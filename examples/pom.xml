@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<!--    <parent>-->
+<!--        <artifactId>spark-milvus</artifactId>-->
+<!--        <groupId>zilliztech</groupId>-->
+<!--        <version>1.0.0-SNAPSHOT</version>-->
+<!--        <relativePath>../pom.xml</relativePath>-->
+<!--    </parent>-->
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>zilliztech</groupId>
+    <artifactId>spark-milvus-examples</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+
+    <properties>
+        <build.testJarPhase>none</build.testJarPhase>
+        <build.copyDependenciesPhase>package</build.copyDependenciesPhase>
+        <spark.scope>compile</spark.scope>
+        <scala.scope>compile</scala.scope>
+        <scala.binary.version>2.12</scala.binary.version>
+        <scalatest.version>3.2.11</scalatest.version>
+        <spark.version>3.3.2</spark.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>zilliztech</groupId>
+            <artifactId>spark-milvus</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+
+        <!-- https://mvnrepository.com/artifact/com.mysql/mysql-connector-j -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>8.0.33</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-core_${scala.binary.version}</artifactId>
+            <version>${spark.version}</version>
+            <scope>${spark.scope}</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-mllib_${scala.binary.version}</artifactId>
+            <version>${spark.version}</version>
+            <scope>${spark.scope}</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-sql_${scala.binary.version}</artifactId>
+            <version>${spark.version}</version>
+            <scope>${spark.scope}</scope>
+        </dependency>
+    </dependencies>
+</project>
