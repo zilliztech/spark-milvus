@@ -75,4 +75,9 @@ object MilvusBinlogUtil {
     val hash = HashString(strValue)
     (hash % shardNum).toInt
   }
+
+  def binaryToString(littleEndianBytes: Array[Byte]): String = {
+//    val buffer = ByteBuffer.wrap(littleEndianBytes).order(ByteOrder.LITTLE_ENDIAN)
+    new String(littleEndianBytes)
+  }
 }

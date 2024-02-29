@@ -54,20 +54,15 @@ public class S3Util {
 
     // snippet-start:[s3.java2.getobjectdata.main]
     public static byte[] getObjectBytes (S3Client s3, String bucketName, String keyName) {
-        try {
-            GetObjectRequest objectRequest = GetObjectRequest
-                    .builder()
-                    .key(keyName)
-                    .bucket(bucketName)
-                    .build();
+        GetObjectRequest objectRequest = GetObjectRequest
+                .builder()
+                .key(keyName)
+                .bucket(bucketName)
+                .build();
 
-            ResponseBytes<GetObjectResponse> objectBytes = s3.getObjectAsBytes(objectRequest);
-            byte[] data = objectBytes.asByteArray();
-            return data;
-        } catch (S3Exception e) {
-            System.err.println(e.awsErrorDetails().errorMessage());
-            return null;
-        }
+        ResponseBytes<GetObjectResponse> objectBytes = s3.getObjectAsBytes(objectRequest);
+        byte[] data = objectBytes.asByteArray();
+        return data;
     }
 
     public static boolean isExists(S3Client s3, String bucketName, String key) {
