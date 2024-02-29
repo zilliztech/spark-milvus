@@ -1,7 +1,7 @@
 package zilliztech.spark.milvus
 
 import io.milvus.grpc.ErrorCode
-import io.milvus.param.collection.{CreateCollectionParam, HasCollectionParam}
+import io.milvus.param.collection.{CreateCollectionParam, CreateDatabaseParam, HasCollectionParam}
 import org.apache.spark.sql.connector.catalog.{Table, TableProvider}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.sources.DataSourceRegister
@@ -9,6 +9,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import java.util
+import scala.collection.convert.ImplicitConversions.{`collection asJava`, `iterable AsScalaIterable`}
 
 case class Milvus() extends TableProvider with DataSourceRegister {
 
@@ -17,8 +18,23 @@ case class Milvus() extends TableProvider with DataSourceRegister {
                         properties: util.Map[String, String]
                        ): Table = {
     val milvusOptions = new MilvusOptions(new CaseInsensitiveStringMap(properties))
-
     val client = MilvusConnection.acquire(milvusOptions)
+    val listDatabasesResponse = client.listDatabases()
+    val databases = listDatabasesResponse.getData.getDbNamesList.asByteStringList().map(x => x.toStringUtf8)
+    val databaseExist = databases.contains(
+      milvusOptions.databaseName
+    )
+    if (!databaseExist) {
+      val createDatabaseParam = CreateDatabaseParam.newBuilder
+        .withDatabaseName(milvusOptions.databaseName).build()
+      val response = client.createDatabase(createDatabaseParam)
+      if (response.getStatus != ErrorCode.Success.getNumber) {
+        if (response.getException != None) {
+          throw new Exception("Fail to create database", response.getException)
+        }
+        throw new Exception(s"Fail to create database response: ${response.toString}")
+      }
+    }
     val hasCollectionParams = HasCollectionParam.newBuilder
       .withDatabaseName(milvusOptions.databaseName)
       .withCollectionName(milvusOptions.collectionName)
