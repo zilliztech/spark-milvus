@@ -97,12 +97,12 @@ object Hello extends App {
 
   // set milvus options
   val milvusOptions = Map(
-      "milvus.host" -> "localhost" -> uri,
+      "milvus.host" -> "localhost",
       "milvus.port" -> "19530",
       "milvus.collection.name" -> "hello_spark_milvus",
       "milvus.collection.vectorField" -> "vec",
       "milvus.collection.vectorDim" -> "5",
-      "milvus.collection.primaryKeyField", "id"
+      "milvus.collection.primaryKeyField" -> "id"
     )
     
   sampleDF.write.format("milvus")

@@ -34,7 +34,9 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
       totalSize = totalSize + 1
 
       if (currentSizeInBuffer >= maxBatchSize) {
-        val insertParam = InsertParam.newBuilder.withCollectionName(milvusCollection.name()).withFields(buffer).build
+        val insertParam = InsertParam.newBuilder
+          .withDatabaseName(milvusCollection.milvusOptions.databaseName)
+          .withCollectionName(milvusCollection.name()).withFields(buffer).build
         val insertR = milvusClient.withTimeout(10, TimeUnit.SECONDS).insert(insertParam)
         log.debug(s"insert batch status ${ insertR.toString} size: ${currentSizeInBuffer}")
         buffer = newInsertBuffer(milvusSchema)
