@@ -1,6 +1,8 @@
 syntax = "proto3";
 package milvus.proto.backup;
 
+import "google/protobuf/struct.proto"; // proto define
+
 option go_package="github.com/zilliztech/milvus-backup/core/proto/backuppb";
 
 service MilvusBackupService {
@@ -16,7 +18,9 @@ service MilvusBackupService {
   rpc RestoreBackup(RestoreBackupRequest) returns (RestoreBackupResponse) {}
   // Get restore state by given id
   rpc GetRestore(GetRestoreStateRequest) returns (RestoreBackupResponse) {}
- }
+  // Check connections
+  rpc Check(CheckRequest) returns (CheckResponse) {}
+}
 
 enum ResponseCode {
   Success = 0;
@@ -57,7 +61,7 @@ message CollectionBackupInfo {
   bool has_index = 16;
   repeated IndexInfo index_infos = 17;
   string load_state = 18;
-  // physical unix time of backup 
+  // physical unix time of backup
   uint64 backup_physical_timestamp = 19;
 }
 
@@ -83,10 +87,10 @@ message SegmentBackupInfo {
   repeated FieldBinlog statslogs = 6;
   repeated FieldBinlog deltalogs = 7;
   int64 size = 8;
-  // separate segments into multi groups by size, 
+  // separate segments into multi groups by size,
   // segments in one group will be copied into one directory during backup
   // and will bulkinsert in one call during restore
-  int64 group_id = 9; 
+  int64 group_id = 9;
 }
 
 /**
@@ -142,7 +146,17 @@ message CreateBackupRequest {
   // async or not
   bool async = 4;
   // database and collections to backup. A json string. To support database. 2023.7.7
-  string db_collections = 5;
+  google.protobuf.Value db_collections = 5;
+  // force backup skip flush, Should make sure data has been stored into disk when using it
+  bool force = 6;
+  // only backup meta, including collection schema and index info
+  bool meta_only = 7;
+  // if true, stop GC to avoid the data compacted and GCed during backup, use it when the data to backup is very large.
+  bool gc_pause_enable = 8;
+  // gc pause seconds, set it larger than the time cost of backup
+  int32 gc_pause_seconds = 9;
+  // gc pause API address
+  string gc_pause_address = 10;
 }
 
 /**
@@ -170,6 +184,8 @@ message GetBackupRequest {
   string bucket_name = 4;
   // if bucket_name and path is set. will override bucket/path in config.
   string path = 5;
+  // if true, return simple response without too much detail to display
+  bool without_detail = 6;
 }
 
 message ListBackupsRequest {
@@ -242,7 +258,19 @@ message RestoreBackupRequest {
   // if bucket_name and path is set. will override bucket/path in config.
   string path = 8;
   // database and collections to restore. A json string. To support database. 2023.7.7
-  string db_collections = 9;
+  google.protobuf.Value db_collections = 9;
+  // if true only restore meta, not restore data
+  bool metaOnly = 10;
+  // if true restore index info
+  bool restoreIndex = 11;
+  // if true use autoindex when restore vector index
+  bool useAutoIndex = 12;
+  // if true, drop existing target collection before create
+  bool dropExistCollection = 13;
+  // if true, drop existing index of target collection before create
+  bool dropExistIndex = 14;
+  // if true, will skip collection, use when collection exist, restore index or data
+  bool skipCreateCollection = 15;
 }
 
 message RestorePartitionTask {
@@ -267,6 +295,19 @@ message RestoreCollectionTask {
   int64 restored_size = 9;
   int64 to_restore_size = 10;
   int32 progress = 11;
+  string target_db_name = 12;
+  // if true only restore meta
+  bool metaOnly = 13;
+  // if true restore index info
+  bool restoreIndex = 14;
+  // if true use autoindex when restore vector index
+  bool useAutoIndex = 15;
+  // if true drop the collections
+  bool dropExistCollection = 16;
+  // if true drop index info
+  bool dropExistIndex = 17;
+  // if true will skip create collections
+  bool skipCreateCollection = 18;
 }
 
 message RestoreBackupTask {
@@ -347,6 +388,9 @@ enum DataType {
   String = 20;
   VarChar = 21; // variable-length strings with a specified maximum length
 
+  Array = 22;
+  Json = 23;
+
   BinaryVector = 100;
   FloatVector = 101;
 }
@@ -398,4 +442,14 @@ message CollectionSchema {
   bool autoID = 3; // deprecated later, keep compatible with c++ part now
   repeated FieldSchema fields = 4;
   bool enable_dynamic_field = 5; // mark whether this table has the dynamic field function enabled.
+}
+
+message CheckRequest {
+}
+
+message CheckResponse {
+  // response code. 0 means success. others are fail
+  ResponseCode code = 1;
+  // error msg if fail
+  string msg = 2;
 }
