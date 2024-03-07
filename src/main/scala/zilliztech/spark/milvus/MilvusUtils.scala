@@ -158,10 +158,18 @@ object MilvusUtils {
 
       // 5. Make a call to Milvus bulkinsert API.
       val bulkInsertFiles: List[String] = List(ouputFilePathWithoutBucket)
-      val bulkInsertParam: BulkInsertParam = BulkInsertParam.newBuilder
-        .withCollectionName(milvusOptions.collectionName)
-        .withFiles(bulkInsertFiles.asJava)
-        .build
+      val bulkInsertParam: BulkInsertParam = if (milvusOptions.partitionName.isEmpty) {
+        BulkInsertParam.newBuilder
+          .withCollectionName(milvusOptions.collectionName)
+          .withPartitionName(milvusOptions.partitionName)
+          .withFiles(bulkInsertFiles.asJava)
+          .build()
+      } else {
+        BulkInsertParam.newBuilder
+          .withCollectionName(milvusOptions.collectionName)
+          .withFiles(bulkInsertFiles.asJava)
+          .build()
+      }
 
       val bulkInsertR: R[ImportResponse] = milvusClient.bulkInsert(bulkInsertParam)
       log.info(s"bulkinsert ${milvusOptions.collectionName} resp: ${bulkInsertR.toString}")
