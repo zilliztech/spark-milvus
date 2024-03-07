@@ -24,6 +24,7 @@ object MilvusOptions {
   // configs of collection, use in both reading and writing
   val MILVUS_DATABASE_NAME = "milvus.database.name"
   val MILVUS_COLLECTION_NAME = "milvus.collection.name"
+  val MILVUS_PARTITION_NAME = "milvus.partition.name"
 
   // configs of collection schema, only used in automatic creating collection when writing
   val MILVUS_COLLECTION_PRIMARY_KEY = "milvus.collection.primaryKeyField"
@@ -69,6 +70,7 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   // collection
   val databaseName: String = config.getOrDefault(MILVUS_DATABASE_NAME, "default")
   val collectionName: String = config.getOrDefault(MILVUS_COLLECTION_NAME, "hello_milvus")
+  val partitionName: String = config.getOrDefault(MILVUS_PARTITION_NAME, "")
 
   val primaryKeyField: String = config.getOrDefault(MILVUS_COLLECTION_PRIMARY_KEY, "")
   val vectorField: String = config.getOrDefault(MILVUS_COLLECTION_VECTOR_FIELD, "")
