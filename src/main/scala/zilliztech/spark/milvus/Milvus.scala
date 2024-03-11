@@ -2,6 +2,7 @@ package zilliztech.spark.milvus
 
 import io.milvus.grpc.ErrorCode
 import io.milvus.param.collection.{CreateCollectionParam, CreateDatabaseParam, HasCollectionParam}
+import io.milvus.param.partition.{CreatePartitionParam, HasPartitionParam}
 import org.apache.spark.sql.connector.catalog.{Table, TableProvider}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.sources.DataSourceRegister
@@ -46,9 +47,9 @@ case class Milvus() extends TableProvider with DataSourceRegister {
       }
       throw new Exception(s"Fail to hasCollection response: ${hasCollectionResponse.toString}")
     }
-    val exist = hasCollectionResponse.getData
+    val collectionExist = hasCollectionResponse.getData
 
-    if (!exist) {
+    if (!collectionExist) {
       val createCollectionParamBuilder = CreateCollectionParam.newBuilder
         .withDatabaseName(milvusOptions.databaseName)
         .withCollectionName(milvusOptions.collectionName)
@@ -58,12 +59,39 @@ case class Milvus() extends TableProvider with DataSourceRegister {
         )
       })
       val createCollectionParam = createCollectionParamBuilder.build()
-      val response = client.createCollection(createCollectionParam)
-      if (response.getStatus != ErrorCode.Success.getNumber) {
-        if (response.getException != None) {
-          throw new Exception("Fail to create collection", response.getException)
+      val createCollectionResponse = client.createCollection(createCollectionParam)
+      if (createCollectionResponse.getStatus != ErrorCode.Success.getNumber) {
+        if (createCollectionResponse.getException != None) {
+          throw new Exception("Fail to create collection", createCollectionResponse.getException)
         }
-        throw new Exception(s"Fail to create collection response: ${response.toString}")
+        throw new Exception(s"Fail to create collection response: ${createCollectionResponse.toString}")
+      }
+    }
+
+    val hasPartitionParams = HasPartitionParam.newBuilder
+      .withCollectionName(milvusOptions.collectionName)
+      .withPartitionName(milvusOptions.partitionName)
+      .build()
+    val hasPartitionResponse = client.hasPartition(hasPartitionParams)
+    if (hasPartitionResponse.getStatus != ErrorCode.Success.getNumber) {
+      if (hasPartitionResponse.getException != None) {
+        throw new Exception("Fail to hasPartition", hasPartitionResponse.getException)
+      }
+      throw new Exception(s"Fail to hasPartition response: ${hasPartitionResponse.toString}")
+    }
+    val partitionExist = hasPartitionResponse.getData
+
+    if (!partitionExist) {
+      val createPartitionParam = CreatePartitionParam.newBuilder
+        .withCollectionName(milvusOptions.collectionName)
+        .withPartitionName(milvusOptions.partitionName)
+        .build()
+      val createPartitionResponse = client.createPartition(createPartitionParam)
+      if (createPartitionResponse.getStatus != ErrorCode.Success.getNumber) {
+        if (createPartitionResponse.getException != None) {
+          throw new Exception("Fail to create partition", createPartitionResponse.getException)
+        }
+        throw new Exception(s"Fail to create partition response: ${createPartitionResponse.toString}")
       }
     }
     client.close()
