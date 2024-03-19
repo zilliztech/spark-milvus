@@ -161,12 +161,12 @@ object MilvusUtils {
       val bulkInsertParam: BulkInsertParam = if (milvusOptions.partitionName.isEmpty) {
         BulkInsertParam.newBuilder
           .withCollectionName(milvusOptions.collectionName)
-          .withPartitionName(milvusOptions.partitionName)
           .withFiles(bulkInsertFiles.asJava)
           .build()
       } else {
         BulkInsertParam.newBuilder
           .withCollectionName(milvusOptions.collectionName)
+          .withPartitionName(milvusOptions.partitionName)
           .withFiles(bulkInsertFiles.asJava)
           .build()
       }
