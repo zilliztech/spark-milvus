@@ -116,6 +116,7 @@ object MilvusUtils {
     val collectionDF = segmentDfs.reduce { (leftDF, rightDF) =>
       leftDF.union(rightDF)
     }
+    milvusClient.close()
     collectionDF.drop(milvusRowId, milvusTs).drop(segmentRowId)
   }
 
@@ -138,6 +139,7 @@ object MilvusUtils {
       .build
     val flushR: R[FlushResponse] = milvusClient.flush(flushParam)
     log.info(s"flush response ${flushR}")
+    milvusClient.close()
   }
 
   private def batchBulkinsert(spark: SparkSession, milvusOptions: MilvusOptions, path: String, format: String): Unit = {
@@ -187,6 +189,7 @@ object MilvusUtils {
         log.error(s"bulkinsert failed ${milvusOptions.collectionName} state: ${bulkloadState}")
       }
     })
+    milvusClient.close()
   }
 
   private def batchBulkinsertZillizCloud(spark: SparkSession, milvusOptions: MilvusOptions, path: String, format: String): Unit = {
