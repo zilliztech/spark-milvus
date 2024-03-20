@@ -18,6 +18,7 @@ object MilvusConnection {
         .withHost(milvusOptions.host)
         .withPort(milvusOptions.port)
         .withAuthorization(milvusOptions.userName, milvusOptions.password)
+        .withDatabaseName(milvusOptions.databaseName)
         .build
     } else {
       // zilliz cloud
