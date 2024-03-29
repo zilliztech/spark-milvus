@@ -19,27 +19,43 @@ case class Milvus() extends TableProvider with DataSourceRegister {
                         properties: util.Map[String, String]
                        ): Table = {
     val milvusOptions = new MilvusOptions(new CaseInsensitiveStringMap(properties))
+    val isZillizCloud = milvusOptions.isZillizCloud()
     val client = MilvusConnection.acquire(milvusOptions)
-    val listDatabasesResponse = client.listDatabases()
-    val databases = listDatabasesResponse.getData.getDbNamesList.asByteStringList().map(x => x.toStringUtf8)
-    val databaseExist = databases.contains(
-      milvusOptions.databaseName
-    )
-    if (!databaseExist) {
-      val createDatabaseParam = CreateDatabaseParam.newBuilder
-        .withDatabaseName(milvusOptions.databaseName).build()
-      val response = client.createDatabase(createDatabaseParam)
-      if (response.getStatus != ErrorCode.Success.getNumber) {
-        if (response.getException != None) {
-          throw new Exception("Fail to create database", response.getException)
+
+    // zillizCloud forbid listDatabases interface
+    if (!isZillizCloud) {
+      val listDatabasesResponse = client.listDatabases()
+      if (listDatabasesResponse.getStatus != ErrorCode.Success.getNumber) {
+        throw new Exception(s"Fail to list databases: ${listDatabasesResponse.toString}")
+      }
+      val databases = listDatabasesResponse.getData.getDbNamesList.asByteStringList().map(x => x.toStringUtf8)
+      val databaseExist = databases.contains(
+        milvusOptions.databaseName
+      )
+      if (!databaseExist) {
+        val createDatabaseParam = CreateDatabaseParam.newBuilder
+          .withDatabaseName(milvusOptions.databaseName).build()
+        val response = client.createDatabase(createDatabaseParam)
+        if (response.getStatus != ErrorCode.Success.getNumber) {
+          if (response.getException != None) {
+            throw new Exception("Fail to create database", response.getException)
+          }
+          throw new Exception(s"Fail to create database response: ${response.toString}")
         }
-        throw new Exception(s"Fail to create database response: ${response.toString}")
       }
     }
-    val hasCollectionParams = HasCollectionParam.newBuilder
-      .withDatabaseName(milvusOptions.databaseName)
-      .withCollectionName(milvusOptions.collectionName)
-      .build()
+
+    val hasCollectionParams = if (isZillizCloud && milvusOptions.databaseName.equals("")) {
+      // zilliz cloud may have no database concept(serverless instance)
+      HasCollectionParam.newBuilder
+        .withCollectionName(milvusOptions.collectionName)
+        .build()
+    } else {
+      HasCollectionParam.newBuilder
+        .withDatabaseName(milvusOptions.databaseName)
+        .withCollectionName(milvusOptions.collectionName)
+        .build()
+    }
     val hasCollectionResponse = client.hasCollection(hasCollectionParams)
     if (hasCollectionResponse.getStatus != ErrorCode.Success.getNumber) {
       if (hasCollectionResponse.getException != None) {
@@ -50,9 +66,14 @@ case class Milvus() extends TableProvider with DataSourceRegister {
     val collectionExist = hasCollectionResponse.getData
 
     if (!collectionExist) {
-      val createCollectionParamBuilder = CreateCollectionParam.newBuilder
-        .withDatabaseName(milvusOptions.databaseName)
-        .withCollectionName(milvusOptions.collectionName)
+      val createCollectionParamBuilder = if (isZillizCloud && milvusOptions.databaseName.equals("")) {
+        CreateCollectionParam.newBuilder
+          .withCollectionName(milvusOptions.collectionName)
+      } else {
+        CreateCollectionParam.newBuilder
+          .withDatabaseName(milvusOptions.databaseName)
+          .withCollectionName(milvusOptions.collectionName)
+      }
       schema.fields.foreach(field => {
         createCollectionParamBuilder.addFieldType(
           MilvusCollection.ToMilvusField(field, milvusOptions)
@@ -68,32 +89,35 @@ case class Milvus() extends TableProvider with DataSourceRegister {
       }
     }
 
-    val hasPartitionParams = HasPartitionParam.newBuilder
-      .withCollectionName(milvusOptions.collectionName)
-      .withPartitionName(milvusOptions.partitionName)
-      .build()
-    val hasPartitionResponse = client.hasPartition(hasPartitionParams)
-    if (hasPartitionResponse.getStatus != ErrorCode.Success.getNumber) {
-      if (hasPartitionResponse.getException != None) {
-        throw new Exception("Fail to hasPartition", hasPartitionResponse.getException)
-      }
-      throw new Exception(s"Fail to hasPartition response: ${hasPartitionResponse.toString}")
-    }
-    val partitionExist = hasPartitionResponse.getData
-
-    if (!partitionExist) {
-      val createPartitionParam = CreatePartitionParam.newBuilder
+    if (!milvusOptions.partitionName.equals("")) {
+      val hasPartitionParams = HasPartitionParam.newBuilder
         .withCollectionName(milvusOptions.collectionName)
         .withPartitionName(milvusOptions.partitionName)
         .build()
-      val createPartitionResponse = client.createPartition(createPartitionParam)
-      if (createPartitionResponse.getStatus != ErrorCode.Success.getNumber) {
-        if (createPartitionResponse.getException != None) {
-          throw new Exception("Fail to create partition", createPartitionResponse.getException)
+      val hasPartitionResponse = client.hasPartition(hasPartitionParams)
+      if (hasPartitionResponse.getStatus != ErrorCode.Success.getNumber) {
+        if (hasPartitionResponse.getException != None) {
+          throw new Exception("Fail to hasPartition", hasPartitionResponse.getException)
         }
-        throw new Exception(s"Fail to create partition response: ${createPartitionResponse.toString}")
+        throw new Exception(s"Fail to hasPartition response: ${hasPartitionResponse.toString}")
+      }
+      val partitionExist = hasPartitionResponse.getData
+
+      if (!partitionExist) {
+        val createPartitionParam = CreatePartitionParam.newBuilder
+          .withCollectionName(milvusOptions.collectionName)
+          .withPartitionName(milvusOptions.partitionName)
+          .build()
+        val createPartitionResponse = client.createPartition(createPartitionParam)
+        if (createPartitionResponse.getStatus != ErrorCode.Success.getNumber) {
+          if (createPartitionResponse.getException != None) {
+            throw new Exception("Fail to create partition", createPartitionResponse.getException)
+          }
+          throw new Exception(s"Fail to create partition response: ${createPartitionResponse.toString}")
+        }
       }
     }
+
     client.close()
     MilvusCollection(milvusOptions, Some(schema))
   }

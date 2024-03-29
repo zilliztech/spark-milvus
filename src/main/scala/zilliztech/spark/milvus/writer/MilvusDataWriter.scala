@@ -34,21 +34,17 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
       totalSize = totalSize + 1
 
       if (currentSizeInBuffer >= maxBatchSize) {
-        val insertParam = if (milvusCollection.milvusOptions.partitionName.isEmpty) {
-          InsertParam.newBuilder
-            .withDatabaseName(milvusCollection.milvusOptions.databaseName)
-            .withCollectionName(milvusCollection.milvusOptions.collectionName)
-            .withFields(buffer)
-            .build
-        } else {
-          InsertParam.newBuilder
-            .withDatabaseName(milvusCollection.milvusOptions.databaseName)
-            .withCollectionName(milvusCollection.milvusOptions.collectionName)
-            .withPartitionName(milvusCollection.milvusOptions.partitionName)
-            .withFields(buffer)
-            .build
+        var builder = InsertParam.newBuilder
+        if (!(milvusOptions.isZillizCloud() && milvusCollection.milvusOptions.databaseName.equals(""))) {
+          builder = builder.withDatabaseName(milvusCollection.milvusOptions.databaseName)
         }
-
+        if (milvusCollection.milvusOptions.partitionName.isEmpty) {
+          builder = builder.withPartitionName(milvusCollection.milvusOptions.partitionName)
+        }
+        val insertParam = builder
+          .withCollectionName(milvusCollection.milvusOptions.collectionName)
+          .withFields(buffer)
+          .build
 
         val insertR = milvusClient.withTimeout(10, TimeUnit.SECONDS).insert(insertParam)
         log.debug(s"insert batch status ${ insertR.toString} size: ${currentSizeInBuffer}")
@@ -64,20 +60,17 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
 
   override def commit(): WriterCommitMessage = {
     if (currentSizeInBuffer > 0) {
-      val insertParam = if (milvusCollection.milvusOptions.partitionName.isEmpty) {
-        InsertParam.newBuilder
-          .withDatabaseName(milvusCollection.milvusOptions.databaseName)
-          .withCollectionName(milvusCollection.milvusOptions.collectionName)
-          .withFields(buffer)
-          .build
-      } else {
-        InsertParam.newBuilder
-          .withDatabaseName(milvusCollection.milvusOptions.databaseName)
-          .withCollectionName(milvusCollection.milvusOptions.collectionName)
-          .withPartitionName(milvusCollection.milvusOptions.partitionName)
-          .withFields(buffer)
-          .build
+      var builder = InsertParam.newBuilder
+      if (!(milvusOptions.isZillizCloud() && milvusCollection.milvusOptions.databaseName.equals(""))) {
+        builder = builder.withDatabaseName(milvusCollection.milvusOptions.databaseName)
       }
+      if (milvusCollection.milvusOptions.partitionName.isEmpty) {
+        builder = builder.withPartitionName(milvusCollection.milvusOptions.partitionName)
+      }
+      val insertParam = builder
+        .withCollectionName(milvusCollection.milvusOptions.collectionName)
+        .withFields(buffer)
+        .build
       val insertR = milvusClient.withTimeout(10, TimeUnit.SECONDS).insert(insertParam)
       log.info(s"commit insert status ${insertR.getStatus.toString} size: ${currentSizeInBuffer}")
       buffer = newInsertBuffer(milvusSchema)
