@@ -38,13 +38,13 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
           InsertParam.newBuilder
             .withDatabaseName(milvusCollection.milvusOptions.databaseName)
             .withCollectionName(milvusCollection.milvusOptions.collectionName)
-            .withPartitionName(milvusCollection.milvusOptions.partitionName)
             .withFields(buffer)
             .build
         } else {
           InsertParam.newBuilder
             .withDatabaseName(milvusCollection.milvusOptions.databaseName)
-            .withCollectionName(milvusCollection.name())
+            .withCollectionName(milvusCollection.milvusOptions.collectionName)
+            .withPartitionName(milvusCollection.milvusOptions.partitionName)
             .withFields(buffer)
             .build
         }
@@ -64,7 +64,20 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
 
   override def commit(): WriterCommitMessage = {
     if (currentSizeInBuffer > 0) {
-      val insertParam = InsertParam.newBuilder.withCollectionName(milvusCollection.name()).withFields(buffer).build
+      val insertParam = if (milvusCollection.milvusOptions.partitionName.isEmpty) {
+        InsertParam.newBuilder
+          .withDatabaseName(milvusCollection.milvusOptions.databaseName)
+          .withCollectionName(milvusCollection.milvusOptions.collectionName)
+          .withFields(buffer)
+          .build
+      } else {
+        InsertParam.newBuilder
+          .withDatabaseName(milvusCollection.milvusOptions.databaseName)
+          .withCollectionName(milvusCollection.milvusOptions.collectionName)
+          .withPartitionName(milvusCollection.milvusOptions.partitionName)
+          .withFields(buffer)
+          .build
+      }
       val insertR = milvusClient.withTimeout(10, TimeUnit.SECONDS).insert(insertParam)
       log.info(s"commit insert status ${insertR.getStatus.toString} size: ${currentSizeInBuffer}")
       buffer = newInsertBuffer(milvusSchema)
