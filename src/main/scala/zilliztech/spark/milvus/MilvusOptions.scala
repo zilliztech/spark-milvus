@@ -68,8 +68,8 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   val storagePassword: String = config.getOrDefault(MILVUS_STORAGE_PASSWORD, "minioadmin")
 
   // collection
-  val databaseName: String = config.getOrDefault(MILVUS_DATABASE_NAME, "default")
-  val collectionName: String = config.getOrDefault(MILVUS_COLLECTION_NAME, "hello_milvus")
+  val databaseName: String = config.getOrDefault(MILVUS_DATABASE_NAME, "")
+  val collectionName: String = config.getOrDefault(MILVUS_COLLECTION_NAME, "")
   val partitionName: String = config.getOrDefault(MILVUS_PARTITION_NAME, "")
 
   val primaryKeyField: String = config.getOrDefault(MILVUS_COLLECTION_PRIMARY_KEY, "")
