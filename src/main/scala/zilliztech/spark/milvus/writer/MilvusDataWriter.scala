@@ -83,6 +83,7 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
 
   override def close(): Unit = {
     commit()
+    milvusClient.close()
     log.info(s"finished insert size: ${totalSize}")
   }
 }
