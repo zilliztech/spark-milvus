@@ -68,7 +68,8 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   val storagePassword: String = config.getOrDefault(MILVUS_STORAGE_PASSWORD, "minioadmin")
 
   // collection
-  val databaseName: String = config.getOrDefault(MILVUS_DATABASE_NAME, "")
+  // Zillizcloud forbid listdatabases and have no database concept in serverless mode
+  val databaseName: String = config.getOrDefault(MILVUS_DATABASE_NAME, if (isZillizCloud()) { "" } else {"default"})
   val collectionName: String = config.getOrDefault(MILVUS_COLLECTION_NAME, "")
   val partitionName: String = config.getOrDefault(MILVUS_PARTITION_NAME, "")
 
