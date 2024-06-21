@@ -1,6 +1,6 @@
 package zilliztech.spark.milvus.writer
 
-import io.milvus.grpc.{CollectionSchema, DataType}
+import io.milvus.grpc.{CollectionSchema, DataType, ErrorCode}
 import io.milvus.param.dml.InsertParam
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.{DataWriter, WriterCommitMessage}
@@ -48,6 +48,9 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
 
         val insertR = milvusClient.withTimeout(10, TimeUnit.SECONDS).insert(insertParam)
         log.debug(s"insert batch status ${ insertR.toString} size: ${currentSizeInBuffer}")
+        if(insertR.getStatus != ErrorCode.Success.getNumber) {
+          throw new Exception(s"Fail to insert batch: ${insertR.toString}")
+        }
         buffer = newInsertBuffer(milvusSchema)
         currentSizeInBuffer = 0
       }
@@ -73,6 +76,9 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
         .build
       val insertR = milvusClient.withTimeout(10, TimeUnit.SECONDS).insert(insertParam)
       log.info(s"commit insert status ${insertR.getStatus.toString} size: ${currentSizeInBuffer}")
+      if(insertR.getStatus != ErrorCode.Success.getNumber) {
+        throw new Exception(s"Fail to commit insert: ${insertR.toString}")
+      }
       buffer = newInsertBuffer(milvusSchema)
       currentSizeInBuffer = 0
     }
