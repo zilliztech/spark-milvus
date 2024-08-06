@@ -3,28 +3,29 @@ import io.milvus.grpc.{DataType, FlushResponse}
 import io.milvus.param.collection.{CreateCollectionParam, FieldType, FlushParam, LoadCollectionParam}
 import io.milvus.param.dml.SearchParam
 import io.milvus.param.index.CreateIndexParam
-import io.milvus.param.{ConnectParam, IndexType, MetricType, R, RpcStatus}
-import org.apache.spark.sql.types._
+import io.milvus.param._
+import org.apache.spark.sql.types.{LongType, StringType, StructType}
 import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.slf4j.LoggerFactory
 import zilliztech.spark.milvus.MilvusOptions._
 
 import java.util
 
-object InsertDemo {
+object SparseVectorInsertDemo {
+
   private val log = LoggerFactory.getLogger(getClass)
 
-  def main(args: Array[String]):Unit = {
+  def main(args: Array[String]): Unit = {
     val spark = SparkSession.builder().master("local[*]")
-      .appName("InsertDemo")
+      .appName("SparseVectorDemo")
       .getOrCreate()
 
     val host = "localhost"
     val port = 19530
     val uri = ""
     val token = ""
-    val collectionName = "hello_spark_milvus"
-    val filePath = "data/insert_demo/data.json"
+    val collectionName = "sparse_vector_demo"
+    val filePath = "data/insert_demo/sparse_demo.sample.100.json"
 
     // 1. create milvus collection through milvus SDK
     val connectParam: ConnectParam = ConnectParam.newBuilder
@@ -37,11 +38,9 @@ object InsertDemo {
     val client: MilvusClient = new MilvusServiceClient(connectParam)
 
     val idField: String = "id_field"
-    val strField: String = "str_field"
-    val floatVectorField: String = "float_vector_field"
-    val jsonField: String = "json_field"
-    val intArrayField: String = "int_array_field"
-    val arrayField: String = "array_field"
+    val sparseVectorField: String = "sparse_vector_field"
+    val vcharField: String = "vchar_field"
+
     val fieldsSchema: util.List[FieldType] = new util.ArrayList[FieldType]
 
     fieldsSchema.add(FieldType.newBuilder
@@ -52,34 +51,13 @@ object InsertDemo {
       .build
     )
     fieldsSchema.add(FieldType.newBuilder
+      .withDataType(DataType.SparseFloatVector)
+      .withName(sparseVectorField)
+      .build
+    )
+    fieldsSchema.add(FieldType.newBuilder
       .withDataType(DataType.VarChar)
-      .withName(strField)
-      .withMaxLength(32)
-      .build
-    )
-    fieldsSchema.add(FieldType.newBuilder
-      .withDataType(DataType.FloatVector)
-      .withName(floatVectorField)
-      .withDimension(32)
-      .build
-    )
-    fieldsSchema.add(FieldType.newBuilder
-      .withDataType(DataType.JSON)
-      .withName(jsonField)
-      .build
-    )
-    fieldsSchema.add(FieldType.newBuilder
-      .withDataType(DataType.Array)
-      .withName(intArrayField)
-      .withMaxCapacity(5)
-      .withElementType(DataType.Int64)
-      .build
-    )
-    fieldsSchema.add(FieldType.newBuilder
-      .withDataType(DataType.Array)
-      .withName(arrayField)
-      .withMaxCapacity(5)
-      .withElementType(DataType.VarChar)
+      .withName(vcharField)
       .withMaxLength(32)
       .build
     )
@@ -98,11 +76,8 @@ object InsertDemo {
     val df = spark.read
       .schema(new StructType()
         .add(idField, LongType)
-        .add(strField, StringType)
-        .add(floatVectorField, ArrayType(FloatType), false)
-        .add(jsonField, StringType, false)
-        .add(intArrayField, ArrayType(LongType), false)
-        .add(arrayField, ArrayType(StringType), false)
+        .add(sparseVectorField, StringType)
+        .add(vcharField, StringType)
       )
       .json(filePath)
 
@@ -134,8 +109,8 @@ object InsertDemo {
     val createIndexParam = CreateIndexParam.newBuilder()
       .withCollectionName(collectionName)
       .withIndexName("index_name")
-      .withFieldName("float_vector_field")
-      .withMetricType(MetricType.L2)
+      .withFieldName(sparseVectorField)
+      .withMetricType(MetricType.IP)
       .withIndexType(IndexType.AUTOINDEX)
       .build()
     val createIndexR = client.createIndex(createIndexParam)
@@ -148,18 +123,26 @@ object InsertDemo {
 
     // 7, search
     val fieldList: util.List[String] = new util.ArrayList[String]()
-    fieldList.add(floatVectorField)
-    fieldList.add(arrayField)
-    fieldList.add(intArrayField)
+    fieldList.add(sparseVectorField)
 
-    // 8, use the first row as search vector
-    val searchVectors = util.Arrays.asList(df.first().getList(2))
+    // 8, search
+    import java.util.{ArrayList, List => JavaList, SortedMap => JavaSortedMap}
+
+    // Create a Java SortedMap
+    val searchVector: JavaSortedMap[java.lang.Long, java.lang.Float] = new java.util.TreeMap()
+    searchVector.put(7L, 0.2218893160534381f)
+    searchVector.put(1L, 0.985183160534381f)
+
+    // Create a Java List and add the Java SortedMap to it
+    val searchVectors: JavaList[JavaSortedMap[java.lang.Long, java.lang.Float]] = new ArrayList()
+    searchVectors.add(searchVector)
+
     val searchParam = SearchParam.newBuilder()
       .withCollectionName(collectionName)
-      .withMetricType(MetricType.L2)
+      .withMetricType(MetricType.IP)
       .withOutFields(fieldList)
-      .withVectors(searchVectors)
-      .withVectorFieldName("float_vector_field")
+      .withSparseFloatVectors(searchVectors)
+      .withVectorFieldName(sparseVectorField)
       .withTopK(10)
       .build()
     val searchParamR = client.search(searchParam)
@@ -167,4 +150,5 @@ object InsertDemo {
 
     client.close()
   }
+
 }
