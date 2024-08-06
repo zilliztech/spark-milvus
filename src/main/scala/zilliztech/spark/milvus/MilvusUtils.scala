@@ -1,6 +1,7 @@
 package zilliztech.spark.milvus
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.google.gson.JsonObject
 import io.milvus.grpc._
 import io.milvus.param.R
 import io.milvus.param.bulkinsert.{BulkInsertParam, GetBulkInsertStateParam}
@@ -15,6 +16,7 @@ import zilliztech.spark.milvus.binlog.MilvusBinlogUtil
 
 import java.io.{BufferedReader, DataOutputStream, InputStreamReader}
 import java.net.{HttpURLConnection, URI, URL}
+import java.nio.{ByteBuffer, ByteOrder}
 import java.util
 import scala.collection.JavaConverters._
 import scala.collection.convert.ImplicitConversions.{`collection AsScalaIterable`, `collection asJava`};
@@ -215,7 +217,7 @@ object MilvusUtils {
       var code = res._1
       var percent = res._2
       var errorMessage = res._3
-      while (code==200 && percent < 1 && errorMessage == "null") {
+      while (code == 200 && percent < 1 && errorMessage == "null") {
         Thread.sleep(3000)
         res = getBulkinsertStateRestAPI(milvusOptions, jobID)
         code = res._1
@@ -260,7 +262,8 @@ object MilvusUtils {
       val response = new StringBuilder
 
       while ( {
-        inputLine = inputStream.readLine(); inputLine != null
+        inputLine = inputStream.readLine();
+        inputLine != null
       }) {
         response.append(inputLine)
       }
@@ -300,7 +303,8 @@ object MilvusUtils {
       val response = new StringBuilder
 
       while ( {
-        inputLine = inputStream.readLine(); inputLine != null
+        inputLine = inputStream.readLine();
+        inputLine != null
       }) {
         response.append(inputLine)
       }
@@ -319,4 +323,32 @@ object MilvusUtils {
     }
   }
 
+  def bytesToSparseVector(bytes: Array[Byte]): util.SortedMap[Integer, Float] = {
+    val length = bytes.length
+    var p = 0
+    val map = new util.TreeMap[Integer, Float]
+    while ( {
+      p < length
+    }) {
+      var buffer = ByteBuffer.wrap(bytes, p, 4)
+      buffer.order(ByteOrder.LITTLE_ENDIAN)
+      val k = buffer.getInt
+      p = p + 4
+      buffer = ByteBuffer.wrap(bytes, p, 4)
+      buffer.order(ByteOrder.LITTLE_ENDIAN)
+      val v = buffer.getFloat
+      p = p + 4
+      map.put(k, v)
+    }
+    map
+  }
+
+  def jsonToSparseVector(json: JsonObject): util.SortedMap[Long, Float] = {
+    val map = new util.TreeMap[Long, Float]
+    val dict = json.asMap()
+    dict.keySet().forEach(key => {
+      map.put(key.toLong, json.get(key).getAsFloat)
+    })
+    map
+  }
 }

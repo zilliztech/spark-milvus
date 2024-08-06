@@ -1,18 +1,20 @@
 package zilliztech.spark.milvus.writer
 
-import com.google.gson.{JsonElement, JsonParser}
+import com.google.gson.{JsonElement, JsonObject, JsonParser}
 import io.milvus.grpc.{CollectionSchema, DataType, ErrorCode}
 import io.milvus.param.dml.InsertParam
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.{DataWriter, WriterCommitMessage}
-import org.apache.spark.unsafe.types.ByteArray
+import org.apache.spark.sql.types.StringType
+import org.apache.spark.unsafe.types.UTF8String
 import org.slf4j.LoggerFactory
 import zilliztech.spark.milvus.writer.MilvusDataWriter.{addRowToBuffer, newInsertBuffer}
-import zilliztech.spark.milvus.{MilvusCollection, MilvusConnection, MilvusOptions}
+import zilliztech.spark.milvus.{MilvusCollection, MilvusConnection, MilvusOptions, MilvusUtils}
 
-import java.nio.ByteBuffer
+import java.nio.{ByteBuffer, ByteOrder}
 import java.util
 import java.util.concurrent.TimeUnit
+import scala.jdk.CollectionConverters._
 
 case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: MilvusOptions) extends DataWriter[InternalRow]
   with Serializable {
@@ -112,9 +114,25 @@ object MilvusDataWriter {
         case DataType.String => new util.ArrayList[String]()
         case DataType.VarChar => new util.ArrayList[String]()
         case DataType.JSON => new util.ArrayList[JsonElement]()
+        case DataType.Array => {
+          val elementType = schema.getFields(i).getElementType
+          val convertType = elementType match {
+            case DataType.Bool => new util.ArrayList[util.ArrayList[Boolean]]()
+            case DataType.Int8 => new util.ArrayList[util.ArrayList[Short]]()
+            case DataType.Int16 => new util.ArrayList[util.ArrayList[Short]]()
+            case DataType.Int32 => new util.ArrayList[util.ArrayList[Int]]()
+            case DataType.Int64 => new util.ArrayList[util.ArrayList[Long]]()
+            case DataType.Float => new util.ArrayList[util.ArrayList[Float]]()
+            case DataType.Double => new util.ArrayList[util.ArrayList[Double]]()
+            case DataType.String => new util.ArrayList[util.ArrayList[String]]()
+            case DataType.VarChar => new util.ArrayList[util.ArrayList[String]]()
+          }
+          convertType
+        }
         // case DataType.BinaryVector => _ // not supported
         // case DataType.BinaryVector => new util.ArrayList[util.ArrayList[Float]]()
         case DataType.FloatVector => new util.ArrayList[util.ArrayList[Float]]()
+        case DataType.SparseFloatVector => new util.ArrayList[util.SortedMap[Long, Float]]()
       }
       fieldsInsert.add(new InsertParam.Field(schema.getFields(i).getName, fieldList))
     }
@@ -137,6 +155,58 @@ object MilvusDataWriter {
           val json = JsonParser.parseString(record.getString(i)).getAsJsonObject()
           buffer.get(i).getValues.asInstanceOf[util.ArrayList[JsonElement]].add(json)
         }
+        case DataType.Array => {
+          val elementType = schema.getFields(i).getElementType
+          elementType match {
+            case DataType.Bool => {
+              val arr = record.getArray(i).toBooleanArray()
+              val ele = new util.ArrayList[Boolean](arr.toBuffer.asJava)
+              buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Boolean]]].add(ele)
+            }
+            case DataType.Int8 => {
+              val arr = record.getArray(i).toShortArray()
+              val ele = new util.ArrayList[Short](arr.toBuffer.asJava)
+              buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Short]]].add(ele)
+            }
+            case DataType.Int16 => {
+              val arr = record.getArray(i).toShortArray()
+              val ele = new util.ArrayList[Short](arr.toBuffer.asJava)
+              buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Short]]].add(ele)
+            }
+            case DataType.Int32 => {
+              val arr = record.getArray(i).toIntArray()
+              val ele = new util.ArrayList[Int](arr.toBuffer.asJava)
+              buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Int]]].add(ele)
+            }
+            case DataType.Int64 => {
+              val arr = record.getArray(i).toLongArray()
+              val ele = new util.ArrayList[Long](arr.toBuffer.asJava)
+              buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Long]]].add(ele)
+            }
+            case DataType.Float => {
+              val arr = record.getArray(i).toFloatArray()
+              val ele = new util.ArrayList[Float](arr.toBuffer.asJava)
+              buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Float]]].add(ele)
+            }
+            case DataType.Double => {
+              val arr = record.getArray(i).toDoubleArray()
+              val ele = new util.ArrayList[Double](arr.toBuffer.asJava)
+              buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Double]]].add(ele)
+            }
+            case DataType.String => {
+              val arr = record.getArray(i).toSeq[UTF8String](StringType)
+              val javaList = new util.ArrayList[String]()
+              arr.foreach(utf8Str => javaList.add(utf8Str.toString))
+              buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[String]]].add(javaList)
+            }
+            case DataType.VarChar => {
+              val arr = record.getArray(i).toSeq[UTF8String](StringType)
+              val javaList = new util.ArrayList[String]()
+              arr.foreach(utf8Str => javaList.add(utf8Str.toString))
+              buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[String]]].add(javaList)
+            }
+          }
+        }
         case DataType.FloatVector => {
           val vectorList = buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Float]]]
           val vector = record.getArray(i).toFloatArray()
@@ -149,6 +219,16 @@ object MilvusDataWriter {
           }
           vectorList.add(javaList)
         }
+        case DataType.SparseFloatVector => {
+          val json = JsonParser.parseString(record.getString(i)).getAsJsonObject()
+          val vector = MilvusUtils.jsonToSparseVector(json)
+          buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.SortedMap[Long, Float]]].add(vector)
+        }
+//        case DataType.SparseFloatVector => {
+//          val ele = record.getString(i)
+//          val vector = bytesToSparseVector(ele.getBytes)
+//          buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.SortedMap[Integer, Float]]].add(vector)
+//        }
         case DataType.BinaryVector =>{
           val vectorList = buffer.get(i).getValues.asInstanceOf[util.ArrayList[ByteBuffer]]
           val vector = record.getBinary(i)
