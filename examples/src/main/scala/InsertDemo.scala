@@ -40,7 +40,8 @@ object InsertDemo {
     val strField: String = "str_field"
     val floatVectorField: String = "float_vector_field"
     val jsonField: String = "json_field"
-
+    val intArrayField: String = "int_array_field"
+    val arrayField: String = "array_field"
     val fieldsSchema: util.List[FieldType] = new util.ArrayList[FieldType]
 
     fieldsSchema.add(FieldType.newBuilder
@@ -67,6 +68,21 @@ object InsertDemo {
       .withName(jsonField)
       .build
     )
+    fieldsSchema.add(FieldType.newBuilder
+      .withDataType(DataType.Array)
+      .withName(intArrayField)
+      .withMaxCapacity(5)
+      .withElementType(DataType.Int64)
+      .build
+    )
+    fieldsSchema.add(FieldType.newBuilder
+      .withDataType(DataType.Array)
+      .withName(arrayField)
+      .withMaxCapacity(5)
+      .withElementType(DataType.VarChar)
+      .withMaxLength(32)
+      .build
+    )
 
     // create collection
     val createParam: CreateCollectionParam = CreateCollectionParam.newBuilder
@@ -85,6 +101,8 @@ object InsertDemo {
         .add(strField, StringType)
         .add(floatVectorField, ArrayType(FloatType), false)
         .add(jsonField, StringType, false)
+        .add(intArrayField, ArrayType(LongType), false)
+        .add(arrayField, ArrayType(StringType), false)
       )
       .json(filePath)
 
@@ -130,7 +148,9 @@ object InsertDemo {
 
     // 7, search
     val fieldList: util.List[String] = new util.ArrayList[String]()
-    fieldList.add("float_vector_field")
+    fieldList.add(floatVectorField)
+    fieldList.add(arrayField)
+    fieldList.add(intArrayField)
 
     // 8, use the first row as search vector
     val searchVectors = util.Arrays.asList(df.first().getList(2))
