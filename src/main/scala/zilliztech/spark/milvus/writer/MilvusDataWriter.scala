@@ -1,13 +1,16 @@
 package zilliztech.spark.milvus.writer
 
+import com.google.gson.{JsonElement, JsonParser}
 import io.milvus.grpc.{CollectionSchema, DataType, ErrorCode}
 import io.milvus.param.dml.InsertParam
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.{DataWriter, WriterCommitMessage}
+import org.apache.spark.unsafe.types.ByteArray
 import org.slf4j.LoggerFactory
 import zilliztech.spark.milvus.writer.MilvusDataWriter.{addRowToBuffer, newInsertBuffer}
 import zilliztech.spark.milvus.{MilvusCollection, MilvusConnection, MilvusOptions}
 
+import java.nio.ByteBuffer
 import java.util
 import java.util.concurrent.TimeUnit
 
@@ -108,7 +111,9 @@ object MilvusDataWriter {
         case DataType.Double => new util.ArrayList[Double]()
         case DataType.String => new util.ArrayList[String]()
         case DataType.VarChar => new util.ArrayList[String]()
-        //case DataType.BinaryVector => _ // not supported
+        case DataType.JSON => new util.ArrayList[JsonElement]()
+        // case DataType.BinaryVector => _ // not supported
+        // case DataType.BinaryVector => new util.ArrayList[util.ArrayList[Float]]()
         case DataType.FloatVector => new util.ArrayList[util.ArrayList[Float]]()
       }
       fieldsInsert.add(new InsertParam.Field(schema.getFields(i).getName, fieldList))
@@ -128,6 +133,10 @@ object MilvusDataWriter {
         case DataType.Double => buffer.get(i).getValues.asInstanceOf[util.ArrayList[Double]].add(record.getDouble(i))
         case DataType.String => buffer.get(i).getValues.asInstanceOf[util.ArrayList[String]].add(record.getString(i))
         case DataType.VarChar => buffer.get(i).getValues.asInstanceOf[util.ArrayList[String]].add(record.getString(i))
+        case DataType.JSON => {
+          val json = JsonParser.parseString(record.getString(i)).getAsJsonObject()
+          buffer.get(i).getValues.asInstanceOf[util.ArrayList[JsonElement]].add(json)
+        }
         case DataType.FloatVector => {
           val vectorList = buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Float]]]
           val vector = record.getArray(i).toFloatArray()
@@ -139,6 +148,35 @@ object MilvusDataWriter {
             }
           }
           vectorList.add(javaList)
+        }
+        case DataType.BinaryVector =>{
+          val vectorList = buffer.get(i).getValues.asInstanceOf[util.ArrayList[ByteBuffer]]
+          val vector = record.getBinary(i)
+          //          val javaList: ByteBuffer = new ByteBuffer()
+          //          for (element <- vector) {
+          //            element match {
+          //              case floatValue: Float => javaList.add(floatValue)
+          //              case _ => throw new IllegalArgumentException("Unsupported element type")
+          //            }
+          //          }
+          vectorList.add(ByteBuffer.wrap(vector))
+          //
+          //          int dim = fieldSchema.getDimension();
+          //          for (int i = 0; i < values.size(); ++i) {
+          //            Object value  = values.get(i);
+          //            // is ByteBuffer?
+          //            if (!(value instanceof ByteBuffer)) {
+          //              throw new ParamException(String.format(errMsgs.get(dataType), fieldSchema.getName()));
+          //            }
+          //
+          //            // check dimension
+          //            ByteBuffer v = (ByteBuffer)value;
+          //            int real_dim = calculateBinVectorDim(dataType, v.position());
+          //            if (real_dim != dim) {
+          //              String msg = "Incorrect dimension for field '%s': the no.%d vector's dimension: %d is not equal to field's dimension: %d";
+          //              throw new ParamException(String.format(msg, fieldSchema.getName(), i, real_dim, dim));
+          //            }
+          //          }
         }
       }
     }

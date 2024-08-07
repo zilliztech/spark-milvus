@@ -141,8 +141,14 @@ object MilvusCollection {
       case DataType.Float => FloatType
       case DataType.Double => DoubleType
       case DataType.VarChar => VarcharType(65535)
-      case DataType.BinaryVector => BinaryType
+      case DataType.JSON => VarcharType(65535)
+//      case DataType.BinaryVector => ArrayType(BinaryType) // todo
+//      case DataType.Array => ArrayType(BinaryType) // todo
+      // vector
       case DataType.FloatVector => ArrayType(FloatType)
+//      case DataType.Float16Vector => ArrayType(FloatType)
+//      case DataType.BFloat16Vector => ArrayType(BinaryType) // todo
+//      case DataType.SparseFloatVector => ArrayType(FloatType) // todo
     }
   }
 }
