@@ -24,7 +24,7 @@ object InsertDemo {
     val uri = ""
     val token = ""
     val collectionName = "hello_spark_milvus"
-    val filePath = "data/insert_demo/dim32_1k.json"
+    val filePath = "data/insert_demo/data.json"
 
     // 1. create milvus collection through milvus SDK
     val connectParam: ConnectParam = ConnectParam.newBuilder
@@ -36,28 +36,35 @@ object InsertDemo {
 
     val client: MilvusClient = new MilvusServiceClient(connectParam)
 
-    val field1Name: String = "id_field"
-    val field2Name: String = "str_field"
-    val field3Name: String = "float_vector_field"
+    val idField: String = "id_field"
+    val strField: String = "str_field"
+    val floatVectorField: String = "float_vector_field"
+    val jsonField: String = "json_field"
+
     val fieldsSchema: util.List[FieldType] = new util.ArrayList[FieldType]
 
     fieldsSchema.add(FieldType.newBuilder
       .withPrimaryKey(true)
       .withAutoID(false)
       .withDataType(DataType.Int64)
-      .withName(field1Name)
+      .withName(idField)
       .build
     )
     fieldsSchema.add(FieldType.newBuilder
       .withDataType(DataType.VarChar)
-      .withName(field2Name)
-      .withMaxLength(65535)
+      .withName(strField)
+      .withMaxLength(32)
       .build
     )
     fieldsSchema.add(FieldType.newBuilder
       .withDataType(DataType.FloatVector)
-      .withName(field3Name)
+      .withName(floatVectorField)
       .withDimension(32)
+      .build
+    )
+    fieldsSchema.add(FieldType.newBuilder
+      .withDataType(DataType.JSON)
+      .withName(jsonField)
       .build
     )
 
@@ -74,9 +81,11 @@ object InsertDemo {
     // 2. read data from file
     val df = spark.read
       .schema(new StructType()
-        .add(field1Name, LongType)
-        .add(field2Name, StringType)
-        .add(field3Name, ArrayType(FloatType), false))
+        .add(idField, LongType)
+        .add(strField, StringType)
+        .add(floatVectorField, ArrayType(FloatType), false)
+        .add(jsonField, StringType, false)
+      )
       .json(filePath)
 
     // 3. configure output target
@@ -86,9 +95,6 @@ object InsertDemo {
       MILVUS_HOST -> host,
       MILVUS_PORT -> port.toString,
       MILVUS_COLLECTION_NAME -> collectionName,
-//      MILVUS_COLLECTION_VECTOR_FIELD -> "float_vector_field",
-//      MILVUS_COLLECTION_VECTOR_DIM -> "32",
-//      MILVUS_COLLECTION_PRIMARY_KEY -> "id_field",
     )
 
     // 3, insert data to milvus collection
