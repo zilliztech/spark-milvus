@@ -1,6 +1,6 @@
 package zilliztech.spark.milvus.writer
 
-import com.google.gson.{JsonElement, JsonObject, JsonParser}
+import com.google.gson.{JsonElement, JsonParser}
 import io.milvus.grpc.{CollectionSchema, DataType, ErrorCode}
 import io.milvus.param.dml.InsertParam
 import org.apache.spark.sql.catalyst.InternalRow
@@ -11,8 +11,9 @@ import org.slf4j.LoggerFactory
 import zilliztech.spark.milvus.writer.MilvusDataWriter.{addRowToBuffer, newInsertBuffer}
 import zilliztech.spark.milvus.{MilvusCollection, MilvusConnection, MilvusOptions, MilvusUtils}
 
-import java.nio.{ByteBuffer, ByteOrder}
+import java.nio.ByteBuffer
 import java.util
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters._
 
@@ -30,7 +31,7 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
   private var buffer = newInsertBuffer(milvusSchema)
 
   private var currentSizeInBuffer = 0
-  private var totalSize       = 0
+  private var totalSize = 0
 
   override def write(record: InternalRow): Unit = {
     try {
@@ -52,8 +53,8 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
           .build
 
         val insertR = milvusClient.withTimeout(10, TimeUnit.SECONDS).insert(insertParam)
-        log.debug(s"insert batch status ${ insertR.toString} size: ${currentSizeInBuffer}")
-        if(insertR.getStatus != ErrorCode.Success.getNumber) {
+        log.debug(s"insert batch status ${insertR.toString} size: ${currentSizeInBuffer}")
+        if (insertR.getStatus != ErrorCode.Success.getNumber) {
           throw new Exception(s"Fail to insert batch: ${insertR.toString}")
         }
         buffer = newInsertBuffer(milvusSchema)
@@ -81,7 +82,7 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
         .build
       val insertR = milvusClient.withTimeout(10, TimeUnit.SECONDS).insert(insertParam)
       log.info(s"commit insert status ${insertR.getStatus.toString} size: ${currentSizeInBuffer}")
-      if(insertR.getStatus != ErrorCode.Success.getNumber) {
+      if (insertR.getStatus != ErrorCode.Success.getNumber) {
         throw new Exception(s"Fail to commit insert: ${insertR.toString}")
       }
       buffer = newInsertBuffer(milvusSchema)
@@ -129,9 +130,10 @@ object MilvusDataWriter {
           }
           convertType
         }
-        // case DataType.BinaryVector => _ // not supported
-        // case DataType.BinaryVector => new util.ArrayList[util.ArrayList[Float]]()
+        case DataType.BinaryVector => new util.ArrayList[ByteBuffer]()
         case DataType.FloatVector => new util.ArrayList[util.ArrayList[Float]]()
+        case DataType.Float16Vector => new util.ArrayList[ByteBuffer]()
+        case DataType.BFloat16Vector => new util.ArrayList[ByteBuffer]()
         case DataType.SparseFloatVector => new util.ArrayList[util.SortedMap[Long, Float]]()
       }
       fieldsInsert.add(new InsertParam.Field(schema.getFields(i).getName, fieldList))
@@ -207,6 +209,23 @@ object MilvusDataWriter {
             }
           }
         }
+        case DataType.BinaryVector => {
+          val dim = MilvusUtils.getVectorDim(schema.getFields(i))
+          val recordStr = record.getString(i)
+          // handle if the input is base64 encoded
+          val bytes = if (recordStr.length * 8 == dim) {
+            recordStr.getBytes
+          } else {
+            Base64.getDecoder.decode(recordStr)
+          }
+          // quite ridiculous I can't use ByteBuffer.wrap(vector). it will fail in Java SDK checkFieldData
+          // val vector = ByteBuffer.wrap(vector)
+          val vector = ByteBuffer.allocate(bytes.length)
+          for (i <- 0 until bytes.length) {
+            vector.put(bytes(i))
+          }
+          buffer.get(i).getValues.asInstanceOf[util.ArrayList[ByteBuffer]].add(vector)
+        }
         case DataType.FloatVector => {
           val vectorList = buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Float]]]
           val vector = record.getArray(i).toFloatArray()
@@ -219,44 +238,37 @@ object MilvusDataWriter {
           }
           vectorList.add(javaList)
         }
+        case DataType.Float16Vector => {
+          val floatArr = record.getArray(i).toFloatArray()
+          // quite ridiculous I can't use ByteBuffer.wrap(vector). it will fail in Java SDK checkFieldData
+          // val vector = ByteBuffer.wrap(vector)
+          val vector = ByteBuffer.allocate(floatArr.length * 2)
+          for (i <- 0 until floatArr.length) {
+            vector.put(MilvusUtils.convertFloatToFloat16ByteArray(floatArr(i)))
+          }
+          buffer.get(i).getValues.asInstanceOf[util.ArrayList[ByteBuffer]].add(vector)
+        }
+        case DataType.BFloat16Vector => {
+          val dim = MilvusUtils.getVectorDim(schema.getFields(i))
+          val recordStr = record.getString(i)
+          // handle if the input is base64 encoded
+          val bytes = if (recordStr.length * 8 == dim) {
+            recordStr.getBytes
+          } else {
+            Base64.getDecoder.decode(recordStr)
+          }
+          // quite ridiculous I can't use ByteBuffer.wrap(vector). it will fail in Java SDK checkFieldData
+          // val vector = ByteBuffer.wrap(vector)
+          val vector = ByteBuffer.allocate(bytes.length)
+          for (i <- 0 until bytes.length) {
+            vector.put(bytes(i))
+          }
+          buffer.get(i).getValues.asInstanceOf[util.ArrayList[ByteBuffer]].add(vector)
+        }
         case DataType.SparseFloatVector => {
           val json = JsonParser.parseString(record.getString(i)).getAsJsonObject()
           val vector = MilvusUtils.jsonToSparseVector(json)
           buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.SortedMap[Long, Float]]].add(vector)
-        }
-//        case DataType.SparseFloatVector => {
-//          val ele = record.getString(i)
-//          val vector = bytesToSparseVector(ele.getBytes)
-//          buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.SortedMap[Integer, Float]]].add(vector)
-//        }
-        case DataType.BinaryVector =>{
-          val vectorList = buffer.get(i).getValues.asInstanceOf[util.ArrayList[ByteBuffer]]
-          val vector = record.getBinary(i)
-          //          val javaList: ByteBuffer = new ByteBuffer()
-          //          for (element <- vector) {
-          //            element match {
-          //              case floatValue: Float => javaList.add(floatValue)
-          //              case _ => throw new IllegalArgumentException("Unsupported element type")
-          //            }
-          //          }
-          vectorList.add(ByteBuffer.wrap(vector))
-          //
-          //          int dim = fieldSchema.getDimension();
-          //          for (int i = 0; i < values.size(); ++i) {
-          //            Object value  = values.get(i);
-          //            // is ByteBuffer?
-          //            if (!(value instanceof ByteBuffer)) {
-          //              throw new ParamException(String.format(errMsgs.get(dataType), fieldSchema.getName()));
-          //            }
-          //
-          //            // check dimension
-          //            ByteBuffer v = (ByteBuffer)value;
-          //            int real_dim = calculateBinVectorDim(dataType, v.position());
-          //            if (real_dim != dim) {
-          //              String msg = "Incorrect dimension for field '%s': the no.%d vector's dimension: %d is not equal to field's dimension: %d";
-          //              throw new ParamException(String.format(msg, fieldSchema.getName(), i, real_dim, dim));
-          //            }
-          //          }
         }
       }
     }

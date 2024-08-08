@@ -351,4 +351,38 @@ object MilvusUtils {
     })
     map
   }
+
+  def convertFloatToFloat16ByteArray(value: Float): Array[Byte] = {
+    import java.lang._
+
+    val floatBits = Float.floatToIntBits(value)
+    val sign = (floatBits >> 16) & 0x8000 // Sign bit
+    var exponent = ((floatBits >> 23) & 0xFF) - 112 // Exponent bits
+    var mantissa = (floatBits & 0x7FFFFF) >> 13 // Mantissa bits
+    if (exponent <= 0) if (exponent < -10) { // Too small, convert to zero
+      exponent = 0
+      mantissa = 0
+    }
+    else { // Subnormal number
+      mantissa = (mantissa | 0x800000) >> (1 - exponent)
+      exponent = 0
+    }
+    else if (exponent > 0x1F) { // Too large, convert to infinity
+      exponent = 0x1F
+      mantissa = 0
+    }
+    val float16Bits = sign | (exponent << 10) | mantissa
+    // Convert to byte array
+    ByteBuffer.allocate(2).putShort(float16Bits.toShort).array
+  }
+
+  def getVectorDim(field: FieldSchema): Int = {
+    val params = field.getTypeParamsList.map(x => x.getKey -> x.getValue).toMap
+    val dimStr = params.get("dim")
+    if (dimStr.isEmpty) {
+      0
+    } else {
+      dimStr.get.toInt
+    }
+  }
 }
