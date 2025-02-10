@@ -89,7 +89,7 @@ object MilvusUtils {
           fieldDict(fieldID)
         }
         val fieldColumn = spark.read.format("milvusbinlog").load(insertPath)
-          .withColumnRenamed("val", fieldName)
+          .withColumnRenamed(fieldID.toString(), fieldName)
           .withColumn(segmentRowId, monotonically_increasing_id())
 
         if (vecFeilds.contains(fieldID)) {

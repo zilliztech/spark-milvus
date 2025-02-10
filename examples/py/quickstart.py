@@ -1,11 +1,19 @@
 from pyspark.sql import SparkSession
 
+spark = SparkSession.builder \
+    .appName("Milvus Integration") \
+    .master("local[*]") \
+    .getOrCreate()
 columns = ["id", "text", "vec"]
 data = [(1, "a", [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]),
     (2, "b", [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]),
     (3, "c", [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]),
     (4, "d", [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0])]
 sample_df = spark.sparkContext.parallelize(data).toDF(columns)
+
+# .option("milvus.uri", "https://localhost:19530") \
+# .option("milvus.token", "root:Milvus") \
+
 sample_df.write \
     .mode("append") \
     .option("milvus.host", "localhost") \
