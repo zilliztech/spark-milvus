@@ -70,10 +70,10 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
   override def commit(): WriterCommitMessage = {
     if (currentSizeInBuffer > 0) {
       var builder = InsertParam.newBuilder
-      if (!(milvusOptions.isZillizCloud() && milvusCollection.milvusOptions.databaseName.equals(""))) {
+      if (milvusCollection.milvusOptions.databaseName.nonEmpty) {
         builder = builder.withDatabaseName(milvusCollection.milvusOptions.databaseName)
       }
-      if (milvusCollection.milvusOptions.partitionName.isEmpty) {
+      if (milvusCollection.milvusOptions.partitionName.nonEmpty) {
         builder = builder.withPartitionName(milvusCollection.milvusOptions.partitionName)
       }
       val insertParam = builder
@@ -81,7 +81,7 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
         .withFields(buffer)
         .build
       val insertR = milvusClient.withTimeout(10, TimeUnit.SECONDS).insert(insertParam)
-      log.info(s"commit insert status ${insertR.getStatus.toString} size: ${currentSizeInBuffer}")
+      log.info(s"commit insert status ${insertR.getStatus.toString} size: ${currentSizeInBuffer}, toString: ${insertR.toString}")
       if (insertR.getStatus != ErrorCode.Success.getNumber) {
         throw new Exception(s"Fail to commit insert: ${insertR.toString}")
       }
@@ -101,6 +101,8 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
 }
 
 object MilvusDataWriter {
+  private val log = LoggerFactory.getLogger(getClass)
+
   def newInsertBuffer(schema: CollectionSchema): util.ArrayList[InsertParam.Field] = {
     val fieldsInsert: util.ArrayList[InsertParam.Field] = new util.ArrayList[InsertParam.Field]
     for (i: Int <- 0 to schema.getFieldsCount - 1) {
@@ -154,7 +156,7 @@ object MilvusDataWriter {
         case DataType.String => buffer.get(i).getValues.asInstanceOf[util.ArrayList[String]].add(record.getString(i))
         case DataType.VarChar => buffer.get(i).getValues.asInstanceOf[util.ArrayList[String]].add(record.getString(i))
         case DataType.JSON => {
-          val json = JsonParser.parseString(record.getString(i)).getAsJsonObject()
+          val json = JsonParser.parseString(record.getString(i))
           buffer.get(i).getValues.asInstanceOf[util.ArrayList[JsonElement]].add(json)
         }
         case DataType.Array => {
