@@ -12,15 +12,32 @@ The Spark Milvus Connector provides seamless integration between Apache Spark an
 
 - Java 8 or higher
 - Apache Maven
+- Scala 2.12.15 (Please make sure you are using this version)
+- Spark 3.3.2 (Please make sure you are using this version)
 
 <b>Clone & Build</b>
 
-```scala
-git clone https://github.com/zilliztech/spark-milvus.git
-cd spark-milvus 
+```bash
+# make the shade milvus-sdk package
+git clone https://github.com/milvus-io/milvus-sdk-java.git
+# apply the pom.xml diff
+# https://github.com/SimFG/milvus-sdk-java
+cd milvus-sdk-java
 mvn clean package -DskipTests
+
+git clone https://github.com/zilliztech/spark-milvus.git
+cd spark-milvus
+# HINT: Follow the comment
+# 1. modify the pom.xml file in the current directory and replace the systemPath path of the milvus-sdk-java dependency
+# 2. package the spark-milvus
+mvn clean package -DskipTests
+# 3. modify the pom.xml file in the example directory and replace the systemPath path of the milvus-sdk-java and spark-milvus dependency
+# 4. package the example
+cd examples
+mvn clean package -DskipTests
+cd ..
 ```
-After the packaging, a new spark-milvus-1.0.0-SNAPSHOT.jar is generated in spark-milvus/target/ directory.
+After the packaging, a new spark-milvus-1.0.0-SNAPSHOT.jar is generated in spark-milvus/target/ directory and a new spark-milvus-examples-1.0.0-SNAPSHOT.jar is generated in spark-milvus/example/target/.
 
 
 ## Usages
@@ -56,6 +73,10 @@ python
 ```python
 from pyspark.sql import SparkSession
 
+spark = SparkSession.builder \
+    .appName("Milvus Integration") \
+    .master("local[*]") \
+    .getOrCreate()
 columns = ["id", "text", "vec"]
 data = [(1, "a", [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]),
     (2, "b", [1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]),
@@ -72,6 +93,11 @@ sample_df.write \
     .option("milvus.collection.primaryKeyField", "id") \
     .format("milvus") \
     .save()
+```
+
+This source file is `examples/python/quickstar.py`. In the project root directory, execute the following command to run it:
+```bash
+spark-submit --jars /home/zilliz/Repo/milvus-sdk-java/sdk-core/target/milvus-sdk-java-new-shaded-2.5.4.jar,/home/zilliz/Repo/spark-milvus/target/spark-milvus-1.0.0-SNAPSHOT.jar  examples/py/quickstart.py
 ```
 
 Scala
@@ -110,6 +136,12 @@ object Hello extends App {
     .mode(SaveMode.Append)
     .save()
 }
+```
+
+This source file is `examples/src/main/scala/QuickStart.scala`. Before running, you need to ensure that the example directory has been packaged and the milvus service has been started locally. In the project root directory, execute the following command to run:
+
+```bash
+spark-submit --jars /home/zilliz/Repo/milvus-sdk-java/sdk-core/target/milvus-sdk-java-new-shaded-2.5.4.jar,/home/zilliz/Repo/spark-milvus/target/spark-milvus-1.0.0-SNAPSHOT.jar --class "QuickStart" examples/target/spark-milvus-examples-1.0.0-SNAPSHOT.jar
 ```
 
 ### More demos

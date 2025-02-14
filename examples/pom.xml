@@ -32,7 +32,16 @@
             <groupId>zilliztech</groupId>
             <artifactId>spark-milvus</artifactId>
             <version>1.0.0-SNAPSHOT</version>
-            <scope>provided</scope>
+            <scope>system</scope>
+            <systemPath>/home/zilliz/Repo/spark-milvus/target/spark-milvus-1.0.0-SNAPSHOT.jar</systemPath>
+        </dependency>
+
+        <dependency>
+            <groupId>io.milvus</groupId>
+            <artifactId>milvus-sdk-java</artifactId>
+            <version>2.5.4-SNAPSHOT-2</version>
+            <scope>system</scope>
+            <systemPath>/home/zilliz/Repo/milvus-sdk-java/sdk-core/target/milvus-sdk-java-new-shaded-2.5.4.jar</systemPath>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/com.mysql/mysql-connector-j -->
@@ -141,7 +150,7 @@
             <plugin>
                 <groupId>net.alchim31.maven</groupId>
                 <artifactId>scala-maven-plugin</artifactId>
-                <version>4.4.0</version>
+                <version>4.8.1</version>
                 <executions>
                     <execution>
                         <goals>
@@ -158,6 +167,9 @@
                 <configuration>
                     <source>8</source>
                     <target>8</target>
+                    <debug>true</debug>
+                    <debuglevel>lines,vars,source</debuglevel>
+                    <compilerArgument>-g</compilerArgument>
                 </configuration>
             </plugin>
         </plugins>

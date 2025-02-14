@@ -156,3 +156,6 @@ examples/.idea/
 clustering/
 clustering-service/
 .gitignore
+.vscode
+.bloop
+.metals
