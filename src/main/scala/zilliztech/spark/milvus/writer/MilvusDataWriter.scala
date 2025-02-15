@@ -5,7 +5,7 @@ import io.milvus.grpc.{CollectionSchema, DataType, ErrorCode}
 import io.milvus.param.dml.InsertParam
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.{DataWriter, WriterCommitMessage}
-import org.apache.spark.sql.types.StringType
+import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 import org.slf4j.LoggerFactory
 import zilliztech.spark.milvus.writer.MilvusDataWriter.{addRowToBuffer, newInsertBuffer}
@@ -17,7 +17,7 @@ import java.util.Base64
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters._
 
-case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: MilvusOptions) extends DataWriter[InternalRow]
+case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: MilvusOptions, sparkSchema: StructType) extends DataWriter[InternalRow]
   with Serializable {
   private val log = LoggerFactory.getLogger(getClass)
 
@@ -35,7 +35,7 @@ case class MilvusDataWriter(partitionId: Int, taskId: Long, milvusOptions: Milvu
 
   override def write(record: InternalRow): Unit = {
     try {
-      addRowToBuffer(record, milvusSchema, buffer)
+      addRowToBuffer(record, milvusSchema, buffer, sparkSchema)
       currentSizeInBuffer = currentSizeInBuffer + 1
       totalSize = totalSize + 1
 
@@ -143,8 +143,9 @@ object MilvusDataWriter {
     fieldsInsert
   }
 
-  def addRowToBuffer(record: InternalRow, schema: CollectionSchema, buffer: util.ArrayList[InsertParam.Field]): util.ArrayList[InsertParam.Field] = {
+  def addRowToBuffer(record: InternalRow, schema: CollectionSchema, buffer: util.ArrayList[InsertParam.Field], sparkSchema: StructType): util.ArrayList[InsertParam.Field] = {
     for (i: Int <- 0 to schema.getFieldsCount - 1) {
+      val schemaFieldName = schema.getFields(i).getName
       schema.getFields(i).getDataType match {
         case DataType.Bool => buffer.get(i).getValues.asInstanceOf[util.ArrayList[Boolean]].add(record.getBoolean(i))
         case DataType.Int8 => buffer.get(i).getValues.asInstanceOf[util.ArrayList[Short]].add(record.getShort(i))
@@ -230,16 +231,31 @@ object MilvusDataWriter {
         }
         case DataType.FloatVector => {
           val vectorList = buffer.get(i).getValues.asInstanceOf[util.ArrayList[util.ArrayList[Float]]]
-          val vector = record.getArray(i).toFloatArray()
-          val javaList: util.ArrayList[Float] = new util.ArrayList[Float](vector.length)
-          for (element <- vector) {
-            element match {
-              case floatValue: Float => javaList.add(floatValue)
-              case _ => throw new IllegalArgumentException("Unsupported element type")
+          val sparkField: StructField = sparkSchema(schemaFieldName)
+          val sparkFieldType: org.apache.spark.sql.types.DataType = sparkField.dataType
+          val dim: Int = record.getArray(i).numElements 
+          val javaList: util.ArrayList[Float] = new util.ArrayList[Float](dim)
+          sparkFieldType match {
+            case arrayType: ArrayType =>
+              arrayType.elementType match {
+                case _: FloatType =>
+                  val vector = record.getArray(i).toFloatArray()
+                  for (element <- vector) {
+                    javaList.add(element)
+                  }
+                case _: DoubleType =>
+                  val vector = record.getArray(i).toDoubleArray()
+                  for (element <- vector) {
+                    javaList.add(element.toFloat)
+                  }
+                case _ =>
+                  throw new IllegalArgumentException("Unsupported element type, only support FloatType and DoubleType, current type is " + arrayType.elementType.typeName)
+              }
+            case _ =>
+              throw new IllegalArgumentException("Unsupported element type, only support ArrayType, current type is " + sparkFieldType.typeName)
             }
+            vectorList.add(javaList)
           }
-          vectorList.add(javaList)
-        }
         case DataType.Float16Vector => {
           val floatArr = record.getArray(i).toFloatArray()
           // quite ridiculous I can't use ByteBuffer.wrap(vector). it will fail in Java SDK checkFieldData

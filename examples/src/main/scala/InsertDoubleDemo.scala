@@ -13,7 +13,7 @@ import java.util.Random
 
 import java.util
 
-object InsertDemo {
+object InsertDoubleDemo {
   private val log = LoggerFactory.getLogger(getClass)
 
   def main(args: Array[String]):Unit = {
@@ -25,8 +25,8 @@ object InsertDemo {
     val port = 19530
     val uri = ""
     val token = ""
-    val collectionName = "hello_spark_milvus102"
-    val filePath = "data/insert_demo/data.json"
+    val collectionName = "hello_spark_milvus101"
+    val filePath = "data/insert_demo/data_double.json"
 
     // 1. create milvus collection through milvus SDK
     val connectParam: ConnectParam = ConnectParam.newBuilder
@@ -97,12 +97,11 @@ object InsertDemo {
     log.info(s"create collection ${collectionName} resp: ${createR.toString}")
 
     // 2. read data from file
-    // .add(floatVectorField, ArrayType(DoubleType), false)
     val df = spark.read
       .schema(new StructType()
         .add(idField, LongType)
         .add(strField, StringType)
-        .add(floatVectorField, ArrayType(FloatType), false)
+        .add(floatVectorField, ArrayType(DoubleType), false)
         .add(jsonField, StringType, false)
         .add(intArrayField, ArrayType(LongType), false)
         .add(arrayField, ArrayType(StringType), false)
