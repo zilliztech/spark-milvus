@@ -28,7 +28,7 @@ case class MilvusCollection(milvusOptions: MilvusOptions, sparkSchema: Option[St
   lazy val sparkSession = SparkSession.active
 
   override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder =
-    MilvusWriteBuilder(milvusOptions)
+    MilvusWriteBuilder(milvusOptions, info)
 
   override def schema(): StructType = {
     if (sparkSchema.isEmpty) {

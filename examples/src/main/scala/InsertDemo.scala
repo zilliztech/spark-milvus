@@ -8,6 +8,8 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.slf4j.LoggerFactory
 import zilliztech.spark.milvus.MilvusOptions._
+import java.util.{ArrayList, List}
+import java.util.Random
 
 import java.util
 
@@ -23,7 +25,7 @@ object InsertDemo {
     val port = 19530
     val uri = ""
     val token = ""
-    val collectionName = "hello_spark_milvus"
+    val collectionName = "hello_spark_milvus102"
     val filePath = "data/insert_demo/data.json"
 
     // 1. create milvus collection through milvus SDK
@@ -95,6 +97,7 @@ object InsertDemo {
     log.info(s"create collection ${collectionName} resp: ${createR.toString}")
 
     // 2. read data from file
+    // .add(floatVectorField, ArrayType(DoubleType), false)
     val df = spark.read
       .schema(new StructType()
         .add(idField, LongType)
@@ -134,7 +137,7 @@ object InsertDemo {
     val createIndexParam = CreateIndexParam.newBuilder()
       .withCollectionName(collectionName)
       .withIndexName("index_name")
-      .withFieldName("float_vector_field")
+      .withFieldName(floatVectorField)
       .withMetricType(MetricType.L2)
       .withIndexType(IndexType.AUTOINDEX)
       .build()
@@ -152,14 +155,20 @@ object InsertDemo {
     fieldList.add(arrayField)
     fieldList.add(intArrayField)
 
-    // 8, use the first row as search vector
-    val searchVectors = util.Arrays.asList(df.first().getList(2))
+    // 8, search 
+    val random = new Random()
+    val searchVectors: List[List[Float]] = new ArrayList[List[Float]]()
+    val innerList: List[Float] = new ArrayList[Float]()
+    for (_ <- 0 until 32) {
+      innerList.add(random.nextFloat())
+    }
+    searchVectors.add(innerList)
     val searchParam = SearchParam.newBuilder()
       .withCollectionName(collectionName)
       .withMetricType(MetricType.L2)
       .withOutFields(fieldList)
       .withVectors(searchVectors)
-      .withVectorFieldName("float_vector_field")
+      .withVectorFieldName(floatVectorField)
       .withTopK(10)
       .build()
     val searchParamR = client.search(searchParam)
