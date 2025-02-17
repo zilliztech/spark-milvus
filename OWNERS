@@ -1,6 +1,6 @@
 filters:
   ".*":
     reviewers:
-      - SimFG
+      - maintainers
     approvers:
-      - SimFG
+      - maintainers
