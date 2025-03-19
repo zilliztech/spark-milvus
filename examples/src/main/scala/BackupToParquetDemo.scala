@@ -1,9 +1,13 @@
+import com.typesafe.config.{ConfigFactory, ConfigRenderOptions}
 import io.milvus.grpc.DataType
 import milvus.proto.backup.BackupUtil
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.functions.{json_tuple, monotonically_increasing_id, udf}
 import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.slf4j.LoggerFactory
+import software.amazon.awssdk.auth.credentials.{AwsBasicCredentials, StaticCredentialsProvider}
+import software.amazon.awssdk.regions.Region
+import software.amazon.awssdk.services.s3.S3Client
 import zilliztech.spark.milvus.MilvusOptions._
 import zilliztech.spark.milvus.binlog.MilvusBinlogUtil
 
@@ -24,8 +28,8 @@ object BackupToParquetDemo {
       "minio_endpoint" -> "http://localhost:9000",
       "ak" -> "minioadmin",
       "sk" -> "minioadmin",
-      "backup_collection" -> "hello_milvus",
-      "backup_database" -> "default",
+      "backup_collection" -> "test_col_lxelwhu",
+      "backup_database" -> "test_db",
     )
 
     val mutableMap = mutable.Map.empty[String, String]
@@ -43,6 +47,8 @@ object BackupToParquetDemo {
     val storage = mergedConfigs("storage")
     val backupPath = mergedConfigs("backup_path")
     val bucketName = mergedConfigs("bucket")
+    val collectionName = mergedConfigs("backup_collection")
+    val database = mergedConfigs("backup_database")
 
     val (backupInfo, fs) = if (storage.equals("local")) {
       (BackupUtil.GetBackupInfoFromLocal(backupPath), "file://")
@@ -74,12 +80,11 @@ object BackupToParquetDemo {
     val collectionBackups = backupInfo.getCollectionBackupsList
     val segmentRowId = "segment_rowid"
 
-
     val parseVectorFunc = udf(MilvusBinlogUtil.littleEndianBinaryToFloatArray(_: Array[Byte]): Array[Float])
 
     collectionBackups.filter(c => c.getCollectionName == collectionName && c.getDbName == database).map(coll => {
       val schema = coll.getSchema
-      schema.getFieldsList.foreach(f => println(s"===========Field: ${f.getName}, Type: ${f.getDataType}"))
+      schema.getFieldsList.foreach(f => println(s"==Field: ${f.getName}, Type: ${f.getDataType}"))
 
       val fieldDict = schema.getFieldsList.map(field => (field.getFieldID, field.getName)).toMap
       val pkField = schema.getFieldsList.filter(field => field.getIsPrimaryKey).toArray.apply(0)
@@ -93,8 +98,9 @@ object BackupToParquetDemo {
       var l0DF = spark.emptyDataFrame
       segments.zipWithIndex.map(x => {
         val segment = x._1
-        // if partitionId is -1, the segment is l0 segment
-         if (segment.getPartitionId == -1) {
+        // collect all delta data if the segment is l0 segment
+         if (segment.getIsL0()) {
+           log.info(s"found l0 segment: ${segment.getSegmentId}")
            val deltaPath = "%s%s/%s/binlogs/delta_log/%d/%d/%d/%d".format(fs, bucketName, backupPath, segment.getCollectionId, segment.getPartitionId, segment.getSegmentId, segment.getSegmentId)
            val delta = spark.read.format("milvusbinlog").load(deltaPath)
            val deltaDF = delta.select(json_tuple(delta.col("val"), "pk", "ts"))
@@ -109,7 +115,7 @@ object BackupToParquetDemo {
         val index = x._2
 
         // skip l0 segment
-        if (segment.getPartitionId == -1) {
+        if (segment.getIsL0()) {
           return
         }
 
