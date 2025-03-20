@@ -1,4 +1,5 @@
 import com.typesafe.config.{ConfigFactory, ConfigRenderOptions}
+import com.zilliztech.spark.l0data.DeltaLogUtils
 import io.milvus.grpc.DataType
 import milvus.proto.backup.BackupUtil
 import org.apache.spark.SparkConf
@@ -11,6 +12,7 @@ import software.amazon.awssdk.services.s3.S3Client
 import zilliztech.spark.milvus.MilvusOptions._
 import zilliztech.spark.milvus.binlog.MilvusBinlogUtil
 
+import java.util
 import scala.collection.convert.ImplicitConversions.`list asScalaBuffer`
 import scala.collection.mutable
 
@@ -18,8 +20,12 @@ object BackupToParquetDemo {
   private val log = LoggerFactory.getLogger(getClass)
 
   def main(args: Array[String]): Unit = {
-    val sparkConf = new SparkConf().setMaster("local")
-    val spark = SparkSession.builder().config(sparkConf).getOrCreate()
+    val sparkConf = new SparkConf()
+      .setMaster("local")
+
+    val spark = SparkSession.builder()
+      .config(sparkConf)
+      .getOrCreate()
 
     val defaultConfigs = Map(
       "storage" -> "local",
@@ -95,41 +101,43 @@ object BackupToParquetDemo {
       log.info(s"total segment number:${segments.length}")
 
       // collect l0 data
-      var l0DF = spark.emptyDataFrame
-      segments.zipWithIndex.map(x => {
+      val deltaPaths = new util.ArrayList[String]
+      segments.filter(s => s.getIsL0()).zipWithIndex.map(x => {
         val segment = x._1
         // collect all delta data if the segment is l0 segment
-         if (segment.getIsL0()) {
-           log.info(s"found l0 segment: ${segment.getSegmentId}")
-           val deltaPath = "%s%s/%s/binlogs/delta_log/%d/%d/%d/%d".format(fs, bucketName, backupPath, segment.getCollectionId, segment.getPartitionId, segment.getSegmentId, segment.getSegmentId)
-           val delta = spark.read.format("milvusbinlog").load(deltaPath)
-           val deltaDF = delta.select(json_tuple(delta.col("val"), "pk", "ts"))
-           l0DF = l0DF.union(deltaDF)
-         }
+         val deltaDir = "%s/%s/binlogs/delta_log/%d/%d/%d/%d/*".format(bucketName, backupPath, segment.getCollectionId, segment.getPartitionId, segment.getSegmentId, segment.getSegmentId)
+         deltaPaths.addAll(DeltaLogUtils.expandGlobPattern(deltaDir))
       })
-      log.info(s"finish read l0 segment progress, count: ${l0DF.count()}")
 
+      var l0DF = spark.emptyDataFrame
+      if (deltaPaths.size() > 0) {
+        log.info(s"delta log file count: ${deltaPaths.size()}")
+        l0DF = DeltaLogUtils.createDataFrame(deltaPaths, spark)
+        l0DF.show(10)
+      }
+      log.info(s"finish read l0 segment, count: ${l0DF.count()}")
+
+      val nonL0Segment = segments.filter(s => !s.getIsL0())
       var insertedRows: Long = 0
-      segments.zipWithIndex.map(x => {
+      nonL0Segment.zipWithIndex.map(x => {
         val segment = x._1
         val index = x._2
 
-        // skip l0 segment
-        if (segment.getIsL0()) {
-          return
-        }
-
         val fieldBinlogs = segment.getBinlogsList
+        var idx = 1
         val dfs = fieldBinlogs.map(field => {
           val insertPath = "%s%s/%s/binlogs/insert_log/%d/%d/%d/%d/%d".format(fs, bucketName, backupPath, segment.getCollectionId, segment.getPartitionId, segment.getSegmentId, segment.getSegmentId, field.getFieldID)
           log.info(s"start insert segment ${segment.getSegmentId} field ${field.getFieldID} from ${insertPath}")
 
+          val fieldName = field.getFieldID.toString
           val fieldColumn = spark.read.format("milvusbinlog").load(insertPath)
+            .withColumnRenamed("val", fieldName)
             .withColumn(segmentRowId, monotonically_increasing_id())
-          log.info(s"finish read segment ${segment.getSegmentId} field ${field.getFieldID} progress: ${index+1}/${segments.length} count: ${fieldColumn.count()}")
+          log.info(s"finish read segment ${segment.getSegmentId} field ${field.getFieldID} progress: ${idx}/${fieldBinlogs.length} count: ${fieldColumn.count()}")
 
+          idx = idx + 1
           if (vecFeilds.contains(field.getFieldID)) {
-            fieldColumn.withColumn(field.getFieldID.toString, parseVectorFunc(fieldColumn(field.getFieldID.toString)))
+            fieldColumn.withColumn(fieldName, parseVectorFunc(fieldColumn(fieldName)))
           } else {
             fieldColumn
           }
@@ -170,12 +178,19 @@ object BackupToParquetDemo {
           df.withColumnRenamed(oldName.toString, newName)
         }
 
-        // Save the DataFrame to Parquet
+        // Try Parquet as well
         val outputPath = s"/tmp/${coll.getCollectionName}_${segment.getSegmentId}.parquet"
-        renamedResultDF.write.format("parquet").mode(SaveMode.Overwrite).save(outputPath)
+        log.info(s"Saving as Parquet: $outputPath")
+
+        renamedResultDF.coalesce(1) // Use a single partition to avoid commit issues
+          .write
+          .format("parquet")
+          .mode(SaveMode.Overwrite)
+          .save(outputPath)
+        log.info(s"Successfully saved as Parquet: $outputPath")
 
         insertedRows += renamedResultDF.count()
-        log.info(s"finish insert segment ${segment.getSegmentId} progress: ${index+1}/${segments.length} inserted rows: ${insertedRows}")
+        log.info(s"finish segment ${segment.getSegmentId} progress: ${index+1}/${nonL0Segment.length} inserted rows: ${insertedRows}")
       })
     })
   }
