@@ -1,3 +1,5 @@
+import com.aliyun.oss.OSSClientBuilder
+import com.aliyun.oss.common.auth.CredentialsProviderFactory
 import com.typesafe.config.{ConfigFactory, ConfigRenderOptions}
 import com.zilliztech.spark.l0data.DeltaLogUtils
 import io.milvus.grpc.DataType
@@ -36,19 +38,34 @@ object BackupToParquetDemo {
       .config(sparkConf)
       .getOrCreate()
 
-    val defaultConfigs = Map(
-      "storage" -> "local",
-      "bucket" -> "",
-      "backup_path" -> "/Users/zilliz/Downloads/newBackup/",
-      "minio_endpoint" -> "http://localhost:9000",
-      "ak" -> "minioadmin",
-      "sk" -> "minioadmin",
-      "backup_collection" -> "test_col_lxelwhu",
-      "backup_database" -> "test_db",
-      "parallelism" -> "4",          // Number of parallel segment conversions
-      "output_directory" -> "/tmp",  // Output directory for Parquet files
-      "coalesce_partitions" -> "1",  // Number of partitions for output Parquet files
-    )
+//    val defaultConfigs = Map(
+//      "storage" -> "local",
+//      "bucket" -> "",
+//      "backup_path" -> "/Users/zilliz/Downloads/newBackup/",
+//      "minio_endpoint" -> "http://localhost:9000",
+//      "region" -> "cn-hangzhou",
+//      "ak" -> "minioadmin",
+//      "sk" -> "minioadmin",
+//      "backup_collection" -> "test_col_lxelwhu",
+//      "backup_database" -> "test_db",
+//      "parallelism" -> "4",          // Number of parallel segment conversions
+//      "output_directory" -> "/tmp",  // Output directory for Parquet files
+//      "coalesce_partitions" -> "1",  // Number of partitions for output Parquet files
+//    )
+val defaultConfigs = Map(
+  "storage" -> "oss",
+  "bucket" -> "backup-zilliz",
+  "backup_path" -> "newBackup/",
+  "minio_endpoint" -> "https://oss-cn-hangzhou.aliyuncs.com",
+  "region" -> "cn-hangzhou",
+  "ak" -> "",
+  "sk" -> "",
+  "backup_collection" -> "test_col_lxelwhu",
+  "backup_database" -> "test_db",
+  "parallelism" -> "4",          // Number of parallel segment conversions
+  "output_directory" -> "/tmp",  // Output directory for Parquet files
+  "coalesce_partitions" -> "1",  // Number of partitions for output Parquet files
+)
 
     val mutableMap = mutable.Map.empty[String, String]
     lazy val userConf = ConfigFactory.load()
@@ -78,6 +95,24 @@ object BackupToParquetDemo {
       val sk = mergedConfigs("sk")
       val s3Client = S3Client.builder().region(Region.US_WEST_2).credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(ak, sk))).build()
       (BackupUtil.GetBackupInfoFromS3(s3Client, bucketName, backupPath), "s3a://")
+    }else if(storage.equals("oss")){
+      val ak = mergedConfigs("ak")
+      val sk = mergedConfigs("sk")
+      val region = mergedConfigs("region")
+      val minioEndPoint = mergedConfigs("minio_endpoint")
+      val credentialsProvider = CredentialsProviderFactory.newDefaultCredentialProvider(ak, sk)
+      val ossClient = OSSClientBuilder.create()
+        .endpoint(minioEndPoint)
+        .credentialsProvider(credentialsProvider)
+        .region(region)
+        .build()
+
+      spark.sparkContext.hadoopConfiguration.set("fs.oss.endpoint", minioEndPoint)
+      spark.sparkContext.hadoopConfiguration.set("fs.oss.impl", "org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem")
+      spark.sparkContext.hadoopConfiguration.set("fs.oss.accessKeyId", ak)
+      spark.sparkContext.hadoopConfiguration.set("fs.oss.accessKeySecret", sk)
+
+      (BackupUtil.GetBackupInfoFromOSS(ossClient, bucketName, backupPath), "oss://")
     } else { // minio
       val ak = mergedConfigs("ak")
       val sk = mergedConfigs("sk")
@@ -351,10 +386,12 @@ object BackupToParquetDemo {
 
     // Iterate through all L0 segments and collect delta log file paths for each partition
     segments.filter(_.getIsL0()).foreach { segment =>
+      log.info("found l0 segment and begin to add delta path")
       val partitionId = segment.getPartitionId
       val deltaDir = s"$bucketName/$backupPath/binlogs/delta_log/${segment.getCollectionId}/$partitionId/${segment.getSegmentId}/${segment.getSegmentId}/*"
       val deltaPaths = partitionID2deltaPaths.getOrDefault(partitionId, new util.ArrayList[String]())
       deltaPaths.addAll(DeltaLogUtils.expandGlobPattern(deltaDir))
+      log.info(s"added deltapath, deltaDir: ${deltaDir}, delpaths:${deltaPaths}")
       partitionID2deltaPaths.put(partitionId, deltaPaths)
     }
 
