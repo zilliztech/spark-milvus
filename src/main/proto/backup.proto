@@ -63,6 +63,8 @@ message CollectionBackupInfo {
   string load_state = 18;
   // physical unix time of backup
   uint64 backup_physical_timestamp = 19;
+  map<string, string> channel_checkpoints = 20;
+  repeated SegmentBackupInfo l0_segments = 21;
 }
 
 message PartitionBackupInfo {
@@ -91,6 +93,8 @@ message SegmentBackupInfo {
   // segments in one group will be copied into one directory during backup
   // and will bulkinsert in one call during restore
   int64 group_id = 9;
+  bool backuped = 10;
+  bool is_l0 = 11;
 }
 
 /**
@@ -110,6 +114,7 @@ message BackupInfo {
   repeated CollectionBackupInfo collection_backups = 9;
   int64 size = 10;
   string milvus_version = 11;
+  RBACMeta rbac_meta = 12;
 }
 
 /**
@@ -157,6 +162,8 @@ message CreateBackupRequest {
   int32 gc_pause_seconds = 9;
   // gc pause API address
   string gc_pause_address = 10;
+  // whether backup RBAC
+  bool rbac = 11;
 }
 
 /**
@@ -238,6 +245,15 @@ enum RestoreTaskStateCode {
   TIMEOUT = 4;
 }
 
+message SkipParams {
+  repeated string collectionProperties = 1;
+
+  repeated string fieldIndexParams = 2;
+  repeated string fieldTypeParams = 3;
+
+  repeated string indexParams = 4;
+}
+
 message RestoreBackupRequest {
   // uuid of request, will generate one if not set
   string requestId = 1;
@@ -257,7 +273,7 @@ message RestoreBackupRequest {
   string bucket_name = 7;
   // if bucket_name and path is set. will override bucket/path in config.
   string path = 8;
-  // database and collections to restore. A json string. To support database. 2023.7.7
+  // database and collections to restore. A json string. for example: {"db1":["collection1"],"db2":["collection2","collection3"]}
   google.protobuf.Value db_collections = 9;
   // if true only restore meta, not restore data
   bool metaOnly = 10;
@@ -271,6 +287,16 @@ message RestoreBackupRequest {
   bool dropExistIndex = 14;
   // if true, will skip collection, use when collection exist, restore index or data
   bool skipCreateCollection = 15;
+  string id = 16;
+  // if true, skip the diskQuota in Import
+  bool skipImportDiskQuotaCheck = 17 [deprecated=true];
+  // whether restore RBAC
+  bool rbac = 18;
+  // target max shard number
+  int32 maxShardNum = 19;
+  // if key is set, will skip the params in restore process
+  SkipParams skipParams = 20;
+  bool useV2Restore = 21;
 }
 
 message RestorePartitionTask {
@@ -308,6 +334,11 @@ message RestoreCollectionTask {
   bool dropExistIndex = 17;
   // if true will skip create collections
   bool skipCreateCollection = 18;
+  bool skipDiskQuotaCheck = 19 [deprecated=true]; // when restore, skip disk quota check will always be true
+  // target max shard number
+  int32 maxShardNum = 20;
+  SkipParams skipParams = 21;
+  bool useV2Restore = 22;
 }
 
 message RestoreBackupTask {
@@ -368,6 +399,12 @@ enum ConsistencyLevel {
   Customized = 4; // Users pass their own `guarantee_timestamp`.
 }
 
+enum FunctionType{
+  Unknown =0;
+  BM25 =1;
+  TextEmbedding =2;
+}
+
 
 // copied from milvus schema.proto
 
@@ -393,6 +430,9 @@ enum DataType {
 
   BinaryVector = 100;
   FloatVector = 101;
+  Float16Vector = 102;
+  BFloat16Vector = 103;
+  SparseFloatVector = 104;
 }
 
 enum FieldState {
@@ -414,9 +454,6 @@ message ValueField {
   }
 }
 
-/**
- * @brief Field schema. The same as https://github.com/milvus-io/milvus-proto schema.proto
- */
 message FieldSchema {
   int64 fieldID = 1;
   string name = 2;
@@ -431,6 +468,21 @@ message FieldSchema {
   ValueField default_value = 11; // default_value only support scalars except array and json for now
   bool is_dynamic = 12; // mark whether this field is the dynamic field
   bool is_partition_key = 13; // enable logic partitions
+  bool nullable = 14;
+  string default_value_proto = 15; // json not support marshall oneof, so use proto string
+  bool is_function_output = 16;
+}
+
+message FunctionSchema {
+  string name = 1;
+  int64 id =2;
+  string description = 3;
+  FunctionType type = 4;
+  repeated string input_field_names = 5;
+  repeated int64 input_field_ids = 6;
+  repeated string output_field_names = 7;
+  repeated int64 output_field_ids = 8;
+  repeated KeyValuePair params = 9;
 }
 
 /**
@@ -442,6 +494,8 @@ message CollectionSchema {
   bool autoID = 3; // deprecated later, keep compatible with c++ part now
   repeated FieldSchema fields = 4;
   bool enable_dynamic_field = 5; // mark whether this table has the dynamic field function enabled.
+  repeated KeyValuePair properties = 6;
+  repeated FunctionSchema functions = 7;
 }
 
 message CheckRequest {
@@ -452,4 +506,69 @@ message CheckResponse {
   ResponseCode code = 1;
   // error msg if fail
   string msg = 2;
+}
+
+message MsgPosition {
+  string channel_name = 1;
+  bytes msgID = 2;
+  string msgGroup = 3;
+  uint64 timestamp = 4;
+}
+
+message ChannelPosition {
+  string name = 1;
+  string position = 2;
+}
+
+message RoleEntity {
+  string name = 1;
+}
+
+message UserEntity {
+  string name = 1;
+}
+
+message ObjectEntity {
+  string name = 1;
+}
+
+message PrivilegeEntity {
+  string name = 1;
+}
+
+message GrantorEntity {
+  UserEntity user = 1;
+  PrivilegeEntity privilege = 2;
+}
+
+message GrantPrivilegeEntity {
+  repeated GrantorEntity entities = 1;
+}
+
+message GrantEntity {
+  // role
+  RoleEntity role = 1;
+  // object
+  ObjectEntity object = 2;
+  // object name
+  string object_name = 3;
+  // privilege
+  GrantorEntity grantor = 4;
+  // db name
+  string db_name = 5;
+}
+
+message UserInfo {
+  string user = 1;
+  string password = 2;
+  repeated RoleEntity roles = 3;
+}
+
+message RBACMeta {
+  // user
+  repeated UserInfo users = 1;
+  // role
+  repeated RoleEntity roles = 2;
+  // (role, object, previledge)
+  repeated GrantEntity grants = 3;
 }
