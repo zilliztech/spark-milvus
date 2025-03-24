@@ -12,6 +12,16 @@ object MilvusOptions {
   val MILVUS_USERNAME = "milvus.username"
   val MILVUS_PASSWORD = "milvus.password"
 
+  //configs for secure connection with milvus Tls/mTls
+  val MILVUS_SECURE = "milvus.secure"
+  val MILVUS_SEVERNAME = "milvus.secure.serverName"
+  val MILVUS_SERVER_PEMPATH = "milvus.secure.serverPemPath"
+  val MILVUS_CA_CERT = "milvus.secure.caCert"
+  val MILVUS_CLIENT_CERT = "milvus.secure.clientCert"
+  val MILVUS_CLIENT_KEY = "milvus.secure.clientKey"
+
+
+
   // configs for milvus storage, only used when using MilvusUtils
   val MILVUS_BUCKET = "milvus.bucket"
   val MILVUS_ROOTPATH = "milvus.rootpath"
@@ -53,6 +63,15 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   val password: String = config.getOrDefault(MILVUS_PASSWORD, "milvus")
   val uri: String = config.getOrDefault(MILVUS_URI, "")
   val token: String = config.getOrDefault(MILVUS_TOKEN, "")
+  val secure: Boolean = config.getBoolean(MILVUS_SECURE, false)
+  val serverName: String = config.getOrDefault(MILVUS_SEVERNAME, "localhost")
+  val serverPemPath: String = config.getOrDefault(MILVUS_SERVER_PEMPATH, "")
+  val caCert: String = config.getOrDefault(MILVUS_CA_CERT, "")
+  val clientKey: String = config.getOrDefault(MILVUS_CLIENT_KEY, "")
+  val clientCert: String = config.getOrDefault(MILVUS_CLIENT_CERT, "")
+  if (secure && serverPemPath.isEmpty && (caCert.isEmpty || clientCert.isEmpty || clientKey.isEmpty)) {
+    throw new IllegalArgumentException("Secure connection requires either serverPemPath (for TLS) OR all three: caCert, clientCert, and clientKey (for mTLS).")
+  }
 
   // zilliz cloud
   val zillizCloudRegion: String = config.getOrDefault(ZILLIZCLOUD_REGION, "")
@@ -81,7 +100,7 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   // insert option
   val maxBatchSize: Int = config.getInt(MILVUS_INSERT_MAX_BATCHSIZE, 200)
 
-  override def toString = s"MilvusOptions($host, $port, $uri, $token, $userName)"
+  override def toString = s"MilvusOptions($host, $port, $uri, $token, $userName, secure=$secure)"
 
   def zillizInstanceID(): String = {
     zillizInstanceIDAndRegion()._1
