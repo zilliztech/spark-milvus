@@ -19,15 +19,22 @@ object MilvusConnection {
         .withPort(milvusOptions.port)
         .withAuthorization(milvusOptions.userName, milvusOptions.password)
         .withDatabaseName(milvusOptions.databaseName)
-        .withServerPemPath(milvusOptions.caCert)
-        .withServerName(milvusOptions.servername)
-      
+
       if (milvusOptions.secure) {
-        if (!milvusOptions.clientCert.isEmpty) {
-          builder.withServerName(milvusOptions.host)
-          builder.withCaPemPath(milvusOptions.caCert)
-          builder.withClientKeyPath(milvusOptions.clientKey)
-          builder.withClientPemPath(milvusOptions.clientCert)
+        if (milvusOptions.serverPemPath.nonEmpty) {
+          // TLS Configuration
+          builder.withServerPemPath(milvusOptions.serverPemPath)
+            .withServerName(milvusOptions.serverName)
+        } else if (milvusOptions.caCert.nonEmpty && milvusOptions.clientCert.nonEmpty && milvusOptions.clientKey.nonEmpty) {
+          // mTLS Configuration
+          builder.withServerName(milvusOptions.serverName)
+            .withCaPemPath(milvusOptions.caCert)
+            .withClientKeyPath(milvusOptions.clientKey)
+            .withClientPemPath(milvusOptions.clientCert)
+        } else {
+          throw new IllegalArgumentException(
+            "Secure connection requires either serverPemPath (for TLS) OR caCert, clientCert, and clientKey (for mTLS)."
+          )
         }
       }
       
@@ -37,15 +44,22 @@ object MilvusConnection {
       val builder = ConnectParam.newBuilder
         .withUri(milvusOptions.uri)
         .withToken(milvusOptions.token)
-        .withServerPemPath(milvusOptions.caCert)
-        .withServerName(milvusOptions.servername)
       
       if (milvusOptions.secure) {
-        if (!milvusOptions.clientCert.isEmpty) {
-          builder.withServerName(milvusOptions.host)
-          builder.withCaPemPath(milvusOptions.caCert)
-          builder.withClientKeyPath(milvusOptions.clientKey)
-          builder.withClientPemPath(milvusOptions.clientCert)
+        if (milvusOptions.serverPemPath.nonEmpty) {
+          // TLS Configuration
+          builder.withServerPemPath(milvusOptions.serverPemPath)
+          .withServerName(milvusOptions.serverName)
+        } else if (milvusOptions.caCert.nonEmpty && milvusOptions.clientCert.nonEmpty && milvusOptions.clientKey.nonEmpty) {
+          // mTLS Configuration
+          builder.withServerName(milvusOptions.serverName)
+            .withCaPemPath(milvusOptions.caCert)
+            .withClientKeyPath(milvusOptions.clientKey)
+            .withClientPemPath(milvusOptions.clientCert)
+        } else {
+          throw new IllegalArgumentException(
+            "Secure connection requires either serverPemPath (for TLS) OR caCert, clientCert, and clientKey (for mTLS)."
+          )
         }
       }
       

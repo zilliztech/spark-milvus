@@ -8,14 +8,17 @@ object MilvusOptions {
   val MILVUS_URI = "milvus.uri"
   val MILVUS_TOKEN = "milvus.token"
   val MILVUS_HOST = "milvus.host"
-  val MILVUS_SEVERNAME = "milvus.servername"
   val MILVUS_PORT = "milvus.port"
   val MILVUS_USERNAME = "milvus.username"
   val MILVUS_PASSWORD = "milvus.password"
+
+  //configs for secure connection with milvus Tls/mTls
   val MILVUS_SECURE = "milvus.secure"
-  val MILVUS_CA_CERT = "milvus.caCert"
-  val MILVUS_CLIENT_CERT = "milvus.clientCert"
-  val MILVUS_CLIENT_KEY = "milvus.clientKey"
+  val MILVUS_SEVERNAME = "milvus.secure.serverName"
+  val MILVUS_SERVER_PEMPATH = "milvus.secure.serverPemPath"
+  val MILVUS_CA_CERT = "milvus.secure.caCert"
+  val MILVUS_CLIENT_CERT = "milvus.secure.clientCert"
+  val MILVUS_CLIENT_KEY = "milvus.secure.clientKey"
 
 
 
@@ -60,13 +63,14 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   val password: String = config.getOrDefault(MILVUS_PASSWORD, "milvus")
   val uri: String = config.getOrDefault(MILVUS_URI, "")
   val token: String = config.getOrDefault(MILVUS_TOKEN, "")
-  val servername: String = config.getOrDefault(MILVUS_SEVERNAME, "localhost")
   val secure: Boolean = config.getBoolean(MILVUS_SECURE, false)
+  val serverName: String = config.getOrDefault(MILVUS_SEVERNAME, "localhost")
+  val serverPemPath: String = config.getOrDefault(MILVUS_SERVER_PEMPATH, "")
   val caCert: String = config.getOrDefault(MILVUS_CA_CERT, "")
   val clientKey: String = config.getOrDefault(MILVUS_CLIENT_KEY, "")
   val clientCert: String = config.getOrDefault(MILVUS_CLIENT_CERT, "")
-  if (secure && (caCert.isEmpty || clientCert.isEmpty || clientKey.isEmpty)) {
-    throw new IllegalArgumentException("Secure connection requires caCert, clientKey, and clientCert to be provided.")
+  if (secure && serverPemPath.isEmpty && (caCert.isEmpty || clientCert.isEmpty || clientKey.isEmpty)) {
+    throw new IllegalArgumentException("Secure connection requires either serverPemPath (for TLS) OR all three: caCert, clientCert, and clientKey (for mTLS).")
   }
 
   // zilliz cloud
