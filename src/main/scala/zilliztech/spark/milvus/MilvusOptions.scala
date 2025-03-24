@@ -8,9 +8,16 @@ object MilvusOptions {
   val MILVUS_URI = "milvus.uri"
   val MILVUS_TOKEN = "milvus.token"
   val MILVUS_HOST = "milvus.host"
+  val MILVUS_SEVERNAME = "milvus.servername"
   val MILVUS_PORT = "milvus.port"
   val MILVUS_USERNAME = "milvus.username"
   val MILVUS_PASSWORD = "milvus.password"
+  val MILVUS_SECURE = "milvus.secure"
+  val MILVUS_CA_CERT = "milvus.caCert"
+  val MILVUS_CLIENT_CERT = "milvus.clientCert"
+  val MILVUS_CLIENT_KEY = "milvus.clientKey"
+
+
 
   // configs for milvus storage, only used when using MilvusUtils
   val MILVUS_BUCKET = "milvus.bucket"
@@ -53,6 +60,14 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   val password: String = config.getOrDefault(MILVUS_PASSWORD, "milvus")
   val uri: String = config.getOrDefault(MILVUS_URI, "")
   val token: String = config.getOrDefault(MILVUS_TOKEN, "")
+  val servername: String = config.getOrDefault(MILVUS_SEVERNAME, "localhost")
+  val secure: Boolean = config.getBoolean(MILVUS_SECURE, false)
+  val caCert: String = config.getOrDefault(MILVUS_CA_CERT, "")
+  val clientKey: String = config.getOrDefault(MILVUS_CLIENT_KEY, "")
+  val clientCert: String = config.getOrDefault(MILVUS_CLIENT_CERT, "")
+  if (secure && (caCert.isEmpty || clientCert.isEmpty || clientKey.isEmpty)) {
+    throw new IllegalArgumentException("Secure connection requires caCert, clientKey, and clientCert to be provided.")
+  }
 
   // zilliz cloud
   val zillizCloudRegion: String = config.getOrDefault(ZILLIZCLOUD_REGION, "")
@@ -81,7 +96,7 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   // insert option
   val maxBatchSize: Int = config.getInt(MILVUS_INSERT_MAX_BATCHSIZE, 200)
 
-  override def toString = s"MilvusOptions($host, $port, $uri, $token, $userName)"
+  override def toString = s"MilvusOptions($host, $port, $uri, $token, $userName, secure=$secure)"
 
   def zillizInstanceID(): String = {
     zillizInstanceIDAndRegion()._1
