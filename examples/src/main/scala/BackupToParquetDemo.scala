@@ -1,4 +1,4 @@
-import com.aliyun.oss.OSSClientBuilder
+import com.aliyun.oss.{OSS, OSSClientBuilder}
 import com.aliyun.oss.common.auth.CredentialsProviderFactory
 import com.typesafe.config.{ConfigFactory, ConfigRenderOptions}
 import com.zilliztech.spark.l0data.DeltaLogUtils
@@ -55,7 +55,7 @@ object BackupToParquetDemo {
 val defaultConfigs = Map(
   "storage" -> "oss",
   "bucket" -> "backup-zilliz",
-  "backup_path" -> "newBackup/",
+  "backup_path" -> "newBackup",
   "minio_endpoint" -> "https://oss-cn-hangzhou.aliyuncs.com",
   "region" -> "cn-hangzhou",
   "ak" -> "",
@@ -88,20 +88,22 @@ val defaultConfigs = Map(
     val outputDirectory = mergedConfigs("output_directory")
     val coalescePartitions = mergedConfigs("coalesce_partitions").toInt
 
+    var ossClient: OSS = null
+    var s3Client: S3Client = null
     val (backupInfo, fs) = if (storage.equals("local")) {
       (BackupUtil.GetBackupInfoFromLocal(backupPath), "file://")
     } else if (storage.equals("s3")){
       val ak = mergedConfigs("ak")
       val sk = mergedConfigs("sk")
       val s3Client = S3Client.builder().region(Region.US_WEST_2).credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(ak, sk))).build()
-      (BackupUtil.GetBackupInfoFromS3(s3Client, bucketName, backupPath), "s3a://")
+      (BackupUtil.GetBackupInfoFromS3(s3Client, bucketName, backupPath+"/"), "s3a://")
     }else if(storage.equals("oss")){
       val ak = mergedConfigs("ak")
       val sk = mergedConfigs("sk")
       val region = mergedConfigs("region")
       val minioEndPoint = mergedConfigs("minio_endpoint")
       val credentialsProvider = CredentialsProviderFactory.newDefaultCredentialProvider(ak, sk)
-      val ossClient = OSSClientBuilder.create()
+      ossClient = OSSClientBuilder.create()
         .endpoint(minioEndPoint)
         .credentialsProvider(credentialsProvider)
         .region(region)
@@ -112,12 +114,12 @@ val defaultConfigs = Map(
       spark.sparkContext.hadoopConfiguration.set("fs.oss.accessKeyId", ak)
       spark.sparkContext.hadoopConfiguration.set("fs.oss.accessKeySecret", sk)
 
-      (BackupUtil.GetBackupInfoFromOSS(ossClient, bucketName, backupPath), "oss://")
+      (BackupUtil.GetBackupInfoFromOSS(ossClient, bucketName, backupPath+"/"), "oss://")
     } else { // minio
       val ak = mergedConfigs("ak")
       val sk = mergedConfigs("sk")
       val minioEndPoint = mergedConfigs("minio_endpoint")
-      val s3Client = S3Client.builder()
+      s3Client = S3Client.builder()
         .region(Region.AWS_GLOBAL)
         .endpointOverride(java.net.URI.create(minioEndPoint))
         .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(ak, sk)))
@@ -130,7 +132,7 @@ val defaultConfigs = Map(
       spark.sparkContext.hadoopConfiguration.set("fs.s3a.access.key", ak)
       spark.sparkContext.hadoopConfiguration.set("fs.s3a.secret.key", sk)
 
-      (BackupUtil.GetBackupInfoFromS3(s3Client, bucketName, backupPath), "s3a://")
+      (BackupUtil.GetBackupInfoFromS3(s3Client, bucketName, backupPath+"/"), "s3a://")
     }
 
     val collectionBackups = backupInfo.getCollectionBackupsList
@@ -153,12 +155,19 @@ val defaultConfigs = Map(
 
       val l0StartTime = System.currentTimeMillis()
       log.info("Collecting L0 data for filtering...")
-      
-      // collect l0 data paths of partition level
-      val partitionID2DF = getPartitionID2DF(segments, bucketName, backupPath, spark, pkField.getDataType)
 
-      // collect l0 data paths of collection level
-      val globalL0DF = getGlobalL0DF(coll, bucketName, backupPath, spark, pkField.getDataType)
+      var partitionID2DF: java.util.HashMap[Long, DataFrame] = null
+      var globalL0DF: DataFrame = null
+
+      if(fs.equals("file://")){
+        // collect l0 data paths of partition level
+        partitionID2DF = L0SegmentUtils.getPartitionID2DF(segments, bucketName, backupPath, spark, pkField.getDataType)
+        // collect l0 data paths of collection level
+        globalL0DF = L0SegmentUtils.getGlobalL0DF(coll, bucketName, backupPath, spark, pkField.getDataType)
+      }else if(fs.equals("oss://")){
+        partitionID2DF = L0SegmentUtils.getOSSPartitionID2DF(segments, bucketName, backupPath, spark, pkField.getDataType, ossClient)
+        globalL0DF = L0SegmentUtils.getOSSGlobalL0DF(coll, bucketName, backupPath, spark, pkField.getDataType, ossClient)
+      }
       
       val l0EndTime = System.currentTimeMillis()
       log.info(s"L0 data collection completed in ${(l0EndTime - l0StartTime)/1000} seconds")
@@ -344,76 +353,6 @@ val defaultConfigs = Map(
     }
   }
 
-  private def getGlobalL0DF(coll: Backup.CollectionBackupInfo,
-                            bucketName: String,
-                            backupPath: String,
-                            spark: SparkSession,
-                            pkType: milvus.proto.backup.Backup.DataType): DataFrame = {
-    val deltaPaths = new util.ArrayList[String]()
-
-    // Collect L0 delta log paths for the entire collection
-    coll.getL0SegmentsList().forEach { segment =>
-      val deltaDir = "%s/%s/binlogs/delta_log/%d/%d/%d/%d/*".format(
-        bucketName, backupPath,
-        segment.getCollectionId, segment.getPartitionId,
-        segment.getSegmentId, segment.getSegmentId
-      )
-      deltaPaths.addAll(DeltaLogUtils.expandGlobPattern(deltaDir))
-    }
-
-    // Create DataFrame from collected delta logs
-    if (deltaPaths.size() > 0) {
-      log.info(s"Global delta log file count: ${deltaPaths.size()}")
-      val globalL0DF = DeltaLogUtils.createDataFrame(deltaPaths, spark, getDataTypeFrom(pkType))
-      globalL0DF.show(10)
-      log.info(s"Finished reading global L0 segments, count: ${globalL0DF.count()}")
-      globalL0DF
-    } else {
-      log.info("No global L0 delta logs found.")
-      spark.emptyDataFrame
-    }
-  }
-
-  private def getPartitionID2DF(
-                         segments: mutable.Buffer[Backup.SegmentBackupInfo],
-                         bucketName: String,
-                         backupPath: String,
-                         spark: SparkSession,
-                         pkType: milvus.proto.backup.Backup.DataType
-                       ): util.HashMap[Long, DataFrame] = {
-
-    val partitionID2deltaPaths = new util.HashMap[Long, util.List[String]]()
-
-    // Iterate through all L0 segments and collect delta log file paths for each partition
-    segments.filter(_.getIsL0()).foreach { segment =>
-      log.info("found l0 segment and begin to add delta path")
-      val partitionId = segment.getPartitionId
-      val deltaDir = s"$bucketName/$backupPath/binlogs/delta_log/${segment.getCollectionId}/$partitionId/${segment.getSegmentId}/${segment.getSegmentId}/*"
-      val deltaPaths = partitionID2deltaPaths.getOrDefault(partitionId, new util.ArrayList[String]())
-      deltaPaths.addAll(DeltaLogUtils.expandGlobPattern(deltaDir))
-      log.info(s"added deltapath, deltaDir: ${deltaDir}, delpaths:${deltaPaths}")
-      partitionID2deltaPaths.put(partitionId, deltaPaths)
-    }
-
-    val partitionID2DF = new util.HashMap[Long, DataFrame]()
-
-    // Iterate through the collected delta log paths and create DataFrames
-    partitionID2deltaPaths.forEach { (partitionID, deltaPaths) =>
-      if (deltaPaths.size() > 0) { // Ensure there are valid delta log files
-        log.info(s"Partition $partitionID - delta log file count: ${deltaPaths.size()}")
-        val l0DF = DeltaLogUtils.createDataFrame(deltaPaths, spark, getDataTypeFrom(pkType))
-
-        // Ensure that the resulting DataFrame is not empty
-        if (!l0DF.isEmpty) {
-          partitionID2DF.put(partitionID, l0DF)
-          log.info(s"Finished reading partition $partitionID L0 segments, count: ${l0DF.count()}")
-        }
-      }
-    }
-
-    partitionID2DF
-  }
-
   private def applyDeltaLogs(insertDF: DataFrame,
                      segment: Backup.SegmentBackupInfo,
                      fs: String,
@@ -492,22 +431,6 @@ val defaultConfigs = Map(
 
     log.info(s"Successfully saved as Parquet: $outputPath with $count rows")
     count
-  }
-
-  private def getDataTypeFrom(dt: milvus.proto.backup.Backup.DataType): org.apache.spark.sql.types.DataType = {
-    dt match {
-      case milvus.proto.backup.Backup.DataType.Bool => org.apache.spark.sql.types.BooleanType
-      case milvus.proto.backup.Backup.DataType.Int8 => org.apache.spark.sql.types.ByteType
-      case milvus.proto.backup.Backup.DataType.Int16 => org.apache.spark.sql.types.ShortType
-      case milvus.proto.backup.Backup.DataType.Int32 => org.apache.spark.sql.types.IntegerType
-      case milvus.proto.backup.Backup.DataType.Int64 => org.apache.spark.sql.types.LongType
-      case milvus.proto.backup.Backup.DataType.Float => org.apache.spark.sql.types.FloatType
-      case milvus.proto.backup.Backup.DataType.Double => org.apache.spark.sql.types.DoubleType
-      case milvus.proto.backup.Backup.DataType.String | milvus.proto.backup.Backup.DataType.VarChar => org.apache.spark.sql.types.StringType
-      case milvus.proto.backup.Backup.DataType.BinaryVector => org.apache.spark.sql.types.BinaryType
-      case milvus.proto.backup.Backup.DataType.FloatVector => org.apache.spark.sql.types.ArrayType(org.apache.spark.sql.types.FloatType)
-      case _ => throw new IllegalArgumentException(s"Unsupported data type: $dt")
-    }
   }
 }
 

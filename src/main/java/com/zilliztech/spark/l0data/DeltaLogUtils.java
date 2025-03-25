@@ -1,5 +1,10 @@
 package com.zilliztech.spark.l0data;
 
+import com.aliyun.oss.OSS;
+import com.aliyun.oss.OSSClientBuilder;
+import com.aliyun.oss.model.ListObjectsRequest;
+import com.aliyun.oss.model.OSSObjectSummary;
+import com.aliyun.oss.model.ObjectListing;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.spark.api.java.JavaRDD;
@@ -405,6 +410,53 @@ public class DeltaLogUtils {
         }
         return matchingFiles;
     }
+
+    public static List<String> expandOssGlob(OSS ossClient, String ossGlob) {
+        String path = ossGlob.substring("oss://".length());
+        int slashIndex = path.indexOf('/');
+        if (slashIndex < 0) {
+            logger.warn("Invalid OSS glob: {}", ossGlob);
+            return Collections.emptyList();
+        }
+
+        String bucket = path.substring(0, slashIndex);
+        String keyPattern = path.substring(slashIndex + 1);
+        String prefix = keyPattern.split("[*?]", 2)[0];
+        String regex = keyPattern.replace(".", "\\.").replace("*", ".*").replace("?", ".");
+
+        logger.info("Expanding OSS glob. Bucket: {}, Prefix: {}, Regex: {}", bucket, prefix, regex);
+
+        List<String> matched = new ArrayList<>();
+        String nextMarker = null;
+        int totalListed = 0;
+
+        do {
+            ObjectListing listing = ossClient.listObjects(
+                    new ListObjectsRequest(bucket)
+                            .withPrefix(prefix)
+                            .withMarker(nextMarker)
+                            .withMaxKeys(1000)
+            );
+
+            List<OSSObjectSummary> summaries = listing.getObjectSummaries();
+            totalListed += summaries.size();
+            logger.info("Listed {} objects (total so far: {})", summaries.size(), totalListed);
+
+            for (OSSObjectSummary summary : summaries) {
+                String key = summary.getKey();
+                if (key.matches(regex)) {
+                    String fullPath = "oss://" + bucket + "/" + key;
+                    logger.debug("Matched object: {}", fullPath);
+                    matched.add(fullPath);
+                }
+            }
+
+            nextMarker = listing.getNextMarker();
+        } while (nextMarker != null);
+
+        logger.info("Glob expansion complete. Matched {} objects.", matched.size());
+        return matched;
+    }
     
     /**
      * Creates a new SparkSession for local processing.
@@ -431,12 +483,14 @@ public class DeltaLogUtils {
      * @throws IOException If an I/O error occurs
      */
     public static Dataset<Row> createDataFrame(List<String> filePaths, SparkSession spark, 
-                                             org.apache.spark.sql.types.DataType pkDataType) throws IOException {
+                                             org.apache.spark.sql.types.DataType pkDataType, Object fileClient) throws IOException {
         if (filePaths == null || filePaths.isEmpty()) {
             throw new IllegalArgumentException("File paths list cannot be empty");
         }
         
         logger.info("Processing {} delta log files in createDataFrame with pkType {}", filePaths.size(), pkDataType);
+
+        logger.info("files:{}", filePaths);
         
         // Define custom schema with provided primary key type
         StructType schema = DataTypes.createStructType(new StructField[] {
@@ -449,50 +503,51 @@ public class DeltaLogUtils {
         int totalProcessed = 0;
         
         for (String filePath : filePaths) {
-            try (DeltaLogReader reader = new DeltaLogReader(filePath)) {
-                List<DeltaData> deltaDataList = reader.readAll();
-                final AtomicInteger fileRowCount = new AtomicInteger(0);
-                
-                for (DeltaData deltaData : deltaDataList) {
-                    deltaData.range((pk, timestamp) -> {
-                        // Convert primary key to string representation
-                        String pkValue;
-                        if (pk instanceof Int64PrimaryKey) {
-                            pkValue = String.valueOf(pk.getValue());
-                        } else if (pk instanceof StringPrimaryKey) {
-                            pkValue = ((StringPrimaryKey) pk).getValue();
-                        } else {
-                            pkValue = pk.toString();
-                        }
-
-                        // Parse JSON primary key to extract its components
-                        Object[] parsedPk = parseJsonPk(pkValue);
-                        Object pk_id;
-                        if (pkDataType.equals(DataTypes.StringType)) {
-                            pk_id = parsedPk[0] != null ? parsedPk[0].toString() : null;
-                        } else {
-                            pk_id = parsedPk[0];
-                        }
-                        Long ts = (Long) parsedPk[1];
-
-                        // Use the JSON timestamp if available, otherwise use the event timestamp
-                        if (ts == null) {
-                            ts = timestamp;
-                        }
-                        
-                        // Create a Row with the primary key and timestamp
-                        allRows.add(RowFactory.create(pk_id, ts));
-                        fileRowCount.incrementAndGet();
-                        return true;
-                    });
-                }
-                
-                totalProcessed += fileRowCount.get();
-                logger.info("Processed {} rows from file: {}", fileRowCount.get(), new File(filePath).getName());
-            } catch (IOException e) {
-                logger.error("Error processing file {}: {}", filePath, e.getMessage());
-                throw e;
+            DeltaLogReader reader = null;
+            if(filePath.startsWith("oss")){
+                reader = new DeltaLogReader(filePath, (OSS) fileClient);
+            }else {
+                reader = new DeltaLogReader(filePath);
             }
+            List<DeltaData> deltaDataList = reader.readAll();
+            final AtomicInteger fileRowCount = new AtomicInteger(0);
+
+            for (DeltaData deltaData : deltaDataList) {
+                deltaData.range((pk, timestamp) -> {
+                    // Convert primary key to string representation
+                    String pkValue;
+                    if (pk instanceof Int64PrimaryKey) {
+                        pkValue = String.valueOf(pk.getValue());
+                    } else if (pk instanceof StringPrimaryKey) {
+                        pkValue = ((StringPrimaryKey) pk).getValue();
+                    } else {
+                        pkValue = pk.toString();
+                    }
+
+                    // Parse JSON primary key to extract its components
+                    Object[] parsedPk = parseJsonPk(pkValue);
+                    Object pk_id;
+                    if (pkDataType.equals(DataTypes.StringType)) {
+                        pk_id = parsedPk[0] != null ? parsedPk[0].toString() : null;
+                    } else {
+                        pk_id = parsedPk[0];
+                    }
+                    Long ts = (Long) parsedPk[1];
+
+                    // Use the JSON timestamp if available, otherwise use the event timestamp
+                    if (ts == null) {
+                        ts = timestamp;
+                    }
+
+                    // Create a Row with the primary key and timestamp
+                    allRows.add(RowFactory.create(pk_id, ts));
+                    fileRowCount.incrementAndGet();
+                    return true;
+                });
+            }
+
+            totalProcessed += fileRowCount.get();
+            logger.info("Processed {} rows from file: {}", fileRowCount.get(), new File(filePath).getName());
         }
 
 
@@ -523,6 +578,6 @@ public class DeltaLogUtils {
      * @throws IOException If an I/O error occurs
      */
     public static Dataset<Row> createDataFrame(List<String> filePaths, SparkSession spark) throws IOException {
-        return createDataFrame(filePaths, spark, DataTypes.LongType);
+        return createDataFrame(filePaths, spark, DataTypes.LongType, null);
     }
 } 
