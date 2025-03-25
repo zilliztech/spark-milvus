@@ -25,6 +25,8 @@
         <maven.release.plugin.version>2.5.3</maven.release.plugin.version>
         <maven.source.plugin.version>3.1.0</maven.source.plugin.version>
         <maven.javadoc.plugin.version>3.2.0</maven.javadoc.plugin.version>
+        <protobuf.version>3.24.0</protobuf.version>
+        <hadoop.version>3.3.6</hadoop.version>
     </properties>
 
     <dependencies>
@@ -55,6 +57,26 @@
                     <artifactId>protobuf-java</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+
+        <!-- Use a consistent version of Protobuf -->
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+            <version>${protobuf.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java-util</artifactId>
+            <version>${protobuf.version}</version>
+        </dependency>
+
+        <!-- Use a consistent version of Hadoop to avoid conflicts -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>${hadoop.version}</version>
         </dependency>
 
         <dependency>
