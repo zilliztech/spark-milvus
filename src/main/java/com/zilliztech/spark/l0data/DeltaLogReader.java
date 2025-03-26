@@ -1,12 +1,20 @@
 package com.zilliztech.spark.l0data;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+
+import com.aliyun.oss.OSS;
+import com.aliyun.oss.OSSClientBuilder;
+import com.aliyun.oss.model.OSSObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -56,6 +64,10 @@ public class DeltaLogReader implements AutoCloseable, Iterable<DeltaData> {
      */
     public DeltaLogReader(String filePath) throws IOException {
         this(new FileReadSeeker(filePath));
+    }
+
+    public DeltaLogReader(String filePath, OSS ossClient) throws IOException {
+        this(new FileReadSeeker(filePath, ossClient));
     }
     
     /**

@@ -1,5 +1,9 @@
 package com.zilliztech.spark.l0data;
 
+import com.aliyun.oss.OSS;
+import com.aliyun.oss.OSSClientBuilder;
+import com.aliyun.oss.model.OSSObject;
+
 import java.io.*;
 
 /**
@@ -16,6 +20,36 @@ public class FileReadSeeker implements ReadSeeker {
      */
     public FileReadSeeker(String filePath) throws IOException {
         this.file = new RandomAccessFile(filePath, "r");
+    }
+
+    public FileReadSeeker(String filePath, OSS oss) throws IOException {
+        this.file = openOssFile(filePath, oss);
+    }
+
+    private RandomAccessFile openOssFile(String ossPath, OSS ossClient) throws IOException {
+        String path = ossPath.substring("oss://".length());
+        int slashIndex = path.indexOf('/');
+        if (slashIndex < 0) throw new IllegalArgumentException("Invalid OSS path");
+
+        String bucket = path.substring(0, slashIndex);
+        String key = path.substring(slashIndex + 1);
+
+        File temp = File.createTempFile("oss-", ".tmp");
+        temp.deleteOnExit();
+
+        try (OSSObject ossObject = ossClient.getObject(bucket, key);
+             InputStream in = ossObject.getObjectContent();
+             FileOutputStream out = new FileOutputStream(temp)) {
+            byte[] buffer = new byte[8192];
+            int len;
+            while ((len = in.read(buffer)) != -1) {
+                out.write(buffer, 0, len);
+            }
+        } finally {
+            ossClient.shutdown();
+        }
+
+        return new RandomAccessFile(temp, "r");
     }
 
     /**

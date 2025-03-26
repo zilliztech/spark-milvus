@@ -35,7 +35,7 @@
             <artifactId>spark-milvus</artifactId>
             <version>1.0.0-SNAPSHOT</version>
             <scope>system</scope>
-            <systemPath>/home/zilliz/Repo/spark-milvus/target/spark-milvus-1.0.0-SNAPSHOT.jar</systemPath>
+            <systemPath>/Users/zilliz/Documents/GitHub/spark-milvus/target/spark-milvus-1.0.0-SNAPSHOT.jar</systemPath>
         </dependency>
 
         <dependency>
@@ -43,7 +43,18 @@
             <artifactId>milvus-sdk-java</artifactId>
             <version>2.5.4-SNAPSHOT-2</version>
             <scope>system</scope>
-            <systemPath>/home/zilliz/Repo/milvus-sdk-java/sdk-core/target/milvus-sdk-java-new-shaded-2.5.4.jar</systemPath>
+            <systemPath>/Users/zilliz/Documents/GitHub/spark-milvus/lib/milvus-sdk-java-shaded-2.4.10.jar</systemPath>
+        </dependency>
+
+        <dependency>
+            <groupId>com.aliyun.oss</groupId>
+            <artifactId>aliyun-sdk-oss</artifactId>
+            <version>3.15.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-aliyun</artifactId>
+            <version>${hadoop.version}</version>
         </dependency>
 
         <!-- https://mvnrepository.com/artifact/com.mysql/mysql-connector-j -->
