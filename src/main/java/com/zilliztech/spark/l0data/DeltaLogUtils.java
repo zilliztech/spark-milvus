@@ -444,6 +444,11 @@ public class DeltaLogUtils {
 
             for (OSSObjectSummary summary : summaries) {
                 String key = summary.getKey();
+                // Skip system files (e.g., .DS_Store or keys ending with '/')
+                if (key.endsWith("/") || key.contains("/.") || key.endsWith(".DS_Store")) {
+                    logger.debug("Skipping non-data object: {}", key);
+                    continue;
+                }
                 if (key.matches(regex)) {
                     String fullPath = "oss://" + bucket + "/" + key;
                     logger.debug("Matched object: {}", fullPath);

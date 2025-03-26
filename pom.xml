@@ -99,7 +99,7 @@
             <!-- <version>2.5.4-shaded-SNAPSHOT</version> -->
             <version>2.5.4-SNAPSHOT-2</version>
             <scope>system</scope>
-            <systemPath>/Users/zilliz/workspace/dev/milvus-sdk-java/target/milvus-sdk-java-shaded-2.4.10.jar</systemPath>
+            <systemPath>/Users/zilliz/Documents/GitHub/spark-milvus/lib/milvus-sdk-java-shaded-2.4.10.jar</systemPath>
             <exclusions>
                 <exclusion>
                     <groupId>com.fasterxml.jackson.core</groupId>

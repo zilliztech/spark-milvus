@@ -11,14 +11,15 @@ object BackupProcess {
 
     val defaultConfigs = Map(
       "storage" -> "oss",
-      "bucket" -> "vts-data",
-      "backup_path" -> "newBackup/",
-      "minio_endpoint" -> "https://oss-cn-shanghai.aliyuncs.com",
-      "region" -> "cn-shanghai",
+      "bucket" -> "backup-zilliz",
+      "backup_path" -> "backup",
+      "minio_endpoint" -> "https://oss-cn-hangzhou.aliyuncs.com",
+      "region" -> "cn-hangzhou",
       "ak" -> "",
       "sk" -> "",
-      "backup_collection" -> "test_col_lxelwhu",
-      "backup_database" -> "test_db"
+      "backup_collection" -> "binlog",
+      "backup_database" -> "default",
+      "parallelism" -> "4",          // Number of parallel segment conversions
     )
 
     val backupDF = BackupFileUtils.processBackup(spark, defaultConfigs)
@@ -26,11 +27,11 @@ object BackupProcess {
 
     import spark.implicits._
     val ossDF = Seq(
-      (1, "Alice", 55, 58.10, "Shanghai"),
-      (2, "David", 53, 80.03, "Shanghai"),
-      (3, "David", 46, 79.44, "Shenzhen"),
-      (4, "David", 41, 50.37, "Guangzhou"),
-      (5, "Charlie", 35, 69.56, "Shanghai")
+      (50, "Alice", 55, 58.10, "Shanghai"),
+      (51, "David", 53, 80.03, "Shanghai"),
+      (52, "David", 46, 79.44, "Shenzhen"),
+      (53, "David", 41, 50.37, "Guangzhou"),
+      (54, "Charlie", 35, 69.56, "Shanghai")
     ).toDF("id", "name", "age", "score", "city")
 
     val finalDF = backupDF.join(ossDF, Seq("id"), "left")
@@ -49,6 +50,7 @@ object BackupProcess {
       .mode(SaveMode.Overwrite)
       .save(outputPath)
     log.info(s"Successfully saved as Parquet: $outputPath")
+    log.info(s"Total rows:${finalDF.count()}")
     finalDF.show(10) // Display the final aggregated DataFrame
 
   }

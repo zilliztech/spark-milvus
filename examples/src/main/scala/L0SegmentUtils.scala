@@ -24,7 +24,7 @@ object L0SegmentUtils {
       segments.filter(_.getIsL0()).foreach { segment =>
         log.info("found l0 segment and begin to add delta path in oss")
         val partitionId = segment.getPartitionId
-        val deltaDir = s"oss://$bucketName/$backupPath/binlogs/delta_log/${segment.getCollectionId}/$partitionId/${segment.getSegmentId}/${segment.getSegmentId}/*"
+        val deltaDir = s"oss://$bucketName/$backupPath/binlogs/delta_log/${segment.getCollectionId}/$partitionId/${segment.getSegmentId}/*"
         val deltaPaths = partitionID2deltaPaths.getOrDefault(partitionId, new util.ArrayList[String]())
         deltaPaths.addAll(DeltaLogUtils.expandOssGlob(ossClient, deltaDir))
         partitionID2deltaPaths.put(partitionId, deltaPaths)
@@ -63,7 +63,7 @@ object L0SegmentUtils {
     segments.filter(_.getIsL0()).foreach { segment =>
       log.info("found l0 segment and begin to add delta path")
       val partitionId = segment.getPartitionId
-      val deltaDir = s"$bucketName/$backupPath/binlogs/delta_log/${segment.getCollectionId}/$partitionId/${segment.getSegmentId}/${segment.getSegmentId}/*"
+      val deltaDir = s"$bucketName/$backupPath/binlogs/delta_log/${segment.getCollectionId}/$partitionId/${segment.getSegmentId}/*"
       val deltaPaths = partitionID2deltaPaths.getOrDefault(partitionId, new util.ArrayList[String]())
       //deltaPaths.addAll(DeltaLogUtils.expandGlobPattern(client, deltaDir))
       deltaPaths.addAll(DeltaLogUtils.expandGlobPattern(deltaDir))
@@ -100,10 +100,10 @@ object L0SegmentUtils {
 
     // Collect L0 delta log paths for the entire collection
     coll.getL0SegmentsList().forEach { segment =>
-      val deltaDir = "%s/%s/binlogs/delta_log/%d/%d/%d/%d/*".format(
+      val deltaDir = "%s/%s/binlogs/delta_log/%d/%d/%d/*".format(
         bucketName, backupPath,
         segment.getCollectionId, segment.getPartitionId,
-        segment.getSegmentId, segment.getSegmentId
+        segment.getSegmentId
       )
       deltaPaths.addAll(DeltaLogUtils.expandGlobPattern(deltaDir))
     }
@@ -131,10 +131,10 @@ object L0SegmentUtils {
 
     // Collect L0 delta log paths for the entire collection
     coll.getL0SegmentsList().forEach { segment =>
-      val deltaDir = "oss://%s/%s/binlogs/delta_log/%d/%d/%d/%d/*".format(
+      val deltaDir = "oss://%s/%s/binlogs/delta_log/%d/%d/%d/*".format(
         bucketName, backupPath,
         segment.getCollectionId, segment.getPartitionId,
-        segment.getSegmentId, segment.getSegmentId
+        segment.getSegmentId
       )
       deltaPaths.addAll(DeltaLogUtils.expandOssGlob(ossClient, deltaDir))
     }
