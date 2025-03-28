@@ -45,6 +45,19 @@ object QuickStart extends App {
     .option("milvus.collection.vectorField", "embeddings")
     .option("milvus.collection.vectorDim", "32")
     .option("milvus.collection.primaryKeyField", "id")
+
+    // tls enabled
+    // .option("milvus.secure", "true") \
+    // .option("milvus.secure.serverName", "localhost") \
+    // .option("milvus.secure.serverPemPath", "path/to/server.pem") \
+
+
+    // mTLS enabled
+    // .option("milvus.secure", "true") \
+    // .option("milvus.secure.serverName", "hostname") \
+    // .option("milvus.secure.caCert", "path/ca.pem") \
+    // .option("milvus.secure.clientCert", "/path/client.pem") \  
+    // .option("milvus.secure.clientKey", "/path/client.key") \ 
     .mode(SaveMode.Append)
     .save()
 }

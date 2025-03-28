@@ -14,6 +14,18 @@ sample_df = spark.sparkContext.parallelize(data).toDF(columns)
 # .option("milvus.uri", "https://localhost:19530") \
 # .option("milvus.token", "root:Milvus") \
 
+# tls enabled
+# .option("milvus.secure", "true") \
+# .option("milvus.secure.serverName", "servername") \
+# .option("milvus.secure.serverPemPath", "path/to/server.pem") \
+
+# mTLS enabled
+# .option("milvus.secure", "true") \
+# .option("milvus.secure.serverName", "hostname") \
+# .option("milvus.secure.caCert", "path/ca.pem") \
+# .option("milvus.secure.clientCert", "/path/client.pem") \  
+# .option("milvus.secure.clientKey", "/path/client.key") \ 
+
 sample_df.write \
     .mode("append") \
     .option("milvus.host", "localhost") \
