@@ -35,12 +35,17 @@ object MilvusOptions {
   val MILVUS_DATABASE_NAME = "milvus.database.name"
   val MILVUS_COLLECTION_NAME = "milvus.collection.name"
   val MILVUS_PARTITION_NAME = "milvus.partition.name"
+  val MILVUS_COLLECTION_ID = "milvus.collection.id"
+  val MILVUS_PARTITION_ID = "milvus.partition.id"
+  val MILVUS_SEGMENT_IDS = "milvus.segment.ids"
+  val MILVUS_PKS = "milvus.pks"
 
   // configs of collection schema, only used in automatic creating collection when writing
   val MILVUS_COLLECTION_PRIMARY_KEY = "milvus.collection.primaryKeyField"
   val MILVUS_COLLECTION_VECTOR_FIELD = "milvus.collection.vectorField"
   val MILVUS_COLLECTION_VECTOR_DIM = "milvus.collection.vectorDim"
   val MILVUS_COLLECTION_AUTOID = "milvus.collection.autoID"
+  val MILVUS_COLLECTION_ONLY_PRIMARY_FIELD = "milvus.collection.onlyPrimaryField"
 
   // configs for zilliz cloud
   val ZILLIZCLOUD_REGION = "zillizcloud.region"
@@ -91,11 +96,16 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   val databaseName: String = config.getOrDefault(MILVUS_DATABASE_NAME, if (isZillizCloud()) { "" } else {"default"})
   val collectionName: String = config.getOrDefault(MILVUS_COLLECTION_NAME, "")
   val partitionName: String = config.getOrDefault(MILVUS_PARTITION_NAME, "")
+  val collectionID: String = config.getOrDefault(MILVUS_COLLECTION_ID, "")
+  val partitionID: String = config.getOrDefault(MILVUS_PARTITION_ID, "")
+  val segmentIDs: String = config.getOrDefault(MILVUS_SEGMENT_IDS, "")
+  val pks: String = config.getOrDefault(MILVUS_PKS, "")
 
   val primaryKeyField: String = config.getOrDefault(MILVUS_COLLECTION_PRIMARY_KEY, "")
   val vectorField: String = config.getOrDefault(MILVUS_COLLECTION_VECTOR_FIELD, "")
   val vectorDim: Int = config.getInt(MILVUS_COLLECTION_VECTOR_DIM, 32)
   val isAutoID: Boolean = config.getBoolean(MILVUS_COLLECTION_AUTOID, false)
+  val onlyPrimaryField: Boolean = config.getBoolean(MILVUS_COLLECTION_ONLY_PRIMARY_FIELD, false) 
 
   // insert option
   val maxBatchSize: Int = config.getInt(MILVUS_INSERT_MAX_BATCHSIZE, 200)

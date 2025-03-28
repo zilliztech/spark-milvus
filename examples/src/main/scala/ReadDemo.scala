@@ -6,37 +6,26 @@ import zilliztech.spark.milvus.{MilvusOptions, MilvusUtils}
 
 import scala.collection.JavaConverters._;
 
+// NOTE: This is a demo code to read data from Milvus collection and show it in Spark DataFrame.
+// If you want to run this code, please set the REPO_PATH environment variable to the path of your local repository, which is the parent directory of the spark-milvus directory.
+// For example, if your spark-milvus directory is /home/user/spark-milvus, set REPO_PATH=/home/user
 object ReadDemo extends App {
 
   val sparkConf = new SparkConf().setMaster("local")
   val spark = SparkSession.builder().config(sparkConf).getOrCreate()
 
-  val host = "localhost"
-  val port = 19530
-  val user = "root"
-  val password = "Milvus"
-  val fs = "s3a://"
-  val bucketName = "a-bucket"
-  val rootPath = "files"
-  val minioAK = "minioadmin"
-  val minioSK = "minioadmin"
-  val minioEndpoint = "localhost:9000"
-  val collectionName = "hello_spark_milvus"
-
-  val properties = Map(
-    MilvusOptions.MILVUS_HOST -> host,
-    MilvusOptions.MILVUS_PORT -> port.toString,
-    MilvusOptions.MILVUS_COLLECTION_NAME -> collectionName,
-    MilvusOptions.MILVUS_BUCKET -> bucketName,
-    MilvusOptions.MILVUS_ROOTPATH -> rootPath,
-    MilvusOptions.MILVUS_FS -> fs,
-    MilvusOptions.MILVUS_STORAGE_ENDPOINT -> minioEndpoint,
-    MilvusOptions.MILVUS_STORAGE_USER -> minioAK,
-    MilvusOptions.MILVUS_STORAGE_PASSWORD -> minioSK,
-  )
-
-  // 1, configurations
-  val milvusOptions = new MilvusOptions(new CaseInsensitiveStringMap(properties.asJava))
+  import scala.io.Source
+  import scala.util.Try
+  val filePath = sys.env.getOrElse("REPO_PATH", "") + "/spark-milvus/examples/read_demo_milvus.properties"
+  val configMap: Map[String, String] = Try {
+    Source.fromFile(filePath).getLines()
+      .filter(line => line.trim.nonEmpty && !line.trim.startsWith("#"))
+      .map { line =>
+        val parts = line.split("=", 2).map(_.trim)
+        parts(0) -> parts.lift(1).getOrElse("")
+      }.toMap
+  }.getOrElse(Map.empty)
+  val milvusOptions = new MilvusOptions(new CaseInsensitiveStringMap(configMap.asJava))
 
   // 2, batch read milvus collection data to dataframe
   val collectionDF = MilvusUtils.readMilvusCollection(spark, milvusOptions)

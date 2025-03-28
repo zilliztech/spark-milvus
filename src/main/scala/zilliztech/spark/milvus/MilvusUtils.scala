@@ -29,7 +29,7 @@ object MilvusUtils {
     spark.sparkContext.hadoopConfiguration.set("fs.s3a.endpoint", s"${milvusOptions.storageEndpoint}")
     spark.sparkContext.hadoopConfiguration.set("fs.s3a.path.style.access", "true")
     spark.sparkContext.hadoopConfiguration.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    spark.sparkContext.hadoopConfiguration.set("fs.s3a.connection.ssl.enabled", "false")
+    spark.sparkContext.hadoopConfiguration.set("fs.s3a.connection.ssl.enabled", milvusOptions.storageUseSSL)
     spark.sparkContext.hadoopConfiguration.set("fs.s3a.access.key", milvusOptions.storageUser)
     spark.sparkContext.hadoopConfiguration.set("fs.s3a.secret.key", milvusOptions.storagePassword)
     val fsConf = spark.sparkContext.hadoopConfiguration
@@ -56,20 +56,39 @@ object MilvusUtils {
 
     // should call flush first, if you want to read growing segments
 
-    // get segments
-    val getPersistentSegmentInfoParam: GetPersistentSegmentInfoParam = GetPersistentSegmentInfoParam.newBuilder
-      .withCollectionName(milvusOptions.collectionName)
-      .build
-    val getPersistentSegmentInfoResp: R[GetPersistentSegmentInfoResponse] = milvusClient.getPersistentSegmentInfo(getPersistentSegmentInfoParam)
-    val segments: util.List[PersistentSegmentInfo] = getPersistentSegmentInfoResp.getData.getInfosList
+    val segments = new util.ArrayList[PersistentSegmentInfo]()
+    if (milvusOptions.collectionID.isEmpty) {
+        // get segments
+      val getPersistentSegmentInfoParam = GetPersistentSegmentInfoParam.newBuilder
+        .withCollectionName(milvusOptions.collectionName)
+        .build
+      val getPersistentSegmentInfoResp = milvusClient.getPersistentSegmentInfo(getPersistentSegmentInfoParam)
+      val allSegments = getPersistentSegmentInfoResp.getData.getInfosList
+      allSegments.asScala.foreach { segment =>
+        segments.add(segment)
+      }
+    } else {
+      milvusOptions.segmentIDs.split(",").foreach { segmentId =>
+      val newSegment = PersistentSegmentInfo.newBuilder()
+          .setSegmentID(segmentId.toLong)
+          .setCollectionID(milvusOptions.collectionID.toLong)
+          .setPartitionID(milvusOptions.partitionID.toLong)
+          .build()
+        segments.add(newSegment)
+      }
+    }
 
-    val fieldIDs = Array(0L, 1L) ++ collection.getSchema.getFieldsList.map(field => field.getFieldID)
     val fieldDict = collection.getSchema.getFieldsList.map(field => (field.getFieldID, field.getName)).toMap
     val pkField = collection.getSchema.getFieldsList.filter(field => field.getIsPrimaryKey).toArray.apply(0)
     val pkFieldName = pkField.getName
     val vecFeilds = collection.getSchema.getFieldsList.filter(field =>
       Seq(DataType.BinaryVector.getNumber, DataType.FloatVector.getNumber).contains(field.getDataType.getNumber)
     ).map(field => field.getFieldID)
+    val fieldIDs = if (milvusOptions.onlyPrimaryField) {
+      Array(1L, pkField.getFieldID)
+    } else {
+      Array(0L, 1L) ++ collection.getSchema.getFieldsList.map(field => field.getFieldID)
+    }
 
     val parseVectorFunc = udf(MilvusBinlogUtil.littleEndianBinaryToFloatArray(_: Array[Byte]): Array[Float])
 
@@ -77,10 +96,12 @@ object MilvusUtils {
     val milvusRowId = "milvus_rowid"
     val milvusTs = "milvus_ts"
     val segmentRowId = "segment_rowid"
+    import scala.collection.JavaConverters._
+    log.info("All segment IDs: " + segments.asScala.map(_.getSegmentID).mkString(", "))
     val segmentDfs = segments.map(segment => {
       val dfs = fieldIDs.map(fieldID => {
         val insertPath = "%s%s/%s/insert_log/%d/%d/%d/%d".format(milvusOptions.fs, milvusOptions.bucket, milvusOptions.rootPath, segment.getCollectionID, segment.getPartitionID, segment.getSegmentID, fieldID)
-
+        
         val fieldName = if (fieldID == 0) {
           milvusRowId
         } else if (fieldID == 1) {
@@ -88,28 +109,61 @@ object MilvusUtils {
         } else {
           fieldDict(fieldID)
         }
-        val fieldColumn = spark.read.format("milvusbinlog").load(insertPath)
-          .withColumnRenamed(fieldID.toString(), fieldName)
-          .withColumn(segmentRowId, monotonically_increasing_id())
 
-        if (vecFeilds.contains(fieldID)) {
-          fieldColumn.withColumn(fieldName, parseVectorFunc(fieldColumn(fieldName)))
+        val insertPathUri = new Path(insertPath)
+        if (fileSystem.exists(insertPathUri)) {
+          val fileStatuses = fileSystem.listStatus(insertPathUri)
+          fileStatuses.foreach(fs => log.info(s"Found file: ${fs.getPath.toString}"))
+
+          val fieldColumn = spark.read.format("milvusbinlog").load(insertPath)
+            .withColumnRenamed(fieldID.toString(), fieldName)
+            .withColumn(segmentRowId, monotonically_increasing_id())
+
+          if (vecFeilds.contains(fieldID)) {
+            fieldColumn.withColumn(fieldName, parseVectorFunc(fieldColumn(fieldName)))
+          } else {
+            fieldColumn
+          }
         } else {
-          fieldColumn
+          log.warn(s"Path $insertPath does not exist in S3.")
+          import org.apache.spark.sql.Row
+          import org.apache.spark.sql.types.{LongType, StringType, StructType}
+
+          spark.createDataFrame(spark.sparkContext.emptyRDD[Row],
+            new StructType()
+              .add(fieldName, StringType)
+              .add(segmentRowId, LongType))
         }
       })
       val insertDF = dfs.reduce { (leftDF, rightDF) =>
         leftDF.join(rightDF, segmentRowId)
       }
+      import org.apache.spark.sql.functions.lit
+      val insertDFUpdated = insertDF.withColumn("segment_id", lit(segment.getSegmentID))
+        .withColumn("op_type", lit("insert"))
 
       val deltaPath = "%s%s/%s/delta_log/%d/%d/%d".format(milvusOptions.fs, milvusOptions.bucket, milvusOptions.rootPath, segment.getCollectionID, segment.getPartitionID, segment.getSegmentID)
       val path = new Path(deltaPath)
       val segmentDF = if (fileSystem.exists(path)) {
         val delta = spark.read.format("milvusbinlog").load(deltaPath)
         val deltaDF = delta.select(json_tuple(delta.col("val"), "pk", "ts"))
-        // deltaDF("c0") is pk column
-        val compactedDF = insertDF.join(deltaDF, insertDF(pkFieldName) === deltaDF("c0"), "left_anti")
-        compactedDF
+        import org.apache.spark.sql.functions.lit
+
+        if (milvusOptions.onlyPrimaryField) {
+          val updatedDeltaDF = deltaDF
+                .withColumnRenamed("c0", pkFieldName)
+                .withColumnRenamed("c1", milvusTs)
+                .withColumn("segment_id", lit(segment.getSegmentID))
+                .withColumn("op_type", lit("delete"))
+                .withColumn(segmentRowId, monotonically_increasing_id())
+          updatedDeltaDF.columns.foreach(println)
+          val mergedDF = insertDFUpdated.unionByName(updatedDeltaDF)
+          mergedDF
+        } else {
+          // deltaDF("c0") is pk column
+          val compactedDF = insertDF.join(deltaDF, insertDF(pkFieldName) === deltaDF("c0"), "left_anti")
+          compactedDF
+        }
       } else {
         insertDF
       }
@@ -119,7 +173,17 @@ object MilvusUtils {
       leftDF.union(rightDF)
     }
     milvusClient.close()
-    collectionDF.drop(milvusRowId, milvusTs).drop(segmentRowId)
+    import org.apache.spark.sql.functions.col
+    val filteredDF = if (milvusOptions.pks.nonEmpty) {
+      collectionDF.filter(col(pkFieldName).isin(milvusOptions.pks.split(","): _*))
+    } else {
+      collectionDF
+    }
+    if (milvusOptions.onlyPrimaryField) {
+      filteredDF.drop(milvusRowId, segmentRowId)
+    } else {
+      filteredDF.drop(milvusRowId, milvusTs, segmentRowId)
+    }
   }
 
   private def extractPathWithoutBucket(s3Path: String): String = {
