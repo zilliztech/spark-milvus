@@ -19,6 +19,7 @@ object MilvusConnection {
         .withPort(milvusOptions.port)
         .withAuthorization(milvusOptions.userName, milvusOptions.password)
         .withDatabaseName(milvusOptions.databaseName)
+        .withSecure(milvusOptions.secure)
 
       if (milvusOptions.secure) {
         if (milvusOptions.serverPemPath.nonEmpty) {
@@ -31,11 +32,7 @@ object MilvusConnection {
             .withCaPemPath(milvusOptions.caCert)
             .withClientKeyPath(milvusOptions.clientKey)
             .withClientPemPath(milvusOptions.clientCert)
-        } else {
-          throw new IllegalArgumentException(
-            "Secure connection requires either serverPemPath (for TLS) OR caCert, clientCert, and clientKey (for mTLS)."
-          )
-        }
+        } 
       }
       
       builder.build
@@ -44,6 +41,7 @@ object MilvusConnection {
       val builder = ConnectParam.newBuilder
         .withUri(milvusOptions.uri)
         .withToken(milvusOptions.token)
+        .withSecure(milvusOptions.secure)
       
       if (milvusOptions.secure) {
         if (milvusOptions.serverPemPath.nonEmpty) {

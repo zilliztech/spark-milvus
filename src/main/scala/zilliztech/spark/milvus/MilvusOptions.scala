@@ -69,9 +69,10 @@ class MilvusOptions(config: CaseInsensitiveStringMap) extends Serializable {
   val caCert: String = config.getOrDefault(MILVUS_CA_CERT, "")
   val clientKey: String = config.getOrDefault(MILVUS_CLIENT_KEY, "")
   val clientCert: String = config.getOrDefault(MILVUS_CLIENT_CERT, "")
-  if (secure && serverPemPath.isEmpty && (caCert.isEmpty || clientCert.isEmpty || clientKey.isEmpty)) {
-    throw new IllegalArgumentException("Secure connection requires either serverPemPath (for TLS) OR all three: caCert, clientCert, and clientKey (for mTLS).")
-  }
+  if ((caCert.nonEmpty || clientCert.nonEmpty || clientKey.nonEmpty) &&
+    !(caCert.nonEmpty && clientCert.nonEmpty && clientKey.nonEmpty)) {
+  throw new IllegalArgumentException("mTLS requires all three: caCert, clientCert, and clientKey.")
+}
 
   // zilliz cloud
   val zillizCloudRegion: String = config.getOrDefault(ZILLIZCLOUD_REGION, "")
