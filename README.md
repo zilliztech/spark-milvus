@@ -244,4 +244,4 @@ Feel free to create an issue if you meet any problem in using spark-milvus.
 Go to [Milvus discord](https://discord.com/channels/1160323594396635310) to discuss, raise questions, share thoughts with other users and developers.
 
 ## License
-spark-milvus is licensed under the Apache License, Version 2.0.
+spark-milvus is licensed under the Server Side Public License v1 (SSPLv1) and the GNU Affero General Public License v3 (AGPLv3).
