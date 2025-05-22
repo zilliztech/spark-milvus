@@ -159,3 +159,5 @@ clustering-service/
 .vscode
 .bloop
 .metals
+.bw_config
+*.log

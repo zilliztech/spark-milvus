@@ -21,7 +21,7 @@ The Spark Milvus Connector provides seamless integration between Apache Spark an
 # make the shade milvus-sdk package
 git clone https://github.com/milvus-io/milvus-sdk-java.git
 # apply the pom.xml diff
-# https://github.com/SimFG/milvus-sdk-java
+# https://github.com/SimFG/milvus-sdk-java/tree/master-build-expr
 cd milvus-sdk-java
 mvn clean package -DskipTests
 
