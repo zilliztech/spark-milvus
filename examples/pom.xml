@@ -29,6 +29,19 @@
         <hadoop.version>3.3.6</hadoop.version>
     </properties>
 
+    <repositories>
+        <repository>
+            <id>oss.sonatype.org-snapshot</id>
+            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
+            <snapshots>
+                <enabled>true</enabled>
+            </snapshots>
+        </repository>
+    </repositories>
+
     <dependencies>
         <dependency>
             <groupId>zilliztech</groupId>
@@ -41,9 +54,8 @@
         <dependency>
             <groupId>io.milvus</groupId>
             <artifactId>milvus-sdk-java</artifactId>
-            <version>2.5.4-SNAPSHOT-2</version>
-            <scope>system</scope>
-            <systemPath>/Users/zilliz/Documents/GitHub/spark-milvus/lib/milvus-sdk-java-shaded-2.4.10.jar</systemPath>
+            <version>2.5.10-SNAPSHOT</version>
+            <classifier>shaded</classifier>
         </dependency>
 
         <dependency>
