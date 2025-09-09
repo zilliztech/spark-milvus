@@ -1,0 +1,13 @@
+/.bsp/
+target/
+.meta/
+.vscode/
+.idea/
+.bloop/
+.metals/
+project/.bloop
+project/project
+project/target
+.DS_Store
+note.md
+build/

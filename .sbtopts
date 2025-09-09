@@ -1,0 +1,5 @@
+-J-Xss64m
+-J-Xmx16G
+-J-XX:+UseG1GC
+-J-XX:MaxMetaspaceSize=1024m
+-Dsbt.concurrent.restrict=false
