@@ -1,7 +1,0 @@
-filters:
-  ".*":
-    reviewers:
-      - maintainers
-      - zhikunyao
-    approvers:
-      - maintainers
