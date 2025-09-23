@@ -261,7 +261,13 @@ test: package
 # Run demo using sbt with custom task
 run-demo:
 	@echo "$(BLUE)Running Milvus Storage JNI demo using sbt custom task...$(NC)"
-	@$(SBT) "runMain com.zilliz.spark.connector.jni.MilvusStorageJNI"
+	@if [ -f "milvus-storage/cpp/build/Release/libmilvus-storage.so" ]; then \
+		echo "$(YELLOW)Using LD_PRELOAD to preload milvus-storage library...$(NC)"; \
+		LD_PRELOAD="$(PWD)/milvus-storage/cpp/build/Release/libmilvus-storage.so" $(SBT) "runMain com.zilliz.spark.connector.jni.MilvusStorageJNI"; \
+	else \
+		echo "$(YELLOW)milvus-storage library not found, running without preload...$(NC)"; \
+		$(SBT) "runMain com.zilliz.spark.connector.jni.MilvusStorageJNI"; \
+	fi
 
 # Install library to system
 install: compile-native

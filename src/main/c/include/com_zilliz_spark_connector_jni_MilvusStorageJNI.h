@@ -8,69 +8,152 @@
 extern "C" {
 #endif
 
-/*
- * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
- * Method:    createSpace
- * Signature: (Ljava/lang/String;Ljava/lang/String;)J
- */
-JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_createSpace
-  (JNIEnv *, jclass, jstring, jstring);
+
+// ==================== Reader C API Methods ====================
 
 /*
  * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
- * Method:    writeData
- * Signature: (JLjava/lang/String;)Z
+ * Method:    readPropertiesDefault
+ * Signature: ()J
  */
-JNIEXPORT jboolean JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_writeData
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readPropertiesDefault
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    readPropertiesCreate
+ * Signature: ([Ljava/lang/String;[Ljava/lang/String;)J
+ */
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readPropertiesCreate
+  (JNIEnv *, jclass, jobjectArray, jobjectArray);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    readPropertiesGet
+ * Signature: (JLjava/lang/String;)Ljava/lang/String;
+ */
+JNIEXPORT jstring JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readPropertiesGet
   (JNIEnv *, jclass, jlong, jstring);
 
 /*
  * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
- * Method:    readData
- * Signature: (J[Ljava/lang/String;)Ljava/lang/String;
+ * Method:    readPropertiesFree
+ * Signature: (J)V
  */
-JNIEXPORT jstring JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readData
-  (JNIEnv *, jclass, jlong, jobjectArray);
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readPropertiesFree
+  (JNIEnv *, jclass, jlong);
 
 /*
  * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
- * Method:    readDataWithFilter
- * Signature: (J[Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+ * Method:    getChunkIndices
+ * Signature: (J[J)[J
  */
-JNIEXPORT jstring JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readDataWithFilter
-  (JNIEnv *, jclass, jlong, jobjectArray, jstring);
+JNIEXPORT jlongArray JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getChunkIndices
+  (JNIEnv *, jclass, jlong, jlongArray);
 
 /*
  * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
- * Method:    getSpaceVersion
+ * Method:    getChunk
+ * Signature: (JJ)J
+ */
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getChunk
+  (JNIEnv *, jclass, jlong, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    getChunks
+ * Signature: (J[JJ)[J
+ */
+JNIEXPORT jlongArray JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getChunks
+  (JNIEnv *, jclass, jlong, jlongArray, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    chunkReaderDestroy
+ * Signature: (J)V
+ */
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_chunkReaderDestroy
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    readerNew
+ * Signature: (JLjava/lang/String;J[Ljava/lang/String;J)J
+ */
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readerNew
+  (JNIEnv *, jclass, jlong, jstring, jlong, jobjectArray, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    getRecordBatchReader
+ * Signature: (JLjava/lang/String;JJ)J
+ */
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getRecordBatchReader
+  (JNIEnv *, jclass, jlong, jstring, jlong, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    getChunkReader
+ * Signature: (JJ)J
+ */
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getChunkReader
+  (JNIEnv *, jclass, jlong, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    take
+ * Signature: (J[JJ)J
+ */
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_take
+  (JNIEnv *, jclass, jlong, jlongArray, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    readerDestroy
+ * Signature: (J)V
+ */
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readerDestroy
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    releaseArrowArray
+ * Signature: (J)V
+ */
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_releaseArrowArray
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    releaseArrowSchema
+ * Signature: (J)V
+ */
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_releaseArrowSchema
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    releaseArrowArrayStream
+ * Signature: (J)V
+ */
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_releaseArrowArrayStream
+  (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
+ * Method:    getArrowArrayLength
  * Signature: (J)J
  */
-JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getSpaceVersion
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getArrowArrayLength
   (JNIEnv *, jclass, jlong);
 
 /*
  * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
- * Method:    getStorageSize
- * Signature: (Ljava/lang/String;)J
+ * Method:    getArrowArrayNumChildren
+ * Signature: (J)J
  */
-JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getStorageSize
-  (JNIEnv *, jclass, jstring);
-
-/*
- * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
- * Method:    closeSpace
- * Signature: (J)Z
- */
-JNIEXPORT jboolean JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_closeSpace
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getArrowArrayNumChildren
   (JNIEnv *, jclass, jlong);
-
-/*
- * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
- * Method:    deleteSpace
- * Signature: (Ljava/lang/String;)Z
- */
-JNIEXPORT jboolean JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_deleteSpace
-  (JNIEnv *, jclass, jstring);
 
 #ifdef __cplusplus
 }

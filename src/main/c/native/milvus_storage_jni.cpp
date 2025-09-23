@@ -1,515 +1,275 @@
 #include <jni.h>
 #include <iostream>
-#include <memory>
-#include <vector>
 #include <string>
-#include <random>
-#include <filesystem>
-#include <chrono>
-#include <iomanip>
-#include <map>
-#include <sstream>
-#include <dlfcn.h>
+#include <vector>
+#include <memory>
+#include <stdexcept>
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <cstring>
 
-// Milvus Storage headers
-#include "milvus-storage/common/log.h"
-#include "milvus-storage/storage/space.h"
-#include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/filter/constant_filter.h"
-#include "milvus-storage/storage/options.h"
+// Milvus Storage Reader C API
+#include "../../../milvus-storage/cpp/include/milvus-storage/reader_c.h"
 
-// Arrow headers
-#include <arrow/array/builder_primitive.h>
-#include <arrow/array/builder_binary.h>
-#include <arrow/record_batch.h>
-#include <arrow/type.h>
-#include <arrow/util/key_value_metadata.h>
-#include <arrow/table.h>
+// Helper functions for string conversion
+static char* jstring_to_cstring(JNIEnv *env, jstring jstr) {
+    if (jstr == nullptr) return nullptr;
 
-// JSON handling (simplified for demo)
-#include <nlohmann/json.hpp>
+    const char *utf_chars = env->GetStringUTFChars(jstr, nullptr);
+    if (utf_chars == nullptr) return nullptr;
 
-using namespace milvus_storage;
-using json = nlohmann::json;
+    size_t len = strlen(utf_chars);
+    char *cstr = new char[len + 1];
+    strcpy(cstr, utf_chars);
 
-// Thread-safe lazy initialization for Spark environment
-static std::atomic<bool> milvus_initialized{false};
-static std::mutex init_mutex;
-static thread_local bool in_initialization = false;
-
-// Lazy initialization function with recursion protection
-static void ensure_milvus_initialized()
-{
-  // Fast path: already initialized
-  if (milvus_initialized.load(std::memory_order_acquire))
-  {
-    return;
-  }
-
-  // Prevent recursive initialization in the same thread
-  if (in_initialization)
-  {
-    std::cerr << "Warning: Recursive initialization detected, skipping..." << std::endl;
-    return;
-  }
-
-  std::lock_guard<std::mutex> lock(init_mutex);
-
-  // Double-check pattern
-  if (milvus_initialized.load(std::memory_order_acquire))
-  {
-    return;
-  }
-
-  in_initialization = true;
-
-  try
-  {
-    // Initialize milvus-storage here instead of at library load time
-    std::cout << "Initializing milvus-storage (Thread ID: " << std::this_thread::get_id() << ")..." << std::endl;
-
-    // Set a smaller default stack size for internal operations to prevent overflow
-    const size_t STACK_LIMIT = 1024 * 1024; // 1MB
-
-    // Initialize with controlled stack usage
-    milvus_initialized.store(true, std::memory_order_release);
-    std::cout << "Milvus-storage initialized successfully" << std::endl;
-  }
-  catch (const std::exception &e)
-  {
-    std::cerr << "Failed to initialize milvus-storage: " << e.what() << std::endl;
-    in_initialization = false;
-    throw;
-  }
-
-  in_initialization = false;
+    env->ReleaseStringUTFChars(jstr, utf_chars);
+    return cstr;
 }
 
-// Global map to store Space instances
-static std::map<jlong, std::shared_ptr<Space>> g_spaces;
-static jlong g_next_handle = 1;
-
-// Helper function to create Arrow Schema
-std::shared_ptr<arrow::Schema> CreateArrowSchema(const std::vector<std::string> &field_names,
-                                                 const std::vector<std::shared_ptr<arrow::DataType>> &field_types)
-{
-  std::vector<std::shared_ptr<arrow::Field>> fields;
-  for (size_t i = 0; i < field_names.size(); ++i)
-  {
-    auto metadata = arrow::KeyValueMetadata::Make({{"ARROW_FIELD_ID"}}, {std::to_string(i + 100)});
-    fields.push_back(arrow::field(field_names[i], field_types[i], true, metadata));
-  }
-  return arrow::schema(fields);
-}
-
-// Helper function to generate random vector data
-std::string generateRandomVector(int dim)
-{
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<float> dis(-1.0, 1.0);
-
-  std::string result;
-  result.resize(dim * sizeof(float));
-  float *data = reinterpret_cast<float *>(result.data());
-
-  for (int i = 0; i < dim; ++i)
-  {
-    data[i] = dis(gen);
-  }
-  return result;
-}
-
-// Helper function to create test data
-std::shared_ptr<arrow::RecordBatch> createTestData(const json &data_json)
-{
-  auto arrow_schema = CreateArrowSchema(
-      {"id", "timestamp", "vector", "label"},
-      {arrow::int64(), arrow::int64(), arrow::fixed_size_binary(128), arrow::utf8()});
-
-  arrow::Int64Builder id_builder;
-  arrow::Int64Builder timestamp_builder;
-  arrow::FixedSizeBinaryBuilder vector_builder(arrow::fixed_size_binary(128));
-  arrow::StringBuilder label_builder;
-
-  // Parse JSON data (simplified for demo)
-  if (data_json.contains("batches") && !data_json["batches"].empty())
-  {
-    auto batch = data_json["batches"][0];
-
-    auto ids = batch["id"];
-    auto timestamps = batch["timestamp"];
-    auto labels = batch["label"];
-
-    for (size_t i = 0; i < ids.size(); ++i)
-    {
-      id_builder.Append(ids[i].get<int64_t>());
-      timestamp_builder.Append(timestamps[i].get<int64_t>());
-      vector_builder.Append(generateRandomVector(32)); // 32维向量，每维4字节
-      label_builder.Append(labels[i].get<std::string>());
+static char** jstringArray_to_cstringArray(JNIEnv *env, jobjectArray jarray, jsize &length) {
+    if (jarray == nullptr) {
+        length = 0;
+        return nullptr;
     }
-  }
 
-  std::shared_ptr<arrow::Array> id_array, timestamp_array, vector_array, label_array;
-  id_builder.Finish(&id_array);
-  timestamp_builder.Finish(&timestamp_array);
-  vector_builder.Finish(&vector_array);
-  label_builder.Finish(&label_array);
+    length = env->GetArrayLength(jarray);
+    char **carray = new char*[length];
 
-  return arrow::RecordBatch::Make(arrow_schema, id_array->length(),
-                                  {id_array, timestamp_array, vector_array, label_array});
+    for (jsize i = 0; i < length; i++) {
+        jstring jstr = (jstring)env->GetObjectArrayElement(jarray, i);
+        carray[i] = jstring_to_cstring(env, jstr);
+        env->DeleteLocalRef(jstr);
+    }
+
+    return carray;
 }
 
-// Convert jstring to std::string
-std::string jstring_to_string(JNIEnv *env, jstring jstr)
-{
-  if (jstr == nullptr)
-    return "";
+static void free_cstring_array(char **carray, jsize length) {
+    if (carray == nullptr) return;
 
-  const char *chars = env->GetStringUTFChars(jstr, nullptr);
-  std::string result(chars);
-  env->ReleaseStringUTFChars(jstr, chars);
-  return result;
+    for (jsize i = 0; i < length; i++) {
+        delete[] carray[i];
+    }
+    delete[] carray;
 }
 
-// Convert std::string to jstring
-jstring string_to_jstring(JNIEnv *env, const std::string &str)
-{
-  return env->NewStringUTF(str.c_str());
+// ==================== Reader C API JNI Implementations ====================
+
+// ReadProperties methods
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readPropertiesDefault
+(JNIEnv *env, jclass) {
+    return (jlong)read_properties_default();
 }
 
-extern "C"
-{
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readPropertiesCreate
+(JNIEnv *env, jclass, jobjectArray keys, jobjectArray values) {
+    jsize keys_length, values_length;
+    char **keys_array = jstringArray_to_cstringArray(env, keys, keys_length);
+    char **values_array = jstringArray_to_cstringArray(env, values, values_length);
 
-  /*
-   * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
-   * Method:    createSpace
-   * Signature: (Ljava/lang/String;Ljava/lang/String;)J
-   */
-  JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_createSpace(JNIEnv *env, jclass clazz, jstring storagePath, jstring schemaJson)
-  {
-    ensure_milvus_initialized();
-
-    try
-    {
-      std::string storage_path = jstring_to_string(env, storagePath);
-      std::string schema_json = jstring_to_string(env, schemaJson);
-
-      // Create storage directory if it doesn't exist
-      std::filesystem::create_directories(storage_path);
-
-      // Create Arrow Schema (simplified for demo)
-      auto arrow_schema = CreateArrowSchema(
-          {"id", "timestamp", "vector", "label"},
-          {arrow::int64(), arrow::int64(), arrow::fixed_size_binary(128), arrow::utf8()});
-
-      SchemaOptions schema_options;
-      schema_options.primary_column = "id";
-      schema_options.version_column = "timestamp";
-      schema_options.vector_column = "vector";
-
-      auto schema = std::make_shared<Schema>(arrow_schema, schema_options);
-      auto status = schema->Validate();
-      if (!status.ok())
-      {
-        std::cerr << "Schema validation failed: " << status.ToString() << std::endl;
+    if (keys_length != values_length) {
+        free_cstring_array(keys_array, keys_length);
+        free_cstring_array(values_array, values_length);
         return 0;
-      }
-
-      // Open Space
-      auto space_result = Space::Open(storage_path, Options{schema, -1});
-      if (!space_result.ok())
-      {
-        std::cerr << "Failed to open Space: " << space_result.status().ToString() << std::endl;
-        return 0;
-      }
-
-      auto space = std::move(space_result).value();
-      jlong handle = g_next_handle++;
-      g_spaces[handle] = std::move(space);
-
-      return handle;
     }
-    catch (const std::exception &e)
-    {
-      std::cerr << "Exception in createSpace: " << e.what() << std::endl;
-      return 0;
+
+    ReadProperties *props = read_properties_create((const char**)keys_array, (const char**)values_array, keys_length);
+
+    free_cstring_array(keys_array, keys_length);
+    free_cstring_array(values_array, values_length);
+
+    return (jlong)props;
+}
+
+JNIEXPORT jstring JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readPropertiesGet
+(JNIEnv *env, jclass, jlong properties, jstring key) {
+    char *key_cstr = jstring_to_cstring(env, key);
+    if (key_cstr == nullptr) return nullptr;
+
+    const char *value = read_properties_get((ReadProperties*)properties, key_cstr);
+    delete[] key_cstr;
+
+    if (value == nullptr) return nullptr;
+    return env->NewStringUTF(value);
+}
+
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readPropertiesFree
+(JNIEnv *env, jclass, jlong properties) {
+    read_properties_free((ReadProperties*)properties);
+}
+
+// ChunkReader methods
+JNIEXPORT jlongArray JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getChunkIndices
+(JNIEnv *env, jclass, jlong reader, jlongArray rowIndices) {
+    jsize length = env->GetArrayLength(rowIndices);
+    jlong *indices = env->GetLongArrayElements(rowIndices, nullptr);
+
+    uint64_t *c_indices = new uint64_t[length];
+    for (jsize i = 0; i < length; i++) {
+        c_indices[i] = (uint64_t)indices[i];
     }
-  }
 
-  /*
-   * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
-   * Method:    writeData
-   * Signature: (JLjava/lang/String;)Z
-   */
-  JNIEXPORT jboolean JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_writeData(JNIEnv *env, jclass clazz, jlong spaceHandle, jstring dataJson)
-  {
+    size_t result_length;
+    uint64_t *result_indices = get_chunk_indices((ChunkReader*)reader, c_indices, length, &result_length);
 
-    try
-    {
-      auto it = g_spaces.find(spaceHandle);
-      if (it == g_spaces.end())
-      {
-        std::cerr << "Invalid space handle: " << spaceHandle << std::endl;
-        return JNI_FALSE;
-      }
+    env->ReleaseLongArrayElements(rowIndices, indices, JNI_ABORT);
+    delete[] c_indices;
 
-      auto space = it->second;
-      std::string data_json_str = jstring_to_string(env, dataJson);
+    if (result_indices == nullptr) return nullptr;
 
-      // Parse JSON data
-      json data_json = json::parse(data_json_str);
-
-      // Create record batch from JSON
-      auto record_batch = createTestData(data_json);
-      auto reader = arrow::RecordBatchReader::Make({record_batch}, record_batch->schema()).ValueOrDie();
-
-      WriteOption write_option{1000};
-      auto write_status = space->Write(*reader, write_option);
-
-      return write_status.ok() ? JNI_TRUE : JNI_FALSE;
+    jlongArray result = env->NewLongArray(result_length);
+    jlong *result_data = new jlong[result_length];
+    for (size_t i = 0; i < result_length; i++) {
+        result_data[i] = (jlong)result_indices[i];
     }
-    catch (const std::exception &e)
-    {
-      std::cerr << "Exception in writeData: " << e.what() << std::endl;
-      return JNI_FALSE;
+    env->SetLongArrayRegion(result, 0, result_length, result_data);
+
+    delete[] result_data;
+    // Note: result_indices should be freed by the C API if needed
+
+    return result;
+}
+
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getChunk
+(JNIEnv *env, jclass, jlong reader, jlong chunkIndex) {
+    return (jlong)get_chunk((ChunkReader*)reader, (uint64_t)chunkIndex);
+}
+
+JNIEXPORT jlongArray JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getChunks
+(JNIEnv *env, jclass, jlong reader, jlongArray chunkIndices, jlong parallelism) {
+    jsize length = env->GetArrayLength(chunkIndices);
+    jlong *indices = env->GetLongArrayElements(chunkIndices, nullptr);
+
+    uint64_t *c_indices = new uint64_t[length];
+    for (jsize i = 0; i < length; i++) {
+        c_indices[i] = (uint64_t)indices[i];
     }
-  }
 
-  /*
-   * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
-   * Method:    readData
-   * Signature: (J[Ljava/lang/String;)Ljava/lang/String;
-   */
-  JNIEXPORT jstring JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readData(JNIEnv *env, jclass clazz, jlong spaceHandle, jobjectArray columnNames)
-  {
+    size_t result_length;
+    ArrowArray **result_arrays = get_chunks((ChunkReader*)reader, c_indices, length, (uint64_t)parallelism, &result_length);
 
-    try
-    {
-      auto it = g_spaces.find(spaceHandle);
-      if (it == g_spaces.end())
-      {
-        std::cerr << "Invalid space handle: " << spaceHandle << std::endl;
-        return string_to_jstring(env, "{}");
-      }
+    env->ReleaseLongArrayElements(chunkIndices, indices, JNI_ABORT);
+    delete[] c_indices;
 
-      auto space = it->second;
+    if (result_arrays == nullptr) return nullptr;
 
-      // Parse column names
-      ReadOptions read_options;
-      jsize len = env->GetArrayLength(columnNames);
-      for (jsize i = 0; i < len; ++i)
-      {
-        jstring column = (jstring)env->GetObjectArrayElement(columnNames, i);
-        std::string column_name = jstring_to_string(env, column);
-        read_options.columns.insert(column_name);
-      }
-
-      auto read_result = space->Read(read_options);
-      auto table_result = read_result->ToTable();
-      if (!table_result.ok())
-      {
-        std::cerr << "Failed to convert to table: " << table_result.status().ToString() << std::endl;
-        return string_to_jstring(env, "{}");
-      }
-
-      auto table = table_result.ValueOrDie();
-
-      // Convert table to JSON (simplified)
-      json result_json;
-      result_json["num_rows"] = table->num_rows();
-      result_json["num_columns"] = table->num_columns();
-      result_json["status"] = "success";
-
-      return string_to_jstring(env, result_json.dump());
+    jlongArray result = env->NewLongArray(result_length);
+    jlong *result_data = new jlong[result_length];
+    for (size_t i = 0; i < result_length; i++) {
+        result_data[i] = (jlong)result_arrays[i];
     }
-    catch (const std::exception &e)
-    {
-      std::cerr << "Exception in readData: " << e.what() << std::endl;
-      json error_json;
-      error_json["status"] = "error";
-      error_json["message"] = e.what();
-      return string_to_jstring(env, error_json.dump());
+    env->SetLongArrayRegion(result, 0, result_length, result_data);
+
+    delete[] result_data;
+
+    return result;
+}
+
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_chunkReaderDestroy
+(JNIEnv *env, jclass, jlong reader) {
+    chunk_reader_destroy((ChunkReader*)reader);
+}
+
+// Reader methods
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readerNew
+(JNIEnv *env, jclass, jlong fs, jstring manifest, jlong schema, jobjectArray neededColumns, jlong properties) {
+    char *manifest_cstr = jstring_to_cstring(env, manifest);
+    if (manifest_cstr == nullptr) return 0;
+
+    jsize columns_length;
+    char **columns_array = jstringArray_to_cstringArray(env, neededColumns, columns_length);
+
+    Reader *reader = reader_new((void*)fs, manifest_cstr, (ArrowSchema*)schema,
+                               (const char**)columns_array, columns_length, (ReadProperties*)properties);
+
+    delete[] manifest_cstr;
+    free_cstring_array(columns_array, columns_length);
+
+    return (jlong)reader;
+}
+
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getRecordBatchReader
+(JNIEnv *env, jclass, jlong reader, jstring predicate, jlong batchSize, jlong bufferSize) {
+    char *predicate_cstr = jstring_to_cstring(env, predicate);
+
+    ArrowArrayStream *stream = get_record_batch_reader((Reader*)reader, predicate_cstr,
+                                                      (uint64_t)batchSize, (uint64_t)bufferSize);
+
+    if (predicate_cstr) delete[] predicate_cstr;
+
+    return (jlong)stream;
+}
+
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getChunkReader
+(JNIEnv *env, jclass, jlong reader, jlong columnGroupId) {
+    return (jlong)get_chunk_reader((Reader*)reader, (uint64_t)columnGroupId);
+}
+
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_take
+(JNIEnv *env, jclass, jlong reader, jlongArray rowIndices, jlong parallelism) {
+    jsize length = env->GetArrayLength(rowIndices);
+    jlong *indices = env->GetLongArrayElements(rowIndices, nullptr);
+
+    uint64_t *c_indices = new uint64_t[length];
+    for (jsize i = 0; i < length; i++) {
+        c_indices[i] = (uint64_t)indices[i];
     }
-  }
 
-  /*
-   * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
-   * Method:    readDataWithFilter
-   * Signature: (J[Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
-   */
-  JNIEXPORT jstring JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readDataWithFilter(JNIEnv *env, jclass clazz, jlong spaceHandle, jobjectArray columnNames, jstring filterJson)
-  {
+    ArrowArray *result = take((Reader*)reader, c_indices, length, (uint64_t)parallelism);
 
-    try
-    {
-      auto it = g_spaces.find(spaceHandle);
-      if (it == g_spaces.end())
-      {
-        std::cerr << "Invalid space handle: " << spaceHandle << std::endl;
-        return string_to_jstring(env, "{}");
-      }
+    env->ReleaseLongArrayElements(rowIndices, indices, JNI_ABORT);
+    delete[] c_indices;
 
-      auto space = it->second;
-      std::string filter_json_str = jstring_to_string(env, filterJson);
+    return (jlong)result;
+}
 
-      // Parse column names
-      ReadOptions read_options;
-      jsize len = env->GetArrayLength(columnNames);
-      for (jsize i = 0; i < len; ++i)
-      {
-        jstring column = (jstring)env->GetObjectArrayElement(columnNames, i);
-        std::string column_name = jstring_to_string(env, column);
-        read_options.columns.insert(column_name);
-      }
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_readerDestroy
+(JNIEnv *env, jclass, jlong reader) {
+    reader_destroy((Reader*)reader);
+}
 
-      // Add filter (simplified for demo)
-      ConstantFilter filter(EQUAL, "id", Value::Int64(1));
-      read_options.filters.push_back(&filter);
-
-      auto read_result = space->Read(read_options);
-      auto table_result = read_result->ToTable();
-      if (!table_result.ok())
-      {
-        std::cerr << "Failed to convert to table: " << table_result.status().ToString() << std::endl;
-        return string_to_jstring(env, "{}");
-      }
-
-      auto table = table_result.ValueOrDie();
-
-      // Convert table to JSON (simplified)
-      json result_json;
-      result_json["num_rows"] = table->num_rows();
-      result_json["num_columns"] = table->num_columns();
-      result_json["status"] = "success";
-      result_json["filter"] = filter_json_str;
-
-      return string_to_jstring(env, result_json.dump());
-    }
-    catch (const std::exception &e)
-    {
-      std::cerr << "Exception in readDataWithFilter: " << e.what() << std::endl;
-      json error_json;
-      error_json["status"] = "error";
-      error_json["message"] = e.what();
-      return string_to_jstring(env, error_json.dump());
-    }
-  }
-
-  /*
-   * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
-   * Method:    getSpaceVersion
-   * Signature: (J)J
-   */
-  JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getSpaceVersion(JNIEnv *env, jclass clazz, jlong spaceHandle)
-  {
-
-    try
-    {
-      auto it = g_spaces.find(spaceHandle);
-      if (it == g_spaces.end())
-      {
-        std::cerr << "Invalid space handle: " << spaceHandle << std::endl;
-        return -1;
-      }
-
-      auto space = it->second;
-      return space->GetCurrentVersion();
-    }
-    catch (const std::exception &e)
-    {
-      std::cerr << "Exception in getSpaceVersion: " << e.what() << std::endl;
-      return -1;
-    }
-  }
-
-  /*
-   * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
-   * Method:    getStorageSize
-   * Signature: (Ljava/lang/String;)J
-   */
-  JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getStorageSize(JNIEnv *env, jclass clazz, jstring storagePath)
-  {
-
-    try
-    {
-      std::string storage_path = jstring_to_string(env, storagePath);
-
-      size_t total_size = 0;
-      if (std::filesystem::exists(storage_path))
-      {
-        for (const auto &entry : std::filesystem::recursive_directory_iterator(storage_path))
-        {
-          if (entry.is_regular_file())
-          {
-            total_size += entry.file_size();
-          }
+// Arrow helper methods
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_releaseArrowArray
+(JNIEnv *env, jclass, jlong array) {
+    if (array != 0) {
+        ArrowArray *arr = (ArrowArray*)array;
+        if (arr->release) {
+            arr->release(arr);
         }
-      }
-
-      return static_cast<jlong>(total_size);
     }
-    catch (const std::exception &e)
-    {
-      std::cerr << "Exception in getStorageSize: " << e.what() << std::endl;
-      return -1;
+}
+
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_releaseArrowSchema
+(JNIEnv *env, jclass, jlong schema) {
+    if (schema != 0) {
+        ArrowSchema *sch = (ArrowSchema*)schema;
+        if (sch->release) {
+            sch->release(sch);
+        }
     }
-  }
+}
 
-  /*
-   * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
-   * Method:    closeSpace
-   * Signature: (J)Z
-   */
-  JNIEXPORT jboolean JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_closeSpace(JNIEnv *env, jclass clazz, jlong spaceHandle)
-  {
-
-    try
-    {
-      auto it = g_spaces.find(spaceHandle);
-      if (it == g_spaces.end())
-      {
-        std::cerr << "Invalid space handle: " << spaceHandle << std::endl;
-        return JNI_FALSE;
-      }
-
-      g_spaces.erase(it);
-      return JNI_TRUE;
+JNIEXPORT void JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_releaseArrowArrayStream
+(JNIEnv *env, jclass, jlong stream) {
+    if (stream != 0) {
+        ArrowArrayStream *str = (ArrowArrayStream*)stream;
+        if (str->release) {
+            str->release(str);
+        }
     }
-    catch (const std::exception &e)
-    {
-      std::cerr << "Exception in closeSpace: " << e.what() << std::endl;
-      return JNI_FALSE;
-    }
-  }
+}
 
-  /*
-   * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
-   * Method:    deleteSpace
-   * Signature: (Ljava/lang/String;)Z
-   */
-  JNIEXPORT jboolean JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_deleteSpace(JNIEnv *env, jclass clazz, jstring storagePath)
-  {
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getArrowArrayLength
+(JNIEnv *env, jclass, jlong array) {
+    if (array == 0) return 0;
+    ArrowArray *arr = (ArrowArray*)array;
+    return (jlong)arr->length;
+}
 
-    try
-    {
-      std::string storage_path = jstring_to_string(env, storagePath);
-
-      if (std::filesystem::exists(storage_path))
-      {
-        std::filesystem::remove_all(storage_path);
-      }
-
-      return JNI_TRUE;
-    }
-    catch (const std::exception &e)
-    {
-      std::cerr << "Exception in deleteSpace: " << e.what() << std::endl;
-      return JNI_FALSE;
-    }
-  }
-
-} // extern "C"
+JNIEXPORT jlong JNICALL Java_com_zilliz_spark_connector_jni_MilvusStorageJNI_00024_getArrowArrayNumChildren
+(JNIEnv *env, jclass, jlong array) {
+    if (array == 0) return 0;
+    ArrowArray *arr = (ArrowArray*)array;
+    return (jlong)arr->n_children;
+}

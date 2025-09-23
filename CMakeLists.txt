@@ -11,12 +11,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 find_package(Java REQUIRED)
 find_package(JNI REQUIRED)
 
-# Find milvus-storage
-find_path(MILVUS_STORAGE_INCLUDE_DIR 
-    NAMES milvus-storage/storage/space.h
-    PATHS ${CMAKE_CURRENT_SOURCE_DIR}/milvus-storage/cpp/include
-    REQUIRED)
-
 find_library(MILVUS_STORAGE_LIB
     NAMES milvus-storage
     PATHS ${CMAKE_CURRENT_SOURCE_DIR}/milvus-storage/cpp/build/Release
