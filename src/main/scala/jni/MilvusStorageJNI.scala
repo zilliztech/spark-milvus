@@ -19,7 +19,7 @@ object MilvusStorageJNI {
   @native def chunkReaderDestroy(reader: Long): Unit
 
   // Reader methods
-  @native def readerNew(
+  @native def readerNew(                            
       fs: Long,
       manifest: String,
       schema: Long,
