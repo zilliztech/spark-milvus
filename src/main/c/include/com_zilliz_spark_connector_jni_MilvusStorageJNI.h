@@ -8,9 +8,6 @@
 extern "C" {
 #endif
 
-
-// ==================== Reader C API Methods ====================
-
 /*
  * Class:     com_zilliz_spark_connector_jni_MilvusStorageJNI
  * Method:    readPropertiesDefault
