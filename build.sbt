@@ -56,6 +56,34 @@ lazy val root = (project in file("."))
     Compile / compile / parallelExecution := true,
     version := "0.1.14-SNAPSHOT",
     organization := "com.zilliz",
+
+    // Fork JVM for run and tests to properly load native libraries
+    run / fork := true,
+    Test / fork := true,
+
+    // JVM options for run
+    run / javaOptions ++= Seq(
+      "-Xss2m",
+      "-Djava.library.path=.",
+      "--add-opens=java.base/java.nio=ALL-UNNAMED"
+    ),
+
+    run / envVars := Map(
+      "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
+    ),
+
+    // JVM options for tests
+    Test / javaOptions ++= Seq(
+      "-Xss2m",
+      "-Xmx4g",
+      "-Djava.library.path=.",
+      "--add-opens=java.base/java.nio=ALL-UNNAMED"
+    ),
+
+    Test / envVars := Map(
+      "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
+    ),
+
     libraryDependencies ++= Seq(
       munit % Test,
       scalaTest % Test,
