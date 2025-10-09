@@ -24,13 +24,21 @@ object Dependencies {
   lazy val scalapbCompilerPlugin =
     "com.thesamet.scalapb" %% "compilerplugin" % scalapbVersion
   lazy val sparkCore =
-    "org.apache.spark" %% "spark-core" % sparkVersion % "provided,test"
+    "org.apache.spark" %% "spark-core" % sparkVersion % "provided,test" excludeAll(
+      ExclusionRule(organization = "org.apache.arrow")
+    )
   lazy val sparkSql =
-    "org.apache.spark" %% "spark-sql" % sparkVersion % "provided,test"
+    "org.apache.spark" %% "spark-sql" % sparkVersion % "provided,test" excludeAll(
+      ExclusionRule(organization = "org.apache.arrow")
+    )
   lazy val sparkCatalyst =
-    "org.apache.spark" %% "spark-catalyst" % sparkVersion % "provided,test"
+    "org.apache.spark" %% "spark-catalyst" % sparkVersion % "provided,test" excludeAll(
+      ExclusionRule(organization = "org.apache.arrow")
+    )
   lazy val sparkMLlib =
-    "org.apache.spark" %% "spark-mllib" % sparkVersion % "provided,test"
+    "org.apache.spark" %% "spark-mllib" % sparkVersion % "provided,test" excludeAll(
+      ExclusionRule(organization = "org.apache.arrow")
+    )
   lazy val parquetHadoop =
     "org.apache.parquet" % "parquet-hadoop" % parquetVersion
   lazy val hadoopCommon =
@@ -47,4 +55,11 @@ object Dependencies {
     "com.fasterxml.jackson.module" %% "jackson-module-scala" % jacksonVersion
   lazy val jacksonDatabind =
     "com.fasterxml.jackson.core" % "jackson-databind" % jacksonVersion
+
+  // Arrow dependencies for milvus-storage JNI
+  lazy val arrowVersion = "14.0.1"
+  lazy val arrowVector = "org.apache.arrow" % "arrow-vector" % arrowVersion
+  lazy val arrowMemoryCore = "org.apache.arrow" % "arrow-memory-core" % arrowVersion
+  lazy val arrowMemoryUnsafe = "org.apache.arrow" % "arrow-memory-unsafe" % arrowVersion
+  lazy val arrowCData = "org.apache.arrow" % "arrow-c-data" % arrowVersion
 }
