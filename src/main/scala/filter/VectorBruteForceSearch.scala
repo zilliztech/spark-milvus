@@ -120,7 +120,7 @@ object VectorBruteForceSearch {
   }
 
   // Unified distance calculation function for dense vectors
-  private def calculateDistance(
+  def calculateDistance(
       v1: Vector,
       v2: Vector,
       distanceType: DistanceType

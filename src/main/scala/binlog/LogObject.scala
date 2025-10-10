@@ -52,6 +52,26 @@ object Constants {
   val S3MaxConnections = "s3.maxConnections"
   val S3PreloadPoolSize = "s3.preloadPoolSize"
 
+  // FFI (Storage V2) filesystem property keys
+  val FsAddress = "fs.address"
+  val FsBucketName = "fs.bucket_name"
+  val FsAccessKeyId = "fs.access_key_id"
+  val FsAccessKeyValue = "fs.access_key_value"
+  val FsRootPath = "fs.root_path"
+  val FsStorageType = "fs.storage_type"
+  val FsCloudProvider = "fs.cloud_provider"
+  val FsIamEndpoint = "fs.iam_endpoint"
+  val FsLogLevel = "fs.log_level"
+  val FsRegion = "fs.region"
+  val FsUseSSL = "fs.use_ssl"
+  val FsSslCaCert = "fs.ssl_ca_cert"
+  val FsUseIam = "fs.use_iam"
+  val FsUseVirtualHost = "fs.use_virtual_host"
+  val FsRequestTimeoutMs = "fs.request_timeout_ms"
+  val FsGcpNativeWithoutAuth = "fs.gcp_native_without_auth"
+  val FsGcpCredentialJson = "fs.gcp_credential_json"
+  val FsUseCustomPartUpload = "fs.use_custom_part_upload"
+
   val TimestampFieldID = "1"
 
   def readMagicNumber(buffer: ByteBuffer) = {

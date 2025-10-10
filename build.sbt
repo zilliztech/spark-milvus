@@ -1,7 +1,29 @@
 import scala.sys.process.Process
+import scala.io.Source
 
 import xerial.sbt.Sonatype._
 import Dependencies._
+
+// Load Sonatype Central credentials
+credentials += {
+  val credFile = Path.userHome / ".sbt" / "sonatype_central_credentials"
+  if (credFile.exists) {
+    val lines = Source.fromFile(credFile).getLines().toList
+    val props = lines.map { line =>
+      val parts = line.split("=", 2)
+      if (parts.length == 2) Some(parts(0).trim -> parts(1).trim) else None
+    }.flatten.toMap
+
+    Credentials(
+      "Sonatype Nexus Repository Manager",
+      props.getOrElse("host", "central.sonatype.com"),
+      props.getOrElse("user", ""),
+      props.getOrElse("password", "")
+    )
+  } else {
+    Credentials(Path.userHome / ".sbt" / "sonatype.credentials")
+  }
+}
 
 ThisBuild / organizationName := "zilliz"
 ThisBuild / organizationHomepage := Some(url("https://zilliz.com/"))
@@ -54,7 +76,7 @@ lazy val root = (project in file("."))
     assembly / parallelExecution := true,
     Test / parallelExecution := true,
     Compile / compile / parallelExecution := true,
-    version := "0.1.14-SNAPSHOT",
+    version := "0.2.1-SNAPSHOT",
     organization := "com.zilliz",
 
     // Fork JVM for run and tests to properly load native libraries
@@ -80,7 +102,11 @@ lazy val root = (project in file("."))
       "-Xss2m",
       "-Xmx4g",
       "-Djava.library.path=.",
-      "--add-opens=java.base/java.nio=ALL-UNNAMED"
+      "--add-opens=java.base/java.nio=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang=ALL-UNNAMED",
+      "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+      "--add-opens=java.base/java.util=ALL-UNNAMED",
+      "--add-opens=java.base/sun.security.action=ALL-UNNAMED"
     ),
 
     Test / envVars := Map(

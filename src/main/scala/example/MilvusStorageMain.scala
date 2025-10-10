@@ -17,7 +17,7 @@ import scala.collection.JavaConverters._
  * It reads test data from src/test/data directory by default.
  *
  * Usage:
- *   spark-submit --class example.MilvusStorageMain target/scala-2.13/spark-connector-assembly-0.1.14-SNAPSHOT.jar [test_data_directory]
+ *   spark-submit --class example.MilvusStorageMain target/scala-2.13/spark-connector-assembly-0.2.1-SNAPSHOT.jar [test_data_directory]
  */
 object MilvusStorageMain {
 

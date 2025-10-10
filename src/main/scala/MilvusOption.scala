@@ -30,7 +30,8 @@ case class MilvusOption(
     segmentID: String = "",
     fieldID: String = "",
     fieldIDs: String = "",
-    extraColumns: Seq[String] = Seq.empty
+    extraColumns: Seq[String] = Seq.empty,
+    options: Map[String, String] = Map.empty
 )
 
 object MilvusOption {
@@ -61,7 +62,14 @@ object MilvusOption {
   val ReaderType = Constants.LogReaderTypeParamName
   val ReaderFieldIDs = Constants.LogReaderFieldIDs
 
-  // s3 config
+  // vector search config
+  val VectorSearchQueryVector = "vector.search.query"
+  val VectorSearchTopK = "vector.search.topK"
+  val VectorSearchMetric = "vector.search.metric"
+  val VectorSearchVectorColumn = "vector.search.column"
+  val VectorSearchIdColumn = "vector.search.idColumn"
+
+  // s3 config (legacy, for V1 binlog)
   val S3FileSystemTypeName = Constants.S3FileSystemTypeName
   val S3Endpoint = Constants.S3Endpoint
   val S3BucketName = Constants.S3BucketName
@@ -70,6 +78,26 @@ object MilvusOption {
   val S3SecretKey = Constants.S3SecretKey
   val S3UseSSL = Constants.S3UseSSL
   val S3PathStyleAccess = Constants.S3PathStyleAccess
+
+  // FFI (Storage V2) filesystem property keys
+  val FsAddress = Constants.FsAddress
+  val FsBucketName = Constants.FsBucketName
+  val FsAccessKeyId = Constants.FsAccessKeyId
+  val FsAccessKeyValue = Constants.FsAccessKeyValue
+  val FsRootPath = Constants.FsRootPath
+  val FsStorageType = Constants.FsStorageType
+  val FsCloudProvider = Constants.FsCloudProvider
+  val FsIamEndpoint = Constants.FsIamEndpoint
+  val FsLogLevel = Constants.FsLogLevel
+  val FsRegion = Constants.FsRegion
+  val FsUseSSL = Constants.FsUseSSL
+  val FsSslCaCert = Constants.FsSslCaCert
+  val FsUseIam = Constants.FsUseIam
+  val FsUseVirtualHost = Constants.FsUseVirtualHost
+  val FsRequestTimeoutMs = Constants.FsRequestTimeoutMs
+  val FsGcpNativeWithoutAuth = Constants.FsGcpNativeWithoutAuth
+  val FsGcpCredentialJson = Constants.FsGcpCredentialJson
+  val FsUseCustomPartUpload = Constants.FsUseCustomPartUpload
 
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {
@@ -101,6 +129,10 @@ object MilvusOption {
       .filter(_.nonEmpty)
       .toSeq
 
+    // Convert CaseInsensitiveStringMap to regular Map for storage
+    import scala.collection.JavaConverters._
+    val optionsMap = options.asScala.toMap
+
     MilvusOption(
       uri,
       token,
@@ -120,12 +152,27 @@ object MilvusOption {
       segmentID,
       fieldID,
       fieldIDs,
-      extraColumns
+      extraColumns,
+      optionsMap
     )
   }
 
   def isInt64PK(milvusPKType: String): Boolean = {
     milvusPKType.toLowerCase() == "int64"
+  }
+
+  /**
+   * Generate vector dimension configuration key for a given field name
+   * Format: vector.{fieldName}.dim
+   */
+  def vectorDimKey(fieldName: String): String = s"vector.$fieldName.dim"
+
+  /**
+   * Helper method to convert Map to CaseInsensitiveStringMap and create MilvusOption
+   */
+  def apply(options: Map[String, String]): MilvusOption = {
+    import scala.collection.JavaConverters._
+    apply(new CaseInsensitiveStringMap(options.asJava))
   }
 }
 

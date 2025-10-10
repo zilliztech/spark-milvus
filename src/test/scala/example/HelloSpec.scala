@@ -27,7 +27,7 @@ class HelloSpec extends munit.FunSuite {
       )
     )
     val segmentInfo =
-      milvusClient.getSegmentInfo(458501504995144502L, 458501504996549295L)
+      milvusClient.getSegmentInfo(461458951676887161L, 461458951677087167L)
     println(segmentInfo)
   }
 }
