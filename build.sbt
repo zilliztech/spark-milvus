@@ -110,9 +110,10 @@ lazy val root = (project in file("."))
       awsSdkCore,
       jacksonScala,
       jacksonDatabind,
+      arrowFormat,
       arrowVector,
       arrowMemoryCore,
-      arrowMemoryUnsafe,
+      arrowMemoryNetty,
       arrowCData
     ),
     Compile / PB.protoSources += baseDirectory.value / "milvus-proto/proto",
@@ -140,6 +141,8 @@ lazy val root = (project in file("."))
 assembly / assemblyShadeRules := Seq(
   ShadeRule.rename("com.google.protobuf.**" -> "shade_proto.@1").inAll,
   ShadeRule.rename("com.google.common.**" -> "shade_googlecommon.@1").inAll
+  // Note: Arrow cannot be shaded due to JNI bindings with hardcoded class names
+  // Use spark.driver.userClassPathFirst=true to prioritize our Arrow version
 )
 
 assembly / assemblyMergeStrategy := {

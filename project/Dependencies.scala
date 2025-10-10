@@ -57,9 +57,10 @@ object Dependencies {
     "com.fasterxml.jackson.core" % "jackson-databind" % jacksonVersion
 
   // Arrow dependencies for milvus-storage JNI
-  lazy val arrowVersion = "14.0.1"
+  lazy val arrowVersion = "17.0.0"
+  lazy val arrowFormat = "org.apache.arrow" % "arrow-format" % arrowVersion
   lazy val arrowVector = "org.apache.arrow" % "arrow-vector" % arrowVersion
   lazy val arrowMemoryCore = "org.apache.arrow" % "arrow-memory-core" % arrowVersion
-  lazy val arrowMemoryUnsafe = "org.apache.arrow" % "arrow-memory-unsafe" % arrowVersion
+  lazy val arrowMemoryNetty = "org.apache.arrow" % "arrow-memory-netty" % arrowVersion
   lazy val arrowCData = "org.apache.arrow" % "arrow-c-data" % arrowVersion
 }
