@@ -11,26 +11,20 @@ import scala.io.Source
 import scala.collection.JavaConverters._
 
 /**
- * Simple Milvus Storage Test Application (No Spark)
+ * Milvus Storage Main Application
  *
- * This application demonstrates reading Milvus storage data without Spark.
- * It reads test data from src/test/data directory.
+ * This application demonstrates reading Milvus storage data.
+ * It reads test data from src/test/data directory by default.
  *
  * Usage:
- *   sbt "runMain example.MilvusStorageSparkTest"
+ *   spark-submit --class example.MilvusStorageMain target/scala-2.13/spark-connector-assembly-0.1.14-SNAPSHOT.jar [test_data_directory]
  */
-object MilvusStorageSparkTest {
+object MilvusStorageMain {
 
   def main(args: Array[String]): Unit = {
-    println("\n" + "="*80)
-    println("Simple Milvus Storage Test Application (No Spark)")
-    println("="*80 + "\n")
-
     try {
       // Load native library
-      println("Loading native library...")
       NativeLibraryLoader.loadLibrary()
-      println("✓ Native library loaded successfully\n")
 
       // Determine test data directory
       val testDataDir = if (args.length > 0) {
@@ -57,7 +51,7 @@ object MilvusStorageSparkTest {
 
       // Update manifest paths to point to actual test data location
       val updatedManifest = updateManifestPaths(originalManifest, testDataDir.getAbsolutePath)
-      println("✓ Manifest loaded and paths updated\n")
+      println("Manifest loaded and paths updated\n")
       println("Updated manifest:")
       println(updatedManifest)
       println()
@@ -72,23 +66,18 @@ object MilvusStorageSparkTest {
       if (!readerProperties.isValid) {
         throw new RuntimeException("Failed to create valid reader properties")
       }
-      println("✓ Reader properties created\n")
 
       // Define schema - matching the test data structure
       val schema = createTestSchema()
-      println("✓ Schema created\n")
 
       // Columns to read (matching C++ test schema order)
       val neededColumns = Array("id", "name", "value", "vector")
-      println(s"Reading columns: ${neededColumns.mkString(", ")}\n")
 
       // Create reader
       val reader = new MilvusStorageReader()
       reader.create(updatedManifest, schema, neededColumns, readerProperties)
-      println("✓ Reader created\n")
 
       // Read data using Arrow C Data Interface
-      println("Reading data from Milvus storage...")
       val recordBatchReaderPtr = reader.getRecordBatchReaderScala(null, 1024, 8 * 1024 * 1024)
 
       // Wrap the C++ ArrowArrayStream pointer with Arrow Java's ArrowArrayStream
@@ -111,7 +100,7 @@ object MilvusStorageSparkTest {
             totalRows += rows
           }
 
-          println(s"\n✓ Successfully read $totalRows rows in $batchCount batch(es)\n")
+          println(s"Successfully read $totalRows rows in $batchCount batch(es)\n")
         } finally {
           arrowReader.close()
         }
@@ -123,11 +112,6 @@ object MilvusStorageSparkTest {
       reader.destroy()
       readerProperties.free()
       ArrowUtils.releaseArrowSchema(schema)
-
-      println("="*80)
-      println("Test completed successfully!")
-      println("="*80 + "\n")
-
     } catch {
       case e: Exception =>
         println(s"\n✗ Error: ${e.getMessage}")
@@ -142,24 +126,25 @@ object MilvusStorageSparkTest {
   private def createTestSchema(): Long = {
     val allocator = ArrowUtils.getAllocator
 
-    val metadata0 = Map("PARQUET:field_id" -> "100").asJava
-    val metadata1 = Map("PARQUET:field_id" -> "101").asJava
-    val metadata2 = Map("PARQUET:field_id" -> "102").asJava
-    val metadata3 = Map("PARQUET:field_id" -> "103").asJava
+    val metadata0 = new JHashMap[String, String]()
+    metadata0.put("PARQUET:field_id", "100")
+    val metadata1 = new JHashMap[String, String]()
+    metadata1.put("PARQUET:field_id", "101")
+    val metadata2 = new JHashMap[String, String]()
+    metadata2.put("PARQUET:field_id", "102")
+    val metadata3 = new JHashMap[String, String]()
+    metadata3.put("PARQUET:field_id", "103")
 
     // Define fields matching the test data
     // Schema from C++ test: id (int64), name (utf8), value (double), vector (list<float>)
-    val fields = List(
-      new ArrowField("id", new FieldType(false, new ArrowType.Int(64, true), null, metadata0), null),
-      new ArrowField("name", new FieldType(false, new ArrowType.Utf8(), null, metadata1), null),
-      new ArrowField("value", new FieldType(false, new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE), null, metadata2), null),
-      new ArrowField("vector",
-        new FieldType(false,
-          new ArrowType.List(), // Variable-length list
-          null,
-          metadata3),
-        List(new ArrowField("element", new FieldType(false, new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.SINGLE), null), null)).asJava)
-    ).asJava
+    val elementChildren = new java.util.ArrayList[ArrowField]()
+    elementChildren.add(new ArrowField("element", new FieldType(false, new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.SINGLE), null), null))
+
+    val fields = new java.util.ArrayList[ArrowField]()
+    fields.add(new ArrowField("id", new FieldType(false, new ArrowType.Int(64, true), null, metadata0), null))
+    fields.add(new ArrowField("name", new FieldType(false, new ArrowType.Utf8(), null, metadata1), null))
+    fields.add(new ArrowField("value", new FieldType(false, new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE), null, metadata2), null))
+    fields.add(new ArrowField("vector", new FieldType(false, new ArrowType.List(), null, metadata3), elementChildren))
 
     val schema = new ArrowSchema(fields)
     val arrowSchema = org.apache.arrow.c.ArrowSchema.allocateNew(allocator)
@@ -184,23 +169,33 @@ object MilvusStorageSparkTest {
 
       // Display first few rows
       val displayCount = Math.min(10, rowCount)
-      println(f"\n${"ID"}%-10s ${"Name"}%-20s ${"Value"}%-15s ${"Vector"}")
+      println(String.format("\n%-10s %-20s %-15s %s", "ID", "Name", "Value", "Vector"))
       println("-" * 80)
 
-      for (i <- 0 until displayCount) {
+      var i = 0
+      while (i < displayCount) {
         val id = if (!idVector.isNull(i)) idVector.get(i).toString else "null"
         val name = if (!nameVector.isNull(i)) new String(nameVector.get(i), "UTF-8") else "null"
-        val value = if (!valueVector.isNull(i)) f"${valueVector.get(i)}%.1f" else "null"
+        val value = if (!valueVector.isNull(i)) String.format("%.1f", valueVector.get(i).asInstanceOf[AnyRef]) else "null"
 
         // Extract vector elements (variable-length list)
         val vectorStr = if (!vectorListVector.isNull(i)) {
           val vectorSlice = vectorListVector.getObject(i).asInstanceOf[java.util.List[Float]]
-          vectorSlice.asScala.map(v => f"$v%.1f").mkString("[", ", ", "]")
+          val sb = new StringBuilder("[")
+          var j = 0
+          while (j < vectorSlice.size()) {
+            if (j > 0) sb.append(", ")
+            sb.append(String.format("%.1f", vectorSlice.get(j).asInstanceOf[AnyRef]))
+            j += 1
+          }
+          sb.append("]")
+          sb.toString
         } else {
           "null"
         }
 
-        println(f"$id%-10s $name%-20s $value%-15s $vectorStr")
+        println(String.format("%-10s %-20s %-15s %s", id, name, value, vectorStr))
+        i += 1
       }
 
       if (rowCount > displayCount) {
@@ -223,11 +218,13 @@ object MilvusStorageSparkTest {
     // Simple path replacement - replace the temp paths with actual paths
     var updated = manifest
 
-    for (i <- 0 to 2) {
+    var i = 0
+    while (i < 3) {
       // Replace any path to column_group_i.parquet with the actual path
       val pattern = s""""paths":\\s*\\[\\s*"[^"]*column_group_${i}\\.parquet"\\s*\\]"""
       val replacement = s""""paths": ["${testDataDir}/column_group_${i}.parquet"]"""
       updated = updated.replaceAll(pattern, replacement)
+      i += 1
     }
 
     updated

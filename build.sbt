@@ -165,6 +165,9 @@ assembly / assemblyMergeStrategy := {
   // Handle hadoop package-info conflicts
   case PathList("org", "apache", "hadoop", xs @ _*) if xs.last == "package-info.class" =>
     MergeStrategy.first
+  // Handle AWS SDK VersionInfo conflicts
+  case PathList("software", "amazon", "awssdk", xs @ _*) if xs.last == "VersionInfo.class" =>
+    MergeStrategy.first
   // Default case
   case x =>
     val oldStrategy = (ThisBuild / assemblyMergeStrategy).value
