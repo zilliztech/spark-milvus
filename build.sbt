@@ -72,6 +72,9 @@ lazy val root = (project in file("."))
       "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
     ),
 
+    // Include test dependencies in run classpath for example applications
+    Compile / run / fullClasspath := (Compile / run / fullClasspath).value ++ (Test / fullClasspath).value,
+
     // JVM options for tests
     Test / javaOptions ++= Seq(
       "-Xss2m",
@@ -83,6 +86,10 @@ lazy val root = (project in file("."))
     Test / envVars := Map(
       "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
     ),
+
+    // Add milvus-storage JNI library as unmanaged dependency
+    Compile / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni-test_2.13-0.1.0-SNAPSHOT.jar",
+    Test / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni-test_2.13-0.1.0-SNAPSHOT.jar",
 
     libraryDependencies ++= Seq(
       munit % Test,
@@ -102,7 +109,12 @@ lazy val root = (project in file("."))
       awsSdkS3Transfer,
       awsSdkCore,
       jacksonScala,
-      jacksonDatabind
+      jacksonDatabind,
+      arrowFormat,
+      arrowVector,
+      arrowMemoryCore,
+      arrowMemoryNetty,
+      arrowCData
     ),
     Compile / PB.protoSources += baseDirectory.value / "milvus-proto/proto",
     Compile / PB.targets := Seq(
@@ -129,6 +141,8 @@ lazy val root = (project in file("."))
 assembly / assemblyShadeRules := Seq(
   ShadeRule.rename("com.google.protobuf.**" -> "shade_proto.@1").inAll,
   ShadeRule.rename("com.google.common.**" -> "shade_googlecommon.@1").inAll
+  // Note: Arrow cannot be shaded due to JNI bindings with hardcoded class names
+  // Use spark.driver.userClassPathFirst=true to prioritize our Arrow version
 )
 
 assembly / assemblyMergeStrategy := {
@@ -145,11 +159,17 @@ assembly / assemblyMergeStrategy := {
   // Handle FastDoubleParser notice
   case PathList("META-INF", "FastDoubleParser-NOTICE") =>
     MergeStrategy.discard
+  // Handle Arrow git properties
+  case PathList("arrow-git.properties") =>
+    MergeStrategy.first
   // Handle module-info.class files
   case x if x.endsWith("module-info.class") =>
     MergeStrategy.discard
   // Handle hadoop package-info conflicts
   case PathList("org", "apache", "hadoop", xs @ _*) if xs.last == "package-info.class" =>
+    MergeStrategy.first
+  // Handle AWS SDK VersionInfo conflicts
+  case PathList("software", "amazon", "awssdk", xs @ _*) if xs.last == "VersionInfo.class" =>
     MergeStrategy.first
   // Default case
   case x =>
