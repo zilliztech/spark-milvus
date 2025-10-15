@@ -89,6 +89,7 @@ class MilvusPartitionReader(
     def getDataType(): MilvusDataType // Get the data type of the field
     def moveToNextRecord(): Unit // Move to the next record
     def close(): Unit // Close the file stream
+    def isNullOnly(): Boolean // Check if this binlog contains only null values
   }
 
   private class MilvusBinlogFieldFileReader(
@@ -112,6 +113,12 @@ class MilvusPartitionReader(
       0 // Index within the current event's data array
     private var currentReaderType: String =
       _ // Need to know if this file is insert or delete type
+
+    // Track if this binlog contains only null values (dataSize == 0)
+    // In this case, we need to sync with the expected row count from other binlogs
+    private var isNullOnlyBinlog: Boolean = false
+    private var expectedRowCount: Int = -1 // Expected total row count for this binlog
+    private var virtualNullIndex: Int = 0 // Virtual index for null-only binlogs
 
     // You might need to pass the expected reader type (insert/delete) for this field file
     // Or infer it from the file content/name if possible
@@ -139,6 +146,8 @@ class MilvusPartitionReader(
 
     override def getDataType(): MilvusDataType = dataType
 
+    override def isNullOnly(): Boolean = isNullOnlyBinlog
+
     override def hasNext(): Boolean = {
       currentReaderType match {
         case Constants.LogReaderTypeInsert => hasNextInsertEvent()
@@ -161,7 +170,17 @@ class MilvusPartitionReader(
           LogReader.readInsertEvent(inputStream, objectMapper, dataType)
       }
 
-      // Ensure we have a valid event and currentIndex is within bounds
+      // Check if this is a null-only binlog (all values are null, dataSize == 0)
+      if (insertEvent != null && insertEvent.getDataSize() == 0) {
+        // This binlog has no actual data, meaning all values are null
+        // We cannot determine hasNext on our own - we need to sync with other binlogs
+        // Mark this as a null-only binlog and return false
+        // The validation logic will skip this reader when checking alignment
+        isNullOnlyBinlog = true
+        return false // No actual data to read
+      }
+
+      // Normal case: check if we have actual data
       insertEvent != null && currentIndex < insertEvent.getDataSize()
     }
 
@@ -191,10 +210,21 @@ class MilvusPartitionReader(
     }
 
     override def moveToNextRecord(): Unit = {
-      currentIndex += 1
+      // For null-only binlogs, we don't increment the actual index
+      // since there's no real data - we just track that we've "read" a virtual null
+      if (isNullOnlyBinlog) {
+        virtualNullIndex += 1
+      } else {
+        currentIndex += 1
+      }
     }
 
     private def readNextInsertRecord(): Any = {
+      // If this is a null-only binlog, always return null
+      if (isNullOnlyBinlog) {
+        return null
+      }
+
       if (insertEvent == null) {
         // This should not happen if hasNext() was called correctly
         throw new IllegalStateException(
@@ -398,18 +428,34 @@ class MilvusPartitionReader(
         fieldFileReaders
       }
 
-      // Check if ALL field readers have a next record
-      val allHaveNext = currentFieldReaders.values.forall(_.hasNext())
+      // Separate readers into null-only and normal readers
+      val (nullOnlyReaders, normalReaders) = currentFieldReaders.partition {
+        case (_, reader) => reader.isNullOnly()
+      }
 
-      // Consistency check: If some have next and some don't, it's an alignment error
-      if (!allHaveNext && currentFieldReaders.values.exists(_.hasNext())) {
+      // Check if ALL normal (non-null-only) field readers have a next record
+      // Null-only readers don't have actual data, so we ignore them in the check
+      val normalHaveNext = if (normalReaders.nonEmpty) {
+        normalReaders.values.forall(_.hasNext())
+      } else {
+        // If all readers are null-only, we have no more data
+        false
+      }
+
+      // Consistency check: If some normal readers have next and some don't, it's an alignment error
+      // We only check normal readers, not null-only ones
+      if (!normalHaveNext && normalReaders.values.exists(_.hasNext())) {
         val status = currentFieldReaders
-          .map { case (name, reader) => s"$name: ${reader.hasNext()}" }
+          .map { case (name, reader) =>
+            s"$name: hasNext=${reader.hasNext()}, isNullOnly=${reader.isNullOnly()}"
+          }
           .mkString(", ")
         throw new IllegalStateException(
           s"Record count mismatch between field files in partition. Status: $status"
         )
       }
+
+      val allHaveNext = normalHaveNext
 
       hasNext = allHaveNext
 
