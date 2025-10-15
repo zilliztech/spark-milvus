@@ -159,6 +159,14 @@ class MilvusPartitionReader(
       if (insertEvent == null) {
         insertEvent =
           LogReader.readInsertEvent(inputStream, objectMapper, dataType)
+
+        // If the event has no data (empty/null payload), keep reading more events
+        // until we find one with data or reach end of stream
+        while (insertEvent != null && insertEvent.getDataSize() == 0) {
+          logWarning(s"Skipping empty insert event with 0 data size in file $filePath")
+          insertEvent =
+            LogReader.readInsertEvent(inputStream, objectMapper, dataType)
+        }
       }
 
       // Ensure we have a valid event and currentIndex is within bounds
@@ -173,6 +181,14 @@ class MilvusPartitionReader(
       if (deleteEvent == null) {
         deleteEvent =
           LogReader.readDeleteEvent(inputStream, objectMapper, dataType)
+
+        // If the event has no data (empty/null payload), keep reading more events
+        // until we find one with data or reach end of stream
+        while (deleteEvent != null && deleteEvent.pks.length == 0) {
+          logWarning(s"Skipping empty delete event with 0 pks in file $filePath")
+          deleteEvent =
+            LogReader.readDeleteEvent(inputStream, objectMapper, dataType)
+        }
       }
 
       // Ensure we have a valid event and currentIndex is within bounds
@@ -401,17 +417,10 @@ class MilvusPartitionReader(
       // Check if ALL field readers have a next record
       val allHaveNext = currentFieldReaders.values.forall(_.hasNext())
 
-      // Consistency check: If some have next and some don't, it's an alignment error
-      if (!allHaveNext && currentFieldReaders.values.exists(_.hasNext())) {
-        val status = currentFieldReaders
-          .map { case (name, reader) => s"$name: ${reader.hasNext()}" }
-          .mkString(", ")
-        throw new IllegalStateException(
-          s"Record count mismatch between field files in partition. Status: $status"
-        )
-      }
-
-      hasNext = allHaveNext
+      // For fields that have exhausted their data (hasNext == false), we'll treat them as
+      // having null values for remaining records. This handles the case where some fields
+      // have all-null binlog files that are empty or have no events.
+      hasNext = allHaveNext || currentFieldReaders.values.exists(_.hasNext())
 
       // If we have a next record, check if it passes the filters
       if (hasNext) {
@@ -420,8 +429,11 @@ class MilvusPartitionReader(
           return true // Found a row that passes the filters
         }
         // If the row doesn't pass the filters, move to next record and continue
+        // Only move readers that still have data (to avoid moving past the end)
         currentFieldReaders.values.foreach { reader =>
-          reader.moveToNextRecord()
+          if (reader.hasNext()) {
+            reader.moveToNextRecord()
+          }
         }
       } else {
         // If no more records in current field files, try next set if available
@@ -599,14 +611,21 @@ class MilvusPartitionReader(
       currentReaders.get(fieldID.toString) match {
         case Some(reader) =>
           try {
-            val fieldValue = reader.readNextRecord()
-            reader.moveToNextRecord()
-            setInternalRowValue(
-              row,
-              index,
-              fieldValue,
-              reader.getDataType()
-            )
+            // Check if this reader has data available
+            if (reader.hasNext()) {
+              val fieldValue = reader.readNextRecord()
+              reader.moveToNextRecord()
+              setInternalRowValue(
+                row,
+                index,
+                fieldValue,
+                reader.getDataType()
+              )
+            } else {
+              // Reader has exhausted its data (e.g., null binlog with no payload)
+              // Set this field to null for remaining records
+              row.setNullAt(index)
+            }
           } catch {
             case e: Exception =>
               logError(
@@ -771,13 +790,20 @@ class MilvusPartitionReader(
       currentReaders.get(fieldID.toString) match {
         case Some(reader) =>
           try {
-            val fieldValue = reader.readNextRecord()
-            setInternalRowValue(
-              row,
-              index,
-              fieldValue,
-              reader.getDataType()
-            )
+            // Check if this reader has data available
+            if (reader.hasNext()) {
+              val fieldValue = reader.readNextRecord()
+              setInternalRowValue(
+                row,
+                index,
+                fieldValue,
+                reader.getDataType()
+              )
+            } else {
+              // Reader has exhausted its data (e.g., null binlog with no payload)
+              // Set this field to null for remaining records
+              row.setNullAt(index)
+            }
           } catch {
             case e: Exception =>
               logError(
