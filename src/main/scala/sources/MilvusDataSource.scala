@@ -2,53 +2,31 @@ package com.zilliz.spark.connector.sources
 
 import java.{util => ju}
 import java.io.FileNotFoundException
-import java.util.{Collections, HashMap, Map => JMap}
+import java.util.{HashMap, Map => JMap}
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
-import scala.util.{Failure, Success, Try}
 
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.catalog.{
+  SupportsRead,
   SupportsWrite,
   Table,
   TableCapability,
   TableProvider
 }
-import org.apache.spark.sql.connector.catalog.SupportsRead
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.connector.read.{
   Batch,
   InputPartition,
-  PartitionReader,
   PartitionReaderFactory,
   Scan,
-  ScanBuilder
-}
-import org.apache.spark.sql.connector.read.{
+  ScanBuilder,
   SupportsPushDownFilters,
   SupportsPushDownRequiredColumns
 }
-import org.apache.spark.sql.connector.write.{
-  BatchWrite,
-  DataWriterFactory,
-  PhysicalWriteInfo,
-  WriterCommitMessage
-}
-import org.apache.spark.sql.connector.write.{
-  BatchWrite,
-  LogicalWriteInfo,
-  Write,
-  WriteBuilder
-}
-import org.apache.spark.sql.connector.write.{
-  DataWriter,
-  DataWriterFactory,
-  WriterCommitMessage
-}
-import org.apache.spark.sql.sources.DataSourceRegister
-import org.apache.spark.sql.sources.Filter
+import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
+import org.apache.spark.sql.sources.{DataSourceRegister, Filter}
 import org.apache.spark.sql.types.{
   DataTypes => SparkDataTypes,
   LongType,
@@ -63,10 +41,10 @@ import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusCollectionInfo,
   MilvusOption,
-  MilvusS3Option,
-  MilvusSegmentInfo
+  MilvusS3Option
 }
-import com.zilliz.spark.connector.MilvusPartitionInfo
+import com.zilliz.spark.connector.read.{MilvusInputPartition, MilvusPartitionReaderFactory}
+import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}
 
 // 1. DataSourceRegister and TableProvider
 case class MilvusDataSource() extends TableProvider with DataSourceRegister {
@@ -244,15 +222,6 @@ case class MilvusTable(
       TableCapability.BATCH_READ
     ).asJava
   }
-}
-
-// 3. WriteBuilder and ScanBuilder
-case class MilvusWriteBuilder(
-    milvusOptions: MilvusOption,
-    info: LogicalWriteInfo
-) extends WriteBuilder
-    with Serializable {
-  override def build: Write = MilvusWrite(milvusOptions, info.schema())
 }
 
 class MilvusScanBuilder(
@@ -677,69 +646,6 @@ class MilvusScan(
   }
 
   override def createReaderFactory(): PartitionReaderFactory = {
-    new MilvusReaderFactory(schema, options, pushedFilters)
-  }
-}
-
-// 4. Write
-case class MilvusWrite(milvusOptions: MilvusOption, schema: StructType)
-    extends Write
-    with Serializable {
-  override def toBatch: BatchWrite = MilvusBatchWriter(milvusOptions, schema)
-}
-
-case class MilvusBatchWriter(milvusOptions: MilvusOption, schema: StructType)
-    extends BatchWrite {
-  override def createBatchWriterFactory(
-      info: PhysicalWriteInfo
-  ): DataWriterFactory = {
-    MilvusDataWriterFactory(milvusOptions, schema)
-  }
-
-  override def commit(messages: Array[WriterCommitMessage]): Unit = {}
-
-  override def abort(messages: Array[WriterCommitMessage]): Unit = {}
-}
-
-case class MilvusDataWriterFactory(
-    milvusOptions: MilvusOption,
-    schema: StructType
-) extends DataWriterFactory
-    with Serializable {
-  override def createWriter(
-      partitionId: Int,
-      taskId: Long
-  ): DataWriter[InternalRow] = {
-    MilvusInsertDataWriter(partitionId, taskId, milvusOptions, schema)
-  }
-}
-
-case class MilvusCommitMessage(rowCount: Int) extends WriterCommitMessage
-
-case class MilvusInputPartition(
-    fieldFiles: Seq[Map[String, String]],
-    partition: String = ""
-) extends InputPartition
-
-class MilvusReaderFactory(
-    schema: StructType,
-    options: CaseInsensitiveStringMap,
-    pushedFilters: Array[Filter] = Array.empty[Filter]
-) extends PartitionReaderFactory {
-
-  private val readerOptions = MilvusS3Option(options)
-
-  override def createReader(
-      partition: InputPartition
-  ): PartitionReader[InternalRow] = {
-    val milvusPartition = partition.asInstanceOf[MilvusInputPartition]
-    // Create the data reader with the file map, schema, and options
-    new MilvusPartitionReader(
-      schema,
-      milvusPartition.fieldFiles,
-      milvusPartition.partition,
-      readerOptions,
-      pushedFilters
-    )
+    new MilvusPartitionReaderFactory(schema, options, pushedFilters)
   }
 }

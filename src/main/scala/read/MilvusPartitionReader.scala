@@ -1,22 +1,14 @@
-package com.zilliz.spark.connector.sources
+package com.zilliz.spark.connector.read
 
 import java.io.InputStream
-import java.util.concurrent.{
-  CompletableFuture,
-  ConcurrentHashMap,
-  Executors,
-  TimeUnit
-}
+import java.util.concurrent.{ConcurrentHashMap, Executors, TimeUnit}
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.concurrent
-import scala.concurrent.{Await, ExecutionContext, Future}
-import scala.concurrent.duration._
+import scala.concurrent.{ExecutionContext, Future}
 import scala.jdk.CollectionConverters._
-import scala.util.{Failure, Success, Try}
-import scala.util.control.Breaks._
+import scala.util.{Failure, Success}
 
-import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
-import org.apache.hadoop.fs.s3a.S3AFileSystem
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData}
 import org.apache.spark.sql.catalyst.InternalRow
@@ -25,7 +17,6 @@ import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.{
   ArrayType,
   DataTypes => SparkDataTypes,
-  StringType,
   StructType
 }
 import org.apache.spark.unsafe.types.UTF8String
@@ -34,13 +25,13 @@ import com.zilliz.spark.connector.binlog.{
   Constants,
   DeleteEventData,
   DescriptorEvent,
-  DescriptorEventData,
+  InsertEventData,
   LogReader
 }
-import com.zilliz.spark.connector.binlog.InsertEventData
 import com.zilliz.spark.connector.MilvusS3Option
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
+// for Milvus 2.5 and below version data source
 class MilvusPartitionReader(
     schema: StructType,
     fieldFilesSeq: Seq[Map[String, String]],
@@ -869,7 +860,7 @@ class MilvusPartitionReader(
         val columnIndex = getColumnIndex(attr)
         if (columnIndex == -1) return true
         val rowValue = getRowValue(row, columnIndex, attr)
-        rowValue == value
+        compareValues(rowValue, value) == 0
 
       case GreaterThan(attr, value) =>
         val columnIndex = getColumnIndex(attr)
@@ -899,7 +890,7 @@ class MilvusPartitionReader(
         val columnIndex = getColumnIndex(attr)
         if (columnIndex == -1) return true
         val rowValue = getRowValue(row, columnIndex, attr)
-        values.contains(rowValue)
+        values.exists(v => compareValues(rowValue, v) == 0)
 
       case IsNull(attr) =>
         val columnIndex = getColumnIndex(attr)
@@ -952,19 +943,26 @@ class MilvusPartitionReader(
 
   private def compareValues(rowValue: Any, filterValue: Any): Int = {
     (rowValue, filterValue) match {
-      case (rv: Long, fv: Long)       => rv.compareTo(fv)
-      case (rv: Long, fv: Int)        => rv.compareTo(fv.toLong)
-      case (rv: Int, fv: Long)        => rv.toLong.compareTo(fv)
-      case (rv: Int, fv: Int)         => rv.compareTo(fv)
-      case (rv: Float, fv: Float)     => rv.compareTo(fv)
-      case (rv: Double, fv: Double)   => rv.compareTo(fv)
-      case (rv: String, fv: String)   => rv.compareTo(fv)
+      case (null, null) => 0
+      case (null, _) => -1
+      case (_, null) => 1
+      case (rv: Long, fv: Long) => rv.compareTo(fv)
+      case (rv: Long, fv: Int) => rv.compareTo(fv.toLong)
+      case (rv: Int, fv: Int) => rv.compareTo(fv)
+      case (rv: Int, fv: Long) => rv.toLong.compareTo(fv)
+      case (rv: Short, fv: Short) => rv.compareTo(fv)
+      case (rv: Short, fv: Int) => rv.toInt.compareTo(fv)
+      case (rv: Float, fv: Float) => rv.compareTo(fv)
+      case (rv: Float, fv: Double) => rv.toDouble.compareTo(fv)
+      case (rv: Double, fv: Double) => rv.compareTo(fv)
+      case (rv: Double, fv: Float) => rv.compareTo(fv.toDouble)
       case (rv: Boolean, fv: Boolean) => rv.compareTo(fv)
-      case (rv: Long, fv: String)     => rv.toString.compareTo(fv)
-      case (rv: String, fv: Long)     => rv.compareTo(fv.toString)
-      case (rv: Boolean, fv: String)  => rv.toString.compareTo(fv)
-      case (rv: String, fv: Boolean)  => rv.compareTo(fv.toString)
-      case _ => 0 // Default to equal if types don't match
+      case (rv: String, fv: String) => rv.compareTo(fv)
+      case (rv: Array[Byte], fv: Array[Byte]) =>
+        java.util.Arrays.compare(rv, fv)
+      case _ =>
+        // For other types, try toString comparison as fallback
+        rowValue.toString.compareTo(filterValue.toString)
     }
   }
 

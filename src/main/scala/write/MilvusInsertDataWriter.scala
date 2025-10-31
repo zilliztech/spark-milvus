@@ -1,7 +1,5 @@
-package com.zilliz.spark.connector.sources
+package com.zilliz.spark.connector.write
 
-import java.nio.ByteBuffer
-import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.util.{Failure, Success}
 
@@ -19,16 +17,19 @@ import org.apache.spark.unsafe.types.UTF8String
 import com.zilliz.spark.connector.{
   DataTypeException,
   MilvusClient,
+  MilvusFieldData,
   MilvusOption,
+  MilvusRpcException,
   MilvusSchemaUtil
 }
-import com.zilliz.spark.connector.{MilvusFieldData, MilvusRpcException}
 import io.milvus.grpc.schema.{
   CollectionSchema,
   DataType => MilvusDataType,
   FieldData,
   FieldSchema
 }
+
+case class MilvusCommitMessage(rowCount: Int) extends WriterCommitMessage
 
 case class MilvusInsertDataWriter(
     partitionId: Int,
