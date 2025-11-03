@@ -79,16 +79,17 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
     val milvusOption = MilvusOption(options)
     val client = MilvusClient(milvusOption)
     try {
-      val milvusSchema = client.getCollectionSchema(
+      val result = client.getCollectionSchema(
         milvusOption.databaseName,
         milvusOption.collectionName
-      ).getOrElse(
+      )
+      val schema = result.getOrElse(
         throw new Exception(
-          s"Collection ${milvusOption.collectionName} not found"
+          s"Failed to get collection schema: ${result.failed.get.getMessage}"
         )
       )
       StructType(
-        milvusSchema.fields.map(field =>
+        schema.fields.map(field =>
           StructField(
             field.name,
             DataTypeUtil.toDataType(field),
@@ -213,24 +214,17 @@ case class MilvusTable(
       )
     )
     val maxFieldID = fieldName2ID.values.max
-    if (
-      milvusCollection.schema.enableDynamicField &&
-      (fieldIDs.isEmpty || fieldIDs.contains((maxFieldID + 1).toString))
-    ) {
+    if (milvusCollection.schema.enableDynamicField &&
+      (fieldIDs.isEmpty || fieldIDs.contains((maxFieldID + 1).toString))) {
       fields = fields :+ StructField("$meta", StringType, true)
     }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnPartition
-      )
-    ) {
+    if (milvusOption.extraColumns.contains(MilvusOption.MilvusExtraColumnPartition)) {
       fields = fields :+ StructField("partition", StringType, true)
     }
     StructType(fields)
   }
 
   override def capabilities(): ju.Set[TableCapability] = {
-    import scala.jdk.CollectionConverters._
     Set[TableCapability](
       TableCapability.BATCH_WRITE,
       TableCapability.BATCH_READ
@@ -258,8 +252,7 @@ class MilvusScanBuilder(
   private var pushedFilterArray: Array[Filter] = Array.empty[Filter]
 
   override def pruneColumns(requiredSchema: StructType): Unit = {
-    val readerFieldIDs = currentOptions.getOrDefault(MilvusOption.ReaderFieldIDs, "")
-    if (readerFieldIDs.nonEmpty) {
+    if (currentOptions.getOrDefault(MilvusOption.ReaderFieldIDs, "").nonEmpty) {
       return
     }
     val fieldName2ID = mutable.Map[String, Long]()
@@ -305,7 +298,6 @@ class MilvusScanBuilder(
     }
 
     val tmpMap = new HashMap[String, String]()
-    import scala.jdk.CollectionConverters._
     options.asScala.foreach { case (key, value) =>
       tmpMap.put(key, value)
     }
@@ -343,9 +335,7 @@ class MilvusScanBuilder(
     unsupportedFilters
   }
 
-  override def pushedFilters(): Array[Filter] = {
-    pushedFilterArray
-  }
+  override def pushedFilters(): Array[Filter] = pushedFilterArray
 
   private def isSupportedFilter(filter: Filter): Boolean = {
     import org.apache.spark.sql.sources._
@@ -668,44 +658,6 @@ class MilvusScan(
       .toMap
   }
 
-  def buildManifestForSegment(
-      milvusSchema: CollectionSchema,
-      collectionID: String,
-      partitionID: String,
-      segmentID: String,
-      client: MilvusClient
-  ): String = {
-    val segmentInfo = client.getSegmentInfo(collectionID.toLong, segmentID.toLong)
-      .getOrElse(throw new IllegalStateException(
-        s"Failed to get segment info for segment $segmentID"
-      ))
-
-    if (segmentInfo.insertLogIDs.isEmpty) {
-      throw new IllegalStateException(
-        s"No insert logs found for segment $segmentID"
-      )
-    }
-
-    val bucket = milvusOption.options.getOrElse(Properties.FsConfig.FsBucketName, "a-bucket")
-    val rootPath = milvusOption.options.getOrElse(Properties.FsConfig.FsRootPath, "files")
-
-    val binlogFilesMap = segmentInfo.insertLogIDs
-      .groupBy(_.split("/")(0))  // Group by field ID
-      .map { case (fieldID, logIDs) =>
-        val paths = logIDs.map { logID =>
-          s"$bucket/$rootPath/insert_log/$collectionID/$partitionID/$segmentID/$logID"
-        }
-        fieldID -> paths
-      }
-
-    val manifest = ManifestBuilder.buildManifest(
-      milvusSchema,
-      binlogFilesMap,
-      version = 0
-    )
-
-    ManifestBuilder.toJson(manifest)
-  }
 
   override def toBatch: Batch = this
 
@@ -748,7 +700,7 @@ class MilvusScan(
     // V2 segments: manifests for FFI reading
     var v2Manifests = mutable.Map[String, (String, String, String)]() // segmentID -> (collectionID, partitionID, manifest)
 
-    // Get collection schema for V2 manifest building
+    // Get collection schema and S3 config for V2 manifest building
     val collectionInfo = client.getCollectionInfo(
       milvusOption.databaseName,
       milvusOption.collectionName
@@ -757,6 +709,8 @@ class MilvusScan(
         s"Collection ${milvusOption.collectionName} not found"
       )
     )
+    val s3Bucket = milvusOption.options.getOrElse(Properties.FsConfig.FsBucketName, "a-bucket")
+    val s3RootPath = milvusOption.options.getOrElse(Properties.FsConfig.FsRootPath, "files")
 
     if (rawPath.isEmpty) {
       if (!partition.isEmpty() && !segment.isEmpty()) {
@@ -764,12 +718,14 @@ class MilvusScan(
         if (validV1Segments.contains(segment)) {
           fieldMaps(segment) = getSegmentFieldMap(fs, client, rootPath)
         } else if (validV2Segments.contains(segment)) {
-          val manifest = buildManifestForSegment(
+          val manifest = ManifestBuilder.buildManifestForSegment(
             collectionInfo.schema,
             collection,
             partition,
             segment,
-            client
+            client,
+            s3Bucket,
+            s3RootPath
           )
           v2Manifests(segment) = (collection, partition, manifest)
         }
@@ -788,12 +744,14 @@ class MilvusScan(
         // Process V2 segments - use FFI instead of filesystem
         validV2Segments.foreach { segmentID =>
           try {
-            val manifest = buildManifestForSegment(
+            val manifest = ManifestBuilder.buildManifestForSegment(
               collectionInfo.schema,
               collection,
               partition,
               segmentID,
-              client
+              client,
+              s3Bucket,
+              s3RootPath
             )
             v2Manifests(segmentID) = (collection, partition, manifest)
             segment2Partition(segmentID) = partition
@@ -850,12 +808,14 @@ class MilvusScan(
 
             if (partitionID.nonEmpty) {
               try {
-                val manifest = buildManifestForSegment(
+                val manifest = ManifestBuilder.buildManifestForSegment(
                   collectionInfo.schema,
                   collection,
                   partitionID,
                   segmentID,
-                  client
+                  client,
+                  s3Bucket,
+                  s3RootPath
                 )
                 v2Manifests(segmentID) = (collection, partitionID, manifest)
                 segment2Partition(segmentID) = partitionID
@@ -912,7 +872,6 @@ class MilvusScan(
 
   override def createReaderFactory(): PartitionReaderFactory = {
     // Convert CaseInsensitiveStringMap to regular Map for serialization
-    import scala.jdk.CollectionConverters._
     val optionsMap = options.asScala.toMap
     new MilvusPartitionReaderFactory(schema, optionsMap, pushedFilters)
   }

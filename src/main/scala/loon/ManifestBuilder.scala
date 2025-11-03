@@ -165,6 +165,56 @@ object ManifestBuilder {
   }
 
   /**
+   * Build manifest for a specific segment using MilvusClient to fetch segment info
+   *
+   * @param schema Collection schema
+   * @param collectionID Collection ID
+   * @param partitionID Partition ID
+   * @param segmentID Segment ID
+   * @param client MilvusClient instance to fetch segment info
+   * @param bucket S3 bucket name
+   * @param rootPath S3 root path
+   * @return Manifest JSON string
+   */
+  def buildManifestForSegment(
+      schema: CollectionSchema,
+      collectionID: String,
+      partitionID: String,
+      segmentID: String,
+      client: com.zilliz.spark.connector.MilvusClient,
+      bucket: String,
+      rootPath: String
+  ): String = {
+    val segmentInfo = client.getSegmentInfo(collectionID.toLong, segmentID.toLong)
+      .getOrElse(throw new IllegalStateException(
+        s"Failed to get segment info for segment $segmentID"
+      ))
+
+    if (segmentInfo.insertLogIDs.isEmpty) {
+      throw new IllegalStateException(
+        s"No insert logs found for segment $segmentID"
+      )
+    }
+
+    val binlogFilesMap = segmentInfo.insertLogIDs
+      .groupBy(_.split("/")(0))  // Group by field ID
+      .map { case (fieldID, logIDs) =>
+        val paths = logIDs.map { logID =>
+          s"$bucket/$rootPath/insert_log/$collectionID/$partitionID/$segmentID/$logID"
+        }
+        fieldID -> paths
+      }
+
+    val manifest = buildManifest(
+      schema,
+      binlogFilesMap,
+      version = 0
+    )
+
+    toJson(manifest)
+  }
+
+  /**
    * Convert Manifest to JSON string
    */
   def toJson(manifest: Manifest): String = {
