@@ -41,7 +41,8 @@ import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusCollectionInfo,
   MilvusOption,
-  MilvusS3Option
+  MilvusS3Option,
+  VectorSearchConfig
 }
 import com.zilliz.spark.connector.read.{
   MilvusInputPartition,
@@ -438,47 +439,12 @@ class MilvusScan(
       Seq[String]()
     }
 
-  // Parse vector search configuration for V2 segments
-  private val vectorSearchConfig = parseVectorSearchConfig()
+  // Get vector search configuration from MilvusOption
+  private val vectorSearchConfig = milvusOption.vectorSearchConfig
 
-  case class VectorSearchConfig(
-      queryVector: Array[Float],
-      topK: Int,
-      metricType: String,
-      vectorColumn: String
-  )
-
-  private def parseVectorSearchConfig(): Option[VectorSearchConfig] = {
-    val queryVectorStr = Option(options.get(MilvusOption.VectorSearchQueryVector))
-    val topKFromOption = Option(options.get(MilvusOption.VectorSearchTopK)).map(_.toInt)
-
-    if (queryVectorStr.isEmpty || topKFromOption.isEmpty) {
-      return None
-    }
-
-    try {
-      val queryVector = parseQueryVector(queryVectorStr.get)
-      val metricType = Option(options.get(MilvusOption.VectorSearchMetric))
-        .getOrElse("L2")
-        .toUpperCase
-      val vectorColumn = Option(options.get(MilvusOption.VectorSearchVectorColumn))
-        .getOrElse("vector")
-
-      logInfo(s"Vector search enabled: topK=${topKFromOption.get}, metric=$metricType, column=$vectorColumn")
-
-      Some(VectorSearchConfig(queryVector, topKFromOption.get, metricType, vectorColumn))
-    } catch {
-      case e: Exception =>
-        logWarning(s"Failed to parse vector search config: ${e.getMessage}")
-        None
-    }
-  }
-
-  private def parseQueryVector(jsonStr: String): Array[Float] = {
-    // Parse JSON array: "[0.1, 0.2, 0.3, ...]"
-    jsonStr.trim.stripPrefix("[").stripSuffix("]")
-      .split(",")
-      .map(_.trim.toFloat)
+  // Log vector search configuration if enabled
+  vectorSearchConfig.foreach { config =>
+    logInfo(s"Vector search enabled: topK=${config.topK}, metric=${config.metricType}, column=${config.vectorColumn}")
   }
 
   def getPathOption(): String = {
@@ -743,22 +709,17 @@ class MilvusScan(
 
         // Process V2 segments - use FFI instead of filesystem
         validV2Segments.foreach { segmentID =>
-          try {
-            val manifest = ManifestBuilder.buildManifestForSegment(
-              collectionInfo.schema,
-              collection,
-              partition,
-              segmentID,
-              client,
-              s3Bucket,
-              s3RootPath
-            )
-            v2Manifests(segmentID) = (collection, partition, manifest)
-            segment2Partition(segmentID) = partition
-          } catch {
-            case e: Exception =>
-              logWarning(s"Failed to build manifest for V2 segment $segmentID: ${e.getMessage}")
-          }
+          val manifest = ManifestBuilder.buildManifestForSegment(
+            collectionInfo.schema,
+            collection,
+            partition,
+            segmentID,
+            client,
+            s3Bucket,
+            s3RootPath
+          )
+          v2Manifests(segmentID) = (collection, partition, manifest)
+          segment2Partition(segmentID) = partition
         }
       } else {
         // For V1 segments, we need filesystem access
@@ -807,22 +768,17 @@ class MilvusScan(
             })
 
             if (partitionID.nonEmpty) {
-              try {
-                val manifest = ManifestBuilder.buildManifestForSegment(
-                  collectionInfo.schema,
-                  collection,
-                  partitionID,
-                  segmentID,
-                  client,
-                  s3Bucket,
-                  s3RootPath
-                )
-                v2Manifests(segmentID) = (collection, partitionID, manifest)
-                segment2Partition(segmentID) = partitionID
-              } catch {
-                case e: Exception =>
-                  logWarning(s"Failed to build manifest for V2 segment $segmentID: ${e.getMessage}")
-              }
+              val manifest = ManifestBuilder.buildManifestForSegment(
+                collectionInfo.schema,
+                collection,
+                partitionID,
+                segmentID,
+                client,
+                s3Bucket,
+                s3RootPath
+              )
+              v2Manifests(segmentID) = (collection, partitionID, manifest)
+              segment2Partition(segmentID) = partitionID
             }
           }
         }

@@ -11,6 +11,16 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import com.zilliz.spark.connector.binlog.Constants
 import com.zilliz.spark.connector.MilvusConnectionException
 
+/**
+ * Vector search configuration for Milvus Storage V2
+ */
+case class VectorSearchConfig(
+    queryVector: Array[Float],
+    topK: Int,
+    metricType: String,
+    vectorColumn: String
+)
+
 case class MilvusOption(
     uri: String,
     token: String = "",
@@ -31,7 +41,8 @@ case class MilvusOption(
     fieldID: String = "",
     fieldIDs: String = "",
     extraColumns: Seq[String] = Seq.empty,
-    options: Map[String, String] = Map.empty
+    options: Map[String, String] = Map.empty,
+    vectorSearchConfig: Option[VectorSearchConfig] = None
 )
 
 object MilvusOption {
@@ -133,6 +144,9 @@ object MilvusOption {
     import scala.collection.JavaConverters._
     val optionsMap = options.asScala.toMap
 
+    // Parse vector search configuration
+    val vectorSearchConfig = parseVectorSearchConfig(options)
+
     MilvusOption(
       uri,
       token,
@@ -153,8 +167,49 @@ object MilvusOption {
       fieldID,
       fieldIDs,
       extraColumns,
-      optionsMap
+      optionsMap,
+      vectorSearchConfig
     )
+  }
+
+  /**
+   * Parse vector search configuration from options
+   */
+  private def parseVectorSearchConfig(
+      options: CaseInsensitiveStringMap
+  ): Option[VectorSearchConfig] = {
+    val queryVectorStr = Option(options.get(VectorSearchQueryVector))
+    val topKStr = Option(options.get(VectorSearchTopK))
+
+    if (queryVectorStr.isEmpty || topKStr.isEmpty) {
+      return None
+    }
+
+    try {
+      val queryVector = parseQueryVector(queryVectorStr.get)
+      val topK = topKStr.get.toInt
+      val metricType = Option(options.get(VectorSearchMetric))
+        .getOrElse("L2")
+        .toUpperCase
+      val vectorColumn = Option(options.get(VectorSearchVectorColumn))
+        .getOrElse("vector")
+
+      Some(VectorSearchConfig(queryVector, topK, metricType, vectorColumn))
+    } catch {
+      case _: Exception => None
+    }
+  }
+
+  /**
+   * Parse query vector from JSON string format
+   * Expected format: "[0.1, 0.2, 0.3, ...]"
+   */
+  private def parseQueryVector(jsonStr: String): Array[Float] = {
+    jsonStr.trim
+      .stripPrefix("[")
+      .stripSuffix("]")
+      .split(",")
+      .map(_.trim.toFloat)
   }
 
   def isInt64PK(milvusPKType: String): Boolean = {
