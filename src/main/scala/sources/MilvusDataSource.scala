@@ -41,10 +41,20 @@ import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusCollectionInfo,
   MilvusOption,
-  MilvusS3Option
+  MilvusS3Option,
+  VectorSearchConfig
 }
-import com.zilliz.spark.connector.read.{MilvusInputPartition, MilvusPartitionReaderFactory}
+import com.zilliz.spark.connector.read.{
+  MilvusInputPartition,
+  MilvusPartitionReaderFactory,
+  MilvusStorageV2InputPartition
+}
 import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}
+import com.zilliz.spark.connector.loon.{
+  ManifestBuilder,
+  Properties
+}
+import io.milvus.grpc.schema.CollectionSchema
 
 // 1. DataSourceRegister and TableProvider
 case class MilvusDataSource() extends TableProvider with DataSourceRegister {
@@ -147,8 +157,9 @@ case class MilvusTable(
     }
   }
 
-  override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder =
+  override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
     MilvusWriteBuilder(milvusOption, info)
+  }
 
   override def newScanBuilder(
       options: CaseInsensitiveStringMap
@@ -186,33 +197,31 @@ case class MilvusTable(
         field.fieldID
       }
     }
-    if (fieldIDs.isEmpty || fieldIDs.contains("0"))
+    if (fieldIDs.isEmpty || fieldIDs.contains("0")) {
       fields = fields :+ StructField("row_id", LongType, false)
-    if (fieldIDs.isEmpty || fieldIDs.contains("1"))
+    }
+    if (fieldIDs.isEmpty || fieldIDs.contains("1")) {
       fields = fields :+ StructField("timestamp", LongType, false)
-    fields = fields ++ milvusCollection.schema.fields
+    }
+    val filteredFields = milvusCollection.schema.fields
       .filter(field =>
         fieldIDs.isEmpty || fieldIDs.contains(fieldName2ID(field.name).toString)
       )
-      .map(field =>
-        StructField(
-          field.name,
-          DataTypeUtil.toDataType(field),
-          field.nullable
-        )
+    fields = fields ++ filteredFields.map(field =>
+      StructField(
+        field.name,
+        DataTypeUtil.toDataType(field),
+        field.nullable
       )
+    )
     val maxFieldID = fieldName2ID.values.max
-    if (
-      milvusCollection.schema.enableDynamicField &&
-      (fieldIDs.isEmpty || fieldIDs.contains((maxFieldID + 1).toString))
-    )
+    if (milvusCollection.schema.enableDynamicField &&
+      (fieldIDs.isEmpty || fieldIDs.contains((maxFieldID + 1).toString))) {
       fields = fields :+ StructField("$meta", StringType, true)
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnPartition
-      )
-    )
+    }
+    if (milvusOption.extraColumns.contains(MilvusOption.MilvusExtraColumnPartition)) {
       fields = fields :+ StructField("partition", StringType, true)
+    }
     StructType(fields)
   }
 
@@ -264,6 +273,24 @@ class MilvusScanBuilder(
         fieldNames = fieldNames :+ field.name
       }
     })
+
+    // Add fields referenced in pushed filters to ensure they are not pruned
+    pushedFilterArray.foreach { filter =>
+      val filterColumns = extractFilterColumns(filter)
+      filterColumns.foreach { colName =>
+        if (fieldName2ID.contains(colName) && !fieldNames.contains(colName)) {
+          fieldNames = fieldNames :+ colName
+        }
+      }
+    }
+
+    // Add vector column if vector search is enabled
+    val vectorColumn = Option(options.get(MilvusOption.VectorSearchVectorColumn)).getOrElse("vector")
+    val hasVectorSearch = Option(options.get(MilvusOption.VectorSearchQueryVector)).isDefined
+    if (hasVectorSearch && fieldName2ID.contains(vectorColumn) && !fieldNames.contains(vectorColumn)) {
+      fieldNames = fieldNames :+ vectorColumn
+    }
+
     fieldNames = fieldNames.sortBy(fieldName => fieldName2ID(fieldName))
     logInfo(s"fieldNames after sort: $fieldNames")
     if (fieldNames.isEmpty) {
@@ -277,11 +304,12 @@ class MilvusScanBuilder(
     }
     // Only set ReaderFieldIDs if fieldNames is not empty
     if (fieldNames.nonEmpty) {
+      val readerFieldIDsStr = fieldNames
+        .map(fieldName => fieldName2ID(fieldName).toString)
+        .mkString(",")
       tmpMap.put(
         MilvusOption.ReaderFieldIDs,
-        fieldNames
-          .map(fieldName => fieldName2ID(fieldName).toString)
-          .mkString(",")
+        readerFieldIDsStr
       )
     }
     if (
@@ -361,8 +389,29 @@ class MilvusScanBuilder(
     }
   }
 
-  override def build(): Scan =
+  /**
+   * Extract all column names referenced in a filter
+   */
+  private def extractFilterColumns(filter: Filter): Seq[String] = {
+    import org.apache.spark.sql.sources._
+    filter match {
+      case EqualTo(attr, _) => Seq(attr)
+      case GreaterThan(attr, _) => Seq(attr)
+      case GreaterThanOrEqual(attr, _) => Seq(attr)
+      case LessThan(attr, _) => Seq(attr)
+      case LessThanOrEqual(attr, _) => Seq(attr)
+      case In(attr, _) => Seq(attr)
+      case IsNull(attr) => Seq(attr)
+      case IsNotNull(attr) => Seq(attr)
+      case And(left, right) => extractFilterColumns(left) ++ extractFilterColumns(right)
+      case Or(left, right) => extractFilterColumns(left) ++ extractFilterColumns(right)
+      case _ => Seq.empty
+    }
+  }
+
+  override def build(): Scan = {
     new MilvusScan(currentSchema, currentOptions, pushedFilterArray)
+  }
 }
 
 class MilvusScan(
@@ -382,14 +431,21 @@ class MilvusScan(
   }
   private val fieldIDs =
     if (options.get(MilvusOption.ReaderFieldIDs) != null) {
-      options
-        .get(MilvusOption.ReaderFieldIDs)
+      options.get(MilvusOption.ReaderFieldIDs)
         .split(",")
         .toSeq
         .filter(_.nonEmpty)
     } else {
       Seq[String]()
     }
+
+  // Get vector search configuration from MilvusOption
+  private val vectorSearchConfig = milvusOption.vectorSearchConfig
+
+  // Log vector search configuration if enabled
+  vectorSearchConfig.foreach { config =>
+    logInfo(s"Vector search enabled: topK=${config.topK}, metric=${config.metricType}, column=${config.vectorColumn}")
+  }
 
   def getPathOption(): String = {
     if (options.get(MilvusOption.ReaderPath) != null) {
@@ -529,18 +585,24 @@ class MilvusScan(
     return fieldMaps
   }
 
-  def getValidSegments(client: MilvusClient): Seq[String] = {
+  def getValidSegments(client: MilvusClient): (Seq[String], Seq[String]) = {
     val result = client.getSegments(
       milvusOption.databaseName,
       milvusOption.collectionName
     )
-    result
+    val allSegments = result
       .getOrElse(
         throw new Exception(
           s"Failed to get segment info: ${result.failed.get.getMessage}"
         )
       )
-      .map(_.segmentID.toString)
+    // Separate V1 and V2 segments
+    val v1Segments = allSegments.filter(_.storageVersion == 0)
+    val v2Segments = allSegments.filter(_.storageVersion == 2)
+
+    val v1SegmentIDs = v1Segments.map(_.segmentID.toString)
+    val v2SegmentIDs = v2Segments.map(_.segmentID.toString)
+    (v1SegmentIDs, v2SegmentIDs)
   }
 
   def getPartitionInfos(
@@ -562,6 +624,7 @@ class MilvusScan(
       .toMap
   }
 
+
   override def toBatch: Batch = this
 
   override def planInputPartitions(): Array[InputPartition] = {
@@ -576,9 +639,13 @@ class MilvusScan(
 
     val client = MilvusClient(milvusOption)
 
-    var validSegments = Seq[String]()
+    // Get both V1 and V2 segments
+    var validV1Segments = Seq[String]()
+    var validV2Segments = Seq[String]()
     if (segment.isEmpty()) {
-      validSegments = getValidSegments(client)
+      val (v1Segs, v2Segs) = getValidSegments(client)
+      validV1Segments = v1Segs
+      validV2Segments = v2Segs
     }
     val containExtraPartition =
       milvusOption.extraColumns.contains(
@@ -586,66 +653,182 @@ class MilvusScan(
       )
     var partitionInfos =
       if (containExtraPartition) {
-        getPartitionInfos(client)
+        val infos = getPartitionInfos(client)
+        infos
       } else {
         Map[String, String]()
       }
     var segment2Partition = mutable.Map[String, String]()
 
+    // V1 segments: field maps for binlog reading
     var fieldMaps = mutable.Map[String, Seq[Map[String, String]]]()
+
+    // V2 segments: manifests for FFI reading
+    var v2Manifests = mutable.Map[String, (String, String, String)]() // segmentID -> (collectionID, partitionID, manifest)
+
+    // Get collection schema and S3 config for V2 manifest building
+    val collectionInfo = client.getCollectionInfo(
+      milvusOption.databaseName,
+      milvusOption.collectionName
+    ).getOrElse(
+      throw new Exception(
+        s"Collection ${milvusOption.collectionName} not found"
+      )
+    )
+    val s3Bucket = milvusOption.options.getOrElse(Properties.FsConfig.FsBucketName, "a-bucket")
+    val s3RootPath = milvusOption.options.getOrElse(Properties.FsConfig.FsRootPath, "files")
+
     if (rawPath.isEmpty) {
       if (!partition.isEmpty() && !segment.isEmpty()) {
-        fieldMaps(segment) = getSegmentFieldMap(fs, client, rootPath)
+        // Check if this segment is V1 or V2
+        if (validV1Segments.contains(segment)) {
+          fieldMaps(segment) = getSegmentFieldMap(fs, client, rootPath)
+        } else if (validV2Segments.contains(segment)) {
+          val manifest = ManifestBuilder.buildManifestForSegment(
+            collectionInfo.schema,
+            collection,
+            partition,
+            segment,
+            client,
+            s3Bucket,
+            s3RootPath
+          )
+          v2Manifests(segment) = (collection, partition, manifest)
+        }
       } else if (!partition.isEmpty()) {
         var segmentStatuses = getCollectionOrPartitionStatuses(fs, rootPath)
-        segmentStatuses
-          .filter(status => validSegments.contains(status.getPath().getName))
-          .foreach(status => {
-            fieldMaps(status.getPath().getName) =
-              getSegmentFieldMap(fs, client, status.getPath())
-          })
+
+        // Process V1 segments
+        val v1SegmentStatuses = segmentStatuses
+          .filter(status => validV1Segments.contains(status.getPath().getName))
+        v1SegmentStatuses.foreach(status => {
+          val segmentID = status.getPath().getName
+          fieldMaps(segmentID) = getSegmentFieldMap(fs, client, status.getPath())
+          segment2Partition(segmentID) = partition
+        })
+
+        // Process V2 segments - use FFI instead of filesystem
+        validV2Segments.foreach { segmentID =>
+          val manifest = ManifestBuilder.buildManifestForSegment(
+            collectionInfo.schema,
+            collection,
+            partition,
+            segmentID,
+            client,
+            s3Bucket,
+            s3RootPath
+          )
+          v2Manifests(segmentID) = (collection, partition, manifest)
+          segment2Partition(segmentID) = partition
+        }
       } else {
-        var partitionStatuses = getCollectionOrPartitionStatuses(fs, rootPath)
-        partitionStatuses.foreach(status => {
-          val partitionID = status.getPath().getName
-          val segmentStatuses =
-            getCollectionOrPartitionStatuses(fs, status.getPath())
-          segmentStatuses
-            .filter(status => validSegments.contains(status.getPath().getName))
-            .foreach(status => {
+        // For V1 segments, we need filesystem access
+        if (validV1Segments.nonEmpty) {
+          var partitionStatuses = getCollectionOrPartitionStatuses(fs, rootPath)
+          partitionStatuses.foreach(status => {
+            val partitionID = status.getPath().getName
+            val segmentStatuses =
+              getCollectionOrPartitionStatuses(fs, status.getPath())
+
+            // Process V1 segments
+            val v1Segments = segmentStatuses
+              .filter(status => validV1Segments.contains(status.getPath().getName))
+            v1Segments.foreach(status => {
               val segmentID = status.getPath().getName
               fieldMaps(segmentID) = getSegmentFieldMap(
                 fs,
                 client,
                 status.getPath()
               )
-              segment2Partition(
-                segmentID
-              ) = partitionID
+              segment2Partition(segmentID) = partitionID
             })
-        })
+          })
+        }
+
+        // For V2 segments, use Milvus API to get partition info
+        if (validV2Segments.nonEmpty) {
+          // Get all segments with their partition IDs from Milvus API
+          val allSegments = client.getSegments(
+            milvusOption.databaseName,
+            milvusOption.collectionName
+          ).getOrElse(
+            throw new Exception("Failed to get segments")
+          )
+
+          // Build map of segmentID -> partitionID
+          val segmentToPartitionMap = allSegments
+            .filter(seg => validV2Segments.contains(seg.segmentID.toString))
+            .map(seg => seg.segmentID.toString -> seg.partitionID.toString)
+            .toMap
+
+          validV2Segments.foreach { segmentID =>
+            val partitionID = segmentToPartitionMap.getOrElse(segmentID, {
+              logWarning(s"Could not find partition for V2 segment $segmentID, skipping")
+              ""
+            })
+
+            if (partitionID.nonEmpty) {
+              val manifest = ManifestBuilder.buildManifestForSegment(
+                collectionInfo.schema,
+                collection,
+                partitionID,
+                segmentID,
+                client,
+                s3Bucket,
+                s3RootPath
+              )
+              v2Manifests(segmentID) = (collection, partitionID, manifest)
+              segment2Partition(segmentID) = partitionID
+            }
+          }
+        }
       }
     } else {
-      fieldMaps(rootPath.getName()) = getSegmentFieldMap(fs, client, rootPath)
+      // Raw path specified - assume V1 for backward compatibility
+      val segmentName = rootPath.getName()
+      fieldMaps(segmentName) = getSegmentFieldMap(fs, client, rootPath)
     }
 
-    val result = fieldMaps.map { case (segment, fieldMap) =>
+    // Create V1 input partitions
+    val v1Partitions = fieldMaps.map { case (segment, fieldMap) =>
+      val partitionName = if (containExtraPartition)
+        partitionInfos.getOrElse(
+          segment2Partition.getOrElse(segment, "unknown"),
+          "unknown"
+        )
+      else ""
       MilvusInputPartition(
         fieldMap,
-        if (containExtraPartition)
-          partitionInfos.getOrElse(
-            segment2Partition.getOrElse(segment, "unknown"),
-            "unknown"
-          )
-        else ""
+        partitionName
       ): InputPartition
-    }.toArray
+    }
+
+    // Create V2 input partitions
+    val v2Partitions = v2Manifests.map { case (segmentID, (collectionID, partitionID, manifest)) =>
+      MilvusStorageV2InputPartition(
+        manifest,
+        collectionInfo.schema.toByteArray,
+        partitionID,
+        milvusOption,
+        vectorSearchConfig.map(_.topK),
+        vectorSearchConfig.map(_.queryVector),
+        vectorSearchConfig.map(_.metricType),
+        vectorSearchConfig.map(_.vectorColumn)
+      ): InputPartition
+    }
+
+    val result = (v1Partitions ++ v2Partitions).toArray
+
+    logInfo(s"Created ${v1Partitions.size} V1 partitions and ${v2Partitions.size} V2 partitions")
+
     fs.close()
     client.close()
     result
   }
 
   override def createReaderFactory(): PartitionReaderFactory = {
-    new MilvusPartitionReaderFactory(schema, options, pushedFilters)
+    // Convert CaseInsensitiveStringMap to regular Map for serialization
+    val optionsMap = options.asScala.toMap
+    new MilvusPartitionReaderFactory(schema, optionsMap, pushedFilters)
   }
 }

@@ -560,15 +560,3 @@ object SparseFloatVectorConverter {
   }
 }
 
-object MilvusSchemaUtil {
-  def getDim(fieldSchema: FieldSchema): Int = {
-    for (param <- fieldSchema.typeParams) {
-      if (param.key == "dim") {
-        return param.value.toInt
-      }
-    }
-    throw new DataParseException(
-      s"Field ${fieldSchema.name} has no dim parameter"
-    )
-  }
-}
