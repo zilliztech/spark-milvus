@@ -9,7 +9,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.spark.connector.{MilvusClient, MilvusOption, MilvusS3Option}
+import com.zilliz.spark.connector.{MilvusClient, MilvusOption}
 
 class MilvusSparkNativeImportWriter(
     uri: String,
@@ -27,10 +27,6 @@ class MilvusSparkNativeImportWriter(
   optionsMap.put(MilvusOption.MilvusCollectionName, collectionName)
 
   private val milvusOption = MilvusOption(
-    new CaseInsensitiveStringMap(optionsMap.asJava)
-  )
-
-  private val s3Option = MilvusS3Option(
     new CaseInsensitiveStringMap(optionsMap.asJava)
   )
 
@@ -61,7 +57,7 @@ class MilvusSparkNativeImportWriter(
   private def writeToS3WithSpark(df: DataFrame, s3Path: String): Try[Unit] = {
     try {
       val fullS3Path =
-        s"s3a://${s3Option.s3BucketName}/${s3Option.s3RootPath}/${s3Path}"
+        s"s3a://${milvusOption.s3BucketName}/${milvusOption.s3RootPath}/${s3Path}"
 
       val spark = df.sparkSession
       configureSparkS3Settings(spark)
@@ -84,11 +80,11 @@ class MilvusSparkNativeImportWriter(
     val conf = spark.sparkContext.hadoopConfiguration
 
     // Basic S3 connection settings
-    conf.set("fs.s3a.endpoint", s3Option.s3Endpoint)
-    conf.set("fs.s3a.access.key", s3Option.s3AccessKey)
-    conf.set("fs.s3a.secret.key", s3Option.s3SecretKey)
-    conf.set("fs.s3a.path.style.access", s3Option.s3PathStyleAccess.toString)
-    conf.set("fs.s3a.connection.ssl.enabled", s3Option.s3UseSSL.toString)
+    conf.set("fs.s3a.endpoint", milvusOption.s3Endpoint)
+    conf.set("fs.s3a.access.key", milvusOption.s3AccessKey)
+    conf.set("fs.s3a.secret.key", milvusOption.s3SecretKey)
+    conf.set("fs.s3a.path.style.access", milvusOption.s3PathStyleAccess.toString)
+    conf.set("fs.s3a.connection.ssl.enabled", milvusOption.s3UseSSL.toString)
 
     // Performance optimization settings
     // Multipart upload size: 128MB (134217728 bytes) - larger parts reduce overhead for big files
@@ -113,9 +109,9 @@ class MilvusSparkNativeImportWriter(
 
   private def collectS3FilesAndImport(s3Path: String): Try[Seq[Long]] = {
     try {
-      val conf = s3Option.getConf()
+      val conf = milvusOption.getConf()
       val fullS3Path =
-        s"s3a://${s3Option.s3BucketName}/${s3Option.s3RootPath}/$s3Path"
+        s"s3a://${milvusOption.s3BucketName}/${milvusOption.s3RootPath}/$s3Path"
       val path = new Path(fullS3Path)
       val fs = path.getFileSystem(conf)
 
@@ -146,7 +142,7 @@ class MilvusSparkNativeImportWriter(
         parquetFiles ++= collectParquetFiles(fs, fileStatus.getPath)
       } else if (fileStatus.getPath.getName.endsWith(".parquet")) {
         val s3Path = fileStatus.getPath.toString.replace(
-          s"s3a://${s3Option.s3BucketName}",
+          s"s3a://${milvusOption.s3BucketName}",
           ""
         )
         parquetFiles += s3Path

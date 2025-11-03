@@ -38,8 +38,7 @@ import org.apache.spark.unsafe.types.UTF8String
 import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusCollectionInfo,
-  MilvusOption,
-  MilvusS3Option
+  MilvusOption
 }
 import io.milvus.grpc.schema.DataType
 
@@ -279,7 +278,6 @@ class MilvusBinlogScan(
     with Batch
     with Logging {
   private val milvusOption = MilvusOption(options)
-  private val readerOptions = MilvusS3Option(options)
   private val pathOption: String = getPathOption()
   if (pathOption == null) {
     throw new IllegalArgumentException(
@@ -288,7 +286,7 @@ class MilvusBinlogScan(
   }
 
   def getPathOption(): String = {
-    if (!readerOptions.notEmpty(readerOptions.s3FileSystemType)) {
+    if (!milvusOption.notEmpty(milvusOption.s3FileSystemType)) {
       return options.get(MilvusOption.ReaderPath)
     }
     val collection = milvusOption.collectionID
@@ -299,14 +297,14 @@ class MilvusBinlogScan(
       return options.get(MilvusOption.ReaderPath)
     }
     if (
-      readerOptions.readerType == Constants.LogReaderTypeInsert && field.isEmpty
+      milvusOption.readerType == Constants.LogReaderTypeInsert && field.isEmpty
     ) {
       throw new IllegalArgumentException(
         "Option 'field' is required for insert log."
       )
     }
     val firstPath =
-      if (readerOptions.readerType == Constants.LogReaderTypeInsert) {
+      if (milvusOption.readerType == Constants.LogReaderTypeInsert) {
         "insert_log"
       } else {
         "delta_log"
@@ -317,7 +315,7 @@ class MilvusBinlogScan(
     if (segment.isEmpty) {
       return s"${firstPath}/${collection}/${partition}"
     }
-    if (readerOptions.readerType == Constants.LogReaderTypeInsert) {
+    if (milvusOption.readerType == Constants.LogReaderTypeInsert) {
       return s"${firstPath}/${collection}/${partition}/${segment}/${field}"
     }
     return s"${firstPath}/${collection}/${partition}/${segment}"
@@ -346,7 +344,7 @@ class MilvusBinlogScan(
     try {
 
       val field = options.getOrDefault("field", "")
-      if (readerOptions.readerType == Constants.LogReaderTypeInsert) {
+      if (milvusOption.readerType == Constants.LogReaderTypeInsert) {
         fs.listStatus(segmentPath)
           .filter(_.getPath.getName == field)
           .filter(_.isDirectory())
@@ -412,17 +410,17 @@ class MilvusBinlogScan(
   }
 
   override def planInputPartitions(): Array[InputPartition] = {
-    var path = readerOptions.getFilePath(pathOption)
+    var path = milvusOption.getFilePath(pathOption)
     var fileStatuses = new SHashMap[String, Seq[FileStatus]]()
-    val fs = readerOptions.getFileSystem(path)
+    val fs = milvusOption.getFileSystem(path)
 
     val collection = milvusOption.collectionID
     val partition = milvusOption.partitionID
     val segment = milvusOption.segmentID
     val field = milvusOption.fieldID
     if (
-      readerOptions.notEmpty(
-        readerOptions.s3FileSystemType
+      milvusOption.notEmpty(
+        milvusOption.s3FileSystemType
       ) && !collection.isEmpty
     ) {
       val client = MilvusClient(milvusOption)
@@ -510,7 +508,7 @@ class MilvusBinlogPartitionReaderFactory(
     pushedFilters: Array[Filter]
 ) extends PartitionReaderFactory {
 
-  private val readerOptions = MilvusS3Option(options)
+  private val milvusOption = MilvusOption(options)
 
   override def createReader(
       partition: InputPartition
@@ -519,7 +517,7 @@ class MilvusBinlogPartitionReaderFactory(
     new MilvusBinlogPartitionReader(
       schema,
       filePaths,
-      readerOptions,
+      milvusOption,
       pushedFilters
     )
   }
@@ -529,7 +527,7 @@ class MilvusBinlogPartitionReaderFactory(
 class MilvusBinlogPartitionReader(
     schema: StructType,
     filePaths: Array[String],
-    options: MilvusS3Option,
+    options: MilvusOption,
     pushedFilters: Array[Filter]
 ) extends PartitionReader[InternalRow]
     with Logging {
@@ -606,7 +604,7 @@ class MilvusBinlogPartitionReader(
     schema.fields.map(field => {
       field.name match {
         case "data" => {
-          if (isDelete && MilvusOption.isInt64PK(options.milvusPKType)) {
+          if (isDelete && MilvusOption.isInt64PK(options.collectionPKType)) {
             values.append(data.toLong)
           } else {
             values.append(UTF8String.fromString(data))
