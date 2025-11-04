@@ -7,7 +7,7 @@ import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.spark.connector.MilvusS3Option
+import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
 
 // Unified PartitionReaderFactory that dispatches to V1 or V2 readers based on partition type
@@ -18,12 +18,12 @@ class MilvusPartitionReaderFactory(
 ) extends PartitionReaderFactory with Logging {
 
   // Reconstruct CaseInsensitiveStringMap for V1 reader
-  @transient private lazy val readerOptions = {
+  @transient private lazy val milvusOption = {
     import scala.jdk.CollectionConverters._
     import java.util.HashMap
     val javaMap = new HashMap[String, String]()
     optionsMap.foreach { case (k, v) => javaMap.put(k, v) }
-    MilvusS3Option(new CaseInsensitiveStringMap(javaMap))
+    MilvusOption(new CaseInsensitiveStringMap(javaMap))
   }
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
@@ -35,7 +35,7 @@ class MilvusPartitionReaderFactory(
           schema,
           milvusPartition.fieldFiles,
           milvusPartition.partition,
-          readerOptions,
+          milvusOption,
           pushedFilters
         )
 

@@ -41,7 +41,6 @@ import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusCollectionInfo,
   MilvusOption,
-  MilvusS3Option,
   VectorSearchConfig
 }
 import com.zilliz.spark.connector.read.{
@@ -422,7 +421,6 @@ class MilvusScan(
     with Batch
     with Logging {
   private val milvusOption = MilvusOption(options)
-  private val readerOption = MilvusS3Option(options)
   private val pathOption: String = getPathOption()
   if (pathOption == null) {
     throw new IllegalArgumentException(
@@ -628,8 +626,8 @@ class MilvusScan(
   override def toBatch: Batch = this
 
   override def planInputPartitions(): Array[InputPartition] = {
-    val rootPath = readerOption.getFilePath(pathOption)
-    val fs = readerOption.getFileSystem(rootPath)
+    val rootPath = milvusOption.getFilePath(pathOption)
+    val fs = milvusOption.getFileSystem(rootPath)
 
     // segment path
     val rawPath = options.getOrDefault(MilvusOption.ReaderPath, "")
