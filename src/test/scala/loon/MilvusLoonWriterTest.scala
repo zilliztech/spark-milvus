@@ -34,6 +34,7 @@ class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
         Properties.FsConfig.FsAccessKeyId -> "minioadmin",
         Properties.FsConfig.FsAccessKeyValue -> "minioadmin",
         Properties.FsConfig.FsUseSSL -> "false",
+        Properties.FsConfig.FsRegion -> "us-east-1",
         MilvusOption.MilvusCollectionName -> "test_collection"
       )
 
@@ -79,6 +80,7 @@ class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
         Properties.FsConfig.FsAccessKeyId -> "minioadmin",
         Properties.FsConfig.FsAccessKeyValue -> "minioadmin",
         Properties.FsConfig.FsUseSSL -> "false",
+        Properties.FsConfig.FsRegion -> "us-east-1",
         MilvusOption.MilvusCollectionName -> "vector_test_collection",
         "vector.vector.dim" -> "4"  // Specify vector dimension
       )

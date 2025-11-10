@@ -183,6 +183,8 @@ class MilvusLoonPartitionWriter(
     w.create(basePath, schemaC.memoryAddress(), props)
 
     if (!w.isValid) {
+      schemaC.close()
+      props.free()
       throw new IllegalStateException("Failed to create MilvusStorageWriter")
     }
 
@@ -317,8 +319,8 @@ class MilvusLoonPartitionWriter(
     }
 
     vectorFields.flatMap { fieldName =>
-      option.options.get(MilvusOption.vectorDimKey(fieldName)).map { dimStr =>
-        fieldName -> dimStr.toInt
+      option.options.get(MilvusOption.vectorDimKey(fieldName)).flatMap { dimStr =>
+        Try(dimStr.toInt).toOption.map(fieldName -> _)
       }
     }.toMap
   }
@@ -332,31 +334,31 @@ class MilvusLoonPartitionWriter(
         writer.destroy()
       }
     }.recover {
-      case e: Exception => logWarning(s"Error destroying writer: ${e.getMessage}")
+      case e: Exception => logError(s"Error destroying writer: ${e.getMessage}")
     }
 
     Try {
       if (root != null) root.close()
     }.recover {
-      case e: Exception => logWarning(s"Error closing VectorSchemaRoot: ${e.getMessage}")
+      case e: Exception => logError(s"Error closing VectorSchemaRoot: ${e.getMessage}")
     }
 
     Try {
       if (arrowSchemaC != null) arrowSchemaC.close()
     }.recover {
-      case e: Exception => logWarning(s"Error closing ArrowSchema: ${e.getMessage}")
+      case e: Exception => logError(s"Error closing ArrowSchema: ${e.getMessage}")
     }
 
     Try {
       if (writerProperties != null) writerProperties.free()
     }.recover {
-      case e: Exception => logWarning(s"Error freeing properties: ${e.getMessage}")
+      case e: Exception => logError(s"Error freeing properties: ${e.getMessage}")
     }
 
     Try {
       if (allocator != null) allocator.close()
     }.recover {
-      case e: Exception => logWarning(s"Error closing allocator: ${e.getMessage}")
+      case e: Exception => logError(s"Error closing allocator: ${e.getMessage}")
     }
   }
 }
