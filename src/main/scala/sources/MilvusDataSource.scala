@@ -222,6 +222,12 @@ case class MilvusTable(
     if (milvusOption.extraColumns.contains(MilvusOption.MilvusExtraColumnPartition)) {
       fields = fields :+ StructField("partition", StringType, true)
     }
+    if (milvusOption.extraColumns.contains(MilvusOption.MilvusExtraColumnSegmentID)) {
+      fields = fields :+ StructField("segment_id", LongType, false)
+    }
+    if (milvusOption.extraColumns.contains(MilvusOption.MilvusExtraColumnRowOffset)) {
+      fields = fields :+ StructField("row_offset", LongType, false)
+    }
     StructType(fields)
   }
 
@@ -317,6 +323,18 @@ class MilvusScanBuilder(
       !fieldNames.contains("partition")
     ) {
       fieldNames = fieldNames :+ "partition"
+    }
+    if (
+      extraColumns.contains(MilvusOption.MilvusExtraColumnSegmentID) &&
+      !fieldNames.contains("segment_id")
+    ) {
+      fieldNames = fieldNames :+ "segment_id"
+    }
+    if (
+      extraColumns.contains(MilvusOption.MilvusExtraColumnRowOffset) &&
+      !fieldNames.contains("row_offset")
+    ) {
+      fieldNames = fieldNames :+ "row_offset"
     }
 
     currentOptions = new CaseInsensitiveStringMap(tmpMap)
@@ -596,6 +614,7 @@ class MilvusScan(
           s"Failed to get segment info: ${result.failed.get.getMessage}"
         )
       )
+
     // Separate V1 and V2 segments
     val v1Segments = allSegments.filter(_.storageVersion == 0)
     val v2Segments = allSegments.filter(_.storageVersion == 2)
@@ -797,14 +816,29 @@ class MilvusScan(
           "unknown"
         )
       else ""
+      // Try to parse segment as Long, if it fails use -1
+      val segmentIDLong = try {
+        segment.toLong
+      } catch {
+        case _: NumberFormatException =>
+          logWarning(s"Failed to parse segment '$segment' as Long, using -1")
+          -1L
+      }
       MilvusInputPartition(
         fieldMap,
-        partitionName
+        partitionName,
+        segmentID = segmentIDLong  // Pass segment ID for tracking
       ): InputPartition
     }
 
     // Create V2 input partitions
     val v2Partitions = v2Manifests.map { case (segmentID, (collectionID, partitionID, manifest)) =>
+      // Parse segmentID string to Long, default to -1 if parsing fails
+      val segmentIDLong = try {
+        segmentID.toLong
+      } catch {
+        case _: NumberFormatException => -1L
+      }
       MilvusStorageV2InputPartition(
         manifest,
         collectionInfo.schema.toByteArray,
@@ -813,7 +847,8 @@ class MilvusScan(
         vectorSearchConfig.map(_.topK),
         vectorSearchConfig.map(_.queryVector),
         vectorSearchConfig.map(_.metricType),
-        vectorSearchConfig.map(_.vectorColumn)
+        vectorSearchConfig.map(_.vectorColumn),
+        segmentIDLong  // Pass segment ID
       ): InputPartition
     }
 

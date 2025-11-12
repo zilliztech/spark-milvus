@@ -12,12 +12,14 @@ case class MilvusStorageV2InputPartition(
     topK: Option[Int] = None,
     queryVector: Option[Array[Float]] = None,
     metricType: Option[String] = None,
-    vectorColumn: Option[String] = None
+    vectorColumn: Option[String] = None,
+    segmentID: Long = -1L  // Add segment ID tracking for V2
 ) extends InputPartition
 
-// V1 Binlog InputPartition  
+// V1 Binlog InputPartition
 case class MilvusInputPartition(
     fieldFiles: Seq[Map[String, String]],
-    partition: String = ""
+    partition: String = "",
+    segmentID: Long = -1L  // Add segment ID tracking
 ) extends InputPartition
 

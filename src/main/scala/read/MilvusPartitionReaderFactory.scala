@@ -29,23 +29,27 @@ class MilvusPartitionReaderFactory(
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
     partition match {
       case milvusPartition: MilvusInputPartition =>
-        logInfo(s"Creating V1 reader for partition")
+        logInfo(s"Creating V1 reader for partition with segmentID=${milvusPartition.segmentID}")
         // Create the V1 data reader with the file map, schema, and options
         new MilvusPartitionReader(
           schema,
           milvusPartition.fieldFiles,
           milvusPartition.partition,
           readerOptions,
-          pushedFilters
+          pushedFilters,
+          milvusPartition.segmentID
         )
 
       case p: MilvusStorageV2InputPartition =>
         logInfo(s"Creating V2 reader for partition")
 
-        // Storage V2 doesn't support system fields (row_id, timestamp)
+        // Storage V2 doesn't support system fields (row_id, timestamp) and extra metadata columns (segment_id, row_offset)
         // Filter them out from the schema for the underlying reader
         val v2Schema = StructType(schema.fields.filter { field =>
-          field.name != "row_id" && field.name != "timestamp"
+          field.name != "row_id" &&
+          field.name != "timestamp" &&
+          field.name != "segment_id" &&
+          field.name != "row_offset"
         })
 
         // Deserialize the protobuf schema
@@ -65,18 +69,22 @@ class MilvusPartitionReaderFactory(
           pushedFilters
         )
 
-        // If the expected schema includes system fields, wrap the reader to add null values
+        // If the expected schema includes system/metadata fields, wrap the reader to add them
         val hasRowId = schema.fieldNames.contains("row_id")
         val hasTimestamp = schema.fieldNames.contains("timestamp")
+        val hasSegmentId = schema.fieldNames.contains("segment_id")
+        val hasRowOffset = schema.fieldNames.contains("row_offset")
 
-        if (hasRowId || hasTimestamp) {
+        if (hasRowId || hasTimestamp || hasSegmentId || hasRowOffset) {
           new PartitionReader[InternalRow] {
+            private var rowOffset: Long = 0L
+
             override def next(): Boolean = underlyingReader.next()
 
             override def get(): InternalRow = {
               val row = underlyingReader.get()
 
-              // Build result row with system fields
+              // Build result row with system/metadata fields
               val numFields = schema.fields.length
               val resultValues = new Array[Any](numFields)
 
@@ -98,6 +106,17 @@ class MilvusPartitionReaderFactory(
                 val value = row.get(readIdx, v2Schema.fields(readIdx).dataType)
                 resultValues(writeIdx) = value
                 readIdx += 1
+                writeIdx += 1
+              }
+
+              // Add metadata fields (segment_id and row_offset)
+              if (hasSegmentId) {
+                resultValues(writeIdx) = p.segmentID
+                writeIdx += 1
+              }
+              if (hasRowOffset) {
+                resultValues(writeIdx) = rowOffset
+                rowOffset += 1
                 writeIdx += 1
               }
 

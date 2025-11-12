@@ -37,7 +37,8 @@ class MilvusPartitionReader(
     fieldFilesSeq: Seq[Map[String, String]],
     partition: String,
     options: MilvusS3Option,
-    pushedFilters: Array[Filter] = Array.empty[Filter]
+    pushedFilters: Array[Filter] = Array.empty[Filter],
+    segmentID: Long = -1L  // Add segment ID parameter
 ) extends PartitionReader[InternalRow]
     with Logging {
 
@@ -46,6 +47,7 @@ class MilvusPartitionReader(
   private val fieldReadersLock = new Object()
 
   private var currentFieldFilesIndex: Int = 0 // Index for current reading
+  private var currentRowOffset: Long = 0L  // Track row offset within segment
 
   private val preloadedBatches
       : concurrent.Map[Int, Map[String, FieldFileReader]] =
@@ -614,12 +616,12 @@ class MilvusPartitionReader(
       )
     }
 
-    // Determine the row size - add 1 extra column if partition is not empty
-    val rowSize = if (partition != null && partition.nonEmpty) {
-      currentReaders.size + 1
-    } else {
-      currentReaders.size
-    }
+    // Determine the row size - include segment_id and row_offset columns
+    var extraColumns = 0
+    if (partition != null && partition.nonEmpty) extraColumns += 1
+    if (segmentID != -1L) extraColumns += 2  // Add both segment_id and row_offset
+
+    val rowSize = currentReaders.size + extraColumns
 
     // Create a new InternalRow with the correct number of fields
     val row = InternalRow.fromSeq(Seq.fill(rowSize)(null))
@@ -661,9 +663,19 @@ class MilvusPartitionReader(
       }
     }
 
+    var currentExtraColumnIndex = currentReaders.size
+
     // Add partition column value if partition is not empty
     if (partition != null && partition.nonEmpty) {
-      row.update(currentReaders.size, UTF8String.fromString(partition))
+      row.update(currentExtraColumnIndex, UTF8String.fromString(partition))
+      currentExtraColumnIndex += 1
+    }
+
+    // Add segment_id and row_offset columns if segment ID is available
+    if (segmentID != -1L) {
+      row.setLong(currentExtraColumnIndex, segmentID)
+      row.setLong(currentExtraColumnIndex + 1, currentRowOffset)
+      currentRowOffset += 1  // Increment row offset for next row
     }
 
     row // Return the populated row
