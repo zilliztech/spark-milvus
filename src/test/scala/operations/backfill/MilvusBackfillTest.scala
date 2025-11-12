@@ -107,7 +107,6 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
         milvusToken = "root:Milvus",
         databaseName = "default",
         collectionName = collectionName,
-        pkFieldToRead = 100,
         s3Endpoint = "localhost:9000",
         s3BucketName = "a-bucket",
         s3AccessKey = "minioadmin",
@@ -119,9 +118,12 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
       )
 
       // Execute MilvusBackfill API
+      // TODO: Generate or provide actual snapshot file for testing
+      val snapshotPath = ""
       val result = MilvusBackfill.run(
         spark,
         parquetPath,
+        snapshotPath,
         config
       )
 

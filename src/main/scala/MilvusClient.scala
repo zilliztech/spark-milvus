@@ -541,6 +541,22 @@ class MilvusClient(params: MilvusConnectionParams) {
     }
   }
 
+  def getPkField(
+      dbName: String,
+      collectionName: String
+  ): Try[(String, Long)] = {
+    getCollectionSchema(dbName, collectionName).map { schema =>
+      val pkField = schema.fields.find(_.isPrimaryKey).get
+      val fieldId = if (pkField.fieldID == 0) {
+        val fieldIndex = schema.fields.indexOf(pkField)
+        fieldIndex + 100
+      } else {
+        pkField.fieldID
+      }
+      (pkField.name, fieldId)
+    }
+  }
+
   def getCollectionSchema(
       dbName: String,
       collectionName: String

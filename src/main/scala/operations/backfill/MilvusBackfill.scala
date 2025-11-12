@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory
 
 import com.zilliz.spark.connector.write.{MilvusLoonBatchWrite, MilvusLoonCommitMessage, MilvusLoonWriter}
 import com.zilliz.spark.connector.{MilvusClient, MilvusConnectionParams, MilvusOption}
+import com.zilliz.spark.connector.read.MilvusSnapshotReader
 
 import scala.collection.JavaConverters._
 
@@ -28,12 +29,14 @@ object MilvusBackfill {
    *
    * @param spark SparkSession
    * @param backfillDataPath Path to Parquet file containing new field data with schema (pk, new_field1, new_field2, ...)
+   * @param snapshotPath Path to Milvus snapshot metadata JSON file
    * @param config Backfill configuration
    * @return Either error or successful result
    */
   def run(
       spark: SparkSession,
       backfillDataPath: String,
+      snapshotPath: String,
       config: BackfillConfig
   ): Either[BackfillError, BackfillResult] = {
 
@@ -56,6 +59,15 @@ object MilvusBackfill {
         )
       )
 
+      // Get PK field from collection schema (try snapshot first, fallback to client)
+      val pkField = getPkField(snapshotPath, config, client) match {
+        case Left(error) => return Left(error)
+        case Right(field) => field
+      }
+
+      val pkName = pkField.name
+      val pkFieldId = pkField.fieldID
+
       // Read backfill data from Parquet
       val backfillDF = readBackfillData(spark, backfillDataPath) match {
         case Left(error) => return Left(error)
@@ -63,15 +75,15 @@ object MilvusBackfill {
       }
 
       // Read original collection data with segment metadata
-      val originalDF = readCollectionWithMetadata(spark, config) match {
+      val originalDF = readCollectionWithMetadata(spark, config, pkFieldId) match {
         case Left(error) => return Left(error)
         case Right(df) => df
       }
 
-      // Validate schema compatibility and get primary key name
-      val pkName = validateSchemaCompatibility(originalDF, backfillDF, config, client) match {
+      // Validate schema compatibility
+      validateSchemaCompatibility(originalDF, backfillDF, pkName) match {
         case Left(error) => return Left(error)
-        case Right(name) => name
+        case Right(_) => // Continue
       }
 
       // Perform Sort Merge Join
@@ -178,17 +190,22 @@ object MilvusBackfill {
   /**
    * Read collection data with segment_id and row_offset metadata
    * segment_id and row_offset are used to match with the original sequence of rows for each segment
+   *
+   * @param pkFieldId Primary key field ID to read only PK field
    */
   private def readCollectionWithMetadata(
       spark: SparkSession,
-      config: BackfillConfig
+      config: BackfillConfig,
+      pkFieldId: Long
   ): Either[BackfillError, DataFrame] = {
     try {
-      val options = config.getMilvusReadOptions
+      var options = config.getMilvusReadOptions
+      options = options + (MilvusOption.ReaderFieldIDs -> pkFieldId.toString)
       val df = spark.read
         .format("milvus")
         .options(options)
         .load()
+      df.show(10, truncate = false)
 
       // Validate that segment_id and row_offset are present
       if (!df.columns.contains("segment_id") || !df.columns.contains("row_offset")) {
@@ -211,25 +228,13 @@ object MilvusBackfill {
 
   /**
    * Validate schema compatibility between original and new field data
-   * Returns the primary key field name if validation succeeds
    */
   private def validateSchemaCompatibility(
       originalDF: DataFrame,
       backfillDF: DataFrame,
-      config: BackfillConfig,
-      client: MilvusClient
-  ): Either[BackfillError, String] = {
+      pkName: String
+  ): Either[BackfillError, Unit] = {
     try {
-      // Get the actual primary key field name from Milvus collection
-      val pkName = client.getPKName(config.databaseName, config.collectionName) match {
-        case scala.util.Success(name) => name
-        case scala.util.Failure(e) =>
-          return Left(ConnectionError(
-            message = s"Failed to get primary key name for collection ${config.collectionName}: ${e.getMessage}",
-            cause = Some(e)
-          ))
-      }
-
       // Find the primary key field in original data
       val pkField = originalDF.schema.fields.find(_.name == pkName)
         .getOrElse {
@@ -251,14 +256,13 @@ object MilvusBackfill {
         ))
       }
 
-      Right(pkName)
+      Right(())
 
     } catch {
       case e: Exception =>
         logger.error("Failed to validate schema compatibility", e)
-        Left(ConnectionError(
-          message = s"Failed to validate schema compatibility: ${e.getMessage}",
-          cause = Some(e)
+        Left(SchemaValidationError(
+          s"Failed to validate schema compatibility: ${e.getMessage}"
         ))
     }
   }
@@ -488,5 +492,40 @@ object MilvusBackfill {
         ), Some(e)))
     }
   }
+
+  /**
+   * Get primary key field from snapshot file with client fallback strategy.
+   */
+  private def getPkField(
+      snapshotPath: String,
+      config: BackfillConfig,
+      client: MilvusClient
+  ): Either[BackfillError, PkFieldInfo] = {
+    // Try to get PK field from snapshot first
+    MilvusSnapshotReader.getSchemaFromFile(snapshotPath) match {
+      case Right(schema) =>
+        val pkField = schema.fields.find(_.isPrimaryKey.getOrElse(false)).get
+        Right(PkFieldInfo(pkField.name, pkField.getFieldIDAsLong))
+
+      case Left(snapshotError) =>
+        // Fall back to Milvus client
+        logger.warn(s"Failed to read schema from snapshot: ${snapshotError.getMessage}, falling back to Milvus client")
+        client.getPkField(config.databaseName, config.collectionName) match {
+          case scala.util.Success((pkName, fieldId)) =>
+            Right(PkFieldInfo(pkName, fieldId))
+
+          case scala.util.Failure(e) =>
+            val errorMsg = s"Failed to get PK field from both snapshot and Milvus client. " +
+              s"Snapshot error: ${snapshotError.getMessage}. Client error: ${e.getMessage}"
+            logger.error(errorMsg, e)
+            Left(ConnectionError(message = errorMsg, cause = Some(e)))
+        }
+    }
+  }
+
+  /**
+   * Case class to hold PK field information
+   */
+  private case class PkFieldInfo(name: String, fieldID: Long)
 
 }
