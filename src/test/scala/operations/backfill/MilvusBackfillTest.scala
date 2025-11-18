@@ -62,12 +62,35 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test("Use MilvusBackfill API for backfill operation") {
-    
-
-    // Prepare new field data as Parquet file
+    // Create backfill data with NULL values in the MIDDLE to test edge cases
     val totalRecords = batchSize * batchCount
-    val addFieldData = (0 until totalRecords).map { i =>
+
+    // Distribution:
+    // - First 30%: Has backfill data
+    // - Middle 40%: NULL (un-joined) ← Key test: NULL in the middle
+    // - Last 30%: Has backfill data
+    val firstRangeEnd = (totalRecords * 0.3).toInt
+    val nullRangeStart = firstRangeEnd
+    val nullRangeEnd = (totalRecords * 0.7).toInt
+    val lastRangeStart = nullRangeEnd
+
+    val recordsWithData = firstRangeEnd + (totalRecords - lastRangeStart)
+    val expectedNullRecords = nullRangeEnd - nullRangeStart
+
+    info(s"\n=== Test Setup ===")
+    info(s"Total records in collection: $totalRecords")
+    info(s"Backfill data distribution:")
+    info(s"  Records 0-${firstRangeEnd-1}: Has backfill data ($firstRangeEnd rows)")
+    info(s"  Records $nullRangeStart-${nullRangeEnd-1}: NO backfill data - will be NULL ($expectedNullRecords rows)")
+    info(s"  Records $lastRangeStart-${totalRecords-1}: Has backfill data (${totalRecords - lastRangeStart} rows)")
+    info(s"Total records with data: $recordsWithData")
+    info(s"Total records with NULL: $expectedNullRecords")
+
+    // Create backfill data: skip the middle range to create NULL gap
+    val addFieldData = (0 until firstRangeEnd).map { i =>
       (i.toLong, s"api_new_value_$i", i * 2) // pk, new_field1, new_field2
+    } ++ (lastRangeStart until totalRecords).map { i =>
+      (i.toLong, s"api_new_value_$i", i * 2)
     }
 
     val addFieldDF = spark.createDataFrame(addFieldData).toDF("pk", "new_field1", "new_field2")
@@ -113,18 +136,34 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
           info(s"  Total execution time: ${success.executionTimeMs}ms")
 
           info("\n  Per-Segment Results ===")
+          var totalRowsProcessed = 0L
           success.segmentResults.toSeq.sortBy(_._1).foreach { case (segmentId, segResult) =>
             info(s"  Segment $segmentId:")
             info(s"    Rows: ${segResult.rowCount}")
             info(s"    Execution time: ${segResult.executionTimeMs}ms")
             info(s"    Output path: ${segResult.outputPath}")
             info(s"    Manifest paths: ${segResult.manifestPaths.mkString(", ")}")
+            totalRowsProcessed += segResult.rowCount
           }
 
           // Assertions
           assert(success.segmentResults.nonEmpty, "Should process at least one segment")
           assert(success.newFieldNames.contains("new_field1"), "Should contain new_field1")
           assert(success.newFieldNames.contains("new_field2"), "Should contain new_field2")
+
+          // Verify all rows were processed (including those with nulls)
+          info(s"\n=== Null Handling Verification ===")
+          info(s"  Total rows in collection: $totalRecords")
+          info(s"  Total rows processed: $totalRowsProcessed")
+          info(s"  Rows with backfill data (joined): $recordsWithData")
+          info(s"  Expected rows with nulls (un-joined): $expectedNullRecords")
+
+          assert(totalRowsProcessed == totalRecords,
+            s"Should process ALL rows including un-joined ones. Expected: $totalRecords, Got: $totalRowsProcessed")
+
+          info(s"All $totalRecords rows were processed")
+          info(s"This includes $recordsWithData rows with backfill data and $expectedNullRecords rows with NULL values")
+          info(s"NULL gap in middle range ($nullRangeStart-${nullRangeEnd-1}) handled correctly")
 
         case Left(error) =>
           fail(s"Backfill API failed: ${error.message}")

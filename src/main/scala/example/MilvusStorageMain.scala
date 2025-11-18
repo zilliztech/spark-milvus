@@ -78,7 +78,7 @@ object MilvusStorageMain {
       reader.create(updatedManifest, schema, neededColumns, readerProperties)
 
       // Read data using Arrow C Data Interface
-      val recordBatchReaderPtr = reader.getRecordBatchReaderScala(null, 1024, 8 * 1024 * 1024)
+      val recordBatchReaderPtr = reader.getRecordBatchReaderScala()
 
       // Wrap the C++ ArrowArrayStream pointer with Arrow Java's ArrowArrayStream
       val allocator = ArrowUtils.getAllocator
