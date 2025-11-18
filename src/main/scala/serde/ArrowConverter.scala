@@ -171,6 +171,35 @@ object ArrowConverter extends Logging {
             ArrayData.toArrayData(arrayElements)
         }
 
+      case ArrayType(ShortType, _) =>
+        // Int8Vector or short array - detect based on Milvus schema
+        fieldTypeMap.get(fieldName) match {
+          case Some(io.milvus.grpc.schema.DataType.Int8Vector) =>
+            // Int8Vector: stored as FixedSizeBinary (1 byte per element), expose as Array[Short]
+            val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
+            val shorts = bytes.map(_.toShort)
+            ArrayData.toArrayData(shorts)
+
+          case _ =>
+            // Generic short array: stored as ListVector
+            val listVector = vector.asInstanceOf[ListVector]
+            val dataVector = listVector.getDataVector
+            val startIndex = listVector.getElementStartIndex(rowIndex)
+            val endIndex = listVector.getElementEndIndex(rowIndex)
+            val length = endIndex - startIndex
+
+            val arrayElements = (0 until length).map { i =>
+              val elemIndex = startIndex + i
+              if (dataVector.isNull(elemIndex)) {
+                null
+              } else {
+                arrowValueToSparkValue(dataVector, elemIndex, ShortType, fieldName, fieldTypeMap)
+              }
+            }.toArray
+
+            ArrayData.toArrayData(arrayElements)
+        }
+
       case ArrayType(elementType, _) =>
         // Generic array handling
         val listVector = vector.asInstanceOf[ListVector]

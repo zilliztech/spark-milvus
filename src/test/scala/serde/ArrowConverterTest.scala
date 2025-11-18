@@ -23,7 +23,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, 42.toByte)
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ByteType)
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ByteType, "test_field", Map.empty)
     result shouldBe 42.toByte
 
     vector.close()
@@ -35,7 +35,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, 1234.toShort)
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ShortType)
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ShortType, "test_field", Map.empty)
     result shouldBe 1234.toShort
 
     vector.close()
@@ -47,7 +47,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, 123456)
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, IntegerType)
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, IntegerType, "test_field", Map.empty)
     result shouldBe 123456
 
     vector.close()
@@ -59,7 +59,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, 123456789L)
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, LongType)
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, LongType, "test_field", Map.empty)
     result shouldBe 123456789L
 
     vector.close()
@@ -71,7 +71,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, 3.14f)
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, FloatType)
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, FloatType, "test_field", Map.empty)
     result shouldBe 3.14f
 
     vector.close()
@@ -83,7 +83,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, 3.14159265)
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, DoubleType)
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, DoubleType, "test_field", Map.empty)
     result shouldBe 3.14159265
 
     vector.close()
@@ -96,10 +96,10 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(1, 0)
     vector.setValueCount(2)
 
-    val result1 = ArrowConverter.arrowValueToSparkValue(vector, 0, BooleanType)
+    val result1 = ArrowConverter.arrowValueToSparkValue(vector, 0, BooleanType, "test_field", Map.empty)
     result1 shouldBe true
 
-    val result2 = ArrowConverter.arrowValueToSparkValue(vector, 1, BooleanType)
+    val result2 = ArrowConverter.arrowValueToSparkValue(vector, 1, BooleanType, "test_field", Map.empty)
     result2 shouldBe false
 
     vector.close()
@@ -111,21 +111,20 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, "Hello, Milvus!".getBytes("UTF-8"))
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, StringType)
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, StringType, "test_field", Map.empty)
     result shouldBe UTF8String.fromString("Hello, Milvus!")
 
     vector.close()
   }
 
-  test("StringType (JSON from Binary) conversion") {
-    val vector = new VarBinaryVector("test", allocator)
+  test("StringType (VarChar) basic conversion") {
+    val vector = new VarCharVector("test", allocator)
     vector.allocateNew(1)
-    val jsonBytes = """{"key": "value"}""".getBytes("UTF-8")
-    vector.set(0, jsonBytes)
+    vector.set(0, "test string".getBytes("UTF-8"))
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, StringType)
-    result shouldBe UTF8String.fromString("""{"key": "value"}""")
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, StringType, "test_field", Map.empty)
+    result shouldBe UTF8String.fromString("test string")
 
     vector.close()
   }
@@ -137,22 +136,29 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, bytes)
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, BinaryType)
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, BinaryType, "test_field", Map.empty)
     result shouldBe bytes
 
     vector.close()
   }
 
-  test("BinaryType (FixedSizeBinary for BinaryVector) conversion") {
+  test("BinaryVector (ArrayType(ByteType) from FixedSizeBinary) conversion") {
     val byteWidth = 8
-    val vector = new FixedSizeBinaryVector("test", allocator, byteWidth)
+    val vector = new FixedSizeBinaryVector("binary_vec", allocator, byteWidth)
     vector.allocateNew(1)
     val bytes = Array[Byte](1, 2, 3, 4, 5, 6, 7, 8)
     vector.set(0, bytes)
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, BinaryType)
-    result shouldBe bytes
+    import io.milvus.grpc.schema.{DataType => MilvusDataType}
+    val schemaMap = Map("binary_vec" -> MilvusDataType.BinaryVector)
+
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ArrayType(ByteType), "binary_vec", schemaMap)
+    val arrayData = result.asInstanceOf[org.apache.spark.sql.catalyst.util.ArrayData]
+    arrayData.numElements() shouldBe 8
+    (0 until 8).foreach { i =>
+      arrayData.getByte(i) shouldBe bytes(i)
+    }
 
     vector.close()
   }
@@ -169,7 +175,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, buffer.array())
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ArrayType(FloatType))
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ArrayType(FloatType), "test_field", Map.empty)
     val arrayData = result.asInstanceOf[org.apache.spark.sql.catalyst.util.ArrayData]
 
     arrayData.numElements() shouldBe 4
@@ -184,7 +190,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
   test("Float16Vector (ArrayType(FloatType) from FixedSizeBinary with 2-byte elements) conversion") {
     val dim = 3  // Use odd dimension to avoid confusion with FloatVector
     val byteWidth = dim * 2  // 2 bytes per float16 = 6 bytes total
-    val vector = new FixedSizeBinaryVector("test", allocator, byteWidth)
+    val vector = new FixedSizeBinaryVector("float16_vec", allocator, byteWidth)
     vector.allocateNew(1)
 
     // Create float16 data: using simple values that convert cleanly
@@ -195,7 +201,10 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
     vector.set(0, buffer.array())
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ArrayType(FloatType))
+    import io.milvus.grpc.schema.{DataType => MilvusDataType}
+    val schemaMap = Map("float16_vec" -> MilvusDataType.Float16Vector)
+
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ArrayType(FloatType), "float16_vec", schemaMap)
     val arrayData = result.asInstanceOf[org.apache.spark.sql.catalyst.util.ArrayData]
 
     arrayData.numElements() shouldBe 3
@@ -210,14 +219,17 @@ class ArrowConverterTest extends AnyFunSuite with Matchers with BeforeAndAfterAl
   test("Int8Vector (ArrayType(ShortType) from FixedSizeBinary) conversion") {
     val dim = 4
     val byteWidth = dim  // 1 byte per int8
-    val vector = new FixedSizeBinaryVector("test", allocator, byteWidth)
+    val vector = new FixedSizeBinaryVector("int8_vec", allocator, byteWidth)
     vector.allocateNew(1)
 
     val bytes = Array[Byte](1, 2, 3, 4)
     vector.set(0, bytes)
     vector.setValueCount(1)
 
-    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ArrayType(ShortType))
+    import io.milvus.grpc.schema.{DataType => MilvusDataType}
+    val schemaMap = Map("int8_vec" -> MilvusDataType.Int8Vector)
+
+    val result = ArrowConverter.arrowValueToSparkValue(vector, 0, ArrayType(ShortType), "int8_vec", schemaMap)
     val arrayData = result.asInstanceOf[org.apache.spark.sql.catalyst.util.ArrayData]
 
     arrayData.numElements() shouldBe 4
