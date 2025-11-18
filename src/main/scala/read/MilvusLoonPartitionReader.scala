@@ -95,7 +95,7 @@ class MilvusLoonPartitionReader(
         if (currentBatch != null && currentRowIndex < currentBatch.getRowCount) {
           // If we have filters, check if current row passes
           if (pushedFilters.nonEmpty) {
-            val row = ArrowConverter.arrowToInternalRow(currentBatch, currentRowIndex, sourceSchema)
+            val row = ArrowConverter.arrowToInternalRow(currentBatch, currentRowIndex, sourceSchema, Some(milvusSchema))
             currentRowIndex += 1
             if (applyFilters(row)) {
               // Found a matching row, back up index so get() will return it
@@ -140,7 +140,7 @@ class MilvusLoonPartitionReader(
         throw new IllegalStateException("No batch loaded")
       }
 
-      val row = ArrowConverter.arrowToInternalRow(currentBatch, currentRowIndex, sourceSchema)
+      val row = ArrowConverter.arrowToInternalRow(currentBatch, currentRowIndex, sourceSchema, Some(milvusSchema))
       currentRowIndex += 1
       row
     }
@@ -210,7 +210,7 @@ class MilvusLoonPartitionReader(
 
       // Process each row in batch
       for (i <- 0 until batchSize) {
-        val row = ArrowConverter.arrowToInternalRow(currentBatch, i, sourceSchema)
+        val row = ArrowConverter.arrowToInternalRow(currentBatch, i, sourceSchema, Some(milvusSchema))
 
         // Extract vector from row
         val vector = try {

@@ -45,11 +45,11 @@ object DataTypeUtil {
       case MilvusDataType.Int64   => DataTypes.LongType
       case MilvusDataType.Float   => DataTypes.FloatType
       case MilvusDataType.Double  => DataTypes.DoubleType
-      case MilvusDataType.Timestamptz => DataTypes.LongType
       case MilvusDataType.String  => DataTypes.StringType
       case MilvusDataType.VarChar => DataTypes.StringType
       case MilvusDataType.Text    => DataTypes.StringType
       case MilvusDataType.JSON    => DataTypes.StringType
+      case MilvusDataType.Timestamptz => DataTypes.LongType
       case MilvusDataType.Array =>
         val elementType = fieldSchema.elementType
         val sparkElementType = elementType match {
@@ -69,11 +69,13 @@ object DataTypeUtil {
         }
         DataTypes.createArrayType(sparkElementType)
       case MilvusDataType.Geometry =>
-        DataTypes.BinaryType  // Geometry data stored as binary
+        DataTypes.createArrayType(
+          DataTypes.BinaryType
+        ) // TODO: fubang support geometry
       case MilvusDataType.FloatVector =>
         DataTypes.createArrayType(DataTypes.FloatType)
       case MilvusDataType.BinaryVector =>
-        DataTypes.BinaryType  // Binary vectors are stored as fixed-size binary, not arrays
+        DataTypes.createArrayType(DataTypes.ByteType)
       case MilvusDataType.Int8Vector =>
         DataTypes.createArrayType(DataTypes.ShortType)
       case MilvusDataType.Float16Vector =>
@@ -82,27 +84,6 @@ object DataTypeUtil {
         DataTypes.createArrayType(DataTypes.FloatType)
       case MilvusDataType.SparseFloatVector =>
         DataTypes.createMapType(DataTypes.LongType, DataTypes.FloatType)
-      case MilvusDataType.ArrayOfVector =>
-        // ArrayOfVector: array of vectors
-        // Element type determines the vector type (FloatVector, BinaryVector, etc.)
-        val elementType = fieldSchema.elementType
-        val vectorType = elementType match {
-          case MilvusDataType.FloatVector =>
-            DataTypes.createArrayType(DataTypes.FloatType)
-          case MilvusDataType.BinaryVector =>
-            DataTypes.BinaryType
-          case MilvusDataType.Float16Vector =>
-            DataTypes.createArrayType(DataTypes.FloatType)
-          case MilvusDataType.BFloat16Vector =>
-            DataTypes.createArrayType(DataTypes.FloatType)
-          case MilvusDataType.Int8Vector =>
-            DataTypes.createArrayType(DataTypes.ShortType)
-          case _ =>
-            throw new DataParseException(
-              s"Unsupported ArrayOfVector element type: $elementType"
-            )
-        }
-        DataTypes.createArrayType(vectorType)
       case _ =>
         throw new DataParseException(
           s"Unsupported Milvus data type: $dataType"

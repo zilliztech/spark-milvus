@@ -17,68 +17,11 @@ import org.apache.spark.unsafe.types.UTF8String
 object ArrowConverter extends Logging {
 
   /**
-   * Convert Float16 or BFloat16 bytes to Float32 array
-   * Note: Currently treats all 2-byte formats as IEEE 754 half-precision (Float16)
-   * TODO: Add BFloat16 detection and conversion if needed
-   *
-   * @param bytes Byte array containing float16/bfloat16 data
-   * @return Array of float32 values
+   * Create a field name → Milvus DataType lookup map from CollectionSchema
+   * This enables accurate type detection during Arrow ↔ Spark conversion
    */
-  private def convertFloat16OrBFloat16ToFloat32(bytes: Array[Byte]): Array[Float] = {
-    val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-    val numFloats = bytes.length / 2
-    val floats = new Array[Float](numFloats)
-
-    for (i <- 0 until numFloats) {
-      val half = buffer.getShort() & 0xFFFF
-      floats(i) = convertFloat16ToFloat32(half)
-    }
-
-    floats
-  }
-
-  /**
-   * Convert a single Float16 (IEEE 754 half-precision) value to Float32
-   *
-   * @param half 16-bit half-precision float as Int
-   * @return 32-bit single-precision float
-   */
-  private def convertFloat16ToFloat32(half: Int): Float = {
-    // Extract sign, exponent, and mantissa
-    val sign = (half >> 15) & 0x1
-    val exponent = (half >> 10) & 0x1F
-    val mantissa = half & 0x3FF
-
-    // Handle special cases
-    if (exponent == 0) {
-      if (mantissa == 0) {
-        // Zero (positive or negative)
-        return if (sign == 1) -0.0f else 0.0f
-      } else {
-        // Subnormal number
-        val result = Math.pow(2, -14).toFloat * (mantissa.toFloat / 1024.0f)
-        return if (sign == 1) -result else result
-      }
-    } else if (exponent == 31) {
-      if (mantissa == 0) {
-        // Infinity
-        return if (sign == 1) Float.NegativeInfinity else Float.PositiveInfinity
-      } else {
-        // NaN
-        return Float.NaN
-      }
-    }
-
-    // Normal number
-    // Convert exponent from biased (15) to biased (127) for float32
-    val float32Exponent = exponent - 15 + 127
-    // Extend mantissa from 10 bits to 23 bits
-    val float32Mantissa = mantissa << 13
-
-    // Construct float32 bits: sign(1) + exponent(8) + mantissa(23)
-    val float32Bits = (sign << 31) | (float32Exponent << 23) | float32Mantissa
-
-    java.lang.Float.intBitsToFloat(float32Bits)
+  private def createFieldTypeMap(milvusSchema: io.milvus.grpc.schema.CollectionSchema): Map[String, io.milvus.grpc.schema.DataType] = {
+    milvusSchema.fields.map(field => field.name -> field.dataType).toMap
   }
 
   /**
@@ -87,13 +30,18 @@ object ArrowConverter extends Logging {
    * @param root Arrow VectorSchemaRoot containing the data
    * @param rowIndex Index of the row to convert
    * @param sparkSchema Spark schema for the target InternalRow
+   * @param milvusSchemaOpt Optional Milvus CollectionSchema for accurate type detection
    * @return Spark InternalRow
    */
   def arrowToInternalRow(
       root: VectorSchemaRoot,
       rowIndex: Int,
-      sparkSchema: StructType
+      sparkSchema: StructType,
+      milvusSchemaOpt: Option[io.milvus.grpc.schema.CollectionSchema] = None
   ): InternalRow = {
+    // Create field type map for lookups (only if schema provided)
+    val fieldTypeMap = milvusSchemaOpt.map(createFieldTypeMap).getOrElse(Map.empty)
+
     val values = new Array[Any](sparkSchema.fields.length)
 
     sparkSchema.fields.zipWithIndex.foreach { case (field, index) =>
@@ -104,7 +52,7 @@ object ArrowConverter extends Logging {
       } else if (vector.isNull(rowIndex)) {
         values(index) = null
       } else {
-        values(index) = arrowValueToSparkValue(vector, rowIndex, field.dataType)
+        values(index) = arrowValueToSparkValue(vector, rowIndex, field.dataType, field.name, fieldTypeMap)
       }
     }
 
@@ -117,12 +65,16 @@ object ArrowConverter extends Logging {
    * @param vector Arrow FieldVector containing the value
    * @param rowIndex Index of the row to extract
    * @param sparkType Target Spark data type
+   * @param fieldName Name of the field for schema lookup
+   * @param fieldTypeMap Map of field name to Milvus DataType for accurate type detection
    * @return Spark value
    */
   def arrowValueToSparkValue(
       vector: FieldVector,
       rowIndex: Int,
-      sparkType: DataType
+      sparkType: DataType,
+      fieldName: String,
+      fieldTypeMap: Map[String, io.milvus.grpc.schema.DataType]
   ): Any = {
     sparkType match {
       case LongType =>
@@ -147,84 +99,61 @@ object ArrowConverter extends Logging {
         vector.asInstanceOf[BitVector].get(rowIndex) != 0
 
       case StringType =>
-        vector match {
-          case vc: VarCharVector =>
-            // Regular string fields
-            val bytes = vc.get(rowIndex)
-            UTF8String.fromBytes(bytes)
-          case vb: VarBinaryVector =>
-            // JSON fields stored as binary
-            val bytes = vb.get(rowIndex)
-            UTF8String.fromBytes(bytes)
-        }
+        val bytes = vector.asInstanceOf[VarCharVector].get(rowIndex)
+        UTF8String.fromBytes(bytes)
 
       case ArrayType(FloatType, _) =>
-        vector match {
-          case fsb: FixedSizeBinaryVector =>
-            // FloatVector, Float16Vector, or BFloat16Vector stored as FixedSizeBinaryVector
-            val bytes = fsb.get(rowIndex)
-            val byteWidth = fsb.getByteWidth
+        // Detect actual vector type from Milvus schema
+        fieldTypeMap.get(fieldName) match {
+          case Some(io.milvus.grpc.schema.DataType.FloatVector) =>
+            // FloatVector: 4 bytes per element
+            val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            val floats = (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
+            ArrayData.toArrayData(floats)
 
-            // Heuristic to determine vector type:
-            // - If byteWidth % 4 != 0: definitely Float16/BFloat16 (2 bytes per element)
-            // - If byteWidth % 8 != 0 (but % 4 == 0): likely Float16 with even dimensions like 2, 6, 10
-            //   because dim*2 = 4, 12, 20 (multiples of 4 but not 8)
-            // - If byteWidth % 8 == 0: likely FloatVector (4 bytes per element)
-            // Exception: very small vectors (byteWidth < 32) are more likely Float16
-
-            val isFloat16 = if (byteWidth % 4 != 0) {
-              true  // Can't be FloatVector
-            } else if (byteWidth % 8 != 0) {
-              true  // Likely Float16 with even dim (e.g., dim=2 -> 4 bytes)
-            } else if (byteWidth < 32) {
-              // Small vectors: try to distinguish by checking if values look like valid float32
-              // For now, assume small multiples of 8 could be either
-              false  // Default to FloatVector for byteWidth = 8, 16, 24
-            } else {
-              false  // Larger vectors, likely FloatVector
+          case Some(io.milvus.grpc.schema.DataType.Float16Vector) =>
+            // Float16Vector: 2 bytes per element, convert to float
+            val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
+            val dim = bytes.length / 2
+            val floats = new Array[Float](dim)
+            for (i <- 0 until dim) {
+              val float16Bytes = bytes.slice(i * 2, i * 2 + 2)
+              floats(i) = com.zilliz.spark.connector.FloatConverter.fromFloat16Bytes(float16Bytes.toSeq)
             }
+            ArrayData.toArrayData(floats)
 
-            if (isFloat16) {
-              // Float16Vector or BFloat16Vector: 2 bytes per float
-              val floats = convertFloat16OrBFloat16ToFloat32(bytes)
-              ArrayData.toArrayData(floats)
-            } else {
-              // FloatVector: 4 bytes per float
-              val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-              val floats = (0 until (byteWidth / 4)).map(_ => buffer.getFloat()).toArray
-              ArrayData.toArrayData(floats)
+          case Some(io.milvus.grpc.schema.DataType.BFloat16Vector) =>
+            // BFloat16Vector: 2 bytes per element, convert to float
+            val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
+            val dim = bytes.length / 2
+            val floats = new Array[Float](dim)
+            for (i <- 0 until dim) {
+              val bfloat16Bytes = bytes.slice(i * 2, i * 2 + 2)
+              floats(i) = com.zilliz.spark.connector.FloatConverter.fromBFloat16Bytes(bfloat16Bytes.toSeq)
             }
+            ArrayData.toArrayData(floats)
 
-          case listVector: ListVector =>
-            // Generic array handling for non-vector types
-            val dataVector = listVector.getDataVector
-            val startIndex = listVector.getElementStartIndex(rowIndex)
-            val endIndex = listVector.getElementEndIndex(rowIndex)
-            val length = endIndex - startIndex
-
-            val arrayElements = (0 until length).map { i =>
-              val elemIndex = startIndex + i
-              if (dataVector.isNull(elemIndex)) {
-                null
-              } else {
-                arrowValueToSparkValue(dataVector, elemIndex, FloatType)
-              }
-            }.toArray
-
-            ArrayData.toArrayData(arrayElements)
+          case _ =>
+            // Fallback: assume FloatVector for backward compatibility
+            logWarning(s"No Milvus schema available for field '$fieldName', assuming FloatVector")
+            val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            val floats = (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
+            ArrayData.toArrayData(floats)
         }
 
-      case ArrayType(ShortType, _) =>
-        vector match {
-          case fsb: FixedSizeBinaryVector =>
-            // Int8Vector: stored as FixedSizeBinary with 1 byte per element
-            // Convert bytes to Short array (Spark doesn't have ByteType arrays)
-            val bytes = fsb.get(rowIndex)
-            val shorts = bytes.map(b => b.toShort)
-            ArrayData.toArrayData(shorts)
+      case ArrayType(ByteType, _) =>
+        // BinaryVector or byte array - detect based on Milvus schema and vector type
+        fieldTypeMap.get(fieldName) match {
+          case Some(io.milvus.grpc.schema.DataType.BinaryVector) =>
+            // BinaryVector: stored as FixedSizeBinary (bit-packed)
+            val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
+            ArrayData.toArrayData(bytes)
 
-          case listVector: ListVector =>
-            // Generic Short array handling
+          case _ =>
+            // Generic byte array: stored as ListVector
+            val listVector = vector.asInstanceOf[ListVector]
             val dataVector = listVector.getDataVector
             val startIndex = listVector.getElementStartIndex(rowIndex)
             val endIndex = listVector.getElementEndIndex(rowIndex)
@@ -235,7 +164,7 @@ object ArrowConverter extends Logging {
               if (dataVector.isNull(elemIndex)) {
                 null
               } else {
-                arrowValueToSparkValue(dataVector, elemIndex, ShortType)
+                arrowValueToSparkValue(dataVector, elemIndex, ByteType, fieldName, fieldTypeMap)
               }
             }.toArray
 
@@ -255,21 +184,15 @@ object ArrowConverter extends Logging {
           if (dataVector.isNull(elemIndex)) {
             null
           } else {
-            arrowValueToSparkValue(dataVector, elemIndex, elementType)
+            arrowValueToSparkValue(dataVector, elemIndex, elementType, fieldName, fieldTypeMap)
           }
         }.toArray
 
         ArrayData.toArrayData(arrayElements)
 
       case BinaryType =>
-        vector match {
-          case vb: VarBinaryVector =>
-            // Variable-length binary (JSON, Array, etc.)
-            vb.get(rowIndex)
-          case fsb: FixedSizeBinaryVector =>
-            // Fixed-size binary (BinaryVector)
-            fsb.get(rowIndex)
-        }
+        val bytes = vector.asInstanceOf[VarBinaryVector].get(rowIndex)
+        bytes
 
       case MapType(keyType, valueType, _) =>
         val mapVector = vector.asInstanceOf[MapVector]
@@ -283,8 +206,8 @@ object ArrowConverter extends Logging {
 
         (0 until length).foreach { i =>
           val elemIndex = startIndex + i
-          keys(i) = arrowValueToSparkValue(dataVector.getChild("key"), elemIndex, keyType)
-          values(i) = arrowValueToSparkValue(dataVector.getChild("value"), elemIndex, valueType)
+          keys(i) = arrowValueToSparkValue(dataVector.getChild("key"), elemIndex, keyType, fieldName, fieldTypeMap)
+          values(i) = arrowValueToSparkValue(dataVector.getChild("value"), elemIndex, valueType, fieldName, fieldTypeMap)
         }
 
         ArrayBasedMapData(keys, values)
@@ -303,13 +226,17 @@ object ArrowConverter extends Logging {
    * @param record Spark InternalRow containing the data
    * @param colIndex Column index in the InternalRow
    * @param sparkType Spark data type of the column
+   * @param fieldName Name of the field for schema lookup
+   * @param fieldTypeMap Map of field name to Milvus DataType for accurate type detection
    */
   def sparkValueToArrowValue(
       vector: FieldVector,
       rowIndex: Int,
       record: InternalRow,
       colIndex: Int,
-      sparkType: DataType
+      sparkType: DataType,
+      fieldName: String,
+      fieldTypeMap: Map[String, io.milvus.grpc.schema.DataType]
   ): Unit = {
     if (record.isNullAt(colIndex)) {
       vector.setNull(rowIndex)
@@ -340,16 +267,77 @@ object ArrowConverter extends Logging {
 
       case StringType =>
         val str = record.getUTF8String(colIndex)
-        vector.asInstanceOf[VarCharVector].set(rowIndex, str.getBytes)
+        if (str == null) {
+          vector.setNull(rowIndex)
+        } else {
+          vector.asInstanceOf[VarCharVector].set(rowIndex, str.getBytes)
+        }
 
       case ArrayType(FloatType, _) =>
-        // FloatVector stored as FixedSizeBinaryVector
         val arrayData = record.getArray(colIndex)
         val floats = (0 until arrayData.numElements()).map(i => arrayData.getFloat(i)).toArray
-        val bytes = new Array[Byte](floats.length * 4)
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        floats.foreach(buffer.putFloat)
-        vector.asInstanceOf[FixedSizeBinaryVector].set(rowIndex, bytes)
+
+        fieldTypeMap.get(fieldName) match {
+          case Some(io.milvus.grpc.schema.DataType.FloatVector) =>
+            // FloatVector: 4 bytes per element
+            val bytes = new Array[Byte](floats.length * 4)
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            floats.foreach(buffer.putFloat)
+            vector.asInstanceOf[FixedSizeBinaryVector].set(rowIndex, bytes)
+
+          case Some(io.milvus.grpc.schema.DataType.Float16Vector) =>
+            // Float16Vector: 2 bytes per element
+            val bytes = floats.flatMap { f =>
+              com.zilliz.spark.connector.FloatConverter.toFloat16Bytes(f)
+            }.toArray
+            vector.asInstanceOf[FixedSizeBinaryVector].set(rowIndex, bytes)
+
+          case Some(io.milvus.grpc.schema.DataType.BFloat16Vector) =>
+            // BFloat16Vector: 2 bytes per element
+            val bytes = floats.flatMap { f =>
+              com.zilliz.spark.connector.FloatConverter.toBFloat16Bytes(f)
+            }.toArray
+            vector.asInstanceOf[FixedSizeBinaryVector].set(rowIndex, bytes)
+
+          case _ =>
+            // Fallback: assume FloatVector
+            logWarning(s"No Milvus schema available for field '$fieldName', assuming FloatVector")
+            val bytes = new Array[Byte](floats.length * 4)
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            floats.foreach(buffer.putFloat)
+            vector.asInstanceOf[FixedSizeBinaryVector].set(rowIndex, bytes)
+        }
+
+      case ArrayType(ByteType, _) =>
+        // BinaryVector or byte array - detect based on Milvus schema
+        val arrayData = record.getArray(colIndex)
+
+        fieldTypeMap.get(fieldName) match {
+          case Some(io.milvus.grpc.schema.DataType.BinaryVector) =>
+            // BinaryVector: stored as FixedSizeBinary (bit-packed)
+            val bytes = (0 until arrayData.numElements()).map(i => arrayData.getByte(i)).toArray
+            vector.asInstanceOf[FixedSizeBinaryVector].set(rowIndex, bytes)
+
+          case _ =>
+            // Generic byte array: stored as ListVector
+            val listVector = vector.asInstanceOf[ListVector]
+            val dataVector = listVector.getDataVector
+
+            listVector.startNewValue(rowIndex)
+            val startIndex = listVector.getOffsetBuffer.getInt(rowIndex * 4)
+
+            (0 until arrayData.numElements()).foreach { i =>
+              val elemIndex = startIndex + i
+              if (arrayData.isNullAt(i)) {
+                dataVector.setNull(elemIndex)
+              } else {
+                val elemRow = InternalRow(arrayData.getByte(i))
+                sparkValueToArrowValue(dataVector, elemIndex, elemRow, 0, ByteType, fieldName, fieldTypeMap)
+              }
+            }
+
+            listVector.endValue(rowIndex, arrayData.numElements())
+        }
 
       case ArrayType(elementType, _) =>
         // Generic array handling
@@ -367,7 +355,7 @@ object ArrowConverter extends Logging {
           } else {
             // Recursively set element value
             val elemRow = InternalRow(arrayData.get(i, elementType))
-            sparkValueToArrowValue(dataVector, elemIndex, elemRow, 0, elementType)
+            sparkValueToArrowValue(dataVector, elemIndex, elemRow, 0, elementType, fieldName, fieldTypeMap)
           }
         }
 
@@ -375,7 +363,11 @@ object ArrowConverter extends Logging {
 
       case BinaryType =>
         val bytes = record.getBinary(colIndex)
-        vector.asInstanceOf[VarBinaryVector].set(rowIndex, bytes)
+        if (bytes == null) {
+          vector.setNull(rowIndex)
+        } else {
+          vector.asInstanceOf[VarBinaryVector].set(rowIndex, bytes)
+        }
 
       case MapType(keyType, valueType, _) =>
         val mapVector = vector.asInstanceOf[MapVector]
@@ -393,8 +385,8 @@ object ArrowConverter extends Logging {
           val keyRow = InternalRow(keys.get(i, keyType))
           val valueRow = InternalRow(values.get(i, valueType))
 
-          sparkValueToArrowValue(structVector.getChild("key"), elemIndex, keyRow, 0, keyType)
-          sparkValueToArrowValue(structVector.getChild("value"), elemIndex, valueRow, 0, valueType)
+          sparkValueToArrowValue(structVector.getChild("key"), elemIndex, keyRow, 0, keyType, fieldName, fieldTypeMap)
+          sparkValueToArrowValue(structVector.getChild("value"), elemIndex, valueRow, 0, valueType, fieldName, fieldTypeMap)
         }
 
         mapVector.endValue(rowIndex, mapData.numElements())
@@ -411,16 +403,20 @@ object ArrowConverter extends Logging {
    * @param rowIndex Index of the row to write
    * @param record Spark InternalRow to convert
    * @param sparkSchema Spark schema of the InternalRow
+   * @param milvusSchemaOpt Optional Milvus CollectionSchema for accurate type detection
    */
   def internalRowToArrow(
       root: VectorSchemaRoot,
       rowIndex: Int,
       record: InternalRow,
-      sparkSchema: StructType
+      sparkSchema: StructType,
+      milvusSchemaOpt: Option[io.milvus.grpc.schema.CollectionSchema] = None
   ): Unit = {
+    val fieldTypeMap = milvusSchemaOpt.map(createFieldTypeMap).getOrElse(Map.empty)
+
     sparkSchema.fields.zipWithIndex.foreach { case (field, colIndex) =>
       val vector = root.getVector(field.name)
-      sparkValueToArrowValue(vector, rowIndex, record, colIndex, field.dataType)
+      sparkValueToArrowValue(vector, rowIndex, record, colIndex, field.dataType, field.name, fieldTypeMap)
     }
   }
 }
