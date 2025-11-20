@@ -14,208 +14,6 @@ import scala.collection.JavaConverters._
 
 
 /**
- * Streaming iterator that processes rows segment-by-segment without buffering
- *
- * Creates and closes writers automatically as segment_id changes in the sorted iterator.
- * Tracks null counts for un-joined rows.
- */
-private class SegmentStreamingIterator(
-    iter: Iterator[InternalRow],
-    config: BackfillConfig,
-    collectionID: Long,
-    segmentToPartitionMap: Map[Long, Long],
-    targetSchema: org.apache.spark.sql.types.StructType
-) extends Iterator[(SegmentBackfillResult, Option[Throwable])] {
-
-  private val logger = LoggerFactory.getLogger(getClass)
-
-  private var currentSegmentID: Long = -1
-  private var currentWriter: Option[DataWriter[InternalRow]] = None
-  private var currentRowCount: Long = 0
-  private var currentNullRowCount: Long = 0
-  private var currentSegmentStartTime: Long = 0
-  private var currentOutputPath: String = ""
-  private var hasNextResult = false
-  private var nextResult: (SegmentBackfillResult, Option[Throwable]) = null
-
-  override def hasNext: Boolean = {
-    if (hasNextResult) {
-      true
-    } else if (iter.hasNext) {
-      true
-    } else {
-      // No more rows, flush final segment if exists
-      if (currentWriter.isDefined) {
-        nextResult = flushCurrentSegment()
-        hasNextResult = true
-        true
-      } else {
-        false
-      }
-    }
-  }
-
-  override def next(): (SegmentBackfillResult, Option[Throwable]) = {
-    if (hasNextResult) {
-      hasNextResult = false
-      nextResult
-    } else {
-      // Process rows until segment changes
-      while (iter.hasNext) {
-        val row = iter.next()
-        val segmentID = row.getLong(0) // segment_id is first column
-
-        if (currentSegmentID == -1) {
-          // First segment
-          startNewSegment(segmentID)
-          writeRow(row)
-        } else if (segmentID == currentSegmentID) {
-          // Same segment, continue writing
-          writeRow(row)
-        } else {
-          // New segment detected, flush current and start new
-          val result = flushCurrentSegment()
-          startNewSegment(segmentID)
-          writeRow(row)
-          return result
-        }
-      }
-
-      // No more rows, flush final segment
-      if (currentWriter.isDefined) {
-        flushCurrentSegment()
-      } else {
-        throw new NoSuchElementException("next on empty iterator")
-      }
-    }
-  }
-
-  private def startNewSegment(segmentID: Long): Unit = {
-    currentSegmentID = segmentID
-    currentRowCount = 0
-    currentNullRowCount = 0
-    currentSegmentStartTime = System.currentTimeMillis()
-
-    // Look up partition ID for this segment
-    val partitionID = segmentToPartitionMap.getOrElse(segmentID, {
-      throw new IllegalStateException(s"Partition ID not found for segment $segmentID")
-    })
-
-    // Create writer for this segment
-    val writeOptions = config.getS3WriteOptions(collectionID, partitionID, segmentID)
-    currentOutputPath = writeOptions("milvus.writer.customPath")
-
-    logger.debug(s"Executor starting segment $segmentID (partition $partitionID) -> $currentOutputPath")
-
-    val optionsMap = new CaseInsensitiveStringMap(writeOptions.asJava)
-    val milvusOption = MilvusOption(optionsMap)
-
-    val batchWrite = new MilvusLoonBatchWrite(targetSchema, milvusOption)
-    val writerFactory = batchWrite.createBatchWriterFactory(null)
-    val writer = writerFactory.createWriter(0, System.currentTimeMillis())
-
-    currentWriter = Some(writer)
-  }
-
-  /**
-   * Write a row to the current segment's writer
-   *
-   * Handles both joined and un-joined rows:
-   * - Joined rows: new field values from backfill data
-   * - Un-joined rows: NULL values for new fields (from left join)
-   */
-  private def writeRow(row: InternalRow): Unit = {
-    currentWriter.foreach { writer =>
-      // Create a new InternalRow with only the target fields (skip segment_id and row_offset)
-      // For un-joined rows, row.get() will return null for new field columns
-      val targetFields = (2 until row.numFields).map(i =>
-        row.get(i, targetSchema.fields(i - 2).dataType)
-      ).toArray
-
-      // Check if this is an un-joined row (all new fields are null)
-      if (targetFields.forall(_ == null)) {
-        currentNullRowCount += 1
-      }
-
-      val targetRow = new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(targetFields)
-      writer.write(targetRow)
-      currentRowCount += 1
-    }
-  }
-
-  private def flushCurrentSegment(): (SegmentBackfillResult, Option[Throwable]) = {
-    val segmentID = currentSegmentID
-    val rowCount = currentRowCount
-    val nullRowCount = currentNullRowCount
-    val outputPath = currentOutputPath
-    val startTime = currentSegmentStartTime
-
-    // Look up partition ID for this segment
-    val partitionID = segmentToPartitionMap.getOrElse(segmentID, {
-      throw new IllegalStateException(s"Partition ID not found for segment $segmentID")
-    })
-
-    currentWriter match {
-      case Some(writer) =>
-        try {
-          // Commit the writer
-          val commitMessage = writer.commit()
-
-          // Extract manifest path from commit message
-          val manifestPaths = commitMessage match {
-            case msg: MilvusLoonCommitMessage => Seq(msg.manifestPath)
-            case _ => Seq.empty
-          }
-
-          val executionTime = System.currentTimeMillis() - startTime
-          val joinedRowCount = rowCount - nullRowCount
-
-          logger.debug(s"Segment $segmentID (partition $partitionID) completed successfully in ${executionTime}ms")
-          logger.debug(s"Segment $segmentID rows: total=$rowCount, joined=$joinedRowCount, un-joined(nulls)=$nullRowCount")
-          logger.debug(s"Segment $segmentID manifest paths: ${manifestPaths.mkString(", ")}")
-
-          // Commit the batch write
-          val optionsMap = new CaseInsensitiveStringMap(
-            config.getS3WriteOptions(collectionID, partitionID, segmentID).asJava
-          )
-          val batchWrite = new MilvusLoonBatchWrite(targetSchema, MilvusOption(optionsMap))
-          batchWrite.commit(Array(commitMessage))
-
-          writer.close()
-          currentWriter = None
-
-          (SegmentBackfillResult(
-            segmentId = segmentID,
-            rowCount = rowCount,
-            manifestPaths = manifestPaths,
-            outputPath = outputPath,
-            executionTimeMs = executionTime
-          ), None)
-
-        } catch {
-          case e: Exception =>
-            val executionTime = System.currentTimeMillis() - startTime
-            logger.error(s"Segment $segmentID (partition $partitionID) failed after ${executionTime}ms", e)
-            writer.abort()
-            writer.close()
-            currentWriter = None
-
-            (SegmentBackfillResult(
-              segmentId = segmentID,
-              rowCount = rowCount,
-              manifestPaths = Seq.empty,
-              outputPath = outputPath,
-              executionTimeMs = executionTime
-            ), Some(e))
-        }
-
-      case None =>
-        throw new IllegalStateException("Attempting to flush segment without active writer")
-    }
-  }
-}
-
-/**
  * Backfill operation for Milvus collections
  *
  * This object provides functionality to backfill new fields into existing Milvus collections
@@ -538,12 +336,6 @@ object MilvusBackfill {
       val preparedDF = joinedDF
         .select((Seq("segment_id", "row_offset") ++ newFieldNames).map(col): _*)
 
-      // Repartition by segment_id to ensure all rows of same segment go to same partition
-      // Sort within partitions to maintain row_offset order
-      val repartitionedDF = preparedDF
-        .repartition(col("segment_id"))
-        .sortWithinPartitions("segment_id", "row_offset")
-
       // Get the schema for new fields only (without segment_id and row_offset)
       val targetSchema = org.apache.spark.sql.types.StructType(
         newFieldNames.map(fieldName =>
@@ -551,30 +343,31 @@ object MilvusBackfill {
         )
       )
 
+      val segmentIds = segmentToPartitionMap.keys.toArray
+      val segmentPartitioner = new SegmentPartitioner(segmentIds)
+
+      // Repartition using custom partitioner, then sort by row_offset within each partition
+      val repartitionedRDD = preparedDF.queryExecution.toRdd
+        .keyBy(_.getLong(0))  // segment_id is at index 0
+        .partitionBy(segmentPartitioner)
+        .values
+        .mapPartitions(iter => iter.toSeq.sortBy(_.getLong(1)).iterator)  // Sort by row_offset
+
       // Broadcast configuration to executors
       val broadcastConfig = spark.sparkContext.broadcast(config)
       val broadcastCollectionID = spark.sparkContext.broadcast(collectionID)
       val broadcastSegmentToPartitionMap = spark.sparkContext.broadcast(segmentToPartitionMap)
       val broadcastTargetSchema = spark.sparkContext.broadcast(targetSchema)
 
-      // Get the underlying RDD[InternalRow] for efficient processing
-      val internalRowRDD = repartitionedDF.queryExecution.toRdd
-
-      // Process each partition (which may contain one or more segments)
-      // Each segment will be written by exactly one FFI writer
-      // Stream processing: create/close writers as segment_id changes
-      val results = internalRowRDD.mapPartitions { iter =>
-        if (!iter.hasNext) {
-          // Empty partition
-          Iterator.empty
-        } else {
-          val cfg = broadcastConfig.value
-          val collID = broadcastCollectionID.value
-          val segToPartMap = broadcastSegmentToPartitionMap.value
-          val schema = broadcastTargetSchema.value
-
-          new SegmentStreamingIterator(iter, cfg, collID, segToPartMap, schema)
-        }
+      val results = repartitionedRDD.mapPartitions { iter =>
+        if (!iter.hasNext) Iterator.empty
+        else processSegmentPartition(
+          iter,
+          broadcastConfig.value,
+          broadcastCollectionID.value,
+          broadcastSegmentToPartitionMap.value,
+          broadcastTargetSchema.value
+        )
       }.collect()
 
       // Cleanup broadcast variables
@@ -622,6 +415,77 @@ object MilvusBackfill {
           message = s"Failed to process segments: ${e.getMessage}",
           cause = Some(e)
         ))
+    }
+  }
+
+  /**
+   * Process a single partition containing exactly one segment
+   * This is called by each Spark executor to write one segment's data
+   */
+  private def processSegmentPartition(
+      iter: Iterator[InternalRow],
+      config: BackfillConfig,
+      collectionID: Long,
+      segmentToPartitionMap: Map[Long, Long],
+      targetSchema: org.apache.spark.sql.types.StructType
+  ): Iterator[(SegmentBackfillResult, Option[Throwable])] = {
+
+    val firstRow = iter.next()
+    val segmentID = firstRow.getLong(0)
+    val partitionID = segmentToPartitionMap(segmentID)
+    val startTime = System.currentTimeMillis()
+
+    // Create writer
+    val writeOptions = config.getS3WriteOptions(collectionID, partitionID, segmentID)
+    val outputPath = writeOptions("milvus.writer.customPath")
+    val optionsMap = new CaseInsensitiveStringMap(writeOptions.asJava)
+    val batchWrite = new MilvusLoonBatchWrite(targetSchema, MilvusOption(optionsMap))
+    val writer = batchWrite.createBatchWriterFactory(null).createWriter(0, System.currentTimeMillis())
+
+    try {
+      var rowCount = 0L
+      var nullRowCount = 0L
+
+      def writeRow(row: InternalRow): Unit = {
+        val targetFields = (2 until row.numFields).map(i =>
+          row.get(i, targetSchema.fields(i - 2).dataType)
+        ).toArray
+        if (targetFields.forall(_ == null)) nullRowCount += 1
+        writer.write(new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(targetFields))
+        rowCount += 1
+      }
+
+      writeRow(firstRow)
+      iter.foreach(writeRow)
+
+      val commitMessage = writer.commit()
+      val manifestPaths = commitMessage match {
+        case msg: MilvusLoonCommitMessage => Seq(msg.manifestPath)
+        case _ => Seq.empty
+      }
+
+      batchWrite.commit(Array(commitMessage))
+      writer.close()
+
+      Iterator.single((SegmentBackfillResult(
+        segmentId = segmentID,
+        rowCount = rowCount,
+        manifestPaths = manifestPaths,
+        outputPath = outputPath,
+        executionTimeMs = System.currentTimeMillis() - startTime
+      ), None))
+
+    } catch {
+      case e: Exception =>
+        writer.abort()
+        writer.close()
+        Iterator.single((SegmentBackfillResult(
+          segmentId = segmentID,
+          rowCount = 0,
+          manifestPaths = Seq.empty,
+          outputPath = outputPath,
+          executionTimeMs = System.currentTimeMillis() - startTime
+        ), Some(e)))
     }
   }
 

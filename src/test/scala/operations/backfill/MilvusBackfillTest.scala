@@ -24,7 +24,7 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
   var spark: SparkSession = _
   var milvusClient: MilvusClient = _
 
-  val collectionName = s"backfilltestcollection"
+  val collectionName = s"backfilltestcollection_${System.currentTimeMillis()}"
   val dim = 128
   val batchSize = 10000
   val batchCount = 100
