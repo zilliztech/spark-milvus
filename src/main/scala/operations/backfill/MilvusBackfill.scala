@@ -23,7 +23,7 @@ private class SegmentStreamingIterator(
     iter: Iterator[InternalRow],
     config: BackfillConfig,
     collectionID: Long,
-    partitionID: Long,
+    segmentToPartitionMap: Map[Long, Long],
     targetSchema: org.apache.spark.sql.types.StructType
 ) extends Iterator[(SegmentBackfillResult, Option[Throwable])] {
 
@@ -96,11 +96,16 @@ private class SegmentStreamingIterator(
     currentNullRowCount = 0
     currentSegmentStartTime = System.currentTimeMillis()
 
+    // Look up partition ID for this segment
+    val partitionID = segmentToPartitionMap.getOrElse(segmentID, {
+      throw new IllegalStateException(s"Partition ID not found for segment $segmentID")
+    })
+
     // Create writer for this segment
     val writeOptions = config.getS3WriteOptions(collectionID, partitionID, segmentID)
     currentOutputPath = writeOptions("milvus.writer.customPath")
 
-    logger.debug(s"Executor starting segment $segmentID -> $currentOutputPath")
+    logger.debug(s"Executor starting segment $segmentID (partition $partitionID) -> $currentOutputPath")
 
     val optionsMap = new CaseInsensitiveStringMap(writeOptions.asJava)
     val milvusOption = MilvusOption(optionsMap)
@@ -145,6 +150,11 @@ private class SegmentStreamingIterator(
     val outputPath = currentOutputPath
     val startTime = currentSegmentStartTime
 
+    // Look up partition ID for this segment
+    val partitionID = segmentToPartitionMap.getOrElse(segmentID, {
+      throw new IllegalStateException(s"Partition ID not found for segment $segmentID")
+    })
+
     currentWriter match {
       case Some(writer) =>
         try {
@@ -160,7 +170,7 @@ private class SegmentStreamingIterator(
           val executionTime = System.currentTimeMillis() - startTime
           val joinedRowCount = rowCount - nullRowCount
 
-          logger.debug(s"Segment $segmentID completed successfully in ${executionTime}ms")
+          logger.debug(s"Segment $segmentID (partition $partitionID) completed successfully in ${executionTime}ms")
           logger.debug(s"Segment $segmentID rows: total=$rowCount, joined=$joinedRowCount, un-joined(nulls)=$nullRowCount")
           logger.debug(s"Segment $segmentID manifest paths: ${manifestPaths.mkString(", ")}")
 
@@ -185,7 +195,7 @@ private class SegmentStreamingIterator(
         } catch {
           case e: Exception =>
             val executionTime = System.currentTimeMillis() - startTime
-            logger.error(s"Segment $segmentID failed after ${executionTime}ms", e)
+            logger.error(s"Segment $segmentID (partition $partitionID) failed after ${executionTime}ms", e)
             writer.abort()
             writer.close()
             currentWriter = None
@@ -237,7 +247,17 @@ object MilvusBackfill {
       case Right(_) => // Continue
     }
 
+    // Create Milvus client once for all operations
+    var client: MilvusClient = null
     try {
+      client = MilvusClient(
+        MilvusConnectionParams(
+          uri = config.milvusUri,
+          token = config.milvusToken,
+          databaseName = config.databaseName
+        )
+      )
+
       // Read backfill data from Parquet
       val backfillDF = readBackfillData(spark, backfillDataPath) match {
         case Left(error) => return Left(error)
@@ -251,7 +271,7 @@ object MilvusBackfill {
       }
 
       // Validate schema compatibility and get primary key name
-      val pkName = validateSchemaCompatibility(originalDF, backfillDF, config) match {
+      val pkName = validateSchemaCompatibility(originalDF, backfillDF, config, client) match {
         case Left(error) => return Left(error)
         case Right(name) => name
       }
@@ -259,12 +279,12 @@ object MilvusBackfill {
       // Perform Sort Merge Join
       val joinedDF = performJoin(originalDF, backfillDF, pkName)
 
-      // Retrieve Milvus metadata (collection ID, partition ID)
+      // Retrieve Milvus metadata (collection ID and segment-to-partition mapping)
       // TODO: Currently get through milvus client, once Milvus snapshot feature is ready,
-      // we can get the collection ID and partition ID from the snapshot file.
-      val (collectionID, partitionID) = retrieveMilvusMetadata(config) match {
+      // we can get the collection ID and segment-to-partition mapping from the snapshot file.
+      val (collectionID, segmentToPartitionMap) = retrieveMilvusMetadata(config, client) match {
         case Left(error) => return Left(error)
-        case Right(ids) => ids
+        case Right(metadata) => metadata
       }
 
       // Extract new field names
@@ -278,7 +298,7 @@ object MilvusBackfill {
         spark,
         joinedDF,
         collectionID,
-        partitionID,
+        segmentToPartitionMap,
         config,
         newFieldNames
       ) match {
@@ -288,11 +308,15 @@ object MilvusBackfill {
 
       // Build final result
       val executionTime = System.currentTimeMillis() - startTime
+
+      // Get all unique partition IDs that were processed
+      val partitionIDs = segmentToPartitionMap.values.toSet
+
       val result = BackfillResult.success(
         segmentResults = segmentResults,
         executionTimeMs = executionTime,
         collectionId = collectionID,
-        partitionId = partitionID,
+        partitionId = if (partitionIDs.size == 1) partitionIDs.head else -1, // -1 indicates multi-partition
         newFieldNames = newFieldNames
       )
 
@@ -303,6 +327,15 @@ object MilvusBackfill {
         val executionTime = System.currentTimeMillis() - startTime
         logger.error("Backfill operation failed", e)
         Left(BackfillError.fromException(e))
+    } finally {
+      if (client != null) {
+        try {
+          client.close()
+        } catch {
+          case e: Exception =>
+            logger.warn("Failed to close Milvus client", e)
+        }
+      }
     }
   }
 
@@ -385,19 +418,11 @@ object MilvusBackfill {
   private def validateSchemaCompatibility(
       originalDF: DataFrame,
       backfillDF: DataFrame,
-      config: BackfillConfig
+      config: BackfillConfig,
+      client: MilvusClient
   ): Either[BackfillError, String] = {
-    // Get the actual primary key field name from Milvus collection
-    var client: MilvusClient = null
     try {
-      client = MilvusClient(
-        MilvusConnectionParams(
-          uri = config.milvusUri,
-          token = config.milvusToken,
-          databaseName = config.databaseName
-        )
-      )
-
+      // Get the actual primary key field name from Milvus collection
       val pkName = client.getPKName(config.databaseName, config.collectionName) match {
         case scala.util.Success(name) => name
         case scala.util.Failure(e) =>
@@ -437,14 +462,6 @@ object MilvusBackfill {
           message = s"Failed to validate schema compatibility: ${e.getMessage}",
           cause = Some(e)
         ))
-    } finally {
-      if (client != null) {
-        try {
-          client.close()
-        } catch {
-          case _: Exception => // Ignore close errors
-        }
-      }
     }
   }
 
@@ -460,21 +477,14 @@ object MilvusBackfill {
   }
 
   /**
-   * Retrieve Milvus metadata (collection ID, partition ID)
+   * Retrieve Milvus metadata (collection ID and segment-to-partition mapping)
+   * Supports multi-partition collections by tracking partition ID for each segment
    */
   private def retrieveMilvusMetadata(
-      config: BackfillConfig
-  ): Either[BackfillError, (Long, Long)] = {
-    var client: MilvusClient = null
+      config: BackfillConfig,
+      client: MilvusClient
+  ): Either[BackfillError, (Long, Map[Long, Long])] = {
     try {
-      client = MilvusClient(
-        MilvusConnectionParams(
-          uri = config.milvusUri,
-          token = config.milvusToken,
-          databaseName = config.databaseName
-        )
-      )
-
       val segments = client.getSegments(config.databaseName, config.collectionName)
         .getOrElse {
           return Left(ConnectionError(
@@ -488,8 +498,16 @@ object MilvusBackfill {
         ))
       }
 
-      val firstSegment = segments.head
-      Right((firstSegment.collectionID, firstSegment.partitionID))
+      val collectionID = segments.head.collectionID
+
+      // Build mapping of segment ID -> partition ID to support multi-partition collections
+      val segmentToPartitionMap = segments.map { seg =>
+        seg.segmentID -> seg.partitionID
+      }.toMap
+
+      logger.info(s"Retrieved metadata for ${segments.length} segments across ${segmentToPartitionMap.values.toSet.size} partition(s)")
+
+      Right((collectionID, segmentToPartitionMap))
 
     } catch {
       case e: Exception =>
@@ -498,26 +516,19 @@ object MilvusBackfill {
           message = s"Failed to retrieve Milvus metadata: ${e.getMessage}",
           cause = Some(e)
         ))
-    } finally {
-      if (client != null) {
-        try {
-          client.close()
-        } catch {
-          case _: Exception => // Ignore close errors
-        }
-      }
     }
   }
 
   /**
    * Process each segment separately by distributing to Spark executors
    * Each segment is processed by exactly one FFI writer on a single executor
+   * Supports multi-partition collections by tracking partition ID per segment
    */
   private def processSegments(
       spark: SparkSession,
       joinedDF: DataFrame,
       collectionID: Long,
-      partitionID: Long,
+      segmentToPartitionMap: Map[Long, Long],
       config: BackfillConfig,
       newFieldNames: Seq[String]
   ): Either[BackfillError, Map[Long, SegmentBackfillResult]] = {
@@ -543,7 +554,7 @@ object MilvusBackfill {
       // Broadcast configuration to executors
       val broadcastConfig = spark.sparkContext.broadcast(config)
       val broadcastCollectionID = spark.sparkContext.broadcast(collectionID)
-      val broadcastPartitionID = spark.sparkContext.broadcast(partitionID)
+      val broadcastSegmentToPartitionMap = spark.sparkContext.broadcast(segmentToPartitionMap)
       val broadcastTargetSchema = spark.sparkContext.broadcast(targetSchema)
 
       // Get the underlying RDD[InternalRow] for efficient processing
@@ -559,17 +570,17 @@ object MilvusBackfill {
         } else {
           val cfg = broadcastConfig.value
           val collID = broadcastCollectionID.value
-          val partID = broadcastPartitionID.value
+          val segToPartMap = broadcastSegmentToPartitionMap.value
           val schema = broadcastTargetSchema.value
 
-          new SegmentStreamingIterator(iter, cfg, collID, partID, schema)
+          new SegmentStreamingIterator(iter, cfg, collID, segToPartMap, schema)
         }
       }.collect()
 
       // Cleanup broadcast variables
       broadcastConfig.unpersist()
       broadcastCollectionID.unpersist()
-      broadcastPartitionID.unpersist()
+      broadcastSegmentToPartitionMap.unpersist()
       broadcastTargetSchema.unpersist()
 
       // Check for failures
