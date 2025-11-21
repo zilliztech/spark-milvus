@@ -69,7 +69,7 @@ class MilvusLoonPartitionReader(
   }
 
   // Get Arrow stream
-  private val recordBatchReaderPtr = reader.getRecordBatchReaderScala(null, 1024, 8 * 1024 * 1024)
+  private val recordBatchReaderPtr = reader.getRecordBatchReaderScala()
   private val arrowArrayStream = ArrowArrayStream.wrap(recordBatchReaderPtr)
   private val arrowReader = Data.importArrayStream(allocator, arrowArrayStream)
 

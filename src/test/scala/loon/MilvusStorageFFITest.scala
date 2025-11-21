@@ -82,7 +82,7 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
 
     // Read data using Arrow C Data Interface
     info("Reading data from Milvus storage...")
-    val recordBatchReaderPtr = reader.getRecordBatchReaderScala(null, 1024, 8 * 1024 * 1024)
+    val recordBatchReaderPtr = reader.getRecordBatchReaderScala()
 
     // Wrap the C++ ArrowArrayStream pointer with Arrow Java's ArrowArrayStream
     val allocator = ArrowUtils.getAllocator

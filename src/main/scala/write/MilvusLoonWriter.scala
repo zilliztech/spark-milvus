@@ -165,8 +165,19 @@ class MilvusLoonPartitionWriter(
   // Allocate initial capacity for vectors
   allocateVectors()
 
-  // Base path for writing
-  private val basePath = generateBasePath()
+  // Base path for writing - use custom path if provided, otherwise generate
+  private val basePath = {
+    // Note: options map has lowercase keys due to CaseInsensitiveStringMap conversion
+    milvusOption.options.get(MilvusOption.WriterCustomPath.toLowerCase) match {
+      case Some(customPath) =>
+        logInfo(s"Using custom write path: $customPath")
+        customPath
+      case None =>
+        val generated = generateBasePath()
+        logInfo(s"Using generated write path: $generated")
+        generated
+    }
+  }
 
   // Create Storage V2 writer with S3 initialization protection
   // Uses double-checked locking: only the FIRST writer in this JVM is serialized
@@ -263,9 +274,9 @@ class MilvusLoonPartitionWriter(
 
       totalRecordCount += currentBatchSize
 
-      // Reset batch - clear and reallocate
-      root.clear()
-      allocateVectors()
+      // Reset batch - DO NOT reallocate, just reset row count
+      // The vectors will be reused for the next batch (Arrow will auto-expand if needed)
+      root.setRowCount(0)
       currentBatchSize = 0
 
     } finally {
@@ -278,7 +289,31 @@ class MilvusLoonPartitionWriter(
    */
   private def allocateVectors(): Unit = {
     import scala.collection.JavaConverters._
-    root.getFieldVectors.asScala.foreach(_.setInitialCapacity(batchSize))
+    import org.apache.arrow.vector.{VarCharVector, BaseVariableWidthVector}
+
+    // For each vector, set appropriate initial capacity
+    root.getFieldVectors.asScala.foreach { vector =>
+      vector match {
+        case varCharVector: VarCharVector =>
+          // For VarChar vectors, allocate both row capacity and byte capacity
+          // Estimate: average 32 bytes per string value (conservative estimate)
+          // This will auto-expand if needed, but starts small to avoid OOM
+          val estimatedBytesPerValue = 32
+          val totalByteCapacity = batchSize * estimatedBytesPerValue
+          varCharVector.setInitialCapacity(batchSize, totalByteCapacity)
+
+        case baseVarVector: BaseVariableWidthVector =>
+          // For other variable-width vectors (like VarBinary)
+          val estimatedBytesPerValue = 32
+          val totalByteCapacity = batchSize * estimatedBytesPerValue
+          baseVarVector.setInitialCapacity(batchSize, totalByteCapacity)
+
+        case _ =>
+          // For fixed-width vectors, just set row capacity
+          vector.setInitialCapacity(batchSize)
+      }
+    }
+
     root.allocateNew()
     root.setRowCount(0)
   }

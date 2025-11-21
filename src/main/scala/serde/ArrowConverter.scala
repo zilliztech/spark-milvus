@@ -178,7 +178,11 @@ object ArrowConverter extends Logging {
 
       case StringType =>
         val str = record.getUTF8String(colIndex)
-        vector.asInstanceOf[VarCharVector].set(rowIndex, str.getBytes)
+        if (str == null) {
+          vector.setNull(rowIndex)
+        } else {
+          vector.asInstanceOf[VarCharVector].set(rowIndex, str.getBytes)
+        }
 
       case ArrayType(FloatType, _) =>
         // FloatVector stored as FixedSizeBinaryVector
@@ -213,7 +217,11 @@ object ArrowConverter extends Logging {
 
       case BinaryType =>
         val bytes = record.getBinary(colIndex)
-        vector.asInstanceOf[VarBinaryVector].set(rowIndex, bytes)
+        if (bytes == null) {
+          vector.setNull(rowIndex)
+        } else {
+          vector.asInstanceOf[VarBinaryVector].set(rowIndex, bytes)
+        }
 
       case MapType(keyType, valueType, _) =>
         val mapVector = vector.asInstanceOf[MapVector]

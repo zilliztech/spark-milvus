@@ -67,6 +67,8 @@ object MilvusOption {
 
   val MilvusExtraColumns = "milvus.extra.columns"
   val MilvusExtraColumnPartition = "partition"
+  val MilvusExtraColumnSegmentID = "segment_id"
+  val MilvusExtraColumnRowOffset = "row_offset"
 
   // reader config
   val ReaderPath = Constants.LogReaderPathParamName
@@ -109,6 +111,9 @@ object MilvusOption {
   val FsGcpNativeWithoutAuth = Constants.FsGcpNativeWithoutAuth
   val FsGcpCredentialJson = Constants.FsGcpCredentialJson
   val FsUseCustomPartUpload = Constants.FsUseCustomPartUpload
+
+  // Writer config
+  val WriterCustomPath = "milvus.writer.customPath"
 
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {

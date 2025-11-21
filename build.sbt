@@ -83,6 +83,9 @@ lazy val root = (project in file("."))
     run / fork := true,
     Test / fork := true,
 
+    // Show test logs immediately (don't buffer)
+    Test / logBuffered := false,
+
     // JVM options for run
     run / javaOptions ++= Seq(
       "-Xss2m",
@@ -102,6 +105,8 @@ lazy val root = (project in file("."))
       "-Xss2m",
       "-Xmx4g",
       "-Djava.library.path=.",
+      "-Dlog4j2.configurationFile=log4j2.properties",
+      "-Dlog4j2.debug=true",
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
       "--add-opens=java.base/java.lang=ALL-UNNAMED",
       "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
