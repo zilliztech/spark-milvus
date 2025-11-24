@@ -84,5 +84,11 @@
   "indexes": [],
   "manifest-list": [
     "snapshots/462324574592960519/manifests/data-file-manifest-95c6ab19-749e-4088-990b-b4613ff2df2f.avro"
+  ],
+  "storagev2-manifest-list": [
+    {
+      "segmentID": 462416429317820786,
+      "manifest": "{\"ver\":2,\"base_path\":\"a-bucket/files/insert_log/462416429317620777/462416429317620778/462416429317820786\"}"
+    }
   ]
 }

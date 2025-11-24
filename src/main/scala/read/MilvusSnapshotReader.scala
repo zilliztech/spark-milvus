@@ -83,13 +83,42 @@ case class SnapshotInfo(
 )
 
 /**
+ * Parsed manifest content from Storage V2
+ */
+case class ManifestContent(
+    @JsonProperty("ver") ver: Int,
+    @JsonProperty("base_path") basePath: String
+)
+
+/**
+ * Storage V2 manifest item
+ */
+case class StorageV2ManifestItem(
+    @JsonProperty("segmentID") segmentID: Long,
+    @JsonProperty("manifest") manifest: String
+) {
+  /**
+   * Parse the manifest JSON string to extract structured content
+   * @return Either containing parsed ManifestContent or error
+   */
+  private[read] def parseManifest(mapper: ObjectMapper with ScalaObjectMapper): Either[Throwable, ManifestContent] = {
+    try {
+      Right(mapper.readValue[ManifestContent](manifest))
+    } catch {
+      case e: Exception => Left(e)
+    }
+  }
+}
+
+/**
  * Complete snapshot metadata
  */
 case class SnapshotMetadata(
     @JsonProperty("snapshot-info") snapshotInfo: SnapshotInfo,
     @JsonProperty("collection") collection: Collection,
     @JsonProperty("indexes") indexes: Seq[Any],
-    @JsonProperty("manifest-list") manifestList: Seq[String]
+    @JsonProperty("manifest-list") manifestList: Seq[String],
+    @JsonProperty("storagev2-manifest-list") storageV2ManifestList: Option[Seq[StorageV2ManifestItem]]
 )
 
 /**
@@ -176,6 +205,35 @@ object MilvusSnapshotReader {
   def getSchemaFromFile(path: String): Either[Throwable, CollectionSchema] = {
     readSnapshotMetadataFromFile(path).map { metadata =>
       metadata.collection.schema
+    }
+  }
+
+  /**
+   * Get Storage V2 segment manifest map from snapshot file
+   * Returns a map from segment ID to parsed manifest content (version and base path)
+   *
+   * @param path Path to the snapshot metadata JSON file
+   * @return Either containing Map[segmentID -> ManifestContent] or error
+   */
+  def getStorageV2ManifestMap(path: String): Either[Throwable, Map[Long, ManifestContent]] = {
+    readSnapshotMetadataFromFile(path).flatMap { metadata =>
+      metadata.storageV2ManifestList match {
+        case Some(manifestList) =>
+          val results = manifestList.map { item =>
+            item.parseManifest(mapper).map(content => item.segmentID -> content)
+          }
+
+          // Check if all parsing succeeded
+          val failures = results.collect { case Left(e) => e }
+          if (failures.nonEmpty) {
+            Left(new Exception(s"Failed to parse ${failures.size} manifest(s): ${failures.head.getMessage}"))
+          } else {
+            Right(results.collect { case Right(pair) => pair }.toMap)
+          }
+
+        case None =>
+          Right(Map.empty[Long, ManifestContent])
+      }
     }
   }
 }

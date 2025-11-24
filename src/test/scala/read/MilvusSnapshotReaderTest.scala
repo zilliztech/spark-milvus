@@ -31,6 +31,15 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     // Verify manifest list
     metadata.manifestList should have size 1
     metadata.manifestList.head should include("data-file-manifest")
+
+    // Verify storage v2 manifest list
+    metadata.storageV2ManifestList shouldBe defined
+    metadata.storageV2ManifestList.get should have size 1
+    val storageV2Item = metadata.storageV2ManifestList.get.head
+    storageV2Item.segmentID shouldBe 462416429317820786L
+    storageV2Item.manifest should include("\"ver\":2")
+    storageV2Item.manifest should include("\"base_path\"")
+    storageV2Item.manifest should include("a-bucket/files/insert_log")
   }
 
   test("Parse collection schema successfully") {
@@ -140,5 +149,23 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
     result shouldBe a[Left[_, _]]
     result.left.toOption.get.getMessage should include("No primary key field found")
+  }
+
+  test("Get Storage V2 manifest map from snapshot file") {
+    val result = MilvusSnapshotReader.getStorageV2ManifestMap(snapshotFilePath)
+
+    result shouldBe a[Right[_, _]]
+    val manifestMap = result.toOption.get
+
+    // Verify map contains the expected segment ID
+    manifestMap should contain key 462416429317820786L
+
+    // Verify the manifest content for this segment
+    val content = manifestMap(462416429317820786L)
+    content.ver shouldBe 2
+    content.basePath shouldBe "a-bucket/files/insert_log/462416429317620777/462416429317620778/462416429317820786"
+
+    // Verify map size
+    manifestMap should have size 1
   }
 }
