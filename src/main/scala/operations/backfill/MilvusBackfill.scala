@@ -9,7 +9,7 @@ import org.slf4j.LoggerFactory
 
 import com.zilliz.spark.connector.write.{MilvusLoonBatchWrite, MilvusLoonCommitMessage, MilvusLoonWriter}
 import com.zilliz.spark.connector.{MilvusClient, MilvusConnectionParams, MilvusOption}
-import com.zilliz.spark.connector.read.{MilvusSnapshotReader, SnapshotMetadata}
+import com.zilliz.spark.connector.read.{MilvusSnapshotReader, SnapshotMetadata, StorageV2ManifestItem}
 
 import scala.collection.JavaConverters._
 
@@ -225,11 +225,62 @@ object MilvusBackfill {
         options = options + (MilvusOption.SnapshotSchemaBytes -> schemaBytesBase64)
         logger.info(s"Passed schema bytes (${schemaBytes.length} bytes) to datasource")
 
-        // Serialize and pass manifest list if available
+        // Read actual manifest files and pass to datasource
         metadata.storageV2ManifestList.foreach { manifestList =>
-          val manifestJson = MilvusSnapshotReader.serializeManifestList(manifestList)
-          options = options + (MilvusOption.SnapshotManifests -> manifestJson)
-          logger.info(s"Passed ${manifestList.size} segment manifests to datasource")
+          // For each segment, read the actual manifest file from base_path
+          val manifestsWithContent = manifestList.flatMap { item =>
+            // Parse the simplified manifest to get base_path
+            val simplifiedManifest = MilvusSnapshotReader.parseManifestContent(item.manifest)
+            simplifiedManifest match {
+              case Right(content) =>
+                // Read the actual manifest file from base_path/manifest-{ver}
+                val manifestPath = s"s3a://${content.basePath}/manifest-${content.ver}"
+                logger.info(s"Reading manifest from: $manifestPath")
+                try {
+                  val manifestContent = spark.read.text(manifestPath)
+                    .collect()
+                    .map(_.getString(0))
+                    .mkString("\n")
+                  logger.info(s"Read manifest content (${manifestContent.length} chars) for segment ${item.segmentID}")
+
+                  // Transform manifest columns from field IDs to field names
+                  // Storage V2 manifest uses field IDs ("100", "101"), but FFI reader expects field names
+                  // Also strip bucket/rootPath prefix from paths since FFI reader will prepend them
+                  val transformedManifest = MilvusSnapshotReader.transformManifestColumnsToNames(
+                    manifestContent,
+                    metadata.collection.schema,
+                    bucket = Some(config.s3BucketName),
+                    rootPath = Some(config.s3RootPath)
+                  ) match {
+                    case Right(transformed) =>
+                      logger.info(s"Transformed manifest for segment ${item.segmentID}")
+                      logger.info(s"Transformed manifest: ${transformed.take(500)}...")
+                      transformed
+                    case Left(e) =>
+                      logger.warn(s"Failed to transform manifest, using original: ${e.getMessage}")
+                      manifestContent
+                  }
+
+                  // Create new StorageV2ManifestItem with transformed manifest content
+                  Some(StorageV2ManifestItem(item.segmentID, transformedManifest))
+                } catch {
+                  case e: Exception =>
+                    logger.error(s"Failed to read manifest from $manifestPath: ${e.getMessage}")
+                    None
+                }
+              case Left(e) =>
+                logger.error(s"Failed to parse simplified manifest: ${e.getMessage}")
+                None
+            }
+          }
+
+          if (manifestsWithContent.nonEmpty) {
+            val manifestJson = MilvusSnapshotReader.serializeManifestList(manifestsWithContent)
+            options = options + (MilvusOption.SnapshotManifests -> manifestJson)
+            logger.info(s"Passed ${manifestsWithContent.size} segment manifests with full content to datasource")
+          } else {
+            logger.warn("No valid manifests found after reading manifest files")
+          }
         }
       }
 
@@ -569,7 +620,7 @@ object MilvusBackfill {
       snapshotPath: String,
       config: BackfillConfig
   ): Either[BackfillError, String] = {
-    if (snapshotPath.isEmpty) {
+    if (snapshotPath == null || snapshotPath.isEmpty) {
       return Right("") // Empty path means use client fallback
     }
 

@@ -148,7 +148,7 @@ case class MilvusTable(
    * Check if snapshot mode is enabled (data comes from snapshot, not client)
    */
   private def isSnapshotMode: Boolean = {
-    milvusOption.options.get(MilvusOption.SnapshotMode).contains("true") ||
+    milvusOption.options.get(MilvusOption.SnapshotMode).contains("true") &&
     milvusOption.options.contains(MilvusOption.SnapshotManifests)
   }
 

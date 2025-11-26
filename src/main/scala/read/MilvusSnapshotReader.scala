@@ -337,7 +337,10 @@ object MilvusSnapshotReader {
     import io.milvus.grpc.schema.{CollectionSchema => ProtoCollectionSchema, FieldSchema, DataType}
     import io.milvus.grpc.common.KeyValuePair
 
-    val protoFields = schema.fields.map { field =>
+    // Filter out system fields (RowID and Timestamp) - only include user fields
+    val userFields = schema.fields.filterNot(f => f.name == "RowID" || f.name == "Timestamp")
+
+    val protoFields = userFields.map { field =>
       FieldSchema(
         fieldID = field.getFieldIDAsLong,
         name = field.name,
@@ -379,6 +382,124 @@ object MilvusSnapshotReader {
   def deserializeManifestList(json: String): Either[Throwable, Seq[StorageV2ManifestItem]] = {
     try {
       Right(mapper.readValue[Seq[StorageV2ManifestItem]](json))
+    } catch {
+      case e: Exception => Left(e)
+    }
+  }
+
+  /**
+   * Parse simplified manifest content JSON string
+   * Format: {"ver":1,"base_path":"..."}
+   *
+   * @param json JSON string containing simplified manifest
+   * @return Either containing parsed ManifestContent or error
+   */
+  def parseManifestContent(json: String): Either[Throwable, ManifestContent] = {
+    try {
+      Right(mapper.readValue[ManifestContent](json))
+    } catch {
+      case e: Exception => Left(e)
+    }
+  }
+
+  /**
+   * Transform Storage V2 manifest JSON by converting column field IDs to field names.
+   * The FFI reader expects field names in the columns array, but Storage V2 manifest files
+   * use field IDs as strings (e.g., "100", "101", "0", "1").
+   *
+   * Also strips bucket/rootPath prefix from paths if present, since the FFI reader
+   * will prepend these when accessing files.
+   *
+   * @param manifestJson The original manifest JSON from Storage V2
+   * @param schema CollectionSchema from snapshot metadata for ID-to-name mapping
+   * @param bucket Optional bucket name to strip from paths
+   * @param rootPath Optional root path to strip from paths
+   * @return Transformed manifest JSON with field names instead of IDs
+   */
+  def transformManifestColumnsToNames(
+      manifestJson: String,
+      schema: CollectionSchema,
+      bucket: Option[String] = None,
+      rootPath: Option[String] = None
+  ): Either[Throwable, String] = {
+    try {
+      // Parse the manifest JSON
+      val manifestObj = mapper.readValue[Map[String, Any]](manifestJson)
+
+      // Build field ID -> name mapping (user fields only, no system fields RowID/Timestamp)
+      // System fields (RowID=0, Timestamp=1) will be filtered out from column_groups
+      val fieldIdToName: Map[String, String] = {
+        schema.fields
+          .filterNot(f => f.name == "RowID" || f.name == "Timestamp")
+          .map(f => f.getFieldIDAsLong.toString -> f.name)
+          .toMap
+      }
+
+      // System field IDs to filter out (these are not in the Arrow schema)
+      val systemFieldIds = Set("0", "1")
+
+      // Build path prefix to strip (if provided)
+      val pathPrefixToStrip = (bucket, rootPath) match {
+        case (Some(b), Some(r)) => Some(s"$b/$r/")
+        case (Some(b), None) => Some(s"$b/")
+        case _ => None
+      }
+
+      // Transform column_groups
+      val columnGroups = manifestObj.getOrElse("column_groups", Seq.empty) match {
+        case groups: Seq[_] =>
+          groups.flatMap {
+            case group: Map[String, Any] @unchecked =>
+              // Transform columns - filter out system fields and map IDs to names
+              val columns = group.getOrElse("columns", Seq.empty) match {
+                case cols: Seq[_] =>
+                  cols.flatMap {
+                    case col: String =>
+                      // Skip system field IDs (0=RowID, 1=Timestamp)
+                      if (systemFieldIds.contains(col)) {
+                        None
+                      } else {
+                        // Map field ID to name, keep if mapping exists
+                        fieldIdToName.get(col)
+                      }
+                    case _ => None
+                  }
+                case _ => Seq.empty
+              }
+
+              // Skip column groups that have no user fields after filtering
+              if (columns.isEmpty) {
+                None
+              } else {
+                // Transform paths (strip bucket/rootPath prefix if present)
+                val paths = group.getOrElse("paths", Seq.empty) match {
+                  case ps: Seq[_] =>
+                    ps.map {
+                      case path: String =>
+                        pathPrefixToStrip match {
+                          case Some(prefix) if path.startsWith(prefix) =>
+                            path.stripPrefix(prefix)
+                          case _ => path
+                        }
+                      case other => other.toString
+                    }
+                  case _ => Seq.empty
+                }
+
+                Some(group + ("columns" -> columns) + ("paths" -> paths))
+              }
+            case other => Some(other)
+          }
+        case _ => Seq.empty
+      }
+
+      // Rebuild manifest with transformed column_groups
+      // Add "version" field (expected by FFI reader) and remove "metadata" if present
+      val transformedManifest = (manifestObj - "metadata") +
+        ("column_groups" -> columnGroups) +
+        ("version" -> 0)
+
+      Right(mapper.writeValueAsString(transformedManifest))
     } catch {
       case e: Exception => Left(e)
     }

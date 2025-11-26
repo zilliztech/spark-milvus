@@ -47,12 +47,18 @@ class MilvusLoonPartitionReader(
   // Load native library
   NativeLibraryLoader.loadLibrary()
 
+  logInfo(s"MilvusLoonPartitionReader initializing...")
+  logInfo(s"  manifestPath: $manifestPath")
+  logInfo(s"  milvusSchema fields: ${milvusSchema.fields.map(_.name).mkString(", ")}")
+  logInfo(s"  spark schema: ${schema.fieldNames.mkString(", ")}")
+
   private val allocator = ArrowUtils.getAllocator
 
   private val sourceSchema = schema
 
   // Create Arrow schema from Milvus schema
   private val (arrowSchemaObj, arrowSchemaPtr) = createArrowSchema()
+  logInfo(s"  arrowSchemaPtr address: $arrowSchemaPtr")
 
   private val fieldNameToId: Map[String, Long] = {
     val systemFields = Map("row_id" -> 0L, "timestamp" -> 1L)
@@ -67,8 +73,10 @@ class MilvusLoonPartitionReader(
 
   // Create reader properties from MilvusOption
   private val readerProperties = Properties.fromMilvusOption(milvusOption)
+  logInfo(s"  readerProperties created")
 
   private val columnNames = getColumnNames()
+  logInfo(s"  columnNames: ${columnNames.mkString(", ")}")
 
   // Get column groups from manifest
   private val manifestResult: LatestColumnGroupsResult = MilvusStorageManifest.getLatestColumnGroupsScala(manifestPath, readerProperties)
@@ -85,7 +93,13 @@ class MilvusLoonPartitionReader(
 
   // Create Storage V2 reader
   private val reader = new MilvusStorageReader()
+  logInfo(s"  Creating MilvusStorageReader...")
+  logInfo(s"  >>> columnGroupsPtr: $columnGroupsPtr")
+  logInfo(s"  >>> arrowSchemaPtr: $arrowSchemaPtr")
+  logInfo(s"  >>> columnNames: ${columnNames.mkString("[", ", ", "]")}")
+  logInfo(s"  >>> readerProperties isValid: ${readerProperties.isValid}")
   reader.create(columnGroupsPtr, arrowSchemaPtr, columnNames, readerProperties)
+  logInfo(s"  MilvusStorageReader created, isValid: ${reader.isValid}")
 
   if (!reader.isValid) {
     throw new IllegalStateException(
@@ -93,10 +107,13 @@ class MilvusLoonPartitionReader(
     )
   }
 
+  logInfo(s"  About to call getRecordBatchReaderScala()...")
   // Get Arrow stream
   private val recordBatchReaderPtr = reader.getRecordBatchReaderScala()
+  logInfo(s"  recordBatchReaderPtr: $recordBatchReaderPtr")
   private val arrowArrayStream = ArrowArrayStream.wrap(recordBatchReaderPtr)
   private val arrowReader = Data.importArrayStream(allocator, arrowArrayStream)
+  logInfo(s"  arrowReader created")
 
   // Eagerly try to load first batch to check if data exists
   private val (currentBatch, currentRowIndex): (VectorSchemaRoot, Int) = {
@@ -119,7 +136,14 @@ class MilvusLoonPartitionReader(
   private var vectorSearchResults: Iterator[(InternalRow, Double)] = _
   private var vectorSearchCompleted = false
 
+  private var nextCallCount = 0
+
   override def next(): Boolean = {
+    nextCallCount += 1
+    if (nextCallCount <= 3) {
+      logInfo(s"next() called, count=$nextCallCount, vectorSearchEnabled=$vectorSearchEnabled")
+    }
+
     if (vectorSearchEnabled) {
       if (!vectorSearchCompleted) {
         performSegmentVectorSearch()
@@ -147,15 +171,26 @@ class MilvusLoonPartitionReader(
           }
         } else {
           // Try to load next batch
+          if (nextCallCount <= 3) {
+            logInfo(s"  Trying to load next batch...")
+          }
           if (arrowReader.loadNextBatch()) {
             _currentBatch = arrowReader.getVectorSchemaRoot
             _currentRowIndex = 0
-            if (_currentBatch.getRowCount > 0) {
+            val rowCount = _currentBatch.getRowCount
+            if (nextCallCount <= 3) {
+              logInfo(s"  Loaded batch with $rowCount rows")
+            }
+            if (rowCount > 0) {
               // Continue loop to check first row of new batch
             } else {
+              logInfo(s"  Empty batch, returning false")
               return false
             }
           } else {
+            if (nextCallCount <= 3) {
+              logInfo(s"  No more batches, returning false")
+            }
             // No more batches
             return false
           }
