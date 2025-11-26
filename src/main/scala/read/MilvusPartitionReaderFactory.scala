@@ -29,6 +29,8 @@ class MilvusPartitionReaderFactory(
           field.name != "row_offset"
         })
 
+        logInfo(s"V2 schema for FFI reader: ${v2Schema.fieldNames.mkString(", ")}")
+
         // Deserialize the protobuf schema
         val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
 

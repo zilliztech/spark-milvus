@@ -241,4 +241,104 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     // Verify map size
     manifestMap should have size 1
   }
+
+  test("Convert snapshot schema to Spark StructType (excluding system fields)") {
+    import org.apache.spark.sql.types._
+
+    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    result shouldBe a[Right[_, _]]
+    val metadata = result.toOption.get
+
+    // Convert to Spark schema without system fields
+    val sparkSchema = MilvusSnapshotReader.toSparkSchema(metadata.collection.schema, includeSystemFields = false)
+
+    // Should have 5 user fields (excluding RowID and Timestamp)
+    sparkSchema.fields should have size 5
+
+    // Verify field names and types
+    val fieldNames = sparkSchema.fields.map(_.name)
+    fieldNames should contain allOf("id", "int64", "float", "varchar", "vector")
+    fieldNames should not contain "RowID"
+    fieldNames should not contain "Timestamp"
+
+    // Verify data types
+    sparkSchema("id").dataType shouldBe LongType
+    sparkSchema("int64").dataType shouldBe LongType
+    sparkSchema("float").dataType shouldBe FloatType
+    sparkSchema("varchar").dataType shouldBe StringType
+    sparkSchema("vector").dataType shouldBe ArrayType(FloatType)
+  }
+
+  test("Convert snapshot schema to Spark StructType (including system fields)") {
+    import org.apache.spark.sql.types._
+
+    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    result shouldBe a[Right[_, _]]
+    val metadata = result.toOption.get
+
+    // Convert to Spark schema with system fields
+    val sparkSchema = MilvusSnapshotReader.toSparkSchema(metadata.collection.schema, includeSystemFields = true)
+
+    // Should have 7 fields (including RowID and Timestamp)
+    sparkSchema.fields should have size 7
+
+    // Verify field names
+    val fieldNames = sparkSchema.fields.map(_.name)
+    fieldNames should contain allOf("id", "int64", "float", "varchar", "vector", "RowID", "Timestamp")
+  }
+
+  test("Get field ID to name mapping") {
+    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    result shouldBe a[Right[_, _]]
+    val metadata = result.toOption.get
+
+    val fieldIdMap = MilvusSnapshotReader.getFieldIdMap(metadata.collection.schema)
+
+    // Verify mappings
+    fieldIdMap(100L) shouldBe "id"
+    fieldIdMap(101L) shouldBe "int64"
+    fieldIdMap(102L) shouldBe "float"
+    fieldIdMap(103L) shouldBe "varchar"
+    fieldIdMap(104L) shouldBe "vector"
+    fieldIdMap(0L) shouldBe "RowID"
+    fieldIdMap(1L) shouldBe "Timestamp"
+  }
+
+  test("Get field name to ID mapping") {
+    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    result shouldBe a[Right[_, _]]
+    val metadata = result.toOption.get
+
+    val fieldNameToIdMap = MilvusSnapshotReader.getFieldNameToIdMap(metadata.collection.schema)
+
+    // Verify mappings
+    fieldNameToIdMap("id") shouldBe 100L
+    fieldNameToIdMap("int64") shouldBe 101L
+    fieldNameToIdMap("float") shouldBe 102L
+    fieldNameToIdMap("varchar") shouldBe 103L
+    fieldNameToIdMap("vector") shouldBe 104L
+    fieldNameToIdMap("RowID") shouldBe 0L
+    fieldNameToIdMap("Timestamp") shouldBe 1L
+  }
+
+  test("Serialize and deserialize manifest list") {
+    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    result shouldBe a[Right[_, _]]
+    val metadata = result.toOption.get
+    val originalManifestList = metadata.storageV2ManifestList.get
+
+    // Serialize
+    val json = MilvusSnapshotReader.serializeManifestList(originalManifestList)
+    json should not be empty
+
+    // Deserialize
+    val deserializeResult = MilvusSnapshotReader.deserializeManifestList(json)
+    deserializeResult shouldBe a[Right[_, _]]
+    val deserializedList = deserializeResult.toOption.get
+
+    // Verify round-trip
+    deserializedList should have size originalManifestList.size
+    deserializedList.head.segmentID shouldBe originalManifestList.head.segmentID
+    deserializedList.head.manifest shouldBe originalManifestList.head.manifest
+  }
 }
