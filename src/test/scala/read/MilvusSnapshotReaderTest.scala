@@ -27,6 +27,8 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     // Verify collection
     metadata.collection.numPartitions shouldBe Some(1)
     metadata.collection.numShards shouldBe Some(1)
+    // consistency_level is optional and may not be present in sample data
+    metadata.collection.consistencyLevel shouldBe a[Option[_]]
 
     // Verify manifest list
     metadata.manifestList should have size 1
@@ -149,6 +151,77 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
     result shouldBe a[Left[_, _]]
     result.left.toOption.get.getMessage should include("No primary key field found")
+  }
+
+  test("Parse consistency_level from snapshot JSON") {
+    val jsonWithConsistencyLevel = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": 5,
+              "is_primary_key": true
+            }
+          ]
+        },
+        "consistency_level": 2
+      },
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val result = MilvusSnapshotReader.parseSnapshotMetadata(jsonWithConsistencyLevel)
+
+    result shouldBe a[Right[_, _]]
+    result.toOption.get.collection.consistencyLevel shouldBe Some(2)
+  }
+
+  test("Parse snapshot with unknown fields should not fail") {
+    val jsonWithUnknownFields = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1,
+        "unknown_field": "some_value"
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": 5,
+              "is_primary_key": true
+            }
+          ]
+        },
+        "future_field": 123
+      },
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val result = MilvusSnapshotReader.parseSnapshotMetadata(jsonWithUnknownFields)
+
+    result shouldBe a[Right[_, _]]
+    result.toOption.get.snapshotInfo.name shouldBe "test"
   }
 
   test("Get Storage V2 manifest map from snapshot file") {

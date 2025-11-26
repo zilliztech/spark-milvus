@@ -1,7 +1,7 @@
 package com.zilliz.spark.connector.read
 
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.{DeserializationFeature, ObjectMapper}
 import com.fasterxml.jackson.module.scala.{DefaultScalaModule, ScalaObjectMapper}
 
 /**
@@ -67,7 +67,8 @@ case class Collection(
     @JsonProperty("schema") schema: CollectionSchema,
     @JsonProperty("num_partitions") numPartitions: Option[Int],
     @JsonProperty("num_shards") numShards: Option[Int],
-    @JsonProperty("properties") properties: Option[Seq[Property]]
+    @JsonProperty("properties") properties: Option[Seq[Property]],
+    @JsonProperty("consistency_level") consistencyLevel: Option[Int]
 )
 
 /**
@@ -129,6 +130,7 @@ object MilvusSnapshotReader {
   private val mapper: ObjectMapper with ScalaObjectMapper = {
     val m = new ObjectMapper() with ScalaObjectMapper
     m.registerModule(DefaultScalaModule)
+    m.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     m
   }
 
@@ -138,7 +140,7 @@ object MilvusSnapshotReader {
    * @param json JSON string containing snapshot metadata
    * @return Either containing parsed SnapshotMetadata or error
    */
-  private def parseSnapshotMetadata(json: String): Either[Throwable, SnapshotMetadata] = {
+  def parseSnapshotMetadata(json: String): Either[Throwable, SnapshotMetadata] = {
     try {
       Right(mapper.readValue[SnapshotMetadata](json))
     } catch {
