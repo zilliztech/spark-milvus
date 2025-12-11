@@ -1,64 +1,25 @@
 package com.zilliz.spark.connector
 
-import java.io.File
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
-import java.net.URI
-import java.nio.charset.StandardCharsets
-import java.time.Duration
-import java.util.concurrent.TimeUnit
-import java.util.Base64
-import scala.concurrent.{ExecutionContext, Future, Promise}
-import scala.jdk.CollectionConverters._
-import scala.util.{Failure, Success, Try}
-
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.scala.{
-  DefaultScalaModule,
-  ScalaObjectMapper
-}
-import com.google.protobuf.ByteString
-
-import io.milvus.grpc.common.{
-  ClientInfo,
-  ConsistencyLevel,
-  ErrorCode,
-  KeyValuePair,
-  Status
-}
-import io.milvus.grpc.common.{SegmentLevel, SegmentState}
-import io.milvus.grpc.milvus.{
-  ConnectRequest,
-  CreateCollectionRequest,
-  CreateDatabaseRequest,
-  DeleteRequest,
-  DescribeCollectionRequest,
-  DescribeCollectionResponse,
-  DropCollectionRequest,
-  FlushRequest,
-  GetImportStateRequest,
-  GetImportStateResponse,
-  GetPersistentSegmentInfoRequest,
-  ImportRequest,
-  InsertRequest,
-  MilvusServiceGrpc,
-  MutationResult,
-  ShowPartitionsRequest
-}
-import io.milvus.grpc.schema.{
-  CollectionSchema,
-  DataType,
-  FieldData,
-  FieldSchema,
-  FunctionSchema,
-  ValueField
-}
-
-import io.grpc._
-import io.grpc.{ClientInterceptor, Metadata, Status => GrpcStatus}
+import com.fasterxml.jackson.module.scala.{DefaultScalaModule, ScalaObjectMapper}
+import io.grpc.Status.Code
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
 import io.grpc.stub.MetadataUtils
-import io.grpc.Status.Code
+import io.grpc.{ClientInterceptor, Metadata, Status => GrpcStatus, _}
+import io.milvus.grpc.common.{Status, _}
+import io.milvus.grpc.milvus._
+import io.milvus.grpc.schema._
+
+import java.io.File
+import java.net.URI
+import java.net.http.{HttpClient, HttpRequest, HttpResponse}
+import java.nio.charset.StandardCharsets
+import java.time.Duration
+import java.util.Base64
+import java.util.concurrent.TimeUnit
+import scala.jdk.CollectionConverters._
+import scala.util.{Failure, Success, Try}
 
 /** A simplified client for interacting with Milvus
   */
@@ -708,6 +669,117 @@ class MilvusClient(params: MilvusConnectionParams) {
       case e: Exception =>
         Failure(
           new Exception(s"Failed to get segment info: ${e.getMessage}")
+        )
+    }
+  }
+
+  /**
+   * Batch version of getSegmentInfo - fetches info for multiple segments in a single API call.
+   * This is much more efficient than calling getSegmentInfo repeatedly.
+   *
+   * @param collectionID the collection ID
+   * @param segmentIDs   the segment IDs to fetch info for
+   * @return Map of segmentID -> MilvusSegmentLogInfo
+   */
+  def getSegmentsInfoBatch(
+      collectionID: Long,
+      segmentIDs: Seq[Long]
+  ): Try[Map[Long, MilvusSegmentLogInfo]] = {
+    if (segmentIDs.isEmpty) {
+      return Success(Map.empty)
+    }
+
+    try {
+      val req = GetSegmentsInfoReq(
+        dbName = params.databaseName,
+        collectionID = collectionID,
+        segmentIDs = segmentIDs
+      )
+      val jsonString = GetSegmentsInfoReq.toJson(req)
+
+      val request = HttpRequest
+        .newBuilder()
+        .uri(URI.create(params.uri + MilvusClient.segmentsUrl))
+        .header("Content-Type", "application/json")
+        .header(
+          "Authorization",
+          "Basic " + Base64.getEncoder.encodeToString(
+            params.token.getBytes(StandardCharsets.UTF_8)
+          )
+        )
+        .POST(HttpRequest.BodyPublishers.ofString(jsonString))
+        .build()
+
+      val response =
+        httpClient.send(request, HttpResponse.BodyHandlers.ofString())
+      if (response.statusCode() != 200) {
+        return Failure(
+          new Exception(s"Failed to get segments info batch: ${response.body()}")
+        )
+      }
+      val responseBody = response.body()
+      val responseJson = MilvusClient.mapper.readTree(responseBody)
+      if (responseJson.has("code") && responseJson.get("code").asInt() != 0) {
+        return Failure(
+          new Exception(
+            s"Failed to get segments info batch: ${responseJson.get("message").asText()}"
+          )
+        )
+      }
+
+      val resultMap = scala.collection.mutable.Map[Long, MilvusSegmentLogInfo]()
+
+      responseJson
+        .get("data")
+        .get("segmentInfos")
+        .elements()
+        .asScala
+        .foreach { info =>
+          val segmentID = info.get("segmentID").asLong()
+          var insertLogIDs = Seq[String]()
+          var deleteLogIDs = Seq[String]()
+
+          info
+            .get("insertLogs")
+            .elements()
+            .asScala
+            .foreach { insertLogs =>
+              val fieldID = insertLogs.get("fieldID").asLong()
+              insertLogs
+                .get("logIDs")
+                .elements()
+                .asScala
+                .foreach { logID =>
+                  insertLogIDs = insertLogIDs :+ s"${fieldID}/${logID.asLong()}"
+                }
+            }
+
+          info
+            .get("deltaLogs")
+            .elements()
+            .asScala
+            .foreach { deleteLogs =>
+              deleteLogs
+                .get("logIDs")
+                .elements()
+                .asScala
+                .foreach { logID =>
+                  deleteLogIDs = deleteLogIDs :+ logID.asLong().toString
+                }
+            }
+
+          resultMap(segmentID) = MilvusSegmentLogInfo(
+            segmentID = segmentID,
+            insertLogIDs = insertLogIDs,
+            deleteLogIDs = deleteLogIDs
+          )
+        }
+
+      Success(resultMap.toMap)
+    } catch {
+      case e: Exception =>
+        Failure(
+          new Exception(s"Failed to get segments info batch: ${e.getMessage}")
         )
     }
   }

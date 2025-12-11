@@ -1,60 +1,26 @@
 package com.zilliz.spark.connector.sources
 
-import java.{util => ju}
-import java.io.FileNotFoundException
-import java.util.{HashMap, Map => JMap}
-import scala.collection.mutable
-import scala.jdk.CollectionConverters._
-
+import com.zilliz.spark.connector.loon.{ManifestBuilder, Properties}
+import com.zilliz.spark.connector.read.{MilvusInputPartition, MilvusPartitionReaderFactory, MilvusStorageV2InputPartition}
+import com.zilliz.spark.connector.write.MilvusWriteBuilder
+import com.zilliz.spark.connector._
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.connector.catalog.{
-  SupportsRead,
-  SupportsWrite,
-  Table,
-  TableCapability,
-  TableProvider
-}
+import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.connector.expressions.Transform
-import org.apache.spark.sql.connector.read.{
-  Batch,
-  InputPartition,
-  PartitionReaderFactory,
-  Scan,
-  ScanBuilder,
-  SupportsPushDownFilters,
-  SupportsPushDownRequiredColumns
-}
+import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.sources.{DataSourceRegister, Filter}
-import org.apache.spark.sql.types.{
-  DataTypes => SparkDataTypes,
-  LongType,
-  StringType,
-  StructField,
-  StructType
-}
+import org.apache.spark.sql.types.{LongType, StringType, StructField, StructType, DataTypes => SparkDataTypes}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.spark.connector.{
-  DataTypeUtil,
-  MilvusClient,
-  MilvusCollectionInfo,
-  MilvusOption,
-  MilvusS3Option,
-  VectorSearchConfig
-}
-import com.zilliz.spark.connector.read.{
-  MilvusInputPartition,
-  MilvusPartitionReaderFactory,
-  MilvusStorageV2InputPartition
-}
-import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}
-import com.zilliz.spark.connector.loon.{
-  ManifestBuilder,
-  Properties
-}
-import io.milvus.grpc.schema.CollectionSchema
+import java.io.FileNotFoundException
+import java.util.concurrent.ConcurrentHashMap
+import java.util.{HashMap, Map => JMap}
+import java.{util => ju}
+import scala.collection.mutable
+import scala.collection.parallel.CollectionConverters._
+import scala.jdk.CollectionConverters._
 
 // 1. DataSourceRegister and TableProvider
 case class MilvusDataSource() extends TableProvider with DataSourceRegister {
@@ -513,72 +479,46 @@ class MilvusScan(
     }
   }
 
-  def getSegmentFieldMap(
-      fs: FileSystem,
-      client: MilvusClient,
-      rootPath: Path
+  /**
+   * Build field map from pre-fetched segment log info.
+   */
+  def getSegmentFieldMapWithLogInfo(
+      rootPath: Path,
+      segmentLogInfo: MilvusSegmentLogInfo
   ): Seq[Map[String, String]] = {
-    val paths = rootPath.toString().split("/")
-    val segmentID = paths(paths.length - 1).toLong
-    val collectionID = paths(paths.length - 3).toLong
-    val result = client.getSegmentInfo(collectionID, segmentID)
-    if (result.isFailure) {
-      throw new IllegalArgumentException(
-        s"Failed to get segment info: ${result.failed.get.getMessage}"
-      )
-    }
-    val insertLogIDs = result.get.insertLogIDs
+    buildFieldMapFromLogInfo(rootPath, segmentLogInfo)
+  }
 
-    val fileStatuses = if (fs.getFileStatus(rootPath).isDirectory) {
-      try {
-        val fieldDirStatuses = fs
-          .listStatus(rootPath)
-          .filterNot(_.getPath.getName.startsWith("_"))
-          .filterNot(_.getPath.getName.startsWith(".")) // Ignore hidden files
-        fieldDirStatuses
-          .flatMap(fieldDirStatus => {
-            val fieldPath = fieldDirStatus.getPath()
-            if (fs.getFileStatus(fieldPath).isDirectory) {
-              val deepFileStatuses = fs
-                .listStatus(fieldPath)
-                .filterNot(_.getPath.getName.startsWith("_"))
-                .filterNot(
-                  _.getPath.getName.startsWith(".")
-                ) // Ignore hidden files
-              deepFileStatuses
-            } else {
-              throw new IllegalArgumentException(
-                s"fieldPath is not a directory: $fieldPath"
-              )
-            }
-          })
-          .toSeq
-      } catch {
-        case e: FileNotFoundException =>
-          logWarning(s"Path $rootPath not found")
-          Seq[FileStatus]()
-      }
-    } else {
-      // Array(fs.getFileStatus(rootPath))
-      throw new IllegalArgumentException(
-        s"rootPath is not a directory: $rootPath"
-      )
+  /**
+   * Internal method to build field map from segment log info.
+   */
+  private def buildFieldMapFromLogInfo(
+      rootPath: Path,
+      segmentLogInfo: MilvusSegmentLogInfo
+  ): Seq[Map[String, String]] = {
+    val insertLogIDs = segmentLogInfo.insertLogIDs
+    val segmentID = segmentLogInfo.segmentID
+
+    if (insertLogIDs.isEmpty) {
+      logWarning(s"No insert logs found for segment $segmentID")
+      return Seq.empty
     }
 
+    // Build file path map directly from API response (no S3 traversal needed)
+    // insertLogIDs format: "fieldID/logID"
     var filePathMap = mutable.Map[String, Seq[String]]()
-    fileStatuses.foreach(status => {
-      val filePath = status.getPath.toString
-      val paths = filePath.split("/")
-      val fileName = paths(paths.length - 1)
-      val filedID = paths(paths.length - 2)
-      if (insertLogIDs.contains(s"${filedID}/${fileName}")) {
-        if (filePathMap.contains(filedID)) {
-          filePathMap(filedID) = filePathMap(filedID) :+ fileName
+    insertLogIDs.foreach { logID =>
+      val parts = logID.split("/")
+      if (parts.length == 2) {
+        val fieldID = parts(0)
+        val fileName = parts(1)
+        if (filePathMap.contains(fieldID)) {
+          filePathMap(fieldID) = filePathMap(fieldID) :+ fileName
         } else {
-          filePathMap(filedID) = Seq(fileName)
+          filePathMap(fieldID) = Seq(fileName)
         }
       }
-    })
+    }
 
     if (fieldIDs.nonEmpty) {
       logInfo(
@@ -586,6 +526,11 @@ class MilvusScan(
       )
       filePathMap = filePathMap.filter(entry => fieldIDs.contains(entry._1))
       logInfo(s"After filtering: ${filePathMap.keys.mkString(", ")}")
+    }
+
+    if (filePathMap.isEmpty) {
+      logWarning(s"No matching fields found for segment $segmentID")
+      return Seq.empty
     }
 
     // Sort the file names in ascending order for each field ID
@@ -596,7 +541,6 @@ class MilvusScan(
     val fieldMaps = filePathMap.head._2.indices.map { i =>
       filePathMap.map { case (fieldId, fileNames) =>
         val fullPath = s"${rootPath.toString()}/${fieldId}/${fileNames(i)}"
-        // logInfo(s"field file fullPath: $fullPath")
         fieldId -> fullPath
       }.toMap
     }.toList
@@ -677,13 +621,14 @@ class MilvusScan(
       } else {
         Map[String, String]()
       }
-    var segment2Partition = mutable.Map[String, String]()
+    // Use ConcurrentHashMap for thread-safe parallel processing
+    val segment2Partition = new ConcurrentHashMap[String, String]()
 
-    // V1 segments: field maps for binlog reading
-    var fieldMaps = mutable.Map[String, Seq[Map[String, String]]]()
+    // V1 segments: field maps for binlog reading (thread-safe for parallel processing)
+    val fieldMaps = new ConcurrentHashMap[String, Seq[Map[String, String]]]()
 
-    // V2 segments: manifests for FFI reading
-    var v2Manifests = mutable.Map[String, (String, String, String)]() // segmentID -> (collectionID, partitionID, manifest)
+    // V2 segments: manifests for FFI reading (thread-safe for parallel processing)
+    val v2Manifests = new ConcurrentHashMap[String, (String, String, String)]() // segmentID -> (collectionID, partitionID, manifest)
 
     // Get collection schema and S3 config for V2 manifest building
     val collectionInfo = client.getCollectionInfo(
@@ -697,11 +642,31 @@ class MilvusScan(
     val s3Bucket = milvusOption.options.getOrElse(Properties.FsConfig.FsBucketName, "a-bucket")
     val s3RootPath = milvusOption.options.getOrElse(Properties.FsConfig.FsRootPath, "files")
 
+    // Batch fetch all V1 segment info in a single API call for better performance
+    val v1SegmentLogInfoMap: Map[Long, MilvusSegmentLogInfo] = if (validV1Segments.nonEmpty) {
+      val v1SegmentIDsLong = validV1Segments.flatMap { segStr =>
+        try { Some(segStr.toLong) } catch { case _: NumberFormatException => None }
+      }
+      if (v1SegmentIDsLong.nonEmpty) {
+        logInfo(s"Batch fetching segment info for ${v1SegmentIDsLong.size} V1 segments")
+        client.getSegmentsInfoBatch(collectionInfo.collectionID, v1SegmentIDsLong).getOrElse(
+          throw new Exception("Failed to batch fetch segment info")
+        )
+      } else {
+        Map.empty[Long, MilvusSegmentLogInfo]
+      }
+    } else {
+      Map.empty[Long, MilvusSegmentLogInfo]
+    }
+
     if (rawPath.isEmpty) {
       if (!partition.isEmpty() && !segment.isEmpty()) {
         // Check if this segment is V1 or V2
         if (validV1Segments.contains(segment)) {
-          fieldMaps(segment) = getSegmentFieldMap(fs, client, rootPath)
+          val segmentIDLong = segment.toLong
+          val segmentLogInfo = v1SegmentLogInfoMap.getOrElse(segmentIDLong,
+            throw new Exception(s"Segment $segment not found in batch result"))
+          fieldMaps.put(segment, getSegmentFieldMapWithLogInfo(rootPath, segmentLogInfo))
         } else if (validV2Segments.contains(segment)) {
           val manifest = ManifestBuilder.buildManifestForSegment(
             collectionInfo.schema,
@@ -712,22 +677,25 @@ class MilvusScan(
             s3Bucket,
             s3RootPath
           )
-          v2Manifests(segment) = (collection, partition, manifest)
+          v2Manifests.put(segment, (collection, partition, manifest))
         }
       } else if (!partition.isEmpty()) {
         var segmentStatuses = getCollectionOrPartitionStatuses(fs, rootPath)
 
-        // Process V1 segments
+        // Process V1 segments in parallel using batch-fetched segment info
         val v1SegmentStatuses = segmentStatuses
           .filter(status => validV1Segments.contains(status.getPath().getName))
-        v1SegmentStatuses.foreach(status => {
+        v1SegmentStatuses.par.foreach(status => {
           val segmentID = status.getPath().getName
-          fieldMaps(segmentID) = getSegmentFieldMap(fs, client, status.getPath())
-          segment2Partition(segmentID) = partition
+          val segmentIDLong = segmentID.toLong
+          val segmentLogInfo = v1SegmentLogInfoMap.getOrElse(segmentIDLong,
+            throw new Exception(s"Segment $segmentID not found in batch result"))
+          fieldMaps.put(segmentID, getSegmentFieldMapWithLogInfo(status.getPath(), segmentLogInfo))
+          segment2Partition.put(segmentID, partition)
         })
 
-        // Process V2 segments - use FFI instead of filesystem
-        validV2Segments.foreach { segmentID =>
+        // Process V2 segments in parallel - use FFI instead of filesystem
+        validV2Segments.par.foreach { segmentID =>
           val manifest = ManifestBuilder.buildManifestForSegment(
             collectionInfo.schema,
             collection,
@@ -737,31 +705,32 @@ class MilvusScan(
             s3Bucket,
             s3RootPath
           )
-          v2Manifests(segmentID) = (collection, partition, manifest)
-          segment2Partition(segmentID) = partition
+          v2Manifests.put(segmentID, (collection, partition, manifest))
+          segment2Partition.put(segmentID, partition)
         }
       } else {
         // For V1 segments, we need filesystem access
         if (validV1Segments.nonEmpty) {
           var partitionStatuses = getCollectionOrPartitionStatuses(fs, rootPath)
-          partitionStatuses.foreach(status => {
-            val partitionID = status.getPath().getName
-            val segmentStatuses =
-              getCollectionOrPartitionStatuses(fs, status.getPath())
 
-            // Process V1 segments
-            val v1Segments = segmentStatuses
-              .filter(status => validV1Segments.contains(status.getPath().getName))
-            v1Segments.foreach(status => {
-              val segmentID = status.getPath().getName
-              fieldMaps(segmentID) = getSegmentFieldMap(
-                fs,
-                client,
-                status.getPath()
-              )
-              segment2Partition(segmentID) = partitionID
-            })
-          })
+          // Collect all V1 segments with their partition info first
+          val allV1SegmentInfos = partitionStatuses.flatMap { status =>
+            val partitionID = status.getPath().getName
+            val segmentStatuses = getCollectionOrPartitionStatuses(fs, status.getPath())
+            segmentStatuses
+              .filter(s => validV1Segments.contains(s.getPath().getName))
+              .map(s => (s, partitionID))
+          }
+
+          // Process all V1 segments in parallel using batch-fetched segment info
+          allV1SegmentInfos.par.foreach { case (status, partitionID) =>
+            val segmentID = status.getPath().getName
+            val segmentIDLong = segmentID.toLong
+            val segmentLogInfo = v1SegmentLogInfoMap.getOrElse(segmentIDLong,
+              throw new Exception(s"Segment $segmentID not found in batch result"))
+            fieldMaps.put(segmentID, getSegmentFieldMapWithLogInfo(status.getPath(), segmentLogInfo))
+            segment2Partition.put(segmentID, partitionID)
+          }
         }
 
         // For V2 segments, use Milvus API to get partition info
@@ -780,7 +749,8 @@ class MilvusScan(
             .map(seg => seg.segmentID.toString -> seg.partitionID.toString)
             .toMap
 
-          validV2Segments.foreach { segmentID =>
+          // Process V2 segments in parallel
+          validV2Segments.par.foreach { segmentID =>
             val partitionID = segmentToPartitionMap.getOrElse(segmentID, {
               logWarning(s"Could not find partition for V2 segment $segmentID, skipping")
               ""
@@ -796,8 +766,8 @@ class MilvusScan(
                 s3Bucket,
                 s3RootPath
               )
-              v2Manifests(segmentID) = (collection, partitionID, manifest)
-              segment2Partition(segmentID) = partitionID
+              v2Manifests.put(segmentID, (collection, partitionID, manifest))
+              segment2Partition.put(segmentID, partitionID)
             }
           }
         }
@@ -805,14 +775,17 @@ class MilvusScan(
     } else {
       // Raw path specified - assume V1 for backward compatibility
       val segmentName = rootPath.getName()
-      fieldMaps(segmentName) = getSegmentFieldMap(fs, client, rootPath)
+      val segmentIDLong = segmentName.toLong
+      val segmentLogInfo = v1SegmentLogInfoMap.getOrElse(segmentIDLong,
+        throw new Exception(s"Segment $segmentName not found in batch result"))
+      fieldMaps.put(segmentName, getSegmentFieldMapWithLogInfo(rootPath, segmentLogInfo))
     }
 
-    // Create V1 input partitions
-    val v1Partitions = fieldMaps.map { case (segment, fieldMap) =>
+    // Create V1 input partitions (convert ConcurrentHashMap to Scala Map)
+    val v1Partitions = fieldMaps.asScala.map { case (segment, fieldMap) =>
       val partitionName = if (containExtraPartition)
         partitionInfos.getOrElse(
-          segment2Partition.getOrElse(segment, "unknown"),
+          segment2Partition.asScala.getOrElse(segment, "unknown"),
           "unknown"
         )
       else ""
@@ -831,8 +804,8 @@ class MilvusScan(
       ): InputPartition
     }
 
-    // Create V2 input partitions
-    val v2Partitions = v2Manifests.map { case (segmentID, (collectionID, partitionID, manifest)) =>
+    // Create V2 input partitions (convert ConcurrentHashMap to Scala Map)
+    val v2Partitions = v2Manifests.asScala.map { case (segmentID, (collectionID, partitionID, manifest)) =>
       // Parse segmentID string to Long, default to -1 if parsing fails
       val segmentIDLong = try {
         segmentID.toLong
@@ -867,3 +840,4 @@ class MilvusScan(
     new MilvusPartitionReaderFactory(schema, optionsMap, pushedFilters)
   }
 }
+
