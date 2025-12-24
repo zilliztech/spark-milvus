@@ -5,7 +5,7 @@ import com.zilliz.spark.connector.MilvusOption
 
 // Storage V2 InputPartition - requires Milvus 2.6+
 case class MilvusStorageV2InputPartition(
-    manifestJson: String,
+    manifestPath: String,  // Path to manifest in S3/MinIO
     milvusSchemaBytes: Array[Byte],  // Serialized protobuf
     partitionName: String,
     milvusOption: MilvusOption,

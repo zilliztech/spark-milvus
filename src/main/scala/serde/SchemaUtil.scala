@@ -57,6 +57,7 @@ object MilvusSchemaUtil {
 
     new org.apache.arrow.vector.types.pojo.Field(
       field.name,
+      // field.fieldID.toString,
       fieldType,
       null // children - null for simple types
     )
@@ -123,6 +124,7 @@ object MilvusSchemaUtil {
 
         new Field(
           field.name,
+          // field.fieldID.toString,
           fieldType,
           null // children
         )
@@ -136,6 +138,80 @@ object MilvusSchemaUtil {
     // Process all fields in the collection schema
     collectionSchema.fields.foreach { field =>
       appendArrowField(field)
+    }
+
+    // Create and return Arrow Schema
+    new org.apache.arrow.vector.types.pojo.Schema(arrowFields.asJava)
+  }
+
+  /**
+   * Convert Milvus CollectionSchema to Arrow Schema using field IDs as field names.
+   * This is required for milvus-storage reader which matches columns by field ID.
+   *
+   * The manifest stores column groups with field IDs (e.g., "100", "101"),
+   * so the Arrow schema must use field IDs as field names for the reader to
+   * correctly match requested columns with column groups.
+   *
+   * Note: System fields (row_id, timestamp) are NOT included here.
+   * They are handled by MilvusPartitionReaderFactory.
+   *
+   * @param collectionSchema The Milvus collection schema
+   * @return Arrow Schema with field IDs as field names
+   */
+  def convertToArrowSchemaWithFieldIdNames(
+      collectionSchema: io.milvus.grpc.schema.CollectionSchema
+  ): org.apache.arrow.vector.types.pojo.Schema = {
+    import scala.collection.JavaConverters._
+    import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType}
+
+    val arrowFields = scala.collection.mutable.ArrayBuffer[Field]()
+
+    // Helper function to create Arrow field with fieldID as name
+    def appendArrowFieldWithIdName(field: FieldSchema): Unit = {
+      // Get dimension for vector types
+      val dim = field.dataType match {
+        case DataType.BinaryVector | DataType.Float16Vector |
+             DataType.BFloat16Vector | DataType.Int8Vector |
+             DataType.FloatVector | DataType.ArrayOfVector =>
+          try {
+            getDim(field)
+          } catch {
+            case e: DataParseException =>
+              throw new DataParseException(
+                s"dim not found in field [${field.name}] params: ${e.getMessage}"
+              )
+          }
+        case _ => 0
+      }
+
+      val arrowType = DataTypeUtil.toArrowType(dim, field.dataType)
+
+      // Create metadata with both field_id and original name for reference
+      val metadata = Map(
+        "PARQUET:field_id" -> field.fieldID.toString,
+        "original_name" -> field.name
+      ).asJava
+
+      val fieldType = new FieldType(
+        true, // nullable
+        arrowType,
+        null, // dictionary encoding
+        metadata
+      )
+
+      // Use fieldID.toString as the field name
+      val arrowField = new Field(
+        field.fieldID.toString,
+        fieldType,
+        null // children
+      )
+
+      arrowFields += arrowField
+    }
+
+    // Process all fields in the collection schema
+    collectionSchema.fields.foreach { field =>
+      appendArrowFieldWithIdName(field)
     }
 
     // Create and return Arrow Schema

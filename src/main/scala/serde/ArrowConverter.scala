@@ -22,17 +22,22 @@ object ArrowConverter extends Logging {
    * @param root Arrow VectorSchemaRoot containing the data
    * @param rowIndex Index of the row to convert
    * @param sparkSchema Spark schema for the target InternalRow
+   * @param fieldNameMapping Optional mapping from Spark field name to Arrow column name
+   *                         (e.g., "id" -> "100" when Arrow uses field IDs as column names)
    * @return Spark InternalRow
    */
   def arrowToInternalRow(
       root: VectorSchemaRoot,
       rowIndex: Int,
-      sparkSchema: StructType
+      sparkSchema: StructType,
+      fieldNameMapping: Map[String, String] = Map.empty
   ): InternalRow = {
     val values = new Array[Any](sparkSchema.fields.length)
 
     sparkSchema.fields.zipWithIndex.foreach { case (field, index) =>
-      val vector = root.getVector(field.name)
+      // Use mapping if provided, otherwise use the field name directly
+      val arrowColumnName = fieldNameMapping.getOrElse(field.name, field.name)
+      val vector = root.getVector(arrowColumnName)
 
       if (vector == null) {
         values(index) = null

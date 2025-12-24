@@ -10,7 +10,7 @@ JAVA_HOME ?= $(shell dirname $(shell dirname $(shell readlink -f $(shell which j
 # Directories
 RESOURCES_DIR := src/main/resources
 MILVUS_STORAGE_CPP := milvus-storage/cpp
-MILVUS_STORAGE_BUILD := $(MILVUS_STORAGE_CPP)/build/Release
+MILVUS_STORAGE_BUILD := $(MILVUS_STORAGE_CPP)/build/Release/lib
 TARGET_DIR := target
 
 # Colors for output
@@ -69,7 +69,7 @@ build-milvus-storage: check-deps init-submodules
 		echo "$(YELLOW)Run 'make init-submodules' first$(NC)"; \
 		exit 1; \
 	fi
-	@cd $(MILVUS_STORAGE_CPP) && make build USE_JNI=True
+	@cd $(MILVUS_STORAGE_CPP) && make java-lib
 	@if [ -f "$(MILVUS_STORAGE_BUILD)/libmilvus-storage.so" ] && [ -f "$(MILVUS_STORAGE_BUILD)/libmilvus-storage-jni.so" ]; then \
 		echo "$(GREEN)✓ Successfully built milvus-storage with JNI$(NC)"; \
 		ls -lh $(MILVUS_STORAGE_BUILD)/*.so; \
@@ -85,10 +85,9 @@ copy-native-libs: $(RESOURCES_DIR)/native
 		echo "$(YELLOW)Native libraries not found, building first...$(NC)"; \
 		$(MAKE) build-milvus-storage; \
 	fi
-	@cp $(MILVUS_STORAGE_BUILD)/libmilvus-storage.so $(RESOURCES_DIR)/native/
-	@cp $(MILVUS_STORAGE_BUILD)/libmilvus-storage-jni.so $(RESOURCES_DIR)/native/
+	@cp $(MILVUS_STORAGE_BUILD)/*.so* $(RESOURCES_DIR)/native/
 	@echo "$(GREEN)✓ Copied native libraries to resources$(NC)"
-	@ls -lh $(RESOURCES_DIR)/native/*.so
+	@ls -lh $(RESOURCES_DIR)/native/ | head -20
 
 # Create necessary directories
 $(RESOURCES_DIR)/native:
