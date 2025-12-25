@@ -2,6 +2,9 @@ import scala.sys.process.Process
 import scala.io.Source
 
 import xerial.sbt.Sonatype._
+import xerial.sbt.Sonatype.sonatypeCentralHost
+
+ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 import Dependencies._
 
 // Load Sonatype Central credentials
@@ -61,14 +64,13 @@ ThisBuild / scmInfo := Some(
     "scm:git@github.com:zilliztech/milvus-spark-connector.git"
   )
 )
-ThisBuild / developers := List(
-  Developer(
-    id = "simfg",
-    name = "SimFG",
-    email = "bang.fu@zilliz.com",
-    url = url("https://github.com/SimFG")
-  )
-)
+ThisBuild / developers := List()
+
+lazy val arch = System.getProperty("os.arch") match {
+  case "amd64" | "x86_64" => "amd64"
+  case "aarch64" | "arm64" => "arm64"
+  case other => other
+}
 
 lazy val root = (project in file("."))
   .settings(

@@ -1,0 +1,66 @@
+# Stage 1: Copy artifacts from milvus-storage image
+ARG MILVUS_STORAGE_IMAGE
+FROM ${MILVUS_STORAGE_IMAGE} AS milvus-storage
+
+# Stage 2: Build spark-milvus
+FROM spark:4.0.1-scala2.13-java21-python3-ubuntu
+
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install basic dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget curl git make zip unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install SDKMAN
+ENV SDKMAN_DIR=/root/.sdkman
+RUN curl -s "https://get.sdkman.io" | bash
+
+# Install Java, Scala, sbt via SDKMAN
+RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && \
+    sdk install java 17.0.14-zulu && \
+    sdk install scala 2.13.16 && \
+    sdk install sbt 1.11.1"
+
+# Set environment variables
+ENV JAVA_HOME=/root/.sdkman/candidates/java/current
+ENV SCALA_HOME=/root/.sdkman/candidates/scala/current
+ENV SBT_HOME=/root/.sdkman/candidates/sbt/current
+ENV PATH=$JAVA_HOME/bin:$SCALA_HOME/bin:$SBT_HOME/bin:$PATH
+
+WORKDIR /workspace
+
+# Copy local spark-milvus source code
+COPY . .
+
+# Copy native libs from milvus-storage image
+COPY --from=milvus-storage /artifacts/libmilvus-storage.so src/main/resources/native/
+COPY --from=milvus-storage /artifacts/libmilvus-storage-jni.so src/main/resources/native/
+
+# Copy native libs to milvus-storage java binding
+RUN mkdir -p milvus-storage/java/native && \
+    cp src/main/resources/native/libmilvus-storage.so milvus-storage/java/native/ && \
+    cp src/main/resources/native/libmilvus-storage-jni.so milvus-storage/java/native/
+
+# Copy Sonatype credentials for publishing
+COPY .sbt/sonatype_central_credentials /root/.sbt/sonatype_central_credentials
+
+# Copy ivy2 local from milvus-storage image (pre-built Java binding JAR)
+COPY --from=milvus-storage /root/.ivy2/local /root/.ivy2/local
+
+# Build Spark connector JAR
+RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt package"
+
+# Publish to Maven Central (Sonatype)
+# Use 'publish' for releases or 'publishSigned' if GPG signing is configured
+ARG PUBLISH_TO_CENTRAL=false
+RUN if [ "$PUBLISH_TO_CENTRAL" = "true" ]; then \
+        bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publish"; \
+    fi
+
+# Output artifact: target/scala-2.13/spark-milvus_2.13-*.jar
+
+CMD ["/bin/bash"]

@@ -1,0 +1,75 @@
+# Stage 1: Build milvus-storage
+FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS builder
+
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install dependencies for building milvus-storage (C++ build tools)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget curl git g++ gcc make ccache gdb \
+    python3 python3-pip \
+    zip unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install CMake 3.27.5
+RUN wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-x86_64.tar.gz" | tar --strip-components=1 -xz -C /usr/local
+
+# Install Conan 1.61.0
+RUN pip3 install conan==1.61.0
+
+# Setup Conan profile
+RUN conan profile new default --detect \
+    && conan profile update settings.compiler.libcxx=libstdc++11 default
+
+# Add Milvus Conan remote
+RUN conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+
+# Install SDKMAN
+ENV SDKMAN_DIR=/root/.sdkman
+RUN curl -s "https://get.sdkman.io" | bash
+
+# Install Java, Scala, sbt via SDKMAN (for Java binding)
+RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && \
+    sdk install java 17.0.14-zulu && \
+    sdk install scala 2.13.16 && \
+    sdk install sbt 1.11.1"
+
+# Set environment variables
+ENV JAVA_HOME=/root/.sdkman/candidates/java/current
+ENV SCALA_HOME=/root/.sdkman/candidates/scala/current
+ENV SBT_HOME=/root/.sdkman/candidates/sbt/current
+ENV PATH=$JAVA_HOME/bin:$SCALA_HOME/bin:$SBT_HOME/bin:$PATH
+
+WORKDIR /workspace
+
+# Copy local milvus-storage submodule
+COPY milvus-storage milvus-storage
+
+# Build native library (C++) with JNI support
+RUN cd milvus-storage/cpp && make build USE_JNI=True WITH_UT=False -j32
+
+# Copy native libs to Java binding resources
+RUN mkdir -p milvus-storage/java/native && \
+    cp milvus-storage/cpp/build/Release/libmilvus-storage.so milvus-storage/java/native/ && \
+    cp milvus-storage/cpp/build/Release/libmilvus-storage-jni.so milvus-storage/java/native/
+
+# Build Java binding JAR and publish locally
+RUN cd milvus-storage/java && bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publishLocal"
+
+# Stage 2: Final image with only artifacts
+FROM spark:4.0.1-scala2.13-java21-python3-ubuntu
+
+USER root
+
+# Copy native libraries
+COPY --from=builder /workspace/milvus-storage/cpp/build/Release/libmilvus-storage.so /artifacts/
+COPY --from=builder /workspace/milvus-storage/cpp/build/Release/libmilvus-storage-jni.so /artifacts/
+
+# Copy published JAR from ivy local repository
+COPY --from=builder /root/.ivy2/local /root/.ivy2/local
+
+WORKDIR /workspace
+
+CMD ["/bin/bash"]
