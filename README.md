@@ -92,6 +92,43 @@ To create a fat JAR containing all dependencies, run:
 sbt assembly
 ```
 
+### Docker Build
+
+You can also build the connector using Docker, which handles all dependencies automatically including the native milvus-storage library.
+
+**Build the Docker image:**
+
+```bash
+# Build for current architecture (x86 or ARM64)
+docker build -t spark-milvus .
+
+# Build without publishing to Maven Central
+docker build --build-arg PUBLISH_TO_CENTRAL=false -t spark-milvus .
+```
+
+**Build arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `GIT_BRANCH` | `unknown` | Branch name for version string |
+| `PUBLISH_TO_CENTRAL` | `true` | Whether to publish to Maven Central Snapshots |
+
+**Version naming:**
+
+The Docker build uses dynamic versioning: `{branch}-{arch}-SNAPSHOT`
+
+For example:
+- `main-amd64-SNAPSHOT` (x86 build from main branch)
+- `feature-arm64-SNAPSHOT` (ARM64 build from feature branch)
+
+**Extract built JAR from container:**
+
+```bash
+docker create --name temp spark-milvus
+docker cp temp:/workspace/target/scala-2.13/spark-connector_2.13-*.jar ./
+docker rm temp
+```
+
 ### Build and Package Milvus Spark Connector Example
 
 Example Project Repository: [Milvus Spark Connector Example](https://github.com/SimFG/milvus-spark-connector-example)

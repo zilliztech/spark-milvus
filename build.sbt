@@ -2,6 +2,8 @@ import scala.sys.process.Process
 import scala.io.Source
 
 import xerial.sbt.Sonatype._
+
+ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 import Dependencies._
 
 // Load Sonatype Central credentials
@@ -63,12 +65,27 @@ ThisBuild / scmInfo := Some(
 )
 ThisBuild / developers := List(
   Developer(
-    id = "simfg",
-    name = "SimFG",
-    email = "bang.fu@zilliz.com",
-    url = url("https://github.com/SimFG")
+    id = "santiago-wjq",
+    name = "Santiago Wu",
+    email = "santiago.wu@zilliz.com",
+    url = url("https://github.com/santiago-wjq")
   )
 )
+
+lazy val arch = System.getProperty("os.arch") match {
+  case "amd64" | "x86_64" => "amd64"
+  case "aarch64" | "arm64" => "arm64"
+  case other => other
+}
+
+// Get git branch name from env var (for Docker builds) or git command, sanitize for Maven version
+lazy val gitBranch = {
+  val branch = sys.env.getOrElse("GIT_BRANCH",
+    scala.util.Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim).getOrElse("unknown")
+  )
+  // Replace invalid characters for Maven version (only alphanumeric, dash, dot, underscore allowed)
+  branch.replaceAll("[^a-zA-Z0-9._-]", "-")
+}
 
 lazy val root = (project in file("."))
   .settings(
@@ -76,8 +93,12 @@ lazy val root = (project in file("."))
     assembly / parallelExecution := true,
     Test / parallelExecution := true,
     Compile / compile / parallelExecution := true,
-    version := "0.2.1-SNAPSHOT",
+    version := s"${gitBranch}-${arch}-SNAPSHOT",
     organization := "com.zilliz",
+
+    // Disable Scaladoc and sources jar for publish (not needed, speeds up build)
+    Compile / packageDoc / publishArtifact := false,
+    Compile / packageSrc / publishArtifact := false,
 
     // Fork JVM for run and tests to properly load native libraries
     run / fork := true,
