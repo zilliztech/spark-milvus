@@ -61,10 +61,14 @@ RUN git config --global --add safe.directory /workspace && \
     git config --global --add safe.directory /workspace/milvus-storage && \
     git submodule update --init --recursive
 
-# Build milvus-storage native library using its Makefile (with cache)
+# Build milvus-storage native library using its Makefile (with cache, no ASAN)
+# Ensure conan profile and remote are set up before build (in case cache is empty)
 RUN --mount=type=cache,target=/root/.conan \
     --mount=type=cache,target=/root/.ccache \
-    cd milvus-storage/cpp && make build USE_JNI=True WITH_UT=False
+    conan profile new default --detect 2>/dev/null || true && \
+    conan profile update settings.compiler.libcxx=libstdc++11 default && \
+    conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert 2>/dev/null || true && \
+    cd milvus-storage/cpp && make build USE_JNI=True WITH_UT=False USE_ASAN=False
 
 # Copy native libs
 RUN mkdir -p milvus-storage/java/native src/main/resources/native && \
@@ -73,17 +77,18 @@ RUN mkdir -p milvus-storage/java/native src/main/resources/native && \
     cp milvus-storage/cpp/build/Release/libmilvus-storage.so src/main/resources/native/ && \
     cp milvus-storage/cpp/build/Release/libmilvus-storage-jni.so src/main/resources/native/
 
-# Build milvus-storage Java binding (with cache)
+# Build milvus-storage Java binding (with cache, persist local publish)
 RUN --mount=type=cache,target=/root/.ivy2 \
     --mount=type=cache,target=/root/.sbt \
-    cd milvus-storage/java && bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publishLocal"
+    cd milvus-storage/java && bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publishLocal" && \
+    mkdir -p /workspace/.ivy2-local && cp -r /root/.ivy2/local/* /workspace/.ivy2-local/
 
 # Build spark-milvus connector (with cache)
 ENV GIT_BRANCH=${GIT_BRANCH}
 ENV SBT_OPTS="-Xmx4g -Xms2g"
 RUN --mount=type=cache,target=/root/.ivy2 \
     --mount=type=cache,target=/root/.sbt \
-    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt package"
+    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt 'compile; Test/compile; package'"
 
 # Stage 2: Final image (only copy artifacts and publish)
 FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS final
@@ -118,7 +123,7 @@ WORKDIR /workspace
 COPY --from=builder /workspace/build.sbt /workspace/build.sbt
 COPY --from=builder /workspace/project/ /workspace/project/
 COPY --from=builder /workspace/target/ /workspace/target/
-COPY --from=builder /root/.ivy2/local /root/.ivy2/local
+COPY --from=builder /workspace/.ivy2-local /root/.ivy2/local
 
 ARG PUBLISH_TO_CENTRAL=true
 ENV SBT_OPTS="-Xmx4g -Xms2g"
