@@ -8,7 +8,6 @@ import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.hadoop.fs.s3a.S3AFileSystem
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.spark.connector.binlog.Constants
 import com.zilliz.spark.connector.MilvusConnectionException
 
 /**
@@ -71,9 +70,9 @@ object MilvusOption {
   val MilvusExtraColumnRowOffset = "row_offset"
 
   // reader config
-  val ReaderPath = Constants.LogReaderPathParamName
-  val ReaderType = Constants.LogReaderTypeParamName
-  val ReaderFieldIDs = Constants.LogReaderFieldIDs
+  val ReaderPath = "path"
+  val ReaderType = "type"
+  val ReaderFieldIDs = "fieldIDs"
 
   // vector search config
   val VectorSearchQueryVector = "vector.search.query"
@@ -82,35 +81,37 @@ object MilvusOption {
   val VectorSearchVectorColumn = "vector.search.column"
   val VectorSearchIdColumn = "vector.search.idColumn"
 
-  // s3 config (legacy, for V1 binlog)
-  val S3FileSystemTypeName = Constants.S3FileSystemTypeName
-  val S3Endpoint = Constants.S3Endpoint
-  val S3BucketName = Constants.S3BucketName
-  val S3RootPath = Constants.S3RootPath
-  val S3AccessKey = Constants.S3AccessKey
-  val S3SecretKey = Constants.S3SecretKey
-  val S3UseSSL = Constants.S3UseSSL
-  val S3PathStyleAccess = Constants.S3PathStyleAccess
+  // s3 config
+  val S3FileSystemTypeName = "s3.fs"
+  val S3Endpoint = "s3.endpoint"
+  val S3BucketName = "s3.bucketName"
+  val S3RootPath = "s3.rootPath"
+  val S3AccessKey = "s3.accessKey"
+  val S3SecretKey = "s3.secretKey"
+  val S3UseSSL = "s3.useSSL"
+  val S3PathStyleAccess = "s3.pathStyleAccess"
+  val S3MaxConnections = "s3.maxConnections"
+  val S3PreloadPoolSize = "s3.preloadPoolSize"
 
   // FFI (Storage V2) filesystem property keys
-  val FsAddress = Constants.FsAddress
-  val FsBucketName = Constants.FsBucketName
-  val FsAccessKeyId = Constants.FsAccessKeyId
-  val FsAccessKeyValue = Constants.FsAccessKeyValue
-  val FsRootPath = Constants.FsRootPath
-  val FsStorageType = Constants.FsStorageType
-  val FsCloudProvider = Constants.FsCloudProvider
-  val FsIamEndpoint = Constants.FsIamEndpoint
-  val FsLogLevel = Constants.FsLogLevel
-  val FsRegion = Constants.FsRegion
-  val FsUseSSL = Constants.FsUseSSL
-  val FsSslCaCert = Constants.FsSslCaCert
-  val FsUseIam = Constants.FsUseIam
-  val FsUseVirtualHost = Constants.FsUseVirtualHost
-  val FsRequestTimeoutMs = Constants.FsRequestTimeoutMs
-  val FsGcpNativeWithoutAuth = Constants.FsGcpNativeWithoutAuth
-  val FsGcpCredentialJson = Constants.FsGcpCredentialJson
-  val FsUseCustomPartUpload = Constants.FsUseCustomPartUpload
+  val FsAddress = "fs.address"
+  val FsBucketName = "fs.bucketName"
+  val FsAccessKeyId = "fs.accessKeyId"
+  val FsAccessKeyValue = "fs.accessKeyValue"
+  val FsRootPath = "fs.rootPath"
+  val FsStorageType = "fs.storageType"
+  val FsCloudProvider = "fs.cloudProvider"
+  val FsIamEndpoint = "fs.iamEndpoint"
+  val FsLogLevel = "fs.logLevel"
+  val FsRegion = "fs.region"
+  val FsUseSSL = "fs.useSSL"
+  val FsSslCaCert = "fs.sslCaCert"
+  val FsUseIam = "fs.useIam"
+  val FsUseVirtualHost = "fs.useVirtualHost"
+  val FsRequestTimeoutMs = "fs.requestTimeoutMs"
+  val FsGcpNativeWithoutAuth = "fs.gcpNativeWithoutAuth"
+  val FsGcpCredentialJson = "fs.gcpCredentialJson"
+  val FsUseCustomPartUpload = "fs.useCustomPartUpload"
 
   // Writer config
   val WriterCustomPath = "milvus.writer.customPath"
@@ -327,18 +328,18 @@ case class MilvusS3Option(
 object MilvusS3Option {
   def apply(options: CaseInsensitiveStringMap): MilvusS3Option = {
     new MilvusS3Option(
-      options.get(Constants.LogReaderTypeParamName),
-      options.get(Constants.S3FileSystemTypeName),
-      options.getOrDefault(Constants.S3BucketName, "a-bucket"),
-      options.getOrDefault(Constants.S3RootPath, "files"),
-      options.getOrDefault(Constants.S3Endpoint, "localhost:9000"),
-      options.getOrDefault(Constants.S3AccessKey, "minioadmin"),
-      options.getOrDefault(Constants.S3SecretKey, "minioadmin"),
-      options.getOrDefault(Constants.S3UseSSL, "false").toBoolean,
-      options.getOrDefault(Constants.S3PathStyleAccess, "true").toBoolean,
+      options.get(MilvusOption.ReaderType),
+      options.get(MilvusOption.S3FileSystemTypeName),
+      options.getOrDefault(MilvusOption.S3BucketName, "a-bucket"),
+      options.getOrDefault(MilvusOption.S3RootPath, "files"),
+      options.getOrDefault(MilvusOption.S3Endpoint, "localhost:9000"),
+      options.getOrDefault(MilvusOption.S3AccessKey, "minioadmin"),
+      options.getOrDefault(MilvusOption.S3SecretKey, "minioadmin"),
+      options.getOrDefault(MilvusOption.S3UseSSL, "false").toBoolean,
+      options.getOrDefault(MilvusOption.S3PathStyleAccess, "true").toBoolean,
       options.getOrDefault(MilvusOption.MilvusCollectionPKType, ""),
-      options.getOrDefault(Constants.S3MaxConnections, "32").toInt,
-      options.getOrDefault(Constants.S3PreloadPoolSize, "4").toInt
+      options.getOrDefault(MilvusOption.S3MaxConnections, "32").toInt,
+      options.getOrDefault(MilvusOption.S3PreloadPoolSize, "4").toInt
     )
   }
 }

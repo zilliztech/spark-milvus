@@ -1,5 +1,11 @@
 # Milvus Spark Connector
 
+## Version Compatibility
+
+**This connector requires Milvus 2.6 or later** (Storage V2).
+
+For Milvus 2.5 and earlier versions, please use the `legacy` branch which is no longer actively maintained.
+
 ## Environment Preparation
 
 **Machine Requirements:** Minimum 2 CPU cores and 8GB RAM.
@@ -7,20 +13,20 @@
 To ensure smooth operation, it is critical to use consistent versions of the required tools. Mismatched versions may lead to compatibility issues.
 
 1. [**SDKMAN**](https://sdkman.io/) is recommended for managing Scala and Spark environments.
-2. **Java Version:** 17.0
-3. **Scala Version:** 2.13.8
-4. **Spark Version:** 3.5.3 (built with Scala 2.13)
+2. **Java Version:** 21
+3. **Scala Version:** 2.13.16
+4. **Spark Version:** 4.0.1 (built with Scala 2.13)
 5. **SBT Version:** 1.11.1
 
 If you are using SDKMAN, you can quickly install Java, Scala, and SBT as follows:
 
 ```bash
-sdk install java 17.0.14.crac-zulu
-sdk install scala 2.13.8
+sdk install java 21.0.5-zulu
+sdk install scala 2.13.16
 sdk install sbt 1.11.1
 ```
 
-The Spark version provided by SDKMAN only supports Scala 2.12. Therefore, you need to manually install the Spark version compatible with Scala 2.13. You can download it from the following link: [Spark Download](https://www.apache.org/dyn/closer.lua/spark/spark-3.5.3/spark-3.5.3-bin-hadoop3-scala2.13.tgz).
+The Spark version provided by SDKMAN only supports Scala 2.12. Therefore, you need to manually install the Spark version compatible with Scala 2.13. You can download it from the following link: [Spark Download](https://www.apache.org/dyn/closer.lua/spark/spark-4.0.1/spark-4.0.1-bin-hadoop3-scala2.13.tgz).
 
 ### Spark Submit Configuration
 
@@ -29,7 +35,7 @@ To simplify the `spark-submit` process, create a wrapper script named `spark-sub
 ```bash
 #!/bin/bash
 
-export SPARK_HOME=/xxx/spark-3.5.3-bin-hadoop3-scala2.13
+export SPARK_HOME=/xxx/spark-4.0.1-bin-hadoop3-scala2.13
 
 if [ ! -d "$SPARK_HOME" ]; then
   echo "Error: SPARK_HOME directory does not exist: $SPARK_HOME"

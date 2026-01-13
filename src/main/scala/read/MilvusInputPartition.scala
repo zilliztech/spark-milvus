@@ -3,7 +3,7 @@ package com.zilliz.spark.connector.read
 import org.apache.spark.sql.connector.read.InputPartition
 import com.zilliz.spark.connector.MilvusOption
 
-// V2 Storage InputPartition
+// Storage V2 InputPartition - requires Milvus 2.6+
 case class MilvusStorageV2InputPartition(
     manifestJson: String,
     milvusSchemaBytes: Array[Byte],  // Serialized protobuf
@@ -13,13 +13,5 @@ case class MilvusStorageV2InputPartition(
     queryVector: Option[Array[Float]] = None,
     metricType: Option[String] = None,
     vectorColumn: Option[String] = None,
-    segmentID: Long = -1L  // Add segment ID tracking for V2
+    segmentID: Long = -1L
 ) extends InputPartition
-
-// V1 Binlog InputPartition
-case class MilvusInputPartition(
-    fieldFiles: Seq[Map[String, String]],
-    partition: String = "",
-    segmentID: Long = -1L  // Add segment ID tracking
-) extends InputPartition
-

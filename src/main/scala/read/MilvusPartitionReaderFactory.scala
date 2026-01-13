@@ -5,43 +5,20 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.spark.connector.MilvusS3Option
 import io.milvus.grpc.schema.CollectionSchema
 
-// Unified PartitionReaderFactory that dispatches to V1 or V2 readers based on partition type
+// PartitionReaderFactory for Storage V2 (Milvus 2.6+)
 class MilvusPartitionReaderFactory(
     schema: StructType,
-    optionsMap: Map[String, String],  // Use Map instead of CaseInsensitiveStringMap for serialization
+    optionsMap: Map[String, String],
     pushedFilters: Array[Filter] = Array.empty[Filter]
 ) extends PartitionReaderFactory with Logging {
 
-  // Reconstruct CaseInsensitiveStringMap for V1 reader
-  @transient private lazy val readerOptions = {
-    import scala.jdk.CollectionConverters._
-    import java.util.HashMap
-    val javaMap = new HashMap[String, String]()
-    optionsMap.foreach { case (k, v) => javaMap.put(k, v) }
-    MilvusS3Option(new CaseInsensitiveStringMap(javaMap))
-  }
-
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
     partition match {
-      case milvusPartition: MilvusInputPartition =>
-        logInfo(s"Creating V1 reader for partition with segmentID=${milvusPartition.segmentID}")
-        // Create the V1 data reader with the file map, schema, and options
-        new MilvusPartitionReader(
-          schema,
-          milvusPartition.fieldFiles,
-          milvusPartition.partition,
-          readerOptions,
-          pushedFilters,
-          milvusPartition.segmentID
-        )
-
       case p: MilvusStorageV2InputPartition =>
-        logInfo(s"Creating V2 reader for partition")
+        logInfo(s"Creating V2 reader for partition with segmentID=${p.segmentID}")
 
         // Storage V2 doesn't support system fields (row_id, timestamp) and extra metadata columns (segment_id, row_offset)
         // Filter them out from the schema for the underlying reader
@@ -131,7 +108,8 @@ class MilvusPartitionReaderFactory(
 
       case _ =>
         throw new IllegalArgumentException(
-          s"Unsupported partition type: ${partition.getClass.getName}"
+          s"Unsupported partition type: ${partition.getClass.getName}. " +
+          "This connector requires Milvus 2.6+ (Storage V2)."
         )
     }
   }

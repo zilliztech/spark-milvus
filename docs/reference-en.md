@@ -1,19 +1,22 @@
 # Milvus Spark Connector Parameter Reference
 
-This document provides a comprehensive guide to all parameter configurations for the two data source formats in Milvus Spark Connector.
+This document provides a comprehensive guide to all parameter configurations for the Milvus Spark Connector.
+
+## Version Compatibility
+
+**This connector requires Milvus 2.6 or later** (Storage V2).
+
+For Milvus 2.5 and earlier versions, please use the `legacy` branch which is no longer actively maintained.
 
 ## Overview
 
-Milvus Spark Connector provides two data source formats:
+Milvus Spark Connector provides the **`milvus`** data source format for reading and writing Milvus data.
 
-1. **`milvus`** - For reading and writing Milvus data
-2. **`milvusbinlog`** - For reading a single field binary log file in a Milvus collection (read-only)
-
-Additionally, a convenient `MilvusDataReader` utility class is provided to simplify collection data reading operations. This utility automatically handles the merging of insert and delete logs, returning the final valid data.
+Additionally, a convenient `MilvusDataReader` utility class is provided to simplify collection data reading operations.
 
 ## 1. `MilvusDataReader` Convenient Reading Method
 
-`MilvusDataReader` provides a convenient method to read collection data, automatically handling the merging of insert and delete logs to return the final valid data.
+`MilvusDataReader` provides a convenient method to read collection data.
 
 ```scala
 import com.zilliz.spark.connector.{MilvusDataReader, MilvusDataReaderConfig, MilvusOption}
@@ -99,14 +102,7 @@ val s3Options = Map(
 
 ### 1.4 How It Works
 
-`MilvusDataReader` internally performs the following steps:
-
-1. **Read Insert Logs**: Uses `milvus` format to read collection insert data
-2. **Read Delete Logs**: Uses `milvusbinlog` format to read delete logs
-3. **Data Merging**: Automatically handles delete operations, filtering out deleted records
-4. **Return Results**: Returns final valid data with system fields removed (such as `row_id`, `timestamp`)
-
-This approach is particularly suitable for scenarios where you need to obtain the current valid data of a collection without manually handling the complex merging logic of insert and delete logs.
+`MilvusDataReader` reads data using the Storage V2 (Loon) FFI interface. Delete operations are handled internally by the storage layer, so no separate delete log processing is needed.
 
 ## 2. `milvus` Format Parameters
 
@@ -146,47 +142,10 @@ This approach is particularly suitable for scenarios where you need to obtain th
 | `MilvusOption.MilvusRetryCount` | Int | No | 3 | Number of retries on operation failure |
 | `MilvusOption.MilvusRetryInterval` | Int | No | 1000 | Retry interval in milliseconds |
 
-## 3. `milvusbinlog` Format Parameters
+## 3. Usage Examples
 
-### 3.1 Basic Parameters
+### 3.1 Reading Data
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `MilvusOption.ReaderType` | String | Yes | - | Reader type, supports "insert" or "delete" |
-| `MilvusOption.ReaderPath` | String | Conditional | - | Binary log file path, required when not using S3 |
-
-### 3.2 Milvus Connection Parameters (for metadata retrieval)
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `MilvusOption.MilvusUri` | String | No | "" | Milvus server URI for retrieving collection metadata |
-| `MilvusOption.MilvusToken` | String | No | "" | Milvus authentication token |
-| `MilvusOption.MilvusDatabaseName` | String | No | "" | Database name |
-| `MilvusOption.MilvusCollectionName` | String | No | "" | Collection name |
-| `MilvusOption.MilvusPartitionName` | String | No | "" | Partition name |
-| `MilvusOption.MilvusCollectionID` | String | No | "" | Collection ID |
-| `MilvusOption.MilvusPartitionID` | String | No | "" | Partition ID |
-| `MilvusOption.MilvusSegmentID` | String | No | "" | Segment ID |
-| `MilvusOption.MilvusFieldID` | String | No | "" | Field ID, required for insert type |
-
-### 3.3 S3 Storage Parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `MilvusOption.S3FileSystemTypeName` | String | No | "" | S3 filesystem type identifier, fixed value "s3.fs" |
-| `MilvusOption.S3Endpoint` | String | No | "localhost:9000" | S3 service endpoint |
-| `MilvusOption.S3BucketName` | String | No | "a-bucket" | S3 bucket name |
-| `MilvusOption.S3RootPath` | String | No | "files" | S3 root path |
-| `MilvusOption.S3AccessKey` | String | No | "minioadmin" | S3 access key |
-| `MilvusOption.S3SecretKey` | String | No | "minioadmin" | S3 secret key |
-| `MilvusOption.S3UseSSL` | Boolean | No | false | Whether to use SSL connection |
-| `MilvusOption.S3PathStyleAccess` | Boolean | No | true | Whether to use path-style access |
-
-## 4. Usage Examples
-
-### 4.1 `milvus` Format Examples
-
-#### Reading Data
 ```scala
 val df = spark.read
   .format("milvus")
@@ -198,7 +157,8 @@ val df = spark.read
   .load()
 ```
 
-#### Writing Data
+### 3.2 Writing Data
+
 ```scala
 df.write
   .format("milvus")
@@ -211,86 +171,33 @@ df.write
   .save()
 ```
 
-### 4.2 `milvusbinlog` Format Examples
+## 4. Data Schema
 
-#### Reading Insert Logs
-```scala
-val insertDF = spark.read
-  .format("milvusbinlog")
-  .option(MilvusOption.ReaderType, "insert")
-  .option(MilvusOption.ReaderPath, "/path/to/insert/logs")
-  .option(MilvusOption.MilvusUri, "http://localhost:19530")
-  .option(MilvusOption.MilvusCollectionName, "your_collection")
-  .option(MilvusOption.MilvusFieldID, "100")  // Field ID required for insert logs
-  .load()
-```
+### 4.1 Output Schema
 
-#### Reading Delete Logs
-```scala
-val deleteDF = spark.read
-  .format("milvusbinlog")
-  .option(MilvusOption.ReaderType, "delete")
-  .option(MilvusOption.ReaderPath, "/path/to/delete/logs")
-  .option(MilvusOption.MilvusUri, "http://localhost:19530")
-  .option(MilvusOption.MilvusCollectionName, "your_collection")
-  .load()
-```
+The output schema for `milvus` format depends on the Milvus collection schema and includes:
 
-#### Using S3-stored Binary Logs
-```scala
-val df = spark.read
-  .format("milvusbinlog")
-  .option(MilvusOption.ReaderType, "insert")
-  .option(MilvusOption.S3FileSystemTypeName, "s3.fs")
-  .option(MilvusOption.S3Endpoint, "s3.amazonaws.com")
-  .option(MilvusOption.S3BucketName, "your-bucket")
-  .option(MilvusOption.S3RootPath, "milvus-logs")
-  .option(MilvusOption.S3AccessKey, "your-access-key")
-  .option(MilvusOption.S3SecretKey, "your-secret-key")
-  .option(MilvusOption.S3UseSSL, "true")
-  .option(MilvusOption.MilvusCollectionID, "123456")
-.option(MilvusOption.MilvusFieldID, "100")
-  .load()
-```
-
-## 5. Data Schema
-
-### 5.1 `milvus` Format Output Schema
-
-The output schema for `milvus` format depends on the Milvus collection schema and includes the following system fields:
-
-- `row_id` (LongType) - Row ID
-- `timestamp` (LongType) - Timestamp
 - User-defined fields (based on collection schema)
 - `$meta` (StringType) - Dynamic fields (if enabled)
 
-### 5.2 `milvusbinlog` Format Output Schema
+## 5. Important Notes
 
-The `milvusbinlog` format outputs the following fixed fields:
+1. **Version Requirement**: This connector requires Milvus 2.6+ with Storage V2
+2. **SSL/TLS Configuration**: Supports both one-way and mutual TLS authentication, configure certificate files as needed
+3. **Batch Size**: Properly setting `MilvusOption.MilvusInsertMaxBatchSize` can optimize write performance
+4. **Retry Mechanism**: Built-in retry mechanism improves operation reliability
+5. **Parameter Constants**: It's recommended to use constants defined in the `MilvusOption` class to avoid string spelling errors
 
-- `data` (StringType/LongType) - Data content, field value for insert, primary key value for delete
-- `timestamp` (LongType) - Timestamp
-- `data_type` (IntegerType) - Data type identifier
+## 6. Supported Data Types
 
-## 6. Important Notes
-
-1. **Automatic Path Construction**: When providing parameters like `MilvusOption.MilvusCollectionID`, the system automatically constructs binary log paths
-2. **Field ID Requirement**: For `milvusbinlog` format with insert type, `MilvusOption.MilvusFieldID` must be specified
-3. **SSL/TLS Configuration**: Supports both one-way and mutual TLS authentication, configure certificate files as needed
-4. **Batch Size**: Properly setting `MilvusOption.MilvusInsertMaxBatchSize` can optimize write performance
-5. **Retry Mechanism**: Built-in retry mechanism improves operation reliability
-6. **Parameter Constants**: It's recommended to use constants defined in the `MilvusOption` class to avoid string spelling errors
-
-## 7. Supported Data Types
-
-### 7.1 Scalar Types
+### 6.1 Scalar Types
 - Bool
 - Int8, Int16, Int32, Int64
 - Float, Double
 - String, VarChar
 - JSON
 
-### 7.2 Vector Types
+### 6.2 Vector Types
 - FloatVector
 - Float16Vector
 - BFloat16Vector
@@ -298,5 +205,5 @@ The `milvusbinlog` format outputs the following fixed fields:
 - Int8Vector
 - SparseFloatVector
 
-### 7.3 Complex Types
+### 6.3 Complex Types
 - Array (supports scalar element types)
