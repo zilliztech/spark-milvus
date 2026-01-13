@@ -47,7 +47,9 @@ object DataTypeUtil {
       case MilvusDataType.Double  => DataTypes.DoubleType
       case MilvusDataType.String  => DataTypes.StringType
       case MilvusDataType.VarChar => DataTypes.StringType
+      case MilvusDataType.Text    => DataTypes.StringType
       case MilvusDataType.JSON    => DataTypes.StringType
+      case MilvusDataType.Timestamptz => DataTypes.LongType
       case MilvusDataType.Array =>
         val elementType = fieldSchema.elementType
         val sparkElementType = elementType match {
@@ -73,7 +75,7 @@ object DataTypeUtil {
       case MilvusDataType.FloatVector =>
         DataTypes.createArrayType(DataTypes.FloatType)
       case MilvusDataType.BinaryVector =>
-        DataTypes.createArrayType(DataTypes.BinaryType)
+        DataTypes.createArrayType(DataTypes.ByteType)
       case MilvusDataType.Int8Vector =>
         DataTypes.createArrayType(DataTypes.ShortType)
       case MilvusDataType.Float16Vector =>
