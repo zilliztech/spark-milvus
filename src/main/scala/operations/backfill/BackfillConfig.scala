@@ -15,7 +15,6 @@ package com.zilliz.spark.connector.operations.backfill
  * @param s3UseSSL Whether to use SSL for S3 connections
  * @param s3RootPath Root path in S3 bucket
  * @param s3Region S3 region
- * @param pkFieldToRead Primary key field ID to read for join operation
  * @param batchSize Batch size for writing data
  * @param customOutputPath Optional custom output path override
  */
@@ -35,9 +34,6 @@ case class BackfillConfig(
     s3UseSSL: Boolean = false,
     s3RootPath: String = "files",
     s3Region: String = "us-east-1",
-
-    // Field configuration
-    pkFieldToRead: Int,
 
     // Writer configuration
     batchSize: Int = 1024,
@@ -77,7 +73,6 @@ case class BackfillConfig(
       "milvus.database.name" -> databaseName,
       "milvus.collection.name" -> collectionName,
       "milvus.extra.columns" -> "segment_id,row_offset", // this is used to match with the original sequence of rows for each segment
-      "milvus.field.ids" -> pkFieldToRead.toString, // Only read PK field for join
       "fs.address" -> s3Endpoint,
       "fs.bucket_name" -> s3BucketName,
       "fs.root_path" -> s3RootPath,
@@ -123,7 +118,6 @@ object BackfillConfig {
    */
   def forTest(
       collectionName: String,
-      pkFieldToRead: Int = 100,
       milvusUri: String = "http://localhost:19530",
       milvusToken: String = "root:Milvus",
       s3Endpoint: String = "localhost:9000",
@@ -133,7 +127,6 @@ object BackfillConfig {
       milvusUri = milvusUri,
       milvusToken = milvusToken,
       collectionName = collectionName,
-      pkFieldToRead = pkFieldToRead,
       s3Endpoint = s3Endpoint,
       s3BucketName = s3BucketName,
       s3AccessKey = "minioadmin",

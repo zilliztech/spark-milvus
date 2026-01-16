@@ -119,6 +119,7 @@ class MilvusLoonPartitionReader(
   private var vectorSearchResults: Iterator[(InternalRow, Double)] = _
   private var vectorSearchCompleted = false
 
+
   override def next(): Boolean = {
     if (vectorSearchEnabled) {
       if (!vectorSearchCompleted) {

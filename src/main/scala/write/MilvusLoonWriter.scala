@@ -297,8 +297,6 @@ class MilvusLoonPartitionWriter(
       return
     }
 
-    logInfo(s"Flushing batch: partition=$partitionId, batchSize=$currentBatchSize")
-
     // Set final row count before export
     root.setRowCount(currentBatchSize)
 

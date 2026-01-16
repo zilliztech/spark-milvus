@@ -5,10 +5,14 @@ import org.scalatest.BeforeAndAfterAll
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
 import scala.util.Random
+import scala.sys.process._
+import scala.util.{Try, Success, Failure}
 
 import com.zilliz.spark.connector.{MilvusClient, MilvusConnectionParams, MilvusFieldData, MilvusOption}
 import com.zilliz.spark.connector.loon.Properties
 import io.milvus.grpc.schema.DataType
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
 
 import java.io.File
 
@@ -25,9 +29,15 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
   var milvusClient: MilvusClient = _
 
   val collectionName = s"backfilltestcollection_${System.currentTimeMillis()}"
+  val snapshotName = s"backfill_snapshot_${System.currentTimeMillis()}"
   val dim = 128
   val batchSize = 10000
   val batchCount = 100
+  val s3Bucket = "a-bucket"
+
+  // Jackson mapper for JSON parsing
+  private val mapper = new ObjectMapper()
+  mapper.registerModule(DefaultScalaModule)
 
   override def beforeAll(): Unit = {
     // Initialize Spark
@@ -53,11 +63,60 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
 
   override def afterAll(): Unit = {
     try {
-      // Clean up
+      // Clean up snapshot first
+      dropSnapshotViaPython(snapshotName)
+      // Then drop collection
       milvusClient.dropCollection("", collectionName)
     } finally {
       if (milvusClient != null) milvusClient.close()
       if (spark != null) spark.stop()
+    }
+  }
+
+  /**
+   * Create a snapshot using Python script (pymilvus has snapshot API, milvus-proto doesn't yet)
+   * Returns the S3 location path
+   */
+  private def createSnapshotViaPython(collectionName: String, snapshotName: String, description: String = ""): String = {
+    val scriptPath = new File("scripts/create_snapshot.py").getAbsolutePath
+    val cmd = Seq("python3", scriptPath, collectionName, snapshotName, description)
+
+    info(s"Creating snapshot via Python: $cmd")
+
+    val output = cmd.!!
+    info(s"Python output: $output")
+
+    val result = mapper.readValue(output, classOf[Map[String, Any]])
+
+    if (result.contains("error")) {
+      throw new RuntimeException(s"Failed to create snapshot: ${result("error")}")
+    }
+
+    val s3Location = result("s3_location").toString
+    info(s"Snapshot created at S3 location: $s3Location")
+
+    // Return as s3a:// path for Spark/Hadoop
+    s"s3a://$s3Bucket/$s3Location"
+  }
+
+  /**
+   * Drop snapshot using Python script
+   */
+  private def dropSnapshotViaPython(snapshotName: String): Unit = {
+    Try {
+      val cmd = Seq(
+        "python3", "-c",
+        s"""
+from pymilvus import MilvusClient
+client = MilvusClient(uri='http://localhost:19530', token='root:Milvus')
+client.drop_snapshot('$snapshotName')
+print('Snapshot dropped')
+"""
+      )
+      cmd.!!
+    } match {
+      case Success(_) => info(s"Snapshot $snapshotName dropped")
+      case Failure(e) => info(s"Failed to drop snapshot $snapshotName: ${e.getMessage}")
     }
   }
 
@@ -107,7 +166,6 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
         milvusToken = "root:Milvus",
         databaseName = "default",
         collectionName = collectionName,
-        pkFieldToRead = 100,
         s3Endpoint = "localhost:9000",
         s3BucketName = "a-bucket",
         s3AccessKey = "minioadmin",
@@ -118,10 +176,19 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
         batchSize = 512
       )
 
+      // Create snapshot via Python (since milvus-proto doesn't have snapshot RPC yet)
+      val snapshotPath = createSnapshotViaPython(
+        collectionName,
+        snapshotName,
+        "add field backfill snapshot for test"
+      )
+      info(s"Using snapshot path: $snapshotPath")
+
       // Execute MilvusBackfill API
       val result = MilvusBackfill.run(
         spark,
         parquetPath,
+        snapshotPath,
         config
       )
 

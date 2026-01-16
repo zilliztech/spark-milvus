@@ -71,31 +71,53 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
 
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
     val milvusOption = MilvusOption(options)
-    if (milvusOption.collectionName.isEmpty) {
-      throw new IllegalArgumentException("collectionName cannot be empty")
-    }
-    val client = MilvusClient(milvusOption)
-    try {
-      val result = client.getCollectionSchema(
-        milvusOption.databaseName,
-        milvusOption.collectionName
-      )
-      val schema = result.getOrElse(
-        throw new Exception(
-          s"Failed to get collection schema: ${result.failed.get.getMessage}"
+
+    // Check for snapshot mode - use snapshot schema if provided
+    val isSnapshotMode = Option(options.get(MilvusOption.SnapshotMode)).contains("true") ||
+                         Option(options.get(MilvusOption.SnapshotManifests)).isDefined
+
+    if (isSnapshotMode) {
+      // Try to get schema from snapshot JSON
+      Option(options.get(MilvusOption.SnapshotSchemaJson)).flatMap { json =>
+        import com.zilliz.spark.connector.read.MilvusSnapshotReader
+        MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+          case Right(metadata) =>
+            Some(MilvusSnapshotReader.toSparkSchema(metadata.collection.schema, includeSystemFields = true))
+          case Left(_) => None
+        }
+      }.getOrElse {
+        // If no snapshot schema provided, return empty schema
+        // The actual schema should be provided via .schema() call
+        StructType(Seq.empty)
+      }
+    } else {
+      // Client-based mode (existing behavior)
+      if (milvusOption.collectionName.isEmpty) {
+        throw new IllegalArgumentException("collectionName cannot be empty")
+      }
+      val client = MilvusClient(milvusOption)
+      try {
+        val result = client.getCollectionSchema(
+          milvusOption.databaseName,
+          milvusOption.collectionName
         )
-      )
-      StructType(
-        schema.fields.map(field =>
-          StructField(
-            field.name,
-            DataTypeUtil.toDataType(field),
-            field.nullable
+        val schema = result.getOrElse(
+          throw new Exception(
+            s"Failed to get collection schema: ${result.failed.get.getMessage}"
           )
         )
-      )
-    } finally {
-      client.close()
+        StructType(
+          schema.fields.map(field =>
+            StructField(
+              field.name,
+              DataTypeUtil.toDataType(field),
+              field.nullable
+            )
+          )
+        )
+      } finally {
+        client.close()
+      }
     }
   }
   override def supportsExternalMetadata = true
@@ -122,7 +144,113 @@ case class MilvusTable(
     }
   logInfo(s"MilvusTable fieldIDs: $fieldIDs")
 
+  /**
+   * Check if snapshot mode is enabled (data comes from snapshot, not client)
+   */
+  private def isSnapshotMode: Boolean = {
+    milvusOption.options.get(MilvusOption.SnapshotMode).contains("true") &&
+    milvusOption.options.contains(MilvusOption.SnapshotManifests)
+  }
+
   def initInfo(): Unit = {
+    // Check for snapshot mode first - skip client calls if snapshot data is provided
+    if (isSnapshotMode) {
+      logInfo("Snapshot mode enabled - skipping Milvus client connection for collection info")
+      initFromSnapshot()
+    } else {
+      // Client-based mode (existing behavior)
+      initFromClient()
+    }
+  }
+
+  /**
+   * Initialize collection info from snapshot metadata (no client connection)
+   */
+  private def initFromSnapshot(): Unit = {
+    import com.zilliz.spark.connector.read.MilvusSnapshotReader
+
+    // Get collection ID from options
+    val collectionId = milvusOption.options.get(MilvusOption.SnapshotCollectionId)
+      .map(_.toLong)
+      .getOrElse(0L)
+
+    // Get partition IDs from options
+    val partitionIds = milvusOption.options.get(MilvusOption.SnapshotPartitionIds)
+      .map(_.split(",").map(_.trim).filter(_.nonEmpty).map(_.toLong).toSeq)
+      .getOrElse(Seq.empty[Long])
+
+    // Use first partition ID if available
+    partitionID = partitionIds.headOption.getOrElse(0L)
+
+    // Try to build schema from snapshot JSON if provided
+    val schemaJson = milvusOption.options.get(MilvusOption.SnapshotSchemaJson)
+    val snapshotSchema = schemaJson.flatMap { json =>
+      MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+        case Right(metadata) => Some(metadata.collection.schema)
+        case Left(_) => None
+      }
+    }
+
+    // Create a minimal MilvusCollectionInfo
+    // For snapshot mode, we use the passed-in sparkSchema for actual schema operations
+    milvusCollection = MilvusCollectionInfo(
+      dbName = milvusOption.databaseName,
+      collectionName = milvusOption.collectionName,
+      collectionID = collectionId,
+      schema = createMinimalCollectionSchema(snapshotSchema)
+    )
+
+    logInfo(s"Initialized from snapshot: collectionID=$collectionId, partitionID=$partitionID")
+  }
+
+  /**
+   * Create a minimal CollectionSchema for snapshot mode
+   * This is used when we have snapshot data but need a protobuf schema structure
+   */
+  private def createMinimalCollectionSchema(
+      snapshotSchema: Option[com.zilliz.spark.connector.read.CollectionSchema]
+  ): CollectionSchema = {
+    import io.milvus.grpc.schema.{CollectionSchema => ProtoCollectionSchema, FieldSchema}
+    import io.milvus.grpc.common.KeyValuePair
+
+    snapshotSchema match {
+      case Some(schema) =>
+        // Convert snapshot schema fields to protobuf FieldSchema
+        val protoFields = schema.fields.map { field =>
+          FieldSchema(
+            fieldID = field.getFieldIDAsLong,
+            name = field.name,
+            description = field.description.getOrElse(""),
+            dataType = io.milvus.grpc.schema.DataType.fromValue(field.dataType),
+            isPrimaryKey = field.isPrimaryKey.getOrElse(false),
+            isClusteringKey = field.isClusteringKey.getOrElse(false),
+            typeParams = field.typeParams.getOrElse(Seq.empty).map { tp =>
+              KeyValuePair(key = tp.key, value = tp.value)
+            }
+          )
+        }
+
+        ProtoCollectionSchema(
+          name = schema.name,
+          description = schema.description.getOrElse(""),
+          fields = protoFields
+        )
+
+      case None =>
+        // If no schema provided, create empty schema
+        // The actual schema will come from sparkSchema passed to the table
+        ProtoCollectionSchema(
+          name = milvusOption.collectionName,
+          description = "",
+          fields = Seq.empty
+        )
+    }
+  }
+
+  /**
+   * Initialize collection info from Milvus client (existing behavior)
+   */
+  private def initFromClient(): Unit = {
     val client = MilvusClient(milvusOption)
     try {
       milvusCollection = client
@@ -184,6 +312,14 @@ case class MilvusTable(
   override def name(): String = milvusOption.collectionName
 
   override def schema(): StructType = {
+    // In snapshot mode with provided sparkSchema, use it directly
+    // This avoids the need to parse milvusCollection.schema which may be incomplete
+    if (isSnapshotMode && sparkSchema.isDefined && sparkSchema.get.nonEmpty) {
+      logInfo(s"Using provided sparkSchema in snapshot mode: ${sparkSchema.get.fieldNames.mkString(", ")}")
+      return sparkSchema.get
+    }
+
+    // Client-based mode or snapshot mode without provided schema: compute from milvusCollection
     var fields = Seq[StructField]()
     var fieldName2ID = mutable.Map[String, Long]()
     milvusCollection.schema.fields.zipWithIndex.foreach { case (field, index) =>
@@ -210,7 +346,8 @@ case class MilvusTable(
         field.nullable
       )
     )
-    val maxFieldID = fieldName2ID.values.max
+    // Safely get maxFieldID, default to 100 if empty
+    val maxFieldID = if (fieldName2ID.values.nonEmpty) fieldName2ID.values.max else 100L
     if (milvusCollection.schema.enableDynamicField &&
       (fieldIDs.isEmpty || fieldIDs.contains((maxFieldID + 1).toString))) {
       fields = fields :+ StructField("$meta", StringType, true)
@@ -452,6 +589,12 @@ class MilvusScan(
   override def toBatch: Batch = this
 
   override def planInputPartitions(): Array[InputPartition] = {
+    // Check if snapshot manifests are provided (offline/snapshot mode)
+    val snapshotManifests = Option(options.get(MilvusOption.SnapshotManifests))
+    if (snapshotManifests.isDefined) {
+      return planInputPartitionsFromSnapshot(snapshotManifests.get)
+    }
+
     // Validate required parameters
     if (milvusOption.collectionName.isEmpty) {
       throw new IllegalArgumentException("collectionName cannot be empty")
@@ -546,6 +689,64 @@ class MilvusScan(
     logInfo(s"Created ${partitions.length} partitions for Storage V2 (Milvus 2.6+)")
     client.close()
     partitions
+  }
+
+  /**
+   * Plan input partitions from snapshot manifests (offline mode - no client connection)
+   * This enables reading Milvus data purely from snapshot metadata without any client calls.
+   */
+  private def planInputPartitionsFromSnapshot(manifestsJson: String): Array[InputPartition] = {
+    import com.zilliz.spark.connector.read.{MilvusSnapshotReader, StorageV2ManifestItem}
+
+    logInfo("Using snapshot mode for partition planning (no Milvus client connection)")
+
+    // Parse manifest list from JSON
+    val manifestList = MilvusSnapshotReader.deserializeManifestList(manifestsJson) match {
+      case Right(list) => list
+      case Left(e) =>
+        throw new Exception(s"Failed to parse snapshot manifests: ${e.getMessage}", e)
+    }
+
+    if (manifestList.isEmpty) {
+      logWarning("Snapshot manifest list is empty, returning no partitions")
+      return Array.empty[InputPartition]
+    }
+
+    // Get partition IDs from options (comma-separated)
+    val partitionIds = Option(options.get(MilvusOption.SnapshotPartitionIds))
+      .map(_.split(",").map(_.trim).filter(_.nonEmpty))
+      .getOrElse(Array.empty[String])
+
+    // Use first partition ID as default, or "0" if none provided
+    val defaultPartitionId = partitionIds.headOption.getOrElse("0")
+
+    // Get schema bytes from options (Base64 encoded)
+    val schemaBytes = Option(options.get(MilvusOption.SnapshotSchemaBytes))
+      .map(base64 => java.util.Base64.getDecoder.decode(base64))
+      .getOrElse {
+        logWarning("No schema bytes provided in snapshot mode, using empty schema")
+        Array.empty[Byte]
+      }
+
+    logInfo(s"Using schema bytes (${schemaBytes.length} bytes) for V2 partitions")
+
+    // Create V2 input partitions from snapshot manifests
+    val v2Partitions = manifestList.map { item =>
+      MilvusStorageV2InputPartition(
+        item.manifest,           // The manifest JSON string
+        schemaBytes,             // Protobuf CollectionSchema bytes from snapshot
+        defaultPartitionId,      // Partition name/ID
+        milvusOption,
+        vectorSearchConfig.map(_.topK),
+        vectorSearchConfig.map(_.queryVector),
+        vectorSearchConfig.map(_.metricType),
+        vectorSearchConfig.map(_.vectorColumn),
+        item.segmentID           // Segment ID from snapshot
+      ): InputPartition
+    }
+
+    logInfo(s"Created ${v2Partitions.size} V2 partitions from snapshot manifests")
+    v2Partitions.toArray
   }
 
   override def createReaderFactory(): PartitionReaderFactory = {

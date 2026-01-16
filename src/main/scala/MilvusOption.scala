@@ -116,6 +116,14 @@ object MilvusOption {
   // Writer config
   val WriterCustomPath = "milvus.writer.customPath"
 
+  // Snapshot-based reading options (for offline/client-free mode)
+  val SnapshotMode = "milvus.snapshot.mode"                 // "true" to enable snapshot mode
+  val SnapshotManifests = "milvus.snapshot.manifests"       // JSON array of StorageV2ManifestItem
+  val SnapshotCollectionId = "milvus.snapshot.collection.id"
+  val SnapshotPartitionIds = "milvus.snapshot.partition.ids"
+  val SnapshotSchemaJson = "milvus.snapshot.schema.json"    // Optional: raw schema JSON for building MilvusCollectionInfo
+  val SnapshotSchemaBytes = "milvus.snapshot.schema.bytes"  // Base64 encoded protobuf CollectionSchema bytes
+
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {
     val uri = options.getOrDefault(MilvusUri, "")

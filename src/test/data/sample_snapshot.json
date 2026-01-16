@@ -1,0 +1,94 @@
+{
+  "snapshot-info": {
+    "name": "backfill_snapshot",
+    "id": 462324574599774209,
+    "description": "add field backfill snapshot",
+    "collection_id": 462324574592960519,
+    "partition_ids": [
+      462324574592960520
+    ],
+    "create_ts": 462324677975474190
+  },
+  "collection": {
+    "schema": {
+      "name": "backfilltestcollection",
+      "description": "Test collection for MilvusBackfill",
+      "fields": [
+        {
+          "fieldID": 100,
+          "name": "id",
+          "is_primary_key": true,
+          "data_type": 5
+        },
+        {
+          "fieldID": 101,
+          "name": "int64",
+          "data_type": 5,
+          "is_clustering_key": true
+        },
+        {
+          "fieldID": 102,
+          "name": "float",
+          "data_type": 10
+        },
+        {
+          "fieldID": 103,
+          "name": "varchar",
+          "data_type": 21,
+          "type_params": [
+            {
+              "key": "max_length",
+              "value": "1024"
+            }
+          ]
+        },
+        {
+          "fieldID": 104,
+          "name": "vector",
+          "data_type": 101,
+          "type_params": [
+            {
+              "key": "dim",
+              "value": "128"
+            }
+          ]
+        },
+        {
+          "name": "RowID",
+          "description": "row id",
+          "data_type": 5
+        },
+        {
+          "fieldID": 1,
+          "name": "Timestamp",
+          "description": "timestamp",
+          "data_type": 5
+        }
+      ],
+      "properties": [
+        {
+          "key": "timezone",
+          "value": "UTC"
+        }
+      ]
+    },
+    "num_partitions": 1,
+    "num_shards": 1,
+    "properties": [
+      {
+        "key": "timezone",
+        "value": "UTC"
+      }
+    ]
+  },
+  "indexes": [],
+  "manifest-list": [
+    "snapshots/462324574592960519/manifests/data-file-manifest-95c6ab19-749e-4088-990b-b4613ff2df2f.avro"
+  ],
+  "storagev2-manifest-list": [
+    {
+      "segmentID": 462416429317820786,
+      "manifest": "{\"ver\":2,\"base_path\":\"a-bucket/files/insert_log/462416429317620777/462416429317620778/462416429317820786\"}"
+    }
+  ]
+}
