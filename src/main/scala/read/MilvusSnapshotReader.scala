@@ -1,9 +1,81 @@
 package com.zilliz.spark.connector.read
 
-import com.fasterxml.jackson.annotation.JsonProperty
-import com.fasterxml.jackson.databind.{DeserializationFeature, ObjectMapper}
+import com.fasterxml.jackson.annotation.{JsonAlias, JsonProperty}
+import com.fasterxml.jackson.databind.{DeserializationFeature, JsonNode, ObjectMapper}
+import com.fasterxml.jackson.databind.cfg.CoercionAction
+import com.fasterxml.jackson.databind.cfg.CoercionInputShape
 import com.fasterxml.jackson.module.scala.{DefaultScalaModule, ScalaObjectMapper}
 import org.apache.spark.sql.types._
+
+/**
+ * Helper object for converting JSON values that may be either numeric or string to Long/Int
+ * Milvus snapshot JSON format may serialize numbers as strings in some versions
+ */
+private[read] object JsonTypeConverter {
+  def toLong(value: Any): Long = value match {
+    case l: Long => l
+    case i: Int => i.toLong
+    case n: Number => n.longValue()
+    case s: String => s.toLong
+    case node: JsonNode if node.isNumber => node.asLong()
+    case node: JsonNode if node.isTextual => node.asText().toLong
+    case _ => 0L
+  }
+
+  def toInt(value: Any): Int = value match {
+    case i: Int => i
+    case l: Long => l.toInt
+    case n: Number => n.intValue()
+    case s: String => s.toInt
+    case node: JsonNode if node.isNumber => node.asInt()
+    case node: JsonNode if node.isTextual => node.asText().toInt
+    case _ => 0
+  }
+
+  def toOptionalInt(value: Option[Any]): Option[Int] = value.map {
+    case i: Int => i
+    case l: Long => l.toInt
+    case n: Number => n.intValue()
+    case s: String => s.toInt
+    case node: JsonNode if node.isNumber => node.asInt()
+    case node: JsonNode if node.isTextual => node.asText().toInt
+    case _ => 0
+  }
+
+  def toLongSeq(value: Any): Seq[Long] = value match {
+    case seq: Seq[_] => seq.map(toLong)
+    case node: JsonNode if node.isArray =>
+      import scala.jdk.CollectionConverters._
+      node.elements().asScala.map(n => toLong(n)).toSeq
+    case _ => Seq.empty
+  }
+
+  /**
+   * Convert a JsonNode or Any value to a data type code.
+   * Handles both numeric values (e.g., 5) and string type names (e.g., "Int64")
+   */
+  def toDataTypeCode(value: Any): Int = value match {
+    case i: Int => i
+    case l: Long => l.toInt
+    case n: Number => n.intValue()
+    case s: String =>
+      // Try parsing as number first, then as type name
+      try {
+        s.toInt
+      } catch {
+        case _: NumberFormatException => Field.dataTypeNameToCode(s)
+      }
+    case node: JsonNode if node.isNumber => node.asInt()
+    case node: JsonNode if node.isTextual =>
+      val text = node.asText()
+      try {
+        text.toInt
+      } catch {
+        case _: NumberFormatException => Field.dataTypeNameToCode(text)
+      }
+    case _ => 0
+  }
+}
 
 /**
  * Type parameter for Milvus field
@@ -17,25 +89,70 @@ case class TypeParam(
  * Field schema definition
  */
 case class Field(
-    @JsonProperty("fieldID") fieldID: Option[Any],  // Can be Int or Long from JSON
+    @JsonProperty("fieldID") fieldID: Option[JsonNode] = None,  // Can be Int or Long from JSON
     @JsonProperty("name") name: String,
-    @JsonProperty("description") description: Option[String],
-    @JsonProperty("data_type") dataType: Int,
-    @JsonProperty("is_primary_key") isPrimaryKey: Option[Boolean],
-    @JsonProperty("is_clustering_key") isClusteringKey: Option[Boolean],
-    @JsonProperty("type_params") typeParams: Option[Seq[TypeParam]]
+    @JsonProperty("description") description: Option[String] = None,
+    @JsonProperty("data_type") rawDataType: Option[JsonNode] = None,  // Can be Int or String (e.g., 5 or "Int64")
+    @JsonProperty("is_primary_key") isPrimaryKey: Option[Boolean] = None,
+    @JsonProperty("is_clustering_key") isClusteringKey: Option[Boolean] = None,
+    @JsonProperty("type_params") typeParams: Option[Seq[TypeParam]] = None
 ) {
+  /**
+   * Get the data type as Int, handling both numeric and string formats
+   * String format examples: "Bool", "Int8", "Int16", "Int32", "Int64", "Float", "Double",
+   *                         "String", "VarChar", "JSON", "Array", "FloatVector", etc.
+   */
+  def dataType: Int = rawDataType.map(JsonTypeConverter.toDataTypeCode).getOrElse(0)
+
   def getTypeParam(key: String): Option[String] = {
     typeParams.flatMap(_.find(_.key == key).map(_.value))
   }
 
   def getFieldIDAsLong: Long = {
     fieldID match {
-      case Some(l: Long) => l
-      case Some(i: Int) => i.toLong
-      case Some(n: Number) => n.longValue()
+      case Some(node) => JsonTypeConverter.toLong(node)
       case _ => 0L
     }
+  }
+}
+
+object Field {
+  /**
+   * Mapping from data type name strings to numeric codes
+   * Based on Milvus DataType enum values
+   */
+  private val dataTypeNameToCodeMap: Map[String, Int] = Map(
+    "None" -> 0,
+    "Bool" -> 1,
+    "Int8" -> 2,
+    "Int16" -> 3,
+    "Int32" -> 4,
+    "Int64" -> 5,
+    "Float" -> 10,
+    "Double" -> 11,
+    "String" -> 20,
+    "VarChar" -> 21,
+    "JSON" -> 22,
+    "Array" -> 23,
+    // Array element types (23-30 based on element type)
+    "ArrayBool" -> 23,
+    "ArrayInt8" -> 24,
+    "ArrayInt16" -> 25,
+    "ArrayInt32" -> 26,
+    "ArrayInt64" -> 27,
+    "ArrayFloat" -> 28,
+    "ArrayDouble" -> 29,
+    "ArrayVarChar" -> 30,
+    // Vector types
+    "BinaryVector" -> 100,
+    "FloatVector" -> 101,
+    "Float16Vector" -> 102,
+    "BFloat16Vector" -> 103,
+    "SparseFloatVector" -> 104
+  )
+
+  def dataTypeNameToCode(name: String): Int = {
+    dataTypeNameToCodeMap.getOrElse(name, 0)
   }
 }
 
@@ -52,9 +169,9 @@ case class Property(
  */
 case class CollectionSchema(
     @JsonProperty("name") name: String,
-    @JsonProperty("description") description: Option[String],
+    @JsonProperty("description") description: Option[String] = None,
     @JsonProperty("fields") fields: Seq[Field],
-    @JsonProperty("properties") properties: Option[Seq[Property]]
+    @JsonProperty("properties") properties: Option[Seq[Property]] = None
 ) {
   def getFieldByName(name: String): Option[Field] = {
     fields.find(_.name == name)
@@ -66,23 +183,34 @@ case class CollectionSchema(
  */
 case class Collection(
     @JsonProperty("schema") schema: CollectionSchema,
-    @JsonProperty("num_partitions") numPartitions: Option[Int],
-    @JsonProperty("num_shards") numShards: Option[Int],
-    @JsonProperty("properties") properties: Option[Seq[Property]],
-    @JsonProperty("consistency_level") consistencyLevel: Option[Int]
-)
+    @JsonProperty("num_partitions") rawNumPartitions: Option[JsonNode] = None,  // Can be Int or String
+    @JsonProperty("num_shards") rawNumShards: Option[JsonNode] = None,  // Can be Int or String
+    @JsonProperty("properties") properties: Option[Seq[Property]] = None,
+    @JsonProperty("consistency_level") rawConsistencyLevel: Option[JsonNode] = None  // Can be Int or String
+) {
+  def numPartitions: Option[Int] = rawNumPartitions.map(n => JsonTypeConverter.toInt(n))
+  def numShards: Option[Int] = rawNumShards.map(n => JsonTypeConverter.toInt(n))
+  def consistencyLevel: Option[Int] = rawConsistencyLevel.map(n => JsonTypeConverter.toInt(n))
+}
 
 /**
  * Snapshot information
  */
 case class SnapshotInfo(
     @JsonProperty("name") name: String,
-    @JsonProperty("id") id: Long,
-    @JsonProperty("description") description: Option[String],
-    @JsonProperty("collection_id") collectionId: Long,
-    @JsonProperty("partition_ids") partitionIds: Seq[Long],
-    @JsonProperty("create_ts") createTs: Long
-)
+    @JsonProperty("id") rawId: Option[JsonNode] = None,  // Can be Long or String from JSON
+    @JsonProperty("description") description: Option[String] = None,
+    @JsonProperty("collection_id") rawCollectionId: Option[JsonNode] = None,  // Can be Long or String from JSON
+    @JsonProperty("partition_ids") rawPartitionIds: Option[JsonNode] = None,  // Can be Seq[Long] or Seq[String] from JSON
+    @JsonProperty("create_ts") rawCreateTs: Option[JsonNode] = None,  // Can be Long or String from JSON
+    @JsonProperty("state") state: Option[String] = None,  // New field: snapshot state
+    @JsonProperty("pending_start_time") pendingStartTime: Option[JsonNode] = None  // New field
+) {
+  def id: Long = rawId.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def collectionId: Long = rawCollectionId.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def partitionIds: Seq[Long] = rawPartitionIds.map(JsonTypeConverter.toLongSeq).getOrElse(Seq.empty)
+  def createTs: Long = rawCreateTs.map(JsonTypeConverter.toLong).getOrElse(0L)
+}
 
 /**
  * Parsed manifest content from Storage V2
@@ -96,9 +224,11 @@ case class ManifestContent(
  * Storage V2 manifest item
  */
 case class StorageV2ManifestItem(
-    @JsonProperty("segmentID") segmentID: Long,
-    @JsonProperty("manifest") manifest: String
+    @JsonProperty("segmentID") rawSegmentID: Option[JsonNode] = None,  // Can be Long or String from JSON
+    @JsonProperty("manifest") manifest: String = ""
 ) {
+  def segmentID: Long = rawSegmentID.map(JsonTypeConverter.toLong).getOrElse(0L)
+
   /**
    * Parse the manifest JSON string to extract structured content
    * @return Either containing parsed ManifestContent or error
@@ -116,11 +246,12 @@ case class StorageV2ManifestItem(
  * Complete snapshot metadata
  */
 case class SnapshotMetadata(
-    @JsonProperty("snapshot-info") snapshotInfo: SnapshotInfo,
+    @JsonProperty("snapshot_info") @JsonAlias(Array("snapshot-info")) snapshotInfo: SnapshotInfo,
     @JsonProperty("collection") collection: Collection,
-    @JsonProperty("indexes") indexes: Seq[Any],
-    @JsonProperty("manifest-list") manifestList: Seq[String],
-    @JsonProperty("storagev2-manifest-list") storageV2ManifestList: Option[Seq[StorageV2ManifestItem]]
+    @JsonProperty("format_version") formatVersion: Option[Int] = None,
+    @JsonProperty("indexes") indexes: Seq[Any] = Seq.empty,
+    @JsonProperty("manifest_list") @JsonAlias(Array("manifest-list")) manifestList: Seq[String] = Seq.empty,
+    @JsonProperty("storagev2_manifest_list") @JsonAlias(Array("storagev2-manifest-list")) storageV2ManifestList: Option[Seq[StorageV2ManifestItem]] = None
 )
 
 /**
@@ -132,6 +263,12 @@ object MilvusSnapshotReader {
     val m = new ObjectMapper() with ScalaObjectMapper
     m.registerModule(DefaultScalaModule)
     m.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+    m.configure(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES, false)
+    // Allow coercion from String to numeric types (e.g., "5" -> 5, "123456789" -> 123456789L)
+    m.coercionConfigFor(classOf[java.lang.Integer]).setCoercion(CoercionInputShape.String, CoercionAction.TryConvert)
+    m.coercionConfigFor(classOf[java.lang.Long]).setCoercion(CoercionInputShape.String, CoercionAction.TryConvert)
+    m.coercionConfigFor(classOf[Int]).setCoercion(CoercionInputShape.String, CoercionAction.TryConvert)
+    m.coercionConfigFor(classOf[Long]).setCoercion(CoercionInputShape.String, CoercionAction.TryConvert)
     m
   }
 

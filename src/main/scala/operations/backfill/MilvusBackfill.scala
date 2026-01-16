@@ -262,7 +262,7 @@ object MilvusBackfill {
                   }
 
                   // Create new StorageV2ManifestItem with transformed manifest content
-                  Some(StorageV2ManifestItem(item.segmentID, transformedManifest))
+                  Some(StorageV2ManifestItem(item.rawSegmentID, transformedManifest))
                 } catch {
                   case e: Exception =>
                     logger.error(s"Failed to read manifest from $manifestPath: ${e.getMessage}")

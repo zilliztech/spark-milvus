@@ -341,4 +341,112 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     deserializedList.head.segmentID shouldBe originalManifestList.head.segmentID
     deserializedList.head.manifest shouldBe originalManifestList.head.manifest
   }
+
+  test("Parse data_type as string format (e.g., 'Int64' instead of 5)") {
+    val jsonWithStringDataType = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": "Int64",
+              "is_primary_key": true
+            },
+            {
+              "fieldID": 101,
+              "name": "score",
+              "data_type": "Float"
+            },
+            {
+              "fieldID": 102,
+              "name": "name",
+              "data_type": "VarChar",
+              "type_params": [{"key": "max_length", "value": "256"}]
+            },
+            {
+              "fieldID": 103,
+              "name": "embedding",
+              "data_type": "FloatVector",
+              "type_params": [{"key": "dim", "value": "128"}]
+            },
+            {
+              "fieldID": 104,
+              "name": "flag",
+              "data_type": "Bool"
+            }
+          ]
+        }
+      },
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val result = MilvusSnapshotReader.parseSnapshotMetadata(jsonWithStringDataType)
+
+    result shouldBe a[Right[_, _]]
+    val metadata = result.toOption.get
+    val schema = metadata.collection.schema
+
+    // Verify string data types are correctly converted to numeric codes
+    schema.getFieldByName("id").get.dataType shouldBe 5       // Int64
+    schema.getFieldByName("score").get.dataType shouldBe 10   // Float
+    schema.getFieldByName("name").get.dataType shouldBe 21    // VarChar
+    schema.getFieldByName("embedding").get.dataType shouldBe 101  // FloatVector
+    schema.getFieldByName("flag").get.dataType shouldBe 1     // Bool
+  }
+
+  test("Parse data_type with mixed formats (some int, some string)") {
+    val jsonWithMixedDataType = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": 5,
+              "is_primary_key": true
+            },
+            {
+              "fieldID": 101,
+              "name": "score",
+              "data_type": "Float"
+            }
+          ]
+        }
+      },
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val result = MilvusSnapshotReader.parseSnapshotMetadata(jsonWithMixedDataType)
+
+    result shouldBe a[Right[_, _]]
+    val metadata = result.toOption.get
+    val schema = metadata.collection.schema
+
+    // Verify both formats work correctly
+    schema.getFieldByName("id").get.dataType shouldBe 5       // Int format
+    schema.getFieldByName("score").get.dataType shouldBe 10   // String format
+  }
 }

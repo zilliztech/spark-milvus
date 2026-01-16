@@ -87,13 +87,13 @@ class MilvusBackfillDemo:
             token=self.milvus_token
         )
 
-        # # Drop collection if exists
-        # if utility.has_collection(self.collection_name):
-        #     print(f"Dropping existing collection: {self.collection_name}")
-        #     utility.drop_collection(self.collection_name)
+        # Drop collection if exists
+        if utility.has_collection(self.collection_name):
+            print(f"Dropping existing collection: {self.collection_name}")
+            utility.drop_collection(self.collection_name)
 
-        # print(f"Creating collection: {self.collection_name}")
-        # self._create_collection()
+        print(f"Creating collection: {self.collection_name}")
+        self._create_collection()
 
     def _create_collection(self):
         """Create test collection with schema"""
@@ -172,28 +172,44 @@ class MilvusBackfillDemo:
         print(f"Total records with NULL: {expected_null_records:,}")
 
         # Create DataFrame with backfill data (skip middle range)
-        data = []
+        # Use pandas/pyarrow to write parquet directly (avoid Spark classloader issues)
+        import pandas as pd
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        data = {
+            "pk": [],
+            "new_field1": [],
+            "new_field2": []
+        }
 
         # First 30%
         for i in range(first_range_end):
-            data.append((i, f"api_new_value_{i}", i * 2))
+            data["pk"].append(i)
+            data["new_field1"].append(f"api_new_value_{i}")
+            data["new_field2"].append(i * 2)
 
         # Last 30%
         for i in range(last_range_start, self.total_records):
-            data.append((i, f"api_new_value_{i}", i * 2))
+            data["pk"].append(i)
+            data["new_field1"].append(f"api_new_value_{i}")
+            data["new_field2"].append(i * 2)
 
-        df = self.spark.createDataFrame(data, ["pk", "new_field1", "new_field2"])
-
-        # Save to Parquet
+        # Create pandas DataFrame and save to parquet using pyarrow
+        pdf = pd.DataFrame(data)
         temp_dir = tempfile.gettempdir()
         parquet_path = os.path.join(temp_dir, f"new_field_data_{int(time.time() * 1000)}.parquet")
-        df.write.mode("overwrite").parquet(parquet_path)
+
+        # Convert to pyarrow Table and write as parquet (no compression to avoid snappy dependency)
+        table = pa.Table.from_pandas(pdf)
+        pq.write_table(table, parquet_path, compression='none')
 
         print(f"\n✓ Backfill data saved to: {parquet_path}")
         print(f"  Columns: pk, new_field1, new_field2")
-        print(f"  Rows: {df.count():,}")
+        print(f"  Rows: {len(pdf):,}")
 
-        df.show(10, truncate=False)
+        # Show first 10 rows using pandas
+        print(pdf.head(10).to_string(index=False))
 
         return parquet_path, records_with_data, expected_null_records
 
@@ -339,15 +355,15 @@ class MilvusBackfillDemo:
             self.setup_spark()
             self.setup_milvus()
 
-            # # Prepare data
-            # self.insert_test_data()
+            # Prepare data
+            self.insert_test_data()
             parquet_path, records_with_data, expected_null = self.create_backfill_data()
 
             # Create snapshot
-            # snapshot_path = self.create_snapshot()
+            snapshot_path = self.create_snapshot()
 
             # Execute backfill
-            success = self.run_backfill(parquet_path, "s3a://a-bucket/snapshots/462437766819218552/metadata/00001-f087ea00-f3f3-48a7-b347-d395ee36e406.json")
+            success = self.run_backfill(parquet_path, snapshot_path)
 
             if success:
                 print("\n" + "=" * 70)

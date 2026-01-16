@@ -18,7 +18,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 # Check if JAR exists
-JAR_FILE="$PROJECT_DIR/target/scala-2.13/spark-connector-assembly-0.2.1-SNAPSHOT.jar"
+JAR_FILE="$PROJECT_DIR/target/scala-2.13/spark-connector-assembly-snapshot_reader-amd64-SNAPSHOT.jar"
 
 if [ ! -f "$JAR_FILE" ]; then
     echo "✗ JAR file not found: $JAR_FILE"
@@ -85,32 +85,31 @@ echo "SPARK_HOME: $SPARK_HOME"
 echo "PYTHONPATH configured for Scala 2.13"
 echo ""
 
-# Set LD_PRELOAD to avoid TLS block errors with native libraries
-# Use system libstdc++ instead of conda's older version
+# Native library paths - DO NOT set LD_PRELOAD in shell env, only pass to Spark
 NATIVE_LIB="$PROJECT_DIR/src/main/resources/native/libmilvus-storage.so"
+NATIVE_LIB_DIR="$PROJECT_DIR/src/main/resources/native"
 
-# Force system libstdc++ to be loaded before conda's version
-# This must be at the very beginning of LD_LIBRARY_PATH
-export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
-export LD_PRELOAD="$NATIVE_LIB"
+# Set LD_LIBRARY_PATH for the driver (but NOT LD_PRELOAD which causes StackOverflow)
+export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:$NATIVE_LIB_DIR:$LD_LIBRARY_PATH"
 
 echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
-echo "LD_PRELOAD: $LD_PRELOAD"
+echo "NATIVE_LIB: $NATIVE_LIB"
 echo ""
 
-# Run with spark-submit (use full path)
-# Set LD_PRELOAD and LD_LIBRARY_PATH for both driver and executor
-# Copy log4j2 config to Spark's conf directory for proper loading
+# Run with spark-submit
 LOG4J2_CONFIG="$PROJECT_DIR/src/test/resources/log4j2.properties"
 
 "$SPARK_SUBMIT" \
   --master local[*] \
   --jars "$JAR_FILE" \
-  --packages "org.apache.hadoop:hadoop-aws:3.4.1" \
+  --packages "org.apache.hadoop:hadoop-aws:3.3.4" \
   --files "$LOG4J2_CONFIG" \
-  --conf "spark.driver.extraJavaOptions=-Dlog4j2.configurationFile=file:$LOG4J2_CONFIG" \
-  --conf "spark.executorEnv.LD_PRELOAD=$NATIVE_LIB" \
-  --conf "spark.executorEnv.LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu" \
+  --conf "spark.driver.extraJavaOptions=-Dlog4j2.configurationFile=file:$LOG4J2_CONFIG -Djava.library.path=$NATIVE_LIB_DIR" \
+  --conf "spark.driver.extraLibraryPath=$NATIVE_LIB_DIR" \
+  --conf "spark.executor.extraLibraryPath=$NATIVE_LIB_DIR" \
+  --conf "spark.executorEnv.LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:$NATIVE_LIB_DIR" \
+  --conf "spark.driver.userClassPathFirst=true" \
+  --conf "spark.executor.userClassPathFirst=true" \
   "$SCRIPT_DIR/backfill_demo.py"
 
 exit_code=$?
