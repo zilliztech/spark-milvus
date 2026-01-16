@@ -92,8 +92,9 @@ case class BackfillConfig(
    */
   def getS3WriteOptions(collectionId: Long, partitionId: Long, segmentId: Long): Map[String, String] = {
     // TODO: this should be changed to field id based on the collection schema once Milvus snapshot feature is ready
+    // Note: bucket name is configured separately via fs.bucket_name, so outputPath should NOT include bucket
     val outputPath = customOutputPath.getOrElse(
-      s"$s3BucketName/$s3RootPath/insert_log/$collectionId/$partitionId/$segmentId/new_field"
+      s"$s3RootPath/insert_log/$collectionId/$partitionId/$segmentId/new_field"
     )
 
     Map(

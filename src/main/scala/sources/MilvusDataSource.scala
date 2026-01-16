@@ -732,8 +732,24 @@ class MilvusScan(
 
     // Create V2 input partitions from snapshot manifests
     val v2Partitions = manifestList.map { item =>
+      // Extract segmentID from manifest path if item.segmentID is 0
+      // Path format: files/insert_log/{collectionID}/{partitionID}/{segmentID}
+      val segmentID = if (item.segmentID != 0L) {
+        item.segmentID
+      } else {
+        // Try to extract from manifest path
+        val pathParts = item.manifest.split("/")
+        if (pathParts.length >= 1) {
+          try {
+            pathParts.last.toLong
+          } catch {
+            case _: NumberFormatException => 0L
+          }
+        } else 0L
+      }
+      logInfo(s"Creating partition with manifestPath=${item.manifest}, segmentID=$segmentID")
       MilvusStorageV2InputPartition(
-        item.manifest,           // The manifest JSON string
+        item.manifest,           // The manifest JSON string (basePath)
         schemaBytes,             // Protobuf CollectionSchema bytes from snapshot
         defaultPartitionId,      // Partition name/ID
         milvusOption,
@@ -741,7 +757,7 @@ class MilvusScan(
         vectorSearchConfig.map(_.queryVector),
         vectorSearchConfig.map(_.metricType),
         vectorSearchConfig.map(_.vectorColumn),
-        item.segmentID           // Segment ID from snapshot
+        segmentID                // Segment ID extracted from path or from item
       ): InputPartition
     }
 

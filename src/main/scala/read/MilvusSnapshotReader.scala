@@ -225,9 +225,16 @@ case class ManifestContent(
  */
 case class StorageV2ManifestItem(
     @JsonProperty("segmentID") rawSegmentID: Option[JsonNode] = None,  // Can be Long or String from JSON
-    @JsonProperty("manifest") manifest: String = ""
+    @JsonProperty("manifest") manifest: String = "",
+    @JsonProperty("segmentIDLong") rawSegmentIDLong: Option[JsonNode] = None  // For serialization (using JsonNode to handle Int/Long)
 ) {
-  def segmentID: Long = rawSegmentID.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def segmentID: Long = {
+    // First try rawSegmentIDLong (used when creating new items for serialization)
+    // Then fall back to rawSegmentID (from original JSON)
+    rawSegmentIDLong.map(JsonTypeConverter.toLong)
+      .orElse(rawSegmentID.map(JsonTypeConverter.toLong))
+      .getOrElse(0L)
+  }
 
   /**
    * Parse the manifest JSON string to extract structured content
@@ -239,6 +246,17 @@ case class StorageV2ManifestItem(
     } catch {
       case e: Exception => Left(e)
     }
+  }
+}
+
+object StorageV2ManifestItem {
+  import com.fasterxml.jackson.databind.node.LongNode
+
+  /**
+   * Create a StorageV2ManifestItem with a Long segmentID (for serialization)
+   */
+  def apply(segmentID: Long, manifest: String): StorageV2ManifestItem = {
+    new StorageV2ManifestItem(None, manifest, Some(LongNode.valueOf(segmentID)))
   }
 }
 

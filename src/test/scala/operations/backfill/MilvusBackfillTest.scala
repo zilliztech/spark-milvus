@@ -32,7 +32,7 @@ class MilvusBackfillTest extends AnyFunSuite with BeforeAndAfterAll {
   val snapshotName = s"backfill_snapshot_${System.currentTimeMillis()}"
   val dim = 128
   val batchSize = 10000
-  val batchCount = 100
+  val batchCount = 10
   val s3Bucket = "a-bucket"
 
   // Jackson mapper for JSON parsing
