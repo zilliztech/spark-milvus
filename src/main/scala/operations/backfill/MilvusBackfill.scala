@@ -208,8 +208,6 @@ object MilvusBackfill {
 
       // If snapshot metadata is available, use snapshot-based reading (no client calls)
       snapshotMetadata.foreach { metadata =>
-        logger.info("Using snapshot-based reading mode (no Milvus client connection for data read)")
-
         // Enable snapshot mode flag
         options = options + (MilvusOption.SnapshotMode -> "true")
 
@@ -223,63 +221,25 @@ object MilvusBackfill {
         val schemaBytes = MilvusSnapshotReader.toProtobufSchemaBytes(metadata.collection.schema)
         val schemaBytesBase64 = java.util.Base64.getEncoder.encodeToString(schemaBytes)
         options = options + (MilvusOption.SnapshotSchemaBytes -> schemaBytesBase64)
-        logger.info(s"Passed schema bytes (${schemaBytes.length} bytes) to datasource")
 
-        // Read actual manifest files and pass to datasource
         metadata.storageV2ManifestList.foreach { manifestList =>
-          // For each segment, read the actual manifest file from base_path
-          val manifestsWithContent = manifestList.flatMap { item =>
+          val manifestsWithBasePath = manifestList.flatMap { item =>
             // Parse the simplified manifest to get base_path
             val simplifiedManifest = MilvusSnapshotReader.parseManifestContent(item.manifest)
             simplifiedManifest match {
               case Right(content) =>
-                // Read the actual manifest file from base_path/manifest-{ver}
-                val manifestPath = s"s3a://${content.basePath}/manifest-${content.ver}"
-                logger.info(s"Reading manifest from: $manifestPath")
-                try {
-                  val manifestContent = spark.read.text(manifestPath)
-                    .collect()
-                    .map(_.getString(0))
-                    .mkString("\n")
-                  logger.info(s"Read manifest content (${manifestContent.length} chars) for segment ${item.segmentID}")
-
-                  // Transform manifest columns from field IDs to field names
-                  // Storage V2 manifest uses field IDs ("100", "101"), but FFI reader expects field names
-                  // Also strip bucket/rootPath prefix from paths since FFI reader will prepend them
-                  val transformedManifest = MilvusSnapshotReader.transformManifestColumnsToNames(
-                    manifestContent,
-                    metadata.collection.schema,
-                    bucket = Some(config.s3BucketName),
-                    rootPath = Some(config.s3RootPath)
-                  ) match {
-                    case Right(transformed) =>
-                      logger.info(s"Transformed manifest for segment ${item.segmentID}")
-                      logger.info(s"Transformed manifest: ${transformed.take(500)}...")
-                      transformed
-                    case Left(e) =>
-                      logger.warn(s"Failed to transform manifest, using original: ${e.getMessage}")
-                      manifestContent
-                  }
-
-                  // Create new StorageV2ManifestItem with transformed manifest content
-                  Some(StorageV2ManifestItem(item.rawSegmentID, transformedManifest))
-                } catch {
-                  case e: Exception =>
-                    logger.error(s"Failed to read manifest from $manifestPath: ${e.getMessage}")
-                    None
-                }
+                Some(StorageV2ManifestItem(item.segmentID, content.basePath))
               case Left(e) =>
-                logger.error(s"Failed to parse simplified manifest: ${e.getMessage}")
+                logger.error(s"Failed to parse simplified manifest for segment ${item.segmentID}: ${e.getMessage}")
                 None
             }
           }
 
-          if (manifestsWithContent.nonEmpty) {
-            val manifestJson = MilvusSnapshotReader.serializeManifestList(manifestsWithContent)
+          if (manifestsWithBasePath.nonEmpty) {
+            val manifestJson = MilvusSnapshotReader.serializeManifestList(manifestsWithBasePath)
             options = options + (MilvusOption.SnapshotManifests -> manifestJson)
-            logger.info(s"Passed ${manifestsWithContent.size} segment manifests with full content to datasource")
           } else {
-            logger.warn("No valid manifests found after reading manifest files")
+            logger.warn("No valid manifests found in snapshot")
           }
         }
       }
@@ -424,8 +384,6 @@ object MilvusBackfill {
       val segmentToPartitionMap = segments.map { seg =>
         seg.segmentID -> seg.partitionID
       }.toMap
-
-      logger.info(s"Retrieved metadata for ${segments.length} segments across ${segmentToPartitionMap.values.toSet.size} partition(s)")
 
       Right((collectionID, segmentToPartitionMap))
 
@@ -627,7 +585,6 @@ object MilvusBackfill {
     try {
       // Check if it's an S3 path
       if (snapshotPath.startsWith("s3://") || snapshotPath.startsWith("s3a://")) {
-        logger.info(s"Reading snapshot from S3: $snapshotPath")
 
         // Construct full S3 path (ensure s3a:// scheme for Hadoop)
         val s3Path = if (snapshotPath.startsWith("s3://")) {
@@ -635,7 +592,6 @@ object MilvusBackfill {
         } else {
           snapshotPath
         }
-        logger.info(s"S3 path after normalization: $s3Path")
 
         // Configure S3 settings in Spark's Hadoop Configuration
         val hadoopConf = spark.sparkContext.hadoopConfiguration
@@ -645,19 +601,14 @@ object MilvusBackfill {
         hadoopConf.set("fs.s3a.path.style.access", "true")
         hadoopConf.set("fs.s3a.connection.ssl.enabled", if (config.s3UseSSL) "true" else "false")
 
-        logger.info(s"Hadoop S3 config: endpoint=${config.s3Endpoint}, bucket=a-bucket, useSSL=${config.s3UseSSL}")
-
         // Use Spark's DataFrame API to read the file (avoids Hadoop version issues)
-        logger.info(s"Reading file using Spark DataFrame API...")
         val df = spark.read.text(s3Path)
         val json = df.collect().map(_.getString(0)).mkString("\n")
 
-        logger.info(s"Successfully read snapshot JSON from S3 (${json.length} chars)")
         Right(json)
 
       } else {
         // Local file path, read directly
-        logger.info(s"Reading snapshot from local file: $snapshotPath")
         val source = scala.io.Source.fromFile(snapshotPath)
         try {
           val json = source.mkString
