@@ -163,8 +163,6 @@ lazy val root = (project in file("."))
       awsSdkS3,
       awsSdkS3Transfer,
       awsSdkCore,
-      awsSdkS3V1,
-      awsSdkDynamoDB,
       jacksonScala,
       jacksonDatabind,
       arrowFormat,
@@ -225,17 +223,8 @@ assembly / assemblyMergeStrategy := {
   // Handle hadoop package-info conflicts
   case PathList("org", "apache", "hadoop", xs @ _*) if xs.last == "package-info.class" =>
     MergeStrategy.first
-  // Handle AWS SDK V2 VersionInfo conflicts
+  // Handle AWS SDK VersionInfo conflicts
   case PathList("software", "amazon", "awssdk", xs @ _*) if xs.last == "VersionInfo.class" =>
-    MergeStrategy.first
-  // Handle AWS SDK V1 class conflicts (between aws-java-sdk-bundle and aws-java-sdk-core)
-  case PathList("com", "amazonaws", xs @ _*) if xs.last.endsWith(".class") =>
-    MergeStrategy.first
-  // Handle AWS SDK V1 properties and config files
-  case PathList("com", "amazonaws", xs @ _*) =>
-    MergeStrategy.first
-  // Handle AWS SDK handler chain configs
-  case x if x.contains("awssdk") && x.endsWith(".handler") =>
     MergeStrategy.first
   // Default case
   case x =>

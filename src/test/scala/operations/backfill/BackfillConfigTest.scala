@@ -18,8 +18,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      pkFieldToRead = 100
+      s3SecretKey = "minioadmin"
     )
 
     config.validate() shouldBe Right(())
@@ -32,8 +31,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      pkFieldToRead = 100
+      s3SecretKey = "minioadmin"
     )
 
     config.validate() shouldBe Left("milvusUri cannot be empty")
@@ -46,8 +44,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      pkFieldToRead = 100
+      s3SecretKey = "minioadmin"
     )
 
     config.validate() shouldBe Left("collectionName cannot be empty")
@@ -60,8 +57,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "",
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      pkFieldToRead = 100
+      s3SecretKey = "minioadmin"
     )
 
     config.validate() shouldBe Left("s3Endpoint cannot be empty")
@@ -74,8 +70,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "localhost:9000",
       s3BucketName = "",
       s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      pkFieldToRead = 100
+      s3SecretKey = "minioadmin"
     )
 
     config.validate() shouldBe Left("s3BucketName cannot be empty")
@@ -88,8 +83,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
       s3AccessKey = "",
-      s3SecretKey = "minioadmin",
-      pkFieldToRead = 100
+      s3SecretKey = "minioadmin"
     )
 
     config.validate() shouldBe Left("s3AccessKey cannot be empty")
@@ -102,8 +96,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
-      s3SecretKey = "",
-      pkFieldToRead = 100
+      s3SecretKey = ""
     )
 
     config.validate() shouldBe Left("s3SecretKey cannot be empty")
@@ -117,7 +110,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
       s3SecretKey = "minioadmin",
-      pkFieldToRead = 100,
       batchSize = 0
     )
 
@@ -132,7 +124,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
       s3SecretKey = "minioadmin",
-      pkFieldToRead = 100,
       batchSize = -1
     )
 
@@ -148,8 +139,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      pkFieldToRead = 100
+      s3SecretKey = "minioadmin"
     )
 
     config.milvusToken shouldBe ""
@@ -175,8 +165,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3AccessKey = "access123",
       s3SecretKey = "secret456",
       s3RootPath = "data/milvus",
-      s3UseSSL = true,
-      pkFieldToRead = 100
+      s3UseSSL = true
     )
 
     val options = config.getMilvusReadOptions
@@ -186,7 +175,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     options("milvus.database.name") shouldBe "my_database"
     options("milvus.collection.name") shouldBe "test_collection"
     options("milvus.extra.columns") shouldBe "segment_id,row_offset"
-    options("milvus.field.ids") shouldBe "100"
     options("fs.address") shouldBe "localhost:9000"
     options("fs.bucket_name") shouldBe "test-bucket"
     options("fs.root_path") shouldBe "data/milvus"
@@ -203,8 +191,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      pkFieldToRead = 100
+      s3SecretKey = "minioadmin"
     )
 
     val options = config.getMilvusReadOptions
@@ -221,8 +208,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      pkFieldToRead = 100
+      s3SecretKey = "minioadmin"
     )
 
     val options = config.getMilvusReadOptions
@@ -243,7 +229,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3RootPath = "files",
       s3Region = "us-west-2",
       s3UseSSL = true,
-      pkFieldToRead = 100,
       batchSize = 2048
     )
 
@@ -274,7 +259,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3BucketName = "test-bucket",
       s3AccessKey = "minioadmin",
       s3SecretKey = "minioadmin",
-      pkFieldToRead = 100,
       customOutputPath = Some("custom/path/to/output")
     )
 
@@ -297,7 +281,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.milvusUri shouldBe "http://localhost:19530"
     config.milvusToken shouldBe "root:Milvus"
     config.collectionName shouldBe "test_collection"
-    config.pkFieldToRead shouldBe 100
     config.s3Endpoint shouldBe "localhost:9000"
     config.s3BucketName shouldBe "a-bucket"
     config.s3AccessKey shouldBe "minioadmin"
@@ -310,7 +293,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
   test("forTest allows overriding default values") {
     val config = BackfillConfig.forTest(
       collectionName = "custom_collection",
-      pkFieldToRead = 200,
       milvusUri = "http://custom:19530",
       milvusToken = "custom:token",
       s3Endpoint = "custom:9000",
@@ -320,7 +302,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.milvusUri shouldBe "http://custom:19530"
     config.milvusToken shouldBe "custom:token"
     config.collectionName shouldBe "custom_collection"
-    config.pkFieldToRead shouldBe 200
     config.s3Endpoint shouldBe "custom:9000"
     config.s3BucketName shouldBe "custom-bucket"
   }
