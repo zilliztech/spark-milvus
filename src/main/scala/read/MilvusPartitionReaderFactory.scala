@@ -35,7 +35,7 @@ class MilvusPartitionReaderFactory(
         // Create MilvusLoonPartitionReader directly
         val underlyingReader = new MilvusLoonPartitionReader(
           v2Schema,
-          p.manifestJson,
+          p.manifestPath,
           milvusSchema,
           p.milvusOption,
           optionsMap,

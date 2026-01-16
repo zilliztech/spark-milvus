@@ -25,7 +25,7 @@ import io.milvus.grpc.schema.CollectionSchema
 import com.zilliz.spark.connector.MilvusOption
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
-import io.milvus.storage.{ArrowUtils, NativeLibraryLoader, MilvusStorageReader}
+import io.milvus.storage.{ArrowUtils, NativeLibraryLoader, MilvusStorageReader, MilvusStorageManifest, LatestColumnGroupsResult}
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import org.apache.arrow.c.{ArrowArrayStream, ArrowSchema, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
@@ -33,7 +33,7 @@ import org.apache.arrow.vector.VectorSchemaRoot
 // for Milvus 2.6+ version data source and milvus lake data
 class MilvusLoonPartitionReader(
     schema: StructType,
-    manifestJson: String,
+    manifestPath: String,  // Path to manifest in S3/MinIO
     milvusSchema: CollectionSchema,
     milvusOption: MilvusOption,
     optionsMap: Map[String, String],
@@ -52,20 +52,45 @@ class MilvusLoonPartitionReader(
   private val sourceSchema = schema
 
   // Create Arrow schema from Milvus schema
-  private val arrowSchemaC = createArrowSchema()
+  private val (arrowSchemaObj, arrowSchemaPtr) = createArrowSchema()
+
+  private val fieldNameToId: Map[String, Long] = {
+    val systemFields = Map("row_id" -> 0L, "timestamp" -> 1L)
+    val userFields = milvusSchema.fields.map { field =>
+      field.name -> field.fieldID
+    }.toMap
+    systemFields ++ userFields
+  }
+
+  private val fieldNameToIdString: Map[String, String] =
+    fieldNameToId.map { case (name, id) => name -> id.toString }
 
   // Create reader properties from MilvusOption
   private val readerProperties = Properties.fromMilvusOption(milvusOption)
 
-  // Determine which columns to read
   private val columnNames = getColumnNames()
+
+  // Get column groups from manifest
+  private val manifestResult: LatestColumnGroupsResult = MilvusStorageManifest.getLatestColumnGroupsScala(manifestPath, readerProperties)
+
+  if (manifestResult.readVersion == 0) {
+    throw new IllegalStateException(
+      s"No manifest file found at path: $manifestPath. " +
+      "The milvus-storage format manifest files do not exist. " +
+      "Please turn on useLoonFFI and compact the data before reading through Spark connector."
+    )
+  }
+
+  private val columnGroupsPtr = manifestResult.columnGroupsPtr
 
   // Create Storage V2 reader
   private val reader = new MilvusStorageReader()
-  reader.create(manifestJson, arrowSchemaC, columnNames, readerProperties)
+  reader.create(columnGroupsPtr, arrowSchemaPtr, columnNames, readerProperties)
 
   if (!reader.isValid) {
-    throw new IllegalStateException("Failed to create MilvusStorageReader")
+    throw new IllegalStateException(
+      s"Failed to create MilvusStorageReader for path: $manifestPath."
+    )
   }
 
   // Get Arrow stream
@@ -73,8 +98,21 @@ class MilvusLoonPartitionReader(
   private val arrowArrayStream = ArrowArrayStream.wrap(recordBatchReaderPtr)
   private val arrowReader = Data.importArrayStream(allocator, arrowArrayStream)
 
-  private var currentBatch: VectorSchemaRoot = _
-  private var currentRowIndex: Int = 0
+  // Eagerly try to load first batch to check if data exists
+  private val (currentBatch, currentRowIndex): (VectorSchemaRoot, Int) = {
+    val hasFirstBatch = arrowReader.loadNextBatch()
+    if (!hasFirstBatch) {
+      // Manifest exists but has no data - this is valid for empty segments
+      (null, 0)
+    } else {
+      val batch = arrowReader.getVectorSchemaRoot
+      (batch, 0)
+    }
+  }
+
+  // Need mutable versions for iteration
+  private var _currentBatch: VectorSchemaRoot = currentBatch
+  private var _currentRowIndex: Int = currentRowIndex
 
   // Vector search state
   private val vectorSearchEnabled = topK.isDefined && queryVector.isDefined
@@ -92,14 +130,14 @@ class MilvusLoonPartitionReader(
       // Loop to find next row that passes filters
       while (true) {
         // Check if we have more rows in current batch
-        if (currentBatch != null && currentRowIndex < currentBatch.getRowCount) {
+        if (_currentBatch != null && _currentRowIndex < _currentBatch.getRowCount) {
           // If we have filters, check if current row passes
           if (pushedFilters.nonEmpty) {
-            val row = ArrowConverter.arrowToInternalRow(currentBatch, currentRowIndex, sourceSchema)
-            currentRowIndex += 1
+            val row = ArrowConverter.arrowToInternalRow(_currentBatch, _currentRowIndex, sourceSchema, fieldNameToIdString)
+            _currentRowIndex += 1
             if (applyFilters(row)) {
               // Found a matching row, back up index so get() will return it
-              currentRowIndex -= 1
+              _currentRowIndex -= 1
               return true
             }
             // Row didn't match filters, continue to next row
@@ -110,9 +148,9 @@ class MilvusLoonPartitionReader(
         } else {
           // Try to load next batch
           if (arrowReader.loadNextBatch()) {
-            currentBatch = arrowReader.getVectorSchemaRoot
-            currentRowIndex = 0
-            if (currentBatch.getRowCount > 0) {
+            _currentBatch = arrowReader.getVectorSchemaRoot
+            _currentRowIndex = 0
+            if (_currentBatch.getRowCount > 0) {
               // Continue loop to check first row of new batch
             } else {
               return false
@@ -136,12 +174,12 @@ class MilvusLoonPartitionReader(
       resultRow
     } else {
       // Normal mode
-      if (currentBatch == null) {
+      if (_currentBatch == null) {
         throw new IllegalStateException("No batch loaded")
       }
 
-      val row = ArrowConverter.arrowToInternalRow(currentBatch, currentRowIndex, sourceSchema)
-      currentRowIndex += 1
+      val row = ArrowConverter.arrowToInternalRow(_currentBatch, _currentRowIndex, sourceSchema, fieldNameToIdString)
+      _currentRowIndex += 1
       row
     }
   }
@@ -151,7 +189,7 @@ class MilvusLoonPartitionReader(
       if (arrowReader != null) arrowReader.close()
       if (arrowArrayStream != null) arrowArrayStream.close()
       if (reader != null) reader.destroy()
-      ArrowUtils.releaseArrowSchema(arrowSchemaC)
+      if (arrowSchemaObj != null) arrowSchemaObj.close()
       readerProperties.free()
     } catch {
       case e: Exception =>
@@ -159,17 +197,24 @@ class MilvusLoonPartitionReader(
     }
   }
 
-  private def createArrowSchema(): Long = {
-    // Convert Milvus schema to Arrow schema
-    val arrowSchemaObj = com.zilliz.spark.connector.MilvusSchemaUtil.convertToArrowSchema(milvusSchema)
+  private def createArrowSchema(): (ArrowSchema, Long) = {
+    // Convert Milvus schema to Arrow schema with field IDs as field names
+    // This is required because milvus-storage reader matches columns by field ID
+    // The manifest stores column groups with field IDs (e.g., "100", "101")
+    val arrowSchema = com.zilliz.spark.connector.MilvusSchemaUtil.convertToArrowSchemaWithFieldIdNames(milvusSchema)
     val arrowSchemaC = ArrowSchema.allocateNew(allocator)
-    Data.exportSchema(allocator, arrowSchemaObj, null, arrowSchemaC)
-    arrowSchemaC.memoryAddress()
+    Data.exportSchema(allocator, arrowSchema, null, arrowSchemaC)
+    (arrowSchemaC, arrowSchemaC.memoryAddress())
   }
 
   private def getColumnNames(): Array[String] = {
-    // Use source schema (which excludes computed distance columns)
-    sourceSchema.fieldNames
+    // Convert column names to field IDs for manifest/reader matching
+    // The manifest stores column groups with field IDs (e.g., "100", "101")
+    // Note: System fields (row_id, timestamp) are handled by MilvusPartitionReaderFactory
+    // and should NOT be requested from milvus-storage reader
+    sourceSchema.fieldNames.flatMap { name =>
+      fieldNameToId.get(name).map(_.toString)
+    }
   }
 
   /**
@@ -203,14 +248,14 @@ class MilvusLoonPartitionReader(
     val heap = scala.collection.mutable.PriorityQueue.empty[(InternalRow, Double)](ordering)
     var rowCount = 0
 
-    // Iterate through all batches
-    while (arrowReader.loadNextBatch()) {
-      currentBatch = arrowReader.getVectorSchemaRoot
-      val batchSize = currentBatch.getRowCount
+    // Helper function to process a batch
+    def processBatch(batch: VectorSchemaRoot): Unit = {
+      if (batch == null) return
+      val batchSize = batch.getRowCount
 
       // Process each row in batch
       for (i <- 0 until batchSize) {
-        val row = ArrowConverter.arrowToInternalRow(currentBatch, i, sourceSchema)
+        val row = ArrowConverter.arrowToInternalRow(batch, i, sourceSchema, fieldNameToIdString)
 
         // Extract vector from row
         val vector = try {
@@ -245,6 +290,15 @@ class MilvusLoonPartitionReader(
 
         rowCount += 1
       }
+    }
+
+    // Process the first batch that was already loaded in constructor
+    processBatch(_currentBatch)
+
+    // Iterate through remaining batches
+    while (arrowReader.loadNextBatch()) {
+      val batch = arrowReader.getVectorSchemaRoot
+      processBatch(batch)
     }
 
     logInfo(s"Per-segment vector search completed: processed $rowCount rows, kept ${heap.size} top-K results")

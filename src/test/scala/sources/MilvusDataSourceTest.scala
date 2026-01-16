@@ -126,7 +126,7 @@ class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
       .option(Properties.FsConfig.FsAccessKeyId, "minioadmin")
       .option(Properties.FsConfig.FsAccessKeyValue, "minioadmin")
       .option(Properties.FsConfig.FsUseSSL, "false")
-      .load()
+      .load()     
 
     // Register as temp view
     df.createOrReplaceTempView("milvus_data")

@@ -46,10 +46,7 @@ import com.zilliz.spark.connector.read.{
   MilvusStorageV2InputPartition
 }
 import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}
-import com.zilliz.spark.connector.loon.{
-  ManifestBuilder,
-  Properties
-}
+import com.zilliz.spark.connector.loon.Properties
 import io.milvus.grpc.schema.CollectionSchema
 
 // 1. DataSourceRegister and TableProvider
@@ -480,18 +477,14 @@ class MilvusScan(
 
     // Helper function to create InputPartition from segment info
     def createPartition(segmentID: String, partitionID: String): InputPartition = {
-      val manifest = ManifestBuilder.buildManifestForSegment(
-        collectionInfo.schema,
-        collection,
-        partitionID,
-        segmentID,
-        client,
-        s3Bucket,
-        s3RootPath
-      )
+      // Build segment path where manifest files exist
+      // V2 segments have manifest files at: rootPath/insert_log/collectionID/partitionID/segmentID/_metadata/
+      val segmentPath = s"$s3RootPath/insert_log/$collection/$partitionID/$segmentID"
+      logInfo(s"Creating V2 partition: segmentID=$segmentID, segmentPath=$segmentPath")
+
       val segmentIDLong = try { segmentID.toLong } catch { case _: NumberFormatException => -1L }
       MilvusStorageV2InputPartition(
-        manifest,
+        segmentPath,
         collectionInfo.schema.toByteArray,
         partitionID,
         milvusOption,
@@ -509,7 +502,7 @@ class MilvusScan(
       milvusOption.collectionName
     ).getOrElse(
       throw new Exception("Failed to get segments")
-    ).filter(_.storageVersion == 2)
+    ).filter(_.storageVersion >= 2)
 
     if (allV2Segments.isEmpty) {
       throw new IllegalArgumentException(

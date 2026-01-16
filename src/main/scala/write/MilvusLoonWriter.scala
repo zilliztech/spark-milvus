@@ -39,6 +39,7 @@ import com.zilliz.spark.connector.serde.ArrowConverter
 import io.milvus.storage.{
   ArrowUtils,
   MilvusStorageProperties,
+  MilvusStorageTransaction,
   MilvusStorageWriter,
   NativeLibraryLoader
 }
@@ -137,6 +138,32 @@ class MilvusLoonWriterFactory(
   }
 }
 
+object MilvusLoonPartitionWriter {
+  @volatile private var writeInitialized: Boolean = false
+  private val writeLock = new Object()
+
+  /**
+   * Ensures the first write operation is serialized to avoid race conditions
+   * in native library's S3 client initialization. Once a write succeeds,
+   * subsequent writes can run in parallel.
+   */
+  def synchronizedWrite(doWrite: => Unit): Unit = {
+    if (!writeInitialized) {
+      writeLock.synchronized {
+        if (!writeInitialized) {
+          doWrite
+          writeInitialized = true
+        } else {
+          // Another thread completed initialization while we waited
+          doWrite
+        }
+      }
+    } else {
+      doWrite
+    }
+  }
+}
+
 /**
  * Partition writer using Storage V2 FFI
  */
@@ -179,9 +206,7 @@ class MilvusLoonPartitionWriter(
     }
   }
 
-  // Create Storage V2 writer with S3 initialization protection
-  // Uses double-checked locking: only the FIRST writer in this JVM is serialized
-  // Subsequent writers run in parallel, preserving Spark's concurrency
+  // Create Storage V2 writer
   private val (writer, writerProperties, arrowSchemaC) = {
     // Writer properties from MilvusOption
     val props = Properties.fromMilvusOption(milvusOption)
@@ -222,12 +247,26 @@ class MilvusLoonPartitionWriter(
         flushBatch()
       }
 
-      // Close writer and get manifest
-      val manifestJson = writer.close()
+      // Close writer and get column groups pointer
+      val columnGroupsPtr = writer.close()
 
-      logInfo(s"Writer committed: partition=$partitionId, records=$totalRecordCount, manifest=$manifestJson")
+      logInfo(s"Writer closed: partition=$partitionId, records=$totalRecordCount, columnGroupsPtr=$columnGroupsPtr")
 
-      MilvusLoonCommitMessage(partitionId, totalRecordCount, basePath, manifestJson)
+      // Commit column groups to manifest using Transaction
+      val transaction = new MilvusStorageTransaction()
+      transaction.begin(basePath, writerProperties)
+
+      // Commit with ADDFILES update type (0) and FAIL resolve strategy (0)
+      val committed = transaction.commit(0, 0, columnGroupsPtr)
+      transaction.destroy()
+
+      if (!committed) {
+        throw new IllegalStateException(s"Failed to commit manifest for partition $partitionId")
+      }
+
+      logInfo(s"Manifest committed: partition=$partitionId, records=$totalRecordCount, basePath=$basePath")
+
+      MilvusLoonCommitMessage(partitionId, totalRecordCount, basePath, columnGroupsPtr)
     } finally {
       cleanup()
     }
@@ -268,9 +307,12 @@ class MilvusLoonPartitionWriter(
     Data.exportVectorSchemaRoot(allocator, root, null, arrowArrayC)
 
     try {
-      // Write to storage
-      writer.write(arrowArrayC.memoryAddress())
-      writer.flush()
+      // Use synchronized write for the first operation to avoid race conditions
+      // in native library's S3 client initialization
+      MilvusLoonPartitionWriter.synchronizedWrite {
+        writer.write(arrowArrayC.memoryAddress())
+        writer.flush()
+      }
 
       totalRecordCount += currentBatchSize
 
@@ -296,7 +338,6 @@ class MilvusLoonPartitionWriter(
       vector match {
         case varCharVector: VarCharVector =>
           // For VarChar vectors, allocate both row capacity and byte capacity
-          // Estimate: average 32 bytes per string value (conservative estimate)
           // This will auto-expand if needed, but starts small to avoid OOM
           val estimatedBytesPerValue = 32
           val totalByteCapacity = batchSize * estimatedBytesPerValue
@@ -405,7 +446,7 @@ case class MilvusLoonCommitMessage(
     partitionId: Int,
     recordCount: Long,
     manifestPath: String,
-    manifestJson: String
+    columnGroupsPtr: Long
 ) extends WriterCommitMessage
 
 /**

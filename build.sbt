@@ -107,6 +107,9 @@ lazy val root = (project in file("."))
     // Show test logs immediately (don't buffer)
     Test / logBuffered := false,
 
+    // Test timeout - 10 seconds per test to avoid hanging
+    Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "10", "10"),
+
     // JVM options for run
     run / javaOptions ++= Seq(
       "-Xss2m",
@@ -125,9 +128,9 @@ lazy val root = (project in file("."))
     Test / javaOptions ++= Seq(
       "-Xss2m",
       "-Xmx4g",
-      "-Djava.library.path=.",
+      s"-Djava.library.path=${(baseDirectory.value / "src/main/resources/native").getAbsolutePath}",
       "-Dlog4j2.configurationFile=log4j2.properties",
-      "-Dlog4j2.debug=true",
+      "-Dlog4j2.debug=false",
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
       "--add-opens=java.base/java.lang=ALL-UNNAMED",
       "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
@@ -136,7 +139,7 @@ lazy val root = (project in file("."))
     ),
 
     Test / envVars := Map(
-      "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
+      "LD_LIBRARY_PATH" -> (baseDirectory.value / "src/main/resources/native").getAbsolutePath
     ),
 
     // Add milvus-storage JNI library as unmanaged dependency
