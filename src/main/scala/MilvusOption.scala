@@ -264,6 +264,7 @@ case class MilvusS3Option(
       // Credentials priority: AK/SK options > spark.hadoop.* > DefaultAWSCredentialsProviderChain
       if (notEmpty(s3AccessKey) && notEmpty(s3SecretKey)) {
         // Priority 1: Use explicit AK/SK credentials when provided via options
+        println(s"MilvusS3Option: Initializing S3 FileSystem using explicit AccessKey/SecretKey. Endpoint: $s3Endpoint")
         conf.set(
           "fs.s3a.aws.credentials.provider",
           "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider,com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
@@ -272,25 +273,18 @@ case class MilvusS3Option(
         conf.set("fs.s3a.secret.key", s3SecretKey)
       } else if (sparkHadoopS3Conf.nonEmpty) {
         // Priority 2: Use Spark's hadoop configuration (spark.hadoop.fs.s3a.*)
-        // This allows users to configure AssumedRoleCredentialProvider via spark.hadoop.*
+        println(s"MilvusS3Option: Initializing S3 FileSystem using Spark Hadoop Configuration (fs.s3a.*). Endpoint: $s3Endpoint")
         sparkHadoopS3Conf.foreach { case (key, value) =>
           conf.set(key, value)
         }
-        // Set default provider if not configured in spark.hadoop.*
-        if (conf.get("fs.s3a.aws.credentials.provider") == null) {
-          conf.set(
-            "fs.s3a.aws.credentials.provider",
-            "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
-          )
-        }
       } else {
         // Priority 3: Use DefaultAWSCredentialsProviderChain for IAM role / env vars
+        println(s"MilvusS3Option: No specific credentials provided. Initializing S3 FileSystem using DefaultAWSCredentialsProviderChain. Endpoint: $s3Endpoint")
         conf.set(
           "fs.s3a.aws.credentials.provider",
           "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
         )
       }
-
       conf.set("fs.s3a.connection.ssl.enabled", s3UseSSL.toString)
 
       // Performance optimization settings

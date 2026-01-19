@@ -18,7 +18,7 @@ class MilvusPartitionReaderFactory(
 ) extends PartitionReaderFactory with Logging {
 
   // Reconstruct CaseInsensitiveStringMap for V1 reader
-  @transient private lazy val readerOptions = {
+  private val readerOptions = {
     import scala.jdk.CollectionConverters._
     import java.util.HashMap
     val javaMap = new HashMap[String, String]()
