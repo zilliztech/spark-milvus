@@ -295,6 +295,15 @@ case class MilvusS3Option(
       conf.set("fs.s3a.connection.timeout", "30000")
       conf.set("fs.s3a.socket.timeout", "30000")
       conf.set("fs.s3a.retry.limit", "3")
+    } else {
+       // If s3FileSystemType is not set, we still MUST apply the Spark Hadoop S3 configuration
+       // captured from the session, otherwise we lose all user settings (endpoint, credentials, path-style).
+       if (sparkHadoopS3Conf.nonEmpty) {
+        println(s"MilvusS3Option: Applying captured Spark Hadoop Configuration to default context.")
+        sparkHadoopS3Conf.foreach { case (key, value) =>
+          conf.set(key, value)
+        }
+      }
     }
     conf
   }
