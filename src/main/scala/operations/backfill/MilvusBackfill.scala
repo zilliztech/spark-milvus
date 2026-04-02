@@ -50,7 +50,10 @@ object MilvusBackfill {
     }
 
     // Step 1: Try to load snapshot metadata
-    val snapshotMetadataOpt = loadSnapshotMetadata(spark, snapshotPath, config)
+    val snapshotMetadataOpt = loadSnapshotMetadata(spark, snapshotPath, config) match {
+      case Left(error) => return Left(error)
+      case Right(opt) => opt
+    }
 
     // Step 2: Create Milvus client only if no snapshot is available
     var client: MilvusClient = null
@@ -128,22 +131,19 @@ object MilvusBackfill {
         case Some(metadata) =>
           MilvusSnapshotReader.getFieldNameToIdMap(metadata.collection.schema)
         case None =>
-          // TODO: get from Milvus client when needed
-          Map.empty
+          return Left(SchemaValidationError(
+            "ADDFIELD backfill requires field ID mapping from snapshot. " +
+            "Please provide a snapshot path to resolve correct field IDs."))
       }
 
       // Filter to only the new fields being backfilled, fail fast if any field is missing from snapshot schema
-      val newFieldNameToId = if (fieldNameToId.nonEmpty) {
-        val missing = newFieldNames.filterNot(fieldNameToId.contains)
-        if (missing.nonEmpty) {
-          return Left(SchemaValidationError(
-            s"Fields not found in snapshot schema: ${missing.mkString(", ")}. " +
-            s"Available fields: ${fieldNameToId.keys.mkString(", ")}"))
-        }
-        newFieldNames.map(n => n -> fieldNameToId(n)).toMap
-      } else {
-        Map.empty[String, Long]
+      val missing = newFieldNames.filterNot(fieldNameToId.contains)
+      if (missing.nonEmpty) {
+        return Left(SchemaValidationError(
+          s"Fields not found in snapshot schema: ${missing.mkString(", ")}. " +
+          s"Available fields: ${fieldNameToId.keys.mkString(", ")}"))
       }
+      val newFieldNameToId = newFieldNames.map(n => n -> fieldNameToId(n)).toMap
 
       // Process each segment
       val segmentResults = processSegments(
@@ -623,24 +623,27 @@ object MilvusBackfill {
 
   /**
    * Load and parse snapshot metadata from file.
-   * Returns None if snapshot path is empty or parsing fails.
+   * Returns None if snapshot path is empty.
+   * Returns Left(error) if snapshot path is provided but parsing fails.
    */
   private def loadSnapshotMetadata(
       spark: SparkSession,
       snapshotPath: String,
       config: BackfillConfig
-  ): Option[SnapshotMetadata] = {
-    if (snapshotPath == null || snapshotPath.isEmpty) return None
+  ): Either[BackfillError, Option[SnapshotMetadata]] = {
+    if (snapshotPath == null || snapshotPath.isEmpty) return Right(None)
 
     readSnapshotJson(spark, snapshotPath, config) match {
       case Right(json) if json.nonEmpty =>
         MilvusSnapshotReader.parseSnapshotMetadata(json) match {
-          case Right(metadata) => Some(metadata)
+          case Right(metadata) => Right(Some(metadata))
           case Left(e) =>
-            logger.warn(s"Failed to parse snapshot metadata: ${e.getMessage}")
-            None
+            Left(SchemaValidationError(s"Failed to parse snapshot metadata: ${e.getMessage}"))
         }
-      case _ => None
+      case Right(_) =>
+        Left(SchemaValidationError(s"Snapshot file is empty: $snapshotPath"))
+      case Left(e) =>
+        Left(SchemaValidationError(s"Failed to read snapshot file: ${e.getMessage}"))
     }
   }
 
@@ -697,7 +700,7 @@ object MilvusBackfill {
       val fs = hadoopPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
       val out = fs.create(hadoopPath, true)
       try {
-        out.writeBytes(result.toJson)
+        out.write(result.toJson.getBytes(java.nio.charset.StandardCharsets.UTF_8))
       } finally {
         out.close()
       }
