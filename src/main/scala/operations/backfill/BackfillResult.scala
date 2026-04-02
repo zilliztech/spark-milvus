@@ -1,5 +1,8 @@
 package com.zilliz.spark.connector.operations.backfill
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
+
 /**
  * Result of backfilling a single segment
  */
@@ -56,29 +59,32 @@ case class BackfillResult(
    * Serialize this result to a JSON string
    */
   def toJson: String = {
-    val segmentsJson = segmentResults.toSeq.sortBy(_._1).map { case (segId, r) =>
-      val manifestPathsJson = r.manifestPaths.map(p => s""""${escapeJson(p)}"""").mkString("[", ", ", "]")
-      s"""    "$segId": {"version": ${r.committedVersion}, "rowCount": ${r.rowCount}, "executionTimeMs": ${r.executionTimeMs}, "outputPath": "${escapeJson(r.outputPath)}", "manifestPaths": $manifestPathsJson}"""
-    }.mkString(",\n")
+    val mapper = new ObjectMapper()
+    mapper.registerModule(DefaultScalaModule)
 
-    val newFieldNamesJson = newFieldNames.map(n => s""""${escapeJson(n)}"""").mkString("[", ", ", "]")
+    val segments = segmentResults.toSeq.sortBy(_._1).map { case (segId, r) =>
+      segId.toString -> Map(
+        "version" -> r.committedVersion,
+        "rowCount" -> r.rowCount,
+        "executionTimeMs" -> r.executionTimeMs,
+        "outputPath" -> r.outputPath,
+        "manifestPaths" -> r.manifestPaths
+      )
+    }.toMap
 
-    s"""{
-       |  "success": $success,
-       |  "collectionId": $collectionId,
-       |  "partitionId": $partitionId,
-       |  "segmentsProcessed": $segmentsProcessed,
-       |  "totalRowsWritten": $totalRowsWritten,
-       |  "executionTimeMs": $executionTimeMs,
-       |  "newFieldNames": $newFieldNamesJson,
-       |  "segments": {
-       |$segmentsJson
-       |  }
-       |}""".stripMargin
+    val result = Map(
+      "success" -> success,
+      "collectionId" -> collectionId,
+      "partitionId" -> partitionId,
+      "segmentsProcessed" -> segmentsProcessed,
+      "totalRowsWritten" -> totalRowsWritten,
+      "executionTimeMs" -> executionTimeMs,
+      "newFieldNames" -> newFieldNames,
+      "segments" -> segments
+    )
+
+    mapper.writerWithDefaultPrettyPrinter().writeValueAsString(result)
   }
-
-  private def escapeJson(s: String): String =
-    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
 
   /**
    * Check if all segments were processed successfully

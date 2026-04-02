@@ -132,8 +132,18 @@ object MilvusBackfill {
           Map.empty
       }
 
-      // Filter to only the new fields being backfilled
-      val newFieldNameToId = newFieldNames.flatMap(n => fieldNameToId.get(n).map(n -> _)).toMap
+      // Filter to only the new fields being backfilled, fail fast if any field is missing from snapshot schema
+      val newFieldNameToId = if (fieldNameToId.nonEmpty) {
+        val missing = newFieldNames.filterNot(fieldNameToId.contains)
+        if (missing.nonEmpty) {
+          return Left(SchemaValidationError(
+            s"Fields not found in snapshot schema: ${missing.mkString(", ")}. " +
+            s"Available fields: ${fieldNameToId.keys.mkString(", ")}"))
+        }
+        newFieldNames.map(n => n -> fieldNameToId(n)).toMap
+      } else {
+        Map.empty[String, Long]
+      }
 
       // Process each segment
       val segmentResults = processSegments(
@@ -651,18 +661,20 @@ object MilvusBackfill {
       val segId = item.segmentID
       MilvusSnapshotReader.parseManifestContent(item.manifest) match {
         case Right(mc) =>
-          segmentBasePathMap += (segId -> mc.basePath)
           // Extract partition ID from basePath: .../insert_log/{col_id}/{part_id}/{seg_id}
           val parts = mc.basePath.split("/")
           val insertLogIdx = parts.indexOf("insert_log")
           if (insertLogIdx >= 0 && insertLogIdx + 2 < parts.length) {
             try {
               val partitionId = parts(insertLogIdx + 2).toLong
+              segmentBasePathMap += (segId -> mc.basePath)
               segmentToPartitionMap += (segId -> partitionId)
             } catch {
               case _: NumberFormatException =>
-                logger.warn(s"Failed to parse partition ID from basePath: ${mc.basePath}")
+                logger.warn(s"Skipping segment $segId: failed to parse partition ID from basePath: ${mc.basePath}")
             }
+          } else {
+            logger.warn(s"Skipping segment $segId: basePath does not contain expected insert_log structure: ${mc.basePath}")
           }
         case Left(e) =>
           logger.warn(s"Failed to parse manifest for segment $segId: ${e.getMessage}")
