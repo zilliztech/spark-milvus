@@ -270,7 +270,7 @@ object ArrowConverter extends Logging {
       sparkSchema: StructType
   ): Unit = {
     sparkSchema.fields.zipWithIndex.foreach { case (field, colIndex) =>
-      val vector = root.getVector(field.name)
+      val vector = root.getVector(colIndex)
       sparkValueToArrowValue(vector, rowIndex, record, colIndex, field.dataType)
     }
   }

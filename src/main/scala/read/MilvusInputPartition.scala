@@ -13,5 +13,6 @@ case class MilvusStorageV2InputPartition(
     queryVector: Option[Array[Float]] = None,
     metricType: Option[String] = None,
     vectorColumn: Option[String] = None,
-    segmentID: Long = -1L
+    segmentID: Long = -1L,
+    readVersion: Long = -1L  // -1 = LATEST, >0 = specific manifest version from snapshot
 ) extends InputPartition

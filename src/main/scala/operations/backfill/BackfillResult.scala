@@ -1,5 +1,8 @@
 package com.zilliz.spark.connector.operations.backfill
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
+
 /**
  * Result of backfilling a single segment
  */
@@ -8,7 +11,8 @@ case class SegmentBackfillResult(
     rowCount: Long,
     manifestPaths: Seq[String],
     outputPath: String,
-    executionTimeMs: Long
+    executionTimeMs: Long,
+    committedVersion: Long = -1
 )
 
 /**
@@ -46,9 +50,40 @@ case class BackfillResult(
    */
   def segmentSummary: String = {
     val segmentLines = segmentResults.toSeq.sortBy(_._1).map { case (segId, result) =>
-      s"    Segment $segId: ${result.rowCount} rows, ${result.executionTimeMs}ms, ${result.manifestPaths.size} manifests"
+      s"    Segment $segId: ${result.rowCount} rows, version=${result.committedVersion}, ${result.executionTimeMs}ms, path=${result.outputPath}"
     }
     s"Segment Details:\n${segmentLines.mkString("\n")}"
+  }
+
+  /**
+   * Serialize this result to a JSON string
+   */
+  def toJson: String = {
+    val mapper = new ObjectMapper()
+    mapper.registerModule(DefaultScalaModule)
+
+    val segments = segmentResults.toSeq.sortBy(_._1).map { case (segId, r) =>
+      segId.toString -> Map(
+        "version" -> r.committedVersion,
+        "rowCount" -> r.rowCount,
+        "executionTimeMs" -> r.executionTimeMs,
+        "outputPath" -> r.outputPath,
+        "manifestPaths" -> r.manifestPaths
+      )
+    }.toMap
+
+    val result = Map(
+      "success" -> success,
+      "collectionId" -> collectionId,
+      "partitionId" -> partitionId,
+      "segmentsProcessed" -> segmentsProcessed,
+      "totalRowsWritten" -> totalRowsWritten,
+      "executionTimeMs" -> executionTimeMs,
+      "newFieldNames" -> newFieldNames,
+      "segments" -> segments
+    )
+
+    mapper.writerWithDefaultPrettyPrinter().writeValueAsString(result)
   }
 
   /**

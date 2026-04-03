@@ -41,7 +41,8 @@ class MilvusLoonPartitionReader(
     queryVector: Option[Array[Float]] = None,
     metricType: Option[String] = None,
     vectorColumn: Option[String] = None,
-    pushedFilters: Array[Filter] = Array.empty[Filter]
+    pushedFilters: Array[Filter] = Array.empty[Filter],
+    readVersion: Long = -1L  // -1 = LATEST, >0 = specific manifest version from snapshot
 ) extends PartitionReader[InternalRow] with Logging {
 
   // Load native library
@@ -70,8 +71,13 @@ class MilvusLoonPartitionReader(
 
   private val columnNames = getColumnNames()
 
-  // Get column groups from manifest
-  private val manifestResult: LatestColumnGroupsResult = MilvusStorageManifest.getLatestColumnGroupsScala(manifestPath, readerProperties)
+  // Get column groups from manifest (use specific version if provided, otherwise latest)
+  private val manifestResult: LatestColumnGroupsResult = if (readVersion > 0) {
+    logInfo(s"Reading manifest at version $readVersion for path: $manifestPath")
+    MilvusStorageManifest.getColumnGroupsScala(manifestPath, readerProperties, readVersion)
+  } else {
+    MilvusStorageManifest.getLatestColumnGroupsScala(manifestPath, readerProperties)
+  }
 
   if (manifestResult.readVersion == 0) {
     throw new IllegalStateException(

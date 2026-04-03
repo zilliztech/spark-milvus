@@ -115,6 +115,8 @@ object MilvusOption {
 
   // Writer config
   val WriterCustomPath = "milvus.writer.customPath"
+  val WriterCommitType = "milvus.writer.commitType"  // "addfield" for backfill, default "addfiles"
+  val WriterFieldIds = "milvus.writer.fieldIds"      // JSON map of field name -> field ID (e.g., "new_field:104,other_field:105")
 
   // Snapshot-based reading options (for offline/client-free mode)
   val SnapshotMode = "milvus.snapshot.mode"                 // "true" to enable snapshot mode

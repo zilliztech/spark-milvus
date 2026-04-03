@@ -108,7 +108,7 @@ class MilvusLoonBatchWrite(
     logInfo(s"Committed ${messages.length} partitions")
     messages.foreach {
       case msg: MilvusLoonCommitMessage =>
-        logInfo(s"Partition ${msg.partitionId} wrote ${msg.recordCount} records, manifest: ${msg.manifestPath}")
+        logInfo(s"Partition ${msg.partitionId} wrote ${msg.recordCount} records, manifest: ${msg.manifestPath}, version: ${msg.committedVersion}")
       case _ =>
         logWarning("Unknown commit message type")
     }
@@ -179,10 +179,19 @@ class MilvusLoonPartitionWriter(
   // Create Arrow schema from Spark schema
   // Note: For vector fields, pass vector dimensions via milvusOption if needed
   private val vectorDimensions = extractVectorDimensions(sparkSchema, milvusOption)
-  private val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema, vectorDimensions)
+  private val fieldIds = parseFieldIds(milvusOption)
+  private val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema, vectorDimensions, fieldIds)
 
   // Create VectorSchemaRoot to accumulate batches
-  private val root = VectorSchemaRoot.create(arrowSchema, allocator)
+  // IMPORTANT: root must be var because we create a new one for each flush.
+  // The C++ writer caches RecordBatch shared_ptrs that reference Java-owned buffers
+  // via Arrow C Data Interface (zero-copy). Reusing the same root would overwrite
+  // buffer contents that C++ still references, causing data corruption.
+  private var root = VectorSchemaRoot.create(arrowSchema, allocator)
+
+  // Track exported roots whose buffers are still referenced by C++ RecordBatches.
+  // These must stay alive until the C++ writer is closed.
+  private val exportedRoots = new java.util.ArrayList[VectorSchemaRoot]()
 
   // Batch size configuration
   private val batchSize = milvusOption.insertMaxBatchSize
@@ -256,17 +265,21 @@ class MilvusLoonPartitionWriter(
       val transaction = new MilvusStorageTransaction()
       transaction.begin(basePath, writerProperties)
 
-      // Commit with ADDFILES update type (0) and FAIL resolve strategy (0)
-      val committed = transaction.commit(0, 0, columnGroupsPtr)
+      // Determine commit type: ADDFIELD (1) for backfill, ADDFILES (0) for normal writes
+      val commitType = milvusOption.options.get(MilvusOption.WriterCommitType.toLowerCase) match {
+        case Some("addfield") => 1  // ADDFIELD
+        case _ => 0                 // ADDFILES (default)
+      }
+      val committedVersion = transaction.commit(commitType, 0, columnGroupsPtr)
       transaction.destroy()
 
-      if (!committed) {
+      if (committedVersion < 0) {
         throw new IllegalStateException(s"Failed to commit manifest for partition $partitionId")
       }
 
-      logInfo(s"Manifest committed: partition=$partitionId, records=$totalRecordCount, basePath=$basePath")
+      logInfo(s"Manifest committed: partition=$partitionId, records=$totalRecordCount, basePath=$basePath, version=$committedVersion")
 
-      MilvusLoonCommitMessage(partitionId, totalRecordCount, basePath, columnGroupsPtr)
+      MilvusLoonCommitMessage(partitionId, totalRecordCount, basePath, columnGroupsPtr, committedVersion)
     } finally {
       cleanup()
     }
@@ -314,9 +327,15 @@ class MilvusLoonPartitionWriter(
 
       totalRecordCount += currentBatchSize
 
-      // Reset batch - DO NOT reallocate, just reset row count
-      // The vectors will be reused for the next batch (Arrow will auto-expand if needed)
-      root.setRowCount(0)
+      // CRITICAL: Do NOT reuse the same root for the next batch!
+      // The C++ ParquetFileWriter caches RecordBatch shared_ptrs that wrap pointers
+      // to this root's buffers (via Arrow C Data Interface zero-copy import).
+      // If we reuse the same root, writing new data overwrites the buffer memory
+      // that C++ cached batches still reference, causing data corruption.
+      // Instead, keep the old root alive and create a fresh one with new buffers.
+      exportedRoots.add(root)
+      root = VectorSchemaRoot.create(arrowSchema, allocator)
+      allocateVectors()
       currentBatchSize = 0
 
     } finally {
@@ -400,6 +419,21 @@ class MilvusLoonPartitionWriter(
   }
 
   /**
+   * Parse field ID mapping from MilvusOption
+   * Format: "field_name:field_id,field_name2:field_id2"
+   */
+  private def parseFieldIds(option: MilvusOption): Map[String, Long] = {
+    option.options.get(MilvusOption.WriterFieldIds.toLowerCase).map { str =>
+      str.split(",").flatMap { pair =>
+        val parts = pair.split(":", 2)
+        if (parts.length == 2) {
+          Try(parts(1).trim.toLong).toOption.map(parts(0).trim -> _)
+        } else None
+      }.toMap
+    }.getOrElse(Map.empty)
+  }
+
+  /**
    * Clean up resources
    */
   private def cleanup(): Unit = {
@@ -411,10 +445,20 @@ class MilvusLoonPartitionWriter(
       case e: Exception => logError(s"Error destroying writer: ${e.getMessage}")
     }
 
+    // Close current root (not yet exported)
     Try {
       if (root != null) root.close()
     }.recover {
       case e: Exception => logError(s"Error closing VectorSchemaRoot: ${e.getMessage}")
+    }
+
+    // Close exported roots whose buffers were referenced by C++ RecordBatches.
+    // By this point the C++ writer is destroyed, so all release callbacks have fired.
+    Try {
+      exportedRoots.forEach(r => Try(r.close()))
+      exportedRoots.clear()
+    }.recover {
+      case e: Exception => logError(s"Error closing exported roots: ${e.getMessage}")
     }
 
     Try {
@@ -444,7 +488,8 @@ case class MilvusLoonCommitMessage(
     partitionId: Int,
     recordCount: Long,
     manifestPath: String,
-    columnGroupsPtr: Long
+    columnGroupsPtr: Long,
+    committedVersion: Long
 ) extends WriterCommitMessage
 
 /**

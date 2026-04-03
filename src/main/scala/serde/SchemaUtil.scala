@@ -228,7 +228,8 @@ object MilvusSchemaUtil {
    */
   def convertSparkSchemaToArrow(
       sparkSchema: org.apache.spark.sql.types.StructType,
-      vectorDimensions: Map[String, Int] = Map.empty
+      vectorDimensions: Map[String, Int] = Map.empty,
+      fieldIds: Map[String, Long] = Map.empty
   ): org.apache.arrow.vector.types.pojo.Schema = {
     import scala.collection.JavaConverters._
     import org.apache.spark.sql.types._
@@ -267,12 +268,14 @@ object MilvusSchemaUtil {
           throw new IllegalArgumentException(s"Unsupported Spark type: ${field.dataType}")
       }
 
-      // Add PARQUET:field_id metadata (required by milvus-storage)
-      // Field IDs start from 1 (0 is reserved for RowID in Milvus)
-      val metadata = Map("PARQUET:field_id" -> (idx + 1).toString).asJava
+      // Use explicit field ID if provided, otherwise fall back to idx + 1
+      val fieldId = fieldIds.getOrElse(field.name, (idx + 1).toLong)
+      val metadata = Map("PARQUET:field_id" -> fieldId.toString).asJava
 
       val fieldType = new FieldType(true, arrowType, null, metadata)
-      new Field(field.name, fieldType, null)
+      // Use field ID as column name when explicit field IDs are provided
+      val fieldName = if (fieldIds.contains(field.name)) fieldId.toString else field.name
+      new Field(fieldName, fieldType, null)
     }
 
     new org.apache.arrow.vector.types.pojo.Schema(fields.toList.asJava)

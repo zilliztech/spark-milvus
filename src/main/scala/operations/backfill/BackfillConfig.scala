@@ -19,11 +19,11 @@ package com.zilliz.spark.connector.operations.backfill
  * @param customOutputPath Optional custom output path override
  */
 case class BackfillConfig(
-    // Milvus connection
-    milvusUri: String,
+    // Milvus connection (optional for snapshot-only mode)
+    milvusUri: String = "",
     milvusToken: String = "",
     databaseName: String = "default",
-    collectionName: String,
+    collectionName: String = "",
     partitionName: Option[String] = None,
 
     // S3 storage configuration
@@ -40,14 +40,10 @@ case class BackfillConfig(
     customOutputPath: Option[String] = None
 ) {
   /**
-   * Validate that all required fields are set
+   * Validate S3 and writer configuration (always required)
    */
   def validate(): Either[String, Unit] = {
-    if (milvusUri.isEmpty) {
-      Left("milvusUri cannot be empty")
-    } else if (collectionName.isEmpty) {
-      Left("collectionName cannot be empty")
-    } else if (s3Endpoint.isEmpty) {
+    if (s3Endpoint.isEmpty) {
       Left("s3Endpoint cannot be empty")
     } else if (s3BucketName.isEmpty) {
       Left("s3BucketName cannot be empty")
@@ -59,6 +55,17 @@ case class BackfillConfig(
       Left("batchSize must be positive")
     } else {
       Right(())
+    }
+  }
+
+  /**
+   * Validate that Milvus client connection config is present (required when no snapshot)
+   */
+  def validateForClientMode(): Either[String, Unit] = {
+    validate().flatMap { _ =>
+      if (milvusUri.isEmpty) Left("milvusUri cannot be empty (required when no snapshot is provided)")
+      else if (collectionName.isEmpty) Left("collectionName cannot be empty (required when no snapshot is provided)")
+      else Right(())
     }
   }
 
@@ -90,14 +97,20 @@ case class BackfillConfig(
   /**
    * Get S3 write options as a Map for MilvusLoonWriter
    */
-  def getS3WriteOptions(collectionId: Long, partitionId: Long, segmentId: Long): Map[String, String] = {
-    // TODO: this should be changed to field id based on the collection schema once Milvus snapshot feature is ready
-    // Note: bucket name is configured separately via fs.bucket_name, so outputPath should NOT include bucket
+  def getS3WriteOptions(collectionId: Long, partitionId: Long, segmentId: Long,
+                         fieldNameToId: Map[String, Long] = Map.empty): Map[String, String] = {
     val outputPath = customOutputPath.getOrElse(
-      s"$s3RootPath/insert_log/$collectionId/$partitionId/$segmentId/new_field"
+      s"$s3RootPath/insert_log/$collectionId/$partitionId/$segmentId"
     )
+    getS3WriteOptionsForBasePath(outputPath, segmentId, fieldNameToId)
+  }
 
-    Map(
+  /**
+   * Get S3 write options using a specific segment base path (e.g., from manifest)
+   */
+  def getS3WriteOptionsForBasePath(segmentBasePath: String, segmentId: Long,
+                                    fieldNameToId: Map[String, Long] = Map.empty): Map[String, String] = {
+    var opts = Map(
       "fs.storage_type" -> "remote",
       "fs.address" -> s3Endpoint,
       "fs.bucket_name" -> s3BucketName,
@@ -107,9 +120,15 @@ case class BackfillConfig(
       "fs.use_ssl" -> s3UseSSL.toString,
       "fs.region" -> s3Region,
       "milvus.collection.name" -> s"segment_${segmentId}_backfill",
-      "milvus.writer.customPath" -> outputPath,
+      "milvus.writer.customPath" -> segmentBasePath,
+      "milvus.writer.commitType" -> "addfield",
       "milvus.insertMaxBatchSize" -> batchSize.toString
     )
+    // Pass field name -> field ID mapping for correct column naming
+    if (fieldNameToId.nonEmpty) {
+      opts = opts + ("milvus.writer.fieldIds" -> fieldNameToId.map { case (k, v) => s"$k:$v" }.mkString(","))
+    }
+    opts
   }
 }
 

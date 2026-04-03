@@ -91,6 +91,7 @@ lazy val root = (project in file("."))
   .settings(
     name := "spark-connector",
     assembly / parallelExecution := true,
+    assembly / assemblyPackageScala / assembleArtifact := false,
     Test / parallelExecution := true,
     Compile / compile / parallelExecution := true,
     version := s"${gitBranch}-${arch}-SNAPSHOT",
@@ -143,8 +144,8 @@ lazy val root = (project in file("."))
     ),
 
     // Add milvus-storage JNI library as unmanaged dependency
-    Compile / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni-test_2.13-0.1.0-SNAPSHOT.jar",
-    Test / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni-test_2.13-0.1.0-SNAPSHOT.jar",
+    Compile / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar",
+    Test / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar",
 
     libraryDependencies ++= Seq(
       munit % Test,

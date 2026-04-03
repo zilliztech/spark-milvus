@@ -43,7 +43,8 @@ class MilvusPartitionReaderFactory(
           p.queryVector,
           p.metricType,
           p.vectorColumn,
-          pushedFilters
+          pushedFilters,
+          p.readVersion
         )
 
         // If the expected schema includes system/metadata fields, wrap the reader to add them

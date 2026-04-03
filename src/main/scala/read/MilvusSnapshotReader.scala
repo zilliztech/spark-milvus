@@ -224,7 +224,7 @@ case class ManifestContent(
  * Storage V2 manifest item
  */
 case class StorageV2ManifestItem(
-    @JsonProperty("segmentID") rawSegmentID: Option[JsonNode] = None,  // Can be Long or String from JSON
+    @JsonProperty("segmentID") @JsonAlias(Array("segment_id")) rawSegmentID: Option[JsonNode] = None,  // Can be Long or String from JSON
     @JsonProperty("manifest") manifest: String = "",
     @JsonProperty("segmentIDLong") rawSegmentIDLong: Option[JsonNode] = None  // For serialization (using JsonNode to handle Int/Long)
 ) {
