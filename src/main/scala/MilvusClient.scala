@@ -175,7 +175,9 @@ class MilvusClient(params: MilvusConnectionParams) {
   }
 
   def checkStatus(api: String, status: Status): Try[Status] = {
-    if (status.code != 0 || status.errorCode != ErrorCode.Success) {
+    if (status.code == 8 || status.reason.contains("rate limit exceeded")) {
+      Failure(new MilvusRateLimitException(s"Failed to $api: ${status.reason}"))
+    } else if (status.code != 0 || status.errorCode != ErrorCode.Success) {
       Failure(new Exception(s"Failed to $api: ${status.reason}"))
     } else {
       Success(status)

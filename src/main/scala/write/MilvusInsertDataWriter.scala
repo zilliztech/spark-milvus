@@ -19,6 +19,7 @@ import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusFieldData,
   MilvusOption,
+  MilvusRateLimitException,
   MilvusRpcException,
   MilvusSchemaUtil
 }
@@ -59,8 +60,16 @@ case class MilvusInsertDataWriter(
   private var totalSize = 0
   private var currentHandledBuffer = Seq.empty[FieldData]
 
-  private def flushBuffer(retries: Int = milvusOption.retryCount): Unit = {
-    if (retries <= 0) {
+  private val maxRateLimitRetries = 10
+  private val initialRateLimitDelay = 500L
+  private val maxRateLimitDelay = 10000L
+
+  private def flushBuffer(
+      retries: Int = milvusOption.retryCount,
+      rateLimitRetries: Int = maxRateLimitRetries,
+      rateLimitDelay: Long = initialRateLimitDelay
+  ): Unit = {
+    if (retries <= 0 && rateLimitRetries <= 0) {
       throw new MilvusRpcException("Flush buffer failed")
     }
     if (currentHandledBuffer.isEmpty) {
@@ -86,12 +95,24 @@ case class MilvusInsertDataWriter(
           throw e
       }
     } catch {
+      case e: MilvusRateLimitException =>
+        if (rateLimitRetries <= 0) {
+          throw new MilvusRpcException(s"Flush buffer failed after rate limit retries: ${e.getMessage}")
+        }
+        logWarning(
+          s"Rate limit hit, backing off ${rateLimitDelay}ms, remaining retries: ${rateLimitRetries}, error: ${e.getMessage}"
+        )
+        Thread.sleep(rateLimitDelay)
+        flushBuffer(retries, rateLimitRetries - 1, Math.min(rateLimitDelay * 2, maxRateLimitDelay))
       case e: Exception =>
+        if (retries <= 0) {
+          throw new MilvusRpcException(s"Flush buffer failed: ${e.getMessage}")
+        }
         logWarning(
           s"Flush buffer failed, retries: ${retries}, error: ${e.getMessage}"
         )
         Thread.sleep(milvusOption.retryInterval)
-        flushBuffer(retries - 1)
+        flushBuffer(retries - 1, rateLimitRetries, rateLimitDelay)
     }
   }
 
