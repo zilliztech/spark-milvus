@@ -39,12 +39,15 @@ object Dependencies {
     "org.apache.spark" %% "spark-mllib" % sparkVersion % "provided,test" excludeAll(
       ExclusionRule(organization = "org.apache.arrow")
     )
+  // Hadoop / Parquet 已由 Spark 发行版（镜像 /opt/spark/jars）提供，
+  // 标 provided 避免被 sbt assembly 打入 fat jar，否则与运行时 classpath 冲突
+  // 引发 "X not a subtype of Y" 类加载错误（特别是开 userClassPathFirst 时）
   lazy val parquetHadoop =
-    "org.apache.parquet" % "parquet-hadoop" % parquetVersion
+    "org.apache.parquet" % "parquet-hadoop" % parquetVersion % "provided,test"
   lazy val hadoopCommon =
-    "org.apache.hadoop" % "hadoop-common" % hadoopVersion exclude ("javax.activation", "activation")
+    "org.apache.hadoop" % "hadoop-common" % hadoopVersion % "provided,test" exclude ("javax.activation", "activation")
   lazy val hadoopAws =
-    "org.apache.hadoop" % "hadoop-aws" % hadoopVersion exclude("software.amazon.awssdk", "bundle")
+    "org.apache.hadoop" % "hadoop-aws" % hadoopVersion % "provided,test" exclude("software.amazon.awssdk", "bundle")
   lazy val awsSdkS3 =
     "software.amazon.awssdk" % "s3" % "2.30.38" // doc: https://javadoc.io/doc/software.amazon.awssdk/s3/2.30.38/index.html
   lazy val awsSdkS3Transfer = 

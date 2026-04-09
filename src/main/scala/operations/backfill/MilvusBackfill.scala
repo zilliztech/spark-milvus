@@ -1,39 +1,55 @@
 package com.zilliz.spark.connector.operations.backfill
 
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.util.CaseInsensitiveStringMap
-import org.apache.spark.sql.connector.write.DataWriter
-import org.slf4j.LoggerFactory
-
-import com.zilliz.spark.connector.write.{MilvusLoonBatchWrite, MilvusLoonCommitMessage, MilvusLoonWriter}
-import com.zilliz.spark.connector.{MilvusClient, MilvusConnectionParams, MilvusOption}
-import com.zilliz.spark.connector.read.{MilvusSnapshotReader, SnapshotMetadata, StorageV2ManifestItem}
-
-import org.apache.hadoop.fs.Path
 import scala.collection.JavaConverters._
 
+import org.apache.hadoop.fs.Path
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.write.DataWriter
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.slf4j.LoggerFactory
 
-/**
- * Backfill operation for Milvus collections
- *
- * This object provides functionality to backfill new fields into existing Milvus collections
- * by reading the original data, joining with new field data, and writing per-segment binlog files.
- */
+import com.zilliz.spark.connector.{
+  MilvusClient,
+  MilvusConnectionParams,
+  MilvusOption
+}
+import com.zilliz.spark.connector.read.{
+  MilvusSnapshotReader,
+  SnapshotMetadata,
+  StorageV2ManifestItem
+}
+import com.zilliz.spark.connector.write.{
+  MilvusLoonBatchWrite,
+  MilvusLoonCommitMessage,
+  MilvusLoonWriter
+}
+
+/** Backfill operation for Milvus collections
+  *
+  * This object provides functionality to backfill new fields into existing
+  * Milvus collections by reading the original data, joining with new field
+  * data, and writing per-segment binlog files.
+  */
 object MilvusBackfill {
 
   private val logger = LoggerFactory.getLogger(getClass)
 
-  /**
-   * Backfill new fields into a Milvus collection
-   *
-   * @param spark SparkSession
-   * @param backfillDataPath Path to Parquet file containing new field data with schema (pk, new_field1, new_field2, ...)
-   * @param snapshotPath Path to Milvus snapshot metadata JSON file
-   * @param config Backfill configuration
-   * @return Either error or successful result
-   */
+  /** Backfill new fields into a Milvus collection
+    *
+    * @param spark
+    *   SparkSession
+    * @param backfillDataPath
+    *   Path to Parquet file containing new field data with schema (pk,
+    *   new_field1, new_field2, ...)
+    * @param snapshotPath
+    *   Path to Milvus snapshot metadata JSON file
+    * @param config
+    *   Backfill configuration
+    * @return
+    *   Either error or successful result
+    */
   def run(
       spark: SparkSession,
       backfillDataPath: String,
@@ -45,22 +61,28 @@ object MilvusBackfill {
 
     // Validate S3/writer configuration (always required)
     config.validate() match {
-      case Left(error) => return Left(SchemaValidationError(s"Invalid configuration: $error"))
+      case Left(error) =>
+        return Left(SchemaValidationError(s"Invalid configuration: $error"))
       case Right(_) => // Continue
     }
 
     // Step 1: Try to load snapshot metadata
-    val snapshotMetadataOpt = loadSnapshotMetadata(spark, snapshotPath, config) match {
-      case Left(error) => return Left(error)
-      case Right(opt) => opt
-    }
+    val snapshotMetadataOpt =
+      loadSnapshotMetadata(spark, snapshotPath, config) match {
+        case Left(error) => return Left(error)
+        case Right(opt)  => opt
+      }
 
     // Step 2: Create Milvus client only if no snapshot is available
     var client: MilvusClient = null
     if (snapshotMetadataOpt.isEmpty) {
       config.validateForClientMode() match {
-        case Left(error) => return Left(SchemaValidationError(
-          s"No snapshot provided and invalid client configuration: $error"))
+        case Left(error) =>
+          return Left(
+            SchemaValidationError(
+              s"No snapshot provided and invalid client configuration: $error"
+            )
+          )
         case Right(_) =>
       }
       client = MilvusClient(
@@ -76,49 +98,68 @@ object MilvusBackfill {
       // Step 3: Get PK field info
       val (pkName, pkFieldId) = snapshotMetadataOpt match {
         case Some(metadata) =>
-          val pkField = metadata.collection.schema.fields.find(_.isPrimaryKey.getOrElse(false))
-            .getOrElse(return Left(SchemaValidationError("No primary key field found in snapshot schema")))
+          val pkField = metadata.collection.schema.fields
+            .find(_.isPrimaryKey.getOrElse(false))
+            .getOrElse(
+              return Left(
+                SchemaValidationError(
+                  "No primary key field found in snapshot schema"
+                )
+              )
+            )
           (pkField.name, pkField.getFieldIDAsLong)
         case None =>
           client.getPkField(config.databaseName, config.collectionName) match {
             case scala.util.Success((name, id)) => (name, id)
-            case scala.util.Failure(e) => return Left(ConnectionError(
-              message = s"Failed to get PK field: ${e.getMessage}", cause = Some(e)))
+            case scala.util.Failure(e) =>
+              return Left(
+                ConnectionError(
+                  message = s"Failed to get PK field: ${e.getMessage}",
+                  cause = Some(e)
+                )
+              )
           }
       }
 
       // Read backfill data from Parquet
-      val backfillDF = readBackfillData(spark, backfillDataPath) match {
+      val backfillDF = readBackfillData(spark, backfillDataPath, config) match {
         case Left(error) => return Left(error)
-        case Right(df) => df
+        case Right(df)   => df
       }
 
       // Read original collection data with segment metadata
-      val originalDF = readCollectionWithMetadata(spark, config, pkFieldId, snapshotMetadataOpt) match {
+      val originalDF = readCollectionWithMetadata(
+        spark,
+        config,
+        pkFieldId,
+        snapshotMetadataOpt
+      ) match {
         case Left(error) => return Left(error)
-        case Right(df) => df
+        case Right(df)   => df
       }
 
       // Validate schema compatibility
       validateSchemaCompatibility(originalDF, backfillDF, pkName) match {
         case Left(error) => return Left(error)
-        case Right(_) => // Continue
+        case Right(_)    => // Continue
       }
 
       // Perform Sort Merge Join
       val joinedDF = performJoin(originalDF, backfillDF, pkName)
 
       // Step 4: Get collection metadata (collectionID, segment-to-partition mapping, base paths)
-      val (collectionID, segmentToPartitionMap, segmentBasePathMap) = snapshotMetadataOpt match {
-        case Some(metadata) =>
-          extractMetadataFromSnapshot(metadata)
-        case None =>
-          val (colId, segPartMap) = retrieveMilvusMetadata(config, client) match {
-            case Left(error) => return Left(error)
-            case Right(metadata) => metadata
-          }
-          (colId, segPartMap, Map.empty[Long, String])
-      }
+      val (collectionID, segmentToPartitionMap, segmentBasePathMap) =
+        snapshotMetadataOpt match {
+          case Some(metadata) =>
+            extractMetadataFromSnapshot(metadata)
+          case None =>
+            val (colId, segPartMap) =
+              retrieveMilvusMetadata(config, client) match {
+                case Left(error)     => return Left(error)
+                case Right(metadata) => metadata
+              }
+            (colId, segPartMap, Map.empty[Long, String])
+        }
 
       // Extract new field names
       val newFieldNames = backfillDF.schema.fields
@@ -131,17 +172,23 @@ object MilvusBackfill {
         case Some(metadata) =>
           MilvusSnapshotReader.getFieldNameToIdMap(metadata.collection.schema)
         case None =>
-          return Left(SchemaValidationError(
-            "ADDFIELD backfill requires field ID mapping from snapshot. " +
-            "Please provide a snapshot path to resolve correct field IDs."))
+          return Left(
+            SchemaValidationError(
+              "ADDFIELD backfill requires field ID mapping from snapshot. " +
+                "Please provide a snapshot path to resolve correct field IDs."
+            )
+          )
       }
 
       // Filter to only the new fields being backfilled, fail fast if any field is missing from snapshot schema
       val missing = newFieldNames.filterNot(fieldNameToId.contains)
       if (missing.nonEmpty) {
-        return Left(SchemaValidationError(
-          s"Fields not found in snapshot schema: ${missing.mkString(", ")}. " +
-          s"Available fields: ${fieldNameToId.keys.mkString(", ")}"))
+        return Left(
+          SchemaValidationError(
+            s"Fields not found in snapshot schema: ${missing.mkString(", ")}. " +
+              s"Available fields: ${fieldNameToId.keys.mkString(", ")}"
+          )
+        )
       }
       val newFieldNameToId = newFieldNames.map(n => n -> fieldNameToId(n)).toMap
 
@@ -156,7 +203,7 @@ object MilvusBackfill {
         newFieldNames,
         newFieldNameToId
       ) match {
-        case Left(error) => return Left(error)
+        case Left(error)    => return Left(error)
         case Right(results) => results
       }
 
@@ -191,51 +238,63 @@ object MilvusBackfill {
     }
   }
 
-  /**
-   * Read backfill data from Parquet file
-   */
+  /** Read backfill data from Parquet file
+    */
   private def readBackfillData(
       spark: SparkSession,
-      path: String
+      path: String,
+      config: BackfillConfig
   ): Either[BackfillError, DataFrame] = {
     try {
+      // Ensure Hadoop S3A is configured for the source bucket (may differ
+      // from the Milvus storage bucket) before reading the parquet.
+      configureHadoopS3ForPath(spark, path, config, isSource = true)
       val df = spark.read.parquet(path)
 
       // Validate that it has a 'pk' column
       if (!df.columns.contains("pk")) {
-        return Left(DataReadError(
-          path = path,
-          message = "Backfill data must contain a 'pk' column"
-        ))
+        return Left(
+          DataReadError(
+            path = path,
+            message = "Backfill data must contain a 'pk' column"
+          )
+        )
       }
 
       // Validate that it has at least one other column
       if (df.columns.length < 2) {
-        return Left(DataReadError(
-          path = path,
-          message = "New field data must contain at least one field besides 'pk'"
-        ))
+        return Left(
+          DataReadError(
+            path = path,
+            message =
+              "New field data must contain at least one field besides 'pk'"
+          )
+        )
       }
 
       Right(df)
     } catch {
       case e: Exception =>
         logger.error(s"Failed to read Parquet file from $path", e)
-        Left(DataReadError(
-          path = path,
-          message = s"Failed to read Parquet file: ${e.getMessage}",
-          cause = Some(e)
-        ))
+        Left(
+          DataReadError(
+            path = path,
+            message = s"Failed to read Parquet file: ${e.getMessage}",
+            cause = Some(e)
+          )
+        )
     }
   }
 
-  /**
-   * Read collection data with segment_id and row_offset metadata
-   * segment_id and row_offset are used to match with the original sequence of rows for each segment
-   *
-   * @param pkFieldId Primary key field ID to read only PK field
-   * @param snapshotMetadata Optional snapshot metadata for offline reading (no client connection)
-   */
+  /** Read collection data with segment_id and row_offset metadata segment_id
+    * and row_offset are used to match with the original sequence of rows for
+    * each segment
+    *
+    * @param pkFieldId
+    *   Primary key field ID to read only PK field
+    * @param snapshotMetadata
+    *   Optional snapshot metadata for offline reading (no client connection)
+    */
   private def readCollectionWithMetadata(
       spark: SparkSession,
       config: BackfillConfig,
@@ -253,24 +312,32 @@ object MilvusBackfill {
 
         // Override connection options for snapshot mode (no client needed)
         options = options + ("milvus.uri" -> "dummy://snapshot-mode")
-        options = options + ("milvus.collection.name" -> metadata.collection.schema.name)
+        options =
+          options + ("milvus.collection.name" -> metadata.collection.schema.name)
 
         // Add snapshot collection ID
-        options = options + (MilvusOption.SnapshotCollectionId -> metadata.snapshotInfo.collectionId.toString)
+        options =
+          options + (MilvusOption.SnapshotCollectionId -> metadata.snapshotInfo.collectionId.toString)
 
         // Add snapshot partition IDs
-        options = options + (MilvusOption.SnapshotPartitionIds -> metadata.snapshotInfo.partitionIds.mkString(","))
+        options =
+          options + (MilvusOption.SnapshotPartitionIds -> metadata.snapshotInfo.partitionIds
+            .mkString(","))
 
         // Convert snapshot schema to protobuf bytes and pass as Base64
-        val schemaBytes = MilvusSnapshotReader.toProtobufSchemaBytes(metadata.collection.schema)
-        val schemaBytesBase64 = java.util.Base64.getEncoder.encodeToString(schemaBytes)
-        options = options + (MilvusOption.SnapshotSchemaBytes -> schemaBytesBase64)
+        val schemaBytes =
+          MilvusSnapshotReader.toProtobufSchemaBytes(metadata.collection.schema)
+        val schemaBytesBase64 =
+          java.util.Base64.getEncoder.encodeToString(schemaBytes)
+        options =
+          options + (MilvusOption.SnapshotSchemaBytes -> schemaBytesBase64)
 
         metadata.storageV2ManifestList.foreach { manifestList =>
           // Pass original manifest JSON (containing both ver and base_path) so that
           // the DataSource can extract readVersion and lock reads to snapshot version
           if (manifestList.nonEmpty) {
-            val manifestJson = MilvusSnapshotReader.serializeManifestList(manifestList)
+            val manifestJson =
+              MilvusSnapshotReader.serializeManifestList(manifestList)
             options = options + (MilvusOption.SnapshotManifests -> manifestJson)
           } else {
             logger.warn("No valid manifests found in snapshot")
@@ -283,17 +350,25 @@ object MilvusBackfill {
         case Some(metadata) =>
           // For snapshot mode, only include the PK field we need to read (not all user fields)
           // FFI reader will only read the columns specified in the schema
-          val pkField = metadata.collection.schema.fields.find(_.getFieldIDAsLong == pkFieldId)
+          val pkField = metadata.collection.schema.fields
+            .find(_.getFieldIDAsLong == pkFieldId)
           val pkSchema = pkField match {
             case Some(field) =>
               // Create schema with only the PK field
               import org.apache.spark.sql.types._
               val pkFieldType = MilvusSnapshotReader.fieldToSparkType(field)
-              StructType(Seq(StructField(field.name, pkFieldType, nullable = true)))
+              StructType(
+                Seq(StructField(field.name, pkFieldType, nullable = true))
+              )
             case None =>
               // Fallback: use full schema if PK field not found
-              logger.warn(s"PK field with ID $pkFieldId not found in snapshot schema, using full schema")
-              MilvusSnapshotReader.toSparkSchema(metadata.collection.schema, includeSystemFields = false)
+              logger.warn(
+                s"PK field with ID $pkFieldId not found in snapshot schema, using full schema"
+              )
+              MilvusSnapshotReader.toSparkSchema(
+                metadata.collection.schema,
+                includeSystemFields = false
+              )
           }
 
           // Add extra columns for segment tracking
@@ -301,44 +376,56 @@ object MilvusBackfill {
             .add("segment_id", org.apache.spark.sql.types.LongType, false)
             .add("row_offset", org.apache.spark.sql.types.LongType, false)
 
-          logger.info(s"Reading with schema: ${fullSchema.fieldNames.mkString(", ")}")
+          logger.info(
+            s"Reading with schema: ${fullSchema.fieldNames.mkString(", ")}"
+          )
 
           spark.read
             .schema(fullSchema)
-            .format("milvus")
+            .format("com.zilliz.spark.connector.sources.MilvusDataSource")
             .options(options)
             .load()
 
         case None =>
           // Client-based mode (existing behavior)
           spark.read
-            .format("milvus")
+            .format("com.zilliz.spark.connector.sources.MilvusDataSource")
             .options(options)
             .load()
       }
 
       // Validate that segment_id and row_offset are present
-      if (!df.columns.contains("segment_id") || !df.columns.contains("row_offset")) {
-        return Left(ConnectionError(
-          message = "Failed to read collection data with segment_id and row_offset. " +
-            "Ensure milvus.extra.columns is set correctly."
-        ))
+      if (
+        !df.columns.contains("segment_id") || !df.columns.contains("row_offset")
+      ) {
+        return Left(
+          ConnectionError(
+            message =
+              "Failed to read collection data with segment_id and row_offset. " +
+                "Ensure milvus.extra.columns is set correctly."
+          )
+        )
       }
 
       Right(df)
     } catch {
       case e: Exception =>
-        logger.error(s"Failed to read Milvus collection ${config.collectionName}", e)
-        Left(ConnectionError(
-          message = s"Failed to read Milvus collection ${config.collectionName}: ${e.getMessage}",
-          cause = Some(e)
-        ))
+        logger.error(
+          s"Failed to read Milvus collection ${config.collectionName}",
+          e
+        )
+        Left(
+          ConnectionError(
+            message =
+              s"Failed to read Milvus collection ${config.collectionName}: ${e.getMessage}",
+            cause = Some(e)
+          )
+        )
     }
   }
 
-  /**
-   * Validate schema compatibility between original and new field data
-   */
+  /** Validate schema compatibility between original and new field data
+    */
   private def validateSchemaCompatibility(
       originalDF: DataFrame,
       backfillDF: DataFrame,
@@ -346,24 +433,32 @@ object MilvusBackfill {
   ): Either[BackfillError, Unit] = {
     try {
       // Find the primary key field in original data
-      val pkField = originalDF.schema.fields.find(_.name == pkName)
+      val pkField = originalDF.schema.fields
+        .find(_.name == pkName)
         .getOrElse {
-          return Left(SchemaValidationError(
-            s"Original collection data must have primary key field '$pkName'"
-          ))
+          return Left(
+            SchemaValidationError(
+              s"Original collection data must have primary key field '$pkName'"
+            )
+          )
         }
 
       // Find the pk field in new field data
-      val newPkField = backfillDF.schema.fields.find(_.name == "pk")
+      val newPkField = backfillDF.schema.fields
+        .find(_.name == "pk")
         .getOrElse {
-          return Left(SchemaValidationError("New field data must have 'pk' field"))
+          return Left(
+            SchemaValidationError("New field data must have 'pk' field")
+          )
         }
 
       // Validate types match
       if (pkField.dataType != newPkField.dataType) {
-        return Left(SchemaValidationError(
-          s"Primary key type mismatch: original=${pkField.dataType}, new=${newPkField.dataType}"
-        ))
+        return Left(
+          SchemaValidationError(
+            s"Primary key type mismatch: original=${pkField.dataType}, new=${newPkField.dataType}"
+          )
+        )
       }
 
       Right(())
@@ -371,15 +466,16 @@ object MilvusBackfill {
     } catch {
       case e: Exception =>
         logger.error("Failed to validate schema compatibility", e)
-        Left(SchemaValidationError(
-          s"Failed to validate schema compatibility: ${e.getMessage}"
-        ))
+        Left(
+          SchemaValidationError(
+            s"Failed to validate schema compatibility: ${e.getMessage}"
+          )
+        )
     }
   }
 
-  /**
-   * Perform left join between original and new field data
-   */
+  /** Perform left join between original and new field data
+    */
   private def performJoin(
       originalDF: DataFrame,
       backfillDF: DataFrame,
@@ -388,26 +484,32 @@ object MilvusBackfill {
     originalDF.join(backfillDF, originalDF(pkName) === backfillDF("pk"), "left")
   }
 
-  /**
-   * Retrieve Milvus metadata (collection ID and segment-to-partition mapping)
-   * Supports multi-partition collections by tracking partition ID for each segment
-   */
+  /** Retrieve Milvus metadata (collection ID and segment-to-partition mapping)
+    * Supports multi-partition collections by tracking partition ID for each
+    * segment
+    */
   private def retrieveMilvusMetadata(
       config: BackfillConfig,
       client: MilvusClient
   ): Either[BackfillError, (Long, Map[Long, Long])] = {
     try {
-      val segments = client.getSegments(config.databaseName, config.collectionName)
+      val segments = client
+        .getSegments(config.databaseName, config.collectionName)
         .getOrElse {
-          return Left(ConnectionError(
-            message = s"No segments found for collection ${config.collectionName}"
-          ))
+          return Left(
+            ConnectionError(
+              message =
+                s"No segments found for collection ${config.collectionName}"
+            )
+          )
         }
 
       if (segments.isEmpty) {
-        return Left(ConnectionError(
-          message = s"Collection ${config.collectionName} has no segments"
-        ))
+        return Left(
+          ConnectionError(
+            message = s"Collection ${config.collectionName} has no segments"
+          )
+        )
       }
 
       val collectionID = segments.head.collectionID
@@ -421,19 +523,23 @@ object MilvusBackfill {
 
     } catch {
       case e: Exception =>
-        logger.error(s"Failed to retrieve Milvus metadata for collection ${config.collectionName}", e)
-        Left(ConnectionError(
-          message = s"Failed to retrieve Milvus metadata: ${e.getMessage}",
-          cause = Some(e)
-        ))
+        logger.error(
+          s"Failed to retrieve Milvus metadata for collection ${config.collectionName}",
+          e
+        )
+        Left(
+          ConnectionError(
+            message = s"Failed to retrieve Milvus metadata: ${e.getMessage}",
+            cause = Some(e)
+          )
+        )
     }
   }
 
-  /**
-   * Process each segment separately by distributing to Spark executors
-   * Each segment is processed by exactly one FFI writer on a single executor
-   * Supports multi-partition collections by tracking partition ID per segment
-   */
+  /** Process each segment separately by distributing to Spark executors Each
+    * segment is processed by exactly one FFI writer on a single executor
+    * Supports multi-partition collections by tracking partition ID per segment
+    */
   private def processSegments(
       spark: SparkSession,
       joinedDF: DataFrame,
@@ -466,32 +572,39 @@ object MilvusBackfill {
       // ExternalSorter stores references to the same mutable buffer, causing all
       // rows to contain the last row's data.
       val repartitionedRDD = preparedDF.queryExecution.toRdd
-        .map(_.copy())  // Materialize each row to avoid UnsafeRow reuse
-        .keyBy(_.getLong(0))  // segment_id is at index 0
+        .map(_.copy()) // Materialize each row to avoid UnsafeRow reuse
+        .keyBy(_.getLong(0)) // segment_id is at index 0
         .partitionBy(segmentPartitioner)
         .values
-        .mapPartitions(iter => iter.toSeq.sortBy(_.getLong(1)).iterator)  // Sort by row_offset
+        .mapPartitions(iter =>
+          iter.toSeq.sortBy(_.getLong(1)).iterator
+        ) // Sort by row_offset
 
       // Broadcast configuration to executors
       val broadcastConfig = spark.sparkContext.broadcast(config)
       val broadcastCollectionID = spark.sparkContext.broadcast(collectionID)
-      val broadcastSegmentToPartitionMap = spark.sparkContext.broadcast(segmentToPartitionMap)
-      val broadcastSegmentBasePathMap = spark.sparkContext.broadcast(segmentBasePathMap)
+      val broadcastSegmentToPartitionMap =
+        spark.sparkContext.broadcast(segmentToPartitionMap)
+      val broadcastSegmentBasePathMap =
+        spark.sparkContext.broadcast(segmentBasePathMap)
       val broadcastTargetSchema = spark.sparkContext.broadcast(targetSchema)
       val broadcastFieldNameToId = spark.sparkContext.broadcast(fieldNameToId)
 
-      val results = repartitionedRDD.mapPartitions { iter =>
-        if (!iter.hasNext) Iterator.empty
-        else processSegmentPartition(
-          iter,
-          broadcastConfig.value,
-          broadcastCollectionID.value,
-          broadcastSegmentToPartitionMap.value,
-          broadcastSegmentBasePathMap.value,
-          broadcastTargetSchema.value,
-          broadcastFieldNameToId.value
-        )
-      }.collect()
+      val results = repartitionedRDD
+        .mapPartitions { iter =>
+          if (!iter.hasNext) Iterator.empty
+          else
+            processSegmentPartition(
+              iter,
+              broadcastConfig.value,
+              broadcastCollectionID.value,
+              broadcastSegmentToPartitionMap.value,
+              broadcastSegmentBasePathMap.value,
+              broadcastTargetSchema.value,
+              broadcastFieldNameToId.value
+            )
+        }
+        .collect()
 
       // Cleanup broadcast variables
       broadcastConfig.unpersist()
@@ -506,12 +619,15 @@ object MilvusBackfill {
       if (failures.nonEmpty) {
         val firstFailure = failures.head
         val error = firstFailure._2.get
-        return Left(WriteError(
-          segmentId = firstFailure._1.segmentId,
-          outputPath = firstFailure._1.outputPath,
-          message = s"Failed to write ${failures.length} segment(s): ${error.getMessage}",
-          cause = Some(error)
-        ))
+        return Left(
+          WriteError(
+            segmentId = firstFailure._1.segmentId,
+            outputPath = firstFailure._1.outputPath,
+            message =
+              s"Failed to write ${failures.length} segment(s): ${error.getMessage}",
+            cause = Some(error)
+          )
+        )
       }
 
       // Extract successful results
@@ -535,18 +651,19 @@ object MilvusBackfill {
     } catch {
       case e: Exception =>
         logger.error("Failed to process segments", e)
-        Left(SegmentProcessingError(
-          segmentId = -1,
-          message = s"Failed to process segments: ${e.getMessage}",
-          cause = Some(e)
-        ))
+        Left(
+          SegmentProcessingError(
+            segmentId = -1,
+            message = s"Failed to process segments: ${e.getMessage}",
+            cause = Some(e)
+          )
+        )
     }
   }
 
-  /**
-   * Process a single partition containing exactly one segment
-   * This is called by each Spark executor to write one segment's data
-   */
+  /** Process a single partition containing exactly one segment This is called
+    * by each Spark executor to write one segment's data
+    */
   private def processSegmentPartition(
       iter: Iterator[InternalRow],
       config: BackfillConfig,
@@ -564,25 +681,39 @@ object MilvusBackfill {
 
     // Create writer — use manifest basePath if available, otherwise generate path
     val writeOptions = segmentBasePathMap.get(segmentID) match {
-      case Some(basePath) => config.getS3WriteOptionsForBasePath(basePath, segmentID, fieldNameToId)
-      case None => config.getS3WriteOptions(collectionID, partitionID, segmentID, fieldNameToId)
+      case Some(basePath) =>
+        config.getS3WriteOptionsForBasePath(basePath, segmentID, fieldNameToId)
+      case None =>
+        config.getS3WriteOptions(
+          collectionID,
+          partitionID,
+          segmentID,
+          fieldNameToId
+        )
     }
     val outputPath = writeOptions("milvus.writer.customPath")
 
     val optionsMap = new CaseInsensitiveStringMap(writeOptions.asJava)
-    val batchWrite = new MilvusLoonBatchWrite(targetSchema, MilvusOption(optionsMap))
-    val writer = batchWrite.createBatchWriterFactory(null).createWriter(0, System.currentTimeMillis())
+    val batchWrite =
+      new MilvusLoonBatchWrite(targetSchema, MilvusOption(optionsMap))
+    val writer = batchWrite
+      .createBatchWriterFactory(null)
+      .createWriter(0, System.currentTimeMillis())
 
     try {
       var rowCount = 0L
       var nullRowCount = 0L
 
       def writeRow(row: InternalRow): Unit = {
-        val targetFields = (2 until row.numFields).map(i =>
-          row.get(i, targetSchema.fields(i - 2).dataType)
-        ).toArray
+        val targetFields = (2 until row.numFields)
+          .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
+          .toArray
         if (targetFields.forall(_ == null)) nullRowCount += 1
-        writer.write(new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(targetFields))
+        writer.write(
+          new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(
+            targetFields
+          )
+        )
         rowCount += 1
       }
 
@@ -591,41 +722,51 @@ object MilvusBackfill {
 
       val commitMessage = writer.commit()
       val (manifestPaths, committedVersion) = commitMessage match {
-        case msg: MilvusLoonCommitMessage => (Seq(msg.manifestPath), msg.committedVersion)
+        case msg: MilvusLoonCommitMessage =>
+          (Seq(msg.manifestPath), msg.committedVersion)
         case _ => (Seq.empty[String], -1L)
       }
 
       batchWrite.commit(Array(commitMessage))
       writer.close()
 
-      Iterator.single((SegmentBackfillResult(
-        segmentId = segmentID,
-        rowCount = rowCount,
-        manifestPaths = manifestPaths,
-        outputPath = outputPath,
-        executionTimeMs = System.currentTimeMillis() - startTime,
-        committedVersion = committedVersion
-      ), None))
+      Iterator.single(
+        (
+          SegmentBackfillResult(
+            segmentId = segmentID,
+            rowCount = rowCount,
+            manifestPaths = manifestPaths,
+            outputPath = outputPath,
+            executionTimeMs = System.currentTimeMillis() - startTime,
+            committedVersion = committedVersion
+          ),
+          None
+        )
+      )
 
     } catch {
       case e: Exception =>
         writer.abort()
         writer.close()
-        Iterator.single((SegmentBackfillResult(
-          segmentId = segmentID,
-          rowCount = 0,
-          manifestPaths = Seq.empty,
-          outputPath = outputPath,
-          executionTimeMs = System.currentTimeMillis() - startTime
-        ), Some(e)))
+        Iterator.single(
+          (
+            SegmentBackfillResult(
+              segmentId = segmentID,
+              rowCount = 0,
+              manifestPaths = Seq.empty,
+              outputPath = outputPath,
+              executionTimeMs = System.currentTimeMillis() - startTime
+            ),
+            Some(e)
+          )
+        )
     }
   }
 
-  /**
-   * Load and parse snapshot metadata from file.
-   * Returns None if snapshot path is empty.
-   * Returns Left(error) if snapshot path is provided but parsing fails.
-   */
+  /** Load and parse snapshot metadata from file. Returns None if snapshot path
+    * is empty. Returns Left(error) if snapshot path is provided but parsing
+    * fails.
+    */
   private def loadSnapshotMetadata(
       spark: SparkSession,
       snapshotPath: String,
@@ -638,19 +779,26 @@ object MilvusBackfill {
         MilvusSnapshotReader.parseSnapshotMetadata(json) match {
           case Right(metadata) => Right(Some(metadata))
           case Left(e) =>
-            Left(SchemaValidationError(s"Failed to parse snapshot metadata: ${e.getMessage}"))
+            Left(
+              SchemaValidationError(
+                s"Failed to parse snapshot metadata: ${e.getMessage}"
+              )
+            )
         }
       case Right(_) =>
         Left(SchemaValidationError(s"Snapshot file is empty: $snapshotPath"))
       case Left(e) =>
-        Left(SchemaValidationError(s"Failed to read snapshot file: ${e.getMessage}"))
+        Left(
+          SchemaValidationError(s"Failed to read snapshot file: ${e.message}")
+        )
     }
   }
 
-  /**
-   * Extract collection metadata from snapshot: collectionID, segment-to-partition mapping, segment base paths.
-   * Partition IDs are derived from manifest basePaths: {rootPath}/insert_log/{col_id}/{part_id}/{seg_id}
-   */
+  /** Extract collection metadata from snapshot: collectionID,
+    * segment-to-partition mapping, segment base paths. Partition IDs are
+    * derived from manifest basePaths:
+    * {rootPath}/insert_log/{col_id}/{part_id}/{seg_id}
+    */
   private def extractMetadataFromSnapshot(
       metadata: SnapshotMetadata
   ): (Long, Map[Long, Long], Map[Long, String]) = {
@@ -674,47 +822,147 @@ object MilvusBackfill {
               segmentToPartitionMap += (segId -> partitionId)
             } catch {
               case _: NumberFormatException =>
-                logger.warn(s"Skipping segment $segId: failed to parse partition ID from basePath: ${mc.basePath}")
+                logger.warn(
+                  s"Skipping segment $segId: failed to parse partition ID from basePath: ${mc.basePath}"
+                )
             }
           } else {
-            logger.warn(s"Skipping segment $segId: basePath does not contain expected insert_log structure: ${mc.basePath}")
+            logger.warn(
+              s"Skipping segment $segId: basePath does not contain expected insert_log structure: ${mc.basePath}"
+            )
           }
         case Left(e) =>
-          logger.warn(s"Failed to parse manifest for segment $segId: ${e.getMessage}")
+          logger.warn(
+            s"Failed to parse manifest for segment $segId: ${e.getMessage}"
+          )
       }
     }
 
-    logger.info(s"Extracted from snapshot: collectionID=$collectionID, " +
-      s"segments=${segmentBasePathMap.keys.mkString(",")}")
+    logger.info(
+      s"Extracted from snapshot: collectionID=$collectionID, " +
+        s"segments=${segmentBasePathMap.keys.mkString(",")}"
+    )
 
     (collectionID, segmentToPartitionMap, segmentBasePathMap)
   }
 
-  /**
-   * Write backfill result JSON to the given output path (S3 or local).
-   * Uses Spark's Hadoop FileSystem API for portability.
-   */
-  def writeResultJson(spark: SparkSession, result: BackfillResult, outputPath: String): Unit = {
+  /** Write backfill result JSON to the given output path (S3 or local). Uses
+    * Spark's Hadoop FileSystem API for portability.
+    */
+  def writeResultJson(
+      spark: SparkSession,
+      result: BackfillResult,
+      outputPath: String
+  ): Unit = {
     try {
       val hadoopPath = new Path(outputPath)
       val fs = hadoopPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
       val out = fs.create(hadoopPath, true)
       try {
-        out.write(result.toJson.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        out.write(
+          result.toJson.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+        )
       } finally {
         out.close()
       }
       logger.info(s"Backfill result JSON written to: $outputPath")
     } catch {
       case e: Exception =>
-        logger.error(s"Failed to write result JSON to $outputPath: ${e.getMessage}", e)
+        logger.error(
+          s"Failed to write result JSON to $outputPath: ${e.getMessage}",
+          e
+        )
     }
   }
 
-  /**
-   * Read snapshot JSON content from S3 or local file system.
-   * Returns the JSON string.
-   */
+  /** Configure Hadoop S3A credentials for the bucket referenced by `path`.
+    *
+    * Uses per-bucket keys (`fs.s3a.bucket.<bucket>.*`) so that the backfill
+    * *source* bucket and the Milvus storage bucket (snapshot / segments) can
+    * each use their own endpoint and credentials within the same Spark session.
+    * No-op for non-S3 paths.
+    *
+    * @param isSource
+    *   true when configuring the backfill input bucket — in that case we
+    *   consult the `sourceS3*` overrides and fall back to the main credentials
+    *   when a particular field is unset.
+    */
+  private def configureHadoopS3ForPath(
+      spark: SparkSession,
+      path: String,
+      config: BackfillConfig,
+      isSource: Boolean
+  ): Unit = {
+    if (path == null) return
+    if (!(path.startsWith("s3://") || path.startsWith("s3a://"))) return
+
+    // Extract bucket name from s3(a)://bucket/key
+    val withoutScheme = path.stripPrefix("s3a://").stripPrefix("s3://")
+    val bucket = {
+      val slash = withoutScheme.indexOf('/')
+      if (slash < 0) withoutScheme else withoutScheme.substring(0, slash)
+    }
+    if (bucket.isEmpty) return
+
+    // Resolve the effective credentials for this bucket. For the source bucket
+    // any unset override falls back to the main credentials, preserving the
+    // existing single-bucket behavior.
+    val endpoint =
+      if (isSource) config.sourceS3Endpoint.getOrElse(config.s3Endpoint)
+      else config.s3Endpoint
+    val accessKey =
+      if (isSource) config.sourceS3AccessKey.getOrElse(config.s3AccessKey)
+      else config.s3AccessKey
+    val secretKey =
+      if (isSource) config.sourceS3SecretKey.getOrElse(config.s3SecretKey)
+      else config.s3SecretKey
+    val useSSL =
+      if (isSource) config.sourceS3UseSSL.getOrElse(config.s3UseSSL)
+      else config.s3UseSSL
+    val useIam =
+      if (isSource) config.sourceS3UseIam.getOrElse(config.s3UseIam)
+      else config.s3UseIam
+
+    val hadoopConf = spark.sparkContext.hadoopConfiguration
+    val prefix = s"fs.s3a.bucket.$bucket"
+
+    // Endpoint + path style + SSL are safe to set in both IAM and static modes
+    if (endpoint != null && endpoint.nonEmpty) {
+      hadoopConf.set(s"$prefix.endpoint", endpoint)
+    }
+    hadoopConf.set(s"$prefix.path.style.access", "true")
+    hadoopConf.set(
+      s"$prefix.connection.ssl.enabled",
+      if (useSSL) "true" else "false"
+    )
+
+    if (useIam) {
+      // Defer credential resolution to the default AWS provider chain for
+      // this bucket (env vars, instance profile, IRSA web identity, etc.).
+      hadoopConf.set(
+        s"$prefix.aws.credentials.provider",
+        "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+      )
+    } else {
+      hadoopConf.set(s"$prefix.access.key", accessKey)
+      hadoopConf.set(s"$prefix.secret.key", secretKey)
+      // Force the simple static-credentials provider for this bucket so it
+      // doesn't get shadowed by a globally configured provider chain.
+      hadoopConf.set(
+        s"$prefix.aws.credentials.provider",
+        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+      )
+    }
+
+    logger.info(
+      s"Configured Hadoop S3A for bucket '$bucket' " +
+        s"(endpoint=$endpoint, useIam=$useIam, isSource=$isSource)"
+    )
+  }
+
+  /** Read snapshot JSON content from S3 or local file system. Returns the JSON
+    * string.
+    */
   private def readSnapshotJson(
       spark: SparkSession,
       snapshotPath: String,
@@ -726,7 +974,9 @@ object MilvusBackfill {
 
     try {
       // Check if it's an S3 path
-      if (snapshotPath.startsWith("s3://") || snapshotPath.startsWith("s3a://")) {
+      if (
+        snapshotPath.startsWith("s3://") || snapshotPath.startsWith("s3a://")
+      ) {
 
         // Construct full S3 path (ensure s3a:// scheme for Hadoop)
         val s3Path = if (snapshotPath.startsWith("s3://")) {
@@ -735,13 +985,10 @@ object MilvusBackfill {
           snapshotPath
         }
 
-        // Configure S3 settings in Spark's Hadoop Configuration
-        val hadoopConf = spark.sparkContext.hadoopConfiguration
-        hadoopConf.set("fs.s3a.endpoint", config.s3Endpoint)
-        hadoopConf.set("fs.s3a.access.key", config.s3AccessKey)
-        hadoopConf.set("fs.s3a.secret.key", config.s3SecretKey)
-        hadoopConf.set("fs.s3a.path.style.access", "true")
-        hadoopConf.set("fs.s3a.connection.ssl.enabled", if (config.s3UseSSL) "true" else "false")
+        // Configure S3 settings on Spark's Hadoop Configuration (per-bucket
+        // so that snapshot bucket and backfill source bucket can use
+        // different credentials in the same Spark session).
+        configureHadoopS3ForPath(spark, s3Path, config, isSource = false)
 
         // Use Spark's DataFrame API to read the file (avoids Hadoop version issues)
         val df = spark.read.text(s3Path)
@@ -762,7 +1009,13 @@ object MilvusBackfill {
     } catch {
       case e: Exception =>
         logger.error(s"Failed to read snapshot JSON: ${e.getMessage}", e)
-        Left(DataReadError(snapshotPath, s"Failed to read snapshot file: ${e.getMessage}", Some(e)))
+        Left(
+          DataReadError(
+            snapshotPath,
+            s"Failed to read snapshot file: ${e.getMessage}",
+            Some(e)
+          )
+        )
     }
   }
 
