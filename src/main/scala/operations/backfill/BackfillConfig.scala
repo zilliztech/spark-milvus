@@ -133,11 +133,18 @@ case class BackfillConfig(
       "fs.address" -> s3Endpoint,
       "fs.bucket_name" -> s3BucketName,
       "fs.root_path" -> s3RootPath,
-      "fs.access_key_id" -> s3AccessKey,
-      "fs.access_key_value" -> s3SecretKey,
       "fs.use_ssl" -> s3UseSSL.toString,
       "fs.use_iam" -> s3UseIam.toString
     )
+    // Only inject static credentials when NOT in IAM mode. Under IRSA the FFI
+    // must consult the AWS default credentials chain — passing fake AK/SK
+    // (or the "minioadmin" defaults from Properties.scala) breaks signing.
+    if (!s3UseIam) {
+      options = options ++ Map(
+        "fs.access_key_id" -> s3AccessKey,
+        "fs.access_key_value" -> s3SecretKey
+      )
+    }
 
     // Add optional configurations
     partitionName.foreach(p =>
@@ -174,8 +181,6 @@ case class BackfillConfig(
       "fs.address" -> s3Endpoint,
       "fs.bucket_name" -> s3BucketName,
       "fs.root_path" -> s3RootPath,
-      "fs.access_key_id" -> s3AccessKey,
-      "fs.access_key_value" -> s3SecretKey,
       "fs.use_ssl" -> s3UseSSL.toString,
       "fs.use_iam" -> s3UseIam.toString,
       "fs.region" -> s3Region,
@@ -184,6 +189,15 @@ case class BackfillConfig(
       "milvus.writer.commitType" -> "addfield",
       "milvus.insertMaxBatchSize" -> batchSize.toString
     )
+    // See getMilvusReadOptions: skip static credentials in IAM mode so the
+    // FFI defers to the AWS default credentials chain instead of signing
+    // with placeholder keys.
+    if (!s3UseIam) {
+      opts = opts ++ Map(
+        "fs.access_key_id" -> s3AccessKey,
+        "fs.access_key_value" -> s3SecretKey
+      )
+    }
     // Pass field name -> field ID mapping for correct column naming
     if (fieldNameToId.nonEmpty) {
       opts = opts + ("milvus.writer.fieldIds" -> fieldNameToId

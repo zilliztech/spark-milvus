@@ -213,12 +213,104 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       isSource = false
     )
     val hc = spark.sparkContext.hadoopConfiguration
-    hc.get(
-      "fs.s3a.bucket.irsa-bucket.aws.credentials.provider"
-    ) shouldBe "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+    val provider =
+      hc.get("fs.s3a.bucket.irsa-bucket.aws.credentials.provider")
+    // The IRSA-friendly chain must include WebIdentityTokenCredentialsProvider
+    // (used by both EKS service account tokens and GKE Workload Identity)
+    // and IAMInstanceCredentialsProvider for the EC2/EKS node fallback.
+    // The legacy v1 DefaultAWSCredentialsProviderChain must NOT be used
+    // because it has been unreliable on EKS pods.
+    provider should include(
+      "com.amazonaws.auth.WebIdentityTokenCredentialsProvider"
+    )
+    provider should include(
+      "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
+    )
+    provider should not include "DefaultAWSCredentialsProviderChain"
     // No static keys should be written in IAM mode
     hc.get("fs.s3a.bucket.irsa-bucket.access.key") shouldBe null
     hc.get("fs.s3a.bucket.irsa-bucket.secret.key") shouldBe null
+  }
+
+  // ============ normalizeS3Scheme ============
+
+  test("normalizeS3Scheme rewrites s3:// to s3a://") {
+    MilvusBackfill.normalizeS3Scheme(
+      "s3://bucket/key.parquet"
+    ) shouldBe "s3a://bucket/key.parquet"
+  }
+
+  test("normalizeS3Scheme leaves s3a:// and other schemes alone") {
+    MilvusBackfill.normalizeS3Scheme(
+      "s3a://bucket/key"
+    ) shouldBe "s3a://bucket/key"
+    MilvusBackfill.normalizeS3Scheme(
+      "file:///tmp/x"
+    ) shouldBe "file:///tmp/x"
+    MilvusBackfill.normalizeS3Scheme("/local/path") shouldBe "/local/path"
+    MilvusBackfill.normalizeS3Scheme(null) shouldBe null
+  }
+
+  // ============ parseArgs whitelist ============
+
+  test("parseArgs rejects unknown flags (typo guard)") {
+    // Common typos like --s3access-key (missing dash) should be rejected at
+    // parse time instead of being silently absorbed and later ignored.
+    val ex = intercept[IllegalArgumentException] {
+      BackfillApp.parseArgs(Array("--s3access-key", "ak"))
+    }
+    ex.getMessage should include("Unknown argument")
+  }
+
+  test("parseArgs accepts the full known flag set") {
+    // Smoke test that every documented CLI flag is in the whitelist.
+    val args = (BackfillApp.KvFlags.toSeq.flatMap(k =>
+      Seq("--" + k, "value")
+    ) ++ BackfillApp.BoolFlags.toSeq.map("--" + _)).toArray
+    val parsed = BackfillApp.parseArgs(args)
+    parsed.keySet shouldBe BackfillApp.KnownFlags
+  }
+
+  // ============ FFI options skip static credentials in IAM mode ============
+
+  test("getMilvusReadOptions omits AK/SK when s3UseIam=true") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "s3.us-west-2.amazonaws.com",
+      s3BucketName = "irsa-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    val opts = cfg.getMilvusReadOptions
+    opts.get("fs.access_key_id") shouldBe None
+    opts.get("fs.access_key_value") shouldBe None
+    opts("fs.use_iam") shouldBe "true"
+  }
+
+  test("getMilvusReadOptions includes AK/SK when s3UseIam=false") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "minio:9000",
+      s3BucketName = "b",
+      s3AccessKey = "ak",
+      s3SecretKey = "sk"
+    )
+    val opts = cfg.getMilvusReadOptions
+    opts("fs.access_key_id") shouldBe "ak"
+    opts("fs.access_key_value") shouldBe "sk"
+  }
+
+  test("getS3WriteOptionsForBasePath omits AK/SK when s3UseIam=true") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "s3.us-west-2.amazonaws.com",
+      s3BucketName = "irsa-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    val opts = cfg.getS3WriteOptionsForBasePath("base/path", 1L)
+    opts.get("fs.access_key_id") shouldBe None
+    opts.get("fs.access_key_value") shouldBe None
+    opts("fs.use_iam") shouldBe "true"
   }
 
   test(

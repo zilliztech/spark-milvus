@@ -101,6 +101,37 @@ object BackfillApp {
     }
   }
 
+  // Boolean flags do not consume the next token.
+  private[backfill] val BoolFlags: Set[String] = Set(
+    "s3-use-ssl",
+    "use-iam",
+    "source-s3-use-ssl",
+    "source-use-iam"
+  )
+
+  // All accepted CLI keys. Validating against this whitelist surfaces typos
+  // (e.g. `--s3access-key` instead of `--s3-access-key`) at parse time
+  // instead of silently absorbing them and producing a confusing failure
+  // later inside the AWS default provider chain.
+  private[backfill] val KvFlags: Set[String] = Set(
+    "parquet",
+    "snapshot",
+    "s3-endpoint",
+    "s3-bucket",
+    "s3-access-key",
+    "s3-secret-key",
+    "s3-root-path",
+    "s3-region",
+    "source-s3-endpoint",
+    "source-s3-access-key",
+    "source-s3-secret-key",
+    "source-s3-region",
+    "batch-size",
+    "output-result"
+  )
+
+  private[backfill] val KnownFlags: Set[String] = BoolFlags ++ KvFlags
+
   private[backfill] def parseArgs(args: Array[String]): Map[String, String] = {
     var map = Map.empty[String, String]
     var i = 0
@@ -108,9 +139,14 @@ object BackfillApp {
       args(i) match {
         case flag if flag.startsWith("--") =>
           val key = flag.stripPrefix("--")
-          if (
-            key == "s3-use-ssl" || key == "use-iam" || key == "source-s3-use-ssl" || key == "source-use-iam"
-          ) {
+          if (!KnownFlags.contains(key)) {
+            throw new IllegalArgumentException(
+              s"Unknown argument: $flag. Known flags: ${KnownFlags.toSeq.sorted
+                  .map("--" + _)
+                  .mkString(", ")}"
+            )
+          }
+          if (BoolFlags.contains(key)) {
             map += (key -> "true")
             i += 1
           } else if (i + 1 < args.length) {

@@ -242,9 +242,14 @@ object MilvusBackfill {
     */
   private def readBackfillData(
       spark: SparkSession,
-      path: String,
+      rawPath: String,
       config: BackfillConfig
   ): Either[BackfillError, DataFrame] = {
+    // Hadoop 3.4.1 has separate s3:// and s3a:// FileSystem implementations
+    // and per-bucket fs.s3a.bucket.<b>.* config is only honored by
+    // S3AFileSystem. Force the s3a scheme so the credentials we just wrote
+    // actually take effect.
+    val path = normalizeS3Scheme(rawPath)
     try {
       // Ensure Hadoop S3A is configured for the source bucket (may differ
       // from the Milvus storage bucket) before reading the parquet.
@@ -863,9 +868,13 @@ object MilvusBackfill {
   def writeResultJson(
       spark: SparkSession,
       result: BackfillResult,
-      outputPath: String,
+      rawOutputPath: String,
       config: BackfillConfig
   ): Either[BackfillError, Unit] = {
+    // Same s3:// → s3a:// normalization as readSnapshotJson /
+    // readBackfillData. Without it, an s3:// URL would route to the legacy
+    // S3FileSystem which ignores fs.s3a.bucket.<b>.* config.
+    val outputPath = normalizeS3Scheme(rawOutputPath)
     try {
       configureHadoopS3ForPath(spark, outputPath, config, isSource = false)
       val hadoopPath = new Path(outputPath)
@@ -895,6 +904,18 @@ object MilvusBackfill {
           )
         )
     }
+  }
+
+  /** Normalize an `s3://` URL to `s3a://`. The legacy `s3://` scheme maps to
+    * Hadoop's S3FileSystem (or, on 3.4.x, an alias that does NOT honor
+    * `fs.s3a.bucket.<b>.*` per-bucket config), so per-bucket credentials we
+    * write would be silently ignored. All read/write code paths in this object
+    * route through this helper before touching Hadoop FS APIs.
+    */
+  private[backfill] def normalizeS3Scheme(path: String): String = {
+    if (path == null) null
+    else if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
+    else path
   }
 
   /** Configure Hadoop S3A credentials for the bucket referenced by `path`.
@@ -968,11 +989,23 @@ object MilvusBackfill {
     )
 
     if (useIam) {
-      // Defer credential resolution to the default AWS provider chain for
-      // this bucket (env vars, instance profile, IRSA web identity, etc.).
+      // Build an explicit IRSA/EKS-friendly provider chain instead of the
+      // v1 DefaultAWSCredentialsProviderChain, which has historically been
+      // unreliable on EKS pods (it does not always pick up the projected
+      // service-account web-identity token before falling back to the
+      // EC2 instance profile of the node — leaking the node's role).
+      //
+      // Order matters:
+      //   1. WebIdentityTokenCredentialsProvider — IRSA / GKE Workload Identity
+      //   2. EnvironmentVariableCredentialsProvider — local dev / CI overrides
+      //   3. IAMInstanceCredentialsProvider — EC2 / EKS node role fallback
       hadoopConf.set(
         s"$prefix.aws.credentials.provider",
-        "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+        Seq(
+          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
+          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
+          "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
+        ).mkString(",")
       )
     } else {
       hadoopConf.set(s"$prefix.access.key", accessKey)
@@ -1011,7 +1044,7 @@ object MilvusBackfill {
 
         // Construct full S3 path (ensure s3a:// scheme for Hadoop)
         val s3Path = if (snapshotPath.startsWith("s3://")) {
-          snapshotPath.replace("s3://", "s3a://")
+          normalizeS3Scheme(snapshotPath)
         } else {
           snapshotPath
         }
