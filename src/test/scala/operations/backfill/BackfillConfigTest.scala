@@ -3,9 +3,8 @@ package com.zilliz.spark.connector.operations.backfill
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/**
- * Unit tests for BackfillConfig validation and options generation
- */
+/** Unit tests for BackfillConfig validation and options generation
+  */
 class BackfillConfigTest extends AnyFunSuite with Matchers {
 
   // ============ Validation Tests ============
@@ -24,7 +23,35 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.validate() shouldBe Right(())
   }
 
-  test("Empty milvusUri fails validation") {
+  test(
+    "Empty milvusUri/collectionName is allowed by validate() in snapshot mode"
+  ) {
+    // milvusUri and collectionName are only required in client mode (no snapshot).
+    // validate() must accept empty values; only validateForClientMode rejects them.
+    val config = BackfillConfig(
+      milvusUri = "",
+      collectionName = "",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin"
+    )
+
+    config.validate() shouldBe Right(())
+  }
+
+  test("validate accepts empty AK/SK when s3UseIam=true") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    config.validate() shouldBe Right(())
+  }
+
+  test("validateForClientMode fails on empty milvusUri") {
     val config = BackfillConfig(
       milvusUri = "",
       collectionName = "test_collection",
@@ -34,10 +61,10 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3SecretKey = "minioadmin"
     )
 
-    config.validate() shouldBe Left("milvusUri cannot be empty")
+    config.validateForClientMode().isLeft shouldBe true
   }
 
-  test("Empty collectionName fails validation") {
+  test("validateForClientMode fails on empty collectionName") {
     val config = BackfillConfig(
       milvusUri = "http://localhost:19530",
       collectionName = "",
@@ -47,7 +74,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3SecretKey = "minioadmin"
     )
 
-    config.validate() shouldBe Left("collectionName cannot be empty")
+    config.validateForClientMode().isLeft shouldBe true
   }
 
   test("Empty s3Endpoint fails validation") {
@@ -76,30 +103,72 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.validate() shouldBe Left("s3BucketName cannot be empty")
   }
 
-  test("Empty s3AccessKey fails validation") {
+  test("Empty s3AccessKey/s3SecretKey is allowed (IAM/IRSA mode)") {
+    // Under IAM/IRSA the SDK falls back to the default AWS credentials chain,
+    // so empty static credentials must NOT fail validation.
     val config = BackfillConfig(
       milvusUri = "http://localhost:19530",
       collectionName = "test_collection",
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
       s3AccessKey = "",
-      s3SecretKey = "minioadmin"
+      s3SecretKey = "",
+      s3UseIam = true
     )
 
-    config.validate() shouldBe Left("s3AccessKey cannot be empty")
+    config.validate() shouldBe Right(())
   }
 
-  test("Empty s3SecretKey fails validation") {
+  test("Empty s3AccessKey/s3SecretKey without useIam is rejected") {
+    // Hard invariant: must use IAM or supply both AK and SK. Half-set or
+    // fully-empty static credentials without useIam are never valid.
     val config = BackfillConfig(
       milvusUri = "http://localhost:19530",
       collectionName = "test_collection",
       s3Endpoint = "localhost:9000",
       s3BucketName = "test-bucket",
-      s3AccessKey = "minioadmin",
+      s3AccessKey = "",
       s3SecretKey = ""
     )
 
-    config.validate() shouldBe Left("s3SecretKey cannot be empty")
+    config.validate().isLeft shouldBe true
+  }
+
+  test("Half-set s3AccessKey without s3SecretKey is rejected") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "ak",
+      s3SecretKey = ""
+    )
+    config.validate().isLeft shouldBe true
+  }
+
+  test(
+    "Source bucket half-set credentials without sourceS3UseIam are rejected"
+  ) {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "main-ak",
+      s3SecretKey = "main-sk",
+      sourceS3AccessKey = Some("src-ak"),
+      sourceS3SecretKey = Some("")
+    )
+    config.validate().isLeft shouldBe true
+  }
+
+  test("Source bucket override with sourceS3UseIam=true is accepted") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "main-ak",
+      s3SecretKey = "main-sk",
+      sourceS3AccessKey = Some(""),
+      sourceS3SecretKey = Some(""),
+      sourceS3UseIam = Some(true)
+    )
+    config.validate() shouldBe Right(())
   }
 
   test("Zero batchSize fails validation") {
@@ -213,7 +282,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
 
     val options = config.getMilvusReadOptions
 
-    options should not contain key ("milvus.partition.name")
+    options should not contain key("milvus.partition.name")
   }
 
   // ============ getS3WriteOptions Tests ============
@@ -247,7 +316,9 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     options("fs.use_ssl") shouldBe "true"
     options("fs.region") shouldBe "us-west-2"
     options("milvus.collection.name") shouldBe "segment_789_backfill"
-    options("milvus.writer.customPath") shouldBe "test-bucket/files/insert_log/123/456/789/new_field"
+    options(
+      "milvus.writer.customPath"
+    ) shouldBe "files/insert_log/123/456/789"
     options("milvus.insertMaxBatchSize") shouldBe "2048"
   }
 

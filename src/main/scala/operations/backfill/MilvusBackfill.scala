@@ -848,13 +848,26 @@ object MilvusBackfill {
 
   /** Write backfill result JSON to the given output path (S3 or local). Uses
     * Spark's Hadoop FileSystem API for portability.
+    *
+    * Returns Right(()) on success and Left(BackfillError) on failure — callers
+    * MUST check the result and propagate failure to the user. The previous
+    * version swallowed exceptions, which caused silent successes (exit 0 with
+    * success message printed but no result file written).
+    *
+    * The output path may live in a bucket whose credentials are not yet
+    * configured on the Spark Hadoop conf, so we run
+    * [[configureHadoopS3ForPath]] for it first (treated as a "main bucket" path
+    * — same credentials as the Milvus storage bucket; override via --source-*
+    * if you need a separate sink for results).
     */
   def writeResultJson(
       spark: SparkSession,
       result: BackfillResult,
-      outputPath: String
-  ): Unit = {
+      outputPath: String,
+      config: BackfillConfig
+  ): Either[BackfillError, Unit] = {
     try {
+      configureHadoopS3ForPath(spark, outputPath, config, isSource = false)
       val hadoopPath = new Path(outputPath)
       val fs = hadoopPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
       val out = fs.create(hadoopPath, true)
@@ -866,11 +879,20 @@ object MilvusBackfill {
         out.close()
       }
       logger.info(s"Backfill result JSON written to: $outputPath")
+      Right(())
     } catch {
       case e: Exception =>
         logger.error(
           s"Failed to write result JSON to $outputPath: ${e.getMessage}",
           e
+        )
+        Left(
+          WriteError(
+            segmentId = -1,
+            outputPath = outputPath,
+            message = s"Failed to write result JSON: ${e.getMessage}",
+            cause = Some(e)
+          )
         )
     }
   }
@@ -887,7 +909,7 @@ object MilvusBackfill {
     *   consult the `sourceS3*` overrides and fall back to the main credentials
     *   when a particular field is unset.
     */
-  private def configureHadoopS3ForPath(
+  private[backfill] def configureHadoopS3ForPath(
       spark: SparkSession,
       path: String,
       config: BackfillConfig,
@@ -922,6 +944,9 @@ object MilvusBackfill {
     val useIam =
       if (isSource) config.sourceS3UseIam.getOrElse(config.s3UseIam)
       else config.s3UseIam
+    val region =
+      if (isSource) config.sourceS3Region.getOrElse(config.s3Region)
+      else config.s3Region
 
     val hadoopConf = spark.sparkContext.hadoopConfiguration
     val prefix = s"fs.s3a.bucket.$bucket"
@@ -929,6 +954,12 @@ object MilvusBackfill {
     // Endpoint + path style + SSL are safe to set in both IAM and static modes
     if (endpoint != null && endpoint.nonEmpty) {
       hadoopConf.set(s"$prefix.endpoint", endpoint)
+    }
+    if (region != null && region.nonEmpty) {
+      // Newer hadoop-aws (3.3.x+) reads endpoint.region; set both keys for
+      // compatibility with older versions that only honor `region`.
+      hadoopConf.set(s"$prefix.endpoint.region", region)
+      hadoopConf.set(s"$prefix.region", region)
     }
     hadoopConf.set(s"$prefix.path.style.access", "true")
     hadoopConf.set(

@@ -77,10 +77,29 @@ case class BackfillConfig(
       Left("s3BucketName cannot be empty")
     } else if (batchSize <= 0) {
       Left("batchSize must be positive")
+    } else if (!s3UseIam && (s3AccessKey.isEmpty || s3SecretKey.isEmpty)) {
+      // Hard invariant: must use IAM or supply both AK and SK. Half-set
+      // static credentials are never valid — they would silently fall back
+      // to the default provider chain and mask config mistakes.
+      Left(
+        "s3AccessKey and s3SecretKey must both be set unless s3UseIam=true"
+      )
     } else {
-      // s3AccessKey/s3SecretKey may be empty in IAM/IRSA mode — the SDK
-      // falls back to the default AWS credentials chain.
-      Right(())
+      // Same invariant for the source (input parquet) bucket. Any field
+      // left as None falls back to the main credentials, which we already
+      // validated above, so we only fail when an asymmetric override would
+      // produce half-set static credentials.
+      val srcUseIam = sourceS3UseIam.getOrElse(s3UseIam)
+      val srcAk = sourceS3AccessKey.getOrElse(s3AccessKey)
+      val srcSk = sourceS3SecretKey.getOrElse(s3SecretKey)
+      if (!srcUseIam && (srcAk.isEmpty || srcSk.isEmpty)) {
+        Left(
+          "source bucket: sourceS3AccessKey and sourceS3SecretKey must both " +
+            "be set unless sourceS3UseIam=true (or fall back to main)"
+        )
+      } else {
+        Right(())
+      }
     }
   }
 

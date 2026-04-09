@@ -81,8 +81,16 @@ object BackfillApp {
           println(result.summary)
           println(result.segmentSummary)
           parsed.get("output-result").foreach { outputPath =>
-            MilvusBackfill.writeResultJson(spark, result, outputPath)
-            println(s"Result JSON written to: $outputPath")
+            MilvusBackfill
+              .writeResultJson(spark, result, outputPath, config) match {
+              case Right(_) =>
+                println(s"Result JSON written to: $outputPath")
+              case Left(err) =>
+                System.err.println(
+                  s"Backfill succeeded but writing result JSON FAILED: ${err.message}"
+                )
+                System.exit(2)
+            }
           }
         case Left(error) =>
           System.err.println(s"Backfill FAILED: ${error.message}")
@@ -93,7 +101,7 @@ object BackfillApp {
     }
   }
 
-  private def parseArgs(args: Array[String]): Map[String, String] = {
+  private[backfill] def parseArgs(args: Array[String]): Map[String, String] = {
     var map = Map.empty[String, String]
     var i = 0
     while (i < args.length) {
