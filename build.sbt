@@ -147,6 +147,25 @@ lazy val root = (project in file("."))
     Compile / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar",
     Test / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar",
 
+    // 老 log binding (slf4j-log4j12 / reload4j / log4j 1.x) 与 spark 的 log4j2 冲突，
+    // 全局排除掉。
+    excludeDependencies ++= Seq(
+      ExclusionRule("org.slf4j", "slf4j-log4j12"),
+      ExclusionRule("org.slf4j", "slf4j-reload4j"),
+      ExclusionRule("log4j", "log4j"),
+      ExclusionRule("ch.qos.reload4j", "reload4j")
+    ),
+    // 在 assembly 阶段过滤掉 slf4j-api jar：
+    // 编译时仍可用（来自传递依赖），但不进 fat jar，运行时由 spark 镜像
+    // /opt/spark/jars/slf4j-api-2.x.jar 提供，避免 userClassPathFirst=true 时
+    // Logger 被加载两份触发 LinkageError
+    assembly / assemblyExcludedJars := {
+      val cp = (assembly / fullClasspath).value
+      cp.filter { f =>
+        val n = f.data.getName
+        n.startsWith("slf4j-api-")
+      }
+    },
     libraryDependencies ++= Seq(
       munit % Test,
       scalaTest % Test,
