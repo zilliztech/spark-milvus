@@ -1,6 +1,5 @@
 package com.zilliz.spark.connector.write
 
-import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.connector.write.{
   BatchWrite,
   DataWriterFactory,
@@ -8,6 +7,8 @@ import org.apache.spark.sql.connector.write.{
   Write,
   WriterCommitMessage
 }
+import org.apache.spark.sql.types.StructType
+
 import com.zilliz.spark.connector.MilvusOption
 
 case class MilvusWrite(milvusOptions: MilvusOption, schema: StructType)

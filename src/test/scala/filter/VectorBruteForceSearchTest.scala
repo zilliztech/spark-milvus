@@ -1,14 +1,13 @@
 package com.zilliz.spark.connector.filter
 
+import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 
 import VectorBruteForceSearch.DistanceType._
 
-/**
- * Unit tests for VectorBruteForceSearch distance calculations
- */
+/** Unit tests for VectorBruteForceSearch distance calculations
+  */
 class VectorBruteForceSearchTest extends AnyFunSuite with Matchers {
 
   // Tolerance for floating point comparisons
@@ -174,7 +173,7 @@ class VectorBruteForceSearchTest extends AnyFunSuite with Matchers {
 
     l2 shouldBe 2.0 +- epsilon
     ip shouldBe 15.0 +- epsilon
-    cosine shouldBe 1.0 +- epsilon  // Same direction, magnitude doesn't matter
+    cosine shouldBe 1.0 +- epsilon // Same direction, magnitude doesn't matter
   }
 
   test("Distance calculation with high dimensional vectors") {
@@ -268,7 +267,8 @@ class VectorBruteForceSearchTest extends AnyFunSuite with Matchers {
 
     for (v1 <- vectors; v2 <- vectors) {
       if (Vectors.norm(v1, 2.0) > 0 && Vectors.norm(v2, 2.0) > 0) {
-        val similarity = VectorBruteForceSearch.calculateDistance(v1, v2, COSINE)
+        val similarity =
+          VectorBruteForceSearch.calculateDistance(v1, v2, COSINE)
         similarity should be >= -1.0 - epsilon
         similarity should be <= 1.0 + epsilon
       }

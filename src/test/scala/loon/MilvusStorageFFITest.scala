@@ -1,25 +1,36 @@
 package com.zilliz.spark.connector.loon
 
-import io.milvus.storage._
-import org.apache.arrow.c.{ArrowArray, ArrowArrayStream, ArrowSchema => CArrowSchema, Data}
-import org.apache.arrow.vector._
-import org.apache.arrow.vector.ipc.ArrowReader
-import org.apache.arrow.vector.complex.ListVector
-import org.apache.arrow.vector.types.pojo.{ArrowType, Field => ArrowField, FieldType, Schema => ArrowSchema}
-import java.util.{HashMap => JHashMap}
 import java.io.File
 import java.nio.file.{Files, Path}
+import java.util.{HashMap => JHashMap}
 import scala.collection.JavaConverters._
+
+import org.apache.arrow.c.{
+  ArrowArray,
+  ArrowArrayStream,
+  ArrowSchema => CArrowSchema,
+  Data
+}
+import org.apache.arrow.vector._
+import org.apache.arrow.vector.complex.ListVector
+import org.apache.arrow.vector.ipc.ArrowReader
+import org.apache.arrow.vector.types.pojo.{
+  ArrowType,
+  Field => ArrowField,
+  FieldType,
+  Schema => ArrowSchema
+}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/**
- * Milvus Storage FFI Test Suite (No Spark)
- *
- * This test demonstrates writing and reading Milvus storage data without Spark.
- * It uses MilvusStorageWriter to write data, then passes the column groups to reader.
- *
- */
+import io.milvus.storage._
+
+/** Milvus Storage FFI Test Suite (No Spark)
+  *
+  * This test demonstrates writing and reading Milvus storage data without
+  * Spark. It uses MilvusStorageWriter to write data, then passes the column
+  * groups to reader.
+  */
 class MilvusStorageFFITest extends AnyFunSuite with Matchers {
 
   test("Write and Read Milvus Storage data using FFI (No Spark)") {
@@ -55,13 +66,18 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
 
       // Create writer
       val writer = new MilvusStorageWriter()
-      writer.create(tempDir.toAbsolutePath.toString, writerSchemaPtr, properties)
+      writer.create(
+        tempDir.toAbsolutePath.toString,
+        writerSchemaPtr,
+        properties
+      )
       info("✓ Writer created\n")
 
       // Create and write test data
       val numRows = 100
       val vectorDim = 4
-      val (root, arrowArray, arrowArrayPtr) = createTestData(allocator, numRows, vectorDim)
+      val (root, arrowArray, arrowArrayPtr) =
+        createTestData(allocator, numRows, vectorDim)
 
       try {
         writer.write(arrowArrayPtr)
@@ -86,7 +102,12 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
 
         // Create reader with column groups from writer
         val reader = new MilvusStorageReader()
-        reader.create(columnGroupsPtr, readerSchemaPtr, neededColumns, properties)
+        reader.create(
+          columnGroupsPtr,
+          readerSchemaPtr,
+          neededColumns,
+          properties
+        )
         info("✓ Reader created\n")
 
         // Read data using Arrow C Data Interface
@@ -107,7 +128,9 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
               totalRows += rows
             }
 
-            info(s"\nSuccessfully read $totalRows rows in $batchCount batch(es)\n")
+            info(
+              s"\nSuccessfully read $totalRows rows in $batchCount batch(es)\n"
+            )
 
             totalRows should be(numRows)
             batchCount should be > 0
@@ -138,9 +161,8 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
     }
   }
 
-  /**
-  * Recursively delete a directory
-  */
+  /** Recursively delete a directory
+    */
   private def deleteDirectory(dir: File): Unit = {
     if (dir.exists()) {
       if (dir.isDirectory) {
@@ -150,23 +172,59 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
     }
   }
 
-  /**
-   * Create test data and return VectorSchemaRoot, ArrowArray object and its pointer
-   * Returns the ArrowArray object so it can be properly closed later
-   */
-  private def createTestData(allocator: org.apache.arrow.memory.BufferAllocator, numRows: Int, vectorDim: Int): (VectorSchemaRoot, ArrowArray, Long) = {
+  /** Create test data and return VectorSchemaRoot, ArrowArray object and its
+    * pointer Returns the ArrowArray object so it can be properly closed later
+    */
+  private def createTestData(
+      allocator: org.apache.arrow.memory.BufferAllocator,
+      numRows: Int,
+      vectorDim: Int
+  ): (VectorSchemaRoot, ArrowArray, Long) = {
     val metadata0 = Map("PARQUET:field_id" -> "100").asJava
     val metadata1 = Map("PARQUET:field_id" -> "101").asJava
     val metadata2 = Map("PARQUET:field_id" -> "102").asJava
     val metadata3 = Map("PARQUET:field_id" -> "103").asJava
 
     val fields = List(
-      new ArrowField("id", new FieldType(false, new ArrowType.Int(64, true), null, metadata0), null),
-      new ArrowField("name", new FieldType(false, new ArrowType.Utf8(), null, metadata1), null),
-      new ArrowField("value", new FieldType(false, new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE), null, metadata2), null),
-      new ArrowField("vector",
+      new ArrowField(
+        "id",
+        new FieldType(false, new ArrowType.Int(64, true), null, metadata0),
+        null
+      ),
+      new ArrowField(
+        "name",
+        new FieldType(false, new ArrowType.Utf8(), null, metadata1),
+        null
+      ),
+      new ArrowField(
+        "value",
+        new FieldType(
+          false,
+          new ArrowType.FloatingPoint(
+            org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE
+          ),
+          null,
+          metadata2
+        ),
+        null
+      ),
+      new ArrowField(
+        "vector",
         new FieldType(false, new ArrowType.List(), null, metadata3),
-        List(new ArrowField("element", new FieldType(false, new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.SINGLE), null), null)).asJava)
+        List(
+          new ArrowField(
+            "element",
+            new FieldType(
+              false,
+              new ArrowType.FloatingPoint(
+                org.apache.arrow.vector.types.FloatingPointPrecision.SINGLE
+              ),
+              null
+            ),
+            null
+          )
+        ).asJava
+      )
     ).asJava
 
     val schema = new ArrowSchema(fields)
@@ -209,10 +267,9 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
     (root, arrowArray, arrowArray.memoryAddress())
   }
 
-  /**
-   * Create test schema matching the test data
-   * Returns both the CArrowSchema object and its memory address for proper cleanup
-   */
+  /** Create test schema matching the test data Returns both the CArrowSchema
+    * object and its memory address for proper cleanup
+    */
   private def createTestSchema(): (CArrowSchema, Long) = {
     val allocator = ArrowUtils.getAllocator
 
@@ -224,15 +281,50 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
     // Define fields matching the test data
     // Schema from C++ test: id (int64), name (utf8), value (double), vector (list<float>)
     val fields = List(
-      new ArrowField("id", new FieldType(false, new ArrowType.Int(64, true), null, metadata0), null),
-      new ArrowField("name", new FieldType(false, new ArrowType.Utf8(), null, metadata1), null),
-      new ArrowField("value", new FieldType(false, new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE), null, metadata2), null),
-      new ArrowField("vector",
-        new FieldType(false,
+      new ArrowField(
+        "id",
+        new FieldType(false, new ArrowType.Int(64, true), null, metadata0),
+        null
+      ),
+      new ArrowField(
+        "name",
+        new FieldType(false, new ArrowType.Utf8(), null, metadata1),
+        null
+      ),
+      new ArrowField(
+        "value",
+        new FieldType(
+          false,
+          new ArrowType.FloatingPoint(
+            org.apache.arrow.vector.types.FloatingPointPrecision.DOUBLE
+          ),
+          null,
+          metadata2
+        ),
+        null
+      ),
+      new ArrowField(
+        "vector",
+        new FieldType(
+          false,
           new ArrowType.List(), // Variable-length list
           null,
-          metadata3),
-        List(new ArrowField("element", new FieldType(false, new ArrowType.FloatingPoint(org.apache.arrow.vector.types.FloatingPointPrecision.SINGLE), null), null)).asJava)
+          metadata3
+        ),
+        List(
+          new ArrowField(
+            "element",
+            new FieldType(
+              false,
+              new ArrowType.FloatingPoint(
+                org.apache.arrow.vector.types.FloatingPointPrecision.SINGLE
+              ),
+              null
+            ),
+            null
+          )
+        ).asJava
+      )
     ).asJava
 
     val schema = new ArrowSchema(fields)
@@ -242,9 +334,8 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
     (arrowSchema, arrowSchema.memoryAddress())
   }
 
-  /**
-   * Display data from VectorSchemaRoot
-   */
+  /** Display data from VectorSchemaRoot
+    */
   private def displayBatchData(root: VectorSchemaRoot, batchNum: Int): Int = {
     try {
       val rowCount = root.getRowCount
@@ -254,7 +345,9 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
       val idVector = root.getVector("id").asInstanceOf[BigIntVector]
       val nameVector = root.getVector("name").asInstanceOf[VarCharVector]
       val valueVector = root.getVector("value").asInstanceOf[Float8Vector]
-      val vectorListVector = root.getVector("vector").asInstanceOf[org.apache.arrow.vector.complex.ListVector]
+      val vectorListVector = root
+        .getVector("vector")
+        .asInstanceOf[org.apache.arrow.vector.complex.ListVector]
 
       // Display first few rows
       val displayCount = Math.min(10, rowCount)
@@ -263,12 +356,16 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
 
       for (i <- 0 until displayCount) {
         val id = if (!idVector.isNull(i)) idVector.get(i).toString else "null"
-        val name = if (!nameVector.isNull(i)) new String(nameVector.get(i), "UTF-8") else "null"
-        val value = if (!valueVector.isNull(i)) f"${valueVector.get(i)}%.1f" else "null"
+        val name =
+          if (!nameVector.isNull(i)) new String(nameVector.get(i), "UTF-8")
+          else "null"
+        val value =
+          if (!valueVector.isNull(i)) f"${valueVector.get(i)}%.1f" else "null"
 
         // Extract vector elements (variable-length list)
         val vectorStr = if (!vectorListVector.isNull(i)) {
-          val vectorSlice = vectorListVector.getObject(i).asInstanceOf[java.util.List[Float]]
+          val vectorSlice =
+            vectorListVector.getObject(i).asInstanceOf[java.util.List[Float]]
           vectorSlice.asScala.map(v => f"$v%.1f").mkString("[", ", ", "]")
         } else {
           "null"

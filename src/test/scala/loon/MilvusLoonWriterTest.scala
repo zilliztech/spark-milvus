@@ -1,16 +1,19 @@
 package com.zilliz.spark.connector.loon
 
+import scala.util.{Failure, Success}
+
 import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
-import com.zilliz.spark.connector.MilvusOption
+
 import com.zilliz.spark.connector.write.MilvusLoonWriter
-import scala.util.{Success, Failure}
+import com.zilliz.spark.connector.MilvusOption
 
 class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
 
   test("Write DataFrame using Loon Writer to Minio") {
-    val spark = SparkSession.builder()
+    val spark = SparkSession
+      .builder()
       .appName("LoonWriterMinioTest")
       .master("local[*]")
       .getOrCreate()
@@ -56,7 +59,8 @@ class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
   }
 
   test("Write DataFrame with vector field to Minio") {
-    val spark = SparkSession.builder()
+    val spark = SparkSession
+      .builder()
       .appName("StorageV2VectorWriterTest")
       .master("local[*]")
       .getOrCreate()
@@ -82,7 +86,7 @@ class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
         Properties.FsConfig.FsUseSSL -> "false",
         Properties.FsConfig.FsRegion -> "us-east-1",
         MilvusOption.MilvusCollectionName -> "vector_test_collection",
-        "vector.vector.dim" -> "4"  // Specify vector dimension
+        "vector.vector.dim" -> "4" // Specify vector dimension
       )
 
       // Write using MilvusLoonWriter API
@@ -90,7 +94,9 @@ class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
 
       result match {
         case Success(manifestPaths) =>
-          info(s"Successfully wrote ${testData.count()} rows with vectors to Minio")
+          info(
+            s"Successfully wrote ${testData.count()} rows with vectors to Minio"
+          )
           info(s"Manifest paths: ${manifestPaths.mkString(", ")}")
           manifestPaths should not be empty
         case Failure(exception) =>
@@ -102,4 +108,3 @@ class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
     }
   }
 }
-

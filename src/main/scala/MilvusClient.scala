@@ -325,12 +325,15 @@ class MilvusClient(params: MilvusConnectionParams) {
           collectionNames = collectionNames
         )
       )
-      checkStatus("flush", flushResponse.status.getOrElse(
-        Status(
-          errorCode = ErrorCode.UnexpectedError,
-          reason = "Flush Status is empty"
+      checkStatus(
+        "flush",
+        flushResponse.status.getOrElse(
+          Status(
+            errorCode = ErrorCode.UnexpectedError,
+            reason = "Flush Status is empty"
+          )
         )
-      ))
+      )
     } catch {
       case e: Exception =>
         Failure(

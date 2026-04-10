@@ -5,9 +5,8 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.spark.connector.MilvusOption
 
-/**
- * Unit tests for Properties and FsConfig constants
- */
+/** Unit tests for Properties and FsConfig constants
+  */
 class PropertiesTest extends AnyFunSuite with Matchers {
 
   // ============ FsConfig Constants Tests ============
@@ -104,10 +103,16 @@ class PropertiesTest extends AnyFunSuite with Matchers {
 
     val milvusOption = MilvusOption(options)
 
-    milvusOption.options(Properties.FsConfig.FsAddress) shouldBe "localhost:9000"
-    milvusOption.options(Properties.FsConfig.FsBucketName) shouldBe "test-bucket"
+    milvusOption.options(
+      Properties.FsConfig.FsAddress
+    ) shouldBe "localhost:9000"
+    milvusOption.options(
+      Properties.FsConfig.FsBucketName
+    ) shouldBe "test-bucket"
     milvusOption.options(Properties.FsConfig.FsAccessKeyId) shouldBe "access123"
-    milvusOption.options(Properties.FsConfig.FsAccessKeyValue) shouldBe "secret456"
+    milvusOption.options(
+      Properties.FsConfig.FsAccessKeyValue
+    ) shouldBe "secret456"
     milvusOption.options(Properties.FsConfig.FsRootPath) shouldBe "data/milvus"
     milvusOption.options(Properties.FsConfig.FsUseSSL) shouldBe "true"
     milvusOption.options(Properties.FsConfig.FsRegion) shouldBe "us-west-2"
@@ -139,7 +144,9 @@ class PropertiesTest extends AnyFunSuite with Matchers {
     milvusOption.options(Properties.FsConfig.FsLogLevel) shouldBe "info"
     milvusOption.options(Properties.FsConfig.FsUseIam) shouldBe "true"
     milvusOption.options(Properties.FsConfig.FsUseVirtualHost) shouldBe "true"
-    milvusOption.options(Properties.FsConfig.FsRequestTimeoutMs) shouldBe "30000"
+    milvusOption.options(
+      Properties.FsConfig.FsRequestTimeoutMs
+    ) shouldBe "30000"
   }
 
   test("MilvusOption handles GCP specific FsConfig options") {
@@ -158,8 +165,12 @@ class PropertiesTest extends AnyFunSuite with Matchers {
     val milvusOption = MilvusOption(options)
 
     milvusOption.options(Properties.FsConfig.FsCloudProvider) shouldBe "gcp"
-    milvusOption.options(Properties.FsConfig.FsGcpNativeWithoutAuth) shouldBe "false"
-    milvusOption.options(Properties.FsConfig.FsGcpCredentialJson) should include("service_account")
+    milvusOption.options(
+      Properties.FsConfig.FsGcpNativeWithoutAuth
+    ) shouldBe "false"
+    milvusOption.options(
+      Properties.FsConfig.FsGcpCredentialJson
+    ) should include("service_account")
   }
 
   // ============ Consistency Tests ============
