@@ -19,9 +19,9 @@ import io.milvus.grpc.schema.{
   VectorField
 }
 
-/**
- * MilvusSchemaUtil provides utilities for converting between Milvus and Arrow schemas
- */
+/** MilvusSchemaUtil provides utilities for converting between Milvus and Arrow
+  * schemas
+  */
 object MilvusSchemaUtil {
   def getDim(fieldSchema: FieldSchema): Int = {
     for (param <- fieldSchema.typeParams) {
@@ -34,9 +34,8 @@ object MilvusSchemaUtil {
     )
   }
 
-  /**
-   * Convert Milvus FieldSchema to Arrow Field
-   */
+  /** Convert Milvus FieldSchema to Arrow Field
+    */
   def convertToArrowField(
       field: FieldSchema,
       arrowType: org.apache.arrow.vector.types.pojo.ArrowType
@@ -63,14 +62,15 @@ object MilvusSchemaUtil {
     )
   }
 
-  /**
-   * Convert Milvus CollectionSchema to Arrow Schema
-   * This function converts a Milvus collection schema to an Arrow schema format.
-   * Now uses the serdeMap for consistent type conversion.
-   *
-   * @param collectionSchema The Milvus collection schema
-   * @return Arrow Schema
-   */
+  /** Convert Milvus CollectionSchema to Arrow Schema This function converts a
+    * Milvus collection schema to an Arrow schema format. Now uses the serdeMap
+    * for consistent type conversion.
+    *
+    * @param collectionSchema
+    *   The Milvus collection schema
+    * @return
+    *   Arrow Schema
+    */
   def convertToArrowSchema(
       collectionSchema: io.milvus.grpc.schema.CollectionSchema
   ): org.apache.arrow.vector.types.pojo.Schema = {
@@ -84,8 +84,8 @@ object MilvusSchemaUtil {
       // Get dimension for vector types
       val dim = field.dataType match {
         case DataType.BinaryVector | DataType.Float16Vector |
-             DataType.BFloat16Vector | DataType.Int8Vector |
-             DataType.FloatVector | DataType.ArrayOfVector =>
+            DataType.BFloat16Vector | DataType.Int8Vector |
+            DataType.FloatVector | DataType.ArrayOfVector =>
           try {
             getDim(field)
           } catch {
@@ -144,20 +144,22 @@ object MilvusSchemaUtil {
     new org.apache.arrow.vector.types.pojo.Schema(arrowFields.asJava)
   }
 
-  /**
-   * Convert Milvus CollectionSchema to Arrow Schema using field IDs as field names.
-   * This is required for milvus-storage reader which matches columns by field ID.
-   *
-   * The manifest stores column groups with field IDs (e.g., "100", "101"),
-   * so the Arrow schema must use field IDs as field names for the reader to
-   * correctly match requested columns with column groups.
-   *
-   * Note: System fields (row_id, timestamp) are NOT included here.
-   * They are handled by MilvusPartitionReaderFactory.
-   *
-   * @param collectionSchema The Milvus collection schema
-   * @return Arrow Schema with field IDs as field names
-   */
+  /** Convert Milvus CollectionSchema to Arrow Schema using field IDs as field
+    * names. This is required for milvus-storage reader which matches columns by
+    * field ID.
+    *
+    * The manifest stores column groups with field IDs (e.g., "100", "101"), so
+    * the Arrow schema must use field IDs as field names for the reader to
+    * correctly match requested columns with column groups.
+    *
+    * Note: System fields (row_id, timestamp) are NOT included here. They are
+    * handled by MilvusPartitionReaderFactory.
+    *
+    * @param collectionSchema
+    *   The Milvus collection schema
+    * @return
+    *   Arrow Schema with field IDs as field names
+    */
   def convertToArrowSchemaWithFieldIdNames(
       collectionSchema: io.milvus.grpc.schema.CollectionSchema
   ): org.apache.arrow.vector.types.pojo.Schema = {
@@ -171,8 +173,8 @@ object MilvusSchemaUtil {
       // Get dimension for vector types
       val dim = field.dataType match {
         case DataType.BinaryVector | DataType.Float16Vector |
-             DataType.BFloat16Vector | DataType.Int8Vector |
-             DataType.FloatVector | DataType.ArrayOfVector =>
+            DataType.BFloat16Vector | DataType.Int8Vector |
+            DataType.FloatVector | DataType.ArrayOfVector =>
           try {
             getDim(field)
           } catch {
@@ -218,14 +220,17 @@ object MilvusSchemaUtil {
     new org.apache.arrow.vector.types.pojo.Schema(arrowFields.asJava)
   }
 
-  /**
-   * Convert Spark StructType to Arrow Schema
-   * This enables direct DataFrame to Arrow conversion without Milvus schema
-   *
-   * @param sparkSchema The Spark StructType schema
-   * @param vectorDimensions Optional map of field name to vector dimension (for float arrays as vectors)
-   * @return Arrow Schema
-   */
+  /** Convert Spark StructType to Arrow Schema This enables direct DataFrame to
+    * Arrow conversion without Milvus schema
+    *
+    * @param sparkSchema
+    *   The Spark StructType schema
+    * @param vectorDimensions
+    *   Optional map of field name to vector dimension (for float arrays as
+    *   vectors)
+    * @return
+    *   Arrow Schema
+    */
   def convertSparkSchemaToArrow(
       sparkSchema: org.apache.spark.sql.types.StructType,
       vectorDimensions: Map[String, Int] = Map.empty,
@@ -238,15 +243,17 @@ object MilvusSchemaUtil {
 
     val fields = sparkSchema.fields.zipWithIndex.map { case (field, idx) =>
       val arrowType: ArrowType = field.dataType match {
-        case LongType => new ArrowType.Int(64, true)
+        case LongType    => new ArrowType.Int(64, true)
         case IntegerType => new ArrowType.Int(32, true)
-        case ShortType => new ArrowType.Int(16, true)
-        case ByteType => new ArrowType.Int(8, true)
-        case FloatType => new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE)
-        case DoubleType => new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)
-        case BooleanType => new ArrowType.Bool()
-        case StringType => new ArrowType.Utf8()
-        case BinaryType => new ArrowType.Binary()
+        case ShortType   => new ArrowType.Int(16, true)
+        case ByteType    => new ArrowType.Int(8, true)
+        case FloatType =>
+          new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE)
+        case DoubleType =>
+          new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)
+        case BooleanType             => new ArrowType.Bool()
+        case StringType              => new ArrowType.Utf8()
+        case BinaryType              => new ArrowType.Binary()
         case ArrayType(FloatType, _) =>
           // Check if this field is a vector (has dimension specified)
           vectorDimensions.get(field.name) match {
@@ -258,14 +265,16 @@ object MilvusSchemaUtil {
               new ArrowType.List()
           }
         case ArrayType(IntegerType, _) => new ArrowType.List()
-        case ArrayType(LongType, _) => new ArrowType.List()
-        case ArrayType(DoubleType, _) => new ArrowType.List()
-        case ArrayType(StringType, _) => new ArrowType.List()
-        case ArrayType(_, _) => new ArrowType.List()
-        case MapType(_, _, _) => new ArrowType.Map(false)
-        case StructType(_) => new ArrowType.Struct()
+        case ArrayType(LongType, _)    => new ArrowType.List()
+        case ArrayType(DoubleType, _)  => new ArrowType.List()
+        case ArrayType(StringType, _)  => new ArrowType.List()
+        case ArrayType(_, _)           => new ArrowType.List()
+        case MapType(_, _, _)          => new ArrowType.Map(false)
+        case StructType(_)             => new ArrowType.Struct()
         case _ =>
-          throw new IllegalArgumentException(s"Unsupported Spark type: ${field.dataType}")
+          throw new IllegalArgumentException(
+            s"Unsupported Spark type: ${field.dataType}"
+          )
       }
 
       // Use explicit field ID if provided, otherwise fall back to idx + 1
@@ -274,7 +283,8 @@ object MilvusSchemaUtil {
 
       val fieldType = new FieldType(true, arrowType, null, metadata)
       // Use field ID as column name when explicit field IDs are provided
-      val fieldName = if (fieldIds.contains(field.name)) fieldId.toString else field.name
+      val fieldName =
+        if (fieldIds.contains(field.name)) fieldId.toString else field.name
       new Field(fieldName, fieldType, null)
     }
 

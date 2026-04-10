@@ -3,7 +3,10 @@ package com.zilliz.spark.connector.read
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+import org.apache.arrow.c.{ArrowArrayStream, ArrowSchema, Data}
+import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.internal.Logging
+import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.sources.Filter
@@ -19,21 +22,24 @@ import org.apache.spark.sql.types.{
   StringType,
   StructType
 }
-import org.apache.spark.ml.linalg.Vectors
 
-import io.milvus.grpc.schema.CollectionSchema
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
-import io.milvus.storage.{ArrowUtils, NativeLibraryLoader, MilvusStorageReader, MilvusStorageManifest, LatestColumnGroupsResult}
-import com.zilliz.spark.connector.filter.VectorBruteForceSearch
-import org.apache.arrow.c.{ArrowArrayStream, ArrowSchema, Data}
-import org.apache.arrow.vector.VectorSchemaRoot
+import com.zilliz.spark.connector.MilvusOption
+import io.milvus.grpc.schema.CollectionSchema
+import io.milvus.storage.{
+  ArrowUtils,
+  LatestColumnGroupsResult,
+  MilvusStorageManifest,
+  MilvusStorageReader,
+  NativeLibraryLoader
+}
 
 // for Milvus 2.6+ version data source and milvus lake data
 class MilvusLoonPartitionReader(
     schema: StructType,
-    manifestPath: String,  // Path to manifest in S3/MinIO
+    manifestPath: String, // Path to manifest in S3/MinIO
     milvusSchema: CollectionSchema,
     milvusOption: MilvusOption,
     optionsMap: Map[String, String],
@@ -42,8 +48,10 @@ class MilvusLoonPartitionReader(
     metricType: Option[String] = None,
     vectorColumn: Option[String] = None,
     pushedFilters: Array[Filter] = Array.empty[Filter],
-    readVersion: Long = -1L  // -1 = LATEST, >0 = specific manifest version from snapshot
-) extends PartitionReader[InternalRow] with Logging {
+    readVersion: Long =
+      -1L // -1 = LATEST, >0 = specific manifest version from snapshot
+) extends PartitionReader[InternalRow]
+    with Logging {
 
   // Load native library
   NativeLibraryLoader.loadLibrary()
@@ -74,16 +82,23 @@ class MilvusLoonPartitionReader(
   // Get column groups from manifest (use specific version if provided, otherwise latest)
   private val manifestResult: LatestColumnGroupsResult = if (readVersion > 0) {
     logInfo(s"Reading manifest at version $readVersion for path: $manifestPath")
-    MilvusStorageManifest.getColumnGroupsScala(manifestPath, readerProperties, readVersion)
+    MilvusStorageManifest.getColumnGroupsScala(
+      manifestPath,
+      readerProperties,
+      readVersion
+    )
   } else {
-    MilvusStorageManifest.getLatestColumnGroupsScala(manifestPath, readerProperties)
+    MilvusStorageManifest.getLatestColumnGroupsScala(
+      manifestPath,
+      readerProperties
+    )
   }
 
   if (manifestResult.readVersion == 0) {
     throw new IllegalStateException(
       s"No manifest file found at path: $manifestPath. " +
-      "The milvus-storage format manifest files do not exist. " +
-      "Please turn on useLoonFFI and compact the data before reading through Spark connector."
+        "The milvus-storage format manifest files do not exist. " +
+        "Please turn on useLoonFFI and compact the data before reading through Spark connector."
     )
   }
 
@@ -125,7 +140,6 @@ class MilvusLoonPartitionReader(
   private var vectorSearchResults: Iterator[(InternalRow, Double)] = _
   private var vectorSearchCompleted = false
 
-
   override def next(): Boolean = {
     if (vectorSearchEnabled) {
       if (!vectorSearchCompleted) {
@@ -137,10 +151,17 @@ class MilvusLoonPartitionReader(
       // Loop to find next row that passes filters
       while (true) {
         // Check if we have more rows in current batch
-        if (_currentBatch != null && _currentRowIndex < _currentBatch.getRowCount) {
+        if (
+          _currentBatch != null && _currentRowIndex < _currentBatch.getRowCount
+        ) {
           // If we have filters, check if current row passes
           if (pushedFilters.nonEmpty) {
-            val row = ArrowConverter.arrowToInternalRow(_currentBatch, _currentRowIndex, sourceSchema, fieldNameToIdString)
+            val row = ArrowConverter.arrowToInternalRow(
+              _currentBatch,
+              _currentRowIndex,
+              sourceSchema,
+              fieldNameToIdString
+            )
             _currentRowIndex += 1
             if (applyFilters(row)) {
               // Found a matching row, back up index so get() will return it
@@ -185,7 +206,12 @@ class MilvusLoonPartitionReader(
         throw new IllegalStateException("No batch loaded")
       }
 
-      val row = ArrowConverter.arrowToInternalRow(_currentBatch, _currentRowIndex, sourceSchema, fieldNameToIdString)
+      val row = ArrowConverter.arrowToInternalRow(
+        _currentBatch,
+        _currentRowIndex,
+        sourceSchema,
+        fieldNameToIdString
+      )
       _currentRowIndex += 1
       row
     }
@@ -208,7 +234,8 @@ class MilvusLoonPartitionReader(
     // Convert Milvus schema to Arrow schema with field IDs as field names
     // This is required because milvus-storage reader matches columns by field ID
     // The manifest stores column groups with field IDs (e.g., "100", "101")
-    val arrowSchema = com.zilliz.spark.connector.MilvusSchemaUtil.convertToArrowSchemaWithFieldIdNames(milvusSchema)
+    val arrowSchema = com.zilliz.spark.connector.MilvusSchemaUtil
+      .convertToArrowSchemaWithFieldIdNames(milvusSchema)
     val arrowSchemaC = ArrowSchema.allocateNew(allocator)
     Data.exportSchema(allocator, arrowSchema, null, arrowSchemaC)
     (arrowSchemaC, arrowSchemaC.memoryAddress())
@@ -224,35 +251,44 @@ class MilvusLoonPartitionReader(
     }
   }
 
-  /**
-   * Perform per-segment vector search and maintain top-K results
-   */
+  /** Perform per-segment vector search and maintain top-K results
+    */
   private def performSegmentVectorSearch(): Unit = {
     val k = topK.get
     val qv = queryVector.get
     val metric = metricType.getOrElse("L2")
     val vecCol = vectorColumn.getOrElse("vector")
 
-    logInfo(s"Starting per-segment vector search: k=$k, metric=$metric, vectorColumn=$vecCol")
+    logInfo(
+      s"Starting per-segment vector search: k=$k, metric=$metric, vectorColumn=$vecCol"
+    )
 
     // Find vector column index in source schema
-    val vectorColIndex = try {
-      sourceSchema.fieldIndex(vecCol)
-    } catch {
-      case _: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"Vector column '$vecCol' not found in schema: ${sourceSchema.fieldNames.mkString(", ")}")
-    }
+    val vectorColIndex =
+      try {
+        sourceSchema.fieldIndex(vecCol)
+      } catch {
+        case _: IllegalArgumentException =>
+          throw new IllegalArgumentException(
+            s"Vector column '$vecCol' not found in schema: ${sourceSchema.fieldNames.mkString(", ")}"
+          )
+      }
 
     // Use priority queue to maintain top-K
     // For L2: min-heap (smaller distance is better, so we keep max at top to evict)
     // For IP/COSINE: max-heap (larger score is better, so we keep min at top to evict)
     val ordering: Ordering[(InternalRow, Double)] = metric match {
-      case "L2" => Ordering.by[(InternalRow, Double), Double](_._2)  // Max-heap for L2
-      case "IP" | "COSINE" => Ordering.by[(InternalRow, Double), Double](_._2).reverse  // Min-heap for IP/COSINE
+      case "L2" =>
+        Ordering.by[(InternalRow, Double), Double](_._2) // Max-heap for L2
+      case "IP" | "COSINE" =>
+        Ordering
+          .by[(InternalRow, Double), Double](_._2)
+          .reverse // Min-heap for IP/COSINE
       case _ => Ordering.by[(InternalRow, Double), Double](_._2)
     }
 
-    val heap = scala.collection.mutable.PriorityQueue.empty[(InternalRow, Double)](ordering)
+    val heap = scala.collection.mutable.PriorityQueue
+      .empty[(InternalRow, Double)](ordering)
     var rowCount = 0
 
     // Helper function to process a batch
@@ -262,16 +298,28 @@ class MilvusLoonPartitionReader(
 
       // Process each row in batch
       for (i <- 0 until batchSize) {
-        val row = ArrowConverter.arrowToInternalRow(batch, i, sourceSchema, fieldNameToIdString)
+        val row = ArrowConverter.arrowToInternalRow(
+          batch,
+          i,
+          sourceSchema,
+          fieldNameToIdString
+        )
 
         // Extract vector from row
-        val vector = try {
-          extractVectorFromRow(row, vectorColIndex, sourceSchema(vectorColIndex).dataType)
-        } catch {
-          case e: Exception =>
-            logWarning(s"Failed to extract vector from row $rowCount: ${e.getMessage}")
-            null
-        }
+        val vector =
+          try {
+            extractVectorFromRow(
+              row,
+              vectorColIndex,
+              sourceSchema(vectorColIndex).dataType
+            )
+          } catch {
+            case e: Exception =>
+              logWarning(
+                s"Failed to extract vector from row $rowCount: ${e.getMessage}"
+              )
+              null
+          }
 
         if (vector != null) {
           // Calculate distance
@@ -283,8 +331,9 @@ class MilvusLoonPartitionReader(
           } else {
             val (_, worstDist) = heap.head
             val shouldReplace = metric match {
-              case "L2" => distance < worstDist  // Smaller L2 distance is better
-              case "IP" | "COSINE" => distance > worstDist  // Larger IP/COSINE is better
+              case "L2" => distance < worstDist // Smaller L2 distance is better
+              case "IP" | "COSINE" =>
+                distance > worstDist // Larger IP/COSINE is better
               case _ => distance < worstDist
             }
 
@@ -308,27 +357,36 @@ class MilvusLoonPartitionReader(
       processBatch(batch)
     }
 
-    logInfo(s"Per-segment vector search completed: processed $rowCount rows, kept ${heap.size} top-K results")
+    logInfo(
+      s"Per-segment vector search completed: processed $rowCount rows, kept ${heap.size} top-K results"
+    )
 
     // Sort results and create iterator
     val sortedResults = metric match {
-      case "L2" => heap.dequeueAll.sortBy[(Double)](x => x._2)  // Ascending for L2
-      case "IP" | "COSINE" => heap.dequeueAll.sortBy[(Double)](x => -x._2)  // Descending for IP/COSINE
+      case "L2" =>
+        heap.dequeueAll.sortBy[(Double)](x => x._2) // Ascending for L2
+      case "IP" | "COSINE" =>
+        heap.dequeueAll.sortBy[(Double)](x => -x._2) // Descending for IP/COSINE
       case _ => heap.dequeueAll.sortBy[(Double)](x => x._2)
     }
 
     vectorSearchResults = sortedResults.iterator
   }
 
-  /**
-   * Extract vector from InternalRow based on data type
-   */
-  private def extractVectorFromRow(row: InternalRow, colIndex: Int, dataType: org.apache.spark.sql.types.DataType): Array[Float] = {
+  /** Extract vector from InternalRow based on data type
+    */
+  private def extractVectorFromRow(
+      row: InternalRow,
+      colIndex: Int,
+      dataType: org.apache.spark.sql.types.DataType
+  ): Array[Float] = {
     dataType match {
       case ArrayType(FloatType, _) =>
         // Array[Float] type
         val arrayData = row.getArray(colIndex)
-        (0 until arrayData.numElements()).map(i => arrayData.getFloat(i)).toArray
+        (0 until arrayData.numElements())
+          .map(i => arrayData.getFloat(i))
+          .toArray
 
       case BinaryType =>
         // Binary type (for FixedSizeBinary float vectors)
@@ -337,13 +395,21 @@ class MilvusLoonPartitionReader(
         (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
 
       case _ =>
-        throw new IllegalArgumentException(s"Unsupported vector type: $dataType")
+        throw new IllegalArgumentException(
+          s"Unsupported vector type: $dataType"
+        )
     }
   }
 
-  private def calculateDistance(queryVec: Array[Float], dataVec: Array[Float], metric: String): Double = {
+  private def calculateDistance(
+      queryVec: Array[Float],
+      dataVec: Array[Float],
+      metric: String
+  ): Double = {
     if (queryVec.length != dataVec.length) {
-      logWarning(s"Vector dimension mismatch: query=${queryVec.length}, data=${dataVec.length}")
+      logWarning(
+        s"Vector dimension mismatch: query=${queryVec.length}, data=${dataVec.length}"
+      )
       return Double.MaxValue
     }
 
@@ -351,18 +417,22 @@ class MilvusLoonPartitionReader(
     val dataVector = Vectors.dense(dataVec.map(_.toDouble))
 
     val distanceType = metric match {
-      case "L2" => VectorBruteForceSearch.DistanceType.L2
-      case "IP" => VectorBruteForceSearch.DistanceType.IP
+      case "L2"     => VectorBruteForceSearch.DistanceType.L2
+      case "IP"     => VectorBruteForceSearch.DistanceType.IP
       case "COSINE" => VectorBruteForceSearch.DistanceType.COSINE
-      case _ => throw new IllegalArgumentException(s"Unsupported metric type: $metric")
+      case _ =>
+        throw new IllegalArgumentException(s"Unsupported metric type: $metric")
     }
 
-    VectorBruteForceSearch.calculateDistance(queryVector, dataVector, distanceType)
+    VectorBruteForceSearch.calculateDistance(
+      queryVector,
+      dataVector,
+      distanceType
+    )
   }
 
-  /**
-   * Apply all pushed filters to a row
-   */
+  /** Apply all pushed filters to a row
+    */
   private def applyFilters(row: InternalRow): Boolean = {
     if (pushedFilters.isEmpty) {
       return true
@@ -370,9 +440,8 @@ class MilvusLoonPartitionReader(
     pushedFilters.forall(filter => evaluateFilter(filter, row))
   }
 
-  /**
-   * Recursively evaluate a filter against a row
-   */
+  /** Recursively evaluate a filter against a row
+    */
   private def evaluateFilter(filter: Filter, row: InternalRow): Boolean = {
     import org.apache.spark.sql.sources._
 
@@ -435,9 +504,8 @@ class MilvusLoonPartitionReader(
     }
   }
 
-  /**
-   * Get column index by name, returns -1 if not found
-   */
+  /** Get column index by name, returns -1 if not found
+    */
   private def getColumnIndex(columnName: String): Int = {
     try {
       sourceSchema.fieldIndex(columnName)
@@ -446,50 +514,52 @@ class MilvusLoonPartitionReader(
     }
   }
 
-  /**
-   * Get value from row at given column index
-   */
-  private def getRowValue(row: InternalRow, columnIndex: Int, columnName: String): Any = {
+  /** Get value from row at given column index
+    */
+  private def getRowValue(
+      row: InternalRow,
+      columnIndex: Int,
+      columnName: String
+  ): Any = {
     if (row.isNullAt(columnIndex)) {
       return null
     }
 
     val field = sourceSchema.fields(columnIndex)
     field.dataType match {
-      case LongType => row.getLong(columnIndex)
+      case LongType    => row.getLong(columnIndex)
       case IntegerType => row.getInt(columnIndex)
-      case ShortType => row.getShort(columnIndex)
-      case FloatType => row.getFloat(columnIndex)
-      case DoubleType => row.getDouble(columnIndex)
+      case ShortType   => row.getShort(columnIndex)
+      case FloatType   => row.getFloat(columnIndex)
+      case DoubleType  => row.getDouble(columnIndex)
       case BooleanType => row.getBoolean(columnIndex)
-      case StringType => row.getUTF8String(columnIndex).toString
-      case BinaryType => row.getBinary(columnIndex)
-      case _ =>
+      case StringType  => row.getUTF8String(columnIndex).toString
+      case BinaryType  => row.getBinary(columnIndex)
+      case _           =>
         // For complex types (arrays, maps, structs), return the raw value
         row.get(columnIndex, field.dataType)
     }
   }
 
-  /**
-   * Compare two values, handling type conversions
-   */
+  /** Compare two values, handling type conversions
+    */
   private def compareValues(rowValue: Any, filterValue: Any): Int = {
     (rowValue, filterValue) match {
-      case (null, null) => 0
-      case (null, _) => -1
-      case (_, null) => 1
-      case (rv: Long, fv: Long) => rv.compareTo(fv)
-      case (rv: Long, fv: Int) => rv.compareTo(fv.toLong)
-      case (rv: Int, fv: Int) => rv.compareTo(fv)
-      case (rv: Int, fv: Long) => rv.toLong.compareTo(fv)
-      case (rv: Short, fv: Short) => rv.compareTo(fv)
-      case (rv: Short, fv: Int) => rv.toInt.compareTo(fv)
-      case (rv: Float, fv: Float) => rv.compareTo(fv)
-      case (rv: Float, fv: Double) => rv.toDouble.compareTo(fv)
-      case (rv: Double, fv: Double) => rv.compareTo(fv)
-      case (rv: Double, fv: Float) => rv.compareTo(fv.toDouble)
+      case (null, null)               => 0
+      case (null, _)                  => -1
+      case (_, null)                  => 1
+      case (rv: Long, fv: Long)       => rv.compareTo(fv)
+      case (rv: Long, fv: Int)        => rv.compareTo(fv.toLong)
+      case (rv: Int, fv: Int)         => rv.compareTo(fv)
+      case (rv: Int, fv: Long)        => rv.toLong.compareTo(fv)
+      case (rv: Short, fv: Short)     => rv.compareTo(fv)
+      case (rv: Short, fv: Int)       => rv.toInt.compareTo(fv)
+      case (rv: Float, fv: Float)     => rv.compareTo(fv)
+      case (rv: Float, fv: Double)    => rv.toDouble.compareTo(fv)
+      case (rv: Double, fv: Double)   => rv.compareTo(fv)
+      case (rv: Double, fv: Float)    => rv.compareTo(fv.toDouble)
       case (rv: Boolean, fv: Boolean) => rv.compareTo(fv)
-      case (rv: String, fv: String) => rv.compareTo(fv)
+      case (rv: String, fv: String)   => rv.compareTo(fv)
       case (rv: Array[Byte], fv: Array[Byte]) =>
         java.util.Arrays.compare(rv, fv)
       case _ =>

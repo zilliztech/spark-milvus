@@ -3,15 +3,15 @@ package com.zilliz.spark.connector.read
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/**
- * Test suite for MilvusSnapshotReader
- */
+/** Test suite for MilvusSnapshotReader
+  */
 class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
   private val snapshotFilePath = "src/test/data/sample_snapshot.json"
 
   test("Parse complete snapshot metadata successfully") {
-    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    val result =
+      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
@@ -19,7 +19,9 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     // Verify snapshot info
     metadata.snapshotInfo.name shouldBe "backfill_snapshot"
     metadata.snapshotInfo.id shouldBe 462324574599774209L
-    metadata.snapshotInfo.description shouldBe Some("add field backfill snapshot")
+    metadata.snapshotInfo.description shouldBe Some(
+      "add field backfill snapshot"
+    )
     metadata.snapshotInfo.collectionId shouldBe 462324574592960519L
     metadata.snapshotInfo.partitionIds should contain(462324574592960520L)
     metadata.snapshotInfo.createTs shouldBe 462324677975474190L
@@ -45,7 +47,8 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("Parse collection schema successfully") {
-    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    val result =
+      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
@@ -64,55 +67,57 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
     // Verify all field names
     val fieldNames = schema.fields.map(_.name)
-    fieldNames should contain allOf("id", "int64", "float", "varchar", "vector", "RowID", "Timestamp")
+    fieldNames should contain allOf ("id", "int64", "float", "varchar", "vector", "RowID", "Timestamp")
 
     // Verify primary key field (id)
     val idField = schema.getFieldByName("id").get
     idField.getFieldIDAsLong shouldBe 100L
-    idField.dataType shouldBe 5  // Int64
+    idField.dataType shouldBe 5 // Int64
     idField.isPrimaryKey shouldBe Some(true)
 
     // Verify clustering key field (int64)
     val int64Field = schema.getFieldByName("int64").get
     int64Field.getFieldIDAsLong shouldBe 101L
-    int64Field.dataType shouldBe 5  // Int64
+    int64Field.dataType shouldBe 5 // Int64
     int64Field.isClusteringKey shouldBe Some(true)
 
     // Verify float field
     val floatField = schema.getFieldByName("float").get
     floatField.getFieldIDAsLong shouldBe 102L
-    floatField.dataType shouldBe 10  // Float
+    floatField.dataType shouldBe 10 // Float
 
     // Verify varchar field with type params
     val varcharField = schema.getFieldByName("varchar").get
     varcharField.getFieldIDAsLong shouldBe 103L
-    varcharField.dataType shouldBe 21  // VarChar
+    varcharField.dataType shouldBe 21 // VarChar
     varcharField.typeParams shouldBe defined
     varcharField.getTypeParam("max_length") shouldBe Some("1024")
 
     // Verify vector field with type params
     val vectorField = schema.getFieldByName("vector").get
     vectorField.getFieldIDAsLong shouldBe 104L
-    vectorField.dataType shouldBe 101  // FloatVector
+    vectorField.dataType shouldBe 101 // FloatVector
     vectorField.typeParams shouldBe defined
     vectorField.getTypeParam("dim") shouldBe Some("128")
 
     // Verify system field RowID
     val rowIdField = schema.getFieldByName("RowID").get
-    rowIdField.getFieldIDAsLong shouldBe 0L  // No fieldID specified
-    rowIdField.dataType shouldBe 5  // Int64
+    rowIdField.getFieldIDAsLong shouldBe 0L // No fieldID specified
+    rowIdField.dataType shouldBe 5 // Int64
     rowIdField.description shouldBe Some("row id")
 
     // Verify system field Timestamp
     val timestampField = schema.getFieldByName("Timestamp").get
     timestampField.getFieldIDAsLong shouldBe 1L
-    timestampField.dataType shouldBe 5  // Int64
+    timestampField.dataType shouldBe 5 // Int64
     timestampField.description shouldBe Some("timestamp")
   }
 
   test("Get primary key name from snapshot JSON") {
     val source = scala.io.Source.fromFile(snapshotFilePath)
-    val json = try source.mkString finally source.close()
+    val json =
+      try source.mkString
+      finally source.close()
 
     val result = MilvusSnapshotReader.getPkName(json)
 
@@ -150,7 +155,9 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     val result = MilvusSnapshotReader.getPkName(jsonWithoutPk)
 
     result shouldBe a[Left[_, _]]
-    result.left.toOption.get.getMessage should include("No primary key field found")
+    result.left.toOption.get.getMessage should include(
+      "No primary key field found"
+    )
   }
 
   test("Parse consistency_level from snapshot JSON") {
@@ -182,7 +189,8 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     }
     """
 
-    val result = MilvusSnapshotReader.parseSnapshotMetadata(jsonWithConsistencyLevel)
+    val result =
+      MilvusSnapshotReader.parseSnapshotMetadata(jsonWithConsistencyLevel)
 
     result shouldBe a[Right[_, _]]
     result.toOption.get.collection.consistencyLevel shouldBe Some(2)
@@ -218,7 +226,8 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     }
     """
 
-    val result = MilvusSnapshotReader.parseSnapshotMetadata(jsonWithUnknownFields)
+    val result =
+      MilvusSnapshotReader.parseSnapshotMetadata(jsonWithUnknownFields)
 
     result shouldBe a[Right[_, _]]
     result.toOption.get.snapshotInfo.name shouldBe "test"
@@ -242,22 +251,28 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     manifestMap should have size 1
   }
 
-  test("Convert snapshot schema to Spark StructType (excluding system fields)") {
+  test(
+    "Convert snapshot schema to Spark StructType (excluding system fields)"
+  ) {
     import org.apache.spark.sql.types._
 
-    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    val result =
+      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
 
     // Convert to Spark schema without system fields
-    val sparkSchema = MilvusSnapshotReader.toSparkSchema(metadata.collection.schema, includeSystemFields = false)
+    val sparkSchema = MilvusSnapshotReader.toSparkSchema(
+      metadata.collection.schema,
+      includeSystemFields = false
+    )
 
     // Should have 5 user fields (excluding RowID and Timestamp)
     sparkSchema.fields should have size 5
 
     // Verify field names and types
     val fieldNames = sparkSchema.fields.map(_.name)
-    fieldNames should contain allOf("id", "int64", "float", "varchar", "vector")
+    fieldNames should contain allOf ("id", "int64", "float", "varchar", "vector")
     fieldNames should not contain "RowID"
     fieldNames should not contain "Timestamp"
 
@@ -269,30 +284,38 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     sparkSchema("vector").dataType shouldBe ArrayType(FloatType)
   }
 
-  test("Convert snapshot schema to Spark StructType (including system fields)") {
+  test(
+    "Convert snapshot schema to Spark StructType (including system fields)"
+  ) {
     import org.apache.spark.sql.types._
 
-    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    val result =
+      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
 
     // Convert to Spark schema with system fields
-    val sparkSchema = MilvusSnapshotReader.toSparkSchema(metadata.collection.schema, includeSystemFields = true)
+    val sparkSchema = MilvusSnapshotReader.toSparkSchema(
+      metadata.collection.schema,
+      includeSystemFields = true
+    )
 
     // Should have 7 fields (including RowID and Timestamp)
     sparkSchema.fields should have size 7
 
     // Verify field names
     val fieldNames = sparkSchema.fields.map(_.name)
-    fieldNames should contain allOf("id", "int64", "float", "varchar", "vector", "RowID", "Timestamp")
+    fieldNames should contain allOf ("id", "int64", "float", "varchar", "vector", "RowID", "Timestamp")
   }
 
   test("Get field ID to name mapping") {
-    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    val result =
+      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
 
-    val fieldIdMap = MilvusSnapshotReader.getFieldIdMap(metadata.collection.schema)
+    val fieldIdMap =
+      MilvusSnapshotReader.getFieldIdMap(metadata.collection.schema)
 
     // Verify mappings
     fieldIdMap(100L) shouldBe "id"
@@ -305,11 +328,13 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("Get field name to ID mapping") {
-    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    val result =
+      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
 
-    val fieldNameToIdMap = MilvusSnapshotReader.getFieldNameToIdMap(metadata.collection.schema)
+    val fieldNameToIdMap =
+      MilvusSnapshotReader.getFieldNameToIdMap(metadata.collection.schema)
 
     // Verify mappings
     fieldNameToIdMap("id") shouldBe 100L
@@ -322,7 +347,8 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("Serialize and deserialize manifest list") {
-    val result = MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+    val result =
+      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
     val originalManifestList = metadata.storageV2ManifestList.get
@@ -392,18 +418,19 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     }
     """
 
-    val result = MilvusSnapshotReader.parseSnapshotMetadata(jsonWithStringDataType)
+    val result =
+      MilvusSnapshotReader.parseSnapshotMetadata(jsonWithStringDataType)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
     val schema = metadata.collection.schema
 
     // Verify string data types are correctly converted to numeric codes
-    schema.getFieldByName("id").get.dataType shouldBe 5       // Int64
-    schema.getFieldByName("score").get.dataType shouldBe 10   // Float
-    schema.getFieldByName("name").get.dataType shouldBe 21    // VarChar
-    schema.getFieldByName("embedding").get.dataType shouldBe 101  // FloatVector
-    schema.getFieldByName("flag").get.dataType shouldBe 1     // Bool
+    schema.getFieldByName("id").get.dataType shouldBe 5 // Int64
+    schema.getFieldByName("score").get.dataType shouldBe 10 // Float
+    schema.getFieldByName("name").get.dataType shouldBe 21 // VarChar
+    schema.getFieldByName("embedding").get.dataType shouldBe 101 // FloatVector
+    schema.getFieldByName("flag").get.dataType shouldBe 1 // Bool
   }
 
   test("Parse data_type with mixed formats (some int, some string)") {
@@ -439,14 +466,15 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     }
     """
 
-    val result = MilvusSnapshotReader.parseSnapshotMetadata(jsonWithMixedDataType)
+    val result =
+      MilvusSnapshotReader.parseSnapshotMetadata(jsonWithMixedDataType)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
     val schema = metadata.collection.schema
 
     // Verify both formats work correctly
-    schema.getFieldByName("id").get.dataType shouldBe 5       // Int format
-    schema.getFieldByName("score").get.dataType shouldBe 10   // String format
+    schema.getFieldByName("id").get.dataType shouldBe 5 // Int format
+    schema.getFieldByName("score").get.dataType shouldBe 10 // String format
   }
 }

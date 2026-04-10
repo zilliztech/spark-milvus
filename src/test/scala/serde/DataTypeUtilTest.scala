@@ -1,16 +1,15 @@
 package com.zilliz.spark.connector
 
-import org.scalatest.funsuite.AnyFunSuite
-import org.scalatest.matchers.should.Matchers
-import org.apache.spark.sql.types.DataTypes
 import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.arrow.vector.types.FloatingPointPrecision
+import org.apache.spark.sql.types.DataTypes
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
 
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
-/**
- * Unit tests for DataTypeUtil type conversions
- */
+/** Unit tests for DataTypeUtil type conversions
+  */
 class DataTypeUtilTest extends AnyFunSuite with Matchers {
 
   // ============ toArrowType tests ============
@@ -48,13 +47,17 @@ class DataTypeUtilTest extends AnyFunSuite with Matchers {
   test("toArrowType converts Float to Arrow FloatingPoint SINGLE") {
     val result = DataTypeUtil.toArrowType(0, MilvusDataType.Float)
     result shouldBe a[ArrowType.FloatingPoint]
-    result.asInstanceOf[ArrowType.FloatingPoint].getPrecision shouldBe FloatingPointPrecision.SINGLE
+    result
+      .asInstanceOf[ArrowType.FloatingPoint]
+      .getPrecision shouldBe FloatingPointPrecision.SINGLE
   }
 
   test("toArrowType converts Double to Arrow FloatingPoint DOUBLE") {
     val result = DataTypeUtil.toArrowType(0, MilvusDataType.Double)
     result shouldBe a[ArrowType.FloatingPoint]
-    result.asInstanceOf[ArrowType.FloatingPoint].getPrecision shouldBe FloatingPointPrecision.DOUBLE
+    result
+      .asInstanceOf[ArrowType.FloatingPoint]
+      .getPrecision shouldBe FloatingPointPrecision.DOUBLE
   }
 
   test("toArrowType converts VarChar to Arrow Utf8") {
@@ -72,33 +75,49 @@ class DataTypeUtilTest extends AnyFunSuite with Matchers {
     result shouldBe a[ArrowType.Binary]
   }
 
-  test("toArrowType converts FloatVector to FixedSizeBinary with correct size") {
+  test(
+    "toArrowType converts FloatVector to FixedSizeBinary with correct size"
+  ) {
     val dim = 128
     val result = DataTypeUtil.toArrowType(dim, MilvusDataType.FloatVector)
     result shouldBe a[ArrowType.FixedSizeBinary]
-    result.asInstanceOf[ArrowType.FixedSizeBinary].getByteWidth shouldBe (dim * 4)
+    result
+      .asInstanceOf[ArrowType.FixedSizeBinary]
+      .getByteWidth shouldBe (dim * 4)
   }
 
-  test("toArrowType converts BinaryVector to FixedSizeBinary with correct size") {
+  test(
+    "toArrowType converts BinaryVector to FixedSizeBinary with correct size"
+  ) {
     val dim = 128
     val result = DataTypeUtil.toArrowType(dim, MilvusDataType.BinaryVector)
     result shouldBe a[ArrowType.FixedSizeBinary]
     // Binary vector: (dim + 7) / 8 bytes
-    result.asInstanceOf[ArrowType.FixedSizeBinary].getByteWidth shouldBe ((dim + 7) / 8)
+    result
+      .asInstanceOf[ArrowType.FixedSizeBinary]
+      .getByteWidth shouldBe ((dim + 7) / 8)
   }
 
-  test("toArrowType converts Float16Vector to FixedSizeBinary with correct size") {
+  test(
+    "toArrowType converts Float16Vector to FixedSizeBinary with correct size"
+  ) {
     val dim = 64
     val result = DataTypeUtil.toArrowType(dim, MilvusDataType.Float16Vector)
     result shouldBe a[ArrowType.FixedSizeBinary]
-    result.asInstanceOf[ArrowType.FixedSizeBinary].getByteWidth shouldBe (dim * 2)
+    result
+      .asInstanceOf[ArrowType.FixedSizeBinary]
+      .getByteWidth shouldBe (dim * 2)
   }
 
-  test("toArrowType converts BFloat16Vector to FixedSizeBinary with correct size") {
+  test(
+    "toArrowType converts BFloat16Vector to FixedSizeBinary with correct size"
+  ) {
     val dim = 64
     val result = DataTypeUtil.toArrowType(dim, MilvusDataType.BFloat16Vector)
     result shouldBe a[ArrowType.FixedSizeBinary]
-    result.asInstanceOf[ArrowType.FixedSizeBinary].getByteWidth shouldBe (dim * 2)
+    result
+      .asInstanceOf[ArrowType.FixedSizeBinary]
+      .getByteWidth shouldBe (dim * 2)
   }
 
   test("toArrowType converts Int8Vector to FixedSizeBinary with correct size") {
@@ -202,7 +221,10 @@ class DataTypeUtilTest extends AnyFunSuite with Matchers {
   test("toDataType converts SparseFloatVector to Spark Map[Long, Float]") {
     val fieldSchema = FieldSchema(dataType = MilvusDataType.SparseFloatVector)
     val result = DataTypeUtil.toDataType(fieldSchema)
-    result shouldBe DataTypes.createMapType(DataTypes.LongType, DataTypes.FloatType)
+    result shouldBe DataTypes.createMapType(
+      DataTypes.LongType,
+      DataTypes.FloatType
+    )
   }
 
   test("toDataType converts Array with Int64 element to Spark Array[Long]") {
@@ -223,7 +245,9 @@ class DataTypeUtilTest extends AnyFunSuite with Matchers {
     result shouldBe DataTypes.createArrayType(DataTypes.FloatType)
   }
 
-  test("toDataType converts Array with VarChar element to Spark Array[String]") {
+  test(
+    "toDataType converts Array with VarChar element to Spark Array[String]"
+  ) {
     val fieldSchema = FieldSchema(
       dataType = MilvusDataType.Array,
       elementType = MilvusDataType.VarChar
@@ -252,7 +276,8 @@ class DataTypeUtilTest extends AnyFunSuite with Matchers {
   test("toDataType throws exception for unsupported array element type") {
     val fieldSchema = FieldSchema(
       dataType = MilvusDataType.Array,
-      elementType = MilvusDataType.FloatVector  // Vectors are not valid array elements
+      elementType =
+        MilvusDataType.FloatVector // Vectors are not valid array elements
     )
 
     an[DataParseException] should be thrownBy {

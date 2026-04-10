@@ -559,4 +559,3 @@ object SparseFloatVectorConverter {
     buf.array()
   }
 }
-

@@ -3,9 +3,8 @@ package com.zilliz.spark.connector.operations.backfill
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 
-/**
- * Result of backfilling a single segment
- */
+/** Result of backfilling a single segment
+  */
 case class SegmentBackfillResult(
     segmentId: Long,
     rowCount: Long,
@@ -15,9 +14,8 @@ case class SegmentBackfillResult(
     committedVersion: Long = -1
 )
 
-/**
- * Comprehensive result of backfill operation
- */
+/** Comprehensive result of backfill operation
+  */
 case class BackfillResult(
     success: Boolean,
     segmentsProcessed: Int,
@@ -29,9 +27,9 @@ case class BackfillResult(
     partitionId: Long,
     newFieldNames: Seq[String]
 ) {
-  /**
-   * Get a summary string of the backfill operation
-   */
+
+  /** Get a summary string of the backfill operation
+    */
   def summary: String = {
     s"""Backfill Summary:
        |  Status: ${if (success) "SUCCESS" else "FAILED"}
@@ -45,32 +43,34 @@ case class BackfillResult(
        |""".stripMargin
   }
 
-  /**
-   * Get detailed per-segment results
-   */
+  /** Get detailed per-segment results
+    */
   def segmentSummary: String = {
-    val segmentLines = segmentResults.toSeq.sortBy(_._1).map { case (segId, result) =>
-      s"    Segment $segId: ${result.rowCount} rows, version=${result.committedVersion}, ${result.executionTimeMs}ms, path=${result.outputPath}"
-    }
+    val segmentLines =
+      segmentResults.toSeq.sortBy(_._1).map { case (segId, result) =>
+        s"    Segment $segId: ${result.rowCount} rows, version=${result.committedVersion}, ${result.executionTimeMs}ms, path=${result.outputPath}"
+      }
     s"Segment Details:\n${segmentLines.mkString("\n")}"
   }
 
-  /**
-   * Serialize this result to a JSON string
-   */
+  /** Serialize this result to a JSON string
+    */
   def toJson: String = {
     val mapper = new ObjectMapper()
     mapper.registerModule(DefaultScalaModule)
 
-    val segments = segmentResults.toSeq.sortBy(_._1).map { case (segId, r) =>
-      segId.toString -> Map(
-        "version" -> r.committedVersion,
-        "rowCount" -> r.rowCount,
-        "executionTimeMs" -> r.executionTimeMs,
-        "outputPath" -> r.outputPath,
-        "manifestPaths" -> r.manifestPaths
-      )
-    }.toMap
+    val segments = segmentResults.toSeq
+      .sortBy(_._1)
+      .map { case (segId, r) =>
+        segId.toString -> Map(
+          "version" -> r.committedVersion,
+          "rowCount" -> r.rowCount,
+          "executionTimeMs" -> r.executionTimeMs,
+          "outputPath" -> r.outputPath,
+          "manifestPaths" -> r.manifestPaths
+        )
+      }
+      .toMap
 
     val result = Map(
       "success" -> success,
@@ -86,21 +86,20 @@ case class BackfillResult(
     mapper.writerWithDefaultPrettyPrinter().writeValueAsString(result)
   }
 
-  /**
-   * Check if all segments were processed successfully
-   */
-  def allSegmentsSuccessful: Boolean = success && segmentsProcessed == segmentResults.size
+  /** Check if all segments were processed successfully
+    */
+  def allSegmentsSuccessful: Boolean =
+    success && segmentsProcessed == segmentResults.size
 
-  /**
-   * Get total execution time in seconds
-   */
+  /** Get total execution time in seconds
+    */
   def executionTimeSec: Double = executionTimeMs / 1000.0
 }
 
 object BackfillResult {
-  /**
-   * Create a successful result
-   */
+
+  /** Create a successful result
+    */
   def success(
       segmentResults: Map[Long, SegmentBackfillResult],
       executionTimeMs: Long,
@@ -124,9 +123,8 @@ object BackfillResult {
     )
   }
 
-  /**
-   * Create a failed result
-   */
+  /** Create a failed result
+    */
   def failure(
       executionTimeMs: Long,
       collectionId: Long = -1,

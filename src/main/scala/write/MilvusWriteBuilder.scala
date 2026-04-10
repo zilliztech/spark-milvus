@@ -1,6 +1,10 @@
 package com.zilliz.spark.connector.write
 
-import org.apache.spark.sql.connector.write.{LogicalWriteInfo, Write, WriteBuilder}
+import org.apache.spark.sql.connector.write.{
+  LogicalWriteInfo,
+  Write,
+  WriteBuilder
+}
 
 import com.zilliz.spark.connector.MilvusOption
 

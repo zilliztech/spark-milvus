@@ -3,9 +3,8 @@ package com.zilliz.spark.connector
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/**
- * Unit tests for MilvusOption parsing and validation
- */
+/** Unit tests for MilvusOption parsing and validation
+  */
 class MilvusOptionTest extends AnyFunSuite with Matchers {
 
   test("Parse basic options with default values") {
@@ -129,7 +128,7 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     milvusOption.vectorSearchConfig shouldBe defined
     val config = milvusOption.vectorSearchConfig.get
-    config.metricType shouldBe "COSINE"  // Should be uppercase
+    config.metricType shouldBe "COSINE" // Should be uppercase
   }
 
   test("Vector search config is None when query vector is missing") {
@@ -165,8 +164,8 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     milvusOption.vectorSearchConfig shouldBe defined
     val config = milvusOption.vectorSearchConfig.get
-    config.metricType shouldBe "L2"  // Default metric
-    config.vectorColumn shouldBe "vector"  // Default column name
+    config.metricType shouldBe "L2" // Default metric
+    config.vectorColumn shouldBe "vector" // Default column name
   }
 
   test("isInt64PK returns true for int64 type") {
@@ -217,18 +216,19 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
   }
 }
 
-/**
- * Unit tests for MilvusS3Option
- */
+/** Unit tests for MilvusS3Option
+  */
 class MilvusS3OptionTest extends AnyFunSuite with Matchers {
 
   test("Parse S3 options with default values") {
     import scala.collection.JavaConverters._
     import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-    val options = new CaseInsensitiveStringMap(Map(
-      MilvusOption.ReaderType -> "insert"
-    ).asJava)
+    val options = new CaseInsensitiveStringMap(
+      Map(
+        MilvusOption.ReaderType -> "insert"
+      ).asJava
+    )
 
     val s3Option = MilvusS3Option(options)
 
@@ -248,19 +248,21 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
     import scala.collection.JavaConverters._
     import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-    val options = new CaseInsensitiveStringMap(Map(
-      MilvusOption.ReaderType -> "insert",
-      MilvusOption.S3FileSystemTypeName -> "s3a://",
-      MilvusOption.S3BucketName -> "my-bucket",
-      MilvusOption.S3RootPath -> "data/milvus",
-      MilvusOption.S3Endpoint -> "s3.amazonaws.com",
-      MilvusOption.S3AccessKey -> "AKIAIOSFODNN7EXAMPLE",
-      MilvusOption.S3SecretKey -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-      MilvusOption.S3UseSSL -> "true",
-      MilvusOption.S3PathStyleAccess -> "false",
-      MilvusOption.S3MaxConnections -> "64",
-      MilvusOption.S3PreloadPoolSize -> "8"
-    ).asJava)
+    val options = new CaseInsensitiveStringMap(
+      Map(
+        MilvusOption.ReaderType -> "insert",
+        MilvusOption.S3FileSystemTypeName -> "s3a://",
+        MilvusOption.S3BucketName -> "my-bucket",
+        MilvusOption.S3RootPath -> "data/milvus",
+        MilvusOption.S3Endpoint -> "s3.amazonaws.com",
+        MilvusOption.S3AccessKey -> "AKIAIOSFODNN7EXAMPLE",
+        MilvusOption.S3SecretKey -> "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        MilvusOption.S3UseSSL -> "true",
+        MilvusOption.S3PathStyleAccess -> "false",
+        MilvusOption.S3MaxConnections -> "64",
+        MilvusOption.S3PreloadPoolSize -> "8"
+      ).asJava
+    )
 
     val s3Option = MilvusS3Option(options)
 
@@ -280,9 +282,11 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
     import scala.collection.JavaConverters._
     import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-    val options = new CaseInsensitiveStringMap(Map(
-      MilvusOption.ReaderType -> "insert"
-    ).asJava)
+    val options = new CaseInsensitiveStringMap(
+      Map(
+        MilvusOption.ReaderType -> "insert"
+      ).asJava
+    )
 
     val s3Option = MilvusS3Option(options)
 
@@ -297,12 +301,14 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
     import scala.collection.JavaConverters._
     import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-    val options = new CaseInsensitiveStringMap(Map(
-      MilvusOption.ReaderType -> "insert",
-      MilvusOption.S3FileSystemTypeName -> "s3a://",
-      MilvusOption.S3BucketName -> "test-bucket",
-      MilvusOption.S3RootPath -> "files"
-    ).asJava)
+    val options = new CaseInsensitiveStringMap(
+      Map(
+        MilvusOption.ReaderType -> "insert",
+        MilvusOption.S3FileSystemTypeName -> "s3a://",
+        MilvusOption.S3BucketName -> "test-bucket",
+        MilvusOption.S3RootPath -> "files"
+      ).asJava
+    )
 
     val s3Option = MilvusS3Option(options)
 
@@ -319,17 +325,19 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
     import scala.collection.JavaConverters._
     import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-    val options = new CaseInsensitiveStringMap(Map(
-      MilvusOption.ReaderType -> "insert",
-      MilvusOption.S3FileSystemTypeName -> "s3a://",
-      MilvusOption.S3BucketName -> "test-bucket",
-      MilvusOption.S3Endpoint -> "localhost:9000",
-      MilvusOption.S3AccessKey -> "test-key",
-      MilvusOption.S3SecretKey -> "test-secret",
-      MilvusOption.S3UseSSL -> "false",
-      MilvusOption.S3PathStyleAccess -> "true",
-      MilvusOption.S3MaxConnections -> "16"
-    ).asJava)
+    val options = new CaseInsensitiveStringMap(
+      Map(
+        MilvusOption.ReaderType -> "insert",
+        MilvusOption.S3FileSystemTypeName -> "s3a://",
+        MilvusOption.S3BucketName -> "test-bucket",
+        MilvusOption.S3Endpoint -> "localhost:9000",
+        MilvusOption.S3AccessKey -> "test-key",
+        MilvusOption.S3SecretKey -> "test-secret",
+        MilvusOption.S3UseSSL -> "false",
+        MilvusOption.S3PathStyleAccess -> "true",
+        MilvusOption.S3MaxConnections -> "16"
+      ).asJava
+    )
 
     val s3Option = MilvusS3Option(options)
     val conf = s3Option.getConf()

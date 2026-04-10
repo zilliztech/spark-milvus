@@ -10,9 +10,8 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.spark.connector.MilvusConnectionException
 
-/**
- * Vector search configuration for Milvus Storage V2
- */
+/** Vector search configuration for Milvus Storage V2
+  */
 case class VectorSearchConfig(
     queryVector: Array[Float],
     topK: Int,
@@ -115,16 +114,21 @@ object MilvusOption {
 
   // Writer config
   val WriterCustomPath = "milvus.writer.customPath"
-  val WriterCommitType = "milvus.writer.commitType"  // "addfield" for backfill, default "addfiles"
-  val WriterFieldIds = "milvus.writer.fieldIds"      // JSON map of field name -> field ID (e.g., "new_field:104,other_field:105")
+  val WriterCommitType =
+    "milvus.writer.commitType" // "addfield" for backfill, default "addfiles"
+  val WriterFieldIds =
+    "milvus.writer.fieldIds" // JSON map of field name -> field ID (e.g., "new_field:104,other_field:105")
 
   // Snapshot-based reading options (for offline/client-free mode)
-  val SnapshotMode = "milvus.snapshot.mode"                 // "true" to enable snapshot mode
-  val SnapshotManifests = "milvus.snapshot.manifests"       // JSON array of StorageV2ManifestItem
+  val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode
+  val SnapshotManifests =
+    "milvus.snapshot.manifests" // JSON array of StorageV2ManifestItem
   val SnapshotCollectionId = "milvus.snapshot.collection.id"
   val SnapshotPartitionIds = "milvus.snapshot.partition.ids"
-  val SnapshotSchemaJson = "milvus.snapshot.schema.json"    // Optional: raw schema JSON for building MilvusCollectionInfo
-  val SnapshotSchemaBytes = "milvus.snapshot.schema.bytes"  // Base64 encoded protobuf CollectionSchema bytes
+  val SnapshotSchemaJson =
+    "milvus.snapshot.schema.json" // Optional: raw schema JSON for building MilvusCollectionInfo
+  val SnapshotSchemaBytes =
+    "milvus.snapshot.schema.bytes" // Base64 encoded protobuf CollectionSchema bytes
 
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {
@@ -188,9 +192,8 @@ object MilvusOption {
     )
   }
 
-  /**
-   * Parse vector search configuration from options
-   */
+  /** Parse vector search configuration from options
+    */
   private def parseVectorSearchConfig(
       options: CaseInsensitiveStringMap
   ): Option[VectorSearchConfig] = {
@@ -216,10 +219,9 @@ object MilvusOption {
     }
   }
 
-  /**
-   * Parse query vector from JSON string format
-   * Expected format: "[0.1, 0.2, 0.3, ...]"
-   */
+  /** Parse query vector from JSON string format Expected format: "[0.1, 0.2,
+    * 0.3, ...]"
+    */
   private def parseQueryVector(jsonStr: String): Array[Float] = {
     jsonStr.trim
       .stripPrefix("[")
@@ -232,15 +234,14 @@ object MilvusOption {
     milvusPKType.toLowerCase() == "int64"
   }
 
-  /**
-   * Generate vector dimension configuration key for a given field name
-   * Format: vector.{fieldName}.dim
-   */
+  /** Generate vector dimension configuration key for a given field name Format:
+    * vector.{fieldName}.dim
+    */
   def vectorDimKey(fieldName: String): String = s"vector.$fieldName.dim"
 
-  /**
-   * Helper method to convert Map to CaseInsensitiveStringMap and create MilvusOption
-   */
+  /** Helper method to convert Map to CaseInsensitiveStringMap and create
+    * MilvusOption
+    */
   def apply(options: Map[String, String]): MilvusOption = {
     import scala.collection.JavaConverters._
     apply(new CaseInsensitiveStringMap(options.asJava))
