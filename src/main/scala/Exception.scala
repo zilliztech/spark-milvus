@@ -7,3 +7,5 @@ case class DataTypeException(message: String) extends Exception(message)
 case class MilvusConnectionException(message: String) extends Exception(message)
 
 case class MilvusRpcException(message: String) extends Exception(message)
+
+case class MilvusRateLimitException(message: String) extends Exception(message)

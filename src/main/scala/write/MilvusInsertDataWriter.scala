@@ -19,6 +19,7 @@ import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusFieldData,
   MilvusOption,
+  MilvusRateLimitException,
   MilvusRpcException,
   MilvusSchemaUtil
 }
@@ -59,10 +60,11 @@ case class MilvusInsertDataWriter(
   private var totalSize = 0
   private var currentHandledBuffer = Seq.empty[FieldData]
 
-  private def flushBuffer(retries: Int = milvusOption.retryCount): Unit = {
-    if (retries <= 0) {
-      throw new MilvusRpcException("Flush buffer failed")
-    }
+  private def flushBuffer(
+      retries: Int = milvusOption.retryCount,
+      rateLimitRetries: Int = MilvusInsertDataWriter.MaxRateLimitRetries,
+      rateLimitDelay: Long = MilvusInsertDataWriter.InitialRateLimitDelay
+  ): Unit = {
     if (currentHandledBuffer.isEmpty) {
       currentHandledBuffer = MilvusInsertDataWriter.getInsertFieldsData(
         collectionSchema.get,
@@ -71,7 +73,7 @@ case class MilvusInsertDataWriter(
     }
 
     try {
-      val insertResult = milvusClient.insert(
+      milvusClient.insert(
         milvusOption.databaseName,
         milvusOption.collectionName,
         if (milvusOption.partitionName.isEmpty) None
@@ -79,7 +81,7 @@ case class MilvusInsertDataWriter(
         currentHandledBuffer,
         numRows = currentSizeInBuffer
       ) match {
-        case Success(status) =>
+        case Success(_) =>
           currentHandledBuffer = Seq.empty[FieldData]
           currentSizeInBuffer = 0
         case Failure(e) =>
@@ -87,11 +89,28 @@ case class MilvusInsertDataWriter(
       }
     } catch {
       case e: Exception =>
-        logWarning(
-          s"Flush buffer failed, retries: ${retries}, error: ${e.getMessage}"
-        )
-        Thread.sleep(milvusOption.retryInterval)
-        flushBuffer(retries - 1)
+        MilvusInsertDataWriter.decideRetry(
+          error = e,
+          retries = retries,
+          rateLimitRetries = rateLimitRetries,
+          rateLimitDelay = rateLimitDelay,
+          retryInterval = milvusOption.retryInterval
+        ) match {
+          case MilvusInsertDataWriter.Abort(err) =>
+            throw err
+          case MilvusInsertDataWriter.Retry(nextRetries, nextRateLimitRetries, sleepMs, nextRateLimitDelay, isRateLimit) =>
+            if (isRateLimit) {
+              logWarning(
+                s"Rate limit hit, backing off ${sleepMs}ms, remaining retries: ${nextRateLimitRetries}, error: ${e.getMessage}"
+              )
+            } else {
+              logWarning(
+                s"Flush buffer failed, retries: ${nextRetries}, error: ${e.getMessage}"
+              )
+            }
+            Thread.sleep(sleepMs)
+            flushBuffer(nextRetries, nextRateLimitRetries, nextRateLimitDelay)
+        }
     }
   }
 
@@ -135,6 +154,74 @@ case class MilvusInsertDataWriter(
 }
 
 object MilvusInsertDataWriter {
+  // Retry policy constants (exposed for tests).
+  val MaxRateLimitRetries: Int = 10
+  val InitialRateLimitDelay: Long = 500L
+  val MaxRateLimitDelay: Long = 10000L
+
+  /** Outcome of [[decideRetry]]. Either we retry with updated counters, or we abort. */
+  sealed trait RetryDecision
+  final case class Retry(
+      retries: Int,
+      rateLimitRetries: Int,
+      sleepMs: Long,
+      nextRateLimitDelay: Long,
+      isRateLimit: Boolean
+  ) extends RetryDecision
+  final case class Abort(error: Throwable) extends RetryDecision
+
+  /**
+   * Classify a flush error and decide whether to retry.
+   *
+   *  - [[MilvusRateLimitException]] (app-layer error code 8 from Milvus) consumes
+   *    a rate-limit retry and doubles the backoff up to [[MaxRateLimitDelay]].
+   *  - Any other exception (including transport-layer RESOURCE_EXHAUSTED which
+   *    surfaces as a non-rate-limit gRPC failure because it is in the gRPC
+   *    interceptor's non-retryable set) consumes a generic retry and uses the
+   *    caller-provided [[retryInterval]].
+   *  - The two counters are independent: a generic failure does not consume a
+   *    rate-limit retry, and vice versa.
+   *  - [[rateLimitDelay]] is NOT reset by generic errors; it only resets when a
+   *    new flushBuffer invocation starts with a fresh batch. This is intentional
+   *    so that a burst of rate limits followed by an unrelated error does not
+   *    fall back to a tiny 500ms backoff on the next rate-limit hit.
+   */
+  def decideRetry(
+      error: Throwable,
+      retries: Int,
+      rateLimitRetries: Int,
+      rateLimitDelay: Long,
+      retryInterval: Long,
+      maxRateLimitDelay: Long = MaxRateLimitDelay
+  ): RetryDecision = error match {
+    case _: MilvusRateLimitException =>
+      if (rateLimitRetries <= 0) {
+        Abort(new MilvusRpcException(
+          s"Flush buffer failed after rate limit retries: ${error.getMessage}"
+        ))
+      } else {
+        Retry(
+          retries = retries,
+          rateLimitRetries = rateLimitRetries - 1,
+          sleepMs = rateLimitDelay,
+          nextRateLimitDelay = Math.min(rateLimitDelay * 2, maxRateLimitDelay),
+          isRateLimit = true
+        )
+      }
+    case _ =>
+      if (retries <= 0) {
+        Abort(new MilvusRpcException(s"Flush buffer failed: ${error.getMessage}"))
+      } else {
+        Retry(
+          retries = retries - 1,
+          rateLimitRetries = rateLimitRetries,
+          sleepMs = retryInterval,
+          nextRateLimitDelay = rateLimitDelay, // not reset across generic errors
+          isRateLimit = false
+        )
+      }
+  }
+
   def newDataBuffer(
       schema: CollectionSchema
   ): Map[String, Any] = {

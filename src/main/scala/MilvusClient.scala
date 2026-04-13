@@ -175,10 +175,18 @@ class MilvusClient(params: MilvusConnectionParams) {
   }
 
   def checkStatus(api: String, status: Status): Try[Status] = {
-    if (status.code != 0 || status.errorCode != ErrorCode.Success) {
-      Failure(new Exception(s"Failed to $api: ${status.reason}"))
+    // Success path first: avoids misclassifying success responses whose reason
+    // may coincidentally contain rate-limit-like text.
+    if (status.code == 0 && status.errorCode == ErrorCode.Success) {
+      return Success(status)
+    }
+    // Failure path: classify rate limit vs other errors.
+    val reason = Option(status.reason).getOrElse("")
+    if (status.code == MilvusClient.RateLimitErrorCode ||
+        reason.toLowerCase.contains(MilvusClient.RateLimitReasonMarker)) {
+      Failure(new MilvusRateLimitException(s"Failed to $api: $reason"))
     } else {
-      Success(status)
+      Failure(new Exception(s"Failed to $api: $reason"))
     }
   }
 
@@ -797,6 +805,11 @@ class MilvusClient(params: MilvusConnectionParams) {
 object MilvusClient {
   val baseUrl = "/v2/vectordb"
   val segmentsUrl = s"$baseUrl/segments/describe"
+
+  // Milvus ErrServiceRateLimit (also matches gRPC RESOURCE_EXHAUSTED numeric value).
+  val RateLimitErrorCode: Int = 8
+  // Case-insensitive reason marker used as a fallback when error code is not set.
+  val RateLimitReasonMarker: String = "rate limit exceeded"
 
   val mapper: ObjectMapper with ScalaObjectMapper = {
     val m = new ObjectMapper() with ScalaObjectMapper
