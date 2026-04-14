@@ -67,7 +67,8 @@ object BackfillApp {
         if (parsed.contains("source-s3-use-ssl")) Some(true) else None,
       sourceS3UseIam = sourceUseIamFlag,
       sourceS3Region = parsed.get("source-s3-region"),
-      batchSize = parsed.getOrElse("batch-size", "1024").toInt
+      batchSize = parsed.getOrElse("batch-size", "1024").toInt,
+      columnMapping = parsed.get("column-mapping").map(parseColumnMapping)
     )
 
     val spark = SparkSession.builder
@@ -127,10 +128,49 @@ object BackfillApp {
     "source-s3-secret-key",
     "source-s3-region",
     "batch-size",
-    "output-result"
+    "output-result",
+    "column-mapping"
   )
 
   private[backfill] val KnownFlags: Set[String] = BoolFlags ++ KvFlags
+
+  // Parse `src1:tgt1,src2:tgt2,...` into a map. Empty segments and malformed
+  // entries raise a clear error rather than silently dropping bindings.
+  private[backfill] def parseColumnMapping(raw: String): Map[String, String] = {
+    val trimmed = raw.trim
+    if (trimmed.isEmpty) {
+      throw new IllegalArgumentException(
+        "--column-mapping cannot be empty"
+      )
+    }
+    val pairs = trimmed
+      .split(",")
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map { entry =>
+        entry.split(":", 2) match {
+          case Array(src, tgt) if src.nonEmpty && tgt.nonEmpty =>
+            src.trim -> tgt.trim
+          case _ =>
+            throw new IllegalArgumentException(
+              s"--column-mapping entry '$entry' must be of the form 'src:tgt'"
+            )
+        }
+      }
+      .toSeq
+    // Duplicate sources silently collapse under `.toMap`; fail fast, mirroring
+    // how applyColumnMapping rejects duplicate targets.
+    val dupSrc = pairs
+      .groupBy(_._1)
+      .collect { case (k, vs) if vs.size > 1 => k }
+      .toSeq
+    if (dupSrc.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"--column-mapping has duplicate source columns: ${dupSrc.mkString(", ")}"
+      )
+    }
+    pairs.toMap
+  }
 
   private[backfill] def parseArgs(args: Array[String]): Map[String, String] = {
     var map = Map.empty[String, String]

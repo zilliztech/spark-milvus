@@ -122,7 +122,20 @@ object MilvusBackfill {
       }
 
       // Read backfill data from Parquet
-      val backfillDF = readBackfillData(spark, backfillDataPath, config) match {
+      val rawBackfillDF =
+        readBackfillData(spark, backfillDataPath, config) match {
+          case Left(error) => return Left(error)
+          case Right(df)   => df
+        }
+
+      // Reproject via the column mapping (or legacy implicit mapping) so that
+      // downstream code can assume the DataFrame's column names match the
+      // Milvus schema exactly — in particular, the pk column is named pkName.
+      val backfillDF = applyColumnMapping(
+        rawBackfillDF,
+        pkName,
+        config.columnMapping
+      ) match {
         case Left(error) => return Left(error)
         case Right(df)   => df
       }
@@ -161,10 +174,10 @@ object MilvusBackfill {
             (colId, segPartMap, Map.empty[Long, String])
         }
 
-      // Extract new field names
+      // Extract new field names (all post-mapping columns except the PK)
       val newFieldNames = backfillDF.schema.fields
         .map(_.name)
-        .filterNot(_ == "pk")
+        .filterNot(_ == pkName)
         .toSeq
 
       // Build field name -> field ID mapping from collection schema
@@ -256,23 +269,13 @@ object MilvusBackfill {
       configureHadoopS3ForPath(spark, path, config, isSource = true)
       val df = spark.read.parquet(path)
 
-      // Validate that it has a 'pk' column
-      if (!df.columns.contains("pk")) {
+      // Minimum shape check; pk presence and field-count checks are enforced
+      // after column mapping is applied (see applyColumnMapping).
+      if (df.columns.isEmpty) {
         return Left(
           DataReadError(
             path = path,
-            message = "Backfill data must contain a 'pk' column"
-          )
-        )
-      }
-
-      // Validate that it has at least one other column
-      if (df.columns.length < 2) {
-        return Left(
-          DataReadError(
-            path = path,
-            message =
-              "New field data must contain at least one field besides 'pk'"
+            message = "Backfill parquet is empty (no columns)"
           )
         )
       }
@@ -289,6 +292,103 @@ object MilvusBackfill {
           )
         )
     }
+  }
+
+  /** Project the raw backfill DataFrame through a parquet-column → Milvus-field
+    * mapping so downstream code sees column names that match the Milvus schema
+    * exactly (including the PK, which must be named `pkName`).
+    *
+    * When `userMapping` is None, a legacy implicit mapping is synthesized: the
+    * literal `"pk"` column is renamed to `pkName`, every other column is kept
+    * as-is. This preserves the pre-existing contract (parquet must have a `pk`
+    * column plus one or more field columns).
+    */
+  private[backfill] def applyColumnMapping(
+      df: DataFrame,
+      pkName: String,
+      userMapping: Option[Map[String, String]]
+  ): Either[BackfillError, DataFrame] = {
+    val cols = df.columns.toSeq
+    val colSet = cols.toSet
+
+    val mapping: Map[String, String] = userMapping match {
+      case Some(m) => m
+      case None    =>
+        // Legacy: require a literal "pk" column; transparently rename it to pkName.
+        if (!colSet.contains("pk")) {
+          return Left(
+            SchemaValidationError(
+              "Backfill parquet must contain a 'pk' column (or supply --column-mapping to rename the PK column)"
+            )
+          )
+        }
+        // If the parquet already has a column named pkName, the implicit
+        // {pk→pkName} rename would collide with it. Surface a dedicated error
+        // rather than letting the generic duplicate-target check fire and
+        // reference "column mapping" — users in the legacy path never passed
+        // --column-mapping.
+        if (pkName != "pk" && colSet.contains(pkName)) {
+          return Left(
+            SchemaValidationError(
+              s"Backfill parquet contains both a 'pk' column and a column named '$pkName' " +
+                s"(the collection's primary-key field). Remove one, or supply --column-mapping to disambiguate."
+            )
+          )
+        }
+        cols.map(c => if (c == "pk") c -> pkName else c -> c).toMap
+    }
+
+    // Mapping keys must all exist in the parquet.
+    val missingSrc = mapping.keySet.diff(colSet)
+    if (missingSrc.nonEmpty) {
+      return Left(
+        SchemaValidationError(
+          s"column mapping references parquet columns that don't exist: " +
+            s"${missingSrc.mkString(", ")}. Available: ${cols.mkString(", ")}"
+        )
+      )
+    }
+
+    // Mapping values must be unique; two parquet columns cannot both point at
+    // the same Milvus field.
+    val dupTargets = mapping.values.groupBy(identity).collect {
+      case (k, v) if v.size > 1 => k
+    }
+    if (dupTargets.nonEmpty) {
+      return Left(
+        SchemaValidationError(
+          s"column mapping has duplicate targets: ${dupTargets.mkString(", ")}"
+        )
+      )
+    }
+
+    // The PK field must appear as a target so we can locate it after renaming.
+    if (!mapping.values.toSet.contains(pkName)) {
+      return Left(
+        SchemaValidationError(
+          s"column mapping must include the primary key field '$pkName' as a target"
+        )
+      )
+    }
+
+    // At least one non-pk field must remain.
+    val newFieldTargets = mapping.values.toSet - pkName
+    if (newFieldTargets.isEmpty) {
+      return Left(
+        SchemaValidationError(
+          "column mapping must include at least one non-PK field to backfill"
+        )
+      )
+    }
+
+    // Single-pass aliased select. A foldLeft of withColumnRenamed would rename
+    // sequentially and corrupt chains like {a→b, b→c} (the second rename would
+    // hit the already-renamed column) and swaps like {a→b, b→a}.
+    val orderedKeys = cols.filter(mapping.contains)
+    val renamed = df.select(
+      orderedKeys.map(src => df.col(src).as(mapping(src))): _*
+    )
+    Right(renamed)
   }
 
   /** Read collection data with segment_id and row_offset metadata segment_id
@@ -448,12 +548,14 @@ object MilvusBackfill {
           )
         }
 
-      // Find the pk field in new field data
+      // Find the pk field in new field data (post-mapping column name = pkName)
       val newPkField = backfillDF.schema.fields
-        .find(_.name == "pk")
+        .find(_.name == pkName)
         .getOrElse {
           return Left(
-            SchemaValidationError("New field data must have 'pk' field")
+            SchemaValidationError(
+              s"Backfill data must have PK field '$pkName' (after column mapping)"
+            )
           )
         }
 
@@ -486,7 +588,10 @@ object MilvusBackfill {
       backfillDF: DataFrame,
       pkName: String
   ): DataFrame = {
-    originalDF.join(backfillDF, originalDF(pkName) === backfillDF("pk"), "left")
+    // Use the using-column join form: both sides share the pkName column
+    // (guaranteed by applyColumnMapping), so Spark collapses it into one,
+    // avoiding ambiguous-reference errors downstream.
+    originalDF.join(backfillDF, Seq(pkName), "left")
   }
 
   /** Retrieve Milvus metadata (collection ID and segment-to-partition mapping)

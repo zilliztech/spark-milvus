@@ -65,7 +65,16 @@ case class BackfillConfig(
 
     // Writer configuration
     batchSize: Int = 1024,
-    customOutputPath: Option[String] = None
+    customOutputPath: Option[String] = None,
+
+    // Optional mapping: parquet column name -> Milvus field name.
+    // When set, the backfill parquet is reprojected through this map before
+    // join/write: parquet columns not listed as keys are dropped, and each
+    // listed column is renamed to its target. The value set MUST contain the
+    // Milvus primary key field name so the pk column can be identified after
+    // renaming. When None (default), legacy behavior applies: the parquet
+    // must contain a literal "pk" column plus one or more field columns.
+    columnMapping: Option[Map[String, String]] = None
 ) {
 
   /** Validate S3 and writer configuration (always required)
