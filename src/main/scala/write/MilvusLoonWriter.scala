@@ -281,17 +281,38 @@ class MilvusLoonPartitionWriter(
 
       // Commit column groups to manifest using Transaction
       val transaction = new MilvusStorageTransaction()
-      transaction.begin(basePath, writerProperties)
+      val committedVersion =
+        try {
+          transaction.begin(basePath, writerProperties)
 
-      // Determine commit type: ADDFIELD (1) for backfill, ADDFILES (0) for normal writes
-      val commitType = milvusOption.options.get(
-        MilvusOption.WriterCommitType.toLowerCase
-      ) match {
-        case Some("addfield") => 1 // ADDFIELD
-        case _                => 0 // ADDFILES (default)
-      }
-      val committedVersion = transaction.commit(commitType, 0, columnGroupsPtr)
-      transaction.destroy()
+          milvusOption.options.get(
+            MilvusOption.WriterCommitType.toLowerCase
+          ) match {
+            case Some("addfield") =>
+              // Backfill = column replacement: drop each target column (noop if
+              // absent) then add the new column groups in the same transaction.
+              // Native commit orders DropColumn before AddColumnGroup validation,
+              // so this is atomic per-column overwrite.
+              // Columns in the manifest are keyed by Milvus field ID (the Arrow
+              // schema uses fieldId.toString as the column name), so dropColumn
+              // must be called with the field ID, not the logical Spark name.
+              sparkSchema.fields.foreach { f =>
+                val fieldId = fieldIds.getOrElse(
+                  f.name,
+                  throw new IllegalStateException(
+                    s"Missing field ID for backfill column '${f.name}'"
+                  )
+                )
+                transaction.dropColumn(fieldId.toString)
+              }
+              transaction.addColumnGroups(columnGroupsPtr)
+            case _ =>
+              transaction.appendFiles(columnGroupsPtr)
+          }
+          transaction.commit()
+        } finally {
+          transaction.destroy()
+        }
 
       if (committedVersion < 0) {
         throw new IllegalStateException(
