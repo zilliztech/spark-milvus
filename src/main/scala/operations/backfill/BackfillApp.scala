@@ -2,6 +2,8 @@ package com.zilliz.spark.connector.operations.backfill
 
 import org.apache.spark.sql.SparkSession
 
+import com.zilliz.spark.connector.MilvusOption
+
 /** Spark application entry point for running backfill via spark-submit.
   *
   * Usage: spark-submit --class
@@ -9,7 +11,8 @@ import org.apache.spark.sql.SparkSession
   * spark-connector-assembly.jar \ --parquet <path> --snapshot <path> \
   * --s3-endpoint <endpoint> --s3-bucket <bucket> \ --s3-access-key <key>
   * --s3-secret-key <secret> \ [--s3-root-path <path>] [--s3-region <region>]
-  * [--s3-use-ssl] \ [--batch-size <n>] [--output-result <path>]
+  * [--s3-use-ssl] \ [--batch-size <n>] [--output-result <path>] \ [--mode
+  * overwrite|coalesce]
   */
 object BackfillApp {
 
@@ -68,7 +71,8 @@ object BackfillApp {
       sourceS3UseIam = sourceUseIamFlag,
       sourceS3Region = parsed.get("source-s3-region"),
       batchSize = parsed.getOrElse("batch-size", "1024").toInt,
-      columnMapping = parsed.get("column-mapping").map(parseColumnMapping)
+      columnMapping = parsed.get("column-mapping").map(parseColumnMapping),
+      mode = parsed.getOrElse("mode", MilvusOption.BackfillModeOverwrite)
     )
 
     val spark = SparkSession.builder
@@ -129,7 +133,8 @@ object BackfillApp {
     "source-s3-region",
     "batch-size",
     "output-result",
-    "column-mapping"
+    "column-mapping",
+    "mode"
   )
 
   private[backfill] val KnownFlags: Set[String] = BoolFlags ++ KvFlags

@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.operations.backfill
 
+import com.zilliz.spark.connector.MilvusOption
+
 /** Configuration for backfill operation
   *
   * @param milvusUri
@@ -74,7 +76,15 @@ case class BackfillConfig(
     // Milvus primary key field name so the pk column can be identified after
     // renaming. When None (default), legacy behavior applies: the parquet
     // must contain a literal "pk" column plus one or more field columns.
-    columnMapping: Option[Map[String, String]] = None
+    columnMapping: Option[Map[String, String]] = None,
+
+    // Merge mode for backfill values:
+    //   "overwrite" (default) — parquet is the source of truth; for every row
+    //     in the collection, write the parquet value (null included).
+    //   "coalesce" — read the target field's current value from source and
+    //     only write the parquet value where the source value is null.
+    //     Per-field: each target field is decided independently.
+    mode: String = MilvusOption.BackfillModeOverwrite
 ) {
 
   /** Validate S3 and writer configuration (always required)
@@ -86,6 +96,14 @@ case class BackfillConfig(
       Left("s3BucketName cannot be empty")
     } else if (batchSize <= 0) {
       Left("batchSize must be positive")
+    } else if (
+      mode != MilvusOption.BackfillModeOverwrite &&
+      mode != MilvusOption.BackfillModeCoalesce
+    ) {
+      Left(
+        s"mode must be '${MilvusOption.BackfillModeOverwrite}' or " +
+          s"'${MilvusOption.BackfillModeCoalesce}' (got '$mode')"
+      )
     } else if (!s3UseIam && (s3AccessKey.isEmpty || s3SecretKey.isEmpty)) {
       // Hard invariant: must use IAM or supply both AK and SK. Half-set
       // static credentials are never valid — they would silently fall back

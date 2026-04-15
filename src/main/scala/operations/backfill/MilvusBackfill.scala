@@ -66,6 +66,8 @@ object MilvusBackfill {
       case Right(_) => // Continue
     }
 
+    logger.info(s"Backfill mode: ${config.mode}")
+
     // Step 1: Try to load snapshot metadata
     val snapshotMetadataOpt =
       loadSnapshotMetadata(spark, snapshotPath, config) match {
@@ -140,12 +142,90 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
+      // Extract new field names (all post-mapping columns except the PK).
+      val newFieldNames = backfillDF.schema.fields
+        .map(_.name)
+        .filterNot(_ == pkName)
+        .toSeq
+
+      // Build field name -> field ID mapping from collection schema. Resolved
+      // early (was post-join) so coalesce mode can ask the reader to also
+      // materialize the target fields from source.
+      val fieldNameToId: Map[String, Long] = snapshotMetadataOpt match {
+        case Some(metadata) =>
+          MilvusSnapshotReader.getFieldNameToIdMap(metadata.collection.schema)
+        case None =>
+          return Left(
+            SchemaValidationError(
+              "ADDFIELD backfill requires field ID mapping from snapshot. " +
+                "Please provide a snapshot path to resolve correct field IDs."
+            )
+          )
+      }
+
+      val missing = newFieldNames.filterNot(fieldNameToId.contains)
+      if (missing.nonEmpty) {
+        return Left(
+          SchemaValidationError(
+            s"Fields not found in snapshot schema: ${missing.mkString(", ")}. " +
+              s"Available fields: ${fieldNameToId.keys.mkString(", ")}"
+          )
+        )
+      }
+      val newFieldNameToId = newFieldNames.map(n => n -> fieldNameToId(n)).toMap
+
+      // In coalesce mode, also read each target field from source so
+      // `coalesce(src, backfill)` can keep the existing value when non-null.
+      // Requires a snapshot — we need the field's Spark type.
+      val isCoalesceMode = config.mode == MilvusOption.BackfillModeCoalesce
+      val extraReadFields
+          : Seq[(String, Long, org.apache.spark.sql.types.StructField)] =
+        if (isCoalesceMode) {
+          val metadata = snapshotMetadataOpt.getOrElse {
+            return Left(
+              SchemaValidationError(
+                s"--mode=${MilvusOption.BackfillModeCoalesce} requires a " +
+                  "snapshot path so source field values can be read"
+              )
+            )
+          }
+          newFieldNames.map { n =>
+            val fid = newFieldNameToId(n)
+            val field = metadata.collection.schema.fields
+              .find(_.getFieldIDAsLong == fid)
+              .getOrElse(
+                return Left(
+                  SchemaValidationError(
+                    s"Field '$n' (id=$fid) not found in snapshot schema"
+                  )
+                )
+              )
+            val sparkType = MilvusSnapshotReader.fieldToSparkType(field)
+            (
+              n,
+              fid,
+              org.apache.spark.sql.types
+                .StructField(n, sparkType, nullable = true)
+            )
+          }
+        } else Seq.empty
+
+      // In coalesce mode, parquet column types must match snapshot field
+      // types exactly (see validateCoalesceTypes for rationale).
+      if (isCoalesceMode) {
+        validateCoalesceTypes(backfillDF.schema, extraReadFields) match {
+          case Left(error) => return Left(error)
+          case Right(_)    => // Continue
+        }
+      }
+
       // Read original collection data with segment metadata
       val originalDF = readCollectionWithMetadata(
         spark,
         config,
         pkFieldId,
-        snapshotMetadataOpt
+        snapshotMetadataOpt,
+        extraReadFields
       ) match {
         case Left(error) => return Left(error)
         case Right(df)   => df
@@ -157,8 +237,14 @@ object MilvusBackfill {
         case Right(_)    => // Continue
       }
 
-      // Perform Sort Merge Join
-      val joinedDF = performJoin(originalDF, backfillDF, pkName)
+      // Merge original and backfill DataFrames according to mode.
+      val joinedDF = performJoin(
+        originalDF,
+        backfillDF,
+        pkName,
+        newFieldNames,
+        config.mode
+      )
 
       // Step 4: Get collection metadata (collectionID, segment-to-partition mapping, base paths)
       val (collectionID, segmentToPartitionMap, segmentBasePathMap) =
@@ -173,37 +259,6 @@ object MilvusBackfill {
               }
             (colId, segPartMap, Map.empty[Long, String])
         }
-
-      // Extract new field names (all post-mapping columns except the PK)
-      val newFieldNames = backfillDF.schema.fields
-        .map(_.name)
-        .filterNot(_ == pkName)
-        .toSeq
-
-      // Build field name -> field ID mapping from collection schema
-      val fieldNameToId: Map[String, Long] = snapshotMetadataOpt match {
-        case Some(metadata) =>
-          MilvusSnapshotReader.getFieldNameToIdMap(metadata.collection.schema)
-        case None =>
-          return Left(
-            SchemaValidationError(
-              "ADDFIELD backfill requires field ID mapping from snapshot. " +
-                "Please provide a snapshot path to resolve correct field IDs."
-            )
-          )
-      }
-
-      // Filter to only the new fields being backfilled, fail fast if any field is missing from snapshot schema
-      val missing = newFieldNames.filterNot(fieldNameToId.contains)
-      if (missing.nonEmpty) {
-        return Left(
-          SchemaValidationError(
-            s"Fields not found in snapshot schema: ${missing.mkString(", ")}. " +
-              s"Available fields: ${fieldNameToId.keys.mkString(", ")}"
-          )
-        )
-      }
-      val newFieldNameToId = newFieldNames.map(n => n -> fieldNameToId(n)).toMap
 
       // Process each segment
       val segmentResults = processSegments(
@@ -404,11 +459,16 @@ object MilvusBackfill {
       spark: SparkSession,
       config: BackfillConfig,
       pkFieldId: Long,
-      snapshotMetadata: Option[SnapshotMetadata]
+      snapshotMetadata: Option[SnapshotMetadata],
+      extraReadFields: Seq[
+        (String, Long, org.apache.spark.sql.types.StructField)
+      ] = Seq.empty
   ): Either[BackfillError, DataFrame] = {
     try {
       var options = config.getMilvusReadOptions
-      options = options + (MilvusOption.ReaderFieldIDs -> pkFieldId.toString)
+      val allFieldIds = pkFieldId +: extraReadFields.map(_._2)
+      options =
+        options + (MilvusOption.ReaderFieldIDs -> allFieldIds.mkString(","))
 
       // If snapshot metadata is available, use snapshot-based reading (no client calls)
       snapshotMetadata.foreach { metadata =>
@@ -476,8 +536,14 @@ object MilvusBackfill {
               )
           }
 
+          // Extend with any extra fields requested (coalesce mode). Field
+          // order in the schema must match the ReaderFieldIDs order.
+          val withExtras = extraReadFields.foldLeft(pkSchema) {
+            case (acc, (_, _, field)) => acc.add(field)
+          }
+
           // Add extra columns for segment tracking
-          val fullSchema = pkSchema
+          val fullSchema = withExtras
             .add("segment_id", org.apache.spark.sql.types.LongType, false)
             .add("row_offset", org.apache.spark.sql.types.LongType, false)
 
@@ -526,6 +592,41 @@ object MilvusBackfill {
             cause = Some(e)
           )
         )
+    }
+  }
+
+  /** Coalesce mode requires parquet column types to match snapshot field types
+    * exactly. Spark's `coalesce(src, bf)` would otherwise widen to a common
+    * supertype (e.g. Int + Long → Long) and the writer would emit binlogs whose
+    * Arrow type no longer matches the Milvus field — Milvus would later misread
+    * them.
+    */
+  private[backfill] def validateCoalesceTypes(
+      backfillSchema: org.apache.spark.sql.types.StructType,
+      extraReadFields: Seq[
+        (String, Long, org.apache.spark.sql.types.StructField)
+      ]
+  ): Either[BackfillError, Unit] = {
+    val backfillTypes =
+      backfillSchema.fields.map(f => f.name -> f.dataType).toMap
+    val mismatches = extraReadFields.collect {
+      case (name, _, srcField)
+          if backfillTypes
+            .get(name)
+            .exists(_ != srcField.dataType) =>
+        s"$name (snapshot=${srcField.dataType.simpleString}, " +
+          s"parquet=${backfillTypes(name).simpleString})"
+    }
+    if (mismatches.nonEmpty) {
+      Left(
+        SchemaValidationError(
+          s"--mode=${MilvusOption.BackfillModeCoalesce} requires backfill " +
+            s"parquet column types to match snapshot field types exactly. " +
+            s"Mismatched: ${mismatches.mkString(", ")}"
+        )
+      )
+    } else {
+      Right(())
     }
   }
 
@@ -581,17 +682,41 @@ object MilvusBackfill {
     }
   }
 
-  /** Perform left join between original and new field data
+  /** Merge original (source) rows with backfill rows per `mode`.
+    *
+    *   - overwrite: left join on PK; backfill value replaces source (source
+    *     only contributes PK + segment tracking columns).
+    *   - coalesce: original side carries source values for each target field;
+    *     after the left join, compute `coalesce(src, backfill)` per field (keep
+    *     source when non-null, otherwise use backfill).
     */
-  private def performJoin(
+  private[backfill] def performJoin(
       originalDF: DataFrame,
       backfillDF: DataFrame,
-      pkName: String
+      pkName: String,
+      newFieldNames: Seq[String],
+      mode: String
   ): DataFrame = {
-    // Use the using-column join form: both sides share the pkName column
-    // (guaranteed by applyColumnMapping), so Spark collapses it into one,
-    // avoiding ambiguous-reference errors downstream.
-    originalDF.join(backfillDF, Seq(pkName), "left")
+    mode match {
+      case MilvusOption.BackfillModeCoalesce =>
+        // Rename backfill-side target columns to avoid name collisions with
+        // source-side columns now present on originalDF.
+        val suffix = "__bf__"
+        val renamedBackfill = newFieldNames.foldLeft(backfillDF) { (df, n) =>
+          df.withColumnRenamed(n, n + suffix)
+        }
+        val joined = originalDF.join(renamedBackfill, Seq(pkName), "left")
+        newFieldNames.foldLeft(joined) { (df, n) =>
+          df.withColumn(n, coalesce(df.col(n), df.col(n + suffix)))
+            .drop(n + suffix)
+        }
+
+      case _ =>
+        // Use the using-column join form: both sides share the pkName column
+        // (guaranteed by applyColumnMapping), so Spark collapses it into one,
+        // avoiding ambiguous-reference errors downstream.
+        originalDF.join(backfillDF, Seq(pkName), "left")
+    }
   }
 
   /** Retrieve Milvus metadata (collection ID and segment-to-partition mapping)

@@ -119,6 +119,11 @@ object MilvusOption {
   val WriterFieldIds =
     "milvus.writer.fieldIds" // JSON map of field name -> field ID (e.g., "new_field:104,other_field:105")
 
+  // Backfill merge mode
+  val BackfillMode = "milvus.backfill.mode"
+  val BackfillModeOverwrite = "overwrite"
+  val BackfillModeCoalesce = "coalesce"
+
   // Snapshot-based reading options (for offline/client-free mode)
   val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode
   val SnapshotManifests =
