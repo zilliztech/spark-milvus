@@ -98,7 +98,13 @@ case class MilvusInsertDataWriter(
         ) match {
           case MilvusInsertDataWriter.Abort(err) =>
             throw err
-          case MilvusInsertDataWriter.Retry(nextRetries, nextRateLimitRetries, sleepMs, nextRateLimitDelay, isRateLimit) =>
+          case MilvusInsertDataWriter.Retry(
+                nextRetries,
+                nextRateLimitRetries,
+                sleepMs,
+                nextRateLimitDelay,
+                isRateLimit
+              ) =>
             if (isRateLimit) {
               logWarning(
                 s"Rate limit hit, backing off ${sleepMs}ms, remaining retries: ${nextRateLimitRetries}, error: ${e.getMessage}"
@@ -159,7 +165,9 @@ object MilvusInsertDataWriter {
   val InitialRateLimitDelay: Long = 500L
   val MaxRateLimitDelay: Long = 10000L
 
-  /** Outcome of [[decideRetry]]. Either we retry with updated counters, or we abort. */
+  /** Outcome of [[decideRetry]]. Either we retry with updated counters, or we
+    * abort.
+    */
   sealed trait RetryDecision
   final case class Retry(
       retries: Int,
@@ -170,22 +178,23 @@ object MilvusInsertDataWriter {
   ) extends RetryDecision
   final case class Abort(error: Throwable) extends RetryDecision
 
-  /**
-   * Classify a flush error and decide whether to retry.
-   *
-   *  - [[MilvusRateLimitException]] (app-layer error code 8 from Milvus) consumes
-   *    a rate-limit retry and doubles the backoff up to [[MaxRateLimitDelay]].
-   *  - Any other exception (including transport-layer RESOURCE_EXHAUSTED which
-   *    surfaces as a non-rate-limit gRPC failure because it is in the gRPC
-   *    interceptor's non-retryable set) consumes a generic retry and uses the
-   *    caller-provided [[retryInterval]].
-   *  - The two counters are independent: a generic failure does not consume a
-   *    rate-limit retry, and vice versa.
-   *  - [[rateLimitDelay]] is NOT reset by generic errors; it only resets when a
-   *    new flushBuffer invocation starts with a fresh batch. This is intentional
-   *    so that a burst of rate limits followed by an unrelated error does not
-   *    fall back to a tiny 500ms backoff on the next rate-limit hit.
-   */
+  /** Classify a flush error and decide whether to retry.
+    *
+    *   - [[MilvusRateLimitException]] (app-layer error code 8 from Milvus)
+    *     consumes a rate-limit retry and doubles the backoff up to
+    *     [[MaxRateLimitDelay]].
+    *   - Any other exception (including transport-layer RESOURCE_EXHAUSTED
+    *     which surfaces as a non-rate-limit gRPC failure because it is in the
+    *     gRPC interceptor's non-retryable set) consumes a generic retry and
+    *     uses the caller-provided [[retryInterval]].
+    *   - The two counters are independent: a generic failure does not consume a
+    *     rate-limit retry, and vice versa.
+    *   - [[rateLimitDelay]] is NOT reset by generic errors; it only resets when
+    *     a new flushBuffer invocation starts with a fresh batch. This is
+    *     intentional so that a burst of rate limits followed by an unrelated
+    *     error does not fall back to a tiny 500ms backoff on the next
+    *     rate-limit hit.
+    */
   def decideRetry(
       error: Throwable,
       retries: Int,
@@ -196,9 +205,11 @@ object MilvusInsertDataWriter {
   ): RetryDecision = error match {
     case _: MilvusRateLimitException =>
       if (rateLimitRetries <= 0) {
-        Abort(new MilvusRpcException(
-          s"Flush buffer failed after rate limit retries: ${error.getMessage}"
-        ))
+        Abort(
+          new MilvusRpcException(
+            s"Flush buffer failed after rate limit retries: ${error.getMessage}"
+          )
+        )
       } else {
         Retry(
           retries = retries,
@@ -210,13 +221,16 @@ object MilvusInsertDataWriter {
       }
     case _ =>
       if (retries <= 0) {
-        Abort(new MilvusRpcException(s"Flush buffer failed: ${error.getMessage}"))
+        Abort(
+          new MilvusRpcException(s"Flush buffer failed: ${error.getMessage}")
+        )
       } else {
         Retry(
           retries = retries - 1,
           rateLimitRetries = rateLimitRetries,
           sleepMs = retryInterval,
-          nextRateLimitDelay = rateLimitDelay, // not reset across generic errors
+          nextRateLimitDelay =
+            rateLimitDelay, // not reset across generic errors
           isRateLimit = false
         )
       }

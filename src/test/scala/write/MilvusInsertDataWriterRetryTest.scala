@@ -1,21 +1,27 @@
 package com.zilliz.spark.connector.write
 
-import com.zilliz.spark.connector.{MilvusRateLimitException, MilvusRpcException}
-import com.zilliz.spark.connector.write.MilvusInsertDataWriter.{Abort, Retry, decideRetry}
-import io.grpc.StatusRuntimeException
 import org.scalatest.funsuite.AnyFunSuite
 
-/**
- * Unit tests for MilvusInsertDataWriter retry decision logic.
- *
- * Covers the review feedback on:
- *   - app-layer rate limit classification (MilvusRateLimitException)
- *   - transport-layer RESOURCE_EXHAUSTED path (gRPC failure surfacing as a
- *     generic exception, since the connector's GrpcRetryInterceptor marks
- *     RESOURCE_EXHAUSTED as non-retryable)
- *   - rateLimitDelay not being reset across alternating generic/rate-limit paths
- *   - independent interaction of the two counters (retries / rateLimitRetries)
- */
+import com.zilliz.spark.connector.{MilvusRateLimitException, MilvusRpcException}
+import com.zilliz.spark.connector.write.MilvusInsertDataWriter.{
+  decideRetry,
+  Abort,
+  Retry
+}
+
+import io.grpc.StatusRuntimeException
+
+/** Unit tests for MilvusInsertDataWriter retry decision logic.
+  *
+  * Covers the review feedback on:
+  *   - app-layer rate limit classification (MilvusRateLimitException)
+  *   - transport-layer RESOURCE_EXHAUSTED path (gRPC failure surfacing as a
+  *     generic exception, since the connector's GrpcRetryInterceptor marks
+  *     RESOURCE_EXHAUSTED as non-retryable)
+  *   - rateLimitDelay not being reset across alternating generic/rate-limit
+  *     paths
+  *   - independent interaction of the two counters (retries / rateLimitRetries)
+  */
 class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
 
   private val retryInterval = 1000L
@@ -35,7 +41,7 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
     )
     decision match {
       case Retry(3, 9, 500L, 1000L, true) => succeed
-      case other => fail(s"unexpected: $other")
+      case other                          => fail(s"unexpected: $other")
     }
   }
 
@@ -53,7 +59,10 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
         maxRateLimitDelay = maxDelay
       ) match {
         case Retry(_, _, _, nextDelay, true) =>
-          assert(nextDelay == expected, s"from $current expected $expected but got $nextDelay")
+          assert(
+            nextDelay == expected,
+            s"from $current expected $expected but got $nextDelay"
+          )
         case other => fail(s"unexpected: $other")
       }
     }
@@ -81,7 +90,8 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
     // StatusRuntimeException wrapped inside a non-MilvusRateLimitException.
     // decideRetry must NOT classify this as a rate-limit retry; it should
     // consume a generic retry slot.
-    val transportError = new StatusRuntimeException(io.grpc.Status.RESOURCE_EXHAUSTED)
+    val transportError =
+      new StatusRuntimeException(io.grpc.Status.RESOURCE_EXHAUSTED)
     decideRetry(
       error = transportError,
       retries = 3,
@@ -90,7 +100,7 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
       retryInterval = retryInterval
     ) match {
       case Retry(2, 10, 1000L, 500L, false) => succeed
-      case other => fail(s"unexpected: $other")
+      case other                            => fail(s"unexpected: $other")
     }
   }
 
@@ -103,7 +113,7 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
       retryInterval = retryInterval
     ) match {
       case Retry(2, 10, 1000L, 500L, false) => succeed
-      case other => fail(s"unexpected: $other")
+      case other                            => fail(s"unexpected: $other")
     }
   }
 
@@ -135,7 +145,10 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
       retryInterval = retryInterval
     ) match {
       case Retry(_, _, _, nextRateLimitDelay, _) =>
-        assert(nextRateLimitDelay == 4000L, "generic error must not reset rateLimitDelay")
+        assert(
+          nextRateLimitDelay == 4000L,
+          "generic error must not reset rateLimitDelay"
+        )
       case other => fail(s"unexpected: $other")
     }
   }
@@ -143,33 +156,52 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
   test("alternating sequence preserves rate-limit delay escalation") {
     // RL(500) -> RL(1000) -> G -> G -> RL should double from 2000 to 4000
     val step1 = decideRetry(
-      new MilvusRateLimitException("rl"), 3, 10, 500L, retryInterval
+      new MilvusRateLimitException("rl"),
+      3,
+      10,
+      500L,
+      retryInterval
     ).asInstanceOf[Retry]
     assert(step1.nextRateLimitDelay == 1000L)
 
     val step2 = decideRetry(
       new MilvusRateLimitException("rl"),
-      step1.retries, step1.rateLimitRetries, step1.nextRateLimitDelay, retryInterval
+      step1.retries,
+      step1.rateLimitRetries,
+      step1.nextRateLimitDelay,
+      retryInterval
     ).asInstanceOf[Retry]
     assert(step2.nextRateLimitDelay == 2000L)
 
     val step3 = decideRetry(
       new RuntimeException("g"),
-      step2.retries, step2.rateLimitRetries, step2.nextRateLimitDelay, retryInterval
+      step2.retries,
+      step2.rateLimitRetries,
+      step2.nextRateLimitDelay,
+      retryInterval
     ).asInstanceOf[Retry]
     assert(step3.nextRateLimitDelay == 2000L, "generic error preserves delay")
 
     val step4 = decideRetry(
       new RuntimeException("g"),
-      step3.retries, step3.rateLimitRetries, step3.nextRateLimitDelay, retryInterval
+      step3.retries,
+      step3.rateLimitRetries,
+      step3.nextRateLimitDelay,
+      retryInterval
     ).asInstanceOf[Retry]
     assert(step4.nextRateLimitDelay == 2000L)
 
     val step5 = decideRetry(
       new MilvusRateLimitException("rl"),
-      step4.retries, step4.rateLimitRetries, step4.nextRateLimitDelay, retryInterval
+      step4.retries,
+      step4.rateLimitRetries,
+      step4.nextRateLimitDelay,
+      retryInterval
     ).asInstanceOf[Retry]
-    assert(step5.nextRateLimitDelay == 4000L, "rate-limit resumes doubling from escalated delay")
+    assert(
+      step5.nextRateLimitDelay == 4000L,
+      "rate-limit resumes doubling from escalated delay"
+    )
   }
 
   // ---------- independent counter interactions ----------
@@ -183,7 +215,7 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
       retryInterval = retryInterval
     ) match {
       case Retry(2, 5, _, _, false) => succeed
-      case other => fail(s"unexpected: $other")
+      case other                    => fail(s"unexpected: $other")
     }
   }
 
@@ -196,7 +228,7 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
       retryInterval = retryInterval
     ) match {
       case Retry(3, 4, _, _, true) => succeed
-      case other => fail(s"unexpected: $other")
+      case other                   => fail(s"unexpected: $other")
     }
   }
 
@@ -211,7 +243,7 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
       retryInterval = retryInterval
     ) match {
       case Retry(0, 4, _, _, true) => succeed
-      case other => fail(s"unexpected: $other")
+      case other                   => fail(s"unexpected: $other")
     }
   }
 
@@ -224,7 +256,7 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
       retryInterval = retryInterval
     ) match {
       case Retry(2, 0, _, _, false) => succeed
-      case other => fail(s"unexpected: $other")
+      case other                    => fail(s"unexpected: $other")
     }
   }
 }

@@ -3,6 +3,26 @@ package com.zilliz.spark.connector.operations.backfill
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 
+/** One StorageV2 (packed-parquet) column group produced by a backfill write.
+  * Mirrors the snapshot-AVRO shape so the caller can patch the snapshot's
+  * manifest entry directly: add one `AvroFieldBinlog` per entry here, with
+  * `field_id = fieldIds.head` when `fieldIds.size == 1` (backfill's invariant).
+  */
+case class V2ColumnGroupArtifact(
+    fieldIds: Seq[Long],
+    binlogFiles: Seq[String],
+    rowCount: Long
+)
+
+/** StorageV2 artifact for one segment — the shape a caller needs to augment the
+  * segment's AVRO manifest with the newly-written fields.
+  */
+case class V2SegmentArtifact(
+    segmentId: Long,
+    storageVersion: Long, // 2 for StorageV2
+    columnGroups: Seq[V2ColumnGroupArtifact]
+)
+
 /** Result of backfilling a single segment
   */
 case class SegmentBackfillResult(
@@ -11,7 +31,13 @@ case class SegmentBackfillResult(
     manifestPaths: Seq[String],
     outputPath: String,
     executionTimeMs: Long,
-    committedVersion: Long = -1
+    committedVersion: Long = -1,
+    /** Populated for StorageV2 (non-manifest packed parquet) segments only. V3
+      * segments continue to record their manifest path + version in the fields
+      * above; for V2 there is no manifest, so consumers should read this
+      * artifact to patch the snapshot.
+      */
+    v2Artifact: Option[V2SegmentArtifact] = None
 )
 
 /** Comprehensive result of backfill operation
@@ -31,6 +57,7 @@ case class BackfillResult(
   /** Get a summary string of the backfill operation
     */
   def summary: String = {
+    val v2Count = segmentResults.count(_._2.v2Artifact.isDefined)
     s"""Backfill Summary:
        |  Status: ${if (success) "SUCCESS" else "FAILED"}
        |  Segments Processed: $segmentsProcessed
@@ -40,6 +67,7 @@ case class BackfillResult(
        |  Partition ID: $partitionId
        |  New Fields: ${newFieldNames.mkString(", ")}
        |  Manifest Paths: ${manifestPaths.size} files
+       |  StorageV2 Segments: $v2Count / ${segmentResults.size}
        |""".stripMargin
   }
 
@@ -48,12 +76,18 @@ case class BackfillResult(
   def segmentSummary: String = {
     val segmentLines =
       segmentResults.toSeq.sortBy(_._1).map { case (segId, result) =>
-        s"    Segment $segId: ${result.rowCount} rows, version=${result.committedVersion}, ${result.executionTimeMs}ms, path=${result.outputPath}"
+        val tag = if (result.v2Artifact.isDefined) "[v2]" else "[v3]"
+        s"    Segment $segId $tag: ${result.rowCount} rows, version=${result.committedVersion}, ${result.executionTimeMs}ms, path=${result.outputPath}"
       }
     s"Segment Details:\n${segmentLines.mkString("\n")}"
   }
 
-  /** Serialize this result to a JSON string
+  /** Serialize this result to a JSON string.
+    *
+    * StorageV2 segments additionally carry a `storage_version` /
+    * `column_groups` block (same shape as the milvus snapshot AVRO's
+    * `ManifestEntry`) so the caller can mechanically extend each segment's
+    * existing manifest with the new field's binlog paths.
     */
   def toJson: String = {
     val mapper = new ObjectMapper()
@@ -62,13 +96,24 @@ case class BackfillResult(
     val segments = segmentResults.toSeq
       .sortBy(_._1)
       .map { case (segId, r) =>
-        segId.toString -> Map(
+        val base = scala.collection.mutable.LinkedHashMap[String, Any](
           "version" -> r.committedVersion,
           "rowCount" -> r.rowCount,
           "executionTimeMs" -> r.executionTimeMs,
           "outputPath" -> r.outputPath,
           "manifestPaths" -> r.manifestPaths
         )
+        r.v2Artifact.foreach { art =>
+          base += "storage_version" -> art.storageVersion
+          base += "column_groups" -> art.columnGroups.map { cg =>
+            Map(
+              "field_ids" -> cg.fieldIds,
+              "binlog_files" -> cg.binlogFiles,
+              "row_count" -> cg.rowCount
+            )
+          }
+        }
+        segId.toString -> base.toMap
       }
       .toMap
 

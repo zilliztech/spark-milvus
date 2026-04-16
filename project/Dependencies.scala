@@ -44,6 +44,22 @@ object Dependencies {
   // 引发 "X not a subtype of Y" 类加载错误（特别是开 userClassPathFirst 时）
   lazy val parquetHadoop =
     "org.apache.parquet" % "parquet-hadoop" % parquetVersion % "provided,test"
+  // parquet-avro gives us AvroParquetWriter which supports withExtraMetaData
+  // for emitting the `storage_version` / `group_field_id_list` kv-metadata
+  // that milvus's StorageV2 packed-parquet format expects on backfilled
+  // binlog files.
+  //
+  // Compile (default) scope: Spark 4.0 ships parquet-hadoop/column 1.15.2 but
+  // NOT parquet-avro, so we need to bundle it into the assembly. Version is
+  // pinned to Spark's parquet line so it links against the same internal
+  // ParquetWriter ABI at runtime.
+  lazy val parquetAvro =
+    "org.apache.parquet" % "parquet-avro" % "1.15.2"
+  // Avro 1.12.0 is shipped by Spark 4.0 at /opt/spark/jars/avro-1.12.0.jar.
+  // Mark provided to avoid shading conflicts; test scope ensures local unit tests can load it.
+  lazy val avroVersion = "1.12.0"
+  lazy val avro =
+    "org.apache.avro" % "avro" % avroVersion % "provided,test"
   lazy val hadoopCommon =
     "org.apache.hadoop" % "hadoop-common" % hadoopVersion % "provided,test" exclude ("javax.activation", "activation")
   lazy val hadoopAws =

@@ -279,6 +279,74 @@ object StorageV2ManifestItem {
   }
 }
 
+/** Wire-format wrappers used when a `Seq[V2SegmentInfo]` is serialized into a
+  * single Spark DataSource option (see `MilvusOption.SnapshotV2Segments`).
+  *
+  * Jackson annotations live on these dumb DTOs — the runtime [[V2SegmentInfo]]
+  * / [[V2ColumnGroup]] case classes stay free of codec noise.
+  */
+// `fieldIds` is declared as `Seq[JsonNode]` rather than `Seq[Long]` because
+// Jackson's Scala module erases `Seq[Long]` to `Seq[Object]` at runtime and
+// may box JSON integer values as `java.lang.Integer` when the value fits in
+// int. Downstream `seq.map(...)` on `Seq[Long]` would emit `unboxToLong` and
+// fail with `ClassCastException: Integer cannot be cast to Long`. Reading
+// as JsonNode and manually converting via `JsonTypeConverter.toLong` avoids
+// the hidden unboxing step entirely.
+case class V2ColumnGroupDTO(
+    @JsonProperty("field_ids") fieldIds: Seq[JsonNode] = Seq.empty,
+    @JsonProperty("file_paths") filePaths: Seq[String] = Seq.empty,
+    @JsonProperty("file_row_counts") fileRowCounts: Seq[JsonNode] = Seq.empty
+)
+
+case class V2SegmentInfoDTO(
+    @JsonProperty("segment_id") rawSegmentId: Option[JsonNode] = None,
+    @JsonProperty("partition_id") rawPartitionId: Option[JsonNode] = None,
+    @JsonProperty("num_of_rows") rawNumOfRows: Option[JsonNode] = None,
+    @JsonProperty("storage_version") rawStorageVersion: Option[JsonNode] = None,
+    @JsonProperty("column_groups") columnGroups: Seq[V2ColumnGroupDTO] =
+      Seq.empty
+) {
+  def segmentId: Long = rawSegmentId.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def partitionId: Long =
+    rawPartitionId.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def numOfRows: Long = rawNumOfRows.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def storageVersion: Long =
+    rawStorageVersion.map(JsonTypeConverter.toLong).getOrElse(0L)
+}
+
+/** One column group within a StorageV2 segment.
+  *
+  * In Milvus StorageV2 ("non-manifest packed parquet"), a segment is split into
+  * N physical parquet files, each carrying 1..n fields. This case class is the
+  * runtime view after decoding the AVRO manifest and joining with the parquet
+  * footer's `group_field_id_list` kv-metadata.
+  *
+  * @param fieldIds
+  *   Real field IDs carried by this group, e.g. Seq(100L, 0L, 1L).
+  * @param filePaths
+  *   Parquet file paths for this group, ordered by `log_id` (row order).
+  * @param fileRowCounts
+  *   Number of rows per file at the same positional index as `filePaths`.
+  *   Required by milvus-storage's packed reader to build valid `(start_index,
+  *   end_index)` ranges per file. Comes from the AVRO's
+  *   `AvroBinlog.entries_num`. Default empty for legacy callers — the packed-V2
+  *   reader will reject empty.
+  */
+case class V2ColumnGroup(
+    fieldIds: Seq[Long],
+    filePaths: Seq[String],
+    fileRowCounts: Seq[Long] = Seq.empty
+)
+
+/** One StorageV2 segment's manifest information needed by backfill. */
+case class V2SegmentInfo(
+    segmentId: Long,
+    partitionId: Long,
+    numOfRows: Long,
+    storageVersion: Long, // always 2L for StorageV2
+    columnGroups: Seq[V2ColumnGroup]
+)
+
 /** Complete snapshot metadata
   */
 case class SnapshotMetadata(
@@ -627,6 +695,68 @@ object MilvusSnapshotReader {
   def parseManifestContent(json: String): Either[Throwable, ManifestContent] = {
     try {
       Right(mapper.readValue[ManifestContent](json))
+    } catch {
+      case e: Exception => Left(e)
+    }
+  }
+
+  /** Serialize a list of StorageV2 (non-manifest) segment layouts to a single
+    * JSON string that can be passed as a Spark DataSource option
+    * (`MilvusOption.SnapshotV2Segments`). Each numeric field is wrapped in a
+    * `LongNode` so round-trip preserves the 64-bit value without Jackson
+    * accidentally boxing it as Integer on the way back in.
+    */
+  def serializeV2Segments(segments: Seq[V2SegmentInfo]): String = {
+    import com.fasterxml.jackson.databind.node.LongNode
+    val dtos = segments.map { s =>
+      V2SegmentInfoDTO(
+        rawSegmentId = Some(LongNode.valueOf(s.segmentId)),
+        rawPartitionId = Some(LongNode.valueOf(s.partitionId)),
+        rawNumOfRows = Some(LongNode.valueOf(s.numOfRows)),
+        rawStorageVersion = Some(LongNode.valueOf(s.storageVersion)),
+        columnGroups = s.columnGroups.map(cg =>
+          V2ColumnGroupDTO(
+            fieldIds = cg.fieldIds.map(fid => LongNode.valueOf(fid): JsonNode),
+            filePaths = cg.filePaths,
+            fileRowCounts =
+              cg.fileRowCounts.map(n => LongNode.valueOf(n): JsonNode)
+          )
+        )
+      )
+    }
+    mapper.writeValueAsString(dtos)
+  }
+
+  /** Inverse of [[serializeV2Segments]].
+    *
+    * Note on the `.map(JsonTypeConverter.toLong)` step: Jackson's Scala
+    * deserializer erases `Seq[Long]`'s element type and may box JSON integer
+    * values as `java.lang.Integer` (when the value fits in int). Downstream
+    * Scala code does `seq.map(_.toString)` which compiles to `unboxToLong` and
+    * throws `ClassCastException: Integer cannot be cast to Long` at runtime.
+    * Forcing each element through `.longValue()` fixes that.
+    */
+  def deserializeV2Segments(
+      json: String
+  ): Either[Throwable, Seq[V2SegmentInfo]] = {
+    try {
+      val dtos = mapper.readValue[Seq[V2SegmentInfoDTO]](json)
+      Right(dtos.map { d =>
+        V2SegmentInfo(
+          segmentId = d.segmentId,
+          partitionId = d.partitionId,
+          numOfRows = d.numOfRows,
+          storageVersion = d.storageVersion,
+          columnGroups = d.columnGroups.map(cg =>
+            V2ColumnGroup(
+              fieldIds = cg.fieldIds.map(v => JsonTypeConverter.toLong(v)),
+              filePaths = cg.filePaths,
+              fileRowCounts =
+                cg.fileRowCounts.map(v => JsonTypeConverter.toLong(v))
+            )
+          )
+        )
+      })
     } catch {
       case e: Exception => Left(e)
     }

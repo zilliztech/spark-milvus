@@ -116,6 +116,73 @@ class MilvusPartitionReaderFactory(
           underlyingReader
         }
 
+      case p: MilvusPackedV2InputPartition =>
+        logInfo(
+          s"Creating packed-V2 reader for segmentID=${p.segmentID} " +
+            s"with ${p.columnGroups.size} column group(s)"
+        )
+
+        // V2 reader does not emit system/metadata columns itself; same
+        // masking rule as V3.
+        val innerSchema = StructType(schema.fields.filter { f =>
+          f.name != "row_id" && f.name != "timestamp" &&
+          f.name != "segment_id" && f.name != "row_offset"
+        })
+
+        val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
+
+        val underlying = new MilvusLoonV2PartitionReader(
+          innerSchema,
+          p.columnGroups,
+          milvusSchema,
+          p.milvusOption,
+          p.neededColumnFieldIds
+        )
+
+        val hasSegmentId = schema.fieldNames.contains("segment_id")
+        val hasRowOffset = schema.fieldNames.contains("row_offset")
+        val hasRowId = schema.fieldNames.contains("row_id")
+        val hasTimestamp = schema.fieldNames.contains("timestamp")
+
+        if (hasRowId || hasTimestamp || hasSegmentId || hasRowOffset) {
+          new PartitionReader[InternalRow] {
+            private var rowOffset: Long = 0L
+
+            override def next(): Boolean = underlying.next()
+
+            override def get(): InternalRow = {
+              val row = underlying.get()
+              val numFields = schema.fields.length
+              val out = new Array[Any](numFields)
+              var writeIdx = 0
+              var readIdx = 0
+
+              if (hasRowId) { out(writeIdx) = null; writeIdx += 1 }
+              if (hasTimestamp) { out(writeIdx) = null; writeIdx += 1 }
+
+              while (readIdx < innerSchema.fields.length) {
+                out(writeIdx) =
+                  row.get(readIdx, innerSchema.fields(readIdx).dataType)
+                readIdx += 1
+                writeIdx += 1
+              }
+
+              if (hasSegmentId) { out(writeIdx) = p.segmentID; writeIdx += 1 }
+              if (hasRowOffset) {
+                out(writeIdx) = rowOffset
+                rowOffset += 1
+                writeIdx += 1
+              }
+
+              InternalRow.fromSeq(out.toSeq)
+            }
+
+            override def close(): Unit = underlying.close()
+          }
+        } else {
+          underlying
+        }
+
       case _ =>
         throw new IllegalArgumentException(
           s"Unsupported partition type: ${partition.getClass.getName}. " +

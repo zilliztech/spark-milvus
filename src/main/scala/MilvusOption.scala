@@ -128,6 +128,11 @@ object MilvusOption {
   val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode
   val SnapshotManifests =
     "milvus.snapshot.manifests" // JSON array of StorageV2ManifestItem
+  // JSON array of com.zilliz.spark.connector.read.V2SegmentInfo (StorageV2,
+  // non-manifest packed parquet). Populated by backfill after decoding the
+  // per-segment AVROs + parquet footers; consumed by MilvusDataSource's
+  // snapshot planner to create MilvusPackedV2InputPartition instances.
+  val SnapshotV2Segments = "milvus.snapshot.v2.segments"
   val SnapshotCollectionId = "milvus.snapshot.collection.id"
   val SnapshotPartitionIds = "milvus.snapshot.partition.ids"
   val SnapshotSchemaJson =

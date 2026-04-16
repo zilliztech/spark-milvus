@@ -75,6 +75,20 @@ object MilvusBackfill {
         case Right(opt)  => opt
       }
 
+    // Step 1b: Eagerly materialize StorageV2 segments (AVRO manifests +
+    // parquet-footer join) so both the read path (which serializes them into
+    // the DataSource option) and the write path (which dispatches per
+    // segment's storage version) share the same view without hitting S3 twice.
+    val v2Segments: Seq[com.zilliz.spark.connector.read.V2SegmentInfo] =
+      snapshotMetadataOpt match {
+        case Some(meta) if meta.manifestList.nonEmpty =>
+          loadV2Segments(spark, meta, config) match {
+            case Right(segs) => segs
+            case Left(err)   => return Left(err)
+          }
+        case _ => Seq.empty
+      }
+
     // Step 2: Create Milvus client only if no snapshot is available
     var client: MilvusClient = null
     if (snapshotMetadataOpt.isEmpty) {
@@ -225,6 +239,7 @@ object MilvusBackfill {
         config,
         pkFieldId,
         snapshotMetadataOpt,
+        v2Segments,
         extraReadFields
       ) match {
         case Left(error) => return Left(error)
@@ -250,7 +265,7 @@ object MilvusBackfill {
       val (collectionID, segmentToPartitionMap, segmentBasePathMap) =
         snapshotMetadataOpt match {
           case Some(metadata) =>
-            extractMetadataFromSnapshot(metadata)
+            extractMetadataFromSnapshot(metadata, v2Segments)
           case None =>
             val (colId, segPartMap) =
               retrieveMilvusMetadata(config, client) match {
@@ -260,6 +275,10 @@ object MilvusBackfill {
             (colId, segPartMap, Map.empty[Long, String])
         }
 
+      // Set of segment IDs that are StorageV2 (packed-parquet, no manifest).
+      // V3 segments continue to use the existing MilvusLoonWriter flow.
+      val v2SegmentIdSet: Set[Long] = v2Segments.map(_.segmentId).toSet
+
       // Process each segment
       val segmentResults = processSegments(
         spark,
@@ -267,6 +286,7 @@ object MilvusBackfill {
         collectionID,
         segmentToPartitionMap,
         segmentBasePathMap,
+        v2SegmentIdSet,
         config,
         newFieldNames,
         newFieldNameToId
@@ -460,6 +480,7 @@ object MilvusBackfill {
       config: BackfillConfig,
       pkFieldId: Long,
       snapshotMetadata: Option[SnapshotMetadata],
+      v2Segments: Seq[com.zilliz.spark.connector.read.V2SegmentInfo],
       extraReadFields: Seq[
         (String, Long, org.apache.spark.sql.types.StructField)
       ] = Seq.empty
@@ -507,6 +528,18 @@ object MilvusBackfill {
           } else {
             logger.warn("No valid manifests found in snapshot")
           }
+        }
+
+        // Pre-loaded StorageV2 (non-manifest packed parquet) segments — hand
+        // them to the DataSource via SnapshotV2Segments so planner can emit
+        // MilvusPackedV2InputPartitions. Loading itself happened earlier in
+        // `run()` via `loadV2Segments`.
+        if (v2Segments.nonEmpty) {
+          val segJson = MilvusSnapshotReader.serializeV2Segments(v2Segments)
+          options = options + (MilvusOption.SnapshotV2Segments -> segJson)
+          logger.info(
+            s"Attached ${v2Segments.size} StorageV2 packed segment(s) to read options"
+          )
         }
       }
 
@@ -781,6 +814,7 @@ object MilvusBackfill {
       collectionID: Long,
       segmentToPartitionMap: Map[Long, Long],
       segmentBasePathMap: Map[Long, String],
+      v2SegmentIdSet: Set[Long],
       config: BackfillConfig,
       newFieldNames: Seq[String],
       fieldNameToId: Map[String, Long] = Map.empty
@@ -822,6 +856,7 @@ object MilvusBackfill {
         spark.sparkContext.broadcast(segmentToPartitionMap)
       val broadcastSegmentBasePathMap =
         spark.sparkContext.broadcast(segmentBasePathMap)
+      val broadcastV2SegmentIdSet = spark.sparkContext.broadcast(v2SegmentIdSet)
       val broadcastTargetSchema = spark.sparkContext.broadcast(targetSchema)
       val broadcastFieldNameToId = spark.sparkContext.broadcast(fieldNameToId)
 
@@ -835,6 +870,7 @@ object MilvusBackfill {
               broadcastCollectionID.value,
               broadcastSegmentToPartitionMap.value,
               broadcastSegmentBasePathMap.value,
+              broadcastV2SegmentIdSet.value,
               broadcastTargetSchema.value,
               broadcastFieldNameToId.value
             )
@@ -846,6 +882,7 @@ object MilvusBackfill {
       broadcastCollectionID.unpersist()
       broadcastSegmentToPartitionMap.unpersist()
       broadcastSegmentBasePathMap.unpersist()
+      broadcastV2SegmentIdSet.unpersist()
       broadcastTargetSchema.unpersist()
       broadcastFieldNameToId.unpersist()
 
@@ -905,6 +942,7 @@ object MilvusBackfill {
       collectionID: Long,
       segmentToPartitionMap: Map[Long, Long],
       segmentBasePathMap: Map[Long, String],
+      v2SegmentIdSet: Set[Long],
       targetSchema: org.apache.spark.sql.types.StructType,
       fieldNameToId: Map[String, Long] = Map.empty
   ): Iterator[(SegmentBackfillResult, Option[Throwable])] = {
@@ -913,6 +951,22 @@ object MilvusBackfill {
     val segmentID = firstRow.getLong(0)
     val partitionID = segmentToPartitionMap(segmentID)
     val startTime = System.currentTimeMillis()
+
+    // StorageV2 (packed-parquet, no manifest) segments: write one parquet per
+    // new field at files/insert_log/.../{fieldID}/{logID} via the V2 writer.
+    if (v2SegmentIdSet.contains(segmentID)) {
+      return processV2SegmentPartition(
+        iter,
+        firstRow,
+        segmentID,
+        partitionID,
+        collectionID,
+        targetSchema,
+        fieldNameToId,
+        config,
+        startTime
+      )
+    }
 
     // Create writer — use manifest basePath if available, otherwise generate path
     val writeOptions = segmentBasePathMap.get(segmentID) match {
@@ -998,6 +1052,59 @@ object MilvusBackfill {
     }
   }
 
+  /** Decode the StorageV2 segments referenced by the snapshot's
+    * `manifest_list`. Each AVRO gives us slot→paths; the matching parquet
+    * footer's `group_field_id_list` recovers the real field IDs per column
+    * group. Called once per backfill and threaded into both the read and write
+    * paths.
+    */
+  private def loadV2Segments(
+      spark: SparkSession,
+      metadata: SnapshotMetadata,
+      config: BackfillConfig
+  ): Either[BackfillError, Seq[
+    com.zilliz.spark.connector.read.V2SegmentInfo
+  ]] = {
+    if (metadata.manifestList.isEmpty) return Right(Seq.empty)
+    try {
+      // Register S3A bucket credentials so V2SegmentLoader can read AVRO +
+      // parquet footers from minio / S3. The main bucket (not the source
+      // parquet bucket) holds the snapshot.
+      configureHadoopS3ForPath(
+        spark,
+        s"s3a://${config.s3BucketName}/",
+        config,
+        isSource = false
+      )
+      val hadoopConf = spark.sparkContext.hadoopConfiguration
+      com.zilliz.spark.connector.read.V2SegmentLoader
+        .loadV2Segments(
+          metadata.manifestList,
+          config.s3BucketName,
+          hadoopConf
+        ) match {
+        case Right(segs) =>
+          logger.info(
+            s"Loaded ${segs.size} StorageV2 segment(s) from snapshot AVRO manifest_list"
+          )
+          Right(segs)
+        case Left(err) =>
+          Left(
+            SchemaValidationError(
+              s"Failed to load StorageV2 segments from AVRO manifests: ${err.getMessage}"
+            )
+          )
+      }
+    } catch {
+      case e: Exception =>
+        Left(
+          SchemaValidationError(
+            s"Failed to load StorageV2 segments: ${e.getMessage}"
+          )
+        )
+    }
+  }
+
   /** Load and parse snapshot metadata from file. Returns None if snapshot path
     * is empty. Returns Left(error) if snapshot path is provided but parsing
     * fails.
@@ -1029,13 +1136,147 @@ object MilvusBackfill {
     }
   }
 
+  /** StorageV2 write path: writes one parquet per new field under
+    * `files/insert_log/{coll}/{part}/{seg}/{newFieldID}/{logID}` via
+    * [[com.zilliz.spark.connector.write.MilvusV2BinlogWriter]]. Backfill always
+    * emits single-field column groups, so `columnGroupID` in the path equals
+    * the new field's ID (milvus convention for 1-field groups).
+    */
+  private def processV2SegmentPartition(
+      iter: Iterator[InternalRow],
+      firstRow: InternalRow,
+      segmentID: Long,
+      partitionID: Long,
+      collectionID: Long,
+      targetSchema: org.apache.spark.sql.types.StructType,
+      fieldNameToId: Map[String, Long],
+      config: BackfillConfig,
+      startTime: Long
+  ): Iterator[(SegmentBackfillResult, Option[Throwable])] = {
+    import com.zilliz.spark.connector.write.{MilvusV2BinlogWriter, V2BinlogFile}
+
+    // Build per-field mapping in targetSchema order.
+    val fieldNames = targetSchema.fieldNames.toSeq
+    val fieldIds = fieldNames.map { name =>
+      fieldNameToId.getOrElse(
+        name,
+        throw new IllegalStateException(
+          s"StorageV2 backfill for segment $segmentID: field '$name' has no field ID in the snapshot schema"
+        )
+      )
+    }
+
+    // Simple monotonic logID allocator seeded by task-start nanos. Plan
+    // names this as a future injection point (caller-provided global ID),
+    // but a monotonic local sequence is sufficient for the single-task
+    // single-segment scope (no collisions expected within one file).
+    val logIdBase = System.nanoTime()
+    val logIdCounter = new java.util.concurrent.atomic.AtomicLong(logIdBase)
+    val allocator: () => Long = () => logIdCounter.incrementAndGet()
+
+    val outputRoot =
+      s"s3a://${config.s3BucketName}/${config.s3RootPath.stripSuffix("/")}/insert_log/" +
+        s"$collectionID/$partitionID/$segmentID"
+
+    // Reuse the same MilvusOption plumbing the V3 writer uses — the new V2
+    // writer talks to S3 via Arrow's filesystem (inside milvus-storage), so
+    // it needs the FS config, not Hadoop S3A config.
+    val writeOptions = config.getS3WriteOptionsForBasePath(
+      s"${config.s3RootPath.stripSuffix("/")}/insert_log/$collectionID/$partitionID/$segmentID",
+      segmentID,
+      fieldNameToId
+    )
+    val milvusOption = MilvusOption(
+      new CaseInsensitiveStringMap(writeOptions.asJava)
+    )
+
+    val writer = new MilvusV2BinlogWriter(
+      collectionId = collectionID,
+      partitionId = partitionID,
+      segmentId = segmentID,
+      newFieldNames = fieldNames,
+      newFieldIds = fieldIds,
+      targetSchema = targetSchema,
+      milvusOption = milvusOption,
+      allocateLogId = allocator
+    )
+
+    var rowCount = 0L
+    try {
+      // The first two columns of each row are (segment_id, row_offset); the
+      // V2 writer only wants the trailing data columns, so we build a
+      // projected row before calling write().
+      def projected(row: InternalRow): InternalRow = {
+        val values = (2 until row.numFields)
+          .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
+          .toArray
+        new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(values)
+      }
+
+      writer.write(projected(firstRow))
+      rowCount += 1
+      iter.foreach { row =>
+        writer.write(projected(row))
+        rowCount += 1
+      }
+      val produced: Seq[V2BinlogFile] = writer.close()
+
+      val manifestPaths = produced.map(_.path)
+      // Single-field column groups (backfill invariant): one V2ColumnGroup
+      // artifact per produced file, with fieldIds = [fieldId].
+      val columnGroupArtifacts = produced.map { pf =>
+        V2ColumnGroupArtifact(
+          fieldIds = Seq(pf.fieldId),
+          binlogFiles = Seq(pf.path),
+          rowCount = pf.rowsWritten
+        )
+      }
+      Iterator.single(
+        (
+          SegmentBackfillResult(
+            segmentId = segmentID,
+            rowCount = rowCount,
+            manifestPaths = manifestPaths,
+            outputPath = outputRoot,
+            executionTimeMs = System.currentTimeMillis() - startTime,
+            committedVersion = -1L,
+            v2Artifact = Some(
+              V2SegmentArtifact(
+                segmentId = segmentID,
+                storageVersion = 2L,
+                columnGroups = columnGroupArtifacts
+              )
+            )
+          ),
+          None
+        )
+      )
+    } catch {
+      case e: Exception =>
+        writer.abort()
+        Iterator.single(
+          (
+            SegmentBackfillResult(
+              segmentId = segmentID,
+              rowCount = 0,
+              manifestPaths = Seq.empty,
+              outputPath = outputRoot,
+              executionTimeMs = System.currentTimeMillis() - startTime
+            ),
+            Some(e)
+          )
+        )
+    }
+  }
+
   /** Extract collection metadata from snapshot: collectionID,
     * segment-to-partition mapping, segment base paths. Partition IDs are
     * derived from manifest basePaths:
     * {rootPath}/insert_log/{col_id}/{part_id}/{seg_id}
     */
   private def extractMetadataFromSnapshot(
-      metadata: SnapshotMetadata
+      metadata: SnapshotMetadata,
+      v2Segments: Seq[com.zilliz.spark.connector.read.V2SegmentInfo] = Seq.empty
   ): (Long, Map[Long, Long], Map[Long, String]) = {
     val collectionID = metadata.snapshotInfo.collectionId
 
@@ -1043,6 +1284,7 @@ object MilvusBackfill {
     var segmentToPartitionMap = Map.empty[Long, Long]
     var segmentBasePathMap = Map.empty[Long, String]
 
+    // V3 (manifest-based) segments: basePath carries partition id too.
     for (item <- manifestList) {
       val segId = item.segmentID
       MilvusSnapshotReader.parseManifestContent(item.manifest) match {
@@ -1073,9 +1315,17 @@ object MilvusBackfill {
       }
     }
 
+    // V2 (packed-parquet) segments: AVRO gives us partition id directly; no
+    // basePath — downstream dispatcher uses `v2SegmentIdSet` to pick the
+    // V2-specific writer and construct per-field paths itself.
+    for (seg <- v2Segments) {
+      segmentToPartitionMap += (seg.segmentId -> seg.partitionId)
+    }
+
     logger.info(
       s"Extracted from snapshot: collectionID=$collectionID, " +
-        s"segments=${segmentBasePathMap.keys.mkString(",")}"
+        s"segments=${segmentToPartitionMap.keys.mkString(",")} " +
+        s"(v3=${segmentBasePathMap.size}, v2=${v2Segments.size})"
     )
 
     (collectionID, segmentToPartitionMap, segmentBasePathMap)

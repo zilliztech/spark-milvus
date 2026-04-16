@@ -43,6 +43,7 @@ import com.zilliz.spark.connector.{
 }
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
+  MilvusPackedV2InputPartition,
   MilvusPartitionReaderFactory,
   MilvusStorageV2InputPartition
 }
@@ -155,11 +156,17 @@ case class MilvusTable(
     }
   logInfo(s"MilvusTable fieldIDs: $fieldIDs")
 
-  /** Check if snapshot mode is enabled (data comes from snapshot, not client)
+  /** Check if snapshot mode is enabled (data comes from snapshot, not client).
+    *
+    * Either the legacy V3 (manifest-based) hint
+    * [[MilvusOption.SnapshotManifests]] or the new V2 (packed parquet) hint
+    * [[MilvusOption.SnapshotV2Segments]] is sufficient to take the
+    * snapshot-only path and skip all Milvus client calls.
     */
   private def isSnapshotMode: Boolean = {
     milvusOption.options.get(MilvusOption.SnapshotMode).contains("true") &&
-    milvusOption.options.contains(MilvusOption.SnapshotManifests)
+    (milvusOption.options.contains(MilvusOption.SnapshotManifests) ||
+      milvusOption.options.contains(MilvusOption.SnapshotV2Segments))
   }
 
   def initInfo(): Unit = {
@@ -521,6 +528,15 @@ class MilvusScanBuilder(
   }
 
   override def pushFilters(filters: Array[Filter]): Array[Filter] = {
+    // V2 packed reader does not apply filters server-side yet — return all
+    // as unsupported so Spark applies them post-read.
+    // TODO: implement filter pushdown for V2 packed reader in a separate PR.
+    val isPackedV2 = Option(options.get(MilvusOption.SnapshotV2Segments))
+      .exists(_.nonEmpty)
+    if (isPackedV2) {
+      pushedFilterArray = Array.empty
+      return filters
+    }
     val (supportedFilters, unsupportedFilters) =
       filters.partition(isSupportedFilter)
     pushedFilterArray = supportedFilters
@@ -632,10 +648,12 @@ class MilvusScan(
   override def toBatch: Batch = this
 
   override def planInputPartitions(): Array[InputPartition] = {
-    // Check if snapshot manifests are provided (offline/snapshot mode)
+    // Check if snapshot data is provided (offline/snapshot mode).
+    // Either legacy manifest-based (V3) or packed-parquet (V2) segments.
     val snapshotManifests = Option(options.get(MilvusOption.SnapshotManifests))
-    if (snapshotManifests.isDefined) {
-      return planInputPartitionsFromSnapshot(snapshotManifests.get)
+    val snapshotV2 = Option(options.get(MilvusOption.SnapshotV2Segments))
+    if (snapshotManifests.isDefined || snapshotV2.isDefined) {
+      return planInputPartitionsFromSnapshot(snapshotManifests.getOrElse(""))
     }
 
     // Validate required parameters
@@ -757,6 +775,16 @@ class MilvusScan(
   /** Plan input partitions from snapshot manifests (offline mode - no client
     * connection) This enables reading Milvus data purely from snapshot metadata
     * without any client calls.
+    *
+    * The caller can pass either:
+    *   - `manifestsJson` (the legacy `SnapshotManifests` option) for
+    *     manifest-based segments (segment-info `storage_version = 3`), or
+    *   - a non-empty `SnapshotV2Segments` option carrying a materialized list
+    *     of [[com.zilliz.spark.connector.read.V2SegmentInfo]] for non-manifest
+    *     packed-parquet segments (segment-info `storage_version = 2`).
+    *
+    * When both are present the planner emits partitions from both sources
+    * (mixed-version snapshot).
     */
   private def planInputPartitionsFromSnapshot(
       manifestsJson: String
@@ -770,21 +798,20 @@ class MilvusScan(
       "Using snapshot mode for partition planning (no Milvus client connection)"
     )
 
-    // Parse manifest list from JSON
-    val manifestList =
-      MilvusSnapshotReader.deserializeManifestList(manifestsJson) match {
-        case Right(list) => list
-        case Left(e) =>
-          throw new Exception(
-            s"Failed to parse snapshot manifests: ${e.getMessage}",
-            e
-          )
-      }
-
-    if (manifestList.isEmpty) {
-      logWarning("Snapshot manifest list is empty, returning no partitions")
-      return Array.empty[InputPartition]
-    }
+    // Parse manifest list from JSON. Empty or null means no V3 manifests
+    // were supplied (pure V2-packed snapshot) — fall through to the
+    // packed-V2 branch below without erroring out.
+    val manifestList: Seq[StorageV2ManifestItem] =
+      if (manifestsJson == null || manifestsJson.isEmpty) Seq.empty
+      else
+        MilvusSnapshotReader.deserializeManifestList(manifestsJson) match {
+          case Right(list) => list
+          case Left(e) =>
+            throw new Exception(
+              s"Failed to parse snapshot manifests: ${e.getMessage}",
+              e
+            )
+        }
 
     // Get partition IDs from options (comma-separated)
     val partitionIds = Option(options.get(MilvusOption.SnapshotPartitionIds))
@@ -857,7 +884,39 @@ class MilvusScan(
     logInfo(
       s"Created ${v2Partitions.size} V2 partitions from snapshot manifests"
     )
-    v2Partitions.toArray
+
+    // Additional partitions from pre-materialized packed-V2 segments (if any).
+    val packedV2Partitions: Seq[InputPartition] =
+      Option(options.get(MilvusOption.SnapshotV2Segments))
+        .filter(_.nonEmpty)
+        .map { json =>
+          MilvusSnapshotReader.deserializeV2Segments(json) match {
+            case Right(segs) if segs.nonEmpty =>
+              logInfo(
+                s"Creating ${segs.size} packed-V2 partition(s) from " +
+                  s"SnapshotV2Segments option"
+              )
+              segs.map { seg =>
+                MilvusPackedV2InputPartition(
+                  segmentID = seg.segmentId,
+                  partitionID = seg.partitionId,
+                  columnGroups = seg.columnGroups,
+                  milvusSchemaBytes = schemaBytes,
+                  milvusOption = milvusOption,
+                  neededColumnFieldIds = Seq.empty
+                ): InputPartition
+              }
+            case Right(_) => Seq.empty[InputPartition]
+            case Left(e) =>
+              throw new Exception(
+                s"Failed to parse SnapshotV2Segments: ${e.getMessage}",
+                e
+              )
+          }
+        }
+        .getOrElse(Seq.empty[InputPartition])
+
+    (v2Partitions ++ packedV2Partitions).toArray
   }
 
   override def createReaderFactory(): PartitionReaderFactory = {

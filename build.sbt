@@ -178,6 +178,8 @@ lazy val root = (project in file("."))
       sparkCatalyst,
       sparkMLlib,
       parquetHadoop,
+      parquetAvro,
+      avro,
       hadoopCommon,
       hadoopAws,
       awsSdkS3,

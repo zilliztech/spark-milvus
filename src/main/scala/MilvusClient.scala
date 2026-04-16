@@ -182,8 +182,10 @@ class MilvusClient(params: MilvusConnectionParams) {
     }
     // Failure path: classify rate limit vs other errors.
     val reason = Option(status.reason).getOrElse("")
-    if (status.code == MilvusClient.RateLimitErrorCode ||
-        reason.toLowerCase.contains(MilvusClient.RateLimitReasonMarker)) {
+    if (
+      status.code == MilvusClient.RateLimitErrorCode ||
+      reason.toLowerCase.contains(MilvusClient.RateLimitReasonMarker)
+    ) {
       Failure(new MilvusRateLimitException(s"Failed to $api: $reason"))
     } else {
       Failure(new Exception(s"Failed to $api: $reason"))
