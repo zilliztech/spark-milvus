@@ -196,16 +196,20 @@ class MilvusLoonPartitionWriter(
     fieldIds
   )
 
-  // Create VectorSchemaRoot to accumulate batches
+  // Create VectorSchemaRoot to accumulate batches.
   // IMPORTANT: root must be var because we create a new one for each flush.
-  // The C++ writer caches RecordBatch shared_ptrs that reference Java-owned buffers
-  // via Arrow C Data Interface (zero-copy). Reusing the same root would overwrite
-  // buffer contents that C++ still references, causing data corruption.
+  // The C++ writer caches RecordBatch shared_ptrs that reference Java-owned
+  // buffers via Arrow C Data Interface (zero-copy). Reusing the same root
+  // would overwrite buffer contents that C++ still references, causing data
+  // corruption — so we swap in a fresh root per flush.
+  //
+  // After export, the source root is closed immediately. `exportVectorSchemaRoot`
+  // independently retains each buffer (verified in ArrowCDataRefcountTest for
+  // every backfill-relevant field type), and C++'s ImportRecordBatch moves
+  // that release callback into the cached shared_ptr, so the buffers stay
+  // alive until C++ drops its ref. This caps per-writer direct memory at
+  // ~16 MB × numGroups instead of growing linearly with the segment's row count.
   private var root = VectorSchemaRoot.create(arrowSchema, allocator)
-
-  // Track exported roots whose buffers are still referenced by C++ RecordBatches.
-  // These must stay alive until the C++ writer is closed.
-  private val exportedRoots = new java.util.ArrayList[VectorSchemaRoot]()
 
   // Batch size configuration
   private val batchSize = milvusOption.insertMaxBatchSize
@@ -213,7 +217,7 @@ class MilvusLoonPartitionWriter(
   private var totalRecordCount = 0L
 
   // Allocate initial capacity for vectors
-  allocateVectors()
+  allocateVectors(root)
 
   // Base path for writing - use custom path if provided, otherwise generate
   private val basePath = {
@@ -369,42 +373,67 @@ class MilvusLoonPartitionWriter(
 
     // Export Arrow array to C interface
     val arrowArrayC = ArrowArray.allocateNew(allocator)
-    Data.exportVectorSchemaRoot(allocator, root, null, arrowArrayC)
-
     try {
+      Data.exportVectorSchemaRoot(allocator, root, null, arrowArrayC)
       // Use synchronized write for the first operation to avoid race conditions
       // in native library's S3 client initialization
       MilvusLoonPartitionWriter.synchronizedWrite {
         writer.write(arrowArrayC.memoryAddress())
         writer.flush()
       }
-
       totalRecordCount += currentBatchSize
-
-      // CRITICAL: Do NOT reuse the same root for the next batch!
-      // The C++ ParquetFileWriter caches RecordBatch shared_ptrs that wrap pointers
-      // to this root's buffers (via Arrow C Data Interface zero-copy import).
-      // If we reuse the same root, writing new data overwrites the buffer memory
-      // that C++ cached batches still reference, causing data corruption.
-      // Instead, keep the old root alive and create a fresh one with new buffers.
-      exportedRoots.add(root)
-      root = VectorSchemaRoot.create(arrowSchema, allocator)
-      allocateVectors()
-      currentBatchSize = 0
-
     } finally {
+      // On success, C++'s ImportRecordBatch already moved the release out of
+      // the struct; close() is a struct-memory cleanup only. On failure, the
+      // release is still here and firing it drops the export-side ref (source
+      // root still has one ref, so buffers remain alive for cleanup to free).
       arrowArrayC.close()
+    }
+
+    // Fully build + allocate the replacement root BEFORE swapping `root`, so
+    // that if allocation throws, the field still points at the old root and
+    // cleanup() can release it. Otherwise an allocation failure mid-swap would
+    // leak the half-allocated newRoot and forget the old one.
+    //
+    // Old root's buffers are referenced only by C++ via the export's retained
+    // ref, so closing `oldRoot` at the end just drops the JVM ref — buffers
+    // stay alive until C++ flushes its cached shared_ptr.
+    val newRoot = VectorSchemaRoot.create(arrowSchema, allocator)
+    try {
+      allocateVectors(newRoot)
+    } catch {
+      case t: Throwable =>
+        Try(newRoot.close()).recover { case e: Exception =>
+          logError(
+            s"Error closing newRoot after allocation failure: ${e.getMessage}"
+          )
+        }
+        throw t
+    }
+    val oldRoot = root
+    root = newRoot
+    currentBatchSize = 0
+    // Best-effort: the native write already succeeded and the batch is durable.
+    // Throwing out of flushBatch here would escape to Spark, trigger task retry,
+    // and duplicate the write. Log and continue — the allocator will still
+    // reclaim buffers once the C++ writer flushes its cached shared_ptrs.
+    Try(oldRoot.close()).recover { case e: Exception =>
+      logError(
+        s"Error closing old VectorSchemaRoot after flush: ${e.getMessage}"
+      )
     }
   }
 
-  /** Allocate or reallocate vectors for the current batch
+  /** Allocate or reallocate vectors for the given root. Takes the root as a
+    * parameter so callers can fully prepare a fresh VectorSchemaRoot before
+    * committing it to the `root` field.
     */
-  private def allocateVectors(): Unit = {
+  private def allocateVectors(r: VectorSchemaRoot): Unit = {
     import scala.collection.JavaConverters._
     import org.apache.arrow.vector.{VarCharVector, BaseVariableWidthVector}
 
     // For each vector, set appropriate initial capacity
-    root.getFieldVectors.asScala.foreach { vector =>
+    r.getFieldVectors.asScala.foreach { vector =>
       vector match {
         case varCharVector: VarCharVector =>
           // For VarChar vectors, allocate both row capacity and byte capacity
@@ -425,8 +454,8 @@ class MilvusLoonPartitionWriter(
       }
     }
 
-    root.allocateNew()
-    root.setRowCount(0)
+    r.allocateNew()
+    r.setRowCount(0)
   }
 
   /** Generate S3 base path for this writer
@@ -510,20 +539,15 @@ class MilvusLoonPartitionWriter(
       logError(s"Error destroying writer: ${e.getMessage}")
     }
 
-    // Close current root (not yet exported)
+    // Close current root (not yet exported). Previously-exported roots were
+    // already closed inside flushBatch right after export — the export-side
+    // refcount keeps their buffers alive until C++ drops the cached shared_ptr,
+    // and `writer.destroy()` above already fired every remaining release
+    // callback, returning those buffers to the allocator.
     Try {
       if (root != null) root.close()
     }.recover { case e: Exception =>
       logError(s"Error closing VectorSchemaRoot: ${e.getMessage}")
-    }
-
-    // Close exported roots whose buffers were referenced by C++ RecordBatches.
-    // By this point the C++ writer is destroyed, so all release callbacks have fired.
-    Try {
-      exportedRoots.forEach(r => Try(r.close()))
-      exportedRoots.clear()
-    }.recover { case e: Exception =>
-      logError(s"Error closing exported roots: ${e.getMessage}")
     }
 
     Try {

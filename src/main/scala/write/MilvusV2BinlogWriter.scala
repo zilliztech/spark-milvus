@@ -157,10 +157,14 @@ class MilvusV2BinlogWriter(
   )
 
   // Batch accumulation. The current `root` collects rows; each flush exports
-  // it via the Arrow C Data Interface. The C++ writer caches RecordBatch
-  // shared_ptrs that wrap the JVM-owned buffers (zero-copy), so we MUST
-  // keep flushed roots alive until the writer is closed — same trap
-  // documented in MilvusLoonPartitionWriter.
+  // it via Arrow C Data Interface, hands the cArray to the C++ writer, then
+  // immediately closes the source root. The export retains each buffer on
+  // its own (verified in ArrowCDataRefcountTest across every backfill-
+  // relevant field type), so closing the source only drops the JVM-side ref —
+  // C++'s cached RecordBatch shared_ptr keeps the buffers alive and fires the
+  // release callback when it drops. This bounds per-writer direct memory to
+  // ~16 MB × numGroups, down from O(segment rows) that the old "retain every
+  // root until writer.close()" strategy incurred.
   private val batchSize: Int =
     if (milvusOption.insertMaxBatchSize > 0) milvusOption.insertMaxBatchSize
     else 5000
@@ -169,7 +173,6 @@ class MilvusV2BinlogWriter(
   allocateVectors(root)
   private var currentBatchSize: Int = 0
   private var totalRows: Long = 0L
-  private val exportedRoots = new java.util.ArrayList[VectorSchemaRoot]()
   private var closed: Boolean = false
 
   /** Consume one Spark row. Each field in `row` must be at the same positional
@@ -235,17 +238,46 @@ class MilvusV2BinlogWriter(
       Data.exportVectorSchemaRoot(allocator, root, null, cArray)
       writer.write(cArray.memoryAddress())
       totalRows += currentBatchSize
-
-      // CRITICAL: do NOT reuse `root`. C++ caches RecordBatch ptrs into
-      // these buffers. Hand the old root off to `exportedRoots` (closed
-      // after writer.close()) and create a fresh one for subsequent rows.
-      exportedRoots.add(root)
-      root = VectorSchemaRoot.create(arrowSchema, allocator)
-      allocateVectors(root)
-      currentBatchSize = 0
     } finally {
+      // The C++ writer's ImportRecordBatch moves the release callback out of
+      // this struct on success; on failure the release is still here and
+      // closing will fire it, dropping the export-side ref (source root still
+      // holds one ref, so buffers remain alive until abort/cleanup runs).
       cArray.close()
     }
+
+    // Fully build + allocate the replacement root BEFORE swapping `root`, so
+    // that if allocation throws, the field still points at the old root and
+    // cleanup() can release it. Otherwise an allocation failure mid-swap would
+    // leak the half-allocated newRoot and forget the old one.
+    //
+    // Old root's buffers are now referenced only by C++ via the export's
+    // retained ref, so closing `oldRoot` at the end just drops the JVM ref —
+    // buffers stay alive until C++ flushes the cached shared_ptr.
+    val newRoot = VectorSchemaRoot.create(arrowSchema, allocator)
+    try {
+      allocateVectors(newRoot)
+    } catch {
+      case t: Throwable =>
+        Try(newRoot.close()).failed.foreach(e =>
+          logError(
+            s"error closing newRoot after allocation failure: ${e.getMessage}"
+          )
+        )
+        throw t
+    }
+    val oldRoot = root
+    root = newRoot
+    currentBatchSize = 0
+    // Best-effort: the native write already succeeded and the batch is durable.
+    // Throwing out of flushBatch here would escape to Spark, trigger task retry,
+    // and duplicate the write. Log and continue — the allocator will still
+    // reclaim buffers once the C++ writer flushes its cached shared_ptrs.
+    Try(oldRoot.close()).failed.foreach(e =>
+      logError(
+        s"error closing old VectorSchemaRoot after flush: ${e.getMessage}"
+      )
+    )
   }
 
   private def allocateVectors(r: VectorSchemaRoot): Unit = {
@@ -263,17 +295,15 @@ class MilvusV2BinlogWriter(
   }
 
   private def cleanup(): Unit = {
+    // Destroying the writer first drops all C++-cached RecordBatch shared_ptrs,
+    // which fires every outstanding release callback and returns the buffers
+    // they were pinning to the allocator. Only then is it safe to close the
+    // allocator.
     Try(writer.destroy()).failed.foreach(e =>
       logError(s"error destroying packed writer: ${e.getMessage}")
     )
     Try(if (root != null) root.close()).failed.foreach(e =>
       logError(s"error closing current root: ${e.getMessage}")
-    )
-    Try {
-      exportedRoots.forEach(r => Try(r.close()))
-      exportedRoots.clear()
-    }.failed.foreach(e =>
-      logError(s"error closing exported roots: ${e.getMessage}")
     )
     Try(if (arrowSchemaC != null) arrowSchemaC.close()).failed.foreach(e =>
       logError(s"error closing ArrowSchema: ${e.getMessage}")
