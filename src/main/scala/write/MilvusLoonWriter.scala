@@ -436,17 +436,15 @@ class MilvusLoonPartitionWriter(
     r.getFieldVectors.asScala.foreach { vector =>
       vector match {
         case varCharVector: VarCharVector =>
-          // For VarChar vectors, allocate both row capacity and byte capacity
-          // This will auto-expand if needed, but starts small to avoid OOM
-          val estimatedBytesPerValue = 32
-          val totalByteCapacity = batchSize * estimatedBytesPerValue
-          varCharVector.setInitialCapacity(batchSize, totalByteCapacity)
+          // Second arg is density (bytes per value), NOT total bytes. Arrow
+          // computes the initial data buffer size as valueCount × density
+          // internally. Passing `batchSize * 32` here gave batchSize² × 32 —
+          // a quadratic over-allocation (~32 MiB per column at batch=1024)
+          // that exploded into GiB-scale peaks and caused direct-memory OOM.
+          varCharVector.setInitialCapacity(batchSize, 32.0)
 
         case baseVarVector: BaseVariableWidthVector =>
-          // For other variable-width vectors (like VarBinary)
-          val estimatedBytesPerValue = 32
-          val totalByteCapacity = batchSize * estimatedBytesPerValue
-          baseVarVector.setInitialCapacity(batchSize, totalByteCapacity)
+          baseVarVector.setInitialCapacity(batchSize, 32.0)
 
         case _ =>
           // For fixed-width vectors, just set row capacity

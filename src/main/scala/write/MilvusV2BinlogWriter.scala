@@ -284,9 +284,14 @@ class MilvusV2BinlogWriter(
     import scala.collection.JavaConverters._
     r.getFieldVectors.asScala.foreach {
       case v: VarCharVector =>
-        v.setInitialCapacity(batchSize, batchSize.toLong * 32L)
+        // Second arg is density (bytes per value), NOT total bytes.
+        // Total buffer = batchSize × density. Passing batchSize*32 here would
+        // give batchSize² × 32 bytes — a quadratic over-allocation that dwarfs
+        // actual data (20-byte values) by ~1000× and made a single allocator
+        // peak ~1 GiB for a 20k-row segment.
+        v.setInitialCapacity(batchSize, 32.0)
       case v: BaseVariableWidthVector =>
-        v.setInitialCapacity(batchSize, batchSize.toLong * 32L)
+        v.setInitialCapacity(batchSize, 32.0)
       case other =>
         other.setInitialCapacity(batchSize)
     }
