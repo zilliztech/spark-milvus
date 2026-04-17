@@ -36,6 +36,13 @@ object MilvusBackfill {
 
   private val logger = LoggerFactory.getLogger(getClass)
 
+  /** Marker column added to the backfill side before the left join so we can
+    * count how many source rows found a PK match (non-null marker → matched).
+    * Kept on the DataFrame all the way down to the per-segment partition
+    * function, and stripped from the projection written to parquet.
+    */
+  private[backfill] val MatchFlagCol = "__bf_matched__"
+
   /** Backfill new fields into a Milvus collection
     *
     * @param spark
@@ -65,6 +72,10 @@ object MilvusBackfill {
         return Left(SchemaValidationError(s"Invalid configuration: $error"))
       case Right(_) => // Continue
     }
+
+    // Tracked so we can unpersist in the outer finally, even on mid-flight
+    // failure (the cache is taken right after column mapping, below).
+    var cachedBackfillDF: DataFrame = null
 
     logger.info(s"Backfill mode: ${config.mode}")
 
@@ -156,11 +167,60 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
+      // Cache so the upcoming count / distinct-PK aggregation doesn't force
+      // a second parquet scan when performJoin consumes the DF later. Held
+      // until after processSegments (see finally block for unpersist).
+      backfillDF.cache()
+      cachedBackfillDF = backfillDF
+
       // Extract new field names (all post-mapping columns except the PK).
       val newFieldNames = backfillDF.schema.fields
         .map(_.name)
         .filterNot(_ == pkName)
         .toSeq
+
+      // Reject a backfill column named MatchFlagCol: the join adds a
+      // lit(true) marker under that name, which would silently overwrite a
+      // user column (overwrite mode) or blow up with AnalysisException on
+      // the coalesce rename/self-reference (coalesce mode).
+      if (newFieldNames.contains(MatchFlagCol)) {
+        return Left(
+          SchemaValidationError(
+            s"Backfill parquet contains a column named '$MatchFlagCol', " +
+              "which is reserved for internal use by the backfill join. " +
+              "Rename the column (or use --column-mapping) and retry."
+          )
+        )
+      }
+
+      // One aggregation over the cached DF gives us both totals: the raw
+      // input row count (reported in the result / logs for debugging low
+      // match rates) and the distinct-PK count (used below to fail fast on
+      // duplicates — see rationale there).
+      val countsRow = backfillDF
+        .agg(count(lit(1)), countDistinct(col(pkName)))
+        .head()
+      val backfillRowCount = countsRow.getLong(0)
+      val distinctPkCount = countsRow.getLong(1)
+      logger.info(
+        s"Backfill data file rows: $backfillRowCount " +
+          s"(distinct ${pkName}: $distinctPkCount)"
+      )
+
+      // Duplicate PKs on the backfill side cause each source row with a
+      // matching PK to be emitted once per duplicate by the left join,
+      // inflating per-segment rowCount / sourceRowCount / matchedRowCount.
+      // Rather than silently report misleading metrics, fail fast so the
+      // user can dedupe upstream.
+      if (distinctPkCount != backfillRowCount) {
+        return Left(
+          SchemaValidationError(
+            s"Backfill parquet contains duplicate primary-key values " +
+              s"(rows=$backfillRowCount, distinct ${pkName}=$distinctPkCount). " +
+              "Deduplicate the input (e.g. dropDuplicates on the PK) and retry."
+          )
+        )
+      }
 
       // Build field name -> field ID mapping from collection schema. Resolved
       // early (was post-join) so coalesce mode can ask the reader to also
@@ -304,7 +364,8 @@ object MilvusBackfill {
         executionTimeMs = executionTime,
         collectionId = collectionID,
         partitionId = if (partitionIDs.size == 1) partitionIDs.head else -1,
-        newFieldNames = newFieldNames
+        newFieldNames = newFieldNames,
+        totalBackfillDataRows = backfillRowCount
       )
 
       Right(result)
@@ -321,6 +382,14 @@ object MilvusBackfill {
         } catch {
           case e: Exception =>
             logger.warn("Failed to close Milvus client", e)
+        }
+      }
+      if (cachedBackfillDF != null) {
+        try {
+          cachedBackfillDF.unpersist()
+        } catch {
+          case e: Exception =>
+            logger.warn("Failed to unpersist backfill DataFrame", e)
         }
       }
     }
@@ -730,13 +799,16 @@ object MilvusBackfill {
       newFieldNames: Seq[String],
       mode: String
   ): DataFrame = {
+    val backfillWithFlag =
+      backfillDF.withColumn(MatchFlagCol, lit(true))
     mode match {
       case MilvusOption.BackfillModeCoalesce =>
         // Rename backfill-side target columns to avoid name collisions with
         // source-side columns now present on originalDF.
         val suffix = "__bf__"
-        val renamedBackfill = newFieldNames.foldLeft(backfillDF) { (df, n) =>
-          df.withColumnRenamed(n, n + suffix)
+        val renamedBackfill = newFieldNames.foldLeft(backfillWithFlag) {
+          (df, n) =>
+            df.withColumnRenamed(n, n + suffix)
         }
         val joined = originalDF.join(renamedBackfill, Seq(pkName), "left")
         newFieldNames.foldLeft(joined) { (df, n) =>
@@ -748,7 +820,7 @@ object MilvusBackfill {
         // Use the using-column join form: both sides share the pkName column
         // (guaranteed by applyColumnMapping), so Spark collapses it into one,
         // avoiding ambiguous-reference errors downstream.
-        originalDF.join(backfillDF, Seq(pkName), "left")
+        originalDF.join(backfillWithFlag, Seq(pkName), "left")
     }
   }
 
@@ -821,11 +893,19 @@ object MilvusBackfill {
   ): Either[BackfillError, Map[Long, SegmentBackfillResult]] = {
 
     try {
-      // Prepare data: select only needed columns and add segment_id for partitioning
+      // Prepare data: select only needed columns and add segment_id for
+      // partitioning. Trailing column is the backfill match flag — retained
+      // here so executors can count PK-matched rows, stripped from the
+      // projection that reaches the writer.
       val preparedDF = joinedDF
-        .select((Seq("segment_id", "row_offset") ++ newFieldNames).map(col): _*)
+        .select(
+          (Seq("segment_id", "row_offset") ++ newFieldNames ++ Seq(
+            MatchFlagCol
+          )).map(col): _*
+        )
 
-      // Get the schema for new fields only (without segment_id and row_offset)
+      // Get the schema for new fields only (without segment_id, row_offset,
+      // or the match flag)
       val targetSchema = org.apache.spark.sql.types.StructType(
         newFieldNames.map(fieldName =>
           preparedDF.schema.fields.find(_.name == fieldName).get
@@ -911,12 +991,31 @@ object MilvusBackfill {
       val totalTime = results.map(_._1.executionTimeMs).sum
       val avgTime = if (results.nonEmpty) totalTime / results.length else 0
       val totalRows = results.map(_._1.rowCount).sum
+      val totalSource = results.map(_._1.sourceRowCount).sum
+      val totalMatched = results.map(_._1.matchedRowCount).sum
+      val matchRateStr =
+        if (totalSource > 0)
+          f"${totalMatched.toDouble / totalSource * 100}%.2f%%"
+        else "n/a"
 
       logger.info("=== Backfill Summary ===")
       logger.info(s"Total segments: ${results.length}")
-      logger.info(s"Total rows processed: $totalRows")
+      logger.info(s"Total source rows: $totalSource")
+      logger.info(
+        s"Total matched rows: $totalMatched (match rate: $matchRateStr)"
+      )
+      logger.info(s"Total rows written: $totalRows")
       logger.info(s"Total time for all segments: ${totalTime}ms")
       logger.info(s"Average time per segment: ${avgTime}ms")
+      results.sortBy(_._1.segmentId).foreach { case (r, _) =>
+        val segRate =
+          if (r.sourceRowCount > 0)
+            f"${r.matchedRowCount.toDouble / r.sourceRowCount * 100}%.2f%%"
+          else "n/a"
+        logger.info(
+          s"Segment ${r.segmentId}: source=${r.sourceRowCount}, matched=${r.matchedRowCount} ($segRate), written=${r.rowCount}"
+        )
+      }
 
       Right(successfulResults)
 
@@ -992,12 +1091,19 @@ object MilvusBackfill {
     try {
       var rowCount = 0L
       var nullRowCount = 0L
+      var matchedRowCount = 0L
 
       def writeRow(row: InternalRow): Unit = {
-        val targetFields = (2 until row.numFields)
+        // Row layout: [segment_id, row_offset, ...newFields, __bf_matched__]
+        // Strip the first two tracking cols and the trailing match flag before
+        // handing values to the writer.
+        val matchFlagIdx = row.numFields - 1
+        val dataEnd = matchFlagIdx
+        val targetFields = (2 until dataEnd)
           .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
           .toArray
         if (targetFields.forall(_ == null)) nullRowCount += 1
+        if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
         writer.write(
           new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(
             targetFields
@@ -1027,7 +1133,9 @@ object MilvusBackfill {
             manifestPaths = manifestPaths,
             outputPath = outputPath,
             executionTimeMs = System.currentTimeMillis() - startTime,
-            committedVersion = committedVersion
+            committedVersion = committedVersion,
+            sourceRowCount = rowCount,
+            matchedRowCount = matchedRowCount
           ),
           None
         )
@@ -1202,20 +1310,29 @@ object MilvusBackfill {
     )
 
     var rowCount = 0L
+    var matchedRowCount = 0L
     try {
-      // The first two columns of each row are (segment_id, row_offset); the
-      // V2 writer only wants the trailing data columns, so we build a
-      // projected row before calling write().
+      // Row layout: [segment_id, row_offset, ...newFields, __bf_matched__].
+      // The V2 writer only wants the newField columns; strip the tracking
+      // columns and the match flag (the flag is instead folded into
+      // matchedRowCount).
       def projected(row: InternalRow): InternalRow = {
-        val values = (2 until row.numFields)
+        val matchFlagIdx = row.numFields - 1
+        val dataEnd = matchFlagIdx
+        val values = (2 until dataEnd)
           .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
           .toArray
         new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(values)
       }
+      def countMatch(row: InternalRow): Unit = {
+        if (!row.isNullAt(row.numFields - 1)) matchedRowCount += 1
+      }
 
+      countMatch(firstRow)
       writer.write(projected(firstRow))
       rowCount += 1
       iter.foreach { row =>
+        countMatch(row)
         writer.write(projected(row))
         rowCount += 1
       }
@@ -1246,7 +1363,9 @@ object MilvusBackfill {
                 storageVersion = 2L,
                 columnGroups = columnGroupArtifacts
               )
-            )
+            ),
+            sourceRowCount = rowCount,
+            matchedRowCount = matchedRowCount
           ),
           None
         )

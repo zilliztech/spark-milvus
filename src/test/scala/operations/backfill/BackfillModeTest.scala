@@ -218,14 +218,16 @@ class BackfillModeTest
       MilvusOption.BackfillModeCoalesce
     )
 
-    // The join should have the same columns as the source side plus nothing
-    // else (the backfill-side target columns are dropped after coalesce).
+    // The join should have the same columns as the source side plus the
+    // backfill-match marker (the backfill-side target columns are dropped
+    // after coalesce). The marker is consumed by processSegments for stats.
     joined.columns.toSet shouldBe Set(
       "pk",
       "f1",
       "f2",
       "segment_id",
-      "row_offset"
+      "row_offset",
+      MilvusBackfill.MatchFlagCol
     )
 
     val byPk = joined

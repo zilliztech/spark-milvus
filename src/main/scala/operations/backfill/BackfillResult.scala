@@ -37,7 +37,16 @@ case class SegmentBackfillResult(
       * above; for V2 there is no manifest, so consumers should read this
       * artifact to patch the snapshot.
       */
-    v2Artifact: Option[V2SegmentArtifact] = None
+    v2Artifact: Option[V2SegmentArtifact] = None,
+    /** Source (snapshot) row count for this segment — equal to `rowCount` on
+      * the success path because the left join preserves every source row, but
+      * kept separate so consumers don't have to rely on that invariant.
+      */
+    sourceRowCount: Long = 0L,
+    /** Source rows whose PK was matched in the backfill parquet. Derived from a
+      * `__bf_matched__` marker column injected before the left join.
+      */
+    matchedRowCount: Long = 0L
 )
 
 /** Comprehensive result of backfill operation
@@ -51,16 +60,28 @@ case class BackfillResult(
     executionTimeMs: Long,
     collectionId: Long,
     partitionId: Long,
-    newFieldNames: Seq[String]
+    newFieldNames: Seq[String],
+    totalSourceRows: Long = 0L,
+    totalBackfillDataRows: Long = 0L,
+    totalMatchedRows: Long = 0L
 ) {
+
+  private def matchRateStr(matched: Long, total: Long): String =
+    if (total <= 0) "n/a" else f"${matched.toDouble / total * 100}%.2f%%"
 
   /** Get a summary string of the backfill operation
     */
   def summary: String = {
     val v2Count = segmentResults.count(_._2.v2Artifact.isDefined)
+    val sourceRate = matchRateStr(totalMatchedRows, totalSourceRows)
+    val dataFileRate = matchRateStr(totalMatchedRows, totalBackfillDataRows)
     s"""Backfill Summary:
-       |  Status: ${if (success) "SUCCESS" else "FAILED"}
+       |  Status: ${if (success) "SUCCESS"
+      else "FAILED"}
        |  Segments Processed: $segmentsProcessed
+       |  Total Source Rows: $totalSourceRows
+       |  Total Backfill Data File Rows: $totalBackfillDataRows
+       |  Total Matched Rows: $totalMatchedRows (of source: $sourceRate, of data file: $dataFileRate)
        |  Total Rows Written: $totalRowsWritten
        |  Execution Time: ${executionTimeMs}ms
        |  Collection ID: $collectionId
@@ -77,7 +98,8 @@ case class BackfillResult(
     val segmentLines =
       segmentResults.toSeq.sortBy(_._1).map { case (segId, result) =>
         val tag = if (result.v2Artifact.isDefined) "[v2]" else "[v3]"
-        s"    Segment $segId $tag: ${result.rowCount} rows, version=${result.committedVersion}, ${result.executionTimeMs}ms, path=${result.outputPath}"
+        val rate = matchRateStr(result.matchedRowCount, result.sourceRowCount)
+        s"    Segment $segId $tag: source=${result.sourceRowCount}, matched=${result.matchedRowCount} ($rate), written=${result.rowCount}, version=${result.committedVersion}, ${result.executionTimeMs}ms, path=${result.outputPath}"
       }
     s"Segment Details:\n${segmentLines.mkString("\n")}"
   }
@@ -99,6 +121,8 @@ case class BackfillResult(
         val base = scala.collection.mutable.LinkedHashMap[String, Any](
           "version" -> r.committedVersion,
           "rowCount" -> r.rowCount,
+          "sourceRowCount" -> r.sourceRowCount,
+          "matchedRowCount" -> r.matchedRowCount,
           "executionTimeMs" -> r.executionTimeMs,
           "outputPath" -> r.outputPath,
           "manifestPaths" -> r.manifestPaths
@@ -117,11 +141,14 @@ case class BackfillResult(
       }
       .toMap
 
-    val result = Map(
+    val result = scala.collection.mutable.LinkedHashMap[String, Any](
       "success" -> success,
       "collectionId" -> collectionId,
       "partitionId" -> partitionId,
       "segmentsProcessed" -> segmentsProcessed,
+      "totalSourceRows" -> totalSourceRows,
+      "totalBackfillDataRows" -> totalBackfillDataRows,
+      "totalMatchedRows" -> totalMatchedRows,
       "totalRowsWritten" -> totalRowsWritten,
       "executionTimeMs" -> executionTimeMs,
       "newFieldNames" -> newFieldNames,
@@ -150,9 +177,12 @@ object BackfillResult {
       executionTimeMs: Long,
       collectionId: Long,
       partitionId: Long,
-      newFieldNames: Seq[String]
+      newFieldNames: Seq[String],
+      totalBackfillDataRows: Long = 0L
   ): BackfillResult = {
     val totalRows = segmentResults.values.map(_.rowCount).sum
+    val totalSource = segmentResults.values.map(_.sourceRowCount).sum
+    val totalMatched = segmentResults.values.map(_.matchedRowCount).sum
     val allManifests = segmentResults.values.flatMap(_.manifestPaths).toSeq
 
     BackfillResult(
@@ -164,7 +194,10 @@ object BackfillResult {
       executionTimeMs = executionTimeMs,
       collectionId = collectionId,
       partitionId = partitionId,
-      newFieldNames = newFieldNames
+      newFieldNames = newFieldNames,
+      totalSourceRows = totalSource,
+      totalBackfillDataRows = totalBackfillDataRows,
+      totalMatchedRows = totalMatched
     )
   }
 
