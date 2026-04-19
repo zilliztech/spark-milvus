@@ -85,28 +85,34 @@ object V2SegmentLoader extends Logging {
             columnGroups = Seq.empty
           )
         } else {
-          // Any one of this segment's parquet files carries the full
-          // `group_field_id_list` in its kv-metadata. Skip any binlog_files
-          // entry that happens to be empty.
-          val sample = entry.binlogFiles
-            .find(_.binlogs.nonEmpty)
-            .get
-            .binlogs
-            .head
-            .logPath
-          val footerPath = resolvePath(sample, bucket)
-          val footer =
-            MilvusParquetFooterReader.read(footerPath, hadoopConf) match {
-              case Right(f) => f
-              case Left(err) =>
-                throw new RuntimeException(
-                  s"failed to read parquet footer $footerPath: ${err.getMessage}",
-                  err
-                )
+          // Per-entry field-id recovery: each V2 parquet file holds exactly
+          // one column group, and its schema's top-level columns ARE that
+          // group's field IDs. Reading per entry (rather than reusing a
+          // single footer's segment-level `group_field_id_list`) is required
+          // because a segment that has been backfilled contains parquets
+          // from multiple write sessions, each advertising only its own
+          // session's groups — see MilvusParquetFooterReader.readFieldIdsFromSchema.
+          val groupFieldIdListPerEntry: Seq[Seq[Long]] =
+            entry.binlogFiles.map { afb =>
+              if (afb.binlogs.isEmpty) Seq.empty
+              else {
+                val samplePath = resolvePath(afb.binlogs.head.logPath, bucket)
+                MilvusParquetFooterReader
+                  .readFieldIdsFromSchema(samplePath, hadoopConf) match {
+                  case Right(ids) => ids
+                  case Left(err) =>
+                    throw new RuntimeException(
+                      s"failed to read field ids from parquet $samplePath " +
+                        s"(segment ${entry.segmentId}, slot ${afb.slotFieldId}): " +
+                        err.getMessage,
+                      err
+                    )
+                }
+              }
             }
           MilvusSegmentManifestReader.toV2SegmentInfo(
             entry,
-            footer.groupFieldIdList
+            groupFieldIdListPerEntry
           ) match {
             case Right(seg) => out += seg
             case Left(err) =>

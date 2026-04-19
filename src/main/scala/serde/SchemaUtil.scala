@@ -228,13 +228,23 @@ object MilvusSchemaUtil {
     * @param vectorDimensions
     *   Optional map of field name to vector dimension (for float arrays as
     *   vectors)
+    * @param fieldIds
+    *   Optional map of field name -> Milvus fieldID. When non-empty, each
+    *   matched field carries a `PARQUET:field_id` metadata entry.
+    * @param useFieldIdAsName
+    *   When true (default, V3 writer semantics), fields with an explicit
+    *   fieldID entry get their Arrow column name rewritten to the fieldID
+    *   string. When false (V2 packed-parquet semantics — what milvus segcore
+    *   produces), the Arrow column name stays as the Spark field's logical name
+    *   while `PARQUET:field_id` metadata still carries the fieldID.
     * @return
     *   Arrow Schema
     */
   def convertSparkSchemaToArrow(
       sparkSchema: org.apache.spark.sql.types.StructType,
       vectorDimensions: Map[String, Int] = Map.empty,
-      fieldIds: Map[String, Long] = Map.empty
+      fieldIds: Map[String, Long] = Map.empty,
+      useFieldIdAsName: Boolean = true
   ): org.apache.arrow.vector.types.pojo.Schema = {
     import scala.collection.JavaConverters._
     import org.apache.spark.sql.types._
@@ -282,9 +292,10 @@ object MilvusSchemaUtil {
       val metadata = Map("PARQUET:field_id" -> fieldId.toString).asJava
 
       val fieldType = new FieldType(true, arrowType, null, metadata)
-      // Use field ID as column name when explicit field IDs are provided
       val fieldName =
-        if (fieldIds.contains(field.name)) fieldId.toString else field.name
+        if (useFieldIdAsName && fieldIds.contains(field.name))
+          fieldId.toString
+        else field.name
       new Field(fieldName, fieldType, null)
     }
 
