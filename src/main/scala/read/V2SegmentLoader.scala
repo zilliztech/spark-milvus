@@ -94,20 +94,30 @@ object V2SegmentLoader extends Logging {
           // session's groups — see MilvusParquetFooterReader.readFieldIdsFromSchema.
           val groupFieldIdListPerEntry: Seq[Seq[Long]] =
             entry.binlogFiles.map { afb =>
-              if (afb.binlogs.isEmpty) Seq.empty
-              else {
-                val samplePath = resolvePath(afb.binlogs.head.logPath, bucket)
-                MilvusParquetFooterReader
-                  .readFieldIdsFromSchema(samplePath, hadoopConf) match {
-                  case Right(ids) => ids
-                  case Left(err) =>
-                    throw new RuntimeException(
-                      s"failed to read field ids from parquet $samplePath " +
-                        s"(segment ${entry.segmentId}, slot ${afb.slotFieldId}): " +
-                        err.getMessage,
-                      err
-                    )
-                }
+              if (afb.binlogs.isEmpty) {
+                // The top-level guard above only rejects the all-empty case.
+                // A partial-empty entry alongside populated ones points at a
+                // corrupt manifest (we have no parquet to recover field ids
+                // from, and the downstream V2ColumnGroup would be a silent
+                // empty shell). Fail loudly with slot/segment context.
+                throw new IllegalStateException(
+                  s"segment ${entry.segmentId} has an empty binlog_files entry " +
+                    s"(slot ${afb.slotFieldId}) while other entries are populated; " +
+                    "cannot recover field ids for this column group — refusing to " +
+                    "emit an empty V2ColumnGroup from a partial manifest"
+                )
+              }
+              val samplePath = resolvePath(afb.binlogs.head.logPath, bucket)
+              MilvusParquetFooterReader
+                .readFieldIdsFromSchema(samplePath, hadoopConf) match {
+                case Right(ids) => ids
+                case Left(err) =>
+                  throw new RuntimeException(
+                    s"failed to read field ids from parquet $samplePath " +
+                      s"(segment ${entry.segmentId}, slot ${afb.slotFieldId}): " +
+                      err.getMessage,
+                    err
+                  )
               }
             }
           MilvusSegmentManifestReader.toV2SegmentInfo(
