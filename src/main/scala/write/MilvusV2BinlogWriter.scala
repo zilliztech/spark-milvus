@@ -108,11 +108,17 @@ class MilvusV2BinlogWriter(
   private val allocator = new RootAllocator(Long.MaxValue)
   private val fieldNameToId: Map[String, Long] =
     newFieldNames.zip(newFieldIds).toMap
+  // V2 packed-parquet written by milvus segcore uses LOGICAL field names as
+  // parquet column names (with `PARQUET:field_id` metadata for cross-reference).
+  // The V2 reader matches columns by logical name, so we must emit the same
+  // shape — NOT the V3 fieldID-as-string convention. `useFieldIdAsName = false`
+  // keeps the logical name while still stamping `PARQUET:field_id` metadata.
   private val arrowSchema =
     MilvusSchemaUtil.convertSparkSchemaToArrow(
       targetSchema,
       vectorDimensions = Map.empty,
-      fieldIds = fieldNameToId
+      fieldIds = fieldNameToId,
+      useFieldIdAsName = false
     )
 
   // Single-field column groups: one parquet output per field, paths in the

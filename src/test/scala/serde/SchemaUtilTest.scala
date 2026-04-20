@@ -297,6 +297,75 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test(
+    "useFieldIdAsName = true (V3 default) rewrites column names to fieldID"
+  ) {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import org.apache.spark.sql.types._
+
+    val schema = StructType(
+      Seq(
+        StructField("pk", LongType),
+        StructField("vec", ArrayType(FloatType)),
+        StructField("unmapped", StringType)
+      )
+    )
+
+    val fieldIds = Map("pk" -> 100L, "vec" -> 101L)
+    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(
+      schema,
+      vectorDimensions = Map("vec" -> 4),
+      fieldIds = fieldIds
+      // useFieldIdAsName defaults to true
+    )
+
+    val byIdx = arrowSchema.getFields.asScala
+    byIdx.size shouldBe 3
+
+    // Mapped fields take their fieldID as the column name.
+    byIdx(0).getName shouldBe "100"
+    byIdx(1).getName shouldBe "101"
+    // Unmapped fields fall back to (idx+1); name stays logical.
+    byIdx(2).getName shouldBe "unmapped"
+
+    // PARQUET:field_id metadata is always stamped, regardless of rename.
+    byIdx(0).getMetadata.get("PARQUET:field_id") shouldBe "100"
+    byIdx(1).getMetadata.get("PARQUET:field_id") shouldBe "101"
+    byIdx(2).getMetadata.get("PARQUET:field_id") shouldBe "3" // idx+1 fallback
+  }
+
+  test(
+    "useFieldIdAsName = false (V2 packed-parquet) preserves logical column names"
+  ) {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import org.apache.spark.sql.types._
+
+    val schema = StructType(
+      Seq(
+        StructField("pk", LongType),
+        StructField("vec", ArrayType(FloatType)),
+        StructField("ts", LongType)
+      )
+    )
+
+    val fieldIds = Map("pk" -> 100L, "vec" -> 101L, "ts" -> 1L)
+    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(
+      schema,
+      vectorDimensions = Map("vec" -> 4),
+      fieldIds = fieldIds,
+      useFieldIdAsName = false
+    )
+
+    val byName = arrowSchema.getFields.asScala.map(f => f.getName -> f).toMap
+    byName.keySet shouldBe Set("pk", "vec", "ts")
+
+    // Arrow column names stay logical — this is the shape milvus segcore
+    // emits, and the V2 reader matches by name.
+    byName("pk").getMetadata.get("PARQUET:field_id") shouldBe "100"
+    byName("vec").getMetadata.get("PARQUET:field_id") shouldBe "101"
+    byName("ts").getMetadata.get("PARQUET:field_id") shouldBe "1"
+  }
+
   test("Handle nullable fields correctly") {
     val spark = SparkSession
       .builder()
