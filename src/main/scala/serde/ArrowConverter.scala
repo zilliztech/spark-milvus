@@ -215,7 +215,11 @@ object ArrowConverter extends Logging {
         if (str == null) {
           vector.setNull(rowIndex)
         } else {
-          vector.asInstanceOf[VarCharVector].set(rowIndex, str.getBytes)
+          // setSafe grows the data buffer when actual bytes exceed the
+          // density-based initial capacity. `set` throws IndexOutOfBounds
+          // instead of reallocating, which blows up whenever strings average
+          // more than the configured density (32 bytes).
+          vector.asInstanceOf[VarCharVector].setSafe(rowIndex, str.getBytes)
         }
 
       case ArrayType(FloatType, _) =>
@@ -262,7 +266,8 @@ object ArrowConverter extends Logging {
         if (bytes == null) {
           vector.setNull(rowIndex)
         } else {
-          vector.asInstanceOf[VarBinaryVector].set(rowIndex, bytes)
+          // See StringType above — setSafe grows the data buffer; set does not.
+          vector.asInstanceOf[VarBinaryVector].setSafe(rowIndex, bytes)
         }
 
       case MapType(keyType, valueType, _) =>

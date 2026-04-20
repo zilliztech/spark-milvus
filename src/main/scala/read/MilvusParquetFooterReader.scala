@@ -6,6 +6,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.hadoop.util.HadoopInputFile
 import org.apache.parquet.hadoop.ParquetFileReader
+import org.apache.parquet.schema.Type
 import org.apache.spark.internal.Logging
 
 /** Parquet kv-metadata produced by the milvus-storage packed writer
@@ -82,6 +83,58 @@ object MilvusParquetFooterReader extends Logging {
               parseGroupFieldIdList(kv.get(GroupFieldIdListKey))
           )
         )
+      } finally {
+        parquet.close()
+      }
+    } catch {
+      case e: Throwable => Left(e)
+    }
+  }
+
+  /** Read the field IDs that this specific parquet file carries on its
+    * top-level columns.
+    *
+    * In StorageV2 each parquet file holds exactly one column group, so the
+    * file's own schema IS that group's field-id list. We prefer this over the
+    * footer's `group_field_id_list` kv-metadata because that kv is per
+    * write-session — after a backfill that appends new column groups to an
+    * existing segment, the original parquets still advertise only the original
+    * session's groups while the newly-written parquets advertise only the
+    * backfill session's groups. Reading each file's own schema avoids that trap
+    * entirely.
+    *
+    * milvus-storage writes the field id on each Arrow field as
+    * `PARQUET:field_id` metadata; arrow-cpp's parquet writer translates that
+    * into Parquet's native `SchemaElement.field_id`, which Parquet Java exposes
+    * via `Type.getId`.
+    *
+    * @return
+    *   `Right(fieldIds)` with one entry per top-level column, in schema order.
+    *   `Left(throwable)` on any I/O or parse failure, or if a column is missing
+    *   a field id (indicates a malformed parquet).
+    */
+  def readFieldIdsFromSchema(
+      path: String,
+      hadoopConf: Configuration
+  ): Either[Throwable, Seq[Long]] = {
+    try {
+      val inputFile =
+        HadoopInputFile.fromPath(new Path(path), hadoopConf)
+      val parquet = ParquetFileReader.open(inputFile)
+      try {
+        val schema = parquet.getFooter.getFileMetaData.getSchema
+        val fields = schema.getFields.asScala
+        val ids = fields.map { t: Type =>
+          val id = t.getId
+          if (id == null) {
+            throw new IllegalStateException(
+              s"parquet column '${t.getName}' in $path has no PARQUET:field_id " +
+                s"metadata; cannot recover StorageV2 column-group field ids"
+            )
+          }
+          id.intValue().toLong
+        }.toSeq
+        Right(ids)
       } finally {
         parquet.close()
       }
