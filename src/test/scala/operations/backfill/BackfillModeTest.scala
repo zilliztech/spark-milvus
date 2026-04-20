@@ -219,15 +219,19 @@ class BackfillModeTest
     )
 
     // The join should have the same columns as the source side plus the
-    // backfill-match marker (the backfill-side target columns are dropped
-    // after coalesce). The marker is consumed by processSegments for stats.
+    // backfill-match marker and, in coalesce mode, per-field provenance
+    // flags used downstream for the usedSource/usedDataFile counters.
     joined.columns.toSet shouldBe Set(
       "pk",
       "f1",
       "f2",
       "segment_id",
       "row_offset",
-      MilvusBackfill.MatchFlagCol
+      MilvusBackfill.MatchFlagCol,
+      MilvusBackfill.usedSrcCol("f1"),
+      MilvusBackfill.usedBfCol("f1"),
+      MilvusBackfill.usedSrcCol("f2"),
+      MilvusBackfill.usedBfCol("f2")
     )
 
     val byPk = joined
@@ -307,6 +311,54 @@ class BackfillModeTest
     )
     MilvusBackfill.validateCoalesceTypes(backfillSchema, extras) shouldBe Right(
       ()
+    )
+  }
+
+  test("coalesce mode: per-field provenance flags mark source vs datafile") {
+    // pk=1 — f1 non-null src → usedSrc(f1); f2 null src + bf non-null → usedBf(f2)
+    // pk=2 — f1 null src + bf non-null → usedBf(f1); f2 non-null src → usedSrc(f2)
+    // pk=3 — no backfill row; f1 non-null src → usedSrc(f1); f2 null src + no
+    //        bf row → neither flag (output is null).
+    val original = buildOriginal(
+      Seq(
+        (1, Int.box(1), null, 10L, 0L),
+        (2, null, "src2", 10L, 1L),
+        (3, Int.box(3), null, 10L, 2L)
+      )
+    )
+    val backfill = buildBackfill(
+      Seq(
+        (1, Int.box(100), "BF1"),
+        (2, Int.box(200), "BF2")
+      )
+    )
+
+    val joined = MilvusBackfill.performJoin(
+      original,
+      backfill,
+      "pk",
+      Seq("f1", "f2"),
+      MilvusOption.BackfillModeCoalesce
+    )
+
+    val flags = joined
+      .orderBy("pk")
+      .collect()
+      .map(r =>
+        (
+          r.getAs[Int]("pk"),
+          r.getAs[Boolean](MilvusBackfill.usedSrcCol("f1")),
+          r.getAs[Boolean](MilvusBackfill.usedBfCol("f1")),
+          r.getAs[Boolean](MilvusBackfill.usedSrcCol("f2")),
+          r.getAs[Boolean](MilvusBackfill.usedBfCol("f2"))
+        )
+      )
+      .toSeq
+
+    flags shouldBe Seq(
+      (1, true, false, false, true),
+      (2, false, true, true, false),
+      (3, true, false, false, false)
     )
   }
 

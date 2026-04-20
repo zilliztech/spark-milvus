@@ -46,7 +46,17 @@ case class SegmentBackfillResult(
     /** Source rows whose PK was matched in the backfill parquet. Derived from a
       * `__bf_matched__` marker column injected before the left join.
       */
-    matchedRowCount: Long = 0L
+    matchedRowCount: Long = 0L,
+    /** Coalesce-mode only: per new-field count of rows whose written value came
+      * from the existing Milvus source (source value was non-null, so
+      * `coalesce(src, bf)` kept it). Empty in overwrite mode.
+      */
+    usedSourceByField: Map[String, Long] = Map.empty,
+    /** Coalesce-mode only: per new-field count of rows whose written value came
+      * from the backfill data file (source was null and the PK matched a
+      * non-null backfill value). Empty in overwrite mode.
+      */
+    usedDataFileByField: Map[String, Long] = Map.empty
 )
 
 /** Comprehensive result of backfill operation
@@ -63,7 +73,15 @@ case class BackfillResult(
     newFieldNames: Seq[String],
     totalSourceRows: Long = 0L,
     totalBackfillDataRows: Long = 0L,
-    totalMatchedRows: Long = 0L
+    totalMatchedRows: Long = 0L,
+    /** Coalesce-mode only: aggregated per new-field count of rows that kept the
+      * existing Milvus source value. Empty in overwrite mode.
+      */
+    totalUsedSourceByField: Map[String, Long] = Map.empty,
+    /** Coalesce-mode only: aggregated per new-field count of rows that took the
+      * backfill data file value. Empty in overwrite mode.
+      */
+    totalUsedDataFileByField: Map[String, Long] = Map.empty
 ) {
 
   private def matchRateStr(matched: Long, total: Long): String =
@@ -75,6 +93,18 @@ case class BackfillResult(
     val v2Count = segmentResults.count(_._2.v2Artifact.isDefined)
     val sourceRate = matchRateStr(totalMatchedRows, totalSourceRows)
     val dataFileRate = matchRateStr(totalMatchedRows, totalBackfillDataRows)
+    val coalesceBlock =
+      if (totalUsedSourceByField.isEmpty && totalUsedDataFileByField.isEmpty)
+        ""
+      else {
+        val fieldLines = newFieldNames.map { f =>
+          val src = totalUsedSourceByField.getOrElse(f, 0L)
+          val df = totalUsedDataFileByField.getOrElse(f, 0L)
+          val nullOut = totalSourceRows - src - df
+          s"    $f: source=$src, dataFile=$df, null=$nullOut"
+        }
+        s"  Coalesce Provenance (per field):\n${fieldLines.mkString("\n")}\n"
+      }
     s"""Backfill Summary:
        |  Status: ${if (success) "SUCCESS"
       else "FAILED"}
@@ -89,7 +119,7 @@ case class BackfillResult(
        |  New Fields: ${newFieldNames.mkString(", ")}
        |  Manifest Paths: ${manifestPaths.size} files
        |  StorageV2 Segments: $v2Count / ${segmentResults.size}
-       |""".stripMargin
+       |$coalesceBlock""".stripMargin
   }
 
   /** Get detailed per-segment results
@@ -127,6 +157,10 @@ case class BackfillResult(
           "outputPath" -> r.outputPath,
           "manifestPaths" -> r.manifestPaths
         )
+        if (r.usedSourceByField.nonEmpty)
+          base += "usedSourceByField" -> r.usedSourceByField
+        if (r.usedDataFileByField.nonEmpty)
+          base += "usedDataFileByField" -> r.usedDataFileByField
         r.v2Artifact.foreach { art =>
           base += "storage_version" -> art.storageVersion
           base += "column_groups" -> art.columnGroups.map { cg =>
@@ -154,6 +188,10 @@ case class BackfillResult(
       "newFieldNames" -> newFieldNames,
       "segments" -> segments
     )
+    if (totalUsedSourceByField.nonEmpty)
+      result += "totalUsedSourceByField" -> totalUsedSourceByField
+    if (totalUsedDataFileByField.nonEmpty)
+      result += "totalUsedDataFileByField" -> totalUsedDataFileByField
 
     mapper.writerWithDefaultPrettyPrinter().writeValueAsString(result)
   }
@@ -185,6 +223,17 @@ object BackfillResult {
     val totalMatched = segmentResults.values.map(_.matchedRowCount).sum
     val allManifests = segmentResults.values.flatMap(_.manifestPaths).toSeq
 
+    def sumByField(
+        pick: SegmentBackfillResult => Map[String, Long]
+    ): Map[String, Long] =
+      segmentResults.values.foldLeft(Map.empty[String, Long]) { (acc, r) =>
+        pick(r).foldLeft(acc) { case (a, (k, v)) =>
+          a.updated(k, a.getOrElse(k, 0L) + v)
+        }
+      }
+    val totalUsedSrc = sumByField(_.usedSourceByField)
+    val totalUsedDf = sumByField(_.usedDataFileByField)
+
     BackfillResult(
       success = true,
       segmentsProcessed = segmentResults.size,
@@ -197,7 +246,9 @@ object BackfillResult {
       newFieldNames = newFieldNames,
       totalSourceRows = totalSource,
       totalBackfillDataRows = totalBackfillDataRows,
-      totalMatchedRows = totalMatched
+      totalMatchedRows = totalMatched,
+      totalUsedSourceByField = totalUsedSrc,
+      totalUsedDataFileByField = totalUsedDf
     )
   }
 

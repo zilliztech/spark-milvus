@@ -43,6 +43,18 @@ object MilvusBackfill {
     */
   private[backfill] val MatchFlagCol = "__bf_matched__"
 
+  /** Per-field flag columns added only in coalesce mode: for each new field,
+    * one boolean marker recording whether the written value came from the
+    * source (src non-null) and another for whether it came from the backfill
+    * data file (src null AND bf non-null). Used by the writer to tally the
+    * per-field `usedSourceByField` / `usedDataFileByField` counts surfaced in
+    * `SegmentBackfillResult`.
+    */
+  private[backfill] def usedSrcCol(field: String): String =
+    s"__bf_used_src_${field}__"
+  private[backfill] def usedBfCol(field: String): String =
+    s"__bf_used_bf_${field}__"
+
   /** Backfill new fields into a Milvus collection
     *
     * @param spark
@@ -811,7 +823,18 @@ object MilvusBackfill {
             df.withColumnRenamed(n, n + suffix)
         }
         val joined = originalDF.join(renamedBackfill, Seq(pkName), "left")
-        newFieldNames.foldLeft(joined) { (df, n) =>
+        // Attach per-field provenance flags BEFORE the coalesce rewrites `n`,
+        // so the flags bind to the unresolved source-side `n` attribute. This
+        // keeps the flags accurate even though the later coalesce shadows the
+        // original `n` column in the output schema.
+        val withFlags = newFieldNames.foldLeft(joined) { (df, n) =>
+          df.withColumn(usedSrcCol(n), df.col(n).isNotNull)
+            .withColumn(
+              usedBfCol(n),
+              df.col(n).isNull && df.col(n + suffix).isNotNull
+            )
+        }
+        newFieldNames.foldLeft(withFlags) { (df, n) =>
           df.withColumn(n, coalesce(df.col(n), df.col(n + suffix)))
             .drop(n + suffix)
         }
@@ -896,12 +919,20 @@ object MilvusBackfill {
       // Prepare data: select only needed columns and add segment_id for
       // partitioning. Trailing column is the backfill match flag — retained
       // here so executors can count PK-matched rows, stripped from the
-      // projection that reaches the writer.
+      // projection that reaches the writer. In coalesce mode, two extra
+      // boolean flag columns per new field follow the match flag (usedSrc,
+      // usedBf interleaved, in `newFieldNames` order) so the writer can
+      // compute per-field usedSourceByField / usedDataFileByField counts.
+      val isCoalesceMode = config.mode == MilvusOption.BackfillModeCoalesce
+      val flagColNames: Seq[String] =
+        if (isCoalesceMode)
+          newFieldNames.flatMap(n => Seq(usedSrcCol(n), usedBfCol(n)))
+        else Seq.empty
       val preparedDF = joinedDF
         .select(
           (Seq("segment_id", "row_offset") ++ newFieldNames ++ Seq(
             MatchFlagCol
-          )).map(col): _*
+          ) ++ flagColNames).map(col): _*
         )
 
       // Get the schema for new fields only (without segment_id, row_offset,
@@ -1007,6 +1038,15 @@ object MilvusBackfill {
       logger.info(s"Total rows written: $totalRows")
       logger.info(s"Total time for all segments: ${totalTime}ms")
       logger.info(s"Average time per segment: ${avgTime}ms")
+      if (isCoalesceMode) {
+        logger.info("Coalesce provenance (per field, aggregated):")
+        newFieldNames.foreach { f =>
+          val src = results.map(_._1.usedSourceByField.getOrElse(f, 0L)).sum
+          val df = results.map(_._1.usedDataFileByField.getOrElse(f, 0L)).sum
+          val nullOut = totalSource - src - df
+          logger.info(s"  $f: source=$src, dataFile=$df, null=$nullOut")
+        }
+      }
       results.sortBy(_._1.segmentId).foreach { case (r, _) =>
         val segRate =
           if (r.sourceRowCount > 0)
@@ -1088,22 +1128,40 @@ object MilvusBackfill {
       .createBatchWriterFactory(null)
       .createWriter(0, System.currentTimeMillis())
 
+    val isCoalesceMode = config.mode == MilvusOption.BackfillModeCoalesce
+    val newFieldNames = targetSchema.fieldNames.toSeq
+    val numNewFields = newFieldNames.size
+    // Row layout (fixed prefix): [segment_id, row_offset, ...newFields,
+    // __bf_matched__, (usedSrc, usedBf)*numNewFields in coalesce mode only].
+    val matchFlagIdx = 2 + numNewFields
+    val firstFlagIdx = matchFlagIdx + 1
+
     try {
       var rowCount = 0L
       var nullRowCount = 0L
       var matchedRowCount = 0L
+      val usedSrcCounts = Array.fill(numNewFields)(0L)
+      val usedBfCounts = Array.fill(numNewFields)(0L)
 
       def writeRow(row: InternalRow): Unit = {
-        // Row layout: [segment_id, row_offset, ...newFields, __bf_matched__]
-        // Strip the first two tracking cols and the trailing match flag before
-        // handing values to the writer.
-        val matchFlagIdx = row.numFields - 1
         val dataEnd = matchFlagIdx
         val targetFields = (2 until dataEnd)
           .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
           .toArray
         if (targetFields.forall(_ == null)) nullRowCount += 1
         if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
+        if (isCoalesceMode) {
+          var i = 0
+          while (i < numNewFields) {
+            val srcIdx = firstFlagIdx + 2 * i
+            val bfIdx = srcIdx + 1
+            if (!row.isNullAt(srcIdx) && row.getBoolean(srcIdx))
+              usedSrcCounts(i) += 1
+            if (!row.isNullAt(bfIdx) && row.getBoolean(bfIdx))
+              usedBfCounts(i) += 1
+            i += 1
+          }
+        }
         writer.write(
           new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(
             targetFields
@@ -1125,6 +1183,14 @@ object MilvusBackfill {
       batchWrite.commit(Array(commitMessage))
       writer.close()
 
+      val (usedSrcByField, usedBfByField) =
+        if (isCoalesceMode)
+          (
+            newFieldNames.zip(usedSrcCounts).toMap,
+            newFieldNames.zip(usedBfCounts).toMap
+          )
+        else (Map.empty[String, Long], Map.empty[String, Long])
+
       Iterator.single(
         (
           SegmentBackfillResult(
@@ -1135,7 +1201,9 @@ object MilvusBackfill {
             executionTimeMs = System.currentTimeMillis() - startTime,
             committedVersion = committedVersion,
             sourceRowCount = rowCount,
-            matchedRowCount = matchedRowCount
+            matchedRowCount = matchedRowCount,
+            usedSourceByField = usedSrcByField,
+            usedDataFileByField = usedBfByField
           ),
           None
         )
@@ -1309,15 +1377,22 @@ object MilvusBackfill {
       allocateLogId = allocator
     )
 
+    val isCoalesceMode = config.mode == MilvusOption.BackfillModeCoalesce
+    val numNewFields = fieldNames.size
+    // Row layout (fixed prefix): [segment_id, row_offset, ...newFields,
+    // __bf_matched__, (usedSrc, usedBf)*numNewFields in coalesce mode only].
+    val matchFlagIdx = 2 + numNewFields
+    val firstFlagIdx = matchFlagIdx + 1
+
     var rowCount = 0L
     var matchedRowCount = 0L
+    val usedSrcCounts = Array.fill(numNewFields)(0L)
+    val usedBfCounts = Array.fill(numNewFields)(0L)
     try {
-      // Row layout: [segment_id, row_offset, ...newFields, __bf_matched__].
       // The V2 writer only wants the newField columns; strip the tracking
-      // columns and the match flag (the flag is instead folded into
-      // matchedRowCount).
+      // columns, the match flag, and any coalesce-mode provenance flags (the
+      // match flag + per-field flags are folded into the counters instead).
       def projected(row: InternalRow): InternalRow = {
-        val matchFlagIdx = row.numFields - 1
         val dataEnd = matchFlagIdx
         val values = (2 until dataEnd)
           .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
@@ -1325,7 +1400,19 @@ object MilvusBackfill {
         new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(values)
       }
       def countMatch(row: InternalRow): Unit = {
-        if (!row.isNullAt(row.numFields - 1)) matchedRowCount += 1
+        if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
+        if (isCoalesceMode) {
+          var i = 0
+          while (i < numNewFields) {
+            val srcIdx = firstFlagIdx + 2 * i
+            val bfIdx = srcIdx + 1
+            if (!row.isNullAt(srcIdx) && row.getBoolean(srcIdx))
+              usedSrcCounts(i) += 1
+            if (!row.isNullAt(bfIdx) && row.getBoolean(bfIdx))
+              usedBfCounts(i) += 1
+            i += 1
+          }
+        }
       }
 
       countMatch(firstRow)
@@ -1348,6 +1435,13 @@ object MilvusBackfill {
           rowCount = pf.rowsWritten
         )
       }
+      val (usedSrcByField, usedBfByField) =
+        if (isCoalesceMode)
+          (
+            fieldNames.zip(usedSrcCounts).toMap,
+            fieldNames.zip(usedBfCounts).toMap
+          )
+        else (Map.empty[String, Long], Map.empty[String, Long])
       Iterator.single(
         (
           SegmentBackfillResult(
@@ -1365,7 +1459,9 @@ object MilvusBackfill {
               )
             ),
             sourceRowCount = rowCount,
-            matchedRowCount = matchedRowCount
+            matchedRowCount = matchedRowCount,
+            usedSourceByField = usedSrcByField,
+            usedDataFileByField = usedBfByField
           ),
           None
         )
