@@ -3,7 +3,7 @@ package com.zilliz.spark.connector.read
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-import org.apache.arrow.c.{ArrowArrayStream, ArrowSchema, Data}
+import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.internal.Logging
 import org.apache.spark.ml.linalg.Vectors
@@ -32,6 +32,7 @@ import io.milvus.storage.{
   ArrowUtils,
   LatestColumnGroupsResult,
   MilvusStorageManifest,
+  MilvusStorageProperties,
   MilvusStorageReader,
   NativeLibraryLoader
 }
@@ -60,9 +61,6 @@ class MilvusLoonPartitionReader(
 
   private val sourceSchema = schema
 
-  // Create Arrow schema from Milvus schema
-  private val (arrowSchemaObj, arrowSchemaPtr) = createArrowSchema()
-
   private val fieldNameToId: Map[String, Long] = {
     val systemFields = Map("row_id" -> 0L, "timestamp" -> 1L)
     val userFields = milvusSchema.fields.map { field =>
@@ -74,66 +72,107 @@ class MilvusLoonPartitionReader(
   private val fieldNameToIdString: Map[String, String] =
     fieldNameToId.map { case (name, id) => name -> id.toString }
 
-  // Create reader properties from MilvusOption
-  private val readerProperties = Properties.fromMilvusOption(milvusOption)
-
   private val columnNames = getColumnNames()
 
-  // Get column groups from manifest (use specific version if provided, otherwise latest)
-  private val manifestResult: LatestColumnGroupsResult = if (readVersion > 0) {
-    logInfo(s"Reading manifest at version $readVersion for path: $manifestPath")
-    MilvusStorageManifest.getColumnGroupsScala(
-      manifestPath,
-      readerProperties,
-      readVersion
-    )
-  } else {
-    MilvusStorageManifest.getLatestColumnGroupsScala(
-      manifestPath,
+  // Native resource handles. Initialized to safe defaults so a partial-init
+  // failure can roll back whatever was allocated so far via releaseAll().
+  // Spark only calls close() on a fully-constructed reader, so any throw
+  // from the init block below has to release its own resources before
+  // bubbling out.
+  private var arrowSchemaObj: ArrowSchema = null
+  private var arrowSchemaPtr: Long = 0L
+  private var readerProperties: MilvusStorageProperties = null
+  private var columnGroupsPtr: Long = 0L
+  private var reader: MilvusStorageReader = null
+  // Per-batch record batch reader handle (see milvus-storage
+  // loon_record_batch_reader_*). We deliberately avoid the ArrowArrayStream
+  // path because Arrow Java's `ArrowReader.loadNextBatch` shares one
+  // VectorSchemaRoot across batches and ignores the ArrowArray `offset`
+  // field — when the underlying C++ reader emits `RecordBatch::Slice`
+  // results, every batch after the first would show the same data.
+  //
+  // `var` + sentinel 0L so close() can null it out and stay idempotent
+  // (Spark may call close() more than once on error paths).
+  private var rbrHandle: Long = 0L
+
+  private var _currentBatch: VectorSchemaRoot = null
+  private var _currentRowIndex: Int = 0
+
+  try {
+    // Create Arrow schema from Milvus schema.
+    val (schemaObj, schemaPtr) = createArrowSchema()
+    arrowSchemaObj = schemaObj
+    arrowSchemaPtr = schemaPtr
+
+    // Reader properties from MilvusOption.
+    readerProperties = Properties.fromMilvusOption(milvusOption)
+
+    // Column groups from manifest (specific version if provided, latest otherwise).
+    val manifestResult: LatestColumnGroupsResult = if (readVersion > 0) {
+      logInfo(
+        s"Reading manifest at version $readVersion for path: $manifestPath"
+      )
+      MilvusStorageManifest.getColumnGroupsScala(
+        manifestPath,
+        readerProperties,
+        readVersion
+      )
+    } else {
+      MilvusStorageManifest.getLatestColumnGroupsScala(
+        manifestPath,
+        readerProperties
+      )
+    }
+    if (manifestResult.readVersion == 0) {
+      throw new IllegalStateException(
+        s"No manifest file found at path: $manifestPath. " +
+          "The milvus-storage format manifest files do not exist. " +
+          "Please turn on useLoonFFI and compact the data before reading through Spark connector."
+      )
+    }
+    columnGroupsPtr = manifestResult.columnGroupsPtr
+
+    reader = new MilvusStorageReader()
+    reader.create(
+      columnGroupsPtr,
+      arrowSchemaPtr,
+      columnNames,
       readerProperties
     )
+    if (!reader.isValid) {
+      throw new IllegalStateException(
+        s"Failed to create MilvusStorageReader for path: $manifestPath."
+      )
+    }
+
+    // Open the per-batch RecordBatchReader and eagerly load the first
+    // batch so empty segments short-circuit upfront.
+    rbrHandle = reader.openRecordBatchReaderScala(null)
+    _currentBatch = pullNextBatch()
+  } catch {
+    case e: Throwable =>
+      releaseAll()
+      throw e
   }
 
-  if (manifestResult.readVersion == 0) {
-    throw new IllegalStateException(
-      s"No manifest file found at path: $manifestPath. " +
-        "The milvus-storage format manifest files do not exist. " +
-        "Please turn on useLoonFFI and compact the data before reading through Spark connector."
-    )
-  }
-
-  private val columnGroupsPtr = manifestResult.columnGroupsPtr
-
-  // Create Storage V2 reader
-  private val reader = new MilvusStorageReader()
-  reader.create(columnGroupsPtr, arrowSchemaPtr, columnNames, readerProperties)
-
-  if (!reader.isValid) {
-    throw new IllegalStateException(
-      s"Failed to create MilvusStorageReader for path: $manifestPath."
-    )
-  }
-
-  // Get Arrow stream
-  private val recordBatchReaderPtr = reader.getRecordBatchReaderScala()
-  private val arrowArrayStream = ArrowArrayStream.wrap(recordBatchReaderPtr)
-  private val arrowReader = Data.importArrayStream(allocator, arrowArrayStream)
-
-  // Eagerly try to load first batch to check if data exists
-  private val (currentBatch, currentRowIndex): (VectorSchemaRoot, Int) = {
-    val hasFirstBatch = arrowReader.loadNextBatch()
-    if (!hasFirstBatch) {
-      // Manifest exists but has no data - this is valid for empty segments
-      (null, 0)
-    } else {
-      val batch = arrowReader.getVectorSchemaRoot
-      (batch, 0)
+  // Pull the next batch as a freshly-owned VectorSchemaRoot, or null on EOF.
+  private def pullNextBatch(): VectorSchemaRoot = {
+    if (rbrHandle == 0L) return null
+    val arr = ArrowArray.allocateNew(allocator)
+    val sch = ArrowSchema.allocateNew(allocator)
+    try {
+      val hasBatch = reader.readNextBatchScala(
+        rbrHandle,
+        arr.memoryAddress(),
+        sch.memoryAddress()
+      )
+      if (!hasBatch) null
+      else Data.importVectorSchemaRoot(allocator, arr, sch, null)
+    } finally {
+      arr.close()
+      sch.close()
     }
   }
-
-  // Need mutable versions for iteration
-  private var _currentBatch: VectorSchemaRoot = currentBatch
-  private var _currentRowIndex: Int = currentRowIndex
 
   // Vector search state
   private val vectorSearchEnabled = topK.isDefined && queryVector.isDefined
@@ -175,18 +214,20 @@ class MilvusLoonPartitionReader(
           }
         } else {
           // Try to load next batch
-          if (arrowReader.loadNextBatch()) {
-            _currentBatch = arrowReader.getVectorSchemaRoot
-            _currentRowIndex = 0
-            if (_currentBatch.getRowCount > 0) {
-              // Continue loop to check first row of new batch
-            } else {
-              return false
-            }
-          } else {
-            // No more batches
+          if (_currentBatch != null) {
+            _currentBatch.close()
+            _currentBatch = null
+          }
+          _currentBatch = pullNextBatch()
+          _currentRowIndex = 0
+          if (_currentBatch == null) {
+            // EOF — no more batches.
             return false
           }
+          // A 0-row batch isn't EOF: fall through, the outer-loop
+          // guard (_currentRowIndex < _currentBatch.getRowCount) is
+          // false for rowCount=0, so the next iteration re-enters
+          // this branch and pulls the following batch.
         }
       }
       false // Unreachable but needed for compilation
@@ -217,16 +258,42 @@ class MilvusLoonPartitionReader(
     }
   }
 
-  override def close(): Unit = {
-    try {
-      if (arrowReader != null) arrowReader.close()
-      if (arrowArrayStream != null) arrowArrayStream.close()
-      if (reader != null) reader.destroy()
-      if (arrowSchemaObj != null) arrowSchemaObj.close()
-      readerProperties.free()
-    } catch {
-      case e: Exception =>
-        logWarning("Error closing Storage V2 reader", e)
+  override def close(): Unit = releaseAll()
+
+  // Each native resource is released in its own try-catch so one failing
+  // release doesn't strand the rest. Null/zero sentinels make this
+  // idempotent — safe to call from both close() and the ctor rollback
+  // path even if Spark calls close() more than once.
+  private def releaseAll(): Unit = {
+    if (_currentBatch != null) {
+      try _currentBatch.close()
+      catch { case e: Throwable => logWarning("close currentBatch failed", e) }
+      _currentBatch = null
+    }
+    if (rbrHandle != 0L && reader != null) {
+      try reader.destroyRecordBatchReaderScala(rbrHandle)
+      catch { case e: Throwable => logWarning("destroy rbrHandle failed", e) }
+      rbrHandle = 0L
+    }
+    if (reader != null) {
+      try reader.destroy()
+      catch { case e: Throwable => logWarning("destroy reader failed", e) }
+      reader = null
+    }
+    if (arrowSchemaObj != null) {
+      try arrowSchemaObj.close()
+      catch {
+        case e: Throwable => logWarning("close arrowSchemaObj failed", e)
+      }
+      arrowSchemaObj = null
+      arrowSchemaPtr = 0L
+    }
+    if (readerProperties != null) {
+      try readerProperties.free()
+      catch {
+        case e: Throwable => logWarning("free readerProperties failed", e)
+      }
+      readerProperties = null
     }
   }
 
@@ -348,13 +415,24 @@ class MilvusLoonPartitionReader(
       }
     }
 
-    // Process the first batch that was already loaded in constructor
+    // Process the first batch that was already loaded in constructor, then
+    // drop it — each per-batch root is independently owned, so we must close
+    // it before pulling the next.
     processBatch(_currentBatch)
+    if (_currentBatch != null) {
+      _currentBatch.close()
+      _currentBatch = null
+    }
 
     // Iterate through remaining batches
-    while (arrowReader.loadNextBatch()) {
-      val batch = arrowReader.getVectorSchemaRoot
-      processBatch(batch)
+    var nextBatch = pullNextBatch()
+    while (nextBatch != null) {
+      try {
+        processBatch(nextBatch)
+      } finally {
+        nextBatch.close()
+      }
+      nextBatch = pullNextBatch()
     }
 
     logInfo(

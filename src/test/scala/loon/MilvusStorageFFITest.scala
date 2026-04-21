@@ -5,15 +5,9 @@ import java.nio.file.{Files, Path}
 import java.util.{HashMap => JHashMap}
 import scala.collection.JavaConverters._
 
-import org.apache.arrow.c.{
-  ArrowArray,
-  ArrowArrayStream,
-  ArrowSchema => CArrowSchema,
-  Data
-}
+import org.apache.arrow.c.{ArrowArray, ArrowSchema => CArrowSchema, Data}
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex.ListVector
-import org.apache.arrow.vector.ipc.ArrowReader
 import org.apache.arrow.vector.types.pojo.{
   ArrowType,
   Field => ArrowField,
@@ -73,8 +67,14 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
       )
       info("✓ Writer created\n")
 
-      // Create and write test data
-      val numRows = 100
+      // Create and write test data. numRows is deliberately chosen to span
+      // multiple record batches: `reader.record_batch_max_rows` defaults to
+      // 8192, so writing >16384 rows forces the packed reader's ReadNext to
+      // emit sliced batches (rb->Slice(min_rows)) starting from batch 2. Any
+      // test with numRows <= 8192 would pass against the buggy
+      // ArrowArrayStream path too and therefore can't serve as a regression
+      // test for the Arrow Java offset bug fixed in milvus-storage#493.
+      val numRows = 20480
       val vectorDim = 4
       val (root, arrowArray, arrowArrayPtr) =
         createTestData(allocator, numRows, vectorDim)
@@ -110,35 +110,88 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
         )
         info("✓ Reader created\n")
 
-        // Read data using Arrow C Data Interface
-        val recordBatchReaderPtr = reader.getRecordBatchReaderScala()
-        val arrowArrayStream = ArrowArrayStream.wrap(recordBatchReaderPtr)
-
+        // Read data via the per-batch RecordBatchReader (the only Java-safe
+        // path — the ArrowArrayStream API duplicates data when Arrow Java
+        // imports a batch whose ArrowArray carries a non-zero offset).
+        val rbrHandle = reader.openRecordBatchReaderScala()
         try {
-          val arrowReader = Data.importArrayStream(allocator, arrowArrayStream)
+          var batchCount = 0
+          var totalRows = 0
+          // Regression check for milvus-storage#493 / Arrow Java offset bug.
+          // Writer produced id[i] = i for i in [0, numRows). If the reader
+          // incorrectly imported sliced batches via ArrowArrayStream (which
+          // ignores `ArrowArray.offset`), every batch past the first would
+          // restart from id=0 and we'd observe id = rowOffset mod 8192. The
+          // per-batch API exports each batch at offset 0 so ids must remain
+          // strictly `id == rowOffset` across the 8192 boundary.
+          var firstMismatch: Option[(Long, Long, Int)] =
+            None // (expected, got, batchIdx)
 
-          try {
-            var batchCount = 0
-            var totalRows = 0
-
-            while (arrowReader.loadNextBatch()) {
-              batchCount += 1
-              val readRoot = arrowReader.getVectorSchemaRoot
-              val rows = displayBatchData(readRoot, batchCount)
-              totalRows += rows
+          var done = false
+          while (!done) {
+            val batchArray = ArrowArray.allocateNew(allocator)
+            val batchSchema = CArrowSchema.allocateNew(allocator)
+            try {
+              val hasBatch = reader.readNextBatchScala(
+                rbrHandle,
+                batchArray.memoryAddress(),
+                batchSchema.memoryAddress()
+              )
+              if (!hasBatch) {
+                done = true
+              } else {
+                batchCount += 1
+                val readRoot = Data.importVectorSchemaRoot(
+                  allocator,
+                  batchArray,
+                  batchSchema,
+                  null
+                )
+                try {
+                  val rows = displayBatchData(readRoot, batchCount)
+                  val idVec =
+                    readRoot.getVector("id").asInstanceOf[BigIntVector]
+                  var i = 0
+                  while (i < rows && firstMismatch.isEmpty) {
+                    val rowOffset = (totalRows + i).toLong
+                    val got = idVec.get(i)
+                    if (got != rowOffset) {
+                      firstMismatch = Some((rowOffset, got, batchCount))
+                    }
+                    i += 1
+                  }
+                  totalRows += rows
+                } finally {
+                  readRoot.close()
+                }
+              }
+            } finally {
+              batchArray.close()
+              batchSchema.close()
             }
+          }
 
-            info(
-              s"\nSuccessfully read $totalRows rows in $batchCount batch(es)\n"
-            )
+          info(
+            s"\nSuccessfully read $totalRows rows in $batchCount batch(es)\n"
+          )
 
-            totalRows should be(numRows)
-            batchCount should be > 0
-          } finally {
-            arrowReader.close()
+          totalRows should be(numRows)
+          batchCount should be > 0
+          // numRows is chosen to force >=2 sliced batches from the packed
+          // reader (default record_batch_max_rows=8192), so anything less
+          // than 3 means the fix isn't actually being exercised.
+          batchCount should be >= 3
+          withClue(
+            s"Arrow offset regression: at row ${firstMismatch.map(_._1).getOrElse(-1L)} " +
+              s"(batch ${firstMismatch.map(_._3).getOrElse(-1)}) " +
+              s"expected id=${firstMismatch.map(_._1).getOrElse(-1L)} " +
+              s"but got id=${firstMismatch.map(_._2).getOrElse(-1L)} — " +
+              "this is the milvus-storage#493 / ArrowArrayStream slice bug. "
+          ) {
+            firstMismatch shouldBe None
           }
         } finally {
-          arrowArrayStream.close()
+          reader.destroyRecordBatchReaderScala(rbrHandle)
         }
 
         // Clean up reader - use close() on Java objects, not native free()
