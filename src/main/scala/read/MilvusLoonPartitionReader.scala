@@ -221,12 +221,13 @@ class MilvusLoonPartitionReader(
           _currentBatch = pullNextBatch()
           _currentRowIndex = 0
           if (_currentBatch == null) {
-            // No more batches
-            return false
-          } else if (_currentBatch.getRowCount == 0) {
+            // EOF — no more batches.
             return false
           }
-          // else: continue loop to check first row of new batch
+          // A 0-row batch isn't EOF: fall through, the outer-loop
+          // guard (_currentRowIndex < _currentBatch.getRowCount) is
+          // false for rowCount=0, so the next iteration re-enters
+          // this branch and pulls the following batch.
         }
       }
       false // Unreachable but needed for compilation
