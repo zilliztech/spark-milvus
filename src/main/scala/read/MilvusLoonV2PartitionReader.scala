@@ -166,8 +166,20 @@ class MilvusLoonV2PartitionReader(
   // before the next import so buffers are correctly reclaimed. This
   // intentionally does not reuse a single root across batches — Arrow
   // Java's shared-root import drops the per-batch `offset`.
-  private var _currentBatch: VectorSchemaRoot = loadNextBatch()
+  //
+  // Initialized inside its own try/catch: Spark only calls close() on
+  // a fully-constructed reader, so a throw from the first loadNextBatch
+  // (e.g. a malformed parquet chunk) would otherwise leak every native
+  // handle allocated in the main init block above.
+  private var _currentBatch: VectorSchemaRoot = null
   private var _currentRowIndex: Int = 0
+  try {
+    _currentBatch = loadNextBatch()
+  } catch {
+    case e: Throwable =>
+      releaseAll()
+      throw e
+  }
 
   private def loadNextBatch(): VectorSchemaRoot = {
     if (rbrHandle == 0L) return null
