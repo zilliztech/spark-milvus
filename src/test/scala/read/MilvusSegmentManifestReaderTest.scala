@@ -95,6 +95,12 @@ class MilvusSegmentManifestReaderTest extends AnyFunSuite with Matchers {
     seg.columnGroups(2).filePaths shouldBe Seq(
       "files/insert_log/465602255560377587/465602255560377588/465602255560578628/102/465602255560688631"
     )
+
+    // The AVRO slot id (AvroFieldBinlog.field_id) must be propagated onto
+    // V2ColumnGroup so MilvusBackfill.dedupColumnGroupsBySlot can resolve
+    // multi-group fieldID conflicts. Slots match the per-group directory
+    // names {0, 1, 102} for this fixture.
+    seg.columnGroups.map(_.slotFieldId) shouldBe Seq(0L, 1L, 102L)
   }
 
   test("toV2SegmentInfo rejects non-StorageV2 entries") {

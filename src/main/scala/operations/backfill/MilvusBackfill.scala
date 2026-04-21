@@ -1228,6 +1228,57 @@ object MilvusBackfill {
     }
   }
 
+  /** Workaround until Milvus snapshot exposes `FieldBinlog.child_fields`: when
+    * the same Milvus fieldID is claimed by multiple V2 column groups (e.g. an
+    * original multi-field group at slot < 100 PLUS a single-field group at slot
+    * \== fieldID written by a prior addfield+backfill), keep the field only in
+    * the group with the largest `slotFieldId`.
+    *
+    * Backfill writes single-field groups with `slot == fieldID` (>= 100), and
+    * Milvus segcore allocates multi-field group slots from the smallest unused
+    * int < 100, so "max slot wins" is equivalent to "newer single-field group
+    * wins" under the current column-group naming convention. When Milvus's
+    * snapshot starts emitting `FieldBinlog.child_fields`, this should be
+    * replaced by the authoritative mapping (see `V2SegmentLoader` line 88-94
+    * for the parquet-footer-based reconciliation that this defends against).
+    *
+    * Skips dedup entirely when any contributing group has `slotFieldId < 0L`
+    * (the sentinel for "unknown slot", e.g. the snapshot-JSON DTO path that
+    * doesn't carry the AVRO slot id) so we don't accidentally drop fields when
+    * the slot signal is missing. We must NOT use `0L` as the sentinel because
+    * RowID's column group is legitimately at slot 0 — using 0L would
+    * short-circuit dedup on every AVRO-loaded segment.
+    */
+  private[backfill] def dedupColumnGroupsBySlot(
+      seg: com.zilliz.spark.connector.read.V2SegmentInfo
+  ): com.zilliz.spark.connector.read.V2SegmentInfo = {
+    val groups = seg.columnGroups
+    if (groups.isEmpty || groups.exists(_.slotFieldId < 0L)) return seg
+
+    val maxSlotPerField: Map[Long, Long] =
+      groups
+        .flatMap(g => g.fieldIds.map(fid => fid -> g.slotFieldId))
+        .groupBy(_._1)
+        .map { case (fid, pairs) => fid -> pairs.map(_._2).max }
+
+    val rebuilt = groups.flatMap { g =>
+      val keptFids =
+        g.fieldIds.filter(fid => maxSlotPerField(fid) == g.slotFieldId)
+      val stripped = g.fieldIds.diff(keptFids)
+      if (stripped.nonEmpty) {
+        logger.info(
+          s"V2 dedup segment=${seg.segmentId} slot=${g.slotFieldId}: " +
+            s"stripped fieldIds=${stripped.mkString(",")} " +
+            s"(owned by larger slots ${stripped.map(maxSlotPerField).mkString(",")})"
+        )
+      }
+      if (keptFids.isEmpty) None
+      else Some(g.copy(fieldIds = keptFids))
+    }
+
+    seg.copy(columnGroups = rebuilt)
+  }
+
   /** Decode the StorageV2 segments referenced by the snapshot's
     * `manifest_list`. Each AVRO gives us slot→paths; the matching parquet
     * footer's `group_field_id_list` recovers the real field IDs per column
@@ -1260,10 +1311,20 @@ object MilvusBackfill {
           hadoopConf
         ) match {
         case Right(segs) =>
+          // Workaround for Milvus snapshot not yet exposing FieldBinlog.child_fields:
+          // some segments carry both an old multi-field column group (slot < 100,
+          // declaring fields like 102..114) AND newer single-field groups (slot ==
+          // fieldID, written by a prior addfield+backfill). The C++ packed reader
+          // picks an undefined source when the same fieldID appears in multiple
+          // groups, often returning the older slot's stale (mostly-null) data —
+          // which silently breaks coalesce-mode merges. dedupColumnGroupsBySlot
+          // strips overlapping fieldIDs from the older (smaller-slot) groups so
+          // each fieldID resolves to exactly one column group.
+          val deduped = segs.map(dedupColumnGroupsBySlot)
           logger.info(
-            s"Loaded ${segs.size} StorageV2 segment(s) from snapshot AVRO manifest_list"
+            s"Loaded ${deduped.size} StorageV2 segment(s) from snapshot AVRO manifest_list (post-dedup)"
           )
-          Right(segs)
+          Right(deduped)
         case Left(err) =>
           Left(
             SchemaValidationError(
