@@ -1,6 +1,11 @@
 package com.zilliz.spark.connector.read
 
-import org.apache.arrow.c.{ArrowArrayStream, ArrowSchema, Data}
+import org.apache.arrow.c.{
+  ArrowArray,
+  ArrowSchema,
+  CDataDictionaryProvider,
+  Data
+}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
@@ -94,8 +99,14 @@ class MilvusLoonV2PartitionReader(
   private var readerProperties: MilvusStorageProperties = null
   private var columnGroupsPtr: Long = 0L
   private var reader: MilvusStorageReader = null
-  private var arrowArrayStream: ArrowArrayStream = null
-  private var arrowReader: org.apache.arrow.vector.ipc.ArrowReader = null
+  // Per-batch record batch reader handle (see milvus-storage
+  // loon_record_batch_reader_*). We deliberately avoid the ArrowArrayStream
+  // path because Arrow Java's `ArrowReader.loadNextBatch` shares one
+  // VectorSchemaRoot across batches and ignores the ArrowArray `offset`
+  // field — when the underlying C++ reader emits `RecordBatch::Slice`
+  // results, every batch after the first would show the same data.
+  private var rbrHandle: Long = 0L
+  private var dictProvider: CDataDictionaryProvider = null
 
   try {
     // Arrow schema for the read: columns named by their logical names so the
@@ -142,31 +153,82 @@ class MilvusLoonV2PartitionReader(
       )
     }
 
-    val recordBatchReaderPtr = reader.getRecordBatchReaderScala()
-    arrowArrayStream = ArrowArrayStream.wrap(recordBatchReaderPtr)
-    arrowReader = Data.importArrayStream(allocator, arrowArrayStream)
+    rbrHandle = reader.openRecordBatchReaderScala()
+    dictProvider = new CDataDictionaryProvider()
   } catch {
     case e: Throwable =>
       releaseAll()
       throw e
   }
 
-  private var _currentBatch: VectorSchemaRoot = {
-    if (arrowReader.loadNextBatch()) arrowReader.getVectorSchemaRoot else null
-  }
+  // Per-batch state: each loadNextBatch() imports a FRESH RecordBatch
+  // into a NEW VectorSchemaRoot. The previous root (if any) is closed
+  // before the next import so buffers are correctly reclaimed. This
+  // intentionally does not reuse a single root across batches — Arrow
+  // Java's shared-root import drops the per-batch `offset`.
+  //
+  // Initialized inside its own try/catch: Spark only calls close() on
+  // a fully-constructed reader, so a throw from the first loadNextBatch
+  // (e.g. a malformed parquet chunk) would otherwise leak every native
+  // handle allocated in the main init block above.
+  private var _currentBatch: VectorSchemaRoot = null
   private var _currentRowIndex: Int = 0
+  try {
+    _currentBatch = loadNextBatch()
+  } catch {
+    case e: Throwable =>
+      releaseAll()
+      throw e
+  }
+
+  private def loadNextBatch(): VectorSchemaRoot = {
+    if (rbrHandle == 0L) return null
+
+    val cArr = ArrowArray.allocateNew(allocator)
+    val cSchema = ArrowSchema.allocateNew(allocator)
+    var gotBatch = false
+    try {
+      gotBatch = reader.readNextBatchScala(
+        rbrHandle,
+        cArr.memoryAddress(),
+        cSchema.memoryAddress()
+      )
+      if (!gotBatch) {
+        null
+      } else {
+        // Import the ArrowArray+ArrowSchema as a RecordBatch-backed
+        // VectorSchemaRoot. Import takes ownership of the release
+        // callbacks (moves them out), so the subsequent `.close()` on
+        // cArr / cSchema is a no-op w.r.t. the live buffers; closing
+        // the returned root (in close()/loadNextBatch) is what releases
+        // them.
+        Data.importVectorSchemaRoot(allocator, cArr, cSchema, dictProvider)
+      }
+    } finally {
+      // Always close the C-struct wrappers: after a successful import
+      // their release callback has been moved into the root and this is
+      // a no-op; on failure we need to release them to avoid leaks.
+      try cArr.close()
+      catch { case e: Throwable => logWarning("close cArr failed", e) }
+      try cSchema.close()
+      catch { case e: Throwable => logWarning("close cSchema failed", e) }
+    }
+  }
 
   override def next(): Boolean = {
-    // Advance past exhausted batches.
+    // Advance past exhausted batches; close the previous root before
+    // loading the next so we bound JVM direct memory to one live batch.
     while (
       _currentBatch != null && _currentRowIndex >= _currentBatch.getRowCount
     ) {
-      if (arrowReader.loadNextBatch()) {
-        _currentBatch = arrowReader.getVectorSchemaRoot
-        _currentRowIndex = 0
-      } else {
-        _currentBatch = null
+      val exhausted = _currentBatch
+      _currentBatch = null
+      try exhausted.close()
+      catch {
+        case e: Throwable => logWarning("close exhausted batch failed", e)
       }
+      _currentBatch = loadNextBatch()
+      _currentRowIndex = 0
     }
     _currentBatch != null && _currentRowIndex < _currentBatch.getRowCount
   }
@@ -191,17 +253,20 @@ class MilvusLoonV2PartitionReader(
   // release doesn't strand the rest. Also reused by the constructor's
   // failure path to roll back a partial init.
   private def releaseAll(): Unit = {
-    if (arrowReader != null) {
-      try arrowReader.close()
-      catch { case e: Throwable => logWarning("close arrowReader failed", e) }
-      arrowReader = null
+    if (_currentBatch != null) {
+      try _currentBatch.close()
+      catch { case e: Throwable => logWarning("close currentBatch failed", e) }
+      _currentBatch = null
     }
-    if (arrowArrayStream != null) {
-      try arrowArrayStream.close()
-      catch {
-        case e: Throwable => logWarning("close arrowArrayStream failed", e)
-      }
-      arrowArrayStream = null
+    if (rbrHandle != 0L) {
+      try reader.destroyRecordBatchReaderScala(rbrHandle)
+      catch { case e: Throwable => logWarning("destroy rbrHandle failed", e) }
+      rbrHandle = 0L
+    }
+    if (dictProvider != null) {
+      try dictProvider.close()
+      catch { case e: Throwable => logWarning("close dictProvider failed", e) }
+      dictProvider = null
     }
     if (reader != null) {
       try reader.destroy()
