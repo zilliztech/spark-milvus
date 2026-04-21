@@ -110,35 +110,55 @@ class MilvusStorageFFITest extends AnyFunSuite with Matchers {
         )
         info("✓ Reader created\n")
 
-        // Read data using Arrow C Data Interface
-        val recordBatchReaderPtr = reader.getRecordBatchReaderScala()
-        val arrowArrayStream = ArrowArrayStream.wrap(recordBatchReaderPtr)
-
+        // Read data via the per-batch RecordBatchReader (the only Java-safe
+        // path — the ArrowArrayStream API duplicates data when Arrow Java
+        // imports a batch whose ArrowArray carries a non-zero offset).
+        val rbrHandle = reader.openRecordBatchReaderScala()
         try {
-          val arrowReader = Data.importArrayStream(allocator, arrowArrayStream)
+          var batchCount = 0
+          var totalRows = 0
 
-          try {
-            var batchCount = 0
-            var totalRows = 0
-
-            while (arrowReader.loadNextBatch()) {
-              batchCount += 1
-              val readRoot = arrowReader.getVectorSchemaRoot
-              val rows = displayBatchData(readRoot, batchCount)
-              totalRows += rows
+          var done = false
+          while (!done) {
+            val batchArray = ArrowArray.allocateNew(allocator)
+            val batchSchema = CArrowSchema.allocateNew(allocator)
+            try {
+              val hasBatch = reader.readNextBatchScala(
+                rbrHandle,
+                batchArray.memoryAddress(),
+                batchSchema.memoryAddress()
+              )
+              if (!hasBatch) {
+                done = true
+              } else {
+                batchCount += 1
+                val readRoot = Data.importVectorSchemaRoot(
+                  allocator,
+                  batchArray,
+                  batchSchema,
+                  null
+                )
+                try {
+                  val rows = displayBatchData(readRoot, batchCount)
+                  totalRows += rows
+                } finally {
+                  readRoot.close()
+                }
+              }
+            } finally {
+              batchArray.close()
+              batchSchema.close()
             }
-
-            info(
-              s"\nSuccessfully read $totalRows rows in $batchCount batch(es)\n"
-            )
-
-            totalRows should be(numRows)
-            batchCount should be > 0
-          } finally {
-            arrowReader.close()
           }
+
+          info(
+            s"\nSuccessfully read $totalRows rows in $batchCount batch(es)\n"
+          )
+
+          totalRows should be(numRows)
+          batchCount should be > 0
         } finally {
-          arrowArrayStream.close()
+          reader.destroyRecordBatchReaderScala(rbrHandle)
         }
 
         // Clean up reader - use close() on Java objects, not native free()

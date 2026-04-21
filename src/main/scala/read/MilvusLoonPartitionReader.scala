@@ -3,7 +3,7 @@ package com.zilliz.spark.connector.read
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-import org.apache.arrow.c.{ArrowArrayStream, ArrowSchema, Data}
+import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.internal.Logging
 import org.apache.spark.ml.linalg.Vectors
@@ -114,26 +114,34 @@ class MilvusLoonPartitionReader(
     )
   }
 
-  // Get Arrow stream
-  private val recordBatchReaderPtr = reader.getRecordBatchReaderScala()
-  private val arrowArrayStream = ArrowArrayStream.wrap(recordBatchReaderPtr)
-  private val arrowReader = Data.importArrayStream(allocator, arrowArrayStream)
+  // Open the per-batch RecordBatchReader. Arrow Java's ArrowArrayStream path
+  // cannot be used here: its C Data importer ignores `ArrowArray.offset`, so
+  // sliced batches (the common case once a row group exceeds the reader's
+  // min_rows) would duplicate data. The per-batch API exports each batch as a
+  // fresh offset=0 ArrowArray+ArrowSchema pair.
+  private val rbrHandle: Long = reader.openRecordBatchReaderScala(null)
 
-  // Eagerly try to load first batch to check if data exists
-  private val (currentBatch, currentRowIndex): (VectorSchemaRoot, Int) = {
-    val hasFirstBatch = arrowReader.loadNextBatch()
-    if (!hasFirstBatch) {
-      // Manifest exists but has no data - this is valid for empty segments
-      (null, 0)
-    } else {
-      val batch = arrowReader.getVectorSchemaRoot
-      (batch, 0)
+  // Pull the next batch as a freshly-owned VectorSchemaRoot, or null on EOF.
+  private def pullNextBatch(): VectorSchemaRoot = {
+    val arr = ArrowArray.allocateNew(allocator)
+    val sch = ArrowSchema.allocateNew(allocator)
+    try {
+      val hasBatch = reader.readNextBatchScala(
+        rbrHandle,
+        arr.memoryAddress(),
+        sch.memoryAddress()
+      )
+      if (!hasBatch) null
+      else Data.importVectorSchemaRoot(allocator, arr, sch, null)
+    } finally {
+      arr.close()
+      sch.close()
     }
   }
 
-  // Need mutable versions for iteration
-  private var _currentBatch: VectorSchemaRoot = currentBatch
-  private var _currentRowIndex: Int = currentRowIndex
+  // Eagerly load the first batch so empty segments short-circuit upfront.
+  private var _currentBatch: VectorSchemaRoot = pullNextBatch()
+  private var _currentRowIndex: Int = 0
 
   // Vector search state
   private val vectorSearchEnabled = topK.isDefined && queryVector.isDefined
@@ -175,18 +183,19 @@ class MilvusLoonPartitionReader(
           }
         } else {
           // Try to load next batch
-          if (arrowReader.loadNextBatch()) {
-            _currentBatch = arrowReader.getVectorSchemaRoot
-            _currentRowIndex = 0
-            if (_currentBatch.getRowCount > 0) {
-              // Continue loop to check first row of new batch
-            } else {
-              return false
-            }
-          } else {
+          if (_currentBatch != null) {
+            _currentBatch.close()
+            _currentBatch = null
+          }
+          _currentBatch = pullNextBatch()
+          _currentRowIndex = 0
+          if (_currentBatch == null) {
             // No more batches
             return false
+          } else if (_currentBatch.getRowCount == 0) {
+            return false
           }
+          // else: continue loop to check first row of new batch
         }
       }
       false // Unreachable but needed for compilation
@@ -219,8 +228,11 @@ class MilvusLoonPartitionReader(
 
   override def close(): Unit = {
     try {
-      if (arrowReader != null) arrowReader.close()
-      if (arrowArrayStream != null) arrowArrayStream.close()
+      if (_currentBatch != null) {
+        _currentBatch.close()
+        _currentBatch = null
+      }
+      if (rbrHandle != 0L) reader.destroyRecordBatchReaderScala(rbrHandle)
       if (reader != null) reader.destroy()
       if (arrowSchemaObj != null) arrowSchemaObj.close()
       readerProperties.free()
@@ -348,13 +360,24 @@ class MilvusLoonPartitionReader(
       }
     }
 
-    // Process the first batch that was already loaded in constructor
+    // Process the first batch that was already loaded in constructor, then
+    // drop it — each per-batch root is independently owned, so we must close
+    // it before pulling the next.
     processBatch(_currentBatch)
+    if (_currentBatch != null) {
+      _currentBatch.close()
+      _currentBatch = null
+    }
 
     // Iterate through remaining batches
-    while (arrowReader.loadNextBatch()) {
-      val batch = arrowReader.getVectorSchemaRoot
-      processBatch(batch)
+    var nextBatch = pullNextBatch()
+    while (nextBatch != null) {
+      try {
+        processBatch(nextBatch)
+      } finally {
+        nextBatch.close()
+      }
+      nextBatch = pullNextBatch()
     }
 
     logInfo(
