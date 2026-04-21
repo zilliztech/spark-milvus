@@ -44,7 +44,8 @@ spark-submit \
   [--source-use-iam] \
   [--source-s3-region us-east-1] \
   [--batch-size 1024] \
-  [--output-result s3a://milvus-bucket/backfill/result.json]
+  [--output-result s3a://milvus-bucket/backfill/result.json] \
+  [--mode coalesce|overwrite]
 ```
 
 ### Authentication and dual-bucket credentials
@@ -73,10 +74,44 @@ spark-submit \
 | `--s3-endpoint`| S3 endpoint for the Milvus storage bucket          |
 | `--s3-bucket`  | Milvus storage bucket name                         |
 
+### Optional flags
+
+| Flag              | Default     | Description                                                                  |
+|-------------------|-------------|------------------------------------------------------------------------------|
+| `--mode`          | `coalesce`  | Merge semantics: `coalesce` (fill-if-null) or `overwrite`. See "Merge modes" below. |
+| `--batch-size`    | `1024`      | Rows per Arrow batch flushed to the writer.                                  |
+| `--column-mapping`| *(none)*    | `src1:tgt1,src2:tgt2,...`. Rename/drop Parquet columns to Milvus field names. |
+| `--output-result` | *(none)*    | Path to write the result JSON.                                               |
+
+## Merge modes (`--mode`)
+
+Distinct from the read-mode choice above (snapshot vs client), `--mode`
+controls how per-row values are merged into each target field:
+
+| Mode        | Default | Semantics                                                                                                        |
+|-------------|---------|------------------------------------------------------------------------------------------------------------------|
+| `coalesce`  | ✅      | Per field, keep the existing source value when non-null; only write the parquet value where the source is null. |
+| `overwrite` |         | Parquet is the source of truth: for every row in the collection, write the parquet value (including `null`).    |
+
+**`coalesce` caveats** (enforced at validation):
+
+- Requires `--snapshot` — each target field is read from the snapshot so
+  the merge can coalesce against the existing value. Client mode (no
+  `--snapshot`) therefore cannot use the default and must pass
+  `--mode overwrite` explicitly.
+- Parquet column types must match the snapshot field types **exactly**
+  — no Spark widening (Int32 → Int64 is rejected).
+- Slightly heavier I/O than `overwrite` because the existing field is
+  read per segment.
+
+See `docs/user-guide-snapshot-backfill.md` §6 for deeper discussion and
+worked examples.
+
 ## Programmatic API
 
 ```scala
 import org.apache.spark.sql.SparkSession
+import com.zilliz.spark.connector.MilvusOption
 import com.zilliz.spark.connector.operations.backfill._
 
 val spark = SparkSession.builder().appName("Backfill").getOrCreate()
@@ -103,7 +138,12 @@ val config = BackfillConfig(
   sourceS3UseIam    = Some(true),
   sourceS3Region    = Some("us-east-1"),
 
-  batchSize = 1024
+  batchSize = 1024,
+
+  // Merge mode. Defaults to "coalesce" (fill-if-null). Use
+  // MilvusOption.BackfillModeOverwrite for the legacy "parquet wins"
+  // semantics. See "Merge modes" above.
+  mode = MilvusOption.BackfillModeCoalesce
 )
 
 val result = MilvusBackfill.run(
@@ -143,6 +183,9 @@ result match {
   corresponding main `s3*` value.
 - `batchSize` — writer batch size (default 1024).
 - `customOutputPath` — override the per-segment output path.
+- `mode` — merge semantics (default `MilvusOption.BackfillModeCoalesce`).
+  Set to `MilvusOption.BackfillModeOverwrite` to restore the previous
+  "parquet wins" default. See "Merge modes" above for caveats.
 
 ## Error handling
 

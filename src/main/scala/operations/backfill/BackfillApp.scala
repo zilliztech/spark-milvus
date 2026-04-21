@@ -72,8 +72,20 @@ object BackfillApp {
       sourceS3Region = parsed.get("source-s3-region"),
       batchSize = parsed.getOrElse("batch-size", "1024").toInt,
       columnMapping = parsed.get("column-mapping").map(parseColumnMapping),
-      mode = parsed.getOrElse("mode", MilvusOption.BackfillModeOverwrite)
+      mode = parsed.getOrElse("mode", MilvusOption.BackfillModeCoalesce)
     )
+
+    // Surface the default flip (#91) loudly: downstream jobs that omit
+    // --mode silently switched from full-overwrite to fill-if-null, and
+    // client-mode callers now fail validation. Printing to stderr so it
+    // reaches the driver log even when the user's log config hides INFO.
+    if (!parsed.contains("mode")) {
+      System.err.println(
+        s"[BackfillApp] --mode not set; defaulting to '${config.mode}' " +
+          s"(fill-if-null). Pass '--mode ${MilvusOption.BackfillModeOverwrite}' " +
+          "to restore the pre-#91 full-overwrite behavior."
+      )
+    }
 
     val spark = SparkSession.builder
       .appName("MilvusBackfill")

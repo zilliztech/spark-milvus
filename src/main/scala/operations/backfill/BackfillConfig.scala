@@ -79,12 +79,12 @@ case class BackfillConfig(
     columnMapping: Option[Map[String, String]] = None,
 
     // Merge mode for backfill values:
-    //   "overwrite" (default) — parquet is the source of truth; for every row
-    //     in the collection, write the parquet value (null included).
-    //   "coalesce" — read the target field's current value from source and
-    //     only write the parquet value where the source value is null.
-    //     Per-field: each target field is decided independently.
-    mode: String = MilvusOption.BackfillModeOverwrite
+    //   "coalesce" (default) — read the target field's current value from
+    //     source and only write the parquet value where the source value is
+    //     null. Per-field: each target field is decided independently.
+    //   "overwrite" — parquet is the source of truth; for every row in the
+    //     collection, write the parquet value (null included).
+    mode: String = MilvusOption.BackfillModeCoalesce
 ) {
 
   /** Validate S3 and writer configuration (always required)
