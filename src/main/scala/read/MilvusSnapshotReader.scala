@@ -331,11 +331,19 @@ case class V2SegmentInfoDTO(
   *   end_index)` ranges per file. Comes from the AVRO's
   *   `AvroBinlog.entries_num`. Default empty for legacy callers — the packed-V2
   *   reader will reject empty.
+  * @param slotFieldId
+  *   The AVRO `AvroFieldBinlog.field_id` — the column-group slot id (also the
+  *   directory name in S3). For single-field groups this equals the actual
+  *   fieldID (>= 100); for multi-field groups it's the smallest unused int <
+  *   100. `-1L` is the sentinel for "unknown slot" (e.g. snapshot-JSON DTO path
+  *   that doesn't carry the AVRO slot id) and disables slot-based dedup. We
+  *   intentionally do NOT use `0L` because RowID's column group is at slot 0.
   */
 case class V2ColumnGroup(
     fieldIds: Seq[Long],
     filePaths: Seq[String],
-    fileRowCounts: Seq[Long] = Seq.empty
+    fileRowCounts: Seq[Long] = Seq.empty,
+    slotFieldId: Long = -1L
 )
 
 /** One StorageV2 segment's manifest information needed by backfill. */

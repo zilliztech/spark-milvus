@@ -12,6 +12,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
+import com.zilliz.spark.connector.read.{V2ColumnGroup, V2SegmentInfo}
 import com.zilliz.spark.connector.MilvusOption
 
 /** Tests for the new `--mode` backfill parameter: CLI/config validation and the
@@ -393,5 +394,156 @@ class BackfillModeTest
       .toSeq
 
     byPk shouldBe Seq((1, 10, "A"), (2, 20, "B"))
+  }
+
+  // ============ dedupColumnGroupsBySlot ============
+
+  private def seg(groups: V2ColumnGroup*): V2SegmentInfo =
+    V2SegmentInfo(
+      segmentId = 1L,
+      partitionId = 2L,
+      numOfRows = 0L,
+      storageVersion = 2L,
+      columnGroups = groups.toSeq
+    )
+
+  test(
+    "dedupColumnGroupsBySlot: single-field group at slot=fieldID strips that " +
+      "fieldID from older multi-field group at slot < 100"
+  ) {
+    // Mirrors the production scenario: an original multi-field packed parquet
+    // (slot 1) declares fields 102..114, but a prior addfield+backfill wrote
+    // single-field groups at slot 113 / 114. Without dedup the reader sees
+    // 113/114 in BOTH groups and the C++ packed reader picks an undefined source,
+    // typically the older slot-1 file (mostly null). After dedup, slot 1's
+    // fieldIds drops 113/114 so each fieldID resolves to one group.
+    val input = seg(
+      V2ColumnGroup(
+        fieldIds = Seq(102L, 103L, 113L, 114L),
+        filePaths = Seq("seg/1/old"),
+        fileRowCounts = Seq(100L),
+        slotFieldId = 1L
+      ),
+      V2ColumnGroup(
+        fieldIds = Seq(113L),
+        filePaths = Seq("seg/113/new"),
+        fileRowCounts = Seq(100L),
+        slotFieldId = 113L
+      ),
+      V2ColumnGroup(
+        fieldIds = Seq(114L),
+        filePaths = Seq("seg/114/new"),
+        fileRowCounts = Seq(100L),
+        slotFieldId = 114L
+      )
+    )
+
+    val out = MilvusBackfill.dedupColumnGroupsBySlot(input)
+    out.columnGroups.map(g => (g.slotFieldId, g.fieldIds)) shouldBe Seq(
+      (1L, Seq(102L, 103L)),
+      (113L, Seq(113L)),
+      (114L, Seq(114L))
+    )
+  }
+
+  test(
+    "dedupColumnGroupsBySlot: drops a group entirely if every fieldID it carries " +
+      "is owned by a larger slot"
+  ) {
+    val input = seg(
+      V2ColumnGroup(
+        fieldIds = Seq(113L),
+        filePaths = Seq("p/old"),
+        fileRowCounts = Seq(1L),
+        slotFieldId = 1L
+      ),
+      V2ColumnGroup(
+        fieldIds = Seq(113L),
+        filePaths = Seq("p/new"),
+        fileRowCounts = Seq(1L),
+        slotFieldId = 113L
+      )
+    )
+    val out = MilvusBackfill.dedupColumnGroupsBySlot(input)
+    out.columnGroups should have size 1
+    out.columnGroups.head.slotFieldId shouldBe 113L
+    out.columnGroups.head.fieldIds shouldBe Seq(113L)
+  }
+
+  test(
+    "dedupColumnGroupsBySlot: leaves single-group / no-conflict layouts untouched"
+  ) {
+    val input = seg(
+      V2ColumnGroup(
+        fieldIds = Seq(100L, 0L, 1L),
+        filePaths = Seq("p/0"),
+        fileRowCounts = Seq(1L),
+        slotFieldId = 0L // Real slot 0 = RowID; legal AVRO value.
+      )
+    )
+    val out = MilvusBackfill.dedupColumnGroupsBySlot(input)
+    out shouldBe input
+  }
+
+  test(
+    "dedupColumnGroupsBySlot: slot 0 (RowID) is a real slot id, not the unknown " +
+      "sentinel — must NOT short-circuit dedup when other groups conflict"
+  ) {
+    // Regression: an earlier version used 0L as the unknown-slot sentinel,
+    // but RowID's AVRO entry legitimately has field_id=0. That made dedup
+    // skip every AVRO-loaded segment, defeating the fix entirely. The
+    // sentinel is now -1L; slot 0L participates in dedup like any other slot.
+    val input = seg(
+      V2ColumnGroup(
+        fieldIds = Seq(0L), // RowID
+        filePaths = Seq("p/rowid"),
+        fileRowCounts = Seq(1L),
+        slotFieldId = 0L
+      ),
+      V2ColumnGroup(
+        fieldIds = Seq(102L, 113L),
+        filePaths = Seq("p/multi"),
+        fileRowCounts = Seq(1L),
+        slotFieldId = 1L
+      ),
+      V2ColumnGroup(
+        fieldIds = Seq(113L),
+        filePaths = Seq("p/single"),
+        fileRowCounts = Seq(1L),
+        slotFieldId = 113L
+      )
+    )
+    val out = MilvusBackfill.dedupColumnGroupsBySlot(input)
+    out.columnGroups.map(g => (g.slotFieldId, g.fieldIds)) shouldBe Seq(
+      (0L, Seq(0L)),
+      (1L, Seq(102L)),
+      (113L, Seq(113L))
+    )
+  }
+
+  test(
+    "dedupColumnGroupsBySlot: skips dedup when ANY group's slotFieldId is the " +
+      "-1L sentinel (snapshot-JSON DTO path) — never silently drops a fieldID"
+  ) {
+    // Snapshot JSON deserialization currently doesn't surface AVRO slot ids,
+    // so V2ColumnGroup.slotFieldId stays at its default -1L. In that mode we
+    // must NOT dedup, otherwise we'd treat all groups as if they shared the
+    // same unknown slot and arbitrarily strip fields.
+    val input = seg(
+      V2ColumnGroup(
+        fieldIds = Seq(102L, 113L),
+        filePaths = Seq("p/multi"),
+        fileRowCounts = Seq(1L)
+        // slotFieldId defaults to -1L
+      ),
+      V2ColumnGroup(
+        fieldIds = Seq(113L),
+        filePaths = Seq("p/single"),
+        fileRowCounts = Seq(1L)
+        // slotFieldId defaults to -1L
+      )
+    )
+    val out = MilvusBackfill.dedupColumnGroupsBySlot(input)
+    out shouldBe input
   }
 }

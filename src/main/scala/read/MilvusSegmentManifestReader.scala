@@ -192,7 +192,12 @@ object MilvusSegmentManifestReader extends Logging {
           V2ColumnGroup(
             fieldIds = realFieldIds,
             filePaths = sorted.map(_.logPath),
-            fileRowCounts = sorted.map(_.entriesNum)
+            fileRowCounts = sorted.map(_.entriesNum),
+            // Surface the AVRO slot id so downstream can dedup when the same
+            // fieldID is claimed by multiple groups (e.g. an old multi-field
+            // group at slot < 100 plus a backfill-written single-field group
+            // at slot == fieldID). See MilvusBackfill.dedupColumnGroupsBySlot.
+            slotFieldId = afb.slotFieldId
           )
         }
       Right(
