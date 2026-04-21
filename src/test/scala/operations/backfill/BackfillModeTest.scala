@@ -41,14 +41,14 @@ class BackfillModeTest
 
   // ============ Config / CLI parsing ============
 
-  test("BackfillConfig defaults to overwrite mode") {
+  test("BackfillConfig defaults to coalesce mode") {
     val config = BackfillConfig(
       s3Endpoint = "localhost:9000",
       s3BucketName = "a-bucket",
       s3AccessKey = "ak",
       s3SecretKey = "sk"
     )
-    config.mode shouldBe MilvusOption.BackfillModeOverwrite
+    config.mode shouldBe MilvusOption.BackfillModeCoalesce
     config.validate() shouldBe Right(())
   }
 
