@@ -45,7 +45,7 @@ spark-submit \
   [--source-s3-region us-east-1] \
   [--batch-size 1024] \
   [--output-result s3a://milvus-bucket/backfill/result.json] \
-  [--mode coalesce|overwrite]
+  [--mode replace|coalesce|overwrite]
 ```
 
 ### Authentication and dual-bucket credentials
@@ -78,7 +78,7 @@ spark-submit \
 
 | Flag              | Default     | Description                                                                  |
 |-------------------|-------------|------------------------------------------------------------------------------|
-| `--mode`          | `coalesce`  | Merge semantics: `coalesce` (fill-if-null) or `overwrite`. See "Merge modes" below. |
+| `--mode`          | `coalesce`  | Merge semantics: `replace`, `coalesce` (fill-if-null), or `overwrite`. See "Merge modes" below. |
 | `--batch-size`    | `1024`      | Rows per Arrow batch flushed to the writer.                                  |
 | `--column-mapping`| *(none)*    | `src1:tgt1,src2:tgt2,...`. Rename/drop Parquet columns to Milvus field names. |
 | `--output-result` | *(none)*    | Path to write the result JSON.                                               |
@@ -86,23 +86,40 @@ spark-submit \
 ## Merge modes (`--mode`)
 
 Distinct from the read-mode choice above (snapshot vs client), `--mode`
-controls how per-row values are merged into each target field:
+controls how per-row values are merged into each target field. All three
+modes use a LEFT JOIN from source (Milvus) to parquet on the PK; parquet
+rows whose PK is not in the collection are always dropped. They differ on
+what happens for matched rows and for source rows with no parquet match:
 
-| Mode        | Default | Semantics                                                                                                        |
-|-------------|---------|------------------------------------------------------------------------------------------------------------------|
-| `coalesce`  | ✅      | Per field, keep the existing source value when non-null; only write the parquet value where the source is null. |
-| `overwrite` |         | Parquet is the source of truth: for every row in the collection, write the parquet value (including `null`).    |
+| Mode        | Default | Matched row (PK in both)         | Source row unmatched by parquet |
+|-------------|---------|----------------------------------|---------------------------------|
+| `replace`   |         | Parquet wins (null included)     | Target columns set to NULL      |
+| `coalesce`  | ✅      | `coalesce(src, parquet)` per field — source wins when non-null | Source preserved |
+| `overwrite` |         | Parquet wins (null included)     | Source preserved                |
 
-**`coalesce` caveats** (enforced at validation):
+Typical fits:
 
-- Requires `--snapshot` — each target field is read from the snapshot so
-  the merge can coalesce against the existing value. Client mode (no
-  `--snapshot`) therefore cannot use the default and must pass
-  `--mode overwrite` explicitly.
+- `replace` — fresh backfill of a brand-new field where parquet is the
+  full authoritative source.
+- `coalesce` — incremental / repair runs that only want to fill gaps.
+- `overwrite` — corrective update for a subset of rows; parquet is
+  authoritative only for the PKs it covers and untouched rows must be
+  preserved.
+
+**`coalesce` / `overwrite` caveats** (enforced at validation — both read
+source-side target values):
+
+- Require `--snapshot` — each target field is read from the snapshot so
+  the merge can compare against the existing value. Client mode (no
+  `--snapshot`) cannot use these and must pass `--mode replace` explicitly.
 - Parquet column types must match the snapshot field types **exactly**
-  — no Spark widening (Int32 → Int64 is rejected).
-- Slightly heavier I/O than `overwrite` because the existing field is
-  read per segment.
+  — no Spark widening (Int32 → Int64 is rejected). Only `replace` lets
+  Spark cast between compatible numeric widths.
+- Slightly heavier I/O than `replace` because the existing field is read
+  per segment.
+- For `overwrite`: an explicitly null value in the parquet **will** clobber
+  the existing source value on matched rows — the match flag drives the
+  projection, not the file column's null-ness.
 
 See `docs/user-guide-snapshot-backfill.md` §6 for deeper discussion and
 worked examples.
@@ -140,9 +157,11 @@ val config = BackfillConfig(
 
   batchSize = 1024,
 
-  // Merge mode. Defaults to "coalesce" (fill-if-null). Use
-  // MilvusOption.BackfillModeOverwrite for the legacy "parquet wins"
-  // semantics. See "Merge modes" above.
+  // Merge mode. Defaults to "coalesce" (fill-if-null). Set to
+  // MilvusOption.BackfillModeOverwrite for matched-rows-only overwrite
+  // (parquet wins on matched PKs, unmatched source rows preserved), or
+  // MilvusOption.BackfillModeReplace for full overwrite (unmatched source
+  // rows get null target columns). See "Merge modes" above.
   mode = MilvusOption.BackfillModeCoalesce
 )
 
@@ -184,8 +203,10 @@ result match {
 - `batchSize` — writer batch size (default 1024).
 - `customOutputPath` — override the per-segment output path.
 - `mode` — merge semantics (default `MilvusOption.BackfillModeCoalesce`).
-  Set to `MilvusOption.BackfillModeOverwrite` to restore the previous
-  "parquet wins" default. See "Merge modes" above for caveats.
+  Set to `MilvusOption.BackfillModeOverwrite` for matched-rows-only
+  overwrite, or `MilvusOption.BackfillModeReplace` for full overwrite
+  (unmatched source rows get null target columns). See "Merge modes"
+  above for caveats.
 
 ## Error handling
 
