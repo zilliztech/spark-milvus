@@ -80,12 +80,25 @@ case class BackfillConfig(
 
     // Merge mode for backfill values:
     //   "coalesce" (default) — read the target field's current value from
-    //     source and only write the parquet value where the source value is
-    //     null. Per-field: each target field is decided independently.
-    //   "overwrite" — parquet is the source of truth; for every row in the
-    //     collection, write the parquet value (null included).
+    //     source and pick coalesce(src, parquet) per row per field (source
+    //     wins when non-null; parquet fills nulls). Unmatched source rows
+    //     keep their original target values.
+    //   "overwrite" — parquet overrides the target field for rows whose pk
+    //     matches (null included). Unmatched source rows keep their original
+    //     target values.
+    //   "replace" — parquet is the absolute source of truth: every source
+    //     row's target field becomes the parquet value (null if the pk has
+    //     no parquet match). Destructive on unmatched rows.
     mode: String = MilvusOption.BackfillModeCoalesce
 ) {
+
+  /** Whether the merge path needs to read each target field from the source
+    * side too. Coalesce and overwrite both compare source and parquet values
+    * per row at join time; replace takes parquet verbatim and therefore only
+    * needs the pk + segment tracking columns from source.
+    */
+  def readsSourceFields: Boolean =
+    mode != MilvusOption.BackfillModeReplace
 
   /** Validate S3 and writer configuration (always required)
     */
@@ -97,12 +110,14 @@ case class BackfillConfig(
     } else if (batchSize <= 0) {
       Left("batchSize must be positive")
     } else if (
-      mode != MilvusOption.BackfillModeOverwrite &&
-      mode != MilvusOption.BackfillModeCoalesce
+      mode != MilvusOption.BackfillModeReplace &&
+      mode != MilvusOption.BackfillModeCoalesce &&
+      mode != MilvusOption.BackfillModeOverwrite
     ) {
       Left(
-        s"mode must be '${MilvusOption.BackfillModeOverwrite}' or " +
-          s"'${MilvusOption.BackfillModeCoalesce}' (got '$mode')"
+        s"mode must be one of '${MilvusOption.BackfillModeReplace}', " +
+          s"'${MilvusOption.BackfillModeCoalesce}', " +
+          s"'${MilvusOption.BackfillModeOverwrite}' (got '$mode')"
       )
     } else if (!s3UseIam && (s3AccessKey.isEmpty || s3SecretKey.isEmpty)) {
       // Hard invariant: must use IAM or supply both AK and SK. Half-set
