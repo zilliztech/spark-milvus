@@ -15,8 +15,8 @@ import org.scalatest.BeforeAndAfterAll
 import com.zilliz.spark.connector.read.{V2ColumnGroup, V2SegmentInfo}
 import com.zilliz.spark.connector.MilvusOption
 
-/** Tests for the new `--mode` backfill parameter: CLI/config validation and the
-  * `performJoin` merge semantics (overwrite vs coalesce).
+/** Tests for the `--mode` backfill parameter: CLI/config validation and the
+  * `performJoin` merge semantics (replace vs coalesce vs overwrite).
   */
 class BackfillModeTest
     extends AnyFunSuite
@@ -140,7 +140,7 @@ class BackfillModeTest
     spark.createDataFrame(spark.sparkContext.parallelize(javaRows), schema)
   }
 
-  test("overwrite mode: source has only PK, backfill values win") {
+  test("replace mode: source has only PK, backfill values win") {
     val originalSchema = StructType(
       Seq(
         StructField("pk", IntegerType, nullable = false),
@@ -166,7 +166,7 @@ class BackfillModeTest
       backfill,
       "pk",
       Seq("f1", "f2"),
-      MilvusOption.BackfillModeOverwrite
+      MilvusOption.BackfillModeReplace
     )
 
     val byPk = joined
@@ -184,7 +184,7 @@ class BackfillModeTest
     byPk shouldBe Seq(
       (1, Some(100), Some("A")),
       (2, None, Some("B")),
-      (3, None, None)
+      (3, None, None) // unmatched source row: target columns become null
     )
   }
 
@@ -255,9 +255,9 @@ class BackfillModeTest
     )
   }
 
-  // ============ validateCoalesceTypes ============
+  // ============ validateMergeableFieldTypes ============
 
-  test("validateCoalesceTypes: matching types pass") {
+  test("validateMergeableFieldTypes: matching types pass") {
     val backfillSchema = StructType(
       Seq(
         StructField("pk", IntegerType, nullable = false),
@@ -269,14 +269,19 @@ class BackfillModeTest
       ("f1", 101L, StructField("f1", IntegerType, nullable = true)),
       ("f2", 102L, StructField("f2", StringType, nullable = true))
     )
-    MilvusBackfill.validateCoalesceTypes(backfillSchema, extras) shouldBe Right(
-      ()
-    )
+    MilvusBackfill.validateMergeableFieldTypes(
+      backfillSchema,
+      extras,
+      MilvusOption.BackfillModeCoalesce
+    ) shouldBe Right(())
   }
 
-  test("validateCoalesceTypes: mismatched type rejected with clear message") {
+  test(
+    "validateMergeableFieldTypes: mismatched type rejected with clear message"
+  ) {
     // parquet sees IntegerType but snapshot says LongType — Spark's coalesce
-    // would silently widen and produce a Long binlog, breaking Milvus reads.
+    // / when-otherwise would silently widen and produce a Long binlog,
+    // breaking Milvus reads.
     val backfillSchema = StructType(
       Seq(
         StructField("pk", IntegerType, nullable = false),
@@ -287,7 +292,11 @@ class BackfillModeTest
       ("f1", 101L, StructField("f1", LongType, nullable = true))
     )
     val err = MilvusBackfill
-      .validateCoalesceTypes(backfillSchema, extras)
+      .validateMergeableFieldTypes(
+        backfillSchema,
+        extras,
+        MilvusOption.BackfillModeOverwrite
+      )
       .left
       .toOption
       .get
@@ -296,10 +305,12 @@ class BackfillModeTest
     err.message should include("f1")
     err.message should include("snapshot=bigint")
     err.message should include("parquet=int")
+    // Error surfaces the active mode so users know which flag to fix.
+    err.message should include(MilvusOption.BackfillModeOverwrite)
   }
 
   test(
-    "validateCoalesceTypes: backfill missing the field is not flagged here"
+    "validateMergeableFieldTypes: backfill missing the field is not flagged here"
   ) {
     // performJoin/processSegments handles missing columns via the left join.
     // The type validator only complains when both sides have the column AND
@@ -310,9 +321,11 @@ class BackfillModeTest
     val extras = Seq(
       ("f1", 101L, StructField("f1", LongType, nullable = true))
     )
-    MilvusBackfill.validateCoalesceTypes(backfillSchema, extras) shouldBe Right(
-      ()
-    )
+    MilvusBackfill.validateMergeableFieldTypes(
+      backfillSchema,
+      extras,
+      MilvusOption.BackfillModeCoalesce
+    ) shouldBe Right(())
   }
 
   test("coalesce mode: per-field provenance flags mark source vs datafile") {
@@ -394,6 +407,122 @@ class BackfillModeTest
       .toSeq
 
     byPk shouldBe Seq((1, 10, "A"), (2, 20, "B"))
+  }
+
+  // ============ overwrite mode (matched rows take file, unmatched keep src) ============
+
+  test(
+    "overwrite mode: matched rows take backfill, unmatched rows keep source"
+  ) {
+    // pk=1 — matched, backfill has non-null values → take backfill for both
+    //        fields (differs from coalesce: even where src is non-null, file
+    //        wins when matched).
+    // pk=2 — matched, backfill has null f1 → write null (differs from
+    //        coalesce: coalesce would keep src; overwrite overrides).
+    // pk=3 — no backfill row → keep source values (differs from replace,
+    //        which would null them out).
+    val original = buildOriginal(
+      Seq(
+        (1, Int.box(1), "src1", 10L, 0L),
+        (2, Int.box(2), "src2", 10L, 1L),
+        (3, Int.box(3), "src3", 10L, 2L)
+      )
+    )
+    val backfill = buildBackfill(
+      Seq(
+        (1, Int.box(100), "BF1"),
+        (2, null, "BF2")
+        // pk=3 missing
+      )
+    )
+
+    val joined = MilvusBackfill.performJoin(
+      original,
+      backfill,
+      "pk",
+      Seq("f1", "f2"),
+      MilvusOption.BackfillModeOverwrite
+    )
+
+    // Output layout mirrors coalesce: source-side columns + match flag +
+    // per-field provenance flags.
+    joined.columns.toSet shouldBe Set(
+      "pk",
+      "f1",
+      "f2",
+      "segment_id",
+      "row_offset",
+      MilvusBackfill.MatchFlagCol,
+      MilvusBackfill.usedSrcCol("f1"),
+      MilvusBackfill.usedBfCol("f1"),
+      MilvusBackfill.usedSrcCol("f2"),
+      MilvusBackfill.usedBfCol("f2")
+    )
+
+    val byPk = joined
+      .orderBy("pk")
+      .collect()
+      .map(r =>
+        (
+          r.getAs[Int]("pk"),
+          Option(r.get(r.fieldIndex("f1"))).map(_.asInstanceOf[Int]),
+          Option(r.getAs[String]("f2"))
+        )
+      )
+      .toSeq
+
+    byPk shouldBe Seq(
+      (1, Some(100), Some("BF1")), // matched: backfill wins on both
+      (2, None, Some("BF2")), // matched: backfill's null clobbers src
+      (3, Some(3), Some("src3")) // unmatched: source preserved
+    )
+  }
+
+  test(
+    "overwrite mode: per-field provenance — matched → usedBf, unmatched → usedSrc"
+  ) {
+    val original = buildOriginal(
+      Seq(
+        (1, Int.box(1), "src1", 10L, 0L),
+        (2, Int.box(2), "src2", 10L, 1L)
+      )
+    )
+    val backfill = buildBackfill(
+      Seq(
+        (1, Int.box(100), "BF1")
+        // pk=2 missing — unmatched
+      )
+    )
+
+    val joined = MilvusBackfill.performJoin(
+      original,
+      backfill,
+      "pk",
+      Seq("f1", "f2"),
+      MilvusOption.BackfillModeOverwrite
+    )
+
+    val flags = joined
+      .orderBy("pk")
+      .collect()
+      .map(r =>
+        (
+          r.getAs[Int]("pk"),
+          r.getAs[Boolean](MilvusBackfill.usedSrcCol("f1")),
+          r.getAs[Boolean](MilvusBackfill.usedBfCol("f1")),
+          r.getAs[Boolean](MilvusBackfill.usedSrcCol("f2")),
+          r.getAs[Boolean](MilvusBackfill.usedBfCol("f2"))
+        )
+      )
+      .toSeq
+
+    // Overwrite's per-field flags track the row-level match — same value
+    // across every field for a given row (unlike coalesce, where each field
+    // decides independently).
+    flags shouldBe Seq(
+      (1, false, true, false, true), // matched: backfill wins for both fields
+      (2, true, false, true, false) // unmatched: source kept for both fields
+    )
   }
 
   // ============ dedupColumnGroupsBySlot ============

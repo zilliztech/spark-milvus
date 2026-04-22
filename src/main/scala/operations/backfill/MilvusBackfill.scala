@@ -43,12 +43,14 @@ object MilvusBackfill {
     */
   private[backfill] val MatchFlagCol = "__bf_matched__"
 
-  /** Per-field flag columns added only in coalesce mode: for each new field,
-    * one boolean marker recording whether the written value came from the
-    * source (src non-null) and another for whether it came from the backfill
-    * data file (src null AND bf non-null). Used by the writer to tally the
-    * per-field `usedSourceByField` / `usedDataFileByField` counts surfaced in
-    * `SegmentBackfillResult`.
+  /** Per-field flag columns added in any mode that reads source-side target
+    * values (coalesce + overwrite). For each new field, one boolean marker
+    * records whether the written value came from the source side and another
+    * whether it came from the backfill data file. Semantics differ per mode:
+    *   - coalesce: usedSrc = src non-null; usedBf = src null AND bf non-null
+    *   - overwrite: usedSrc = pk unmatched; usedBf = pk matched
+    * Used by the writer to tally the per-field `usedSourceByField` /
+    * `usedDataFileByField` counts surfaced in `SegmentBackfillResult`.
     */
   private[backfill] def usedSrcCol(field: String): String =
     s"__bf_used_src_${field}__"
@@ -260,18 +262,19 @@ object MilvusBackfill {
       }
       val newFieldNameToId = newFieldNames.map(n => n -> fieldNameToId(n)).toMap
 
-      // In coalesce mode, also read each target field from source so
-      // `coalesce(src, backfill)` can keep the existing value when non-null.
-      // Requires a snapshot — we need the field's Spark type.
-      val isCoalesceMode = config.mode == MilvusOption.BackfillModeCoalesce
+      // In coalesce / overwrite modes, also read each target field from source
+      // so the merge step (coalesce(src,bf) or when(matched, bf).otherwise(src))
+      // can compare source and parquet values per row. Requires a snapshot —
+      // we need the field's Spark type.
+      val readsSourceFields = config.readsSourceFields
       val extraReadFields
           : Seq[(String, Long, org.apache.spark.sql.types.StructField)] =
-        if (isCoalesceMode) {
+        if (readsSourceFields) {
           val metadata = snapshotMetadataOpt.getOrElse {
             return Left(
               SchemaValidationError(
-                s"--mode=${MilvusOption.BackfillModeCoalesce} requires a " +
-                  "snapshot path so source field values can be read"
+                s"--mode=${config.mode} requires a snapshot path so source " +
+                  "field values can be read"
               )
             )
           }
@@ -296,10 +299,14 @@ object MilvusBackfill {
           }
         } else Seq.empty
 
-      // In coalesce mode, parquet column types must match snapshot field
-      // types exactly (see validateCoalesceTypes for rationale).
-      if (isCoalesceMode) {
-        validateCoalesceTypes(backfillDF.schema, extraReadFields) match {
+      // In any source-reading mode, parquet column types must match snapshot
+      // field types exactly (see validateMergeableFieldTypes for rationale).
+      if (readsSourceFields) {
+        validateMergeableFieldTypes(
+          backfillDF.schema,
+          extraReadFields,
+          config.mode
+        ) match {
           case Left(error) => return Left(error)
           case Right(_)    => // Continue
         }
@@ -650,8 +657,9 @@ object MilvusBackfill {
               )
           }
 
-          // Extend with any extra fields requested (coalesce mode). Field
-          // order in the schema must match the ReaderFieldIDs order.
+          // Extend with any extra fields requested (coalesce / overwrite
+          // modes). Field order in the schema must match the ReaderFieldIDs
+          // order.
           val withExtras = extraReadFields.foldLeft(pkSchema) {
             case (acc, (_, _, field)) => acc.add(field)
           }
@@ -709,17 +717,20 @@ object MilvusBackfill {
     }
   }
 
-  /** Coalesce mode requires parquet column types to match snapshot field types
-    * exactly. Spark's `coalesce(src, bf)` would otherwise widen to a common
-    * supertype (e.g. Int + Long → Long) and the writer would emit binlogs whose
-    * Arrow type no longer matches the Milvus field — Milvus would later misread
-    * them.
+  /** Coalesce and overwrite modes require parquet column types to match
+    * snapshot field types exactly. Both modes synthesize a per-row choice
+    * between the source-side and parquet-side values (`coalesce(src, bf)` in
+    * coalesce, `when(matched, bf).otherwise(src)` in overwrite) — Spark would
+    * otherwise widen to a common supertype (e.g. Int + Long → Long) and the
+    * writer would emit binlogs whose Arrow type no longer matches the Milvus
+    * field, which Milvus would later misread.
     */
-  private[backfill] def validateCoalesceTypes(
+  private[backfill] def validateMergeableFieldTypes(
       backfillSchema: org.apache.spark.sql.types.StructType,
       extraReadFields: Seq[
         (String, Long, org.apache.spark.sql.types.StructField)
-      ]
+      ],
+      mode: String
   ): Either[BackfillError, Unit] = {
     val backfillTypes =
       backfillSchema.fields.map(f => f.name -> f.dataType).toMap
@@ -734,8 +745,8 @@ object MilvusBackfill {
     if (mismatches.nonEmpty) {
       Left(
         SchemaValidationError(
-          s"--mode=${MilvusOption.BackfillModeCoalesce} requires backfill " +
-            s"parquet column types to match snapshot field types exactly. " +
+          s"--mode=$mode requires backfill parquet column types to match " +
+            s"snapshot field types exactly. " +
             s"Mismatched: ${mismatches.mkString(", ")}"
         )
       )
@@ -798,11 +809,17 @@ object MilvusBackfill {
 
   /** Merge original (source) rows with backfill rows per `mode`.
     *
-    *   - overwrite: left join on PK; backfill value replaces source (source
-    *     only contributes PK + segment tracking columns).
-    *   - coalesce: original side carries source values for each target field;
-    *     after the left join, compute `coalesce(src, backfill)` per field (keep
-    *     source when non-null, otherwise use backfill).
+    *   - replace: left join on PK; backfill value replaces source (source only
+    *     contributes PK + segment tracking columns). Unmatched source rows end
+    *     up with null target columns.
+    *   - coalesce: source side carries the target fields; after the left join,
+    *     compute `coalesce(src, backfill)` per field (source wins when
+    *     non-null, otherwise use backfill). Unmatched source rows keep their
+    *     original target values.
+    *   - overwrite: source side carries the target fields; after the left join,
+    *     compute `when(matched, backfill).otherwise(src)` per field (file wins
+    *     when the pk matched, even if the file value is null). Unmatched source
+    *     rows keep their original target values.
     */
   private[backfill] def performJoin(
       originalDF: DataFrame,
@@ -839,11 +856,42 @@ object MilvusBackfill {
             .drop(n + suffix)
         }
 
-      case _ =>
+      case MilvusOption.BackfillModeOverwrite =>
+        // Same suffix-rename scaffolding as coalesce — both modes need both
+        // sides' target columns live on the joined frame.
+        val suffix = "__bf__"
+        val renamedBackfill = newFieldNames.foldLeft(backfillWithFlag) {
+          (df, n) =>
+            df.withColumnRenamed(n, n + suffix)
+        }
+        val joined = originalDF.join(renamedBackfill, Seq(pkName), "left")
+        // Match flag is null for unmatched left rows, non-null for matched.
+        // Using it (rather than `bf.isNotNull`) preserves overwrite's "file
+        // wins, null included" semantics when the file explicitly stores null.
+        val matched = col(MatchFlagCol).isNotNull
+        val withFlags = newFieldNames.foldLeft(joined) { (df, n) =>
+          df.withColumn(usedSrcCol(n), !matched)
+            .withColumn(usedBfCol(n), matched)
+        }
+        newFieldNames.foldLeft(withFlags) { (df, n) =>
+          df.withColumn(
+            n,
+            when(matched, df.col(n + suffix)).otherwise(df.col(n))
+          ).drop(n + suffix)
+        }
+
+      case MilvusOption.BackfillModeReplace =>
         // Use the using-column join form: both sides share the pkName column
         // (guaranteed by applyColumnMapping), so Spark collapses it into one,
         // avoiding ambiguous-reference errors downstream.
         originalDF.join(backfillWithFlag, Seq(pkName), "left")
+
+      case other =>
+        // Defensive: validate() rejects anything else, but keep a clear error
+        // in case a new mode constant is added without extending this match.
+        throw new IllegalArgumentException(
+          s"Unknown backfill mode '$other'"
+        )
     }
   }
 
@@ -919,13 +967,14 @@ object MilvusBackfill {
       // Prepare data: select only needed columns and add segment_id for
       // partitioning. Trailing column is the backfill match flag — retained
       // here so executors can count PK-matched rows, stripped from the
-      // projection that reaches the writer. In coalesce mode, two extra
-      // boolean flag columns per new field follow the match flag (usedSrc,
-      // usedBf interleaved, in `newFieldNames` order) so the writer can
-      // compute per-field usedSourceByField / usedDataFileByField counts.
-      val isCoalesceMode = config.mode == MilvusOption.BackfillModeCoalesce
+      // projection that reaches the writer. In any source-reading mode
+      // (coalesce / overwrite), two extra boolean flag columns per new field
+      // follow the match flag (usedSrc, usedBf interleaved, in
+      // `newFieldNames` order) so the writer can compute per-field
+      // usedSourceByField / usedDataFileByField counts.
+      val readsSourceFields = config.readsSourceFields
       val flagColNames: Seq[String] =
-        if (isCoalesceMode)
+        if (readsSourceFields)
           newFieldNames.flatMap(n => Seq(usedSrcCol(n), usedBfCol(n)))
         else Seq.empty
       val preparedDF = joinedDF
@@ -1038,8 +1087,10 @@ object MilvusBackfill {
       logger.info(s"Total rows written: $totalRows")
       logger.info(s"Total time for all segments: ${totalTime}ms")
       logger.info(s"Average time per segment: ${avgTime}ms")
-      if (isCoalesceMode) {
-        logger.info("Coalesce provenance (per field, aggregated):")
+      if (readsSourceFields) {
+        logger.info(
+          s"Per-field provenance (mode=${config.mode}, aggregated):"
+        )
         newFieldNames.foreach { f =>
           val src = results.map(_._1.usedSourceByField.getOrElse(f, 0L)).sum
           val df = results.map(_._1.usedDataFileByField.getOrElse(f, 0L)).sum
@@ -1128,11 +1179,12 @@ object MilvusBackfill {
       .createBatchWriterFactory(null)
       .createWriter(0, System.currentTimeMillis())
 
-    val isCoalesceMode = config.mode == MilvusOption.BackfillModeCoalesce
+    val readsSourceFields = config.readsSourceFields
     val newFieldNames = targetSchema.fieldNames.toSeq
     val numNewFields = newFieldNames.size
     // Row layout (fixed prefix): [segment_id, row_offset, ...newFields,
-    // __bf_matched__, (usedSrc, usedBf)*numNewFields in coalesce mode only].
+    // __bf_matched__, (usedSrc, usedBf)*numNewFields in source-reading modes
+    // (coalesce / overwrite) only].
     val matchFlagIdx = 2 + numNewFields
     val firstFlagIdx = matchFlagIdx + 1
 
@@ -1150,7 +1202,7 @@ object MilvusBackfill {
           .toArray
         if (targetFields.forall(_ == null)) nullRowCount += 1
         if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
-        if (isCoalesceMode) {
+        if (readsSourceFields) {
           var i = 0
           while (i < numNewFields) {
             val srcIdx = firstFlagIdx + 2 * i
@@ -1184,7 +1236,7 @@ object MilvusBackfill {
       writer.close()
 
       val (usedSrcByField, usedBfByField) =
-        if (isCoalesceMode)
+        if (readsSourceFields)
           (
             newFieldNames.zip(usedSrcCounts).toMap,
             newFieldNames.zip(usedBfCounts).toMap
@@ -1438,10 +1490,11 @@ object MilvusBackfill {
       allocateLogId = allocator
     )
 
-    val isCoalesceMode = config.mode == MilvusOption.BackfillModeCoalesce
+    val readsSourceFields = config.readsSourceFields
     val numNewFields = fieldNames.size
     // Row layout (fixed prefix): [segment_id, row_offset, ...newFields,
-    // __bf_matched__, (usedSrc, usedBf)*numNewFields in coalesce mode only].
+    // __bf_matched__, (usedSrc, usedBf)*numNewFields in source-reading modes
+    // (coalesce / overwrite) only].
     val matchFlagIdx = 2 + numNewFields
     val firstFlagIdx = matchFlagIdx + 1
 
@@ -1451,8 +1504,9 @@ object MilvusBackfill {
     val usedBfCounts = Array.fill(numNewFields)(0L)
     try {
       // The V2 writer only wants the newField columns; strip the tracking
-      // columns, the match flag, and any coalesce-mode provenance flags (the
-      // match flag + per-field flags are folded into the counters instead).
+      // columns, the match flag, and any source-reading-mode provenance flags
+      // (the match flag + per-field flags are folded into the counters
+      // instead).
       def projected(row: InternalRow): InternalRow = {
         val dataEnd = matchFlagIdx
         val values = (2 until dataEnd)
@@ -1462,7 +1516,7 @@ object MilvusBackfill {
       }
       def countMatch(row: InternalRow): Unit = {
         if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
-        if (isCoalesceMode) {
+        if (readsSourceFields) {
           var i = 0
           while (i < numNewFields) {
             val srcIdx = firstFlagIdx + 2 * i
@@ -1497,7 +1551,7 @@ object MilvusBackfill {
         )
       }
       val (usedSrcByField, usedBfByField) =
-        if (isCoalesceMode)
+        if (readsSourceFields)
           (
             fieldNames.zip(usedSrcCounts).toMap,
             fieldNames.zip(usedBfCounts).toMap

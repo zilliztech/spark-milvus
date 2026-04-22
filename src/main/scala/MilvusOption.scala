@@ -119,10 +119,19 @@ object MilvusOption {
   val WriterFieldIds =
     "milvus.writer.fieldIds" // JSON map of field name -> field ID (e.g., "new_field:104,other_field:105")
 
-  // Backfill merge mode
+  // Backfill merge mode.
+  //   replace   — file is source of truth for target columns: matched rows
+  //               take file values (null included); unmatched source rows get
+  //               null target columns.
+  //   coalesce  — fill-if-null: matched rows pick coalesce(src, file) per
+  //               field (source wins when non-null); unmatched source rows
+  //               keep their original values.
+  //   overwrite — file overrides matched rows only (null included); unmatched
+  //               source rows keep their original values.
   val BackfillMode = "milvus.backfill.mode"
-  val BackfillModeOverwrite = "overwrite"
+  val BackfillModeReplace = "replace"
   val BackfillModeCoalesce = "coalesce"
+  val BackfillModeOverwrite = "overwrite"
 
   // Snapshot-based reading options (for offline/client-free mode)
   val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode

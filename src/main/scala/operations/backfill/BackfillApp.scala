@@ -12,7 +12,15 @@ import com.zilliz.spark.connector.MilvusOption
   * --s3-endpoint <endpoint> --s3-bucket <bucket> \ --s3-access-key <key>
   * --s3-secret-key <secret> \ [--s3-root-path <path>] [--s3-region <region>]
   * [--s3-use-ssl] \ [--batch-size <n>] [--output-result <path>] \ [--mode
-  * overwrite|coalesce]
+  * replace|coalesce|overwrite]
+  *
+  * --mode:
+  *   - replace: parquet is absolute source of truth; unmatched source rows get
+  *     null target columns (destructive)
+  *   - coalesce: fill-if-null — source wins when non-null, parquet fills nulls;
+  *     unmatched source rows keep original values (default)
+  *   - overwrite: file overrides matched rows (null included); unmatched source
+  *     rows keep original values
   */
 object BackfillApp {
 
@@ -75,15 +83,17 @@ object BackfillApp {
       mode = parsed.getOrElse("mode", MilvusOption.BackfillModeCoalesce)
     )
 
-    // Surface the default flip (#91) loudly: downstream jobs that omit
-    // --mode silently switched from full-overwrite to fill-if-null, and
-    // client-mode callers now fail validation. Printing to stderr so it
-    // reaches the driver log even when the user's log config hides INFO.
+    // Surface the default (#91) loudly: downstream jobs that omit --mode get
+    // fill-if-null, and client-mode callers fail validation without a
+    // snapshot. Printing to stderr so it reaches the driver log even when the
+    // user's log config hides INFO.
     if (!parsed.contains("mode")) {
       System.err.println(
         s"[BackfillApp] --mode not set; defaulting to '${config.mode}' " +
-          s"(fill-if-null). Pass '--mode ${MilvusOption.BackfillModeOverwrite}' " +
-          "to restore the pre-#91 full-overwrite behavior."
+          s"(fill-if-null). Pass '--mode ${MilvusOption.BackfillModeReplace}' " +
+          "for the pre-#91 full-overwrite behavior, or " +
+          s"'--mode ${MilvusOption.BackfillModeOverwrite}' to overwrite only " +
+          "matched rows."
       )
     }
 
