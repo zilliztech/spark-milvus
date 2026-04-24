@@ -22,7 +22,7 @@ import org.apache.spark.internal.Logging
   *      `MilvusSegmentManifestReader.toV2SegmentInfo` to join the two.
   *
   * The resulting `Seq[V2SegmentInfo]` is the runtime view consumed by
-  * `MilvusPackedV2InputPartition` / `MilvusLoonV2PartitionReader`.
+  * `MilvusPackedV2InputPartition` / `MilvusPackedV2PartitionReader`.
   *
   * Path resolution: AVRO and parquet paths that milvus writes are
   * bucket-relative (`files/snapshots/...`). When `bucket` is non-empty we

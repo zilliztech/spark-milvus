@@ -45,8 +45,13 @@ import io.milvus.storage.{
   NativeLibraryLoader
 }
 
-/** MilvusLoonWriteTable provides write support using Storage V2 FFI This table
-  * is used by MilvusLoonDataSource for write operations
+/** MilvusLoonWriteTable provides write support for StorageV3 (segment-info
+  * `storage_version = 3`, the manifest-based packed parquet format consumed by
+  * milvus-storage's loon reader/writer FFI). Used by MilvusLoonDataSource.
+  *
+  * Naming note: milvus-storage's own library calls this format its "format v2",
+  * hence the "Loon" (= loon manifest) prefix, but in segment-info parlance this
+  * is V3. See `read/MilvusInputPartition.scala` for the full enum.
   */
 case class MilvusLoonWriteTable(
     milvusOption: MilvusOption,
