@@ -4,16 +4,19 @@ import org.apache.spark.sql.connector.read.InputPartition
 
 import com.zilliz.spark.connector.MilvusOption
 
-// Storage V2 InputPartition - requires Milvus 2.6+
+// InputPartition for milvus-segment-info `storage_version = 3` (StorageV3) —
+// the manifest-based packed parquet format consumed by milvus-storage's
+// `loon_reader_new` via `LoonManifest`. See `milvus/internal/storage/rw.go`
+// for the authoritative segment-info enum (V1=0, V2=2, V3=3).
 //
-// Naming note: "V2" here refers to the **milvus-storage format version 2**
-// (manifest-based, consumed by `loon_reader_new` via `LoonManifest`). In
-// milvus's segment-info convention this is `storage_version = 3`
-// (StorageV3). See `milvus/internal/storage/rw.go` for the authoritative
-// segment-info enum. For the **non-manifest packed parquet** segments
-// (segment-info `storage_version = 2`, StorageV2) use
-// [[MilvusPackedV2InputPartition]].
-case class MilvusStorageV2InputPartition(
+// For the non-manifest packed-parquet format (segment-info
+// `storage_version = 2`, StorageV2) use [[MilvusPackedV2InputPartition]].
+//
+// Historical note: this class used to be called `MilvusStorageV2InputPartition`
+// because the underlying milvus-storage library calls its own manifest format
+// "format v2". That collided with the segment-info enum where V2 means
+// something different; the class was renamed to match the enum.
+case class MilvusStorageV3InputPartition(
     manifestPath: String, // Path to manifest in S3/MinIO
     milvusSchemaBytes: Array[Byte], // Serialized protobuf
     partitionName: String,

@@ -235,7 +235,14 @@ case class ManifestContent(
     @JsonProperty("base_path") basePath: String
 )
 
-/** Storage V2 manifest item
+/** One loon manifest entry from the snapshot JSON's `storagev2_manifest_list`.
+  *
+  * NAMING NOTE: despite the "V2" in class name + JSON key, these entries are
+  * StorageV3 (segment-info `storage_version = 3`, manifest-based packed
+  * parquet). The "V2" comes from milvus-storage's library-internal version, not
+  * from the server's segment-info enum. The wire key is emitted by
+  * milvus-datacoord (Go side) and can't be renamed from the connector alone.
+  * See `read/MilvusInputPartition.scala` for the authoritative enum.
   */
 case class StorageV2ManifestItem(
     @JsonProperty("segmentID") @JsonAlias(

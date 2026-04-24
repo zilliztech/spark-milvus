@@ -25,21 +25,22 @@ import io.milvus.storage.{
 }
 
 /** Spark partition reader for milvus-segment-info `storage_version = 2`
-  * (non-manifest packed parquet) segments.
+  * (StorageV2, non-manifest packed parquet) segments.
   *
-  * Unlike [[MilvusLoonPartitionReader]], which resolves a milvus-storage
-  * `.milvus_manifest` file via `MilvusStorageManifest.getColumnGroupsScala`,
-  * this reader is handed a pre-materialized set of [[V2ColumnGroup]]s recovered
-  * from the snapshot AVRO (slot -> file paths) + one parquet footer's
-  * `group_field_id_list` kv-metadata (slot -> real field IDs). The packed
-  * reader then opens only the files for the requested columns.
+  * Unlike [[MilvusLoonPartitionReader]] (which handles StorageV3: manifest
+  * based, resolves a milvus-storage `.milvus_manifest` file via
+  * `MilvusStorageManifest.getColumnGroupsScala`), this reader is handed a
+  * pre-materialized set of [[V2ColumnGroup]]s recovered from the snapshot AVRO
+  * (slot -> file paths) + one parquet footer's `group_field_id_list`
+  * kv-metadata (slot -> real field IDs). The packed reader then opens only the
+  * files for the requested columns.
   *
   * The reader iterates the Arrow stream sequentially (no vector search, no
   * filter pushdown). Backfill only needs the PK column plus positional row
   * metadata added by [[MilvusPartitionReaderFactory]], so the minimal shape
   * fits well.
   */
-class MilvusLoonV2PartitionReader(
+class MilvusPackedV2PartitionReader(
     schema: StructType,
     columnGroups: Seq[V2ColumnGroup],
     milvusSchema: CollectionSchema,

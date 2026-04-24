@@ -135,12 +135,17 @@ object MilvusOption {
 
   // Snapshot-based reading options (for offline/client-free mode)
   val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode
-  val SnapshotManifests =
-    "milvus.snapshot.manifests" // JSON array of StorageV2ManifestItem
-  // JSON array of com.zilliz.spark.connector.read.V2SegmentInfo (StorageV2,
-  // non-manifest packed parquet). Populated by backfill after decoding the
-  // per-segment AVROs + parquet footers; consumed by MilvusDataSource's
-  // snapshot planner to create MilvusPackedV2InputPartition instances.
+  // JSON array of StorageV2ManifestItem. Despite the "V2" in the class name,
+  // these are StorageV3 loon manifests (segment-info storage_version = 3).
+  // The class name + JSON wire key are historical: milvus-storage's library
+  // calls its own manifest format "format v2", which collides with the
+  // server's segment-info enum where V2 means non-manifest packed parquet.
+  val SnapshotManifests = "milvus.snapshot.manifests"
+  // JSON array of com.zilliz.spark.connector.read.V2SegmentInfo — true
+  // StorageV2 (segment-info storage_version = 2, non-manifest packed parquet).
+  // Populated by backfill after decoding the per-segment AVROs + parquet
+  // footers; consumed by MilvusDataSource's snapshot planner to create
+  // MilvusPackedV2InputPartition instances.
   val SnapshotV2Segments = "milvus.snapshot.v2.segments"
   val SnapshotCollectionId = "milvus.snapshot.collection.id"
   val SnapshotPartitionIds = "milvus.snapshot.partition.ids"

@@ -45,7 +45,7 @@ import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
   MilvusPackedV2InputPartition,
   MilvusPartitionReaderFactory,
-  MilvusStorageV2InputPartition
+  MilvusStorageV3InputPartition
 }
 import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}
 import io.milvus.grpc.schema.CollectionSchema
@@ -691,17 +691,18 @@ class MilvusScan(
         partitionID: String
     ): InputPartition = {
       // Build segment path where manifest files exist
-      // V2 segments have manifest files at: rootPath/insert_log/collectionID/partitionID/segmentID/_metadata/
+      // StorageV3 segments have manifest files at:
+      //   rootPath/insert_log/collectionID/partitionID/segmentID/_metadata/
       val segmentPath =
         s"$s3RootPath/insert_log/$collection/$partitionID/$segmentID"
       logInfo(
-        s"Creating V2 partition: segmentID=$segmentID, segmentPath=$segmentPath"
+        s"Creating V3 partition: segmentID=$segmentID, segmentPath=$segmentPath"
       )
 
       val segmentIDLong =
         try { segmentID.toLong }
         catch { case _: NumberFormatException => -1L }
-      MilvusStorageV2InputPartition(
+      MilvusStorageV3InputPartition(
         segmentPath,
         collectionInfo.schema.toByteArray,
         partitionID,
@@ -714,8 +715,11 @@ class MilvusScan(
       )
     }
 
-    // Get all V2 segments with partition info
-    val allV2Segments = client
+    // Get all segments with storage_version >= 2 (StorageV2 packed parquet
+    // without manifest, or StorageV3 packed parquet with loon manifest).
+    // NOTE: current planner treats every >= 2 segment as StorageV3; a separate
+    // task is tracking client-mode StorageV2 (non-manifest) dispatch.
+    val allPackedSegments = client
       .getSegments(
         milvusOption.databaseName,
         milvusOption.collectionName
@@ -725,18 +729,20 @@ class MilvusScan(
       )
       .filter(_.storageVersion >= 2)
 
-    if (allV2Segments.isEmpty) {
+    if (allPackedSegments.isEmpty) {
       throw new IllegalArgumentException(
-        s"No Storage V2 segments found in collection ${milvusOption.collectionName}. " +
-          "This connector requires Milvus 2.6+ with Storage V2. " +
-          "Please ensure the collection has been flushed and contains data."
+        s"No packed-parquet segments (StorageV2/V3) found in collection " +
+          s"${milvusOption.collectionName}. This connector requires Milvus " +
+          "2.6+ with Storage V2 or V3. Please ensure the collection has " +
+          "been flushed and contains data."
       )
     }
 
     val partitions: Array[InputPartition] =
       if (!partition.isEmpty() && !segment.isEmpty()) {
         // Case 1: Specific segment specified - validate segment belongs to partition
-        val segmentInfo = allV2Segments.find(_.segmentID.toString == segment)
+        val segmentInfo =
+          allPackedSegments.find(_.segmentID.toString == segment)
         segmentInfo match {
           case Some(seg) =>
             if (seg.partitionID.toString != partition) {
@@ -747,26 +753,28 @@ class MilvusScan(
             Array(createPartition(segment, partition))
           case None =>
             throw new IllegalArgumentException(
-              s"Segment $segment not found or not a V2 segment (Storage V2 required)"
+              s"Segment $segment not found or has storage_version < 2 " +
+                "(StorageV2/V3 packed parquet required)"
             )
         }
 
       } else if (!partition.isEmpty()) {
-        // Case 2: Partition specified - only process V2 segments in this partition
-        allV2Segments
+        // Case 2: Partition specified - only process packed segments in this partition
+        allPackedSegments
           .filter(_.partitionID.toString == partition)
           .map(seg => createPartition(seg.segmentID.toString, partition))
           .toArray
 
       } else {
-        // Case 3: No partition specified - process all V2 segments
-        allV2Segments.map { seg =>
+        // Case 3: No partition specified - process all packed segments
+        allPackedSegments.map { seg =>
           createPartition(seg.segmentID.toString, seg.partitionID.toString)
         }.toArray
       }
 
     logInfo(
-      s"Created ${partitions.length} partitions for Storage V2 (Milvus 2.6+)"
+      s"Created ${partitions.length} partitions (treating all StorageV2/V3 " +
+        "segments as V3; see V2 dispatch TODO)"
     )
     client.close()
     partitions
@@ -867,7 +875,7 @@ class MilvusScan(
       logInfo(
         s"Creating partition with manifestPath=$basePath, segmentID=$segmentID, readVersion=$readVersion"
       )
-      MilvusStorageV2InputPartition(
+      MilvusStorageV3InputPartition(
         basePath, // The basePath extracted from manifest JSON
         schemaBytes, // Protobuf CollectionSchema bytes from snapshot
         defaultPartitionId, // Partition name/ID
