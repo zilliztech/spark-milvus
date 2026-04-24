@@ -24,12 +24,12 @@ class MilvusPartitionReaderFactory(
       partition: InputPartition
   ): PartitionReader[InternalRow] = {
     partition match {
-      case p: MilvusStorageV2InputPartition =>
+      case p: MilvusStorageV3InputPartition =>
         logInfo(
-          s"Creating V2 reader for partition with segmentID=${p.segmentID}"
+          s"Creating V3 reader for partition with segmentID=${p.segmentID}"
         )
 
-        // Storage V2 doesn't support system fields (row_id, timestamp) and extra metadata columns (segment_id, row_offset)
+        // Storage V3 doesn't support system fields (row_id, timestamp) and extra metadata columns (segment_id, row_offset)
         // Filter them out from the schema for the underlying reader
         val v2Schema = StructType(schema.fields.filter { field =>
           field.name != "row_id" &&
@@ -131,7 +131,7 @@ class MilvusPartitionReaderFactory(
 
         val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
 
-        val underlying = new MilvusLoonV2PartitionReader(
+        val underlying = new MilvusPackedV2PartitionReader(
           innerSchema,
           p.columnGroups,
           milvusSchema,
