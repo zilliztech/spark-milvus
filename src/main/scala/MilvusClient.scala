@@ -37,6 +37,7 @@ import io.milvus.grpc.milvus.{
   DescribeCollectionResponse,
   DescribeSnapshotRequest,
   DropCollectionRequest,
+  DropSnapshotRequest,
   FlushRequest,
   GetImportStateRequest,
   GetImportStateResponse,
@@ -638,33 +639,59 @@ class MilvusClient(params: MilvusConnectionParams) {
       )
       checkStatus("createSnapshot", createStatus).get
 
-      val snapshot = stub.describeSnapshot(
-        DescribeSnapshotRequest(
+      try {
+        val snapshot = stub.describeSnapshot(
+          DescribeSnapshotRequest(
+            name = snapshotName,
+            dbName = dbName,
+            collectionName = collectionName
+          )
+        )
+        checkStatus(
+          "describeSnapshot",
+          snapshot.status.getOrElse(
+            Status(
+              errorCode = ErrorCode.UnexpectedError,
+              reason = "DescribeSnapshot Status is empty"
+            )
+          )
+        ).get
+
+        Success(
+          MilvusSnapshotInfo(
+            name = snapshot.name,
+            description = snapshot.description,
+            collectionName = snapshot.collectionName,
+            partitionNames = snapshot.partitionNames,
+            createTs = snapshot.createTs,
+            s3Location = snapshot.s3Location
+          )
+        )
+      } catch {
+        case e: Exception =>
+          dropSnapshot(dbName, collectionName, snapshotName)
+          throw e
+      }
+    } catch {
+      case e: StatusRuntimeException => Failure(e)
+      case e: Exception              => Failure(e)
+    }
+  }
+
+  def dropSnapshot(
+      dbName: String,
+      collectionName: String,
+      snapshotName: String
+  ): Try[Unit] = {
+    try {
+      val status = stub.dropSnapshot(
+        DropSnapshotRequest(
           name = snapshotName,
           dbName = dbName,
           collectionName = collectionName
         )
       )
-      checkStatus(
-        "describeSnapshot",
-        snapshot.status.getOrElse(
-          Status(
-            errorCode = ErrorCode.UnexpectedError,
-            reason = "DescribeSnapshot Status is empty"
-          )
-        )
-      ).get
-
-      Success(
-        MilvusSnapshotInfo(
-          name = snapshot.name,
-          description = snapshot.description,
-          collectionName = snapshot.collectionName,
-          partitionNames = snapshot.partitionNames,
-          createTs = snapshot.createTs,
-          s3Location = snapshot.s3Location
-        )
-      )
+      checkStatus("dropSnapshot", status).map(_ => ())
     } catch {
       case e: StatusRuntimeException => Failure(e)
       case e: Exception              => Failure(e)

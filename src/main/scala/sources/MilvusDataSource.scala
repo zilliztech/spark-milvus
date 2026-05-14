@@ -435,6 +435,7 @@ class MilvusScanBuilder(
     .split(",")
     .map(_.trim)
     .filter(_.nonEmpty)
+    .map(MilvusOption.normalizeExtraColumnName)
     .toSeq
 
   // Store the filters that can be pushed down
@@ -657,6 +658,12 @@ object MilvusScan {
     }
   }
 
+  def canUseClientSnapshotFastPath(milvusOption: MilvusOption): Boolean = {
+    milvusOption.partitionName.isEmpty &&
+    milvusOption.partitionID.isEmpty &&
+    milvusOption.segmentID.isEmpty
+  }
+
   def buildClientSnapshotOptions(
       baseOptions: Map[String, String],
       collectionName: String,
@@ -730,7 +737,16 @@ class MilvusScan(
 
     val client = MilvusClient(milvusOption)
     try {
-      planInputPartitionsFromClientSnapshot(client).getOrElse {
+      val clientSnapshotPartitions =
+        if (MilvusScan.canUseClientSnapshotFastPath(milvusOption)) {
+          planInputPartitionsFromClientSnapshot(client)
+        } else {
+          debugRead(
+            "client snapshot fast path disabled because partition/segment selector is set"
+          )
+          None
+        }
+      clientSnapshotPartitions.getOrElse {
         val collectionInfo = client
           .getCollectionInfo(
             milvusOption.databaseName,

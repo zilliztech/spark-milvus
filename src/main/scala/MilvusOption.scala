@@ -206,7 +206,7 @@ object MilvusOption extends Logging {
     }
   }
 
-  private def normalizeExtraColumnName(name: String): String = {
+  private[connector] def normalizeExtraColumnName(name: String): String = {
     name match {
       case "segment_id" =>
         logWarning(
