@@ -118,4 +118,12 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
     val err = new RuntimeException("permission denied")
     assert(!MilvusClient.isServiceNotImplemented(err))
   }
+
+  test(
+    "does not classify unrelated unimplemented messages as service not implemented"
+  ) {
+    val err =
+      new RuntimeException("Feature X is unimplemented for storage backend Y")
+    assert(!MilvusClient.isServiceNotImplemented(err))
+  }
 }

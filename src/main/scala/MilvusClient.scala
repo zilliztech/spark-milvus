@@ -884,7 +884,6 @@ object MilvusClient {
       val message = Option(current.getMessage).getOrElse("").toLowerCase
       if (
         message.contains(ServiceNotImplementedMarker) ||
-        message.contains("unimplemented") ||
         message.contains("unknown method")
       ) {
         return true

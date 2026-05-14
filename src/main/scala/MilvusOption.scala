@@ -8,6 +8,7 @@ import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.hadoop.fs.s3a.S3AFileSystem
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
+import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.MilvusConnectionException
 
 /** Vector search configuration for Milvus Storage V2
@@ -158,6 +159,51 @@ object MilvusOption {
   val ClientSnapshotDescription = "milvus.client.snapshot.description"
   val ClientSnapshotCompactionProtectionSeconds =
     "milvus.client.snapshot.compactionProtectionSeconds"
+
+  def configureHadoopS3A(
+      conf: Configuration,
+      options: Map[String, String],
+      bucket: String
+  ): Unit = {
+    val prefix = s"fs.s3a.bucket.$bucket"
+
+    conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    options.get(Properties.FsConfig.FsAddress).foreach { endpoint =>
+      conf.set(s"$prefix.endpoint", endpoint)
+    }
+    options.get(Properties.FsConfig.FsRegion).foreach { region =>
+      conf.set(s"$prefix.endpoint.region", region)
+      conf.set(s"$prefix.region", region)
+    }
+    conf.set(s"$prefix.path.style.access", "true")
+    conf.set(
+      s"$prefix.connection.ssl.enabled",
+      options.getOrElse(Properties.FsConfig.FsUseSSL, "false")
+    )
+
+    val useIam = options
+      .get(Properties.FsConfig.FsUseIam)
+      .exists(_.equalsIgnoreCase("true"))
+    val accessKey = options.get(Properties.FsConfig.FsAccessKeyId)
+    val secretKey = options.get(Properties.FsConfig.FsAccessKeyValue)
+    if (useIam || accessKey.isEmpty || secretKey.isEmpty) {
+      conf.set(
+        s"$prefix.aws.credentials.provider",
+        Seq(
+          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
+          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
+          "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
+        ).mkString(",")
+      )
+    } else {
+      conf.set(s"$prefix.access.key", accessKey.get)
+      conf.set(s"$prefix.secret.key", secretKey.get)
+      conf.set(
+        s"$prefix.aws.credentials.provider",
+        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+      )
+    }
+  }
 
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {

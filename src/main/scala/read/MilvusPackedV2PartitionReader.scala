@@ -71,7 +71,9 @@ class MilvusPackedV2PartitionReader(
 
   private val fieldNameToArrowColumn: Map[String, String] = Map(
     "row_id" -> "RowID",
-    "timestamp" -> "Timestamp"
+    "RowID" -> "RowID",
+    "timestamp" -> "Timestamp",
+    "Timestamp" -> "Timestamp"
   )
 
   // Which column names to ask the packed reader for. Prefer explicit

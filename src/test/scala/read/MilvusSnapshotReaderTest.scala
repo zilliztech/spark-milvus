@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.read
 
+import java.io.ByteArrayInputStream
+
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -8,6 +10,16 @@ import org.scalatest.matchers.should.Matchers
 class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
   private val snapshotFilePath = "src/test/data/sample_snapshot.json"
+
+  test("readUtf8WithLimit rejects oversized snapshot metadata") {
+    val in = new ByteArrayInputStream("abcdef".getBytes("UTF-8"))
+
+    val err = intercept[IllegalArgumentException] {
+      MilvusSnapshotReader.readUtf8WithLimit(in, "snapshot.json", maxBytes = 5)
+    }
+
+    err.getMessage should include("exceeds maximum supported size")
+  }
 
   test("Parse complete snapshot metadata successfully") {
     val result =
@@ -300,12 +312,14 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       includeSystemFields = true
     )
 
-    // Should have 7 fields (including RowID and Timestamp)
+    // Should have 7 fields (including row_id and timestamp)
     sparkSchema.fields should have size 7
 
     // Verify field names
     val fieldNames = sparkSchema.fields.map(_.name)
-    fieldNames should contain allOf ("id", "int64", "float", "varchar", "vector", "RowID", "Timestamp")
+    fieldNames should contain allOf ("row_id", "timestamp", "id", "int64", "float", "varchar", "vector")
+    fieldNames should not contain "RowID"
+    fieldNames should not contain "Timestamp"
   }
 
   test("Get field ID to name mapping") {

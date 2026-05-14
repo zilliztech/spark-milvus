@@ -62,7 +62,12 @@ class MilvusLoonPartitionReader(
   private val sourceSchema = schema
 
   private val fieldNameToId: Map[String, Long] = {
-    val systemFields = Map("row_id" -> 0L, "timestamp" -> 1L)
+    val systemFields = Map(
+      "row_id" -> 0L,
+      "RowID" -> 0L,
+      "timestamp" -> 1L,
+      "Timestamp" -> 1L
+    )
     val userFields = milvusSchema.fields.map { field =>
       field.name -> field.fieldID
     }.toMap

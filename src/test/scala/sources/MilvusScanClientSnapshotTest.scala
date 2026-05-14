@@ -1,11 +1,35 @@
 package com.zilliz.spark.connector.sources
 
+import java.util.HashMap
+
+import org.apache.spark.sql.types.{LongType, StructField, StructType}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.spark.connector.read.{StorageV2ManifestItem, V2SegmentInfo}
 import com.zilliz.spark.connector.MilvusOption
 
 class MilvusScanClientSnapshotTest extends AnyFunSuite {
+  test("snapshot table schema appends requested extra metadata columns") {
+    val rawOptions = new HashMap[String, String]()
+    rawOptions.put(MilvusOption.SnapshotMode, "true")
+    rawOptions.put(MilvusOption.SnapshotManifests, "[]")
+    rawOptions.put(MilvusOption.MilvusCollectionName, "c")
+    rawOptions.put(
+      MilvusOption.MilvusExtraColumns,
+      "$segment_id,$row_offset"
+    )
+    val options = new CaseInsensitiveStringMap(rawOptions)
+    val table = MilvusTable(
+      MilvusOption(options),
+      Some(StructType(Seq(StructField("id", LongType, nullable = false))))
+    )
+
+    assert(
+      table.schema().fieldNames.toSeq == Seq("id", "$segment_id", "$row_offset")
+    )
+  }
+
   test(
     "resolveClientSnapshotLocation prefixes bucket-relative snapshot locations"
   ) {

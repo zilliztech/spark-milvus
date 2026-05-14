@@ -1,6 +1,6 @@
 package com.zilliz.spark.connector.tools
 
-import java.io.ByteArrayOutputStream
+import java.io.FileInputStream
 import java.net.URI
 import java.util.Base64
 
@@ -284,9 +284,9 @@ object MilvusReadApp {
   }
 
   private[tools] def readLocalSnapshotJson(path: String): String = {
-    val source = scala.io.Source.fromFile(path)
-    try source.mkString
-    finally source.close()
+    val in = new FileInputStream(path)
+    try MilvusSnapshotReader.readUtf8WithLimit(in, path)
+    finally in.close()
   }
 
   private[tools] def readSnapshotJson(
@@ -300,18 +300,8 @@ object MilvusReadApp {
       val uri = new URI(normalized)
       val fs = FileSystem.get(uri, hadoopConf)
       val in = fs.open(new Path(uri))
-      try {
-        val out = new ByteArrayOutputStream()
-        val buf = new Array[Byte](8192)
-        var n = in.read(buf)
-        while (n >= 0) {
-          out.write(buf, 0, n)
-          n = in.read(buf)
-        }
-        new String(out.toByteArray, "UTF-8")
-      } finally {
-        in.close()
-      }
+      try MilvusSnapshotReader.readUtf8WithLimit(in, normalized)
+      finally in.close()
     }
   }
 
@@ -321,35 +311,11 @@ object MilvusReadApp {
   ): Unit = {
     if (args.s3Bucket.isEmpty) return
 
-    val bucket = args.s3Bucket
-    val prefix = s"fs.s3a.bucket.$bucket"
-
-    conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    if (args.s3Endpoint.nonEmpty) conf.set(s"$prefix.endpoint", args.s3Endpoint)
-    if (args.s3Region.nonEmpty) {
-      conf.set(s"$prefix.endpoint.region", args.s3Region)
-      conf.set(s"$prefix.region", args.s3Region)
-    }
-    conf.set(s"$prefix.path.style.access", "true")
-    conf.set(s"$prefix.connection.ssl.enabled", args.s3UseSSL.toString)
-
-    if (args.useIam || (args.s3AccessKey.isEmpty && args.s3SecretKey.isEmpty)) {
-      conf.set(
-        s"$prefix.aws.credentials.provider",
-        Seq(
-          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
-          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
-          "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
-        ).mkString(",")
-      )
-    } else {
-      conf.set(s"$prefix.access.key", args.s3AccessKey)
-      conf.set(s"$prefix.secret.key", args.s3SecretKey)
-      conf.set(
-        s"$prefix.aws.credentials.provider",
-        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
-      )
-    }
+    MilvusOption.configureHadoopS3A(
+      conf,
+      buildStorageOptions(args),
+      args.s3Bucket
+    )
   }
 
   private[tools] def applyTransformations(

@@ -1,7 +1,6 @@
 package com.zilliz.spark.connector.sources
 
 import java.{util => ju}
-import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.util.{Base64, HashMap, Map => JMap, UUID}
 import scala.collection.mutable
@@ -163,6 +162,29 @@ case class MilvusTable(
       Seq[String]()
     }
   logInfo(s"MilvusTable fieldIDs: $fieldIDs")
+
+  private def appendExtraColumns(schema: StructType): StructType = {
+    var fields = schema.fields.toSeq
+    def addIfRequested(name: String, field: StructField): Unit = {
+      if (
+        milvusOption.extraColumns
+          .contains(name) && !fields.exists(_.name == name)
+      ) {
+        fields = fields :+ field
+      }
+    }
+
+    addIfRequested("partition", StructField("partition", StringType, true))
+    addIfRequested(
+      MilvusOption.MilvusExtraColumnSegmentID,
+      StructField(MilvusOption.MilvusExtraColumnSegmentID, LongType, false)
+    )
+    addIfRequested(
+      MilvusOption.MilvusExtraColumnRowOffset,
+      StructField(MilvusOption.MilvusExtraColumnRowOffset, LongType, false)
+    )
+    StructType(fields)
+  }
 
   /** Check if snapshot mode is enabled (data comes from snapshot, not client).
     *
@@ -349,7 +371,7 @@ case class MilvusTable(
       logInfo(
         s"Using provided sparkSchema in snapshot mode: ${sparkSchema.get.fieldNames.mkString(", ")}"
       )
-      return sparkSchema.get
+      return appendExtraColumns(sparkSchema.get)
     }
 
     // Client-based mode or snapshot mode without provided schema: compute from milvusCollection
@@ -388,36 +410,7 @@ case class MilvusTable(
     ) {
       fields = fields :+ StructField("$meta", StringType, true)
     }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnPartition
-      )
-    ) {
-      fields = fields :+ StructField("partition", StringType, true)
-    }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnSegmentID
-      )
-    ) {
-      fields = fields :+ StructField(
-        MilvusOption.MilvusExtraColumnSegmentID,
-        LongType,
-        false
-      )
-    }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnRowOffset
-      )
-    ) {
-      fields = fields :+ StructField(
-        MilvusOption.MilvusExtraColumnRowOffset,
-        LongType,
-        false
-      )
-    }
-    StructType(fields)
+    appendExtraColumns(StructType(fields))
   }
 
   override def capabilities(): ju.Set[TableCapability] = {
@@ -980,46 +973,7 @@ class MilvusScan(
       Properties.FsConfig.FsBucketName,
       "a-bucket"
     )
-    val prefix = s"fs.s3a.bucket.$bucket"
-
-    conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    milvusOption.options.get(Properties.FsConfig.FsAddress).foreach {
-      endpoint =>
-        conf.set(s"$prefix.endpoint", endpoint)
-    }
-    milvusOption.options.get(Properties.FsConfig.FsRegion).foreach { region =>
-      conf.set(s"$prefix.endpoint.region", region)
-      conf.set(s"$prefix.region", region)
-    }
-    conf.set(s"$prefix.path.style.access", "true")
-    conf.set(
-      s"$prefix.connection.ssl.enabled",
-      milvusOption.options.getOrElse(Properties.FsConfig.FsUseSSL, "false")
-    )
-
-    val useIam = milvusOption.options
-      .get(Properties.FsConfig.FsUseIam)
-      .exists(_.equalsIgnoreCase("true"))
-    val accessKey = milvusOption.options.get(Properties.FsConfig.FsAccessKeyId)
-    val secretKey =
-      milvusOption.options.get(Properties.FsConfig.FsAccessKeyValue)
-    if (useIam || accessKey.isEmpty || secretKey.isEmpty) {
-      conf.set(
-        s"$prefix.aws.credentials.provider",
-        Seq(
-          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
-          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
-          "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
-        ).mkString(",")
-      )
-    } else {
-      conf.set(s"$prefix.access.key", accessKey.get)
-      conf.set(s"$prefix.secret.key", secretKey.get)
-      conf.set(
-        s"$prefix.aws.credentials.provider",
-        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
-      )
-    }
+    MilvusOption.configureHadoopS3A(conf, milvusOption.options, bucket)
     conf
   }
 
@@ -1027,18 +981,8 @@ class MilvusScan(
     val uri = new URI(path)
     val fs = FileSystem.get(uri, conf)
     val in = fs.open(new Path(uri))
-    try {
-      val out = new ByteArrayOutputStream()
-      val buf = new Array[Byte](8192)
-      var n = in.read(buf)
-      while (n >= 0) {
-        out.write(buf, 0, n)
-        n = in.read(buf)
-      }
-      new String(out.toByteArray, "UTF-8")
-    } finally {
-      in.close()
-    }
+    try MilvusSnapshotReader.readUtf8WithLimit(in, path)
+    finally in.close()
   }
 
   /** Plan input partitions from snapshot manifests (offline mode - no client
