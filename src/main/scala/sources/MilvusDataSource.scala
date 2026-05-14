@@ -1,10 +1,14 @@
 package com.zilliz.spark.connector.sources
 
 import java.{util => ju}
-import java.util.{HashMap, Map => JMap}
+import java.io.ByteArrayOutputStream
+import java.net.URI
+import java.util.{Base64, HashMap, Map => JMap, UUID}
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.catalog.{
   SupportsRead,
@@ -45,7 +49,11 @@ import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
   MilvusPackedV2InputPartition,
   MilvusPartitionReaderFactory,
-  MilvusStorageV3InputPartition
+  MilvusSnapshotReader,
+  MilvusStorageV3InputPartition,
+  StorageV2ManifestItem,
+  V2SegmentInfo,
+  V2SegmentLoader
 }
 import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}
 import io.milvus.grpc.schema.CollectionSchema
@@ -392,14 +400,22 @@ case class MilvusTable(
         MilvusOption.MilvusExtraColumnSegmentID
       )
     ) {
-      fields = fields :+ StructField("segment_id", LongType, false)
+      fields = fields :+ StructField(
+        MilvusOption.MilvusExtraColumnSegmentID,
+        LongType,
+        false
+      )
     }
     if (
       milvusOption.extraColumns.contains(
         MilvusOption.MilvusExtraColumnRowOffset
       )
     ) {
-      fields = fields :+ StructField("row_offset", LongType, false)
+      fields = fields :+ StructField(
+        MilvusOption.MilvusExtraColumnRowOffset,
+        LongType,
+        false
+      )
     }
     StructType(fields)
   }
@@ -506,15 +522,15 @@ class MilvusScanBuilder(
     }
     if (
       extraColumns.contains(MilvusOption.MilvusExtraColumnSegmentID) &&
-      !fieldNames.contains("segment_id")
+      !fieldNames.contains(MilvusOption.MilvusExtraColumnSegmentID)
     ) {
-      fieldNames = fieldNames :+ "segment_id"
+      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnSegmentID
     }
     if (
       extraColumns.contains(MilvusOption.MilvusExtraColumnRowOffset) &&
-      !fieldNames.contains("row_offset")
+      !fieldNames.contains(MilvusOption.MilvusExtraColumnRowOffset)
     ) {
-      fieldNames = fieldNames :+ "row_offset"
+      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnRowOffset
     }
 
     currentOptions = new CaseInsensitiveStringMap(tmpMap)
@@ -622,6 +638,61 @@ class MilvusScanBuilder(
   }
 }
 
+object MilvusScan {
+  private val SnapshotOptionKeys = Seq(
+    MilvusOption.SnapshotManifests,
+    MilvusOption.SnapshotV2Segments,
+    MilvusOption.SnapshotCollectionId,
+    MilvusOption.SnapshotPartitionIds,
+    MilvusOption.SnapshotSchemaJson,
+    MilvusOption.SnapshotSchemaBytes
+  )
+
+  def resolveClientSnapshotLocation(
+      location: String,
+      bucket: String
+  ): String = {
+    val trimmed = Option(location).map(_.trim).getOrElse("")
+    if (trimmed.isEmpty) {
+      throw new IllegalArgumentException("snapshot s3_location is empty")
+    } else if (trimmed.startsWith("s3a://")) {
+      trimmed
+    } else if (trimmed.startsWith("s3://")) {
+      "s3a://" + trimmed.stripPrefix("s3://")
+    } else {
+      s"s3a://${bucket}/${trimmed.stripPrefix("/")}"
+    }
+  }
+
+  def buildClientSnapshotOptions(
+      baseOptions: Map[String, String],
+      collectionName: String,
+      collectionId: Long,
+      partitionIds: Seq[Long],
+      snapshotJson: String,
+      schemaBytesBase64: String,
+      manifestList: Seq[StorageV2ManifestItem],
+      v2Segments: Seq[V2SegmentInfo]
+  ): Map[String, String] = {
+    var out = baseOptions -- SnapshotOptionKeys
+    out = out ++ Map(
+      MilvusOption.SnapshotMode -> "true",
+      MilvusOption.MilvusCollectionName -> collectionName,
+      MilvusOption.SnapshotCollectionId -> collectionId.toString,
+      MilvusOption.SnapshotPartitionIds -> partitionIds.mkString(","),
+      MilvusOption.SnapshotSchemaJson -> snapshotJson,
+      MilvusOption.SnapshotSchemaBytes -> schemaBytesBase64,
+      MilvusOption.SnapshotManifests ->
+        MilvusSnapshotReader.serializeManifestList(manifestList)
+    )
+    if (v2Segments.nonEmpty) {
+      out += MilvusOption.SnapshotV2Segments ->
+        MilvusSnapshotReader.serializeV2Segments(v2Segments)
+    }
+    out
+  }
+}
+
 class MilvusScan(
     schema: StructType,
     options: CaseInsensitiveStringMap,
@@ -630,6 +701,12 @@ class MilvusScan(
     with Batch
     with Logging {
   private val milvusOption = MilvusOption(options)
+  private val readDebugEnabled = Option(options.get(MilvusOption.ReaderDebug))
+    .exists(_.equalsIgnoreCase("true"))
+
+  private def debugRead(message: => String): Unit = {
+    if (readDebugEnabled) System.err.println(s"[MilvusReadDebug] $message")
+  }
 
   // Get vector search configuration from MilvusOption
   private val vectorSearchConfig = milvusOption.vectorSearchConfig
@@ -648,55 +725,170 @@ class MilvusScan(
   override def toBatch: Batch = this
 
   override def planInputPartitions(): Array[InputPartition] = {
-    // Check if snapshot data is provided (offline/snapshot mode).
-    // Either legacy manifest-based (V3) or packed-parquet (V2) segments.
     val snapshotManifests = Option(options.get(MilvusOption.SnapshotManifests))
     val snapshotV2 = Option(options.get(MilvusOption.SnapshotV2Segments))
     if (snapshotManifests.isDefined || snapshotV2.isDefined) {
       return planInputPartitionsFromSnapshot(snapshotManifests.getOrElse(""))
     }
 
-    // Validate required parameters
     if (milvusOption.collectionName.isEmpty) {
       throw new IllegalArgumentException("collectionName cannot be empty")
     }
 
-    val collection = milvusOption.collectionID
-    val partition = milvusOption.partitionID
-    val segment = milvusOption.segmentID
-
     val client = MilvusClient(milvusOption)
+    try {
+      planInputPartitionsFromClientSnapshot(client).getOrElse {
+        val collectionInfo = client
+          .getCollectionInfo(
+            milvusOption.databaseName,
+            milvusOption.collectionName
+          )
+          .getOrElse(
+            throw new Exception(
+              s"Collection ${milvusOption.collectionName} not found"
+            )
+          )
+        planInputPartitionsFromLegacyClient(client, collectionInfo)
+      }
+    } finally {
+      client.close()
+    }
+  }
 
-    // Get collection schema and S3 config for manifest building
-    val collectionInfo = client
-      .getCollectionInfo(
-        milvusOption.databaseName,
-        milvusOption.collectionName
-      )
-      .getOrElse(
-        throw new Exception(
-          s"Collection ${milvusOption.collectionName} not found"
-        )
-      )
+  private def planInputPartitionsFromClientSnapshot(
+      client: MilvusClient
+  ): Option[Array[InputPartition]] = {
     val s3Bucket = milvusOption.options.getOrElse(
       Properties.FsConfig.FsBucketName,
       "a-bucket"
     )
+    val snapshotName = Option(options.get(MilvusOption.ClientSnapshotName))
+      .filter(_.trim.nonEmpty)
+      .getOrElse(
+        s"spark_read_${milvusOption.collectionName}_${System
+            .currentTimeMillis()}_${UUID.randomUUID().toString.replace("-", "")}"
+      )
+    val description = Option(
+      options.get(MilvusOption.ClientSnapshotDescription)
+    ).filter(_.trim.nonEmpty).getOrElse("spark connector client read snapshot")
+    val protectionSeconds = Option(
+      options.get(MilvusOption.ClientSnapshotCompactionProtectionSeconds)
+    ).filter(_.trim.nonEmpty).map(_.toLong).getOrElse(86400L)
+
+    client.createSnapshotForRead(
+      milvusOption.databaseName,
+      milvusOption.collectionName,
+      snapshotName,
+      description,
+      protectionSeconds
+    ) match {
+      case scala.util.Success(snapshot) =>
+        val snapshotPath = MilvusScan.resolveClientSnapshotLocation(
+          snapshot.s3Location,
+          s3Bucket
+        )
+        debugRead(
+          s"client snapshot created name=${snapshot.name} path=$snapshotPath " +
+            s"protectionSeconds=$protectionSeconds"
+        )
+        Some(planInputPartitionsFromClientSnapshotPath(snapshotPath))
+
+      case scala.util.Failure(e) if MilvusClient.isServiceNotImplemented(e) =>
+        logWarning(
+          "CreateSnapshot/DescribeSnapshot is not implemented by this Milvus " +
+            "service; falling back to legacy GetPersistentSegmentInfo read path"
+        )
+        debugRead(s"client snapshot unavailable: ${e.getMessage}")
+        None
+
+      case scala.util.Failure(e) =>
+        throw new RuntimeException(
+          s"Failed to create client read snapshot for collection " +
+            s"${milvusOption.collectionName}: ${e.getMessage}",
+          e
+        )
+    }
+  }
+
+  private def planInputPartitionsFromClientSnapshotPath(
+      snapshotPath: String
+  ): Array[InputPartition] = {
+    val hadoopConf = buildSnapshotHadoopConf()
+    val snapshotJson = readAllBytes(hadoopConf, snapshotPath)
+    val metadata =
+      MilvusSnapshotReader.parseSnapshotMetadata(snapshotJson) match {
+        case Right(value) => value
+        case Left(err) =>
+          throw new IllegalArgumentException(
+            s"Failed to parse client-created snapshot metadata: ${err.getMessage}",
+            err
+          )
+      }
+
+    val s3Bucket = milvusOption.options.getOrElse(
+      Properties.FsConfig.FsBucketName,
+      "a-bucket"
+    )
+    val v2Segments = if (metadata.manifestList.nonEmpty) {
+      V2SegmentLoader.loadV2Segments(
+        metadata.manifestList,
+        s3Bucket,
+        hadoopConf
+      ) match {
+        case Right(segs) => segs
+        case Left(err) =>
+          throw new IllegalStateException(
+            s"Failed to load StorageV2 segments from client-created snapshot: ${err.getMessage}",
+            err
+          )
+      }
+    } else Seq.empty
+
+    val schemaBytes = MilvusSnapshotReader.toProtobufSchemaBytes(
+      metadata.collection.schema
+    )
+    val snapshotOptions = MilvusScan.buildClientSnapshotOptions(
+      options.asScala.toMap,
+      collectionName = metadata.collection.schema.name,
+      collectionId = metadata.snapshotInfo.collectionId,
+      partitionIds = metadata.snapshotInfo.partitionIds,
+      snapshotJson = snapshotJson,
+      schemaBytesBase64 = Base64.getEncoder.encodeToString(schemaBytes),
+      manifestList = metadata.storageV2ManifestList.getOrElse(Seq.empty),
+      v2Segments = v2Segments
+    )
+
+    new MilvusScan(
+      schema,
+      new CaseInsensitiveStringMap(snapshotOptions.asJava),
+      pushedFilters
+    ).planInputPartitions()
+  }
+
+  private def planInputPartitionsFromLegacyClient(
+      client: MilvusClient,
+      collectionInfo: MilvusCollectionInfo
+  ): Array[InputPartition] = {
+    val collection = milvusOption.collectionID
+    val partition = milvusOption.partitionID
+    val segment = milvusOption.segmentID
     val s3RootPath =
       milvusOption.options.getOrElse(Properties.FsConfig.FsRootPath, "files")
 
-    // Helper function to create InputPartition from segment info
     def createPartition(
         segmentID: String,
         partitionID: String
     ): InputPartition = {
-      // Build segment path where manifest files exist
-      // StorageV3 segments have manifest files at:
-      //   rootPath/insert_log/collectionID/partitionID/segmentID/_metadata/
       val segmentPath =
         s"$s3RootPath/insert_log/$collection/$partitionID/$segmentID"
       logInfo(
         s"Creating V3 partition: segmentID=$segmentID, segmentPath=$segmentPath"
+      )
+      debugRead(
+        s"planner selected reader=V3 segmentID=$segmentID " +
+          s"partitionID=$partitionID collectionID=$collection " +
+          s"segmentPath=$segmentPath " +
+          "note=fallback-old-client-grpc-path"
       )
 
       val segmentIDLong =
@@ -715,11 +907,7 @@ class MilvusScan(
       )
     }
 
-    // Get all segments with storage_version >= 2 (StorageV2 packed parquet
-    // without manifest, or StorageV3 packed parquet with loon manifest).
-    // NOTE: current planner treats every >= 2 segment as StorageV3; a separate
-    // task is tracking client-mode StorageV2 (non-manifest) dispatch.
-    val allPackedSegments = client
+    val allSegments = client
       .getSegments(
         milvusOption.databaseName,
         milvusOption.collectionName
@@ -727,7 +915,23 @@ class MilvusScan(
       .getOrElse(
         throw new Exception("Failed to get segments")
       )
-      .filter(_.storageVersion >= 2)
+    debugRead(
+      s"client planner collection=${milvusOption.collectionName} " +
+        s"collectionID=$collection requestedPartition=$partition " +
+        s"requestedSegment=$segment totalSegments=${allSegments.size}"
+    )
+    allSegments.foreach { seg =>
+      debugRead(
+        s"client segment segmentID=${seg.segmentID} " +
+          s"partitionID=${seg.partitionID} collectionID=${seg.collectionID} " +
+          s"numRows=${seg.numRows} state=${seg.state} level=${seg.level} " +
+          s"storageVersion=${seg.storageVersion}"
+      )
+    }
+    val allPackedSegments = allSegments.filter(_.storageVersion >= 2)
+    debugRead(
+      s"client planner selected packedSegments=${allPackedSegments.size}"
+    )
 
     if (allPackedSegments.isEmpty) {
       throw new IllegalArgumentException(
@@ -739,45 +943,102 @@ class MilvusScan(
     }
 
     val partitions: Array[InputPartition] =
-      if (!partition.isEmpty() && !segment.isEmpty()) {
-        // Case 1: Specific segment specified - validate segment belongs to partition
-        val segmentInfo =
-          allPackedSegments.find(_.segmentID.toString == segment)
-        segmentInfo match {
-          case Some(seg) =>
-            if (seg.partitionID.toString != partition) {
-              throw new IllegalArgumentException(
-                s"Segment $segment belongs to partition ${seg.partitionID}, not $partition"
-              )
-            }
+      if (partition.nonEmpty && segment.nonEmpty) {
+        allPackedSegments.find(_.segmentID.toString == segment) match {
+          case Some(seg) if seg.partitionID.toString == partition =>
             Array(createPartition(segment, partition))
+          case Some(seg) =>
+            throw new IllegalArgumentException(
+              s"Segment $segment belongs to partition ${seg.partitionID}, not $partition"
+            )
           case None =>
             throw new IllegalArgumentException(
               s"Segment $segment not found or has storage_version < 2 " +
                 "(StorageV2/V3 packed parquet required)"
             )
         }
-
-      } else if (!partition.isEmpty()) {
-        // Case 2: Partition specified - only process packed segments in this partition
+      } else if (partition.nonEmpty) {
         allPackedSegments
           .filter(_.partitionID.toString == partition)
           .map(seg => createPartition(seg.segmentID.toString, partition))
           .toArray
-
       } else {
-        // Case 3: No partition specified - process all packed segments
         allPackedSegments.map { seg =>
           createPartition(seg.segmentID.toString, seg.partitionID.toString)
         }.toArray
       }
 
     logInfo(
-      s"Created ${partitions.length} partitions (treating all StorageV2/V3 " +
-        "segments as V3; see V2 dispatch TODO)"
+      s"Created ${partitions.length} partitions via legacy client path"
     )
-    client.close()
     partitions
+  }
+
+  private def buildSnapshotHadoopConf(): Configuration = {
+    val conf = new Configuration()
+    val bucket = milvusOption.options.getOrElse(
+      Properties.FsConfig.FsBucketName,
+      "a-bucket"
+    )
+    val prefix = s"fs.s3a.bucket.$bucket"
+
+    conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    milvusOption.options.get(Properties.FsConfig.FsAddress).foreach {
+      endpoint =>
+        conf.set(s"$prefix.endpoint", endpoint)
+    }
+    milvusOption.options.get(Properties.FsConfig.FsRegion).foreach { region =>
+      conf.set(s"$prefix.endpoint.region", region)
+      conf.set(s"$prefix.region", region)
+    }
+    conf.set(s"$prefix.path.style.access", "true")
+    conf.set(
+      s"$prefix.connection.ssl.enabled",
+      milvusOption.options.getOrElse(Properties.FsConfig.FsUseSSL, "false")
+    )
+
+    val useIam = milvusOption.options
+      .get(Properties.FsConfig.FsUseIam)
+      .exists(_.equalsIgnoreCase("true"))
+    val accessKey = milvusOption.options.get(Properties.FsConfig.FsAccessKeyId)
+    val secretKey =
+      milvusOption.options.get(Properties.FsConfig.FsAccessKeyValue)
+    if (useIam || accessKey.isEmpty || secretKey.isEmpty) {
+      conf.set(
+        s"$prefix.aws.credentials.provider",
+        Seq(
+          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
+          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
+          "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
+        ).mkString(",")
+      )
+    } else {
+      conf.set(s"$prefix.access.key", accessKey.get)
+      conf.set(s"$prefix.secret.key", secretKey.get)
+      conf.set(
+        s"$prefix.aws.credentials.provider",
+        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+      )
+    }
+    conf
+  }
+
+  private def readAllBytes(conf: Configuration, path: String): String = {
+    val uri = new URI(path)
+    val fs = FileSystem.get(uri, conf)
+    val in = fs.open(new Path(uri))
+    try {
+      val out = new ByteArrayOutputStream()
+      val buf = new Array[Byte](8192)
+      var n = in.read(buf)
+      while (n >= 0) {
+        out.write(buf, 0, n)
+        n = in.read(buf)
+      }
+      new String(out.toByteArray, "UTF-8")
+    } finally {
+      in.close()
+    }
   }
 
   /** Plan input partitions from snapshot manifests (offline mode - no client
@@ -842,6 +1103,11 @@ class MilvusScan(
     logInfo(
       s"Using schema bytes (${schemaBytes.length} bytes) for V2 partitions"
     )
+    debugRead(
+      s"snapshot planner v3ManifestCount=${manifestList.size} " +
+        s"partitionIds=${partitionIds.mkString(",")} " +
+        s"defaultPartitionId=$defaultPartitionId schemaBytes=${schemaBytes.length}"
+    )
 
     // Create V2 input partitions from snapshot manifests
     val v2Partitions = manifestList.map { item =>
@@ -875,6 +1141,11 @@ class MilvusScan(
       logInfo(
         s"Creating partition with manifestPath=$basePath, segmentID=$segmentID, readVersion=$readVersion"
       )
+      debugRead(
+        s"snapshot segment reader=V3 segmentID=$segmentID " +
+          s"partitionID=$defaultPartitionId basePath=$basePath " +
+          s"readVersion=$readVersion rawManifest=${item.manifest}"
+      )
       MilvusStorageV3InputPartition(
         basePath, // The basePath extracted from manifest JSON
         schemaBytes, // Protobuf CollectionSchema bytes from snapshot
@@ -905,6 +1176,21 @@ class MilvusScan(
                   s"SnapshotV2Segments option"
               )
               segs.map { seg =>
+                debugRead(
+                  s"snapshot segment reader=V2 segmentID=${seg.segmentId} " +
+                    s"partitionID=${seg.partitionId} numRows=${seg.numOfRows} " +
+                    s"storageVersion=${seg.storageVersion} " +
+                    s"columnGroups=${seg.columnGroups.size}"
+                )
+                seg.columnGroups.zipWithIndex.foreach { case (cg, idx) =>
+                  debugRead(
+                    s"snapshot V2 columnGroup[$idx] segmentID=${seg.segmentId} " +
+                      s"slotFieldId=${cg.slotFieldId} " +
+                      s"fieldIds=${cg.fieldIds.mkString(",")} " +
+                      s"files=${cg.filePaths.mkString(",")} " +
+                      s"rowCounts=${cg.fileRowCounts.mkString(",")}"
+                  )
+                }
                 MilvusPackedV2InputPartition(
                   segmentID = seg.segmentId,
                   partitionID = seg.partitionId,

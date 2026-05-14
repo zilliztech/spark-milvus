@@ -66,15 +66,13 @@ class MilvusPackedV2PartitionReader(
     systemFields ++ userFields
   }
   private val fieldNameToId: Map[String, Long] =
-    fieldIdToName.map { case (id, name) => name -> id }
+    fieldIdToName.map { case (id, name) => name -> id } ++
+      Map("row_id" -> 0L, "timestamp" -> 1L)
 
-  // V3 readers pass a {sparkName -> fieldId-as-string} map to ArrowConverter
-  // because their on-disk parquet uses fieldId-as-string column names. V2
-  // packed parquet uses LOGICAL names (e.g. "ID"), so we must NOT remap —
-  // ArrowConverter calls `root.getVector(field.name)` directly when the
-  // mapping is empty, which is exactly what we need here. Remapping would
-  // make it look up a non-existent column and silently null every cell.
-  private val fieldNameToArrowColumn: Map[String, String] = Map.empty
+  private val fieldNameToArrowColumn: Map[String, String] = Map(
+    "row_id" -> "RowID",
+    "timestamp" -> "Timestamp"
+  )
 
   // Which column names to ask the packed reader for. Prefer explicit
   // projection from neededColumnFieldIds; fall back to sourceSchema's Spark
@@ -90,6 +88,13 @@ class MilvusPackedV2PartitionReader(
     val declared: Set[String] =
       columnGroups.flatMap(_.fieldIds.flatMap(fieldIdToName.get)).toSet
     explicitNames.filter(name => declared.contains(name)).toArray
+  }
+  private val readDebugEnabled = milvusOption.options
+    .get(MilvusOption.ReaderDebug)
+    .exists(_.equalsIgnoreCase("true"))
+
+  private def debugRead(message: => String): Unit = {
+    if (readDebugEnabled) System.err.println(s"[MilvusReadDebug] $message")
   }
 
   // Native resource handles. Initialized to safe defaults so a partial-init
@@ -138,6 +143,20 @@ class MilvusPackedV2PartitionReader(
       )
       cg.fileRowCounts.toArray
     }.toArray
+    debugRead(
+      s"V2 reader opening neededColumns=${neededColumns.mkString(",")} " +
+        s"sourceSchema=${sourceSchema.fieldNames.mkString(",")} " +
+        s"columnGroups=${columnGroups.size}"
+    )
+    columnGroups.zipWithIndex.foreach { case (cg, idx) =>
+      debugRead(
+        s"V2 reader columnGroup[$idx] slotFieldId=${cg.slotFieldId} " +
+          s"fieldIds=${cg.fieldIds.mkString(",")} " +
+          s"columns=${cols(idx).mkString(",")} " +
+          s"files=${files(idx).mkString(",")} " +
+          s"rowCounts=${rowCounts(idx).mkString(",")}"
+      )
+    }
     columnGroupsPtr =
       MilvusStorageColumnGroups.createFromGroups(cols, files, rowCounts)
 

@@ -42,6 +42,8 @@ object MilvusBackfill {
     * function, and stripped from the projection written to parquet.
     */
   private[backfill] val MatchFlagCol = "__bf_matched__"
+  private[backfill] val SegmentIdCol = MilvusOption.MilvusExtraColumnSegmentID
+  private[backfill] val RowOffsetCol = MilvusOption.MilvusExtraColumnRowOffset
 
   /** Per-field flag columns added in any mode that reads source-side target
     * values (coalesce + overwrite). For each new field, one boolean marker
@@ -666,8 +668,8 @@ object MilvusBackfill {
 
           // Add extra columns for segment tracking
           val fullSchema = withExtras
-            .add("segment_id", org.apache.spark.sql.types.LongType, false)
-            .add("row_offset", org.apache.spark.sql.types.LongType, false)
+            .add(SegmentIdCol, org.apache.spark.sql.types.LongType, false)
+            .add(RowOffsetCol, org.apache.spark.sql.types.LongType, false)
 
           logger.info(
             s"Reading with schema: ${fullSchema.fieldNames.mkString(", ")}"
@@ -687,14 +689,13 @@ object MilvusBackfill {
             .load()
       }
 
-      // Validate that segment_id and row_offset are present
       if (
-        !df.columns.contains("segment_id") || !df.columns.contains("row_offset")
+        !df.columns.contains(SegmentIdCol) || !df.columns.contains(RowOffsetCol)
       ) {
         return Left(
           ConnectionError(
             message =
-              "Failed to read collection data with segment_id and row_offset. " +
+              s"Failed to read collection data with $SegmentIdCol and $RowOffsetCol. " +
                 "Ensure milvus.extra.columns is set correctly."
           )
         )
@@ -979,7 +980,7 @@ object MilvusBackfill {
         else Seq.empty
       val preparedDF = joinedDF
         .select(
-          (Seq("segment_id", "row_offset") ++ newFieldNames ++ Seq(
+          (Seq(SegmentIdCol, RowOffsetCol) ++ newFieldNames ++ Seq(
             MatchFlagCol
           ) ++ flagColNames).map(col): _*
         )

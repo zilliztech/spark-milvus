@@ -66,12 +66,12 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
   test("Parse extra columns configuration") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
-      MilvusOption.MilvusExtraColumns -> "partition, segment_id, row_offset"
+      MilvusOption.MilvusExtraColumns -> "partition, $segment_id, $row_offset"
     )
 
     val milvusOption = MilvusOption(options)
 
-    milvusOption.extraColumns should contain allOf ("partition", "segment_id", "row_offset")
+    milvusOption.extraColumns should contain allOf ("partition", "$segment_id", "$row_offset")
     milvusOption.extraColumns.size shouldBe 3
   }
 

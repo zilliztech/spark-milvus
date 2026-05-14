@@ -15,6 +15,20 @@ import org.apache.spark.unsafe.types.UTF8String
   */
 object ArrowConverter extends Logging {
 
+  private def variableWidthBytes(
+      vector: FieldVector,
+      rowIndex: Int
+  ): Array[Byte] = {
+    vector match {
+      case v: VarCharVector   => v.get(rowIndex)
+      case v: VarBinaryVector => v.get(rowIndex)
+      case other =>
+        throw new IllegalArgumentException(
+          s"Expected variable-width Arrow vector, got ${other.getClass.getName}"
+        )
+    }
+  }
+
   /** Convert an Arrow VectorSchemaRoot row to Spark InternalRow
     *
     * @param root
@@ -90,8 +104,7 @@ object ArrowConverter extends Logging {
         vector.asInstanceOf[BitVector].get(rowIndex) != 0
 
       case StringType =>
-        val bytes = vector.asInstanceOf[VarCharVector].get(rowIndex)
-        UTF8String.fromBytes(bytes)
+        UTF8String.fromBytes(variableWidthBytes(vector, rowIndex))
 
       case ArrayType(FloatType, _) =>
         // FloatVector stored as FixedSizeBinaryVector
@@ -121,8 +134,7 @@ object ArrowConverter extends Logging {
         ArrayData.toArrayData(arrayElements)
 
       case BinaryType =>
-        val bytes = vector.asInstanceOf[VarBinaryVector].get(rowIndex)
-        bytes
+        variableWidthBytes(vector, rowIndex)
 
       case MapType(keyType, valueType, _) =>
         val mapVector = vector.asInstanceOf[MapVector]

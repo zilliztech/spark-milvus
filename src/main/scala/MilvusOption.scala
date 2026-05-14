@@ -65,13 +65,14 @@ object MilvusOption {
 
   val MilvusExtraColumns = "milvus.extra.columns"
   val MilvusExtraColumnPartition = "partition"
-  val MilvusExtraColumnSegmentID = "segment_id"
-  val MilvusExtraColumnRowOffset = "row_offset"
+  val MilvusExtraColumnSegmentID = "$segment_id"
+  val MilvusExtraColumnRowOffset = "$row_offset"
 
   // reader config
   val ReaderPath = "path"
   val ReaderType = "type"
   val ReaderFieldIDs = "fieldIDs"
+  val ReaderDebug = "milvus.reader.debug"
 
   // vector search config
   val VectorSearchQueryVector = "vector.search.query"
@@ -153,6 +154,10 @@ object MilvusOption {
     "milvus.snapshot.schema.json" // Optional: raw schema JSON for building MilvusCollectionInfo
   val SnapshotSchemaBytes =
     "milvus.snapshot.schema.bytes" // Base64 encoded protobuf CollectionSchema bytes
+  val ClientSnapshotName = "milvus.client.snapshot.name"
+  val ClientSnapshotDescription = "milvus.client.snapshot.description"
+  val ClientSnapshotCompactionProtectionSeconds =
+    "milvus.client.snapshot.compactionProtectionSeconds"
 
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {

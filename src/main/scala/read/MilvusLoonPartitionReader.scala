@@ -73,6 +73,15 @@ class MilvusLoonPartitionReader(
     fieldNameToId.map { case (name, id) => name -> id.toString }
 
   private val columnNames = getColumnNames()
+  private val readDebugEnabled = milvusOption.options
+    .get(MilvusOption.ReaderDebug)
+    .exists(_.equalsIgnoreCase("true")) || optionsMap
+    .get(MilvusOption.ReaderDebug)
+    .exists(_.equalsIgnoreCase("true"))
+
+  private def debugRead(message: => String): Unit = {
+    if (readDebugEnabled) System.err.println(s"[MilvusReadDebug] $message")
+  }
 
   // Native resource handles. Initialized to safe defaults so a partial-init
   // failure can roll back whatever was allocated so far via releaseAll().
@@ -106,6 +115,16 @@ class MilvusLoonPartitionReader(
 
     // Reader properties from MilvusOption.
     readerProperties = Properties.fromMilvusOption(milvusOption)
+    debugRead(
+      s"V3 reader opening manifestPath=$manifestPath " +
+        s"requestedReadVersion=$readVersion " +
+        s"requestedColumns=${columnNames.mkString(",")} " +
+        s"sourceSchema=${sourceSchema.fieldNames.mkString(",")} " +
+        s"fieldNameToId=${fieldNameToId.toSeq
+            .sortBy(_._2)
+            .map { case (n, id) => n + ":" + id }
+            .mkString(",")}"
+    )
 
     // Column groups from manifest (specific version if provided, latest otherwise).
     val manifestResult: LatestColumnGroupsResult = if (readVersion > 0) {
@@ -123,6 +142,11 @@ class MilvusLoonPartitionReader(
         readerProperties
       )
     }
+    debugRead(
+      s"V3 manifest resolved manifestPath=$manifestPath " +
+        s"actualReadVersion=${manifestResult.readVersion} " +
+        s"columnGroupsPtr=${manifestResult.columnGroupsPtr}"
+    )
     if (manifestResult.readVersion == 0) {
       throw new IllegalStateException(
         s"No manifest file found at path: $manifestPath. " +
@@ -311,8 +335,7 @@ class MilvusLoonPartitionReader(
   private def getColumnNames(): Array[String] = {
     // Convert column names to field IDs for manifest/reader matching
     // The manifest stores column groups with field IDs (e.g., "100", "101")
-    // Note: System fields (row_id, timestamp) are handled by MilvusPartitionReaderFactory
-    // and should NOT be requested from milvus-storage reader
+    // System fields are mapped to Milvus field IDs 0 and 1 and requested from storage.
     sourceSchema.fieldNames.flatMap { name =>
       fieldNameToId.get(name).map(_.toString)
     }

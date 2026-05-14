@@ -31,9 +31,11 @@ import io.milvus.grpc.milvus.{
   ConnectRequest,
   CreateCollectionRequest,
   CreateDatabaseRequest,
+  CreateSnapshotRequest,
   DeleteRequest,
   DescribeCollectionRequest,
   DescribeCollectionResponse,
+  DescribeSnapshotRequest,
   DropCollectionRequest,
   FlushRequest,
   GetImportStateRequest,
@@ -617,6 +619,58 @@ class MilvusClient(params: MilvusConnectionParams) {
     }
   }
 
+  def createSnapshotForRead(
+      dbName: String,
+      collectionName: String,
+      snapshotName: String,
+      description: String,
+      compactionProtectionSeconds: Long
+  ): Try[MilvusSnapshotInfo] = {
+    try {
+      val createStatus = stub.createSnapshot(
+        CreateSnapshotRequest(
+          name = snapshotName,
+          description = description,
+          dbName = dbName,
+          collectionName = collectionName,
+          compactionProtectionSeconds = compactionProtectionSeconds
+        )
+      )
+      checkStatus("createSnapshot", createStatus).get
+
+      val snapshot = stub.describeSnapshot(
+        DescribeSnapshotRequest(
+          name = snapshotName,
+          dbName = dbName,
+          collectionName = collectionName
+        )
+      )
+      checkStatus(
+        "describeSnapshot",
+        snapshot.status.getOrElse(
+          Status(
+            errorCode = ErrorCode.UnexpectedError,
+            reason = "DescribeSnapshot Status is empty"
+          )
+        )
+      ).get
+
+      Success(
+        MilvusSnapshotInfo(
+          name = snapshot.name,
+          description = snapshot.description,
+          collectionName = snapshot.collectionName,
+          partitionNames = snapshot.partitionNames,
+          createTs = snapshot.createTs,
+          s3Location = snapshot.s3Location
+        )
+      )
+    } catch {
+      case e: StatusRuntimeException => Failure(e)
+      case e: Exception              => Failure(e)
+    }
+  }
+
   def getSegments(
       dbName: String,
       collectionName: String
@@ -812,6 +866,33 @@ object MilvusClient {
   val RateLimitErrorCode: Int = 8
   // Case-insensitive reason marker used as a fallback when error code is not set.
   val RateLimitReasonMarker: String = "rate limit exceeded"
+  val ServiceNotImplementedMarker: String = "service not implemented"
+
+  def isServiceNotImplemented(t: Throwable): Boolean = {
+    var current = t
+    while (current != null) {
+      current match {
+        case e: StatusRuntimeException
+            if e.getStatus.getCode == GrpcStatus.Code.UNIMPLEMENTED =>
+          return true
+        case e: StatusException
+            if e.getStatus.getCode == GrpcStatus.Code.UNIMPLEMENTED =>
+          return true
+        case _ =>
+      }
+
+      val message = Option(current.getMessage).getOrElse("").toLowerCase
+      if (
+        message.contains(ServiceNotImplementedMarker) ||
+        message.contains("unimplemented") ||
+        message.contains("unknown method")
+      ) {
+        return true
+      }
+      current = current.getCause
+    }
+    false
+  }
 
   val mapper: ObjectMapper with ScalaObjectMapper = {
     val m = new ObjectMapper() with ScalaObjectMapper
@@ -855,6 +936,15 @@ case class MilvusCollectionInfo(
     collectionName: String,
     collectionID: Long,
     schema: CollectionSchema
+)
+
+case class MilvusSnapshotInfo(
+    name: String,
+    description: String,
+    collectionName: String,
+    partitionNames: Seq[String],
+    createTs: Long,
+    s3Location: String
 )
 
 case class MilvusSegmentInfo(

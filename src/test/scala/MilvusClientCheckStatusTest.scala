@@ -6,6 +6,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import io.milvus.grpc.common.{ErrorCode, Status}
 
+import io.grpc.{Status => GrpcStatus, StatusRuntimeException}
+
 /** Unit tests for MilvusClient.checkStatus classification logic.
   *
   * Covers the review feedback on ordering, NPE safety, success-path
@@ -96,5 +98,24 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
       reason = "something broke"
     )
     assert(client.checkStatus("insert", status).isFailure)
+  }
+
+  test("classifies grpc UNIMPLEMENTED as service not implemented") {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNIMPLEMENTED.withDescription("unknown method CreateSnapshot")
+    )
+    assert(MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("classifies textual service not implemented errors") {
+    val err = new RuntimeException(
+      "Failed to createSnapshot: service not implemented"
+    )
+    assert(MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("does not classify ordinary errors as service not implemented") {
+    val err = new RuntimeException("permission denied")
+    assert(!MilvusClient.isServiceNotImplemented(err))
   }
 }
