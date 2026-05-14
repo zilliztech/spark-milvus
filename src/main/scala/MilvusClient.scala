@@ -882,9 +882,11 @@ object MilvusClient {
       }
 
       val message = Option(current.getMessage).getOrElse("").toLowerCase
+      val isGrpcException = current.isInstanceOf[StatusRuntimeException] ||
+        current.isInstanceOf[StatusException]
       if (
         message.contains(ServiceNotImplementedMarker) ||
-        message.contains("unknown method")
+        (isGrpcException && message.contains("unknown method"))
       ) {
         return true
       }

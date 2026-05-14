@@ -75,6 +75,19 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     milvusOption.extraColumns.size shouldBe 3
   }
 
+  test("Normalize legacy extra column names") {
+    val options = Map(
+      MilvusOption.MilvusUri -> "http://localhost:19530",
+      MilvusOption.MilvusExtraColumns -> "partition, segment_id, row_offset"
+    )
+
+    val milvusOption = MilvusOption(options)
+
+    milvusOption.extraColumns should contain allOf ("partition", "$segment_id", "$row_offset")
+    milvusOption.extraColumns should not contain "segment_id"
+    milvusOption.extraColumns should not contain "row_offset"
+  }
+
   test("Parse empty extra columns") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",

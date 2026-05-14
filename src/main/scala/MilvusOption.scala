@@ -6,6 +6,7 @@ import scala.collection.Map
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.hadoop.fs.s3a.S3AFileSystem
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.spark.connector.loon.Properties
@@ -44,7 +45,7 @@ case class MilvusOption(
     vectorSearchConfig: Option[VectorSearchConfig] = None
 )
 
-object MilvusOption {
+object MilvusOption extends Logging {
   // Constants for map keys
   val MilvusUri = "milvus.uri"
   val MilvusToken = "milvus.token"
@@ -205,6 +206,22 @@ object MilvusOption {
     }
   }
 
+  private def normalizeExtraColumnName(name: String): String = {
+    name match {
+      case "segment_id" =>
+        logWarning(
+          s"Extra column 'segment_id' is deprecated; use '$MilvusExtraColumnSegmentID' instead"
+        )
+        MilvusExtraColumnSegmentID
+      case "row_offset" =>
+        logWarning(
+          s"Extra column 'row_offset' is deprecated; use '$MilvusExtraColumnRowOffset' instead"
+        )
+        MilvusExtraColumnRowOffset
+      case other => other
+    }
+  }
+
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {
     val uri = options.getOrDefault(MilvusUri, "")
@@ -233,6 +250,7 @@ object MilvusOption {
       .split(",")
       .map(_.trim)
       .filter(_.nonEmpty)
+      .map(normalizeExtraColumnName)
       .toSeq
 
     // Convert CaseInsensitiveStringMap to regular Map for storage

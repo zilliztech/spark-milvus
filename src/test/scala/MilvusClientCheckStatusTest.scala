@@ -126,4 +126,16 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
       new RuntimeException("Feature X is unimplemented for storage backend Y")
     assert(!MilvusClient.isServiceNotImplemented(err))
   }
+
+  test("does not classify non-grpc unknown method text as service not implemented") {
+    val err = new RuntimeException("proxy returned unknown method in response body")
+    assert(!MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("classifies grpc unknown method text as service not implemented") {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNKNOWN.withDescription("unknown method CreateSnapshot")
+    )
+    assert(MilvusClient.isServiceNotImplemented(err))
+  }
 }
