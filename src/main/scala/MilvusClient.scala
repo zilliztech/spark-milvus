@@ -62,10 +62,11 @@ import io.grpc.{ClientInterceptor, Metadata, Status => GrpcStatus}
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
 import io.grpc.stub.MetadataUtils
 import io.grpc.Status.Code
+import org.apache.spark.internal.Logging
 
 /** A simplified client for interacting with Milvus
   */
-class MilvusClient(params: MilvusConnectionParams) {
+class MilvusClient(params: MilvusConnectionParams) extends Logging {
   private val retryInterceptor = new GrpcRetryInterceptor(
     maxRetries = 5,
     initialDelayMillis = 500,
@@ -669,7 +670,14 @@ class MilvusClient(params: MilvusConnectionParams) {
         )
       } catch {
         case e: Exception =>
-          dropSnapshot(dbName, collectionName, snapshotName)
+          dropSnapshot(dbName, collectionName, snapshotName) match {
+            case Failure(dropErr) =>
+              logWarning(
+                s"Failed to drop snapshot $snapshotName after describeSnapshot failure",
+                dropErr
+              )
+            case Success(_) =>
+          }
           throw e
       }
     } catch {
