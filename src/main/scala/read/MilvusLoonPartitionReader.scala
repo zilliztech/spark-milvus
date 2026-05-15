@@ -85,7 +85,7 @@ class MilvusLoonPartitionReader(
     .exists(_.equalsIgnoreCase("true"))
 
   private def debugRead(message: => String): Unit = {
-    if (readDebugEnabled) System.err.println(s"[MilvusReadDebug] $message")
+    if (readDebugEnabled) logInfo(s"[MilvusReadDebug] $message")
   }
 
   // Native resource handles. Initialized to safe defaults so a partial-init

@@ -658,6 +658,23 @@ object MilvusScan {
     }
   }
 
+  def snapshotBucket(location: String): Option[String] = {
+    val trimmed = Option(location).map(_.trim).getOrElse("")
+    if (trimmed.startsWith("s3://") || trimmed.startsWith("s3a://")) {
+      Option(new URI(resolveClientSnapshotLocation(trimmed, "")).getHost)
+        .filter(_.nonEmpty)
+    } else {
+      None
+    }
+  }
+
+  def snapshotBucketsToConfigure(
+      snapshotPath: String,
+      connectorBucket: String
+  ): Seq[String] = {
+    (Seq(connectorBucket).filter(_.nonEmpty) ++ snapshotBucket(snapshotPath)).distinct
+  }
+
   def canUseClientSnapshotFastPath(milvusOption: MilvusOption): Boolean = {
     milvusOption.partitionName.isEmpty &&
     milvusOption.partitionID.isEmpty &&
@@ -705,7 +722,7 @@ class MilvusScan(
     .exists(_.equalsIgnoreCase("true"))
 
   private def debugRead(message: => String): Unit = {
-    if (readDebugEnabled) System.err.println(s"[MilvusReadDebug] $message")
+    if (readDebugEnabled) logInfo(s"[MilvusReadDebug] $message")
   }
 
   // Get vector search configuration from MilvusOption
@@ -839,7 +856,7 @@ class MilvusScan(
   private def planInputPartitionsFromClientSnapshotPath(
       snapshotPath: String
   ): Array[InputPartition] = {
-    val hadoopConf = buildSnapshotHadoopConf()
+    val hadoopConf = buildSnapshotHadoopConf(snapshotPath)
     val snapshotJson = readAllBytes(hadoopConf, snapshotPath)
     val metadata =
       MilvusSnapshotReader.parseSnapshotMetadata(snapshotJson) match {
@@ -1000,13 +1017,15 @@ class MilvusScan(
     partitions
   }
 
-  private def buildSnapshotHadoopConf(): Configuration = {
+  private def buildSnapshotHadoopConf(snapshotPath: String): Configuration = {
     val conf = new Configuration()
     val bucket = milvusOption.options.getOrElse(
       Properties.FsConfig.FsBucketName,
       "a-bucket"
     )
-    MilvusOption.configureHadoopS3A(conf, milvusOption.options, bucket)
+    MilvusScan.snapshotBucketsToConfigure(snapshotPath, bucket).foreach { b =>
+      MilvusOption.configureHadoopS3A(conf, milvusOption.options, b)
+    }
     conf
   }
 

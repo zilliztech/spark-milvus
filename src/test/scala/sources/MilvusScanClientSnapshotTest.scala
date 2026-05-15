@@ -50,6 +50,21 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
+  test("snapshotBucketsToConfigure includes cross-bucket snapshot locations") {
+    assert(
+      MilvusScan.snapshotBucketsToConfigure(
+        "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json",
+        "connector-bucket"
+      ) == Seq("connector-bucket", "snapshot-bucket")
+    )
+    assert(
+      MilvusScan.snapshotBucketsToConfigure(
+        "s3a://connector-bucket/files/snapshots/1/metadata/2.json",
+        "connector-bucket"
+      ) == Seq("connector-bucket")
+    )
+  }
+
   test(
     "client snapshot fast path is disabled when partition or segment selectors are set"
   ) {

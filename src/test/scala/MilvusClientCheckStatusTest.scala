@@ -107,11 +107,11 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
     assert(MilvusClient.isServiceNotImplemented(err))
   }
 
-  test("classifies textual service not implemented errors") {
+  test("does not classify non-grpc service-not-implemented text") {
     val err = new RuntimeException(
       "Failed to createSnapshot: service not implemented"
     )
-    assert(MilvusClient.isServiceNotImplemented(err))
+    assert(!MilvusClient.isServiceNotImplemented(err))
   }
 
   test("does not classify ordinary errors as service not implemented") {

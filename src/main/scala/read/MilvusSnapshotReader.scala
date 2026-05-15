@@ -569,13 +569,8 @@ object MilvusSnapshotReader {
         !includeSystemFields && (f.name == "RowID" || f.name == "Timestamp")
       )
       .map { field =>
-        val sparkFieldName = field.name match {
-          case "RowID"     => "row_id"
-          case "Timestamp" => "timestamp"
-          case other       => other
-        }
         StructField(
-          sparkFieldName,
+          field.name,
           dataTypeToSparkType(field.dataType, field.typeParams),
           nullable = true
         )

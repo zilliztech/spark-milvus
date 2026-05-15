@@ -920,8 +920,9 @@ object MilvusClient {
       val isGrpcException = current.isInstanceOf[StatusRuntimeException] ||
         current.isInstanceOf[StatusException]
       if (
-        message.contains(ServiceNotImplementedMarker) ||
-        (isGrpcException && message.contains("unknown method"))
+        isGrpcException &&
+        (message.contains(ServiceNotImplementedMarker) ||
+          message.contains("unknown method"))
       ) {
         return true
       }

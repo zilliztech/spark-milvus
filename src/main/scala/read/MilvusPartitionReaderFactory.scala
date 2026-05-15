@@ -26,7 +26,7 @@ class MilvusPartitionReaderFactory(
     .exists(_.equalsIgnoreCase("true"))
 
   private def debugRead(message: => String): Unit = {
-    if (readDebugEnabled) System.err.println(s"[MilvusReadDebug] $message")
+    if (readDebugEnabled) logInfo(s"[MilvusReadDebug] $message")
   }
 
   override def createReader(

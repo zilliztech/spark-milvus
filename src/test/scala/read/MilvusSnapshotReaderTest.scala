@@ -312,14 +312,12 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       includeSystemFields = true
     )
 
-    // Should have 7 fields (including row_id and timestamp)
+    // Should have 7 fields (including RowID and Timestamp)
     sparkSchema.fields should have size 7
 
     // Verify field names
     val fieldNames = sparkSchema.fields.map(_.name)
-    fieldNames should contain allOf ("row_id", "timestamp", "id", "int64", "float", "varchar", "vector")
-    fieldNames should not contain "RowID"
-    fieldNames should not contain "Timestamp"
+    fieldNames should contain allOf ("id", "int64", "float", "varchar", "vector", "RowID", "Timestamp")
   }
 
   test("Get field ID to name mapping") {
