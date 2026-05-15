@@ -250,7 +250,7 @@ Override via `customOutputPath` if needed.
    in snapshot mode (FQCN avoids shortName collisions with other connectors).
 6. Validate PK type compatibility, then left-join on the PK.
 7. For each segment, repartition with a custom segment partitioner, sort by
-   `row_offset`, and write per-segment binlogs via `MilvusLoonWriter`.
+   `$row_offset`, and write per-segment binlogs via `MilvusLoonWriter`.
 8. Return a `BackfillResult` with manifest paths and per-segment stats.
 
 ## Testing helper

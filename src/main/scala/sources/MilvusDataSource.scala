@@ -800,7 +800,24 @@ class MilvusScan(
           s"client snapshot created name=${snapshot.name} path=$snapshotPath " +
             s"protectionSeconds=$protectionSeconds"
         )
-        Some(planInputPartitionsFromClientSnapshotPath(snapshotPath))
+        try {
+          Some(planInputPartitionsFromClientSnapshotPath(snapshotPath))
+        } catch {
+          case e: Throwable =>
+            client.dropSnapshot(
+              milvusOption.databaseName,
+              milvusOption.collectionName,
+              snapshot.name
+            ) match {
+              case scala.util.Failure(dropErr) =>
+                logWarning(
+                  s"Failed to drop client read snapshot ${snapshot.name} after planning failure",
+                  dropErr
+                )
+              case _ =>
+            }
+            throw e
+        }
 
       case scala.util.Failure(e) if MilvusClient.isServiceNotImplemented(e) =>
         logWarning(

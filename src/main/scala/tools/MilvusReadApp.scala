@@ -217,12 +217,10 @@ object MilvusReadApp {
       )
     )
 
-    metadata.storageV2ManifestList.foreach { manifestList =>
-      if (manifestList.nonEmpty) {
-        opts += MilvusOption.SnapshotManifests ->
-          MilvusSnapshotReader.serializeManifestList(manifestList)
-      }
-    }
+    opts += MilvusOption.SnapshotManifests ->
+      MilvusSnapshotReader.serializeManifestList(
+        metadata.storageV2ManifestList.getOrElse(Seq.empty)
+      )
 
     if (v2Segments.nonEmpty) {
       opts += MilvusOption.SnapshotV2Segments ->

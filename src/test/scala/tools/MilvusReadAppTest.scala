@@ -204,6 +204,38 @@ class MilvusReadAppTest
     opts.get(Properties.FsConfig.FsAccessKeyValue) shouldBe None
   }
 
+  test("buildSnapshotOptionsFromMetadata emits empty manifest option") {
+    val source = scala.io.Source.fromFile("src/test/data/sample_snapshot.json")
+    val json =
+      try source.mkString
+      finally source.close()
+    val metadata = MilvusSnapshotReader
+      .parseSnapshotMetadata(json)
+      .toOption
+      .get
+      .copy(manifestList = Seq.empty, storageV2ManifestList = Some(Seq.empty))
+    val args = MilvusReadApp.parseArgs(
+      Array(
+        "--mode",
+        "snapshot",
+        "--snapshot",
+        "src/test/data/sample_snapshot.json",
+        "--s3-bucket",
+        "a-bucket"
+      )
+    )
+
+    val opts = MilvusReadApp.buildSnapshotOptionsFromMetadata(
+      args,
+      metadata,
+      json,
+      v2Segments = Seq.empty
+    )
+
+    opts(MilvusOption.SnapshotManifests) shouldBe "[]"
+    opts should not contain key(MilvusOption.SnapshotV2Segments)
+  }
+
   test(
     "buildSnapshotOptionsFromMetadata includes schema bytes and manifest options"
   ) {
