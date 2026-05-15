@@ -359,4 +359,24 @@ class MilvusReadAppTest
     result.columns.toSeq shouldBe Seq("id")
     result.collect().map(_.getLong(0)).toSeq shouldBe Seq(2L, 3L)
   }
+
+  test("applyTransformations filters before selecting columns") {
+    val sparkSession = spark
+    import sparkSession.implicits._
+    val df = Seq((1L, "a"), (2L, "b"), (3L, "c")).toDF("id", "tag")
+    val args = MilvusReadApp.parseArgs(
+      Array(
+        "--mode",
+        "client",
+        "--select",
+        "id",
+        "--where",
+        "tag = 'b'"
+      )
+    )
+
+    val result = MilvusReadApp.applyTransformations(df, args)
+    result.columns.toSeq shouldBe Seq("id")
+    result.collect().map(_.getLong(0)).toSeq shouldBe Seq(2L)
+  }
 }

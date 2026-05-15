@@ -127,8 +127,11 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
     assert(!MilvusClient.isServiceNotImplemented(err))
   }
 
-  test("does not classify non-grpc unknown method text as service not implemented") {
-    val err = new RuntimeException("proxy returned unknown method in response body")
+  test(
+    "does not classify non-grpc unknown method text as service not implemented"
+  ) {
+    val err =
+      new RuntimeException("proxy returned unknown method in response body")
     assert(!MilvusClient.isServiceNotImplemented(err))
   }
 

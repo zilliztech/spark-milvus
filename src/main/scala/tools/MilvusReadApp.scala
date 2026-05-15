@@ -322,17 +322,17 @@ object MilvusReadApp {
       df: DataFrame,
       args: ReadArgs
   ): DataFrame = {
-    val selected = args.select match {
+    val filtered = args.where match {
+      case Some(expr) if expr.trim.nonEmpty => df.where(expr)
+      case _                                => df
+    }
+
+    args.select match {
       case Some(raw) if raw.trim.nonEmpty =>
         val cols = raw.split(",").map(_.trim).filter(_.nonEmpty)
         require(cols.nonEmpty, "--select must contain at least one column")
-        df.select(cols.head, cols.tail: _*)
-      case _ => df
-    }
-
-    args.where match {
-      case Some(expr) if expr.trim.nonEmpty => selected.where(expr)
-      case _                                => selected
+        filtered.select(cols.head, cols.tail: _*)
+      case _ => filtered
     }
   }
 

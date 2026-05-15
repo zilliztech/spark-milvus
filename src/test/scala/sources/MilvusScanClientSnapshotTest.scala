@@ -50,7 +50,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
-  test("client snapshot fast path is disabled when partition or segment selectors are set") {
+  test(
+    "client snapshot fast path is disabled when partition or segment selectors are set"
+  ) {
     val base = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
       MilvusOption.MilvusCollectionName -> "c"

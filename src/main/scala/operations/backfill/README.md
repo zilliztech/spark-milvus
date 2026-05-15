@@ -245,7 +245,7 @@ Override via `customOutputPath` if needed.
    Milvus client in client mode).
 4. Read the new-field parquet, configuring S3A credentials for the source
    bucket as needed.
-5. Read the original PK column + `segment_id` / `row_offset` via
+5. Read the original PK column + `$segment_id` / `$row_offset` via
    `spark.read.format("com.zilliz.spark.connector.sources.MilvusDataSource")`
    in snapshot mode (FQCN avoids shortName collisions with other connectors).
 6. Validate PK type compatibility, then left-join on the PK.
