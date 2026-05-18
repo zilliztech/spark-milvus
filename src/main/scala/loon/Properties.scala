@@ -42,15 +42,11 @@ object Properties {
     *   MilvusStorageProperties for milvus-storage native library
     */
   def fromMilvusOption(milvusOption: MilvusOption): MilvusStorageProperties = {
-    val props = new MilvusStorageProperties()
     val propsMap = new ju.HashMap[String, String]()
 
     // Extract filesystem configuration with defaults
     val endpoint =
       milvusOption.options.getOrElse(FsConfig.FsAddress, "localhost:9000")
-    val bucket =
-      milvusOption.options.getOrElse(FsConfig.FsBucketName, "a-bucket")
-    val rootPath = milvusOption.options.getOrElse(FsConfig.FsRootPath, "files")
     // When use_iam=true the FFI must consult the AWS default credentials
     // chain (env vars / web identity / instance profile). Falling back to
     // hard-coded "minioadmin" defaults under IRSA produces signed requests
@@ -59,6 +55,18 @@ object Properties {
     val useIamFlag = milvusOption.options
       .get(FsConfig.FsUseIam)
       .exists(_.equalsIgnoreCase("true"))
+    val bucket = milvusOption.options
+      .get(FsConfig.FsBucketName)
+      .filter(_.trim.nonEmpty)
+      .getOrElse {
+        if (useIamFlag) {
+          throw new IllegalArgumentException(
+            s"${FsConfig.FsBucketName} must be set when ${FsConfig.FsUseIam}=true"
+          )
+        }
+        "a-bucket"
+      }
+    val rootPath = milvusOption.options.getOrElse(FsConfig.FsRootPath, "files")
     val accessKey =
       milvusOption.options.getOrElse(
         FsConfig.FsAccessKeyId,
@@ -119,6 +127,7 @@ object Properties {
       .get(FsConfig.FsUseCustomPartUpload)
       .foreach(propsMap.put(FsConfig.FsUseCustomPartUpload, _))
 
+    val props = new MilvusStorageProperties()
     props.create(propsMap)
     if (!props.isValid) {
       throw new IllegalStateException(

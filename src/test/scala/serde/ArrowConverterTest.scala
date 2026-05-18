@@ -46,4 +46,38 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       allocator.close()
     }
   }
+
+  test("arrowToInternalRow rejects non UTF-8 VarBinary as Spark StringType") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    val arrowField = new Field(
+      "103",
+      FieldType.nullable(new ArrowType.Binary()),
+      null
+    )
+    val root =
+      VectorSchemaRoot.create(new Schema(Seq(arrowField).asJava), allocator)
+
+    try {
+      val vector = root.getVector("103").asInstanceOf[VarBinaryVector]
+      vector.allocateNew()
+      vector.setSafe(0, Array[Byte](0xc3.toByte, 0x28.toByte))
+      vector.setValueCount(1)
+      root.setRowCount(1)
+
+      val sparkSchema = StructType(Seq(StructField("$meta", StringType, true)))
+      val err = intercept[IllegalArgumentException] {
+        ArrowConverter.arrowToInternalRow(
+          root,
+          0,
+          sparkSchema,
+          Map("$meta" -> "103")
+        )
+      }
+
+      err.getMessage should include("not valid UTF-8")
+    } finally {
+      root.close()
+      allocator.close()
+    }
+  }
 }

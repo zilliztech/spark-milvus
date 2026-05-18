@@ -218,6 +218,11 @@ class MilvusLoonPartitionWriter(
 
   // Batch size configuration
   private val batchSize = milvusOption.insertMaxBatchSize
+  private val variableWidthBytesPerValue =
+    parsePositiveDoubleOption(
+      MilvusOption.WriterVariableWidthBytesPerValue,
+      defaultValue = 256.0
+    )
   private var currentBatchSize = 0
   private var totalRecordCount = 0L
 
@@ -444,12 +449,18 @@ class MilvusLoonPartitionWriter(
           // Second arg is density (bytes per value), NOT total bytes. Arrow
           // computes the initial data buffer size as valueCount × density
           // internally. Passing `batchSize * 32` here gave batchSize² × 32 —
-          // a quadratic over-allocation (~32 MiB per column at batch=1024)
-          // that exploded into GiB-scale peaks and caused direct-memory OOM.
-          varCharVector.setInitialCapacity(batchSize, 32.0)
+          // a quadratic over-allocation. Use a bounded per-value default that
+          // can be raised for wide JSON/VARCHAR workloads.
+          varCharVector.setInitialCapacity(
+            batchSize,
+            variableWidthBytesPerValue
+          )
 
         case baseVarVector: BaseVariableWidthVector =>
-          baseVarVector.setInitialCapacity(batchSize, 32.0)
+          baseVarVector.setInitialCapacity(
+            batchSize,
+            variableWidthBytesPerValue
+          )
 
         case _ =>
           // For fixed-width vectors, just set row capacity
@@ -459,6 +470,30 @@ class MilvusLoonPartitionWriter(
 
     r.allocateNew()
     r.setRowCount(0)
+  }
+
+  private def parsePositiveDoubleOption(
+      key: String,
+      defaultValue: Double
+  ): Double = {
+    milvusOption.options
+      .get(key)
+      .orElse(milvusOption.options.get(key.toLowerCase))
+      .filter(_.trim.nonEmpty)
+      .map { value =>
+        val parsed = Try(value.trim.toDouble).getOrElse {
+          throw new IllegalArgumentException(
+            s"$key must be a positive number, got '$value'"
+          )
+        }
+        if (parsed <= 0.0) {
+          throw new IllegalArgumentException(
+            s"$key must be a positive number, got '$value'"
+          )
+        }
+        parsed
+      }
+      .getOrElse(defaultValue)
   }
 
   /** Generate S3 base path for this writer

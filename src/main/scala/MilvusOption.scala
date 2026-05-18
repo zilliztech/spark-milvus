@@ -121,6 +121,8 @@ object MilvusOption extends Logging {
     "milvus.writer.commitType" // "addfield" for backfill, default "addfiles"
   val WriterFieldIds =
     "milvus.writer.fieldIds" // JSON map of field name -> field ID (e.g., "new_field:104,other_field:105")
+  val WriterVariableWidthBytesPerValue =
+    "milvus.writer.variableWidthBytesPerValue"
 
   // Backfill merge mode.
   //   replace   — file is source of truth for target columns: matched rows

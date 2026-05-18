@@ -1,6 +1,11 @@
 package com.zilliz.spark.connector.serde
 
 import java.nio.{ByteBuffer, ByteOrder}
+import java.nio.charset.{
+  CharacterCodingException,
+  CodingErrorAction,
+  StandardCharsets
+}
 import scala.collection.JavaConverters._
 
 import org.apache.arrow.vector._
@@ -27,6 +32,31 @@ object ArrowConverter extends Logging {
           s"Expected variable-width Arrow vector, got ${other.getClass.getName}"
         )
     }
+  }
+
+  private def utf8StringFromVariableWidth(
+      vector: FieldVector,
+      rowIndex: Int
+  ): UTF8String = {
+    val bytes = variableWidthBytes(vector, rowIndex)
+    vector match {
+      case _: VarBinaryVector =>
+        try {
+          StandardCharsets.UTF_8
+            .newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+        } catch {
+          case e: CharacterCodingException =>
+            throw new IllegalArgumentException(
+              s"Arrow VarBinary value in column ${vector.getName} at row $rowIndex is not valid UTF-8",
+              e
+            )
+        }
+      case _ =>
+    }
+    UTF8String.fromBytes(bytes)
   }
 
   /** Convert an Arrow VectorSchemaRoot row to Spark InternalRow
@@ -104,7 +134,7 @@ object ArrowConverter extends Logging {
         vector.asInstanceOf[BitVector].get(rowIndex) != 0
 
       case StringType =>
-        UTF8String.fromBytes(variableWidthBytes(vector, rowIndex))
+        utf8StringFromVariableWidth(vector, rowIndex)
 
       case ArrayType(FloatType, _) =>
         // FloatVector stored as FixedSizeBinaryVector
