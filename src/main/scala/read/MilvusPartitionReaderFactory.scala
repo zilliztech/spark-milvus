@@ -39,6 +39,7 @@ class MilvusPartitionReaderFactory(
         )
 
         val v2Schema = StructType(schema.fields.filter { field =>
+          field.name != MilvusOption.MilvusExtraColumnPartition &&
           field.name != MilvusOption.MilvusExtraColumnSegmentID &&
           field.name != MilvusOption.MilvusExtraColumnRowOffset
         })
@@ -68,6 +69,9 @@ class MilvusPartitionReaderFactory(
           p.readVersion
         )
 
+        val hasPartition = schema.fieldNames.contains(
+          MilvusOption.MilvusExtraColumnPartition
+        )
         val hasSegmentId = schema.fieldNames.contains(
           MilvusOption.MilvusExtraColumnSegmentID
         )
@@ -75,7 +79,7 @@ class MilvusPartitionReaderFactory(
           MilvusOption.MilvusExtraColumnRowOffset
         )
 
-        if (hasSegmentId || hasRowOffset) {
+        if (hasPartition || hasSegmentId || hasRowOffset) {
           new PartitionReader[InternalRow] {
             private var rowOffset: Long = 0L
 
@@ -88,6 +92,8 @@ class MilvusPartitionReaderFactory(
 
               schema.fields.zipWithIndex.foreach { case (field, writeIdx) =>
                 field.name match {
+                  case MilvusOption.MilvusExtraColumnPartition =>
+                    resultValues(writeIdx) = p.partitionName
                   case MilvusOption.MilvusExtraColumnSegmentID =>
                     resultValues(writeIdx) = p.segmentID
                   case MilvusOption.MilvusExtraColumnRowOffset =>
@@ -115,6 +121,7 @@ class MilvusPartitionReaderFactory(
         )
 
         val innerSchema = StructType(schema.fields.filter { f =>
+          f.name != MilvusOption.MilvusExtraColumnPartition &&
           f.name != MilvusOption.MilvusExtraColumnSegmentID &&
           f.name != MilvusOption.MilvusExtraColumnRowOffset
         })
@@ -136,6 +143,9 @@ class MilvusPartitionReaderFactory(
           p.neededColumnFieldIds
         )
 
+        val hasPartition = schema.fieldNames.contains(
+          MilvusOption.MilvusExtraColumnPartition
+        )
         val hasSegmentId = schema.fieldNames.contains(
           MilvusOption.MilvusExtraColumnSegmentID
         )
@@ -143,7 +153,7 @@ class MilvusPartitionReaderFactory(
           MilvusOption.MilvusExtraColumnRowOffset
         )
 
-        if (hasSegmentId || hasRowOffset) {
+        if (hasPartition || hasSegmentId || hasRowOffset) {
           new PartitionReader[InternalRow] {
             private var rowOffset: Long = 0L
 
@@ -156,6 +166,8 @@ class MilvusPartitionReaderFactory(
 
               schema.fields.zipWithIndex.foreach { case (field, writeIdx) =>
                 field.name match {
+                  case MilvusOption.MilvusExtraColumnPartition =>
+                    out(writeIdx) = p.partitionID.toString
                   case MilvusOption.MilvusExtraColumnSegmentID =>
                     out(writeIdx) = p.segmentID
                   case MilvusOption.MilvusExtraColumnRowOffset =>

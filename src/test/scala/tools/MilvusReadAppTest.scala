@@ -124,6 +124,46 @@ class MilvusReadAppTest
     }
   }
 
+  test("parseArgs rejects snapshot mode without snapshot path") {
+    an[IllegalArgumentException] should be thrownBy {
+      MilvusReadApp.parseArgs(
+        Array("--mode", "snapshot", "--s3-bucket", "a-bucket")
+      )
+    }
+  }
+
+  test("parseArgs rejects client-only options in snapshot mode") {
+    val err = intercept[IllegalArgumentException] {
+      MilvusReadApp.parseArgs(
+        Array(
+          "--mode",
+          "snapshot",
+          "--snapshot",
+          "src/test/data/sample_snapshot.json",
+          "--collection",
+          "book",
+          "--s3-bucket",
+          "a-bucket"
+        )
+      )
+    }
+
+    err.getMessage should include("Snapshot mode does not accept")
+  }
+
+  test("parseArgs rejects snapshot option in client mode") {
+    an[IllegalArgumentException] should be thrownBy {
+      MilvusReadApp.parseArgs(
+        Array(
+          "--mode",
+          "client",
+          "--snapshot",
+          "src/test/data/sample_snapshot.json"
+        )
+      )
+    }
+  }
+
   test("buildClientOptions maps client and storage arguments") {
     val args = MilvusReadApp.parseArgs(
       Array(
@@ -279,7 +319,7 @@ class MilvusReadAppTest
     )
 
     opts(MilvusOption.SnapshotMode) shouldBe "true"
-    opts(MilvusOption.MilvusUri) shouldBe "dummy://snapshot-mode"
+    opts should not contain key(MilvusOption.MilvusUri)
     opts(
       MilvusOption.MilvusCollectionName
     ) shouldBe metadata.collection.schema.name
@@ -370,6 +410,26 @@ class MilvusReadAppTest
     conf.get("fs.s3a.bucket.a-bucket.aws.credentials.provider") should include(
       "WebIdentityTokenCredentialsProvider"
     )
+  }
+
+  test("runActions caches a DataFrame before multiple data actions") {
+    val sparkSession = spark
+    import sparkSession.implicits._
+    val acc = sparkSession.sparkContext.longAccumulator("run-actions-cache")
+    val df = sparkSession
+      .range(0, 3)
+      .map { value =>
+        acc.add(1L)
+        value
+      }
+      .toDF("id")
+    val args = MilvusReadApp.parseArgs(
+      Array("--mode", "client", "--show", "2", "--count")
+    )
+
+    MilvusReadApp.runActions(df, args)
+
+    acc.value shouldBe 3L
   }
 
   test("applyTransformations applies select and where") {

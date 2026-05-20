@@ -7,6 +7,7 @@ import java.util.Base64
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.storage.StorageLevel
 
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
@@ -81,6 +82,33 @@ object MilvusReadApp {
 
   private[tools] val KnownFlags: Set[String] = BoolFlags ++ KvFlags
 
+  private[tools] def validateModeArgs(args: ReadArgs): Unit = {
+    args.mode match {
+      case "client" =>
+        require(
+          args.snapshot.isEmpty,
+          "--snapshot is only valid in snapshot mode"
+        )
+      case "snapshot" =>
+        require(
+          args.snapshot.nonEmpty,
+          "--snapshot is required in snapshot mode"
+        )
+        val clientOnly = Seq(
+          "--milvus-uri" -> args.milvusUri.nonEmpty,
+          "--milvus-token" -> args.milvusToken.nonEmpty,
+          "--collection" -> args.collection.nonEmpty,
+          "--partition-name" -> args.partitionName.nonEmpty
+        ).collect { case (flag, true) => flag }
+        require(
+          clientOnly.isEmpty,
+          s"Snapshot mode does not accept client-only option(s): ${clientOnly.mkString(", ")}"
+        )
+      case other =>
+        throw new IllegalArgumentException(s"Unsupported mode: $other")
+    }
+  }
+
   private[tools] def parseArgs(args: Array[String]): ReadArgs = {
     val parsed = scala.collection.mutable.Map.empty[String, String]
     var i = 0
@@ -114,7 +142,7 @@ object MilvusReadApp {
       )
     }
 
-    ReadArgs(
+    val readArgs = ReadArgs(
       mode = mode,
       milvusUri = parsed.getOrElse("milvus-uri", ""),
       milvusToken = parsed.getOrElse("milvus-token", ""),
@@ -140,6 +168,8 @@ object MilvusReadApp {
       where = parsed.get("where"),
       outputParquet = parsed.get("output-parquet")
     )
+    validateModeArgs(readArgs)
+    readArgs
   }
 
   private[tools] def buildStorageOptions(
@@ -205,7 +235,6 @@ object MilvusReadApp {
 
     val opts = scala.collection.mutable.Map[String, String](
       MilvusOption.SnapshotMode -> "true",
-      MilvusOption.MilvusUri -> "dummy://snapshot-mode",
       MilvusOption.MilvusDatabaseName -> args.database,
       MilvusOption.MilvusCollectionName -> metadata.collection.schema.name,
       MilvusOption.SnapshotCollectionId -> metadata.snapshotInfo.collectionId.toString,
@@ -355,25 +384,43 @@ object MilvusReadApp {
   }
 
   private[tools] def runActions(df: DataFrame, args: ReadArgs): Unit = {
-    if (args.printSchema) {
-      println("\n=== Schema ===")
-      df.printSchema()
-    }
+    val dataActionCount = Seq(
+      args.show.map(_ => 1).getOrElse(0),
+      if (args.count) 1 else 0,
+      if (args.outputParquet.nonEmpty) 1 else 0
+    ).sum
+    val shouldCache = dataActionCount > 1
+    val actionDf =
+      if (shouldCache) df.persist(StorageLevel.MEMORY_AND_DISK) else df
+    var materializedCount = Option.empty[Long]
 
-    args.show.foreach { n =>
-      println(s"\n=== Showing $n row(s) ===")
-      df.show(n, truncate = false)
-    }
+    try {
+      if (shouldCache) {
+        materializedCount = Some(actionDf.count())
+      }
 
-    if (args.count) {
-      println("\n=== Count ===")
-      println(df.count())
-    }
+      if (args.printSchema) {
+        println("\n=== Schema ===")
+        actionDf.printSchema()
+      }
 
-    args.outputParquet.foreach { path =>
-      println(s"\n=== Writing parquet output to $path ===")
-      df.write.mode("overwrite").parquet(path)
-      println(s"Wrote parquet output to $path")
+      args.show.foreach { n =>
+        println(s"\n=== Showing $n row(s) ===")
+        actionDf.show(n, truncate = false)
+      }
+
+      if (args.count) {
+        println("\n=== Count ===")
+        println(materializedCount.getOrElse(actionDf.count()))
+      }
+
+      args.outputParquet.foreach { path =>
+        println(s"\n=== Writing parquet output to $path ===")
+        actionDf.write.mode("overwrite").parquet(path)
+        println(s"Wrote parquet output to $path")
+      }
+    } finally {
+      if (shouldCache) actionDf.unpersist()
     }
   }
 

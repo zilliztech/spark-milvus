@@ -163,6 +163,18 @@ object MilvusOption extends Logging {
   val ClientSnapshotCompactionProtectionSeconds =
     "milvus.client.snapshot.compactionProtectionSeconds"
 
+  def isSnapshotMode(options: Map[String, String]): Boolean = {
+    options.get(SnapshotMode).exists(_.equalsIgnoreCase("true")) ||
+    options.contains(SnapshotManifests) ||
+    options.contains(SnapshotV2Segments)
+  }
+
+  def isSnapshotMode(options: CaseInsensitiveStringMap): Boolean = {
+    Option(options.get(SnapshotMode)).exists(_.equalsIgnoreCase("true")) ||
+    Option(options.get(SnapshotManifests)).isDefined ||
+    Option(options.get(SnapshotV2Segments)).isDefined
+  }
+
   def configureHadoopS3A(
       conf: Configuration,
       options: Map[String, String],

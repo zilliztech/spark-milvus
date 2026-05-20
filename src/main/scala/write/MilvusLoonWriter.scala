@@ -221,7 +221,7 @@ class MilvusLoonPartitionWriter(
   private val variableWidthBytesPerValue =
     parsePositiveDoubleOption(
       MilvusOption.WriterVariableWidthBytesPerValue,
-      defaultValue = 256.0
+      defaultValue = 32.0
     )
   private var currentBatchSize = 0
   private var totalRecordCount = 0L
