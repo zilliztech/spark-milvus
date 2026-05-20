@@ -24,6 +24,39 @@ import io.milvus.storage.{
   NativeLibraryLoader
 }
 
+object MilvusPackedV2PartitionReader {
+  private[read] case class FieldMappings(
+      fieldIdToName: Map[Long, String],
+      fieldNameToId: Map[String, Long],
+      fieldNameToArrowColumn: Map[String, String]
+  )
+
+  private[read] def buildFieldMappings(
+      milvusSchema: CollectionSchema
+  ): FieldMappings = {
+    val systemFields = Map(0L -> "RowID", 1L -> "Timestamp")
+    val userFields = milvusSchema.fields.map(f => f.fieldID -> f.name).toMap
+    val fieldIdToName = systemFields ++ userFields
+    val userFieldNames = milvusSchema.fields.map(_.name).toSet
+    val lowercaseSystemAliases = Seq(
+      "row_id" -> (0L, "RowID"),
+      "timestamp" -> (1L, "Timestamp")
+    ).filterNot { case (alias, _) => userFieldNames.contains(alias) }
+
+    FieldMappings(
+      fieldIdToName,
+      fieldIdToName.map { case (id, name) => name -> id } ++
+        lowercaseSystemAliases.map { case (alias, (id, _)) =>
+          alias -> id
+        }.toMap,
+      Map("RowID" -> "RowID", "Timestamp" -> "Timestamp") ++
+        lowercaseSystemAliases.map { case (alias, (_, column)) =>
+          alias -> column
+        }.toMap
+    )
+  }
+}
+
 /** Spark partition reader for milvus-segment-info `storage_version = 2`
   * (StorageV2, non-manifest packed parquet) segments.
   *
@@ -54,27 +87,11 @@ class MilvusPackedV2PartitionReader(
   private val allocator = ArrowUtils.getAllocator
   private val sourceSchema = schema
 
-  // Field ID -> logical column name. StorageV2 packed-parquet files written
-  // by milvus segcore use the field's logical name in the parquet schema
-  // (with PARQUET:field_id metadata for cross-reference). The packed reader
-  // matches columns by name, so we must pass logical names — NOT
-  // field-id-as-string like the V3 reader does.
-  private val fieldIdToName: Map[Long, String] = {
-    val systemFields = Map(0L -> "RowID", 1L -> "Timestamp")
-    val userFields =
-      milvusSchema.fields.map(f => f.fieldID -> f.name).toMap
-    systemFields ++ userFields
-  }
-  private val fieldNameToId: Map[String, Long] =
-    fieldIdToName.map { case (id, name) => name -> id } ++
-      Map("row_id" -> 0L, "timestamp" -> 1L)
-
-  private val fieldNameToArrowColumn: Map[String, String] = Map(
-    "row_id" -> "RowID",
-    "RowID" -> "RowID",
-    "timestamp" -> "Timestamp",
-    "Timestamp" -> "Timestamp"
-  )
+  private val fieldMappings =
+    MilvusPackedV2PartitionReader.buildFieldMappings(milvusSchema)
+  private val fieldIdToName = fieldMappings.fieldIdToName
+  private val fieldNameToId = fieldMappings.fieldNameToId
+  private val fieldNameToArrowColumn = fieldMappings.fieldNameToArrowColumn
 
   // Which column names to ask the packed reader for. Prefer explicit
   // projection from neededColumnFieldIds; fall back to sourceSchema's Spark

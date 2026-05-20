@@ -477,8 +477,7 @@ class MilvusLoonPartitionWriter(
       defaultValue: Double
   ): Double = {
     milvusOption.options
-      .get(key)
-      .orElse(milvusOption.options.get(key.toLowerCase))
+      .get(key.toLowerCase)
       .filter(_.trim.nonEmpty)
       .map { value =>
         val parsed = Try(value.trim.toDouble).getOrElse {

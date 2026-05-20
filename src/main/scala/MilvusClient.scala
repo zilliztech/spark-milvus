@@ -18,6 +18,7 @@ import com.fasterxml.jackson.module.scala.{
   ScalaObjectMapper
 }
 import com.google.protobuf.ByteString
+import org.apache.spark.internal.Logging
 
 import io.milvus.grpc.common.{
   ClientInfo,
@@ -62,7 +63,6 @@ import io.grpc.{ClientInterceptor, Metadata, Status => GrpcStatus}
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
 import io.grpc.stub.MetadataUtils
 import io.grpc.Status.Code
-import org.apache.spark.internal.Logging
 
 /** A simplified client for interacting with Milvus
   */
@@ -904,8 +904,11 @@ object MilvusClient {
   val ServiceNotImplementedMarker: String = "service not implemented"
 
   def isServiceNotImplemented(t: Throwable): Boolean = {
+    val visited = java.util.Collections.newSetFromMap(
+      new java.util.IdentityHashMap[Throwable, java.lang.Boolean]()
+    )
     var current = t
-    while (current != null) {
+    while (current != null && visited.add(current)) {
       current match {
         case e: StatusRuntimeException
             if e.getStatus.getCode == GrpcStatus.Code.UNIMPLEMENTED =>

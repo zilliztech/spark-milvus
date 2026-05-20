@@ -141,4 +141,11 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
     )
     assert(MilvusClient.isServiceNotImplemented(err))
   }
+
+  test("service-not-implemented detection stops on cyclic causes") {
+    val err = new RuntimeException("ordinary error") {
+      override def getCause: Throwable = this
+    }
+    assert(!MilvusClient.isServiceNotImplemented(err))
+  }
 }

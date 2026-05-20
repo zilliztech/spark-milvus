@@ -115,6 +115,24 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
+  test("pruneColumns uses first available field for empty required schema") {
+    val rawOptions = new HashMap[String, String]()
+    val schema = StructType(
+      Seq(
+        StructField("RowID", LongType, nullable = false),
+        StructField("Timestamp", LongType, nullable = false)
+      )
+    )
+    val builder = new MilvusScanBuilder(
+      schema,
+      new CaseInsensitiveStringMap(rawOptions)
+    )
+
+    builder.pruneColumns(StructType(Seq.empty))
+
+    assert(builder.build().readSchema().fieldNames.toSeq == Seq("RowID"))
+  }
+
   test(
     "buildClientSnapshotOptions preserves read options and adds snapshot options"
   ) {
@@ -123,6 +141,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       MilvusOption.MilvusCollectionName -> "c",
       MilvusOption.MilvusExtraColumns -> "$segment_id,$row_offset",
       MilvusOption.ReaderDebug -> "true",
+      MilvusOption.SnapshotMode -> "false",
       MilvusOption.SnapshotCollectionId -> "old"
     )
 
@@ -160,17 +179,18 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       MilvusScan
         .parseInsertLogPathIds(
           "a-bucket/files/insert_log/10/20/30"
-        )
-        .contains("20" -> 30L)
+        ) == ("20" -> 30L)
     )
     assert(
       MilvusScan
         .parseInsertLogPathIds(
           "s3a://a-bucket/files/insert_log/10/21/31"
-        )
-        .contains("21" -> 31L)
+        ) == ("21" -> 31L)
     )
-    assert(MilvusScan.parseInsertLogPathIds("a-bucket/files/30").isEmpty)
+    val err = intercept[IllegalArgumentException] {
+      MilvusScan.parseInsertLogPathIds("a-bucket/files/30")
+    }
+    assert(err.getMessage.contains("does not contain insert_log"))
   }
 
   test(

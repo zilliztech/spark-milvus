@@ -158,6 +158,7 @@ object MilvusOption extends Logging {
     "milvus.snapshot.schema.json" // Optional: raw schema JSON for building MilvusCollectionInfo
   val SnapshotSchemaBytes =
     "milvus.snapshot.schema.bytes" // Base64 encoded protobuf CollectionSchema bytes
+  val SnapshotMaxJsonBytes = "milvus.snapshot.maxJsonBytes"
   val ClientSnapshotName = "milvus.client.snapshot.name"
   val ClientSnapshotDescription = "milvus.client.snapshot.description"
   val ClientSnapshotCompactionProtectionSeconds =

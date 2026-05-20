@@ -10,7 +10,6 @@ import scala.jdk.CollectionConverters._
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.internal.Logging
-import org.apache.spark.scheduler.{SparkListener, SparkListenerJobEnd}
 import org.apache.spark.sql.connector.catalog.{
   SupportsRead,
   SupportsWrite,
@@ -29,6 +28,7 @@ import org.apache.spark.sql.connector.read.{
   SupportsPushDownRequiredColumns
 }
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
+import org.apache.spark.sql.execution.QueryExecution
 import org.apache.spark.sql.sources.{DataSourceRegister, Filter}
 import org.apache.spark.sql.types.{
   DataTypes => SparkDataTypes,
@@ -37,7 +37,10 @@ import org.apache.spark.sql.types.{
   StructField,
   StructType
 }
-import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.sql.util.{
+  CaseInsensitiveStringMap,
+  QueryExecutionListener
+}
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.spark.connector.{
@@ -485,9 +488,10 @@ class MilvusScanBuilder(
 
     fieldNames = fieldNames.sortBy(fieldName => fieldName2ID(fieldName))
     logInfo(s"fieldNames after sort: $fieldNames")
-    if (fieldNames.isEmpty) {
-      fieldNames = fieldNames :+ "row_id"
-      logInfo(s"fieldNames after add row_id: $fieldNames")
+    if (fieldNames.isEmpty && fieldName2ID.nonEmpty) {
+      val fallbackFieldName = fieldName2ID.toSeq.sortBy(_._2).head._1
+      fieldNames = fieldNames :+ fallbackFieldName
+      logInfo(s"fieldNames after add fallback field: $fieldNames")
     }
 
     val tmpMap = new HashMap[String, String]()
@@ -630,6 +634,7 @@ class MilvusScanBuilder(
 
 object MilvusScan extends Logging {
   private val SnapshotOptionKeys = Seq(
+    MilvusOption.SnapshotMode,
     MilvusOption.SnapshotManifests,
     MilvusOption.SnapshotV2Segments,
     MilvusOption.SnapshotCollectionId,
@@ -673,21 +678,68 @@ object MilvusScan extends Logging {
     )).distinct
   }
 
-  def parseInsertLogPathIds(basePath: String): Option[(String, Long)] = {
+  def parseInsertLogPathIds(basePath: String): (String, Long) = {
     val parts = Option(basePath)
       .getOrElse("")
       .split("/")
       .map(_.trim)
       .filter(_.nonEmpty)
     val insertLogIndex = parts.lastIndexOf("insert_log")
-    if (insertLogIndex < 0 || parts.length <= insertLogIndex + 3) {
-      None
-    } else {
-      val partitionId = parts(insertLogIndex + 2)
-      val segmentIdText = parts(insertLogIndex + 3)
-      try Some(partitionId -> segmentIdText.toLong)
-      catch { case _: NumberFormatException => None }
+    if (insertLogIndex < 0) {
+      throw new IllegalArgumentException(
+        s"Snapshot manifest base_path does not contain insert_log: '$basePath'"
+      )
     }
+    if (parts.length <= insertLogIndex + 3) {
+      throw new IllegalArgumentException(
+        s"Snapshot manifest base_path is missing partition/segment IDs: '$basePath'"
+      )
+    }
+
+    val partitionId = parts(insertLogIndex + 2)
+    val segmentIdText = parts(insertLogIndex + 3)
+    val segmentId =
+      try segmentIdText.toLong
+      catch {
+        case e: NumberFormatException =>
+          throw new IllegalArgumentException(
+            s"Snapshot manifest base_path has non-numeric segment ID '$segmentIdText': '$basePath'",
+            e
+          )
+      }
+    partitionId -> segmentId
+  }
+
+  def dropClientReadSnapshot(
+      client: MilvusClient,
+      databaseName: String,
+      collectionName: String,
+      snapshotName: String,
+      reason: String,
+      maxAttempts: Int = 3
+  ): Boolean = {
+    var lastFailure = Option.empty[Throwable]
+    (1 to maxAttempts).foreach { attempt =>
+      client.dropSnapshot(databaseName, collectionName, snapshotName) match {
+        case scala.util.Success(_) =>
+          logInfo(s"Dropped client read snapshot $snapshotName after $reason")
+          return true
+        case scala.util.Failure(e) =>
+          lastFailure = Some(e)
+          logWarning(
+            s"Failed to drop client read snapshot $snapshotName after $reason " +
+              s"(attempt $attempt/$maxAttempts)",
+            e
+          )
+      }
+    }
+    lastFailure.foreach { e =>
+      logWarning(
+        s"Giving up dropping client read snapshot $snapshotName after $maxAttempts attempt(s)",
+        e
+      )
+    }
+    false
   }
 
   def registerClientSnapshotCleanup(
@@ -695,22 +747,20 @@ object MilvusScan extends Logging {
       databaseName: String,
       collectionName: String,
       snapshotName: String
-  ): Unit = {
+  ): Boolean = {
     val dropped = new AtomicBoolean(false)
 
     def dropSnapshot(reason: String): Unit = {
       if (!dropped.compareAndSet(false, true)) return
       val client = MilvusClient(MilvusOption(baseOptions))
       try {
-        client.dropSnapshot(databaseName, collectionName, snapshotName) match {
-          case scala.util.Success(_) =>
-            logInfo(s"Dropped client read snapshot $snapshotName after $reason")
-          case scala.util.Failure(e) =>
-            logWarning(
-              s"Failed to drop client read snapshot $snapshotName after $reason",
-              e
-            )
-        }
+        dropClientReadSnapshot(
+          client,
+          databaseName,
+          collectionName,
+          snapshotName,
+          reason
+        )
       } finally {
         client.close()
       }
@@ -718,15 +768,31 @@ object MilvusScan extends Logging {
 
     SparkSession.getActiveSession.orElse(SparkSession.getDefaultSession) match {
       case Some(session) =>
-        session.sparkContext.addSparkListener(new SparkListener {
-          override def onJobEnd(jobEnd: SparkListenerJobEnd): Unit = {
-            dropSnapshot(s"Spark job ${jobEnd.jobId} ended")
+        val listener = new QueryExecutionListener {
+          private def cleanup(reason: String): Unit = {
+            try dropSnapshot(reason)
+            finally session.listenerManager.unregister(this)
           }
-        })
+
+          override def onSuccess(
+              funcName: String,
+              qe: QueryExecution,
+              durationNs: Long
+          ): Unit = cleanup(s"Spark query '$funcName' succeeded")
+
+          override def onFailure(
+              funcName: String,
+              qe: QueryExecution,
+              exception: Exception
+          ): Unit = cleanup(s"Spark query '$funcName' failed")
+        }
+        session.listenerManager.register(listener)
+        true
       case None =>
         logWarning(
           s"No active SparkSession; client read snapshot $snapshotName cannot be auto-dropped"
         )
+        false
     }
   }
 
@@ -875,27 +941,38 @@ class MilvusScan(
           val partitions = planInputPartitionsFromClientSnapshotPath(
             snapshotPath
           )
-          MilvusScan.registerClientSnapshotCleanup(
+          val cleanupRegistered = MilvusScan.registerClientSnapshotCleanup(
             options.asScala.toMap,
             milvusOption.databaseName,
             milvusOption.collectionName,
             snapshot.name
           )
-          Some(partitions)
-        } catch {
-          case e: Throwable =>
-            client.dropSnapshot(
+          if (cleanupRegistered) {
+            Some(partitions)
+          } else {
+            val dropped = MilvusScan.dropClientReadSnapshot(
+              client,
               milvusOption.databaseName,
               milvusOption.collectionName,
-              snapshot.name
-            ) match {
-              case scala.util.Failure(dropErr) =>
-                logWarning(
-                  s"Failed to drop client read snapshot ${snapshot.name} after planning failure",
-                  dropErr
-                )
-              case _ =>
+              snapshot.name,
+              "missing SparkSession"
+            )
+            if (!dropped) {
+              throw new IllegalStateException(
+                s"Failed to drop client read snapshot ${snapshot.name} when no SparkSession was available"
+              )
             }
+            None
+          }
+        } catch {
+          case e: Throwable =>
+            MilvusScan.dropClientReadSnapshot(
+              client,
+              milvusOption.databaseName,
+              milvusOption.collectionName,
+              snapshot.name,
+              "planning failure"
+            )
             throw e
         }
 
@@ -1093,10 +1170,15 @@ class MilvusScan(
   }
 
   private def readAllBytes(conf: Configuration, path: String): String = {
+    val maxBytes = milvusOption.options
+      .get(MilvusOption.SnapshotMaxJsonBytes)
+      .filter(_.trim.nonEmpty)
+      .map(_.toLong)
+      .getOrElse(MilvusSnapshotReader.MaxSnapshotJsonBytes)
     val uri = new URI(path)
     val fs = FileSystem.get(uri, conf)
     val in = fs.open(new Path(uri))
-    try MilvusSnapshotReader.readUtf8WithLimit(in, path)
+    try MilvusSnapshotReader.readUtf8WithLimit(in, path, maxBytes)
     finally in.close()
   }
 
@@ -1203,30 +1285,17 @@ class MilvusScan(
             ) // Backward compatible: plain basePath, latest version
         }
 
-      val parsedPathIds = MilvusScan.parseInsertLogPathIds(basePath)
-      val partitionId = parsedPathIds.map(_._1).getOrElse {
-        if (partitionIds.length <= 1) defaultPartitionId
-        else {
-          throw new IllegalArgumentException(
-            s"Cannot determine partition ID from snapshot manifest base_path '$basePath'"
-          )
-        }
-      }
+      val (partitionId, parsedSegmentId) =
+        MilvusScan.parseInsertLogPathIds(basePath)
       val segmentID = if (item.segmentID != 0L) {
-        parsedPathIds.foreach { case (_, parsedSegmentId) =>
-          if (parsedSegmentId != item.segmentID) {
-            throw new IllegalArgumentException(
-              s"Snapshot manifest segmentID ${item.segmentID} does not match base_path segment $parsedSegmentId in '$basePath'"
-            )
-          }
+        if (parsedSegmentId != item.segmentID) {
+          throw new IllegalArgumentException(
+            s"Snapshot manifest segmentID ${item.segmentID} does not match base_path segment $parsedSegmentId in '$basePath'"
+          )
         }
         item.segmentID
       } else {
-        parsedPathIds.map(_._2).getOrElse {
-          throw new IllegalArgumentException(
-            s"Cannot determine segment ID from snapshot manifest base_path '$basePath'"
-          )
-        }
+        parsedSegmentId
       }
       logInfo(
         s"Creating partition with manifestPath=$basePath, segmentID=$segmentID, readVersion=$readVersion"
