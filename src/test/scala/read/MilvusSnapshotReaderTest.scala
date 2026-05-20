@@ -2,6 +2,8 @@ package com.zilliz.spark.connector.read
 
 import java.io.ByteArrayInputStream
 
+import com.fasterxml.jackson.databind.node.IntNode
+import org.apache.spark.sql.types.DataTypes
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -19,6 +21,42 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     }
 
     err.getMessage should include("exceeds maximum supported size")
+  }
+
+  test("toSparkSchema maps vector enum values using Milvus proto codes") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(
+        Field(name = "binary", rawDataType = Some(IntNode.valueOf(100))),
+        Field(name = "float", rawDataType = Some(IntNode.valueOf(101))),
+        Field(name = "float16", rawDataType = Some(IntNode.valueOf(102))),
+        Field(name = "bfloat16", rawDataType = Some(IntNode.valueOf(103))),
+        Field(name = "sparse", rawDataType = Some(IntNode.valueOf(104))),
+        Field(name = "int8", rawDataType = Some(IntNode.valueOf(105)))
+      )
+    )
+
+    val sparkSchema = MilvusSnapshotReader.toSparkSchema(schema)
+
+    sparkSchema("binary").dataType shouldBe DataTypes.createArrayType(
+      DataTypes.BinaryType
+    )
+    sparkSchema("float").dataType shouldBe DataTypes.createArrayType(
+      DataTypes.FloatType
+    )
+    sparkSchema("float16").dataType shouldBe DataTypes.createArrayType(
+      DataTypes.FloatType
+    )
+    sparkSchema("bfloat16").dataType shouldBe DataTypes.createArrayType(
+      DataTypes.FloatType
+    )
+    sparkSchema("sparse").dataType shouldBe DataTypes.createMapType(
+      DataTypes.LongType,
+      DataTypes.FloatType
+    )
+    sparkSchema("int8").dataType shouldBe DataTypes.createArrayType(
+      DataTypes.ShortType
+    )
   }
 
   test("Parse complete snapshot metadata successfully") {

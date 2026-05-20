@@ -158,7 +158,8 @@ object Field {
     "FloatVector" -> 101,
     "Float16Vector" -> 102,
     "BFloat16Vector" -> 103,
-    "SparseFloatVector" -> 104
+    "SparseFloatVector" -> 104,
+    "Int8Vector" -> 105
   )
 
   def dataTypeNameToCode(name: String): Int = {
@@ -621,11 +622,12 @@ object MilvusSnapshotReader {
       case 28  => ArrayType(FloatType) // Array[Float]
       case 29  => ArrayType(DoubleType) // Array[Double]
       case 30  => ArrayType(StringType) // Array[VarChar]
+      case 100 => ArrayType(BinaryType) // BinaryVector
       case 101 => ArrayType(FloatType) // FloatVector
-      case 102 => ArrayType(ByteType) // BinaryVector
-      case 103 => ArrayType(ShortType) // Float16Vector
-      case 104 => ArrayType(ShortType) // BFloat16Vector
-      case 105 => MapType(LongType, FloatType) // SparseFloatVector
+      case 102 => ArrayType(FloatType) // Float16Vector
+      case 103 => ArrayType(FloatType) // BFloat16Vector
+      case 104 => MapType(LongType, FloatType) // SparseFloatVector
+      case 105 => ArrayType(ShortType) // Int8Vector
       case _   => BinaryType // Unknown types as binary
     }
   }
