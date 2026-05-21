@@ -1269,12 +1269,6 @@ class MilvusScan(
         }
         .getOrElse(Seq.empty)
 
-    if (manifestList.isEmpty && packedV2Segments.isEmpty) {
-      throw new IllegalArgumentException(
-        "Snapshot mode has no StorageV3 manifests or StorageV2 segments; refusing to return an empty read"
-      )
-    }
-
     // Get partition IDs from options (comma-separated)
     val partitionIds = Option(options.get(MilvusOption.SnapshotPartitionIds))
       .map(_.split(",").map(_.trim).filter(_.nonEmpty))

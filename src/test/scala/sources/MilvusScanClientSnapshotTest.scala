@@ -211,21 +211,28 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(err.getMessage.contains("does not contain insert_log"))
   }
 
-  test(
-    "snapshot planner fails loudly when all snapshot segment lists are empty"
-  ) {
+  test("snapshot planner returns no partitions for empty snapshots") {
     val rawOptions = new HashMap[String, String]()
     rawOptions.put(MilvusOption.SnapshotMode, "true")
     rawOptions.put(MilvusOption.SnapshotManifests, "[]")
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
 
-    val err = intercept[IllegalArgumentException] {
+    val partitions = scanWithOptions(rawOptions).planInputPartitions()
+
+    assert(partitions.isEmpty)
+  }
+
+  test("snapshot planner fails loudly on malformed manifest JSON") {
+    val rawOptions = new HashMap[String, String]()
+    rawOptions.put(MilvusOption.SnapshotMode, "true")
+    rawOptions.put(MilvusOption.SnapshotManifests, "not-json")
+    rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
+
+    val err = intercept[Exception] {
       scanWithOptions(rawOptions).planInputPartitions()
     }
 
-    assert(
-      err.getMessage.contains("no StorageV3 manifests or StorageV2 segments")
-    )
+    assert(err.getMessage.contains("Failed to parse snapshot manifests"))
   }
 
   test("snapshot planner tags V3 partitions with partition ID string") {
