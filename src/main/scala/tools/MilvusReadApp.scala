@@ -45,9 +45,14 @@ object MilvusReadApp {
       count: Boolean = false,
       printSchema: Boolean = false,
       debugRead: Boolean = false,
+      clientSnapshotName: Option[String] = None,
+      clientSnapshotDescription: Option[String] = None,
+      clientSnapshotCompactionProtectionSeconds: Option[Long] = None,
+      snapshotMaxJsonBytes: Option[Long] = None,
       select: Option[String] = None,
       where: Option[String] = None,
-      outputParquet: Option[String] = None
+      outputParquet: Option[String] = None,
+      sparkLogLevel: Option[String] = None
   )
 
   private[tools] val BoolFlags: Set[String] = Set(
@@ -75,9 +80,14 @@ object MilvusReadApp {
     "field-ids",
     "extra-columns",
     "show",
+    "client-snapshot-name",
+    "client-snapshot-description",
+    "client-snapshot-compaction-protection-seconds",
+    "snapshot-max-json-bytes",
     "select",
     "where",
-    "output-parquet"
+    "output-parquet",
+    "spark-log-level"
   )
 
   private[tools] val KnownFlags: Set[String] = BoolFlags ++ KvFlags
@@ -98,7 +108,10 @@ object MilvusReadApp {
           "--milvus-uri" -> args.milvusUri.nonEmpty,
           "--milvus-token" -> args.milvusToken.nonEmpty,
           "--collection" -> args.collection.nonEmpty,
-          "--partition-name" -> args.partitionName.nonEmpty
+          "--partition-name" -> args.partitionName.nonEmpty,
+          "--client-snapshot-name" -> args.clientSnapshotName.nonEmpty,
+          "--client-snapshot-description" -> args.clientSnapshotDescription.nonEmpty,
+          "--client-snapshot-compaction-protection-seconds" -> args.clientSnapshotCompactionProtectionSeconds.nonEmpty
         ).collect { case (flag, true) => flag }
         require(
           clientOnly.isEmpty,
@@ -106,6 +119,15 @@ object MilvusReadApp {
         )
       case other =>
         throw new IllegalArgumentException(s"Unsupported mode: $other")
+    }
+    args.clientSnapshotCompactionProtectionSeconds.foreach { seconds =>
+      require(
+        seconds > 0,
+        "--client-snapshot-compaction-protection-seconds must be positive"
+      )
+    }
+    args.snapshotMaxJsonBytes.foreach { bytes =>
+      require(bytes > 0, "--snapshot-max-json-bytes must be positive")
     }
   }
 
@@ -164,9 +186,17 @@ object MilvusReadApp {
       count = parsed.contains("count"),
       printSchema = parsed.contains("print-schema"),
       debugRead = parsed.contains("debug-read"),
+      clientSnapshotName = parsed.get("client-snapshot-name"),
+      clientSnapshotDescription = parsed.get("client-snapshot-description"),
+      clientSnapshotCompactionProtectionSeconds = parsed
+        .get("client-snapshot-compaction-protection-seconds")
+        .map(_.toLong),
+      snapshotMaxJsonBytes =
+        parsed.get("snapshot-max-json-bytes").map(_.toLong),
       select = parsed.get("select"),
       where = parsed.get("where"),
-      outputParquet = parsed.get("output-parquet")
+      outputParquet = parsed.get("output-parquet"),
+      sparkLogLevel = parsed.get("spark-log-level")
     )
     validateModeArgs(readArgs)
     readArgs
@@ -216,6 +246,18 @@ object MilvusReadApp {
     )
     args.fieldIds.foreach(v => opts += MilvusOption.ReaderFieldIDs -> v)
     args.extraColumns.foreach(v => opts += MilvusOption.MilvusExtraColumns -> v)
+    args.clientSnapshotName.foreach(v =>
+      opts += MilvusOption.ClientSnapshotName -> v
+    )
+    args.clientSnapshotDescription.foreach(v =>
+      opts += MilvusOption.ClientSnapshotDescription -> v
+    )
+    args.clientSnapshotCompactionProtectionSeconds.foreach(v =>
+      opts += MilvusOption.ClientSnapshotCompactionProtectionSeconds -> v.toString
+    )
+    args.snapshotMaxJsonBytes.foreach(v =>
+      opts += MilvusOption.SnapshotMaxJsonBytes -> v.toString
+    )
     if (args.debugRead) opts += MilvusOption.ReaderDebug -> "true"
 
     opts.toMap ++ buildStorageOptions(args)
@@ -258,6 +300,9 @@ object MilvusReadApp {
 
     args.fieldIds.foreach(v => opts += MilvusOption.ReaderFieldIDs -> v)
     args.extraColumns.foreach(v => opts += MilvusOption.MilvusExtraColumns -> v)
+    args.snapshotMaxJsonBytes.foreach(v =>
+      opts += MilvusOption.SnapshotMaxJsonBytes -> v.toString
+    )
     if (args.debugRead) opts += MilvusOption.ReaderDebug -> "true"
 
     opts.toMap ++ buildStorageOptions(args)
@@ -274,7 +319,10 @@ object MilvusReadApp {
     )
     configureHadoopS3A(hadoopConf, args)
 
-    val snapshotJson = readSnapshotJson(snapshotPath, hadoopConf)
+    val maxBytes = args.snapshotMaxJsonBytes.getOrElse(
+      MilvusSnapshotReader.MaxSnapshotJsonBytes
+    )
+    val snapshotJson = readSnapshotJson(snapshotPath, hadoopConf, maxBytes)
     val metadata =
       MilvusSnapshotReader.parseSnapshotMetadata(snapshotJson) match {
         case Right(value) => value
@@ -310,24 +358,28 @@ object MilvusReadApp {
     else path
   }
 
-  private[tools] def readLocalSnapshotJson(path: String): String = {
+  private[tools] def readLocalSnapshotJson(
+      path: String,
+      maxBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
+  ): String = {
     val in = new FileInputStream(path)
-    try MilvusSnapshotReader.readUtf8WithLimit(in, path)
+    try MilvusSnapshotReader.readUtf8WithLimit(in, path, maxBytes)
     finally in.close()
   }
 
   private[tools] def readSnapshotJson(
       path: String,
-      hadoopConf: Configuration
+      hadoopConf: Configuration,
+      maxBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
   ): String = {
     val normalized = normalizeSnapshotPath(path)
     if (!normalized.contains("://")) {
-      readLocalSnapshotJson(normalized)
+      readLocalSnapshotJson(normalized, maxBytes)
     } else {
       val uri = new URI(normalized)
       val fs = FileSystem.get(uri, hadoopConf)
       val in = fs.open(new Path(uri))
-      try MilvusSnapshotReader.readUtf8WithLimit(in, normalized)
+      try MilvusSnapshotReader.readUtf8WithLimit(in, normalized, maxBytes)
       finally in.close()
     }
   }
@@ -429,7 +481,7 @@ object MilvusReadApp {
     val spark = SparkSession.builder
       .appName("MilvusReadApp")
       .getOrCreate()
-    spark.sparkContext.setLogLevel("WARN")
+    args.sparkLogLevel.foreach(level => spark.sparkContext.setLogLevel(level))
 
     try {
       println(s"MilvusReadApp mode=${args.mode}")

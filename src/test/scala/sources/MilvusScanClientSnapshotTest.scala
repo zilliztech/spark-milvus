@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.sources
 
 import java.util.{Base64, HashMap}
 
+import org.apache.spark.sql.sources.{EqualTo, Filter}
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
@@ -131,6 +132,20 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     builder.pruneColumns(StructType(Seq.empty))
 
     assert(builder.build().readSchema().fieldNames.toSeq == Seq("RowID"))
+  }
+
+  test("pushFilters returns all filters for client snapshot fast path") {
+    val rawOptions = new HashMap[String, String]()
+    rawOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
+    rawOptions.put(MilvusOption.MilvusCollectionName, "c")
+    val builder = new MilvusScanBuilder(
+      StructType(Seq(StructField("id", LongType, nullable = false))),
+      new CaseInsensitiveStringMap(rawOptions)
+    )
+    val filters: Array[Filter] = Array(EqualTo("id", 10L))
+
+    assert(builder.pushFilters(filters).sameElements(filters))
+    assert(builder.pushedFilters().isEmpty)
   }
 
   test(

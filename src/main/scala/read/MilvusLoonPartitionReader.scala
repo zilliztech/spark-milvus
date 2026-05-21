@@ -111,6 +111,10 @@ class MilvusLoonPartitionReader(
 
   private var _currentBatch: VectorSchemaRoot = null
   private var _currentRowIndex: Int = 0
+  private var _currentBatchStartRowOffset: Long = 0L
+  private var _lastReturnedRowOffset: Long = -1L
+
+  def lastReturnedRowOffset: Long = _lastReturnedRowOffset
 
   try {
     // Create Arrow schema from Milvus schema.
@@ -244,6 +248,7 @@ class MilvusLoonPartitionReader(
         } else {
           // Try to load next batch
           if (_currentBatch != null) {
+            _currentBatchStartRowOffset += _currentBatch.getRowCount
             _currentBatch.close()
             _currentBatch = null
           }
@@ -276,6 +281,7 @@ class MilvusLoonPartitionReader(
         throw new IllegalStateException("No batch loaded")
       }
 
+      _lastReturnedRowOffset = _currentBatchStartRowOffset + _currentRowIndex
       val row = ArrowConverter.arrowToInternalRow(
         _currentBatch,
         _currentRowIndex,

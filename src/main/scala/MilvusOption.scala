@@ -183,7 +183,9 @@ object MilvusOption extends Logging {
   ): Unit = {
     val prefix = s"fs.s3a.bucket.$bucket"
 
-    conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    if (Option(conf.get("fs.s3a.impl")).forall(_.trim.isEmpty)) {
+      conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    }
     options.get(Properties.FsConfig.FsAddress).foreach { endpoint =>
       conf.set(s"$prefix.endpoint", endpoint)
     }
@@ -221,21 +223,7 @@ object MilvusOption extends Logging {
     }
   }
 
-  private[connector] def normalizeExtraColumnName(name: String): String = {
-    name match {
-      case "segment_id" =>
-        logWarning(
-          s"Extra column 'segment_id' is deprecated; use '$MilvusExtraColumnSegmentID' instead"
-        )
-        MilvusExtraColumnSegmentID
-      case "row_offset" =>
-        logWarning(
-          s"Extra column 'row_offset' is deprecated; use '$MilvusExtraColumnRowOffset' instead"
-        )
-        MilvusExtraColumnRowOffset
-      case other => other
-    }
-  }
+  private[connector] def normalizeExtraColumnName(name: String): String = name
 
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {

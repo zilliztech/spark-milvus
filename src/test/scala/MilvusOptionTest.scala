@@ -78,7 +78,7 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     milvusOption.extraColumns.size shouldBe 3
   }
 
-  test("Normalize legacy extra column names") {
+  test("Parse extra columns without rewriting user field names") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
       MilvusOption.MilvusExtraColumns -> "partition, segment_id, row_offset"
@@ -86,9 +86,9 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     val milvusOption = MilvusOption(options)
 
-    milvusOption.extraColumns should contain allOf ("partition", "$segment_id", "$row_offset")
-    milvusOption.extraColumns should not contain "segment_id"
-    milvusOption.extraColumns should not contain "row_offset"
+    milvusOption.extraColumns should contain allOf ("partition", "segment_id", "row_offset")
+    milvusOption.extraColumns should not contain "$segment_id"
+    milvusOption.extraColumns should not contain "$row_offset"
   }
 
   test("Parse empty extra columns") {
@@ -249,6 +249,19 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     milvusOption.options should contain key "custom.option"
     milvusOption.options("custom.option") shouldBe "custom_value"
+  }
+
+  test("configureHadoopS3A preserves existing global S3A implementation") {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set("fs.s3a.impl", "com.example.CustomS3AFileSystem")
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(MilvusOption.FsBucketName -> "bucket"),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.impl") shouldBe "com.example.CustomS3AFileSystem"
   }
 }
 

@@ -7,6 +7,7 @@ import java.nio.charset.{
   StandardCharsets
 }
 import scala.collection.JavaConverters._
+import scala.util.Try
 
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex.{ListVector, MapVector, StructVector}
@@ -16,9 +17,16 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
+import com.zilliz.spark.connector.FloatConverter
+
 /** Utilities for converting between Spark InternalRow and Arrow vectors
   */
 object ArrowConverter extends Logging {
+
+  private val MilvusDataTypeMetadataKeys = Seq(
+    "milvus_data_type",
+    "milvus.data_type"
+  )
 
   private def variableWidthBytes(
       vector: FieldVector,
@@ -30,6 +38,20 @@ object ArrowConverter extends Logging {
       case other =>
         throw new IllegalArgumentException(
           s"Expected variable-width Arrow vector, got ${other.getClass.getName}"
+        )
+    }
+  }
+
+  private def binaryBytes(
+      vector: FieldVector,
+      rowIndex: Int
+  ): Array[Byte] = {
+    vector match {
+      case v: VarBinaryVector       => v.get(rowIndex)
+      case v: FixedSizeBinaryVector => v.get(rowIndex)
+      case other =>
+        throw new IllegalArgumentException(
+          s"Expected binary Arrow vector, got ${other.getClass.getName}"
         )
     }
   }
@@ -57,6 +79,71 @@ object ArrowConverter extends Logging {
       case _ =>
     }
     UTF8String.fromBytes(bytes)
+  }
+
+  private def milvusDataTypeCode(vector: FieldVector): Option[Int] = {
+    Option(vector.getField)
+      .flatMap(field => Option(field.getMetadata))
+      .flatMap { metadata =>
+        MilvusDataTypeMetadataKeys.iterator
+          .flatMap(key => Option(metadata.get(key)))
+          .find(_.trim.nonEmpty)
+      }
+      .flatMap(value => Try(value.trim.toInt).toOption)
+  }
+
+  private def floatArrayFromFixedSizeBinary(
+      vector: FixedSizeBinaryVector,
+      rowIndex: Int
+  ): Array[Float] = {
+    val bytes = vector.get(rowIndex)
+    milvusDataTypeCode(vector) match {
+      case Some(102) =>
+        if (bytes.length % 2 != 0) {
+          throw new IllegalArgumentException(
+            s"Float16Vector column ${vector.getName} has odd byte length ${bytes.length}"
+          )
+        }
+        bytes.grouped(2).map(b => FloatConverter.fromFloat16Bytes(b)).toArray
+      case Some(103) =>
+        if (bytes.length % 2 != 0) {
+          throw new IllegalArgumentException(
+            s"BFloat16Vector column ${vector.getName} has odd byte length ${bytes.length}"
+          )
+        }
+        bytes.grouped(2).map(b => FloatConverter.fromBFloat16Bytes(b)).toArray
+      case _ =>
+        if (bytes.length % 4 != 0) {
+          throw new IllegalArgumentException(
+            s"FloatVector column ${vector.getName} byte length ${bytes.length} is not divisible by 4"
+          )
+        }
+        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
+    }
+  }
+
+  private def arrayFromListVector(
+      vector: FieldVector,
+      rowIndex: Int,
+      elementType: DataType
+  ): ArrayData = {
+    val listVector = vector.asInstanceOf[ListVector]
+    val dataVector = listVector.getDataVector
+    val startIndex = listVector.getElementStartIndex(rowIndex)
+    val endIndex = listVector.getElementEndIndex(rowIndex)
+    val length = endIndex - startIndex
+
+    val arrayElements = (0 until length).map { i =>
+      val elemIndex = startIndex + i
+      if (dataVector.isNull(elemIndex)) {
+        null
+      } else {
+        arrowValueToSparkValue(dataVector, elemIndex, elementType)
+      }
+    }.toArray
+
+    ArrayData.toArrayData(arrayElements)
   }
 
   /** Convert an Arrow VectorSchemaRoot row to Spark InternalRow
@@ -121,6 +208,9 @@ object ArrowConverter extends Logging {
       case IntegerType =>
         vector.asInstanceOf[IntVector].get(rowIndex)
 
+      case ByteType =>
+        vector.asInstanceOf[TinyIntVector].get(rowIndex)
+
       case ShortType =>
         vector.asInstanceOf[SmallIntVector].get(rowIndex)
 
@@ -137,34 +227,38 @@ object ArrowConverter extends Logging {
         utf8StringFromVariableWidth(vector, rowIndex)
 
       case ArrayType(FloatType, _) =>
-        // FloatVector stored as FixedSizeBinaryVector
-        val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        val floats =
-          (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
-        ArrayData.toArrayData(floats)
+        vector match {
+          case v: FixedSizeBinaryVector =>
+            ArrayData.toArrayData(floatArrayFromFixedSizeBinary(v, rowIndex))
+          case _ => arrayFromListVector(vector, rowIndex, FloatType)
+        }
+
+      case ArrayType(BinaryType, _) =>
+        vector match {
+          case v: FixedSizeBinaryVector =>
+            ArrayData.toArrayData(Array(v.get(rowIndex)))
+          case _ => arrayFromListVector(vector, rowIndex, BinaryType)
+        }
+
+      case ArrayType(ByteType, _) =>
+        vector match {
+          case v: FixedSizeBinaryVector =>
+            ArrayData.toArrayData(v.get(rowIndex))
+          case _ => arrayFromListVector(vector, rowIndex, ByteType)
+        }
+
+      case ArrayType(ShortType, _) =>
+        vector match {
+          case v: FixedSizeBinaryVector =>
+            ArrayData.toArrayData(v.get(rowIndex).map(_.toShort))
+          case _ => arrayFromListVector(vector, rowIndex, ShortType)
+        }
 
       case ArrayType(elementType, _) =>
-        // Generic array handling
-        val listVector = vector.asInstanceOf[ListVector]
-        val dataVector = listVector.getDataVector
-        val startIndex = listVector.getElementStartIndex(rowIndex)
-        val endIndex = listVector.getElementEndIndex(rowIndex)
-        val length = endIndex - startIndex
-
-        val arrayElements = (0 until length).map { i =>
-          val elemIndex = startIndex + i
-          if (dataVector.isNull(elemIndex)) {
-            null
-          } else {
-            arrowValueToSparkValue(dataVector, elemIndex, elementType)
-          }
-        }.toArray
-
-        ArrayData.toArrayData(arrayElements)
+        arrayFromListVector(vector, rowIndex, elementType)
 
       case BinaryType =>
-        variableWidthBytes(vector, rowIndex)
+        binaryBytes(vector, rowIndex)
 
       case MapType(keyType, valueType, _) =>
         val mapVector = vector.asInstanceOf[MapVector]

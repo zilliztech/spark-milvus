@@ -39,7 +39,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     val sparkSchema = MilvusSnapshotReader.toSparkSchema(schema)
 
     sparkSchema("binary").dataType shouldBe DataTypes.createArrayType(
-      DataTypes.BinaryType
+      DataTypes.ByteType
     )
     sparkSchema("float").dataType shouldBe DataTypes.createArrayType(
       DataTypes.FloatType

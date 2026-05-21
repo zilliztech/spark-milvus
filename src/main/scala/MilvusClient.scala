@@ -37,6 +37,7 @@ import io.milvus.grpc.milvus.{
   DescribeCollectionRequest,
   DescribeCollectionResponse,
   DescribeSnapshotRequest,
+  DescribeSnapshotResponse,
   DropCollectionRequest,
   DropSnapshotRequest,
   FlushRequest,
@@ -641,22 +642,11 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       checkStatus("createSnapshot", createStatus).get
 
       try {
-        val snapshot = stub.describeSnapshot(
-          DescribeSnapshotRequest(
-            name = snapshotName,
-            dbName = dbName,
-            collectionName = collectionName
-          )
+        val snapshot = describeSnapshotForReadWithRetry(
+          dbName,
+          collectionName,
+          snapshotName
         )
-        checkStatus(
-          "describeSnapshot",
-          snapshot.status.getOrElse(
-            Status(
-              errorCode = ErrorCode.UnexpectedError,
-              reason = "DescribeSnapshot Status is empty"
-            )
-          )
-        ).get
 
         Success(
           MilvusSnapshotInfo(
@@ -684,6 +674,49 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       case e: StatusRuntimeException => Failure(e)
       case e: Exception              => Failure(e)
     }
+  }
+
+  private def describeSnapshotForReadWithRetry(
+      dbName: String,
+      collectionName: String,
+      snapshotName: String,
+      maxAttempts: Int = 3
+  ): DescribeSnapshotResponse = {
+    var lastFailure = Option.empty[Exception]
+    (1 to maxAttempts).foreach { attempt =>
+      try {
+        val snapshot = stub.describeSnapshot(
+          DescribeSnapshotRequest(
+            name = snapshotName,
+            dbName = dbName,
+            collectionName = collectionName
+          )
+        )
+        checkStatus(
+          "describeSnapshot",
+          snapshot.status.getOrElse(
+            Status(
+              errorCode = ErrorCode.UnexpectedError,
+              reason = "DescribeSnapshot Status is empty"
+            )
+          )
+        ).get
+        return snapshot
+      } catch {
+        case e: Exception =>
+          lastFailure = Some(e)
+          if (attempt < maxAttempts) {
+            logWarning(
+              s"describeSnapshot failed for $snapshotName (attempt $attempt/$maxAttempts)",
+              e
+            )
+            TimeUnit.MILLISECONDS.sleep(200L * attempt)
+          }
+      }
+    }
+    throw lastFailure.getOrElse(
+      new RuntimeException(s"describeSnapshot failed for $snapshotName")
+    )
   }
 
   def dropSnapshot(

@@ -43,7 +43,8 @@ object MilvusSchemaUtil {
     import scala.collection.JavaConverters._
 
     val metadata = Map(
-      "PARQUET:field_id" -> field.fieldID.toString
+      "PARQUET:field_id" -> field.fieldID.toString,
+      "milvus_data_type" -> field.dataType.value.toString
     ).asJava
 
     // Create FieldType with metadata included
@@ -201,7 +202,8 @@ object MilvusSchemaUtil {
       // Create metadata with both field_id and original name for reference
       val metadata = Map(
         "PARQUET:field_id" -> field.fieldID.toString,
-        "original_name" -> field.name
+        "original_name" -> field.name,
+        "milvus_data_type" -> field.dataType.value.toString
       ).asJava
 
       val fieldType = new FieldType(

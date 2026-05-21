@@ -538,12 +538,12 @@ class MilvusScanBuilder(
   }
 
   override def pushFilters(filters: Array[Filter]): Array[Filter] = {
-    // V2 packed reader does not apply filters server-side yet — return all
-    // as unsupported so Spark applies them post-read.
-    // TODO: implement filter pushdown for V2 packed reader in a separate PR.
-    val isPackedV2 = Option(options.get(MilvusOption.SnapshotV2Segments))
-      .exists(_.nonEmpty)
-    if (isPackedV2) {
+    // Snapshot planning can mix V3 and packed V2 readers, and client mode may
+    // pivot into snapshot mode after Spark has already asked about pushdown.
+    val milvusOption = MilvusOption(options)
+    val shouldReadViaSnapshot = MilvusOption.isSnapshotMode(options) ||
+      MilvusScan.canUseClientSnapshotFastPath(milvusOption)
+    if (shouldReadViaSnapshot) {
       pushedFilterArray = Array.empty
       return filters
     }
@@ -1044,7 +1044,7 @@ class MilvusScan(
     new MilvusScan(
       schema,
       new CaseInsensitiveStringMap(snapshotOptions.asJava),
-      pushedFilters
+      Array.empty[Filter]
     ).planInputPartitions()
   }
 

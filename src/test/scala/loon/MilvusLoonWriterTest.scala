@@ -6,10 +6,35 @@ import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.spark.connector.write.MilvusLoonWriter
+import com.zilliz.spark.connector.write.{
+  MilvusLoonPartitionWriter,
+  MilvusLoonWriter
+}
 import com.zilliz.spark.connector.MilvusOption
 
 class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
+
+  test("parsePositiveDoubleOption rejects NaN and Infinity") {
+    Seq("NaN", "Infinity", "-Infinity").foreach { value =>
+      an[IllegalArgumentException] should be thrownBy {
+        MilvusLoonPartitionWriter.parsePositiveDoubleOption(
+          Map(
+            MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> value
+          ),
+          MilvusOption.WriterVariableWidthBytesPerValue,
+          defaultValue = 32.0
+        )
+      }
+    }
+  }
+
+  test("parsePositiveDoubleOption accepts finite positive values") {
+    MilvusLoonPartitionWriter.parsePositiveDoubleOption(
+      Map(MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> "64.5"),
+      MilvusOption.WriterVariableWidthBytesPerValue,
+      defaultValue = 32.0
+    ) shouldBe 64.5
+  }
 
   test("Write DataFrame using Loon Writer to Minio") {
     val spark = SparkSession

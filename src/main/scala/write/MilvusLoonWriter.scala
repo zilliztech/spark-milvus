@@ -176,6 +176,30 @@ object MilvusLoonPartitionWriter {
       doWrite
     }
   }
+
+  private[connector] def parsePositiveDoubleOption(
+      options: scala.collection.Map[String, String],
+      key: String,
+      defaultValue: Double
+  ): Double = {
+    options
+      .get(key.toLowerCase)
+      .filter(_.trim.nonEmpty)
+      .map { value =>
+        val parsed = Try(value.trim.toDouble).getOrElse {
+          throw new IllegalArgumentException(
+            s"$key must be a finite positive number, got '$value'"
+          )
+        }
+        if (!java.lang.Double.isFinite(parsed) || parsed <= 0.0) {
+          throw new IllegalArgumentException(
+            s"$key must be a finite positive number, got '$value'"
+          )
+        }
+        parsed
+      }
+      .getOrElse(defaultValue)
+  }
 }
 
 /** Partition writer using Storage V2 FFI
@@ -219,7 +243,8 @@ class MilvusLoonPartitionWriter(
   // Batch size configuration
   private val batchSize = milvusOption.insertMaxBatchSize
   private val variableWidthBytesPerValue =
-    parsePositiveDoubleOption(
+    MilvusLoonPartitionWriter.parsePositiveDoubleOption(
+      milvusOption.options,
       MilvusOption.WriterVariableWidthBytesPerValue,
       defaultValue = 32.0
     )
@@ -472,29 +497,6 @@ class MilvusLoonPartitionWriter(
     r.setRowCount(0)
   }
 
-  private def parsePositiveDoubleOption(
-      key: String,
-      defaultValue: Double
-  ): Double = {
-    milvusOption.options
-      .get(key.toLowerCase)
-      .filter(_.trim.nonEmpty)
-      .map { value =>
-        val parsed = Try(value.trim.toDouble).getOrElse {
-          throw new IllegalArgumentException(
-            s"$key must be a positive number, got '$value'"
-          )
-        }
-        if (parsed <= 0.0) {
-          throw new IllegalArgumentException(
-            s"$key must be a positive number, got '$value'"
-          )
-        }
-        parsed
-      }
-      .getOrElse(defaultValue)
-  }
-
   /** Generate S3 base path for this writer
     *
     * For S3FileSystem, the path format should be: bucket/root_path/... Arrow
@@ -636,6 +638,8 @@ object MilvusLoonWriter extends Logging {
     *   - fs.root_path: Root path in bucket (default: "files")
     *   - milvus.collection.name: Collection name for path generation
     *   - vector.{field_name}.dim: Vector dimension for float array fields
+    *   - milvus.writer.variableWidthBytesPerValue: initial bytes per
+    *     variable-width value (default: 32.0)
     * @return
     *   Try containing manifest paths on success
     */

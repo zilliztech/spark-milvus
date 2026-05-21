@@ -85,7 +85,7 @@ object DataTypeUtil {
       case MilvusDataType.FloatVector =>
         DataTypes.createArrayType(DataTypes.FloatType)
       case MilvusDataType.BinaryVector =>
-        DataTypes.createArrayType(DataTypes.BinaryType)
+        DataTypes.createArrayType(DataTypes.ByteType)
       case MilvusDataType.Int8Vector =>
         DataTypes.createArrayType(DataTypes.ShortType)
       case MilvusDataType.Float16Vector =>

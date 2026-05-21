@@ -81,8 +81,6 @@ class MilvusPartitionReaderFactory(
 
         if (hasPartition || hasSegmentId || hasRowOffset) {
           new PartitionReader[InternalRow] {
-            private var rowOffset: Long = 0L
-
             override def next(): Boolean = underlyingReader.next()
 
             override def get(): InternalRow = {
@@ -97,13 +95,13 @@ class MilvusPartitionReaderFactory(
                   case MilvusOption.MilvusExtraColumnSegmentID =>
                     resultValues(writeIdx) = p.segmentID
                   case MilvusOption.MilvusExtraColumnRowOffset =>
-                    resultValues(writeIdx) = rowOffset
+                    resultValues(writeIdx) =
+                      underlyingReader.lastReturnedRowOffset
                   case _ =>
                     resultValues(writeIdx) = row.get(readIdx, field.dataType)
                     readIdx += 1
                 }
               }
-              rowOffset += 1
 
               InternalRow.fromSeq(resultValues.toSeq)
             }

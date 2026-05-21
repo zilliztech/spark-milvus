@@ -61,7 +61,17 @@ class MilvusReadAppTest
         "10",
         "--count",
         "--print-schema",
-        "--debug-read"
+        "--debug-read",
+        "--client-snapshot-name",
+        "spark-read-test",
+        "--client-snapshot-description",
+        "test snapshot",
+        "--client-snapshot-compaction-protection-seconds",
+        "60",
+        "--snapshot-max-json-bytes",
+        "1024",
+        "--spark-log-level",
+        "WARN"
       )
     )
 
@@ -73,6 +83,11 @@ class MilvusReadAppTest
     args.count shouldBe true
     args.printSchema shouldBe true
     args.debugRead shouldBe true
+    args.clientSnapshotName shouldBe Some("spark-read-test")
+    args.clientSnapshotDescription shouldBe Some("test snapshot")
+    args.clientSnapshotCompactionProtectionSeconds shouldBe Some(60L)
+    args.snapshotMaxJsonBytes shouldBe Some(1024L)
+    args.sparkLogLevel shouldBe Some("WARN")
   }
 
   test("parseArgs parses snapshot mode arguments") {
@@ -142,6 +157,8 @@ class MilvusReadAppTest
           "src/test/data/sample_snapshot.json",
           "--collection",
           "book",
+          "--client-snapshot-name",
+          "spark-read-test",
           "--s3-bucket",
           "a-bucket"
         )
@@ -159,6 +176,19 @@ class MilvusReadAppTest
           "client",
           "--snapshot",
           "src/test/data/sample_snapshot.json"
+        )
+      )
+    }
+  }
+
+  test("parseArgs rejects non-positive client snapshot protection seconds") {
+    an[IllegalArgumentException] should be thrownBy {
+      MilvusReadApp.parseArgs(
+        Array(
+          "--mode",
+          "client",
+          "--client-snapshot-compaction-protection-seconds",
+          "0"
         )
       )
     }
@@ -196,7 +226,15 @@ class MilvusReadAppTest
         "100,101",
         "--extra-columns",
         "$segment_id,$row_offset",
-        "--debug-read"
+        "--debug-read",
+        "--client-snapshot-name",
+        "spark-read-test",
+        "--client-snapshot-description",
+        "test snapshot",
+        "--client-snapshot-compaction-protection-seconds",
+        "60",
+        "--snapshot-max-json-bytes",
+        "1024"
       )
     )
 
@@ -209,6 +247,12 @@ class MilvusReadAppTest
     opts(MilvusOption.ReaderFieldIDs) shouldBe "100,101"
     opts(MilvusOption.MilvusExtraColumns) shouldBe "$segment_id,$row_offset"
     opts(MilvusOption.ReaderDebug) shouldBe "true"
+    opts(MilvusOption.ClientSnapshotName) shouldBe "spark-read-test"
+    opts(MilvusOption.ClientSnapshotDescription) shouldBe "test snapshot"
+    opts(
+      MilvusOption.ClientSnapshotCompactionProtectionSeconds
+    ) shouldBe "60"
+    opts(MilvusOption.SnapshotMaxJsonBytes) shouldBe "1024"
     opts(Properties.FsConfig.FsAddress) shouldBe "127.0.0.1:9000"
     opts(Properties.FsConfig.FsBucketName) shouldBe "a-bucket"
     opts(Properties.FsConfig.FsRootPath) shouldBe "files"
@@ -307,7 +351,9 @@ class MilvusReadAppTest
         "--field-ids",
         "100",
         "--extra-columns",
-        "$segment_id,$row_offset"
+        "$segment_id,$row_offset",
+        "--snapshot-max-json-bytes",
+        "1024"
       )
     )
 
@@ -332,6 +378,7 @@ class MilvusReadAppTest
     opts(MilvusOption.SnapshotSchemaJson) shouldBe json
     opts(MilvusOption.ReaderFieldIDs) shouldBe "100"
     opts(MilvusOption.MilvusExtraColumns) shouldBe "$segment_id,$row_offset"
+    opts(MilvusOption.SnapshotMaxJsonBytes) shouldBe "1024"
     opts should contain key MilvusOption.SnapshotSchemaBytes
     Base64.getDecoder
       .decode(opts(MilvusOption.SnapshotSchemaBytes))
@@ -360,6 +407,15 @@ class MilvusReadAppTest
       MilvusReadApp.readLocalSnapshotJson("src/test/data/sample_snapshot.json")
     json should include("snapshot-info")
     json should include("collection")
+  }
+
+  test("readLocalSnapshotJson applies explicit max JSON byte limit") {
+    an[IllegalArgumentException] should be thrownBy {
+      MilvusReadApp.readLocalSnapshotJson(
+        "src/test/data/sample_snapshot.json",
+        maxBytes = 1L
+      )
+    }
   }
 
   test("configureHadoopS3A configures static credentials") {
