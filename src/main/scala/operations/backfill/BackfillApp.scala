@@ -216,7 +216,7 @@ object BackfillApp {
           if (BoolFlags.contains(key)) {
             map += (key -> "true")
             i += 1
-          } else if (i + 1 < args.length) {
+          } else if (i + 1 < args.length && !args(i + 1).startsWith("--")) {
             map += (key -> args(i + 1))
             i += 2
           } else {

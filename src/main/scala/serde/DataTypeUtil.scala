@@ -84,8 +84,7 @@ object DataTypeUtil {
         ) // TODO: fubang support geometry
       case MilvusDataType.FloatVector =>
         DataTypes.createArrayType(DataTypes.FloatType)
-      case MilvusDataType.BinaryVector =>
-        DataTypes.createArrayType(DataTypes.BinaryType)
+      case MilvusDataType.BinaryVector => DataTypes.BinaryType
       case MilvusDataType.Int8Vector =>
         DataTypes.createArrayType(DataTypes.ShortType)
       case MilvusDataType.Float16Vector =>

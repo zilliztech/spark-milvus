@@ -196,4 +196,18 @@ class PropertiesTest extends AnyFunSuite with Matchers {
     Properties.FsConfig.FsUseSSL should not be empty
     Properties.FsConfig.FsRegion should not be empty
   }
+
+  test("fromMilvusOption requires bucket name in IAM mode") {
+    val options = Map(
+      MilvusOption.MilvusUri -> "http://localhost:19530",
+      Properties.FsConfig.FsUseIam -> "true"
+    )
+
+    val err = intercept[IllegalArgumentException] {
+      Properties.fromMilvusOption(MilvusOption(options))
+    }
+
+    err.getMessage should include(Properties.FsConfig.FsBucketName)
+    err.getMessage should include(Properties.FsConfig.FsUseIam)
+  }
 }

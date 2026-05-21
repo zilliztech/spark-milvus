@@ -1,5 +1,8 @@
 package com.zilliz.spark.connector.read
 
+import java.io.{ByteArrayOutputStream, FileInputStream, InputStream}
+import java.nio.charset.StandardCharsets
+
 import com.fasterxml.jackson.annotation.{JsonAlias, JsonProperty}
 import com.fasterxml.jackson.databind.{
   DeserializationFeature,
@@ -155,7 +158,8 @@ object Field {
     "FloatVector" -> 101,
     "Float16Vector" -> 102,
     "BFloat16Vector" -> 103,
-    "SparseFloatVector" -> 104
+    "SparseFloatVector" -> 104,
+    "Int8Vector" -> 105
   )
 
   def dataTypeNameToCode(name: String): Int = {
@@ -383,6 +387,30 @@ case class SnapshotMetadata(
   */
 object MilvusSnapshotReader {
 
+  val MaxSnapshotJsonBytes: Long = 64L * 1024L * 1024L
+
+  def readUtf8WithLimit(
+      in: InputStream,
+      path: String,
+      maxBytes: Long = MaxSnapshotJsonBytes
+  ): String = {
+    val out = new ByteArrayOutputStream()
+    val buf = new Array[Byte](8192)
+    var total = 0L
+    var n = in.read(buf)
+    while (n >= 0) {
+      total += n
+      if (total > maxBytes) {
+        throw new IllegalArgumentException(
+          s"Snapshot metadata file exceeds maximum supported size of $maxBytes bytes: $path"
+        )
+      }
+      out.write(buf, 0, n)
+      n = in.read(buf)
+    }
+    new String(out.toByteArray, StandardCharsets.UTF_8)
+  }
+
   private val mapper: ObjectMapper with ScalaObjectMapper = {
     val m = new ObjectMapper() with ScalaObjectMapper
     m.registerModule(DefaultScalaModule)
@@ -428,12 +456,11 @@ object MilvusSnapshotReader {
       path: String
   ): Either[Throwable, SnapshotMetadata] = {
     try {
-      val source = scala.io.Source.fromFile(path)
+      val in = new FileInputStream(path)
       try {
-        val json = source.mkString
-        parseSnapshotMetadata(json)
+        parseSnapshotMetadata(readUtf8WithLimit(in, path))
       } finally {
-        source.close()
+        in.close()
       }
     } catch {
       case e: Exception => Left(e)
@@ -595,11 +622,12 @@ object MilvusSnapshotReader {
       case 28  => ArrayType(FloatType) // Array[Float]
       case 29  => ArrayType(DoubleType) // Array[Double]
       case 30  => ArrayType(StringType) // Array[VarChar]
+      case 100 => BinaryType // BinaryVector
       case 101 => ArrayType(FloatType) // FloatVector
-      case 102 => ArrayType(ByteType) // BinaryVector
-      case 103 => ArrayType(ShortType) // Float16Vector
-      case 104 => ArrayType(ShortType) // BFloat16Vector
-      case 105 => MapType(LongType, FloatType) // SparseFloatVector
+      case 102 => ArrayType(FloatType) // Float16Vector
+      case 103 => ArrayType(FloatType) // BFloat16Vector
+      case 104 => MapType(LongType, FloatType) // SparseFloatVector
+      case 105 => ArrayType(ShortType) // Int8Vector
       case _   => BinaryType // Unknown types as binary
     }
   }

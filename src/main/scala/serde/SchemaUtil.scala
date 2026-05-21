@@ -34,6 +34,14 @@ object MilvusSchemaUtil {
     )
   }
 
+  private def systemFieldNameAliases(field: FieldSchema): Set[String] = {
+    field.fieldID match {
+      case 0 => Set("rowid", "row_id")
+      case 1 => Set("timestamp")
+      case _ => Set(field.name.toLowerCase)
+    }
+  }
+
   /** Convert Milvus FieldSchema to Arrow Field
     */
   def convertToArrowField(
@@ -43,7 +51,8 @@ object MilvusSchemaUtil {
     import scala.collection.JavaConverters._
 
     val metadata = Map(
-      "PARQUET:field_id" -> field.fieldID.toString
+      "PARQUET:field_id" -> field.fieldID.toString,
+      "milvus_data_type" -> field.dataType.value.toString
     ).asJava
 
     // Create FieldType with metadata included
@@ -135,8 +144,17 @@ object MilvusSchemaUtil {
       arrowFields += arrowField
     }
 
-    // Process all fields in the collection schema
-    collectionSchema.fields.foreach { field =>
+    val existingNames = collectionSchema.fields.map(_.name.toLowerCase).toSet
+    val existingFieldIds = collectionSchema.fields.map(_.fieldID).toSet
+    val systemFields = Seq(
+      FieldSchema(name = "RowID", fieldID = 0, dataType = DataType.Int64),
+      FieldSchema(name = "Timestamp", fieldID = 1, dataType = DataType.Int64)
+    ).filterNot(field =>
+      systemFieldNameAliases(field).exists(existingNames.contains) ||
+        existingFieldIds.contains(field.fieldID)
+    )
+
+    (systemFields ++ collectionSchema.fields).foreach { field =>
       appendArrowField(field)
     }
 
@@ -152,8 +170,8 @@ object MilvusSchemaUtil {
     * the Arrow schema must use field IDs as field names for the reader to
     * correctly match requested columns with column groups.
     *
-    * Note: System fields (row_id, timestamp) are NOT included here. They are
-    * handled by MilvusPartitionReaderFactory.
+    * System fields (RowID=0, Timestamp=1) are included when the Milvus schema
+    * does not already declare them, so readers can project row_id/timestamp.
     *
     * @param collectionSchema
     *   The Milvus collection schema
@@ -191,7 +209,8 @@ object MilvusSchemaUtil {
       // Create metadata with both field_id and original name for reference
       val metadata = Map(
         "PARQUET:field_id" -> field.fieldID.toString,
-        "original_name" -> field.name
+        "original_name" -> field.name,
+        "milvus_data_type" -> field.dataType.value.toString
       ).asJava
 
       val fieldType = new FieldType(
@@ -211,8 +230,17 @@ object MilvusSchemaUtil {
       arrowFields += arrowField
     }
 
-    // Process all fields in the collection schema
-    collectionSchema.fields.foreach { field =>
+    val existingNames = collectionSchema.fields.map(_.name.toLowerCase).toSet
+    val existingFieldIds = collectionSchema.fields.map(_.fieldID).toSet
+    val systemFields = Seq(
+      FieldSchema(name = "RowID", fieldID = 0, dataType = DataType.Int64),
+      FieldSchema(name = "Timestamp", fieldID = 1, dataType = DataType.Int64)
+    ).filterNot(field =>
+      systemFieldNameAliases(field).exists(existingNames.contains) ||
+        existingFieldIds.contains(field.fieldID)
+    )
+
+    (systemFields ++ collectionSchema.fields).foreach { field =>
       appendArrowFieldWithIdName(field)
     }
 
@@ -287,8 +315,8 @@ object MilvusSchemaUtil {
           )
       }
 
-      // Use explicit field ID if provided, otherwise fall back to idx + 1
-      val fieldId = fieldIds.getOrElse(field.name, (idx + 1).toLong)
+      // Use explicit field ID if provided, otherwise avoid Milvus system IDs 0/1.
+      val fieldId = fieldIds.getOrElse(field.name, (idx + 100).toLong)
       val metadata = Map("PARQUET:field_id" -> fieldId.toString).asJava
 
       val fieldType = new FieldType(true, arrowType, null, metadata)

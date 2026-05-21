@@ -1,5 +1,8 @@
 package com.zilliz.spark.connector
 
+import scala.collection.JavaConverters._
+
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -66,13 +69,26 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
   test("Parse extra columns configuration") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
+      MilvusOption.MilvusExtraColumns -> "partition, $segment_id, $row_offset"
+    )
+
+    val milvusOption = MilvusOption(options)
+
+    milvusOption.extraColumns should contain allOf ("partition", "$segment_id", "$row_offset")
+    milvusOption.extraColumns.size shouldBe 3
+  }
+
+  test("Parse extra columns without rewriting user field names") {
+    val options = Map(
+      MilvusOption.MilvusUri -> "http://localhost:19530",
       MilvusOption.MilvusExtraColumns -> "partition, segment_id, row_offset"
     )
 
     val milvusOption = MilvusOption(options)
 
     milvusOption.extraColumns should contain allOf ("partition", "segment_id", "row_offset")
-    milvusOption.extraColumns.size shouldBe 3
+    milvusOption.extraColumns should not contain "$segment_id"
+    milvusOption.extraColumns should not contain "$row_offset"
   }
 
   test("Parse empty extra columns") {
@@ -202,6 +218,26 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     milvusOption.caPemPath shouldBe "/path/to/ca.pem"
   }
 
+  test("isSnapshotMode recognizes all snapshot mode hints") {
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotMode -> "true")
+    ) shouldBe true
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotManifests -> "[]")
+    ) shouldBe true
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotV2Segments -> "[]")
+    ) shouldBe true
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.MilvusUri -> "http://localhost:19530")
+    ) shouldBe false
+
+    val caseInsensitive = new CaseInsensitiveStringMap(
+      Map(MilvusOption.SnapshotMode.toUpperCase -> "TRUE").asJava
+    )
+    MilvusOption.isSnapshotMode(caseInsensitive) shouldBe true
+  }
+
   test("Options map is preserved") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
@@ -213,6 +249,105 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     milvusOption.options should contain key "custom.option"
     milvusOption.options("custom.option") shouldBe "custom_value"
+  }
+
+  test("configureHadoopS3A preserves existing global S3A implementation") {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set("fs.s3a.impl", "com.example.CustomS3AFileSystem")
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(MilvusOption.FsBucketName -> "bucket"),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.impl") shouldBe "com.example.CustomS3AFileSystem"
+  }
+
+  test("configureHadoopS3A preserves existing bucket path style") {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set("fs.s3a.bucket.bucket.path.style.access", "false")
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(MilvusOption.FsBucketName -> "bucket"),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.path.style.access") shouldBe "false"
+  }
+
+  test("configureHadoopS3A preserves existing bucket SSL setting") {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set("fs.s3a.bucket.bucket.connection.ssl.enabled", "true")
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(MilvusOption.FsBucketName -> "bucket"),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.connection.ssl.enabled") shouldBe "true"
+  }
+
+  test(
+    "configureHadoopS3A explicit SSL option overrides existing bucket setting"
+  ) {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set("fs.s3a.bucket.bucket.connection.ssl.enabled", "true")
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(
+        MilvusOption.FsBucketName -> "bucket",
+        com.zilliz.spark.connector.loon.Properties.FsConfig.FsUseSSL -> "false"
+      ),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.connection.ssl.enabled") shouldBe "false"
+  }
+
+  test(
+    "configureHadoopS3A preserves existing credentials provider when implicit"
+  ) {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set(
+      "fs.s3a.bucket.bucket.aws.credentials.provider",
+      "com.example.CustomCredentialsProvider"
+    )
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(MilvusOption.FsBucketName -> "bucket"),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.aws.credentials.provider") shouldBe
+      "com.example.CustomCredentialsProvider"
+  }
+
+  test("configureHadoopS3A explicit static credentials override provider") {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set(
+      "fs.s3a.bucket.bucket.aws.credentials.provider",
+      "com.example.CustomCredentialsProvider"
+    )
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(
+        MilvusOption.FsBucketName -> "bucket",
+        com.zilliz.spark.connector.loon.Properties.FsConfig.FsAccessKeyId -> "ak",
+        com.zilliz.spark.connector.loon.Properties.FsConfig.FsAccessKeyValue -> "sk"
+      ),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.access.key") shouldBe "ak"
+    conf.get("fs.s3a.bucket.bucket.secret.key") shouldBe "sk"
+    conf.get("fs.s3a.bucket.bucket.aws.credentials.provider") shouldBe
+      "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
   }
 }
 

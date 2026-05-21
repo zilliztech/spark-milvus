@@ -6,8 +6,10 @@ import scala.collection.Map
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.hadoop.fs.s3a.S3AFileSystem
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
+import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.MilvusConnectionException
 
 /** Vector search configuration for Milvus Storage V2
@@ -43,7 +45,7 @@ case class MilvusOption(
     vectorSearchConfig: Option[VectorSearchConfig] = None
 )
 
-object MilvusOption {
+object MilvusOption extends Logging {
   // Constants for map keys
   val MilvusUri = "milvus.uri"
   val MilvusToken = "milvus.token"
@@ -65,13 +67,14 @@ object MilvusOption {
 
   val MilvusExtraColumns = "milvus.extra.columns"
   val MilvusExtraColumnPartition = "partition"
-  val MilvusExtraColumnSegmentID = "segment_id"
-  val MilvusExtraColumnRowOffset = "row_offset"
+  val MilvusExtraColumnSegmentID = "$segment_id"
+  val MilvusExtraColumnRowOffset = "$row_offset"
 
   // reader config
   val ReaderPath = "path"
   val ReaderType = "type"
   val ReaderFieldIDs = "fieldIDs"
+  val ReaderDebug = "milvus.reader.debug"
 
   // vector search config
   val VectorSearchQueryVector = "vector.search.query"
@@ -118,6 +121,8 @@ object MilvusOption {
     "milvus.writer.commitType" // "addfield" for backfill, default "addfiles"
   val WriterFieldIds =
     "milvus.writer.fieldIds" // JSON map of field name -> field ID (e.g., "new_field:104,other_field:105")
+  val WriterVariableWidthBytesPerValue =
+    "milvus.writer.variableWidthBytesPerValue"
 
   // Backfill merge mode.
   //   replace   — file is source of truth for target columns: matched rows
@@ -153,6 +158,103 @@ object MilvusOption {
     "milvus.snapshot.schema.json" // Optional: raw schema JSON for building MilvusCollectionInfo
   val SnapshotSchemaBytes =
     "milvus.snapshot.schema.bytes" // Base64 encoded protobuf CollectionSchema bytes
+  val SnapshotMaxJsonBytes = "milvus.snapshot.maxJsonBytes"
+  val ClientSnapshotName = "milvus.client.snapshot.name"
+  val ClientSnapshotDescription = "milvus.client.snapshot.description"
+  val ClientSnapshotCompactionProtectionSeconds =
+    "milvus.client.snapshot.compactionProtectionSeconds"
+
+  def isSnapshotMode(options: Map[String, String]): Boolean = {
+    options.get(SnapshotMode).exists(_.equalsIgnoreCase("true")) ||
+    options.contains(SnapshotManifests) ||
+    options.contains(SnapshotV2Segments)
+  }
+
+  def isSnapshotMode(options: CaseInsensitiveStringMap): Boolean = {
+    Option(options.get(SnapshotMode)).exists(_.equalsIgnoreCase("true")) ||
+    Option(options.get(SnapshotManifests)).isDefined ||
+    Option(options.get(SnapshotV2Segments)).isDefined
+  }
+
+  def configureHadoopS3A(
+      conf: Configuration,
+      options: Map[String, String],
+      bucket: String
+  ): Unit = {
+    val prefix = s"fs.s3a.bucket.$bucket"
+
+    def isMissing(key: String): Boolean =
+      Option(conf.get(key)).forall(_.trim.isEmpty)
+
+    def setIfMissing(key: String, value: String): Unit = {
+      if (isMissing(key)) conf.set(key, value)
+    }
+
+    setIfMissing("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    options.get(Properties.FsConfig.FsAddress).foreach { endpoint =>
+      conf.set(s"$prefix.endpoint", endpoint)
+    }
+    options.get(Properties.FsConfig.FsRegion).foreach { region =>
+      conf.set(s"$prefix.endpoint.region", region)
+      conf.set(s"$prefix.region", region)
+    }
+    options
+      .get(Properties.FsConfig.FsUseVirtualHost)
+      .orElse(options.get(FsUseVirtualHost)) match {
+      case Some(useVirtualHost) =>
+        conf.set(
+          s"$prefix.path.style.access",
+          (!useVirtualHost.toBoolean).toString
+        )
+      case None =>
+        setIfMissing(s"$prefix.path.style.access", "true")
+    }
+    options
+      .get(Properties.FsConfig.FsUseSSL)
+      .orElse(options.get(FsUseSSL)) match {
+      case Some(useSSL) => conf.set(s"$prefix.connection.ssl.enabled", useSSL)
+      case None => setIfMissing(s"$prefix.connection.ssl.enabled", "false")
+    }
+
+    val useIam = options
+      .get(Properties.FsConfig.FsUseIam)
+      .orElse(options.get(FsUseIam))
+      .exists(_.equalsIgnoreCase("true"))
+    val accessKey = options
+      .get(Properties.FsConfig.FsAccessKeyId)
+      .orElse(options.get(FsAccessKeyId))
+    val secretKey = options
+      .get(Properties.FsConfig.FsAccessKeyValue)
+      .orElse(options.get(FsAccessKeyValue))
+    if (useIam) {
+      conf.set(
+        s"$prefix.aws.credentials.provider",
+        Seq(
+          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
+          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
+          "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
+        ).mkString(",")
+      )
+    } else if (accessKey.nonEmpty && secretKey.nonEmpty) {
+      conf.set(s"$prefix.access.key", accessKey.get)
+      conf.set(s"$prefix.secret.key", secretKey.get)
+      conf.set(
+        s"$prefix.aws.credentials.provider",
+        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+      )
+    } else {
+      setIfMissing(
+        s"$prefix.aws.credentials.provider",
+        Seq(
+          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
+          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
+          "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
+        ).mkString(",")
+      )
+    }
+  }
+
+  private[connector] def normalizeExtraColumnName(name: String): String = name
 
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {
@@ -182,6 +284,7 @@ object MilvusOption {
       .split(",")
       .map(_.trim)
       .filter(_.nonEmpty)
+      .map(normalizeExtraColumnName)
       .toSeq
 
     // Convert CaseInsensitiveStringMap to regular Map for storage

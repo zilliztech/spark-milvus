@@ -84,6 +84,12 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     }
   }
 
+  test("parseArgs throws when key flag value is another flag") {
+    an[IllegalArgumentException] should be thrownBy {
+      BackfillApp.parseArgs(Array("--mode", "--snapshot"))
+    }
+  }
+
   test("parseArgs throws on unexpected positional arg") {
     an[IllegalArgumentException] should be thrownBy {
       BackfillApp.parseArgs(Array("oops"))

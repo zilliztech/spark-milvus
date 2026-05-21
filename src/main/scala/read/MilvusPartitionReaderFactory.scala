@@ -10,6 +10,7 @@ import org.apache.spark.sql.connector.read.{
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 
+import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
 
 // PartitionReaderFactory for Storage V2 (Milvus 2.6+)
@@ -20,6 +21,14 @@ class MilvusPartitionReaderFactory(
 ) extends PartitionReaderFactory
     with Logging {
 
+  private val readDebugEnabled = optionsMap
+    .get(MilvusOption.ReaderDebug)
+    .exists(_.equalsIgnoreCase("true"))
+
+  private def debugRead(message: => String): Unit = {
+    if (readDebugEnabled) logInfo(s"[MilvusReadDebug] $message")
+  }
+
   override def createReader(
       partition: InputPartition
   ): PartitionReader[InternalRow] = {
@@ -29,17 +38,21 @@ class MilvusPartitionReaderFactory(
           s"Creating V3 reader for partition with segmentID=${p.segmentID}"
         )
 
-        // Storage V3 doesn't support system fields (row_id, timestamp) and extra metadata columns (segment_id, row_offset)
-        // Filter them out from the schema for the underlying reader
         val v2Schema = StructType(schema.fields.filter { field =>
-          field.name != "row_id" &&
-          field.name != "timestamp" &&
-          field.name != "segment_id" &&
-          field.name != "row_offset"
+          field.name != MilvusOption.MilvusExtraColumnPartition &&
+          field.name != MilvusOption.MilvusExtraColumnSegmentID &&
+          field.name != MilvusOption.MilvusExtraColumnRowOffset
         })
 
         // Deserialize the protobuf schema
         val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
+        debugRead(
+          s"factory creating readerType=V3 segmentID=${p.segmentID} " +
+            s"partition=${p.partitionName} manifestPath=${p.manifestPath} " +
+            s"readVersion=${p.readVersion} " +
+            s"requestedSchema=${schema.fieldNames.mkString(",")} " +
+            s"innerSchema=${v2Schema.fieldNames.mkString(",")}"
+        )
 
         // Create MilvusLoonPartitionReader directly
         val underlyingReader = new MilvusLoonPartitionReader(
@@ -56,55 +69,38 @@ class MilvusPartitionReaderFactory(
           p.readVersion
         )
 
-        // If the expected schema includes system/metadata fields, wrap the reader to add them
-        val hasRowId = schema.fieldNames.contains("row_id")
-        val hasTimestamp = schema.fieldNames.contains("timestamp")
-        val hasSegmentId = schema.fieldNames.contains("segment_id")
-        val hasRowOffset = schema.fieldNames.contains("row_offset")
+        val hasPartition = schema.fieldNames.contains(
+          MilvusOption.MilvusExtraColumnPartition
+        )
+        val hasSegmentId = schema.fieldNames.contains(
+          MilvusOption.MilvusExtraColumnSegmentID
+        )
+        val hasRowOffset = schema.fieldNames.contains(
+          MilvusOption.MilvusExtraColumnRowOffset
+        )
 
-        if (hasRowId || hasTimestamp || hasSegmentId || hasRowOffset) {
+        if (hasPartition || hasSegmentId || hasRowOffset) {
           new PartitionReader[InternalRow] {
-            private var rowOffset: Long = 0L
-
             override def next(): Boolean = underlyingReader.next()
 
             override def get(): InternalRow = {
               val row = underlyingReader.get()
-
-              // Build result row with system/metadata fields
-              val numFields = schema.fields.length
-              val resultValues = new Array[Any](numFields)
-
-              var writeIdx = 0
+              val resultValues = new Array[Any](schema.fields.length)
               var readIdx = 0
 
-              // Add system fields with null values
-              if (hasRowId) {
-                resultValues(writeIdx) = null
-                writeIdx += 1
-              }
-              if (hasTimestamp) {
-                resultValues(writeIdx) = null
-                writeIdx += 1
-              }
-
-              // Copy actual data from underlying reader
-              while (readIdx < v2Schema.fields.length) {
-                val value = row.get(readIdx, v2Schema.fields(readIdx).dataType)
-                resultValues(writeIdx) = value
-                readIdx += 1
-                writeIdx += 1
-              }
-
-              // Add metadata fields (segment_id and row_offset)
-              if (hasSegmentId) {
-                resultValues(writeIdx) = p.segmentID
-                writeIdx += 1
-              }
-              if (hasRowOffset) {
-                resultValues(writeIdx) = rowOffset
-                rowOffset += 1
-                writeIdx += 1
+              schema.fields.zipWithIndex.foreach { case (field, writeIdx) =>
+                field.name match {
+                  case MilvusOption.MilvusExtraColumnPartition =>
+                    resultValues(writeIdx) = p.partitionName
+                  case MilvusOption.MilvusExtraColumnSegmentID =>
+                    resultValues(writeIdx) = p.segmentID
+                  case MilvusOption.MilvusExtraColumnRowOffset =>
+                    resultValues(writeIdx) =
+                      underlyingReader.lastReturnedRowOffset
+                  case _ =>
+                    resultValues(writeIdx) = row.get(readIdx, field.dataType)
+                    readIdx += 1
+                }
               }
 
               InternalRow.fromSeq(resultValues.toSeq)
@@ -122,14 +118,20 @@ class MilvusPartitionReaderFactory(
             s"with ${p.columnGroups.size} column group(s)"
         )
 
-        // V2 reader does not emit system/metadata columns itself; same
-        // masking rule as V3.
         val innerSchema = StructType(schema.fields.filter { f =>
-          f.name != "row_id" && f.name != "timestamp" &&
-          f.name != "segment_id" && f.name != "row_offset"
+          f.name != MilvusOption.MilvusExtraColumnPartition &&
+          f.name != MilvusOption.MilvusExtraColumnSegmentID &&
+          f.name != MilvusOption.MilvusExtraColumnRowOffset
         })
 
         val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
+        debugRead(
+          s"factory creating readerType=V2 segmentID=${p.segmentID} " +
+            s"partitionID=${p.partitionID} columnGroups=${p.columnGroups.size} " +
+            s"neededColumnFieldIds=${p.neededColumnFieldIds.mkString(",")} " +
+            s"requestedSchema=${schema.fieldNames.mkString(",")} " +
+            s"innerSchema=${innerSchema.fieldNames.mkString(",")}"
+        )
 
         val underlying = new MilvusPackedV2PartitionReader(
           innerSchema,
@@ -139,12 +141,17 @@ class MilvusPartitionReaderFactory(
           p.neededColumnFieldIds
         )
 
-        val hasSegmentId = schema.fieldNames.contains("segment_id")
-        val hasRowOffset = schema.fieldNames.contains("row_offset")
-        val hasRowId = schema.fieldNames.contains("row_id")
-        val hasTimestamp = schema.fieldNames.contains("timestamp")
+        val hasPartition = schema.fieldNames.contains(
+          MilvusOption.MilvusExtraColumnPartition
+        )
+        val hasSegmentId = schema.fieldNames.contains(
+          MilvusOption.MilvusExtraColumnSegmentID
+        )
+        val hasRowOffset = schema.fieldNames.contains(
+          MilvusOption.MilvusExtraColumnRowOffset
+        )
 
-        if (hasRowId || hasTimestamp || hasSegmentId || hasRowOffset) {
+        if (hasPartition || hasSegmentId || hasRowOffset) {
           new PartitionReader[InternalRow] {
             private var rowOffset: Long = 0L
 
@@ -152,27 +159,23 @@ class MilvusPartitionReaderFactory(
 
             override def get(): InternalRow = {
               val row = underlying.get()
-              val numFields = schema.fields.length
-              val out = new Array[Any](numFields)
-              var writeIdx = 0
+              val out = new Array[Any](schema.fields.length)
               var readIdx = 0
 
-              if (hasRowId) { out(writeIdx) = null; writeIdx += 1 }
-              if (hasTimestamp) { out(writeIdx) = null; writeIdx += 1 }
-
-              while (readIdx < innerSchema.fields.length) {
-                out(writeIdx) =
-                  row.get(readIdx, innerSchema.fields(readIdx).dataType)
-                readIdx += 1
-                writeIdx += 1
+              schema.fields.zipWithIndex.foreach { case (field, writeIdx) =>
+                field.name match {
+                  case MilvusOption.MilvusExtraColumnPartition =>
+                    out(writeIdx) = p.partitionID.toString
+                  case MilvusOption.MilvusExtraColumnSegmentID =>
+                    out(writeIdx) = p.segmentID
+                  case MilvusOption.MilvusExtraColumnRowOffset =>
+                    out(writeIdx) = rowOffset
+                  case _ =>
+                    out(writeIdx) = row.get(readIdx, field.dataType)
+                    readIdx += 1
+                }
               }
-
-              if (hasSegmentId) { out(writeIdx) = p.segmentID; writeIdx += 1 }
-              if (hasRowOffset) {
-                out(writeIdx) = rowOffset
-                rowOffset += 1
-                writeIdx += 1
-              }
+              rowOffset += 1
 
               InternalRow.fromSeq(out.toSeq)
             }

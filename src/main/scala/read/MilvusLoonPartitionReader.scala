@@ -37,6 +37,35 @@ import io.milvus.storage.{
   NativeLibraryLoader
 }
 
+object MilvusLoonPartitionReader {
+  private[read] val SystemFieldAliases: Seq[(String, Long)] = Seq(
+    "RowID" -> 0L,
+    "row_id" -> 0L,
+    "rowid" -> 0L,
+    "Timestamp" -> 1L,
+    "timestamp" -> 1L
+  )
+
+  private[read] case class VectorSearchResult(
+      row: InternalRow,
+      distance: Double,
+      rowOffset: Long
+  )
+
+  private[read] def buildFieldNameToId(
+      milvusSchema: CollectionSchema
+  ): Map[String, Long] = {
+    val userFieldNames = milvusSchema.fields.map(_.name).toSet
+    val systemFields = SystemFieldAliases.filterNot { case (alias, _) =>
+      userFieldNames.contains(alias)
+    }.toMap
+    val userFields = milvusSchema.fields.map { field =>
+      field.name -> field.fieldID
+    }.toMap
+    systemFields ++ userFields
+  }
+}
+
 // for Milvus 2.6+ version data source and milvus lake data
 class MilvusLoonPartitionReader(
     schema: StructType,
@@ -61,18 +90,22 @@ class MilvusLoonPartitionReader(
 
   private val sourceSchema = schema
 
-  private val fieldNameToId: Map[String, Long] = {
-    val systemFields = Map("row_id" -> 0L, "timestamp" -> 1L)
-    val userFields = milvusSchema.fields.map { field =>
-      field.name -> field.fieldID
-    }.toMap
-    systemFields ++ userFields
-  }
+  private val fieldNameToId: Map[String, Long] =
+    MilvusLoonPartitionReader.buildFieldNameToId(milvusSchema)
 
   private val fieldNameToIdString: Map[String, String] =
     fieldNameToId.map { case (name, id) => name -> id.toString }
 
   private val columnNames = getColumnNames()
+  private val readDebugEnabled = milvusOption.options
+    .get(MilvusOption.ReaderDebug)
+    .exists(_.equalsIgnoreCase("true")) || optionsMap
+    .get(MilvusOption.ReaderDebug)
+    .exists(_.equalsIgnoreCase("true"))
+
+  private def debugRead(message: => String): Unit = {
+    if (readDebugEnabled) logInfo(s"[MilvusReadDebug] $message")
+  }
 
   // Native resource handles. Initialized to safe defaults so a partial-init
   // failure can roll back whatever was allocated so far via releaseAll().
@@ -97,6 +130,10 @@ class MilvusLoonPartitionReader(
 
   private var _currentBatch: VectorSchemaRoot = null
   private var _currentRowIndex: Int = 0
+  private var _currentBatchStartRowOffset: Long = 0L
+  private var _lastReturnedRowOffset: Long = -1L
+
+  def lastReturnedRowOffset: Long = _lastReturnedRowOffset
 
   try {
     // Create Arrow schema from Milvus schema.
@@ -106,6 +143,16 @@ class MilvusLoonPartitionReader(
 
     // Reader properties from MilvusOption.
     readerProperties = Properties.fromMilvusOption(milvusOption)
+    debugRead(
+      s"V3 reader opening manifestPath=$manifestPath " +
+        s"requestedReadVersion=$readVersion " +
+        s"requestedColumns=${columnNames.mkString(",")} " +
+        s"sourceSchema=${sourceSchema.fieldNames.mkString(",")} " +
+        s"fieldNameToId=${fieldNameToId.toSeq
+            .sortBy(_._2)
+            .map { case (n, id) => n + ":" + id }
+            .mkString(",")}"
+    )
 
     // Column groups from manifest (specific version if provided, latest otherwise).
     val manifestResult: LatestColumnGroupsResult = if (readVersion > 0) {
@@ -123,6 +170,11 @@ class MilvusLoonPartitionReader(
         readerProperties
       )
     }
+    debugRead(
+      s"V3 manifest resolved manifestPath=$manifestPath " +
+        s"actualReadVersion=${manifestResult.readVersion} " +
+        s"columnGroupsPtr=${manifestResult.columnGroupsPtr}"
+    )
     if (manifestResult.readVersion == 0) {
       throw new IllegalStateException(
         s"No manifest file found at path: $manifestPath. " +
@@ -176,7 +228,9 @@ class MilvusLoonPartitionReader(
 
   // Vector search state
   private val vectorSearchEnabled = topK.isDefined && queryVector.isDefined
-  private var vectorSearchResults: Iterator[(InternalRow, Double)] = _
+  private var vectorSearchResults: Iterator[
+    MilvusLoonPartitionReader.VectorSearchResult
+  ] = _
   private var vectorSearchCompleted = false
 
   override def next(): Boolean = {
@@ -215,6 +269,7 @@ class MilvusLoonPartitionReader(
         } else {
           // Try to load next batch
           if (_currentBatch != null) {
+            _currentBatchStartRowOffset += _currentBatch.getRowCount
             _currentBatch.close()
             _currentBatch = null
           }
@@ -236,17 +291,17 @@ class MilvusLoonPartitionReader(
 
   override def get(): InternalRow = {
     if (vectorSearchEnabled) {
-      // Vector search mode: return row with distance appended
-      val (row, distance) = vectorSearchResults.next()
-      val rowSeq = row.toSeq(sourceSchema)
-      val resultRow = InternalRow.fromSeq(rowSeq :+ distance)
-      resultRow
+      val result = vectorSearchResults.next()
+      _lastReturnedRowOffset = result.rowOffset
+      val rowSeq = result.row.toSeq(sourceSchema)
+      InternalRow.fromSeq(rowSeq :+ result.distance)
     } else {
       // Normal mode
       if (_currentBatch == null) {
         throw new IllegalStateException("No batch loaded")
       }
 
+      _lastReturnedRowOffset = _currentBatchStartRowOffset + _currentRowIndex
       val row = ArrowConverter.arrowToInternalRow(
         _currentBatch,
         _currentRowIndex,
@@ -311,8 +366,7 @@ class MilvusLoonPartitionReader(
   private def getColumnNames(): Array[String] = {
     // Convert column names to field IDs for manifest/reader matching
     // The manifest stores column groups with field IDs (e.g., "100", "101")
-    // Note: System fields (row_id, timestamp) are handled by MilvusPartitionReaderFactory
-    // and should NOT be requested from milvus-storage reader
+    // System fields are mapped to Milvus field IDs 0 and 1 and requested from storage.
     sourceSchema.fieldNames.flatMap { name =>
       fieldNameToId.get(name).map(_.toString)
     }
@@ -344,19 +398,27 @@ class MilvusLoonPartitionReader(
     // Use priority queue to maintain top-K
     // For L2: min-heap (smaller distance is better, so we keep max at top to evict)
     // For IP/COSINE: max-heap (larger score is better, so we keep min at top to evict)
-    val ordering: Ordering[(InternalRow, Double)] = metric match {
-      case "L2" =>
-        Ordering.by[(InternalRow, Double), Double](_._2) // Max-heap for L2
-      case "IP" | "COSINE" =>
-        Ordering
-          .by[(InternalRow, Double), Double](_._2)
-          .reverse // Min-heap for IP/COSINE
-      case _ => Ordering.by[(InternalRow, Double), Double](_._2)
-    }
+    val ordering: Ordering[MilvusLoonPartitionReader.VectorSearchResult] =
+      metric match {
+        case "L2" =>
+          Ordering.by[MilvusLoonPartitionReader.VectorSearchResult, Double](
+            _.distance
+          )
+        case "IP" | "COSINE" =>
+          Ordering
+            .by[MilvusLoonPartitionReader.VectorSearchResult, Double](
+              _.distance
+            )
+            .reverse
+        case _ =>
+          Ordering.by[MilvusLoonPartitionReader.VectorSearchResult, Double](
+            _.distance
+          )
+      }
 
     val heap = scala.collection.mutable.PriorityQueue
-      .empty[(InternalRow, Double)](ordering)
-    var rowCount = 0
+      .empty[MilvusLoonPartitionReader.VectorSearchResult](ordering)
+    var rowCount = 0L
 
     // Helper function to process a batch
     def processBatch(batch: VectorSchemaRoot): Unit = {
@@ -389,24 +451,26 @@ class MilvusLoonPartitionReader(
           }
 
         if (vector != null) {
-          // Calculate distance
           val distance = calculateDistance(qv, vector, metric)
+          val result = MilvusLoonPartitionReader.VectorSearchResult(
+            row.copy(),
+            distance,
+            rowCount
+          )
 
-          // Maintain top-K heap
           if (heap.size < k) {
-            heap.enqueue((row.copy(), distance))
+            heap.enqueue(result)
           } else {
-            val (_, worstDist) = heap.head
+            val worst = heap.head
             val shouldReplace = metric match {
-              case "L2" => distance < worstDist // Smaller L2 distance is better
-              case "IP" | "COSINE" =>
-                distance > worstDist // Larger IP/COSINE is better
-              case _ => distance < worstDist
+              case "L2"            => distance < worst.distance
+              case "IP" | "COSINE" => distance > worst.distance
+              case _               => distance < worst.distance
             }
 
             if (shouldReplace) {
               heap.dequeue()
-              heap.enqueue((row.copy(), distance))
+              heap.enqueue(result)
             }
           }
         }
@@ -439,13 +503,20 @@ class MilvusLoonPartitionReader(
       s"Per-segment vector search completed: processed $rowCount rows, kept ${heap.size} top-K results"
     )
 
-    // Sort results and create iterator
+    val results = heap.dequeueAll
     val sortedResults = metric match {
       case "L2" =>
-        heap.dequeueAll.sortBy[(Double)](x => x._2) // Ascending for L2
+        results.sortBy((result: MilvusLoonPartitionReader.VectorSearchResult) =>
+          result.distance
+        )
       case "IP" | "COSINE" =>
-        heap.dequeueAll.sortBy[(Double)](x => -x._2) // Descending for IP/COSINE
-      case _ => heap.dequeueAll.sortBy[(Double)](x => x._2)
+        results.sortBy((result: MilvusLoonPartitionReader.VectorSearchResult) =>
+          -result.distance
+        )
+      case _ =>
+        results.sortBy((result: MilvusLoonPartitionReader.VectorSearchResult) =>
+          result.distance
+        )
     }
 
     vectorSearchResults = sortedResults.iterator
