@@ -139,22 +139,26 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
     val server = MilvusServiceGrpc
       .blockingStub(channel)
       .withWaitForReady()
+    server
       .withDeadlineAfter(10, TimeUnit.SECONDS)
-    server.connect(
-      ConnectRequest(
-        clientInfo = Some(
-          ClientInfo(
-            sdkType = "spark-connector",
-            sdkVersion = "0.1.0",
-            localTime = java.time.LocalDateTime.now().toString,
-            host = java.net.InetAddress.getLocalHost.getHostName,
-            user = "scala-sdk-user"
+      .connect(
+        ConnectRequest(
+          clientInfo = Some(
+            ClientInfo(
+              sdkType = "spark-connector",
+              sdkVersion = "0.1.0",
+              localTime = java.time.LocalDateTime.now().toString,
+              host = java.net.InetAddress.getLocalHost.getHostName,
+              user = "scala-sdk-user"
+            )
           )
         )
       )
-    )
     server
   }
+
+  private def rpcStub: MilvusServiceGrpc.MilvusServiceBlockingStub =
+    stub.withDeadlineAfter(10, TimeUnit.SECONDS)
 
   private lazy val httpClient: HttpClient = {
     HttpClient
@@ -202,7 +206,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       properties: Map[String, String] = Map.empty
   ): Try[Status] = {
     try {
-      val status = stub.createDatabase(
+      val status = rpcStub.createDatabase(
         CreateDatabaseRequest(
           dbName = dbName,
           properties = properties
@@ -287,7 +291,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       properties: Map[String, String] = Map.empty
   ): Try[Status] = {
     try {
-      val status = stub.createCollection(
+      val status = rpcStub.createCollection(
         CreateCollectionRequest(
           dbName = dbName,
           collectionName = collectionName,
@@ -314,7 +318,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       collectionName: String
   ): Try[Status] = {
     try {
-      val status = stub.dropCollection(
+      val status = rpcStub.dropCollection(
         DropCollectionRequest(
           dbName = dbName,
           collectionName = collectionName
@@ -334,7 +338,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       collectionNames: Seq[String] = Seq.empty
   ): Try[Status] = {
     try {
-      val flushResponse = stub.flush(
+      val flushResponse = rpcStub.flush(
         FlushRequest(
           dbName = dbName,
           collectionNames = collectionNames
@@ -375,7 +379,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       schemaTimestamp: Long = 0L
   ): Try[Status] = {
     try {
-      val insertResult = stub.insert(
+      val insertResult = rpcStub.insert(
         InsertRequest(
           dbName = dbName,
           collectionName = collectionName,
@@ -411,7 +415,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       rowBased: Boolean = false
   ): Try[Seq[Long]] = {
     try {
-      val importResult = stub.`import`(
+      val importResult = rpcStub.`import`(
         ImportRequest(
           dbName = dbName,
           collectionName = collectionName,
@@ -448,7 +452,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
 
   def getImportState(taskId: Long): Try[GetImportStateResponse] = {
     try {
-      val importStateResult = stub.getImportState(
+      val importStateResult = rpcStub.getImportState(
         GetImportStateRequest(task = taskId)
       )
       val status = importStateResult.status.getOrElse(
@@ -497,7 +501,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
           s"$name in [${processor.process(pks)}]"
         }
       }
-      val deleteResult = stub.delete(
+      val deleteResult = rpcStub.delete(
         DeleteRequest(
           dbName = dbName,
           collectionName = collectionName,
@@ -526,7 +530,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       dbName: String,
       collectionName: String
   ): DescribeCollectionResponse = {
-    return stub.describeCollection(
+    return rpcStub.describeCollection(
       DescribeCollectionRequest(
         dbName = dbName,
         collectionName = collectionName
@@ -630,7 +634,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       compactionProtectionSeconds: Long
   ): Try[MilvusSnapshotInfo] = {
     try {
-      val createStatus = stub.createSnapshot(
+      val createStatus = rpcStub.createSnapshot(
         CreateSnapshotRequest(
           name = snapshotName,
           description = description,
@@ -685,7 +689,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
     var lastFailure = Option.empty[Exception]
     (1 to maxAttempts).foreach { attempt =>
       try {
-        val snapshot = stub.describeSnapshot(
+        val snapshot = rpcStub.describeSnapshot(
           DescribeSnapshotRequest(
             name = snapshotName,
             dbName = dbName,
@@ -725,7 +729,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       snapshotName: String
   ): Try[Unit] = {
     try {
-      val status = stub.dropSnapshot(
+      val status = rpcStub.dropSnapshot(
         DropSnapshotRequest(
           name = snapshotName,
           dbName = dbName,
@@ -744,7 +748,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       collectionName: String
   ): Try[Seq[MilvusSegmentInfo]] = {
     try {
-      val segments = stub.getPersistentSegmentInfo(
+      val segments = rpcStub.getPersistentSegmentInfo(
         GetPersistentSegmentInfoRequest(
           dbName = dbName,
           collectionName = collectionName
@@ -869,7 +873,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       partitionName: String
   ): Try[Long] = {
     try {
-      val partitionInfos = stub.showPartitions(
+      val partitionInfos = rpcStub.showPartitions(
         ShowPartitionsRequest(
           dbName = dbName,
           collectionName = collectionName
@@ -898,7 +902,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       collectionName: String
   ): Try[Seq[MilvusPartitionInfo]] = {
     try {
-      val partitionInfos = stub.showPartitions(
+      val partitionInfos = rpcStub.showPartitions(
         ShowPartitionsRequest(
           dbName = dbName,
           collectionName = collectionName
@@ -1140,7 +1144,6 @@ class GrpcRetryInterceptor(
                       (currentDelay * delayMultiplier).toLong,
                       maxDelayMillis
                     )
-                    super.onClose(status, trailers)
                     executeCall()
                   } else {
                     println(

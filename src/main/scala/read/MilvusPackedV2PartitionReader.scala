@@ -55,6 +55,50 @@ object MilvusPackedV2PartitionReader {
         }.toMap
     )
   }
+
+  private[read] def resolveNeededColumns(
+      sourceSchema: StructType,
+      columnGroups: Seq[V2ColumnGroup],
+      fieldMappings: FieldMappings,
+      neededColumnFieldIds: Seq[Long]
+  ): Array[String] = {
+    val declared: Set[String] = columnGroups
+      .flatMap(_.fieldIds.flatMap(fieldMappings.fieldIdToName.get))
+      .toSet
+    val requestedNames: Seq[String] =
+      if (neededColumnFieldIds.nonEmpty) {
+        val missingIds = neededColumnFieldIds.filterNot(
+          fieldMappings.fieldIdToName.contains
+        )
+        if (missingIds.nonEmpty) {
+          throw new IllegalArgumentException(
+            s"Packed V2 requested unknown field IDs: ${missingIds.distinct.mkString(",")}" +
+              s"; schema field IDs=${fieldMappings.fieldIdToName.keys.toSeq.sorted.mkString(",")}"
+          )
+        }
+        neededColumnFieldIds.flatMap(fieldMappings.fieldIdToName.get)
+      } else {
+        val missingNames = sourceSchema.fieldNames.filterNot(
+          fieldMappings.fieldNameToId.contains
+        )
+        if (missingNames.nonEmpty) {
+          throw new IllegalArgumentException(
+            s"Packed V2 requested unknown columns: ${missingNames.distinct.mkString(",")}" +
+              s"; schema columns=${fieldMappings.fieldNameToId.keys.toSeq.sorted.mkString(",")}"
+          )
+        }
+        sourceSchema.fieldNames.toSeq
+      }
+    val missingColumns = requestedNames.filterNot(declared.contains).distinct
+    if (missingColumns.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Packed V2 column groups do not contain requested columns: ${missingColumns
+            .mkString(",")}" +
+          s"; declared columns=${declared.toSeq.sorted.mkString(",")}"
+      )
+    }
+    requestedNames.toArray
+  }
 }
 
 /** Spark partition reader for milvus-segment-info `storage_version = 2`
@@ -89,25 +133,19 @@ class MilvusPackedV2PartitionReader(
 
   private val fieldMappings =
     MilvusPackedV2PartitionReader.buildFieldMappings(milvusSchema)
-  private val fieldIdToName = fieldMappings.fieldIdToName
-  private val fieldNameToId = fieldMappings.fieldNameToId
   private val fieldNameToArrowColumn = fieldMappings.fieldNameToArrowColumn
 
   // Which column names to ask the packed reader for. Prefer explicit
   // projection from neededColumnFieldIds; fall back to sourceSchema's Spark
   // field names. In both cases we coerce to logical names that the parquet
   // actually carries.
-  private val neededColumns: Array[String] = {
-    val explicitNames: Seq[String] =
-      if (neededColumnFieldIds.nonEmpty)
-        neededColumnFieldIds.flatMap(fid => fieldIdToName.get(fid))
-      else sourceSchema.fieldNames.toSeq.filter(fieldNameToId.contains)
-    // Drop names that aren't declared by any of the v2 column groups —
-    // `loon_reader_new` would reject unknown columns.
-    val declared: Set[String] =
-      columnGroups.flatMap(_.fieldIds.flatMap(fieldIdToName.get)).toSet
-    explicitNames.filter(name => declared.contains(name)).toArray
-  }
+  private val neededColumns: Array[String] =
+    MilvusPackedV2PartitionReader.resolveNeededColumns(
+      sourceSchema,
+      columnGroups,
+      fieldMappings,
+      neededColumnFieldIds
+    )
   private val readDebugEnabled = milvusOption.options
     .get(MilvusOption.ReaderDebug)
     .exists(_.equalsIgnoreCase("true"))
@@ -151,7 +189,7 @@ class MilvusPackedV2PartitionReader(
     // from the AVRO's AvroBinlog.entries_num — required because the packed
     // reader rejects negative end indices.
     val cols = columnGroups.map { cg =>
-      cg.fieldIds.flatMap(fieldIdToName.get).toArray
+      cg.fieldIds.flatMap(fieldMappings.fieldIdToName.get).toArray
     }.toArray
     val files = columnGroups.map(_.filePaths.toArray).toArray
     val rowCounts = columnGroups.map { cg =>

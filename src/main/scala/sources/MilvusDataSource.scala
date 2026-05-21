@@ -10,6 +10,7 @@ import scala.jdk.CollectionConverters._
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.internal.Logging
+import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent}
 import org.apache.spark.sql.connector.catalog.{
   SupportsRead,
   SupportsWrite,
@@ -28,7 +29,7 @@ import org.apache.spark.sql.connector.read.{
   SupportsPushDownRequiredColumns
 }
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
-import org.apache.spark.sql.execution.QueryExecution
+import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
 import org.apache.spark.sql.sources.{DataSourceRegister, Filter}
 import org.apache.spark.sql.types.{
   DataTypes => SparkDataTypes,
@@ -37,10 +38,7 @@ import org.apache.spark.sql.types.{
   StructField,
   StructType
 }
-import org.apache.spark.sql.util.{
-  CaseInsensitiveStringMap,
-  QueryExecutionListener
-}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.spark.connector.{
@@ -439,6 +437,7 @@ class MilvusScanBuilder(
 
   // Store the filters that can be pushed down
   private var pushedFilterArray: Array[Filter] = Array.empty[Filter]
+  private var readerFilterArray: Array[Filter] = Array.empty[Filter]
 
   override def pruneColumns(requiredSchema: StructType): Unit = {
     if (currentOptions.getOrDefault(MilvusOption.ReaderFieldIDs, "").nonEmpty) {
@@ -543,13 +542,15 @@ class MilvusScanBuilder(
     val milvusOption = MilvusOption(options)
     val shouldReadViaSnapshot = MilvusOption.isSnapshotMode(options) ||
       MilvusScan.canUseClientSnapshotFastPath(milvusOption)
-    if (shouldReadViaSnapshot) {
-      pushedFilterArray = Array.empty
-      return filters
-    }
     val (supportedFilters, unsupportedFilters) =
       filters.partition(isSupportedFilter)
+    if (shouldReadViaSnapshot) {
+      pushedFilterArray = Array.empty
+      readerFilterArray = supportedFilters
+      return filters
+    }
     pushedFilterArray = supportedFilters
+    readerFilterArray = supportedFilters
     unsupportedFilters
   }
 
@@ -628,11 +629,17 @@ class MilvusScanBuilder(
   }
 
   override def build(): Scan = {
-    new MilvusScan(currentSchema, currentOptions, pushedFilterArray)
+    new MilvusScan(
+      currentSchema,
+      currentOptions,
+      pushedFilterArray,
+      readerFilterArray
+    )
   }
 }
 
 object MilvusScan extends Logging {
+  private val SparkSqlExecutionIdKey = "spark.sql.execution.id"
   private val SnapshotOptionKeys = Seq(
     MilvusOption.SnapshotMode,
     MilvusOption.SnapshotManifests,
@@ -716,10 +723,12 @@ object MilvusScan extends Logging {
       collectionName: String,
       snapshotName: String,
       reason: String,
-      maxAttempts: Int = 3
+      maxAttempts: Int = 3,
+      retryDelayMillis: Long = 500
   ): Boolean = {
     var lastFailure = Option.empty[Throwable]
-    (1 to maxAttempts).foreach { attempt =>
+    var attempt = 1
+    while (attempt <= maxAttempts) {
       client.dropSnapshot(databaseName, collectionName, snapshotName) match {
         case scala.util.Success(_) =>
           logInfo(s"Dropped client read snapshot $snapshotName after $reason")
@@ -731,7 +740,16 @@ object MilvusScan extends Logging {
               s"(attempt $attempt/$maxAttempts)",
             e
           )
+          if (attempt < maxAttempts && retryDelayMillis > 0) {
+            try Thread.sleep(retryDelayMillis)
+            catch {
+              case _: InterruptedException =>
+                Thread.currentThread().interrupt()
+                return false
+            }
+          }
       }
+      attempt += 1
     }
     lastFailure.foreach { e =>
       logWarning(
@@ -768,26 +786,32 @@ object MilvusScan extends Logging {
 
     SparkSession.getActiveSession.orElse(SparkSession.getDefaultSession) match {
       case Some(session) =>
-        val listener = new QueryExecutionListener {
-          private def cleanup(reason: String): Unit = {
-            try dropSnapshot(reason)
-            finally session.listenerManager.unregister(this)
-          }
+        Option(session.sparkContext.getLocalProperty(SparkSqlExecutionIdKey))
+          .filter(_.trim.nonEmpty) match {
+          case Some(executionId) =>
+            val listener = new SparkListener {
+              private def cleanup(reason: String): Unit = {
+                try dropSnapshot(reason)
+                finally session.sparkContext.removeSparkListener(this)
+              }
 
-          override def onSuccess(
-              funcName: String,
-              qe: QueryExecution,
-              durationNs: Long
-          ): Unit = cleanup(s"Spark query '$funcName' succeeded")
-
-          override def onFailure(
-              funcName: String,
-              qe: QueryExecution,
-              exception: Exception
-          ): Unit = cleanup(s"Spark query '$funcName' failed")
+              override def onOtherEvent(event: SparkListenerEvent): Unit = {
+                event match {
+                  case e: SparkListenerSQLExecutionEnd
+                      if e.executionId.toString == executionId =>
+                    cleanup(s"Spark SQL execution $executionId ended")
+                  case _ =>
+                }
+              }
+            }
+            session.sparkContext.addSparkListener(listener)
+            true
+          case None =>
+            logWarning(
+              s"No active Spark SQL execution id; client read snapshot $snapshotName cannot be safely auto-dropped"
+            )
+            false
         }
-        session.listenerManager.register(listener)
-        true
       case None =>
         logWarning(
           s"No active SparkSession; client read snapshot $snapshotName cannot be auto-dropped"
@@ -834,7 +858,8 @@ object MilvusScan extends Logging {
 class MilvusScan(
     schema: StructType,
     options: CaseInsensitiveStringMap,
-    pushedFilters: Array[Filter] = Array.empty[Filter]
+    pushedFilters: Array[Filter] = Array.empty[Filter],
+    readerFilters: Array[Filter] = Array.empty[Filter]
 ) extends Scan
     with Batch
     with Logging {
@@ -855,6 +880,8 @@ class MilvusScan(
       s"Vector search enabled: topK=${config.topK}, metric=${config.metricType}, column=${config.vectorColumn}"
     )
   }
+
+  private[sources] def readerFiltersForPlanning: Array[Filter] = readerFilters
 
   override def readSchema(): StructType = {
     schema
@@ -1365,6 +1392,6 @@ class MilvusScan(
   override def createReaderFactory(): PartitionReaderFactory = {
     // Convert CaseInsensitiveStringMap to regular Map for serialization
     val optionsMap = options.asScala.toMap
-    new MilvusPartitionReaderFactory(schema, optionsMap, pushedFilters)
+    new MilvusPartitionReaderFactory(schema, optionsMap, readerFilters)
   }
 }

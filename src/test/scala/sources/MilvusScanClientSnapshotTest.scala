@@ -144,8 +144,11 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
     val filters: Array[Filter] = Array(EqualTo("id", 10L))
 
-    assert(builder.pushFilters(filters).sameElements(filters))
+    val unhandledFilters = builder.pushFilters(filters)
+    assert(unhandledFilters.sameElements(filters))
     assert(builder.pushedFilters().isEmpty)
+    val scan = builder.build().asInstanceOf[MilvusScan]
+    assert(scan.readerFiltersForPlanning.sameElements(filters))
   }
 
   test(

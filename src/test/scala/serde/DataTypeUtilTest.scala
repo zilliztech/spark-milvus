@@ -200,10 +200,10 @@ class DataTypeUtilTest extends AnyFunSuite with Matchers {
     result shouldBe DataTypes.createArrayType(DataTypes.FloatType)
   }
 
-  test("toDataType converts BinaryVector to Spark Array[Byte]") {
+  test("toDataType converts BinaryVector to Spark BinaryType") {
     val fieldSchema = FieldSchema(dataType = MilvusDataType.BinaryVector)
     val result = DataTypeUtil.toDataType(fieldSchema)
-    result shouldBe DataTypes.createArrayType(DataTypes.ByteType)
+    result shouldBe DataTypes.BinaryType
   }
 
   test("toDataType converts Int8Vector to Spark Array[Short]") {

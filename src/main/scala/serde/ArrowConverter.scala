@@ -233,13 +233,6 @@ object ArrowConverter extends Logging {
           case _ => arrayFromListVector(vector, rowIndex, FloatType)
         }
 
-      case ArrayType(BinaryType, _) =>
-        vector match {
-          case v: FixedSizeBinaryVector =>
-            ArrayData.toArrayData(Array(v.get(rowIndex)))
-          case _ => arrayFromListVector(vector, rowIndex, BinaryType)
-        }
-
       case ArrayType(ByteType, _) =>
         vector match {
           case v: FixedSizeBinaryVector =>

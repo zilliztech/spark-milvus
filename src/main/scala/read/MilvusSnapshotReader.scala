@@ -622,7 +622,7 @@ object MilvusSnapshotReader {
       case 28  => ArrayType(FloatType) // Array[Float]
       case 29  => ArrayType(DoubleType) // Array[Double]
       case 30  => ArrayType(StringType) // Array[VarChar]
-      case 100 => ArrayType(ByteType) // BinaryVector
+      case 100 => BinaryType // BinaryVector
       case 101 => ArrayType(FloatType) // FloatVector
       case 102 => ArrayType(FloatType) // Float16Vector
       case 103 => ArrayType(FloatType) // BFloat16Vector

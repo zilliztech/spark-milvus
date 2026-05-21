@@ -97,12 +97,12 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
     try {
       val vector = root.getVector("100").asInstanceOf[FixedSizeBinaryVector]
       vector.allocateNew()
-      vector.set(0, Array[Byte](0x01.toByte, 0x02.toByte))
+      vector.set(0, Array[Byte](0x01.toByte, 0xff.toByte))
       vector.setValueCount(1)
       root.setRowCount(1)
 
       val sparkSchema =
-        StructType(Seq(StructField("binary", ArrayType(ByteType))))
+        StructType(Seq(StructField("binary", BinaryType)))
       val row = ArrowConverter.arrowToInternalRow(
         root,
         0,
@@ -110,7 +110,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         Map("binary" -> "100")
       )
 
-      row.getArray(0).toByteArray().toSeq shouldBe Seq(1.toByte, 2.toByte)
+      row.getBinary(0).toSeq shouldBe Seq(1.toByte, 0xff.toByte)
     } finally {
       root.close()
       allocator.close()
