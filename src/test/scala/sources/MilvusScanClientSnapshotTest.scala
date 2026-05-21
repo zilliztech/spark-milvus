@@ -228,7 +228,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
-  test("snapshot planner tags V3 partitions from manifest base path") {
+  test("snapshot planner tags V3 partitions with partition ID string") {
     val manifestJson = MilvusSnapshotReader.serializeManifestList(
       Seq(
         StorageV2ManifestItem(

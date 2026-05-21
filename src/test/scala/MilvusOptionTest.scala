@@ -263,6 +263,92 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     conf.get("fs.s3a.impl") shouldBe "com.example.CustomS3AFileSystem"
   }
+
+  test("configureHadoopS3A preserves existing bucket path style") {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set("fs.s3a.bucket.bucket.path.style.access", "false")
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(MilvusOption.FsBucketName -> "bucket"),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.path.style.access") shouldBe "false"
+  }
+
+  test("configureHadoopS3A preserves existing bucket SSL setting") {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set("fs.s3a.bucket.bucket.connection.ssl.enabled", "true")
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(MilvusOption.FsBucketName -> "bucket"),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.connection.ssl.enabled") shouldBe "true"
+  }
+
+  test(
+    "configureHadoopS3A explicit SSL option overrides existing bucket setting"
+  ) {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set("fs.s3a.bucket.bucket.connection.ssl.enabled", "true")
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(
+        MilvusOption.FsBucketName -> "bucket",
+        com.zilliz.spark.connector.loon.Properties.FsConfig.FsUseSSL -> "false"
+      ),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.connection.ssl.enabled") shouldBe "false"
+  }
+
+  test(
+    "configureHadoopS3A preserves existing credentials provider when implicit"
+  ) {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set(
+      "fs.s3a.bucket.bucket.aws.credentials.provider",
+      "com.example.CustomCredentialsProvider"
+    )
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(MilvusOption.FsBucketName -> "bucket"),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.aws.credentials.provider") shouldBe
+      "com.example.CustomCredentialsProvider"
+  }
+
+  test("configureHadoopS3A explicit static credentials override provider") {
+    val conf = new org.apache.hadoop.conf.Configuration()
+    conf.set(
+      "fs.s3a.bucket.bucket.aws.credentials.provider",
+      "com.example.CustomCredentialsProvider"
+    )
+
+    MilvusOption.configureHadoopS3A(
+      conf,
+      Map(
+        MilvusOption.FsBucketName -> "bucket",
+        com.zilliz.spark.connector.loon.Properties.FsConfig.FsAccessKeyId -> "ak",
+        com.zilliz.spark.connector.loon.Properties.FsConfig.FsAccessKeyValue -> "sk"
+      ),
+      "bucket"
+    )
+
+    conf.get("fs.s3a.bucket.bucket.access.key") shouldBe "ak"
+    conf.get("fs.s3a.bucket.bucket.secret.key") shouldBe "sk"
+    conf.get("fs.s3a.bucket.bucket.aws.credentials.provider") shouldBe
+      "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+  }
 }
 
 /** Unit tests for MilvusS3Option

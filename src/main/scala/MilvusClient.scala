@@ -59,21 +59,20 @@ import io.milvus.grpc.schema.{
   ValueField
 }
 
-import io.grpc._
-import io.grpc.{ClientInterceptor, Metadata, Status => GrpcStatus}
+import io.grpc.{
+  ClientInterceptor,
+  ManagedChannel,
+  Metadata,
+  Status => GrpcStatus,
+  StatusException,
+  StatusRuntimeException
+}
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
 import io.grpc.stub.MetadataUtils
-import io.grpc.Status.Code
 
 /** A simplified client for interacting with Milvus
   */
 class MilvusClient(params: MilvusConnectionParams) extends Logging {
-  private val retryInterceptor = new GrpcRetryInterceptor(
-    maxRetries = 5,
-    initialDelayMillis = 500,
-    delayMultiplier = 2.0,
-    maxDelayMillis = 5000
-  )
   private lazy val channel: ManagedChannel = {
     val uri = new URI(params.uri)
     val scheme = uri.getScheme
@@ -88,10 +87,7 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       }
     }
 
-    val interceptors = Seq(
-      getConnectionMetadataInterceptor(),
-      retryInterceptor
-    )
+    val interceptors = Seq(getConnectionMetadataInterceptor())
     var channelBuilder = if (params.serverPemPath.nonEmpty) {
       val sslContext = GrpcSslContexts
         .forClient()
@@ -940,31 +936,42 @@ object MilvusClient {
   val RateLimitReasonMarker: String = "rate limit exceeded"
   val ServiceNotImplementedMarker: String = "service not implemented"
 
+  private val SnapshotRpcNames: Set[String] = Set(
+    "createsnapshot",
+    "describesnapshot",
+    "dropsnapshot"
+  )
+
+  private val ServiceUnavailableMarkers: Set[String] = Set(
+    ServiceNotImplementedMarker,
+    "unknown method",
+    "method not registered"
+  )
+
+  private def grpcStatus(t: Throwable): Option[GrpcStatus] = t match {
+    case e: StatusRuntimeException => Some(e.getStatus)
+    case e: StatusException        => Some(e.getStatus)
+    case _                         => None
+  }
+
+  private def isSnapshotRpcUnavailable(description: String): Boolean = {
+    val normalized = description.toLowerCase
+    SnapshotRpcNames.exists(normalized.contains) &&
+    ServiceUnavailableMarkers.exists(normalized.contains)
+  }
+
   def isServiceNotImplemented(t: Throwable): Boolean = {
     val visited = java.util.Collections.newSetFromMap(
       new java.util.IdentityHashMap[Throwable, java.lang.Boolean]()
     )
     var current = t
     while (current != null && visited.add(current)) {
-      current match {
-        case e: StatusRuntimeException
-            if e.getStatus.getCode == GrpcStatus.Code.UNIMPLEMENTED =>
-          return true
-        case e: StatusException
-            if e.getStatus.getCode == GrpcStatus.Code.UNIMPLEMENTED =>
-          return true
-        case _ =>
-      }
-
-      val message = Option(current.getMessage).getOrElse("").toLowerCase
-      val isGrpcException = current.isInstanceOf[StatusRuntimeException] ||
-        current.isInstanceOf[StatusException]
-      if (
-        isGrpcException &&
-        (message.contains(ServiceNotImplementedMarker) ||
-          message.contains("unknown method"))
-      ) {
-        return true
+      grpcStatus(current).foreach { status =>
+        if (status.getCode == GrpcStatus.Code.UNIMPLEMENTED) return true
+        if (status.getCode == GrpcStatus.Code.UNKNOWN) {
+          val description = Option(status.getDescription).getOrElse("")
+          if (isSnapshotRpcUnavailable(description)) return true
+        }
       }
       current = current.getCause
     }
@@ -1076,89 +1083,5 @@ object PKProcessor {
 
   implicit object StringProcessor extends PKProcessor[String] {
     def process(seq: Seq[String]): String = seq.map(s => s"'$s'").mkString(", ")
-  }
-}
-
-class GrpcRetryInterceptor(
-    maxRetries: Int = 5,
-    initialDelayMillis: Long = 500,
-    delayMultiplier: Double = 2.0,
-    maxDelayMillis: Long = 5000
-) extends ClientInterceptor {
-
-  private val nonRetryableCodes: Set[Code] = Set(
-    Code.DEADLINE_EXCEEDED,
-    Code.PERMISSION_DENIED,
-    Code.UNAUTHENTICATED,
-    Code.INVALID_ARGUMENT,
-    Code.ALREADY_EXISTS,
-    Code.RESOURCE_EXHAUSTED,
-    Code.UNIMPLEMENTED
-  )
-
-  override def interceptCall[ReqT, RespT](
-      method: MethodDescriptor[ReqT, RespT],
-      callOptions: CallOptions,
-      next: Channel
-  ): ClientCall[ReqT, RespT] = {
-    new ForwardingClientCall.SimpleForwardingClientCall[ReqT, RespT](
-      next.newCall(method, callOptions)
-    ) {
-      override def start(
-          responseListener: ClientCall.Listener[RespT],
-          headers: Metadata
-      ): Unit = {
-        var currentAttempt = 0
-        var currentDelay = initialDelayMillis
-
-        def executeCall(): Unit = {
-          currentAttempt += 1
-          println(
-            s"Attempting gRPC call for method ${method.getFullMethodName()}, attempt $currentAttempt"
-          )
-
-          val originalListener =
-            new ForwardingClientCallListener.SimpleForwardingClientCallListener[
-              RespT
-            ](responseListener) {
-              override def onClose(
-                  status: GrpcStatus,
-                  trailers: Metadata
-              ): Unit = {
-                if (status.isOk) {
-                  // Call succeeded
-                  super.onClose(status, trailers)
-                } else {
-                  val statusCode = status.getCode
-                  if (nonRetryableCodes.contains(statusCode)) {
-                    println(
-                      s"gRPC call failed with non-retryable status: $statusCode. Not retrying."
-                    )
-                    super.onClose(status, trailers)
-                  } else if (currentAttempt < maxRetries) {
-                    println(
-                      s"gRPC call failed with retryable status: $statusCode. Retrying in $currentDelay ms."
-                    )
-                    Thread.sleep(currentDelay)
-                    currentDelay = Math.min(
-                      (currentDelay * delayMultiplier).toLong,
-                      maxDelayMillis
-                    )
-                    executeCall()
-                  } else {
-                    println(
-                      s"gRPC call failed after $maxRetries attempts with status: $statusCode. No more retries."
-                    )
-                    super.onClose(status, trailers)
-                  }
-                }
-              }
-            }
-          super.start(originalListener, headers)
-        }
-
-        executeCall() // Start the first attempt
-      }
-    }
   }
 }

@@ -135,11 +135,40 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
     assert(!MilvusClient.isServiceNotImplemented(err))
   }
 
-  test("classifies grpc unknown method text as service not implemented") {
+  test("classifies grpc snapshot unknown method as service not implemented") {
     val err = new StatusRuntimeException(
       GrpcStatus.UNKNOWN.withDescription("unknown method CreateSnapshot")
     )
     assert(MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test(
+    "classifies grpc snapshot method-not-registered as service not implemented"
+  ) {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNKNOWN.withDescription(
+        "method not registered: DescribeSnapshot"
+      )
+    )
+    assert(MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("does not classify grpc unknown method for unrelated RPC") {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNKNOWN.withDescription("unknown method SomeOtherMethod")
+    )
+    assert(!MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test(
+    "does not classify unrelated grpc UNKNOWN text as service not implemented"
+  ) {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNKNOWN.withDescription(
+        "service not implemented for health check"
+      )
+    )
+    assert(!MilvusClient.isServiceNotImplemented(err))
   }
 
   test("service-not-implemented detection stops on cyclic causes") {

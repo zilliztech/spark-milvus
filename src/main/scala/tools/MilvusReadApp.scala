@@ -202,6 +202,16 @@ object MilvusReadApp {
     readArgs
   }
 
+  private[tools] def credentialWarning(args: ReadArgs): Option[String] = {
+    if (args.s3AccessKey.nonEmpty || args.s3SecretKey.nonEmpty) {
+      Some(
+        "WARNING: S3 credentials passed on the command line may be visible in process listings and shell history; prefer --use-iam or environment credentials when possible."
+      )
+    } else {
+      None
+    }
+  }
+
   private[tools] def buildStorageOptions(
       args: ReadArgs
   ): Map[String, String] = {
@@ -210,10 +220,12 @@ object MilvusReadApp {
     val opts = scala.collection.mutable.Map[String, String](
       Properties.FsConfig.FsBucketName -> args.s3Bucket,
       Properties.FsConfig.FsRootPath -> args.s3RootPath,
-      Properties.FsConfig.FsRegion -> args.s3Region,
-      Properties.FsConfig.FsUseSSL -> args.s3UseSSL.toString
+      Properties.FsConfig.FsRegion -> args.s3Region
     )
 
+    if (args.s3UseSSL) {
+      opts += Properties.FsConfig.FsUseSSL -> "true"
+    }
     if (args.s3Endpoint.nonEmpty) {
       opts += Properties.FsConfig.FsAddress -> args.s3Endpoint
     }
@@ -478,6 +490,7 @@ object MilvusReadApp {
 
   def main(rawArgs: Array[String]): Unit = {
     val args = parseArgs(rawArgs)
+    credentialWarning(args).foreach(System.err.println)
     val spark = SparkSession.builder
       .appName("MilvusReadApp")
       .getOrCreate()

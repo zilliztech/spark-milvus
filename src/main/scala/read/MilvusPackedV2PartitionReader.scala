@@ -31,6 +31,14 @@ object MilvusPackedV2PartitionReader {
       fieldNameToArrowColumn: Map[String, String]
   )
 
+  private[read] val SystemFieldAliases: Seq[(String, (Long, String))] = Seq(
+    "RowID" -> (0L, "RowID"),
+    "row_id" -> (0L, "RowID"),
+    "rowid" -> (0L, "RowID"),
+    "Timestamp" -> (1L, "Timestamp"),
+    "timestamp" -> (1L, "Timestamp")
+  )
+
   private[read] def buildFieldMappings(
       milvusSchema: CollectionSchema
   ): FieldMappings = {
@@ -38,21 +46,22 @@ object MilvusPackedV2PartitionReader {
     val userFields = milvusSchema.fields.map(f => f.fieldID -> f.name).toMap
     val fieldIdToName = systemFields ++ userFields
     val userFieldNames = milvusSchema.fields.map(_.name).toSet
-    val lowercaseSystemAliases = Seq(
-      "row_id" -> (0L, "RowID"),
-      "timestamp" -> (1L, "Timestamp")
-    ).filterNot { case (alias, _) => userFieldNames.contains(alias) }
+    val systemAliases = SystemFieldAliases.filterNot { case (alias, _) =>
+      userFieldNames.contains(alias)
+    }
+    val userFieldNameToId =
+      milvusSchema.fields.map(f => f.name -> f.fieldID).toMap
+    val systemFieldNameToId = systemAliases.map { case (alias, (id, _)) =>
+      alias -> id
+    }.toMap
+    val systemFieldNameToArrowColumn = systemAliases.map {
+      case (alias, (_, column)) => alias -> column
+    }.toMap
 
     FieldMappings(
       fieldIdToName,
-      fieldIdToName.map { case (id, name) => name -> id } ++
-        lowercaseSystemAliases.map { case (alias, (id, _)) =>
-          alias -> id
-        }.toMap,
-      Map("RowID" -> "RowID", "Timestamp" -> "Timestamp") ++
-        lowercaseSystemAliases.map { case (alias, (_, column)) =>
-          alias -> column
-        }.toMap
+      systemFieldNameToId ++ userFieldNameToId,
+      systemFieldNameToArrowColumn
     )
   }
 
@@ -62,10 +71,8 @@ object MilvusPackedV2PartitionReader {
       fieldMappings: FieldMappings,
       neededColumnFieldIds: Seq[Long]
   ): Array[String] = {
-    val declared: Set[String] = columnGroups
-      .flatMap(_.fieldIds.flatMap(fieldMappings.fieldIdToName.get))
-      .toSet
-    val requestedNames: Seq[String] =
+    val declaredFieldIds = columnGroups.flatMap(_.fieldIds).toSet
+    val requestedFieldIds: Seq[Long] =
       if (neededColumnFieldIds.nonEmpty) {
         val missingIds = neededColumnFieldIds.filterNot(
           fieldMappings.fieldIdToName.contains
@@ -76,7 +83,7 @@ object MilvusPackedV2PartitionReader {
               s"; schema field IDs=${fieldMappings.fieldIdToName.keys.toSeq.sorted.mkString(",")}"
           )
         }
-        neededColumnFieldIds.flatMap(fieldMappings.fieldIdToName.get)
+        neededColumnFieldIds
       } else {
         val missingNames = sourceSchema.fieldNames.filterNot(
           fieldMappings.fieldNameToId.contains
@@ -87,17 +94,24 @@ object MilvusPackedV2PartitionReader {
               s"; schema columns=${fieldMappings.fieldNameToId.keys.toSeq.sorted.mkString(",")}"
           )
         }
-        sourceSchema.fieldNames.toSeq
+        sourceSchema.fieldNames.toSeq.map(fieldMappings.fieldNameToId)
       }
-    val missingColumns = requestedNames.filterNot(declared.contains).distinct
-    if (missingColumns.nonEmpty) {
+    val missingFieldIds = requestedFieldIds.filterNot(declaredFieldIds.contains)
+    if (missingFieldIds.nonEmpty) {
+      val missingColumns = missingFieldIds
+        .flatMap(fieldMappings.fieldIdToName.get)
+        .distinct
+      val declaredColumns = declaredFieldIds
+        .flatMap(fieldMappings.fieldIdToName.get)
+        .toSeq
+        .sorted
       throw new IllegalArgumentException(
         s"Packed V2 column groups do not contain requested columns: ${missingColumns
             .mkString(",")}" +
-          s"; declared columns=${declared.toSeq.sorted.mkString(",")}"
+          s"; declared columns=${declaredColumns.mkString(",")}"
       )
     }
-    requestedNames.toArray
+    requestedFieldIds.flatMap(fieldMappings.fieldIdToName.get).toArray
   }
 }
 

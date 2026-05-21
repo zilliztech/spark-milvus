@@ -183,9 +183,14 @@ object MilvusOption extends Logging {
   ): Unit = {
     val prefix = s"fs.s3a.bucket.$bucket"
 
-    if (Option(conf.get("fs.s3a.impl")).forall(_.trim.isEmpty)) {
-      conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    def isMissing(key: String): Boolean =
+      Option(conf.get(key)).forall(_.trim.isEmpty)
+
+    def setIfMissing(key: String, value: String): Unit = {
+      if (isMissing(key)) conf.set(key, value)
     }
+
+    setIfMissing("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     options.get(Properties.FsConfig.FsAddress).foreach { endpoint =>
       conf.set(s"$prefix.endpoint", endpoint)
     }
@@ -193,18 +198,35 @@ object MilvusOption extends Logging {
       conf.set(s"$prefix.endpoint.region", region)
       conf.set(s"$prefix.region", region)
     }
-    conf.set(s"$prefix.path.style.access", "true")
-    conf.set(
-      s"$prefix.connection.ssl.enabled",
-      options.getOrElse(Properties.FsConfig.FsUseSSL, "false")
-    )
+    options
+      .get(Properties.FsConfig.FsUseVirtualHost)
+      .orElse(options.get(FsUseVirtualHost)) match {
+      case Some(useVirtualHost) =>
+        conf.set(
+          s"$prefix.path.style.access",
+          (!useVirtualHost.toBoolean).toString
+        )
+      case None =>
+        setIfMissing(s"$prefix.path.style.access", "true")
+    }
+    options
+      .get(Properties.FsConfig.FsUseSSL)
+      .orElse(options.get(FsUseSSL)) match {
+      case Some(useSSL) => conf.set(s"$prefix.connection.ssl.enabled", useSSL)
+      case None => setIfMissing(s"$prefix.connection.ssl.enabled", "false")
+    }
 
     val useIam = options
       .get(Properties.FsConfig.FsUseIam)
+      .orElse(options.get(FsUseIam))
       .exists(_.equalsIgnoreCase("true"))
-    val accessKey = options.get(Properties.FsConfig.FsAccessKeyId)
-    val secretKey = options.get(Properties.FsConfig.FsAccessKeyValue)
-    if (useIam || accessKey.isEmpty || secretKey.isEmpty) {
+    val accessKey = options
+      .get(Properties.FsConfig.FsAccessKeyId)
+      .orElse(options.get(FsAccessKeyId))
+    val secretKey = options
+      .get(Properties.FsConfig.FsAccessKeyValue)
+      .orElse(options.get(FsAccessKeyValue))
+    if (useIam) {
       conf.set(
         s"$prefix.aws.credentials.provider",
         Seq(
@@ -213,12 +235,21 @@ object MilvusOption extends Logging {
           "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
         ).mkString(",")
       )
-    } else {
+    } else if (accessKey.nonEmpty && secretKey.nonEmpty) {
       conf.set(s"$prefix.access.key", accessKey.get)
       conf.set(s"$prefix.secret.key", secretKey.get)
       conf.set(
         s"$prefix.aws.credentials.provider",
         "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+      )
+    } else {
+      setIfMissing(
+        s"$prefix.aws.credentials.provider",
+        Seq(
+          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
+          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
+          "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
+        ).mkString(",")
       )
     }
   }

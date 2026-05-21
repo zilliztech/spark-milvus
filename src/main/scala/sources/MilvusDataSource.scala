@@ -975,6 +975,10 @@ class MilvusScan(
             snapshot.name
           )
           if (cleanupRegistered) {
+            logWarning(
+              s"Client read snapshot ${snapshot.name} will be dropped when the Spark SQL execution ends; " +
+                "an unclean driver exit can leave it behind and require manual cleanup."
+            )
             Some(partitions)
           } else {
             val dropped = MilvusScan.dropClientReadSnapshot(
@@ -1335,7 +1339,7 @@ class MilvusScan(
       MilvusStorageV3InputPartition(
         basePath, // The basePath extracted from manifest JSON
         schemaBytes, // Protobuf CollectionSchema bytes from snapshot
-        partitionId, // Partition name/ID
+        partitionId, // Partition ID string for the extra column
         milvusOption,
         vectorSearchConfig.map(_.topK),
         vectorSearchConfig.map(_.queryVector),

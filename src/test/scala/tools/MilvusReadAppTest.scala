@@ -269,6 +269,43 @@ class MilvusReadAppTest
     }
   }
 
+  test("credentialWarning warns when command-line S3 credentials are present") {
+    val args = MilvusReadApp.parseArgs(
+      Array(
+        "--mode",
+        "snapshot",
+        "--snapshot",
+        "src/test/data/sample_snapshot.json",
+        "--s3-bucket",
+        "a-bucket",
+        "--s3-access-key",
+        "ak"
+      )
+    )
+
+    MilvusReadApp.credentialWarning(args).get should include(
+      "S3 credentials passed on the command line"
+    )
+  }
+
+  test(
+    "credentialWarning is empty when command-line S3 credentials are omitted"
+  ) {
+    val args = MilvusReadApp.parseArgs(
+      Array(
+        "--mode",
+        "snapshot",
+        "--snapshot",
+        "src/test/data/sample_snapshot.json",
+        "--s3-bucket",
+        "a-bucket",
+        "--use-iam"
+      )
+    )
+
+    MilvusReadApp.credentialWarning(args) shouldBe None
+  }
+
   test("buildStorageOptions omits AK/SK in IAM mode") {
     val args = MilvusReadApp.parseArgs(
       Array(
