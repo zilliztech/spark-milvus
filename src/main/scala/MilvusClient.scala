@@ -639,37 +639,40 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       description: String,
       compactionProtectionSeconds: Long
   ): Try[MilvusSnapshotInfo] = {
-    try {
-      val createStatus = rpcStub.createSnapshot(
-        CreateSnapshotRequest(
-          name = snapshotName,
-          description = description,
-          dbName = dbName,
-          collectionName = collectionName,
-          compactionProtectionSeconds = compactionProtectionSeconds
-        )
-      )
-      checkStatus("createSnapshot", createStatus).get
-
+    val createStatus =
       try {
-        val snapshot = describeSnapshotForReadWithRetry(
-          dbName,
-          collectionName,
-          snapshotName
-        )
-
-        Success(
-          MilvusSnapshotInfo(
-            name = snapshot.name,
-            description = snapshot.description,
-            collectionName = snapshot.collectionName,
-            partitionNames = snapshot.partitionNames,
-            createTs = snapshot.createTs,
-            s3Location = snapshot.s3Location
+        rpcStub.createSnapshot(
+          CreateSnapshotRequest(
+            name = snapshotName,
+            description = description,
+            dbName = dbName,
+            collectionName = collectionName,
+            compactionProtectionSeconds = compactionProtectionSeconds
           )
         )
       } catch {
-        case e: Exception =>
+        case e: StatusRuntimeException => return Failure(e)
+        case e: Exception              => return Failure(e)
+      }
+
+    checkStatus("createSnapshot", createStatus).flatMap { _ =>
+      describeSnapshotForReadWithRetry(
+        dbName,
+        collectionName,
+        snapshotName
+      ) match {
+        case Success(snapshot) =>
+          Success(
+            MilvusSnapshotInfo(
+              name = snapshot.name,
+              description = snapshot.description,
+              collectionName = snapshot.collectionName,
+              partitionNames = snapshot.partitionNames,
+              createTs = snapshot.createTs,
+              s3Location = snapshot.s3Location
+            )
+          )
+        case Failure(e) =>
           dropSnapshot(dbName, collectionName, snapshotName) match {
             case Failure(dropErr) =>
               logWarning(
@@ -678,11 +681,8 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
               )
             case Success(_) =>
           }
-          throw e
+          Failure(e)
       }
-    } catch {
-      case e: StatusRuntimeException => Failure(e)
-      case e: Exception              => Failure(e)
     }
   }
 
@@ -691,29 +691,34 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
       collectionName: String,
       snapshotName: String,
       maxAttempts: Int = 3
-  ): DescribeSnapshotResponse = {
-    var lastFailure = Option.empty[Exception]
+  ): Try[DescribeSnapshotResponse] = {
+    var lastFailure = Option.empty[Throwable]
     (1 to maxAttempts).foreach { attempt =>
-      try {
-        val snapshot = rpcStub.describeSnapshot(
-          DescribeSnapshotRequest(
-            name = snapshotName,
-            dbName = dbName,
-            collectionName = collectionName
-          )
-        )
-        checkStatus(
-          "describeSnapshot",
-          snapshot.status.getOrElse(
-            Status(
-              errorCode = ErrorCode.UnexpectedError,
-              reason = "DescribeSnapshot Status is empty"
+      val result =
+        try {
+          val snapshot = rpcStub.describeSnapshot(
+            DescribeSnapshotRequest(
+              name = snapshotName,
+              dbName = dbName,
+              collectionName = collectionName
             )
           )
-        ).get
-        return snapshot
-      } catch {
-        case e: Exception =>
+          checkStatus(
+            "describeSnapshot",
+            snapshot.status.getOrElse(
+              Status(
+                errorCode = ErrorCode.UnexpectedError,
+                reason = "DescribeSnapshot Status is empty"
+              )
+            )
+          ).map(_ => snapshot)
+        } catch {
+          case e: Exception => Failure(e)
+        }
+
+      result match {
+        case success @ Success(_) => return success
+        case Failure(e) =>
           lastFailure = Some(e)
           if (attempt < maxAttempts) {
             logWarning(
@@ -724,8 +729,10 @@ class MilvusClient(params: MilvusConnectionParams) extends Logging {
           }
       }
     }
-    throw lastFailure.getOrElse(
-      new RuntimeException(s"describeSnapshot failed for $snapshotName")
+    Failure(
+      lastFailure.getOrElse(
+        new RuntimeException(s"describeSnapshot failed for $snapshotName")
+      )
     )
   }
 
