@@ -18,6 +18,7 @@ import com.fasterxml.jackson.module.scala.{
   ScalaObjectMapper
 }
 import com.google.protobuf.ByteString
+import org.apache.spark.internal.Logging
 
 import io.milvus.grpc.common.{
   ClientInfo,
@@ -31,10 +32,14 @@ import io.milvus.grpc.milvus.{
   ConnectRequest,
   CreateCollectionRequest,
   CreateDatabaseRequest,
+  CreateSnapshotRequest,
   DeleteRequest,
   DescribeCollectionRequest,
   DescribeCollectionResponse,
+  DescribeSnapshotRequest,
+  DescribeSnapshotResponse,
   DropCollectionRequest,
+  DropSnapshotRequest,
   FlushRequest,
   GetImportStateRequest,
   GetImportStateResponse,
@@ -55,14 +60,20 @@ import io.milvus.grpc.schema.{
 }
 
 import io.grpc._
-import io.grpc.{ClientInterceptor, Metadata, Status => GrpcStatus}
+import io.grpc.{
+  ClientInterceptor,
+  Metadata,
+  Status => GrpcStatus,
+  StatusException,
+  StatusRuntimeException
+}
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
 import io.grpc.stub.MetadataUtils
 import io.grpc.Status.Code
 
 /** A simplified client for interacting with Milvus
   */
-class MilvusClient(params: MilvusConnectionParams) {
+class MilvusClient(params: MilvusConnectionParams) extends Logging {
   private val retryInterceptor = new GrpcRetryInterceptor(
     maxRetries = 5,
     initialDelayMillis = 500,
@@ -134,22 +145,26 @@ class MilvusClient(params: MilvusConnectionParams) {
     val server = MilvusServiceGrpc
       .blockingStub(channel)
       .withWaitForReady()
+    server
       .withDeadlineAfter(10, TimeUnit.SECONDS)
-    server.connect(
-      ConnectRequest(
-        clientInfo = Some(
-          ClientInfo(
-            sdkType = "spark-connector",
-            sdkVersion = "0.1.0",
-            localTime = java.time.LocalDateTime.now().toString,
-            host = java.net.InetAddress.getLocalHost.getHostName,
-            user = "scala-sdk-user"
+      .connect(
+        ConnectRequest(
+          clientInfo = Some(
+            ClientInfo(
+              sdkType = "spark-connector",
+              sdkVersion = "0.1.0",
+              localTime = java.time.LocalDateTime.now().toString,
+              host = java.net.InetAddress.getLocalHost.getHostName,
+              user = "scala-sdk-user"
+            )
           )
         )
       )
-    )
     server
   }
+
+  private def rpcStub: MilvusServiceGrpc.MilvusServiceBlockingStub =
+    stub.withDeadlineAfter(10, TimeUnit.SECONDS)
 
   private lazy val httpClient: HttpClient = {
     HttpClient
@@ -197,7 +212,7 @@ class MilvusClient(params: MilvusConnectionParams) {
       properties: Map[String, String] = Map.empty
   ): Try[Status] = {
     try {
-      val status = stub.createDatabase(
+      val status = rpcStub.createDatabase(
         CreateDatabaseRequest(
           dbName = dbName,
           properties = properties
@@ -282,7 +297,7 @@ class MilvusClient(params: MilvusConnectionParams) {
       properties: Map[String, String] = Map.empty
   ): Try[Status] = {
     try {
-      val status = stub.createCollection(
+      val status = rpcStub.createCollection(
         CreateCollectionRequest(
           dbName = dbName,
           collectionName = collectionName,
@@ -309,7 +324,7 @@ class MilvusClient(params: MilvusConnectionParams) {
       collectionName: String
   ): Try[Status] = {
     try {
-      val status = stub.dropCollection(
+      val status = rpcStub.dropCollection(
         DropCollectionRequest(
           dbName = dbName,
           collectionName = collectionName
@@ -329,7 +344,7 @@ class MilvusClient(params: MilvusConnectionParams) {
       collectionNames: Seq[String] = Seq.empty
   ): Try[Status] = {
     try {
-      val flushResponse = stub.flush(
+      val flushResponse = rpcStub.flush(
         FlushRequest(
           dbName = dbName,
           collectionNames = collectionNames
@@ -370,7 +385,7 @@ class MilvusClient(params: MilvusConnectionParams) {
       schemaTimestamp: Long = 0L
   ): Try[Status] = {
     try {
-      val insertResult = stub.insert(
+      val insertResult = rpcStub.insert(
         InsertRequest(
           dbName = dbName,
           collectionName = collectionName,
@@ -406,7 +421,7 @@ class MilvusClient(params: MilvusConnectionParams) {
       rowBased: Boolean = false
   ): Try[Seq[Long]] = {
     try {
-      val importResult = stub.`import`(
+      val importResult = rpcStub.`import`(
         ImportRequest(
           dbName = dbName,
           collectionName = collectionName,
@@ -443,7 +458,7 @@ class MilvusClient(params: MilvusConnectionParams) {
 
   def getImportState(taskId: Long): Try[GetImportStateResponse] = {
     try {
-      val importStateResult = stub.getImportState(
+      val importStateResult = rpcStub.getImportState(
         GetImportStateRequest(task = taskId)
       )
       val status = importStateResult.status.getOrElse(
@@ -492,7 +507,7 @@ class MilvusClient(params: MilvusConnectionParams) {
           s"$name in [${processor.process(pks)}]"
         }
       }
-      val deleteResult = stub.delete(
+      val deleteResult = rpcStub.delete(
         DeleteRequest(
           dbName = dbName,
           collectionName = collectionName,
@@ -521,7 +536,7 @@ class MilvusClient(params: MilvusConnectionParams) {
       dbName: String,
       collectionName: String
   ): DescribeCollectionResponse = {
-    return stub.describeCollection(
+    return rpcStub.describeCollection(
       DescribeCollectionRequest(
         dbName = dbName,
         collectionName = collectionName
@@ -617,12 +632,136 @@ class MilvusClient(params: MilvusConnectionParams) {
     }
   }
 
+  def createSnapshotForRead(
+      dbName: String,
+      collectionName: String,
+      snapshotName: String,
+      description: String,
+      compactionProtectionSeconds: Long
+  ): Try[MilvusSnapshotInfo] = {
+    val createStatus =
+      try {
+        rpcStub.createSnapshot(
+          CreateSnapshotRequest(
+            name = snapshotName,
+            description = description,
+            dbName = dbName,
+            collectionName = collectionName,
+            compactionProtectionSeconds = compactionProtectionSeconds
+          )
+        )
+      } catch {
+        case e: StatusRuntimeException => return Failure(e)
+        case e: Exception              => return Failure(e)
+      }
+
+    checkStatus("createSnapshot", createStatus).flatMap { _ =>
+      describeSnapshotForReadWithRetry(
+        dbName,
+        collectionName,
+        snapshotName
+      ) match {
+        case Success(snapshot) =>
+          Success(
+            MilvusSnapshotInfo(
+              name = snapshot.name,
+              description = snapshot.description,
+              collectionName = snapshot.collectionName,
+              partitionNames = snapshot.partitionNames,
+              createTs = snapshot.createTs,
+              s3Location = snapshot.s3Location
+            )
+          )
+        case Failure(e) =>
+          dropSnapshot(dbName, collectionName, snapshotName) match {
+            case Failure(dropErr) =>
+              logWarning(
+                s"Failed to drop snapshot $snapshotName after describeSnapshot failure",
+                dropErr
+              )
+            case Success(_) =>
+          }
+          Failure(e)
+      }
+    }
+  }
+
+  private def describeSnapshotForReadWithRetry(
+      dbName: String,
+      collectionName: String,
+      snapshotName: String,
+      maxAttempts: Int = 3
+  ): Try[DescribeSnapshotResponse] = {
+    var lastFailure = Option.empty[Throwable]
+    (1 to maxAttempts).foreach { attempt =>
+      val result =
+        try {
+          val snapshot = rpcStub.describeSnapshot(
+            DescribeSnapshotRequest(
+              name = snapshotName,
+              dbName = dbName,
+              collectionName = collectionName
+            )
+          )
+          checkStatus(
+            "describeSnapshot",
+            snapshot.status.getOrElse(
+              Status(
+                errorCode = ErrorCode.UnexpectedError,
+                reason = "DescribeSnapshot Status is empty"
+              )
+            )
+          ).map(_ => snapshot)
+        } catch {
+          case e: Exception => Failure(e)
+        }
+
+      result match {
+        case success @ Success(_) => return success
+        case Failure(e) =>
+          lastFailure = Some(e)
+          if (attempt < maxAttempts) {
+            logWarning(
+              s"describeSnapshot failed for $snapshotName (attempt $attempt/$maxAttempts)",
+              e
+            )
+            TimeUnit.MILLISECONDS.sleep(200L * attempt)
+          }
+      }
+    }
+    Failure(
+      lastFailure.getOrElse(
+        new RuntimeException(s"describeSnapshot failed for $snapshotName")
+      )
+    )
+  }
+
+  def dropSnapshot(
+      dbName: String,
+      collectionName: String,
+      snapshotName: String
+  ): Try[Unit] = {
+    try {
+      val status = rpcStub.dropSnapshot(
+        DropSnapshotRequest(
+          name = snapshotName,
+          dbName = dbName,
+          collectionName = collectionName
+        )
+      )
+      checkStatus("dropSnapshot", status).map(_ => ())
+    } catch {
+      case e: StatusRuntimeException => Failure(e)
+      case e: Exception              => Failure(e)
+    }
+  }
+
   def getSegments(
       dbName: String,
       collectionName: String
   ): Try[Seq[MilvusSegmentInfo]] = {
     try {
-      val segments = stub.getPersistentSegmentInfo(
+      val segments = rpcStub.getPersistentSegmentInfo(
         GetPersistentSegmentInfoRequest(
           dbName = dbName,
           collectionName = collectionName
@@ -747,7 +886,7 @@ class MilvusClient(params: MilvusConnectionParams) {
       partitionName: String
   ): Try[Long] = {
     try {
-      val partitionInfos = stub.showPartitions(
+      val partitionInfos = rpcStub.showPartitions(
         ShowPartitionsRequest(
           dbName = dbName,
           collectionName = collectionName
@@ -776,7 +915,7 @@ class MilvusClient(params: MilvusConnectionParams) {
       collectionName: String
   ): Try[Seq[MilvusPartitionInfo]] = {
     try {
-      val partitionInfos = stub.showPartitions(
+      val partitionInfos = rpcStub.showPartitions(
         ShowPartitionsRequest(
           dbName = dbName,
           collectionName = collectionName
@@ -812,6 +951,49 @@ object MilvusClient {
   val RateLimitErrorCode: Int = 8
   // Case-insensitive reason marker used as a fallback when error code is not set.
   val RateLimitReasonMarker: String = "rate limit exceeded"
+  val ServiceNotImplementedMarker: String = "service not implemented"
+
+  private val SnapshotRpcNames: Set[String] = Set(
+    "createsnapshot",
+    "describesnapshot",
+    "dropsnapshot"
+  )
+
+  private val ServiceUnavailableMarkers: Set[String] = Set(
+    ServiceNotImplementedMarker,
+    "unknown method",
+    "method not registered"
+  )
+
+  private def grpcStatus(t: Throwable): Option[GrpcStatus] = t match {
+    case e: StatusRuntimeException => Some(e.getStatus)
+    case e: StatusException        => Some(e.getStatus)
+    case _                         => None
+  }
+
+  private def isSnapshotRpcUnavailable(description: String): Boolean = {
+    val normalized = description.toLowerCase
+    SnapshotRpcNames.exists(normalized.contains) &&
+    ServiceUnavailableMarkers.exists(normalized.contains)
+  }
+
+  def isServiceNotImplemented(t: Throwable): Boolean = {
+    val visited = java.util.Collections.newSetFromMap(
+      new java.util.IdentityHashMap[Throwable, java.lang.Boolean]()
+    )
+    var current = t
+    while (current != null && visited.add(current)) {
+      grpcStatus(current).foreach { status =>
+        if (status.getCode == GrpcStatus.Code.UNIMPLEMENTED) return true
+        if (status.getCode == GrpcStatus.Code.UNKNOWN) {
+          val description = Option(status.getDescription).getOrElse("")
+          if (isSnapshotRpcUnavailable(description)) return true
+        }
+      }
+      current = current.getCause
+    }
+    false
+  }
 
   val mapper: ObjectMapper with ScalaObjectMapper = {
     val m = new ObjectMapper() with ScalaObjectMapper
@@ -855,6 +1037,15 @@ case class MilvusCollectionInfo(
     collectionName: String,
     collectionID: Long,
     schema: CollectionSchema
+)
+
+case class MilvusSnapshotInfo(
+    name: String,
+    description: String,
+    collectionName: String,
+    partitionNames: Seq[String],
+    createTs: Long,
+    s3Location: String
 )
 
 case class MilvusSegmentInfo(

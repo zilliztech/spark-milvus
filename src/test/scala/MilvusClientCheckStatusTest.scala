@@ -6,6 +6,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import io.milvus.grpc.common.{ErrorCode, Status}
 
+import io.grpc.{Status => GrpcStatus, StatusRuntimeException}
+
 /** Unit tests for MilvusClient.checkStatus classification logic.
   *
   * Covers the review feedback on ordering, NPE safety, success-path
@@ -96,5 +98,71 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
       reason = "something broke"
     )
     assert(client.checkStatus("insert", status).isFailure)
+  }
+
+  test("classifies grpc UNIMPLEMENTED as service not implemented") {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNIMPLEMENTED.withDescription("unknown method CreateSnapshot")
+    )
+    assert(MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("classifies wrapped grpc UNIMPLEMENTED as service not implemented") {
+    val cause = new StatusRuntimeException(
+      GrpcStatus.UNIMPLEMENTED.withDescription("snapshot service disabled")
+    )
+    val err = new RuntimeException("wrapped", cause)
+    assert(MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("does not classify non-grpc service-not-implemented text") {
+    val err = new RuntimeException(
+      "Failed to createSnapshot: service not implemented"
+    )
+    assert(!MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("does not classify ordinary errors as service not implemented") {
+    val err = new RuntimeException("permission denied")
+    assert(!MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("classifies grpc snapshot unknown method as service not implemented") {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNKNOWN.withDescription("unknown method CreateSnapshot")
+    )
+    assert(MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test(
+    "classifies grpc snapshot method-not-registered as service not implemented"
+  ) {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNKNOWN.withDescription(
+        "method not registered: DescribeSnapshot"
+      )
+    )
+    assert(MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("does not classify grpc unknown method for unrelated RPC") {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNKNOWN.withDescription("unknown method SomeOtherMethod")
+    )
+    assert(!MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("does not classify grpc UNKNOWN with null description") {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNKNOWN.withDescription(null)
+    )
+    assert(!MilvusClient.isServiceNotImplemented(err))
+  }
+
+  test("service-not-implemented detection stops on cyclic causes") {
+    val err = new RuntimeException("ordinary error") {
+      override def getCause: Throwable = this
+    }
+    assert(!MilvusClient.isServiceNotImplemented(err))
   }
 }
