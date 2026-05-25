@@ -106,7 +106,6 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       collectionName = "snapshot_collection",
       collectionId = 10L,
       partitionIds = Seq(20L, 21L),
-      snapshotJson = "{\"snapshot_info\":{},\"collection\":{}}",
       schemaBytesBase64 = "abc",
       manifestList = Seq.empty,
       v2Segments = Seq.empty
@@ -115,7 +114,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(out(MilvusOption.MilvusCollectionName) == "snapshot_collection")
     assert(out(MilvusOption.SnapshotCollectionId) == "10")
     assert(out(MilvusOption.SnapshotPartitionIds) == "20,21")
-    assert(out(MilvusOption.SnapshotSchemaJson).nonEmpty)
+    assert(!out.contains(MilvusOption.SnapshotSchemaJson))
     assert(out(MilvusOption.SnapshotSchemaBytes) == "abc")
     assert(out.contains(MilvusOption.SnapshotManifests))
     assert(out(MilvusOption.MilvusExtraColumns) == "partition")

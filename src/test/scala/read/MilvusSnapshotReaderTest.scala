@@ -24,6 +24,15 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     err.getMessage should include("exceeds")
   }
 
+  test("readUtf8WithLimit rejects non-positive limit clearly") {
+    val bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    val in = new java.io.ByteArrayInputStream(bytes)
+    val err = intercept[IllegalArgumentException] {
+      MilvusSnapshotReader.readUtf8WithLimit(in, "memory", -1)
+    }
+    err.getMessage should include("must be positive")
+  }
+
   test("Parse complete snapshot metadata successfully") {
     val result =
       MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)

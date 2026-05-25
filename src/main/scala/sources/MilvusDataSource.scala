@@ -3,9 +3,18 @@ package com.zilliz.spark.connector.sources
 import java.{util => ju}
 import java.net.URI
 import java.util.{Base64, HashMap, Map => JMap, UUID}
+import java.util.concurrent.{
+  Executors,
+  ScheduledFuture,
+  ThreadFactory,
+  TimeUnit
+}
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.mutable
+import scala.concurrent.{ExecutionContext, Future}
 import scala.jdk.CollectionConverters._
+import scala.util.{Failure, Success, Try}
+import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
@@ -30,6 +39,7 @@ import org.apache.spark.sql.connector.read.{
 }
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
+import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.sources.{DataSourceRegister, Filter}
 import org.apache.spark.sql.types.{
   DataTypes => SparkDataTypes,
@@ -627,7 +637,27 @@ class MilvusScanBuilder(
 }
 
 object MilvusScan extends Logging {
-  private val SparkSqlExecutionIdKey = "spark.sql.execution.id"
+  case class SnapshotCleanupRegistration(
+      session: SparkSession,
+      executionId: String
+  )
+
+  private val SnapshotCleanupTtlMillis = TimeUnit.MINUTES.toMillis(30)
+
+  private val CleanupThreadFactory = new ThreadFactory {
+    override def newThread(r: Runnable): Thread = {
+      val thread = new Thread(r, "milvus-snapshot-cleanup")
+      thread.setDaemon(true)
+      thread
+    }
+  }
+
+  private val CleanupExecutor = Executors.newSingleThreadScheduledExecutor(
+    CleanupThreadFactory
+  )
+
+  private implicit val CleanupExecutionContext: ExecutionContext =
+    ExecutionContext.fromExecutor(CleanupExecutor)
 
   private val SnapshotOptionKeys = Seq(
     MilvusOption.SnapshotMode,
@@ -635,7 +665,6 @@ object MilvusScan extends Logging {
     MilvusOption.SnapshotV2Segments,
     MilvusOption.SnapshotCollectionId,
     MilvusOption.SnapshotPartitionIds,
-    MilvusOption.SnapshotSchemaJson,
     MilvusOption.SnapshotSchemaBytes
   )
 
@@ -681,6 +710,18 @@ object MilvusScan extends Logging {
     milvusOption.segmentID.isEmpty
   }
 
+  def activeCleanupRegistration(): Option[SnapshotCleanupRegistration] = {
+    SparkSession.getActiveSession.orElse(SparkSession.getDefaultSession) match {
+      case Some(session) =>
+        Option(
+          session.sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
+        )
+          .filter(_.trim.nonEmpty)
+          .map(SnapshotCleanupRegistration(session, _))
+      case None => None
+    }
+  }
+
   def dropClientReadSnapshot(
       client: MilvusClient,
       databaseName: String,
@@ -688,14 +729,14 @@ object MilvusScan extends Logging {
       snapshotName: String,
       reason: String,
       maxAttempts: Int = 3
-  ): Boolean = {
+  ): Try[Unit] = {
     var lastFailure = Option.empty[Throwable]
     (1 to maxAttempts).foreach { attempt =>
       client.dropSnapshot(databaseName, collectionName, snapshotName) match {
-        case scala.util.Success(_) =>
+        case Success(_) =>
           logInfo(s"Dropped client read snapshot $snapshotName after $reason")
-          return true
-        case scala.util.Failure(e) =>
+          return Success(())
+        case Failure(e) =>
           lastFailure = Some(e)
           logWarning(
             s"Failed to drop client read snapshot $snapshotName after $reason " +
@@ -705,26 +746,23 @@ object MilvusScan extends Logging {
           if (attempt < maxAttempts) Thread.sleep(200L * attempt)
       }
     }
-    lastFailure.foreach { e =>
-      logWarning(
-        s"Giving up dropping client read snapshot $snapshotName after $maxAttempts attempt(s)",
-        e
+    Failure(
+      lastFailure.getOrElse(
+        new RuntimeException(
+          s"Failed to drop client read snapshot $snapshotName after $reason"
+        )
       )
-    }
-    false
+    )
   }
 
-  def registerClientSnapshotCleanup(
+  private def dropClientReadSnapshotWithNewClient(
       baseOptions: Map[String, String],
       databaseName: String,
       collectionName: String,
-      snapshotName: String
-  ): Boolean = {
-    val dropped = new AtomicBoolean(false)
-
-    def dropSnapshot(reason: String): Unit = {
-      if (!dropped.compareAndSet(false, true)) return
-      val client = MilvusClient(MilvusOption(baseOptions))
+      snapshotName: String,
+      reason: String
+  ): Try[Unit] = {
+    Try(MilvusClient(MilvusOption(baseOptions))).flatMap { client =>
       try {
         dropClientReadSnapshot(
           client,
@@ -737,38 +775,97 @@ object MilvusScan extends Logging {
         client.close()
       }
     }
+  }
 
-    SparkSession.getActiveSession.orElse(SparkSession.getDefaultSession) match {
-      case Some(session) =>
-        Option(session.sparkContext.getLocalProperty(SparkSqlExecutionIdKey))
-          .filter(_.trim.nonEmpty) match {
-          case Some(executionId) =>
-            val listener = new SparkListener {
-              private def cleanup(reason: String): Unit = {
-                try dropSnapshot(reason)
-                finally session.sparkContext.removeSparkListener(this)
-              }
+  def registerClientSnapshotCleanup(
+      registration: SnapshotCleanupRegistration,
+      baseOptions: Map[String, String],
+      databaseName: String,
+      collectionName: String,
+      snapshotName: String
+  ): Boolean = {
+    val cleanupComplete = new AtomicBoolean(false)
+    val cleanupInFlight = new AtomicBoolean(false)
+    val session = registration.session
+    val executionId = registration.executionId
 
-              override def onOtherEvent(event: SparkListenerEvent): Unit = {
-                event match {
-                  case e: SparkListenerSQLExecutionEnd
-                      if e.executionId.toString == executionId =>
-                    cleanup(s"Spark SQL execution $executionId ended")
-                  case _ =>
-                }
-              }
-            }
-            session.sparkContext.addSparkListener(listener)
-            true
-          case None =>
-            logWarning(
-              s"No active Spark SQL execution id; client read snapshot $snapshotName cannot be safely auto-dropped"
+    var ttlTask: ScheduledFuture[_] = null
+
+    def removeListener(listener: SparkListener): Unit = {
+      session.sparkContext.removeSparkListener(listener)
+      if (ttlTask != null) ttlTask.cancel(false)
+    }
+
+    def submitCleanup(
+        reason: String,
+        listener: SparkListener,
+        finalAttempt: Boolean
+    ): Unit = {
+      if (
+        cleanupComplete.get() || !cleanupInFlight.compareAndSet(false, true)
+      ) {
+        return
+      }
+      Future {
+        val dropResult = dropClientReadSnapshotWithNewClient(
+          baseOptions,
+          databaseName,
+          collectionName,
+          snapshotName,
+          reason
+        )
+        dropResult match {
+          case Success(_) =>
+            cleanupComplete.set(true)
+            removeListener(listener)
+          case Failure(e) =>
+            logError(
+              s"Failed to drop client read snapshot $snapshotName after $reason",
+              e
             )
-            false
+            if (finalAttempt) {
+              removeListener(listener)
+            }
         }
-      case None =>
-        logWarning(
-          s"No active SparkSession; client read snapshot $snapshotName cannot be auto-dropped"
+        cleanupInFlight.set(false)
+      }
+    }
+
+    val listener = new SparkListener {
+      override def onOtherEvent(event: SparkListenerEvent): Unit = {
+        event match {
+          case e: SparkListenerSQLExecutionEnd
+              if e.executionId.toString == executionId =>
+            submitCleanup(
+              s"Spark SQL execution $executionId ended",
+              this,
+              finalAttempt = false
+            )
+          case _ =>
+        }
+      }
+    }
+
+    Try(session.sparkContext.addSparkListener(listener)) match {
+      case Success(_) =>
+        ttlTask = CleanupExecutor.schedule(
+          new Runnable {
+            override def run(): Unit = {
+              submitCleanup(
+                s"cleanup listener TTL ${SnapshotCleanupTtlMillis}ms expired",
+                listener,
+                finalAttempt = true
+              )
+            }
+          },
+          SnapshotCleanupTtlMillis,
+          TimeUnit.MILLISECONDS
+        )
+        true
+      case Failure(e) =>
+        logError(
+          s"Failed to register cleanup listener for client read snapshot $snapshotName",
+          e
         )
         false
     }
@@ -779,7 +876,6 @@ object MilvusScan extends Logging {
       collectionName: String,
       collectionId: Long,
       partitionIds: Seq[Long],
-      snapshotJson: String,
       schemaBytesBase64: String,
       manifestList: Seq[StorageV2ManifestItem],
       v2Segments: Seq[V2SegmentInfo]
@@ -790,7 +886,6 @@ object MilvusScan extends Logging {
       MilvusOption.MilvusCollectionName -> collectionName,
       MilvusOption.SnapshotCollectionId -> collectionId.toString,
       MilvusOption.SnapshotPartitionIds -> partitionIds.mkString(","),
-      MilvusOption.SnapshotSchemaJson -> snapshotJson,
       MilvusOption.SnapshotSchemaBytes -> schemaBytesBase64,
       MilvusOption.SnapshotManifests ->
         MilvusSnapshotReader.serializeManifestList(manifestList)
@@ -891,6 +986,15 @@ class MilvusScan(
       options.get(MilvusOption.ClientSnapshotCompactionProtectionSeconds)
     ).filter(_.trim.nonEmpty).map(_.toLong).getOrElse(86400L)
 
+    val cleanupRegistration = MilvusScan.activeCleanupRegistration()
+    if (cleanupRegistration.isEmpty) {
+      logWarning(
+        "Skipping client snapshot fast path because Spark SQL execution cleanup cannot be registered; " +
+          "falling back to legacy GetPersistentSegmentInfo read path"
+      )
+      return None
+    }
+
     client.createSnapshotForRead(
       milvusOption.databaseName,
       milvusOption.collectionName,
@@ -907,42 +1011,50 @@ class MilvusScan(
           val partitions = planInputPartitionsFromClientSnapshotPath(
             snapshotPath
           )
-          val cleanupRegistered = MilvusScan.registerClientSnapshotCleanup(
-            options.asScala.toMap,
-            milvusOption.databaseName,
-            milvusOption.collectionName,
-            snapshot.name
-          )
-          if (cleanupRegistered) {
+          if (
+            MilvusScan.registerClientSnapshotCleanup(
+              cleanupRegistration.get,
+              options.asScala.toMap,
+              milvusOption.databaseName,
+              milvusOption.collectionName,
+              snapshot.name
+            )
+          ) {
             logWarning(
               s"Client read snapshot ${snapshot.name} will be dropped when the Spark SQL execution ends; " +
                 "an unclean driver exit can leave it behind and require manual cleanup."
             )
             Some(partitions)
           } else {
-            val dropped = MilvusScan.dropClientReadSnapshot(
-              client,
-              milvusOption.databaseName,
-              milvusOption.collectionName,
-              snapshot.name,
-              "cleanup registration failure"
-            )
-            if (!dropped) {
-              throw new IllegalStateException(
-                s"Failed to drop client read snapshot ${snapshot.name} after cleanup registration failure"
+            MilvusScan
+              .dropClientReadSnapshot(
+                client,
+                milvusOption.databaseName,
+                milvusOption.collectionName,
+                snapshot.name,
+                "cleanup registration failure"
               )
-            }
+              .failed
+              .foreach { e =>
+                logError(
+                  s"Failed to drop client read snapshot ${snapshot.name} after cleanup registration failure; falling back to legacy read path",
+                  e
+                )
+              }
             None
           }
         } catch {
-          case e: Throwable =>
-            MilvusScan.dropClientReadSnapshot(
-              client,
-              milvusOption.databaseName,
-              milvusOption.collectionName,
-              snapshot.name,
-              "planning failure"
-            )
+          case NonFatal(e) =>
+            MilvusScan
+              .dropClientReadSnapshot(
+                client,
+                milvusOption.databaseName,
+                milvusOption.collectionName,
+                snapshot.name,
+                "planning failure"
+              )
+              .failed
+              .foreach(e.addSuppressed)
             throw e
         }
 
@@ -1004,7 +1116,6 @@ class MilvusScan(
       collectionName = metadata.collection.schema.name,
       collectionId = metadata.snapshotInfo.collectionId,
       partitionIds = metadata.snapshotInfo.partitionIds,
-      snapshotJson = snapshotJson,
       schemaBytesBase64 = Base64.getEncoder.encodeToString(schemaBytes),
       manifestList = metadata.storageV2ManifestList.getOrElse(Seq.empty),
       v2Segments = v2Segments
@@ -1106,34 +1217,27 @@ class MilvusScan(
   }
 
   private def buildSnapshotHadoopConf(snapshotPath: String): Configuration = {
-    val conf = new Configuration()
-    val endpoint = milvusOption.options.getOrElse(
-      Properties.FsConfig.FsAddress,
-      "localhost:9000"
-    )
-    val accessKey = milvusOption.options.getOrElse(
-      Properties.FsConfig.FsAccessKeyId,
-      ""
-    )
-    val secretKey = milvusOption.options.getOrElse(
-      Properties.FsConfig.FsAccessKeyValue,
-      ""
-    )
-    val useSsl = milvusOption.options.getOrElse(
-      Properties.FsConfig.FsUseSSL,
-      "false"
-    )
-    val pathStyle = milvusOption.options.getOrElse(
-      "fs.s3a.path.style.access",
-      "true"
-    )
+    val conf = SparkSession.getActiveSession
+      .orElse(SparkSession.getDefaultSession)
+      .map(_.sessionState.newHadoopConf())
+      .getOrElse(new Configuration())
+    val endpoint = milvusOption.options.get(Properties.FsConfig.FsAddress)
+    val accessKey = milvusOption.options.get(Properties.FsConfig.FsAccessKeyId)
+    val secretKey =
+      milvusOption.options.get(Properties.FsConfig.FsAccessKeyValue)
+    val useSsl = milvusOption.options.get(Properties.FsConfig.FsUseSSL)
+    val pathStyle = milvusOption.options.get("fs.s3a.path.style.access")
+
+    def setIfDefined(key: String, value: Option[String]): Unit = {
+      value.filter(_.nonEmpty).foreach(conf.set(key, _))
+    }
 
     conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    conf.set("fs.s3a.endpoint", endpoint)
-    conf.set("fs.s3a.connection.ssl.enabled", useSsl)
-    conf.set("fs.s3a.path.style.access", pathStyle)
-    if (accessKey.nonEmpty) conf.set("fs.s3a.access.key", accessKey)
-    if (secretKey.nonEmpty) conf.set("fs.s3a.secret.key", secretKey)
+    setIfDefined("fs.s3a.endpoint", endpoint)
+    setIfDefined("fs.s3a.connection.ssl.enabled", useSsl)
+    setIfDefined("fs.s3a.path.style.access", pathStyle)
+    setIfDefined("fs.s3a.access.key", accessKey)
+    setIfDefined("fs.s3a.secret.key", secretKey)
 
     val connectorBucket = milvusOption.options.getOrElse(
       Properties.FsConfig.FsBucketName,
@@ -1142,17 +1246,11 @@ class MilvusScan(
     MilvusScan
       .snapshotBucketsToConfigure(snapshotPath, connectorBucket)
       .foreach { bucket =>
-        if (endpoint.nonEmpty) {
-          conf.set(s"fs.s3a.bucket.$bucket.endpoint", endpoint)
-        }
-        conf.set(s"fs.s3a.bucket.$bucket.connection.ssl.enabled", useSsl)
-        conf.set(s"fs.s3a.bucket.$bucket.path.style.access", pathStyle)
-        if (accessKey.nonEmpty) {
-          conf.set(s"fs.s3a.bucket.$bucket.access.key", accessKey)
-        }
-        if (secretKey.nonEmpty) {
-          conf.set(s"fs.s3a.bucket.$bucket.secret.key", secretKey)
-        }
+        setIfDefined(s"fs.s3a.bucket.$bucket.endpoint", endpoint)
+        setIfDefined(s"fs.s3a.bucket.$bucket.connection.ssl.enabled", useSsl)
+        setIfDefined(s"fs.s3a.bucket.$bucket.path.style.access", pathStyle)
+        setIfDefined(s"fs.s3a.bucket.$bucket.access.key", accessKey)
+        setIfDefined(s"fs.s3a.bucket.$bucket.secret.key", secretKey)
       }
     conf
   }
@@ -1161,7 +1259,15 @@ class MilvusScan(
     val maxBytes = milvusOption.options
       .get(MilvusOption.SnapshotMaxJsonBytes)
       .filter(_.trim.nonEmpty)
-      .map(_.toLong)
+      .map { raw =>
+        val parsed = raw.toLong
+        if (parsed <= 0) {
+          throw new IllegalArgumentException(
+            s"${MilvusOption.SnapshotMaxJsonBytes} must be positive, got $raw"
+          )
+        }
+        parsed
+      }
       .getOrElse(MilvusSnapshotReader.MaxSnapshotJsonBytes)
     val uri = new URI(path)
     val fs = FileSystem.get(uri, conf)

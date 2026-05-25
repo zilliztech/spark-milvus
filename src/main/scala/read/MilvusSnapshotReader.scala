@@ -390,6 +390,11 @@ object MilvusSnapshotReader {
       path: String,
       maxBytes: Long = MaxSnapshotJsonBytes
   ): String = {
+    if (maxBytes <= 0) {
+      throw new IllegalArgumentException(
+        s"Snapshot metadata max size must be positive, got $maxBytes"
+      )
+    }
     val out = new java.io.ByteArrayOutputStream()
     val buf = new Array[Byte](8192)
     var total = 0L
