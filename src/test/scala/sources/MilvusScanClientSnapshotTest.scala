@@ -51,6 +51,26 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
+  test("resolveClientSnapshotLocation rejects unsupported schemes") {
+    Seq("gs://a-bucket/files/snapshot.json", "file:///tmp/snapshot.json")
+      .foreach { location =>
+        val err = intercept[IllegalArgumentException] {
+          MilvusScan.resolveClientSnapshotLocation(location, "ignored")
+        }
+        assert(
+          err.getMessage.contains("Unsupported snapshot s3_location scheme")
+        )
+      }
+  }
+
+  test("snapshotBucket extracts authority when URI host is null") {
+    assert(
+      MilvusScan.snapshotBucket(
+        "s3a://snapshot_bucket/files/snapshots/1/metadata/2.json"
+      ) == Some("snapshot_bucket")
+    )
+  }
+
   test("snapshotBucketsToConfigure includes cross-bucket snapshot locations") {
     assert(
       MilvusScan.snapshotBucketsToConfigure(
@@ -99,7 +119,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       MilvusOption.MilvusCollectionName -> "c",
       MilvusOption.MilvusExtraColumns -> "partition",
       MilvusOption.SnapshotMode -> "false",
-      MilvusOption.SnapshotCollectionId -> "old"
+      MilvusOption.SnapshotCollectionId -> "old",
+      MilvusOption.SnapshotSchemaJson -> "stale-schema-json"
     )
     val out = MilvusScan.buildClientSnapshotOptions(
       baseOptions = base,
@@ -120,13 +141,38 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(out(MilvusOption.MilvusExtraColumns) == "partition")
   }
 
+  test("parsePositiveLongOption rejects non-numeric and non-positive values") {
+    Seq("not-a-number", "0", "-1").foreach { value =>
+      val rawOptions = new ju.HashMap[String, String]()
+      rawOptions.put(
+        MilvusOption.ClientSnapshotCompactionProtectionSeconds,
+        value
+      )
+      val err = intercept[IllegalArgumentException] {
+        MilvusScan.parsePositiveLongOption(
+          new CaseInsensitiveStringMap(rawOptions),
+          MilvusOption.ClientSnapshotCompactionProtectionSeconds,
+          86400L
+        )
+      }
+      assert(
+        err.getMessage.contains(
+          MilvusOption.ClientSnapshotCompactionProtectionSeconds
+        )
+      )
+    }
+  }
+
   test("snapshot planner returns no partitions for empty snapshots") {
     val rawOptions = new ju.HashMap[String, String]()
     rawOptions.put(MilvusOption.SnapshotMode, "true")
     rawOptions.put(MilvusOption.SnapshotManifests, "[]")
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
-    val partitions = scanWithOptions(rawOptions).planInputPartitions()
-    assert(partitions.isEmpty)
+    val scan = scanWithOptions(rawOptions)
+    val firstPartitions = scan.planInputPartitions()
+    val secondPartitions = scan.planInputPartitions()
+    assert(firstPartitions.isEmpty)
+    assert(firstPartitions eq secondPartitions)
   }
 
   test("snapshot planner fails loudly on malformed manifest JSON") {
