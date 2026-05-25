@@ -214,6 +214,27 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     milvusOption.options should contain key "custom.option"
     milvusOption.options("custom.option") shouldBe "custom_value"
   }
+
+  test("isSnapshotMode accepts explicit snapshot mode") {
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotMode -> "true")
+    ) shouldBe true
+  }
+
+  test("isSnapshotMode accepts snapshot metadata options") {
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotManifests -> "[]")
+    ) shouldBe true
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotV2Segments -> "[]")
+    ) shouldBe true
+  }
+
+  test("isSnapshotMode is false for normal client options") {
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.MilvusCollectionName -> "c")
+    ) shouldBe false
+  }
 }
 
 /** Unit tests for MilvusS3Option

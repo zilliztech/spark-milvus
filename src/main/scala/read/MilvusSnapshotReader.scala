@@ -383,6 +383,30 @@ case class SnapshotMetadata(
   */
 object MilvusSnapshotReader {
 
+  val MaxSnapshotJsonBytes: Long = 64L * 1024L * 1024L
+
+  def readUtf8WithLimit(
+      in: java.io.InputStream,
+      path: String,
+      maxBytes: Long = MaxSnapshotJsonBytes
+  ): String = {
+    val out = new java.io.ByteArrayOutputStream()
+    val buf = new Array[Byte](8192)
+    var total = 0L
+    var n = in.read(buf)
+    while (n >= 0) {
+      total += n
+      if (total > maxBytes) {
+        throw new IllegalArgumentException(
+          s"Snapshot metadata $path exceeds max size $maxBytes bytes"
+        )
+      }
+      out.write(buf, 0, n)
+      n = in.read(buf)
+    }
+    out.toString(java.nio.charset.StandardCharsets.UTF_8.name())
+  }
+
   private val mapper: ObjectMapper with ScalaObjectMapper = {
     val m = new ObjectMapper() with ScalaObjectMapper
     m.registerModule(DefaultScalaModule)
@@ -428,12 +452,11 @@ object MilvusSnapshotReader {
       path: String
   ): Either[Throwable, SnapshotMetadata] = {
     try {
-      val source = scala.io.Source.fromFile(path)
+      val in = new java.io.FileInputStream(path)
       try {
-        val json = source.mkString
-        parseSnapshotMetadata(json)
+        parseSnapshotMetadata(readUtf8WithLimit(in, path))
       } finally {
-        source.close()
+        in.close()
       }
     } catch {
       case e: Exception => Left(e)
