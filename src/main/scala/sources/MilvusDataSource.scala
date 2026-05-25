@@ -937,17 +937,6 @@ class MilvusScan(
 
     val client = MilvusClient(milvusOption)
     try {
-      val collectionInfo = client
-        .getCollectionInfo(
-          milvusOption.databaseName,
-          milvusOption.collectionName
-        )
-        .getOrElse(
-          throw new Exception(
-            s"Collection ${milvusOption.collectionName} not found"
-          )
-        )
-
       val clientSnapshotPartitions =
         if (MilvusScan.canUseClientSnapshotFastPath(milvusOption)) {
           planInputPartitionsFromClientSnapshot(client)
@@ -959,6 +948,16 @@ class MilvusScan(
         }
 
       clientSnapshotPartitions.getOrElse {
+        val collectionInfo = client
+          .getCollectionInfo(
+            milvusOption.databaseName,
+            milvusOption.collectionName
+          )
+          .getOrElse(
+            throw new Exception(
+              s"Collection ${milvusOption.collectionName} not found"
+            )
+          )
         planInputPartitionsFromLegacyClient(client, collectionInfo)
       }
     } finally {
