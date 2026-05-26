@@ -138,6 +138,68 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(conf.get("fs.s3a.impl.disable.cache") == "true")
   }
 
+  test("buildSnapshotHadoopConf maps connector S3 options to S3A") {
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(Properties.FsConfig.FsBucketName, "connector-bucket")
+    rawOptions.put(Properties.FsConfig.FsAddress, "minio:9000")
+    rawOptions.put(Properties.FsConfig.FsAccessKeyId, "ak")
+    rawOptions.put(Properties.FsConfig.FsAccessKeyValue, "sk")
+    rawOptions.put(Properties.FsConfig.FsUseSSL, "false")
+    rawOptions.put(Properties.FsConfig.FsRegion, "us-west-2")
+    rawOptions.put(Properties.FsConfig.FsUseVirtualHost, "false")
+
+    val conf = scanWithOptions(rawOptions).buildSnapshotHadoopConf(
+      "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json"
+    )
+
+    assert(conf.get("fs.s3a.endpoint") == "minio:9000")
+    assert(conf.get("fs.s3a.connection.ssl.enabled") == "false")
+    assert(conf.get("fs.s3a.path.style.access") == "true")
+    assert(conf.get("fs.s3a.endpoint.region") == "us-west-2")
+    assert(conf.get("fs.s3a.access.key") == "ak")
+    assert(conf.get("fs.s3a.secret.key") == "sk")
+    assert(conf.get("fs.s3a.bucket.connector-bucket.endpoint") == "minio:9000")
+    assert(conf.get("fs.s3a.bucket.snapshot-bucket.endpoint") == "minio:9000")
+    assert(
+      conf.get("fs.s3a.bucket.snapshot-bucket.path.style.access") == "true"
+    )
+  }
+
+  test("buildSnapshotHadoopConf maps IAM mode without static credentials") {
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(Properties.FsConfig.FsBucketName, "connector-bucket")
+    rawOptions.put(Properties.FsConfig.FsUseIam, "true")
+    rawOptions.put(Properties.FsConfig.FsAccessKeyId, "ak")
+    rawOptions.put(Properties.FsConfig.FsAccessKeyValue, "sk")
+
+    val conf = scanWithOptions(rawOptions).buildSnapshotHadoopConf(
+      "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
+    )
+
+    assert(conf.get("fs.s3a.access.key") == null)
+    assert(conf.get("fs.s3a.secret.key") == null)
+    assert(
+      conf.get("fs.s3a.aws.credentials.provider") ==
+        "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
+    )
+    assert(conf.get("fs.s3a.bucket.connector-bucket.access.key") == null)
+    assert(conf.get("fs.s3a.bucket.connector-bucket.secret.key") == null)
+    assert(
+      conf.get("fs.s3a.bucket.connector-bucket.aws.credentials.provider") ==
+        "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
+    )
+  }
+
+  test(
+    "buildSnapshotHadoopConf accepts snapshot bucket without connector bucket"
+  ) {
+    val conf = scanWithOptions(new ju.HashMap[String, String]())
+      .buildSnapshotHadoopConf(
+        "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json"
+      )
+    assert(conf.get("fs.s3a.impl.disable.cache") == "true")
+  }
+
   test("readAllBytes closes the FileSystem instance when cache is disabled") {
     val rawOptions = new ju.HashMap[String, String]()
     val conf = new Configuration()

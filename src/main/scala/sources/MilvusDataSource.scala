@@ -745,18 +745,45 @@ object MilvusScan extends Logging {
     )).distinct
   }
 
+  private[sources] def optionValue(
+      options: scala.collection.Map[String, String],
+      key: String
+  ): Option[String] = {
+    options.collectFirst {
+      case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
+    }
+  }
+
+  private[sources] def connectorS3BucketOption(
+      options: scala.collection.Map[String, String]
+  ): Option[String] = {
+    optionValue(options, Properties.FsConfig.FsBucketName)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+  }
+
   private[sources] def resolveConnectorS3Bucket(
       options: scala.collection.Map[String, String]
   ): String = {
-    options
-      .get(Properties.FsConfig.FsBucketName)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .getOrElse {
-        throw new IllegalArgumentException(
-          s"${Properties.FsConfig.FsBucketName} is required for client snapshot reads"
-        )
-      }
+    connectorS3BucketOption(options).getOrElse {
+      throw new IllegalArgumentException(
+        s"${Properties.FsConfig.FsBucketName} is required for client snapshot reads"
+      )
+    }
+  }
+
+  private[sources] def snapshotS3BucketForRelativePaths(
+      snapshotPath: String,
+      options: scala.collection.Map[String, String]
+  ): Option[String] = {
+    connectorS3BucketOption(options).orElse(snapshotBucket(snapshotPath))
+  }
+
+  private[sources] def isBucketRelativeSnapshotLocation(
+      location: String
+  ): Boolean = {
+    val trimmed = Option(location).map(_.trim).getOrElse("")
+    trimmed.nonEmpty && Option(new URI(trimmed).getScheme).isEmpty
   }
 
   private[sources] def canUseClientSnapshotFastPath(
@@ -1096,7 +1123,6 @@ class MilvusScan(
   private def planInputPartitionsFromClientSnapshot(
       client: MilvusClient
   ): Option[Array[InputPartition]] = {
-    val s3Bucket = MilvusScan.resolveConnectorS3Bucket(milvusOption.options)
     val snapshotName = Option(options.get(MilvusOption.ClientSnapshotName))
       .filter(_.trim.nonEmpty)
       .getOrElse(
@@ -1128,7 +1154,34 @@ class MilvusScan(
       protectionSeconds
     ) match {
       case scala.util.Success(snapshot) =>
+        val connectorBucket = MilvusScan.connectorS3BucketOption(
+          milvusOption.options
+        )
         if (
+          connectorBucket.isEmpty && MilvusScan
+            .isBucketRelativeSnapshotLocation(snapshot.s3Location)
+        ) {
+          logWarning(
+            s"Skipping client snapshot fast path because ${Properties.FsConfig.FsBucketName} is missing " +
+              "and the snapshot location is bucket-relative; falling back to legacy GetPersistentSegmentInfo read path"
+          )
+          MilvusScan
+            .dropClientReadSnapshot(
+              client,
+              milvusOption.databaseName,
+              milvusOption.collectionName,
+              snapshot.name,
+              s"missing ${Properties.FsConfig.FsBucketName} for bucket-relative snapshot location"
+            )
+            .failed
+            .foreach { e =>
+              logError(
+                s"Failed to drop client read snapshot ${snapshot.name} after missing bucket fallback",
+                e
+              )
+            }
+          None
+        } else if (
           MilvusScan.registerClientSnapshotCleanup(
             cleanupRegistration.get,
             options.asScala.toMap,
@@ -1143,7 +1196,7 @@ class MilvusScan(
           )
           val snapshotPath = MilvusScan.resolveClientSnapshotLocation(
             snapshot.s3Location,
-            s3Bucket
+            connectorBucket.getOrElse("")
           )
           Some(planInputPartitionsFromClientSnapshotPath(snapshotPath))
         } else {
@@ -1198,12 +1251,15 @@ class MilvusScan(
         snapshotPath
       )
 
-    val s3Bucket = MilvusScan.resolveConnectorS3Bucket(milvusOption.options)
+    val snapshotBucket = MilvusScan.snapshotS3BucketForRelativePaths(
+      snapshotPath,
+      milvusOption.options
+    )
     val v2Segments =
       if (metadata.manifestList.nonEmpty) {
         V2SegmentLoader.loadV2Segments(
           metadata.manifestList,
-          s3Bucket,
+          snapshotBucket.getOrElse(""),
           hadoopConf
         ) match {
           case Right(segs) => segs
@@ -1334,43 +1390,72 @@ class MilvusScan(
       .orElse(SparkSession.getDefaultSession)
       .map(_.sessionState.newHadoopConf())
       .getOrElse(new Configuration())
-    val endpoint = milvusOption.options.get(Properties.FsConfig.FsAddress)
-    val accessKey = milvusOption.options.get(Properties.FsConfig.FsAccessKeyId)
+    val rawOptions = milvusOption.options
+    val endpoint =
+      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsAddress)
+    val accessKey =
+      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsAccessKeyId)
     val secretKey =
-      milvusOption.options.get(Properties.FsConfig.FsAccessKeyValue)
-    val useSsl = milvusOption.options.get(Properties.FsConfig.FsUseSSL)
-    val pathStyle = milvusOption.options.get("fs.s3a.path.style.access")
+      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsAccessKeyValue)
+    val useSsl =
+      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsUseSSL)
+    val region =
+      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsRegion)
+    val useIam = MilvusScan
+      .optionValue(rawOptions, Properties.FsConfig.FsUseIam)
+      .exists(_.trim.equalsIgnoreCase("true"))
+    val useVirtualHost = MilvusScan
+      .optionValue(rawOptions, Properties.FsConfig.FsUseVirtualHost)
+      .filter(_.trim.nonEmpty)
+    val pathStyle = MilvusScan
+      .optionValue(rawOptions, "fs.s3a.path.style.access")
+      .orElse(
+        useVirtualHost.map(v => (!v.trim.equalsIgnoreCase("true")).toString)
+      )
 
     def setIfDefined(key: String, value: Option[String]): Unit = {
-      value.filter(_.nonEmpty).foreach(conf.set(key, _))
+      value.map(_.trim).filter(_.nonEmpty).foreach(conf.set(key, _))
+    }
+
+    def configureS3A(prefix: String): Unit = {
+      setIfDefined(s"$prefix.endpoint", endpoint)
+      setIfDefined(s"$prefix.connection.ssl.enabled", useSsl)
+      setIfDefined(s"$prefix.path.style.access", pathStyle)
+      setIfDefined(s"$prefix.endpoint.region", region)
+      setIfDefined(s"$prefix.region", region)
+      if (useIam) {
+        conf.unset(s"$prefix.access.key")
+        conf.unset(s"$prefix.secret.key")
+        conf.set(
+          s"$prefix.aws.credentials.provider",
+          "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
+        )
+      } else {
+        setIfDefined(s"$prefix.access.key", accessKey)
+        setIfDefined(s"$prefix.secret.key", secretKey)
+      }
     }
 
     if (conf.get("fs.s3a.impl") == null) {
       conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     }
     conf.set("fs.s3a.impl.disable.cache", "true")
-    if (accessKey.forall(_.trim.isEmpty) || secretKey.forall(_.trim.isEmpty)) {
+    if (
+      !useIam && (accessKey
+        .forall(_.trim.isEmpty) || secretKey.forall(_.trim.isEmpty))
+    ) {
       logWarning(
         "Snapshot S3 credentials were not provided; Hadoop S3A will use the default AWS credential provider chain."
       )
     }
-    setIfDefined("fs.s3a.endpoint", endpoint)
-    setIfDefined("fs.s3a.connection.ssl.enabled", useSsl)
-    setIfDefined("fs.s3a.path.style.access", pathStyle)
-    setIfDefined("fs.s3a.access.key", accessKey)
-    setIfDefined("fs.s3a.secret.key", secretKey)
+    configureS3A("fs.s3a")
 
-    val connectorBucket =
-      MilvusScan.resolveConnectorS3Bucket(milvusOption.options)
     MilvusScan
-      .snapshotBucketsToConfigure(snapshotPath, connectorBucket)
-      .foreach { bucket =>
-        setIfDefined(s"fs.s3a.bucket.$bucket.endpoint", endpoint)
-        setIfDefined(s"fs.s3a.bucket.$bucket.connection.ssl.enabled", useSsl)
-        setIfDefined(s"fs.s3a.bucket.$bucket.path.style.access", pathStyle)
-        setIfDefined(s"fs.s3a.bucket.$bucket.access.key", accessKey)
-        setIfDefined(s"fs.s3a.bucket.$bucket.secret.key", secretKey)
-      }
+      .snapshotBucketsToConfigure(
+        snapshotPath,
+        MilvusScan.connectorS3BucketOption(rawOptions).getOrElse("")
+      )
+      .foreach(bucket => configureS3A(s"fs.s3a.bucket.$bucket"))
     conf
   }
 
