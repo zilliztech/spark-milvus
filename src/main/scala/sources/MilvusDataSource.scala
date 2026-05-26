@@ -77,6 +77,7 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
   ): Table = {
     val options = new CaseInsensitiveStringMap(properties)
     val milvusOption = MilvusOption(options)
+    MilvusOption.validateSnapshotModeOptions(options)
     val isSnapshotMode = MilvusOption.isSnapshotMode(options)
     if (milvusOption.uri.isEmpty && !isSnapshotMode) {
       throw new IllegalArgumentException(
@@ -93,6 +94,7 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
     val milvusOption = MilvusOption(options)
 
     // Check for snapshot mode - use snapshot schema if provided
+    MilvusOption.validateSnapshotModeOptions(options)
     val isSnapshotMode = MilvusOption.isSnapshotMode(options)
 
     if (isSnapshotMode) {
@@ -653,7 +655,8 @@ object MilvusScan extends Logging {
       }
     }
 
-  private val CleanupRpcExecutor = Executors.newCachedThreadPool(
+  private val CleanupRpcExecutor = Executors.newFixedThreadPool(
+    2,
     daemonThreadFactory("milvus-snapshot-cleanup-rpc")
   )
 
@@ -726,12 +729,20 @@ object MilvusScan extends Logging {
     if (trimmed.isEmpty) {
       None
     } else {
-      val uri = new URI(resolveClientSnapshotLocation(trimmed, ""))
-      Option(uri.getHost).orElse {
-        Option(uri.getAuthority)
-          .map(_.takeWhile(_ != '@'))
-          .map(_.split(":").head)
-          .filter(_.nonEmpty)
+      val uri = new URI(trimmed)
+      Option(uri.getScheme).map(_.toLowerCase) match {
+        case Some("s3a") | Some("s3") =>
+          Option(uri.getHost).orElse {
+            Option(uri.getAuthority)
+              .map(_.takeWhile(_ != '@'))
+              .map(_.split(":").head)
+              .filter(_.nonEmpty)
+          }
+        case Some(other) =>
+          throw new IllegalArgumentException(
+            s"Unsupported snapshot s3_location scheme '$other': $trimmed"
+          )
+        case None => None
       }
     }
   }
@@ -776,7 +787,7 @@ object MilvusScan extends Logging {
       snapshotPath: String,
       options: scala.collection.Map[String, String]
   ): Option[String] = {
-    connectorS3BucketOption(options).orElse(snapshotBucket(snapshotPath))
+    snapshotBucket(snapshotPath).orElse(connectorS3BucketOption(options))
   }
 
   private[sources] def isBucketRelativeSnapshotLocation(
@@ -803,7 +814,11 @@ object MilvusScan extends Logging {
     val prefix = "spark_read_"
     val maxCollectionNameLength =
       MaxGeneratedSnapshotNameLength - prefix.length - suffix.length
-    val safeCollectionName = collectionName.take(maxCollectionNameLength.max(0))
+    val sanitizedCollectionName =
+      collectionName.replaceAll("[^A-Za-z0-9_]", "_")
+    val safeCollectionName = sanitizedCollectionName.take(
+      maxCollectionNameLength.max(0)
+    )
     s"$prefix$safeCollectionName$suffix"
   }
 
@@ -913,6 +928,33 @@ object MilvusScan extends Logging {
     }
   }
 
+  private def submitClientSnapshotCleanup(
+      baseOptions: Map[String, String],
+      databaseName: String,
+      collectionName: String,
+      snapshotName: String,
+      reason: String
+  ): Unit = {
+    val cleanupFuture = Future {
+      dropClientReadSnapshotWithNewClient(
+        baseOptions,
+        databaseName,
+        collectionName,
+        snapshotName,
+        reason
+      ) match {
+        case Success(_) =>
+        case Failure(e) =>
+          logError(
+            s"Failed to drop client read snapshot $snapshotName after $reason",
+            e
+          )
+      }
+    }
+    PendingCleanupFutures.add(cleanupFuture)
+    cleanupFuture.onComplete(_ => PendingCleanupFutures.remove(cleanupFuture))
+  }
+
   private[sources] def registerClientSnapshotCleanup(
       registration: SnapshotCleanupRegistration,
       baseOptions: Map[String, String],
@@ -925,24 +967,13 @@ object MilvusScan extends Logging {
     val executionId = registration.executionId
 
     def submitCleanup(reason: String): Unit = {
-      val cleanupFuture = Future {
-        dropClientReadSnapshotWithNewClient(
-          baseOptions,
-          databaseName,
-          collectionName,
-          snapshotName,
-          reason
-        ) match {
-          case Success(_) =>
-          case Failure(e) =>
-            logError(
-              s"Failed to drop client read snapshot $snapshotName after $reason",
-              e
-            )
-        }
-      }
-      PendingCleanupFutures.add(cleanupFuture)
-      cleanupFuture.onComplete(_ => PendingCleanupFutures.remove(cleanupFuture))
+      submitClientSnapshotCleanup(
+        baseOptions,
+        databaseName,
+        collectionName,
+        snapshotName,
+        reason
+      )
     }
 
     val listener = new SparkListener {
@@ -976,7 +1007,8 @@ object MilvusScan extends Logging {
       partitionIds: Seq[Long],
       schemaBytesBase64: String,
       manifestList: Seq[StorageV2ManifestItem],
-      v2Segments: Seq[V2SegmentInfo]
+      v2Segments: Seq[V2SegmentInfo],
+      snapshotBucketForRelativePaths: Option[String] = None
   ): Map[String, String] = {
     var out = baseOptions.filterNot { case (key, _) =>
       SnapshotOptionKeys.exists(_.equalsIgnoreCase(key))
@@ -993,6 +1025,12 @@ object MilvusScan extends Logging {
     if (v2Segments.nonEmpty) {
       out += MilvusOption.SnapshotV2Segments ->
         MilvusSnapshotReader.serializeV2Segments(v2Segments)
+    }
+    snapshotBucketForRelativePaths.foreach { bucket =>
+      out = out.filterNot { case (key, _) =>
+        key.equalsIgnoreCase(Properties.FsConfig.FsBucketName)
+      }
+      out += Properties.FsConfig.FsBucketName -> bucket
     }
     out
   }
@@ -1065,24 +1103,10 @@ class MilvusScan(
 
   private def computeInputPartitions(): Array[InputPartition] = {
     if (MilvusOption.isSnapshotMode(options)) {
+      MilvusOption.validateSnapshotModeOptions(options)
       val snapshotManifests = Option(
         options.get(MilvusOption.SnapshotManifests)
       )
-      val snapshotV2Segments = Option(
-        options.get(MilvusOption.SnapshotV2Segments)
-      )
-      val explicitSnapshotMode = Option(options.get(MilvusOption.SnapshotMode))
-        .exists(_.equalsIgnoreCase("true"))
-      if (
-        explicitSnapshotMode && snapshotManifests.forall(
-          _.trim.isEmpty
-        ) && snapshotV2Segments
-          .forall(_.trim.isEmpty)
-      ) {
-        throw new IllegalArgumentException(
-          s"${MilvusOption.SnapshotMode}=true requires ${MilvusOption.SnapshotManifests} or ${MilvusOption.SnapshotV2Segments}"
-        )
-      }
       return planInputPartitionsFromSnapshot(snapshotManifests.getOrElse(""))
     }
 
@@ -1165,21 +1189,13 @@ class MilvusScan(
             s"Skipping client snapshot fast path because ${Properties.FsConfig.FsBucketName} is missing " +
               "and the snapshot location is bucket-relative; falling back to legacy GetPersistentSegmentInfo read path"
           )
-          MilvusScan
-            .dropClientReadSnapshot(
-              client,
-              milvusOption.databaseName,
-              milvusOption.collectionName,
-              snapshot.name,
-              s"missing ${Properties.FsConfig.FsBucketName} for bucket-relative snapshot location"
-            )
-            .failed
-            .foreach { e =>
-              logError(
-                s"Failed to drop client read snapshot ${snapshot.name} after missing bucket fallback",
-                e
-              )
-            }
+          MilvusScan.submitClientSnapshotCleanup(
+            options.asScala.toMap,
+            milvusOption.databaseName,
+            milvusOption.collectionName,
+            snapshot.name,
+            s"missing ${Properties.FsConfig.FsBucketName} for bucket-relative snapshot location"
+          )
           None
         } else if (
           MilvusScan.registerClientSnapshotCleanup(
@@ -1200,21 +1216,13 @@ class MilvusScan(
           )
           Some(planInputPartitionsFromClientSnapshotPath(snapshotPath))
         } else {
-          MilvusScan
-            .dropClientReadSnapshot(
-              client,
-              milvusOption.databaseName,
-              milvusOption.collectionName,
-              snapshot.name,
-              "cleanup registration failure"
-            )
-            .failed
-            .foreach { e =>
-              logError(
-                s"Failed to drop client read snapshot ${snapshot.name} after cleanup registration failure; falling back to legacy read path",
-                e
-              )
-            }
+          MilvusScan.submitClientSnapshotCleanup(
+            options.asScala.toMap,
+            milvusOption.databaseName,
+            milvusOption.collectionName,
+            snapshot.name,
+            "cleanup registration failure"
+          )
           None
         }
 
@@ -1281,7 +1289,8 @@ class MilvusScan(
       partitionIds = metadata.snapshotInfo.partitionIds,
       schemaBytesBase64 = Base64.getEncoder.encodeToString(schemaBytes),
       manifestList = metadata.storageV2ManifestList.getOrElse(Seq.empty),
-      v2Segments = v2Segments
+      v2Segments = v2Segments,
+      snapshotBucketForRelativePaths = snapshotBucket
     )
     require(
       MilvusOption.isSnapshotMode(snapshotOptions),
@@ -1483,8 +1492,10 @@ class MilvusScan(
       try MilvusSnapshotReader.readUtf8WithLimit(in, path, maxBytes)
       finally in.close()
     } finally {
-      if (conf.getBoolean(s"fs.${uri.getScheme}.impl.disable.cache", false)) {
-        fs.close()
+      Option(uri.getScheme).foreach { scheme =>
+        if (conf.getBoolean(s"fs.$scheme.impl.disable.cache", false)) {
+          fs.close()
+        }
       }
     }
   }

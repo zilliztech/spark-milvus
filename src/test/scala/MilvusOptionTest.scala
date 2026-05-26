@@ -222,6 +222,43 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     ) shouldBe true
   }
 
+  test(
+    "validateSnapshotModeOptions rejects explicit mode without segment hints"
+  ) {
+    Seq(
+      Map(MilvusOption.SnapshotMode -> "true"),
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotManifests -> " "
+      ),
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotV2Segments -> " "
+      )
+    ).foreach { options =>
+      val err = intercept[IllegalArgumentException] {
+        MilvusOption.validateSnapshotModeOptions(options)
+      }
+      err.getMessage should include(MilvusOption.SnapshotManifests)
+      err.getMessage should include(MilvusOption.SnapshotV2Segments)
+    }
+  }
+
+  test("validateSnapshotModeOptions accepts explicit mode with segment hints") {
+    MilvusOption.validateSnapshotModeOptions(
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotManifests -> "[]"
+      )
+    )
+    MilvusOption.validateSnapshotModeOptions(
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotV2Segments -> "[]"
+      )
+    )
+  }
+
   test("isSnapshotMode accepts snapshot metadata options") {
     MilvusOption.isSnapshotMode(
       Map(MilvusOption.SnapshotManifests -> "[]")

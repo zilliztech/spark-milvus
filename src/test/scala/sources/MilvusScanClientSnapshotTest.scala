@@ -96,6 +96,34 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  test("snapshotBucket returns None for bucket-relative snapshot locations") {
+    assert(
+      MilvusScan.snapshotBucket("files/snapshots/1/metadata/2.json") == None
+    )
+  }
+
+  test("snapshotBucket rejects unsupported schemes") {
+    val err = intercept[IllegalArgumentException] {
+      MilvusScan.snapshotBucket("gs://a-bucket/files/snapshot.json")
+    }
+    assert(err.getMessage.contains("Unsupported snapshot s3_location scheme"))
+  }
+
+  test("snapshotS3BucketForRelativePaths prefers snapshot bucket") {
+    assert(
+      MilvusScan.snapshotS3BucketForRelativePaths(
+        "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json",
+        Map(Properties.FsConfig.FsBucketName -> "connector-bucket")
+      ) == Some("snapshot-bucket")
+    )
+    assert(
+      MilvusScan.snapshotS3BucketForRelativePaths(
+        "files/snapshots/1/metadata/2.json",
+        Map(Properties.FsConfig.FsBucketName -> "connector-bucket")
+      ) == Some("connector-bucket")
+    )
+  }
+
   test("snapshotBucketsToConfigure includes cross-bucket snapshot locations") {
     assert(
       MilvusScan.snapshotBucketsToConfigure(
@@ -216,6 +244,24 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(CloseTrackingFileSystem.closeCount.get() == 1)
   }
 
+  test("readAllBytes ignores cache close config for scheme-less paths") {
+    val rawOptions = new ju.HashMap[String, String]()
+    val conf = new Configuration()
+    conf.set("fs.defaultFS", "close-tracking://bucket")
+    conf.set(
+      "fs.close-tracking.impl",
+      classOf[CloseTrackingFileSystem].getName
+    )
+    conf.set("fs.close-tracking.impl.disable.cache", "true")
+    val content = scanWithOptions(rawOptions).readAllBytes(
+      conf,
+      "/snapshot.json"
+    )
+    assert(content == "{}")
+    assert(CloseTrackingFileSystem.closeCount.get() == 0)
+    assert(conf.get("fs.null.impl.disable.cache") == null)
+  }
+
   test(
     "client snapshot fast path is disabled when partition or segment selectors are set"
   ) {
@@ -271,6 +317,22 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(out(MilvusOption.MilvusExtraColumns) == "partition")
   }
 
+  test("buildClientSnapshotOptions overrides relative-path bucket") {
+    val out = MilvusScan.buildClientSnapshotOptions(
+      baseOptions = Map(
+        Properties.FsConfig.FsBucketName.toUpperCase -> "connector-bucket"
+      ),
+      collectionName = "snapshot_collection",
+      collectionId = 10L,
+      partitionIds = Seq(20L),
+      schemaBytesBase64 = "abc",
+      manifestList = Seq.empty,
+      v2Segments = Seq.empty,
+      snapshotBucketForRelativePaths = Some("snapshot-bucket")
+    )
+    assert(out(Properties.FsConfig.FsBucketName) == "snapshot-bucket")
+  }
+
   test("snapshot option keys use dotted lowercase suffixes") {
     assert(
       MilvusOption.SnapshotMaxJsonBytes == "milvus.snapshot.max.json.bytes"
@@ -312,6 +374,15 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(name.length <= 255)
     assert(name.startsWith("spark_read_"))
     assert(name.endsWith("_1_" + "u" * 32))
+  }
+
+  test("generatedClientSnapshotName sanitizes collection names") {
+    val name = MilvusScan.generatedClientSnapshotName(
+      collectionName = "col-name.with unicode值",
+      currentTimeMillis = 1L,
+      uuid = "u" * 32
+    )
+    assert(name == s"spark_read_col_name_with_unicode__1_${"u" * 32}")
   }
 
   test("buildClientSnapshotOptions enables snapshot mode") {

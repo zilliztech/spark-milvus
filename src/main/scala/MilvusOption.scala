@@ -159,6 +159,12 @@ object MilvusOption {
   val ClientSnapshotCompactionProtectionSeconds =
     "milvus.client.snapshot.compaction.protection.seconds"
 
+  private def nonEmptyOption(
+      getOption: String => Option[String],
+      key: String
+  ): Boolean =
+    getOption(key).exists(_.trim.nonEmpty)
+
   private def isSnapshotModeFrom(
       getOption: String => Option[String]
   ): Boolean = {
@@ -172,6 +178,20 @@ object MilvusOption {
       }
   }
 
+  private def validateSnapshotModeOptionsFrom(
+      getOption: String => Option[String]
+  ): Unit = {
+    val explicitSnapshotMode = getOption(SnapshotMode)
+      .exists(_.trim.equalsIgnoreCase("true"))
+    val hasSnapshotData = nonEmptyOption(getOption, SnapshotManifests) ||
+      nonEmptyOption(getOption, SnapshotV2Segments)
+    if (explicitSnapshotMode && !hasSnapshotData) {
+      throw new IllegalArgumentException(
+        s"$SnapshotMode=true requires $SnapshotManifests or $SnapshotV2Segments"
+      )
+    }
+  }
+
   def isSnapshotMode(options: Map[String, String]): Boolean = {
     isSnapshotModeFrom { key =>
       options.collectFirst {
@@ -183,6 +203,19 @@ object MilvusOption {
 
   def isSnapshotMode(options: CaseInsensitiveStringMap): Boolean = {
     isSnapshotModeFrom(key => Option(options.get(key)))
+  }
+
+  def validateSnapshotModeOptions(options: Map[String, String]): Unit = {
+    validateSnapshotModeOptionsFrom { key =>
+      options.collectFirst {
+        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
+          value
+      }
+    }
+  }
+
+  def validateSnapshotModeOptions(options: CaseInsensitiveStringMap): Unit = {
+    validateSnapshotModeOptionsFrom(key => Option(options.get(key)))
   }
 
   // Create MilvusOption from a map
