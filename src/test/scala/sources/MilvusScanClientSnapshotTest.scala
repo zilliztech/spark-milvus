@@ -7,6 +7,7 @@ import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
   MilvusPackedV2InputPartition,
   MilvusSnapshotReader,
@@ -86,6 +87,24 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
+  test("resolveConnectorS3Bucket trims configured bucket") {
+    assert(
+      MilvusScan.resolveConnectorS3Bucket(
+        Map(Properties.FsConfig.FsBucketName -> " connector-bucket ")
+      ) == "connector-bucket"
+    )
+  }
+
+  test("resolveConnectorS3Bucket rejects missing or blank bucket") {
+    Seq(Map.empty[String, String], Map(Properties.FsConfig.FsBucketName -> " "))
+      .foreach { options =>
+        val err = intercept[IllegalArgumentException] {
+          MilvusScan.resolveConnectorS3Bucket(options)
+        }
+        assert(err.getMessage.contains(Properties.FsConfig.FsBucketName))
+      }
+  }
+
   test(
     "client snapshot fast path is disabled when partition or segment selectors are set"
   ) {
@@ -139,6 +158,16 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(out(MilvusOption.SnapshotSchemaBytes) == "abc")
     assert(out.contains(MilvusOption.SnapshotManifests))
     assert(out(MilvusOption.MilvusExtraColumns) == "partition")
+  }
+
+  test("snapshot option keys use dotted lowercase suffixes") {
+    assert(
+      MilvusOption.SnapshotMaxJsonBytes == "milvus.snapshot.max.json.bytes"
+    )
+    assert(
+      MilvusOption.ClientSnapshotCompactionProtectionSeconds ==
+        "milvus.client.snapshot.compaction.protection.seconds"
+    )
   }
 
   test("parsePositiveLongOption rejects non-numeric and non-positive values") {

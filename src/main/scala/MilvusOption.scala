@@ -153,11 +153,11 @@ object MilvusOption {
     "milvus.snapshot.schema.json" // Optional: raw schema JSON for building MilvusCollectionInfo
   val SnapshotSchemaBytes =
     "milvus.snapshot.schema.bytes" // Base64 encoded protobuf CollectionSchema bytes
-  val SnapshotMaxJsonBytes = "milvus.snapshot.maxJsonBytes"
+  val SnapshotMaxJsonBytes = "milvus.snapshot.max.json.bytes"
   val ClientSnapshotName = "milvus.client.snapshot.name"
   val ClientSnapshotDescription = "milvus.client.snapshot.description"
   val ClientSnapshotCompactionProtectionSeconds =
-    "milvus.client.snapshot.compactionProtectionSeconds"
+    "milvus.client.snapshot.compaction.protection.seconds"
 
   def isSnapshotMode(options: Map[String, String]): Boolean = {
     options.get(SnapshotMode).exists(_.equalsIgnoreCase("true")) ||

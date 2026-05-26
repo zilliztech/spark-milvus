@@ -743,6 +743,20 @@ object MilvusScan extends Logging {
     )).distinct
   }
 
+  private[sources] def resolveConnectorS3Bucket(
+      options: scala.collection.Map[String, String]
+  ): String = {
+    options
+      .get(Properties.FsConfig.FsBucketName)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .getOrElse {
+        throw new IllegalArgumentException(
+          s"${Properties.FsConfig.FsBucketName} is required for client snapshot reads"
+        )
+      }
+  }
+
   private[sources] def canUseClientSnapshotFastPath(
       milvusOption: MilvusOption
   ): Boolean = {
@@ -1031,10 +1045,7 @@ class MilvusScan(
   private def planInputPartitionsFromClientSnapshot(
       client: MilvusClient
   ): Option[Array[InputPartition]] = {
-    val s3Bucket = milvusOption.options.getOrElse(
-      Properties.FsConfig.FsBucketName,
-      "a-bucket"
-    )
+    val s3Bucket = MilvusScan.resolveConnectorS3Bucket(milvusOption.options)
     val snapshotName = Option(options.get(MilvusOption.ClientSnapshotName))
       .filter(_.trim.nonEmpty)
       .getOrElse(
@@ -1152,10 +1163,7 @@ class MilvusScan(
           )
       }
 
-    val s3Bucket = milvusOption.options.getOrElse(
-      Properties.FsConfig.FsBucketName,
-      "a-bucket"
-    )
+    val s3Bucket = MilvusScan.resolveConnectorS3Bucket(milvusOption.options)
     val v2Segments =
       if (metadata.manifestList.nonEmpty) {
         V2SegmentLoader.loadV2Segments(
@@ -1296,17 +1304,22 @@ class MilvusScan(
       value.filter(_.nonEmpty).foreach(conf.set(key, _))
     }
 
-    conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    if (conf.get("fs.s3a.impl") == null) {
+      conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    }
+    if (accessKey.forall(_.trim.isEmpty) || secretKey.forall(_.trim.isEmpty)) {
+      logWarning(
+        "Snapshot S3 credentials were not provided; Hadoop S3A will use the default AWS credential provider chain."
+      )
+    }
     setIfDefined("fs.s3a.endpoint", endpoint)
     setIfDefined("fs.s3a.connection.ssl.enabled", useSsl)
     setIfDefined("fs.s3a.path.style.access", pathStyle)
     setIfDefined("fs.s3a.access.key", accessKey)
     setIfDefined("fs.s3a.secret.key", secretKey)
 
-    val connectorBucket = milvusOption.options.getOrElse(
-      Properties.FsConfig.FsBucketName,
-      "a-bucket"
-    )
+    val connectorBucket =
+      MilvusScan.resolveConnectorS3Bucket(milvusOption.options)
     MilvusScan
       .snapshotBucketsToConfigure(snapshotPath, connectorBucket)
       .foreach { bucket =>
