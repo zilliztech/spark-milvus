@@ -994,6 +994,14 @@ object MilvusScan extends Logging {
         s"Client-created snapshot metadata at $snapshotPath is missing collection.schema"
       )
     }
+    if (
+      metadata.manifestList.isEmpty &&
+      metadata.storageV2ManifestList.forall(_.isEmpty)
+    ) {
+      throw new IllegalArgumentException(
+        s"Invalid client-created snapshot metadata at $snapshotPath: client snapshot is empty: no manifests and no V2 segments"
+      )
+    }
     metadata
   }
 }

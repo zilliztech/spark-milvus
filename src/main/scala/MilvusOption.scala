@@ -162,9 +162,14 @@ object MilvusOption {
   private def isSnapshotModeFrom(
       getOption: String => Option[String]
   ): Boolean = {
-    getOption(SnapshotMode).exists(_.equalsIgnoreCase("true")) ||
-    getOption(SnapshotManifests).isDefined ||
-    getOption(SnapshotV2Segments).isDefined
+    getOption(SnapshotMode)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(_.equalsIgnoreCase("true"))
+      .getOrElse {
+        getOption(SnapshotManifests).isDefined ||
+        getOption(SnapshotV2Segments).isDefined
+      }
   }
 
   def isSnapshotMode(options: Map[String, String]): Boolean = {

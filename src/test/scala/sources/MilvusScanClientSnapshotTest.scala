@@ -252,6 +252,18 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       MilvusScan.validateClientSnapshotMetadata(missingSchema, snapshotPath)
     }
     assert(schemaErr.getMessage.contains("collection.schema"))
+
+    val emptySnapshot = SnapshotMetadata(
+      snapshotInfo = SnapshotInfo("s"),
+      collection = Collection(CollectionSchema("c", fields = Seq.empty)),
+      manifestList = Seq.empty,
+      storageV2ManifestList = Some(Seq.empty)
+    )
+    val emptyErr = intercept[IllegalArgumentException] {
+      MilvusScan.validateClientSnapshotMetadata(emptySnapshot, snapshotPath)
+    }
+    assert(emptyErr.getMessage.contains("client snapshot is empty"))
+    assert(emptyErr.getMessage.contains("no manifests and no V2 segments"))
   }
 
   test(

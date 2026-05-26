@@ -231,6 +231,22 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     ) shouldBe true
   }
 
+  test(
+    "isSnapshotMode respects explicit false over snapshot metadata options"
+  ) {
+    val mapOptions = Map(
+      MilvusOption.SnapshotMode -> "false",
+      MilvusOption.SnapshotManifests -> "[]"
+    )
+    MilvusOption.isSnapshotMode(mapOptions) shouldBe false
+
+    val javaOptions = new java.util.HashMap[String, String]()
+    mapOptions.foreach { case (key, value) => javaOptions.put(key, value) }
+    MilvusOption.isSnapshotMode(
+      new CaseInsensitiveStringMap(javaOptions)
+    ) shouldBe false
+  }
+
   test("isSnapshotMode is consistent across option map types") {
     Seq(
       Map(MilvusOption.SnapshotMode.toUpperCase -> "true"),
