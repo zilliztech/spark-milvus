@@ -159,16 +159,25 @@ object MilvusOption {
   val ClientSnapshotCompactionProtectionSeconds =
     "milvus.client.snapshot.compaction.protection.seconds"
 
+  private def isSnapshotModeFrom(
+      getOption: String => Option[String]
+  ): Boolean = {
+    getOption(SnapshotMode).exists(_.equalsIgnoreCase("true")) ||
+    getOption(SnapshotManifests).isDefined ||
+    getOption(SnapshotV2Segments).isDefined
+  }
+
   def isSnapshotMode(options: Map[String, String]): Boolean = {
-    options.get(SnapshotMode).exists(_.equalsIgnoreCase("true")) ||
-    options.contains(SnapshotManifests) ||
-    options.contains(SnapshotV2Segments)
+    isSnapshotModeFrom { key =>
+      options.collectFirst {
+        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
+          value
+      }
+    }
   }
 
   def isSnapshotMode(options: CaseInsensitiveStringMap): Boolean = {
-    Option(options.get(SnapshotMode)).exists(_.equalsIgnoreCase("true")) ||
-    Option(options.get(SnapshotManifests)).isDefined ||
-    Option(options.get(SnapshotV2Segments)).isDefined
+    isSnapshotModeFrom(key => Option(options.get(key)))
   }
 
   // Create MilvusOption from a map

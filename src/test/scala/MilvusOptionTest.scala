@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector
 
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -228,6 +229,21 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     MilvusOption.isSnapshotMode(
       Map(MilvusOption.SnapshotV2Segments -> "[]")
     ) shouldBe true
+  }
+
+  test("isSnapshotMode is consistent across option map types") {
+    Seq(
+      Map(MilvusOption.SnapshotMode.toUpperCase -> "true"),
+      Map(MilvusOption.SnapshotManifests.toUpperCase -> "[]"),
+      Map(MilvusOption.SnapshotV2Segments.toUpperCase -> "[]"),
+      Map(MilvusOption.MilvusCollectionName -> "c")
+    ).foreach { options =>
+      val javaOptions = new java.util.HashMap[String, String]()
+      options.foreach { case (key, value) => javaOptions.put(key, value) }
+      MilvusOption.isSnapshotMode(options) shouldBe MilvusOption.isSnapshotMode(
+        new CaseInsensitiveStringMap(javaOptions)
+      )
+    }
   }
 
   test("isSnapshotMode is false for normal client options") {

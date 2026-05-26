@@ -9,9 +9,13 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
+  Collection,
+  CollectionSchema,
   MilvusPackedV2InputPartition,
   MilvusSnapshotReader,
   MilvusStorageV3InputPartition,
+  SnapshotInfo,
+  SnapshotMetadata,
   StorageV2ManifestItem,
   V2ColumnGroup,
   V2SegmentInfo
@@ -190,6 +194,77 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         )
       )
     }
+  }
+
+  test("generatedClientSnapshotName caps long collection names") {
+    val name = MilvusScan.generatedClientSnapshotName(
+      collectionName = "c" * 300,
+      currentTimeMillis = 1L,
+      uuid = "u" * 32
+    )
+    assert(name.length <= 255)
+    assert(name.startsWith("spark_read_"))
+    assert(name.endsWith("_1_" + "u" * 32))
+  }
+
+  test("buildClientSnapshotOptions enables snapshot mode") {
+    val out = MilvusScan.buildClientSnapshotOptions(
+      baseOptions = Map(MilvusOption.SnapshotMode.toUpperCase -> "false"),
+      collectionName = "snapshot_collection",
+      collectionId = 10L,
+      partitionIds = Seq(20L),
+      schemaBytesBase64 = "abc",
+      manifestList = Seq.empty,
+      v2Segments = Seq.empty
+    )
+    assert(MilvusOption.isSnapshotMode(out))
+    assert(!out.contains(MilvusOption.SnapshotMode.toUpperCase))
+  }
+
+  test("validateClientSnapshotMetadata rejects missing required fields") {
+    val snapshotPath = "s3a://bucket/snapshot.json"
+    val missingSnapshotInfo = SnapshotMetadata(
+      snapshotInfo = null,
+      collection = Collection(CollectionSchema("c", fields = Seq.empty))
+    )
+    val snapshotInfoErr = intercept[IllegalArgumentException] {
+      MilvusScan.validateClientSnapshotMetadata(
+        missingSnapshotInfo,
+        snapshotPath
+      )
+    }
+    assert(snapshotInfoErr.getMessage.contains("snapshot_info"))
+
+    val missingCollection = SnapshotMetadata(
+      snapshotInfo = SnapshotInfo("s"),
+      collection = null
+    )
+    val collectionErr = intercept[IllegalArgumentException] {
+      MilvusScan.validateClientSnapshotMetadata(missingCollection, snapshotPath)
+    }
+    assert(collectionErr.getMessage.contains("collection"))
+
+    val missingSchema = SnapshotMetadata(
+      snapshotInfo = SnapshotInfo("s"),
+      collection = Collection(null)
+    )
+    val schemaErr = intercept[IllegalArgumentException] {
+      MilvusScan.validateClientSnapshotMetadata(missingSchema, snapshotPath)
+    }
+    assert(schemaErr.getMessage.contains("collection.schema"))
+  }
+
+  test(
+    "snapshot planner rejects explicit snapshot mode without segment hints"
+  ) {
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(MilvusOption.SnapshotMode, "true")
+    rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
+    val err = intercept[IllegalArgumentException] {
+      scanWithOptions(rawOptions).planInputPartitions()
+    }
+    assert(err.getMessage.contains(MilvusOption.SnapshotManifests))
+    assert(err.getMessage.contains(MilvusOption.SnapshotV2Segments))
   }
 
   test("snapshot planner returns no partitions for empty snapshots") {
