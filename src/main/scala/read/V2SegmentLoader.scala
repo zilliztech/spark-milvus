@@ -184,24 +184,30 @@ object V2SegmentLoader extends Logging {
     else path
   }
 
-  private def readAllBytes(
+  private[read] def readAllBytes(
       conf: Configuration,
       fullyQualifiedPath: String
   ): Array[Byte] = {
     val uri = new URI(fullyQualifiedPath)
     val fs = FileSystem.get(uri, conf)
-    val in = fs.open(new Path(uri))
     try {
-      val out = new ByteArrayOutputStream()
-      val buf = new Array[Byte](8192)
-      var n = in.read(buf)
-      while (n >= 0) {
-        out.write(buf, 0, n)
-        n = in.read(buf)
+      val in = fs.open(new Path(uri))
+      try {
+        val out = new ByteArrayOutputStream()
+        val buf = new Array[Byte](8192)
+        var n = in.read(buf)
+        while (n >= 0) {
+          out.write(buf, 0, n)
+          n = in.read(buf)
+        }
+        out.toByteArray
+      } finally {
+        in.close()
       }
-      out.toByteArray
     } finally {
-      in.close()
+      if (conf.getBoolean(s"fs.${uri.getScheme}.impl.disable.cache", false)) {
+        fs.close()
+      }
     }
   }
 }

@@ -1,11 +1,26 @@
 package com.zilliz.spark.connector.sources
 
 import java.{util => ju}
+import java.net.URI
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicInteger
 
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{
+  FSDataInputStream,
+  FSDataOutputStream,
+  FSInputStream,
+  FileStatus,
+  FileSystem,
+  Path
+}
+import org.apache.hadoop.fs.permission.FsPermission
+import org.apache.hadoop.util.Progressable
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.BeforeAndAfterEach
 
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
@@ -22,10 +37,15 @@ import com.zilliz.spark.connector.read.{
 }
 import com.zilliz.spark.connector.MilvusOption
 
-class MilvusScanClientSnapshotTest extends AnyFunSuite {
+class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(
     io.milvus.grpc.schema.CollectionSchema(name = "c").toByteArray
   )
+
+  override def beforeEach(): Unit = {
+    super.beforeEach()
+    CloseTrackingFileSystem.reset()
+  }
 
   private def scanWithOptions(
       rawOptions: ju.HashMap[String, String]
@@ -107,6 +127,31 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         }
         assert(err.getMessage.contains(Properties.FsConfig.FsBucketName))
       }
+  }
+
+  test("buildSnapshotHadoopConf disables S3A FileSystem cache") {
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(Properties.FsConfig.FsBucketName, "connector-bucket")
+    val conf = scanWithOptions(rawOptions).buildSnapshotHadoopConf(
+      "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
+    )
+    assert(conf.get("fs.s3a.impl.disable.cache") == "true")
+  }
+
+  test("readAllBytes closes the FileSystem instance when cache is disabled") {
+    val rawOptions = new ju.HashMap[String, String]()
+    val conf = new Configuration()
+    conf.set(
+      "fs.close-tracking.impl",
+      classOf[CloseTrackingFileSystem].getName
+    )
+    conf.set("fs.close-tracking.impl.disable.cache", "true")
+    val content = scanWithOptions(rawOptions).readAllBytes(
+      conf,
+      "close-tracking://bucket/snapshot.json"
+    )
+    assert(content == "{}")
+    assert(CloseTrackingFileSystem.closeCount.get() == 1)
   }
 
   test(
@@ -352,4 +397,85 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(partition.segmentID == 30L)
     assert(partition.partitionID == 20L)
   }
+}
+
+class CloseTrackingFileSystem extends FileSystem {
+  private var uri: URI = _
+
+  override def initialize(name: URI, conf: Configuration): Unit = {
+    super.initialize(name, conf)
+    uri = name
+  }
+
+  override def getUri: URI = uri
+
+  override def open(path: Path, bufferSize: Int): FSDataInputStream = {
+    val bytes = "{}".getBytes(StandardCharsets.UTF_8)
+    val in = new FSInputStream {
+      private var pos = 0
+
+      override def read(): Int = {
+        if (pos >= bytes.length) -1
+        else {
+          val value = bytes(pos) & 0xff
+          pos += 1
+          value
+        }
+      }
+
+      override def seek(newPos: Long): Unit = {
+        pos = newPos.toInt
+      }
+
+      override def getPos: Long = pos
+
+      override def seekToNewSource(targetPos: Long): Boolean = false
+    }
+    new FSDataInputStream(in)
+  }
+
+  override def close(): Unit = {
+    CloseTrackingFileSystem.closeCount.incrementAndGet()
+    super.close()
+  }
+
+  override def create(
+      path: Path,
+      permission: FsPermission,
+      overwrite: Boolean,
+      bufferSize: Int,
+      replication: Short,
+      blockSize: Long,
+      progress: Progressable
+  ): FSDataOutputStream = throw new UnsupportedOperationException
+
+  override def append(
+      path: Path,
+      bufferSize: Int,
+      progress: Progressable
+  ): FSDataOutputStream = throw new UnsupportedOperationException
+
+  override def rename(src: Path, dst: Path): Boolean =
+    throw new UnsupportedOperationException
+
+  override def delete(path: Path, recursive: Boolean): Boolean =
+    throw new UnsupportedOperationException
+
+  override def listStatus(path: Path): Array[FileStatus] =
+    throw new UnsupportedOperationException
+
+  override def setWorkingDirectory(path: Path): Unit = ()
+
+  override def getWorkingDirectory: Path = new Path("/")
+
+  override def mkdirs(path: Path, permission: FsPermission): Boolean = true
+
+  override def getFileStatus(path: Path): FileStatus =
+    new FileStatus(2L, false, 1, 2L, 0L, path)
+}
+
+object CloseTrackingFileSystem {
+  val closeCount = new AtomicInteger(0)
+
+  def reset(): Unit = closeCount.set(0)
 }

@@ -1327,7 +1327,9 @@ class MilvusScan(
     partitions
   }
 
-  private def buildSnapshotHadoopConf(snapshotPath: String): Configuration = {
+  private[sources] def buildSnapshotHadoopConf(
+      snapshotPath: String
+  ): Configuration = {
     val conf = SparkSession.getActiveSession
       .orElse(SparkSession.getDefaultSession)
       .map(_.sessionState.newHadoopConf())
@@ -1346,6 +1348,7 @@ class MilvusScan(
     if (conf.get("fs.s3a.impl") == null) {
       conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     }
+    conf.set("fs.s3a.impl.disable.cache", "true")
     if (accessKey.forall(_.trim.isEmpty) || secretKey.forall(_.trim.isEmpty)) {
       logWarning(
         "Snapshot S3 credentials were not provided; Hadoop S3A will use the default AWS credential provider chain."
@@ -1371,7 +1374,10 @@ class MilvusScan(
     conf
   }
 
-  private def readAllBytes(conf: Configuration, path: String): String = {
+  private[sources] def readAllBytes(
+      conf: Configuration,
+      path: String
+  ): String = {
     val maxBytes = milvusOption.options
       .get(MilvusOption.SnapshotMaxJsonBytes)
       .filter(_.trim.nonEmpty)
@@ -1387,9 +1393,15 @@ class MilvusScan(
       .getOrElse(MilvusSnapshotReader.MaxSnapshotJsonBytes)
     val uri = new URI(path)
     val fs = FileSystem.get(uri, conf)
-    val in = fs.open(new Path(uri))
-    try MilvusSnapshotReader.readUtf8WithLimit(in, path, maxBytes)
-    finally in.close()
+    try {
+      val in = fs.open(new Path(uri))
+      try MilvusSnapshotReader.readUtf8WithLimit(in, path, maxBytes)
+      finally in.close()
+    } finally {
+      if (conf.getBoolean(s"fs.${uri.getScheme}.impl.disable.cache", false)) {
+        fs.close()
+      }
+    }
   }
 
   /** Plan input partitions from snapshot manifests (offline mode - no client

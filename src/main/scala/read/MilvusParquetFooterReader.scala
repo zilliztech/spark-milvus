@@ -1,11 +1,13 @@
 package com.zilliz.spark.connector.read
 
+import java.net.URI
 import scala.jdk.CollectionConverters._
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.Path
-import org.apache.parquet.hadoop.util.HadoopInputFile
+import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.parquet.hadoop.util.HadoopStreams
 import org.apache.parquet.hadoop.ParquetFileReader
+import org.apache.parquet.io.InputFile
 import org.apache.parquet.schema.Type
 import org.apache.spark.internal.Logging
 
@@ -70,24 +72,17 @@ object MilvusParquetFooterReader extends Logging {
       path: String,
       hadoopConf: Configuration
   ): Either[Throwable, ParquetFooterMetadata] = {
-    try {
-      val inputFile =
-        HadoopInputFile.fromPath(new Path(path), hadoopConf)
+    readWithFileSystem(path, hadoopConf) { inputFile =>
       val parquet = ParquetFileReader.open(inputFile)
       try {
         val kv = parquet.getFooter.getFileMetaData.getKeyValueMetaData
-        Right(
-          ParquetFooterMetadata(
-            storageVersion = Option(kv.get(StorageVersionKey)),
-            groupFieldIdList =
-              parseGroupFieldIdList(kv.get(GroupFieldIdListKey))
-          )
+        ParquetFooterMetadata(
+          storageVersion = Option(kv.get(StorageVersionKey)),
+          groupFieldIdList = parseGroupFieldIdList(kv.get(GroupFieldIdListKey))
         )
       } finally {
         parquet.close()
       }
-    } catch {
-      case e: Throwable => Left(e)
     }
   }
 
@@ -117,14 +112,12 @@ object MilvusParquetFooterReader extends Logging {
       path: String,
       hadoopConf: Configuration
   ): Either[Throwable, Seq[Long]] = {
-    try {
-      val inputFile =
-        HadoopInputFile.fromPath(new Path(path), hadoopConf)
+    readWithFileSystem(path, hadoopConf) { inputFile =>
       val parquet = ParquetFileReader.open(inputFile)
       try {
         val schema = parquet.getFooter.getFileMetaData.getSchema
         val fields = schema.getFields.asScala
-        val ids = fields.map { t: Type =>
+        fields.map { t: Type =>
           val id = t.getId
           if (id == null) {
             throw new IllegalStateException(
@@ -134,12 +127,38 @@ object MilvusParquetFooterReader extends Logging {
           }
           id.intValue().toLong
         }.toSeq
-        Right(ids)
       } finally {
         parquet.close()
       }
+    }
+  }
+
+  private def readWithFileSystem[T](
+      path: String,
+      hadoopConf: Configuration
+  )(read: InputFile => T): Either[Throwable, T] = {
+    val uri = new URI(path)
+    var fs: FileSystem = null
+    try {
+      val hadoopPath = new Path(uri)
+      fs = hadoopPath.getFileSystem(hadoopConf)
+      val fileStatus = fs.getFileStatus(hadoopPath)
+      val inputFile = new InputFile {
+        override def getLength: Long = fileStatus.getLen
+
+        override def newStream(): org.apache.parquet.io.SeekableInputStream =
+          HadoopStreams.wrap(fs.open(hadoopPath))
+      }
+      Right(read(inputFile))
     } catch {
       case e: Throwable => Left(e)
+    } finally {
+      if (
+        fs != null &&
+        hadoopConf.getBoolean(s"fs.${uri.getScheme}.impl.disable.cache", false)
+      ) {
+        fs.close()
+      }
     }
   }
 
