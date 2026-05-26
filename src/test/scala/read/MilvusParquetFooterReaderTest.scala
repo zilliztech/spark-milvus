@@ -142,6 +142,15 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("readFieldIdsFromSchema returns Left for malformed URI") {
+    val result = MilvusParquetFooterReader.readFieldIdsFromSchema(
+      "s3a://bucket/path with spaces/[bad].parquet",
+      new Configuration()
+    )
+
+    result shouldBe a[Left[_, _]]
+  }
+
   test("readFieldIdsFromSchema returns Left when a column has no field id") {
     val tmp = Files.createTempFile("milvus-fid-test-bad-", ".parquet")
     Files.delete(tmp)

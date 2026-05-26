@@ -281,6 +281,18 @@ class V2SegmentLoaderTest
     result shouldBe Right(None)
   }
 
+  test("readAllBytes wraps malformed URI with path context") {
+    val err = intercept[RuntimeException] {
+      V2SegmentLoader.readAllBytes(
+        new Configuration(),
+        "s3a://bucket/path with spaces/[bad].avro"
+      )
+    }
+
+    err.getMessage should include("failed to read bytes")
+    err.getMessage should include("s3a://bucket/path with spaces/[bad].avro")
+  }
+
   test("readAllBytes closes the FileSystem instance when cache is disabled") {
     val conf = new Configuration()
     conf.set(

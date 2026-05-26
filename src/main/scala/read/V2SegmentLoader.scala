@@ -188,9 +188,11 @@ object V2SegmentLoader extends Logging {
       conf: Configuration,
       fullyQualifiedPath: String
   ): Array[Byte] = {
-    val uri = new URI(fullyQualifiedPath)
-    val fs = FileSystem.get(uri, conf)
+    var uri: URI = null
+    var fs: FileSystem = null
     try {
+      uri = new URI(fullyQualifiedPath)
+      fs = FileSystem.get(uri, conf)
       val in = fs.open(new Path(uri))
       try {
         val out = new ByteArrayOutputStream()
@@ -204,9 +206,19 @@ object V2SegmentLoader extends Logging {
       } finally {
         in.close()
       }
+    } catch {
+      case e: Throwable =>
+        throw new RuntimeException(
+          s"failed to read bytes from $fullyQualifiedPath: ${e.getMessage}",
+          e
+        )
     } finally {
-      if (conf.getBoolean(s"fs.${uri.getScheme}.impl.disable.cache", false)) {
-        fs.close()
+      Option(uri).flatMap(uri => Option(uri.getScheme)).foreach { scheme =>
+        if (
+          fs != null && conf.getBoolean(s"fs.$scheme.impl.disable.cache", false)
+        ) {
+          fs.close()
+        }
       }
     }
   }

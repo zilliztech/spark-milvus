@@ -186,10 +186,22 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(conf.get("fs.s3a.endpoint.region") == "us-west-2")
     assert(conf.get("fs.s3a.access.key") == "ak")
     assert(conf.get("fs.s3a.secret.key") == "sk")
+    assert(
+      conf.get("fs.s3a.aws.credentials.provider") ==
+        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+    )
     assert(conf.get("fs.s3a.bucket.connector-bucket.endpoint") == "minio:9000")
     assert(conf.get("fs.s3a.bucket.snapshot-bucket.endpoint") == "minio:9000")
     assert(
       conf.get("fs.s3a.bucket.snapshot-bucket.path.style.access") == "true"
+    )
+    assert(
+      conf.get("fs.s3a.bucket.connector-bucket.aws.credentials.provider") ==
+        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+    )
+    assert(
+      conf.get("fs.s3a.bucket.snapshot-bucket.aws.credentials.provider") ==
+        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
     )
   }
 
@@ -467,6 +479,18 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     val secondPartitions = scan.planInputPartitions()
     assert(firstPartitions.isEmpty)
     assert(firstPartitions eq secondPartitions)
+  }
+
+  test("client mode does not cache planned input partitions") {
+    val clientOptions = new ju.HashMap[String, String]()
+    clientOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
+    clientOptions.put(MilvusOption.MilvusCollectionName, "c")
+    assert(!scanWithOptions(clientOptions).shouldCacheInputPartitions)
+
+    val snapshotOptions = new ju.HashMap[String, String]()
+    snapshotOptions.put(MilvusOption.SnapshotMode, "true")
+    snapshotOptions.put(MilvusOption.SnapshotManifests, "[]")
+    assert(scanWithOptions(snapshotOptions).shouldCacheInputPartitions)
   }
 
   test("snapshot planner fails loudly on malformed manifest JSON") {

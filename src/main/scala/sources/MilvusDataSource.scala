@@ -645,6 +645,10 @@ object MilvusScan extends Logging {
   private val InitialDropRetryDelayMillis = 200L
   private val DropRetryMaxAttempts = 7
   private val MaxGeneratedSnapshotNameLength = 255
+  private val DefaultAwsCredentialsProvider =
+    "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
+  private val SimpleAwsCredentialsProvider =
+    "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
 
   private def daemonThreadFactory(namePrefix: String): ThreadFactory =
     new ThreadFactory {
@@ -666,26 +670,33 @@ object MilvusScan extends Logging {
   private val PendingCleanupFutures =
     ConcurrentHashMap.newKeySet[Future[Unit]]()
 
-  Runtime.getRuntime.addShutdownHook(
-    new Thread(
-      new Runnable {
-        override def run(): Unit = {
-          val deadline = SnapshotCleanupDrainTimeout.fromNow
-          PendingCleanupFutures.asScala.foreach { future =>
-            val remaining = deadline.timeLeft
-            if (remaining.length > 0) {
-              try Await.ready(future, remaining)
-              catch {
-                case NonFatal(e) =>
-                  logWarning("Timed out waiting for client snapshot cleanup", e)
+  Try(
+    Runtime.getRuntime.addShutdownHook(
+      new Thread(
+        new Runnable {
+          override def run(): Unit = {
+            val deadline = SnapshotCleanupDrainTimeout.fromNow
+            PendingCleanupFutures.asScala.foreach { future =>
+              val remaining = deadline.timeLeft
+              if (remaining.length > 0) {
+                try Await.ready(future, remaining)
+                catch {
+                  case NonFatal(e) =>
+                    logWarning(
+                      "Timed out waiting for client snapshot cleanup",
+                      e
+                    )
+                }
               }
             }
           }
-        }
-      },
-      "milvus-snapshot-cleanup-shutdown-drain"
+        },
+        "milvus-snapshot-cleanup-shutdown-drain"
+      )
     )
-  )
+  ).failed.foreach { e =>
+    logWarning("Failed to register client snapshot cleanup shutdown hook", e)
+  }
 
   private val SnapshotOptionKeys = Seq(
     MilvusOption.SnapshotMode,
@@ -1096,10 +1107,16 @@ class MilvusScan(
 
   override def toBatch: Batch = this
 
-  private lazy val plannedPartitions: Array[InputPartition] =
+  private lazy val plannedSnapshotPartitions: Array[InputPartition] =
     computeInputPartitions()
 
-  override def planInputPartitions(): Array[InputPartition] = plannedPartitions
+  override def planInputPartitions(): Array[InputPartition] = {
+    if (shouldCacheInputPartitions) plannedSnapshotPartitions
+    else computeInputPartitions()
+  }
+
+  private[sources] def shouldCacheInputPartitions: Boolean =
+    MilvusOption.isSnapshotMode(options)
 
   private def computeInputPartitions(): Array[InputPartition] = {
     if (MilvusOption.isSnapshotMode(options)) {
@@ -1437,11 +1454,19 @@ class MilvusScan(
         conf.unset(s"$prefix.secret.key")
         conf.set(
           s"$prefix.aws.credentials.provider",
-          "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
+          MilvusScan.DefaultAwsCredentialsProvider
         )
       } else {
         setIfDefined(s"$prefix.access.key", accessKey)
         setIfDefined(s"$prefix.secret.key", secretKey)
+        if (
+          accessKey.exists(_.trim.nonEmpty) && secretKey.exists(_.trim.nonEmpty)
+        ) {
+          conf.set(
+            s"$prefix.aws.credentials.provider",
+            MilvusScan.SimpleAwsCredentialsProvider
+          )
+        }
       }
     }
 

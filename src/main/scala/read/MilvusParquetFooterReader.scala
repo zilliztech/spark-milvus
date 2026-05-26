@@ -137,9 +137,10 @@ object MilvusParquetFooterReader extends Logging {
       path: String,
       hadoopConf: Configuration
   )(read: InputFile => T): Either[Throwable, T] = {
-    val uri = new URI(path)
+    var uri: URI = null
     var fs: FileSystem = null
     try {
+      uri = new URI(path)
       val hadoopPath = new Path(uri)
       fs = hadoopPath.getFileSystem(hadoopConf)
       val fileStatus = fs.getFileStatus(hadoopPath)
@@ -153,11 +154,13 @@ object MilvusParquetFooterReader extends Logging {
     } catch {
       case e: Throwable => Left(e)
     } finally {
-      if (
-        fs != null &&
-        hadoopConf.getBoolean(s"fs.${uri.getScheme}.impl.disable.cache", false)
-      ) {
-        fs.close()
+      Option(uri).flatMap(uri => Option(uri.getScheme)).foreach { scheme =>
+        if (
+          fs != null && hadoopConf
+            .getBoolean(s"fs.$scheme.impl.disable.cache", false)
+        ) {
+          fs.close()
+        }
       }
     }
   }
