@@ -78,14 +78,21 @@ object ArrowConverter extends Logging {
       rowIndex: Int,
       sparkType: DataType
   ): Any = {
-    arrowValueToSparkValue(vector, rowIndex, sparkType, None)
+    arrowValueToSparkValue(
+      vector,
+      rowIndex,
+      sparkType,
+      None,
+      allowLegacyFloatVector = true
+    )
   }
 
   private def arrowValueToSparkValue(
       vector: FieldVector,
       rowIndex: Int,
       sparkType: DataType,
-      milvusType: Option[MilvusDataType]
+      milvusType: Option[MilvusDataType],
+      allowLegacyFloatVector: Boolean = false
   ): Any = {
     sparkType match {
       case LongType =>
@@ -123,7 +130,13 @@ object ArrowConverter extends Logging {
       case ArrayType(FloatType, _)
           if vector.isInstanceOf[FixedSizeBinaryVector] =>
         val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
-        ArrayData.toArrayData(decodeFixedSizeBinaryFloats(bytes, milvusType))
+        ArrayData.toArrayData(
+          decodeFixedSizeBinaryFloats(
+            bytes,
+            milvusType,
+            allowLegacyFloatVector
+          )
+        )
 
       case ArrayType(FloatType, _) =>
         val listVector = vector.asInstanceOf[ListVector]
@@ -204,7 +217,8 @@ object ArrowConverter extends Logging {
 
   private def decodeFixedSizeBinaryFloats(
       bytes: Array[Byte],
-      milvusType: Option[MilvusDataType]
+      milvusType: Option[MilvusDataType],
+      allowLegacyFloatVector: Boolean
   ): Array[Float] = {
     milvusType match {
       case Some(MilvusDataType.Float16Vector) =>
@@ -217,10 +231,24 @@ object ArrowConverter extends Logging {
           .grouped(2)
           .map(b => FloatConverter.fromBFloat16Bytes(b.toSeq))
           .toArray
-      case _ =>
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
+      case Some(MilvusDataType.FloatVector) =>
+        decodeFloatVectorBytes(bytes)
+      case None if allowLegacyFloatVector =>
+        decodeFloatVectorBytes(bytes)
+      case None =>
+        throw new IllegalArgumentException(
+          s"FixedSizeBinary float vectors require ${MilvusDataTypeMetadataKey} metadata"
+        )
+      case Some(other) =>
+        throw new IllegalArgumentException(
+          s"Cannot decode FixedSizeBinary as Array[Float] for Milvus type $other"
+        )
     }
+  }
+
+  private def decodeFloatVectorBytes(bytes: Array[Byte]): Array[Float] = {
+    val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
   }
 
   val MilvusDataTypeMetadataKey = "milvus.data_type"
