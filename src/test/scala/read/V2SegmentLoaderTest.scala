@@ -293,6 +293,15 @@ class V2SegmentLoaderTest
     err.getMessage should include("s3a://bucket/path with spaces/[bad].avro")
   }
 
+  test("readAllBytes does not swallow fatal errors") {
+    val conf = new Configuration()
+    conf.set("fs.fatal-v2.impl", classOf[FatalV2FileSystem].getName)
+
+    intercept[OutOfMemoryError] {
+      V2SegmentLoader.readAllBytes(conf, "fatal-v2://bucket/manifest.avro")
+    }
+  }
+
   test("readAllBytes closes the FileSystem instance when cache is disabled") {
     val conf = new Configuration()
     conf.set(
@@ -388,4 +397,9 @@ object CloseTrackingV2FileSystem {
   val closeCount = new AtomicInteger(0)
 
   def reset(): Unit = closeCount.set(0)
+}
+
+class FatalV2FileSystem extends CloseTrackingV2FileSystem {
+  override def open(path: HPath, bufferSize: Int): FSDataInputStream =
+    throw new OutOfMemoryError("fatal")
 }

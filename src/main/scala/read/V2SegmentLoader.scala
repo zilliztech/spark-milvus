@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import java.io.ByteArrayOutputStream
 import java.net.URI
+import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
@@ -72,7 +73,7 @@ object V2SegmentLoader extends Logging {
       }
       Right(out.toSeq)
     } catch {
-      case e: Throwable => Left(e)
+      case NonFatal(e) => Left(e)
     }
   }
 
@@ -169,7 +170,7 @@ object V2SegmentLoader extends Logging {
             )
         }
       } catch {
-        case e: Throwable => Left(e)
+        case NonFatal(e) => Left(e)
       }
     }
   }
@@ -207,7 +208,7 @@ object V2SegmentLoader extends Logging {
         in.close()
       }
     } catch {
-      case e: Throwable =>
+      case NonFatal(e) =>
         throw new RuntimeException(
           s"failed to read bytes from $fullyQualifiedPath: ${e.getMessage}",
           e

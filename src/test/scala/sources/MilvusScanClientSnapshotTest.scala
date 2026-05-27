@@ -4,6 +4,7 @@ import java.{util => ju}
 import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicInteger
+import scala.util.{Failure, Success}
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{
@@ -107,6 +108,59 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       MilvusScan.snapshotBucket("gs://a-bucket/files/snapshot.json")
     }
     assert(err.getMessage.contains("Unsupported snapshot s3_location scheme"))
+  }
+
+  test(
+    "validateSnapshotBucketForRelativeDataPaths rejects cross-bucket relative data paths"
+  ) {
+    val err = intercept[IllegalArgumentException] {
+      MilvusScan.validateSnapshotBucketForRelativeDataPaths(
+        "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
+        Some("connector-bucket"),
+        Seq(
+          StorageV2ManifestItem(
+            30L,
+            "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
+          )
+        ),
+        Seq.empty
+      )
+    }
+    assert(err.getMessage.contains("snapshot-bucket"))
+    assert(err.getMessage.contains("connector-bucket"))
+    assert(err.getMessage.contains("bucket-relative"))
+  }
+
+  test(
+    "validateSnapshotBucketForRelativeDataPaths accepts cross-bucket fully-qualified data paths"
+  ) {
+    MilvusScan.validateSnapshotBucketForRelativeDataPaths(
+      "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
+      Some("connector-bucket"),
+      Seq(
+        StorageV2ManifestItem(
+          30L,
+          "{\"ver\":7,\"base_path\":\"s3a://data-bucket/files/insert_log/10/20/30\"}"
+        )
+      ),
+      Seq(
+        V2SegmentInfo(
+          segmentId = 30L,
+          partitionId = 20L,
+          numOfRows = 1L,
+          storageVersion = 2L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              fieldIds = Seq(100L),
+              filePaths = Seq(
+                "s3a://data-bucket/files/insert_log/10/20/30/100/1.parquet"
+              ),
+              fileRowCounts = Seq(1L)
+            )
+          )
+        )
+      )
+    )
   }
 
   test("snapshotS3BucketForRelativePaths prefers snapshot bucket") {
@@ -375,6 +429,69 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
         )
       )
     }
+  }
+
+  test("readAllBytes reuses positive long parser for max json bytes") {
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(MilvusOption.SnapshotMaxJsonBytes, "not-a-number")
+    val err = intercept[IllegalArgumentException] {
+      scanWithOptions(rawOptions).readAllBytes(
+        new Configuration(),
+        "close-tracking://bucket/snapshot.json"
+      )
+    }
+    assert(err.getMessage.contains(MilvusOption.SnapshotMaxJsonBytes))
+  }
+
+  test(
+    "parseClientSnapshotCompactionProtectionSeconds rejects excessive values"
+  ) {
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(
+      MilvusOption.ClientSnapshotCompactionProtectionSeconds,
+      (8L * 24L * 60L * 60L).toString
+    )
+    val err = intercept[IllegalArgumentException] {
+      MilvusScan.parseClientSnapshotCompactionProtectionSeconds(
+        new CaseInsensitiveStringMap(rawOptions)
+      )
+    }
+    assert(
+      err.getMessage.contains(
+        MilvusOption.ClientSnapshotCompactionProtectionSeconds
+      )
+    )
+  }
+
+  test("preserveResultWhenCloseFails keeps the original cleanup result") {
+    val ok = MilvusScan.preserveResultWhenCloseFails(
+      Success(()),
+      throw new RuntimeException("close failed"),
+      "test client"
+    )
+    assert(ok == Success(()))
+
+    val original = new RuntimeException("drop failed")
+    val failed = MilvusScan.preserveResultWhenCloseFails(
+      Failure(original),
+      (),
+      "test client"
+    )
+    assert(failed == Failure(original))
+  }
+
+  test(
+    "ensureClientSnapshotHasPackedSegments rejects filtered-empty snapshots"
+  ) {
+    val err = intercept[IllegalArgumentException] {
+      MilvusScan.ensureClientSnapshotHasPackedSegments(
+        Seq.empty,
+        Seq.empty,
+        "c"
+      )
+    }
+    assert(err.getMessage.contains("No packed-parquet segments"))
+    assert(err.getMessage.contains("c"))
   }
 
   test("generatedClientSnapshotName caps long collection names") {

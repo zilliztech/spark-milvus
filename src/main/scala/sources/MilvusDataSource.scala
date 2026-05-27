@@ -35,6 +35,7 @@ import org.apache.spark.sql.connector.read.{
 }
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
+// Spark does not expose a public SQL-execution-end hook; validate when upgrading Spark.
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.sources.{DataSourceRegister, Filter}
 import org.apache.spark.sql.types.{
@@ -244,33 +245,12 @@ case class MilvusTable(
   private def createMinimalCollectionSchema(
       snapshotSchema: Option[com.zilliz.spark.connector.read.CollectionSchema]
   ): CollectionSchema = {
-    import io.milvus.grpc.schema.{
-      CollectionSchema => ProtoCollectionSchema,
-      FieldSchema
-    }
-    import io.milvus.grpc.common.KeyValuePair
+    import io.milvus.grpc.schema.{CollectionSchema => ProtoCollectionSchema}
 
     snapshotSchema match {
       case Some(schema) =>
-        // Convert snapshot schema fields to protobuf FieldSchema
-        val protoFields = schema.fields.map { field =>
-          FieldSchema(
-            fieldID = field.getFieldIDAsLong,
-            name = field.name,
-            description = field.description.getOrElse(""),
-            dataType = io.milvus.grpc.schema.DataType.fromValue(field.dataType),
-            isPrimaryKey = field.isPrimaryKey.getOrElse(false),
-            isClusteringKey = field.isClusteringKey.getOrElse(false),
-            typeParams = field.typeParams.getOrElse(Seq.empty).map { tp =>
-              KeyValuePair(key = tp.key, value = tp.value)
-            }
-          )
-        }
-
-        ProtoCollectionSchema(
-          name = schema.name,
-          description = schema.description.getOrElse(""),
-          fields = protoFields
+        ProtoCollectionSchema.parseFrom(
+          MilvusSnapshotReader.toProtobufSchemaBytes(schema)
         )
 
       case None =>
@@ -644,6 +624,9 @@ object MilvusScan extends Logging {
   private val SnapshotCleanupDrainTimeout = 2.seconds
   private val InitialDropRetryDelayMillis = 200L
   private val DropRetryMaxAttempts = 7
+  private val DefaultClientSnapshotCompactionProtectionSeconds = 86400L
+  private val MaxClientSnapshotCompactionProtectionSeconds =
+    7L * 24L * 60L * 60L
   private val MaxGeneratedSnapshotNameLength = 255
   private val DefaultAwsCredentialsProvider =
     "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
@@ -669,27 +652,44 @@ object MilvusScan extends Logging {
 
   private val PendingCleanupFutures =
     ConcurrentHashMap.newKeySet[Future[Unit]]()
+  private val CleanupDraining = new AtomicBoolean(false)
+  private val CleanupSubmissionLock = new Object
+
+  private[sources] def drainPendingCleanupFutures(
+      timeout: FiniteDuration = SnapshotCleanupDrainTimeout
+  ): Unit = {
+    CleanupSubmissionLock.synchronized {
+      CleanupDraining.set(true)
+    }
+    val deadline = timeout.fromNow
+    var keepDraining = true
+    while (keepDraining && deadline.timeLeft.length > 0) {
+      val snapshot = PendingCleanupFutures.asScala.toSeq
+      if (snapshot.isEmpty) {
+        keepDraining = false
+      } else {
+        snapshot.foreach { future =>
+          val remaining = deadline.timeLeft
+          if (remaining.length > 0) {
+            try Await.ready(future, remaining)
+            catch {
+              case NonFatal(e) =>
+                logWarning(
+                  "Timed out waiting for client snapshot cleanup",
+                  e
+                )
+            }
+          }
+        }
+      }
+    }
+  }
 
   Try(
     Runtime.getRuntime.addShutdownHook(
       new Thread(
         new Runnable {
-          override def run(): Unit = {
-            val deadline = SnapshotCleanupDrainTimeout.fromNow
-            PendingCleanupFutures.asScala.foreach { future =>
-              val remaining = deadline.timeLeft
-              if (remaining.length > 0) {
-                try Await.ready(future, remaining)
-                catch {
-                  case NonFatal(e) =>
-                    logWarning(
-                      "Timed out waiting for client snapshot cleanup",
-                      e
-                    )
-                }
-              }
-            }
-          }
+          override def run(): Unit = drainPendingCleanupFutures()
         },
         "milvus-snapshot-cleanup-shutdown-drain"
       )
@@ -801,6 +801,56 @@ object MilvusScan extends Logging {
     snapshotBucket(snapshotPath).orElse(connectorS3BucketOption(options))
   }
 
+  private[sources] def storageV2ManifestBasePath(
+      item: StorageV2ManifestItem
+  ): String = {
+    MilvusSnapshotReader.parseManifestContent(item.manifest) match {
+      case Right(content) => content.basePath
+      case Left(_)        => item.manifest
+    }
+  }
+
+  private[sources] def validateSnapshotBucketForRelativeDataPaths(
+      snapshotPath: String,
+      connectorBucket: Option[String],
+      storageV2ManifestList: Seq[StorageV2ManifestItem],
+      v2Segments: Seq[V2SegmentInfo]
+  ): Unit = {
+    (snapshotBucket(snapshotPath), connectorBucket) match {
+      case (Some(snapshot), Some(connector)) if snapshot != connector =>
+        val relativeStorageV3Paths = storageV2ManifestList
+          .map(storageV2ManifestBasePath)
+          .filter(isBucketRelativeSnapshotLocation)
+        val relativeStorageV2Paths = v2Segments
+          .flatMap(_.columnGroups.flatMap(_.filePaths))
+          .filter(isBucketRelativeSnapshotLocation)
+        val relativePaths = relativeStorageV3Paths ++ relativeStorageV2Paths
+        if (relativePaths.nonEmpty) {
+          throw new IllegalArgumentException(
+            s"Client-created snapshot metadata is in bucket '$snapshot' but " +
+              s"${Properties.FsConfig.FsBucketName} is '$connector' and snapshot data paths are bucket-relative. " +
+              "Refusing to guess which bucket native executors should use; set the connector bucket to the data bucket or use fully-qualified data paths. " +
+              s"Example relative path: ${relativePaths.head}"
+          )
+        }
+      case _ =>
+    }
+  }
+
+  private[sources] def ensureClientSnapshotHasPackedSegments(
+      storageV2ManifestList: Seq[StorageV2ManifestItem],
+      v2Segments: Seq[V2SegmentInfo],
+      collectionName: String
+  ): Unit = {
+    if (storageV2ManifestList.isEmpty && v2Segments.isEmpty) {
+      throw new IllegalArgumentException(
+        s"No packed-parquet segments (StorageV2/V3) found in client-created snapshot for collection " +
+          s"$collectionName. This connector requires Milvus 2.6+ with Storage V2 or V3. " +
+          "Please ensure the collection has been flushed and contains data."
+      )
+    }
+  }
+
   private[sources] def isBucketRelativeSnapshotLocation(
       location: String
   ): Boolean = {
@@ -854,6 +904,29 @@ object MilvusScan extends Logging {
     if (value <= 0) {
       throw new IllegalArgumentException(
         s"Option '$key' must be positive, got $value"
+      )
+    }
+    value
+  }
+
+  private[sources] def parseClientSnapshotCompactionProtectionSeconds(
+      options: CaseInsensitiveStringMap
+  ): Long = {
+    val value = parsePositiveLongOption(
+      options,
+      MilvusOption.ClientSnapshotCompactionProtectionSeconds,
+      DefaultClientSnapshotCompactionProtectionSeconds
+    )
+    if (value > MaxClientSnapshotCompactionProtectionSeconds) {
+      throw new IllegalArgumentException(
+        s"Option '${MilvusOption.ClientSnapshotCompactionProtectionSeconds}' must be <= " +
+          s"$MaxClientSnapshotCompactionProtectionSeconds seconds, got $value"
+      )
+    }
+    if (value > DefaultClientSnapshotCompactionProtectionSeconds) {
+      logWarning(
+        s"Client snapshot compaction protection is set to $value seconds; " +
+          "long protection windows can delay Milvus compaction."
       )
     }
     value
@@ -917,6 +990,17 @@ object MilvusScan extends Logging {
     )
   }
 
+  private[sources] def preserveResultWhenCloseFails(
+      result: Try[Unit],
+      close: => Unit,
+      closeDescription: String
+  ): Try[Unit] = {
+    Try(close).failed.foreach { e =>
+      logWarning(s"Failed to close $closeDescription", e)
+    }
+    result
+  }
+
   private def dropClientReadSnapshotWithNewClient(
       baseOptions: Map[String, String],
       databaseName: String,
@@ -925,17 +1009,18 @@ object MilvusScan extends Logging {
       reason: String
   ): Try[Unit] = {
     Try(MilvusClient(MilvusOption(baseOptions))).flatMap { client =>
-      try {
-        dropClientReadSnapshot(
-          client,
-          databaseName,
-          collectionName,
-          snapshotName,
-          reason
-        )
-      } finally {
-        client.close()
-      }
+      val dropResult = dropClientReadSnapshot(
+        client,
+        databaseName,
+        collectionName,
+        snapshotName,
+        reason
+      )
+      preserveResultWhenCloseFails(
+        dropResult,
+        client.close(),
+        s"Milvus client after dropping client read snapshot $snapshotName"
+      )
     }
   }
 
@@ -946,24 +1031,32 @@ object MilvusScan extends Logging {
       snapshotName: String,
       reason: String
   ): Unit = {
-    val cleanupFuture = Future {
-      dropClientReadSnapshotWithNewClient(
-        baseOptions,
-        databaseName,
-        collectionName,
-        snapshotName,
-        reason
-      ) match {
-        case Success(_) =>
-        case Failure(e) =>
-          logError(
-            s"Failed to drop client read snapshot $snapshotName after $reason",
-            e
-          )
+    CleanupSubmissionLock.synchronized {
+      if (CleanupDraining.get()) {
+        logWarning(
+          s"Skipping client read snapshot cleanup submission for $snapshotName after $reason because shutdown drain has started"
+        )
+        return
       }
+      val cleanupFuture = Future {
+        dropClientReadSnapshotWithNewClient(
+          baseOptions,
+          databaseName,
+          collectionName,
+          snapshotName,
+          reason
+        ) match {
+          case Success(_) =>
+          case Failure(e) =>
+            logError(
+              s"Failed to drop client read snapshot $snapshotName after $reason",
+              e
+            )
+        }
+      }
+      PendingCleanupFutures.add(cleanupFuture)
+      cleanupFuture.onComplete(_ => PendingCleanupFutures.remove(cleanupFuture))
     }
-    PendingCleanupFutures.add(cleanupFuture)
-    cleanupFuture.onComplete(_ => PendingCleanupFutures.remove(cleanupFuture))
   }
 
   private[sources] def registerClientSnapshotCleanup(
@@ -1172,11 +1265,8 @@ class MilvusScan(
     val description = Option(
       options.get(MilvusOption.ClientSnapshotDescription)
     ).filter(_.trim.nonEmpty).getOrElse("spark connector client read snapshot")
-    val protectionSeconds = MilvusScan.parsePositiveLongOption(
-      options,
-      MilvusOption.ClientSnapshotCompactionProtectionSeconds,
-      86400L
-    )
+    val protectionSeconds =
+      MilvusScan.parseClientSnapshotCompactionProtectionSeconds(options)
 
     val cleanupRegistration = MilvusScan.activeCleanupRegistration()
     if (cleanupRegistration.isEmpty) {
@@ -1295,6 +1385,19 @@ class MilvusScan(
             )
         }
       } else Seq.empty
+    val storageV2ManifestList =
+      metadata.storageV2ManifestList.getOrElse(Seq.empty)
+    MilvusScan.ensureClientSnapshotHasPackedSegments(
+      storageV2ManifestList,
+      v2Segments,
+      metadata.collection.schema.name
+    )
+    MilvusScan.validateSnapshotBucketForRelativeDataPaths(
+      snapshotPath,
+      MilvusScan.connectorS3BucketOption(milvusOption.options),
+      storageV2ManifestList,
+      v2Segments
+    )
 
     val schemaBytes = MilvusSnapshotReader.toProtobufSchemaBytes(
       metadata.collection.schema
@@ -1305,7 +1408,7 @@ class MilvusScan(
       collectionId = metadata.snapshotInfo.collectionId,
       partitionIds = metadata.snapshotInfo.partitionIds,
       schemaBytesBase64 = Base64.getEncoder.encodeToString(schemaBytes),
-      manifestList = metadata.storageV2ManifestList.getOrElse(Seq.empty),
+      manifestList = storageV2ManifestList,
       v2Segments = v2Segments,
       snapshotBucketForRelativePaths = snapshotBucket
     )
@@ -1497,19 +1600,11 @@ class MilvusScan(
       conf: Configuration,
       path: String
   ): String = {
-    val maxBytes = milvusOption.options
-      .get(MilvusOption.SnapshotMaxJsonBytes)
-      .filter(_.trim.nonEmpty)
-      .map { raw =>
-        val parsed = raw.toLong
-        if (parsed <= 0) {
-          throw new IllegalArgumentException(
-            s"${MilvusOption.SnapshotMaxJsonBytes} must be positive, got $raw"
-          )
-        }
-        parsed
-      }
-      .getOrElse(MilvusSnapshotReader.MaxSnapshotJsonBytes)
+    val maxBytes = MilvusScan.parsePositiveLongOption(
+      options,
+      MilvusOption.SnapshotMaxJsonBytes,
+      MilvusSnapshotReader.MaxSnapshotJsonBytes
+    )
     val uri = new URI(path)
     val fs = FileSystem.get(uri, conf)
     try {

@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import java.net.URI
 import scala.jdk.CollectionConverters._
+import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
@@ -152,7 +153,7 @@ object MilvusParquetFooterReader extends Logging {
       }
       Right(read(inputFile))
     } catch {
-      case e: Throwable => Left(e)
+      case NonFatal(e) => Left(e)
     } finally {
       Option(uri).flatMap(uri => Option(uri.getScheme)).foreach { scheme =>
         if (
