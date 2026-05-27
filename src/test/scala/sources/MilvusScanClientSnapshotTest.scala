@@ -132,6 +132,57 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test(
+    "validateSnapshotBucketForRelativeDataPaths rejects unset connector bucket with relative V3 paths"
+  ) {
+    val err = intercept[IllegalArgumentException] {
+      MilvusScan.validateSnapshotBucketForRelativeDataPaths(
+        "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
+        None,
+        Seq(
+          StorageV2ManifestItem(
+            30L,
+            "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
+          )
+        ),
+        Seq.empty
+      )
+    }
+    assert(err.getMessage.contains("snapshot-bucket"))
+    assert(err.getMessage.contains("<unset>"))
+    assert(err.getMessage.contains("files/insert_log/10/20/30"))
+  }
+
+  test(
+    "validateSnapshotBucketForRelativeDataPaths rejects unset connector bucket with relative V2 paths"
+  ) {
+    val err = intercept[IllegalArgumentException] {
+      MilvusScan.validateSnapshotBucketForRelativeDataPaths(
+        "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
+        None,
+        Seq.empty,
+        Seq(
+          V2SegmentInfo(
+            segmentId = 30L,
+            partitionId = 20L,
+            numOfRows = 1L,
+            storageVersion = 2L,
+            columnGroups = Seq(
+              V2ColumnGroup(
+                fieldIds = Seq(100L),
+                filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+                fileRowCounts = Seq(1L)
+              )
+            )
+          )
+        )
+      )
+    }
+    assert(err.getMessage.contains("snapshot-bucket"))
+    assert(err.getMessage.contains("<unset>"))
+    assert(err.getMessage.contains("files/insert_log/10/20/30/100/1.parquet"))
+  }
+
+  test(
     "validateSnapshotBucketForRelativeDataPaths accepts cross-bucket fully-qualified data paths"
   ) {
     MilvusScan.validateSnapshotBucketForRelativeDataPaths(

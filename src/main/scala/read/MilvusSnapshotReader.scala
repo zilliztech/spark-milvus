@@ -14,6 +14,8 @@ import com.fasterxml.jackson.module.scala.{
 }
 import org.apache.spark.sql.types._
 
+import com.zilliz.spark.connector.serde.ArrowConverter
+
 /** Helper object for converting JSON values that may be either numeric or
   * string to Long/Int Milvus snapshot JSON format may serialize numbers as
   * strings in some versions
@@ -687,7 +689,10 @@ object MilvusSnapshotReader {
         StructField(
           field.name,
           dataTypeToSparkType(field.dataType, field.elementType),
-          nullable = field.nullable.getOrElse(true)
+          nullable = field.nullable.getOrElse(true),
+          metadata = new MetadataBuilder()
+            .putLong(ArrowConverter.MilvusDataTypeMetadataKey, field.dataType)
+            .build()
         )
       }
     StructType(userFields)

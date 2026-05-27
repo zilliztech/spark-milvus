@@ -311,6 +311,9 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     sparkSchema("float").dataType shouldBe FloatType
     sparkSchema("varchar").dataType shouldBe StringType
     sparkSchema("vector").dataType shouldBe ArrayType(FloatType)
+    sparkSchema("vector").metadata.getLong(
+      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+    ) shouldBe 101L
   }
 
   test(

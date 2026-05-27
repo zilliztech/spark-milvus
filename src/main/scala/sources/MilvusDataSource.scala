@@ -140,7 +140,8 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
             StructField(
               field.name,
               DataTypeUtil.toDataType(field),
-              field.nullable
+              field.nullable,
+              DataTypeUtil.metadata(field)
             )
           )
         )
@@ -361,7 +362,8 @@ case class MilvusTable(
       StructField(
         field.name,
         DataTypeUtil.toDataType(field),
-        field.nullable
+        field.nullable,
+        DataTypeUtil.metadata(field)
       )
     )
     // Safely get maxFieldID, default to 100 if empty
@@ -816,24 +818,23 @@ object MilvusScan extends Logging {
       storageV2ManifestList: Seq[StorageV2ManifestItem],
       v2Segments: Seq[V2SegmentInfo]
   ): Unit = {
-    (snapshotBucket(snapshotPath), connectorBucket) match {
-      case (Some(snapshot), Some(connector)) if snapshot != connector =>
-        val relativeStorageV3Paths = storageV2ManifestList
-          .map(storageV2ManifestBasePath)
-          .filter(isBucketRelativeSnapshotLocation)
-        val relativeStorageV2Paths = v2Segments
-          .flatMap(_.columnGroups.flatMap(_.filePaths))
-          .filter(isBucketRelativeSnapshotLocation)
-        val relativePaths = relativeStorageV3Paths ++ relativeStorageV2Paths
-        if (relativePaths.nonEmpty) {
-          throw new IllegalArgumentException(
-            s"Client-created snapshot metadata is in bucket '$snapshot' but " +
-              s"${Properties.FsConfig.FsBucketName} is '$connector' and snapshot data paths are bucket-relative. " +
-              "Refusing to guess which bucket native executors should use; set the connector bucket to the data bucket or use fully-qualified data paths. " +
-              s"Example relative path: ${relativePaths.head}"
-          )
-        }
-      case _ =>
+    snapshotBucket(snapshotPath).foreach { snapshot =>
+      val relativeStorageV3Paths = storageV2ManifestList
+        .map(storageV2ManifestBasePath)
+        .filter(isBucketRelativeSnapshotLocation)
+      val relativeStorageV2Paths = v2Segments
+        .flatMap(_.columnGroups.flatMap(_.filePaths))
+        .filter(isBucketRelativeSnapshotLocation)
+      val relativePaths = relativeStorageV3Paths ++ relativeStorageV2Paths
+      if (relativePaths.nonEmpty && !connectorBucket.contains(snapshot)) {
+        val connectorDescription = connectorBucket.getOrElse("<unset>")
+        throw new IllegalArgumentException(
+          s"Client-created snapshot metadata is in bucket '$snapshot' but " +
+            s"${Properties.FsConfig.FsBucketName} is '$connectorDescription' and snapshot data paths are bucket-relative. " +
+            "Refusing to guess which bucket native executors should use; set the connector bucket to the data bucket or use fully-qualified data paths. " +
+            s"Example relative path: ${relativePaths.head}"
+        )
+      }
     }
   }
 
@@ -968,6 +969,17 @@ object MilvusScan extends Logging {
         case Success(_) =>
           logInfo(s"Dropped client read snapshot $snapshotName after $reason")
           return Success(())
+        case Failure(e) if MilvusClient.isSnapshotAlreadyDropped(e) =>
+          logInfo(
+            s"Client read snapshot $snapshotName was already dropped after $reason"
+          )
+          return Success(())
+        case Failure(e) if MilvusClient.isTerminalSnapshotDropError(e) =>
+          logWarning(
+            s"Not retrying terminal failure while dropping client read snapshot $snapshotName after $reason",
+            e
+          )
+          return Failure(e)
         case Failure(e) =>
           lastFailure = Some(e)
           logWarning(
