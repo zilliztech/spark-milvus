@@ -159,6 +159,42 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
     assert(!MilvusClient.isServiceNotImplemented(err))
   }
 
+  test("classifies grpc NOT_FOUND as snapshot already dropped") {
+    val err = new StatusRuntimeException(
+      GrpcStatus.NOT_FOUND.withDescription("snapshot not found")
+    )
+    assert(MilvusClient.isSnapshotAlreadyDropped(err))
+    assert(MilvusClient.isTerminalSnapshotDropError(err))
+  }
+
+  test("classifies wrapped grpc terminal snapshot drop errors") {
+    Seq(GrpcStatus.PERMISSION_DENIED, GrpcStatus.INVALID_ARGUMENT).foreach {
+      status =>
+        val err = new RuntimeException(
+          "wrapped",
+          new StatusRuntimeException(status.withDescription("terminal"))
+        )
+        assert(!MilvusClient.isSnapshotAlreadyDropped(err))
+        assert(MilvusClient.isTerminalSnapshotDropError(err))
+    }
+  }
+
+  test("does not classify grpc UNAVAILABLE as terminal snapshot drop error") {
+    val err = new StatusRuntimeException(
+      GrpcStatus.UNAVAILABLE.withDescription("transient")
+    )
+    assert(!MilvusClient.isSnapshotAlreadyDropped(err))
+    assert(!MilvusClient.isTerminalSnapshotDropError(err))
+  }
+
+  test("snapshot drop terminal detection stops on cyclic causes") {
+    val err = new RuntimeException("ordinary error") {
+      override def getCause: Throwable = this
+    }
+    assert(!MilvusClient.isSnapshotAlreadyDropped(err))
+    assert(!MilvusClient.isTerminalSnapshotDropError(err))
+  }
+
   test("service-not-implemented detection stops on cyclic causes") {
     val err = new RuntimeException("ordinary error") {
       override def getCause: Throwable = this

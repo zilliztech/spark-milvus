@@ -1,9 +1,21 @@
 package com.zilliz.spark.connector.read
 
+import java.net.URI
+import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path => NPath}
+import java.util.concurrent.atomic.AtomicInteger
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{Path => HPath}
+import org.apache.hadoop.fs.{
+  FSDataInputStream,
+  FSDataOutputStream,
+  FSInputStream,
+  FileStatus,
+  FileSystem,
+  Path => HPath
+}
+import org.apache.hadoop.fs.permission.FsPermission
+import org.apache.hadoop.util.Progressable
 import org.apache.parquet.example.data.simple.SimpleGroupFactory
 import org.apache.parquet.hadoop.example.{
   ExampleParquetWriter,
@@ -14,6 +26,7 @@ import org.apache.parquet.schema.{MessageType, Types}
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import org.scalatest.BeforeAndAfterEach
 
 /** Unit tests for [[V2SegmentLoader.buildV2SegmentInfoFromEntry]].
   *
@@ -24,7 +37,15 @@ import org.scalatest.matchers.should.Matchers
   * settings and stamps them into Parquet's native `SchemaElement.field_id` —
   * the same place milvus-storage's arrow-cpp writer puts them.
   */
-class V2SegmentLoaderTest extends AnyFunSuite with Matchers {
+class V2SegmentLoaderTest
+    extends AnyFunSuite
+    with Matchers
+    with BeforeAndAfterEach {
+
+  override def beforeEach(): Unit = {
+    super.beforeEach()
+    CloseTrackingV2FileSystem.reset()
+  }
 
   /** Write a single-column parquet at `path` carrying the given field id, so
     * `readFieldIdsFromSchema` will return `Seq(fieldId)`.
@@ -259,4 +280,126 @@ class V2SegmentLoaderTest extends AnyFunSuite with Matchers {
 
     result shouldBe Right(None)
   }
+
+  test("readAllBytes wraps malformed URI with path context") {
+    val err = intercept[RuntimeException] {
+      V2SegmentLoader.readAllBytes(
+        new Configuration(),
+        "s3a://bucket/path with spaces/[bad].avro"
+      )
+    }
+
+    err.getMessage should include("failed to read bytes")
+    err.getMessage should include("s3a://bucket/path with spaces/[bad].avro")
+  }
+
+  test("readAllBytes does not swallow fatal errors") {
+    val conf = new Configuration()
+    conf.set("fs.fatal-v2.impl", classOf[FatalV2FileSystem].getName)
+
+    intercept[OutOfMemoryError] {
+      V2SegmentLoader.readAllBytes(conf, "fatal-v2://bucket/manifest.avro")
+    }
+  }
+
+  test("readAllBytes closes the FileSystem instance when cache is disabled") {
+    val conf = new Configuration()
+    conf.set(
+      "fs.close-tracking-v2.impl",
+      classOf[CloseTrackingV2FileSystem].getName
+    )
+    conf.set("fs.close-tracking-v2.impl.disable.cache", "true")
+
+    V2SegmentLoader.readAllBytes(
+      conf,
+      "close-tracking-v2://bucket/manifest.avro"
+    ) shouldBe "avro".getBytes(StandardCharsets.UTF_8)
+    CloseTrackingV2FileSystem.closeCount.get() shouldBe 1
+  }
+}
+
+class CloseTrackingV2FileSystem extends FileSystem {
+  private var uri: URI = _
+
+  override def initialize(name: URI, conf: Configuration): Unit = {
+    super.initialize(name, conf)
+    uri = name
+  }
+
+  override def getUri: URI = uri
+
+  override def open(path: HPath, bufferSize: Int): FSDataInputStream = {
+    val bytes = "avro".getBytes(StandardCharsets.UTF_8)
+    val in = new FSInputStream {
+      private var pos = 0
+
+      override def read(): Int = {
+        if (pos >= bytes.length) -1
+        else {
+          val value = bytes(pos) & 0xff
+          pos += 1
+          value
+        }
+      }
+
+      override def seek(newPos: Long): Unit = {
+        pos = newPos.toInt
+      }
+
+      override def getPos: Long = pos
+
+      override def seekToNewSource(targetPos: Long): Boolean = false
+    }
+    new FSDataInputStream(in)
+  }
+
+  override def close(): Unit = {
+    CloseTrackingV2FileSystem.closeCount.incrementAndGet()
+    super.close()
+  }
+
+  override def create(
+      path: HPath,
+      permission: FsPermission,
+      overwrite: Boolean,
+      bufferSize: Int,
+      replication: Short,
+      blockSize: Long,
+      progress: Progressable
+  ): FSDataOutputStream = throw new UnsupportedOperationException
+
+  override def append(
+      path: HPath,
+      bufferSize: Int,
+      progress: Progressable
+  ): FSDataOutputStream = throw new UnsupportedOperationException
+
+  override def rename(src: HPath, dst: HPath): Boolean =
+    throw new UnsupportedOperationException
+
+  override def delete(path: HPath, recursive: Boolean): Boolean =
+    throw new UnsupportedOperationException
+
+  override def listStatus(path: HPath): Array[FileStatus] =
+    throw new UnsupportedOperationException
+
+  override def setWorkingDirectory(path: HPath): Unit = ()
+
+  override def getWorkingDirectory: HPath = new HPath("/")
+
+  override def mkdirs(path: HPath, permission: FsPermission): Boolean = true
+
+  override def getFileStatus(path: HPath): FileStatus =
+    new FileStatus(4L, false, 1, 4L, 0L, path)
+}
+
+object CloseTrackingV2FileSystem {
+  val closeCount = new AtomicInteger(0)
+
+  def reset(): Unit = closeCount.set(0)
+}
+
+class FatalV2FileSystem extends CloseTrackingV2FileSystem {
+  override def open(path: HPath, bufferSize: Int): FSDataInputStream =
+    throw new OutOfMemoryError("fatal")
 }
