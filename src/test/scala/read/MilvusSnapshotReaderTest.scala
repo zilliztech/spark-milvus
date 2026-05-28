@@ -3,11 +3,40 @@ package com.zilliz.spark.connector.read
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import io.milvus.grpc.schema.{
+  CollectionSchema => ProtoCollectionSchema,
+  DataType
+}
+
 /** Test suite for MilvusSnapshotReader
   */
 class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
   private val snapshotFilePath = "src/test/data/sample_snapshot.json"
+
+  test("readUtf8WithLimit reads utf8 content within limit") {
+    val bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    val in = new java.io.ByteArrayInputStream(bytes)
+    MilvusSnapshotReader.readUtf8WithLimit(in, "memory", 10) shouldBe "hello"
+  }
+
+  test("readUtf8WithLimit rejects content beyond limit") {
+    val bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    val in = new java.io.ByteArrayInputStream(bytes)
+    val err = intercept[IllegalArgumentException] {
+      MilvusSnapshotReader.readUtf8WithLimit(in, "memory", 4)
+    }
+    err.getMessage should include("exceeds")
+  }
+
+  test("readUtf8WithLimit rejects non-positive limit clearly") {
+    val bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    val in = new java.io.ByteArrayInputStream(bytes)
+    val err = intercept[IllegalArgumentException] {
+      MilvusSnapshotReader.readUtf8WithLimit(in, "memory", -1)
+    }
+    err.getMessage should include("must be positive")
+  }
 
   test("Parse complete snapshot metadata successfully") {
     val result =
@@ -282,6 +311,9 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     sparkSchema("float").dataType shouldBe FloatType
     sparkSchema("varchar").dataType shouldBe StringType
     sparkSchema("vector").dataType shouldBe ArrayType(FloatType)
+    sparkSchema("vector").metadata.getLong(
+      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+    ) shouldBe 101L
   }
 
   test(
@@ -476,5 +508,142 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     // Verify both formats work correctly
     schema.getFieldByName("id").get.dataType shouldBe 5 // Int format
     schema.getFieldByName("score").get.dataType shouldBe 10 // String format
+  }
+
+  test("toProtobufSchemaBytes preserves read-path schema attributes") {
+    val json = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "description": "schema desc",
+          "autoID": true,
+          "enable_dynamic_field": true,
+          "properties": [{"key": "timezone", "value": "UTC"}],
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": "Int64",
+              "is_primary_key": true,
+              "is_partition_key": true,
+              "nullable": false,
+              "state": "FieldCreated",
+              "default_value": {"long_data": 7}
+            },
+            {
+              "fieldID": 101,
+              "name": "tags",
+              "data_type": "Array",
+              "element_type": "VarChar",
+              "nullable": true,
+              "is_function_output": true
+            },
+            {
+              "fieldID": 102,
+              "name": "dyn",
+              "data_type": "JSON",
+              "is_dynamic": true
+            }
+          ]
+        }
+      },
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val schema = MilvusSnapshotReader
+      .parseSnapshotMetadata(json)
+      .toOption
+      .get
+      .collection
+      .schema
+    val proto = ProtoCollectionSchema.parseFrom(
+      MilvusSnapshotReader.toProtobufSchemaBytes(schema)
+    )
+
+    proto.name shouldBe "test"
+    proto.description shouldBe "schema desc"
+    proto.autoID shouldBe true
+    proto.enableDynamicField shouldBe true
+    proto.properties.map(p => p.key -> p.value) should contain(
+      "timezone" -> "UTC"
+    )
+
+    val id = proto.fields.find(_.name == "id").get
+    id.fieldID shouldBe 100L
+    id.dataType shouldBe DataType.Int64
+    id.isPrimaryKey shouldBe true
+    id.isPartitionKey shouldBe true
+    id.nullable shouldBe false
+    id.getDefaultValue.getLongData shouldBe 7L
+
+    val tags = proto.fields.find(_.name == "tags").get
+    tags.dataType shouldBe DataType.Array
+    tags.elementType shouldBe DataType.VarChar
+    tags.nullable shouldBe true
+    tags.isFunctionOutput shouldBe true
+
+    val dyn = proto.fields.find(_.name == "dyn").get
+    dyn.dataType shouldBe DataType.JSON
+    dyn.isDynamic shouldBe true
+  }
+
+  test("toSparkSchema uses array element type and snapshot nullable flag") {
+    val json = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": "Int64",
+              "nullable": false
+            },
+            {
+              "fieldID": 101,
+              "name": "tags",
+              "data_type": "Array",
+              "element_type": "VarChar",
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val schema = MilvusSnapshotReader
+      .parseSnapshotMetadata(json)
+      .toOption
+      .get
+      .collection
+      .schema
+    val sparkSchema = MilvusSnapshotReader.toSparkSchema(schema)
+
+    sparkSchema("id").nullable shouldBe false
+    sparkSchema("tags").dataType shouldBe org.apache.spark.sql.types.ArrayType(
+      org.apache.spark.sql.types.StringType
+    )
+    sparkSchema("tags").nullable shouldBe true
   }
 }

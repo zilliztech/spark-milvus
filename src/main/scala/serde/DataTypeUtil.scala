@@ -3,8 +3,9 @@ package com.zilliz.spark.connector
 import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.arrow.vector.types.FloatingPointPrecision
 import org.apache.spark.sql.types.{DataType => SparkDataType}
-import org.apache.spark.sql.types.DataTypes
+import org.apache.spark.sql.types.{DataTypes, MetadataBuilder}
 
+import com.zilliz.spark.connector.serde.ArrowConverter
 import com.zilliz.spark.connector.DataParseException
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
@@ -45,6 +46,15 @@ object DataTypeUtil {
           s"Unsupported Milvus data type for Arrow conversion: $dataType"
         )
     }
+  }
+
+  def metadata(fieldSchema: FieldSchema) = {
+    new MetadataBuilder()
+      .putLong(
+        ArrowConverter.MilvusDataTypeMetadataKey,
+        fieldSchema.dataType.value
+      )
+      .build()
   }
 
   def toDataType(fieldSchema: FieldSchema): SparkDataType = {

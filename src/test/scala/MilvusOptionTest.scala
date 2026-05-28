@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector
 
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -213,6 +214,95 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     milvusOption.options should contain key "custom.option"
     milvusOption.options("custom.option") shouldBe "custom_value"
+  }
+
+  test("isSnapshotMode accepts explicit snapshot mode") {
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotMode -> "true")
+    ) shouldBe true
+  }
+
+  test(
+    "validateSnapshotModeOptions rejects explicit mode without segment hints"
+  ) {
+    Seq(
+      Map(MilvusOption.SnapshotMode -> "true"),
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotManifests -> " "
+      ),
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotV2Segments -> " "
+      )
+    ).foreach { options =>
+      val err = intercept[IllegalArgumentException] {
+        MilvusOption.validateSnapshotModeOptions(options)
+      }
+      err.getMessage should include(MilvusOption.SnapshotManifests)
+      err.getMessage should include(MilvusOption.SnapshotV2Segments)
+    }
+  }
+
+  test("validateSnapshotModeOptions accepts explicit mode with segment hints") {
+    MilvusOption.validateSnapshotModeOptions(
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotManifests -> "[]"
+      )
+    )
+    MilvusOption.validateSnapshotModeOptions(
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotV2Segments -> "[]"
+      )
+    )
+  }
+
+  test("isSnapshotMode accepts snapshot metadata options") {
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotManifests -> "[]")
+    ) shouldBe true
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotV2Segments -> "[]")
+    ) shouldBe true
+  }
+
+  test(
+    "isSnapshotMode respects explicit false over snapshot metadata options"
+  ) {
+    val mapOptions = Map(
+      MilvusOption.SnapshotMode -> "false",
+      MilvusOption.SnapshotManifests -> "[]"
+    )
+    MilvusOption.isSnapshotMode(mapOptions) shouldBe false
+
+    val javaOptions = new java.util.HashMap[String, String]()
+    mapOptions.foreach { case (key, value) => javaOptions.put(key, value) }
+    MilvusOption.isSnapshotMode(
+      new CaseInsensitiveStringMap(javaOptions)
+    ) shouldBe false
+  }
+
+  test("isSnapshotMode is consistent across option map types") {
+    Seq(
+      Map(MilvusOption.SnapshotMode.toUpperCase -> "true"),
+      Map(MilvusOption.SnapshotManifests.toUpperCase -> "[]"),
+      Map(MilvusOption.SnapshotV2Segments.toUpperCase -> "[]"),
+      Map(MilvusOption.MilvusCollectionName -> "c")
+    ).foreach { options =>
+      val javaOptions = new java.util.HashMap[String, String]()
+      options.foreach { case (key, value) => javaOptions.put(key, value) }
+      MilvusOption.isSnapshotMode(options) shouldBe MilvusOption.isSnapshotMode(
+        new CaseInsensitiveStringMap(javaOptions)
+      )
+    }
+  }
+
+  test("isSnapshotMode is false for normal client options") {
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.MilvusCollectionName -> "c")
+    ) shouldBe false
   }
 }
 

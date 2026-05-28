@@ -977,6 +977,23 @@ object MilvusClient {
     ServiceUnavailableMarkers.exists(normalized.contains)
   }
 
+  private def hasGrpcCode(
+      t: Throwable,
+      codes: Set[GrpcStatus.Code]
+  ): Boolean = {
+    val visited = java.util.Collections.newSetFromMap(
+      new java.util.IdentityHashMap[Throwable, java.lang.Boolean]()
+    )
+    var current = t
+    while (current != null && visited.add(current)) {
+      grpcStatus(current).foreach { status =>
+        if (codes.contains(status.getCode)) return true
+      }
+      current = current.getCause
+    }
+    false
+  }
+
   def isServiceNotImplemented(t: Throwable): Boolean = {
     val visited = java.util.Collections.newSetFromMap(
       new java.util.IdentityHashMap[Throwable, java.lang.Boolean]()
@@ -994,6 +1011,19 @@ object MilvusClient {
     }
     false
   }
+
+  def isSnapshotAlreadyDropped(t: Throwable): Boolean =
+    hasGrpcCode(t, Set(GrpcStatus.Code.NOT_FOUND))
+
+  def isTerminalSnapshotDropError(t: Throwable): Boolean =
+    hasGrpcCode(
+      t,
+      Set(
+        GrpcStatus.Code.NOT_FOUND,
+        GrpcStatus.Code.PERMISSION_DENIED,
+        GrpcStatus.Code.INVALID_ARGUMENT
+      )
+    )
 
   val mapper: ObjectMapper with ScalaObjectMapper = {
     val m = new ObjectMapper() with ScalaObjectMapper

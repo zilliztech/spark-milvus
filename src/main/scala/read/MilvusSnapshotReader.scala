@@ -14,6 +14,8 @@ import com.fasterxml.jackson.module.scala.{
 }
 import org.apache.spark.sql.types._
 
+import com.zilliz.spark.connector.serde.ArrowConverter
+
 /** Helper object for converting JSON values that may be either numeric or
   * string to Long/Int Milvus snapshot JSON format may serialize numbers as
   * strings in some versions
@@ -81,6 +83,23 @@ private[read] object JsonTypeConverter {
       }
     case _ => 0
   }
+
+  def toFieldStateCode(value: Any): Int = value match {
+    case i: Int    => i
+    case l: Long   => l.toInt
+    case n: Number => n.intValue()
+    case s: String =>
+      try s.toInt
+      catch { case _: NumberFormatException => Field.fieldStateNameToCode(s) }
+    case node: JsonNode if node.isNumber => node.asInt()
+    case node: JsonNode if node.isTextual =>
+      val text = node.asText()
+      try text.toInt
+      catch {
+        case _: NumberFormatException => Field.fieldStateNameToCode(text)
+      }
+    case _ => 0
+  }
 }
 
 /** Type parameter for Milvus field
@@ -101,7 +120,18 @@ case class Field(
       None, // Can be Int or String (e.g., 5 or "Int64")
     @JsonProperty("is_primary_key") isPrimaryKey: Option[Boolean] = None,
     @JsonProperty("is_clustering_key") isClusteringKey: Option[Boolean] = None,
-    @JsonProperty("type_params") typeParams: Option[Seq[TypeParam]] = None
+    @JsonProperty("type_params") typeParams: Option[Seq[TypeParam]] = None,
+    @JsonProperty("autoID") @JsonAlias(Array("auto_id")) autoID: Option[
+      Boolean
+    ] = None,
+    @JsonProperty("state") rawState: Option[JsonNode] = None,
+    @JsonProperty("element_type") rawElementType: Option[JsonNode] = None,
+    @JsonProperty("is_dynamic") isDynamic: Option[Boolean] = None,
+    @JsonProperty("is_partition_key") isPartitionKey: Option[Boolean] = None,
+    @JsonProperty("nullable") nullable: Option[Boolean] = None,
+    @JsonProperty("is_function_output") isFunctionOutput: Option[Boolean] =
+      None,
+    @JsonProperty("default_value") defaultValue: Option[JsonNode] = None
 ) {
 
   /** Get the data type as Int, handling both numeric and string formats String
@@ -121,7 +151,15 @@ case class Field(
       case _          => 0L
     }
   }
+
+  def state: Int = rawState.map(JsonTypeConverter.toFieldStateCode).getOrElse(0)
+
+  def elementType: Int =
+    rawElementType.map(JsonTypeConverter.toDataTypeCode).getOrElse(0)
 }
+
+case class UnsupportedSnapshotSchemaField(message: String)
+    extends IllegalArgumentException(message)
 
 object Field {
 
@@ -139,27 +177,36 @@ object Field {
     "Double" -> 11,
     "String" -> 20,
     "VarChar" -> 21,
-    "JSON" -> 22,
-    "Array" -> 23,
-    // Array element types (23-30 based on element type)
-    "ArrayBool" -> 23,
-    "ArrayInt8" -> 24,
-    "ArrayInt16" -> 25,
-    "ArrayInt32" -> 26,
-    "ArrayInt64" -> 27,
-    "ArrayFloat" -> 28,
-    "ArrayDouble" -> 29,
-    "ArrayVarChar" -> 30,
+    "Array" -> 22,
+    "JSON" -> 23,
+    "Geometry" -> 24,
+    "Text" -> 25,
+    "Timestamptz" -> 26,
     // Vector types
     "BinaryVector" -> 100,
     "FloatVector" -> 101,
     "Float16Vector" -> 102,
     "BFloat16Vector" -> 103,
-    "SparseFloatVector" -> 104
+    "SparseFloatVector" -> 104,
+    "Int8Vector" -> 105,
+    "ArrayOfVector" -> 106,
+    "ArrayOfStruct" -> 200,
+    "Struct" -> 201
+  )
+
+  private val fieldStateNameToCodeMap: Map[String, Int] = Map(
+    "FieldCreated" -> 0,
+    "FieldCreating" -> 1,
+    "FieldDropping" -> 2,
+    "FieldDropped" -> 3
   )
 
   def dataTypeNameToCode(name: String): Int = {
     dataTypeNameToCodeMap.getOrElse(name, 0)
+  }
+
+  def fieldStateNameToCode(name: String): Int = {
+    fieldStateNameToCodeMap.getOrElse(name, 0)
   }
 }
 
@@ -176,7 +223,12 @@ case class CollectionSchema(
     @JsonProperty("name") name: String,
     @JsonProperty("description") description: Option[String] = None,
     @JsonProperty("fields") fields: Seq[Field],
-    @JsonProperty("properties") properties: Option[Seq[Property]] = None
+    @JsonProperty("properties") properties: Option[Seq[Property]] = None,
+    @JsonProperty("autoID") @JsonAlias(Array("auto_id")) autoID: Option[
+      Boolean
+    ] = None,
+    @JsonProperty("enable_dynamic_field") enableDynamicField: Option[Boolean] =
+      None
 ) {
   def getFieldByName(name: String): Option[Field] = {
     fields.find(_.name == name)
@@ -383,6 +435,35 @@ case class SnapshotMetadata(
   */
 object MilvusSnapshotReader {
 
+  val MaxSnapshotJsonBytes: Long = 64L * 1024L * 1024L
+
+  def readUtf8WithLimit(
+      in: java.io.InputStream,
+      path: String,
+      maxBytes: Long = MaxSnapshotJsonBytes
+  ): String = {
+    if (maxBytes <= 0) {
+      throw new IllegalArgumentException(
+        s"Snapshot metadata max size must be positive, got $maxBytes"
+      )
+    }
+    val out = new java.io.ByteArrayOutputStream()
+    val buf = new Array[Byte](8192)
+    var total = 0L
+    var n = in.read(buf)
+    while (n >= 0) {
+      total += n
+      if (total > maxBytes) {
+        throw new IllegalArgumentException(
+          s"Snapshot metadata $path exceeds max size $maxBytes bytes"
+        )
+      }
+      out.write(buf, 0, n)
+      n = in.read(buf)
+    }
+    out.toString(java.nio.charset.StandardCharsets.UTF_8.name())
+  }
+
   private val mapper: ObjectMapper with ScalaObjectMapper = {
     val m = new ObjectMapper() with ScalaObjectMapper
     m.registerModule(DefaultScalaModule)
@@ -398,6 +479,69 @@ object MilvusSnapshotReader {
     m.coercionConfigFor(classOf[Long])
       .setCoercion(CoercionInputShape.String, CoercionAction.TryConvert)
     m
+  }
+
+  private def protobufDefaultValue(
+      node: JsonNode,
+      fieldName: String
+  ): io.milvus.grpc.schema.ValueField = {
+    import io.milvus.grpc.schema.ValueField
+
+    val value = Option(node).filterNot(_.isNull).getOrElse {
+      throw UnsupportedSnapshotSchemaField(
+        s"default_value for field $fieldName is null"
+      )
+    }
+
+    def child(names: String*): Option[JsonNode] =
+      names.iterator.map(value.get).find(v => v != null && !v.isNull)
+
+    child("bool_data", "boolData")
+      .map(v => ValueField().withBoolData(v.asBoolean()))
+      .orElse(
+        child("int_data", "intData").map(v =>
+          ValueField().withIntData(v.asInt())
+        )
+      )
+      .orElse(
+        child("long_data", "longData").map(v =>
+          ValueField().withLongData(v.asLong())
+        )
+      )
+      .orElse(
+        child("float_data", "floatData").map(v =>
+          ValueField().withFloatData(v.floatValue())
+        )
+      )
+      .orElse(
+        child("double_data", "doubleData").map(v =>
+          ValueField().withDoubleData(v.asDouble())
+        )
+      )
+      .orElse(
+        child("string_data", "stringData").map(v =>
+          ValueField().withStringData(v.asText())
+        )
+      )
+      .orElse(
+        child("bytes_data", "bytesData").map { v =>
+          ValueField().withBytesData(
+            com.google.protobuf.ByteString.copyFrom(
+              java.util.Base64.getDecoder.decode(v.asText())
+            )
+          )
+        }
+      )
+      .orElse(
+        child("timestamptz_data", "timestamptzData").map(v =>
+          ValueField().withTimestamptzData(v.asLong())
+        )
+      )
+      .getOrElse {
+        throw UnsupportedSnapshotSchemaField(
+          s"default_value for field $fieldName uses an unsupported shape: $value"
+        )
+      }
   }
 
   /** Parse snapshot metadata from JSON string
@@ -428,12 +572,11 @@ object MilvusSnapshotReader {
       path: String
   ): Either[Throwable, SnapshotMetadata] = {
     try {
-      val source = scala.io.Source.fromFile(path)
+      val in = new java.io.FileInputStream(path)
       try {
-        val json = source.mkString
-        parseSnapshotMetadata(json)
+        parseSnapshotMetadata(readUtf8WithLimit(in, path))
       } finally {
-        source.close()
+        in.close()
       }
     } catch {
       case e: Exception => Left(e)
@@ -545,8 +688,11 @@ object MilvusSnapshotReader {
       .map { field =>
         StructField(
           field.name,
-          dataTypeToSparkType(field.dataType, field.typeParams),
-          nullable = true
+          dataTypeToSparkType(field.dataType, field.elementType),
+          nullable = field.nullable.getOrElse(true),
+          metadata = new MetadataBuilder()
+            .putLong(ArrowConverter.MilvusDataTypeMetadataKey, field.dataType)
+            .build()
         )
       }
     StructType(userFields)
@@ -560,7 +706,7 @@ object MilvusSnapshotReader {
     *   Corresponding Spark DataType
     */
   def fieldToSparkType(field: Field): DataType = {
-    dataTypeToSparkType(field.dataType, field.typeParams)
+    dataTypeToSparkType(field.dataType, field.elementType)
   }
 
   /** Convert Milvus data type to Spark DataType
@@ -574,7 +720,7 @@ object MilvusSnapshotReader {
     */
   private def dataTypeToSparkType(
       dataType: Int,
-      typeParams: Option[Seq[TypeParam]]
+      elementType: Int
   ): DataType = {
     dataType match {
       case 1   => BooleanType // Bool
@@ -586,20 +732,17 @@ object MilvusSnapshotReader {
       case 11  => DoubleType // Double
       case 20  => StringType // String
       case 21  => StringType // VarChar
-      case 22  => StringType // JSON (as string)
-      case 23  => ArrayType(BooleanType) // Array[Bool]
-      case 24  => ArrayType(ByteType) // Array[Int8]
-      case 25  => ArrayType(ShortType) // Array[Int16]
-      case 26  => ArrayType(IntegerType) // Array[Int32]
-      case 27  => ArrayType(LongType) // Array[Int64]
-      case 28  => ArrayType(FloatType) // Array[Float]
-      case 29  => ArrayType(DoubleType) // Array[Double]
-      case 30  => ArrayType(StringType) // Array[VarChar]
+      case 22  => ArrayType(dataTypeToSparkType(elementType, 0)) // Array
+      case 23  => StringType // JSON (as string)
+      case 24  => StringType // Geometry
+      case 25  => StringType // Text
+      case 26  => LongType // Timestamptz
+      case 100 => ArrayType(ByteType) // BinaryVector
       case 101 => ArrayType(FloatType) // FloatVector
-      case 102 => ArrayType(ByteType) // BinaryVector
-      case 103 => ArrayType(ShortType) // Float16Vector
-      case 104 => ArrayType(ShortType) // BFloat16Vector
-      case 105 => MapType(LongType, FloatType) // SparseFloatVector
+      case 102 => ArrayType(FloatType) // Float16Vector
+      case 103 => ArrayType(FloatType) // BFloat16Vector
+      case 104 => MapType(LongType, FloatType) // SparseFloatVector
+      case 105 => ArrayType(ByteType) // Int8Vector
       case _   => BinaryType // Unknown types as binary
     }
   }
@@ -637,8 +780,9 @@ object MilvusSnapshotReader {
   def toProtobufSchemaBytes(schema: CollectionSchema): Array[Byte] = {
     import io.milvus.grpc.schema.{
       CollectionSchema => ProtoCollectionSchema,
+      DataType,
       FieldSchema,
-      DataType
+      FieldState
     }
     import io.milvus.grpc.common.KeyValuePair
 
@@ -656,14 +800,28 @@ object MilvusSnapshotReader {
         isClusteringKey = field.isClusteringKey.getOrElse(false),
         typeParams = field.typeParams.getOrElse(Seq.empty).map { tp =>
           KeyValuePair(key = tp.key, value = tp.value)
-        }
+        },
+        autoID = field.autoID.getOrElse(false),
+        state = FieldState.fromValue(field.state),
+        elementType = DataType.fromValue(field.elementType),
+        isDynamic = field.isDynamic.getOrElse(false),
+        isPartitionKey = field.isPartitionKey.getOrElse(false),
+        nullable = field.nullable.getOrElse(false),
+        isFunctionOutput = field.isFunctionOutput.getOrElse(false),
+        defaultValue =
+          field.defaultValue.map(protobufDefaultValue(_, field.name))
       )
     }
 
     val protoSchema = ProtoCollectionSchema(
       name = schema.name,
       description = schema.description.getOrElse(""),
-      fields = protoFields
+      autoID = schema.autoID.getOrElse(false),
+      fields = protoFields,
+      enableDynamicField = schema.enableDynamicField.getOrElse(false),
+      properties = schema.properties.getOrElse(Seq.empty).map { prop =>
+        KeyValuePair(key = prop.key, value = prop.value)
+      }
     )
 
     protoSchema.toByteArray

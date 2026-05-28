@@ -1,9 +1,18 @@
 package com.zilliz.spark.connector.read
 
+import java.net.URI
 import java.nio.file.Files
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{Path => HPath}
+import org.apache.hadoop.fs.{
+  FSDataInputStream,
+  FSDataOutputStream,
+  FileStatus,
+  FileSystem,
+  Path => HPath
+}
+import org.apache.hadoop.fs.permission.FsPermission
+import org.apache.hadoop.util.Progressable
 import org.apache.parquet.example.data.simple.SimpleGroupFactory
 import org.apache.parquet.hadoop.example.{
   ExampleParquetWriter,
@@ -142,6 +151,27 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("readFieldIdsFromSchema returns Left for malformed URI") {
+    val result = MilvusParquetFooterReader.readFieldIdsFromSchema(
+      "s3a://bucket/path with spaces/[bad].parquet",
+      new Configuration()
+    )
+
+    result shouldBe a[Left[_, _]]
+  }
+
+  test("readFieldIdsFromSchema does not swallow fatal errors") {
+    val conf = new Configuration()
+    conf.set("fs.fatal-footer.impl", classOf[FatalFooterFileSystem].getName)
+
+    intercept[OutOfMemoryError] {
+      MilvusParquetFooterReader.readFieldIdsFromSchema(
+        "fatal-footer://bucket/file.parquet",
+        conf
+      )
+    }
+  }
+
   test("readFieldIdsFromSchema returns Left when a column has no field id") {
     val tmp = Files.createTempFile("milvus-fid-test-bad-", ".parquet")
     Files.delete(tmp)
@@ -183,4 +213,52 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       Files.deleteIfExists(tmp)
     }
   }
+}
+
+class FatalFooterFileSystem extends FileSystem {
+  private var uri: URI = _
+
+  override def initialize(name: URI, conf: Configuration): Unit = {
+    super.initialize(name, conf)
+    uri = name
+  }
+
+  override def getUri: URI = uri
+
+  override def open(path: HPath, bufferSize: Int): FSDataInputStream =
+    throw new OutOfMemoryError("fatal")
+
+  override def create(
+      path: HPath,
+      permission: FsPermission,
+      overwrite: Boolean,
+      bufferSize: Int,
+      replication: Short,
+      blockSize: Long,
+      progress: Progressable
+  ): FSDataOutputStream = throw new UnsupportedOperationException
+
+  override def append(
+      path: HPath,
+      bufferSize: Int,
+      progress: Progressable
+  ): FSDataOutputStream = throw new UnsupportedOperationException
+
+  override def rename(src: HPath, dst: HPath): Boolean =
+    throw new UnsupportedOperationException
+
+  override def delete(path: HPath, recursive: Boolean): Boolean =
+    throw new UnsupportedOperationException
+
+  override def listStatus(path: HPath): Array[FileStatus] =
+    throw new UnsupportedOperationException
+
+  override def setWorkingDirectory(path: HPath): Unit = ()
+
+  override def getWorkingDirectory: HPath = new HPath("/")
+
+  override def mkdirs(path: HPath, permission: FsPermission): Boolean = true
+
+  override def getFileStatus(path: HPath): FileStatus =
+    new FileStatus(1L, false, 1, 1L, 0L, path)
 }

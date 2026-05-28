@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import java.io.ByteArrayOutputStream
 import java.net.URI
+import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
@@ -72,7 +73,7 @@ object V2SegmentLoader extends Logging {
       }
       Right(out.toSeq)
     } catch {
-      case e: Throwable => Left(e)
+      case NonFatal(e) => Left(e)
     }
   }
 
@@ -169,7 +170,7 @@ object V2SegmentLoader extends Logging {
             )
         }
       } catch {
-        case e: Throwable => Left(e)
+        case NonFatal(e) => Left(e)
       }
     }
   }
@@ -184,24 +185,42 @@ object V2SegmentLoader extends Logging {
     else path
   }
 
-  private def readAllBytes(
+  private[read] def readAllBytes(
       conf: Configuration,
       fullyQualifiedPath: String
   ): Array[Byte] = {
-    val uri = new URI(fullyQualifiedPath)
-    val fs = FileSystem.get(uri, conf)
-    val in = fs.open(new Path(uri))
+    var uri: URI = null
+    var fs: FileSystem = null
     try {
-      val out = new ByteArrayOutputStream()
-      val buf = new Array[Byte](8192)
-      var n = in.read(buf)
-      while (n >= 0) {
-        out.write(buf, 0, n)
-        n = in.read(buf)
+      uri = new URI(fullyQualifiedPath)
+      fs = FileSystem.get(uri, conf)
+      val in = fs.open(new Path(uri))
+      try {
+        val out = new ByteArrayOutputStream()
+        val buf = new Array[Byte](8192)
+        var n = in.read(buf)
+        while (n >= 0) {
+          out.write(buf, 0, n)
+          n = in.read(buf)
+        }
+        out.toByteArray
+      } finally {
+        in.close()
       }
-      out.toByteArray
+    } catch {
+      case NonFatal(e) =>
+        throw new RuntimeException(
+          s"failed to read bytes from $fullyQualifiedPath: ${e.getMessage}",
+          e
+        )
     } finally {
-      in.close()
+      Option(uri).flatMap(uri => Option(uri.getScheme)).foreach { scheme =>
+        if (
+          fs != null && conf.getBoolean(s"fs.$scheme.impl.disable.cache", false)
+        ) {
+          fs.close()
+        }
+      }
     }
   }
 }
