@@ -328,6 +328,36 @@ case class MilvusTable(
 
   override def name(): String = milvusOption.collectionName
 
+  private def appendExtraColumns(baseSchema: StructType): StructType = {
+    var fields = baseSchema.fields.toSeq
+
+    def addIfRequested(name: String, field: StructField): Unit = {
+      if (milvusOption.extraColumns.contains(name)) {
+        if (fields.exists(_.name == name)) {
+          throw new IllegalArgumentException(
+            s"Requested metadata extra column '$name' conflicts with an existing field named '$name'"
+          )
+        }
+        fields = fields :+ field
+      }
+    }
+
+    addIfRequested(
+      MilvusOption.MilvusExtraColumnPartition,
+      StructField(MilvusOption.MilvusExtraColumnPartition, StringType, true)
+    )
+    addIfRequested(
+      MilvusOption.MilvusExtraColumnSegmentID,
+      StructField(MilvusOption.MilvusExtraColumnSegmentID, LongType, false)
+    )
+    addIfRequested(
+      MilvusOption.MilvusExtraColumnRowOffset,
+      StructField(MilvusOption.MilvusExtraColumnRowOffset, LongType, false)
+    )
+
+    StructType(fields)
+  }
+
   override def schema(): StructType = {
     // In snapshot mode with provided sparkSchema, use it directly
     // This avoids the need to parse milvusCollection.schema which may be incomplete
@@ -335,7 +365,7 @@ case class MilvusTable(
       logInfo(
         s"Using provided sparkSchema in snapshot mode: ${sparkSchema.get.fieldNames.mkString(", ")}"
       )
-      return sparkSchema.get
+      return appendExtraColumns(sparkSchema.get)
     }
 
     // Client-based mode or snapshot mode without provided schema: compute from milvusCollection
@@ -375,28 +405,7 @@ case class MilvusTable(
     ) {
       fields = fields :+ StructField("$meta", StringType, true)
     }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnPartition
-      )
-    ) {
-      fields = fields :+ StructField("partition", StringType, true)
-    }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnSegmentID
-      )
-    ) {
-      fields = fields :+ StructField("segment_id", LongType, false)
-    }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnRowOffset
-      )
-    ) {
-      fields = fields :+ StructField("row_offset", LongType, false)
-    }
-    StructType(fields)
+    appendExtraColumns(StructType(fields))
   }
 
   override def capabilities(): ju.Set[TableCapability] = {
@@ -421,6 +430,7 @@ class MilvusScanBuilder(
     .split(",")
     .map(_.trim)
     .filter(_.nonEmpty)
+    .map(MilvusOption.normalizeExtraColumnName)
     .toSeq
 
   // Store the filters that can be pushed down
@@ -495,21 +505,21 @@ class MilvusScanBuilder(
     }
     if (
       extraColumns.contains(MilvusOption.MilvusExtraColumnPartition) &&
-      !fieldNames.contains("partition")
+      !fieldNames.contains(MilvusOption.MilvusExtraColumnPartition)
     ) {
-      fieldNames = fieldNames :+ "partition"
+      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnPartition
     }
     if (
       extraColumns.contains(MilvusOption.MilvusExtraColumnSegmentID) &&
-      !fieldNames.contains("segment_id")
+      !fieldNames.contains(MilvusOption.MilvusExtraColumnSegmentID)
     ) {
-      fieldNames = fieldNames :+ "segment_id"
+      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnSegmentID
     }
     if (
       extraColumns.contains(MilvusOption.MilvusExtraColumnRowOffset) &&
-      !fieldNames.contains("row_offset")
+      !fieldNames.contains(MilvusOption.MilvusExtraColumnRowOffset)
     ) {
-      fieldNames = fieldNames :+ "row_offset"
+      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnRowOffset
     }
 
     currentOptions = new CaseInsensitiveStringMap(tmpMap)

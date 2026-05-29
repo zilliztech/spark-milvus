@@ -64,7 +64,23 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     milvusOption.segmentID shouldBe "111222333"
   }
 
-  test("Parse extra columns configuration") {
+  test("Parse extra columns configuration with canonical names") {
+    val options = Map(
+      MilvusOption.MilvusUri -> "http://localhost:19530",
+      MilvusOption.MilvusExtraColumns -> "partition, $segment_id, $row_offset"
+    )
+
+    val milvusOption = MilvusOption(options)
+
+    milvusOption.extraColumns should contain allOf (
+      MilvusOption.MilvusExtraColumnPartition,
+      MilvusOption.MilvusExtraColumnSegmentID,
+      MilvusOption.MilvusExtraColumnRowOffset
+    )
+    milvusOption.extraColumns.size shouldBe 3
+  }
+
+  test("Parse legacy extra column aliases as canonical requests") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
       MilvusOption.MilvusExtraColumns -> "partition, segment_id, row_offset"
@@ -72,8 +88,13 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     val milvusOption = MilvusOption(options)
 
-    milvusOption.extraColumns should contain allOf ("partition", "segment_id", "row_offset")
-    milvusOption.extraColumns.size shouldBe 3
+    milvusOption.extraColumns should contain allOf (
+      "partition",
+      "$segment_id",
+      "$row_offset"
+    )
+    milvusOption.extraColumns should not contain "segment_id"
+    milvusOption.extraColumns should not contain "row_offset"
   }
 
   test("Parse empty extra columns") {

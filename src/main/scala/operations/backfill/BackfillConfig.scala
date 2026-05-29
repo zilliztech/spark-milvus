@@ -171,7 +171,10 @@ case class BackfillConfig(
       "milvus.token" -> milvusToken,
       "milvus.database.name" -> databaseName,
       "milvus.collection.name" -> collectionName,
-      "milvus.extra.columns" -> "segment_id,row_offset", // this is used to match with the original sequence of rows for each segment
+      MilvusOption.MilvusExtraColumns -> Seq(
+        MilvusOption.MilvusExtraColumnSegmentID,
+        MilvusOption.MilvusExtraColumnRowOffset
+      ).mkString(","),
       "fs.address" -> s3Endpoint,
       "fs.bucket_name" -> s3BucketName,
       "fs.root_path" -> s3RootPath,

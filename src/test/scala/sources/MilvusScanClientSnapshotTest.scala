@@ -57,6 +57,20 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  private def snapshotTableSchema(
+      baseSchema: StructType,
+      extraColumns: String
+  ): StructType = {
+    val options = Map(
+      MilvusOption.SnapshotMode -> "true",
+      MilvusOption.SnapshotManifests -> "[]",
+      MilvusOption.SnapshotCollectionId -> "10",
+      MilvusOption.MilvusCollectionName -> "c",
+      MilvusOption.MilvusExtraColumns -> extraColumns
+    )
+    MilvusTable(MilvusOption(options), Some(baseSchema)).schema()
+  }
+
   test(
     "resolveClientSnapshotLocation prefixes bucket-relative snapshot locations"
   ) {
@@ -400,6 +414,79 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(
       !MilvusScan.canUseClientSnapshotFastPath(
         MilvusOption(base + (MilvusOption.MilvusSegmentID -> "30"))
+      )
+    )
+  }
+
+  test(
+    "table schema emits canonical metadata extra column names from legacy aliases"
+  ) {
+    val schema = snapshotTableSchema(
+      StructType(Seq(StructField("pk", LongType, nullable = false))),
+      "partition,segment_id,row_offset"
+    )
+
+    assert(
+      schema.fieldNames.toSeq == Seq(
+        "pk",
+        "partition",
+        "$segment_id",
+        "$row_offset"
+      )
+    )
+  }
+
+  test(
+    "table schema rejects user field conflicting with canonical metadata column"
+  ) {
+    val err = intercept[IllegalArgumentException] {
+      snapshotTableSchema(
+        StructType(Seq(StructField("$segment_id", LongType, nullable = false))),
+        "$segment_id"
+      )
+    }
+
+    assert(err.getMessage.contains("$segment_id"))
+    assert(err.getMessage.contains("metadata extra column"))
+  }
+
+  test(
+    "table schema keeps legacy alias user field separate from canonical metadata"
+  ) {
+    val schema = snapshotTableSchema(
+      StructType(Seq(StructField("segment_id", LongType, nullable = false))),
+      "segment_id"
+    )
+
+    assert(schema.fieldNames.toSeq == Seq("segment_id", "$segment_id"))
+  }
+
+  test(
+    "scan pruning preserves canonical metadata fields requested by legacy aliases"
+  ) {
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(MilvusOption.MilvusExtraColumns, "segment_id,row_offset")
+    val schema = StructType(
+      Seq(
+        StructField("pk", LongType, nullable = false),
+        StructField("$segment_id", LongType, nullable = false),
+        StructField("$row_offset", LongType, nullable = false)
+      )
+    )
+    val builder = new MilvusScanBuilder(
+      schema,
+      new CaseInsensitiveStringMap(rawOptions)
+    )
+
+    builder.pruneColumns(
+      StructType(Seq(StructField("pk", LongType, nullable = false)))
+    )
+
+    assert(
+      builder.build().readSchema().fieldNames.toSeq == Seq(
+        "pk",
+        "$segment_id",
+        "$row_offset"
       )
     )
   }

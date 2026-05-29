@@ -19,7 +19,7 @@ import com.zilliz.spark.connector.MilvusOption
 case class MilvusStorageV3InputPartition(
     manifestPath: String, // Path to manifest in S3/MinIO
     milvusSchemaBytes: Array[Byte], // Serialized protobuf
-    partitionName: String,
+    partitionName: String, // Snapshot reads store the partition ID string here.
     milvusOption: MilvusOption,
     topK: Option[Int] = None,
     queryVector: Option[Array[Float]] = None,
