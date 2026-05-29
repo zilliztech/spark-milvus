@@ -451,14 +451,18 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test(
-    "table schema keeps legacy alias user field separate from canonical metadata"
+    "table schema rejects legacy metadata aliases in provided schema"
   ) {
-    val schema = snapshotTableSchema(
-      StructType(Seq(StructField("segment_id", LongType, nullable = false))),
-      "segment_id"
-    )
+    val err = intercept[IllegalArgumentException] {
+      snapshotTableSchema(
+        StructType(Seq(StructField("segment_id", LongType, nullable = false))),
+        "segment_id"
+      )
+    }
 
-    assert(schema.fieldNames.toSeq == Seq("segment_id", "$segment_id"))
+    assert(err.getMessage.contains("segment_id"))
+    assert(err.getMessage.contains("legacy alias"))
+    assert(err.getMessage.contains("$segment_id"))
   }
 
   test(

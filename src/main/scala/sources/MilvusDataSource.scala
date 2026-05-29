@@ -331,6 +331,14 @@ case class MilvusTable(
   private def appendExtraColumns(baseSchema: StructType): StructType = {
     var fields = baseSchema.fields.toSeq
 
+    def failIfPresent(alias: String, canonical: String): Unit = {
+      if (fields.exists(_.name == alias)) {
+        throw new IllegalArgumentException(
+          s"Field '$alias' is a legacy alias for metadata extra column '$canonical'; use '$canonical' in the schema or remove it and request '$canonical' via ${MilvusOption.MilvusExtraColumns}"
+        )
+      }
+    }
+
     def addIfRequested(name: String, field: StructField): Unit = {
       if (milvusOption.extraColumns.contains(name)) {
         if (fields.exists(_.name == name)) {
@@ -340,6 +348,27 @@ case class MilvusTable(
         }
         fields = fields :+ field
       }
+    }
+
+    if (
+      milvusOption.extraColumns.contains(
+        MilvusOption.MilvusExtraColumnSegmentID
+      )
+    ) {
+      failIfPresent(
+        MilvusOption.MilvusExtraColumnSegmentIDAlias,
+        MilvusOption.MilvusExtraColumnSegmentID
+      )
+    }
+    if (
+      milvusOption.extraColumns.contains(
+        MilvusOption.MilvusExtraColumnRowOffset
+      )
+    ) {
+      failIfPresent(
+        MilvusOption.MilvusExtraColumnRowOffsetAlias,
+        MilvusOption.MilvusExtraColumnRowOffset
+      )
     }
 
     addIfRequested(

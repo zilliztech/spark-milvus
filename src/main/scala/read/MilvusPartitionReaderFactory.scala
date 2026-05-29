@@ -9,9 +9,38 @@ import org.apache.spark.sql.connector.read.{
 }
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
+
+object MilvusPartitionReaderFactory {
+  private[read] def requestedExtraColumns(
+      optionsMap: Map[String, String]
+  ): Set[String] = {
+    optionsMap
+      .collectFirst {
+        case (key, value)
+            if key.equalsIgnoreCase(MilvusOption.MilvusExtraColumns) =>
+          value
+      }
+      .toSeq
+      .flatMap(_.split(","))
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(MilvusOption.normalizeExtraColumnName)
+      .toSet
+  }
+
+  private[read] def isMetadataExtraField(
+      name: String,
+      requestedExtraColumns: Set[String]
+  ): Boolean =
+    requestedExtraColumns.contains(name)
+
+  private[read] def stringValue(value: String): UTF8String =
+    UTF8String.fromString(value)
+}
 
 // PartitionReaderFactory for Storage V2 (Milvus 2.6+)
 class MilvusPartitionReaderFactory(
@@ -24,10 +53,14 @@ class MilvusPartitionReaderFactory(
   private def isSystemField(name: String): Boolean =
     name == "row_id" || name == "timestamp"
 
+  private val requestedExtraColumns =
+    MilvusPartitionReaderFactory.requestedExtraColumns(optionsMap)
+
   private def isMetadataExtraField(name: String): Boolean =
-    name == MilvusOption.MilvusExtraColumnPartition ||
-      name == MilvusOption.MilvusExtraColumnSegmentID ||
-      name == MilvusOption.MilvusExtraColumnRowOffset
+    MilvusPartitionReaderFactory.isMetadataExtraField(
+      name,
+      requestedExtraColumns
+    )
 
   override def createReader(
       partition: InputPartition
@@ -78,7 +111,8 @@ class MilvusPartitionReaderFactory(
                   case "row_id" | "timestamp" =>
                     resultValues(writeIdx) = null
                   case MilvusOption.MilvusExtraColumnPartition =>
-                    resultValues(writeIdx) = p.partitionName
+                    resultValues(writeIdx) =
+                      MilvusPartitionReaderFactory.stringValue(p.partitionName)
                   case MilvusOption.MilvusExtraColumnSegmentID =>
                     resultValues(writeIdx) = p.segmentID
                   case MilvusOption.MilvusExtraColumnRowOffset =>
@@ -139,7 +173,9 @@ class MilvusPartitionReaderFactory(
                   case "row_id" | "timestamp" =>
                     out(writeIdx) = null
                   case MilvusOption.MilvusExtraColumnPartition =>
-                    out(writeIdx) = p.partitionID.toString
+                    out(writeIdx) = MilvusPartitionReaderFactory.stringValue(
+                      p.partitionID.toString
+                    )
                   case MilvusOption.MilvusExtraColumnSegmentID =>
                     out(writeIdx) = p.segmentID
                   case MilvusOption.MilvusExtraColumnRowOffset =>
