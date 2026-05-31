@@ -23,6 +23,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterEach
 
+import com.zilliz.spark.connector.{MilvusCollectionInfo, MilvusOption}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
   Collection,
@@ -36,7 +37,6 @@ import com.zilliz.spark.connector.read.{
   V2ColumnGroup,
   V2SegmentInfo
 }
-import com.zilliz.spark.connector.MilvusOption
 
 class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(
@@ -466,6 +466,57 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test(
+    "client-derived schema allows user fields named legacy metadata aliases"
+  ) {
+    val options = Map(
+      MilvusOption.SnapshotMode -> "true",
+      MilvusOption.SnapshotManifests -> "[]",
+      MilvusOption.SnapshotCollectionId -> "10",
+      MilvusOption.MilvusCollectionName -> "c",
+      MilvusOption.MilvusExtraColumns -> "segment_id,row_offset"
+    )
+    val collectionSchema = io.milvus.grpc.schema.CollectionSchema(
+      name = "c",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100,
+          name = "segment_id",
+          dataType = io.milvus.grpc.schema.DataType.Int64,
+          nullable = false
+        ),
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 101,
+          name = "row_offset",
+          dataType = io.milvus.grpc.schema.DataType.Int64,
+          nullable = false
+        )
+      )
+    )
+
+    val schema = new MilvusTable(MilvusOption(options), None) {
+      override def initInfo(): Unit = {
+        milvusCollection = MilvusCollectionInfo(
+          dbName = "",
+          collectionName = "c",
+          collectionID = 10L,
+          schema = collectionSchema
+        )
+      }
+    }.schema()
+
+    assert(
+      schema.fieldNames.toSeq == Seq(
+        "row_id",
+        "timestamp",
+        "segment_id",
+        "row_offset",
+        "$segment_id",
+        "$row_offset"
+      )
+    )
+  }
+
+  test(
     "scan pruning preserves canonical metadata fields requested by legacy aliases"
   ) {
     val rawOptions = new ju.HashMap[String, String]()
@@ -769,6 +820,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
         StorageV2ManifestItem(
           30L,
           "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
+        ),
+        StorageV2ManifestItem(
+          31L,
+          "{\"ver\":8,\"base_path\":\"files/insert_log/10/21/31\"}"
         )
       )
     )
@@ -778,11 +833,15 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     rawOptions.put(MilvusOption.SnapshotPartitionIds, "20,21")
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val partitions = scanWithOptions(rawOptions).planInputPartitions()
-    assert(partitions.length == 1)
-    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
-    assert(partition.partitionName == "20")
-    assert(partition.segmentID == 30L)
-    assert(partition.readVersion == 7L)
+    assert(partitions.length == 2)
+    val first = partitions(0).asInstanceOf[MilvusStorageV3InputPartition]
+    val second = partitions(1).asInstanceOf[MilvusStorageV3InputPartition]
+    assert(first.partitionName == "20")
+    assert(first.segmentID == 30L)
+    assert(first.readVersion == 7L)
+    assert(second.partitionName == "21")
+    assert(second.segmentID == 31L)
+    assert(second.readVersion == 8L)
   }
 
   test("snapshot planner accepts V2-only snapshot segments") {

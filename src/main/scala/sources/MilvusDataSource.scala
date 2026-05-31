@@ -328,11 +328,14 @@ case class MilvusTable(
 
   override def name(): String = milvusOption.collectionName
 
-  private def appendExtraColumns(baseSchema: StructType): StructType = {
+  private def appendExtraColumns(
+      baseSchema: StructType,
+      rejectLegacyAliases: Boolean
+  ): StructType = {
     var fields = baseSchema.fields.toSeq
 
     def failIfPresent(alias: String, canonical: String): Unit = {
-      if (fields.exists(_.name == alias)) {
+      if (rejectLegacyAliases && fields.exists(_.name == alias)) {
         throw new IllegalArgumentException(
           s"Field '$alias' is a legacy alias for metadata extra column '$canonical'; use '$canonical' in the schema or remove it and request '$canonical' via ${MilvusOption.MilvusExtraColumns}"
         )
@@ -394,7 +397,7 @@ case class MilvusTable(
       logInfo(
         s"Using provided sparkSchema in snapshot mode: ${sparkSchema.get.fieldNames.mkString(", ")}"
       )
-      return appendExtraColumns(sparkSchema.get)
+      return appendExtraColumns(sparkSchema.get, rejectLegacyAliases = true)
     }
 
     // Client-based mode or snapshot mode without provided schema: compute from milvusCollection
@@ -434,7 +437,7 @@ case class MilvusTable(
     ) {
       fields = fields :+ StructField("$meta", StringType, true)
     }
-    appendExtraColumns(StructType(fields))
+    appendExtraColumns(StructType(fields), rejectLegacyAliases = false)
   }
 
   override def capabilities(): ju.Set[TableCapability] = {
@@ -1748,28 +1751,32 @@ class MilvusScan(
             ) // Backward compatible: plain basePath, latest version
         }
 
-      // Extract segmentID from manifest path if item.segmentID is 0
+      // Extract segmentID and partitionID from manifest path if needed
       // Path format: files/insert_log/{collectionID}/{partitionID}/{segmentID}
+      val pathParts = basePath.split("/").filter(_.nonEmpty)
       val segmentID = if (item.segmentID != 0L) {
         item.segmentID
-      } else {
-        // Try to extract from basePath
-        val pathParts = basePath.split("/")
-        if (pathParts.length >= 1) {
-          try {
-            pathParts.last.toLong
-          } catch {
-            case _: NumberFormatException => 0L
-          }
-        } else 0L
-      }
+      } else if (pathParts.nonEmpty) {
+        try {
+          pathParts.last.toLong
+        } catch {
+          case _: NumberFormatException => 0L
+        }
+      } else 0L
+      val insertLogIdx = pathParts.lastIndexOf("insert_log")
+      val partitionId =
+        if (insertLogIdx >= 0 && pathParts.length > insertLogIdx + 3) {
+          pathParts(insertLogIdx + 2)
+        } else {
+          defaultPartitionId
+        }
       logInfo(
-        s"Creating partition with manifestPath=$basePath, segmentID=$segmentID, readVersion=$readVersion"
+        s"Creating partition with manifestPath=$basePath, partitionID=$partitionId, segmentID=$segmentID, readVersion=$readVersion"
       )
       MilvusStorageV3InputPartition(
         basePath, // The basePath extracted from manifest JSON
         schemaBytes, // Protobuf CollectionSchema bytes from snapshot
-        defaultPartitionId, // Partition name/ID
+        partitionId, // Partition name/ID
         milvusOption,
         vectorSearchConfig.map(_.topK),
         vectorSearchConfig.map(_.queryVector),
