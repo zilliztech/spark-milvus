@@ -1768,6 +1768,9 @@ class MilvusScan(
         if (insertLogIdx >= 0 && pathParts.length > insertLogIdx + 3) {
           pathParts(insertLogIdx + 2)
         } else {
+          logWarning(
+            s"Manifest path '$basePath' does not match expected insert_log/{collectionID}/{partitionID}/{segmentID} layout; using fallback partitionID=$defaultPartitionId"
+          )
           defaultPartitionId
         }
       logInfo(

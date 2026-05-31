@@ -844,6 +844,30 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(second.readVersion == 8L)
   }
 
+  test(
+    "snapshot planner falls back to default partition ID for unexpected V3 paths"
+  ) {
+    val manifestJson = MilvusSnapshotReader.serializeManifestList(
+      Seq(
+        StorageV2ManifestItem(
+          30L,
+          "{\"ver\":7,\"base_path\":\"files/unexpected/10/20/30\"}"
+        )
+      )
+    )
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(MilvusOption.SnapshotMode, "true")
+    rawOptions.put(MilvusOption.SnapshotManifests, manifestJson)
+    rawOptions.put(MilvusOption.SnapshotPartitionIds, "20,21")
+    rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
+    val partitions = scanWithOptions(rawOptions).planInputPartitions()
+    assert(partitions.length == 1)
+    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
+    assert(partition.partitionName == "20")
+    assert(partition.segmentID == 30L)
+    assert(partition.readVersion == 7L)
+  }
+
   test("snapshot planner accepts V2-only snapshot segments") {
     val v2Json = MilvusSnapshotReader.serializeV2Segments(
       Seq(
