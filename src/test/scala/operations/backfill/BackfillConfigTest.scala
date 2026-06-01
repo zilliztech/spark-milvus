@@ -243,7 +243,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     options("milvus.token") shouldBe "root:Milvus"
     options("milvus.database.name") shouldBe "my_database"
     options("milvus.collection.name") shouldBe "test_collection"
-    options("milvus.extra.columns") shouldBe "segment_id,row_offset"
+    options("milvus.extra.columns") shouldBe "$segment_id,$row_offset"
     options("fs.address") shouldBe "localhost:9000"
     options("fs.bucket_name") shouldBe "test-bucket"
     options("fs.root_path") shouldBe "data/milvus"

@@ -65,8 +65,17 @@ object MilvusOption {
 
   val MilvusExtraColumns = "milvus.extra.columns"
   val MilvusExtraColumnPartition = "partition"
-  val MilvusExtraColumnSegmentID = "segment_id"
-  val MilvusExtraColumnRowOffset = "row_offset"
+  val MilvusExtraColumnSegmentID = "$segment_id"
+  val MilvusExtraColumnRowOffset = "$row_offset"
+  private[connector] val MilvusExtraColumnSegmentIDAlias = "segment_id"
+  private[connector] val MilvusExtraColumnRowOffsetAlias = "row_offset"
+
+  private[connector] def normalizeExtraColumnName(name: String): String =
+    name match {
+      case MilvusExtraColumnSegmentIDAlias => MilvusExtraColumnSegmentID
+      case MilvusExtraColumnRowOffsetAlias => MilvusExtraColumnRowOffset
+      case other                           => other
+    }
 
   // reader config
   val ReaderPath = "path"
@@ -246,6 +255,7 @@ object MilvusOption {
       .split(",")
       .map(_.trim)
       .filter(_.nonEmpty)
+      .map(normalizeExtraColumnName)
       .toSeq
 
     // Convert CaseInsensitiveStringMap to regular Map for storage

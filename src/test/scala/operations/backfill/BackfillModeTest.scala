@@ -110,14 +110,14 @@ class BackfillModeTest
   private def buildOriginal(
       rows: Seq[(Int, java.lang.Integer, java.lang.String, Long, Long)]
   ): DataFrame = {
-    // columns: pk, f1 (nullable Int), f2 (nullable String), segment_id, row_offset
+    // columns: pk, f1 (nullable Int), f2 (nullable String), $segment_id, $row_offset
     val schema = StructType(
       Seq(
         StructField("pk", IntegerType, nullable = false),
         StructField("f1", IntegerType, nullable = true),
         StructField("f2", StringType, nullable = true),
-        StructField("segment_id", LongType, nullable = false),
-        StructField("row_offset", LongType, nullable = false)
+        StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false),
+        StructField(MilvusBackfill.RowOffsetCol, LongType, nullable = false)
       )
     )
     val javaRows = rows.map { case (pk, f1, f2, seg, off) =>
@@ -144,8 +144,8 @@ class BackfillModeTest
     val originalSchema = StructType(
       Seq(
         StructField("pk", IntegerType, nullable = false),
-        StructField("segment_id", LongType, nullable = false),
-        StructField("row_offset", LongType, nullable = false)
+        StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false),
+        StructField(MilvusBackfill.RowOffsetCol, LongType, nullable = false)
       )
     )
     val originalRows = Seq(Row(1, 10L, 0L), Row(2, 10L, 1L), Row(3, 10L, 2L))
@@ -226,8 +226,8 @@ class BackfillModeTest
       "pk",
       "f1",
       "f2",
-      "segment_id",
-      "row_offset",
+      MilvusBackfill.SegmentIdCol,
+      MilvusBackfill.RowOffsetCol,
       MilvusBackfill.MatchFlagCol,
       MilvusBackfill.usedSrcCol("f1"),
       MilvusBackfill.usedBfCol("f1"),
@@ -450,8 +450,8 @@ class BackfillModeTest
       "pk",
       "f1",
       "f2",
-      "segment_id",
-      "row_offset",
+      MilvusBackfill.SegmentIdCol,
+      MilvusBackfill.RowOffsetCol,
       MilvusBackfill.MatchFlagCol,
       MilvusBackfill.usedSrcCol("f1"),
       MilvusBackfill.usedBfCol("f1"),

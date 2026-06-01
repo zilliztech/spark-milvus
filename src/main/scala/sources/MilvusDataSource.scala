@@ -328,6 +328,68 @@ case class MilvusTable(
 
   override def name(): String = milvusOption.collectionName
 
+  private def appendExtraColumns(
+      baseSchema: StructType,
+      rejectLegacyAliases: Boolean
+  ): StructType = {
+    var fields = baseSchema.fields.toSeq
+
+    def failIfPresent(alias: String, canonical: String): Unit = {
+      if (rejectLegacyAliases && fields.exists(_.name == alias)) {
+        throw new IllegalArgumentException(
+          s"Field '$alias' is a legacy alias for metadata extra column '$canonical'; use '$canonical' in the schema or remove it and request '$canonical' via ${MilvusOption.MilvusExtraColumns}"
+        )
+      }
+    }
+
+    def addIfRequested(name: String, field: StructField): Unit = {
+      if (milvusOption.extraColumns.contains(name)) {
+        if (fields.exists(_.name == name)) {
+          throw new IllegalArgumentException(
+            s"Requested metadata extra column '$name' conflicts with an existing field named '$name'"
+          )
+        }
+        fields = fields :+ field
+      }
+    }
+
+    if (
+      milvusOption.extraColumns.contains(
+        MilvusOption.MilvusExtraColumnSegmentID
+      )
+    ) {
+      failIfPresent(
+        MilvusOption.MilvusExtraColumnSegmentIDAlias,
+        MilvusOption.MilvusExtraColumnSegmentID
+      )
+    }
+    if (
+      milvusOption.extraColumns.contains(
+        MilvusOption.MilvusExtraColumnRowOffset
+      )
+    ) {
+      failIfPresent(
+        MilvusOption.MilvusExtraColumnRowOffsetAlias,
+        MilvusOption.MilvusExtraColumnRowOffset
+      )
+    }
+
+    addIfRequested(
+      MilvusOption.MilvusExtraColumnPartition,
+      StructField(MilvusOption.MilvusExtraColumnPartition, StringType, true)
+    )
+    addIfRequested(
+      MilvusOption.MilvusExtraColumnSegmentID,
+      StructField(MilvusOption.MilvusExtraColumnSegmentID, LongType, false)
+    )
+    addIfRequested(
+      MilvusOption.MilvusExtraColumnRowOffset,
+      StructField(MilvusOption.MilvusExtraColumnRowOffset, LongType, false)
+    )
+
+    StructType(fields)
+  }
+
   override def schema(): StructType = {
     // In snapshot mode with provided sparkSchema, use it directly
     // This avoids the need to parse milvusCollection.schema which may be incomplete
@@ -335,7 +397,7 @@ case class MilvusTable(
       logInfo(
         s"Using provided sparkSchema in snapshot mode: ${sparkSchema.get.fieldNames.mkString(", ")}"
       )
-      return sparkSchema.get
+      return appendExtraColumns(sparkSchema.get, rejectLegacyAliases = true)
     }
 
     // Client-based mode or snapshot mode without provided schema: compute from milvusCollection
@@ -375,28 +437,7 @@ case class MilvusTable(
     ) {
       fields = fields :+ StructField("$meta", StringType, true)
     }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnPartition
-      )
-    ) {
-      fields = fields :+ StructField("partition", StringType, true)
-    }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnSegmentID
-      )
-    ) {
-      fields = fields :+ StructField("segment_id", LongType, false)
-    }
-    if (
-      milvusOption.extraColumns.contains(
-        MilvusOption.MilvusExtraColumnRowOffset
-      )
-    ) {
-      fields = fields :+ StructField("row_offset", LongType, false)
-    }
-    StructType(fields)
+    appendExtraColumns(StructType(fields), rejectLegacyAliases = false)
   }
 
   override def capabilities(): ju.Set[TableCapability] = {
@@ -421,6 +462,7 @@ class MilvusScanBuilder(
     .split(",")
     .map(_.trim)
     .filter(_.nonEmpty)
+    .map(MilvusOption.normalizeExtraColumnName)
     .toSeq
 
   // Store the filters that can be pushed down
@@ -495,21 +537,21 @@ class MilvusScanBuilder(
     }
     if (
       extraColumns.contains(MilvusOption.MilvusExtraColumnPartition) &&
-      !fieldNames.contains("partition")
+      !fieldNames.contains(MilvusOption.MilvusExtraColumnPartition)
     ) {
-      fieldNames = fieldNames :+ "partition"
+      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnPartition
     }
     if (
       extraColumns.contains(MilvusOption.MilvusExtraColumnSegmentID) &&
-      !fieldNames.contains("segment_id")
+      !fieldNames.contains(MilvusOption.MilvusExtraColumnSegmentID)
     ) {
-      fieldNames = fieldNames :+ "segment_id"
+      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnSegmentID
     }
     if (
       extraColumns.contains(MilvusOption.MilvusExtraColumnRowOffset) &&
-      !fieldNames.contains("row_offset")
+      !fieldNames.contains(MilvusOption.MilvusExtraColumnRowOffset)
     ) {
-      fieldNames = fieldNames :+ "row_offset"
+      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnRowOffset
     }
 
     currentOptions = new CaseInsensitiveStringMap(tmpMap)
@@ -1709,28 +1751,35 @@ class MilvusScan(
             ) // Backward compatible: plain basePath, latest version
         }
 
-      // Extract segmentID from manifest path if item.segmentID is 0
+      // Extract segmentID and partitionID from manifest path if needed
       // Path format: files/insert_log/{collectionID}/{partitionID}/{segmentID}
+      val pathParts = basePath.split("/").filter(_.nonEmpty)
       val segmentID = if (item.segmentID != 0L) {
         item.segmentID
-      } else {
-        // Try to extract from basePath
-        val pathParts = basePath.split("/")
-        if (pathParts.length >= 1) {
-          try {
-            pathParts.last.toLong
-          } catch {
-            case _: NumberFormatException => 0L
-          }
-        } else 0L
-      }
+      } else if (pathParts.nonEmpty) {
+        try {
+          pathParts.last.toLong
+        } catch {
+          case _: NumberFormatException => 0L
+        }
+      } else 0L
+      val insertLogIdx = pathParts.lastIndexOf("insert_log")
+      val partitionId =
+        if (insertLogIdx >= 0 && pathParts.length > insertLogIdx + 3) {
+          pathParts(insertLogIdx + 2)
+        } else {
+          logWarning(
+            s"Manifest path '$basePath' does not match expected insert_log/{collectionID}/{partitionID}/{segmentID} layout; using fallback partitionID=$defaultPartitionId"
+          )
+          defaultPartitionId
+        }
       logInfo(
-        s"Creating partition with manifestPath=$basePath, segmentID=$segmentID, readVersion=$readVersion"
+        s"Creating partition with manifestPath=$basePath, partitionID=$partitionId, segmentID=$segmentID, readVersion=$readVersion"
       )
       MilvusStorageV3InputPartition(
         basePath, // The basePath extracted from manifest JSON
         schemaBytes, // Protobuf CollectionSchema bytes from snapshot
-        defaultPartitionId, // Partition name/ID
+        partitionId, // Partition name/ID
         milvusOption,
         vectorSearchConfig.map(_.topK),
         vectorSearchConfig.map(_.queryVector),
