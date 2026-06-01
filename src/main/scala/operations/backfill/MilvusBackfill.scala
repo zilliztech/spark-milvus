@@ -42,6 +42,8 @@ object MilvusBackfill {
     * function, and stripped from the projection written to parquet.
     */
   private[backfill] val MatchFlagCol = "__bf_matched__"
+  private[backfill] val SegmentIdCol = MilvusOption.MilvusExtraColumnSegmentID
+  private[backfill] val RowOffsetCol = MilvusOption.MilvusExtraColumnRowOffset
 
   /** Per-field flag columns added in any mode that reads source-side target
     * values (coalesce + overwrite). For each new field, one boolean marker
@@ -554,8 +556,8 @@ object MilvusBackfill {
     Right(renamed)
   }
 
-  /** Read collection data with segment_id and row_offset metadata segment_id
-    * and row_offset are used to match with the original sequence of rows for
+  /** Read collection data with $segment_id and $row_offset metadata $segment_id
+    * and $row_offset are used to match with the original sequence of rows for
     * each segment
     *
     * @param pkFieldId
@@ -664,17 +666,12 @@ object MilvusBackfill {
             case (acc, (_, _, field)) => acc.add(field)
           }
 
-          // Add extra columns for segment tracking
-          val fullSchema = withExtras
-            .add("segment_id", org.apache.spark.sql.types.LongType, false)
-            .add("row_offset", org.apache.spark.sql.types.LongType, false)
-
           logger.info(
-            s"Reading with schema: ${fullSchema.fieldNames.mkString(", ")}"
+            s"Reading with schema: ${withExtras.fieldNames.mkString(", ")}"
           )
 
           spark.read
-            .schema(fullSchema)
+            .schema(withExtras)
             .format("com.zilliz.spark.connector.sources.MilvusDataSource")
             .options(options)
             .load()
@@ -687,14 +684,13 @@ object MilvusBackfill {
             .load()
       }
 
-      // Validate that segment_id and row_offset are present
       if (
-        !df.columns.contains("segment_id") || !df.columns.contains("row_offset")
+        !df.columns.contains(SegmentIdCol) || !df.columns.contains(RowOffsetCol)
       ) {
         return Left(
           ConnectionError(
             message =
-              "Failed to read collection data with segment_id and row_offset. " +
+              s"Failed to read collection data with $SegmentIdCol and $RowOffsetCol. " +
                 "Ensure milvus.extra.columns is set correctly."
           )
         )
@@ -964,7 +960,7 @@ object MilvusBackfill {
   ): Either[BackfillError, Map[Long, SegmentBackfillResult]] = {
 
     try {
-      // Prepare data: select only needed columns and add segment_id for
+      // Prepare data: select only needed columns and add $segment_id for
       // partitioning. Trailing column is the backfill match flag — retained
       // here so executors can count PK-matched rows, stripped from the
       // projection that reaches the writer. In any source-reading mode
@@ -979,12 +975,12 @@ object MilvusBackfill {
         else Seq.empty
       val preparedDF = joinedDF
         .select(
-          (Seq("segment_id", "row_offset") ++ newFieldNames ++ Seq(
+          (Seq(SegmentIdCol, RowOffsetCol) ++ newFieldNames ++ Seq(
             MatchFlagCol
           ) ++ flagColNames).map(col): _*
         )
 
-      // Get the schema for new fields only (without segment_id, row_offset,
+      // Get the schema for new fields only (without $segment_id, $row_offset,
       // or the match flag)
       val targetSchema = org.apache.spark.sql.types.StructType(
         newFieldNames.map(fieldName =>
@@ -995,19 +991,19 @@ object MilvusBackfill {
       val segmentIds = segmentToPartitionMap.keys.toArray
       val segmentPartitioner = new SegmentPartitioner(segmentIds)
 
-      // Repartition using custom partitioner, then sort by row_offset within each partition
+      // Repartition using custom partitioner, then sort by $row_offset within each partition
       // CRITICAL: .copy() is required because queryExecution.toRdd produces an iterator
       // that reuses the same UnsafeRow buffer. Without copy, keyBy/partitionBy's
       // ExternalSorter stores references to the same mutable buffer, causing all
       // rows to contain the last row's data.
       val repartitionedRDD = preparedDF.queryExecution.toRdd
         .map(_.copy()) // Materialize each row to avoid UnsafeRow reuse
-        .keyBy(_.getLong(0)) // segment_id is at index 0
+        .keyBy(_.getLong(0)) // $segment_id is at index 0
         .partitionBy(segmentPartitioner)
         .values
         .mapPartitions(iter =>
           iter.toSeq.sortBy(_.getLong(1)).iterator
-        ) // Sort by row_offset
+        ) // Sort by $row_offset
 
       // Broadcast configuration to executors
       val broadcastConfig = spark.sparkContext.broadcast(config)
@@ -1182,7 +1178,7 @@ object MilvusBackfill {
     val readsSourceFields = config.readsSourceFields
     val newFieldNames = targetSchema.fieldNames.toSeq
     val numNewFields = newFieldNames.size
-    // Row layout (fixed prefix): [segment_id, row_offset, ...newFields,
+    // Row layout (fixed prefix): [$segment_id, $row_offset, ...newFields,
     // __bf_matched__, (usedSrc, usedBf)*numNewFields in source-reading modes
     // (coalesce / overwrite) only].
     val matchFlagIdx = 2 + numNewFields
@@ -1492,7 +1488,7 @@ object MilvusBackfill {
 
     val readsSourceFields = config.readsSourceFields
     val numNewFields = fieldNames.size
-    // Row layout (fixed prefix): [segment_id, row_offset, ...newFields,
+    // Row layout (fixed prefix): [$segment_id, $row_offset, ...newFields,
     // __bf_matched__, (usedSrc, usedBf)*numNewFields in source-reading modes
     // (coalesce / overwrite) only].
     val matchFlagIdx = 2 + numNewFields

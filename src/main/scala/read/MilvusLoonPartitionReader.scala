@@ -37,6 +37,14 @@ import io.milvus.storage.{
   NativeLibraryLoader
 }
 
+object MilvusLoonPartitionReader {
+  private case class VectorSearchResult(
+      row: InternalRow,
+      distance: Double,
+      rowOffset: Long
+  )
+}
+
 // for Milvus 2.6+ version data source and milvus lake data
 class MilvusLoonPartitionReader(
     schema: StructType,
@@ -97,6 +105,10 @@ class MilvusLoonPartitionReader(
 
   private var _currentBatch: VectorSchemaRoot = null
   private var _currentRowIndex: Int = 0
+  private var _currentBatchStartRowOffset: Long = 0L
+  private var _lastReturnedRowOffset: Long = -1L
+
+  def lastReturnedRowOffset: Long = _lastReturnedRowOffset
 
   try {
     // Create Arrow schema from Milvus schema.
@@ -176,7 +188,9 @@ class MilvusLoonPartitionReader(
 
   // Vector search state
   private val vectorSearchEnabled = topK.isDefined && queryVector.isDefined
-  private var vectorSearchResults: Iterator[(InternalRow, Double)] = _
+  private var vectorSearchResults: Iterator[
+    MilvusLoonPartitionReader.VectorSearchResult
+  ] = _
   private var vectorSearchCompleted = false
 
   override def next(): Boolean = {
@@ -215,6 +229,7 @@ class MilvusLoonPartitionReader(
         } else {
           // Try to load next batch
           if (_currentBatch != null) {
+            _currentBatchStartRowOffset += _currentBatch.getRowCount
             _currentBatch.close()
             _currentBatch = null
           }
@@ -237,9 +252,10 @@ class MilvusLoonPartitionReader(
   override def get(): InternalRow = {
     if (vectorSearchEnabled) {
       // Vector search mode: return row with distance appended
-      val (row, distance) = vectorSearchResults.next()
-      val rowSeq = row.toSeq(sourceSchema)
-      val resultRow = InternalRow.fromSeq(rowSeq :+ distance)
+      val result = vectorSearchResults.next()
+      _lastReturnedRowOffset = result.rowOffset
+      val rowSeq = result.row.toSeq(sourceSchema)
+      val resultRow = InternalRow.fromSeq(rowSeq :+ result.distance)
       resultRow
     } else {
       // Normal mode
@@ -247,6 +263,7 @@ class MilvusLoonPartitionReader(
         throw new IllegalStateException("No batch loaded")
       }
 
+      _lastReturnedRowOffset = _currentBatchStartRowOffset + _currentRowIndex
       val row = ArrowConverter.arrowToInternalRow(
         _currentBatch,
         _currentRowIndex,
@@ -344,19 +361,27 @@ class MilvusLoonPartitionReader(
     // Use priority queue to maintain top-K
     // For L2: min-heap (smaller distance is better, so we keep max at top to evict)
     // For IP/COSINE: max-heap (larger score is better, so we keep min at top to evict)
-    val ordering: Ordering[(InternalRow, Double)] = metric match {
-      case "L2" =>
-        Ordering.by[(InternalRow, Double), Double](_._2) // Max-heap for L2
-      case "IP" | "COSINE" =>
-        Ordering
-          .by[(InternalRow, Double), Double](_._2)
-          .reverse // Min-heap for IP/COSINE
-      case _ => Ordering.by[(InternalRow, Double), Double](_._2)
-    }
+    val ordering: Ordering[MilvusLoonPartitionReader.VectorSearchResult] =
+      metric match {
+        case "L2" =>
+          Ordering.by[MilvusLoonPartitionReader.VectorSearchResult, Double](
+            _.distance
+          )
+        case "IP" | "COSINE" =>
+          Ordering
+            .by[MilvusLoonPartitionReader.VectorSearchResult, Double](
+              _.distance
+            )
+            .reverse
+        case _ =>
+          Ordering.by[MilvusLoonPartitionReader.VectorSearchResult, Double](
+            _.distance
+          )
+      }
 
     val heap = scala.collection.mutable.PriorityQueue
-      .empty[(InternalRow, Double)](ordering)
-    var rowCount = 0
+      .empty[MilvusLoonPartitionReader.VectorSearchResult](ordering)
+    var rowCount = 0L
 
     // Helper function to process a batch
     def processBatch(batch: VectorSchemaRoot): Unit = {
@@ -389,24 +414,26 @@ class MilvusLoonPartitionReader(
           }
 
         if (vector != null) {
-          // Calculate distance
           val distance = calculateDistance(qv, vector, metric)
+          val result = MilvusLoonPartitionReader.VectorSearchResult(
+            row.copy(),
+            distance,
+            rowCount
+          )
 
-          // Maintain top-K heap
           if (heap.size < k) {
-            heap.enqueue((row.copy(), distance))
+            heap.enqueue(result)
           } else {
-            val (_, worstDist) = heap.head
+            val worst = heap.head
             val shouldReplace = metric match {
-              case "L2" => distance < worstDist // Smaller L2 distance is better
-              case "IP" | "COSINE" =>
-                distance > worstDist // Larger IP/COSINE is better
-              case _ => distance < worstDist
+              case "L2"            => distance < worst.distance
+              case "IP" | "COSINE" => distance > worst.distance
+              case _               => distance < worst.distance
             }
 
             if (shouldReplace) {
               heap.dequeue()
-              heap.enqueue((row.copy(), distance))
+              heap.enqueue(result)
             }
           }
         }
@@ -439,13 +466,20 @@ class MilvusLoonPartitionReader(
       s"Per-segment vector search completed: processed $rowCount rows, kept ${heap.size} top-K results"
     )
 
-    // Sort results and create iterator
+    val results = heap.dequeueAll
     val sortedResults = metric match {
       case "L2" =>
-        heap.dequeueAll.sortBy[(Double)](x => x._2) // Ascending for L2
+        results.sortBy((result: MilvusLoonPartitionReader.VectorSearchResult) =>
+          result.distance
+        )
       case "IP" | "COSINE" =>
-        heap.dequeueAll.sortBy[(Double)](x => -x._2) // Descending for IP/COSINE
-      case _ => heap.dequeueAll.sortBy[(Double)](x => x._2)
+        results.sortBy((result: MilvusLoonPartitionReader.VectorSearchResult) =>
+          -result.distance
+        )
+      case _ =>
+        results.sortBy((result: MilvusLoonPartitionReader.VectorSearchResult) =>
+          result.distance
+        )
     }
 
     vectorSearchResults = sortedResults.iterator
