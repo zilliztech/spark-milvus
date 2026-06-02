@@ -506,8 +506,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     assert(
       schema.fieldNames.toSeq == Seq(
-        "row_id",
-        "timestamp",
+        "RowID",
+        "Timestamp",
         "segment_id",
         "row_offset",
         "$segment_id",
