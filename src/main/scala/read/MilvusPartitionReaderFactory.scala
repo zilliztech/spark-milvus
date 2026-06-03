@@ -50,13 +50,6 @@ class MilvusPartitionReaderFactory(
 ) extends PartitionReaderFactory
     with Logging {
 
-  private def isSystemField(name: String): Boolean =
-    name == "RowID" ||
-      name == "Timestamp" ||
-      name == "row_id" ||
-      name == "rowid" ||
-      name == "timestamp"
-
   private val requestedExtraColumns =
     MilvusPartitionReaderFactory.requestedExtraColumns(optionsMap)
 

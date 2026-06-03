@@ -71,6 +71,10 @@ object MilvusPackedV2PartitionReader {
       fieldMappings: FieldMappings,
       neededColumnFieldIds: Seq[Long]
   ): Array[String] = {
+    if (columnGroups.isEmpty) {
+      return Array.empty
+    }
+
     val declaredFieldIds = columnGroups.flatMap(_.fieldIds).toSet
     val requestedFieldIds: Seq[Long] =
       if (neededColumnFieldIds.nonEmpty) {

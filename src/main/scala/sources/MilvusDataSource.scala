@@ -53,6 +53,7 @@ import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusCollectionInfo,
   MilvusOption,
+  MilvusSchemaUtil,
   VectorSearchConfig
 }
 import com.zilliz.spark.connector.loon.Properties
@@ -410,10 +411,20 @@ case class MilvusTable(
         field.fieldID
       }
     }
-    if (fieldIDs.isEmpty || fieldIDs.contains("0")) {
+    val missingSystemFields = MilvusSchemaUtil
+      .missingSystemFields(milvusCollection.schema)
+      .map(_.fieldID)
+      .toSet
+    if (
+      missingSystemFields.contains(0L) &&
+      (fieldIDs.isEmpty || fieldIDs.contains("0"))
+    ) {
       fields = fields :+ StructField("RowID", LongType, false)
     }
-    if (fieldIDs.isEmpty || fieldIDs.contains("1")) {
+    if (
+      missingSystemFields.contains(1L) &&
+      (fieldIDs.isEmpty || fieldIDs.contains("1"))
+    ) {
       fields = fields :+ StructField("Timestamp", LongType, false)
     }
     val filteredFields = milvusCollection.schema.fields

@@ -34,12 +34,30 @@ object MilvusSchemaUtil {
     )
   }
 
-  private def systemFieldNameAliases(field: FieldSchema): Set[String] = {
+  private[connector] val CanonicalSystemFields: Seq[FieldSchema] = Seq(
+    FieldSchema(name = "RowID", fieldID = 0, dataType = DataType.Int64),
+    FieldSchema(name = "Timestamp", fieldID = 1, dataType = DataType.Int64)
+  )
+
+  private[connector] def systemFieldNameAliases(
+      field: FieldSchema
+  ): Set[String] = {
     field.fieldID match {
       case 0 => Set("rowid", "row_id")
       case 1 => Set("timestamp")
       case _ => Set(field.name.toLowerCase)
     }
+  }
+
+  private[connector] def missingSystemFields(
+      collectionSchema: io.milvus.grpc.schema.CollectionSchema
+  ): Seq[FieldSchema] = {
+    val existingNames = collectionSchema.fields.map(_.name.toLowerCase).toSet
+    val existingFieldIds = collectionSchema.fields.map(_.fieldID).toSet
+    CanonicalSystemFields.filterNot(field =>
+      systemFieldNameAliases(field).exists(existingNames.contains) ||
+        existingFieldIds.contains(field.fieldID)
+    )
   }
 
   /** Convert Milvus FieldSchema to Arrow Field
@@ -143,18 +161,9 @@ object MilvusSchemaUtil {
       arrowFields += arrowField
     }
 
-    val existingNames = collectionSchema.fields.map(_.name.toLowerCase).toSet
-    val existingFieldIds = collectionSchema.fields.map(_.fieldID).toSet
-    val systemFields = Seq(
-      FieldSchema(name = "RowID", fieldID = 0, dataType = DataType.Int64),
-      FieldSchema(name = "Timestamp", fieldID = 1, dataType = DataType.Int64)
-    ).filterNot(field =>
-      systemFieldNameAliases(field).exists(existingNames.contains) ||
-        existingFieldIds.contains(field.fieldID)
-    )
-
-    (systemFields ++ collectionSchema.fields).foreach { field =>
-      appendArrowField(field)
+    (missingSystemFields(collectionSchema) ++ collectionSchema.fields).foreach {
+      field =>
+        appendArrowField(field)
     }
 
     // Create and return Arrow Schema
@@ -229,18 +238,9 @@ object MilvusSchemaUtil {
       arrowFields += arrowField
     }
 
-    val existingNames = collectionSchema.fields.map(_.name.toLowerCase).toSet
-    val existingFieldIds = collectionSchema.fields.map(_.fieldID).toSet
-    val systemFields = Seq(
-      FieldSchema(name = "RowID", fieldID = 0, dataType = DataType.Int64),
-      FieldSchema(name = "Timestamp", fieldID = 1, dataType = DataType.Int64)
-    ).filterNot(field =>
-      systemFieldNameAliases(field).exists(existingNames.contains) ||
-        existingFieldIds.contains(field.fieldID)
-    )
-
-    (systemFields ++ collectionSchema.fields).foreach { field =>
-      appendArrowFieldWithIdName(field)
+    (missingSystemFields(collectionSchema) ++ collectionSchema.fields).foreach {
+      field =>
+        appendArrowFieldWithIdName(field)
     }
 
     // Create and return Arrow Schema
