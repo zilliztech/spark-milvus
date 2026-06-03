@@ -53,6 +53,7 @@ import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusCollectionInfo,
   MilvusOption,
+  MilvusSchemaUtil,
   VectorSearchConfig
 }
 import com.zilliz.spark.connector.loon.Properties
@@ -410,11 +411,21 @@ case class MilvusTable(
         field.fieldID
       }
     }
-    if (fieldIDs.isEmpty || fieldIDs.contains("0")) {
-      fields = fields :+ StructField("row_id", LongType, false)
+    val missingSystemFields = MilvusSchemaUtil
+      .missingSystemFields(milvusCollection.schema)
+      .map(_.fieldID)
+      .toSet
+    if (
+      missingSystemFields.contains(0L) &&
+      (fieldIDs.isEmpty || fieldIDs.contains("0"))
+    ) {
+      fields = fields :+ StructField("RowID", LongType, false)
     }
-    if (fieldIDs.isEmpty || fieldIDs.contains("1")) {
-      fields = fields :+ StructField("timestamp", LongType, false)
+    if (
+      missingSystemFields.contains(1L) &&
+      (fieldIDs.isEmpty || fieldIDs.contains("1"))
+    ) {
+      fields = fields :+ StructField("Timestamp", LongType, false)
     }
     val filteredFields = milvusCollection.schema.fields
       .filter(field =>
@@ -516,9 +527,10 @@ class MilvusScanBuilder(
 
     fieldNames = fieldNames.sortBy(fieldName => fieldName2ID(fieldName))
     logInfo(s"fieldNames after sort: $fieldNames")
-    if (fieldNames.isEmpty) {
-      fieldNames = fieldNames :+ "row_id"
-      logInfo(s"fieldNames after add row_id: $fieldNames")
+    if (fieldNames.isEmpty && fieldName2ID.nonEmpty) {
+      val fallbackFieldName = fieldName2ID.toSeq.sortBy(_._2).head._1
+      fieldNames = fieldNames :+ fallbackFieldName
+      logInfo(s"fieldNames after add fallback field: $fieldNames")
     }
 
     val tmpMap = new HashMap[String, String]()

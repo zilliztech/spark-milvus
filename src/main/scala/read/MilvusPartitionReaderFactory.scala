@@ -50,9 +50,6 @@ class MilvusPartitionReaderFactory(
 ) extends PartitionReaderFactory
     with Logging {
 
-  private def isSystemField(name: String): Boolean =
-    name == "row_id" || name == "timestamp"
-
   private val requestedExtraColumns =
     MilvusPartitionReaderFactory.requestedExtraColumns(optionsMap)
 
@@ -72,7 +69,7 @@ class MilvusPartitionReaderFactory(
         )
 
         val v2Schema = StructType(schema.fields.filterNot { field =>
-          isSystemField(field.name) || isMetadataExtraField(field.name)
+          isMetadataExtraField(field.name)
         })
 
         // Deserialize the protobuf schema
@@ -93,11 +90,11 @@ class MilvusPartitionReaderFactory(
           p.readVersion
         )
 
-        val hasSyntheticFields = schema.fieldNames.exists { name =>
-          isSystemField(name) || isMetadataExtraField(name)
+        val hasMetadataExtraFields = schema.fieldNames.exists { name =>
+          isMetadataExtraField(name)
         }
 
-        if (hasSyntheticFields) {
+        if (hasMetadataExtraFields) {
           new PartitionReader[InternalRow] {
             override def next(): Boolean = underlyingReader.next()
 
@@ -108,8 +105,6 @@ class MilvusPartitionReaderFactory(
 
               schema.fields.zipWithIndex.foreach { case (field, writeIdx) =>
                 field.name match {
-                  case "row_id" | "timestamp" =>
-                    resultValues(writeIdx) = null
                   case MilvusOption.MilvusExtraColumnPartition =>
                     resultValues(writeIdx) =
                       MilvusPartitionReaderFactory.stringValue(p.partitionName)
@@ -140,7 +135,7 @@ class MilvusPartitionReaderFactory(
         )
 
         val innerSchema = StructType(schema.fields.filterNot { field =>
-          isSystemField(field.name) || isMetadataExtraField(field.name)
+          isMetadataExtraField(field.name)
         })
 
         val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
@@ -153,11 +148,11 @@ class MilvusPartitionReaderFactory(
           p.neededColumnFieldIds
         )
 
-        val hasSyntheticFields = schema.fieldNames.exists { name =>
-          isSystemField(name) || isMetadataExtraField(name)
+        val hasMetadataExtraFields = schema.fieldNames.exists { name =>
+          isMetadataExtraField(name)
         }
 
-        if (hasSyntheticFields) {
+        if (hasMetadataExtraFields) {
           new PartitionReader[InternalRow] {
             private var rowOffset: Long = 0L
 
@@ -170,8 +165,6 @@ class MilvusPartitionReaderFactory(
 
               schema.fields.zipWithIndex.foreach { case (field, writeIdx) =>
                 field.name match {
-                  case "row_id" | "timestamp" =>
-                    out(writeIdx) = null
                   case MilvusOption.MilvusExtraColumnPartition =>
                     out(writeIdx) = MilvusPartitionReaderFactory.stringValue(
                       p.partitionID.toString

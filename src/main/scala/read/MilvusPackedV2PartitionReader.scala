@@ -24,6 +24,104 @@ import io.milvus.storage.{
   NativeLibraryLoader
 }
 
+object MilvusPackedV2PartitionReader {
+  private val ToleratedUnmappedColumns = Set("$meta")
+
+  private[read] case class FieldMappings(
+      fieldIdToName: Map[Long, String],
+      fieldNameToId: Map[String, Long],
+      fieldNameToArrowColumn: Map[String, String]
+  )
+
+  private[read] val SystemFieldAliases: Seq[(String, (Long, String))] = Seq(
+    "RowID" -> (0L, "RowID"),
+    "row_id" -> (0L, "RowID"),
+    "rowid" -> (0L, "RowID"),
+    "Timestamp" -> (1L, "Timestamp"),
+    "timestamp" -> (1L, "Timestamp")
+  )
+
+  private[read] def buildFieldMappings(
+      milvusSchema: CollectionSchema
+  ): FieldMappings = {
+    val systemFields = Map(0L -> "RowID", 1L -> "Timestamp")
+    val userFields = milvusSchema.fields.map(f => f.fieldID -> f.name).toMap
+    val fieldIdToName = systemFields ++ userFields
+    val userFieldNames = milvusSchema.fields.map(_.name).toSet
+    val systemAliases = SystemFieldAliases.filterNot { case (alias, _) =>
+      userFieldNames.contains(alias)
+    }
+    val userFieldNameToId =
+      milvusSchema.fields.map(f => f.name -> f.fieldID).toMap
+    val systemFieldNameToId = systemAliases.map { case (alias, (id, _)) =>
+      alias -> id
+    }.toMap
+    val systemFieldNameToArrowColumn = systemAliases.map {
+      case (alias, (_, column)) => alias -> column
+    }.toMap
+
+    FieldMappings(
+      fieldIdToName,
+      systemFieldNameToId ++ userFieldNameToId,
+      systemFieldNameToArrowColumn
+    )
+  }
+
+  private[read] def resolveNeededColumns(
+      sourceSchema: StructType,
+      columnGroups: Seq[V2ColumnGroup],
+      fieldMappings: FieldMappings,
+      neededColumnFieldIds: Seq[Long]
+  ): Array[String] = {
+    if (columnGroups.isEmpty) {
+      return Array.empty
+    }
+
+    val declaredFieldIds = columnGroups.flatMap(_.fieldIds).toSet
+    val requestedFieldIds: Seq[Long] =
+      if (neededColumnFieldIds.nonEmpty) {
+        val missingIds = neededColumnFieldIds.filterNot(
+          fieldMappings.fieldIdToName.contains
+        )
+        if (missingIds.nonEmpty) {
+          throw new IllegalArgumentException(
+            s"Packed V2 requested unknown field IDs: ${missingIds.distinct.mkString(",")}" +
+              s"; schema field IDs=${fieldMappings.fieldIdToName.keys.toSeq.sorted.mkString(",")}"
+          )
+        }
+        neededColumnFieldIds
+      } else {
+        val missingNames = sourceSchema.fieldNames.filterNot(name =>
+          fieldMappings.fieldNameToId.contains(name) ||
+            ToleratedUnmappedColumns.contains(name)
+        )
+        if (missingNames.nonEmpty) {
+          throw new IllegalArgumentException(
+            s"Packed V2 requested unknown columns: ${missingNames.distinct.mkString(",")}" +
+              s"; schema columns=${fieldMappings.fieldNameToId.keys.toSeq.sorted.mkString(",")}"
+          )
+        }
+        sourceSchema.fieldNames.toSeq.flatMap(fieldMappings.fieldNameToId.get)
+      }
+    val missingFieldIds = requestedFieldIds.filterNot(declaredFieldIds.contains)
+    if (missingFieldIds.nonEmpty) {
+      val missingColumns = missingFieldIds
+        .flatMap(fieldMappings.fieldIdToName.get)
+        .distinct
+      val declaredColumns = declaredFieldIds
+        .flatMap(fieldMappings.fieldIdToName.get)
+        .toSeq
+        .sorted
+      throw new IllegalArgumentException(
+        s"Packed V2 column groups do not contain requested columns: ${missingColumns
+            .mkString(",")}" +
+          s"; declared columns=${declaredColumns.mkString(",")}"
+      )
+    }
+    requestedFieldIds.flatMap(fieldMappings.fieldIdToName.get).toArray
+  }
+}
+
 /** Spark partition reader for milvus-segment-info `storage_version = 2`
   * (StorageV2, non-manifest packed parquet) segments.
   *
@@ -54,43 +152,25 @@ class MilvusPackedV2PartitionReader(
   private val allocator = ArrowUtils.getAllocator
   private val sourceSchema = schema
 
-  // Field ID -> logical column name. StorageV2 packed-parquet files written
-  // by milvus segcore use the field's logical name in the parquet schema
-  // (with PARQUET:field_id metadata for cross-reference). The packed reader
-  // matches columns by name, so we must pass logical names — NOT
-  // field-id-as-string like the V3 reader does.
-  private val fieldIdToName: Map[Long, String] = {
-    val systemFields = Map(0L -> "RowID", 1L -> "Timestamp")
-    val userFields =
-      milvusSchema.fields.map(f => f.fieldID -> f.name).toMap
-    systemFields ++ userFields
-  }
-  private val fieldNameToId: Map[String, Long] =
-    fieldIdToName.map { case (id, name) => name -> id }
-
-  // V3 readers pass a {sparkName -> fieldId-as-string} map to ArrowConverter
-  // because their on-disk parquet uses fieldId-as-string column names. V2
-  // packed parquet uses LOGICAL names (e.g. "ID"), so we must NOT remap —
-  // ArrowConverter calls `root.getVector(field.name)` directly when the
-  // mapping is empty, which is exactly what we need here. Remapping would
-  // make it look up a non-existent column and silently null every cell.
-  private val fieldNameToArrowColumn: Map[String, String] = Map.empty
+  private val fieldMappings =
+    MilvusPackedV2PartitionReader.buildFieldMappings(milvusSchema)
+  private val fieldNameToArrowColumn = fieldMappings.fieldNameToArrowColumn
 
   // Which column names to ask the packed reader for. Prefer explicit
   // projection from neededColumnFieldIds; fall back to sourceSchema's Spark
   // field names. In both cases we coerce to logical names that the parquet
   // actually carries.
-  private val neededColumns: Array[String] = {
-    val explicitNames: Seq[String] =
-      if (neededColumnFieldIds.nonEmpty)
-        neededColumnFieldIds.flatMap(fid => fieldIdToName.get(fid))
-      else sourceSchema.fieldNames.toSeq.filter(fieldNameToId.contains)
-    // Drop names that aren't declared by any of the v2 column groups —
-    // `loon_reader_new` would reject unknown columns.
-    val declared: Set[String] =
-      columnGroups.flatMap(_.fieldIds.flatMap(fieldIdToName.get)).toSet
-    explicitNames.filter(name => declared.contains(name)).toArray
-  }
+  private val neededColumns: Array[String] =
+    MilvusPackedV2PartitionReader.resolveNeededColumns(
+      sourceSchema,
+      columnGroups,
+      fieldMappings,
+      neededColumnFieldIds
+    )
+
+  // V2 packed parquet uses logical names (e.g. "ID"). When callers request
+  // aliases such as row_id/timestamp, ArrowConverter must look up the canonical
+  // packed column names RowID/Timestamp instead.
 
   // Native resource handles. Initialized to safe defaults so a partial-init
   // failure can roll back whatever was allocated so far. Spark only calls
@@ -127,7 +207,7 @@ class MilvusPackedV2PartitionReader(
     // from the AVRO's AvroBinlog.entries_num — required because the packed
     // reader rejects negative end indices.
     val cols = columnGroups.map { cg =>
-      cg.fieldIds.flatMap(fieldIdToName.get).toArray
+      cg.fieldIds.flatMap(fieldMappings.fieldIdToName.get).toArray
     }.toArray
     val files = columnGroups.map(_.filePaths.toArray).toArray
     val rowCounts = columnGroups.map { cg =>
