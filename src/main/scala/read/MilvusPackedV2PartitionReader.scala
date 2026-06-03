@@ -25,6 +25,8 @@ import io.milvus.storage.{
 }
 
 object MilvusPackedV2PartitionReader {
+  private val ToleratedUnmappedColumns = Set("$meta")
+
   private[read] case class FieldMappings(
       fieldIdToName: Map[Long, String],
       fieldNameToId: Map[String, Long],
@@ -89,8 +91,9 @@ object MilvusPackedV2PartitionReader {
         }
         neededColumnFieldIds
       } else {
-        val missingNames = sourceSchema.fieldNames.filterNot(
-          fieldMappings.fieldNameToId.contains
+        val missingNames = sourceSchema.fieldNames.filterNot(name =>
+          fieldMappings.fieldNameToId.contains(name) ||
+            ToleratedUnmappedColumns.contains(name)
         )
         if (missingNames.nonEmpty) {
           throw new IllegalArgumentException(
@@ -98,7 +101,7 @@ object MilvusPackedV2PartitionReader {
               s"; schema columns=${fieldMappings.fieldNameToId.keys.toSeq.sorted.mkString(",")}"
           )
         }
-        sourceSchema.fieldNames.toSeq.map(fieldMappings.fieldNameToId)
+        sourceSchema.fieldNames.toSeq.flatMap(fieldMappings.fieldNameToId.get)
       }
     val missingFieldIds = requestedFieldIds.filterNot(declaredFieldIds.contains)
     if (missingFieldIds.nonEmpty) {
