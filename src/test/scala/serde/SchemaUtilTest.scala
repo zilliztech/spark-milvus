@@ -331,7 +331,54 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
     // PARQUET:field_id metadata is always stamped, regardless of rename.
     byIdx(0).getMetadata.get("PARQUET:field_id") shouldBe "100"
     byIdx(1).getMetadata.get("PARQUET:field_id") shouldBe "101"
-    byIdx(2).getMetadata.get("PARQUET:field_id") shouldBe "3" // idx+1 fallback
+    byIdx(2).getMetadata.get("PARQUET:field_id") shouldBe "102"
+  }
+
+  test("field ID fallback avoids Milvus system field IDs") {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import org.apache.spark.sql.types._
+
+    val schema = StructType(
+      Seq(
+        StructField("first", LongType),
+        StructField("second", StringType)
+      )
+    )
+
+    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(schema)
+    val metadata = arrowSchema.getFields.asScala.map(_.getMetadata)
+
+    metadata.head.get("PARQUET:field_id") shouldBe "100"
+    metadata(1).get("PARQUET:field_id") shouldBe "101"
+  }
+
+  test("system fields are not appended over case-insensitive name conflicts") {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import io.milvus.grpc.schema.{
+      CollectionSchema => MilvusCollectionSchema,
+      DataType => MilvusDataType,
+      FieldSchema => MilvusFieldSchema
+    }
+
+    val schema = MilvusCollectionSchema(
+      fields = Seq(
+        MilvusFieldSchema(
+          name = "row_id",
+          fieldID = 100,
+          dataType = MilvusDataType.Int64
+        ),
+        MilvusFieldSchema(
+          name = "timestamp",
+          fieldID = 101,
+          dataType = MilvusDataType.Int64
+        )
+      )
+    )
+
+    val arrowSchema = MilvusSchemaUtil.convertToArrowSchema(schema)
+    val names = arrowSchema.getFields.asScala.map(_.getName)
+
+    names shouldBe Seq("row_id", "timestamp")
   }
 
   test(

@@ -38,6 +38,27 @@ import io.milvus.storage.{
 }
 
 object MilvusLoonPartitionReader {
+  private[read] val SystemFieldAliases: Seq[(String, Long)] = Seq(
+    "RowID" -> 0L,
+    "row_id" -> 0L,
+    "rowid" -> 0L,
+    "Timestamp" -> 1L,
+    "timestamp" -> 1L
+  )
+
+  private[read] def buildFieldNameToId(
+      milvusSchema: CollectionSchema
+  ): Map[String, Long] = {
+    val userFieldNames = milvusSchema.fields.map(_.name).toSet
+    val systemFields = SystemFieldAliases.filterNot { case (alias, _) =>
+      userFieldNames.contains(alias)
+    }.toMap
+    val userFields = milvusSchema.fields.map { field =>
+      field.name -> field.fieldID
+    }.toMap
+    systemFields ++ userFields
+  }
+
   private case class VectorSearchResult(
       row: InternalRow,
       distance: Double,
@@ -69,13 +90,8 @@ class MilvusLoonPartitionReader(
 
   private val sourceSchema = schema
 
-  private val fieldNameToId: Map[String, Long] = {
-    val systemFields = Map("row_id" -> 0L, "timestamp" -> 1L)
-    val userFields = milvusSchema.fields.map { field =>
-      field.name -> field.fieldID
-    }.toMap
-    systemFields ++ userFields
-  }
+  private val fieldNameToId: Map[String, Long] =
+    MilvusLoonPartitionReader.buildFieldNameToId(milvusSchema)
 
   private val fieldNameToIdString: Map[String, String] =
     fieldNameToId.map { case (name, id) => name -> id.toString }
@@ -326,10 +342,8 @@ class MilvusLoonPartitionReader(
   }
 
   private def getColumnNames(): Array[String] = {
-    // Convert column names to field IDs for manifest/reader matching
-    // The manifest stores column groups with field IDs (e.g., "100", "101")
-    // Note: System fields (row_id, timestamp) are handled by MilvusPartitionReaderFactory
-    // and should NOT be requested from milvus-storage reader
+    // Convert column names to field IDs for manifest/reader matching.
+    // System fields are mapped to Milvus field IDs 0 and 1 and requested from storage.
     sourceSchema.fieldNames.flatMap { name =>
       fieldNameToId.get(name).map(_.toString)
     }
