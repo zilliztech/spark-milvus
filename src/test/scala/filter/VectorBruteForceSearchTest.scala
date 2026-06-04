@@ -1,14 +1,38 @@
 package com.zilliz.spark.connector.filter
 
 import org.apache.spark.ml.linalg.{DenseVector, Vectors}
+import org.apache.spark.sql.catalyst.expressions.Literal
+import org.apache.spark.sql.types.BinaryType
+import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import org.scalatest.BeforeAndAfterAll
+
+import com.zilliz.spark.connector.expressions.HammingDistanceExpression
 
 import VectorBruteForceSearch.DistanceType._
 
 /** Unit tests for VectorBruteForceSearch distance calculations
   */
-class VectorBruteForceSearchTest extends AnyFunSuite with Matchers {
+class VectorBruteForceSearchTest
+    extends AnyFunSuite
+    with Matchers
+    with BeforeAndAfterAll {
+
+  private var spark: SparkSession = _
+
+  override def beforeAll(): Unit = {
+    spark = SparkSession
+      .builder()
+      .appName("VectorBruteForceSearchTest")
+      .master("local[*]")
+      .getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
+  }
+
+  override def afterAll(): Unit = {
+    if (spark != null) spark.stop()
+  }
 
   // Tolerance for floating point comparisons
   val epsilon = 1e-6
@@ -273,5 +297,38 @@ class VectorBruteForceSearchTest extends AnyFunSuite with Matchers {
         similarity should be <= 1.0 + epsilon
       }
     }
+  }
+
+  test("filterSimilarVectors accepts BinaryType columns") {
+    val sparkSession = spark
+    import sparkSession.implicits._
+
+    val df = Seq(
+      (1L, Array[Byte](0x00.toByte, 0x0f.toByte)),
+      (2L, Array[Byte](0x00.toByte, 0xf0.toByte))
+    ).toDF("id", "vector")
+
+    df.schema("vector").dataType shouldBe BinaryType
+
+    val result = VectorBruteForceSearch.filterSimilarVectors(
+      df = df,
+      queryVector = Array[Byte](0x00.toByte, 0x0f.toByte),
+      k = 2,
+      threshold = 16.0,
+      vectorCol = "vector",
+      idCol = Some("id"),
+      distanceType = HAMMING
+    )
+
+    result.count() shouldBe 2L
+    result.schema("vector").dataType shouldBe BinaryType
+  }
+
+  test("HammingDistanceExpression accepts raw byte arrays") {
+    val expr = HammingDistanceExpression(Literal(1), Literal(2))
+    expr.nullSafeEval(
+      Array[Byte](0x00.toByte, 0x0f.toByte),
+      Array[Byte](0x00.toByte, 0xf0.toByte)
+    ) shouldBe 8.0
   }
 }

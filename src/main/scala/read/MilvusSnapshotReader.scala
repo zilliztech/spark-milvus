@@ -737,12 +737,12 @@ object MilvusSnapshotReader {
       case 24  => StringType // Geometry
       case 25  => StringType // Text
       case 26  => LongType // Timestamptz
-      case 100 => ArrayType(ByteType) // BinaryVector
+      case 100 => BinaryType // BinaryVector
       case 101 => ArrayType(FloatType) // FloatVector
       case 102 => ArrayType(FloatType) // Float16Vector
       case 103 => ArrayType(FloatType) // BFloat16Vector
       case 104 => MapType(LongType, FloatType) // SparseFloatVector
-      case 105 => ArrayType(ByteType) // Int8Vector
+      case 105 => ArrayType(ShortType) // Int8Vector
       case _   => BinaryType // Unknown types as binary
     }
   }
