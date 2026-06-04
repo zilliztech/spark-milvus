@@ -685,17 +685,21 @@ object MilvusSnapshotReader {
       .filterNot(f =>
         !includeSystemFields && (f.name == "RowID" || f.name == "Timestamp")
       )
-      .map { field =>
-        StructField(
-          field.name,
-          dataTypeToSparkType(field.dataType, field.elementType),
-          nullable = field.nullable.getOrElse(true),
-          metadata = new MetadataBuilder()
-            .putLong(ArrowConverter.MilvusDataTypeMetadataKey, field.dataType)
-            .build()
-        )
-      }
+      .map(fieldToStructField)
     StructType(userFields)
+  }
+
+  /** Convert a Field to Spark StructField with Milvus metadata preserved.
+    */
+  def fieldToStructField(field: Field): StructField = {
+    StructField(
+      field.name,
+      dataTypeToSparkType(field.dataType, field.elementType),
+      nullable = field.nullable.getOrElse(true),
+      metadata = new MetadataBuilder()
+        .putLong(ArrowConverter.MilvusDataTypeMetadataKey, field.dataType)
+        .build()
+    )
   }
 
   /** Convert a Field to Spark DataType
@@ -706,7 +710,7 @@ object MilvusSnapshotReader {
     *   Corresponding Spark DataType
     */
   def fieldToSparkType(field: Field): DataType = {
-    dataTypeToSparkType(field.dataType, field.elementType)
+    fieldToStructField(field).dataType
   }
 
   /** Convert Milvus data type to Spark DataType

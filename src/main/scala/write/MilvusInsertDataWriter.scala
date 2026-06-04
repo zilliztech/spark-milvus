@@ -427,8 +427,7 @@ object MilvusInsertDataWriter {
         case MilvusDataType.BinaryVector =>
           buffer(fieldName)
             .asInstanceOf[ArrayBuffer[Array[Byte]]] += row
-            .getArray(fieldIndex)
-            .toByteArray()
+            .getBinary(fieldIndex)
         case MilvusDataType.Int8Vector =>
           buffer(fieldName)
             .asInstanceOf[ArrayBuffer[Array[Short]]] += row

@@ -700,4 +700,22 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
     ) shouldBe 105L
   }
+
+  test("fieldToStructField preserves milvus.data_type metadata") {
+    val field = Field(
+      name = "binary_vec",
+      rawDataType =
+        Some(com.fasterxml.jackson.databind.node.IntNode.valueOf(100)),
+      nullable = Some(false)
+    )
+
+    val structField = MilvusSnapshotReader.fieldToStructField(field)
+
+    structField.name shouldBe "binary_vec"
+    structField.dataType shouldBe org.apache.spark.sql.types.BinaryType
+    structField.nullable shouldBe false
+    structField.metadata.getLong(
+      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+    ) shouldBe 100L
+  }
 }
