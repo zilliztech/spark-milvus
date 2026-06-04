@@ -216,6 +216,10 @@ object ArrowConverter extends Logging {
                   s"FixedSizeBinary binary vectors require ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
                 )
             }
+          case other =>
+            throw new IllegalArgumentException(
+              s"Cannot decode ${other.getClass.getSimpleName} as BinaryType"
+            )
         }
 
       case MapType(keyType, valueType, _) =>
