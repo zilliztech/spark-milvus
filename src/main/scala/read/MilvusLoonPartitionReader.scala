@@ -20,6 +20,7 @@ import org.apache.spark.sql.types.{
   LongType,
   ShortType,
   StringType,
+  StructField,
   StructType
 }
 
@@ -27,7 +28,7 @@ import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
 import com.zilliz.spark.connector.MilvusOption
-import io.milvus.grpc.schema.CollectionSchema
+import io.milvus.grpc.schema.{CollectionSchema, DataType}
 import io.milvus.storage.{
   ArrowUtils,
   LatestColumnGroupsResult,
@@ -64,6 +65,34 @@ object MilvusLoonPartitionReader {
       distance: Double,
       rowOffset: Long
   )
+
+  private[read] def decodeBinaryTypeVectorForSearch(
+      bytes: Array[Byte],
+      field: StructField
+  ): Array[Float] = {
+    if (!field.metadata.contains(ArrowConverter.MilvusDataTypeMetadataKey)) {
+      throw new IllegalArgumentException(
+        s"BinaryType vector search requires ${ArrowConverter.MilvusDataTypeMetadataKey} metadata"
+      )
+    }
+
+    field.metadata
+      .getLong(ArrowConverter.MilvusDataTypeMetadataKey)
+      .toInt match {
+      case DataType.FloatVector.value | DataType.Float16Vector.value |
+          DataType.BFloat16Vector.value =>
+        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
+      case DataType.BinaryVector.value =>
+        throw new IllegalArgumentException(
+          "BinaryVector does not support vector.search.* dense-float metrics; use binary search utilities with Hamming/Jaccard instead"
+        )
+      case other =>
+        throw new IllegalArgumentException(
+          s"BinaryType vector search is unsupported for Milvus data type $other"
+        )
+    }
+  }
 }
 
 // for Milvus 2.6+ version data source and milvus lake data
@@ -508,17 +537,16 @@ class MilvusLoonPartitionReader(
   ): Array[Float] = {
     dataType match {
       case ArrayType(FloatType, _) =>
-        // Array[Float] type
         val arrayData = row.getArray(colIndex)
         (0 until arrayData.numElements())
           .map(i => arrayData.getFloat(i))
           .toArray
 
       case BinaryType =>
-        // Binary type (for FixedSizeBinary float vectors)
-        val bytes = row.getBinary(colIndex)
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
+        MilvusLoonPartitionReader.decodeBinaryTypeVectorForSearch(
+          row.getBinary(colIndex),
+          sourceSchema(colIndex)
+        )
 
       case _ =>
         throw new IllegalArgumentException(

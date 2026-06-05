@@ -114,6 +114,19 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       }
     """
 
+  private val vectorSnapshotSchemaBytes =
+    java.util.Base64.getEncoder.encodeToString(
+      MilvusSnapshotReader
+        .toProtobufSchemaBytes(
+          MilvusSnapshotReader
+            .parseSnapshotMetadata(vectorSnapshotSchemaJson)
+            .toOption
+            .get
+            .collection
+            .schema
+        )
+    )
+
   private def metadata(
       entries: (String, Long)*
   ): org.apache.spark.sql.types.Metadata = {
@@ -125,17 +138,23 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   private def snapshotTableSchema(
       baseSchema: StructType,
       extraColumns: String,
-      snapshotSchemaJson: String = vectorSnapshotSchemaJson
+      snapshotSchemaJson: Option[String] = Some(vectorSnapshotSchemaJson),
+      snapshotSchemaBytes: Option[String] = None
   ): StructType = {
-    val options = Map(
+    val options = scala.collection.mutable.Map(
       MilvusOption.SnapshotMode -> "true",
       MilvusOption.SnapshotManifests -> "[]",
       MilvusOption.SnapshotCollectionId -> "10",
       MilvusOption.MilvusCollectionName -> "c",
-      MilvusOption.MilvusExtraColumns -> extraColumns,
-      MilvusOption.SnapshotSchemaJson -> snapshotSchemaJson
+      MilvusOption.MilvusExtraColumns -> extraColumns
     )
-    MilvusTable(MilvusOption(options), Some(baseSchema)).schema()
+    snapshotSchemaJson.foreach(json =>
+      options += MilvusOption.SnapshotSchemaJson -> json
+    )
+    snapshotSchemaBytes.foreach(bytes =>
+      options += MilvusOption.SnapshotSchemaBytes -> bytes
+    )
+    MilvusTable(MilvusOption(options.toMap), Some(baseSchema)).schema()
   }
 
   test(
@@ -592,6 +611,39 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       schema("binary_vec").metadata.getLong(
         ArrowConverter.MilvusDataTypeMetadataKey
       ) == 100L
+    )
+  }
+
+  test(
+    "snapshot mode injects milvus.data_type metadata from snapshot schema bytes"
+  ) {
+    val schema = snapshotTableSchema(
+      StructType(
+        Seq(
+          StructField("binary_vec", BinaryType, nullable = true),
+          StructField("float_vec", ArrayType(FloatType), nullable = true),
+          StructField("int8_vec", ArrayType(ShortType), nullable = true)
+        )
+      ),
+      extraColumns = "",
+      snapshotSchemaJson = None,
+      snapshotSchemaBytes = Some(vectorSnapshotSchemaBytes)
+    )
+
+    assert(
+      schema("binary_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 100L
+    )
+    assert(
+      schema("float_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 101L
+    )
+    assert(
+      schema("int8_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 105L
     )
   }
 

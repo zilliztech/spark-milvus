@@ -220,14 +220,31 @@ case class MilvusTable(
     // Use first partition ID if available
     partitionID = partitionIds.headOption.getOrElse(0L)
 
-    // Try to build schema from snapshot JSON if provided
-    val schemaJson = milvusOption.options.get(MilvusOption.SnapshotSchemaJson)
-    val snapshotSchema = schemaJson.flatMap { json =>
-      MilvusSnapshotReader.parseSnapshotMetadata(json) match {
-        case Right(metadata) => Some(metadata.collection.schema)
-        case Left(_)         => None
+    val snapshotSchema = milvusOption.options
+      .get(MilvusOption.SnapshotSchemaJson)
+      .flatMap { json =>
+        MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+          case Right(metadata) =>
+            Try {
+              CollectionSchema.parseFrom(
+                MilvusSnapshotReader.toProtobufSchemaBytes(
+                  metadata.collection.schema
+                )
+              )
+            }.toOption
+          case Left(_) => None
+        }
       }
-    }
+      .orElse {
+        milvusOption.options.get(MilvusOption.SnapshotSchemaBytes).flatMap {
+          base64 =>
+            Try {
+              CollectionSchema.parseFrom(
+                Base64.getDecoder.decode(base64)
+              )
+            }.toOption
+        }
+      }
 
     // Create a minimal MilvusCollectionInfo
     // For snapshot mode, we use the passed-in sparkSchema for actual schema operations
@@ -247,24 +264,14 @@ case class MilvusTable(
     * have snapshot data but need a protobuf schema structure
     */
   private def createMinimalCollectionSchema(
-      snapshotSchema: Option[com.zilliz.spark.connector.read.CollectionSchema]
+      snapshotSchema: Option[CollectionSchema]
   ): CollectionSchema = {
-    import io.milvus.grpc.schema.{CollectionSchema => ProtoCollectionSchema}
-
-    snapshotSchema match {
-      case Some(schema) =>
-        ProtoCollectionSchema.parseFrom(
-          MilvusSnapshotReader.toProtobufSchemaBytes(schema)
-        )
-
-      case None =>
-        // If no schema provided, create empty schema
-        // The actual schema will come from sparkSchema passed to the table
-        ProtoCollectionSchema(
-          name = milvusOption.collectionName,
-          description = "",
-          fields = Seq.empty
-        )
+    snapshotSchema.getOrElse {
+      CollectionSchema(
+        name = milvusOption.collectionName,
+        description = "",
+        fields = Seq.empty
+      )
     }
   }
 
