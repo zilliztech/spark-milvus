@@ -222,28 +222,11 @@ case class MilvusTable(
 
     val snapshotSchema = milvusOption.options
       .get(MilvusOption.SnapshotSchemaJson)
-      .flatMap { json =>
-        MilvusSnapshotReader.parseSnapshotMetadata(json) match {
-          case Right(metadata) =>
-            Try {
-              CollectionSchema.parseFrom(
-                MilvusSnapshotReader.toProtobufSchemaBytes(
-                  metadata.collection.schema
-                )
-              )
-            }.toOption
-          case Left(_) => None
-        }
-      }
+      .map(parseSnapshotSchemaJson)
       .orElse {
-        milvusOption.options.get(MilvusOption.SnapshotSchemaBytes).flatMap {
-          base64 =>
-            Try {
-              CollectionSchema.parseFrom(
-                Base64.getDecoder.decode(base64)
-              )
-            }.toOption
-        }
+        milvusOption.options
+          .get(MilvusOption.SnapshotSchemaBytes)
+          .map(parseSnapshotSchemaBytes)
       }
 
     // Create a minimal MilvusCollectionInfo
@@ -263,6 +246,31 @@ case class MilvusTable(
   /** Create a minimal CollectionSchema for snapshot mode This is used when we
     * have snapshot data but need a protobuf schema structure
     */
+  private def parseSnapshotSchemaJson(json: String): CollectionSchema = {
+    MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+      case Right(metadata) =>
+        CollectionSchema.parseFrom(
+          MilvusSnapshotReader.toProtobufSchemaBytes(metadata.collection.schema)
+        )
+      case Left(err) =>
+        throw new IllegalArgumentException(
+          s"Failed to parse ${MilvusOption.SnapshotSchemaJson}: $err"
+        )
+    }
+  }
+
+  private def parseSnapshotSchemaBytes(base64: String): CollectionSchema = {
+    try {
+      CollectionSchema.parseFrom(Base64.getDecoder.decode(base64))
+    } catch {
+      case NonFatal(e) =>
+        throw new IllegalArgumentException(
+          s"Failed to parse ${MilvusOption.SnapshotSchemaBytes}: ${e.getMessage}",
+          e
+        )
+    }
+  }
+
   private def createMinimalCollectionSchema(
       snapshotSchema: Option[CollectionSchema]
   ): CollectionSchema = {

@@ -679,6 +679,34 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  test("snapshot mode fails loudly on malformed snapshot schema json") {
+    val err = intercept[IllegalArgumentException] {
+      snapshotTableSchema(
+        StructType(Seq(StructField("binary_vec", BinaryType, nullable = true))),
+        extraColumns = "",
+        snapshotSchemaJson = Some("not-json"),
+        snapshotSchemaBytes = None
+      )
+    }
+
+    assert(err.getMessage.contains(MilvusOption.SnapshotSchemaJson))
+    assert(err.getMessage.contains("Failed to parse"))
+  }
+
+  test("snapshot mode fails loudly on malformed snapshot schema bytes") {
+    val err = intercept[IllegalArgumentException] {
+      snapshotTableSchema(
+        StructType(Seq(StructField("binary_vec", BinaryType, nullable = true))),
+        extraColumns = "",
+        snapshotSchemaJson = None,
+        snapshotSchemaBytes = Some("not-base64%%")
+      )
+    }
+
+    assert(err.getMessage.contains(MilvusOption.SnapshotSchemaBytes))
+    assert(err.getMessage.contains("Failed to parse"))
+  }
+
   test(
     "client-derived schema allows user fields named legacy metadata aliases"
   ) {

@@ -24,10 +24,10 @@ import org.apache.spark.sql.types.{
   StructType
 }
 
+import com.zilliz.spark.connector.{FloatConverter, MilvusOption}
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
-import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType}
 import io.milvus.storage.{
   ArrowUtils,
@@ -79,10 +79,19 @@ object MilvusLoonPartitionReader {
     field.metadata
       .getLong(ArrowConverter.MilvusDataTypeMetadataKey)
       .toInt match {
-      case DataType.FloatVector.value | DataType.Float16Vector.value |
-          DataType.BFloat16Vector.value =>
+      case DataType.FloatVector.value =>
         val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
+      case DataType.Float16Vector.value =>
+        bytes
+          .grouped(2)
+          .map(b => FloatConverter.fromFloat16Bytes(b.toSeq))
+          .toArray
+      case DataType.BFloat16Vector.value =>
+        bytes
+          .grouped(2)
+          .map(b => FloatConverter.fromBFloat16Bytes(b.toSeq))
+          .toArray
       case DataType.BinaryVector.value =>
         throw new IllegalArgumentException(
           "BinaryVector does not support vector.search.* dense-float metrics; use binary search utilities with Hamming/Jaccard instead"
