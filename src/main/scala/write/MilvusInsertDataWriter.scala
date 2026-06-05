@@ -425,9 +425,26 @@ object MilvusInsertDataWriter {
               )
           }
         case MilvusDataType.BinaryVector =>
+          val sparkField: StructField = sparkSchema(fieldIndex)
+          val binaryVector = sparkField.dataType match {
+            case SparkDataTypes.BinaryType =>
+              row.getBinary(fieldIndex)
+            case arrayType: ArrayType =>
+              arrayType.elementType match {
+                case SparkDataTypes.ByteType =>
+                  row.getArray(fieldIndex).toByteArray()
+                case _ =>
+                  throw new DataTypeException(
+                    s"Unsupported data type: ${sparkField.dataType}, field name: ${fieldName}, element type: ${arrayType.elementType}"
+                  )
+              }
+            case _ =>
+              throw new DataTypeException(
+                s"Unsupported data type: ${sparkField.dataType}, field name: ${fieldName}"
+              )
+          }
           buffer(fieldName)
-            .asInstanceOf[ArrayBuffer[Array[Byte]]] += row
-            .getBinary(fieldIndex)
+            .asInstanceOf[ArrayBuffer[Array[Byte]]] += binaryVector
         case MilvusDataType.Int8Vector =>
           buffer(fieldName)
             .asInstanceOf[ArrayBuffer[Array[Short]]] += row
