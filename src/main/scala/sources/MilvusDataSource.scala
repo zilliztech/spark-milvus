@@ -41,6 +41,7 @@ import org.apache.spark.sql.sources.{DataSourceRegister, Filter}
 import org.apache.spark.sql.types.{
   DataTypes => SparkDataTypes,
   LongType,
+  MetadataBuilder,
   StringType,
   StructField,
   StructType
@@ -67,6 +68,7 @@ import com.zilliz.spark.connector.read.{
   V2SegmentInfo,
   V2SegmentLoader
 }
+import com.zilliz.spark.connector.serde.ArrowConverter
 import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -329,6 +331,35 @@ case class MilvusTable(
 
   override def name(): String = milvusOption.collectionName
 
+  private def rehydrateSnapshotSchemaMetadata(
+      baseSchema: StructType
+  ): StructType = {
+    val fieldTypeByName = milvusCollection.schema.fields.map { field =>
+      field.name -> field.dataType.value.toLong
+    }.toMap
+
+    val fields = baseSchema.fields.map { field =>
+      if (
+        milvusOption.extraColumns.contains(field.name) ||
+        field.metadata.contains(ArrowConverter.MilvusDataTypeMetadataKey)
+      ) {
+        field
+      } else {
+        fieldTypeByName.get(field.name) match {
+          case Some(milvusType) =>
+            val metadataBuilder = new MetadataBuilder()
+              .withMetadata(field.metadata)
+              .putLong(ArrowConverter.MilvusDataTypeMetadataKey, milvusType)
+            field.copy(metadata = metadataBuilder.build())
+          case None =>
+            field
+        }
+      }
+    }
+
+    StructType(fields)
+  }
+
   private def appendExtraColumns(
       baseSchema: StructType,
       rejectLegacyAliases: Boolean
@@ -398,7 +429,10 @@ case class MilvusTable(
       logInfo(
         s"Using provided sparkSchema in snapshot mode: ${sparkSchema.get.fieldNames.mkString(", ")}"
       )
-      return appendExtraColumns(sparkSchema.get, rejectLegacyAliases = true)
+      return appendExtraColumns(
+        rehydrateSnapshotSchemaMetadata(sparkSchema.get),
+        rejectLegacyAliases = true
+      )
     }
 
     // Client-based mode or snapshot mode without provided schema: compute from milvusCollection
