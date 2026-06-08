@@ -1,6 +1,14 @@
 package com.zilliz.spark.connector.write
 
+import org.apache.spark.sql.catalyst.expressions.{
+  GenericInternalRow,
+  UnsafeProjection
+}
+import org.apache.spark.sql.catalyst.util.ArrayData
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.unsafe.types.UTF8String
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.spark.connector.{MilvusRateLimitException, MilvusRpcException}
 import com.zilliz.spark.connector.write.MilvusInsertDataWriter.{
@@ -8,6 +16,7 @@ import com.zilliz.spark.connector.write.MilvusInsertDataWriter.{
   Abort,
   Retry
 }
+import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 import io.grpc.StatusRuntimeException
 
@@ -22,7 +31,7 @@ import io.grpc.StatusRuntimeException
   *     paths
   *   - independent interaction of the two counters (retries / rateLimitRetries)
   */
-class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
+class MilvusInsertDataWriterRetryTest extends AnyFunSuite with Matchers {
 
   private val retryInterval = 1000L
   private val initialDelay = 500L
@@ -258,5 +267,78 @@ class MilvusInsertDataWriterRetryTest extends AnyFunSuite {
       case Retry(2, 0, _, _, false) => succeed
       case other                    => fail(s"unexpected: $other")
     }
+  }
+
+  private def binaryVectorSchema = CollectionSchema(
+    fields = Seq(
+      FieldSchema(
+        name = "binary_vec",
+        dataType = DataType.BinaryVector,
+        typeParams = Seq(io.milvus.grpc.common.KeyValuePair("dim", "16"))
+      )
+    )
+  )
+
+  test("addDataToBuffer reads BinaryVector from Spark BinaryType") {
+    val schema = binaryVectorSchema
+    val fieldMap = MilvusInsertDataWriter.getFieldMap(schema)
+    val buffer = MilvusInsertDataWriter.newDataBuffer(schema)
+    val sparkSchema = org.apache.spark.sql.types.StructType(
+      Seq(
+        org.apache.spark.sql.types
+          .StructField("binary_vec", org.apache.spark.sql.types.BinaryType)
+      )
+    )
+    val row =
+      new GenericInternalRow(Array[Any](Array[Byte](0x01.toByte, 0x23.toByte)))
+
+    MilvusInsertDataWriter.addDataToBuffer(buffer, row, fieldMap, sparkSchema)
+
+    val values = buffer("binary_vec")
+      .asInstanceOf[scala.collection.mutable.ArrayBuffer[Array[Byte]]]
+      .toSeq
+
+    values should have size 1
+    values.head shouldBe Array[Byte](0x01.toByte, 0x23.toByte)
+  }
+
+  test(
+    "addDataToBuffer reads BinaryVector from legacy ArrayType(ByteType) UnsafeRow"
+  ) {
+    val schema = binaryVectorSchema
+    val fieldMap = MilvusInsertDataWriter.getFieldMap(schema)
+    val buffer = MilvusInsertDataWriter.newDataBuffer(schema)
+    val sparkSchema = org.apache.spark.sql.types.StructType(
+      Seq(
+        org.apache.spark.sql.types.StructField(
+          "binary_vec",
+          org.apache.spark.sql.types
+            .ArrayType(org.apache.spark.sql.types.ByteType)
+        )
+      )
+    )
+    val unsafeRow = UnsafeProjection
+      .create(sparkSchema)
+      .apply(
+        new GenericInternalRow(
+          Array[Any](
+            ArrayData.toArrayData(Array[Byte](0x01.toByte, 0x23.toByte))
+          )
+        )
+      )
+
+    MilvusInsertDataWriter.addDataToBuffer(
+      buffer,
+      unsafeRow,
+      fieldMap,
+      sparkSchema
+    )
+
+    val values = buffer("binary_vec")
+      .asInstanceOf[scala.collection.mutable.ArrayBuffer[Array[Byte]]]
+      .toSeq
+
+    values should have size 1
+    values.head shouldBe Array[Byte](0x01.toByte, 0x23.toByte)
   }
 }

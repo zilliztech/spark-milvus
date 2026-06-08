@@ -20,14 +20,15 @@ import org.apache.spark.sql.types.{
   LongType,
   ShortType,
   StringType,
+  StructField,
   StructType
 }
 
+import com.zilliz.spark.connector.{FloatConverter, MilvusOption}
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
-import com.zilliz.spark.connector.MilvusOption
-import io.milvus.grpc.schema.CollectionSchema
+import io.milvus.grpc.schema.{CollectionSchema, DataType}
 import io.milvus.storage.{
   ArrowUtils,
   LatestColumnGroupsResult,
@@ -64,6 +65,65 @@ object MilvusLoonPartitionReader {
       distance: Double,
       rowOffset: Long
   )
+
+  private[read] def validateVectorSearchField(
+      field: StructField,
+      metric: String
+  ): Unit = {
+    field.dataType match {
+      case BinaryType
+          if field.metadata.contains(
+            ArrowConverter.MilvusDataTypeMetadataKey
+          ) =>
+        field.metadata
+          .getLong(ArrowConverter.MilvusDataTypeMetadataKey)
+          .toInt match {
+          case DataType.BinaryVector.value =>
+            throw new IllegalArgumentException(
+              s"Vector column '${field.name}' uses BinaryVector storage and does not support vector.search.* dense-float metric '$metric'; use binary search utilities with Hamming/Jaccard instead"
+            )
+          case _ =>
+        }
+      case _ =>
+    }
+  }
+
+  private[read] def decodeBinaryTypeVectorForSearch(
+      bytes: Array[Byte],
+      field: StructField
+  ): Array[Float] = {
+    if (!field.metadata.contains(ArrowConverter.MilvusDataTypeMetadataKey)) {
+      throw new IllegalArgumentException(
+        s"BinaryType vector search requires ${ArrowConverter.MilvusDataTypeMetadataKey} metadata"
+      )
+    }
+
+    field.metadata
+      .getLong(ArrowConverter.MilvusDataTypeMetadataKey)
+      .toInt match {
+      case DataType.FloatVector.value =>
+        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
+      case DataType.Float16Vector.value =>
+        bytes
+          .grouped(2)
+          .map(b => FloatConverter.fromFloat16Bytes(b.toSeq))
+          .toArray
+      case DataType.BFloat16Vector.value =>
+        bytes
+          .grouped(2)
+          .map(b => FloatConverter.fromBFloat16Bytes(b.toSeq))
+          .toArray
+      case DataType.BinaryVector.value =>
+        throw new IllegalArgumentException(
+          "BinaryVector does not support vector.search.* dense-float metrics; use binary search utilities with Hamming/Jaccard instead"
+        )
+      case other =>
+        throw new IllegalArgumentException(
+          s"BinaryType vector search is unsupported for Milvus data type $other"
+        )
+    }
+  }
 }
 
 // for Milvus 2.6+ version data source and milvus lake data
@@ -372,6 +432,11 @@ class MilvusLoonPartitionReader(
           )
       }
 
+    MilvusLoonPartitionReader.validateVectorSearchField(
+      sourceSchema(vectorColIndex),
+      metric
+    )
+
     // Use priority queue to maintain top-K
     // For L2: min-heap (smaller distance is better, so we keep max at top to evict)
     // For IP/COSINE: max-heap (larger score is better, so we keep min at top to evict)
@@ -508,17 +573,16 @@ class MilvusLoonPartitionReader(
   ): Array[Float] = {
     dataType match {
       case ArrayType(FloatType, _) =>
-        // Array[Float] type
         val arrayData = row.getArray(colIndex)
         (0 until arrayData.numElements())
           .map(i => arrayData.getFloat(i))
           .toArray
 
       case BinaryType =>
-        // Binary type (for FixedSizeBinary float vectors)
-        val bytes = row.getBinary(colIndex)
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
+        MilvusLoonPartitionReader.decodeBinaryTypeVectorForSearch(
+          row.getBinary(colIndex),
+          sourceSchema(colIndex)
+        )
 
       case _ =>
         throw new IllegalArgumentException(

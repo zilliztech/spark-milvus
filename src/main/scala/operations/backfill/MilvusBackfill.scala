@@ -291,12 +291,11 @@ object MilvusBackfill {
                   )
                 )
               )
-            val sparkType = MilvusSnapshotReader.fieldToSparkType(field)
+            val structField = MilvusSnapshotReader.fieldToStructField(field)
             (
               n,
               fid,
-              org.apache.spark.sql.types
-                .StructField(n, sparkType, nullable = true)
+              structField
             )
           }
         } else Seq.empty
@@ -644,10 +643,7 @@ object MilvusBackfill {
             case Some(field) =>
               // Create schema with only the PK field
               import org.apache.spark.sql.types._
-              val pkFieldType = MilvusSnapshotReader.fieldToSparkType(field)
-              StructType(
-                Seq(StructField(field.name, pkFieldType, nullable = true))
-              )
+              StructType(Seq(MilvusSnapshotReader.fieldToStructField(field)))
             case None =>
               // Fallback: use full schema if PK field not found
               logger.warn(

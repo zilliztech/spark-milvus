@@ -646,4 +646,76 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     )
     sparkSchema("tags").nullable shouldBe true
   }
+
+  test("toSparkSchema maps BinaryVector and Int8Vector consistently") {
+    import org.apache.spark.sql.types.{ArrayType, BinaryType, ShortType}
+
+    val json = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "binary_vec",
+              "data_type": "BinaryVector",
+              "type_params": [{"key": "dim", "value": "128"}]
+            },
+            {
+              "fieldID": 101,
+              "name": "int8_vec",
+              "data_type": "Int8Vector",
+              "type_params": [{"key": "dim", "value": "4"}]
+            }
+          ]
+        }
+      },
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val schema = MilvusSnapshotReader
+      .parseSnapshotMetadata(json)
+      .toOption
+      .get
+      .collection
+      .schema
+    val sparkSchema = MilvusSnapshotReader.toSparkSchema(schema)
+
+    sparkSchema("binary_vec").dataType shouldBe BinaryType
+    sparkSchema("binary_vec").metadata.getLong(
+      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+    ) shouldBe 100L
+    sparkSchema("int8_vec").dataType shouldBe ArrayType(ShortType)
+    sparkSchema("int8_vec").metadata.getLong(
+      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+    ) shouldBe 105L
+  }
+
+  test("fieldToStructField preserves milvus.data_type metadata") {
+    val field = Field(
+      name = "binary_vec",
+      rawDataType =
+        Some(com.fasterxml.jackson.databind.node.IntNode.valueOf(100)),
+      nullable = Some(false)
+    )
+
+    val structField = MilvusSnapshotReader.fieldToStructField(field)
+
+    structField.name shouldBe "binary_vec"
+    structField.dataType shouldBe org.apache.spark.sql.types.BinaryType
+    structField.nullable shouldBe false
+    structField.metadata.getLong(
+      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+    ) shouldBe 100L
+  }
 }

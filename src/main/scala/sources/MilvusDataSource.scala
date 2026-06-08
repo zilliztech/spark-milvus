@@ -41,6 +41,7 @@ import org.apache.spark.sql.sources.{DataSourceRegister, Filter}
 import org.apache.spark.sql.types.{
   DataTypes => SparkDataTypes,
   LongType,
+  MetadataBuilder,
   StringType,
   StructField,
   StructType
@@ -67,6 +68,7 @@ import com.zilliz.spark.connector.read.{
   V2SegmentInfo,
   V2SegmentLoader
 }
+import com.zilliz.spark.connector.serde.ArrowConverter
 import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -218,14 +220,14 @@ case class MilvusTable(
     // Use first partition ID if available
     partitionID = partitionIds.headOption.getOrElse(0L)
 
-    // Try to build schema from snapshot JSON if provided
-    val schemaJson = milvusOption.options.get(MilvusOption.SnapshotSchemaJson)
-    val snapshotSchema = schemaJson.flatMap { json =>
-      MilvusSnapshotReader.parseSnapshotMetadata(json) match {
-        case Right(metadata) => Some(metadata.collection.schema)
-        case Left(_)         => None
+    val snapshotSchema = milvusOption.options
+      .get(MilvusOption.SnapshotSchemaJson)
+      .map(parseSnapshotSchemaJson)
+      .orElse {
+        milvusOption.options
+          .get(MilvusOption.SnapshotSchemaBytes)
+          .map(parseSnapshotSchemaBytes)
       }
-    }
 
     // Create a minimal MilvusCollectionInfo
     // For snapshot mode, we use the passed-in sparkSchema for actual schema operations
@@ -244,25 +246,40 @@ case class MilvusTable(
   /** Create a minimal CollectionSchema for snapshot mode This is used when we
     * have snapshot data but need a protobuf schema structure
     */
+  private def parseSnapshotSchemaJson(json: String): CollectionSchema = {
+    MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+      case Right(metadata) =>
+        CollectionSchema.parseFrom(
+          MilvusSnapshotReader.toProtobufSchemaBytes(metadata.collection.schema)
+        )
+      case Left(err) =>
+        throw new IllegalArgumentException(
+          s"Failed to parse ${MilvusOption.SnapshotSchemaJson}: $err"
+        )
+    }
+  }
+
+  private def parseSnapshotSchemaBytes(base64: String): CollectionSchema = {
+    try {
+      CollectionSchema.parseFrom(Base64.getDecoder.decode(base64))
+    } catch {
+      case NonFatal(e) =>
+        throw new IllegalArgumentException(
+          s"Failed to parse ${MilvusOption.SnapshotSchemaBytes}: ${e.getMessage}",
+          e
+        )
+    }
+  }
+
   private def createMinimalCollectionSchema(
-      snapshotSchema: Option[com.zilliz.spark.connector.read.CollectionSchema]
+      snapshotSchema: Option[CollectionSchema]
   ): CollectionSchema = {
-    import io.milvus.grpc.schema.{CollectionSchema => ProtoCollectionSchema}
-
-    snapshotSchema match {
-      case Some(schema) =>
-        ProtoCollectionSchema.parseFrom(
-          MilvusSnapshotReader.toProtobufSchemaBytes(schema)
-        )
-
-      case None =>
-        // If no schema provided, create empty schema
-        // The actual schema will come from sparkSchema passed to the table
-        ProtoCollectionSchema(
-          name = milvusOption.collectionName,
-          description = "",
-          fields = Seq.empty
-        )
+    snapshotSchema.getOrElse {
+      CollectionSchema(
+        name = milvusOption.collectionName,
+        description = "",
+        fields = Seq.empty
+      )
     }
   }
 
@@ -328,6 +345,35 @@ case class MilvusTable(
   }
 
   override def name(): String = milvusOption.collectionName
+
+  private def rehydrateSnapshotSchemaMetadata(
+      baseSchema: StructType
+  ): StructType = {
+    val fieldTypeByName = milvusCollection.schema.fields.map { field =>
+      field.name -> field.dataType.value.toLong
+    }.toMap
+
+    val fields = baseSchema.fields.map { field =>
+      if (
+        milvusOption.extraColumns.contains(field.name) ||
+        field.metadata.contains(ArrowConverter.MilvusDataTypeMetadataKey)
+      ) {
+        field
+      } else {
+        fieldTypeByName.get(field.name) match {
+          case Some(milvusType) =>
+            val metadataBuilder = new MetadataBuilder()
+              .withMetadata(field.metadata)
+              .putLong(ArrowConverter.MilvusDataTypeMetadataKey, milvusType)
+            field.copy(metadata = metadataBuilder.build())
+          case None =>
+            field
+        }
+      }
+    }
+
+    StructType(fields)
+  }
 
   private def appendExtraColumns(
       baseSchema: StructType,
@@ -398,7 +444,10 @@ case class MilvusTable(
       logInfo(
         s"Using provided sparkSchema in snapshot mode: ${sparkSchema.get.fieldNames.mkString(", ")}"
       )
-      return appendExtraColumns(sparkSchema.get, rejectLegacyAliases = true)
+      return appendExtraColumns(
+        rehydrateSnapshotSchemaMetadata(sparkSchema.get),
+        rejectLegacyAliases = true
+      )
     }
 
     // Client-based mode or snapshot mode without provided schema: compute from milvusCollection
