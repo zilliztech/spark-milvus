@@ -1,6 +1,11 @@
 package com.zilliz.spark.connector.serde
 
 import java.nio.{ByteBuffer, ByteOrder}
+import java.nio.charset.{
+  CharacterCodingException,
+  CodingErrorAction,
+  StandardCharsets
+}
 import scala.collection.JavaConverters._
 
 import org.apache.arrow.vector._
@@ -101,6 +106,9 @@ object ArrowConverter extends Logging {
       case IntegerType =>
         vector.asInstanceOf[IntVector].get(rowIndex)
 
+      case ByteType =>
+        vector.asInstanceOf[TinyIntVector].get(rowIndex)
+
       case ShortType =>
         vector.asInstanceOf[SmallIntVector].get(rowIndex)
 
@@ -114,18 +122,39 @@ object ArrowConverter extends Logging {
         vector.asInstanceOf[BitVector].get(rowIndex) != 0
 
       case StringType =>
-        val bytes = vector.asInstanceOf[VarCharVector].get(rowIndex)
-        UTF8String.fromBytes(bytes)
+        utf8StringFromVariableWidth(vector, rowIndex)
 
       case ArrayType(ByteType, _)
           if vector.isInstanceOf[FixedSizeBinaryVector] =>
         val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
-        ArrayData.toArrayData(bytes)
+        milvusType match {
+          case Some(MilvusDataType.BinaryVector) =>
+            ArrayData.toArrayData(bytes)
+          case Some(other) =>
+            throw new IllegalArgumentException(
+              s"Cannot decode FixedSizeBinary as Array[Byte] for Milvus type $other"
+            )
+          case None =>
+            throw new IllegalArgumentException(
+              s"FixedSizeBinary byte vectors require ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
+            )
+        }
 
       case ArrayType(ShortType, _)
           if vector.isInstanceOf[FixedSizeBinaryVector] =>
         val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
-        ArrayData.toArrayData(bytes.map(_.toShort))
+        milvusType match {
+          case Some(MilvusDataType.Int8Vector) =>
+            ArrayData.toArrayData(bytes.map(_.toShort))
+          case Some(other) =>
+            throw new IllegalArgumentException(
+              s"Cannot decode FixedSizeBinary as Array[Short] for Milvus type $other"
+            )
+          case None =>
+            throw new IllegalArgumentException(
+              s"FixedSizeBinary short vectors require ${MilvusDataTypeMetadataKey} metadata"
+            )
+        }
 
       case ArrayType(FloatType, _)
           if vector.isInstanceOf[FixedSizeBinaryVector] =>
@@ -171,8 +200,27 @@ object ArrowConverter extends Logging {
         ArrayData.toArrayData(arrayElements)
 
       case BinaryType =>
-        val bytes = vector.asInstanceOf[VarBinaryVector].get(rowIndex)
-        bytes
+        vector match {
+          case v: VarBinaryVector =>
+            v.get(rowIndex)
+          case v: FixedSizeBinaryVector =>
+            milvusType match {
+              case Some(MilvusDataType.BinaryVector) =>
+                v.get(rowIndex)
+              case Some(other) =>
+                throw new IllegalArgumentException(
+                  s"Cannot decode FixedSizeBinary as BinaryType for Milvus type $other"
+                )
+              case None =>
+                throw new IllegalArgumentException(
+                  s"FixedSizeBinary binary vectors require ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
+                )
+            }
+          case other =>
+            throw new IllegalArgumentException(
+              s"Cannot decode ${other.getClass.getSimpleName} as BinaryType"
+            )
+        }
 
       case MapType(keyType, valueType, _) =>
         val mapVector = vector.asInstanceOf[MapVector]
@@ -213,6 +261,37 @@ object ArrowConverter extends Logging {
       .filter(_.contains(MilvusDataTypeMetadataKey))
       .map(_.getLong(MilvusDataTypeMetadataKey).toInt)
       .map(MilvusDataType.fromValue)
+  }
+
+  private def utf8StringFromVariableWidth(
+      vector: FieldVector,
+      rowIndex: Int
+  ): UTF8String = {
+    val bytes = vector match {
+      case v: VarCharVector =>
+        v.get(rowIndex)
+      case v: VarBinaryVector =>
+        val bytes = v.get(rowIndex)
+        try {
+          StandardCharsets.UTF_8
+            .newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+        } catch {
+          case e: CharacterCodingException =>
+            throw new IllegalArgumentException(
+              s"Arrow VarBinary value in column ${vector.getName} at row $rowIndex is not valid UTF-8",
+              e
+            )
+        }
+        bytes
+      case _ =>
+        throw new IllegalArgumentException(
+          s"Cannot decode ${vector.getClass.getSimpleName} as StringType"
+        )
+    }
+    UTF8String.fromBytes(bytes)
   }
 
   private def decodeFixedSizeBinaryFloats(

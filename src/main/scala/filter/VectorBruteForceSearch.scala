@@ -198,13 +198,31 @@ object VectorBruteForceSearch {
     }
   })
 
-  // UDF for converting Array[Byte] to binary vector (keep as Array[Byte])
-  private val arrayByteToBinaryVectorUDF = udf((arr: Seq[Byte]) => {
-    if (arr == null) {
-      null
-    } else {
-      arr.toArray
+  private def byteArrayFromBinaryValue(value: Any): Array[Byte] = {
+    value match {
+      case null =>
+        null
+      case arr: Array[Byte] =>
+        arr
+      case seq: Seq[_] =>
+        seq.map {
+          case b: Byte   => b
+          case n: Number => n.byteValue()
+          case other =>
+            throw new IllegalArgumentException(
+              s"Cannot convert ${other.getClass.getName} to Byte in binary vector"
+            )
+        }.toArray
+      case other =>
+        throw new IllegalArgumentException(
+          s"Unsupported binary vector value type: ${other.getClass.getName}"
+        )
     }
+  }
+
+  // UDF for normalizing binary vectors to raw bytes
+  private val arrayByteToBinaryVectorUDF = udf((value: Any) => {
+    byteArrayFromBinaryValue(value)
   })
 
   // UDF for converting Map[Long, Float] to SparseVector
@@ -239,13 +257,13 @@ object VectorBruteForceSearch {
     }
 
     schema(vectorCol).dataType match {
-      case ArrayType(FloatType, _)         => DENSE_FLOAT
-      case ArrayType(ByteType, _)          => BINARY
-      case MapType(LongType, FloatType, _) => SPARSE
+      case ArrayType(FloatType, _)             => DENSE_FLOAT
+      case BinaryType | ArrayType(ByteType, _) => BINARY
+      case MapType(LongType, FloatType, _)     => SPARSE
       case _ =>
         throw new IllegalArgumentException(
           s"Unsupported vector column type: ${schema(vectorCol).dataType}. " +
-            s"Supported types are: Array[Float] (dense float), Array[Byte] (binary), Map[Long, Float] (sparse)"
+            s"Supported types are: Array[Float] (dense float), BinaryType/Array[Byte] (binary), Map[Long, Float] (sparse)"
         )
     }
   }
@@ -592,10 +610,10 @@ object VectorBruteForceSearch {
 
     // Validate vector type
     schema(vectorCol).dataType match {
-      case ArrayType(ByteType, _) => // Valid
+      case BinaryType | ArrayType(ByteType, _) => // Valid
       case _ =>
         throw new IllegalArgumentException(
-          s"Vector column '$vectorCol' must be of type Array[Byte]. Found: ${schema(vectorCol).dataType}"
+          s"Vector column '$vectorCol' must be of type BinaryType or Array[Byte]. Found: ${schema(vectorCol).dataType}"
         )
     }
 

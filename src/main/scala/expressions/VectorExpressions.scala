@@ -346,6 +346,8 @@ case class HammingDistanceExpression(_left: Expression, _right: Expression)
 
   private def extractByteArray(value: Any): Array[Byte] = {
     value match {
+      case bytes: Array[Byte] =>
+        bytes
       case arrayData: ArrayData =>
         val size = arrayData.numElements()
         val result = new Array[Byte](size)
@@ -422,6 +424,8 @@ case class JaccardDistanceExpression(_left: Expression, _right: Expression)
 
   private def extractByteArray(value: Any): Array[Byte] = {
     value match {
+      case bytes: Array[Byte] =>
+        bytes
       case arrayData: ArrayData =>
         val size = arrayData.numElements()
         val result = new Array[Byte](size)

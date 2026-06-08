@@ -18,7 +18,18 @@ import org.apache.hadoop.fs.{
 import org.apache.hadoop.fs.permission.FsPermission
 import org.apache.hadoop.util.Progressable
 import org.apache.spark.sql.connector.read.InputPartition
-import org.apache.spark.sql.types.{LongType, StructField, StructType}
+import org.apache.spark.sql.types.{
+  ArrayType,
+  BinaryType,
+  ByteType,
+  FloatType,
+  LongType,
+  MetadataBuilder,
+  ShortType,
+  StringType,
+  StructField,
+  StructType
+}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterEach
@@ -37,6 +48,7 @@ import com.zilliz.spark.connector.read.{
   V2ColumnGroup,
   V2SegmentInfo
 }
+import com.zilliz.spark.connector.serde.ArrowConverter
 
 class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(
@@ -57,18 +69,92 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  private val vectorSnapshotSchemaJson =
+    """
+      {
+        "snapshot-info": {
+          "name": "test",
+          "id": 1,
+          "collection_id": 10,
+          "partition_ids": [1],
+          "create_ts": 1
+        },
+        "collection": {
+          "schema": {
+            "name": "c",
+            "fields": [
+              {
+                "fieldID": 100,
+                "name": "binary_vec",
+                "data_type": "BinaryVector",
+                "type_params": [{"key": "dim", "value": "128"}]
+              },
+              {
+                "fieldID": 101,
+                "name": "float_vec",
+                "data_type": "FloatVector",
+                "type_params": [{"key": "dim", "value": "4"}]
+              },
+              {
+                "fieldID": 102,
+                "name": "int8_vec",
+                "data_type": "Int8Vector",
+                "type_params": [{"key": "dim", "value": "4"}]
+              },
+              {
+                "fieldID": 103,
+                "name": "json_payload",
+                "data_type": "JSON"
+              }
+            ]
+          }
+        },
+        "indexes": [],
+        "manifest-list": []
+      }
+    """
+
+  private val vectorSnapshotSchemaBytes =
+    java.util.Base64.getEncoder.encodeToString(
+      MilvusSnapshotReader
+        .toProtobufSchemaBytes(
+          MilvusSnapshotReader
+            .parseSnapshotMetadata(vectorSnapshotSchemaJson)
+            .toOption
+            .get
+            .collection
+            .schema
+        )
+    )
+
+  private def metadata(
+      entries: (String, Long)*
+  ): org.apache.spark.sql.types.Metadata = {
+    val builder = new MetadataBuilder()
+    entries.foreach { case (key, value) => builder.putLong(key, value) }
+    builder.build()
+  }
+
   private def snapshotTableSchema(
       baseSchema: StructType,
-      extraColumns: String
+      extraColumns: String,
+      snapshotSchemaJson: Option[String] = Some(vectorSnapshotSchemaJson),
+      snapshotSchemaBytes: Option[String] = None
   ): StructType = {
-    val options = Map(
+    val options = scala.collection.mutable.Map(
       MilvusOption.SnapshotMode -> "true",
       MilvusOption.SnapshotManifests -> "[]",
       MilvusOption.SnapshotCollectionId -> "10",
       MilvusOption.MilvusCollectionName -> "c",
       MilvusOption.MilvusExtraColumns -> extraColumns
     )
-    MilvusTable(MilvusOption(options), Some(baseSchema)).schema()
+    snapshotSchemaJson.foreach(json =>
+      options += MilvusOption.SnapshotSchemaJson -> json
+    )
+    snapshotSchemaBytes.foreach(bytes =>
+      options += MilvusOption.SnapshotSchemaBytes -> bytes
+    )
+    MilvusTable(MilvusOption(options.toMap), Some(baseSchema)).schema()
   }
 
   test(
@@ -463,6 +549,162 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(err.getMessage.contains("segment_id"))
     assert(err.getMessage.contains("legacy alias"))
     assert(err.getMessage.contains("$segment_id"))
+  }
+
+  test(
+    "snapshot mode injects milvus.data_type metadata into provided external schema"
+  ) {
+    val schema = snapshotTableSchema(
+      StructType(
+        Seq(
+          StructField("binary_vec", BinaryType, nullable = true),
+          StructField("float_vec", ArrayType(FloatType), nullable = true),
+          StructField("int8_vec", ArrayType(ShortType), nullable = true),
+          StructField("json_payload", StringType, nullable = true)
+        )
+      ),
+      "partition"
+    )
+
+    assert(
+      schema("binary_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 100L
+    )
+    assert(
+      schema("float_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 101L
+    )
+    assert(
+      schema("int8_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 105L
+    )
+    assert(
+      schema("json_payload").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 23L
+    )
+    assert(schema.fieldNames.toSeq.last == "partition")
+  }
+
+  test(
+    "snapshot mode preserves caller metadata when injecting milvus.data_type"
+  ) {
+    val schema = snapshotTableSchema(
+      StructType(
+        Seq(
+          StructField(
+            "binary_vec",
+            BinaryType,
+            nullable = true,
+            metadata = metadata("custom.flag" -> 7L)
+          )
+        )
+      ),
+      ""
+    )
+
+    assert(schema("binary_vec").metadata.getLong("custom.flag") == 7L)
+    assert(
+      schema("binary_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 100L
+    )
+  }
+
+  test(
+    "snapshot mode injects milvus.data_type metadata from snapshot schema bytes"
+  ) {
+    val schema = snapshotTableSchema(
+      StructType(
+        Seq(
+          StructField("binary_vec", BinaryType, nullable = true),
+          StructField("float_vec", ArrayType(FloatType), nullable = true),
+          StructField("int8_vec", ArrayType(ShortType), nullable = true)
+        )
+      ),
+      extraColumns = "",
+      snapshotSchemaJson = None,
+      snapshotSchemaBytes = Some(vectorSnapshotSchemaBytes)
+    )
+
+    assert(
+      schema("binary_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 100L
+    )
+    assert(
+      schema("float_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 101L
+    )
+    assert(
+      schema("int8_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 105L
+    )
+  }
+
+  test("snapshot mode does not overwrite existing milvus.data_type") {
+    val schema = snapshotTableSchema(
+      StructType(
+        Seq(
+          StructField(
+            "binary_vec",
+            BinaryType,
+            nullable = true,
+            metadata = metadata(
+              ArrowConverter.MilvusDataTypeMetadataKey -> 999L,
+              "custom.flag" -> 7L
+            )
+          ),
+          StructField("legacy_bytes", ArrayType(ByteType), nullable = true)
+        )
+      ),
+      ""
+    )
+
+    assert(
+      schema("binary_vec").metadata.getLong(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      ) == 999L
+    )
+    assert(schema("binary_vec").metadata.getLong("custom.flag") == 7L)
+    assert(
+      !schema("legacy_bytes").metadata.contains(
+        ArrowConverter.MilvusDataTypeMetadataKey
+      )
+    )
+  }
+
+  test("snapshot mode fails loudly on malformed snapshot schema json") {
+    val err = intercept[IllegalArgumentException] {
+      snapshotTableSchema(
+        StructType(Seq(StructField("binary_vec", BinaryType, nullable = true))),
+        extraColumns = "",
+        snapshotSchemaJson = Some("not-json"),
+        snapshotSchemaBytes = None
+      )
+    }
+
+    assert(err.getMessage.contains(MilvusOption.SnapshotSchemaJson))
+    assert(err.getMessage.contains("Failed to parse"))
+  }
+
+  test("snapshot mode fails loudly on malformed snapshot schema bytes") {
+    val err = intercept[IllegalArgumentException] {
+      snapshotTableSchema(
+        StructType(Seq(StructField("binary_vec", BinaryType, nullable = true))),
+        extraColumns = "",
+        snapshotSchemaJson = None,
+        snapshotSchemaBytes = Some("not-base64%%")
+      )
+    }
+
+    assert(err.getMessage.contains(MilvusOption.SnapshotSchemaBytes))
+    assert(err.getMessage.contains("Failed to parse"))
   }
 
   test(
