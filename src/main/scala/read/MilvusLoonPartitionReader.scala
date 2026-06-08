@@ -66,6 +66,28 @@ object MilvusLoonPartitionReader {
       rowOffset: Long
   )
 
+  private[read] def validateVectorSearchField(
+      field: StructField,
+      metric: String
+  ): Unit = {
+    field.dataType match {
+      case BinaryType
+          if field.metadata.contains(
+            ArrowConverter.MilvusDataTypeMetadataKey
+          ) =>
+        field.metadata
+          .getLong(ArrowConverter.MilvusDataTypeMetadataKey)
+          .toInt match {
+          case DataType.BinaryVector.value =>
+            throw new IllegalArgumentException(
+              s"Vector column '${field.name}' uses BinaryVector storage and does not support vector.search.* dense-float metric '$metric'; use binary search utilities with Hamming/Jaccard instead"
+            )
+          case _ =>
+        }
+      case _ =>
+    }
+  }
+
   private[read] def decodeBinaryTypeVectorForSearch(
       bytes: Array[Byte],
       field: StructField
@@ -409,6 +431,11 @@ class MilvusLoonPartitionReader(
             s"Vector column '$vecCol' not found in schema: ${sourceSchema.fieldNames.mkString(", ")}"
           )
       }
+
+    MilvusLoonPartitionReader.validateVectorSearchField(
+      sourceSchema(vectorColIndex),
+      metric
+    )
 
     // Use priority queue to maintain top-K
     // For L2: min-heap (smaller distance is better, so we keep max at top to evict)
