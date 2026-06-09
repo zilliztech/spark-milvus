@@ -139,6 +139,7 @@ val s3Options = Map(
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `MilvusOption.MilvusInsertMaxBatchSize` | Int | No | 5000 | Maximum batch size for single insert operation |
+| `MilvusOption.WriterVariableWidthBytesPerValue` | Double | No | 32.0 | Initial Arrow buffer density for VARCHAR/JSON/binary writer columns; increase for wide variable-width values. Must be finite and positive. |
 | `MilvusOption.MilvusRetryCount` | Int | No | 3 | Number of retries on operation failure |
 | `MilvusOption.MilvusRetryInterval` | Int | No | 1000 | Retry interval in milliseconds |
 

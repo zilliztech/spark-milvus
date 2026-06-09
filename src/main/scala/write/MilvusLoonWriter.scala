@@ -176,6 +176,30 @@ object MilvusLoonPartitionWriter {
       doWrite
     }
   }
+
+  private[connector] def parsePositiveDoubleOption(
+      options: scala.collection.Map[String, String],
+      key: String,
+      defaultValue: Double
+  ): Double = {
+    options
+      .get(key.toLowerCase)
+      .filter(_.trim.nonEmpty)
+      .map { value =>
+        val parsed = Try(value.trim.toDouble).getOrElse {
+          throw new IllegalArgumentException(
+            s"$key must be a finite positive number, got '$value'"
+          )
+        }
+        if (!java.lang.Double.isFinite(parsed) || parsed <= 0.0) {
+          throw new IllegalArgumentException(
+            s"$key must be a finite positive number, got '$value'"
+          )
+        }
+        parsed
+      }
+      .getOrElse(defaultValue)
+  }
 }
 
 /** Partition writer using Storage V2 FFI
@@ -218,6 +242,12 @@ class MilvusLoonPartitionWriter(
 
   // Batch size configuration
   private val batchSize = milvusOption.insertMaxBatchSize
+  private val variableWidthBytesPerValue =
+    MilvusLoonPartitionWriter.parsePositiveDoubleOption(
+      milvusOption.options,
+      MilvusOption.WriterVariableWidthBytesPerValue,
+      defaultValue = 32.0
+    )
   private var currentBatchSize = 0
   private var totalRecordCount = 0L
 
@@ -444,12 +474,18 @@ class MilvusLoonPartitionWriter(
           // Second arg is density (bytes per value), NOT total bytes. Arrow
           // computes the initial data buffer size as valueCount × density
           // internally. Passing `batchSize * 32` here gave batchSize² × 32 —
-          // a quadratic over-allocation (~32 MiB per column at batch=1024)
-          // that exploded into GiB-scale peaks and caused direct-memory OOM.
-          varCharVector.setInitialCapacity(batchSize, 32.0)
+          // a quadratic over-allocation. Use a bounded per-value default that
+          // can be raised for wide JSON/VARCHAR workloads.
+          varCharVector.setInitialCapacity(
+            batchSize,
+            variableWidthBytesPerValue
+          )
 
         case baseVarVector: BaseVariableWidthVector =>
-          baseVarVector.setInitialCapacity(batchSize, 32.0)
+          baseVarVector.setInitialCapacity(
+            batchSize,
+            variableWidthBytesPerValue
+          )
 
         case _ =>
           // For fixed-width vectors, just set row capacity
@@ -602,6 +638,8 @@ object MilvusLoonWriter extends Logging {
     *   - fs.root_path: Root path in bucket (default: "files")
     *   - milvus.collection.name: Collection name for path generation
     *   - vector.{field_name}.dim: Vector dimension for float array fields
+    *   - milvus.writer.variableWidthBytesPerValue: initial bytes per
+    *     variable-width value (default: 32.0)
     * @return
     *   Try containing manifest paths on success
     */

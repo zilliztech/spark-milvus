@@ -139,6 +139,7 @@ val s3Options = Map(
 | 参数名 | 类型 | 必需 | 默认值 | 描述 |
 |--------|------|------|--------|------|
 | `MilvusOption.MilvusInsertMaxBatchSize` | Int | 否 | 5000 | 单次插入的最大批次大小 |
+| `MilvusOption.WriterVariableWidthBytesPerValue` | Double | 否 | 32.0 | VARCHAR/JSON/binary 写入列的 Arrow 初始 buffer 密度；宽变长字段可调大。必须是有限正数。 |
 | `MilvusOption.MilvusRetryCount` | Int | 否 | 3 | 操作失败时的重试次数 |
 | `MilvusOption.MilvusRetryInterval` | Int | 否 | 1000 | 重试间隔时间（毫秒） |
 
