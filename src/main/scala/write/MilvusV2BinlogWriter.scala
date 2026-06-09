@@ -39,6 +39,17 @@ case class V2BinlogFile(
     rowsWritten: Long
 )
 
+object MilvusV2BinlogWriter {
+  private[connector] def parseVariableWidthBytesPerValue(
+      options: scala.collection.Map[String, String]
+  ): Double =
+    MilvusLoonPartitionWriter.parsePositiveDoubleOption(
+      options,
+      MilvusOption.WriterVariableWidthBytesPerValue,
+      defaultValue = 32.0
+    )
+}
+
 /** Writes StorageV2 per-field binlog parquet files for a single segment.
   *
   * Backfill always emits **single-field column groups**, so the writer creates
@@ -174,6 +185,8 @@ class MilvusV2BinlogWriter(
   private val batchSize: Int =
     if (milvusOption.insertMaxBatchSize > 0) milvusOption.insertMaxBatchSize
     else 5000
+  private val variableWidthBytesPerValue: Double =
+    MilvusV2BinlogWriter.parseVariableWidthBytesPerValue(milvusOption.options)
   private var root: VectorSchemaRoot =
     VectorSchemaRoot.create(arrowSchema, allocator)
   allocateVectors(root)
@@ -295,9 +308,9 @@ class MilvusV2BinlogWriter(
         // give batchSize² × 32 bytes — a quadratic over-allocation that dwarfs
         // actual data (20-byte values) by ~1000× and made a single allocator
         // peak ~1 GiB for a 20k-row segment.
-        v.setInitialCapacity(batchSize, 32.0)
+        v.setInitialCapacity(batchSize, variableWidthBytesPerValue)
       case v: BaseVariableWidthVector =>
-        v.setInitialCapacity(batchSize, 32.0)
+        v.setInitialCapacity(batchSize, variableWidthBytesPerValue)
       case other =>
         other.setInitialCapacity(batchSize)
     }

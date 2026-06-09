@@ -210,4 +210,18 @@ class PropertiesTest extends AnyFunSuite with Matchers {
     err.getMessage should include(Properties.FsConfig.FsBucketName)
     err.getMessage should include(Properties.FsConfig.FsUseIam)
   }
+
+  test("fromMilvusOption trims fs.use_iam before IAM-mode validation") {
+    val options = Map(
+      MilvusOption.MilvusUri -> "http://localhost:19530",
+      Properties.FsConfig.FsUseIam -> " true "
+    )
+
+    val err = intercept[IllegalArgumentException] {
+      Properties.fromMilvusOption(MilvusOption(options))
+    }
+
+    err.getMessage should include(Properties.FsConfig.FsBucketName)
+    err.getMessage should include(Properties.FsConfig.FsUseIam)
+  }
 }

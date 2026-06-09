@@ -54,7 +54,7 @@ object Properties {
     // dev/test default when we are clearly *not* in IAM mode.
     val useIamFlag = milvusOption.options
       .get(FsConfig.FsUseIam)
-      .exists(_.equalsIgnoreCase("true"))
+      .exists(_.trim.equalsIgnoreCase("true"))
     val bucket = milvusOption.options
       .get(FsConfig.FsBucketName)
       .filter(_.trim.nonEmpty)
