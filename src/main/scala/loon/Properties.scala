@@ -9,6 +9,10 @@ import io.milvus.storage.MilvusStorageProperties
   */
 object Properties {
 
+  private[connector] def normalizedFsUseIamValue(
+      options: scala.collection.Map[String, String]
+  ): Option[String] = options.get(FsConfig.FsUseIam).map(_.trim)
+
   /** Filesystem configuration constants for Storage V2 (matching milvus-storage
     * C++ API)
     */
@@ -52,9 +56,8 @@ object Properties {
     // hard-coded "minioadmin" defaults under IRSA produces signed requests
     // with bogus keys, which fail with InvalidAccessKeyId. Only inject the
     // dev/test default when we are clearly *not* in IAM mode.
-    val useIamFlag = milvusOption.options
-      .get(FsConfig.FsUseIam)
-      .exists(_.trim.equalsIgnoreCase("true"))
+    val normalizedUseIamValue = normalizedFsUseIamValue(milvusOption.options)
+    val useIamFlag = normalizedUseIamValue.exists(_.equalsIgnoreCase("true"))
     val bucket = milvusOption.options
       .get(FsConfig.FsBucketName)
       .filter(_.trim.nonEmpty)
@@ -108,9 +111,7 @@ object Properties {
     milvusOption.options
       .get(FsConfig.FsSslCaCert)
       .foreach(propsMap.put(FsConfig.FsSslCaCert, _))
-    milvusOption.options
-      .get(FsConfig.FsUseIam)
-      .foreach(propsMap.put(FsConfig.FsUseIam, _))
+    normalizedUseIamValue.foreach(propsMap.put(FsConfig.FsUseIam, _))
     milvusOption.options
       .get(FsConfig.FsUseVirtualHost)
       .foreach(propsMap.put(FsConfig.FsUseVirtualHost, _))

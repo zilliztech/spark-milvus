@@ -224,4 +224,10 @@ class PropertiesTest extends AnyFunSuite with Matchers {
     err.getMessage should include(Properties.FsConfig.FsBucketName)
     err.getMessage should include(Properties.FsConfig.FsUseIam)
   }
+
+  test("normalizedFsUseIamValue trims whitespace before FFI forwarding") {
+    Properties.normalizedFsUseIamValue(
+      Map(Properties.FsConfig.FsUseIam -> " true ")
+    ) shouldBe Some("true")
+  }
 }

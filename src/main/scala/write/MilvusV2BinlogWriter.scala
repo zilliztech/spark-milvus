@@ -89,6 +89,9 @@ class MilvusV2BinlogWriter(
       s"${newFieldNames.size} / ${newFieldIds.size} / ${targetSchema.fields.length}"
   )
 
+  private val variableWidthBytesPerValue: Double =
+    MilvusV2BinlogWriter.parseVariableWidthBytesPerValue(milvusOption.options)
+
   // Storage root comes from the same FS config the V3 writer already consumes
   // — see com.zilliz.spark.connector.loon.Properties. Paths passed to the
   // native writer are bucket-relative keys: milvus-storage's FilesystemCache
@@ -185,8 +188,6 @@ class MilvusV2BinlogWriter(
   private val batchSize: Int =
     if (milvusOption.insertMaxBatchSize > 0) milvusOption.insertMaxBatchSize
     else 5000
-  private val variableWidthBytesPerValue: Double =
-    MilvusV2BinlogWriter.parseVariableWidthBytesPerValue(milvusOption.options)
   private var root: VectorSchemaRoot =
     VectorSchemaRoot.create(arrowSchema, allocator)
   allocateVectors(root)
