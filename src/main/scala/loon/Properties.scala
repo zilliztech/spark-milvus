@@ -63,14 +63,25 @@ object Properties {
     // dev/test default when we are clearly *not* in IAM mode.
     val normalizedUseIamValue = normalizedFsUseIamValue(milvusOption.options)
     val useIamFlag = normalizedUseIamValue.exists(_.equalsIgnoreCase("true"))
+    val rawBucketValue = milvusOption.options.get(FsConfig.FsBucketName)
     val bucket = normalizedFsBucketNameValue(milvusOption.options)
       .getOrElse {
-        if (useIamFlag) {
-          throw new IllegalArgumentException(
-            s"${FsConfig.FsBucketName} must be set when ${FsConfig.FsUseIam}=true"
-          )
+        rawBucketValue match {
+          case Some(_) if useIamFlag =>
+            throw new IllegalArgumentException(
+              s"${FsConfig.FsBucketName} must not be blank when ${FsConfig.FsUseIam}=true"
+            )
+          case Some(_) =>
+            throw new IllegalArgumentException(
+              s"${FsConfig.FsBucketName} must not be blank"
+            )
+          case None if useIamFlag =>
+            throw new IllegalArgumentException(
+              s"${FsConfig.FsBucketName} must be set when ${FsConfig.FsUseIam}=true"
+            )
+          case None =>
+            "a-bucket"
         }
-        "a-bucket"
       }
     val rootPath = milvusOption.options.getOrElse(FsConfig.FsRootPath, "files")
     val accessKey =

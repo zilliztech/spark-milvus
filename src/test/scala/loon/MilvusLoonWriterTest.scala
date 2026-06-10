@@ -36,6 +36,27 @@ class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
     ) shouldBe 64.5
   }
 
+  test(
+    "constructor validates variable-width density before bucket validation"
+  ) {
+    val options = Map(
+      Properties.FsConfig.FsBucketName -> "   ",
+      MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> "NaN"
+    )
+
+    val err = intercept[IllegalArgumentException] {
+      new MilvusLoonPartitionWriter(
+        partitionId = 1,
+        taskId = 1L,
+        sparkSchema = org.apache.spark.sql.types.StructType(Nil),
+        milvusOption = MilvusOption(options)
+      )
+    }
+
+    err.getMessage should include(MilvusOption.WriterVariableWidthBytesPerValue)
+    err.getMessage should not include (Properties.FsConfig.FsBucketName)
+  }
+
   test("Write DataFrame using Loon Writer to Minio") {
     val spark = SparkSession
       .builder()

@@ -212,6 +212,16 @@ class MilvusLoonPartitionWriter(
 ) extends DataWriter[InternalRow]
     with Logging {
 
+  // Batch size configuration
+  private val batchSize = milvusOption.insertMaxBatchSize
+  private val variableWidthBytesPerValue =
+    MilvusLoonPartitionWriter.parsePositiveDoubleOption(
+      milvusOption.options,
+      MilvusOption.WriterVariableWidthBytesPerValue,
+      defaultValue = 32.0
+    )
+  private val writerProperties = Properties.fromMilvusOption(milvusOption)
+
   private val allocator = new RootAllocator(Long.MaxValue)
 
   // Create Arrow schema from Spark schema
@@ -239,15 +249,6 @@ class MilvusLoonPartitionWriter(
   // alive until C++ drops its ref. This caps per-writer direct memory at
   // ~16 MB × numGroups instead of growing linearly with the segment's row count.
   private var root = VectorSchemaRoot.create(arrowSchema, allocator)
-
-  // Batch size configuration
-  private val batchSize = milvusOption.insertMaxBatchSize
-  private val variableWidthBytesPerValue =
-    MilvusLoonPartitionWriter.parsePositiveDoubleOption(
-      milvusOption.options,
-      MilvusOption.WriterVariableWidthBytesPerValue,
-      defaultValue = 32.0
-    )
   private var currentBatchSize = 0
   private var totalRecordCount = 0L
 
@@ -268,25 +269,22 @@ class MilvusLoonPartitionWriter(
     }
   }
 
-  // Create Storage V2 writer
-  private val (writer, writerProperties, arrowSchemaC) = {
-    // Writer properties from MilvusOption
-    val props = Properties.fromMilvusOption(milvusOption)
+  private val arrowSchemaC = ArrowSchema.allocateNew(allocator)
 
-    // Create Storage V2 writer
-    val schemaC = ArrowSchema.allocateNew(allocator)
-    Data.exportSchema(allocator, arrowSchema, null, schemaC)
+  // Create Storage V2 writer
+  private val writer = {
+    Data.exportSchema(allocator, arrowSchema, null, arrowSchemaC)
 
     val w = new MilvusStorageWriter()
-    w.create(basePath, schemaC.memoryAddress(), props)
+    w.create(basePath, arrowSchemaC.memoryAddress(), writerProperties)
 
     if (!w.isValid) {
-      schemaC.close()
-      props.free()
+      arrowSchemaC.close()
+      writerProperties.free()
       throw new IllegalStateException("Failed to create MilvusStorageWriter")
     }
 
-    (w, props, schemaC)
+    w
   }
 
   logInfo(
