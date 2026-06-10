@@ -13,6 +13,11 @@ object Properties {
       options: scala.collection.Map[String, String]
   ): Option[String] = options.get(FsConfig.FsUseIam).map(_.trim)
 
+  private[connector] def normalizedFsBucketNameValue(
+      options: scala.collection.Map[String, String]
+  ): Option[String] =
+    options.get(FsConfig.FsBucketName).map(_.trim).filter(_.nonEmpty)
+
   /** Filesystem configuration constants for Storage V2 (matching milvus-storage
     * C++ API)
     */
@@ -58,9 +63,7 @@ object Properties {
     // dev/test default when we are clearly *not* in IAM mode.
     val normalizedUseIamValue = normalizedFsUseIamValue(milvusOption.options)
     val useIamFlag = normalizedUseIamValue.exists(_.equalsIgnoreCase("true"))
-    val bucket = milvusOption.options
-      .get(FsConfig.FsBucketName)
-      .filter(_.trim.nonEmpty)
+    val bucket = normalizedFsBucketNameValue(milvusOption.options)
       .getOrElse {
         if (useIamFlag) {
           throw new IllegalArgumentException(

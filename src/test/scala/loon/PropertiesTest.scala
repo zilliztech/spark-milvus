@@ -230,4 +230,16 @@ class PropertiesTest extends AnyFunSuite with Matchers {
       Map(Properties.FsConfig.FsUseIam -> " true ")
     ) shouldBe Some("true")
   }
+
+  test("normalizedFsBucketNameValue trims whitespace before FFI forwarding") {
+    Properties.normalizedFsBucketNameValue(
+      Map(Properties.FsConfig.FsBucketName -> " my-bucket ")
+    ) shouldBe Some("my-bucket")
+  }
+
+  test("normalizedFsBucketNameValue drops blank bucket names") {
+    Properties.normalizedFsBucketNameValue(
+      Map(Properties.FsConfig.FsBucketName -> "   ")
+    ) shouldBe None
+  }
 }
