@@ -9,6 +9,15 @@ import io.milvus.storage.MilvusStorageProperties
   */
 object Properties {
 
+  private[connector] def normalizedFsUseIamValue(
+      options: scala.collection.Map[String, String]
+  ): Option[String] = options.get(FsConfig.FsUseIam).map(_.trim)
+
+  private[connector] def normalizedFsBucketNameValue(
+      options: scala.collection.Map[String, String]
+  ): Option[String] =
+    options.get(FsConfig.FsBucketName).map(_.trim).filter(_.nonEmpty)
+
   /** Filesystem configuration constants for Storage V2 (matching milvus-storage
     * C++ API)
     */
@@ -42,23 +51,39 @@ object Properties {
     *   MilvusStorageProperties for milvus-storage native library
     */
   def fromMilvusOption(milvusOption: MilvusOption): MilvusStorageProperties = {
-    val props = new MilvusStorageProperties()
     val propsMap = new ju.HashMap[String, String]()
 
     // Extract filesystem configuration with defaults
     val endpoint =
       milvusOption.options.getOrElse(FsConfig.FsAddress, "localhost:9000")
-    val bucket =
-      milvusOption.options.getOrElse(FsConfig.FsBucketName, "a-bucket")
-    val rootPath = milvusOption.options.getOrElse(FsConfig.FsRootPath, "files")
     // When use_iam=true the FFI must consult the AWS default credentials
     // chain (env vars / web identity / instance profile). Falling back to
     // hard-coded "minioadmin" defaults under IRSA produces signed requests
     // with bogus keys, which fail with InvalidAccessKeyId. Only inject the
     // dev/test default when we are clearly *not* in IAM mode.
-    val useIamFlag = milvusOption.options
-      .get(FsConfig.FsUseIam)
-      .exists(_.equalsIgnoreCase("true"))
+    val normalizedUseIamValue = normalizedFsUseIamValue(milvusOption.options)
+    val useIamFlag = normalizedUseIamValue.exists(_.equalsIgnoreCase("true"))
+    val rawBucketValue = milvusOption.options.get(FsConfig.FsBucketName)
+    val bucket = normalizedFsBucketNameValue(milvusOption.options)
+      .getOrElse {
+        rawBucketValue match {
+          case Some(_) if useIamFlag =>
+            throw new IllegalArgumentException(
+              s"${FsConfig.FsBucketName} must not be blank when ${FsConfig.FsUseIam}=true"
+            )
+          case Some(_) =>
+            throw new IllegalArgumentException(
+              s"${FsConfig.FsBucketName} must not be blank"
+            )
+          case None if useIamFlag =>
+            throw new IllegalArgumentException(
+              s"${FsConfig.FsBucketName} must be set when ${FsConfig.FsUseIam}=true"
+            )
+          case None =>
+            "a-bucket"
+        }
+      }
+    val rootPath = milvusOption.options.getOrElse(FsConfig.FsRootPath, "files")
     val accessKey =
       milvusOption.options.getOrElse(
         FsConfig.FsAccessKeyId,
@@ -100,9 +125,7 @@ object Properties {
     milvusOption.options
       .get(FsConfig.FsSslCaCert)
       .foreach(propsMap.put(FsConfig.FsSslCaCert, _))
-    milvusOption.options
-      .get(FsConfig.FsUseIam)
-      .foreach(propsMap.put(FsConfig.FsUseIam, _))
+    normalizedUseIamValue.foreach(propsMap.put(FsConfig.FsUseIam, _))
     milvusOption.options
       .get(FsConfig.FsUseVirtualHost)
       .foreach(propsMap.put(FsConfig.FsUseVirtualHost, _))
@@ -119,6 +142,7 @@ object Properties {
       .get(FsConfig.FsUseCustomPartUpload)
       .foreach(propsMap.put(FsConfig.FsUseCustomPartUpload, _))
 
+    val props = new MilvusStorageProperties()
     props.create(propsMap)
     if (!props.isValid) {
       throw new IllegalStateException(
