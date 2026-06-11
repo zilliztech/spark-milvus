@@ -196,4 +196,82 @@ class PropertiesTest extends AnyFunSuite with Matchers {
     Properties.FsConfig.FsUseSSL should not be empty
     Properties.FsConfig.FsRegion should not be empty
   }
+
+  test("fromMilvusOption requires bucket name in IAM mode") {
+    val options = Map(
+      MilvusOption.MilvusUri -> "http://localhost:19530",
+      Properties.FsConfig.FsUseIam -> "true"
+    )
+
+    val err = intercept[IllegalArgumentException] {
+      Properties.fromMilvusOption(MilvusOption(options))
+    }
+
+    err.getMessage should include(Properties.FsConfig.FsBucketName)
+    err.getMessage should include(Properties.FsConfig.FsUseIam)
+    err.getMessage should include("must be set")
+  }
+
+  test("fromMilvusOption rejects blank bucket name in non-IAM mode") {
+    val options = Map(
+      MilvusOption.MilvusUri -> "http://localhost:19530",
+      Properties.FsConfig.FsBucketName -> "   "
+    )
+
+    val err = intercept[IllegalArgumentException] {
+      Properties.fromMilvusOption(MilvusOption(options))
+    }
+
+    err.getMessage should include(Properties.FsConfig.FsBucketName)
+    err.getMessage should include("must not be blank")
+    err.getMessage should not include (Properties.FsConfig.FsUseIam)
+  }
+
+  test("fromMilvusOption rejects blank bucket name in IAM mode") {
+    val options = Map(
+      MilvusOption.MilvusUri -> "http://localhost:19530",
+      Properties.FsConfig.FsUseIam -> "true",
+      Properties.FsConfig.FsBucketName -> "   "
+    )
+
+    val err = intercept[IllegalArgumentException] {
+      Properties.fromMilvusOption(MilvusOption(options))
+    }
+
+    err.getMessage should include(Properties.FsConfig.FsBucketName)
+    err.getMessage should include(Properties.FsConfig.FsUseIam)
+    err.getMessage should include("must not be blank")
+  }
+
+  test("fromMilvusOption trims fs.use_iam before IAM-mode validation") {
+    val options = Map(
+      MilvusOption.MilvusUri -> "http://localhost:19530",
+      Properties.FsConfig.FsUseIam -> " true "
+    )
+
+    val err = intercept[IllegalArgumentException] {
+      Properties.fromMilvusOption(MilvusOption(options))
+    }
+
+    err.getMessage should include(Properties.FsConfig.FsBucketName)
+    err.getMessage should include(Properties.FsConfig.FsUseIam)
+  }
+
+  test("normalizedFsUseIamValue trims whitespace before FFI forwarding") {
+    Properties.normalizedFsUseIamValue(
+      Map(Properties.FsConfig.FsUseIam -> " true ")
+    ) shouldBe Some("true")
+  }
+
+  test("normalizedFsBucketNameValue trims whitespace before FFI forwarding") {
+    Properties.normalizedFsBucketNameValue(
+      Map(Properties.FsConfig.FsBucketName -> " my-bucket ")
+    ) shouldBe Some("my-bucket")
+  }
+
+  test("normalizedFsBucketNameValue drops blank bucket names") {
+    Properties.normalizedFsBucketNameValue(
+      Map(Properties.FsConfig.FsBucketName -> "   ")
+    ) shouldBe None
+  }
 }
