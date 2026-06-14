@@ -84,6 +84,35 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     }
   }
 
+  test("parseArgs throws when key/value flag is followed by another flag") {
+    val ex = intercept[IllegalArgumentException] {
+      BackfillApp.parseArgs(Array("--parquet", "--snapshot", "/tmp/snap.json"))
+    }
+    ex.getMessage should include("Missing value for --parquet")
+  }
+
+  test(
+    "parseArgs throws when source key/value flag is followed by another flag"
+  ) {
+    val ex = intercept[IllegalArgumentException] {
+      BackfillApp.parseArgs(Array("--source-s3-endpoint", "--source-use-iam"))
+    }
+    ex.getMessage should include("Missing value for --source-s3-endpoint")
+  }
+
+  test("parseArgs allows non-flag values that begin with double dash") {
+    val parsed = BackfillApp.parseArgs(
+      Array(
+        "--s3-secret-key",
+        "--literal-secret",
+        "--parquet",
+        "/tmp/data.parquet"
+      )
+    )
+    parsed("s3-secret-key") shouldBe "--literal-secret"
+    parsed("parquet") shouldBe "/tmp/data.parquet"
+  }
+
   test("parseArgs throws on unexpected positional arg") {
     an[IllegalArgumentException] should be thrownBy {
       BackfillApp.parseArgs(Array("oops"))

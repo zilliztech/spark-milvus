@@ -217,7 +217,15 @@ object BackfillApp {
             map += (key -> "true")
             i += 1
           } else if (i + 1 < args.length) {
-            map += (key -> args(i + 1))
+            val value = args(i + 1)
+            if (
+              value.startsWith("--") && KnownFlags.contains(
+                value.stripPrefix("--")
+              )
+            ) {
+              throw new IllegalArgumentException(s"Missing value for $flag")
+            }
+            map += (key -> value)
             i += 2
           } else {
             throw new IllegalArgumentException(s"Missing value for $flag")
