@@ -104,7 +104,8 @@ object ListV2SegmentsApp {
           processOneSegment(
             hadoopConf,
             resolvePath(manifestPath, s3Bucket),
-            s3Bucket
+            s3Bucket,
+            metadata.manifestSchemaVersion
           )
         }
       }
@@ -120,13 +121,15 @@ object ListV2SegmentsApp {
   private def processOneSegment(
       hadoopConf: Configuration,
       manifestPath: String,
-      bucket: String
+      bucket: String,
+      manifestSchemaVersion: Int
   ): Unit = {
     println(s"\n  AVRO: $manifestPath")
     val avroBytes = readAllBytes(hadoopConf, manifestPath)
     println(s"    size: ${avroBytes.length} bytes")
 
-    MilvusSegmentManifestReader.parse(avroBytes) match {
+    MilvusSegmentManifestReader
+      .parse(avroBytes, manifestSchemaVersion) match {
       case Left(err) =>
         println(s"    ERROR decoding AVRO: ${err.getMessage}")
 

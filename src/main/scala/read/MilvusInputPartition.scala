@@ -27,7 +27,9 @@ case class MilvusStorageV3InputPartition(
     vectorColumn: Option[String] = None,
     segmentID: Long = -1L,
     readVersion: Long =
-      -1L // -1 = LATEST, >0 = specific manifest version from snapshot
+      -1L, // -1 = LATEST, >0 = specific manifest version from snapshot
+    applyDeletes: Boolean = true,
+    deletePlan: MilvusDeletePlan = MilvusDeletePlan.empty
 ) extends InputPartition
 
 /** InputPartition for milvus-segment-info `storage_version = 2` — the
@@ -51,5 +53,7 @@ case class MilvusPackedV2InputPartition(
     columnGroups: Seq[V2ColumnGroup],
     milvusSchemaBytes: Array[Byte],
     milvusOption: MilvusOption,
-    neededColumnFieldIds: Seq[Long] = Seq.empty
+    neededColumnFieldIds: Seq[Long] = Seq.empty,
+    applyDeletes: Boolean = true,
+    deletePlan: MilvusDeletePlan = MilvusDeletePlan.empty
 ) extends InputPartition

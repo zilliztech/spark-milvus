@@ -329,6 +329,21 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  test("snapshotS3BucketForRelativePaths accepts connector bucket aliases") {
+    assert(
+      MilvusScan.snapshotS3BucketForRelativePaths(
+        "files/snapshots/1/metadata/2.json",
+        Map(MilvusOption.FsBucketName -> "connector-bucket")
+      ) == Some("connector-bucket")
+    )
+    assert(
+      MilvusScan.snapshotS3BucketForRelativePaths(
+        "files/snapshots/1/metadata/2.json",
+        Map(MilvusOption.S3BucketName -> "connector-bucket")
+      ) == Some("connector-bucket")
+    )
+  }
+
   test("snapshotBucketsToConfigure includes cross-bucket snapshot locations") {
     assert(
       MilvusScan.snapshotBucketsToConfigure(
@@ -842,6 +857,21 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       MilvusOption.ClientSnapshotCompactionProtectionSeconds ==
         "milvus.client.snapshot.compaction.protection.seconds"
     )
+    assert(
+      MilvusOption.ClientSnapshotAutoCleanup ==
+        "milvus.client.snapshot.auto.cleanup"
+    )
+  }
+
+  test("clientSnapshotAutoCleanup defaults to true and parses false") {
+    assert(
+      MilvusOption.clientSnapshotAutoCleanup(Map.empty[String, String])
+    )
+    assert(
+      !MilvusOption.clientSnapshotAutoCleanup(
+        Map(MilvusOption.ClientSnapshotAutoCleanup -> "false")
+      )
+    )
   }
 
   test("parsePositiveLongOption rejects non-numeric and non-positive values") {
@@ -1033,11 +1063,17 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(firstPartitions eq secondPartitions)
   }
 
-  test("client mode does not cache planned input partitions") {
+  test("client snapshot fast path caches planned input partitions") {
     val clientOptions = new ju.HashMap[String, String]()
     clientOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
     clientOptions.put(MilvusOption.MilvusCollectionName, "c")
-    assert(!scanWithOptions(clientOptions).shouldCacheInputPartitions)
+    assert(scanWithOptions(clientOptions).shouldCacheInputPartitions)
+
+    val partitionScopedOptions = new ju.HashMap[String, String]()
+    partitionScopedOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
+    partitionScopedOptions.put(MilvusOption.MilvusCollectionName, "c")
+    partitionScopedOptions.put(MilvusOption.MilvusPartitionName, "p1")
+    assert(!scanWithOptions(partitionScopedOptions).shouldCacheInputPartitions)
 
     val snapshotOptions = new ju.HashMap[String, String]()
     snapshotOptions.put(MilvusOption.SnapshotMode, "true")

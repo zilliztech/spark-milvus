@@ -145,7 +145,9 @@ class MilvusPartitionReaderFactory(
           p.columnGroups,
           milvusSchema,
           p.milvusOption,
-          p.neededColumnFieldIds
+          p.neededColumnFieldIds,
+          p.applyDeletes,
+          p.deletePlan
         )
 
         val hasMetadataExtraFields = schema.fieldNames.exists { name =>
@@ -154,8 +156,6 @@ class MilvusPartitionReaderFactory(
 
         if (hasMetadataExtraFields) {
           new PartitionReader[InternalRow] {
-            private var rowOffset: Long = 0L
-
             override def next(): Boolean = underlying.next()
 
             override def get(): InternalRow = {
@@ -172,13 +172,12 @@ class MilvusPartitionReaderFactory(
                   case MilvusOption.MilvusExtraColumnSegmentID =>
                     out(writeIdx) = p.segmentID
                   case MilvusOption.MilvusExtraColumnRowOffset =>
-                    out(writeIdx) = rowOffset
+                    out(writeIdx) = underlying.lastReturnedRowOffset
                   case _ =>
                     out(writeIdx) = row.get(readIdx, field.dataType)
                     readIdx += 1
                 }
               }
-              rowOffset += 1
 
               InternalRow.fromSeq(out.toSeq)
             }

@@ -6,16 +6,22 @@ import org.apache.arrow.c.{
   CDataDictionaryProvider,
   Data
 }
-import org.apache.arrow.vector.VectorSchemaRoot
+import org.apache.arrow.vector.{
+  BigIntVector,
+  VarBinaryVector,
+  VarCharVector,
+  VectorSchemaRoot
+}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
 import com.zilliz.spark.connector.MilvusOption
-import io.milvus.grpc.schema.CollectionSchema
+import io.milvus.grpc.schema.{CollectionSchema, DataType}
 import io.milvus.storage.{
   ArrowUtils,
   MilvusStorageColumnGroups,
@@ -67,6 +73,25 @@ object MilvusPackedV2PartitionReader {
     )
   }
 
+  private[read] def projectedFieldIds(
+      sourceSchema: StructType,
+      fieldMappings: FieldMappings,
+      neededColumnFieldIds: Seq[Long],
+      applyDeletes: Boolean,
+      deletePlan: MilvusDeletePlan,
+      pkFieldId: Long
+  ): Seq[Long] = {
+    if (!applyDeletes || deletePlan.isEmpty) {
+      neededColumnFieldIds
+    } else if (neededColumnFieldIds.nonEmpty) {
+      (neededColumnFieldIds :+ pkFieldId).distinct
+    } else {
+      (sourceSchema.fieldNames.toSeq.flatMap(
+        fieldMappings.fieldNameToId.get
+      ) :+ pkFieldId).distinct
+    }
+  }
+
   private[read] def resolveNeededColumns(
       sourceSchema: StructType,
       columnGroups: Seq[V2ColumnGroup],
@@ -103,6 +128,7 @@ object MilvusPackedV2PartitionReader {
         }
         sourceSchema.fieldNames.toSeq.flatMap(fieldMappings.fieldNameToId.get)
       }
+
     val missingFieldIds = requestedFieldIds.filterNot(declaredFieldIds.contains)
     if (missingFieldIds.nonEmpty) {
       val missingColumns = missingFieldIds
@@ -118,32 +144,19 @@ object MilvusPackedV2PartitionReader {
           s"; declared columns=${declaredColumns.mkString(",")}"
       )
     }
+
     requestedFieldIds.flatMap(fieldMappings.fieldIdToName.get).toArray
   }
 }
 
-/** Spark partition reader for milvus-segment-info `storage_version = 2`
-  * (StorageV2, non-manifest packed parquet) segments.
-  *
-  * Unlike [[MilvusLoonPartitionReader]] (which handles StorageV3: manifest
-  * based, resolves a milvus-storage `.milvus_manifest` file via
-  * `MilvusStorageManifest.getColumnGroupsScala`), this reader is handed a
-  * pre-materialized set of [[V2ColumnGroup]]s recovered from the snapshot AVRO
-  * (slot -> file paths) + one parquet footer's `group_field_id_list`
-  * kv-metadata (slot -> real field IDs). The packed reader then opens only the
-  * files for the requested columns.
-  *
-  * The reader iterates the Arrow stream sequentially (no vector search, no
-  * filter pushdown). Backfill only needs the PK column plus positional row
-  * metadata added by [[MilvusPartitionReaderFactory]], so the minimal shape
-  * fits well.
-  */
 class MilvusPackedV2PartitionReader(
     schema: StructType,
     columnGroups: Seq[V2ColumnGroup],
     milvusSchema: CollectionSchema,
     milvusOption: MilvusOption,
-    neededColumnFieldIds: Seq[Long]
+    neededColumnFieldIds: Seq[Long],
+    applyDeletes: Boolean,
+    deletePlan: MilvusDeletePlan
 ) extends PartitionReader[InternalRow]
     with Logging {
 
@@ -151,47 +164,39 @@ class MilvusPackedV2PartitionReader(
 
   private val allocator = ArrowUtils.getAllocator
   private val sourceSchema = schema
-
+  private val pkField = milvusSchema.fields.find(_.isPrimaryKey).getOrElse {
+    throw new IllegalArgumentException("No primary key field found in schema")
+  }
   private val fieldMappings =
     MilvusPackedV2PartitionReader.buildFieldMappings(milvusSchema)
   private val fieldNameToArrowColumn = fieldMappings.fieldNameToArrowColumn
-
-  // Which column names to ask the packed reader for. Prefer explicit
-  // projection from neededColumnFieldIds; fall back to sourceSchema's Spark
-  // field names. In both cases we coerce to logical names that the parquet
-  // actually carries.
+  private val effectiveNeededColumnFieldIds =
+    MilvusPackedV2PartitionReader.projectedFieldIds(
+      sourceSchema,
+      fieldMappings,
+      neededColumnFieldIds,
+      applyDeletes,
+      deletePlan,
+      pkField.fieldID
+    )
   private val neededColumns: Array[String] =
     MilvusPackedV2PartitionReader.resolveNeededColumns(
       sourceSchema,
       columnGroups,
       fieldMappings,
-      neededColumnFieldIds
+      effectiveNeededColumnFieldIds
     )
+  private val pkColumnName =
+    fieldMappings.fieldIdToName.getOrElse(pkField.fieldID, pkField.name)
 
-  // V2 packed parquet uses logical names (e.g. "ID"). When callers request
-  // aliases such as row_id/timestamp, ArrowConverter must look up the canonical
-  // packed column names RowID/Timestamp instead.
-
-  // Native resource handles. Initialized to safe defaults so a partial-init
-  // failure can roll back whatever was allocated so far. Spark only calls
-  // close() on a fully-constructed reader; any throw from the init block
-  // below has to release its own resources before bubbling out.
   private var arrowSchemaObj: ArrowSchema = null
   private var readerProperties: MilvusStorageProperties = null
   private var columnGroupsPtr: Long = 0L
   private var reader: MilvusStorageReader = null
-  // Per-batch record batch reader handle (see milvus-storage
-  // loon_record_batch_reader_*). We deliberately avoid the ArrowArrayStream
-  // path because Arrow Java's `ArrowReader.loadNextBatch` shares one
-  // VectorSchemaRoot across batches and ignores the ArrowArray `offset`
-  // field — when the underlying C++ reader emits `RecordBatch::Slice`
-  // results, every batch after the first would show the same data.
   private var rbrHandle: Long = 0L
   private var dictProvider: CDataDictionaryProvider = null
 
   try {
-    // Arrow schema for the read: columns named by their logical names so the
-    // packed reader can find them by name in the on-disk parquet.
     val arrowSchema =
       com.zilliz.spark.connector.MilvusSchemaUtil.convertToArrowSchema(
         milvusSchema
@@ -201,11 +206,6 @@ class MilvusPackedV2PartitionReader(
 
     readerProperties = Properties.fromMilvusOption(milvusOption)
 
-    // Build LoonColumnGroups directly from the materialized v2 layout. Each
-    // group's `columns` is the LOGICAL names of its fields (matching what
-    // milvus segcore wrote into the parquet). Row counts (per file) come
-    // from the AVRO's AvroBinlog.entries_num — required because the packed
-    // reader rejects negative end indices.
     val cols = columnGroups.map { cg =>
       cg.fieldIds.flatMap(fieldMappings.fieldIdToName.get).toArray
     }.toArray
@@ -242,20 +242,15 @@ class MilvusPackedV2PartitionReader(
       throw e
   }
 
-  // Per-batch state: each loadNextBatch() imports a FRESH RecordBatch
-  // into a NEW VectorSchemaRoot. The previous root (if any) is closed
-  // before the next import so buffers are correctly reclaimed. This
-  // intentionally does not reuse a single root across batches — Arrow
-  // Java's shared-root import drops the per-batch `offset`.
-  //
-  // Initialized inside its own try/catch: Spark only calls close() on
-  // a fully-constructed reader, so a throw from the first loadNextBatch
-  // (e.g. a malformed parquet chunk) would otherwise leak every native
-  // handle allocated in the main init block above.
-  private var _currentBatch: VectorSchemaRoot = null
-  private var _currentRowIndex: Int = 0
+  private var currentBatch: VectorSchemaRoot = null
+  private var currentRowIndex: Int = 0
+  private var currentBatchStartRowOffset: Long = 0L
+  private var _lastReturnedRowOffset: Long = -1L
+
+  def lastReturnedRowOffset: Long = _lastReturnedRowOffset
+
   try {
-    _currentBatch = loadNextBatch()
+    currentBatch = loadNextBatch()
   } catch {
     case e: Throwable =>
       releaseAll()
@@ -277,18 +272,9 @@ class MilvusPackedV2PartitionReader(
       if (!gotBatch) {
         null
       } else {
-        // Import the ArrowArray+ArrowSchema as a RecordBatch-backed
-        // VectorSchemaRoot. Import takes ownership of the release
-        // callbacks (moves them out), so the subsequent `.close()` on
-        // cArr / cSchema is a no-op w.r.t. the live buffers; closing
-        // the returned root (in close()/loadNextBatch) is what releases
-        // them.
         Data.importVectorSchemaRoot(allocator, cArr, cSchema, dictProvider)
       }
     } finally {
-      // Always close the C-struct wrappers: after a successful import
-      // their release callback has been moved into the root and this is
-      // a no-op; on failure we need to release them to avoid leaks.
       try cArr.close()
       catch { case e: Throwable => logWarning("close cArr failed", e) }
       try cSchema.close()
@@ -297,47 +283,91 @@ class MilvusPackedV2PartitionReader(
   }
 
   override def next(): Boolean = {
-    // Advance past exhausted batches; close the previous root before
-    // loading the next so we bound JVM direct memory to one live batch.
-    while (
-      _currentBatch != null && _currentRowIndex >= _currentBatch.getRowCount
-    ) {
-      val exhausted = _currentBatch
-      _currentBatch = null
-      try exhausted.close()
-      catch {
-        case e: Throwable => logWarning("close exhausted batch failed", e)
+    while (true) {
+      while (
+        currentBatch != null && currentRowIndex >= currentBatch.getRowCount
+      ) {
+        val exhausted = currentBatch
+        currentBatch = null
+        currentBatchStartRowOffset += exhausted.getRowCount.toLong
+        try exhausted.close()
+        catch {
+          case e: Throwable => logWarning("close exhausted batch failed", e)
+        }
+        currentBatch = loadNextBatch()
+        currentRowIndex = 0
       }
-      _currentBatch = loadNextBatch()
-      _currentRowIndex = 0
+
+      if (currentBatch == null) {
+        return false
+      }
+
+      if (applyDeletes && !deletePlan.isEmpty && isDeleted(currentRowIndex)) {
+        currentRowIndex += 1
+      } else {
+        return true
+      }
     }
-    _currentBatch != null && _currentRowIndex < _currentBatch.getRowCount
+    false
   }
 
   override def get(): InternalRow = {
-    if (_currentBatch == null) {
+    if (currentBatch == null) {
       throw new IllegalStateException("No batch loaded")
     }
+    _lastReturnedRowOffset = currentBatchStartRowOffset + currentRowIndex
     val row = ArrowConverter.arrowToInternalRow(
-      _currentBatch,
-      _currentRowIndex,
+      currentBatch,
+      currentRowIndex,
       sourceSchema,
       fieldNameToArrowColumn
     )
-    _currentRowIndex += 1
+    currentRowIndex += 1
     row
   }
 
   override def close(): Unit = releaseAll()
 
-  // Each native resource is released in its own try-catch so one failing
-  // release doesn't strand the rest. Also reused by the constructor's
-  // failure path to roll back a partial init.
+  private def isDeleted(rowIndex: Int): Boolean = {
+    val vector = currentBatch.getVector(pkColumnName)
+    if (vector == null) {
+      throw new IllegalStateException(
+        s"Packed V2 delete filtering requires PK column $pkColumnName to be loaded"
+      )
+    }
+    if (vector.isNull(rowIndex)) {
+      false
+    } else {
+      pkField.dataType match {
+        case DataType.Int64 =>
+          deletePlan.containsLongPk(
+            vector.asInstanceOf[BigIntVector].get(rowIndex)
+          )
+        case DataType.VarChar =>
+          val value = vector match {
+            case v: VarCharVector =>
+              UTF8String.fromBytes(v.get(rowIndex)).toString
+            case v: VarBinaryVector =>
+              UTF8String.fromBytes(v.get(rowIndex)).toString
+            case other =>
+              throw new IllegalStateException(
+                s"Packed V2 delete filtering expected VarChar/VarBinary PK vector for $pkColumnName, got ${other.getClass.getSimpleName}"
+              )
+          }
+          deletePlan.containsStringPk(value)
+        case other =>
+          throw new IllegalArgumentException(
+            s"Packed V2 delete filtering only supports Int64/VarChar PKs, got $other"
+          )
+      }
+    }
+  }
+
   private def releaseAll(): Unit = {
-    if (_currentBatch != null) {
-      try _currentBatch.close()
+    if (currentBatch != null) {
+      try currentBatch.close()
       catch { case e: Throwable => logWarning("close currentBatch failed", e) }
-      _currentBatch = null
+      currentBatch = null
     }
     if (rbrHandle != 0L) {
       try reader.destroyRecordBatchReaderScala(rbrHandle)

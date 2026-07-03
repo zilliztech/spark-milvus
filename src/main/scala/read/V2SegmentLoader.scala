@@ -50,22 +50,31 @@ object V2SegmentLoader extends Logging {
   def loadV2Segments(
       manifestPaths: Seq[String],
       bucket: String,
-      hadoopConf: Configuration
+      hadoopConf: Configuration,
+      manifestSchemaVersion: Int = 1,
+      applyDeletes: Boolean = true
   ): Either[Throwable, Seq[V2SegmentInfo]] = {
     try {
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
       manifestPaths.foreach { rawPath =>
         val avroPath = resolvePath(rawPath, bucket)
         val avroBytes = readAllBytes(hadoopConf, avroPath)
-        val entry = MilvusSegmentManifestReader.parse(avroBytes) match {
-          case Right(e) => e
-          case Left(err) =>
-            throw new RuntimeException(
-              s"failed to decode segment manifest $avroPath: ${err.getMessage}",
-              err
-            )
-        }
-        buildV2SegmentInfoFromEntry(entry, bucket, hadoopConf) match {
+        val entry =
+          MilvusSegmentManifestReader
+            .parse(avroBytes, manifestSchemaVersion) match {
+            case Right(e) => e
+            case Left(err) =>
+              throw new RuntimeException(
+                s"failed to decode segment manifest $avroPath: ${err.getMessage}",
+                err
+              )
+          }
+        buildV2SegmentInfoFromEntry(
+          entry,
+          bucket,
+          hadoopConf,
+          applyDeletes
+        ) match {
           case Right(Some(seg)) => out += seg
           case Right(None)      => // skipped (storage version != 2)
           case Left(err)        => throw err
@@ -91,12 +100,21 @@ object V2SegmentLoader extends Logging {
   private[read] def buildV2SegmentInfoFromEntry(
       entry: AvroManifestEntry,
       bucket: String,
-      hadoopConf: Configuration
+      hadoopConf: Configuration,
+      applyDeletes: Boolean = true
   ): Either[Throwable, Option[V2SegmentInfo]] = {
+    val isL0 = entry.segmentLevel == 0L
+    val hasDeltaLogs = entry.deltaLogFiles.exists(_.binlogs.nonEmpty)
+
     if (entry.storageVersion != 2L) {
       logInfo(
         s"skipping segment ${entry.segmentId}: storage_version=${entry.storageVersion} " +
           s"(!= 2); V2SegmentLoader only handles StorageV2"
+      )
+      Right(None)
+    } else if (isL0 && !applyDeletes) {
+      logInfo(
+        s"skipping StorageV2 L0 delete-only segment ${entry.segmentId} because applyDeletes=false"
       )
       Right(None)
     } else if (
@@ -114,7 +132,17 @@ object V2SegmentLoader extends Logging {
             partitionId = entry.partitionId,
             numOfRows = entry.numOfRows,
             storageVersion = entry.storageVersion,
-            columnGroups = Seq.empty
+            columnGroups = Seq.empty,
+            deltaLogs = entry.deltaLogFiles
+              .flatMap(_.binlogs)
+              .sortBy(_.logId)
+              .map(log =>
+                V2DeltaLogFile(
+                  logId = log.logId,
+                  logPath = log.logPath,
+                  entriesNum = log.entriesNum
+                )
+              )
           )
         )
       )
