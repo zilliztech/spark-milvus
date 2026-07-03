@@ -5,8 +5,6 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.spark.connector.read.{
-  MilvusParquetFooterReader,
-  MilvusSegmentManifestReader,
   MilvusSnapshotReader,
   V2SegmentInfo,
   V2SegmentLoader
@@ -65,7 +63,6 @@ object ReadSourceOnlyApp {
         s3Region
       )
 
-      // 1. Read snapshot metadata
       val snapshotJson = new String(
         readAllBytes(hadoopConf, normalizeS3(snapshotPath)),
         "UTF-8"
@@ -82,7 +79,6 @@ object ReadSourceOnlyApp {
       println(s"snapshot.id = ${metadata.snapshotInfo.id}")
       println(s"collection  = ${metadata.collection.schema.name}")
 
-      // 2. Load V2 segments (same path MilvusBackfill uses)
       val v2Segments: Seq[V2SegmentInfo] =
         V2SegmentLoader.loadV2Segments(
           metadata.manifestList,
@@ -105,7 +101,6 @@ object ReadSourceOnlyApp {
         )
       }
 
-      // 3. Pick PK field id from schema
       val pkField = metadata.collection.schema.fields
         .find(_.isPrimaryKey.getOrElse(false))
         .getOrElse(throw new RuntimeException("no PK field in schema"))
@@ -113,8 +108,8 @@ object ReadSourceOnlyApp {
       val pkName = pkField.name
       println(s"pk field: $pkName (id=$pkFieldId)")
 
-      // 4. Build MilvusDataSource read options (matches MilvusBackfill's
-      //    readCollectionWithMetadata path — snapshot mode, PK + extras only).
+      val segmentIdCol = MilvusOption.MilvusExtraColumnSegmentID
+      val rowOffsetCol = MilvusOption.MilvusExtraColumnRowOffset
       var options = Map[String, String](
         MilvusOption.SnapshotMode -> "true",
         "milvus.uri" -> "dummy://snapshot-mode",
@@ -123,6 +118,7 @@ object ReadSourceOnlyApp {
         MilvusOption.SnapshotPartitionIds -> metadata.snapshotInfo.partitionIds
           .mkString(","),
         MilvusOption.ReaderFieldIDs -> pkFieldId.toString,
+        MilvusOption.MilvusExtraColumns -> s"$segmentIdCol,$rowOffsetCol",
         "milvus.s3.endpoint" -> s3Endpoint,
         "milvus.s3.bucketName" -> s3Bucket,
         "milvus.s3.accessKey" -> s3AccessKey,
@@ -149,10 +145,7 @@ object ReadSourceOnlyApp {
           MilvusSnapshotReader.serializeV2Segments(v2Segments))
       }
 
-      // 5. Build the read schema: PK field + segment metadata columns
       import org.apache.spark.sql.types._
-      val segmentIdCol = MilvusOption.MilvusExtraColumnSegmentID
-      val rowOffsetCol = MilvusOption.MilvusExtraColumnRowOffset
       val pkStructField = MilvusSnapshotReader.fieldToStructField(pkField)
       val readSchema = StructType(
         Seq(
@@ -168,8 +161,6 @@ object ReadSourceOnlyApp {
         .options(options)
         .load()
 
-      // ---- Diagnose ----
-
       println("\n=== Raw source DataFrame ===")
       val total = df.count()
       val distinctPk = df.select(col(pkName)).distinct().count()
@@ -182,7 +173,6 @@ object ReadSourceOnlyApp {
         )
         println("=> V2 packed reader is producing repeated data.")
 
-        // Show PK frequency — which pks appear more than once?
         println("\nTop duplicated PKs (appear count > 1):")
         df.groupBy(col(pkName))
           .count()
@@ -191,7 +181,6 @@ object ReadSourceOnlyApp {
           .show(20, truncate = false)
       }
 
-      // ---- Boundary samples: first/last of each 8192-row block ----
       val probeOffsets = Seq(
         0L, 1L, 8191L, 8192L, 8193L, 10000L, 16383L, 16384L, 16385L, 20479L
       )
@@ -203,23 +192,25 @@ object ReadSourceOnlyApp {
       ).orderBy(segmentIdCol, rowOffsetCol)
         .show(100, truncate = false)
 
-      // ---- Per-segment stats ----
       println("\n=== Per-segment stats ===")
       df.groupBy(col(segmentIdCol))
         .agg(
           count(lit(1)).as("rows"),
-          countDistinct(col(pkName)).as(s"distinct_$pkName"),
-          min(col(rowOffsetCol)).as("min_ro"),
-          max(col(rowOffsetCol)).as("max_ro")
+          countDistinct(col(pkName)).as("distinct_pk"),
+          min(col(rowOffsetCol)).as("min_row_offset"),
+          max(col(rowOffsetCol)).as("max_row_offset")
         )
-        .show(50, truncate = false)
+        .orderBy(col(segmentIdCol))
+        .show(100, truncate = false)
 
+      println("\n=== Done ===")
+      println(s"snapshot=$snapshotPath")
+      println(s"pk=$pkName")
+      println(s"segments=${v2Segments.map(_.segmentId).mkString(",")}")
     } finally {
       spark.stop()
     }
   }
-
-  // ------------------------------------------------------------------
 
   private def required(
       parsed: Map[String, String],
@@ -284,9 +275,11 @@ object ReadSourceOnlyApp {
       conf: Configuration,
       path: String
   ): Array[Byte] = {
-    import java.net.URI
-    import org.apache.hadoop.fs.{FileSystem, Path => HPath}
     import java.io.ByteArrayOutputStream
+    import java.net.URI
+
+    import org.apache.hadoop.fs.{FileSystem, Path => HPath}
+
     val uri = new URI(path)
     val fs = FileSystem.get(uri, conf)
     val in = fs.open(new HPath(uri))
