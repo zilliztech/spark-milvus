@@ -46,7 +46,9 @@ object MilvusPartitionReaderFactory {
 class MilvusPartitionReaderFactory(
     schema: StructType,
     optionsMap: Map[String, String],
-    pushedFilters: Array[Filter] = Array.empty[Filter]
+    pushedFilters: Array[Filter] = Array.empty[Filter],
+    packedV2DeleteContext: MilvusPackedV2DeleteContext =
+      MilvusPackedV2DeleteContext.empty
 ) extends PartitionReaderFactory
     with Logging {
 
@@ -140,6 +142,14 @@ class MilvusPartitionReaderFactory(
 
         val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
 
+        val effectiveDeletePlan = MilvusDeletePlan.union(
+          packedV2DeleteContext.inheritedPlansByPartition.getOrElse(
+            p.inheritedDeletePlanPartitionId.getOrElse(Long.MinValue),
+            MilvusDeletePlan.empty
+          ),
+          p.deletePlan
+        )
+
         val underlying = new MilvusPackedV2PartitionReader(
           innerSchema,
           p.columnGroups,
@@ -147,7 +157,7 @@ class MilvusPartitionReaderFactory(
           p.milvusOption,
           p.neededColumnFieldIds,
           p.applyDeletes,
-          p.deletePlan
+          effectiveDeletePlan
         )
 
         val hasMetadataExtraFields = schema.fieldNames.exists { name =>

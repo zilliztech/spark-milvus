@@ -55,5 +55,15 @@ case class MilvusPackedV2InputPartition(
     milvusOption: MilvusOption,
     neededColumnFieldIds: Seq[Long] = Seq.empty,
     applyDeletes: Boolean = true,
-    deletePlan: MilvusDeletePlan = MilvusDeletePlan.empty
+    deletePlan: MilvusDeletePlan = MilvusDeletePlan.empty,
+    inheritedDeletePlanPartitionId: Option[Long] = None
 ) extends InputPartition
+
+case class MilvusPackedV2DeleteContext(
+    inheritedPlansByPartition: Map[Long, MilvusDeletePlan]
+)
+
+object MilvusPackedV2DeleteContext {
+  val empty: MilvusPackedV2DeleteContext =
+    MilvusPackedV2DeleteContext(Map.empty)
+}

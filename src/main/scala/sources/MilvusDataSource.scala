@@ -60,6 +60,7 @@ import com.zilliz.spark.connector.{
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
   MilvusDeltaLogReader,
+  MilvusPackedV2DeleteContext,
   MilvusPackedV2InputPartition,
   MilvusPartitionReaderFactory,
   MilvusSnapshotReader,
@@ -1547,6 +1548,42 @@ class MilvusScan(
         errorContext = "client-created snapshot"
       )
 
+    val inheritedDeleteSegments =
+      v2Segments.filter(seg =>
+        seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
+      )
+    val inheritedDeletePlansByPartition =
+      if (
+        !MilvusOption.readApplyDeletes(
+          options
+        ) || inheritedDeleteSegments.isEmpty
+      ) {
+        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+      } else {
+        val pkField = CollectionSchema
+          .parseFrom(schemaBytes)
+          .fields
+          .find(_.isPrimaryKey)
+          .getOrElse {
+            throw new IllegalArgumentException(
+              "No primary key field found in schema"
+            )
+          }
+        MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+          inheritedDeleteSegments,
+          pkField,
+          snapshotBucket.getOrElse(""),
+          hadoopConf
+        ) match {
+          case Right(plans) => plans
+          case Left(err) =>
+            throw new IllegalStateException(
+              s"Failed to load inherited StorageV2 delete logs from client-created snapshot: ${err.getMessage}",
+              err
+            )
+        }
+      }
+
     buildSnapshotPartitions(
       manifestList = storageV2ManifestList,
       defaultPartitionId = metadata.snapshotInfo.partitionIds.headOption
@@ -1554,7 +1591,8 @@ class MilvusScan(
         .getOrElse("0"),
       schemaBytes = schemaBytes,
       v2Segments = v2Segments,
-      v2DeletePlans = v2DeletePlans
+      v2DeletePlans = v2DeletePlans,
+      inheritedDeletePlansByPartition = inheritedDeletePlansByPartition
     )
   }
 
@@ -1773,24 +1811,36 @@ class MilvusScan(
       errorContext: String
   ): Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan] = {
     val applyDeletes = MilvusOption.readApplyDeletes(options)
-    val hasAnyDeltaLogs = v2Segments.exists(_.deltaLogs.nonEmpty)
-    if (!applyDeletes || v2Segments.isEmpty || !hasAnyDeltaLogs) {
+    val dataSegments = v2Segments.filter(seg =>
+      seg.columnGroups.nonEmpty && seg.deltaLogs.nonEmpty
+    )
+    if (!applyDeletes || dataSegments.isEmpty) {
       Map.empty
     } else {
-      val milvusSchema = CollectionSchema.parseFrom(schemaBytes)
-      MilvusDeltaLogReader.loadDeletePlansBySegment(
-        v2Segments,
-        milvusSchema,
-        snapshotBucket.getOrElse(""),
-        hadoopConf
-      ) match {
-        case Right(plans) => plans
-        case Left(err) =>
-          throw new IllegalStateException(
-            s"Failed to load StorageV2 delete logs from $errorContext: ${err.getMessage}",
-            err
+      val pkField = CollectionSchema
+        .parseFrom(schemaBytes)
+        .fields
+        .find(_.isPrimaryKey)
+        .getOrElse {
+          throw new IllegalArgumentException(
+            "No primary key field found in schema"
           )
-      }
+        }
+      dataSegments.map { seg =>
+        MilvusDeltaLogReader.loadDeletePlan(
+          seg.deltaLogs,
+          pkField,
+          snapshotBucket.getOrElse(""),
+          hadoopConf
+        ) match {
+          case Right(plan) => seg.segmentId -> plan
+          case Left(err) =>
+            throw new IllegalStateException(
+              s"Failed to load StorageV2 delete logs from $errorContext for segment ${seg.segmentId}: ${err.getMessage}",
+              err
+            )
+        }
+      }.toMap
     }
   }
 
@@ -1799,7 +1849,14 @@ class MilvusScan(
       defaultPartitionId: String,
       schemaBytes: Array[Byte],
       v2Segments: Seq[V2SegmentInfo],
-      v2DeletePlans: Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+      v2DeletePlans: Map[
+        Long,
+        com.zilliz.spark.connector.read.MilvusDeletePlan
+      ],
+      inheritedDeletePlansByPartition: Map[
+        Long,
+        com.zilliz.spark.connector.read.MilvusDeletePlan
+      ] = Map.empty
   ): Array[InputPartition] = {
     val v3Partitions = manifestList.map { item =>
       val (basePath, readVersion) =
@@ -1863,7 +1920,11 @@ class MilvusScan(
           deletePlan = v2DeletePlans.getOrElse(
             seg.segmentId,
             com.zilliz.spark.connector.read.MilvusDeletePlan.empty
-          )
+          ),
+          inheritedDeletePlanPartitionId =
+            if (inheritedDeletePlansByPartition.contains(seg.partitionId))
+              Some(seg.partitionId)
+            else None
         ): InputPartition
       }
 
@@ -1966,18 +2027,114 @@ class MilvusScan(
         errorContext = "snapshot metadata"
       )
 
+    val inheritedDeleteSegments =
+      v2Segments.filter(seg =>
+        seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
+      )
+    val inheritedDeletePlansByPartition =
+      if (
+        !MilvusOption.readApplyDeletes(
+          options
+        ) || inheritedDeleteSegments.isEmpty
+      ) {
+        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+      } else {
+        val pkField = CollectionSchema
+          .parseFrom(schemaBytes)
+          .fields
+          .find(_.isPrimaryKey)
+          .getOrElse {
+            throw new IllegalArgumentException(
+              "No primary key field found in schema"
+            )
+          }
+        MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+          inheritedDeleteSegments,
+          pkField,
+          snapshotBucketForRelativePaths.getOrElse(""),
+          buildSnapshotHadoopConf("")
+        ) match {
+          case Right(plans) => plans
+          case Left(err) =>
+            throw new IllegalStateException(
+              s"Failed to load inherited StorageV2 delete logs from snapshot metadata: ${err.getMessage}",
+              err
+            )
+        }
+      }
+
     buildSnapshotPartitions(
       manifestList = manifestList,
       defaultPartitionId = defaultPartitionId,
       schemaBytes = schemaBytes,
       v2Segments = v2Segments,
-      v2DeletePlans = v2DeletePlans
+      v2DeletePlans = v2DeletePlans,
+      inheritedDeletePlansByPartition = inheritedDeletePlansByPartition
     )
   }
 
   override def createReaderFactory(): PartitionReaderFactory = {
-    // Convert CaseInsensitiveStringMap to regular Map for serialization
     val optionsMap = options.asScala.toMap
-    new MilvusPartitionReaderFactory(schema, optionsMap, pushedFilters)
+    val inheritedPlansByPartition =
+      if (
+        MilvusOption
+          .isSnapshotMode(options) && MilvusOption.readApplyDeletes(options)
+      ) {
+        val schemaBytes = Option(options.get(MilvusOption.SnapshotSchemaBytes))
+          .map(base64 => java.util.Base64.getDecoder.decode(base64))
+          .getOrElse(Array.emptyByteArray)
+        val v2Segments = Option(options.get(MilvusOption.SnapshotV2Segments))
+          .filter(_.nonEmpty)
+          .map(json =>
+            MilvusSnapshotReader.deserializeV2Segments(json) match {
+              case Right(segs) => segs
+              case Left(err) =>
+                throw new IllegalStateException(
+                  s"Failed to parse SnapshotV2Segments in reader factory: ${err.getMessage}",
+                  err
+                )
+            }
+          )
+          .getOrElse(Seq.empty)
+        val inheritedDeleteSegments =
+          v2Segments.filter(seg =>
+            seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
+          )
+        if (schemaBytes.isEmpty || inheritedDeleteSegments.isEmpty) {
+          Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+        } else {
+          val pkField = CollectionSchema
+            .parseFrom(schemaBytes)
+            .fields
+            .find(_.isPrimaryKey)
+            .getOrElse(
+              throw new IllegalArgumentException(
+                "No primary key field found in schema"
+              )
+            )
+          MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+            inheritedDeleteSegments,
+            pkField,
+            MilvusScan.connectorS3BucketOption(optionsMap).getOrElse(""),
+            buildSnapshotHadoopConf("")
+          ) match {
+            case Right(plans) => plans
+            case Left(err) =>
+              throw new IllegalStateException(
+                s"Failed to load inherited StorageV2 delete logs for reader factory: ${err.getMessage}",
+                err
+              )
+          }
+        }
+      } else {
+        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+      }
+
+    new MilvusPartitionReaderFactory(
+      schema,
+      optionsMap,
+      pushedFilters,
+      MilvusPackedV2DeleteContext(inheritedPlansByPartition)
+    )
   }
 }

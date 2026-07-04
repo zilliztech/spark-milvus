@@ -40,21 +40,61 @@ object MilvusDeltaLogReader extends Logging {
     val dataSegments = segments.filter(_.columnGroups.nonEmpty)
 
     for {
-      globalPlan <- loadDeletePlan(
-        deleteOnlySegments.flatMap(_.deltaLogs),
+      globalPlans <- loadPartitionScopedDeletePlans(
+        deleteOnlySegments,
         pkField,
         bucket,
         hadoopConf
       )
-      perSegment <- sequence(
+      ownPlans <- sequence(
         dataSegments.map { seg =>
           loadDeletePlan(seg.deltaLogs, pkField, bucket, hadoopConf).map {
-            ownPlan =>
-              seg.segmentId -> MilvusDeletePlan.union(globalPlan, ownPlan)
+            ownPlan => seg.segmentId -> ownPlan
           }
         }
       )
-    } yield perSegment.toMap
+    } yield mergeInheritedDeletePlans(
+      dataSegments,
+      globalPlans,
+      ownPlans.toMap
+    )
+  }
+
+  private[read] def mergeInheritedDeletePlans(
+      dataSegments: Seq[V2SegmentInfo],
+      inheritedPlansByPartition: Map[Long, MilvusDeletePlan],
+      ownPlansBySegment: Map[Long, MilvusDeletePlan]
+  ): Map[Long, MilvusDeletePlan] = {
+    dataSegments.iterator.map { seg =>
+      val inheritedPlan = inheritedPlansByPartition.getOrElse(
+        seg.partitionId,
+        MilvusDeletePlan.empty
+      )
+      val ownPlan = ownPlansBySegment.getOrElse(
+        seg.segmentId,
+        MilvusDeletePlan.empty
+      )
+      seg.segmentId -> MilvusDeletePlan.union(inheritedPlan, ownPlan)
+    }.toMap
+  }
+
+  private[connector] def loadPartitionScopedDeletePlans(
+      deleteOnlySegments: Seq[V2SegmentInfo],
+      pkField: FieldSchema,
+      bucket: String,
+      hadoopConf: Configuration
+  ): Either[Throwable, Map[Long, MilvusDeletePlan]] = {
+    sequence(
+      deleteOnlySegments.groupBy(_.partitionId).toSeq.map {
+        case (partitionId, segments) =>
+          loadDeletePlan(
+            segments.flatMap(_.deltaLogs),
+            pkField,
+            bucket,
+            hadoopConf
+          ).map(partitionId -> _)
+      }
+    ).map(_.toMap)
   }
 
   def loadDeletePlan(
@@ -99,8 +139,8 @@ object MilvusDeltaLogReader extends Logging {
       pkField: FieldSchema,
       path: String
   ): MilvusDeletePlan = {
-    val longs = mutable.HashSet.empty[Long]
-    val strings = mutable.HashSet.empty[String]
+    val longs = mutable.HashMap.empty[Long, Long]
+    val strings = mutable.HashMap.empty[String, Long]
     val reader = newGroupReader(payload)
     try {
       var record = reader.read()
@@ -123,8 +163,8 @@ object MilvusDeltaLogReader extends Logging {
     }
 
     pkField.dataType match {
-      case DataType.Int64   => MilvusDeletePlan.fromLongPks(longs.toSet)
-      case DataType.VarChar => MilvusDeletePlan.fromStringPks(strings.toSet)
+      case DataType.Int64   => MilvusDeletePlan.fromLongPks(longs.toMap)
+      case DataType.VarChar => MilvusDeletePlan.fromStringPks(strings.toMap)
       case other =>
         throw new IllegalArgumentException(
           s"unsupported primary key type $other for delete logs"
@@ -136,8 +176,8 @@ object MilvusDeltaLogReader extends Logging {
       record: Group,
       pkField: FieldSchema,
       path: String,
-      longs: mutable.Set[Long],
-      strings: mutable.Set[String]
+      longs: mutable.Map[Long, Long],
+      strings: mutable.Map[String, Long]
   ): Unit = {
     val fieldCount = record.getType.getFieldCount
     if (fieldCount < 2) {
@@ -150,10 +190,23 @@ object MilvusDeltaLogReader extends Logging {
         s"multi-field delete log payload in $path is missing the pk value"
       )
     }
+    if (record.getFieldRepetitionCount(1) == 0) {
+      throw new IllegalStateException(
+        s"multi-field delete log payload in $path is missing the ts value"
+      )
+    }
+    val deleteTs = record.getLong(1, 0)
 
     pkField.dataType match {
-      case DataType.Int64   => longs += record.getLong(0, 0)
-      case DataType.VarChar => strings += record.getString(0, 0)
+      case DataType.Int64 =>
+        val pk = record.getLong(0, 0)
+        longs.update(pk, math.max(longs.getOrElse(pk, Long.MinValue), deleteTs))
+      case DataType.VarChar =>
+        val pk = record.getString(0, 0)
+        strings.update(
+          pk,
+          math.max(strings.getOrElse(pk, Long.MinValue), deleteTs)
+        )
       case other =>
         throw new IllegalArgumentException(
           s"unsupported primary key type $other for delete logs"
@@ -186,8 +239,8 @@ object MilvusDeltaLogReader extends Logging {
       raw: String,
       pkField: FieldSchema,
       path: String,
-      longs: mutable.Set[Long],
-      strings: mutable.Set[String]
+      longs: mutable.Map[Long, Long],
+      strings: mutable.Map[String, Long]
   ): Unit = {
     val trimmed = raw.trim
     if (trimmed.startsWith("{")) {
@@ -212,6 +265,13 @@ object MilvusDeltaLogReader extends Logging {
           s"delete log pkType $pkType in $path does not match collection PK type ${pkField.dataType.value}"
         )
       }
+      val tsNode = json.path("ts")
+      if (!tsNode.canConvertToLong) {
+        throw new IllegalStateException(
+          s"delete log ts in $path must be numeric: $trimmed"
+        )
+      }
+      val deleteTs = tsNode.longValue()
       pkField.dataType match {
         case DataType.Int64 =>
           if (!pkNode.isNumber) {
@@ -219,14 +279,22 @@ object MilvusDeltaLogReader extends Logging {
               s"delete log pk in $path must be numeric for Int64 PKs: $trimmed"
             )
           }
-          longs += pkNode.longValue()
+          val pk = pkNode.longValue()
+          longs.update(
+            pk,
+            math.max(longs.getOrElse(pk, Long.MinValue), deleteTs)
+          )
         case DataType.VarChar =>
           if (!pkNode.isTextual) {
             throw new IllegalStateException(
               s"delete log pk in $path must be textual for VarChar PKs: $trimmed"
             )
           }
-          strings += pkNode.textValue()
+          val pk = pkNode.textValue()
+          strings.update(
+            pk,
+            math.max(strings.getOrElse(pk, Long.MinValue), deleteTs)
+          )
         case _ =>
       }
     } else {
@@ -241,7 +309,9 @@ object MilvusDeltaLogReader extends Logging {
           s"legacy 'pk,ts' delete log payload in $path only supports Int64 PKs"
         )
       }
-      longs += parts(0).trim.toLong
+      val pk = parts(0).trim.toLong
+      val deleteTs = parts(1).trim.toLong
+      longs.update(pk, math.max(longs.getOrElse(pk, Long.MinValue), deleteTs))
     }
   }
 

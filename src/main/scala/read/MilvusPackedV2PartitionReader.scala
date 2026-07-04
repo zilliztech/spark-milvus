@@ -21,7 +21,7 @@ import org.apache.spark.unsafe.types.UTF8String
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
 import com.zilliz.spark.connector.MilvusOption
-import io.milvus.grpc.schema.{CollectionSchema, DataType}
+import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 import io.milvus.storage.{
   ArrowUtils,
   MilvusStorageColumnGroups,
@@ -79,16 +79,55 @@ object MilvusPackedV2PartitionReader {
       neededColumnFieldIds: Seq[Long],
       applyDeletes: Boolean,
       deletePlan: MilvusDeletePlan,
-      pkFieldId: Long
+      pkFieldId: Long,
+      tsFieldId: Long = 1L
   ): Seq[Long] = {
     if (!applyDeletes || deletePlan.isEmpty) {
       neededColumnFieldIds
     } else if (neededColumnFieldIds.nonEmpty) {
-      (neededColumnFieldIds :+ pkFieldId).distinct
+      (neededColumnFieldIds ++ Seq(pkFieldId, tsFieldId)).distinct
     } else {
       (sourceSchema.fieldNames.toSeq.flatMap(
         fieldMappings.fieldNameToId.get
-      ) :+ pkFieldId).distinct
+      ) ++ Seq(pkFieldId, tsFieldId)).distinct
+    }
+  }
+
+  private[read] def rowDeleted(
+      deletePlan: MilvusDeletePlan,
+      pkField: FieldSchema,
+      pkVector: org.apache.arrow.vector.ValueVector,
+      tsVector: BigIntVector,
+      rowIndex: Int,
+      pkColumnName: String
+  ): Boolean = {
+    if (pkVector.isNull(rowIndex) || tsVector.isNull(rowIndex)) {
+      false
+    } else {
+      val rowTs = tsVector.get(rowIndex)
+      pkField.dataType match {
+        case DataType.Int64 =>
+          deletePlan.containsLongPk(
+            pkVector.asInstanceOf[BigIntVector].get(rowIndex),
+            rowTs
+          )
+        case DataType.VarChar =>
+          val value = pkVector match {
+            case v: VarCharVector =>
+              UTF8String.fromBytes(v.get(rowIndex)).toString
+            case v: VarBinaryVector =>
+              UTF8String.fromBytes(v.get(rowIndex)).toString
+            case other =>
+              throw new IllegalStateException(
+                s"Packed V2 delete filtering expected VarChar/VarBinary PK vector for $pkColumnName, got ${other.getClass.getSimpleName}"
+              )
+          }
+          deletePlan.containsStringPk(value, rowTs)
+        case other =>
+          throw new IllegalArgumentException(
+            s"Packed V2 delete filtering only supports Int64/VarChar PKs, got $other"
+          )
+      }
     }
   }
 
@@ -177,7 +216,8 @@ class MilvusPackedV2PartitionReader(
       neededColumnFieldIds,
       applyDeletes,
       deletePlan,
-      pkField.fieldID
+      pkField.fieldID,
+      tsFieldId = 1L
     )
   private val neededColumns: Array[String] =
     MilvusPackedV2PartitionReader.resolveNeededColumns(
@@ -329,38 +369,26 @@ class MilvusPackedV2PartitionReader(
   override def close(): Unit = releaseAll()
 
   private def isDeleted(rowIndex: Int): Boolean = {
-    val vector = currentBatch.getVector(pkColumnName)
-    if (vector == null) {
+    val pkVector = currentBatch.getVector(pkColumnName)
+    if (pkVector == null) {
       throw new IllegalStateException(
         s"Packed V2 delete filtering requires PK column $pkColumnName to be loaded"
       )
     }
-    if (vector.isNull(rowIndex)) {
-      false
-    } else {
-      pkField.dataType match {
-        case DataType.Int64 =>
-          deletePlan.containsLongPk(
-            vector.asInstanceOf[BigIntVector].get(rowIndex)
-          )
-        case DataType.VarChar =>
-          val value = vector match {
-            case v: VarCharVector =>
-              UTF8String.fromBytes(v.get(rowIndex)).toString
-            case v: VarBinaryVector =>
-              UTF8String.fromBytes(v.get(rowIndex)).toString
-            case other =>
-              throw new IllegalStateException(
-                s"Packed V2 delete filtering expected VarChar/VarBinary PK vector for $pkColumnName, got ${other.getClass.getSimpleName}"
-              )
-          }
-          deletePlan.containsStringPk(value)
-        case other =>
-          throw new IllegalArgumentException(
-            s"Packed V2 delete filtering only supports Int64/VarChar PKs, got $other"
-          )
-      }
+    val rawTsVector = currentBatch.getVector("Timestamp")
+    if (rawTsVector == null) {
+      throw new IllegalStateException(
+        "Packed V2 delete filtering requires Timestamp column to be loaded"
+      )
     }
+    MilvusPackedV2PartitionReader.rowDeleted(
+      deletePlan,
+      pkField,
+      pkVector,
+      rawTsVector.asInstanceOf[BigIntVector],
+      rowIndex,
+      pkColumnName
+    )
   }
 
   private def releaseAll(): Unit = {

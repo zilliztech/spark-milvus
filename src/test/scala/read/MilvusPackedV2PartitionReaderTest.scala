@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.read
 
+import org.apache.arrow.vector.BigIntVector
 import org.apache.spark.sql.types.{
   LongType,
   StringType,
@@ -196,11 +197,11 @@ class MilvusPackedV2PartitionReaderTest extends AnyFunSuite {
       mappings,
       neededColumnFieldIds = Seq(101L),
       applyDeletes = true,
-      deletePlan = MilvusDeletePlan.fromLongPks(Set(1L)),
+      deletePlan = MilvusDeletePlan.fromLongPks(Map(1L -> 100L)),
       pkFieldId = 100L
     )
 
-    assert(projected == Seq(101L, 100L))
+    assert(projected == Seq(101L, 100L, 1L))
   }
 
   test(
@@ -230,5 +231,53 @@ class MilvusPackedV2PartitionReaderTest extends AnyFunSuite {
     )
 
     assert(projected == Seq(101L))
+  }
+
+  test("rowDeleted respects delete timestamp ordering") {
+    val pkField = FieldSchema(
+      name = "pk",
+      fieldID = 100,
+      dataType = DataType.Int64,
+      isPrimaryKey = true
+    )
+    val allocator = new org.apache.arrow.memory.RootAllocator(Long.MaxValue)
+    val pkVector = new BigIntVector("pk", allocator)
+    val tsVector = new BigIntVector("Timestamp", allocator)
+    try {
+      pkVector.allocateNew(1)
+      pkVector.set(0, 1L)
+      pkVector.setValueCount(1)
+      tsVector.allocateNew(1)
+      tsVector.set(0, 200L)
+      tsVector.setValueCount(1)
+
+      val deletePlan = MilvusDeletePlan.fromLongPks(Map(1L -> 150L))
+      assert(
+        !MilvusPackedV2PartitionReader.rowDeleted(
+          deletePlan,
+          pkField,
+          pkVector,
+          tsVector,
+          rowIndex = 0,
+          pkColumnName = "pk"
+        )
+      )
+
+      val laterDeletePlan = MilvusDeletePlan.fromLongPks(Map(1L -> 250L))
+      assert(
+        MilvusPackedV2PartitionReader.rowDeleted(
+          laterDeletePlan,
+          pkField,
+          pkVector,
+          tsVector,
+          rowIndex = 0,
+          pkColumnName = "pk"
+        )
+      )
+    } finally {
+      pkVector.close()
+      tsVector.close()
+      allocator.close()
+    }
   }
 }

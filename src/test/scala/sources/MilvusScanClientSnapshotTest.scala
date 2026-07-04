@@ -39,6 +39,7 @@ import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
   Collection,
   CollectionSchema,
+  MilvusDeletePlan,
   MilvusPackedV2InputPartition,
   MilvusSnapshotReader,
   MilvusStorageV3InputPartition,
@@ -1173,6 +1174,34 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     val partition = partitions.head.asInstanceOf[MilvusPackedV2InputPartition]
     assert(partition.segmentID == 30L)
     assert(partition.partitionID == 20L)
+  }
+
+  test(
+    "snapshot planner keeps inherited delete plan reference out of per-segment plan"
+  ) {
+    val inherited = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
+    val segmentPlan = MilvusDeletePlan.fromLongPks(Map(9L -> 200L))
+    val partition = MilvusPackedV2InputPartition(
+      segmentID = 30L,
+      partitionID = 20L,
+      columnGroups = Seq(
+        V2ColumnGroup(
+          fieldIds = Seq(100L, 1L),
+          filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+          fileRowCounts = Seq(1L)
+        )
+      ),
+      milvusSchemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      milvusOption = MilvusOption(
+        new CaseInsensitiveStringMap(new ju.HashMap[String, String]())
+      ),
+      deletePlan = segmentPlan,
+      inheritedDeletePlanPartitionId = Some(20L)
+    )
+
+    assert(partition.deletePlan == segmentPlan)
+    assert(partition.inheritedDeletePlanPartitionId.contains(20L))
+    assert(inherited.containsLongPk(7L, 50L))
   }
 }
 

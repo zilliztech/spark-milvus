@@ -115,11 +115,12 @@ class V2SegmentLoaderTest
       binlogs: Seq[AvroFieldBinlogEntry],
       storageVersion: Long = 2L,
       segmentLevel: Long = 1L,
+      partitionId: Long = 10L,
       deltaLogFiles: Seq[AvroFieldBinlogEntry] = Seq.empty
   ): AvroManifestEntry =
     AvroManifestEntry(
       segmentId = segmentId,
-      partitionId = 10L,
+      partitionId = partitionId,
       segmentLevel = segmentLevel,
       numOfRows = 100L,
       storageVersion = storageVersion,
