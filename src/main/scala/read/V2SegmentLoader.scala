@@ -103,7 +103,7 @@ object V2SegmentLoader extends Logging {
       hadoopConf: Configuration,
       applyDeletes: Boolean = true
   ): Either[Throwable, Option[V2SegmentInfo]] = {
-    val isL0 = entry.segmentLevel == 0L
+    val isL0 = entry.segmentLevel == 1L
     val hasDeltaLogs = entry.deltaLogFiles.exists(_.binlogs.nonEmpty)
 
     if (entry.storageVersion != 2L) {

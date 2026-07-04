@@ -1455,7 +1455,12 @@ class MilvusScan(
             snapshot.s3Location,
             connectorBucket.getOrElse("")
           )
-          Some(planInputPartitionsFromClientSnapshotPath(snapshotPath))
+          Some(
+            planInputPartitionsFromClientSnapshotPath(
+              snapshotPath,
+              forceCanonicalBucket = connectorBucket
+            )
+          )
         } else {
           MilvusScan.submitClientSnapshotCleanup(
             options.asScala.toMap,
@@ -1483,7 +1488,8 @@ class MilvusScan(
   }
 
   private def planInputPartitionsFromClientSnapshotPath(
-      snapshotPath: String
+      snapshotPath: String,
+      forceCanonicalBucket: Option[String] = None
   ): Array[InputPartition] = {
     val hadoopConf = buildSnapshotHadoopConf(snapshotPath)
     val snapshotJson = readAllBytes(hadoopConf, snapshotPath)
@@ -1500,10 +1506,13 @@ class MilvusScan(
         snapshotPath
       )
 
-    val snapshotBucket = MilvusScan.snapshotS3BucketForRelativePaths(
-      snapshotPath,
-      milvusOption.options
-    )
+    val snapshotBucket = forceCanonicalBucket
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .orElse(
+        MilvusScan
+          .snapshotS3BucketForRelativePaths(snapshotPath, milvusOption.options)
+      )
     val applyDeletes = MilvusOption.readApplyDeletes(options)
     val v2Segments =
       if (metadata.manifestList.nonEmpty) {
@@ -1856,8 +1865,20 @@ class MilvusScan(
       inheritedDeletePlansByPartition: Map[
         Long,
         com.zilliz.spark.connector.read.MilvusDeletePlan
-      ] = Map.empty
+      ] = Map.empty,
+      forceCanonicalBucket: Option[String] = None
   ): Array[InputPartition] = {
+    val canonicalMilvusOption = forceCanonicalBucket
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(bucket =>
+        milvusOption.copy(
+          options = milvusOption.options +
+            (Properties.FsConfig.FsBucketName -> bucket)
+        )
+      )
+      .getOrElse(milvusOption)
+
     val v3Partitions = manifestList.map { item =>
       val (basePath, readVersion) =
         MilvusSnapshotReader.parseManifestContent(item.manifest) match {
@@ -1914,7 +1935,7 @@ class MilvusScan(
           partitionID = seg.partitionId,
           columnGroups = seg.columnGroups,
           milvusSchemaBytes = schemaBytes,
-          milvusOption = milvusOption,
+          milvusOption = canonicalMilvusOption,
           neededColumnFieldIds = Seq.empty,
           applyDeletes = MilvusOption.readApplyDeletes(options),
           deletePlan = v2DeletePlans.getOrElse(

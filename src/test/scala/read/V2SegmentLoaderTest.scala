@@ -114,7 +114,7 @@ class V2SegmentLoaderTest
       segmentId: Long,
       binlogs: Seq[AvroFieldBinlogEntry],
       storageVersion: Long = 2L,
-      segmentLevel: Long = 1L,
+      segmentLevel: Long = 2L,
       partitionId: Long = 10L,
       deltaLogFiles: Seq[AvroFieldBinlogEntry] = Seq.empty
   ): AvroManifestEntry =
@@ -318,7 +318,7 @@ class V2SegmentLoaderTest
       binlogs = Seq(
         AvroFieldBinlogEntry(slotFieldId = 100L, binlogs = Seq.empty)
       ),
-      segmentLevel = 0L
+      segmentLevel = 1L
     )
 
     val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(

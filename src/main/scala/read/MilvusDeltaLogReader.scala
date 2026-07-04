@@ -60,15 +60,17 @@ object MilvusDeltaLogReader extends Logging {
     )
   }
 
+  private val AllPartitionsId = -1L
+
   private[read] def mergeInheritedDeletePlans(
       dataSegments: Seq[V2SegmentInfo],
       inheritedPlansByPartition: Map[Long, MilvusDeletePlan],
       ownPlansBySegment: Map[Long, MilvusDeletePlan]
   ): Map[Long, MilvusDeletePlan] = {
     dataSegments.iterator.map { seg =>
-      val inheritedPlan = inheritedPlansByPartition.getOrElse(
+      val inheritedPlan = effectiveInheritedDeletePlan(
         seg.partitionId,
-        MilvusDeletePlan.empty
+        inheritedPlansByPartition
       )
       val ownPlan = ownPlansBySegment.getOrElse(
         seg.segmentId,
@@ -96,6 +98,31 @@ object MilvusDeltaLogReader extends Logging {
       }
     ).map(_.toMap)
   }
+
+  private[read] def effectiveInheritedDeletePlan(
+      partitionId: Long,
+      inheritedPlansByPartition: Map[Long, MilvusDeletePlan]
+  ): MilvusDeletePlan = {
+    val collectionWidePlan = inheritedPlansByPartition.getOrElse(
+      AllPartitionsId,
+      MilvusDeletePlan.empty
+    )
+    val partitionPlan = inheritedPlansByPartition.getOrElse(
+      partitionId,
+      MilvusDeletePlan.empty
+    )
+    MilvusDeletePlan.union(collectionWidePlan, partitionPlan)
+  }
+
+  private[read] def inheritedDeletePlanPartitionMarker(
+      partitionId: Long,
+      inheritedPlansByPartition: Map[Long, MilvusDeletePlan]
+  ): Option[Long] =
+    if (
+      inheritedPlansByPartition.contains(AllPartitionsId) ||
+      inheritedPlansByPartition.contains(partitionId)
+    ) Some(partitionId)
+    else None
 
   def loadDeletePlan(
       deltaLogs: Seq[V2DeltaLogFile],
