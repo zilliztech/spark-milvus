@@ -59,6 +59,8 @@ import com.zilliz.spark.connector.{
 }
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
+  MilvusDeltaLogReader,
+  MilvusPackedV2DeleteContext,
   MilvusPackedV2InputPartition,
   MilvusPartitionReaderFactory,
   MilvusSnapshotReader,
@@ -884,9 +886,13 @@ object MilvusScan extends Logging {
   private[sources] def connectorS3BucketOption(
       options: scala.collection.Map[String, String]
   ): Option[String] = {
-    optionValue(options, Properties.FsConfig.FsBucketName)
-      .map(_.trim)
-      .filter(_.nonEmpty)
+    Seq(
+      Properties.FsConfig.FsBucketName,
+      MilvusOption.FsBucketName,
+      MilvusOption.S3BucketName
+    ).view
+      .flatMap(key => optionValue(options, key).map(_.trim).filter(_.nonEmpty))
+      .headOption
   }
 
   private[sources] def resolveConnectorS3Bucket(
@@ -1179,43 +1185,51 @@ object MilvusScan extends Logging {
       baseOptions: Map[String, String],
       databaseName: String,
       collectionName: String,
-      snapshotName: String
+      snapshotName: String,
+      autoCleanup: Boolean = true
   ): Boolean = {
     val cleanupTriggered = new AtomicBoolean(false)
     val session = registration.session
     val executionId = registration.executionId
 
-    def submitCleanup(reason: String): Unit = {
-      submitClientSnapshotCleanup(
-        baseOptions,
-        databaseName,
-        collectionName,
-        snapshotName,
-        reason
+    if (!autoCleanup) {
+      logWarning(
+        s"Client read snapshot $snapshotName will be preserved after Spark SQL execution ends because ${MilvusOption.ClientSnapshotAutoCleanup}=false"
       )
-    }
+      true
+    } else {
+      def submitCleanup(reason: String): Unit = {
+        submitClientSnapshotCleanup(
+          baseOptions,
+          databaseName,
+          collectionName,
+          snapshotName,
+          reason
+        )
+      }
 
-    val listener = new SparkListener {
-      override def onOtherEvent(event: SparkListenerEvent): Unit = {
-        event match {
-          case e: SparkListenerSQLExecutionEnd
-              if e.executionId == executionId && cleanupTriggered
-                .compareAndSet(false, true) =>
-            try submitCleanup(s"Spark SQL execution $executionId ended")
-            finally session.sparkContext.removeSparkListener(this)
-          case _ =>
+      val listener = new SparkListener {
+        override def onOtherEvent(event: SparkListenerEvent): Unit = {
+          event match {
+            case e: SparkListenerSQLExecutionEnd
+                if e.executionId == executionId && cleanupTriggered
+                  .compareAndSet(false, true) =>
+              try submitCleanup(s"Spark SQL execution $executionId ended")
+              finally session.sparkContext.removeSparkListener(this)
+            case _ =>
+          }
         }
       }
-    }
 
-    Try(session.sparkContext.addSparkListener(listener)) match {
-      case Success(_) => true
-      case Failure(e) =>
-        logError(
-          s"Failed to register cleanup listener for client read snapshot $snapshotName",
-          e
-        )
-        false
+      Try(session.sparkContext.addSparkListener(listener)) match {
+        case Success(_) => true
+        case Failure(e) =>
+          logError(
+            s"Failed to register cleanup listener for client read snapshot $snapshotName",
+            e
+          )
+          false
+      }
     }
   }
 
@@ -1288,6 +1302,7 @@ object MilvusScan extends Logging {
     }
     metadata
   }
+
 }
 
 class MilvusScan(
@@ -1324,7 +1339,8 @@ class MilvusScan(
   }
 
   private[sources] def shouldCacheInputPartitions: Boolean =
-    MilvusOption.isSnapshotMode(options)
+    MilvusOption.isSnapshotMode(options) ||
+      MilvusScan.canUseClientSnapshotFastPath(milvusOption)
 
   private def computeInputPartitions(): Array[InputPartition] = {
     if (MilvusOption.isSnapshotMode(options)) {
@@ -1425,18 +1441,26 @@ class MilvusScan(
             options.asScala.toMap,
             milvusOption.databaseName,
             milvusOption.collectionName,
-            snapshot.name
+            snapshot.name,
+            autoCleanup = MilvusOption.clientSnapshotAutoCleanup(options)
           )
         ) {
-          logWarning(
-            s"Client read snapshot ${snapshot.name} will be dropped when the Spark SQL execution ends; " +
-              "an unclean driver exit can leave it behind and require manual cleanup."
-          )
+          if (MilvusOption.clientSnapshotAutoCleanup(options)) {
+            logWarning(
+              s"Client read snapshot ${snapshot.name} will be dropped when the Spark SQL execution ends; " +
+                "an unclean driver exit can leave it behind and require manual cleanup."
+            )
+          }
           val snapshotPath = MilvusScan.resolveClientSnapshotLocation(
             snapshot.s3Location,
             connectorBucket.getOrElse("")
           )
-          Some(planInputPartitionsFromClientSnapshotPath(snapshotPath))
+          Some(
+            planInputPartitionsFromClientSnapshotPath(
+              snapshotPath,
+              forceCanonicalBucket = connectorBucket
+            )
+          )
         } else {
           MilvusScan.submitClientSnapshotCleanup(
             options.asScala.toMap,
@@ -1464,7 +1488,8 @@ class MilvusScan(
   }
 
   private def planInputPartitionsFromClientSnapshotPath(
-      snapshotPath: String
+      snapshotPath: String,
+      forceCanonicalBucket: Option[String] = None
   ): Array[InputPartition] = {
     val hadoopConf = buildSnapshotHadoopConf(snapshotPath)
     val snapshotJson = readAllBytes(hadoopConf, snapshotPath)
@@ -1481,16 +1506,22 @@ class MilvusScan(
         snapshotPath
       )
 
-    val snapshotBucket = MilvusScan.snapshotS3BucketForRelativePaths(
-      snapshotPath,
-      milvusOption.options
-    )
+    val snapshotBucket = forceCanonicalBucket
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .orElse(
+        MilvusScan
+          .snapshotS3BucketForRelativePaths(snapshotPath, milvusOption.options)
+      )
+    val applyDeletes = MilvusOption.readApplyDeletes(options)
     val v2Segments =
       if (metadata.manifestList.nonEmpty) {
         V2SegmentLoader.loadV2Segments(
           metadata.manifestList,
           snapshotBucket.getOrElse(""),
-          hadoopConf
+          hadoopConf,
+          manifestSchemaVersion = metadata.manifestSchemaVersion,
+          applyDeletes = applyDeletes
         ) match {
           case Right(segs) => segs
           case Left(err) =>
@@ -1517,26 +1548,61 @@ class MilvusScan(
     val schemaBytes = MilvusSnapshotReader.toProtobufSchemaBytes(
       metadata.collection.schema
     )
-    val snapshotOptions = MilvusScan.buildClientSnapshotOptions(
-      options.asScala.toMap,
-      collectionName = metadata.collection.schema.name,
-      collectionId = metadata.snapshotInfo.collectionId,
-      partitionIds = metadata.snapshotInfo.partitionIds,
-      schemaBytesBase64 = Base64.getEncoder.encodeToString(schemaBytes),
-      manifestList = storageV2ManifestList,
-      v2Segments = v2Segments,
-      snapshotBucketForRelativePaths = snapshotBucket
-    )
-    require(
-      MilvusOption.isSnapshotMode(snapshotOptions),
-      "Client-created snapshot options must enable snapshot mode"
-    )
+    val v2DeletePlans =
+      loadV2DeletePlans(
+        v2Segments,
+        schemaBytes,
+        snapshotBucket,
+        hadoopConf,
+        errorContext = "client-created snapshot"
+      )
 
-    new MilvusScan(
-      schema,
-      new CaseInsensitiveStringMap(snapshotOptions.asJava),
-      pushedFilters
-    ).planInputPartitions()
+    val inheritedDeleteSegments =
+      v2Segments.filter(seg =>
+        seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
+      )
+    val inheritedDeletePlansByPartition =
+      if (
+        !MilvusOption.readApplyDeletes(
+          options
+        ) || inheritedDeleteSegments.isEmpty
+      ) {
+        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+      } else {
+        val pkField = CollectionSchema
+          .parseFrom(schemaBytes)
+          .fields
+          .find(_.isPrimaryKey)
+          .getOrElse {
+            throw new IllegalArgumentException(
+              "No primary key field found in schema"
+            )
+          }
+        MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+          inheritedDeleteSegments,
+          pkField,
+          snapshotBucket.getOrElse(""),
+          hadoopConf
+        ) match {
+          case Right(plans) => plans
+          case Left(err) =>
+            throw new IllegalStateException(
+              s"Failed to load inherited StorageV2 delete logs from client-created snapshot: ${err.getMessage}",
+              err
+            )
+        }
+      }
+
+    buildSnapshotPartitions(
+      manifestList = storageV2ManifestList,
+      defaultPartitionId = metadata.snapshotInfo.partitionIds.headOption
+        .map(_.toString)
+        .getOrElse("0"),
+      schemaBytes = schemaBytes,
+      v2Segments = v2Segments,
+      v2DeletePlans = v2DeletePlans,
+      inheritedDeletePlansByPartition = inheritedDeletePlansByPartition
+    )
   }
 
   private def planInputPartitionsFromLegacyClient(
@@ -1594,10 +1660,21 @@ class MilvusScan(
       )
     }
 
+    val storageV2Segments = allPackedSegments.filter(_.storageVersion == 2)
+    if (storageV2Segments.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Legacy GetPersistentSegmentInfo read path cannot safely read StorageV2 segments for collection " +
+          s"${milvusOption.collectionName}. Use snapshot mode or the client snapshot fast path instead. " +
+          s"Offending segment IDs: ${storageV2Segments.map(_.segmentID).sorted.mkString(",")}"
+      )
+    }
+
+    val storageV3Segments = allPackedSegments.filter(_.storageVersion >= 3)
+
     val partitions =
       if (partition.nonEmpty && segment.nonEmpty) {
         val segmentInfo =
-          allPackedSegments.find(_.segmentID.toString == segment)
+          storageV3Segments.find(_.segmentID.toString == segment)
         segmentInfo match {
           case Some(seg) =>
             if (seg.partitionID.toString != partition) {
@@ -1613,12 +1690,12 @@ class MilvusScan(
             )
         }
       } else if (partition.nonEmpty) {
-        allPackedSegments
+        storageV3Segments
           .filter(_.partitionID.toString == partition)
           .map(seg => createPartition(seg.segmentID.toString, partition))
           .toArray
       } else {
-        allPackedSegments.map { seg =>
+        storageV3Segments.map { seg =>
           createPartition(seg.segmentID.toString, seg.partitionID.toString)
         }.toArray
       }
@@ -1735,6 +1812,160 @@ class MilvusScan(
     }
   }
 
+  private def loadV2DeletePlans(
+      v2Segments: Seq[V2SegmentInfo],
+      schemaBytes: Array[Byte],
+      snapshotBucket: Option[String],
+      hadoopConf: Configuration,
+      errorContext: String
+  ): Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan] = {
+    val applyDeletes = MilvusOption.readApplyDeletes(options)
+    val dataSegments = v2Segments.filter(seg =>
+      seg.columnGroups.nonEmpty && seg.deltaLogs.nonEmpty
+    )
+    if (!applyDeletes || dataSegments.isEmpty) {
+      Map.empty
+    } else {
+      val pkField = CollectionSchema
+        .parseFrom(schemaBytes)
+        .fields
+        .find(_.isPrimaryKey)
+        .getOrElse {
+          throw new IllegalArgumentException(
+            "No primary key field found in schema"
+          )
+        }
+      dataSegments.map { seg =>
+        MilvusDeltaLogReader.loadDeletePlan(
+          seg.deltaLogs,
+          pkField,
+          snapshotBucket.getOrElse(""),
+          hadoopConf
+        ) match {
+          case Right(plan) => seg.segmentId -> plan
+          case Left(err) =>
+            throw new IllegalStateException(
+              s"Failed to load StorageV2 delete logs from $errorContext for segment ${seg.segmentId}: ${err.getMessage}",
+              err
+            )
+        }
+      }.toMap
+    }
+  }
+
+  private def buildSnapshotPartitions(
+      manifestList: Seq[StorageV2ManifestItem],
+      defaultPartitionId: String,
+      schemaBytes: Array[Byte],
+      v2Segments: Seq[V2SegmentInfo],
+      v2DeletePlans: Map[
+        Long,
+        com.zilliz.spark.connector.read.MilvusDeletePlan
+      ],
+      inheritedDeletePlansByPartition: Map[
+        Long,
+        com.zilliz.spark.connector.read.MilvusDeletePlan
+      ] = Map.empty,
+      forceCanonicalBucket: Option[String] = None
+  ): Array[InputPartition] = {
+    val canonicalMilvusOption = forceCanonicalBucket
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(bucket =>
+        milvusOption.copy(
+          options = milvusOption.options +
+            (Properties.FsConfig.FsBucketName -> bucket)
+        )
+      )
+      .getOrElse(milvusOption)
+
+    val v3Partitions = manifestList.map { item =>
+      val (basePath, readVersion) =
+        MilvusSnapshotReader.parseManifestContent(item.manifest) match {
+          case Right(content) => (content.basePath, content.ver.toLong)
+          case Left(_)        => (item.manifest, -1L)
+        }
+
+      val pathParts = basePath.split("/").filter(_.nonEmpty)
+      val segmentID =
+        if (item.segmentID != 0L) {
+          item.segmentID
+        } else if (pathParts.nonEmpty) {
+          try pathParts.last.toLong
+          catch { case _: NumberFormatException => 0L }
+        } else 0L
+      val insertLogIdx = pathParts.lastIndexOf("insert_log")
+      val partitionId =
+        if (insertLogIdx >= 0 && pathParts.length > insertLogIdx + 3) {
+          pathParts(insertLogIdx + 2)
+        } else {
+          logWarning(
+            s"Manifest path '$basePath' does not match expected insert_log/{collectionID}/{partitionID}/{segmentID} layout; using fallback partitionID=$defaultPartitionId"
+          )
+          defaultPartitionId
+        }
+      logInfo(
+        s"Creating partition with manifestPath=$basePath, partitionID=$partitionId, segmentID=$segmentID, readVersion=$readVersion"
+      )
+      MilvusStorageV3InputPartition(
+        basePath,
+        schemaBytes,
+        partitionId,
+        milvusOption,
+        vectorSearchConfig.map(_.topK),
+        vectorSearchConfig.map(_.queryVector),
+        vectorSearchConfig.map(_.metricType),
+        vectorSearchConfig.map(_.vectorColumn),
+        segmentID,
+        readVersion
+      ): InputPartition
+    }
+
+    if (v3Partitions.nonEmpty) {
+      logInfo(
+        s"Created ${v3Partitions.size} V3 partitions from snapshot manifests"
+      )
+    }
+
+    val packedV2Partitions = v2Segments
+      .filter(_.columnGroups.nonEmpty)
+      .map { seg =>
+        MilvusPackedV2InputPartition(
+          segmentID = seg.segmentId,
+          partitionID = seg.partitionId,
+          columnGroups = seg.columnGroups,
+          milvusSchemaBytes = schemaBytes,
+          milvusOption = canonicalMilvusOption,
+          neededColumnFieldIds = Seq.empty,
+          applyDeletes = MilvusOption.readApplyDeletes(options),
+          deletePlan = v2DeletePlans.getOrElse(
+            seg.segmentId,
+            com.zilliz.spark.connector.read.MilvusDeletePlan.empty
+          ),
+          inheritedDeletePlanPartitionId =
+            if (inheritedDeletePlansByPartition.contains(seg.partitionId))
+              Some(seg.partitionId)
+            else None
+        ): InputPartition
+      }
+
+    val skippedDeleteOnlySegments =
+      v2Segments.count(_.columnGroups.isEmpty)
+    if (skippedDeleteOnlySegments > 0) {
+      logInfo(
+        s"Skipped $skippedDeleteOnlySegments StorageV2 delete-only segment(s) during snapshot partition planning"
+      )
+    }
+
+    if (packedV2Partitions.nonEmpty) {
+      logInfo(
+        s"Created ${packedV2Partitions.size} packed-V2 partition(s) from snapshot metadata"
+      )
+    }
+
+    (v3Partitions ++ packedV2Partitions).toArray
+  }
+
   /** Plan input partitions from snapshot manifests (offline mode - no client
     * connection) This enables reading Milvus data purely from snapshot metadata
     * without any client calls.
@@ -1761,9 +1992,6 @@ class MilvusScan(
       "Using snapshot mode for partition planning (no Milvus client connection)"
     )
 
-    // Parse manifest list from JSON. Empty or null means no V3 manifests
-    // were supplied (pure V2-packed snapshot) — fall through to the
-    // packed-V2 branch below without erroring out.
     val manifestList: Seq[StorageV2ManifestItem] =
       if (manifestsJson == null || manifestsJson.isEmpty) Seq.empty
       else
@@ -1776,15 +2004,11 @@ class MilvusScan(
             )
         }
 
-    // Get partition IDs from options (comma-separated)
     val partitionIds = Option(options.get(MilvusOption.SnapshotPartitionIds))
       .map(_.split(",").map(_.trim).filter(_.nonEmpty))
       .getOrElse(Array.empty[String])
-
-    // Use first partition ID as default, or "0" if none provided
     val defaultPartitionId = partitionIds.headOption.getOrElse("0")
 
-    // Get schema bytes from options (Base64 encoded)
     val schemaBytes = Option(options.get(MilvusOption.SnapshotSchemaBytes))
       .map(base64 => java.util.Base64.getDecoder.decode(base64))
       .getOrElse {
@@ -1798,100 +2022,140 @@ class MilvusScan(
       s"Using schema bytes (${schemaBytes.length} bytes) for V2 partitions"
     )
 
-    // Create V2 input partitions from snapshot manifests
-    val v2Partitions = manifestList.map { item =>
-      // Try to parse manifest as JSON to extract basePath and ver (version)
-      // If parsing fails, treat the manifest string as a plain basePath (backward compatible)
-      val (basePath, readVersion) =
-        MilvusSnapshotReader.parseManifestContent(item.manifest) match {
-          case Right(content) => (content.basePath, content.ver.toLong)
-          case Left(_) =>
-            (
-              item.manifest,
-              -1L
-            ) // Backward compatible: plain basePath, latest version
+    val v2Segments = Option(options.get(MilvusOption.SnapshotV2Segments))
+      .filter(_.nonEmpty)
+      .map { json =>
+        MilvusSnapshotReader.deserializeV2Segments(json) match {
+          case Right(segs) => segs
+          case Left(e) =>
+            throw new Exception(
+              s"Failed to parse SnapshotV2Segments: ${e.getMessage}",
+              e
+            )
         }
+      }
+      .getOrElse(Seq.empty)
 
-      // Extract segmentID and partitionID from manifest path if needed
-      // Path format: files/insert_log/{collectionID}/{partitionID}/{segmentID}
-      val pathParts = basePath.split("/").filter(_.nonEmpty)
-      val segmentID = if (item.segmentID != 0L) {
-        item.segmentID
-      } else if (pathParts.nonEmpty) {
-        try {
-          pathParts.last.toLong
-        } catch {
-          case _: NumberFormatException => 0L
-        }
-      } else 0L
-      val insertLogIdx = pathParts.lastIndexOf("insert_log")
-      val partitionId =
-        if (insertLogIdx >= 0 && pathParts.length > insertLogIdx + 3) {
-          pathParts(insertLogIdx + 2)
-        } else {
-          logWarning(
-            s"Manifest path '$basePath' does not match expected insert_log/{collectionID}/{partitionID}/{segmentID} layout; using fallback partitionID=$defaultPartitionId"
-          )
-          defaultPartitionId
-        }
-      logInfo(
-        s"Creating partition with manifestPath=$basePath, partitionID=$partitionId, segmentID=$segmentID, readVersion=$readVersion"
+    val snapshotBucketForRelativePaths =
+      MilvusScan.connectorS3BucketOption(options.asScala.toMap)
+
+    val v2DeletePlans =
+      loadV2DeletePlans(
+        v2Segments,
+        schemaBytes,
+        snapshotBucket = snapshotBucketForRelativePaths,
+        hadoopConf = buildSnapshotHadoopConf(""),
+        errorContext = "snapshot metadata"
       )
-      MilvusStorageV3InputPartition(
-        basePath, // The basePath extracted from manifest JSON
-        schemaBytes, // Protobuf CollectionSchema bytes from snapshot
-        partitionId, // Partition name/ID
-        milvusOption,
-        vectorSearchConfig.map(_.topK),
-        vectorSearchConfig.map(_.queryVector),
-        vectorSearchConfig.map(_.metricType),
-        vectorSearchConfig.map(_.vectorColumn),
-        segmentID, // Segment ID extracted from path or from item
-        readVersion // Manifest version from snapshot (-1 = latest)
-      ): InputPartition
-    }
 
-    logInfo(
-      s"Created ${v2Partitions.size} V2 partitions from snapshot manifests"
-    )
-
-    // Additional partitions from pre-materialized packed-V2 segments (if any).
-    val packedV2Partitions: Seq[InputPartition] =
-      Option(options.get(MilvusOption.SnapshotV2Segments))
-        .filter(_.nonEmpty)
-        .map { json =>
-          MilvusSnapshotReader.deserializeV2Segments(json) match {
-            case Right(segs) if segs.nonEmpty =>
-              logInfo(
-                s"Creating ${segs.size} packed-V2 partition(s) from " +
-                  s"SnapshotV2Segments option"
-              )
-              segs.map { seg =>
-                MilvusPackedV2InputPartition(
-                  segmentID = seg.segmentId,
-                  partitionID = seg.partitionId,
-                  columnGroups = seg.columnGroups,
-                  milvusSchemaBytes = schemaBytes,
-                  milvusOption = milvusOption,
-                  neededColumnFieldIds = Seq.empty
-                ): InputPartition
-              }
-            case Right(_) => Seq.empty[InputPartition]
-            case Left(e) =>
-              throw new Exception(
-                s"Failed to parse SnapshotV2Segments: ${e.getMessage}",
-                e
-              )
+    val inheritedDeleteSegments =
+      v2Segments.filter(seg =>
+        seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
+      )
+    val inheritedDeletePlansByPartition =
+      if (
+        !MilvusOption.readApplyDeletes(
+          options
+        ) || inheritedDeleteSegments.isEmpty
+      ) {
+        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+      } else {
+        val pkField = CollectionSchema
+          .parseFrom(schemaBytes)
+          .fields
+          .find(_.isPrimaryKey)
+          .getOrElse {
+            throw new IllegalArgumentException(
+              "No primary key field found in schema"
+            )
           }
+        MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+          inheritedDeleteSegments,
+          pkField,
+          snapshotBucketForRelativePaths.getOrElse(""),
+          buildSnapshotHadoopConf("")
+        ) match {
+          case Right(plans) => plans
+          case Left(err) =>
+            throw new IllegalStateException(
+              s"Failed to load inherited StorageV2 delete logs from snapshot metadata: ${err.getMessage}",
+              err
+            )
         }
-        .getOrElse(Seq.empty[InputPartition])
+      }
 
-    (v2Partitions ++ packedV2Partitions).toArray
+    buildSnapshotPartitions(
+      manifestList = manifestList,
+      defaultPartitionId = defaultPartitionId,
+      schemaBytes = schemaBytes,
+      v2Segments = v2Segments,
+      v2DeletePlans = v2DeletePlans,
+      inheritedDeletePlansByPartition = inheritedDeletePlansByPartition
+    )
   }
 
   override def createReaderFactory(): PartitionReaderFactory = {
-    // Convert CaseInsensitiveStringMap to regular Map for serialization
     val optionsMap = options.asScala.toMap
-    new MilvusPartitionReaderFactory(schema, optionsMap, pushedFilters)
+    val inheritedPlansByPartition =
+      if (
+        MilvusOption
+          .isSnapshotMode(options) && MilvusOption.readApplyDeletes(options)
+      ) {
+        val schemaBytes = Option(options.get(MilvusOption.SnapshotSchemaBytes))
+          .map(base64 => java.util.Base64.getDecoder.decode(base64))
+          .getOrElse(Array.emptyByteArray)
+        val v2Segments = Option(options.get(MilvusOption.SnapshotV2Segments))
+          .filter(_.nonEmpty)
+          .map(json =>
+            MilvusSnapshotReader.deserializeV2Segments(json) match {
+              case Right(segs) => segs
+              case Left(err) =>
+                throw new IllegalStateException(
+                  s"Failed to parse SnapshotV2Segments in reader factory: ${err.getMessage}",
+                  err
+                )
+            }
+          )
+          .getOrElse(Seq.empty)
+        val inheritedDeleteSegments =
+          v2Segments.filter(seg =>
+            seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
+          )
+        if (schemaBytes.isEmpty || inheritedDeleteSegments.isEmpty) {
+          Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+        } else {
+          val pkField = CollectionSchema
+            .parseFrom(schemaBytes)
+            .fields
+            .find(_.isPrimaryKey)
+            .getOrElse(
+              throw new IllegalArgumentException(
+                "No primary key field found in schema"
+              )
+            )
+          MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+            inheritedDeleteSegments,
+            pkField,
+            MilvusScan.connectorS3BucketOption(optionsMap).getOrElse(""),
+            buildSnapshotHadoopConf("")
+          ) match {
+            case Right(plans) => plans
+            case Left(err) =>
+              throw new IllegalStateException(
+                s"Failed to load inherited StorageV2 delete logs for reader factory: ${err.getMessage}",
+                err
+              )
+          }
+        }
+      } else {
+        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+      }
+
+    new MilvusPartitionReaderFactory(
+      schema,
+      optionsMap,
+      pushedFilters,
+      MilvusPackedV2DeleteContext(inheritedPlansByPartition)
+    )
   }
 }

@@ -101,6 +101,47 @@ class MilvusSegmentManifestReaderTest extends AnyFunSuite with Matchers {
     // multi-group fieldID conflicts. Slots match the per-group directory
     // names {0, 1, 102} for this fixture.
     seg.columnGroups.map(_.slotFieldId) shouldBe Seq(0L, 1L, 102L)
+    seg.deltaLogs shouldBe empty
+  }
+
+  test("toV2SegmentInfo flattens and sorts delta logs by logId") {
+    val entry = AvroManifestEntry(
+      segmentId = 123L,
+      partitionId = 456L,
+      segmentLevel = 1L,
+      numOfRows = 789L,
+      storageVersion = 2L,
+      binlogFiles = Seq(
+        AvroFieldBinlogEntry(
+          slotFieldId = 100L,
+          binlogs = Seq(AvroBinlogEntry(1L, "files/insert_log/.../1", 10L))
+        )
+      ),
+      deltaLogFiles = Seq(
+        AvroFieldBinlogEntry(
+          slotFieldId = 100L,
+          binlogs = Seq(
+            AvroBinlogEntry(9L, "files/delete_log/.../9", 1L),
+            AvroBinlogEntry(7L, "files/delete_log/.../7", 3L)
+          )
+        ),
+        AvroFieldBinlogEntry(
+          slotFieldId = 101L,
+          binlogs = Seq(AvroBinlogEntry(8L, "files/delete_log/.../8", 2L))
+        )
+      )
+    )
+
+    val result =
+      MilvusSegmentManifestReader.toV2SegmentInfo(entry, Seq(Seq(100L)))
+
+    result shouldBe a[Right[_, _]]
+    val seg = result.toOption.get
+    seg.deltaLogs shouldBe Seq(
+      V2DeltaLogFile(7L, "files/delete_log/.../7", 3L),
+      V2DeltaLogFile(8L, "files/delete_log/.../8", 2L),
+      V2DeltaLogFile(9L, "files/delete_log/.../9", 1L)
+    )
   }
 
   test("toV2SegmentInfo rejects non-StorageV2 entries") {
@@ -135,6 +176,18 @@ class MilvusSegmentManifestReaderTest extends AnyFunSuite with Matchers {
           filePaths = Seq("p/103"),
           fileRowCounts = Seq(20480L)
         )
+      ),
+      deltaLogs = Seq(
+        V2DeltaLogFile(
+          logId = 7L,
+          logPath = "files/delete_log/.../7",
+          entriesNum = 3L
+        ),
+        V2DeltaLogFile(
+          logId = 9L,
+          logPath = "files/delete_log/.../9",
+          entriesNum = 1L
+        )
       )
     )
     val json = MilvusSnapshotReader.serializeV2Segments(Seq(seg))
@@ -145,12 +198,15 @@ class MilvusSegmentManifestReaderTest extends AnyFunSuite with Matchers {
     got.segmentId shouldBe seg.segmentId
     got.columnGroups(0).fieldIds shouldBe Seq(100L, 0L, 1L)
     got.columnGroups(0).fileRowCounts shouldBe Seq(20480L)
+    got.deltaLogs shouldBe seg.deltaLogs
     // Exercise the exact pattern that failed at runtime — mapping over the
     // rehydrated Seq[Long]. Must not throw ClassCastException.
     val asStrings = got.columnGroups(0).fieldIds.map(_.toString)
     asStrings shouldBe Seq("100", "0", "1")
     val rcStrings = got.columnGroups(0).fileRowCounts.map(_.toString)
     rcStrings shouldBe Seq("20480")
+    val deltaStrings = got.deltaLogs.map(_.logId.toString)
+    deltaStrings shouldBe Seq("7", "9")
   }
 
   test("toV2SegmentInfo fails when group count disagrees with AVRO") {

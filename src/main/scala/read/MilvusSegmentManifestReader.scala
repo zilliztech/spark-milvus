@@ -36,9 +36,11 @@ private[read] case class AvroBinlogEntry(
 private[read] case class AvroManifestEntry(
     segmentId: Long,
     partitionId: Long,
+    segmentLevel: Long,
     numOfRows: Long,
     storageVersion: Long,
-    binlogFiles: Seq[AvroFieldBinlogEntry]
+    binlogFiles: Seq[AvroFieldBinlogEntry],
+    deltaLogFiles: Seq[AvroFieldBinlogEntry]
 )
 
 /** Decoder for per-segment manifest AVRO files written by milvus-datacoord.
@@ -60,33 +62,28 @@ private[read] case class AvroManifestEntry(
   */
 object MilvusSegmentManifestReader extends Logging {
 
-  /** Classpath path of the bundled AVSC (same content as milvus's
-    * `getProperAvroSchema()`).
-    */
-  private val SchemaResource = "/milvus-segment-manifest.avsc"
+  private val LastNeededField = "deltalog_files"
 
-  /** The last field we read from each AVRO record. Avro binary is positional
-    * and has no container header here, so the reader schema must match the
-    * writer schema exactly for whatever it parses. By stopping at
-    * `binlog_files` (the last field backfill actually uses) we make all
-    * trailing fields — present or absent — effectively optional: extra bytes
-    * after this field are simply ignored, and writers that emit fewer trailing
-    * fields still decode because the prefix they share with us is identical.
-    * Update this if backfill starts consuming a later field.
-    */
-  private val LastNeededField = "binlog_files"
+  private val SchemaResources: Map[Int, String] = Map(
+    1 -> "/milvus-segment-manifest-v1.avsc",
+    2 -> "/milvus-segment-manifest-v2.avsc",
+    3 -> "/milvus-segment-manifest-v3.avsc",
+    4 -> "/milvus-segment-manifest-v4.avsc"
+  )
 
-  /** Parsed lazily once. `Schema.Parser` is not thread-safe but the parsed
-    * `Schema` is immutable, so lazy val is fine. We truncate the bundled schema
-    * to the prefix ending at `LastNeededField` so trailing fields are treated
-    * as optional across milvus versions.
-    */
-  private lazy val schema: Schema = truncatedSchema(fullSchema, LastNeededField)
+  private lazy val schemas: Map[Int, Schema] = SchemaResources.map {
+    case (version, resource) =>
+      version -> truncatedSchema(
+        loadSchema(resource),
+        LastNeededField,
+        resource
+      )
+  }
 
-  private lazy val fullSchema: Schema = {
-    val in = Option(getClass.getResourceAsStream(SchemaResource)).getOrElse {
+  private def loadSchema(resource: String): Schema = {
+    val in = Option(getClass.getResourceAsStream(resource)).getOrElse {
       throw new IllegalStateException(
-        s"bundled AVSC resource $SchemaResource not found on classpath"
+        s"bundled AVSC resource $resource not found on classpath"
       )
     }
     try {
@@ -98,15 +95,27 @@ object MilvusSegmentManifestReader extends Logging {
     }
   }
 
+  private def schemaFor(version: Int): Schema =
+    schemas.getOrElse(
+      version,
+      throw new IllegalArgumentException(
+        s"Unsupported Milvus manifest schema version $version"
+      )
+    )
+
   /** Build a record schema containing only the prefix of `full`'s fields up to
     * and including `lastField`. Field objects are reconstructed so the new
     * record owns them (avro forbids a field being attached to two records).
     */
-  private def truncatedSchema(full: Schema, lastField: String): Schema = {
+  private def truncatedSchema(
+      full: Schema,
+      lastField: String,
+      resource: String
+  ): Schema = {
     val idx = full.getFields.asScala.indexWhere(_.name == lastField)
     if (idx < 0) {
       throw new IllegalStateException(
-        s"bundled AVSC $SchemaResource is missing required field '$lastField'"
+        s"bundled AVSC $resource is missing required field '$lastField'"
       )
     }
     val truncated = Schema.createRecord(
@@ -128,9 +137,15 @@ object MilvusSegmentManifestReader extends Logging {
     * @return
     *   `Right(entry)` on success, or `Left(throwable)` on any parse error.
     */
-  def parse(avroBytes: Array[Byte]): Either[Throwable, AvroManifestEntry] = {
+  def parse(
+      avroBytes: Array[Byte],
+      manifestSchemaVersion: Int = 1
+  ): Either[Throwable, AvroManifestEntry] = {
     try {
-      val reader = new GenericDatumReader[GenericRecord](schema)
+      val reader =
+        new GenericDatumReader[GenericRecord](
+          schemaFor(manifestSchemaVersion)
+        )
       val decoder =
         DecoderFactory
           .get()
@@ -141,6 +156,8 @@ object MilvusSegmentManifestReader extends Logging {
       case e: Throwable => Left(e)
     }
   }
+
+  def supportedSchemaVersions: Seq[Int] = SchemaResources.keys.toSeq.sorted
 
   /** Join an AVRO entry with the segment's `group_field_id_list` kv-metadata
     * (read from any one of the segment's parquet files) to produce the runtime
@@ -172,7 +189,17 @@ object MilvusSegmentManifestReader extends Logging {
           partitionId = entry.partitionId,
           numOfRows = entry.numOfRows,
           storageVersion = entry.storageVersion,
-          columnGroups = Seq.empty
+          columnGroups = Seq.empty,
+          deltaLogs = entry.deltaLogFiles
+            .flatMap(_.binlogs)
+            .sortBy(_.logId)
+            .map(log =>
+              V2DeltaLogFile(
+                logId = log.logId,
+                logPath = log.logPath,
+                entriesNum = log.entriesNum
+              )
+            )
         )
       )
     } else if (entry.binlogFiles.size != groupFieldIdList.size) {
@@ -200,13 +227,24 @@ object MilvusSegmentManifestReader extends Logging {
             slotFieldId = afb.slotFieldId
           )
         }
+      val deltaLogs = entry.deltaLogFiles
+        .flatMap(_.binlogs)
+        .sortBy(_.logId)
+        .map(log =>
+          V2DeltaLogFile(
+            logId = log.logId,
+            logPath = log.logPath,
+            entriesNum = log.entriesNum
+          )
+        )
       Right(
         V2SegmentInfo(
           segmentId = entry.segmentId,
           partitionId = entry.partitionId,
           numOfRows = entry.numOfRows,
           storageVersion = entry.storageVersion,
-          columnGroups = cgs
+          columnGroups = cgs,
+          deltaLogs = deltaLogs
         )
       )
     }
@@ -251,9 +289,11 @@ object MilvusSegmentManifestReader extends Logging {
     AvroManifestEntry(
       segmentId = asLong(rec.get("segment_id")),
       partitionId = asLong(rec.get("partition_id")),
+      segmentLevel = asLong(rec.get("segment_level")),
       numOfRows = asLong(rec.get("num_of_rows")),
       storageVersion = asLong(rec.get("storage_version")),
-      binlogFiles = projectFieldBinlogs(rec.get("binlog_files"))
+      binlogFiles = projectFieldBinlogs(rec.get("binlog_files")),
+      deltaLogFiles = projectFieldBinlogs(rec.get("deltalog_files"))
     )
   }
 

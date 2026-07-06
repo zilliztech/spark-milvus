@@ -45,6 +45,8 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
 
+    metadata.allSegments shouldBe empty
+
     // Verify snapshot info
     metadata.snapshotInfo.name shouldBe "backfill_snapshot"
     metadata.snapshotInfo.id shouldBe 462324574599774209L
@@ -262,6 +264,299 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     result.toOption.get.snapshotInfo.name shouldBe "test"
   }
 
+  test("manifestSchemaVersion defaults legacy snapshots to v1") {
+    val json = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": 5,
+              "is_primary_key": true
+            }
+          ]
+        }
+      },
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val metadata =
+      MilvusSnapshotReader.parseSnapshotMetadata(json).toOption.get
+
+    metadata.manifestSchemaVersion shouldBe 1
+  }
+
+  test("manifestSchemaVersion uses snapshot format_version when present") {
+    val json = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": 5,
+              "is_primary_key": true
+            }
+          ]
+        }
+      },
+      "format_version": 4,
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val metadata =
+      MilvusSnapshotReader.parseSnapshotMetadata(json).toOption.get
+
+    metadata.manifestSchemaVersion shouldBe 4
+  }
+
+  test("manifestSchemaVersion treats version 0 metadata as v1 manifests") {
+    val json = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": 5,
+              "is_primary_key": true
+            }
+          ]
+        }
+      },
+      "format_version": 0,
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+
+    val metadata =
+      MilvusSnapshotReader.parseSnapshotMetadata(json).toOption.get
+
+    metadata.manifestSchemaVersion shouldBe 1
+  }
+
+  test("manifestSchemaVersion preserves v2 and v3 metadata versions") {
+    val jsonV2 = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": 5,
+              "is_primary_key": true
+            }
+          ]
+        }
+      },
+      "format_version": 2,
+      "indexes": [],
+      "manifest-list": []
+    }
+    """
+    val jsonV3 =
+      jsonV2.replace("\"format_version\": 2", "\"format_version\": 3")
+
+    MilvusSnapshotReader
+      .parseSnapshotMetadata(jsonV2)
+      .toOption
+      .get
+      .manifestSchemaVersion shouldBe 2
+    MilvusSnapshotReader
+      .parseSnapshotMetadata(jsonV3)
+      .toOption
+      .get
+      .manifestSchemaVersion shouldBe 3
+  }
+
+  test(
+    "Parse snapshot segment delete metadata from segments and segment_infos"
+  ) {
+    val json = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": 5,
+              "is_primary_key": true
+            }
+          ]
+        }
+      },
+      "indexes": [],
+      "manifest-list": [],
+      "segments": [
+        {
+          "segment_id": 10,
+          "partition_id": 20,
+          "segment_level": 1,
+          "storage_version": 2,
+          "deltalog_files": [
+            {
+              "field_id": 100,
+              "binlogs": [
+                {
+                  "entries_num": 3,
+                  "log_path": "files/delete-a",
+                  "log_id": 7
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "segment_infos": [
+        {
+          "segment_id": 11,
+          "partition_id": 21,
+          "segment_level": 0,
+          "storage_version": 2,
+          "deltalog_files": [
+            {
+              "field_id": 100,
+              "binlogs": [
+                {
+                  "entries_num": 1,
+                  "log_path": "files/delete-b",
+                  "log_id": 8
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+    """
+
+    val result = MilvusSnapshotReader.parseSnapshotMetadata(json)
+
+    result shouldBe a[Right[_, _]]
+    val metadata = result.toOption.get
+    metadata.allSegments should have size 1
+    metadata.allSegments.head.segmentId shouldBe 10L
+    metadata.allSegments.head.partitionId shouldBe 20L
+    metadata.allSegments.head.segmentLevel shouldBe Some(1L)
+    metadata.allSegments.head.storageVersion shouldBe 2L
+    metadata.allSegments.head.deltaLogFiles should have size 1
+    metadata.allSegments.head.deltaLogFiles.head.fieldId shouldBe 100L
+    metadata.allSegments.head.deltaLogFiles.head.binlogs.head.entriesNum shouldBe 3L
+    metadata.allSegments.head.deltaLogFiles.head.binlogs.head.logPath shouldBe "files/delete-a"
+    metadata.allSegments.head.deltaLogFiles.head.binlogs.head.logId shouldBe 7L
+  }
+
+  test("allSegments falls back to segment_infos when segments is empty") {
+    val json = """
+    {
+      "snapshot-info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "fields": [
+            {
+              "fieldID": 100,
+              "name": "id",
+              "data_type": 5,
+              "is_primary_key": true
+            }
+          ]
+        }
+      },
+      "indexes": [],
+      "manifest-list": [],
+      "segment_infos": [
+        {
+          "segment_id": 11,
+          "partition_id": 21,
+          "segment_level": 0,
+          "storage_version": 2,
+          "deltalog_files": [
+            {
+              "field_id": 100,
+              "binlogs": [
+                {
+                  "entries_num": 1,
+                  "log_path": "files/delete-b",
+                  "log_id": 8
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+    """
+
+    val result = MilvusSnapshotReader.parseSnapshotMetadata(json)
+
+    result shouldBe a[Right[_, _]]
+    val metadata = result.toOption.get
+    metadata.segments shouldBe empty
+    metadata.segmentInfos should have size 1
+    metadata.allSegments should have size 1
+    metadata.allSegments.head.segmentId shouldBe 11L
+    metadata.allSegments.head.segmentLevel shouldBe Some(0L)
+    metadata.allSegments.head.deltaLogFiles.head.binlogs.head.logPath shouldBe "files/delete-b"
+  }
+
   test("Get Storage V2 manifest map from snapshot file") {
     val result = MilvusSnapshotReader.getStorageV2ManifestMap(snapshotFilePath)
 
@@ -398,6 +693,46 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     deserializedList should have size originalManifestList.size
     deserializedList.head.segmentID shouldBe originalManifestList.head.segmentID
     deserializedList.head.manifest shouldBe originalManifestList.head.manifest
+  }
+
+  test("serialize and deserialize V2 segments keeps delta logs") {
+    val segments = Seq(
+      V2SegmentInfo(
+        segmentId = 10L,
+        partitionId = 20L,
+        numOfRows = 30L,
+        storageVersion = 2L,
+        columnGroups = Seq(
+          V2ColumnGroup(
+            fieldIds = Seq(100L, 0L, 1L),
+            filePaths = Seq("files/insert_log/.../0/1"),
+            fileRowCounts = Seq(30L)
+          )
+        ),
+        deltaLogs = Seq(
+          V2DeltaLogFile(
+            logId = 9L,
+            logPath = "files/delete_log/.../9",
+            entriesNum = 2L
+          ),
+          V2DeltaLogFile(
+            logId = 11L,
+            logPath = "files/delete_log/.../11",
+            entriesNum = 1L
+          )
+        )
+      )
+    )
+
+    val json = MilvusSnapshotReader.serializeV2Segments(segments)
+    json should not be empty
+
+    val result = MilvusSnapshotReader.deserializeV2Segments(json)
+    result shouldBe a[Right[_, _]]
+    val roundTripped = result.toOption.get
+
+    roundTripped should have size 1
+    roundTripped.head shouldBe segments.head
   }
 
   test("Parse data_type as string format (e.g., 'Int64' instead of 5)") {

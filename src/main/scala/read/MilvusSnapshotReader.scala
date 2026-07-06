@@ -357,13 +357,24 @@ case class V2ColumnGroupDTO(
     @JsonProperty("file_row_counts") fileRowCounts: Seq[JsonNode] = Seq.empty
 )
 
+case class V2DeltaLogFileDTO(
+    @JsonProperty("log_id") rawLogId: Option[JsonNode] = None,
+    @JsonProperty("log_path") logPath: String = "",
+    @JsonProperty("entries_num") rawEntriesNum: Option[JsonNode] = None
+) {
+  def logId: Long = rawLogId.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def entriesNum: Long =
+    rawEntriesNum.map(JsonTypeConverter.toLong).getOrElse(0L)
+}
+
 case class V2SegmentInfoDTO(
     @JsonProperty("segment_id") rawSegmentId: Option[JsonNode] = None,
     @JsonProperty("partition_id") rawPartitionId: Option[JsonNode] = None,
     @JsonProperty("num_of_rows") rawNumOfRows: Option[JsonNode] = None,
     @JsonProperty("storage_version") rawStorageVersion: Option[JsonNode] = None,
     @JsonProperty("column_groups") columnGroups: Seq[V2ColumnGroupDTO] =
-      Seq.empty
+      Seq.empty,
+    @JsonProperty("delta_logs") deltaLogs: Seq[V2DeltaLogFileDTO] = Seq.empty
 ) {
   def segmentId: Long = rawSegmentId.map(JsonTypeConverter.toLong).getOrElse(0L)
   def partitionId: Long =
@@ -405,14 +416,54 @@ case class V2ColumnGroup(
     slotFieldId: Long = -1L
 )
 
+case class V2DeltaLogFile(
+    logId: Long,
+    logPath: String,
+    entriesNum: Long
+)
+
 /** One StorageV2 segment's manifest information needed by backfill. */
 case class V2SegmentInfo(
     segmentId: Long,
     partitionId: Long,
     numOfRows: Long,
     storageVersion: Long, // always 2L for StorageV2
-    columnGroups: Seq[V2ColumnGroup]
+    columnGroups: Seq[V2ColumnGroup],
+    deltaLogs: Seq[V2DeltaLogFile] = Seq.empty
 )
+
+case class SnapshotBinlogEntry(
+    @JsonProperty("entries_num") rawEntriesNum: Option[JsonNode] = None,
+    @JsonProperty("log_path") logPath: String = "",
+    @JsonProperty("log_id") rawLogId: Option[JsonNode] = None
+) {
+  def entriesNum: Long =
+    rawEntriesNum.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def logId: Long = rawLogId.map(JsonTypeConverter.toLong).getOrElse(0L)
+}
+
+case class SnapshotFieldBinlog(
+    @JsonProperty("field_id") rawFieldId: Option[JsonNode] = None,
+    @JsonProperty("binlogs") binlogs: Seq[SnapshotBinlogEntry] = Seq.empty
+) {
+  def fieldId: Long = rawFieldId.map(JsonTypeConverter.toLong).getOrElse(0L)
+}
+
+case class SnapshotSegmentInfo(
+    @JsonProperty("segment_id") rawSegmentId: Option[JsonNode] = None,
+    @JsonProperty("partition_id") rawPartitionId: Option[JsonNode] = None,
+    @JsonProperty("segment_level") rawSegmentLevel: Option[JsonNode] = None,
+    @JsonProperty("storage_version") rawStorageVersion: Option[JsonNode] = None,
+    @JsonProperty("deltalog_files") deltaLogFiles: Seq[SnapshotFieldBinlog] =
+      Seq.empty
+) {
+  def segmentId: Long = rawSegmentId.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def partitionId: Long =
+    rawPartitionId.map(JsonTypeConverter.toLong).getOrElse(0L)
+  def segmentLevel: Option[Long] = rawSegmentLevel.map(JsonTypeConverter.toLong)
+  def storageVersion: Long =
+    rawStorageVersion.map(JsonTypeConverter.toLong).getOrElse(0L)
+}
 
 /** Complete snapshot metadata
   */
@@ -428,8 +479,78 @@ case class SnapshotMetadata(
     ) manifestList: Seq[String] = Seq.empty,
     @JsonProperty("storagev2_manifest_list") @JsonAlias(
       Array("storagev2-manifest-list")
-    ) storageV2ManifestList: Option[Seq[StorageV2ManifestItem]] = None
-)
+    ) storageV2ManifestList: Option[Seq[StorageV2ManifestItem]] = None,
+    @JsonProperty("segments") segments: Seq[SnapshotSegmentInfo] = Seq.empty,
+    @JsonProperty("segment_infos") @JsonAlias(
+      Array("segment-infos", "segmentInfos")
+    ) segmentInfos: Seq[SnapshotSegmentInfo] = Seq.empty
+) {
+  def allSegments: Seq[SnapshotSegmentInfo] =
+    if (segments.nonEmpty) segments else segmentInfos
+
+  def manifestSchemaVersion: Int = formatVersion match {
+    case Some(v) if v >= 2 => v
+    case _                 => 1
+  }
+}
+
+object SnapshotMetadata {
+  def fromAvroEntries(
+      snapshotInfo: SnapshotInfo,
+      collection: Collection,
+      manifestList: Seq[String],
+      storageV2ManifestList: Option[Seq[StorageV2ManifestItem]],
+      entries: Seq[AvroManifestEntry]
+  ): SnapshotMetadata = {
+    SnapshotMetadata(
+      snapshotInfo = snapshotInfo,
+      collection = collection,
+      manifestList = manifestList,
+      storageV2ManifestList = storageV2ManifestList,
+      segments = entries.map(entry =>
+        SnapshotSegmentInfo(
+          rawSegmentId = Some(
+            com.fasterxml.jackson.databind.node.LongNode
+              .valueOf(entry.segmentId)
+          ),
+          rawPartitionId = Some(
+            com.fasterxml.jackson.databind.node.LongNode
+              .valueOf(entry.partitionId)
+          ),
+          rawSegmentLevel = Some(
+            com.fasterxml.jackson.databind.node.LongNode
+              .valueOf(entry.segmentLevel)
+          ),
+          rawStorageVersion = Some(
+            com.fasterxml.jackson.databind.node.LongNode
+              .valueOf(entry.storageVersion)
+          ),
+          deltaLogFiles = entry.deltaLogFiles.map(group =>
+            SnapshotFieldBinlog(
+              rawFieldId = Some(
+                com.fasterxml.jackson.databind.node.LongNode
+                  .valueOf(group.slotFieldId)
+              ),
+              binlogs = group.binlogs.map(log =>
+                SnapshotBinlogEntry(
+                  rawEntriesNum = Some(
+                    com.fasterxml.jackson.databind.node.LongNode
+                      .valueOf(log.entriesNum)
+                  ),
+                  logPath = log.logPath,
+                  rawLogId = Some(
+                    com.fasterxml.jackson.databind.node.LongNode
+                      .valueOf(log.logId)
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  }
+}
 
 /** Reader for Milvus snapshot metadata JSON files
   */
@@ -898,6 +1019,13 @@ object MilvusSnapshotReader {
             fileRowCounts =
               cg.fileRowCounts.map(n => LongNode.valueOf(n): JsonNode)
           )
+        ),
+        deltaLogs = s.deltaLogs.map(log =>
+          V2DeltaLogFileDTO(
+            rawLogId = Some(LongNode.valueOf(log.logId)),
+            logPath = log.logPath,
+            rawEntriesNum = Some(LongNode.valueOf(log.entriesNum))
+          )
         )
       )
     }
@@ -930,6 +1058,13 @@ object MilvusSnapshotReader {
               filePaths = cg.filePaths,
               fileRowCounts =
                 cg.fileRowCounts.map(v => JsonTypeConverter.toLong(v))
+            )
+          ),
+          deltaLogs = d.deltaLogs.map(log =>
+            V2DeltaLogFile(
+              logId = log.logId,
+              logPath = log.logPath,
+              entriesNum = log.entriesNum
             )
           )
         )

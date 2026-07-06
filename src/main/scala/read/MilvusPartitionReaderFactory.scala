@@ -46,7 +46,9 @@ object MilvusPartitionReaderFactory {
 class MilvusPartitionReaderFactory(
     schema: StructType,
     optionsMap: Map[String, String],
-    pushedFilters: Array[Filter] = Array.empty[Filter]
+    pushedFilters: Array[Filter] = Array.empty[Filter],
+    packedV2DeleteContext: MilvusPackedV2DeleteContext =
+      MilvusPackedV2DeleteContext.empty
 ) extends PartitionReaderFactory
     with Logging {
 
@@ -140,12 +142,22 @@ class MilvusPartitionReaderFactory(
 
         val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
 
+        val effectiveDeletePlan = MilvusDeletePlan.union(
+          packedV2DeleteContext.inheritedPlansByPartition.getOrElse(
+            p.inheritedDeletePlanPartitionId.getOrElse(Long.MinValue),
+            MilvusDeletePlan.empty
+          ),
+          p.deletePlan
+        )
+
         val underlying = new MilvusPackedV2PartitionReader(
           innerSchema,
           p.columnGroups,
           milvusSchema,
           p.milvusOption,
-          p.neededColumnFieldIds
+          p.neededColumnFieldIds,
+          p.applyDeletes,
+          effectiveDeletePlan
         )
 
         val hasMetadataExtraFields = schema.fieldNames.exists { name =>
@@ -154,8 +166,6 @@ class MilvusPartitionReaderFactory(
 
         if (hasMetadataExtraFields) {
           new PartitionReader[InternalRow] {
-            private var rowOffset: Long = 0L
-
             override def next(): Boolean = underlying.next()
 
             override def get(): InternalRow = {
@@ -172,13 +182,12 @@ class MilvusPartitionReaderFactory(
                   case MilvusOption.MilvusExtraColumnSegmentID =>
                     out(writeIdx) = p.segmentID
                   case MilvusOption.MilvusExtraColumnRowOffset =>
-                    out(writeIdx) = rowOffset
+                    out(writeIdx) = underlying.lastReturnedRowOffset
                   case _ =>
                     out(writeIdx) = row.get(readIdx, field.dataType)
                     readIdx += 1
                 }
               }
-              rowOffset += 1
 
               InternalRow.fromSeq(out.toSeq)
             }

@@ -579,6 +579,7 @@ object MilvusBackfill {
       val allFieldIds = pkFieldId +: extraReadFields.map(_._2)
       options =
         options + (MilvusOption.ReaderFieldIDs -> allFieldIds.mkString(","))
+      options = options + (MilvusOption.ReadApplyDeletes -> "false")
 
       // If snapshot metadata is available, use snapshot-based reading (no client calls)
       snapshotMetadata.foreach { metadata =>
@@ -1352,7 +1353,9 @@ object MilvusBackfill {
         .loadV2Segments(
           metadata.manifestList,
           config.s3BucketName,
-          hadoopConf
+          hadoopConf,
+          manifestSchemaVersion = metadata.manifestSchemaVersion,
+          applyDeletes = false
         ) match {
         case Right(segs) =>
           // Workaround for Milvus snapshot not yet exposing FieldBinlog.child_fields:
