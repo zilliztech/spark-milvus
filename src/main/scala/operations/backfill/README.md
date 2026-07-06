@@ -29,7 +29,7 @@ class for running backfill as a Spark application:
 ```bash
 spark-submit \
   --class com.zilliz.spark.connector.operations.backfill.BackfillApp \
-  spark-connector-assembly.jar \
+  spark-connector-assembly-<branch>-amd64-SNAPSHOT.jar \
   --parquet      s3a://source-bucket/new_fields.parquet \
   --snapshot     s3a://milvus-bucket/snapshots/foo.json \
   --s3-endpoint  s3.us-west-2.amazonaws.com \

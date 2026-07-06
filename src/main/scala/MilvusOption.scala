@@ -165,10 +165,13 @@ object MilvusOption {
   val SnapshotSchemaBytes =
     "milvus.snapshot.schema.bytes" // Base64 encoded protobuf CollectionSchema bytes
   val SnapshotMaxJsonBytes = "milvus.snapshot.max.json.bytes"
+  val ReadApplyDeletes = "milvus.read.apply.deletes"
   val ClientSnapshotName = "milvus.client.snapshot.name"
   val ClientSnapshotDescription = "milvus.client.snapshot.description"
   val ClientSnapshotCompactionProtectionSeconds =
     "milvus.client.snapshot.compaction.protection.seconds"
+  val ClientSnapshotAutoCleanup =
+    "milvus.client.snapshot.auto.cleanup"
 
   private def nonEmptyOption(
       getOption: String => Option[String],
@@ -227,6 +230,54 @@ object MilvusOption {
 
   def validateSnapshotModeOptions(options: CaseInsensitiveStringMap): Unit = {
     validateSnapshotModeOptionsFrom(key => Option(options.get(key)))
+  }
+
+  private def readApplyDeletesFrom(
+      getOption: String => Option[String]
+  ): Boolean = {
+    getOption(ReadApplyDeletes)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(_.equalsIgnoreCase("true"))
+      .getOrElse(true)
+  }
+
+  def readApplyDeletes(options: Map[String, String]): Boolean = {
+    readApplyDeletesFrom { key =>
+      options.collectFirst {
+        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
+          value
+      }
+    }
+  }
+
+  def readApplyDeletes(options: CaseInsensitiveStringMap): Boolean = {
+    readApplyDeletesFrom(key => Option(options.get(key)))
+  }
+
+  private def clientSnapshotAutoCleanupFrom(
+      getOption: String => Option[String]
+  ): Boolean = {
+    getOption(ClientSnapshotAutoCleanup)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(_.equalsIgnoreCase("true"))
+      .getOrElse(true)
+  }
+
+  def clientSnapshotAutoCleanup(options: Map[String, String]): Boolean = {
+    clientSnapshotAutoCleanupFrom { key =>
+      options.collectFirst {
+        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
+          value
+      }
+    }
+  }
+
+  def clientSnapshotAutoCleanup(
+      options: CaseInsensitiveStringMap
+  ): Boolean = {
+    clientSnapshotAutoCleanupFrom(key => Option(options.get(key)))
   }
 
   // Create MilvusOption from a map

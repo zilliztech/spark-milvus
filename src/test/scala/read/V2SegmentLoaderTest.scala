@@ -113,14 +113,19 @@ class V2SegmentLoaderTest
   private def entry(
       segmentId: Long,
       binlogs: Seq[AvroFieldBinlogEntry],
-      storageVersion: Long = 2L
+      storageVersion: Long = 2L,
+      segmentLevel: Long = 2L,
+      partitionId: Long = 10L,
+      deltaLogFiles: Seq[AvroFieldBinlogEntry] = Seq.empty
   ): AvroManifestEntry =
     AvroManifestEntry(
       segmentId = segmentId,
-      partitionId = 10L,
+      partitionId = partitionId,
+      segmentLevel = segmentLevel,
       numOfRows = 100L,
       storageVersion = storageVersion,
-      binlogFiles = binlogs
+      binlogFiles = binlogs,
+      deltaLogFiles = deltaLogFiles
     )
 
   test(
@@ -265,9 +270,110 @@ class V2SegmentLoaderTest
     seg.columnGroups shouldBe empty
   }
 
+  test(
+    "StorageV2 entry with delete metadata keeps segment info when applyDeletes=true"
+  ) {
+    val pq0 = mkTempParquet("v2loader-delete-meta-")
+    try {
+      writeSingleFieldParquet(pq0, "pk", fieldId = 100)
+
+      val manifest = entry(
+        segmentId = 5005L,
+        binlogs = Seq(
+          AvroFieldBinlogEntry(
+            slotFieldId = 100L,
+            binlogs = Seq(AvroBinlogEntry(0L, pq0.toUri.toString, 10L))
+          )
+        ),
+        deltaLogFiles = Seq(
+          AvroFieldBinlogEntry(
+            slotFieldId = 100L,
+            binlogs = Seq(AvroBinlogEntry(9L, "s3a://bucket/delete-1", 1L))
+          )
+        )
+      )
+
+      val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
+        manifest,
+        bucket = "",
+        new Configuration(),
+        applyDeletes = true
+      )
+
+      result shouldBe a[Right[_, _]]
+      val Some(seg) = result.toOption.get
+      seg.segmentId shouldBe 5005L
+      seg.columnGroups.map(_.fieldIds) shouldBe Seq(Seq(100L))
+      seg.deltaLogs shouldBe Seq(
+        V2DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
+      )
+    } finally {
+      Files.deleteIfExists(pq0)
+    }
+  }
+
+  test("StorageV2 L0 segment is skipped when applyDeletes=false") {
+    val manifest = entry(
+      segmentId = 5006L,
+      binlogs = Seq(
+        AvroFieldBinlogEntry(slotFieldId = 100L, binlogs = Seq.empty)
+      ),
+      segmentLevel = 1L
+    )
+
+    val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
+      manifest,
+      bucket = "",
+      new Configuration(),
+      applyDeletes = false
+    )
+
+    result shouldBe Right(None)
+  }
+
+  test("StorageV2 data segment keeps reading when applyDeletes=false") {
+    val pq0 = mkTempParquet("v2loader-ignore-delete-")
+    try {
+      writeSingleFieldParquet(pq0, "pk", fieldId = 100)
+
+      val manifest = entry(
+        segmentId = 5007L,
+        binlogs = Seq(
+          AvroFieldBinlogEntry(
+            slotFieldId = 100L,
+            binlogs = Seq(AvroBinlogEntry(0L, pq0.toUri.toString, 10L))
+          )
+        ),
+        deltaLogFiles = Seq(
+          AvroFieldBinlogEntry(
+            slotFieldId = 100L,
+            binlogs = Seq(AvroBinlogEntry(9L, "s3a://bucket/delete-1", 1L))
+          )
+        )
+      )
+
+      val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
+        manifest,
+        bucket = "",
+        new Configuration(),
+        applyDeletes = false
+      )
+
+      result shouldBe a[Right[_, _]]
+      val Some(seg) = result.toOption.get
+      seg.segmentId shouldBe 5007L
+      seg.columnGroups.map(_.fieldIds) shouldBe Seq(Seq(100L))
+      seg.deltaLogs shouldBe Seq(
+        V2DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
+      )
+    } finally {
+      Files.deleteIfExists(pq0)
+    }
+  }
+
   test("non-StorageV2 entry is skipped (returns Right(None))") {
     val manifest = entry(
-      segmentId = 5005L,
+      segmentId = 5008L,
       binlogs = Seq.empty,
       storageVersion = 3L // V3
     )

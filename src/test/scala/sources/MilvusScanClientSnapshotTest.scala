@@ -39,6 +39,7 @@ import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
   Collection,
   CollectionSchema,
+  MilvusDeletePlan,
   MilvusPackedV2InputPartition,
   MilvusSnapshotReader,
   MilvusStorageV3InputPartition,
@@ -325,6 +326,21 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       MilvusScan.snapshotS3BucketForRelativePaths(
         "files/snapshots/1/metadata/2.json",
         Map(Properties.FsConfig.FsBucketName -> "connector-bucket")
+      ) == Some("connector-bucket")
+    )
+  }
+
+  test("snapshotS3BucketForRelativePaths accepts connector bucket aliases") {
+    assert(
+      MilvusScan.snapshotS3BucketForRelativePaths(
+        "files/snapshots/1/metadata/2.json",
+        Map(MilvusOption.FsBucketName -> "connector-bucket")
+      ) == Some("connector-bucket")
+    )
+    assert(
+      MilvusScan.snapshotS3BucketForRelativePaths(
+        "files/snapshots/1/metadata/2.json",
+        Map(MilvusOption.S3BucketName -> "connector-bucket")
       ) == Some("connector-bucket")
     )
   }
@@ -842,6 +858,21 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       MilvusOption.ClientSnapshotCompactionProtectionSeconds ==
         "milvus.client.snapshot.compaction.protection.seconds"
     )
+    assert(
+      MilvusOption.ClientSnapshotAutoCleanup ==
+        "milvus.client.snapshot.auto.cleanup"
+    )
+  }
+
+  test("clientSnapshotAutoCleanup defaults to true and parses false") {
+    assert(
+      MilvusOption.clientSnapshotAutoCleanup(Map.empty[String, String])
+    )
+    assert(
+      !MilvusOption.clientSnapshotAutoCleanup(
+        Map(MilvusOption.ClientSnapshotAutoCleanup -> "false")
+      )
+    )
   }
 
   test("parsePositiveLongOption rejects non-numeric and non-positive values") {
@@ -1033,11 +1064,17 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(firstPartitions eq secondPartitions)
   }
 
-  test("client mode does not cache planned input partitions") {
+  test("client snapshot fast path caches planned input partitions") {
     val clientOptions = new ju.HashMap[String, String]()
     clientOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
     clientOptions.put(MilvusOption.MilvusCollectionName, "c")
-    assert(!scanWithOptions(clientOptions).shouldCacheInputPartitions)
+    assert(scanWithOptions(clientOptions).shouldCacheInputPartitions)
+
+    val partitionScopedOptions = new ju.HashMap[String, String]()
+    partitionScopedOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
+    partitionScopedOptions.put(MilvusOption.MilvusCollectionName, "c")
+    partitionScopedOptions.put(MilvusOption.MilvusPartitionName, "p1")
+    assert(!scanWithOptions(partitionScopedOptions).shouldCacheInputPartitions)
 
     val snapshotOptions = new ju.HashMap[String, String]()
     snapshotOptions.put(MilvusOption.SnapshotMode, "true")
@@ -1137,6 +1174,34 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     val partition = partitions.head.asInstanceOf[MilvusPackedV2InputPartition]
     assert(partition.segmentID == 30L)
     assert(partition.partitionID == 20L)
+  }
+
+  test(
+    "snapshot planner keeps inherited delete plan reference out of per-segment plan"
+  ) {
+    val inherited = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
+    val segmentPlan = MilvusDeletePlan.fromLongPks(Map(9L -> 200L))
+    val partition = MilvusPackedV2InputPartition(
+      segmentID = 30L,
+      partitionID = 20L,
+      columnGroups = Seq(
+        V2ColumnGroup(
+          fieldIds = Seq(100L, 1L),
+          filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+          fileRowCounts = Seq(1L)
+        )
+      ),
+      milvusSchemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      milvusOption = MilvusOption(
+        new CaseInsensitiveStringMap(new ju.HashMap[String, String]())
+      ),
+      deletePlan = segmentPlan,
+      inheritedDeletePlanPartitionId = Some(20L)
+    )
+
+    assert(partition.deletePlan == segmentPlan)
+    assert(partition.inheritedDeletePlanPartitionId.contains(20L))
+    assert(inherited.containsLongPk(7L, 50L))
   }
 }
 
