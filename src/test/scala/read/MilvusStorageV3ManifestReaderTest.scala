@@ -1,10 +1,12 @@
 package com.zilliz.spark.connector.read
 
 import java.io.ByteArrayOutputStream
+import java.nio.file.Files
 
 import org.apache.avro.file.DataFileWriter
 import org.apache.avro.generic.{GenericData, GenericDatumWriter, GenericRecord}
 import org.apache.avro.Schema
+import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -70,6 +72,21 @@ class MilvusStorageV3ManifestReaderTest extends AnyFunSuite with Matchers {
       "files/insert_log/10/20/30",
       "s3://bucket/files/insert_log/10/20/30/_delta/9001"
     ) shouldBe "s3a://bucket/files/insert_log/10/20/30/_delta/9001"
+  }
+
+  test("latestManifestVersion returns greatest StorageV3 manifest version") {
+    val basePath = Files.createTempDirectory("milvus-v3-manifest-test")
+    val metadataPath = Files.createDirectory(basePath.resolve("_metadata"))
+    Files.createFile(metadataPath.resolve("manifest-2.avro"))
+    Files.createFile(metadataPath.resolve("manifest-11.avro"))
+    Files.createFile(metadataPath.resolve("manifest-not-a-version.avro"))
+    Files.createFile(metadataPath.resolve("other"))
+
+    MilvusStorageV3ManifestReader.latestManifestVersion(
+      basePath.toString,
+      "",
+      new Configuration()
+    ) shouldBe Right(11L)
   }
 
   private def writeManifest(

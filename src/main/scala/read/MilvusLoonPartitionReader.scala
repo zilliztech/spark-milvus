@@ -39,6 +39,8 @@ import io.milvus.storage.{
 }
 
 object MilvusLoonPartitionReader {
+  private[read] val TimestampColumnName = "1"
+
   private[read] val SystemFieldAliases: Seq[(String, Long)] = Seq(
     "RowID" -> 0L,
     "row_id" -> 0L,
@@ -379,7 +381,9 @@ class MilvusLoonPartitionReader(
         s"StorageV3 delete filtering requires PK column $pkColumnName to be loaded"
       )
     }
-    val rawTsVector = batch.getVector("Timestamp")
+    val rawTsVector = batch.getVector(
+      MilvusLoonPartitionReader.TimestampColumnName
+    )
     if (rawTsVector == null) {
       throw new IllegalStateException(
         "StorageV3 delete filtering requires Timestamp column to be loaded"
@@ -459,7 +463,10 @@ class MilvusLoonPartitionReader(
             "StorageV3 delete filtering requires a primary key field"
           )
         )
-      (requested ++ Seq(pkId, "1")).distinct
+      (requested ++ Seq(
+        pkId,
+        MilvusLoonPartitionReader.TimestampColumnName
+      )).distinct
     }
   }
 

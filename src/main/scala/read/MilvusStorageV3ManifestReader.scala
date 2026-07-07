@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector.read
 
 import java.io.ByteArrayInputStream
+import java.net.URI
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
@@ -8,9 +9,11 @@ import org.apache.avro.file.DataFileStream
 import org.apache.avro.generic.{GenericDatumReader, GenericRecord}
 import org.apache.avro.util.Utf8
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{FileSystem, Path}
 
 object MilvusStorageV3ManifestReader {
   private val PrimaryKeyDeltaLogType = 0
+  private val ManifestFileName = """manifest-(\d+)\.avro""".r
 
   def loadDeltaLogs(
       basePath: String,
@@ -40,6 +43,52 @@ object MilvusStorageV3ManifestReader {
       )
     }
     s"${basePath.stripSuffix("/")}/_metadata/manifest-$readVersion.avro"
+  }
+
+  private[connector] def latestManifestVersion(
+      basePath: String,
+      bucket: String,
+      hadoopConf: Configuration
+  ): Either[Throwable, Long] = {
+    var uri: URI = null
+    var fs: FileSystem = null
+    try {
+      val metadataPath = V2SegmentLoader.resolvePath(
+        s"${basePath.stripSuffix("/")}/_metadata",
+        bucket
+      )
+      uri = new URI(metadataPath)
+      fs = FileSystem.get(uri, hadoopConf)
+      val path = new Path(uri)
+      if (!fs.exists(path)) {
+        Right(0L)
+      } else {
+        Right(
+          fs.listStatus(path)
+            .iterator
+            .flatMap(status =>
+              status.getPath.getName match {
+                case ManifestFileName(version) => Some(version.toLong)
+                case _                         => None
+              }
+            )
+            .foldLeft(0L)(math.max)
+        )
+      }
+    } catch {
+      case NonFatal(e) => Left(e)
+    } finally {
+      Option(uri).flatMap(uri => Option(uri.getScheme)).foreach { scheme =>
+        if (
+          fs != null && hadoopConf.getBoolean(
+            s"fs.$scheme.impl.disable.cache",
+            false
+          )
+        ) {
+          fs.close()
+        }
+      }
+    }
   }
 
   private[read] def parseDeltaLogs(

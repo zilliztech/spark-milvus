@@ -13,6 +13,10 @@ import com.zilliz.spark.connector.FloatConverter
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class MilvusLoonPartitionReaderTest extends AnyFunSuite {
+  test("delete filtering uses field-id column name for timestamp") {
+    assert(MilvusLoonPartitionReader.TimestampColumnName == "1")
+  }
+
   test("buildFieldNameToId exposes non-conflicting system aliases") {
     val schema = CollectionSchema(
       fields = Seq(

@@ -68,6 +68,7 @@ import com.zilliz.spark.connector.read.{
   MilvusStorageV3ManifestReader,
   SnapshotMetadata,
   StorageV2ManifestItem,
+  V2DeltaLogFile,
   V2SegmentInfo,
   V2SegmentLoader
 }
@@ -740,6 +741,18 @@ object MilvusScan extends Logging {
     "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
   private val SimpleAwsCredentialsProvider =
     "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+
+  private[sources] case class V3DeletePlanning(
+      deletePlans: Map[
+        Long,
+        com.zilliz.spark.connector.read.MilvusDeletePlan
+      ],
+      readVersions: Map[Long, Long]
+  )
+
+  private[sources] object V3DeletePlanning {
+    val empty: V3DeletePlanning = V3DeletePlanning(Map.empty, Map.empty)
+  }
 
   private def daemonThreadFactory(namePrefix: String): ThreadFactory =
     new ThreadFactory {
@@ -1564,8 +1577,8 @@ class MilvusScan(
     val schemaBytes = MilvusSnapshotReader.toProtobufSchemaBytes(
       metadata.collection.schema
     )
-    val v3DeletePlans =
-      loadV3DeletePlans(
+    val v3DeletePlanning =
+      loadV3DeletePlanning(
         storageV2ManifestList,
         schemaBytes,
         snapshotBucket,
@@ -1623,7 +1636,8 @@ class MilvusScan(
         .map(_.toString)
         .getOrElse("0"),
       schemaBytes = schemaBytes,
-      v3DeletePlans = v3DeletePlans,
+      v3DeletePlans = v3DeletePlanning.deletePlans,
+      v3ReadVersions = v3DeletePlanning.readVersions,
       v2Segments = v2Segments,
       v2DeletePlans = v2DeletePlans,
       inheritedDeletePlansByPartition = inheritedDeletePlansByPartition,
@@ -1879,68 +1893,100 @@ class MilvusScan(
     }
   }
 
-  private def loadV3DeletePlans(
+  private def loadV3DeletePlanning(
       manifestList: Seq[StorageV2ManifestItem],
       schemaBytes: Array[Byte],
       snapshotBucket: Option[String],
       hadoopConf: Configuration,
       errorContext: String
-  ): Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan] = {
+  ): MilvusScan.V3DeletePlanning = {
     val applyDeletes = MilvusOption.readApplyDeletes(options)
     if (!applyDeletes || manifestList.isEmpty) {
-      Map.empty
+      MilvusScan.V3DeletePlanning.empty
     } else {
       val pkField = CollectionSchema
         .parseFrom(schemaBytes)
         .fields
         .find(_.isPrimaryKey)
       if (pkField.isEmpty) {
-        return Map.empty
+        return MilvusScan.V3DeletePlanning.empty
       }
 
-      manifestList.flatMap { item =>
-        val (basePath, readVersion) =
+      val entries = manifestList.flatMap { item =>
+        val (basePath, requestedReadVersion) =
           MilvusSnapshotReader.parseManifestContent(item.manifest) match {
             case Right(content) => (content.basePath, content.ver.toLong)
             case Left(_)        => (item.manifest, -1L)
           }
         val segmentId = MilvusScan.segmentIdForManifestItem(item, basePath)
-        if (segmentId == 0L || readVersion <= 0L) {
+        if (segmentId == 0L) {
           None
         } else {
-          val deltaLogs =
-            MilvusStorageV3ManifestReader.loadDeltaLogs(
-              basePath,
-              readVersion,
-              snapshotBucket.getOrElse(""),
-              hadoopConf
-            ) match {
-              case Right(logs) => logs
-              case Left(err) =>
-                throw new IllegalStateException(
-                  s"Failed to load StorageV3 manifest delete logs from $errorContext for segment $segmentId: ${err.getMessage}",
-                  err
-                )
+          val readVersion: Long =
+            if (requestedReadVersion > 0L) {
+              requestedReadVersion
+            } else {
+              MilvusStorageV3ManifestReader.latestManifestVersion(
+                basePath,
+                snapshotBucket.getOrElse(""),
+                hadoopConf
+              ) match {
+                case Right(version) => version
+                case Left(err) =>
+                  throw new IllegalStateException(
+                    s"Failed to resolve latest StorageV3 manifest version from $errorContext for segment $segmentId: ${err.getMessage}",
+                    err
+                  )
+              }
             }
-          if (deltaLogs.isEmpty) {
+          if (readVersion <= 0L) {
             None
           } else {
-            MilvusDeltaLogReader.loadDeletePlan(
-              deltaLogs,
-              pkField.get,
-              snapshotBucket.getOrElse(""),
-              hadoopConf
-            ) match {
-              case Right(plan) => Some(segmentId -> plan)
-              case Left(err) =>
-                throw new IllegalStateException(
-                  s"Failed to decode StorageV3 manifest delete logs from $errorContext for segment $segmentId: ${err.getMessage}",
-                  err
-                )
-            }
+            val deltaLogs: Seq[V2DeltaLogFile] =
+              MilvusStorageV3ManifestReader.loadDeltaLogs(
+                basePath,
+                readVersion,
+                snapshotBucket.getOrElse(""),
+                hadoopConf
+              ) match {
+                case Right(logs) => logs
+                case Left(err) =>
+                  throw new IllegalStateException(
+                    s"Failed to load StorageV3 manifest delete logs from $errorContext for segment $segmentId: ${err.getMessage}",
+                    err
+                  )
+              }
+            val deletePlan
+                : Option[com.zilliz.spark.connector.read.MilvusDeletePlan] =
+              if (deltaLogs.isEmpty) {
+                None
+              } else {
+                MilvusDeltaLogReader.loadDeletePlan(
+                  deltaLogs,
+                  pkField.get,
+                  snapshotBucket.getOrElse(""),
+                  hadoopConf
+                ) match {
+                  case Right(plan) => Some(plan)
+                  case Left(err) =>
+                    throw new IllegalStateException(
+                      s"Failed to decode StorageV3 manifest delete logs from $errorContext for segment $segmentId: ${err.getMessage}",
+                      err
+                    )
+                }
+              }
+            Some((segmentId, readVersion, deletePlan))
           }
         }
-      }.toMap
+      }
+      MilvusScan.V3DeletePlanning(
+        deletePlans = entries.flatMap { case (segmentId, _, deletePlan) =>
+          deletePlan.map(segmentId -> _)
+        }.toMap,
+        readVersions = entries.map { case (segmentId, readVersion, _) =>
+          segmentId -> readVersion
+        }.toMap
+      )
     }
   }
 
@@ -1952,6 +1998,7 @@ class MilvusScan(
         Long,
         com.zilliz.spark.connector.read.MilvusDeletePlan
       ] = Map.empty,
+      v3ReadVersions: Map[Long, Long] = Map.empty,
       v2Segments: Seq[V2SegmentInfo],
       v2DeletePlans: Map[
         Long,
@@ -1976,7 +2023,7 @@ class MilvusScan(
       .getOrElse(milvusOption)
 
     val v3Partitions = manifestList.map { item =>
-      val (basePath, readVersion) =
+      val (basePath, parsedReadVersion) =
         MilvusSnapshotReader.parseManifestContent(item.manifest) match {
           case Right(content) => (content.basePath, content.ver.toLong)
           case Left(_)        => (item.manifest, -1L)
@@ -1984,6 +2031,7 @@ class MilvusScan(
 
       val pathParts = basePath.split("/").filter(_.nonEmpty)
       val segmentID = MilvusScan.segmentIdForManifestItem(item, basePath)
+      val readVersion = v3ReadVersions.getOrElse(segmentID, parsedReadVersion)
       val insertLogIdx = pathParts.lastIndexOf("insert_log")
       val partitionId =
         if (insertLogIdx >= 0 && pathParts.length > insertLogIdx + 3) {
@@ -2169,8 +2217,8 @@ class MilvusScan(
       MilvusScan.connectorS3BucketOption(options.asScala.toMap)
 
     val snapshotHadoopConf = buildSnapshotHadoopConf("")
-    val v3DeletePlans =
-      loadV3DeletePlans(
+    val v3DeletePlanning =
+      loadV3DeletePlanning(
         manifestList,
         schemaBytes,
         snapshotBucket = snapshotBucketForRelativePaths,
@@ -2227,7 +2275,8 @@ class MilvusScan(
       manifestList = manifestList,
       defaultPartitionId = defaultPartitionId,
       schemaBytes = schemaBytes,
-      v3DeletePlans = v3DeletePlans,
+      v3DeletePlans = v3DeletePlanning.deletePlans,
+      v3ReadVersions = v3DeletePlanning.readVersions,
       v2Segments = v2Segments,
       v2DeletePlans = v2DeletePlans,
       inheritedDeletePlansByPartition = inheritedDeletePlansByPartition

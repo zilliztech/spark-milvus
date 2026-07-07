@@ -1170,6 +1170,28 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(partition.applyDeletes)
   }
 
+  test(
+    "snapshot planner pins StorageV3 raw manifest path to resolved version"
+  ) {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq(
+        StorageV2ManifestItem(
+          30L,
+          "files/insert_log/10/20/30"
+        )
+      ),
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v3ReadVersions = Map(30L -> 11L),
+      v2Segments = Seq.empty,
+      v2DeletePlans = Map.empty
+    )
+
+    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
+    assert(partition.readVersion == 11L)
+  }
+
   test("snapshot planner applies inherited L0 delete plans to StorageV3") {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
     val v3Plan = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
