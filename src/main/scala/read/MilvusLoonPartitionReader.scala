@@ -4,7 +4,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
-import org.apache.arrow.vector.VectorSchemaRoot
+import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
 import org.apache.spark.internal.Logging
 import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.sql.catalyst.InternalRow
@@ -28,7 +28,7 @@ import com.zilliz.spark.connector.{FloatConverter, MilvusOption}
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
-import io.milvus.grpc.schema.{CollectionSchema, DataType}
+import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 import io.milvus.storage.{
   ArrowUtils,
   LatestColumnGroupsResult,
@@ -39,6 +39,8 @@ import io.milvus.storage.{
 }
 
 object MilvusLoonPartitionReader {
+  private[read] val TimestampColumnName = "1"
+
   private[read] val SystemFieldAliases: Seq[(String, Long)] = Seq(
     "RowID" -> 0L,
     "row_id" -> 0L,
@@ -139,7 +141,9 @@ class MilvusLoonPartitionReader(
     vectorColumn: Option[String] = None,
     pushedFilters: Array[Filter] = Array.empty[Filter],
     readVersion: Long =
-      -1L // -1 = LATEST, >0 = specific manifest version from snapshot
+      -1L, // -1 = LATEST, >0 = specific manifest version from snapshot
+    applyDeletes: Boolean = true,
+    deletePlan: MilvusDeletePlan = MilvusDeletePlan.empty
 ) extends PartitionReader[InternalRow]
     with Logging {
 
@@ -155,6 +159,10 @@ class MilvusLoonPartitionReader(
 
   private val fieldNameToIdString: Map[String, String] =
     fieldNameToId.map { case (name, id) => name -> id.toString }
+
+  private val pkField: Option[FieldSchema] =
+    milvusSchema.fields.find(_.isPrimaryKey)
+  private val pkColumnName = pkField.map(_.fieldID.toString).getOrElse("")
 
   private val columnNames = getColumnNames()
 
@@ -283,6 +291,14 @@ class MilvusLoonPartitionReader(
         if (
           _currentBatch != null && _currentRowIndex < _currentBatch.getRowCount
         ) {
+          if (
+            applyDeletes && !deletePlan.isEmpty && isDeleted(
+              _currentBatch,
+              _currentRowIndex
+            )
+          ) {
+            _currentRowIndex += 1
+          } else
           // If we have filters, check if current row passes
           if (pushedFilters.nonEmpty) {
             val row = ArrowConverter.arrowToInternalRow(
@@ -353,6 +369,36 @@ class MilvusLoonPartitionReader(
 
   override def close(): Unit = releaseAll()
 
+  private def isDeleted(batch: VectorSchemaRoot, rowIndex: Int): Boolean = {
+    val pk = pkField.getOrElse {
+      throw new IllegalArgumentException(
+        "StorageV3 delete filtering requires a primary key field"
+      )
+    }
+    val pkVector = batch.getVector(pkColumnName)
+    if (pkVector == null) {
+      throw new IllegalStateException(
+        s"StorageV3 delete filtering requires PK column $pkColumnName to be loaded"
+      )
+    }
+    val rawTsVector = batch.getVector(
+      MilvusLoonPartitionReader.TimestampColumnName
+    )
+    if (rawTsVector == null) {
+      throw new IllegalStateException(
+        "StorageV3 delete filtering requires Timestamp column to be loaded"
+      )
+    }
+    MilvusPackedV2PartitionReader.rowDeleted(
+      deletePlan,
+      pk,
+      pkVector,
+      rawTsVector.asInstanceOf[BigIntVector],
+      rowIndex,
+      pkColumnName
+    )
+  }
+
   // Each native resource is released in its own try-catch so one failing
   // release doesn't strand the rest. Null/zero sentinels make this
   // idempotent — safe to call from both close() and the ctor rollback
@@ -404,8 +450,23 @@ class MilvusLoonPartitionReader(
   private def getColumnNames(): Array[String] = {
     // Convert column names to field IDs for manifest/reader matching.
     // System fields are mapped to Milvus field IDs 0 and 1 and requested from storage.
-    sourceSchema.fieldNames.flatMap { name =>
+    val requested = sourceSchema.fieldNames.flatMap { name =>
       fieldNameToId.get(name).map(_.toString)
+    }
+    if (!applyDeletes || deletePlan.isEmpty) {
+      requested
+    } else {
+      val pkId = pkField
+        .map(_.fieldID.toString)
+        .getOrElse(
+          throw new IllegalArgumentException(
+            "StorageV3 delete filtering requires a primary key field"
+          )
+        )
+      (requested ++ Seq(
+        pkId,
+        MilvusLoonPartitionReader.TimestampColumnName
+      )).distinct
     }
   }
 
@@ -469,50 +530,52 @@ class MilvusLoonPartitionReader(
 
       // Process each row in batch
       for (i <- 0 until batchSize) {
-        val row = ArrowConverter.arrowToInternalRow(
-          batch,
-          i,
-          sourceSchema,
-          fieldNameToIdString
-        )
-
-        // Extract vector from row
-        val vector =
-          try {
-            extractVectorFromRow(
-              row,
-              vectorColIndex,
-              sourceSchema(vectorColIndex).dataType
-            )
-          } catch {
-            case e: Exception =>
-              logWarning(
-                s"Failed to extract vector from row $rowCount: ${e.getMessage}"
-              )
-              null
-          }
-
-        if (vector != null) {
-          val distance = calculateDistance(qv, vector, metric)
-          val result = MilvusLoonPartitionReader.VectorSearchResult(
-            row.copy(),
-            distance,
-            rowCount
+        if (!(applyDeletes && !deletePlan.isEmpty && isDeleted(batch, i))) {
+          val row = ArrowConverter.arrowToInternalRow(
+            batch,
+            i,
+            sourceSchema,
+            fieldNameToIdString
           )
 
-          if (heap.size < k) {
-            heap.enqueue(result)
-          } else {
-            val worst = heap.head
-            val shouldReplace = metric match {
-              case "L2"            => distance < worst.distance
-              case "IP" | "COSINE" => distance > worst.distance
-              case _               => distance < worst.distance
+          // Extract vector from row
+          val vector =
+            try {
+              extractVectorFromRow(
+                row,
+                vectorColIndex,
+                sourceSchema(vectorColIndex).dataType
+              )
+            } catch {
+              case e: Exception =>
+                logWarning(
+                  s"Failed to extract vector from row $rowCount: ${e.getMessage}"
+                )
+                null
             }
 
-            if (shouldReplace) {
-              heap.dequeue()
+          if (vector != null) {
+            val distance = calculateDistance(qv, vector, metric)
+            val result = MilvusLoonPartitionReader.VectorSearchResult(
+              row.copy(),
+              distance,
+              rowCount
+            )
+
+            if (heap.size < k) {
               heap.enqueue(result)
+            } else {
+              val worst = heap.head
+              val shouldReplace = metric match {
+                case "L2"            => distance < worst.distance
+                case "IP" | "COSINE" => distance > worst.distance
+                case _               => distance < worst.distance
+              }
+
+              if (shouldReplace) {
+                heap.dequeue()
+                heap.enqueue(result)
+              }
             }
           }
         }

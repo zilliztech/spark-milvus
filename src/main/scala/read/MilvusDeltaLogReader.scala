@@ -99,7 +99,7 @@ object MilvusDeltaLogReader extends Logging {
     ).map(_.toMap)
   }
 
-  private[read] def effectiveInheritedDeletePlan(
+  private[connector] def effectiveInheritedDeletePlan(
       partitionId: Long,
       inheritedPlansByPartition: Map[Long, MilvusDeletePlan]
   ): MilvusDeletePlan = {
@@ -114,7 +114,7 @@ object MilvusDeltaLogReader extends Logging {
     MilvusDeletePlan.union(collectionWidePlan, partitionPlan)
   }
 
-  private[read] def inheritedDeletePlanPartitionMarker(
+  private[connector] def inheritedDeletePlanPartitionMarker(
       partitionId: Long,
       inheritedPlansByPartition: Map[Long, MilvusDeletePlan]
   ): Option[Long] =

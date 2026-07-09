@@ -55,4 +55,29 @@ class MilvusDeltaLogReaderTest extends AnyFunSuite with Matchers {
     merged.containsLongPk(7L, 250L) shouldBe false
     merged.containsLongPk(8L, 140L) shouldBe true
   }
+
+  test("collection-wide L0 delete plan applies to every partition") {
+    val inheritedPlansByPartition = Map(
+      -1L -> MilvusDeletePlan.fromLongPks(Map(7L -> 100L)),
+      10L -> MilvusDeletePlan.fromLongPks(Map(9L -> 200L))
+    )
+
+    val partition10Plan = MilvusDeltaLogReader.effectiveInheritedDeletePlan(
+      10L,
+      inheritedPlansByPartition
+    )
+    val partition11Plan = MilvusDeltaLogReader.effectiveInheritedDeletePlan(
+      11L,
+      inheritedPlansByPartition
+    )
+
+    partition10Plan.containsLongPk(7L, 50L) shouldBe true
+    partition10Plan.containsLongPk(9L, 150L) shouldBe true
+    partition11Plan.containsLongPk(7L, 50L) shouldBe true
+    partition11Plan.containsLongPk(9L, 150L) shouldBe false
+    MilvusDeltaLogReader.inheritedDeletePlanPartitionMarker(
+      11L,
+      inheritedPlansByPartition
+    ) shouldBe Some(11L)
+  }
 }

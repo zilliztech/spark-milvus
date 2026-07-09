@@ -89,7 +89,9 @@ class MilvusPartitionReaderFactory(
           p.metricType,
           p.vectorColumn,
           pushedFilters,
-          p.readVersion
+          p.readVersion,
+          p.applyDeletes,
+          p.deletePlan
         )
 
         val hasMetadataExtraFields = schema.fieldNames.exists { name =>
@@ -142,13 +144,16 @@ class MilvusPartitionReaderFactory(
 
         val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
 
-        val effectiveDeletePlan = MilvusDeletePlan.union(
-          packedV2DeleteContext.inheritedPlansByPartition.getOrElse(
-            p.inheritedDeletePlanPartitionId.getOrElse(Long.MinValue),
-            MilvusDeletePlan.empty
-          ),
-          p.deletePlan
-        )
+        val inheritedDeletePlan = p.inheritedDeletePlanPartitionId
+          .map(partitionId =>
+            MilvusDeltaLogReader.effectiveInheritedDeletePlan(
+              partitionId,
+              packedV2DeleteContext.inheritedPlansByPartition
+            )
+          )
+          .getOrElse(MilvusDeletePlan.empty)
+        val effectiveDeletePlan =
+          MilvusDeletePlan.union(inheritedDeletePlan, p.deletePlan)
 
         val underlying = new MilvusPackedV2PartitionReader(
           innerSchema,
