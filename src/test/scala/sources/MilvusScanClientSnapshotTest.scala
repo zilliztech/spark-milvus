@@ -1147,6 +1147,87 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(partition.readVersion == 7L)
   }
 
+  test("snapshot planner attaches StorageV3 manifest delete plans") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val deletePlan = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq(
+        StorageV2ManifestItem(
+          30L,
+          "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
+        )
+      ),
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v3DeletePlans = Map(30L -> deletePlan),
+      v2Segments = Seq.empty,
+      v2DeletePlans = Map.empty
+    )
+
+    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
+    assert(partition.segmentID == 30L)
+    assert(partition.deletePlan == deletePlan)
+    assert(partition.applyDeletes)
+  }
+
+  test(
+    "snapshot planner pins StorageV3 raw manifest path to resolved version"
+  ) {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq(
+        StorageV2ManifestItem(
+          30L,
+          "files/insert_log/10/20/30"
+        )
+      ),
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v3ReadVersions = Map(30L -> 11L),
+      v2Segments = Seq.empty,
+      v2DeletePlans = Map.empty
+    )
+
+    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
+    assert(partition.readVersion == 11L)
+  }
+
+  test("snapshot planner applies inherited L0 delete plans to StorageV3") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val v3Plan = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
+    val inheritedPlans = Map(
+      -1L -> MilvusDeletePlan.fromLongPks(Map(8L -> 120L)),
+      20L -> MilvusDeletePlan.fromLongPks(Map(9L -> 140L))
+    )
+
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq(
+        StorageV2ManifestItem(
+          30L,
+          "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
+        ),
+        StorageV2ManifestItem(
+          31L,
+          "{\"ver\":7,\"base_path\":\"files/insert_log/10/21/31\"}"
+        )
+      ),
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v3DeletePlans = Map(30L -> v3Plan),
+      v2Segments = Seq.empty,
+      v2DeletePlans = Map.empty,
+      inheritedDeletePlansByPartition = inheritedPlans
+    )
+
+    val first = partitions(0).asInstanceOf[MilvusStorageV3InputPartition]
+    val second = partitions(1).asInstanceOf[MilvusStorageV3InputPartition]
+    assert(first.deletePlan.containsLongPk(7L, 50L))
+    assert(first.deletePlan.containsLongPk(8L, 100L))
+    assert(first.deletePlan.containsLongPk(9L, 130L))
+    assert(second.deletePlan.containsLongPk(8L, 100L))
+    assert(!second.deletePlan.containsLongPk(9L, 130L))
+  }
+
   test("snapshot planner accepts V2-only snapshot segments") {
     val v2Json = MilvusSnapshotReader.serializeV2Segments(
       Seq(
@@ -1202,6 +1283,118 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(partition.deletePlan == segmentPlan)
     assert(partition.inheritedDeletePlanPartitionId.contains(20L))
     assert(inherited.containsLongPk(7L, 50L))
+  }
+
+  test(
+    "snapshot partition planning marks collection-wide L0 deletes for every partition"
+  ) {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val inheritedPlans = Map(
+      -1L -> MilvusDeletePlan.fromLongPks(Map(7L -> 100L)),
+      20L -> MilvusDeletePlan.fromLongPks(Map(8L -> 120L))
+    )
+    val ownPlan = MilvusDeletePlan.fromLongPks(Map(9L -> 140L))
+
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq.empty,
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v2Segments = Seq(
+        V2SegmentInfo(
+          segmentId = 30L,
+          partitionId = 20L,
+          numOfRows = 1L,
+          storageVersion = 2L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              fieldIds = Seq(100L),
+              filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+              fileRowCounts = Seq(1L)
+            )
+          )
+        ),
+        V2SegmentInfo(
+          segmentId = 31L,
+          partitionId = 21L,
+          numOfRows = 1L,
+          storageVersion = 2L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              fieldIds = Seq(100L),
+              filePaths = Seq("files/insert_log/10/21/31/100/1.parquet"),
+              fileRowCounts = Seq(1L)
+            )
+          )
+        )
+      ),
+      v2DeletePlans = Map(30L -> ownPlan),
+      inheritedDeletePlansByPartition = inheritedPlans
+    )
+
+    val first = partitions(0).asInstanceOf[MilvusPackedV2InputPartition]
+    val second = partitions(1).asInstanceOf[MilvusPackedV2InputPartition]
+    assert(first.deletePlan == ownPlan)
+    assert(first.inheritedDeletePlanPartitionId.contains(20L))
+    assert(second.deletePlan == MilvusDeletePlan.empty)
+    assert(second.inheritedDeletePlanPartitionId.contains(21L))
+  }
+
+  test(
+    "client snapshot partition planning inlines inherited L0 deletes into V2 partition plans"
+  ) {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val inheritedPlans = Map(
+      -1L -> MilvusDeletePlan.fromLongPks(Map(7L -> 100L)),
+      20L -> MilvusDeletePlan.fromLongPks(Map(8L -> 120L))
+    )
+    val ownPlan = MilvusDeletePlan.fromLongPks(Map(9L -> 140L))
+
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq.empty,
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v2Segments = Seq(
+        V2SegmentInfo(
+          segmentId = 30L,
+          partitionId = 20L,
+          numOfRows = 1L,
+          storageVersion = 2L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              fieldIds = Seq(100L),
+              filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+              fileRowCounts = Seq(1L)
+            )
+          )
+        ),
+        V2SegmentInfo(
+          segmentId = 31L,
+          partitionId = 21L,
+          numOfRows = 1L,
+          storageVersion = 2L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              fieldIds = Seq(100L),
+              filePaths = Seq("files/insert_log/10/21/31/100/1.parquet"),
+              fileRowCounts = Seq(1L)
+            )
+          )
+        )
+      ),
+      v2DeletePlans = Map(30L -> ownPlan),
+      inheritedDeletePlansByPartition = inheritedPlans,
+      inlineInheritedDeletePlans = true
+    )
+
+    val first = partitions(0).asInstanceOf[MilvusPackedV2InputPartition]
+    val second = partitions(1).asInstanceOf[MilvusPackedV2InputPartition]
+    assert(first.inheritedDeletePlanPartitionId.isEmpty)
+    assert(first.deletePlan.containsLongPk(7L, 50L))
+    assert(first.deletePlan.containsLongPk(8L, 100L))
+    assert(first.deletePlan.containsLongPk(9L, 130L))
+    assert(second.inheritedDeletePlanPartitionId.isEmpty)
+    assert(second.deletePlan.containsLongPk(7L, 50L))
+    assert(!second.deletePlan.containsLongPk(8L, 100L))
   }
 }
 
