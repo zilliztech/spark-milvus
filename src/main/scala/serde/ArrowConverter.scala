@@ -205,7 +205,11 @@ object ArrowConverter extends Logging {
             v.get(rowIndex)
           case v: FixedSizeBinaryVector =>
             milvusType match {
-              case Some(MilvusDataType.BinaryVector) =>
+              case Some(
+                    MilvusDataType.BinaryVector | MilvusDataType.FloatVector |
+                    MilvusDataType.Float16Vector |
+                    MilvusDataType.BFloat16Vector | MilvusDataType.Int8Vector
+                  ) =>
                 v.get(rowIndex)
               case Some(other) =>
                 throw new IllegalArgumentException(
@@ -213,7 +217,7 @@ object ArrowConverter extends Logging {
                 )
               case None =>
                 throw new IllegalArgumentException(
-                  s"FixedSizeBinary binary vectors require ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
+                  s"FixedSizeBinary vectors require ${MilvusDataTypeMetadataKey} metadata"
                 )
             }
           case other =>
@@ -331,6 +335,7 @@ object ArrowConverter extends Logging {
   }
 
   val MilvusDataTypeMetadataKey = "milvus.data_type"
+  val MilvusVectorDimensionMetadataKey = "milvus.vector_dim"
 
   /** Set a value in an Arrow vector from a Spark InternalRow
     *
@@ -442,8 +447,16 @@ object ArrowConverter extends Logging {
         if (bytes == null) {
           vector.setNull(rowIndex)
         } else {
-          // See StringType above — setSafe grows the data buffer; set does not.
-          vector.asInstanceOf[VarBinaryVector].setSafe(rowIndex, bytes)
+          vector match {
+            case fixed: FixedSizeBinaryVector => fixed.set(rowIndex, bytes)
+            case variable: VarBinaryVector    =>
+              // See StringType above — setSafe grows the data buffer; set does not.
+              variable.setSafe(rowIndex, bytes)
+            case other =>
+              throw new IllegalArgumentException(
+                s"Cannot encode BinaryType into ${other.getClass.getSimpleName}"
+              )
+          }
         }
 
       case MapType(keyType, valueType, _) =>

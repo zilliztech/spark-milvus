@@ -174,7 +174,7 @@ object MilvusBackfill {
       // Reproject via the column mapping (or legacy implicit mapping) so that
       // downstream code can assume the DataFrame's column names match the
       // Milvus schema exactly — in particular, the pk column is named pkName.
-      val backfillDF = applyColumnMapping(
+      val mappedBackfillDF = applyColumnMapping(
         rawBackfillDF,
         pkName,
         config.columnMapping
@@ -183,14 +183,8 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
-      // Cache so the upcoming count / distinct-PK aggregation doesn't force
-      // a second parquet scan when performJoin consumes the DF later. Held
-      // until after processSegments (see finally block for unpersist).
-      backfillDF.cache()
-      cachedBackfillDF = backfillDF
-
       // Extract new field names (all post-mapping columns except the PK).
-      val newFieldNames = backfillDF.schema.fields
+      val newFieldNames = mappedBackfillDF.schema.fields
         .map(_.name)
         .filterNot(_ == pkName)
         .toSeq
@@ -205,35 +199,6 @@ object MilvusBackfill {
             s"Backfill parquet contains a column named '$MatchFlagCol', " +
               "which is reserved for internal use by the backfill join. " +
               "Rename the column (or use --column-mapping) and retry."
-          )
-        )
-      }
-
-      // One aggregation over the cached DF gives us both totals: the raw
-      // input row count (reported in the result / logs for debugging low
-      // match rates) and the distinct-PK count (used below to fail fast on
-      // duplicates — see rationale there).
-      val countsRow = backfillDF
-        .agg(count(lit(1)), countDistinct(col(pkName)))
-        .head()
-      val backfillRowCount = countsRow.getLong(0)
-      val distinctPkCount = countsRow.getLong(1)
-      logger.info(
-        s"Backfill data file rows: $backfillRowCount " +
-          s"(distinct ${pkName}: $distinctPkCount)"
-      )
-
-      // Duplicate PKs on the backfill side cause each source row with a
-      // matching PK to be emitted once per duplicate by the left join,
-      // inflating per-segment rowCount / sourceRowCount / matchedRowCount.
-      // Rather than silently report misleading metrics, fail fast so the
-      // user can dedupe upstream.
-      if (distinctPkCount != backfillRowCount) {
-        return Left(
-          SchemaValidationError(
-            s"Backfill parquet contains duplicate primary-key values " +
-              s"(rows=$backfillRowCount, distinct ${pkName}=$distinctPkCount). " +
-              "Deduplicate the input (e.g. dropDuplicates on the PK) and retry."
           )
         )
       }
@@ -264,6 +229,78 @@ object MilvusBackfill {
       }
       val newFieldNameToId = newFieldNames.map(n => n -> fieldNameToId(n)).toMap
 
+      val snapshotMetadata = snapshotMetadataOpt.getOrElse {
+        return Left(
+          SchemaValidationError(
+            "ADDFIELD backfill requires collection schema from a snapshot"
+          )
+        )
+      }
+      val targetFieldsByName = newFieldNames.map { name =>
+        val field = snapshotMetadata.collection.schema.fields
+          .find(_.name == name)
+          .getOrElse(
+            return Left(
+              SchemaValidationError(
+                s"Field '$name' not found in snapshot collection schema"
+              )
+            )
+          )
+        name -> field
+      }.toMap
+
+      // User parquet uses normal ingestion-friendly vector shapes (numeric
+      // arrays, byte arrays, sparse maps/structs/JSON). Normalize vector
+      // fields to Milvus's physical per-row bytes before caching or joining so
+      // Spark never widens or rewrites half/int8/sparse representations.
+      val backfillDF = VectorBackfillSupport.normalizeVectorColumns(
+        mappedBackfillDF,
+        targetFieldsByName
+      ) match {
+        case Left(error) => return Left(error)
+        case Right(df)   => df
+      }
+
+      // Cache so the upcoming count / distinct-PK aggregation doesn't force
+      // a second parquet scan when performJoin consumes the DF later. The
+      // count also eagerly validates every normalized vector row.
+      backfillDF.cache()
+      cachedBackfillDF = backfillDF
+
+      // One aggregation over the cached DF gives us both totals: the raw
+      // input row count (reported in the result / logs for debugging low
+      // match rates) and the distinct-PK count (used below to fail fast on
+      // duplicates — see rationale there).
+      val countsRow = backfillDF
+        .agg(count(lit(1)), countDistinct(col(pkName)))
+        .head()
+      val backfillRowCount = countsRow.getLong(0)
+      val distinctPkCount = countsRow.getLong(1)
+      logger.info(
+        s"Backfill data file rows: $backfillRowCount " +
+          s"(distinct ${pkName}: $distinctPkCount)"
+      )
+
+      // Duplicate PKs on the backfill side cause each source row with a
+      // matching PK to be emitted once per duplicate by the left join,
+      // inflating per-segment rowCount / sourceRowCount / matchedRowCount.
+      // Rather than silently report misleading metrics, fail fast so the
+      // user can dedupe upstream.
+      if (distinctPkCount != backfillRowCount) {
+        return Left(
+          SchemaValidationError(
+            s"Backfill parquet contains duplicate primary-key values " +
+              s"(rows=$backfillRowCount, distinct ${pkName}=$distinctPkCount). " +
+              "Deduplicate the input (e.g. dropDuplicates on the PK) and retry."
+          )
+        )
+      }
+
+      val targetVectorFields = targetFieldsByName.collect {
+        case (name, field) if VectorBackfillSupport.isVectorField(field) =>
+          name -> VectorBackfillSupport.canonicalStructField(field)
+      }
+
       // In coalesce / overwrite modes, also read each target field from source
       // so the merge step (coalesce(src,bf) or when(matched, bf).otherwise(src))
       // can compare source and parquet values per row. Requires a snapshot —
@@ -272,26 +309,13 @@ object MilvusBackfill {
       val extraReadFields
           : Seq[(String, Long, org.apache.spark.sql.types.StructField)] =
         if (readsSourceFields) {
-          val metadata = snapshotMetadataOpt.getOrElse {
-            return Left(
-              SchemaValidationError(
-                s"--mode=${config.mode} requires a snapshot path so source " +
-                  "field values can be read"
-              )
-            )
-          }
           newFieldNames.map { n =>
             val fid = newFieldNameToId(n)
-            val field = metadata.collection.schema.fields
-              .find(_.getFieldIDAsLong == fid)
-              .getOrElse(
-                return Left(
-                  SchemaValidationError(
-                    s"Field '$n' (id=$fid) not found in snapshot schema"
-                  )
-                )
-              )
-            val structField = MilvusSnapshotReader.fieldToStructField(field)
+            val field = targetFieldsByName(n)
+            val structField = targetVectorFields.getOrElse(
+              n,
+              MilvusSnapshotReader.fieldToStructField(field)
+            )
             (
               n,
               fid,
@@ -369,7 +393,8 @@ object MilvusBackfill {
         v2SegmentIdSet,
         config,
         newFieldNames,
-        newFieldNameToId
+        newFieldNameToId,
+        targetVectorFields
       ) match {
         case Left(error)    => return Left(error)
         case Right(results) => results
@@ -953,7 +978,11 @@ object MilvusBackfill {
       v2SegmentIdSet: Set[Long],
       config: BackfillConfig,
       newFieldNames: Seq[String],
-      fieldNameToId: Map[String, Long] = Map.empty
+      fieldNameToId: Map[String, Long] = Map.empty,
+      targetFieldOverrides: Map[
+        String,
+        org.apache.spark.sql.types.StructField
+      ] = Map.empty
   ): Either[BackfillError, Map[Long, SegmentBackfillResult]] = {
 
     try {
@@ -981,7 +1010,10 @@ object MilvusBackfill {
       // or the match flag)
       val targetSchema = org.apache.spark.sql.types.StructType(
         newFieldNames.map(fieldName =>
-          preparedDF.schema.fields.find(_.name == fieldName).get
+          targetFieldOverrides.getOrElse(
+            fieldName,
+            preparedDF.schema.fields.find(_.name == fieldName).get
+          )
         )
       )
 

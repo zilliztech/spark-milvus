@@ -11,6 +11,7 @@ import org.apache.arrow.vector.{
 }
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.sql.catalyst.util.ArrayData
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.{
   ArrayType,
   BinaryType,
@@ -119,6 +120,57 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("arrowToInternalRow keeps dense vector fixed-size bytes as BinaryType") {
+    val bytes = java.nio.ByteBuffer
+      .allocate(8)
+      .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+      .putFloat(1.5f)
+      .putFloat(-2.0f)
+      .array()
+    withFixedSizeBinaryRoot("float", bytes.length, bytes) { root =>
+      val row = ArrowConverter.arrowToInternalRow(
+        root,
+        0,
+        StructType(
+          Seq(vectorField("float", BinaryType, MilvusDataType.FloatVector))
+        )
+      )
+      row.getBinary(0) shouldBe bytes
+    }
+  }
+
+  test("internalRowToArrow writes BinaryType to fixed and variable binary") {
+    val bytes = Array[Byte](1, 2, 3, 4)
+    val sparkSchema = StructType(Seq(StructField("vec", BinaryType)))
+
+    Seq[ArrowType](
+      new ArrowType.FixedSizeBinary(bytes.length),
+      new ArrowType.Binary()
+    ).foreach { arrowType =>
+      val allocator = new RootAllocator(Long.MaxValue)
+      try {
+        val schema = new Schema(
+          Seq(new Field("vec", FieldType.nullable(arrowType), null)).asJava
+        )
+        val root = VectorSchemaRoot.create(schema, allocator)
+        try {
+          root.allocateNew()
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow(bytes),
+            sparkSchema
+          )
+          root.getVector("vec") match {
+            case vector: FixedSizeBinaryVector => vector.get(0) shouldBe bytes
+            case vector: VarBinaryVector       => vector.get(0) shouldBe bytes
+            case other => fail(s"unexpected vector ${other.getClass}")
+          }
+        } finally root.close()
+      } finally allocator.close()
+    }
+  }
+
   test("arrowToInternalRow decodes valid UTF-8 from VarBinary as StringType") {
     val bytes = "hello, 世界".getBytes(java.nio.charset.StandardCharsets.UTF_8)
     withVariableWidthRoot("text", new ArrowType.Binary(), bytes) { root =>
@@ -144,29 +196,6 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         )
       }
       err.getMessage should include("not valid UTF-8")
-    }
-  }
-
-  test(
-    "arrowToInternalRow rejects BinaryType for FloatVector fixed-size bytes"
-  ) {
-    val bytes = java.nio.ByteBuffer
-      .allocate(8)
-      .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-      .putFloat(1.5f)
-      .putFloat(-2.0f)
-      .array()
-    withFixedSizeBinaryRoot("float", bytes.length, bytes) { root =>
-      val err = intercept[IllegalArgumentException] {
-        ArrowConverter.arrowToInternalRow(
-          root,
-          0,
-          StructType(
-            Seq(vectorField("float", BinaryType, MilvusDataType.FloatVector))
-          )
-        )
-      }
-      err.getMessage should include("BinaryType")
     }
   }
 
@@ -242,7 +271,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("arrowToInternalRow rejects BinaryType without BinaryVector metadata") {
+  test("arrowToInternalRow rejects BinaryType without vector metadata") {
     val bytes = Array[Byte](0x01, 0x23, 0x45, 0x67)
     withFixedSizeBinaryRoot("binary", bytes.length, bytes) { root =>
       val err = intercept[IllegalArgumentException] {
@@ -252,7 +281,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
           StructType(Seq(StructField("binary", BinaryType)))
         )
       }
-      err.getMessage should include("BinaryVector")
+      err.getMessage should include(ArrowConverter.MilvusDataTypeMetadataKey)
     }
   }
 

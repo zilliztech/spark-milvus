@@ -83,6 +83,24 @@ spark-submit \
 | `--column-mapping`| *(none)*    | `src1:tgt1,src2:tgt2,...`. Rename/drop Parquet columns to Milvus field names. |
 | `--output-result` | *(none)*    | Path to write the result JSON.                                               |
 
+## Vector columns
+
+Backfill accepts the same practical shapes commonly used by Milvus import
+clients, plus already-encoded Milvus bytes:
+
+| Milvus type | Accepted Parquet/Spark values |
+|-------------|-------------------------------|
+| `FloatVector` | Numeric array of length `dim`; JSON array string; or little-endian internal binary (`dim * 4` bytes). |
+| `BinaryVector` | Packed integral-byte array or binary of length `dim / 8`; JSON byte-array string. |
+| `Float16Vector`, `BFloat16Vector` | Float/double array of length `dim`; encoded byte/short array or binary of length `dim * 2`; JSON numeric-array string. |
+| `Int8Vector` | Integral array of length `dim` with values in `[-128, 127]`; JSON integral-array string; or internal binary. |
+| `SparseFloatVector` | Map of index to non-negative weight; `{indices, values}` struct; JSON object string; or Milvus sparse binary. |
+
+Before the join, vector values are validated and normalized to Milvus's
+per-row byte layout. Non-nullable dense vectors are written as Arrow
+`FixedSizeBinary`; nullable dense vectors and sparse vectors are written as
+Arrow `Binary`, matching Milvus storage metadata and endianness.
+
 ## Merge modes (`--mode`)
 
 Distinct from the read-mode choice above (snapshot vs client), `--mode`
