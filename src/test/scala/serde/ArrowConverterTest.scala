@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.serde
 
+import java.nio.{ByteBuffer, ByteOrder}
 import scala.collection.JavaConverters._
 
 import org.apache.arrow.memory.RootAllocator
@@ -94,15 +95,22 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
   private def vectorField(
       name: String,
       sparkType: org.apache.spark.sql.types.DataType,
-      milvusType: MilvusDataType
+      milvusType: MilvusDataType,
+      dimension: Option[Int] = None
   ): StructField = {
+    val metadata = new MetadataBuilder()
+      .putLong(ArrowConverter.MilvusDataTypeMetadataKey, milvusType.value)
+    dimension.foreach(value =>
+      metadata.putLong(
+        ArrowConverter.MilvusVectorDimensionMetadataKey,
+        value
+      )
+    )
     StructField(
       name,
       sparkType,
       nullable = true,
-      metadata = new MetadataBuilder()
-        .putLong(ArrowConverter.MilvusDataTypeMetadataKey, milvusType.value)
-        .build()
+      metadata = metadata.build()
     )
   }
 
@@ -168,6 +176,145 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
           }
         } finally root.close()
       } finally allocator.close()
+    }
+  }
+
+  test("internalRowToArrow writes nullable dense arrays to VarBinary") {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+
+    def write(
+        field: StructField,
+        value: ArrayData
+    ): Array[Byte] = {
+      val sparkSchema = StructType(Seq(field))
+      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+      val allocator = new RootAllocator(Long.MaxValue)
+      try {
+        val root = VectorSchemaRoot.create(arrowSchema, allocator)
+        try {
+          root.allocateNew()
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow.fromSeq(Seq(value)),
+            sparkSchema
+          )
+          ArrowConverter.internalRowToArrow(
+            root,
+            1,
+            InternalRow.fromSeq(Seq(null)),
+            sparkSchema
+          )
+          val vector = root.getVector(field.name).asInstanceOf[VarBinaryVector]
+          vector.setValueCount(2)
+          vector.isNull(1) shouldBe true
+          vector.get(0)
+        } finally root.close()
+      } finally allocator.close()
+    }
+
+    val floats = Array(1.5f, -2.0f)
+    val floatBytes = ByteBuffer
+      .allocate(8)
+      .order(ByteOrder.LITTLE_ENDIAN)
+      .putFloat(floats(0))
+      .putFloat(floats(1))
+      .array()
+
+    write(
+      vectorField(
+        "float",
+        ArrayType(FloatType),
+        MilvusDataType.FloatVector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(floats)
+    ) shouldBe floatBytes
+    write(
+      vectorField(
+        "float16",
+        ArrayType(FloatType),
+        MilvusDataType.Float16Vector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(floats)
+    ) shouldBe floats.flatMap(FloatConverter.toFloat16Bytes)
+    write(
+      vectorField(
+        "bfloat16",
+        ArrayType(FloatType),
+        MilvusDataType.BFloat16Vector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(floats)
+    ) shouldBe floats.flatMap(FloatConverter.toBFloat16Bytes)
+    write(
+      vectorField(
+        "int8",
+        ArrayType(ShortType),
+        MilvusDataType.Int8Vector,
+        Some(4)
+      ),
+      ArrayData.toArrayData(Array[Short](-128, -1, 0, 127))
+    ) shouldBe Array[Byte](-128, -1, 0, 127)
+  }
+
+  test("arrowToInternalRow decodes nullable dense vectors from VarBinary") {
+    val floats = Array(1.5f, -2.0f)
+    val floatBytes = ByteBuffer
+      .allocate(8)
+      .order(ByteOrder.LITTLE_ENDIAN)
+      .putFloat(floats(0))
+      .putFloat(floats(1))
+      .array()
+
+    def readFloats(
+        name: String,
+        bytes: Array[Byte],
+        milvusType: MilvusDataType
+    ): Array[Float] = {
+      var result: Array[Float] = null
+      withVariableWidthRoot(name, new ArrowType.Binary(), bytes) { root =>
+        val row = ArrowConverter.arrowToInternalRow(
+          root,
+          0,
+          StructType(
+            Seq(vectorField(name, ArrayType(FloatType), milvusType))
+          )
+        )
+        result = row.getArray(0).toFloatArray
+      }
+      result
+    }
+
+    readFloats("float", floatBytes, MilvusDataType.FloatVector) shouldBe floats
+    readFloats(
+      "float16",
+      floats.flatMap(FloatConverter.toFloat16Bytes),
+      MilvusDataType.Float16Vector
+    ) shouldBe floats
+    readFloats(
+      "bfloat16",
+      floats.flatMap(FloatConverter.toBFloat16Bytes),
+      MilvusDataType.BFloat16Vector
+    ) shouldBe floats
+
+    val int8Bytes = Array[Byte](-128, -1, 0, 127)
+    withVariableWidthRoot("int8", new ArrowType.Binary(), int8Bytes) { root =>
+      val row = ArrowConverter.arrowToInternalRow(
+        root,
+        0,
+        StructType(
+          Seq(
+            vectorField(
+              "int8",
+              ArrayType(ShortType),
+              MilvusDataType.Int8Vector
+            )
+          )
+        )
+      )
+      row.getArray(0).toShortArray shouldBe int8Bytes.map(_.toShort)
     }
   }
 
