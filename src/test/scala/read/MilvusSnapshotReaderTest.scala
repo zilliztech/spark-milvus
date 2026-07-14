@@ -88,6 +88,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     // Verify schema basic info
     schema.name shouldBe "backfilltestcollection"
     schema.description shouldBe Some("Test collection for MilvusBackfill")
+    schema.version shouldBe 0
     schema.fields should have size 7
 
     // Verify schema properties
@@ -142,6 +143,32 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     timestampField.getFieldIDAsLong shouldBe 1L
     timestampField.dataType shouldBe 5 // Int64
     timestampField.description shouldBe Some("timestamp")
+  }
+
+  test("Parse collection schema version from snapshot JSON") {
+    val json = """
+    {
+      "snapshot_info": {
+        "name": "test",
+        "id": 1,
+        "collection_id": 1,
+        "partition_ids": [1],
+        "create_ts": 1
+      },
+      "collection": {
+        "schema": {
+          "name": "test",
+          "version": 7,
+          "fields": []
+        }
+      }
+    }
+    """
+
+    val metadata =
+      MilvusSnapshotReader.parseSnapshotMetadata(json).toOption.get
+
+    metadata.collection.schema.version shouldBe 7
   }
 
   test("Get primary key name from snapshot JSON") {
