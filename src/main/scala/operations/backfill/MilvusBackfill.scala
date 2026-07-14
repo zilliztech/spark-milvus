@@ -384,6 +384,9 @@ object MilvusBackfill {
         executionTimeMs = executionTime,
         collectionId = collectionID,
         partitionId = if (partitionIDs.size == 1) partitionIDs.head else -1,
+        schemaVersion = snapshotMetadataOpt
+          .map(_.collection.schema.version)
+          .getOrElse(0),
         newFieldNames = newFieldNames,
         totalBackfillDataRows = backfillRowCount
       )

@@ -70,6 +70,7 @@ case class BackfillResult(
     executionTimeMs: Long,
     collectionId: Long,
     partitionId: Long,
+    schemaVersion: Int,
     newFieldNames: Seq[String],
     totalSourceRows: Long = 0L,
     totalBackfillDataRows: Long = 0L,
@@ -116,6 +117,7 @@ case class BackfillResult(
        |  Execution Time: ${executionTimeMs}ms
        |  Collection ID: $collectionId
        |  Partition ID: $partitionId
+       |  Schema Version: $schemaVersion
        |  New Fields: ${newFieldNames.mkString(", ")}
        |  Manifest Paths: ${manifestPaths.size} files
        |  StorageV2 Segments: $v2Count / ${segmentResults.size}
@@ -179,6 +181,7 @@ case class BackfillResult(
       "success" -> success,
       "collectionId" -> collectionId,
       "partitionId" -> partitionId,
+      "schemaVersion" -> schemaVersion,
       "segmentsProcessed" -> segmentsProcessed,
       "totalSourceRows" -> totalSourceRows,
       "totalBackfillDataRows" -> totalBackfillDataRows,
@@ -215,6 +218,7 @@ object BackfillResult {
       executionTimeMs: Long,
       collectionId: Long,
       partitionId: Long,
+      schemaVersion: Int,
       newFieldNames: Seq[String],
       totalBackfillDataRows: Long = 0L
   ): BackfillResult = {
@@ -243,6 +247,7 @@ object BackfillResult {
       executionTimeMs = executionTimeMs,
       collectionId = collectionId,
       partitionId = partitionId,
+      schemaVersion = schemaVersion,
       newFieldNames = newFieldNames,
       totalSourceRows = totalSource,
       totalBackfillDataRows = totalBackfillDataRows,
@@ -268,6 +273,7 @@ object BackfillResult {
       executionTimeMs = executionTimeMs,
       collectionId = collectionId,
       partitionId = partitionId,
+      schemaVersion = 0,
       newFieldNames = Seq.empty
     )
   }

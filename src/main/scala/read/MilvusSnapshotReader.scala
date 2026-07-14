@@ -228,7 +228,8 @@ case class CollectionSchema(
       Boolean
     ] = None,
     @JsonProperty("enable_dynamic_field") enableDynamicField: Option[Boolean] =
-      None
+      None,
+    @JsonProperty("version") version: Int = 0
 ) {
   def getFieldByName(name: String): Option[Field] = {
     fields.find(_.name == name)
