@@ -11,6 +11,7 @@ import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.spark.connector.read.{Field, TypeParam}
 import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.FloatConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class VectorBackfillSupportTest
@@ -155,6 +156,17 @@ class VectorBackfillSupportTest
       "[0.11111,0.22222]",
       encodedHalfBytes = false
     ) shouldBe Array[Byte](0x1c, 0x2f, 0x1c, 0x33)
+
+    val rounded = Array[Byte](0xcd.toByte, 0x34, 0x9a.toByte, 0x39)
+    FloatConverter.toFloat16Bytes(0.3f).toArray ++
+      FloatConverter.toFloat16Bytes(0.7f).toArray shouldBe rounded
+    VectorBackfillSupport.encodeDenseJsonArray(
+      "float16",
+      MilvusDataType.Float16Vector,
+      2,
+      "[0.3,0.7]",
+      encodedHalfBytes = false
+    ) shouldBe rounded
   }
 
   test("rejects negative sparse weights like Milvus validation") {

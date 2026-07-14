@@ -353,34 +353,47 @@ object FloatConverter {
       )
     }
 
-    // IEEE 754 float32 format: 1 sign bit, 8 exponent bits, 23 fraction bits
+    // Match Milvus's float16.Fromfloat32 conversion: IEEE-754
+    // round-to-nearest-even, including subnormal values. Truncating the
+    // mantissa here makes normal ingestion produce different bytes from
+    // Milvus import/backfill for values such as 0.3f and 0.7f.
     val bits = java.lang.Float.floatToRawIntBits(value)
-    val sign = (bits >>> 31) & 0x1
-    val exp = (bits >>> 23) & 0xff
-    val frac = bits & 0x7fffff
+    val sign = (bits >>> 16) & 0x8000
+    val exponent = (bits >>> 23) & 0xff
+    val mantissa = bits & 0x7fffff
+    val halfExponent = exponent - 127 + 15
 
-    // IEEE 754 float16 format: 1 sign bit, 5 exponent bits, 10 fraction bits
-    val f16Sign = sign
-    val f16Exp = if (exp == 0) {
-      0 // Zero/Subnormal
-    } else if (exp == 0xff) {
-      0x1f // Infinity/NaN
+    val f16Bits = if (halfExponent <= 0) {
+      if (halfExponent < -10) {
+        sign
+      } else {
+        val normalizedMantissa = mantissa | 0x800000
+        val shift = 14 - halfExponent
+        var halfMantissa = normalizedMantissa >>> shift
+        val remainderMask = (1 << shift) - 1
+        val remainder = normalizedMantissa & remainderMask
+        val halfway = 1 << (shift - 1)
+        if (
+          remainder > halfway ||
+          (remainder == halfway && (halfMantissa & 1) != 0)
+        ) {
+          halfMantissa += 1
+        }
+        sign | halfMantissa
+      }
     } else {
-      val newExp = exp - 127 + 15
-      if (newExp < 0) 0
-      else if (newExp > 0x1f) 0x1f
-      else newExp
+      var half = sign | (halfExponent << 10) | (mantissa >>> 13)
+      val remainder = mantissa & 0x1fff
+      if (remainder > 0x1000 || (remainder == 0x1000 && (half & 1) != 0)) {
+        half += 1
+      }
+      if (((half >>> 10) & 0x1f) == 0x1f) {
+        throw new DataParseException(
+          s"Value $value rounds out of float16 range"
+        )
+      }
+      half
     }
-    val f16Frac = frac >>> 13
-
-    // Combine components into a half-precision (float16) value
-    val f16Bits = (f16Sign << 15) | (f16Exp << 10) | f16Frac
-
-    // Create byte array in big-endian format (high byte first)
-    // val bytes = new Array[Byte](2)
-    // bytes(0) = ((f16Bits >>> 8) & 0xff).toByte
-    // bytes(1) = (f16Bits & 0xff).toByte
-    // bytes.toSeq
 
     // Create byte array in little-endian format (low byte first)
     val bytes = new Array[Byte](2)

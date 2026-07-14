@@ -8,6 +8,7 @@ import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.functions.{col, to_json, udf}
 import org.apache.spark.sql.types._
 
+import com.zilliz.spark.connector.{DataParseException, FloatConverter}
 import com.zilliz.spark.connector.read.Field
 import com.zilliz.spark.connector.serde.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
@@ -404,7 +405,7 @@ private[backfill] object VectorBackfillSupport {
           .order(ByteOrder.LITTLE_ENDIAN)
         values.foreach { value =>
           val floatValue = finiteFloat(fieldName, value)
-          bytes.putShort(floatToHalfBits(fieldName, floatValue).toShort)
+          bytes.put(float16Bytes(fieldName, floatValue))
         }
         bytes.array()
 
@@ -521,7 +522,7 @@ private[backfill] object VectorBackfillSupport {
           .order(ByteOrder.LITTLE_ENDIAN)
         elements.foreach { node =>
           val value = finiteFloat(fieldName, node)
-          bytes.putShort(floatToHalfBits(fieldName, value).toShort)
+          bytes.put(float16Bytes(fieldName, value))
         }
         bytes.array()
 
@@ -812,54 +813,11 @@ private[backfill] object VectorBackfillSupport {
     }
   }
 
-  /** IEEE-754 binary32 -> binary16, round-to-nearest-even. */
-  private def floatToHalfBits(fieldName: String, value: Float): Int = {
-    val bits = java.lang.Float.floatToRawIntBits(value)
-    val sign = (bits >>> 16) & 0x8000
-    val exponent = (bits >>> 23) & 0xff
-    val mantissa = bits & 0x7fffff
-
-    if (exponent == 0xff) {
-      fail(fieldName, s"Float16Vector contains non-finite value $value")
+  private def float16Bytes(fieldName: String, value: Float): Array[Byte] =
+    try FloatConverter.toFloat16Bytes(value).toArray
+    catch {
+      case e: DataParseException => fail(fieldName, e.getMessage)
     }
-
-    val halfExponent = exponent - 127 + 15
-    if (halfExponent >= 31) {
-      fail(
-        fieldName,
-        s"Float16Vector value $value is outside finite float16 range"
-      )
-    }
-
-    if (halfExponent <= 0) {
-      if (halfExponent < -10) return sign
-      val normalizedMantissa = mantissa | 0x800000
-      val shift = 14 - halfExponent
-      var halfMantissa = normalizedMantissa >>> shift
-      val remainderMask = (1 << shift) - 1
-      val remainder = normalizedMantissa & remainderMask
-      val halfway = 1 << (shift - 1)
-      if (
-        remainder > halfway || (remainder == halfway && (halfMantissa & 1) != 0)
-      ) {
-        halfMantissa += 1
-      }
-      sign | halfMantissa
-    } else {
-      var half = sign | (halfExponent << 10) | (mantissa >>> 13)
-      val remainder = mantissa & 0x1fff
-      if (remainder > 0x1000 || (remainder == 0x1000 && (half & 1) != 0)) {
-        half += 1
-      }
-      if (((half >>> 10) & 0x1f) == 0x1f) {
-        fail(
-          fieldName,
-          s"Float16Vector value $value rounds outside finite float16 range"
-        )
-      }
-      half
-    }
-  }
 
   private def fail(fieldName: String, message: String): Nothing =
     throw new IllegalArgumentException(s"Vector field '$fieldName': $message")
