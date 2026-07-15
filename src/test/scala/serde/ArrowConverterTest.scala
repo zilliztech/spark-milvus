@@ -11,13 +11,15 @@ import org.apache.arrow.vector.{
   VectorSchemaRoot
 }
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
-import org.apache.spark.sql.catalyst.util.ArrayData
+import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.{
   ArrayType,
   BinaryType,
   ByteType,
   FloatType,
+  LongType,
+  MapType,
   MetadataBuilder,
   ShortType,
   StringType,
@@ -27,7 +29,11 @@ import org.apache.spark.sql.types.{
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.spark.connector.FloatConverter
+import com.zilliz.spark.connector.{
+  FloatConverter,
+  MilvusSchemaUtil,
+  SparseFloatVectorConverter
+}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class ArrowConverterTest extends AnyFunSuite with Matchers {
@@ -449,6 +455,90 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       )
       row.getArray(0).toShortArray shouldBe int8Bytes.map(_.toShort)
     }
+  }
+
+  test("internalRowToArrow round-trips SparseFloatVector MapType as Binary") {
+    val field = vectorField(
+      "sparse",
+      MapType(LongType, FloatType, valueContainsNull = false),
+      MilvusDataType.SparseFloatVector
+    )
+    val sparkSchema = StructType(Seq(field))
+    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+    arrowSchema.findField("sparse").getType shouldBe new ArrowType.Binary()
+
+    val mapData = ArrayBasedMapData(
+      Array[Any](3L, 1L),
+      Array[Any](2.5f, 1.25f)
+    )
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val root = VectorSchemaRoot.create(arrowSchema, allocator)
+      try {
+        root.allocateNew()
+        ArrowConverter.internalRowToArrow(
+          root,
+          0,
+          InternalRow(mapData),
+          sparkSchema
+        )
+        val vector = root.getVector("sparse").asInstanceOf[VarBinaryVector]
+        vector.setValueCount(1)
+        root.setRowCount(1)
+
+        vector.get(0) shouldBe SparseFloatVectorConverter
+          .encodeSparseFloatVector(Map(1L -> 1.25f, 3L -> 2.5f))
+
+        val decoded = ArrowConverter
+          .arrowToInternalRow(root, 0, sparkSchema)
+          .getMap(0)
+        decoded.keyArray().toLongArray shouldBe Array(1L, 3L)
+        decoded.valueArray().toFloatArray shouldBe Array(1.25f, 2.5f)
+      } finally root.close()
+    } finally allocator.close()
+  }
+
+  test("SparseFloatVector binary conversion validates malformed values") {
+    val field = vectorField(
+      "sparse",
+      MapType(LongType, FloatType, valueContainsNull = false),
+      MilvusDataType.SparseFloatVector
+    )
+    val sparkSchema = StructType(Seq(field))
+
+    withVariableWidthRoot(
+      "sparse",
+      new ArrowType.Binary(),
+      Array[Byte](1)
+    ) { root =>
+      val error = intercept[com.zilliz.spark.connector.DataParseException] {
+        ArrowConverter.arrowToInternalRow(root, 0, sparkSchema)
+      }
+      error.getMessage should include("multiple of 8")
+    }
+
+    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val root = VectorSchemaRoot.create(arrowSchema, allocator)
+      try {
+        root.allocateNew()
+        val error = intercept[com.zilliz.spark.connector.DataParseException] {
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow(
+              ArrayBasedMapData(
+                Array[Any](1L),
+                Array[Any](-0.5f)
+              )
+            ),
+            sparkSchema
+          )
+        }
+        error.getMessage should include("non-negative")
+      } finally root.close()
+    } finally allocator.close()
   }
 
   test("arrowToInternalRow decodes valid UTF-8 from VarBinary as StringType") {

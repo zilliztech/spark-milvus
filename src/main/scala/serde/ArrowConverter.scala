@@ -11,12 +11,16 @@ import scala.collection.JavaConverters._
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex.{ListVector, MapVector, StructVector}
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData}
+import org.apache.spark.sql.catalyst.util.{
+  ArrayBasedMapData,
+  ArrayData,
+  MapData
+}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
-import com.zilliz.spark.connector.FloatConverter
+import com.zilliz.spark.connector.{FloatConverter, SparseFloatVectorConverter}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Utilities for converting between Spark InternalRow and Arrow vectors
@@ -204,6 +208,21 @@ object ArrowConverter extends Logging {
             )
         }
 
+      case MapType(keyType, valueType, _) if isBinaryBackedVector(vector) =>
+        milvusType match {
+          case Some(MilvusDataType.SparseFloatVector) =>
+            requireSparseSparkTypes(keyType, valueType)
+            decodeSparseMap(binaryVectorBytes(vector, rowIndex))
+          case Some(other) =>
+            throw new IllegalArgumentException(
+              s"Cannot decode binary-backed vector as MapType for Milvus type $other"
+            )
+          case None =>
+            throw new IllegalArgumentException(
+              s"Binary-backed maps require ${MilvusDataTypeMetadataKey} metadata for SparseFloatVector"
+            )
+        }
+
       case MapType(keyType, valueType, _) =>
         val mapVector = vector.asInstanceOf[MapVector]
         val dataVector = mapVector.getDataVector.asInstanceOf[StructVector]
@@ -288,6 +307,47 @@ object ArrowConverter extends Logging {
     }.toArray
 
     ArrayData.toArrayData(arrayElements)
+  }
+
+  private def requireSparseSparkTypes(
+      keyType: DataType,
+      valueType: DataType
+  ): Unit = {
+    if (keyType != LongType || valueType != FloatType) {
+      throw new IllegalArgumentException(
+        s"SparseFloatVector requires MapType(LongType, FloatType), got MapType($keyType, $valueType)"
+      )
+    }
+  }
+
+  private def decodeSparseMap(bytes: Array[Byte]): ArrayBasedMapData = {
+    val entries = SparseFloatVectorConverter.decodeSparseFloatVector(bytes)
+    val keys = new Array[Any](entries.size)
+    val values = new Array[Any](entries.size)
+    entries.zipWithIndex.foreach { case ((index, value), entryIndex) =>
+      keys(entryIndex) = index
+      values(entryIndex) = value
+    }
+    ArrayBasedMapData(keys, values)
+  }
+
+  private def encodeSparseMap(
+      mapData: MapData,
+      keyType: DataType,
+      valueType: DataType
+  ): Array[Byte] = {
+    requireSparseSparkTypes(keyType, valueType)
+    val keys = mapData.keyArray()
+    val values = mapData.valueArray()
+    val entries = (0 until mapData.numElements()).map { index =>
+      if (keys.isNullAt(index) || values.isNullAt(index)) {
+        throw new IllegalArgumentException(
+          "SparseFloatVector map entries cannot contain null keys or values"
+        )
+      }
+      keys.getLong(index) -> values.getFloat(index)
+    }
+    SparseFloatVectorConverter.encodeSparseFloatVectorEntries(entries)
   }
 
   private def utf8StringFromVariableWidth(
@@ -674,6 +734,28 @@ object ArrowConverter extends Logging {
             vectorDimension
           )
         }
+
+      case MapType(keyType, valueType, _)
+          if milvusType.contains(MilvusDataType.SparseFloatVector) =>
+        if (!isBinaryBackedVector(vector)) {
+          throw new IllegalArgumentException(
+            s"SparseFloatVector MapType requires a binary-backed Arrow vector, got ${vector.getClass.getSimpleName}"
+          )
+        }
+        val bytes = encodeSparseMap(record.getMap(colIndex), keyType, valueType)
+        setBinaryVectorValue(
+          vector,
+          rowIndex,
+          bytes,
+          "SparseFloatVector MapType",
+          milvusType,
+          vectorDimension
+        )
+
+      case MapType(_, _, _) if isBinaryBackedVector(vector) =>
+        throw new IllegalArgumentException(
+          s"Binary-backed MapType requires ${MilvusDataTypeMetadataKey} metadata for SparseFloatVector"
+        )
 
       case MapType(keyType, valueType, _) =>
         val mapVector = vector.asInstanceOf[MapVector]

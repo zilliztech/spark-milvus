@@ -1030,10 +1030,26 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     sparkSchema("binary_vec").metadata.getLong(
       com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
     ) shouldBe 100L
+    sparkSchema("binary_vec").metadata.getLong(
+      com.zilliz.spark.connector.serde.ArrowConverter.MilvusVectorDimensionMetadataKey
+    ) shouldBe 128L
     sparkSchema("int8_vec").dataType shouldBe ArrayType(ShortType)
     sparkSchema("int8_vec").metadata.getLong(
       com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
     ) shouldBe 105L
+    sparkSchema("int8_vec").metadata.getLong(
+      com.zilliz.spark.connector.serde.ArrowConverter.MilvusVectorDimensionMetadataKey
+    ) shouldBe 4L
+
+    import scala.collection.JavaConverters._
+    val arrowFields = com.zilliz.spark.connector.MilvusSchemaUtil
+      .convertSparkSchemaToArrow(sparkSchema)
+      .getFields
+      .asScala
+      .map(field => field.getName -> field)
+      .toMap
+    arrowFields("binary_vec").getMetadata.get("dim") shouldBe "128"
+    arrowFields("int8_vec").getMetadata.get("dim") shouldBe "4"
   }
 
   test("fieldToStructField preserves milvus.data_type metadata") {
@@ -1041,6 +1057,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       name = "binary_vec",
       rawDataType =
         Some(com.fasterxml.jackson.databind.node.IntNode.valueOf(100)),
+      typeParams = Some(Seq(TypeParam("dim", "128"))),
       nullable = Some(false)
     )
 
@@ -1052,5 +1069,8 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     structField.metadata.getLong(
       com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
     ) shouldBe 100L
+    structField.metadata.getLong(
+      com.zilliz.spark.connector.serde.ArrowConverter.MilvusVectorDimensionMetadataKey
+    ) shouldBe 128L
   }
 }

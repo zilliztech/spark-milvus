@@ -7,6 +7,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.spark.connector.serde.ArrowConverter
+import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 /** Unit tests for DataTypeUtil type conversions
@@ -281,11 +282,17 @@ class DataTypeUtilTest extends AnyFunSuite with Matchers {
   }
 
   test("metadata stores Milvus data type code") {
-    val fieldSchema = FieldSchema(dataType = MilvusDataType.Float16Vector)
+    val fieldSchema = FieldSchema(
+      name = "float16_vec",
+      dataType = MilvusDataType.Float16Vector,
+      typeParams = Seq(KeyValuePair(key = "dim", value = "128"))
+    )
     val result = DataTypeUtil.metadata(fieldSchema)
 
     result.getLong(ArrowConverter.MilvusDataTypeMetadataKey) shouldBe
       MilvusDataType.Float16Vector.value.toLong
+    result.getLong(ArrowConverter.MilvusVectorDimensionMetadataKey) shouldBe
+      128L
   }
 
   test("toDataType throws exception for unsupported array element type") {

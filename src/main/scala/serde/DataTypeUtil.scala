@@ -11,6 +11,38 @@ import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 object DataTypeUtil {
 
+  private[connector] val DenseVectorTypes: Set[MilvusDataType] = Set(
+    MilvusDataType.FloatVector,
+    MilvusDataType.BinaryVector,
+    MilvusDataType.Float16Vector,
+    MilvusDataType.BFloat16Vector,
+    MilvusDataType.Int8Vector
+  )
+
+  private[connector] def isDenseVectorType(
+      dataType: MilvusDataType
+  ): Boolean = DenseVectorTypes.contains(dataType)
+
+  private[connector] def parseVectorDimension(
+      fieldName: String,
+      rawDimension: String
+  ): Long = {
+    val dimension =
+      try rawDimension.toLong
+      catch {
+        case _: NumberFormatException =>
+          throw new DataParseException(
+            s"Invalid vector dimension '$rawDimension' for field '$fieldName'"
+          )
+      }
+    if (dimension <= 0 || dimension > Int.MaxValue) {
+      throw new DataParseException(
+        s"Invalid vector dimension $dimension for field '$fieldName'"
+      )
+    }
+    dimension
+  }
+
   /** Converts Milvus DataType to Arrow type given dimension and element type
     */
   def toArrowType(dim: Int, dataType: MilvusDataType): ArrowType = {
@@ -49,12 +81,24 @@ object DataTypeUtil {
   }
 
   def metadata(fieldSchema: FieldSchema) = {
-    new MetadataBuilder()
+    val builder = new MetadataBuilder()
       .putLong(
         ArrowConverter.MilvusDataTypeMetadataKey,
         fieldSchema.dataType.value
       )
-      .build()
+
+    if (isDenseVectorType(fieldSchema.dataType)) {
+      fieldSchema.typeParams
+        .find(_.key == "dim")
+        .foreach { param =>
+          builder.putLong(
+            ArrowConverter.MilvusVectorDimensionMetadataKey,
+            parseVectorDimension(fieldSchema.name, param.value)
+          )
+        }
+    }
+
+    builder.build()
   }
 
   def toDataType(fieldSchema: FieldSchema): SparkDataType = {
