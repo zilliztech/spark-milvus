@@ -167,6 +167,21 @@ class VectorBackfillSupportTest
       "[0.3,0.7]",
       encodedHalfBytes = false
     ) shouldBe rounded
+
+    val maxFinite = Array[Byte](0xff.toByte, 0x7b)
+    FloatConverter.toFloat16Bytes(65510.0f).toArray shouldBe maxFinite
+    VectorBackfillSupport.encodeDenseJsonArray(
+      "float16",
+      MilvusDataType.Float16Vector,
+      1,
+      "[65510]",
+      encodedHalfBytes = false
+    ) shouldBe maxFinite
+
+    val overflow = intercept[com.zilliz.spark.connector.DataParseException] {
+      FloatConverter.toFloat16Bytes(65520.0f)
+    }
+    overflow.getMessage should include("float16 range")
   }
 
   test("rejects negative sparse weights like Milvus validation") {

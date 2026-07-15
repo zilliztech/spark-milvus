@@ -350,6 +350,19 @@ object ArrowConverter extends Logging {
     SparseFloatVectorConverter.encodeSparseFloatVectorEntries(entries)
   }
 
+  private def requireNonNullVectorArrayElement(
+      arrayData: ArrayData,
+      index: Int,
+      vector: FieldVector,
+      sparkType: String
+  ): Unit = {
+    if (arrayData.isNullAt(index)) {
+      throw new IllegalArgumentException(
+        s"Cannot encode $sparkType for vector '${vector.getName}': null element at index $index"
+      )
+    }
+  }
+
   private def utf8StringFromVariableWidth(
       vector: FieldVector,
       rowIndex: Int
@@ -602,9 +615,15 @@ object ArrowConverter extends Logging {
 
       case ArrayType(FloatType, _) if isBinaryBackedVector(vector) =>
         val arrayData = record.getArray(colIndex)
-        val floats = (0 until arrayData.numElements())
-          .map(i => arrayData.getFloat(i))
-          .toArray
+        val floats = (0 until arrayData.numElements()).map { i =>
+          requireNonNullVectorArrayElement(
+            arrayData,
+            i,
+            vector,
+            "Array[Float]"
+          )
+          arrayData.getFloat(i)
+        }.toArray
         val bytes = milvusType match {
           case Some(MilvusDataType.Float16Vector) =>
             floats.flatMap(value => FloatConverter.toFloat16Bytes(value))
@@ -628,9 +647,15 @@ object ArrowConverter extends Logging {
 
       case ArrayType(ShortType, _) if isBinaryBackedVector(vector) =>
         val arrayData = record.getArray(colIndex)
-        val values = (0 until arrayData.numElements())
-          .map(i => arrayData.getShort(i))
-          .toArray
+        val values = (0 until arrayData.numElements()).map { i =>
+          requireNonNullVectorArrayElement(
+            arrayData,
+            i,
+            vector,
+            "Array[Short]"
+          )
+          arrayData.getShort(i)
+        }.toArray
         val bytes = milvusType match {
           case Some(MilvusDataType.Int8Vector) =>
             values.map { value =>
@@ -661,9 +686,15 @@ object ArrowConverter extends Logging {
 
       case ArrayType(ByteType, _) if isBinaryBackedVector(vector) =>
         val arrayData = record.getArray(colIndex)
-        val bytes = (0 until arrayData.numElements())
-          .map(i => arrayData.getByte(i))
-          .toArray
+        val bytes = (0 until arrayData.numElements()).map { i =>
+          requireNonNullVectorArrayElement(
+            arrayData,
+            i,
+            vector,
+            "Array[Byte]"
+          )
+          arrayData.getByte(i)
+        }.toArray
         milvusType match {
           case Some(MilvusDataType.BinaryVector) =>
             setBinaryVectorValue(

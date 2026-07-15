@@ -398,6 +398,57 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
     } finally allocator.close()
   }
 
+  test("internalRowToArrow rejects null dense vector array elements") {
+    def reject(field: StructField, value: ArrayData): Unit = {
+      val sparkSchema = StructType(Seq(field))
+      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+      val allocator = new RootAllocator(Long.MaxValue)
+      try {
+        val root = VectorSchemaRoot.create(arrowSchema, allocator)
+        try {
+          root.allocateNew()
+          val error = intercept[IllegalArgumentException] {
+            ArrowConverter.internalRowToArrow(
+              root,
+              0,
+              InternalRow(value),
+              sparkSchema
+            )
+          }
+          error.getMessage should include("null element at index 1")
+        } finally root.close()
+      } finally allocator.close()
+    }
+
+    reject(
+      vectorField(
+        "float",
+        ArrayType(FloatType, containsNull = true),
+        MilvusDataType.FloatVector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(Array[Any](1.0f, null))
+    )
+    reject(
+      vectorField(
+        "int8",
+        ArrayType(ShortType, containsNull = true),
+        MilvusDataType.Int8Vector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(Array[Any](1.toShort, null))
+    )
+    reject(
+      vectorField(
+        "binary",
+        ArrayType(ByteType, containsNull = true),
+        MilvusDataType.BinaryVector,
+        Some(16)
+      ),
+      ArrayData.toArrayData(Array[Any](1.toByte, null))
+    )
+  }
+
   test("arrowToInternalRow decodes nullable dense vectors from VarBinary") {
     val floats = Array(1.5f, -2.0f)
     val floatBytes = ByteBuffer

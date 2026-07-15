@@ -333,11 +333,8 @@ object MilvusFieldData {
 }
 
 object FloatConverter {
-  private def isWithinFloat16Range(value: Float): Boolean = {
-    val absValue = Math.abs(value)
-    // float16 range: ±65504
-    absValue <= 65504f && !value.isNaN && !value.isInfinite
-  }
+  private def isFiniteFloat16Input(value: Float): Boolean =
+    !value.isNaN && !value.isInfinite
 
   private def isWithinBFloat16Range(value: Float): Boolean = {
     // bfloat16 has 8 exponent bits, same as float32
@@ -347,9 +344,9 @@ object FloatConverter {
   }
 
   def toFloat16Bytes(value: Float): Seq[Byte] = {
-    if (!isWithinFloat16Range(value)) {
+    if (!isFiniteFloat16Input(value)) {
       throw new DataParseException(
-        s"Value $value is out of float16 range"
+        s"Value $value is not a finite float16 input"
       )
     }
 
@@ -362,6 +359,12 @@ object FloatConverter {
     val exponent = (bits >>> 23) & 0xff
     val mantissa = bits & 0x7fffff
     val halfExponent = exponent - 127 + 15
+
+    if (halfExponent >= 31) {
+      throw new DataParseException(
+        s"Value $value is out of float16 range"
+      )
+    }
 
     val f16Bits = if (halfExponent <= 0) {
       if (halfExponent < -10) {
