@@ -11,17 +11,31 @@ import scala.collection.JavaConverters._
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex.{ListVector, MapVector, StructVector}
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData}
+import org.apache.spark.sql.catalyst.util.{
+  ArrayBasedMapData,
+  ArrayData,
+  MapData
+}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
-import com.zilliz.spark.connector.FloatConverter
+import com.zilliz.spark.connector.{FloatConverter, SparseFloatVectorConverter}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Utilities for converting between Spark InternalRow and Arrow vectors
   */
 object ArrowConverter extends Logging {
+
+  private val DenseVectorTypes: Set[MilvusDataType] = Set(
+    MilvusDataType.FloatVector,
+    MilvusDataType.BinaryVector,
+    MilvusDataType.Float16Vector,
+    MilvusDataType.BFloat16Vector,
+    MilvusDataType.Int8Vector
+  )
+
+  private val ArrowVectorDimensionMetadataKey = "dim"
 
   /** Convert an Arrow VectorSchemaRoot row to Spark InternalRow
     *
@@ -124,80 +138,48 @@ object ArrowConverter extends Logging {
       case StringType =>
         utf8StringFromVariableWidth(vector, rowIndex)
 
-      case ArrayType(ByteType, _)
-          if vector.isInstanceOf[FixedSizeBinaryVector] =>
-        val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
+      case ArrayType(ByteType, _) if isBinaryBackedVector(vector) =>
+        val bytes = binaryVectorBytes(vector, rowIndex)
         milvusType match {
           case Some(MilvusDataType.BinaryVector) =>
             ArrayData.toArrayData(bytes)
           case Some(other) =>
             throw new IllegalArgumentException(
-              s"Cannot decode FixedSizeBinary as Array[Byte] for Milvus type $other"
+              s"Cannot decode binary-backed vector as Array[Byte] for Milvus type $other"
             )
           case None =>
             throw new IllegalArgumentException(
-              s"FixedSizeBinary byte vectors require ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
+              s"Binary-backed byte vectors require ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
             )
         }
 
-      case ArrayType(ShortType, _)
-          if vector.isInstanceOf[FixedSizeBinaryVector] =>
-        val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
+      case ArrayType(ShortType, _) if isBinaryBackedVector(vector) =>
+        val bytes = binaryVectorBytes(vector, rowIndex)
         milvusType match {
           case Some(MilvusDataType.Int8Vector) =>
             ArrayData.toArrayData(bytes.map(_.toShort))
           case Some(other) =>
             throw new IllegalArgumentException(
-              s"Cannot decode FixedSizeBinary as Array[Short] for Milvus type $other"
+              s"Cannot decode binary-backed vector as Array[Short] for Milvus type $other"
             )
           case None =>
             throw new IllegalArgumentException(
-              s"FixedSizeBinary short vectors require ${MilvusDataTypeMetadataKey} metadata"
+              s"Binary-backed short vectors require ${MilvusDataTypeMetadataKey} metadata"
             )
         }
 
-      case ArrayType(FloatType, _)
-          if vector.isInstanceOf[FixedSizeBinaryVector] =>
-        val bytes = vector.asInstanceOf[FixedSizeBinaryVector].get(rowIndex)
+      case ArrayType(FloatType, _) if isBinaryBackedVector(vector) =>
+        val bytes = binaryVectorBytes(vector, rowIndex)
         ArrayData.toArrayData(
-          decodeFixedSizeBinaryFloats(
+          decodeBinaryFloats(
             bytes,
             milvusType,
             allowLegacyFloatVector
           )
         )
 
-      case ArrayType(FloatType, _) =>
-        val listVector = vector.asInstanceOf[ListVector]
-        val dataVector = listVector.getDataVector
-        val startIndex = listVector.getElementStartIndex(rowIndex)
-        val endIndex = listVector.getElementEndIndex(rowIndex)
-        val length = endIndex - startIndex
-        val arrayElements = (0 until length).map { i =>
-          val elemIndex = startIndex + i
-          if (dataVector.isNull(elemIndex)) null
-          else arrowValueToSparkValue(dataVector, elemIndex, FloatType, None)
-        }.toArray
-        ArrayData.toArrayData(arrayElements)
-
       case ArrayType(elementType, _) =>
-        // Generic array handling
-        val listVector = vector.asInstanceOf[ListVector]
-        val dataVector = listVector.getDataVector
-        val startIndex = listVector.getElementStartIndex(rowIndex)
-        val endIndex = listVector.getElementEndIndex(rowIndex)
-        val length = endIndex - startIndex
-
-        val arrayElements = (0 until length).map { i =>
-          val elemIndex = startIndex + i
-          if (dataVector.isNull(elemIndex)) {
-            null
-          } else {
-            arrowValueToSparkValue(dataVector, elemIndex, elementType, None)
-          }
-        }.toArray
-
-        ArrayData.toArrayData(arrayElements)
+        decodeListArray(vector, rowIndex, elementType)
 
       case BinaryType =>
         vector match {
@@ -205,7 +187,11 @@ object ArrowConverter extends Logging {
             v.get(rowIndex)
           case v: FixedSizeBinaryVector =>
             milvusType match {
-              case Some(MilvusDataType.BinaryVector) =>
+              case Some(
+                    MilvusDataType.BinaryVector | MilvusDataType.FloatVector |
+                    MilvusDataType.Float16Vector |
+                    MilvusDataType.BFloat16Vector | MilvusDataType.Int8Vector
+                  ) =>
                 v.get(rowIndex)
               case Some(other) =>
                 throw new IllegalArgumentException(
@@ -213,12 +199,27 @@ object ArrowConverter extends Logging {
                 )
               case None =>
                 throw new IllegalArgumentException(
-                  s"FixedSizeBinary binary vectors require ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
+                  s"FixedSizeBinary vectors require ${MilvusDataTypeMetadataKey} metadata"
                 )
             }
           case other =>
             throw new IllegalArgumentException(
               s"Cannot decode ${other.getClass.getSimpleName} as BinaryType"
+            )
+        }
+
+      case MapType(keyType, valueType, _) if isBinaryBackedVector(vector) =>
+        milvusType match {
+          case Some(MilvusDataType.SparseFloatVector) =>
+            requireSparseSparkTypes(keyType, valueType)
+            decodeSparseMap(binaryVectorBytes(vector, rowIndex))
+          case Some(other) =>
+            throw new IllegalArgumentException(
+              s"Cannot decode binary-backed vector as MapType for Milvus type $other"
+            )
+          case None =>
+            throw new IllegalArgumentException(
+              s"Binary-backed maps require ${MilvusDataTypeMetadataKey} metadata for SparseFloatVector"
             )
         }
 
@@ -263,6 +264,105 @@ object ArrowConverter extends Logging {
       .map(MilvusDataType.fromValue)
   }
 
+  private def isBinaryBackedVector(vector: FieldVector): Boolean =
+    vector.isInstanceOf[FixedSizeBinaryVector] ||
+      vector.isInstanceOf[VarBinaryVector]
+
+  private def binaryVectorBytes(
+      vector: FieldVector,
+      rowIndex: Int
+  ): Array[Byte] = vector match {
+    case fixed: FixedSizeBinaryVector => fixed.get(rowIndex)
+    case variable: VarBinaryVector    => variable.get(rowIndex)
+    case other =>
+      throw new IllegalArgumentException(
+        s"Cannot read ${other.getClass.getSimpleName} as a binary-backed vector"
+      )
+  }
+
+  private def decodeListArray(
+      vector: FieldVector,
+      rowIndex: Int,
+      elementType: DataType
+  ): ArrayData = {
+    val listVector = vector match {
+      case list: ListVector => list
+      case other =>
+        throw new IllegalArgumentException(
+          s"Cannot decode ${other.getClass.getSimpleName} as Array[$elementType]"
+        )
+    }
+    val dataVector = listVector.getDataVector
+    val startIndex = listVector.getElementStartIndex(rowIndex)
+    val endIndex = listVector.getElementEndIndex(rowIndex)
+    val length = endIndex - startIndex
+
+    val arrayElements = (0 until length).map { i =>
+      val elemIndex = startIndex + i
+      if (dataVector.isNull(elemIndex)) {
+        null
+      } else {
+        arrowValueToSparkValue(dataVector, elemIndex, elementType, None)
+      }
+    }.toArray
+
+    ArrayData.toArrayData(arrayElements)
+  }
+
+  private def requireSparseSparkTypes(
+      keyType: DataType,
+      valueType: DataType
+  ): Unit = {
+    if (keyType != LongType || valueType != FloatType) {
+      throw new IllegalArgumentException(
+        s"SparseFloatVector requires MapType(LongType, FloatType), got MapType($keyType, $valueType)"
+      )
+    }
+  }
+
+  private def decodeSparseMap(bytes: Array[Byte]): ArrayBasedMapData = {
+    val entries = SparseFloatVectorConverter.decodeSparseFloatVector(bytes)
+    val keys = new Array[Any](entries.size)
+    val values = new Array[Any](entries.size)
+    entries.zipWithIndex.foreach { case ((index, value), entryIndex) =>
+      keys(entryIndex) = index
+      values(entryIndex) = value
+    }
+    ArrayBasedMapData(keys, values)
+  }
+
+  private def encodeSparseMap(
+      mapData: MapData,
+      keyType: DataType,
+      valueType: DataType
+  ): Array[Byte] = {
+    requireSparseSparkTypes(keyType, valueType)
+    val keys = mapData.keyArray()
+    val values = mapData.valueArray()
+    val entries = (0 until mapData.numElements()).map { index =>
+      if (keys.isNullAt(index) || values.isNullAt(index)) {
+        throw new IllegalArgumentException(
+          "SparseFloatVector map entries cannot contain null keys or values"
+        )
+      }
+      keys.getLong(index) -> values.getFloat(index)
+    }
+    SparseFloatVectorConverter.encodeSparseFloatVectorEntries(entries)
+  }
+
+  private def requireNonNullVectorArrayElement(
+      arrayData: ArrayData,
+      index: Int,
+      vector: FieldVector,
+      sparkType: String
+  ): Unit = {
+    if (arrayData.isNullAt(index)) {
+      throw new IllegalArgumentException(
+        s"Cannot encode $sparkType for vector '${vector.getName}': null element at index $index"
+      )
+    }
+  }
+
   private def utf8StringFromVariableWidth(
       vector: FieldVector,
       rowIndex: Int
@@ -294,7 +394,7 @@ object ArrowConverter extends Logging {
     UTF8String.fromBytes(bytes)
   }
 
-  private def decodeFixedSizeBinaryFloats(
+  private def decodeBinaryFloats(
       bytes: Array[Byte],
       milvusType: Option[MilvusDataType],
       allowLegacyFloatVector: Boolean
@@ -316,11 +416,11 @@ object ArrowConverter extends Logging {
         decodeFloatVectorBytes(bytes)
       case None =>
         throw new IllegalArgumentException(
-          s"FixedSizeBinary float vectors require ${MilvusDataTypeMetadataKey} metadata"
+          s"Binary-backed float vectors require ${MilvusDataTypeMetadataKey} metadata"
         )
       case Some(other) =>
         throw new IllegalArgumentException(
-          s"Cannot decode FixedSizeBinary as Array[Float] for Milvus type $other"
+          s"Cannot decode binary-backed vector as Array[Float] for Milvus type $other"
         )
     }
   }
@@ -330,7 +430,103 @@ object ArrowConverter extends Logging {
     (0 until (bytes.length / 4)).map(_ => buffer.getFloat()).toArray
   }
 
+  private def encodeFloatVectorBytes(values: Array[Float]): Array[Byte] = {
+    val bytes = new Array[Byte](values.length * 4)
+    val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    values.foreach(buffer.putFloat)
+    bytes
+  }
+
+  private def setBinaryVectorValue(
+      vector: FieldVector,
+      rowIndex: Int,
+      bytes: Array[Byte],
+      sparkType: String,
+      milvusType: Option[MilvusDataType],
+      vectorDimension: Option[Int]
+  ): Unit = {
+    validateDenseVectorByteWidth(
+      vector,
+      bytes,
+      sparkType,
+      milvusType,
+      vectorDimension
+    )
+
+    vector match {
+      case fixed: FixedSizeBinaryVector => fixed.set(rowIndex, bytes)
+      case variable: VarBinaryVector    =>
+        // setSafe grows the variable-width data buffer when needed.
+        variable.setSafe(rowIndex, bytes)
+      case other =>
+        throw new IllegalArgumentException(
+          s"Cannot encode $sparkType into ${other.getClass.getSimpleName}"
+        )
+    }
+  }
+
+  private def validateDenseVectorByteWidth(
+      vector: FieldVector,
+      bytes: Array[Byte],
+      sparkType: String,
+      milvusType: Option[MilvusDataType],
+      vectorDimension: Option[Int]
+  ): Unit =
+    milvusType.filter(DenseVectorTypes.contains).foreach { dataType =>
+      val expectedBytes = vectorDimension match {
+        case Some(dimension) => denseVectorByteWidth(dataType, dimension)
+        case None =>
+          vector match {
+            case fixed: FixedSizeBinaryVector => fixed.getByteWidth
+            case _: VarBinaryVector =>
+              throw new IllegalArgumentException(
+                s"Cannot encode $sparkType for nullable dense vector '${vector.getName}' ($dataType): missing $MilvusVectorDimensionMetadataKey or Arrow $ArrowVectorDimensionMetadataKey metadata"
+              )
+            case other =>
+              throw new IllegalArgumentException(
+                s"Cannot determine dense vector width from ${other.getClass.getSimpleName}"
+              )
+          }
+      }
+
+      if (bytes.length != expectedBytes) {
+        throw new IllegalArgumentException(
+          s"Cannot encode $sparkType for dense vector '${vector.getName}' ($dataType): expected $expectedBytes bytes, got ${bytes.length}"
+        )
+      }
+    }
+
+  private def denseVectorByteWidth(
+      dataType: MilvusDataType,
+      dimension: Int
+  ): Int = {
+    if (dimension <= 0) {
+      throw new IllegalArgumentException(
+        s"Dense vector dimension must be positive, got $dimension for $dataType"
+      )
+    }
+
+    dataType match {
+      case MilvusDataType.FloatVector => Math.multiplyExact(dimension, 4)
+      case MilvusDataType.Float16Vector | MilvusDataType.BFloat16Vector =>
+        Math.multiplyExact(dimension, 2)
+      case MilvusDataType.Int8Vector => dimension
+      case MilvusDataType.BinaryVector =>
+        if (dimension % 8 != 0) {
+          throw new IllegalArgumentException(
+            s"BinaryVector dimension must be a multiple of 8, got $dimension"
+          )
+        }
+        dimension / 8
+      case other =>
+        throw new IllegalArgumentException(
+          s"Cannot compute dense vector byte width for $other"
+        )
+    }
+  }
+
   val MilvusDataTypeMetadataKey = "milvus.data_type"
+  val MilvusVectorDimensionMetadataKey = "milvus.vector_dim"
 
   /** Set a value in an Arrow vector from a Spark InternalRow
     *
@@ -351,6 +547,25 @@ object ArrowConverter extends Logging {
       record: InternalRow,
       colIndex: Int,
       sparkType: DataType
+  ): Unit =
+    sparkValueToArrowValue(
+      vector,
+      rowIndex,
+      record,
+      colIndex,
+      sparkType,
+      None,
+      None
+    )
+
+  private def sparkValueToArrowValue(
+      vector: FieldVector,
+      rowIndex: Int,
+      record: InternalRow,
+      colIndex: Int,
+      sparkType: DataType,
+      milvusType: Option[MilvusDataType],
+      vectorDimension: Option[Int]
   ): Unit = {
     if (record.isNullAt(colIndex)) {
       vector.setNull(rowIndex)
@@ -398,20 +613,117 @@ object ArrowConverter extends Logging {
           vector.asInstanceOf[VarCharVector].setSafe(rowIndex, str.getBytes)
         }
 
-      case ArrayType(FloatType, _) =>
-        // FloatVector stored as FixedSizeBinaryVector
+      case ArrayType(FloatType, _) if isBinaryBackedVector(vector) =>
         val arrayData = record.getArray(colIndex)
-        val floats = (0 until arrayData.numElements())
-          .map(i => arrayData.getFloat(i))
-          .toArray
-        val bytes = new Array[Byte](floats.length * 4)
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        floats.foreach(buffer.putFloat)
-        vector.asInstanceOf[FixedSizeBinaryVector].set(rowIndex, bytes)
+        val floats = (0 until arrayData.numElements()).map { i =>
+          requireNonNullVectorArrayElement(
+            arrayData,
+            i,
+            vector,
+            "Array[Float]"
+          )
+          arrayData.getFloat(i)
+        }.toArray
+        val bytes = milvusType match {
+          case Some(MilvusDataType.Float16Vector) =>
+            floats.flatMap(value => FloatConverter.toFloat16Bytes(value))
+          case Some(MilvusDataType.BFloat16Vector) =>
+            floats.flatMap(value => FloatConverter.toBFloat16Bytes(value))
+          case Some(MilvusDataType.FloatVector) | None =>
+            encodeFloatVectorBytes(floats)
+          case Some(other) =>
+            throw new IllegalArgumentException(
+              s"Cannot encode Array[Float] as binary-backed Milvus type $other"
+            )
+        }
+        setBinaryVectorValue(
+          vector,
+          rowIndex,
+          bytes,
+          "Array[Float]",
+          milvusType,
+          vectorDimension
+        )
+
+      case ArrayType(ShortType, _) if isBinaryBackedVector(vector) =>
+        val arrayData = record.getArray(colIndex)
+        val values = (0 until arrayData.numElements()).map { i =>
+          requireNonNullVectorArrayElement(
+            arrayData,
+            i,
+            vector,
+            "Array[Short]"
+          )
+          arrayData.getShort(i)
+        }.toArray
+        val bytes = milvusType match {
+          case Some(MilvusDataType.Int8Vector) =>
+            values.map { value =>
+              if (value < Byte.MinValue || value > Byte.MaxValue) {
+                throw new IllegalArgumentException(
+                  s"Int8Vector value $value is outside [${Byte.MinValue}, ${Byte.MaxValue}]"
+                )
+              }
+              value.toByte
+            }
+          case Some(other) =>
+            throw new IllegalArgumentException(
+              s"Cannot encode Array[Short] as binary-backed Milvus type $other"
+            )
+          case None =>
+            throw new IllegalArgumentException(
+              s"Binary-backed Array[Short] requires ${MilvusDataTypeMetadataKey} metadata for Int8Vector"
+            )
+        }
+        setBinaryVectorValue(
+          vector,
+          rowIndex,
+          bytes,
+          "Array[Short]",
+          milvusType,
+          vectorDimension
+        )
+
+      case ArrayType(ByteType, _) if isBinaryBackedVector(vector) =>
+        val arrayData = record.getArray(colIndex)
+        val bytes = (0 until arrayData.numElements()).map { i =>
+          requireNonNullVectorArrayElement(
+            arrayData,
+            i,
+            vector,
+            "Array[Byte]"
+          )
+          arrayData.getByte(i)
+        }.toArray
+        milvusType match {
+          case Some(MilvusDataType.BinaryVector) =>
+            setBinaryVectorValue(
+              vector,
+              rowIndex,
+              bytes,
+              "Array[Byte]",
+              milvusType,
+              vectorDimension
+            )
+          case Some(other) =>
+            throw new IllegalArgumentException(
+              s"Cannot encode Array[Byte] as binary-backed Milvus type $other"
+            )
+          case None =>
+            throw new IllegalArgumentException(
+              s"Binary-backed Array[Byte] requires ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
+            )
+        }
 
       case ArrayType(elementType, _) =>
         // Generic array handling
-        val listVector = vector.asInstanceOf[ListVector]
+        val listVector = vector match {
+          case list: ListVector => list
+          case other =>
+            throw new IllegalArgumentException(
+              s"Cannot encode Array[$elementType] into ${other.getClass.getSimpleName}"
+            )
+        }
         val dataVector = listVector.getDataVector
         val arrayData = record.getArray(colIndex)
 
@@ -430,7 +742,9 @@ object ArrowConverter extends Logging {
               elemIndex,
               elemRow,
               0,
-              elementType
+              elementType,
+              None,
+              None
             )
           }
         }
@@ -442,9 +756,37 @@ object ArrowConverter extends Logging {
         if (bytes == null) {
           vector.setNull(rowIndex)
         } else {
-          // See StringType above — setSafe grows the data buffer; set does not.
-          vector.asInstanceOf[VarBinaryVector].setSafe(rowIndex, bytes)
+          setBinaryVectorValue(
+            vector,
+            rowIndex,
+            bytes,
+            "BinaryType",
+            milvusType,
+            vectorDimension
+          )
         }
+
+      case MapType(keyType, valueType, _)
+          if milvusType.contains(MilvusDataType.SparseFloatVector) =>
+        if (!isBinaryBackedVector(vector)) {
+          throw new IllegalArgumentException(
+            s"SparseFloatVector MapType requires a binary-backed Arrow vector, got ${vector.getClass.getSimpleName}"
+          )
+        }
+        val bytes = encodeSparseMap(record.getMap(colIndex), keyType, valueType)
+        setBinaryVectorValue(
+          vector,
+          rowIndex,
+          bytes,
+          "SparseFloatVector MapType",
+          milvusType,
+          vectorDimension
+        )
+
+      case MapType(_, _, _) if isBinaryBackedVector(vector) =>
+        throw new IllegalArgumentException(
+          s"Binary-backed MapType requires ${MilvusDataTypeMetadataKey} metadata for SparseFloatVector"
+        )
 
       case MapType(keyType, valueType, _) =>
         val mapVector = vector.asInstanceOf[MapVector]
@@ -467,14 +809,18 @@ object ArrowConverter extends Logging {
             elemIndex,
             keyRow,
             0,
-            keyType
+            keyType,
+            None,
+            None
           )
           sparkValueToArrowValue(
             structVector.getChild("value"),
             elemIndex,
             valueRow,
             0,
-            valueType
+            valueType,
+            None,
+            None
           )
         }
 
@@ -504,7 +850,48 @@ object ArrowConverter extends Logging {
   ): Unit = {
     sparkSchema.fields.zipWithIndex.foreach { case (field, colIndex) =>
       val vector = root.getVector(colIndex)
-      sparkValueToArrowValue(vector, rowIndex, record, colIndex, field.dataType)
+      sparkValueToArrowValue(
+        vector,
+        rowIndex,
+        record,
+        colIndex,
+        field.dataType,
+        milvusDataType(field),
+        milvusVectorDimension(field, vector)
+      )
+    }
+  }
+
+  private def milvusVectorDimension(
+      field: StructField,
+      vector: FieldVector
+  ): Option[Int] = {
+    val sparkDimension = Option(field.metadata)
+      .filter(_.contains(MilvusVectorDimensionMetadataKey))
+      .map(_.getLong(MilvusVectorDimensionMetadataKey))
+
+    val arrowDimension = Option(vector.getField)
+      .flatMap(arrowField => Option(arrowField.getMetadata))
+      .flatMap(metadata =>
+        Option(metadata.get(ArrowVectorDimensionMetadataKey))
+      )
+      .map { rawDimension =>
+        try rawDimension.toLong
+        catch {
+          case _: NumberFormatException =>
+            throw new IllegalArgumentException(
+              s"Invalid Arrow $ArrowVectorDimensionMetadataKey metadata '$rawDimension' for vector '${vector.getName}'"
+            )
+        }
+      }
+
+    sparkDimension.orElse(arrowDimension).map { dimension =>
+      if (dimension <= 0 || dimension > Int.MaxValue) {
+        throw new IllegalArgumentException(
+          s"Invalid vector dimension $dimension for field '${field.name}'"
+        )
+      }
+      dimension.toInt
     }
   }
 }

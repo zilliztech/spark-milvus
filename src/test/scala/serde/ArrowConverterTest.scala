@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.serde
 
+import java.nio.{ByteBuffer, ByteOrder}
 import scala.collection.JavaConverters._
 
 import org.apache.arrow.memory.RootAllocator
@@ -10,12 +11,15 @@ import org.apache.arrow.vector.{
   VectorSchemaRoot
 }
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
-import org.apache.spark.sql.catalyst.util.ArrayData
+import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, ArrayData}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.{
   ArrayType,
   BinaryType,
   ByteType,
   FloatType,
+  LongType,
+  MapType,
   MetadataBuilder,
   ShortType,
   StringType,
@@ -25,7 +29,11 @@ import org.apache.spark.sql.types.{
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.spark.connector.FloatConverter
+import com.zilliz.spark.connector.{
+  FloatConverter,
+  MilvusSchemaUtil,
+  SparseFloatVectorConverter
+}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class ArrowConverterTest extends AnyFunSuite with Matchers {
@@ -93,15 +101,22 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
   private def vectorField(
       name: String,
       sparkType: org.apache.spark.sql.types.DataType,
-      milvusType: MilvusDataType
+      milvusType: MilvusDataType,
+      dimension: Option[Int] = None
   ): StructField = {
+    val metadata = new MetadataBuilder()
+      .putLong(ArrowConverter.MilvusDataTypeMetadataKey, milvusType.value)
+    dimension.foreach(value =>
+      metadata.putLong(
+        ArrowConverter.MilvusVectorDimensionMetadataKey,
+        value
+      )
+    )
     StructField(
       name,
       sparkType,
       nullable = true,
-      metadata = new MetadataBuilder()
-        .putLong(ArrowConverter.MilvusDataTypeMetadataKey, milvusType.value)
-        .build()
+      metadata = metadata.build()
     )
   }
 
@@ -117,6 +132,464 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       )
       row.getBinary(0) shouldBe bytes
     }
+  }
+
+  test("arrowToInternalRow keeps dense vector fixed-size bytes as BinaryType") {
+    val bytes = java.nio.ByteBuffer
+      .allocate(8)
+      .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+      .putFloat(1.5f)
+      .putFloat(-2.0f)
+      .array()
+    withFixedSizeBinaryRoot("float", bytes.length, bytes) { root =>
+      val row = ArrowConverter.arrowToInternalRow(
+        root,
+        0,
+        StructType(
+          Seq(vectorField("float", BinaryType, MilvusDataType.FloatVector))
+        )
+      )
+      row.getBinary(0) shouldBe bytes
+    }
+  }
+
+  test("internalRowToArrow writes BinaryType to fixed and variable binary") {
+    val bytes = Array[Byte](1, 2, 3, 4)
+    val sparkSchema = StructType(Seq(StructField("vec", BinaryType)))
+
+    Seq[ArrowType](
+      new ArrowType.FixedSizeBinary(bytes.length),
+      new ArrowType.Binary()
+    ).foreach { arrowType =>
+      val allocator = new RootAllocator(Long.MaxValue)
+      try {
+        val schema = new Schema(
+          Seq(new Field("vec", FieldType.nullable(arrowType), null)).asJava
+        )
+        val root = VectorSchemaRoot.create(schema, allocator)
+        try {
+          root.allocateNew()
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow(bytes),
+            sparkSchema
+          )
+          root.getVector("vec") match {
+            case vector: FixedSizeBinaryVector => vector.get(0) shouldBe bytes
+            case vector: VarBinaryVector       => vector.get(0) shouldBe bytes
+            case other => fail(s"unexpected vector ${other.getClass}")
+          }
+        } finally root.close()
+      } finally allocator.close()
+    }
+  }
+
+  test("internalRowToArrow writes nullable dense arrays to VarBinary") {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+
+    def write(
+        field: StructField,
+        value: ArrayData
+    ): Array[Byte] = {
+      val sparkSchema = StructType(Seq(field))
+      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+      val allocator = new RootAllocator(Long.MaxValue)
+      try {
+        val root = VectorSchemaRoot.create(arrowSchema, allocator)
+        try {
+          root.allocateNew()
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow.fromSeq(Seq(value)),
+            sparkSchema
+          )
+          ArrowConverter.internalRowToArrow(
+            root,
+            1,
+            InternalRow.fromSeq(Seq(null)),
+            sparkSchema
+          )
+          val vector = root.getVector(field.name).asInstanceOf[VarBinaryVector]
+          vector.setValueCount(2)
+          vector.isNull(1) shouldBe true
+          vector.get(0)
+        } finally root.close()
+      } finally allocator.close()
+    }
+
+    val floats = Array(1.5f, -2.0f)
+    val floatBytes = ByteBuffer
+      .allocate(8)
+      .order(ByteOrder.LITTLE_ENDIAN)
+      .putFloat(floats(0))
+      .putFloat(floats(1))
+      .array()
+
+    write(
+      vectorField(
+        "float",
+        ArrayType(FloatType),
+        MilvusDataType.FloatVector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(floats)
+    ) shouldBe floatBytes
+    write(
+      vectorField(
+        "float16",
+        ArrayType(FloatType),
+        MilvusDataType.Float16Vector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(floats)
+    ) shouldBe floats.flatMap(FloatConverter.toFloat16Bytes)
+    write(
+      vectorField(
+        "bfloat16",
+        ArrayType(FloatType),
+        MilvusDataType.BFloat16Vector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(floats)
+    ) shouldBe floats.flatMap(FloatConverter.toBFloat16Bytes)
+    write(
+      vectorField(
+        "int8",
+        ArrayType(ShortType),
+        MilvusDataType.Int8Vector,
+        Some(4)
+      ),
+      ArrayData.toArrayData(Array[Short](-128, -1, 0, 127))
+    ) shouldBe Array[Byte](-128, -1, 0, 127)
+  }
+
+  test("internalRowToArrow rejects wrong-width nullable dense vectors") {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+
+    def reject(
+        field: StructField,
+        value: Any,
+        expectedBytes: Int,
+        actualBytes: Int,
+        vectorDimensions: Map[String, Int] = Map.empty
+    ): Unit = {
+      val sparkSchema = StructType(Seq(field))
+      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(
+        sparkSchema,
+        vectorDimensions
+      )
+      val allocator = new RootAllocator(Long.MaxValue)
+      try {
+        val root = VectorSchemaRoot.create(arrowSchema, allocator)
+        try {
+          root.allocateNew()
+          val error = intercept[IllegalArgumentException] {
+            ArrowConverter.internalRowToArrow(
+              root,
+              0,
+              InternalRow.fromSeq(Seq(value)),
+              sparkSchema
+            )
+          }
+          error.getMessage should include(s"expected $expectedBytes bytes")
+          error.getMessage should include(s"got $actualBytes")
+        } finally root.close()
+      } finally allocator.close()
+    }
+
+    // No Spark dimension metadata here: exercise the Arrow `dim` metadata
+    // emitted from the normal writer's vectorDimensions option.
+    reject(
+      vectorField(
+        "float",
+        ArrayType(FloatType),
+        MilvusDataType.FloatVector
+      ),
+      ArrayData.toArrayData(Array(1.0f)),
+      expectedBytes = 8,
+      actualBytes = 4,
+      vectorDimensions = Map("float" -> 2)
+    )
+    reject(
+      vectorField(
+        "float16",
+        ArrayType(FloatType),
+        MilvusDataType.Float16Vector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(Array(1.0f)),
+      expectedBytes = 4,
+      actualBytes = 2
+    )
+    reject(
+      vectorField(
+        "bfloat16",
+        ArrayType(FloatType),
+        MilvusDataType.BFloat16Vector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(Array(1.0f)),
+      expectedBytes = 4,
+      actualBytes = 2
+    )
+    reject(
+      vectorField(
+        "int8",
+        ArrayType(ShortType),
+        MilvusDataType.Int8Vector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(Array[Short](1)),
+      expectedBytes = 2,
+      actualBytes = 1
+    )
+    reject(
+      vectorField(
+        "binary_array",
+        ArrayType(ByteType),
+        MilvusDataType.BinaryVector,
+        Some(16)
+      ),
+      ArrayData.toArrayData(Array[Byte](1)),
+      expectedBytes = 2,
+      actualBytes = 1
+    )
+    reject(
+      vectorField(
+        "binary_bytes",
+        BinaryType,
+        MilvusDataType.BinaryVector,
+        Some(16)
+      ),
+      Array[Byte](1),
+      expectedBytes = 2,
+      actualBytes = 1
+    )
+  }
+
+  test("internalRowToArrow rejects non-byte-aligned BinaryVector dimension") {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+
+    val field = vectorField(
+      "binary",
+      BinaryType,
+      MilvusDataType.BinaryVector,
+      Some(10)
+    )
+    val sparkSchema = StructType(Seq(field))
+    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val root = VectorSchemaRoot.create(arrowSchema, allocator)
+      try {
+        root.allocateNew()
+        val error = intercept[IllegalArgumentException] {
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow(Array[Byte](1, 2)),
+            sparkSchema
+          )
+        }
+        error.getMessage should include("multiple of 8")
+      } finally root.close()
+    } finally allocator.close()
+  }
+
+  test("internalRowToArrow rejects null dense vector array elements") {
+    def reject(field: StructField, value: ArrayData): Unit = {
+      val sparkSchema = StructType(Seq(field))
+      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+      val allocator = new RootAllocator(Long.MaxValue)
+      try {
+        val root = VectorSchemaRoot.create(arrowSchema, allocator)
+        try {
+          root.allocateNew()
+          val error = intercept[IllegalArgumentException] {
+            ArrowConverter.internalRowToArrow(
+              root,
+              0,
+              InternalRow(value),
+              sparkSchema
+            )
+          }
+          error.getMessage should include("null element at index 1")
+        } finally root.close()
+      } finally allocator.close()
+    }
+
+    reject(
+      vectorField(
+        "float",
+        ArrayType(FloatType, containsNull = true),
+        MilvusDataType.FloatVector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(Array[Any](1.0f, null))
+    )
+    reject(
+      vectorField(
+        "int8",
+        ArrayType(ShortType, containsNull = true),
+        MilvusDataType.Int8Vector,
+        Some(2)
+      ),
+      ArrayData.toArrayData(Array[Any](1.toShort, null))
+    )
+    reject(
+      vectorField(
+        "binary",
+        ArrayType(ByteType, containsNull = true),
+        MilvusDataType.BinaryVector,
+        Some(16)
+      ),
+      ArrayData.toArrayData(Array[Any](1.toByte, null))
+    )
+  }
+
+  test("arrowToInternalRow decodes nullable dense vectors from VarBinary") {
+    val floats = Array(1.5f, -2.0f)
+    val floatBytes = ByteBuffer
+      .allocate(8)
+      .order(ByteOrder.LITTLE_ENDIAN)
+      .putFloat(floats(0))
+      .putFloat(floats(1))
+      .array()
+
+    def readFloats(
+        name: String,
+        bytes: Array[Byte],
+        milvusType: MilvusDataType
+    ): Array[Float] = {
+      var result: Array[Float] = null
+      withVariableWidthRoot(name, new ArrowType.Binary(), bytes) { root =>
+        val row = ArrowConverter.arrowToInternalRow(
+          root,
+          0,
+          StructType(
+            Seq(vectorField(name, ArrayType(FloatType), milvusType))
+          )
+        )
+        result = row.getArray(0).toFloatArray
+      }
+      result
+    }
+
+    readFloats("float", floatBytes, MilvusDataType.FloatVector) shouldBe floats
+    readFloats(
+      "float16",
+      floats.flatMap(FloatConverter.toFloat16Bytes),
+      MilvusDataType.Float16Vector
+    ) shouldBe floats
+    readFloats(
+      "bfloat16",
+      floats.flatMap(FloatConverter.toBFloat16Bytes),
+      MilvusDataType.BFloat16Vector
+    ) shouldBe floats
+
+    val int8Bytes = Array[Byte](-128, -1, 0, 127)
+    withVariableWidthRoot("int8", new ArrowType.Binary(), int8Bytes) { root =>
+      val row = ArrowConverter.arrowToInternalRow(
+        root,
+        0,
+        StructType(
+          Seq(
+            vectorField(
+              "int8",
+              ArrayType(ShortType),
+              MilvusDataType.Int8Vector
+            )
+          )
+        )
+      )
+      row.getArray(0).toShortArray shouldBe int8Bytes.map(_.toShort)
+    }
+  }
+
+  test("internalRowToArrow round-trips SparseFloatVector MapType as Binary") {
+    val field = vectorField(
+      "sparse",
+      MapType(LongType, FloatType, valueContainsNull = false),
+      MilvusDataType.SparseFloatVector
+    )
+    val sparkSchema = StructType(Seq(field))
+    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+    arrowSchema.findField("sparse").getType shouldBe new ArrowType.Binary()
+
+    val mapData = ArrayBasedMapData(
+      Array[Any](3L, 1L),
+      Array[Any](2.5f, 1.25f)
+    )
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val root = VectorSchemaRoot.create(arrowSchema, allocator)
+      try {
+        root.allocateNew()
+        ArrowConverter.internalRowToArrow(
+          root,
+          0,
+          InternalRow(mapData),
+          sparkSchema
+        )
+        val vector = root.getVector("sparse").asInstanceOf[VarBinaryVector]
+        vector.setValueCount(1)
+        root.setRowCount(1)
+
+        vector.get(0) shouldBe SparseFloatVectorConverter
+          .encodeSparseFloatVector(Map(1L -> 1.25f, 3L -> 2.5f))
+
+        val decoded = ArrowConverter
+          .arrowToInternalRow(root, 0, sparkSchema)
+          .getMap(0)
+        decoded.keyArray().toLongArray shouldBe Array(1L, 3L)
+        decoded.valueArray().toFloatArray shouldBe Array(1.25f, 2.5f)
+      } finally root.close()
+    } finally allocator.close()
+  }
+
+  test("SparseFloatVector binary conversion validates malformed values") {
+    val field = vectorField(
+      "sparse",
+      MapType(LongType, FloatType, valueContainsNull = false),
+      MilvusDataType.SparseFloatVector
+    )
+    val sparkSchema = StructType(Seq(field))
+
+    withVariableWidthRoot(
+      "sparse",
+      new ArrowType.Binary(),
+      Array[Byte](1)
+    ) { root =>
+      val error = intercept[com.zilliz.spark.connector.DataParseException] {
+        ArrowConverter.arrowToInternalRow(root, 0, sparkSchema)
+      }
+      error.getMessage should include("multiple of 8")
+    }
+
+    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val root = VectorSchemaRoot.create(arrowSchema, allocator)
+      try {
+        root.allocateNew()
+        val error = intercept[com.zilliz.spark.connector.DataParseException] {
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow(
+              ArrayBasedMapData(
+                Array[Any](1L),
+                Array[Any](-0.5f)
+              )
+            ),
+            sparkSchema
+          )
+        }
+        error.getMessage should include("non-negative")
+      } finally root.close()
+    } finally allocator.close()
   }
 
   test("arrowToInternalRow decodes valid UTF-8 from VarBinary as StringType") {
@@ -144,29 +617,6 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         )
       }
       err.getMessage should include("not valid UTF-8")
-    }
-  }
-
-  test(
-    "arrowToInternalRow rejects BinaryType for FloatVector fixed-size bytes"
-  ) {
-    val bytes = java.nio.ByteBuffer
-      .allocate(8)
-      .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-      .putFloat(1.5f)
-      .putFloat(-2.0f)
-      .array()
-    withFixedSizeBinaryRoot("float", bytes.length, bytes) { root =>
-      val err = intercept[IllegalArgumentException] {
-        ArrowConverter.arrowToInternalRow(
-          root,
-          0,
-          StructType(
-            Seq(vectorField("float", BinaryType, MilvusDataType.FloatVector))
-          )
-        )
-      }
-      err.getMessage should include("BinaryType")
     }
   }
 
@@ -242,7 +692,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("arrowToInternalRow rejects BinaryType without BinaryVector metadata") {
+  test("arrowToInternalRow rejects BinaryType without vector metadata") {
     val bytes = Array[Byte](0x01, 0x23, 0x45, 0x67)
     withFixedSizeBinaryRoot("binary", bytes.length, bytes) { root =>
       val err = intercept[IllegalArgumentException] {
@@ -252,7 +702,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
           StructType(Seq(StructField("binary", BinaryType)))
         )
       }
-      err.getMessage should include("BinaryVector")
+      err.getMessage should include(ArrowConverter.MilvusDataTypeMetadataKey)
     }
   }
 

@@ -15,6 +15,8 @@ import com.fasterxml.jackson.module.scala.{
 import org.apache.spark.sql.types._
 
 import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.DataTypeUtil
+import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Helper object for converting JSON values that may be either numeric or
   * string to Long/Int Milvus snapshot JSON format may serialize numbers as
@@ -814,13 +816,23 @@ object MilvusSnapshotReader {
   /** Convert a Field to Spark StructField with Milvus metadata preserved.
     */
   def fieldToStructField(field: Field): StructField = {
+    val metadata = new MetadataBuilder()
+      .putLong(ArrowConverter.MilvusDataTypeMetadataKey, field.dataType)
+    val milvusType = MilvusDataType.fromValue(field.dataType)
+    if (DataTypeUtil.isDenseVectorType(milvusType)) {
+      field.getTypeParam("dim").foreach { rawDimension =>
+        metadata.putLong(
+          ArrowConverter.MilvusVectorDimensionMetadataKey,
+          DataTypeUtil.parseVectorDimension(field.name, rawDimension)
+        )
+      }
+    }
+
     StructField(
       field.name,
       dataTypeToSparkType(field.dataType, field.elementType),
       nullable = field.nullable.getOrElse(true),
-      metadata = new MetadataBuilder()
-        .putLong(ArrowConverter.MilvusDataTypeMetadataKey, field.dataType)
-        .build()
+      metadata = metadata.build()
     )
   }
 

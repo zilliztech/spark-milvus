@@ -34,9 +34,10 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.unsafe.types.UTF8String
 
-import com.zilliz.spark.connector.{MilvusOption, MilvusSchemaUtil}
+import com.zilliz.spark.connector.{DataTypeUtil, MilvusOption, MilvusSchemaUtil}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
+import io.milvus.grpc.schema.{DataType => MilvusDataType}
 import io.milvus.storage.{
   ArrowUtils,
   MilvusStorageProperties,
@@ -521,8 +522,9 @@ class MilvusLoonPartitionWriter(
     s"$bucket/$rootPath/spark_write/$collectionName/$partitionName/$timestamp/task_${partitionId}_$taskId"
   }
 
-  /** Extract vector dimensions from MilvusOption for vector fields Vector
-    * fields are identified as Array[Float] in Spark schema
+  /** Extract vector dimensions from MilvusOption for vector fields. Vector
+    * metadata identifies all current dense vector types; Array[Float] remains
+    * as the legacy FloatVector fallback.
     */
   private def extractVectorDimensions(
       schema: StructType,
@@ -532,9 +534,17 @@ class MilvusLoonPartitionWriter(
     // Format: vector.field_name.dim = dimension_value
     val vectorFields = schema.fields.collect {
       case field
-          if field.dataType.isInstanceOf[ArrayType] &&
-            field.dataType.asInstanceOf[ArrayType].elementType == FloatType =>
+          if field.metadata.contains(
+            ArrowConverter.MilvusDataTypeMetadataKey
+          ) && DataTypeUtil.isDenseVectorType(
+            MilvusDataType.fromValue(
+              field.metadata
+                .getLong(ArrowConverter.MilvusDataTypeMetadataKey)
+                .toInt
+            )
+          ) =>
         field.name
+      case field @ StructField(_, ArrayType(FloatType, _), _, _) => field.name
     }
 
     vectorFields.flatMap { fieldName =>
