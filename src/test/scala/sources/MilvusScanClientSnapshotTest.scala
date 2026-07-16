@@ -598,6 +598,21 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       ) == 105L
     )
     assert(
+      schema("binary_vec").metadata.getLong(
+        ArrowConverter.MilvusVectorDimensionMetadataKey
+      ) == 128L
+    )
+    assert(
+      schema("float_vec").metadata.getLong(
+        ArrowConverter.MilvusVectorDimensionMetadataKey
+      ) == 4L
+    )
+    assert(
+      schema("int8_vec").metadata.getLong(
+        ArrowConverter.MilvusVectorDimensionMetadataKey
+      ) == 4L
+    )
+    assert(
       schema("json_payload").metadata.getLong(
         ArrowConverter.MilvusDataTypeMetadataKey
       ) == 23L
@@ -627,6 +642,11 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       schema("binary_vec").metadata.getLong(
         ArrowConverter.MilvusDataTypeMetadataKey
       ) == 100L
+    )
+    assert(
+      schema("binary_vec").metadata.getLong(
+        ArrowConverter.MilvusVectorDimensionMetadataKey
+      ) == 128L
     )
   }
 
@@ -661,6 +681,21 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
         ArrowConverter.MilvusDataTypeMetadataKey
       ) == 105L
     )
+    assert(
+      schema("binary_vec").metadata.getLong(
+        ArrowConverter.MilvusVectorDimensionMetadataKey
+      ) == 128L
+    )
+    assert(
+      schema("float_vec").metadata.getLong(
+        ArrowConverter.MilvusVectorDimensionMetadataKey
+      ) == 4L
+    )
+    assert(
+      schema("int8_vec").metadata.getLong(
+        ArrowConverter.MilvusVectorDimensionMetadataKey
+      ) == 4L
+    )
   }
 
   test("snapshot mode does not overwrite existing milvus.data_type") {
@@ -688,6 +723,11 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       ) == 999L
     )
     assert(schema("binary_vec").metadata.getLong("custom.flag") == 7L)
+    assert(
+      !schema("binary_vec").metadata.contains(
+        ArrowConverter.MilvusVectorDimensionMetadataKey
+      )
+    )
     assert(
       !schema("legacy_bytes").metadata.contains(
         ArrowConverter.MilvusDataTypeMetadataKey

@@ -381,6 +381,59 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
     names shouldBe Seq("row_id", "timestamp")
   }
 
+  test("Milvus collection schema uses Binary for nullable dense vectors") {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import io.milvus.grpc.common.KeyValuePair
+    import io.milvus.grpc.schema.{
+      CollectionSchema => MilvusCollectionSchema,
+      DataType => MilvusDataType,
+      FieldSchema => MilvusFieldSchema
+    }
+    import org.apache.arrow.vector.types.pojo.ArrowType
+
+    def vector(
+        name: String,
+        fieldId: Long,
+        dataType: MilvusDataType,
+        nullable: Boolean
+    ) = MilvusFieldSchema(
+      name = name,
+      fieldID = fieldId,
+      dataType = dataType,
+      nullable = nullable,
+      typeParams = Seq(KeyValuePair(key = "dim", value = "4"))
+    )
+
+    val schema = MilvusCollectionSchema(
+      fields = Seq(
+        vector("fixed", 100, MilvusDataType.FloatVector, nullable = false),
+        vector("nullable", 101, MilvusDataType.FloatVector, nullable = true)
+      )
+    )
+
+    val byLogicalName = MilvusSchemaUtil
+      .convertToArrowSchema(schema)
+      .getFields
+      .asScala
+      .map(field => field.getName -> field)
+      .toMap
+    byLogicalName("fixed").getType shouldBe new ArrowType.FixedSizeBinary(16)
+    byLogicalName("fixed").isNullable shouldBe false
+    byLogicalName("nullable").getType shouldBe new ArrowType.Binary()
+    byLogicalName("nullable").isNullable shouldBe true
+    byLogicalName("nullable").getMetadata.get("dim") shouldBe "4"
+
+    val byFieldId = MilvusSchemaUtil
+      .convertToArrowSchemaWithFieldIdNames(schema)
+      .getFields
+      .asScala
+      .map(field => field.getName -> field)
+      .toMap
+    byFieldId("100").getType shouldBe new ArrowType.FixedSizeBinary(16)
+    byFieldId("101").getType shouldBe new ArrowType.Binary()
+    byFieldId("101").getMetadata.get("dim") shouldBe "4"
+  }
+
   test(
     "useFieldIdAsName = false (V2 packed-parquet) preserves logical column names"
   ) {
@@ -411,6 +464,88 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
     byName("pk").getMetadata.get("PARQUET:field_id") shouldBe "100"
     byName("vec").getMetadata.get("PARQUET:field_id") shouldBe "101"
     byName("ts").getMetadata.get("PARQUET:field_id") shouldBe "1"
+  }
+
+  test("Milvus vector metadata produces exact internal Arrow types") {
+    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import com.zilliz.spark.connector.serde.ArrowConverter
+    import io.milvus.grpc.schema.{DataType => MilvusDataType}
+    import org.apache.arrow.vector.types.pojo.ArrowType
+    import org.apache.spark.sql.types._
+
+    def vectorMetadata(dataType: MilvusDataType, dim: Option[Int]) = {
+      val builder = new MetadataBuilder()
+        .putLong(ArrowConverter.MilvusDataTypeMetadataKey, dataType.value)
+      dim.foreach(value =>
+        builder.putLong(
+          ArrowConverter.MilvusVectorDimensionMetadataKey,
+          value
+        )
+      )
+      builder.build()
+    }
+
+    val schema = StructType(
+      Seq(
+        StructField(
+          "float_vec",
+          BinaryType,
+          nullable = false,
+          vectorMetadata(MilvusDataType.FloatVector, Some(4))
+        ),
+        StructField(
+          "nullable_float_vec",
+          BinaryType,
+          nullable = true,
+          vectorMetadata(MilvusDataType.FloatVector, Some(4))
+        ),
+        StructField(
+          "binary_vec",
+          BinaryType,
+          nullable = false,
+          vectorMetadata(MilvusDataType.BinaryVector, Some(16))
+        ),
+        StructField(
+          "float16_vec",
+          BinaryType,
+          nullable = false,
+          vectorMetadata(MilvusDataType.Float16Vector, Some(4))
+        ),
+        StructField(
+          "bfloat16_vec",
+          BinaryType,
+          nullable = false,
+          vectorMetadata(MilvusDataType.BFloat16Vector, Some(4))
+        ),
+        StructField(
+          "int8_vec",
+          BinaryType,
+          nullable = false,
+          vectorMetadata(MilvusDataType.Int8Vector, Some(4))
+        ),
+        StructField(
+          "sparse_vec",
+          BinaryType,
+          nullable = true,
+          vectorMetadata(MilvusDataType.SparseFloatVector, None)
+        )
+      )
+    )
+
+    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(schema)
+    val fields =
+      arrowSchema.getFields.asScala.map(field => field.getName -> field).toMap
+
+    fields("float_vec").getType shouldBe new ArrowType.FixedSizeBinary(16)
+    fields("float_vec").isNullable shouldBe false
+    fields("nullable_float_vec").getType shouldBe new ArrowType.Binary()
+    fields("nullable_float_vec").isNullable shouldBe true
+    fields("nullable_float_vec").getMetadata.get("dim") shouldBe "4"
+    fields("binary_vec").getType shouldBe new ArrowType.FixedSizeBinary(2)
+    fields("float16_vec").getType shouldBe new ArrowType.FixedSizeBinary(8)
+    fields("bfloat16_vec").getType shouldBe new ArrowType.FixedSizeBinary(8)
+    fields("int8_vec").getType shouldBe new ArrowType.FixedSizeBinary(4)
+    fields("sparse_vec").getType shouldBe new ArrowType.Binary()
   }
 
   test("Handle nullable fields correctly") {

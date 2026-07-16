@@ -333,11 +333,8 @@ object MilvusFieldData {
 }
 
 object FloatConverter {
-  private def isWithinFloat16Range(value: Float): Boolean = {
-    val absValue = Math.abs(value)
-    // float16 range: ±65504
-    absValue <= 65504f && !value.isNaN && !value.isInfinite
-  }
+  private def isFiniteFloat16Input(value: Float): Boolean =
+    !value.isNaN && !value.isInfinite
 
   private def isWithinBFloat16Range(value: Float): Boolean = {
     // bfloat16 has 8 exponent bits, same as float32
@@ -347,40 +344,59 @@ object FloatConverter {
   }
 
   def toFloat16Bytes(value: Float): Seq[Byte] = {
-    if (!isWithinFloat16Range(value)) {
+    if (!isFiniteFloat16Input(value)) {
+      throw new DataParseException(
+        s"Value $value is not a finite float16 input"
+      )
+    }
+
+    // Match Milvus's float16.Fromfloat32 conversion: IEEE-754
+    // round-to-nearest-even, including subnormal values. Truncating the
+    // mantissa here makes normal ingestion produce different bytes from
+    // Milvus import/backfill for values such as 0.3f and 0.7f.
+    val bits = java.lang.Float.floatToRawIntBits(value)
+    val sign = (bits >>> 16) & 0x8000
+    val exponent = (bits >>> 23) & 0xff
+    val mantissa = bits & 0x7fffff
+    val halfExponent = exponent - 127 + 15
+
+    if (halfExponent >= 31) {
       throw new DataParseException(
         s"Value $value is out of float16 range"
       )
     }
 
-    // IEEE 754 float32 format: 1 sign bit, 8 exponent bits, 23 fraction bits
-    val bits = java.lang.Float.floatToRawIntBits(value)
-    val sign = (bits >>> 31) & 0x1
-    val exp = (bits >>> 23) & 0xff
-    val frac = bits & 0x7fffff
-
-    // IEEE 754 float16 format: 1 sign bit, 5 exponent bits, 10 fraction bits
-    val f16Sign = sign
-    val f16Exp = if (exp == 0) {
-      0 // Zero/Subnormal
-    } else if (exp == 0xff) {
-      0x1f // Infinity/NaN
+    val f16Bits = if (halfExponent <= 0) {
+      if (halfExponent < -10) {
+        sign
+      } else {
+        val normalizedMantissa = mantissa | 0x800000
+        val shift = 14 - halfExponent
+        var halfMantissa = normalizedMantissa >>> shift
+        val remainderMask = (1 << shift) - 1
+        val remainder = normalizedMantissa & remainderMask
+        val halfway = 1 << (shift - 1)
+        if (
+          remainder > halfway ||
+          (remainder == halfway && (halfMantissa & 1) != 0)
+        ) {
+          halfMantissa += 1
+        }
+        sign | halfMantissa
+      }
     } else {
-      val newExp = exp - 127 + 15
-      if (newExp < 0) 0
-      else if (newExp > 0x1f) 0x1f
-      else newExp
+      var half = sign | (halfExponent << 10) | (mantissa >>> 13)
+      val remainder = mantissa & 0x1fff
+      if (remainder > 0x1000 || (remainder == 0x1000 && (half & 1) != 0)) {
+        half += 1
+      }
+      if (((half >>> 10) & 0x1f) == 0x1f) {
+        throw new DataParseException(
+          s"Value $value rounds out of float16 range"
+        )
+      }
+      half
     }
-    val f16Frac = frac >>> 13
-
-    // Combine components into a half-precision (float16) value
-    val f16Bits = (f16Sign << 15) | (f16Exp << 10) | f16Frac
-
-    // Create byte array in big-endian format (high byte first)
-    // val bytes = new Array[Byte](2)
-    // bytes(0) = ((f16Bits >>> 8) & 0xff).toByte
-    // bytes(1) = (f16Bits & 0xff).toByte
-    // bytes.toSeq
 
     // Create byte array in little-endian format (low byte first)
     val bytes = new Array[Byte](2)
@@ -529,33 +545,83 @@ object IntConverter {
 }
 
 object SparseFloatVectorConverter {
+  private val MaxIndexExclusive = 0xffffffffL
+
   def encodeSparseFloatVector(sparse: Map[Long, Float]): Array[Byte] = {
-    val sortedEntries = sparse.toSeq.sortBy(_._1)
+    encodeSparseFloatVectorEntries(sparse.toSeq)
+  }
+
+  private[connector] def encodeSparseFloatVectorEntries(
+      entries: Seq[(Long, Float)]
+  ): Array[Byte] = {
+    val sortedEntries = entries.sortBy(_._1)
 
     val buf = ByteBuffer.allocate((4 + 4) * sortedEntries.size)
     buf.order(ByteOrder.LITTLE_ENDIAN)
 
+    var previousIndex: Option[Long] = None
     for ((k, v) <- sortedEntries) {
-      if (k < 0 || k >= Math.pow(2.0, 32) - 1) {
+      if (k < 0 || k >= MaxIndexExclusive) {
         throw new DataParseException(
-          s"Sparse vector index ($k) must be positive and less than 2^32-1"
+          s"Sparse vector index ($k) must be non-negative and less than 2^32-1"
+        )
+      }
+      if (previousIndex.contains(k)) {
+        throw new DataParseException(
+          s"Sparse vector index ($k) is duplicated"
         )
       }
 
-      val lBuf = ByteBuffer.allocate(8)
-      lBuf.order(ByteOrder.LITTLE_ENDIAN)
-      lBuf.putLong(k)
-      buf.put(lBuf.array(), 0, 4)
+      buf.putInt(k.toInt)
 
-      if (v.isNaN || v.isInfinite) {
+      if (v.isNaN || v.isInfinite || v < 0.0f) {
         throw new DataParseException(
-          s"Sparse vector value ($v) cannot be NaN or Infinite"
+          s"Sparse vector value ($v) must be finite and non-negative"
         )
       }
 
       buf.putFloat(v)
+      previousIndex = Some(k)
     }
 
     buf.array()
+  }
+
+  private[connector] def decodeSparseFloatVector(
+      bytes: Array[Byte]
+  ): Seq[(Long, Float)] = {
+    if (bytes.length % 8 != 0) {
+      throw new DataParseException(
+        s"Sparse vector byte length must be a multiple of 8, got ${bytes.length}"
+      )
+    }
+
+    val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val entries = Seq.newBuilder[(Long, Float)]
+    var previousIndex: Option[Long] = None
+    while (buffer.hasRemaining) {
+      val index = buffer.getInt() & 0xffffffffL
+      val value = buffer.getFloat()
+      if (index >= MaxIndexExclusive) {
+        throw new DataParseException(
+          s"Sparse vector index ($index) must be less than 2^32-1"
+        )
+      }
+      previousIndex.foreach { previous =>
+        if (index <= previous) {
+          throw new DataParseException(
+            s"Sparse vector indices must be strictly increasing, got $index after $previous"
+          )
+        }
+      }
+      if (value.isNaN || value.isInfinite || value < 0.0f) {
+        throw new DataParseException(
+          s"Sparse vector value ($value) must be finite and non-negative"
+        )
+      }
+      entries += index -> value
+      previousIndex = Some(index)
+    }
+    entries.result()
   }
 }

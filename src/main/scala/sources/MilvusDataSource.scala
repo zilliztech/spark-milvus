@@ -353,22 +353,53 @@ case class MilvusTable(
   private def rehydrateSnapshotSchemaMetadata(
       baseSchema: StructType
   ): StructType = {
-    val fieldTypeByName = milvusCollection.schema.fields.map { field =>
-      field.name -> field.dataType.value.toLong
+    val collectionFieldByName = milvusCollection.schema.fields.map { field =>
+      field.name -> field
     }.toMap
 
     val fields = baseSchema.fields.map { field =>
-      if (
-        milvusOption.extraColumns.contains(field.name) ||
-        field.metadata.contains(ArrowConverter.MilvusDataTypeMetadataKey)
-      ) {
+      if (milvusOption.extraColumns.contains(field.name)) {
         field
       } else {
-        fieldTypeByName.get(field.name) match {
-          case Some(milvusType) =>
+        collectionFieldByName.get(field.name) match {
+          case Some(collectionField) =>
+            val collectionMetadata = DataTypeUtil.metadata(collectionField)
             val metadataBuilder = new MetadataBuilder()
               .withMetadata(field.metadata)
-              .putLong(ArrowConverter.MilvusDataTypeMetadataKey, milvusType)
+
+            if (
+              !field.metadata.contains(ArrowConverter.MilvusDataTypeMetadataKey)
+            ) {
+              metadataBuilder.putLong(
+                ArrowConverter.MilvusDataTypeMetadataKey,
+                collectionMetadata.getLong(
+                  ArrowConverter.MilvusDataTypeMetadataKey
+                )
+              )
+            }
+            val existingTypeMatchesCollection =
+              !field.metadata.contains(
+                ArrowConverter.MilvusDataTypeMetadataKey
+              ) || field.metadata.getLong(
+                ArrowConverter.MilvusDataTypeMetadataKey
+              ) == collectionMetadata.getLong(
+                ArrowConverter.MilvusDataTypeMetadataKey
+              )
+            if (
+              collectionMetadata.contains(
+                ArrowConverter.MilvusVectorDimensionMetadataKey
+              ) && !field.metadata.contains(
+                ArrowConverter.MilvusVectorDimensionMetadataKey
+              ) && existingTypeMatchesCollection
+            ) {
+              metadataBuilder.putLong(
+                ArrowConverter.MilvusVectorDimensionMetadataKey,
+                collectionMetadata.getLong(
+                  ArrowConverter.MilvusVectorDimensionMetadataKey
+                )
+              )
+            }
+
             field.copy(metadata = metadataBuilder.build())
           case None =>
             field
