@@ -216,4 +216,122 @@ class ColumnMappingTest
     err shouldBe a[SchemaValidationError]
     err.message should include("non-PK")
   }
+
+  // ============ prepareBackfillData ============
+
+  private def resolvedPk(name: String): ResolvedJoinKey =
+    ResolvedJoinKey.primaryKey(name, 100L, None)
+
+  test(
+    "prepareBackfillData keeps legacy pk mapping but uses internal join alias"
+  ) {
+    val df = buildDf(
+      Seq("pk", "vec"),
+      Seq(Seq(1, "v1"), Seq(2, "v2"))
+    )
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(df, resolvedPk("id"), None)
+      .toOption
+      .get
+
+    prepared.joinColumns shouldBe Seq(ResolvedJoinKey.internalColumn(0))
+    prepared.targetFieldNames shouldBe Seq("vec")
+    prepared.dataFrame.columns.toSeq shouldBe Seq(
+      ResolvedJoinKey.internalColumn(0),
+      "vec"
+    )
+    prepared.dataFrame
+      .orderBy(ResolvedJoinKey.internalColumn(0))
+      .collect()
+      .map(r => (r.getInt(0), r.getString(1)))
+      .toSeq shouldBe Seq((1, "v1"), (2, "v2"))
+  }
+
+  test(
+    "prepareBackfillData separates explicitly mapped PK from target fields"
+  ) {
+    val df = buildDf(
+      Seq("source_id", "vec", "drop_me"),
+      Seq(Seq("1", "v1", "x"))
+    )
+    val mapping = Some(Map("source_id" -> "id", "vec" -> "embedding"))
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(df, resolvedPk("id"), mapping)
+      .toOption
+      .get
+
+    prepared.dataFrame.columns.toSeq shouldBe Seq(
+      ResolvedJoinKey.internalColumn(0),
+      "embedding"
+    )
+    prepared.targetFieldNames shouldBe Seq("embedding")
+  }
+
+  test("prepareBackfillData rejects internal join-column collisions") {
+    val df = buildDf(
+      Seq("pk", ResolvedJoinKey.internalColumn(0), "vec"),
+      Seq(Seq(1, "reserved", "v1"))
+    )
+
+    val err = MilvusBackfill
+      .prepareBackfillData(df, resolvedPk("id"), None)
+      .left
+      .toOption
+      .get
+
+    err shouldBe a[SchemaValidationError]
+    err.message should include("reserved for internal join use")
+  }
+
+  test(
+    "prepareBackfillData permits a collection PK named like the internal alias"
+  ) {
+    val internal = ResolvedJoinKey.internalColumn(0)
+    val df = buildDf(Seq("pk", "vec"), Seq(Seq(1, "v1")))
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(df, resolvedPk(internal), None)
+      .toOption
+      .get
+
+    prepared.dataFrame.columns.toSeq shouldBe Seq(internal, "vec")
+    prepared.targetFieldNames shouldBe Seq("vec")
+  }
+
+  test("prepareBackfillData normalizes multiple internal join components") {
+    val joinKey = ResolvedJoinKey(
+      kind = "test_composite",
+      components = Seq(
+        ResolvedJoinComponent(
+          "id",
+          100L,
+          None,
+          ResolvedJoinKey.internalColumn(0)
+        ),
+        ResolvedJoinComponent(
+          "row_number",
+          101L,
+          None,
+          ResolvedJoinKey.internalColumn(1)
+        )
+      )
+    )
+    val df = buildDf(
+      Seq("pk", "row_number", "vec"),
+      Seq(Seq(1, "7", "v1"))
+    )
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(df, joinKey, None)
+      .toOption
+      .get
+
+    prepared.joinColumns shouldBe Seq(
+      ResolvedJoinKey.internalColumn(0),
+      ResolvedJoinKey.internalColumn(1)
+    )
+    prepared.targetFieldNames shouldBe Seq("vec")
+  }
 }
