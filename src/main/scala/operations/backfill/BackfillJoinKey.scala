@@ -27,13 +27,37 @@ private[backfill] final case class ResolvedJoinKey(
   val sourceColumns: Seq[String] = components.map(_.sourceColumn)
   val internalColumns: Seq[String] = components.map(_.internalColumn)
   val fieldIds: Seq[Long] = components.map(_.fieldId)
+
+  /** Assign deterministic private aliases that do not collide with user or
+    * collection columns under Spark's configured name resolver.
+    */
+  def withCollisionFreeInternalColumns(
+      occupiedNames: Seq[String],
+      resolver: (String, String) => Boolean
+  ): ResolvedJoinKey = {
+    var allocatedNames = occupiedNames
+    val allocatedComponents = components.zipWithIndex.map {
+      case (component, index) =>
+        var collisionOrdinal = 0
+        var candidate =
+          ResolvedJoinKey.internalColumn(index, collisionOrdinal)
+        while (allocatedNames.exists(resolver(_, candidate))) {
+          collisionOrdinal += 1
+          candidate = ResolvedJoinKey.internalColumn(index, collisionOrdinal)
+        }
+        allocatedNames = allocatedNames :+ candidate
+        component.copy(internalColumn = candidate)
+    }
+    copy(components = allocatedComponents)
+  }
 }
 
 private[backfill] object ResolvedJoinKey {
   private val InternalColumnPrefix = "__bf_join_"
 
-  def internalColumn(index: Int): String =
-    s"$InternalColumnPrefix${index}__"
+  def internalColumn(index: Int, collisionOrdinal: Int = 0): String =
+    if (collisionOrdinal == 0) s"$InternalColumnPrefix${index}__"
+    else s"$InternalColumnPrefix${index}_${collisionOrdinal}__"
 
   def primaryKey(
       name: String,
@@ -58,9 +82,11 @@ private[backfill] object ResolvedJoinKey {
   */
 private[backfill] final case class PreparedBackfillData(
     dataFrame: DataFrame,
-    joinColumns: Seq[String],
+    joinKey: ResolvedJoinKey,
     targetFieldNames: Seq[String]
-)
+) {
+  val joinColumns: Seq[String] = joinKey.internalColumns
+}
 
 private[backfill] final case class JoinKeyStats(
     rowCount: Long,

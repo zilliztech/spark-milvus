@@ -141,7 +141,7 @@ object MilvusBackfill {
       // Step 3: Resolve the current primary-key join into the generic runtime
       // join-key model. PR1 intentionally keeps PK as the only public behavior;
       // PR2 will add explicit physical-field resolution on top of this seam.
-      val joinKey = snapshotMetadataOpt match {
+      val baseJoinKey = snapshotMetadataOpt match {
         case Some(metadata) =>
           val pkField = metadata.collection.schema.fields
             .find(_.isPrimaryKey.getOrElse(false))
@@ -184,13 +184,17 @@ object MilvusBackfill {
       // depends on the collection's PK name.
       val preparedBackfill = prepareBackfillData(
         rawBackfillDF,
-        joinKey,
-        config.columnMapping
+        baseJoinKey,
+        config.columnMapping,
+        snapshotMetadataOpt.toSeq.flatMap(
+          _.collection.schema.fields.map(_.name)
+        )
       ) match {
         case Left(error) => return Left(error)
         case Right(data) => data
       }
       val mappedBackfillDF = preparedBackfill.dataFrame
+      val joinKey = preparedBackfill.joinKey
 
       val newFieldNames = preparedBackfill.targetFieldNames
 
@@ -584,7 +588,8 @@ object MilvusBackfill {
   private[backfill] def prepareBackfillData(
       df: DataFrame,
       joinKey: ResolvedJoinKey,
-      userMapping: Option[Map[String, String]]
+      userMapping: Option[Map[String, String]],
+      collectionFieldNames: Seq[String] = Seq.empty
   ): Either[BackfillError, PreparedBackfillData] = {
     // The existing mapping contract identifies the first (currently only)
     // component through the collection PK target. Any additional internal
@@ -602,39 +607,36 @@ object MilvusBackfill {
           )
         )
       } else {
-        val reservedCollisions = joinKey.internalColumns.filter(name =>
-          mappedColumns.contains(name) && !joinKey.sourceColumns.contains(name)
+        val caseSensitive = df.sparkSession.conf
+          .get("spark.sql.caseSensitive", "false")
+          .toBoolean
+        val resolver: (String, String) => Boolean =
+          if (caseSensitive) (left, right) => left == right
+          else (left, right) => left.equalsIgnoreCase(right)
+        val allocatedJoinKey = joinKey.withCollisionFreeInternalColumns(
+          mappedColumns ++ collectionFieldNames,
+          resolver
         )
-        if (reservedCollisions.nonEmpty) {
-          Left(
-            SchemaValidationError(
-              s"Backfill parquet contains columns reserved for internal join use: " +
-                reservedCollisions.mkString(", ") +
-                ". Rename the columns (or use --column-mapping) and retry."
-            )
+        val keyAliases =
+          allocatedJoinKey.components.map(c => c.sourceColumn -> c).toMap
+        val normalized = mapped.select(
+          mappedColumns.map { name =>
+            keyAliases.get(name) match {
+              case Some(component) =>
+                mapped.col(name).as(component.internalColumn)
+              case None => mapped.col(name)
+            }
+          }: _*
+        )
+        val targetFieldNames =
+          mappedColumns.filterNot(allocatedJoinKey.sourceColumns.contains)
+        Right(
+          PreparedBackfillData(
+            dataFrame = normalized,
+            joinKey = allocatedJoinKey,
+            targetFieldNames = targetFieldNames
           )
-        } else {
-          val keyAliases =
-            joinKey.components.map(c => c.sourceColumn -> c).toMap
-          val normalized = mapped.select(
-            mappedColumns.map { name =>
-              keyAliases.get(name) match {
-                case Some(component) =>
-                  mapped.col(name).as(component.internalColumn)
-                case None => mapped.col(name)
-              }
-            }: _*
-          )
-          val targetFieldNames =
-            mappedColumns.filterNot(joinKey.sourceColumns.contains)
-          Right(
-            PreparedBackfillData(
-              dataFrame = normalized,
-              joinColumns = joinKey.internalColumns,
-              targetFieldNames = targetFieldNames
-            )
-          )
-        }
+        )
       }
     }
   }
