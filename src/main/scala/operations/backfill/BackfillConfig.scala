@@ -31,6 +31,8 @@ import com.zilliz.spark.connector.MilvusOption
   *   Root path in S3 bucket
   * @param s3Region
   *   S3 region
+  * @param s3CloudProvider
+  *   Native storage provider for the Milvus storage bucket
   * @param batchSize
   *   Batch size for writing data
   * @param customOutputPath
@@ -52,6 +54,7 @@ case class BackfillConfig(
     s3UseSSL: Boolean = false,
     s3RootPath: String = "files",
     s3Region: String = "us-east-1",
+    s3CloudProvider: String = BackfillConfig.DefaultCloudProvider,
     // When true, both Milvus FFI and Spark Hadoop S3A use the default credentials
     // chain (env / web identity / instance profile) instead of static AK/SK.
     s3UseIam: Boolean = false,
@@ -123,6 +126,13 @@ case class BackfillConfig(
       Left("s3Endpoint cannot be empty")
     } else if (s3BucketName.isEmpty) {
       Left("s3BucketName cannot be empty")
+    } else if (
+      !BackfillConfig.AllowedCloudProviders.contains(s3CloudProvider.trim)
+    ) {
+      Left(
+        s"s3CloudProvider must be one of ${BackfillConfig.AllowedCloudProviders
+            .mkString("[", ", ", "]")} (got '$s3CloudProvider')"
+      )
     } else if (batchSize <= 0) {
       Left("batchSize must be positive")
     } else if (
@@ -200,6 +210,7 @@ case class BackfillConfig(
         "fs.bucket_name" -> s3BucketName,
         "fs.root_path" -> s3RootPath,
         "fs.use_ssl" -> s3UseSSL.toString,
+        Properties.FsConfig.FsCloudProvider -> s3CloudProvider.trim,
         "fs.use_iam" -> s3UseIam.toString
       )
     )
@@ -243,6 +254,7 @@ case class BackfillConfig(
         "fs.use_ssl" -> s3UseSSL.toString,
         "fs.use_iam" -> s3UseIam.toString,
         "fs.region" -> s3Region,
+        Properties.FsConfig.FsCloudProvider -> s3CloudProvider.trim,
         "milvus.collection.name" -> s"segment_${segmentId}_backfill",
         "milvus.writer.customPath" -> segmentBasePath,
         "milvus.writer.commitType" -> "addfield",
@@ -324,6 +336,10 @@ case class BackfillConfig(
 }
 
 object BackfillConfig {
+
+  private[backfill] val DefaultCloudProvider = "aws"
+  private[backfill] val AllowedCloudProviders =
+    Set("aws", "gcp", "aliyun", "azure", "tencent", "huawei")
 
   private[backfill] val HadoopS3CredentialsProvider =
     "fs.s3a.aws.credentials.provider"

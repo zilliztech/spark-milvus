@@ -40,6 +40,8 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       "minio:9000",
       "--s3-bucket",
       "a-bucket",
+      "--s3-cloud-provider",
+      "aliyun",
       "--s3-access-key",
       "ak",
       "--s3-secret-key",
@@ -52,6 +54,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     parsed("snapshot") shouldBe "/tmp/snap.json"
     parsed("s3-endpoint") shouldBe "minio:9000"
     parsed("s3-bucket") shouldBe "a-bucket"
+    parsed("s3-cloud-provider") shouldBe "aliyun"
     parsed("s3-access-key") shouldBe "ak"
     parsed("s3-secret-key") shouldBe "sk"
     parsed("s3-use-ssl") shouldBe "true"
@@ -478,12 +481,13 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
   test("Backfill native options include the configured AssumeRole settings") {
     val cfg = BackfillConfig(
-      s3Endpoint = "s3.us-west-2.amazonaws.com",
+      s3Endpoint = "oss-cn-shanghai.aliyuncs.com",
       s3BucketName = "managed-bucket",
       s3AccessKey = "",
       s3SecretKey = "",
+      s3CloudProvider = "aliyun",
       s3UseIam = true,
-      s3RoleArn = Some("arn:aws:iam::123456789012:role/data-role"),
+      s3RoleArn = Some("acs:ram::123456789012:role/data-role"),
       s3RoleSessionName = Some("spark-job"),
       s3ExternalId = Some("external-id")
     )
@@ -493,9 +497,10 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       cfg.getS3WriteOptionsForBasePath("base/path", 1L)
     ).foreach { opts =>
       opts("fs.role_arn") shouldBe
-        "arn:aws:iam::123456789012:role/data-role"
+        "acs:ram::123456789012:role/data-role"
       opts("fs.session_name") shouldBe "spark-job"
       opts("fs.external_id") shouldBe "external-id"
+      opts("fs.cloud_provider") shouldBe "aliyun"
       opts.get("fs.access_key_id") shouldBe None
       opts.get("fs.access_key_value") shouldBe None
     }

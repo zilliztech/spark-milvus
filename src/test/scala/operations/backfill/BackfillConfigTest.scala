@@ -104,6 +104,21 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.validate() shouldBe Left("s3BucketName cannot be empty")
   }
 
+  test("Unsupported s3CloudProvider fails validation") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      s3CloudProvider = "oss"
+    )
+
+    config.validate() match {
+      case Left(error) => error should include("s3CloudProvider must be one of")
+      case Right(_)    => fail("expected invalid s3CloudProvider to fail")
+    }
+  }
+
   test("Empty s3AccessKey/s3SecretKey is allowed (IAM/IRSA mode)") {
     // Under IAM/IRSA the SDK falls back to the default AWS credentials chain,
     // so empty static credentials must NOT fail validation.
@@ -313,6 +328,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.s3UseSSL shouldBe false
     config.s3RootPath shouldBe "files"
     config.s3Region shouldBe "us-east-1"
+    config.s3CloudProvider shouldBe "aws"
     config.batchSize shouldBe 1024
     config.customOutputPath shouldBe None
   }
@@ -346,6 +362,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     options("fs.access_key_id") shouldBe "access123"
     options("fs.access_key_value") shouldBe "secret456"
     options("fs.use_ssl") shouldBe "true"
+    options("fs.cloud_provider") shouldBe "aws"
   }
 
   test("getMilvusReadOptions includes partitionName when set") {
@@ -393,6 +410,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3SecretKey = "secret456",
       s3RootPath = "files",
       s3Region = "us-west-2",
+      s3CloudProvider = "aliyun",
       s3UseSSL = true,
       batchSize = 2048
     )
@@ -411,6 +429,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     options("fs.access_key_value") shouldBe "secret456"
     options("fs.use_ssl") shouldBe "true"
     options("fs.region") shouldBe "us-west-2"
+    options("fs.cloud_provider") shouldBe "aliyun"
     options("milvus.collection.name") shouldBe "segment_789_backfill"
     options(
       "milvus.writer.customPath"

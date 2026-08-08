@@ -35,6 +35,7 @@ spark-submit \
   --s3-endpoint  s3.us-west-2.amazonaws.com \
   --s3-bucket    milvus-bucket \
   --s3-region    us-west-2 \
+  [--s3-cloud-provider aws|aliyun|gcp|azure|tencent|huawei] \
   [--s3-access-key AKIA... --s3-secret-key ...] \
   [--s3-use-ssl] \
   [--use-iam] \
@@ -59,6 +60,9 @@ spark-submit \
   `AssumedRoleCredentialProvider` configuration. A global main-storage role
   is also forwarded to the Milvus storage FFI; otherwise both clients use
   their default IAM chain (env vars / web identity token / instance profile).
+- **Cloud provider**: omit `--s3-cloud-provider` for AWS. Pass `aliyun` when
+  the Milvus storage bucket is OSS so the native writer uses the Aliyun
+  credentials provider and AssumeRole flow.
 - **Different bucket for input parquet**: when the parquet file lives in a
   different bucket (or even region/account) from the Milvus storage bucket,
   use the `--source-s3-*` flags. They are written as per-bucket Hadoop S3A
@@ -83,6 +87,7 @@ spark-submit \
 | `--batch-size`    | `1024`      | Rows per Arrow batch flushed to the writer.                                  |
 | `--column-mapping`| *(none)*    | `src1:tgt1,src2:tgt2,...`. Rename/drop Parquet columns to Milvus field names. |
 | `--output-result` | *(none)*    | Path to write the result JSON.                                               |
+| `--s3-cloud-provider` | `aws` | Native storage provider for the Milvus storage bucket: `aws`, `aliyun`, `gcp`, `azure`, `tencent`, or `huawei`. |
 
 ## Vector columns
 
@@ -207,13 +212,15 @@ result match {
 
 - `s3Endpoint`, `s3BucketName` — Milvus storage bucket.
 - `s3AccessKey`, `s3SecretKey` — may be empty when `s3UseIam = true`.
+- `s3CloudProvider` — native storage provider for the Milvus storage bucket
+  (default `aws`).
 
 ### Optional
 
 - `milvusUri`, `milvusToken`, `databaseName`, `collectionName` — required
   only in client mode (no snapshot).
 - `partitionName` — backfill a specific partition.
-- `s3UseIam` — use the AWS default credentials chain instead of static AK/SK.
+- `s3UseIam` — use the provider IAM chain instead of static AK/SK.
 - `s3UseSSL`, `s3RootPath`, `s3Region` — standard S3 options.
 - `sourceS3Endpoint`, `sourceS3AccessKey`, `sourceS3SecretKey`,
   `sourceS3UseSSL`, `sourceS3UseIam`, `sourceS3Region` — overrides for the

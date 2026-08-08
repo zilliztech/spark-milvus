@@ -11,7 +11,8 @@ import com.zilliz.spark.connector.MilvusOption
   * spark-connector-assembly.jar \ --parquet <path> --snapshot <path> \
   * --s3-endpoint <endpoint> --s3-bucket <bucket> \ --s3-access-key <key>
   * --s3-secret-key <secret> \ [--s3-root-path <path>] [--s3-region <region>]
-  * [--s3-use-ssl] \ [--batch-size <n>] [--output-result <path>] \ [--mode
+  * [--s3-cloud-provider aws|aliyun|gcp|azure|tencent|huawei] [--s3-use-ssl] \
+  * [--batch-size <n>] [--output-result <path>] \ [--mode
   * replace|coalesce|overwrite]
   *
   * --mode:
@@ -70,6 +71,10 @@ object BackfillApp {
       s3UseSSL = parsed.contains("s3-use-ssl"),
       s3RootPath = parsed.getOrElse("s3-root-path", "files"),
       s3Region = parsed.getOrElse("s3-region", "us-east-1"),
+      s3CloudProvider = parsed.getOrElse(
+        "s3-cloud-provider",
+        BackfillConfig.DefaultCloudProvider
+      ),
       s3UseIam = useIam,
       sourceS3Endpoint = parsed.get("source-s3-endpoint"),
       sourceS3AccessKey = parsed.get("source-s3-access-key"),
@@ -153,6 +158,7 @@ object BackfillApp {
     "s3-secret-key",
     "s3-root-path",
     "s3-region",
+    "s3-cloud-provider",
     "source-s3-endpoint",
     "source-s3-access-key",
     "source-s3-secret-key",
