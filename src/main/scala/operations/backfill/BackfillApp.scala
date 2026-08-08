@@ -108,17 +108,13 @@ object BackfillApp {
     spark.sparkContext.setLogLevel("WARN")
 
     try {
-      val config = baseConfig.withHadoopStorageAssumeRole(
-        spark.sparkContext.hadoopConfiguration,
-        spark.sparkContext.applicationId
-      )
-      MilvusBackfill.run(spark, parquetPath, snapshotPath, config) match {
+      MilvusBackfill.run(spark, parquetPath, snapshotPath, baseConfig) match {
         case Right(result) =>
           println(result.summary)
           println(result.segmentSummary)
           parsed.get("output-result").foreach { outputPath =>
             MilvusBackfill
-              .writeResultJson(spark, result, outputPath, config) match {
+              .writeResultJson(spark, result, outputPath, baseConfig) match {
               case Right(_) =>
                 println(s"Result JSON written to: $outputPath")
               case Left(err) =>

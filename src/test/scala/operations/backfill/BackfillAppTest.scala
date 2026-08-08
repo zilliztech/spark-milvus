@@ -367,6 +367,83 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     }
   }
 
+  test(
+    "configureHadoopS3ForPath accepts global provider with bucket role ARN"
+  ) {
+    val cfg = BackfillConfig(
+      s3Endpoint = "s3.us-west-2.amazonaws.com",
+      s3BucketName = "mixed-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    val hc = spark.sparkContext.hadoopConfiguration
+    val prefix = "fs.s3a.bucket.mixed-bucket"
+    val bucketProviderKey = s"$prefix.aws.credentials.provider"
+    val bucketRoleArnKey = s"$prefix.assumed.role.arn"
+    hc.unset(bucketProviderKey)
+    hc.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hc.set(
+      bucketRoleArnKey,
+      "arn:aws:iam::123456789012:role/bucket-role"
+    )
+
+    try {
+      MilvusBackfill.configureHadoopS3ForPath(
+        spark,
+        "s3a://mixed-bucket/data",
+        cfg,
+        isSource = false
+      )
+
+      hc.get(bucketProviderKey) shouldBe null
+      hc.get(bucketRoleArnKey) shouldBe
+        "arn:aws:iam::123456789012:role/bucket-role"
+    } finally {
+      hc.unset(bucketProviderKey)
+      hc.unset(bucketRoleArnKey)
+      hc.unset(BackfillConfig.HadoopS3CredentialsProvider)
+    }
+  }
+
+  test(
+    "configureHadoopS3ForPath accepts bucket provider with global role ARN"
+  ) {
+    val cfg = BackfillConfig(
+      s3Endpoint = "s3.us-west-2.amazonaws.com",
+      s3BucketName = "mixed-bucket-2",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    val hc = spark.sparkContext.hadoopConfiguration
+    val prefix = "fs.s3a.bucket.mixed-bucket-2"
+    val bucketProviderKey = s"$prefix.aws.credentials.provider"
+    hc.set(bucketProviderKey, BackfillConfig.HadoopS3AssumedRoleProvider)
+    hc.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/global-role"
+    )
+
+    try {
+      MilvusBackfill.configureHadoopS3ForPath(
+        spark,
+        "s3a://mixed-bucket-2/data",
+        cfg,
+        isSource = false
+      )
+
+      hc.get(bucketProviderKey) shouldBe
+        BackfillConfig.HadoopS3AssumedRoleProvider
+    } finally {
+      hc.unset(bucketProviderKey)
+      hc.unset(BackfillConfig.HadoopS3AssumedRoleArn)
+    }
+  }
+
   test("explicit static credentials replace a bucket AssumeRole provider") {
     val cfg = BackfillConfig(
       s3Endpoint = "s3.us-west-2.amazonaws.com",
@@ -451,6 +528,35 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     opts.get("fs.access_key_id") shouldBe None
     opts.get("fs.access_key_value") shouldBe None
     opts("fs.use_iam") shouldBe "true"
+  }
+
+  test("MilvusBackfill.run derives Hadoop AssumeRole for embedded callers") {
+    val hc = spark.sparkContext.hadoopConfiguration
+    hc.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    val cfg = BackfillConfig(
+      s3Endpoint = "s3.us-west-2.amazonaws.com",
+      s3BucketName = "embedded-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    try {
+      MilvusBackfill.run(spark, "file:///unused.parquet", "", cfg) match {
+        case Left(error) =>
+          error.message should include(
+            "Invalid Hadoop storage AssumeRole configuration"
+          )
+          error.message should include(BackfillConfig.HadoopS3AssumedRoleArn)
+        case Right(_) => fail("expected invalid Hadoop AssumeRole config")
+      }
+    } finally {
+      hc.unset(BackfillConfig.HadoopS3CredentialsProvider)
+      hc.unset(BackfillConfig.HadoopS3AssumedRoleArn)
+    }
   }
 
   test("getMilvusReadOptions includes AK/SK when s3UseIam=false") {

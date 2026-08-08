@@ -77,10 +77,24 @@ object MilvusBackfill {
       spark: SparkSession,
       backfillDataPath: String,
       snapshotPath: String,
-      config: BackfillConfig
+      initialConfig: BackfillConfig
   ): Either[BackfillError, BackfillResult] = {
 
     val startTime = System.currentTimeMillis()
+    val config =
+      try {
+        initialConfig.withHadoopStorageAssumeRole(
+          spark.sparkContext.hadoopConfiguration,
+          spark.sparkContext.applicationId
+        )
+      } catch {
+        case e: IllegalArgumentException =>
+          return Left(
+            SchemaValidationError(
+              s"Invalid Hadoop storage AssumeRole configuration: ${e.getMessage}"
+            )
+          )
+      }
 
     // Validate S3/writer configuration (always required)
     config.validate() match {
@@ -1830,38 +1844,8 @@ object MilvusBackfill {
 
     if (useIam) {
       val bucketProviderKey = s"$prefix.aws.credentials.provider"
-      val bucketProvider = Option(
-        hadoopConf.getTrimmed(bucketProviderKey)
-      ).getOrElse("")
-      val globalProvider = Option(
-        hadoopConf.getTrimmed(BackfillConfig.HadoopS3CredentialsProvider)
-      ).getOrElse("")
-      val bucketUsesAssumeRole =
-        BackfillConfig.isAssumedRoleProvider(bucketProvider)
-      val globalUsesAssumeRole =
-        BackfillConfig.isAssumedRoleProvider(globalProvider)
-
-      if (
-        bucketUsesAssumeRole && Option(
-          hadoopConf.getTrimmed(s"$prefix.assumed.role.arn")
-        ).forall(_.isEmpty)
-      ) {
-        throw new IllegalArgumentException(
-          s"$prefix.assumed.role.arn must be set when $bucketProviderKey uses " +
-            BackfillConfig.HadoopS3AssumedRoleProvider
-        )
-      }
-      if (
-        !bucketUsesAssumeRole && globalUsesAssumeRole && Option(
-          hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleArn)
-        ).forall(_.isEmpty)
-      ) {
-        throw new IllegalArgumentException(
-          s"${BackfillConfig.HadoopS3AssumedRoleArn} must be set when " +
-            s"${BackfillConfig.HadoopS3CredentialsProvider} uses " +
-            BackfillConfig.HadoopS3AssumedRoleProvider
-        )
-      }
+      val assumedRole =
+        BackfillConfig.resolveAwsS3AssumeRole(hadoopConf, bucket)
 
       // Build an explicit IRSA/EKS-friendly provider chain instead of the
       // v1 DefaultAWSCredentialsProviderChain, which has historically been
@@ -1876,7 +1860,7 @@ object MilvusBackfill {
       // A managed runtime may already have selected an AssumeRole provider
       // globally for its data role or per bucket for an external volume. Do
       // not replace that security boundary with the pod's ambient identity.
-      if (!bucketUsesAssumeRole && !globalUsesAssumeRole) {
+      if (assumedRole.isEmpty) {
         hadoopConf.set(
           bucketProviderKey,
           Seq(

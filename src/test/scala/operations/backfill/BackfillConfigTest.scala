@@ -282,6 +282,109 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     resolved.validate() shouldBe Right(())
   }
 
+  test(
+    "withHadoopStorageAssumeRole derives an AWS bucket-scoped native main-storage role"
+  ) {
+    val hadoopConf = new Configuration(false)
+    val prefix = "fs.s3a.bucket.bucket"
+    hadoopConf.set(
+      s"$prefix.aws.credentials.provider",
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      s"$prefix.assumed.role.arn",
+      "arn:aws:iam::123456789012:role/bucket-role"
+    )
+    hadoopConf.set(s"$prefix.assumed.role.session.name", "bucket-session")
+    hadoopConf.set(s"$prefix.assumed.role.external.id", "bucket-external-id")
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopStorageAssumeRole(
+      hadoopConf,
+      "spark-job"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "arn:aws:iam::123456789012:role/bucket-role"
+    )
+    resolved.s3RoleSessionName shouldBe Some("bucket-session")
+    resolved.s3ExternalId shouldBe Some("bucket-external-id")
+  }
+
+  test(
+    "withHadoopStorageAssumeRole resolves AWS provider and role from mixed scopes"
+  ) {
+    val hadoopConf = new Configuration(false)
+    val prefix = "fs.s3a.bucket.bucket"
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      s"$prefix.assumed.role.arn",
+      "arn:aws:iam::123456789012:role/bucket-role"
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleExternalId,
+      "global-external-id"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopStorageAssumeRole(
+      hadoopConf,
+      "spark-job"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "arn:aws:iam::123456789012:role/bucket-role"
+    )
+    resolved.s3RoleSessionName shouldBe Some("spark-job")
+    resolved.s3ExternalId shouldBe Some("global-external-id")
+  }
+
+  test(
+    "withHadoopStorageAssumeRole lets an AWS bucket provider use a global role ARN"
+  ) {
+    val hadoopConf = new Configuration(false)
+    val prefix = "fs.s3a.bucket.bucket"
+    hadoopConf.set(
+      s"$prefix.aws.credentials.provider",
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/global-role"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopStorageAssumeRole(
+      hadoopConf,
+      "spark-job"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "arn:aws:iam::123456789012:role/global-role"
+    )
+  }
+
   test("withHadoopStorageAssumeRole ignores missing Alibaba role config") {
     val config = BackfillConfig(
       s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
@@ -357,6 +460,30 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
     }
     error.getMessage should include(BackfillConfig.HadoopS3AssumedRoleArn)
+  }
+
+  test(
+    "withHadoopStorageAssumeRole does not apply AWS S3A roles to other providers"
+  ) {
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+
+    config.withHadoopStorageAssumeRole(hadoopConf, "spark-job") shouldBe config
   }
 
   test("Zero batchSize fails validation") {
