@@ -37,9 +37,9 @@ object MilvusBackfill {
   private val logger = LoggerFactory.getLogger(getClass)
 
   /** Marker column added to the backfill side before the left join so we can
-    * count how many source rows found a PK match (non-null marker → matched).
-    * Kept on the DataFrame all the way down to the per-segment partition
-    * function, and stripped from the projection written to parquet.
+    * count how many source rows found a join-key match (non-null marker →
+    * matched). Kept on the DataFrame all the way down to the per-segment
+    * partition function, and stripped from the projection written to parquet.
     */
   private[backfill] val MatchFlagCol = "__bf_matched__"
   private[backfill] val SegmentIdCol = MilvusOption.MilvusExtraColumnSegmentID
@@ -50,7 +50,7 @@ object MilvusBackfill {
     * records whether the written value came from the source side and another
     * whether it came from the backfill data file. Semantics differ per mode:
     *   - coalesce: usedSrc = src non-null; usedBf = src null AND bf non-null
-    *   - overwrite: usedSrc = pk unmatched; usedBf = pk matched
+    *   - overwrite: usedSrc = join key unmatched; usedBf = join key matched
     * Used by the writer to tally the per-field `usedSourceByField` /
     * `usedDataFileByField` counts surfaced in `SegmentBackfillResult`.
     */
@@ -138,8 +138,10 @@ object MilvusBackfill {
     }
 
     try {
-      // Step 3: Get PK field info
-      val (pkName, pkFieldId) = snapshotMetadataOpt match {
+      // Step 3: Resolve the current primary-key join into the generic runtime
+      // join-key model. PR1 intentionally keeps PK as the only public behavior;
+      // PR2 will add explicit physical-field resolution on top of this seam.
+      val baseJoinKey = snapshotMetadataOpt match {
         case Some(metadata) =>
           val pkField = metadata.collection.schema.fields
             .find(_.isPrimaryKey.getOrElse(false))
@@ -150,10 +152,15 @@ object MilvusBackfill {
                 )
               )
             )
-          (pkField.name, pkField.getFieldIDAsLong)
+          ResolvedJoinKey.primaryKey(
+            pkField.name,
+            pkField.getFieldIDAsLong,
+            Some(MilvusSnapshotReader.fieldToStructField(pkField))
+          )
         case None =>
           client.getPkField(config.databaseName, config.collectionName) match {
-            case scala.util.Success((name, id)) => (name, id)
+            case scala.util.Success((name, id)) =>
+              ResolvedJoinKey.primaryKey(name, id, None)
             case scala.util.Failure(e) =>
               return Left(
                 ConnectionError(
@@ -171,23 +178,25 @@ object MilvusBackfill {
           case Right(df)   => df
         }
 
-      // Reproject via the column mapping (or legacy implicit mapping) so that
-      // downstream code can assume the DataFrame's column names match the
-      // Milvus schema exactly — in particular, the pk column is named pkName.
-      val mappedBackfillDF = applyColumnMapping(
+      // Reproject via the existing PK column-mapping contract, then separate
+      // the join component from fields that will be written. The join column is
+      // normalized to an internal alias so downstream execution no longer
+      // depends on the collection's PK name.
+      val preparedBackfill = prepareBackfillData(
         rawBackfillDF,
-        pkName,
-        config.columnMapping
+        baseJoinKey,
+        config.columnMapping,
+        snapshotMetadataOpt.toSeq.flatMap(
+          _.collection.schema.fields.map(_.name)
+        )
       ) match {
         case Left(error) => return Left(error)
-        case Right(df)   => df
+        case Right(data) => data
       }
+      val mappedBackfillDF = preparedBackfill.dataFrame
+      val joinKey = preparedBackfill.joinKey
 
-      // Extract new field names (all post-mapping columns except the PK).
-      val newFieldNames = mappedBackfillDF.schema.fields
-        .map(_.name)
-        .filterNot(_ == pkName)
-        .toSeq
+      val newFieldNames = preparedBackfill.targetFieldNames
 
       // Reject a backfill column named MatchFlagCol: the join adds a
       // lit(true) marker under that name, which would silently overwrite a
@@ -261,40 +270,26 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
-      // Cache so the upcoming count / distinct-PK aggregation doesn't force
+      // Cache so the upcoming join-key aggregation doesn't force
       // a second parquet scan when performJoin consumes the DF later. The
       // count also eagerly validates every normalized vector row.
       backfillDF.cache()
       cachedBackfillDF = backfillDF
 
-      // One aggregation over the cached DF gives us both totals: the raw
-      // input row count (reported in the result / logs for debugging low
-      // match rates) and the distinct-PK count (used below to fail fast on
-      // duplicates — see rationale there).
-      val countsRow = backfillDF
-        .agg(count(lit(1)), countDistinct(col(pkName)))
-        .head()
-      val backfillRowCount = countsRow.getLong(0)
-      val distinctPkCount = countsRow.getLong(1)
+      val joinKeyStats = validateJoinKeyCardinality(
+        backfillDF,
+        joinKey.internalColumns,
+        joinKey.sourceColumns,
+        side = "Backfill parquet"
+      ) match {
+        case Left(error)  => return Left(error)
+        case Right(stats) => stats
+      }
+      val backfillRowCount = joinKeyStats.rowCount
       logger.info(
         s"Backfill data file rows: $backfillRowCount " +
-          s"(distinct ${pkName}: $distinctPkCount)"
+          s"(distinct join keys: ${joinKeyStats.distinctValidKeyCount})"
       )
-
-      // Duplicate PKs on the backfill side cause each source row with a
-      // matching PK to be emitted once per duplicate by the left join,
-      // inflating per-segment rowCount / sourceRowCount / matchedRowCount.
-      // Rather than silently report misleading metrics, fail fast so the
-      // user can dedupe upstream.
-      if (distinctPkCount != backfillRowCount) {
-        return Left(
-          SchemaValidationError(
-            s"Backfill parquet contains duplicate primary-key values " +
-              s"(rows=$backfillRowCount, distinct ${pkName}=$distinctPkCount). " +
-              "Deduplicate the input (e.g. dropDuplicates on the PK) and retry."
-          )
-        )
-      }
 
       val targetVectorFields = targetFieldsByName.collect {
         case (name, field) if VectorBackfillSupport.isVectorField(field) =>
@@ -341,7 +336,7 @@ object MilvusBackfill {
       val originalDF = readCollectionWithMetadata(
         spark,
         config,
-        pkFieldId,
+        joinKey,
         snapshotMetadataOpt,
         v2Segments,
         extraReadFields
@@ -350,8 +345,8 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
-      // Validate schema compatibility
-      validateSchemaCompatibility(originalDF, backfillDF, pkName) match {
+      // Validate join-key schema compatibility.
+      validateJoinKeyCompatibility(originalDF, backfillDF, joinKey) match {
         case Left(error) => return Left(error)
         case Right(_)    => // Continue
       }
@@ -360,7 +355,7 @@ object MilvusBackfill {
       val joinedDF = performJoin(
         originalDF,
         backfillDF,
-        pkName,
+        joinKey.internalColumns,
         newFieldNames,
         config.mode
       )
@@ -583,19 +578,145 @@ object MilvusBackfill {
     Right(renamed)
   }
 
+  /** Apply the existing PK mapping contract, then normalize identity columns to
+    * private join aliases and return target fields explicitly.
+    *
+    * PR1 still resolves exactly one primary-key component. The sequence-based
+    * shape is intentional so the read and join stages do not need another
+    * signature change when a later PR adds physical or composite keys.
+    */
+  private[backfill] def prepareBackfillData(
+      df: DataFrame,
+      joinKey: ResolvedJoinKey,
+      userMapping: Option[Map[String, String]],
+      collectionFieldNames: Seq[String] = Seq.empty
+  ): Either[BackfillError, PreparedBackfillData] = {
+    // The existing mapping contract identifies the first (currently only)
+    // component through the collection PK target. Any additional internal
+    // components must already be present after mapping; this keeps the helper
+    // sequence-shaped without exposing composite keys publicly in PR1.
+    val keyColumn = joinKey.sourceColumns.head
+    applyColumnMapping(df, keyColumn, userMapping).flatMap { mapped =>
+      val mappedColumns = mapped.columns.toSeq
+      val missingKeys = joinKey.sourceColumns.filterNot(mappedColumns.contains)
+      if (missingKeys.nonEmpty) {
+        Left(
+          SchemaValidationError(
+            s"Backfill data is missing join-key columns after column mapping: " +
+              missingKeys.mkString(", ")
+          )
+        )
+      } else {
+        val caseSensitive = df.sparkSession.conf
+          .get("spark.sql.caseSensitive", "false")
+          .toBoolean
+        val resolver: (String, String) => Boolean =
+          if (caseSensitive) (left, right) => left == right
+          else (left, right) => left.equalsIgnoreCase(right)
+        val allocatedJoinKey = joinKey.withCollisionFreeInternalColumns(
+          mappedColumns ++ collectionFieldNames,
+          resolver
+        )
+        val keyAliases =
+          allocatedJoinKey.components.map(c => c.sourceColumn -> c).toMap
+        val normalized = mapped.select(
+          mappedColumns.map { name =>
+            keyAliases.get(name) match {
+              case Some(component) =>
+                mapped.col(name).as(component.internalColumn)
+              case None => mapped.col(name)
+            }
+          }: _*
+        )
+        val targetFieldNames =
+          mappedColumns.filterNot(allocatedJoinKey.sourceColumns.contains)
+        Right(
+          PreparedBackfillData(
+            dataFrame = normalized,
+            joinKey = allocatedJoinKey,
+            targetFieldNames = targetFieldNames
+          )
+        )
+      }
+    }
+  }
+
+  /** Build the ordered field-ID/schema projection used by snapshot reads.
+    * Deduplication happens on the pair before either side is emitted so the
+    * supplied Spark schema always stays aligned with `ReaderFieldIDs`.
+    */
+  private[backfill] def buildSourceReadProjection(
+      joinKey: ResolvedJoinKey,
+      extraReadFields: Seq[
+        (String, Long, org.apache.spark.sql.types.StructField)
+      ]
+  ): Either[BackfillError, SourceReadProjection] = {
+    val missingSchemas = joinKey.components.filter(_.sourceField.isEmpty)
+    if (missingSchemas.nonEmpty) {
+      Left(
+        SchemaValidationError(
+          s"Missing snapshot schema for join-key fields: " +
+            missingSchemas.map(_.sourceColumn).mkString(", ")
+        )
+      )
+    } else {
+      val requested =
+        joinKey.components.map(c => (c.fieldId, c.sourceField.get)) ++
+          extraReadFields.map { case (_, fieldId, field) => (fieldId, field) }
+      val deduped = requested
+        .foldLeft(
+          (
+            Vector.empty[(Long, org.apache.spark.sql.types.StructField)],
+            Set.empty[Long]
+          )
+        ) { case ((fields, seen), item @ (fieldId, _)) =>
+          if (seen.contains(fieldId)) (fields, seen)
+          else (fields :+ item, seen + fieldId)
+        }
+        ._1
+
+      Right(
+        SourceReadProjection(
+          fieldIds = deduped.map(_._1),
+          schema = org.apache.spark.sql.types.StructType(deduped.map(_._2))
+        )
+      )
+    }
+  }
+
+  /** Normalize source-side join columns in one projection. A sequential
+    * `withColumnRenamed` chain can corrupt swaps or rename chains when a source
+    * field happens to use another component's internal name.
+    */
+  private[backfill] def normalizeSourceJoinColumns(
+      df: DataFrame,
+      joinKey: ResolvedJoinKey
+  ): DataFrame = {
+    val sourceAliases =
+      joinKey.components.map(c => c.sourceColumn -> c.internalColumn).toMap
+    df.select(
+      df.columns.toSeq.map { name =>
+        sourceAliases.get(name) match {
+          case Some(alias) => df.col(name).as(alias)
+          case None        => df.col(name)
+        }
+      }: _*
+    )
+  }
+
   /** Read collection data with $segment_id and $row_offset metadata $segment_id
     * and $row_offset are used to match with the original sequence of rows for
     * each segment
     *
-    * @param pkFieldId
-    *   Primary key field ID to read only PK field
+    * @param joinKey
+    *   Resolved source fields used to match backfill input rows
     * @param snapshotMetadata
     *   Optional snapshot metadata for offline reading (no client connection)
     */
   private def readCollectionWithMetadata(
       spark: SparkSession,
       config: BackfillConfig,
-      pkFieldId: Long,
+      joinKey: ResolvedJoinKey,
       snapshotMetadata: Option[SnapshotMetadata],
       v2Segments: Seq[com.zilliz.spark.connector.read.V2SegmentInfo],
       extraReadFields: Seq[
@@ -604,7 +725,7 @@ object MilvusBackfill {
   ): Either[BackfillError, DataFrame] = {
     try {
       var options = config.getMilvusReadOptions
-      val allFieldIds = pkFieldId +: extraReadFields.map(_._2)
+      val allFieldIds = (joinKey.fieldIds ++ extraReadFields.map(_._2)).distinct
       options =
         options + (MilvusOption.ReaderFieldIDs -> allFieldIds.mkString(","))
       options = options + (MilvusOption.ReadApplyDeletes -> "false")
@@ -663,40 +784,25 @@ object MilvusBackfill {
 
       // Build schema from snapshot if available (for snapshot mode)
       val df = snapshotMetadata match {
-        case Some(metadata) =>
-          // For snapshot mode, only include the PK field we need to read (not all user fields)
-          // FFI reader will only read the columns specified in the schema
-          val pkField = metadata.collection.schema.fields
-            .find(_.getFieldIDAsLong == pkFieldId)
-          val pkSchema = pkField match {
-            case Some(field) =>
-              // Create schema with only the PK field
-              import org.apache.spark.sql.types._
-              StructType(Seq(MilvusSnapshotReader.fieldToStructField(field)))
-            case None =>
-              // Fallback: use full schema if PK field not found
-              logger.warn(
-                s"PK field with ID $pkFieldId not found in snapshot schema, using full schema"
-              )
-              MilvusSnapshotReader.toSparkSchema(
-                metadata.collection.schema,
-                includeSystemFields = false
-              )
-          }
-
-          // Extend with any extra fields requested (coalesce / overwrite
-          // modes). Field order in the schema must match the ReaderFieldIDs
-          // order.
-          val withExtras = extraReadFields.foldLeft(pkSchema) {
-            case (acc, (_, _, field)) => acc.add(field)
-          }
+        case Some(_) =>
+          // The supplied schema and ReaderFieldIDs must stay in the same order.
+          // PR1 resolves the PK into one component; the component sequence also
+          // supports future physical/composite key resolvers.
+          val projection =
+            buildSourceReadProjection(joinKey, extraReadFields) match {
+              case Left(error)  => return Left(error)
+              case Right(value) => value
+            }
+          options =
+            options + (MilvusOption.ReaderFieldIDs -> projection.fieldIds
+              .mkString(","))
 
           logger.info(
-            s"Reading with schema: ${withExtras.fieldNames.mkString(", ")}"
+            s"Reading with schema: ${projection.schema.fieldNames.mkString(", ")}"
           )
 
           spark.read
-            .schema(withExtras)
+            .schema(projection.schema)
             .format("com.zilliz.spark.connector.sources.MilvusDataSource")
             .options(options)
             .load()
@@ -707,6 +813,17 @@ object MilvusBackfill {
             .format("com.zilliz.spark.connector.sources.MilvusDataSource")
             .options(options)
             .load()
+      }
+
+      val missingSourceJoinColumns =
+        joinKey.sourceColumns.filterNot(df.columns.contains)
+      if (missingSourceJoinColumns.nonEmpty) {
+        return Left(
+          ConnectionError(
+            message = s"Failed to read collection join-key columns: " +
+              missingSourceJoinColumns.mkString(", ")
+          )
+        )
       }
 
       if (
@@ -721,7 +838,7 @@ object MilvusBackfill {
         )
       }
 
-      Right(df)
+      Right(normalizeSourceJoinColumns(df, joinKey))
     } catch {
       case e: Exception =>
         logger.error(
@@ -776,53 +893,135 @@ object MilvusBackfill {
     }
   }
 
-  /** Validate schema compatibility between original and new field data
+  /** Validate that a DataFrame contains a non-null, unique join key.
+    *
+    * A duplicate on the backfill side would fan one source row out into
+    * multiple joined rows and corrupt per-segment row counts. Nulls are
+    * reported separately because Spark equi-joins never match null keys.
     */
-  private def validateSchemaCompatibility(
-      originalDF: DataFrame,
-      backfillDF: DataFrame,
-      pkName: String
-  ): Either[BackfillError, Unit] = {
+  private[backfill] def validateJoinKeyCardinality(
+      df: DataFrame,
+      joinColumns: Seq[String],
+      displayColumns: Seq[String],
+      side: String
+  ): Either[BackfillError, JoinKeyStats] = {
+    if (joinColumns.isEmpty) {
+      return Left(SchemaValidationError("Join key must not be empty"))
+    }
+
+    val missing = joinColumns.filterNot(df.columns.contains)
+    if (missing.nonEmpty) {
+      return Left(
+        SchemaValidationError(
+          s"$side is missing internal join-key columns: ${missing.mkString(", ")}"
+        )
+      )
+    }
+
     try {
-      // Find the primary key field in original data
-      val pkField = originalDF.schema.fields
-        .find(_.name == pkName)
-        .getOrElse {
-          return Left(
-            SchemaValidationError(
-              s"Original collection data must have primary key field '$pkName'"
-            )
-          )
-        }
-
-      // Find the pk field in new field data (post-mapping column name = pkName)
-      val newPkField = backfillDF.schema.fields
-        .find(_.name == pkName)
-        .getOrElse {
-          return Left(
-            SchemaValidationError(
-              s"Backfill data must have PK field '$pkName' (after column mapping)"
-            )
-          )
-        }
-
-      // Validate types match
-      if (pkField.dataType != newPkField.dataType) {
-        return Left(
-          SchemaValidationError(
-            s"Primary key type mismatch: original=${pkField.dataType}, new=${newPkField.dataType}"
+      val hasNull = joinColumns.map(name => col(name).isNull).reduce(_ || _)
+      val keyValue = struct(joinColumns.map(col): _*)
+      val counts = df
+        .agg(
+          count(lit(1)).as("__bf_key_rows__"),
+          coalesce(
+            sum(when(hasNull, lit(1L)).otherwise(lit(0L))),
+            lit(0L)
+          ).as("__bf_null_key_rows__"),
+          countDistinct(when(!hasNull, keyValue)).as(
+            "__bf_distinct_valid_keys__"
           )
         )
+        .head()
+
+      val stats = JoinKeyStats(
+        rowCount = counts.getAs[Long]("__bf_key_rows__"),
+        nullKeyRowCount = counts.getAs[Long]("__bf_null_key_rows__"),
+        distinctValidKeyCount = counts.getAs[Long](
+          "__bf_distinct_valid_keys__"
+        )
+      )
+      val display = displayColumns.mkString("(", ", ", ")")
+
+      if (stats.nullKeyRowCount > 0) {
+        Left(
+          SchemaValidationError(
+            s"$side contains ${stats.nullKeyRowCount} row(s) with null join key " +
+              s"$display. Join keys must be non-null."
+          )
+        )
+      } else if (stats.distinctValidKeyCount != stats.rowCount) {
+        Left(
+          SchemaValidationError(
+            s"$side contains duplicate join-key values " +
+              s"(columns=$display, rows=${stats.rowCount}, " +
+              s"distinct=${stats.distinctValidKeyCount}). " +
+              "Deduplicate the input on the join key and retry."
+          )
+        )
+      } else {
+        Right(stats)
+      }
+    } catch {
+      case e: Exception =>
+        Left(
+          SchemaValidationError(
+            s"Failed to validate $side join key: ${e.getMessage}",
+            Some(e)
+          )
+        )
+    }
+  }
+
+  /** Validate join-key schema compatibility between source and backfill data.
+    */
+  private[backfill] def validateJoinKeyCompatibility(
+      originalDF: DataFrame,
+      backfillDF: DataFrame,
+      joinKey: ResolvedJoinKey
+  ): Either[BackfillError, Unit] = {
+    try {
+      joinKey.components.foreach { component =>
+        val sourceField = originalDF.schema.fields
+          .find(_.name == component.internalColumn)
+          .getOrElse {
+            return Left(
+              SchemaValidationError(
+                s"Original collection data must have join-key field " +
+                  s"'${component.sourceColumn}'"
+              )
+            )
+          }
+
+        val backfillField = backfillDF.schema.fields
+          .find(_.name == component.internalColumn)
+          .getOrElse {
+            return Left(
+              SchemaValidationError(
+                s"Backfill data must have join-key field " +
+                  s"'${component.sourceColumn}' after column mapping"
+              )
+            )
+          }
+
+        if (sourceField.dataType != backfillField.dataType) {
+          return Left(
+            SchemaValidationError(
+              s"Join-key type mismatch for '${component.sourceColumn}': " +
+                s"original=${sourceField.dataType}, new=${backfillField.dataType}"
+            )
+          )
+        }
       }
 
       Right(())
 
     } catch {
       case e: Exception =>
-        logger.error("Failed to validate schema compatibility", e)
+        logger.error("Failed to validate join-key schema compatibility", e)
         Left(
           SchemaValidationError(
-            s"Failed to validate schema compatibility: ${e.getMessage}"
+            s"Failed to validate join-key schema compatibility: ${e.getMessage}"
           )
         )
     }
@@ -830,22 +1029,22 @@ object MilvusBackfill {
 
   /** Merge original (source) rows with backfill rows per `mode`.
     *
-    *   - replace: left join on PK; backfill value replaces source (source only
-    *     contributes PK + segment tracking columns). Unmatched source rows end
-    *     up with null target columns.
+    *   - replace: left join on the resolved key; backfill value replaces source
+    *     (source only contributes join + segment tracking columns). Unmatched
+    *     source rows end up with null target columns.
     *   - coalesce: source side carries the target fields; after the left join,
     *     compute `coalesce(src, backfill)` per field (source wins when
     *     non-null, otherwise use backfill). Unmatched source rows keep their
     *     original target values.
     *   - overwrite: source side carries the target fields; after the left join,
     *     compute `when(matched, backfill).otherwise(src)` per field (file wins
-    *     when the pk matched, even if the file value is null). Unmatched source
-    *     rows keep their original target values.
+    *     when the join key matched, even if the file value is null). Unmatched
+    *     source rows keep their original target values.
     */
   private[backfill] def performJoin(
       originalDF: DataFrame,
       backfillDF: DataFrame,
-      pkName: String,
+      joinColumns: Seq[String],
       newFieldNames: Seq[String],
       mode: String
   ): DataFrame = {
@@ -860,7 +1059,7 @@ object MilvusBackfill {
           (df, n) =>
             df.withColumnRenamed(n, n + suffix)
         }
-        val joined = originalDF.join(renamedBackfill, Seq(pkName), "left")
+        val joined = originalDF.join(renamedBackfill, joinColumns, "left")
         // Attach per-field provenance flags BEFORE the coalesce rewrites `n`,
         // so the flags bind to the unresolved source-side `n` attribute. This
         // keeps the flags accurate even though the later coalesce shadows the
@@ -885,7 +1084,7 @@ object MilvusBackfill {
           (df, n) =>
             df.withColumnRenamed(n, n + suffix)
         }
-        val joined = originalDF.join(renamedBackfill, Seq(pkName), "left")
+        val joined = originalDF.join(renamedBackfill, joinColumns, "left")
         // Match flag is null for unmatched left rows, non-null for matched.
         // Using it (rather than `bf.isNotNull`) preserves overwrite's "file
         // wins, null included" semantics when the file explicitly stores null.
@@ -902,10 +1101,10 @@ object MilvusBackfill {
         }
 
       case MilvusOption.BackfillModeReplace =>
-        // Use the using-column join form: both sides share the pkName column
-        // (guaranteed by applyColumnMapping), so Spark collapses it into one,
+        // Use the using-column join form: both sides share the internal join
+        // columns, so Spark collapses them into one,
         // avoiding ambiguous-reference errors downstream.
-        originalDF.join(backfillWithFlag, Seq(pkName), "left")
+        originalDF.join(backfillWithFlag, joinColumns, "left")
 
       case other =>
         // Defensive: validate() rejects anything else, but keep a clear error

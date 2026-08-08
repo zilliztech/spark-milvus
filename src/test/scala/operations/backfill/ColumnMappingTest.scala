@@ -99,6 +99,16 @@ class ColumnMappingTest
     )
   }
 
+  private def withCaseSensitiveAnalysis[T](enabled: Boolean)(body: => T): T = {
+    val previous = spark.conf.get("spark.sql.caseSensitive", "false")
+    spark.conf.set("spark.sql.caseSensitive", enabled.toString)
+    try {
+      body
+    } finally {
+      spark.conf.set("spark.sql.caseSensitive", previous)
+    }
+  }
+
   test("applyColumnMapping: explicit mapping renames, drops unlisted columns") {
     val df = buildDf(
       Seq("pk", "vec", "extra"),
@@ -215,5 +225,205 @@ class ColumnMappingTest
     val err = result.left.toOption.get
     err shouldBe a[SchemaValidationError]
     err.message should include("non-PK")
+  }
+
+  // ============ prepareBackfillData ============
+
+  private def resolvedPk(name: String): ResolvedJoinKey =
+    ResolvedJoinKey.primaryKey(name, 100L, None)
+
+  test(
+    "prepareBackfillData keeps legacy pk mapping but uses internal join alias"
+  ) {
+    val df = buildDf(
+      Seq("pk", "vec"),
+      Seq(Seq(1, "v1"), Seq(2, "v2"))
+    )
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(df, resolvedPk("id"), None)
+      .toOption
+      .get
+
+    prepared.joinColumns shouldBe Seq(ResolvedJoinKey.internalColumn(0))
+    prepared.targetFieldNames shouldBe Seq("vec")
+    prepared.dataFrame.columns.toSeq shouldBe Seq(
+      ResolvedJoinKey.internalColumn(0),
+      "vec"
+    )
+    prepared.dataFrame
+      .orderBy(ResolvedJoinKey.internalColumn(0))
+      .collect()
+      .map(r => (r.getInt(0), r.getString(1)))
+      .toSeq shouldBe Seq((1, "v1"), (2, "v2"))
+  }
+
+  test(
+    "prepareBackfillData separates explicitly mapped PK from target fields"
+  ) {
+    val df = buildDf(
+      Seq("source_id", "vec", "drop_me"),
+      Seq(Seq("1", "v1", "x"))
+    )
+    val mapping = Some(Map("source_id" -> "id", "vec" -> "embedding"))
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(df, resolvedPk("id"), mapping)
+      .toOption
+      .get
+
+    prepared.dataFrame.columns.toSeq shouldBe Seq(
+      ResolvedJoinKey.internalColumn(0),
+      "embedding"
+    )
+    prepared.targetFieldNames shouldBe Seq("embedding")
+  }
+
+  test("prepareBackfillData preserves a target named like the default alias") {
+    val defaultAlias = ResolvedJoinKey.internalColumn(0)
+    val allocatedAlias = ResolvedJoinKey.internalColumn(0, 1)
+    val df = buildDf(
+      Seq("pk", defaultAlias, "vec"),
+      Seq(Seq(1, "reserved", "v1"))
+    )
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(df, resolvedPk("id"), None)
+      .toOption
+      .get
+
+    prepared.joinColumns shouldBe Seq(allocatedAlias)
+    prepared.joinKey.internalColumns shouldBe Seq(allocatedAlias)
+    prepared.targetFieldNames shouldBe Seq(defaultAlias, "vec")
+    prepared.dataFrame.columns.toSeq shouldBe Seq(
+      allocatedAlias,
+      defaultAlias,
+      "vec"
+    )
+    val row = prepared.dataFrame.collect().head
+    row.getAs[Int](allocatedAlias) shouldBe 1
+    row.getAs[String](defaultAlias) shouldBe "reserved"
+  }
+
+  test("prepareBackfillData avoids case variants under the default resolver") {
+    withCaseSensitiveAnalysis(false) {
+      val caseVariant = "__BF_JOIN_0__"
+      val allocatedAlias = ResolvedJoinKey.internalColumn(0, 1)
+      val df = buildDf(
+        Seq("pk", caseVariant, "vec"),
+        Seq(Seq(1, "target", "v1"))
+      )
+
+      val prepared = MilvusBackfill
+        .prepareBackfillData(df, resolvedPk("id"), None)
+        .toOption
+        .get
+
+      prepared.joinColumns shouldBe Seq(allocatedAlias)
+      prepared.targetFieldNames shouldBe Seq(caseVariant, "vec")
+      MilvusBackfill
+        .validateJoinKeyCardinality(
+          prepared.dataFrame,
+          prepared.joinColumns,
+          Seq("id"),
+          "Backfill parquet"
+        )
+        .isRight shouldBe true
+    }
+  }
+
+  test("prepareBackfillData honors Spark's case-sensitive resolver") {
+    withCaseSensitiveAnalysis(true) {
+      val caseVariant = "__BF_JOIN_0__"
+      val defaultAlias = ResolvedJoinKey.internalColumn(0)
+      val df = buildDf(
+        Seq("pk", caseVariant, "vec"),
+        Seq(Seq(1, "target", "v1"))
+      )
+
+      val prepared = MilvusBackfill
+        .prepareBackfillData(df, resolvedPk("id"), None)
+        .toOption
+        .get
+
+      prepared.joinColumns shouldBe Seq(defaultAlias)
+      prepared.targetFieldNames shouldBe Seq(caseVariant, "vec")
+      prepared.dataFrame.columns.toSeq shouldBe Seq(
+        defaultAlias,
+        caseVariant,
+        "vec"
+      )
+    }
+  }
+
+  test(
+    "prepareBackfillData permits a collection PK named like the internal alias"
+  ) {
+    val internal = ResolvedJoinKey.internalColumn(0)
+    val allocatedAlias = ResolvedJoinKey.internalColumn(0, 1)
+    val df = buildDf(Seq("pk", "vec"), Seq(Seq(1, "v1")))
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(df, resolvedPk(internal), None)
+      .toOption
+      .get
+
+    prepared.joinColumns shouldBe Seq(allocatedAlias)
+    prepared.dataFrame.columns.toSeq shouldBe Seq(allocatedAlias, "vec")
+    prepared.targetFieldNames shouldBe Seq("vec")
+  }
+
+  test("prepareBackfillData avoids collection-only field-name collisions") {
+    val defaultAlias = ResolvedJoinKey.internalColumn(0)
+    val allocatedAlias = ResolvedJoinKey.internalColumn(0, 1)
+    val df = buildDf(Seq("pk", "vec"), Seq(Seq(1, "v1")))
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(
+        df,
+        resolvedPk("id"),
+        None,
+        collectionFieldNames = Seq(defaultAlias)
+      )
+      .toOption
+      .get
+
+    prepared.joinColumns shouldBe Seq(allocatedAlias)
+    prepared.dataFrame.columns.toSeq shouldBe Seq(allocatedAlias, "vec")
+  }
+
+  test("prepareBackfillData normalizes multiple internal join components") {
+    val joinKey = ResolvedJoinKey(
+      kind = "test_composite",
+      components = Seq(
+        ResolvedJoinComponent(
+          "id",
+          100L,
+          None,
+          ResolvedJoinKey.internalColumn(0)
+        ),
+        ResolvedJoinComponent(
+          "row_number",
+          101L,
+          None,
+          ResolvedJoinKey.internalColumn(1)
+        )
+      )
+    )
+    val df = buildDf(
+      Seq("pk", "row_number", "vec"),
+      Seq(Seq(1, "7", "v1"))
+    )
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(df, joinKey, None)
+      .toOption
+      .get
+
+    prepared.joinColumns shouldBe Seq(
+      ResolvedJoinKey.internalColumn(0),
+      ResolvedJoinKey.internalColumn(1)
+    )
+    prepared.targetFieldNames shouldBe Seq("vec")
   }
 }
