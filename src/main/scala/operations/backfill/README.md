@@ -55,9 +55,10 @@ spark-submit \
   `fs.s3a.bucket.<bucket>.*`) and the Milvus storage FFI.
 - **IAM / IRSA**: pass `--use-iam`, or simply omit both AK/SK. `BackfillApp`
   auto-enables `useIam` when both keys are empty, so no flag is required
-  under IRSA. In IAM mode the connector defers to
-  `DefaultAWSCredentialsProviderChain` (env vars / web identity token /
-  instance profile).
+  under IRSA. In IAM mode the connector honors an existing Hadoop S3A
+  `AssumedRoleCredentialProvider` configuration. A global main-storage role
+  is also forwarded to the Milvus storage FFI; otherwise both clients use
+  their default IAM chain (env vars / web identity token / instance profile).
 - **Different bucket for input parquet**: when the parquet file lives in a
   different bucket (or even region/account) from the Milvus storage bucket,
   use the `--source-s3-*` flags. They are written as per-bucket Hadoop S3A

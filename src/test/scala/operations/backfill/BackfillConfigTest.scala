@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.operations.backfill
 
+import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -169,6 +170,101 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       sourceS3UseIam = Some(true)
     )
     config.validate() shouldBe Right(())
+  }
+
+  test("AssumeRole settings require IAM mode and a role ARN") {
+    BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "ak",
+      s3SecretKey = "sk",
+      s3RoleArn = Some("arn:aws:iam::123456789012:role/data-role")
+    ).validate() shouldBe Left("s3RoleArn requires s3UseIam=true")
+
+    BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true,
+      s3RoleSessionName = Some("spark-job")
+    ).validate() shouldBe Left(
+      "s3RoleSessionName and s3ExternalId require s3RoleArn"
+    )
+  }
+
+  test("withHadoopS3AssumeRole derives the native main-storage role") {
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleExternalId,
+      "external-id"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopS3AssumeRole(
+      hadoopConf,
+      "spark app/with invalid characters and a very long identifier 1234567890"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+    resolved.s3RoleSessionName.get should fullyMatch regex
+      "[A-Za-z0-9+=,.@-]{1,64}"
+    resolved.s3ExternalId shouldBe Some("external-id")
+    resolved.validate() shouldBe Right(())
+  }
+
+  test("withHadoopS3AssumeRole ignores non-AssumeRole config") {
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+
+    config.withHadoopS3AssumeRole(hadoopConf, "spark-job") shouldBe config
+  }
+
+  test("withHadoopS3AssumeRole rejects an incomplete AssumeRole config") {
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    val hadoopConf = new Configuration(false)
+
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+
+    val error = intercept[IllegalArgumentException] {
+      config.withHadoopS3AssumeRole(hadoopConf, "spark-job")
+    }
+    error.getMessage should include(BackfillConfig.HadoopS3AssumedRoleArn)
   }
 
   test("Zero batchSize fails validation") {

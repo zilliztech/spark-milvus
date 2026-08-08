@@ -1,5 +1,8 @@
 package com.zilliz.spark.connector.operations.backfill
 
+import org.apache.hadoop.conf.Configuration
+
+import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.MilvusOption
 
 /** Configuration for backfill operation
@@ -89,7 +92,14 @@ case class BackfillConfig(
     //   "replace" — parquet is the absolute source of truth: every source
     //     row's target field becomes the parquet value (null if the pk has
     //     no parquet match). Destructive on unmatched rows.
-    mode: String = MilvusOption.BackfillModeCoalesce
+    mode: String = MilvusOption.BackfillModeCoalesce,
+
+    // Optional main-storage AssumeRole settings. BackfillApp derives these
+    // from an existing Hadoop S3A configuration when the runtime platform has
+    // already selected a data role for the job.
+    s3RoleArn: Option[String] = None,
+    s3RoleSessionName: Option[String] = None,
+    s3ExternalId: Option[String] = None
 ) {
 
   /** Whether the merge path needs to read each target field from the source
@@ -103,6 +113,12 @@ case class BackfillConfig(
   /** Validate S3 and writer configuration (always required)
     */
   def validate(): Either[String, Unit] = {
+    val normalizedRoleArn = s3RoleArn.map(_.trim).filter(_.nonEmpty)
+    val hasRoleDetails =
+      s3RoleSessionName.exists(_.trim.nonEmpty) || s3ExternalId.exists(
+        _.trim.nonEmpty
+      )
+
     if (s3Endpoint.isEmpty) {
       Left("s3Endpoint cannot be empty")
     } else if (s3BucketName.isEmpty) {
@@ -126,6 +142,10 @@ case class BackfillConfig(
       Left(
         "s3AccessKey and s3SecretKey must both be set unless s3UseIam=true"
       )
+    } else if (normalizedRoleArn.nonEmpty && !s3UseIam) {
+      Left("s3RoleArn requires s3UseIam=true")
+    } else if (normalizedRoleArn.isEmpty && hasRoleDetails) {
+      Left("s3RoleSessionName and s3ExternalId require s3RoleArn")
     } else {
       // Same invariant for the source (input parquet) bucket. Any field
       // left as None falls back to the main credentials, which we already
@@ -166,30 +186,23 @@ case class BackfillConfig(
     * field to minimize data transfer for join operation
     */
   def getMilvusReadOptions: Map[String, String] = {
-    var options = Map(
-      "milvus.uri" -> milvusUri,
-      "milvus.token" -> milvusToken,
-      "milvus.database.name" -> databaseName,
-      "milvus.collection.name" -> collectionName,
-      MilvusOption.MilvusExtraColumns -> Seq(
-        MilvusOption.MilvusExtraColumnSegmentID,
-        MilvusOption.MilvusExtraColumnRowOffset
-      ).mkString(","),
-      "fs.address" -> s3Endpoint,
-      "fs.bucket_name" -> s3BucketName,
-      "fs.root_path" -> s3RootPath,
-      "fs.use_ssl" -> s3UseSSL.toString,
-      "fs.use_iam" -> s3UseIam.toString
-    )
-    // Only inject static credentials when NOT in IAM mode. Under IRSA the FFI
-    // must consult the AWS default credentials chain — passing fake AK/SK
-    // (or the "minioadmin" defaults from Properties.scala) breaks signing.
-    if (!s3UseIam) {
-      options = options ++ Map(
-        "fs.access_key_id" -> s3AccessKey,
-        "fs.access_key_value" -> s3SecretKey
+    var options = withS3Authentication(
+      Map(
+        "milvus.uri" -> milvusUri,
+        "milvus.token" -> milvusToken,
+        "milvus.database.name" -> databaseName,
+        "milvus.collection.name" -> collectionName,
+        MilvusOption.MilvusExtraColumns -> Seq(
+          MilvusOption.MilvusExtraColumnSegmentID,
+          MilvusOption.MilvusExtraColumnRowOffset
+        ).mkString(","),
+        "fs.address" -> s3Endpoint,
+        "fs.bucket_name" -> s3BucketName,
+        "fs.root_path" -> s3RootPath,
+        "fs.use_ssl" -> s3UseSSL.toString,
+        "fs.use_iam" -> s3UseIam.toString
       )
-    }
+    )
 
     // Add optional configurations
     partitionName.foreach(p =>
@@ -221,28 +234,21 @@ case class BackfillConfig(
       segmentId: Long,
       fieldNameToId: Map[String, Long] = Map.empty
   ): Map[String, String] = {
-    var opts = Map(
-      "fs.storage_type" -> "remote",
-      "fs.address" -> s3Endpoint,
-      "fs.bucket_name" -> s3BucketName,
-      "fs.root_path" -> s3RootPath,
-      "fs.use_ssl" -> s3UseSSL.toString,
-      "fs.use_iam" -> s3UseIam.toString,
-      "fs.region" -> s3Region,
-      "milvus.collection.name" -> s"segment_${segmentId}_backfill",
-      "milvus.writer.customPath" -> segmentBasePath,
-      "milvus.writer.commitType" -> "addfield",
-      "milvus.insertMaxBatchSize" -> batchSize.toString
-    )
-    // See getMilvusReadOptions: skip static credentials in IAM mode so the
-    // FFI defers to the AWS default credentials chain instead of signing
-    // with placeholder keys.
-    if (!s3UseIam) {
-      opts = opts ++ Map(
-        "fs.access_key_id" -> s3AccessKey,
-        "fs.access_key_value" -> s3SecretKey
+    var opts = withS3Authentication(
+      Map(
+        "fs.storage_type" -> "remote",
+        "fs.address" -> s3Endpoint,
+        "fs.bucket_name" -> s3BucketName,
+        "fs.root_path" -> s3RootPath,
+        "fs.use_ssl" -> s3UseSSL.toString,
+        "fs.use_iam" -> s3UseIam.toString,
+        "fs.region" -> s3Region,
+        "milvus.collection.name" -> s"segment_${segmentId}_backfill",
+        "milvus.writer.customPath" -> segmentBasePath,
+        "milvus.writer.commitType" -> "addfield",
+        "milvus.insertMaxBatchSize" -> batchSize.toString
       )
-    }
+    )
     // Pass field name -> field ID mapping for correct column naming
     if (fieldNameToId.nonEmpty) {
       opts = opts + ("milvus.writer.fieldIds" -> fieldNameToId
@@ -251,9 +257,97 @@ case class BackfillConfig(
     }
     opts
   }
+
+  private[backfill] def withHadoopS3AssumeRole(
+      hadoopConf: Configuration,
+      defaultSessionName: String
+  ): BackfillConfig = {
+    val provider = Option(
+      hadoopConf.getTrimmed(BackfillConfig.HadoopS3CredentialsProvider)
+    ).getOrElse("")
+    val configuredRoleArn = Option(
+      hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleArn)
+    ).filter(_.nonEmpty)
+
+    if (
+      !s3UseIam || s3RoleArn.exists(_.trim.nonEmpty) ||
+      !BackfillConfig.isAssumedRoleProvider(provider)
+    ) {
+      this
+    } else {
+      val roleArn = configuredRoleArn.getOrElse(
+        throw new IllegalArgumentException(
+          s"${BackfillConfig.HadoopS3AssumedRoleArn} must be set when " +
+            s"${BackfillConfig.HadoopS3CredentialsProvider} uses " +
+            BackfillConfig.HadoopS3AssumedRoleProvider
+        )
+      )
+      copy(
+        s3RoleArn = Some(roleArn),
+        s3RoleSessionName = Option(
+          hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleSessionName)
+        ).filter(_.nonEmpty)
+          .map(BackfillConfig.normalizeRoleSessionName)
+          .orElse(
+            Some(BackfillConfig.normalizeRoleSessionName(defaultSessionName))
+          ),
+        s3ExternalId = Option(
+          hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleExternalId)
+        ).filter(_.nonEmpty)
+      )
+    }
+  }
+
+  private def withS3Authentication(
+      options: Map[String, String]
+  ): Map[String, String] = {
+    val credentialOptions = if (s3UseIam) {
+      options
+    } else {
+      options ++ Map(
+        Properties.FsConfig.FsAccessKeyId -> s3AccessKey,
+        Properties.FsConfig.FsAccessKeyValue -> s3SecretKey
+      )
+    }
+
+    Seq(
+      Properties.FsConfig.FsRoleArn -> s3RoleArn,
+      Properties.FsConfig.FsSessionName -> s3RoleSessionName,
+      Properties.FsConfig.FsExternalId -> s3ExternalId
+    ).foldLeft(credentialOptions) { case (result, (key, value)) =>
+      value.map(_.trim).filter(_.nonEmpty) match {
+        case Some(normalized) => result + (key -> normalized)
+        case None             => result
+      }
+    }
+  }
 }
 
 object BackfillConfig {
+
+  private[backfill] val HadoopS3CredentialsProvider =
+    "fs.s3a.aws.credentials.provider"
+  private[backfill] val HadoopS3AssumedRoleArn =
+    "fs.s3a.assumed.role.arn"
+  private[backfill] val HadoopS3AssumedRoleSessionName =
+    "fs.s3a.assumed.role.session.name"
+  private[backfill] val HadoopS3AssumedRoleExternalId =
+    "fs.s3a.assumed.role.external.id"
+  private[backfill] val HadoopS3AssumedRoleProvider =
+    "org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider"
+
+  private[backfill] def isAssumedRoleProvider(provider: String): Boolean =
+    provider
+      .split(',')
+      .exists(_.trim == HadoopS3AssumedRoleProvider)
+
+  private[backfill] def normalizeRoleSessionName(value: String): String = {
+    val normalized = Option(value)
+      .getOrElse("")
+      .replaceAll("[^A-Za-z0-9+=,.@-]", "-")
+    val nonEmpty = if (normalized.nonEmpty) normalized else "spark-backfill"
+    nonEmpty.take(64)
+  }
 
   /** Create a minimal config for testing
     */

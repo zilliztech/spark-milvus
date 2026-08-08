@@ -1829,6 +1829,40 @@ object MilvusBackfill {
     )
 
     if (useIam) {
+      val bucketProviderKey = s"$prefix.aws.credentials.provider"
+      val bucketProvider = Option(
+        hadoopConf.getTrimmed(bucketProviderKey)
+      ).getOrElse("")
+      val globalProvider = Option(
+        hadoopConf.getTrimmed(BackfillConfig.HadoopS3CredentialsProvider)
+      ).getOrElse("")
+      val bucketUsesAssumeRole =
+        BackfillConfig.isAssumedRoleProvider(bucketProvider)
+      val globalUsesAssumeRole =
+        BackfillConfig.isAssumedRoleProvider(globalProvider)
+
+      if (
+        bucketUsesAssumeRole && Option(
+          hadoopConf.getTrimmed(s"$prefix.assumed.role.arn")
+        ).forall(_.isEmpty)
+      ) {
+        throw new IllegalArgumentException(
+          s"$prefix.assumed.role.arn must be set when $bucketProviderKey uses " +
+            BackfillConfig.HadoopS3AssumedRoleProvider
+        )
+      }
+      if (
+        !bucketUsesAssumeRole && globalUsesAssumeRole && Option(
+          hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleArn)
+        ).forall(_.isEmpty)
+      ) {
+        throw new IllegalArgumentException(
+          s"${BackfillConfig.HadoopS3AssumedRoleArn} must be set when " +
+            s"${BackfillConfig.HadoopS3CredentialsProvider} uses " +
+            BackfillConfig.HadoopS3AssumedRoleProvider
+        )
+      }
+
       // Build an explicit IRSA/EKS-friendly provider chain instead of the
       // v1 DefaultAWSCredentialsProviderChain, which has historically been
       // unreliable on EKS pods (it does not always pick up the projected
@@ -1839,14 +1873,19 @@ object MilvusBackfill {
       //   1. WebIdentityTokenCredentialsProvider — IRSA / GKE Workload Identity
       //   2. EnvironmentVariableCredentialsProvider — local dev / CI overrides
       //   3. IAMInstanceCredentialsProvider — EC2 / EKS node role fallback
-      hadoopConf.set(
-        s"$prefix.aws.credentials.provider",
-        Seq(
-          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
-          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
-          "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
-        ).mkString(",")
-      )
+      // A managed runtime may already have selected an AssumeRole provider
+      // globally for its data role or per bucket for an external volume. Do
+      // not replace that security boundary with the pod's ambient identity.
+      if (!bucketUsesAssumeRole && !globalUsesAssumeRole) {
+        hadoopConf.set(
+          bucketProviderKey,
+          Seq(
+            "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
+            "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
+            "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
+          ).mkString(",")
+        )
+      }
     } else {
       hadoopConf.set(s"$prefix.access.key", accessKey)
       hadoopConf.set(s"$prefix.secret.key", secretKey)

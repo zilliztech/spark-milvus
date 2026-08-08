@@ -62,7 +62,7 @@ object BackfillApp {
       ) Some(false)
       else None
 
-    val config = BackfillConfig(
+    val baseConfig = BackfillConfig(
       s3Endpoint = s3Endpoint,
       s3BucketName = s3Bucket,
       s3AccessKey = s3AccessKey,
@@ -89,7 +89,7 @@ object BackfillApp {
     // user's log config hides INFO.
     if (!parsed.contains("mode")) {
       System.err.println(
-        s"[BackfillApp] --mode not set; defaulting to '${config.mode}' " +
+        s"[BackfillApp] --mode not set; defaulting to '${baseConfig.mode}' " +
           s"(fill-if-null). Pass '--mode ${MilvusOption.BackfillModeReplace}' " +
           "for the pre-#91 full-overwrite behavior, or " +
           s"'--mode ${MilvusOption.BackfillModeOverwrite}' to overwrite only " +
@@ -103,6 +103,10 @@ object BackfillApp {
     spark.sparkContext.setLogLevel("WARN")
 
     try {
+      val config = baseConfig.withHadoopS3AssumeRole(
+        spark.sparkContext.hadoopConfiguration,
+        spark.sparkContext.applicationId
+      )
       MilvusBackfill.run(spark, parquetPath, snapshotPath, config) match {
         case Right(result) =>
           println(result.summary)
