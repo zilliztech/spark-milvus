@@ -140,6 +140,209 @@ class BackfillModeTest
     spark.createDataFrame(spark.sparkContext.parallelize(javaRows), schema)
   }
 
+  test("join-key cardinality accepts unique non-null keys") {
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row(1), Row(2))),
+      StructType(Seq(StructField("join_key", IntegerType, nullable = false)))
+    )
+
+    MilvusBackfill.validateJoinKeyCardinality(
+      df,
+      Seq("join_key"),
+      Seq("pk"),
+      "Backfill parquet"
+    ) shouldBe Right(JoinKeyStats(2L, 0L, 2L))
+  }
+
+  test("join-key cardinality rejects null keys separately from duplicates") {
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row(Int.box(1)), Row(null))),
+      StructType(Seq(StructField("join_key", IntegerType, nullable = true)))
+    )
+
+    val err = MilvusBackfill
+      .validateJoinKeyCardinality(
+        df,
+        Seq("join_key"),
+        Seq("pk"),
+        "Backfill parquet"
+      )
+      .left
+      .toOption
+      .get
+
+    err.message should include("null join key")
+    err.message should include("(pk)")
+  }
+
+  test("join-key cardinality rejects duplicate keys") {
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row(1), Row(1))),
+      StructType(Seq(StructField("join_key", IntegerType, nullable = false)))
+    )
+
+    val err = MilvusBackfill
+      .validateJoinKeyCardinality(
+        df,
+        Seq("join_key"),
+        Seq("pk"),
+        "Backfill parquet"
+      )
+      .left
+      .toOption
+      .get
+
+    err.message should include("duplicate join-key values")
+    err.message should include("distinct=1")
+  }
+
+  test("join-key cardinality validates composite tuples") {
+    val unique = spark.createDataFrame(
+      spark.sparkContext.parallelize(
+        Seq(Row(1, "a"), Row(1, "b"), Row(2, "a"))
+      ),
+      StructType(
+        Seq(
+          StructField("k1", IntegerType, nullable = false),
+          StructField("k2", StringType, nullable = false)
+        )
+      )
+    )
+    val duplicate = unique.union(unique.limit(1))
+
+    MilvusBackfill.validateJoinKeyCardinality(
+      unique,
+      Seq("k1", "k2"),
+      Seq("file", "row"),
+      "Backfill parquet"
+    ) shouldBe Right(JoinKeyStats(3L, 0L, 3L))
+
+    MilvusBackfill
+      .validateJoinKeyCardinality(
+        duplicate,
+        Seq("k1", "k2"),
+        Seq("file", "row"),
+        "Backfill parquet"
+      )
+      .isLeft shouldBe true
+  }
+
+  test("source read projection keeps field IDs aligned with schema order") {
+    val pkField = StructField("pk", IntegerType, nullable = false)
+    val joinKey = ResolvedJoinKey.primaryKey("pk", 100L, Some(pkField))
+    val projection = MilvusBackfill
+      .buildSourceReadProjection(
+        joinKey,
+        Seq(
+          ("pk", 100L, pkField),
+          ("f1", 101L, StructField("f1", StringType, nullable = true))
+        )
+      )
+      .toOption
+      .get
+
+    projection.fieldIds shouldBe Seq(100L, 101L)
+    projection.schema.fieldNames.toSeq shouldBe Seq("pk", "f1")
+  }
+
+  test("source join normalization preserves rename swaps in one projection") {
+    val joinKey = ResolvedJoinKey(
+      kind = "test_swap",
+      components = Seq(
+        ResolvedJoinComponent("a", 100L, None, "b"),
+        ResolvedJoinComponent("b", 101L, None, "a")
+      )
+    )
+    val source = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row("A", "B", 10L))),
+      StructType(
+        Seq(
+          StructField("a", StringType, nullable = false),
+          StructField("b", StringType, nullable = false),
+          StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false)
+        )
+      )
+    )
+
+    val normalized = MilvusBackfill.normalizeSourceJoinColumns(source, joinKey)
+    val row = normalized.collect().head
+
+    row.getAs[String]("b") shouldBe "A"
+    row.getAs[String]("a") shouldBe "B"
+    row.getAs[Long](MilvusBackfill.SegmentIdCol) shouldBe 10L
+  }
+
+  test("join-key compatibility checks normalized component types") {
+    val internal = ResolvedJoinKey.internalColumn(0)
+    val joinKey = ResolvedJoinKey.primaryKey("pk", 100L, None)
+    val source = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row(1))),
+      StructType(Seq(StructField(internal, IntegerType, nullable = false)))
+    )
+    val matching = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row(1))),
+      StructType(Seq(StructField(internal, IntegerType, nullable = false)))
+    )
+    val mismatched = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row(1L))),
+      StructType(Seq(StructField(internal, LongType, nullable = false)))
+    )
+
+    MilvusBackfill.validateJoinKeyCompatibility(
+      source,
+      matching,
+      joinKey
+    ) shouldBe Right(())
+
+    val err = MilvusBackfill
+      .validateJoinKeyCompatibility(source, mismatched, joinKey)
+      .left
+      .toOption
+      .get
+    err.message should include("Join-key type mismatch")
+    err.message should include("pk")
+  }
+
+  test("performJoin supports multiple resolved join components") {
+    val original = spark.createDataFrame(
+      spark.sparkContext.parallelize(
+        Seq(Row(1, "a", 10L, 0L), Row(1, "b", 10L, 1L))
+      ),
+      StructType(
+        Seq(
+          StructField("k1", IntegerType, nullable = false),
+          StructField("k2", StringType, nullable = false),
+          StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false),
+          StructField(MilvusBackfill.RowOffsetCol, LongType, nullable = false)
+        )
+      )
+    )
+    val backfill = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row(1, "a", "matched"))),
+      StructType(
+        Seq(
+          StructField("k1", IntegerType, nullable = false),
+          StructField("k2", StringType, nullable = false),
+          StructField("value", StringType, nullable = true)
+        )
+      )
+    )
+
+    val joined = MilvusBackfill.performJoin(
+      original,
+      backfill,
+      Seq("k1", "k2"),
+      Seq("value"),
+      MilvusOption.BackfillModeReplace
+    )
+
+    joined
+      .orderBy("k2")
+      .collect()
+      .map(r => (r.getAs[String]("k2"), Option(r.getAs[String]("value"))))
+      .toSeq shouldBe Seq(("a", Some("matched")), ("b", None))
+  }
+
   test("replace mode: source has only PK, backfill values win") {
     val originalSchema = StructType(
       Seq(
@@ -164,7 +367,7 @@ class BackfillModeTest
     val joined = MilvusBackfill.performJoin(
       original,
       backfill,
-      "pk",
+      Seq("pk"),
       Seq("f1", "f2"),
       MilvusOption.BackfillModeReplace
     )
@@ -214,7 +417,7 @@ class BackfillModeTest
     val joined = MilvusBackfill.performJoin(
       original,
       backfill,
-      "pk",
+      Seq("pk"),
       Seq("f1", "f2"),
       MilvusOption.BackfillModeCoalesce
     )
@@ -350,7 +553,7 @@ class BackfillModeTest
     val joined = MilvusBackfill.performJoin(
       original,
       backfill,
-      "pk",
+      Seq("pk"),
       Seq("f1", "f2"),
       MilvusOption.BackfillModeCoalesce
     )
@@ -395,7 +598,7 @@ class BackfillModeTest
     val joined = MilvusBackfill.performJoin(
       original,
       backfill,
-      "pk",
+      Seq("pk"),
       Seq("f1", "f2"),
       MilvusOption.BackfillModeCoalesce
     )
@@ -439,7 +642,7 @@ class BackfillModeTest
     val joined = MilvusBackfill.performJoin(
       original,
       backfill,
-      "pk",
+      Seq("pk"),
       Seq("f1", "f2"),
       MilvusOption.BackfillModeOverwrite
     )
@@ -497,7 +700,7 @@ class BackfillModeTest
     val joined = MilvusBackfill.performJoin(
       original,
       backfill,
-      "pk",
+      Seq("pk"),
       Seq("f1", "f2"),
       MilvusOption.BackfillModeOverwrite
     )
