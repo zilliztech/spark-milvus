@@ -56,10 +56,11 @@ spark-submit \
   `fs.s3a.bucket.<bucket>.*`) and the Milvus storage FFI.
 - **IAM / IRSA**: pass `--use-iam`, or simply omit both AK/SK. `BackfillApp`
   auto-enables `useIam` when both keys are empty, so no flag is required
-  under IRSA. In IAM mode the connector honors an existing Hadoop S3A
-  `AssumedRoleCredentialProvider` configuration. A global main-storage role
-  is also forwarded to the Milvus storage FFI; otherwise both clients use
-  their default IAM chain (env vars / web identity token / instance profile).
+  under IRSA. In IAM mode the connector honors the platform-injected Hadoop
+  AssumeRole configuration: `fs.s3a.assumed.role.*` on AWS and
+  `fs.oss.assumed.role.*` on Alibaba Cloud. A global main-storage role is also
+  forwarded to the Milvus storage FFI; otherwise both clients use their default
+  IAM chain (env vars / web identity token / instance profile).
 - **Cloud provider**: omit `--s3-cloud-provider` for AWS. Pass `aliyun` when
   the Milvus storage bucket is OSS so the native writer uses the Aliyun
   credentials provider and AssumeRole flow.

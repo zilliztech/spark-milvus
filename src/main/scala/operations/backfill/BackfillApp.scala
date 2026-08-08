@@ -108,7 +108,7 @@ object BackfillApp {
     spark.sparkContext.setLogLevel("WARN")
 
     try {
-      val config = baseConfig.withHadoopS3AssumeRole(
+      val config = baseConfig.withHadoopStorageAssumeRole(
         spark.sparkContext.hadoopConfiguration,
         spark.sparkContext.applicationId
       )

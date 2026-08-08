@@ -208,7 +208,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     )
   }
 
-  test("withHadoopS3AssumeRole derives the native main-storage role") {
+  test("withHadoopStorageAssumeRole derives the AWS native main-storage role") {
     val hadoopConf = new Configuration(false)
     hadoopConf.set(
       BackfillConfig.HadoopS3CredentialsProvider,
@@ -230,7 +230,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3UseIam = true
     )
 
-    val resolved = config.withHadoopS3AssumeRole(
+    val resolved = config.withHadoopStorageAssumeRole(
       hadoopConf,
       "spark app/with invalid characters and a very long identifier 1234567890"
     )
@@ -244,7 +244,82 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     resolved.validate() shouldBe Right(())
   }
 
-  test("withHadoopS3AssumeRole ignores non-AssumeRole config") {
+  test(
+    "withHadoopStorageAssumeRole derives the Alibaba native main-storage role"
+  ) {
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopOssAssumedRoleArn,
+      "acs:ram::123456789012:role/spark-data-role"
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopOssAssumedRoleSessionName,
+      "spark-job"
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopOssAssumedRoleExternalId,
+      "external-id"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopStorageAssumeRole(
+      hadoopConf,
+      "unused-default-session"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "acs:ram::123456789012:role/spark-data-role"
+    )
+    resolved.s3RoleSessionName shouldBe Some("spark-job")
+    resolved.s3ExternalId shouldBe Some("external-id")
+    resolved.validate() shouldBe Right(())
+  }
+
+  test("withHadoopStorageAssumeRole ignores missing Alibaba role config") {
+    val config = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true
+    )
+    val hadoopConf = new Configuration(false)
+
+    config.withHadoopStorageAssumeRole(hadoopConf, "spark-job") shouldBe config
+  }
+
+  test(
+    "withHadoopStorageAssumeRole rejects an incomplete Alibaba AssumeRole config"
+  ) {
+    val config = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true
+    )
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopOssCredentialsProvider,
+      BackfillConfig.HadoopOssAssumedRoleProvider
+    )
+
+    val error = intercept[IllegalArgumentException] {
+      config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
+    }
+    error.getMessage should include(BackfillConfig.HadoopOssAssumedRoleArn)
+  }
+
+  test("withHadoopStorageAssumeRole ignores non-AssumeRole AWS config") {
     val config = BackfillConfig(
       s3Endpoint = "s3.amazonaws.com",
       s3BucketName = "bucket",
@@ -258,10 +333,12 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       "arn:aws:iam::123456789012:role/data-role"
     )
 
-    config.withHadoopS3AssumeRole(hadoopConf, "spark-job") shouldBe config
+    config.withHadoopStorageAssumeRole(hadoopConf, "spark-job") shouldBe config
   }
 
-  test("withHadoopS3AssumeRole rejects an incomplete AssumeRole config") {
+  test(
+    "withHadoopStorageAssumeRole rejects an incomplete AWS AssumeRole config"
+  ) {
     val config = BackfillConfig(
       s3Endpoint = "s3.amazonaws.com",
       s3BucketName = "bucket",
@@ -277,7 +354,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     )
 
     val error = intercept[IllegalArgumentException] {
-      config.withHadoopS3AssumeRole(hadoopConf, "spark-job")
+      config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
     }
     error.getMessage should include(BackfillConfig.HadoopS3AssumedRoleArn)
   }

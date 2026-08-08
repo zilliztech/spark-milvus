@@ -270,44 +270,105 @@ case class BackfillConfig(
     opts
   }
 
-  private[backfill] def withHadoopS3AssumeRole(
+  private[backfill] def withHadoopStorageAssumeRole(
+      hadoopConf: Configuration,
+      defaultSessionName: String
+  ): BackfillConfig = {
+    if (!s3UseIam || s3RoleArn.exists(_.trim.nonEmpty)) {
+      this
+    } else if (s3CloudProvider.trim == "aliyun") {
+      withAlibabaOssAssumeRole(hadoopConf, defaultSessionName)
+    } else {
+      withAwsS3AssumeRole(hadoopConf, defaultSessionName)
+    }
+  }
+
+  private def withAwsS3AssumeRole(
       hadoopConf: Configuration,
       defaultSessionName: String
   ): BackfillConfig = {
     val provider = Option(
       hadoopConf.getTrimmed(BackfillConfig.HadoopS3CredentialsProvider)
     ).getOrElse("")
-    val configuredRoleArn = Option(
+    if (!BackfillConfig.isAssumedRoleProvider(provider)) {
+      return this
+    }
+
+    val roleArn = Option(
       hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleArn)
     ).filter(_.nonEmpty)
-
-    if (
-      !s3UseIam || s3RoleArn.exists(_.trim.nonEmpty) ||
-      !BackfillConfig.isAssumedRoleProvider(provider)
-    ) {
-      this
-    } else {
-      val roleArn = configuredRoleArn.getOrElse(
+      .getOrElse(
         throw new IllegalArgumentException(
           s"${BackfillConfig.HadoopS3AssumedRoleArn} must be set when " +
             s"${BackfillConfig.HadoopS3CredentialsProvider} uses " +
             BackfillConfig.HadoopS3AssumedRoleProvider
         )
       )
-      copy(
-        s3RoleArn = Some(roleArn),
-        s3RoleSessionName = Option(
-          hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleSessionName)
-        ).filter(_.nonEmpty)
-          .map(BackfillConfig.normalizeRoleSessionName)
-          .orElse(
-            Some(BackfillConfig.normalizeRoleSessionName(defaultSessionName))
-          ),
-        s3ExternalId = Option(
-          hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleExternalId)
-        ).filter(_.nonEmpty)
+    withNativeAssumeRole(
+      roleArn,
+      Option(
+        hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleSessionName)
+      ).filter(_.nonEmpty),
+      Option(
+        hadoopConf.getTrimmed(BackfillConfig.HadoopS3AssumedRoleExternalId)
+      )
+        .filter(_.nonEmpty),
+      defaultSessionName
+    )
+  }
+
+  private def withAlibabaOssAssumeRole(
+      hadoopConf: Configuration,
+      defaultSessionName: String
+  ): BackfillConfig = {
+    val provider = Option(
+      hadoopConf.getTrimmed(BackfillConfig.HadoopOssCredentialsProvider)
+    ).getOrElse("")
+    val roleArn = Option(
+      hadoopConf.getTrimmed(BackfillConfig.HadoopOssAssumedRoleArn)
+    ).filter(_.nonEmpty)
+
+    if (roleArn.isEmpty && BackfillConfig.isOssAssumeRoleProvider(provider)) {
+      throw new IllegalArgumentException(
+        s"${BackfillConfig.HadoopOssAssumedRoleArn} must be set when " +
+          s"${BackfillConfig.HadoopOssCredentialsProvider} uses " +
+          BackfillConfig.HadoopOssAssumedRoleProvider
       )
     }
+
+    roleArn
+      .map { arn =>
+        withNativeAssumeRole(
+          arn,
+          Option(
+            hadoopConf.getTrimmed(
+              BackfillConfig.HadoopOssAssumedRoleSessionName
+            )
+          ).filter(_.nonEmpty),
+          Option(
+            hadoopConf.getTrimmed(BackfillConfig.HadoopOssAssumedRoleExternalId)
+          ).filter(_.nonEmpty),
+          defaultSessionName
+        )
+      }
+      .getOrElse(this)
+  }
+
+  private def withNativeAssumeRole(
+      roleArn: String,
+      sessionName: Option[String],
+      externalId: Option[String],
+      defaultSessionName: String
+  ): BackfillConfig = {
+    copy(
+      s3RoleArn = Some(roleArn),
+      s3RoleSessionName = sessionName
+        .map(BackfillConfig.normalizeRoleSessionName)
+        .orElse(
+          Some(BackfillConfig.normalizeRoleSessionName(defaultSessionName))
+        ),
+      s3ExternalId = externalId
+    )
   }
 
   private def withS3Authentication(
@@ -351,11 +412,26 @@ object BackfillConfig {
     "fs.s3a.assumed.role.external.id"
   private[backfill] val HadoopS3AssumedRoleProvider =
     "org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider"
+  private[backfill] val HadoopOssAssumedRoleArn =
+    "fs.oss.assumed.role.arn"
+  private[backfill] val HadoopOssCredentialsProvider =
+    "fs.oss.credentials.provider"
+  private[backfill] val HadoopOssAssumedRoleSessionName =
+    "fs.oss.assumed.role.session.name"
+  private[backfill] val HadoopOssAssumedRoleExternalId =
+    "fs.oss.assumed.role.external.id"
+  private[backfill] val HadoopOssAssumedRoleProvider =
+    "com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider"
 
   private[backfill] def isAssumedRoleProvider(provider: String): Boolean =
     provider
       .split(',')
       .exists(_.trim == HadoopS3AssumedRoleProvider)
+
+  private[backfill] def isOssAssumeRoleProvider(provider: String): Boolean =
+    provider
+      .split(',')
+      .exists(_.trim == HadoopOssAssumedRoleProvider)
 
   private[backfill] def normalizeRoleSessionName(value: String): String = {
     val normalized = Option(value)
