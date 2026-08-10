@@ -11,7 +11,8 @@ import com.zilliz.spark.connector.MilvusOption
   * spark-connector-assembly.jar \ --parquet <path> --snapshot <path> \
   * --s3-endpoint <endpoint> --s3-bucket <bucket> \ --s3-access-key <key>
   * --s3-secret-key <secret> \ [--s3-root-path <path>] [--s3-region <region>]
-  * [--s3-use-ssl] \ [--batch-size <n>] [--output-result <path>] \ [--mode
+  * [--s3-cloud-provider aws|aliyun|gcp|azure|tencent|huawei] [--s3-use-ssl] \
+  * [--batch-size <n>] [--output-result <path>] \ [--mode
   * replace|coalesce|overwrite]
   *
   * --mode:
@@ -62,7 +63,7 @@ object BackfillApp {
       ) Some(false)
       else None
 
-    val config = BackfillConfig(
+    val baseConfig = BackfillConfig(
       s3Endpoint = s3Endpoint,
       s3BucketName = s3Bucket,
       s3AccessKey = s3AccessKey,
@@ -70,6 +71,10 @@ object BackfillApp {
       s3UseSSL = parsed.contains("s3-use-ssl"),
       s3RootPath = parsed.getOrElse("s3-root-path", "files"),
       s3Region = parsed.getOrElse("s3-region", "us-east-1"),
+      s3CloudProvider = parsed.getOrElse(
+        "s3-cloud-provider",
+        BackfillConfig.DefaultCloudProvider
+      ),
       s3UseIam = useIam,
       sourceS3Endpoint = parsed.get("source-s3-endpoint"),
       sourceS3AccessKey = parsed.get("source-s3-access-key"),
@@ -89,7 +94,7 @@ object BackfillApp {
     // user's log config hides INFO.
     if (!parsed.contains("mode")) {
       System.err.println(
-        s"[BackfillApp] --mode not set; defaulting to '${config.mode}' " +
+        s"[BackfillApp] --mode not set; defaulting to '${baseConfig.mode}' " +
           s"(fill-if-null). Pass '--mode ${MilvusOption.BackfillModeReplace}' " +
           "for the pre-#91 full-overwrite behavior, or " +
           s"'--mode ${MilvusOption.BackfillModeOverwrite}' to overwrite only " +
@@ -103,13 +108,13 @@ object BackfillApp {
     spark.sparkContext.setLogLevel("WARN")
 
     try {
-      MilvusBackfill.run(spark, parquetPath, snapshotPath, config) match {
+      MilvusBackfill.run(spark, parquetPath, snapshotPath, baseConfig) match {
         case Right(result) =>
           println(result.summary)
           println(result.segmentSummary)
           parsed.get("output-result").foreach { outputPath =>
             MilvusBackfill
-              .writeResultJson(spark, result, outputPath, config) match {
+              .writeResultJson(spark, result, outputPath, baseConfig) match {
               case Right(_) =>
                 println(s"Result JSON written to: $outputPath")
               case Left(err) =>
@@ -149,6 +154,7 @@ object BackfillApp {
     "s3-secret-key",
     "s3-root-path",
     "s3-region",
+    "s3-cloud-provider",
     "source-s3-endpoint",
     "source-s3-access-key",
     "source-s3-secret-key",
