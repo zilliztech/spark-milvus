@@ -116,6 +116,7 @@ case class BackfillConfig(
   /** Validate S3 and writer configuration (always required)
     */
   def validate(): Either[String, Unit] = {
+    val normalizedCloudProvider = s3CloudProvider.trim
     val normalizedRoleArn = s3RoleArn.map(_.trim).filter(_.nonEmpty)
     val hasRoleDetails =
       s3RoleSessionName.exists(_.trim.nonEmpty) || s3ExternalId.exists(
@@ -127,7 +128,7 @@ case class BackfillConfig(
     } else if (s3BucketName.isEmpty) {
       Left("s3BucketName cannot be empty")
     } else if (
-      !BackfillConfig.AllowedCloudProviders.contains(s3CloudProvider.trim)
+      !BackfillConfig.AllowedCloudProviders.contains(normalizedCloudProvider)
     ) {
       Left(
         s"s3CloudProvider must be one of ${BackfillConfig.AllowedCloudProviders
@@ -154,6 +155,17 @@ case class BackfillConfig(
       )
     } else if (normalizedRoleArn.nonEmpty && !s3UseIam) {
       Left("s3RoleArn requires s3UseIam=true")
+    } else if (
+      normalizedRoleArn.nonEmpty &&
+      !BackfillConfig.NativeAssumeRoleCloudProviders.contains(
+        normalizedCloudProvider
+      )
+    ) {
+      Left(
+        s"s3RoleArn is supported only when s3CloudProvider is one of " +
+          s"${BackfillConfig.NativeAssumeRoleCloudProviders.mkString("[", ", ", "]")} " +
+          s"(got '$s3CloudProvider')"
+      )
     } else if (normalizedRoleArn.isEmpty && hasRoleDetails) {
       Left("s3RoleSessionName and s3ExternalId require s3RoleArn")
     } else {
@@ -393,6 +405,7 @@ object BackfillConfig {
   private[backfill] val DefaultCloudProvider = "aws"
   private[backfill] val AllowedCloudProviders =
     Set("aws", "gcp", "aliyun", "azure", "tencent", "huawei")
+  private[backfill] val NativeAssumeRoleCloudProviders = Set("aws", "aliyun")
 
   private[backfill] val HadoopS3CredentialsProvider =
     "fs.s3a.aws.credentials.provider"

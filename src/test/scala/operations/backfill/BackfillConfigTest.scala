@@ -208,6 +208,36 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     )
   }
 
+  test(
+    "AssumeRole settings are accepted only for native AWS and Alibaba storage"
+  ) {
+    Seq("aws", "aliyun").foreach { provider =>
+      BackfillConfig(
+        s3Endpoint = "storage.example.com",
+        s3BucketName = "bucket",
+        s3AccessKey = "",
+        s3SecretKey = "",
+        s3CloudProvider = provider,
+        s3UseIam = true,
+        s3RoleArn = Some("role-arn")
+      ).validate() shouldBe Right(())
+    }
+
+    Seq("gcp", "azure", "tencent", "huawei").foreach { provider =>
+      val error = BackfillConfig(
+        s3Endpoint = "storage.example.com",
+        s3BucketName = "bucket",
+        s3AccessKey = "",
+        s3SecretKey = "",
+        s3CloudProvider = provider,
+        s3UseIam = true,
+        s3RoleArn = Some("role-arn")
+      ).validate().left.toOption.get
+
+      error should include("s3RoleArn is supported only")
+    }
+  }
+
   test("withHadoopStorageAssumeRole derives the AWS native main-storage role") {
     val hadoopConf = new Configuration(false)
     hadoopConf.set(
