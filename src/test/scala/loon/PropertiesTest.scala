@@ -25,6 +25,9 @@ class PropertiesTest extends AnyFunSuite with Matchers {
     Properties.FsConfig.FsUseSSL shouldBe "fs.use_ssl"
     Properties.FsConfig.FsSslCaCert shouldBe "fs.ssl_ca_cert"
     Properties.FsConfig.FsUseIam shouldBe "fs.use_iam"
+    Properties.FsConfig.FsRoleArn shouldBe "fs.role_arn"
+    Properties.FsConfig.FsSessionName shouldBe "fs.session_name"
+    Properties.FsConfig.FsExternalId shouldBe "fs.external_id"
     Properties.FsConfig.FsUseVirtualHost shouldBe "fs.use_virtual_host"
     Properties.FsConfig.FsRequestTimeoutMs shouldBe "fs.request_timeout_ms"
     Properties.FsConfig.FsGcpNativeWithoutAuth shouldBe "fs.gcp_native_without_auth"
@@ -48,6 +51,9 @@ class PropertiesTest extends AnyFunSuite with Matchers {
       Properties.FsConfig.FsUseSSL,
       Properties.FsConfig.FsSslCaCert,
       Properties.FsConfig.FsUseIam,
+      Properties.FsConfig.FsRoleArn,
+      Properties.FsConfig.FsSessionName,
+      Properties.FsConfig.FsExternalId,
       Properties.FsConfig.FsUseVirtualHost,
       Properties.FsConfig.FsRequestTimeoutMs,
       Properties.FsConfig.FsGcpNativeWithoutAuth,
@@ -77,6 +83,9 @@ class PropertiesTest extends AnyFunSuite with Matchers {
       Properties.FsConfig.FsUseSSL,
       Properties.FsConfig.FsSslCaCert,
       Properties.FsConfig.FsUseIam,
+      Properties.FsConfig.FsRoleArn,
+      Properties.FsConfig.FsSessionName,
+      Properties.FsConfig.FsExternalId,
       Properties.FsConfig.FsUseVirtualHost,
       Properties.FsConfig.FsRequestTimeoutMs,
       Properties.FsConfig.FsGcpNativeWithoutAuth,
@@ -273,5 +282,20 @@ class PropertiesTest extends AnyFunSuite with Matchers {
     Properties.normalizedFsBucketNameValue(
       Map(Properties.FsConfig.FsBucketName -> "   ")
     ) shouldBe None
+  }
+
+  test("normalizedAssumeRoleOptions forwards only non-blank role settings") {
+    Properties.normalizedAssumeRoleOptions(
+      Map(
+        Properties.FsConfig.FsRoleArn ->
+          " arn:aws:iam::123456789012:role/data-role ",
+        Properties.FsConfig.FsSessionName -> " spark-job ",
+        Properties.FsConfig.FsExternalId -> "   "
+      )
+    ) shouldBe Map(
+      Properties.FsConfig.FsRoleArn ->
+        "arn:aws:iam::123456789012:role/data-role",
+      Properties.FsConfig.FsSessionName -> "spark-job"
+    )
   }
 }

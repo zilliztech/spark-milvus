@@ -18,6 +18,17 @@ object Properties {
   ): Option[String] =
     options.get(FsConfig.FsBucketName).map(_.trim).filter(_.nonEmpty)
 
+  private[loon] def normalizedAssumeRoleOptions(
+      options: scala.collection.Map[String, String]
+  ): Map[String, String] =
+    Seq(
+      FsConfig.FsRoleArn,
+      FsConfig.FsSessionName,
+      FsConfig.FsExternalId
+    ).flatMap { key =>
+      options.get(key).map(_.trim).filter(_.nonEmpty).map(key -> _)
+    }.toMap
+
   /** Filesystem configuration constants for Storage V2 (matching milvus-storage
     * C++ API)
     */
@@ -35,6 +46,9 @@ object Properties {
     val FsUseSSL = "fs.use_ssl"
     val FsSslCaCert = "fs.ssl_ca_cert"
     val FsUseIam = "fs.use_iam"
+    val FsRoleArn = "fs.role_arn"
+    val FsSessionName = "fs.session_name"
+    val FsExternalId = "fs.external_id"
     val FsUseVirtualHost = "fs.use_virtual_host"
     val FsRequestTimeoutMs = "fs.request_timeout_ms"
     val FsGcpNativeWithoutAuth = "fs.gcp_native_without_auth"
@@ -126,6 +140,9 @@ object Properties {
       .get(FsConfig.FsSslCaCert)
       .foreach(propsMap.put(FsConfig.FsSslCaCert, _))
     normalizedUseIamValue.foreach(propsMap.put(FsConfig.FsUseIam, _))
+    normalizedAssumeRoleOptions(milvusOption.options).foreach {
+      case (key, value) => propsMap.put(key, value)
+    }
     milvusOption.options
       .get(FsConfig.FsUseVirtualHost)
       .foreach(propsMap.put(FsConfig.FsUseVirtualHost, _))
