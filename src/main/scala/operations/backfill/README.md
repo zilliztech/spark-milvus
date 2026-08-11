@@ -109,15 +109,20 @@ input uses a different name, map it to the selected field:
 --column-mapping source_row_id:external_row_id,new_vec:embedding
 ```
 
-The selected join field is join-only and is not written as a target field. The
-parquet key must be unique and non-null so each physical source row produces at
-most one output row. The snapshot field may repeat: one parquet record is
-applied to every physical source row with the same key. Its Spark type must
-match exactly. Supported physical-key Milvus types are Int8, Int16, Int32,
-Int64, String, and VarChar. Floating-point, JSON, Geometry, Text, Timestamptz,
-unknown, array/struct/map, and vector fields are rejected. Logical file/row
-keys are not supported; `$row_offset` is used only to restore physical segment
-order and is not a stable logical row ID.
+The selected join field is join-only and is not written as a target field. It
+must be declared non-nullable in the snapshot schema. The parquet key must be
+unique and non-null so each physical source row produces at most one output
+row. Source values may repeat: one parquet record is applied to every physical
+source row with the same key. Its Spark type must match exactly. Supported
+physical-key Milvus types are Int8, Int16, Int32, Int64, String, and VarChar.
+Floating-point, JSON, Geometry, Text, Timestamptz, unknown, array/struct/map,
+and vector fields are rejected. Logical file/row keys are not supported;
+`$row_offset` is used only to restore physical segment order and is not a
+stable logical row ID.
+
+Backfill targets must be ordinary writable collection fields. Primary keys,
+partition keys, dynamic fields, function-output fields, and Milvus system
+fields are rejected before source data is read.
 
 ## Vector columns
 
@@ -171,6 +176,9 @@ source-side target values):
   Spark cast between compatible numeric widths.
 - Slightly heavier I/O than `replace` because the existing field is read
   per segment.
+- On Storage V2 packed segments, target fields must already exist in the
+  segment's column groups. Use `replace` for the initial backfill of a newly
+  added field.
 - For `overwrite`: an explicitly null value in the parquet **will** clobber
   the existing source value on matched rows — the match flag drives the
   projection, not the file column's null-ness.

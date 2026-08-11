@@ -5,16 +5,16 @@ field to an existing Milvus collection and populate it for every existing
 row**, entirely offline against object storage. Online reads and writes are
 not interrupted.
 
-If you want the architecture / internals, see
-`design-snapshot-backfill.md`. This doc is task-oriented.
+For implementation details and accepted vector encodings, see the
+[backfill README](../src/main/scala/operations/backfill/README.md).
 
 ## 1. When to use it
 
 Use snapshot backfill when you need to:
 
-- Add a new **scalar**, **text**, or **JSON** field to a large collection and
-  fill in values for rows that already exist.
-- Re-compute a scalar/text/JSON field from an external system (e.g. an
+- Add a new **scalar**, **text**, **JSON**, or supported **vector** field to a
+  large collection and fill in values for rows that already exist.
+- Re-compute a scalar/text/JSON/vector field from an external system (e.g. an
   embedding classifier output, a new metadata column, a re-scored relevance
   label) without re-ingesting base data.
 - Do the above without load on the Milvus cluster and without rebuilding
@@ -22,8 +22,10 @@ Use snapshot backfill when you need to:
 
 **Not supported today:**
 
-- Backfilling vector fields, primary-key columns, dynamic fields, or
-  function fields.
+- Backfilling primary-key columns, partition-key columns, dynamic fields,
+  function-output fields, or Milvus system fields.
+- Using vector fields as physical join keys. Supported vector fields can still
+  be backfill targets.
 - Collections whose sealed segments are still in the legacy V1 binlog
   format. You need a cluster that writes storage-V2 or V3 segments.
 
@@ -34,16 +36,16 @@ Use snapshot backfill when you need to:
 | Milvus server              | Snapshot + `UpdateSegmentColumnGroups` support required (any recent 2.6+ or internal build).    |
 | Object storage             | S3 / MinIO / GCS with S3-compatible endpoint. Must be accessible from both Milvus and Spark.    |
 | Spark                      | 3.5.x, JDK 8+. Cluster mode on YARN, Kubernetes (Spark Operator), or standalone all work.       |
-| Connector JARs             | `spark-connector-assembly-*.jar`. It already bundles the native `milvus-storage` resources copied into `src/main/resources/native/`; see `CLAUDE.md` for the build order.|
+| Connector JARs             | `spark-connector-assembly-*.jar`. It bundles the native `milvus-storage` resources copied into `src/main/resources/native/`. |
 | Parquet of new-field data  | Must contain the resolved join-key column, plus one column per new field.                      |
-| Network                    | Spark executors must reach the object store. Milvus gRPC is only needed for step 1 and step 4.  |
+| Network                    | Spark executors must reach the object store. Milvus gRPC is needed for schema setup, snapshot creation, and result commit. |
 
 ## 3. The flow at a glance
 
 ```
 ┌─── on Milvus ────────────────────────────────────────────────────┐
-│ 1. CreateSnapshot(collection)         → snapshot.json on S3      │
-│ 2. AddCollectionField(new_field)      → schema gains the field   │
+│ 1. AddCollectionField(new_field)      → schema gains the field   │
+│ 2. CreateSnapshot(collection)         → snapshot.json on S3      │
 └──────────────────────────────────────────────────────────────────┘
                 │
                 ▼   snapshot.json + your parquet
@@ -92,12 +94,13 @@ exact column name. With a differently named input column:
 --column-mapping source_row_id:external_row_id,category:category,score:score
 ```
 
-The physical field must exist exactly (including case) in the snapshot schema.
-The parquet key must be non-null and unique so one source row cannot fan out
-into multiple output rows. The snapshot field may repeat; the same parquet
-record is applied to every matching physical source row. The join field is not
-a target field, so you cannot backfill it in the same operation. Supported
-physical-key Milvus types are Int8/16/32/64, String, and VarChar.
+The physical field must exist exactly (including case) in the snapshot schema
+and must be declared non-nullable. The parquet key must also be non-null and
+unique so one source row cannot fan out into multiple output rows. Source
+values may repeat; the same parquet record is applied to every matching
+physical source row. The join field is not a target field, so you cannot
+backfill it in the same operation. Supported physical-key Milvus types are
+Int8/16/32/64, String, and VarChar.
 Floating-point, JSON, Geometry, Text, Timestamptz, unknown, vector, array, map,
 and struct keys are rejected. Logical file/row keys are not supported.
 `$row_offset` only restores segment write order and is not a stable row identity.
@@ -116,32 +119,12 @@ Extra parquet keys not present in the collection are silently ignored.
 
 ## 5. Step-by-step
 
-### 5.1 Take a snapshot
-
-Call `CreateSnapshot` via any Milvus SDK. Example with `pymilvus`:
+### 5.1 Add the new field
 
 ```python
-from pymilvus import MilvusClient
+from pymilvus import DataType, MilvusClient
 
 client = MilvusClient(uri="http://milvus:19530")
-client.create_snapshot(
-    collection_name="my_collection",
-    snapshot_name="bkfill_20260417",
-    compaction_protection_seconds=86400,   # pin files for 24h
-)
-
-info = client.describe_snapshot(snapshot_name="bkfill_20260417")
-snapshot_path = info["s3_location"]      # → s3a://bucket/snapshots/<coll>/metadata/<id>.json
-```
-
-`compaction_protection_seconds` tells Milvus to keep segment files pinned
-for N seconds, long enough for backfill to run. Pick a value larger than
-your expected job runtime; it is cheap.
-
-### 5.2 Add the new field
-
-```python
-from pymilvus import DataType
 
 client.add_collection_field(
     collection_name="my_collection",
@@ -159,9 +142,29 @@ client.add_collection_field(
 After this call, `describe_collection` will show the new fields, but
 existing rows have no values for them.
 
-> **Tip.** Do this **after** `CreateSnapshot`, not before — otherwise the
-> snapshot contains the added field but no data for it, which confuses
-> `coalesce` mode. Order: snapshot first, then add field.
+### 5.2 Take a snapshot
+
+Create the snapshot only after schema evolution so its schema contains the
+target field IDs required by the backfill:
+
+```python
+client.create_snapshot(
+    collection_name="my_collection",
+    snapshot_name="bkfill_20260417",
+    compaction_protection_seconds=86400,   # pin files for 24h
+)
+
+info = client.describe_snapshot(snapshot_name="bkfill_20260417")
+snapshot_path = info["s3_location"]      # → s3a://bucket/snapshots/<coll>/metadata/<id>.json
+```
+
+`compaction_protection_seconds` tells Milvus to keep segment files pinned
+for N seconds, long enough for backfill to run. Pick a value larger than
+your expected job runtime.
+
+For a newly added field, use `replace` mode. On Storage V2 packed segments,
+`coalesce` and `overwrite` attempt to read the target field from existing
+column groups and fail when the new field has no column group yet.
 
 ### 5.3 Submit the Spark job
 
@@ -183,6 +186,7 @@ spark-submit \
   --s3-region   us-west-2 \
   --use-iam \
   --column-mapping doc_id:pk_field,category:category,score:score \
+  --mode replace \
   --batch-size 1024 \
   --output-result s3a://bucket/backfill/result_20260417.json
 ```
@@ -190,21 +194,9 @@ spark-submit \
 For a physical key, add `--join-key external_row_id` and make the corresponding
 column-mapping target `external_row_id`.
 
-On Kubernetes with Spark Operator, see `examples/05-spark-application.yaml`.
-
-Small datasets can use the PySpark demo wrapper:
-
-```bash
-cd examples
-bash backfill_demo.sh \
-  --parquet    data.parquet \
-  --snapshot   snapshot.json \
-  --s3-endpoint localhost:9000 \
-  --s3-bucket  a-bucket \
-  --s3-access-key minioadmin \
-  --s3-secret-key minioadmin \
-  --s3-root-path files
-```
+On Kubernetes with Spark Operator, use the same application arguments and set
+`mainClass` to
+`com.zilliz.spark.connector.operations.backfill.BackfillApp`.
 
 ### 5.4 Read the result
 
@@ -324,9 +316,10 @@ from source side).
   silently change the stored Arrow type otherwise.
 - Reads the target field(s) from the base segments — slightly heavier I/O
   than `replace`.
-- For `coalesce`: if the target field has no prior binlogs (you just added
-  it), reads return all nulls and `coalesce` degrades to parquet-wins
-  behaviour. Safe, but no win over `replace` in that case.
+- On Storage V2 packed segments, every target field must already be declared
+  by an existing column group. A newly added field has no such group, so the
+  packed reader rejects `coalesce` and `overwrite`; use `replace` for the
+  initial backfill.
 - For `overwrite`: an explicitly null value in the parquet **will** clobber
   the existing source value on matched rows — the match flag drives the
   projection, not the file column's null-ness.
@@ -342,8 +335,8 @@ from source side).
 | `--s3-endpoint`   | S3 endpoint for Milvus storage (where segments live).                   |
 | `--s3-bucket`     | Bucket for Milvus storage.                                              |
 
-Omitting `--snapshot` switches the job to **client mode**, which requires
-`--milvus-uri` and `--collection`. This path is discouraged for production.
+`BackfillApp` requires `--snapshot`; its CLI does not provide a client-only
+mode.
 
 ### S3 auth (Milvus storage)
 
@@ -373,16 +366,6 @@ primary S3 config is reused for the input read.
 | `--mode`             | `coalesce`     | `replace` \| `coalesce` \| `overwrite`. See §6 for semantics.    |
 | `--output-result`    | *(none)*       | Path to write the result JSON. Strongly recommended.             |
 
-### Client mode (no snapshot)
-
-| Flag               | Description                                                         |
-| ------------------ | ------------------------------------------------------------------- |
-| `--milvus-uri`     | gRPC URI, e.g. `http://milvus:19530`.                               |
-| `--milvus-token`   | Optional bearer token.                                              |
-| `--database`       | Optional database name.                                             |
-| `--collection`     | Collection name. Required in client mode.                           |
-| `--partition`      | Optional.                                                           |
-
 ## 8. Performance & sizing
 
 - **Partition count = segment count.** The connector pins one segment per
@@ -391,8 +374,7 @@ primary S3 config is reused for the input read.
 - **Memory.** Arrow buffers + AWS SDK multipart upload queue can hold
   hundreds of MB per writer. Set `spark.executor.memoryOverhead` to at
   least equal the heap if you see `Direct buffer memory` or Arrow
-  `RootAllocator` OOMs; see `docs/bugfix-backfill-direct-memory-oom.md`.
-  Start at `memoryOverhead=8g`.
+  `RootAllocator` OOMs. Start at `memoryOverhead=8g`.
 - **Batch size.** Default `1024` is a safe starting point. Lower it
   (`--batch-size 500`) if executors OOM; raise it (up to ~5000) for
   throughput if memory is ample.
@@ -413,7 +395,7 @@ primary S3 config is reused for the input read.
 | `Physical join-key field ... was not found`         | `--join-key` is case-sensitive and must name a persisted snapshot field.                                        |
 | `Field name X not found in collection schema`       | Your column-mapping targets a field that isn't in the collection. Verify schema and mapping.                    |
 | `--mode=coalesce/overwrite requires ... types to match snapshot` | Your Parquet column is e.g. `Int32` but the field is `Int64`. Cast in your ETL, or switch to `--mode replace` if you're OK with Spark widening.  |
-| `OutOfMemoryError: Direct buffer memory`            | Increase `spark.executor.memoryOverhead` (start at 8g), lower `--batch-size`. See OOM bugfix doc.              |
+| `OutOfMemoryError: Direct buffer memory`            | Increase `spark.executor.memoryOverhead` (start at 8g) and lower `--batch-size`.                              |
 | `NotSerializableException: java.util.Optional`      | You're on an old connector build — an Arrow exception is being masked. Update to a build that unwraps it.       |
 | All backfilled rows have the same value             | Missing `.copy()` after a shuffle in a custom fork. The mainline connector handles this; upstream fix only.    |
 | Job succeeds, queries still show NULL for new field | You forgot step 5.5 (`UpdateSegmentColumnGroups`) or the QueryNode hasn't reopened yet. Check `DataVersion`.    |
@@ -422,9 +404,7 @@ primary S3 config is reused for the input read.
 
 ## 10. Kubernetes notes
 
-See `docs/k8s-backfill-troubleshooting.md` and
-`examples/05-spark-application.yaml` for the full Spark Operator recipe.
-Common gotchas:
+Common Spark Operator gotchas:
 
 - **Native libraries.** The connector's assembly JAR bundles native `.so`s,
   but Spark Operator templates may strip `LD_LIBRARY_PATH`. Make sure it
@@ -435,12 +415,8 @@ Common gotchas:
 - **`mainClass`.** Always
   `com.zilliz.spark.connector.operations.backfill.BackfillApp`.
 
-## 11. Related docs
+## 11. Implementation reference
 
-- `design-snapshot-backfill.md` — full architecture / internals.
-- `snapshot-backfill-workflow.md` — operational runbook (Chinese).
-- `v2-backfill-implementation.md` — V2 (non-manifest) segment support.
-- `backfill-mode-plan.md` — design of `--mode coalesce`.
-- `bugfix-backfill-data-corruption.md` — the UnsafeRow / Arrow buffer trap.
-- `bugfix-backfill-direct-memory-oom.md` — memory sizing.
-- `k8s-backfill-troubleshooting.md` — Kubernetes / Spark Operator.
+See the
+[backfill README](../src/main/scala/operations/backfill/README.md) for merge
+internals, vector encodings, validation rules, and result metrics.

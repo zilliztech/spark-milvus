@@ -119,13 +119,21 @@ class BackfillModeTest
       name: String,
       id: Long,
       dataType: Int,
-      primary: Boolean = false
+      primary: Boolean = false,
+      nullable: Option[Boolean] = None,
+      partition: Boolean = false,
+      dynamic: Boolean = false,
+      functionOutput: Boolean = false
   ): Field =
     Field(
       fieldID = Some(LongNode.valueOf(id)),
       name = name,
       rawDataType = Some(IntNode.valueOf(dataType)),
-      isPrimaryKey = Some(primary)
+      isPrimaryKey = Some(primary),
+      isDynamic = Some(dynamic),
+      isPartitionKey = Some(partition),
+      nullable = nullable,
+      isFunctionOutput = Some(functionOutput)
     )
 
   test("resolveJoinKey resolves the default collection primary key") {
@@ -201,6 +209,50 @@ class BackfillModeTest
     error.message should include("External_Row_ID")
   }
 
+  test("resolveJoinKey trims a programmatic physical field name") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(snapshotField("external_row_id", 101L, 21))
+    )
+
+    val resolved = MilvusBackfill
+      .resolveJoinKey(
+        schema,
+        BackfillJoinKey.PhysicalField("  external_row_id  ")
+      )
+      .toOption
+      .get
+
+    resolved.sourceColumns shouldBe Seq("external_row_id")
+    resolved.fieldIds shouldBe Seq(101L)
+  }
+
+  test("resolveJoinKey rejects a nullable physical field") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(
+        snapshotField(
+          "external_row_id",
+          101L,
+          21,
+          nullable = Some(true)
+        )
+      )
+    )
+
+    val error = MilvusBackfill
+      .resolveJoinKey(
+        schema,
+        BackfillJoinKey.PhysicalField("external_row_id")
+      )
+      .left
+      .toOption
+      .get
+
+    error.message should include("nullable")
+    error.message should include("do not match NULL")
+  }
+
   test("resolveJoinKey supports stable scalar physical key types") {
     val cases = Seq(
       2 -> org.apache.spark.sql.types.ByteType,
@@ -253,6 +305,86 @@ class BackfillModeTest
       error.message should include("unsupported type")
       error.message should include(name)
     }
+  }
+
+  test("resolveBackfillTargetFields accepts ordinary collection fields") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(snapshotField("value", 101L, 21))
+    )
+
+    val resolved = MilvusBackfill
+      .resolveBackfillTargetFields(schema, Seq("value"))
+      .toOption
+      .get
+
+    resolved.keySet shouldBe Set("value")
+    resolved("value").getFieldIDAsLong shouldBe 101L
+  }
+
+  test("resolveBackfillTargetFields rejects protected collection fields") {
+    val cases = Seq(
+      snapshotField("id", 100L, 5, primary = true) -> "primary key",
+      snapshotField("tenant", 101L, 21, partition = true) -> "partition key",
+      snapshotField("$meta", 102L, 23, dynamic = true) -> "dynamic field",
+      snapshotField(
+        "generated_text",
+        103L,
+        21,
+        functionOutput = true
+      ) -> "function output",
+      snapshotField("RowID", 0L, 5) -> "system field",
+      snapshotField("Timestamp", 1L, 5) -> "system field"
+    )
+
+    cases.foreach { case (field, expectedRole) =>
+      val schema = CollectionSchema(name = "c", fields = Seq(field))
+      val error = MilvusBackfill
+        .resolveBackfillTargetFields(schema, Seq(field.name))
+        .left
+        .toOption
+        .get
+
+      error.message should include(field.name)
+      error.message should include(expectedRole)
+    }
+  }
+
+  test(
+    "resolveBackfillTargetFields rejects a PK target selected beside a physical join key"
+  ) {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(
+        snapshotField("id", 100L, 5, primary = true),
+        snapshotField("external_row_id", 101L, 21),
+        snapshotField("value", 102L, 21)
+      )
+    )
+
+    val error = MilvusBackfill
+      .resolveBackfillTargetFields(schema, Seq("id", "value"))
+      .left
+      .toOption
+      .get
+
+    error.message should include("'id' (primary key)")
+  }
+
+  test("resolveBackfillTargetFields reports missing snapshot fields") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(snapshotField("value", 101L, 21))
+    )
+
+    val error = MilvusBackfill
+      .resolveBackfillTargetFields(schema, Seq("missing"))
+      .left
+      .toOption
+      .get
+
+    error.message should include("Fields not found in snapshot schema")
+    error.message should include("missing")
   }
 
   // ============ performJoin semantics ============

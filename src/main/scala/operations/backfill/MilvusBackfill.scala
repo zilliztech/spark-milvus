@@ -17,6 +17,7 @@ import com.zilliz.spark.connector.{
 }
 import com.zilliz.spark.connector.read.{
   CollectionSchema,
+  Field,
   MilvusSnapshotReader,
   SnapshotMetadata,
   StorageV2ManifestItem
@@ -57,6 +58,11 @@ object MilvusBackfill {
     MilvusDataType.VarChar.value
   )
 
+  private val SystemFieldIdsByName: Map[String, Long] = Map(
+    "RowID" -> 0L,
+    "Timestamp" -> 1L
+  )
+
   /** Resolve the public join-key specification against an exact snapshot schema
     * field. Physical keys deliberately support only stable scalar equality
     * types and never rely on Spark's case-insensitive resolver.
@@ -65,7 +71,13 @@ object MilvusBackfill {
       schema: CollectionSchema,
       spec: BackfillJoinKey
   ): Either[BackfillError, ResolvedJoinKey] = {
-    val selected = spec match {
+    val normalizedSpec = spec match {
+      case BackfillJoinKey.PhysicalField(name) =>
+        BackfillJoinKey.PhysicalField(Option(name).map(_.trim).getOrElse(""))
+      case BackfillJoinKey.PrimaryKey => BackfillJoinKey.PrimaryKey
+    }
+
+    val selected = normalizedSpec match {
       case BackfillJoinKey.PrimaryKey =>
         schema.fields
           .find(_.isPrimaryKey.contains(true))
@@ -74,8 +86,7 @@ object MilvusBackfill {
               "No primary key field found in snapshot schema"
             )
           )
-      case BackfillJoinKey.PhysicalField(name)
-          if Option(name).forall(_.trim.isEmpty) =>
+      case BackfillJoinKey.PhysicalField(name) if name.isEmpty =>
         Left(
           SchemaValidationError("Physical join-key field name cannot be blank")
         )
@@ -91,7 +102,7 @@ object MilvusBackfill {
     }
 
     selected.flatMap { field =>
-      spec match {
+      normalizedSpec match {
         case _: BackfillJoinKey.PhysicalField
             if !SupportedPhysicalJoinMilvusTypes.contains(field.dataType) =>
           Left(
@@ -99,6 +110,14 @@ object MilvusBackfill {
               s"Physical join-key field '${field.name}' has unsupported type " +
                 s"(Milvus type ${field.dataType}). Supported types are Int8, Int16, Int32, " +
                 "Int64, String, and VarChar."
+            )
+          )
+        case _: BackfillJoinKey.PhysicalField
+            if field.nullable.contains(true) =>
+          Left(
+            SchemaValidationError(
+              s"Physical join-key field '${field.name}' is nullable. " +
+                "Physical join keys must be non-nullable because Spark equality joins do not match NULL values."
             )
           )
         case _ =>
@@ -116,7 +135,7 @@ object MilvusBackfill {
             }
 
           sourceFieldResult.map { sourceField =>
-            spec match {
+            normalizedSpec match {
               case BackfillJoinKey.PrimaryKey =>
                 ResolvedJoinKey.primaryKey(
                   field.name,
@@ -131,6 +150,53 @@ object MilvusBackfill {
                 )
             }
           }
+      }
+    }
+  }
+
+  /** Resolve requested writer targets from the snapshot schema and reject
+    * fields whose values are owned by Milvus rather than by backfill output.
+    * This shared boundary protects both primary-key and physical-key mapping
+    * paths before source reads or writes begin.
+    */
+  private[backfill] def resolveBackfillTargetFields(
+      schema: CollectionSchema,
+      targetFieldNames: Seq[String]
+  ): Either[BackfillError, Map[String, Field]] = {
+    val fieldsByName = schema.fields.map(field => field.name -> field).toMap
+    val missing = targetFieldNames.filterNot(fieldsByName.contains)
+    if (missing.nonEmpty) {
+      Left(
+        SchemaValidationError(
+          s"Fields not found in snapshot schema: ${missing.mkString(", ")}. " +
+            s"Available fields: ${fieldsByName.keys.mkString(", ")}"
+        )
+      )
+    } else {
+      val resolved = targetFieldNames.map(name => name -> fieldsByName(name))
+      val unsupported = resolved.flatMap { case (name, field) =>
+        val isSystemField =
+          SystemFieldIdsByName.get(name).contains(field.getFieldIDAsLong)
+        Seq(
+          if (field.isPrimaryKey.contains(true)) Some("primary key") else None,
+          if (field.isPartitionKey.contains(true)) Some("partition key")
+          else None,
+          if (field.isDynamic.contains(true)) Some("dynamic field") else None,
+          if (field.isFunctionOutput.contains(true)) Some("function output")
+          else None,
+          if (isSystemField) Some("system field") else None
+        ).flatten.map(role => s"'$name' ($role)")
+      }
+
+      if (unsupported.nonEmpty) {
+        Left(
+          SchemaValidationError(
+            "Backfill targets must be ordinary writable collection fields; " +
+              s"unsupported targets: ${unsupported.mkString(", ")}"
+          )
+        )
+      } else {
+        Right(resolved.toMap)
       }
     }
   }
@@ -321,32 +387,6 @@ object MilvusBackfill {
         )
       }
 
-      // Build field name -> field ID mapping from collection schema. Resolved
-      // early (was post-join) so coalesce mode can ask the reader to also
-      // materialize the target fields from source.
-      val fieldNameToId: Map[String, Long] = snapshotMetadataOpt match {
-        case Some(metadata) =>
-          MilvusSnapshotReader.getFieldNameToIdMap(metadata.collection.schema)
-        case None =>
-          return Left(
-            SchemaValidationError(
-              "ADDFIELD backfill requires field ID mapping from snapshot. " +
-                "Please provide a snapshot path to resolve correct field IDs."
-            )
-          )
-      }
-
-      val missing = newFieldNames.filterNot(fieldNameToId.contains)
-      if (missing.nonEmpty) {
-        return Left(
-          SchemaValidationError(
-            s"Fields not found in snapshot schema: ${missing.mkString(", ")}. " +
-              s"Available fields: ${fieldNameToId.keys.mkString(", ")}"
-          )
-        )
-      }
-      val newFieldNameToId = newFieldNames.map(n => n -> fieldNameToId(n)).toMap
-
       val snapshotMetadata = snapshotMetadataOpt.getOrElse {
         return Left(
           SchemaValidationError(
@@ -354,18 +394,16 @@ object MilvusBackfill {
           )
         )
       }
-      val targetFieldsByName = newFieldNames.map { name =>
-        val field = snapshotMetadata.collection.schema.fields
-          .find(_.name == name)
-          .getOrElse(
-            return Left(
-              SchemaValidationError(
-                s"Field '$name' not found in snapshot collection schema"
-              )
-            )
-          )
-        name -> field
-      }.toMap
+      val targetFieldsByName = resolveBackfillTargetFields(
+        snapshotMetadata.collection.schema,
+        newFieldNames
+      ) match {
+        case Left(error)  => return Left(error)
+        case Right(value) => value
+      }
+      val newFieldNameToId = newFieldNames
+        .map(name => name -> targetFieldsByName(name).getFieldIDAsLong)
+        .toMap
 
       // User parquet uses normal ingestion-friendly vector shapes (numeric
       // arrays, byte arrays, sparse maps/structs/JSON). Normalize vector
