@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.operations.backfill
 
+import com.fasterxml.jackson.databind.node.{IntNode, LongNode}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{
   IntegerType,
@@ -12,7 +13,12 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.spark.connector.read.{V2ColumnGroup, V2SegmentInfo}
+import com.zilliz.spark.connector.read.{
+  CollectionSchema,
+  Field,
+  V2ColumnGroup,
+  V2SegmentInfo
+}
 import com.zilliz.spark.connector.MilvusOption
 
 /** Tests for the `--mode` backfill parameter: CLI/config validation and the
@@ -103,6 +109,143 @@ class BackfillModeTest
       BackfillApp.parseArgs(Array("--modes", "coalesce"))
     }
     ex.getMessage should include("Unknown argument")
+  }
+
+  private def snapshotField(
+      name: String,
+      id: Long,
+      dataType: Int,
+      primary: Boolean = false
+  ): Field =
+    Field(
+      fieldID = Some(LongNode.valueOf(id)),
+      name = name,
+      rawDataType = Some(IntNode.valueOf(dataType)),
+      isPrimaryKey = Some(primary)
+    )
+
+  test("resolveJoinKey resolves the default collection primary key") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(
+        snapshotField("id", 100L, 5, primary = true),
+        snapshotField("external_row_id", 101L, 21)
+      )
+    )
+
+    val resolved = MilvusBackfill
+      .resolveJoinKey(schema, BackfillJoinKey.PrimaryKey)
+      .toOption
+      .get
+
+    resolved.kind shouldBe "primary_key"
+    resolved.sourceColumns shouldBe Seq("id")
+    resolved.fieldIds shouldBe Seq(100L)
+  }
+
+  test("resolveJoinKey rejects a default PK join when the schema has no PK") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(snapshotField("external_row_id", 101L, 21))
+    )
+
+    val error = MilvusBackfill
+      .resolveJoinKey(schema, BackfillJoinKey.PrimaryKey)
+      .left
+      .toOption
+      .get
+
+    error.message should include("No primary key field")
+  }
+
+  test("resolveJoinKey accepts a physical field in a schema without a PK") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(snapshotField("external_row_id", 101L, 21))
+    )
+
+    val resolved = MilvusBackfill
+      .resolveJoinKey(
+        schema,
+        BackfillJoinKey.PhysicalField("external_row_id")
+      )
+      .toOption
+      .get
+
+    resolved.kind shouldBe "physical"
+    resolved.sourceColumns shouldBe Seq("external_row_id")
+    resolved.fieldIds shouldBe Seq(101L)
+    resolved.components.head.sourceField.get.dataType shouldBe StringType
+  }
+
+  test("resolveJoinKey requires an exact physical field name") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(snapshotField("External_Row_ID", 101L, 21))
+    )
+
+    val error = MilvusBackfill
+      .resolveJoinKey(
+        schema,
+        BackfillJoinKey.PhysicalField("external_row_id")
+      )
+      .left
+      .toOption
+      .get
+
+    error.message should include("was not found")
+    error.message should include("External_Row_ID")
+  }
+
+  test("resolveJoinKey supports stable scalar physical key types") {
+    val cases = Seq(
+      2 -> org.apache.spark.sql.types.ByteType,
+      3 -> org.apache.spark.sql.types.ShortType,
+      4 -> IntegerType,
+      5 -> LongType,
+      20 -> StringType,
+      21 -> StringType,
+      27 -> org.apache.spark.sql.types.BinaryType
+    )
+
+    cases.zipWithIndex.foreach { case ((milvusType, sparkType), index) =>
+      val name = s"key_$index"
+      val schema = CollectionSchema(
+        name = "c",
+        fields = Seq(snapshotField(name, 100L + index, milvusType))
+      )
+      val resolved = MilvusBackfill
+        .resolveJoinKey(schema, BackfillJoinKey.PhysicalField(name))
+        .toOption
+        .get
+
+      resolved.components.head.sourceField.get.dataType shouldBe sparkType
+    }
+  }
+
+  test("resolveJoinKey rejects unsafe physical key types") {
+    Seq(
+      1 -> "boolean",
+      10 -> "float",
+      11 -> "double",
+      22 -> "array",
+      23 -> "json",
+      100 -> "vector"
+    ).foreach { case (milvusType, label) =>
+      val name = s"${label}_key"
+      val schema = CollectionSchema(
+        name = "c",
+        fields = Seq(snapshotField(name, 101L, milvusType))
+      )
+      val error = MilvusBackfill
+        .resolveJoinKey(schema, BackfillJoinKey.PhysicalField(name))
+        .left
+        .toOption
+        .get
+
+      error.message should include("unsupported type")
+      error.message should include(name)
+    }
   }
 
   // ============ performJoin semantics ============
@@ -196,6 +339,27 @@ class BackfillModeTest
     err.message should include("distinct=1")
   }
 
+  test("join-key cardinality identifies source snapshot failures") {
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row("dup"), Row("dup"))),
+      StructType(Seq(StructField("join_key", StringType, nullable = false)))
+    )
+
+    val error = MilvusBackfill
+      .validateJoinKeyCardinality(
+        df,
+        Seq("join_key"),
+        Seq("external_row_id"),
+        "Source snapshot"
+      )
+      .left
+      .toOption
+      .get
+
+    error.message should include("Source snapshot")
+    error.message should include("external_row_id")
+  }
+
   test("join-key cardinality validates composite tuples") {
     val unique = spark.createDataFrame(
       spark.sparkContext.parallelize(
@@ -243,6 +407,36 @@ class BackfillModeTest
 
     projection.fieldIds shouldBe Seq(100L, 101L)
     projection.schema.fieldNames.toSeq shouldBe Seq("pk", "f1")
+  }
+
+  test("source read projection starts with the selected physical field") {
+    val physicalField = StructField(
+      "external_row_id",
+      StringType,
+      nullable = false
+    )
+    val joinKey = ResolvedJoinKey.physicalField(
+      "external_row_id",
+      101L,
+      physicalField
+    )
+    val projection = MilvusBackfill
+      .buildSourceReadProjection(
+        joinKey,
+        Seq(
+          ("id", 100L, StructField("id", LongType, nullable = false)),
+          ("value", 102L, StructField("value", StringType, nullable = true))
+        )
+      )
+      .toOption
+      .get
+
+    projection.fieldIds shouldBe Seq(101L, 100L, 102L)
+    projection.schema.fieldNames.toSeq shouldBe Seq(
+      "external_row_id",
+      "id",
+      "value"
+    )
   }
 
   test("source join normalization preserves rename swaps in one projection") {
@@ -341,6 +535,46 @@ class BackfillModeTest
       .collect()
       .map(r => (r.getAs[String]("k2"), Option(r.getAs[String]("value"))))
       .toSeq shouldBe Seq(("a", Some("matched")), ("b", None))
+  }
+
+  test("performJoin matches rows on a non-PK physical key") {
+    val physicalKey = ResolvedJoinKey.internalColumn(0)
+    val original = spark.createDataFrame(
+      spark.sparkContext.parallelize(
+        Seq(Row(1L, "row-b", 10L, 0L), Row(2L, "row-a", 10L, 1L))
+      ),
+      StructType(
+        Seq(
+          StructField("id", LongType, nullable = false),
+          StructField(physicalKey, StringType, nullable = false),
+          StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false),
+          StructField(MilvusBackfill.RowOffsetCol, LongType, nullable = false)
+        )
+      )
+    )
+    val backfill = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(Row("row-a", "matched"))),
+      StructType(
+        Seq(
+          StructField(physicalKey, StringType, nullable = false),
+          StructField("value", StringType, nullable = true)
+        )
+      )
+    )
+
+    val joined = MilvusBackfill.performJoin(
+      original,
+      backfill,
+      Seq(physicalKey),
+      Seq("value"),
+      MilvusOption.BackfillModeReplace
+    )
+
+    joined
+      .orderBy("id")
+      .collect()
+      .map(row => (row.getAs[Long]("id"), Option(row.getAs[String]("value"))))
+      .toSeq shouldBe Seq((1L, None), (2L, Some("matched")))
   }
 
   test("replace mode: source has only PK, backfill values win") {

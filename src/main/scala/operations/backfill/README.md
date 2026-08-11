@@ -1,8 +1,10 @@
 # Backfill API
 
 The Backfill API adds new fields to existing Milvus collections by joining
-the original primary-key column with new field values and writing per-segment
-binlog files directly into Milvus storage. It can run as a programmatic API
+snapshot rows with new field values and writing per-segment binlog files
+directly into Milvus storage. The collection primary key remains the default
+join key; snapshot mode can instead use an explicitly selected persisted
+physical field. It can run as a programmatic API
 from Scala/PySpark, or as a standalone `spark-submit` job (for example on
 Apache Spark Operator / Kubernetes).
 
@@ -11,7 +13,7 @@ Apache Spark Operator / Kubernetes).
 The backfill operation has two read modes for the original collection:
 
 1. **Snapshot mode (recommended)** — `MilvusBackfill.run` is given a Milvus
-   snapshot manifest JSON. The original PK column and segment metadata are
+   snapshot manifest JSON. The selected join column and segment metadata are
    read directly from S3 via the storage-v2 FFI reader. **No connection to a
    running Milvus server is required.** Field IDs are derived from the
    snapshot's collection schema.
@@ -46,6 +48,7 @@ spark-submit \
   [--source-s3-region us-east-1] \
   [--batch-size 1024] \
   [--output-result s3a://milvus-bucket/backfill/result.json] \
+  [--join-key external_row_id] \
   [--mode replace|coalesce|overwrite]
 ```
 
@@ -75,7 +78,7 @@ spark-submit \
 
 | Flag           | Description                                       |
 |----------------|---------------------------------------------------|
-| `--parquet`    | Path to the new-field parquet (`pk, field1, ...`) |
+| `--parquet`    | Path to the new-field parquet (join key + target fields) |
 | `--snapshot`   | Path to the Milvus snapshot manifest JSON          |
 | `--s3-endpoint`| S3 endpoint for the Milvus storage bucket          |
 | `--s3-bucket`  | Milvus storage bucket name                         |
@@ -87,8 +90,32 @@ spark-submit \
 | `--mode`          | `coalesce`  | Merge semantics: `replace`, `coalesce` (fill-if-null), or `overwrite`. See "Merge modes" below. |
 | `--batch-size`    | `1024`      | Rows per Arrow batch flushed to the writer.                                  |
 | `--column-mapping`| *(none)*    | `src1:tgt1,src2:tgt2,...`. Rename/drop Parquet columns to Milvus field names. |
+| `--join-key`      | collection PK | Exact persisted snapshot field to use instead of the collection PK. |
 | `--output-result` | *(none)*    | Path to write the result JSON.                                               |
 | `--s3-cloud-provider` | `aws` | Native storage provider for the Milvus storage bucket: `aws`, `aliyun`, `gcp`, `azure`, `tencent`, or `huawei`. |
+
+## Join keys and column mapping
+
+Omitting `--join-key` preserves the historical primary-key behavior. Without
+`--column-mapping`, the input must contain a literal `pk` column, which is
+implicitly renamed to the collection PK field.
+
+`--join-key external_row_id` selects that exact persisted snapshot field. With
+no mapping, the parquet must contain a column named `external_row_id`. If the
+input uses a different name, map it to the selected field:
+
+```bash
+--join-key external_row_id \
+--column-mapping source_row_id:external_row_id,new_vec:embedding
+```
+
+The selected join field is identity-only and is not written as a target field.
+It must be unique and non-null on both the parquet and snapshot sides, and its
+Spark type must match exactly. Supported physical-key types are Int8, Int16,
+Int32, Int64, string-like scalar fields, and binary scalar fields when exposed
+by the snapshot schema. Floating-point, JSON, array/struct/map, and vector
+fields are rejected. Logical file/row keys are not supported; `$row_offset` is
+used only to restore physical segment order and is not a stable logical row ID.
 
 ## Vector columns
 
@@ -112,11 +139,11 @@ Arrow `Binary`, matching Milvus storage metadata and endianness.
 
 Distinct from the read-mode choice above (snapshot vs client), `--mode`
 controls how per-row values are merged into each target field. All three
-modes use a LEFT JOIN from source (Milvus) to parquet on the PK; parquet
-rows whose PK is not in the collection are always dropped. They differ on
+modes use a LEFT JOIN from source (Milvus) to parquet on the resolved join key;
+parquet rows whose key is not in the collection are always dropped. They differ on
 what happens for matched rows and for source rows with no parquet match:
 
-| Mode        | Default | Matched row (PK in both)         | Source row unmatched by parquet |
+| Mode        | Default | Matched row (join key in both)   | Source row unmatched by parquet |
 |-------------|---------|----------------------------------|---------------------------------|
 | `replace`   |         | Parquet wins (null included)     | Target columns set to NULL      |
 | `coalesce`  | ✅      | `coalesce(src, parquet)` per field — source wins when non-null | Source preserved |
@@ -128,7 +155,7 @@ Typical fits:
   full authoritative source.
 - `coalesce` — incremental / repair runs that only want to fill gaps.
 - `overwrite` — corrective update for a subset of rows; parquet is
-  authoritative only for the PKs it covers and untouched rows must be
+  authoritative only for the join keys it covers and untouched rows must be
   preserved.
 
 **`coalesce` / `overwrite` caveats** (enforced at validation — both read
@@ -184,10 +211,13 @@ val config = BackfillConfig(
 
   // Merge mode. Defaults to "coalesce" (fill-if-null). Set to
   // MilvusOption.BackfillModeOverwrite for matched-rows-only overwrite
-  // (parquet wins on matched PKs, unmatched source rows preserved), or
+  // (parquet wins on matched join keys, unmatched source rows preserved), or
   // MilvusOption.BackfillModeReplace for full overwrite (unmatched source
   // rows get null target columns). See "Merge modes" above.
-  mode = MilvusOption.BackfillModeCoalesce
+  mode = MilvusOption.BackfillModeCoalesce,
+
+  // Optional. Omit for the collection PK.
+  joinKey = BackfillJoinKey.PhysicalField("external_row_id")
 )
 
 val result = MilvusBackfill.run(
@@ -229,6 +259,10 @@ result match {
   corresponding main `s3*` value.
 - `batchSize` — writer batch size (default 1024).
 - `customOutputPath` — override the per-segment output path.
+- `joinKey` — `BackfillJoinKey.PrimaryKey` by default, or
+  `BackfillJoinKey.PhysicalField("field_name")` for a persisted snapshot field.
+- `columnMapping` — parquet-column to Milvus-field mapping. It must include the
+  resolved join field as a target when supplied.
 - `mode` — merge semantics (default `MilvusOption.BackfillModeCoalesce`).
   Set to `MilvusOption.BackfillModeOverwrite` for matched-rows-only
   overwrite, or `MilvusOption.BackfillModeReplace` for full overwrite
@@ -268,14 +302,16 @@ Override via `customOutputPath` if needed.
 1. Validate S3/writer configuration. Empty AK/SK is allowed (IAM/IRSA).
 2. Load the snapshot manifest JSON (per-bucket S3A credentials are
    configured automatically).
-3. Resolve PK field name and field ID from the snapshot schema (or via the
-   Milvus client in client mode).
+3. Resolve the configured join field and field ID from the snapshot schema.
+   The default PK can also be resolved through the Milvus client in client mode;
+   explicit physical keys require a snapshot.
 4. Read the new-field parquet, configuring S3A credentials for the source
    bucket as needed.
-5. Read the original PK column + `$segment_id` / `$row_offset` via
+5. Read the selected join column + `$segment_id` / `$row_offset` via
    `spark.read.format("com.zilliz.spark.connector.sources.MilvusDataSource")`
    in snapshot mode (FQCN avoids shortName collisions with other connectors).
-6. Validate PK type compatibility, then left-join on the PK.
+6. Validate join-key type compatibility and cardinality, then left-join on the
+   internal normalized key alias.
 7. For each segment, repartition with a custom segment partitioner, sort by
    `$row_offset`, and write per-segment binlogs via `MilvusLoonWriter`.
 8. Return a `BackfillResult` with manifest paths and per-segment stats.
@@ -297,6 +333,7 @@ tests in `MilvusBackfillTest`. Unit tests for `parseArgs`, the new
 com.zilliz.spark.connector.operations.backfill.BackfillApp
 com.zilliz.spark.connector.operations.backfill.MilvusBackfill
 com.zilliz.spark.connector.operations.backfill.BackfillConfig
+com.zilliz.spark.connector.operations.backfill.BackfillJoinKey
 com.zilliz.spark.connector.operations.backfill.BackfillResult
 com.zilliz.spark.connector.operations.backfill.BackfillError
 ```

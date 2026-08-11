@@ -87,6 +87,53 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     }
   }
 
+  test("parseArgs accepts --join-key") {
+    val parsed = BackfillApp.parseArgs(
+      Array("--join-key", "external_row_id")
+    )
+    parsed("join-key") shouldBe "external_row_id"
+  }
+
+  test("parseArgs reports a missing --join-key value") {
+    val error = intercept[IllegalArgumentException] {
+      BackfillApp.parseArgs(Array("--join-key"))
+    }
+    error.getMessage should include("Missing value for --join-key")
+  }
+
+  test("buildConfig maps --join-key to a physical field") {
+    val config = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "join-key" -> "  external_row_id  "
+      )
+    )
+
+    config.joinKey shouldBe BackfillJoinKey.PhysicalField("external_row_id")
+    config.validate() shouldBe Right(())
+  }
+
+  test("buildConfig keeps primary-key join when --join-key is omitted") {
+    val config = BackfillApp.buildConfig(
+      Map("s3-endpoint" -> "endpoint", "s3-bucket" -> "bucket")
+    )
+
+    config.joinKey shouldBe BackfillJoinKey.PrimaryKey
+  }
+
+  test("buildConfig leaves a blank join key for config validation") {
+    val config = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "join-key" -> "   "
+      )
+    )
+
+    config.validate().left.toOption.get should include("cannot be blank")
+  }
+
   test("parseArgs throws when key/value flag is followed by another flag") {
     val ex = intercept[IllegalArgumentException] {
       BackfillApp.parseArgs(Array("--parquet", "--snapshot", "/tmp/snap.json"))

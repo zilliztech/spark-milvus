@@ -43,8 +43,9 @@ case class SegmentBackfillResult(
       * kept separate so consumers don't have to rely on that invariant.
       */
     sourceRowCount: Long = 0L,
-    /** Source rows whose PK was matched in the backfill parquet. Derived from a
-      * `__bf_matched__` marker column injected before the left join.
+    /** Source rows whose resolved join key was matched in the backfill parquet.
+      * Derived from a `__bf_matched__` marker column injected before the left
+      * join.
       */
     matchedRowCount: Long = 0L,
     /** Coalesce-mode only: per new-field count of rows whose written value came
@@ -53,7 +54,7 @@ case class SegmentBackfillResult(
       */
     usedSourceByField: Map[String, Long] = Map.empty,
     /** Coalesce-mode only: per new-field count of rows whose written value came
-      * from the backfill data file (source was null and the PK matched a
+      * from the backfill data file (source was null and the join key matched a
       * non-null backfill value). Empty in overwrite mode.
       */
     usedDataFileByField: Map[String, Long] = Map.empty

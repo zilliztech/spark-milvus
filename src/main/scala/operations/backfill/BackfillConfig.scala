@@ -37,6 +37,8 @@ import com.zilliz.spark.connector.MilvusOption
   *   Batch size for writing data
   * @param customOutputPath
   *   Optional custom output path override
+  * @param joinKey
+  *   Row identity used to match snapshot rows with backfill input rows
   */
 case class BackfillConfig(
     // Milvus connection (optional for snapshot-only mode)
@@ -78,10 +80,12 @@ case class BackfillConfig(
     // Optional mapping: parquet column name -> Milvus field name.
     // When set, the backfill parquet is reprojected through this map before
     // join/write: parquet columns not listed as keys are dropped, and each
-    // listed column is renamed to its target. The value set MUST contain the
-    // Milvus primary key field name so the pk column can be identified after
-    // renaming. When None (default), legacy behavior applies: the parquet
-    // must contain a literal "pk" column plus one or more field columns.
+    // listed column is renamed to its target. The value set must contain the
+    // configured join field so the identity column can be consumed after
+    // renaming. With the default primary-key join and no mapping, legacy
+    // behavior applies: the parquet must contain a literal "pk" column plus
+    // one or more field columns. With a physical join field and no mapping,
+    // the parquet must contain that exact field name.
     columnMapping: Option[Map[String, String]] = None,
 
     // Merge mode for backfill values:
@@ -89,12 +93,12 @@ case class BackfillConfig(
     //     source and pick coalesce(src, parquet) per row per field (source
     //     wins when non-null; parquet fills nulls). Unmatched source rows
     //     keep their original target values.
-    //   "overwrite" — parquet overrides the target field for rows whose pk
-    //     matches (null included). Unmatched source rows keep their original
-    //     target values.
+    //   "overwrite" — parquet overrides the target field for rows whose join
+    //     key matches (null included). Unmatched source rows keep their
+    //     original target values.
     //   "replace" — parquet is the absolute source of truth: every source
-    //     row's target field becomes the parquet value (null if the pk has
-    //     no parquet match). Destructive on unmatched rows.
+    //     row's target field becomes the parquet value (null if the join key
+    //     has no parquet match). Destructive on unmatched rows.
     mode: String = MilvusOption.BackfillModeCoalesce,
 
     // Optional main-storage AssumeRole settings. BackfillApp derives these
@@ -102,13 +106,17 @@ case class BackfillConfig(
     // already selected a data role for the job.
     s3RoleArn: Option[String] = None,
     s3RoleSessionName: Option[String] = None,
-    s3ExternalId: Option[String] = None
+    s3ExternalId: Option[String] = None,
+
+    // Row identity used to join snapshot rows with backfill data. The primary
+    // key remains the default for backward compatibility.
+    joinKey: BackfillJoinKey = BackfillJoinKey.PrimaryKey
 ) {
 
   /** Whether the merge path needs to read each target field from the source
     * side too. Coalesce and overwrite both compare source and parquet values
     * per row at join time; replace takes parquet verbatim and therefore only
-    * needs the pk + segment tracking columns from source.
+    * needs the join key + segment tracking columns from source.
     */
   def readsSourceFields: Boolean =
     mode != MilvusOption.BackfillModeReplace
@@ -146,6 +154,14 @@ case class BackfillConfig(
           s"'${MilvusOption.BackfillModeCoalesce}', " +
           s"'${MilvusOption.BackfillModeOverwrite}' (got '$mode')"
       )
+    } else if (
+      joinKey match {
+        case BackfillJoinKey.PhysicalField(name) =>
+          Option(name).forall(_.trim.isEmpty)
+        case _ => false
+      }
+    ) {
+      Left("physical join-key field name cannot be blank")
     } else if (!s3UseIam && (s3AccessKey.isEmpty || s3SecretKey.isEmpty)) {
       // Hard invariant: must use IAM or supply both AK and SK. Half-set
       // static credentials are never valid — they would silently fall back
@@ -204,8 +220,8 @@ case class BackfillConfig(
     }
   }
 
-  /** Get Milvus read options as a Map for DataSource Only reads the primary key
-    * field to minimize data transfer for join operation
+  /** Get base Milvus read options as a Map for DataSource. The resolved join
+    * field IDs are added by `MilvusBackfill` to minimize data transfer.
     */
   def getMilvusReadOptions: Map[String, String] = {
     var options = withS3Authentication(

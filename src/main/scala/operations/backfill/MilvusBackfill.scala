@@ -7,7 +7,16 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types.{
+  BinaryType,
+  ByteType,
+  IntegerType,
+  LongType,
+  ShortType,
+  StringType
+}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.storage.StorageLevel
 import org.slf4j.LoggerFactory
 
 import com.zilliz.spark.connector.{
@@ -16,6 +25,7 @@ import com.zilliz.spark.connector.{
   MilvusOption
 }
 import com.zilliz.spark.connector.read.{
+  CollectionSchema,
   MilvusSnapshotReader,
   SnapshotMetadata,
   StorageV2ManifestItem
@@ -45,6 +55,106 @@ object MilvusBackfill {
   private[backfill] val SegmentIdCol = MilvusOption.MilvusExtraColumnSegmentID
   private[backfill] val RowOffsetCol = MilvusOption.MilvusExtraColumnRowOffset
 
+  private val SupportedPhysicalJoinSparkTypes
+      : Set[org.apache.spark.sql.types.DataType] = Set(
+    ByteType,
+    ShortType,
+    IntegerType,
+    LongType,
+    StringType,
+    BinaryType
+  )
+
+  /** Resolve the public join-key specification against an exact snapshot schema
+    * field. Physical keys deliberately support only stable scalar equality
+    * types and never rely on Spark's case-insensitive resolver.
+    */
+  private[backfill] def resolveJoinKey(
+      schema: CollectionSchema,
+      spec: BackfillJoinKey
+  ): Either[BackfillError, ResolvedJoinKey] = {
+    val selected = spec match {
+      case BackfillJoinKey.PrimaryKey =>
+        schema.fields
+          .find(_.isPrimaryKey.contains(true))
+          .toRight(
+            SchemaValidationError(
+              "No primary key field found in snapshot schema"
+            )
+          )
+      case BackfillJoinKey.PhysicalField(name)
+          if Option(name).forall(_.trim.isEmpty) =>
+        Left(
+          SchemaValidationError("Physical join-key field name cannot be blank")
+        )
+      case BackfillJoinKey.PhysicalField(name) =>
+        schema.fields
+          .find(_.name == name)
+          .toRight(
+            SchemaValidationError(
+              s"Physical join-key field '$name' was not found in snapshot schema. " +
+                s"Available fields: ${schema.fields.map(_.name).mkString(", ")}"
+            )
+          )
+    }
+
+    selected.flatMap { field =>
+      val sourceFieldResult =
+        try {
+          Right(MilvusSnapshotReader.fieldToStructField(field))
+        } catch {
+          case e: Exception =>
+            Left(
+              SchemaValidationError(
+                s"Failed to resolve join-key field '${field.name}': ${e.getMessage}",
+                Some(e)
+              )
+            )
+        }
+
+      sourceFieldResult.flatMap { sourceField =>
+        val unsupportedPhysicalSemanticType =
+          field.dataType == 0 ||
+            field.dataType == 22 || // Array
+            field.dataType == 23 || // JSON
+            field.dataType == 200 || // ArrayOfStruct
+            field.dataType == 201 || // Struct
+            VectorBackfillSupport.isVectorField(field)
+
+        spec match {
+          case BackfillJoinKey.PrimaryKey =>
+            Right(
+              ResolvedJoinKey.primaryKey(
+                field.name,
+                field.getFieldIDAsLong,
+                Some(sourceField)
+              )
+            )
+          case _: BackfillJoinKey.PhysicalField
+              if unsupportedPhysicalSemanticType ||
+                !SupportedPhysicalJoinSparkTypes.contains(
+                  sourceField.dataType
+                ) =>
+            Left(
+              SchemaValidationError(
+                s"Physical join-key field '${field.name}' has unsupported type " +
+                  s"${sourceField.dataType.simpleString} (Milvus type ${field.dataType}). " +
+                  "Supported Spark types are tinyint, smallint, int, bigint, string, and binary."
+              )
+            )
+          case _: BackfillJoinKey.PhysicalField =>
+            Right(
+              ResolvedJoinKey.physicalField(
+                field.name,
+                field.getFieldIDAsLong,
+                sourceField
+              )
+            )
+        }
+      }
+    }
+  }
+
   /** Per-field flag columns added in any mode that reads source-side target
     * values (coalesce + overwrite). For each new field, one boolean marker
     * records whether the written value came from the source side and another
@@ -64,8 +174,8 @@ object MilvusBackfill {
     * @param spark
     *   SparkSession
     * @param backfillDataPath
-    *   Path to Parquet file containing new field data with schema (pk,
-    *   new_field1, new_field2, ...)
+    *   Path to Parquet file containing the configured join key and new field
+    *   data
     * @param snapshotPath
     *   Path to Milvus snapshot metadata JSON file
     * @param config
@@ -106,6 +216,7 @@ object MilvusBackfill {
     // Tracked so we can unpersist in the outer finally, even on mid-flight
     // failure (the cache is taken right after column mapping, below).
     var cachedBackfillDF: DataFrame = null
+    var cachedSourceDF: DataFrame = null
 
     logger.info(s"Backfill mode: ${config.mode}")
 
@@ -133,6 +244,16 @@ object MilvusBackfill {
     // Step 2: Create Milvus client only if no snapshot is available
     var client: MilvusClient = null
     if (snapshotMetadataOpt.isEmpty) {
+      config.joinKey match {
+        case BackfillJoinKey.PhysicalField(name) =>
+          return Left(
+            SchemaValidationError(
+              s"Physical join key '$name' requires a snapshot schema. " +
+                "Provide a snapshot path or use the default primary-key join."
+            )
+          )
+        case BackfillJoinKey.PrimaryKey =>
+      }
       config.validateForClientMode() match {
         case Left(error) =>
           return Left(
@@ -152,25 +273,14 @@ object MilvusBackfill {
     }
 
     try {
-      // Step 3: Resolve the current primary-key join into the generic runtime
-      // join-key model. PR1 intentionally keeps PK as the only public behavior;
-      // PR2 will add explicit physical-field resolution on top of this seam.
+      // Step 3: Resolve the configured public join key into the component-based
+      // runtime model used by projection, validation, and join execution.
       val baseJoinKey = snapshotMetadataOpt match {
         case Some(metadata) =>
-          val pkField = metadata.collection.schema.fields
-            .find(_.isPrimaryKey.getOrElse(false))
-            .getOrElse(
-              return Left(
-                SchemaValidationError(
-                  "No primary key field found in snapshot schema"
-                )
-              )
-            )
-          ResolvedJoinKey.primaryKey(
-            pkField.name,
-            pkField.getFieldIDAsLong,
-            Some(MilvusSnapshotReader.fieldToStructField(pkField))
-          )
+          resolveJoinKey(metadata.collection.schema, config.joinKey) match {
+            case Left(error) => return Left(error)
+            case Right(key)  => key
+          }
         case None =>
           client.getPkField(config.databaseName, config.collectionName) match {
             case scala.util.Success((name, id)) =>
@@ -184,6 +294,11 @@ object MilvusBackfill {
               )
           }
       }
+      logger.info(
+        s"Backfill join key: kind=${baseJoinKey.kind}, " +
+          s"fields=${baseJoinKey.sourceColumns.mkString(",")}, " +
+          s"fieldIds=${baseJoinKey.fieldIds.mkString(",")}"
+      )
 
       // Read backfill data from Parquet
       val rawBackfillDF =
@@ -192,13 +307,14 @@ object MilvusBackfill {
           case Right(df)   => df
         }
 
-      // Reproject via the existing PK column-mapping contract, then separate
+      // Reproject via the selected join-key mapping contract, then separate
       // the join component from fields that will be written. The join column is
       // normalized to an internal alias so downstream execution no longer
-      // depends on the collection's PK name.
+      // depends on the collection field name.
       val preparedBackfill = prepareBackfillData(
         rawBackfillDF,
         baseJoinKey,
+        config.joinKey,
         config.columnMapping,
         snapshotMetadataOpt.toSeq.flatMap(
           _.collection.schema.fields.map(_.name)
@@ -359,15 +475,40 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
+      val reusableOriginalDF = config.joinKey match {
+        case _: BackfillJoinKey.PhysicalField =>
+          originalDF.persist(StorageLevel.MEMORY_AND_DISK)
+          cachedSourceDF = originalDF
+          validateJoinKeyCardinality(
+            originalDF,
+            joinKey.internalColumns,
+            joinKey.sourceColumns,
+            side = "Source snapshot"
+          ) match {
+            case Left(error) => return Left(error)
+            case Right(stats) =>
+              logger.info(
+                s"Source snapshot rows: ${stats.rowCount} " +
+                  s"(distinct join keys: ${stats.distinctValidKeyCount})"
+              )
+          }
+          originalDF
+        case BackfillJoinKey.PrimaryKey => originalDF
+      }
+
       // Validate join-key schema compatibility.
-      validateJoinKeyCompatibility(originalDF, backfillDF, joinKey) match {
+      validateJoinKeyCompatibility(
+        reusableOriginalDF,
+        backfillDF,
+        joinKey
+      ) match {
         case Left(error) => return Left(error)
         case Right(_)    => // Continue
       }
 
       // Merge original and backfill DataFrames according to mode.
       val joinedDF = performJoin(
-        originalDF,
+        reusableOriginalDF,
         backfillDF,
         joinKey.internalColumns,
         newFieldNames,
@@ -449,6 +590,14 @@ object MilvusBackfill {
             logger.warn("Failed to unpersist backfill DataFrame", e)
         }
       }
+      if (cachedSourceDF != null) {
+        try {
+          cachedSourceDF.unpersist()
+        } catch {
+          case e: Exception =>
+            logger.warn("Failed to unpersist source DataFrame", e)
+        }
+      }
     }
   }
 
@@ -470,8 +619,8 @@ object MilvusBackfill {
       configureHadoopS3ForPath(spark, path, config, isSource = true)
       val df = spark.read.parquet(path)
 
-      // Minimum shape check; pk presence and field-count checks are enforced
-      // after column mapping is applied (see applyColumnMapping).
+      // Minimum shape check; join-key presence and field-count checks are
+      // enforced after column mapping is applied.
       if (df.columns.isEmpty) {
         return Left(
           DataReadError(
@@ -592,25 +741,111 @@ object MilvusBackfill {
     Right(renamed)
   }
 
-  /** Apply the existing PK mapping contract, then normalize identity columns to
-    * private join aliases and return target fields explicitly.
-    *
-    * PR1 still resolves exactly one primary-key component. The sequence-based
-    * shape is intentional so the read and join stages do not need another
-    * signature change when a later PR adds physical or composite keys.
+  /** Apply column mapping for an explicitly selected physical join field.
+    * Unlike the legacy primary-key path, an omitted mapping never treats a
+    * literal `pk` column specially: the input must contain the exact selected
+    * field name.
+    */
+  private[backfill] def applyPhysicalJoinColumnMapping(
+      df: DataFrame,
+      joinFieldName: String,
+      userMapping: Option[Map[String, String]]
+  ): Either[BackfillError, DataFrame] = {
+    val columns = df.columns.toSeq
+    val columnSet = columns.toSet
+    val mapping = userMapping.getOrElse {
+      if (!columnSet.contains(joinFieldName)) {
+        return Left(
+          SchemaValidationError(
+            s"Backfill parquet must contain the physical join-key column " +
+              s"'$joinFieldName' (or supply --column-mapping to rename the input key)"
+          )
+        )
+      }
+      columns.map(name => name -> name).toMap
+    }
+
+    val missingSources = mapping.keySet.diff(columnSet)
+    if (missingSources.nonEmpty) {
+      return Left(
+        SchemaValidationError(
+          s"column mapping references parquet columns that don't exist: " +
+            s"${missingSources.mkString(", ")}. Available: ${columns.mkString(", ")}"
+        )
+      )
+    }
+
+    val duplicateTargets = mapping.values.groupBy(identity).collect {
+      case (name, values) if values.size > 1 => name
+    }
+    if (duplicateTargets.nonEmpty) {
+      return Left(
+        SchemaValidationError(
+          s"column mapping has duplicate targets: ${duplicateTargets.mkString(", ")}"
+        )
+      )
+    }
+
+    if (!mapping.values.toSet.contains(joinFieldName)) {
+      return Left(
+        SchemaValidationError(
+          s"column mapping must include physical join-key field " +
+            s"'$joinFieldName' as a target"
+        )
+      )
+    }
+
+    val targetFields = mapping.values.toSet - joinFieldName
+    if (targetFields.isEmpty) {
+      return Left(
+        SchemaValidationError(
+          "column mapping must include at least one non-join-key field to backfill"
+        )
+      )
+    }
+
+    val orderedSources = columns.filter(mapping.contains)
+    Right(
+      df.select(
+        orderedSources.map(source => df.col(source).as(mapping(source))): _*
+      )
+    )
+  }
+
+  /** Apply the legacy PK mapping contract, then normalize identity columns to
+    * private join aliases and return target fields explicitly. This overload
+    * remains for existing internal callers and tests.
     */
   private[backfill] def prepareBackfillData(
       df: DataFrame,
       joinKey: ResolvedJoinKey,
       userMapping: Option[Map[String, String]],
       collectionFieldNames: Seq[String] = Seq.empty
+  ): Either[BackfillError, PreparedBackfillData] =
+    prepareBackfillData(
+      df,
+      joinKey,
+      BackfillJoinKey.PrimaryKey,
+      userMapping,
+      collectionFieldNames
+    )
+
+  private[backfill] def prepareBackfillData(
+      df: DataFrame,
+      joinKey: ResolvedJoinKey,
+      joinSpec: BackfillJoinKey,
+      userMapping: Option[Map[String, String]],
+      collectionFieldNames: Seq[String]
   ): Either[BackfillError, PreparedBackfillData] = {
-    // The existing mapping contract identifies the first (currently only)
-    // component through the collection PK target. Any additional internal
-    // components must already be present after mapping; this keeps the helper
-    // sequence-shaped without exposing composite keys publicly in PR1.
     val keyColumn = joinKey.sourceColumns.head
-    applyColumnMapping(df, keyColumn, userMapping).flatMap { mapped =>
+    val mappedResult = joinSpec match {
+      case BackfillJoinKey.PrimaryKey =>
+        applyColumnMapping(df, keyColumn, userMapping)
+      case BackfillJoinKey.PhysicalField(_) =>
+        applyPhysicalJoinColumnMapping(df, keyColumn, userMapping)
+    }
+
+    mappedResult.flatMap { mapped =>
       val mappedColumns = mapped.columns.toSeq
       val missingKeys = joinKey.sourceColumns.filterNot(mappedColumns.contains)
       if (missingKeys.nonEmpty) {
@@ -800,8 +1035,8 @@ object MilvusBackfill {
       val df = snapshotMetadata match {
         case Some(_) =>
           // The supplied schema and ReaderFieldIDs must stay in the same order.
-          // PR1 resolves the PK into one component; the component sequence also
-          // supports future physical/composite key resolvers.
+          // The component sequence also supports future logical/composite key
+          // resolvers.
           val projection =
             buildSourceReadProjection(joinKey, extraReadFields) match {
               case Left(error)  => return Left(error)
@@ -1204,7 +1439,7 @@ object MilvusBackfill {
     try {
       // Prepare data: select only needed columns and add $segment_id for
       // partitioning. Trailing column is the backfill match flag — retained
-      // here so executors can count PK-matched rows, stripped from the
+      // here so executors can count join-key-matched rows, stripped from the
       // projection that reaches the writer. In any source-reading mode
       // (coalesce / overwrite), two extra boolean flag columns per new field
       // follow the match flag (usedSrc, usedBf interleaved, in
