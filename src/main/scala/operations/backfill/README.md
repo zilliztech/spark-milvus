@@ -109,13 +109,15 @@ input uses a different name, map it to the selected field:
 --column-mapping source_row_id:external_row_id,new_vec:embedding
 ```
 
-The selected join field is identity-only and is not written as a target field.
-It must be unique and non-null on both the parquet and snapshot sides, and its
-Spark type must match exactly. Supported physical-key types are Int8, Int16,
-Int32, Int64, string-like scalar fields, and binary scalar fields when exposed
-by the snapshot schema. Floating-point, JSON, array/struct/map, and vector
-fields are rejected. Logical file/row keys are not supported; `$row_offset` is
-used only to restore physical segment order and is not a stable logical row ID.
+The selected join field is join-only and is not written as a target field. The
+parquet key must be unique and non-null so each physical source row produces at
+most one output row. The snapshot field may repeat: one parquet record is
+applied to every physical source row with the same key. Its Spark type must
+match exactly. Supported physical-key Milvus types are Int8, Int16, Int32,
+Int64, String, and VarChar. Floating-point, JSON, Geometry, Text, Timestamptz,
+unknown, array/struct/map, and vector fields are rejected. Logical file/row
+keys are not supported; `$row_offset` is used only to restore physical segment
+order and is not a stable logical row ID.
 
 ## Vector columns
 
@@ -310,8 +312,8 @@ Override via `customOutputPath` if needed.
 5. Read the selected join column + `$segment_id` / `$row_offset` via
    `spark.read.format("com.zilliz.spark.connector.sources.MilvusDataSource")`
    in snapshot mode (FQCN avoids shortName collisions with other connectors).
-6. Validate join-key type compatibility and cardinality, then left-join on the
-   internal normalized key alias.
+6. Validate join-key type compatibility and parquet-side cardinality, then
+   left-join on the internal normalized key alias. Source keys may repeat.
 7. For each segment, repartition with a custom segment partitioner, sort by
    `$row_offset`, and write per-segment binlogs via `MilvusLoonWriter`.
 8. Return a `BackfillResult` with manifest paths and per-segment stats.

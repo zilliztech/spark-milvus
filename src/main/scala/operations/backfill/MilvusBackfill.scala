@@ -7,16 +7,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.{
-  BinaryType,
-  ByteType,
-  IntegerType,
-  LongType,
-  ShortType,
-  StringType
-}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
-import org.apache.spark.storage.StorageLevel
 import org.slf4j.LoggerFactory
 
 import com.zilliz.spark.connector.{
@@ -35,6 +26,7 @@ import com.zilliz.spark.connector.write.{
   MilvusLoonCommitMessage,
   MilvusLoonWriter
 }
+import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Backfill operation for Milvus collections
   *
@@ -54,15 +46,15 @@ object MilvusBackfill {
   private[backfill] val MatchFlagCol = "__bf_matched__"
   private[backfill] val SegmentIdCol = MilvusOption.MilvusExtraColumnSegmentID
   private[backfill] val RowOffsetCol = MilvusOption.MilvusExtraColumnRowOffset
+  private[backfill] val ApplyDeletesToSourceRows = false
 
-  private val SupportedPhysicalJoinSparkTypes
-      : Set[org.apache.spark.sql.types.DataType] = Set(
-    ByteType,
-    ShortType,
-    IntegerType,
-    LongType,
-    StringType,
-    BinaryType
+  private val SupportedPhysicalJoinMilvusTypes: Set[Int] = Set(
+    MilvusDataType.Int8.value,
+    MilvusDataType.Int16.value,
+    MilvusDataType.Int32.value,
+    MilvusDataType.Int64.value,
+    MilvusDataType.String.value,
+    MilvusDataType.VarChar.value
   )
 
   /** Resolve the public join-key specification against an exact snapshot schema
@@ -99,58 +91,46 @@ object MilvusBackfill {
     }
 
     selected.flatMap { field =>
-      val sourceFieldResult =
-        try {
-          Right(MilvusSnapshotReader.fieldToStructField(field))
-        } catch {
-          case e: Exception =>
-            Left(
-              SchemaValidationError(
-                s"Failed to resolve join-key field '${field.name}': ${e.getMessage}",
-                Some(e)
-              )
+      spec match {
+        case _: BackfillJoinKey.PhysicalField
+            if !SupportedPhysicalJoinMilvusTypes.contains(field.dataType) =>
+          Left(
+            SchemaValidationError(
+              s"Physical join-key field '${field.name}' has unsupported type " +
+                s"(Milvus type ${field.dataType}). Supported types are Int8, Int16, Int32, " +
+                "Int64, String, and VarChar."
             )
-        }
+          )
+        case _ =>
+          val sourceFieldResult =
+            try {
+              Right(MilvusSnapshotReader.fieldToStructField(field))
+            } catch {
+              case e: Exception =>
+                Left(
+                  SchemaValidationError(
+                    s"Failed to resolve join-key field '${field.name}': ${e.getMessage}",
+                    Some(e)
+                  )
+                )
+            }
 
-      sourceFieldResult.flatMap { sourceField =>
-        val unsupportedPhysicalSemanticType =
-          field.dataType == 0 ||
-            field.dataType == 22 || // Array
-            field.dataType == 23 || // JSON
-            field.dataType == 200 || // ArrayOfStruct
-            field.dataType == 201 || // Struct
-            VectorBackfillSupport.isVectorField(field)
-
-        spec match {
-          case BackfillJoinKey.PrimaryKey =>
-            Right(
-              ResolvedJoinKey.primaryKey(
-                field.name,
-                field.getFieldIDAsLong,
-                Some(sourceField)
-              )
-            )
-          case _: BackfillJoinKey.PhysicalField
-              if unsupportedPhysicalSemanticType ||
-                !SupportedPhysicalJoinSparkTypes.contains(
-                  sourceField.dataType
-                ) =>
-            Left(
-              SchemaValidationError(
-                s"Physical join-key field '${field.name}' has unsupported type " +
-                  s"${sourceField.dataType.simpleString} (Milvus type ${field.dataType}). " +
-                  "Supported Spark types are tinyint, smallint, int, bigint, string, and binary."
-              )
-            )
-          case _: BackfillJoinKey.PhysicalField =>
-            Right(
-              ResolvedJoinKey.physicalField(
-                field.name,
-                field.getFieldIDAsLong,
-                sourceField
-              )
-            )
-        }
+          sourceFieldResult.map { sourceField =>
+            spec match {
+              case BackfillJoinKey.PrimaryKey =>
+                ResolvedJoinKey.primaryKey(
+                  field.name,
+                  field.getFieldIDAsLong,
+                  Some(sourceField)
+                )
+              case _: BackfillJoinKey.PhysicalField =>
+                ResolvedJoinKey.physicalField(
+                  field.name,
+                  field.getFieldIDAsLong,
+                  sourceField
+                )
+            }
+          }
       }
     }
   }
@@ -216,7 +196,6 @@ object MilvusBackfill {
     // Tracked so we can unpersist in the outer finally, even on mid-flight
     // failure (the cache is taken right after column mapping, below).
     var cachedBackfillDF: DataFrame = null
-    var cachedSourceDF: DataFrame = null
 
     logger.info(s"Backfill mode: ${config.mode}")
 
@@ -475,30 +454,10 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
-      val reusableOriginalDF = config.joinKey match {
-        case _: BackfillJoinKey.PhysicalField =>
-          originalDF.persist(StorageLevel.MEMORY_AND_DISK)
-          cachedSourceDF = originalDF
-          validateJoinKeyCardinality(
-            originalDF,
-            joinKey.internalColumns,
-            joinKey.sourceColumns,
-            side = "Source snapshot"
-          ) match {
-            case Left(error) => return Left(error)
-            case Right(stats) =>
-              logger.info(
-                s"Source snapshot rows: ${stats.rowCount} " +
-                  s"(distinct join keys: ${stats.distinctValidKeyCount})"
-              )
-          }
-          originalDF
-        case BackfillJoinKey.PrimaryKey => originalDF
-      }
-
-      // Validate join-key schema compatibility.
+      // This check only inspects schemas. Run it before any source-side action
+      // so a mismatched parquet key fails without scanning the collection.
       validateJoinKeyCompatibility(
-        reusableOriginalDF,
+        originalDF,
         backfillDF,
         joinKey
       ) match {
@@ -508,7 +467,7 @@ object MilvusBackfill {
 
       // Merge original and backfill DataFrames according to mode.
       val joinedDF = performJoin(
-        reusableOriginalDF,
+        originalDF,
         backfillDF,
         joinKey.internalColumns,
         newFieldNames,
@@ -588,14 +547,6 @@ object MilvusBackfill {
         } catch {
           case e: Exception =>
             logger.warn("Failed to unpersist backfill DataFrame", e)
-        }
-      }
-      if (cachedSourceDF != null) {
-        try {
-          cachedSourceDF.unpersist()
-        } catch {
-          case e: Exception =>
-            logger.warn("Failed to unpersist source DataFrame", e)
         }
       }
     }
@@ -977,7 +928,10 @@ object MilvusBackfill {
       val allFieldIds = (joinKey.fieldIds ++ extraReadFields.map(_._2)).distinct
       options =
         options + (MilvusOption.ReaderFieldIDs -> allFieldIds.mkString(","))
-      options = options + (MilvusOption.ReadApplyDeletes -> "false")
+      // Backfill writes one value per physical source row. Applying deletes
+      // would remove rows and invalidate $row_offset-based field alignment.
+      options = options + (MilvusOption.ReadApplyDeletes ->
+        ApplyDeletesToSourceRows.toString)
 
       // If snapshot metadata is available, use snapshot-based reading (no client calls)
       snapshotMetadata.foreach { metadata =>
@@ -1142,7 +1096,7 @@ object MilvusBackfill {
     }
   }
 
-  /** Validate that a DataFrame contains a non-null, unique join key.
+  /** Validate that backfill input contains a non-null, unique join key.
     *
     * A duplicate on the backfill side would fan one source row out into
     * multiple joined rows and corrupt per-segment row counts. Nulls are
@@ -1838,7 +1792,7 @@ object MilvusBackfill {
           config.s3BucketName,
           hadoopConf,
           manifestSchemaVersion = metadata.manifestSchemaVersion,
-          applyDeletes = false
+          applyDeletes = ApplyDeletesToSourceRows
         ) match {
         case Right(segs) =>
           // Workaround for Milvus snapshot not yet exposing FieldBinlog.child_fields:

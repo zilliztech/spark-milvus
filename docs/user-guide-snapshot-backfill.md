@@ -93,11 +93,13 @@ exact column name. With a differently named input column:
 ```
 
 The physical field must exist exactly (including case) in the snapshot schema.
-It must be non-null and unique on both sides, and it is consumed as identity —
-you cannot backfill that same field in the operation. Supported physical keys
-are narrow scalar equality types (Int8/16/32/64, strings, and binary scalar
-fields when exposed by the snapshot). Floating-point, JSON, vector, array,
-map, and struct keys are rejected. Logical file/row keys are not supported.
+The parquet key must be non-null and unique so one source row cannot fan out
+into multiple output rows. The snapshot field may repeat; the same parquet
+record is applied to every matching physical source row. The join field is not
+a target field, so you cannot backfill it in the same operation. Supported
+physical-key Milvus types are Int8/16/32/64, String, and VarChar.
+Floating-point, JSON, Geometry, Text, Timestamptz, unknown, vector, array, map,
+and struct keys are rejected. Logical file/row keys are not supported.
 `$row_offset` only restores segment write order and is not a stable row identity.
 
 **Type rules:**
@@ -367,7 +369,7 @@ primary S3 config is reused for the input read.
 | -------------------- | -------------- | ---------------------------------------------------------------- |
 | `--batch-size`       | `1024`         | Rows per Arrow batch flushed to the writer.                      |
 | `--column-mapping`   | *(none)*       | `src1:tgt1,src2:tgt2,...`. Rename/drop Parquet columns to Milvus field names. Must include the resolved join field as one target. |
-| `--join-key`         | collection PK  | Exact persisted snapshot field to use as row identity. Physical keys require snapshot mode. |
+| `--join-key`         | collection PK  | Exact persisted snapshot field to use for matching. Physical keys require snapshot mode.    |
 | `--mode`             | `coalesce`     | `replace` \| `coalesce` \| `overwrite`. See §6 for semantics.    |
 | `--output-result`    | *(none)*       | Path to write the result JSON. Strongly recommended.             |
 
@@ -407,7 +409,7 @@ primary S3 config is reused for the input read.
 | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | `InvalidSnapshot: missing manifest_list and storagev2_manifest_list` | Snapshot was produced before storage-V2/V3 landed on that collection, or the snapshot file is truncated. Re-run `CreateSnapshot`. |
 | `Join-key type mismatch`                            | Parquet key type doesn't exactly match the selected snapshot field. Cast it in your ETL.                        |
-| `duplicate join-key values` / `null join key`       | The parquet key, or an explicit physical source key, is not a one-to-one row identity. Fix or deduplicate the data. |
+| `duplicate join-key values` / `null join key`       | The parquet join key is invalid. Deduplicate it and remove null-key rows before retrying.                          |
 | `Physical join-key field ... was not found`         | `--join-key` is case-sensitive and must name a persisted snapshot field.                                        |
 | `Field name X not found in collection schema`       | Your column-mapping targets a field that isn't in the collection. Verify schema and mapping.                    |
 | `--mode=coalesce/overwrite requires ... types to match snapshot` | Your Parquet column is e.g. `Int32` but the field is `Int64`. Cast in your ETL, or switch to `--mode replace` if you're OK with Spark widening.  |

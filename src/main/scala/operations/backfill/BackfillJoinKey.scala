@@ -3,8 +3,9 @@ package com.zilliz.spark.connector.operations.backfill
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.DataFrame
 
-/** Public specification for the row identity used to match snapshot rows with
-  * backfill input rows.
+/** Public specification for the key used to match snapshot rows with backfill
+  * input rows. Source values may repeat; backfill input values must be unique
+  * so the left join preserves one output row per physical source row.
   */
 sealed trait BackfillJoinKey extends Product with Serializable
 

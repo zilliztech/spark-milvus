@@ -82,6 +82,10 @@ class BackfillModeTest
     err should include("bogus")
   }
 
+  test("backfill physical source reads never apply deletes") {
+    MilvusBackfill.ApplyDeletesToSourceRows shouldBe false
+  }
+
   test("parseArgs accepts --mode coalesce") {
     val parsed = BackfillApp.parseArgs(
       Array(
@@ -204,8 +208,7 @@ class BackfillModeTest
       4 -> IntegerType,
       5 -> LongType,
       20 -> StringType,
-      21 -> StringType,
-      27 -> org.apache.spark.sql.types.BinaryType
+      21 -> StringType
     )
 
     cases.zipWithIndex.foreach { case ((milvusType, sparkType), index) =>
@@ -230,6 +233,10 @@ class BackfillModeTest
       11 -> "double",
       22 -> "array",
       23 -> "json",
+      24 -> "geometry",
+      25 -> "text",
+      26 -> "timestamptz",
+      27 -> "unknown",
       100 -> "vector"
     ).foreach { case (milvusType, label) =>
       val name = s"${label}_key"
@@ -337,27 +344,6 @@ class BackfillModeTest
 
     err.message should include("duplicate join-key values")
     err.message should include("distinct=1")
-  }
-
-  test("join-key cardinality identifies source snapshot failures") {
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(Seq(Row("dup"), Row("dup"))),
-      StructType(Seq(StructField("join_key", StringType, nullable = false)))
-    )
-
-    val error = MilvusBackfill
-      .validateJoinKeyCardinality(
-        df,
-        Seq("join_key"),
-        Seq("external_row_id"),
-        "Source snapshot"
-      )
-      .left
-      .toOption
-      .get
-
-    error.message should include("Source snapshot")
-    error.message should include("external_row_id")
   }
 
   test("join-key cardinality validates composite tuples") {
@@ -537,11 +523,15 @@ class BackfillModeTest
       .toSeq shouldBe Seq(("a", Some("matched")), ("b", None))
   }
 
-  test("performJoin matches rows on a non-PK physical key") {
+  test("performJoin allows repeated source rows on a non-PK physical key") {
     val physicalKey = ResolvedJoinKey.internalColumn(0)
     val original = spark.createDataFrame(
       spark.sparkContext.parallelize(
-        Seq(Row(1L, "row-b", 10L, 0L), Row(2L, "row-a", 10L, 1L))
+        Seq(
+          Row(1L, "row-b", 10L, 0L),
+          Row(2L, "row-a", 10L, 1L),
+          Row(3L, "row-a", 10L, 2L)
+        )
       ),
       StructType(
         Seq(
@@ -570,11 +560,16 @@ class BackfillModeTest
       MilvusOption.BackfillModeReplace
     )
 
+    joined.count() shouldBe original.count()
     joined
       .orderBy("id")
       .collect()
       .map(row => (row.getAs[Long]("id"), Option(row.getAs[String]("value"))))
-      .toSeq shouldBe Seq((1L, None), (2L, Some("matched")))
+      .toSeq shouldBe Seq(
+      (1L, None),
+      (2L, Some("matched")),
+      (3L, Some("matched"))
+    )
   }
 
   test("replace mode: source has only PK, backfill values win") {
