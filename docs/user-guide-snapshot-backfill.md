@@ -103,6 +103,8 @@ backfill it in the same operation. Supported physical-key Milvus types are
 Int8/16/32/64, String, and VarChar.
 Floating-point, JSON, Geometry, Text, Timestamptz, unknown, vector, array, map,
 and struct keys are rejected. Logical file/row keys are not supported.
+The names `segment_id`, `row_offset`, `$segment_id`, and `$row_offset` are
+reserved for backfill metadata and cannot be used as join keys.
 `$row_offset` only restores segment write order and is not a stable row identity.
 
 **Type rules:**
@@ -295,10 +297,10 @@ Milvus will index the new binlogs and re-reopen the segments when done.
 
 Pass `--mode coalesce` (default), `--mode overwrite`, or `--mode replace`.
 
-All three behave identically for matched rows that already have non-null
-target values — they differ in two axes: what happens for matched rows where
-one side (src or parquet) is null, and what happens for rows whose join key is only
-present on one side.
+Matched rows do not behave identically: `coalesce` preserves each non-null
+source value, while `overwrite` and `replace` take the parquet value, including
+NULL. The modes also differ in how they handle source rows whose join key is
+absent from parquet.
 
 | Mode           | Matched row (join key in both)                   | Source row unmatched by parquet | Typical use                                                               |
 | -------------- | ------------------------------------------------ | ------------------------------- | ------------------------------------------------------------------------- |

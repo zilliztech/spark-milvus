@@ -227,6 +227,55 @@ class BackfillModeTest
     resolved.fieldIds shouldBe Seq(101L)
   }
 
+  test("resolveJoinKey rejects reserved metadata field names") {
+    val reservedNames = Seq(
+      MilvusOption.MilvusExtraColumnSegmentIDAlias,
+      MilvusOption.MilvusExtraColumnRowOffsetAlias,
+      MilvusOption.MilvusExtraColumnSegmentID,
+      MilvusOption.MilvusExtraColumnRowOffset
+    )
+
+    reservedNames.zipWithIndex.foreach { case (name, index) =>
+      val schema = CollectionSchema(
+        name = "c",
+        fields = Seq(snapshotField(name, 101L + index, 21))
+      )
+
+      val error = MilvusBackfill
+        .resolveJoinKey(schema, BackfillJoinKey.PhysicalField(name))
+        .left
+        .toOption
+        .get
+
+      error.message should include(name)
+      error.message should include("reserved")
+      error.message should include("--join-key")
+    }
+  }
+
+  test("resolveJoinKey rejects a default PK with a reserved metadata name") {
+    val schema = CollectionSchema(
+      name = "c",
+      fields = Seq(
+        snapshotField(
+          MilvusOption.MilvusExtraColumnSegmentIDAlias,
+          100L,
+          5,
+          primary = true
+        )
+      )
+    )
+
+    val error = MilvusBackfill
+      .resolveJoinKey(schema, BackfillJoinKey.PrimaryKey)
+      .left
+      .toOption
+      .get
+
+    error.message should include(MilvusOption.MilvusExtraColumnSegmentIDAlias)
+    error.message should include("reserved")
+  }
+
   test("resolveJoinKey rejects a nullable physical field") {
     val schema = CollectionSchema(
       name = "c",

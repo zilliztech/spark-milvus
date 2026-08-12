@@ -63,6 +63,13 @@ object MilvusBackfill {
     "Timestamp" -> 1L
   )
 
+  private val ReservedJoinKeyFieldNames: Set[String] = Set(
+    MilvusOption.MilvusExtraColumnSegmentIDAlias,
+    MilvusOption.MilvusExtraColumnRowOffsetAlias,
+    MilvusOption.MilvusExtraColumnSegmentID,
+    MilvusOption.MilvusExtraColumnRowOffset
+  )
+
   /** Resolve the public join-key specification against an exact snapshot schema
     * field. Physical keys deliberately support only stable scalar equality
     * types and never rely on Spark's case-insensitive resolver.
@@ -103,6 +110,16 @@ object MilvusBackfill {
 
     selected.flatMap { field =>
       normalizedSpec match {
+        case _ if ReservedJoinKeyFieldNames.contains(field.name) =>
+          Left(
+            SchemaValidationError(
+              "Snapshot field '" + field.name + "' cannot be used as the backfill join key because " +
+                "its name is reserved for required metadata columns '" +
+                MilvusOption.MilvusExtraColumnSegmentID + "' and '" +
+                MilvusOption.MilvusExtraColumnRowOffset + "'. " +
+                "Choose another persisted field with --join-key."
+            )
+          )
         case _: BackfillJoinKey.PhysicalField
             if !SupportedPhysicalJoinMilvusTypes.contains(field.dataType) =>
           Left(
