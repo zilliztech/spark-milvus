@@ -33,12 +33,12 @@ Use snapshot backfill when you need to:
 
 | Requirement                | Notes                                                                                           |
 | -------------------------- | ----------------------------------------------------------------------------------------------- |
-| Milvus server              | Snapshot + `UpdateSegmentColumnGroups` support required (any recent 2.6+ or internal build).    |
+| Milvus server              | Milvus 3.0.0+ with snapshot support and the backfill commit management endpoint.                |
 | Object storage             | S3 / MinIO / GCS with S3-compatible endpoint. Must be accessible from both Milvus and Spark.    |
 | Spark                      | 3.5.x, JDK 8+. Cluster mode on YARN, Kubernetes (Spark Operator), or standalone all work.       |
 | Connector JARs             | `spark-connector-assembly-*.jar`. It bundles the native `milvus-storage` resources copied into `src/main/resources/native/`. |
 | Parquet of new-field data  | Must contain the resolved join-key column, plus one column per new field.                      |
-| Network                    | Spark executors must reach the object store. Milvus gRPC is needed for schema setup, snapshot creation, and result commit. |
+| Network                    | Spark executors must reach the object store. Schema setup and snapshot creation use the Milvus SDK; result commit must reach the Proxy management HTTP endpoint. |
 
 ## 3. The flow at a glance
 
@@ -57,14 +57,14 @@ Use snapshot backfill when you need to:
                 │
                 ▼   backfill_result.json
 ┌─── on Milvus ────────────────────────────────────────────────────┐
-│ 4. For each segment: UpdateSegmentColumnGroups(...)              │
+│ 4. GET /management/datacoord/backfill/commit?result_path=...     │
 │ 5. (optional) CreateIndex(new_field)                             │
 │ 6. QueryNode reopens segments automatically                      │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Step 3 is the only part this guide covers in detail; the Milvus-side calls
-are one-liners in your SDK of choice.
+Steps 1 and 2 use your Milvus SDK. Step 4 is a single request to the Proxy
+management HTTP endpoint, not a public SDK or gRPC method.
 
 ## 4. Prepare your Parquet input
 
@@ -245,32 +245,24 @@ Each segment entry is one of:
 
 ### 5.5 Commit to Milvus
 
-Iterate the `segments` map and, for each entry, call
-`UpdateSegmentColumnGroups` on Milvus. The shape depends on V2 vs V3:
+Pass the object-storage path written by `--output-result` to the Proxy
+management HTTP endpoint. DataCoord reads the JSON and commits all V2 and V3
+segment entries from that file; do not iterate the `segments` map or call an
+SDK method per segment.
 
-```python
-# Pseudocode — use your SDK's equivalent
-for seg_id, seg in result["segments"].items():
-    if "column_groups" in seg:          # V2
-        client.update_segment_column_groups(
-            segment_id=int(seg_id),
-            column_groups={
-                cg["field_ids"][0]: {
-                    "fieldID": cg["field_ids"][0],
-                    "binlogs": [{"log_path": p} for p in cg["binlog_files"]],
-                }
-                for cg in seg["column_groups"]
-            },
-        )
-    else:                                # V3
-        client.update_segment_manifest(
-            segment_id=int(seg_id),
-            manifest_version=seg["version"],
-        )
+```bash
+curl --fail-with-body --get \
+  'http://<proxy-management-host>:9091/management/datacoord/backfill/commit' \
+  --data-urlencode \
+  'result_path=s3a://bucket/backfill/result_20260417.json'
 ```
 
-Each call is idempotent at segment granularity; if one fails, retry that
-one only.
+Port `9091` is the default management port; use the configured management
+address for your deployment. A successful response includes
+`total_segments`, `committed_segments`, `failed_segments`, and
+`segment_statuses`. Check that `failed_segments` is zero instead of relying on
+HTTP status alone. The `result_path` must be readable through Milvus's object
+storage configuration.
 
 ### 5.6 (Optional) Build an index on the new field
 
@@ -400,7 +392,8 @@ primary S3 config is reused for the input read.
 | `OutOfMemoryError: Direct buffer memory`            | Increase `spark.executor.memoryOverhead` (start at 8g) and lower `--batch-size`.                              |
 | `NotSerializableException: java.util.Optional`      | You're on an old connector build — an Arrow exception is being masked. Update to a build that unwraps it.       |
 | All backfilled rows have the same value             | Missing `.copy()` after a shuffle in a custom fork. The mainline connector handles this; upstream fix only.    |
-| Job succeeds, queries still show NULL for new field | You forgot step 5.5 (`UpdateSegmentColumnGroups`) or the QueryNode hasn't reopened yet. Check `DataVersion`.    |
+| Commit endpoint returns HTTP 404                   | The server is older than Milvus 3.0.0, or the request was sent to the wrong Proxy management address.          |
+| Job succeeds, queries still show NULL for new field | The result JSON was not committed through step 5.5, `failed_segments` was non-zero, or QueryNode has not reopened yet. Check the commit response and `DataVersion`. |
 | `s3:// not registered`                              | Hadoop doesn't auto-register the `s3` scheme. Use `s3a://` throughout (the connector normalizes automatically, but some pre-flight tools do not).|
 | Compaction nuked my segment files mid-run           | `compaction_protection_seconds` was too short or not set. Re-run the snapshot with a larger TTL.                |
 
