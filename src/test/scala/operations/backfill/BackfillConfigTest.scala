@@ -10,6 +10,29 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
 
   // ============ Validation Tests ============
 
+  test("backfill defaults to collection primary-key join") {
+    BackfillConfig.forTest("c").joinKey shouldBe BackfillJoinKey.PrimaryKey
+  }
+
+  test("backfill accepts an explicit physical-field join key") {
+    BackfillConfig
+      .forTest("c")
+      .copy(joinKey = BackfillJoinKey.PhysicalField("external_row_id"))
+      .validate() shouldBe Right(())
+  }
+
+  test("backfill rejects a blank physical-field join key") {
+    val error = BackfillConfig
+      .forTest("c")
+      .copy(joinKey = BackfillJoinKey.PhysicalField("  "))
+      .validate()
+      .left
+      .toOption
+      .get
+
+    error should include("cannot be blank")
+  }
+
   test("Valid config passes validation") {
     val config = BackfillConfig(
       milvusUri = "http://localhost:19530",
