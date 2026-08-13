@@ -25,10 +25,11 @@ import org.apache.spark.internal.Logging
   * The resulting `Seq[V2SegmentInfo]` is the runtime view consumed by
   * `MilvusPackedV2InputPartition` / `MilvusPackedV2PartitionReader`.
   *
-  * Path resolution: AVRO and parquet paths that milvus writes are
+  * Path resolution: AVRO and parquet paths that Milvus writes are
   * bucket-relative (`files/snapshots/...`). When `bucket` is non-empty we
-  * prefix `s3a://{bucket}/` so Hadoop picks the S3A filesystem. Fully qualified
-  * `s3a://...` / `s3://...` URIs pass through.
+  * prefix `{storageScheme}://{bucket}/`. The default remains `s3a` for the
+  * connector DataSource and tools; Alibaba callers must explicitly pass
+  * `storageScheme = "oss"` with a matching Hadoop OSS configuration.
   */
 object V2SegmentLoader extends Logging {
 
@@ -207,7 +208,11 @@ object V2SegmentLoader extends Logging {
     }
   }
 
-  /** Prefix `bucket` when `path` has no scheme; preserve explicit schemes. */
+  /** Prefix `bucket` when `path` has no scheme; preserve explicit schemes.
+    * `storageScheme` is intentionally explicit for non-S3 providers because the
+    * generic connector read path does not yet derive a provider from its public
+    * options.
+    */
   def resolvePath(
       path: String,
       bucket: String,

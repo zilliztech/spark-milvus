@@ -59,17 +59,23 @@ spark-submit \
   under IRSA. In IAM mode the connector honors the platform-injected Hadoop
   AssumeRole configuration: `fs.s3a.assumed.role.*` on AWS and
   `fs.oss.assumed.role.*` on Alibaba Cloud. A global main-storage role is also
-  forwarded to the Milvus storage FFI; otherwise both clients use their default
-  IAM chain (env vars / web identity token / instance profile).
+  forwarded to the Milvus storage FFI. Alibaba OSS IAM mode requires the
+  managed runtime to inject `fs.oss.credentials.provider`; hadoop-aliyun has
+  no generic ECS/env default provider chain for this path and fails fast when
+  that property is absent.
 - **Cloud provider**: omit `--s3-cloud-provider` for AWS. Pass `aliyun` when
   the Milvus storage bucket is OSS so the native writer uses the Aliyun
-  credentials provider and AssumeRole flow.
+  credentials provider and AssumeRole flow. For Alibaba, `s3://` and `s3a://`
+  CLI paths are normalized to `oss://`; using explicit `oss://` is preferred.
+  The Spark runtime image must provide `hadoop-aliyun` 3.4.1; it is declared
+  as a provided dependency to avoid conflicting with Spark's Hadoop runtime.
 - **Different bucket for input parquet**: when the parquet file lives in a
   different bucket (or even region/account) from the Milvus storage bucket,
-  use the `--source-s3-*` flags. They are written as per-bucket Hadoop S3A
-  config, so each bucket can independently use static AK/SK or IAM in the
-  same Spark session. Any unset `--source-*` falls back to the main
-  credentials.
+  use the `--source-s3-*` flags. AWS uses per-bucket S3A configuration. OSS
+  access is scoped to each source or target operation and restores the managed
+  role configuration afterwards, so static source credentials cannot replace
+  the target bucket's IAM provider. Any unset `--source-*` falls back to the
+  main credentials.
 
 ### Required flags
 

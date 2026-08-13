@@ -494,10 +494,27 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     MilvusBackfill.normalizeS3Scheme(null) shouldBe null
   }
 
-  test("normalizeObjectStorageScheme preserves OSS paths") {
+  test("normalizeObjectStorageScheme selects OSS aliases for Alibaba") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
+      s3BucketName = "managed-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true
+    )
     MilvusBackfill.normalizeObjectStorageScheme(
-      "oss://bucket/files/snapshot.json"
-    ) shouldBe "oss://bucket/files/snapshot.json"
+      "s3a://managed-bucket/files/snapshot.json",
+      cfg
+    ) shouldBe "oss://managed-bucket/files/snapshot.json"
+    MilvusBackfill.normalizeObjectStorageScheme(
+      "s3://managed-bucket/files/snapshot.json",
+      cfg
+    ) shouldBe "oss://managed-bucket/files/snapshot.json"
+    MilvusBackfill.normalizeObjectStorageScheme(
+      "oss://managed-bucket/files/snapshot.json",
+      cfg
+    ) shouldBe "oss://managed-bucket/files/snapshot.json"
   }
 
   test("storagePath selects OSS for Alibaba") {
@@ -542,7 +559,105 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       hc.get("fs.oss.accessKeyId") shouldBe null
       hc.get("fs.oss.accessKeySecret") shouldBe null
     } finally {
-      hc.unset(BackfillConfig.HadoopOssCredentialsProvider)
+      Seq(
+        BackfillConfig.HadoopOssCredentialsProvider,
+        "fs.oss.impl",
+        "fs.oss.endpoint",
+        "fs.oss.connection.secure.enabled",
+        "fs.oss.accessKeyId",
+        "fs.oss.accessKeySecret"
+      ).foreach(hc.unset)
+    }
+  }
+
+  test(
+    "configureHadoopOssForPath uses built-in static credential construction"
+  ) {
+    val cfg = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou.aliyuncs.com",
+      s3BucketName = "static-bucket",
+      s3AccessKey = "static-ak",
+      s3SecretKey = "static-sk",
+      s3CloudProvider = "aliyun",
+      s3UseIam = false
+    )
+    val hc = spark.sparkContext.hadoopConfiguration
+    hc.set(
+      BackfillConfig.HadoopOssCredentialsProvider,
+      BackfillConfig.HadoopOssAssumedRoleProvider
+    )
+    try {
+      MilvusBackfill.configureHadoopOssForPath(
+        spark,
+        "oss://static-bucket/files/data.parquet",
+        cfg,
+        isSource = false
+      )
+      hc.get("fs.oss.accessKeyId") shouldBe "static-ak"
+      hc.get("fs.oss.accessKeySecret") shouldBe "static-sk"
+      hc.get(BackfillConfig.HadoopOssCredentialsProvider) shouldBe null
+      hc.get("fs.oss.connection.secure.enabled") shouldBe null
+      val uri = new java.net.URI("oss://static-bucket/files/data.parquet")
+      val provider = org.apache.hadoop.fs.aliyun.oss.AliyunOSSUtils
+        .getCredentialsProvider(uri, hc)
+      provider should not be null
+      provider.getCredentials.getAccessKeyId shouldBe "static-ak"
+      provider.getCredentials.getSecretAccessKey shouldBe "static-sk"
+    } finally {
+      Seq(
+        BackfillConfig.HadoopOssCredentialsProvider,
+        "fs.oss.impl",
+        "fs.oss.endpoint",
+        "fs.oss.connection.secure.enabled",
+        "fs.oss.accessKeyId",
+        "fs.oss.accessKeySecret"
+      ).foreach(hc.unset)
+    }
+  }
+
+  test("withScopedHadoopStorage restores managed OSS configuration") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou.aliyuncs.com",
+      s3BucketName = "static-source",
+      s3AccessKey = "main-ak",
+      s3SecretKey = "main-sk",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true,
+      sourceS3AccessKey = Some("source-ak"),
+      sourceS3SecretKey = Some("source-sk"),
+      sourceS3UseIam = Some(false)
+    )
+    val hc = spark.sparkContext.hadoopConfiguration
+    val provider = BackfillConfig.HadoopOssAssumedRoleProvider
+    hc.set(BackfillConfig.HadoopOssCredentialsProvider, provider)
+    hc.set("fs.oss.endpoint", "managed-endpoint")
+    try {
+      MilvusBackfill.withScopedHadoopStorage(
+        spark,
+        "oss://static-source/input.parquet",
+        cfg,
+        isSource = true
+      ) {
+        hc.get("fs.oss.accessKeyId") shouldBe "source-ak"
+        hc.get("fs.oss.accessKeySecret") shouldBe "source-sk"
+        hc.get(BackfillConfig.HadoopOssCredentialsProvider) shouldBe null
+      }
+      hc.get(BackfillConfig.HadoopOssCredentialsProvider) shouldBe provider
+      hc.get("fs.oss.endpoint") shouldBe "managed-endpoint"
+      hc.get("fs.oss.accessKeyId") shouldBe null
+      hc.get("fs.oss.accessKeySecret") shouldBe null
+      hc.get("fs.oss.impl") shouldBe null
+      hc.get("fs.oss.impl.disable.cache") shouldBe null
+    } finally {
+      Seq(
+        BackfillConfig.HadoopOssCredentialsProvider,
+        "fs.oss.impl",
+        "fs.oss.impl.disable.cache",
+        "fs.oss.endpoint",
+        "fs.oss.connection.secure.enabled",
+        "fs.oss.accessKeyId",
+        "fs.oss.accessKeySecret"
+      ).foreach(hc.unset)
     }
   }
 
