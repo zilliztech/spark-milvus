@@ -35,7 +35,7 @@ Use snapshot backfill when you need to:
 | -------------------------- | ----------------------------------------------------------------------------------------------- |
 | Milvus server              | Milvus 3.0.0+ with snapshot support and the backfill commit management endpoint.                |
 | Object storage             | S3 / MinIO / GCS with S3-compatible endpoint. Must be accessible from both Milvus and Spark.    |
-| Spark                      | 3.5.x, JDK 8+. Cluster mode on YARN, Kubernetes (Spark Operator), or standalone all work.       |
+| Spark / Java               | Spark 4.0.x built for Scala 2.13, with Java 21. Cluster mode on YARN, Kubernetes, or standalone. |
 | Connector JARs             | `spark-connector-assembly-*.jar`. It bundles the native `milvus-storage` resources copied into `src/main/resources/native/`. |
 | Parquet of new-field data  | Must contain the resolved join-key column, plus one column per new field.                      |
 | Network                    | Spark executors must reach the object store. Schema setup and snapshot creation use the Milvus SDK; result commit must reach the Proxy management HTTP endpoint. |
@@ -111,10 +111,9 @@ reserved for backfill metadata and cannot be used as join keys.
 
 - Join-key type in Parquet must match the selected snapshot field type exactly
   (int64 ↔ Int64, varchar ↔ String).
-- In `--mode coalesce` (default) or `--mode overwrite`, Parquet types must
-  match the Milvus field types **exactly** — no widening. See "Modes" below.
-- In `--mode replace`, Parquet types must be compatible with the Milvus
-  field types (Spark will cast where sensible).
+- In every mode, Parquet target-column types must match the Milvus field types
+  **exactly** — the backfill writer does not cast them. Perform any conversion
+  explicitly in your ETL before running the job.
 
 Missing join keys in the Parquet: behaviour depends on `--mode` (see §6).
 Extra parquet keys not present in the collection are silently ignored.
@@ -133,11 +132,13 @@ client.add_collection_field(
     field_name="category",
     data_type=DataType.VARCHAR,
     max_length=64,
+    nullable=True,
 )
 client.add_collection_field(
     collection_name="my_collection",
     field_name="score",
     data_type=DataType.FLOAT,
+    nullable=True,
 )
 ```
 
@@ -156,8 +157,14 @@ client.create_snapshot(
     compaction_protection_seconds=86400,   # pin files for 24h
 )
 
-info = client.describe_snapshot(snapshot_name="bkfill_20260417")
-snapshot_path = info["s3_location"]      # → s3a://bucket/snapshots/<coll>/metadata/<id>.json
+info = client.describe_snapshot(
+    snapshot_name="bkfill_20260417",
+    collection_name="my_collection",
+)
+snapshot_location = info.s3_location
+# SnapshotInfo commonly returns a bucket-relative object key, for example:
+# files/snapshots/<collection-id>/metadata/<snapshot-id>.json
+snapshot_path = f"s3a://bucket/{snapshot_location.lstrip('/')}"
 ```
 
 `compaction_protection_seconds` tells Milvus to keep segment files pinned
@@ -269,10 +276,13 @@ storage configuration.
 Backfill does **not** build indexes. If you need one:
 
 ```python
+index_params = MilvusClient.prepare_index_params(
+    field_name="category",
+    index_type="Trie",
+)
 client.create_index(
     collection_name="my_collection",
-    field_name="category",
-    index_type="Trie",       # or whatever suits the field
+    index_params=index_params,
 )
 ```
 
@@ -303,11 +313,10 @@ absent from parquet.
 Parquet rows whose join key is not in the collection are always dropped (left-join
 from source side).
 
-**`coalesce` / `overwrite` caveats** (shared — both read source-side values):
+All modes require exact Parquet-to-Milvus target types; cast input columns in
+your ETL before running backfill. Additional `coalesce` / `overwrite` caveats
+(both read source-side values):
 
-- Parquet types must match the collection field types **exactly**
-  (e.g. Int64 vs Int32 will be rejected). Spark's type widening would
-  silently change the stored Arrow type otherwise.
 - Reads the target field(s) from the base segments — slightly heavier I/O
   than `replace`.
 - On Storage V2 packed segments, every target field must already be declared
@@ -387,8 +396,8 @@ primary S3 config is reused for the input read.
 | `Join-key type mismatch`                            | Parquet key type doesn't exactly match the selected snapshot field. Cast it in your ETL.                        |
 | `duplicate join-key values` / `null join key`       | The parquet join key is invalid. Deduplicate it and remove null-key rows before retrying.                          |
 | `Physical join-key field ... was not found`         | `--join-key` is case-sensitive and must name a persisted snapshot field.                                        |
-| `Field name X not found in collection schema`       | Your column-mapping targets a field that isn't in the collection. Verify schema and mapping.                    |
-| `--mode=coalesce/overwrite requires ... types to match snapshot` | Your Parquet column is e.g. `Int32` but the field is `Int64`. Cast in your ETL, or switch to `--mode replace` if you're OK with Spark widening.  |
+| `Fields not found in snapshot schema: ...`          | Your column-mapping targets a field that isn't in the collection. Verify schema and mapping.                    |
+| `--mode=... requires backfill parquet target-column types to match snapshot field types exactly` | Your Parquet column is e.g. `Int32` but the field is `Int64`. Cast it explicitly in your ETL before retrying. |
 | `OutOfMemoryError: Direct buffer memory`            | Increase `spark.executor.memoryOverhead` (start at 8g) and lower `--batch-size`.                              |
 | `NotSerializableException: java.util.Optional`      | You're on an old connector build — an Arrow exception is being masked. Update to a build that unwraps it.       |
 | All backfilled rows have the same value             | Missing `.copy()` after a shuffle in a custom fork. The mainline connector handles this; upstream fix only.    |

@@ -868,9 +868,9 @@ class BackfillModeTest
     )
   }
 
-  // ============ validateMergeableFieldTypes ============
+  // ============ validateBackfillTargetFieldTypes ============
 
-  test("validateMergeableFieldTypes: matching types pass") {
+  test("validateBackfillTargetFieldTypes: matching types pass") {
     val backfillSchema = StructType(
       Seq(
         StructField("pk", IntegerType, nullable = false),
@@ -882,7 +882,7 @@ class BackfillModeTest
       ("f1", 101L, StructField("f1", IntegerType, nullable = true)),
       ("f2", 102L, StructField("f2", StringType, nullable = true))
     )
-    MilvusBackfill.validateMergeableFieldTypes(
+    MilvusBackfill.validateBackfillTargetFieldTypes(
       backfillSchema,
       extras,
       MilvusOption.BackfillModeCoalesce
@@ -890,7 +890,7 @@ class BackfillModeTest
   }
 
   test(
-    "validateMergeableFieldTypes: mismatched type rejected with clear message"
+    "validateBackfillTargetFieldTypes: mismatched type rejected with clear message"
   ) {
     // parquet sees IntegerType but snapshot says LongType — Spark's coalesce
     // / when-otherwise would silently widen and produce a Long binlog,
@@ -905,7 +905,7 @@ class BackfillModeTest
       ("f1", 101L, StructField("f1", LongType, nullable = true))
     )
     val err = MilvusBackfill
-      .validateMergeableFieldTypes(
+      .validateBackfillTargetFieldTypes(
         backfillSchema,
         extras,
         MilvusOption.BackfillModeOverwrite
@@ -922,8 +922,32 @@ class BackfillModeTest
     err.message should include(MilvusOption.BackfillModeOverwrite)
   }
 
+  test("validateBackfillTargetFieldTypes rejects replace-mode widening") {
+    val backfillSchema = StructType(
+      Seq(StructField("f1", IntegerType, nullable = true))
+    )
+    val targets = Seq(
+      ("f1", 101L, StructField("f1", LongType, nullable = true))
+    )
+
+    val err = MilvusBackfill
+      .validateBackfillTargetFieldTypes(
+        backfillSchema,
+        targets,
+        MilvusOption.BackfillModeReplace
+      )
+      .left
+      .toOption
+      .get
+
+    err.message should include(MilvusOption.BackfillModeReplace)
+    err.message should include("cast them in the input ETL")
+    err.message should include("snapshot=bigint")
+    err.message should include("parquet=int")
+  }
+
   test(
-    "validateMergeableFieldTypes: backfill missing the field is not flagged here"
+    "validateBackfillTargetFieldTypes: backfill missing the field is not flagged here"
   ) {
     // performJoin/processSegments handles missing columns via the left join.
     // The type validator only complains when both sides have the column AND
@@ -934,7 +958,7 @@ class BackfillModeTest
     val extras = Seq(
       ("f1", 101L, StructField("f1", LongType, nullable = true))
     )
-    MilvusBackfill.validateMergeableFieldTypes(
+    MilvusBackfill.validateBackfillTargetFieldTypes(
       backfillSchema,
       extras,
       MilvusOption.BackfillModeCoalesce

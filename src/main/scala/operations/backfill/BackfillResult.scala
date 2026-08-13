@@ -94,7 +94,6 @@ case class BackfillResult(
   def summary: String = {
     val v2Count = segmentResults.count(_._2.v2Artifact.isDefined)
     val sourceRate = matchRateStr(totalMatchedRows, totalSourceRows)
-    val dataFileRate = matchRateStr(totalMatchedRows, totalBackfillDataRows)
     val coalesceBlock =
       if (totalUsedSourceByField.isEmpty && totalUsedDataFileByField.isEmpty)
         ""
@@ -113,7 +112,7 @@ case class BackfillResult(
        |  Segments Processed: $segmentsProcessed
        |  Total Source Rows: $totalSourceRows
        |  Total Backfill Data File Rows: $totalBackfillDataRows
-       |  Total Matched Rows: $totalMatchedRows (of source: $sourceRate, of data file: $dataFileRate)
+       |  Total Matched Source Rows: $totalMatchedRows ($sourceRate of source rows)
        |  Total Rows Written: $totalRowsWritten
        |  Execution Time: ${executionTimeMs}ms
        |  Collection ID: $collectionId

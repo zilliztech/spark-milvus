@@ -434,6 +434,31 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
+      val targetVectorFields = targetFieldsByName.collect {
+        case (name, field) if VectorBackfillSupport.isVectorField(field) =>
+          name -> VectorBackfillSupport.canonicalStructField(field)
+      }
+
+      val targetWriteFields = newFieldNames.map { n =>
+        val field = targetFieldsByName(n)
+        val structField = targetVectorFields.getOrElse(
+          n,
+          MilvusSnapshotReader.fieldToStructField(field)
+        )
+        (n, newFieldNameToId(n), structField)
+      }
+
+      // Every mode writes parquet-side values with their current Spark types.
+      // Replace has no implicit cast, so validate before any writer runs.
+      validateBackfillTargetFieldTypes(
+        backfillDF.schema,
+        targetWriteFields,
+        config.mode
+      ) match {
+        case Left(error) => return Left(error)
+        case Right(_)    => // Continue
+      }
+
       // Cache so the upcoming join-key aggregation doesn't force
       // a second parquet scan when performJoin consumes the DF later. The
       // count also eagerly validates every normalized vector row.
@@ -455,11 +480,6 @@ object MilvusBackfill {
           s"(distinct join keys: ${joinKeyStats.distinctValidKeyCount})"
       )
 
-      val targetVectorFields = targetFieldsByName.collect {
-        case (name, field) if VectorBackfillSupport.isVectorField(field) =>
-          name -> VectorBackfillSupport.canonicalStructField(field)
-      }
-
       // In coalesce / overwrite modes, also read each target field from source
       // so the merge step (coalesce(src,bf) or when(matched, bf).otherwise(src))
       // can compare source and parquet values per row. Requires a snapshot —
@@ -467,34 +487,7 @@ object MilvusBackfill {
       val readsSourceFields = config.readsSourceFields
       val extraReadFields
           : Seq[(String, Long, org.apache.spark.sql.types.StructField)] =
-        if (readsSourceFields) {
-          newFieldNames.map { n =>
-            val fid = newFieldNameToId(n)
-            val field = targetFieldsByName(n)
-            val structField = targetVectorFields.getOrElse(
-              n,
-              MilvusSnapshotReader.fieldToStructField(field)
-            )
-            (
-              n,
-              fid,
-              structField
-            )
-          }
-        } else Seq.empty
-
-      // In any source-reading mode, parquet column types must match snapshot
-      // field types exactly (see validateMergeableFieldTypes for rationale).
-      if (readsSourceFields) {
-        validateMergeableFieldTypes(
-          backfillDF.schema,
-          extraReadFields,
-          config.mode
-        ) match {
-          case Left(error) => return Left(error)
-          case Right(_)    => // Continue
-        }
-      }
+        if (readsSourceFields) targetWriteFields else Seq.empty
 
       // Read original collection data with segment metadata
       val originalDF = readCollectionWithMetadata(
@@ -1113,24 +1106,23 @@ object MilvusBackfill {
     }
   }
 
-  /** Coalesce and overwrite modes require parquet column types to match
-    * snapshot field types exactly. Both modes synthesize a per-row choice
-    * between the source-side and parquet-side values (`coalesce(src, bf)` in
-    * coalesce, `when(matched, bf).otherwise(src)` in overwrite) — Spark would
-    * otherwise widen to a common supertype (e.g. Int + Long → Long) and the
-    * writer would emit binlogs whose Arrow type no longer matches the Milvus
-    * field, which Milvus would later misread.
+  /** Every backfill mode requires parquet target-column types to match the
+    * snapshot field types exactly. Replace writes parquet columns verbatim;
+    * coalesce and overwrite additionally synthesize a per-row choice between
+    * source and parquet values. Allowing either an input mismatch or Spark
+    * widening would make the writer emit binlogs whose Arrow type no longer
+    * matches the Milvus field.
     */
-  private[backfill] def validateMergeableFieldTypes(
+  private[backfill] def validateBackfillTargetFieldTypes(
       backfillSchema: org.apache.spark.sql.types.StructType,
-      extraReadFields: Seq[
+      targetFields: Seq[
         (String, Long, org.apache.spark.sql.types.StructField)
       ],
       mode: String
   ): Either[BackfillError, Unit] = {
     val backfillTypes =
       backfillSchema.fields.map(f => f.name -> f.dataType).toMap
-    val mismatches = extraReadFields.collect {
+    val mismatches = targetFields.collect {
       case (name, _, srcField)
           if backfillTypes
             .get(name)
@@ -1141,8 +1133,8 @@ object MilvusBackfill {
     if (mismatches.nonEmpty) {
       Left(
         SchemaValidationError(
-          s"--mode=$mode requires backfill parquet column types to match " +
-            s"snapshot field types exactly. " +
+          s"--mode=$mode requires backfill parquet target-column types to match " +
+            s"snapshot field types exactly; cast them in the input ETL before running backfill. " +
             s"Mismatched: ${mismatches.mkString(", ")}"
         )
       )

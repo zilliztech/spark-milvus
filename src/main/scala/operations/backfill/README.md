@@ -165,15 +165,13 @@ Typical fits:
   authoritative only for the join keys it covers and untouched rows must be
   preserved.
 
-**`coalesce` / `overwrite` caveats** (enforced at validation — both read
+All modes require exact Parquet-to-Milvus target types; perform required casts
+in the input ETL. Additional `coalesce` / `overwrite` caveats (both read
 source-side target values):
 
 - Require `--snapshot` — each target field is read from the snapshot so
   the merge can compare against the existing value. Client mode (no
   `--snapshot`) cannot use these and must pass `--mode replace` explicitly.
-- Parquet column types must match the snapshot field types **exactly**
-  — no Spark widening (Int32 → Int64 is rejected). Only `replace` lets
-  Spark cast between compatible numeric widths.
 - Slightly heavier I/O than `replace` because the existing field is read
   per segment.
 - On Storage V2 packed segments, target fields must already exist in the
