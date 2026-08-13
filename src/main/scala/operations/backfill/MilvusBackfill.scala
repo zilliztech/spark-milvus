@@ -463,11 +463,11 @@ object MilvusBackfill {
     // and per-bucket fs.s3a.bucket.<b>.* config is only honored by
     // S3AFileSystem. Force the s3a scheme so the credentials we just wrote
     // actually take effect.
-    val path = normalizeS3Scheme(rawPath)
+    val path = normalizeObjectStorageScheme(rawPath)
     try {
       // Ensure Hadoop S3A is configured for the source bucket (may differ
       // from the Milvus storage bucket) before reading the parquet.
-      configureHadoopS3ForPath(spark, path, config, isSource = true)
+      configureHadoopStorageForPath(spark, path, config, isSource = true)
       val df = spark.read.parquet(path)
 
       // Minimum shape check; pk presence and field-count checks are enforced
@@ -1590,9 +1590,9 @@ object MilvusBackfill {
       // Register S3A bucket credentials so V2SegmentLoader can read AVRO +
       // parquet footers from minio / S3. The main bucket (not the source
       // parquet bucket) holds the snapshot.
-      configureHadoopS3ForPath(
+      configureHadoopStorageForPath(
         spark,
-        s"s3a://${config.s3BucketName}/",
+        storagePath(config, ""),
         config,
         isSource = false
       )
@@ -1603,7 +1603,10 @@ object MilvusBackfill {
           config.s3BucketName,
           hadoopConf,
           manifestSchemaVersion = metadata.manifestSchemaVersion,
-          applyDeletes = false
+          applyDeletes = false,
+          storageScheme =
+            if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun")) "oss"
+            else "s3a"
         ) match {
         case Right(segs) =>
           // Workaround for Milvus snapshot not yet exposing FieldBinlog.child_fields:
@@ -1707,7 +1710,8 @@ object MilvusBackfill {
     val allocator: () => Long = () => logIdCounter.incrementAndGet()
 
     val outputRoot =
-      s"s3a://${config.s3BucketName}/${config.s3RootPath.stripSuffix("/")}/insert_log/" +
+      s"${if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun")) "oss"
+        else "s3a"}://${config.s3BucketName}/${config.s3RootPath.stripSuffix("/")}/insert_log/" +
         s"$collectionID/$partitionID/$segmentID"
 
     // Reuse the same MilvusOption plumbing the V3 writer uses — the new V2
@@ -1927,9 +1931,9 @@ object MilvusBackfill {
     // Same s3:// → s3a:// normalization as readSnapshotJson /
     // readBackfillData. Without it, an s3:// URL would route to the legacy
     // S3FileSystem which ignores fs.s3a.bucket.<b>.* config.
-    val outputPath = normalizeS3Scheme(rawOutputPath)
+    val outputPath = normalizeObjectStorageScheme(rawOutputPath)
     try {
-      configureHadoopS3ForPath(spark, outputPath, config, isSource = false)
+      configureHadoopStorageForPath(spark, outputPath, config, isSource = false)
       val hadoopPath = new Path(outputPath)
       val fs = hadoopPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
       val out = fs.create(hadoopPath, true)
@@ -1969,6 +1973,90 @@ object MilvusBackfill {
     if (path == null) null
     else if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
     else path
+  }
+
+  private[backfill] def normalizeObjectStorageScheme(path: String): String =
+    normalizeS3Scheme(path)
+
+  private[backfill] def storagePath(
+      config: BackfillConfig,
+      suffix: String
+  ): String = {
+    val scheme =
+      if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun")) "oss://"
+      else "s3a://"
+    scheme + config.s3BucketName + "/" + suffix.stripPrefix("/")
+  }
+
+  private[backfill] def configureHadoopStorageForPath(
+      spark: SparkSession,
+      path: String,
+      config: BackfillConfig,
+      isSource: Boolean
+  ): Unit = {
+    val normalized = normalizeObjectStorageScheme(path)
+    if (normalized != null && normalized.startsWith("oss://")) {
+      configureHadoopOssForPath(spark, normalized, config, isSource)
+    } else {
+      configureHadoopS3ForPath(spark, normalized, config, isSource)
+    }
+  }
+
+  private[backfill] def configureHadoopOssForPath(
+      spark: SparkSession,
+      path: String,
+      config: BackfillConfig,
+      isSource: Boolean
+  ): Unit = {
+    if (path == null || !path.startsWith("oss://")) return
+    val withoutScheme = path.stripPrefix("oss://")
+    val slash = withoutScheme.indexOf('/')
+    val bucket =
+      if (slash < 0) withoutScheme else withoutScheme.substring(0, slash)
+    if (bucket.isEmpty) return
+
+    val endpoint =
+      if (isSource) config.sourceS3Endpoint.getOrElse(config.s3Endpoint)
+      else config.s3Endpoint
+    val accessKey =
+      if (isSource) config.sourceS3AccessKey.getOrElse(config.s3AccessKey)
+      else config.s3AccessKey
+    val secretKey =
+      if (isSource) config.sourceS3SecretKey.getOrElse(config.s3SecretKey)
+      else config.s3SecretKey
+    val useSSL =
+      if (isSource) config.sourceS3UseSSL.getOrElse(config.s3UseSSL)
+      else config.s3UseSSL
+    val useIam =
+      if (isSource) config.sourceS3UseIam.getOrElse(config.s3UseIam)
+      else config.s3UseIam
+    val hadoopConf = spark.sparkContext.hadoopConfiguration
+    hadoopConf.set(
+      "fs.oss.impl",
+      "org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem"
+    )
+    if (endpoint != null && endpoint.nonEmpty)
+      hadoopConf.set("fs.oss.endpoint", endpoint)
+    hadoopConf.set("fs.oss.connection.secure.enabled", useSSL.toString)
+    if (useIam) {
+      val provider = Option(
+        hadoopConf.getTrimmed(BackfillConfig.HadoopOssCredentialsProvider)
+      ).filter(_.nonEmpty)
+      if (provider.isEmpty) {
+        throw new IllegalArgumentException(
+          s"${BackfillConfig.HadoopOssCredentialsProvider} must be configured for OSS IAM access"
+        )
+      }
+      hadoopConf.unset("fs.oss.accessKeyId")
+      hadoopConf.unset("fs.oss.accessKeySecret")
+    } else {
+      hadoopConf.set("fs.oss.accessKeyId", accessKey)
+      hadoopConf.set("fs.oss.accessKeySecret", secretKey)
+      hadoopConf.set(
+        BackfillConfig.HadoopOssCredentialsProvider,
+        "org.apache.hadoop.fs.aliyun.oss.AliyunCredentialsProvider"
+      )
+    }
   }
 
   /** Configure Hadoop S3A credentials for the bucket referenced by `path`.
@@ -2101,12 +2189,14 @@ object MilvusBackfill {
     try {
       // Check if it's an S3 path
       if (
-        snapshotPath.startsWith("s3://") || snapshotPath.startsWith("s3a://")
+        snapshotPath.startsWith("s3://") || snapshotPath.startsWith(
+          "s3a://"
+        ) || snapshotPath.startsWith("oss://")
       ) {
 
         // Construct full S3 path (ensure s3a:// scheme for Hadoop)
         val s3Path = if (snapshotPath.startsWith("s3://")) {
-          normalizeS3Scheme(snapshotPath)
+          normalizeObjectStorageScheme(snapshotPath)
         } else {
           snapshotPath
         }
@@ -2114,7 +2204,7 @@ object MilvusBackfill {
         // Configure S3 settings on Spark's Hadoop Configuration (per-bucket
         // so that snapshot bucket and backfill source bucket can use
         // different credentials in the same Spark session).
-        configureHadoopS3ForPath(spark, s3Path, config, isSource = false)
+        configureHadoopStorageForPath(spark, s3Path, config, isSource = false)
 
         // Use Spark's DataFrame API to read the file (avoids Hadoop version issues)
         val df = spark.read.text(s3Path)

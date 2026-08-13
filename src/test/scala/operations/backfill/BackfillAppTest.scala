@@ -494,6 +494,58 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     MilvusBackfill.normalizeS3Scheme(null) shouldBe null
   }
 
+  test("normalizeObjectStorageScheme preserves OSS paths") {
+    MilvusBackfill.normalizeObjectStorageScheme(
+      "oss://bucket/files/snapshot.json"
+    ) shouldBe "oss://bucket/files/snapshot.json"
+  }
+
+  test("storagePath selects OSS for Alibaba") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
+      s3BucketName = "managed-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true
+    )
+    MilvusBackfill.storagePath(
+      cfg,
+      "files"
+    ) shouldBe "oss://managed-bucket/files"
+  }
+
+  test("configureHadoopOssForPath preserves managed IAM provider") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
+      s3BucketName = "managed-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true
+    )
+    val hc = spark.sparkContext.hadoopConfiguration
+    val provider = BackfillConfig.HadoopOssAssumedRoleProvider
+    hc.set(BackfillConfig.HadoopOssCredentialsProvider, provider)
+    try {
+      MilvusBackfill.configureHadoopOssForPath(
+        spark,
+        "oss://managed-bucket/files/snapshot.json",
+        cfg,
+        isSource = false
+      )
+      hc.get(
+        "fs.oss.impl"
+      ) shouldBe "org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem"
+      hc.get("fs.oss.endpoint") shouldBe "oss-cn-hangzhou-internal.aliyuncs.com"
+      hc.get(BackfillConfig.HadoopOssCredentialsProvider) shouldBe provider
+      hc.get("fs.oss.accessKeyId") shouldBe null
+      hc.get("fs.oss.accessKeySecret") shouldBe null
+    } finally {
+      hc.unset(BackfillConfig.HadoopOssCredentialsProvider)
+    }
+  }
+
   // ============ parseArgs whitelist ============
 
   test("parseArgs rejects unknown flags (typo guard)") {

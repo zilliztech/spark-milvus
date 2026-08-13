@@ -52,12 +52,13 @@ object V2SegmentLoader extends Logging {
       bucket: String,
       hadoopConf: Configuration,
       manifestSchemaVersion: Int = 1,
-      applyDeletes: Boolean = true
+      applyDeletes: Boolean = true,
+      storageScheme: String = "s3a"
   ): Either[Throwable, Seq[V2SegmentInfo]] = {
     try {
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
       manifestPaths.foreach { rawPath =>
-        val avroPath = resolvePath(rawPath, bucket)
+        val avroPath = resolvePath(rawPath, bucket, storageScheme)
         val avroBytes = readAllBytes(hadoopConf, avroPath)
         val entry =
           MilvusSegmentManifestReader
@@ -73,7 +74,8 @@ object V2SegmentLoader extends Logging {
           entry,
           bucket,
           hadoopConf,
-          applyDeletes
+          applyDeletes,
+          storageScheme
         ) match {
           case Right(Some(seg)) => out += seg
           case Right(None)      => // skipped (storage version != 2)
@@ -101,7 +103,8 @@ object V2SegmentLoader extends Logging {
       entry: AvroManifestEntry,
       bucket: String,
       hadoopConf: Configuration,
-      applyDeletes: Boolean = true
+      applyDeletes: Boolean = true,
+      storageScheme: String = "s3a"
   ): Either[Throwable, Option[V2SegmentInfo]] = {
     val isL0 = entry.segmentLevel == 1L
     val hasDeltaLogs = entry.deltaLogFiles.exists(_.binlogs.nonEmpty)
@@ -170,7 +173,8 @@ object V2SegmentLoader extends Logging {
                   "emit an empty V2ColumnGroup from a partial manifest"
               )
             }
-            val samplePath = resolvePath(afb.binlogs.head.logPath, bucket)
+            val samplePath =
+              resolvePath(afb.binlogs.head.logPath, bucket, storageScheme)
             MilvusParquetFooterReader
               .readFieldIdsFromSchema(samplePath, hadoopConf) match {
               case Right(ids) => ids
@@ -203,13 +207,19 @@ object V2SegmentLoader extends Logging {
     }
   }
 
-  /** Prefix `bucket` when `path` has no scheme; pass through s3a:// / s3://. */
-  def resolvePath(path: String, bucket: String): String = {
+  /** Prefix `bucket` when `path` has no scheme; preserve explicit schemes. */
+  def resolvePath(
+      path: String,
+      bucket: String,
+      storageScheme: String = "s3a"
+  ): String = {
     if (path == null) path
-    else if (path.startsWith("s3a://")) path
-    else if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
-    else if (bucket != null && bucket.nonEmpty)
-      s"s3a://$bucket/${path.stripPrefix("/")}"
+    else if (path.startsWith("s3a://") || path.startsWith("oss://")) path
+    else if (path.startsWith("s3://")) {
+      val scheme = storageScheme.stripSuffix("://")
+      s"$scheme://" + path.stripPrefix("s3://")
+    } else if (bucket != null && bucket.nonEmpty)
+      s"${storageScheme.stripSuffix("://")}://$bucket/${path.stripPrefix("/")}"
     else path
   }
 

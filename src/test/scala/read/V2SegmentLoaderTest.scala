@@ -42,6 +42,19 @@ class V2SegmentLoaderTest
     with Matchers
     with BeforeAndAfterEach {
 
+  test("resolvePath uses OSS for Alibaba relative and legacy S3 paths") {
+    V2SegmentLoader.resolvePath(
+      "files/manifest.avro",
+      "managed-bucket",
+      "oss"
+    ) shouldBe "oss://managed-bucket/files/manifest.avro"
+    V2SegmentLoader.resolvePath(
+      "s3://managed-bucket/files/manifest.avro",
+      "managed-bucket",
+      "oss"
+    ) shouldBe "oss://managed-bucket/files/manifest.avro"
+  }
+
   override def beforeEach(): Unit = {
     super.beforeEach()
     CloseTrackingV2FileSystem.reset()
