@@ -1,10 +1,16 @@
 package com.zilliz.spark.connector.read
 
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path => NPath}
+import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicInteger
+import scala.jdk.CollectionConverters._
 
+import org.apache.avro.generic.{GenericData, GenericDatumWriter, GenericRecord}
+import org.apache.avro.io.EncoderFactory
+import org.apache.avro.Schema
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{
   FSDataInputStream,
@@ -70,6 +76,93 @@ class V2SegmentLoaderTest
     CloseTrackingV2FileSystem.reset()
   }
 
+  private lazy val manifestSchema: Schema = {
+    val in = getClass.getResourceAsStream("/milvus-segment-manifest-v1.avsc")
+    val full =
+      try new Schema.Parser().parse(in)
+      finally in.close()
+    val lastFieldIndex = full.getFields.asScala.indexWhere(
+      _.name == "deltalog_files"
+    )
+    val schema = Schema.createRecord(
+      full.getName,
+      full.getDoc,
+      full.getNamespace,
+      full.isError
+    )
+    schema.setFields(
+      full.getFields.asScala
+        .take(lastFieldIndex + 1)
+        .map { f =>
+          new Schema.Field(f.name, f.schema, f.doc, f.defaultVal)
+        }
+        .asJava
+    )
+    schema
+  }
+
+  private def encodeManifest(
+      binlogPath: String,
+      deltaLogPath: String
+  ): Array[Byte] = {
+    val record = new GenericData.Record(manifestSchema)
+    record.put("segment_id", 1001L)
+    record.put("partition_id", 10L)
+    record.put("segment_level", 2L)
+    record.put("channel_name", "test-channel")
+    record.put("num_of_rows", 1L)
+
+    val positionSchema = manifestSchema.getField("start_position").schema
+    def position(): GenericRecord = {
+      val value = new GenericData.Record(positionSchema)
+      value.put("channel_name", "test-channel")
+      value.put("msg_id", ByteBuffer.wrap(Array.emptyByteArray))
+      value.put("msg_group", "test-group")
+      value.put("timestamp", 1L)
+      value
+    }
+    record.put("start_position", position())
+    record.put("dml_position", position())
+    record.put("storage_version", 2L)
+    record.put("is_sorted", false)
+
+    val fieldBinlogSchema =
+      manifestSchema.getField("binlog_files").schema.getElementType
+    val binlogSchema =
+      fieldBinlogSchema.getField("binlogs").schema.getElementType
+
+    def binlog(path: String, logId: Long): GenericRecord = {
+      val value = new GenericData.Record(binlogSchema)
+      value.put("entries_num", 1L)
+      value.put("timestamp_from", 1L)
+      value.put("timestamp_to", 1L)
+      value.put("log_path", path)
+      value.put("log_size", 1L)
+      value.put("log_id", logId)
+      value.put("memory_size", 1L)
+      value
+    }
+
+    def fieldBinlog(path: String, logId: Long): GenericRecord = {
+      val value = new GenericData.Record(fieldBinlogSchema)
+      value.put("field_id", 100L)
+      value.put("binlogs", Seq(binlog(path, logId)).asJava)
+      value
+    }
+
+    record.put("binlog_files", Seq(fieldBinlog(binlogPath, 1L)).asJava)
+    record.put("deltalog_files", Seq(fieldBinlog(deltaLogPath, 2L)).asJava)
+
+    val out = new ByteArrayOutputStream()
+    val encoder = EncoderFactory.get().directBinaryEncoder(out, null)
+    new GenericDatumWriter[GenericRecord](manifestSchema).write(record, encoder)
+    encoder.flush()
+    out.toByteArray
+  }
+
+  private def fileUriAsS3a(path: NPath): String =
+    "s3a://" + path.toUri.toString.stripPrefix("file://")
+
   /** Write a single-column parquet at `path` carrying the given field id, so
     * `readFieldIdsFromSchema` will return `Seq(fieldId)`.
     */
@@ -131,6 +224,34 @@ class V2SegmentLoaderTest
     val p = Files.createTempFile(prefix, ".parquet")
     Files.delete(p) // ExampleParquetWriter refuses to overwrite existing files
     p
+  }
+
+  test("loadV2Segments normalizes returned S3A binlog and delta paths") {
+    val parquet = mkTempParquet("v2loader-resolved-path-")
+    val manifest = Files.createTempFile("v2loader-manifest-", ".avro")
+    val deltaLog = manifest.resolveSibling("delete-log.bin")
+    try {
+      writeSingleFieldParquet(parquet, "pk", fieldId = 100)
+      Files.write(
+        manifest,
+        encodeManifest(fileUriAsS3a(parquet), fileUriAsS3a(deltaLog))
+      )
+
+      val result = V2SegmentLoader.loadV2Segments(
+        Seq(fileUriAsS3a(manifest)),
+        bucket = "",
+        hadoopConf = new Configuration(),
+        storageScheme = "file"
+      )
+
+      result shouldBe a[Right[_, _]]
+      val segment = result.toOption.get.head
+      segment.columnGroups.head.filePaths shouldBe Seq(parquet.toUri.toString)
+      segment.deltaLogs.map(_.logPath) shouldBe Seq(deltaLog.toUri.toString)
+    } finally {
+      Files.deleteIfExists(manifest)
+      Files.deleteIfExists(parquet)
+    }
   }
 
   private def entry(

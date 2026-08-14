@@ -296,11 +296,14 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
-      // Cache so the upcoming join-key aggregation doesn't force
-      // a second parquet scan when performJoin consumes the DF later. The
-      // count also eagerly validates every normalized vector row.
-      backfillDF.cache()
-      cachedBackfillDF = backfillDF
+      // Non-OSS sources retain their recoverable external-storage lineage, so
+      // cache the transformed DataFrame to avoid a second scan. OSS sources
+      // instead retain the single local-checkpoint RDD until every consumer
+      // completes; caching this derived DataFrame would hold two full copies.
+      if (sourceCheckpointRDD.isEmpty) {
+        backfillDF.cache()
+        cachedBackfillDF = backfillDF
+      }
 
       val joinKeyStats = validateJoinKeyCardinality(
         backfillDF,
@@ -312,8 +315,6 @@ object MilvusBackfill {
         case Right(stats) => stats
       }
       val backfillRowCount = joinKeyStats.rowCount
-      sourceCheckpointRDD.foreach(_.unpersist())
-      sourceCheckpointRDD = None
       logger.info(
         s"Backfill data file rows: $backfillRowCount " +
           s"(distinct join keys: ${joinKeyStats.distinctValidKeyCount})"
@@ -2059,6 +2060,7 @@ object MilvusBackfill {
     "fs.oss.connection.secure.enabled",
     "fs.oss.accessKeyId",
     "fs.oss.accessKeySecret",
+    BackfillConfig.HadoopOssSecurityToken,
     BackfillConfig.HadoopOssCredentialsProvider
   )
 
@@ -2164,6 +2166,7 @@ object MilvusBackfill {
     } else {
       hadoopConf.set("fs.oss.accessKeyId", accessKey)
       hadoopConf.set("fs.oss.accessKeySecret", secretKey)
+      hadoopConf.unset(BackfillConfig.HadoopOssSecurityToken)
       // hadoop-aliyun constructs AliyunCredentialsProvider itself from the
       // accessKeyId/accessKeySecret properties. The class has no (URI,
       // Configuration) or no-arg constructor, so configuring it explicitly

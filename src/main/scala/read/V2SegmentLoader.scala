@@ -108,37 +108,37 @@ object V2SegmentLoader extends Logging {
       applyDeletes: Boolean = true,
       storageScheme: String = "s3a"
   ): Either[Throwable, Option[V2SegmentInfo]] = {
-    val isL0 = entry.segmentLevel == 1L
-    val hasDeltaLogs = entry.deltaLogFiles.exists(_.binlogs.nonEmpty)
+    val resolvedEntry = resolveEntryPaths(entry, bucket, storageScheme)
+    val isL0 = resolvedEntry.segmentLevel == 1L
 
-    if (entry.storageVersion != 2L) {
+    if (resolvedEntry.storageVersion != 2L) {
       logInfo(
-        s"skipping segment ${entry.segmentId}: storage_version=${entry.storageVersion} " +
+        s"skipping segment ${resolvedEntry.segmentId}: storage_version=${resolvedEntry.storageVersion} " +
           s"(!= 2); V2SegmentLoader only handles StorageV2"
       )
       Right(None)
     } else if (isL0 && !applyDeletes) {
       logInfo(
-        s"skipping StorageV2 L0 delete-only segment ${entry.segmentId} because applyDeletes=false"
+        s"skipping StorageV2 L0 delete-only segment ${resolvedEntry.segmentId} because applyDeletes=false"
       )
       Right(None)
     } else if (
-      entry.binlogFiles.isEmpty ||
-      entry.binlogFiles.forall(_.binlogs.isEmpty)
+      resolvedEntry.binlogFiles.isEmpty ||
+      resolvedEntry.binlogFiles.forall(_.binlogs.isEmpty)
     ) {
       logWarning(
-        s"segment ${entry.segmentId} has no binlog files with entries; " +
+        s"segment ${resolvedEntry.segmentId} has no binlog files with entries; " +
           s"emitting as empty column-group list"
       )
       Right(
         Some(
           V2SegmentInfo(
-            segmentId = entry.segmentId,
-            partitionId = entry.partitionId,
-            numOfRows = entry.numOfRows,
-            storageVersion = entry.storageVersion,
+            segmentId = resolvedEntry.segmentId,
+            partitionId = resolvedEntry.partitionId,
+            numOfRows = resolvedEntry.numOfRows,
+            storageVersion = resolvedEntry.storageVersion,
             columnGroups = Seq.empty,
-            deltaLogs = entry.deltaLogFiles
+            deltaLogs = resolvedEntry.deltaLogFiles
               .flatMap(_.binlogs)
               .sortBy(_.logId)
               .map(log =>
@@ -161,7 +161,7 @@ object V2SegmentLoader extends Logging {
         // from multiple write sessions, each advertising only its own
         // session's groups — see MilvusParquetFooterReader.readFieldIdsFromSchema.
         val groupFieldIdListPerEntry: Seq[Seq[Long]] =
-          entry.binlogFiles.map { afb =>
+          resolvedEntry.binlogFiles.map { afb =>
             if (afb.binlogs.isEmpty) {
               // The top-level guard above only rejects the all-empty case.
               // A partial-empty entry alongside populated ones points at a
@@ -169,35 +169,34 @@ object V2SegmentLoader extends Logging {
               // from, and the downstream V2ColumnGroup would be a silent
               // empty shell). Fail loudly with slot/segment context.
               throw new IllegalStateException(
-                s"segment ${entry.segmentId} has an empty binlog_files entry " +
+                s"segment ${resolvedEntry.segmentId} has an empty binlog_files entry " +
                   s"(slot ${afb.slotFieldId}) while other entries are populated; " +
                   "cannot recover field ids for this column group — refusing to " +
                   "emit an empty V2ColumnGroup from a partial manifest"
               )
             }
-            val samplePath =
-              resolvePath(afb.binlogs.head.logPath, bucket, storageScheme)
+            val samplePath = afb.binlogs.head.logPath
             MilvusParquetFooterReader
               .readFieldIdsFromSchema(samplePath, hadoopConf) match {
               case Right(ids) => ids
               case Left(err) =>
                 throw new RuntimeException(
                   s"failed to read field ids from parquet $samplePath " +
-                    s"(segment ${entry.segmentId}, slot ${afb.slotFieldId}): " +
+                    s"(segment ${resolvedEntry.segmentId}, slot ${afb.slotFieldId}): " +
                     err.getMessage,
                   err
                 )
             }
           }
         MilvusSegmentManifestReader.toV2SegmentInfo(
-          entry,
+          resolvedEntry,
           groupFieldIdListPerEntry
         ) match {
           case Right(seg) => Right(Some(seg))
           case Left(err) =>
             Left(
               new RuntimeException(
-                s"failed to build V2SegmentInfo for segment ${entry.segmentId}: " +
+                s"failed to build V2SegmentInfo for segment ${resolvedEntry.segmentId}: " +
                   err.getMessage,
                 err
               )
@@ -207,6 +206,28 @@ object V2SegmentLoader extends Logging {
         case NonFatal(e) => Left(e)
       }
     }
+  }
+
+  private def resolveEntryPaths(
+      entry: AvroManifestEntry,
+      bucket: String,
+      storageScheme: String
+  ): AvroManifestEntry = {
+    def resolveFieldBinlogs(
+        fieldBinlogs: Seq[AvroFieldBinlogEntry]
+    ): Seq[AvroFieldBinlogEntry] =
+      fieldBinlogs.map(fieldBinlog =>
+        fieldBinlog.copy(binlogs =
+          fieldBinlog.binlogs.map(log =>
+            log.copy(logPath = resolvePath(log.logPath, bucket, storageScheme))
+          )
+        )
+      )
+
+    entry.copy(
+      binlogFiles = resolveFieldBinlogs(entry.binlogFiles),
+      deltaLogFiles = resolveFieldBinlogs(entry.deltaLogFiles)
+    )
   }
 
   /** Prefix `bucket` when `path` has no scheme; rewrite S3 aliases to the

@@ -545,6 +545,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val hc = spark.sparkContext.hadoopConfiguration
     val provider = BackfillConfig.HadoopOssAssumedRoleProvider
     hc.set(BackfillConfig.HadoopOssCredentialsProvider, provider)
+    hc.set(BackfillConfig.HadoopOssSecurityToken, "managed-token")
     try {
       MilvusBackfill.configureHadoopOssForPath(
         spark,
@@ -557,11 +558,13 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       ) shouldBe "org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem"
       hc.get("fs.oss.endpoint") shouldBe "oss-cn-hangzhou-internal.aliyuncs.com"
       hc.get(BackfillConfig.HadoopOssCredentialsProvider) shouldBe provider
+      hc.get(BackfillConfig.HadoopOssSecurityToken) shouldBe "managed-token"
       hc.get("fs.oss.accessKeyId") shouldBe null
       hc.get("fs.oss.accessKeySecret") shouldBe null
     } finally {
       Seq(
         BackfillConfig.HadoopOssCredentialsProvider,
+        BackfillConfig.HadoopOssSecurityToken,
         "fs.oss.impl",
         "fs.oss.endpoint",
         "fs.oss.connection.secure.enabled",
@@ -587,6 +590,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       BackfillConfig.HadoopOssCredentialsProvider,
       BackfillConfig.HadoopOssAssumedRoleProvider
     )
+    hc.set(BackfillConfig.HadoopOssSecurityToken, "stale-target-token")
     try {
       MilvusBackfill.configureHadoopOssForPath(
         spark,
@@ -597,6 +601,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       hc.get("fs.oss.accessKeyId") shouldBe "static-ak"
       hc.get("fs.oss.accessKeySecret") shouldBe "static-sk"
       hc.get(BackfillConfig.HadoopOssCredentialsProvider) shouldBe null
+      hc.get(BackfillConfig.HadoopOssSecurityToken) shouldBe null
       hc.get("fs.oss.connection.secure.enabled") shouldBe null
       val uri = new java.net.URI("oss://static-bucket/files/data.parquet")
       val provider = org.apache.hadoop.fs.aliyun.oss.AliyunOSSUtils
@@ -607,6 +612,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     } finally {
       Seq(
         BackfillConfig.HadoopOssCredentialsProvider,
+        BackfillConfig.HadoopOssSecurityToken,
         "fs.oss.impl",
         "fs.oss.endpoint",
         "fs.oss.connection.secure.enabled",
@@ -631,6 +637,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val hc = spark.sparkContext.hadoopConfiguration
     val provider = BackfillConfig.HadoopOssAssumedRoleProvider
     hc.set(BackfillConfig.HadoopOssCredentialsProvider, provider)
+    hc.set(BackfillConfig.HadoopOssSecurityToken, "managed-token")
     hc.set("fs.oss.endpoint", "managed-endpoint")
     try {
       MilvusBackfill.withScopedHadoopStorage(
@@ -642,8 +649,10 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         hc.get("fs.oss.accessKeyId") shouldBe "source-ak"
         hc.get("fs.oss.accessKeySecret") shouldBe "source-sk"
         hc.get(BackfillConfig.HadoopOssCredentialsProvider) shouldBe null
+        hc.get(BackfillConfig.HadoopOssSecurityToken) shouldBe null
       }
       hc.get(BackfillConfig.HadoopOssCredentialsProvider) shouldBe provider
+      hc.get(BackfillConfig.HadoopOssSecurityToken) shouldBe "managed-token"
       hc.get("fs.oss.endpoint") shouldBe "managed-endpoint"
       hc.get("fs.oss.accessKeyId") shouldBe null
       hc.get("fs.oss.accessKeySecret") shouldBe null
@@ -652,6 +661,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     } finally {
       Seq(
         BackfillConfig.HadoopOssCredentialsProvider,
+        BackfillConfig.HadoopOssSecurityToken,
         "fs.oss.impl",
         "fs.oss.impl.disable.cache",
         "fs.oss.endpoint",
