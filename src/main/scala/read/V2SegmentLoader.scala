@@ -29,7 +29,8 @@ import org.apache.spark.internal.Logging
   * bucket-relative (`files/snapshots/...`). When `bucket` is non-empty we
   * prefix `{storageScheme}://{bucket}/`. The default remains `s3a` for the
   * connector DataSource and tools; Alibaba callers must explicitly pass
-  * `storageScheme = "oss"` with a matching Hadoop OSS configuration.
+  * `storageScheme = "oss"` with a matching Hadoop OSS configuration. Explicit
+  * `s3://` and `s3a://` paths are aliases rewritten to the requested scheme.
   */
 object V2SegmentLoader extends Logging {
 
@@ -208,23 +209,25 @@ object V2SegmentLoader extends Logging {
     }
   }
 
-  /** Prefix `bucket` when `path` has no scheme; preserve explicit schemes.
-    * `storageScheme` is intentionally explicit for non-S3 providers because the
-    * generic connector read path does not yet derive a provider from its public
-    * options.
+  /** Prefix `bucket` when `path` has no scheme; rewrite S3 aliases to the
+    * requested scheme and preserve other explicit schemes. `storageScheme` is
+    * intentionally explicit for non-S3 providers because the generic connector
+    * read path does not yet derive a provider from its public options.
     */
   def resolvePath(
       path: String,
       bucket: String,
       storageScheme: String = "s3a"
   ): String = {
+    val scheme = storageScheme.stripSuffix("://")
     if (path == null) path
-    else if (path.startsWith("s3a://") || path.startsWith("oss://")) path
-    else if (path.startsWith("s3://")) {
-      val scheme = storageScheme.stripSuffix("://")
+    else if (path.startsWith("s3a://"))
+      s"$scheme://" + path.stripPrefix("s3a://")
+    else if (path.startsWith("s3://"))
       s"$scheme://" + path.stripPrefix("s3://")
-    } else if (bucket != null && bucket.nonEmpty)
-      s"${storageScheme.stripSuffix("://")}://$bucket/${path.stripPrefix("/")}"
+    else if (path.contains("://")) path
+    else if (bucket != null && bucket.nonEmpty)
+      s"$scheme://$bucket/${path.stripPrefix("/")}"
     else path
   }
 

@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector.operations.backfill
 
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.storage.StorageLevel
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
@@ -659,6 +660,27 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         "fs.oss.accessKeySecret"
       ).foreach(hc.unset)
     }
+  }
+
+  test("OSS source checkpoint exposes and releases its persisted RDD") {
+    val session = spark
+    import session.implicits._
+
+    val source = MilvusBackfill.localCheckpointBackfillData(
+      spark,
+      Seq((1L, "one"), (2L, "two")).toDF("id", "value")
+    )
+    val checkpointRDD = source.checkpointRDD.get
+    try {
+      source.dataFrame.collect().map(_.getLong(0)).toSeq shouldBe Seq(1L, 2L)
+      checkpointRDD.getStorageLevel should not be StorageLevel.NONE
+      spark.sparkContext.getPersistentRDDs.keySet should contain(
+        checkpointRDD.id
+      )
+    } finally {
+      checkpointRDD.unpersist(blocking = true)
+    }
+    spark.sparkContext.getPersistentRDDs.keySet should not contain checkpointRDD.id
   }
 
   // ============ parseArgs whitelist ============

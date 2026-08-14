@@ -4,7 +4,8 @@ import scala.collection.mutable
 import scala.collection.JavaConverters._
 
 import org.apache.hadoop.fs.Path
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.functions._
@@ -36,6 +37,11 @@ import com.zilliz.spark.connector.write.{
 object MilvusBackfill {
 
   private val logger = LoggerFactory.getLogger(getClass)
+
+  private[backfill] final case class BackfillSource(
+      dataFrame: DataFrame,
+      checkpointRDD: Option[RDD[Row]]
+  )
 
   /** Marker column added to the backfill side before the left join so we can
     * count how many source rows found a join-key match (non-null marker →
@@ -104,9 +110,11 @@ object MilvusBackfill {
       case Right(_) => // Continue
     }
 
-    // Tracked so we can unpersist in the outer finally, even on mid-flight
-    // failure (the cache is taken right after column mapping, below).
-    var cachedSourceDF: DataFrame = null
+    // OSS source reads use a local-checkpointed RDD to sever the external
+    // storage lineage while scoped credentials are installed. Keep the actual
+    // persisted RDD so its blocks can be released after the transformed
+    // backfill DataFrame is materialized, including on failure.
+    var sourceCheckpointRDD: Option[RDD[Row]] = None
     var cachedBackfillDF: DataFrame = null
 
     logger.info(s"Backfill mode: ${config.mode}")
@@ -191,9 +199,9 @@ object MilvusBackfill {
       val rawBackfillDF =
         readBackfillData(spark, backfillDataPath, config) match {
           case Left(error) => return Left(error)
-          case Right(df) =>
-            cachedSourceDF = df
-            df
+          case Right(source) =>
+            sourceCheckpointRDD = source.checkpointRDD
+            source.dataFrame
         }
 
       // Reproject via the existing PK column-mapping contract, then separate
@@ -304,8 +312,8 @@ object MilvusBackfill {
         case Right(stats) => stats
       }
       val backfillRowCount = joinKeyStats.rowCount
-      cachedSourceDF.unpersist()
-      cachedSourceDF = null
+      sourceCheckpointRDD.foreach(_.unpersist())
+      sourceCheckpointRDD = None
       logger.info(
         s"Backfill data file rows: $backfillRowCount " +
           s"(distinct join keys: ${joinKeyStats.distinctValidKeyCount})"
@@ -455,12 +463,12 @@ object MilvusBackfill {
             logger.warn("Failed to unpersist backfill DataFrame", e)
         }
       }
-      if (cachedSourceDF != null) {
+      sourceCheckpointRDD.foreach { checkpointRDD =>
         try {
-          cachedSourceDF.unpersist()
+          checkpointRDD.unpersist()
         } catch {
           case e: Exception =>
-            logger.warn("Failed to unpersist source backfill DataFrame", e)
+            logger.warn("Failed to unpersist source checkpoint RDD", e)
         }
       }
     }
@@ -472,15 +480,16 @@ object MilvusBackfill {
       spark: SparkSession,
       rawPath: String,
       config: BackfillConfig
-  ): Either[BackfillError, DataFrame] = {
+  ): Either[BackfillError, BackfillSource] = {
     // Hadoop 3.4.1 has separate s3:// and s3a:// FileSystem implementations
     // and per-bucket fs.s3a.bucket.<b>.* config is only honored by
     // S3AFileSystem. Force the s3a scheme so the credentials we just wrote
     // actually take effect.
     val path = normalizeObjectStorageScheme(rawPath, config)
     try {
-      // Ensure Hadoop S3A is configured for the source bucket (may differ
-      // from the Milvus storage bucket) before reading the parquet.
+      // Configure the source bucket before reading the parquet. OSS must be
+      // fully materialized while this temporary credential scope is active;
+      // S3A uses persistent per-bucket configuration and does not need it.
       Right(withScopedHadoopStorage(spark, path, config, isSource = true) {
         // Materialize while source-bucket credentials are installed. Spark
         // evaluates DataFrame reads lazily, so returning an unmaterialized DF
@@ -491,11 +500,11 @@ object MilvusBackfill {
             "Backfill parquet is empty (no columns)"
           )
         }
-        // A normal cache keeps the source lineage and may re-read OSS after
-        // eviction, when the scoped source credentials have already been
-        // restored. Eager local checkpointing materializes the input and
-        // truncates that external-storage lineage before leaving this scope.
-        df.localCheckpoint(eager = true)
+        if (path.startsWith("oss://")) {
+          localCheckpointBackfillData(spark, df)
+        } else {
+          BackfillSource(df, None)
+        }
       })
     } catch {
       case e: Exception =>
@@ -507,6 +516,31 @@ object MilvusBackfill {
             cause = Some(e)
           )
         )
+    }
+  }
+
+  private[backfill] def localCheckpointBackfillData(
+      spark: SparkSession,
+      dataFrame: DataFrame
+  ): BackfillSource = {
+    // Copy external Rows before checkpointing because Spark's physical plans
+    // may reuse mutable row objects. The checkpoint severs the OSS lineage,
+    // and retaining this exact RDD gives run() a reliable cleanup handle.
+    val checkpointRDD = dataFrame.rdd.map(_.copy())
+    checkpointRDD.localCheckpoint()
+    try {
+      checkpointRDD.count()
+      BackfillSource(
+        spark.createDataFrame(checkpointRDD, dataFrame.schema),
+        Some(checkpointRDD)
+      )
+    } catch {
+      case e: Exception =>
+        try checkpointRDD.unpersist()
+        catch {
+          case cleanupError: Exception => e.addSuppressed(cleanupError)
+        }
+        throw e
     }
   }
 

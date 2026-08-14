@@ -42,7 +42,7 @@ class V2SegmentLoaderTest
     with Matchers
     with BeforeAndAfterEach {
 
-  test("resolvePath uses OSS for Alibaba relative and legacy S3 paths") {
+  test("resolvePath uses OSS for Alibaba manifest and nested binlog paths") {
     V2SegmentLoader.resolvePath(
       "files/manifest.avro",
       "managed-bucket",
@@ -53,6 +53,16 @@ class V2SegmentLoaderTest
       "managed-bucket",
       "oss"
     ) shouldBe "oss://managed-bucket/files/manifest.avro"
+    V2SegmentLoader.resolvePath(
+      "s3a://managed-bucket/files/snapshots/manifest.avro",
+      "managed-bucket",
+      "oss"
+    ) shouldBe "oss://managed-bucket/files/snapshots/manifest.avro"
+    V2SegmentLoader.resolvePath(
+      "s3a://managed-bucket/files/insert_log/1/2/3/4.parquet",
+      "managed-bucket",
+      "oss"
+    ) shouldBe "oss://managed-bucket/files/insert_log/1/2/3/4.parquet"
   }
 
   override def beforeEach(): Unit = {
