@@ -109,7 +109,7 @@ class ColumnMappingTest
     }
   }
 
-  test("applyColumnMapping: explicit mapping renames, drops unlisted columns") {
+  test("applyColumnMapping: explicit mapping preserves unlisted columns") {
     val df = buildDf(
       Seq("pk", "vec", "extra"),
       Seq(Seq(1, "v1", "drop-me"), Seq(2, "v2", "drop-me-2"))
@@ -118,7 +118,11 @@ class ColumnMappingTest
     val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
     result.isRight shouldBe true
     val out = result.toOption.get
-    out.columns.toSeq should contain theSameElementsAs Seq("id", "embedding")
+    out.columns.toSeq should contain theSameElementsAs Seq(
+      "id",
+      "embedding",
+      "extra"
+    )
     val collected =
       out.orderBy("id").collect().map(r => (r.getInt(0), r.getString(1))).toSeq
     collected shouldBe Seq((1, "v1"), (2, "v2"))
@@ -164,12 +168,29 @@ class ColumnMappingTest
     out.columns.toSeq should contain theSameElementsAs Seq("id", "vec")
   }
 
-  test("applyColumnMapping: legacy path errors when 'pk' column missing") {
+  test("applyColumnMapping: same-name columns need no mapping") {
     val df = buildDf(Seq("id", "vec"), Seq(Seq(1, "v1")))
     val result = MilvusBackfill.applyColumnMapping(df, "id", None)
-    result.isLeft shouldBe true
-    result.left.toOption.get shouldBe a[SchemaValidationError]
-    result.left.toOption.get.message should include("'pk' column")
+    result.isRight shouldBe true
+    result.toOption.get.columns.toSeq should contain theSameElementsAs Seq(
+      "id",
+      "vec"
+    )
+  }
+
+  test("applyColumnMapping: partial mapping preserves same-name columns") {
+    val df = buildDf(
+      Seq("id", "source_label", "score"),
+      Seq(Seq(1, "label-1", "0.9"))
+    )
+    val mapping = Some(Map("source_label" -> "label"))
+    val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
+    result.isRight shouldBe true
+    result.toOption.get.columns.toSeq should contain theSameElementsAs Seq(
+      "id",
+      "label",
+      "score"
+    )
   }
 
   test(
@@ -205,6 +226,17 @@ class ColumnMappingTest
     val err = result.left.toOption.get
     err shouldBe a[SchemaValidationError]
     err.message should include("duplicate targets")
+  }
+
+  test("applyColumnMapping: override cannot collide with a same-name column") {
+    val df = buildDf(
+      Seq("id", "source_label", "label"),
+      Seq(Seq(1, "source", "existing"))
+    )
+    val mapping = Some(Map("source_label" -> "label"))
+    val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
+    result.isLeft shouldBe true
+    result.left.toOption.get.message should include("duplicate targets")
   }
 
   test("applyColumnMapping: explicit mapping missing pkName as target errors") {
@@ -258,9 +290,7 @@ class ColumnMappingTest
       .toSeq shouldBe Seq((1, "v1"), (2, "v2"))
   }
 
-  test(
-    "prepareBackfillData separates explicitly mapped PK from target fields"
-  ) {
+  test("prepareBackfillData applies overrides and keeps same-name fields") {
     val df = buildDf(
       Seq("source_id", "vec", "drop_me"),
       Seq(Seq("1", "v1", "x"))
@@ -274,9 +304,10 @@ class ColumnMappingTest
 
     prepared.dataFrame.columns.toSeq shouldBe Seq(
       ResolvedJoinKey.internalColumn(0),
-      "embedding"
+      "embedding",
+      "drop_me"
     )
-    prepared.targetFieldNames shouldBe Seq("embedding")
+    prepared.targetFieldNames shouldBe Seq("embedding", "drop_me")
   }
 
   test("prepareBackfillData preserves a target named like the default alias") {

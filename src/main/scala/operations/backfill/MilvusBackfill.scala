@@ -495,14 +495,10 @@ object MilvusBackfill {
     }
   }
 
-  /** Project the raw backfill DataFrame through a parquet-column → Milvus-field
-    * mapping so downstream code sees column names that match the Milvus schema
-    * exactly (including the PK, which must be named `pkName`).
-    *
-    * When `userMapping` is None, a legacy implicit mapping is synthesized: the
-    * literal `"pk"` column is renamed to `pkName`, every other column is kept
-    * as-is. This preserves the pre-existing contract (parquet must have a `pk`
-    * column plus one or more field columns).
+  /** Project the raw backfill DataFrame through optional parquet-column →
+    * Milvus-field overrides. Columns omitted from `userMapping` keep their
+    * original names. The legacy literal `"pk"` column is still renamed to
+    * `pkName` when no same-name primary-key column exists.
     */
   private[backfill] def applyColumnMapping(
       df: DataFrame,
@@ -512,35 +508,10 @@ object MilvusBackfill {
     val cols = df.columns.toSeq
     val colSet = cols.toSet
 
-    val mapping: Map[String, String] = userMapping match {
-      case Some(m) => m
-      case None    =>
-        // Legacy: require a literal "pk" column; transparently rename it to pkName.
-        if (!colSet.contains("pk")) {
-          return Left(
-            SchemaValidationError(
-              "Backfill parquet must contain a 'pk' column (or supply --column-mapping to rename the PK column)"
-            )
-          )
-        }
-        // If the parquet already has a column named pkName, the implicit
-        // {pk→pkName} rename would collide with it. Surface a dedicated error
-        // rather than letting the generic duplicate-target check fire and
-        // reference "column mapping" — users in the legacy path never passed
-        // --column-mapping.
-        if (pkName != "pk" && colSet.contains(pkName)) {
-          return Left(
-            SchemaValidationError(
-              s"Backfill parquet contains both a 'pk' column and a column named '$pkName' " +
-                s"(the collection's primary-key field). Remove one, or supply --column-mapping to disambiguate."
-            )
-          )
-        }
-        cols.map(c => if (c == "pk") c -> pkName else c -> c).toMap
-    }
+    val overrides = userMapping.getOrElse(Map.empty)
 
-    // Mapping keys must all exist in the parquet.
-    val missingSrc = mapping.keySet.diff(colSet)
+    // Explicit override keys must all exist in the parquet.
+    val missingSrc = overrides.keySet.diff(colSet)
     if (missingSrc.nonEmpty) {
       return Left(
         SchemaValidationError(
@@ -550,8 +521,28 @@ object MilvusBackfill {
       )
     }
 
-    // Mapping values must be unique; two parquet columns cannot both point at
-    // the same Milvus field.
+    if (
+      pkName != "pk" && colSet.contains("pk") && colSet.contains(pkName) &&
+      !overrides.contains("pk") && !overrides.contains(pkName)
+    ) {
+      return Left(
+        SchemaValidationError(
+          s"Backfill parquet contains both a 'pk' column and a column named '$pkName' " +
+            s"(the collection's primary-key field). Remove one, or supply --column-mapping to disambiguate."
+        )
+      )
+    }
+
+    val identityMapping = cols.map(column => column -> column).toMap
+    val legacyPkMapping =
+      if (
+        !colSet.contains(pkName) && colSet.contains("pk") &&
+        !overrides.contains("pk")
+      ) Map("pk" -> pkName)
+      else Map.empty[String, String]
+    val mapping = identityMapping ++ legacyPkMapping ++ overrides
+
+    // Validate the effective mapping, including implicit same-name columns.
     val dupTargets = mapping.values.groupBy(identity).collect {
       case (k, v) if v.size > 1 => k
     }
@@ -567,7 +558,7 @@ object MilvusBackfill {
     if (!mapping.values.toSet.contains(pkName)) {
       return Left(
         SchemaValidationError(
-          s"column mapping must include the primary key field '$pkName' as a target"
+          s"Backfill parquet must contain the primary key field '$pkName', or columnMapping must map a source column to it"
         )
       )
     }
@@ -577,7 +568,7 @@ object MilvusBackfill {
     if (newFieldTargets.isEmpty) {
       return Left(
         SchemaValidationError(
-          "column mapping must include at least one non-PK field to backfill"
+          "Backfill parquet must contain at least one non-PK field to backfill"
         )
       )
     }
@@ -585,9 +576,8 @@ object MilvusBackfill {
     // Single-pass aliased select. A foldLeft of withColumnRenamed would rename
     // sequentially and corrupt chains like {a→b, b→c} (the second rename would
     // hit the already-renamed column) and swaps like {a→b, b→a}.
-    val orderedKeys = cols.filter(mapping.contains)
     val renamed = df.select(
-      orderedKeys.map(src => df.col(src).as(mapping(src))): _*
+      cols.map(src => df.col(src).as(mapping(src))): _*
     )
     Right(renamed)
   }
