@@ -207,12 +207,9 @@ lazy val root = (project in file("."))
       }
     },
     Compile / resourceDirectories += baseDirectory.value / "src" / "main" / "resources",
-    // 发布 assembly JAR 作为单独的 artifact，带 classifier
-    assembly / artifact := {
-      val art = (assembly / artifact).value
-      art.withClassifier(Some("assembly"))
-    },
-    addArtifact(assembly / artifact, assembly)
+    // Publish the runnable assembly as the primary Maven artifact. Cloud
+    // consumers already resolve this artifact without an assembly classifier.
+    Compile / packageBin := assembly.value
   )
 
 assembly / assemblyShadeRules := Seq(
