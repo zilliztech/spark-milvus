@@ -1,28 +1,25 @@
 import scala.sys.process.Process
-import scala.io.Source
 
 import xerial.sbt.Sonatype._
 
 ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 import Dependencies._
 
-// Load Sonatype Central credentials
-credentials += {
-  val credFile = Path.userHome / ".sbt" / "sonatype_central_credentials"
-  if (credFile.exists) {
-    val lines = Source.fromFile(credFile).getLines().toList
-    val props = lines.map { line =>
-      val parts = line.split("=", 2)
-      if (parts.length == 2) Some(parts(0).trim -> parts(1).trim) else None
-    }.flatten.toMap
+lazy val snapshotRepositoryUrl = sys.env.getOrElse(
+  "MAVEN_SNAPSHOT_REPOSITORY_URL",
+  "https://central.sonatype.com/repository/maven-snapshots/"
+)
 
-    Credentials(
-      "Sonatype Nexus Repository Manager",
-      props.getOrElse("host", "central.sonatype.com"),
-      props.getOrElse("user", ""),
-      props.getOrElse("password", "")
-    )
-  } else {
+lazy val mavenCredentialsFile = file(sys.env.getOrElse(
+  "MAVEN_CREDENTIALS_FILE",
+  (Path.userHome / ".sbt" / "sonatype_central_credentials").getAbsolutePath
+))
+
+// Keep the legacy Sonatype path as a local fallback while CI supplies an
+// explicit credentials file for the selected Maven repository.
+credentials += {
+  if (mavenCredentialsFile.exists) Credentials(mavenCredentialsFile)
+  else {
     Credentials(Path.userHome / ".sbt" / "sonatype.credentials")
   }
 }
@@ -40,9 +37,7 @@ ThisBuild / pomIncludeRepository := { _ => false }
 ThisBuild / publishMavenStyle := true
 
 ThisBuild / publishTo := {
-  val centralSnapshots =
-    "https://central.sonatype.com/repository/maven-snapshots/"
-  if (isSnapshot.value) Some("central-snapshots" at centralSnapshots)
+  if (isSnapshot.value) Some("maven-snapshots" at snapshotRepositoryUrl)
   else localStaging.value
 }
 
@@ -208,12 +203,9 @@ lazy val root = (project in file("."))
       }
     },
     Compile / resourceDirectories += baseDirectory.value / "src" / "main" / "resources",
-    // 发布 assembly JAR 作为单独的 artifact，带 classifier
-    assembly / artifact := {
-      val art = (assembly / artifact).value
-      art.withClassifier(Some("assembly"))
-    },
-    addArtifact(assembly / artifact, assembly)
+    // Publish the runnable assembly as the primary Maven artifact. Cloud
+    // consumers already resolve this artifact without an assembly classifier.
+    Compile / packageBin := assembly.value
   )
 
 assembly / assemblyShadeRules := Seq(
