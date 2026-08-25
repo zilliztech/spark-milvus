@@ -55,6 +55,7 @@ import com.zilliz.spark.connector.{
   MilvusCollectionInfo,
   MilvusOption,
   MilvusSchemaUtil,
+  MilvusStoragePath,
   VectorSearchConfig
 }
 import com.zilliz.spark.connector.loon.Properties
@@ -68,6 +69,7 @@ import com.zilliz.spark.connector.read.{
   MilvusStorageV3ManifestReader,
   SnapshotMetadata,
   StorageV2ManifestItem,
+  V2ColumnGroup,
   V2DeltaLogFile,
   V2SegmentInfo,
   V2SegmentLoader
@@ -862,24 +864,32 @@ object MilvusScan extends Logging {
 
   private[sources] def resolveClientSnapshotLocation(
       location: String,
-      bucket: String
+      bucket: String,
+      endpoint: String = ""
   ): String = {
     val trimmed = Option(location).map(_.trim).getOrElse("")
     if (trimmed.isEmpty) {
       throw new IllegalArgumentException("snapshot s3_location is empty")
     }
 
-    val scheme = Option(new URI(trimmed).getScheme).map(_.toLowerCase)
+    val scheme = MilvusStoragePath.schemeOf(trimmed)
     scheme match {
-      case Some("s3a") => trimmed
-      case Some("s3") =>
-        s"s3a://${trimmed.substring(trimmed.indexOf("://") + 3)}"
+      case Some("s3") | Some("s3a") =>
+        // Canonicalize both standard s3://bucket/key and Milvus-format
+        // s3://<address>/<bucket>/<key> to s3a://bucket/key. schemeOf probes
+        // the scheme textually, so an unparseable s3:// path reaches the
+        // fallback instead of throwing a raw URISyntaxException.
+        MilvusStoragePath.toStandardS3Path(
+          trimmed,
+          endpoint = endpoint,
+          configuredBucket = bucket
+        )
       case Some(other) =>
         throw new IllegalArgumentException(
           s"Unsupported snapshot s3_location scheme '$other': $trimmed"
         )
       case None if bucket.trim.nonEmpty =>
-        s"s3a://${bucket.trim}/${trimmed.stripPrefix("/")}"
+        MilvusStoragePath.toStandardS3Path(trimmed, bucket)
       case None =>
         throw new IllegalArgumentException(
           "bucket-relative snapshot s3_location requires connector S3 bucket"
@@ -887,35 +897,38 @@ object MilvusScan extends Logging {
     }
   }
 
-  private[sources] def snapshotBucket(location: String): Option[String] = {
+  private[sources] def snapshotBucket(
+      location: String,
+      endpoint: String = "",
+      configuredBucket: String = ""
+  ): Option[String] = {
     val trimmed = Option(location).map(_.trim).getOrElse("")
     if (trimmed.isEmpty) {
       None
     } else {
-      val uri = new URI(trimmed)
-      Option(uri.getScheme).map(_.toLowerCase) match {
-        case Some("s3a") | Some("s3") =>
-          Option(uri.getHost).orElse {
-            Option(uri.getAuthority)
-              .map(_.takeWhile(_ != '@'))
-              .map(_.split(":").head)
-              .filter(_.nonEmpty)
-          }
-        case Some(other) =>
+      MilvusStoragePath.schemeOf(trimmed) match {
+        case Some(other) if other != "s3" && other != "s3a" =>
           throw new IllegalArgumentException(
             s"Unsupported snapshot s3_location scheme '$other': $trimmed"
           )
-        case None => None
+        case _ =>
+          // bucketOf reduces the canonical / Milvus-format / bucket-relative /
+          // unparseable shapes to the bucket, never throwing on input
+          // java.net.URI rejects.
+          MilvusStoragePath.bucketOf(trimmed, endpoint, configuredBucket)
       }
     }
   }
 
   private[sources] def snapshotBucketsToConfigure(
       snapshotPath: String,
-      connectorBucket: String
+      connectorBucket: String,
+      endpoint: String = ""
   ): Seq[String] = {
     (Seq(connectorBucket).filter(_.nonEmpty) ++ snapshotBucket(
-      snapshotPath
+      snapshotPath,
+      endpoint,
+      connectorBucket
     )).distinct
   }
 
@@ -950,19 +963,74 @@ object MilvusScan extends Logging {
     }
   }
 
+  private[sources] def connectorS3EndpointOption(
+      options: scala.collection.Map[String, String]
+  ): Option[String] = {
+    Seq(
+      Properties.FsConfig.FsAddress,
+      MilvusOption.S3Endpoint
+    ).view
+      .flatMap(key => optionValue(options, key).map(_.trim).filter(_.nonEmpty))
+      .headOption
+  }
+
+  private[sources] def connectorS3AccessKeyOption(
+      options: scala.collection.Map[String, String]
+  ): Option[String] = {
+    Seq(
+      Properties.FsConfig.FsAccessKeyId,
+      MilvusOption.S3AccessKey
+    ).view
+      .flatMap(key => optionValue(options, key).map(_.trim).filter(_.nonEmpty))
+      .headOption
+  }
+
+  private[sources] def connectorS3SecretKeyOption(
+      options: scala.collection.Map[String, String]
+  ): Option[String] = {
+    Seq(
+      Properties.FsConfig.FsAccessKeyValue,
+      MilvusOption.S3SecretKey
+    ).view
+      .flatMap(key => optionValue(options, key).map(_.trim).filter(_.nonEmpty))
+      .headOption
+  }
+
+  private[sources] def connectorS3UseSslOption(
+      options: scala.collection.Map[String, String]
+  ): Option[String] = {
+    Seq(
+      Properties.FsConfig.FsUseSSL,
+      MilvusOption.S3UseSSL
+    ).view
+      .flatMap(key => optionValue(options, key).map(_.trim).filter(_.nonEmpty))
+      .headOption
+  }
+
   private[sources] def snapshotS3BucketForRelativePaths(
       snapshotPath: String,
       options: scala.collection.Map[String, String]
   ): Option[String] = {
-    snapshotBucket(snapshotPath).orElse(connectorS3BucketOption(options))
+    snapshotBucket(
+      snapshotPath,
+      connectorS3EndpointOption(options).getOrElse(""),
+      connectorS3BucketOption(options).getOrElse("")
+    ).orElse(connectorS3BucketOption(options))
   }
 
   private[sources] def storageV2ManifestBasePath(
-      item: StorageV2ManifestItem
+      item: StorageV2ManifestItem,
+      endpoint: String = "",
+      configuredBucket: String = ""
   ): String = {
     MilvusSnapshotReader.parseManifestContent(item.manifest) match {
-      case Right(content) => content.basePath
-      case Left(_)        => item.manifest
+      case Right(content) =>
+        MilvusStoragePath.toStandardS3Path(
+          content.basePath,
+          endpoint = endpoint,
+          configuredBucket = configuredBucket
+        )
+      case Left(_) => item.manifest
     }
   }
 
@@ -970,11 +1038,13 @@ object MilvusScan extends Logging {
       snapshotPath: String,
       connectorBucket: Option[String],
       storageV2ManifestList: Seq[StorageV2ManifestItem],
-      v2Segments: Seq[V2SegmentInfo]
+      v2Segments: Seq[V2SegmentInfo],
+      endpoint: String = ""
   ): Unit = {
-    snapshotBucket(snapshotPath).foreach { snapshot =>
+    val configuredBucket = connectorBucket.getOrElse("")
+    snapshotBucket(snapshotPath, endpoint, configuredBucket).foreach { snapshot =>
       val relativeStorageV3Paths = storageV2ManifestList
-        .map(storageV2ManifestBasePath)
+        .map(item => storageV2ManifestBasePath(item, endpoint, configuredBucket))
         .filter(isBucketRelativeSnapshotLocation)
       val relativeStorageV2Paths = v2Segments
         .flatMap(_.columnGroups.flatMap(_.filePaths))
@@ -1010,7 +1080,7 @@ object MilvusScan extends Logging {
       location: String
   ): Boolean = {
     val trimmed = Option(location).map(_.trim).getOrElse("")
-    trimmed.nonEmpty && Option(new URI(trimmed).getScheme).isEmpty
+    trimmed.nonEmpty && MilvusStoragePath.schemeOf(trimmed).isEmpty
   }
 
   private[sources] def canUseClientSnapshotFastPath(
@@ -1513,7 +1583,9 @@ class MilvusScan(
           }
           val snapshotPath = MilvusScan.resolveClientSnapshotLocation(
             snapshot.s3Location,
-            connectorBucket.getOrElse("")
+            connectorBucket.getOrElse(""),
+            MilvusScan.connectorS3EndpointOption(milvusOption.options)
+              .getOrElse("")
           )
           Some(
             planInputPartitionsFromClientSnapshotPath(
@@ -1581,7 +1653,10 @@ class MilvusScan(
           snapshotBucket.getOrElse(""),
           hadoopConf,
           manifestSchemaVersion = metadata.manifestSchemaVersion,
-          applyDeletes = applyDeletes
+          applyDeletes = applyDeletes,
+          endpoint = MilvusScan
+            .connectorS3EndpointOption(milvusOption.options)
+            .getOrElse("")
         ) match {
           case Right(segs) => segs
           case Left(err) =>
@@ -1602,7 +1677,8 @@ class MilvusScan(
       snapshotPath,
       MilvusScan.connectorS3BucketOption(milvusOption.options),
       storageV2ManifestList,
-      v2Segments
+      v2Segments,
+      MilvusScan.connectorS3EndpointOption(milvusOption.options).getOrElse("")
     )
 
     val schemaBytes = MilvusSnapshotReader.toProtobufSchemaBytes(
@@ -1650,7 +1726,8 @@ class MilvusScan(
           inheritedDeleteSegments,
           pkField,
           snapshotBucket.getOrElse(""),
-          hadoopConf
+          hadoopConf,
+          MilvusScan.connectorS3EndpointOption(milvusOption.options).getOrElse("")
         ) match {
           case Right(plans) => plans
           case Left(err) =>
@@ -1783,14 +1860,18 @@ class MilvusScan(
       .map(_.sessionState.newHadoopConf())
       .getOrElse(new Configuration())
     val rawOptions = milvusOption.options
+    // Resolve the S3A endpoint and credentials through the same multi-key
+    // aliases used for Milvus-format detection (fs.* and s3.*), so a user who
+    // configures only s3.endpoint / s3.accessKey gets both the detection and
+    // the Hadoop S3A endpoint/credentials pointing at the same storage.
     val endpoint =
-      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsAddress)
+      MilvusScan.connectorS3EndpointOption(rawOptions)
     val accessKey =
-      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsAccessKeyId)
+      MilvusScan.connectorS3AccessKeyOption(rawOptions)
     val secretKey =
-      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsAccessKeyValue)
+      MilvusScan.connectorS3SecretKeyOption(rawOptions)
     val useSsl =
-      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsUseSSL)
+      MilvusScan.connectorS3UseSslOption(rawOptions)
     val region =
       MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsRegion)
     val useIam = MilvusScan
@@ -1799,8 +1880,12 @@ class MilvusScan(
     val useVirtualHost = MilvusScan
       .optionValue(rawOptions, Properties.FsConfig.FsUseVirtualHost)
       .filter(_.trim.nonEmpty)
+    // Resolve path-style access through the same multi-key aliases as the
+    // other S3 options; without it a MinIO user configuring only the s3.*
+    // family gets S3A's virtual-host default and resolves bucket.minio:9000.
     val pathStyle = MilvusScan
       .optionValue(rawOptions, "fs.s3a.path.style.access")
+      .orElse(MilvusScan.optionValue(rawOptions, MilvusOption.S3PathStyleAccess))
       .orElse(
         useVirtualHost.map(v => (!v.trim.equalsIgnoreCase("true")).toString)
       )
@@ -1853,7 +1938,8 @@ class MilvusScan(
     MilvusScan
       .snapshotBucketsToConfigure(
         snapshotPath,
-        MilvusScan.connectorS3BucketOption(rawOptions).getOrElse("")
+        MilvusScan.connectorS3BucketOption(rawOptions).getOrElse(""),
+        MilvusScan.connectorS3EndpointOption(rawOptions).getOrElse("")
       )
       .foreach(bucket => configureS3A(s"fs.s3a.bucket.$bucket"))
     conf
@@ -1911,7 +1997,8 @@ class MilvusScan(
           seg.deltaLogs,
           pkField,
           snapshotBucket.getOrElse(""),
-          hadoopConf
+          hadoopConf,
+          MilvusScan.connectorS3EndpointOption(milvusOption.options).getOrElse("")
         ) match {
           case Right(plan) => seg.segmentId -> plan
           case Left(err) =>
@@ -1946,8 +2033,18 @@ class MilvusScan(
       val entries = manifestList.flatMap { item =>
         val (basePath, requestedReadVersion) =
           MilvusSnapshotReader.parseManifestContent(item.manifest) match {
-            case Right(content) => (content.basePath, content.ver.toLong)
-            case Left(_)        => (item.manifest, -1L)
+            case Right(content) =>
+              (
+                MilvusStoragePath.toStandardS3Path(
+                  content.basePath,
+                  endpoint = MilvusScan
+                    .connectorS3EndpointOption(milvusOption.options)
+                    .getOrElse(""),
+                  configuredBucket = snapshotBucket.getOrElse("")
+                ),
+                content.ver.toLong
+              )
+            case Left(_) => (item.manifest, -1L)
           }
         val segmentId = MilvusScan.segmentIdForManifestItem(item, basePath)
         if (segmentId == 0L) {
@@ -1960,7 +2057,9 @@ class MilvusScan(
               MilvusStorageV3ManifestReader.latestManifestVersion(
                 basePath,
                 snapshotBucket.getOrElse(""),
-                hadoopConf
+                hadoopConf,
+                MilvusScan.connectorS3EndpointOption(milvusOption.options)
+                  .getOrElse("")
               ) match {
                 case Right(version) => version
                 case Left(err) =>
@@ -1978,7 +2077,9 @@ class MilvusScan(
                 basePath,
                 readVersion,
                 snapshotBucket.getOrElse(""),
-                hadoopConf
+                hadoopConf,
+                MilvusScan.connectorS3EndpointOption(milvusOption.options)
+                  .getOrElse("")
               ) match {
                 case Right(logs) => logs
                 case Left(err) =>
@@ -1996,7 +2097,9 @@ class MilvusScan(
                   deltaLogs,
                   pkField.get,
                   snapshotBucket.getOrElse(""),
-                  hadoopConf
+                  hadoopConf,
+                  MilvusScan.connectorS3EndpointOption(milvusOption.options)
+                    .getOrElse("")
                 ) match {
                   case Right(plan) => Some(plan)
                   case Left(err) =>
@@ -2021,6 +2124,98 @@ class MilvusScan(
     }
   }
 
+  private[sources] def withPinnedBucket(
+      milvusOption: MilvusOption,
+      bucket: String
+  ): MilvusOption = {
+    val trimmed = bucket.trim
+    val opts = milvusOption.options
+    var updated =
+      if (trimmed.isEmpty) opts else opts + (Properties.FsConfig.FsBucketName -> trimmed)
+    // The native FFI (Properties.fromMilvusOption) reads only fs.* keys, so a
+    // user who configured the s3.* aliases gets them translated here — without
+    // this the executors would fall back to localhost:9000 / minioadmin.
+    // Under fs.use_iam the driver deliberately drops static credentials (the
+    // FFI must consult the default credentials chain), so skip the AK/SK
+    // translation there to avoid signing with stale keys.
+    val useIam = MilvusScan
+      .optionValue(opts, Properties.FsConfig.FsUseIam)
+      .exists(_.trim.equalsIgnoreCase("true"))
+    Seq(
+      (Properties.FsConfig.FsAddress, MilvusScan.connectorS3EndpointOption(opts)),
+      (
+        Properties.FsConfig.FsAccessKeyId,
+        if (useIam) None else MilvusScan.connectorS3AccessKeyOption(opts)
+      ),
+      (
+        Properties.FsConfig.FsAccessKeyValue,
+        if (useIam) None else MilvusScan.connectorS3SecretKeyOption(opts)
+      ),
+      (Properties.FsConfig.FsUseSSL, MilvusScan.connectorS3UseSslOption(opts))
+    ).foreach { case (fsKey, value) =>
+      value.foreach(v => updated = updated + (fsKey -> v))
+    }
+    milvusOption.copy(options = updated)
+  }
+
+  /** Reduce a V3 manifest basePath to the scheme-less key the native reader
+    * consumes, pinning the bucket the path names on the partition option so
+    * the FFI resolves the key against the right `fs.bucket_name`.
+    */
+  private[sources] def nativeV3ManifestPath(
+      basePath: String,
+      milvusOption: MilvusOption,
+      endpoint: String,
+      configuredBucket: String = ""
+  ): (String, MilvusOption) = {
+    val bucket =
+      MilvusStoragePath.bucketOf(basePath, endpoint, configuredBucket)
+    val key = MilvusStoragePath.toBucketRelativeKey(
+      basePath,
+      endpoint,
+      configuredBucket
+    )
+    (key, withPinnedBucket(milvusOption, bucket.getOrElse("")))
+  }
+
+  /** Reduce a V2 segment's column-group file paths to scheme-less keys the
+    * native reader consumes, returning the bucket the (qualified) paths name
+    * (None when all paths are already bucket-relative) together with the
+    * stripped column groups.
+    *
+    * The bucket is captured BEFORE any path is reduced to a bare key, so a
+    * qualified cross-bucket path cannot silently resolve against the
+    * connector's configured bucket. A segment whose qualified paths name more
+    * than one distinct bucket is refused — there is no single bucket to pin,
+    * and stripping against the first one would silently read the wrong data.
+    */
+  private[sources] def nativeV2ColumnGroups(
+      columnGroups: Seq[V2ColumnGroup],
+      endpoint: String,
+      configuredBucket: String = ""
+  ): (Option[String], Seq[V2ColumnGroup]) = {
+    val buckets = columnGroups.iterator
+      .flatMap(_.filePaths)
+      .flatMap(p => MilvusStoragePath.bucketOf(p, endpoint, configuredBucket))
+      .toSet
+    if (buckets.size > 1) {
+      throw new IllegalArgumentException(
+        s"StorageV2 segment column-group paths reference more than one bucket " +
+          s"(${buckets.toSeq.sorted.mkString(", ")}); refusing to guess which " +
+          "bucket native executors should resolve them against"
+      )
+    }
+    val bucket = buckets.headOption
+    val native = columnGroups.map { cg =>
+      cg.copy(
+        filePaths = cg.filePaths.map(
+          MilvusStoragePath.toBucketRelativeKey(_, endpoint, configuredBucket)
+        )
+      )
+    }
+    (bucket, native)
+  }
+
   private[sources] def buildSnapshotPartitions(
       manifestList: Seq[StorageV2ManifestItem],
       defaultPartitionId: String,
@@ -2042,15 +2237,12 @@ class MilvusScan(
       inlineInheritedDeletePlans: Boolean = false,
       forceCanonicalBucket: Option[String] = None
   ): Array[InputPartition] = {
+    val endpoint =
+      MilvusScan.connectorS3EndpointOption(milvusOption.options).getOrElse("")
     val canonicalMilvusOption = forceCanonicalBucket
       .map(_.trim)
       .filter(_.nonEmpty)
-      .map(bucket =>
-        milvusOption.copy(
-          options = milvusOption.options +
-            (Properties.FsConfig.FsBucketName -> bucket)
-        )
-      )
+      .map(bucket => withPinnedBucket(milvusOption, bucket))
       .getOrElse(milvusOption)
 
     val v3Partitions = manifestList.map { item =>
@@ -2059,9 +2251,24 @@ class MilvusScan(
           case Right(content) => (content.basePath, content.ver.toLong)
           case Left(_)        => (item.manifest, -1L)
         }
+      // milvus-storage's native FFI resolves scheme-less keys against the
+      // fs.* properties and rejects scheme-bearing paths for lack of an
+      // extfs.* block, so hand it the bare bucket-relative key — and pin the
+      // bucket the path names on the canonical partition option (which already
+      // carries forceCanonicalBucket), so a cross-bucket snapshot is not
+      // silently resolved against the connector's configured bucket and a
+      // bucket-relative base path is not resolved against an unset default.
+      val (manifestPath, partitionMilvusOption) =
+        nativeV3ManifestPath(
+          basePath,
+          canonicalMilvusOption,
+          endpoint,
+          MilvusScan.connectorS3BucketOption(canonicalMilvusOption.options)
+            .getOrElse("")
+        )
 
-      val pathParts = basePath.split("/").filter(_.nonEmpty)
-      val segmentID = MilvusScan.segmentIdForManifestItem(item, basePath)
+      val pathParts = manifestPath.split("/").filter(_.nonEmpty)
+      val segmentID = MilvusScan.segmentIdForManifestItem(item, manifestPath)
       val readVersion = v3ReadVersions.getOrElse(segmentID, parsedReadVersion)
       val insertLogIdx = pathParts.lastIndexOf("insert_log")
       val partitionId =
@@ -2069,12 +2276,12 @@ class MilvusScan(
           pathParts(insertLogIdx + 2)
         } else {
           logWarning(
-            s"Manifest path '$basePath' does not match expected insert_log/{collectionID}/{partitionID}/{segmentID} layout; using fallback partitionID=$defaultPartitionId"
+            s"Manifest path '$manifestPath' does not match expected insert_log/{collectionID}/{partitionID}/{segmentID} layout; using fallback partitionID=$defaultPartitionId"
           )
           defaultPartitionId
         }
       logInfo(
-        s"Creating partition with manifestPath=$basePath, partitionID=$partitionId, segmentID=$segmentID, readVersion=$readVersion"
+        s"Creating partition with manifestPath=$manifestPath, partitionID=$partitionId, segmentID=$segmentID, readVersion=$readVersion"
       )
       val partitionIdLong =
         try partitionId.toLong
@@ -2093,10 +2300,10 @@ class MilvusScan(
         com.zilliz.spark.connector.read.MilvusDeletePlan.empty
       )
       MilvusStorageV3InputPartition(
-        basePath,
+        manifestPath,
         schemaBytes,
         partitionId,
-        milvusOption,
+        partitionMilvusOption,
         vectorSearchConfig.map(_.topK),
         vectorSearchConfig.map(_.queryVector),
         vectorSearchConfig.map(_.metricType),
@@ -2138,12 +2345,24 @@ class MilvusScan(
             inheritedDeletePlan,
             ownDeletePlan
           )
+        // Reduce column-group file paths to scheme-less keys the native reader
+        // consumes, pinning the bucket the qualified paths name so the FFI
+        // resolves them against the right fs.bucket_name.
+        val (nativeBucket, nativeColumnGroups) =
+          nativeV2ColumnGroups(
+            seg.columnGroups,
+            endpoint,
+            MilvusScan.connectorS3BucketOption(canonicalMilvusOption.options)
+              .getOrElse("")
+          )
+        val partitionOption =
+          withPinnedBucket(canonicalMilvusOption, nativeBucket.getOrElse(""))
         MilvusPackedV2InputPartition(
           segmentID = seg.segmentId,
           partitionID = seg.partitionId,
-          columnGroups = seg.columnGroups,
+          columnGroups = nativeColumnGroups,
           milvusSchemaBytes = schemaBytes,
-          milvusOption = canonicalMilvusOption,
+          milvusOption = partitionOption,
           neededColumnFieldIds = Seq.empty,
           applyDeletes = MilvusOption.readApplyDeletes(options),
           deletePlan = deletePlan,
@@ -2291,7 +2510,8 @@ class MilvusScan(
           inheritedDeleteSegments,
           pkField,
           snapshotBucketForRelativePaths.getOrElse(""),
-          snapshotHadoopConf
+          snapshotHadoopConf,
+          MilvusScan.connectorS3EndpointOption(milvusOption.options).getOrElse("")
         ) match {
           case Right(plans) => plans
           case Left(err) =>
@@ -2357,7 +2577,8 @@ class MilvusScan(
             inheritedDeleteSegments,
             pkField,
             MilvusScan.connectorS3BucketOption(optionsMap).getOrElse(""),
-            buildSnapshotHadoopConf("")
+            buildSnapshotHadoopConf(""),
+            MilvusScan.connectorS3EndpointOption(optionsMap).getOrElse("")
           ) match {
             case Right(plans) => plans
             case Left(err) =>

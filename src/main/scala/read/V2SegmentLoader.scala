@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream
 import java.net.URI
 import scala.util.control.NonFatal
 
+import com.zilliz.spark.connector.MilvusStoragePath
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.internal.Logging
@@ -55,12 +56,14 @@ object V2SegmentLoader extends Logging {
       hadoopConf: Configuration,
       manifestSchemaVersion: Int = 1,
       applyDeletes: Boolean = true,
-      storageScheme: String = "s3a"
+      storageScheme: String = "s3a",
+      endpoint: String = ""
   ): Either[Throwable, Seq[V2SegmentInfo]] = {
     try {
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
       manifestPaths.foreach { rawPath =>
-        val avroPath = resolvePath(rawPath, bucket, storageScheme)
+        val avroPath =
+          resolvePath(rawPath, bucket, storageScheme, endpoint)
         val avroBytes = readAllBytes(hadoopConf, avroPath)
         val entry =
           MilvusSegmentManifestReader
@@ -77,7 +80,8 @@ object V2SegmentLoader extends Logging {
           bucket,
           hadoopConf,
           applyDeletes,
-          storageScheme
+          storageScheme,
+          endpoint
         ) match {
           case Right(Some(seg)) => out += seg
           case Right(None)      => // skipped (storage version != 2)
@@ -106,9 +110,10 @@ object V2SegmentLoader extends Logging {
       bucket: String,
       hadoopConf: Configuration,
       applyDeletes: Boolean = true,
-      storageScheme: String = "s3a"
+      storageScheme: String = "s3a",
+      endpoint: String = ""
   ): Either[Throwable, Option[V2SegmentInfo]] = {
-    val resolvedEntry = resolveEntryPaths(entry, bucket, storageScheme)
+    val resolvedEntry = resolveEntryPaths(entry, bucket, storageScheme, endpoint)
     val isL0 = resolvedEntry.segmentLevel == 1L
 
     if (resolvedEntry.storageVersion != 2L) {
@@ -211,7 +216,8 @@ object V2SegmentLoader extends Logging {
   private def resolveEntryPaths(
       entry: AvroManifestEntry,
       bucket: String,
-      storageScheme: String
+      storageScheme: String,
+      endpoint: String = ""
   ): AvroManifestEntry = {
     def resolveFieldBinlogs(
         fieldBinlogs: Seq[AvroFieldBinlogEntry]
@@ -219,7 +225,9 @@ object V2SegmentLoader extends Logging {
       fieldBinlogs.map(fieldBinlog =>
         fieldBinlog.copy(binlogs =
           fieldBinlog.binlogs.map(log =>
-            log.copy(logPath = resolvePath(log.logPath, bucket, storageScheme))
+            log.copy(
+              logPath = resolvePath(log.logPath, bucket, storageScheme, endpoint)
+            )
           )
         )
       )
@@ -230,23 +238,34 @@ object V2SegmentLoader extends Logging {
     )
   }
 
-  /** Prefix `bucket` when `path` has no scheme; rewrite S3 aliases to the
-    * requested scheme and preserve other explicit schemes. `storageScheme` is
+  /** Prefix `bucket` when `path` has no scheme; pass through s3a:// / s3://.
+    *
+    * `endpoint` is the configured storage endpoint (e.g. `fs.address` /
+    * `s3Endpoint`); it lets [[MilvusStoragePath.toStandardS3Path]] recognize
+    * port-less endpoint-prefixed Milvus-format URIs. `storageScheme` is
     * intentionally explicit for non-S3 providers because the generic connector
     * read path does not yet derive a provider from its public options.
     */
   def resolvePath(
       path: String,
       bucket: String,
-      storageScheme: String = "s3a"
+      storageScheme: String = "s3a",
+      endpoint: String = ""
   ): String = {
     val scheme = storageScheme.stripSuffix("://")
     if (path == null) path
-    else if (path.startsWith("s3a://"))
-      s"$scheme://" + path.stripPrefix("s3a://")
-    else if (path.startsWith("s3://"))
-      s"$scheme://" + path.stripPrefix("s3://")
-    else if (path.contains("://")) path
+    else if (path.startsWith("s3a://") || path.startsWith("s3://")) {
+      // Canonicalize Milvus-format s3://<address>/<bucket>/<key> to
+      // s3a://bucket/key, then re-apply the target storage scheme (e.g. oss
+      // for Aliyun).
+      val canonical = MilvusStoragePath.toStandardS3Path(
+        path,
+        endpoint = endpoint,
+        configuredBucket = bucket
+      )
+      if (scheme == "s3a") canonical
+      else scheme + "://" + canonical.stripPrefix("s3a://")
+    } else if (path.contains("://")) path
     else if (bucket != null && bucket.nonEmpty)
       s"$scheme://$bucket/${path.stripPrefix("/")}"
     else path

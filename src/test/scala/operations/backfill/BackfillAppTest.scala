@@ -231,6 +231,56 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     ) shouldBe "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
   }
 
+  test(
+    "configureHadoopS3ForPath canonicalizes Milvus-format endpoint-prefixed paths"
+  ) {
+    val cfg = BackfillConfig(
+      s3Endpoint = "minio:9000",
+      s3BucketName = "main-bucket",
+      s3AccessKey = "ak1",
+      s3SecretKey = "sk1",
+      s3UseSSL = false
+    )
+    MilvusBackfill.configureHadoopS3ForPath(
+      spark,
+      "s3://eric-spark-minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json",
+      cfg,
+      isSource = false
+    )
+    val hc = spark.sparkContext.hadoopConfiguration
+    // The endpoint-prefixed authority must not be treated as a bucket.
+    hc.get("fs.s3a.bucket.eric-spark-minio.endpoint") shouldBe null
+    hc.get("fs.s3a.bucket.eric-spark-minio:9000.endpoint") shouldBe null
+    // The real data bucket gets the per-bucket S3A config.
+    hc.get("fs.s3a.bucket.milvus-bucket.endpoint") shouldBe "minio:9000"
+    hc.get("fs.s3a.bucket.milvus-bucket.path.style.access") shouldBe "true"
+    hc.get("fs.s3a.bucket.milvus-bucket.access.key") shouldBe "ak1"
+  }
+
+  test(
+    "configureHadoopS3ForPath does not misclassify a user output path whose first segment equals the target bucket"
+  ) {
+    val cfg = BackfillConfig(
+      s3Endpoint = "minio:9000",
+      s3BucketName = "main-bucket",
+      s3AccessKey = "ak1",
+      s3SecretKey = "sk1",
+      s3UseSSL = false
+    )
+    MilvusBackfill.configureHadoopS3ForPath(
+      spark,
+      "s3://results/main-bucket/backfill.json",
+      cfg,
+      isSource = false
+    )
+    val hc = spark.sparkContext.hadoopConfiguration
+    hc.unset("fs.s3a.bucket.main-bucket.endpoint")
+    // The user-supplied path is standard; its bucket is "results", not the
+    // target bucket "main-bucket".
+    hc.get("fs.s3a.bucket.results.endpoint") shouldBe "minio:9000"
+    hc.get("fs.s3a.bucket.main-bucket.endpoint") shouldBe null
+  }
+
   test("configureHadoopS3ForPath uses IAM provider when useIam=true") {
     val cfg = BackfillConfig(
       s3Endpoint = "s3.amazonaws.com",
@@ -493,6 +543,12 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     ) shouldBe "file:///tmp/x"
     MilvusBackfill.normalizeS3Scheme("/local/path") shouldBe "/local/path"
     MilvusBackfill.normalizeS3Scheme(null) shouldBe null
+  }
+
+  test("normalizeS3Scheme canonicalizes Milvus-format endpoint-prefixed paths") {
+    MilvusBackfill.normalizeS3Scheme(
+      "s3://eric-spark-minio:9000/milvus-bucket/data.parquet"
+    ) shouldBe "s3a://milvus-bucket/data.parquet"
   }
 
   test("normalizeObjectStorageScheme selects OSS aliases for Alibaba") {

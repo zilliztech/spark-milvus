@@ -33,7 +33,8 @@ object MilvusDeltaLogReader extends Logging {
       segments: Seq[V2SegmentInfo],
       milvusSchema: CollectionSchema,
       bucket: String,
-      hadoopConf: Configuration
+      hadoopConf: Configuration,
+      endpoint: String = ""
   ): Either[Throwable, Map[Long, MilvusDeletePlan]] = {
     val pkField = primaryKeyField(milvusSchema)
     val deleteOnlySegments = segments.filter(_.columnGroups.isEmpty)
@@ -44,13 +45,13 @@ object MilvusDeltaLogReader extends Logging {
         deleteOnlySegments,
         pkField,
         bucket,
-        hadoopConf
+        hadoopConf,
+        endpoint
       )
       ownPlans <- sequence(
         dataSegments.map { seg =>
-          loadDeletePlan(seg.deltaLogs, pkField, bucket, hadoopConf).map {
-            ownPlan => seg.segmentId -> ownPlan
-          }
+          loadDeletePlan(seg.deltaLogs, pkField, bucket, hadoopConf, endpoint)
+            .map { ownPlan => seg.segmentId -> ownPlan }
         }
       )
     } yield mergeInheritedDeletePlans(
@@ -84,7 +85,8 @@ object MilvusDeltaLogReader extends Logging {
       deleteOnlySegments: Seq[V2SegmentInfo],
       pkField: FieldSchema,
       bucket: String,
-      hadoopConf: Configuration
+      hadoopConf: Configuration,
+      endpoint: String = ""
   ): Either[Throwable, Map[Long, MilvusDeletePlan]] = {
     sequence(
       deleteOnlySegments.groupBy(_.partitionId).toSeq.map {
@@ -93,7 +95,8 @@ object MilvusDeltaLogReader extends Logging {
             segments.flatMap(_.deltaLogs),
             pkField,
             bucket,
-            hadoopConf
+            hadoopConf,
+            endpoint
           ).map(partitionId -> _)
       }
     ).map(_.toMap)
@@ -128,13 +131,14 @@ object MilvusDeltaLogReader extends Logging {
       deltaLogs: Seq[V2DeltaLogFile],
       pkField: FieldSchema,
       bucket: String,
-      hadoopConf: Configuration
+      hadoopConf: Configuration,
+      endpoint: String = ""
   ): Either[Throwable, MilvusDeletePlan] = {
     try {
       validatePkType(pkField)
       val plans = deltaLogs.map { log =>
         val fullyQualifiedPath =
-          V2SegmentLoader.resolvePath(log.logPath, bucket)
+          V2SegmentLoader.resolvePath(log.logPath, bucket, endpoint = endpoint)
         val bytes = V2SegmentLoader.readAllBytes(hadoopConf, fullyQualifiedPath)
         decodeDeletePlan(bytes, pkField, fullyQualifiedPath)
       }

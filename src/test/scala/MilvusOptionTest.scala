@@ -432,6 +432,44 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
     path2.toString shouldBe "s3a://other-bucket/other-path"
   }
 
+  test("getFilePath canonicalizes Milvus-format endpoint-prefixed paths") {
+    import scala.collection.JavaConverters._
+    import org.apache.spark.sql.util.CaseInsensitiveStringMap
+    val options = new CaseInsensitiveStringMap(
+      Map(
+        MilvusOption.ReaderType -> "insert",
+        MilvusOption.S3FileSystemTypeName -> "s3a://",
+        MilvusOption.S3BucketName -> "test-bucket",
+        MilvusOption.S3RootPath -> "files"
+      ).asJava
+    )
+    val s3Option = MilvusS3Option(options)
+
+    val path = s3Option.getFilePath(
+      "s3a://minio:9000/milvus-bucket/files/insert_log/123/456"
+    )
+    path.toString shouldBe "s3a://milvus-bucket/files/insert_log/123/456"
+  }
+
+  test("getFilePath detects port-less endpoints via the configured endpoint") {
+    import scala.collection.JavaConverters._
+    import org.apache.spark.sql.util.CaseInsensitiveStringMap
+    val options = new CaseInsensitiveStringMap(
+      Map(
+        MilvusOption.ReaderType -> "insert",
+        MilvusOption.S3FileSystemTypeName -> "s3a://",
+        MilvusOption.S3BucketName -> "test-bucket",
+        MilvusOption.S3Endpoint -> "oss-cn-hangzhou.aliyuncs.com"
+      ).asJava
+    )
+    val s3Option = MilvusS3Option(options)
+
+    val path = s3Option.getFilePath(
+      "s3://oss-cn-hangzhou.aliyuncs.com/bucket/files/insert_log/123/456"
+    )
+    path.toString shouldBe "s3a://bucket/files/insert_log/123/456"
+  }
+
   test("getConf generates correct S3 configuration") {
     import scala.collection.JavaConverters._
     import org.apache.spark.sql.util.CaseInsensitiveStringMap

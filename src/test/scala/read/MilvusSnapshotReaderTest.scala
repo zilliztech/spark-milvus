@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.read
 
+import com.zilliz.spark.connector.MilvusStoragePath
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -36,6 +37,307 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       MilvusSnapshotReader.readUtf8WithLimit(in, "memory", -1)
     }
     err.getMessage should include("must be positive")
+  }
+
+  test("toStandardS3Path canonicalizes Milvus-format endpoint-prefixed URIs") {
+    MilvusStoragePath.toStandardS3Path(
+      "s3://eric-spark-minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe "s3a://milvus-bucket/file/snapshots/1/metadata/2.json"
+  }
+
+  test("toStandardS3Path normalizes standard s3 scheme to s3a") {
+    MilvusStoragePath.toStandardS3Path(
+      "s3://a-bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe "s3a://a-bucket/file/snapshots/1/metadata/2.json"
+    MilvusStoragePath.toStandardS3Path(
+      "s3a://a-bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe "s3a://a-bucket/file/snapshots/1/metadata/2.json"
+  }
+
+  test("toStandardS3Path prefixes bucket for bucket-relative paths") {
+    MilvusStoragePath.toStandardS3Path(
+      "files/snapshots/1/metadata/2.json",
+      "a-bucket"
+    ) shouldBe "s3a://a-bucket/files/snapshots/1/metadata/2.json"
+  }
+
+  test("toStandardS3Path leaves bucket-relative paths alone without a bucket") {
+    MilvusStoragePath.toStandardS3Path(
+      "files/snapshots/1/metadata/2.json"
+    ) shouldBe "files/snapshots/1/metadata/2.json"
+  }
+
+  test("toStandardS3Path leaves local and unsupported schemes alone") {
+    MilvusStoragePath.toStandardS3Path("/tmp/snapshot.json") shouldBe
+      "/tmp/snapshot.json"
+    MilvusStoragePath.toStandardS3Path("minio:/a/b") shouldBe "minio:/a/b"
+    MilvusStoragePath.toStandardS3Path(null) shouldBe null
+    MilvusStoragePath.toStandardS3Path("") shouldBe ""
+  }
+
+  test("toStandardS3Path handles s3a Milvus-format and endpoint host matches") {
+    MilvusStoragePath.toStandardS3Path(
+      "s3a://minio:9000/milvus-bucket/files/data.parquet"
+    ) shouldBe "s3a://milvus-bucket/files/data.parquet"
+  }
+
+  test(
+    "toStandardS3Path detects port-less endpoints via the configured endpoint"
+  ) {
+    // No port in the URI; without the configured endpoint the shape is
+    // indistinguishable from a standard URI.
+    MilvusStoragePath.toStandardS3Path(
+      "s3://s3.amazonaws.com/milvus-bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe "s3a://s3.amazonaws.com/milvus-bucket/file/snapshots/1/metadata/2.json"
+    // With the endpoint configured, "s3.amazonaws.com" is recognized as the
+    // storage endpoint rather than the bucket.
+    MilvusStoragePath.toStandardS3Path(
+      "s3://s3.amazonaws.com/milvus-bucket/file/snapshots/1/metadata/2.json",
+      "",
+      "s3.amazonaws.com"
+    ) shouldBe "s3a://milvus-bucket/file/snapshots/1/metadata/2.json"
+  }
+
+  test("toStandardS3Path keeps userinfo out of endpoint detection") {
+    MilvusStoragePath.toStandardS3Path(
+      "s3a://user:pass@bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe "s3a://user:pass@bucket/file/snapshots/1/metadata/2.json"
+  }
+
+  test("toBucketRelativeKey reduces standard and Milvus-format URIs to keys") {
+    MilvusStoragePath.toBucketRelativeKey(
+      "files/snapshots/1/metadata/2.json"
+    ) shouldBe "files/snapshots/1/metadata/2.json"
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3://a-bucket/files/snapshots/1/metadata/2.json"
+    ) shouldBe "files/snapshots/1/metadata/2.json"
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3://minio:9000/a-bucket/files/snapshots/1/metadata/2.json"
+    ) shouldBe "files/snapshots/1/metadata/2.json"
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3://s3.amazonaws.com/a-bucket/files/snapshots/1/metadata/2.json",
+      "s3.amazonaws.com"
+    ) shouldBe "files/snapshots/1/metadata/2.json"
+  }
+
+  test("toBucketRelativeKey ignores userinfo and leaves non-s3 paths alone") {
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3a://user:pass@bucket/files/snapshots/1/metadata/2.json"
+    ) shouldBe "files/snapshots/1/metadata/2.json"
+    MilvusStoragePath.toBucketRelativeKey("minio:/a/b") shouldBe "minio:/a/b"
+    MilvusStoragePath.toBucketRelativeKey(null) shouldBe null
+    MilvusStoragePath.toBucketRelativeKey("") shouldBe ""
+  }
+
+  test("storageEndpointHost normalizes configured endpoints to bare hosts") {
+    MilvusStoragePath.storageEndpointHost("minio:9000") shouldBe "minio"
+    MilvusStoragePath.storageEndpointHost("http://localhost:9000") shouldBe
+      "localhost"
+    MilvusStoragePath.storageEndpointHost("s3.amazonaws.com") shouldBe
+      "s3.amazonaws.com"
+    MilvusStoragePath.storageEndpointHost("") shouldBe ""
+    MilvusStoragePath.storageEndpointHost(null) shouldBe ""
+  }
+
+  test("storageEndpointHost lowercases the URI host") {
+    MilvusStoragePath.storageEndpointHost("S3.INTERNAL.EXAMPLE") shouldBe
+      "s3.internal.example"
+  }
+
+  test("toStandardS3Path preserves percent-encoding in the reconstructed URI") {
+    MilvusStoragePath.toStandardS3Path(
+      "s3://a-bucket/file/a%20b.json"
+    ) shouldBe "s3a://a-bucket/file/a%20b.json"
+    MilvusStoragePath.toStandardS3Path(
+      "s3://a-bucket/file/%23hash.json"
+    ) shouldBe "s3a://a-bucket/file/%23hash.json"
+  }
+
+  test(
+    "toStandardS3Path detects underscore hosts via the textual authority"
+  ) {
+    // milvus_minio violates RFC 2396 domainlabel, so java.net.URI.getHost is
+    // null and getPort is -1; the port signal must still fire.
+    MilvusStoragePath.toStandardS3Path(
+      "s3://milvus_minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe "s3a://milvus-bucket/file/snapshots/1/metadata/2.json"
+    MilvusStoragePath.bucketOf(
+      "s3://milvus_minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe Some("milvus-bucket")
+  }
+
+  test(
+    "toStandardS3Path keeps the s3->s3a rewrite for unparseable s3 URIs"
+  ) {
+    // A space makes this an invalid java.net.URI; the prefix rewrite must
+    // survive so the legacy s3:// FileSystem never swallows S3A config.
+    MilvusStoragePath.toStandardS3Path(
+      "s3://bucket/my snapshot/2.json"
+    ) shouldBe "s3a://bucket/my snapshot/2.json"
+  }
+
+  test("toStandardS3Path does not truncate keys with '#' or '?'") {
+    // getRawPath stops at '#'/'?'; the raw query/fragment is re-appended.
+    MilvusStoragePath.toStandardS3Path(
+      "s3://a-bucket/file#frag"
+    ) shouldBe "s3a://a-bucket/file#frag"
+    MilvusStoragePath.toStandardS3Path(
+      "s3://a-bucket/file?query=1"
+    ) shouldBe "s3a://a-bucket/file?query=1"
+  }
+
+  test(
+    "toStandardS3Path keeps the Milvus-format bucket when a key has '#' or '?'"
+  ) {
+    // The global prefix rewrite would have left the endpoint as the bucket.
+    MilvusStoragePath.toStandardS3Path(
+      "s3://minio:9000/milvus-bucket/file#frag"
+    ) shouldBe "s3a://milvus-bucket/file#frag"
+    MilvusStoragePath.toStandardS3Path(
+      "s3://minio:9000/milvus-bucket/file?query=1"
+    ) shouldBe "s3a://milvus-bucket/file?query=1"
+  }
+
+  test("toBucketRelativeKey preserves '#' / '?' in the object key") {
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3://a-bucket/file#frag"
+    ) shouldBe "file#frag"
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3://minio:9000/milvus-bucket/file?query=1"
+    ) shouldBe "file?query=1"
+  }
+
+  test("toBucketRelativeKey reduces unparseable s3 URIs to a bare key") {
+    // The native reader expects a bare key, not a scheme-bearing value.
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3://bucket/my snapshot/2.json"
+    ) shouldBe "my snapshot/2.json"
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3://minio:9000/milvus-bucket/my snapshot/2.json"
+    ) shouldBe "my snapshot/2.json"
+  }
+
+  test("toBucketRelativeKey returns empty for a bucket-only Milvus-format URI") {
+    // rawPath's first segment is the bucket itself; there is no object key.
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3://minio:9000/milvus-bucket"
+    ) shouldBe ""
+  }
+
+  test(
+    "toStandardS3Path splits unparseable Milvus-format URIs textually"
+  ) {
+    // java.net.URI rejects the space; the textual authority split must still
+    // strip the endpoint so it is not left as the bucket.
+    MilvusStoragePath.toStandardS3Path(
+      "s3://minio:9000/milvus-bucket/my snapshot/2.json"
+    ) shouldBe "s3a://milvus-bucket/my snapshot/2.json"
+  }
+
+  test("toBucketRelativeKey preserves percent-encoding in the object key") {
+    MilvusStoragePath.toBucketRelativeKey(
+      "s3://a-bucket/file/a%20b.json"
+    ) shouldBe "file/a%20b.json"
+  }
+
+  test("bucketOf extracts the bucket from qualified URIs") {
+    MilvusStoragePath.bucketOf(
+      "s3://a-bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe Some("a-bucket")
+    MilvusStoragePath.bucketOf(
+      "s3://minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe Some("milvus-bucket")
+    MilvusStoragePath.bucketOf(
+      "s3://s3.amazonaws.com/milvus-bucket/file/snapshots/1/metadata/2.json",
+      "s3.amazonaws.com"
+    ) shouldBe Some("milvus-bucket")
+    MilvusStoragePath.bucketOf(
+      "s3a://user:pass@bucket/file/snapshots/1/metadata/2.json"
+    ) shouldBe Some("bucket")
+  }
+
+  test("bucketOf strips userinfo even when the host is not a valid URI host") {
+    // 'a_bucket' makes java.net.URI.getHost return null; the fallback must
+    // take the part after the userinfo, not before it.
+    MilvusStoragePath.bucketOf(
+      "s3a://user:pass@a_bucket/files/snapshots/1/metadata/2.json"
+    ) shouldBe Some("a_bucket")
+  }
+
+  test("toStandardS3Path trims whitespace around the fallback bucket") {
+    MilvusStoragePath.toStandardS3Path(
+      "files/snapshots/1/metadata/2.json",
+      "  a-bucket "
+    ) shouldBe "s3a://a-bucket/files/snapshots/1/metadata/2.json"
+    MilvusStoragePath.toStandardS3Path(
+      "files/snapshots/1/metadata/2.json",
+      "   "
+    ) shouldBe "files/snapshots/1/metadata/2.json"
+  }
+
+  test(
+    "toStandardS3Path detects Milvus-format via the first path segment bucket"
+  ) {
+    // Port-less endpoint whose embedded host differs from the configured
+    // endpoint (regional vs global host); the first path segment matching the
+    // configured bucket still reveals the Milvus-format shape.
+    MilvusStoragePath.toStandardS3Path(
+      "s3://s3.us-east-1.amazonaws.com/milvus-bucket/file/snapshots/1/metadata/2.json",
+      "",
+      "s3.amazonaws.com",
+      "milvus-bucket"
+    ) shouldBe "s3a://milvus-bucket/file/snapshots/1/metadata/2.json"
+  }
+
+  test(
+    "toStandardS3Path does not misclassify a single-label bucket whose key's first segment equals the configured bucket"
+  ) {
+    // A single-label authority like "archive" is a standard bucket, not an
+    // endpoint; the key's first segment matching the configured bucket must
+    // not rewrite the path to the configured bucket.
+    MilvusStoragePath.toStandardS3Path(
+      "s3://archive/milvus-bucket/file/snapshots/1/metadata/2.json",
+      "",
+      "",
+      "milvus-bucket"
+    ) shouldBe "s3a://archive/milvus-bucket/file/snapshots/1/metadata/2.json"
+  }
+
+  test("toStandardS3Path keeps authority-as-bucket standard when it matches") {
+    MilvusStoragePath.toStandardS3Path(
+      "s3://milvus-bucket/file/snapshots/1/metadata/2.json",
+      "",
+      "",
+      "milvus-bucket"
+    ) shouldBe "s3a://milvus-bucket/file/snapshots/1/metadata/2.json"
+  }
+
+  test("bucketOf uses the configured-bucket signal for port-less endpoints") {
+    MilvusStoragePath.bucketOf(
+      "s3://s3.us-east-1.amazonaws.com/milvus-bucket/file/snapshots/1/metadata/2.json",
+      "s3.amazonaws.com",
+      "milvus-bucket"
+    ) shouldBe Some("milvus-bucket")
+  }
+
+  test("bucketOf extracts the bucket from unparseable URIs textually") {
+    // java.net.URI rejects the space; bucketOf must still pin a bucket so the
+    // bare key toBucketRelativeKey strips from the same input never resolves
+    // silently against the connector's configured bucket.
+    MilvusStoragePath.bucketOf(
+      "s3://minio:9000/milvus-bucket/my snapshot/2.json"
+    ) shouldBe Some("milvus-bucket")
+    MilvusStoragePath.bucketOf(
+      "s3://bucket/my snapshot/2.json"
+    ) shouldBe Some("bucket")
+  }
+
+  test("bucketOf returns None for bucket-relative and non-s3 paths") {
+    MilvusStoragePath.bucketOf("files/snapshots/1/metadata/2.json") shouldBe
+      None
+    MilvusStoragePath.bucketOf("") shouldBe None
+    MilvusStoragePath.bucketOf(null) shouldBe None
+    MilvusStoragePath.bucketOf("/tmp/snapshot.json") shouldBe None
   }
 
   test("Parse complete snapshot metadata successfully") {

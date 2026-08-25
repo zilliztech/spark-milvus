@@ -448,6 +448,8 @@ class V2SegmentLoaderTest
       val Some(seg) = result.toOption.get
       seg.segmentId shouldBe 5005L
       seg.columnGroups.map(_.fieldIds) shouldBe Seq(Seq(100L))
+      // V2SegmentInfo keeps the original AVRO paths; the native reader boundary
+      // strips + pins the bucket at partition-build time.
       seg.deltaLogs shouldBe Seq(
         V2DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
       )
@@ -507,6 +509,8 @@ class V2SegmentLoaderTest
       val Some(seg) = result.toOption.get
       seg.segmentId shouldBe 5007L
       seg.columnGroups.map(_.fieldIds) shouldBe Seq(Seq(100L))
+      // V2SegmentInfo keeps the original AVRO paths; the native reader boundary
+      // strips + pins the bucket at partition-build time.
       seg.deltaLogs shouldBe Seq(
         V2DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
       )
@@ -541,6 +545,32 @@ class V2SegmentLoaderTest
 
     err.getMessage should include("failed to read bytes")
     err.getMessage should include("s3a://bucket/path with spaces/[bad].avro")
+  }
+
+  test("resolvePath canonicalizes Milvus-format endpoint-prefixed paths") {
+    V2SegmentLoader.resolvePath(
+      "s3://eric-spark-minio:9000/milvus-bucket/file/insert_log/10/20/30/100/1",
+      "ignored"
+    ) shouldBe "s3a://milvus-bucket/file/insert_log/10/20/30/100/1"
+  }
+
+  test("resolvePath prefixes bucket for bucket-relative paths") {
+    V2SegmentLoader.resolvePath("file/insert_log/10/20/30/100/1", "a-bucket")
+      .shouldBe("s3a://a-bucket/file/insert_log/10/20/30/100/1")
+  }
+
+  test("resolvePath passes standard s3a paths through unchanged") {
+    V2SegmentLoader.resolvePath(
+      "s3a://a-bucket/file/insert_log/10/20/30/100/1",
+      "ignored"
+    ) shouldBe "s3a://a-bucket/file/insert_log/10/20/30/100/1"
+  }
+
+  test("resolvePath canonicalizes s3a Milvus-format endpoint-prefixed paths") {
+    V2SegmentLoader.resolvePath(
+      "s3a://eric-spark-minio:9000/milvus-bucket/file/insert_log/10/20/30/100/1",
+      "ignored"
+    ) shouldBe "s3a://milvus-bucket/file/insert_log/10/20/30/100/1"
   }
 
   test("readAllBytes does not swallow fatal errors") {

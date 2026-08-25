@@ -74,6 +74,19 @@ class MilvusStorageV3ManifestReaderTest extends AnyFunSuite with Matchers {
     ) shouldBe "s3a://bucket/files/insert_log/10/20/30/_delta/9001"
   }
 
+  test(
+    "resolveManifestDeltaPath canonicalizes Milvus-format endpoint-prefixed deltalog paths"
+  ) {
+    MilvusStorageV3ManifestReader.resolveManifestDeltaPath(
+      "s3://minio:9000/bucket/files/insert_log/10/20/30",
+      "s3://minio:9000/bucket/files/insert_log/10/20/30/_delta/9001"
+    ) shouldBe "s3a://bucket/files/insert_log/10/20/30/_delta/9001"
+    MilvusStorageV3ManifestReader.resolveManifestDeltaPath(
+      "s3://minio:9000/bucket/files/insert_log/10/20/30",
+      "s3a://minio:9000/bucket/files/insert_log/10/20/30/_delta/9001"
+    ) shouldBe "s3a://bucket/files/insert_log/10/20/30/_delta/9001"
+  }
+
   test("latestManifestVersion returns greatest StorageV3 manifest version") {
     val basePath = Files.createTempDirectory("milvus-v3-manifest-test")
     val metadataPath = Files.createDirectory(basePath.resolve("_metadata"))

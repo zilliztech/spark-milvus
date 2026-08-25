@@ -475,8 +475,17 @@ case class MilvusS3Option(
 
   def getFilePath(path: String): Path = {
     if (notEmpty(s3FileSystemType)) {
-      if (path.startsWith("s3a://")) {
-        new Path(path)
+      if (path.startsWith("s3a://") || path.startsWith("s3://")) {
+        // Canonicalize Milvus-format s3://<address>/<bucket>/<key> so the
+        // endpoint is not treated as the bucket. Thread the configured
+        // endpoint so port-less endpoints are recognized too.
+        new Path(
+          MilvusStoragePath.toStandardS3Path(
+            path,
+            endpoint = s3Endpoint,
+            configuredBucket = s3BucketName
+          )
+        )
       } else {
         val finalPath = s"s3a://${s3BucketName}/${s3RootPath}/${path}"
         new Path(new URI(finalPath))
