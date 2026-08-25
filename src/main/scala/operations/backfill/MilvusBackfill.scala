@@ -1,9 +1,11 @@
 package com.zilliz.spark.connector.operations.backfill
 
+import scala.collection.mutable
 import scala.collection.JavaConverters._
 
 import org.apache.hadoop.fs.Path
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.functions._
@@ -35,6 +37,11 @@ import com.zilliz.spark.connector.write.{
 object MilvusBackfill {
 
   private val logger = LoggerFactory.getLogger(getClass)
+
+  private[backfill] final case class BackfillSource(
+      dataFrame: DataFrame,
+      checkpointRDD: Option[RDD[Row]]
+  )
 
   /** Marker column added to the backfill side before the left join so we can
     * count how many source rows found a join-key match (non-null marker →
@@ -103,8 +110,11 @@ object MilvusBackfill {
       case Right(_) => // Continue
     }
 
-    // Tracked so we can unpersist in the outer finally, even on mid-flight
-    // failure (the cache is taken right after column mapping, below).
+    // OSS source reads use a local-checkpointed RDD to sever the external
+    // storage lineage while scoped credentials are installed. Keep the actual
+    // persisted RDD so its blocks can be released after the transformed
+    // backfill DataFrame is materialized, including on failure.
+    var sourceCheckpointRDD: Option[RDD[Row]] = None
     var cachedBackfillDF: DataFrame = null
 
     logger.info(s"Backfill mode: ${config.mode}")
@@ -189,7 +199,9 @@ object MilvusBackfill {
       val rawBackfillDF =
         readBackfillData(spark, backfillDataPath, config) match {
           case Left(error) => return Left(error)
-          case Right(df)   => df
+          case Right(source) =>
+            sourceCheckpointRDD = source.checkpointRDD
+            source.dataFrame
         }
 
       // Reproject via the existing PK column-mapping contract, then separate
@@ -284,11 +296,14 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
-      // Cache so the upcoming join-key aggregation doesn't force
-      // a second parquet scan when performJoin consumes the DF later. The
-      // count also eagerly validates every normalized vector row.
-      backfillDF.cache()
-      cachedBackfillDF = backfillDF
+      // Non-OSS sources retain their recoverable external-storage lineage, so
+      // cache the transformed DataFrame to avoid a second scan. OSS sources
+      // instead retain the single local-checkpoint RDD until every consumer
+      // completes; caching this derived DataFrame would hold two full copies.
+      if (sourceCheckpointRDD.isEmpty) {
+        backfillDF.cache()
+        cachedBackfillDF = backfillDF
+      }
 
       val joinKeyStats = validateJoinKeyCardinality(
         backfillDF,
@@ -449,6 +464,14 @@ object MilvusBackfill {
             logger.warn("Failed to unpersist backfill DataFrame", e)
         }
       }
+      sourceCheckpointRDD.foreach { checkpointRDD =>
+        try {
+          checkpointRDD.unpersist()
+        } catch {
+          case e: Exception =>
+            logger.warn("Failed to unpersist source checkpoint RDD", e)
+        }
+      }
     }
   }
 
@@ -458,30 +481,32 @@ object MilvusBackfill {
       spark: SparkSession,
       rawPath: String,
       config: BackfillConfig
-  ): Either[BackfillError, DataFrame] = {
+  ): Either[BackfillError, BackfillSource] = {
     // Hadoop 3.4.1 has separate s3:// and s3a:// FileSystem implementations
     // and per-bucket fs.s3a.bucket.<b>.* config is only honored by
     // S3AFileSystem. Force the s3a scheme so the credentials we just wrote
     // actually take effect.
-    val path = normalizeS3Scheme(rawPath)
+    val path = normalizeObjectStorageScheme(rawPath, config)
     try {
-      // Ensure Hadoop S3A is configured for the source bucket (may differ
-      // from the Milvus storage bucket) before reading the parquet.
-      configureHadoopS3ForPath(spark, path, config, isSource = true)
-      val df = spark.read.parquet(path)
-
-      // Minimum shape check; pk presence and field-count checks are enforced
-      // after column mapping is applied (see applyColumnMapping).
-      if (df.columns.isEmpty) {
-        return Left(
-          DataReadError(
-            path = path,
-            message = "Backfill parquet is empty (no columns)"
+      // Configure the source bucket before reading the parquet. OSS must be
+      // fully materialized while this temporary credential scope is active;
+      // S3A uses persistent per-bucket configuration and does not need it.
+      Right(withScopedHadoopStorage(spark, path, config, isSource = true) {
+        // Materialize while source-bucket credentials are installed. Spark
+        // evaluates DataFrame reads lazily, so returning an unmaterialized DF
+        // would allow later main-bucket configuration to leak into this read.
+        val df = spark.read.parquet(path)
+        if (df.columns.isEmpty) {
+          throw new IllegalArgumentException(
+            "Backfill parquet is empty (no columns)"
           )
-        )
-      }
-
-      Right(df)
+        }
+        if (path.startsWith("oss://")) {
+          localCheckpointBackfillData(spark, df)
+        } else {
+          BackfillSource(df, None)
+        }
+      })
     } catch {
       case e: Exception =>
         logger.error(s"Failed to read Parquet file from $path", e)
@@ -492,6 +517,31 @@ object MilvusBackfill {
             cause = Some(e)
           )
         )
+    }
+  }
+
+  private[backfill] def localCheckpointBackfillData(
+      spark: SparkSession,
+      dataFrame: DataFrame
+  ): BackfillSource = {
+    // Copy external Rows before checkpointing because Spark's physical plans
+    // may reuse mutable row objects. The checkpoint severs the OSS lineage,
+    // and retaining this exact RDD gives run() a reliable cleanup handle.
+    val checkpointRDD = dataFrame.rdd.map(_.copy())
+    checkpointRDD.localCheckpoint()
+    try {
+      checkpointRDD.count()
+      BackfillSource(
+        spark.createDataFrame(checkpointRDD, dataFrame.schema),
+        Some(checkpointRDD)
+      )
+    } catch {
+      case e: Exception =>
+        try checkpointRDD.unpersist()
+        catch {
+          case cleanupError: Exception => e.addSuppressed(cleanupError)
+        }
+        throw e
     }
   }
 
@@ -1587,23 +1637,28 @@ object MilvusBackfill {
   ]] = {
     if (metadata.manifestList.isEmpty) return Right(Seq.empty)
     try {
-      // Register S3A bucket credentials so V2SegmentLoader can read AVRO +
-      // parquet footers from minio / S3. The main bucket (not the source
-      // parquet bucket) holds the snapshot.
-      configureHadoopS3ForPath(
-        spark,
-        s"s3a://${config.s3BucketName}/",
+      // Configure a private Hadoop view so V2SegmentLoader can read AVRO and
+      // parquet footers without mutating the Spark session's shared OSS
+      // credentials. The main bucket (not the source bucket) holds these
+      // snapshot artifacts.
+      val hadoopConf = new org.apache.hadoop.conf.Configuration(
+        spark.sparkContext.hadoopConfiguration
+      )
+      configureHadoopStorageForPath(
+        hadoopConf,
+        storagePath(config, ""),
         config,
         isSource = false
       )
-      val hadoopConf = spark.sparkContext.hadoopConfiguration
+      hadoopConf.set("fs.oss.impl.disable.cache", "true")
       com.zilliz.spark.connector.read.V2SegmentLoader
         .loadV2Segments(
           metadata.manifestList,
           config.s3BucketName,
           hadoopConf,
           manifestSchemaVersion = metadata.manifestSchemaVersion,
-          applyDeletes = false
+          applyDeletes = false,
+          storageScheme = storageScheme(config)
         ) match {
         case Right(segs) =>
           // Workaround for Milvus snapshot not yet exposing FieldBinlog.child_fields:
@@ -1706,9 +1761,10 @@ object MilvusBackfill {
     val logIdCounter = new java.util.concurrent.atomic.AtomicLong(logIdBase)
     val allocator: () => Long = () => logIdCounter.incrementAndGet()
 
-    val outputRoot =
-      s"s3a://${config.s3BucketName}/${config.s3RootPath.stripSuffix("/")}/insert_log/" +
-        s"$collectionID/$partitionID/$segmentID"
+    val outputRoot = storagePath(
+      config,
+      s"${config.s3RootPath.stripSuffix("/")}/insert_log/$collectionID/$partitionID/$segmentID"
+    )
 
     // Reuse the same MilvusOption plumbing the V3 writer uses — the new V2
     // writer talks to S3 via Arrow's filesystem (inside milvus-storage), so
@@ -1927,18 +1983,20 @@ object MilvusBackfill {
     // Same s3:// → s3a:// normalization as readSnapshotJson /
     // readBackfillData. Without it, an s3:// URL would route to the legacy
     // S3FileSystem which ignores fs.s3a.bucket.<b>.* config.
-    val outputPath = normalizeS3Scheme(rawOutputPath)
+    val outputPath = normalizeObjectStorageScheme(rawOutputPath, config)
     try {
-      configureHadoopS3ForPath(spark, outputPath, config, isSource = false)
-      val hadoopPath = new Path(outputPath)
-      val fs = hadoopPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
-      val out = fs.create(hadoopPath, true)
-      try {
-        out.write(
-          result.toJson.getBytes(java.nio.charset.StandardCharsets.UTF_8)
-        )
-      } finally {
-        out.close()
+      withScopedHadoopStorage(spark, outputPath, config, isSource = false) {
+        val hadoopPath = new Path(outputPath)
+        val fs =
+          hadoopPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
+        val out = fs.create(hadoopPath, true)
+        try {
+          out.write(
+            result.toJson.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+          )
+        } finally {
+          out.close()
+        }
       }
       logger.info(s"Backfill result JSON written to: $outputPath")
       Right(())
@@ -1971,6 +2029,164 @@ object MilvusBackfill {
     else path
   }
 
+  private[backfill] def normalizeObjectStorageScheme(
+      path: String,
+      config: BackfillConfig
+  ): String = {
+    if (path == null) null
+    else if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun")) {
+      if (path.startsWith("s3://")) "oss://" + path.stripPrefix("s3://")
+      else if (path.startsWith("s3a://")) "oss://" + path.stripPrefix("s3a://")
+      else path
+    } else normalizeS3Scheme(path)
+  }
+
+  private[backfill] def storageScheme(config: BackfillConfig): String =
+    if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun")) "oss"
+    else "s3a"
+
+  private[backfill] def storagePath(
+      config: BackfillConfig,
+      suffix: String
+  ): String = {
+    storageScheme(config) + "://" + config.s3BucketName + "/" + suffix
+      .stripPrefix("/")
+  }
+
+  private val OssHadoopKeys = Seq(
+    "fs.oss.impl",
+    "fs.oss.impl.disable.cache",
+    "fs.oss.endpoint",
+    "fs.oss.connection.secure.enabled",
+    "fs.oss.accessKeyId",
+    "fs.oss.accessKeySecret",
+    BackfillConfig.HadoopOssSecurityToken,
+    BackfillConfig.HadoopOssCredentialsProvider
+  )
+
+  private[backfill] def withScopedHadoopStorage[T](
+      spark: SparkSession,
+      path: String,
+      config: BackfillConfig,
+      isSource: Boolean
+  )(operation: => T): T = {
+    val hadoopConf = spark.sparkContext.hadoopConfiguration
+    if (path == null || !path.startsWith("oss://")) {
+      configureHadoopStorageForPath(hadoopConf, path, config, isSource)
+      return operation
+    }
+
+    val previous = mutable.LinkedHashMap.empty[String, Option[String]]
+    OssHadoopKeys.foreach(key => previous.put(key, Option(hadoopConf.get(key))))
+    try {
+      configureHadoopStorageForPath(hadoopConf, path, config, isSource)
+      hadoopConf.set("fs.oss.impl.disable.cache", "true")
+      operation
+    } finally {
+      previous.foreach {
+        case (key, Some(value)) => hadoopConf.set(key, value)
+        case (key, None)        => hadoopConf.unset(key)
+      }
+    }
+  }
+
+  private[backfill] def configureHadoopStorageForPath(
+      hadoopConf: org.apache.hadoop.conf.Configuration,
+      path: String,
+      config: BackfillConfig,
+      isSource: Boolean
+  ): Unit = {
+    val normalized = path
+    if (normalized != null && normalized.startsWith("oss://")) {
+      configureHadoopOssForPath(hadoopConf, normalized, config, isSource)
+    } else {
+      configureHadoopS3ForPath(hadoopConf, normalized, config, isSource)
+    }
+  }
+
+  private[backfill] def configureHadoopStorageForPath(
+      spark: SparkSession,
+      path: String,
+      config: BackfillConfig,
+      isSource: Boolean
+  ): Unit = configureHadoopStorageForPath(
+    spark.sparkContext.hadoopConfiguration,
+    normalizeObjectStorageScheme(path, config),
+    config,
+    isSource
+  )
+
+  private[backfill] def configureHadoopOssForPath(
+      hadoopConf: org.apache.hadoop.conf.Configuration,
+      path: String,
+      config: BackfillConfig,
+      isSource: Boolean
+  ): Unit = {
+    if (path == null || !path.startsWith("oss://")) return
+    val withoutScheme = path.stripPrefix("oss://")
+    val slash = withoutScheme.indexOf('/')
+    val bucket =
+      if (slash < 0) withoutScheme else withoutScheme.substring(0, slash)
+    if (bucket.isEmpty) return
+
+    val endpoint =
+      if (isSource) config.sourceS3Endpoint.getOrElse(config.s3Endpoint)
+      else config.s3Endpoint
+    val accessKey =
+      if (isSource) config.sourceS3AccessKey.getOrElse(config.s3AccessKey)
+      else config.s3AccessKey
+    val secretKey =
+      if (isSource) config.sourceS3SecretKey.getOrElse(config.s3SecretKey)
+      else config.s3SecretKey
+    val useSSL =
+      if (isSource) config.sourceS3UseSSL.getOrElse(config.s3UseSSL)
+      else config.s3UseSSL
+    val useIam =
+      if (isSource) config.sourceS3UseIam.getOrElse(config.s3UseIam)
+      else config.s3UseIam
+    hadoopConf.set(
+      "fs.oss.impl",
+      "org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem"
+    )
+    if (endpoint != null && endpoint.nonEmpty)
+      hadoopConf.set("fs.oss.endpoint", endpoint)
+    if (useSSL) hadoopConf.set("fs.oss.connection.secure.enabled", "true")
+    else hadoopConf.unset("fs.oss.connection.secure.enabled")
+    if (useIam) {
+      val provider = Option(
+        hadoopConf.getTrimmed(BackfillConfig.HadoopOssCredentialsProvider)
+      ).filter(_.nonEmpty)
+      if (provider.isEmpty) {
+        throw new IllegalArgumentException(
+          s"${BackfillConfig.HadoopOssCredentialsProvider} must be configured for OSS IAM access"
+        )
+      }
+      hadoopConf.unset("fs.oss.accessKeyId")
+      hadoopConf.unset("fs.oss.accessKeySecret")
+    } else {
+      hadoopConf.set("fs.oss.accessKeyId", accessKey)
+      hadoopConf.set("fs.oss.accessKeySecret", secretKey)
+      hadoopConf.unset(BackfillConfig.HadoopOssSecurityToken)
+      // hadoop-aliyun constructs AliyunCredentialsProvider itself from the
+      // accessKeyId/accessKeySecret properties. The class has no (URI,
+      // Configuration) or no-arg constructor, so configuring it explicitly
+      // causes filesystem initialization to fail.
+      hadoopConf.unset(BackfillConfig.HadoopOssCredentialsProvider)
+    }
+  }
+
+  private[backfill] def configureHadoopOssForPath(
+      spark: SparkSession,
+      path: String,
+      config: BackfillConfig,
+      isSource: Boolean
+  ): Unit = configureHadoopOssForPath(
+    spark.sparkContext.hadoopConfiguration,
+    path,
+    config,
+    isSource
+  )
+
   /** Configure Hadoop S3A credentials for the bucket referenced by `path`.
     *
     * Uses per-bucket keys (`fs.s3a.bucket.<bucket>.*`) so that the backfill
@@ -1984,7 +2200,7 @@ object MilvusBackfill {
     *   when a particular field is unset.
     */
   private[backfill] def configureHadoopS3ForPath(
-      spark: SparkSession,
+      hadoopConf: org.apache.hadoop.conf.Configuration,
       path: String,
       config: BackfillConfig,
       isSource: Boolean
@@ -2022,7 +2238,6 @@ object MilvusBackfill {
       if (isSource) config.sourceS3Region.getOrElse(config.s3Region)
       else config.s3Region
 
-    val hadoopConf = spark.sparkContext.hadoopConfiguration
     val prefix = s"fs.s3a.bucket.$bucket"
 
     // Endpoint + path style + SSL are safe to set in both IAM and static modes
@@ -2086,6 +2301,18 @@ object MilvusBackfill {
     )
   }
 
+  private[backfill] def configureHadoopS3ForPath(
+      spark: SparkSession,
+      path: String,
+      config: BackfillConfig,
+      isSource: Boolean
+  ): Unit = configureHadoopS3ForPath(
+    spark.sparkContext.hadoopConfiguration,
+    path,
+    config,
+    isSource
+  )
+
   /** Read snapshot JSON content from S3 or local file system. Returns the JSON
     * string.
     */
@@ -2101,24 +2328,26 @@ object MilvusBackfill {
     try {
       // Check if it's an S3 path
       if (
-        snapshotPath.startsWith("s3://") || snapshotPath.startsWith("s3a://")
+        snapshotPath.startsWith("s3://") || snapshotPath.startsWith(
+          "s3a://"
+        ) || snapshotPath.startsWith("oss://")
       ) {
 
         // Construct full S3 path (ensure s3a:// scheme for Hadoop)
-        val s3Path = if (snapshotPath.startsWith("s3://")) {
-          normalizeS3Scheme(snapshotPath)
-        } else {
-          snapshotPath
-        }
+        val s3Path = normalizeObjectStorageScheme(snapshotPath, config)
 
         // Configure S3 settings on Spark's Hadoop Configuration (per-bucket
         // so that snapshot bucket and backfill source bucket can use
         // different credentials in the same Spark session).
-        configureHadoopS3ForPath(spark, s3Path, config, isSource = false)
-
-        // Use Spark's DataFrame API to read the file (avoids Hadoop version issues)
-        val df = spark.read.text(s3Path)
-        val json = df.collect().map(_.getString(0)).mkString("\n")
+        val json = withScopedHadoopStorage(
+          spark,
+          s3Path,
+          config,
+          isSource = false
+        ) {
+          // Use Spark's DataFrame API to read the file (avoids Hadoop version issues)
+          spark.read.text(s3Path).collect().map(_.getString(0)).mkString("\n")
+        }
 
         Right(json)
 

@@ -182,6 +182,7 @@ lazy val root = (project in file("."))
       avro,
       hadoopCommon,
       hadoopAws,
+      hadoopAliyun,
       awsSdkS3,
       awsSdkS3Transfer,
       awsSdkCore,

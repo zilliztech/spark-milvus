@@ -421,6 +421,7 @@ object BackfillConfig {
     "fs.oss.assumed.role.arn"
   private[backfill] val HadoopOssCredentialsProvider =
     "fs.oss.credentials.provider"
+  private[backfill] val HadoopOssSecurityToken = "fs.oss.securityToken"
   private[backfill] val HadoopOssAssumedRoleSessionName =
     "fs.oss.assumed.role.session.name"
   private[backfill] val HadoopOssAssumedRoleExternalId =
