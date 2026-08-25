@@ -145,6 +145,11 @@ object MilvusOption {
   val BackfillModeOverwrite = "overwrite"
 
   // Snapshot-based reading options (for offline/client-free mode)
+  // Backup-based reading options (offline/client-free). `milvus.backup.dir`
+  // points at a binlog-format backup produced by milvus-backup (the directory
+  // whose `meta/full_meta.json` holds the collection schema + segment layout).
+  val BackupDir = "milvus.backup.dir"
+
   val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode
   // JSON array of StorageV2ManifestItem. Despite the "V2" in the class name,
   // these are StorageV3 loon manifests (segment-info storage_version = 3).
@@ -230,6 +235,50 @@ object MilvusOption {
 
   def validateSnapshotModeOptions(options: CaseInsensitiveStringMap): Unit = {
     validateSnapshotModeOptionsFrom(key => Option(options.get(key)))
+  }
+
+  private def backupDirFrom(
+      getOption: String => Option[String]
+  ): Option[String] =
+    getOption(BackupDir).map(_.trim).filter(_.nonEmpty)
+
+  def backupDir(options: Map[String, String]): Option[String] = {
+    backupDirFrom { key =>
+      options.collectFirst {
+        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
+          value
+      }
+    }
+  }
+
+  def backupDir(options: CaseInsensitiveStringMap): Option[String] = {
+    backupDirFrom(key => Option(options.get(key)))
+  }
+
+  def isBackupMode(options: Map[String, String]): Boolean =
+    backupDir(options).isDefined
+
+  def isBackupMode(options: CaseInsensitiveStringMap): Boolean =
+    backupDir(options).isDefined
+
+  /** Backup mode reads a milvus-backup binlog-format export offline. It is
+    * mutually exclusive with snapshot mode: pick one source of truth for the
+    * segment layout.
+    */
+  def validateBackupModeOptions(options: Map[String, String]): Unit = {
+    if (isBackupMode(options) && isSnapshotMode(options)) {
+      throw new IllegalArgumentException(
+        s"$BackupDir and snapshot mode ($SnapshotMode/$SnapshotManifests/$SnapshotV2Segments) are mutually exclusive"
+      )
+    }
+  }
+
+  def validateBackupModeOptions(options: CaseInsensitiveStringMap): Unit = {
+    if (isBackupMode(options) && isSnapshotMode(options)) {
+      throw new IllegalArgumentException(
+        s"$BackupDir and snapshot mode ($SnapshotMode/$SnapshotManifests/$SnapshotV2Segments) are mutually exclusive"
+      )
+    }
   }
 
   private def readApplyDeletesFrom(

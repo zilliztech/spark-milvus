@@ -59,6 +59,7 @@ import com.zilliz.spark.connector.{
 }
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
+  BackupMetaReader,
   MilvusDeltaLogReader,
   MilvusPackedV2DeleteContext,
   MilvusPackedV2InputPartition,
@@ -86,8 +87,10 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
     val options = new CaseInsensitiveStringMap(properties)
     val milvusOption = MilvusOption(options)
     MilvusOption.validateSnapshotModeOptions(options)
+    MilvusOption.validateBackupModeOptions(options)
     val isSnapshotMode = MilvusOption.isSnapshotMode(options)
-    if (milvusOption.uri.isEmpty && !isSnapshotMode) {
+    val isBackupMode = MilvusOption.isBackupMode(options)
+    if (milvusOption.uri.isEmpty && !isSnapshotMode && !isBackupMode) {
       throw new IllegalArgumentException(
         s"Option '${MilvusOption.MilvusUri}' is required for reading milvus data."
       )
@@ -103,7 +106,9 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
 
     // Check for snapshot mode - use snapshot schema if provided
     MilvusOption.validateSnapshotModeOptions(options)
+    MilvusOption.validateBackupModeOptions(options)
     val isSnapshotMode = MilvusOption.isSnapshotMode(options)
+    val isBackupMode = MilvusOption.isBackupMode(options)
 
     if (isSnapshotMode) {
       // Try to get schema from snapshot JSON
@@ -126,6 +131,11 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
           // The actual schema should be provided via .schema() call
           StructType(Seq.empty)
         }
+    } else if (isBackupMode) {
+      // Backup mode is fully offline: the schema is materialized from the
+      // backup's full_meta.json when the read plans its partitions. Return an
+      // empty schema here; callers supply the real schema via .schema().
+      StructType(Seq.empty)
     } else {
       // Client-based mode (existing behavior)
       if (milvusOption.collectionName.isEmpty) {
@@ -191,6 +201,12 @@ case class MilvusTable(
   private def isSnapshotMode: Boolean =
     MilvusOption.isSnapshotMode(milvusOption.options)
 
+  /** Check if backup mode is enabled (data comes from a milvus-backup export,
+    * not client). Requires [[MilvusOption.BackupDir]] to be set.
+    */
+  private def isBackupMode: Boolean =
+    MilvusOption.isBackupMode(milvusOption.options)
+
   def initInfo(): Unit = {
     // Check for snapshot mode first - skip client calls if snapshot data is provided
     if (isSnapshotMode) {
@@ -198,10 +214,69 @@ case class MilvusTable(
         "Snapshot mode enabled - skipping Milvus client connection for collection info"
       )
       initFromSnapshot()
+    } else if (isBackupMode) {
+      logInfo(
+        "Backup mode enabled - skipping Milvus client connection for collection info"
+      )
+      initFromBackup()
     } else {
       // Client-based mode (existing behavior)
       initFromClient()
     }
+  }
+
+  /** Initialize collection info from a milvus-backup export (no client
+    * connection). The collection schema is materialized from the backup's
+    * `full_meta.json` so downstream metadata rehydration (e.g. Milvus data type
+    * / vector dimension on Spark fields) works identically to snapshot mode.
+    * Best-effort: if the meta cannot be read or parsed, we fall back to an
+    * empty schema and rely on the caller-supplied Spark schema.
+    */
+  private def initFromBackup(): Unit = {
+    val collectionId = milvusOption.options
+      .get(MilvusOption.SnapshotCollectionId)
+      .map(_.toLong)
+      .getOrElse(0L)
+    partitionID = 0L
+
+    val schemaFromMeta =
+      MilvusOption.backupDir(milvusOption.options).flatMap { dir =>
+        val conf =
+          MilvusScan.buildHadoopConfForOptions(milvusOption.options, dir)
+        BackupMetaReader
+          .readMeta(conf, dir)
+          .toOption
+          .flatMap(_.collectionBackups.headOption.flatMap(_.schema))
+          .flatMap(s =>
+            scala.util
+              .Try(
+                CollectionSchema.parseFrom(
+                  BackupMetaReader.toProtobufSchemaBytes(s)
+                )
+              )
+              .toOption
+          )
+      }
+
+    schemaFromMeta match {
+      case Some(schema) =>
+        logInfo(
+          s"Initialized from backup: collectionID=$collectionId, " +
+            s"schema='${schema.name}' with ${schema.fields.size} fields"
+        )
+      case None =>
+        logWarning(
+          "Could not materialize collection schema from backup meta; " +
+            "relying on the caller-provided Spark schema"
+        )
+    }
+
+    milvusCollection = MilvusCollectionInfo(
+      dbName = milvusOption.databaseName,
+      collectionName = milvusOption.collectionName,
+      collectionID = collectionId,
+      schema = schemaFromMeta.getOrElse(createMinimalCollectionSchema(None))
+    )
   }
 
   /** Initialize collection info from snapshot metadata (no client connection)
@@ -475,7 +550,9 @@ case class MilvusTable(
   override def schema(): StructType = {
     // In snapshot mode with provided sparkSchema, use it directly
     // This avoids the need to parse milvusCollection.schema which may be incomplete
-    if (isSnapshotMode && sparkSchema.isDefined && sparkSchema.get.nonEmpty) {
+    if (
+      (isSnapshotMode || isBackupMode) && sparkSchema.isDefined && sparkSchema.get.nonEmpty
+    ) {
       logInfo(
         s"Using provided sparkSchema in snapshot mode: ${sparkSchema.get.fieldNames.mkString(", ")}"
       )
@@ -666,7 +743,8 @@ class MilvusScanBuilder(
     // TODO: implement filter pushdown for V2 packed reader in a separate PR.
     val isPackedV2 = Option(options.get(MilvusOption.SnapshotV2Segments))
       .exists(_.nonEmpty)
-    if (isPackedV2) {
+    val isBackupMode = MilvusOption.isBackupMode(options)
+    if (isPackedV2 || isBackupMode) {
       pushedFilterArray = Array.empty
       return filters
     }
@@ -1363,6 +1441,87 @@ object MilvusScan extends Logging {
     metadata
   }
 
+  /** Build a Hadoop `Configuration` for reading objects referenced by a
+    * snapshot/backup path, applying the connector's `fs.*` options plus any
+    * per-bucket S3A configuration. Extracted as a companion method so both the
+    * scan planner and table-level schema rehydration (backup mode) share it.
+    */
+  private[sources] def buildHadoopConfForOptions(
+      rawOptions: scala.collection.Map[String, String],
+      path: String
+  ): Configuration = {
+    val conf = SparkSession.getActiveSession
+      .orElse(SparkSession.getDefaultSession)
+      .map(_.sessionState.newHadoopConf())
+      .getOrElse(new Configuration())
+    val endpoint = optionValue(rawOptions, Properties.FsConfig.FsAddress)
+    val accessKey = optionValue(rawOptions, Properties.FsConfig.FsAccessKeyId)
+    val secretKey =
+      optionValue(rawOptions, Properties.FsConfig.FsAccessKeyValue)
+    val useSsl = optionValue(rawOptions, Properties.FsConfig.FsUseSSL)
+    val region = optionValue(rawOptions, Properties.FsConfig.FsRegion)
+    val useIam = optionValue(rawOptions, Properties.FsConfig.FsUseIam)
+      .exists(_.trim.equalsIgnoreCase("true"))
+    val useVirtualHost =
+      optionValue(rawOptions, Properties.FsConfig.FsUseVirtualHost)
+        .filter(_.trim.nonEmpty)
+    val pathStyle = optionValue(rawOptions, "fs.s3a.path.style.access")
+      .orElse(
+        useVirtualHost.map(v => (!v.trim.equalsIgnoreCase("true")).toString)
+      )
+
+    def setIfDefined(key: String, value: Option[String]): Unit = {
+      value.map(_.trim).filter(_.nonEmpty).foreach(conf.set(key, _))
+    }
+
+    def configureS3A(prefix: String): Unit = {
+      setIfDefined(s"$prefix.endpoint", endpoint)
+      setIfDefined(s"$prefix.connection.ssl.enabled", useSsl)
+      setIfDefined(s"$prefix.path.style.access", pathStyle)
+      setIfDefined(s"$prefix.endpoint.region", region)
+      setIfDefined(s"$prefix.region", region)
+      if (useIam) {
+        conf.unset(s"$prefix.access.key")
+        conf.unset(s"$prefix.secret.key")
+        conf.set(
+          s"$prefix.aws.credentials.provider",
+          DefaultAwsCredentialsProvider
+        )
+      } else {
+        setIfDefined(s"$prefix.access.key", accessKey)
+        setIfDefined(s"$prefix.secret.key", secretKey)
+        if (
+          accessKey.exists(_.trim.nonEmpty) && secretKey.exists(_.trim.nonEmpty)
+        ) {
+          conf.set(
+            s"$prefix.aws.credentials.provider",
+            SimpleAwsCredentialsProvider
+          )
+        }
+      }
+    }
+
+    if (conf.get("fs.s3a.impl") == null) {
+      conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    }
+    conf.set("fs.s3a.impl.disable.cache", "true")
+    if (
+      !useIam && (accessKey
+        .forall(_.trim.isEmpty) || secretKey.forall(_.trim.isEmpty))
+    ) {
+      logWarning(
+        "Snapshot/backup S3 credentials were not provided; Hadoop S3A will use the default AWS credential provider chain."
+      )
+    }
+    configureS3A("fs.s3a")
+
+    snapshotBucketsToConfigure(
+      path,
+      connectorS3BucketOption(rawOptions).getOrElse("")
+    ).foreach(bucket => configureS3A(s"fs.s3a.bucket.$bucket"))
+    conf
+  }
+
 }
 
 class MilvusScan(
@@ -1400,6 +1559,7 @@ class MilvusScan(
 
   private[sources] def shouldCacheInputPartitions: Boolean =
     MilvusOption.isSnapshotMode(options) ||
+      MilvusOption.isBackupMode(options) ||
       MilvusScan.canUseClientSnapshotFastPath(milvusOption)
 
   private def computeInputPartitions(): Array[InputPartition] = {
@@ -1409,6 +1569,10 @@ class MilvusScan(
         options.get(MilvusOption.SnapshotManifests)
       )
       return planInputPartitionsFromSnapshot(snapshotManifests.getOrElse(""))
+    }
+
+    if (MilvusOption.isBackupMode(options)) {
+      return planInputPartitionsFromBackup()
     }
 
     if (milvusOption.collectionName.isEmpty) {
@@ -1777,87 +1941,8 @@ class MilvusScan(
 
   private[sources] def buildSnapshotHadoopConf(
       snapshotPath: String
-  ): Configuration = {
-    val conf = SparkSession.getActiveSession
-      .orElse(SparkSession.getDefaultSession)
-      .map(_.sessionState.newHadoopConf())
-      .getOrElse(new Configuration())
-    val rawOptions = milvusOption.options
-    val endpoint =
-      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsAddress)
-    val accessKey =
-      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsAccessKeyId)
-    val secretKey =
-      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsAccessKeyValue)
-    val useSsl =
-      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsUseSSL)
-    val region =
-      MilvusScan.optionValue(rawOptions, Properties.FsConfig.FsRegion)
-    val useIam = MilvusScan
-      .optionValue(rawOptions, Properties.FsConfig.FsUseIam)
-      .exists(_.trim.equalsIgnoreCase("true"))
-    val useVirtualHost = MilvusScan
-      .optionValue(rawOptions, Properties.FsConfig.FsUseVirtualHost)
-      .filter(_.trim.nonEmpty)
-    val pathStyle = MilvusScan
-      .optionValue(rawOptions, "fs.s3a.path.style.access")
-      .orElse(
-        useVirtualHost.map(v => (!v.trim.equalsIgnoreCase("true")).toString)
-      )
-
-    def setIfDefined(key: String, value: Option[String]): Unit = {
-      value.map(_.trim).filter(_.nonEmpty).foreach(conf.set(key, _))
-    }
-
-    def configureS3A(prefix: String): Unit = {
-      setIfDefined(s"$prefix.endpoint", endpoint)
-      setIfDefined(s"$prefix.connection.ssl.enabled", useSsl)
-      setIfDefined(s"$prefix.path.style.access", pathStyle)
-      setIfDefined(s"$prefix.endpoint.region", region)
-      setIfDefined(s"$prefix.region", region)
-      if (useIam) {
-        conf.unset(s"$prefix.access.key")
-        conf.unset(s"$prefix.secret.key")
-        conf.set(
-          s"$prefix.aws.credentials.provider",
-          MilvusScan.DefaultAwsCredentialsProvider
-        )
-      } else {
-        setIfDefined(s"$prefix.access.key", accessKey)
-        setIfDefined(s"$prefix.secret.key", secretKey)
-        if (
-          accessKey.exists(_.trim.nonEmpty) && secretKey.exists(_.trim.nonEmpty)
-        ) {
-          conf.set(
-            s"$prefix.aws.credentials.provider",
-            MilvusScan.SimpleAwsCredentialsProvider
-          )
-        }
-      }
-    }
-
-    if (conf.get("fs.s3a.impl") == null) {
-      conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-    }
-    conf.set("fs.s3a.impl.disable.cache", "true")
-    if (
-      !useIam && (accessKey
-        .forall(_.trim.isEmpty) || secretKey.forall(_.trim.isEmpty))
-    ) {
-      logWarning(
-        "Snapshot S3 credentials were not provided; Hadoop S3A will use the default AWS credential provider chain."
-      )
-    }
-    configureS3A("fs.s3a")
-
-    MilvusScan
-      .snapshotBucketsToConfigure(
-        snapshotPath,
-        MilvusScan.connectorS3BucketOption(rawOptions).getOrElse("")
-      )
-      .foreach(bucket => configureS3A(s"fs.s3a.bucket.$bucket"))
-    conf
-  }
+  ): Configuration =
+    MilvusScan.buildHadoopConfForOptions(milvusOption.options, snapshotPath)
 
   private[sources] def readAllBytes(
       conf: Configuration,
@@ -2313,6 +2398,133 @@ class MilvusScan(
       inheritedDeletePlansByPartition = inheritedDeletePlansByPartition
     )
   }
+
+  /** Plan input partitions from a milvus-backup binlog-format export (offline,
+    * no Milvus client connection).
+    *
+    * `[[MilvusOption.BackupDir]]` points at the backup directory (the parent of
+    * `meta/full_meta.json`). The meta is translated by [[BackupMetaReader]]
+    * into the same `V2SegmentInfo` objects the snapshot path uses, then handed
+    * to the shared [[buildSnapshotPartitions]] so delete planning, extra
+    * columns, vector projection and the packed-V2 reader are all reused.
+    */
+  private def planInputPartitionsFromBackup(): Array[InputPartition] = {
+    val backupDir = MilvusOption.backupDir(options).getOrElse {
+      throw new IllegalArgumentException(
+        s"${MilvusOption.BackupDir} is not set"
+      )
+    }
+    logInfo(
+      s"Using backup mode for partition planning (no Milvus client connection): $backupDir"
+    )
+
+    val hadoopConf = buildSnapshotHadoopConf(backupDir)
+    val meta = BackupMetaReader.readMeta(hadoopConf, backupDir) match {
+      case Right(m) => m
+      case Left(err) =>
+        throw new IllegalArgumentException(
+          s"Failed to parse backup meta at ${BackupMetaReader
+              .metaPath(backupDir)}: ${err.getMessage}",
+          err
+        )
+    }
+    if (meta.isSnapshotFormat) {
+      throw new IllegalArgumentException(
+        s"Backup '${meta.name}' is in snapshot format; only binlog-format " +
+          "backups can be read as a datasource"
+      )
+    }
+    if (meta.collectionBackups.size != 1) {
+      throw new IllegalArgumentException(
+        s"Backup '${meta.name}' must contain exactly one collection for a " +
+          s"datasource read, got ${meta.collectionBackups.size}"
+      )
+    }
+    val coll = meta.collectionBackups.head
+    val schemaBytes = coll.schema
+      .map(BackupMetaReader.toProtobufSchemaBytes)
+      .getOrElse(Array.empty[Byte])
+    val bucket = backupBucket(backupDir)
+    val applyDeletes = MilvusOption.readApplyDeletes(options)
+    val v2Segments = BackupMetaReader.toV2Segments(
+      meta,
+      hadoopConf,
+      bucket,
+      applyDeletes
+    ) match {
+      case Right(segs) => segs
+      case Left(err) =>
+        throw new IllegalStateException(
+          s"Failed to load StorageV2 segments from backup: ${err.getMessage}",
+          err
+        )
+    }
+    MilvusScan.ensureClientSnapshotHasPackedSegments(
+      Seq.empty,
+      v2Segments,
+      coll.collectionName
+    )
+
+    val bucketOpt = if (bucket.nonEmpty) Some(bucket) else None
+    val v2DeletePlans = loadV2DeletePlans(
+      v2Segments,
+      schemaBytes,
+      bucketOpt,
+      hadoopConf,
+      errorContext = "backup"
+    )
+
+    val inheritedDeleteSegments = v2Segments.filter(seg =>
+      seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
+    )
+    val inheritedDeletePlansByPartition =
+      if (!applyDeletes || inheritedDeleteSegments.isEmpty) {
+        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+      } else {
+        val pkField = CollectionSchema
+          .parseFrom(schemaBytes)
+          .fields
+          .find(_.isPrimaryKey)
+          .getOrElse {
+            throw new IllegalArgumentException(
+              "No primary key field found in schema"
+            )
+          }
+        MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+          inheritedDeleteSegments,
+          pkField,
+          bucketOpt.getOrElse(""),
+          hadoopConf
+        ) match {
+          case Right(plans) => plans
+          case Left(err) =>
+            throw new IllegalStateException(
+              s"Failed to load inherited StorageV2 delete logs from backup: ${err.getMessage}",
+              err
+            )
+        }
+      }
+
+    buildSnapshotPartitions(
+      manifestList = Seq.empty,
+      defaultPartitionId = "0",
+      schemaBytes = schemaBytes,
+      v2Segments = v2Segments,
+      v2DeletePlans = v2DeletePlans,
+      inheritedDeletePlansByPartition = inheritedDeletePlansByPartition,
+      inlineInheritedDeletePlans = true
+    )
+  }
+
+  /** Bucket holding the backup's objects: explicit `fs.bucket_name` wins,
+    * otherwise the bucket is parsed out of the backup dir URI (e.g.
+    * `s3a://bucket/backup/<name>`). Empty means local paths.
+    */
+  private def backupBucket(backupDir: String): String =
+    MilvusScan
+      .connectorS3BucketOption(milvusOption.options)
+      .orElse(MilvusScan.snapshotBucket(backupDir))
+      .getOrElse("")
 
   override def createReaderFactory(): PartitionReaderFactory = {
     val optionsMap = options.asScala.toMap

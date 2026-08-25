@@ -166,6 +166,32 @@ object MilvusParquetFooterReader extends Logging {
     }
   }
 
+  /** Read the total number of rows a parquet file contains by summing its row
+    * groups' row counts from the footer.
+    *
+    * Used by the backup datasource to recover per-file row counts that
+    * milvus-backup's meta does not persist (only `log_size` is recorded), which
+    * the packed V2 reader requires to build valid `(start_index, end_index)`
+    * ranges per file. Like the other footer reads this issues a `HEAD` + a
+    * single range `GET` for the last few KB of the file.
+    *
+    * @return
+    *   `Right(rowCount)` on success. `Left(throwable)` on I/O or parse failure.
+    */
+  def readRowCount(
+      path: String,
+      hadoopConf: Configuration
+  ): Either[Throwable, Long] = {
+    readWithFileSystem(path, hadoopConf) { inputFile =>
+      val parquet = ParquetFileReader.open(inputFile)
+      try {
+        parquet.getFooter.getBlocks.asScala.map(_.getRowCount).sum
+      } finally {
+        parquet.close()
+      }
+    }
+  }
+
   /** Parse the kv-metadata string `"100,0,1;101;102"` into `Seq(Seq(100, 0, 1),
     * Seq(101), Seq(102))`.
     *

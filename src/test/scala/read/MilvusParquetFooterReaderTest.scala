@@ -213,6 +213,46 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       Files.deleteIfExists(tmp)
     }
   }
+
+  test("readRowCount sums row groups from the footer") {
+    val tmp = Files.createTempFile("milvus-rowcount-test-", ".parquet")
+    Files.delete(tmp)
+    val schema: MessageType = Types
+      .buildMessage()
+      .required(PrimitiveTypeName.INT64)
+      .id(100)
+      .named("pk")
+      .required(PrimitiveTypeName.INT64)
+      .id(0)
+      .named("row_id")
+      .named("milvus_group")
+
+    val conf = new Configuration()
+    GroupWriteSupport.setSchema(schema, conf)
+    val writer = ExampleParquetWriter
+      .builder(new HPath(tmp.toUri))
+      .withType(schema)
+      .withConf(conf)
+      .withCompressionCodec(CompressionCodecName.UNCOMPRESSED)
+      .build()
+    try {
+      val factory = new SimpleGroupFactory(schema)
+      writer.write(factory.newGroup().append("pk", 1L).append("row_id", 10L))
+      writer.write(factory.newGroup().append("pk", 2L).append("row_id", 11L))
+      writer.write(factory.newGroup().append("pk", 3L).append("row_id", 12L))
+    } finally {
+      writer.close()
+    }
+
+    try {
+      MilvusParquetFooterReader.readRowCount(
+        tmp.toUri.toString,
+        new Configuration()
+      ) shouldBe Right(3L)
+    } finally {
+      Files.deleteIfExists(tmp)
+    }
+  }
 }
 
 class FatalFooterFileSystem extends FileSystem {
