@@ -166,6 +166,15 @@ object MilvusParquetFooterReader extends Logging {
     }
   }
 
+  /** The projection of a parquet footer the backup datasource needs to build a
+    * `V2ColumnGroup`: the file's own top-level field IDs plus its total row
+    * count, recovered from a single footer read.
+    */
+  private[read] case class ParquetFooterInfo(
+      fieldIds: Seq[Long],
+      rowCount: Long
+  )
+
   /** Read the total number of rows a parquet file contains by summing its row
     * groups' row counts from the footer.
     *
@@ -186,6 +195,40 @@ object MilvusParquetFooterReader extends Logging {
       val parquet = ParquetFileReader.open(inputFile)
       try {
         parquet.getFooter.getBlocks.asScala.map(_.getRowCount).sum
+      } finally {
+        parquet.close()
+      }
+    }
+  }
+
+  /** Read a parquet file's own field IDs and total row count with a single
+    * footer open.
+    *
+    * Used by the backup datasource to avoid opening the head file of a column
+    * group twice — once for [[readFieldIdsFromSchema]] and again for
+    * [[readRowCount]].
+    */
+  def readFieldIdsAndRowCount(
+      path: String,
+      hadoopConf: Configuration
+  ): Either[Throwable, ParquetFooterInfo] = {
+    readWithFileSystem(path, hadoopConf) { inputFile =>
+      val parquet = ParquetFileReader.open(inputFile)
+      try {
+        val footer = parquet.getFooter
+        val schema = footer.getFileMetaData.getSchema
+        val fieldIds = schema.getFields.asScala.map { t: Type =>
+          val id = t.getId
+          if (id == null) {
+            throw new IllegalStateException(
+              s"parquet column '${t.getName}' in $path has no PARQUET:field_id " +
+                s"metadata; cannot recover StorageV2 column-group field ids"
+            )
+          }
+          id.intValue().toLong
+        }.toSeq
+        val rowCount = footer.getBlocks.asScala.map(_.getRowCount).sum
+        ParquetFooterInfo(fieldIds, rowCount)
       } finally {
         parquet.close()
       }

@@ -1,7 +1,6 @@
 package com.zilliz.spark.connector.read
 
-import java.nio.file.Files
-import java.nio.file.Paths
+import java.nio.file.{Files, Paths}
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{Path => HPath}
@@ -20,10 +19,13 @@ import org.scalatest.matchers.should.Matchers
 import io.milvus.grpc.schema.{CollectionSchema, DataType}
 
 /** Tests for [[BackupMetaReader]] — parses milvus-backup's `full_meta.json` and
-  * maps it to the packed-V2 read-path objects. Local parquet files written with
-  * parquet-mr's example writer carry `PARQUET:field_id` the same way
-  * milvus-storage does, so the field-id / row-count recovery can be exercised
-  * without minio.
+  * maps it to the packed-V2 read-path objects.
+  *
+  * The meta fixtures carry **Milvus source keys** for `log_path` (e.g.
+  * `files/insert_log/...`) exactly like a real export — milvus-backup records
+  * the source key and copies the data under a separate `DestKey`. The tests
+  * materialize that `DestKey` layout on local disk and assert that the reader
+  * reconstructs those backup paths (never the source keys).
   */
 class BackupMetaReaderTest extends AnyFunSuite with Matchers {
 
@@ -47,19 +49,19 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     .named("name")
     .named("milvus_group")
 
-  /** Write a local parquet with the given rows (one `Group` per row) and return
-    * its `file://` URI.
+  /** Write a parquet file at `target` (creating parent dirs) with one `Group`
+    * per row.
     */
-  private def writeParquet(
+  private def writeParquetAt(
+      target: java.nio.file.Path,
       schema: MessageType,
       rows: List[SimpleGroupFactory => Group]
-  ): String = {
-    val tmp = Files.createTempFile("milvus-backup-test-", ".parquet")
-    Files.delete(tmp)
+  ): Unit = {
+    Files.createDirectories(target.getParent)
     val conf = new Configuration()
     GroupWriteSupport.setSchema(schema, conf)
     val writer = ExampleParquetWriter
-      .builder(new HPath(tmp.toUri))
+      .builder(new HPath(target.toUri))
       .withType(schema)
       .withConf(conf)
       .withCompressionCodec(CompressionCodecName.UNCOMPRESSED)
@@ -70,11 +72,31 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     } finally {
       writer.close()
     }
-    tmp.toUri.toString
   }
 
-  private def parquetA: String =
-    writeParquet(
+  /** Materialize the backup object layout milvus-backup's `DestKey` produces
+    * under `root` for the fixture segments:
+    *
+    * {{{
+    *   binlogs/insert_log/444/555/777/777/103/{1,2}   (2 rows, 1 row)
+    *   binlogs/insert_log/444/555/777/777/101/1        (3 rows)
+    * }}}
+    *
+    * Returns the backup dir path string.
+    */
+  private def materializeBackup(root: java.nio.file.Path): String = {
+    val seg =
+      Paths.get(
+        root.toString,
+        "binlogs",
+        "insert_log",
+        "444",
+        "555",
+        "777",
+        "777"
+      )
+    writeParquetAt(
+      Paths.get(seg.toString, "103", "1"),
       groupASchema,
       List(
         f =>
@@ -86,17 +108,15 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
           f.newGroup().append("pk", 2L).append("row_id", 11L).append("ts", 101L)
       )
     )
-
-  private def parquetB: String =
-    writeParquet(
+    writeParquetAt(
+      Paths.get(seg.toString, "103", "2"),
       groupASchema,
       List(f =>
         f.newGroup().append("pk", 3L).append("row_id", 12L).append("ts", 102L)
       )
     )
-
-  private def parquetC: String =
-    writeParquet(
+    writeParquetAt(
+      Paths.get(seg.toString, "101", "1"),
       groupCSchema,
       List(
         f => f.newGroup().append("name", "a"),
@@ -104,6 +124,8 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         f => f.newGroup().append("name", "c")
       )
     )
+    root.toString
+  }
 
   private def backupFixture(
       format: String = "",
@@ -194,6 +216,15 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
        |}""".stripMargin
   }
 
+  // Milvus source keys, as a real full_meta.json records them.
+  private val SourceKeys =
+    (
+      "files/insert_log/444/555/777/103/1",
+      "files/insert_log/444/555/777/103/2",
+      "files/insert_log/444/555/777/101/1",
+      "files/delta_log/444/-1/888/1"
+    )
+
   test("metaPath joins the backup dir with meta/full_meta.json") {
     BackupMetaReader.metaPath("s3a://bucket/backup/b1") shouldBe
       "s3a://bucket/backup/b1/meta/full_meta.json"
@@ -208,13 +239,12 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     try {
       val metaDir = Paths.get(dir.toString, "meta")
       Files.createDirectories(metaDir)
-      val json =
-        backupFixture(
-          groupAPath = "backup/b1/binlogs/insert_log/444/555/777/103/1",
-          groupBPath = "backup/b1/binlogs/insert_log/444/555/777/103/2",
-          groupCPath = "backup/b1/binlogs/insert_log/444/555/777/101/1",
-          deltaPath = "backup/b1/binlogs/delta_log/444/-1/888/1"
-        )
+      val json = backupFixture(
+        groupAPath = SourceKeys._1,
+        groupBPath = SourceKeys._2,
+        groupCPath = SourceKeys._3,
+        deltaPath = SourceKeys._4
+      )
       Files.write(
         Paths.get(metaDir.toString, "full_meta.json"),
         json.getBytes("UTF-8")
@@ -240,13 +270,12 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("toProtobufSchemaBytes round-trips the backup collection schema") {
-    val json =
-      backupFixture(
-        groupAPath = "x",
-        groupBPath = "y",
-        groupCPath = "z",
-        deltaPath = "d"
-      )
+    val json = backupFixture(
+      groupAPath = SourceKeys._1,
+      groupBPath = SourceKeys._2,
+      groupCPath = SourceKeys._3,
+      deltaPath = SourceKeys._4
+    )
     val meta = BackupMetaReader.parse(json).getOrElse(fail("expected Right"))
     val schema = meta.collectionBackups.head.schema.get
 
@@ -265,89 +294,152 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     byId(102L).typeParams.find(_.key == "dim").get.value shouldBe "8"
   }
 
-  test("toV2Segments recovers column groups, field ids and row counts") {
-    val a = parquetA
-    val b = parquetB
-    val c = parquetC
-    val meta = BackupMetaReader
-      .parse(
-        backupFixture(
-          groupAPath = a,
-          groupBPath = b,
-          groupCPath = c,
-          deltaPath = "dummy/delta.log"
+  test(
+    "toV2Segments reconstructs backup paths and recovers column groups, field ids and row counts"
+  ) {
+    val dir = Files.createTempDirectory("milvus-backup-b1-")
+    try {
+      val backupDir = materializeBackup(dir)
+      val meta = BackupMetaReader
+        .parse(
+          backupFixture(
+            groupAPath = SourceKeys._1,
+            groupBPath = SourceKeys._2,
+            groupCPath = SourceKeys._3,
+            deltaPath = SourceKeys._4
+          )
         )
+        .getOrElse(fail("expected Right"))
+
+      val segments = BackupMetaReader
+        .toV2Segments(meta, new Configuration(), backupDir)
+        .getOrElse(fail("expected Right"))
+
+      segments should have size 2
+      val seg = segments.find(_.segmentId == 777L).get
+      seg.partitionId shouldBe 555L
+      seg.numOfRows shouldBe 3L
+      seg.storageVersion shouldBe 2L
+      seg.columnGroups should have size 2
+
+      // Reconstructed backup paths (groupId=777 level present for insert_log),
+      // not the source keys carried in the meta.
+      val slot103 = seg.columnGroups.find(_.slotFieldId == 103L).get
+      slot103.fieldIds shouldBe Seq(100L, 0L, 1L)
+      slot103.filePaths shouldBe Seq(
+        s"$backupDir/binlogs/insert_log/444/555/777/777/103/1",
+        s"$backupDir/binlogs/insert_log/444/555/777/777/103/2"
       )
-      .getOrElse(fail("expected Right"))
+      slot103.fileRowCounts shouldBe Seq(2L, 1L)
 
-    val segments = BackupMetaReader
-      .toV2Segments(meta, new Configuration(), bucket = "")
-      .getOrElse(fail("expected Right"))
+      val slot101 = seg.columnGroups.find(_.slotFieldId == 101L).get
+      slot101.fieldIds shouldBe Seq(101L)
+      slot101.filePaths shouldBe Seq(
+        s"$backupDir/binlogs/insert_log/444/555/777/777/101/1"
+      )
+      slot101.fileRowCounts shouldBe Seq(3L)
 
-    segments should have size 2
-    val seg = segments.find(_.segmentId == 777L).get
-    seg.partitionId shouldBe 555L
-    seg.numOfRows shouldBe 3L
-    seg.storageVersion shouldBe 2L
-    seg.columnGroups should have size 2
-
-    val slot103 = seg.columnGroups.find(_.slotFieldId == 103L).get
-    slot103.fieldIds shouldBe Seq(100L, 0L, 1L)
-    slot103.filePaths shouldBe Seq(a, b)
-    slot103.fileRowCounts shouldBe Seq(2L, 1L)
-
-    val slot101 = seg.columnGroups.find(_.slotFieldId == 101L).get
-    slot101.fieldIds shouldBe Seq(101L)
-    slot101.filePaths shouldBe Seq(c)
-    slot101.fileRowCounts shouldBe Seq(3L)
-
-    val l0 = segments.find(_.segmentId == 888L).get
-    l0.columnGroups shouldBe empty
-    l0.deltaLogs should have size 1
-    l0.deltaLogs.head.logPath shouldBe "dummy/delta.log"
+      // L0 delta logs reconstruct without the groupID level (partition == -1).
+      val l0 = segments.find(_.segmentId == 888L).get
+      l0.columnGroups shouldBe empty
+      l0.deltaLogs should have size 1
+      l0.deltaLogs.head.logPath shouldBe
+        s"$backupDir/binlogs/delta_log/444/-1/888/1"
+    } finally {
+      deleteRecursively(dir)
+    }
   }
 
   test("toV2Segments skips L0 segments when applyDeletes is false") {
-    val meta = BackupMetaReader
-      .parse(
-        backupFixture(
-          groupAPath = parquetA,
-          groupBPath = parquetB,
-          groupCPath = parquetC,
-          deltaPath = "dummy/delta.log"
+    val dir = Files.createTempDirectory("milvus-backup-b1-")
+    try {
+      val backupDir = materializeBackup(dir)
+      val meta = BackupMetaReader
+        .parse(
+          backupFixture(
+            groupAPath = SourceKeys._1,
+            groupBPath = SourceKeys._2,
+            groupCPath = SourceKeys._3,
+            deltaPath = SourceKeys._4
+          )
         )
-      )
-      .getOrElse(fail("expected Right"))
-    val segments = BackupMetaReader
-      .toV2Segments(
-        meta,
-        new Configuration(),
-        bucket = "",
-        applyDeletes = false
-      )
-      .getOrElse(fail("expected Right"))
-    segments.map(_.segmentId) shouldBe Seq(777L)
+        .getOrElse(fail("expected Right"))
+      val segments = BackupMetaReader
+        .toV2Segments(
+          meta,
+          new Configuration(),
+          backupDir,
+          applyDeletes = false
+        )
+        .getOrElse(fail("expected Right"))
+      segments.map(_.segmentId) shouldBe Seq(777L)
+    } finally {
+      deleteRecursively(dir)
+    }
   }
 
-  test("buildV2Segment rejects StorageV3+ and skips StorageV1") {
-    val v3 = BackupMetaReader.SegmentBackup(
-      segmentId = 1L,
-      storageVersion = 3L
-    )
+  test(
+    "buildV2Segment fails hard for non-L0 non-StorageV2 and keeps L0 without a storage version"
+  ) {
+    val conf = new Configuration()
+
+    // StorageV3 data segment -> Left.
+    val v3 = BackupMetaReader.SegmentBackup(segmentId = 1L, storageVersion = 3L)
     BackupMetaReader
-      .buildV2Segment(v3, new Configuration(), "", applyDeletes = true)
+      .buildV2Segment(v3, conf, "/tmp/backup", applyDeletes = true)
       .left
       .toOption
       .get
-      .getMessage should include("StorageV3")
+      .getMessage should include("storage_version")
 
-    val v1 = BackupMetaReader.SegmentBackup(
-      segmentId = 2L,
-      storageVersion = 0L
-    )
+    // StorageV1 data segment -> fails hard too (partial dataset is worse than
+    // an error).
+    val v1 = BackupMetaReader.SegmentBackup(segmentId = 2L, storageVersion = 0L)
     BackupMetaReader
-      .buildV2Segment(v1, new Configuration(), "", applyDeletes = true) shouldBe
-      Right(None)
+      .buildV2Segment(v1, conf, "/tmp/backup", applyDeletes = true)
+      .isLeft shouldBe true
+
+    // L0 delete-only segment with storage_version 0/omitted (how Milvus 2.6
+    // creates them) must NOT fall into the StorageV1 skip path.
+    val l0NoVersion = BackupMetaReader.SegmentBackup(
+      segmentId = 3L,
+      collectionId = 444L,
+      partitionId = -1L,
+      isL0 = true,
+      storageVersion = 0L,
+      deltalogs = Seq(
+        BackupMetaReader.FieldBinlog(
+          fieldId = 0L,
+          binlogs = Seq(
+            BackupMetaReader.Binlog(
+              logId = 1L,
+              logPath = "files/delta_log/444/-1/3/1",
+              logSize = 10L
+            )
+          )
+        )
+      )
+    )
+    BackupMetaReader.buildV2Segment(
+      l0NoVersion,
+      conf,
+      "/tmp/backup",
+      applyDeletes = true
+    ) match {
+      case Right(Some(seg)) =>
+        seg.columnGroups shouldBe empty
+        seg.deltaLogs.map(_.logPath) shouldBe Seq(
+          "/tmp/backup/binlogs/delta_log/444/-1/3/1"
+        )
+      case other => fail(s"expected Right(Some), got $other")
+    }
+    // With applyDeletes=false the L0 segment is skipped entirely.
+    BackupMetaReader.buildV2Segment(
+      l0NoVersion,
+      conf,
+      "/tmp/backup",
+      applyDeletes = false
+    ) shouldBe Right(None)
   }
 
   test("toV2Segments rejects snapshot-format backups") {
@@ -355,15 +447,18 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       .parse(
         backupFixture(
           format = "snapshot",
-          groupAPath = parquetA,
-          groupBPath = parquetB,
-          groupCPath = parquetC,
-          deltaPath = "dummy/delta.log"
+          groupAPath = SourceKeys._1,
+          groupBPath = SourceKeys._2,
+          groupCPath = SourceKeys._3,
+          deltaPath = SourceKeys._4
         )
       )
       .getOrElse(fail("expected Right"))
-    val result =
-      BackupMetaReader.toV2Segments(meta, new Configuration(), bucket = "")
+    val result = BackupMetaReader.toV2Segments(
+      meta,
+      new Configuration(),
+      "s3a://bucket/backup/b1"
+    )
     result.isLeft shouldBe true
     result.left.toOption.get.getMessage should include("snapshot format")
   }

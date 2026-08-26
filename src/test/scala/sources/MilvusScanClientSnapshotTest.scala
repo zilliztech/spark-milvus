@@ -204,11 +204,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
-  test("snapshotBucket rejects unsupported schemes") {
-    val err = intercept[IllegalArgumentException] {
-      MilvusScan.snapshotBucket("gs://a-bucket/files/snapshot.json")
-    }
-    assert(err.getMessage.contains("Unsupported snapshot s3_location scheme"))
+  test("snapshotBucket returns None for unsupported (non-S3) schemes") {
+    // Non-S3 locations carry no bucket to configure; explicit scheme
+    // validation lives in resolveClientSnapshotLocation.
+    assert(
+      MilvusScan.snapshotBucket("gs://a-bucket/files/snapshot.json") == None
+    )
+    assert(MilvusScan.snapshotBucket("file:///data/backup/b1") == None)
   }
 
   test(

@@ -1,5 +1,12 @@
 package com.zilliz.spark.connector.read
 
+import java.util.concurrent.{
+  Callable,
+  ExecutorService,
+  Executors,
+  ThreadFactory
+}
+import java.util.concurrent.atomic.AtomicInteger
 import scala.util.control.NonFatal
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -31,23 +38,30 @@ import io.milvus.grpc.schema.{
   *     collection schema plus every segment's binlog / deltalog layout (mirrors
   *     Milvus's `schemapb.CollectionSchema` and `datapb.SegmentInfo`-lite), and
   *   - `binlogs/insert_log/...` and `binlogs/delta_log/...` — byte-identical
-  *     copies of the Milvus storage objects.
+  *     copies of the Milvus storage objects, keyed at a deterministic layout
+  *     derived from the backup dir plus segment IDs (see
+  *     [[backupInsertLogPath]] / [[backupDeltaLogPath]]).
   *
   * This object translates the meta into the same runtime objects the snapshot
   * read path consumes (`V2SegmentInfo`), so the backup can be read offline with
-  * the existing packed-V2 reader. Two gaps vs. a Milvus snapshot are closed
-  * here:
+  * the existing packed-V2 reader. The meta's `log_path` values are the
+  * **original Milvus source keys** — milvus-backup copies each binlog into a
+  * separate `DestKey` under the backup dir and records only the source key in
+  * the meta — so object paths are always reconstructed from `backupDir` plus
+  * the collection/partition/group/segment/field/log IDs, never taken from
+  * `log_path`. Three gaps vs. a Milvus snapshot are closed here:
   *   1. milvus-backup persists only `log_size` per binlog, not `entries_num`.
   *      The per-file row count is recovered by reading each parquet footer's
-  *      row count ([MilvusParquetFooterReader.readRowCount]). 2. The AVRO
-  *      segment-info (and hence the slot -> real field ID mapping) is not
-  *      copied by the backup; the real field IDs are recovered from each
+  *      row count ([MilvusParquetFooterReader.readRowCount]), in parallel. 2.
+  *      The AVRO segment-info (and hence the slot -> real field ID mapping) is
+  *      not copied by the backup; the real field IDs are recovered from each
   *      parquet file's own schema
-  *      ([MilvusParquetFooterReader.readFieldIdsFromSchema]).
+  *      ([MilvusParquetFooterReader.readFieldIdsFromSchema]). 3. L0 delete-only
+  *      segments are created by Milvus without a `StorageVersion` (0/omitted),
+  *      so they are handled before any storage-version filtering.
   *
-  * Only StorageV2 (packed parquet, `storage_version == 2`) segments are
-  * supported — the same format the packed-V2 reader handles. StorageV1 is
-  * skipped and StorageV3 is rejected.
+  * Only StorageV2 (packed parquet, `storage_version == 2`) data segments are
+  * supported; anything else fails hard rather than returning a partial dataset.
   */
 object BackupMetaReader extends Logging {
 
@@ -286,18 +300,49 @@ object BackupMetaReader extends Logging {
   // Segment conversion
   // -------------------------------------------------------------------------
 
-  /** Build the runtime `V2SegmentInfo` list for every StorageV2 segment of the
-    * backup. L0 delete-only segments keep an empty `columnGroups` so they feed
-    * the inherited delete-plan path, exactly like the snapshot reader.
+  /** `_allPartitionID` as used by milvus-backup for collection-wide L0
+    * segments.
+    */
+  private val AllPartitionId = -1L
+
+  private val FooterReadThreadCount: Int = {
+    val cores = Runtime.getRuntime.availableProcessors()
+    math.max(2, math.min(cores, 8))
+  }
+
+  /** Bounded, daemon thread pool for parallel parquet footer reads on the
+    * driver. Footer reads are I/O-bound (a HEAD + one tail range GET each), so
+    * fanning them out avoids a serialized round trip per binlog before any
+    * Spark task is scheduled.
+    */
+  private val FooterReadPool: ExecutorService = Executors.newFixedThreadPool(
+    FooterReadThreadCount,
+    new ThreadFactory {
+      private val counter = new AtomicInteger(0)
+      override def newThread(r: Runnable): Thread = {
+        val t =
+          new Thread(r, s"backup-footer-read-${counter.incrementAndGet()}")
+        t.setDaemon(true)
+        t
+      }
+    }
+  )
+
+  /** Build the runtime `V2SegmentInfo` list for every segment of the backup. L0
+    * delete-only segments keep an empty `columnGroups` so they feed the
+    * inherited delete-plan path, exactly like the snapshot reader.
     *
-    * @param bucket
-    *   Bucket holding the backup's objects (empty for local paths). Bucket-
-    *   relative `log_path` values are resolved to `s3a://bucket/...`.
+    * @param backupDir
+    *   The full `milvus.backup.dir` (e.g. `s3a://bucket/backup/<name>` or a
+    *   local path). Backup object paths are **reconstructed** from this plus
+    *   the segment's collection/partition/group/segment/field/log IDs — the
+    *   `log_path` values in the meta are the original Milvus source keys and
+    *   must never be read directly.
     */
   def toV2Segments(
       info: BackupInfo,
       hadoopConf: Configuration,
-      bucket: String,
+      backupDir: String,
       applyDeletes: Boolean = true
   ): Either[Throwable, Seq[V2SegmentInfo]] = {
     try {
@@ -310,10 +355,10 @@ object BackupMetaReader extends Logging {
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
       info.collectionBackups.foreach { coll =>
         coll.allSegments.foreach { seg =>
-          buildV2Segment(seg, hadoopConf, bucket, applyDeletes) match {
+          buildV2Segment(seg, hadoopConf, backupDir, applyDeletes) match {
             case Right(Some(v2)) => out += v2
-            case Right(None) => // skipped (legacy storage or L0 w/o deletes)
-            case Left(e)     => throw e
+            case Right(None)     => // L0 segment skipped (applyDeletes=false)
+            case Left(e)         => throw e
           }
         }
       }
@@ -325,53 +370,45 @@ object BackupMetaReader extends Logging {
 
   /** Convert one backup segment into a `V2SegmentInfo` (or skip it).
     *
+    * L0 delete-only segments are handled before any storage-version filtering:
+    * Milvus creates them without a `StorageVersion` (0/omitted in the meta), so
+    * they must not fall into the StorageV1 skip path.
+    *
     * @return
-    *   `Right(None)` for StorageV1 segments or (when `applyDeletes = false`) L0
-    *   segments; `Right(Some(seg))` for readable StorageV2 segments.
+    *   `Right(None)` for an L0 segment when `applyDeletes = false`;
+    *   `Right(Some(seg))` for readable segments; `Left` for unsupported data
+    *   segments (fails hard rather than returning a partial dataset).
     */
   private[read] def buildV2Segment(
       seg: SegmentBackup,
       hadoopConf: Configuration,
-      bucket: String,
+      backupDir: String,
       applyDeletes: Boolean
   ): Either[Throwable, Option[V2SegmentInfo]] = {
-    if (seg.storageVersion > 2L) {
+    if (seg.isL0) {
+      if (!applyDeletes) {
+        logInfo(
+          s"skipping L0 delete-only segment ${seg.segmentId} because " +
+            "applyDeletes=false"
+        )
+        Right(None)
+      } else {
+        Right(Some(emptyColumnGroupSegment(seg, backupDir)))
+      }
+    } else if (seg.storageVersion != 2L) {
       Left(
         new IllegalStateException(
           s"backup segment ${seg.segmentId} has storage_version=" +
-            s"${seg.storageVersion} (StorageV3+); backup datasource only " +
-            "supports StorageV2 packed parquet"
+            s"${seg.storageVersion}; backup datasource only supports " +
+            "StorageV2 (packed parquet) data segments"
         )
       )
-    } else if (seg.storageVersion < 2L) {
-      logInfo(
-        s"skipping backup segment ${seg.segmentId}: storage_version=" +
-          s"${seg.storageVersion} (< 2, not StorageV2)"
-      )
-      Right(None)
-    } else if (seg.isL0 && !applyDeletes) {
-      logInfo(
-        s"skipping StorageV2 L0 delete-only segment ${seg.segmentId} because " +
-          "applyDeletes=false"
-      )
-      Right(None)
     } else if (seg.binlogs.isEmpty || seg.binlogs.forall(_.binlogs.isEmpty)) {
       logWarning(
         s"backup segment ${seg.segmentId} has no binlogs; emitting as empty " +
           "column-group list"
       )
-      Right(
-        Some(
-          V2SegmentInfo(
-            segmentId = seg.segmentId,
-            partitionId = seg.partitionId,
-            numOfRows = seg.numOfRows,
-            storageVersion = seg.storageVersion,
-            columnGroups = Seq.empty,
-            deltaLogs = toDeltaLogs(seg, bucket)
-          )
-        )
-      )
+      Right(Some(emptyColumnGroupSegment(seg, backupDir)))
     } else {
       try {
         val columnGroups = seg.binlogs.map { fieldBinlog =>
@@ -383,37 +420,40 @@ object BackupMetaReader extends Logging {
             )
           }
           val sorted = fieldBinlog.binlogs.sortBy(_.logId)
-          val paths =
-            sorted.map(b => V2SegmentLoader.resolvePath(b.logPath, bucket))
-          val fieldIds = MilvusParquetFooterReader.readFieldIdsFromSchema(
+          val paths = sorted.map(b =>
+            backupInsertLogPath(backupDir, seg, fieldBinlog.fieldId, b.logId)
+          )
+          // The head file's footer is read once for both the real field IDs
+          // (which live in the parquet schema, not the backup meta) and its row
+          // count; the remaining files' row counts are read in parallel.
+          val headInfo = MilvusParquetFooterReader.readFieldIdsAndRowCount(
             paths.head,
             hadoopConf
           ) match {
-            case Right(ids) => ids
+            case Right(info) => info
             case Left(err) =>
               throw new RuntimeException(
-                s"failed to read field ids from parquet ${paths.head} " +
+                s"failed to read footer of parquet ${paths.head} " +
                   s"(backup segment ${seg.segmentId}, slot " +
                   s"${fieldBinlog.fieldId}): ${err.getMessage}",
                 err
               )
           }
-          val rowCounts = paths.map { p =>
-            MilvusParquetFooterReader.readRowCount(p, hadoopConf) match {
-              case Right(n) => n
-              case Left(err) =>
-                throw new RuntimeException(
-                  s"failed to read row count from parquet $p " +
-                    s"(backup segment ${seg.segmentId}, slot " +
-                    s"${fieldBinlog.fieldId}): ${err.getMessage}",
-                  err
-                )
+          val tailRowCounts = if (paths.size > 1) {
+            readRowCountsInParallel(
+              paths.tail,
+              hadoopConf,
+              seg.segmentId,
+              fieldBinlog.fieldId
+            ) match {
+              case Right(counts) => counts
+              case Left(err)     => throw err
             }
-          }
+          } else Seq.empty
           V2ColumnGroup(
-            fieldIds = fieldIds,
+            fieldIds = headInfo.fieldIds,
             filePaths = paths,
-            fileRowCounts = rowCounts,
+            fileRowCounts = headInfo.rowCount +: tailRowCounts,
             slotFieldId = fieldBinlog.fieldId
           )
         }
@@ -425,7 +465,7 @@ object BackupMetaReader extends Logging {
               numOfRows = seg.numOfRows,
               storageVersion = seg.storageVersion,
               columnGroups = columnGroups,
-              deltaLogs = toDeltaLogs(seg, bucket)
+              deltaLogs = toDeltaLogs(seg, backupDir)
             )
           )
         )
@@ -435,9 +475,22 @@ object BackupMetaReader extends Logging {
     }
   }
 
+  private def emptyColumnGroupSegment(
+      seg: SegmentBackup,
+      backupDir: String
+  ): V2SegmentInfo =
+    V2SegmentInfo(
+      segmentId = seg.segmentId,
+      partitionId = seg.partitionId,
+      numOfRows = seg.numOfRows,
+      storageVersion = seg.storageVersion,
+      columnGroups = Seq.empty,
+      deltaLogs = toDeltaLogs(seg, backupDir)
+    )
+
   private def toDeltaLogs(
       seg: SegmentBackup,
-      bucket: String
+      backupDir: String
   ): Seq[V2DeltaLogFile] =
     seg.deltalogs
       .flatMap(_.binlogs)
@@ -445,8 +498,90 @@ object BackupMetaReader extends Logging {
       .map(b =>
         V2DeltaLogFile(
           logId = b.logId,
-          logPath = V2SegmentLoader.resolvePath(b.logPath, bucket),
+          logPath = backupDeltaLogPath(backupDir, seg, b.logId),
           entriesNum = b.entriesNum
         )
       )
+
+  /** Read the row count of every path concurrently, preserving input order. */
+  private def readRowCountsInParallel(
+      paths: Seq[String],
+      hadoopConf: Configuration,
+      segmentId: Long,
+      slotFieldId: Long
+  ): Either[Throwable, Seq[Long]] = {
+    try {
+      val futures = paths.map { p =>
+        FooterReadPool.submit(new Callable[Long] {
+          override def call(): Long =
+            MilvusParquetFooterReader.readRowCount(p, hadoopConf) match {
+              case Right(n) => n
+              case Left(err) =>
+                throw new RuntimeException(
+                  s"failed to read row count from parquet $p " +
+                    s"(backup segment $segmentId, slot $slotFieldId): " +
+                    s"${err.getMessage}",
+                  err
+                )
+            }
+        })
+      }
+      Right(futures.map(_.get()))
+    } catch {
+      case NonFatal(e) => Left(e)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Backup path reconstruction
+  // -------------------------------------------------------------------------
+
+  /** milvus-backup copies each binlog into a `DestKey` under the backup dir and
+    * writes only the source key into `full_meta.json`; the meta's `log_path`
+    * values therefore point at the original Milvus storage and must never be
+    * opened directly. The backup copies live at a deterministic layout derived
+    * from the backup dir plus the segment IDs — mirroring `coll_dml_task.go`'s
+    * `insertLogsAttrs` / `deltaLogAttrs`:
+    *
+    * {{{
+    *   insert: {backupDir}/binlogs/insert_log/{coll}/{part}/{group}/{seg}/{field}/{log}
+    *   delta:  {backupDir}/binlogs/delta_log/{coll}/{part}/{seg}/{log}            (part == -1)
+    *           {backupDir}/binlogs/delta_log/{coll}/{part}/{group}/{seg}/{log}    (part != -1)
+    * }}}
+    */
+  private def backupBase(backupDir: String): String = {
+    Option(backupDir)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(_.stripSuffix("/"))
+      .getOrElse(
+        throw new IllegalArgumentException("backup dir must not be empty")
+      )
+  }
+
+  private def backupInsertLogPath(
+      backupDir: String,
+      seg: SegmentBackup,
+      slotFieldId: Long,
+      logId: Long
+  ): String = {
+    val base = backupBase(backupDir)
+    s"$base/binlogs/insert_log/${seg.collectionId}/${seg.partitionId}/" +
+      s"${seg.groupId}/${seg.segmentId}/$slotFieldId/$logId"
+  }
+
+  private def backupDeltaLogPath(
+      backupDir: String,
+      seg: SegmentBackup,
+      logId: Long
+  ): String = {
+    val base = backupBase(backupDir)
+    if (seg.partitionId == AllPartitionId) {
+      s"$base/binlogs/delta_log/${seg.collectionId}/${seg.partitionId}/" +
+        s"${seg.segmentId}/$logId"
+    } else {
+      s"$base/binlogs/delta_log/${seg.collectionId}/${seg.partitionId}/" +
+        s"${seg.groupId}/${seg.segmentId}/$logId"
+    }
+  }
 }

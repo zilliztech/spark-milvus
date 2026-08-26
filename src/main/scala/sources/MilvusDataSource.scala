@@ -979,11 +979,11 @@ object MilvusScan extends Logging {
               .map(_.split(":").head)
               .filter(_.nonEmpty)
           }
-        case Some(other) =>
-          throw new IllegalArgumentException(
-            s"Unsupported snapshot s3_location scheme '$other': $trimmed"
-          )
-        case None => None
+        // Non-S3 schemes (e.g. `file://` for a local snapshot/backup dir) carry
+        // no bucket to configure; treat them as "no bucket". Explicit scheme
+        // validation lives in resolveClientSnapshotLocation.
+        case Some(_) => None
+        case None    => None
       }
     }
   }
@@ -2443,13 +2443,30 @@ class MilvusScan(
     val coll = meta.collectionBackups.head
     val schemaBytes = coll.schema
       .map(BackupMetaReader.toProtobufSchemaBytes)
-      .getOrElse(Array.empty[Byte])
-    val bucket = backupBucket(backupDir)
+      .getOrElse {
+        throw new IllegalArgumentException(
+          s"Backup '${meta.name}' meta has no schema for collection " +
+            s"'${coll.collectionName}'; cannot plan a read"
+        )
+      }
+    val pkField = CollectionSchema
+      .parseFrom(schemaBytes)
+      .fields
+      .find(_.isPrimaryKey)
+      .getOrElse {
+        throw new IllegalArgumentException(
+          s"Backup '${meta.name}' collection '${coll.collectionName}' schema " +
+            "has no primary key; cannot plan a read"
+        )
+      }
     val applyDeletes = MilvusOption.readApplyDeletes(options)
+    // Object paths are reconstructed from `backupDir` plus segment IDs inside
+    // BackupMetaReader; the meta's `log_path` values are source keys and are
+    // never opened. No separate bucket is needed for delete-plan resolution.
     val v2Segments = BackupMetaReader.toV2Segments(
       meta,
       hadoopConf,
-      bucket,
+      backupDir,
       applyDeletes
     ) match {
       case Right(segs) => segs
@@ -2465,11 +2482,10 @@ class MilvusScan(
       coll.collectionName
     )
 
-    val bucketOpt = if (bucket.nonEmpty) Some(bucket) else None
     val v2DeletePlans = loadV2DeletePlans(
       v2Segments,
       schemaBytes,
-      bucketOpt,
+      snapshotBucket = None,
       hadoopConf,
       errorContext = "backup"
     )
@@ -2481,19 +2497,10 @@ class MilvusScan(
       if (!applyDeletes || inheritedDeleteSegments.isEmpty) {
         Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
       } else {
-        val pkField = CollectionSchema
-          .parseFrom(schemaBytes)
-          .fields
-          .find(_.isPrimaryKey)
-          .getOrElse {
-            throw new IllegalArgumentException(
-              "No primary key field found in schema"
-            )
-          }
         MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
           inheritedDeleteSegments,
           pkField,
-          bucketOpt.getOrElse(""),
+          bucket = "",
           hadoopConf
         ) match {
           case Right(plans) => plans
@@ -2515,16 +2522,6 @@ class MilvusScan(
       inlineInheritedDeletePlans = true
     )
   }
-
-  /** Bucket holding the backup's objects: explicit `fs.bucket_name` wins,
-    * otherwise the bucket is parsed out of the backup dir URI (e.g.
-    * `s3a://bucket/backup/<name>`). Empty means local paths.
-    */
-  private def backupBucket(backupDir: String): String =
-    MilvusScan
-      .connectorS3BucketOption(milvusOption.options)
-      .orElse(MilvusScan.snapshotBucket(backupDir))
-      .getOrElse("")
 
   override def createReaderFactory(): PartitionReaderFactory = {
     val optionsMap = options.asScala.toMap

@@ -81,15 +81,31 @@ Branch precedence: snapshot mode > backup mode > client mode.
 Two gaps versus a Milvus snapshot are closed in `BackupMetaReader`:
 
 1. **Per-file row counts** (`fileRowCounts`) — recovered from each parquet
-   footer via the new `MilvusParquetFooterReader.readRowCount`.
+   footer via the new `MilvusParquetFooterReader.readRowCount` (head file read
+   once via `readFieldIdsAndRowCount`, remaining files read in parallel).
 2. **Slot → real field ID mapping** — the AVRO segment-info is not copied by
    the backup, so real field IDs are recovered from each parquet file's own
    schema via the existing `readFieldIdsFromSchema`.
 
-Path resolution: backup `log_path` values are bucket-relative; they are
-resolved with `V2SegmentLoader.resolvePath(logPath, bucket)` to
-`s3a://bucket/...` (or kept local when the bucket is empty). No `groupID`
-reverse-engineering is needed — paths are taken verbatim from the meta.
+Path resolution: the `log_path` values in `full_meta.json` are the **original
+Milvus source keys** — milvus-backup copies each binlog into a separately
+computed `DestKey` under the backup dir and records only the source key in the
+meta (`coll_dml_task.go` asserts the two differ). Backup object paths are
+therefore **reconstructed** from `milvus.backup.dir` plus the segment's
+collection/partition/group/segment/field/log IDs, mirroring
+`insertLogsAttrs`/`deltaLogAttrs`:
+
+```
+insert: {backupDir}/binlogs/insert_log/{coll}/{part}/{group}/{seg}/{field}/{log}
+delta:  {backupDir}/binlogs/delta_log/{coll}/{part}/{seg}/{log}          (part == -1)
+        {backupDir}/binlogs/delta_log/{coll}/{part}/{group}/{seg}/{log}  (part != -1)
+```
+
+The `groupID` level is always present for `insert_log` (it is the virtual
+partition id; `0` for `partition_id == -1`) and present for L1 `delta_log`
+only when `partition_id != -1`. The bucket always comes from the
+`milvus.backup.dir` URI (S3 only); `fs.bucket_name` plays no part in path
+resolution.
 
 ## 4. Changes
 
@@ -111,7 +127,7 @@ object BackupMetaReader {
   def readMeta(hadoopConf: Configuration, backupDir: String): Either[Throwable, BackupInfo]
   def parse(json: String): Either[Throwable, BackupInfo]
   def toProtobufSchemaBytes(schema: BackupCollectionSchema): Array[Byte]
-  def toV2Segments(info: BackupInfo, hadoopConf: Configuration, bucket: String,
+  def toV2Segments(info: BackupInfo, hadoopConf: Configuration, backupDir: String,
                    applyDeletes: Boolean = true): Either[Throwable, Seq[V2SegmentInfo]]
 }
 ```
@@ -124,9 +140,12 @@ Embedded JSON model mirrors `backuppb.BackupInfo` → `CollectionBackupInfo` →
 
 Behavior:
 
-- Rejects snapshot-format backups and StorageV3 (`storage_version > 2`) segments.
-- Skips StorageV1 (`storage_version < 2`) segments.
-- Skips L0 segments when `applyDeletes = false`.
+- Rejects snapshot-format backups and non-L0 segments whose `storage_version`
+  is not `2` (StorageV1/V3) — both fail loudly rather than producing a partial
+  dataset.
+- Skips L0 segments when `applyDeletes = false` (otherwise L0 segments, which
+  Milvus creates without a storage version, bypass the V2 filter and feed the
+  inherited delete-plan path).
 - L0 segments produce a `V2SegmentInfo` with empty `columnGroups` plus
   `deltaLogs`, feeding the inherited delete-plan path.
 
@@ -135,6 +154,8 @@ Behavior:
 - New `readRowCount(path, hadoopConf): Either[Throwable, Long]` — sums the
   row groups' row counts from the parquet footer (a `HEAD` + a single tail
   `GET`, same cost profile as the existing footer reads).
+- New `readFieldIdsAndRowCount(path, hadoopConf)` — field IDs + row count from
+  a single footer open (avoids opening the head file twice).
 
 ### 4.4 `src/main/scala/sources/MilvusDataSource.scala`
 
@@ -144,15 +165,17 @@ Behavior:
 - `MilvusTable`: `isBackupMode`, `initFromBackup()` (materializes the collection
   schema from the backup meta so metadata rehydration for vector columns works
   like snapshot mode), and `schema()` handling for offline modes.
-- `MilvusScan.planInputPartitionsFromBackup()`: reads the meta, builds
-  `V2SegmentInfo`, loads delete plans, and hands everything to the shared
+- `MilvusScan.planInputPartitionsFromBackup()`: reads the meta, validates that
+  it carries a collection schema with a primary key, builds `V2SegmentInfo`,
+  loads delete plans, and hands everything to the shared
   `buildSnapshotPartitions` with `inlineInheritedDeletePlans = true`.
 - `MilvusScan.pushFilters`: backup mode returns all filters as unsupported
   (the packed-V2 reader has no filter pushdown), matching the packed-V2 snapshot
   path.
 - `MilvusScan.buildSnapshotHadoopConf` refactored into the companion
   `buildHadoopConfForOptions(rawOptions, path)` so both the planner and table
-  schema rehydration share it.
+  schema rehydration share it. `snapshotBucket` now treats non-S3 schemes as
+  "no bucket" (so `file://` backup dirs don't raise a snapshot-flavoured error).
 
 ## 5. Data Mapping (`full_meta.json → V2SegmentInfo`)
 
@@ -161,14 +184,14 @@ Behavior:
 | `segmentId` | `SegmentBackupInfo.segment_id` | |
 | `partitionId` | `.partition_id` | `-1` preserved for L0 / all-partition |
 | `numOfRows` | `.num_of_rows` | |
-| `storageVersion` | `.storage_version` | only `== 2` supported; `< 2` skipped, `> 2` rejected |
+| `storageVersion` | `.storage_version` | L0 handled before this; non-L0 must be `== 2`, else the read fails hard |
 | `columnGroups` | `.binlogs[]` grouped by `fieldID` (slot) | slot = directory name |
-| `cg.fieldIds` | first file of each group via `readFieldIdsFromSchema` | |
-| `cg.filePaths` | group's `log_path` sorted by `log_id` | explicit paths incl. `binlogs/` + groupID levels |
-| `cg.fileRowCounts` | per-file `readRowCount` | gap-closer; `size == paths.size` enforced |
+| `cg.fieldIds` | head file of each group via `readFieldIdsAndRowCount` | |
+| `cg.filePaths` | reconstructed from `backupDir` + IDs (never the meta `log_path`) | `insert_log` carries the groupID level; sorted by `log_id` |
+| `cg.fileRowCounts` | head via combined read, rest via parallel `readRowCount` | gap-closer; `size == paths.size` enforced |
 | `cg.slotFieldId` | group's `fieldID` | used for slot-based dedup |
-| `deltaLogs` | `.deltalogs[].binlogs[]` → `(log_id, log_path)` | `entriesNum = 0` (unused by the decoder) |
-| L0 segment | `is_l0 = true` → empty `columnGroups` + `deltaLogs` | inherited delete-plan path |
+| `deltaLogs` | reconstructed `delta_log` paths from `backupDir` + IDs | `entriesNum = 0` (unused by the decoder) |
+| L0 segment | `is_l0 = true` → empty `columnGroups` + `deltaLogs` | inherited delete-plan path; Milvus creates L0 without a storage version, so it bypasses the V2 filter |
 
 ## 6. Delete Semantics (reuses existing logic)
 
@@ -189,9 +212,14 @@ Behavior:
   and are skipped during partition planning (`skippedDeleteOnlySegments`).
 - Dynamic field `$meta` is preserved via `enableDynamicField`; the packed
   reader tolerates unmapped `$meta` columns.
-- StorageV3 segments are rejected loudly rather than silently mis-read.
-- Local paths (`/data/backup/...`) work for the meta/footer mapping layer
-  (and unit tests); the JNI packed reader itself requires S3 storage.
+- Non-L0 segments that are not StorageV2 (`storage_version != 2`) fail hard on
+  the driver rather than returning a partial dataset. L0 delete-only segments
+  bypass the storage-version check (Milvus creates them without one).
+- The driver validates that the backup meta carries a collection schema with a
+  primary key before planning.
+- Local paths (`/data/backup/...` or `file:///...`) work for the meta/footer
+  mapping layer (and unit tests); the JNI packed reader itself requires S3
+  storage.
 - A backup must contain exactly one collection per datasource read.
 
 ## 8. Usage
