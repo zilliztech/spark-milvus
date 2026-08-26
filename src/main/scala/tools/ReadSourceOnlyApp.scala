@@ -10,6 +10,8 @@ import com.zilliz.spark.connector.read.{
   V2SegmentLoader
 }
 import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.MilvusStoragePath
+import com.zilliz.spark.connector.loon.Properties
 
 /** Standalone reader-only verification app.
   *
@@ -64,7 +66,7 @@ object ReadSourceOnlyApp {
       )
 
       val snapshotJson = new String(
-        readAllBytes(hadoopConf, normalizeS3(snapshotPath)),
+        readAllBytes(hadoopConf, normalizeS3(snapshotPath, s3Endpoint, s3Bucket)),
         "UTF-8"
       )
       val metadata =
@@ -84,7 +86,8 @@ object ReadSourceOnlyApp {
           metadata.manifestList,
           s3Bucket,
           hadoopConf,
-          manifestSchemaVersion = metadata.manifestSchemaVersion
+          manifestSchemaVersion = metadata.manifestSchemaVersion,
+          endpoint = s3Endpoint
         ) match {
           case Right(segs) => segs
           case Left(err) =>
@@ -124,7 +127,17 @@ object ReadSourceOnlyApp {
         "milvus.s3.accessKey" -> s3AccessKey,
         "milvus.s3.secretKey" -> s3SecretKey,
         "milvus.s3.region" -> s3Region,
-        "milvus.s3.rootPath" -> s3RootPath
+        "milvus.s3.rootPath" -> s3RootPath,
+        // The executor-side native FFI reads only fs.* keys
+        // (Properties.fromMilvusOption); the milvus.s3.* aliases above are
+        // ignored by it, so populate fs.* here too or the FFI falls back to
+        // localhost:9000 / a-bucket / minioadmin.
+        Properties.FsConfig.FsAddress -> s3Endpoint,
+        Properties.FsConfig.FsBucketName -> s3Bucket,
+        Properties.FsConfig.FsAccessKeyId -> s3AccessKey,
+        Properties.FsConfig.FsAccessKeyValue -> s3SecretKey,
+        Properties.FsConfig.FsRegion -> s3Region,
+        Properties.FsConfig.FsRootPath -> s3RootPath
       )
 
       val schemaBytes = MilvusSnapshotReader.toProtobufSchemaBytes(
@@ -268,8 +281,18 @@ object ReadSourceOnlyApp {
     }
   }
 
-  private def normalizeS3(path: String): String =
-    if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://") else path
+  private def normalizeS3(
+      path: String,
+      endpoint: String = "",
+      configuredBucket: String = ""
+  ): String =
+    if (path.startsWith("s3://") || path.startsWith("s3a://"))
+      MilvusStoragePath.toStandardS3Path(
+        path,
+        endpoint = endpoint,
+        configuredBucket = configuredBucket
+      )
+    else path
 
   private def readAllBytes(
       conf: Configuration,

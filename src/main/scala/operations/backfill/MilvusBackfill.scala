@@ -15,7 +15,8 @@ import org.slf4j.LoggerFactory
 import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusConnectionParams,
-  MilvusOption
+  MilvusOption,
+  MilvusStoragePath
 }
 import com.zilliz.spark.connector.read.{
   MilvusSnapshotReader,
@@ -393,7 +394,12 @@ object MilvusBackfill {
       val (collectionID, segmentToPartitionMap, segmentBasePathMap) =
         snapshotMetadataOpt match {
           case Some(metadata) =>
-            extractMetadataFromSnapshot(metadata, v2Segments)
+            extractMetadataFromSnapshot(
+              metadata,
+              v2Segments,
+              config.s3Endpoint,
+              config.s3BucketName
+            )
           case None =>
             val (colId, segPartMap) =
               retrieveMilvusMetadata(config, client) match {
@@ -484,9 +490,22 @@ object MilvusBackfill {
   ): Either[BackfillError, BackfillSource] = {
     // Hadoop 3.4.1 has separate s3:// and s3a:// FileSystem implementations
     // and per-bucket fs.s3a.bucket.<b>.* config is only honored by
-    // S3AFileSystem. Force the s3a scheme so the credentials we just wrote
-    // actually take effect.
-    val path = normalizeObjectStorageScheme(rawPath, config)
+    // S3AFileSystem. Force the s3a scheme (and canonicalize any Milvus-format
+    // endpoint-prefixed path, using the source bucket's endpoint override when
+    // present) so the credentials we just wrote actually take effect; Aliyun
+    // OSS paths keep their own scheme.
+    val path =
+      if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun"))
+        normalizeObjectStorageScheme(rawPath, config)
+      else
+        // The source bucket is not configurable, so pass "" as the detection
+        // hint: using the Milvus target bucket here would misclassify a source
+        // key whose first segment happens to equal the target bucket name.
+        normalizeS3Scheme(
+          rawPath,
+          config.sourceS3Endpoint.getOrElse(config.s3Endpoint),
+          ""
+        )
     try {
       // Configure the source bucket before reading the parquet. OSS must be
       // fully materialized while this temporary credential scope is active;
@@ -1658,7 +1677,8 @@ object MilvusBackfill {
           hadoopConf,
           manifestSchemaVersion = metadata.manifestSchemaVersion,
           applyDeletes = false,
-          storageScheme = storageScheme(config)
+          storageScheme = storageScheme(config),
+          endpoint = config.s3Endpoint
         ) match {
         case Right(segs) =>
           // Workaround for Milvus snapshot not yet exposing FieldBinlog.child_fields:
@@ -1905,7 +1925,9 @@ object MilvusBackfill {
     */
   private def extractMetadataFromSnapshot(
       metadata: SnapshotMetadata,
-      v2Segments: Seq[com.zilliz.spark.connector.read.V2SegmentInfo] = Seq.empty
+      v2Segments: Seq[com.zilliz.spark.connector.read.V2SegmentInfo] = Seq.empty,
+      endpoint: String = "",
+      writeBucket: String = ""
   ): (Long, Map[Long, Long], Map[Long, String]) = {
     val collectionID = metadata.snapshotInfo.collectionId
 
@@ -1918,23 +1940,48 @@ object MilvusBackfill {
       val segId = item.segmentID
       MilvusSnapshotReader.parseManifestContent(item.manifest) match {
         case Right(mc) =>
+          // A qualified manifest basePath names the bucket its data lives in.
+          // The stripped key below becomes milvus.writer.customPath and is
+          // resolved against fs.bucket_name (config.s3BucketName), so writing
+          // to a different bucket would report success while Milvus (reading
+          // its own bucket) sees nothing. Reject the mismatch up front, like
+          // the read path's validateSnapshotBucketForRelativeDataPaths.
+          MilvusStoragePath
+            .bucketOf(mc.basePath, endpoint, writeBucket)
+            .filter(bucket => writeBucket.nonEmpty && bucket != writeBucket)
+            .foreach { manifestBucket =>
+              throw new IllegalArgumentException(
+                s"Snapshot manifest basePath '${mc.basePath}' names bucket " +
+                  s"'$manifestBucket' but backfill --s3-bucket is '$writeBucket'; " +
+                  "refusing to write addfield data into the wrong bucket"
+              )
+            }
+          // Reduce Milvus-format s3://<address>/<bucket>/<key> basePaths to the
+          // scheme-less bucket-relative key that the native writer consumes;
+          // it cannot read a scheme-bearing customPath for lack of an extfs.*
+          // config. This also keeps the insert_log slice below stable.
+          val basePath = MilvusStoragePath.toBucketRelativeKey(
+            mc.basePath,
+            endpoint,
+            writeBucket
+          )
           // Extract partition ID from basePath: .../insert_log/{col_id}/{part_id}/{seg_id}
-          val parts = mc.basePath.split("/")
+          val parts = basePath.split("/")
           val insertLogIdx = parts.indexOf("insert_log")
           if (insertLogIdx >= 0 && insertLogIdx + 2 < parts.length) {
             try {
               val partitionId = parts(insertLogIdx + 2).toLong
-              segmentBasePathMap += (segId -> mc.basePath)
+              segmentBasePathMap += (segId -> basePath)
               segmentToPartitionMap += (segId -> partitionId)
             } catch {
               case _: NumberFormatException =>
                 logger.warn(
-                  s"Skipping segment $segId: failed to parse partition ID from basePath: ${mc.basePath}"
+                  s"Skipping segment $segId: failed to parse partition ID from basePath: $basePath"
                 )
             }
           } else {
             logger.warn(
-              s"Skipping segment $segId: basePath does not contain expected insert_log structure: ${mc.basePath}"
+              s"Skipping segment $segId: basePath does not contain expected insert_log structure: $basePath"
             )
           }
         case Left(e) =>
@@ -1983,7 +2030,14 @@ object MilvusBackfill {
     // Same s3:// → s3a:// normalization as readSnapshotJson /
     // readBackfillData. Without it, an s3:// URL would route to the legacy
     // S3FileSystem which ignores fs.s3a.bucket.<b>.* config.
-    val outputPath = normalizeObjectStorageScheme(rawOutputPath, config)
+    val outputPath =
+      if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun"))
+        normalizeObjectStorageScheme(rawOutputPath, config)
+      else
+        // --output is a user-supplied path; passing the Milvus target bucket
+        // as the detection hint would misclassify a key whose first segment
+        // happens to equal it (see the source-path site above).
+        normalizeS3Scheme(rawOutputPath, config.s3Endpoint, "")
     try {
       withScopedHadoopStorage(spark, outputPath, config, isSource = false) {
         val hadoopPath = new Path(outputPath)
@@ -2023,9 +2077,18 @@ object MilvusBackfill {
     * write would be silently ignored. All read/write code paths in this object
     * route through this helper before touching Hadoop FS APIs.
     */
-  private[backfill] def normalizeS3Scheme(path: String): String = {
+  private[backfill] def normalizeS3Scheme(
+      path: String,
+      endpoint: String = "",
+      configuredBucket: String = ""
+  ): String = {
     if (path == null) null
-    else if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
+    else if (path.startsWith("s3://") || path.startsWith("s3a://"))
+      MilvusStoragePath.toStandardS3Path(
+        path,
+        endpoint = endpoint,
+        configuredBucket = configuredBucket
+      )
     else path
   }
 
@@ -2206,10 +2269,30 @@ object MilvusBackfill {
       isSource: Boolean
   ): Unit = {
     if (path == null) return
+    // Branch on the raw scheme so a malformed-but-s3 URI (spaces, unescaped
+    // %, [ ]) still gets per-bucket S3A config; only the extracted value is
+    // canonicalized.
     if (!(path.startsWith("s3://") || path.startsWith("s3a://"))) return
+    // The source bucket may have its own endpoint override; use the same
+    // effective endpoint for Milvus-format detection and credentials.
+    val endpoint =
+      if (isSource) config.sourceS3Endpoint.getOrElse(config.s3Endpoint)
+      else config.s3Endpoint
+    // Canonicalize Milvus-format s3://<address>/<bucket>/<key> to
+    // s3a://<bucket>/<key> so the bucket (and thus the per-bucket Hadoop
+    // S3A config) is extracted correctly.
+    val canonical = MilvusStoragePath.toStandardS3Path(
+      path,
+      endpoint = endpoint,
+      // Paths reaching here are user-supplied (source parquet, snapshot output)
+      // or already canonicalized by the caller; passing the Milvus target
+      // bucket as the detection hint would misclassify a key whose first
+      // segment happens to equal it.
+      configuredBucket = ""
+    )
 
-    // Extract bucket name from s3(a)://bucket/key
-    val withoutScheme = path.stripPrefix("s3a://").stripPrefix("s3://")
+    // Extract bucket name from s3a://bucket/key
+    val withoutScheme = canonical.stripPrefix("s3a://").stripPrefix("s3://")
     val bucket = {
       val slash = withoutScheme.indexOf('/')
       if (slash < 0) withoutScheme else withoutScheme.substring(0, slash)
@@ -2219,9 +2302,6 @@ object MilvusBackfill {
     // Resolve the effective credentials for this bucket. For the source bucket
     // any unset override falls back to the main credentials, preserving the
     // existing single-bucket behavior.
-    val endpoint =
-      if (isSource) config.sourceS3Endpoint.getOrElse(config.s3Endpoint)
-      else config.s3Endpoint
     val accessKey =
       if (isSource) config.sourceS3AccessKey.getOrElse(config.s3AccessKey)
       else config.s3AccessKey
@@ -2326,15 +2406,31 @@ object MilvusBackfill {
     }
 
     try {
-      // Check if it's an S3 path
-      if (
-        snapshotPath.startsWith("s3://") || snapshotPath.startsWith(
-          "s3a://"
-        ) || snapshotPath.startsWith("oss://")
-      ) {
-
-        // Construct full S3 path (ensure s3a:// scheme for Hadoop)
-        val s3Path = normalizeObjectStorageScheme(snapshotPath, config)
+      // Branch on the raw scheme: a malformed-but-s3 URI must still take the
+      // S3 branch (and configure per-bucket S3A) instead of falling through
+      // to scala.io.Source.fromFile. Only the read value is canonicalized.
+      val isS3 = snapshotPath.startsWith("s3://") ||
+        snapshotPath.startsWith("s3a://") ||
+        snapshotPath.startsWith("oss://")
+      // Canonicalize bucket-relative / standard / Milvus-format
+      // (s3://<address>/<bucket>/<key>) snapshot locations to s3a://bucket/key.
+      // Aliyun rewrites any s3:// / s3a:// location to oss:// (Milvus writes
+      // s3:// regardless of the backend), gated on the configured provider like
+      // readBackfillData / writeResultJson.
+      val s3Path = if (isS3) {
+        if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun"))
+          normalizeObjectStorageScheme(snapshotPath, config)
+        else
+          MilvusStoragePath.toStandardS3Path(
+            snapshotPath,
+            endpoint = config.s3Endpoint,
+            configuredBucket = config.s3BucketName
+          )
+      } else {
+        snapshotPath
+      }
+      // Check if it's an S3/OSS path
+      if (isS3) {
 
         // Configure S3 settings on Spark's Hadoop Configuration (per-bucket
         // so that snapshot bucket and backfill source bucket can use
@@ -2353,7 +2449,7 @@ object MilvusBackfill {
 
       } else {
         // Local file path, read directly
-        val source = scala.io.Source.fromFile(snapshotPath)
+        val source = scala.io.Source.fromFile(s3Path)
         try {
           val json = source.mkString
           Right(json)

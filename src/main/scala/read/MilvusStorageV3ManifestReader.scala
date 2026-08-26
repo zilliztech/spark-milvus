@@ -5,6 +5,7 @@ import java.net.URI
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
+import com.zilliz.spark.connector.MilvusStoragePath
 import org.apache.avro.file.DataFileStream
 import org.apache.avro.generic.{GenericDatumReader, GenericRecord}
 import org.apache.avro.util.Utf8
@@ -19,15 +20,17 @@ object MilvusStorageV3ManifestReader {
       basePath: String,
       readVersion: Long,
       bucket: String,
-      hadoopConf: Configuration
+      hadoopConf: Configuration,
+      endpoint: String = ""
   ): Either[Throwable, Seq[V2DeltaLogFile]] = {
     try {
       val manifestPath = V2SegmentLoader.resolvePath(
         manifestFilePath(basePath, readVersion),
-        bucket
+        bucket,
+        endpoint = endpoint
       )
       val bytes = V2SegmentLoader.readAllBytes(hadoopConf, manifestPath)
-      parseDeltaLogs(bytes, basePath)
+      parseDeltaLogs(bytes, basePath, endpoint, bucket)
     } catch {
       case NonFatal(e) => Left(e)
     }
@@ -48,14 +51,16 @@ object MilvusStorageV3ManifestReader {
   private[connector] def latestManifestVersion(
       basePath: String,
       bucket: String,
-      hadoopConf: Configuration
+      hadoopConf: Configuration,
+      endpoint: String = ""
   ): Either[Throwable, Long] = {
     var uri: URI = null
     var fs: FileSystem = null
     try {
       val metadataPath = V2SegmentLoader.resolvePath(
         s"${basePath.stripSuffix("/")}/_metadata",
-        bucket
+        bucket,
+        endpoint = endpoint
       )
       uri = new URI(metadataPath)
       fs = FileSystem.get(uri, hadoopConf)
@@ -93,7 +98,9 @@ object MilvusStorageV3ManifestReader {
 
   private[read] def parseDeltaLogs(
       avroBytes: Array[Byte],
-      basePath: String
+      basePath: String,
+      endpoint: String = "",
+      configuredBucket: String = ""
   ): Either[Throwable, Seq[V2DeltaLogFile]] = {
     try {
       val reader = new DataFileStream[GenericRecord](
@@ -105,7 +112,7 @@ object MilvusStorageV3ManifestReader {
           Right(Seq.empty)
         } else {
           val rec = reader.next()
-          Right(projectDeltaLogs(rec, basePath))
+          Right(projectDeltaLogs(rec, basePath, endpoint, configuredBucket))
         }
       } finally {
         reader.close()
@@ -117,7 +124,9 @@ object MilvusStorageV3ManifestReader {
 
   private def projectDeltaLogs(
       rec: GenericRecord,
-      basePath: String
+      basePath: String,
+      endpoint: String = "",
+      configuredBucket: String = ""
   ): Seq[V2DeltaLogFile] = {
     val raw = rec.get("delta_logs")
     if (raw == null) {
@@ -133,8 +142,12 @@ object MilvusStorageV3ManifestReader {
         .map { case (log, idx) =>
           V2DeltaLogFile(
             logId = idx.toLong,
-            logPath =
-              resolveManifestDeltaPath(basePath, asString(log.get("path"))),
+            logPath = resolveManifestDeltaPath(
+              basePath,
+              asString(log.get("path")),
+              endpoint,
+              configuredBucket
+            ),
             entriesNum = asLong(log.get("num_entries"))
           )
         }
@@ -143,11 +156,17 @@ object MilvusStorageV3ManifestReader {
 
   private[read] def resolveManifestDeltaPath(
       basePath: String,
-      path: String
+      path: String,
+      endpoint: String = "",
+      configuredBucket: String = ""
   ): String = {
     if (path == null || path.isEmpty) path
-    else if (path.startsWith("s3a://")) path
-    else if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
+    else if (path.startsWith("s3a://") || path.startsWith("s3://"))
+      MilvusStoragePath.toStandardS3Path(
+        path,
+        endpoint = endpoint,
+        configuredBucket = configuredBucket
+      )
     else if (path.startsWith("_delta/"))
       s"${basePath.stripSuffix("/")}/$path"
     else if (path.startsWith("/"))

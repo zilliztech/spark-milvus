@@ -7,6 +7,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.sql.SparkSession
 
+import com.zilliz.spark.connector.MilvusStoragePath
 import com.zilliz.spark.connector.read.{
   MilvusParquetFooterReader,
   MilvusSegmentManifestReader,
@@ -80,7 +81,7 @@ object ListV2SegmentsApp {
       println(s"  Milvus snapshot: $snapshotPath")
       println("==============================================")
 
-      val resolvedSnapshotPath = resolvePath(snapshotPath, s3Bucket)
+      val resolvedSnapshotPath = resolvePath(snapshotPath, s3Bucket, s3Endpoint)
       val metadata = loadMetadata(hadoopConf, resolvedSnapshotPath)
       printHeader(metadata)
 
@@ -103,9 +104,10 @@ object ListV2SegmentsApp {
         metadata.manifestList.foreach { manifestPath =>
           processOneSegment(
             hadoopConf,
-            resolvePath(manifestPath, s3Bucket),
+            resolvePath(manifestPath, s3Bucket, s3Endpoint),
             s3Bucket,
-            metadata.manifestSchemaVersion
+            metadata.manifestSchemaVersion,
+            s3Endpoint
           )
         }
       }
@@ -122,7 +124,8 @@ object ListV2SegmentsApp {
       hadoopConf: Configuration,
       manifestPath: String,
       bucket: String,
-      manifestSchemaVersion: Int
+      manifestSchemaVersion: Int,
+      endpoint: String = ""
   ): Unit = {
     println(s"\n  AVRO: $manifestPath")
     val avroBytes = readAllBytes(hadoopConf, manifestPath)
@@ -157,7 +160,7 @@ object ListV2SegmentsApp {
           // the real field IDs per column group. All files in the segment
           // carry the same group_field_id_list.
           val samplePath = entry.binlogFiles.head.binlogs.head.logPath
-          val normalized = resolvePath(samplePath, bucket)
+          val normalized = resolvePath(samplePath, bucket, endpoint)
           MilvusParquetFooterReader.read(normalized, hadoopConf) match {
             case Left(err) =>
               println(
@@ -270,10 +273,18 @@ object ListV2SegmentsApp {
     * Hadoop would default to the local filesystem — which is usually not what
     * we want, but is intentional for unit-test paths like `src/test/data/...`.
     */
-  private def resolvePath(path: String, bucket: String): String = {
+  private def resolvePath(
+      path: String,
+      bucket: String,
+      endpoint: String = ""
+  ): String = {
     if (path == null) path
-    else if (path.startsWith("s3a://")) path
-    else if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
+    else if (path.startsWith("s3a://") || path.startsWith("s3://"))
+      MilvusStoragePath.toStandardS3Path(
+        path,
+        endpoint = endpoint,
+        configuredBucket = bucket
+      )
     else if (bucket != null && bucket.nonEmpty)
       s"s3a://$bucket/${path.stripPrefix("/")}"
     else path

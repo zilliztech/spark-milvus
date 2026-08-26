@@ -190,6 +190,17 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       }
   }
 
+  test(
+    "resolveClientSnapshotLocation canonicalizes Milvus-format endpoint-prefixed locations"
+  ) {
+    assert(
+      MilvusScan.resolveClientSnapshotLocation(
+        "s3://eric-spark-minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json",
+        "ignored"
+      ) == "s3a://milvus-bucket/file/snapshots/1/metadata/2.json"
+    )
+  }
+
   test("snapshotBucket extracts authority when URI host is null") {
     assert(
       MilvusScan.snapshotBucket(
@@ -198,10 +209,217 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  test(
+    "snapshotBucket returns data bucket for Milvus-format endpoint-prefixed locations"
+  ) {
+    assert(
+      MilvusScan.snapshotBucket(
+        "s3://eric-spark-minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json"
+      ) == Some("milvus-bucket")
+    )
+  }
+
   test("snapshotBucket returns None for bucket-relative snapshot locations") {
     assert(
       MilvusScan.snapshotBucket("files/snapshots/1/metadata/2.json") == None
     )
+  }
+
+  test("snapshotBucket ignores userinfo when extracting the bucket") {
+    assert(
+      MilvusScan.snapshotBucket(
+        "s3a://user:pass@bucket/files/snapshots/1/metadata/2.json"
+      ) == Some("bucket")
+    )
+  }
+
+  test(
+    "snapshotBucket strips userinfo even when the host is not a valid URI host"
+  ) {
+    // 'a_bucket' makes java.net.URI.getHost return null; the authority
+    // fallback must take the part after the userinfo, not before it.
+    assert(
+      MilvusScan.snapshotBucket(
+        "s3a://user:pass@a_bucket/files/snapshots/1/metadata/2.json"
+      ) == Some("a_bucket")
+    )
+  }
+
+  test(
+    "snapshotBucket detects port-less endpoints via the configured endpoint"
+  ) {
+    // Without the endpoint, s3.amazonaws.com is indistinguishable from a bucket.
+    assert(
+      MilvusScan.snapshotBucket(
+        "s3://s3.amazonaws.com/milvus-bucket/files/snapshots/1/metadata/2.json"
+      ) == Some("s3.amazonaws.com")
+    )
+    // With the endpoint configured, the data bucket is extracted.
+    assert(
+      MilvusScan.snapshotBucket(
+        "s3://s3.amazonaws.com/milvus-bucket/files/snapshots/1/metadata/2.json",
+        "s3.amazonaws.com"
+      ) == Some("milvus-bucket")
+    )
+  }
+
+  test(
+    "resolveClientSnapshotLocation detects port-less endpoints via the configured endpoint"
+  ) {
+    assert(
+      MilvusScan.resolveClientSnapshotLocation(
+        "s3://s3.amazonaws.com/milvus-bucket/file/snapshots/1/metadata/2.json",
+        "ignored",
+        "s3.amazonaws.com"
+      ) == "s3a://milvus-bucket/file/snapshots/1/metadata/2.json"
+    )
+  }
+
+  test("nativeV3ManifestPath reduces the key and pins the manifest bucket") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val (key, option) = scan.nativeV3ManifestPath(
+      "s3://eric-spark-minio:9000/milvus-bucket/file/snapshots/1/20/30",
+      MilvusOption(Map.empty[String, String]),
+      "minio:9000"
+    )
+    assert(key == "file/snapshots/1/20/30")
+    assert(
+      option.options.get(Properties.FsConfig.FsBucketName) == Some(
+        "milvus-bucket"
+      )
+    )
+  }
+
+  test("withPinnedBucket translates s3.* aliases into fs.* for the FFI") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val option = scan.withPinnedBucket(
+      MilvusOption(
+        Map(
+          MilvusOption.S3Endpoint -> "minio:9000",
+          MilvusOption.S3AccessKey -> "ak",
+          MilvusOption.S3SecretKey -> "sk",
+          MilvusOption.S3UseSSL -> "false"
+        )
+      ),
+      "milvus-bucket"
+    )
+    assert(
+      option.options.get(Properties.FsConfig.FsBucketName) == Some(
+        "milvus-bucket"
+      )
+    )
+    assert(option.options.get(Properties.FsConfig.FsAddress) == Some("minio:9000"))
+    assert(
+      option.options.get(Properties.FsConfig.FsAccessKeyId) == Some("ak")
+    )
+    assert(
+      option.options.get(Properties.FsConfig.FsAccessKeyValue) == Some("sk")
+    )
+    assert(option.options.get(Properties.FsConfig.FsUseSSL) == Some("false"))
+  }
+
+  test("withPinnedBucket skips AK/SK translation under IAM") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val option = scan.withPinnedBucket(
+      MilvusOption(
+        Map(
+          Properties.FsConfig.FsUseIam -> "true",
+          MilvusOption.S3Endpoint -> "minio:9000",
+          MilvusOption.S3AccessKey -> "stale-ak",
+          MilvusOption.S3SecretKey -> "stale-sk"
+        )
+      ),
+      "milvus-bucket"
+    )
+    assert(
+      option.options.get(Properties.FsConfig.FsAddress) == Some("minio:9000")
+    )
+    // Under IAM the driver drops static credentials; the translation must not
+    // reintroduce them for the executor FFI.
+    assert(option.options.get(Properties.FsConfig.FsAccessKeyId) == None)
+    assert(option.options.get(Properties.FsConfig.FsAccessKeyValue) == None)
+  }
+
+  test(
+    "resolveClientSnapshotLocation tolerates unparseable snapshot locations"
+  ) {
+    // A space makes this an invalid java.net.URI; the scheme probe must not
+    // throw a raw URISyntaxException before the textual fallback runs.
+    assert(
+      MilvusScan.resolveClientSnapshotLocation(
+        "s3://minio:9000/milvus-bucket/my snapshot/2.json",
+        "connector-bucket"
+      ) == "s3a://milvus-bucket/my snapshot/2.json"
+    )
+  }
+
+  test("snapshotBucket tolerates unparseable snapshot locations") {
+    assert(
+      MilvusScan.snapshotBucket(
+        "s3://minio:9000/milvus-bucket/my snapshot/2.json"
+      ) == Some("milvus-bucket")
+    )
+  }
+
+  test("nativeV3ManifestPath leaves bucket-relative base paths unpinned") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val (key, option) = scan.nativeV3ManifestPath(
+      "files/snapshots/1/20/30",
+      MilvusOption(
+        Map(Properties.FsConfig.FsBucketName -> "connector-bucket")
+      ),
+      "minio:9000"
+    )
+    assert(key == "files/snapshots/1/20/30")
+    assert(
+      option.options.get(Properties.FsConfig.FsBucketName) == Some(
+        "connector-bucket"
+      )
+    )
+  }
+
+  test("nativeV2ColumnGroups strips qualified paths and pins their bucket") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val (bucket, groups) = scan.nativeV2ColumnGroups(
+      Seq(
+        V2ColumnGroup(
+          fieldIds = Seq(100L),
+          filePaths = Seq(
+            "s3://eric-spark-minio:9000/milvus-bucket/files/insert_log/10/20/30/100/1",
+            "files/insert_log/10/20/30/100/2"
+          )
+        )
+      ),
+      "minio:9000"
+    )
+    assert(bucket == Some("milvus-bucket"))
+    assert(
+      groups.head.filePaths == Seq(
+        "files/insert_log/10/20/30/100/1",
+        "files/insert_log/10/20/30/100/2"
+      )
+    )
+  }
+
+  test("nativeV2ColumnGroups refuses segments spanning more than one bucket") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val err = intercept[IllegalArgumentException] {
+      scan.nativeV2ColumnGroups(
+        Seq(
+          V2ColumnGroup(
+            fieldIds = Seq(100L),
+            filePaths = Seq(
+              "s3://minio:9000/milvus-bucket/files/insert_log/10/20/30/100/1",
+              "s3://minio:9000/data-bucket/files/insert_log/10/20/30/100/2"
+            )
+          )
+        ),
+        "minio:9000"
+      )
+    }
+    assert(err.getMessage.contains("more than one bucket"))
+    assert(err.getMessage.contains("milvus-bucket"))
+    assert(err.getMessage.contains("data-bucket"))
   }
 
   test("snapshotBucket rejects unsupported schemes") {
@@ -360,6 +578,17 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  test(
+    "snapshotBucketsToConfigure canonicalizes Milvus-format endpoint-prefixed locations"
+  ) {
+    assert(
+      MilvusScan.snapshotBucketsToConfigure(
+        "s3a://eric-spark-minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json",
+        "connector-bucket"
+      ) == Seq("connector-bucket", "milvus-bucket")
+    )
+  }
+
   test("resolveConnectorS3Bucket trims configured bucket") {
     assert(
       MilvusScan.resolveConnectorS3Bucket(
@@ -426,13 +655,62 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  test(
+    "buildSnapshotHadoopConf maps s3.* aliases to S3A endpoint and credentials"
+  ) {
+    // Detection accepts s3.endpoint etc.; the S3A Hadoop conf must too, so a
+    // user who configures only the s3.* family gets one consistent storage.
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(MilvusOption.S3BucketName, "connector-bucket")
+    rawOptions.put(MilvusOption.S3Endpoint, "minio:9000")
+    rawOptions.put(MilvusOption.S3AccessKey, "ak")
+    rawOptions.put(MilvusOption.S3SecretKey, "sk")
+    rawOptions.put(MilvusOption.S3UseSSL, "false")
+    rawOptions.put(MilvusOption.S3PathStyleAccess, "true")
+
+    val conf = scanWithOptions(rawOptions).buildSnapshotHadoopConf(
+      "s3://minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json"
+    )
+
+    assert(conf.get("fs.s3a.endpoint") == "minio:9000")
+    assert(conf.get("fs.s3a.connection.ssl.enabled") == "false")
+    assert(conf.get("fs.s3a.path.style.access") == "true")
+    assert(conf.get("fs.s3a.access.key") == "ak")
+    assert(conf.get("fs.s3a.secret.key") == "sk")
+    assert(conf.get("fs.s3a.bucket.milvus-bucket.endpoint") == "minio:9000")
+    assert(conf.get("fs.s3a.bucket.milvus-bucket.path.style.access") == "true")
+  }
+
+  test(
+    "buildSnapshotHadoopConf configures data bucket for Milvus-format snapshot location"
+  ) {
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(Properties.FsConfig.FsBucketName, "connector-bucket")
+    rawOptions.put(Properties.FsConfig.FsAddress, "minio:9000")
+    rawOptions.put(Properties.FsConfig.FsAccessKeyId, "ak")
+    rawOptions.put(Properties.FsConfig.FsAccessKeyValue, "sk")
+
+    val conf = scanWithOptions(rawOptions).buildSnapshotHadoopConf(
+      "s3a://eric-spark-minio:9000/milvus-bucket/file/snapshots/1/metadata/2.json"
+    )
+
+    // The endpoint-prefixed authority must not be treated as a bucket.
+    assert(conf.get("fs.s3a.bucket.eric-spark-minio.endpoint") == null)
+    assert(conf.get("fs.s3a.bucket.eric-spark-minio:9000.endpoint") == null)
+    // The real data bucket gets the per-bucket S3A config.
+    assert(conf.get("fs.s3a.bucket.milvus-bucket.endpoint") == "minio:9000")
+    assert(
+      conf.get("fs.s3a.bucket.milvus-bucket.aws.credentials.provider") ==
+        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+    )
+  }
+
   test("buildSnapshotHadoopConf maps IAM mode without static credentials") {
     val rawOptions = new ju.HashMap[String, String]()
     rawOptions.put(Properties.FsConfig.FsBucketName, "connector-bucket")
     rawOptions.put(Properties.FsConfig.FsUseIam, "true")
     rawOptions.put(Properties.FsConfig.FsAccessKeyId, "ak")
     rawOptions.put(Properties.FsConfig.FsAccessKeyValue, "sk")
-
     val conf = scanWithOptions(rawOptions).buildSnapshotHadoopConf(
       "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
     )
@@ -1230,6 +1508,57 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
     assert(partition.readVersion == 11L)
+  }
+
+  test(
+    "snapshot planner pins the canonical bucket on bucket-relative StorageV3 partitions"
+  ) {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq(
+        StorageV2ManifestItem(30L, "files/insert_log/10/20/30")
+      ),
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v2Segments = Seq.empty,
+      v2DeletePlans = Map.empty,
+      forceCanonicalBucket = Some("data-bucket")
+    )
+
+    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
+    assert(partition.manifestPath == "files/insert_log/10/20/30")
+    assert(
+      partition.milvusOption.options.get(Properties.FsConfig.FsBucketName) ==
+        Some("data-bucket")
+    )
+  }
+
+  test(
+    "snapshot planner pins the manifest bucket on qualified StorageV3 partitions"
+  ) {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq(
+        StorageV2ManifestItem(
+          30L,
+          "s3://minio:9000/milvus-bucket/files/insert_log/10/20/30"
+        )
+      ),
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v2Segments = Seq.empty,
+      v2DeletePlans = Map.empty,
+      forceCanonicalBucket = Some("other-bucket")
+    )
+
+    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
+    assert(partition.manifestPath == "files/insert_log/10/20/30")
+    // The manifest-named bucket wins over forceCanonicalBucket for a qualified
+    // base path.
+    assert(
+      partition.milvusOption.options.get(Properties.FsConfig.FsBucketName) ==
+        Some("milvus-bucket")
+    )
   }
 
   test("snapshot planner applies inherited L0 delete plans to StorageV3") {
