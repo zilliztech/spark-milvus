@@ -103,9 +103,15 @@ delta:  {backupDir}/binlogs/delta_log/{coll}/{part}/{seg}/{log}          (part =
 
 The `groupID` level is always present for `insert_log` (it is the virtual
 partition id; `0` for `partition_id == -1`) and present for L1 `delta_log`
-only when `partition_id != -1`. The bucket always comes from the
-`milvus.backup.dir` URI (S3 only); `fs.bucket_name` plays no part in path
-resolution.
+only when `partition_id != -1`. Two path forms are produced:
+
+- **Qualified** (`s3a://bucket/backup/b1/binlogs/...`) for the Hadoop-side
+  reads (parquet footers, delta logs, meta).
+- **Bucket-relative keys** (`backup/b1/binlogs/...`) for the milvus-storage
+  native packed reader: its `FilesystemCache::resolve_config` rejects
+  scheme-qualified URIs (demanding `extfs.*` config), and the filesystem proxy
+  prepends `fs.bucket_name`. The connector therefore canonicalizes
+  `fs.bucket_name` to the backup URI's bucket for the native reader.
 
 ## 4. Changes
 
@@ -187,10 +193,10 @@ Behavior:
 | `storageVersion` | `.storage_version` | L0 handled before this; non-L0 must be `== 2`, else the read fails hard |
 | `columnGroups` | `.binlogs[]` grouped by `fieldID` (slot) | slot = directory name |
 | `cg.fieldIds` | head file of each group via `readFieldIdsAndRowCount` | |
-| `cg.filePaths` | reconstructed from `backupDir` + IDs (never the meta `log_path`) | `insert_log` carries the groupID level; sorted by `log_id` |
+| `cg.filePaths` | reconstructed from `backupDir` + IDs (never the meta `log_path`), **bucket-relative** for the native reader | `insert_log` carries the groupID level; sorted by `log_id` |
 | `cg.fileRowCounts` | head via combined read, rest via parallel `readRowCount` | gap-closer; `size == paths.size` enforced |
 | `cg.slotFieldId` | group's `fieldID` | used for slot-based dedup |
-| `deltaLogs` | reconstructed `delta_log` paths from `backupDir` + IDs | `entriesNum = 0` (unused by the decoder) |
+| `deltaLogs` | reconstructed `delta_log` paths from `backupDir` + IDs (**qualified**, Hadoop-side) | `entriesNum = 0` (unused by the decoder) |
 | L0 segment | `is_l0 = true` → empty `columnGroups` + `deltaLogs` | inherited delete-plan path; Milvus creates L0 without a storage version, so it bypasses the V2 filter |
 
 ## 6. Delete Semantics (reuses existing logic)

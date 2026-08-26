@@ -2462,7 +2462,9 @@ class MilvusScan(
     val applyDeletes = MilvusOption.readApplyDeletes(options)
     // Object paths are reconstructed from `backupDir` plus segment IDs inside
     // BackupMetaReader; the meta's `log_path` values are source keys and are
-    // never opened. No separate bucket is needed for delete-plan resolution.
+    // never opened. The native packed reader receives bucket-relative keys, so
+    // its `fs.bucket_name` must be canonicalized to the backup URI's bucket.
+    val canonicalBucket = MilvusScan.snapshotBucket(backupDir)
     val v2Segments = BackupMetaReader.toV2Segments(
       meta,
       hadoopConf,
@@ -2485,7 +2487,7 @@ class MilvusScan(
     val v2DeletePlans = loadV2DeletePlans(
       v2Segments,
       schemaBytes,
-      snapshotBucket = None,
+      snapshotBucket = canonicalBucket,
       hadoopConf,
       errorContext = "backup"
     )
@@ -2500,7 +2502,7 @@ class MilvusScan(
         MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
           inheritedDeleteSegments,
           pkField,
-          bucket = "",
+          canonicalBucket.getOrElse(""),
           hadoopConf
         ) match {
           case Right(plans) => plans
@@ -2519,7 +2521,8 @@ class MilvusScan(
       v2Segments = v2Segments,
       v2DeletePlans = v2DeletePlans,
       inheritedDeletePlansByPartition = inheritedDeletePlansByPartition,
-      inlineInheritedDeletePlans = true
+      inlineInheritedDeletePlans = true,
+      forceCanonicalBucket = canonicalBucket
     )
   }
 

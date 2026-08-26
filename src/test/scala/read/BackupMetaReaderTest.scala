@@ -234,6 +234,49 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       "/data/backups/b1/meta/full_meta.json"
   }
 
+  test(
+    "path builders split qualified URIs (Hadoop) from bucket-relative keys (native)"
+  ) {
+    val seg = BackupMetaReader.SegmentBackup(
+      segmentId = 777L,
+      collectionId = 444L,
+      partitionId = 555L,
+      groupId = 777L
+    )
+    BackupMetaReader.backupKeyBase(
+      "s3a://bucket/backup/b1"
+    ) shouldBe "backup/b1"
+    BackupMetaReader.backupKeyBase("/data/backup/b1") shouldBe "/data/backup/b1"
+
+    // Native reader gets bucket-relative keys; Hadoop reads get the qualified URI.
+    BackupMetaReader.nativeInsertLogPath(
+      "s3a://bucket/backup/b1",
+      seg,
+      103L,
+      1L
+    ) shouldBe "backup/b1/binlogs/insert_log/444/555/777/777/103/1"
+    BackupMetaReader.qualifiedInsertLogPath(
+      "s3a://bucket/backup/b1",
+      seg,
+      103L,
+      1L
+    ) shouldBe "s3a://bucket/backup/b1/binlogs/insert_log/444/555/777/777/103/1"
+
+    // Delta logs only feed the Hadoop delete-plan reader, so only qualified
+    // paths exist. groupID level present for part != -1, omitted for part == -1.
+    BackupMetaReader.qualifiedDeltaLogPath(
+      "s3a://bucket/backup/b1",
+      seg,
+      9L
+    ) shouldBe "s3a://bucket/backup/b1/binlogs/delta_log/444/555/777/777/9"
+    val l0 = seg.copy(partitionId = -1L, groupId = 0L)
+    BackupMetaReader.qualifiedDeltaLogPath(
+      "s3a://bucket/backup/b1",
+      l0,
+      9L
+    ) shouldBe "s3a://bucket/backup/b1/binlogs/delta_log/444/-1/777/9"
+  }
+
   test("readMeta parses a binlog-format backup full_meta.json") {
     val dir = Files.createTempDirectory("milvus-backup-meta-")
     try {

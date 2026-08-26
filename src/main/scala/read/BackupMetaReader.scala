@@ -420,28 +420,33 @@ object BackupMetaReader extends Logging {
             )
           }
           val sorted = fieldBinlog.binlogs.sortBy(_.logId)
-          val paths = sorted.map(b =>
-            backupInsertLogPath(backupDir, seg, fieldBinlog.fieldId, b.logId)
+          // Hadoop-qualified paths for the footer reads; the native reader
+          // gets bucket-relative keys in `filePaths`.
+          val hadoopPaths = sorted.map(b =>
+            qualifiedInsertLogPath(backupDir, seg, fieldBinlog.fieldId, b.logId)
+          )
+          val nativePaths = sorted.map(b =>
+            nativeInsertLogPath(backupDir, seg, fieldBinlog.fieldId, b.logId)
           )
           // The head file's footer is read once for both the real field IDs
           // (which live in the parquet schema, not the backup meta) and its row
           // count; the remaining files' row counts are read in parallel.
           val headInfo = MilvusParquetFooterReader.readFieldIdsAndRowCount(
-            paths.head,
+            hadoopPaths.head,
             hadoopConf
           ) match {
             case Right(info) => info
             case Left(err) =>
               throw new RuntimeException(
-                s"failed to read footer of parquet ${paths.head} " +
+                s"failed to read footer of parquet ${hadoopPaths.head} " +
                   s"(backup segment ${seg.segmentId}, slot " +
                   s"${fieldBinlog.fieldId}): ${err.getMessage}",
                 err
               )
           }
-          val tailRowCounts = if (paths.size > 1) {
+          val tailRowCounts = if (hadoopPaths.size > 1) {
             readRowCountsInParallel(
-              paths.tail,
+              hadoopPaths.tail,
               hadoopConf,
               seg.segmentId,
               fieldBinlog.fieldId
@@ -452,7 +457,7 @@ object BackupMetaReader extends Logging {
           } else Seq.empty
           V2ColumnGroup(
             fieldIds = headInfo.fieldIds,
-            filePaths = paths,
+            filePaths = nativePaths,
             fileRowCounts = headInfo.rowCount +: tailRowCounts,
             slotFieldId = fieldBinlog.fieldId
           )
@@ -498,7 +503,7 @@ object BackupMetaReader extends Logging {
       .map(b =>
         V2DeltaLogFile(
           logId = b.logId,
-          logPath = backupDeltaLogPath(backupDir, seg, b.logId),
+          logPath = qualifiedDeltaLogPath(backupDir, seg, b.logId),
           entriesNum = b.entriesNum
         )
       )
@@ -548,6 +553,17 @@ object BackupMetaReader extends Logging {
     *   delta:  {backupDir}/binlogs/delta_log/{coll}/{part}/{seg}/{log}            (part == -1)
     *           {backupDir}/binlogs/delta_log/{coll}/{part}/{group}/{seg}/{log}    (part != -1)
     * }}}
+    *
+    * Two path forms are produced:
+    *   - **qualified** (`qualifiedInsertLogPath` / `qualifiedDeltaLogPath`),
+    *     e.g. `s3a://bucket/backup/b1/binlogs/...`, consumed by the Hadoop-side
+    *     reads (parquet footers, delta logs).
+    *   - **native** (`nativeInsertLogPath`), e.g. `backup/b1/binlogs/...`,
+    *     consumed by the milvus-storage native packed reader. Its
+    *     `FilesystemCache::resolve_config` rejects scheme-qualified URIs (it
+    *     would demand `extfs.*` config) and the filesystem proxy prepends
+    *     `fs.bucket_name`, so the column-group file keys must be
+    *     bucket-relative.
     */
   private def backupBase(backupDir: String): String = {
     Option(backupDir)
@@ -559,29 +575,70 @@ object BackupMetaReader extends Logging {
       )
   }
 
-  private def backupInsertLogPath(
+  /** Bucket-relative base of the backup dir: strips `scheme://bucket/` for S3
+    * URIs (e.g. `s3a://bucket/backup/b1` -> `backup/b1`); local dirs are
+    * returned unchanged. This is the key form the native reader expects.
+    */
+  private[read] def backupKeyBase(backupDir: String): String = {
+    val base = backupBase(backupDir)
+    val schemeIdx = base.indexOf("://")
+    if (schemeIdx < 0) {
+      base
+    } else {
+      val rest = base.substring(schemeIdx + 3)
+      val slash = rest.indexOf('/')
+      if (slash < 0) "" else rest.substring(slash + 1)
+    }
+  }
+
+  private def insertLogPath(
+      prefix: String,
+      seg: SegmentBackup,
+      slotFieldId: Long,
+      logId: Long
+  ): String =
+    s"$prefix/binlogs/insert_log/${seg.collectionId}/${seg.partitionId}/" +
+      s"${seg.groupId}/${seg.segmentId}/$slotFieldId/$logId"
+
+  private def deltaLogPath(
+      prefix: String,
+      seg: SegmentBackup,
+      logId: Long
+  ): String =
+    if (seg.partitionId == AllPartitionId) {
+      s"$prefix/binlogs/delta_log/${seg.collectionId}/${seg.partitionId}/" +
+        s"${seg.segmentId}/$logId"
+    } else {
+      s"$prefix/binlogs/delta_log/${seg.collectionId}/${seg.partitionId}/" +
+        s"${seg.groupId}/${seg.segmentId}/$logId"
+    }
+
+  /** Hadoop-qualified insert-log path (e.g.
+    * `s3a://bucket/backup/b1/binlogs/...`).
+    */
+  private[read] def qualifiedInsertLogPath(
       backupDir: String,
       seg: SegmentBackup,
       slotFieldId: Long,
       logId: Long
-  ): String = {
-    val base = backupBase(backupDir)
-    s"$base/binlogs/insert_log/${seg.collectionId}/${seg.partitionId}/" +
-      s"${seg.groupId}/${seg.segmentId}/$slotFieldId/$logId"
-  }
+  ): String = insertLogPath(backupBase(backupDir), seg, slotFieldId, logId)
 
-  private def backupDeltaLogPath(
+  /** Native-reader bucket-relative insert-log key (e.g.
+    * `backup/b1/binlogs/...`).
+    */
+  private[read] def nativeInsertLogPath(
+      backupDir: String,
+      seg: SegmentBackup,
+      slotFieldId: Long,
+      logId: Long
+  ): String = insertLogPath(backupKeyBase(backupDir), seg, slotFieldId, logId)
+
+  /** Hadoop-qualified delta-log path. Delta logs only feed the Hadoop-side
+    * delete-plan reader, so no native form is produced.
+    */
+  private[read] def qualifiedDeltaLogPath(
       backupDir: String,
       seg: SegmentBackup,
       logId: Long
-  ): String = {
-    val base = backupBase(backupDir)
-    if (seg.partitionId == AllPartitionId) {
-      s"$base/binlogs/delta_log/${seg.collectionId}/${seg.partitionId}/" +
-        s"${seg.segmentId}/$logId"
-    } else {
-      s"$base/binlogs/delta_log/${seg.collectionId}/${seg.partitionId}/" +
-        s"${seg.groupId}/${seg.segmentId}/$logId"
-    }
-  }
+  ): String = deltaLogPath(backupBase(backupDir), seg, logId)
 }
