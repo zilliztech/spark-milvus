@@ -229,34 +229,31 @@ case class MilvusTable(
     * connection). The collection schema is materialized from the backup's
     * `full_meta.json` so downstream metadata rehydration (e.g. Milvus data type
     * / vector dimension on Spark fields) works identically to snapshot mode.
-    * Best-effort: if the meta cannot be read or parsed, we fall back to an
-    * empty schema and rely on the caller-supplied Spark schema.
+    * The collection is selected by `milvus.collection.name`, and its id is read
+    * from the meta. Best-effort only for I/O: if the meta cannot be read we
+    * fall back to an empty schema, but a meta-level contract violation (e.g. a
+    * dynamic collection without a `$meta` record) surfaces loudly.
     */
   private def initFromBackup(): Unit = {
-    val collectionId = milvusOption.options
-      .get(MilvusOption.SnapshotCollectionId)
-      .map(_.toLong)
-      .getOrElse(0L)
     partitionID = 0L
 
-    val schemaFromMeta =
+    val parsedCollection =
       MilvusOption.backupDir(milvusOption.options).flatMap { dir =>
         val conf =
           MilvusScan.buildHadoopConfForOptions(milvusOption.options, dir)
-        BackupMetaReader
-          .readMeta(conf, dir)
-          .toOption
-          .flatMap(_.collectionBackups.headOption.flatMap(_.schema))
-          .flatMap(s =>
-            scala.util
-              .Try(
-                CollectionSchema.parseFrom(
-                  BackupMetaReader.toProtobufSchemaBytes(s)
-                )
-              )
-              .toOption
-          )
+        BackupMetaReader.readMeta(conf, dir).toOption.flatMap { meta =>
+          MilvusScan
+            .resolveBackupCollection(meta, milvusOption.collectionName)
+            .toOption
+        }
       }
+
+    val collectionId = parsedCollection.map(_.collectionId).getOrElse(0L)
+
+    val schemaFromMeta = parsedCollection.flatMap(_.schema).map { s =>
+      BackupMetaReader.validateDynamicFieldSchema(s)
+      CollectionSchema.parseFrom(BackupMetaReader.toProtobufSchemaBytes(s))
+    }
 
     schemaFromMeta match {
       case Some(schema) =>
@@ -1441,6 +1438,38 @@ object MilvusScan extends Logging {
     metadata
   }
 
+  /** Resolve the collection to read from a backup meta, matching on
+    * `milvus.collection.name`. Returns `Left(message)` when no collection
+    * matches, or when the name is unset and the backup holds multiple
+    * collections (so callers never silently read the wrong `.head`).
+    */
+  private[sources] def resolveBackupCollection(
+      meta: BackupMetaReader.BackupInfo,
+      collectionName: String
+  ): Either[String, BackupMetaReader.CollectionBackup] = {
+    if (collectionName.nonEmpty) {
+      meta.collectionBackups.find(_.collectionName == collectionName) match {
+        case Some(coll) => Right(coll)
+        case None =>
+          Left(
+            s"Backup '${meta.name}' does not contain collection " +
+              s"'$collectionName'; available: " +
+              meta.collectionBackups.map(_.collectionName).mkString(",")
+          )
+      }
+    } else {
+      meta.collectionBackups match {
+        case Seq(single) => Right(single)
+        case _ =>
+          Left(
+            s"Backup '${meta.name}' contains " +
+              s"${meta.collectionBackups.size} collection(s); set " +
+              s"${MilvusOption.MilvusCollectionName} to select one"
+          )
+      }
+    }
+  }
+
   /** Build a Hadoop `Configuration` for reading objects referenced by a
     * snapshot/backup path, applying the connector's `fs.*` options plus any
     * per-bucket S3A configuration. Extracted as a companion method so both the
@@ -2434,13 +2463,26 @@ class MilvusScan(
           "backups can be read as a datasource"
       )
     }
-    if (meta.collectionBackups.size != 1) {
+    val coll = MilvusScan.resolveBackupCollection(
+      meta,
+      milvusOption.collectionName
+    ) match {
+      case Right(c) => c
+      case Left(msg) =>
+        throw new IllegalArgumentException(msg)
+    }
+    if (
+      milvusOption.partitionName.nonEmpty || milvusOption.partitionID.nonEmpty ||
+      milvusOption.segmentID.nonEmpty
+    ) {
       throw new IllegalArgumentException(
-        s"Backup '${meta.name}' must contain exactly one collection for a " +
-          s"datasource read, got ${meta.collectionBackups.size}"
+        s"Backup datasource does not support " +
+          s"'${MilvusOption.MilvusPartitionName}' / " +
+          s"'${MilvusOption.MilvusPartitionID}' / " +
+          s"'${MilvusOption.MilvusSegmentID}' selectors yet; read the whole " +
+          "backup and filter in Spark"
       )
     }
-    val coll = meta.collectionBackups.head
     val schemaBytes = coll.schema
       .map(BackupMetaReader.toProtobufSchemaBytes)
       .getOrElse {

@@ -506,6 +506,67 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     result.left.toOption.get.getMessage should include("snapshot format")
   }
 
+  test(
+    "toProtobufSchemaBytes rejects dynamic collections without a $meta record"
+  ) {
+    import com.fasterxml.jackson.databind.node.IntNode
+    val base = BackupMetaReader.BackupCollectionSchema(
+      name = "demo",
+      enableDynamicField = true,
+      fields = Seq(
+        BackupMetaReader.BackupFieldSchema(
+          fieldId = 100L,
+          name = "id",
+          rawDataType = Some(IntNode.valueOf(5))
+        )
+      )
+    )
+    val err = intercept[IllegalArgumentException] {
+      BackupMetaReader.toProtobufSchemaBytes(base)
+    }
+    err.getMessage should include("--backup_index_extra")
+
+    // With the $meta field recorded, conversion succeeds.
+    val withMeta = base.copy(
+      fields = base.fields :+ BackupMetaReader.BackupFieldSchema(
+        fieldId = 101L,
+        name = "$meta",
+        rawDataType = Some(IntNode.valueOf(23))
+      )
+    )
+    BackupMetaReader.toProtobufSchemaBytes(withMeta).nonEmpty shouldBe true
+  }
+
+  test(
+    "buildV2Segment fails hard when a non-empty StorageV2 segment has no binlogs"
+  ) {
+    val conf = new Configuration()
+    val seg = BackupMetaReader.SegmentBackup(
+      segmentId = 9L,
+      storageVersion = 2L,
+      numOfRows = 50000L,
+      binlogs = Seq.empty
+    )
+    val err = BackupMetaReader
+      .buildV2Segment(seg, conf, "/tmp/backup", applyDeletes = true)
+      .left
+      .toOption
+      .get
+    err.getMessage should include("refusing to silently drop rows")
+
+    // A genuinely empty segment (no rows, no binlogs) stays a soft empty.
+    val zeroRowSeg = seg.copy(numOfRows = 0L)
+    BackupMetaReader.buildV2Segment(
+      zeroRowSeg,
+      conf,
+      "/tmp/backup",
+      applyDeletes = true
+    ) match {
+      case Right(Some(v2)) => v2.columnGroups shouldBe Seq.empty
+      case other           => fail(s"expected Right(Some), got $other")
+    }
+  }
+
   private def deleteRecursively(dir: java.nio.file.Path): Unit = {
     import scala.jdk.CollectionConverters._
     if (Files.exists(dir)) {

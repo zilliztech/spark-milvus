@@ -116,22 +116,34 @@ object MilvusParquetFooterReader extends Logging {
     readWithFileSystem(path, hadoopConf) { inputFile =>
       val parquet = ParquetFileReader.open(inputFile)
       try {
-        val schema = parquet.getFooter.getFileMetaData.getSchema
-        val fields = schema.getFields.asScala
-        fields.map { t: Type =>
-          val id = t.getId
-          if (id == null) {
-            throw new IllegalStateException(
-              s"parquet column '${t.getName}' in $path has no PARQUET:field_id " +
-                s"metadata; cannot recover StorageV2 column-group field ids"
-            )
-          }
-          id.intValue().toLong
-        }.toSeq
+        fieldIdsFromMessageType(
+          parquet.getFooter.getFileMetaData.getSchema,
+          path
+        )
       } finally {
         parquet.close()
       }
     }
+  }
+
+  /** Shared field-ID extraction from a parquet `MessageType`, keeping the
+    * single-open callers (`readFieldIdsFromSchema`, `readFieldIdsAndRowCount`)
+    * in lock-step.
+    */
+  private[read] def fieldIdsFromMessageType(
+      schema: org.apache.parquet.schema.MessageType,
+      path: String
+  ): Seq[Long] = {
+    schema.getFields.asScala.map { t: Type =>
+      val id = t.getId
+      if (id == null) {
+        throw new IllegalStateException(
+          s"parquet column '${t.getName}' in $path has no PARQUET:field_id " +
+            s"metadata; cannot recover StorageV2 column-group field ids"
+        )
+      }
+      id.intValue().toLong
+    }.toSeq
   }
 
   private def readWithFileSystem[T](
@@ -216,17 +228,10 @@ object MilvusParquetFooterReader extends Logging {
       val parquet = ParquetFileReader.open(inputFile)
       try {
         val footer = parquet.getFooter
-        val schema = footer.getFileMetaData.getSchema
-        val fieldIds = schema.getFields.asScala.map { t: Type =>
-          val id = t.getId
-          if (id == null) {
-            throw new IllegalStateException(
-              s"parquet column '${t.getName}' in $path has no PARQUET:field_id " +
-                s"metadata; cannot recover StorageV2 column-group field ids"
-            )
-          }
-          id.intValue().toLong
-        }.toSeq
+        val fieldIds = fieldIdsFromMessageType(
+          footer.getFileMetaData.getSchema,
+          path
+        )
         val rowCount = footer.getBlocks.asScala.map(_.getRowCount).sum
         ParquetFooterInfo(fieldIds, rowCount)
       } finally {

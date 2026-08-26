@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import java.util.concurrent.{
   Callable,
+  ConcurrentHashMap,
   ExecutorService,
   Executors,
   ThreadFactory
@@ -21,6 +22,7 @@ import com.fasterxml.jackson.module.scala.{
   ScalaObjectMapper
 }
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.FileSystem
 import org.apache.spark.internal.Logging
 
 import io.milvus.grpc.common.KeyValuePair
@@ -205,18 +207,64 @@ object BackupMetaReader extends Logging {
     s"$stripped/meta/full_meta.json"
   }
 
-  /** Read and parse the backup's `full_meta.json`. */
+  /** Read and parse the backup's `full_meta.json`.
+    *
+    * The read is bounded ([[MilvusSnapshotReader.readUtf8WithLimit]]) so an
+    * oversized or pathological meta fails on the driver instead of being
+    * slurped into memory. Successful parses are cached per backup dir — a
+    * backup is an immutable export, and both table init and scan planning need
+    * it.
+    */
   def readMeta(
       hadoopConf: Configuration,
-      backupDir: String
+      backupDir: String,
+      maxBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
   ): Either[Throwable, BackupInfo] = {
+    val cached = metaCache.get(backupDir)
+    if (cached != null) {
+      Right(cached)
+    } else {
+      readMetaUncached(hadoopConf, backupDir, maxBytes).map { info =>
+        metaCache.putIfAbsent(backupDir, info)
+        info
+      }
+    }
+  }
+
+  private def readMetaUncached(
+      hadoopConf: Configuration,
+      backupDir: String,
+      maxBytes: Long
+  ): Either[Throwable, BackupInfo] = {
+    var uri: java.net.URI = null
+    var fs: FileSystem = null
     try {
       val metaFilePath = metaPath(backupDir)
-      val bytes = V2SegmentLoader.readAllBytes(hadoopConf, metaFilePath)
-      val json = new String(bytes, "UTF-8")
-      Right(mapper.readValue[BackupInfo](json))
+      uri = new java.net.URI(metaFilePath)
+      fs = FileSystem.get(uri, hadoopConf)
+      val in = fs.open(new org.apache.hadoop.fs.Path(uri))
+      try {
+        val json =
+          MilvusSnapshotReader.readUtf8WithLimit(in, metaFilePath, maxBytes)
+        Right(mapper.readValue[BackupInfo](json))
+      } finally {
+        in.close()
+      }
     } catch {
       case NonFatal(e) => Left(e)
+    } finally {
+      Option(uri)
+        .flatMap(u => Option(u.getScheme))
+        .foreach { scheme =>
+          if (
+            fs != null && hadoopConf.getBoolean(
+              s"fs.$scheme.impl.disable.cache",
+              false
+            )
+          ) {
+            fs.close()
+          }
+        }
     }
   }
 
@@ -238,8 +286,15 @@ object BackupMetaReader extends Logging {
 
   /** Convert a backup `CollectionSchema` into Milvus protobuf
     * `CollectionSchema` bytes — the format the packed-V2 reader expects.
+    *
+    * Rejects a dynamic collection whose meta lacks the `$meta` field: a default
+    * backup only records it when created with etcd access
+    * (`--backup_index_extra`), and without it the reader would silently return
+    * a null `$meta` column while dropping the real field from the column
+    * groups.
     */
   def toProtobufSchemaBytes(schema: BackupCollectionSchema): Array[Byte] = {
+    validateDynamicFieldSchema(schema)
     val userFields =
       schema.fields.filterNot(f => f.name == "RowID" || f.name == "Timestamp")
     val protoFields = userFields.map { field =>
@@ -273,6 +328,23 @@ object BackupMetaReader extends Logging {
     protoSchema.toByteArray
   }
 
+  /** Validate a backup collection schema before planning. Currently rejects a
+    * dynamic collection whose meta has no `$meta` field (a default backup only
+    * records it with etcd access) — reading it would silently return a null
+    * `$meta` column.
+    */
+  private[connector] def validateDynamicFieldSchema(
+      schema: BackupCollectionSchema
+  ): Unit = {
+    if (schema.enableDynamicField && !schema.fields.exists(_.name == "$meta")) {
+      throw new IllegalArgumentException(
+        s"backup collection '${schema.name}' has enable_dynamic_field=true but " +
+          "its meta does not record the '$meta' field; create the backup with " +
+          "etcd access (--backup_index_extra) so the dynamic field schema is captured"
+      )
+    }
+  }
+
   private def toProtoKV(kv: BackupKeyValuePair): KeyValuePair =
     KeyValuePair(key = kv.key, value = kv.value)
 
@@ -304,6 +376,13 @@ object BackupMetaReader extends Logging {
     * segments.
     */
   private val AllPartitionId = -1L
+
+  /** Process-wide cache of parsed `full_meta.json` keyed by backup dir. Backups
+    * are immutable exports, and both table init and scan planning need the
+    * meta, so a successful parse is reused instead of reading+parsing twice.
+    */
+  private val metaCache =
+    new ConcurrentHashMap[String, BackupInfo]()
 
   private val FooterReadThreadCount: Int = {
     val cores = Runtime.getRuntime.availableProcessors()
@@ -404,11 +483,20 @@ object BackupMetaReader extends Logging {
         )
       )
     } else if (seg.binlogs.isEmpty || seg.binlogs.forall(_.binlogs.isEmpty)) {
-      logWarning(
-        s"backup segment ${seg.segmentId} has no binlogs; emitting as empty " +
-          "column-group list"
-      )
-      Right(Some(emptyColumnGroupSegment(seg, backupDir)))
+      if (seg.numOfRows == 0L) {
+        logWarning(
+          s"backup segment ${seg.segmentId} has no binlogs and no rows; " +
+            "emitting as empty column-group list"
+        )
+        Right(Some(emptyColumnGroupSegment(seg, backupDir)))
+      } else {
+        Left(
+          new IllegalStateException(
+            s"backup segment ${seg.segmentId} has no binlogs but " +
+              s"num_of_rows=${seg.numOfRows}; refusing to silently drop rows"
+          )
+        )
+      }
     } else {
       try {
         val columnGroups = seg.binlogs.map { fieldBinlog =>

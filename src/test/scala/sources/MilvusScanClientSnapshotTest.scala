@@ -37,6 +37,7 @@ import org.scalatest.BeforeAndAfterEach
 import com.zilliz.spark.connector.{MilvusCollectionInfo, MilvusOption}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
+  BackupMetaReader,
   Collection,
   CollectionSchema,
   MilvusDeletePlan,
@@ -211,6 +212,34 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       MilvusScan.snapshotBucket("gs://a-bucket/files/snapshot.json") == None
     )
     assert(MilvusScan.snapshotBucket("file:///data/backup/b1") == None)
+  }
+
+  test("resolveBackupCollection matches by collection name, never .head") {
+    def coll(name: String, id: Long) =
+      BackupMetaReader.CollectionBackup(
+        collectionName = name,
+        collectionId = id
+      )
+    val multi = BackupMetaReader.BackupInfo(
+      name = "b1",
+      collectionBackups = Seq(coll("c1", 1L), coll("c2", 2L))
+    )
+    assert(
+      MilvusScan.resolveBackupCollection(multi, "c2").map(_.collectionId) ==
+        Right(2L)
+    )
+    assert(MilvusScan.resolveBackupCollection(multi, "nope").isLeft)
+    // No name given + multiple collections -> error, not .head.
+    assert(MilvusScan.resolveBackupCollection(multi, "").isLeft)
+
+    val single = BackupMetaReader.BackupInfo(
+      name = "s",
+      collectionBackups = Seq(coll("only", 3L))
+    )
+    assert(
+      MilvusScan.resolveBackupCollection(single, "").map(_.collectionId) ==
+        Right(3L)
+    )
   }
 
   test(

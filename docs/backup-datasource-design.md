@@ -154,6 +154,12 @@ Behavior:
   inherited delete-plan path).
 - L0 segments produce a `V2SegmentInfo` with empty `columnGroups` plus
   `deltaLogs`, feeding the inherited delete-plan path.
+- Fails hard for a StorageV2 data segment with rows but no binlogs (would
+  otherwise silently drop rows), and for dynamic collections whose meta lacks
+  the `$meta` field (default backups; points at `--backup_index_extra`).
+- `readMeta` reads `full_meta.json` with a bounded reader
+  (`milvus.snapshot.max.json.bytes`, default 64 MiB) and caches the parsed
+  `BackupInfo` per backup dir so table init and scan planning read it once.
 
 ### 4.3 `src/main/scala/read/MilvusParquetFooterReader.scala`
 
@@ -169,11 +175,13 @@ Behavior:
   `milvus.uri`; enforce snapshot/backup mutual exclusion; return an empty
   schema from inference (callers supply `.schema()`).
 - `MilvusTable`: `isBackupMode`, `initFromBackup()` (materializes the collection
-  schema from the backup meta so metadata rehydration for vector columns works
+  schema and collection id from the backup meta — matched by
+  `milvus.collection.name` — so metadata rehydration for vector columns works
   like snapshot mode), and `schema()` handling for offline modes.
-- `MilvusScan.planInputPartitionsFromBackup()`: reads the meta, validates that
-  it carries a collection schema with a primary key, builds `V2SegmentInfo`,
-  loads delete plans, and hands everything to the shared
+- `MilvusScan.planInputPartitionsFromBackup()`: resolves the collection by name
+  (`resolveBackupCollection`), rejects partition/segment selectors, validates
+  that the meta carries a collection schema with a primary key, builds
+  `V2SegmentInfo`, loads delete plans, and hands everything to the shared
   `buildSnapshotPartitions` with `inlineInheritedDeletePlans = true`.
 - `MilvusScan.pushFilters`: backup mode returns all filters as unsupported
   (the packed-V2 reader has no filter pushdown), matching the packed-V2 snapshot
@@ -214,15 +222,27 @@ Behavior:
 
 - Backups default to a flush, so only disk-resident (flushed) data is read — a
   consistent point-in-time copy, same constraint as snapshot reads.
-- Empty segments / segments without binlogs emit `columnGroups = Seq.empty`
-  and are skipped during partition planning (`skippedDeleteOnlySegments`).
-- Dynamic field `$meta` is preserved via `enableDynamicField`; the packed
-  reader tolerates unmapped `$meta` columns.
+- Empty segments (`num_of_rows == 0`, no binlogs) emit `columnGroups =
+  Seq.empty` and are skipped during partition planning. A StorageV2 data
+  segment with rows but no binlogs fails hard rather than silently dropping
+  rows.
+- Dynamic collections: a default backup (no etcd access) does not record the
+  `$meta` field, so reading it would return null `$meta` rows; such backups are
+  rejected with a pointer to `--backup_index_extra`.
+- `milvus.partition.name` / `milvus.partition.id` / `milvus.segment.id`
+  selectors are rejected (not yet supported); read the whole backup and filter
+  in Spark.
+- The collection is selected by `milvus.collection.name` (never `.head`); when
+  the name is unset and the backup holds multiple collections the read is
+  rejected.
 - Non-L0 segments that are not StorageV2 (`storage_version != 2`) fail hard on
   the driver rather than returning a partial dataset. L0 delete-only segments
   bypass the storage-version check (Milvus creates them without one).
 - The driver validates that the backup meta carries a collection schema with a
-  primary key before planning.
+  primary key before planning. `full_meta.json` is read with a bounded reader
+  (default 64 MiB, overridable via `milvus.snapshot.max.json.bytes`) and cached
+  per backup dir.
+- `milvus.backup.dir` normalizes the `s3://` alias to `s3a://`.
 - Local paths (`/data/backup/...` or `file:///...`) work for the meta/footer
   mapping layer (and unit tests); the JNI packed reader itself requires S3
   storage.

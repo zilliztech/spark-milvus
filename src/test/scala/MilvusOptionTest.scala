@@ -475,6 +475,18 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
     ) shouldBe false
   }
 
+  test("backupDir normalizes the s3:// alias to s3a://") {
+    MilvusOption.backupDir(
+      Map(MilvusOption.BackupDir -> "s3://bucket/backup/b1")
+    ) shouldBe Some("s3a://bucket/backup/b1")
+    MilvusOption.backupDir(
+      Map(MilvusOption.BackupDir -> "s3a://bucket/backup/b1")
+    ) shouldBe Some("s3a://bucket/backup/b1")
+    MilvusOption.backupDir(
+      Map(MilvusOption.BackupDir -> "/data/backup/b1")
+    ) shouldBe Some("/data/backup/b1")
+  }
+
   test("validateBackupModeOptions rejects backup combined with snapshot mode") {
     val both = Map(
       MilvusOption.BackupDir -> "s3a://bucket/backup/b1",

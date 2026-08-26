@@ -240,7 +240,16 @@ object MilvusOption {
   private def backupDirFrom(
       getOption: String => Option[String]
   ): Option[String] =
-    getOption(BackupDir).map(_.trim).filter(_.nonEmpty)
+    getOption(BackupDir)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(normalizeBackupScheme)
+
+  /** Normalize the `s3://` alias to `s3a://` at entry so Hadoop (which drops
+    * the `s3://` provider) and the connector's path reconstruction agree.
+    */
+  private def normalizeBackupScheme(dir: String): String =
+    if (dir.startsWith("s3://")) "s3a://" + dir.stripPrefix("s3://") else dir
 
   def backupDir(options: Map[String, String]): Option[String] = {
     backupDirFrom { key =>
