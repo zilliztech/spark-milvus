@@ -1595,31 +1595,15 @@ object MilvusBackfill {
   private[backfill] def dedupColumnGroupsBySlot(
       seg: com.zilliz.spark.connector.read.V2SegmentInfo
   ): com.zilliz.spark.connector.read.V2SegmentInfo = {
-    val groups = seg.columnGroups
-    if (groups.isEmpty || groups.exists(_.slotFieldId < 0L)) return seg
-
-    val maxSlotPerField: Map[Long, Long] =
-      groups
-        .flatMap(g => g.fieldIds.map(fid => fid -> g.slotFieldId))
-        .groupBy(_._1)
-        .map { case (fid, pairs) => fid -> pairs.map(_._2).max }
-
-    val rebuilt = groups.flatMap { g =>
-      val keptFids =
-        g.fieldIds.filter(fid => maxSlotPerField(fid) == g.slotFieldId)
-      val stripped = g.fieldIds.diff(keptFids)
-      if (stripped.nonEmpty) {
-        logger.info(
-          s"V2 dedup segment=${seg.segmentId} slot=${g.slotFieldId}: " +
-            s"stripped fieldIds=${stripped.mkString(",")} " +
-            s"(owned by larger slots ${stripped.map(maxSlotPerField).mkString(",")})"
-        )
-      }
-      if (keptFids.isEmpty) None
-      else Some(g.copy(fieldIds = keptFids))
+    val before = seg.columnGroups
+    val deduped = seg.dedupColumnGroupsBySlot
+    if (before != deduped.columnGroups) {
+      logger.info(
+        s"V2 dedup segment=${seg.segmentId}: removed overlapping field ids " +
+          "claimed by older slots"
+      )
     }
-
-    seg.copy(columnGroups = rebuilt)
+    deduped
   }
 
   /** Decode the StorageV2 segments referenced by the snapshot's

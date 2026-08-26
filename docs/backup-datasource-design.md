@@ -189,6 +189,8 @@ Behavior:
   (`V2SegmentInfo.dedupColumnGroupsBySlot`) so a field carried by an old
   multi-field group and a newer single-field group (add-field + backfill) is
   read from the newest owner — the same gap the snapshot read path had.
+  `MilvusBackfill.dedupColumnGroupsBySlot` delegates to the same method, so the
+  rule has a single implementation.
 - `MilvusScan.pushFilters`: backup mode returns all filters as unsupported
   (the packed-V2 reader has no filter pushdown), matching the packed-V2 snapshot
   path.
@@ -254,6 +256,9 @@ Behavior:
 - `toV2Segments` materializes segments only for the resolved `collectionId`, so
   a multi-collection backup never leaks another collection's segments into the
   read.
+- Schema conversion drops system fields by field ID (`0`/`1`), never by name:
+  milvus-backup's schema carries only user fields, so a user field literally
+  named `RowID`/`Timestamp` survives.
 - `milvus.backup.dir` normalizes the `s3://` alias to `s3a://`; `file:///...`
   and bare local paths resolve to the same native keys.
 - A dynamic collection whose `$meta` field is present is not duplicated by the

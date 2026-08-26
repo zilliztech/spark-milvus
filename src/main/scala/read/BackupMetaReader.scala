@@ -279,8 +279,12 @@ object BackupMetaReader extends Logging {
     */
   def toProtobufSchemaBytes(schema: BackupCollectionSchema): Array[Byte] = {
     validateDynamicFieldSchema(schema)
+    // Drop system fields by field ID (0 = RowID, 1 = Timestamp), never by name:
+    // milvus-backup's schema comes from DescribeCollection, which only returns
+    // user fields, so a legitimately-named user field (e.g. a PK literally
+    // called "RowID") must survive and only true system IDs are removed.
     val userFields =
-      schema.fields.filterNot(f => f.name == "RowID" || f.name == "Timestamp")
+      schema.fields.filterNot(f => f.fieldId == 0L || f.fieldId == 1L)
     val protoFields = userFields.map { field =>
       FieldSchema(
         fieldID = field.fieldId,

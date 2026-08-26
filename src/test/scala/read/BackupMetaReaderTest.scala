@@ -237,11 +237,13 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
   test(
     "path builders split qualified URIs (Hadoop) from bucket-relative keys (native)"
   ) {
+    // A groupId distinct from segmentId pins the {group}/{seg} level order —
+    // groupId == segmentId would not discriminate the two.
     val seg = BackupMetaReader.SegmentBackup(
       segmentId = 777L,
       collectionId = 444L,
       partitionId = 555L,
-      groupId = 777L
+      groupId = 999L
     )
     BackupMetaReader.backupKeyBase(
       "s3a://bucket/backup/b1"
@@ -257,13 +259,13 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       seg,
       103L,
       1L
-    ) shouldBe "backup/b1/binlogs/insert_log/444/555/777/777/103/1"
+    ) shouldBe "backup/b1/binlogs/insert_log/444/555/999/777/103/1"
     BackupMetaReader.qualifiedInsertLogPath(
       "s3a://bucket/backup/b1",
       seg,
       103L,
       1L
-    ) shouldBe "s3a://bucket/backup/b1/binlogs/insert_log/444/555/777/777/103/1"
+    ) shouldBe "s3a://bucket/backup/b1/binlogs/insert_log/444/555/999/777/103/1"
 
     // Delta logs only feed the Hadoop delete-plan reader, so only qualified
     // paths exist. groupID level present for part != -1, omitted for part == -1.
@@ -271,7 +273,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       "s3a://bucket/backup/b1",
       seg,
       9L
-    ) shouldBe "s3a://bucket/backup/b1/binlogs/delta_log/444/555/777/777/9"
+    ) shouldBe "s3a://bucket/backup/b1/binlogs/delta_log/444/555/999/777/9"
     val l0 = seg.copy(partitionId = -1L, groupId = 0L)
     BackupMetaReader.qualifiedDeltaLogPath(
       "s3a://bucket/backup/b1",

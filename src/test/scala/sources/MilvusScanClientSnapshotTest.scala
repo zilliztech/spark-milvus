@@ -1492,6 +1492,52 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(second.deletePlan.containsLongPk(7L, 50L))
     assert(!second.deletePlan.containsLongPk(8L, 100L))
   }
+
+  test("snapshot planner dedups V2 column groups by slot before planning") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    // A segment that went through add-field + backfill: the old multi-field
+    // group (slot 3) still reports field 100 from its own schema, and the newer
+    // single-field group (slot 100) reports it too. buildSnapshotPartitions
+    // must strip the overlapping field from the older slot.
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq.empty,
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v2Segments = Seq(
+        V2SegmentInfo(
+          segmentId = 30L,
+          partitionId = 20L,
+          numOfRows = 2L,
+          storageVersion = 2L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              fieldIds = Seq(100L, 0L, 1L),
+              filePaths = Seq("files/insert_log/10/20/30/3/1.parquet"),
+              fileRowCounts = Seq(2L),
+              slotFieldId = 3L
+            ),
+            V2ColumnGroup(
+              fieldIds = Seq(100L),
+              filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+              fileRowCounts = Seq(2L),
+              slotFieldId = 100L
+            )
+          )
+        )
+      ),
+      v2DeletePlans = Map.empty,
+      inheritedDeletePlansByPartition = Map.empty,
+      inlineInheritedDeletePlans = true
+    )
+
+    val partition = partitions.head.asInstanceOf[MilvusPackedV2InputPartition]
+    val groups = partition.columnGroups
+    assert(groups.size == 2)
+    // Old slot keeps only its unique fields; the shared field 100 is read from
+    // the newest slot.
+    assert(groups.find(_.slotFieldId == 3L).get.fieldIds == Seq(0L, 1L))
+    assert(groups.find(_.slotFieldId == 100L).get.fieldIds == Seq(100L))
+  }
 }
 
 class CloseTrackingFileSystem extends FileSystem {

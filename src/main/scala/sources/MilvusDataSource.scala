@@ -256,8 +256,17 @@ case class MilvusTable(
                 meta,
                 milvusOption.databaseName,
                 milvusOption.collectionName
-              )
-              .toOption
+              ) match {
+              case Right(coll) => Some(coll)
+              case Left(msg)   =>
+                // Not an I/O failure — the user asked for a collection that is
+                // not in the backup. Surface it now (the planner re-raises it)
+                // instead of silently degrading to a minimal schema.
+                logWarning(
+                  s"Backup collection resolution failed at table init: $msg"
+                )
+                None
+            }
           }
       }
 
