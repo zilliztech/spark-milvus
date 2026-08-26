@@ -220,12 +220,13 @@ object BackupMetaReader extends Logging {
       backupDir: String,
       maxBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
   ): Either[Throwable, BackupInfo] = {
-    val cached = metaCache.get(backupDir)
+    val cacheKey = metaCacheKey(backupDir, maxBytes)
+    val cached = metaCache.get(cacheKey)
     if (cached != null) {
       Right(cached)
     } else {
       readMetaUncached(hadoopConf, backupDir, maxBytes).map { info =>
-        metaCache.putIfAbsent(backupDir, info)
+        metaCache.putIfAbsent(cacheKey, info)
         info
       }
     }
@@ -377,12 +378,17 @@ object BackupMetaReader extends Logging {
     */
   private val AllPartitionId = -1L
 
-  /** Process-wide cache of parsed `full_meta.json` keyed by backup dir. Backups
-    * are immutable exports, and both table init and scan planning need the
-    * meta, so a successful parse is reused instead of reading+parsing twice.
+  /** Process-wide cache of parsed `full_meta.json` keyed by backup dir + size
+    * limit. Backups are immutable exports, and both table init and scan
+    * planning need the meta, so a successful parse is reused instead of
+    * reading+parsing twice. The limit is part of the key so a later read with a
+    * different `milvus.snapshot.max.json.bytes` cannot alias a cached parse.
     */
   private val metaCache =
     new ConcurrentHashMap[String, BackupInfo]()
+
+  private def metaCacheKey(backupDir: String, maxBytes: Long): String =
+    s"$backupDir\u0000$maxBytes"
 
   private val FooterReadThreadCount: Int = {
     val cores = Runtime.getRuntime.availableProcessors()
@@ -675,7 +681,15 @@ object BackupMetaReader extends Logging {
     } else {
       val rest = base.substring(schemeIdx + 3)
       val slash = rest.indexOf('/')
-      if (slash < 0) "" else rest.substring(slash + 1)
+      if (slash < 0) {
+        ""
+      } else if (slash == 0) {
+        // Empty authority (e.g. file:///data/backup/b1): keep the leading
+        // slash so both spellings of the same local location agree.
+        rest
+      } else {
+        rest.substring(slash + 1)
+      }
     }
   }
 

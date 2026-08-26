@@ -178,11 +178,16 @@ Behavior:
   schema and collection id from the backup meta — matched by
   `milvus.collection.name` — so metadata rehydration for vector columns works
   like snapshot mode), and `schema()` handling for offline modes.
-- `MilvusScan.planInputPartitionsFromBackup()`: resolves the collection by name
-  (`resolveBackupCollection`), rejects partition/segment selectors, validates
+- `MilvusScan.planInputPartitionsFromBackup()`: resolves the collection by
+  `milvus.database.name` + `milvus.collection.name` (`resolveBackupCollection`,
+  ambiguous names rejected), rejects partition/segment selectors, validates
   that the meta carries a collection schema with a primary key, builds
   `V2SegmentInfo`, loads delete plans, and hands everything to the shared
   `buildSnapshotPartitions` with `inlineInheritedDeletePlans = true`.
+- Shared `buildSnapshotPartitions` dedups each segment's column groups by slot
+  (`V2SegmentInfo.dedupColumnGroupsBySlot`) so a field carried by an old
+  multi-field group and a newer single-field group (add-field + backfill) is
+  read from the newest owner — the same gap the snapshot read path had.
 - `MilvusScan.pushFilters`: backup mode returns all filters as unsupported
   (the packed-V2 reader has no filter pushdown), matching the packed-V2 snapshot
   path.
@@ -232,17 +237,21 @@ Behavior:
 - `milvus.partition.name` / `milvus.partition.id` / `milvus.segment.id`
   selectors are rejected (not yet supported); read the whole backup and filter
   in Spark.
-- The collection is selected by `milvus.collection.name` (never `.head`); when
-  the name is unset and the backup holds multiple collections the read is
+- The collection is selected by `milvus.database.name` +
+  `milvus.collection.name` (never `.head`); an unqualified name that is
+  ambiguous across databases, or no name with multiple collections, is
   rejected.
 - Non-L0 segments that are not StorageV2 (`storage_version != 2`) fail hard on
   the driver rather than returning a partial dataset. L0 delete-only segments
   bypass the storage-version check (Milvus creates them without one).
 - The driver validates that the backup meta carries a collection schema with a
   primary key before planning. `full_meta.json` is read with a bounded reader
-  (default 64 MiB, overridable via `milvus.snapshot.max.json.bytes`) and cached
-  per backup dir.
-- `milvus.backup.dir` normalizes the `s3://` alias to `s3a://`.
+  (`milvus.snapshot.max.json.bytes`, default 64 MiB, honored at both read
+  sites) and cached per (backup dir, limit).
+- `milvus.backup.dir` normalizes the `s3://` alias to `s3a://`; `file:///...`
+  and bare local paths resolve to the same native keys.
+- A dynamic collection whose `$meta` field is present is not duplicated by the
+  computed schema.
 - Local paths (`/data/backup/...` or `file:///...`) work for the meta/footer
   mapping layer (and unit tests); the JNI packed reader itself requires S3
   storage.

@@ -214,30 +214,55 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(MilvusScan.snapshotBucket("file:///data/backup/b1") == None)
   }
 
-  test("resolveBackupCollection matches by collection name, never .head") {
-    def coll(name: String, id: Long) =
+  test("backupMaxJsonBytes honors milvus.snapshot.max.json.bytes") {
+    val withLimit = new ju.HashMap[String, String]()
+    withLimit.put(MilvusOption.SnapshotMaxJsonBytes, "1048576")
+    assert(
+      MilvusScan.backupMaxJsonBytes(new CaseInsensitiveStringMap(withLimit)) ==
+        1048576L
+    )
+    assert(
+      MilvusScan.backupMaxJsonBytes(
+        new CaseInsensitiveStringMap(new ju.HashMap[String, String]())
+      ) ==
+        MilvusSnapshotReader.MaxSnapshotJsonBytes
+    )
+  }
+
+  test("resolveBackupCollection matches by name and database, never .head") {
+    def coll(name: String, id: Long, db: String = "") =
       BackupMetaReader.CollectionBackup(
         collectionName = name,
-        collectionId = id
+        collectionId = id,
+        dbName = db
       )
     val multi = BackupMetaReader.BackupInfo(
       name = "b1",
-      collectionBackups = Seq(coll("c1", 1L), coll("c2", 2L))
+      collectionBackups =
+        Seq(coll("orders", 1L, "db1"), coll("orders", 2L, "db2"))
     )
     assert(
-      MilvusScan.resolveBackupCollection(multi, "c2").map(_.collectionId) ==
+      MilvusScan
+        .resolveBackupCollection(multi, "db1", "orders")
+        .map(_.collectionId) ==
+        Right(1L)
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(multi, "db2", "orders")
+        .map(_.collectionId) ==
         Right(2L)
     )
-    assert(MilvusScan.resolveBackupCollection(multi, "nope").isLeft)
-    // No name given + multiple collections -> error, not .head.
-    assert(MilvusScan.resolveBackupCollection(multi, "").isLeft)
+    assert(MilvusScan.resolveBackupCollection(multi, "db1", "nope").isLeft)
+    assert(MilvusScan.resolveBackupCollection(multi, "", "orders").isLeft)
+    assert(MilvusScan.resolveBackupCollection(multi, "", "").isLeft)
 
     val single = BackupMetaReader.BackupInfo(
       name = "s",
       collectionBackups = Seq(coll("only", 3L))
     )
     assert(
-      MilvusScan.resolveBackupCollection(single, "").map(_.collectionId) ==
+      MilvusScan.resolveBackupCollection(single, "", "").map(_.collectionId) ==
         Right(3L)
     )
   }

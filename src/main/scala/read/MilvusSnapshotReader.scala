@@ -433,7 +433,40 @@ case class V2SegmentInfo(
     storageVersion: Long, // always 2L for StorageV2
     columnGroups: Seq[V2ColumnGroup],
     deltaLogs: Seq[V2DeltaLogFile] = Seq.empty
-)
+) {
+
+  /** Dedup column groups by slot, keeping only the largest slot that owns each
+    * real field ID.
+    *
+    * A segment that went through add-field + backfill can carry two groups
+    * declaring the same field: the old multi-field parquet still physically
+    * holds the column (so its own schema reports it) while the newer
+    * single-field group reports it too. Without dedup the packed reader maps
+    * each group's field IDs to column names and lets the C++ side pick a
+    * source, which can return the older group's stale/null data.
+    *
+    * `slotFieldId < 0L` means "slot unknown" (e.g. the snapshot-JSON DTO path),
+    * where dedup cannot be trusted, so it is skipped.
+    */
+  def dedupColumnGroupsBySlot: V2SegmentInfo = {
+    val groups = columnGroups
+    if (groups.isEmpty || groups.exists(_.slotFieldId < 0L)) {
+      return this
+    }
+    val maxSlotPerField: Map[Long, Long] =
+      groups
+        .flatMap(g => g.fieldIds.map(fid => fid -> g.slotFieldId))
+        .groupBy(_._1)
+        .map { case (fid, pairs) => fid -> pairs.map(_._2).max }
+    val rebuilt = groups.flatMap { g =>
+      val keptFids =
+        g.fieldIds.filter(fid => maxSlotPerField(fid) == g.slotFieldId)
+      if (keptFids.isEmpty) None
+      else Some(g.copy(fieldIds = keptFids))
+    }
+    copy(columnGroups = rebuilt)
+  }
+}
 
 case class SnapshotBinlogEntry(
     @JsonProperty("entries_num") rawEntriesNum: Option[JsonNode] = None,

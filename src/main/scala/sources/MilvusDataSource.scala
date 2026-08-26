@@ -241,11 +241,24 @@ case class MilvusTable(
       MilvusOption.backupDir(milvusOption.options).flatMap { dir =>
         val conf =
           MilvusScan.buildHadoopConfForOptions(milvusOption.options, dir)
-        BackupMetaReader.readMeta(conf, dir).toOption.flatMap { meta =>
-          MilvusScan
-            .resolveBackupCollection(meta, milvusOption.collectionName)
-            .toOption
-        }
+        BackupMetaReader
+          .readMeta(
+            conf,
+            dir,
+            MilvusScan.backupMaxJsonBytes(
+              new CaseInsensitiveStringMap(milvusOption.options.asJava)
+            )
+          )
+          .toOption
+          .flatMap { meta =>
+            MilvusScan
+              .resolveBackupCollection(
+                meta,
+                milvusOption.databaseName,
+                milvusOption.collectionName
+              )
+              .toOption
+          }
       }
 
     val collectionId = parsedCollection.map(_.collectionId).getOrElse(0L)
@@ -600,7 +613,12 @@ case class MilvusTable(
     // Safely get maxFieldID, default to 100 if empty
     val maxFieldID =
       if (fieldName2ID.values.nonEmpty) fieldName2ID.values.max else 100L
+    // Only append $meta if the schema loop did not already emit it (backup
+    // mode materializes $meta from the meta, unlike client mode where
+    // DescribeCollection omits dynamic fields).
+    val alreadyHasMeta = fields.exists(_.name == "$meta")
     if (
+      !alreadyHasMeta &&
       milvusCollection.schema.enableDynamicField &&
       (fieldIDs.isEmpty || fieldIDs.contains((maxFieldID + 1).toString))
     ) {
@@ -1139,6 +1157,18 @@ object MilvusScan extends Logging {
     value
   }
 
+  /** Backup `full_meta.json` size limit, honoring
+    * `milvus.snapshot.max.json.bytes` (the same option the snapshot read uses).
+    */
+  private[sources] def backupMaxJsonBytes(
+      options: CaseInsensitiveStringMap
+  ): Long =
+    parsePositiveLongOption(
+      options,
+      MilvusOption.SnapshotMaxJsonBytes,
+      MilvusSnapshotReader.MaxSnapshotJsonBytes
+    )
+
   private[sources] def parseClientSnapshotCompactionProtectionSeconds(
       options: CaseInsensitiveStringMap
   ): Long = {
@@ -1439,23 +1469,48 @@ object MilvusScan extends Logging {
   }
 
   /** Resolve the collection to read from a backup meta, matching on
-    * `milvus.collection.name`. Returns `Left(message)` when no collection
-    * matches, or when the name is unset and the backup holds multiple
-    * collections (so callers never silently read the wrong `.head`).
+    * `milvus.database.name` + `milvus.collection.name`. Returns `Left(message)`
+    * when nothing matches, when an unqualified name is ambiguous across
+    * databases, or when the name is unset and the backup holds multiple
+    * collections — so callers never silently read the wrong `.head`.
     */
   private[sources] def resolveBackupCollection(
       meta: BackupMetaReader.BackupInfo,
+      dbName: String,
       collectionName: String
   ): Either[String, BackupMetaReader.CollectionBackup] = {
+    def qualified(c: BackupMetaReader.CollectionBackup): String =
+      s"${if (c.dbName.nonEmpty) c.dbName + "." else ""}${c.collectionName}"
+
     if (collectionName.nonEmpty) {
-      meta.collectionBackups.find(_.collectionName == collectionName) match {
-        case Some(coll) => Right(coll)
-        case None =>
-          Left(
-            s"Backup '${meta.name}' does not contain collection " +
-              s"'$collectionName'; available: " +
-              meta.collectionBackups.map(_.collectionName).mkString(",")
-          )
+      val candidates =
+        meta.collectionBackups.filter(_.collectionName == collectionName)
+      if (dbName.nonEmpty) {
+        candidates.find(_.dbName == dbName) match {
+          case Some(coll) => Right(coll)
+          case None =>
+            Left(
+              s"Backup '${meta.name}' does not contain collection " +
+                s"'$collectionName' in database '$dbName'; available: " +
+                meta.collectionBackups.map(qualified).mkString(",")
+            )
+        }
+      } else {
+        candidates match {
+          case Seq(single) => Right(single)
+          case Seq() =>
+            Left(
+              s"Backup '${meta.name}' does not contain collection " +
+                s"'$collectionName'; available: " +
+                meta.collectionBackups.map(qualified).mkString(",")
+            )
+          case many =>
+            Left(
+              s"Backup '${meta.name}' has multiple collections named " +
+                s"'$collectionName' (${many.map(qualified).mkString(",")}); " +
+                s"set ${MilvusOption.MilvusDatabaseName} to disambiguate"
+            )
+        }
       }
     } else {
       meta.collectionBackups match {
@@ -2231,7 +2286,11 @@ class MilvusScan(
       )
     }
 
+    // Dedup column groups by slot so a field carried by both an old multi-field
+    // group and a newer single-field group (add-field + backfill) is read from
+    // the newest owner, not whichever the native reader picks.
     val packedV2Partitions = v2Segments
+      .map(_.dedupColumnGroupsBySlot)
       .filter(_.columnGroups.nonEmpty)
       .map { seg =>
         val ownDeletePlan = v2DeletePlans.getOrElse(
@@ -2448,7 +2507,11 @@ class MilvusScan(
     )
 
     val hadoopConf = buildSnapshotHadoopConf(backupDir)
-    val meta = BackupMetaReader.readMeta(hadoopConf, backupDir) match {
+    val meta = BackupMetaReader.readMeta(
+      hadoopConf,
+      backupDir,
+      MilvusScan.backupMaxJsonBytes(options)
+    ) match {
       case Right(m) => m
       case Left(err) =>
         throw new IllegalArgumentException(
@@ -2465,6 +2528,7 @@ class MilvusScan(
     }
     val coll = MilvusScan.resolveBackupCollection(
       meta,
+      milvusOption.databaseName,
       milvusOption.collectionName
     ) match {
       case Right(c) => c

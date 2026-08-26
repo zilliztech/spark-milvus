@@ -247,6 +247,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       "s3a://bucket/backup/b1"
     ) shouldBe "backup/b1"
     BackupMetaReader.backupKeyBase("/data/backup/b1") shouldBe "/data/backup/b1"
+    // Empty-authority URIs keep the leading slash, matching the bare form.
+    BackupMetaReader.backupKeyBase("file:///data/backup/b1") shouldBe
+      "/data/backup/b1"
 
     // Native reader gets bucket-relative keys; Hadoop reads get the qualified URI.
     BackupMetaReader.nativeInsertLogPath(
@@ -275,6 +278,51 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       l0,
       9L
     ) shouldBe "s3a://bucket/backup/b1/binlogs/delta_log/444/-1/777/9"
+  }
+
+  test(
+    "V2SegmentInfo.dedupColumnGroupsBySlot keeps the newest slot per field"
+  ) {
+    val oldGroup = V2ColumnGroup(
+      fieldIds = Seq(100L, 0L, 1L),
+      filePaths = Seq("p1"),
+      fileRowCounts = Seq(2L),
+      slotFieldId = 3L
+    )
+    val newGroup = V2ColumnGroup(
+      fieldIds = Seq(100L),
+      filePaths = Seq("p2"),
+      fileRowCounts = Seq(1L),
+      slotFieldId = 100L
+    )
+    val seg = V2SegmentInfo(
+      segmentId = 1L,
+      partitionId = 1L,
+      numOfRows = 3L,
+      storageVersion = 2L,
+      columnGroups = Seq(oldGroup, newGroup)
+    )
+    val deduped = seg.dedupColumnGroupsBySlot
+    // The old group keeps its unique fields (0, 1); the shared field 100 is
+    // stripped from it and read from the newer slot (100).
+    deduped.columnGroups.map(_.slotFieldId) shouldBe Seq(3L, 100L)
+    deduped.columnGroups.head.fieldIds shouldBe Seq(0L, 1L)
+    deduped.columnGroups.last.fieldIds shouldBe Seq(100L)
+
+    // Unknown slot (-1) disables dedup entirely.
+    val unknown = V2ColumnGroup(
+      fieldIds = Seq(100L),
+      filePaths = Seq("p"),
+      fileRowCounts = Seq(1L),
+      slotFieldId = -1L
+    )
+    V2SegmentInfo(
+      segmentId = 2L,
+      partitionId = 1L,
+      numOfRows = 1L,
+      storageVersion = 2L,
+      columnGroups = Seq(unknown)
+    ).dedupColumnGroupsBySlot.columnGroups shouldBe Seq(unknown)
   }
 
   test("readMeta parses a binlog-format backup full_meta.json") {
