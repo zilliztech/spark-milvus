@@ -2575,7 +2575,8 @@ class MilvusScan(
       meta,
       hadoopConf,
       backupDir,
-      applyDeletes
+      applyDeletes,
+      coll.collectionId
     ) match {
       case Right(segs) => segs
       case Left(err) =>
@@ -2584,11 +2585,17 @@ class MilvusScan(
           err
         )
     }
-    MilvusScan.ensureClientSnapshotHasPackedSegments(
-      Seq.empty,
-      v2Segments,
-      coll.collectionName
-    )
+    // L0 delete-only segments alone must not satisfy the guard: they carry no
+    // column groups and would be filtered out at partition planning, so a
+    // delete-only backup would silently read zero rows.
+    if (!v2Segments.exists(_.columnGroups.nonEmpty)) {
+      throw new IllegalArgumentException(
+        s"Backup '${meta.name}' collection '${coll.collectionName}' has no " +
+          "packed-parquet (StorageV2) data segments to read (only delete-only " +
+          "segments). This connector requires Milvus 2.6+ with Storage V2; " +
+          "ensure the collection has been flushed and contains data."
+      )
+    }
 
     val v2DeletePlans = loadV2DeletePlans(
       v2Segments,

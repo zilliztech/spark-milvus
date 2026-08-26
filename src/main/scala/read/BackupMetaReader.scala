@@ -2,7 +2,6 @@ package com.zilliz.spark.connector.read
 
 import java.util.concurrent.{
   Callable,
-  ConcurrentHashMap,
   ExecutorService,
   Executors,
   ThreadFactory
@@ -211,31 +210,15 @@ object BackupMetaReader extends Logging {
     *
     * The read is bounded ([[MilvusSnapshotReader.readUtf8WithLimit]]) so an
     * oversized or pathological meta fails on the driver instead of being
-    * slurped into memory. Successful parses are cached per backup dir — a
-    * backup is an immutable export, and both table init and scan planning need
-    * it.
+    * slurped into memory. No process-global cache is kept: the parse must
+    * reflect the exact Hadoop configuration (credentials/endpoint) and the
+    * current object at that path, and an unbounded cache would retain every
+    * backup dir read over the driver's lifetime.
     */
   def readMeta(
       hadoopConf: Configuration,
       backupDir: String,
       maxBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
-  ): Either[Throwable, BackupInfo] = {
-    val cacheKey = metaCacheKey(backupDir, maxBytes)
-    val cached = metaCache.get(cacheKey)
-    if (cached != null) {
-      Right(cached)
-    } else {
-      readMetaUncached(hadoopConf, backupDir, maxBytes).map { info =>
-        metaCache.putIfAbsent(cacheKey, info)
-        info
-      }
-    }
-  }
-
-  private def readMetaUncached(
-      hadoopConf: Configuration,
-      backupDir: String,
-      maxBytes: Long
   ): Either[Throwable, BackupInfo] = {
     var uri: java.net.URI = null
     var fs: FileSystem = null
@@ -378,18 +361,6 @@ object BackupMetaReader extends Logging {
     */
   private val AllPartitionId = -1L
 
-  /** Process-wide cache of parsed `full_meta.json` keyed by backup dir + size
-    * limit. Backups are immutable exports, and both table init and scan
-    * planning need the meta, so a successful parse is reused instead of
-    * reading+parsing twice. The limit is part of the key so a later read with a
-    * different `milvus.snapshot.max.json.bytes` cannot alias a cached parse.
-    */
-  private val metaCache =
-    new ConcurrentHashMap[String, BackupInfo]()
-
-  private def metaCacheKey(backupDir: String, maxBytes: Long): String =
-    s"$backupDir\u0000$maxBytes"
-
   private val FooterReadThreadCount: Int = {
     val cores = Runtime.getRuntime.availableProcessors()
     math.max(2, math.min(cores, 8))
@@ -413,9 +384,10 @@ object BackupMetaReader extends Logging {
     }
   )
 
-  /** Build the runtime `V2SegmentInfo` list for every segment of the backup. L0
-    * delete-only segments keep an empty `columnGroups` so they feed the
-    * inherited delete-plan path, exactly like the snapshot reader.
+  /** Build the runtime `V2SegmentInfo` list for the segments of the collection
+    * identified by `collectionId`. L0 delete-only segments keep an empty
+    * `columnGroups` so they feed the inherited delete-plan path, exactly like
+    * the snapshot reader.
     *
     * @param backupDir
     *   The full `milvus.backup.dir` (e.g. `s3a://bucket/backup/<name>` or a
@@ -423,12 +395,17 @@ object BackupMetaReader extends Logging {
     *   the segment's collection/partition/group/segment/field/log IDs — the
     *   `log_path` values in the meta are the original Milvus source keys and
     *   must never be read directly.
+    * @param collectionId
+    *   Only the segments of this collection are materialized; a backup holding
+    *   several collections must never leak another collection's segments into
+    *   the read.
     */
   def toV2Segments(
       info: BackupInfo,
       hadoopConf: Configuration,
       backupDir: String,
-      applyDeletes: Boolean = true
+      applyDeletes: Boolean = true,
+      collectionId: Long
   ): Either[Throwable, Seq[V2SegmentInfo]] = {
     try {
       if (info.isSnapshotFormat) {
@@ -438,15 +415,17 @@ object BackupMetaReader extends Logging {
         )
       }
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
-      info.collectionBackups.foreach { coll =>
-        coll.allSegments.foreach { seg =>
-          buildV2Segment(seg, hadoopConf, backupDir, applyDeletes) match {
-            case Right(Some(v2)) => out += v2
-            case Right(None)     => // L0 segment skipped (applyDeletes=false)
-            case Left(e)         => throw e
+      info.collectionBackups
+        .filter(_.collectionId == collectionId)
+        .foreach { coll =>
+          coll.allSegments.foreach { seg =>
+            buildV2Segment(seg, hadoopConf, backupDir, applyDeletes) match {
+              case Right(Some(v2)) => out += v2
+              case Right(None)     => // L0 segment skipped (applyDeletes=false)
+              case Left(e)         => throw e
+            }
           }
         }
-      }
       Right(out.toSeq)
     } catch {
       case NonFatal(e) => Left(e)
@@ -481,10 +460,16 @@ object BackupMetaReader extends Logging {
         Right(Some(emptyColumnGroupSegment(seg, backupDir)))
       }
     } else if (seg.storageVersion != 2L) {
+      val storageVersionNote =
+        if (seg.storageVersion == 0L) {
+          "0/absent means StorageV1 (legacy per-field binlogs)"
+        } else {
+          s"${seg.storageVersion}"
+        }
       Left(
         new IllegalStateException(
           s"backup segment ${seg.segmentId} has storage_version=" +
-            s"${seg.storageVersion}; backup datasource only supports " +
+            s"$storageVersionNote; backup datasource only supports " +
             "StorageV2 (packed parquet) data segments"
         )
       )

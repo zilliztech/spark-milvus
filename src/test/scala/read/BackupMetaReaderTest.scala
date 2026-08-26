@@ -403,7 +403,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         .getOrElse(fail("expected Right"))
 
       val segments = BackupMetaReader
-        .toV2Segments(meta, new Configuration(), backupDir)
+        .toV2Segments(meta, new Configuration(), backupDir, collectionId = 444L)
         .getOrElse(fail("expected Right"))
 
       segments should have size 2
@@ -441,6 +441,51 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("toV2Segments materializes only the requested collection") {
+    val dir = Files.createTempDirectory("milvus-backup-b1-")
+    try {
+      val backupDir = materializeBackup(dir)
+      val base = BackupMetaReader
+        .parse(
+          backupFixture(
+            groupAPath = SourceKeys._1,
+            groupBPath = SourceKeys._2,
+            groupCPath = SourceKeys._3,
+            deltaPath = SourceKeys._4
+          )
+        )
+        .getOrElse(fail("expected Right"))
+      // A second collection with no segments must never leak into the read.
+      val twoColl = base.copy(
+        collectionBackups = base.collectionBackups :+
+          BackupMetaReader.CollectionBackup(
+            collectionId = 555L,
+            collectionName = "other"
+          )
+      )
+      val segments = BackupMetaReader
+        .toV2Segments(
+          twoColl,
+          new Configuration(),
+          backupDir,
+          collectionId = 444L
+        )
+        .getOrElse(fail("expected Right"))
+      segments.map(_.segmentId) shouldBe Seq(777L, 888L)
+
+      BackupMetaReader
+        .toV2Segments(
+          twoColl,
+          new Configuration(),
+          backupDir,
+          collectionId = 555L
+        )
+        .getOrElse(fail("expected Right")) shouldBe Seq.empty
+    } finally {
+      deleteRecursively(dir)
+    }
+  }
+
   test("toV2Segments skips L0 segments when applyDeletes is false") {
     val dir = Files.createTempDirectory("milvus-backup-b1-")
     try {
@@ -460,7 +505,8 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
           meta,
           new Configuration(),
           backupDir,
-          applyDeletes = false
+          applyDeletes = false,
+          collectionId = 444L
         )
         .getOrElse(fail("expected Right"))
       segments.map(_.segmentId) shouldBe Seq(777L)
@@ -548,7 +594,8 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     val result = BackupMetaReader.toV2Segments(
       meta,
       new Configuration(),
-      "s3a://bucket/backup/b1"
+      "s3a://bucket/backup/b1",
+      collectionId = 444L
     )
     result.isLeft shouldBe true
     result.left.toOption.get.getMessage should include("snapshot format")

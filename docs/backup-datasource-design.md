@@ -130,11 +130,12 @@ Parses a binlog-format backup's `meta/full_meta.json` (wire keys match the Go
 ```scala
 object BackupMetaReader {
   def metaPath(backupDir: String): String          // <dir>/meta/full_meta.json
-  def readMeta(hadoopConf: Configuration, backupDir: String): Either[Throwable, BackupInfo]
+  def readMeta(hadoopConf: Configuration, backupDir: String,
+               maxBytes: Long = MaxSnapshotJsonBytes): Either[Throwable, BackupInfo]
   def parse(json: String): Either[Throwable, BackupInfo]
   def toProtobufSchemaBytes(schema: BackupCollectionSchema): Array[Byte]
   def toV2Segments(info: BackupInfo, hadoopConf: Configuration, backupDir: String,
-                   applyDeletes: Boolean = true): Either[Throwable, Seq[V2SegmentInfo]]
+                   applyDeletes: Boolean, collectionId: Long): Either[Throwable, Seq[V2SegmentInfo]]
 }
 ```
 
@@ -242,12 +243,17 @@ Behavior:
   ambiguous across databases, or no name with multiple collections, is
   rejected.
 - Non-L0 segments that are not StorageV2 (`storage_version != 2`) fail hard on
-  the driver rather than returning a partial dataset. L0 delete-only segments
-  bypass the storage-version check (Milvus creates them without one).
+  the driver rather than returning a partial dataset; `0`/absent is reported as
+  StorageV1. L0 delete-only segments bypass the storage-version check (Milvus
+  creates them without one).
 - The driver validates that the backup meta carries a collection schema with a
-  primary key before planning. `full_meta.json` is read with a bounded reader
-  (`milvus.snapshot.max.json.bytes`, default 64 MiB, honored at both read
-  sites) and cached per (backup dir, limit).
+  primary key before planning, and that the read has at least one packed
+  (non-delete-only) segment — an L0-only backup otherwise reads zero rows.
+  `full_meta.json` is read with a bounded reader
+  (`milvus.snapshot.max.json.bytes`, default 64 MiB) and **not** cached.
+- `toV2Segments` materializes segments only for the resolved `collectionId`, so
+  a multi-collection backup never leaks another collection's segments into the
+  read.
 - `milvus.backup.dir` normalizes the `s3://` alias to `s3a://`; `file:///...`
   and bare local paths resolve to the same native keys.
 - A dynamic collection whose `$meta` field is present is not duplicated by the
