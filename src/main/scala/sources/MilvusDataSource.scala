@@ -182,6 +182,9 @@ case class MilvusTable(
     with Logging {
   var milvusCollection: MilvusCollectionInfo = _
   var partitionID: Long = 0L
+  // Serialized full_meta.json parsed during initFromBackup; threaded to the
+  // scan planner via the BackupMetaJson option so the meta is read/parsed once.
+  private var backupMetaJson: Option[String] = None
   initInfo()
   var fieldIDs =
     if (milvusOption.fieldIDs.nonEmpty) {
@@ -237,7 +240,9 @@ case class MilvusTable(
   private def initFromBackup(): Unit = {
     partitionID = 0L
 
-    val parsedCollection =
+    val parsedMeta: Option[
+      (BackupMetaReader.BackupInfo, Option[BackupMetaReader.CollectionBackup])
+    ] =
       MilvusOption.backupDir(milvusOption.options).flatMap { dir =>
         val conf =
           MilvusScan.buildHadoopConfForOptions(milvusOption.options, dir)
@@ -250,8 +255,8 @@ case class MilvusTable(
             )
           )
           .toOption
-          .flatMap { meta =>
-            MilvusScan
+          .map { meta =>
+            val resolved = MilvusScan
               .resolveBackupCollection(
                 meta,
                 milvusOption.databaseName,
@@ -267,9 +272,14 @@ case class MilvusTable(
                 )
                 None
             }
+            (meta, resolved)
           }
       }
+    backupMetaJson = parsedMeta.map { case (meta, _) =>
+      BackupMetaReader.serialize(meta)
+    }
 
+    val parsedCollection = parsedMeta.flatMap(_._2)
     val collectionId = parsedCollection.map(_.collectionId).getOrElse(0L)
 
     val schemaFromMeta = parsedCollection.flatMap(_.schema).map { s =>
@@ -436,6 +446,9 @@ case class MilvusTable(
         MilvusOption.MilvusPartitionID,
         partitionID.toString
       )
+    }
+    backupMetaJson.foreach { json =>
+      mergedOptions.put(MilvusOption.BackupMetaJson, json)
     }
 
     val allOptions = new CaseInsensitiveStringMap(mergedOptions)
@@ -2516,19 +2529,36 @@ class MilvusScan(
     )
 
     val hadoopConf = buildSnapshotHadoopConf(backupDir)
-    val meta = BackupMetaReader.readMeta(
-      hadoopConf,
-      backupDir,
-      MilvusScan.backupMaxJsonBytes(options)
-    ) match {
-      case Right(m) => m
-      case Left(err) =>
-        throw new IllegalArgumentException(
-          s"Failed to parse backup meta at ${BackupMetaReader
-              .metaPath(backupDir)}: ${err.getMessage}",
-          err
-        )
-    }
+    // Prefer the meta already parsed during table init (threaded via the
+    // BackupMetaJson option) so full_meta.json is read/parsed once per read;
+    // fall back to a fresh read otherwise (e.g. direct scan without table init).
+    val meta = Option(options.get(MilvusOption.BackupMetaJson))
+      .filter(_.nonEmpty)
+      .map { json =>
+        BackupMetaReader.parse(json) match {
+          case Right(m) => m
+          case Left(err) =>
+            throw new IllegalArgumentException(
+              s"Failed to parse threaded backup meta for '$backupDir': ${err.getMessage}",
+              err
+            )
+        }
+      }
+      .getOrElse {
+        BackupMetaReader.readMeta(
+          hadoopConf,
+          backupDir,
+          MilvusScan.backupMaxJsonBytes(options)
+        ) match {
+          case Right(m) => m
+          case Left(err) =>
+            throw new IllegalArgumentException(
+              s"Failed to parse backup meta at ${BackupMetaReader
+                  .metaPath(backupDir)}: ${err.getMessage}",
+              err
+            )
+        }
+      }
     if (meta.isSnapshotFormat) {
       throw new IllegalArgumentException(
         s"Backup '${meta.name}' is in snapshot format; only binlog-format " +
@@ -2580,6 +2610,16 @@ class MilvusScan(
     // never opened. The native packed reader receives bucket-relative keys, so
     // its `fs.bucket_name` must be canonicalized to the backup URI's bucket.
     val canonicalBucket = MilvusScan.snapshotBucket(backupDir)
+    if (canonicalBucket.isEmpty) {
+      // The JNI packed reader requires S3: with a local/file:// dir it would
+      // fall back to a-bucket/localhost:9000 and fail on every task, so reject
+      // here rather than after footer planning and partition dispatch.
+      throw new IllegalArgumentException(
+        s"${MilvusOption.BackupDir} must be an S3 URI (s3a://...) for reads; " +
+          s"got '$backupDir'. Local or file:// backup dirs are only supported " +
+          "by the meta/footer mapping layer, not the native packed reader"
+      )
+    }
     val v2Segments = BackupMetaReader.toV2Segments(
       meta,
       hadoopConf,

@@ -252,21 +252,26 @@ Behavior:
   primary key before planning, and that the read has at least one packed
   (non-delete-only) segment — an L0-only backup otherwise reads zero rows.
   `full_meta.json` is read with a bounded reader
-  (`milvus.snapshot.max.json.bytes`, default 64 MiB) and **not** cached.
+  (`milvus.snapshot.max.json.bytes`, default 64 MiB) and **not** cached; the
+  parse done at table init is threaded to the scan planner via an internal
+  option, so the meta is read/parsed once per `spark.read`.
 - `toV2Segments` materializes segments only for the resolved `collectionId`, so
   a multi-collection backup never leaks another collection's segments into the
   read.
 - Schema conversion drops system fields by field ID (`0`/`1`), never by name:
   milvus-backup's schema carries only user fields, so a user field literally
   named `RowID`/`Timestamp` survives.
-- `milvus.backup.dir` normalizes the `s3://` alias to `s3a://`; `file:///...`
-  and bare local paths resolve to the same native keys.
+- `milvus.backup.dir` must be an S3 URI (`s3a://`) for reads — local/`file://`
+  dirs are rejected at planning since the JNI packed reader requires S3.
+  `s3://` is normalized to `s3a://` at entry.
 - A dynamic collection whose `$meta` field is present is not duplicated by the
   computed schema.
-- Local paths (`/data/backup/...` or `file:///...`) work for the meta/footer
-  mapping layer (and unit tests); the JNI packed reader itself requires S3
-  storage.
-- A backup must contain exactly one collection per datasource read.
+- Local paths (`/data/backup/...` or `file:///...`) are exercised by the
+  meta/footer mapping layer and unit tests; actual reads require an S3
+  (`s3a://`) backup dir because the JNI packed reader needs S3.
+- The collection to read is resolved by `milvus.database.name` +
+  `milvus.collection.name` (never `.head`); a backup may hold several
+  collections.
 
 ## 8. Usage
 

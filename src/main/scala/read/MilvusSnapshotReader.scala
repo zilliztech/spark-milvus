@@ -357,8 +357,14 @@ object StorageV2ManifestItem {
 case class V2ColumnGroupDTO(
     @JsonProperty("field_ids") fieldIds: Seq[JsonNode] = Seq.empty,
     @JsonProperty("file_paths") filePaths: Seq[String] = Seq.empty,
-    @JsonProperty("file_row_counts") fileRowCounts: Seq[JsonNode] = Seq.empty
-)
+    @JsonProperty("file_row_counts") fileRowCounts: Seq[JsonNode] = Seq.empty,
+    @JsonProperty("slot_field_id") rawSlotFieldId: Option[JsonNode] = None
+) {
+  // -1 = unknown slot (legacy JSON that predates the field). Kept so
+  // `dedupColumnGroupsBySlot` in the read path does not silently no-op.
+  def slotFieldId: Long =
+    rawSlotFieldId.map(JsonTypeConverter.toLong).getOrElse(-1L)
+}
 
 case class V2DeltaLogFileDTO(
     @JsonProperty("log_id") rawLogId: Option[JsonNode] = None,
@@ -1063,7 +1069,8 @@ object MilvusSnapshotReader {
             fieldIds = cg.fieldIds.map(fid => LongNode.valueOf(fid): JsonNode),
             filePaths = cg.filePaths,
             fileRowCounts =
-              cg.fileRowCounts.map(n => LongNode.valueOf(n): JsonNode)
+              cg.fileRowCounts.map(n => LongNode.valueOf(n): JsonNode),
+            rawSlotFieldId = Some(LongNode.valueOf(cg.slotFieldId): JsonNode)
           )
         ),
         deltaLogs = s.deltaLogs.map(log =>
@@ -1103,7 +1110,8 @@ object MilvusSnapshotReader {
               fieldIds = cg.fieldIds.map(v => JsonTypeConverter.toLong(v)),
               filePaths = cg.filePaths,
               fileRowCounts =
-                cg.fileRowCounts.map(v => JsonTypeConverter.toLong(v))
+                cg.fileRowCounts.map(v => JsonTypeConverter.toLong(v)),
+              slotFieldId = cg.slotFieldId
             )
           ),
           deltaLogs = d.deltaLogs.map(log =>

@@ -264,6 +264,11 @@ object BackupMetaReader extends Logging {
     }
   }
 
+  /** Serialize a parsed `BackupInfo` back to JSON. Used to thread the meta from
+    * table init to the scan planner so it is read/parsed only once.
+    */
+  def serialize(info: BackupInfo): String = mapper.writeValueAsString(info)
+
   // -------------------------------------------------------------------------
   // Schema conversion
   // -------------------------------------------------------------------------

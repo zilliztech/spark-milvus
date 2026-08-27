@@ -362,6 +362,23 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("serialize/parse round-trips the parsed backup meta") {
+    val json = backupFixture(
+      groupAPath = SourceKeys._1,
+      groupBPath = SourceKeys._2,
+      groupCPath = SourceKeys._3,
+      deltaPath = SourceKeys._4
+    )
+    val meta = BackupMetaReader.parse(json).getOrElse(fail("expected Right"))
+    val roundTripped =
+      BackupMetaReader
+        .parse(BackupMetaReader.serialize(meta))
+        .getOrElse(
+          fail("expected Right")
+        )
+    roundTripped shouldBe meta
+  }
+
   test("toProtobufSchemaBytes round-trips the backup collection schema") {
     val json = backupFixture(
       groupAPath = SourceKeys._1,
