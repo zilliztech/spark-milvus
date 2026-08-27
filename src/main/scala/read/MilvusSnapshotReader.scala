@@ -451,6 +451,17 @@ case class V2SegmentInfo(
     * each group's field IDs to column names and lets the C++ side pick a
     * source, which can return the older group's stale/null data.
     *
+    * PREMISE (why slot magnitude is a recency proxy): milvus-storage assigns a
+    * column-group slot id equal to the group's directory name. Multi-field
+    * groups (e.g. RowID+Timestamp or several fields) use small synthetic slots
+    * (< 100), while a single-field group uses its real field id (>= 100), and
+    * Milvus allocates field ids monotonically increasing over time. So the
+    * backfill-written single-field group for a new field always has a larger
+    * slot than the older multi-field group it overlaps, and "max slot" ==
+    * "newest owner". This is a heuristic, not a documented guarantee; if the
+    * slot assignment ever diverges from monotonicity, dedup could attribute a
+    * field to an older group.
+    *
     * `slotFieldId < 0L` means "slot unknown" (e.g. the snapshot-JSON DTO path),
     * where dedup cannot be trusted, so it is skipped.
     */

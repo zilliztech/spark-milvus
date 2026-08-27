@@ -234,6 +234,10 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       .withType(schema)
       .withConf(conf)
       .withCompressionCodec(CompressionCodecName.UNCOMPRESSED)
+      // Tiny row-group threshold forces one row group per row, so the test
+      // actually sums across multiple groups (returning only the first block's
+      // count would not yield 3).
+      .withRowGroupSize(1)
       .build()
     try {
       val factory = new SimpleGroupFactory(schema)

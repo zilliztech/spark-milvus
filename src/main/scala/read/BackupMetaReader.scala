@@ -55,11 +55,13 @@ import io.milvus.grpc.schema.{
   *      The per-file row count is recovered by reading each parquet footer's
   *      row count ([MilvusParquetFooterReader.readRowCount]), in parallel. 2.
   *      The AVRO segment-info (and hence the slot -> real field ID mapping) is
-  *      not copied by the backup; the real field IDs are recovered from each
-  *      parquet file's own schema
-  *      ([MilvusParquetFooterReader.readFieldIdsFromSchema]). 3. L0 delete-only
-  *      segments are created by Milvus without a `StorageVersion` (0/omitted),
-  *      so they are handled before any storage-version filtering.
+  *      not copied by the backup; the real field IDs are recovered from the
+  *      **head file** of each column group via that file's own parquet schema
+  *      ([MilvusParquetFooterReader.readFieldIdsAndRowCount]) — matching
+  *      V2SegmentLoader, which assumes all files in a group share the schema.
+  *      3. L0 delete-only segments are created by Milvus without a
+  *      `StorageVersion` (0/omitted), so they are handled before any
+  *      storage-version filtering.
   *
   * Only StorageV2 (packed parquet, `storage_version == 2`) data segments are
   * supported; anything else fails hard rather than returning a partial dataset.
@@ -463,7 +465,11 @@ object BackupMetaReader extends Logging {
             f.get() match {
               case Right(Some(v2)) => out += v2
               case Right(None)     => // L0 segment skipped (applyDeletes=false)
-              case Left(e)         => throw e
+              case Left(e)         =>
+                // One bad segment shouldn't leave a burst of wasted driver-side
+                // S3 footer reads running after the read has already failed.
+                futures.foreach(_.cancel(true))
+                throw e
             }
           }
         }
@@ -580,6 +586,29 @@ object BackupMetaReader extends Logging {
             filePaths = nativePaths,
             fileRowCounts = headInfo.rowCount +: tailRowCounts,
             slotFieldId = fieldBinlog.fieldId
+          )
+        }
+        // Driver-side validation to keep the no-partial-read contract: fail a
+        // malformed backup here instead of dispatching tasks that die late in
+        // the native reader (or silently returning an empty DataFrame).
+        if (columnGroups.exists(_.fieldIds.isEmpty)) {
+          throw new IllegalStateException(
+            s"backup segment ${seg.segmentId} has a column group with no " +
+              "field ids; refusing malformed backup"
+          )
+        }
+        val groupTotals = columnGroups.map(_.fileRowCounts.sum)
+        if (groupTotals.distinct.size > 1) {
+          throw new IllegalStateException(
+            s"backup segment ${seg.segmentId} column groups have " +
+              s"inconsistent row totals: ${groupTotals.mkString(",")}"
+          )
+        }
+        val totalRows = groupTotals.headOption.getOrElse(0L)
+        if (seg.numOfRows > 0L && totalRows <= 0L) {
+          throw new IllegalStateException(
+            s"backup segment ${seg.segmentId} has num_of_rows=${seg.numOfRows} " +
+              "but the parquet footers recovered 0 rows"
           )
         }
         Right(

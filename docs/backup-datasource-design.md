@@ -82,12 +82,13 @@ Branch precedence: snapshot mode > backup mode > client mode.
 
 Two gaps versus a Milvus snapshot are closed in `BackupMetaReader`:
 
-1. **Per-file row counts** (`fileRowCounts`) — recovered from each parquet
-   footer via the new `MilvusParquetFooterReader.readRowCount` (head file read
-   once via `readFieldIdsAndRowCount`, remaining files read in parallel).
+1. **Per-file row counts** (`fileRowCounts`) — always recovered from the parquet
+   footers (the meta never carries `entries_num`); the head file is read once
+   via `readFieldIdsAndRowCount`, the remaining files in parallel.
 2. **Slot → real field ID mapping** — the AVRO segment-info is not copied by
-   the backup, so real field IDs are recovered from each parquet file's own
-   schema via the existing `readFieldIdsFromSchema`.
+   the backup, so real field IDs are recovered from the **head file** of each
+   column group via `readFieldIdsAndRowCount` (all files in a group share the
+   schema, matching `V2SegmentLoader`).
 
 Path resolution: the `log_path` values in `full_meta.json` are the **original
 Milvus source keys** — milvus-backup copies each binlog into a separately

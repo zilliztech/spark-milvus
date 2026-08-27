@@ -696,6 +696,92 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test(
+    "buildV2Segment rejects column groups with inconsistent row totals"
+  ) {
+    val dir = Files.createTempDirectory("milvus-backup-inconsistent-")
+    try {
+      val base =
+        Paths.get(
+          dir.toString,
+          "binlogs",
+          "insert_log",
+          "444",
+          "555",
+          "999",
+          "777"
+        )
+      writeParquetAt(
+        Paths.get(base.toString, "103", "1"),
+        groupASchema,
+        List(
+          f =>
+            f.newGroup()
+              .append("pk", 1L)
+              .append("row_id", 10L)
+              .append("ts", 100L),
+          f =>
+            f.newGroup()
+              .append("pk", 2L)
+              .append("row_id", 11L)
+              .append("ts", 101L)
+        )
+      )
+      writeParquetAt(
+        Paths.get(base.toString, "101", "1"),
+        groupCSchema,
+        List(
+          f => f.newGroup().append("name", "a"),
+          f => f.newGroup().append("name", "b"),
+          f => f.newGroup().append("name", "c")
+        )
+      )
+      val seg = BackupMetaReader.SegmentBackup(
+        segmentId = 777L,
+        collectionId = 444L,
+        partitionId = 555L,
+        groupId = 999L,
+        numOfRows = 5L,
+        storageVersion = 2L,
+        binlogs = Seq(
+          BackupMetaReader.FieldBinlog(
+            fieldId = 103L,
+            binlogs = Seq(
+              BackupMetaReader.Binlog(
+                logId = 1L,
+                logPath = "files/insert_log/444/555/777/103/1",
+                logSize = 10L
+              )
+            )
+          ),
+          BackupMetaReader.FieldBinlog(
+            fieldId = 101L,
+            binlogs = Seq(
+              BackupMetaReader.Binlog(
+                logId = 1L,
+                logPath = "files/insert_log/444/555/777/101/1",
+                logSize = 10L
+              )
+            )
+          )
+        )
+      )
+      val err = BackupMetaReader
+        .buildV2Segment(
+          seg,
+          new Configuration(),
+          dir.toString,
+          applyDeletes = true
+        )
+        .left
+        .toOption
+        .get
+      err.getMessage should include("inconsistent row totals")
+    } finally {
+      deleteRecursively(dir)
+    }
+  }
+
   test("L1 segment delta logs reconstruct with the groupID level") {
     val dir = Files.createTempDirectory("milvus-backup-l1-")
     try {

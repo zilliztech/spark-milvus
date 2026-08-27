@@ -143,6 +143,26 @@ val s3Options = Map(
 | `MilvusOption.MilvusRetryCount` | Int | No | 3 | Number of retries on operation failure |
 | `MilvusOption.MilvusRetryInterval` | Int | No | 1000 | Retry interval in milliseconds |
 
+### 2.5 Offline Backup Read Parameters
+
+Read a binlog-format milvus-backup export (`milvus-backup create --format binlog`)
+as a DataFrame without any Milvus client connection. See
+`docs/backup-datasource-design.md` for the full design.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `MilvusOption.BackupDir` | String | No | "" | `milvus.backup.dir` — the backup directory, e.g. `s3a://bucket/backup/<name>`. **S3 only** (`s3://` is normalized to `s3a://`); local/`file://` dirs are rejected at planning because the packed reader requires S3. |
+| `MilvusOption.MilvusDatabaseName` | String | No | "" | Database the collection lives in (`"default"` is equivalent to an empty name). Used together with `milvus.collection.name` to select the collection; an ambiguous unqualified name is rejected. |
+| `MilvusOption.MilvusCollectionName` | String | No | - | Collection name inside the backup (matched with the database name, never `.head`). Required when the backup holds more than one collection. |
+| `MilvusOption.ReadApplyDeletes` | Boolean | No | true | `milvus.read.apply.deletes` — apply delete logs (L0/L1) while reading. |
+| `MilvusOption.SnapshotMaxJsonBytes` | Long | No | 67108864 | `milvus.snapshot.max.json.bytes` — max size of the backup `full_meta.json`. |
+
+The Spark read schema must be provided via `.schema()` or is derived from the
+backup meta; without `.schema()` the read fails loudly if the meta cannot be
+read. S3 credentials use the existing `fs.*` options (`fs.address`,
+`fs.access_key_id`, `fs.access_key_value`, ...); the bucket comes from the
+`milvus.backup.dir` URI.
+
 ## 3. Usage Examples
 
 ### 3.1 Reading Data

@@ -134,4 +134,4 @@ Hadoop 侧读（footer/meta/delta）用带 scheme 的 URI（`s3a://...`）；原
 ## 9. 不在本次范围 / 后续可选
 
 - StorageV3(loon) 段：需 milvus-backup 拷贝 `.milvus_manifest` 或 footer 反推 V3 布局。
-- 方案 B：milvus-backup 填充 `entries_num`（连接器留 fallback：meta 有则优先，无则读 footer）。
+- 方案 B：milvus-backup 填充 `entries_num`（**已实现：连接器总是读 footer 行数，不优先 meta 的 entries_num**；若未来 milvus-backup 填充该字段，可加"有则用"的 fallback）。

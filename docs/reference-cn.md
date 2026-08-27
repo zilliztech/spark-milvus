@@ -143,6 +143,20 @@ val s3Options = Map(
 | `MilvusOption.MilvusRetryCount` | Int | 否 | 3 | 操作失败时的重试次数 |
 | `MilvusOption.MilvusRetryInterval` | Int | 否 | 1000 | 重试间隔时间（毫秒） |
 
+### 2.5 离线备份读取参数
+
+读取 milvus-backup 导出的 **binlog 格式**备份（`milvus-backup create --format binlog`），无需任何 Milvus client 连接。完整设计见 `docs/backup-datasource-design.md`。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|-----------|------|----------|---------|-------------|
+| `MilvusOption.BackupDir` | String | 否 | "" | `milvus.backup.dir` — 备份目录，如 `s3a://bucket/backup/<name>`。**仅支持 S3**（`s3://` 自动归一化为 `s3a://`）；本地/`file://` 目录在规划期被拒绝（packed reader 需要 S3）。 |
+| `MilvusOption.MilvusDatabaseName` | String | 否 | "" | collection 所在库（`"default"` 与空名等价）。与 `milvus.collection.name` 一起选库；未限定且有歧义时拒绝。 |
+| `MilvusOption.MilvusCollectionName` | String | 否 | - | 备份内的 collection 名（与库名联合匹配，不用 `.head`）。备份含多个 collection 时必须指定。 |
+| `MilvusOption.ReadApplyDeletes` | Boolean | 否 | true | `milvus.read.apply.deletes` — 读取时应用删除日志（L0/L1）。 |
+| `MilvusOption.SnapshotMaxJsonBytes` | Long | 否 | 67108864 | `milvus.snapshot.max.json.bytes` — backup `full_meta.json` 大小上限。 |
+
+读取 schema 需通过 `.schema()` 提供，或从备份 meta 推导；未提供 `.schema()` 且 meta 读取失败时读取硬失败。S3 凭证复用现有 `fs.*` 选项（`fs.address`、`fs.access_key_id`、`fs.access_key_value` ...）；桶取自 `milvus.backup.dir` URI。
+
 ## 3. 使用示例
 
 ### 3.1 读取数据
