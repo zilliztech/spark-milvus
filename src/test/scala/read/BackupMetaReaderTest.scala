@@ -681,6 +681,80 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("L1 segment delta logs reconstruct with the groupID level") {
+    val dir = Files.createTempDirectory("milvus-backup-l1-")
+    try {
+      // L1 (partition != -1) delta logs carry the groupID level; a regression
+      // here (empty deltaLogs or a mis-ordered delta path) would silently let
+      // deleted rows come back because loadV2DeletePlans filters on
+      // columnGroups.nonEmpty && deltaLogs.nonEmpty.
+      val segDir =
+        Paths.get(
+          dir.toString,
+          "binlogs",
+          "insert_log",
+          "444",
+          "555",
+          "999",
+          "777"
+        )
+      writeParquetAt(
+        Paths.get(segDir.toString, "103", "1"),
+        groupASchema,
+        List(f =>
+          f.newGroup().append("pk", 1L).append("row_id", 10L).append("ts", 100L)
+        )
+      )
+      val seg = BackupMetaReader.SegmentBackup(
+        segmentId = 777L,
+        collectionId = 444L,
+        partitionId = 555L,
+        groupId = 999L,
+        numOfRows = 1L,
+        storageVersion = 2L,
+        binlogs = Seq(
+          BackupMetaReader.FieldBinlog(
+            fieldId = 103L,
+            binlogs = Seq(
+              BackupMetaReader.Binlog(
+                logId = 1L,
+                logPath = "files/insert_log/444/555/777/103/1",
+                logSize = 10L
+              )
+            )
+          )
+        ),
+        deltalogs = Seq(
+          BackupMetaReader.FieldBinlog(
+            fieldId = 0L,
+            binlogs = Seq(
+              BackupMetaReader.Binlog(
+                logId = 5L,
+                logPath = "files/delta_log/444/555/777/5",
+                logSize = 10L
+              )
+            )
+          )
+        )
+      )
+      BackupMetaReader.buildV2Segment(
+        seg,
+        new Configuration(),
+        dir.toString,
+        applyDeletes = true
+      ) match {
+        case Right(Some(v2)) =>
+          v2.deltaLogs.map(_.logId) shouldBe Seq(5L)
+          v2.deltaLogs.map(_.logPath) shouldBe Seq(
+            s"${dir.toString}/binlogs/delta_log/444/555/999/777/5"
+          )
+        case other => fail(s"expected Right(Some), got $other")
+      }
+    } finally {
+      deleteRecursively(dir)
+    }
+  }
+
   private def deleteRecursively(dir: java.nio.file.Path): Unit = {
     import scala.jdk.CollectionConverters._
     if (Files.exists(dir)) {

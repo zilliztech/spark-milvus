@@ -2,7 +2,7 @@
 
 **Status:** Implemented
 **Audience:** Milvus / Spark connector / storage-v2 engineers
-**Last updated:** 2026-08-25
+**Last updated:** 2026-08-27
 
 ## 1. Background & Goals
 
@@ -19,8 +19,10 @@ required.
 
 **Goals**
 
-- Input: a backup directory (`milvus.backup.dir`, e.g. `s3a://bucket/backup/<name>`
-  or a local path) produced by `milvus-backup create`.
+- Input: an S3 backup directory (`milvus.backup.dir`, e.g.
+  `s3a://bucket/backup/<name>`) produced by `milvus-backup create`. Local /
+  `file://` dirs are exercised only by the mapping layer and unit tests; reads
+  require S3 because the JNI packed reader does.
 - Output: a Spark DataFrame supporting column pruning, `milvus.extra.columns`
   (`partition`, `$segment_id`, `$row_offset`), and the same delete semantics as
   snapshot reads (`milvus.read.apply.deletes`).
@@ -159,8 +161,9 @@ Behavior:
   otherwise silently drop rows), and for dynamic collections whose meta lacks
   the `$meta` field (default backups; points at `--backup_index_extra`).
 - `readMeta` reads `full_meta.json` with a bounded reader
-  (`milvus.snapshot.max.json.bytes`, default 64 MiB) and caches the parsed
-  `BackupInfo` per backup dir so table init and scan planning read it once.
+  (`milvus.snapshot.max.json.bytes`, default 64 MiB) and keeps **no** cache; the
+  parse done at table init is threaded to the scan planner via an internal
+  option, so the meta is read/parsed once per read.
 
 ### 4.3 `src/main/scala/read/MilvusParquetFooterReader.scala`
 
@@ -177,8 +180,10 @@ Behavior:
   schema from inference (callers supply `.schema()`).
 - `MilvusTable`: `isBackupMode`, `initFromBackup()` (materializes the collection
   schema and collection id from the backup meta — matched by
-  `milvus.collection.name` — so metadata rehydration for vector columns works
-  like snapshot mode), and `schema()` handling for offline modes.
+  `milvus.database.name` + `milvus.collection.name`; fails loudly when no
+  `.schema()` is supplied and the meta is unreadable — so metadata rehydration
+  for vector columns works like snapshot mode), and `schema()` handling for
+  offline modes.
 - `MilvusScan.planInputPartitionsFromBackup()`: resolves the collection by
   `milvus.database.name` + `milvus.collection.name` (`resolveBackupCollection`,
   ambiguous names rejected), rejects partition/segment selectors, validates
@@ -281,9 +286,9 @@ spark.read
   .schema(userSchema)
   .option("milvus.backup.dir", "s3a://bucket/backup/b1")
   .option("milvus.collection.name", "demo")
-  // reuse the existing fs.* / s3.* options for S3 credentials:
+  // reuse the existing fs.* options for S3 credentials. The bucket comes from
+  // the milvus.backup.dir URI (URI wins), so fs.bucket_name need not be set:
   .option("fs.address", "localhost:9000")
-  .option("fs.bucket_name", "a-bucket")
   .option("fs.access_key_id", "minioadmin")
   .option("fs.access_key_value", "minioadmin")
   .load()

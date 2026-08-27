@@ -257,6 +257,39 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(MilvusScan.resolveBackupCollection(multi, "", "orders").isLeft)
     assert(MilvusScan.resolveBackupCollection(multi, "", "").isLeft)
 
+    // "default" database is equivalent to an empty db_name (older backups omit
+    // it), in both directions.
+    val defaultDb = BackupMetaReader.BackupInfo(
+      name = "d",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionName = "orders",
+          collectionId = 9L,
+          dbName = "" // omitted by milvus-backup
+        )
+      )
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(defaultDb, "default", "orders")
+        .map(_.collectionId) == Right(9L)
+    )
+    val namedDefault = BackupMetaReader.BackupInfo(
+      name = "d2",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionName = "orders",
+          collectionId = 10L,
+          dbName = "default"
+        )
+      )
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(namedDefault, "", "orders")
+        .map(_.collectionId) == Right(10L)
+    )
+
     val single = BackupMetaReader.BackupInfo(
       name = "s",
       collectionBackups = Seq(coll("only", 3L))

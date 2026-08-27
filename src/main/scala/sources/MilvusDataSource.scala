@@ -232,59 +232,84 @@ case class MilvusTable(
     * connection). The collection schema is materialized from the backup's
     * `full_meta.json` so downstream metadata rehydration (e.g. Milvus data type
     * / vector dimension on Spark fields) works identically to snapshot mode.
-    * The collection is selected by `milvus.collection.name`, and its id is read
-    * from the meta. Best-effort only for I/O: if the meta cannot be read we
-    * fall back to an empty schema, but a meta-level contract violation (e.g. a
-    * dynamic collection without a `$meta` record) surfaces loudly.
+    * The collection is selected by `milvus.database.name` +
+    * `milvus.collection.name`, and its id is read from the meta.
+    *
+    * When no `.schema()` is provided, the backup meta is the only source of the
+    * Spark schema, so a read failure (or a missing collection / schema) fails
+    * loudly rather than degrading to a RowID/Timestamp-only schema that
+    * silently drops user columns. With an explicit `.schema()` the meta read is
+    * best-effort (it only feeds metadata rehydration).
     */
   private def initFromBackup(): Unit = {
     partitionID = 0L
 
+    // Without an explicit .schema(), the Spark schema is derived from the
+    // backup meta; failing to read it must surface loudly rather than degrade
+    // to a RowID/Timestamp-only schema that silently drops every user column.
+    val needsSchema = !sparkSchema.exists(_.nonEmpty)
+
     val parsedMeta: Option[
-      (BackupMetaReader.BackupInfo, Option[BackupMetaReader.CollectionBackup])
+      (BackupMetaReader.BackupInfo, BackupMetaReader.CollectionBackup)
     ] =
       MilvusOption.backupDir(milvusOption.options).flatMap { dir =>
         val conf =
           MilvusScan.buildHadoopConfForOptions(milvusOption.options, dir)
-        BackupMetaReader
-          .readMeta(
-            conf,
-            dir,
-            MilvusScan.backupMaxJsonBytes(
-              new CaseInsensitiveStringMap(milvusOption.options.asJava)
-            )
-          )
-          .toOption
-          .map { meta =>
-            val resolved = MilvusScan
+        val maxBytes = MilvusScan.backupMaxJsonBytes(
+          new CaseInsensitiveStringMap(milvusOption.options.asJava)
+        )
+        BackupMetaReader.readMeta(conf, dir, maxBytes) match {
+          case Left(err) =>
+            if (needsSchema) {
+              throw new IllegalArgumentException(
+                s"Failed to read backup meta at ${BackupMetaReader
+                    .metaPath(dir)} (required because no .schema() was " +
+                  s"provided): ${err.getMessage}",
+                err
+              )
+            } else {
+              logWarning(
+                s"Could not read backup meta at table init: ${err.getMessage}"
+              )
+              None
+            }
+          case Right(meta) =>
+            MilvusScan
               .resolveBackupCollection(
                 meta,
                 milvusOption.databaseName,
                 milvusOption.collectionName
               ) match {
-              case Right(coll) => Some(coll)
-              case Left(msg)   =>
-                // Not an I/O failure — the user asked for a collection that is
-                // not in the backup. Surface it now (the planner re-raises it)
-                // instead of silently degrading to a minimal schema.
-                logWarning(
-                  s"Backup collection resolution failed at table init: $msg"
-                )
-                None
+              case Right(coll) => Some((meta, coll))
+              case Left(msg) =>
+                if (needsSchema) {
+                  throw new IllegalArgumentException(msg)
+                } else {
+                  logWarning(
+                    s"Backup collection resolution failed at table init: $msg"
+                  )
+                  None
+                }
             }
-            (meta, resolved)
-          }
+        }
       }
     backupMetaJson = parsedMeta.map { case (meta, _) =>
       BackupMetaReader.serialize(meta)
     }
 
-    val parsedCollection = parsedMeta.flatMap(_._2)
+    val parsedCollection = parsedMeta.map(_._2)
     val collectionId = parsedCollection.map(_.collectionId).getOrElse(0L)
 
     val schemaFromMeta = parsedCollection.flatMap(_.schema).map { s =>
       BackupMetaReader.validateDynamicFieldSchema(s)
       CollectionSchema.parseFrom(BackupMetaReader.toProtobufSchemaBytes(s))
+    }
+
+    if (needsSchema && parsedCollection.nonEmpty && schemaFromMeta.isEmpty) {
+      throw new IllegalArgumentException(
+        s"Backup collection '${parsedCollection.get.collectionName}' has no " +
+          "schema; cannot derive a read schema without .schema()"
+      )
     }
 
     schemaFromMeta match {
@@ -1501,14 +1526,26 @@ object MilvusScan extends Logging {
       dbName: String,
       collectionName: String
   ): Either[String, BackupMetaReader.CollectionBackup] = {
-    def qualified(c: BackupMetaReader.CollectionBackup): String =
-      s"${if (c.dbName.nonEmpty) c.dbName + "." else ""}${c.collectionName}"
+    // Milvus's default database is named "default", but older milvus-backup
+    // versions / single-db clusters omit db_name from the meta (omitempty), so
+    // "default" and "" are the same database for matching purposes.
+    def normalizedDb(d: String): String = {
+      val t = Option(d).map(_.trim).getOrElse("")
+      if (t == "default") "" else t
+    }
+
+    def qualified(c: BackupMetaReader.CollectionBackup): String = {
+      val db = normalizedDb(c.dbName)
+      s"${if (db.nonEmpty) db + "." else ""}${c.collectionName}"
+    }
+
+    val reqDb = normalizedDb(dbName)
 
     if (collectionName.nonEmpty) {
       val candidates =
         meta.collectionBackups.filter(_.collectionName == collectionName)
-      if (dbName.nonEmpty) {
-        candidates.find(_.dbName == dbName) match {
+      if (reqDb.nonEmpty) {
+        candidates.find(c => normalizedDb(c.dbName) == reqDb) match {
           case Some(coll) => Right(coll)
           case None =>
             Left(
@@ -1638,6 +1675,18 @@ class MilvusScan(
     with Batch
     with Logging {
   private val milvusOption = MilvusOption(options)
+
+  // The threaded backup meta (if any) is consumed on the driver only; it must
+  // not ride along on every InputPartition to the executors (it can be tens of
+  // MB and has no executor-side consumer).
+  private val partitionMilvusOption: MilvusOption =
+    if (milvusOption.options.contains(MilvusOption.BackupMetaJson)) {
+      milvusOption.copy(
+        options = milvusOption.options - MilvusOption.BackupMetaJson
+      )
+    } else {
+      milvusOption
+    }
 
   // Get vector search configuration from MilvusOption
   private val vectorSearchConfig = milvusOption.vectorSearchConfig
@@ -2237,12 +2286,12 @@ class MilvusScan(
       .map(_.trim)
       .filter(_.nonEmpty)
       .map(bucket =>
-        milvusOption.copy(
-          options = milvusOption.options +
+        partitionMilvusOption.copy(
+          options = partitionMilvusOption.options +
             (Properties.FsConfig.FsBucketName -> bucket)
         )
       )
-      .getOrElse(milvusOption)
+      .getOrElse(partitionMilvusOption)
 
     val v3Partitions = manifestList.map { item =>
       val (basePath, parsedReadVersion) =

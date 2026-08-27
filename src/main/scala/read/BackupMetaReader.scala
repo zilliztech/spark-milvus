@@ -427,8 +427,21 @@ object BackupMetaReader extends Logging {
       info.collectionBackups
         .filter(_.collectionId == collectionId)
         .foreach { coll =>
-          coll.allSegments.foreach { seg =>
-            buildV2Segment(seg, hadoopConf, backupDir, applyDeletes) match {
+          // Segments are independent, so their footer reads run in parallel on
+          // the shared pool; with the common "one file per group" shape each
+          // segment still costs a serial head read, so parallelism across
+          // segments (not just across a group's tail files) is what keeps a
+          // large backup from stalling the driver.
+          val futures = coll.allSegments.map { seg =>
+            FooterReadPool.submit(
+              new Callable[Either[Throwable, Option[V2SegmentInfo]]] {
+                override def call(): Either[Throwable, Option[V2SegmentInfo]] =
+                  buildV2Segment(seg, hadoopConf, backupDir, applyDeletes)
+              }
+            )
+          }
+          futures.foreach { f =>
+            f.get() match {
               case Right(Some(v2)) => out += v2
               case Right(None)     => // L0 segment skipped (applyDeletes=false)
               case Left(e)         => throw e
