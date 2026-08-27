@@ -290,6 +290,34 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
         .map(_.collectionId) == Right(10L)
     )
 
+    // Explicit "default" selects the default-db candidate even when another
+    // database has a same-named collection (request side is not flattened).
+    val mixed = BackupMetaReader.BackupInfo(
+      name = "mixed",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionName = "orders",
+          collectionId = 11L,
+          dbName = "" // default
+        ),
+        BackupMetaReader.CollectionBackup(
+          collectionName = "orders",
+          collectionId = 12L,
+          dbName = "db2"
+        )
+      )
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(mixed, "default", "orders")
+        .map(_.collectionId) == Right(11L)
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(mixed, "db2", "orders")
+        .map(_.collectionId) == Right(12L)
+    )
+
     val single = BackupMetaReader.BackupInfo(
       name = "s",
       collectionBackups = Seq(coll("only", 3L))

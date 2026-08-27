@@ -1528,7 +1528,10 @@ object MilvusScan extends Logging {
   ): Either[String, BackupMetaReader.CollectionBackup] = {
     // Milvus's default database is named "default", but older milvus-backup
     // versions / single-db clusters omit db_name from the meta (omitempty), so
-    // "default" and "" are the same database for matching purposes.
+    // a candidate with db_name "" or "default" both mean the default database.
+    // The normalization applies to the MATCHING side only: an explicitly
+    // supplied dbName (even "default") still selects the per-database branch,
+    // otherwise `default.orders` + `db2.orders` would be unreachable.
     def normalizedDb(d: String): String = {
       val t = Option(d).map(_.trim).getOrElse("")
       if (t == "default") "" else t
@@ -1539,12 +1542,13 @@ object MilvusScan extends Logging {
       s"${if (db.nonEmpty) db + "." else ""}${c.collectionName}"
     }
 
+    val rawDb = Option(dbName).map(_.trim).getOrElse("")
     val reqDb = normalizedDb(dbName)
 
     if (collectionName.nonEmpty) {
       val candidates =
         meta.collectionBackups.filter(_.collectionName == collectionName)
-      if (reqDb.nonEmpty) {
+      if (rawDb.nonEmpty) {
         candidates.find(c => normalizedDb(c.dbName) == reqDb) match {
           case Some(coll) => Right(coll)
           case None =>
@@ -2738,7 +2742,10 @@ class MilvusScan(
   }
 
   override def createReaderFactory(): PartitionReaderFactory = {
-    val optionsMap = options.asScala.toMap
+    // The threaded backup meta is consumed on the driver only; strip it before
+    // this map is serialized into the task binary and deserialized on every
+    // executor, where nothing reads it.
+    val optionsMap = options.asScala.toMap - MilvusOption.BackupMetaJson
     val inheritedPlansByPartition =
       if (
         MilvusOption

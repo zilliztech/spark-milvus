@@ -252,6 +252,12 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     // Empty-authority URIs keep the leading slash, matching the bare form.
     BackupMetaReader.backupKeyBase("file:///data/backup/b1") shouldBe
       "/data/backup/b1"
+    // Backup at the bucket root: empty bucket-relative prefix, and trailing
+    // double-slashes must collapse to a single location.
+    BackupMetaReader.backupKeyBase("s3a://bucket") shouldBe ""
+    BackupMetaReader.backupKeyBase("s3a://b/backup/b1//") shouldBe "backup/b1"
+    BackupMetaReader.metaPath("s3a://b/backup/b1//") shouldBe
+      "s3a://b/backup/b1/meta/full_meta.json"
 
     // Native reader gets bucket-relative keys; Hadoop reads get the qualified URI.
     BackupMetaReader.nativeInsertLogPath(
@@ -266,6 +272,15 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       103L,
       1L
     ) shouldBe "s3a://bucket/backup/b1/binlogs/insert_log/444/555/999/777/103/1"
+    // Bucket-root backup: native key has NO leading slash (a different S3 key).
+    BackupMetaReader.nativeInsertLogPath("s3a://bucket", seg, 103L, 1L) shouldBe
+      "binlogs/insert_log/444/555/999/777/103/1"
+    BackupMetaReader.qualifiedInsertLogPath(
+      "s3a://bucket",
+      seg,
+      103L,
+      1L
+    ) shouldBe "s3a://bucket/binlogs/insert_log/444/555/999/777/103/1"
 
     // Delta logs only feed the Hadoop delete-plan reader, so only qualified
     // paths exist. groupID level present for part != -1, omitted for part == -1.

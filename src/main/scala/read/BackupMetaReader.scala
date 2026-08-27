@@ -202,7 +202,9 @@ object BackupMetaReader extends Logging {
     if (base.isEmpty) {
       throw new IllegalArgumentException("backup dir must not be empty")
     }
-    val stripped = if (base.endsWith("/")) base.stripSuffix("/") else base
+    // Strip ALL trailing slashes: `.../b1//` is the same location as `.../b1`
+    // but a different S3 key, so a single stripSuffix("/") would miss it.
+    val stripped = base.replaceAll("/+$", "")
     s"$stripped/meta/full_meta.json"
   }
 
@@ -375,23 +377,40 @@ object BackupMetaReader extends Logging {
     math.max(2, math.min(cores, 8))
   }
 
-  /** Bounded, daemon thread pool for parallel parquet footer reads on the
-    * driver. Footer reads are I/O-bound (a HEAD + one tail range GET each), so
+  /** Bounded, daemon thread pool for per-file parquet footer reads on the
+    * driver (a HEAD + one tail range GET each). Footer reads are I/O-bound, so
     * fanning them out avoids a serialized round trip per binlog before any
     * Spark task is scheduled.
+    *
+    * The inner tail-file reads run on their own pool, separate from
+    * [[SegmentReadPool]], so a segment worker blocked on `Future.get()` for its
+    * tail reads can never starve those reads of threads (a single shared pool
+    * would deadlock when every worker waits on tasks that are queued behind
+    * it).
     */
   private val FooterReadPool: ExecutorService = Executors.newFixedThreadPool(
     FooterReadThreadCount,
+    daemonThreadFactory("backup-footer-read")
+  )
+
+  /** Bounded, daemon thread pool for segment-level conversion (each segment's
+    * footer reads are independent). See [[FooterReadPool]] for the deadlock
+    * rationale for keeping this separate from the per-file pool.
+    */
+  private val SegmentReadPool: ExecutorService = Executors.newFixedThreadPool(
+    FooterReadThreadCount,
+    daemonThreadFactory("backup-segment-read")
+  )
+
+  private def daemonThreadFactory(namePrefix: String): ThreadFactory =
     new ThreadFactory {
       private val counter = new AtomicInteger(0)
       override def newThread(r: Runnable): Thread = {
-        val t =
-          new Thread(r, s"backup-footer-read-${counter.incrementAndGet()}")
+        val t = new Thread(r, s"$namePrefix-${counter.incrementAndGet()}")
         t.setDaemon(true)
         t
       }
     }
-  )
 
   /** Build the runtime `V2SegmentInfo` list for the segments of the collection
     * identified by `collectionId`. L0 delete-only segments keep an empty
@@ -433,7 +452,7 @@ object BackupMetaReader extends Logging {
           // segments (not just across a group's tail files) is what keeps a
           // large backup from stalling the driver.
           val futures = coll.allSegments.map { seg =>
-            FooterReadPool.submit(
+            SegmentReadPool.submit(
               new Callable[Either[Throwable, Option[V2SegmentInfo]]] {
                 override def call(): Either[Throwable, Option[V2SegmentInfo]] =
                   buildV2Segment(seg, hadoopConf, backupDir, applyDeletes)
@@ -670,7 +689,7 @@ object BackupMetaReader extends Logging {
     Option(backupDir)
       .map(_.trim)
       .filter(_.nonEmpty)
-      .map(_.stripSuffix("/"))
+      .map(_.replaceAll("/+$", ""))
       .getOrElse(
         throw new IllegalArgumentException("backup dir must not be empty")
       )
@@ -700,14 +719,21 @@ object BackupMetaReader extends Logging {
     }
   }
 
+  /** Join a path prefix with "/" without introducing a leading slash when the
+    * prefix is empty (a backup at the bucket root has an empty bucket-relative
+    * prefix, and `/binlogs/...` is a different S3 key than `binlogs/...`).
+    */
+  private def joinPrefix(prefix: String): String =
+    if (prefix.isEmpty) "" else prefix + "/"
+
   private def insertLogPath(
       prefix: String,
       seg: SegmentBackup,
       slotFieldId: Long,
       logId: Long
   ): String =
-    s"$prefix/binlogs/insert_log/${seg.collectionId}/${seg.partitionId}/" +
-      s"${seg.groupId}/${seg.segmentId}/$slotFieldId/$logId"
+    s"${joinPrefix(prefix)}binlogs/insert_log/${seg.collectionId}/" +
+      s"${seg.partitionId}/${seg.groupId}/${seg.segmentId}/$slotFieldId/$logId"
 
   private def deltaLogPath(
       prefix: String,
@@ -715,11 +741,11 @@ object BackupMetaReader extends Logging {
       logId: Long
   ): String =
     if (seg.partitionId == AllPartitionId) {
-      s"$prefix/binlogs/delta_log/${seg.collectionId}/${seg.partitionId}/" +
-        s"${seg.segmentId}/$logId"
+      s"${joinPrefix(prefix)}binlogs/delta_log/${seg.collectionId}/" +
+        s"${seg.partitionId}/${seg.segmentId}/$logId"
     } else {
-      s"$prefix/binlogs/delta_log/${seg.collectionId}/${seg.partitionId}/" +
-        s"${seg.groupId}/${seg.segmentId}/$logId"
+      s"${joinPrefix(prefix)}binlogs/delta_log/${seg.collectionId}/" +
+        s"${seg.partitionId}/${seg.groupId}/${seg.segmentId}/$logId"
     }
 
   /** Hadoop-qualified insert-log path (e.g.

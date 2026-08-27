@@ -163,7 +163,9 @@ Behavior:
 - `readMeta` reads `full_meta.json` with a bounded reader
   (`milvus.snapshot.max.json.bytes`, default 64 MiB) and keeps **no** cache; the
   parse done at table init is threaded to the scan planner via an internal
-  option, so the meta is read/parsed once per read.
+  option, so the meta is read/parsed once per read. That option never reaches
+  executors: it is stripped from both the per-partition `milvusOption` and the
+  reader-factory options map.
 
 ### 4.3 `src/main/scala/read/MilvusParquetFooterReader.scala`
 
@@ -268,7 +270,12 @@ Behavior:
   named `RowID`/`Timestamp` survives.
 - `milvus.backup.dir` must be an S3 URI (`s3a://`) for reads — local/`file://`
   dirs are rejected at planning since the JNI packed reader requires S3.
-  `s3://` is normalized to `s3a://` at entry.
+  `s3://` is normalized to `s3a://` at entry. Bucket-root backups and trailing
+  double-slashes are handled: the native key never gains a leading slash and
+  all trailing slashes are stripped (both would be different S3 keys).
+- Column-group footer reads run on two independent bounded pools (segments vs
+  per-file tail reads) so a segment worker waiting on its tail reads can never
+  deadlock the single pool.
 - A dynamic collection whose `$meta` field is present is not duplicated by the
   computed schema.
 - Local paths (`/data/backup/...` or `file:///...`) are exercised by the
