@@ -719,6 +719,22 @@ object BackupMetaReader extends Logging {
         )
       )
 
+  /** Build the L0 (delete-only) `V2SegmentInfo` list for a collection with no
+    * footer reads. Used by the reader factory to compute the shared
+    * partition-scoped L0 delete plans independently of partition planning, so
+    * delete handling does not depend on Spark evaluating partitions first.
+    */
+  private[connector] def l0DeleteSegments(
+      info: BackupInfo,
+      collectionId: Long,
+      backupDir: String
+  ): Seq[V2SegmentInfo] =
+    info.collectionBackups
+      .filter(_.collectionId == collectionId)
+      .flatMap(_.allSegments)
+      .filter(seg => seg.isL0 && seg.deltalogs.exists(_.binlogs.nonEmpty))
+      .map(seg => emptyColumnGroupSegment(seg, backupDir))
+
   /** Read the row count of every path concurrently, preserving input order. All
     * reads share the caller-supplied `FileSystem` (thread-safe for concurrent
     * opens), so no per-file S3A client is constructed.

@@ -1685,13 +1685,6 @@ class MilvusScan(
     with Logging {
   private val milvusOption = MilvusOption(options)
 
-  // Partition-scoped L0 delete plans computed during backup planning; the
-  // reader factory resolves the shared plan from this single map (partitions
-  // carry only a marker), so a delete-heavy backup is not duplicated per
-  // segment. Driver-side only; never serialized to executors directly.
-  private var backupInheritedDeletePlans
-      : Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan] = Map.empty
-
   // Get vector search configuration from MilvusOption
   private val vectorSearchConfig = milvusOption.vectorSearchConfig
 
@@ -2730,7 +2723,6 @@ class MilvusScan(
             )
         }
       }
-    backupInheritedDeletePlans = inheritedDeletePlansByPartition
 
     // inlineInheritedDeletePlans=false: partitions carry a partition-scoped
     // marker instead of a copy of the L0 delete plan, and the reader factory
@@ -2805,11 +2797,9 @@ class MilvusScan(
         MilvusOption
           .isBackupMode(options) && MilvusOption.readApplyDeletes(options)
       ) {
-        // Backup partitions carry a partition-scoped marker (inline=false), so
-        // the shared L0 delete plan must be supplied here. Reuse the map the
-        // planner already computed — it is built once on the driver and
-        // serialized once with this factory, not per segment.
-        backupInheritedDeletePlans
+        // Computed here (not read from a planning side effect) so delete
+        // handling does not depend on Spark evaluating partitions first.
+        computeBackupInheritedDeletePlans()
       } else {
         Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
       }
@@ -2820,5 +2810,55 @@ class MilvusScan(
       pushedFilters,
       MilvusPackedV2DeleteContext(inheritedPlansByPartition)
     )
+  }
+
+  /** Compute the shared partition-scoped L0 delete plans for a backup read from
+    * the parsed meta, independent of partition planning. Returns `Map.empty`
+    * when no deletes apply or the meta/schema cannot be resolved (the planner
+    * would already have failed loudly for those cases).
+    */
+  private def computeBackupInheritedDeletePlans()
+      : Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan] = {
+    val backupDir = MilvusOption.backupDir(options).getOrElse {
+      return Map.empty
+    }
+    val meta = preParsedBackupMeta.getOrElse {
+      return Map.empty
+    }
+    val coll = MilvusScan
+      .resolveBackupCollection(
+        meta,
+        milvusOption.databaseName,
+        milvusOption.collectionName
+      )
+      .getOrElse { return Map.empty }
+    val schemaBytes = coll.schema
+      .map(BackupMetaReader.toProtobufSchemaBytes)
+      .getOrElse { return Map.empty }
+    val pkField = CollectionSchema
+      .parseFrom(schemaBytes)
+      .fields
+      .find(_.isPrimaryKey)
+      .getOrElse { return Map.empty }
+    val l0Segments =
+      BackupMetaReader.l0DeleteSegments(meta, coll.collectionId, backupDir)
+    if (l0Segments.isEmpty) {
+      Map.empty
+    } else {
+      val hadoopConf = buildSnapshotHadoopConf(backupDir)
+      MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+        l0Segments,
+        pkField,
+        MilvusScan.snapshotBucket(backupDir).getOrElse(""),
+        hadoopConf
+      ) match {
+        case Right(plans) => plans
+        case Left(err) =>
+          throw new IllegalStateException(
+            s"Failed to load inherited StorageV2 delete logs for reader factory: ${err.getMessage}",
+            err
+          )
+      }
+    }
   }
 }

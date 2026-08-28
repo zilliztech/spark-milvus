@@ -342,6 +342,29 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     ).dedupColumnGroupsBySlot.columnGroups shouldBe Seq(unknown)
   }
 
+  test("l0DeleteSegments returns L0-only segments with qualified delta paths") {
+    val meta = BackupMetaReader
+      .parse(
+        backupFixture(
+          groupAPath = SourceKeys._1,
+          groupBPath = SourceKeys._2,
+          groupCPath = SourceKeys._3,
+          deltaPath = SourceKeys._4
+        )
+      )
+      .getOrElse(fail("expected Right"))
+    val l0 = BackupMetaReader.l0DeleteSegments(
+      meta,
+      444L,
+      "s3a://bucket/backup/b1"
+    )
+    l0.map(_.segmentId) shouldBe Seq(888L)
+    l0.head.columnGroups shouldBe Seq.empty
+    l0.head.deltaLogs.map(_.logPath) shouldBe Seq(
+      "s3a://bucket/backup/b1/binlogs/delta_log/444/-1/888/1"
+    )
+  }
+
   test("readMeta parses a binlog-format backup full_meta.json") {
     val dir = Files.createTempDirectory("milvus-backup-meta-")
     try {

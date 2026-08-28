@@ -229,6 +229,47 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  test("backup createReaderFactory is self-contained without prior planning") {
+    import com.fasterxml.jackson.databind.node.IntNode
+    val schema = BackupMetaReader.BackupCollectionSchema(
+      name = "demo",
+      fields = Seq(
+        BackupMetaReader.BackupFieldSchema(
+          fieldId = 100L,
+          name = "id",
+          isPrimaryKey = true,
+          rawDataType = Some(IntNode.valueOf(5))
+        )
+      )
+    )
+    val meta = BackupMetaReader.BackupInfo(
+      name = "b1",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionName = "demo",
+          collectionId = 444L,
+          schema = Some(schema)
+        )
+      )
+    )
+    val options = new ju.HashMap[String, String]()
+    options.put(MilvusOption.BackupDir, "s3a://bucket/backup/b1")
+    options.put(MilvusOption.MilvusCollectionName, "demo")
+    val scan = new MilvusScan(
+      StructType(Seq(StructField("RowID", LongType, nullable = false))),
+      new CaseInsensitiveStringMap(options),
+      preParsedBackupMeta = Some(meta)
+    )
+    // No prior planInputPartitions call: the factory must compute its delete
+    // context on its own (no planning side effect).
+    val factory = scan.createReaderFactory()
+    assert(
+      factory.isInstanceOf[
+        com.zilliz.spark.connector.read.MilvusPartitionReaderFactory
+      ]
+    )
+  }
+
   test("resolveBackupCollection matches by name and database, never .head") {
     def coll(name: String, id: Long, db: String = "") =
       BackupMetaReader.CollectionBackup(

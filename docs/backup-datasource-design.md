@@ -199,9 +199,11 @@ Behavior:
   that the meta carries a collection schema with a primary key, builds
   `V2SegmentInfo`, loads delete plans, and hands everything to the shared
   `buildSnapshotPartitions` with `inlineInheritedDeletePlans = false`: backup
-  partitions carry a partition-scoped marker and the reader factory resolves
-  the L0 delete plan from a single shared map, so a delete-heavy backup is not
-  materialized once per segment (O(S×D)).
+  partitions carry a partition-scoped marker and the reader factory computes
+  the shared L0 delete plan **independently from the parsed meta** (not as a
+  planning side effect), so a delete-heavy backup is not materialized once per
+  segment (O(S×D)) and delete handling does not depend on Spark evaluating
+  partitions first.
 - Shared `buildSnapshotPartitions` dedups each segment's column groups by slot
   (`V2SegmentInfo.dedupColumnGroupsBySlot`) so a field carried by an old
   multi-field group and a newer single-field group (add-field + backfill) is
