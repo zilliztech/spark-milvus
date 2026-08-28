@@ -169,10 +169,10 @@ Behavior:
   the `$meta` field (default backups; points at `--backup_index_extra`).
 - `readMeta` reads `full_meta.json` with a bounded reader
   (`milvus.snapshot.max.json.bytes`, default 64 MiB) and keeps **no** cache; the
-  parse done at table init is threaded to the scan planner via an internal
-  option, so the meta is read/parsed once per read. That option never reaches
-  executors: it is stripped from both the per-partition `milvusOption` and the
-  reader-factory options map.
+  meta is parsed once at table init and the parsed `BackupInfo` is threaded
+  directly to the scan planner (never via options, so it is neither
+  re-serialized nor shipped to executors); a direct scan falls back to a fresh
+  read.
 
 ### 4.3 `src/main/scala/read/MilvusParquetFooterReader.scala`
 
@@ -198,7 +198,10 @@ Behavior:
   ambiguous names rejected), rejects partition/segment selectors, validates
   that the meta carries a collection schema with a primary key, builds
   `V2SegmentInfo`, loads delete plans, and hands everything to the shared
-  `buildSnapshotPartitions` with `inlineInheritedDeletePlans = true`.
+  `buildSnapshotPartitions` with `inlineInheritedDeletePlans = false`: backup
+  partitions carry a partition-scoped marker and the reader factory resolves
+  the L0 delete plan from a single shared map, so a delete-heavy backup is not
+  materialized once per segment (O(S×D)).
 - Shared `buildSnapshotPartitions` dedups each segment's column groups by slot
   (`V2SegmentInfo.dedupColumnGroupsBySlot`) so a field carried by an old
   multi-field group and a newer single-field group (add-field + backfill) is
@@ -276,8 +279,8 @@ Behavior:
   (non-delete-only) segment — an L0-only backup otherwise reads zero rows.
   `full_meta.json` is read with a bounded reader
   (`milvus.snapshot.max.json.bytes`, default 64 MiB) and **not** cached; the
-  parse done at table init is threaded to the scan planner via an internal
-  option, so the meta is read/parsed once per `spark.read`.
+  meta is parsed once at table init and the parsed `BackupInfo` is threaded
+  directly to the scan planner, so it is read/parsed once per `spark.read`.
 - `toV2Segments` materializes segments only for the resolved `collectionId`, so
   a multi-collection backup never leaks another collection's segments into the
   read.

@@ -182,9 +182,10 @@ case class MilvusTable(
     with Logging {
   var milvusCollection: MilvusCollectionInfo = _
   var partitionID: Long = 0L
-  // Serialized full_meta.json parsed during initFromBackup; threaded to the
-  // scan planner via the BackupMetaJson option so the meta is read/parsed once.
-  private var backupMetaJson: Option[String] = None
+  // full_meta.json parsed during initFromBackup, threaded directly to the scan
+  // planner (never through options, so it is neither re-serialized nor shipped
+  // to executors).
+  private var parsedBackupMeta: Option[BackupMetaReader.BackupInfo] = None
   initInfo()
   var fieldIDs =
     if (milvusOption.fieldIDs.nonEmpty) {
@@ -293,9 +294,7 @@ case class MilvusTable(
             }
         }
       }
-    backupMetaJson = parsedMeta.map { case (meta, _) =>
-      BackupMetaReader.serialize(meta)
-    }
+    parsedBackupMeta = parsedMeta.map(_._1)
 
     val parsedCollection = parsedMeta.map(_._2)
     val collectionId = parsedCollection.map(_.collectionId).getOrElse(0L)
@@ -472,12 +471,9 @@ case class MilvusTable(
         partitionID.toString
       )
     }
-    backupMetaJson.foreach { json =>
-      mergedOptions.put(MilvusOption.BackupMetaJson, json)
-    }
 
     val allOptions = new CaseInsensitiveStringMap(mergedOptions)
-    new MilvusScanBuilder(schema(), allOptions)
+    new MilvusScanBuilder(schema(), allOptions, parsedBackupMeta)
   }
 
   override def name(): String = milvusOption.collectionName
@@ -684,7 +680,8 @@ case class MilvusTable(
 
 class MilvusScanBuilder(
     schema: StructType,
-    options: CaseInsensitiveStringMap
+    options: CaseInsensitiveStringMap,
+    preParsedBackupMeta: Option[BackupMetaReader.BackupInfo] = None
 ) extends ScanBuilder
     with SupportsPushDownFilters
     with SupportsPushDownRequiredColumns
@@ -891,7 +888,12 @@ class MilvusScanBuilder(
   }
 
   override def build(): Scan = {
-    new MilvusScan(currentSchema, currentOptions, pushedFilterArray)
+    new MilvusScan(
+      currentSchema,
+      currentOptions,
+      pushedFilterArray,
+      preParsedBackupMeta
+    )
   }
 }
 
@@ -1674,23 +1676,21 @@ object MilvusScan extends Logging {
 class MilvusScan(
     schema: StructType,
     options: CaseInsensitiveStringMap,
-    pushedFilters: Array[Filter] = Array.empty[Filter]
+    pushedFilters: Array[Filter] = Array.empty[Filter],
+    // Backup meta already parsed at table init (threaded directly, never via
+    // options, so it does not ride along on InputPartitions to executors).
+    preParsedBackupMeta: Option[BackupMetaReader.BackupInfo] = None
 ) extends Scan
     with Batch
     with Logging {
   private val milvusOption = MilvusOption(options)
 
-  // The threaded backup meta (if any) is consumed on the driver only; it must
-  // not ride along on every InputPartition to the executors (it can be tens of
-  // MB and has no executor-side consumer).
-  private val partitionMilvusOption: MilvusOption =
-    if (milvusOption.options.contains(MilvusOption.BackupMetaJson)) {
-      milvusOption.copy(
-        options = milvusOption.options - MilvusOption.BackupMetaJson
-      )
-    } else {
-      milvusOption
-    }
+  // Partition-scoped L0 delete plans computed during backup planning; the
+  // reader factory resolves the shared plan from this single map (partitions
+  // carry only a marker), so a delete-heavy backup is not duplicated per
+  // segment. Driver-side only; never serialized to executors directly.
+  private var backupInheritedDeletePlans
+      : Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan] = Map.empty
 
   // Get vector search configuration from MilvusOption
   private val vectorSearchConfig = milvusOption.vectorSearchConfig
@@ -2290,12 +2290,12 @@ class MilvusScan(
       .map(_.trim)
       .filter(_.nonEmpty)
       .map(bucket =>
-        partitionMilvusOption.copy(
-          options = partitionMilvusOption.options +
+        milvusOption.copy(
+          options = milvusOption.options +
             (Properties.FsConfig.FsBucketName -> bucket)
         )
       )
-      .getOrElse(partitionMilvusOption)
+      .getOrElse(milvusOption)
 
     val v3Partitions = manifestList.map { item =>
       val (basePath, parsedReadVersion) =
@@ -2596,36 +2596,24 @@ class MilvusScan(
     )
 
     val hadoopConf = buildSnapshotHadoopConf(backupDir)
-    // Prefer the meta already parsed during table init (threaded via the
-    // BackupMetaJson option) so full_meta.json is read/parsed once per read;
-    // fall back to a fresh read otherwise (e.g. direct scan without table init).
-    val meta = Option(options.get(MilvusOption.BackupMetaJson))
-      .filter(_.nonEmpty)
-      .map { json =>
-        BackupMetaReader.parse(json) match {
-          case Right(m) => m
-          case Left(err) =>
-            throw new IllegalArgumentException(
-              s"Failed to parse threaded backup meta for '$backupDir': ${err.getMessage}",
-              err
-            )
-        }
+    // Prefer the meta already parsed at table init (threaded directly, so it is
+    // neither re-serialized nor shipped to executors); fall back to a fresh
+    // read otherwise (e.g. a direct scan without table init).
+    val meta = preParsedBackupMeta.getOrElse {
+      BackupMetaReader.readMeta(
+        hadoopConf,
+        backupDir,
+        MilvusScan.backupMaxJsonBytes(options)
+      ) match {
+        case Right(m) => m
+        case Left(err) =>
+          throw new IllegalArgumentException(
+            s"Failed to parse backup meta at ${BackupMetaReader
+                .metaPath(backupDir)}: ${err.getMessage}",
+            err
+          )
       }
-      .getOrElse {
-        BackupMetaReader.readMeta(
-          hadoopConf,
-          backupDir,
-          MilvusScan.backupMaxJsonBytes(options)
-        ) match {
-          case Right(m) => m
-          case Left(err) =>
-            throw new IllegalArgumentException(
-              s"Failed to parse backup meta at ${BackupMetaReader
-                  .metaPath(backupDir)}: ${err.getMessage}",
-              err
-            )
-        }
-      }
+    }
     if (meta.isSnapshotFormat) {
       throw new IllegalArgumentException(
         s"Backup '${meta.name}' is in snapshot format; only binlog-format " +
@@ -2742,7 +2730,12 @@ class MilvusScan(
             )
         }
       }
+    backupInheritedDeletePlans = inheritedDeletePlansByPartition
 
+    // inlineInheritedDeletePlans=false: partitions carry a partition-scoped
+    // marker instead of a copy of the L0 delete plan, and the reader factory
+    // resolves the shared plan from a single map — otherwise a delete-heavy
+    // backup materializes the L0 delete map once per segment (O(S×D)).
     buildSnapshotPartitions(
       manifestList = Seq.empty,
       defaultPartitionId = "0",
@@ -2750,16 +2743,13 @@ class MilvusScan(
       v2Segments = v2Segments,
       v2DeletePlans = v2DeletePlans,
       inheritedDeletePlansByPartition = inheritedDeletePlansByPartition,
-      inlineInheritedDeletePlans = true,
+      inlineInheritedDeletePlans = false,
       forceCanonicalBucket = canonicalBucket
     )
   }
 
   override def createReaderFactory(): PartitionReaderFactory = {
-    // The threaded backup meta is consumed on the driver only; strip it before
-    // this map is serialized into the task binary and deserialized on every
-    // executor, where nothing reads it.
-    val optionsMap = options.asScala.toMap - MilvusOption.BackupMetaJson
+    val optionsMap = options.asScala.toMap
     val inheritedPlansByPartition =
       if (
         MilvusOption
@@ -2811,6 +2801,15 @@ class MilvusScan(
               )
           }
         }
+      } else if (
+        MilvusOption
+          .isBackupMode(options) && MilvusOption.readApplyDeletes(options)
+      ) {
+        // Backup partitions carry a partition-scoped marker (inline=false), so
+        // the shared L0 delete plan must be supplied here. Reuse the map the
+        // planner already computed — it is built once on the driver and
+        // serialized once with this factory, not per segment.
+        backupInheritedDeletePlans
       } else {
         Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
       }

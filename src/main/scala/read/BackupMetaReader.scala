@@ -484,11 +484,32 @@ object BackupMetaReader extends Logging {
     } catch {
       case NonFatal(e) => Left(e)
     } finally {
-      try {
-        if (fs != null) fs.close()
-      } catch {
-        case NonFatal(_) => // close is best-effort; the read result already won
+      closeIfNotCached(fs, hadoopConf)
+    }
+  }
+
+  /** Close a `FileSystem` only when its scheme has the cache disabled (i.e. the
+    * instance was created fresh for this read). A cached scheme (e.g. the
+    * process-wide `LocalFileSystem` for local paths) must NOT be closed: that
+    * evicts it from `FileSystem.CACHE` and fails every other holder with
+    * `IOException: Filesystem closed`.
+    */
+  private def closeIfNotCached(
+      fs: FileSystem,
+      hadoopConf: Configuration
+  ): Unit = {
+    try {
+      if (fs != null) {
+        val scheme = fs.getUri.getScheme
+        if (
+          scheme != null && hadoopConf
+            .getBoolean(s"fs.$scheme.impl.disable.cache", false)
+        ) {
+          fs.close()
+        }
       }
+    } catch {
+      case NonFatal(_) => // close is best-effort; the read result already won
     }
   }
 
@@ -660,11 +681,7 @@ object BackupMetaReader extends Logging {
       fs = FileSystem.get(new java.net.URI(backupBase(backupDir)), hadoopConf)
       buildV2SegmentWithFs(seg, fs, backupDir, applyDeletes)
     } finally {
-      try {
-        if (fs != null) fs.close()
-      } catch {
-        case NonFatal(_) => // close is best-effort; the read result already
-      }
+      closeIfNotCached(fs, hadoopConf)
     }
   }
 

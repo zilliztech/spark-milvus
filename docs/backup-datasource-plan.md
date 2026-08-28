@@ -1,6 +1,6 @@
 # 实现计划：milvus-backup 作为 Milvus 读数据源（spark-milvus）
 
-> **⚠️ 已废弃 / SUPERSEDED**：本文件是**首个提交**时的实现计划，此后 8 轮 review 修正了大量设计（路径重建、L0/storage_version 处理、非 S3 拒绝、collection 匹配、meta 单次解析等），本文多处已与实现**相反**。
+> **⚠️ 已废弃 / SUPERSEDED**：本文件是**首个提交**时的实现计划，此后 11 轮 review 修正了大量设计（路径重建、L0/storage_version 处理、非 S3 拒绝、collection 匹配、meta 单次解析、**一致性语义**、动态字段最低版本等），本文多处已与实现**相反**。
 > **请以 [`docs/backup-datasource-design.md`](backup-datasource-design.md)（英文、持续更新、已实现）为准。** 尤其不要按本文件 §5 的"直接解析 `log_path` / 不做 groupID 反推"实现——`log_path` 是原始 Milvus 源 key，照做会把读打到源集群对象路径上。
 
 ## 1. 背景与目标
@@ -116,7 +116,7 @@ Hadoop 侧读（footer/meta/delta）用带 scheme 的 URI（`s3a://...`）；原
 
 ## 7. 边界与限制
 
-- backup 默认 flush，仅含落盘数据；一致时间点快照，与 snapshot 读语义一致。
+- **一致性（已实现，与初稿相反）**：backup 默认 flush，仅含落盘数据，但**不是** server 强制的事务一致点时间视图——GC-pause 为 best-effort（可能静默失败，#1119）、各集合各自 flush 时间戳、skipFlush 不 flush，GC/压缩竞态可撕裂。**不可当作 cutover/对账真值**（那才是 snapshot 的保证）。详见 `docs/backup-datasource-design.md` §7。
 - 空段/无 binlog：`num_of_rows == 0` 且无 binlogs 才发射空 `columnGroups`；有行数但无 binlogs 硬失败。
 - 动态字段 `$meta`（**已实现**）：meta 无 `$meta` 记录（默认 backup 无 etcd 访问）时**拒绝读取**并提示 `--backup_index_extra`；有记录则正常保留。
 - 非 L0 且非 StorageV2 段硬失败；L0 段无版本也保留（删除语义）。

@@ -149,9 +149,6 @@ object MilvusOption {
   // points at a binlog-format backup produced by milvus-backup (the directory
   // whose `meta/full_meta.json` holds the collection schema + segment layout).
   val BackupDir = "milvus.backup.dir"
-  // Internal: the already-parsed `full_meta.json` threaded from table init to
-  // the scan planner so the meta is read/parsed once per read.
-  val BackupMetaJson = "milvus.backup.meta.json"
 
   val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode
   // JSON array of StorageV2ManifestItem. Despite the "V2" in the class name,
