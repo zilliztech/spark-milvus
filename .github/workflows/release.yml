@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: spark:4.0.1-scala2.13-java21-python3-ubuntu
+      options: --user root
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Install Git
+        run: |
+          apt-get update
+          apt-get install -y git gnupg zip
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Get milvus-storage commit ID
+        id: milvus-storage
+        run: |
+          echo "commit=$(git -C milvus-storage rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      # 复用 CI 的 native library 缓存
+      - name: Cache native library build
+        id: cache-native
+        uses: actions/cache@v4
+        with:
+          path: |
+            milvus-storage/cpp/build
+            milvus-storage/java/native
+          key: native-${{ steps.milvus-storage.outputs.commit }}
+
+      - name: Cache Conan packages
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: /root/.conan
+          key: conan-${{ steps.milvus-storage.outputs.commit }}
+          restore-keys: |
+            conan-
+
+      - name: Cache ccache
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: /root/.ccache
+          key: ccache-${{ steps.milvus-storage.outputs.commit }}
+          restore-keys: |
+            ccache-
+
+      - name: Cache sbt dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/.sbt
+            /root/.ivy2/cache
+            /root/.cache/coursier
+          key: sbt-${{ hashFiles('build.sbt', 'project/*.sbt', 'project/*.scala') }}
+          restore-keys: |
+            sbt-
+
+      - name: Install build dependencies
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        run: |
+          apt-get install -y g++ gcc make ccache automake autoconf libtool curl wget
+
+      - name: Install CMake
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        run: |
+          wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-x86_64.tar.gz" | tar --strip-components=1 -xz -C /usr/local
+
+      - name: Install sbt
+        run: |
+          curl -fL https://github.com/sbt/sbt/releases/download/v1.11.1/sbt-1.11.1.tgz | tar xz -C /usr/local
+          ln -sf /usr/local/sbt/bin/sbt /usr/local/bin/sbt
+
+      - name: Install Conan
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        run: |
+          pip3 install conan==1.61.0
+          conan profile new default --detect || true
+          conan profile update settings.compiler.libcxx=libstdc++11 default
+          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert || true
+
+      - name: Build milvus-storage native library
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        run: |
+          cd milvus-storage/cpp
+          make build USE_JNI=True WITH_UT=False USE_ASAN=False
+          mkdir -p ../java/native
+          cp build/Release/libmilvus-storage.so ../java/native/
+          cp build/Release/libmilvus-storage-jni.so ../java/native/
+
+      - name: Copy native libraries
+        run: |
+          mkdir -p src/main/resources/native
+          cp milvus-storage/java/native/libmilvus-storage.so src/main/resources/native/
+          cp milvus-storage/java/native/libmilvus-storage-jni.so src/main/resources/native/
+
+      - name: Publish milvus-storage Java binding locally
+        run: |
+          cd milvus-storage/java
+          sbt publishLocal
+
+      - name: Run unit tests
+        run: |
+          sbt 'testOnly \
+            com.zilliz.spark.connector.MilvusOptionTest \
+            com.zilliz.spark.connector.MilvusS3OptionTest \
+            com.zilliz.spark.connector.DataTypeUtilTest \
+            com.zilliz.spark.connector.filter.VectorBruteForceSearchTest \
+            com.zilliz.spark.connector.operations.backfill.BackfillConfigTest \
+            com.zilliz.spark.connector.loon.PropertiesTest \
+            serde.SchemaUtilTest'
+
+      - name: Build assembly JAR
+        run: |
+          VERSION=${{ github.event.release.tag_name }}
+          sbt "set version := \"${VERSION#v}\"" assembly
+
+      - name: Create release archive
+        run: |
+          VERSION=${{ github.event.release.tag_name }}
+          mkdir -p dist
+          cp target/scala-2.13/*.jar dist/
+          cp -r src/main/resources/native dist/
+          cd dist
+          tar -czvf spark-milvus-${VERSION}.tar.gz *.jar native/
+          zip -r spark-milvus-${VERSION}.zip *.jar native/
+
+      - name: Upload release assets to GitHub
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/spark-milvus-*.tar.gz
+            dist/spark-milvus-*.zip
+            dist/*.jar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup GPG for signing
+        env:
+          PGP_SECRET: ${{ secrets.PGP_SECRET }}
+        run: |
+          echo "$PGP_SECRET" | base64 -d | gpg --batch --import
+
+      - name: Setup Sonatype credentials
+        env:
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+        run: |
+          mkdir -p /root/.sbt
+          cat > /root/.sbt/sonatype_central_credentials << EOF
+          host=central.sonatype.com
+          user=$SONATYPE_USERNAME
+          password=$SONATYPE_PASSWORD
+          EOF
+
+      - name: Publish to Maven Central
+        env:
+          PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+        run: |
+          VERSION=${{ github.event.release.tag_name }}
+          # Use sonatypeCentralUpload for Sonatype Central Portal
+          sbt "; set version := \"${VERSION#v}\"; publishSigned; sonatypeCentralUpload"

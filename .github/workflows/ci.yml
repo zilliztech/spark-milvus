@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [ci-workflows]  # for testing cache
+
+jobs:
+  build-and-test:
+    # TODO: Add ARM64 support after milvus-storage updates google-cloud-cpp dependency
+    # ARM64 build fails due to crc32c/1.1.1 compilation error with newer GCC
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: spark:4.0.1-scala2.13-java21-python3-ubuntu
+      options: --user root
+
+    steps:
+      - name: Install Git
+        run: |
+          apt-get update
+          apt-get install -y git
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Get milvus-storage commit ID
+        id: milvus-storage
+        run: |
+          echo "commit=$(git -C milvus-storage rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      # 缓存 native library 编译产物 (按架构区分)
+      - name: Cache native library build
+        id: cache-native
+        uses: actions/cache@v4
+        with:
+          path: |
+            milvus-storage/cpp/build
+            milvus-storage/java/native
+          key: native-${{ matrix.arch }}-${{ steps.milvus-storage.outputs.commit }}
+
+      # 以下缓存仅在需要编译时使用
+      - name: Cache Conan packages
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: /root/.conan
+          key: conan-${{ matrix.arch }}-${{ steps.milvus-storage.outputs.commit }}
+          restore-keys: |
+            conan-
+      - name: Cache ccache
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: /root/.ccache
+          key: ccache-${{ matrix.arch }}-${{ steps.milvus-storage.outputs.commit }}
+          restore-keys: |
+            ccache-
+      - name: Cache sbt dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/.sbt
+            /root/.ivy2/cache
+            /root/.cache/coursier
+          key: sbt-${{ matrix.arch }}-${{ hashFiles('build.sbt', 'project/*.sbt', 'project/*.scala') }}
+          restore-keys: |
+            sbt-
+      - name: Install build dependencies
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        run: |
+          apt-get install -y g++ gcc make ccache automake autoconf libtool curl wget
+
+      - name: Install CMake
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        run: |
+          wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-x86_64.tar.gz" | tar --strip-components=1 -xz -C /usr/local
+
+      - name: Install sbt
+        run: |
+          curl -fL https://github.com/sbt/sbt/releases/download/v1.11.1/sbt-1.11.1.tgz | tar xz -C /usr/local
+          ln -sf /usr/local/sbt/bin/sbt /usr/local/bin/sbt
+
+      - name: Install Conan
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        run: |
+          pip3 install conan==1.61.0
+          conan profile new default --detect || true
+          conan profile update settings.compiler.libcxx=libstdc++11 default
+          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert || true
+
+      - name: Build milvus-storage native library
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        run: |
+          cd milvus-storage/cpp
+          make build USE_JNI=True WITH_UT=False USE_ASAN=False
+          mkdir -p ../java/native
+          cp build/Release/libmilvus-storage.so ../java/native/
+          cp build/Release/libmilvus-storage-jni.so ../java/native/
+
+      - name: Copy native libraries
+        run: |
+          mkdir -p src/main/resources/native
+          cp milvus-storage/java/native/libmilvus-storage.so src/main/resources/native/
+          cp milvus-storage/java/native/libmilvus-storage-jni.so src/main/resources/native/
+
+      - name: Publish milvus-storage Java binding locally
+        run: |
+          cd milvus-storage/java
+          sbt publishLocal
+
+      - name: Compile
+        run: sbt compile
+
+      - name: Run unit tests
+        run: |
+          sbt 'testOnly \
+            com.zilliz.spark.connector.MilvusOptionTest \
+            com.zilliz.spark.connector.MilvusS3OptionTest \
+            com.zilliz.spark.connector.DataTypeUtilTest \
+            com.zilliz.spark.connector.filter.VectorBruteForceSearchTest \
+            com.zilliz.spark.connector.operations.backfill.BackfillConfigTest \
+            com.zilliz.spark.connector.loon.PropertiesTest \
+            serde.SchemaUtilTest'
