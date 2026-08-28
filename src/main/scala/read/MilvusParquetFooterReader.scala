@@ -156,14 +156,7 @@ object MilvusParquetFooterReader extends Logging {
       uri = new URI(path)
       val hadoopPath = new Path(uri)
       fs = hadoopPath.getFileSystem(hadoopConf)
-      val fileStatus = fs.getFileStatus(hadoopPath)
-      val inputFile = new InputFile {
-        override def getLength: Long = fileStatus.getLen
-
-        override def newStream(): org.apache.parquet.io.SeekableInputStream =
-          HadoopStreams.wrap(fs.open(hadoopPath))
-      }
-      Right(read(inputFile))
+      readWithFileSystem(fs, path)(read)
     } catch {
       case NonFatal(e) => Left(e)
     } finally {
@@ -175,6 +168,30 @@ object MilvusParquetFooterReader extends Logging {
           fs.close()
         }
       }
+    }
+  }
+
+  /** Read with a caller-supplied `FileSystem` (reused across many footer reads,
+    * e.g. all binlogs of a backup) instead of resolving a fresh one per file —
+    * with `fs.s3a.impl.disable.cache=true` every `FileSystem.get` otherwise
+    * constructs a whole S3A client + thread pool.
+    */
+  private[read] def readWithFileSystem[T](
+      fs: FileSystem,
+      path: String
+  )(read: InputFile => T): Either[Throwable, T] = {
+    try {
+      val hadoopPath = new Path(path)
+      val fileStatus = fs.getFileStatus(hadoopPath)
+      val inputFile = new InputFile {
+        override def getLength: Long = fileStatus.getLen
+
+        override def newStream(): org.apache.parquet.io.SeekableInputStream =
+          HadoopStreams.wrap(fs.open(hadoopPath))
+      }
+      Right(read(inputFile))
+    } catch {
+      case NonFatal(e) => Left(e)
     }
   }
 
@@ -204,12 +221,28 @@ object MilvusParquetFooterReader extends Logging {
       hadoopConf: Configuration
   ): Either[Throwable, Long] = {
     readWithFileSystem(path, hadoopConf) { inputFile =>
-      val parquet = ParquetFileReader.open(inputFile)
-      try {
-        parquet.getFooter.getBlocks.asScala.map(_.getRowCount).sum
-      } finally {
-        parquet.close()
-      }
+      sumRowGroups(inputFile)
+    }
+  }
+
+  /** [[readRowCount]] with a caller-supplied `FileSystem` (reused across many
+    * files, e.g. all binlogs of a backup read).
+    */
+  def readRowCount(
+      fs: FileSystem,
+      path: String
+  ): Either[Throwable, Long] = {
+    readWithFileSystem(fs, path) { inputFile =>
+      sumRowGroups(inputFile)
+    }
+  }
+
+  private def sumRowGroups(inputFile: InputFile): Long = {
+    val parquet = ParquetFileReader.open(inputFile)
+    try {
+      parquet.getFooter.getBlocks.asScala.map(_.getRowCount).sum
+    } finally {
+      parquet.close()
     }
   }
 
@@ -225,18 +258,35 @@ object MilvusParquetFooterReader extends Logging {
       hadoopConf: Configuration
   ): Either[Throwable, ParquetFooterInfo] = {
     readWithFileSystem(path, hadoopConf) { inputFile =>
-      val parquet = ParquetFileReader.open(inputFile)
-      try {
-        val footer = parquet.getFooter
-        val fieldIds = fieldIdsFromMessageType(
-          footer.getFileMetaData.getSchema,
-          path
-        )
-        val rowCount = footer.getBlocks.asScala.map(_.getRowCount).sum
-        ParquetFooterInfo(fieldIds, rowCount)
-      } finally {
-        parquet.close()
-      }
+      footerInfo(inputFile, path)
+    }
+  }
+
+  /** [[readFieldIdsAndRowCount]] with a caller-supplied `FileSystem`. */
+  def readFieldIdsAndRowCount(
+      fs: FileSystem,
+      path: String
+  ): Either[Throwable, ParquetFooterInfo] = {
+    readWithFileSystem(fs, path) { inputFile =>
+      footerInfo(inputFile, path)
+    }
+  }
+
+  private def footerInfo(
+      inputFile: InputFile,
+      path: String
+  ): ParquetFooterInfo = {
+    val parquet = ParquetFileReader.open(inputFile)
+    try {
+      val footer = parquet.getFooter
+      val fieldIds = fieldIdsFromMessageType(
+        footer.getFileMetaData.getSchema,
+        path
+      )
+      val rowCount = footer.getBlocks.asScala.map(_.getRowCount).sum
+      ParquetFooterInfo(fieldIds, rowCount)
+    } finally {
+      parquet.close()
     }
   }
 

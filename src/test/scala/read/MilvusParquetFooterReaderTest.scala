@@ -229,21 +229,26 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
 
     val conf = new Configuration()
     GroupWriteSupport.setSchema(schema, conf)
+    // parquet-mr only evaluates the row-group size once
+    // recordCount >= DEFAULT_MINIMUM_RECORD_COUNT_FOR_CHECK (100), so with 3
+    // rows a tiny rowGroupSize would never flush and the file would hold one
+    // block. Write enough rows for the check to run and flush multiple groups,
+    // so readRowCount must genuinely sum across them.
+    val totalRows = 150
     val writer = ExampleParquetWriter
       .builder(new HPath(tmp.toUri))
       .withType(schema)
       .withConf(conf)
       .withCompressionCodec(CompressionCodecName.UNCOMPRESSED)
-      // Tiny row-group threshold forces one row group per row, so the test
-      // actually sums across multiple groups (returning only the first block's
-      // count would not yield 3).
       .withRowGroupSize(1)
       .build()
     try {
       val factory = new SimpleGroupFactory(schema)
-      writer.write(factory.newGroup().append("pk", 1L).append("row_id", 10L))
-      writer.write(factory.newGroup().append("pk", 2L).append("row_id", 11L))
-      writer.write(factory.newGroup().append("pk", 3L).append("row_id", 12L))
+      (1 to totalRows).foreach { i =>
+        writer.write(
+          factory.newGroup().append("pk", i.toLong).append("row_id", i.toLong)
+        )
+      }
     } finally {
       writer.close()
     }
@@ -252,7 +257,19 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       MilvusParquetFooterReader.readRowCount(
         tmp.toUri.toString,
         new Configuration()
-      ) shouldBe Right(3L)
+      ) shouldBe Right(totalRows.toLong)
+
+      // Prove the file actually has multiple row groups (a first-block-only
+      // readRowCount would not reach totalRows).
+      val parquet = org.apache.parquet.hadoop.ParquetFileReader.open(
+        org.apache.parquet.hadoop.util.HadoopInputFile
+          .fromPath(new HPath(tmp.toUri), new Configuration())
+      )
+      try {
+        parquet.getFooter.getBlocks.size() should be >= 2
+      } finally {
+        parquet.close()
+      }
     } finally {
       Files.deleteIfExists(tmp)
     }

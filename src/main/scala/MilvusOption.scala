@@ -195,8 +195,11 @@ object MilvusOption {
       .filter(_.nonEmpty)
       .map(_.equalsIgnoreCase("true"))
       .getOrElse {
-        getOption(SnapshotManifests).isDefined ||
-        getOption(SnapshotV2Segments).isDefined
+        // Only a non-empty hint enables snapshot mode: config templates that
+        // keep optional keys with empty values (e.g. milvus.snapshot.manifests="")
+        // must not trip the snapshot/backup mutual-exclusion check.
+        nonEmptyOption(getOption, SnapshotManifests) ||
+        nonEmptyOption(getOption, SnapshotV2Segments)
       }
   }
 

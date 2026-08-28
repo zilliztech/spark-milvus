@@ -437,6 +437,7 @@ object BackupMetaReader extends Logging {
       applyDeletes: Boolean = true,
       collectionId: Long
   ): Either[Throwable, Seq[V2SegmentInfo]] = {
+    var fs: FileSystem = null
     try {
       if (info.isSnapshotFormat) {
         throw new IllegalStateException(
@@ -444,6 +445,10 @@ object BackupMetaReader extends Logging {
             "backups can be read as a datasource"
         )
       }
+      // One FileSystem reused across every segment's footer reads: with
+      // fs.s3a.impl.disable.cache=true, per-file FileSystem.get would otherwise
+      // construct a whole S3A client + thread pool for each binlog.
+      fs = FileSystem.get(new java.net.URI(backupBase(backupDir)), hadoopConf)
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
       info.collectionBackups
         .filter(_.collectionId == collectionId)
@@ -457,7 +462,7 @@ object BackupMetaReader extends Logging {
             SegmentReadPool.submit(
               new Callable[Either[Throwable, Option[V2SegmentInfo]]] {
                 override def call(): Either[Throwable, Option[V2SegmentInfo]] =
-                  buildV2Segment(seg, hadoopConf, backupDir, applyDeletes)
+                  buildV2SegmentWithFs(seg, fs, backupDir, applyDeletes)
               }
             )
           }
@@ -476,10 +481,18 @@ object BackupMetaReader extends Logging {
       Right(out.toSeq)
     } catch {
       case NonFatal(e) => Left(e)
+    } finally {
+      try {
+        if (fs != null) fs.close()
+      } catch {
+        case NonFatal(_) => // close is best-effort; the read result already won
+      }
     }
   }
 
-  /** Convert one backup segment into a `V2SegmentInfo` (or skip it).
+  /** Convert one backup segment into a `V2SegmentInfo` (or skip it), reusing
+    * the caller-supplied `FileSystem` for all footer reads (a backup read opens
+    * one FS for all segments, so per-file S3A client construction is avoided).
     *
     * L0 delete-only segments are handled before any storage-version filtering:
     * Milvus creates them without a `StorageVersion` (0/omitted in the meta), so
@@ -490,9 +503,9 @@ object BackupMetaReader extends Logging {
     *   `Right(Some(seg))` for readable segments; `Left` for unsupported data
     *   segments (fails hard rather than returning a partial dataset).
     */
-  private[read] def buildV2Segment(
+  private[read] def buildV2SegmentWithFs(
       seg: SegmentBackup,
-      hadoopConf: Configuration,
+      fs: FileSystem,
       backupDir: String,
       applyDeletes: Boolean
   ): Either[Throwable, Option[V2SegmentInfo]] = {
@@ -558,8 +571,8 @@ object BackupMetaReader extends Logging {
           // (which live in the parquet schema, not the backup meta) and its row
           // count; the remaining files' row counts are read in parallel.
           val headInfo = MilvusParquetFooterReader.readFieldIdsAndRowCount(
-            hadoopPaths.head,
-            hadoopConf
+            fs,
+            hadoopPaths.head
           ) match {
             case Right(info) => info
             case Left(err) =>
@@ -572,8 +585,8 @@ object BackupMetaReader extends Logging {
           }
           val tailRowCounts = if (hadoopPaths.size > 1) {
             readRowCountsInParallel(
+              fs,
               hadoopPaths.tail,
-              hadoopConf,
               seg.segmentId,
               fieldBinlog.fieldId
             ) match {
@@ -629,6 +642,30 @@ object BackupMetaReader extends Logging {
     }
   }
 
+  /** [[buildV2SegmentWithFs]] opening a fresh `FileSystem` from the config —
+    * for tests / single-segment use. Batch reads should go through
+    * [[toV2Segments]], which opens one `FileSystem` for all segments and reuses
+    * it across every footer read.
+    */
+  private[read] def buildV2Segment(
+      seg: SegmentBackup,
+      hadoopConf: Configuration,
+      backupDir: String,
+      applyDeletes: Boolean
+  ): Either[Throwable, Option[V2SegmentInfo]] = {
+    var fs: FileSystem = null
+    try {
+      fs = FileSystem.get(new java.net.URI(backupBase(backupDir)), hadoopConf)
+      buildV2SegmentWithFs(seg, fs, backupDir, applyDeletes)
+    } finally {
+      try {
+        if (fs != null) fs.close()
+      } catch {
+        case NonFatal(_) => // close is best-effort; the read result already
+      }
+    }
+  }
+
   private def emptyColumnGroupSegment(
       seg: SegmentBackup,
       backupDir: String
@@ -657,10 +694,13 @@ object BackupMetaReader extends Logging {
         )
       )
 
-  /** Read the row count of every path concurrently, preserving input order. */
+  /** Read the row count of every path concurrently, preserving input order. All
+    * reads share the caller-supplied `FileSystem` (thread-safe for concurrent
+    * opens), so no per-file S3A client is constructed.
+    */
   private def readRowCountsInParallel(
+      fs: FileSystem,
       paths: Seq[String],
-      hadoopConf: Configuration,
       segmentId: Long,
       slotFieldId: Long
   ): Either[Throwable, Seq[Long]] = {
@@ -668,7 +708,7 @@ object BackupMetaReader extends Logging {
       val futures = paths.map { p =>
         FooterReadPool.submit(new Callable[Long] {
           override def call(): Long =
-            MilvusParquetFooterReader.readRowCount(p, hadoopConf) match {
+            MilvusParquetFooterReader.readRowCount(fs, p) match {
               case Right(n) => n
               case Left(err) =>
                 throw new RuntimeException(

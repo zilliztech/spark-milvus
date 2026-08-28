@@ -145,14 +145,16 @@ val s3Options = Map(
 
 ### 2.5 Offline Backup Read Parameters
 
-Read a binlog-format milvus-backup export (`milvus-backup create --format binlog`)
-as a DataFrame without any Milvus client connection. See
-`docs/backup-datasource-design.md` for the full design.
+Read a binlog-format milvus-backup export as a DataFrame without any Milvus
+client connection. A plain `milvus-backup create` on released versions
+(v0.5.x) already produces binlog format; the `--format binlog` flag exists
+only on milvus-backup's master branch (which targets Milvus 3.x and defaults
+to snapshot). See `docs/backup-datasource-design.md` for the full design.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `MilvusOption.BackupDir` | String | No | "" | `milvus.backup.dir` — the backup directory, e.g. `s3a://bucket/backup/<name>`. **S3 only** (`s3://` is normalized to `s3a://`); local/`file://` dirs are rejected at planning because the packed reader requires S3. |
-| `MilvusOption.MilvusDatabaseName` | String | No | "" | Database the collection lives in (`"default"` is equivalent to an empty name). Used together with `milvus.collection.name` to select the collection; an ambiguous unqualified name is rejected. |
+| `MilvusOption.MilvusDatabaseName` | String | No | "" | Database the collection lives in. Passing `"default"` selects the default-database collection (matching a meta that records `""` or `"default"`); leaving the option empty performs single-candidate / ambiguity resolution instead — with both `default.orders` and `db2.orders` present, pass `"default"` (or `"db2"`) to disambiguate. |
 | `MilvusOption.MilvusCollectionName` | String | No | - | Collection name inside the backup (matched with the database name, never `.head`). Required when the backup holds more than one collection. |
 | `MilvusOption.ReadApplyDeletes` | Boolean | No | true | `milvus.read.apply.deletes` — apply delete logs (L0/L1) while reading. |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | No | 67108864 | `milvus.snapshot.max.json.bytes` — max size of the backup `full_meta.json`. |

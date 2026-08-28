@@ -500,4 +500,27 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
       Map(MilvusOption.BackupDir -> "s3a://bucket/backup/b1")
     )
   }
+
+  test("empty-valued snapshot hint keys do not enable snapshot mode") {
+    // Config templates keep optional keys with empty values; they must not trip
+    // the snapshot/backup mutual-exclusion check.
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotManifests -> "")
+    ) shouldBe false
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotV2Segments -> "   ")
+    ) shouldBe false
+    MilvusOption.validateBackupModeOptions(
+      Map(
+        MilvusOption.BackupDir -> "s3a://bucket/backup/b1",
+        MilvusOption.SnapshotManifests -> ""
+      )
+    )
+    MilvusOption.validateBackupModeOptions(
+      Map(
+        MilvusOption.BackupDir -> "s3a://bucket/backup/b1",
+        MilvusOption.SnapshotV2Segments -> ""
+      )
+    )
+  }
 }
