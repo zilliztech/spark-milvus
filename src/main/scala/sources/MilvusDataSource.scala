@@ -2813,17 +2813,27 @@ class MilvusScan(
   }
 
   /** Compute the shared partition-scoped L0 delete plans for a backup read from
-    * the parsed meta, independent of partition planning. Returns `Map.empty`
-    * when no deletes apply or the meta/schema cannot be resolved (the planner
-    * would already have failed loudly for those cases).
+    * the parsed meta, independent of partition planning. Falls back to a fresh
+    * meta read when table init did not parse one (e.g. its read failed while
+    * the planner's succeeded), so a marker never silently resolves to an empty
+    * plan. Returns `Map.empty` when no deletes apply or the meta/schema cannot
+    * be resolved.
     */
   private def computeBackupInheritedDeletePlans()
       : Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan] = {
     val backupDir = MilvusOption.backupDir(options).getOrElse {
       return Map.empty
     }
+    val hadoopConf = buildSnapshotHadoopConf(backupDir)
     val meta = preParsedBackupMeta.getOrElse {
-      return Map.empty
+      BackupMetaReader.readMeta(
+        hadoopConf,
+        backupDir,
+        MilvusScan.backupMaxJsonBytes(options)
+      ) match {
+        case Right(m) => m
+        case Left(_)  => return Map.empty
+      }
     }
     val coll = MilvusScan
       .resolveBackupCollection(
@@ -2845,7 +2855,6 @@ class MilvusScan(
     if (l0Segments.isEmpty) {
       Map.empty
     } else {
-      val hadoopConf = buildSnapshotHadoopConf(backupDir)
       MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
         l0Segments,
         pkField,

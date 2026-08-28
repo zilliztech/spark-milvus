@@ -270,6 +270,29 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  test(
+    "backup createReaderFactory falls back to re-reading meta when init did not parse it"
+  ) {
+    // preParsedBackupMeta = None (table init failed but the planner would have
+    // re-read the meta and stamped markers). The factory must not silently hand
+    // an empty plan — it re-reads the meta, and a missing dir degrades to empty
+    // without throwing.
+    val options = new ju.HashMap[String, String]()
+    options.put(MilvusOption.BackupDir, "/tmp/nonexistent-backup-xyz")
+    options.put(MilvusOption.MilvusCollectionName, "demo")
+    val scan = new MilvusScan(
+      StructType(Seq(StructField("RowID", LongType, nullable = false))),
+      new CaseInsensitiveStringMap(options),
+      preParsedBackupMeta = None
+    )
+    val factory = scan.createReaderFactory()
+    assert(
+      factory.isInstanceOf[
+        com.zilliz.spark.connector.read.MilvusPartitionReaderFactory
+      ]
+    )
+  }
+
   test("resolveBackupCollection matches by name and database, never .head") {
     def coll(name: String, id: Long, db: String = "") =
       BackupMetaReader.CollectionBackup(

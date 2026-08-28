@@ -105,14 +105,12 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
             .append("row_id", 10L)
             .append("ts", 100L),
         f =>
-          f.newGroup().append("pk", 2L).append("row_id", 11L).append("ts", 101L)
-      )
-    )
-    writeParquetAt(
-      Paths.get(seg.toString, "103", "2"),
-      groupASchema,
-      List(f =>
-        f.newGroup().append("pk", 3L).append("row_id", 12L).append("ts", 102L)
+          f.newGroup()
+            .append("pk", 2L)
+            .append("row_id", 11L)
+            .append("ts", 101L),
+        f =>
+          f.newGroup().append("pk", 3L).append("row_id", 12L).append("ts", 102L)
       )
     )
     writeParquetAt(
@@ -132,8 +130,14 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       groupAPath: String,
       groupBPath: String,
       groupCPath: String,
-      deltaPath: String
+      deltaPath: String,
+      multiFile: Boolean = true
   ): String = {
+    val groupBBinlog =
+      if (multiFile)
+        """,
+          |                  {"log_path": "$groupBPath", "log_size": 100, "log_id": 2}""".stripMargin
+      else ""
     s"""{
        |  "id": "task-1",
        |  "name": "b1",
@@ -169,13 +173,12 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
        |              "partition_id": 555,
        |              "num_of_rows": 3,
        |              "binlogs": [
-       |                {"fieldID": 103, "binlogs": [
-       |                  {"log_path": "$groupAPath", "log_size": 100, "log_id": 1},
-       |                  {"log_path": "$groupBPath", "log_size": 100, "log_id": 2}
-       |                ]},
-       |                {"fieldID": 101, "binlogs": [
-       |                  {"log_path": "$groupCPath", "log_size": 100, "log_id": 1}
-       |                ]}
+        |                {"fieldID": 103, "binlogs": [
+        |                  {"log_path": "$groupAPath", "log_size": 100, "log_id": 1}$groupBBinlog
+        |                ]},
+        |                {"fieldID": 101, "binlogs": [
+        |                  {"log_path": "$groupCPath", "log_size": 100, "log_id": 1}
+        |                ]}
        |              ],
        |              "deltalogs": [],
        |              "size": 300,
@@ -454,7 +457,8 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
             groupAPath = SourceKeys._1,
             groupBPath = SourceKeys._2,
             groupCPath = SourceKeys._3,
-            deltaPath = SourceKeys._4
+            deltaPath = SourceKeys._4,
+            multiFile = false
           )
         )
         .getOrElse(fail("expected Right"))
@@ -475,10 +479,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       val slot103 = seg.columnGroups.find(_.slotFieldId == 103L).get
       slot103.fieldIds shouldBe Seq(100L, 0L, 1L)
       slot103.filePaths shouldBe Seq(
-        s"$backupDir/binlogs/insert_log/444/555/777/777/103/1",
-        s"$backupDir/binlogs/insert_log/444/555/777/777/103/2"
+        s"$backupDir/binlogs/insert_log/444/555/777/777/103/1"
       )
-      slot103.fileRowCounts shouldBe Seq(2L, 1L)
+      slot103.fileRowCounts shouldBe Seq(3L)
 
       val slot101 = seg.columnGroups.find(_.slotFieldId == 101L).get
       slot101.fieldIds shouldBe Seq(101L)
@@ -508,7 +511,8 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
             groupAPath = SourceKeys._1,
             groupBPath = SourceKeys._2,
             groupCPath = SourceKeys._3,
-            deltaPath = SourceKeys._4
+            deltaPath = SourceKeys._4,
+            multiFile = false
           )
         )
         .getOrElse(fail("expected Right"))
@@ -553,7 +557,8 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
             groupAPath = SourceKeys._1,
             groupBPath = SourceKeys._2,
             groupCPath = SourceKeys._3,
-            deltaPath = SourceKeys._4
+            deltaPath = SourceKeys._4,
+            multiFile = false
           )
         )
         .getOrElse(fail("expected Right"))
@@ -570,6 +575,31 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     } finally {
       deleteRecursively(dir)
     }
+  }
+
+  test(
+    "toV2Segments rejects multi-file column groups (milvus-storage bug)"
+  ) {
+    val meta = BackupMetaReader
+      .parse(
+        backupFixture(
+          groupAPath = SourceKeys._1,
+          groupBPath = SourceKeys._2,
+          groupCPath = SourceKeys._3,
+          deltaPath = SourceKeys._4
+        )
+      )
+      .getOrElse(fail("expected Right"))
+    val result = BackupMetaReader.toV2Segments(
+      meta,
+      new Configuration(),
+      "/tmp/backup",
+      collectionId = 444L
+    )
+    result.isLeft shouldBe true
+    result.left.toOption.get.getMessage should include(
+      "multi-file column groups"
+    )
   }
 
   test(

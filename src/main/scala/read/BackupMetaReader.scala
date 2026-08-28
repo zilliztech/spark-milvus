@@ -381,25 +381,11 @@ object BackupMetaReader extends Logging {
     math.max(2, math.min(cores, 8))
   }
 
-  /** Bounded, daemon thread pool for per-file parquet footer reads on the
-    * driver (a HEAD + one tail range GET each). Footer reads are I/O-bound, so
-    * fanning them out avoids a serialized round trip per binlog before any
-    * Spark task is scheduled.
-    *
-    * The inner tail-file reads run on their own pool, separate from
-    * [[SegmentReadPool]], so a segment worker blocked on `Future.get()` for its
-    * tail reads can never starve those reads of threads (a single shared pool
-    * would deadlock when every worker waits on tasks that are queued behind
-    * it).
-    */
-  private val FooterReadPool: ExecutorService = Executors.newFixedThreadPool(
-    FooterReadThreadCount,
-    daemonThreadFactory("backup-footer-read")
-  )
-
   /** Bounded, daemon thread pool for segment-level conversion (each segment's
-    * footer reads are independent). See [[FooterReadPool]] for the deadlock
-    * rationale for keeping this separate from the per-file pool.
+    * footer reads are independent). Only column groups with a single binlog
+    * file are supported, so each segment does one footer read per column group
+    * and cross-segment parallelism is what keeps a large backup from stalling
+    * the driver.
     */
   private val SegmentReadPool: ExecutorService = Executors.newFixedThreadPool(
     FooterReadThreadCount,
@@ -582,6 +568,22 @@ object BackupMetaReader extends Logging {
             )
           }
           val sorted = fieldBinlog.binlogs.sortBy(_.logId)
+          // Guard: a column group spanning multiple binlog files is rejected.
+          // milvus-storage's BuildLoonColumnGroups encodes per-file row counts
+          // as group-cumulative ranges, which the packed reader intersects
+          // against each file's own zero-based row-group offsets, so file i > 0
+          // is silently truncated (zero rows when earlier files are at least as
+          // large). Refuse loudly rather than return a short DataFrame; the fix
+          // belongs in milvus-storage (per-file, not cumulative, indices).
+          if (sorted.size > 1) {
+            throw new IllegalStateException(
+              s"backup segment ${seg.segmentId} has a column group (slot " +
+                s"${fieldBinlog.fieldId}) spanning ${sorted.size} binlog files; " +
+                "multi-file column groups are unsupported until " +
+                "milvus-storage BuildLoonColumnGroups is fixed (per-file, not " +
+                "group-cumulative, row ranges)"
+            )
+          }
           // Hadoop-qualified paths for the footer reads; the native reader
           // gets bucket-relative keys in `filePaths`.
           val hadoopPaths = sorted.map(b =>
@@ -590,9 +592,9 @@ object BackupMetaReader extends Logging {
           val nativePaths = sorted.map(b =>
             nativeInsertLogPath(backupDir, seg, fieldBinlog.fieldId, b.logId)
           )
-          // The head file's footer is read once for both the real field IDs
+          // The (single) file's footer is read once for both the real field IDs
           // (which live in the parquet schema, not the backup meta) and its row
-          // count; the remaining files' row counts are read in parallel.
+          // count.
           val headInfo = MilvusParquetFooterReader.readFieldIdsAndRowCount(
             fs,
             hadoopPaths.head
@@ -606,27 +608,10 @@ object BackupMetaReader extends Logging {
                 err
               )
           }
-          val tailRowCounts = if (hadoopPaths.size > 1) {
-            readRowCountsInParallel(
-              fs,
-              hadoopPaths.tail,
-              seg.segmentId,
-              fieldBinlog.fieldId
-            ) match {
-              case Right(counts) => counts
-              case Left(err)     => throw err
-            }
-          } else Seq.empty
           V2ColumnGroup(
             fieldIds = headInfo.fieldIds,
             filePaths = nativePaths,
-            // NOTE: per-file row counts (the packed reader derives per-file
-            // [0, rc_i) ranges). A KNOWN milvus-storage bug
-            // (BuildLoonColumnGroups, v2_column_groups_builder.cpp) treats these
-            // as group-cumulative, so a column group spanning MULTIPLE binlog
-            // files reads short (file i>0 truncated) until that is fixed and
-            // the submodule is bumped. Single-file groups are unaffected.
-            fileRowCounts = headInfo.rowCount +: tailRowCounts,
+            fileRowCounts = Seq(headInfo.rowCount),
             slotFieldId = fieldBinlog.fieldId
           )
         }
@@ -734,38 +719,6 @@ object BackupMetaReader extends Logging {
       .flatMap(_.allSegments)
       .filter(seg => seg.isL0 && seg.deltalogs.exists(_.binlogs.nonEmpty))
       .map(seg => emptyColumnGroupSegment(seg, backupDir))
-
-  /** Read the row count of every path concurrently, preserving input order. All
-    * reads share the caller-supplied `FileSystem` (thread-safe for concurrent
-    * opens), so no per-file S3A client is constructed.
-    */
-  private def readRowCountsInParallel(
-      fs: FileSystem,
-      paths: Seq[String],
-      segmentId: Long,
-      slotFieldId: Long
-  ): Either[Throwable, Seq[Long]] = {
-    try {
-      val futures = paths.map { p =>
-        FooterReadPool.submit(new Callable[Long] {
-          override def call(): Long =
-            MilvusParquetFooterReader.readRowCount(fs, p) match {
-              case Right(n) => n
-              case Left(err) =>
-                throw new RuntimeException(
-                  s"failed to read row count from parquet $p " +
-                    s"(backup segment $segmentId, slot $slotFieldId): " +
-                    s"${err.getMessage}",
-                  err
-                )
-            }
-        })
-      }
-      Right(futures.map(_.get()))
-    } catch {
-      case NonFatal(e) => Left(e)
-    }
-  }
 
   // -------------------------------------------------------------------------
   // Backup path reconstruction

@@ -203,7 +203,9 @@ Behavior:
   the shared L0 delete plan **independently from the parsed meta** (not as a
   planning side effect), so a delete-heavy backup is not materialized once per
   segment (O(S×D)) and delete handling does not depend on Spark evaluating
-  partitions first.
+  partitions first. If table init did not parse the meta (e.g. its read failed
+  while the planner's succeeded), the factory falls back to a fresh meta read
+  rather than silently resolving every marker to an empty plan.
 - Shared `buildSnapshotPartitions` dedups each segment's column groups by slot
   (`V2SegmentInfo.dedupColumnGroupsBySlot`) so a field carried by an old
   multi-field group and a newer single-field group (add-field + backfill) is
@@ -261,17 +263,18 @@ Behavior:
   Seq.empty` and are skipped during partition planning. A StorageV2 data
   segment with rows but no binlogs fails hard rather than silently dropping
   rows.
-- **Known external bug — multi-file column groups read short.** The connector
+- **Known external bug — multi-file column groups rejected.** The connector
   feeds per-file row counts to `MilvusStorageColumnGroups.createFromGroups`,
   but milvus-storage's `BuildLoonColumnGroups` (`v2_column_groups_builder.cpp`)
   writes them as group-cumulative `start_index`/`end_index` while
   `ColumnGroupReaderImpl::open` intersects them against per-file row-group
-  offsets, so a column group spanning more than one binlog file returns fewer
-  rows (file `i > 0` truncated, zero when earlier files are at least as large).
-  This also affects the snapshot/backfill read path (they share
-  `createFromGroups`). The fix belongs in milvus-storage (per-file, not
-  cumulative, indices) plus a submodule bump — tracked as a separate task, not
-  in this PR.
+  offsets, so a column group spanning more than one binlog file would return
+  fewer rows (file `i > 0` truncated, zero when earlier files are at least as
+  large). Rather than silently read short, the backup planner **rejects any
+  column group with more than one file** (`buildV2SegmentWithFs`); the fix
+  belongs in milvus-storage (per-file, not cumulative, indices) plus a
+  submodule bump, after which the guard can be removed. The snapshot/backfill
+  path shares `createFromGroups` and is affected by the same bug.
 - Dynamic collections: a default backup (no etcd access) does not record the
   `$meta` field, so reading it would return null `$meta` rows; such backups are
   rejected with a pointer to `--backup_index_extra` (requires milvus-backup
