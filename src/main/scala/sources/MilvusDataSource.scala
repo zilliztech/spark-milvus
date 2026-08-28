@@ -2363,9 +2363,23 @@ class MilvusScan(
 
     // Dedup column groups by slot so a field carried by both an old multi-field
     // group and a newer single-field group (add-field + backfill) is read from
-    // the newest owner, not whichever the native reader picks.
-    val packedV2Partitions = v2Segments
-      .map(_.dedupColumnGroupsBySlot)
+    // the newest owner, not whichever the native reader picks. This changes
+    // which parquet a field is read from on every read path, so log loudly
+    // whenever it actually re-attributes a field — a silent mis-attribute would
+    // otherwise surface as stale/null values with no explanation.
+    val packedV2Segments = v2Segments.map { seg =>
+      val deduped = seg.dedupColumnGroupsBySlot
+      if (deduped.columnGroups != seg.columnGroups) {
+        logWarning(
+          s"V2 slot dedup re-attributed fields for segment ${seg.segmentId}: " +
+            "overlapping fields are now read from their max-slot group. This " +
+            "assumes slot ids grow with write time; if they do not, the read " +
+            "may return an older group's values."
+        )
+      }
+      deduped
+    }
+    val packedV2Partitions = packedV2Segments
       .filter(_.columnGroups.nonEmpty)
       .map { seg =>
         val ownDeletePlan = v2DeletePlans.getOrElse(

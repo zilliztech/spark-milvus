@@ -155,7 +155,7 @@ val s3Options = Map(
 | `MilvusOption.ReadApplyDeletes` | Boolean | 否 | true | `milvus.read.apply.deletes` — 读取时应用删除日志（L0/L1）。 |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | 否 | 67108864 | `milvus.snapshot.max.json.bytes` — backup `full_meta.json` 大小上限。 |
 
-读取 schema 需通过 `.schema()` 提供，或从备份 meta 推导；未提供 `.schema()` 且 meta 读取失败时读取硬失败。S3 凭证复用现有 `fs.*` 选项（`fs.address`、`fs.access_key_id`、`fs.access_key_value` ...）；桶取自 `milvus.backup.dir` URI。
+读取 schema 需通过 `.schema()` 提供，或从备份 meta 推导；未提供 `.schema()` 且 meta 读取失败时读取硬失败。读取动态集合（`enable_dynamic_field=true`）要求备份 meta 记录 `$meta` 字段——仅当 milvus-backup 带 etcd 访问（`--backup_index_extra`）且 **≥ v0.5.13** 时才捕获。S3 凭证复用现有 `fs.*` 选项（`fs.address`、`fs.access_key_id`、`fs.access_key_value` ...）；桶取自 `milvus.backup.dir` URI。
 
 ## 3. 使用示例
 

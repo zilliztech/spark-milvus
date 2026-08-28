@@ -9,8 +9,9 @@
 Milvus 2.6 deployments that cannot use the server snapshot feature (or that want
 a fully offline, client-free read path) currently have no way to read data
 through the connector without a live Proxy connection. `milvus-backup create`
-already produces a byte-identical, point-in-time copy of the flushed binlogs,
-but the connector had no way to consume it.
+already produces a copy of the flushed binlogs (byte-identical objects at a
+per-collection flush boundary; see the consistency caveat in §7), but the
+connector had no way to consume it.
 
 This change adds a **backup datasource mode**: point the connector at a
 binlog-format milvus-backup export and read it as a Spark DataFrame with the
@@ -28,7 +29,12 @@ required.
   snapshot reads (`milvus.read.apply.deletes`).
 - Reuse the existing StorageV2 packed read path (`MilvusPackedV2PartitionReader`
   + the milvus-storage JNI reader) unchanged.
-- **No changes to milvus-backup**: existing exports work as-is.
+- **No changes to milvus-backup**: existing binlog-format exports work as-is.
+  One caveat: a dynamic collection (`enable_dynamic_field=true`) requires the
+  backup meta to record the `$meta` field, which milvus-backup only captures
+  with etcd access (`--backup_index_extra`) and **v0.5.13+** (on v0.5.10–v0.5.12
+  the flag does not capture `$meta`); such backups are rejected with that
+  guidance.
 
 **Out of scope**
 
@@ -44,7 +50,7 @@ milvus-backup's meta records only `log_size` per binlog, not `entries_num`
 derive the `(start_index, end_index)` ranges for each file; missing or wrong
 counts are rejected or silently mis-read. **Approach A**: recover each file's
 row count by reading its parquet footer at planning time. This requires no
-backup-side changes and works on any existing export.
+backup-side changes and works on any existing binlog-format export.
 
 ## 2. Verified Key Facts
 
@@ -236,15 +242,24 @@ Behavior:
 
 ## 7. Edge Cases & Limitations
 
-- Backups default to a flush, so only disk-resident (flushed) data is read — a
-  consistent point-in-time copy, same constraint as snapshot reads.
+- **Consistency caveat (differs from a server snapshot).** A backup's binlog
+  flow is flush → segment enumeration → per-object copy. The flush is
+  best-effort per the chosen strategy: `serialFlushPlan` seals each collection
+  at its own timestamp, `skipFlushPlan` omits the flush, and the GC pause that
+  protects against a sweep/compaction between enumeration and copy is an
+  advisory that may fail silently (zilliztech/milvus-backup#1119). So only
+  disk-resident (flushed) data is read, but a backup is **not** a
+  server-enforced, transactionally consistent point-in-time view across the
+  whole backup — a GC/compaction race can tear it. Do not treat it as a
+  cutover/snapshot source of truth; that guarantee is the server snapshot's.
 - Empty segments (`num_of_rows == 0`, no binlogs) emit `columnGroups =
   Seq.empty` and are skipped during partition planning. A StorageV2 data
   segment with rows but no binlogs fails hard rather than silently dropping
   rows.
 - Dynamic collections: a default backup (no etcd access) does not record the
   `$meta` field, so reading it would return null `$meta` rows; such backups are
-  rejected with a pointer to `--backup_index_extra`.
+  rejected with a pointer to `--backup_index_extra` (requires milvus-backup
+  v0.5.13+ to capture `$meta`).
 - `milvus.partition.name` / `milvus.partition.id` / `milvus.segment.id`
   selectors are rejected (not yet supported); read the whole backup and filter
   in Spark.

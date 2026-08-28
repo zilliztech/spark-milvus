@@ -336,8 +336,10 @@ object BackupMetaReader extends Logging {
     if (schema.enableDynamicField && !schema.fields.exists(_.name == "$meta")) {
       throw new IllegalArgumentException(
         s"backup collection '${schema.name}' has enable_dynamic_field=true but " +
-          "its meta does not record the '$meta' field; create the backup with " +
-          "etcd access (--backup_index_extra) so the dynamic field schema is captured"
+          "its meta does not record the '$meta' field; re-create the backup " +
+          "with etcd access so the dynamic field schema is captured " +
+          "(--backup_index_extra requires milvus-backup >= v0.5.13; on " +
+          "v0.5.10-v0.5.12 the flag does not capture $meta)"
       )
     }
   }

@@ -161,7 +161,10 @@ to snapshot). See `docs/backup-datasource-design.md` for the full design.
 
 The Spark read schema must be provided via `.schema()` or is derived from the
 backup meta; without `.schema()` the read fails loudly if the meta cannot be
-read. S3 credentials use the existing `fs.*` options (`fs.address`,
+read. Reading a dynamic collection (`enable_dynamic_field=true`) requires the
+backup meta to record the `$meta` field — captured only with milvus-backup
+etcd access (`--backup_index_extra`) and **v0.5.13+**. S3 credentials use the
+existing `fs.*` options (`fs.address`,
 `fs.access_key_id`, `fs.access_key_value`, ...); the bucket comes from the
 `milvus.backup.dir` URI.
 
