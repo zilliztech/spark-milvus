@@ -1,64 +1,81 @@
-# 实现计划：milvus-backup 作为 Milvus 读数据源（spark-milvus）
+# Implementation Plan — milvus-backup as a Milvus Read Data Source (spark-milvus)
 
-> **⚠️ 已废弃 / SUPERSEDED**：本文件是**首个提交**时的实现计划，此后 11 轮 review 修正了大量设计（路径重建、L0/storage_version 处理、非 S3 拒绝、collection 匹配、meta 单次解析、**一致性语义**、动态字段最低版本等），本文多处已与实现**相反**。
-> **请以 [`docs/backup-datasource-design.md`](backup-datasource-design.md)（英文、持续更新、已实现）为准。** 尤其不要按本文件 §5 的"直接解析 `log_path` / 不做 groupID 反推"实现——`log_path` 是原始 Milvus 源 key，照做会把读打到源集群对象路径上。
+> **⚠️ SUPERSEDED**: This file is the implementation plan from the **first commit**. Eleven
+> subsequent review rounds corrected large parts of the design (path reconstruction,
+> L0/storage_version handling, non-S3 rejection, collection matching, single meta parse,
+> **consistency semantics**, dynamic-field minimum version, and more); much of this document
+> now contradicts the implementation.
+> **Please treat [`docs/backup-datasource-design.md`](backup-datasource-design.md) (English,
+> continuously updated, implemented) as authoritative.** In particular, do NOT implement
+> §5's "parse `log_path` directly / no groupID reverse-engineering" — `log_path` is the
+> original Milvus source key; following it would point reads at the source cluster's objects.
 
-## 1. 背景与目标
+## 1. Background & Goals
 
-**场景**：Milvus 2.6，无 snapshot 可用。希望用 `milvus-backup create` 的产物（binlog 格式备份）作为 spark-milvus 的只读数据源，替代 client / snapshot 读，提供一致的离线读能力。
+**Scenario**: Milvus 2.6 with no snapshot available. Use `milvus-backup create`'s output
+(a binlog-format backup) as a read-only data source for spark-milvus, in place of the client /
+snapshot read, providing an offline read capability.
 
-**目标**：
-- 输入：一个 backup 目录（`milvus.backup.dir`，形如 `s3a://bucket/backup/<name>` 或本地路径）。
-- 输出：Spark DataFrame，支持列裁剪、`milvus.extra.columns`（partition / `$segment_id` / `$row_offset`）、删除语义（apply deletes）。
-- 完全复用现有 StorageV2 packed read 栈（`MilvusPackedV2PartitionReader` + milvus-storage JNI），**不改 milvus-backup**。
-- **排除**：StorageV3(loon manifest) 段、写入/回填、client snapshot 快路径。
+**Goals**:
+- Input: an S3 backup directory (`milvus.backup.dir`, e.g. `s3a://bucket/backup/<name>`).
+  Local / `file://` dirs are exercised by the meta/footer mapping layer and unit tests only;
+  actual reads require S3 (see §7).
+- Output: a Spark DataFrame with column pruning, `milvus.extra.columns` (partition /
+  `$segment_id` / `$row_offset`), and delete semantics (apply deletes).
+- Reuse the existing StorageV2 packed read stack (`MilvusPackedV2PartitionReader` +
+  milvus-storage JNI) — **no changes to milvus-backup**.
+- **Excluded**: StorageV3 (loon manifest) segments, write/backfill, the client snapshot fast path.
 
-**核心缺口与方案**：backup meta 的 `Binlog` 只写 `log_path/log_size/log_id`，`entries_num`（每文件行数）未填充；而 packed 读要求精确的 `fileRowCounts`（累加出 `(start_index,end_index)`，缺失即拒/错读）。**方案 A：连接器读各 parquet footer 的总行数补齐**，对现有 backup 零改动。
+**Core gap & approach**: backup meta's `Binlog` only records `log_path/log_size/log_id`;
+`entries_num` (per-file row count) is not populated. The packed read requires exact
+`fileRowCounts` (cumulatively forming `(start_index,end_index)`; missing values are rejected /
+mis-read). **Approach A: recover each file's row count by reading its parquet footer** —
+zero changes to existing backups.
 
-## 2. 关键事实（已核实）
+## 2. Verified Key Facts
 
-| 事实 | 出处 |
+| Fact | Source |
 |---|---|
-| backup 的 binlog 对象与 Milvus 存储逐字节一致 | `milvus-backup/core/backup/coll_dml_task.go:511-546`（CopyObjectsTask 原样复制） |
-| backup 布局 `binlogs/insert_log/{coll}/{part}/{groupID}/{seg}/{field}/{log}`；`groupID` 为虚拟 partition，仅 restore 用 | `milvus-backup/internal/storage/mpath/path.go:17-26, 288-297` |
-| 完整 meta 在 `meta/full_meta.json`（schema + partitions + segments + L0） | `milvus-backup/internal/meta/meta.go:129-139`；`meta_builder.go:327-337` |
-| `SegmentBackupInfo`：id / `num_of_rows` / `storage_version` / `group_id` / `is_l0` / `binlogs` / `deltalogs` | `milvus-backup/core/proto/backup.proto:102-120` |
-| `Binlog` 仅填 `log_path/log_size/log_id`，`entries_num` 字段存在但 deprecate 未填充 | `backup.proto:494-501`；`coll_dml_task.go:101,131` |
-| packed 读要求 `fileRowCounts` 精确 | `src/main/scala/read/MilvusPackedV2PartitionReader.scala:253-260`；`milvus-storage/cpp/include/milvus-storage/ffi_internal/v2_column_groups_builder.h:35-43` |
-| 真实 field ID 可从 parquet 自带 schema 的 `PARQUET:field_id` 恢复 | `src/main/scala/read/MilvusParquetFooterReader.readFieldIdsFromSchema` |
-| delta log 解码只用 `logPath`，`entriesNum` 不参与 | `src/main/scala/read/MilvusDeltaLogReader.scala:127-145` |
-| L0 段无 column groups、只有 delta log → inherited partition 级 delete plan | `src/main/scala/sources/MilvusDataSource.scala:1628-1662, 2269-2303` |
+| Backup binlog objects are byte-identical to Milvus storage objects | `milvus-backup/core/backup/coll_dml_task.go:511-546` (CopyObjectsTask copies as-is) |
+| Backup layout `binlogs/insert_log/{coll}/{part}/{groupID}/{seg}/{field}/{log}`; `groupID` is a virtual partition, restore-only | `milvus-backup/internal/storage/mpath/path.go:17-26, 288-297` |
+| Full meta in `meta/full_meta.json` (schema + partitions + segments + L0) | `milvus-backup/internal/meta/meta.go:129-139`; `meta_builder.go:327-337` |
+| `SegmentBackupInfo`: id / `num_of_rows` / `storage_version` / `group_id` / `is_l0` / `binlogs` / `deltalogs` | `milvus-backup/core/proto/backup.proto:102-120` |
+| `Binlog` only records `log_path/log_size/log_id`; `entries_num` exists but is deprecated/unset | `backup.proto:494-501`; `coll_dml_task.go:101,131` |
+| Packed read requires exact `fileRowCounts` | `src/main/scala/read/MilvusPackedV2PartitionReader.scala:253-260`; `milvus-storage/cpp/include/milvus-storage/ffi_internal/v2_column_groups_builder.h:35-43` |
+| Real field IDs recoverable from the parquet's own schema `PARQUET:field_id` | `src/main/scala/read/MilvusParquetFooterReader.readFieldIdsFromSchema` |
+| Delta-log decoding uses only `logPath`; `entriesNum` unused | `src/main/scala/read/MilvusDeltaLogReader.scala:127-145` |
+| L0 segments have no column groups, only delta logs → inherited partition-level delete plan | `src/main/scala/sources/MilvusDataSource.scala:1628-1662, 2269-2303` |
 
-## 3. 总体设计
+## 3. Overall Design
 
-新增 **backup 离线模式**，与 snapshot 模式平级：
+Add a **backup offline mode**, parallel to snapshot mode:
 
 ```
 MilvusDataSource / MilvusTable  isBackupMode? ─┐
                                               ▼
 MilvusScan.computeInputPartitions ──> planInputPartitionsFromBackup()
-                                              │  用 BackupMetaReader 产出
+                                              │   produced via BackupMetaReader
                                               ▼
                            (schemaBytes, Seq[V2SegmentInfo])
-                                              │  复用
+                                              │   reuse
                                               ▼
                     buildSnapshotPartitions() → MilvusPackedV2InputPartition[]
                                               │
-              createReaderFactory() → MilvusPackedV2PartitionReader（不变）
+              createReaderFactory() → MilvusPackedV2PartitionReader (unchanged)
 ```
 
-分支优先级：`isSnapshotMode` > `isBackupMode` > client。
+Branch precedence: `isSnapshotMode` > `isBackupMode` > client.
 
-## 4. 改动文件清单
+## 4. Changed Files
 
 ### 4.1 `src/main/scala/MilvusOption.scala`
-- 新增 `MilvusOption.BackupDir = "milvus.backup.dir"`。
-- 新增 `isBackupMode(options)`：`BackupDir` 非空即开启。
-- `MilvusDataSource.getTable/inferSchema`：backup 模式下允许无 `milvus.uri`；`validateSnapshotModeOptions` 处新增 snapshot/backup 互斥校验。
-- S3 配置复用现有 `fs.*` / `s3.*`。
+- New `MilvusOption.BackupDir = "milvus.backup.dir"`.
+- New `isBackupMode(options)`: enabled when `BackupDir` is non-empty.
+- `MilvusDataSource.getTable/inferSchema`: allow backup mode without `milvus.uri`; add snapshot/backup mutual-exclusion validation at `validateSnapshotModeOptions`.
+- S3 config reuses existing `fs.*` / `s3.*`.
 
-### 4.2 新增 `src/main/scala/read/BackupMetaReader.scala`（核心）
-Jackson 解析 backup `full_meta.json`（仿 `MilvusSnapshotReader`），对外：
+### 4.2 New `src/main/scala/read/BackupMetaReader.scala` (core)
+Parses backup `full_meta.json` with Jackson (mirroring `MilvusSnapshotReader`):
 ```scala
 object BackupMetaReader {
   def readMeta(hadoopConf: Configuration, backupDir: String,
@@ -68,36 +85,45 @@ object BackupMetaReader {
                    applyDeletes: Boolean, collectionId: Long): Either[Throwable, Seq[V2SegmentInfo]]
 }
 ```
-内嵌 JSON 模型：`BackupInfo`、`CollectionBackupInfo`、`PartitionBackupInfo`、`SegmentBackupInfo`、`FieldBinlog`、`Binlog`、`CollectionSchema`/`FieldSchema`（镜像 schemapb，含 `type_params`、`data_type`、`is_primary_key`、`element_type`、`is_dynamic`、`nullable` 等）。
+Embedded JSON model: `BackupInfo`, `CollectionBackupInfo`, `PartitionBackupInfo`,
+`SegmentBackupInfo`, `FieldBinlog`, `Binlog`, `CollectionSchema`/`FieldSchema` (a mirror of
+schemapb, including `type_params`, `data_type`, `is_primary_key`, `element_type`, `is_dynamic`,
+`nullable`, etc.).
 
 ### 4.3 `src/main/scala/read/MilvusParquetFooterReader.scala`
-- 新增 `readRowCount(path, hadoopConf): Either[Throwable, Long]`：`ParquetFileReader.getFooter.getBlocks` 求和（每文件总行数），复用现有 `readWithFileSystem`。
+- New `readRowCount(path, hadoopConf): Either[Throwable, Long]`: sums
+  `ParquetFileReader.getFooter.getBlocks` (per-file total row count), reusing the existing
+  `readWithFileSystem`.
 
 ### 4.4 `src/main/scala/sources/MilvusDataSource.scala`
-- `MilvusTable.isBackupMode` → `initFromBackup()`（跳过 client，schema 由 `BackupMetaReader` 或用户 `.schema()` 提供）。
-- `MilvusScan.planInputPartitionsFromBackup()`：
-  1. 构建 backup bucket hadoop conf（复用 `buildSnapshotHadoopConf`）。
-  2. `BackupMetaReader.readMeta` → schema bytes + `V2SegmentInfo`。
-  3. 复用 `loadV2DeletePlans`（L1 段）与 `loadPartitionScopedDeletePlans`（L0 段）。
-  4. 调用现有 `buildSnapshotPartitions(v2Segments=..., v2DeletePlans=...)`。
+- `MilvusTable.isBackupMode` → `initFromBackup()` (skips the client; schema from
+  `BackupMetaReader` or the user's `.schema()`).
+- `MilvusScan.planInputPartitionsFromBackup()`:
+  1. Build the backup-bucket Hadoop conf (reuse `buildSnapshotHadoopConf`).
+  2. `BackupMetaReader.readMeta` → schema bytes + `V2SegmentInfo`.
+  3. Reuse `loadV2DeletePlans` (L1 segments) and `loadPartitionScopedDeletePlans` (L0 segments).
+  4. Call the existing `buildSnapshotPartitions(v2Segments=..., v2DeletePlans=...)`.
 
-## 5. 数据映射（`full_meta.json → V2SegmentInfo`）
+## 5. Data Mapping (`full_meta.json → V2SegmentInfo`)
 
-| `V2SegmentInfo` | 来源 | 备注 |
+| `V2SegmentInfo` | Source | Notes |
 |---|---|---|
 | `segmentId` | `SegmentBackupInfo.segment_id` | |
-| `partitionId` | `.partition_id` | part=-1 保留（L0/全分区） |
+| `partitionId` | `.partition_id` | part=-1 preserved (L0 / all-partition) |
 | `numOfRows` | `.num_of_rows` | |
-| `storageVersion` | `.storage_version` | **已实现**：L0 段（无版本/`0`）在版本过滤前处理；非 L0 非 V2 一律硬失败（`0`/absent 即 StorageV1） |
-| `columnGroups` | `.binlogs[]` 按 `field_id`(slot) 分组 | slot 即目录名 |
-| `cg.fieldIds` | 每组首个文件 `readFieldIdsAndRowCount` | 单次打开同时取 fieldIDs 与行数 |
-| `cg.filePaths` | **已实现：从 `backupDir`+IDs 重建**（见下），绝不使用 meta 的 `log_path` | 原生 reader 用 bucket 相对 key；Hadoop 读用带 scheme URI |
-| `cg.fileRowCounts` | 首文件合并读取 + 其余并行 `readRowCount` | **方案 A 补齐**；`size==paths.size` 校验 |
-| `cg.slotFieldId` | 组的 `field_id` | 读路径按 slot 去重（`dedupColumnGroupsBySlot`） |
-| `deltaLogs` | **已实现：从 `backupDir`+IDs 重建**；`partitionId != -1` 含 group 层级 | `entriesNum=0`（解码不使用） |
-| L0 段 | `is_l0=true` → `columnGroups=Seq.empty` + deltaLogs | 走 inherited plan |
+| `storageVersion` | `.storage_version` | **Implemented**: L0 (no version / `0`) handled before the version filter; non-L0 non-V2 fails hard (`0`/absent = StorageV1) |
+| `columnGroups` | `.binlogs[]` grouped by `field_id` (slot) | slot = directory name |
+| `cg.fieldIds` | head file of each group via `readFieldIdsAndRowCount` | a single open yields fieldIDs + row count |
+| `cg.filePaths` | **Implemented: reconstructed from `backupDir`+IDs** (below); never the meta `log_path` | native reader uses bucket-relative keys; Hadoop reads use scheme-qualified URIs |
+| `cg.fileRowCounts` | head file combined read + remaining in parallel `readRowCount` | **Approach A gap-closer**; `size==paths.size` enforced |
+| `cg.slotFieldId` | group's `field_id` | read path dedups by slot (`dedupColumnGroupsBySlot`) |
+| `deltaLogs` | **Implemented: reconstructed from `backupDir`+IDs**; `partitionId != -1` carries the group level | `entriesNum=0` (unused by the decoder) |
+| L0 segment | `is_l0=true` → `columnGroups=Seq.empty` + deltaLogs | inherited delete-plan path |
 
-路径解析（**已实现**，与初稿相反）：meta 的 `log_path` 是原始 Milvus 源 key，**不能直接解析**。备份对象路径按 milvus-backup 的 `DestKey` 布局从 `backupDir` + collection/partition/group/segment/field/log ID **重建**：
+Path resolution (**implemented**, opposite of the initial draft): the meta's `log_path` is the
+original Milvus source key and must **not** be parsed directly. Backup object paths are
+**reconstructed** from `backupDir` + collection/partition/group/segment/field/log IDs following
+milvus-backup's `DestKey` layout:
 
 ```
 insert: {backupDir}/binlogs/insert_log/{coll}/{part}/{group}/{seg}/{field}/{log}
@@ -105,33 +131,57 @@ delta:  {backupDir}/binlogs/delta_log/{coll}/{part}/{seg}/{log}          (part =
         {backupDir}/binlogs/delta_log/{coll}/{part}/{group}/{seg}/{log}  (part != -1)
 ```
 
-Hadoop 侧读（footer/meta/delta）用带 scheme 的 URI（`s3a://...`）；原生 JNI reader 的 `filePaths` 用 bucket 相对 key，`fs.bucket_name` 由 backup URI 规范化。**读必须用 S3（`s3a://`）backup dir，本地/`file://` 在规划期被拒绝。**
+Hadoop-side reads (footer/meta/delta) use scheme-qualified URIs (`s3a://...`); the native JNI
+reader's `filePaths` use bucket-relative keys with `fs.bucket_name` canonicalized from the
+backup URI. **Reads require an S3 (`s3a://`) backup dir; local / `file://` is rejected at
+planning.**
 
-## 6. 删除语义（复用现有逻辑）
+## 6. Delete Semantics (reuses existing logic)
 
-- `milvus.read.apply.deletes`（默认 true）。
-- L1 段 `delta_log` → `loadV2DeletePlans`（段级 plan）。
-- L0 段 → `loadPartitionScopedDeletePlans`（`-1` = 全集合删除）。
-- 读时按 `(pk, timestamp)` 在 packed reader 内过滤（`isDeleted`）。
+- `milvus.read.apply.deletes` (default true).
+- L1 segment `delta_log` → `loadV2DeletePlans` (segment-level plan).
+- L0 segment → `loadPartitionScopedDeletePlans` (`-1` = collection-wide delete).
+- Rows are filtered at read time by `(pk, timestamp)` inside the packed reader (`isDeleted`).
 
-## 7. 边界与限制
+## 7. Edge Cases & Limitations
 
-- **一致性（已实现，与初稿相反）**：backup 默认 flush，仅含落盘数据，但**不是** server 强制的事务一致点时间视图——GC-pause 为 best-effort（可能静默失败，#1119）、各集合各自 flush 时间戳、skipFlush 不 flush，GC/压缩竞态可撕裂。**不可当作 cutover/对账真值**（那才是 snapshot 的保证）。详见 `docs/backup-datasource-design.md` §7。
-- 空段/无 binlog：`num_of_rows == 0` 且无 binlogs 才发射空 `columnGroups`；有行数但无 binlogs 硬失败。
-- 动态字段 `$meta`（**已实现**）：meta 无 `$meta` 记录（默认 backup 无 etcd 访问）时**拒绝读取**并提示 `--backup_index_extra`；有记录则正常保留。
-- 非 L0 且非 StorageV2 段硬失败；L0 段无版本也保留（删除语义）。
-- 本地路径（`/data/backup/xxx` / `file://`）：仅 meta/footer 映射层与单测可用；**实际读在规划期拒绝**（JNI reader 需 S3）。
-- collection 按 `milvus.database.name` + `milvus.collection.name` 匹配（`default` 与空库名等价），不允许 `.head` 兜底。
+- **Consistency (implemented, opposite of the initial draft)**: backups default to a flush and
+  contain only disk-resident data, but they are **not** a server-enforced transactionally
+  consistent point-in-time view — the GC pause is best-effort (may fail silently, #1119), each
+  collection is sealed at its own flush timestamp, and skipFlush omits the flush, so a
+  GC/compaction race can tear the view. **Do not use it as a cutover/reconciliation source of
+  truth** (that guarantee belongs to a snapshot). See `docs/backup-datasource-design.md` §7.
+- Empty segment / no binlogs: an empty `columnGroups` is emitted only when `num_of_rows == 0`;
+  a segment with rows but no binlogs fails hard.
+- Dynamic field `$meta` (**implemented**): when the meta lacks the `$meta` record (a default
+  backup without etcd access) the read is **rejected** with a pointer to `--backup_index_extra`;
+  when present it is preserved.
+- Non-L0 non-StorageV2 segments fail hard; L0 segments without a version are preserved (delete
+  semantics).
+- Local paths (`/data/backup/xxx` / `file://`): usable by the meta/footer mapping layer and unit
+  tests only; actual reads are rejected at planning (the JNI reader requires S3).
+- The collection is matched by `milvus.database.name` + `milvus.collection.name` (never
+  `.head`). Passing `"default"` selects the default-database collection (matching a meta that
+  records `""` or `"default"`), while leaving the database name empty performs
+  single-candidate/ambiguity resolution — so with `default.orders` and `db2.orders` present,
+  pass `"default"` (or `"db2"`) to disambiguate.
 
-## 8. 测试计划
+## 8. Test Plan
 
-1. **单元测试**
-   - `BackupMetaReaderSpec`：fixture `full_meta.json`（1 个 L1 段 + 1 个 L0 段 + 多列分组）→ 断言 schema bytes、`V2SegmentInfo` 的 fieldIds/filePaths/排序、L0 空 columnGroups。
-   - `readRowCountSpec`：本地 parquet 行数正确性。
-2. **集成脚本**（仿现有 demo）：MinIO + Milvus 2.6 → 灌数据/flush → `milvus-backup create -n b1` → `spark.read.format(...).options("milvus.backup.dir", ...)`，对比 `count(*)` 与 distinct PK。
-3. **回归**：snapshot 模式、client 读不受影响。
+1. **Unit tests**
+   - `BackupMetaReaderSpec`: fixture `full_meta.json` (one L1 segment + one L0 segment + multiple
+     column groups) → assert schema bytes, `V2SegmentInfo` fieldIds/filePaths/order, L0 empty
+     columnGroups.
+   - `readRowCountSpec`: local parquet row-count correctness.
+2. **Integration script** (mirroring existing demos): MinIO + Milvus 2.6 → ingest/flush →
+   `milvus-backup create -n b1` → `spark.read.format(...).options("milvus.backup.dir", ...)`,
+   comparing `count(*)` and distinct PK.
+3. **Regression**: snapshot mode and client read unaffected.
 
-## 9. 不在本次范围 / 后续可选
+## 9. Out of Scope / Future
 
-- StorageV3(loon) 段：需 milvus-backup 拷贝 `.milvus_manifest` 或 footer 反推 V3 布局。
-- 方案 B：milvus-backup 填充 `entries_num`（**已实现：连接器总是读 footer 行数，不优先 meta 的 entries_num**；若未来 milvus-backup 填充该字段，可加"有则用"的 fallback）。
+- StorageV3 (loon) segments: requires milvus-backup to copy `.milvus_manifest` or footer-based
+  V3 layout recovery.
+- Option B: milvus-backup populating `entries_num` (**implemented: the connector always reads
+  the footer row count, not preferring the meta's entries_num**; if milvus-backup populates it
+  in the future, an "use-if-present" fallback could be added).

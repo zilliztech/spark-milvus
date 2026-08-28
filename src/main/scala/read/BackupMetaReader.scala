@@ -620,6 +620,12 @@ object BackupMetaReader extends Logging {
           V2ColumnGroup(
             fieldIds = headInfo.fieldIds,
             filePaths = nativePaths,
+            // NOTE: per-file row counts (the packed reader derives per-file
+            // [0, rc_i) ranges). A KNOWN milvus-storage bug
+            // (BuildLoonColumnGroups, v2_column_groups_builder.cpp) treats these
+            // as group-cumulative, so a column group spanning MULTIPLE binlog
+            // files reads short (file i>0 truncated) until that is fixed and
+            // the submodule is bumped. Single-file groups are unaffected.
             fileRowCounts = headInfo.rowCount +: tailRowCounts,
             slotFieldId = fieldBinlog.fieldId
           )
