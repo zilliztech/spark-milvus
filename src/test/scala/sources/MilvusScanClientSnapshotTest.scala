@@ -271,12 +271,12 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test(
-    "backup createReaderFactory falls back to re-reading meta when init did not parse it"
+    "backup createReaderFactory fails loudly when the meta re-read fails"
   ) {
-    // preParsedBackupMeta = None (table init failed but the planner would have
-    // re-read the meta and stamped markers). The factory must not silently hand
-    // an empty plan — it re-reads the meta, and a missing dir degrades to empty
-    // without throwing.
+    // preParsedBackupMeta = None (table init failed) and the factory's fallback
+    // re-read also fails. The planner would have stamped inherited-delete
+    // markers, so the factory must NOT hand an empty plan — it must fail loudly
+    // rather than silently returning deleted rows.
     val options = new ju.HashMap[String, String]()
     options.put(MilvusOption.BackupDir, "/tmp/nonexistent-backup-xyz")
     options.put(MilvusOption.MilvusCollectionName, "demo")
@@ -285,12 +285,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       new CaseInsensitiveStringMap(options),
       preParsedBackupMeta = None
     )
-    val factory = scan.createReaderFactory()
-    assert(
-      factory.isInstanceOf[
-        com.zilliz.spark.connector.read.MilvusPartitionReaderFactory
-      ]
-    )
+    val err = intercept[IllegalStateException] {
+      scan.createReaderFactory()
+    }
+    assert(err.getMessage.contains("re-read backup meta"))
   }
 
   test("resolveBackupCollection matches by name and database, never .head") {

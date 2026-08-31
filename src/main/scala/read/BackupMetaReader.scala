@@ -704,12 +704,20 @@ object BackupMetaReader extends Logging {
         )
       )
 
-  /** Build the L0 (delete-only) `V2SegmentInfo` list for a collection with no
-    * footer reads. Used by the reader factory to compute the shared
-    * partition-scoped L0 delete plans independently of partition planning, so
-    * delete handling does not depend on Spark evaluating partitions first.
+  /** Build the delete-only `V2SegmentInfo` list for a collection with no footer
+    * reads. Used by the reader factory to compute the shared partition-scoped
+    * delete plans independently of partition planning, so delete handling does
+    * not depend on Spark evaluating partitions first.
+    *
+    * The predicate MUST match the planner's `inheritedDeleteSegments`
+    * (`columnGroups.isEmpty && deltaLogs.nonEmpty` after
+    * `buildV2SegmentWithFs`): every L0 segment, plus a non-L0 StorageV2 segment
+    * with no binlogs and zero rows (emitted as an empty column-group segment).
+    * Otherwise a partition can be stamped with an inherited-delete marker that
+    * has no matching plan entry and silently resolves to
+    * `MilvusDeletePlan.empty`.
     */
-  private[connector] def l0DeleteSegments(
+  private[connector] def deleteOnlySegments(
       info: BackupInfo,
       collectionId: Long,
       backupDir: String
@@ -717,8 +725,16 @@ object BackupMetaReader extends Logging {
     info.collectionBackups
       .filter(_.collectionId == collectionId)
       .flatMap(_.allSegments)
-      .filter(seg => seg.isL0 && seg.deltalogs.exists(_.binlogs.nonEmpty))
+      .filter(isDeleteOnlySegment)
       .map(seg => emptyColumnGroupSegment(seg, backupDir))
+
+  private def isDeleteOnlySegment(seg: SegmentBackup): Boolean = {
+    val hasDeltas = seg.deltalogs.exists(_.binlogs.nonEmpty)
+    val binlogsEmpty =
+      seg.binlogs.isEmpty || seg.binlogs.forall(_.binlogs.isEmpty)
+    hasDeltas && (seg.isL0 ||
+      (seg.storageVersion == 2L && binlogsEmpty && seg.numOfRows == 0L))
+  }
 
   // -------------------------------------------------------------------------
   // Backup path reconstruction

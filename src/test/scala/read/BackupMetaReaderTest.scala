@@ -345,7 +345,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     ).dedupColumnGroupsBySlot.columnGroups shouldBe Seq(unknown)
   }
 
-  test("l0DeleteSegments returns L0-only segments with qualified delta paths") {
+  test(
+    "deleteOnlySegments returns delete-only segments with qualified delta paths"
+  ) {
     val meta = BackupMetaReader
       .parse(
         backupFixture(
@@ -356,7 +358,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         )
       )
       .getOrElse(fail("expected Right"))
-    val l0 = BackupMetaReader.l0DeleteSegments(
+    val l0 = BackupMetaReader.deleteOnlySegments(
       meta,
       444L,
       "s3a://bucket/backup/b1"
@@ -365,6 +367,53 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     l0.head.columnGroups shouldBe Seq.empty
     l0.head.deltaLogs.map(_.logPath) shouldBe Seq(
       "s3a://bucket/backup/b1/binlogs/delta_log/444/-1/888/1"
+    )
+
+    // A non-L0 StorageV2 segment with no binlogs, zero rows and non-empty
+    // deltalogs is also delete-only — it must match the planner's inherited
+    // predicate so its partition marker has a matching plan entry.
+    val nonL0Empty = BackupMetaReader.SegmentBackup(
+      segmentId = 999L,
+      collectionId = 444L,
+      partitionId = 555L,
+      groupId = 999L,
+      numOfRows = 0L,
+      storageVersion = 2L,
+      binlogs = Seq.empty,
+      deltalogs = Seq(
+        BackupMetaReader.FieldBinlog(
+          fieldId = 0L,
+          binlogs = Seq(
+            BackupMetaReader.Binlog(
+              logId = 7L,
+              logPath = "files/delta_log/444/555/999/7",
+              logSize = 10L
+            )
+          )
+        )
+      )
+    )
+    val meta2 = BackupMetaReader.BackupInfo(
+      name = "b2",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionId = 444L,
+          collectionName = "demo",
+          partitionBackups = Seq(
+            BackupMetaReader.PartitionBackup(
+              partitionId = 555L,
+              segmentBackups = Seq(nonL0Empty)
+            )
+          )
+        )
+      )
+    )
+    val segs =
+      BackupMetaReader.deleteOnlySegments(meta2, 444L, "s3a://bucket/backup/b2")
+    segs.map(_.segmentId) shouldBe Seq(999L)
+    segs.head.columnGroups shouldBe Seq.empty
+    segs.head.deltaLogs.map(_.logPath) shouldBe Seq(
+      "s3a://bucket/backup/b2/binlogs/delta_log/444/555/999/999/7"
     )
   }
 
