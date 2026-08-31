@@ -2642,7 +2642,9 @@ class MilvusScan(
             s"'${coll.collectionName}'; cannot plan a read"
         )
       }
-    val pkField = CollectionSchema
+    // Driver-side validation only: a backup read requires a primary key for
+    // delete handling; the reader factory re-derives it independently.
+    CollectionSchema
       .parseFrom(schemaBytes)
       .fields
       .find(_.isPrimaryKey)
@@ -2705,23 +2707,22 @@ class MilvusScan(
     val inheritedDeleteSegments = v2Segments.filter(seg =>
       seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
     )
+    // With inlineInheritedDeletePlans=false, buildSnapshotPartitions only
+    // consults the KEYS of this map (inheritedDeletePlanPartitionMarker does
+    // `.contains`); the full partition-scoped delete plans are loaded once, by
+    // createReaderFactory. Passing empty placeholder plans keeps the marker
+    // semantics without downloading and PK-decoding the entire L0 delete set
+    // twice on the driver.
     val inheritedDeletePlansByPartition =
       if (!applyDeletes || inheritedDeleteSegments.isEmpty) {
         Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
       } else {
-        MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
-          inheritedDeleteSegments,
-          pkField,
-          canonicalBucket.getOrElse(""),
-          hadoopConf
-        ) match {
-          case Right(plans) => plans
-          case Left(err) =>
-            throw new IllegalStateException(
-              s"Failed to load inherited StorageV2 delete logs from backup: ${err.getMessage}",
-              err
-            )
-        }
+        inheritedDeleteSegments
+          .map(seg =>
+            seg.partitionId ->
+              com.zilliz.spark.connector.read.MilvusDeletePlan.empty
+          )
+          .toMap
       }
 
     // inlineInheritedDeletePlans=false: partitions carry a partition-scoped

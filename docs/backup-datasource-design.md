@@ -89,8 +89,9 @@ Branch precedence: snapshot mode > backup mode > client mode.
 Two gaps versus a Milvus snapshot are closed in `BackupMetaReader`:
 
 1. **Per-file row counts** (`fileRowCounts`) — always recovered from the parquet
-   footers (the meta never carries `entries_num`); the head file is read once
-   via `readFieldIdsAndRowCount`, the remaining files in parallel.
+   footers (the meta never carries `entries_num`); each column group is a single
+   file read once via `readFieldIdsAndRowCount` (multi-file column groups are
+   rejected, see §7).
 2. **Slot → real field ID mapping** — the AVRO segment-info is not copied by
    the backup, so real field IDs are recovered from the **head file** of each
    column group via `readFieldIdsAndRowCount` (all files in a group share the
@@ -176,11 +177,10 @@ Behavior:
 
 ### 4.3 `src/main/scala/read/MilvusParquetFooterReader.scala`
 
-- New `readRowCount(path, hadoopConf): Either[Throwable, Long]` — sums the
-  row groups' row counts from the parquet footer (a `HEAD` + a single tail
-  `GET`, same cost profile as the existing footer reads).
-- New `readFieldIdsAndRowCount(path, hadoopConf)` — field IDs + row count from
-  a single footer open (avoids opening the head file twice).
+- New `readFieldIdsAndRowCount(path, hadoopConf)` — field IDs + summed row-group
+  row count from a single footer open (a `HEAD` + a single tail `GET`), the only
+  footer-read path the backup planner uses. (A `FileSystem` overload reuses one
+  instance across a read.)
 
 ### 4.4 `src/main/scala/sources/MilvusDataSource.scala`
 
@@ -197,13 +197,15 @@ Behavior:
   `milvus.database.name` + `milvus.collection.name` (`resolveBackupCollection`,
   ambiguous names rejected), rejects partition/segment selectors, validates
   that the meta carries a collection schema with a primary key, builds
-  `V2SegmentInfo`, loads delete plans, and hands everything to the shared
-  `buildSnapshotPartitions` with `inlineInheritedDeletePlans = false`: backup
-  partitions carry a partition-scoped marker and the reader factory computes
-  the shared L0 delete plan **independently from the parsed meta** (not as a
-  planning side effect), so a delete-heavy backup is not materialized once per
-  segment (O(S×D)) and delete handling does not depend on Spark evaluating
-  partitions first. If table init did not parse the meta (e.g. its read failed
+  `V2SegmentInfo`, and hands everything to the shared `buildSnapshotPartitions`
+  with `inlineInheritedDeletePlans = false`: backup partitions carry a
+  partition-scoped marker and the reader factory computes the shared L0 delete
+  plan **independently from the parsed meta** (not as a planning side effect),
+  so a delete-heavy backup is not materialized once per segment (O(S×D)), the
+  L0 delete set is not downloaded/decoded twice, and delete handling does not
+  depend on Spark evaluating partitions first. The planner only stamps the
+  marker's key set (partition IDs); the single full plan load happens in the
+  reader factory. If table init did not parse the meta (e.g. its read failed
   while the planner's succeeded), the factory falls back to a fresh meta read
   rather than silently resolving every marker to an empty plan.
 - Shared `buildSnapshotPartitions` dedups each segment's column groups by slot
@@ -231,7 +233,7 @@ Behavior:
 | `columnGroups` | `.binlogs[]` grouped by `fieldID` (slot) | slot = directory name |
 | `cg.fieldIds` | head file of each group via `readFieldIdsAndRowCount` | |
 | `cg.filePaths` | reconstructed from `backupDir` + IDs (never the meta `log_path`), **bucket-relative** for the native reader | `insert_log` carries the groupID level; sorted by `log_id` |
-| `cg.fileRowCounts` | head via combined read, rest via parallel `readRowCount` | gap-closer; `size == paths.size` enforced |
+| `cg.fileRowCounts` | the single file via `readFieldIdsAndRowCount` | gap-closer; validated to equal `num_of_rows` |
 | `cg.slotFieldId` | group's `fieldID` | used for slot-based dedup |
 | `deltaLogs` | reconstructed `delta_log` paths from `backupDir` + IDs (**qualified**, Hadoop-side) | `entriesNum = 0` (unused by the decoder) |
 | L0 segment | `is_l0 = true` → empty `columnGroups` + `deltaLogs` | inherited delete-plan path; Milvus creates L0 without a storage version, so it bypasses the V2 filter |
@@ -315,9 +317,9 @@ Behavior:
   `s3://` is normalized to `s3a://` at entry. Bucket-root backups and trailing
   double-slashes are handled: the native key never gains a leading slash and
   all trailing slashes are stripped (both would be different S3 keys).
-- Column-group footer reads run on two independent bounded pools (segments vs
-  per-file tail reads) so a segment worker waiting on its tail reads can never
-  deadlock the single pool.
+- Column-group footer reads run on a single bounded pool (`SegmentReadPool`,
+  segment-level parallelism). Multi-file column groups are rejected (see §7),
+  so there are no nested per-file tail reads and therefore no worker-blocks-on-its-own-pool deadlock risk.
 - A dynamic collection whose `$meta` field is present is not duplicated by the
   computed schema.
 - Local paths (`/data/backup/...` or `file:///...`) are exercised by the
@@ -349,7 +351,8 @@ spark.read
   schema round-trip, column-group / row-count recovery against local parquet
   files written with parquet-mr (carrying `PARQUET:field_id`), L0 skipping with
   `applyDeletes = false`, StorageV1/V3 branches, and snapshot-format rejection.
-- `MilvusParquetFooterReaderTest` — `readRowCount` sums row groups.
+- `MilvusParquetFooterReaderTest` — `readFieldIdsAndRowCount` recovers field IDs
+  and sums multiple row groups in one footer open.
 - `MilvusOptionTest` — `isBackupMode` and snapshot/backup mutual exclusion.
 - End-to-end: Milvus 2.6 → `milvus-backup create` → `spark.read` with
   `milvus.backup.dir`, cross-checked against `count(*)` / distinct PKs.
