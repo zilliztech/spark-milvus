@@ -214,7 +214,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("readRowCount sums row groups from the footer") {
+  test("readFieldIdsAndRowCount sums row groups across the footer") {
     val tmp = Files.createTempFile("milvus-rowcount-test-", ".parquet")
     Files.delete(tmp)
     val schema: MessageType = Types
@@ -233,7 +233,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
     // recordCount >= DEFAULT_MINIMUM_RECORD_COUNT_FOR_CHECK (100), so with 3
     // rows a tiny rowGroupSize would never flush and the file would hold one
     // block. Write enough rows for the check to run and flush multiple groups,
-    // so readRowCount must genuinely sum across them.
+    // so the production footerInfo must genuinely sum across them.
     val totalRows = 150
     val writer = ExampleParquetWriter
       .builder(new HPath(tmp.toUri))
@@ -254,13 +254,16 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
     }
 
     try {
-      MilvusParquetFooterReader.readRowCount(
-        tmp.toUri.toString,
-        new Configuration()
-      ) shouldBe Right(totalRows.toLong)
+      // The production path (used by the backup planner) returns field IDs and
+      // the summed row count in a single open.
+      val info = MilvusParquetFooterReader
+        .readFieldIdsAndRowCount(tmp.toUri.toString, new Configuration())
+        .getOrElse(fail("expected Right"))
+      info.fieldIds shouldBe Seq(100L, 0L)
+      info.rowCount shouldBe totalRows.toLong
 
       // Prove the file actually has multiple row groups (a first-block-only
-      // readRowCount would not reach totalRows).
+      // sum would not reach totalRows).
       val parquet = org.apache.parquet.hadoop.ParquetFileReader.open(
         org.apache.parquet.hadoop.util.HadoopInputFile
           .fromPath(new HPath(tmp.toUri), new Configuration())

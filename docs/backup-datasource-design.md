@@ -279,6 +279,13 @@ Behavior:
   `$meta` field, so reading it would return null `$meta` rows; such backups are
   rejected with a pointer to `--backup_index_extra` (requires milvus-backup
   v0.5.13+ to capture `$meta`).
+- Struct-array fields (`struct_array_fields`): the connector's read path does
+  not support Struct/ArrayOfStruct data types end-to-end, so a backup whose
+  schema carries non-empty `struct_array_fields` is **rejected** rather than
+  silently dropping those columns. Full support is tracked separately.
+- A segment whose recovered footer row total disagrees with `num_of_rows` (and
+  segments whose column groups disagree with each other) fail hard on the
+  driver rather than producing short `(start_index, end_index)` ranges.
 - `milvus.partition.name` / `milvus.partition.id` / `milvus.segment.id`
   selectors are rejected (not yet supported); read the whole backup and filter
   in Spark.

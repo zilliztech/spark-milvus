@@ -769,6 +769,35 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
   }
 
   test(
+    "toProtobufSchemaBytes rejects collections with struct-array fields"
+  ) {
+    import com.fasterxml.jackson.databind.node.IntNode
+    val arrayNode = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance
+      .arrayNode()
+    arrayNode.addObject()
+    val schema = BackupMetaReader.BackupCollectionSchema(
+      name = "demo",
+      fields = Seq(
+        BackupMetaReader.BackupFieldSchema(
+          fieldId = 100L,
+          name = "id",
+          rawDataType = Some(IntNode.valueOf(5))
+        )
+      ),
+      structArrayFields = Some(arrayNode)
+    )
+    val err = intercept[IllegalArgumentException] {
+      BackupMetaReader.toProtobufSchemaBytes(schema)
+    }
+    err.getMessage should include("struct-array")
+
+    // Empty / absent struct_array_fields are fine.
+    BackupMetaReader
+      .toProtobufSchemaBytes(schema.copy(structArrayFields = None))
+      .nonEmpty shouldBe true
+  }
+
+  test(
     "buildV2Segment fails hard when a non-empty StorageV2 segment has no binlogs"
   ) {
     val conf = new Configuration()
@@ -879,6 +908,73 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         .toOption
         .get
       err.getMessage should include("inconsistent row totals")
+    } finally {
+      deleteRecursively(dir)
+    }
+  }
+
+  test(
+    "buildV2Segment rejects when footer rows disagree with num_of_rows"
+  ) {
+    val dir = Files.createTempDirectory("milvus-backup-rowmismatch-")
+    try {
+      val base =
+        Paths.get(
+          dir.toString,
+          "binlogs",
+          "insert_log",
+          "444",
+          "555",
+          "999",
+          "777"
+        )
+      writeParquetAt(
+        Paths.get(base.toString, "103", "1"),
+        groupASchema,
+        List(
+          f =>
+            f.newGroup()
+              .append("pk", 1L)
+              .append("row_id", 10L)
+              .append("ts", 100L),
+          f =>
+            f.newGroup()
+              .append("pk", 2L)
+              .append("row_id", 11L)
+              .append("ts", 101L)
+        )
+      )
+      val seg = BackupMetaReader.SegmentBackup(
+        segmentId = 777L,
+        collectionId = 444L,
+        partitionId = 555L,
+        groupId = 999L,
+        numOfRows = 3L, // meta claims 3, footer has 2
+        storageVersion = 2L,
+        binlogs = Seq(
+          BackupMetaReader.FieldBinlog(
+            fieldId = 103L,
+            binlogs = Seq(
+              BackupMetaReader.Binlog(
+                logId = 1L,
+                logPath = "files/insert_log/444/555/777/103/1",
+                logSize = 10L
+              )
+            )
+          )
+        )
+      )
+      val err = BackupMetaReader
+        .buildV2Segment(
+          seg,
+          new Configuration(),
+          dir.toString,
+          applyDeletes = true
+        )
+        .left
+        .toOption
+        .get
+      err.getMessage should include("meta and data disagree")
     } finally {
       deleteRecursively(dir)
     }

@@ -52,11 +52,12 @@ import io.milvus.grpc.schema.{
   * the collection/partition/group/segment/field/log IDs, never taken from
   * `log_path`. Three gaps vs. a Milvus snapshot are closed here:
   *   1. milvus-backup persists only `log_size` per binlog, not `entries_num`.
-  *      The per-file row count is recovered by reading each parquet footer's
-  *      row count ([MilvusParquetFooterReader.readRowCount]), in parallel. 2.
-  *      The AVRO segment-info (and hence the slot -> real field ID mapping) is
-  *      not copied by the backup; the real field IDs are recovered from the
-  *      **head file** of each column group via that file's own parquet schema
+  *      The per-file row count is recovered by reading each (single) parquet
+  *      footer's row count
+  *      ([MilvusParquetFooterReader.readFieldIdsAndRowCount]). 2. The AVRO
+  *      segment-info (and hence the slot -> real field ID mapping) is not
+  *      copied by the backup; the real field IDs are recovered from the **head
+  *      file** of each column group via that file's own parquet schema
   *      ([MilvusParquetFooterReader.readFieldIdsAndRowCount]) — matching
   *      V2SegmentLoader, which assumes all files in a group share the schema.
   *      3. L0 delete-only segments are created by Milvus without a
@@ -171,8 +172,15 @@ object BackupMetaReader extends Logging {
       @JsonProperty("fields") fields: Seq[BackupFieldSchema] = Seq.empty,
       @JsonProperty("enable_dynamic_field") enableDynamicField: Boolean = false,
       @JsonProperty("properties") properties: Seq[BackupKeyValuePair] =
-        Seq.empty
-  )
+        Seq.empty,
+      @JsonProperty("struct_array_fields") structArrayFields: Option[JsonNode] =
+        None
+  ) {
+    def hasStructArrayFields: Boolean =
+      structArrayFields.exists(n =>
+        n != null && !n.isNull && n.isArray && n.size() > 0
+      )
+  }
 
   // -------------------------------------------------------------------------
   // Parsing
@@ -288,6 +296,7 @@ object BackupMetaReader extends Logging {
     */
   def toProtobufSchemaBytes(schema: BackupCollectionSchema): Array[Byte] = {
     validateDynamicFieldSchema(schema)
+    validateStructArrayFields(schema)
     // Drop system fields by field ID (0 = RowID, 1 = Timestamp), never by name:
     // milvus-backup's schema comes from DescribeCollection, which only returns
     // user fields, so a legitimately-named user field (e.g. a PK literally
@@ -340,6 +349,25 @@ object BackupMetaReader extends Logging {
           "with etcd access so the dynamic field schema is captured " +
           "(--backup_index_extra requires milvus-backup >= v0.5.13; on " +
           "v0.5.10-v0.5.12 the flag does not capture $meta)"
+      )
+    }
+  }
+
+  /** Reject a collection whose meta carries `struct_array_fields`: these
+    * top-level fields live in a separate repeated message (not in `fields`),
+    * and the connector's read path does not support Struct/ArrayOfStruct data
+    * types end-to-end, so silently dropping them would return a DataFrame
+    * missing whole user columns. Full struct-array support is tracked
+    * separately.
+    */
+  private[connector] def validateStructArrayFields(
+      schema: BackupCollectionSchema
+  ): Unit = {
+    if (schema.hasStructArrayFields) {
+      throw new IllegalArgumentException(
+        s"backup collection '${schema.name}' has struct-array fields " +
+          "(struct_array_fields), which the connector does not support yet; " +
+          "reading it would silently drop those columns"
       )
     }
   }
@@ -632,10 +660,11 @@ object BackupMetaReader extends Logging {
           )
         }
         val totalRows = groupTotals.headOption.getOrElse(0L)
-        if (seg.numOfRows > 0L && totalRows <= 0L) {
+        if (totalRows != seg.numOfRows) {
           throw new IllegalStateException(
             s"backup segment ${seg.segmentId} has num_of_rows=${seg.numOfRows} " +
-              "but the parquet footers recovered 0 rows"
+              s"but the parquet footers recovered $totalRows rows; refusing " +
+              "to read a segment whose meta and data disagree"
           )
         }
         Right(
