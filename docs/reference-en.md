@@ -110,7 +110,7 @@ val s3Options = Map(
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `MilvusOption.MilvusUri` | String | Yes | - | Milvus server connection URI, format: `http://host:port` or `https://host:port` |
+| `MilvusOption.MilvusUri` | String | Conditional | - | Milvus server connection URI, format: `http://host:port` or `https://host:port`. Required for client mode; not required for snapshot/backup mode (offline reads). |
 | `MilvusOption.MilvusToken` | String | No | "" | Milvus server authentication token |
 | `MilvusOption.MilvusDatabaseName` | String | No | "" | Database name, defaults to default database |
 
@@ -127,7 +127,7 @@ val s3Options = Map(
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `MilvusOption.MilvusCollectionName` | String | Yes | - | Collection name |
+| `MilvusOption.MilvusCollectionName` | String | Conditional | - | Collection name. Required for client mode; in backup mode required only when the backup holds more than one collection. |
 | `MilvusOption.MilvusPartitionName` | String | No | "" | Partition name, operates on all partitions when empty |
 | `MilvusOption.MilvusCollectionID` | String | No | "" | Collection ID, usually auto-retrieved |
 | `MilvusOption.MilvusPartitionID` | String | No | "" | Partition ID, usually auto-retrieved |
@@ -142,6 +142,34 @@ val s3Options = Map(
 | `MilvusOption.WriterVariableWidthBytesPerValue` | Double | No | 32.0 | Initial Arrow buffer density for VARCHAR/JSON/binary writer columns; increase for wide variable-width values. Must be finite and positive. |
 | `MilvusOption.MilvusRetryCount` | Int | No | 3 | Number of retries on operation failure |
 | `MilvusOption.MilvusRetryInterval` | Int | No | 1000 | Retry interval in milliseconds |
+
+### 2.5 Offline Backup Read Parameters
+
+Read a binlog-format milvus-backup export as a DataFrame without any Milvus
+client connection. A plain `milvus-backup create` on released versions
+(v0.5.x) already produces binlog format; the `--format binlog` flag exists
+only on milvus-backup's master branch (which targets Milvus 3.x and defaults
+to snapshot). See `docs/backup-datasource-design.md` for the full design.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `MilvusOption.BackupDir` | String | No | "" | `milvus.backup.dir` — the backup directory, e.g. `s3a://bucket/backup/<name>`. **S3 only** (`s3://` is normalized to `s3a://`); local/`file://` dirs are rejected at planning because the packed reader requires S3. |
+| `MilvusOption.MilvusDatabaseName` | String | No | "" | Database the collection lives in. Passing `"default"` selects the default-database collection (matching a meta that records `""` or `"default"`); leaving the option empty performs single-candidate / ambiguity resolution instead — with both `default.orders` and `db2.orders` present, pass `"default"` (or `"db2"`) to disambiguate. |
+| `MilvusOption.MilvusCollectionName` | String | Conditional | - | Collection name inside the backup (matched with the database name, never `.head`). Required when the backup holds more than one collection. |
+| `MilvusOption.ReadApplyDeletes` | Boolean | No | true | `milvus.read.apply.deletes` — apply delete logs (L0/L1) while reading. |
+| `MilvusOption.SnapshotMaxJsonBytes` | Long | No | 67108864 | `milvus.snapshot.max.json.bytes` — max size of the backup `full_meta.json`. |
+
+The Spark read schema must be provided via `.schema()` or is derived from the
+backup meta; without `.schema()` the read fails loudly if the meta cannot be
+read. Reading a dynamic collection (`enable_dynamic_field=true`) requires the
+backup meta to record the `$meta` field — captured only with milvus-backup
+etcd access (`--backup_index_extra`) and **v0.5.13+**. Two backup shapes abort
+the read at planning time: a column group spanning more than one binlog file
+(an unfixed milvus-storage bug — see the design doc) and a collection with
+struct-array fields (`struct_array_fields`). S3 credentials use the existing
+`fs.*` options (`fs.address`,
+`fs.access_key_id`, `fs.access_key_value`, ...); the bucket comes from the
+`milvus.backup.dir` URI.
 
 ## 3. Usage Examples
 

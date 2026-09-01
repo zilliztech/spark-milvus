@@ -762,6 +762,18 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     roundTripped.head shouldBe segments.head
   }
 
+  test(
+    "deserializeV2Segments defaults legacy column-group JSON to unknown slot"
+  ) {
+    // JSON that predates slot_field_id: the group must decode to -1 so
+    // slot-based dedup stays off rather than reading stale data.
+    val json =
+      """[{"segment_id":1,"partition_id":1,"num_of_rows":1,"storage_version":2,""" +
+        """"column_groups":[{"field_ids":[100],"file_paths":["p"],"file_row_counts":[1]}]}]"""
+    val segs = MilvusSnapshotReader.deserializeV2Segments(json).toOption.get
+    segs.head.columnGroups.head.slotFieldId shouldBe -1L
+  }
+
   test("Parse data_type as string format (e.g., 'Int64' instead of 5)") {
     val jsonWithStringDataType = """
     {

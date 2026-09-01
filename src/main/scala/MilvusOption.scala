@@ -145,6 +145,11 @@ object MilvusOption {
   val BackfillModeOverwrite = "overwrite"
 
   // Snapshot-based reading options (for offline/client-free mode)
+  // Backup-based reading options (offline/client-free). `milvus.backup.dir`
+  // points at a binlog-format backup produced by milvus-backup (the directory
+  // whose `meta/full_meta.json` holds the collection schema + segment layout).
+  val BackupDir = "milvus.backup.dir"
+
   val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode
   // JSON array of StorageV2ManifestItem. Despite the "V2" in the class name,
   // these are StorageV3 loon manifests (segment-info storage_version = 3).
@@ -187,8 +192,11 @@ object MilvusOption {
       .filter(_.nonEmpty)
       .map(_.equalsIgnoreCase("true"))
       .getOrElse {
-        getOption(SnapshotManifests).isDefined ||
-        getOption(SnapshotV2Segments).isDefined
+        // Only a non-empty hint enables snapshot mode: config templates that
+        // keep optional keys with empty values (e.g. milvus.snapshot.manifests="")
+        // must not trip the snapshot/backup mutual-exclusion check.
+        nonEmptyOption(getOption, SnapshotManifests) ||
+        nonEmptyOption(getOption, SnapshotV2Segments)
       }
   }
 
@@ -230,6 +238,59 @@ object MilvusOption {
 
   def validateSnapshotModeOptions(options: CaseInsensitiveStringMap): Unit = {
     validateSnapshotModeOptionsFrom(key => Option(options.get(key)))
+  }
+
+  private def backupDirFrom(
+      getOption: String => Option[String]
+  ): Option[String] =
+    getOption(BackupDir)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(normalizeBackupScheme)
+
+  /** Normalize the `s3://` alias to `s3a://` at entry so Hadoop (which drops
+    * the `s3://` provider) and the connector's path reconstruction agree.
+    */
+  private def normalizeBackupScheme(dir: String): String =
+    if (dir.startsWith("s3://")) "s3a://" + dir.stripPrefix("s3://") else dir
+
+  def backupDir(options: Map[String, String]): Option[String] = {
+    backupDirFrom { key =>
+      options.collectFirst {
+        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
+          value
+      }
+    }
+  }
+
+  def backupDir(options: CaseInsensitiveStringMap): Option[String] = {
+    backupDirFrom(key => Option(options.get(key)))
+  }
+
+  def isBackupMode(options: Map[String, String]): Boolean =
+    backupDir(options).isDefined
+
+  def isBackupMode(options: CaseInsensitiveStringMap): Boolean =
+    backupDir(options).isDefined
+
+  /** Backup mode reads a milvus-backup binlog-format export offline. It is
+    * mutually exclusive with snapshot mode: pick one source of truth for the
+    * segment layout.
+    */
+  def validateBackupModeOptions(options: Map[String, String]): Unit = {
+    if (isBackupMode(options) && isSnapshotMode(options)) {
+      throw new IllegalArgumentException(
+        s"$BackupDir and snapshot mode ($SnapshotMode/$SnapshotManifests/$SnapshotV2Segments) are mutually exclusive"
+      )
+    }
+  }
+
+  def validateBackupModeOptions(options: CaseInsensitiveStringMap): Unit = {
+    if (isBackupMode(options) && isSnapshotMode(options)) {
+      throw new IllegalArgumentException(
+        s"$BackupDir and snapshot mode ($SnapshotMode/$SnapshotManifests/$SnapshotV2Segments) are mutually exclusive"
+      )
+    }
   }
 
   private def readApplyDeletesFrom(

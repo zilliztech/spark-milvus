@@ -110,7 +110,7 @@ val s3Options = Map(
 
 | 参数名 | 类型 | 必需 | 默认值 | 描述 |
 |--------|------|------|--------|------|
-| `MilvusOption.MilvusUri` | String | 是 | - | Milvus 服务器连接 URI，格式：`http://host:port` 或 `https://host:port` |
+| `MilvusOption.MilvusUri` | String | 条件 | - | Milvus 服务器连接 URI，格式：`http://host:port` 或 `https://host:port`。客户端模式必需；snapshot/backup 模式（离线读）不要求。 |
 | `MilvusOption.MilvusToken` | String | 否 | "" | Milvus 服务器认证令牌 |
 | `MilvusOption.MilvusDatabaseName` | String | 否 | "" | 数据库名称，默认为 default 数据库 |
 
@@ -127,7 +127,7 @@ val s3Options = Map(
 
 | 参数名 | 类型 | 必需 | 默认值 | 描述 |
 |--------|------|------|--------|------|
-| `MilvusOption.MilvusCollectionName` | String | 是 | - | 集合名称 |
+| `MilvusOption.MilvusCollectionName` | String | 条件 | - | 集合名称。客户端模式必需；backup 模式仅当备份含多个集合时必需。 |
 | `MilvusOption.MilvusPartitionName` | String | 否 | "" | 分区名称，为空时操作所有分区 |
 | `MilvusOption.MilvusCollectionID` | String | 否 | "" | 集合 ID，通常自动获取 |
 | `MilvusOption.MilvusPartitionID` | String | 否 | "" | 分区 ID，通常自动获取 |
@@ -142,6 +142,20 @@ val s3Options = Map(
 | `MilvusOption.WriterVariableWidthBytesPerValue` | Double | 否 | 32.0 | VARCHAR/JSON/binary 写入列的 Arrow 初始 buffer 密度；宽变长字段可调大。必须是有限正数。 |
 | `MilvusOption.MilvusRetryCount` | Int | 否 | 3 | 操作失败时的重试次数 |
 | `MilvusOption.MilvusRetryInterval` | Int | 否 | 1000 | 重试间隔时间（毫秒） |
+
+### 2.5 离线备份读取参数
+
+读取 milvus-backup 导出的 **binlog 格式**备份，无需任何 Milvus client 连接。已发布版本（v0.5.x）的 `milvus-backup create` 默认即 binlog 格式；`--format binlog` 仅存在于 milvus-backup master 分支（面向 Milvus 3.x，默认 snapshot）。完整设计见 `docs/backup-datasource-design.md`。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|-----------|------|----------|---------|-------------|
+| `MilvusOption.BackupDir` | String | 否 | "" | `milvus.backup.dir` — 备份目录，如 `s3a://bucket/backup/<name>`。**仅支持 S3**（`s3://` 自动归一化为 `s3a://`）；本地/`file://` 目录在规划期被拒绝（packed reader 需要 S3）。 |
+| `MilvusOption.MilvusDatabaseName` | String | 否 | "" | collection 所在库。传 `"default"` 选择默认库的 collection（匹配 meta 记录为 `""` 或 `"default"`）；留空则走单候选/歧义判定——当同时存在 `default.orders` 与 `db2.orders` 时，需传 `"default"`（或 `"db2"`）消除歧义。 |
+| `MilvusOption.MilvusCollectionName` | String | 条件 | - | 备份内的 collection 名（与库名联合匹配，不用 `.head`）。备份含多个 collection 时必须指定。 |
+| `MilvusOption.ReadApplyDeletes` | Boolean | 否 | true | `milvus.read.apply.deletes` — 读取时应用删除日志（L0/L1）。 |
+| `MilvusOption.SnapshotMaxJsonBytes` | Long | 否 | 67108864 | `milvus.snapshot.max.json.bytes` — backup `full_meta.json` 大小上限。 |
+
+读取 schema 需通过 `.schema()` 提供，或从备份 meta 推导；未提供 `.schema()` 且 meta 读取失败时读取硬失败。读取动态集合（`enable_dynamic_field=true`）要求备份 meta 记录 `$meta` 字段——仅当 milvus-backup 带 etcd 访问（`--backup_index_extra`）且 **≥ v0.5.13** 时才捕获。两种备份形态会在规划期中止读取：跨多个 binlog 文件的 column group（未修复的 milvus-storage bug，见设计文档）与含 struct-array 字段（`struct_array_fields`）的集合。S3 凭证复用现有 `fs.*` 选项（`fs.address`、`fs.access_key_id`、`fs.access_key_value` ...）；桶取自 `milvus.backup.dir` URI。
 
 ## 3. 使用示例
 
