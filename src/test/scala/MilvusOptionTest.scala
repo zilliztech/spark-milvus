@@ -461,4 +461,66 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
     conf.get("fs.s3a.threads.max") shouldBe "16"
     conf.get("fs.s3a.impl") shouldBe "org.apache.hadoop.fs.s3a.S3AFileSystem"
   }
+
+  test("isBackupMode is true only when milvus.backup.dir is set") {
+    MilvusOption.isBackupMode(Map.empty[String, String]) shouldBe false
+    MilvusOption.isBackupMode(
+      Map(MilvusOption.MilvusUri -> "http://localhost:19530")
+    ) shouldBe false
+    MilvusOption.isBackupMode(
+      Map(MilvusOption.BackupDir -> "s3a://bucket/backup/b1")
+    ) shouldBe true
+    MilvusOption.isBackupMode(
+      Map(MilvusOption.BackupDir -> "   ")
+    ) shouldBe false
+  }
+
+  test("backupDir normalizes the s3:// alias to s3a://") {
+    MilvusOption.backupDir(
+      Map(MilvusOption.BackupDir -> "s3://bucket/backup/b1")
+    ) shouldBe Some("s3a://bucket/backup/b1")
+    MilvusOption.backupDir(
+      Map(MilvusOption.BackupDir -> "s3a://bucket/backup/b1")
+    ) shouldBe Some("s3a://bucket/backup/b1")
+    MilvusOption.backupDir(
+      Map(MilvusOption.BackupDir -> "/data/backup/b1")
+    ) shouldBe Some("/data/backup/b1")
+  }
+
+  test("validateBackupModeOptions rejects backup combined with snapshot mode") {
+    val both = Map(
+      MilvusOption.BackupDir -> "s3a://bucket/backup/b1",
+      MilvusOption.SnapshotV2Segments -> "[]"
+    )
+    intercept[IllegalArgumentException] {
+      MilvusOption.validateBackupModeOptions(both)
+    }
+    // Backup mode alone is fine.
+    MilvusOption.validateBackupModeOptions(
+      Map(MilvusOption.BackupDir -> "s3a://bucket/backup/b1")
+    )
+  }
+
+  test("empty-valued snapshot hint keys do not enable snapshot mode") {
+    // Config templates keep optional keys with empty values; they must not trip
+    // the snapshot/backup mutual-exclusion check.
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotManifests -> "")
+    ) shouldBe false
+    MilvusOption.isSnapshotMode(
+      Map(MilvusOption.SnapshotV2Segments -> "   ")
+    ) shouldBe false
+    MilvusOption.validateBackupModeOptions(
+      Map(
+        MilvusOption.BackupDir -> "s3a://bucket/backup/b1",
+        MilvusOption.SnapshotManifests -> ""
+      )
+    )
+    MilvusOption.validateBackupModeOptions(
+      Map(
+        MilvusOption.BackupDir -> "s3a://bucket/backup/b1",
+        MilvusOption.SnapshotV2Segments -> ""
+      )
+    )
+  }
 }

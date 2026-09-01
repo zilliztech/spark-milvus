@@ -116,22 +116,34 @@ object MilvusParquetFooterReader extends Logging {
     readWithFileSystem(path, hadoopConf) { inputFile =>
       val parquet = ParquetFileReader.open(inputFile)
       try {
-        val schema = parquet.getFooter.getFileMetaData.getSchema
-        val fields = schema.getFields.asScala
-        fields.map { t: Type =>
-          val id = t.getId
-          if (id == null) {
-            throw new IllegalStateException(
-              s"parquet column '${t.getName}' in $path has no PARQUET:field_id " +
-                s"metadata; cannot recover StorageV2 column-group field ids"
-            )
-          }
-          id.intValue().toLong
-        }.toSeq
+        fieldIdsFromMessageType(
+          parquet.getFooter.getFileMetaData.getSchema,
+          path
+        )
       } finally {
         parquet.close()
       }
     }
+  }
+
+  /** Shared field-ID extraction from a parquet `MessageType`, keeping the
+    * single-open callers (`readFieldIdsFromSchema`, `readFieldIdsAndRowCount`)
+    * in lock-step.
+    */
+  private[read] def fieldIdsFromMessageType(
+      schema: org.apache.parquet.schema.MessageType,
+      path: String
+  ): Seq[Long] = {
+    schema.getFields.asScala.map { t: Type =>
+      val id = t.getId
+      if (id == null) {
+        throw new IllegalStateException(
+          s"parquet column '${t.getName}' in $path has no PARQUET:field_id " +
+            s"metadata; cannot recover StorageV2 column-group field ids"
+        )
+      }
+      id.intValue().toLong
+    }.toSeq
   }
 
   private def readWithFileSystem[T](
@@ -144,14 +156,7 @@ object MilvusParquetFooterReader extends Logging {
       uri = new URI(path)
       val hadoopPath = new Path(uri)
       fs = hadoopPath.getFileSystem(hadoopConf)
-      val fileStatus = fs.getFileStatus(hadoopPath)
-      val inputFile = new InputFile {
-        override def getLength: Long = fileStatus.getLen
-
-        override def newStream(): org.apache.parquet.io.SeekableInputStream =
-          HadoopStreams.wrap(fs.open(hadoopPath))
-      }
-      Right(read(inputFile))
+      readWithFileSystem(fs, path)(read)
     } catch {
       case NonFatal(e) => Left(e)
     } finally {
@@ -163,6 +168,80 @@ object MilvusParquetFooterReader extends Logging {
           fs.close()
         }
       }
+    }
+  }
+
+  /** Read with a caller-supplied `FileSystem` (reused across many footer reads,
+    * e.g. all binlogs of a backup) instead of resolving a fresh one per file —
+    * with `fs.s3a.impl.disable.cache=true` every `FileSystem.get` otherwise
+    * constructs a whole S3A client + thread pool.
+    */
+  private[read] def readWithFileSystem[T](
+      fs: FileSystem,
+      path: String
+  )(read: InputFile => T): Either[Throwable, T] = {
+    try {
+      val hadoopPath = new Path(path)
+      val fileStatus = fs.getFileStatus(hadoopPath)
+      val inputFile = new InputFile {
+        override def getLength: Long = fileStatus.getLen
+
+        override def newStream(): org.apache.parquet.io.SeekableInputStream =
+          HadoopStreams.wrap(fs.open(hadoopPath))
+      }
+      Right(read(inputFile))
+    } catch {
+      case NonFatal(e) => Left(e)
+    }
+  }
+
+  /** The projection of a parquet footer the backup datasource needs to build a
+    * `V2ColumnGroup`: the file's own top-level field IDs plus its total row
+    * count, recovered from a single footer read.
+    */
+  private[read] case class ParquetFooterInfo(
+      fieldIds: Seq[Long],
+      rowCount: Long
+  )
+
+  /** Read a parquet file's own field IDs and total row count with a single
+    * footer open — the production path the backup datasource uses to recover
+    * both the column-group field IDs and the per-file row count.
+    */
+  def readFieldIdsAndRowCount(
+      path: String,
+      hadoopConf: Configuration
+  ): Either[Throwable, ParquetFooterInfo] = {
+    readWithFileSystem(path, hadoopConf) { inputFile =>
+      footerInfo(inputFile, path)
+    }
+  }
+
+  /** [[readFieldIdsAndRowCount]] with a caller-supplied `FileSystem`. */
+  def readFieldIdsAndRowCount(
+      fs: FileSystem,
+      path: String
+  ): Either[Throwable, ParquetFooterInfo] = {
+    readWithFileSystem(fs, path) { inputFile =>
+      footerInfo(inputFile, path)
+    }
+  }
+
+  private def footerInfo(
+      inputFile: InputFile,
+      path: String
+  ): ParquetFooterInfo = {
+    val parquet = ParquetFileReader.open(inputFile)
+    try {
+      val footer = parquet.getFooter
+      val fieldIds = fieldIdsFromMessageType(
+        footer.getFileMetaData.getSchema,
+        path
+      )
+      val rowCount = footer.getBlocks.asScala.map(_.getRowCount).sum
+      ParquetFooterInfo(fieldIds, rowCount)
+    } finally {
+      parquet.close()
     }
   }
 
