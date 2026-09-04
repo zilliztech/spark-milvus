@@ -87,12 +87,38 @@ lazy val gitBranch = {
   branch.replaceAll("[^a-zA-Z0-9._-]", "-")
 }
 
+lazy val IntegrationTest = config("it") extend Test
+
+// Shared JVM/native setup required by both the unit-test and integration-test
+// source sets (native library loading, Arrow JNI access, JNI thin JAR).
+lazy val nativeTestSettings: Seq[Setting[_]] = Seq(
+  fork := true,
+  parallelExecution := true,
+  logBuffered := false,
+  javaOptions ++= Seq(
+    "-Xss2m",
+    "-Xmx4g",
+    s"-Djava.library.path=${(baseDirectory.value / "src/main/resources/native").getAbsolutePath}",
+    "-Dlog4j2.configurationFile=log4j2.properties",
+    "-Dlog4j2.debug=false",
+    "--add-opens=java.base/java.nio=ALL-UNNAMED",
+    "--add-opens=java.base/java.lang=ALL-UNNAMED",
+    "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+    "--add-opens=java.base/java.util=ALL-UNNAMED",
+    "--add-opens=java.base/sun.security.action=ALL-UNNAMED"
+  ),
+  envVars := Map(
+    "LD_LIBRARY_PATH" -> (baseDirectory.value / "src/main/resources/native").getAbsolutePath
+  ),
+  unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar"
+)
+
 lazy val root = (project in file("."))
+  .configs(IntegrationTest)
   .settings(
     name := "spark-connector",
     assembly / parallelExecution := true,
     assembly / assemblyPackageScala / assembleArtifact := false,
-    Test / parallelExecution := true,
     Compile / compile / parallelExecution := true,
     version := s"${gitBranch}-${arch}-SNAPSHOT",
     organization := "com.zilliz",
@@ -101,15 +127,21 @@ lazy val root = (project in file("."))
     Compile / packageDoc / publishArtifact := false,
     Compile / packageSrc / publishArtifact := false,
 
-    // Fork JVM for run and tests to properly load native libraries
+    // Fork JVM for run to properly load native libraries
     run / fork := true,
-    Test / fork := true,
 
-    // Show test logs immediately (don't buffer)
-    Test / logBuffered := false,
+    // Unit tests: fast, no external services. 10s per test to avoid hanging.
+    inConfig(Test)(nativeTestSettings ++ Seq(
+      testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "10", "10")
+    )),
 
-    // Test timeout - 10 seconds per test to avoid hanging
-    Test / testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "10", "10"),
+    // Integration tests: need Milvus server (:19530) + MinIO (:9000).
+    // Give them a generous timeout since they run against real infrastructure.
+    // Defaults.itSettings points the source/resource dirs at src/it/* (otherwise
+    // the config would inherit Test's src/test dirs via `extend Test`).
+    inConfig(IntegrationTest)(Defaults.itSettings ++ nativeTestSettings ++ Seq(
+      testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "600", "600")
+    )),
 
     // JVM options for run
     run / javaOptions ++= Seq(
@@ -125,27 +157,8 @@ lazy val root = (project in file("."))
     // Include test dependencies in run classpath for example applications
     Compile / run / fullClasspath := (Compile / run / fullClasspath).value ++ (Test / fullClasspath).value,
 
-    // JVM options for tests
-    Test / javaOptions ++= Seq(
-      "-Xss2m",
-      "-Xmx4g",
-      s"-Djava.library.path=${(baseDirectory.value / "src/main/resources/native").getAbsolutePath}",
-      "-Dlog4j2.configurationFile=log4j2.properties",
-      "-Dlog4j2.debug=false",
-      "--add-opens=java.base/java.nio=ALL-UNNAMED",
-      "--add-opens=java.base/java.lang=ALL-UNNAMED",
-      "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
-      "--add-opens=java.base/java.util=ALL-UNNAMED",
-      "--add-opens=java.base/sun.security.action=ALL-UNNAMED"
-    ),
-
-    Test / envVars := Map(
-      "LD_LIBRARY_PATH" -> (baseDirectory.value / "src/main/resources/native").getAbsolutePath
-    ),
-
     // Add milvus-storage JNI library as unmanaged dependency
     Compile / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar",
-    Test / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar",
 
     // 老 log binding (slf4j-log4j12 / reload4j / log4j 1.x) 与 spark 的 log4j2 冲突，
     // 全局排除掉。
