@@ -125,6 +125,57 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     root.toString
   }
 
+  /** Materialize a backup whose slot 103 column group spans **two** binlog
+    * files (mirrors the `multiFile = true` fixture: `103/1` + `103/2`), with
+    * the same total rows as the single-file [[materializeBackup]] shape.
+    */
+  private def materializeMultiFileBackup(root: java.nio.file.Path): String = {
+    val seg =
+      Paths.get(
+        root.toString,
+        "binlogs",
+        "insert_log",
+        "444",
+        "555",
+        "777",
+        "777"
+      )
+    writeParquetAt(
+      Paths.get(seg.toString, "103", "1"),
+      groupASchema,
+      List(
+        f =>
+          f.newGroup()
+            .append("pk", 1L)
+            .append("row_id", 10L)
+            .append("ts", 100L),
+        f =>
+          f.newGroup()
+            .append("pk", 2L)
+            .append("row_id", 11L)
+            .append("ts", 101L)
+      )
+    )
+    writeParquetAt(
+      Paths.get(seg.toString, "103", "2"),
+      groupASchema,
+      List(
+        f =>
+          f.newGroup().append("pk", 3L).append("row_id", 12L).append("ts", 102L)
+      )
+    )
+    writeParquetAt(
+      Paths.get(seg.toString, "101", "1"),
+      groupCSchema,
+      List(
+        f => f.newGroup().append("name", "a"),
+        f => f.newGroup().append("name", "b"),
+        f => f.newGroup().append("name", "c")
+      )
+    )
+    root.toString
+  }
+
   private def backupFixture(
       format: String = "",
       groupAPath: String,
@@ -627,28 +678,47 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "toV2Segments rejects multi-file column groups (milvus-storage bug)"
+    "toV2Segments recovers per-file row counts for multi-file column groups"
   ) {
-    val meta = BackupMetaReader
-      .parse(
-        backupFixture(
-          groupAPath = SourceKeys._1,
-          groupBPath = SourceKeys._2,
-          groupCPath = SourceKeys._3,
-          deltaPath = SourceKeys._4
+    val dir = Files.createTempDirectory("milvus-backup-multi-")
+    try {
+      val backupDir = materializeMultiFileBackup(dir)
+      val meta = BackupMetaReader
+        .parse(
+          backupFixture(
+            groupAPath = SourceKeys._1,
+            groupBPath = SourceKeys._2,
+            groupCPath = SourceKeys._3,
+            deltaPath = SourceKeys._4,
+            multiFile = true
+          )
         )
+        .getOrElse(fail("expected Right"))
+
+      val segments = BackupMetaReader
+        .toV2Segments(meta, new Configuration(), backupDir, collectionId = 444L)
+        .getOrElse(fail("expected Right"))
+
+      val seg = segments.find(_.segmentId == 777L).get
+      seg.numOfRows shouldBe 3L
+      // Slot 103 spans two binlog files; per-file row counts must be recovered
+      // (not group-cumulative), otherwise the packed reader silently truncates
+      // the second file.
+      val slot103 = seg.columnGroups.find(_.slotFieldId == 103L).get
+      slot103.filePaths shouldBe Seq(
+        s"$backupDir/binlogs/insert_log/444/555/777/777/103/1",
+        s"$backupDir/binlogs/insert_log/444/555/777/777/103/2"
       )
-      .getOrElse(fail("expected Right"))
-    val result = BackupMetaReader.toV2Segments(
-      meta,
-      new Configuration(),
-      "/tmp/backup",
-      collectionId = 444L
-    )
-    result.isLeft shouldBe true
-    result.left.toOption.get.getMessage should include(
-      "multi-file column groups"
-    )
+      slot103.fileRowCounts shouldBe Seq(2L, 1L)
+
+      val slot101 = seg.columnGroups.find(_.slotFieldId == 101L).get
+      slot101.filePaths shouldBe Seq(
+        s"$backupDir/binlogs/insert_log/444/555/777/777/101/1"
+      )
+      slot101.fileRowCounts shouldBe Seq(3L)
+    } finally {
+      deleteRecursively(dir)
+    }
   }
 
   test(

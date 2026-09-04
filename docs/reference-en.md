@@ -163,11 +163,11 @@ The Spark read schema must be provided via `.schema()` or is derived from the
 backup meta; without `.schema()` the read fails loudly if the meta cannot be
 read. Reading a dynamic collection (`enable_dynamic_field=true`) requires the
 backup meta to record the `$meta` field — captured only with milvus-backup
-etcd access (`--backup_index_extra`) and **v0.5.13+**. Two backup shapes abort
-the read at planning time: a column group spanning more than one binlog file
-(an unfixed milvus-storage bug — see the design doc) and a collection with
-struct-array fields (`struct_array_fields`). S3 credentials use the existing
-`fs.*` options (`fs.address`,
+etcd access (`--backup_index_extra`) and **v0.5.13+**. A column group spanning
+multiple binlog files is supported (milvus-storage#657 fixed the per-file row
+range encoding; see the design doc). One backup shape still aborts the read at
+planning time: a collection with struct-array fields (`struct_array_fields`).
+S3 credentials use the existing `fs.*` options (`fs.address`,
 `fs.access_key_id`, `fs.access_key_value`, ...); the bucket comes from the
 `milvus.backup.dir` URI.
 

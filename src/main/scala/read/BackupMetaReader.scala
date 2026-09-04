@@ -50,20 +50,22 @@ import io.milvus.grpc.schema.{
   * separate `DestKey` under the backup dir and records only the source key in
   * the meta — so object paths are always reconstructed from `backupDir` plus
   * the collection/partition/group/segment/field/log IDs, never taken from
-  * `log_path`. Three gaps vs. a Milvus snapshot are closed here:
-  *   1. milvus-backup persists only `log_size` per binlog, not `entries_num`.
-  *      The per-file row count is recovered by reading each (single) parquet
-  *      footer's row count
-  *      ([MilvusParquetFooterReader.readFieldIdsAndRowCount]). 2. The AVRO
-  *      segment-info (and hence the slot -> real field ID mapping) is not
-  *      copied by the backup; the real field IDs are recovered from the **head
-  *      file** of each column group via that file's own parquet schema
-  *      ([MilvusParquetFooterReader.readFieldIdsAndRowCount]) — matching
-  *      V2SegmentLoader, which assumes all files in a group share the schema.
-  *      3. L0 delete-only segments are created by Milvus without a
-  *      `StorageVersion` (0/omitted), so they are handled before any
-  *      storage-version filtering.
-  *
+   * `log_path`. Three gaps vs. a Milvus snapshot are closed here:
+   *   1. milvus-backup persists only `log_size` per binlog, not `entries_num`.
+   *      Per-file row counts are recovered by reading each binlog's parquet
+   *      footer ([MilvusParquetFooterReader.readRowCount], with the head file's
+   *      footer read once for both field IDs and its row count via
+   *      [MilvusParquetFooterReader.readFieldIdsAndRowCount]).
+   *   2. The AVRO
+   *      segment-info (and hence the slot -> real field ID mapping) is not
+   *      copied by the backup; the real field IDs are recovered from the **head
+   *      file** of each column group via that file's own parquet schema
+   *      ([MilvusParquetFooterReader.readFieldIdsAndRowCount]) — matching
+   *      V2SegmentLoader, which assumes all files in a group share the schema.
+   *   3. L0 delete-only segments are created by Milvus without a
+   *      `StorageVersion` (0/omitted), so they are handled before any
+   *      storage-version filtering.
+   *
   * Only StorageV2 (packed parquet, `storage_version == 2`) data segments are
   * supported; anything else fails hard rather than returning a partial dataset.
   */
@@ -409,11 +411,25 @@ object BackupMetaReader extends Logging {
     math.max(2, math.min(cores, 8))
   }
 
+  /** Bounded, daemon thread pool for per-file parquet footer reads on the
+    * driver (a HEAD + one tail range GET each). Footer reads are I/O-bound, so
+    * fanning them out avoids a serialized round trip per binlog before any
+    * Spark task is scheduled.
+    *
+    * The inner tail-file reads run on their own pool, separate from
+    * [[SegmentReadPool]], so a segment worker blocked on `Future.get()` for its
+    * tail reads can never starve those reads of threads (a single shared pool
+    * would deadlock when every worker waits on tasks that are queued behind
+    * it).
+    */
+  private val FooterReadPool: ExecutorService = Executors.newFixedThreadPool(
+    FooterReadThreadCount,
+    daemonThreadFactory("backup-footer-read")
+  )
+
   /** Bounded, daemon thread pool for segment-level conversion (each segment's
-    * footer reads are independent). Only column groups with a single binlog
-    * file are supported, so each segment does one footer read per column group
-    * and cross-segment parallelism is what keeps a large backup from stalling
-    * the driver.
+    * footer reads are independent). See [[FooterReadPool]] for the deadlock
+    * rationale for keeping this separate from the per-file pool.
     */
   private val SegmentReadPool: ExecutorService = Executors.newFixedThreadPool(
     FooterReadThreadCount,
@@ -596,22 +612,6 @@ object BackupMetaReader extends Logging {
             )
           }
           val sorted = fieldBinlog.binlogs.sortBy(_.logId)
-          // Guard: a column group spanning multiple binlog files is rejected.
-          // milvus-storage's BuildLoonColumnGroups encodes per-file row counts
-          // as group-cumulative ranges, which the packed reader intersects
-          // against each file's own zero-based row-group offsets, so file i > 0
-          // is silently truncated (zero rows when earlier files are at least as
-          // large). Refuse loudly rather than return a short DataFrame; the fix
-          // belongs in milvus-storage (per-file, not cumulative, indices).
-          if (sorted.size > 1) {
-            throw new IllegalStateException(
-              s"backup segment ${seg.segmentId} has a column group (slot " +
-                s"${fieldBinlog.fieldId}) spanning ${sorted.size} binlog files; " +
-                "multi-file column groups are unsupported until " +
-                "milvus-storage BuildLoonColumnGroups is fixed (per-file, not " +
-                "group-cumulative, row ranges)"
-            )
-          }
           // Hadoop-qualified paths for the footer reads; the native reader
           // gets bucket-relative keys in `filePaths`.
           val hadoopPaths = sorted.map(b =>
@@ -620,9 +620,9 @@ object BackupMetaReader extends Logging {
           val nativePaths = sorted.map(b =>
             nativeInsertLogPath(backupDir, seg, fieldBinlog.fieldId, b.logId)
           )
-          // The (single) file's footer is read once for both the real field IDs
+          // The head file's footer is read once for both the real field IDs
           // (which live in the parquet schema, not the backup meta) and its row
-          // count.
+          // count; the remaining files' row counts are read in parallel.
           val headInfo = MilvusParquetFooterReader.readFieldIdsAndRowCount(
             fs,
             hadoopPaths.head
@@ -636,10 +636,25 @@ object BackupMetaReader extends Logging {
                 err
               )
           }
+          val tailRowCounts = if (hadoopPaths.size > 1) {
+            readRowCountsInParallel(
+              fs,
+              hadoopPaths.tail,
+              seg.segmentId,
+              fieldBinlog.fieldId
+            ) match {
+              case Right(counts) => counts
+              case Left(err)     => throw err
+            }
+          } else Seq.empty
           V2ColumnGroup(
             fieldIds = headInfo.fieldIds,
             filePaths = nativePaths,
-            fileRowCounts = Seq(headInfo.rowCount),
+            // Per-file row counts (the packed reader derives per-file [0, rc_i)
+            // ranges); the BuildLoonColumnGroups fix (milvus-storage#657) made
+            // multi-file column groups safe, so a group may span several binlog
+            // files.
+            fileRowCounts = headInfo.rowCount +: tailRowCounts,
             slotFieldId = fieldBinlog.fieldId
           )
         }
@@ -763,6 +778,38 @@ object BackupMetaReader extends Logging {
       seg.binlogs.isEmpty || seg.binlogs.forall(_.binlogs.isEmpty)
     hasDeltas && (seg.isL0 ||
       (seg.storageVersion == 2L && binlogsEmpty && seg.numOfRows == 0L))
+  }
+
+  /** Read the row count of every path concurrently, preserving input order. All
+    * reads share the caller-supplied `FileSystem` (thread-safe for concurrent
+    * opens), so no per-file S3A client is constructed.
+    */
+  private def readRowCountsInParallel(
+      fs: FileSystem,
+      paths: Seq[String],
+      segmentId: Long,
+      slotFieldId: Long
+  ): Either[Throwable, Seq[Long]] = {
+    try {
+      val futures = paths.map { p =>
+        FooterReadPool.submit(new Callable[Long] {
+          override def call(): Long =
+            MilvusParquetFooterReader.readRowCount(fs, p) match {
+              case Right(n) => n
+              case Left(err) =>
+                throw new RuntimeException(
+                  s"failed to read row count from parquet $p " +
+                    s"(backup segment $segmentId, slot $slotFieldId): " +
+                    s"${err.getMessage}",
+                  err
+                )
+            }
+        })
+      }
+      Right(futures.map(_.get()))
+    } catch {
+      case NonFatal(e) => Left(e)
+    }
   }
 
   // -------------------------------------------------------------------------
