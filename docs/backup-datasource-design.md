@@ -89,9 +89,10 @@ Branch precedence: snapshot mode > backup mode > client mode.
 Two gaps versus a Milvus snapshot are closed in `BackupMetaReader`:
 
 1. **Per-file row counts** (`fileRowCounts`) — always recovered from the parquet
-   footers (the meta never carries `entries_num`); each column group is a single
-   file read once via `readFieldIdsAndRowCount` (multi-file column groups are
-   rejected, see §7).
+   footers (the meta never carries `entries_num`); the **head file** of each
+   column group is read once via `readFieldIdsAndRowCount` for both field IDs
+   and its row count, and any remaining files' row counts are read in parallel
+   via `readRowCount` (multi-file column groups are supported, see §7).
 2. **Slot → real field ID mapping** — the AVRO segment-info is not copied by
    the backup, so real field IDs are recovered from the **head file** of each
    column group via `readFieldIdsAndRowCount` (all files in a group share the
@@ -265,18 +266,15 @@ Behavior:
   Seq.empty` and are skipped during partition planning. A StorageV2 data
   segment with rows but no binlogs fails hard rather than silently dropping
   rows.
-- **Known external bug — multi-file column groups rejected.** The connector
-  feeds per-file row counts to `MilvusStorageColumnGroups.createFromGroups`,
-  but milvus-storage's `BuildLoonColumnGroups` (`v2_column_groups_builder.cpp`)
-  writes them as group-cumulative `start_index`/`end_index` while
-  `ColumnGroupReaderImpl::open` intersects them against per-file row-group
-  offsets, so a column group spanning more than one binlog file would return
-  fewer rows (file `i > 0` truncated, zero when earlier files are at least as
-  large). Rather than silently read short, the backup planner **rejects any
-  column group with more than one file** (`buildV2SegmentWithFs`); the fix
-  belongs in milvus-storage (per-file, not cumulative, indices) plus a
-  submodule bump, after which the guard can be removed. The snapshot/backfill
-  path shares `createFromGroups` and is affected by the same bug.
+- **Multi-file column groups are supported.** A column group may span several
+  binlog files (multiple flushes). Per-file row counts are recovered from each
+  file's parquet footer (head file via `readFieldIdsAndRowCount`, the rest in
+  parallel via `readRowCount`) and fed to
+  `MilvusStorageColumnGroups.createFromGroups`. The earlier rejection guard was
+  removed after milvus-storage fixed `BuildLoonColumnGroups`
+  (`v2_column_groups_builder.cpp`, milvus-storage#657) to write per-file
+  `[0, rc_i)` indices instead of group-cumulative ranges; the submodule pin was
+  bumped to that fix (`cb22dfa`).
 - Dynamic collections: a default backup (no etcd access) does not record the
   `$meta` field, so reading it would return null `$meta` rows; such backups are
   rejected with a pointer to `--backup_index_extra` (requires milvus-backup
@@ -318,8 +316,11 @@ Behavior:
   double-slashes are handled: the native key never gains a leading slash and
   all trailing slashes are stripped (both would be different S3 keys).
 - Column-group footer reads run on a single bounded pool (`SegmentReadPool`,
-  segment-level parallelism). Multi-file column groups are rejected (see §7),
-  so there are no nested per-file tail reads and therefore no worker-blocks-on-its-own-pool deadlock risk.
+  segment-level parallelism). Per-file tail row-count reads for multi-file
+  column groups run on their own pool (`FooterReadPool`), kept separate so a
+  segment worker blocked on `Future.get()` for its tail reads can never starve
+  those reads of threads (a single shared pool would deadlock when every worker
+  waits on tasks queued behind it).
 - A dynamic collection whose `$meta` field is present is not duplicated by the
   computed schema.
 - Local paths (`/data/backup/...` or `file:///...`) are exercised by the
