@@ -111,6 +111,27 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     ex.getMessage should include("mutually exclusive")
   }
 
+  test("resolveInputPath treats empty flag values as absent") {
+    // Template wrappers keep optional keys with empty values; an empty
+    // --parquet must not trip the mutual-exclusion check nor shadow a
+    // populated --input-path.
+    BackfillApp.resolveInputPath(
+      Map("parquet" -> "", "input-path" -> "s3://bucket/backfill.lance")
+    ) shouldBe "s3://bucket/backfill.lance"
+    BackfillApp.resolveInputPath(
+      Map("parquet" -> " ", "input-path" -> "/tmp/a.parquet")
+    ) shouldBe "/tmp/a.parquet"
+  }
+
+  test("resolveInputPath treats a sole empty path as missing") {
+    an[IllegalArgumentException] should be thrownBy {
+      BackfillApp.resolveInputPath(Map("parquet" -> ""))
+    }
+    an[IllegalArgumentException] should be thrownBy {
+      BackfillApp.resolveInputPath(Map("input-path" -> ""))
+    }
+  }
+
   test("resolveInputPath requires an input path") {
     an[IllegalArgumentException] should be thrownBy {
       BackfillApp.resolveInputPath(Map.empty)

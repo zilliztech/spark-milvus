@@ -477,28 +477,32 @@ object MilvusBackfill {
 
   /** Read the backfill input by dispatching on `config.inputFormat`.
     *
-    * `BackfillConfig.validate()` already rejects recognized-but-unimplemented
-    * formats (iceberg, lance) before any snapshot/segment work; this branch
-    * remains as a defensive safety net for embedded callers that bypass
-    * validate().
+    * The guard is keyed to the same `ImplementedInputFormats` set that
+    * `BackfillConfig.validate()` uses, so the two cannot drift: a format with
+    * a reader is dispatched here, anything else fails with the same
+    * not-implemented contract. `run()` rejects unimplemented formats earlier,
+    * at validate() before any snapshot/S3 work.
     */
   private def readBackfillData(
       spark: SparkSession,
       rawPath: String,
       config: BackfillConfig
-  ): Either[BackfillError, BackfillSource] =
-    config.inputFormat.trim match {
-      case BackfillConfig.DefaultInputFormat =>
-        readParquet(spark, rawPath, config)
-      case other =>
-        Left(
-          DataReadError(
-            path = rawPath,
-            message = s"Input format '$other' is not supported yet; only " +
-              s"'${BackfillConfig.DefaultInputFormat}' is currently available"
-          )
+  ): Either[BackfillError, BackfillSource] = {
+    val format = config.inputFormat.trim
+    if (!BackfillConfig.ImplementedInputFormats.contains(format)) {
+      return Left(
+        DataReadError(
+          path = rawPath,
+          message = s"Input format '$format' is not implemented; only " +
+            s"${BackfillConfig.ImplementedInputFormats.mkString("[", ", ", "]")} " +
+            "have a reader"
         )
+      )
     }
+    format match {
+      case "parquet" => readParquet(spark, rawPath, config)
+    }
+  }
 
   private def readParquet(
       spark: SparkSession,

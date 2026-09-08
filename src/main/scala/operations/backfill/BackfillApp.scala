@@ -34,8 +34,10 @@ object BackfillApp {
     val parsed = parseArgs(args)
 
     val parquetPath = resolveInputPath(parsed)
-    val inputFormat =
-      parsed.getOrElse("input-format", BackfillConfig.DefaultInputFormat)
+    val inputFormat = parsed
+      .get("input-format")
+      .filter(_.trim.nonEmpty)
+      .getOrElse(BackfillConfig.DefaultInputFormat)
     val snapshotPath = parsed.getOrElse(
       "snapshot",
       throw new IllegalArgumentException("--snapshot is required")
@@ -177,16 +179,22 @@ object BackfillApp {
   /** Resolve the input data path from `--parquet` (legacy) or `--input-path`
     * (format-neutral alias). Supplying both is a config mistake, not an
     * override, so it fails fast instead of silently picking one.
+    *
+    * Template-driven spark-submit wrappers often keep optional keys with
+    * empty values (e.g. `--parquet "$LEGACY"` while migrating to
+    * `--input-path`); empty values are treated as absent, mirroring
+    * `MilvusOption.nonEmptyOption`.
     */
   private[backfill] def resolveInputPath(parsed: Map[String, String]): String = {
-    if (parsed.contains("parquet") && parsed.contains("input-path")) {
+    val parquetPath = parsed.get("parquet").filter(_.trim.nonEmpty)
+    val inputPath = parsed.get("input-path").filter(_.trim.nonEmpty)
+    if (parquetPath.nonEmpty && inputPath.nonEmpty) {
       throw new IllegalArgumentException(
         "--parquet and --input-path are mutually exclusive; use --input-path"
       )
     }
-    parsed
-      .get("parquet")
-      .orElse(parsed.get("input-path"))
+    parquetPath
+      .orElse(inputPath)
       .getOrElse(
         throw new IllegalArgumentException(
           "--parquet (or --input-path) is required"

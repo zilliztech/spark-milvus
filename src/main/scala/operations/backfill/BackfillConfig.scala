@@ -72,9 +72,8 @@ case class BackfillConfig(
     sourceS3Region: Option[String] = None,
 
     // Input data source format. "parquet" is the only implemented reader;
-    // "iceberg" and "lance" are recognized by validation so configs can be
-    // authored ahead of their readers, but readBackfillData rejects them
-    // until the corresponding reader lands.
+    // "iceberg" and "lance" are recognized as valid format names but have no
+    // reader yet, so validate() rejects them until a reader lands.
     inputFormat: String = BackfillConfig.DefaultInputFormat,
 
     // Writer configuration
@@ -430,9 +429,9 @@ object BackfillConfig {
   private[backfill] val AllowedInputFormats =
     Set("parquet", "iceberg", "lance")
   // Subset of AllowedInputFormats with a working reader. validate() rejects
-  // recognized-but-unimplemented formats here, fail-fast at config time,
-  // instead of letting the job burn snapshot/S3 work before readBackfillData
-  // rejects the format. Each new reader extends this set.
+  // recognized-but-unimplemented formats here (fail-fast at config time), and
+  // readBackfillData guards its per-format dispatch on the same set so the two
+  // cannot drift. Each new reader extends this set and adds a dispatch arm.
   private[backfill] val ImplementedInputFormats = Set("parquet")
 
   private[backfill] val HadoopS3CredentialsProvider =
