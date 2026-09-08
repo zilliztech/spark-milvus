@@ -793,6 +793,32 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     }
   }
 
+  test(
+    "MilvusBackfill.run rejects unimplemented inputFormat at config validation"
+  ) {
+    BackfillConfig.AllowedInputFormats
+      .diff(BackfillConfig.ImplementedInputFormats)
+      .foreach { format =>
+        val cfg = BackfillConfig(
+          s3Endpoint = "localhost:9000",
+          s3BucketName = "b",
+          s3AccessKey = "minioadmin",
+          s3SecretKey = "minioadmin",
+          inputFormat = format
+        )
+        // An empty snapshotPath would otherwise be read; failing at
+        // config.validate() proves the error short-circuits before any
+        // snapshot/S3 work.
+        MilvusBackfill.run(spark, "file:///unused.input", "", cfg) match {
+          case Left(error) =>
+            error.message should include("Invalid configuration")
+            error.message should include(format)
+          case Right(_) =>
+            fail(s"expected unimplemented inputFormat '$format' to fail")
+        }
+      }
+  }
+
   test("getMilvusReadOptions includes AK/SK when s3UseIam=false") {
     val cfg = BackfillConfig(
       s3Endpoint = "minio:9000",

@@ -179,6 +179,14 @@ case class BackfillConfig(
         s"inputFormat must be one of ${BackfillConfig.AllowedInputFormats
             .mkString("[", ", ", "]")} (got '$inputFormat')"
       )
+    } else if (
+      !BackfillConfig.ImplementedInputFormats.contains(inputFormat.trim)
+    ) {
+      Left(
+        s"inputFormat '$inputFormat' is recognized but not yet implemented; " +
+          s"only ${BackfillConfig.ImplementedInputFormats.mkString("[", ", ", "]")} " +
+          "have a reader"
+      )
     } else {
       // Same invariant for the source (input parquet) bucket. Any field
       // left as None falls back to the main credentials, which we already
@@ -421,6 +429,11 @@ object BackfillConfig {
   private[backfill] val DefaultInputFormat = "parquet"
   private[backfill] val AllowedInputFormats =
     Set("parquet", "iceberg", "lance")
+  // Subset of AllowedInputFormats with a working reader. validate() rejects
+  // recognized-but-unimplemented formats here, fail-fast at config time,
+  // instead of letting the job burn snapshot/S3 work before readBackfillData
+  // rejects the format. Each new reader extends this set.
+  private[backfill] val ImplementedInputFormats = Set("parquet")
 
   private[backfill] val HadoopS3CredentialsProvider =
     "fs.s3a.aws.credentials.provider"

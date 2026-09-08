@@ -477,9 +477,10 @@ object MilvusBackfill {
 
   /** Read the backfill input by dispatching on `config.inputFormat`.
     *
-    * Only "parquet" has a reader today; "iceberg" and "lance" pass config
-    * validation but are rejected here with an explicit unsupported-format
-    * error until their readers land.
+    * `BackfillConfig.validate()` already rejects recognized-but-unimplemented
+    * formats (iceberg, lance) before any snapshot/segment work; this branch
+    * remains as a defensive safety net for embedded callers that bypass
+    * validate().
     */
   private def readBackfillData(
       spark: SparkSession,
