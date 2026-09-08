@@ -475,9 +475,31 @@ object MilvusBackfill {
     }
   }
 
-  /** Read backfill data from Parquet file
+  /** Read the backfill input by dispatching on `config.inputFormat`.
+    *
+    * Only "parquet" has a reader today; "iceberg" and "lance" pass config
+    * validation but are rejected here with an explicit unsupported-format
+    * error until their readers land.
     */
   private def readBackfillData(
+      spark: SparkSession,
+      rawPath: String,
+      config: BackfillConfig
+  ): Either[BackfillError, BackfillSource] =
+    config.inputFormat.trim match {
+      case BackfillConfig.DefaultInputFormat =>
+        readParquet(spark, rawPath, config)
+      case other =>
+        Left(
+          DataReadError(
+            path = rawPath,
+            message = s"Input format '$other' is not supported yet; only " +
+              s"'${BackfillConfig.DefaultInputFormat}' is currently available"
+          )
+        )
+    }
+
+  private def readParquet(
       spark: SparkSession,
       rawPath: String,
       config: BackfillConfig

@@ -82,6 +82,41 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     parsed("source-use-iam") shouldBe "true"
   }
 
+  test("parseArgs accepts --input-path and --input-format") {
+    val parsed = BackfillApp.parseArgs(
+      Array("--input-path", "s3://bucket/backfill.lance", "--input-format", "lance")
+    )
+    parsed("input-path") shouldBe "s3://bucket/backfill.lance"
+    parsed("input-format") shouldBe "lance"
+  }
+
+  test("resolveInputPath keeps --parquet as the legacy alias") {
+    BackfillApp.resolveInputPath(
+      Map("parquet" -> "/tmp/data.parquet")
+    ) shouldBe "/tmp/data.parquet"
+  }
+
+  test("resolveInputPath accepts --input-path as the format-neutral alias") {
+    BackfillApp.resolveInputPath(
+      Map("input-path" -> "s3://bucket/backfill.lance")
+    ) shouldBe "s3://bucket/backfill.lance"
+  }
+
+  test("resolveInputPath rejects both --parquet and --input-path") {
+    val ex = intercept[IllegalArgumentException] {
+      BackfillApp.resolveInputPath(
+        Map("parquet" -> "/tmp/a.parquet", "input-path" -> "/tmp/b.lance")
+      )
+    }
+    ex.getMessage should include("mutually exclusive")
+  }
+
+  test("resolveInputPath requires an input path") {
+    an[IllegalArgumentException] should be thrownBy {
+      BackfillApp.resolveInputPath(Map.empty)
+    }
+  }
+
   test("parseArgs throws on missing value for non-flag") {
     an[IllegalArgumentException] should be thrownBy {
       BackfillApp.parseArgs(Array("--parquet"))

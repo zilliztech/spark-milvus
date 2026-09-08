@@ -13,7 +13,12 @@ import com.zilliz.spark.connector.MilvusOption
   * --s3-secret-key <secret> \ [--s3-root-path <path>] [--s3-region <region>]
   * [--s3-cloud-provider aws|aliyun|gcp|azure|tencent|huawei] [--s3-use-ssl] \
   * [--batch-size <n>] [--output-result <path>] \ [--mode
-  * replace|coalesce|overwrite]
+  * replace|coalesce|overwrite] [--input-format parquet|iceberg|lance]
+  *
+  * --input-path <path> is a format-neutral alias for --parquet (mutually
+  * exclusive with it). --input-format selects the input reader; only
+  * "parquet" is implemented, iceberg/lance are validated but rejected until
+  * their readers land.
   *
   * --mode:
   *   - replace: parquet is absolute source of truth; unmatched source rows get
@@ -28,10 +33,9 @@ object BackfillApp {
   def main(args: Array[String]): Unit = {
     val parsed = parseArgs(args)
 
-    val parquetPath = parsed.getOrElse(
-      "parquet",
-      throw new IllegalArgumentException("--parquet is required")
-    )
+    val parquetPath = resolveInputPath(parsed)
+    val inputFormat =
+      parsed.getOrElse("input-format", BackfillConfig.DefaultInputFormat)
     val snapshotPath = parsed.getOrElse(
       "snapshot",
       throw new IllegalArgumentException("--snapshot is required")
@@ -85,6 +89,7 @@ object BackfillApp {
       sourceS3Region = parsed.get("source-s3-region"),
       batchSize = parsed.getOrElse("batch-size", "1024").toInt,
       columnMapping = parsed.get("column-mapping").map(parseColumnMapping),
+      inputFormat = inputFormat,
       mode = parsed.getOrElse("mode", MilvusOption.BackfillModeCoalesce)
     )
 
@@ -147,6 +152,8 @@ object BackfillApp {
   // later inside the AWS default provider chain.
   private[backfill] val KvFlags: Set[String] = Set(
     "parquet",
+    "input-path",
+    "input-format",
     "snapshot",
     "s3-endpoint",
     "s3-bucket",
@@ -166,6 +173,26 @@ object BackfillApp {
   )
 
   private[backfill] val KnownFlags: Set[String] = BoolFlags ++ KvFlags
+
+  /** Resolve the input data path from `--parquet` (legacy) or `--input-path`
+    * (format-neutral alias). Supplying both is a config mistake, not an
+    * override, so it fails fast instead of silently picking one.
+    */
+  private[backfill] def resolveInputPath(parsed: Map[String, String]): String = {
+    if (parsed.contains("parquet") && parsed.contains("input-path")) {
+      throw new IllegalArgumentException(
+        "--parquet and --input-path are mutually exclusive; use --input-path"
+      )
+    }
+    parsed
+      .get("parquet")
+      .orElse(parsed.get("input-path"))
+      .getOrElse(
+        throw new IllegalArgumentException(
+          "--parquet (or --input-path) is required"
+        )
+      )
+  }
 
   // Parse `src1:tgt1,src2:tgt2,...` into a map. Empty segments and malformed
   // entries raise a clear error rather than silently dropping bindings.

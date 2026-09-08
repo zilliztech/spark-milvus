@@ -71,6 +71,12 @@ case class BackfillConfig(
     sourceS3UseIam: Option[Boolean] = None,
     sourceS3Region: Option[String] = None,
 
+    // Input data source format. "parquet" is the only implemented reader;
+    // "iceberg" and "lance" are recognized by validation so configs can be
+    // authored ahead of their readers, but readBackfillData rejects them
+    // until the corresponding reader lands.
+    inputFormat: String = BackfillConfig.DefaultInputFormat,
+
     // Writer configuration
     batchSize: Int = 1024,
     customOutputPath: Option[String] = None,
@@ -168,6 +174,11 @@ case class BackfillConfig(
       )
     } else if (normalizedRoleArn.isEmpty && hasRoleDetails) {
       Left("s3RoleSessionName and s3ExternalId require s3RoleArn")
+    } else if (!BackfillConfig.AllowedInputFormats.contains(inputFormat.trim)) {
+      Left(
+        s"inputFormat must be one of ${BackfillConfig.AllowedInputFormats
+            .mkString("[", ", ", "]")} (got '$inputFormat')"
+      )
     } else {
       // Same invariant for the source (input parquet) bucket. Any field
       // left as None falls back to the main credentials, which we already
@@ -406,6 +417,10 @@ object BackfillConfig {
   private[backfill] val AllowedCloudProviders =
     Set("aws", "gcp", "aliyun", "azure", "tencent", "huawei")
   private[backfill] val NativeAssumeRoleCloudProviders = Set("aws", "aliyun")
+
+  private[backfill] val DefaultInputFormat = "parquet"
+  private[backfill] val AllowedInputFormats =
+    Set("parquet", "iceberg", "lance")
 
   private[backfill] val HadoopS3CredentialsProvider =
     "fs.s3a.aws.credentials.provider"
