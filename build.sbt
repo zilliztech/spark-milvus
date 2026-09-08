@@ -130,17 +130,23 @@ lazy val root = (project in file("."))
     // Fork JVM for run to properly load native libraries
     run / fork := true,
 
-    // Unit tests: fast, no external services. 10s per test to avoid hanging.
+    // Unit tests: fast, no external services. `-W` enables ScalaTest's
+    // slowpoke detection: it emits an alert if a test exceeds the threshold,
+    // but it never fails, cancels or interrupts a test — it is a signal, not
+    // a hard timeout. `:=` (not `+=`) keeps the option list config-local.
     inConfig(Test)(nativeTestSettings ++ Seq(
-      testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "10", "10")
+      testOptions := Seq(Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "10", "10"))
     )),
 
-    // Integration tests: need Milvus server (:19530) + MinIO (:9000).
-    // Give them a generous timeout since they run against real infrastructure.
+    // Integration tests: need Milvus server (:19530) + MinIO (:9000). Same
+    // slowpoke detection with a larger threshold. `:=` is required: because
+    // `it extend Test`, a `+=` would delegate through to `Test / testOptions`
+    // and concatenate both `-W 10 10` and `-W 600 600`, and ScalaTest reads
+    // only the first — silently downgrading integration tests to 10s.
     // Defaults.itSettings points the source/resource dirs at src/it/* (otherwise
     // the config would inherit Test's src/test dirs via `extend Test`).
     inConfig(IntegrationTest)(Defaults.itSettings ++ nativeTestSettings ++ Seq(
-      testOptions += Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "600", "600")
+      testOptions := Seq(Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "600", "600"))
     )),
 
     // JVM options for run
