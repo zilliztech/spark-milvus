@@ -91,11 +91,15 @@ lazy val IntegrationTest = config("it") extend Test
 
 // Shared JVM/native setup required by both the unit-test and integration-test
 // source sets (native library loading, Arrow JNI access, JNI thin JAR).
+// javaOptions uses `:=` (not `+=`): sbt has no config-scoped default for it, so
+// under `it extend Test` a `+=` would delegate to the already-populated
+// `Test / javaOptions` and append the list a second time (see the testOptions
+// note below).
 lazy val nativeTestSettings: Seq[Setting[_]] = Seq(
   fork := true,
   parallelExecution := true,
   logBuffered := false,
-  javaOptions ++= Seq(
+  javaOptions := Seq(
     "-Xss2m",
     "-Xmx4g",
     s"-Djava.library.path=${(baseDirectory.value / "src/main/resources/native").getAbsolutePath}",
