@@ -43,8 +43,9 @@ case class SegmentBackfillResult(
       * kept separate so consumers don't have to rely on that invariant.
       */
     sourceRowCount: Long = 0L,
-    /** Source rows whose PK was matched in the backfill parquet. Derived from a
-      * `__bf_matched__` marker column injected before the left join.
+    /** Source rows whose resolved join key was matched in the backfill parquet.
+      * Derived from a `__bf_matched__` marker column injected before the left
+      * join.
       */
     matchedRowCount: Long = 0L,
     /** Coalesce-mode only: per new-field count of rows whose written value came
@@ -53,7 +54,7 @@ case class SegmentBackfillResult(
       */
     usedSourceByField: Map[String, Long] = Map.empty,
     /** Coalesce-mode only: per new-field count of rows whose written value came
-      * from the backfill data file (source was null and the PK matched a
+      * from the backfill data file (source was null and the join key matched a
       * non-null backfill value). Empty in overwrite mode.
       */
     usedDataFileByField: Map[String, Long] = Map.empty
@@ -93,7 +94,6 @@ case class BackfillResult(
   def summary: String = {
     val v2Count = segmentResults.count(_._2.v2Artifact.isDefined)
     val sourceRate = matchRateStr(totalMatchedRows, totalSourceRows)
-    val dataFileRate = matchRateStr(totalMatchedRows, totalBackfillDataRows)
     val coalesceBlock =
       if (totalUsedSourceByField.isEmpty && totalUsedDataFileByField.isEmpty)
         ""
@@ -112,7 +112,7 @@ case class BackfillResult(
        |  Segments Processed: $segmentsProcessed
        |  Total Source Rows: $totalSourceRows
        |  Total Backfill Data File Rows: $totalBackfillDataRows
-       |  Total Matched Rows: $totalMatchedRows (of source: $sourceRate, of data file: $dataFileRate)
+       |  Total Matched Source Rows: $totalMatchedRows ($sourceRate of source rows)
        |  Total Rows Written: $totalRowsWritten
        |  Execution Time: ${executionTimeMs}ms
        |  Collection ID: $collectionId

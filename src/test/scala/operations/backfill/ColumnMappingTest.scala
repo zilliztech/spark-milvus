@@ -232,6 +232,13 @@ class ColumnMappingTest
   private def resolvedPk(name: String): ResolvedJoinKey =
     ResolvedJoinKey.primaryKey(name, 100L, None)
 
+  private def resolvedPhysical(name: String): ResolvedJoinKey =
+    ResolvedJoinKey.physicalField(
+      name,
+      101L,
+      StructField(name, StringType, nullable = false)
+    )
+
   test(
     "prepareBackfillData keeps legacy pk mapping but uses internal join alias"
   ) {
@@ -277,6 +284,99 @@ class ColumnMappingTest
       "embedding"
     )
     prepared.targetFieldNames shouldBe Seq("embedding")
+  }
+
+  test("prepareBackfillData consumes a same-name physical join field") {
+    val df = buildDf(
+      Seq("external_row_id", "vec"),
+      Seq(Seq("row-1", "v1"))
+    )
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(
+        df,
+        resolvedPhysical("external_row_id"),
+        BackfillJoinKey.PhysicalField("external_row_id"),
+        None,
+        Seq("external_row_id", "vec")
+      )
+      .toOption
+      .get
+
+    prepared.dataFrame.columns.toSeq shouldBe Seq(
+      ResolvedJoinKey.internalColumn(0),
+      "vec"
+    )
+    prepared.targetFieldNames shouldBe Seq("vec")
+    prepared.dataFrame.collect().head.getString(0) shouldBe "row-1"
+  }
+
+  test("prepareBackfillData maps a differently named physical input key") {
+    val df = buildDf(
+      Seq("source_row_id", "vec", "ignored"),
+      Seq(Seq("row-1", "v1", "drop"))
+    )
+    val mapping = Some(
+      Map("source_row_id" -> "external_row_id", "vec" -> "embedding")
+    )
+
+    val prepared = MilvusBackfill
+      .prepareBackfillData(
+        df,
+        resolvedPhysical("external_row_id"),
+        BackfillJoinKey.PhysicalField("external_row_id"),
+        mapping,
+        Seq("external_row_id", "embedding")
+      )
+      .toOption
+      .get
+
+    prepared.dataFrame.columns.toSeq shouldBe Seq(
+      ResolvedJoinKey.internalColumn(0),
+      "embedding"
+    )
+    prepared.targetFieldNames shouldBe Seq("embedding")
+  }
+
+  test("prepareBackfillData rejects a missing physical join field") {
+    val df = buildDf(Seq("pk", "vec"), Seq(Seq(1, "v1")))
+
+    val error = MilvusBackfill
+      .prepareBackfillData(
+        df,
+        resolvedPhysical("external_row_id"),
+        BackfillJoinKey.PhysicalField("external_row_id"),
+        None,
+        Seq("external_row_id", "vec")
+      )
+      .left
+      .toOption
+      .get
+
+    error.message should include("physical join-key column")
+    error.message should include("external_row_id")
+  }
+
+  test("prepareBackfillData requires the mapped physical join-key target") {
+    val df = buildDf(
+      Seq("source_row_id", "vec"),
+      Seq(Seq("row-1", "v1"))
+    )
+
+    val error = MilvusBackfill
+      .prepareBackfillData(
+        df,
+        resolvedPhysical("external_row_id"),
+        BackfillJoinKey.PhysicalField("external_row_id"),
+        Some(Map("source_row_id" -> "wrong_key", "vec" -> "embedding")),
+        Seq("external_row_id", "embedding")
+      )
+      .left
+      .toOption
+      .get
+
+    error.message should include("physical join-key field")
+    error.message should include("external_row_id")
   }
 
   test("prepareBackfillData preserves a target named like the default alias") {

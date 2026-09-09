@@ -40,16 +40,19 @@ def main():
         )
 
         # Get snapshot info
-        info = client.describe_snapshot(snapshot_name=snapshot_name)
+        info = client.describe_snapshot(
+            snapshot_name=snapshot_name,
+            collection_name=collection_name
+        )
 
         # Output as JSON
         result = {
-            "name": info["name"],
-            "description": info["description"],
-            "collection_name": info["collection_name"],
-            "partition_names": info["partition_names"],
-            "create_ts": info["create_ts"],
-            "s3_location": info["s3_location"]
+            "name": info.name,
+            "description": info.description,
+            "collection_name": info.collection_name,
+            "partition_names": info.partition_names,
+            "create_ts": info.create_ts,
+            "s3_location": info.s3_location
         }
         print(json.dumps(result))
 

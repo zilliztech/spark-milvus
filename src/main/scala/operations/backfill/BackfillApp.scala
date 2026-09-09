@@ -13,12 +13,13 @@ import com.zilliz.spark.connector.MilvusOption
   * --s3-secret-key <secret> \ [--s3-root-path <path>] [--s3-region <region>]
   * [--s3-cloud-provider aws|aliyun|gcp|azure|tencent|huawei] [--s3-use-ssl] \
   * [--batch-size <n>] [--output-result <path>] \ [--mode
-  * replace|coalesce|overwrite] [--input-format parquet|iceberg|lance]
+  * replace|coalesce|overwrite] [--join-key <snapshot-field-name>] \
+  * [--input-format parquet|iceberg|lance]
   *
   * --input-path <path> is a format-neutral alias for --parquet (mutually
-  * exclusive with it). --input-format selects the input reader; only
-  * "parquet" is implemented, iceberg/lance are validated but rejected until
-  * their readers land.
+  * exclusive with it). --input-format selects the input reader; only "parquet"
+  * is implemented, iceberg/lance are validated but rejected until their readers
+  * land.
   *
   * --mode:
   *   - replace: parquet is absolute source of truth; unmatched source rows get
@@ -34,66 +35,11 @@ object BackfillApp {
     val parsed = parseArgs(args)
 
     val parquetPath = resolveInputPath(parsed)
-    val inputFormat = parsed
-      .get("input-format")
-      .filter(_.trim.nonEmpty)
-      .getOrElse(BackfillConfig.DefaultInputFormat)
     val snapshotPath = parsed.getOrElse(
       "snapshot",
       throw new IllegalArgumentException("--snapshot is required")
     )
-    val s3Endpoint = parsed.getOrElse(
-      "s3-endpoint",
-      throw new IllegalArgumentException("--s3-endpoint is required")
-    )
-    val s3Bucket = parsed.getOrElse(
-      "s3-bucket",
-      throw new IllegalArgumentException("--s3-bucket is required")
-    )
-    // Optional in IAM/IRSA mode — when both empty, automatically enable use_iam so that
-    // both Milvus FFI and Spark Hadoop S3A defer to the default credentials chain
-    // (env vars, instance profile, web identity token, etc.).
-    val s3AccessKey = parsed.getOrElse("s3-access-key", "")
-    val s3SecretKey = parsed.getOrElse("s3-secret-key", "")
-    val useIam =
-      parsed.contains("use-iam") || (s3AccessKey.isEmpty && s3SecretKey.isEmpty)
-
-    // Optional separate credentials for the backfill input (parquet) bucket.
-    // When unset, the main s3-* credentials above are reused.
-    val sourceUseIamFlag =
-      if (parsed.contains("source-use-iam")) Some(true)
-      else if (
-        parsed.contains("source-s3-access-key") || parsed.contains(
-          "source-s3-secret-key"
-        )
-      ) Some(false)
-      else None
-
-    val baseConfig = BackfillConfig(
-      s3Endpoint = s3Endpoint,
-      s3BucketName = s3Bucket,
-      s3AccessKey = s3AccessKey,
-      s3SecretKey = s3SecretKey,
-      s3UseSSL = parsed.contains("s3-use-ssl"),
-      s3RootPath = parsed.getOrElse("s3-root-path", "files"),
-      s3Region = parsed.getOrElse("s3-region", "us-east-1"),
-      s3CloudProvider = parsed.getOrElse(
-        "s3-cloud-provider",
-        BackfillConfig.DefaultCloudProvider
-      ),
-      s3UseIam = useIam,
-      sourceS3Endpoint = parsed.get("source-s3-endpoint"),
-      sourceS3AccessKey = parsed.get("source-s3-access-key"),
-      sourceS3SecretKey = parsed.get("source-s3-secret-key"),
-      sourceS3UseSSL =
-        if (parsed.contains("source-s3-use-ssl")) Some(true) else None,
-      sourceS3UseIam = sourceUseIamFlag,
-      sourceS3Region = parsed.get("source-s3-region"),
-      batchSize = parsed.getOrElse("batch-size", "1024").toInt,
-      columnMapping = parsed.get("column-mapping").map(parseColumnMapping),
-      inputFormat = inputFormat,
-      mode = parsed.getOrElse("mode", MilvusOption.BackfillModeCoalesce)
-    )
+    val baseConfig = buildConfig(parsed)
 
     // Surface the default (#91) loudly: downstream jobs that omit --mode get
     // fill-if-null, and client-mode callers fail validation without a
@@ -171,21 +117,88 @@ object BackfillApp {
     "batch-size",
     "output-result",
     "column-mapping",
-    "mode"
+    "mode",
+    "join-key"
   )
 
   private[backfill] val KnownFlags: Set[String] = BoolFlags ++ KvFlags
+
+  /** Build the programmatic configuration at one testable CLI boundary. */
+  private[backfill] def buildConfig(
+      parsed: Map[String, String]
+  ): BackfillConfig = {
+    val s3Endpoint = parsed.getOrElse(
+      "s3-endpoint",
+      throw new IllegalArgumentException("--s3-endpoint is required")
+    )
+    val s3Bucket = parsed.getOrElse(
+      "s3-bucket",
+      throw new IllegalArgumentException("--s3-bucket is required")
+    )
+
+    // Optional in IAM/IRSA mode — when both are empty, both Milvus FFI and
+    // Spark Hadoop S3A use the default credentials chain.
+    val s3AccessKey = parsed.getOrElse("s3-access-key", "")
+    val s3SecretKey = parsed.getOrElse("s3-secret-key", "")
+    val useIam =
+      parsed.contains("use-iam") || (s3AccessKey.isEmpty && s3SecretKey.isEmpty)
+
+    val sourceUseIamFlag =
+      if (parsed.contains("source-use-iam")) Some(true)
+      else if (
+        parsed.contains("source-s3-access-key") || parsed.contains(
+          "source-s3-secret-key"
+        )
+      ) Some(false)
+      else None
+
+    BackfillConfig(
+      s3Endpoint = s3Endpoint,
+      s3BucketName = s3Bucket,
+      s3AccessKey = s3AccessKey,
+      s3SecretKey = s3SecretKey,
+      s3UseSSL = parsed.contains("s3-use-ssl"),
+      s3RootPath = parsed.getOrElse("s3-root-path", "files"),
+      s3Region = parsed.getOrElse("s3-region", "us-east-1"),
+      s3CloudProvider = parsed.getOrElse(
+        "s3-cloud-provider",
+        BackfillConfig.DefaultCloudProvider
+      ),
+      s3UseIam = useIam,
+      sourceS3Endpoint = parsed.get("source-s3-endpoint"),
+      sourceS3AccessKey = parsed.get("source-s3-access-key"),
+      sourceS3SecretKey = parsed.get("source-s3-secret-key"),
+      sourceS3UseSSL =
+        if (parsed.contains("source-s3-use-ssl")) Some(true) else None,
+      sourceS3UseIam = sourceUseIamFlag,
+      sourceS3Region = parsed.get("source-s3-region"),
+      batchSize = parsed.getOrElse("batch-size", "1024").toInt,
+      columnMapping = parsed.get("column-mapping").map(parseColumnMapping),
+      inputFormat = parsed
+        .get("input-format")
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .getOrElse(BackfillConfig.DefaultInputFormat),
+      mode = parsed.getOrElse("mode", MilvusOption.BackfillModeCoalesce),
+      joinKey = parsed
+        .get("join-key")
+        .map(value => BackfillJoinKey.PhysicalField(value.trim))
+        .getOrElse(BackfillJoinKey.PrimaryKey)
+    )
+  }
 
   /** Resolve the input data path from `--parquet` (legacy) or `--input-path`
     * (format-neutral alias). Supplying both is a config mistake, not an
     * override, so it fails fast instead of silently picking one.
     *
-    * Template-driven spark-submit wrappers often keep optional keys with
-    * empty values (e.g. `--parquet "$LEGACY"` while migrating to
-    * `--input-path`); empty values are treated as absent, mirroring
+    * Template-driven spark-submit wrappers often keep optional keys with empty
+    * values (e.g. `--parquet "$LEGACY"` while migrating to `--input-path`);
+    * empty values are treated as absent, mirroring
     * `MilvusOption.nonEmptyOption`.
     */
-  private[backfill] def resolveInputPath(parsed: Map[String, String]): String = {
+  private[backfill] def resolveInputPath(
+      parsed: Map[String, String]
+  ): String = {
     val parquetPath = parsed.get("parquet").filter(_.trim.nonEmpty)
     val inputPath = parsed.get("input-path").filter(_.trim.nonEmpty)
     if (parquetPath.nonEmpty && inputPath.nonEmpty) {
