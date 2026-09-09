@@ -805,6 +805,27 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     }
   }
 
+  test("MilvusBackfill.run rejects a physical join key without a snapshot") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "s3.us-west-2.amazonaws.com",
+      s3BucketName = "embedded-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true,
+      joinKey = BackfillJoinKey.PhysicalField("external_id")
+    )
+
+    // An empty snapshot path selects the client-mode path; a physical key has
+    // no schema to resolve against there, so run() must fail before it tries
+    // to build a MilvusClient or read the input.
+    MilvusBackfill.run(spark, "file:///unused.parquet", "", cfg) match {
+      case Left(error) =>
+        error.message should include("external_id")
+        error.message should include("requires a snapshot schema")
+      case Right(_) => fail("expected physical join key to require a snapshot")
+    }
+  }
+
   test("getMilvusReadOptions includes AK/SK when s3UseIam=false") {
     val cfg = BackfillConfig(
       s3Endpoint = "minio:9000",

@@ -239,6 +239,53 @@ object MilvusBackfill {
   private[backfill] def usedBfCol(field: String): String =
     s"__bf_used_bf_${field}__"
 
+  /** Suffix appended to backfill-side target columns while both sides of a
+    * target field are live on the joined frame (coalesce + overwrite).
+    */
+  private[backfill] val BackfillSideSuffix = "__bf__"
+
+  /** Every column name the join/merge pipeline synthesizes on the joined frame
+    * for the given targets and resolved join key. Kept in one place so the
+    * pre-read reservation check below cannot drift from the generators.
+    */
+  private[backfill] def reservedInternalColumnNames(
+      newFieldNames: Seq[String],
+      joinKey: ResolvedJoinKey
+  ): Seq[String] =
+    (Seq(MatchFlagCol) ++ joinKey.internalColumns ++ newFieldNames.flatMap {
+      n => Seq(usedSrcCol(n), usedBfCol(n), n + BackfillSideSuffix)
+    }).distinct
+
+  /** Reject target names that resolve (under Spark's configured resolver,
+    * case-insensitive by default) to any internal column generated later. A
+    * colliding target would either be silently overwritten by marker data or
+    * make the merge projection ambiguous, so fail before any source read.
+    */
+  private[backfill] def validateTargetNamesAgainstInternalColumns(
+      newFieldNames: Seq[String],
+      joinKey: ResolvedJoinKey,
+      resolver: (String, String) => Boolean
+  ): Either[BackfillError, Unit] = {
+    val reserved = reservedInternalColumnNames(newFieldNames, joinKey)
+    val collisions = newFieldNames.flatMap { name =>
+      reserved.collect {
+        case internal if resolver(name, internal) =>
+          s"'$name' (reserved as '$internal')"
+      }
+    }
+    if (collisions.nonEmpty) {
+      Left(
+        SchemaValidationError(
+          "Backfill target columns collide with names reserved for internal " +
+            s"use by the backfill join: ${collisions.mkString(", ")}. " +
+            "Rename the column (or use --column-mapping) and retry."
+        )
+      )
+    } else {
+      Right(())
+    }
+  }
+
   /** Backfill new fields into a Milvus collection
     *
     * @param spark
@@ -402,18 +449,18 @@ object MilvusBackfill {
 
       val newFieldNames = preparedBackfill.targetFieldNames
 
-      // Reject a backfill column named MatchFlagCol: the join adds a
-      // lit(true) marker under that name, which would silently overwrite a
-      // user column (overwrite mode) or blow up with AnalysisException on
-      // the coalesce rename/self-reference (coalesce mode).
-      if (newFieldNames.contains(MatchFlagCol)) {
-        return Left(
-          SchemaValidationError(
-            s"Backfill parquet contains a column named '$MatchFlagCol', " +
-              "which is reserved for internal use by the backfill join. " +
-              "Rename the column (or use --column-mapping) and retry."
-          )
-        )
+      // Reserve every internal column the join/merge step will synthesize
+      // (match flag, join aliases, per-field provenance flags, backfill-side
+      // suffix) under Spark's configured resolver. A colliding target would be
+      // silently overwritten by marker data (overwrite mode) or blow up with
+      // AnalysisException on the coalesce rename/self-reference.
+      validateTargetNamesAgainstInternalColumns(
+        newFieldNames,
+        joinKey,
+        spark.sessionState.conf.resolver
+      ) match {
+        case Left(error) => return Left(error)
+        case Right(_)    => // Continue
       }
 
       val snapshotMetadata = snapshotMetadataOpt.getOrElse {
@@ -1354,7 +1401,7 @@ object MilvusBackfill {
       case MilvusOption.BackfillModeCoalesce =>
         // Rename backfill-side target columns to avoid name collisions with
         // source-side columns now present on originalDF.
-        val suffix = "__bf__"
+        val suffix = BackfillSideSuffix
         val renamedBackfill = newFieldNames.foldLeft(backfillWithFlag) {
           (df, n) =>
             df.withColumnRenamed(n, n + suffix)
@@ -1379,7 +1426,7 @@ object MilvusBackfill {
       case MilvusOption.BackfillModeOverwrite =>
         // Same suffix-rename scaffolding as coalesce — both modes need both
         // sides' target columns live on the joined frame.
-        val suffix = "__bf__"
+        val suffix = BackfillSideSuffix
         val renamedBackfill = newFieldNames.foldLeft(backfillWithFlag) {
           (df, n) =>
             df.withColumnRenamed(n, n + suffix)

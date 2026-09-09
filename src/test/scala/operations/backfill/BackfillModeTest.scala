@@ -2,6 +2,10 @@ package com.zilliz.spark.connector.operations.backfill
 
 import com.fasterxml.jackson.databind.node.{IntNode, LongNode}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.catalyst.analysis.{
+  caseInsensitiveResolution,
+  caseSensitiveResolution
+}
 import org.apache.spark.sql.types.{
   IntegerType,
   LongType,
@@ -43,6 +47,78 @@ class BackfillModeTest
 
   override def afterAll(): Unit = {
     if (spark != null) spark.stop()
+  }
+
+  // ============ Internal column reservation ============
+
+  private val reservationJoinKey =
+    ResolvedJoinKey.primaryKey("id", 100L, None)
+
+  test("internal column reservation accepts ordinary target names") {
+    MilvusBackfill.validateTargetNamesAgainstInternalColumns(
+      Seq("score", "category"),
+      reservationJoinKey,
+      caseInsensitiveResolution
+    ) shouldBe Right(())
+  }
+
+  test("internal column reservation rejects case variants of the match flag") {
+    val result = MilvusBackfill.validateTargetNamesAgainstInternalColumns(
+      Seq("__BF_MATCHED__", "score"),
+      reservationJoinKey,
+      caseInsensitiveResolution
+    )
+    result.isLeft shouldBe true
+    result.left.get.message should include("__BF_MATCHED__")
+    result.left.get.message should include(MilvusBackfill.MatchFlagCol)
+  }
+
+  test("internal column reservation rejects provenance flag names") {
+    val result = MilvusBackfill.validateTargetNamesAgainstInternalColumns(
+      Seq("score", MilvusBackfill.usedSrcCol("score").toUpperCase),
+      reservationJoinKey,
+      caseInsensitiveResolution
+    )
+    result.isLeft shouldBe true
+    result.left.get.message should include(MilvusBackfill.usedSrcCol("score"))
+
+    val bf = MilvusBackfill.validateTargetNamesAgainstInternalColumns(
+      Seq("score", MilvusBackfill.usedBfCol("score")),
+      reservationJoinKey,
+      caseSensitiveResolution
+    )
+    bf.isLeft shouldBe true
+  }
+
+  test("internal column reservation rejects backfill-side suffix names") {
+    val result = MilvusBackfill.validateTargetNamesAgainstInternalColumns(
+      Seq("score", "score" + MilvusBackfill.BackfillSideSuffix),
+      reservationJoinKey,
+      caseInsensitiveResolution
+    )
+    result.isLeft shouldBe true
+    result.left.get.message should include(
+      "score" + MilvusBackfill.BackfillSideSuffix
+    )
+  }
+
+  test("internal column reservation rejects join alias names") {
+    val alias = reservationJoinKey.internalColumns.head
+    MilvusBackfill
+      .validateTargetNamesAgainstInternalColumns(
+        Seq(alias.toUpperCase),
+        reservationJoinKey,
+        caseInsensitiveResolution
+      )
+      .isLeft shouldBe true
+  }
+
+  test("internal column reservation honors a case-sensitive resolver") {
+    MilvusBackfill.validateTargetNamesAgainstInternalColumns(
+      Seq("__BF_MATCHED__"),
+      reservationJoinKey,
+      caseSensitiveResolution
+    ) shouldBe Right(())
   }
 
   // ============ Config / CLI parsing ============
