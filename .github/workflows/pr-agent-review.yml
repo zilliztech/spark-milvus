@@ -1,6 +1,9 @@
 name: "PR-Agent Review"
 
-# Mirrors zilliztech/zilliz-cloud's pr-agent-review.yml. It produces the
+# Mirrors zilliztech/zilliz-cloud's pr-agent-review.yml, but routes to DeepSeek
+# (deepseek-v4-pro, fallback deepseek-v4-flash) through the OpenAI-compatible
+# gateway in ANTHROPIC_BASE_URL. The "openai/" prefix is LiteLLM's marker for an
+# OpenAI-compatible endpoint, not a vendor choice. It produces the
 # "Bug fix" / "Tests" / "enhancement" / "documentation" / "Review effort N/5"
 # labels (see .pr_agent.toml, publish_labels = true) plus the auto description,
 # review and code suggestions.
@@ -39,10 +42,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_BASE_URL: "${{ secrets.ANTHROPIC_BASE_URL }}/v1"
-          config.model: "openai/gpt-5.4"
-          config.model_turbo: "openai/gpt-5.4"
-          config.fallback_models: '["openai/claude-sonnet-4-6"]'
-          config.custom_model_max_tokens: "1000000"
+          config.model: "openai/deepseek-v4-pro"
+          config.model_turbo: "openai/deepseek-v4-pro"
+          config.fallback_models: '["openai/deepseek-v4-flash"]'
+          config.custom_model_max_tokens: "128000"
           LITELLM_DROP_PARAMS: "true"
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
