@@ -88,7 +88,7 @@ ENV GIT_BRANCH=${GIT_BRANCH}
 ENV SBT_OPTS="-Xmx4g -Xms2g"
 RUN --mount=type=cache,target=/root/.ivy2 \
     --mount=type=cache,target=/root/.sbt \
-    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt 'compile; Test/compile; package'"
+    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt 'compile; Test/compile; IntegrationTest/compile; package'"
 
 # Stage 2: Final image (only copy artifacts and publish)
 FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS final
