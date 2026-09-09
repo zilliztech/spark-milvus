@@ -475,9 +475,36 @@ object MilvusBackfill {
     }
   }
 
-  /** Read backfill data from Parquet file
+  /** Read the backfill input by dispatching on `config.inputFormat`.
+    *
+    * The guard is keyed to the same `ImplementedInputFormats` set that
+    * `BackfillConfig.validate()` uses, so the two cannot drift: a format with
+    * a reader is dispatched here, anything else fails with the same
+    * not-implemented contract. `run()` rejects unimplemented formats earlier,
+    * at validate() before any snapshot/S3 work.
     */
   private def readBackfillData(
+      spark: SparkSession,
+      rawPath: String,
+      config: BackfillConfig
+  ): Either[BackfillError, BackfillSource] = {
+    val format = config.inputFormat.trim
+    if (!BackfillConfig.ImplementedInputFormats.contains(format)) {
+      return Left(
+        DataReadError(
+          path = rawPath,
+          message = s"Input format '$format' is not implemented; only " +
+            s"${BackfillConfig.ImplementedInputFormats.mkString("[", ", ", "]")} " +
+            "have a reader"
+        )
+      )
+    }
+    format match {
+      case "parquet" => readParquet(spark, rawPath, config)
+    }
+  }
+
+  private def readParquet(
       spark: SparkSession,
       rawPath: String,
       config: BackfillConfig

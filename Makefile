@@ -21,7 +21,7 @@ BLUE := \033[0;34m
 NC := \033[0m # No Color
 
 # All phony targets
-.PHONY: all help check-deps init-submodules build-milvus-storage copy-native-libs clean package test run-demo rebuild quick-build status
+.PHONY: all help check-deps init-submodules build-milvus-storage copy-native-libs clean package test compile-it run-demo rebuild quick-build status
 
 # Default target
 all: clean build-milvus-storage copy-native-libs package
@@ -36,7 +36,8 @@ help:
 	@echo "  $(GREEN)build-milvus-storage$(NC)   - Build milvus-storage with JNI support"
 	@echo "  $(GREEN)copy-native-libs$(NC)       - Copy native libraries to resources"
 	@echo "  $(GREEN)package$(NC)                - Package JAR with native libraries"
-	@echo "  $(GREEN)test$(NC)                   - Run tests"
+	@echo "  $(GREEN)test$(NC)                   - Type-check tests (incl. integration) and run unit tests"
+	@echo "  $(GREEN)compile-it$(NC)             - Type-check integration tests (no external services)"
 	@echo "  $(GREEN)run-demo$(NC)               - Run demo"
 	@echo "  $(GREEN)init-submodules$(NC)        - Initialize Git submodules"
 	@echo "  $(GREEN)check-deps$(NC)             - Check system dependencies"
@@ -121,9 +122,17 @@ package: copy-native-libs
 
 # Run tests
 test: package
-	@echo "$(BLUE)Running tests...$(NC)"
+	@echo "$(BLUE)Type-checking integration tests...$(NC)"
+	@$(SBT) "IntegrationTest/compile"
+	@echo "$(BLUE)Running unit tests...$(NC)"
 	@$(SBT) test
 	@echo "$(GREEN)Tests complete$(NC)"
+
+# Type-check integration tests only (no Milvus/MinIO required at compile time)
+compile-it: package
+	@echo "$(BLUE)Type-checking integration tests...$(NC)"
+	@$(SBT) "IntegrationTest/compile"
+	@echo "$(GREEN)Integration tests compile complete$(NC)"
 
 # Run demo
 run-demo: package

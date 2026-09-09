@@ -136,7 +136,7 @@ RUN set -eux; \
         aarch64|arm64) native_platform=linux-aarch64 ;; \
         *) echo "Unsupported build architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
-    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt 'compile; Test/compile; assembly'"; \
+    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt 'compile; Test/compile; IntegrationTest/compile; assembly'"; \
     assembly_jar="$(find target/scala-2.13 -maxdepth 1 -type f -name 'spark-connector-assembly-*.jar' -print -quit)"; \
     test -n "${assembly_jar}"; \
     test -s "${assembly_jar}"; \
