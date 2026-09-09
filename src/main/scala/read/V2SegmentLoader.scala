@@ -25,10 +25,12 @@ import org.apache.spark.internal.Logging
   * The resulting `Seq[V2SegmentInfo]` is the runtime view consumed by
   * `MilvusPackedV2InputPartition` / `MilvusPackedV2PartitionReader`.
   *
-  * Path resolution: AVRO and parquet paths that milvus writes are
+  * Path resolution: AVRO and parquet paths that Milvus writes are
   * bucket-relative (`files/snapshots/...`). When `bucket` is non-empty we
-  * prefix `s3a://{bucket}/` so Hadoop picks the S3A filesystem. Fully qualified
-  * `s3a://...` / `s3://...` URIs pass through.
+  * prefix `{storageScheme}://{bucket}/`. The default remains `s3a` for the
+  * connector DataSource and tools; Alibaba callers must explicitly pass
+  * `storageScheme = "oss"` with a matching Hadoop OSS configuration. Explicit
+  * `s3://` and `s3a://` paths are aliases rewritten to the requested scheme.
   */
 object V2SegmentLoader extends Logging {
 
@@ -52,12 +54,13 @@ object V2SegmentLoader extends Logging {
       bucket: String,
       hadoopConf: Configuration,
       manifestSchemaVersion: Int = 1,
-      applyDeletes: Boolean = true
+      applyDeletes: Boolean = true,
+      storageScheme: String = "s3a"
   ): Either[Throwable, Seq[V2SegmentInfo]] = {
     try {
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
       manifestPaths.foreach { rawPath =>
-        val avroPath = resolvePath(rawPath, bucket)
+        val avroPath = resolvePath(rawPath, bucket, storageScheme)
         val avroBytes = readAllBytes(hadoopConf, avroPath)
         val entry =
           MilvusSegmentManifestReader
@@ -73,7 +76,8 @@ object V2SegmentLoader extends Logging {
           entry,
           bucket,
           hadoopConf,
-          applyDeletes
+          applyDeletes,
+          storageScheme
         ) match {
           case Right(Some(seg)) => out += seg
           case Right(None)      => // skipped (storage version != 2)
@@ -101,39 +105,40 @@ object V2SegmentLoader extends Logging {
       entry: AvroManifestEntry,
       bucket: String,
       hadoopConf: Configuration,
-      applyDeletes: Boolean = true
+      applyDeletes: Boolean = true,
+      storageScheme: String = "s3a"
   ): Either[Throwable, Option[V2SegmentInfo]] = {
-    val isL0 = entry.segmentLevel == 1L
-    val hasDeltaLogs = entry.deltaLogFiles.exists(_.binlogs.nonEmpty)
+    val resolvedEntry = resolveEntryPaths(entry, bucket, storageScheme)
+    val isL0 = resolvedEntry.segmentLevel == 1L
 
-    if (entry.storageVersion != 2L) {
+    if (resolvedEntry.storageVersion != 2L) {
       logInfo(
-        s"skipping segment ${entry.segmentId}: storage_version=${entry.storageVersion} " +
+        s"skipping segment ${resolvedEntry.segmentId}: storage_version=${resolvedEntry.storageVersion} " +
           s"(!= 2); V2SegmentLoader only handles StorageV2"
       )
       Right(None)
     } else if (isL0 && !applyDeletes) {
       logInfo(
-        s"skipping StorageV2 L0 delete-only segment ${entry.segmentId} because applyDeletes=false"
+        s"skipping StorageV2 L0 delete-only segment ${resolvedEntry.segmentId} because applyDeletes=false"
       )
       Right(None)
     } else if (
-      entry.binlogFiles.isEmpty ||
-      entry.binlogFiles.forall(_.binlogs.isEmpty)
+      resolvedEntry.binlogFiles.isEmpty ||
+      resolvedEntry.binlogFiles.forall(_.binlogs.isEmpty)
     ) {
       logWarning(
-        s"segment ${entry.segmentId} has no binlog files with entries; " +
+        s"segment ${resolvedEntry.segmentId} has no binlog files with entries; " +
           s"emitting as empty column-group list"
       )
       Right(
         Some(
           V2SegmentInfo(
-            segmentId = entry.segmentId,
-            partitionId = entry.partitionId,
-            numOfRows = entry.numOfRows,
-            storageVersion = entry.storageVersion,
+            segmentId = resolvedEntry.segmentId,
+            partitionId = resolvedEntry.partitionId,
+            numOfRows = resolvedEntry.numOfRows,
+            storageVersion = resolvedEntry.storageVersion,
             columnGroups = Seq.empty,
-            deltaLogs = entry.deltaLogFiles
+            deltaLogs = resolvedEntry.deltaLogFiles
               .flatMap(_.binlogs)
               .sortBy(_.logId)
               .map(log =>
@@ -156,7 +161,7 @@ object V2SegmentLoader extends Logging {
         // from multiple write sessions, each advertising only its own
         // session's groups — see MilvusParquetFooterReader.readFieldIdsFromSchema.
         val groupFieldIdListPerEntry: Seq[Seq[Long]] =
-          entry.binlogFiles.map { afb =>
+          resolvedEntry.binlogFiles.map { afb =>
             if (afb.binlogs.isEmpty) {
               // The top-level guard above only rejects the all-empty case.
               // A partial-empty entry alongside populated ones points at a
@@ -164,34 +169,34 @@ object V2SegmentLoader extends Logging {
               // from, and the downstream V2ColumnGroup would be a silent
               // empty shell). Fail loudly with slot/segment context.
               throw new IllegalStateException(
-                s"segment ${entry.segmentId} has an empty binlog_files entry " +
+                s"segment ${resolvedEntry.segmentId} has an empty binlog_files entry " +
                   s"(slot ${afb.slotFieldId}) while other entries are populated; " +
                   "cannot recover field ids for this column group — refusing to " +
                   "emit an empty V2ColumnGroup from a partial manifest"
               )
             }
-            val samplePath = resolvePath(afb.binlogs.head.logPath, bucket)
+            val samplePath = afb.binlogs.head.logPath
             MilvusParquetFooterReader
               .readFieldIdsFromSchema(samplePath, hadoopConf) match {
               case Right(ids) => ids
               case Left(err) =>
                 throw new RuntimeException(
                   s"failed to read field ids from parquet $samplePath " +
-                    s"(segment ${entry.segmentId}, slot ${afb.slotFieldId}): " +
+                    s"(segment ${resolvedEntry.segmentId}, slot ${afb.slotFieldId}): " +
                     err.getMessage,
                   err
                 )
             }
           }
         MilvusSegmentManifestReader.toV2SegmentInfo(
-          entry,
+          resolvedEntry,
           groupFieldIdListPerEntry
         ) match {
           case Right(seg) => Right(Some(seg))
           case Left(err) =>
             Left(
               new RuntimeException(
-                s"failed to build V2SegmentInfo for segment ${entry.segmentId}: " +
+                s"failed to build V2SegmentInfo for segment ${resolvedEntry.segmentId}: " +
                   err.getMessage,
                 err
               )
@@ -203,13 +208,47 @@ object V2SegmentLoader extends Logging {
     }
   }
 
-  /** Prefix `bucket` when `path` has no scheme; pass through s3a:// / s3://. */
-  def resolvePath(path: String, bucket: String): String = {
+  private def resolveEntryPaths(
+      entry: AvroManifestEntry,
+      bucket: String,
+      storageScheme: String
+  ): AvroManifestEntry = {
+    def resolveFieldBinlogs(
+        fieldBinlogs: Seq[AvroFieldBinlogEntry]
+    ): Seq[AvroFieldBinlogEntry] =
+      fieldBinlogs.map(fieldBinlog =>
+        fieldBinlog.copy(binlogs =
+          fieldBinlog.binlogs.map(log =>
+            log.copy(logPath = resolvePath(log.logPath, bucket, storageScheme))
+          )
+        )
+      )
+
+    entry.copy(
+      binlogFiles = resolveFieldBinlogs(entry.binlogFiles),
+      deltaLogFiles = resolveFieldBinlogs(entry.deltaLogFiles)
+    )
+  }
+
+  /** Prefix `bucket` when `path` has no scheme; rewrite S3 aliases to the
+    * requested scheme and preserve other explicit schemes. `storageScheme` is
+    * intentionally explicit for non-S3 providers because the generic connector
+    * read path does not yet derive a provider from its public options.
+    */
+  def resolvePath(
+      path: String,
+      bucket: String,
+      storageScheme: String = "s3a"
+  ): String = {
+    val scheme = storageScheme.stripSuffix("://")
     if (path == null) path
-    else if (path.startsWith("s3a://")) path
-    else if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
+    else if (path.startsWith("s3a://"))
+      s"$scheme://" + path.stripPrefix("s3a://")
+    else if (path.startsWith("s3://"))
+      s"$scheme://" + path.stripPrefix("s3://")
+    else if (path.contains("://")) path
     else if (bucket != null && bucket.nonEmpty)
-      s"s3a://$bucket/${path.stripPrefix("/")}"
+      s"$scheme://$bucket/${path.stripPrefix("/")}"
     else path
   }
 

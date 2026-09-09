@@ -282,6 +282,29 @@ class MilvusPackedV2PartitionReader(
       throw e
   }
 
+  /** Total rows the packed reader must deliver, recovered from the per-file row
+    * counts fed to `MilvusStorageColumnGroups.createFromGroups`. All column
+    * groups of a segment carry the same row total, so the head group's sum is
+    * the segment-wide expectation.
+    *
+    * This is the "not silently short" guard: a pre-fix milvus-storage library
+    * (before milvus-storage#657) drops every file after the first in a
+    * multi-file column group, and the native cross-group row check cannot catch
+    * it when all groups share the same file split. Without a delivered-row
+    * comparison the scan would end on the first null batch and return a short
+    * DataFrame with no error and no log.
+    */
+  private val expectedTotalRows: Long =
+    columnGroups.headOption.map(_.fileRowCounts.sum).getOrElse(0L)
+
+  /** Physical rows observed so far (regardless of delete filtering): the sum of
+    * every batch's row count as batches are exhausted. Delete filtering skips
+    * rows in [[next]] but never removes them from a batch, so this counter
+    * reaches the native reader's full delivered row count at EOF.
+    */
+  private var observedPhysicalRows: Long = 0L
+  private var rowCountVerified: Boolean = false
+
   private var currentBatch: VectorSchemaRoot = null
   private var currentRowIndex: Int = 0
   private var currentBatchStartRowOffset: Long = 0L
@@ -330,6 +353,7 @@ class MilvusPackedV2PartitionReader(
         val exhausted = currentBatch
         currentBatch = null
         currentBatchStartRowOffset += exhausted.getRowCount.toLong
+        observedPhysicalRows += exhausted.getRowCount.toLong
         try exhausted.close()
         catch {
           case e: Throwable => logWarning("close exhausted batch failed", e)
@@ -339,6 +363,7 @@ class MilvusPackedV2PartitionReader(
       }
 
       if (currentBatch == null) {
+        verifyRowCount()
         return false
       }
 
@@ -367,6 +392,32 @@ class MilvusPackedV2PartitionReader(
   }
 
   override def close(): Unit = releaseAll()
+
+  /** Guard the no-partial-read contract at EOF: the packed reader must have
+    * delivered exactly `expectedTotalRows` physical rows. A short scan is
+    * refused loudly instead of silently returning fewer rows than the column
+    * groups declare — the failure mode of a pre-fix milvus-storage library
+    * (milvus-storage#657) on multi-file column groups.
+    *
+    * Runs once: Spark calls `next()` to exhaustion for a full scan; a `close()`
+    * before EOF (e.g. a caller that stops early) deliberately skips the check.
+    */
+  private def verifyRowCount(): Unit = {
+    if (rowCountVerified) return
+    rowCountVerified = true
+    if (observedPhysicalRows != expectedTotalRows) {
+      throw new IllegalStateException(
+        s"Packed V2 reader delivered $observedPhysicalRows rows for segment " +
+          s"with ${columnGroups.size} column group(s) spanning " +
+          s"${columnGroups.map(_.filePaths.size).sum} file(s), expected " +
+          s"$expectedTotalRows (sum of per-file row counts). This usually means " +
+          "the native milvus-storage library predates the BuildLoonColumnGroups " +
+          "per-file range fix (milvus-storage#657) and silently dropped rows " +
+          "after the first file of a column group; refusing to return a short " +
+          "DataFrame"
+      )
+    }
+  }
 
   private def isDeleted(rowIndex: Int): Boolean = {
     val pkVector = currentBatch.getVector(pkColumnName)

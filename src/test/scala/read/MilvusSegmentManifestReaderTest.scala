@@ -169,12 +169,14 @@ class MilvusSegmentManifestReaderTest extends AnyFunSuite with Matchers {
         V2ColumnGroup(
           fieldIds = Seq(100L, 0L, 1L),
           filePaths = Seq("files/insert_log/.../0/100"),
-          fileRowCounts = Seq(20480L)
+          fileRowCounts = Seq(20480L),
+          slotFieldId = 3L
         ),
         V2ColumnGroup(
           fieldIds = Seq(103L),
           filePaths = Seq("p/103"),
-          fileRowCounts = Seq(20480L)
+          fileRowCounts = Seq(20480L),
+          slotFieldId = 103L
         )
       ),
       deltaLogs = Seq(
@@ -198,6 +200,9 @@ class MilvusSegmentManifestReaderTest extends AnyFunSuite with Matchers {
     got.segmentId shouldBe seg.segmentId
     got.columnGroups(0).fieldIds shouldBe Seq(100L, 0L, 1L)
     got.columnGroups(0).fileRowCounts shouldBe Seq(20480L)
+    // slotFieldId round-trips so slot-based dedup is not a silent no-op for
+    // the milvus.snapshot.v2.segments option path.
+    got.columnGroups.map(_.slotFieldId) shouldBe Seq(3L, 103L)
     got.deltaLogs shouldBe seg.deltaLogs
     // Exercise the exact pattern that failed at runtime — mapping over the
     // rehydrated Seq[Long]. Must not throw ClassCastException.

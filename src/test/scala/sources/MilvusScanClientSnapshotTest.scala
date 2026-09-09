@@ -37,6 +37,7 @@ import org.scalatest.BeforeAndAfterEach
 import com.zilliz.spark.connector.{MilvusCollectionInfo, MilvusOption}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
+  BackupMetaReader,
   Collection,
   CollectionSchema,
   MilvusDeletePlan,
@@ -204,11 +205,189 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
-  test("snapshotBucket rejects unsupported schemes") {
-    val err = intercept[IllegalArgumentException] {
-      MilvusScan.snapshotBucket("gs://a-bucket/files/snapshot.json")
+  test("snapshotBucket returns None for unsupported (non-S3) schemes") {
+    // Non-S3 locations carry no bucket to configure; explicit scheme
+    // validation lives in resolveClientSnapshotLocation.
+    assert(
+      MilvusScan.snapshotBucket("gs://a-bucket/files/snapshot.json") == None
+    )
+    assert(MilvusScan.snapshotBucket("file:///data/backup/b1") == None)
+  }
+
+  test("backupMaxJsonBytes honors milvus.snapshot.max.json.bytes") {
+    val withLimit = new ju.HashMap[String, String]()
+    withLimit.put(MilvusOption.SnapshotMaxJsonBytes, "1048576")
+    assert(
+      MilvusScan.backupMaxJsonBytes(new CaseInsensitiveStringMap(withLimit)) ==
+        1048576L
+    )
+    assert(
+      MilvusScan.backupMaxJsonBytes(
+        new CaseInsensitiveStringMap(new ju.HashMap[String, String]())
+      ) ==
+        MilvusSnapshotReader.MaxSnapshotJsonBytes
+    )
+  }
+
+  test("backup createReaderFactory is self-contained without prior planning") {
+    import com.fasterxml.jackson.databind.node.IntNode
+    val schema = BackupMetaReader.BackupCollectionSchema(
+      name = "demo",
+      fields = Seq(
+        BackupMetaReader.BackupFieldSchema(
+          fieldId = 100L,
+          name = "id",
+          isPrimaryKey = true,
+          rawDataType = Some(IntNode.valueOf(5))
+        )
+      )
+    )
+    val meta = BackupMetaReader.BackupInfo(
+      name = "b1",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionName = "demo",
+          collectionId = 444L,
+          schema = Some(schema)
+        )
+      )
+    )
+    val options = new ju.HashMap[String, String]()
+    options.put(MilvusOption.BackupDir, "s3a://bucket/backup/b1")
+    options.put(MilvusOption.MilvusCollectionName, "demo")
+    val scan = new MilvusScan(
+      StructType(Seq(StructField("RowID", LongType, nullable = false))),
+      new CaseInsensitiveStringMap(options),
+      preParsedBackupMeta = Some(meta)
+    )
+    // No prior planInputPartitions call: the factory must compute its delete
+    // context on its own (no planning side effect).
+    val factory = scan.createReaderFactory()
+    assert(
+      factory.isInstanceOf[
+        com.zilliz.spark.connector.read.MilvusPartitionReaderFactory
+      ]
+    )
+  }
+
+  test(
+    "backup createReaderFactory fails loudly when the meta re-read fails"
+  ) {
+    // preParsedBackupMeta = None (table init failed) and the factory's fallback
+    // re-read also fails. The planner would have stamped inherited-delete
+    // markers, so the factory must NOT hand an empty plan — it must fail loudly
+    // rather than silently returning deleted rows.
+    val options = new ju.HashMap[String, String]()
+    options.put(MilvusOption.BackupDir, "/tmp/nonexistent-backup-xyz")
+    options.put(MilvusOption.MilvusCollectionName, "demo")
+    val scan = new MilvusScan(
+      StructType(Seq(StructField("RowID", LongType, nullable = false))),
+      new CaseInsensitiveStringMap(options),
+      preParsedBackupMeta = None
+    )
+    val err = intercept[IllegalStateException] {
+      scan.createReaderFactory()
     }
-    assert(err.getMessage.contains("Unsupported snapshot s3_location scheme"))
+    assert(err.getMessage.contains("re-read backup meta"))
+  }
+
+  test("resolveBackupCollection matches by name and database, never .head") {
+    def coll(name: String, id: Long, db: String = "") =
+      BackupMetaReader.CollectionBackup(
+        collectionName = name,
+        collectionId = id,
+        dbName = db
+      )
+    val multi = BackupMetaReader.BackupInfo(
+      name = "b1",
+      collectionBackups =
+        Seq(coll("orders", 1L, "db1"), coll("orders", 2L, "db2"))
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(multi, "db1", "orders")
+        .map(_.collectionId) ==
+        Right(1L)
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(multi, "db2", "orders")
+        .map(_.collectionId) ==
+        Right(2L)
+    )
+    assert(MilvusScan.resolveBackupCollection(multi, "db1", "nope").isLeft)
+    assert(MilvusScan.resolveBackupCollection(multi, "", "orders").isLeft)
+    assert(MilvusScan.resolveBackupCollection(multi, "", "").isLeft)
+
+    // "default" database is equivalent to an empty db_name (older backups omit
+    // it), in both directions.
+    val defaultDb = BackupMetaReader.BackupInfo(
+      name = "d",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionName = "orders",
+          collectionId = 9L,
+          dbName = "" // omitted by milvus-backup
+        )
+      )
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(defaultDb, "default", "orders")
+        .map(_.collectionId) == Right(9L)
+    )
+    val namedDefault = BackupMetaReader.BackupInfo(
+      name = "d2",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionName = "orders",
+          collectionId = 10L,
+          dbName = "default"
+        )
+      )
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(namedDefault, "", "orders")
+        .map(_.collectionId) == Right(10L)
+    )
+
+    // Explicit "default" selects the default-db candidate even when another
+    // database has a same-named collection (request side is not flattened).
+    val mixed = BackupMetaReader.BackupInfo(
+      name = "mixed",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionName = "orders",
+          collectionId = 11L,
+          dbName = "" // default
+        ),
+        BackupMetaReader.CollectionBackup(
+          collectionName = "orders",
+          collectionId = 12L,
+          dbName = "db2"
+        )
+      )
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(mixed, "default", "orders")
+        .map(_.collectionId) == Right(11L)
+    )
+    assert(
+      MilvusScan
+        .resolveBackupCollection(mixed, "db2", "orders")
+        .map(_.collectionId) == Right(12L)
+    )
+
+    val single = BackupMetaReader.BackupInfo(
+      name = "s",
+      collectionBackups = Seq(coll("only", 3L))
+    )
+    assert(
+      MilvusScan.resolveBackupCollection(single, "", "").map(_.collectionId) ==
+        Right(3L)
+    )
   }
 
   test(
@@ -1435,6 +1614,52 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(second.inheritedDeletePlanPartitionId.isEmpty)
     assert(second.deletePlan.containsLongPk(7L, 50L))
     assert(!second.deletePlan.containsLongPk(8L, 100L))
+  }
+
+  test("snapshot planner dedups V2 column groups by slot before planning") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    // A segment that went through add-field + backfill: the old multi-field
+    // group (slot 3) still reports field 100 from its own schema, and the newer
+    // single-field group (slot 100) reports it too. buildSnapshotPartitions
+    // must strip the overlapping field from the older slot.
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq.empty,
+      defaultPartitionId = "20",
+      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      v2Segments = Seq(
+        V2SegmentInfo(
+          segmentId = 30L,
+          partitionId = 20L,
+          numOfRows = 2L,
+          storageVersion = 2L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              fieldIds = Seq(100L, 0L, 1L),
+              filePaths = Seq("files/insert_log/10/20/30/3/1.parquet"),
+              fileRowCounts = Seq(2L),
+              slotFieldId = 3L
+            ),
+            V2ColumnGroup(
+              fieldIds = Seq(100L),
+              filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+              fileRowCounts = Seq(2L),
+              slotFieldId = 100L
+            )
+          )
+        )
+      ),
+      v2DeletePlans = Map.empty,
+      inheritedDeletePlansByPartition = Map.empty,
+      inlineInheritedDeletePlans = true
+    )
+
+    val partition = partitions.head.asInstanceOf[MilvusPackedV2InputPartition]
+    val groups = partition.columnGroups
+    assert(groups.size == 2)
+    // Old slot keeps only its unique fields; the shared field 100 is read from
+    // the newest slot.
+    assert(groups.find(_.slotFieldId == 3L).get.fieldIds == Seq(0L, 1L))
+    assert(groups.find(_.slotFieldId == 100L).get.fieldIds == Seq(100L))
   }
 }
 

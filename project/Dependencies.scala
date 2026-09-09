@@ -64,6 +64,8 @@ object Dependencies {
     "org.apache.hadoop" % "hadoop-common" % hadoopVersion % "provided,test" exclude ("javax.activation", "activation")
   lazy val hadoopAws =
     "org.apache.hadoop" % "hadoop-aws" % hadoopVersion % "provided,test" exclude("software.amazon.awssdk", "bundle")
+  lazy val hadoopAliyun =
+    "org.apache.hadoop" % "hadoop-aliyun" % hadoopVersion % "provided,test"
   lazy val awsSdkS3 =
     "software.amazon.awssdk" % "s3" % "2.30.38" // doc: https://javadoc.io/doc/software.amazon.awssdk/s3/2.30.38/index.html
   lazy val awsSdkS3Transfer = 
