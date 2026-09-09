@@ -1,0 +1,70 @@
+name: CI Labels
+
+# Mirrors the ci-passed / ci-not-pass labels that Jenkins applies on
+# zilliztech/zilliz-cloud.
+#
+# ci.yml runs untrusted PR code, so it only gets a read-only token and cannot
+# label fork PRs. This workflow reacts to ci.yml via workflow_run, which always
+# runs from main with a write token and never checks out PR code.
+#
+#   CI requested            -> remove ci-passed, add ci-not-pass
+#   CI succeeded            -> remove ci-not-pass, add ci-passed
+#   CI failed / timed out   -> remove ci-passed, add ci-not-pass
+#   CI cancelled / skipped  -> no change (a newer run already reset the labels)
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [requested, completed]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const { owner, repo } = context.repo;
+
+            // workflow_run.pull_requests is empty for fork PRs, so resolve the
+            // PR from the head commit instead and double-check the SHA.
+            const { data: associated } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner, repo, commit_sha: run.head_sha,
+            });
+            const prs = associated.filter(pr => pr.state === 'open' && pr.head.sha === run.head_sha);
+            if (prs.length === 0) {
+              core.info(`No open PR at ${run.head_sha}; nothing to label (run may be stale).`);
+              return;
+            }
+
+            const PASSED = 'ci-passed';
+            const NOT_PASSED = 'ci-not-pass';
+            let add, remove;
+            if (context.payload.action === 'requested') {
+              add = NOT_PASSED; remove = PASSED;
+            } else if (run.conclusion === 'success') {
+              add = PASSED; remove = NOT_PASSED;
+            } else if (run.conclusion === 'failure' || run.conclusion === 'timed_out') {
+              add = NOT_PASSED; remove = PASSED;
+            } else {
+              core.info(`CI conclusion '${run.conclusion}', leaving labels untouched.`);
+              return;
+            }
+
+            for (const pr of prs) {
+              const issue_number = pr.number;
+              const current = pr.labels.map(l => l.name);
+              if (current.includes(remove)) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number, name: remove })
+                  .catch(e => { if (e.status !== 404) throw e; });
+              }
+              if (!current.includes(add)) {
+                await github.rest.issues.addLabels({ owner, repo, issue_number, labels: [add] });
+              }
+              core.info(`PR #${issue_number}: -${remove} +${add}`);
+            }

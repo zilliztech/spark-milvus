@@ -1,0 +1,46 @@
+name: CI
+
+# Builds the connector and runs the unit tests on every PR. The native
+# milvus-storage libraries are not built here (that needs Conan 2 + Rust and
+# takes a long time, see Dockerfile); the JNI Scala wrapper compiles fine
+# without them, so only the two suites that load the .so are excluded.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: sbt
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Build milvus-storage JNI wrapper (Scala only, no native libs)
+        working-directory: milvus-storage/java
+        run: sbt package
+
+      - name: Compile main, test and integration-test sources
+        run: sbt 'compile; Test/compile; IntegrationTest/compile'
+
+      - name: Unit tests (suites that need the native .so are excluded)
+        run: >-
+          sbt
+          'set Test / testOptions += Tests.Filter(n => !Set("com.zilliz.spark.connector.loon.MilvusStorageFFITest", "com.zilliz.spark.connector.loon.MilvusStorageMultiFileGroupTest").contains(n))'
+          test

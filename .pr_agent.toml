@@ -1,0 +1,25 @@
+[pr_reviewer]
+extra_instructions = """\
+This is spark-milvus, the Apache Spark connector for Milvus (Scala 2.13, Spark 4.x, sbt).
+It reads Milvus binlog/segment data and the milvus-storage (Loon) format through a JNI bridge,
+and ships ETL operations such as backfill, backup reads and Milvus writes.
+
+Review focus areas:
+- Data correctness: schema mapping, null handling and Spark<->Milvus type conversions must round-trip exactly
+- Scale: no driver-side collect(), unbounded caching or per-row RPCs on large collections
+- Storage access: S3/OSS/MinIO/GCS path and credential handling must not leak secrets in logs or break existing URI schemes
+- JNI/native boundary: resource lifecycle (close/free), thread safety and error propagation from milvus-storage
+- CLI/config changes must keep backward-compatible defaults and be documented in the operation's README
+- New behaviour needs unit tests under src/test; tests that need Milvus/MinIO belong in src/it
+"""
+num_code_suggestions = 5
+inline_code_comments = true
+
+[pr_description]
+publish_labels = true
+publish_description_as_comment = false
+add_original_user_description = true
+generate_ai_title = false
+
+[pr_code_suggestions]
+num_code_suggestions = 5
