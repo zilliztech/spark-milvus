@@ -219,19 +219,22 @@ class MilvusBackfillDemo:
 
         print(f"Creating snapshot: {self.snapshot_name}")
         self.client.create_snapshot(
-            self.collection_name,
-            self.snapshot_name,
-            "add field backfill snapshot"
+            snapshot_name=self.snapshot_name,
+            collection_name=self.collection_name,
+            description="add field backfill snapshot",
         )
 
         # Get snapshot path from S3 location
-        snapshot_info = self.client.describe_snapshot(self.snapshot_name)
-        snapshot_path = snapshot_info['s3_location']
+        snapshot_info = self.client.describe_snapshot(
+            snapshot_name=self.snapshot_name,
+            collection_name=self.collection_name,
+        )
+        snapshot_path = snapshot_info.s3_location
 
         print(f"✓ Snapshot created at: {snapshot_path}")
 
         # Format as s3a:// path for Spark/Hadoop
-        s3a_path = f"s3a://{self.s3_bucket}/{snapshot_path}"
+        s3a_path = f"s3a://{self.s3_bucket}/{snapshot_path.lstrip('/')}"
         print(f"  S3A path: {s3a_path}")
 
         return s3a_path

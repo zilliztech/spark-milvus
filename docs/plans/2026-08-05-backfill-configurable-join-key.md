@@ -6,6 +6,15 @@
 
 **Technology stack:** Scala, Spark SQL/DataFrame API, Spark DataSource V2, ScalaTest, sbt, scalafmt
 
+> **Accepted contract (as implemented, 2026-09):** cardinality is enforced on
+> the *backfill input* side only — the parquet join key must be non-null and
+> unique so a physical source row never fans out into multiple output rows.
+> *Source-side* values may repeat; the same parquet record is applied to every
+> matching source row (many-to-one). Where this plan says "non-null, unique on
+> both sides" or lists many-to-one as out of scope, the implementation and
+> `docs/user-guide-snapshot-backfill.md` are authoritative. The physical key
+> field itself must still be declared non-nullable in the snapshot schema.
+
 ---
 
 ## Current behavior and constraints
@@ -30,7 +39,7 @@ Phase 1 includes:
 - Add an explicit physical-field join strategy for persisted scalar fields present in the snapshot schema.
 - Permit an explicit physical join key even when the snapshot schema has no field marked as a primary key.
 - Support input-column renaming through the existing `columnMapping` mechanism.
-- Require exact type compatibility and a non-null, unique row key.
+- Require exact type compatibility and a non-null, unique backfill-side row key (source-side values may repeat; see the accepted-contract note above).
 - Make internal join execution component-based even though the phase-1 CLI accepts one physical field.
 - Keep the result JSON wire shape unchanged.
 
@@ -38,7 +47,7 @@ Phase 1 does not include:
 
 - Logical keys synthesized from file metadata, row positions, expressions, or UDFs.
 - Joining directly on `$segment_id` / `$row_offset` as a public row identity.
-- Many-to-one or one-to-many join cardinality.
+- One-to-many join cardinality (a backfill row matching several source rows is allowed; a source row matching several backfill rows is rejected).
 - Updating the selected join-key field in the same backfill operation.
 - Expanding the currently unsupported client-only ADDFIELD path.
 - Changes to native readers, JNI, V2/V3 writers, or Milvus commit behavior.

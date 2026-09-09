@@ -3,13 +3,30 @@ package com.zilliz.spark.connector.operations.backfill
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.DataFrame
 
+/** Public specification for the key used to match snapshot rows with backfill
+  * input rows. Source values may repeat; backfill input values must be unique
+  * so the left join preserves one output row per physical source row.
+  */
+sealed trait BackfillJoinKey extends Product with Serializable
+
+object BackfillJoinKey {
+
+  /** Preserve the historical behavior: resolve and join on the collection
+    * primary key.
+    */
+  case object PrimaryKey extends BackfillJoinKey
+
+  /** Join on an exact, persisted field name from the snapshot schema. */
+  final case class PhysicalField(name: String) extends BackfillJoinKey
+}
+
 /** One source-side component of the key used to match collection rows with
   * backfill data.
   *
-  * The current public behavior resolves exactly one component: the collection
-  * primary key. Keeping the runtime representation component-based lets the
-  * execution pipeline support a future composite or logical key without
-  * changing its read, validation, or join contracts again.
+  * Current public strategies resolve exactly one persisted field. Keeping the
+  * runtime representation component-based lets the execution pipeline support a
+  * future composite or logical key without changing its read, validation, or
+  * join contracts again.
   */
 private[backfill] final case class ResolvedJoinComponent(
     sourceColumn: String,
@@ -71,6 +88,23 @@ private[backfill] object ResolvedJoinKey {
           sourceColumn = name,
           fieldId = fieldId,
           sourceField = sourceField,
+          internalColumn = internalColumn(0)
+        )
+      )
+    )
+
+  def physicalField(
+      name: String,
+      fieldId: Long,
+      sourceField: StructField
+  ): ResolvedJoinKey =
+    ResolvedJoinKey(
+      kind = "physical",
+      components = Seq(
+        ResolvedJoinComponent(
+          sourceColumn = name,
+          fieldId = fieldId,
+          sourceField = Some(sourceField),
           internalColumn = internalColumn(0)
         )
       )

@@ -84,7 +84,12 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
   test("parseArgs accepts --input-path and --input-format") {
     val parsed = BackfillApp.parseArgs(
-      Array("--input-path", "s3://bucket/backfill.lance", "--input-format", "lance")
+      Array(
+        "--input-path",
+        "s3://bucket/backfill.lance",
+        "--input-format",
+        "lance"
+      )
     )
     parsed("input-path") shouldBe "s3://bucket/backfill.lance"
     parsed("input-format") shouldBe "lance"
@@ -142,6 +147,73 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     an[IllegalArgumentException] should be thrownBy {
       BackfillApp.parseArgs(Array("--parquet"))
     }
+  }
+
+  test("parseArgs accepts --join-key") {
+    val parsed = BackfillApp.parseArgs(
+      Array("--join-key", "external_row_id")
+    )
+    parsed("join-key") shouldBe "external_row_id"
+  }
+
+  test("parseArgs reports a missing --join-key value") {
+    val error = intercept[IllegalArgumentException] {
+      BackfillApp.parseArgs(Array("--join-key"))
+    }
+    error.getMessage should include("Missing value for --join-key")
+  }
+
+  test("buildConfig maps --join-key to a physical field") {
+    val config = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "join-key" -> "  external_row_id  "
+      )
+    )
+
+    config.joinKey shouldBe BackfillJoinKey.PhysicalField("external_row_id")
+    config.validate() shouldBe Right(())
+  }
+
+  test("buildConfig keeps primary-key join when --join-key is omitted") {
+    val config = BackfillApp.buildConfig(
+      Map("s3-endpoint" -> "endpoint", "s3-bucket" -> "bucket")
+    )
+
+    config.joinKey shouldBe BackfillJoinKey.PrimaryKey
+  }
+
+  test("buildConfig leaves a blank join key for config validation") {
+    val config = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "join-key" -> "   "
+      )
+    )
+
+    config.validate().left.toOption.get should include("cannot be blank")
+  }
+
+  test("buildConfig maps --input-format and defaults it to parquet") {
+    val explicit = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "input-format" -> " lance "
+      )
+    )
+    explicit.inputFormat shouldBe "lance"
+
+    val defaulted = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "input-format" -> ""
+      )
+    )
+    defaulted.inputFormat shouldBe BackfillConfig.DefaultInputFormat
   }
 
   test("parseArgs throws when key/value flag is followed by another flag") {
@@ -811,6 +883,27 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     } finally {
       hc.unset(BackfillConfig.HadoopS3CredentialsProvider)
       hc.unset(BackfillConfig.HadoopS3AssumedRoleArn)
+    }
+  }
+
+  test("MilvusBackfill.run rejects a physical join key without a snapshot") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "s3.us-west-2.amazonaws.com",
+      s3BucketName = "embedded-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true,
+      joinKey = BackfillJoinKey.PhysicalField("external_id")
+    )
+
+    // An empty snapshot path selects the client-mode path; a physical key has
+    // no schema to resolve against there, so run() must fail before it tries
+    // to build a MilvusClient or read the input.
+    MilvusBackfill.run(spark, "file:///unused.parquet", "", cfg) match {
+      case Left(error) =>
+        error.message should include("external_id")
+        error.message should include("requires a snapshot schema")
+      case Right(_) => fail("expected physical join key to require a snapshot")
     }
   }
 
