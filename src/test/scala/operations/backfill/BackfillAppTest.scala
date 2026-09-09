@@ -82,6 +82,67 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     parsed("source-use-iam") shouldBe "true"
   }
 
+  test("parseArgs accepts --input-path and --input-format") {
+    val parsed = BackfillApp.parseArgs(
+      Array(
+        "--input-path",
+        "s3://bucket/backfill.lance",
+        "--input-format",
+        "lance"
+      )
+    )
+    parsed("input-path") shouldBe "s3://bucket/backfill.lance"
+    parsed("input-format") shouldBe "lance"
+  }
+
+  test("resolveInputPath keeps --parquet as the legacy alias") {
+    BackfillApp.resolveInputPath(
+      Map("parquet" -> "/tmp/data.parquet")
+    ) shouldBe "/tmp/data.parquet"
+  }
+
+  test("resolveInputPath accepts --input-path as the format-neutral alias") {
+    BackfillApp.resolveInputPath(
+      Map("input-path" -> "s3://bucket/backfill.lance")
+    ) shouldBe "s3://bucket/backfill.lance"
+  }
+
+  test("resolveInputPath rejects both --parquet and --input-path") {
+    val ex = intercept[IllegalArgumentException] {
+      BackfillApp.resolveInputPath(
+        Map("parquet" -> "/tmp/a.parquet", "input-path" -> "/tmp/b.lance")
+      )
+    }
+    ex.getMessage should include("mutually exclusive")
+  }
+
+  test("resolveInputPath treats empty flag values as absent") {
+    // Template wrappers keep optional keys with empty values; an empty
+    // --parquet must not trip the mutual-exclusion check nor shadow a
+    // populated --input-path.
+    BackfillApp.resolveInputPath(
+      Map("parquet" -> "", "input-path" -> "s3://bucket/backfill.lance")
+    ) shouldBe "s3://bucket/backfill.lance"
+    BackfillApp.resolveInputPath(
+      Map("parquet" -> " ", "input-path" -> "/tmp/a.parquet")
+    ) shouldBe "/tmp/a.parquet"
+  }
+
+  test("resolveInputPath treats a sole empty path as missing") {
+    an[IllegalArgumentException] should be thrownBy {
+      BackfillApp.resolveInputPath(Map("parquet" -> ""))
+    }
+    an[IllegalArgumentException] should be thrownBy {
+      BackfillApp.resolveInputPath(Map("input-path" -> ""))
+    }
+  }
+
+  test("resolveInputPath requires an input path") {
+    an[IllegalArgumentException] should be thrownBy {
+      BackfillApp.resolveInputPath(Map.empty)
+    }
+  }
+
   test("parseArgs throws on missing value for non-flag") {
     an[IllegalArgumentException] should be thrownBy {
       BackfillApp.parseArgs(Array("--parquet"))
@@ -133,6 +194,26 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     )
 
     config.validate().left.toOption.get should include("cannot be blank")
+  }
+
+  test("buildConfig maps --input-format and defaults it to parquet") {
+    val explicit = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "input-format" -> " lance "
+      )
+    )
+    explicit.inputFormat shouldBe "lance"
+
+    val defaulted = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "input-format" -> ""
+      )
+    )
+    defaulted.inputFormat shouldBe BackfillConfig.DefaultInputFormat
   }
 
   test("parseArgs throws when key/value flag is followed by another flag") {
@@ -824,6 +905,32 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         error.message should include("requires a snapshot schema")
       case Right(_) => fail("expected physical join key to require a snapshot")
     }
+  }
+
+  test(
+    "MilvusBackfill.run rejects unimplemented inputFormat at config validation"
+  ) {
+    BackfillConfig.AllowedInputFormats
+      .diff(BackfillConfig.ImplementedInputFormats)
+      .foreach { format =>
+        val cfg = BackfillConfig(
+          s3Endpoint = "localhost:9000",
+          s3BucketName = "b",
+          s3AccessKey = "minioadmin",
+          s3SecretKey = "minioadmin",
+          inputFormat = format
+        )
+        // An empty snapshotPath would otherwise be read; failing at
+        // config.validate() proves the error short-circuits before any
+        // snapshot/S3 work.
+        MilvusBackfill.run(spark, "file:///unused.input", "", cfg) match {
+          case Left(error) =>
+            error.message should include("Invalid configuration")
+            error.message should include(format)
+          case Right(_) =>
+            fail(s"expected unimplemented inputFormat '$format' to fail")
+        }
+      }
   }
 
   test("getMilvusReadOptions includes AK/SK when s3UseIam=false") {

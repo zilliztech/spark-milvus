@@ -32,7 +32,7 @@ class for running backfill as a Spark application:
 spark-submit \
   --class com.zilliz.spark.connector.operations.backfill.BackfillApp \
   spark-connector-assembly-<branch>-amd64-SNAPSHOT.jar \
-  --parquet      s3a://source-bucket/new_fields.parquet \
+  --input-path   s3a://source-bucket/new_fields.parquet \
   --snapshot     s3a://milvus-bucket/snapshots/foo.json \
   --s3-endpoint  s3.us-west-2.amazonaws.com \
   --s3-bucket    milvus-bucket \
@@ -49,8 +49,12 @@ spark-submit \
   [--batch-size 1024] \
   [--output-result s3a://milvus-bucket/backfill/result.json] \
   [--join-key external_row_id] \
-  [--mode replace|coalesce|overwrite]
+  [--mode replace|coalesce|overwrite] \
+  [--input-format parquet]
 ```
+
+`--parquet <path>` is still accepted as a legacy alias for `--input-path`;
+passing both is an error.
 
 ### Authentication and dual-bucket credentials
 
@@ -84,7 +88,7 @@ spark-submit \
 
 | Flag           | Description                                       |
 |----------------|---------------------------------------------------|
-| `--parquet`    | Path to the new-field parquet (join key + target fields) |
+| `--input-path` | Path to the new-field input data (join key + target fields). `--parquet` is a legacy alias; the two are mutually exclusive. |
 | `--snapshot`   | Path to the Milvus snapshot manifest JSON          |
 | `--s3-endpoint`| S3 endpoint for the Milvus storage bucket          |
 | `--s3-bucket`  | Milvus storage bucket name                         |
@@ -93,6 +97,7 @@ spark-submit \
 
 | Flag              | Default     | Description                                                                  |
 |-------------------|-------------|------------------------------------------------------------------------------|
+| `--input-format`  | `parquet`   | Input reader. `parquet` is the only implemented format; `iceberg` and `lance` are recognized but rejected at config validation until their readers land. |
 | `--mode`          | `coalesce`  | Merge semantics: `replace`, `coalesce` (fill-if-null), or `overwrite`. See "Merge modes" below. |
 | `--batch-size`    | `1024`      | Rows per Arrow batch flushed to the writer.                                  |
 | `--column-mapping`| *(none)*    | `src1:tgt1,src2:tgt2,...`. Rename/drop Parquet columns to Milvus field names. |

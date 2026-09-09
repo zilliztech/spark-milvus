@@ -13,7 +13,13 @@ import com.zilliz.spark.connector.MilvusOption
   * --s3-secret-key <secret> \ [--s3-root-path <path>] [--s3-region <region>]
   * [--s3-cloud-provider aws|aliyun|gcp|azure|tencent|huawei] [--s3-use-ssl] \
   * [--batch-size <n>] [--output-result <path>] \ [--mode
-  * replace|coalesce|overwrite] [--join-key <snapshot-field-name>]
+  * replace|coalesce|overwrite] [--join-key <snapshot-field-name>] \
+  * [--input-format parquet|iceberg|lance]
+  *
+  * --input-path <path> is a format-neutral alias for --parquet (mutually
+  * exclusive with it). --input-format selects the input reader; only "parquet"
+  * is implemented, iceberg/lance are validated but rejected until their readers
+  * land.
   *
   * --mode:
   *   - replace: parquet is absolute source of truth; unmatched source rows get
@@ -28,10 +34,7 @@ object BackfillApp {
   def main(args: Array[String]): Unit = {
     val parsed = parseArgs(args)
 
-    val parquetPath = parsed.getOrElse(
-      "parquet",
-      throw new IllegalArgumentException("--parquet is required")
-    )
+    val parquetPath = resolveInputPath(parsed)
     val snapshotPath = parsed.getOrElse(
       "snapshot",
       throw new IllegalArgumentException("--snapshot is required")
@@ -97,6 +100,8 @@ object BackfillApp {
   // later inside the AWS default provider chain.
   private[backfill] val KvFlags: Set[String] = Set(
     "parquet",
+    "input-path",
+    "input-format",
     "snapshot",
     "s3-endpoint",
     "s3-bucket",
@@ -169,12 +174,45 @@ object BackfillApp {
       sourceS3Region = parsed.get("source-s3-region"),
       batchSize = parsed.getOrElse("batch-size", "1024").toInt,
       columnMapping = parsed.get("column-mapping").map(parseColumnMapping),
+      inputFormat = parsed
+        .get("input-format")
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .getOrElse(BackfillConfig.DefaultInputFormat),
       mode = parsed.getOrElse("mode", MilvusOption.BackfillModeCoalesce),
       joinKey = parsed
         .get("join-key")
         .map(value => BackfillJoinKey.PhysicalField(value.trim))
         .getOrElse(BackfillJoinKey.PrimaryKey)
     )
+  }
+
+  /** Resolve the input data path from `--parquet` (legacy) or `--input-path`
+    * (format-neutral alias). Supplying both is a config mistake, not an
+    * override, so it fails fast instead of silently picking one.
+    *
+    * Template-driven spark-submit wrappers often keep optional keys with empty
+    * values (e.g. `--parquet "$LEGACY"` while migrating to `--input-path`);
+    * empty values are treated as absent, mirroring
+    * `MilvusOption.nonEmptyOption`.
+    */
+  private[backfill] def resolveInputPath(
+      parsed: Map[String, String]
+  ): String = {
+    val parquetPath = parsed.get("parquet").filter(_.trim.nonEmpty)
+    val inputPath = parsed.get("input-path").filter(_.trim.nonEmpty)
+    if (parquetPath.nonEmpty && inputPath.nonEmpty) {
+      throw new IllegalArgumentException(
+        "--parquet and --input-path are mutually exclusive; use --input-path"
+      )
+    }
+    parquetPath
+      .orElse(inputPath)
+      .getOrElse(
+        throw new IllegalArgumentException(
+          "--parquet (or --input-path) is required"
+        )
+      )
   }
 
   // Parse `src1:tgt1,src2:tgt2,...` into a map. Empty segments and malformed
