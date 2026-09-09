@@ -22,6 +22,58 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     )
 
     config.validate() shouldBe Right(())
+    config.inputFormat shouldBe BackfillConfig.DefaultInputFormat
+  }
+
+  test("validate accepts implemented inputFormat (parquet)") {
+    BackfillConfig.ImplementedInputFormats.foreach { format =>
+      val config = BackfillConfig(
+        s3Endpoint = "localhost:9000",
+        s3BucketName = "test-bucket",
+        s3AccessKey = "minioadmin",
+        s3SecretKey = "minioadmin",
+        inputFormat = format
+      )
+      config.validate() shouldBe Right(())
+    }
+  }
+
+  test("validate rejects recognized-but-unimplemented inputFormats") {
+    val unimplemented =
+      BackfillConfig.AllowedInputFormats -- BackfillConfig.ImplementedInputFormats
+    unimplemented should not be empty
+    unimplemented.foreach { format =>
+      val config = BackfillConfig(
+        s3Endpoint = "localhost:9000",
+        s3BucketName = "test-bucket",
+        s3AccessKey = "minioadmin",
+        s3SecretKey = "minioadmin",
+        inputFormat = format
+      )
+      config.validate() match {
+        case Right(_) =>
+          fail(s"expected validation error for unimplemented inputFormat '$format'")
+        case Left(message) =>
+          message should include("recognized but not yet implemented")
+      }
+    }
+  }
+
+  test("validate rejects unknown inputFormat") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "avro"
+    )
+    config.validate() match {
+      case Right(_) =>
+        fail("expected validation error for unknown inputFormat")
+      case Left(message) =>
+        message should include("inputFormat must be one of")
+        message should include("(got 'avro')")
+    }
   }
 
   test(
