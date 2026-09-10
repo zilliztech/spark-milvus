@@ -59,7 +59,7 @@ flowchart TB
 
 ### 2.2 核心层对象模型
 
-读的唯一入口是 Snapshot：主路径从快照目录选一个快照；1.x 的离线 option 和 backup 两条入口保留为 compat 模块里的 SnapshotSource 适配器，产出同一个 Snapshot 对象；Storage V2 packed 段的 reader 也在 compat 模块，主路径只认 Storage V3。
+读的唯一入口是 Snapshot：主路径从快照目录选一个快照，只认 Storage V3；1.x 的三条非标准入口作适配器产出同一个 Snapshot 或 SegmentReader（capabilities.md 的 K1 到 K3）。
 
 | 类型 | 含义 | 来源 |
 |---|---|---|
@@ -69,7 +69,7 @@ flowchart TB
 | ColumnGroup | 一个列组文件及其字段 id 集合 | Manifest |
 | DeleteBitset | 快照时间戳之前生效的删除，按行号置位 | 段目录的 `_delta/` 文件 |
 | StoragePath | 桶内相对 key、标准 S3、Milvus 格式（`s3://<endpoint>/<bucket>/<key>`）三种形态到 (bucket, key) 的归一 | issue #118 的设计稿，未实现；1.x 现有逻辑是几处前缀替换 |
-| SchemaMapper | 字段 id、名字、Milvus 类型、Arrow 类型、Spark 类型的唯一映射 | 快照 schema |
+| SchemaMapper | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；Spark 类型的映射在 spark 层 | 快照 schema |
 | Expr IR | Spark 谓词和 Milvus 表达式翻成的同一套中间表示 | ExprTranslator |
 
 ### 2.3 读路径
@@ -132,7 +132,7 @@ flowchart LR
 | Catalog | 三段名 `milvus.db.coll`；loadTable 的 version 和 timestamp 对应快照名和时间点；createTable、dropTable 走 gRPC |
 | Table | schema 来自快照；元数据列 segment id、row offset、timestamp（名字见决策 5）；行数字节数来自快照；DeleteV2 只接能翻成 Milvus 表达式的谓词 |
 | ScanBuilder | 列裁剪、DataSource V2 谓词、Limit、RuntimeV2Filtering；不实现 V1 Filter |
-| 旁路 | Spark 4 用 ProcedureCatalog 的 CALL：建快照、建索引、load、flush、register；Spark 3.5 暴露为函数 |
+| 旁路 | Spark 4 用 ProcedureCatalog 的 CALL，Spark 3.5 暴露为同名函数；清单见 capabilities.md 第 4 节 |
 
 ### 2.7 产物与版本
 
@@ -146,7 +146,7 @@ flowchart LR
 
 ## 3 重点与顺序 `[草稿]`
 
-判据：先做让下游列式算子能接上的部分。读路径是一切的基础，写路径的 append 等 Milvus 侧的登记接口，搜索层依赖列式读。顺序只有依赖，没有日期。
+不做的功能见 capabilities.md 第 9 节。判据：先做让下游列式算子能接上的部分。读路径是一切的基础，写路径的 append 等 Milvus 侧的登记接口，搜索层依赖列式读。顺序只有依赖，没有日期。
 
 | 级别 | 顺序 | 内容 | 理由 |
 |---|---|---|---|
@@ -159,7 +159,6 @@ flowchart LR
 | P2 | 7 | knowhere 的 C shim 和 JNI、索引加载、索引写出与登记、BruteForce；backfill 写模式 | 依赖列式 reader 和写路径 |
 | P3 | 8 | native jar 打包、四条 Spark 线的子项目和 CI 矩阵、基准（读吞吐、拷贝次数、写端到端）；macOS 和 GPU 产物 | 打包工作，不影响设计 |
 | P3 | 9 | 2.0.0 发布，云上作业切换 | |
-| 不做 | | TopN、Aggregates 下推；UPDATE、MERGE；text_match 一族；GIS；struct 表达式 | 1.x 也没有，2.0 不承诺 |
 
 ## 4 待定决策 `[讨论中]`
 
@@ -197,9 +196,9 @@ flowchart LR
 | 2026-09-09 | Spark 用 knowhere 建的索引是否写回对象存储、按 Milvus 的索引文件格式登记进段清单，让 Milvus 在线也能加载 | 2.0 首版只做反方向（加载 Milvus 建的索引到 knowhere）和任务内即时建索引；写回随 Global Index（底库按中心点重分布、每桶建索引、映射写进格式）一起做，因为它是唯一需要写回的场景 |
 | 2026-09-10 | 1.x 冻结点 | tag v1.6.0，main 只收 1.x 修复 |
 | 2026-09-10 | backfill 的模块归属 | 不分仓；仓库内用 sbt 模块隔离，场景与遗留代码进 ops 模块，依赖只能向下。同一政策适用于调试工具、JVM 向量搜索、backup 入口、gRPC Insert |
-| 2026-09-10 | 支持的 Spark 版本 | 跟 lance-spark 一样：每条维护中的 Spark 线一个子项目、一份源码、各自钉 Spark 和 Arrow、各出产物；首发覆盖 3.5、4.0、4.1、4.2，Scala 2.13 |
+| 2026-09-10 | 支持的 Spark 版本 | 跟 lance-spark 一样：每条维护中的 Spark 线一个子项目、一份源码、各自钉 Spark 和 Arrow、各出产物；首发覆盖 3.5、4.0、4.1、4.2 |
 | 2026-09-10 | 索引写回 | 推翻 09-09 那条：Spark 建的索引按 Milvus 索引文件格式写回并登记进 Manifest，是 2.0 的功能之一，与加载链和 Global Index 映射一起做。2.0 是完整设计，不按场景裁剪 |
 | 2026-09-10 | 暴力搜索能力 | 保留。1.x 的 JVM 实现先留在 ops/search；正式形态（入口、原生层 BruteForce、归属）在能力规划时一起设计 |
-| 2026-09-10 | Scala 版本 | 跟 lance-spark 一样：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；整个仓库交叉编译 |
+| 2026-09-10 | Scala 版本 | 跟 lance-spark 一样：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；交叉编译范围见 modules.md 第 1 节 |
 | 2026-09-10 | 非标准功能的处理原则 | 与总设计冲突、暂时不好判断的功能一律保留并用模块隔离，不进核心层。据此：Storage V2 packed 读、离线 option 塞段列表、backup 三个入口进 compat 模块，作 Snapshot 或 Reader 的适配器；gRPC Insert 进 ops/legacy 作小批量兜底 |
 | 2026-09-10 | 写路径的登记接口 | 读 Milvus master 得出：backfill 走现有的 BatchUpdateManifest / CommitBackfillResult（只前进已有段的 Manifest 版本）；append 要 Milvus 新增 RegisterSegments RPC。之前写的「登记走 External Collection refresh」是误判，已从设计里删除。分析见 spark-milvus-design-docs/milvus-registration-analysis-2026-09-10.md |
