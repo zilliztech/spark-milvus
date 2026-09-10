@@ -216,6 +216,36 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     defaulted.inputFormat shouldBe BackfillConfig.DefaultInputFormat
   }
 
+  test("buildConfig maps --iceberg-snapshot-id") {
+    val withSnapshot = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "input-format" -> "iceberg",
+        "iceberg-snapshot-id" -> "4325893492"
+      )
+    )
+    withSnapshot.icebergSnapshotId shouldBe Some("4325893492")
+
+    val withoutSnapshot = BackfillApp.buildConfig(
+      Map("s3-endpoint" -> "endpoint", "s3-bucket" -> "bucket")
+    )
+    withoutSnapshot.icebergSnapshotId shouldBe None
+  }
+
+  test("parseArgs accepts --iceberg-snapshot-id") {
+    val parsed = BackfillApp.parseArgs(
+      Array(
+        "--input-format",
+        "iceberg",
+        "--iceberg-snapshot-id",
+        "4325893492"
+      )
+    )
+    parsed("input-format") shouldBe "iceberg"
+    parsed("iceberg-snapshot-id") shouldBe "4325893492"
+  }
+
   test("parseArgs throws when key/value flag is followed by another flag") {
     val ex = intercept[IllegalArgumentException] {
       BackfillApp.parseArgs(Array("--parquet", "--snapshot", "/tmp/snap.json"))

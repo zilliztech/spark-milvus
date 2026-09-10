@@ -17,9 +17,10 @@ import com.zilliz.spark.connector.MilvusOption
   * [--input-format parquet|iceberg|lance]
   *
   * --input-path <path> is a format-neutral alias for --parquet (mutually
-  * exclusive with it). --input-format selects the input reader; only "parquet"
-  * is implemented, iceberg/lance are validated but rejected until their readers
-  * land.
+  * exclusive with it). --input-format selects the input reader; "parquet"
+  * and "iceberg" are implemented, "lance" is validated but rejected until
+  * its reader lands. --iceberg-snapshot-id time-travels an iceberg input
+  * table to a specific snapshot (requires --input-format iceberg).
   *
   * --mode:
   *   - replace: parquet is absolute source of truth; unmatched source rows get
@@ -118,7 +119,8 @@ object BackfillApp {
     "output-result",
     "column-mapping",
     "mode",
-    "join-key"
+    "join-key",
+    "iceberg-snapshot-id"
   )
 
   private[backfill] val KnownFlags: Set[String] = BoolFlags ++ KvFlags
@@ -179,6 +181,7 @@ object BackfillApp {
         .map(_.trim)
         .filter(_.nonEmpty)
         .getOrElse(BackfillConfig.DefaultInputFormat),
+      icebergSnapshotId = parsed.get("iceberg-snapshot-id"),
       mode = parsed.getOrElse("mode", MilvusOption.BackfillModeCoalesce),
       joinKey = parsed
         .get("join-key")

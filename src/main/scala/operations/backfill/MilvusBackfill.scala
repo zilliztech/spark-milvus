@@ -711,6 +711,7 @@ object MilvusBackfill {
     }
     format match {
       case "parquet" => readParquet(spark, rawPath, config)
+      case "iceberg" => readIceberg(spark, rawPath, config)
     }
   }
 
@@ -751,6 +752,54 @@ object MilvusBackfill {
           DataReadError(
             path = path,
             message = s"Failed to read Parquet file: ${e.getMessage}",
+            cause = Some(e)
+          )
+        )
+    }
+  }
+
+  private def readIceberg(
+      spark: SparkSession,
+      rawPath: String,
+      config: BackfillConfig
+  ): Either[BackfillError, BackfillSource] = {
+    // Iceberg loads by catalog-qualified identifier (catalog.db.table); the
+    // catalog must be registered via spark.sql.catalog.<name> at submit time.
+    // Raw object-storage *path* loads are not usable without a Hive metastore:
+    // Iceberg 1.10 routes path reads through a default_iceberg catalog that it
+    // hardcodes to type=hive, so we document identifiers as the supported form.
+    // Identifiers pass through normalizeObjectStorageScheme and
+    // configureHadoopS3ForPath unharmed; reads go through Hadoop FS, so the
+    // scoped source-bucket S3A config still applies.
+    val path = normalizeObjectStorageScheme(rawPath, config)
+    try {
+      Right(withScopedHadoopStorage(spark, path, config, isSource = true) {
+        // Materialize while source-bucket credentials are installed, mirroring
+        // readParquet: Spark evaluates DataFrame reads lazily, so returning an
+        // unmaterialized DF would let later main-bucket configuration leak in.
+        var reader = spark.read.format("iceberg")
+        config.icebergSnapshotId
+          .filter(_.trim.nonEmpty)
+          .foreach(id => reader = reader.option("snapshot-id", id))
+        val df = reader.load(path)
+        if (df.columns.isEmpty) {
+          throw new IllegalArgumentException(
+            "Backfill iceberg input is empty (no columns)"
+          )
+        }
+        if (path.startsWith("oss://")) {
+          localCheckpointBackfillData(spark, df)
+        } else {
+          BackfillSource(df, None)
+        }
+      })
+    } catch {
+      case e: Exception =>
+        logger.error(s"Failed to read Iceberg table from $path", e)
+        Left(
+          DataReadError(
+            path = path,
+            message = s"Failed to read Iceberg table: ${e.getMessage}",
             cause = Some(e)
           )
         )

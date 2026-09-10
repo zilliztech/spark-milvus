@@ -99,6 +99,52 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("validate accepts iceberg inputFormat with a valid snapshot id") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "iceberg",
+      icebergSnapshotId = Some("4325893492")
+    )
+    config.validate() shouldBe Right(())
+  }
+
+  test("validate rejects a non-integer icebergSnapshotId") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "iceberg",
+      icebergSnapshotId = Some("not-a-snapshot")
+    )
+    config.validate() match {
+      case Right(_) =>
+        fail("expected validation error for non-integer icebergSnapshotId")
+      case Left(message) =>
+        message should include("icebergSnapshotId must be an integer snapshot id")
+    }
+  }
+
+  test("validate rejects icebergSnapshotId for non-iceberg inputFormat") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "parquet",
+      icebergSnapshotId = Some("4325893492")
+    )
+    config.validate() match {
+      case Right(_) =>
+        fail("expected validation error for icebergSnapshotId without iceberg")
+      case Left(message) =>
+        message should include("icebergSnapshotId requires inputFormat='iceberg'")
+    }
+  }
+
   test(
     "Empty milvusUri/collectionName is allowed by validate() in snapshot mode"
   ) {
