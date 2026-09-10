@@ -111,6 +111,7 @@ flowchart LR
 2. commit 止于作业清单。登记由用户或云上作业发 `CALL milvus.system.refresh`（第 3 层 Procedure），核心层不调 Milvus。refresh 后在线可见；Connector 自己再读要先 CALL 建快照。
 3. 写模式：append 写新段；backfill 给已有段追加列组文件，已有列组不重写，段的 Manifest 出新版本。backfill 能否走 refresh 登记取决于决策 3。
 4. append 不用 RequiresDistributionAndOrdering；backfill 写模式的按段分布和按行号排序见决策 10。truncate 和 overwrite 只接受全表。
+5. 索引随段一起写：SegmentWriter 可以在写段的同时用 knowhere 建索引，按 Milvus 的索引文件格式写到段目录旁并登记进该段的 Manifest（2.5 第 6 条）；Global Index 的中心点到桶的映射同样写进 Milvus Storage。作业清单带上索引文件，refresh 一并登记。
 
 ### 2.5 原生层
 
@@ -119,6 +120,8 @@ flowchart LR
 3. JNI 不用 Panama（JDK 22 才正式的外部函数接口），因为 Spark 4 最低 Java 17。
 4. 交给 native 的路径一律是桶内相对 key，桶来自 fs.bucket_name。
 5. 索引加载：索引文件在对象存储里按 Milvus binlog 格式切成多片，每片带事件头；加载时从快照的段列表拿路径，去掉事件头，按 SLICE_META（记录切片顺序的元信息）拼回 knowhere 的 BinarySet；DiskANN 先落本地目录。
+6. 索引写出是加载的逆过程：knowhere serialize 出 BinarySet，按 16MB 切片，每片加 binlog 事件头，写 SLICE_META，上传到该段的索引文件路径，用 milvus-storage 的 add_index_info 登记进 Manifest；索引版本按 knowhere 的版本区间标记，供 Milvus 加载时校验。
+7. 索引来源三级，由 IndexSource 统一：Milvus 建的（快照段列表里）、Spark 建并按第 6 条写回的、任务内即时建的（只在内存，不写回）。
 
 ### 2.6 接口层
 
@@ -192,10 +195,9 @@ spark-milvus/
 | P1 | 4 | Catalog、元数据列、统计、DataSource V2 谓词、Limit | 三段名和回表 |
 | P1 | 5 | ExprTranslator、IR、求值器 | 谓词语义对齐 Milvus |
 | P1 | 6 | SegmentWriter、Committer、refresh Procedure | 等决策 3 的契约，可与 1 到 3 并行谈 |
-| P2 | 7 | knowhere 的 C shim 和 JNI、索引加载、BruteForce；backfill 写模式 | 依赖列式 reader |
+| P2 | 7 | knowhere 的 C shim 和 JNI、索引加载、索引写出与登记、BruteForce；backfill 写模式 | 依赖列式 reader 和写路径 |
 | P3 | 8 | native jar 打包、四条 Spark 线的子项目和 CI 矩阵、基准（读吞吐、拷贝次数、写端到端）；macOS 和 GPU 产物 | 打包工作，不影响设计 |
 | P3 | 9 | 2.0.0 发布，云上作业切换 | |
-| 后续 | | Spark 建的索引按 Milvus 索引文件格式写回并登记 | 随 Global Index 一起做 `[已定]`，见决策日志 |
 | 不做 | | TopN、Aggregates 下推；UPDATE、MERGE；text_match 一族；GIS；struct 表达式 | 1.x 也没有，2.0 不承诺 |
 
 ## 4 待定决策 `[讨论中]`
@@ -223,7 +225,7 @@ spark-milvus/
 |---|---|
 | External Collection refresh 登记 Connector 写出的段，保持段的布局；能否登记已有段的新 Manifest 版本 | 2.4 写路径，决策 3 |
 | 列级 min/max 统计，row group 统计剪枝；milvus-storage 的 Parquet 谓词下推现在是空实现 | 2.3 下推两级 |
-| Milvus 服务把索引文件写进段的 Manifest（milvus-storage 的 add_index_info 接口已有） | 2.5 索引加载 |
+| Milvus 服务把索引文件写进段的 Manifest（milvus-storage 的 add_index_info 接口已有）；加载 Connector 写回的索引文件：认 Manifest 里的索引登记，校验 knowhere 版本区间，refresh 时一并接受 | 2.5 索引加载与写出 |
 | 自动快照加保留策略；快照目录里加 catalog 文件；格式契约文档 | 2.3 读入口，决策 11 |
 
 ## 6 决策日志
@@ -236,3 +238,4 @@ spark-milvus/
 | 2026-09-10 | 1.x 冻结点 | tag v1.6.0，main 只收 1.x 修复 |
 | 2026-09-10 | backfill 的模块归属 | 不分仓；仓库内用 sbt 模块隔离，场景与遗留代码进 ops 模块，依赖只能向下。同一政策适用于调试工具、JVM 向量搜索、backup 入口、gRPC Insert |
 | 2026-09-10 | 支持的 Spark 版本 | 跟 lance-spark 一样：每条维护中的 Spark 线一个子项目、一份源码、各自钉 Spark 和 Arrow、各出产物；首发覆盖 3.5、4.0、4.1、4.2，Scala 2.13 |
+| 2026-09-10 | 索引写回 | 推翻 09-09 那条：Spark 建的索引按 Milvus 索引文件格式写回并登记进 Manifest，是 2.0 的功能之一，与加载链和 Global Index 映射一起做。2.0 是完整设计，不按场景裁剪 |
