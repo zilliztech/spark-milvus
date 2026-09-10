@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget curl git g++ gcc make ccache gdb \
     python3 python3-pip \
     zip unzip \
-    automake autoconf libtool patchelf libaio-dev libssl-dev pkg-config \
+    automake autoconf libtool patchelf libaio-dev libssl-dev libclang-dev pkg-config \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/aclocal-1.16 /usr/bin/aclocal-1.15 \
     && ln -sf /usr/bin/automake-1.16 /usr/bin/automake-1.15
@@ -60,6 +60,7 @@ RUN conan profile detect --force \
 # The current milvus-storage format bridge is built from Rust sources.
 ENV RUSTUP_HOME=/root/.rustup
 ENV CARGO_HOME=/root/.cargo
+ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
 ENV PATH=/root/.cargo/bin:${PATH}
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --profile minimal --default-toolchain stable
@@ -95,6 +96,7 @@ RUN git config --global --add safe.directory /workspace && \
 RUN set -eux; \
     pkg-config --exists openssl; \
     test -f /usr/include/openssl/ssl.h; \
+    test -f "${LIBCLANG_PATH}/libclang.so"; \
     avro_ref='libavrocpp/1.12.1.1@milvus/dev#cde7bb587a29f6f233bae7e18b71815d'; \
     conan download "${avro_ref}" -r default-conan-local2 --only-recipe; \
     avro_recipe="$(conan cache path "${avro_ref}")"; \
