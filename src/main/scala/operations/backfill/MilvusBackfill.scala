@@ -39,6 +39,21 @@ import io.milvus.grpc.schema.{DataType => MilvusDataType}
   */
 object MilvusBackfill {
 
+  /** Partition ID stamped on the top-level result JSON.
+    *
+    * Milvus DataCoord (`CommitBackfillResult`) validates every segment's
+    * partition against a positive value and skips the check otherwise. Builds
+    * before milvus-io/milvus#53330 skip the check only for `0`, so `0` is the
+    * one value that means "no partition restriction" on every build. A backfill
+    * that spans more than one partition must therefore report `0`. The previous
+    * `-1` sentinel was compared against partition -1 by those builds, which
+    * rejected every segment ("no backfill segments passed pre-validation").
+    */
+  private[backfill] def resolveResultPartitionId(
+      partitionIDs: Set[Long]
+  ): Long =
+    if (partitionIDs.size == 1) partitionIDs.head else 0L
+
   private val logger = LoggerFactory.getLogger(getClass)
 
   private[backfill] final case class BackfillSource(
@@ -627,7 +642,7 @@ object MilvusBackfill {
         segmentResults = segmentResults,
         executionTimeMs = executionTime,
         collectionId = collectionID,
-        partitionId = if (partitionIDs.size == 1) partitionIDs.head else -1,
+        partitionId = resolveResultPartitionId(partitionIDs),
         schemaVersion = snapshotMetadataOpt
           .map(_.collection.schema.version)
           .getOrElse(0),
