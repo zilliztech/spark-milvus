@@ -91,7 +91,7 @@ RUN git config --global --add safe.directory /workspace && \
     git submodule update --init --recursive
 
 # Keep the pinned recipes and checksums, but replace obsolete primary source
-# endpoints with their durable upstream archives.
+# endpoints with durable upstream download locations.
 RUN set -eux; \
     pkg-config --exists openssl; \
     test -f /usr/include/openssl/ssl.h; \
@@ -104,9 +104,10 @@ RUN set -eux; \
     boost_ref='boost/1.83.0#4e8a94ac1b88312af95eded83cd81ca8'; \
     conan download "${boost_ref}" -r default-conan-local2 --only-recipe; \
     boost_recipe="$(conan cache path "${boost_ref}")"; \
-    sed -i 's#https://boostorg.jfrog.io/artifactory/main/#https://archives.boost.io/#' \
+    sed -i 's#https://boostorg.jfrog.io/artifactory/main/release/#https://downloads.sourceforge.net/project/boost/boost/#' \
         "${boost_recipe}/conandata.yml"; \
-    grep -Fq 'https://archives.boost.io/release/1.83.0/' "${boost_recipe}/conandata.yml"
+    grep -Fq 'https://downloads.sourceforge.net/project/boost/boost/1.83.0/' \
+        "${boost_recipe}/conandata.yml"
 
 # Build milvus-storage native libraries using its Conan 2 Makefile.
 RUN cd milvus-storage/cpp && make java-lib
