@@ -6,8 +6,8 @@
 
 | 模块 | 层 | 包名 | 依赖 | 产物 |
 |---|---|---|---|---|
-| native-storage | 第 1 层 | `com.zilliz.milvus.native.storage` | milvus-storage 的 C 接口 | `com.zilliz:spark-milvus-native-storage`，jar 内 `native/{os}-{arch}/` 平铺 .so |
-| native-vector | 第 1 层 | `com.zilliz.milvus.native.vector` | knowhere 的 C shim | `com.zilliz:spark-milvus-native-vector`，同上布局 |
+| native-storage | 第 1 层 | `com.zilliz.milvus.jni.storage` | milvus-storage 的 C 接口 | `com.zilliz:spark-milvus-native-storage`，jar 内 `native/{os}-{arch}/` 平铺 .so |
+| native-vector | 第 1 层 | `com.zilliz.milvus.jni.vector` | knowhere 的 C shim | `com.zilliz:spark-milvus-native-vector`，同上布局 |
 | core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow C Data Interface、对象存储 SDK | `com.zilliz:spark-milvus-core_<scala>` |
 | compat | 第 2 层 | `com.zilliz.milvus.storage.compat` | core | `com.zilliz:spark-milvus-compat_<scala>` |
 | client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC | `com.zilliz:spark-milvus-client_<scala>` |
@@ -55,20 +55,23 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | `offline` | 1.x 离线 option 的段列表转 Snapshot，实现 SnapshotSource |
 | `backup` | milvus-backup 导出目录转 Snapshot，实现 SnapshotSource |
 
-### 2.3 native-storage `com.zilliz.milvus.native.storage`
+### 2.3 native-storage `com.zilliz.milvus.jni.storage`
 
 | 包 | 职责 |
 |---|---|
-| `jni` | StorageNative：每个 loon_* 一个 native 方法，句柄是 long，结果码转异常 |
-| `arrow` | ArrowArray、ArrowSchema、ArrowArrayStream 三个 C 结构体的分配与 release |
-| `loader` | 按 os 和 arch 解压 .so 到带版本号的目录后 System.load |
+| `jni.storage` | StorageNative：每个 loon_* 一个 native 方法，句柄是 long，结果码转异常 |
+| `jni.storage.arrow` | ArrowArray、ArrowSchema、ArrowArrayStream 三个 C 结构体的分配与 release |
+| `jni.storage.loader` | 按 os 和 arch 解压 .so 到带版本号的目录后 System.load |
 
-### 2.4 native-vector `com.zilliz.milvus.native.vector`
+包名用 `jni` 而不是 `native`：`native` 是 Java 的保留字，不能做包名。
+
+### 2.4 native-vector `com.zilliz.milvus.jni.vector`
 
 | 包 | 职责 |
 |---|---|
-| `jni` | VectorNative：mv_* 的 native 方法 |
-| `shim` | C 源码：mv_* 包 knowhere::Index、BruteForce、BinarySet、Version；DiskANN 的本地 FileManager |
+| `jni.vector` | VectorNative：mv_* 的 native 方法 |
+
+C shim（mv_* 包 knowhere::Index、BruteForce、BinarySet、Version，以及 DiskANN 的本地 FileManager）是 C 源码，在 `src/main/cpp`。
 
 ### 2.5 client `com.zilliz.milvus.client`
 
@@ -113,11 +116,11 @@ spark-milvus/
   project/                         插件、依赖版本、Spark 线与 Scala 版本矩阵
   native/
     storage/
-      src/main/java/               com.zilliz.milvus.native.storage
+      src/main/java/               com.zilliz.milvus.jni.storage
       src/main/cpp/                JNI 源码
       build/                       构建与 patchelf 脚本
     vector/
-      src/main/java/               com.zilliz.milvus.native.vector
+      src/main/java/               com.zilliz.milvus.jni.vector
       src/main/cpp/                C shim 与 JNI
   core/
     src/main/scala/com/zilliz/milvus/storage/{snapshot,manifest,schema,path,credential,expr,delete,stats,read,write,index}
