@@ -41,12 +41,13 @@ object MilvusBackfill {
 
   /** Partition ID stamped on the top-level result JSON.
     *
-    * Milvus DataCoord (`CommitBackfillResult`) treats a non-zero value as a
-    * partition-scoped commit and rejects every segment whose partition differs
-    * from it; `0` means "no partition restriction". A backfill that spans more
-    * than one partition must therefore report `0`. The previous `-1` sentinel
-    * made Milvus compare every segment against partition -1 and reject all of
-    * them ("no backfill segments passed pre-validation").
+    * Milvus DataCoord (`CommitBackfillResult`) validates every segment's
+    * partition against a positive value and skips the check otherwise. Builds
+    * before milvus-io/milvus#53330 skip the check only for `0`, so `0` is the
+    * one value that means "no partition restriction" on every build. A backfill
+    * that spans more than one partition must therefore report `0`. The previous
+    * `-1` sentinel was compared against partition -1 by those builds, which
+    * rejected every segment ("no backfill segments passed pre-validation").
     */
   private[backfill] def resolveResultPartitionId(
       partitionIDs: Set[Long]
