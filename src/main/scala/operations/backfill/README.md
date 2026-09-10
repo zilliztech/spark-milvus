@@ -97,13 +97,46 @@ passing both is an error.
 
 | Flag              | Default     | Description                                                                  |
 |-------------------|-------------|------------------------------------------------------------------------------|
-| `--input-format`  | `parquet`   | Input reader. `parquet` is the only implemented format; `iceberg` and `lance` are recognized but rejected at config validation until their readers land. |
+| `--input-format`  | `parquet`   | Input reader. `parquet` and `iceberg` are implemented; `lance` is recognized but rejected at config validation until its reader lands. |
+| `--iceberg-snapshot-id` | *(none)* | Iceberg snapshot to read the input table at (time travel); requires `--input-format iceberg`. |
 | `--mode`          | `coalesce`  | Merge semantics: `replace`, `coalesce` (fill-if-null), or `overwrite`. See "Merge modes" below. |
 | `--batch-size`    | `1024`      | Rows per Arrow batch flushed to the writer.                                  |
 | `--column-mapping`| *(none)*    | `src1:tgt1,src2:tgt2,...`. Rename/drop Parquet columns to Milvus field names. |
 | `--join-key`      | collection PK | Exact persisted snapshot field to use instead of the collection PK. |
 | `--output-result` | *(none)*    | Path to write the result JSON.                                               |
 | `--s3-cloud-provider` | `aws` | Native storage provider for the Milvus storage bucket: `aws`, `aliyun`, `gcp`, `azure`, `tencent`, or `huawei`. |
+
+### Iceberg input
+
+`--input-format iceberg` reads the new-field data from an Iceberg table
+instead of a parquet file. `--input-path` is a **catalog-qualified identifier**
+(`catalog.db.table`): the catalog must be registered on the SparkSession via
+`--conf spark.sql.catalog.<name>=...` (e.g. `org.apache.iceberg.spark.SparkCatalog`
+with `type=hadoop` and `warehouse=...`). Reads go through Hadoop FS, so the
+`--source-s3-*` per-bucket credentials apply to the warehouse bucket too.
+
+Raw object-storage *path* reads (`--input-path s3a://.../table`) are **not**
+supported: Iceberg 1.10 routes path loads through a `default_iceberg` catalog
+that it hardcodes to `type=hive`, which requires a Hive metastore. Use a
+catalog-qualified identifier instead.
+
+Spark 4.0 does not ship Iceberg, so the runtime jar must be supplied at submit
+time (the connector declares it `provided` and excludes it from the assembly):
+
+```bash
+spark-submit \
+  --packages org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.2 \
+  --conf spark.sql.catalog.backfill=org.apache.iceberg.spark.SparkCatalog \
+  --conf spark.sql.catalog.backfill.type=hadoop \
+  --conf spark.sql.catalog.backfill.warehouse=s3a://warehouse \
+  ... --input-format iceberg \
+      --input-path backfill.db.backfill_table \
+      --iceberg-snapshot-id 4325893492
+```
+
+`--iceberg-snapshot-id` time-travels the input table to a specific Iceberg
+snapshot so a long-running backfill reads a stable view. Column mapping, join
+keys and merge modes are identical to the parquet input.
 
 ## Join keys and column mapping
 

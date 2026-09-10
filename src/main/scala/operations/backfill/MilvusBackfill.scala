@@ -711,6 +711,7 @@ object MilvusBackfill {
     }
     format match {
       case "parquet" => readParquet(spark, rawPath, config)
+      case "iceberg" => readIceberg(spark, rawPath, config)
     }
   }
 
@@ -751,6 +752,71 @@ object MilvusBackfill {
           DataReadError(
             path = path,
             message = s"Failed to read Parquet file: ${e.getMessage}",
+            cause = Some(e)
+          )
+        )
+    }
+  }
+
+  private[backfill] def readIceberg(
+      spark: SparkSession,
+      rawPath: String,
+      config: BackfillConfig
+  ): Either[BackfillError, BackfillSource] = {
+    // Iceberg loads by catalog-qualified identifier (catalog.db.table); the
+    // catalog must be registered via spark.sql.catalog.<name> at submit time.
+    // Raw object-storage *path* loads are not usable without a Hive metastore:
+    // Iceberg 1.10 routes path reads through a default_iceberg catalog that it
+    // hardcodes to type=hive, so we document identifiers as the supported form.
+    // Identifiers pass through normalizeObjectStorageScheme and
+    // configureHadoopS3ForPath unharmed; reads go through Hadoop FS, so the
+    // scoped source-bucket S3A config still applies.
+    val path = normalizeObjectStorageScheme(rawPath, config)
+    // Iceberg input must be a catalog-qualified identifier (catalog.db.table).
+    // Raw file/object-storage paths are unsupported and would otherwise fail
+    // later with a misleading Hive-metastore error from Iceberg's default
+    // catalog resolution; reject them up front with a clear message.
+    if (path != null && (path.contains("://") || path.startsWith("/"))) {
+      return Left(
+        DataReadError(
+          path = path,
+          message = "Iceberg input must be a catalog-qualified identifier " +
+            "(catalog.db.table), not a raw file/object-storage path"
+        )
+      )
+    }
+    try {
+      Right(withScopedHadoopStorage(spark, path, config, isSource = true) {
+        // No full materialization is needed here, mirroring readParquet:
+        // S3A uses persistent per-bucket `fs.s3a.bucket.<b>.*` configuration,
+        // so a later lazy scan still resolves the source-bucket credentials
+        // even after this block returns. OSS keys are restored on exit, so
+        // oss:// inputs are materialized via localCheckpoint inside the scope.
+        // df.columns resolves the Iceberg schema (metadata read) inside the
+        // scope, failing fast on an empty table.
+        var reader = spark.read.format("iceberg")
+        config.icebergSnapshotId
+          .filter(_.trim.nonEmpty)
+          .foreach(id => reader = reader.option("snapshot-id", id.trim))
+        val df = reader.load(path)
+        if (df.columns.isEmpty) {
+          throw new IllegalArgumentException(
+            "Backfill iceberg input is empty (no columns)"
+          )
+        }
+        if (path.startsWith("oss://")) {
+          localCheckpointBackfillData(spark, df)
+        } else {
+          BackfillSource(df, None)
+        }
+      })
+    } catch {
+      case e: Exception =>
+        logger.error(s"Failed to read Iceberg table from $path", e)
+        Left(
+          DataReadError(
+            path = path,
+            message = s"Failed to read Iceberg table: ${e.getMessage}",
             cause = Some(e)
           )
         )

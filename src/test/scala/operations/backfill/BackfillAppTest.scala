@@ -216,6 +216,36 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     defaulted.inputFormat shouldBe BackfillConfig.DefaultInputFormat
   }
 
+  test("buildConfig maps --iceberg-snapshot-id") {
+    val withSnapshot = BackfillApp.buildConfig(
+      Map(
+        "s3-endpoint" -> "endpoint",
+        "s3-bucket" -> "bucket",
+        "input-format" -> "iceberg",
+        "iceberg-snapshot-id" -> "4325893492"
+      )
+    )
+    withSnapshot.icebergSnapshotId shouldBe Some("4325893492")
+
+    val withoutSnapshot = BackfillApp.buildConfig(
+      Map("s3-endpoint" -> "endpoint", "s3-bucket" -> "bucket")
+    )
+    withoutSnapshot.icebergSnapshotId shouldBe None
+  }
+
+  test("parseArgs accepts --iceberg-snapshot-id") {
+    val parsed = BackfillApp.parseArgs(
+      Array(
+        "--input-format",
+        "iceberg",
+        "--iceberg-snapshot-id",
+        "4325893492"
+      )
+    )
+    parsed("input-format") shouldBe "iceberg"
+    parsed("iceberg-snapshot-id") shouldBe "4325893492"
+  }
+
   test("parseArgs throws when key/value flag is followed by another flag") {
     val ex = intercept[IllegalArgumentException] {
       BackfillApp.parseArgs(Array("--parquet", "--snapshot", "/tmp/snap.json"))
@@ -931,6 +961,25 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
             fail(s"expected unimplemented inputFormat '$format' to fail")
         }
       }
+  }
+
+  test("readIceberg rejects raw object-storage paths up front") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "b",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "iceberg"
+    )
+    // The rejection happens before any Spark/Iceberg I/O, so the shared local
+    // SparkSession is sufficient; a raw path must not reach the reader.
+    MilvusBackfill.readIceberg(spark, "s3a://warehouse/db/backfill_table", cfg) match {
+      case Left(error) =>
+        error.message should include("catalog-qualified identifier")
+        error.message should include("raw file/object-storage path")
+      case Right(_) =>
+        fail("expected a raw object-storage path to be rejected")
+    }
   }
 
   test("getMilvusReadOptions includes AK/SK when s3UseIam=false") {

@@ -198,6 +198,7 @@ lazy val root = (project in file("."))
       parquetHadoop,
       parquetAvro,
       avro,
+      icebergSparkRuntime,
       hadoopCommon,
       hadoopAws,
       hadoopAliyun,

@@ -77,6 +77,15 @@ object Dependencies {
   lazy val jacksonDatabind =
     "com.fasterxml.jackson.core" % "jackson-databind" % jacksonVersion
 
+  // Iceberg input reader for backfill (inputFormat = "iceberg"). Spark 4.0 does
+  // NOT ship Iceberg, so this is marked provided: it stays out of the assembly
+  // and operators inject the runtime jar at submit time via --packages/--jars.
+  // test scope makes it available to integration tests that build real
+  // hadoop-catalog tables.
+  lazy val icebergVersion = "1.10.2"
+  lazy val icebergSparkRuntime =
+    "org.apache.iceberg" % "iceberg-spark-runtime-4.0_2.13" % icebergVersion % "provided,test"
+
   // Arrow dependencies for milvus-storage JNI
   lazy val arrowVersion = "17.0.0"
   lazy val arrowFormat = "org.apache.arrow" % "arrow-format" % arrowVersion

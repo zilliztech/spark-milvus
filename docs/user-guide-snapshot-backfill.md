@@ -37,7 +37,7 @@ Use snapshot backfill when you need to:
 | Object storage             | S3 / MinIO / GCS with S3-compatible endpoint. Must be accessible from both Milvus and Spark.    |
 | Spark / Java               | Spark 4.0.x built for Scala 2.13, with Java 21. Cluster mode on YARN, Kubernetes, or standalone. |
 | Connector JARs             | `spark-connector-assembly-*.jar`. It bundles the native `milvus-storage` resources copied into `src/main/resources/native/`. |
-| Parquet of new-field data  | Must contain the resolved join-key column, plus one column per new field.                      |
+| New-field input data        | A Parquet file or an Iceberg table (`--input-format`), containing the resolved join-key column plus one column per new field. |
 | Network                    | Spark executors must reach the object store. Schema setup and snapshot creation use the Milvus SDK; result commit must reach the Proxy management HTTP endpoint. |
 
 ## 3. The flow at a glance
@@ -48,7 +48,7 @@ Use snapshot backfill when you need to:
 │ 2. CreateSnapshot(collection)         → snapshot.json on S3      │
 └──────────────────────────────────────────────────────────────────┘
                 │
-                ▼   snapshot.json + your parquet
+                ▼   snapshot.json + your input data (parquet / iceberg)
 ┌─── Spark job ────────────────────────────────────────────────────┐
 │ 3. Run BackfillApp                                               │
 │    → writes new binlogs to S3                                    │
@@ -66,12 +66,13 @@ Use snapshot backfill when you need to:
 Steps 1 and 2 use your Milvus SDK. Step 4 is a single request to the Proxy
 management HTTP endpoint, not a public SDK or gRPC method.
 
-## 4. Prepare your Parquet input
+## 4. Prepare your input data
 
-The Parquet file must contain:
+`--input-format` selects the input reader: `parquet` (default) or `iceberg`.
+The input must contain:
 
 - The **join-key** column. By default the job joins on the collection primary
-  key and expects a parquet column named `pk`; use `--column-mapping` if your
+  key and expects an input column named `pk`; use `--column-mapping` if your
   source has a different name.
 - One column per **new field** you want to backfill. Column names must
   match the Milvus field names (after any column mapping).
@@ -85,8 +86,18 @@ Example (new fields `category` and `score`, PK column in source is `doc_id`):
 
 At submit time: `--column-mapping doc_id:pk_field,category:category,score:score`.
 
+For an **Iceberg input**, pass `--input-format iceberg` and an
+`--input-path` of the form `catalog.db.table`. The catalog must be registered
+on the Spark session (`--conf spark.sql.catalog.<name>=org.apache.iceberg.spark.SparkCatalog`
+plus `type`/`warehouse`); the runtime jar is supplied with
+`--packages org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.2`.
+Iceberg *path* reads (`s3a://...`) are not supported — Iceberg 1.10 routes them
+through a hardcoded `type=hive` default catalog that needs a Hive metastore.
+`--iceberg-snapshot-id` time-travels the input table to a specific snapshot.
+Column mapping, join keys and merge modes are identical to the parquet input.
+
 To join on a different persisted snapshot field, pass
-`--join-key external_row_id`. With no mapping, the parquet must contain that
+`--join-key external_row_id`. With no mapping, the input must contain that
 exact column name. With a differently named input column:
 
 ```text
@@ -95,9 +106,9 @@ exact column name. With a differently named input column:
 ```
 
 The physical field must exist exactly (including case) in the snapshot schema
-and must be declared non-nullable. The parquet key must also be non-null and
+and must be declared non-nullable. The input key must also be non-null and
 unique so one source row cannot fan out into multiple output rows. Source
-values may repeat; the same parquet record is applied to every matching
+values may repeat; the same input record is applied to every matching
 physical source row. The join field is not a target field, so you cannot
 backfill it in the same operation. Supported physical-key Milvus types are
 Int8/16/32/64, String, and VarChar.
@@ -116,7 +127,7 @@ reserved for backfill metadata and cannot be used as join keys.
   explicitly in your ETL before running the job.
 
 Missing join keys in the Parquet: behaviour depends on `--mode` (see §6).
-Extra parquet keys not present in the collection are silently ignored.
+Extra input columns not present in the collection are silently ignored.
 
 ## 5. Step-by-step
 
@@ -333,13 +344,20 @@ your ETL before running backfill. Additional `coalesce` / `overwrite` caveats
 
 | Flag              | Description                                                             |
 | ----------------- | ----------------------------------------------------------------------- |
-| `--parquet`       | Path to user Parquet with join-key + new-field columns. `s3a://` or local. |
+| `--input-path`    | Input data location: path to a Parquet file (`s3a://` or local) or an Iceberg `catalog.db.table` identifier. `--parquet` is a legacy alias; the two are mutually exclusive. |
 | `--snapshot`      | Path to `snapshot.json` produced by Milvus `CreateSnapshot`.            |
 | `--s3-endpoint`   | S3 endpoint for Milvus storage (where segments live).                   |
 | `--s3-bucket`     | Bucket for Milvus storage.                                              |
 
 `BackfillApp` requires `--snapshot`; its CLI does not provide a client-only
 mode.
+
+### Input reader
+
+| Flag                 | Default     | Description                                                                 |
+| -------------------- | ----------- | --------------------------------------------------------------------------- |
+| `--input-format`     | `parquet`   | Input reader: `parquet` (implemented), `iceberg` (implemented), `lance` (recognized, rejected until its reader lands). |
+| `--iceberg-snapshot-id` | *(none)* | Iceberg snapshot to read the input table at (time travel); requires `--input-format iceberg`. |
 
 ### S3 auth (Milvus storage)
 
@@ -352,12 +370,14 @@ mode.
 | `--s3-root-path`   | Milvus `rootPath` (default: `files`).                                |
 | `--s3-region`      | Default: `us-east-1`.                                                |
 
-### Source bucket override (user Parquet in a different account / region)
+### Source bucket override (input in a different account / region)
 
 All of the above, prefixed with `--source-`: `--source-s3-endpoint`,
 `--source-s3-access-key`, `--source-s3-secret-key`, `--source-use-iam`,
 `--source-s3-use-ssl`, `--source-s3-region`. If none are given, the
-primary S3 config is reused for the input read.
+primary S3 config is reused for the input read. Applies to the Parquet input
+path and, for an Iceberg `hadoop`-catalog input, to the warehouse bucket that
+the identifier resolves to.
 
 ### Writer
 

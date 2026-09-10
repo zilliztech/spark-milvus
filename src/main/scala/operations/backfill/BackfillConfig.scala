@@ -73,10 +73,16 @@ case class BackfillConfig(
     sourceS3UseIam: Option[Boolean] = None,
     sourceS3Region: Option[String] = None,
 
-    // Input data source format. "parquet" is the only implemented reader;
-    // "iceberg" and "lance" are recognized as valid format names but have no
-    // reader yet, so validate() rejects them until a reader lands.
+    // Input data source format. "parquet" and "iceberg" have readers; "lance"
+    // is recognized as a valid format name but has no reader yet, so
+    // validate() rejects it until a reader lands.
     inputFormat: String = BackfillConfig.DefaultInputFormat,
+
+    // Iceberg input read options. snapshot-id time-travels the input table to
+    // a specific Iceberg snapshot so a long-running backfill reads a stable
+    // view; ignored when inputFormat != "iceberg" (validate() rejects that
+    // combination).
+    icebergSnapshotId: Option[String] = None,
 
     // Writer configuration
     batchSize: Int = 1024,
@@ -201,6 +207,19 @@ case class BackfillConfig(
         s"inputFormat '$inputFormat' is recognized but not yet implemented; " +
           s"only ${BackfillConfig.ImplementedInputFormats.mkString("[", ", ", "]")} " +
           "have a reader"
+      )
+    } else if (
+      inputFormat.trim != "iceberg" && icebergSnapshotId.exists(_.trim.nonEmpty)
+    ) {
+      Left("icebergSnapshotId requires inputFormat='iceberg'")
+    } else if (
+      inputFormat.trim == "iceberg" && icebergSnapshotId.exists { id =>
+        id.trim.nonEmpty && scala.util.Try(id.trim.toLong).isFailure
+      }
+    ) {
+      Left(
+        s"icebergSnapshotId must be an integer snapshot id " +
+          s"(got '${icebergSnapshotId.get}')"
       )
     } else {
       // Same invariant for the source (input parquet) bucket. Any field
@@ -448,7 +467,7 @@ object BackfillConfig {
   // recognized-but-unimplemented formats here (fail-fast at config time), and
   // readBackfillData guards its per-format dispatch on the same set so the two
   // cannot drift. Each new reader extends this set and adds a dispatch arm.
-  private[backfill] val ImplementedInputFormats = Set("parquet")
+  private[backfill] val ImplementedInputFormats = Set("parquet", "iceberg")
 
   private[backfill] val HadoopS3CredentialsProvider =
     "fs.s3a.aws.credentials.provider"
