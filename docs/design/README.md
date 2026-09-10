@@ -132,7 +132,7 @@ flowchart LR
 ### 2.7 产物与版本
 
 1. 版本 `2.0.0-{branch}-{arch}-SNAPSHOT`，正式版 2.0.0。分支和架构后缀保留到 native jar 改成多平台单 jar 为止。
-2. Connector 按 Spark 3.5 和 4.0 各出 jar（3.5 的时间见决策 9）；native jar 跟 Milvus 小版本发布，与 Spark 版本无关。
+2. 每条维护中的 Spark 线各出一个 Connector jar 和一个 bundle（2.8）；native jar 跟 Milvus 小版本发布，与 Spark 版本无关。
 3. 1.x 已有 linux-x86_64 和 linux-aarch64 的构建链和 `native/linux-{arch}/` 布局（未经 CI 验证）。2.0 新增：native jar 与 Connector jar 分离、macOS 开发用产物、GPU classifier。
 
 ### 2.8 目录与模块 `[讨论中]`
@@ -145,9 +145,11 @@ flowchart LR
 | native-vector | 第 1 层 | `com.zilliz.milvus.native.vector` | knowhere C shim | 同上，P2 再建 |
 | core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow | 无 Spark 依赖的 jar |
 | client | Milvus 服务客户端 | `com.zilliz.milvus.client` | ScalaPB、gRPC | 只被 spark 和 ops 用：DDL、Delete、Procedure |
-| spark | 第 3 层 | `com.zilliz.spark.connector` | core、client；Spark 为 provided | Connector fat jar，坐标沿用 `spark-connector_2.13` |
-| ops | 场景与遗留 | `com.zilliz.spark.connector.ops.{backfill,tools,search,legacy}` | spark | 单独的 fat jar，云上作业用它 |
-| it | 集成测试 | | spark、ops；需要 MinIO 和 Milvus | 不发布 |
+| spark-base | 第 3 层，共享源码 | `com.zilliz.spark.connector` | core、client | 不发布；只是源码目录 |
+| spark-3.5 / spark-4.0 / spark-4.1 / spark-4.2 | 第 3 层，每条 Spark 线一个 | 同上 | spark-base 的源码加本线专属目录；本线的 Spark 为 provided | `spark-milvus-<line>_2.13` |
+| bundle-<line> | 打包 | | 对应的 spark-<line> | `spark-milvus-bundle-<line>_2.13`，含 core、client、native 的 shaded fat jar |
+| ops | 场景与遗留 | `com.zilliz.spark.connector.ops.{backfill,tools,search,legacy}` | spark-<line> | 每条线一个 fat jar，云上作业用 4.0 那个 |
+| it | 集成测试 | | spark-<line>、ops；需要 MinIO 和 Milvus | 不发布 |
 
 ```
 spark-milvus/
@@ -159,9 +161,11 @@ spark-milvus/
   core/                     第 2 层：snapshot、segment、manifest、delete、schema、expr、path、reader、writer
   client/                   gRPC 客户端与 Procedure 用到的调用
   spark/
-    src/main/scala/         第 3 层：catalog、table、scan、write、procedure
-    src/main/scala-spark4/  只有 4.0 有的接口（ProcedureCatalog）
-    src/main/scala-spark35/ 3.5 的替代实现，按决策 9 启用
+    base/src/main/scala/    第 3 层共享源码：catalog、table、scan、write、procedure
+    3.5/src/main/scala/     本线专属：CALL 的函数替代、createTable 重载
+    4.0/src/main/scala/     本线专属：ProcedureCatalog
+    4.1/  4.2/              同上；每个子项目把 base 的源码目录加进自己的 unmanagedSourceDirectories
+    bundle-3.5/ bundle-4.0/ bundle-4.1/ bundle-4.2/   shaded fat jar
   ops/
     backfill/               场景：backfill 作业、CLI、结果 JSON
     tools/                  调试工具
@@ -172,7 +176,7 @@ spark-milvus/
 ```
 
 1. 依赖只能向下：ops → spark → client、core → native。core 的构建里没有 Spark，spark 模块的编译期检查用 `org.apache.spark` 的 import 禁令做。
-2. Spark 3.5 和 4.0 用一个 spark 模块加版本专属源码目录，不用两个模块：两者的接口差异只有 CALL 和 createTable 重载两处。
+2. 多 Spark 版本照 lance-spark 的做法：一份源码，每条线一个子项目编译一次，各自钉本线的 Spark 补丁版和 Arrow；本线专属的文件放各自目录。CI 矩阵每条线各跑一遍单测和集成测试。Scala 只做 2.13；3.5 线是否加 2.12 见决策 15。
 3. ops 里的每个目录是一个独立入口（main 类或 SparkSessionExtensions），不互相依赖；删掉任何一个不影响其他。
 4. 包名：核心层不再用 `spark` 字样；第 3 层保留 `com.zilliz.spark.connector`，`format("milvus")` 的短名和类名对 1.x 用户不变。
 
@@ -189,7 +193,7 @@ spark-milvus/
 | P1 | 5 | ExprTranslator、IR、求值器 | 谓词语义对齐 Milvus |
 | P1 | 6 | SegmentWriter、Committer、refresh Procedure | 等决策 3 的契约，可与 1 到 3 并行谈 |
 | P2 | 7 | knowhere 的 C shim 和 JNI、索引加载、BruteForce；backfill 写模式 | 依赖列式 reader |
-| P3 | 8 | native jar 打包、Spark 3.5、CI 矩阵、基准（读吞吐、拷贝次数、写端到端）；macOS 和 GPU 产物 | 打包工作，不影响设计 |
+| P3 | 8 | native jar 打包、四条 Spark 线的子项目和 CI 矩阵、基准（读吞吐、拷贝次数、写端到端）；macOS 和 GPU 产物 | 打包工作，不影响设计 |
 | P3 | 9 | 2.0.0 发布，云上作业切换 | |
 | 后续 | | Spark 建的索引写回 Milvus 格式 | 随 Global Index 一起做 `[已定]` |
 | 不做 | | TopN、Aggregates 下推；UPDATE、MERGE；text_match 一族；GIS；struct 表达式 | 1.x 也没有，2.0 不承诺 |
@@ -205,7 +209,8 @@ spark-milvus/
 | 5 | 元数据列名 | `_segment_id` 或 1.x 的 `$segment_id`；`partition` 列是否保留 | 1.x 用户的兼容 |
 | 6 | 类型映射 | Float16/BFloat16、Int8Vector、稀疏、Array 各选透传还是转换 | 用户可见类型；下游算子拿到的布局 |
 | 7 | 现有 JVM 搜索代码 | a. 删除；b. 留作对拍基准，放 ops/search | 按决策 1 不移出仓库；只剩删还是留 |
-| 9 | Spark 3.5 是否进 2.0.0 首发 | a. 首发含；b. 2.0.x 跟上 | 交叉构建和 CI 矩阵 |
+| 9 | 支持的 Spark 版本 `[已定]` | 跟 lance-spark 一样：每条维护中的线一个子项目和产物，首发覆盖 3.5、4.0、4.1、4.2；3.4 已停不做 | 见 2.8 |
+| 15 | Spark 3.5 线是否加 Scala 2.12 产物 | a. 只做 2.13；b. 照 lance-spark 也出 2.12 | Spark 3.5 发行版默认 2.12；2.12 要交叉编译整个仓库 |
 | 10 | backfill 写模式的按段分布和按行号排序 | a. 实现 RequiresDistributionAndOrdering；b. 场景代码自己 shuffle 后再写 | 写路径接口 |
 | 11 | 谁建快照、建前是否先 Flush | a. Connector 的 CALL 建，先 Flush；b. 只用 Milvus 自动快照 | 读延迟；1.x 快路径不 Flush |
 | 12 | 表读出口是否压缩掉被过滤的行 | a. 压缩，多一次拷贝；b. 交位图给 Spark 逐行跳过 | 拷贝账；Spark 侧算子的接法 |
@@ -230,3 +235,4 @@ spark-milvus/
 | 2026-09-09 | Spark 建的索引写回 Milvus 格式 | 不进首版，随 Global Index 一起做 |
 | 2026-09-10 | 1.x 冻结点 | tag v1.6.0，main 只收 1.x 修复 |
 | 2026-09-10 | backfill 的模块归属 | 不分仓；仓库内用 sbt 模块隔离，场景与遗留代码进 ops 模块，依赖只能向下。同一政策适用于调试工具、JVM 向量搜索、backup 入口、gRPC Insert |
+| 2026-09-10 | 支持的 Spark 版本 | 跟 lance-spark 一样：每条维护中的 Spark 线一个子项目、一份源码、各自钉 Spark 和 Arrow、各出产物；首发覆盖 3.5、4.0、4.1、4.2，Scala 2.13 |
