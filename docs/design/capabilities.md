@@ -1,6 +1,6 @@
 # 2.0 功能规划 `[草稿]`
 
-46 条功能按用户入口分八组。读的 18 条全程不经 Milvus 服务；写的 7 条止于作业清单，登记归 Milvus（README 2.4）。优先级取值和顺序见 README 第 3 节，实现位置用 [modules.md](modules.md) 的包名。名词（段、列组、Manifest、快照、backfill）沿用 README 第 0 节。
+48 条功能按用户入口分八组。读的 18 条全程不经 Milvus 服务；写的 7 条止于作业清单，登记归 Milvus（README 2.4）。优先级取值和顺序见 README 第 3 节，实现位置用 [modules.md](modules.md) 的包名。名词（段、列组、Manifest、快照、backfill）沿用 README 第 0 节。
 
 ## 1 表读
 
