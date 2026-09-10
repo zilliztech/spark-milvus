@@ -774,13 +774,17 @@ object MilvusBackfill {
     val path = normalizeObjectStorageScheme(rawPath, config)
     try {
       Right(withScopedHadoopStorage(spark, path, config, isSource = true) {
-        // Materialize while source-bucket credentials are installed, mirroring
-        // readParquet: Spark evaluates DataFrame reads lazily, so returning an
-        // unmaterialized DF would let later main-bucket configuration leak in.
+        // No full materialization is needed here, mirroring readParquet:
+        // S3A uses persistent per-bucket `fs.s3a.bucket.<b>.*` configuration,
+        // so a later lazy scan still resolves the source-bucket credentials
+        // even after this block returns. OSS keys are restored on exit, so
+        // oss:// inputs are materialized via localCheckpoint inside the scope.
+        // df.columns resolves the Iceberg schema (metadata read) inside the
+        // scope, failing fast on an empty table.
         var reader = spark.read.format("iceberg")
         config.icebergSnapshotId
           .filter(_.trim.nonEmpty)
-          .foreach(id => reader = reader.option("snapshot-id", id))
+          .foreach(id => reader = reader.option("snapshot-id", id.trim))
         val df = reader.load(path)
         if (df.columns.isEmpty) {
           throw new IllegalArgumentException(

@@ -111,6 +111,20 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.validate() shouldBe Right(())
   }
 
+  test("validate accepts a whitespace-padded icebergSnapshotId") {
+    // validate() trims before parsing and readIceberg trims before passing the
+    // value to the snapshot-id option, so a padded id must not be rejected.
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "iceberg",
+      icebergSnapshotId = Some("  4325893492  ")
+    )
+    config.validate() shouldBe Right(())
+  }
+
   test("validate rejects a non-integer icebergSnapshotId") {
     val config = BackfillConfig(
       s3Endpoint = "localhost:9000",
