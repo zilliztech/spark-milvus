@@ -296,9 +296,7 @@ assembly / assemblyMergeStrategy := {
 lazy val v2Modules: Seq[ProjectReference] = Seq(
   nativeStorage, nativeVector, core, compat, client,
   spark35, spark40, spark41, spark42,
-  apps35, apps40, apps41, apps42,
-  bundle35, bundle40, bundle41, bundle42,
-  integration35, integration40, integration41, integration42
+  apps40, integration40
 )
 
 // 第 1 层：两个原生库的封装。纯 Java，产物不带 Scala 后缀。
@@ -358,7 +356,13 @@ def sparkProject(l: Versions.SparkLine): Project =
       Compile / unmanagedSourceDirectories +=
         Modules.sharedSource((ThisBuild / baseDirectory).value, "spark"),
       libraryDependencies ++= Modules.sparkDeps(l) ++ Modules.arrowDeps(l),
-      libraryDependencies += scalaTest % Test
+      libraryDependencies += scalaTest % Test,
+      // fat jar 是同一个 project 上的一个任务，带 classifier 发布，不需要单独
+      // 的 bundle 模块（Maven 才需要）。
+      // TODO shade 规则按 modules.md 第 4 节第 6 条：只 relocate protobuf 和
+      // guava，com.zilliz.milvus.jni.** 与 org.apache.arrow.** 不 relocate。
+      assembly / assemblyJarName := s"spark-milvus-${l.id}-bundle.jar",
+      assembly / artifact := (assembly / artifact).value.withClassifier(Some("bundle"))
     )
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
@@ -366,7 +370,7 @@ lazy val spark40 = sparkProject(Versions.line("4.0"))
 lazy val spark41 = sparkProject(Versions.line("4.1"))
 lazy val spark42 = sparkProject(Versions.line("4.2"))
 
-// 第 4 层：对外的入口，每条线一个 fat jar。四个包互不依赖。
+// 第 4 层：对外的入口，一个 fat jar。四个包互不依赖。
 // 名字不用 ops：内部已有一个叫 OPS 的系统，容易混。
 def appsProject(l: Versions.SparkLine, sparkLine: Project): Project =
   Project(s"apps${l.projectId.stripPrefix("spark")}", file(s"apps/${l.id}"))
@@ -380,26 +384,9 @@ def appsProject(l: Versions.SparkLine, sparkLine: Project): Project =
       libraryDependencies += scalaTest % Test
     )
 
-lazy val apps35 = appsProject(Versions.line("3.5"), spark35)
+// 只在云上跑的那条线上建一个；别的线有人要了再加一行。
 lazy val apps40 = appsProject(Versions.line("4.0"), spark40)
-lazy val apps41 = appsProject(Versions.line("4.1"), spark41)
-lazy val apps42 = appsProject(Versions.line("4.2"), spark42)
 
-// 打包。TODO：shade 规则按 modules.md 第 4 节第 6 条 —— 只 relocate protobuf 和
-// guava，native 与 arrow 不 relocate（JNI 的导出符号已按包名编进 .so）。
-def bundleProject(l: Versions.SparkLine, sparkLine: Project): Project =
-  Project(s"bundle${l.projectId.stripPrefix("spark")}", file(s"spark/bundle-${l.id}"))
-    .dependsOn(sparkLine)
-    .settings(
-      name := s"spark-milvus-bundle-${l.id}",
-      Modules.perLine(l),
-      libraryDependencies ++= Modules.sparkDeps(l)
-    )
-
-lazy val bundle35 = bundleProject(Versions.line("3.5"), spark35)
-lazy val bundle40 = bundleProject(Versions.line("4.0"), spark40)
-lazy val bundle41 = bundleProject(Versions.line("4.1"), spark41)
-lazy val bundle42 = bundleProject(Versions.line("4.2"), spark42)
 
 // 集成测试。需要 MinIO 和 Milvus，不发布；用例写在各自的 src/test/scala，
 // 共享 integration/base 的源码。名字不用 it：sbt 内置的 IntegrationTest 配置
@@ -416,7 +403,5 @@ def integrationProject(l: Versions.SparkLine, sparkLine: Project, appsLine: Proj
       libraryDependencies += scalaTest % Test
     )
 
-lazy val integration35 = integrationProject(Versions.line("3.5"), spark35, apps35)
+// 集成测试要真的 Milvus 和 MinIO，跑一条线够了；某条线出特有的问题再加。
 lazy val integration40 = integrationProject(Versions.line("4.0"), spark40, apps40)
-lazy val integration41 = integrationProject(Versions.line("4.1"), spark41, apps41)
-lazy val integration42 = integrationProject(Versions.line("4.2"), spark42, apps42)

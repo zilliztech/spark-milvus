@@ -330,15 +330,15 @@
 │   ├── <span class="u">base/</span>                         <span class="c">共享源码，不是 project</span>
 │   │      <span class="c">table · scan · expr · types · write · options</span>
 │   ├── 3.5/                          <span class="c">catalog · functions · extensions · services</span>
-│   ├── 4.0/  4.1/  4.2/              <span class="c">catalog · procedure · extensions · services</span>
-│   └── bundle-3.5/ … bundle-4.2/     <span class="c">每条线一个 fat jar</span>
+│   └── 4.0/  4.1/  4.2/              <span class="c">catalog · procedure · extensions · services</span>
+│                                     <span class="c">fat jar 是各线上的 assembly 任务，不单独成模块</span>
 │
 ├── <span class="m">apps/</span><span class="lay">第 4 层</span>                        <span class="c">场景与遗留，四个包互不依赖</span>
 │   ├── <span class="u">base/</span>                         <span class="c">backfill · tools · search · legacy</span>
-│   └── 3.5/  4.0/  4.1/  4.2/        <span class="c">各引 base 的源码，依赖本线 spark</span>
+│   └── 4.0/                          <span class="c">只在云上跑的那条线上建，别的线按需加</span>
 │
 ├── <span class="m">integration/</span>                  <span class="c">集成测试，需要 MinIO 与 Milvus，不发布</span>
-│   ├── <span class="u">base/</span>  3.5/  4.0/  4.1/  4.2/  <span class="c">用例写在各自的 src/test/scala</span>
+│   └── <span class="u">base/</span>  4.0/                 <span class="c">跑一条线，出线特有的问题再加</span>
 │
 ├── <span class="u">src/</span>                          <span class="c">1.x 的代码，原地不动，按模块逐个迁走</span>
 └── <span class="d">docs/design/</span>                  <span class="c">本文与三份设计文档</span></pre>
@@ -707,18 +707,18 @@
         </g>
         <g font-size="10.5">
           <rect x="708" y="50" width="196" height="40" fill="var(--surface)" stroke="var(--line)"/>
-          <text x="720" y="66" fill="currentColor" font-family="ui-monospace,monospace">bundle-3.5 · apps-3.5</text>
-          <text x="720" y="81" fill="currentColor" opacity=".6">2.12 与 2.13 各一套</text>
+          <text x="720" y="66" fill="currentColor" font-family="ui-monospace,monospace">spark-milvus-3.5</text>
+          <text x="720" y="81" fill="currentColor" opacity=".6">加 bundle classifier 的 fat jar；2.12 与 2.13 各一套</text>
           <rect x="708" y="120" width="196" height="40" fill="var(--surface)" stroke="var(--line)"/>
-          <text x="720" y="136" fill="currentColor" font-family="ui-monospace,monospace">bundle-4.0 · apps-4.0</text>
+          <text x="720" y="136" fill="currentColor" font-family="ui-monospace,monospace">spark-milvus-4.0</text>
           <rect x="708" y="190" width="196" height="40" fill="var(--surface)" stroke="var(--line)"/>
-          <text x="720" y="206" fill="currentColor" font-family="ui-monospace,monospace">bundle-4.1 · apps-4.1</text>
+          <text x="720" y="206" fill="currentColor" font-family="ui-monospace,monospace">spark-milvus-4.1</text>
           <rect x="708" y="260" width="196" height="40" fill="var(--surface)" stroke="var(--line)"/>
-          <text x="720" y="276" fill="currentColor" font-family="ui-monospace,monospace">bundle-4.2 · apps-4.2</text>
+          <text x="720" y="276" fill="currentColor" font-family="ui-monospace,monospace">spark-milvus-4.2</text>
         </g>
       </svg>
     </div>
-    <figcaption>展开后约 17 个 sbt project。Spark 3.4 已经停止发版，不做；Spark 3.5 的发行版默认 Scala 2.12，所以只有这条线出两个 Scala 版本。</figcaption>
+    <figcaption>展开后 11 个 sbt project。Spark 3.4 已经停止发版，不做；Spark 3.5 的发行版默认 Scala 2.12，所以只有这条线出两个 Scala 版本。</figcaption>
   </figure>
 
   <div class="note">

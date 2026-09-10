@@ -13,13 +13,14 @@
 | client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC | `com.zilliz:spark-milvus-client_<scala>` |
 | spark-base | 第 3 层 | `com.zilliz.spark.connector` | 不是 sbt project，只是各线引用的源码目录 | 无 |
 | spark-3.5 / 4.0 / 4.1 / 4.2 | 第 3 层 | 同上 | spark-base 的源码 + 本线专属目录；core、compat、client；本线 Spark 为 provided | `com.zilliz:spark-milvus-<line>_<scala>` |
-| bundle-`<line>` | 打包 | | 本线的 spark 模块 | `com.zilliz:spark-milvus-bundle-<line>_<scala>`：fat jar |
-| apps-`<line>` | 第 4 层 | `com.zilliz.spark.connector.apps` | 本线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`：fat jar |
-| integration-`<line>` | 测试 | | 本线的 spark 与 apps 模块；需 MinIO 和 Milvus | 不发布 |
+| apps | 第 4 层 | `com.zilliz.spark.connector.apps` | 一条线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`：fat jar。只在云上跑的那条线上建，别的线按需加 |
+| integration | 测试 | | 一条线的 spark 与 apps 模块；需 MinIO 和 Milvus | 不发布。跑一条线，某条线出特有的问题再加 |
 
-展开后约 17 个 sbt project：native 两个、core、compat、client、spark 四条线、bundle 四条线、apps 五个（3.5 的 2.12 和 2.13，4.x 三条线）、integration 同 apps。交叉编译由 `crossScalaVersions` 控制。
+展开后 11 个 sbt project：native 两个、core、compat、client、spark 四条线、apps 一个、integration 一个。交叉编译由 `crossScalaVersions` 控制，不增加 project 数。
 
-Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client、spark-base、apps 交叉编译两个版本，bundle 和 integration 跟随所在线。
+只有 spark 必须按线拆：接口差异（Spark 4.0 才有的 ProcedureCatalog）、Arrow、antlr、Java 目标版本都是按线定的。fat jar 不单独成模块，assembly 是 spark-`<line>` 上的一个任务；apps 和 integration 各只建一个，加线是加一行配置。
+
+Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client、spark-base 交叉编译两个版本；apps 和 integration 跟随所在线。
 
 1.x 的坐标 `com.zilliz:spark-connector_2.13` 在 2.0 之后不再更新，1.x 的修复仍发到它。
 
@@ -136,13 +137,12 @@ spark-milvus/
     base/src/main/scala/com/zilliz/spark/connector/{table,scan,expr,types,write,options}
     3.5/src/main/{scala,resources}/  catalog、functions、extensions、META-INF/services
     4.0/  4.1/  4.2/                 catalog、procedure、extensions、META-INF/services
-    bundle-3.5/ bundle-4.0/ bundle-4.1/ bundle-4.2/
   apps/
     base/src/main/{scala,resources}/ com.zilliz.spark.connector.apps.{backfill,tools,search,legacy}
-    3.5/  4.0/  4.1/  4.2/           各引 base 的源码，依赖本线 spark 模块
+    4.0/                             引 base 的源码，依赖本线 spark 模块
   integration/                     集成测试，需要 MinIO 与 Milvus
-    base/src/test/scala/             四条线共享的用例
-    3.5/  4.0/  4.1/  4.2/
+    base/src/test/scala/             共享的用例
+    4.0/
   docs/design/                     设计文档
   docs/                            用户文档
 ```
@@ -154,9 +154,9 @@ spark-milvus/
 1. core、compat、client 的依赖里没有 spark-*；用 sbt 任务扫描源码，出现 `org.apache.spark` 即编译失败。
 2. native-* 的 C 头文件不出现 JNI 类型；JNI 只在 `jni` 包。原生库只在 executor 加载：`core.read.exec`、`core.write.exec`、`core.index` 之外的 core 包不得调用 native，driver 侧要读的 Manifest 字段由纯 JVM 解析器读。
 3. Arrow 版本由 spark-`<line>` 钉（3.5 用 15，4.0 用 18.1，4.1 用 18.3，4.2 按本线）；core 只按 Arrow C Data Interface 编译，`arrow-c-data`、`arrow-format` 标 provided，不依赖 `arrow-memory-*`。
-4. Java 目标版本按线：core、compat、client、native-* 钉 `-release 11`；spark-`<line>`、bundle、apps 按本线（3.5 用 11，4.x 用 17）。
+4. Java 目标版本按线：core、compat、client、native-* 钉 `-release 11`；spark-`<line>`、apps 按本线（3.5 用 11，4.x 用 17）。
 5. 交叉编译的模块统一 `import scala.jdk.CollectionConverters._`，加 `scala-collection-compat` 为 2.12 补齐，禁止 `scala.collection.JavaConverters`。
-6. bundle 只 relocate protobuf 和 guava；`com.zilliz.milvus.native.**` 和 `org.apache.arrow.**` 不 relocate，JNI 的导出符号已按包名编进 .so；`META-INF/services` 用 merge 策略。
+6. fat jar 只 relocate protobuf 和 guava；`com.zilliz.milvus.native.**` 和 `org.apache.arrow.**` 不 relocate，JNI 的导出符号已按包名编进 .so；`META-INF/services` 用 merge 策略。
 7. apps 的每个包能单独删除而不影响编译。
 
 ## 5 1.x 到 2.0 的迁移对照
