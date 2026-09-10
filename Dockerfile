@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget curl git g++ gcc make ccache gdb \
     python3 python3-pip \
     zip unzip \
-    automake autoconf libtool patchelf libaio-dev \
+    automake autoconf libtool patchelf libaio-dev libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/aclocal-1.16 /usr/bin/aclocal-1.15 \
     && ln -sf /usr/bin/automake-1.16 /usr/bin/automake-1.15
