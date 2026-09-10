@@ -195,7 +195,7 @@ spark-milvus/
 | P2 | 7 | knowhere 的 C shim 和 JNI、索引加载、BruteForce；backfill 写模式 | 依赖列式 reader |
 | P3 | 8 | native jar 打包、四条 Spark 线的子项目和 CI 矩阵、基准（读吞吐、拷贝次数、写端到端）；macOS 和 GPU 产物 | 打包工作，不影响设计 |
 | P3 | 9 | 2.0.0 发布，云上作业切换 | |
-| 后续 | | Spark 建的索引写回 Milvus 格式 | 随 Global Index 一起做 `[已定]` |
+| 后续 | | Spark 建的索引按 Milvus 索引文件格式写回并登记 | 随 Global Index 一起做 `[已定]`，见决策日志 |
 | 不做 | | TopN、Aggregates 下推；UPDATE、MERGE；text_match 一族；GIS；struct 表达式 | 1.x 也没有，2.0 不承诺 |
 
 ## 4 待定决策 `[讨论中]`
@@ -232,7 +232,7 @@ spark-milvus/
 |---|---|---|
 | 2026-09-09 | 版本号与分支 | 2.0.0，refactor/v2 |
 | 2026-09-09 | 谓词求值位置 | 核心层 |
-| 2026-09-09 | Spark 建的索引写回 Milvus 格式 | 不进首版，随 Global Index 一起做 |
+| 2026-09-09 | Spark 用 knowhere 建的索引是否写回对象存储、按 Milvus 的索引文件格式登记进段清单，让 Milvus 在线也能加载 | 2.0 首版只做反方向（加载 Milvus 建的索引到 knowhere）和任务内即时建索引；写回随 Global Index（底库按中心点重分布、每桶建索引、映射写进格式）一起做，因为它是唯一需要写回的场景 |
 | 2026-09-10 | 1.x 冻结点 | tag v1.6.0，main 只收 1.x 修复 |
 | 2026-09-10 | backfill 的模块归属 | 不分仓；仓库内用 sbt 模块隔离，场景与遗留代码进 ops 模块，依赖只能向下。同一政策适用于调试工具、JVM 向量搜索、backup 入口、gRPC Insert |
 | 2026-09-10 | 支持的 Spark 版本 | 跟 lance-spark 一样：每条维护中的 Spark 线一个子项目、一份源码、各自钉 Spark 和 Arrow、各出产物；首发覆盖 3.5、4.0、4.1、4.2，Scala 2.13 |
