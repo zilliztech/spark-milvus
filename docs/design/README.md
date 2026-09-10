@@ -4,14 +4,14 @@
 
 ## 0 结论 `[草稿]`
 
-spark-milvus 2.0 是读写 Milvus Storage 的 Spark Connector：一个 collection 在 Spark 里是一张表，读直接读对象存储上的快照，不经 Milvus 服务；写按 Milvus Storage 格式直接落对象存储，再由 Milvus 的 External Collection refresh 把这些文件登记为段。代码分三层：Connector 接口层只做翻译，核心层做全部计算且不依赖 Spark，原生层封装 milvus-storage 和 knowhere 两个 C++ 库。1.x 在 tag v1.6.0 冻结，2.0 在分支 refactor/v2 上重写。
+spark-milvus 2.0 是读写 Milvus Storage 的 Spark Connector：一个 collection 在 Spark 里是一张表，读直接读对象存储上的快照，不经 Milvus 服务；写按 Milvus Storage 格式直接落对象存储，再由 Milvus 登记：已有段的新 Manifest 版本走 Milvus 现有的 BatchUpdateManifest 接口，新段的登记要 Milvus 新增接口（2.4）。代码分三层：Connector 接口层只做翻译，核心层做全部计算且不依赖 Spark，原生层封装 milvus-storage 和 knowhere 两个 C++ 库。1.x 在 tag v1.6.0 冻结，2.0 在分支 refactor/v2 上重写。
 
 名词：
 1. Milvus Storage：Milvus 的表格式，当前版本 V3，上游代码里也叫 Loon。milvus-storage 是读写它的 C++ 库。
 2. knowhere：Milvus 的向量索引库，负责建索引和检索。
 3. 段：存储和加载的单位，sealed 段只读，落在对象存储。列组：段的列分成的几个 Parquet 文件。Storage V2 是 2.0 之前的段布局，多列合在一个 Parquet 文件里、没有 Manifest；Storage V3 每段带 Manifest。
 4. 快照：etcd 里的段元数据落到对象存储的 JSON 加 Avro，由 Milvus 生成。
-5. External Collection：Milvus 登记外部文件为段的机制，refresh 是它的登记动作。
+5. External Collection：Milvus 把外部文件当数据源建的 collection，refresh 重新扫描源文件并按自己的规则切段、分配段 id、生成 Manifest；只对 external collection 开放，不是给外部写入方登记段的接口。
 6. backfill：给已有 collection 的段补写新列组的作业，1.x 里是仓库自带的独立应用。
 7. 下游列式算子：在同一个 Spark 作业里直接消费 Arrow 列批的向量算子（聚类、去重、相似度 join 一类），不在本仓库。Connector 交给它们的是列批加 knowhere 封装，向量和位图以地址交出。
 
@@ -56,7 +56,7 @@ flowchart TB
 1. 第 3 层实现 DataSource V2 要的 Catalog、Table、Scan、Write、Procedure，把 Spark 类型换成核心层类型，不做计算。
 2. 三条构建约束：核心层源码不出现 org.apache.spark；C 接口头文件不出现 JNI 类型；原生层只在 executor 加载。
 3. sbt 模块和目录见 2.8。依赖只能向下。
-4. Milvus 服务只在三处被第 3 层调用：DDL、Delete、Procedure。读路径和写文件不经它；写路径的登记也是一个 Procedure（2.4）。
+4. Milvus 服务只在三处被第 3 层调用：DDL、Delete、Procedure。读路径和写文件不经它；写路径的登记是一个 Procedure，调 2.4 说的登记接口。
 
 ### 2.2 核心层对象模型
 
@@ -98,20 +98,23 @@ flowchart LR
 
 ### 2.4 写路径
 
-写不经 Milvus 服务：executor 直接写段目录到暂存前缀，driver 提交作业清单，登记由 Milvus 的 refresh 完成。
+写不经 Milvus 服务：executor 直接写段目录到暂存前缀，driver 提交作业清单，登记由 Milvus 的元数据接口完成。Milvus master（2026-09-10）里两种登记的现状不同：已有段的新 Manifest 版本有接口，新段没有。
 
 ```mermaid
 flowchart LR
-  W["WriteBuilder（driver）<br/>校验 schema，生成 staging/{job}/"] --> SW["SegmentWriter（executor，每 task）<br/>milvus-storage writer 写段目录到 staging/{job}/{task}/"]
-  SW -- "commit message：段路径、行数" --> CM["Committer（driver）<br/>写作业清单，幂等"]
-  CM -. "用户或云上作业 CALL refresh" .-> M["Milvus：External Collection refresh 登记为段"]
+  W["WriteBuilder（driver）<br/>校验 schema，生成 staging/{job}/"] --> SW["SegmentWriter（executor，每 task）<br/>milvus-storage writer 写段目录或新列组"]
+  SW -- "commit message：段路径、Manifest 版本、行数" --> CM["Committer（driver）<br/>写作业清单，幂等"]
+  CM -. "backfill：CALL 登记 → BatchUpdateManifest" .-> M1["Milvus：已有段 Manifest 版本前进"]
+  CM -. "append：CALL 登记 → RegisterSegments（待 Milvus 新增）" .-> M2["Milvus：新段进元数据"]
 ```
 
-1. 作业清单放 `staging/{job}/`，内容是本次作业全部段路径和行数。提交前先写记作业 id 的标记文件，重跑发现标记文件就跳过已提交的段；abort 或失败删暂存前缀。
-2. commit 止于作业清单。登记由用户或云上作业发 `CALL milvus.system.refresh`（第 3 层 Procedure），核心层不调 Milvus。refresh 后在线可见；Connector 自己再读要先 CALL 建快照。
-3. 写模式：append 写新段；backfill 给已有段追加列组文件，已有列组不重写，段的 Manifest 出新版本。backfill 能否走 refresh 登记取决于决策 3。
-4. append 不用 RequiresDistributionAndOrdering；backfill 写模式的按段分布和按行号排序见决策 10。truncate 和 overwrite 只接受全表。
-5. 索引随段一起写：SegmentWriter 可以在写段的同时用 knowhere 建索引，按 Milvus 的索引文件格式写到段目录旁并登记进该段的 Manifest（2.5 第 6 条）；Global Index 的中心点到桶的映射同样写进 Milvus Storage。作业清单带上索引文件，refresh 一并登记。
+1. 作业清单放 `staging/{job}/`，内容是本次作业全部段的路径、Manifest 版本和行数。提交前先写记作业 id 的标记文件，重跑发现标记文件就跳过已提交的段；abort 或失败删暂存前缀。
+2. commit 止于作业清单。登记由用户或云上作业发 `CALL milvus.system.register`（第 3 层 Procedure），核心层不调 Milvus。登记后在线可见；Connector 自己再读要先 CALL 建快照。
+3. backfill 写模式：给已有段在它现有的 base_path 下追加列组文件，Manifest 出新版本（版本号严格大于当前）；登记走 Milvus 的 gRPC `BatchUpdateManifest`（或管理端口的 `CommitBackfillResult`），二者都只把该段 manifest_path 里的版本号前进，base_path 不变。前提：AddCollectionField 先于登记，否则 QueryNode 重开段时不加载新列；段必须是 Flushed；作业期间 schema 版本不能变。
+4. append 写模式：写新段目录。Milvus 今天没有登记外部新段的接口：External Collection refresh 只对 external collection 开放，且把外部文件当源重新切段、分配新段 id、在 Milvus 自己的路径下重建 Manifest，不采纳写入方的段目录。DataCoord 内部已有 `CommitSegmentManifest` 的 NewSegment 原语，缺的是 RPC、id 分配和 WAL 广播，见第 5 节。
+5. 暂存位置要避开 GC：DataCoord 把 `insert_log/{coll}/{part}/{seg}` 下未登记的 V3 段目录在 `dataCoord.gc.missingTolerance`（默认 86400 秒）后回收；暂存前缀放在 `insert_log` 之外，登记时按最终路径写或移动。
+6. 索引随段一起写：SegmentWriter 可以在写段的同时用 knowhere 建索引，按 Milvus 的索引文件格式写到段目录旁并登记进该段的 Manifest（2.5 第 6 条）；Global Index 的中心点到桶的映射同样写进 Milvus Storage。作业清单带上索引文件，登记时一并交给 Milvus。
+7. append 不用 RequiresDistributionAndOrdering；backfill 写模式的按段分布和按行号排序见决策 10。truncate 和 overwrite 只接受全表。
 
 ### 2.5 原生层
 
@@ -208,7 +211,6 @@ spark-milvus/
 
 | 编号 | 决策 | 选项 | 影响 |
 |---|---|---|---|
-| 3 | refresh 能否登记已有段的新 Manifest 版本 | 向 Milvus 确认 | backfill 写模式能否走 refresh；否则要 Milvus 另给接口 |
 | 5 | 元数据列名 | `_segment_id` 或 1.x 的 `$segment_id`；`partition` 列是否保留 | 1.x 用户的兼容 |
 | 6 | 类型映射 | Float16/BFloat16、Int8Vector、稀疏、Array 各选透传还是转换 | 用户可见类型；下游算子拿到的布局 |
 | 10 | backfill 写模式的按段分布和按行号排序 | a. 实现 RequiresDistributionAndOrdering；b. 场景代码自己 shuffle 后再写 | 写路径接口 |
@@ -220,12 +222,15 @@ spark-milvus/
 
 ## 5 需要 Milvus 侧提供的 `[草稿]`
 
-| 事项 | 影响的设计点 |
-|---|---|
-| External Collection refresh 登记 Connector 写出的段，保持段的布局；能否登记已有段的新 Manifest 版本 | 2.4 写路径，决策 3 |
-| 列级 min/max 统计，row group 统计剪枝；milvus-storage 的 Parquet 谓词下推现在是空实现 | 2.3 下推两级 |
-| Milvus 服务把索引文件写进段的 Manifest（milvus-storage 的 add_index_info 接口已有）；加载 Connector 写回的索引文件：认 Manifest 里的索引登记，校验 knowhere 版本区间，refresh 时一并接受 | 2.5 索引加载与写出 |
-| 自动快照加保留策略；快照目录里加 catalog 文件；格式契约文档 | 2.3 读入口，决策 11 |
+| 事项 | 现状（master 13cd0e99f） | 缺口 | 影响的设计点 |
+|---|---|---|---|
+| 登记外部写入的新段 | 无接口；refresh 只对 external collection 开放且重新切段 | 新增 RegisterSegments RPC：复用 DataCoord 的 CommitSegmentManifest NewSegment 原语，含段 id 分配、WAL 广播、行数和统计 | 2.4 append |
+| 读段当前的 base_path 和 Manifest 版本 | 无公开 API 暴露 manifest_path，只能从快照 metadata 取 | GetPersistentSegmentInfo 或新 RPC 暴露 manifest_path | 2.4 backfill，否则每次 backfill 前都要先打快照 |
+| backfill 期间冻结目标段 | 无；BatchUpdateManifest 的 ack 路径不持段级 Manifest 锁，与 compaction、stats、索引、schema 变更竞争 | 段级租约，或把 ack 接到 CommitSegmentManifests 的串行路径 | 2.4 backfill |
+| 登记时校验 Manifest 内容 | BatchUpdateManifest 不打开 Manifest 文件，不校验列和行数 | 登记时读 Manifest 校验列组、行数、schema 版本 | 2.4 |
+| 列级 min/max 统计，row group 统计剪枝 | milvus-storage 的 Parquet 谓词下推是空实现 | 写统计文件，reader 用统计剪枝 | 2.3 下推两级 |
+| Milvus 把索引文件写进段的 Manifest；加载 Connector 写回的索引 | milvus-storage 的 add_index_info 接口已有 | Milvus 服务填写并读取 Manifest 里的索引登记，校验 knowhere 版本区间 | 2.5 索引加载与写出 |
+| 自动快照加保留策略；快照目录里加 catalog 文件；格式契约文档 | 快照由 CreateSnapshot 手动建 | | 2.3 读入口，决策 11 |
 
 ## 6 决策日志
 
@@ -241,3 +246,4 @@ spark-milvus/
 | 2026-09-10 | 暴力搜索能力 | 保留。1.x 的 JVM 实现先留在 ops/search；正式形态（入口、原生层 BruteForce、归属）在能力规划时一起设计 |
 | 2026-09-10 | Scala 版本 | 跟 lance-spark 一样：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；整个仓库交叉编译 |
 | 2026-09-10 | 非标准功能的处理原则 | 与总设计冲突、暂时不好判断的功能一律保留并用模块隔离，不进核心层。据此：Storage V2 packed 读、离线 option 塞段列表、backup 三个入口进 compat 模块，作 Snapshot 或 Reader 的适配器；gRPC Insert 进 ops/legacy 作小批量兜底 |
+| 2026-09-10 | 写路径的登记接口 | 读 Milvus master 得出：External Collection refresh 不是外部写入方的登记接口（只对 external collection 开放，且重新切段、分配新 id、重建 Manifest）。backfill 走现有的 BatchUpdateManifest / CommitBackfillResult（只前进已有段的 Manifest 版本）；append 要 Milvus 新增 RegisterSegments RPC。分析见 spark-milvus-design-docs/milvus-registration-analysis-2026-09-10.md |
