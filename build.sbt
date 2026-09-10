@@ -119,7 +119,7 @@ lazy val root = (project in file("."))
     assembly / parallelExecution := true,
     assembly / assemblyPackageScala / assembleArtifact := false,
     Compile / compile / parallelExecution := true,
-    version := s"${gitBranch}-${arch}-SNAPSHOT",
+    version := s"2.0.0-${gitBranch}-${arch}-SNAPSHOT",
     organization := "com.zilliz",
 
     // Disable Scaladoc and sources jar for publish (not needed, speeds up build)

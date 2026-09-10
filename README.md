@@ -67,7 +67,7 @@ You can use the pre-built Milvus Spark Connector package directly, or compile it
 **Note:** The official release package is currently used primarily for testing the release process. Active development and updates are concentrated in the SNAPSHOT versions.
 
 - **Official Release:** Available at [Maven Repository](https://mvnrepository.com/artifact/com.zilliz/spark-connector_2.13)
-- **Latest SNAPSHOT:** Version 0.1.7-SNAPSHOT
+- **Latest SNAPSHOT:** the 2.0.0 line (`2.0.0-{branch}-{arch}-SNAPSHOT`), developed on branch `refactor/v2`. The 1.x line is frozen at tag `v1.6.0`.
 
 #### Using SNAPSHOT Dependencies
 
@@ -121,11 +121,11 @@ docker build --build-arg PUBLISH_TO_CENTRAL=false -t spark-milvus .
 
 **Version naming:**
 
-The Docker build uses dynamic versioning: `{branch}-{arch}-SNAPSHOT`
+The Docker build uses dynamic versioning: `2.0.0-{branch}-{arch}-SNAPSHOT`
 
 For example:
-- `main-amd64-SNAPSHOT` (x86 build from main branch)
-- `feature-arm64-SNAPSHOT` (ARM64 build from feature branch)
+- `2.0.0-refactor-v2-amd64-SNAPSHOT` (x86 build from the refactor/v2 branch)
+- `2.0.0-feature-arm64-SNAPSHOT` (ARM64 build from a feature branch)
 
 **Extract built JAR from container:**
 
