@@ -1,6 +1,6 @@
 # spark-milvus 2.0 设计（工作稿）
 
-标记：`[草稿]` 未讨论，`[讨论中]` 有分歧，`[已定]` 结论已进第 6 节决策日志。定稿后按章拆成 docs/design/ 下的文件，接口和约定整理成项目 skills。
+标记：`[草稿]` 未讨论，`[讨论中]` 有分歧，`[已定]` 结论已进第 6 节决策日志。分章文件：[capabilities.md](capabilities.md) 功能规划，[modules.md](modules.md) 模块、包与目录。定稿后接口和约定整理成项目 skills。
 
 ## 0 结论 `[草稿]`
 
@@ -142,50 +142,7 @@ flowchart LR
 
 ### 2.8 目录与模块 `[讨论中]`
 
-不分仓：场景代码、调试工具和遗留路径都留在本仓库，用 sbt 模块隔离，依赖规则保证核心层不被它们污染。与总设计冲突、暂时不好判断的非标准功能一律按这条处理：保留，隔离，不进核心层。适用这条政策的有：backfill、调试工具（ListV2SegmentsApp、ReadSourceOnlyApp）、JVM 向量搜索（暴力搜索、SQL 距离函数、`vector.search.*`）、backup 入口、gRPC Insert 写入器、和云上约定的结果 JSON。
-
-| 模块 | 层 | 包名 | 依赖 | 产物 |
-|---|---|---|---|---|
-| native-storage | 第 1 层 | `com.zilliz.milvus.native.storage` | milvus-storage C 接口 | jar 内 `native/{os}-{arch}/` 平铺 .so |
-| native-vector | 第 1 层 | `com.zilliz.milvus.native.vector` | knowhere C shim | 同上，P2 再建 |
-| core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow | 无 Spark 依赖的 jar |
-| compat | 非标准入口 | `com.zilliz.milvus.storage.compat` | core | 三个适配器：Storage V2 packed 段的 reader、离线 option 塞段列表的 SnapshotSource、backup 目录的 SnapshotSource；都产出 core 的 Snapshot 或 Reader 接口 |
-| client | Milvus 服务客户端 | `com.zilliz.milvus.client` | ScalaPB、gRPC | 只被 spark 和 ops 用：DDL、Delete、Procedure |
-| spark-base | 第 3 层，共享源码 | `com.zilliz.spark.connector` | core、client | 不发布；只是源码目录 |
-| spark-3.5 / spark-4.0 / spark-4.1 / spark-4.2 | 第 3 层，每条 Spark 线一个 | 同上 | spark-base 的源码加本线专属目录；本线的 Spark 为 provided | `spark-milvus-<line>_<scala>`：3.5 出 2.12 和 2.13，4.x 出 2.13 |
-| bundle-<line> | 打包 | | 对应的 spark-<line> | `spark-milvus-bundle-<line>_<scala>`，含 core、client、native 的 shaded fat jar |
-| ops | 场景与遗留 | `com.zilliz.spark.connector.ops.{backfill,tools,search,legacy}` | spark-<line> | 每条线一个 fat jar，云上作业用 4.0 那个 |
-| it | 集成测试 | | spark-<line>、ops；需要 MinIO 和 Milvus | 不发布 |
-
-```
-spark-milvus/
-  build.sbt                 root：聚合，版本，发布
-  project/                  插件与依赖版本
-  native/
-    storage/                第 1 层：Java 绑定 + C JNI 源码 + 打包脚本
-    vector/                 第 1 层：C shim + JNI，P2
-  core/                     第 2 层：snapshot、segment、manifest、delete、schema、expr、path、reader、writer
-  compat/                   非标准入口的适配器：Storage V2 packed 读、离线 option、backup
-  client/                   gRPC 客户端与 Procedure 用到的调用
-  spark/
-    base/src/main/scala/    第 3 层共享源码：catalog、table、scan、write、procedure
-    3.5/src/main/scala/     本线专属：CALL 的函数替代、createTable 重载
-    4.0/src/main/scala/     本线专属：ProcedureCatalog
-    4.1/  4.2/              同上；每个子项目把 base 的源码目录加进自己的 unmanagedSourceDirectories
-    bundle-3.5/ bundle-4.0/ bundle-4.1/ bundle-4.2/   shaded fat jar
-  ops/
-    backfill/               场景：backfill 作业、CLI、结果 JSON
-    tools/                  调试工具
-    search/                 暴力搜索，保留（决策日志）；形态见决策 16
-    legacy/                 gRPC Insert 写入器，保留作小批量兜底
-  it/                       集成测试，src/it 迁入
-  docs/design/              本文
-```
-
-1. 依赖只能向下：ops → spark → client、compat、core → native；compat 只依赖 core。core 的构建里没有 Spark，spark 模块的编译期检查用 `org.apache.spark` 的 import 禁令做。
-2. 多 Spark 版本照 lance-spark 的做法：一份源码，每条线一个子项目编译一次，各自钉本线的 Spark 补丁版和 Arrow；本线专属的文件放各自目录。CI 矩阵每条线各跑一遍单测和集成测试。Scala 跟 lance-spark 一样：3.5 线出 2.12 和 2.13，4.x 线只出 2.13，整个仓库按两个 Scala 版本交叉编译。
-3. ops 里的每个目录是一个独立入口（main 类或 SparkSessionExtensions），不互相依赖；删掉任何一个不影响其他。
-4. 包名：核心层不再用 `spark` 字样；第 3 层保留 `com.zilliz.spark.connector`，`format("milvus")` 的短名和类名对 1.x 用户不变。
+不分仓：场景代码、调试工具和遗留路径都留在本仓库，用 sbt 模块隔离，依赖规则保证核心层不被它们污染。与总设计冲突、暂时不好判断的非标准功能一律按这条处理：保留，隔离，不进核心层。模块、包、目录和 1.x 到 2.0 的迁移对照见 [modules.md](modules.md)；功能清单见 [capabilities.md](capabilities.md)。
 
 ## 3 重点与顺序 `[草稿]`
 
