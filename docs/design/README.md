@@ -1,6 +1,6 @@
 # spark-milvus 2.0 设计（工作稿）
 
-标记：`[草稿]` 未讨论，`[讨论中]` 有分歧，`[已定]` 结论已进第 6 节决策日志。分章文件：[capabilities.md](capabilities.md) 功能规划，[modules.md](modules.md) 模块、包与目录，[overview.html](overview.html) 七张图的图解版。定稿后接口和约定整理成项目 skills。
+标记：`[草稿]` 未讨论，`[讨论中]` 有分歧，`[已定]` 结论已进第 6 节决策日志。分章文件：[capabilities.md](capabilities.md) 功能规划，[modules.md](modules.md) 模块、包与目录，[overview.html](overview.html) 图解版，[lance-spark.md](lance-spark.md) 与 [lance-spark.html](lance-spark.html) 对照 Apache Lance 的 Spark 连接器。定稿后接口和约定整理成项目 skills。
 
 ## 0 结论 `[草稿]`
 
