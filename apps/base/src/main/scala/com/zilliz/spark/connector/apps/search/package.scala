@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.ops
+package com.zilliz.spark.connector.apps
 
 /** VectorBruteForceSearch、SQL 函数扩展。
   *

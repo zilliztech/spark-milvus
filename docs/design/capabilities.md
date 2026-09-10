@@ -39,7 +39,7 @@
 | W4 | truncate 和 overwrite | `.overwrite()`，只接受全表 | spark.write | 登记见 A4 | P1 |
 | W5 | DELETE | `DELETE FROM milvus.db.coll WHERE ...`，只接能翻成 Milvus 表达式的谓词 | spark.table 的 DeleteV2 → core.expr 的 ExprPrinter → client.api | Milvus 在线 | P1 |
 | W6 | 索引随段写出 | 写 option `milvus.index.<field>=HNSW,...` | spark.options 校验，core.index 编码与登记，native-vector 建索引 | Milvus 认 Manifest 里的索引登记（README 第 5 节） | P2 |
-| W7 | 小批量 gRPC 写入 | `format("milvus")` 的旧路径 | ops.legacy | 迁入前先修 abort：task 级 abort 必须丢弃缓冲，不得刷进 Milvus | P3 |
+| W7 | 小批量 gRPC 写入 | `format("milvus")` 的旧路径 | apps.legacy | 迁入前先修 abort：task 级 abort 必须丢弃缓冲，不得刷进 Milvus | P3 |
 
 ## 3 目录与 DDL
 
@@ -73,7 +73,7 @@ Table 接口表达不了的动作走 CALL：Spark 4 用 ProcedureCatalog，Spark
 | V1 | knowhere 封装 | 仓库内经 core.index 调用；下游算子直接依赖 native-vector | native-vector | knowhere 的 C shim | P2 |
 | V2 | 加载 Milvus 建的索引 | 自动；按快照或 Manifest 里的索引文件 | core.index | 索引文件路径登记在 Manifest 里（README 第 5 节） | P2 |
 | V4 | 索引来源与缓存 | 自动；Milvus 建的、Spark 写回的、任务内即时建的三级，按 (build id, 索引版本, 段, 字段) 缓存 | core.index | | P2 |
-| V5 | 暴力搜索 | 入口与归属见决策 16 | native-vector 的 bruteforce；1.x 的 JVM 实现留在 ops.search 作对拍 | 决策 16 | P2 |
+| V5 | 暴力搜索 | 入口与归属见决策 16 | native-vector 的 bruteforce；1.x 的 JVM 实现留在 apps.search 作对拍 | 决策 16 | P2 |
 
 ## 6 兼容入口
 
@@ -88,12 +88,12 @@ Table 接口表达不了的动作走 CALL：Spark 4 用 ProcedureCatalog，Spark
 
 ## 7 场景与工具
 
-场景和工具在 ops 模块，各自是独立入口，删掉任何一个不影响其他。
+场景和工具在 apps 模块，各自是独立入口，删掉任何一个不影响其他。
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
-| O1 | backfill 作业 | `spark-submit --class ...BackfillApp`，24 个 flag，结果 JSON | ops.backfill | 1.x 迁入，flag 照收（`--input-format` 只有 parquet 有实现）；内部改用 W2，因此不早于 W2 | P2 |
-| O2 | 调试工具 | ListV2SegmentsApp、ReadSourceOnlyApp | ops.tools | 1.x 迁入 | P3 |
+| O1 | backfill 作业 | `spark-submit --class ...BackfillApp`，24 个 flag，结果 JSON | apps.backfill | 1.x 迁入，flag 照收（`--input-format` 只有 parquet 有实现）；内部改用 W2，因此不早于 W2 | P2 |
+| O2 | 调试工具 | ListV2SegmentsApp、ReadSourceOnlyApp | apps.tools | 1.x 迁入 | P3 |
 
 ## 8 配置
 

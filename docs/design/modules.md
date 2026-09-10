@@ -1,6 +1,6 @@
 # 2.0 模块、包与目录 `[草稿]`
 
-依赖只能向下：ops → spark-`<line>`（源码来自 spark-base）→ compat、client → core → native-storage、native-vector。核心层没有 Spark，原生层没有业务逻辑，场景和遗留代码只在 ops。功能编号见 [capabilities.md](capabilities.md)，名词沿用 README 第 0 节。
+依赖只能向下：apps → spark-`<line>`（源码来自 spark-base）→ compat、client → core → native-storage、native-vector。核心层没有 Spark，原生层没有业务逻辑，对外的入口和遗留代码只在 apps。功能编号见 [capabilities.md](capabilities.md)，名词沿用 README 第 0 节。
 
 ## 1 模块
 
@@ -14,12 +14,12 @@
 | spark-base | 第 3 层 | `com.zilliz.spark.connector` | 不是 sbt project，只是各线引用的源码目录 | 无 |
 | spark-3.5 / 4.0 / 4.1 / 4.2 | 第 3 层 | 同上 | spark-base 的源码 + 本线专属目录；core、compat、client；本线 Spark 为 provided | `com.zilliz:spark-milvus-<line>_<scala>` |
 | bundle-`<line>` | 打包 | | 本线的 spark 模块 | `com.zilliz:spark-milvus-bundle-<line>_<scala>`：fat jar |
-| ops-`<line>` | 第 4 层 | `com.zilliz.spark.connector.ops` | 本线的 spark 模块 | `com.zilliz:spark-milvus-ops-<line>_<scala>`：fat jar |
-| it-`<line>` | 测试 | | 本线的 spark 与 ops 模块；需 MinIO 和 Milvus | 不发布 |
+| apps-`<line>` | 第 4 层 | `com.zilliz.spark.connector.apps` | 本线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`：fat jar |
+| it-`<line>` | 测试 | | 本线的 spark 与 apps 模块；需 MinIO 和 Milvus | 不发布 |
 
-展开后约 17 个 sbt project：native 两个、core、compat、client、spark 四条线、bundle 四条线、ops 五个（3.5 的 2.12 和 2.13，4.x 三条线）、it 同 ops。交叉编译由 `crossScalaVersions` 控制。
+展开后约 17 个 sbt project：native 两个、core、compat、client、spark 四条线、bundle 四条线、apps 五个（3.5 的 2.12 和 2.13，4.x 三条线）、it 同 apps。交叉编译由 `crossScalaVersions` 控制。
 
-Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client、spark-base、ops 交叉编译两个版本，bundle 和 it 跟随所在线。
+Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client、spark-base、apps 交叉编译两个版本，bundle 和 it 跟随所在线。
 
 1.x 的坐标 `com.zilliz:spark-connector_2.13` 在 2.0 之后不再更新，1.x 的修复仍发到它。
 
@@ -97,7 +97,9 @@ C shim（mv_* 包 knowhere::Index、BruteForce、BinarySet、Version，以及 Di
 
 按线的还有 `META-INF/services` 资源。
 
-### 2.7 ops `com.zilliz.spark.connector.ops`
+### 2.7 apps `com.zilliz.spark.connector.apps`
+
+第 4 层：对外的入口和遗留代码。名字不用 ops，内部已有一个叫 OPS 的系统。
 
 | 包 | 内容 |
 |---|---|
@@ -106,7 +108,7 @@ C shim（mv_* 包 knowhere::Index、BruteForce、BinarySet、Version，以及 Di
 | `search` | VectorBruteForceSearch、SQL 函数扩展 |
 | `legacy` | gRPC Insert 的 TableProvider、DataSource V2 写栈、`format("milvus")` 短名注册 |
 
-四个包互不依赖，各自是独立入口。`format("milvus")` 的短名归 ops 之后，只有加载 ops jar 才能用旧写法；三段名 `milvus.db.coll` 不需要 ops。
+四个包互不依赖，各自是独立入口。`format("milvus")` 的短名归 apps 之后，只有加载 apps jar 才能用旧写法；三段名 `milvus.db.coll` 不需要 apps。
 
 ## 3 目录
 
@@ -135,8 +137,8 @@ spark-milvus/
     3.5/src/main/{scala,resources}/  catalog、functions、extensions、META-INF/services
     4.0/  4.1/  4.2/                 catalog、procedure、extensions、META-INF/services
     bundle-3.5/ bundle-4.0/ bundle-4.1/ bundle-4.2/
-  ops/
-    base/src/main/{scala,resources}/ com.zilliz.spark.connector.ops.{backfill,tools,search,legacy}
+  apps/
+    base/src/main/{scala,resources}/ com.zilliz.spark.connector.apps.{backfill,tools,search,legacy}
     3.5/  4.0/  4.1/  4.2/           各引 base 的源码，依赖本线 spark 模块
   it/
     base/src/test/scala/             集成测试
@@ -152,10 +154,10 @@ spark-milvus/
 1. core、compat、client 的依赖里没有 spark-*；用 sbt 任务扫描源码，出现 `org.apache.spark` 即编译失败。
 2. native-* 的 C 头文件不出现 JNI 类型；JNI 只在 `jni` 包。原生库只在 executor 加载：`core.read.exec`、`core.write.exec`、`core.index` 之外的 core 包不得调用 native，driver 侧要读的 Manifest 字段由纯 JVM 解析器读。
 3. Arrow 版本由 spark-`<line>` 钉（3.5 用 15，4.0 用 18.1，4.1 用 18.3，4.2 按本线）；core 只按 Arrow C Data Interface 编译，`arrow-c-data`、`arrow-format` 标 provided，不依赖 `arrow-memory-*`。
-4. Java 目标版本按线：core、compat、client、native-* 钉 `-release 11`；spark-`<line>`、bundle、ops 按本线（3.5 用 11，4.x 用 17）。
+4. Java 目标版本按线：core、compat、client、native-* 钉 `-release 11`；spark-`<line>`、bundle、apps 按本线（3.5 用 11，4.x 用 17）。
 5. 交叉编译的模块统一 `import scala.jdk.CollectionConverters._`，加 `scala-collection-compat` 为 2.12 补齐，禁止 `scala.collection.JavaConverters`。
 6. bundle 只 relocate protobuf 和 guava；`com.zilliz.milvus.native.**` 和 `org.apache.arrow.**` 不 relocate，JNI 的导出符号已按包名编进 .so；`META-INF/services` 用 merge 策略。
-7. ops 的每个包能单独删除而不影响编译。
+7. apps 的每个包能单独删除而不影响编译。
 
 ## 5 1.x 到 2.0 的迁移对照
 
@@ -166,7 +168,7 @@ spark-milvus/
 | sources/MilvusDataSource.scala（2879 行） | spark.catalog、table、scan；规划逻辑进 core.snapshot、core.read.plan | 拆分重写 |
 | MilvusOption.scala、loon/Properties.scala | spark.options；fs.* 归一到 core.credential | 合并重写 |
 | MilvusClient.scala | client.grpc、client.api | 迁入，删 mock 和无调用的接口 |
-| MilvusUtil.scala（627 行，值打成 gRPC FieldData） | ops.legacy | 迁入，只有 gRPC Insert 用 |
+| MilvusUtil.scala（627 行，值打成 gRPC FieldData） | apps.legacy | 迁入，只有 gRPC Insert 用 |
 | Exception.scala | core 定义异常基类，各层派生 | 重写 |
 | read/MilvusSnapshotReader.scala | core.snapshot | 迁入，去 Spark 依赖 |
 | read/MilvusStorageV3ManifestReader.scala、MilvusSegmentManifestReader.scala | core.manifest | 迁入 |
@@ -177,10 +179,10 @@ spark-milvus/
 | serde/DataTypeUtil.scala、SchemaUtil.scala | core.schema（Milvus 与 Arrow）、spark.types（Arrow 与 Spark） | 合并为两份，去 Spark 依赖 |
 | serde/ArrowConverter.scala（897 行行式转换） | 删除 | 读路径由 ColumnVector 取代，写路径的 Spark 到 Arrow 重写进 core.write.exec |
 | write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | core.write | 决策 14 定为复用时迁入，事务提交移到 Committer；定为重写时删除 |
-| write/MilvusInsertDataWriter.scala、MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala | ops.legacy | 随 W7 的 `format("milvus")` 入口整体迁入，先修 abort |
+| write/MilvusInsertDataWriter.scala、MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala | apps.legacy | 随 W7 的 `format("milvus")` 入口整体迁入，先修 abort |
 | write/MilvusSparkNativeImportWriter.scala | 删除 | 无调用 |
-| filter/、expressions/、extensions/ | ops.search | 迁入 |
-| operations/backfill/* | ops.backfill | 迁入，内部改用 W2 |
-| tools/* | ops.tools | 迁入 |
+| filter/、expressions/、extensions/ | apps.search | 迁入 |
+| operations/backfill/* | apps.backfill | 迁入，内部改用 W2 |
+| tools/* | apps.tools | 迁入 |
 | src/main/resources/milvus-segment-manifest*.avsc | core 的 resources | 迁入 |
 | milvus-storage/java 的 Java 绑定 | native-storage | 替换为自有 JNI |

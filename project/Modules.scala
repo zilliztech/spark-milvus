@@ -66,7 +66,7 @@ object Modules {
     Seq("arrow-vector", "arrow-memory-core", "arrow-c-data")
       .map(m => "org.apache.arrow" % m % l.arrow)
 
-  /** 共享源码目录：spark/base 与 ops/base 不是 project，各线把它加进自己的源码根。 */
+  /** 共享源码目录：spark/base 与 apps/base 不是 project，各线把它加进自己的源码根。 */
   def sharedSource(root: File, module: String): File =
     root / module / "base" / "src" / "main" / "scala"
 }

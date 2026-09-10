@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.ops
+package com.zilliz.spark.connector.apps
 
 /** ListV2SegmentsApp、ReadSourceOnlyApp。
   *

@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.ops
+package com.zilliz.spark.connector.apps
 
 /** BackfillApp、配置、join 键、列映射、merge 模式、结果 JSON。
   *

@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.ops
+package com.zilliz.spark.connector.apps
 
 /** gRPC Insert 的 TableProvider、DataSource V2 写栈、format("milvus") 短名注册。
   *
