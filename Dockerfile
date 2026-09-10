@@ -27,8 +27,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip unzip \
     automake autoconf libtool patchelf libaio-dev libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/* \
-    && pkg-config --exists openssl \
-    && test -f /usr/include/openssl/ssl.h \
     && ln -sf /usr/bin/aclocal-1.16 /usr/bin/aclocal-1.15 \
     && ln -sf /usr/bin/automake-1.16 /usr/bin/automake-1.15
 
@@ -95,6 +93,8 @@ RUN git config --global --add safe.directory /workspace && \
 # Keep the pinned recipes and checksums, but replace obsolete primary source
 # endpoints with their durable upstream archives.
 RUN set -eux; \
+    pkg-config --exists openssl; \
+    test -f /usr/include/openssl/ssl.h; \
     avro_ref='libavrocpp/1.12.1.1@milvus/dev#cde7bb587a29f6f233bae7e18b71815d'; \
     conan download "${avro_ref}" -r default-conan-local2 --only-recipe; \
     avro_recipe="$(conan cache path "${avro_ref}")"; \
