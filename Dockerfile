@@ -27,6 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip unzip \
     automake autoconf libtool patchelf libaio-dev libssl-dev pkg-config \
     && rm -rf /var/lib/apt/lists/* \
+    && pkg-config --exists openssl \
+    && test -f /usr/include/openssl/ssl.h \
     && ln -sf /usr/bin/aclocal-1.16 /usr/bin/aclocal-1.15 \
     && ln -sf /usr/bin/automake-1.16 /usr/bin/automake-1.15
 
@@ -90,15 +92,21 @@ RUN git config --global --add safe.directory /workspace && \
     git config --global --add safe.directory /workspace/milvus-storage && \
     git submodule update --init --recursive
 
-# Apache removes superseded releases from dlcdn; keep the pinned recipe and
-# checksum, but use the durable archive endpoint for its Avro source.
+# Keep the pinned recipes and checksums, but replace obsolete primary source
+# endpoints with their durable upstream archives.
 RUN set -eux; \
     avro_ref='libavrocpp/1.12.1.1@milvus/dev#cde7bb587a29f6f233bae7e18b71815d'; \
     conan download "${avro_ref}" -r default-conan-local2 --only-recipe; \
     avro_recipe="$(conan cache path "${avro_ref}")"; \
     sed -i 's#https://dlcdn.apache.org/avro/#https://archive.apache.org/dist/avro/#' \
         "${avro_recipe}/conandata.yml"; \
-    grep -Fq 'https://archive.apache.org/dist/avro/' "${avro_recipe}/conandata.yml"
+    grep -Fq 'https://archive.apache.org/dist/avro/' "${avro_recipe}/conandata.yml"; \
+    boost_ref='boost/1.83.0#4e8a94ac1b88312af95eded83cd81ca8'; \
+    conan download "${boost_ref}" -r default-conan-local2 --only-recipe; \
+    boost_recipe="$(conan cache path "${boost_ref}")"; \
+    sed -i 's#https://boostorg.jfrog.io/artifactory/main/#https://archives.boost.io/#' \
+        "${boost_recipe}/conandata.yml"; \
+    grep -Fq 'https://archives.boost.io/release/1.83.0/' "${boost_recipe}/conandata.yml"
 
 # Build milvus-storage native libraries using its Conan 2 Makefile.
 RUN cd milvus-storage/cpp && make java-lib
