@@ -172,7 +172,7 @@ spark-milvus/
   ops/
     backfill/               场景：backfill 作业、CLI、结果 JSON
     tools/                  调试工具
-    search/                 暴力搜索，保留；形态见决策 16
+    search/                 暴力搜索，保留（决策日志）；形态见决策 16
     legacy/                 gRPC Insert 写入器，去留见决策 4
   it/                       集成测试，src/it 迁入
   docs/design/              本文
@@ -202,23 +202,21 @@ spark-milvus/
 
 ## 4 待定决策 `[讨论中]`
 
+只列未定的；定了的行删掉，结论进第 6 节。
+
 | 编号 | 决策 | 选项 | 影响 |
 |---|---|---|---|
-| 1 | backfill 的模块归属 `[已定]` | 不分仓，留在本仓库的 ops 模块；同一政策适用于 2.8 列出的其他场景与遗留代码 | 见 2.8 |
 | 2 | 三种非快照目录入口的去留：Storage V2 packed 段、离线 option 塞段列表、backup（读 milvus-backup 导出目录） | a. 只做 V3 加快照目录；b. 部分保留进核心层 | reader 一条路还是两条；backfill 读原表今天走的是离线 option |
 | 3 | refresh 能否登记已有段的新 Manifest 版本 | 向 Milvus 确认 | backfill 写模式能否走 refresh；否则要 Milvus 另给接口 |
 | 4 | gRPC Insert | a. 删除；b. 留在 ops/legacy 作小批量兜底 | 无快照、无对象存储凭证时能否写 |
 | 5 | 元数据列名 | `_segment_id` 或 1.x 的 `$segment_id`；`partition` 列是否保留 | 1.x 用户的兼容 |
 | 6 | 类型映射 | Float16/BFloat16、Int8Vector、稀疏、Array 各选透传还是转换 | 用户可见类型；下游算子拿到的布局 |
-| 7 | 暴力搜索能力 `[已定]` | 保留，不删。形态和位置在能力规划时设计，见决策 16 | 1.x 的三块 JVM 搜索代码先留在 ops/search |
-| 16 | 暴力搜索的形态与位置 | 入口：DataFrame 方法、SQL 函数、读选项三选几；执行：knowhere 的 BruteForce 在原生层，JVM 实现作参照或兜底；归属：spark 层能力还是 ops 场景 | 能力清单和模块规划一起定 |
-| 9 | 支持的 Spark 版本 `[已定]` | 跟 lance-spark 一样：每条维护中的线一个子项目和产物，首发覆盖 3.5、4.0、4.1、4.2；3.4 已停不做 | 见 2.8 |
-| 15 | Scala 版本 `[已定]` | 跟 lance-spark 一样：3.5 线出 2.12 和 2.13，4.x 线只出 2.13 | core、client、ops 整个仓库按 2.12 和 2.13 交叉编译 |
 | 10 | backfill 写模式的按段分布和按行号排序 | a. 实现 RequiresDistributionAndOrdering；b. 场景代码自己 shuffle 后再写 | 写路径接口 |
 | 11 | 谁建快照、建前是否先 Flush | a. Connector 的 CALL 建，先 Flush；b. 只用 Milvus 自动快照 | 读延迟；1.x 快路径不 Flush |
 | 12 | 表读出口是否压缩掉被过滤的行 | a. 压缩，多一次拷贝；b. 交位图给 Spark 逐行跳过 | 拷贝账；Spark 侧算子的接法 |
 | 13 | `_delta/` 删除文件格式 | 两列 Parquet 与旧 binlog 容器格式的共存期 | DeleteBitset 的解析器 |
 | 14 | SegmentWriter | a. 复用 1.x 的 Loon 写入器（写侧已零拷贝）；b. 在新 JNI 上重写 | 原生层的工作量 |
+| 16 | 暴力搜索的形态与位置（能力已定保留，见决策日志） | 入口：DataFrame 方法、SQL 函数、读选项三选几；执行：knowhere 的 BruteForce 在原生层，JVM 实现作参照或兜底；归属：spark 层能力还是 ops 场景 | 能力清单和模块规划一起定 |
 
 ## 5 需要 Milvus 侧提供的 `[草稿]`
 
