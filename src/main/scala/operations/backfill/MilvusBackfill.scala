@@ -758,7 +758,7 @@ object MilvusBackfill {
     }
   }
 
-  private def readIceberg(
+  private[backfill] def readIceberg(
       spark: SparkSession,
       rawPath: String,
       config: BackfillConfig
@@ -772,6 +772,19 @@ object MilvusBackfill {
     // configureHadoopS3ForPath unharmed; reads go through Hadoop FS, so the
     // scoped source-bucket S3A config still applies.
     val path = normalizeObjectStorageScheme(rawPath, config)
+    // Iceberg input must be a catalog-qualified identifier (catalog.db.table).
+    // Raw file/object-storage paths are unsupported and would otherwise fail
+    // later with a misleading Hive-metastore error from Iceberg's default
+    // catalog resolution; reject them up front with a clear message.
+    if (path != null && (path.contains("://") || path.startsWith("/"))) {
+      return Left(
+        DataReadError(
+          path = path,
+          message = "Iceberg input must be a catalog-qualified identifier " +
+            "(catalog.db.table), not a raw file/object-storage path"
+        )
+      )
+    }
     try {
       Right(withScopedHadoopStorage(spark, path, config, isSource = true) {
         // No full materialization is needed here, mirroring readParquet:

@@ -963,6 +963,25 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       }
   }
 
+  test("readIceberg rejects raw object-storage paths up front") {
+    val cfg = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "b",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "iceberg"
+    )
+    // The rejection happens before any Spark/Iceberg I/O, so the shared local
+    // SparkSession is sufficient; a raw path must not reach the reader.
+    MilvusBackfill.readIceberg(spark, "s3a://warehouse/db/backfill_table", cfg) match {
+      case Left(error) =>
+        error.message should include("catalog-qualified identifier")
+        error.message should include("raw file/object-storage path")
+      case Right(_) =>
+        fail("expected a raw object-storage path to be rejected")
+    }
+  }
+
   test("getMilvusReadOptions includes AK/SK when s3UseIam=false") {
     val cfg = BackfillConfig(
       s3Endpoint = "minio:9000",

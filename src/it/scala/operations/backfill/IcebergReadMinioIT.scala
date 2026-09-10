@@ -23,8 +23,16 @@ class IcebergReadMinioIT extends AnyFunSuite with Matchers {
 
   private val catalog = "iceberg_cat"
   private val warehouse = "s3a://a-bucket/iceberg-warehouse"
-  private val table = "backfill_input"
-  private val tableIdentifier = s"$catalog.db.$table"
+  private val tablePrefix = "backfill_input"
+  private var tableSeq = 0L
+
+  /** A per-test unique table identifier so a failed run cannot drop a
+    * pre-existing table from an earlier run (or from a concurrent test).
+    */
+  private def newTableIdentifier(): String = {
+    tableSeq += 1
+    s"$catalog.db.${tablePrefix}_${System.currentTimeMillis()}_$tableSeq"
+  }
 
   private def newSpark(): SparkSession =
     SparkSession
@@ -45,10 +53,13 @@ class IcebergReadMinioIT extends AnyFunSuite with Matchers {
       .config("spark.sql.shuffle.partitions", "1")
       .getOrCreate()
 
-  private def currentSnapshotId(spark: SparkSession): Long =
+  private def currentSnapshotId(
+      spark: SparkSession,
+      tableIdentifier: String
+  ): Long =
     spark
       .sql(
-        s"SELECT snapshot_id FROM $catalog.db.$table.snapshots " +
+        s"SELECT snapshot_id FROM $tableIdentifier.snapshots " +
           "ORDER BY committed_at DESC LIMIT 1"
       )
       .head()
@@ -56,6 +67,7 @@ class IcebergReadMinioIT extends AnyFunSuite with Matchers {
 
   test("read an Iceberg table by catalog identifier from MinIO") {
     val spark = newSpark()
+    val tableIdentifier = newTableIdentifier()
     try {
       import spark.implicits._
       spark.sql(s"CREATE NAMESPACE IF NOT EXISTS $catalog.db")
@@ -90,6 +102,7 @@ class IcebergReadMinioIT extends AnyFunSuite with Matchers {
 
   test("snapshot-id option time-travels an Iceberg input table") {
     val spark = newSpark()
+    val tableIdentifier = newTableIdentifier()
     try {
       import spark.implicits._
       spark.sql(s"CREATE NAMESPACE IF NOT EXISTS $catalog.db")
@@ -100,7 +113,7 @@ class IcebergReadMinioIT extends AnyFunSuite with Matchers {
         .toDF("pk", "new_field")
         .writeTo(tableIdentifier)
         .append()
-      val firstSnapshot = currentSnapshotId(spark)
+      val firstSnapshot = currentSnapshotId(spark, tableIdentifier)
 
       Seq((3L, "v3"), (4L, "v4"))
         .toDF("pk", "new_field")
