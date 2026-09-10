@@ -114,7 +114,13 @@ lazy val nativeTestSettings: Seq[Setting[_]] = Seq(
 
 lazy val root = (project in file("."))
   .configs(IntegrationTest)
+  .aggregate(v2Modules: _*)
   .settings(
+    // 2.0 的新模块只跟着编译和测试。assembly、publish 不下发到子模块，Docker
+    // 构建和发布的行为与 1.x 完全一致。
+    assembly / aggregate := false,
+    publish / aggregate := false,
+    publishLocal / aggregate := false,
     name := "spark-connector",
     assembly / parallelExecution := true,
     assembly / assemblyPackageScala / assembleArtifact := false,
@@ -276,3 +282,139 @@ assembly / assemblyMergeStrategy := {
 // grpcJavaVersion := Version.grpcJavaVersion
 
 // See https://www.scala-sbt.org/1.x/docs/Using-Sonatype.html for instructions on how to publish to Sonatype.
+
+
+// ---------------------------------------------------------------------------
+// 2.0 的多模块骨架。docs/design/modules.md 是契约。
+//
+// 1.x 的代码仍然在 root 的 src/main/scala 里，root 的设置一个字没动；新模块现在
+// 只有包结构，迁移一个模块一个模块来（modules.md 第 5 节）。依赖只能向下：
+//   ops-<line> -> spark-<line> -> compat、client -> core -> native-*
+// spark/base 与 ops/base 不是 project，只是各线引用的共享源码目录。
+// ---------------------------------------------------------------------------
+
+lazy val v2Modules: Seq[ProjectReference] = Seq(
+  nativeStorage, nativeVector, core, compat, client,
+  spark35, spark40, spark41, spark42,
+  ops35, ops40, ops41, ops42,
+  bundle35, bundle40, bundle41, bundle42,
+  it35, it40, it41, it42
+)
+
+// 第 1 层：两个原生库的封装。纯 Java，产物不带 Scala 后缀。
+lazy val nativeStorage = Project("nativeStorage", file("native/storage"))
+  .settings(name := "spark-milvus-native-storage", Modules.javaOnly)
+
+lazy val nativeVector = Project("nativeVector", file("native/vector"))
+  .settings(name := "spark-milvus-native-vector", Modules.javaOnly)
+
+// 第 2 层：核心层。全部计算在这里，源码不出现 org.apache.spark。
+lazy val core = Project("core", file("core"))
+  .dependsOn(nativeStorage, nativeVector)
+  .settings(
+    name := "spark-milvus-core",
+    Modules.shared,
+    // Arrow 由 spark-<line> 钉；core 只按 C Data Interface 编译。
+    libraryDependencies ++= Seq(
+      "org.apache.arrow" % "arrow-c-data" % Versions.line("4.0").arrow % "provided",
+      "org.apache.arrow" % "arrow-format" % Versions.line("4.0").arrow % "provided",
+      scalaTest % Test
+    )
+    // TODO 决策 17：Milvus 表达式的 Plan.g4 与 antlr runtime 放哪。Spark 3.5 带
+    // antlr 4.9.3、4.x 带 4.13.1，生成的解析器不通用，所以这里先不加 antlr 依赖。
+  )
+
+// 三个非标准入口的适配器，产出 core 的 Snapshot 或 SegmentReader。
+lazy val compat = Project("compat", file("compat"))
+  .dependsOn(core)
+  .settings(
+    name := "spark-milvus-compat",
+    Modules.shared,
+    libraryDependencies += scalaTest % Test
+  )
+
+// Milvus 在线服务的客户端：DDL、Delete、Procedure 用到的调用。
+lazy val client = Project("client", file("client"))
+  .dependsOn(core)
+  .settings(
+    name := "spark-milvus-client",
+    Modules.shared,
+    libraryDependencies ++= Seq(
+      grpcNetty,
+      scalapbRuntime % "protobuf",
+      scalapbRuntimeGrpc,
+      scalaTest % Test
+    )
+    // TODO 迁移时把 milvus-proto 的生成从 root 移到这里（modules.md 第 5 节）。
+  )
+
+// 第 3 层：每条 Spark 线一个 project，共享 spark/base 的源码。
+def sparkProject(l: Versions.SparkLine): Project =
+  Project(l.projectId, file(s"spark/${l.id}"))
+    .dependsOn(core, compat, client)
+    .settings(
+      name := s"spark-milvus-${l.id}",
+      Modules.perLine(l),
+      Compile / unmanagedSourceDirectories +=
+        Modules.sharedSource((ThisBuild / baseDirectory).value, "spark"),
+      libraryDependencies ++= Modules.sparkDeps(l) ++ Modules.arrowDeps(l),
+      libraryDependencies += scalaTest % Test
+    )
+
+lazy val spark35 = sparkProject(Versions.line("3.5"))
+lazy val spark40 = sparkProject(Versions.line("4.0"))
+lazy val spark41 = sparkProject(Versions.line("4.1"))
+lazy val spark42 = sparkProject(Versions.line("4.2"))
+
+// 场景与遗留代码，每条线一个 fat jar。四个包互不依赖。
+def opsProject(l: Versions.SparkLine, sparkLine: Project): Project =
+  Project(s"ops${l.projectId.stripPrefix("spark")}", file(s"ops/${l.id}"))
+    .dependsOn(sparkLine)
+    .settings(
+      name := s"spark-milvus-ops-${l.id}",
+      Modules.perLine(l),
+      Compile / unmanagedSourceDirectories +=
+        Modules.sharedSource((ThisBuild / baseDirectory).value, "ops"),
+      libraryDependencies ++= Modules.sparkDeps(l),
+      libraryDependencies += scalaTest % Test
+    )
+
+lazy val ops35 = opsProject(Versions.line("3.5"), spark35)
+lazy val ops40 = opsProject(Versions.line("4.0"), spark40)
+lazy val ops41 = opsProject(Versions.line("4.1"), spark41)
+lazy val ops42 = opsProject(Versions.line("4.2"), spark42)
+
+// 打包。TODO：shade 规则按 modules.md 第 4 节第 6 条 —— 只 relocate protobuf 和
+// guava，native 与 arrow 不 relocate（JNI 的导出符号已按包名编进 .so）。
+def bundleProject(l: Versions.SparkLine, sparkLine: Project): Project =
+  Project(s"bundle${l.projectId.stripPrefix("spark")}", file(s"spark/bundle-${l.id}"))
+    .dependsOn(sparkLine)
+    .settings(
+      name := s"spark-milvus-bundle-${l.id}",
+      Modules.perLine(l),
+      libraryDependencies ++= Modules.sparkDeps(l)
+    )
+
+lazy val bundle35 = bundleProject(Versions.line("3.5"), spark35)
+lazy val bundle40 = bundleProject(Versions.line("4.0"), spark40)
+lazy val bundle41 = bundleProject(Versions.line("4.1"), spark41)
+lazy val bundle42 = bundleProject(Versions.line("4.2"), spark42)
+
+// 集成测试。需要 MinIO 和 Milvus，不发布；用例写在各自的 src/test/scala，
+// 共享 it/base 的源码。
+def itProject(l: Versions.SparkLine, sparkLine: Project, opsLine: Project): Project =
+  Project(s"it${l.projectId.stripPrefix("spark")}", file(s"it/${l.id}"))
+    .dependsOn(sparkLine, opsLine)
+    .settings(
+      name := s"spark-milvus-it-${l.id}",
+      Modules.perLine(l),
+      Test / unmanagedSourceDirectories +=
+        (ThisBuild / baseDirectory).value / "it" / "base" / "src" / "test" / "scala",
+      libraryDependencies ++= Modules.sparkDeps(l).map(_.withConfigurations(Some("test"))),
+      libraryDependencies += scalaTest % Test
+    )
+
+lazy val it35 = itProject(Versions.line("3.5"), spark35, ops35)
+lazy val it40 = itProject(Versions.line("4.0"), spark40, ops40)
+lazy val it41 = itProject(Versions.line("4.1"), spark41, ops41)
+lazy val it42 = itProject(Versions.line("4.2"), spark42, ops42)
