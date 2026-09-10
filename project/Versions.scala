@@ -25,12 +25,19 @@ object Versions {
       scalas: Seq[String]
   )
 
-  /** Spark 3.4 已停止发版，不做。4.x 三条线的接口差异接近零。 */
+  /** Spark 3.4 已停止发版，不做。4.x 三条线的接口差异接近零。
+    *
+    * spark 取每条线最低的维护 patch，不取最新：编译版本就是兼容下限，钉高位会把
+    * 下限一起抬上去。跑哪些 patch 是测试矩阵的事，另表。
+    *
+    * arrow 与本线 Spark 自带的对齐（Spark 的 spark-parent pom 里的 arrow.version），
+    * 否则 executor 上会加载两份 Arrow。
+    */
   val lines: Seq[SparkLine] = Seq(
-    SparkLine("3.5", "spark35", "3.5.9", "15.0.2", "4.9.3", "11", Seq(scala212, scala213)),
-    SparkLine("4.0", "spark40", "4.0.4", "18.1.0", "4.13.1", "17", Seq(scala213)),
-    SparkLine("4.1", "spark41", "4.1.3", "18.3.0", "4.13.1", "17", Seq(scala213)),
-    SparkLine("4.2", "spark42", "4.2.0", "18.3.0", "4.13.1", "17", Seq(scala213))
+    SparkLine("3.5", "spark35", "3.5.5", "15.0.2", "4.9.3", "11", Seq(scala212, scala213)),
+    SparkLine("4.0", "spark40", "4.0.0", "18.1.0", "4.13.1", "17", Seq(scala213)),
+    SparkLine("4.1", "spark41", "4.1.1", "18.3.0", "4.13.1", "17", Seq(scala213)),
+    SparkLine("4.2", "spark42", "4.2.0", "19.0.0", "4.13.1", "17", Seq(scala213))
   )
 
   def line(id: String): SparkLine =

@@ -192,7 +192,7 @@
   <div class="fact"><b>33/41</b><span>1.x 源文件 import Spark</span></div>
   <div class="fact"><b>2879</b><span>行的单个 DataSource 文件</span></div>
   <div class="fact"><b>6 → 2</b><span>一个向量值的拷贝次数</span></div>
-  <div class="fact"><b>48</b><span>条功能，分八组</span></div>
+  <div class="fact"><b>51</b><span>条功能，分八组</span></div>
   <div class="fact"><b>4</b><span>条 Spark 线各出产物</span></div>
   <div class="fact"><b>12</b><span>条决策还没定</span></div>
 </div>
@@ -686,19 +686,19 @@
         <g font-size="11">
           <rect x="320" y="44" width="352" height="52" fill="var(--ours-soft)" stroke="var(--ours)"/>
           <text x="334" y="64" font-weight="600" fill="var(--ours)" font-family="ui-monospace,monospace">spark-3.5</text>
-          <text x="334" y="82" fill="currentColor" opacity=".8">Spark 3.5.9 · Arrow 15 · antlr 4.9.3 · Java 11 · Scala 2.12 与 2.13</text>
+          <text x="334" y="82" fill="currentColor" opacity=".8">Spark 3.5.5 · Arrow 15.0.2 · antlr 4.9.3 · Java 11 · Scala 2.12 与 2.13</text>
 
           <rect x="320" y="114" width="352" height="52" fill="var(--ours-soft)" stroke="var(--ours)"/>
           <text x="334" y="134" font-weight="600" fill="var(--ours)" font-family="ui-monospace,monospace">spark-4.0</text>
-          <text x="334" y="152" fill="currentColor" opacity=".8">Spark 4.0.4 · Arrow 18.1 · antlr 4.13 · Java 17 · Scala 2.13</text>
+          <text x="334" y="152" fill="currentColor" opacity=".8">Spark 4.0.0 · Arrow 18.1.0 · antlr 4.13 · Java 17 · Scala 2.13</text>
 
           <rect x="320" y="184" width="352" height="52" fill="var(--ours-soft)" stroke="var(--ours)"/>
           <text x="334" y="204" font-weight="600" fill="var(--ours)" font-family="ui-monospace,monospace">spark-4.1</text>
-          <text x="334" y="222" fill="currentColor" opacity=".8">Spark 4.1.3 · Arrow 18.3 · antlr 4.13 · Java 17 · Scala 2.13</text>
+          <text x="334" y="222" fill="currentColor" opacity=".8">Spark 4.1.1 · Arrow 18.3.0 · antlr 4.13 · Java 17 · Scala 2.13</text>
 
           <rect x="320" y="254" width="352" height="52" fill="var(--ours-soft)" stroke="var(--ours)"/>
           <text x="334" y="274" font-weight="600" fill="var(--ours)" font-family="ui-monospace,monospace">spark-4.2</text>
-          <text x="334" y="292" fill="currentColor" opacity=".8">Spark 4.2.0 · Arrow 按本线 · antlr 4.13 · Java 17 · Scala 2.13</text>
+          <text x="334" y="292" fill="currentColor" opacity=".8">Spark 4.2.0 · Arrow 19.0.0 · antlr 4.13 · Java 17 · Scala 2.13</text>
         </g>
 
         <g stroke="currentColor" marker-end="url(#ar5)" opacity=".8">
@@ -718,7 +718,7 @@
         </g>
       </svg>
     </div>
-    <figcaption>展开后 11 个 sbt project。Spark 3.4 已经停止发版，不做；Spark 3.5 的发行版默认 Scala 2.12，所以只有这条线出两个 Scala 版本。</figcaption>
+    <figcaption>展开后 11 个 sbt project。Spark 的 patch 取每条线最低的维护版，编译版本就是兼容下限；Arrow 与本线 Spark 自带的对齐。3.4 已停止发版，不做；3.5 的发行版默认 Scala 2.12，所以只有这条线出两个 Scala 版本。</figcaption>
   </figure>
 
   <div class="note">
@@ -728,7 +728,7 @@
 
 <section id="caps">
   <h2><span class="n">06</span>功能地图</h2>
-  <p class="claim">48 条功能分八组，每条都写清用户怎么用、哪个包实现、依赖什么。读的 18 条全程不经 Milvus 服务；写的 7 条止于作业清单。</p>
+  <p class="claim">51 条功能分八组，每条都写清用户怎么用、哪个包实现、依赖什么。读的 19 条全程不经 Milvus 服务；写的 7 条止于作业清单。</p>
 
   <div class="key">
     <span><i class="sw ours"></i>P0 · 骨架，不做后面都在旧结构上打补丁</span>
@@ -739,7 +739,7 @@
 
   <div class="groups">
     <div class="grp">
-      <h4>表读 · 18 条</h4>
+      <h4>表读 · 19 条</h4>
       <p>快照定视图，列式 reader 出批，剪枝和谓词求值都在核心层。</p>
       <div class="chips">
         <span class="chip p0"><span class="id">R2</span>读固定快照</span>
@@ -760,6 +760,7 @@
         <span class="chip p1"><span class="id">R13</span>表统计</span>
         <span class="chip p1"><span class="id">R14</span>回表</span>
         <span class="chip p1"><span class="id">R16</span>分区段选择</span>
+        <span class="chip p3"><span class="id">R19</span>按分区报分区</span>
       </div>
     </div>
 
@@ -788,7 +789,7 @@
     </div>
 
     <div class="grp">
-      <h4>CALL · 6 条</h4>
+      <h4>CALL · 7 条</h4>
       <p>Table 接口表达不了的动作；Spark 3.5 上是同名函数。</p>
       <div class="chips">
         <span class="chip p1"><span class="id">A1</span>快照</span>
@@ -797,6 +798,7 @@
         <span class="chip p1"><span class="id">A4</span>登记</span>
         <span class="chip p1"><span class="id">A5</span>描述</span>
         <span class="chip p1"><span class="id">A6</span>读时自动建快照</span>
+        <span class="chip p1"><span class="id">A7</span>清理暂存</span>
       </div>
     </div>
 
@@ -832,13 +834,14 @@
     </div>
 
     <div class="grp">
-      <h4>配置 · 4 条</h4>
+      <h4>配置 · 5 条</h4>
       <p>1.x 的 89 个键在这里收敛并映射。</p>
       <div class="chips">
         <span class="chip p1"><span class="id">G1</span>表 option</span>
         <span class="chip p1"><span class="id">G2</span>写 option</span>
         <span class="chip p1"><span class="id">G3</span>内存与批</span>
         <span class="chip p2"><span class="id">G4</span>索引缓存与 GPU</span>
+        <span class="chip p1"><span class="id">G5</span>指标</span>
       </div>
     </div>
   </div>
