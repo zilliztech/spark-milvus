@@ -108,6 +108,29 @@
   .chip.wait{background:var(--wait-soft); border-color:var(--wait); color:var(--wait)}
   .chip.wait .id{color:var(--wait)}
 
+
+  pre.tree{font-family:var(--mono); font-size:12.5px; line-height:1.85; margin:0;
+    white-space:pre; color:var(--dim)}
+  pre.tree .d{color:var(--ink); font-weight:500}
+  pre.tree .m{color:var(--ours); font-weight:500}
+  pre.tree .u{color:var(--up)}
+  pre.tree .c{color:var(--faint)}
+  pre.tree .lay{display:inline-block; font-size:10px; border:1px solid var(--line);
+    padding:0 5px; margin-left:6px; color:var(--faint); vertical-align:1px}
+
+  .pkgs{display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:1px;
+    background:var(--line); border:1px solid var(--line); margin-top:24px}
+  .pkg{background:var(--surface); padding:16px 18px 18px}
+  .pkg > h4{margin:0 0 2px; font-size:13px; font-family:var(--mono); font-weight:600;
+    color:var(--ours)}
+  .pkg > .role{margin:0 0 12px; font-size:12px; color:var(--dim); line-height:1.6}
+  .pkg dl{margin:0; display:grid; grid-template-columns:auto 1fr; gap:5px 12px;
+    align-items:baseline}
+  .pkg dt{font-family:var(--mono); font-size:11.5px; color:var(--ink); white-space:nowrap}
+  .pkg dd{margin:0; font-size:12px; color:var(--dim); line-height:1.55}
+  .pkg dd em{font-style:normal; font-family:var(--mono); font-size:10.5px;
+    color:var(--faint)}
+
   .key{display:flex; flex-wrap:wrap; gap:16px; margin:18px 0 0; font-size:12.5px;
     color:var(--dim)}
   .key span{display:inline-flex; align-items:center; gap:7px}
@@ -151,7 +174,7 @@
   <div class="topin">
     <div class="brand">spark-milvus <em>2.0</em></div>
     <nav class="top">
-      <a href="#layers">分层</a><a href="#read">读</a><a href="#write">写</a>
+      <a href="#layers">分层</a><a href="#tree">目录</a><a href="#read">读</a><a href="#write">写</a>
       <a href="#build">构建</a><a href="#caps">功能</a><a href="#order">顺序</a><a href="#open">未定</a>
     </nav>
   </div>
@@ -272,8 +295,129 @@
   </div>
 </section>
 
+<section id="tree">
+  <h2><span class="n">02</span>目录与包</h2>
+  <p class="claim">每个模块一个目录，每个包一个职责。<code>spark/base</code> 和 <code>ops/base</code> 不是独立模块，只是四条 Spark 线共同引用的源码目录；1.x 的代码还在根目录的 <code>src/</code> 里，迁移一个模块一个模块来。</p>
+
+  <figure>
+    <div class="figbox">
+<pre class="tree"><span class="d">spark-milvus/</span>
+├── <span class="f">build.sbt</span>                     <span class="c">聚合、版本、发布</span>
+├── <span class="d">project/</span>                      <span class="c">Versions.scala 版本矩阵，Modules.scala 构建约束</span>
+│
+├── <span class="m">native/storage/</span><span class="lay">第 1 层</span>
+│   ├── src/main/java/                <span class="c">com.zilliz.milvus.jni.storage</span>
+│   ├── src/main/cpp/                 <span class="c">包 loon_* C 接口的 JNI 源码</span>
+│   └── build/                        <span class="c">构建与 patchelf 脚本</span>
+├── <span class="m">native/vector/</span><span class="lay">第 1 层</span>
+│   ├── src/main/java/                <span class="c">com.zilliz.milvus.jni.vector</span>
+│   └── src/main/cpp/                 <span class="c">mv_* 的 C shim 与 JNI</span>
+│
+├── <span class="m">core/</span><span class="lay">第 2 层</span>                        <span class="c">无 Spark 依赖，编译期强制</span>
+│   ├── src/main/scala/com/zilliz/milvus/storage/
+│   │      <span class="c">snapshot · manifest · schema · path · credential</span>
+│   │      <span class="c">expr · delete · stats · index</span>
+│   │      <span class="c">read/{plan,exec} · write/{exec,commit}</span>
+│   ├── src/main/antlr4/              <span class="c">Plan.g4，antlr 放哪见决策 17</span>
+│   └── src/main/resources/           <span class="c">段清单的 Avro schema</span>
+├── <span class="m">compat/</span><span class="lay">第 2 层</span>                      <span class="c">三个非标准入口的适配器</span>
+│   └── .../storage/compat/           <span class="c">v2packed · offline · backup</span>
+├── <span class="m">client/</span><span class="lay">第 2 层</span>                      <span class="c">Milvus 在线服务的客户端</span>
+│   ├── .../milvus/client/            <span class="c">grpc · api</span>
+│   └── src/main/protobuf/            <span class="c">milvus-proto 子模块的引用</span>
+│
+├── <span class="m">spark/</span><span class="lay">第 3 层</span>
+│   ├── <span class="u">base/</span>                         <span class="c">共享源码，不是 project</span>
+│   │      <span class="c">table · scan · expr · types · write · options</span>
+│   ├── 3.5/                          <span class="c">catalog · functions · extensions · services</span>
+│   ├── 4.0/  4.1/  4.2/              <span class="c">catalog · procedure · extensions · services</span>
+│   └── bundle-3.5/ … bundle-4.2/     <span class="c">每条线一个 fat jar</span>
+│
+├── <span class="m">ops/</span><span class="lay">第 4 层</span>                        <span class="c">场景与遗留，四个包互不依赖</span>
+│   ├── <span class="u">base/</span>                         <span class="c">backfill · tools · search · legacy</span>
+│   └── 3.5/  4.0/  4.1/  4.2/        <span class="c">各引 base 的源码，依赖本线 spark</span>
+│
+├── <span class="m">it/</span>                           <span class="c">集成测试，需要 MinIO 与 Milvus，不发布</span>
+│   ├── <span class="u">base/</span>  3.5/  4.0/  4.1/  4.2/
+│
+├── <span class="u">src/</span>                          <span class="c">1.x 的代码，原地不动，按模块逐个迁走</span>
+└── <span class="d">docs/design/</span>                  <span class="c">本文与三份设计文档</span></pre>
+    </div>
+    <figcaption>目录树。绿色是 2.0 的模块，灰色是共享源码目录和还没迁的 1.x 代码。四条 Spark 线的目录名就是线号，产物名带线号和 Scala 版本。</figcaption>
+  </figure>
+
+  <h3>包的职责</h3>
+  <p>每个包在仓库里都有一个 <code>package.scala</code>，scaladoc 写着下面这些职责和它承载的功能编号。</p>
+
+  <div class="pkgs">
+    <div class="pkg">
+      <h4>core</h4>
+      <p class="role">第 2 层。全部计算在这里，源码不出现 org.apache.spark。对外只暴露 snapshot、read、write、index、schema、expr 六个包。</p>
+      <dl>
+        <dt>snapshot</dt><dd>列快照目录，选快照，解析成对象；分发 SnapshotSource <em>R2 R3 R13 R16 C3</em></dd>
+        <dt>manifest</dt><dd>一个段的列组、删除文件、统计、索引登记 <em>R4 R5</em></dd>
+        <dt>schema</dt><dd>字段 id、名字、Milvus 类型、Arrow 类型的唯一映射 <em>R15 C3</em></dd>
+        <dt>path</dt><dd>三种路径形态归一成 (bucket, key) <em>R3</em></dd>
+        <dt>credential</dt><dd>对象存储凭证的取用和下发 <em>R3 W1</em></dd>
+        <dt>expr</dt><dd>中间表示、Milvus 文法解析器、列批求值器、反向打印器 <em>R6 R7 W5</em></dd>
+        <dt>delete</dt><dd>删除文件解码，按行号置位 <em>R8</em></dd>
+        <dt>stats</dt><dd>段统计与 row group 统计的读取和剪枝 <em>R9 R10 R18</em></dd>
+        <dt>read.plan</dt><dd>分区规划，纯 JVM，可序列化 <em>R3 R5 R10</em></dd>
+        <dt>read.exec</dt><dd>批读取、按行号取列、出口；碰 native <em>R4 R14 R17</em></dd>
+        <dt>write.exec</dt><dd>段写出、暂存布局；碰 native <em>W1 W2</em></dd>
+        <dt>write.commit</dt><dd>作业清单、提交、幂等 <em>W3</em></dd>
+        <dt>index</dt><dd>索引文件编解码、来源、缓存、写出 <em>V2 V4 W6</em></dd>
+      </dl>
+    </div>
+
+    <div class="pkg">
+      <h4>spark/base 与各线</h4>
+      <p class="role">第 3 层。只做翻译，Spark 索取什么就交出什么。base 是共享源码，四条线各编译一次；按线不同的只有 catalog、procedure 或 functions、extensions 和服务注册文件。</p>
+      <dl>
+        <dt>table</dt><dd>schema、能力集、元数据列、统计、DeleteV2 <em>R12 R13 W5</em></dd>
+        <dt>scan</dt><dd>ScanBuilder、Scan、InputPartition、ColumnVector 实现 <em>R4 R5 R11 R16 R18</em></dd>
+        <dt>expr</dt><dd>DataSource V2 谓词翻成中间表示 <em>R6</em></dd>
+        <dt>types</dt><dd>Arrow 类型到 Spark 类型的映射，向量列的表示 <em>R15</em></dd>
+        <dt>write</dt><dd>WriteBuilder、BatchWrite、DataWriter；三种写模式 <em>W1–W4</em></dd>
+        <dt>options</dt><dd>option 名、别名、校验；把 compat 的实现注册进 core <em>K4 G1–G4</em></dd>
+        <dt>catalog</dt><dd>三段名、命名空间、loadTable 的快照重载 <em>R1 R2 C1 C2 A6</em></dd>
+        <dt>procedure</dt><dd>Spark 4 的 CALL <em>A1–A5</em></dd>
+        <dt>functions</dt><dd>Spark 3.5 上同一批动作的函数入口 <em>A1–A5</em></dd>
+        <dt>extensions</dt><dd>SparkSessionExtensions、SQL 解析器扩展、优化规则</dd>
+      </dl>
+    </div>
+
+    <div class="pkg">
+      <h4>compat 与 client</h4>
+      <p class="role">第 2 层的另外两个模块。compat 的三个适配器产出 core 的 Snapshot 或 SegmentReader，由 spark 层在启动时注册进 core 的注册表，core 源码不出现 compat 的包名。</p>
+      <dl>
+        <dt>v2packed</dt><dd>Storage V2 packed 段的 SegmentReader <em>K1</em></dd>
+        <dt>offline</dt><dd>1.x 离线 option 的段列表转 Snapshot <em>K2</em></dd>
+        <dt>backup</dt><dd>milvus-backup 导出目录转 Snapshot <em>K3</em></dd>
+        <dt>client.grpc</dt><dd>ScalaPB 生成的 stub，重试拦截器</dd>
+        <dt>client.api</dt><dd>DDL、Delete、快照、索引、生命周期、登记；proto 的 DataType 与 core 的 MilvusType 互转 <em>C1 C2 W5 A1–A5</em></dd>
+      </dl>
+    </div>
+
+    <div class="pkg">
+      <h4>native 与 ops</h4>
+      <p class="role">第 1 层的包名用 jni 而不是 native：native 是 Java 的保留字。第 4 层的四个包各自是独立入口，删掉任何一个不影响其他。</p>
+      <dl>
+        <dt>jni.storage</dt><dd>StorageNative：每个 loon_* 一个 native 方法 <em>R4 W1</em></dd>
+        <dt>… .arrow</dt><dd>三个 Arrow C 结构体的分配与 release</dd>
+        <dt>… .loader</dt><dd>按 os 和 arch 解压 .so 后加载</dd>
+        <dt>jni.vector</dt><dd>VectorNative：mv_* 的 native 方法 <em>V1 V5</em></dd>
+        <dt>ops.backfill</dt><dd>作业、CLI、结果 JSON <em>O1</em></dd>
+        <dt>ops.tools</dt><dd>两个调试工具 <em>O2</em></dd>
+        <dt>ops.search</dt><dd>暴力搜索的 JVM 实现，作对拍 <em>V5</em></dd>
+        <dt>ops.legacy</dt><dd>gRPC Insert 的写栈与 format("milvus") 短名 <em>W7</em></dd>
+      </dl>
+    </div>
+  </div>
+</section>
+
 <section id="read">
-  <h2><span class="n">02</span>读路径</h2>
+  <h2><span class="n">03</span>读路径</h2>
   <p class="claim">读全程不经 Milvus 服务：driver 只碰元数据，从快照定分区和谓词；executor 只碰自己那一片，把删除和谓词合成一张位图，交出列批。</p>
 
   <figure>
@@ -423,7 +567,7 @@
 </section>
 
 <section id="write">
-  <h2><span class="n">03</span>写路径与登记</h2>
+  <h2><span class="n">04</span>写路径与登记</h2>
   <p class="claim">写止于作业清单。段按 Milvus Storage 格式直接落对象存储，把它们变成 collection 的一部分是 Milvus 的动作。今天两种登记的现状不同：给已有段加列组有接口，登记新段没有。</p>
 
   <figure>
@@ -506,7 +650,7 @@
 </section>
 
 <section id="build">
-  <h2><span class="n">04</span>构建矩阵</h2>
+  <h2><span class="n">05</span>构建矩阵</h2>
   <p class="claim">跟 lance-spark 一样：一份源码，每条维护中的 Spark 线编译一次，各自钉本线的 Spark、Arrow、antlr 和 Java 版本。共用模块必须按最低的那条线编译。</p>
 
   <figure>
@@ -583,7 +727,7 @@
 </section>
 
 <section id="caps">
-  <h2><span class="n">05</span>功能地图</h2>
+  <h2><span class="n">06</span>功能地图</h2>
   <p class="claim">48 条功能分八组，每条都写清用户怎么用、哪个包实现、依赖什么。读的 18 条全程不经 Milvus 服务；写的 7 条止于作业清单。</p>
 
   <div class="key">
@@ -704,7 +848,7 @@
 </section>
 
 <section id="order">
-  <h2><span class="n">06</span>顺序</h2>
+  <h2><span class="n">07</span>顺序</h2>
   <p class="claim">只有依赖，没有日期。判据是先做让下游列式算子能接上的部分：读路径是一切的基础，写路径的 append 等 Milvus 侧的接口，搜索层依赖列式读。</p>
 
   <ol class="steps">
@@ -721,7 +865,7 @@
 </section>
 
 <section id="open">
-  <h2><span class="n">07</span>还没定的 12 条</h2>
+  <h2><span class="n">08</span>还没定的 12 条</h2>
   <p class="claim">其中三条挡在 P0 前面：类型映射决定 ColumnVector 怎么写，表读出口决定要不要多一次拷贝，SegmentWriter 决定原生层要不要连写一起包。</p>
 
   <div class="tw">
