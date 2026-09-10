@@ -174,6 +174,7 @@ flowchart LR
 | 13 | `_delta/` 删除文件格式 | 两列 Parquet 与旧 binlog 容器格式的共存期 | DeleteBitset 的解析器 |
 | 14 | SegmentWriter | a. 复用 1.x 的 Loon 写入器（写侧已零拷贝）；b. 在新 JNI 上重写 | 原生层的工作量 |
 | 16 | 暴力搜索的形态与位置（能力已定保留，见决策日志） | 入口：DataFrame 方法、SQL 函数、读选项三选几；执行：knowhere 的 BruteForce 在原生层，JVM 实现作参照或兜底；归属：spark 层能力还是 ops 场景 | 能力清单和模块规划一起定 |
+| 17 | Milvus 表达式解析器的 antlr runtime 放哪 | a. core 自带并 relocate；b. Plan.g4 放共享源码，各 Spark 线用本线的 antlr 版本各生成一份 | Spark 3.5 带 antlr 4.9.3，4.x 带 4.13.1，生成代码不通用；core 是跨线单产物 |
 
 ## 5 需要 Milvus 侧提供的 `[草稿]`
 
