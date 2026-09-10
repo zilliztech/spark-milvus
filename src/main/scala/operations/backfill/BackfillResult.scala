@@ -70,6 +70,11 @@ case class BackfillResult(
     segmentResults: Map[Long, SegmentBackfillResult],
     executionTimeMs: Long,
     collectionId: Long,
+    /** Partition every processed segment belongs to, or 0 when the segments
+      * span several partitions. Milvus skips its partition check for 0 (and,
+      * since milvus-io/milvus#53330, for any non-positive value); a positive
+      * value must match each segment's partition or the commit fails.
+      */
     partitionId: Long,
     schemaVersion: Int,
     newFieldNames: Seq[String],
