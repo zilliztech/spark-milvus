@@ -172,7 +172,7 @@ spark-milvus/
   ops/
     backfill/               场景：backfill 作业、CLI、结果 JSON
     tools/                  调试工具
-    search/                 JVM 向量搜索，去留见决策 7
+    search/                 暴力搜索，保留；形态见决策 16
     legacy/                 gRPC Insert 写入器，去留见决策 4
   it/                       集成测试，src/it 迁入
   docs/design/              本文
@@ -210,7 +210,8 @@ spark-milvus/
 | 4 | gRPC Insert | a. 删除；b. 留在 ops/legacy 作小批量兜底 | 无快照、无对象存储凭证时能否写 |
 | 5 | 元数据列名 | `_segment_id` 或 1.x 的 `$segment_id`；`partition` 列是否保留 | 1.x 用户的兼容 |
 | 6 | 类型映射 | Float16/BFloat16、Int8Vector、稀疏、Array 各选透传还是转换 | 用户可见类型；下游算子拿到的布局 |
-| 7 | 现有 JVM 搜索代码 | a. 删除；b. 留作对拍基准，放 ops/search | 按决策 1 不移出仓库；只剩删还是留 |
+| 7 | 暴力搜索能力 `[已定]` | 保留，不删。形态和位置在能力规划时设计，见决策 16 | 1.x 的三块 JVM 搜索代码先留在 ops/search |
+| 16 | 暴力搜索的形态与位置 | 入口：DataFrame 方法、SQL 函数、读选项三选几；执行：knowhere 的 BruteForce 在原生层，JVM 实现作参照或兜底；归属：spark 层能力还是 ops 场景 | 能力清单和模块规划一起定 |
 | 9 | 支持的 Spark 版本 `[已定]` | 跟 lance-spark 一样：每条维护中的线一个子项目和产物，首发覆盖 3.5、4.0、4.1、4.2；3.4 已停不做 | 见 2.8 |
 | 15 | Spark 3.5 线是否加 Scala 2.12 产物 | a. 只做 2.13；b. 照 lance-spark 也出 2.12 | Spark 3.5 发行版默认 2.12；2.12 要交叉编译整个仓库 |
 | 10 | backfill 写模式的按段分布和按行号排序 | a. 实现 RequiresDistributionAndOrdering；b. 场景代码自己 shuffle 后再写 | 写路径接口 |
@@ -239,3 +240,4 @@ spark-milvus/
 | 2026-09-10 | backfill 的模块归属 | 不分仓；仓库内用 sbt 模块隔离，场景与遗留代码进 ops 模块，依赖只能向下。同一政策适用于调试工具、JVM 向量搜索、backup 入口、gRPC Insert |
 | 2026-09-10 | 支持的 Spark 版本 | 跟 lance-spark 一样：每条维护中的 Spark 线一个子项目、一份源码、各自钉 Spark 和 Arrow、各出产物；首发覆盖 3.5、4.0、4.1、4.2，Scala 2.13 |
 | 2026-09-10 | 索引写回 | 推翻 09-09 那条：Spark 建的索引按 Milvus 索引文件格式写回并登记进 Manifest，是 2.0 的功能之一，与加载链和 Global Index 映射一起做。2.0 是完整设计，不按场景裁剪 |
+| 2026-09-10 | 暴力搜索能力 | 保留。1.x 的 JVM 实现先留在 ops/search；正式形态（入口、原生层 BruteForce、归属）在能力规划时一起设计 |
