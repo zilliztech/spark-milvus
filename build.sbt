@@ -298,7 +298,7 @@ lazy val v2Modules: Seq[ProjectReference] = Seq(
   spark35, spark40, spark41, spark42,
   apps35, apps40, apps41, apps42,
   bundle35, bundle40, bundle41, bundle42,
-  it35, it40, it41, it42
+  integration35, integration40, integration41, integration42
 )
 
 // 第 1 层：两个原生库的封装。纯 Java，产物不带 Scala 后缀。
@@ -402,20 +402,21 @@ lazy val bundle41 = bundleProject(Versions.line("4.1"), spark41)
 lazy val bundle42 = bundleProject(Versions.line("4.2"), spark42)
 
 // 集成测试。需要 MinIO 和 Milvus，不发布；用例写在各自的 src/test/scala，
-// 共享 it/base 的源码。
-def itProject(l: Versions.SparkLine, sparkLine: Project, appsLine: Project): Project =
-  Project(s"it${l.projectId.stripPrefix("spark")}", file(s"it/${l.id}"))
+// 共享 integration/base 的源码。名字不用 it：sbt 内置的 IntegrationTest 配置
+// 从 1.9 起废弃、sbt 2 已删除，2.0 不再用它，沿用这个词会误导。
+def integrationProject(l: Versions.SparkLine, sparkLine: Project, appsLine: Project): Project =
+  Project(s"integration${l.projectId.stripPrefix("spark")}", file(s"integration/${l.id}"))
     .dependsOn(sparkLine, appsLine)
     .settings(
-      name := s"spark-milvus-it-${l.id}",
+      name := s"spark-milvus-integration-${l.id}",
       Modules.perLine(l),
       Test / unmanagedSourceDirectories +=
-        (ThisBuild / baseDirectory).value / "it" / "base" / "src" / "test" / "scala",
+        (ThisBuild / baseDirectory).value / "integration" / "base" / "src" / "test" / "scala",
       libraryDependencies ++= Modules.sparkDeps(l).map(_.withConfigurations(Some("test"))),
       libraryDependencies += scalaTest % Test
     )
 
-lazy val it35 = itProject(Versions.line("3.5"), spark35, apps35)
-lazy val it40 = itProject(Versions.line("4.0"), spark40, apps40)
-lazy val it41 = itProject(Versions.line("4.1"), spark41, apps41)
-lazy val it42 = itProject(Versions.line("4.2"), spark42, apps42)
+lazy val integration35 = integrationProject(Versions.line("3.5"), spark35, apps35)
+lazy val integration40 = integrationProject(Versions.line("4.0"), spark40, apps40)
+lazy val integration41 = integrationProject(Versions.line("4.1"), spark41, apps41)
+lazy val integration42 = integrationProject(Versions.line("4.2"), spark42, apps42)

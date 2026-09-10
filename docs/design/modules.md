@@ -15,11 +15,11 @@
 | spark-3.5 / 4.0 / 4.1 / 4.2 | 第 3 层 | 同上 | spark-base 的源码 + 本线专属目录；core、compat、client；本线 Spark 为 provided | `com.zilliz:spark-milvus-<line>_<scala>` |
 | bundle-`<line>` | 打包 | | 本线的 spark 模块 | `com.zilliz:spark-milvus-bundle-<line>_<scala>`：fat jar |
 | apps-`<line>` | 第 4 层 | `com.zilliz.spark.connector.apps` | 本线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`：fat jar |
-| it-`<line>` | 测试 | | 本线的 spark 与 apps 模块；需 MinIO 和 Milvus | 不发布 |
+| integration-`<line>` | 测试 | | 本线的 spark 与 apps 模块；需 MinIO 和 Milvus | 不发布 |
 
-展开后约 17 个 sbt project：native 两个、core、compat、client、spark 四条线、bundle 四条线、apps 五个（3.5 的 2.12 和 2.13，4.x 三条线）、it 同 apps。交叉编译由 `crossScalaVersions` 控制。
+展开后约 17 个 sbt project：native 两个、core、compat、client、spark 四条线、bundle 四条线、apps 五个（3.5 的 2.12 和 2.13，4.x 三条线）、integration 同 apps。交叉编译由 `crossScalaVersions` 控制。
 
-Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client、spark-base、apps 交叉编译两个版本，bundle 和 it 跟随所在线。
+Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client、spark-base、apps 交叉编译两个版本，bundle 和 integration 跟随所在线。
 
 1.x 的坐标 `com.zilliz:spark-connector_2.13` 在 2.0 之后不再更新，1.x 的修复仍发到它。
 
@@ -140,8 +140,8 @@ spark-milvus/
   apps/
     base/src/main/{scala,resources}/ com.zilliz.spark.connector.apps.{backfill,tools,search,legacy}
     3.5/  4.0/  4.1/  4.2/           各引 base 的源码，依赖本线 spark 模块
-  it/
-    base/src/test/scala/             集成测试
+  integration/                     集成测试，需要 MinIO 与 Milvus
+    base/src/test/scala/             四条线共享的用例
     3.5/  4.0/  4.1/  4.2/
   docs/design/                     设计文档
   docs/                            用户文档
