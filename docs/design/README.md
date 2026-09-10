@@ -60,7 +60,7 @@ flowchart TB
 
 ### 2.2 核心层对象模型
 
-读的唯一入口是 Snapshot：1.x 的 live、离线、backup 三条入口都改成选一个快照。
+读的唯一入口是 Snapshot：主路径从快照目录选一个快照；1.x 的离线 option 和 backup 两条入口保留为 compat 模块里的 SnapshotSource 适配器，产出同一个 Snapshot 对象；Storage V2 packed 段的 reader 也在 compat 模块，主路径只认 Storage V3。
 
 | 类型 | 含义 | 来源 |
 |---|---|---|
@@ -140,13 +140,14 @@ flowchart LR
 
 ### 2.8 目录与模块 `[讨论中]`
 
-不分仓：场景代码、调试工具和遗留路径都留在本仓库，用 sbt 模块隔离，依赖规则保证核心层不被它们污染。适用这条政策的有：backfill、调试工具（ListV2SegmentsApp、ReadSourceOnlyApp）、JVM 向量搜索（暴力搜索、SQL 距离函数、`vector.search.*`）、backup 入口、gRPC Insert 写入器、和云上约定的结果 JSON。
+不分仓：场景代码、调试工具和遗留路径都留在本仓库，用 sbt 模块隔离，依赖规则保证核心层不被它们污染。与总设计冲突、暂时不好判断的非标准功能一律按这条处理：保留，隔离，不进核心层。适用这条政策的有：backfill、调试工具（ListV2SegmentsApp、ReadSourceOnlyApp）、JVM 向量搜索（暴力搜索、SQL 距离函数、`vector.search.*`）、backup 入口、gRPC Insert 写入器、和云上约定的结果 JSON。
 
 | 模块 | 层 | 包名 | 依赖 | 产物 |
 |---|---|---|---|---|
 | native-storage | 第 1 层 | `com.zilliz.milvus.native.storage` | milvus-storage C 接口 | jar 内 `native/{os}-{arch}/` 平铺 .so |
 | native-vector | 第 1 层 | `com.zilliz.milvus.native.vector` | knowhere C shim | 同上，P2 再建 |
 | core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow | 无 Spark 依赖的 jar |
+| compat | 非标准入口 | `com.zilliz.milvus.storage.compat` | core | 三个适配器：Storage V2 packed 段的 reader、离线 option 塞段列表的 SnapshotSource、backup 目录的 SnapshotSource；都产出 core 的 Snapshot 或 Reader 接口 |
 | client | Milvus 服务客户端 | `com.zilliz.milvus.client` | ScalaPB、gRPC | 只被 spark 和 ops 用：DDL、Delete、Procedure |
 | spark-base | 第 3 层，共享源码 | `com.zilliz.spark.connector` | core、client | 不发布；只是源码目录 |
 | spark-3.5 / spark-4.0 / spark-4.1 / spark-4.2 | 第 3 层，每条 Spark 线一个 | 同上 | spark-base 的源码加本线专属目录；本线的 Spark 为 provided | `spark-milvus-<line>_<scala>`：3.5 出 2.12 和 2.13，4.x 出 2.13 |
@@ -162,6 +163,7 @@ spark-milvus/
     storage/                第 1 层：Java 绑定 + C JNI 源码 + 打包脚本
     vector/                 第 1 层：C shim + JNI，P2
   core/                     第 2 层：snapshot、segment、manifest、delete、schema、expr、path、reader、writer
+  compat/                   非标准入口的适配器：Storage V2 packed 读、离线 option、backup
   client/                   gRPC 客户端与 Procedure 用到的调用
   spark/
     base/src/main/scala/    第 3 层共享源码：catalog、table、scan、write、procedure
@@ -173,12 +175,12 @@ spark-milvus/
     backfill/               场景：backfill 作业、CLI、结果 JSON
     tools/                  调试工具
     search/                 暴力搜索，保留（决策日志）；形态见决策 16
-    legacy/                 gRPC Insert 写入器，去留见决策 4
+    legacy/                 gRPC Insert 写入器，保留作小批量兜底
   it/                       集成测试，src/it 迁入
   docs/design/              本文
 ```
 
-1. 依赖只能向下：ops → spark → client、core → native。core 的构建里没有 Spark，spark 模块的编译期检查用 `org.apache.spark` 的 import 禁令做。
+1. 依赖只能向下：ops → spark → client、compat、core → native；compat 只依赖 core。core 的构建里没有 Spark，spark 模块的编译期检查用 `org.apache.spark` 的 import 禁令做。
 2. 多 Spark 版本照 lance-spark 的做法：一份源码，每条线一个子项目编译一次，各自钉本线的 Spark 补丁版和 Arrow；本线专属的文件放各自目录。CI 矩阵每条线各跑一遍单测和集成测试。Scala 跟 lance-spark 一样：3.5 线出 2.12 和 2.13，4.x 线只出 2.13，整个仓库按两个 Scala 版本交叉编译。
 3. ops 里的每个目录是一个独立入口（main 类或 SparkSessionExtensions），不互相依赖；删掉任何一个不影响其他。
 4. 包名：核心层不再用 `spark` 字样；第 3 层保留 `com.zilliz.spark.connector`，`format("milvus")` 的短名和类名对 1.x 用户不变。
@@ -206,9 +208,7 @@ spark-milvus/
 
 | 编号 | 决策 | 选项 | 影响 |
 |---|---|---|---|
-| 2 | 三种非快照目录入口的去留：Storage V2 packed 段、离线 option 塞段列表、backup（读 milvus-backup 导出目录） | a. 只做 V3 加快照目录；b. 部分保留进核心层 | reader 一条路还是两条；backfill 读原表今天走的是离线 option |
 | 3 | refresh 能否登记已有段的新 Manifest 版本 | 向 Milvus 确认 | backfill 写模式能否走 refresh；否则要 Milvus 另给接口 |
-| 4 | gRPC Insert | a. 删除；b. 留在 ops/legacy 作小批量兜底 | 无快照、无对象存储凭证时能否写 |
 | 5 | 元数据列名 | `_segment_id` 或 1.x 的 `$segment_id`；`partition` 列是否保留 | 1.x 用户的兼容 |
 | 6 | 类型映射 | Float16/BFloat16、Int8Vector、稀疏、Array 各选透传还是转换 | 用户可见类型；下游算子拿到的布局 |
 | 10 | backfill 写模式的按段分布和按行号排序 | a. 实现 RequiresDistributionAndOrdering；b. 场景代码自己 shuffle 后再写 | 写路径接口 |
@@ -240,3 +240,4 @@ spark-milvus/
 | 2026-09-10 | 索引写回 | 推翻 09-09 那条：Spark 建的索引按 Milvus 索引文件格式写回并登记进 Manifest，是 2.0 的功能之一，与加载链和 Global Index 映射一起做。2.0 是完整设计，不按场景裁剪 |
 | 2026-09-10 | 暴力搜索能力 | 保留。1.x 的 JVM 实现先留在 ops/search；正式形态（入口、原生层 BruteForce、归属）在能力规划时一起设计 |
 | 2026-09-10 | Scala 版本 | 跟 lance-spark 一样：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；整个仓库交叉编译 |
+| 2026-09-10 | 非标准功能的处理原则 | 与总设计冲突、暂时不好判断的功能一律保留并用模块隔离，不进核心层。据此：Storage V2 packed 读、离线 option 塞段列表、backup 三个入口进 compat 模块，作 Snapshot 或 Reader 的适配器；gRPC Insert 进 ops/legacy 作小批量兜底 |
