@@ -28,8 +28,8 @@
 <code>.agents/skills/spark-milvus-storage-auth/</code>。</p>
 
 <div class="verdict">
-<strong>结论。</strong>连接器不构造凭证，但不能完全不管：跨账号双桶和平台已选的 AssumeRole
-两个场景只能由它处理。现有 provider 链逻辑保留，要治的是六处复制和写死的默认值。
+<strong>结论。</strong>连接器不构造凭证，只继承 Spark 给的 Configuration。写配置是第 4 层
+作业的事，因为只有作业知道自己要访问哪几个桶。现有逻辑保留，要治的是六处复制和写死的默认值。
 另外两件必须做：AWS SDK v1 已于 2025-12-31 结束支持，升到 v2；JVM 侧只支持 S3 与 OSS，
 Azure 与 GCS 读不了，是真缺口。
 </div>
@@ -131,19 +131,12 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 <p>取 <code>sessionState.newHadoopConf()</code> 往下传。平台通过 <code>spark.hadoop.fs.s3a.*</code>
 配置一次，连接器不写凭证代码。Iceberg 的 <code>HadoopFileIO</code> 与 Delta 都是这样。</p>
 
-<h3>4.2 例外一：跨账号双桶必须写按桶键</h3>
-<p>backfill 同时读源桶、写 Milvus 桶，两个桶可能属于不同账号，端点、密钥、区域都不同。
-会话级配置表达不了，所以连接器必须写 <code>fs.s3a.bucket.&lt;桶&gt;.*</code>。
-这是原则 2 允许的形态，也是 <code>configureHadoopS3ForPath</code> 有 <code>isSource</code> 参数的原因。</p>
-
-<h3>4.3 例外二：平台已选的 AssumeRole 不能被覆盖</h3>
-<p>托管运行时可能已经全局或按桶选好 AssumeRole provider，用于它的数据角色或外部卷。
-连接器只在该桶没有 AssumeRole 时才补自己的链。对应提交
-<code>d823ec0 fix: [backfill] honor platform AssumeRole configuration (#108)</code>。</p>
-
-<h3>4.4 例外三：静态密钥要钉住 provider</h3>
-<p>用户给了 AKSK 时强制 <code>SimpleAWSCredentialsProvider</code>，否则会被全局 provider 链遮蔽。
-这是 Hadoop 的真实行为，不是防御性编程。</p>
+<h3>4.2 写配置是第 4 层的事，不是连接器的</h3>
+<p>一个作业可能要用不同身份访问多个桶，会话级配置表达不了，只能由作业自己写按桶的键。
+这属于第 4 层。backfill 怎么做、S3 与 OSS 为什么不一样，见
+<a href="../apps/backfill-storage.html">backfill 的多桶存储访问</a>。</p>
+<p>无论谁写，都要守<a href="#principle">第三节</a>的五条：只写按桶或按账号的键，
+不覆盖已设好的 provider，不内置默认值。</p>
 
 <h3>4.5 原生侧：只传位置与模式，不传密钥</h3>
 <p>milvus-storage 的 C 层有自己的 SDK，在同一个 pod 里自己发现身份。它认识的键：</p>

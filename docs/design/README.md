@@ -8,6 +8,7 @@
 | 理解总体结构、确定模块与包的归属 | architecture/ | [架构图解](architecture/overview.html)、[模块与迁移](architecture/modules.md) |
 | core 怎么访问对象存储、凭证怎么下发 | architecture/ | [存储访问层](architecture/storage-access.html)（未完待续） |
 | 改动对象存储凭证、provider 链、按桶配置 | architecture/ | [对象存储认证](architecture/storage-auth.html) |
+| backfill 怎么访问多个桶 | apps/ | [backfill 的多桶存储访问](apps/backfill-storage.html) |
 | 审查或修改构建、打包与发布配置 | engineering/ | [sbt 原则与实践](engineering/sbt.html) |
 | 对比外部方案、核对设计依据 | research/ | [Lance 分析](research/lance-spark.md)、[对比图解](research/lance-spark.html) |
 
@@ -260,4 +261,6 @@ flowchart LR
 | 2026-09-11 | connector 不再自造 Configuration | 删掉 MilvusOption 的 getConf 与 getFileSystem。前者自己 new 一个 Configuration 从零配 fs.s3a.*，后者自己 new 一个 S3AFileSystem 绕开 FileSystem 缓存，两个方法都没有生产调用方，只有一个测试在断言 getConf 的产物，随之删除。删完 spark-base 对 hadoop-aws 的编译期依赖归零，hadoop-aws 因此也移出 legacyDeps。连接器从此只继承 Spark 给的 Configuration |
 | 2026-09-11 | 我们这边的 v1 类名换成 v2 | backfill、ListV2SegmentsApp 与对应测试断言里的 WebIdentityTokenCredentialsProvider 与 EnvironmentVariableCredentialsProvider 换成 software.amazon.awssdk 的对应类；仓库里已无 v1 类名。aws-java-sdk-core 依赖暂不删：删它的前置是查清运行时由谁提供 v1 实现类。已核实的是——云上 SparkCspRuntimeSupport 第 51 行注入 v1 的 DefaultAWSCredentialsProviderChain 作为 assumed.role.credentials.provider，而同仓库的 spark-data-service/pom.xml 自己带 aws-java-sdk-bundle 1.12.262 并用 shade 打包；未核实的是 shade 是否 relocate、两份 v1 谁胜出、开源用户 classpath 上有没有。这件事从构建文件看不出来，要在真实部署上看。见 [storage-auth.html](architecture/storage-auth.html#platform-blocker) |
 | 2026-09-11 | sbt 项目声明采用惯用 DSL | 变量名与项目 ID 相同的普通模块使用 project.in(file(...))，root 也统一点号写法；原生模块的带连字符 ID 和 Spark 工厂的动态 ID 保留 Project(id, base)。保持 ID、目录及所有 settings 不变，消除可以简写的显式构造与对应 IDE 提示；规则与示例同步到 [sbt 规范](engineering/sbt.html#modules) |
+| 2026-09-11 | sbt 声明的阅读顺序 | 基础默认值与 root 在前，模块按层排列，运行、打包、发布实现随后展开；发布段集中为元数据、仓库策略、root 发布实现三组，共享输入靠近使用处。只移动现有声明并补充分组注释，保持设置值、作用域及模块关系；不增加文件或 helper，避免增加阅读跳转。顺序写入 [sbt 规范](engineering/sbt.html#reading) |
 | 2026-09-11 | v2 的 WebIdentity provider 要带 sts 模块 | 换类名时差点引入它本来要防的 bug。v2 的 WebIdentityTokenFileCredentialsProvider 要找 WebIdentityTokenCredentialsProviderFactory 的实现，它在 software.amazon.awssdk:sts 里。缺了它 provider 构造不报错（类里有 loadException 字段存住失败），取凭证时才抛；而在 provider 链里一个抛了就换下一个，落到 IAMInstanceCredentialsProvider 拿到节点角色。改之前我们 jar 里 sts 是 0 个类——hadoopAws 排除了 awssdk:bundle，我们只单加了 s3 与 s3-transfer-manager。已加 sts，验证 StsWebIdentityCredentialsProviderFactory 进了 jar。顺带发现 v1 也一样需要 STS 而我们 jar 里同样没有，它一直靠云上 spark-data-service 带的 aws-java-sdk-bundle：我们的 fat jar 从来不是自足的，开源部署要单独验 |
+| 2026-09-11 | backfill 写 provider 链的真实原因 | 不是认证，是一个作业要用不同身份访问多个桶，而 Spark 会话级配置只能表达一套。S3 有按桶覆盖（hadoop-aws 的 propagateBucketOptions 与 fs.s3a.bucket. 前缀），用它是对的；hadoop-aliyun 3.4.1 的 jar 里这两样一处都没有，OSS 只能备份八个全局键、改写、还原，并设 fs.oss.impl.disable.cache=true 防缓存住旧凭证。那是绕过 hadoop-aliyun 的能力缺失，不是设计。另查明：那条显式 provider 链只在 use_iam 为真且该桶没有已配 AssumeRole 时才设，而平台会全局设 AssumedRole provider，所以在云上根本不执行，只在开源部署生效。内容按层拆到 [apps/backfill-storage.html](apps/backfill-storage.html)，architecture 那份只留通用机制与原则 |

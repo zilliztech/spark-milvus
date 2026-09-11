@@ -1,0 +1,98 @@
+<meta charset="utf-8">
+<title>backfill 的多桶存储访问</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 46rem; margin: 2rem auto; padding: 0 1.2rem;
+         font: 16px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.2rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.6rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { border: 1px solid #8884; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #8881; font-weight: 600; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .87em;
+         background: #8881; padding: .1em .35em; border-radius: 3px; }
+  pre { background: #8881; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .84rem; }
+  pre code { background: none; padding: 0; }
+  .verdict { border-left: 3px solid #1a7f37; background: #1a7f3714; padding: .8rem 1rem; margin: 1.2rem 0; }
+  .warn { border-left: 3px solid #d08700; background: #d0870014; padding: .8rem 1rem; margin: 1.2rem 0; }
+</style>
+
+<h1>backfill 的多桶存储访问</h1>
+<p>本页对应能力 O1，属于第 4 层。对象存储认证的通用机制与判断原则见
+<a href="../architecture/storage-auth.html">storage-auth.html</a>，此处不重复。</p>
+
+<div class="verdict">
+<strong>结论。</strong>backfill 里那段写 provider 链的代码，解决的不是认证，是
+<strong>一个作业要用不同身份访问多个桶</strong>。S3 有按桶覆盖机制，用它是对的；
+OSS 没有，只能备份改写还原全局键，那是绕过 hadoop-aliyun 的能力缺失。
+</div>
+
+<h2 id="why">一、为什么一个作业会碰多个桶</h2>
+<p>backfill 读一份源数据，算出新的列值，写回 Milvus 的段。源桶是客户的，Milvus 桶是
+托管方的，两者可能属于不同账号，端点、密钥、区域各不相同。代码里的
+<code>isSource</code> 参数就是在区分这两个桶：</p>
+<pre><code>configureHadoopS3ForPath(hadoopConf, path, config, isSource)
+// isSource = true  → 源桶，取 config.sourceS3* 系列，缺省回落到主配置
+// isSource = false → Milvus 桶，取 config.s3*</code></pre>
+<p>Spark 的会话级配置只能表达一套身份，所以这件事必须由作业自己处理。</p>
+
+<h2 id="s3">二、S3：按桶覆盖，机制本来就有</h2>
+<p>hadoop-aws 支持 <code>fs.s3a.bucket.&lt;桶名&gt;.&lt;键&gt;</code>，建 FileSystem 实例时由
+<code>S3AUtils.propagateBucketOptions</code> 把按桶的键提升成该实例的值。所以 backfill 写的是
+<code>fs.s3a.bucket.&lt;桶&gt;.*</code>，不是全局键，不影响会话里别的读写。</p>
+
+<h3>2.1 provider 链什么时候才会被设</h3>
+<p>只在两个条件同时成立时：<code>fs.use_iam</code> 为真，<strong>且</strong>该桶没有已配置的
+AssumeRole。判断走 <code>BackfillConfig.resolveAwsS3AssumeRole</code>，它是
+「先看按桶的键，再看全局的键」。</p>
+<p>托管平台会全局设 <code>fs.s3a.aws.credentials.provider</code> 为 AssumedRole provider，
+所以<strong>在平台上这个分支不会执行</strong>。它只在没有平台配置的环境里生效：
+开源用户自己装的 Spark，或本地测试。</p>
+<p>链的顺序是刻意排的，理由在
+<a href="../architecture/storage-auth.html#verified">storage-auth.html 第六节</a>：
+默认链在 EKS 上不总是先取投影进来的 service-account token，会回落到节点的实例角色。</p>
+
+<h2 id="oss">三、OSS：没有按桶机制，只能改全局键再还原</h2>
+<p>hadoop-aliyun 的配置键全是全局的：<code>fs.oss.accessKeyId</code>、
+<code>fs.oss.accessKeySecret</code>、<code>fs.oss.endpoint</code>、
+<code>fs.oss.credentials.provider</code>。核对 3.4.1 的 jar，
+<code>org.apache.hadoop.fs.aliyun.oss</code> 下没有任何
+<code>propagateBucketOptions</code> 或 <code>fs.oss.bucket.</code> 的痕迹；
+同版本的 hadoop-aws 里这两样都在。</p>
+<p>所以要在一个作业里先用身份 A 读源桶、再用身份 B 写 Milvus 桶，只能：</p>
+<pre><code>withScopedHadoopStorage(spark, path, config, isSource) {
+  // 1. 备份 8 个 fs.oss.* 全局键的当前值
+  // 2. 写入本次要用的值
+  // 3. 设 fs.oss.impl.disable.cache=true
+  // 4. 跑操作
+  // 5. finally 还原这 8 个键
+}</code></pre>
+<p>第 3 步不可省：FileSystem 有实例缓存，不禁用的话第二次访问会拿到缓存里那个还揣着
+旧凭证的实例。</p>
+<p>另一处（<code>MilvusBackfill.scala:1947</code> 附近）走的是另一种隔离：克隆一份
+<code>Configuration</code> 给 V2SegmentLoader 读 AVRO 与 parquet footer，
+不动会话里共享的那份。注释写明了目的是不污染共享的 OSS 凭证。</p>
+
+<div class="warn">
+<p><strong>这是绕过，不是设计。</strong>改全局状态再还原，在并发下不安全：
+同一个 SparkSession 里若有另一个线程同时读 OSS，它会看到被临时改写的键。
+backfill 目前是单线程驱动这些操作，所以没有暴露，但这个前提没有写在任何地方，
+也没有测试守着。</p>
+</div>
+
+<h2 id="root">四、根因与出路</h2>
+<p>根因是 <strong>hadoop-aliyun 不支持按桶配置</strong>，不是我们的代码写得不好。
+在 Hadoop 的框架内，除了改全局键再还原，没有别的表达方式。</p>
+<p>milvus-storage 的 C 层没有这个问题：<code>loon_filesystem_get(properties, path)</code>
+每次调用都带一份属性，天然按路径隔离，不存在需要备份还原的全局状态。
+这是<a href="../architecture/storage-access.html#open">路线决定</a>的一条具体证据，
+比「多云覆盖」那条更贴近现有痛点。</p>
+
+<h2 id="open">五、未决</h2>
+<ol>
+<li>并发前提没有写下来也没有测试。若将来 backfill 内部并行化，OSS 这条路会出问题。</li>
+<li>这段逻辑与 <code>ListV2SegmentsApp</code> 里的一份副本重复，收敛到哪取决于路线决定。</li>
+<li>平台之外的环境里那条 provider 链是否真的能工作，取决于 STS 模块是否在 classpath 上，
+见 <a href="../architecture/storage-auth.html#sts">storage-auth.html 5.6</a>。</li>
+</ol>

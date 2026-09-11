@@ -94,6 +94,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | Which module and package does a thing belong to? | [docs/design/architecture/modules.md](docs/design/architecture/modules.md) — module table, package design, directory tree, build constraints in section 4, migration state in section 5 |
 | How does core reach object storage? | [docs/design/architecture/storage-access.html](docs/design/architecture/storage-access.html) — unfinished; records what is settled, what was ruled out, and the four facts still to check |
 | How are object storage credentials handled? | [docs/design/architecture/storage-auth.html](docs/design/architecture/storage-auth.html) for the mechanism, the rules and the measured facts; apply the skill [.agents/skills/spark-milvus-storage-auth/SKILL.md](.agents/skills/spark-milvus-storage-auth/SKILL.md) |
+| How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
 | How do we compare with the Lance Spark connector? | [docs/design/research/lance-spark.md](docs/design/research/lance-spark.md) |
 | Illustrated versions of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html), [docs/design/research/lance-spark.html](docs/design/research/lance-spark.html) |
 | What options does a user pass? | [docs/reference-en.md](docs/reference-en.md), [docs/reference-cn.md](docs/reference-cn.md) |
