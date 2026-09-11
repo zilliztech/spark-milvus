@@ -111,7 +111,7 @@ RUN set -eux; \
         aarch64|arm64) native_platform=linux-aarch64 ;; \
         *) echo "Unsupported build architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
-    native_dir="src/main/resources/native/${native_platform}"; \
+    native_dir="native-storage/src/main/resources/native/${native_platform}"; \
     libs_dir="milvus-storage/cpp/build/Release/libs"; \
     mkdir -p "${native_dir}"; \
     cp milvus-storage/cpp/build/Release/libmilvus-storage.so "${native_dir}/"; \

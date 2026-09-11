@@ -1,14 +1,14 @@
 name: CI
 
-# Builds the connector and runs the unit tests on every PR. The native
-# milvus-storage libraries are not built here (that needs Conan 2 + Rust and
-# takes a long time, see Dockerfile); the JNI Scala wrapper compiles fine
+# Builds every module and runs the unit tests. The native milvus-storage
+# libraries are not built here: that needs Conan 2 and Rust and takes far longer
+# than this job should (see the Dockerfile). The JNI Scala wrapper compiles
 # without them, so only the two suites that load the .so are excluded.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, refactor/v2]
   push:
-    branches: [main]
+    branches: [main, refactor/v2]
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
@@ -36,11 +36,25 @@ jobs:
         working-directory: milvus-storage/java
         run: sbt package
 
-      - name: Compile main, test and integration-test sources
-        run: sbt 'compile; Test/compile; IntegrationTest/compile'
+      - name: Check formatting
+        run: sbt scalafmtCheckAll
+
+      # `compile` aggregates over the ten unit-tested modules, which covers all
+      # four Spark lines against the shared spark-base sources. integration-4.0
+      # is outside the aggregate because its suites need a live Milvus, so it is
+      # compiled explicitly here and never run.
+      - name: Compile every module
+        run: sbt 'compile; Test/compile; integration40/Test/compile'
+
+      # core, compat and client publish for both Scala versions. The 3.5 line
+      # cannot cross-compile yet: the upstream milvus-storage Java binding it
+      # still depends on is published for 2.13 only, and that goes away when
+      # native-storage replaces the binding.
+      - name: Cross-compile the shared modules for Scala 2.12
+        run: sbt '++2.12.20 core/compile; ++2.12.20 compat/compile; ++2.12.20 client/compile'
 
       - name: Unit tests (suites that need the native .so are excluded)
         run: >-
           sbt
-          'set Test / testOptions += Tests.Filter(n => !Set("com.zilliz.spark.connector.loon.MilvusStorageFFITest", "com.zilliz.spark.connector.loon.MilvusStorageMultiFileGroupTest").contains(n))'
+          'set spark40 / Test / testOptions += Tests.Filter(n => !Set("com.zilliz.spark.connector.loon.MilvusStorageFFITest", "com.zilliz.spark.connector.loon.MilvusStorageMultiFileGroupTest").contains(n))'
           test

@@ -212,7 +212,7 @@ spark-milvus/
 | expressions/、extensions/ | apps.search | 已迁 |
 | tools/* | apps.tools | 已迁 |
 | src/test/**、src/it/** | 各模块的 src/test | 已迁。core 32、compat 43、client 20、spark-4.0 261、apps-4.0 212 个用例；integration-4.0 收 3 个集成用例 |
-| milvus-storage/java 的 Java 绑定 | native-storage | 未做。四条 Spark 线目前仍引用这个 unmanaged jar |
+| milvus-storage/java 的 Java 绑定 | native-storage | 未做。四条 Spark 线目前仍引用这个 unmanaged jar，它只发 2.13，所以 3.5 线的 Scala 2.12 产物也卡在这里 |
 
 ### 5.1 搬运中暴露的事实
 

@@ -36,7 +36,7 @@ Use snapshot backfill when you need to:
 | Milvus server              | Milvus 3.0.0+ with snapshot support and the backfill commit management endpoint.                |
 | Object storage             | S3 / MinIO / GCS with S3-compatible endpoint. Must be accessible from both Milvus and Spark.    |
 | Spark / Java               | Spark 4.0.x built for Scala 2.13, with Java 21. Cluster mode on YARN, Kubernetes, or standalone. |
-| Connector JARs             | `spark-connector-assembly-*.jar`. It bundles the native `milvus-storage` resources copied into `src/main/resources/native/`. |
+| Connector JARs             | `spark-connector-assembly-*.jar`. It bundles the native `milvus-storage` resources copied into `native-storage/src/main/resources/native/`. |
 | Parquet of new-field data  | Must contain the resolved join-key column, plus one column per new field.                      |
 | Network                    | Spark executors must reach the object store. Schema setup and snapshot creation use the Milvus SDK; result commit must reach the Proxy management HTTP endpoint. |
 
@@ -412,7 +412,7 @@ Common Spark Operator gotchas:
 
 - **Native libraries.** The connector's assembly JAR bundles native `.so`s,
   but Spark Operator templates may strip `LD_LIBRARY_PATH`. Make sure it
-  includes `src/main/resources/native/linux-x86_64` (or the extracted
+  includes `native-storage/src/main/resources/native/linux-x86_64` (or the extracted
   location inside the container).
 - **IRSA.** Pass `--use-iam` and drop `--s3-access-key` / `--s3-secret-key`
   to use the service-account role.

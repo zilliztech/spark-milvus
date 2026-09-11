@@ -85,38 +85,7 @@ lazy val gitBranch = {
 lazy val milvusProtoDir =
   Def.setting((ThisBuild / baseDirectory).value / "milvus-proto" / "proto")
 
-lazy val IntegrationTest = config("it") extend Test
-
-// Shared JVM/native setup required by both the unit-test and integration-test
-// source sets (native library loading, Arrow JNI access, JNI thin JAR).
-// javaOptions uses `:=` (not `+=`): sbt has no config-scoped default for it, so
-// under `it extend Test` a `+=` would delegate to the already-populated
-// `Test / javaOptions` and append the list a second time (see the testOptions
-// note below).
-lazy val nativeTestSettings: Seq[Setting[_]] = Seq(
-  fork := true,
-  parallelExecution := true,
-  logBuffered := false,
-  javaOptions := Seq(
-    "-Xss2m",
-    "-Xmx4g",
-    s"-Djava.library.path=${(baseDirectory.value / "src/main/resources/native").getAbsolutePath}",
-    "-Dlog4j2.configurationFile=log4j2.properties",
-    "-Dlog4j2.debug=false",
-    "--add-opens=java.base/java.nio=ALL-UNNAMED",
-    "--add-opens=java.base/java.lang=ALL-UNNAMED",
-    "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
-    "--add-opens=java.base/java.util=ALL-UNNAMED",
-    "--add-opens=java.base/sun.security.action=ALL-UNNAMED"
-  ),
-  envVars := Map(
-    "LD_LIBRARY_PATH" -> (baseDirectory.value / "src/main/resources/native").getAbsolutePath
-  ),
-  unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar"
-)
-
 lazy val root = (project in file("."))
-  .configs(IntegrationTest)
   .aggregate(v2Modules: _*)
   // Migration-time: every source file now lives in a module, and the root
   // project only assembles the fat jar. The artifact name and publish
@@ -150,25 +119,6 @@ lazy val root = (project in file("."))
     // Fork JVM for run to properly load native libraries
     run / fork := true,
 
-    // Unit tests: fast, no external services. `-W` enables ScalaTest's
-    // slowpoke detection: it emits an alert if a test exceeds the threshold,
-    // but it never fails, cancels or interrupts a test — it is a signal, not
-    // a hard timeout. `:=` (not `+=`) keeps the option list config-local.
-    inConfig(Test)(nativeTestSettings ++ Seq(
-      testOptions := Seq(Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "10", "10"))
-    )),
-
-    // Integration tests: need Milvus server (:19530) + MinIO (:9000). Same
-    // slowpoke detection with a larger threshold. `:=` is required: because
-    // `it extend Test`, a `+=` would delegate through to `Test / testOptions`
-    // and concatenate both `-W 10 10` and `-W 600 600`, and ScalaTest reads
-    // only the first — silently downgrading integration tests to 10s.
-    // Defaults.itSettings points the source/resource dirs at src/it/* (otherwise
-    // the config would inherit Test's src/test dirs via `extend Test`).
-    inConfig(IntegrationTest)(Defaults.itSettings ++ nativeTestSettings ++ Seq(
-      testOptions := Seq(Tests.Argument(TestFrameworks.ScalaTest, "-oDF", "-W", "600", "600"))
-    )),
-
     // JVM options for run
     run / javaOptions ++= Seq(
       "-Xss2m",
@@ -177,7 +127,8 @@ lazy val root = (project in file("."))
     ),
 
     run / envVars := Map(
-      "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
+      "LD_PRELOAD" -> (baseDirectory.value / "native-storage" / "src" / "main" /
+        "resources" / "native" / "libmilvus-storage.so").getAbsolutePath
     ),
 
     // Include test dependencies in run classpath for example applications
@@ -247,7 +198,6 @@ lazy val root = (project in file("."))
         }
       }
     },
-    Compile / resourceDirectories += baseDirectory.value / "src" / "main" / "resources",
     // Publish the runnable assembly as the primary Maven artifact. Cloud
     // consumers already resolve this artifact without an assembly classifier.
     Compile / packageBin := assembly.value
@@ -313,10 +263,15 @@ assembly / assemblyMergeStrategy := {
 // already enforced by spark-3.5 compiling it against the lowest line.
 // ---------------------------------------------------------------------------
 
+// integration40 is deliberately absent: it aggregates into `compile` and
+// `test`, and its suites need a live Milvus and MinIO. Under 1.x they sat in
+// the `it` configuration and a plain `test` never picked them up; keeping them
+// out of the aggregate preserves that. Build them with
+// `integration40/Test/compile` and run them with `integration40/test`.
 lazy val v2Modules: Seq[ProjectReference] = Seq(
   nativeStorage, nativeVector, core, compat, client,
   spark35, spark40, spark41, spark42,
-  apps40, integration40
+  apps40
 )
 
 // Layer 1: the two native library wrappers. Plain Java, no Scala suffix.

@@ -108,7 +108,11 @@ object Modules {
     * client here.
     */
   def legacyDeps(l: Versions.SparkLine): Seq[ModuleID] = Seq(
-    Dependencies.sparkMLlib,
+    // Pinned to this line's Spark, not the 1.x default. spark-mllib_2.12 does
+    // not exist for Spark 4, so the 3.5 line fails to resolve if it inherits
+    // the 4.0 version.
+    ("org.apache.spark" %% "spark-mllib" % l.spark % "provided,test")
+      .excludeAll(ExclusionRule(organization = "org.apache.arrow")),
     Dependencies.parquetHadoop,
     Dependencies.parquetAvro,
     Dependencies.avro,
@@ -146,8 +150,9 @@ object Modules {
     *
     * Arrow's MemoryUtil cannot initialize without --add-opens; without it the
     * first column batch throws "Failed to initialize MemoryUtil". The native
-    * library path points at the directory the Dockerfile writes into, so on a
-    * machine that has not built it only the tests that need it fail.
+    * library path points at native-storage's resources, which is where the
+    * Dockerfile writes the built libraries, so on a machine that has not built
+    * them only the tests that need them fail.
     */
   def nativeTest: Seq[Setting[_]] = Seq(
     fork := true,
@@ -159,7 +164,7 @@ object Modules {
     logBuffered := false,
     javaOptions := {
       val nativeDir =
-        ((ThisBuild / baseDirectory).value / "src" / "main" / "resources" / "native").getAbsolutePath
+        ((ThisBuild / baseDirectory).value / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
       Seq(
         "-Xss2m",
         "-Xmx4g",
@@ -175,7 +180,7 @@ object Modules {
     },
     envVars := Map(
       "LD_LIBRARY_PATH" ->
-        ((ThisBuild / baseDirectory).value / "src" / "main" / "resources" / "native").getAbsolutePath
+        ((ThisBuild / baseDirectory).value / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
     )
   )
 

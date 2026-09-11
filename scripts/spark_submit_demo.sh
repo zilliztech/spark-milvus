@@ -5,11 +5,11 @@
 
 set -e
 
-export LD_PRELOAD=$(pwd)/src/main/resources/native/libmilvus-storage.so && \
+export LD_PRELOAD=$(pwd)/native-storage/src/main/resources/native/libmilvus-storage.so && \
     spark-submit \
     --master "local[*]" \
     --conf "spark.driver.extraJavaOptions=-Xss2m
-    -Djava.library.path=$(pwd)/src/main/resources/native
+    -Djava.library.path=$(pwd)/native-storage/src/main/resources/native
     --add-opens=java.base/java.nio=ALL-UNNAMED" \
     --conf "spark.driver.userClassPathFirst=true" \
     --conf "spark.executor.userClassPathFirst=true" \

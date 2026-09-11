@@ -8,7 +8,7 @@ SBT := sbt
 JAVA_HOME ?= $(shell dirname $(shell dirname $(shell readlink -f $(shell which java))))
 
 # Directories
-RESOURCES_DIR := src/main/resources
+RESOURCES_DIR := native-storage/src/main/resources
 MILVUS_STORAGE_CPP := milvus-storage/cpp
 MILVUS_STORAGE_BUILD := $(MILVUS_STORAGE_CPP)/build/Release/lib
 TARGET_DIR := target
