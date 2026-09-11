@@ -1,6 +1,6 @@
 # spark-milvus 2.0 设计（工作稿）
 
-标记：`[草稿]` 未讨论，`[讨论中]` 有分歧，`[已定]` 结论已进第 6 节决策日志。分章文件：[capabilities.md](capabilities.md) 功能规划，[modules.md](modules.md) 模块、包与目录，[overview.html](overview.html) 图解版，[lance-spark.md](lance-spark.md) 与 [lance-spark.html](lance-spark.html) 对照 Apache Lance 的 Spark 连接器。进入仓库的入口是 [AGENTS.md](../../AGENTS.md)（CLAUDE.md 是它的软链），它只做路由，内容都在本目录。
+标记：`[草稿]` 未讨论，`[讨论中]` 有分歧，`[已定]` 结论已进第 6 节决策日志。分章文件：[capabilities.md](capabilities.md) 功能规划，[modules.md](modules.md) 模块、包与目录，[sbt.md](sbt.md) 构建原则与实践，[overview.html](overview.html) 图解版，[lance-spark.md](lance-spark.md) 与 [lance-spark.html](lance-spark.html) 对照 Apache Lance 的 Spark 连接器。进入仓库的入口是 [AGENTS.md](../../AGENTS.md)（CLAUDE.md 是它的软链），它披露整体原则、当前状态和文档入口。
 
 ## 0 结论 `[草稿]`
 
@@ -175,6 +175,9 @@ flowchart LR
 | 13 | `_delta/` 删除文件格式 | 两列 Parquet 与旧 binlog 容器格式的共存期 | DeleteBitset 的解析器 |
 | 14 | SegmentWriter | a. 复用 1.x 的 Loon 写入器（写侧已零拷贝）；b. 在新 JNI 上重写 | 原生层的工作量 |
 | 16 | 暴力搜索的形态与位置（能力已定保留，见决策日志） | 入口：DataFrame 方法、SQL 函数、读选项三选几；执行：knowhere 的 BruteForce 在原生层，JVM 实现作参照或兜底；归属：spark 层能力还是 apps 场景 | 能力清单和模块规划一起定 |
+| 20 | 原生属性包由谁渲染 | a. core.credential 出中性的 Map，碰原生的那一层转成 MilvusStorageProperties；b. 整个渲染放第 3 层 | 选 a 则 fs.* 的键名语义进 core，但 core 不依赖上游 Java 绑定（那个绑定是第 1 层要替换掉的）|
+| 21 | 开发默认值留不留 | a. 从生产路径删掉，只在显式测试 profile 里保留，漏配就响亮失败；b. 保持现状 | `a-bucket`、`localhost:9000`、`minioadmin` 现在写死在生产路径上，非 IAM 模式漏配桶名会安静地连错桶。选 a 是对外可见的行为变化 |
+| 22 | 身份要不要进 ObjectStoreFactory 的签名 | a. 现在就加，对齐 Trino 的 `create(ConnectorIdentity)`；b. 先不加，等第二个身份场景出现 | 我们有 AssumeRole、IRSA、按桶不同的密钥，长期要；但现在一个作业一套凭证，提前加是空抽象 |
 
 ## 5 需要 Milvus 侧提供的 `[草稿]`
 
@@ -231,3 +234,4 @@ flowchart LR
 | 2026-09-11 | 3.5 线的 Arrow 基线纠正 | Spark 3.5.5 的官方 POM 指定 12.0.1，原先的 15.0.2 不符合按 Spark 自带版本对齐的约束；修改 Versions.scala、模块约束、可视化与 Lance 对照文档。采用发行版基线，不覆盖 Spark 自带 Arrow；这次修正本身不代表已完成运行兼容验证 |
 | 2026-09-11 | sbt 的可维护性 | 保留现有文件、显式 project 声明和按线工厂，不新增 Packaging.scala 或通用构建框架。build.sbt 依次放公共设置、模块、根产物打包发布；库版本集中 Versions，依赖组合放 Dependencies，公共 settings 放 Modules。复用现有 jacksonPin 并集中临时 JNI 路径，模块特有配置仍就近声明；保留现有版本与作用域，根产物沿用的 Arrow 17 明确标为 legacyRootArrow，历史理由留在本日志 |
 | 2026-09-11 | 设计原则写进 AGENTS.md | 五条判断力原则排在四条机械约束前面：整体自洽优先于完成任务；从根因解决禁止外围兜底；禁止烟囱式开发；需要重构就重构且永远不评估工时；删除是设计工作但禁止静默删除，必须先说明依据和风险并等人确认。推迟只有三个合法理由——决策没定、依赖没建好、事实没查清；「工作量大」「这是重构不是本次范围」都不算 |
+| 2026-09-11 | 设计先行进原则 | 任何能力开工前必须确认四件事：capabilities.md 里有行、它依赖的决策都已出第 4 节、落点包存在且 package.scala 写明职责、governing 的设计已经成文。少一样，那一样就是当前的工作。子系统的设计说不进「能力行 + README 的分层」时，才在 docs/design 下单开一份文件，并挂进 AGENTS.md 的路由表。文档分级本身是为了减少每次会话的预加载：每条事实只写在需要它的那一级，其余级别只链接 |

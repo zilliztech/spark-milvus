@@ -97,6 +97,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | What options does a user pass? | [docs/reference-en.md](docs/reference-en.md), [docs/reference-cn.md](docs/reference-cn.md) |
 | What is a given package responsible for? | The `package.scala` or `package-info.java` in that package |
 | How do I build, test and run it? | [README.md](README.md), then [docs/contributing.md](docs/contributing.md) for the mechanics on top |
+| How do we review or change the sbt build? | [docs/design/sbt.md](docs/design/sbt.md) for principles and practice; apply the repository skill [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md) for build work |
 | What sits outside this repository? | [docs/context.md](docs/context.md) |
 | How should a document here be written? | [docs/writing.md](docs/writing.md) |
 
@@ -104,6 +105,32 @@ writing Vortex column groups. Check it before designing around a gap.
 
 These come before the rules below. The rules are mechanical and the build checks
 them; these are judgment, and judgment decides first.
+
+**Design comes before code, and the design is written down.** No capability is
+implemented until the design that governs it exists as a document reachable from
+this page. A row in capabilities.md is not a design: it says what and where, not
+how. When the row is all there is, writing the design is the first task, not
+something done while coding.
+
+Before writing code for a capability, confirm four things: it has a row in
+capabilities.md; every decision it depends on is out of section 4 of
+docs/design/README.md; the package it lands in exists with a `package.scala`
+that states its responsibility; and the design that governs it is written. If
+one is missing, that is the work, and it comes first.
+
+A subsystem earns its own file under `docs/design` when its design cannot be
+stated in its capability row plus the layering in `docs/design/README.md`. That
+file says what the subsystem is, what it touches globally, how it will be built,
+which industry practice it follows or rejects and why, and what is still open.
+Add it to the routing table above.
+
+The documents are layered on purpose, and that is what keeps the preloaded
+context small. This page carries the model, the state and the invariants; each
+file under `docs/design` carries one subsystem; each `package.scala` carries one
+package; `docs/contributing.md` and its siblings are read only when you are
+doing that particular thing. Put every fact at the level that needs it and link
+to it from the others. A level that restates the level below costs tokens in
+every session and drifts on its own schedule.
 
 **The design has one standard: the whole stays coherent.** When a capability
 arrives, the first question is where it belongs in the design that already
@@ -213,3 +240,6 @@ Planning work: `docs/design/capabilities.md` for what is in scope, section 4 of
 
 Writing code: the `package.scala` of the package you are touching, then section
 4 of `docs/design/modules.md`, then [docs/contributing.md](docs/contributing.md).
+
+Working on sbt: [docs/design/sbt.md](docs/design/sbt.md), then the
+[spark-milvus-sbt skill](.agents/skills/spark-milvus-sbt/SKILL.md).
