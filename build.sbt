@@ -336,6 +336,8 @@ lazy val core = Project("core", file("core"))
       "org.apache.arrow" % "arrow-memory-core" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-c-data" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-format" % Versions.line("4.0").arrow % "provided",
+      // 日志门面：运行时用 Spark 自带的 slf4j-api，版本按 3.5 线的下限编译。
+      "org.slf4j" % "slf4j-api" % "2.0.7" % "provided",
       scalapbRuntime % "protobuf",
       scalaTest % Test
     ),

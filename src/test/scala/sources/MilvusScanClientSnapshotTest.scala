@@ -34,6 +34,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterEach
 
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.{MilvusCollectionInfo, MilvusOption}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
@@ -763,37 +764,37 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     assert(
       schema("binary_vec").metadata.getLong(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       ) == 100L
     )
     assert(
       schema("float_vec").metadata.getLong(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       ) == 101L
     )
     assert(
       schema("int8_vec").metadata.getLong(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       ) == 105L
     )
     assert(
       schema("binary_vec").metadata.getLong(
-        ArrowConverter.MilvusVectorDimensionMetadataKey
+        FieldMetadata.MilvusVectorDimensionMetadataKey
       ) == 128L
     )
     assert(
       schema("float_vec").metadata.getLong(
-        ArrowConverter.MilvusVectorDimensionMetadataKey
+        FieldMetadata.MilvusVectorDimensionMetadataKey
       ) == 4L
     )
     assert(
       schema("int8_vec").metadata.getLong(
-        ArrowConverter.MilvusVectorDimensionMetadataKey
+        FieldMetadata.MilvusVectorDimensionMetadataKey
       ) == 4L
     )
     assert(
       schema("json_payload").metadata.getLong(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       ) == 23L
     )
     assert(schema.fieldNames.toSeq.last == "partition")
@@ -819,12 +820,12 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(schema("binary_vec").metadata.getLong("custom.flag") == 7L)
     assert(
       schema("binary_vec").metadata.getLong(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       ) == 100L
     )
     assert(
       schema("binary_vec").metadata.getLong(
-        ArrowConverter.MilvusVectorDimensionMetadataKey
+        FieldMetadata.MilvusVectorDimensionMetadataKey
       ) == 128L
     )
   }
@@ -847,32 +848,32 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     assert(
       schema("binary_vec").metadata.getLong(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       ) == 100L
     )
     assert(
       schema("float_vec").metadata.getLong(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       ) == 101L
     )
     assert(
       schema("int8_vec").metadata.getLong(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       ) == 105L
     )
     assert(
       schema("binary_vec").metadata.getLong(
-        ArrowConverter.MilvusVectorDimensionMetadataKey
+        FieldMetadata.MilvusVectorDimensionMetadataKey
       ) == 128L
     )
     assert(
       schema("float_vec").metadata.getLong(
-        ArrowConverter.MilvusVectorDimensionMetadataKey
+        FieldMetadata.MilvusVectorDimensionMetadataKey
       ) == 4L
     )
     assert(
       schema("int8_vec").metadata.getLong(
-        ArrowConverter.MilvusVectorDimensionMetadataKey
+        FieldMetadata.MilvusVectorDimensionMetadataKey
       ) == 4L
     )
   }
@@ -886,7 +887,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
             BinaryType,
             nullable = true,
             metadata = metadata(
-              ArrowConverter.MilvusDataTypeMetadataKey -> 999L,
+              FieldMetadata.MilvusDataTypeMetadataKey -> 999L,
               "custom.flag" -> 7L
             )
           ),
@@ -898,18 +899,18 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     assert(
       schema("binary_vec").metadata.getLong(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       ) == 999L
     )
     assert(schema("binary_vec").metadata.getLong("custom.flag") == 7L)
     assert(
       !schema("binary_vec").metadata.contains(
-        ArrowConverter.MilvusVectorDimensionMetadataKey
+        FieldMetadata.MilvusVectorDimensionMetadataKey
       )
     )
     assert(
       !schema("legacy_bytes").metadata.contains(
-        ArrowConverter.MilvusDataTypeMetadataKey
+        FieldMetadata.MilvusDataTypeMetadataKey
       )
     )
   }

@@ -3,6 +3,7 @@ package com.zilliz.spark.connector
 import org.apache.spark.sql.types.{DataType => SparkDataType}
 import org.apache.spark.sql.types.{DataTypes, MetadataBuilder}
 
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.MilvusTypes
 import com.zilliz.milvus.storage.DataParseException
 import com.zilliz.spark.connector.serde.ArrowConverter
@@ -16,7 +17,7 @@ object DataTypeUtil {
   def metadata(fieldSchema: FieldSchema) = {
     val builder = new MetadataBuilder()
       .putLong(
-        ArrowConverter.MilvusDataTypeMetadataKey,
+        FieldMetadata.MilvusDataTypeMetadataKey,
         fieldSchema.dataType.value
       )
 
@@ -25,7 +26,7 @@ object DataTypeUtil {
         .find(_.key == "dim")
         .foreach { param =>
           builder.putLong(
-            ArrowConverter.MilvusVectorDimensionMetadataKey,
+            FieldMetadata.MilvusVectorDimensionMetadataKey,
             MilvusTypes.parseVectorDimension(fieldSchema.name, param.value)
           )
         }

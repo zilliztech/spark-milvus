@@ -9,9 +9,10 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
+import com.zilliz.milvus.storage.codec.FloatConverter
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.read.{Field, TypeParam}
 import com.zilliz.spark.connector.serde.ArrowConverter
-import com.zilliz.spark.connector.FloatConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class VectorBackfillSupportTest
@@ -96,13 +97,13 @@ class VectorBackfillSupportTest
       normalized
         .schema(name)
         .metadata
-        .getLong(ArrowConverter.MilvusDataTypeMetadataKey) shouldBe
+        .getLong(FieldMetadata.MilvusDataTypeMetadataKey) shouldBe
         targets(name).dataType.toLong
     }
     normalized
       .schema("float_vec")
       .metadata
-      .getLong(ArrowConverter.MilvusVectorDimensionMetadataKey) shouldBe 2L
+      .getLong(FieldMetadata.MilvusVectorDimensionMetadataKey) shouldBe 2L
 
     val result = normalized.head()
     result.getAs[Array[Byte]]("float_vec") shouldBe ByteBuffer

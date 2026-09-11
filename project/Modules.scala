@@ -6,6 +6,14 @@ object Modules {
 
   val checkNoSpark = taskKey[Unit]("核心层不得依赖 Spark：源码里出现 org.apache.spark 即编译失败")
 
+  /** 注释里提到 org.apache.spark 是合法的（迁移期到处要写「这个类原来继承 Spark 的
+    * Logging」），扫描前先去掉块注释和行注释，只看真代码。
+    */
+  private def stripComments(source: String): String =
+    source
+      .replaceAll("(?s)/\\*.*?\\*/", "")
+      .replaceAll("(?m)//.*$", "")
+
   /** 约束 1：core、compat、client 的源码不出现 org.apache.spark。
     *
     * 挂在 Compile / compile 前面，所以违反了就编译不过，而不是等到评审才发现。
@@ -13,9 +21,10 @@ object Modules {
   val noSparkImports: Seq[Setting[_]] = Seq(
     checkNoSpark := {
       val log = streams.value.log
-      val offenders = (Compile / sources).value.filter { f =>
+      val offenders = (Compile / unmanagedSources).value.filter { f =>
         val n = f.getName
-        (n.endsWith(".scala") || n.endsWith(".java")) && IO.read(f).contains("org.apache.spark")
+        (n.endsWith(".scala") || n.endsWith(".java")) &&
+        stripComments(IO.read(f)).contains("org.apache.spark")
       }
       if (offenders.nonEmpty) {
         offenders.foreach { f =>

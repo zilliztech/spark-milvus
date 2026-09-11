@@ -24,10 +24,12 @@ import org.apache.spark.sql.types.{
   StructType
 }
 
-import com.zilliz.spark.connector.{FloatConverter, MilvusOption}
+import com.zilliz.milvus.storage.codec.FloatConverter
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 import io.milvus.storage.{
   ArrowUtils,
@@ -75,10 +77,10 @@ object MilvusLoonPartitionReader {
     field.dataType match {
       case BinaryType
           if field.metadata.contains(
-            ArrowConverter.MilvusDataTypeMetadataKey
+            FieldMetadata.MilvusDataTypeMetadataKey
           ) =>
         field.metadata
-          .getLong(ArrowConverter.MilvusDataTypeMetadataKey)
+          .getLong(FieldMetadata.MilvusDataTypeMetadataKey)
           .toInt match {
           case DataType.BinaryVector.value =>
             throw new IllegalArgumentException(
@@ -94,14 +96,14 @@ object MilvusLoonPartitionReader {
       bytes: Array[Byte],
       field: StructField
   ): Array[Float] = {
-    if (!field.metadata.contains(ArrowConverter.MilvusDataTypeMetadataKey)) {
+    if (!field.metadata.contains(FieldMetadata.MilvusDataTypeMetadataKey)) {
       throw new IllegalArgumentException(
-        s"BinaryType vector search requires ${ArrowConverter.MilvusDataTypeMetadataKey} metadata"
+        s"BinaryType vector search requires ${FieldMetadata.MilvusDataTypeMetadataKey} metadata"
       )
     }
 
     field.metadata
-      .getLong(ArrowConverter.MilvusDataTypeMetadataKey)
+      .getLong(FieldMetadata.MilvusDataTypeMetadataKey)
       .toInt match {
       case DataType.FloatVector.value =>
         val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)

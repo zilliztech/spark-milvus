@@ -20,7 +20,11 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
-import com.zilliz.spark.connector.{FloatConverter, SparseFloatVectorConverter}
+import com.zilliz.milvus.storage.codec.{
+  FloatConverter,
+  SparseFloatVectorConverter
+}
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Utilities for converting between Spark InternalRow and Arrow vectors
@@ -149,7 +153,7 @@ object ArrowConverter extends Logging {
             )
           case None =>
             throw new IllegalArgumentException(
-              s"Binary-backed byte vectors require ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
+              s"Binary-backed byte vectors require ${FieldMetadata.MilvusDataTypeMetadataKey} metadata for BinaryVector"
             )
         }
 
@@ -164,7 +168,7 @@ object ArrowConverter extends Logging {
             )
           case None =>
             throw new IllegalArgumentException(
-              s"Binary-backed short vectors require ${MilvusDataTypeMetadataKey} metadata"
+              s"Binary-backed short vectors require ${FieldMetadata.MilvusDataTypeMetadataKey} metadata"
             )
         }
 
@@ -199,7 +203,7 @@ object ArrowConverter extends Logging {
                 )
               case None =>
                 throw new IllegalArgumentException(
-                  s"FixedSizeBinary vectors require ${MilvusDataTypeMetadataKey} metadata"
+                  s"FixedSizeBinary vectors require ${FieldMetadata.MilvusDataTypeMetadataKey} metadata"
                 )
             }
           case other =>
@@ -219,7 +223,7 @@ object ArrowConverter extends Logging {
             )
           case None =>
             throw new IllegalArgumentException(
-              s"Binary-backed maps require ${MilvusDataTypeMetadataKey} metadata for SparseFloatVector"
+              s"Binary-backed maps require ${FieldMetadata.MilvusDataTypeMetadataKey} metadata for SparseFloatVector"
             )
         }
 
@@ -259,8 +263,8 @@ object ArrowConverter extends Logging {
 
   private def milvusDataType(field: StructField): Option[MilvusDataType] = {
     Option(field.metadata)
-      .filter(_.contains(MilvusDataTypeMetadataKey))
-      .map(_.getLong(MilvusDataTypeMetadataKey).toInt)
+      .filter(_.contains(FieldMetadata.MilvusDataTypeMetadataKey))
+      .map(_.getLong(FieldMetadata.MilvusDataTypeMetadataKey).toInt)
       .map(MilvusDataType.fromValue)
   }
 
@@ -416,7 +420,7 @@ object ArrowConverter extends Logging {
         decodeFloatVectorBytes(bytes)
       case None =>
         throw new IllegalArgumentException(
-          s"Binary-backed float vectors require ${MilvusDataTypeMetadataKey} metadata"
+          s"Binary-backed float vectors require ${FieldMetadata.MilvusDataTypeMetadataKey} metadata"
         )
       case Some(other) =>
         throw new IllegalArgumentException(
@@ -480,7 +484,7 @@ object ArrowConverter extends Logging {
             case fixed: FixedSizeBinaryVector => fixed.getByteWidth
             case _: VarBinaryVector =>
               throw new IllegalArgumentException(
-                s"Cannot encode $sparkType for nullable dense vector '${vector.getName}' ($dataType): missing $MilvusVectorDimensionMetadataKey or Arrow $ArrowVectorDimensionMetadataKey metadata"
+                s"Cannot encode $sparkType for nullable dense vector '${vector.getName}' ($dataType): missing $FieldMetadata.MilvusVectorDimensionMetadataKey or Arrow $ArrowVectorDimensionMetadataKey metadata"
               )
             case other =>
               throw new IllegalArgumentException(
@@ -524,9 +528,6 @@ object ArrowConverter extends Logging {
         )
     }
   }
-
-  val MilvusDataTypeMetadataKey = "milvus.data_type"
-  val MilvusVectorDimensionMetadataKey = "milvus.vector_dim"
 
   /** Set a value in an Arrow vector from a Spark InternalRow
     *
@@ -672,7 +673,7 @@ object ArrowConverter extends Logging {
             )
           case None =>
             throw new IllegalArgumentException(
-              s"Binary-backed Array[Short] requires ${MilvusDataTypeMetadataKey} metadata for Int8Vector"
+              s"Binary-backed Array[Short] requires ${FieldMetadata.MilvusDataTypeMetadataKey} metadata for Int8Vector"
             )
         }
         setBinaryVectorValue(
@@ -711,7 +712,7 @@ object ArrowConverter extends Logging {
             )
           case None =>
             throw new IllegalArgumentException(
-              s"Binary-backed Array[Byte] requires ${MilvusDataTypeMetadataKey} metadata for BinaryVector"
+              s"Binary-backed Array[Byte] requires ${FieldMetadata.MilvusDataTypeMetadataKey} metadata for BinaryVector"
             )
         }
 
@@ -785,7 +786,7 @@ object ArrowConverter extends Logging {
 
       case MapType(_, _, _) if isBinaryBackedVector(vector) =>
         throw new IllegalArgumentException(
-          s"Binary-backed MapType requires ${MilvusDataTypeMetadataKey} metadata for SparseFloatVector"
+          s"Binary-backed MapType requires ${FieldMetadata.MilvusDataTypeMetadataKey} metadata for SparseFloatVector"
         )
 
       case MapType(keyType, valueType, _) =>
@@ -867,8 +868,8 @@ object ArrowConverter extends Logging {
       vector: FieldVector
   ): Option[Int] = {
     val sparkDimension = Option(field.metadata)
-      .filter(_.contains(MilvusVectorDimensionMetadataKey))
-      .map(_.getLong(MilvusVectorDimensionMetadataKey))
+      .filter(_.contains(FieldMetadata.MilvusVectorDimensionMetadataKey))
+      .map(_.getLong(FieldMetadata.MilvusVectorDimensionMetadataKey))
 
     val arrowDimension = Option(vector.getField)
       .flatMap(arrowField => Option(arrowField.getMetadata))

@@ -49,6 +49,7 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.spark.connector.{
   DataTypeUtil,
@@ -497,34 +498,34 @@ case class MilvusTable(
               .withMetadata(field.metadata)
 
             if (
-              !field.metadata.contains(ArrowConverter.MilvusDataTypeMetadataKey)
+              !field.metadata.contains(FieldMetadata.MilvusDataTypeMetadataKey)
             ) {
               metadataBuilder.putLong(
-                ArrowConverter.MilvusDataTypeMetadataKey,
+                FieldMetadata.MilvusDataTypeMetadataKey,
                 collectionMetadata.getLong(
-                  ArrowConverter.MilvusDataTypeMetadataKey
+                  FieldMetadata.MilvusDataTypeMetadataKey
                 )
               )
             }
             val existingTypeMatchesCollection =
               !field.metadata.contains(
-                ArrowConverter.MilvusDataTypeMetadataKey
+                FieldMetadata.MilvusDataTypeMetadataKey
               ) || field.metadata.getLong(
-                ArrowConverter.MilvusDataTypeMetadataKey
+                FieldMetadata.MilvusDataTypeMetadataKey
               ) == collectionMetadata.getLong(
-                ArrowConverter.MilvusDataTypeMetadataKey
+                FieldMetadata.MilvusDataTypeMetadataKey
               )
             if (
               collectionMetadata.contains(
-                ArrowConverter.MilvusVectorDimensionMetadataKey
+                FieldMetadata.MilvusVectorDimensionMetadataKey
               ) && !field.metadata.contains(
-                ArrowConverter.MilvusVectorDimensionMetadataKey
+                FieldMetadata.MilvusVectorDimensionMetadataKey
               ) && existingTypeMatchesCollection
             ) {
               metadataBuilder.putLong(
-                ArrowConverter.MilvusVectorDimensionMetadataKey,
+                FieldMetadata.MilvusVectorDimensionMetadataKey,
                 collectionMetadata.getLong(
-                  ArrowConverter.MilvusVectorDimensionMetadataKey
+                  FieldMetadata.MilvusVectorDimensionMetadataKey
                 )
               )
             }

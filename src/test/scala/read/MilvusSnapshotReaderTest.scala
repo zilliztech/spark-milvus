@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.read
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import io.milvus.grpc.schema.{
   CollectionSchema => ProtoCollectionSchema,
   DataType
@@ -634,7 +635,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     sparkSchema("varchar").dataType shouldBe StringType
     sparkSchema("vector").dataType shouldBe ArrayType(FloatType)
     sparkSchema("vector").metadata.getLong(
-      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusDataTypeMetadataKey
     ) shouldBe 101L
   }
 
@@ -1067,17 +1068,17 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
     sparkSchema("binary_vec").dataType shouldBe BinaryType
     sparkSchema("binary_vec").metadata.getLong(
-      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusDataTypeMetadataKey
     ) shouldBe 100L
     sparkSchema("binary_vec").metadata.getLong(
-      com.zilliz.spark.connector.serde.ArrowConverter.MilvusVectorDimensionMetadataKey
+      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusVectorDimensionMetadataKey
     ) shouldBe 128L
     sparkSchema("int8_vec").dataType shouldBe ArrayType(ShortType)
     sparkSchema("int8_vec").metadata.getLong(
-      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusDataTypeMetadataKey
     ) shouldBe 105L
     sparkSchema("int8_vec").metadata.getLong(
-      com.zilliz.spark.connector.serde.ArrowConverter.MilvusVectorDimensionMetadataKey
+      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusVectorDimensionMetadataKey
     ) shouldBe 4L
 
     import scala.collection.JavaConverters._
@@ -1106,10 +1107,10 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     structField.dataType shouldBe org.apache.spark.sql.types.BinaryType
     structField.nullable shouldBe false
     structField.metadata.getLong(
-      com.zilliz.spark.connector.serde.ArrowConverter.MilvusDataTypeMetadataKey
+      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusDataTypeMetadataKey
     ) shouldBe 100L
     structField.metadata.getLong(
-      com.zilliz.spark.connector.serde.ArrowConverter.MilvusVectorDimensionMetadataKey
+      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusVectorDimensionMetadataKey
     ) shouldBe 128L
   }
 }

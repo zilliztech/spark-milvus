@@ -8,8 +8,9 @@ import org.apache.spark.sql.types.{
 }
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.zilliz.milvus.storage.codec.FloatConverter
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.serde.ArrowConverter
-import com.zilliz.spark.connector.FloatConverter
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class MilvusLoonPartitionReaderTest extends AnyFunSuite {
@@ -63,7 +64,7 @@ class MilvusLoonPartitionReaderTest extends AnyFunSuite {
       nullable = true,
       metadata = new MetadataBuilder()
         .putLong(
-          ArrowConverter.MilvusDataTypeMetadataKey,
+          FieldMetadata.MilvusDataTypeMetadataKey,
           DataType.BinaryVector.value.toLong
         )
         .build()
@@ -85,7 +86,7 @@ class MilvusLoonPartitionReaderTest extends AnyFunSuite {
       nullable = true,
       metadata = new MetadataBuilder()
         .putLong(
-          ArrowConverter.MilvusDataTypeMetadataKey,
+          FieldMetadata.MilvusDataTypeMetadataKey,
           DataType.BinaryVector.value.toLong
         )
         .build()
@@ -109,7 +110,7 @@ class MilvusLoonPartitionReaderTest extends AnyFunSuite {
       nullable = true,
       metadata = new MetadataBuilder()
         .putLong(
-          ArrowConverter.MilvusDataTypeMetadataKey,
+          FieldMetadata.MilvusDataTypeMetadataKey,
           DataType.Float16Vector.value.toLong
         )
         .build()
@@ -130,7 +131,7 @@ class MilvusLoonPartitionReaderTest extends AnyFunSuite {
       nullable = true,
       metadata = new MetadataBuilder()
         .putLong(
-          ArrowConverter.MilvusDataTypeMetadataKey,
+          FieldMetadata.MilvusDataTypeMetadataKey,
           DataType.BFloat16Vector.value.toLong
         )
         .build()

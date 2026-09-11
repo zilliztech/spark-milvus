@@ -29,11 +29,12 @@ import org.apache.spark.sql.types.{
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.spark.connector.{
+import com.zilliz.milvus.storage.codec.{
   FloatConverter,
-  MilvusSchemaUtil,
   SparseFloatVectorConverter
 }
+import com.zilliz.milvus.storage.schema.FieldMetadata
+import com.zilliz.spark.connector.MilvusSchemaUtil
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class ArrowConverterTest extends AnyFunSuite with Matchers {
@@ -105,10 +106,10 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       dimension: Option[Int] = None
   ): StructField = {
     val metadata = new MetadataBuilder()
-      .putLong(ArrowConverter.MilvusDataTypeMetadataKey, milvusType.value)
+      .putLong(FieldMetadata.MilvusDataTypeMetadataKey, milvusType.value)
     dimension.foreach(value =>
       metadata.putLong(
-        ArrowConverter.MilvusVectorDimensionMetadataKey,
+        FieldMetadata.MilvusVectorDimensionMetadataKey,
         value
       )
     )
@@ -702,7 +703,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
           StructType(Seq(StructField("binary", BinaryType)))
         )
       }
-      err.getMessage should include(ArrowConverter.MilvusDataTypeMetadataKey)
+      err.getMessage should include(FieldMetadata.MilvusDataTypeMetadataKey)
     }
   }
 
@@ -716,7 +717,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
           StructType(Seq(StructField("binary", ArrayType(ByteType))))
         )
       }
-      err.getMessage should include(ArrowConverter.MilvusDataTypeMetadataKey)
+      err.getMessage should include(FieldMetadata.MilvusDataTypeMetadataKey)
     }
   }
 
@@ -953,7 +954,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
           StructType(Seq(StructField("float16", ArrayType(FloatType))))
         )
       }
-      err.getMessage should include(ArrowConverter.MilvusDataTypeMetadataKey)
+      err.getMessage should include(FieldMetadata.MilvusDataTypeMetadataKey)
     }
   }
 }

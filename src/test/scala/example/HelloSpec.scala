@@ -1,6 +1,6 @@
 package example
 
-import com.zilliz.spark.connector.FloatConverter
+import com.zilliz.milvus.storage.codec.FloatConverter
 
 class HelloSpec extends munit.FunSuite {
   test("say hello") {

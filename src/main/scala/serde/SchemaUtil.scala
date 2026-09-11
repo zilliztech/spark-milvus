@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector
 
 import com.zilliz.milvus.storage.schema.ArrowTypes
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.serde.ArrowConverter
 
 /** Spark StructType 到 Arrow Schema。Milvus CollectionSchema 到 Arrow Schema 的
@@ -52,9 +53,9 @@ object MilvusSchemaUtil {
 
     def milvusVectorType(field: StructField): Option[MilvusDataType] =
       Option(field.metadata)
-        .filter(_.contains(ArrowConverter.MilvusDataTypeMetadataKey))
+        .filter(_.contains(FieldMetadata.MilvusDataTypeMetadataKey))
         .map(
-          _.getLong(ArrowConverter.MilvusDataTypeMetadataKey).toInt
+          _.getLong(FieldMetadata.MilvusDataTypeMetadataKey).toInt
         )
         .map(MilvusDataType.fromValue)
         .filter(vectorTypes.contains)
@@ -67,16 +68,16 @@ object MilvusSchemaUtil {
       else {
         Option(field.metadata)
           .filter(
-            _.contains(ArrowConverter.MilvusVectorDimensionMetadataKey)
+            _.contains(FieldMetadata.MilvusVectorDimensionMetadataKey)
           )
           .map(
-            _.getLong(ArrowConverter.MilvusVectorDimensionMetadataKey).toInt
+            _.getLong(FieldMetadata.MilvusVectorDimensionMetadataKey).toInt
           )
           .orElse(vectorDimensions.get(field.name))
           .filter(_ > 0)
           .getOrElse {
             throw new IllegalArgumentException(
-              s"Milvus vector field '${field.name}' ($milvusType) requires positive ${ArrowConverter.MilvusVectorDimensionMetadataKey} metadata or vectorDimensions entry"
+              s"Milvus vector field '${field.name}' ($milvusType) requires positive ${FieldMetadata.MilvusVectorDimensionMetadataKey} metadata or vectorDimensions entry"
             )
           }
       }

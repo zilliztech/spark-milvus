@@ -6,6 +6,8 @@ import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.schema.FieldMetadata
+
 /** Test suite for MilvusSchemaUtil
   */
 class SchemaUtilTest extends AnyFunSuite with Matchers {
@@ -393,10 +395,10 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     def vectorMetadata(dataType: MilvusDataType, dim: Option[Int]) = {
       val builder = new MetadataBuilder()
-        .putLong(ArrowConverter.MilvusDataTypeMetadataKey, dataType.value)
+        .putLong(FieldMetadata.MilvusDataTypeMetadataKey, dataType.value)
       dim.foreach(value =>
         builder.putLong(
-          ArrowConverter.MilvusVectorDimensionMetadataKey,
+          FieldMetadata.MilvusVectorDimensionMetadataKey,
           value
         )
       )
