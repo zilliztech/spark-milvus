@@ -30,7 +30,8 @@
 <div class="verdict">
 <strong>结论。</strong>连接器不构造凭证，只继承 Spark 给的 Configuration。写配置是第 4 层
 作业的事，因为只有作业知道自己要访问哪几个桶。现有逻辑保留，要治的是六处复制和写死的默认值。
-另外两件必须做：AWS SDK v1 已于 2025-12-31 结束支持，升到 v2；JVM 侧只支持 S3 与 OSS，
+另外两件：AWS SDK v1 已于 2025-12-31 结束支持，我们自己的类名已换成 v2，
+但依赖删不掉，前置见 <a href="#platform-blocker">5.5</a>；JVM 侧只支持 S3 与 OSS，
 Azure 与 GCS 读不了，是真缺口。
 </div>
 
@@ -82,7 +83,7 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 <tr><td>阿里云 OSS</td><td>是</td><td>hadoop-aliyun</td><td>走 S3 兼容端点</td></tr>
 <tr><td>Google Cloud Storage</td><td>是</td><td class="no">无</td><td>gcp</td></tr>
 <tr><td>Azure Blob</td><td>是</td><td class="no">无</td><td>azure</td></tr>
-<tr><td>腾讯云 COS</td><td>是</td><td class="no">无</td><td>未确认</td></tr>
+<tr><td>腾讯云 COS</td><td>是</td><td class="no">无</td><td>tencent，见 <a href="#c-coverage">2.1</a></td></tr>
 <tr><td>本地</td><td>是</td><td>file</td><td>local</td></tr>
 </table>
 
@@ -128,8 +129,13 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 <h2 id="design">四、我们的设计</h2>
 
 <h3>4.1 JVM 侧：继承，不构造</h3>
-<p>取 <code>sessionState.newHadoopConf()</code> 往下传。平台通过 <code>spark.hadoop.fs.s3a.*</code>
-配置一次，连接器不写凭证代码。Iceberg 的 <code>HadoopFileIO</code> 与 Delta 都是这样。</p>
+<p>已经是现状。<code>MilvusDataSource.scala:1609</code> 取
+<code>sessionState.newHadoopConf()</code>，没有会话时退回一个空
+<code>Configuration</code>。平台通过 <code>spark.hadoop.fs.s3a.*</code> 配置一次，
+连接器不写凭证代码。Iceberg 的 <code>HadoopFileIO</code> 与 Delta 都是这样。</p>
+<p><code>MilvusOption</code> 原来另有一条自造 <code>Configuration</code> 与
+<code>S3AFileSystem</code> 的路径，已删除：它属于早已无人调用的
+<code>MilvusS3Option</code>，删除不改变任何运行时行为。</p>
 
 <h3>4.2 写配置是第 4 层的事，不是连接器的</h3>
 <p>一个作业可能要用不同身份访问多个桶，会话级配置表达不了，只能由作业自己写按桶的键。
@@ -155,9 +161,12 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 只有<strong>一侧被显式配置、另一侧没有</strong>时才分叉。规则：两侧都不配，或两侧配一致。</p>
 
 <h3>4.5 要治的两处</h3>
-<p><strong>六处复制</strong>：凭证构建散在 <code>MilvusOption</code>、<code>loon/Properties</code>、
-<code>MilvusDataSource</code>、<code>MilvusBackfill</code>、<code>BackfillConfig</code>、
-<code>ListV2SegmentsApp</code>，而 <code>core.credential</code> 是空包。逻辑正确但没有落点。</p>
+<p><strong>五处复制</strong>：<code>loon/Properties</code>（原生属性包）、
+<code>MilvusDataSource</code>（按桶 Hadoop 配置）、<code>MilvusBackfill</code>、
+<code>BackfillConfig</code>、<code>apps/tools</code> 下的
+<code>ListV2SegmentsApp</code> 与 <code>ReadSourceOnlyApp</code>，
+而 <code>core.credential</code> 是空包。逻辑正确但没有落点。
+<code>MilvusOption</code> 已不在此列，它那份随 <code>MilvusS3Option</code> 一起删了。</p>
 <p><strong>写死的默认值</strong>：<code>a-bucket</code>、<code>localhost:9000</code>、
 <code>minioadmin</code> 在生产路径上，漏配桶名会安静地连错桶。对应决策 21。</p>
 
@@ -197,17 +206,17 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 <code>旧类名=新类名</code> 对，由 <code>S3AUtils.getTrimmedStringCollectionSplitByEquals</code> 解析。
 它是给改不了代码的人用的逃生口。</p>
 
-<h3>5.3 范围：全是字符串，没有代码</h3>
-<p>全仓对 <code>com.amazonaws</code> 的引用只有五处，且<strong>全是配置值里的类名字符串，
-没有一处 import</strong>。所以这次升级不涉及代码迁移。</p>
+<h3>5.3 范围：全是字符串，没有代码（已完成）</h3>
+<p>升级前，全仓对 <code>com.amazonaws</code> 的引用只有五处，且全是配置值里的类名字符串，
+没有一处 import，所以不涉及代码迁移。现在这五处都已换成 v2，仓库里没有 v1 类名了。</p>
 <table>
-<tr><th>位置</th><th>类名</th><th>内置映射</th></tr>
-<tr><td><code>MilvusOption.scala:505</code></td><td><code>DefaultAWSCredentialsProviderChain</code></td><td class="no">无，走 v1 回退</td></tr>
-<tr><td><code>MilvusBackfill.scala:2589</code></td><td><code>WebIdentityTokenCredentialsProvider</code></td><td class="no">无，走 v1 回退</td></tr>
-<tr><td><code>MilvusBackfill.scala:2590</code></td><td><code>EnvironmentVariableCredentialsProvider</code></td><td>有</td></tr>
-<tr><td><code>ListV2SegmentsApp.scala:307,308</code></td><td>同上两个</td><td>同上</td></tr>
-<tr><td><code>BackfillAppTest.scala:385</code></td><td>断言里的字符串</td><td>—</td></tr>
+<tr><th>位置</th><th>原来</th><th>现在</th></tr>
+<tr><td><code>MilvusOption.scala</code></td><td><code>DefaultAWSCredentialsProviderChain</code></td><td>随 <code>MilvusS3Option</code> 删除</td></tr>
+<tr><td><code>MilvusBackfill.scala</code>、<code>ListV2SegmentsApp.scala</code></td><td><code>WebIdentityTokenCredentialsProvider</code></td><td><code>software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider</code></td></tr>
+<tr><td>同上</td><td><code>EnvironmentVariableCredentialsProvider</code></td><td>同名的 <code>software.amazon.awssdk</code> 版本</td></tr>
+<tr><td><code>BackfillAppTest.scala</code></td><td>断言里的字符串</td><td>跟着改</td></tr>
 </table>
+<p>换类名的同时必须加 <code>software.amazon.awssdk:sts</code>，原因见 <a href="#sts">5.6</a>。</p>
 
 <div class="warn">
 <p><strong>顺带发现一处不一致，比升级本身更值得注意。</strong>
@@ -217,15 +226,14 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 这条要和升级一起改，不能只换类名不换链。</p>
 </div>
 
-<h3>5.4 目标映射</h3>
+<h3>5.4 目标映射（已落地）</h3>
 <table>
-<tr><th>现在</th><th>换成</th></tr>
+<tr><th>原来</th><th>现在</th></tr>
 <tr><td><code>com.amazonaws.auth.WebIdentityTokenCredentialsProvider</code></td><td><code>software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider</code></td></tr>
 <tr><td><code>com.amazonaws.auth.EnvironmentVariableCredentialsProvider</code></td><td><code>software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider</code></td></tr>
-<tr><td><code>com.amazonaws.auth.DefaultAWSCredentialsProviderChain</code></td><td>不是换名，是换成与 backfill 一致的显式链</td></tr>
+<tr><td><code>com.amazonaws.auth.DefaultAWSCredentialsProviderChain</code>（在 MilvusOption 里）</td><td>随 <code>MilvusS3Option</code> 一起删除，不需要替换</td></tr>
 </table>
-<p>两个 v2 类都已在我们依赖的 <code>auth-2.30.38.jar</code> 里，
-<code>org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider</code> 本来就是 hadoop 的 v2 类，不动。</p>
+<p><code>org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider</code> 本来就是 hadoop 的 v2 类，不动。</p>
 
 <h3 id="platform-blocker">5.5 v1 依赖能不能删：取决于运行时谁提供</h3>
 <p>云上 <code>zilliz-cloud</code> 仓库的
@@ -289,16 +297,19 @@ spark.hadoop.fs.oss.credentials.provider
 
 <h3>5.7 步骤与顺序</h3>
 <ol>
-<li>三处类名换成 v2，<code>MilvusOption</code> 的链改成与 backfill 一致的显式顺序，测试断言同步。</li>
-<li><strong>在真实 EKS 上验证</strong>。v1 的 <code>WebIdentityTokenCredentialsProvider</code>
-与 v2 的 <code>WebIdentityTokenFileCredentialsProvider</code> 名字就不同，
-一个偏向环境变量、一个偏向 token 文件路径，等价性没有验过。
-当初这条链存在就是因为默认链在 EKS 上拿错角色，而这类问题本地和 CI 都测不出来。</li>
-<li>验过之后才删 <code>com.amazonaws:aws-java-sdk-core</code> 依赖。</li>
+<li><s>三处类名换成 v2，测试断言同步。</s><strong>已做</strong>，见 5.3。
+<code>MilvusOption</code> 那处不是换名，是随死代码一起删除。</li>
+<li><s>补上 <code>software.amazon.awssdk:sts</code>。</s><strong>已做</strong>，见 5.6。</li>
+<li><strong>未做</strong>：在真实 EKS 上验证。v1 的
+<code>WebIdentityTokenCredentialsProvider</code> 与 v2 的
+<code>WebIdentityTokenFileCredentialsProvider</code> 等价性没有验过。
+当初这条链存在就是因为默认链在 EKS 上拿错角色，而这类问题本地与 CI 都测不出来。</li>
+<li><strong>未做</strong>：查清运行时 v1 由谁提供，见 5.5。</li>
+<li>前两项都过了，才删 <code>com.amazonaws:aws-java-sdk-core</code>。</li>
 </ol>
 <div class="warn">
 <p>顺序不能颠倒。删依赖是编译期无感、连接时才炸的改动：provider 类名解析发生在
-建 FileSystem 的那一刻，不在编译期。先删依赖再换名，等于把一次可控的验证变成线上故障。</p>
+建 FileSystem 的那一刻。先删依赖再验证，等于把一次可控的检查变成线上故障。</p>
 </div>
 
 <h3>5.8 为什么不选另外两条</h3>
@@ -315,8 +326,9 @@ spark.hadoop.fs.oss.credentials.provider
 <code>CredentialProviderListFactory.java</code> 源码得出。</li>
 <li>我们同时依赖 <code>software.amazon.awssdk:*:2.30.38</code> 与
 <code>com.amazonaws:aws-java-sdk-core:1.12.780</code>；后者的 jar 里确有
-<code>com/amazonaws/auth/WebIdentityTokenCredentialsProvider.class</code>，
-所以现在走的是第 5 步的 v1 回退。</li>
+<code>com/amazonaws/auth/WebIdentityTokenCredentialsProvider.class</code>。
+换名之前，我们配的链走的是 5.2 第 5 步的 v1 回退；换名之后我们自己不再触发它，
+但平台注入的那条仍然走这条路（见 5.5）。</li>
 <li>v2 的 <code>WebIdentityTokenFileCredentialsProvider</code> 与
 <code>DefaultCredentialsProvider</code> 都在 <code>auth-2.30.38.jar</code> 里。</li>
 <li>Milvus 的 <code>storageType</code> 只有 <code>local</code> 与 <code>remote</code>，
