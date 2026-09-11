@@ -432,36 +432,6 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
     path2.toString shouldBe "s3a://other-bucket/other-path"
   }
 
-  test("getConf generates correct S3 configuration") {
-    import scala.collection.JavaConverters._
-    import org.apache.spark.sql.util.CaseInsensitiveStringMap
-
-    val options = new CaseInsensitiveStringMap(
-      Map(
-        MilvusOption.ReaderType -> "insert",
-        MilvusOption.S3FileSystemTypeName -> "s3a://",
-        MilvusOption.S3BucketName -> "test-bucket",
-        MilvusOption.S3Endpoint -> "localhost:9000",
-        MilvusOption.S3AccessKey -> "test-key",
-        MilvusOption.S3SecretKey -> "test-secret",
-        MilvusOption.S3UseSSL -> "false",
-        MilvusOption.S3PathStyleAccess -> "true",
-        MilvusOption.S3MaxConnections -> "16"
-      ).asJava
-    )
-
-    val s3Option = MilvusS3Option(options)
-    val conf = s3Option.getConf()
-
-    conf.get("fs.s3a.endpoint") shouldBe "localhost:9000"
-    conf.get("fs.s3a.access.key") shouldBe "test-key"
-    conf.get("fs.s3a.secret.key") shouldBe "test-secret"
-    conf.get("fs.s3a.connection.ssl.enabled") shouldBe "false"
-    conf.get("fs.s3a.path.style.access") shouldBe "true"
-    conf.get("fs.s3a.threads.max") shouldBe "16"
-    conf.get("fs.s3a.impl") shouldBe "org.apache.hadoop.fs.s3a.S3AFileSystem"
-  }
-
   test("isBackupMode is true only when milvus.backup.dir is set") {
     MilvusOption.isBackupMode(Map.empty[String, String]) shouldBe false
     MilvusOption.isBackupMode(

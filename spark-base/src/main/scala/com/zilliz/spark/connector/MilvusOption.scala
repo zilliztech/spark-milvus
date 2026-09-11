@@ -4,8 +4,7 @@ import java.net.URI
 import scala.collection.Map
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
-import org.apache.hadoop.fs.s3a.S3AFileSystem
+import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.client.api.MilvusConnectionParams
@@ -492,64 +491,6 @@ case class MilvusS3Option(
     s3PreloadPoolSize: Int
 ) extends Serializable {
   def notEmpty(str: String): Boolean = str != null && str.trim.nonEmpty
-
-  def getConf(): Configuration = {
-    val conf = new Configuration()
-    if (notEmpty(s3FileSystemType)) {
-      // Basic S3 configuration
-      conf.set("fs.s3a.endpoint", s3Endpoint)
-      conf.set("fs.s3a.path.style.access", s3PathStyleAccess.toString)
-      conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-      conf.set(
-        "fs.s3a.aws.credentials.provider",
-        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider,com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
-      )
-      conf.set("fs.s3a.access.key", s3AccessKey)
-      conf.set("fs.s3a.secret.key", s3SecretKey)
-      conf.set("fs.s3a.connection.ssl.enabled", s3UseSSL.toString)
-
-      // Performance optimization settings
-      conf.set("fs.s3a.block.size", "134217728") // 128MB
-      conf.set("fs.s3a.threads.max", s3MaxConnections.toString)
-      conf.set("fs.s3a.threads.core", (s3MaxConnections / 2).toString)
-      conf.set("fs.s3a.connection.maximum", (s3MaxConnections + 32).toString)
-      conf.set("fs.s3a.connection.timeout", "30000")
-      conf.set("fs.s3a.socket.timeout", "30000")
-      conf.set("fs.s3a.retry.limit", "3")
-    }
-    conf
-  }
-
-  def getFileSystem(path: Path): FileSystem = {
-    if (notEmpty(s3FileSystemType)) {
-      val conf = getConf()
-      val fileSystem = new S3AFileSystem()
-      try {
-        fileSystem.initialize(
-          new URI(
-            s"s3a://${s3BucketName}/"
-          ),
-          conf
-        )
-        fileSystem
-      } catch {
-        case e: Exception =>
-          // Close the filesystem if initialization failed
-          try {
-            fileSystem.close()
-          } catch {
-            case _: Exception => // Ignore close errors
-          }
-          throw new RuntimeException(
-            s"Failed to initialize S3 FileSystem for bucket $s3BucketName: ${e.getMessage}",
-            e
-          )
-      }
-    } else {
-      val conf = getConf()
-      path.getFileSystem(conf)
-    }
-  }
 
   def getFilePath(path: String): Path = {
     if (notEmpty(s3FileSystemType)) {

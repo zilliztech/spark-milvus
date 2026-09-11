@@ -234,7 +234,23 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 <p>两个 v2 类都已在我们依赖的 <code>auth-2.30.38.jar</code> 里，
 <code>org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider</code> 本来就是 hadoop 的 v2 类，不动。</p>
 
-<h3>5.5 步骤与顺序</h3>
+<h3 id="platform-blocker">5.5 平台侧的阻断项</h3>
+<p>读云上 <code>SparkCspRuntimeSupport.java</code> 得知，平台自己注入的是：</p>
+<pre><code>spark.hadoop.fs.s3a.aws.credentials.provider
+    = org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider
+spark.hadoop.fs.s3a.assumed.role.credentials.provider
+    = com.amazonaws.auth.DefaultAWSCredentialsProviderChain    ← v1 类名
+spark.hadoop.fs.oss.credentials.provider
+    = com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider</code></pre>
+<div class="warn">
+<p>第二行是 v1 类名，不在 hadoop-aws 的五条映射表里，而它的实现类只可能来自我们 fat jar 里的
+<code>aws-java-sdk-core</code>。<strong>所以删这个依赖不是我们单方面能做的</strong>：
+平台要先把那个常量换成 v2 的
+<code>software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider</code>，
+我们才能去掉它。在那之前删，平台配的每一个作业都会在建 FileSystem 时失败。</p>
+</div>
+
+<h3>5.6 步骤与顺序</h3>
 <ol>
 <li>三处类名换成 v2，<code>MilvusOption</code> 的链改成与 backfill 一致的显式顺序，测试断言同步。</li>
 <li><strong>在真实 EKS 上验证</strong>。v1 的 <code>WebIdentityTokenCredentialsProvider</code>
@@ -248,7 +264,7 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 建 FileSystem 的那一刻，不在编译期。先删依赖再换名，等于把一次可控的验证变成线上故障。</p>
 </div>
 
-<h3>5.6 为什么不选另外两条</h3>
+<h3>5.7 为什么不选另外两条</h3>
 <table>
 <tr><th>方案</th><th>不选的理由</th></tr>
 <tr><td>保持现状</td><td>继续带一个已结束支持的依赖，且任何人以「统一到 v2」为由删它都会在运行时炸</td></tr>

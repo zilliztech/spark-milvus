@@ -382,7 +382,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     // The legacy v1 DefaultAWSCredentialsProviderChain must NOT be used
     // because it has been unreliable on EKS pods.
     provider should include(
-      "com.amazonaws.auth.WebIdentityTokenCredentialsProvider"
+      "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
     )
     provider should include(
       "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"

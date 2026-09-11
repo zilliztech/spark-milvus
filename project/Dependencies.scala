@@ -82,9 +82,6 @@ object Dependencies {
     ("org.apache.spark" %% "spark-mllib" % l.spark % "provided,test")
       .excludeAll(ExclusionRule(organization = "org.apache.arrow")),
     hadoopCommon,
-    // Still needed while MilvusOption imports S3AFileSystem directly; it goes
-    // when the connector stops building its own Configuration.
-    hadoopAws,
     // Shipped, not compiled against: these supply the credential provider
     // classes that fs.s3a.aws.credentials.provider names by string. Removing
     // one fails when a FileSystem is built, not at compile time. See

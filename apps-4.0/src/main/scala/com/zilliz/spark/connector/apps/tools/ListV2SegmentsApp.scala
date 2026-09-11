@@ -304,8 +304,8 @@ object ListV2SegmentsApp {
       conf.set(
         s"$prefix.aws.credentials.provider",
         Seq(
-          "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
-          "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
+          "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider",
+          "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider",
           "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
         ).mkString(",")
       )

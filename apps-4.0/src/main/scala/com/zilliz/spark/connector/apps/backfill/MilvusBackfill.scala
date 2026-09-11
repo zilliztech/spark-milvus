@@ -2586,8 +2586,8 @@ object MilvusBackfill {
         hadoopConf.set(
           bucketProviderKey,
           Seq(
-            "com.amazonaws.auth.WebIdentityTokenCredentialsProvider",
-            "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
+            "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider",
+            "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider",
             "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
           ).mkString(",")
         )
