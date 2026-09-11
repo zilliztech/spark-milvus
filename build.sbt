@@ -290,12 +290,12 @@ assembly / assemblyMergeStrategy := {
 // 1.x 的代码仍然在 root 的 src/main/scala 里，root 的设置一个字没动；新模块现在
 // 只有包结构，迁移一个模块一个模块来（modules.md 第 5 节）。依赖只能向下：
 //   apps-<line> -> spark-<line> -> compat、client -> core -> native-*
-// spark-base 不是 project，只是四条线引用的共享源码目录。
+// spark-base 是共享源码，钉最低的线编译当约束；各线把它的源码加进自己的源码根。
 // ---------------------------------------------------------------------------
 
 lazy val v2Modules: Seq[ProjectReference] = Seq(
   nativeStorage, nativeVector, core, compat, client,
-  spark35, spark40, spark41, spark42,
+  sparkBase, spark35, spark40, spark41, spark42,
   apps40, integration40
 )
 
@@ -372,6 +372,19 @@ def sparkProject(l: Versions.SparkLine): Project =
       assembly / assemblyJarName := s"spark-milvus-${l.id}-bundle.jar",
       assembly / artifact := (assembly / artifact).value.withClassifier(Some("bundle"))
     )
+
+// spark-base 也是一个 project，钉在最低的那条线上编译。这样 IDE 里它和别的模块
+// 一样是个模块；更要紧的是，共享源码一旦用了高版本才有的 API，它先编译失败 ——
+// 等于把「共享源码只能用各条线都有的 API」变成编译期约束。它的产物没人依赖，
+// 各线是把它的源码加进自己的源码根各编一次。
+lazy val sparkBase = Project("spark-base", file("spark-base"))
+  .dependsOn(core, compat, client)
+  .settings(
+    name := "spark-base",
+    Modules.perLine(Versions.lowest),
+    libraryDependencies ++= Modules.sparkDeps(Versions.lowest) ++ Modules.arrowDeps(Versions.lowest),
+    libraryDependencies += scalaTest % Test
+  )
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
 lazy val spark40 = sparkProject(Versions.line("4.0"))

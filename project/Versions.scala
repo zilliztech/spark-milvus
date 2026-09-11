@@ -40,6 +40,9 @@ object Versions {
     SparkLine("4.2", "spark42", "4.2.0", "19.0.0", "4.13.1", "17", Seq(scala213))
   )
 
+  /** 最低的那条线。lines 按版本从低到高排，spark-base 钉它编译。 */
+  val lowest: SparkLine = lines.head
+
   def line(id: String): SparkLine =
     lines.find(_.id == id).getOrElse(sys.error(s"unknown Spark line: $id"))
 
