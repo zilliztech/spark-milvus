@@ -1,0 +1,198 @@
+<meta charset="utf-8">
+<title>对象存储认证：机制与设计</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 46rem; margin: 2rem auto; padding: 0 1.2rem;
+         font: 16px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.2rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.6rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { border: 1px solid #8884; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #8881; font-weight: 600; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em;
+         background: #8881; padding: .1em .35em; border-radius: 3px; }
+  pre { background: #8881; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .85rem; }
+  pre code { background: none; padding: 0; }
+  .verdict { border-left: 3px solid #1a7f37; background: #1a7f3714; padding: .8rem 1rem; margin: 1.2rem 0; }
+  .warn { border-left: 3px solid #d08700; background: #d0870014; padding: .8rem 1rem; margin: 1.2rem 0; }
+  figcaption { font-size: .88rem; color: #8889; margin-top: .5rem; }
+  svg { max-width: 100%; height: auto; }
+</style>
+
+<h1>对象存储认证：机制与设计</h1>
+<p>本页记录大数据生态处理文件系统认证的既有机制、我们的判断原则、按原则得出的结论，
+以及支撑结论的实测事实。存储访问层的整体设计见
+<a href="storage-access.html">storage-access.html</a>，模块边界见
+<a href="modules.md">modules.md</a>。</p>
+
+<div class="verdict">
+<strong>结论先行。</strong>连接器不构造凭证，但也不能完全不管。JVM 侧继承 Spark 的 Hadoop
+配置；需要写配置时只写按桶的键，且只在平台没设时补；原生侧只传位置与模式，不传密钥。
+现有的 provider 链逻辑<strong>保留</strong>，要治的是六处复制和写死的默认值。
+详见<a href="#design">第三节</a>。
+</div>
+
+<h2 id="mechanism">一、既有机制：Hadoop 兼容文件系统怎么处理认证</h2>
+<p>Spark、Hive、Flink、Iceberg、Delta 都建在这套机制上。它由四件事组成。</p>
+
+<h3>1.1 一个入口，按 scheme 分发</h3>
+<p><code>FileSystem.get(URI, Configuration)</code> 是唯一入口。URI 的 scheme 通过
+<code>fs.&lt;scheme&gt;.impl</code> 选实现：s3a、abfs/abfss、gs、hdfs、file。
+<strong>抽象在文件系统 API 这一层，不在凭证这一层。</strong></p>
+
+<h3>1.2 认证不是 API，是配置键</h3>
+<p>没有任何跨文件系统的凭证接口。认证全部表达成 <code>Configuration</code> 里的键，
+每个文件系统占一个命名空间：</p>
+<table>
+<tr><th>文件系统</th><th>认证相关的键</th></tr>
+<tr><td>s3a</td><td><code>fs.s3a.access.key</code>、<code>secret.key</code>、<code>session.token</code>、<code>aws.credentials.provider</code>、<code>assumed.role.arn</code></td></tr>
+<tr><td>abfs</td><td><code>fs.azure.account.auth.type</code>、<code>account.oauth.provider.type</code>、<code>account.key.&lt;account&gt;</code></td></tr>
+<tr><td>gs</td><td><code>fs.gs.auth.type</code>、<code>auth.service.account.json.keyfile</code></td></tr>
+<tr><td>hdfs</td><td><code>dfs.*</code>，身份走 Kerberos 的 UGI</td></tr>
+</table>
+<p>Kerberos 与 AKSK 没有共同结构，不可能统一。所以这套机制的做法是按 scheme 分发、
+各占一个键命名空间，谁都不管谁。<strong>它屏蔽的是文件访问的 API 差异，不是认证差异。</strong></p>
+
+<h3>1.3 provider 链</h3>
+<p><code>fs.s3a.aws.credentials.provider</code> 是一串类名，按顺序尝试。abfs 和 gs 是同样的形状。
+默认链由 hadoop-aws 的版本决定。</p>
+
+<h3>1.4 按桶、按账号覆盖</h3>
+<p><code>fs.s3a.bucket.&lt;桶名&gt;.&lt;键&gt;</code> 覆盖全局的 <code>fs.s3a.&lt;键&gt;</code>，
+hadoop-aws 在建 FileSystem 实例时把它提升成该实例的值。abfs 对应
+<code>fs.azure.account.key.&lt;account&gt;</code>。</p>
+<p><strong>一个作业用两套身份访问两个桶，只能靠这个机制，没有别的办法。</strong>
+Spark 的会话级配置表达不了「读 A 桶用身份 X，写 B 桶用身份 Y」。</p>
+
+<h3>1.5 Spark 怎么接</h3>
+<p><code>spark.hadoop.&lt;键&gt;</code> 会被拷进 Hadoop 的 <code>Configuration</code>；连接器取
+<code>sessionState.newHadoopConf()</code> 往下传。Kerberos 场景另有 delegation token：
+driver 收集后分发给 executor。</p>
+
+<h2 id="principle">二、判断原则</h2>
+<p>由上面的机制得出五条，用来判断连接器该不该碰认证：</p>
+<ol>
+<li><strong>不构造凭证</strong>，把拿到的 <code>Configuration</code> 传给 <code>FileSystem.get</code>。</li>
+<li><strong>必须写配置时只写按桶或按账号的键</strong>，不写全局键。写全局键等于改整个会话的安全边界。</li>
+<li><strong>不覆盖已设好的 provider</strong>，只在缺失时补。</li>
+<li><strong>不内置默认值</strong>。端点、密钥、桶名没配就应该失败。</li>
+<li><strong>不重复</strong>。同一段逻辑只存在一处。</li>
+</ol>
+
+<h2 id="design">三、我们的设计</h2>
+
+<h3>3.1 JVM 侧：继承，不构造</h3>
+<p>取 <code>sessionState.newHadoopConf()</code> 往下传。平台通过 <code>spark.hadoop.fs.s3a.*</code>
+配置一次，连接器不写任何凭证代码。Iceberg 的 <code>HadoopFileIO</code> 与 Delta 都是这样。</p>
+
+<h3>3.2 例外：跨账号双桶必须由连接器写按桶键</h3>
+<p>backfill 同时读源桶、写 Milvus 桶，两个桶可能属于不同账号，端点、密钥、区域都不同。
+会话级配置表达不了，所以连接器必须写 <code>fs.s3a.bucket.&lt;桶&gt;.*</code>。
+这是原则 2 允许的形态，也是现有代码 <code>configureHadoopS3ForPath</code> 的
+<code>isSource</code> 参数存在的原因。</p>
+
+<h3>3.3 例外：平台已选的 AssumeRole 不能被覆盖</h3>
+<p>托管运行时可能已经全局或按桶选好了 AssumeRole provider，用于它的数据角色或外部卷。
+连接器只在该桶没有 AssumeRole 时才补自己的链。对应原则 3，也是提交
+<code>d823ec0 fix: [backfill] honor platform AssumeRole configuration (#108)</code> 的由来。</p>
+
+<h3>3.4 例外：静态密钥要钉住 provider</h3>
+<p>用户给了 AKSK 时强制 <code>SimpleAWSCredentialsProvider</code>，
+否则会被全局配置的 provider 链遮蔽。这是 Hadoop 的真实行为，不是防御性编程。</p>
+
+<h3>3.5 原生侧：只传位置与模式，不传密钥</h3>
+<p>milvus-storage 的 C 层有自己的 SDK，在同一个 pod 里自己做发现。它认识的键分四类：</p>
+<table>
+<tr><th>类别</th><th>键</th></tr>
+<tr><td>身份模式</td><td><code>fs.use_iam</code>、<code>fs.role_arn</code>、<code>fs.session_name</code>、<code>fs.external_id</code>、<code>fs.iam_endpoint</code></td></tr>
+<tr><td>位置</td><td><code>fs.address</code>、<code>fs.bucket_name</code>、<code>fs.root_path</code>、<code>fs.region</code>、<code>fs.cloud_provider</code></td></tr>
+<tr><td>静态密钥</td><td><code>fs.access_key_id</code>、<code>fs.access_key_value</code></td></tr>
+<tr><td>各云专属</td><td><code>fs.azure_client_id</code>、<code>fs.azure_tenant_id</code>、<code>fs.gcp_credential_json</code>、<code>fs.gcp_target_service_account</code>、<code>fs.oss.endpoint</code></td></tr>
+</table>
+<p><code>fs.cpp:104</code> 与 <code>117</code> 里 <code>use_iam</code> 为真时走另一条分支，
+不取静态密钥，由它自己的 SDK 发现。所以云上的正确配置是 <code>fs.use_iam=true</code>
+加位置信息，一个密钥都不传。</p>
+
+<h3>3.6 两侧发现的一致性</h3>
+<p>两个 SDK 各自发现，在干净的 IRSA 场景下会得到同一个身份——同一个 pod、同一个 token 文件。
+它们只在<strong>一侧被显式配置、另一侧没有</strong>时才分叉。规则：
+<strong>要么两侧都不配，要么两侧配一致</strong>，不存在只配一侧。</p>
+
+<h3>3.7 要治的两处</h3>
+<p><strong>六处复制。</strong>凭证构建散在
+<code>MilvusOption</code>、<code>loon/Properties</code>、<code>MilvusDataSource</code>、
+<code>MilvusBackfill</code>、<code>BackfillConfig</code>、<code>ListV2SegmentsApp</code>，
+而 <code>core.credential</code> 是空包。逻辑正确但没有落点，收敛成一处。</p>
+<p><strong>写死的默认值。</strong><code>a-bucket</code>、<code>localhost:9000</code>、
+<code>minioadmin</code> 在生产路径上，违反原则 4，漏配桶名会安静地连错桶。
+移到显式的测试配置，漏配就失败。对应 README 第 4 节决策 21。</p>
+
+<h2 id="verified">四、实测事实</h2>
+<p>以下是读源码与 jar 得到的，不是推断。</p>
+
+<h3>4.1 EKS 上 SDK v1 默认链不可靠，所以有那条显式链</h3>
+<p><code>MilvusBackfill.scala</code> 的注释原文：SDK v1 的
+<code>DefaultAWSCredentialsProviderChain</code> 在 EKS pod 上不总是先取投影进来的
+service-account web identity token，会回落到节点的 EC2 实例角色，<strong>拿到节点的角色</strong>。
+所以顺序是刻意排的：WebIdentity → EnvironmentVariable → IAMInstance。</p>
+
+<h3 id="v1v2">4.2 v1 类名在 hadoop-aws 3.4.1 上仍然可用，但依赖我们自带 v1 SDK</h3>
+<p>我们钉 hadoop 3.4.1，hadoop-aws 3.4.x 已迁到 AWS SDK v2。读
+<code>CredentialProviderListFactory.java</code>：v1 到 v2 的映射表只有五条。</p>
+<table>
+<tr><th>v1 类名</th><th>映射到</th></tr>
+<tr><td><code>com.amazonaws.auth.AnonymousAWSCredentials</code></td><td>AnonymousAWSCredentialsProvider</td></tr>
+<tr><td><code>com.amazonaws.auth.EC2ContainerCredentialsProviderWrapper</code></td><td>IAMInstanceCredentialsProvider</td></tr>
+<tr><td><code>com.amazonaws.auth.InstanceProfileCredentialsProvider</code></td><td>IAMInstanceCredentialsProvider</td></tr>
+<tr><td><code>com.amazonaws.auth.EnvironmentVariableCredentialsProvider</code></td><td>v2 的 EnvironmentVariableCredentialsProvider</td></tr>
+<tr><td><code>com.amazonaws.auth.profile.ProfileCredentialsProvider</code></td><td>v2 的 ProfileCredentialsProvider</td></tr>
+</table>
+<p><strong><code>WebIdentityTokenCredentialsProvider</code> 不在表里。</strong>
+不在表里的类走这条路径：先查用户自定义的
+<code>fs.s3a.aws.credentials.provider.mapping</code>；再试按 v2 实例化，失败；
+然后 <code>if (isAwsV1SdkAvailable())</code> 用 <code>AwsV1BindingSupport</code> 按 v1 实例化；
+v1 SDK 不在 classpath 就抛异常。</p>
+<p>我们的依赖同时有两代：<code>software.amazon.awssdk:*:2.30.38</code> 和
+<code>com.amazonaws:aws-java-sdk-core:1.12.780</code>。后者的 jar 里确实有
+<code>com/amazonaws/auth/WebIdentityTokenCredentialsProvider.class</code>。</p>
+<div class="warn">
+<p><strong>所以现在能工作，但它靠的是我们特意带着 v1 core SDK。</strong>
+一旦有人以「统一到 v2」为由删掉 <code>aws-java-sdk-core</code>，这条链会在实例化时失败，
+而失败发生在连接对象存储的那一刻，不在编译期。</p>
+<p>更稳的两种写法，二选一：换成 v2 的
+<code>software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider</code>
+（已在我们的 <code>auth-2.30.38.jar</code> 里），或者显式配
+<code>fs.s3a.aws.credentials.provider.mapping</code> 把 v1 名映射过去。
+换之前要在真实 EKS 上验证 v2 的这个 provider 行为与 v1 一致。</p>
+</div>
+
+<h3>4.3 仓库内两代类名并存</h3>
+<p><code>MilvusDataSource.scala:918</code> 用 v2 的
+<code>software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider</code>，
+<code>MilvusBackfill.scala:2589</code> 与 <code>ListV2SegmentsApp.scala:307</code> 用 v1 名。
+收敛成一处时要一并统一。</p>
+
+<h3>4.4 Milvus 自己不支持 HDFS</h3>
+<p><code>configs/milvus.yaml</code> 的 <code>storageType</code> 只有 <code>local</code> 和
+<code>remote</code>，<code>cloudProvider</code> 是 aws、gcp、gcpnative、azure、aliyun、tencent。
+所以 Milvus 格式的路径永远不在 HDFS 上。用户自己的源数据走
+<code>spark.read.parquet(path)</code>（<code>MilvusBackfill.scala:733</code>），
+用的是用户自己的 Hadoop 配置，与本层无关。</p>
+<p><strong>本层的范围因此是：Milvus 格式的路径，加 milvus-backup 的导出目录，两者都在对象存储上。</strong></p>
+
+<h2 id="rejected">五、被否决的方案</h2>
+<table>
+<tr><th>方案</th><th>否决理由</th></tr>
+<tr><td>造一个跨文件系统的凭证抽象</td><td>Kerberos 与 AKSK 无共同结构。业界的做法是按 scheme 分发加命名空间透传，不是统一凭证</td></tr>
+<tr><td>默认什么都不配，让默认链发现</td><td>SDK v1 默认链在 EKS 上会拿到节点角色。这正是现有显式链要解决的问题</td></tr>
+<tr><td>删掉六处 provider 链逻辑</td><td>会连同跨账号双桶、平台 AssumeRole 两个真实场景和一个缺陷规避一起删掉。要治的是复制与默认值，不是逻辑</td></tr>
+</table>
+
+<h2 id="next">六、未决</h2>
+<ol>
+<li>v1 provider 类名换成 v2，还是配 <code>provider.mapping</code>。换之前要在真实 EKS 上验证行为一致。</li>
+<li>收敛后的落点：<code>core.credential</code> 还是第 3 层。取决于
+<a href="storage-access.html#open">storage-access.html</a> 里那个路线级决定。</li>
+<li>决策 21：写死的开发默认值怎么删，这是对外可见的行为变化。</li>
+</ol>
