@@ -10,7 +10,8 @@ import com.zilliz.spark.connector.serde.ArrowConverter
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
-/** DataTypeUtil 的 Spark 侧映射。到 Arrow 类型的用例在 core 的 ArrowTypesTest。
+/** The Spark half of DataTypeUtil. The Arrow half is covered by ArrowTypesTest
+  * in core.
   */
 class DataTypeUtilTest extends AnyFunSuite with Matchers {
 

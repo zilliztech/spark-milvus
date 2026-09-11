@@ -2,13 +2,15 @@ package com.zilliz.milvus.storage
 
 import org.slf4j.{Logger, LoggerFactory}
 
-/** core 的日志门面。
+/** The logging facade for the core layer.
   *
-  * 方法名与 org.apache.spark.internal.Logging 一致，第 2 层的文件从 1.x 搬下来 时只换
-  * import。消息按名传，级别关掉时不拼字符串。
+  * The method names match org.apache.spark.internal.Logging, so a file moving
+  * down from 1.x only has to change its import. Messages are by-name, so
+  * nothing is concatenated when the level is off.
   *
-  * slf4j-api 标 provided：运行时用 Spark 自带的那份，assembly 也会把它排除掉， 否则
-  * userClassPathFirst 下会加载两份 binding。
+  * slf4j-api is declared provided: at runtime the copy Spark ships is used, and
+  * assembly filters it out of the fat jar. Bundling it would load two bindings
+  * under spark.executor.userClassPathFirst=true.
   */
 trait Logging {
 

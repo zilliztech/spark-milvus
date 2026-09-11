@@ -40,9 +40,10 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 |---|---|---|
 | `snapshot` | 列快照目录，选快照，解析 JSON 和 Avro 成对象；分发 SnapshotSource | SnapshotCatalog、Snapshot、Segment、SnapshotSource、SnapshotSourceRegistry |
 | `manifest` | 一个段的 Manifest：列组、删除文件、统计、索引登记 | Manifest、ColumnGroup、ManifestReader |
-| `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型 | SchemaMapper、MilvusTypes、ArrowTypes |
+| `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型 | SchemaMapper、MilvusTypes、ArrowTypes、FieldMetadata |
 | `path` | 三种路径形态到 (bucket, key) | StoragePath、Located |
 | `io` | 对象存储读写的最小接口和它的实现 | ObjectStore、ObjectStoreFactory、FileInfo、SeekableInput |
+| `codec` | 列值的字节编解码，读写共用 | FloatConverter、SparseFloatVectorConverter |
 | `credential` | 对象存储凭证的取用和下发 | Credentials、CredentialSource |
 | `expr` | 中间表示、Milvus 文法解析器、列批求值器、反向打印器 | Expr、PlanParser、Evaluator、ExprPrinter、Bitmap |
 | `delete` | 删除文件解码，按行号置位 | DeleteBitset、DeltaLogDecoder |
@@ -175,33 +176,48 @@ spark-milvus/
 10. 共享源码只能用各条线都有的 Spark API。这条由 spark-3.5 兜住：它用最低的那条线编译共享源码，用了高版本才有的 API，它先编译失败。
 11. 目录镜像包名。1.x 的 41 个文件不是这样（文件在 `src/main/scala/read/`，包是 `com.zilliz.spark.connector.read`），迁移时一并对齐。
 12. 模块的显示名跟目录走，发布坐标用 `moduleName` 另设。根项目显示名 `spark-milvus`（等于仓库目录），坐标仍是 `com.zilliz:spark-connector`。sbt 的 project id 不能带点，所以命令行是 `spark40` 而目录是 `spark-4.0`。
-13. core 读写存储只经 `io.ObjectStore`，源码里不出现 `org.apache.hadoop`。接口五个方法：`open`、`list`、`exists`、`stat`、`create`，没有 `rename` 和 `delete`（1.x 的 22 处调用点也没用过这两个）。Hadoop 实现放 core 的 `io.hadoop`，`hadoop-common` 标 provided，运行时用 Spark 自带的那份。executor 上拿到的是可序列化的 `ObjectStoreFactory`（一组配置字符串），不是活的 `Configuration`。
-14. milvus-proto 的生成分两处：不带 service 的 `common.proto`、`schema.proto` 在 core 生成（`grpc = false`），带 service 的五个在 client 生成（`grpc = true`），靠 include 路径引用 core 的产物，同一份 .proto 不生成两遍。core 用得上它们，是因为 Milvus 的存储格式本身由 protobuf 定义：快照里嵌着 CollectionSchema，Manifest 的字段描述来自 schema.proto，core 不另建一套 schema 模型。
+13. 第 2 层不用 Spark 的 Logging，用 core 的 `com.zilliz.milvus.storage.Logging`（slf4j，provided）。约束 1 的扫描会先去掉注释，注释里提 org.apache.spark 是合法的。
+14. core 读写存储只经 `io.ObjectStore`，源码里不出现 `org.apache.hadoop`。接口五个方法：`open`、`list`、`exists`、`stat`、`create`，没有 `rename` 和 `delete`（1.x 的 22 处调用点也没用过这两个）。Hadoop 实现放 core 的 `io.hadoop`，`hadoop-common` 标 provided，运行时用 Spark 自带的那份。executor 上拿到的是可序列化的 `ObjectStoreFactory`（一组配置字符串），不是活的 `Configuration`。
+15. milvus-proto 的生成分两处：不带 service 的 `common.proto`、`schema.proto` 在 core 生成（`grpc = false`），带 service 的五个在 client 生成（`grpc = true`），靠 include 路径引用 core 的产物，同一份 .proto 不生成两遍。core 用得上它们，是因为 Milvus 的存储格式本身由 protobuf 定义：快照里嵌着 CollectionSchema，Manifest 的字段描述来自 schema.proto，core 不另建一套 schema 模型。
 
 ## 5 1.x 到 2.0 的迁移对照
 
-41 个 1.x 源文件的去向。
+41 个 1.x 源文件已经全部离开 `src/`，该目录不再存在。这一轮只做归属，不改语义：
+文件搬到它该在的模块，包名跟目录对齐，调用点直接改指新位置，不留转发壳子。
+读路径列式化、写路径提交、DataSource 拆分这些是下一步的重构，不在本表内。
 
-| 1.x 文件 | 2.0 位置 | 处理 |
+| 1.x 文件 | 2.0 位置 | 状态 |
 |---|---|---|
-| sources/MilvusDataSource.scala（2879 行） | spark.catalog、table、scan；规划逻辑进 core.snapshot、core.read.plan | 拆分重写 |
-| MilvusOption.scala、loon/Properties.scala | spark.options；fs.* 归一到 core.credential | 合并重写 |
-| MilvusClient.scala | client.grpc、client.api | 迁入，删 mock 和无调用的接口 |
-| MilvusUtil.scala（627 行，值打成 gRPC FieldData） | apps.legacy | 迁入，只有 gRPC Insert 用 |
-| Exception.scala | core 定义异常基类，各层派生 | 部分已迁：DataParseException、DataTypeException 进 core；三个 RPC 异常随 client 迁 |
-| read/MilvusSnapshotReader.scala | core.snapshot | 迁入，去 Spark 依赖 |
-| read/MilvusStorageV3ManifestReader.scala、MilvusSegmentManifestReader.scala | core.manifest | 迁入 |
-| read/MilvusDeltaLogReader.scala、MilvusDeletePlan.scala | core.delete | 迁入，改按行号位图 |
-| read/V2SegmentLoader.scala、MilvusPackedV2PartitionReader.scala、MilvusParquetFooterReader.scala | compat.v2packed | 迁入 |
-| read/BackupMetaReader.scala | compat.backup | 迁入 |
-| read/MilvusLoonPartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala | spark.scan、core.read | 重写为列式 |
-| serde/DataTypeUtil.scala、SchemaUtil.scala | core.schema（Milvus 与 Arrow）、spark.types（Arrow 与 Spark） | **已迁**：core.schema 得到 MilvusTypes、ArrowTypes、SchemaMapper 与 18 个用例；1.x 只剩 Spark 类型映射与 convertSparkSchemaToArrow |
-| serde/ArrowConverter.scala（897 行行式转换） | 删除 | 读路径由 ColumnVector 取代，写路径的 Spark 到 Arrow 重写进 core.write.exec |
-| write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | core.write | 决策 14 定为复用时迁入，事务提交移到 Committer；定为重写时删除 |
-| write/MilvusInsertDataWriter.scala、MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala | apps.legacy | 随 W7 的 `format("milvus")` 入口整体迁入，先修 abort |
-| write/MilvusSparkNativeImportWriter.scala | 删除 | 无调用 |
-| filter/、expressions/、extensions/ | apps.search | 迁入 |
-| operations/backfill/* | apps.backfill | 迁入，内部改用 W2 |
-| tools/* | apps.tools | 迁入 |
-| src/main/resources/milvus-segment-manifest*.avsc | core 的 resources | 迁入 |
-| milvus-storage/java 的 Java 绑定 | native-storage | 替换为自有 JNI |
+| read/MilvusSnapshotReader.scala | core.snapshot | 已迁。92 行 Spark 类型转换切成 spark-base 的 SnapshotSparkSchema，切完这个文件就是纯 JVM |
+| read/MilvusSegmentManifestReader.scala、MilvusStorageV3ManifestReader.scala | core.manifest | 已迁 |
+| read/MilvusDeltaLogReader.scala、MilvusDeletePlan.scala | core.delete | 已迁。改按行号位图是重构，未做 |
+| src/main/resources/milvus-segment-manifest*.avsc | core 的 resources | 已迁。资源必须跟代码走，留在原处解码器会报 not found on classpath，而失败形式是返回 Left 不是抛异常 |
+| serde/DataTypeUtil.scala、SchemaUtil.scala | core.schema、spark-base | 已迁。core.schema 得到 MilvusTypes、ArrowTypes、SchemaMapper、FieldMetadata；Spark 那一半留在 spark-base |
+| MilvusUtil.scala 的 FloatConverter、SparseFloatVectorConverter | core.codec | 已迁。文档原来写「MilvusUtil 整个进 apps.legacy」，不成立：627 行里只有 307 行是 FieldData 打包，两个转换器是纯 JVM 的列值编解码，被 ArrowConverter 和读路径用着 |
+| MilvusUtil.scala 的 IntConverter | 删除 | 已删，全仓零引用 |
+| Exception.scala | core 与 client | 已迁。DataParseException、DataTypeException 进 core；三个 RPC 异常进 client |
+| read/V2SegmentLoader.scala | compat.v2packed | 已迁。resolvePath 与 readAllBytes 先下沉到 core 的 path 与 io.hadoop，否则 core 的两个 Manifest 解析器要反向依赖 compat |
+| read/MilvusParquetFooterReader.scala | compat 根包 | 已迁。v2packed 和 backup 都要用它 |
+| read/BackupMetaReader.scala | compat.backup | 已迁 |
+| MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数 |
+| sources/MilvusDataSource.scala（2880 行） | spark-base | 已搬。拆成 catalog、table、scan 并把规划逻辑下沉 core 是重构，未做 |
+| MilvusOption.scala、loon/Properties.scala | spark-base | 已搬。MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。Properties 产出上游 Java 绑定的类型，core 不该依赖它，留在第 3 层 |
+| read/MilvusLoonPartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusPackedV2PartitionReader.scala | spark-base | 已搬。重写为列式是重构，未做 |
+| serde/ArrowConverter.scala | spark-base | 已搬。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
+| filter/VectorBruteForceSearch.scala | spark-base | 已搬。它是从 MilvusLoonPartitionReader 的读路径里调的，不是 app；最终形态等决策 16 |
+| write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | spark-base | 已搬。去向等决策 14 |
+| write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusUtil.scala 的 MilvusFieldData | spark-base | 已搬。整条 `format("milvus")` 写链是一个整体，上半截是 DataSource V2 的接口实现；下放 apps.legacy 要先有 W7 的注册表，那是重构 |
+| write/MilvusSparkNativeImportWriter.scala | 删除 | 已删，全仓零引用 |
+| operations/backfill/* | apps.backfill | 已迁，包名从 operations.backfill 改成 apps.backfill |
+| expressions/、extensions/ | apps.search | 已迁 |
+| tools/* | apps.tools | 已迁 |
+| src/test/**、src/it/** | 各模块的 src/test | 已迁。core 32、compat 43、client 20、spark-4.0 261、apps-4.0 212 个用例；integration-4.0 收 3 个集成用例 |
+| milvus-storage/java 的 Java 绑定 | native-storage | 未做。四条 Spark 线目前仍引用这个 unmanaged jar |
+
+### 5.1 搬运中暴露的事实
+
+1. 六个文件只因为 `org.apache.spark.internal.Logging` 才算 Spark 代码，其中三个继承了但一次都没调用，全仓实际日志调用只有 7 处。core 因此有了自己的 `Logging`（slf4j，provided）。
+2. 1.x 的 `private[read]` 跨模块之后失效，14 个成员被迫改成 public。1.x 的封装边界是按目录划的，不是按职责划的。
+3. 1.x 的 main 与 test 在 Spark 3.5.5、4.0.0、4.2.0 上都编得过，所以存量代码进 spark-base 让四条线各编一遍没有兼容风险。这是 spark-base 而不是单条线的依据。
+4. parquet-hadoop 传递进来的 jackson-databind 比 jackson-module-scala 新，跨版本直接抛 JsonMappingException。第 2 层因此钉死 jackson；Spark 线不能钉，Spark 自带的是一套自洽的更新版本。
+5. 挡住纯搬运的反向引用一共 6 处，全部是文件放错位置，不是真的循环依赖。

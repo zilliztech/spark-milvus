@@ -7,7 +7,7 @@ import org.scalatest.matchers.should.Matchers
 
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
-/** Milvus 类型到 Arrow 类型的映射。 */
+/** The Milvus type to Arrow type mapping. */
 class ArrowTypesTest extends AnyFunSuite with Matchers {
 
   test("toArrowType converts Bool to Arrow Bool") {

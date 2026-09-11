@@ -1,7 +1,8 @@
 package com.zilliz.milvus.storage.compat
 
-/** 1.x 离线 option 的段列表转 Snapshot，实现 SnapshotSource。
+/** Turns the segment list carried by the 1.x offline options into a Snapshot by
+  * implementing SnapshotSource.
   *
-  * 承载的功能：K2（见 docs/design/capabilities.md）。
+  * Capabilities: K2 (see docs/design/capabilities.md).
   */
 package object offline

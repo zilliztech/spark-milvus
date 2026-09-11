@@ -4,8 +4,8 @@ import com.zilliz.milvus.storage.schema.ArrowTypes
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.serde.ArrowConverter
 
-/** Spark StructType 到 Arrow Schema。Milvus CollectionSchema 到 Arrow Schema 的
-  * 那一半已搬到 core 的 com.zilliz.milvus.storage.schema.SchemaMapper。
+/** Spark StructType to Arrow Schema. The Milvus CollectionSchema half moved to
+  * com.zilliz.milvus.storage.schema.SchemaMapper in core.
   */
 object MilvusSchemaUtil {
 

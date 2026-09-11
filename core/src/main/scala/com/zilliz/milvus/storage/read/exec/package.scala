@@ -1,8 +1,9 @@
 package com.zilliz.milvus.storage.read
 
-/** 批读取、行号取列、出口；碰 native。
+/** Batch reading, taking columns by row number, and the read outlet. This is
+  * where core calls into the native layer.
   *
-  * 主要类型：SegmentReader、SegmentReaderRegistry、ColumnBatch、Take。
-  * 承载的功能：R3、R4、R14、R17、G3（见 docs/design/capabilities.md）。
+  * Main types: SegmentReader, SegmentReaderRegistry, ColumnBatch, Take.
+  * Capabilities: R3, R4, R14, R17, G3 (see docs/design/capabilities.md).
   */
 package object exec

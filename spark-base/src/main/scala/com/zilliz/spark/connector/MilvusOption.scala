@@ -44,7 +44,9 @@ case class MilvusOption(
     vectorSearchConfig: Option[VectorSearchConfig] = None
 ) {
 
-  /** 连接 Milvus 需要的那几项。客户端不认识 MilvusOption——它在第 3 层， client 模块在第 2 层，依赖只能向下。
+  /** Just the fields needed to connect to Milvus. The client does not know
+    * about MilvusOption: options are layer 3, the client module is layer 2, and
+    * dependencies only point downward.
     */
   def connectionParams: MilvusConnectionParams =
     MilvusConnectionParams(

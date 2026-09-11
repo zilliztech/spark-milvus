@@ -1,22 +1,30 @@
 import sbt._
 import sbt.Keys._
 
-/** 2.0 各模块的共用设置与构建约束。见 docs/design/modules.md 第 4 节。 */
+/** Shared settings and build constraints for the 2.0 modules. See section 4 of
+  * docs/design/modules.md.
+  */
 object Modules {
 
-  val checkNoSpark = taskKey[Unit]("核心层不得依赖 Spark：源码里出现 org.apache.spark 即编译失败")
+  val checkNoSpark = taskKey[Unit](
+    "The core layer must not depend on Spark: org.apache.spark in a source file fails the build"
+  )
 
-  /** 注释里提到 org.apache.spark 是合法的（迁移期到处要写「这个类原来继承 Spark 的
-    * Logging」），扫描前先去掉块注释和行注释，只看真代码。
+  /** Mentioning org.apache.spark in a comment is legitimate: during the
+    * migration many files need to say "this class used to extend Spark's
+    * Logging". Strip block and line comments before scanning so only real code
+    * is checked.
     */
   private def stripComments(source: String): String =
     source
       .replaceAll("(?s)/\\*.*?\\*/", "")
       .replaceAll("(?m)//.*$", "")
 
-  /** 约束 1：core、compat、client 的源码不出现 org.apache.spark。
+  /** Constraint 1: no source file in core, compat or client mentions
+    * org.apache.spark.
     *
-    * 挂在 Compile / compile 前面，所以违反了就编译不过，而不是等到评审才发现。
+    * It runs ahead of Compile / compile, so a violation fails the build instead
+    * of waiting to be caught in review.
     */
   val noSparkImports: Seq[Setting[_]] = Seq(
     checkNoSpark := {
@@ -28,29 +36,37 @@ object Modules {
       }
       if (offenders.nonEmpty) {
         offenders.foreach { f =>
-          log.error(s"${name.value}：核心层不得依赖 Spark，但 $f 里出现了 org.apache.spark")
+          log.error(
+            s"${name.value}: the core layer must not depend on Spark, but $f mentions org.apache.spark"
+          )
         }
-        sys.error(s"${name.value} 出现 ${offenders.size} 处 Spark 依赖（docs/design/modules.md 第 4 节第 1 条）")
+        sys.error(
+          s"${name.value} has ${offenders.size} Spark dependencies " +
+            "(constraint 1, section 4 of docs/design/modules.md)"
+        )
       }
     },
     Compile / compile := (Compile / compile).dependsOn(checkNoSpark).value
   )
 
-  /** 跨线共用的 Scala 模块：core、compat、client。 */
+  /** The Scala modules shared across Spark lines: core, compat and client. */
   val shared: Seq[Setting[_]] = Seq(
     crossScalaVersions := Versions.sharedScalas,
     scalacOptions ++= Seq("-release", Versions.sharedJavaRelease),
     javacOptions ++= Seq("--release", Versions.sharedJavaRelease),
     libraryDependencies ++= Seq(
       "org.scala-lang.modules" %% "scala-collection-compat" % Versions.scalaCollectionCompat,
-      // core 的日志门面建在 slf4j 上，运行时用 Spark 自带的那份。
+      // The core logging facade is built on slf4j; at runtime it uses the copy
+      // Spark ships.
       "org.slf4j" % "slf4j-api" % Versions.slf4j % "provided"
     ),
-    // 模块有内容之后再开发布
+    // Publishing turns on once a module has content.
     publish / skip := true
   ) ++ noSparkImports
 
-  /** 第 1 层的两个模块是纯 Java 的，产物不带 Scala 后缀。 */
+  /** The two layer-1 modules are plain Java, so their artifacts carry no Scala
+    * suffix.
+    */
   val javaOnly: Seq[Setting[_]] = Seq(
     crossPaths := false,
     autoScalaLibrary := false,
@@ -58,7 +74,9 @@ object Modules {
     publish / skip := true
   )
 
-  /** 一条 Spark 线的编译设置：钉本线的 Java、Scala 与 Spark。 */
+  /** Compile settings for one Spark line: pin that line's Java, Scala and
+    * Spark.
+    */
   def perLine(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
     crossScalaVersions := l.scalas,
     scalacOptions ++= Seq("-release", l.javaRelease),
@@ -66,22 +84,28 @@ object Modules {
     publish / skip := true
   )
 
-  /** 本线的 Spark 模块，一律 provided；Arrow 由本线钉，不从 Spark 传递进来。 */
+  /** This line's Spark modules, always provided. Arrow is pinned by the line
+    * itself rather than inherited transitively from Spark.
+    */
   def sparkDeps(l: Versions.SparkLine): Seq[ModuleID] =
     Seq("spark-core", "spark-sql", "spark-catalyst").map { m =>
       ("org.apache.spark" %% m % l.spark % "provided")
         .excludeAll(ExclusionRule(organization = "org.apache.arrow"))
     }
 
-  /** 约束 3：Arrow 版本由 spark-<line> 钉，core 只按 C Data Interface 编译。 */
+  /** Constraint 3: the Arrow version is pinned by spark-<line>; core compiles
+    * against the interfaces only.
+    */
   def arrowDeps(l: Versions.SparkLine): Seq[ModuleID] =
     Seq("arrow-vector", "arrow-memory-core", "arrow-c-data", "arrow-memory-netty")
       .map(m => "org.apache.arrow" % m % l.arrow)
 
-  /** 迁移期：1.x 的连接器源码搬进 spark-base 之后，四条线都要这批依赖。
+  /** Migration-time: once the 1.x connector sources moved into spark-base, all
+    * four lines need this set of dependencies.
     *
-    * 随着代码往下沉到 core，这个列表只会变短。存储 SDK 与 parquet、avro 最终都
-    * 归 core，这里剩下的应该只有 Spark、Arrow 和 Milvus 的客户端。
+    * The list only gets shorter as code sinks down into core. Storage access,
+    * parquet and avro all end up there, leaving Spark, Arrow and the Milvus
+    * client here.
     */
   def legacyDeps(l: Versions.SparkLine): Seq[ModuleID] = Seq(
     Dependencies.sparkMLlib,
@@ -102,11 +126,13 @@ object Modules {
     Dependencies.hadoopMapreduceClientCore % Test
   )
 
-  /** jackson 三件套钉同一个版本：parquet-hadoop 传递进来的 databind 更新，
-    * 与 jackson-module-scala 跨版本会直接抛 JsonMappingException。
+  /** Pins the three jackson artifacts to one version: parquet-hadoop pulls in a
+    * newer databind, and mixing it with jackson-module-scala throws
+    * JsonMappingException.
     *
-    * 只给第 2 层用。Spark 自带一套自洽的 jackson，钉死反而会把 databind 压到比
-    * Spark 的 jackson-module-scala 低，同样抛异常。
+    * Layer 2 only. Spark ships a self-consistent jackson set, and pinning there
+    * would drag databind below Spark's own jackson-module-scala, which throws
+    * the same way.
     */
   val jacksonPin: Seq[Setting[_]] = Seq(
     dependencyOverrides ++= Seq(
@@ -116,16 +142,18 @@ object Modules {
     )
   )
 
-  /** 跑测试要的 JVM 参数。
+  /** The JVM flags the test suites need.
     *
-    * Arrow 的 MemoryUtil 要 --add-opens 才能初始化，否则一碰列批就抛
-    * 「Failed to initialize MemoryUtil」；原生库的路径是 Dockerfile 写入的
-    * 那个目录，本机没 build 过就只有依赖它的几个用例失败。
+    * Arrow's MemoryUtil cannot initialize without --add-opens; without it the
+    * first column batch throws "Failed to initialize MemoryUtil". The native
+    * library path points at the directory the Dockerfile writes into, so on a
+    * machine that has not built it only the tests that need it fail.
     */
   def nativeTest: Seq[Setting[_]] = Seq(
     fork := true,
-    // fork 之后工作目录默认是子项目的目录。1.x 的用例全部按仓库根写相对路径
-    // 读 fixture，钉回根目录，路径的含义与迁移前一致。
+    // After forking, the working directory defaults to the subproject's own
+    // directory. Every 1.x test reads its fixtures by a path relative to the
+    // repository root, so pin it back and the paths keep their old meaning.
     baseDirectory := (ThisBuild / baseDirectory).value,
     parallelExecution := true,
     logBuffered := false,
@@ -151,7 +179,9 @@ object Modules {
     )
   )
 
-  /** 共享源码目录：spark-base 不是 project，四条线把它加进自己的源码根。 */
+  /** The shared source directory. spark-base is not an sbt project; each of the
+    * four lines adds it to its own source roots.
+    */
   def sharedSource(root: File, dir: String): File =
     root / dir / "src" / "main" / "scala"
 }

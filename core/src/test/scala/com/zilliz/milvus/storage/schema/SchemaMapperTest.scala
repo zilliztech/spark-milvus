@@ -5,7 +5,7 @@ import scala.jdk.CollectionConverters._
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/** Milvus CollectionSchema 到 Arrow Schema。 */
+/** Milvus CollectionSchema to Arrow Schema. */
 class SchemaMapperTest extends AnyFunSuite with Matchers {
 
   test("system fields are not appended over case-insensitive name conflicts") {

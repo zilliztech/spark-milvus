@@ -7,14 +7,18 @@ import scala.util.control.NonFatal
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 
-/** Hadoop FileSystem 上的读取。
+/** Reads over the Hadoop FileSystem API.
   *
-  * 迁移期的形态：签名还收活的 Configuration。ObjectStore 接口落地后这里换成 它的实现，调用方不用再见到 Hadoop 的类型。见
-  * docs/design/modules.md 第 4 节 第 13 条。
+  * This is the migration-time shape: the signature still takes a live
+  * Configuration. Once the ObjectStore interface lands, this becomes its
+  * implementation and callers stop seeing Hadoop types. See constraint 13 in
+  * section 4 of docs/design/modules.md.
   */
 object HadoopIO {
 
-  /** 整个文件读进字节数组。快照、Manifest、删除文件都是小文件，没有流式需求。 */
+  /** Reads a whole file into a byte array. Snapshots, manifests and delete
+    * files are all small; nothing here needs streaming.
+    */
   def readAllBytes(
       conf: Configuration,
       fullyQualifiedPath: String
@@ -44,7 +48,8 @@ object HadoopIO {
           e
         )
     } finally {
-      // 关掉 FileSystem 缓存时每次 get 都新建一个，不关就泄漏连接池。
+      // With the FileSystem cache disabled every get() builds a new instance,
+      // so not closing it leaks the connection pool.
       Option(uri).flatMap(uri => Option(uri.getScheme)).foreach { scheme =>
         if (
           fs != null && conf.getBoolean(s"fs.$scheme.impl.disable.cache", false)

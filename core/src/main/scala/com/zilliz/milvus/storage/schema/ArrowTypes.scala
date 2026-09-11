@@ -6,11 +6,14 @@ import org.apache.arrow.vector.types.FloatingPointPrecision
 import com.zilliz.milvus.storage.DataParseException
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
-/** Milvus 类型到 Arrow 类型的唯一映射。不含 Spark 类型，那一层的映射在 spark 模块。 */
+/** The single mapping from Milvus type to Arrow type. Carries no Spark types;
+  * that half of the mapping lives in the spark modules.
+  */
 object ArrowTypes {
 
   /** @param dim
-    *   稠密向量的维度，非向量字段传 0。定长向量的字节宽度由它算出来。
+    *   The dimension of a dense vector; pass 0 for non-vector fields. The byte
+    *   width of a fixed-size vector is derived from it.
     */
   def toArrowType(dim: Int, dataType: MilvusDataType): ArrowType = {
     dataType match {

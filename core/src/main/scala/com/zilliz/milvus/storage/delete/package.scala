@@ -1,7 +1,8 @@
 package com.zilliz.milvus.storage
 
-/** 删除文件解码，按行号置位。
+/** Decodes delete files into a bitset indexed by row number.
   *
-  * 主要类型：DeleteBitset、DeltaLogDecoder。 承载的功能：R8（见 docs/design/capabilities.md）。
+  * Main types: DeleteBitset, DeltaLogDecoder. Capabilities: R8 (see
+  * docs/design/capabilities.md).
   */
 package object delete

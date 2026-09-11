@@ -3,14 +3,17 @@ package com.zilliz.milvus.storage.schema
 import com.zilliz.milvus.storage.DataParseException
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
-/** Milvus 字段类型的判定与取维。
+/** Predicates over Milvus field types, and reading a field's dimension.
   *
-  * 存储格式里的 schema 就是 schema.proto 的 CollectionSchema，core 不另建一套
-  * 模型，只在它上面提供判定，避免两份真相。
+  * The schema in the storage format is exactly the CollectionSchema from
+  * schema.proto. Core does not build a parallel model of it; it only adds
+  * predicates on top, so there is one source of truth rather than two.
   */
 object MilvusTypes {
 
-  /** 按定长二进制落盘的稠密向量。SparseFloatVector 不在其中，它落变长二进制。 */
+  /** Dense vectors, which land as fixed-size binary. SparseFloatVector is not
+    * one of them: it lands as variable-width binary.
+    */
   val DenseVectorTypes: Set[MilvusDataType] = Set(
     MilvusDataType.FloatVector,
     MilvusDataType.BinaryVector,
@@ -22,7 +25,9 @@ object MilvusTypes {
   def isDenseVectorType(dataType: MilvusDataType): Boolean =
     DenseVectorTypes.contains(dataType)
 
-  /** 向量字段都带 dim，且必须落进 Int 范围：Arrow 的 FixedSizeBinary 宽度是 int。 */
+  /** Every vector field carries a dim, and it has to fit in an Int: the width
+    * of Arrow's FixedSizeBinary is an int.
+    */
   def parseVectorDimension(fieldName: String, rawDimension: String): Long = {
     val dimension =
       try rawDimension.toLong
@@ -40,7 +45,9 @@ object MilvusTypes {
     dimension
   }
 
-  /** 从 typeParams 里取 dim；没有就是 schema 有问题，不给默认值。 */
+  /** Reads dim out of typeParams. A missing dim means the schema is wrong, so
+    * there is no default.
+    */
   def dimensionOf(fieldSchema: FieldSchema): Int = {
     fieldSchema.typeParams
       .find(_.key == "dim")

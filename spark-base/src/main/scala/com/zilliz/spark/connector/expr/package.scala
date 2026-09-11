@@ -1,7 +1,7 @@
 package com.zilliz.spark.connector
 
-/** DataSource V2 Predicate 到 IR 的翻译。
+/** Translates DataSource V2 predicates into the core expression IR.
   *
-  * 承载的功能：R6（见 docs/design/capabilities.md）。
+  * Capabilities: R6 (see docs/design/capabilities.md).
   */
 package object expr

@@ -1,10 +1,10 @@
 package com.zilliz.milvus.client
 
-/** 连不上 Milvus。 */
+/** Milvus could not be reached. */
 case class MilvusConnectionException(message: String) extends Exception(message)
 
-/** RPC 返回了非成功状态。 */
+/** An RPC came back with a non-success status. */
 case class MilvusRpcException(message: String) extends Exception(message)
 
-/** Milvus 侧限流，调用方应退避重试。 */
+/** Milvus is rate limiting; the caller should back off and retry. */
 case class MilvusRateLimitException(message: String) extends Exception(message)

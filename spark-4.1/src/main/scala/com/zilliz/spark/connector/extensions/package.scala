@@ -1,7 +1,8 @@
 package com.zilliz.spark.connector
 
-/** SparkSessionExtensions、SQL 解析器扩展、优化规则。
+/** SparkSessionExtensions, the SQL parser extension and the optimizer rules.
   *
-  * 承载的功能：capabilities.md 未把编号落到本包（见 docs/design/capabilities.md）。
+  * capabilities.md does not pin any capability id to this package (see
+  * docs/design/capabilities.md).
   */
 package object extensions

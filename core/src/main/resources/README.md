@@ -1,3 +1,5 @@
-# core 的 resources
+# core resources
 
-1.x 的 `src/main/resources/milvus-segment-manifest*.avsc` 迁到这里（modules.md §5），段清单的 Avro schema 由 `core.manifest` 读。
+The Avro schemas for segment manifests, `milvus-segment-manifest*.avsc`, moved
+here from the 1.x `src/main/resources` (section 5 of docs/design/modules.md).
+`core.manifest` reads them by format version.

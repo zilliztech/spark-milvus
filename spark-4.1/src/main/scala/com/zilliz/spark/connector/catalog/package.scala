@@ -1,8 +1,9 @@
 package com.zilliz.spark.connector
 
-/** MilvusCatalog：TableCatalog、SupportsNamespaces、loadTable 的快照重载；createTable
-  * 的接口差异按线。
+/** MilvusCatalog: TableCatalog, SupportsNamespaces, and the loadTable overload
+  * that resolves a snapshot. The createTable signature differs between Spark
+  * lines, which is why this package is per line rather than shared.
   *
-  * 承载的功能：R1、R2、C1、C2、A6（见 docs/design/capabilities.md）。
+  * Capabilities: R1, R2, C1, C2, A6 (see docs/design/capabilities.md).
   */
 package object catalog

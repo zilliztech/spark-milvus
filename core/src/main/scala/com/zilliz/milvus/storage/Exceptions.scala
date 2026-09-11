@@ -1,7 +1,9 @@
 package com.zilliz.milvus.storage
 
-/** 解析存储格式里的 schema 或数据时的失败：缺字段参数、维度非法、类型不认识。 */
+/** A schema or data value in the storage format could not be parsed: a missing
+  * field parameter, an out-of-range dimension, an unrecognized type code.
+  */
 case class DataParseException(message: String) extends Exception(message)
 
-/** 类型映射不支持的组合。 */
+/** A type combination the mapping does not support. */
 case class DataTypeException(message: String) extends Exception(message)

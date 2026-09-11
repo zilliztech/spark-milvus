@@ -1,7 +1,8 @@
 package com.zilliz.spark.connector.apps
 
-/** BackfillApp、配置、join 键、列映射、merge 模式、结果 JSON。
+/** BackfillApp, its configuration, join keys, column mapping, merge modes and
+  * the result JSON.
   *
-  * 承载的功能：O1（见 docs/design/capabilities.md）。
+  * Capabilities: O1 (see docs/design/capabilities.md).
   */
 package object backfill

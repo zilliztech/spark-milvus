@@ -1,7 +1,7 @@
 package com.zilliz.milvus.storage.compat
 
-/** Storage V2 packed 段的 SegmentReader。
+/** SegmentReader for Storage V2 packed segments, which carry no manifest.
   *
-  * 承载的功能：K1（见 docs/design/capabilities.md）。
+  * Capabilities: K1 (see docs/design/capabilities.md).
   */
 package object v2packed

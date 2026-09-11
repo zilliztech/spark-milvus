@@ -1,7 +1,7 @@
 package com.zilliz.spark.connector.apps
 
-/** VectorBruteForceSearch、SQL 函数扩展。
+/** Brute-force vector search and the SQL function extensions that expose it.
   *
-  * 承载的功能：V5（见 docs/design/capabilities.md）。
+  * Capabilities: V5 (see docs/design/capabilities.md).
   */
 package object search

@@ -9,7 +9,7 @@ import com.zilliz.milvus.storage.DataParseException
 import com.zilliz.spark.connector.serde.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
-/** Milvus 类型到 Spark 类型的映射。到 Arrow 类型的那一半在 core 的
+/** Milvus type to Spark type. The Arrow half of the mapping lives in core, in
   * com.zilliz.milvus.storage.schema.ArrowTypes。
   */
 object DataTypeUtil {

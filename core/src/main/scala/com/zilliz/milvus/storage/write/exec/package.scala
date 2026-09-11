@@ -1,8 +1,9 @@
 package com.zilliz.milvus.storage.write
 
-/** 段写出、暂存布局；碰 native。
+/** Writing segments out and the staging layout. This is where the write path
+  * calls into the native layer.
   *
-  * 主要类型：SegmentWriter、StagingLayout。 承载的功能：W1、W2、G2（见
-  * docs/design/capabilities.md）。
+  * Main types: SegmentWriter, StagingLayout. Capabilities: W1, W2, G2 (see
+  * docs/design/capabilities.md).
   */
 package object exec

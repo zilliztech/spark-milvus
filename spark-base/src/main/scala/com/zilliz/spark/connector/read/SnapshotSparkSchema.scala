@@ -6,10 +6,11 @@ import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
 import com.zilliz.milvus.storage.snapshot.{CollectionSchema, Field}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
-/** 快照里的 CollectionSchema 到 Spark StructType。
+/** The CollectionSchema inside a snapshot to a Spark StructType.
   *
-  * 这一段原来长在 MilvusSnapshotReader 上，是它唯一的 Spark 依赖。快照解析归第 2 层，Spark 类型归第 3
-  * 层，所以拆开。
+  * This used to hang off MilvusSnapshotReader and was that file's only Spark
+  * dependency. Snapshot parsing belongs to layer 2 and Spark types to layer 3,
+  * hence the split.
   */
 object SnapshotSparkSchema {
 

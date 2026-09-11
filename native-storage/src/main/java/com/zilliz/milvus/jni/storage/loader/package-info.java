@@ -1,6 +1,7 @@
 /**
- * 按 os 和 arch 解压 .so 到带版本号的目录后 System.load。
+ * Extracts the shared library for the running os and arch into a
+ * version-stamped directory, then System.load()s it.
  *
- * 承载的功能：R4（见 docs/design/capabilities.md）。
+ * <p>Capabilities: R4 (see docs/design/capabilities.md).
  */
 package com.zilliz.milvus.jni.storage.loader;

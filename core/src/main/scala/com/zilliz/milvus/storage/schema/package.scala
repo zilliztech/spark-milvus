@@ -1,8 +1,9 @@
 package com.zilliz.milvus.storage
 
-/** 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型。
+/** The single mapping between field id, field name, Milvus type and Arrow type.
+  * Carries no Spark types.
   *
-  * 主要类型：SchemaMapper、MilvusTypes、ArrowTypes。 承载的功能：R15、C3（见
-  * docs/design/capabilities.md）。
+  * Main types: SchemaMapper, MilvusTypes, ArrowTypes. Capabilities: R15, C3
+  * (see docs/design/capabilities.md).
   */
 package object schema

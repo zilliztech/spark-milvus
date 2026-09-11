@@ -1,11 +1,14 @@
 package com.zilliz.milvus.storage
 
-/** Milvus 列值的字节编码与解码，纯 JVM，读写两侧共用。
+/** Byte-level encoding and decoding of Milvus column values. Pure JVM, shared
+  * by the read and write paths.
   *
-  * Float16 与 BFloat16 的拆装、稀疏向量的 (index, value) 编码都在这里。 和 schema 包的分工：schema
-  * 回答「这个字段是什么类型」，codec 回答 「这个类型的一个值在字节里长什么样」。
+  * Float16 and BFloat16 packing lives here, as does the (index, value) encoding
+  * of sparse vectors. The split against the schema package: schema answers
+  * "what type is this field", codec answers "what does one value of that type
+  * look like in bytes".
   *
-  * 主要类型：FloatConverter、SparseFloatVectorConverter。 承载的功能：R15、W3（见
-  * docs/design/capabilities.md）。
+  * Main types: FloatConverter, SparseFloatVectorConverter. Capabilities: R15,
+  * W3 (see docs/design/capabilities.md).
   */
 package object codec

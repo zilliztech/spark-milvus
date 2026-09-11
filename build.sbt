@@ -118,18 +118,22 @@ lazy val nativeTestSettings: Seq[Setting[_]] = Seq(
 lazy val root = (project in file("."))
   .configs(IntegrationTest)
   .aggregate(v2Modules: _*)
-  // 迁移期：源码已经全部搬进各模块，根项目只负责把 fat jar 装出来，
-  // 产物名与发布坐标跟 1.x 完全一致。
+  // Migration-time: every source file now lives in a module, and the root
+  // project only assembles the fat jar. The artifact name and publish
+  // coordinates are identical to 1.x.
   .dependsOn(spark40, apps40)
   .settings(
-    // 2.0 的新模块只跟着编译和测试。assembly、publish 不下发到子模块，Docker
-    // 构建和发布的行为与 1.x 完全一致。
+    // The 2.0 modules only follow along for compile and test. assembly and
+    // publish are not delegated to subprojects, so the Docker build and the
+    // release flow behave exactly as they did in 1.x.
     assembly / aggregate := false,
     publish / aggregate := false,
     publishLocal / aggregate := false,
-    // 显示名跟仓库目录走，元构建才会叫 spark-milvus-build；发布坐标保持
-    // spark-connector，云上 spark-data-service 钉的是它。assembly 的文件名默认
-    // 从 name 推，这里钉死，否则 Dockerfile 找不到产物。
+    // The display name follows the repository directory, so only the meta-build
+    // is called spark-milvus-build. The publish coordinate stays
+    // spark-connector because that is what spark-data-service pins in the
+    // cloud. sbt-assembly derives the jar name from `name` by default, so pin
+    // it here or the Dockerfile will not find the artifact.
     name := "spark-milvus",
     moduleName := "spark-connector",
     assembly / assemblyJarName := s"spark-connector-assembly-${version.value}.jar",
@@ -182,18 +186,19 @@ lazy val root = (project in file("."))
     // Add milvus-storage JNI library as unmanaged dependency
     Compile / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar",
 
-    // 老 log binding (slf4j-log4j12 / reload4j / log4j 1.x) 与 spark 的 log4j2 冲突，
-    // 全局排除掉。
+    // The old log bindings (slf4j-log4j12 / reload4j / log4j 1.x) collide with
+    // Spark's log4j2, so exclude them globally.
     excludeDependencies ++= Seq(
       ExclusionRule("org.slf4j", "slf4j-log4j12"),
       ExclusionRule("org.slf4j", "slf4j-reload4j"),
       ExclusionRule("log4j", "log4j"),
       ExclusionRule("ch.qos.reload4j", "reload4j")
     ),
-    // 在 assembly 阶段过滤掉 slf4j-api jar：
-    // 编译时仍可用（来自传递依赖），但不进 fat jar，运行时由 spark 镜像
-    // /opt/spark/jars/slf4j-api-2.x.jar 提供，避免 userClassPathFirst=true 时
-    // Logger 被加载两份触发 LinkageError
+    // Filter the slf4j-api jar out at assembly time. It stays available at
+    // compile time through transitive dependencies but never enters the fat
+    // jar; at runtime the Spark image provides
+    // /opt/spark/jars/slf4j-api-2.x.jar. Bundling it loads Logger twice under
+    // spark.executor.userClassPathFirst=true and raises LinkageError.
     assembly / assemblyExcludedJars := {
       val cp = (assembly / fullClasspath).value
       cp.filter { f =>
@@ -229,7 +234,8 @@ lazy val root = (project in file("."))
       arrowMemoryNetty,
       arrowCData
     ),
-    // proto 的生成移到 core（消息）和 client（服务），这里只消费它们的产物。
+    // Proto generation moved to core (messages) and client (services); the root
+    // project only consumes what they produce.
     Compile / packageBin / mappings ++= {
       val bases = Seq(
         (core / Compile / PB.targets).value.head.outputPath,
@@ -295,15 +301,16 @@ assembly / assemblyMergeStrategy := {
 
 
 // ---------------------------------------------------------------------------
-// 2.0 的多模块骨架。docs/design/modules.md 是契约。
+// The 2.0 multi-module layout. docs/design/modules.md is the contract.
 //
-// 1.x 的代码仍然在 root 的 src/main/scala 里，root 的设置一个字没动；新模块现在
-// 只有包结构，迁移一个模块一个模块来（modules.md 第 5 节）。依赖只能向下：
+// Dependencies only point downward:
 //   apps-<line> -> spark-<line> -> compat、client -> core -> native-*
-// spark-base 只是四条线共享的源码目录，不是 project。把它做成 project 去不掉
-// IDE 里那个合成的 spark-base-sources 模块 —— 合成模块来自「多个项目声明同一个
-// 源码根」，不是来自「它不是项目」；而「共享源码只能用各线都有的 API」这条约束，
-// spark-3.5 用最低的线编译它时本来就提供了。
+// spark-base is only a source directory shared by the four lines, not a
+// project. Making it a project does not remove the synthetic
+// spark-base-sources module the IDE shows: that module comes from "several
+// projects declare the same source root", not from "it is not a project". And
+// the constraint that shared source may only use APIs present on every line is
+// already enforced by spark-3.5 compiling it against the lowest line.
 // ---------------------------------------------------------------------------
 
 lazy val v2Modules: Seq[ProjectReference] = Seq(
@@ -312,7 +319,7 @@ lazy val v2Modules: Seq[ProjectReference] = Seq(
   apps40, integration40
 )
 
-// 第 1 层：两个原生库的封装。纯 Java，产物不带 Scala 后缀。
+// Layer 1: the two native library wrappers. Plain Java, no Scala suffix.
 lazy val nativeStorage = Project("native-storage", file("native-storage"))
   .settings(name := "native-storage",
     moduleName := "spark-milvus-native-storage",
@@ -323,24 +330,28 @@ lazy val nativeVector = Project("native-vector", file("native-vector"))
     moduleName := "spark-milvus-native-vector",
     Modules.javaOnly)
 
-// 第 2 层：核心层。全部计算在这里，源码不出现 org.apache.spark。
+// Layer 2: the core layer. All computation happens here, and no source file
+// mentions org.apache.spark.
 lazy val core = Project("core", file("core"))
   .dependsOn(nativeStorage, nativeVector)
   .settings(
     name := "core",
     moduleName := "spark-milvus-core",
     Modules.shared,
-    // Arrow 由 spark-<line> 钉；core 只按 C Data Interface 编译。
+    // Arrow is pinned by spark-<line>; core compiles against the interfaces.
     libraryDependencies ++= Seq(
-      // 只按接口编译，实现由 spark-<line> 钉版本后在运行时提供。
+      // Compiled against the interfaces only; the implementation arrives at
+      // runtime at the version spark-<line> pinned.
       "org.apache.arrow" % "arrow-vector" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-memory-core" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-c-data" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-format" % Versions.line("4.0").arrow % "provided",
-      // 存储访问的唯一实现走 Hadoop FileSystem，运行时用 Spark 自带的那份。
+      // The only storage implementation goes through the Hadoop FileSystem
+      // API, using the copy Spark ships at runtime.
       hadoopCommon,
-      // 格式本身要的三样：快照与 backup meta 是 JSON，段清单是 Avro，
-      // 删除文件和列组是 Parquet。
+      // Three formats the storage layer itself needs: snapshots and backup
+      // metadata are JSON, segment manifests are Avro, delete files and column
+      // groups are Parquet.
       jacksonDatabind,
       jacksonScala,
       avro,
@@ -348,27 +359,32 @@ lazy val core = Project("core", file("core"))
       scalapbRuntime % "protobuf",
       scalaTest % Test
     ),
-    // parquet-hadoop 传递进来的 jackson-databind 比 jackson-module-scala 新，
-    // 运行时直接抛 JsonMappingException。钉死成同一个版本。
+    // parquet-hadoop pulls in a jackson-databind newer than
+    // jackson-module-scala, which throws JsonMappingException at runtime. Pin
+    // them to one version.
     dependencyOverrides ++= Seq(
       jacksonDatabind,
       "com.fasterxml.jackson.core" % "jackson-core" % Versions.jackson,
       "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson
     ),
-    // Milvus 的存储格式本身是 protobuf 定义的：快照里嵌着 CollectionSchema，
-    // Manifest 的字段描述也来自 schema.proto。所以这两个不带 service 的文件在
-    // core 生成（grpc = false）；带 service 的在 client 生成，靠 include 路径
-    // 复用这里的产物，不重复生成。
+    // The Milvus storage format is itself defined in protobuf: a snapshot
+    // embeds a CollectionSchema, and the manifest's field descriptions come
+    // from schema.proto. So the two service-free files are generated here with
+    // grpc = false, and the ones carrying services are generated in client,
+    // which reuses these outputs through its include path rather than
+    // generating the same .proto twice.
     Compile / PB.protoSources := Seq(milvusProtoDir.value),
     Compile / PB.generate / includeFilter := "common.proto" | "schema.proto",
     Compile / PB.targets := Seq(
       scalapb.gen(grpc = false) -> (Compile / sourceManaged).value / "scalapb"
     )
-    // TODO 决策 17：Milvus 表达式的 Plan.g4 与 antlr runtime 放哪。Spark 3.5 带
-    // antlr 4.9.3、4.x 带 4.13.1，生成的解析器不通用，所以这里先不加 antlr 依赖。
+    // TODO decision 17: where Plan.g4 for Milvus expressions and the antlr
+    // runtime live. Spark 3.5 ships antlr 4.9.3 and 4.x ships 4.13.1, and the
+    // generated parsers are not interchangeable, so no antlr dependency yet.
   )
 
-// 三个非标准入口的适配器，产出 core 的 Snapshot 或 SegmentReader。
+// Adapters for the three non-standard entry points. Each one produces a core
+// Snapshot or SegmentReader.
 lazy val compat = Project("compat", file("compat"))
   .dependsOn(core)
   .settings(
@@ -381,8 +397,9 @@ lazy val compat = Project("compat", file("compat"))
       jacksonScala,
       avro,
       parquetHadoop,
-      // 用例用 parquet-mr 的 ExampleParquetWriter 写真 parquet，它要
-      // FileOutputFormat；生产路径不需要，所以只在 Test 里。
+      // The tests write real parquet with parquet-mr's ExampleParquetWriter,
+      // which needs FileOutputFormat. The production path does not, so this
+      // stays in Test scope.
       hadoopMapreduceClientCore % Test,
       scalaTest % Test
     ),
@@ -393,7 +410,8 @@ lazy val compat = Project("compat", file("compat"))
     )
   )
 
-// Milvus 在线服务的客户端：DDL、Delete、Procedure 用到的调用。
+// The client for the online Milvus service: the calls behind DDL, delete and
+// the procedures.
 lazy val client = Project("client", file("client"))
   .dependsOn(core)
   .settings(
@@ -413,8 +431,9 @@ lazy val client = Project("client", file("client"))
       "com.fasterxml.jackson.core" % "jackson-core" % Versions.jackson,
       "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson
     ),
-    // common.proto 与 schema.proto 由 core 生成，这里只把它们放进 include 路径，
-    // 生成的服务桩引用 core 里已有的消息类。
+    // common.proto and schema.proto are generated in core; here they only go on
+    // the include path, so the generated service stubs reference the message
+    // classes core already produced.
     Compile / PB.protoSources := Seq(milvusProtoDir.value),
     Compile / PB.generate / excludeFilter := "common.proto" | "schema.proto",
     Compile / PB.targets := Seq(
@@ -422,7 +441,7 @@ lazy val client = Project("client", file("client"))
     )
   )
 
-// 第 3 层：每条 Spark 线一个 project，共享 spark/base 的源码。
+// Layer 3: one project per Spark line, all sharing the spark-base sources.
 def sparkProject(l: Versions.SparkLine): Project =
   Project(l.projectId, file(s"spark-${l.id}"))
     .dependsOn(core, compat, client)
@@ -438,15 +457,18 @@ def sparkProject(l: Versions.SparkLine): Project =
         Modules.sparkDeps(l) ++ Modules.arrowDeps(l) ++ Modules.legacyDeps(l),
       libraryDependencies += scalaTest % Test,
       inConfig(Test)(Modules.nativeTest),
-      // 迁移期：1.x 的写路径还在用上游 milvus-storage 的 Java 绑定，
-      // native-storage 替换它之前，四条线都要这个 unmanaged jar。
+      // Migration-time: the 1.x write path still uses the upstream
+      // milvus-storage Java binding, so until native-storage replaces it all
+      // four lines need this unmanaged jar.
       Compile / unmanagedJars += (ThisBuild / baseDirectory).value /
         "milvus-storage" / "java" / "target" / "scala-2.13" /
         "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar",
-      // fat jar 是同一个 project 上的一个任务，带 classifier 发布，不需要单独
-      // 的 bundle 模块（Maven 才需要）。
-      // TODO shade 规则按 modules.md 第 4 节第 6 条：只 relocate protobuf 和
-      // guava，com.zilliz.milvus.jni.** 与 org.apache.arrow.** 不 relocate。
+      // The fat jar is a task on this same project, published with a
+      // classifier. No separate bundle module is needed; that is a Maven
+      // limitation, not an sbt one.
+      // TODO shade rules per constraint 6 in section 4 of modules.md: relocate
+      // protobuf and guava only, never com.zilliz.milvus.jni.** or
+      // org.apache.arrow.**.
       assembly / assemblyJarName := s"spark-milvus-${l.id}-bundle.jar",
       assembly / artifact := (assembly / artifact).value.withClassifier(Some("bundle"))
     )
@@ -456,9 +478,12 @@ lazy val spark40 = sparkProject(Versions.line("4.0"))
 lazy val spark41 = sparkProject(Versions.line("4.1"))
 lazy val spark42 = sparkProject(Versions.line("4.2"))
 
-// 第 4 层：对外的入口，一个 fat jar。四个包互不依赖。源码直接放在这一条线的
-// 目录里，不设共享的 base —— 只有一个消费者时，共享目录只是多一层。
-// 名字不用 ops：内部已有一个叫 OPS 的系统，容易混。
+// Layer 4: the entry points users run, shipped as one fat jar. The four
+// packages do not depend on each other. The sources sit directly in this line's
+// directory with no shared base: with a single consumer, a shared directory is
+// just one more level.
+// The module is not called ops because an internal system already has that
+// name.
 def appsProject(l: Versions.SparkLine, sparkLine: Project): Project =
   Project(s"apps${l.projectId.stripPrefix("spark")}", file(s"apps-${l.id}"))
     .dependsOn(sparkLine)
@@ -475,13 +500,16 @@ def appsProject(l: Versions.SparkLine, sparkLine: Project): Project =
         "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar"
     )
 
-// 只在云上跑的那条线上建一个；别的线有人要了再加一行。
+// Built only for the line that runs in the cloud; another line is one more
+// line of configuration.
 lazy val apps40 = appsProject(Versions.line("4.0"), spark40)
 
 
-// 集成测试。需要 MinIO 和 Milvus，不发布；用例写在这一条线的 src/test/scala。
-// 名字不用 it：sbt 内置的 IntegrationTest 配置
-// 从 1.9 起废弃、sbt 2 已删除，2.0 不再用它，沿用这个词会误导。
+// Integration tests. They need MinIO and Milvus, are never published, and live
+// in this line's src/test/scala.
+// The module is not called it: sbt's built-in IntegrationTest configuration was
+// deprecated in 1.9 and removed in sbt 2, 2.0 does not use it, and reusing the
+// word would mislead.
 def integrationProject(l: Versions.SparkLine, sparkLine: Project, appsLine: Project): Project =
   Project(s"integration${l.projectId.stripPrefix("spark")}", file(s"integration-${l.id}"))
     .dependsOn(sparkLine, appsLine)
@@ -494,5 +522,6 @@ def integrationProject(l: Versions.SparkLine, sparkLine: Project, appsLine: Proj
       inConfig(Test)(Modules.nativeTest)
     )
 
-// 集成测试要真的 Milvus 和 MinIO，跑一条线够了；某条线出特有的问题再加。
+// Integration tests need a real Milvus and MinIO, so one line is enough; add
+// another when a line shows a problem of its own.
 lazy val integration40 = integrationProject(Versions.line("4.0"), spark40, apps40)

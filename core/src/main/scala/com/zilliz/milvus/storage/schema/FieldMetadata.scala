@@ -1,16 +1,21 @@
 package com.zilliz.milvus.storage.schema
 
-/** 字段元数据的键名。
+/** The field-metadata key names.
   *
-  * Milvus 的类型信息在 Arrow 和 Spark 的 schema 里都没有对应表示：Arrow 只知道 一列是
-  * FixedSizeBinary，Spark 只知道它是 BinaryType，谁也不知道它是维度 128 的 FloatVector。这两个键就是把
-  * Milvus 类型和维度挂在字段上带下去的地方， 读写两侧、Arrow 侧和 Spark 侧共用同一套键名，所以它们属于 core。
+  * Neither Arrow nor Spark has a way to express a Milvus type: Arrow only knows
+  * a column is FixedSizeBinary, Spark only knows it is BinaryType, and neither
+  * knows it is a 128-dimension FloatVector. These two keys are where the Milvus
+  * type and dimension ride along on the field. The read and write paths, the
+  * Arrow side and the Spark side all share one set of key names, so they belong
+  * to core.
   */
 object FieldMetadata {
 
-  /** Milvus DataType 的枚举值，按 Long 存。 */
+  /** The Milvus DataType enum value, stored as a Long. */
   val MilvusDataTypeMetadataKey = "milvus.data_type"
 
-  /** 稠密向量的维度，按 Long 存。可空稠密向量落变长二进制时靠它还原宽度。 */
+  /** The dimension of a dense vector, stored as a Long. A nullable dense vector
+    * lands as variable-width binary, and this is what recovers its width.
+    */
   val MilvusVectorDimensionMetadataKey = "milvus.vector_dim"
 }

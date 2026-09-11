@@ -1,12 +1,15 @@
 package com.zilliz.milvus.storage
 
-/** 对象存储读写的最小接口：open、list、exists、stat、create，没有 rename 和 delete。
+/** The smallest object-storage interface the format needs: open, list, exists,
+  * stat, create. No rename and no delete.
   *
-  * core 源码不出现 org.apache.hadoop，换实现时不改 core 的公开签名。唯一实现在
-  * `io.hadoop`，hadoop-common 标 provided，运行时用 Spark 自带的那份。 executor 上拿到的是可序列化的
-  * ObjectStoreFactory，不是活的 Configuration。
+  * No core source outside `io.hadoop` mentions org.apache.hadoop, so swapping
+  * the implementation does not change any core signature. The single
+  * implementation lives in `io.hadoop` with hadoop-common declared provided, so
+  * at runtime it uses the copy Spark ships. Executors receive a serializable
+  * ObjectStoreFactory, never a live Hadoop Configuration.
   *
-  * 主要类型：ObjectStore、ObjectStoreFactory、FileInfo、SeekableInput。 承载的功能：R2、R3、W1（见
-  * docs/design/capabilities.md）。
+  * Main types: ObjectStore, ObjectStoreFactory, FileInfo, SeekableInput.
+  * Capabilities: R2, R3, W1 (see docs/design/capabilities.md).
   */
 package object io

@@ -39,9 +39,11 @@ object Dependencies {
     "org.apache.spark" %% "spark-mllib" % sparkVersion % "provided,test" excludeAll(
       ExclusionRule(organization = "org.apache.arrow")
     )
-  // Hadoop / Parquet 已由 Spark 发行版（镜像 /opt/spark/jars）提供，
-  // 标 provided 避免被 sbt assembly 打入 fat jar，否则与运行时 classpath 冲突
-  // 引发 "X not a subtype of Y" 类加载错误（特别是开 userClassPathFirst 时）
+  // Hadoop and Parquet already come with the Spark distribution (in the image,
+  // /opt/spark/jars). Marking them provided keeps sbt-assembly from bundling
+  // them into the fat jar, which would collide with the runtime classpath and
+  // surface as "X not a subtype of Y" class-loading errors, especially with
+  // spark.executor.userClassPathFirst=true.
   lazy val parquetHadoop =
     "org.apache.parquet" % "parquet-hadoop" % parquetVersion % "provided,test"
   // parquet-avro gives us AvroParquetWriter which supports withExtraMetaData

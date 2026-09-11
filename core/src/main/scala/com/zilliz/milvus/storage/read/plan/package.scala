@@ -1,8 +1,9 @@
 package com.zilliz.milvus.storage.read
 
-/** 分区规划，纯 JVM，可序列化。
+/** Partition planning. Pure JVM and serializable, so it can be built on the
+  * driver and shipped to executors.
   *
-  * 主要类型：Partitioner、ReadPlan、InputSpec。 承载的功能：R3、R5、R10（见
-  * docs/design/capabilities.md）。
+  * Main types: Partitioner, ReadPlan, InputSpec. Capabilities: R3, R5, R10 (see
+  * docs/design/capabilities.md).
   */
 package object plan

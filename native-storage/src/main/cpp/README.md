@@ -1,5 +1,12 @@
-# native-storage 的 C 源码
+# native-storage C sources
 
-放 JNI 源码：milvus-storage 的 `loon_*` C 接口的封装，一个 `loon_*` 对应 `com.zilliz.milvus.native.storage.jni.StorageNative` 的一个 native 方法，句柄是 long，结果码转异常。C 头文件里不出现 JNI 类型，JNI 只在 `jni` 包（modules.md §4 第 2 条）。
+Holds the JNI sources that wrap milvus-storage's `loon_*` C interface. Each
+`loon_*` entry point maps to one native method on
+`com.zilliz.milvus.jni.storage.StorageNative`; handles are longs and result
+codes become exceptions.
 
-构建脚本在模块实现时加，放 `native/storage/build/`（构建与 patchelf 脚本）；产物按 `native/{os}-{arch}/` 平铺进 jar。
+No JNI type appears in a C header; JNI lives only in the `jni` package
+(constraint 2, section 4 of docs/design/modules.md).
+
+The build and patchelf scripts land here when the module is implemented. The
+artifacts go into the jar flattened under `native/{os}-{arch}/`.

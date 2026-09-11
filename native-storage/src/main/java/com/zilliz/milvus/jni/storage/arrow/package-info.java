@@ -1,6 +1,7 @@
 /**
- * ArrowArray、ArrowSchema、ArrowArrayStream 三个 C 结构体的分配与 release。
+ * Allocation and release of the three Arrow C structs: ArrowArray, ArrowSchema
+ * and ArrowArrayStream.
  *
- * 承载的功能：R4（见 docs/design/capabilities.md）。
+ * <p>Capabilities: R4 (see docs/design/capabilities.md).
  */
 package com.zilliz.milvus.jni.storage.arrow;

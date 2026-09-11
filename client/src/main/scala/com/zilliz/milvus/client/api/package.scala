@@ -1,8 +1,9 @@
 package com.zilliz.milvus.client
 
-/** MilvusClient：DDL、describe、Delete、快照、索引、load、release、flush、compact、BatchUpdateManifest、RegisterSegments（待
-  * Milvus 提供）；proto 的 DataType 与 core 的 MilvusType 互转。
+/** MilvusClient: DDL, describe, delete, snapshots, indexes, load, release,
+  * flush, compact, BatchUpdateManifest, and RegisterSegments once Milvus offers
+  * it. Also converts between the protobuf DataType and the core type model.
   *
-  * 承载的功能：C1、C2、W5、A1、A2、A3、A4、A5、A6（见 docs/design/capabilities.md）。
+  * Capabilities: C1, C2, W5, A1 through A6 (see docs/design/capabilities.md).
   */
 package object api

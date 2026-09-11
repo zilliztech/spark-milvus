@@ -1,8 +1,8 @@
 package com.zilliz.spark.connector
 
-/** ScanBuilder、Scan、Batch、InputPartition、ColumnarPartitionReader、ColumnVector
-  * 实现。
+/** ScanBuilder, Scan, Batch, InputPartition, the columnar PartitionReader and
+  * the ColumnVector implementations.
   *
-  * 承载的功能：R4、R5、R11、R16、R18（见 docs/design/capabilities.md）。
+  * Capabilities: R4, R5, R11, R16, R18 (see docs/design/capabilities.md).
   */
 package object scan

@@ -1,7 +1,8 @@
 package com.zilliz.spark.connector.apps
 
-/** gRPC Insert 的 TableProvider、DataSource V2 写栈、format("milvus") 短名注册。
+/** The gRPC Insert write path: TableProvider, the DataSource V2 write stack and
+  * the `format("milvus")` short-name registration.
   *
-  * 承载的功能：W7（见 docs/design/capabilities.md）。
+  * Capabilities: W7 (see docs/design/capabilities.md).
   */
 package object legacy

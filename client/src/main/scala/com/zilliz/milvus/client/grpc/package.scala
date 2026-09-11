@@ -1,8 +1,9 @@
 package com.zilliz.milvus.client
 
-/** ScalaPB 生成的 stub，重试拦截器。
+/** The ScalaPB-generated service stubs and the retry interceptor.
   *
-  * 承载的功能：C1、C2、W5、A1 到 A6 的 RPC 由本包的 stub 发出，capabilities.md 的实现位置列 把这几条记在
-  * client.api（见 docs/design/capabilities.md）。
+  * Every RPC behind C1, C2, W5 and A1 through A6 leaves through this package,
+  * but capabilities.md records those rows against client.api (see
+  * docs/design/capabilities.md).
   */
 package object grpc
