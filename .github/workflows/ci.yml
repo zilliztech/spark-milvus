@@ -39,6 +39,11 @@ jobs:
       - name: Check formatting
         run: sbt scalafmtCheckAll
 
+      # The capability index ties a feature in capabilities.md to the package
+      # that implements it. Nothing else notices when it drifts.
+      - name: Check the capability index
+        run: sbt checkCapabilityIndex
+
       # `compile` aggregates over the ten unit-tested modules, which covers all
       # four Spark lines against the shared spark-base sources. integration-4.0
       # is outside the aggregate because its suites need a live Milvus, so it is

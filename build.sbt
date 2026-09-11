@@ -105,6 +105,9 @@ lazy val root = (project in file("."))
     // it here or the Dockerfile will not find the artifact.
     name := "spark-milvus",
     moduleName := "spark-connector",
+    // Keeps docs/design/capabilities.md and the package docs from drifting
+    // apart. See "Keeping the index true" in AGENTS.md.
+    CapabilityIndex.settings,
     assembly / assemblyJarName := s"spark-connector-assembly-${version.value}.jar",
     assembly / parallelExecution := true,
     assembly / assemblyPackageScala / assembleArtifact := false,

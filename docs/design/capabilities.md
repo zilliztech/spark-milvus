@@ -116,3 +116,16 @@ Table 接口表达不了的动作走 CALL：Spark 4 用 ProcedureCatalog，Spark
 ## 10 不做
 
 TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tantivy 文本索引）；GIS 表达式；struct 数组表达式；random_sample；DataSource V1 Filter（1.x 走 V1，2.0 只实现 V2 谓词，见 R6）；Vortex 列组的读写（milvus-storage 支持，Connector 不接）。
+
+## 11 尚未落地
+
+这几条在第 1 到第 8 节里有行，但代码里还没有任何包声明承载它们。列在这里是让
+`checkCapabilityIndex` 知道这是已知的空缺，不是索引漂移。落地时删掉对应行，并在目标包的
+`package.scala` 里写上编号。
+
+| 编号 | 为什么还没有 |
+|---|---|
+| R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
+| A7 | 清理暂存要 `spark.procedure`，那个包目前是空的，等第 3 层拆分 |
+| G5 | 指标要 native-storage 的 JNI 层留计数器，第 1 层还是占位 |
+
