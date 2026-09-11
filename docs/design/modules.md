@@ -2,14 +2,18 @@
 
 依赖只能向下：apps → spark-`<line>`（源码来自 spark-base）→ compat、client → core → native-storage、native-vector。核心层没有 Spark，原生层没有业务逻辑，对外的入口和遗留代码只在 apps。
 
-核心层不依赖 Spark 换来三件事：它在四条 Spark 线上只编一次、只出一个产物；它的测试不用拉起 SparkSession；边界由编译期检查守着。换不来的是跨语言复用 —— Ray 是 Python，依赖不了 JVM 的 jar，它共用的是第 1 层的 C 接口，Python 绑定压在上面。功能编号见 [capabilities.md](capabilities.md)，名词沿用 README 第 0 节。
+核心层不依赖 Spark 换来三件事：它在四条 Spark 线上只编一次、只出一个产物；它的测试不用拉起 SparkSession；边界由编译期检查守着。换不来的是跨语言复用 —— Ray 是 Python，依赖不了 JVM 的 jar。
+
+跨语言共用的只在第 1 层，而且只有一半：
+1. storage 那半不用我们操心。上游 milvus-storage 自带 Python 绑定（`python/` 目录），Ray 直接用上游的包，和我们的 `native-storage` 无关。
+2. vector 那半是我们的。knowhere 既没有 C 接口也没有 Python 绑定，`native-vector/src/main/cpp` 里那层 `mv_*` C shim 是唯一的跨语言资产 —— Ray 要用 knowhere，消费的是它编出的 `.so` 加 C 头文件，不是 JNI 那半。所以 shim 的接口设计要按「会有第二个调用方」来定：只传地址和长度，配置用 JSON，不出现任何 JVM 的概念。功能编号见 [capabilities.md](capabilities.md)，名词沿用 README 第 0 节。
 
 ## 1 模块
 
 | 模块 | 层 | 包名 | 依赖 | 产物 |
 |---|---|---|---|---|
 | native-storage | 第 1 层 | `com.zilliz.milvus.jni.storage` | milvus-storage 的 C 接口 | `com.zilliz:spark-milvus-native-storage`，jar 内 `native/{os}-{arch}/` 平铺 .so |
-| native-vector | 第 1 层 | `com.zilliz.milvus.jni.vector` | knowhere 的 C shim | `com.zilliz:spark-milvus-native-vector`，同上布局 |
+| native-vector | 第 1 层 | `com.zilliz.milvus.jni.vector` | knowhere 的 C shim | `com.zilliz:spark-milvus-native-vector`，同上布局。C shim 的 `.so` 与头文件另出一份，供 Ray 之类的非 JVM 调用方用 |
 | core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow C Data Interface、对象存储 SDK | `com.zilliz:spark-milvus-core_<scala>` |
 | compat | 第 2 层 | `com.zilliz.milvus.storage.compat` | core | `com.zilliz:spark-milvus-compat_<scala>` |
 | client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC | `com.zilliz:spark-milvus-client_<scala>` |
