@@ -14,7 +14,7 @@
 |---|---|---|---|---|
 | native-storage | 第 1 层 | `com.zilliz.milvus.jni.storage` | milvus-storage 的 C 接口 | `com.zilliz:spark-milvus-native-storage`，jar 内 `native/{os}-{arch}/` 平铺 .so |
 | native-vector | 第 1 层 | `com.zilliz.milvus.jni.vector` | knowhere 的 C shim | `com.zilliz:spark-milvus-native-vector`，同上布局。C shim 的 `.so` 与头文件另出一份，供 Ray 之类的非 JVM 调用方用 |
-| core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow C Data Interface、对象存储 SDK | `com.zilliz:spark-milvus-core_<scala>` |
+| core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow C Data Interface、Hadoop FileSystem（provided） | `com.zilliz:spark-milvus-core_<scala>` |
 | compat | 第 2 层 | `com.zilliz.milvus.storage.compat` | core | `com.zilliz:spark-milvus-compat_<scala>` |
 | client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC | `com.zilliz:spark-milvus-client_<scala>` |
 | spark-base | 第 3 层 | `com.zilliz.spark.connector` | 不是 sbt project，是四条线引用的源码目录 | 无 |
@@ -42,6 +42,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | `manifest` | 一个段的 Manifest：列组、删除文件、统计、索引登记 | Manifest、ColumnGroup、ManifestReader |
 | `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型 | SchemaMapper、MilvusType、ArrowTypes |
 | `path` | 三种路径形态到 (bucket, key) | StoragePath、Located |
+| `io` | 对象存储读写的最小接口和它的实现 | ObjectStore、ObjectStoreFactory、FileInfo、SeekableInput |
 | `credential` | 对象存储凭证的取用和下发 | Credentials、CredentialSource |
 | `expr` | 中间表示、Milvus 文法解析器、列批求值器、反向打印器 | Expr、PlanParser、Evaluator、ExprPrinter、Bitmap |
 | `delete` | 删除文件解码，按行号置位 | DeleteBitset、DeltaLogDecoder |
@@ -174,6 +175,7 @@ spark-milvus/
 10. 共享源码只能用各条线都有的 Spark API。这条由 spark-3.5 兜住：它用最低的那条线编译共享源码，用了高版本才有的 API，它先编译失败。
 11. 目录镜像包名。1.x 的 41 个文件不是这样（文件在 `src/main/scala/read/`，包是 `com.zilliz.spark.connector.read`），迁移时一并对齐。
 12. 模块的显示名跟目录走，发布坐标用 `moduleName` 另设。根项目显示名 `spark-milvus`（等于仓库目录），坐标仍是 `com.zilliz:spark-connector`。sbt 的 project id 不能带点，所以命令行是 `spark40` 而目录是 `spark-4.0`。
+13. core 读写存储只经 `io.ObjectStore`，源码里不出现 `org.apache.hadoop`。接口五个方法：`open`、`list`、`exists`、`stat`、`create`，没有 `rename` 和 `delete`（1.x 的 22 处调用点也没用过这两个）。Hadoop 实现放 core 的 `io.hadoop`，`hadoop-common` 标 provided，运行时用 Spark 自带的那份。executor 上拿到的是可序列化的 `ObjectStoreFactory`（一组配置字符串），不是活的 `Configuration`。
 
 ## 5 1.x 到 2.0 的迁移对照
 

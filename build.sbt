@@ -82,6 +82,9 @@ lazy val gitBranch = {
   branch.replaceAll("[^a-zA-Z0-9._-]", "-")
 }
 
+lazy val milvusProtoDir =
+  Def.setting((ThisBuild / baseDirectory).value / "milvus-proto" / "proto")
+
 lazy val IntegrationTest = config("it") extend Test
 
 // Shared JVM/native setup required by both the unit-test and integration-test
@@ -115,6 +118,8 @@ lazy val nativeTestSettings: Seq[Setting[_]] = Seq(
 lazy val root = (project in file("."))
   .configs(IntegrationTest)
   .aggregate(v2Modules: _*)
+  // 迁移期：1.x 的源码留在 src/，已经搬进第 2 层的部分从这三个模块取。
+  .dependsOn(core, compat, client)
   .settings(
     // 2.0 的新模块只跟着编译和测试。assembly、publish 不下发到子模块，Docker
     // 构建和发布的行为与 1.x 完全一致。
@@ -223,17 +228,16 @@ lazy val root = (project in file("."))
       arrowMemoryNetty,
       arrowCData
     ),
-    Compile / PB.protoSources += baseDirectory.value / "milvus-proto/proto",
-    Compile / PB.targets := Seq(
-      scalapb.gen(grpc = true) -> (Compile / sourceManaged).value / "scalapb"
-    ),
-    Compile / unmanagedSourceDirectories += (
-      Compile / PB.targets
-    ).value.head.outputPath,
+    // proto 的生成移到 core（消息）和 client（服务），这里只消费它们的产物。
     Compile / packageBin / mappings ++= {
-      val base = (Compile / PB.targets).value.head.outputPath
-      (base ** "*.scala").get.map { file =>
-        file -> s"generated_protobuf/${file.relativeTo(base).getOrElse(file)}"
+      val bases = Seq(
+        (core / Compile / PB.targets).value.head.outputPath,
+        (client / Compile / PB.targets).value.head.outputPath
+      )
+      bases.flatMap { base =>
+        (base ** "*.scala").get.map { file =>
+          file -> s"generated_protobuf/${file.relativeTo(base).getOrElse(file)}"
+        }
       }
     },
     Compile / resourceDirectories += baseDirectory.value / "src" / "main" / "resources",
@@ -329,7 +333,17 @@ lazy val core = Project("core", file("core"))
     libraryDependencies ++= Seq(
       "org.apache.arrow" % "arrow-c-data" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-format" % Versions.line("4.0").arrow % "provided",
+      scalapbRuntime % "protobuf",
       scalaTest % Test
+    ),
+    // Milvus 的存储格式本身是 protobuf 定义的：快照里嵌着 CollectionSchema，
+    // Manifest 的字段描述也来自 schema.proto。所以这两个不带 service 的文件在
+    // core 生成（grpc = false）；带 service 的在 client 生成，靠 include 路径
+    // 复用这里的产物，不重复生成。
+    Compile / PB.protoSources := Seq(milvusProtoDir.value),
+    Compile / PB.generate / includeFilter := "common.proto" | "schema.proto",
+    Compile / PB.targets := Seq(
+      scalapb.gen(grpc = false) -> (Compile / sourceManaged).value / "scalapb"
     )
     // TODO 决策 17：Milvus 表达式的 Plan.g4 与 antlr runtime 放哪。Spark 3.5 带
     // antlr 4.9.3、4.x 带 4.13.1，生成的解析器不通用，所以这里先不加 antlr 依赖。
@@ -357,8 +371,14 @@ lazy val client = Project("client", file("client"))
       scalapbRuntime % "protobuf",
       scalapbRuntimeGrpc,
       scalaTest % Test
+    ),
+    // common.proto 与 schema.proto 由 core 生成，这里只把它们放进 include 路径，
+    // 生成的服务桩引用 core 里已有的消息类。
+    Compile / PB.protoSources := Seq(milvusProtoDir.value),
+    Compile / PB.generate / excludeFilter := "common.proto" | "schema.proto",
+    Compile / PB.targets := Seq(
+      scalapb.gen(grpc = true) -> (Compile / sourceManaged).value / "scalapb"
     )
-    // TODO 迁移时把 milvus-proto 的生成从 root 移到这里（modules.md 第 5 节）。
   )
 
 // 第 3 层：每条 Spark 线一个 project，共享 spark/base 的源码。
