@@ -91,13 +91,13 @@ writing Vortex column groups. Check it before designing around a gap.
 |---|---|
 | What does the connector commit to doing? | [docs/design/capabilities.md](docs/design/capabilities.md) |
 | How is it layered, and what is still undecided? | [docs/design/README.md](docs/design/README.md) — read path, write path, priorities, open decisions in section 4, decision log in section 6 |
-| Which module and package does a thing belong to? | [docs/design/modules.md](docs/design/modules.md) — module table, package design, directory tree, build constraints in section 4, migration state in section 5 |
-| How do we compare with the Lance Spark connector? | [docs/design/lance-spark.md](docs/design/lance-spark.md) |
-| Illustrated versions of the above | [docs/design/overview.html](docs/design/overview.html), [docs/design/lance-spark.html](docs/design/lance-spark.html) |
+| Which module and package does a thing belong to? | [docs/design/architecture/modules.md](docs/design/architecture/modules.md) — module table, package design, directory tree, build constraints in section 4, migration state in section 5 |
+| How do we compare with the Lance Spark connector? | [docs/design/research/lance-spark.md](docs/design/research/lance-spark.md) |
+| Illustrated versions of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html), [docs/design/research/lance-spark.html](docs/design/research/lance-spark.html) |
 | What options does a user pass? | [docs/reference-en.md](docs/reference-en.md), [docs/reference-cn.md](docs/reference-cn.md) |
 | What is a given package responsible for? | The `package.scala` or `package-info.java` in that package |
 | How do I build, test and run it? | [README.md](README.md), then [docs/contributing.md](docs/contributing.md) for the mechanics on top |
-| How do we review or change the sbt build? | [docs/design/sbt.md](docs/design/sbt.md) for principles and practice; apply the repository skill [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md) for build work |
+| How do we review or change the sbt build? | [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html) for principles and practice; apply the repository skill [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md) for build work |
 | What sits outside this repository? | [docs/context.md](docs/context.md) |
 | How should a document here be written? | [docs/writing.md](docs/writing.md) |
 
@@ -118,11 +118,13 @@ docs/design/README.md; the package it lands in exists with a `package.scala`
 that states its responsibility; and the design that governs it is written. If
 one is missing, that is the work, and it comes first.
 
-A subsystem earns its own file under `docs/design` when its design cannot be
-stated in its capability row plus the layering in `docs/design/README.md`. That
-file says what the subsystem is, what it touches globally, how it will be built,
-which industry practice it follows or rejects and why, and what is still open.
-Add it to the routing table above.
+A subsystem earns its own document in a topic directory under `docs/design`
+when its design cannot be stated in its capability row plus the layering in
+`docs/design/README.md`. That document says what the subsystem is, what it touches
+globally, how it will be built, which industry practice it follows or rejects
+and why, and what is still open.
+Add it to the routing table above and follow the
+[design directory rules](docs/writing.md#design-document-layout).
 
 Write that file as HTML, not Markdown. Markdown is convenient to write and an
 agent writes these now, so convenience is not the constraint; what matters is
@@ -176,6 +178,27 @@ proof: reflection, service loading, user code outside this tree, documentation,
 and the cloud jobs that pin this artifact all depend on things that grep as
 dead.
 
+**Explain the mechanism. No analogies, no metaphors, no invented shorthand.** A
+technical question is answered by naming what actually happens: which file is
+opened, which field is read, what the failure looks like on screen. An analogy
+replaces that with something the reader has to translate back, and the
+translation is where the misunderstanding gets in. Shorthand coined mid-sentence
+is the same failure in a smaller package: it forces the reader to carry a
+definition that exists nowhere else in the repository. Use the official name for
+an official concept, define an abbreviation the first time it appears, and when
+you reach for a comparison, describe the thing instead.
+
+This is not a style preference. Asked what the storage access layer is for, an
+explanation in this session called it the part that "fetches bytes" as opposed
+to the packages that "interpret bytes". Both terms were invented on the spot and
+appear nowhere else, and the question had to be asked three times before the
+answer was concrete: reading one table means physically opening five kinds of
+file — the snapshot JSON, the segment manifest, a parquet footer, the delete
+files and the column group data — of which the JVM opens four and the native
+library opens the fifth. That sentence was available the whole time.
+`docs/writing.md` has the full list of banned forms; it applies to explanations,
+code comments and naming, not only to documents.
+
 A documented interim state is not a patch. During a migration parts of the tree
 will sit in the wrong module on purpose. That is legitimate when it is written
 down, has a named end condition and someone is holding it; a patch is the one
@@ -184,7 +207,7 @@ now for that reason, and section 5 of modules.md says so.
 
 ## Rules any change has to satisfy
 
-The full list is section 4 of [modules.md](docs/design/modules.md); these four
+The full list is section 4 of [modules.md](docs/design/architecture/modules.md); these four
 get violated most often.
 
 1. **No Spark below layer 3.** A source file in `core`, `compat` or `client`
@@ -243,10 +266,10 @@ New to the repository: this file, then `README.md`, then
 
 Planning work: `docs/design/capabilities.md` for what is in scope, section 4 of
 `docs/design/README.md` for what is still undecided, section 5 of
-`docs/design/modules.md` for where the code stands.
+`docs/design/architecture/modules.md` for where the code stands.
 
 Writing code: the `package.scala` of the package you are touching, then section
-4 of `docs/design/modules.md`, then [docs/contributing.md](docs/contributing.md).
+4 of `docs/design/architecture/modules.md`, then [docs/contributing.md](docs/contributing.md).
 
-Working on sbt: [docs/design/sbt.md](docs/design/sbt.md), then the
+Working on sbt: [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html), then the
 [spark-milvus-sbt skill](.agents/skills/spark-milvus-sbt/SKILL.md).

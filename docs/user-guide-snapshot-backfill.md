@@ -6,7 +6,7 @@ row**, entirely offline against object storage. Online reads and writes are
 not interrupted.
 
 For implementation details and accepted vector encodings, see the
-[backfill README](../src/main/scala/operations/backfill/README.md).
+[backfill README](../apps-4.0/src/main/scala/com/zilliz/spark/connector/apps/backfill/README.md).
 
 ## 1. When to use it
 
@@ -422,5 +422,5 @@ Common Spark Operator gotchas:
 ## 11. Implementation reference
 
 See the
-[backfill README](../src/main/scala/operations/backfill/README.md) for merge
+[backfill README](../apps-4.0/src/main/scala/com/zilliz/spark/connector/apps/backfill/README.md) for merge
 internals, vector encodings, validation rules, and result metrics.
