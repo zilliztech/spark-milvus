@@ -11,7 +11,8 @@ import com.zilliz.milvus.storage.snapshot.{V2ColumnGroup, V2DeltaLogFile}
 /** Tests for [[MilvusSegmentManifestReader]] against a real milvus-produced
   * per-segment AVRO.
   *
-  * The fixture `src/test/data/seg_manifest.avro` was captured from local minio:
+  * The fixture `core/src/test/data/seg_manifest.avro` was captured from local
+  * minio:
   * `a-bucket/files/snapshots/465602255560377587/manifests/465602255561974530/465602255560578628.avro`
   * It describes one StorageV2 segment of the `hello_spark_milvus` collection
   * with schema:
@@ -27,7 +28,7 @@ import com.zilliz.milvus.storage.snapshot.{V2ColumnGroup, V2DeltaLogFile}
 class MilvusSegmentManifestReaderTest extends AnyFunSuite with Matchers {
 
   private val avroBytes: Array[Byte] =
-    Files.readAllBytes(Paths.get("src/test/data/seg_manifest.avro"))
+    Files.readAllBytes(Paths.get("core/src/test/data/seg_manifest.avro"))
 
   // Pre-captured from the parquet kv-metadata — avoids needing minio at test time.
   private val expectedGroupFieldIdList: Seq[Seq[Long]] =

@@ -210,7 +210,7 @@ test("backfill rejects a blank physical-field join key") {
 Run:
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.BackfillConfigTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.BackfillConfigTest"
 ```
 
 Expected: FAIL because the join-key model and config field do not exist.
@@ -289,7 +289,7 @@ This avoids testing `main` through `System.exit` and gives future join-key CLI s
 **Step 2: Run the tests and verify failure**
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.BackfillAppTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.BackfillAppTest"
 ```
 
 Expected: FAIL because `join-key` is not a known key/value flag.
@@ -355,7 +355,7 @@ Reject floating-point, vector, array, map, struct, and JSON-like fields. Additio
 **Step 2: Run the tests and verify failure**
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.MilvusBackfillTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.MilvusBackfillTest"
 ```
 
 Expected: FAIL because join-key resolution is still hard-coded to PK lookup.
@@ -413,7 +413,7 @@ Add tests covering:
 **Step 2: Run the tests and verify failure**
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.ColumnMappingTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.ColumnMappingTest"
 ```
 
 Expected: FAIL because `applyColumnMapping` still requires the PK and derives targets by excluding `pkName`.
@@ -479,7 +479,7 @@ Expose a narrow test helper for building read options/schema rather than requiri
 **Step 2: Run the tests and verify failure**
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.BackfillModeTest com.zilliz.spark.connector.operations.backfill.MilvusBackfillTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.BackfillModeTest com.zilliz.spark.connector.apps.backfill.MilvusBackfillTest"
 ```
 
 Expected: FAIL because the reader and validator accept only `pkFieldId` / `pkName`.
@@ -543,7 +543,7 @@ Add a reusable helper that validates a DataFrame key using the internal join col
 **Step 2: Run the tests and verify failure**
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.BackfillModeTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.BackfillModeTest"
 ```
 
 Expected: FAIL because current validation is PK-specific and does not distinguish nulls from duplicates.
@@ -609,7 +609,7 @@ Also add an internal two-component join test to prove the execution layer is rea
 **Step 2: Run the tests and verify failure**
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.BackfillModeTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.BackfillModeTest"
 ```
 
 Expected: FAIL because `performJoin` accepts a single `pkName`.
@@ -674,7 +674,7 @@ Cover the orchestration sequence without requiring native writes where possible:
 **Step 2: Run the tests and verify failure**
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.MilvusBackfillTest com.zilliz.spark.connector.operations.backfill.ColumnMappingTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.MilvusBackfillTest com.zilliz.spark.connector.apps.backfill.ColumnMappingTest"
 ```
 
 Expected: FAIL until `run` uses the new helpers end to end.
@@ -754,7 +754,7 @@ Keep the existing JSON field names because they are already generic enough. Do n
 **Step 3: Run documentation-adjacent tests**
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.BackfillResultTest com.zilliz.spark.connector.operations.backfill.BackfillAppTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.BackfillResultTest com.zilliz.spark.connector.apps.backfill.BackfillAppTest"
 ```
 
 Expected: PASS.
@@ -783,7 +783,7 @@ Expected: SUCCESS.
 **Step 2: Run focused tests**
 
 ```bash
-sbt "testOnly com.zilliz.spark.connector.operations.backfill.BackfillConfigTest com.zilliz.spark.connector.operations.backfill.BackfillAppTest com.zilliz.spark.connector.operations.backfill.ColumnMappingTest com.zilliz.spark.connector.operations.backfill.BackfillModeTest com.zilliz.spark.connector.operations.backfill.BackfillResultTest com.zilliz.spark.connector.operations.backfill.MilvusBackfillTest com.zilliz.spark.connector.operations.backfill.VectorBackfillSupportTest"
+sbt "testOnly com.zilliz.spark.connector.apps.backfill.BackfillConfigTest com.zilliz.spark.connector.apps.backfill.BackfillAppTest com.zilliz.spark.connector.apps.backfill.ColumnMappingTest com.zilliz.spark.connector.apps.backfill.BackfillModeTest com.zilliz.spark.connector.apps.backfill.BackfillResultTest com.zilliz.spark.connector.apps.backfill.MilvusBackfillTest com.zilliz.spark.connector.apps.backfill.VectorBackfillSupportTest"
 ```
 
 Expected: PASS.

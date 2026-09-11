@@ -118,8 +118,9 @@ lazy val nativeTestSettings: Seq[Setting[_]] = Seq(
 lazy val root = (project in file("."))
   .configs(IntegrationTest)
   .aggregate(v2Modules: _*)
-  // 迁移期：1.x 的源码留在 src/，已经搬进第 2 层的部分从这三个模块取。
-  .dependsOn(core, compat, client)
+  // 迁移期：源码已经全部搬进各模块，根项目只负责把 fat jar 装出来，
+  // 产物名与发布坐标跟 1.x 完全一致。
+  .dependsOn(spark40, apps40)
   .settings(
     // 2.0 的新模块只跟着编译和测试。assembly、publish 不下发到子模块，Docker
     // 构建和发布的行为与 1.x 完全一致。
@@ -431,8 +432,17 @@ def sparkProject(l: Versions.SparkLine): Project =
       Modules.perLine(l),
       Compile / unmanagedSourceDirectories +=
         Modules.sharedSource((ThisBuild / baseDirectory).value, "spark-base"),
-      libraryDependencies ++= Modules.sparkDeps(l) ++ Modules.arrowDeps(l),
+      Compile / unmanagedResourceDirectories +=
+        (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "resources",
+      libraryDependencies ++=
+        Modules.sparkDeps(l) ++ Modules.arrowDeps(l) ++ Modules.legacyDeps(l),
       libraryDependencies += scalaTest % Test,
+      inConfig(Test)(Modules.nativeTest),
+      // 迁移期：1.x 的写路径还在用上游 milvus-storage 的 Java 绑定，
+      // native-storage 替换它之前，四条线都要这个 unmanaged jar。
+      Compile / unmanagedJars += (ThisBuild / baseDirectory).value /
+        "milvus-storage" / "java" / "target" / "scala-2.13" /
+        "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar",
       // fat jar 是同一个 project 上的一个任务，带 classifier 发布，不需要单独
       // 的 bundle 模块（Maven 才需要）。
       // TODO shade 规则按 modules.md 第 4 节第 6 条：只 relocate protobuf 和
@@ -456,8 +466,13 @@ def appsProject(l: Versions.SparkLine, sparkLine: Project): Project =
       name := s"apps-${l.id}",
       moduleName := s"spark-milvus-apps-${l.id}",
       Modules.perLine(l),
-      libraryDependencies ++= Modules.sparkDeps(l),
-      libraryDependencies += scalaTest % Test
+      libraryDependencies ++=
+        Modules.sparkDeps(l) ++ Modules.arrowDeps(l) ++ Modules.legacyDeps(l),
+      libraryDependencies += scalaTest % Test,
+      inConfig(Test)(Modules.nativeTest),
+      Compile / unmanagedJars += (ThisBuild / baseDirectory).value /
+        "milvus-storage" / "java" / "target" / "scala-2.13" /
+        "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar"
     )
 
 // 只在云上跑的那条线上建一个；别的线有人要了再加一行。
@@ -475,7 +490,8 @@ def integrationProject(l: Versions.SparkLine, sparkLine: Project, appsLine: Proj
       moduleName := s"spark-milvus-integration-${l.id}",
       Modules.perLine(l),
       libraryDependencies ++= Modules.sparkDeps(l).map(_.withConfigurations(Some("test"))),
-      libraryDependencies += scalaTest % Test
+      libraryDependencies += scalaTest % Test,
+      inConfig(Test)(Modules.nativeTest)
     )
 
 // 集成测试要真的 Milvus 和 MinIO，跑一条线够了；某条线出特有的问题再加。

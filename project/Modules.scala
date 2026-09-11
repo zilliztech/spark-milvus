@@ -75,8 +75,81 @@ object Modules {
 
   /** 约束 3：Arrow 版本由 spark-<line> 钉，core 只按 C Data Interface 编译。 */
   def arrowDeps(l: Versions.SparkLine): Seq[ModuleID] =
-    Seq("arrow-vector", "arrow-memory-core", "arrow-c-data")
+    Seq("arrow-vector", "arrow-memory-core", "arrow-c-data", "arrow-memory-netty")
       .map(m => "org.apache.arrow" % m % l.arrow)
+
+  /** 迁移期：1.x 的连接器源码搬进 spark-base 之后，四条线都要这批依赖。
+    *
+    * 随着代码往下沉到 core，这个列表只会变短。存储 SDK 与 parquet、avro 最终都
+    * 归 core，这里剩下的应该只有 Spark、Arrow 和 Milvus 的客户端。
+    */
+  def legacyDeps(l: Versions.SparkLine): Seq[ModuleID] = Seq(
+    Dependencies.sparkMLlib,
+    Dependencies.parquetHadoop,
+    Dependencies.parquetAvro,
+    Dependencies.avro,
+    Dependencies.hadoopCommon,
+    Dependencies.hadoopAws,
+    Dependencies.hadoopAliyun,
+    Dependencies.awsSdkS3,
+    Dependencies.awsSdkS3Transfer,
+    Dependencies.awsSdkCore,
+    Dependencies.jacksonScala,
+    Dependencies.jacksonDatabind,
+    Dependencies.grpcNetty,
+    Dependencies.scalapbRuntimeGrpc,
+    Dependencies.munit % Test,
+    Dependencies.hadoopMapreduceClientCore % Test
+  )
+
+  /** jackson 三件套钉同一个版本：parquet-hadoop 传递进来的 databind 更新，
+    * 与 jackson-module-scala 跨版本会直接抛 JsonMappingException。
+    *
+    * 只给第 2 层用。Spark 自带一套自洽的 jackson，钉死反而会把 databind 压到比
+    * Spark 的 jackson-module-scala 低，同样抛异常。
+    */
+  val jacksonPin: Seq[Setting[_]] = Seq(
+    dependencyOverrides ++= Seq(
+      Dependencies.jacksonDatabind,
+      "com.fasterxml.jackson.core" % "jackson-core" % Versions.jackson,
+      "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson
+    )
+  )
+
+  /** 跑测试要的 JVM 参数。
+    *
+    * Arrow 的 MemoryUtil 要 --add-opens 才能初始化，否则一碰列批就抛
+    * 「Failed to initialize MemoryUtil」；原生库的路径是 Dockerfile 写入的
+    * 那个目录，本机没 build 过就只有依赖它的几个用例失败。
+    */
+  def nativeTest: Seq[Setting[_]] = Seq(
+    fork := true,
+    // fork 之后工作目录默认是子项目的目录。1.x 的用例全部按仓库根写相对路径
+    // 读 fixture，钉回根目录，路径的含义与迁移前一致。
+    baseDirectory := (ThisBuild / baseDirectory).value,
+    parallelExecution := true,
+    logBuffered := false,
+    javaOptions := {
+      val nativeDir =
+        ((ThisBuild / baseDirectory).value / "src" / "main" / "resources" / "native").getAbsolutePath
+      Seq(
+        "-Xss2m",
+        "-Xmx4g",
+        s"-Djava.library.path=$nativeDir",
+        "-Dlog4j2.configurationFile=log4j2.properties",
+        "-Dlog4j2.debug=false",
+        "--add-opens=java.base/java.nio=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
+        "--add-opens=java.base/sun.security.action=ALL-UNNAMED"
+      )
+    },
+    envVars := Map(
+      "LD_LIBRARY_PATH" ->
+        ((ThisBuild / baseDirectory).value / "src" / "main" / "resources" / "native").getAbsolutePath
+    )
+  )
 
   /** 共享源码目录：spark-base 不是 project，四条线把它加进自己的源码根。 */
   def sharedSource(root: File, dir: String): File =

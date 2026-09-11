@@ -183,7 +183,7 @@ Minimal `spark-submit` example (standalone / YARN):
 spark-submit \
   --master yarn \
   --deploy-mode cluster \
-  --class com.zilliz.spark.connector.operations.backfill.BackfillApp \
+  --class com.zilliz.spark.connector.apps.backfill.BackfillApp \
   --conf spark.executor.memory=8g \
   --conf spark.executor.memoryOverhead=8g \
   spark-connector-assembly-<branch>-amd64-SNAPSHOT.jar \
@@ -205,7 +205,7 @@ column-mapping target `external_row_id`.
 
 On Kubernetes with Spark Operator, use the same application arguments and set
 `mainClass` to
-`com.zilliz.spark.connector.operations.backfill.BackfillApp`.
+`com.zilliz.spark.connector.apps.backfill.BackfillApp`.
 
 ### 5.4 Read the result
 
@@ -417,7 +417,7 @@ Common Spark Operator gotchas:
 - **IRSA.** Pass `--use-iam` and drop `--s3-access-key` / `--s3-secret-key`
   to use the service-account role.
 - **`mainClass`.** Always
-  `com.zilliz.spark.connector.operations.backfill.BackfillApp`.
+  `com.zilliz.spark.connector.apps.backfill.BackfillApp`.
 
 ## 11. Implementation reference
 
