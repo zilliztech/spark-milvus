@@ -14,9 +14,9 @@
 |---|---|---|---|---|
 | native-storage | 第 1 层 | `com.zilliz.milvus.jni.storage` | milvus-storage 的 C 接口 | `com.zilliz:spark-milvus-native-storage`，jar 内 `native/{os}-{arch}/` 平铺 .so |
 | native-vector | 第 1 层 | `com.zilliz.milvus.jni.vector` | knowhere 的 C shim | `com.zilliz:spark-milvus-native-vector`，同上布局。C shim 的 `.so` 与头文件另出一份，供 Ray 之类的非 JVM 调用方用 |
-| core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow C Data Interface、Hadoop FileSystem（provided） | `com.zilliz:spark-milvus-core_<scala>` |
+| core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow（provided）、Hadoop FileSystem（provided）、milvus-proto 的消息类 | `com.zilliz:spark-milvus-core_<scala>` |
 | compat | 第 2 层 | `com.zilliz.milvus.storage.compat` | core | `com.zilliz:spark-milvus-compat_<scala>` |
-| client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC | `com.zilliz:spark-milvus-client_<scala>` |
+| client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC；带 service 的 proto 在这里生成 | `com.zilliz:spark-milvus-client_<scala>` |
 | spark-base | 第 3 层 | `com.zilliz.spark.connector` | 不是 sbt project，是四条线引用的源码目录 | 无 |
 | spark-3.5 / 4.0 / 4.1 / 4.2 | 第 3 层 | 同上 | spark-base 的源码 + 本线专属目录；core、compat、client；本线 Spark 为 provided | `com.zilliz:spark-milvus-<line>_<scala>` |
 | apps | 第 4 层 | `com.zilliz.spark.connector.apps` | 一条线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`：fat jar。只在云上跑的那条线上建；只有一个消费者，源码直接放在这条线的目录里，不设共享 base |
@@ -40,7 +40,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 |---|---|---|
 | `snapshot` | 列快照目录，选快照，解析 JSON 和 Avro 成对象；分发 SnapshotSource | SnapshotCatalog、Snapshot、Segment、SnapshotSource、SnapshotSourceRegistry |
 | `manifest` | 一个段的 Manifest：列组、删除文件、统计、索引登记 | Manifest、ColumnGroup、ManifestReader |
-| `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型 | SchemaMapper、MilvusType、ArrowTypes |
+| `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型 | SchemaMapper、MilvusTypes、ArrowTypes |
 | `path` | 三种路径形态到 (bucket, key) | StoragePath、Located |
 | `io` | 对象存储读写的最小接口和它的实现 | ObjectStore、ObjectStoreFactory、FileInfo、SeekableInput |
 | `credential` | 对象存储凭证的取用和下发 | Credentials、CredentialSource |
@@ -165,7 +165,7 @@ spark-milvus/
 
 1. core、compat、client 的依赖里没有 spark-*；用 sbt 任务扫描源码，出现 `org.apache.spark` 即编译失败。
 2. native-* 的 C 头文件不出现 JNI 类型；JNI 只在 `jni` 包。原生库只在 executor 加载：`core.read.exec`、`core.write.exec`、`core.index` 之外的 core 包不得调用 native，driver 侧要读的 Manifest 字段由纯 JVM 解析器读。
-3. Arrow 版本由 spark-`<line>` 钉，与本线 Spark 自带的对齐（3.5 用 15.0.2，4.0 用 18.1.0，4.1 用 18.3.0，4.2 用 19.0.0）；core 只按 Arrow C Data Interface 编译，`arrow-c-data`、`arrow-format` 标 provided，不依赖 `arrow-memory-*`。Spark 的 patch 版取每条线最低的维护版，编译版本就是兼容下限。
+3. Arrow 版本由 spark-`<line>` 钉，与本线 Spark 自带的对齐（3.5 用 15.0.2，4.0 用 18.1.0，4.1 用 18.3.0，4.2 用 19.0.0）；core 只按接口编译，`arrow-vector`、`arrow-memory-core`、`arrow-c-data`、`arrow-format` 全标 provided，实现由运行时的 Spark 提供，版本按 4.0 线取。Spark 的 patch 版取每条线最低的维护版，编译版本就是兼容下限。
 4. Java 目标版本按线：core、compat、client、native-* 钉 `-release 11`；spark-`<line>`、apps 按本线（3.5 用 11，4.x 用 17）。
 5. 交叉编译的模块统一 `import scala.jdk.CollectionConverters._`，加 `scala-collection-compat` 为 2.12 补齐，禁止 `scala.collection.JavaConverters`。
 6. fat jar 只 relocate protobuf 和 guava；`com.zilliz.milvus.native.**` 和 `org.apache.arrow.**` 不 relocate，JNI 的导出符号已按包名编进 .so；`META-INF/services` 用 merge 策略。
@@ -176,6 +176,7 @@ spark-milvus/
 11. 目录镜像包名。1.x 的 41 个文件不是这样（文件在 `src/main/scala/read/`，包是 `com.zilliz.spark.connector.read`），迁移时一并对齐。
 12. 模块的显示名跟目录走，发布坐标用 `moduleName` 另设。根项目显示名 `spark-milvus`（等于仓库目录），坐标仍是 `com.zilliz:spark-connector`。sbt 的 project id 不能带点，所以命令行是 `spark40` 而目录是 `spark-4.0`。
 13. core 读写存储只经 `io.ObjectStore`，源码里不出现 `org.apache.hadoop`。接口五个方法：`open`、`list`、`exists`、`stat`、`create`，没有 `rename` 和 `delete`（1.x 的 22 处调用点也没用过这两个）。Hadoop 实现放 core 的 `io.hadoop`，`hadoop-common` 标 provided，运行时用 Spark 自带的那份。executor 上拿到的是可序列化的 `ObjectStoreFactory`（一组配置字符串），不是活的 `Configuration`。
+14. milvus-proto 的生成分两处：不带 service 的 `common.proto`、`schema.proto` 在 core 生成（`grpc = false`），带 service 的五个在 client 生成（`grpc = true`），靠 include 路径引用 core 的产物，同一份 .proto 不生成两遍。core 用得上它们，是因为 Milvus 的存储格式本身由 protobuf 定义：快照里嵌着 CollectionSchema，Manifest 的字段描述来自 schema.proto，core 不另建一套 schema 模型。
 
 ## 5 1.x 到 2.0 的迁移对照
 
@@ -187,14 +188,14 @@ spark-milvus/
 | MilvusOption.scala、loon/Properties.scala | spark.options；fs.* 归一到 core.credential | 合并重写 |
 | MilvusClient.scala | client.grpc、client.api | 迁入，删 mock 和无调用的接口 |
 | MilvusUtil.scala（627 行，值打成 gRPC FieldData） | apps.legacy | 迁入，只有 gRPC Insert 用 |
-| Exception.scala | core 定义异常基类，各层派生 | 重写 |
+| Exception.scala | core 定义异常基类，各层派生 | 部分已迁：DataParseException、DataTypeException 进 core；三个 RPC 异常随 client 迁 |
 | read/MilvusSnapshotReader.scala | core.snapshot | 迁入，去 Spark 依赖 |
 | read/MilvusStorageV3ManifestReader.scala、MilvusSegmentManifestReader.scala | core.manifest | 迁入 |
 | read/MilvusDeltaLogReader.scala、MilvusDeletePlan.scala | core.delete | 迁入，改按行号位图 |
 | read/V2SegmentLoader.scala、MilvusPackedV2PartitionReader.scala、MilvusParquetFooterReader.scala | compat.v2packed | 迁入 |
 | read/BackupMetaReader.scala | compat.backup | 迁入 |
 | read/MilvusLoonPartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala | spark.scan、core.read | 重写为列式 |
-| serde/DataTypeUtil.scala、SchemaUtil.scala | core.schema（Milvus 与 Arrow）、spark.types（Arrow 与 Spark） | 合并为两份，去 Spark 依赖 |
+| serde/DataTypeUtil.scala、SchemaUtil.scala | core.schema（Milvus 与 Arrow）、spark.types（Arrow 与 Spark） | **已迁**：core.schema 得到 MilvusTypes、ArrowTypes、SchemaMapper 与 18 个用例；1.x 只剩 Spark 类型映射与 convertSparkSchemaToArrow |
 | serde/ArrowConverter.scala（897 行行式转换） | 删除 | 读路径由 ColumnVector 取代，写路径的 Spark 到 Arrow 重写进 core.write.exec |
 | write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | core.write | 决策 14 定为复用时迁入，事务提交移到 Committer；定为重写时删除 |
 | write/MilvusInsertDataWriter.scala、MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala | apps.legacy | 随 W7 的 `format("milvus")` 入口整体迁入，先修 abort |

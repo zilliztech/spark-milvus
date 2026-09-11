@@ -440,7 +440,7 @@ class MilvusLoonPartitionReader(
     // Convert Milvus schema to Arrow schema with field IDs as field names
     // This is required because milvus-storage reader matches columns by field ID
     // The manifest stores column groups with field IDs (e.g., "100", "101")
-    val arrowSchema = com.zilliz.spark.connector.MilvusSchemaUtil
+    val arrowSchema = com.zilliz.milvus.storage.schema.SchemaMapper
       .convertToArrowSchemaWithFieldIdNames(milvusSchema)
     val arrowSchemaC = ArrowSchema.allocateNew(allocator)
     Data.exportSchema(allocator, arrowSchema, null, arrowSchemaC)

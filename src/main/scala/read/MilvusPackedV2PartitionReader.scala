@@ -238,7 +238,7 @@ class MilvusPackedV2PartitionReader(
 
   try {
     val arrowSchema =
-      com.zilliz.spark.connector.MilvusSchemaUtil.convertToArrowSchema(
+      com.zilliz.milvus.storage.schema.SchemaMapper.convertToArrowSchema(
         milvusSchema
       )
     arrowSchemaObj = ArrowSchema.allocateNew(allocator)

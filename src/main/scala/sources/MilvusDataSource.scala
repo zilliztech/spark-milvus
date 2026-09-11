@@ -49,6 +49,7 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
+import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.spark.connector.{
   DataTypeUtil,
   MilvusClient,
@@ -625,7 +626,7 @@ case class MilvusTable(
         field.fieldID
       }
     }
-    val missingSystemFields = MilvusSchemaUtil
+    val missingSystemFields = SchemaMapper
       .missingSystemFields(milvusCollection.schema)
       .map(_.fieldID)
       .toSet

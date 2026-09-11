@@ -178,7 +178,7 @@ class VectorBackfillSupportTest
       encodedHalfBytes = false
     ) shouldBe maxFinite
 
-    val overflow = intercept[com.zilliz.spark.connector.DataParseException] {
+    val overflow = intercept[com.zilliz.milvus.storage.DataParseException] {
       FloatConverter.toFloat16Bytes(65520.0f)
     }
     overflow.getMessage should include("float16 range")

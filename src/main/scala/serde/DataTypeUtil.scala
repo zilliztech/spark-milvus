@@ -1,84 +1,17 @@
 package com.zilliz.spark.connector
 
-import org.apache.arrow.vector.types.pojo.ArrowType
-import org.apache.arrow.vector.types.FloatingPointPrecision
 import org.apache.spark.sql.types.{DataType => SparkDataType}
 import org.apache.spark.sql.types.{DataTypes, MetadataBuilder}
 
+import com.zilliz.milvus.storage.schema.MilvusTypes
+import com.zilliz.milvus.storage.DataParseException
 import com.zilliz.spark.connector.serde.ArrowConverter
-import com.zilliz.spark.connector.DataParseException
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
+/** Milvus 类型到 Spark 类型的映射。到 Arrow 类型的那一半在 core 的
+  * com.zilliz.milvus.storage.schema.ArrowTypes。
+  */
 object DataTypeUtil {
-
-  private[connector] val DenseVectorTypes: Set[MilvusDataType] = Set(
-    MilvusDataType.FloatVector,
-    MilvusDataType.BinaryVector,
-    MilvusDataType.Float16Vector,
-    MilvusDataType.BFloat16Vector,
-    MilvusDataType.Int8Vector
-  )
-
-  private[connector] def isDenseVectorType(
-      dataType: MilvusDataType
-  ): Boolean = DenseVectorTypes.contains(dataType)
-
-  private[connector] def parseVectorDimension(
-      fieldName: String,
-      rawDimension: String
-  ): Long = {
-    val dimension =
-      try rawDimension.toLong
-      catch {
-        case _: NumberFormatException =>
-          throw new DataParseException(
-            s"Invalid vector dimension '$rawDimension' for field '$fieldName'"
-          )
-      }
-    if (dimension <= 0 || dimension > Int.MaxValue) {
-      throw new DataParseException(
-        s"Invalid vector dimension $dimension for field '$fieldName'"
-      )
-    }
-    dimension
-  }
-
-  /** Converts Milvus DataType to Arrow type given dimension and element type
-    */
-  def toArrowType(dim: Int, dataType: MilvusDataType): ArrowType = {
-    dataType match {
-      case MilvusDataType.Bool  => new ArrowType.Bool()
-      case MilvusDataType.Int8  => new ArrowType.Int(8, true)
-      case MilvusDataType.Int16 => new ArrowType.Int(16, true)
-      case MilvusDataType.Int32 => new ArrowType.Int(32, true)
-      case MilvusDataType.Int64 => new ArrowType.Int(64, true)
-      case MilvusDataType.Float =>
-        new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE)
-      case MilvusDataType.Double =>
-        new ArrowType.FloatingPoint(FloatingPointPrecision.DOUBLE)
-      case MilvusDataType.Timestamptz => new ArrowType.Int(64, true)
-      case MilvusDataType.VarChar | MilvusDataType.String |
-          MilvusDataType.Text =>
-        new ArrowType.Utf8()
-      case MilvusDataType.Array | MilvusDataType.JSON |
-          MilvusDataType.Geometry =>
-        new ArrowType.Binary()
-      case MilvusDataType.BinaryVector =>
-        new ArrowType.FixedSizeBinary((dim + 7) / 8)
-      case MilvusDataType.Float16Vector =>
-        new ArrowType.FixedSizeBinary(dim * 2)
-      case MilvusDataType.BFloat16Vector =>
-        new ArrowType.FixedSizeBinary(dim * 2)
-      case MilvusDataType.Int8Vector  => new ArrowType.FixedSizeBinary(dim)
-      case MilvusDataType.FloatVector => new ArrowType.FixedSizeBinary(dim * 4)
-      case MilvusDataType.SparseFloatVector => new ArrowType.Binary()
-      case MilvusDataType.ArrayOfVector     => new ArrowType.List()
-      case _ =>
-        throw new DataParseException(
-          s"Unsupported Milvus data type for Arrow conversion: $dataType"
-        )
-    }
-  }
 
   def metadata(fieldSchema: FieldSchema) = {
     val builder = new MetadataBuilder()
@@ -87,13 +20,13 @@ object DataTypeUtil {
         fieldSchema.dataType.value
       )
 
-    if (isDenseVectorType(fieldSchema.dataType)) {
+    if (MilvusTypes.isDenseVectorType(fieldSchema.dataType)) {
       fieldSchema.typeParams
         .find(_.key == "dim")
         .foreach { param =>
           builder.putLong(
             ArrowConverter.MilvusVectorDimensionMetadataKey,
-            parseVectorDimension(fieldSchema.name, param.value)
+            MilvusTypes.parseVectorDimension(fieldSchema.name, param.value)
           )
         }
     }

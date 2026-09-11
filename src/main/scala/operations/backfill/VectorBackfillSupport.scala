@@ -8,9 +8,10 @@ import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.functions.{col, to_json, udf}
 import org.apache.spark.sql.types._
 
-import com.zilliz.spark.connector.{DataParseException, FloatConverter}
+import com.zilliz.milvus.storage.DataParseException
 import com.zilliz.spark.connector.read.Field
 import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.FloatConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Normalizes user-facing vector values to the byte layout Milvus stores in

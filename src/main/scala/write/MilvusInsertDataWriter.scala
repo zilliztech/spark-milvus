@@ -14,14 +14,14 @@ import org.apache.spark.sql.types.{
 }
 import org.apache.spark.unsafe.types.UTF8String
 
+import com.zilliz.milvus.storage.schema.MilvusTypes
+import com.zilliz.milvus.storage.DataTypeException
 import com.zilliz.spark.connector.{
-  DataTypeException,
   MilvusClient,
   MilvusFieldData,
   MilvusOption,
   MilvusRateLimitException,
-  MilvusRpcException,
-  MilvusSchemaUtil
+  MilvusRpcException
 }
 import io.milvus.grpc.schema.{
   CollectionSchema,
@@ -741,7 +741,7 @@ object MilvusInsertDataWriter {
               )
           )
         case MilvusDataType.FloatVector =>
-          val dim = MilvusSchemaUtil.getDim(fieldSchema)
+          val dim = MilvusTypes.dimensionOf(fieldSchema)
           insertFieldsData += MilvusFieldData.packFloatVectorFieldData(
             fieldName,
             fieldBufferData
@@ -751,7 +751,7 @@ object MilvusInsertDataWriter {
             dim
           )
         case MilvusDataType.BinaryVector =>
-          val dim = MilvusSchemaUtil.getDim(fieldSchema)
+          val dim = MilvusTypes.dimensionOf(fieldSchema)
           insertFieldsData += MilvusFieldData.packBinaryVectorFieldData(
             fieldName,
             fieldBufferData
@@ -761,7 +761,7 @@ object MilvusInsertDataWriter {
             dim
           )
         case MilvusDataType.Int8Vector =>
-          val dim = MilvusSchemaUtil.getDim(fieldSchema)
+          val dim = MilvusTypes.dimensionOf(fieldSchema)
           insertFieldsData += MilvusFieldData.packInt8VectorFieldData(
             fieldName,
             fieldBufferData
@@ -771,7 +771,7 @@ object MilvusInsertDataWriter {
             dim
           )
         case MilvusDataType.Float16Vector =>
-          val dim = MilvusSchemaUtil.getDim(fieldSchema)
+          val dim = MilvusTypes.dimensionOf(fieldSchema)
           insertFieldsData += MilvusFieldData.packFloat16VectorFieldData(
             fieldName,
             fieldBufferData
@@ -781,7 +781,7 @@ object MilvusInsertDataWriter {
             dim
           )
         case MilvusDataType.BFloat16Vector =>
-          val dim = MilvusSchemaUtil.getDim(fieldSchema)
+          val dim = MilvusTypes.dimensionOf(fieldSchema)
           insertFieldsData += MilvusFieldData.packBFloat16VectorFieldData(
             fieldName,
             fieldBufferData
@@ -791,7 +791,7 @@ object MilvusInsertDataWriter {
             dim
           )
         case MilvusDataType.SparseFloatVector =>
-          val dim = MilvusSchemaUtil.getDim(fieldSchema)
+          val dim = MilvusTypes.dimensionOf(fieldSchema)
           insertFieldsData += MilvusFieldData.packSparseFloatVectorFieldData(
             fieldName,
             fieldBufferData

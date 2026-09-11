@@ -34,6 +34,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.unsafe.types.UTF8String
 
+import com.zilliz.milvus.storage.schema.MilvusTypes
 import com.zilliz.spark.connector.{DataTypeUtil, MilvusOption, MilvusSchemaUtil}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
@@ -536,7 +537,7 @@ class MilvusLoonPartitionWriter(
       case field
           if field.metadata.contains(
             ArrowConverter.MilvusDataTypeMetadataKey
-          ) && DataTypeUtil.isDenseVectorType(
+          ) && MilvusTypes.isDenseVectorType(
             MilvusDataType.fromValue(
               field.metadata
                 .getLong(ArrowConverter.MilvusDataTypeMetadataKey)

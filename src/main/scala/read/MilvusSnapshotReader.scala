@@ -14,6 +14,7 @@ import com.fasterxml.jackson.module.scala.{
 }
 import org.apache.spark.sql.types._
 
+import com.zilliz.milvus.storage.schema.MilvusTypes
 import com.zilliz.spark.connector.serde.ArrowConverter
 import com.zilliz.spark.connector.DataTypeUtil
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
@@ -869,11 +870,11 @@ object MilvusSnapshotReader {
     val metadata = new MetadataBuilder()
       .putLong(ArrowConverter.MilvusDataTypeMetadataKey, field.dataType)
     val milvusType = MilvusDataType.fromValue(field.dataType)
-    if (DataTypeUtil.isDenseVectorType(milvusType)) {
+    if (MilvusTypes.isDenseVectorType(milvusType)) {
       field.getTypeParam("dim").foreach { rawDimension =>
         metadata.putLong(
           ArrowConverter.MilvusVectorDimensionMetadataKey,
-          DataTypeUtil.parseVectorDimension(field.name, rawDimension)
+          MilvusTypes.parseVectorDimension(field.name, rawDimension)
         )
       }
     }

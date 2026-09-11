@@ -1,8 +1,7 @@
 package com.zilliz.spark.connector
 
-case class DataParseException(message: String) extends Exception(message)
-
-case class DataTypeException(message: String) extends Exception(message)
+// DataParseException 与 DataTypeException 已搬到 core 的
+// com.zilliz.milvus.storage，用到的地方直接 import。
 
 case class MilvusConnectionException(message: String) extends Exception(message)
 

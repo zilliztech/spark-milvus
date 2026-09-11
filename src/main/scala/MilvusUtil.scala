@@ -4,7 +4,7 @@ import java.nio.{ByteBuffer, ByteOrder}
 
 import com.google.protobuf.ByteString
 
-import com.zilliz.spark.connector.DataParseException
+import com.zilliz.milvus.storage.DataParseException
 import io.milvus.grpc.schema.{
   ArrayArray,
   BoolArray,

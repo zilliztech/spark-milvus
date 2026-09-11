@@ -562,7 +562,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       new ArrowType.Binary(),
       Array[Byte](1)
     ) { root =>
-      val error = intercept[com.zilliz.spark.connector.DataParseException] {
+      val error = intercept[com.zilliz.milvus.storage.DataParseException] {
         ArrowConverter.arrowToInternalRow(root, 0, sparkSchema)
       }
       error.getMessage should include("multiple of 8")
@@ -574,7 +574,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       val root = VectorSchemaRoot.create(arrowSchema, allocator)
       try {
         root.allocateNew()
-        val error = intercept[com.zilliz.spark.connector.DataParseException] {
+        val error = intercept[com.zilliz.milvus.storage.DataParseException] {
           ArrowConverter.internalRowToArrow(
             root,
             0,

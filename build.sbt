@@ -331,6 +331,9 @@ lazy val core = Project("core", file("core"))
     Modules.shared,
     // Arrow 由 spark-<line> 钉；core 只按 C Data Interface 编译。
     libraryDependencies ++= Seq(
+      // 只按接口编译，实现由 spark-<line> 钉版本后在运行时提供。
+      "org.apache.arrow" % "arrow-vector" % Versions.line("4.0").arrow % "provided",
+      "org.apache.arrow" % "arrow-memory-core" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-c-data" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-format" % Versions.line("4.0").arrow % "provided",
       scalapbRuntime % "protobuf",
