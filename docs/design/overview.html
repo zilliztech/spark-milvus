@@ -284,7 +284,7 @@
         </g>
       </svg>
     </div>
-    <figcaption>四层与依赖方向。apps 里的场景和遗留代码留在同一个仓库，用模块隔离，不进核心层；核心层换成 Ray 的接口层就能复用。</figcaption>
+    <figcaption>四层与依赖方向。apps 里的场景和遗留代码留在同一个仓库，用模块隔离，不进核心层；核心层无 Spark 依赖不是为了给 Ray 复用（Ray 是 Python，用不了 JVM 的 jar），是为了让它在四条 Spark 线上只编一次、测试不用拉起 SparkSession。Ray 那边共用的是第 1 层的 C 接口，Python 绑定压在上面。</figcaption>
   </figure>
 
   <div class="key">

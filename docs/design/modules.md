@@ -1,6 +1,8 @@
 # 2.0 模块、包与目录 `[草稿]`
 
-依赖只能向下：apps → spark-`<line>`（源码来自 spark-base）→ compat、client → core → native-storage、native-vector。核心层没有 Spark，原生层没有业务逻辑，对外的入口和遗留代码只在 apps。功能编号见 [capabilities.md](capabilities.md)，名词沿用 README 第 0 节。
+依赖只能向下：apps → spark-`<line>`（源码来自 spark-base）→ compat、client → core → native-storage、native-vector。核心层没有 Spark，原生层没有业务逻辑，对外的入口和遗留代码只在 apps。
+
+核心层不依赖 Spark 换来三件事：它在四条 Spark 线上只编一次、只出一个产物；它的测试不用拉起 SparkSession；边界由编译期检查守着。换不来的是跨语言复用 —— Ray 是 Python，依赖不了 JVM 的 jar，它共用的是第 1 层的 C 接口，Python 绑定压在上面。功能编号见 [capabilities.md](capabilities.md)，名词沿用 README 第 0 节。
 
 ## 1 模块
 
