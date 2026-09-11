@@ -15,6 +15,8 @@ import org.apache.parquet.hadoop.ParquetReader
 import org.apache.parquet.io.{InputFile, SeekableInputStream}
 import org.apache.spark.internal.Logging
 
+import com.zilliz.milvus.storage.io.hadoop.HadoopIO
+import com.zilliz.milvus.storage.path.StoragePath
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 object MilvusDeltaLogReader extends Logging {
@@ -134,8 +136,8 @@ object MilvusDeltaLogReader extends Logging {
       validatePkType(pkField)
       val plans = deltaLogs.map { log =>
         val fullyQualifiedPath =
-          V2SegmentLoader.resolvePath(log.logPath, bucket)
-        val bytes = V2SegmentLoader.readAllBytes(hadoopConf, fullyQualifiedPath)
+          StoragePath.resolvePath(log.logPath, bucket)
+        val bytes = HadoopIO.readAllBytes(hadoopConf, fullyQualifiedPath)
         decodeDeletePlan(bytes, pkField, fullyQualifiedPath)
       }
       sequence(plans).map(MilvusDeletePlan.union)

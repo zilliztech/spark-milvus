@@ -338,6 +338,8 @@ lazy val core = Project("core", file("core"))
       "org.apache.arrow" % "arrow-format" % Versions.line("4.0").arrow % "provided",
       // 日志门面：运行时用 Spark 自带的 slf4j-api，版本按 3.5 线的下限编译。
       "org.slf4j" % "slf4j-api" % "2.0.7" % "provided",
+      // 存储访问的唯一实现走 Hadoop FileSystem，运行时用 Spark 自带的那份。
+      hadoopCommon,
       scalapbRuntime % "protobuf",
       scalaTest % Test
     ),

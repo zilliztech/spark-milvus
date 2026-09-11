@@ -11,6 +11,9 @@ import org.apache.avro.util.Utf8
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 
+import com.zilliz.milvus.storage.io.hadoop.HadoopIO
+import com.zilliz.milvus.storage.path.StoragePath
+
 object MilvusStorageV3ManifestReader {
   private val PrimaryKeyDeltaLogType = 0
   private val ManifestFileName = """manifest-(\d+)\.avro""".r
@@ -22,11 +25,11 @@ object MilvusStorageV3ManifestReader {
       hadoopConf: Configuration
   ): Either[Throwable, Seq[V2DeltaLogFile]] = {
     try {
-      val manifestPath = V2SegmentLoader.resolvePath(
+      val manifestPath = StoragePath.resolvePath(
         manifestFilePath(basePath, readVersion),
         bucket
       )
-      val bytes = V2SegmentLoader.readAllBytes(hadoopConf, manifestPath)
+      val bytes = HadoopIO.readAllBytes(hadoopConf, manifestPath)
       parseDeltaLogs(bytes, basePath)
     } catch {
       case NonFatal(e) => Left(e)
@@ -53,7 +56,7 @@ object MilvusStorageV3ManifestReader {
     var uri: URI = null
     var fs: FileSystem = null
     try {
-      val metadataPath = V2SegmentLoader.resolvePath(
+      val metadataPath = StoragePath.resolvePath(
         s"${basePath.stripSuffix("/")}/_metadata",
         bucket
       )

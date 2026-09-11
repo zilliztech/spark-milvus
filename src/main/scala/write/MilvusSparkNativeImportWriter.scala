@@ -157,7 +157,7 @@ class MilvusSparkNativeImportWriter(
   }
 
   private def callMilvusImport(filePaths: Seq[String]): Try[Seq[Long]] = {
-    val client = MilvusClient(milvusOption)
+    val client = MilvusClient(milvusOption.connectionParams)
     try {
       val result = client.importData(
         dbName = milvusOption.databaseName,

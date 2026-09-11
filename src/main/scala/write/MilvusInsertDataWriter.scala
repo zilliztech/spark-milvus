@@ -40,7 +40,7 @@ case class MilvusInsertDataWriter(
 ) extends DataWriter[InternalRow]
     with Serializable
     with Logging {
-  private val milvusClient = MilvusClient(milvusOption)
+  private val milvusClient = MilvusClient(milvusOption.connectionParams)
   private val collectionSchema = milvusClient.getCollectionSchema(
     milvusOption.databaseName,
     milvusOption.collectionName

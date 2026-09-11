@@ -1,12 +1,12 @@
 package com.zilliz.spark.connector.read
 
-import java.io.ByteArrayOutputStream
-import java.net.URI
 import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.internal.Logging
+
+import com.zilliz.milvus.storage.io.hadoop.HadoopIO
+import com.zilliz.milvus.storage.path.StoragePath
 
 /** High-level loader for StorageV2 (non-manifest packed parquet) segments.
   *
@@ -60,8 +60,8 @@ object V2SegmentLoader extends Logging {
     try {
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
       manifestPaths.foreach { rawPath =>
-        val avroPath = resolvePath(rawPath, bucket, storageScheme)
-        val avroBytes = readAllBytes(hadoopConf, avroPath)
+        val avroPath = StoragePath.resolvePath(rawPath, bucket, storageScheme)
+        val avroBytes = HadoopIO.readAllBytes(hadoopConf, avroPath)
         val entry =
           MilvusSegmentManifestReader
             .parse(avroBytes, manifestSchemaVersion) match {
@@ -219,7 +219,9 @@ object V2SegmentLoader extends Logging {
       fieldBinlogs.map(fieldBinlog =>
         fieldBinlog.copy(binlogs =
           fieldBinlog.binlogs.map(log =>
-            log.copy(logPath = resolvePath(log.logPath, bucket, storageScheme))
+            log.copy(logPath =
+              StoragePath.resolvePath(log.logPath, bucket, storageScheme)
+            )
           )
         )
       )
@@ -228,66 +230,5 @@ object V2SegmentLoader extends Logging {
       binlogFiles = resolveFieldBinlogs(entry.binlogFiles),
       deltaLogFiles = resolveFieldBinlogs(entry.deltaLogFiles)
     )
-  }
-
-  /** Prefix `bucket` when `path` has no scheme; rewrite S3 aliases to the
-    * requested scheme and preserve other explicit schemes. `storageScheme` is
-    * intentionally explicit for non-S3 providers because the generic connector
-    * read path does not yet derive a provider from its public options.
-    */
-  def resolvePath(
-      path: String,
-      bucket: String,
-      storageScheme: String = "s3a"
-  ): String = {
-    val scheme = storageScheme.stripSuffix("://")
-    if (path == null) path
-    else if (path.startsWith("s3a://"))
-      s"$scheme://" + path.stripPrefix("s3a://")
-    else if (path.startsWith("s3://"))
-      s"$scheme://" + path.stripPrefix("s3://")
-    else if (path.contains("://")) path
-    else if (bucket != null && bucket.nonEmpty)
-      s"$scheme://$bucket/${path.stripPrefix("/")}"
-    else path
-  }
-
-  private[read] def readAllBytes(
-      conf: Configuration,
-      fullyQualifiedPath: String
-  ): Array[Byte] = {
-    var uri: URI = null
-    var fs: FileSystem = null
-    try {
-      uri = new URI(fullyQualifiedPath)
-      fs = FileSystem.get(uri, conf)
-      val in = fs.open(new Path(uri))
-      try {
-        val out = new ByteArrayOutputStream()
-        val buf = new Array[Byte](8192)
-        var n = in.read(buf)
-        while (n >= 0) {
-          out.write(buf, 0, n)
-          n = in.read(buf)
-        }
-        out.toByteArray
-      } finally {
-        in.close()
-      }
-    } catch {
-      case NonFatal(e) =>
-        throw new RuntimeException(
-          s"failed to read bytes from $fullyQualifiedPath: ${e.getMessage}",
-          e
-        )
-    } finally {
-      Option(uri).flatMap(uri => Option(uri.getScheme)).foreach { scheme =>
-        if (
-          fs != null && conf.getBoolean(s"fs.$scheme.impl.disable.cache", false)
-        ) {
-          fs.close()
-        }
-      }
-    }
   }
 }

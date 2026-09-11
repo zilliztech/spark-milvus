@@ -1035,19 +1035,6 @@ object MilvusClient {
     new MilvusClient(params)
   }
 
-  def apply(options: MilvusOption): MilvusClient = {
-    new MilvusClient(
-      MilvusConnectionParams(
-        options.uri,
-        options.token,
-        options.databaseName,
-        options.serverPemPath,
-        options.clientPemPath,
-        options.clientKeyPath,
-        options.caPemPath
-      )
-    )
-  }
 }
 
 case class MilvusConnectionParams(

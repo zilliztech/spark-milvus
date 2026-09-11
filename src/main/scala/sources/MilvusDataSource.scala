@@ -143,7 +143,7 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
       if (milvusOption.collectionName.isEmpty) {
         throw new IllegalArgumentException("collectionName cannot be empty")
       }
-      val client = MilvusClient(milvusOption)
+      val client = MilvusClient(milvusOption.connectionParams)
       try {
         val result = client.getCollectionSchema(
           milvusOption.databaseName,
@@ -420,7 +420,7 @@ case class MilvusTable(
   /** Initialize collection info from Milvus client (existing behavior)
     */
   private def initFromClient(): Unit = {
-    val client = MilvusClient(milvusOption)
+    val client = MilvusClient(milvusOption.connectionParams)
     try {
       milvusCollection = client
         .getCollectionInfo(
@@ -1330,19 +1330,20 @@ object MilvusScan extends Logging {
       snapshotName: String,
       reason: String
   ): Try[Unit] = {
-    Try(MilvusClient(MilvusOption(baseOptions))).flatMap { client =>
-      val dropResult = dropClientReadSnapshot(
-        client,
-        databaseName,
-        collectionName,
-        snapshotName,
-        reason
-      )
-      preserveResultWhenCloseFails(
-        dropResult,
-        client.close(),
-        s"Milvus client after dropping client read snapshot $snapshotName"
-      )
+    Try(MilvusClient(MilvusOption(baseOptions).connectionParams)).flatMap {
+      client =>
+        val dropResult = dropClientReadSnapshot(
+          client,
+          databaseName,
+          collectionName,
+          snapshotName,
+          reason
+        )
+        preserveResultWhenCloseFails(
+          dropResult,
+          client.close(),
+          s"Milvus client after dropping client read snapshot $snapshotName"
+        )
     }
   }
 
@@ -1733,7 +1734,7 @@ class MilvusScan(
       throw new IllegalArgumentException("collectionName cannot be empty")
     }
 
-    val client = MilvusClient(milvusOption)
+    val client = MilvusClient(milvusOption.connectionParams)
     try {
       val clientSnapshotPartitions =
         if (MilvusScan.canUseClientSnapshotFastPath(milvusOption)) {

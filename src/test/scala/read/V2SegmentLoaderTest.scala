@@ -34,6 +34,9 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterEach
 
+import com.zilliz.milvus.storage.io.hadoop.HadoopIO
+import com.zilliz.milvus.storage.path.StoragePath
+
 /** Unit tests for [[V2SegmentLoader.buildV2SegmentInfoFromEntry]].
   *
   * Integration with S3/minio is covered by the backfill E2E test; here we
@@ -49,22 +52,22 @@ class V2SegmentLoaderTest
     with BeforeAndAfterEach {
 
   test("resolvePath uses OSS for Alibaba manifest and nested binlog paths") {
-    V2SegmentLoader.resolvePath(
+    StoragePath.resolvePath(
       "files/manifest.avro",
       "managed-bucket",
       "oss"
     ) shouldBe "oss://managed-bucket/files/manifest.avro"
-    V2SegmentLoader.resolvePath(
+    StoragePath.resolvePath(
       "s3://managed-bucket/files/manifest.avro",
       "managed-bucket",
       "oss"
     ) shouldBe "oss://managed-bucket/files/manifest.avro"
-    V2SegmentLoader.resolvePath(
+    StoragePath.resolvePath(
       "s3a://managed-bucket/files/snapshots/manifest.avro",
       "managed-bucket",
       "oss"
     ) shouldBe "oss://managed-bucket/files/snapshots/manifest.avro"
-    V2SegmentLoader.resolvePath(
+    StoragePath.resolvePath(
       "s3a://managed-bucket/files/insert_log/1/2/3/4.parquet",
       "managed-bucket",
       "oss"
@@ -533,7 +536,7 @@ class V2SegmentLoaderTest
 
   test("readAllBytes wraps malformed URI with path context") {
     val err = intercept[RuntimeException] {
-      V2SegmentLoader.readAllBytes(
+      HadoopIO.readAllBytes(
         new Configuration(),
         "s3a://bucket/path with spaces/[bad].avro"
       )
@@ -548,7 +551,7 @@ class V2SegmentLoaderTest
     conf.set("fs.fatal-v2.impl", classOf[FatalV2FileSystem].getName)
 
     intercept[OutOfMemoryError] {
-      V2SegmentLoader.readAllBytes(conf, "fatal-v2://bucket/manifest.avro")
+      HadoopIO.readAllBytes(conf, "fatal-v2://bucket/manifest.avro")
     }
   }
 
@@ -560,7 +563,7 @@ class V2SegmentLoaderTest
     )
     conf.set("fs.close-tracking-v2.impl.disable.cache", "true")
 
-    V2SegmentLoader.readAllBytes(
+    HadoopIO.readAllBytes(
       conf,
       "close-tracking-v2://bucket/manifest.avro"
     ) shouldBe "avro".getBytes(StandardCharsets.UTF_8)
