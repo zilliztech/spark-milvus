@@ -234,20 +234,43 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 <p>两个 v2 类都已在我们依赖的 <code>auth-2.30.38.jar</code> 里，
 <code>org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider</code> 本来就是 hadoop 的 v2 类，不动。</p>
 
-<h3 id="platform-blocker">5.5 平台侧的阻断项</h3>
-<p>读云上 <code>SparkCspRuntimeSupport.java</code> 得知，平台自己注入的是：</p>
+<h3 id="platform-blocker">5.5 v1 依赖能不能删：取决于运行时谁提供</h3>
+<p>云上 <code>zilliz-cloud</code> 仓库的
+<code>vdc/region-group/activity-provider/activity-web/src/main/java/com/zilliz/cloud/activity/provider/service/spark/SparkCspRuntimeSupport.java</code>
+在提交作业时注入：</p>
 <pre><code>spark.hadoop.fs.s3a.aws.credentials.provider
     = org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider
 spark.hadoop.fs.s3a.assumed.role.credentials.provider
-    = com.amazonaws.auth.DefaultAWSCredentialsProviderChain    ← v1 类名
+    = com.amazonaws.auth.DefaultAWSCredentialsProviderChain    ← v1 类名，第 51 行常量
 spark.hadoop.fs.oss.credentials.provider
     = com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider</code></pre>
+<p>这个 v1 类名不在 hadoop-aws 的五条映射表里，必须有实现类在运行时 classpath 上。</p>
+
+<h4>已核实</h4>
+<ul>
+<li>平台确实注入 v1 类名，位置如上。</li>
+<li>同一个仓库的 <code>vdc/region/spark-data-service/pom.xml</code> 第 128-132 行自己声明了
+<code>com.amazonaws:aws-java-sdk-bundle:1.12.262</code>，compile 作用域；该模块用 maven-shade-plugin 打包。</li>
+<li>我们的 fat jar 里带 <code>com.amazonaws:aws-java-sdk-core:1.12.780</code>。</li>
+</ul>
+
+<h4>未核实</h4>
+<ul>
+<li>spark-data-service 的 shade 是否把 v1 类原样打进产物，还是做了 relocate 或排除。
+它的 Dockerfile 另有一批显式下载进 <code>/tmp/spark-runtime-jars</code> 的 jar，
+列表里没有 aws-java-sdk-bundle。</li>
+<li>两份 v1（1.12.262 与 1.12.780）同时在 classpath 上时哪份胜出。</li>
+<li>开源用户不经 spark-data-service，他们的 classpath 上有没有 v1。</li>
+</ul>
+
 <div class="warn">
-<p>第二行是 v1 类名，不在 hadoop-aws 的五条映射表里，而它的实现类只可能来自我们 fat jar 里的
-<code>aws-java-sdk-core</code>。<strong>所以删这个依赖不是我们单方面能做的</strong>：
-平台要先把那个常量换成 v2 的
+<p><strong>更正</strong>：本页早先写的是「实现类只可能来自我们的 fat jar，所以要平台先改常量」，
+这句不成立——spark-data-service 自己就带 v1 bundle。正确的说法是：
+<strong>删依赖的前置是查清运行时由谁提供 v1，而不是等平台改常量。</strong>
+这件事从任何一个仓库的构建文件都看不出来，要在真实部署上看 classpath。</p>
+<p>平台那个 v1 常量仍然建议换成 v2 的
 <code>software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider</code>，
-我们才能去掉它。在那之前删，平台配的每一个作业都会在建 FileSystem 时失败。</p>
+但那是独立的一件事，不是我们删依赖的前置。</p>
 </div>
 
 <h3>5.6 步骤与顺序</h3>
