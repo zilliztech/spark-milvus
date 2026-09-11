@@ -120,7 +120,14 @@ loon_transaction_update_stat / drop_column / drop_index / append_files</code></p
 <p><code>read_manifest</code> 不只读字节，它返回解析好的列组、删除日志和统计，
 那正是 <code>core.manifest</code> 整个包要做的事。事务那组覆盖写侧的提交语义。</p>
 
-<h3>4.3 被推翻的方案</h3>
+<h3 id="multicloud">4.3 多云也已经在 C 层解决</h3>
+<p>文件系统建在 <code>arrow::fs::FileSystem</code> 上，<code>cloud_provider</code> 认识七个：
+aws、aliyun、azure、gcp、huawei、tencent、local。
+<code>s3/provider/</code> 下有阿里云的 RAM、STS 与 OIDC 角色链，腾讯云与华为云的凭证与 STS 客户端；
+azure 与 gcp 各有独立实现。我们 JVM 侧只有 S3 与 OSS，Azure 和 GCS 一行都没有。
+明细见 <a href="storage-auth.html#c-coverage">storage-auth.html</a>。</p>
+
+<h3>4.4 被推翻的方案</h3>
 <p>本页早先的方案是在 Scala 里定义 <code>ObjectStore</code>（open / list / stat / create），
 用 Hadoop FileSystem 实现，前提是「原生层只会打开数据文件」。这个前提不成立。
 在已有通路旁边再建一条 Scala 的，按 AGENTS.md 的原则就是烟囱。</p>
