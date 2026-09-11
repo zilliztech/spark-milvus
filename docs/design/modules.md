@@ -11,7 +11,7 @@
 | core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow C Data Interface、对象存储 SDK | `com.zilliz:spark-milvus-core_<scala>` |
 | compat | 第 2 层 | `com.zilliz.milvus.storage.compat` | core | `com.zilliz:spark-milvus-compat_<scala>` |
 | client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC | `com.zilliz:spark-milvus-client_<scala>` |
-| spark-base | 第 3 层 | `com.zilliz.spark.connector` | core、compat、client；钉最低的那条线 | 不发布。既是四条线共享的源码，也是一个 project |
+| spark-base | 第 3 层 | `com.zilliz.spark.connector` | 不是 sbt project，是四条线引用的源码目录 | 无 |
 | spark-3.5 / 4.0 / 4.1 / 4.2 | 第 3 层 | 同上 | spark-base 的源码 + 本线专属目录；core、compat、client；本线 Spark 为 provided | `com.zilliz:spark-milvus-<line>_<scala>` |
 | apps | 第 4 层 | `com.zilliz.spark.connector.apps` | 一条线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`：fat jar。只在云上跑的那条线上建；只有一个消费者，源码直接放在这条线的目录里，不设共享 base |
 | integration | 测试 | | 一条线的 spark 与 apps 模块；需 MinIO 和 Milvus | 不发布。Spark 线跑一条，存储后端做成参数化的 fixture 整体重跑（本地、MinIO、S3、OSS、COS、OBS） |
@@ -165,7 +165,9 @@ spark-milvus/
 7. apps 的每个包能单独删除而不影响编译。
 8. SQL 扩展的语法文件放共享源码目录，每条线用本线的 antlr 版本各生成一份，antlr 运行时标 provided 用 Spark 自带的。core 里的 Milvus 表达式解析器不用 antlr：core 是跨线单产物，生成的解析器在 3.5 的 4.9.3 和 4.x 的 4.13.1 之间不通用。
 9. 打开段只有一个入口，凭证刷新在那里做；`core.read.exec` 与 `core.write.exec` 不得绕过它直接开文件。
-10. spark-base 钉最低的那条 Spark 线编译。共享源码只能用各条线都有的 API，用了高版本才有的，spark-base 先编译失败。它的产物不发布也没人依赖，各线是把它的源码加进自己的源码根各编一次。
+10. 共享源码只能用各条线都有的 Spark API。这条由 spark-3.5 兜住：它用最低的那条线编译共享源码，用了高版本才有的 API，它先编译失败。
+11. 目录镜像包名。1.x 的 41 个文件不是这样（文件在 `src/main/scala/read/`，包是 `com.zilliz.spark.connector.read`），迁移时一并对齐。
+12. 模块的显示名跟目录走，发布坐标用 `moduleName` 另设。根项目显示名 `spark-milvus`（等于仓库目录），坐标仍是 `com.zilliz:spark-connector`。sbt 的 project id 不能带点，所以命令行是 `spark40` 而目录是 `spark-4.0`。
 
 ## 5 1.x 到 2.0 的迁移对照
 
