@@ -1,0 +1,185 @@
+<meta charset="utf-8">
+<title>存储访问层设计（未完待续）</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 46rem; margin: 2rem auto; padding: 0 1.2rem;
+         font: 16px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.2rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.6rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .93rem; }
+  th, td { border: 1px solid #8884; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #8881; font-weight: 600; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em;
+         background: #8881; padding: .1em .35em; border-radius: 3px; }
+  pre { background: #8881; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .85rem; }
+  pre code { background: none; padding: 0; }
+  .status { border-left: 3px solid #d08700; background: #d0870014; padding: .8rem 1rem; margin: 1.2rem 0; }
+  figure { margin: 1.6rem 0; }
+  figcaption { font-size: .88rem; color: #8889; margin-top: .5rem; }
+  svg { max-width: 100%; height: auto; }
+  .open { border-left: 3px solid #c0392b; background: #c0392b12; padding: .8rem 1rem; margin: 1.2rem 0; }
+</style>
+
+<h1>存储访问层设计</h1>
+<p>本页对应能力 R3。术语、分层与包边界见
+<a href="modules.md">modules.md</a>，能力编号见
+<a href="../capabilities.md">capabilities.md</a>。</p>
+
+<div class="status">
+<strong>状态：未完待续。</strong>讨论到「统一入口应该是 C 的 filesystem 层而不是 Scala 接口」
+这一步停下，先做认证授权的设计（见文末<a href="#next">下一步</a>）。本页记录已经确定的事实和
+已经被推翻的方案，避免重新推导。
+</div>
+
+<h2 id="position">一、位置与职责</h2>
+<p><strong>位置</strong>：core 内部，所有格式包的下面。<strong>职责</strong>：把格式里的引用变成字节。</p>
+<p>它不认识快照、manifest、删除文件、列组，一个都不认识。判据：一个包如果在解析不属于它的字节，
+就是放错了位置。core 里 <code>path</code>、<code>credential</code>、<code>io</code> 三个包没有任何解析器，
+其余包各有各的编码——snapshot 用 ObjectMapper，manifest 用 Avro 的 DataFileStream，
+delete 用 ByteBuffer 加 ObjectMapper，schema 只碰 CollectionSchema，codec 只碰 ByteBuffer。</p>
+
+<h2 id="files">二、读一张表要打开哪些文件</h2>
+<p>五个入口分支，用户给的东西不同，但都归结成一个对象存储路径：collection 名（连接器调
+gRPC CreateSnapshot 拿 s3Location）、快照路径、<code>milvus.snapshot.manifests</code> 或
+<code>milvus.snapshot.v2.segments</code>（离线段列表）、<code>milvus.backup.dir</code>、遗留 client 模式。</p>
+
+<table>
+<tr><th>文件</th><th>路径怎么来</th><th>谁解析</th></tr>
+<tr><td>快照 JSON</td><td>起点路径本身</td><td>JVM</td></tr>
+<tr><td>V3 段 manifest</td><td><code>&lt;段基路径&gt;/_metadata/manifest-&lt;N&gt;.avro</code>，N 要先列 <code>_metadata/</code> 取最大值</td><td>JVM</td></tr>
+<tr><td>V2 段 manifest</td><td>快照 JSON 的 <code>manifest_list</code> 列出的 avro，裸二进制无 OCF 容器头，外挂 avsc 按格式版本解</td><td>JVM</td></tr>
+<tr><td>删除文件</td><td><code>&lt;段基路径&gt;/_delta/&lt;文件名&gt;</code></td><td>JVM</td></tr>
+<tr><td>parquet footer</td><td>列组文件的尾部，只读 footer，恢复 V2 packed 段的字段 id</td><td>JVM</td></tr>
+<tr><td>列组 parquet</td><td>manifest 里记的路径</td><td>C++</td></tr>
+<tr><td>索引文件</td><td>manifest 的索引登记</td><td>C++（未建）</td></tr>
+</table>
+
+<p>判据不是「manifest 还是数据」，是<strong>谁解析</strong>。列组 parquet 文件是数据，但 JVM 会打开它读
+footer——V2 packed 段的字段 id 只写在 parquet 的 schema 里，别处没有。同一个物理文件，两条通路都碰。</p>
+
+<h3 id="paths">路径的六种写法</h3>
+<p>格式内部写引用不统一，代码里实际出现过这六种：</p>
+<pre><code>s3a://bucket/key
+s3://bucket/key                                   → 被改写成 s3a
+_delta/xxx                                        → 相对段基路径
+/xxx                                              → 带前导斜杠，仍相对段基路径
+files/insert_log/&lt;collection&gt;/&lt;partition&gt;/&lt;segment&gt;/&lt;field&gt;/&lt;log&gt;   → 桶内相对 key
+a-bucket/files/...                                → 带桶名不带 scheme</code></pre>
+
+<p>这里要区分两件现在混在一起的事。<strong>路径归一</strong>（六种形状收敛成 bucket 加 key）是通用的，
+不需要知道文件是什么。<strong>路径构造</strong>（V3 的 manifest 在 <code>_metadata/manifest-N.avro</code>、
+删除文件在 <code>_delta/</code> 下）是格式知识，属于 <code>manifest</code> 和 <code>delete</code> 包。
+现在 <code>MilvusStorageV3ManifestReader.resolveManifestDeltaPath</code> 把两件事写在同一个函数里，
+它既做 s3/s3a 归一，又知道 <code>_delta/</code> 这个目录名。</p>
+
+<h2 id="auth-today">三、认证的现状：没有模块，六处各写各的</h2>
+<p><code>core.credential</code> 是空包，只有 package.scala。真正构建凭证的代码分散在三个模块：</p>
+
+<table>
+<tr><th>位置</th><th>做什么</th></tr>
+<tr><td><code>spark-base/MilvusOption.scala:504,523</code></td><td>设 <code>fs.s3a.aws.credentials.provider</code>，自建 FileSystem</td></tr>
+<tr><td><code>spark-base/loon/Properties.scala:67</code></td><td>组装原生侧的属性包</td></tr>
+<tr><td><code>spark-base/sources/MilvusDataSource.scala:1603</code></td><td><code>buildHadoopConfForOptions</code></td></tr>
+<tr><td><code>apps-4.0/backfill/MilvusBackfill.scala:2401-2612</code></td><td>S3 与 OSS 各一套 provider 链</td></tr>
+<tr><td><code>apps-4.0/backfill/BackfillConfig.scala:363,454,466,480</code></td><td>provider 键名常量、OSS AssumeRole 判定</td></tr>
+<tr><td><code>apps-4.0/tools/ListV2SegmentsApp.scala:307</code></td><td>自己抄了一份 IRSA 链</td></tr>
+</table>
+
+<p>已实现的认证方式：静态 AKSK、实例/默认链、Web Identity（Pod STS / IRSA）、AssumeRole、
+阿里云的 <code>AliyunOSSRoleCredentialsProvider</code>。</p>
+
+<p>已知的失效形态：IRSA 下 Web Identity 必须排在 instance profile 前面，排错了会拿到节点角色，
+能连上但连的是别人的桶；开发用的 <code>a-bucket</code>、<code>localhost:9000</code>、<code>minioadmin</code>
+写死在生产路径上，非 IAM 模式漏配桶名会安静地连错桶。</p>
+
+<h2 id="finding">四、关键发现：C 层已经有完整的文件系统与 manifest 接口</h2>
+<p>读 <code>milvus-storage/cpp/include/milvus-storage/</code> 的 C 头文件得出。这一条推翻了本页之前的方案。</p>
+
+<h3>4.1 文件系统 API</h3>
+<pre><code>loon_filesystem_get(properties, path, path_len, out_handle)
+loon_filesystem_read_file_all(handle, path, path_len, out_data, out_size)
+loon_filesystem_open_reader / reader_readat(handle, offset, nbytes, out_data)
+loon_filesystem_reader_readat_async / reader_supports_async
+loon_filesystem_list_dir(handle, path, recursive, out_list)   // {path, is_dir, size, mtime_ns}
+loon_filesystem_get_file_info / get_path_info / get_file_stats / get_object_info
+loon_filesystem_open_writer / writer_write / writer_flush / writer_close
+loon_filesystem_write_file / create_dir / delete_file
+loon_filesystem_get_metrics / list_metrics / reset_metrics</code></pre>
+<p>凭证包在 <code>properties</code> 里。后端实现有 s3、gcp、azure、local 四种；OSS 没有独立实现，
+走 S3 兼容端点。<code>loon_filesystem_get</code> 的注释写明：路径带 scheme 时会去解析
+<code>extfs.*</code> 配置。</p>
+
+<h3>4.2 manifest 与事务</h3>
+<pre><code>loon_exttable_read_manifest(manifest_file_path, properties, out_manifest)
+// 头文件原注释：output manifest (includes column groups, delta logs, and stats)
+
+loon_transaction_begin / commit / get_manifest / get_read_version
+loon_transaction_add_column_group / add_delta_log / add_index_info / add_lob_file
+loon_transaction_update_stat / drop_column / drop_index / append_files</code></pre>
+<p><code>read_manifest</code> 不只读字节，它返回解析好的列组、删除日志和统计，
+那正是 <code>core.manifest</code> 整个包要做的事。事务那组覆盖写侧的提交语义。</p>
+
+<h3>4.3 被推翻的方案</h3>
+<p>本页早先的方案是在 Scala 里定义 <code>ObjectStore</code>（open / list / stat / create），
+用 Hadoop FileSystem 实现，前提是「原生层只会打开数据文件」。这个前提不成立。
+在已有通路旁边再建一条 Scala 的，按 AGENTS.md 的原则就是烟囱。</p>
+
+<figure>
+<svg viewBox="0 0 660 250" role="img" aria-label="今天两条通路各自配置凭证，目标是一份配置一个句柄">
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="currentColor"/>
+    </marker>
+  </defs>
+  <text x="0" y="14" font-size="12" font-weight="600" fill="currentColor">今天</text>
+  <rect x="0" y="28" width="120" height="34" fill="none" stroke="currentColor"/>
+  <text x="10" y="49" font-size="11" fill="currentColor">JVM 六处凭证</text>
+  <rect x="0" y="76" width="120" height="34" fill="none" stroke="currentColor"/>
+  <text x="10" y="97" font-size="11" fill="currentColor">原生属性包</text>
+  <line x1="120" y1="45" x2="235" y2="55" stroke="currentColor" marker-end="url(#a)"/>
+  <line x1="120" y1="93" x2="235" y2="78" stroke="currentColor" marker-end="url(#a)"/>
+  <text x="128" y="40" font-size="10" fill="currentColor">Hadoop</text>
+  <text x="128" y="108" font-size="10" fill="currentColor">C++ 自己开</text>
+  <rect x="240" y="48" width="110" height="38" fill="none" stroke="currentColor"/>
+  <text x="252" y="72" font-size="11" fill="currentColor">对象存储</text>
+
+  <text x="380" y="14" font-size="12" font-weight="600" fill="currentColor">目标</text>
+  <rect x="380" y="48" width="120" height="34" fill="none" stroke="#c0392b"/>
+  <text x="390" y="69" font-size="11" fill="#c0392b">一份凭证配置</text>
+  <line x1="500" y1="65" x2="540" y2="65" stroke="#c0392b" marker-end="url(#a)"/>
+  <rect x="545" y="48" width="110" height="34" fill="none" stroke="#c0392b"/>
+  <text x="556" y="69" font-size="11" fill="#c0392b">一个 fs 句柄</text>
+  <line x1="600" y1="82" x2="600" y2="120" stroke="#c0392b" marker-end="url(#a)"/>
+  <rect x="545" y="126" width="110" height="34" fill="none" stroke="currentColor"/>
+  <text x="566" y="147" font-size="11" fill="currentColor">对象存储</text>
+  <text x="380" y="150" font-size="10" fill="currentColor">JVM 与 C++ 都经它</text>
+</svg>
+<figcaption>今天两条通路各自组装身份，两边只要有一处顺序或默认值不同就会指向不同的桶。目标是身份只渲染一次。</figcaption>
+</figure>
+
+<h2 id="open">五、待决</h2>
+<div class="open">
+<p><strong>路线级问题</strong>：统一入口取 C 的 filesystem 层，还是保留一条 JVM 通路。这个决定比
+决策 20、21、22 都大，定了之后它们三条可能自动消失。</p>
+<p>定它之前要先查清四件事：</p>
+<ol>
+<li>小文件跨 JNI 的开销。快照 JSON 和 manifest 都不大，但没测过。</li>
+<li>C++ 没有 HDFS 实现。确认部署里是否真的不需要。</li>
+<li>Spark 的 <code>hadoopConfiguration</code> 里平台注入的 s3a 配置将不再生效，云上部署是否依赖它。</li>
+<li>OSS 走 S3 兼容端点与现在的 <code>hadoop-aliyun</code> 路径行为是否一致。</li>
+</ol>
+</div>
+
+<p>已登记在 <a href="../README.md">README.md</a> 第 4 节的三条，等路线定了再回头看：</p>
+<table>
+<tr><th>编号</th><th>问题</th></tr>
+<tr><td>20</td><td>原生属性包由谁渲染</td></tr>
+<tr><td>21</td><td>开发默认值留不留在生产路径上</td></tr>
+<tr><td>22</td><td>身份要不要进工厂签名</td></tr>
+</table>
+
+<h2 id="next">六、下一步</h2>
+<p>先做<strong>认证授权</strong>的设计，它是这一层最基础的部分，而且无论路线怎么定都要做：
+六处复制必须收敛成一处，凭证模式要建模成封闭集合而不是一个布尔加四个可选字符串。</p>
+<p>认证定稿后回到本页，按上面四条事实的调查结果定路线，再写接口。</p>
