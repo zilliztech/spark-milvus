@@ -2,6 +2,8 @@ package com.zilliz.spark.connector.read
 
 import org.apache.spark.sql.connector.read.InputPartition
 
+import com.zilliz.milvus.storage.delete.MilvusDeletePlan
+import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.MilvusOption
 
 // InputPartition for milvus-segment-info `storage_version = 3` (StorageV3) —

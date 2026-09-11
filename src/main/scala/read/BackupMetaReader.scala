@@ -24,6 +24,13 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.FileSystem
 import org.apache.spark.internal.Logging
 
+import com.zilliz.milvus.storage.snapshot.{
+  JsonTypeConverter,
+  MilvusSnapshotReader,
+  V2ColumnGroup,
+  V2DeltaLogFile,
+  V2SegmentInfo
+}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{
   CollectionSchema => ProtoCollectionSchema,
@@ -50,22 +57,21 @@ import io.milvus.grpc.schema.{
   * separate `DestKey` under the backup dir and records only the source key in
   * the meta — so object paths are always reconstructed from `backupDir` plus
   * the collection/partition/group/segment/field/log IDs, never taken from
-   * `log_path`. Three gaps vs. a Milvus snapshot are closed here:
-   *   1. milvus-backup persists only `log_size` per binlog, not `entries_num`.
-   *      Per-file row counts are recovered by reading each binlog's parquet
-   *      footer ([MilvusParquetFooterReader.readRowCount], with the head file's
-   *      footer read once for both field IDs and its row count via
-   *      [MilvusParquetFooterReader.readFieldIdsAndRowCount]).
-   *   2. The AVRO
-   *      segment-info (and hence the slot -> real field ID mapping) is not
-   *      copied by the backup; the real field IDs are recovered from the **head
-   *      file** of each column group via that file's own parquet schema
-   *      ([MilvusParquetFooterReader.readFieldIdsAndRowCount]) — matching
-   *      V2SegmentLoader, which assumes all files in a group share the schema.
-   *   3. L0 delete-only segments are created by Milvus without a
-   *      `StorageVersion` (0/omitted), so they are handled before any
-   *      storage-version filtering.
-   *
+  * `log_path`. Three gaps vs. a Milvus snapshot are closed here:
+  *   1. milvus-backup persists only `log_size` per binlog, not `entries_num`.
+  *      Per-file row counts are recovered by reading each binlog's parquet
+  *      footer ([MilvusParquetFooterReader.readRowCount], with the head file's
+  *      footer read once for both field IDs and its row count via
+  *      [MilvusParquetFooterReader.readFieldIdsAndRowCount]). 2. The AVRO
+  *      segment-info (and hence the slot -> real field ID mapping) is not
+  *      copied by the backup; the real field IDs are recovered from the **head
+  *      file** of each column group via that file's own parquet schema
+  *      ([MilvusParquetFooterReader.readFieldIdsAndRowCount]) — matching
+  *      V2SegmentLoader, which assumes all files in a group share the schema.
+  *      3. L0 delete-only segments are created by Milvus without a
+  *      `StorageVersion` (0/omitted), so they are handled before any
+  *      storage-version filtering.
+  *
   * Only StorageV2 (packed parquet, `storage_version == 2`) data segments are
   * supported; anything else fails hard rather than returning a partial dataset.
   */

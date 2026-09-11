@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.delete
 
 sealed trait MilvusDeletePlan {
   def containsLongPk(value: Long, rowTs: Long): Boolean

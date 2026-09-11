@@ -12,18 +12,19 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.slf4j.LoggerFactory
 
-import com.zilliz.spark.connector.{
-  MilvusClient,
-  MilvusConnectionParams,
-  MilvusOption
-}
-import com.zilliz.spark.connector.read.{
+import com.zilliz.milvus.storage.snapshot.{
   CollectionSchema,
   Field,
   MilvusSnapshotReader,
   SnapshotMetadata,
   StorageV2ManifestItem
 }
+import com.zilliz.spark.connector.{
+  MilvusClient,
+  MilvusConnectionParams,
+  MilvusOption
+}
+import com.zilliz.spark.connector.read.SnapshotSparkSchema
 import com.zilliz.spark.connector.write.{
   MilvusLoonBatchWrite,
   MilvusLoonCommitMessage,
@@ -162,7 +163,7 @@ object MilvusBackfill {
         case _ =>
           val sourceFieldResult =
             try {
-              Right(MilvusSnapshotReader.fieldToStructField(field))
+              Right(SnapshotSparkSchema.fieldToStructField(field))
             } catch {
               case e: Exception =>
                 Left(
@@ -365,7 +366,7 @@ object MilvusBackfill {
     // parquet-footer join) so both the read path (which serializes them into
     // the DataSource option) and the write path (which dispatches per
     // segment's storage version) share the same view without hitting S3 twice.
-    val v2Segments: Seq[com.zilliz.spark.connector.read.V2SegmentInfo] =
+    val v2Segments: Seq[com.zilliz.milvus.storage.snapshot.V2SegmentInfo] =
       snapshotMetadataOpt match {
         case Some(meta) if meta.manifestList.nonEmpty =>
           loadV2Segments(spark, meta, config) match {
@@ -517,7 +518,7 @@ object MilvusBackfill {
         val field = targetFieldsByName(n)
         val structField = targetVectorFields.getOrElse(
           n,
-          MilvusSnapshotReader.fieldToStructField(field)
+          SnapshotSparkSchema.fieldToStructField(field)
         )
         (n, newFieldNameToId(n), structField)
       }
@@ -1105,7 +1106,7 @@ object MilvusBackfill {
       config: BackfillConfig,
       joinKey: ResolvedJoinKey,
       snapshotMetadata: Option[SnapshotMetadata],
-      v2Segments: Seq[com.zilliz.spark.connector.read.V2SegmentInfo],
+      v2Segments: Seq[com.zilliz.milvus.storage.snapshot.V2SegmentInfo],
       extraReadFields: Seq[
         (String, Long, org.apache.spark.sql.types.StructField)
       ] = Seq.empty
@@ -1918,8 +1919,8 @@ object MilvusBackfill {
     * short-circuit dedup on every AVRO-loaded segment.
     */
   private[backfill] def dedupColumnGroupsBySlot(
-      seg: com.zilliz.spark.connector.read.V2SegmentInfo
-  ): com.zilliz.spark.connector.read.V2SegmentInfo = {
+      seg: com.zilliz.milvus.storage.snapshot.V2SegmentInfo
+  ): com.zilliz.milvus.storage.snapshot.V2SegmentInfo = {
     val before = seg.columnGroups
     val deduped = seg.dedupColumnGroupsBySlot
     if (before != deduped.columnGroups) {
@@ -1942,7 +1943,7 @@ object MilvusBackfill {
       metadata: SnapshotMetadata,
       config: BackfillConfig
   ): Either[BackfillError, Seq[
-    com.zilliz.spark.connector.read.V2SegmentInfo
+    com.zilliz.milvus.storage.snapshot.V2SegmentInfo
   ]] = {
     if (metadata.manifestList.isEmpty) return Right(Seq.empty)
     try {
@@ -2214,7 +2215,8 @@ object MilvusBackfill {
     */
   private def extractMetadataFromSnapshot(
       metadata: SnapshotMetadata,
-      v2Segments: Seq[com.zilliz.spark.connector.read.V2SegmentInfo] = Seq.empty
+      v2Segments: Seq[com.zilliz.milvus.storage.snapshot.V2SegmentInfo] =
+        Seq.empty
   ): (Long, Map[Long, Long], Map[Long, String]) = {
     val collectionID = metadata.snapshotInfo.collectionId
 

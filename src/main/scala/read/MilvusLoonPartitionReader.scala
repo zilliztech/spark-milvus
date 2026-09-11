@@ -25,6 +25,7 @@ import org.apache.spark.sql.types.{
 }
 
 import com.zilliz.milvus.storage.codec.FloatConverter
+import com.zilliz.milvus.storage.delete.MilvusDeletePlan
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.loon.Properties

@@ -1,7 +1,10 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.delete
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+
+import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
+import com.zilliz.milvus.storage.snapshot.V2SegmentInfo
 
 class MilvusDeltaLogReaderTest extends AnyFunSuite with Matchers {
   test("mergeInheritedDeletePlans keeps L0 deletes within the same partition") {

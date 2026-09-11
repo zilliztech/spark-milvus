@@ -49,8 +49,17 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
+import com.zilliz.milvus.storage.delete.MilvusDeltaLogReader
+import com.zilliz.milvus.storage.manifest.MilvusStorageV3ManifestReader
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.SchemaMapper
+import com.zilliz.milvus.storage.snapshot.{
+  MilvusSnapshotReader,
+  SnapshotMetadata,
+  StorageV2ManifestItem,
+  V2DeltaLogFile,
+  V2SegmentInfo
+}
 import com.zilliz.spark.connector.{
   DataTypeUtil,
   MilvusClient,
@@ -62,17 +71,11 @@ import com.zilliz.spark.connector.{
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
   BackupMetaReader,
-  MilvusDeltaLogReader,
   MilvusPackedV2DeleteContext,
   MilvusPackedV2InputPartition,
   MilvusPartitionReaderFactory,
-  MilvusSnapshotReader,
   MilvusStorageV3InputPartition,
-  MilvusStorageV3ManifestReader,
-  SnapshotMetadata,
-  StorageV2ManifestItem,
-  V2DeltaLogFile,
-  V2SegmentInfo,
+  SnapshotSparkSchema,
   V2SegmentLoader
 }
 import com.zilliz.spark.connector.serde.ArrowConverter
@@ -116,11 +119,11 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
       // Try to get schema from snapshot JSON
       Option(options.get(MilvusOption.SnapshotSchemaJson))
         .flatMap { json =>
-          import com.zilliz.spark.connector.read.MilvusSnapshotReader
+          import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
           MilvusSnapshotReader.parseSnapshotMetadata(json) match {
             case Right(metadata) =>
               Some(
-                MilvusSnapshotReader.toSparkSchema(
+                SnapshotSparkSchema.toSparkSchema(
                   metadata.collection.schema,
                   includeSystemFields = true
                 )
@@ -337,7 +340,7 @@ case class MilvusTable(
   /** Initialize collection info from snapshot metadata (no client connection)
     */
   private def initFromSnapshot(): Unit = {
-    import com.zilliz.spark.connector.read.MilvusSnapshotReader
+    import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
 
     // Get collection ID from options
     val collectionId = milvusOption.options
@@ -920,7 +923,7 @@ object MilvusScan extends Logging {
   private[sources] case class V3DeletePlanning(
       deletePlans: Map[
         Long,
-        com.zilliz.spark.connector.read.MilvusDeletePlan
+        com.zilliz.milvus.storage.delete.MilvusDeletePlan
       ],
       readVersions: Map[Long, Long]
   )
@@ -1954,7 +1957,7 @@ class MilvusScan(
           options
         ) || inheritedDeleteSegments.isEmpty
       ) {
-        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+        Map.empty[Long, com.zilliz.milvus.storage.delete.MilvusDeletePlan]
       } else {
         val pkField = CollectionSchema
           .parseFrom(schemaBytes)
@@ -2129,7 +2132,7 @@ class MilvusScan(
       snapshotBucket: Option[String],
       hadoopConf: Configuration,
       errorContext: String
-  ): Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan] = {
+  ): Map[Long, com.zilliz.milvus.storage.delete.MilvusDeletePlan] = {
     val applyDeletes = MilvusOption.readApplyDeletes(options)
     val dataSegments = v2Segments.filter(seg =>
       seg.columnGroups.nonEmpty && seg.deltaLogs.nonEmpty
@@ -2228,7 +2231,7 @@ class MilvusScan(
                   )
               }
             val deletePlan
-                : Option[com.zilliz.spark.connector.read.MilvusDeletePlan] =
+                : Option[com.zilliz.milvus.storage.delete.MilvusDeletePlan] =
               if (deltaLogs.isEmpty) {
                 None
               } else {
@@ -2267,17 +2270,17 @@ class MilvusScan(
       schemaBytes: Array[Byte],
       v3DeletePlans: Map[
         Long,
-        com.zilliz.spark.connector.read.MilvusDeletePlan
+        com.zilliz.milvus.storage.delete.MilvusDeletePlan
       ] = Map.empty,
       v3ReadVersions: Map[Long, Long] = Map.empty,
       v2Segments: Seq[V2SegmentInfo],
       v2DeletePlans: Map[
         Long,
-        com.zilliz.spark.connector.read.MilvusDeletePlan
+        com.zilliz.milvus.storage.delete.MilvusDeletePlan
       ],
       inheritedDeletePlansByPartition: Map[
         Long,
-        com.zilliz.spark.connector.read.MilvusDeletePlan
+        com.zilliz.milvus.storage.delete.MilvusDeletePlan
       ] = Map.empty,
       inlineInheritedDeletePlans: Boolean = false,
       forceCanonicalBucket: Option[String] = None
@@ -2321,7 +2324,7 @@ class MilvusScan(
         catch { case _: NumberFormatException => Long.MinValue }
       val inheritedDeletePlan =
         if (partitionIdLong == Long.MinValue) {
-          com.zilliz.spark.connector.read.MilvusDeletePlan.empty
+          com.zilliz.milvus.storage.delete.MilvusDeletePlan.empty
         } else {
           MilvusDeltaLogReader.effectiveInheritedDeletePlan(
             partitionIdLong,
@@ -2330,7 +2333,7 @@ class MilvusScan(
         }
       val ownDeletePlan = v3DeletePlans.getOrElse(
         segmentID,
-        com.zilliz.spark.connector.read.MilvusDeletePlan.empty
+        com.zilliz.milvus.storage.delete.MilvusDeletePlan.empty
       )
       MilvusStorageV3InputPartition(
         basePath,
@@ -2344,7 +2347,7 @@ class MilvusScan(
         segmentID,
         readVersion,
         applyDeletes = MilvusOption.readApplyDeletes(options),
-        deletePlan = com.zilliz.spark.connector.read.MilvusDeletePlan.union(
+        deletePlan = com.zilliz.milvus.storage.delete.MilvusDeletePlan.union(
           inheritedDeletePlan,
           ownDeletePlan
         )
@@ -2380,7 +2383,7 @@ class MilvusScan(
       .map { seg =>
         val ownDeletePlan = v2DeletePlans.getOrElse(
           seg.segmentId,
-          com.zilliz.spark.connector.read.MilvusDeletePlan.empty
+          com.zilliz.milvus.storage.delete.MilvusDeletePlan.empty
         )
         val inheritedDeletePlan =
           if (inlineInheritedDeletePlans) {
@@ -2389,10 +2392,10 @@ class MilvusScan(
               inheritedDeletePlansByPartition
             )
           } else {
-            com.zilliz.spark.connector.read.MilvusDeletePlan.empty
+            com.zilliz.milvus.storage.delete.MilvusDeletePlan.empty
           }
         val deletePlan =
-          com.zilliz.spark.connector.read.MilvusDeletePlan.union(
+          com.zilliz.milvus.storage.delete.MilvusDeletePlan.union(
             inheritedDeletePlan,
             ownDeletePlan
           )
@@ -2440,8 +2443,9 @@ class MilvusScan(
     *   - `manifestsJson` (the legacy `SnapshotManifests` option) for
     *     manifest-based segments (segment-info `storage_version = 3`), or
     *   - a non-empty `SnapshotV2Segments` option carrying a materialized list
-    *     of [[com.zilliz.spark.connector.read.V2SegmentInfo]] for non-manifest
-    *     packed-parquet segments (segment-info `storage_version = 2`).
+    *     of [[com.zilliz.milvus.storage.snapshot.V2SegmentInfo]] for
+    *     non-manifest packed-parquet segments (segment-info `storage_version =
+    *     2`).
     *
     * When both are present the planner emits partitions from both sources
     * (mixed-version snapshot).
@@ -2449,7 +2453,7 @@ class MilvusScan(
   private def planInputPartitionsFromSnapshot(
       manifestsJson: String
   ): Array[InputPartition] = {
-    import com.zilliz.spark.connector.read.{
+    import com.zilliz.milvus.storage.snapshot.{
       MilvusSnapshotReader,
       StorageV2ManifestItem
     }
@@ -2534,7 +2538,7 @@ class MilvusScan(
           options
         ) || inheritedDeleteSegments.isEmpty
       ) {
-        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+        Map.empty[Long, com.zilliz.milvus.storage.delete.MilvusDeletePlan]
       } else {
         val pkField = CollectionSchema
           .parseFrom(schemaBytes)
@@ -2718,12 +2722,12 @@ class MilvusScan(
     // twice on the driver.
     val inheritedDeletePlansByPartition =
       if (!applyDeletes || inheritedDeleteSegments.isEmpty) {
-        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+        Map.empty[Long, com.zilliz.milvus.storage.delete.MilvusDeletePlan]
       } else {
         inheritedDeleteSegments
           .map(seg =>
             seg.partitionId ->
-              com.zilliz.spark.connector.read.MilvusDeletePlan.empty
+              com.zilliz.milvus.storage.delete.MilvusDeletePlan.empty
           )
           .toMap
       }
@@ -2772,7 +2776,7 @@ class MilvusScan(
             seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
           )
         if (schemaBytes.isEmpty || inheritedDeleteSegments.isEmpty) {
-          Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+          Map.empty[Long, com.zilliz.milvus.storage.delete.MilvusDeletePlan]
         } else {
           val pkField = CollectionSchema
             .parseFrom(schemaBytes)
@@ -2805,7 +2809,7 @@ class MilvusScan(
         // handling does not depend on Spark evaluating partitions first.
         computeBackupInheritedDeletePlans()
       } else {
-        Map.empty[Long, com.zilliz.spark.connector.read.MilvusDeletePlan]
+        Map.empty[Long, com.zilliz.milvus.storage.delete.MilvusDeletePlan]
       }
 
     new MilvusPartitionReaderFactory(
@@ -2824,7 +2828,7 @@ class MilvusScan(
     * plan and deleted rows would come back as live.
     */
   private def computeBackupInheritedDeletePlans()
-      : Map[Long, com.zilliz.spark.connector.read.MilvusDeletePlan] = {
+      : Map[Long, com.zilliz.milvus.storage.delete.MilvusDeletePlan] = {
     val backupDir = MilvusOption.backupDir(options).getOrElse {
       return Map.empty
     }

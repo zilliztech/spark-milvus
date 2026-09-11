@@ -4,11 +4,8 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.spark.connector.read.{
-  MilvusSnapshotReader,
-  V2SegmentInfo,
-  V2SegmentLoader
-}
+import com.zilliz.milvus.storage.snapshot.{MilvusSnapshotReader, V2SegmentInfo}
+import com.zilliz.spark.connector.read.{SnapshotSparkSchema, V2SegmentLoader}
 import com.zilliz.spark.connector.MilvusOption
 
 /** Standalone reader-only verification app.
@@ -146,7 +143,7 @@ object ReadSourceOnlyApp {
       }
 
       import org.apache.spark.sql.types._
-      val pkStructField = MilvusSnapshotReader.fieldToStructField(pkField)
+      val pkStructField = SnapshotSparkSchema.fieldToStructField(pkField)
       val readSchema = StructType(
         Seq(
           pkStructField,

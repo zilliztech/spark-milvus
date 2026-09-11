@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.manifest
 
 import java.io.ByteArrayInputStream
 import scala.jdk.CollectionConverters._
@@ -7,7 +7,13 @@ import org.apache.avro.generic.{GenericDatumReader, GenericRecord}
 import org.apache.avro.io.DecoderFactory
 import org.apache.avro.util.Utf8
 import org.apache.avro.Schema
-import org.apache.spark.internal.Logging
+
+import com.zilliz.milvus.storage.snapshot.{
+  Field,
+  V2ColumnGroup,
+  V2DeltaLogFile,
+  V2SegmentInfo
+}
 
 /** Low-level mirror of one AVRO binlog group (`AvroFieldBinlog`):
   *   - `slotFieldId`: the value milvus writes for `AvroFieldBinlog.field_id`.
@@ -17,12 +23,12 @@ import org.apache.spark.internal.Logging
   *   - `binlogs`: one [[AvroBinlogEntry]] per physical parquet file belonging
   *     to this group, in writer-assigned order (sort by `logId` for rows).
   */
-private[read] case class AvroFieldBinlogEntry(
+case class AvroFieldBinlogEntry(
     slotFieldId: Long,
     binlogs: Seq[AvroBinlogEntry]
 )
 
-private[read] case class AvroBinlogEntry(
+case class AvroBinlogEntry(
     logId: Long,
     logPath: String,
     entriesNum: Long
@@ -33,7 +39,7 @@ private[read] case class AvroBinlogEntry(
   * `storageVersion` uses the authoritative constants from
   * `milvus/internal/storage/rw.go`: StorageV1=0, StorageV2=2, StorageV3=3.
   */
-private[read] case class AvroManifestEntry(
+case class AvroManifestEntry(
     segmentId: Long,
     partitionId: Long,
     segmentLevel: Long,
@@ -60,7 +66,7 @@ private[read] case class AvroManifestEntry(
   *   }
   * }}}
   */
-object MilvusSegmentManifestReader extends Logging {
+object MilvusSegmentManifestReader extends com.zilliz.milvus.storage.Logging {
 
   private val LastNeededField = "deltalog_files"
 

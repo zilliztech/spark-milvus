@@ -34,22 +34,24 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterEach
 
+import com.zilliz.milvus.storage.delete.MilvusDeletePlan
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.spark.connector.{MilvusCollectionInfo, MilvusOption}
-import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.read.{
-  BackupMetaReader,
+import com.zilliz.milvus.storage.snapshot.{
   Collection,
   CollectionSchema,
-  MilvusDeletePlan,
-  MilvusPackedV2InputPartition,
   MilvusSnapshotReader,
-  MilvusStorageV3InputPartition,
   SnapshotInfo,
   SnapshotMetadata,
   StorageV2ManifestItem,
   V2ColumnGroup,
   V2SegmentInfo
+}
+import com.zilliz.spark.connector.{MilvusCollectionInfo, MilvusOption}
+import com.zilliz.spark.connector.loon.Properties
+import com.zilliz.spark.connector.read.{
+  BackupMetaReader,
+  MilvusPackedV2InputPartition,
+  MilvusStorageV3InputPartition
 }
 import com.zilliz.spark.connector.serde.ArrowConverter
 

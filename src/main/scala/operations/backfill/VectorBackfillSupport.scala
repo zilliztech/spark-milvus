@@ -10,8 +10,8 @@ import org.apache.spark.sql.types._
 
 import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.schema.FieldMetadata
+import com.zilliz.milvus.storage.snapshot.Field
 import com.zilliz.milvus.storage.DataParseException
-import com.zilliz.spark.connector.read.Field
 import com.zilliz.spark.connector.serde.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 

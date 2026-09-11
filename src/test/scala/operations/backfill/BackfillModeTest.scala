@@ -17,7 +17,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.spark.connector.read.{
+import com.zilliz.milvus.storage.snapshot.{
   CollectionSchema,
   Field,
   V2ColumnGroup,

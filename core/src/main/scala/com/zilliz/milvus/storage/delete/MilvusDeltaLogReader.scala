@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.delete
 
 import java.io.EOFException
 import java.nio.ByteBuffer
@@ -13,13 +13,13 @@ import org.apache.parquet.hadoop.api.ReadSupport
 import org.apache.parquet.hadoop.example.GroupReadSupport
 import org.apache.parquet.hadoop.ParquetReader
 import org.apache.parquet.io.{InputFile, SeekableInputStream}
-import org.apache.spark.internal.Logging
 
 import com.zilliz.milvus.storage.io.hadoop.HadoopIO
 import com.zilliz.milvus.storage.path.StoragePath
+import com.zilliz.milvus.storage.snapshot.{V2DeltaLogFile, V2SegmentInfo}
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-object MilvusDeltaLogReader extends Logging {
+object MilvusDeltaLogReader extends com.zilliz.milvus.storage.Logging {
   private val MagicNumber = 0xfffabc
   private val DescriptorEventType: Byte = 0
   private val DeleteEventType: Byte = 2
@@ -64,7 +64,7 @@ object MilvusDeltaLogReader extends Logging {
 
   private val AllPartitionsId = -1L
 
-  private[read] def mergeInheritedDeletePlans(
+  def mergeInheritedDeletePlans(
       dataSegments: Seq[V2SegmentInfo],
       inheritedPlansByPartition: Map[Long, MilvusDeletePlan],
       ownPlansBySegment: Map[Long, MilvusDeletePlan]
@@ -82,7 +82,7 @@ object MilvusDeltaLogReader extends Logging {
     }.toMap
   }
 
-  private[connector] def loadPartitionScopedDeletePlans(
+  def loadPartitionScopedDeletePlans(
       deleteOnlySegments: Seq[V2SegmentInfo],
       pkField: FieldSchema,
       bucket: String,
@@ -101,7 +101,7 @@ object MilvusDeltaLogReader extends Logging {
     ).map(_.toMap)
   }
 
-  private[connector] def effectiveInheritedDeletePlan(
+  def effectiveInheritedDeletePlan(
       partitionId: Long,
       inheritedPlansByPartition: Map[Long, MilvusDeletePlan]
   ): MilvusDeletePlan = {
@@ -116,7 +116,7 @@ object MilvusDeltaLogReader extends Logging {
     MilvusDeletePlan.union(collectionWidePlan, partitionPlan)
   }
 
-  private[connector] def inheritedDeletePlanPartitionMarker(
+  def inheritedDeletePlanPartitionMarker(
       partitionId: Long,
       inheritedPlansByPartition: Map[Long, MilvusDeletePlan]
   ): Option[Long] =

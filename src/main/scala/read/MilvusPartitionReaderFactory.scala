@@ -11,6 +11,7 @@ import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.unsafe.types.UTF8String
 
+import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
 import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
 

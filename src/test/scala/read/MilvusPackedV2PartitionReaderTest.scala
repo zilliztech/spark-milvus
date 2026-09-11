@@ -9,6 +9,8 @@ import org.apache.spark.sql.types.{
 }
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.zilliz.milvus.storage.delete.MilvusDeletePlan
+import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class MilvusPackedV2PartitionReaderTest extends AnyFunSuite {

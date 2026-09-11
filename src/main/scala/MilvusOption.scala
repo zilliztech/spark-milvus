@@ -171,7 +171,7 @@ object MilvusOption {
   // calls its own manifest format "format v2", which collides with the
   // server's segment-info enum where V2 means non-manifest packed parquet.
   val SnapshotManifests = "milvus.snapshot.manifests"
-  // JSON array of com.zilliz.spark.connector.read.V2SegmentInfo — true
+  // JSON array of com.zilliz.milvus.storage.snapshot.V2SegmentInfo — true
   // StorageV2 (segment-info storage_version = 2, non-manifest packed parquet).
   // Populated by backfill after decoding the per-segment AVROs + parquet
   // footers; consumed by MilvusDataSource's snapshot planner to create

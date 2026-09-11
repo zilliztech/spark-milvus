@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.manifest
 
 import java.io.ByteArrayOutputStream
 import java.nio.file.Files
@@ -9,6 +9,8 @@ import org.apache.avro.Schema
 import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+
+import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
 
 class MilvusStorageV3ManifestReaderTest extends AnyFunSuite with Matchers {
   private val schema = new Schema.Parser().parse("""

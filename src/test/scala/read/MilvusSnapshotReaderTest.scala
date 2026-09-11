@@ -4,6 +4,14 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.schema.FieldMetadata
+import com.zilliz.milvus.storage.snapshot.{Field, V2SegmentInfo}
+import com.zilliz.milvus.storage.snapshot.{
+  TypeParam,
+  V2ColumnGroup,
+  V2DeltaLogFile
+}
+import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
+import com.zilliz.spark.connector.read.SnapshotSparkSchema
 import io.milvus.grpc.schema.{
   CollectionSchema => ProtoCollectionSchema,
   DataType
@@ -614,7 +622,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     val metadata = result.toOption.get
 
     // Convert to Spark schema without system fields
-    val sparkSchema = MilvusSnapshotReader.toSparkSchema(
+    val sparkSchema = SnapshotSparkSchema.toSparkSchema(
       metadata.collection.schema,
       includeSystemFields = false
     )
@@ -650,7 +658,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     val metadata = result.toOption.get
 
     // Convert to Spark schema with system fields
-    val sparkSchema = MilvusSnapshotReader.toSparkSchema(
+    val sparkSchema = SnapshotSparkSchema.toSparkSchema(
       metadata.collection.schema,
       includeSystemFields = true
     )
@@ -1013,7 +1021,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       .get
       .collection
       .schema
-    val sparkSchema = MilvusSnapshotReader.toSparkSchema(schema)
+    val sparkSchema = SnapshotSparkSchema.toSparkSchema(schema)
 
     sparkSchema("id").nullable shouldBe false
     sparkSchema("tags").dataType shouldBe org.apache.spark.sql.types.ArrayType(
@@ -1064,7 +1072,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       .get
       .collection
       .schema
-    val sparkSchema = MilvusSnapshotReader.toSparkSchema(schema)
+    val sparkSchema = SnapshotSparkSchema.toSparkSchema(schema)
 
     sparkSchema("binary_vec").dataType shouldBe BinaryType
     sparkSchema("binary_vec").metadata.getLong(
@@ -1101,7 +1109,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       nullable = Some(false)
     )
 
-    val structField = MilvusSnapshotReader.fieldToStructField(field)
+    val structField = SnapshotSparkSchema.fieldToStructField(field)
 
     structField.name shouldBe "binary_vec"
     structField.dataType shouldBe org.apache.spark.sql.types.BinaryType

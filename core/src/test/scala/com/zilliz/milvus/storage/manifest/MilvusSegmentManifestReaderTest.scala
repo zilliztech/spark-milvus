@@ -1,9 +1,12 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.manifest
 
 import java.nio.file.{Files, Paths}
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+
+import com.zilliz.milvus.storage.snapshot.{MilvusSnapshotReader, V2SegmentInfo}
+import com.zilliz.milvus.storage.snapshot.{V2ColumnGroup, V2DeltaLogFile}
 
 /** Tests for [[MilvusSegmentManifestReader]] against a real milvus-produced
   * per-segment AVRO.

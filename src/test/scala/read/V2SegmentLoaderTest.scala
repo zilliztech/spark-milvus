@@ -35,7 +35,13 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterEach
 
 import com.zilliz.milvus.storage.io.hadoop.HadoopIO
+import com.zilliz.milvus.storage.manifest.{
+  AvroFieldBinlogEntry,
+  AvroManifestEntry
+}
+import com.zilliz.milvus.storage.manifest.AvroBinlogEntry
 import com.zilliz.milvus.storage.path.StoragePath
+import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
 
 /** Unit tests for [[V2SegmentLoader.buildV2SegmentInfoFromEntry]].
   *

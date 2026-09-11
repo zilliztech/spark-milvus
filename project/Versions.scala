@@ -50,6 +50,11 @@ object Versions {
   val sharedJavaRelease = "11"
   val sharedScalas: Seq[String] = Seq(scala212, scala213)
 
+  /** jackson-module-scala 与 jackson-databind 必须同版本，跨版本直接抛
+    * JsonMappingException。parquet-hadoop 会传递一个更新的 databind 进来。
+    */
+  val jackson = "2.17.3"
+
   /** 为 2.12 补齐 scala.jdk.CollectionConverters，见 modules.md 第 4 节第 5 条。 */
   val scalaCollectionCompat = "2.12.0"
 }

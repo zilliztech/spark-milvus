@@ -6,7 +6,14 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
 
 import com.zilliz.milvus.storage.io.hadoop.HadoopIO
+import com.zilliz.milvus.storage.manifest.{
+  AvroFieldBinlogEntry,
+  AvroManifestEntry
+}
+import com.zilliz.milvus.storage.manifest.MilvusSegmentManifestReader
 import com.zilliz.milvus.storage.path.StoragePath
+import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
+import com.zilliz.milvus.storage.snapshot.V2SegmentInfo
 
 /** High-level loader for StorageV2 (non-manifest packed parquet) segments.
   *

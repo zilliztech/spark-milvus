@@ -7,13 +7,13 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.spark.connector.read.{
-  MilvusParquetFooterReader,
-  MilvusSegmentManifestReader,
+import com.zilliz.milvus.storage.manifest.MilvusSegmentManifestReader
+import com.zilliz.milvus.storage.snapshot.{
   MilvusSnapshotReader,
   SnapshotMetadata,
   V2SegmentInfo
 }
+import com.zilliz.spark.connector.read.MilvusParquetFooterReader
 
 /** Standalone Spark app that reads a Milvus snapshot (local path or `s3a://`)
   * and prints the per-segment column-group layout recovered via the new

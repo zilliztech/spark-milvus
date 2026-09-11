@@ -340,8 +340,21 @@ lazy val core = Project("core", file("core"))
       "org.slf4j" % "slf4j-api" % "2.0.7" % "provided",
       // 存储访问的唯一实现走 Hadoop FileSystem，运行时用 Spark 自带的那份。
       hadoopCommon,
+      // 格式本身要的三样：快照与 backup meta 是 JSON，段清单是 Avro，
+      // 删除文件和列组是 Parquet。
+      jacksonDatabind,
+      jacksonScala,
+      avro,
+      parquetHadoop,
       scalapbRuntime % "protobuf",
       scalaTest % Test
+    ),
+    // parquet-hadoop 传递进来的 jackson-databind 比 jackson-module-scala 新，
+    // 运行时直接抛 JsonMappingException。钉死成同一个版本。
+    dependencyOverrides ++= Seq(
+      jacksonDatabind,
+      "com.fasterxml.jackson.core" % "jackson-core" % Versions.jackson,
+      "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson
     ),
     // Milvus 的存储格式本身是 protobuf 定义的：快照里嵌着 CollectionSchema，
     // Manifest 的字段描述也来自 schema.proto。所以这两个不带 service 的文件在

@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.manifest
 
 import java.io.ByteArrayInputStream
 import java.net.URI
@@ -13,6 +13,7 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 
 import com.zilliz.milvus.storage.io.hadoop.HadoopIO
 import com.zilliz.milvus.storage.path.StoragePath
+import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
 
 object MilvusStorageV3ManifestReader {
   private val PrimaryKeyDeltaLogType = 0
@@ -36,7 +37,7 @@ object MilvusStorageV3ManifestReader {
     }
   }
 
-  private[read] def manifestFilePath(
+  def manifestFilePath(
       basePath: String,
       readVersion: Long
   ): String = {
@@ -48,7 +49,7 @@ object MilvusStorageV3ManifestReader {
     s"${basePath.stripSuffix("/")}/_metadata/manifest-$readVersion.avro"
   }
 
-  private[connector] def latestManifestVersion(
+  def latestManifestVersion(
       basePath: String,
       bucket: String,
       hadoopConf: Configuration
@@ -94,7 +95,7 @@ object MilvusStorageV3ManifestReader {
     }
   }
 
-  private[read] def parseDeltaLogs(
+  def parseDeltaLogs(
       avroBytes: Array[Byte],
       basePath: String
   ): Either[Throwable, Seq[V2DeltaLogFile]] = {
@@ -144,7 +145,7 @@ object MilvusStorageV3ManifestReader {
     }
   }
 
-  private[read] def resolveManifestDeltaPath(
+  def resolveManifestDeltaPath(
       basePath: String,
       path: String
   ): String = {

@@ -16,6 +16,7 @@ import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.snapshot.{V2ColumnGroup, V2SegmentInfo}
 import io.milvus.grpc.schema.{CollectionSchema, DataType}
 
 /** Tests for [[BackupMetaReader]] — parses milvus-backup's `full_meta.json` and
@@ -159,9 +160,8 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     writeParquetAt(
       Paths.get(seg.toString, "103", "2"),
       groupASchema,
-      List(
-        f =>
-          f.newGroup().append("pk", 3L).append("row_id", 12L).append("ts", 102L)
+      List(f =>
+        f.newGroup().append("pk", 3L).append("row_id", 12L).append("ts", 102L)
       )
     )
     writeParquetAt(
