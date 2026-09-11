@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.compat.backup
 
 import java.util.concurrent.{
   Callable,
@@ -22,8 +22,9 @@ import com.fasterxml.jackson.module.scala.{
 }
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.FileSystem
-import org.apache.spark.internal.Logging
 
+import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
+import com.zilliz.milvus.storage.compat.MilvusParquetFooterReader
 import com.zilliz.milvus.storage.snapshot.{
   JsonTypeConverter,
   MilvusSnapshotReader,
@@ -75,7 +76,7 @@ import io.milvus.grpc.schema.{
   * Only StorageV2 (packed parquet, `storage_version == 2`) data segments are
   * supported; anything else fails hard rather than returning a partial dataset.
   */
-object BackupMetaReader extends Logging {
+object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
 
   // -------------------------------------------------------------------------
   // Backup meta JSON model (wire keys match backuppb's Go encoding/json tags).
@@ -347,7 +348,7 @@ object BackupMetaReader extends Logging {
     * records it with etcd access) — reading it would silently return a null
     * `$meta` column.
     */
-  private[connector] def validateDynamicFieldSchema(
+  def validateDynamicFieldSchema(
       schema: BackupCollectionSchema
   ): Unit = {
     if (schema.enableDynamicField && !schema.fields.exists(_.name == "$meta")) {
@@ -368,7 +369,7 @@ object BackupMetaReader extends Logging {
     * missing whole user columns. Full struct-array support is tracked
     * separately.
     */
-  private[connector] def validateStructArrayFields(
+  private[storage] def validateStructArrayFields(
       schema: BackupCollectionSchema
   ): Unit = {
     if (schema.hasStructArrayFields) {
@@ -562,7 +563,7 @@ object BackupMetaReader extends Logging {
     *   `Right(Some(seg))` for readable segments; `Left` for unsupported data
     *   segments (fails hard rather than returning a partial dataset).
     */
-  private[read] def buildV2SegmentWithFs(
+  private[storage] def buildV2SegmentWithFs(
       seg: SegmentBackup,
       fs: FileSystem,
       backupDir: String,
@@ -711,7 +712,7 @@ object BackupMetaReader extends Logging {
     * [[toV2Segments]], which opens one `FileSystem` for all segments and reuses
     * it across every footer read.
     */
-  private[read] def buildV2Segment(
+  def buildV2Segment(
       seg: SegmentBackup,
       hadoopConf: Configuration,
       backupDir: String,
@@ -767,7 +768,7 @@ object BackupMetaReader extends Logging {
     * has no matching plan entry and silently resolves to
     * `MilvusDeletePlan.empty`.
     */
-  private[connector] def deleteOnlySegments(
+  def deleteOnlySegments(
       info: BackupInfo,
       collectionId: Long,
       backupDir: String
@@ -860,7 +861,7 @@ object BackupMetaReader extends Logging {
     * URIs (e.g. `s3a://bucket/backup/b1` -> `backup/b1`); local dirs are
     * returned unchanged. This is the key form the native reader expects.
     */
-  private[read] def backupKeyBase(backupDir: String): String = {
+  def backupKeyBase(backupDir: String): String = {
     val base = backupBase(backupDir)
     val schemeIdx = base.indexOf("://")
     if (schemeIdx < 0) {
@@ -912,7 +913,7 @@ object BackupMetaReader extends Logging {
   /** Hadoop-qualified insert-log path (e.g.
     * `s3a://bucket/backup/b1/binlogs/...`).
     */
-  private[read] def qualifiedInsertLogPath(
+  def qualifiedInsertLogPath(
       backupDir: String,
       seg: SegmentBackup,
       slotFieldId: Long,
@@ -922,7 +923,7 @@ object BackupMetaReader extends Logging {
   /** Native-reader bucket-relative insert-log key (e.g.
     * `backup/b1/binlogs/...`).
     */
-  private[read] def nativeInsertLogPath(
+  def nativeInsertLogPath(
       backupDir: String,
       seg: SegmentBackup,
       slotFieldId: Long,
@@ -932,7 +933,7 @@ object BackupMetaReader extends Logging {
   /** Hadoop-qualified delta-log path. Delta logs only feed the Hadoop-side
     * delete-plan reader, so no native form is produced.
     */
-  private[read] def qualifiedDeltaLogPath(
+  def qualifiedDeltaLogPath(
       backupDir: String,
       seg: SegmentBackup,
       logId: Long

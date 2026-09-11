@@ -55,6 +55,9 @@ object Versions {
     */
   val jackson = "2.17.3"
 
+  /** 按 3.5 线的下限编译；4.x 自带的更新，接口一样。 */
+  val slf4j = "2.0.7"
+
   /** 为 2.12 补齐 scala.jdk.CollectionConverters，见 modules.md 第 4 节第 5 条。 */
   val scalaCollectionCompat = "2.12.0"
 }

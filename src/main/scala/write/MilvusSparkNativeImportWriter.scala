@@ -9,7 +9,8 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.spark.connector.{MilvusClient, MilvusOption, MilvusS3Option}
+import com.zilliz.milvus.client.api.MilvusClient
+import com.zilliz.spark.connector.{MilvusOption, MilvusS3Option}
 
 class MilvusSparkNativeImportWriter(
     uri: String,

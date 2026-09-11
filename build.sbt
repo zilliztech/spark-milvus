@@ -336,8 +336,6 @@ lazy val core = Project("core", file("core"))
       "org.apache.arrow" % "arrow-memory-core" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-c-data" % Versions.line("4.0").arrow % "provided",
       "org.apache.arrow" % "arrow-format" % Versions.line("4.0").arrow % "provided",
-      // 日志门面：运行时用 Spark 自带的 slf4j-api，版本按 3.5 线的下限编译。
-      "org.slf4j" % "slf4j-api" % "2.0.7" % "provided",
       // 存储访问的唯一实现走 Hadoop FileSystem，运行时用 Spark 自带的那份。
       hadoopCommon,
       // 格式本身要的三样：快照与 backup meta 是 JSON，段清单是 Avro，
@@ -376,7 +374,22 @@ lazy val compat = Project("compat", file("compat"))
     name := "compat",
     moduleName := "spark-milvus-compat",
     Modules.shared,
-    libraryDependencies += scalaTest % Test
+    libraryDependencies ++= Seq(
+      hadoopCommon,
+      jacksonDatabind,
+      jacksonScala,
+      avro,
+      parquetHadoop,
+      // 用例用 parquet-mr 的 ExampleParquetWriter 写真 parquet，它要
+      // FileOutputFormat；生产路径不需要，所以只在 Test 里。
+      hadoopMapreduceClientCore % Test,
+      scalaTest % Test
+    ),
+    dependencyOverrides ++= Seq(
+      jacksonDatabind,
+      "com.fasterxml.jackson.core" % "jackson-core" % Versions.jackson,
+      "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson
+    )
   )
 
 // Milvus 在线服务的客户端：DDL、Delete、Procedure 用到的调用。
@@ -390,7 +403,14 @@ lazy val client = Project("client", file("client"))
       grpcNetty,
       scalapbRuntime % "protobuf",
       scalapbRuntimeGrpc,
+      jacksonDatabind,
+      jacksonScala,
       scalaTest % Test
+    ),
+    dependencyOverrides ++= Seq(
+      jacksonDatabind,
+      "com.fasterxml.jackson.core" % "jackson-core" % Versions.jackson,
+      "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson
     ),
     // common.proto 与 schema.proto 由 core 生成，这里只把它们放进 include 路径，
     // 生成的服务桩引用 core 里已有的消息类。

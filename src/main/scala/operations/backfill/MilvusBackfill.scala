@@ -12,6 +12,7 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.slf4j.LoggerFactory
 
+import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
 import com.zilliz.milvus.storage.snapshot.{
   CollectionSchema,
   Field,
@@ -19,17 +20,13 @@ import com.zilliz.milvus.storage.snapshot.{
   SnapshotMetadata,
   StorageV2ManifestItem
 }
-import com.zilliz.spark.connector.{
-  MilvusClient,
-  MilvusConnectionParams,
-  MilvusOption
-}
 import com.zilliz.spark.connector.read.SnapshotSparkSchema
 import com.zilliz.spark.connector.write.{
   MilvusLoonBatchWrite,
   MilvusLoonCommitMessage,
   MilvusLoonWriter
 }
+import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Backfill operation for Milvus collections
@@ -1961,7 +1958,7 @@ object MilvusBackfill {
         isSource = false
       )
       hadoopConf.set("fs.oss.impl.disable.cache", "true")
-      com.zilliz.spark.connector.read.V2SegmentLoader
+      com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
         .loadV2Segments(
           metadata.manifestList,
           config.s3BucketName,

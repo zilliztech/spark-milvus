@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.compat
 
 import java.net.URI
 import java.nio.file.Files

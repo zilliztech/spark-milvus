@@ -62,6 +62,8 @@ object Dependencies {
     "org.apache.avro" % "avro" % avroVersion % "provided,test"
   lazy val hadoopCommon =
     "org.apache.hadoop" % "hadoop-common" % hadoopVersion % "provided,test" exclude ("javax.activation", "activation")
+  lazy val hadoopMapreduceClientCore =
+    "org.apache.hadoop" % "hadoop-mapreduce-client-core" % hadoopVersion
   lazy val hadoopAws =
     "org.apache.hadoop" % "hadoop-aws" % hadoopVersion % "provided,test" exclude("software.amazon.awssdk", "bundle")
   lazy val hadoopAliyun =

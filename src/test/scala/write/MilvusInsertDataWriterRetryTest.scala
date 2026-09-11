@@ -10,7 +10,7 @@ import org.apache.spark.unsafe.types.UTF8String
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.spark.connector.{MilvusRateLimitException, MilvusRpcException}
+import com.zilliz.milvus.client.{MilvusRateLimitException, MilvusRpcException}
 import com.zilliz.spark.connector.write.MilvusInsertDataWriter.{
   decideRetry,
   Abort,

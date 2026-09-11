@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector
+package com.zilliz.milvus.client.api
 
 import java.io.File
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
@@ -18,8 +18,13 @@ import com.fasterxml.jackson.module.scala.{
   ScalaObjectMapper
 }
 import com.google.protobuf.ByteString
-import org.apache.spark.internal.Logging
 
+import com.zilliz.milvus.client.{
+  MilvusConnectionException,
+  MilvusRateLimitException,
+  MilvusRpcException
+}
+import com.zilliz.milvus.client.grpc.GrpcRetryInterceptor
 import io.milvus.grpc.common.{
   ClientInfo,
   ConsistencyLevel,
@@ -73,7 +78,8 @@ import io.grpc.Status.Code
 
 /** A simplified client for interacting with Milvus
   */
-class MilvusClient(params: MilvusConnectionParams) extends Logging {
+class MilvusClient(params: MilvusConnectionParams)
+    extends com.zilliz.milvus.storage.Logging {
   private val retryInterceptor = new GrpcRetryInterceptor(
     maxRetries = 5,
     initialDelayMillis = 500,
@@ -1117,90 +1123,5 @@ object PKProcessor {
 
   implicit object StringProcessor extends PKProcessor[String] {
     def process(seq: Seq[String]): String = seq.map(s => s"'$s'").mkString(", ")
-  }
-}
-
-class GrpcRetryInterceptor(
-    maxRetries: Int = 5,
-    initialDelayMillis: Long = 500,
-    delayMultiplier: Double = 2.0,
-    maxDelayMillis: Long = 5000
-) extends ClientInterceptor {
-
-  private val nonRetryableCodes: Set[Code] = Set(
-    Code.DEADLINE_EXCEEDED,
-    Code.PERMISSION_DENIED,
-    Code.UNAUTHENTICATED,
-    Code.INVALID_ARGUMENT,
-    Code.ALREADY_EXISTS,
-    Code.RESOURCE_EXHAUSTED,
-    Code.UNIMPLEMENTED
-  )
-
-  override def interceptCall[ReqT, RespT](
-      method: MethodDescriptor[ReqT, RespT],
-      callOptions: CallOptions,
-      next: Channel
-  ): ClientCall[ReqT, RespT] = {
-    new ForwardingClientCall.SimpleForwardingClientCall[ReqT, RespT](
-      next.newCall(method, callOptions)
-    ) {
-      override def start(
-          responseListener: ClientCall.Listener[RespT],
-          headers: Metadata
-      ): Unit = {
-        var currentAttempt = 0
-        var currentDelay = initialDelayMillis
-
-        def executeCall(): Unit = {
-          currentAttempt += 1
-          println(
-            s"Attempting gRPC call for method ${method.getFullMethodName()}, attempt $currentAttempt"
-          )
-
-          val originalListener =
-            new ForwardingClientCallListener.SimpleForwardingClientCallListener[
-              RespT
-            ](responseListener) {
-              override def onClose(
-                  status: GrpcStatus,
-                  trailers: Metadata
-              ): Unit = {
-                if (status.isOk) {
-                  // Call succeeded
-                  super.onClose(status, trailers)
-                } else {
-                  val statusCode = status.getCode
-                  if (nonRetryableCodes.contains(statusCode)) {
-                    println(
-                      s"gRPC call failed with non-retryable status: $statusCode. Not retrying."
-                    )
-                    super.onClose(status, trailers)
-                  } else if (currentAttempt < maxRetries) {
-                    println(
-                      s"gRPC call failed with retryable status: $statusCode. Retrying in $currentDelay ms."
-                    )
-                    Thread.sleep(currentDelay)
-                    currentDelay = Math.min(
-                      (currentDelay * delayMultiplier).toLong,
-                      maxDelayMillis
-                    )
-                    super.onClose(status, trailers)
-                    executeCall()
-                  } else {
-                    println(
-                      s"gRPC call failed after $maxRetries attempts with status: $statusCode. No more retries."
-                    )
-                    super.onClose(status, trailers)
-                  }
-                }
-              }
-            }
-          super.start(originalListener, headers)
-        }
-
-        executeCall() // Start the first attempt
-      }
-    }
   }
 }

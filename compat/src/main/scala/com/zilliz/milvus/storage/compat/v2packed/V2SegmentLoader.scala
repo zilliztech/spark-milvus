@@ -1,10 +1,10 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.compat.v2packed
 
 import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.spark.internal.Logging
 
+import com.zilliz.milvus.storage.compat.MilvusParquetFooterReader
 import com.zilliz.milvus.storage.io.hadoop.HadoopIO
 import com.zilliz.milvus.storage.manifest.{
   AvroFieldBinlogEntry,
@@ -39,7 +39,7 @@ import com.zilliz.milvus.storage.snapshot.V2SegmentInfo
   * `storageScheme = "oss"` with a matching Hadoop OSS configuration. Explicit
   * `s3://` and `s3a://` paths are aliases rewritten to the requested scheme.
   */
-object V2SegmentLoader extends Logging {
+object V2SegmentLoader extends com.zilliz.milvus.storage.Logging {
 
   /** Load all V2 segments referenced by an AVRO manifest list.
     *
@@ -108,7 +108,7 @@ object V2SegmentLoader extends Logging {
     *   not StorageV2 and should be skipped; `Left(err)` with segment/slot
     *   context on any unrecoverable failure.
     */
-  private[read] def buildV2SegmentInfoFromEntry(
+  def buildV2SegmentInfoFromEntry(
       entry: AvroManifestEntry,
       bucket: String,
       hadoopConf: Configuration,

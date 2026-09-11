@@ -34,6 +34,8 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterEach
 
+import com.zilliz.milvus.client.api.MilvusCollectionInfo
+import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.{
@@ -46,14 +48,13 @@ import com.zilliz.milvus.storage.snapshot.{
   V2ColumnGroup,
   V2SegmentInfo
 }
-import com.zilliz.spark.connector.{MilvusCollectionInfo, MilvusOption}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
-  BackupMetaReader,
   MilvusPackedV2InputPartition,
   MilvusStorageV3InputPartition
 }
 import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.MilvusOption
 
 class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(

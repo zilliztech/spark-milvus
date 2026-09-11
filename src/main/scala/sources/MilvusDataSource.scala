@@ -49,6 +49,9 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
+import com.zilliz.milvus.client.api.{MilvusClient, MilvusCollectionInfo}
+import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
+import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
 import com.zilliz.milvus.storage.delete.MilvusDeltaLogReader
 import com.zilliz.milvus.storage.manifest.MilvusStorageV3ManifestReader
 import com.zilliz.milvus.storage.schema.FieldMetadata
@@ -62,21 +65,17 @@ import com.zilliz.milvus.storage.snapshot.{
 }
 import com.zilliz.spark.connector.{
   DataTypeUtil,
-  MilvusClient,
-  MilvusCollectionInfo,
   MilvusOption,
   MilvusSchemaUtil,
   VectorSearchConfig
 }
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
-  BackupMetaReader,
   MilvusPackedV2DeleteContext,
   MilvusPackedV2InputPartition,
   MilvusPartitionReaderFactory,
   MilvusStorageV3InputPartition,
-  SnapshotSparkSchema,
-  V2SegmentLoader
+  SnapshotSparkSchema
 }
 import com.zilliz.spark.connector.serde.ArrowConverter
 import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}

@@ -41,8 +41,11 @@ object Modules {
     crossScalaVersions := Versions.sharedScalas,
     scalacOptions ++= Seq("-release", Versions.sharedJavaRelease),
     javacOptions ++= Seq("--release", Versions.sharedJavaRelease),
-    libraryDependencies +=
+    libraryDependencies ++= Seq(
       "org.scala-lang.modules" %% "scala-collection-compat" % Versions.scalaCollectionCompat,
+      // core 的日志门面建在 slf4j 上，运行时用 Spark 自带的那份。
+      "org.slf4j" % "slf4j-api" % Versions.slf4j % "provided"
+    ),
     // 模块有内容之后再开发布
     publish / skip := true
   ) ++ noSparkImports

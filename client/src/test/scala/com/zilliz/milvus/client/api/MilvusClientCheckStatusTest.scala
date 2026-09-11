@@ -1,9 +1,10 @@
-package com.zilliz.spark.connector
+package com.zilliz.milvus.client.api
 
 import scala.util.{Failure, Success}
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.zilliz.milvus.client.MilvusRateLimitException
 import io.milvus.grpc.common.{ErrorCode, Status}
 
 import io.grpc.{Status => GrpcStatus, StatusRuntimeException}

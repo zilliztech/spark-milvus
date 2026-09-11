@@ -14,15 +14,11 @@ import org.apache.spark.sql.types.{
 }
 import org.apache.spark.unsafe.types.UTF8String
 
+import com.zilliz.milvus.client.{MilvusRateLimitException, MilvusRpcException}
+import com.zilliz.milvus.client.api.MilvusClient
 import com.zilliz.milvus.storage.schema.MilvusTypes
 import com.zilliz.milvus.storage.DataTypeException
-import com.zilliz.spark.connector.{
-  MilvusClient,
-  MilvusFieldData,
-  MilvusOption,
-  MilvusRateLimitException,
-  MilvusRpcException
-}
+import com.zilliz.spark.connector.{MilvusFieldData, MilvusOption}
 import io.milvus.grpc.schema.{
   CollectionSchema,
   DataType => MilvusDataType,

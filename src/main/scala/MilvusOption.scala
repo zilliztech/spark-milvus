@@ -8,7 +8,8 @@ import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.hadoop.fs.s3a.S3AFileSystem
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.spark.connector.MilvusConnectionException
+import com.zilliz.milvus.client.api.MilvusConnectionParams
+import com.zilliz.milvus.client.MilvusConnectionException
 
 /** Vector search configuration for Milvus Storage V2
   */

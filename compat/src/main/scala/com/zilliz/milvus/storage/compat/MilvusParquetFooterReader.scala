@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.compat
 
 import java.net.URI
 import scala.jdk.CollectionConverters._
@@ -10,7 +10,6 @@ import org.apache.parquet.hadoop.util.HadoopStreams
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.io.InputFile
 import org.apache.parquet.schema.Type
-import org.apache.spark.internal.Logging
 
 /** Parquet kv-metadata produced by the milvus-storage packed writer
   * (StorageV2).
@@ -47,7 +46,7 @@ case class ParquetFooterMetadata(
   * Reading just the footer is cheap — parquet-mr issues a `HEAD` + a single
   * range `GET` for the last few KB of the file.
   */
-object MilvusParquetFooterReader extends Logging {
+object MilvusParquetFooterReader extends com.zilliz.milvus.storage.Logging {
 
   /** Parquet kv-metadata key written by milvus-storage to identify the on-disk
     * storage format version. For StorageV2 segments the value is `"1.0.0"`.
@@ -130,7 +129,7 @@ object MilvusParquetFooterReader extends Logging {
     * single-open callers (`readFieldIdsFromSchema`, `readFieldIdsAndRowCount`)
     * in lock-step.
     */
-  private[read] def fieldIdsFromMessageType(
+  private[storage] def fieldIdsFromMessageType(
       schema: org.apache.parquet.schema.MessageType,
       path: String
   ): Seq[Long] = {
@@ -176,7 +175,7 @@ object MilvusParquetFooterReader extends Logging {
     * with `fs.s3a.impl.disable.cache=true` every `FileSystem.get` otherwise
     * constructs a whole S3A client + thread pool.
     */
-  private[read] def readWithFileSystem[T](
+  private[storage] def readWithFileSystem[T](
       fs: FileSystem,
       path: String
   )(read: InputFile => T): Either[Throwable, T] = {
@@ -199,7 +198,7 @@ object MilvusParquetFooterReader extends Logging {
     * `V2ColumnGroup`: the file's own top-level field IDs plus its total row
     * count, recovered from a single footer read.
     */
-  private[read] case class ParquetFooterInfo(
+  private[storage] case class ParquetFooterInfo(
       fieldIds: Seq[Long],
       rowCount: Long
   )

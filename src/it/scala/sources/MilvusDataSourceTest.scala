@@ -6,12 +6,8 @@ import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.spark.connector.{
-  MilvusClient,
-  MilvusConnectionParams,
-  MilvusFieldData,
-  MilvusOption
-}
+import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
+import com.zilliz.spark.connector.{MilvusFieldData, MilvusOption}
 import com.zilliz.spark.connector.loon.Properties
 import io.milvus.grpc.schema.DataType
 

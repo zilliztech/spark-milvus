@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.milvus.storage.compat.v2packed
 
 import java.io.ByteArrayOutputStream
 import java.net.URI
