@@ -81,21 +81,21 @@ object Dependencies {
   def legacyDeps(l: Versions.SparkLine): Seq[ModuleID] = Seq(
     ("org.apache.spark" %% "spark-mllib" % l.spark % "provided,test")
       .excludeAll(ExclusionRule(organization = "org.apache.arrow")),
-    parquetHadoop,
-    parquetAvro,
-    avro,
     hadoopCommon,
+    // Still needed while MilvusOption imports S3AFileSystem directly; it goes
+    // when the connector stops building its own Configuration.
     hadoopAws,
-    hadoopAliyun,
+    // Shipped, not compiled against: these supply the credential provider
+    // classes that fs.s3a.aws.credentials.provider names by string. Removing
+    // one fails when a FileSystem is built, not at compile time. See
+    // docs/design/architecture/storage-auth.html.
     awsSdkS3,
     awsSdkS3Transfer,
     awsSdkCore,
+    parquetAvro,
     jacksonScala,
     jacksonDatabind,
-    grpcNetty,
-    scalapbRuntimeGrpc,
-    munit % Test,
-    hadoopMapreduceClientCore % Test
+    munit % Test
   )
 
   /** Preserve the root assembly's dependency set while modules take over. */
