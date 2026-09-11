@@ -124,6 +124,13 @@ file says what the subsystem is, what it touches globally, how it will be built,
 which industry practice it follows or rejects and why, and what is still open.
 Add it to the routing table above.
 
+Write that file as HTML, not Markdown. Markdown is convenient to write and an
+agent writes these now, so convenience is not the constraint; what matters is
+that a person can read and review it, and HTML carries diagrams, real tables and
+cross-links that Markdown cannot. Markdown stays where it earns its place: this
+page, anything a build step parses, and anything appended to and reviewed by
+diff. `docs/writing.md` has the rule in full.
+
 The documents are layered on purpose, and that is what keeps the preloaded
 context small. This page carries the model, the state and the invariants; each
 file under `docs/design` carries one subsystem; each `package.scala` carries one

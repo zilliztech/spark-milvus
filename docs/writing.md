@@ -4,6 +4,38 @@ Optimize for how fast a reader understands on the first pass, not for
 completeness. The first draft of the 2.0 design was cut to about a fifth of its
 length and carried more information afterwards; what went was dilution.
 
+## Format
+
+Markdown is pleasant to write and an agent writes these documents now, so ease
+of writing is not the constraint. Ease of *reading* is. HTML carries diagrams,
+tables that hold their shape, and cross-links; Markdown flattens all three.
+
+**HTML** for the detail level: every subsystem design under `docs/design`.
+
+**Markdown** where it earns its place:
+
+- `AGENTS.md` and the files it routes to at the top level, because they are the
+  first thing read and have to stay small
+- anything a build step parses — `docs/design/capabilities.md` is read by
+  `sbt checkCapabilityIndex`, so its tables have to stay machine-readable
+- anything appended to and reviewed by diff, such as the decision log in
+  section 6 of `docs/design/README.md`
+
+**Never both.** A document exists in one form. An HTML twin of a Markdown file
+is two copies of one fact, and the two will disagree.
+
+Mechanics for the HTML files:
+
+- Start with `<meta charset="utf-8">`. Without it the file renders as mojibake
+  when opened from disk, which is how most people will read it.
+- Self-contained: no external scripts, stylesheets or fonts. A design document
+  has to open from a checkout with no network.
+- Diagrams are hand-authored inline SVG. No ASCII art, no image files, no
+  diagramming library. The diagram rules below apply unchanged.
+- Style it for reading: one column, a readable measure, real `<table>` markup
+  for anything tabular, and anchors on the section headings so other documents
+  can link to a specific part.
+
 ## Structure
 
 1. **Essence first.** The first screen states the thing in one sentence. The
