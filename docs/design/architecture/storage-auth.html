@@ -138,7 +138,7 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 <p>无论谁写，都要守<a href="#principle">第三节</a>的五条：只写按桶或按账号的键，
 不覆盖已设好的 provider，不内置默认值。</p>
 
-<h3>4.5 原生侧：只传位置与模式，不传密钥</h3>
+<h3>4.3 原生侧：只传位置与模式，不传密钥</h3>
 <p>milvus-storage 的 C 层有自己的 SDK，在同一个 pod 里自己发现身份。它认识的键：</p>
 <table>
 <tr><th>类别</th><th>键</th></tr>
@@ -150,11 +150,11 @@ aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local<
 <p><code>fs.cpp:104</code> 与 <code>117</code> 里 <code>use_iam</code> 为真时走另一条分支，
 不取静态密钥。云上的正确配置是 <code>fs.use_iam=true</code> 加位置信息，一个密钥都不传。</p>
 
-<h3>4.6 两侧一致性</h3>
+<h3>4.4 两侧一致性</h3>
 <p>两个 SDK 各自发现，在干净的 IRSA 场景下得到同一个身份——同一个 pod、同一个 token 文件。
 只有<strong>一侧被显式配置、另一侧没有</strong>时才分叉。规则：两侧都不配，或两侧配一致。</p>
 
-<h3>4.7 要治的两处</h3>
+<h3>4.5 要治的两处</h3>
 <p><strong>六处复制</strong>：凭证构建散在 <code>MilvusOption</code>、<code>loon/Properties</code>、
 <code>MilvusDataSource</code>、<code>MilvusBackfill</code>、<code>BackfillConfig</code>、
 <code>ListV2SegmentsApp</code>，而 <code>core.credential</code> 是空包。逻辑正确但没有落点。</p>
