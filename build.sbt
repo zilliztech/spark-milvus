@@ -290,7 +290,7 @@ assembly / assemblyMergeStrategy := {
 // 1.x 的代码仍然在 root 的 src/main/scala 里，root 的设置一个字没动；新模块现在
 // 只有包结构，迁移一个模块一个模块来（modules.md 第 5 节）。依赖只能向下：
 //   apps-<line> -> spark-<line> -> compat、client -> core -> native-*
-// spark/base 与 apps/base 不是 project，只是各线引用的共享源码目录。
+// spark-base 与 apps-base 不是 project，只是各线引用的共享源码目录。
 // ---------------------------------------------------------------------------
 
 lazy val v2Modules: Seq[ProjectReference] = Seq(
@@ -300,10 +300,10 @@ lazy val v2Modules: Seq[ProjectReference] = Seq(
 )
 
 // 第 1 层：两个原生库的封装。纯 Java，产物不带 Scala 后缀。
-lazy val nativeStorage = Project("nativeStorage", file("native/storage"))
+lazy val nativeStorage = Project("nativeStorage", file("native-storage"))
   .settings(name := "spark-milvus-native-storage", Modules.javaOnly)
 
-lazy val nativeVector = Project("nativeVector", file("native/vector"))
+lazy val nativeVector = Project("nativeVector", file("native-vector"))
   .settings(name := "spark-milvus-native-vector", Modules.javaOnly)
 
 // 第 2 层：核心层。全部计算在这里，源码不出现 org.apache.spark。
@@ -348,13 +348,13 @@ lazy val client = Project("client", file("client"))
 
 // 第 3 层：每条 Spark 线一个 project，共享 spark/base 的源码。
 def sparkProject(l: Versions.SparkLine): Project =
-  Project(l.projectId, file(s"spark/${l.id}"))
+  Project(l.projectId, file(s"spark-${l.id}"))
     .dependsOn(core, compat, client)
     .settings(
       name := s"spark-milvus-${l.id}",
       Modules.perLine(l),
       Compile / unmanagedSourceDirectories +=
-        Modules.sharedSource((ThisBuild / baseDirectory).value, "spark"),
+        Modules.sharedSource((ThisBuild / baseDirectory).value, "spark-base"),
       libraryDependencies ++= Modules.sparkDeps(l) ++ Modules.arrowDeps(l),
       libraryDependencies += scalaTest % Test,
       // fat jar 是同一个 project 上的一个任务，带 classifier 发布，不需要单独
@@ -373,13 +373,13 @@ lazy val spark42 = sparkProject(Versions.line("4.2"))
 // 第 4 层：对外的入口，一个 fat jar。四个包互不依赖。
 // 名字不用 ops：内部已有一个叫 OPS 的系统，容易混。
 def appsProject(l: Versions.SparkLine, sparkLine: Project): Project =
-  Project(s"apps${l.projectId.stripPrefix("spark")}", file(s"apps/${l.id}"))
+  Project(s"apps${l.projectId.stripPrefix("spark")}", file(s"apps-${l.id}"))
     .dependsOn(sparkLine)
     .settings(
       name := s"spark-milvus-apps-${l.id}",
       Modules.perLine(l),
       Compile / unmanagedSourceDirectories +=
-        Modules.sharedSource((ThisBuild / baseDirectory).value, "apps"),
+        Modules.sharedSource((ThisBuild / baseDirectory).value, "apps-base"),
       libraryDependencies ++= Modules.sparkDeps(l),
       libraryDependencies += scalaTest % Test
     )
@@ -389,16 +389,16 @@ lazy val apps40 = appsProject(Versions.line("4.0"), spark40)
 
 
 // 集成测试。需要 MinIO 和 Milvus，不发布；用例写在各自的 src/test/scala，
-// 共享 integration/base 的源码。名字不用 it：sbt 内置的 IntegrationTest 配置
+// 共享 integration-base 的源码。名字不用 it：sbt 内置的 IntegrationTest 配置
 // 从 1.9 起废弃、sbt 2 已删除，2.0 不再用它，沿用这个词会误导。
 def integrationProject(l: Versions.SparkLine, sparkLine: Project, appsLine: Project): Project =
-  Project(s"integration${l.projectId.stripPrefix("spark")}", file(s"integration/${l.id}"))
+  Project(s"integration${l.projectId.stripPrefix("spark")}", file(s"integration-${l.id}"))
     .dependsOn(sparkLine, appsLine)
     .settings(
       name := s"spark-milvus-integration-${l.id}",
       Modules.perLine(l),
       Test / unmanagedSourceDirectories +=
-        (ThisBuild / baseDirectory).value / "integration" / "base" / "src" / "test" / "scala",
+        (ThisBuild / baseDirectory).value / "integration-base" / "src" / "test" / "scala",
       libraryDependencies ++= Modules.sparkDeps(l).map(_.withConfigurations(Some("test"))),
       libraryDependencies += scalaTest % Test
     )

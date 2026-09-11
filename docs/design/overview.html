@@ -305,11 +305,11 @@
 ├── <span class="f">build.sbt</span>                     <span class="c">聚合、版本、发布</span>
 ├── <span class="d">project/</span>                      <span class="c">Versions.scala 版本矩阵，Modules.scala 构建约束</span>
 │
-├── <span class="m">native/storage/</span><span class="lay">第 1 层</span>
+├── <span class="m">native-storage/</span><span class="lay">第 1 层</span>
 │   ├── src/main/java/                <span class="c">com.zilliz.milvus.jni.storage</span>
 │   ├── src/main/cpp/                 <span class="c">包 loon_* C 接口的 JNI 源码</span>
 │   └── build/                        <span class="c">构建与 patchelf 脚本</span>
-├── <span class="m">native/vector/</span><span class="lay">第 1 层</span>
+├── <span class="m">native-vector/</span><span class="lay">第 1 层</span>
 │   ├── src/main/java/                <span class="c">com.zilliz.milvus.jni.vector</span>
 │   └── src/main/cpp/                 <span class="c">mv_* 的 C shim 与 JNI</span>
 │
@@ -318,7 +318,7 @@
 │   │      <span class="c">snapshot · manifest · schema · path · credential</span>
 │   │      <span class="c">expr · delete · stats · index</span>
 │   │      <span class="c">read/{plan,exec} · write/{exec,commit}</span>
-│   ├── src/main/antlr4/              <span class="c">Plan.g4，antlr 放哪见决策 17</span>
+│   ├── src/main/antlr4/              <span class="c">表达式文法</span>
 │   └── src/main/resources/           <span class="c">段清单的 Avro schema</span>
 ├── <span class="m">compat/</span><span class="lay">第 2 层</span>                      <span class="c">三个非标准入口的适配器</span>
 │   └── .../storage/compat/           <span class="c">v2packed · offline · backup</span>
@@ -326,19 +326,17 @@
 │   ├── .../milvus/client/            <span class="c">grpc · api</span>
 │   └── src/main/protobuf/            <span class="c">milvus-proto 子模块的引用</span>
 │
-├── <span class="m">spark/</span><span class="lay">第 3 层</span>
-│   ├── <span class="u">base/</span>                         <span class="c">共享源码，不是 project</span>
-│   │      <span class="c">table · scan · expr · types · write · options</span>
-│   ├── 3.5/                          <span class="c">catalog · functions · extensions · services</span>
-│   └── 4.0/  4.1/  4.2/              <span class="c">catalog · procedure · extensions · services</span>
+├── <span class="u">spark-base/</span><span class="lay">第 3 层</span>                  <span class="c">共享源码，不是 project</span>
+│   └── .../spark/connector/          <span class="c">table · scan · expr · types · write · options</span>
+├── <span class="m">spark-3.5/</span>                    <span class="c">catalog · functions · extensions · services</span>
+├── <span class="m">spark-4.0/</span> <span class="m">spark-4.1/</span> <span class="m">spark-4.2/</span>  <span class="c">catalog · procedure · extensions · services</span>
 │                                     <span class="c">fat jar 是各线上的 assembly 任务，不单独成模块</span>
 │
-├── <span class="m">apps/</span><span class="lay">第 4 层</span>                        <span class="c">场景与遗留，四个包互不依赖</span>
-│   ├── <span class="u">base/</span>                         <span class="c">backfill · tools · search · legacy</span>
-│   └── 4.0/                          <span class="c">只在云上跑的那条线上建，别的线按需加</span>
+├── <span class="u">apps-base/</span><span class="lay">第 4 层</span>                   <span class="c">backfill · tools · search · legacy</span>
+├── <span class="m">apps-4.0/</span>                     <span class="c">只在云上跑的那条线上建，别的线按需加</span>
 │
-├── <span class="m">integration/</span>                  <span class="c">集成测试，需要 MinIO 与 Milvus，不发布</span>
-│   └── <span class="u">base/</span>  4.0/                 <span class="c">跑一条线，出线特有的问题再加</span>
+├── <span class="u">integration-base/</span>             <span class="c">共享的集成测试用例</span>
+├── <span class="m">integration-4.0/</span>              <span class="c">需要 MinIO 与 Milvus，跑一条线</span>
 │
 ├── <span class="u">src/</span>                          <span class="c">1.x 的代码，原地不动，按模块逐个迁走</span>
 └── <span class="d">docs/design/</span>                  <span class="c">本文与三份设计文档</span></pre>

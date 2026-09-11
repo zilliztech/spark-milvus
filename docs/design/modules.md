@@ -125,35 +125,34 @@ CALL 走语法扩展，不走 `ProcedureCatalog`：后者是 Spark 4.0 才有的
 spark-milvus/
   build.sbt                        聚合、版本、发布
   project/                         插件、依赖版本、Spark 线与 Scala 版本矩阵
-  native/
-    storage/
-      src/main/java/               com.zilliz.milvus.jni.storage
-      src/main/cpp/                JNI 源码
-      build/                       构建与 patchelf 脚本
-    vector/
-      src/main/java/               com.zilliz.milvus.jni.vector
-      src/main/cpp/                C shim 与 JNI
+  native-storage/
+    src/main/java/                 com.zilliz.milvus.jni.storage
+    src/main/cpp/                  JNI 源码
+    build/                         构建与 patchelf 脚本
+  native-vector/
+    src/main/java/                 com.zilliz.milvus.jni.vector
+    src/main/cpp/                  C shim 与 JNI
   core/
     src/main/scala/com/zilliz/milvus/storage/{snapshot,manifest,schema,path,credential,expr,delete,stats,read,write,index}
-    src/main/antlr4/               Plan.g4
+    src/main/antlr4/               表达式文法（见第 4 节第 8 条）
     src/main/resources/            段清单的 Avro schema
   compat/src/main/scala/com/zilliz/milvus/storage/compat/{v2packed,offline,backup}
   client/
     src/main/scala/com/zilliz/milvus/client/{grpc,api}
     src/main/protobuf/             milvus-proto 子模块的引用
-  spark/
-    base/src/main/scala/com/zilliz/spark/connector/{table,scan,expr,types,write,options}
-    3.5/src/main/{scala,resources}/  catalog、functions、extensions、META-INF/services
-    4.0/  4.1/  4.2/                 catalog、procedure、extensions、META-INF/services
-  apps/
-    base/src/main/{scala,resources}/ com.zilliz.spark.connector.apps.{backfill,tools,search,legacy}
-    4.0/                             引 base 的源码，依赖本线 spark 模块
-  integration/                     集成测试，需要 MinIO 与 Milvus
-    base/src/test/scala/             共享的用例
-    4.0/
+  spark-base/src/main/scala/com/zilliz/spark/connector/{table,scan,expr,types,write,options}
+  spark-3.5/src/main/{scala,resources}/  catalog、functions、extensions、META-INF/services
+  spark-4.0/  spark-4.1/  spark-4.2/     catalog、procedure、extensions、META-INF/services
+  apps-base/src/main/{scala,resources}/  com.zilliz.spark.connector.apps.{backfill,tools,search,legacy}
+  apps-4.0/                        引 apps-base 的源码，依赖本线 spark 模块
+  integration-base/src/test/scala/ 共享的集成测试用例
+  integration-4.0/                 需要 MinIO 与 Milvus
+  src/                             1.x 的代码，按模块逐个迁走
   docs/design/                     设计文档
   docs/                            用户文档
 ```
+
+目录全部平铺，不用分组目录：`native/`、`spark/` 这类分组目录本身不是 sbt project，在 IDE 里只是普通文件夹，和真模块混在一起看不出区别。
 
 单测在各模块的 `src/test/scala`；需要 .so 的单测标 tag，CI 在有 native 产物的 job 里跑。
 
