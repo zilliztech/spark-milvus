@@ -332,10 +332,8 @@
 ├── <span class="m">spark-4.0/</span> <span class="m">spark-4.1/</span> <span class="m">spark-4.2/</span>  <span class="c">catalog · procedure · extensions · services</span>
 │                                     <span class="c">fat jar 是各线上的 assembly 任务，不单独成模块</span>
 │
-├── <span class="u">apps-base/</span><span class="lay">第 4 层</span>                   <span class="c">backfill · tools · search · legacy</span>
-├── <span class="m">apps-4.0/</span>                     <span class="c">只在云上跑的那条线上建，别的线按需加</span>
-│
-├── <span class="u">integration-base/</span>             <span class="c">共享的集成测试用例</span>
+├── <span class="m">apps-4.0/</span><span class="lay">第 4 层</span>                    <span class="c">backfill · tools · search · legacy</span>
+│                                     <span class="c">只在云上跑的那条线上建，别的线按需加</span>
 ├── <span class="m">integration-4.0/</span>              <span class="c">需要 MinIO 与 Milvus，跑一条线</span>
 │
 ├── <span class="u">src/</span>                          <span class="c">1.x 的代码，原地不动，按模块逐个迁走</span>

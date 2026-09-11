@@ -13,7 +13,7 @@
 | client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC | `com.zilliz:spark-milvus-client_<scala>` |
 | spark-base | 第 3 层 | `com.zilliz.spark.connector` | 不是 sbt project，只是各线引用的源码目录 | 无 |
 | spark-3.5 / 4.0 / 4.1 / 4.2 | 第 3 层 | 同上 | spark-base 的源码 + 本线专属目录；core、compat、client；本线 Spark 为 provided | `com.zilliz:spark-milvus-<line>_<scala>` |
-| apps | 第 4 层 | `com.zilliz.spark.connector.apps` | 一条线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`：fat jar。只在云上跑的那条线上建，别的线按需加 |
+| apps | 第 4 层 | `com.zilliz.spark.connector.apps` | 一条线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`：fat jar。只在云上跑的那条线上建；只有一个消费者，源码直接放在这条线的目录里，不设共享 base |
 | integration | 测试 | | 一条线的 spark 与 apps 模块；需 MinIO 和 Milvus | 不发布。Spark 线跑一条，存储后端做成参数化的 fixture 整体重跑（本地、MinIO、S3、OSS、COS、OBS） |
 
 展开后 11 个 sbt project：native 两个、core、compat、client、spark 四条线、apps 一个、integration 一个。交叉编译由 `crossScalaVersions` 控制，不增加 project 数。
@@ -143,10 +143,8 @@ spark-milvus/
   spark-base/src/main/scala/com/zilliz/spark/connector/{table,scan,expr,types,write,options}
   spark-3.5/src/main/{scala,resources}/  catalog、functions、extensions、META-INF/services
   spark-4.0/  spark-4.1/  spark-4.2/     catalog、procedure、extensions、META-INF/services
-  apps-base/src/main/{scala,resources}/  com.zilliz.spark.connector.apps.{backfill,tools,search,legacy}
-  apps-4.0/                        引 apps-base 的源码，依赖本线 spark 模块
-  integration-base/src/test/scala/ 共享的集成测试用例
-  integration-4.0/                 需要 MinIO 与 Milvus
+  apps-4.0/src/main/{scala,resources}/   com.zilliz.spark.connector.apps.{backfill,tools,search,legacy}
+  integration-4.0/src/test/scala/  需要 MinIO 与 Milvus
   src/                             1.x 的代码，按模块逐个迁走
   docs/design/                     设计文档
   docs/                            用户文档
