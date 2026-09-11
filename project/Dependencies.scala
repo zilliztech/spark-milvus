@@ -49,6 +49,12 @@ object Dependencies {
     "org.apache.hadoop" % "hadoop-aliyun" % Versions.hadoop % "provided,test"
   lazy val awsSdkS3 =
     "software.amazon.awssdk" % "s3" % Versions.awsSdkV2
+  // Required by WebIdentityTokenFileCredentialsProvider: it looks up
+  // WebIdentityTokenCredentialsProviderFactory, whose implementation ships in
+  // this module. Without it the provider constructs, then throws when
+  // resolving, and a provider chain silently falls through to the node role.
+  lazy val awsSdkSts =
+    "software.amazon.awssdk" % "sts" % Versions.awsSdkV2
   lazy val awsSdkS3Transfer =
     "software.amazon.awssdk" % "s3-transfer-manager" % Versions.awsSdkV2
   lazy val awsSdkCore =
@@ -88,6 +94,7 @@ object Dependencies {
     // docs/design/architecture/storage-auth.html.
     awsSdkS3,
     awsSdkS3Transfer,
+    awsSdkSts,
     awsSdkCore,
     parquetAvro,
     jacksonScala,
@@ -115,6 +122,7 @@ object Dependencies {
     hadoopAliyun,
     awsSdkS3,
     awsSdkS3Transfer,
+    awsSdkSts,
     awsSdkCore,
     jacksonScala,
     jacksonDatabind,

@@ -273,7 +273,28 @@ spark.hadoop.fs.oss.credentials.provider
 但那是独立的一件事，不是我们删依赖的前置。</p>
 </div>
 
-<h3>5.6 步骤与顺序</h3>
+<h3 id="sts">5.6 v2 的 WebIdentity provider 需要 sts 模块</h3>
+<p>换类名时差点引入它本来要防的那个 bug。v2 的
+<code>WebIdentityTokenFileCredentialsProvider</code> 内部去找
+<code>WebIdentityTokenCredentialsProviderFactory</code> 的实现，那个实现是
+<code>software.amazon.awssdk:sts</code> 里的
+<code>StsWebIdentityCredentialsProviderFactory</code>。</p>
+<p>缺了这个模块，provider 构造不报错——类里有个
+<code>private final RuntimeException loadException</code> 字段把失败存起来——
+等到真去取凭证才抛。而在 provider <strong>链</strong>里，一个抛了就换下一个，
+于是落到 <code>IAMInstanceCredentialsProvider</code>，<strong>拿到节点角色</strong>。</p>
+<div class="warn">
+<p>改之前我们的 fat jar 里 <code>software/amazon/awssdk/services/sts/</code> 是 0 个类：
+<code>hadoopAws</code> 排除了 <code>software.amazon.awssdk:bundle</code>，
+而我们只单独加了 <code>s3</code> 与 <code>s3-transfer-manager</code>。
+所以换成 v2 类名的同时必须加 <code>software.amazon.awssdk:sts</code>，已加。</p>
+<p>顺带解释了 v1 为什么一直能工作：v1 的 <code>WebIdentityTokenCredentialsProvider</code>
+同样需要 STS，而 <code>com/amazonaws/services/securitytoken/</code> 在我们 jar 里也是 0 个类。
+它靠的是云上 spark-data-service 带的 <code>aws-java-sdk-bundle</code>。
+<strong>我们的 fat jar 从来不是自足的</strong>，这一点在开源部署上值得单独验。</p>
+</div>
+
+<h3>5.7 步骤与顺序</h3>
 <ol>
 <li>三处类名换成 v2，<code>MilvusOption</code> 的链改成与 backfill 一致的显式顺序，测试断言同步。</li>
 <li><strong>在真实 EKS 上验证</strong>。v1 的 <code>WebIdentityTokenCredentialsProvider</code>
@@ -287,7 +308,7 @@ spark.hadoop.fs.oss.credentials.provider
 建 FileSystem 的那一刻，不在编译期。先删依赖再换名，等于把一次可控的验证变成线上故障。</p>
 </div>
 
-<h3>5.7 为什么不选另外两条</h3>
+<h3>5.8 为什么不选另外两条</h3>
 <table>
 <tr><th>方案</th><th>不选的理由</th></tr>
 <tr><td>保持现状</td><td>继续带一个已结束支持的依赖，且任何人以「统一到 v2」为由删它都会在运行时炸</td></tr>
