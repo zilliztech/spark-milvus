@@ -100,6 +100,54 @@ writing Vortex column groups. Check it before designing around a gap.
 | What sits outside this repository? | [docs/context.md](docs/context.md) |
 | How should a document here be written? | [docs/writing.md](docs/writing.md) |
 
+## Principles
+
+These come before the rules below. The rules are mechanical and the build checks
+them; these are judgment, and judgment decides first.
+
+**The design has one standard: the whole stays coherent.** When a capability
+arrives, the first question is where it belongs in the design that already
+exists, not how to make it run. One that fits no existing package is a signal
+that the architecture has to change, not a reason to open a package to hold it.
+Never lower the design standard to finish a task, and never optimise for what is
+convenient this week.
+
+**Fix causes. Never patch the edge.** Swallowing an exception, turning a failure
+into an empty result, adding a flag that routes around a defect, special-casing
+at one call site: each of these takes a visible problem and makes it invisible
+while the system keeps running wrong. The delete path is the live example —
+an unreadable delete file currently yields an empty delete plan, so deleted rows
+come back with no exception and no warning. That is not robustness.
+
+**No stovepipes.** One class of problem gets one solution. The three
+non-standard read entry points implement a single `SnapshotSource` and a single
+`SegmentReader`; they do not each get their own path from top to bottom. When
+you find yourself building a second parallel route, the first route is the thing
+to change.
+
+**Refactor when the design needs it, and never weigh the effort.** "That is too
+big a change" is not a reason to keep a wrong design; effort is not an input to
+a design decision. Exactly three reasons justify deferring: a decision has not
+been made, a dependency does not exist yet, or a fact is not yet known. "It is a
+lot of work" and "that is refactoring, not this task" are not among them.
+
+**Removing is design work, and it is never silent.** Subtraction is what keeps
+an architecture simple: the count of concepts, packages and options should hold
+steady or fall as capabilities land, not climb. But never delete on your own
+judgment. Before removing a file, a package, a public type, a configuration
+option, a capability row or a test, say what you propose to remove, what
+evidence says it is unused, and what breaks if that evidence is wrong — then
+wait for a person to agree. "No references in this repository" is evidence, not
+proof: reflection, service loading, user code outside this tree, documentation,
+and the cloud jobs that pin this artifact all depend on things that grep as
+dead.
+
+A documented interim state is not a patch. During a migration parts of the tree
+will sit in the wrong module on purpose. That is legitimate when it is written
+down, has a named end condition and someone is holding it; a patch is the one
+you intend to leave there. `compat.offline` and `apps.legacy` are empty right
+now for that reason, and section 5 of modules.md says so.
+
 ## Rules any change has to satisfy
 
 The full list is section 4 of [modules.md](docs/design/modules.md); these four

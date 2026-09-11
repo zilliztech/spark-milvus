@@ -166,7 +166,7 @@ spark-milvus/
 
 1. core、compat、client 的依赖里没有 spark-*；用 sbt 任务扫描源码，出现 `org.apache.spark` 即编译失败。
 2. native-* 的 C 头文件不出现 JNI 类型；JNI 只在 `jni` 包。原生库只在 executor 加载：`core.read.exec`、`core.write.exec`、`core.index` 之外的 core 包不得调用 native，driver 侧要读的 Manifest 字段由纯 JVM 解析器读。
-3. Arrow 版本由 spark-`<line>` 钉，与本线 Spark 自带的对齐（3.5 用 15.0.2，4.0 用 18.1.0，4.1 用 18.3.0，4.2 用 19.0.0）；core 只按接口编译，`arrow-vector`、`arrow-memory-core`、`arrow-c-data`、`arrow-format` 全标 provided，实现由运行时的 Spark 提供，版本按 4.0 线取。Spark 的 patch 版取每条线最低的维护版，编译版本就是兼容下限。
+3. Arrow 版本由 spark-`<line>` 钉，与本线 Spark 自带的对齐（3.5 用 12.0.1，4.0 用 18.1.0，4.1 用 18.3.0，4.2 用 19.0.0）；core 只按接口编译，`arrow-vector`、`arrow-memory-core`、`arrow-c-data`、`arrow-format` 全标 provided，实现由运行时的 Spark 提供，版本按 4.0 线取。Spark 的 patch 版取每条线最低的维护版，编译版本就是兼容下限。
 4. Java 目标版本按线：core、compat、client、native-* 钉 `-release 11`；spark-`<line>`、apps 按本线（3.5 用 11，4.x 用 17）。
 5. 交叉编译的模块统一 `import scala.jdk.CollectionConverters._`，加 `scala-collection-compat` 为 2.12 补齐，禁止 `scala.collection.JavaConverters`。
 6. fat jar 只 relocate protobuf 和 guava；`com.zilliz.milvus.native.**` 和 `org.apache.arrow.**` 不 relocate，JNI 的导出符号已按包名编进 .so；`META-INF/services` 用 merge 策略。

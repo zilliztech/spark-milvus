@@ -22,6 +22,34 @@ The root project has no sources of its own. It depends on `spark40` and
 `apps40` and exists to assemble the fat jar under the 1.x artifact name, so the
 Dockerfile and the cloud consumers do not have to change.
 
+Only the root assembly is published during the migration. Its POM omits the
+embedded `spark40` and `apps40` module dependencies, which are not published
+separately yet; external dependencies remain in the POM.
+
+## Build files
+
+`build.sbt` starts with shared defaults and explicit module declarations, then
+groups root packaging and publishing at the end. Module-specific dependencies
+stay beside the module that uses them.
+
+| File | What to change there |
+|---|---|
+| `project/Versions.scala` | Library versions and the Spark line matrix |
+| `project/Dependencies.scala` | Dependency coordinates, scopes and dependency groups |
+| `project/Modules.scala` | Shared compile/test settings, checks and the temporary JNI dependency |
+| `project/plugins.sbt` | Build plugins and their meta-build dependencies |
+
+Reuse `Modules.jacksonPin` only in core, compat and client. Root, Spark and apps
+share `Modules.legacyJni` until the native-storage module replaces the upstream
+Scala binding. `Dependencies.legacyRootDeps` preserves the root artifact's
+existing dependency declarations, including its separate `legacyRootArrow`
+version; it is not the version matrix for the Spark modules.
+
+Adding a Spark line means adding its version row, an explicit `sparkProject`
+declaration and an aggregate entry. Keep this wiring visible, and extract shared
+settings when they remove real duplication. The reasons for migration choices
+belong in the design decision log.
+
 ## Tests that cannot pass locally
 
 Two tests need `libmilvus-storage-jni`, which is built inside the Docker image

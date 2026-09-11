@@ -10,22 +10,13 @@ object Modules {
     "The core layer must not depend on Spark: org.apache.spark in a source file fails the build"
   )
 
-  /** Mentioning org.apache.spark in a comment is legitimate: during the
-    * migration many files need to say "this class used to extend Spark's
-    * Logging". Strip block and line comments before scanning so only real code
-    * is checked.
-    */
+  /** Comments may explain old Spark dependencies without introducing one. */
   private def stripComments(source: String): String =
     source
       .replaceAll("(?s)/\\*.*?\\*/", "")
       .replaceAll("(?m)//.*$", "")
 
-  /** Constraint 1: no source file in core, compat or client mentions
-    * org.apache.spark.
-    *
-    * It runs ahead of Compile / compile, so a violation fails the build instead
-    * of waiting to be caught in review.
-    */
+  /** Reject Spark references in the shared modules before compilation. */
   val noSparkImports: Seq[Setting[_]] = Seq(
     checkNoSpark := {
       val log = streams.value.log
@@ -60,7 +51,7 @@ object Modules {
       // Spark ships.
       "org.slf4j" % "slf4j-api" % Versions.slf4j % "provided"
     ),
-    // Publishing turns on once a module has content.
+    // Module publication is not enabled yet.
     publish / skip := true
   ) ++ noSparkImports
 
@@ -74,9 +65,7 @@ object Modules {
     publish / skip := true
   )
 
-  /** Compile settings for one Spark line: pin that line's Java, Scala and
-    * Spark.
-    */
+  /** Compile settings for one Spark line's Java and Scala versions. */
   def perLine(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
     crossScalaVersions := l.scalas,
     scalacOptions ++= Seq("-release", l.javaRelease),
@@ -84,60 +73,14 @@ object Modules {
     publish / skip := true
   )
 
-  /** This line's Spark modules, always provided. Arrow is pinned by the line
-    * itself rather than inherited transitively from Spark.
-    */
-  def sparkDeps(l: Versions.SparkLine): Seq[ModuleID] =
-    Seq("spark-core", "spark-sql", "spark-catalyst").map { m =>
-      ("org.apache.spark" %% m % l.spark % "provided")
-        .excludeAll(ExclusionRule(organization = "org.apache.arrow"))
-    }
-
-  /** Constraint 3: the Arrow version is pinned by spark-<line>; core compiles
-    * against the interfaces only.
-    */
-  def arrowDeps(l: Versions.SparkLine): Seq[ModuleID] =
-    Seq("arrow-vector", "arrow-memory-core", "arrow-c-data", "arrow-memory-netty")
-      .map(m => "org.apache.arrow" % m % l.arrow)
-
-  /** Migration-time: once the 1.x connector sources moved into spark-base, all
-    * four lines need this set of dependencies.
-    *
-    * The list only gets shorter as code sinks down into core. Storage access,
-    * parquet and avro all end up there, leaving Spark, Arrow and the Milvus
-    * client here.
-    */
-  def legacyDeps(l: Versions.SparkLine): Seq[ModuleID] = Seq(
-    // Pinned to this line's Spark, not the 1.x default. spark-mllib_2.12 does
-    // not exist for Spark 4, so the 3.5 line fails to resolve if it inherits
-    // the 4.0 version.
-    ("org.apache.spark" %% "spark-mllib" % l.spark % "provided,test")
-      .excludeAll(ExclusionRule(organization = "org.apache.arrow")),
-    Dependencies.parquetHadoop,
-    Dependencies.parquetAvro,
-    Dependencies.avro,
-    Dependencies.hadoopCommon,
-    Dependencies.hadoopAws,
-    Dependencies.hadoopAliyun,
-    Dependencies.awsSdkS3,
-    Dependencies.awsSdkS3Transfer,
-    Dependencies.awsSdkCore,
-    Dependencies.jacksonScala,
-    Dependencies.jacksonDatabind,
-    Dependencies.grpcNetty,
-    Dependencies.scalapbRuntimeGrpc,
-    Dependencies.munit % Test,
-    Dependencies.hadoopMapreduceClientCore % Test
+  /** Remove when native-storage replaces the upstream Scala 2.13 binding. */
+  val legacyJni: Seq[Setting[_]] = Seq(
+    Compile / unmanagedJars += (ThisBuild / baseDirectory).value /
+      "milvus-storage" / "java" / "target" / "scala-2.13" /
+      "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar"
   )
 
-  /** Pins the three jackson artifacts to one version: parquet-hadoop pulls in a
-    * newer databind, and mixing it with jackson-module-scala throws
-    * JsonMappingException.
-    *
-    * Layer 2 only. Spark ships a self-consistent jackson set, and pinning there
-    * would drag databind below Spark's own jackson-module-scala, which throws
-    * the same way.
-    */
+  /** Keep layer 2's Jackson artifacts aligned. Spark modules use Spark's set. */
   val jacksonPin: Seq[Setting[_]] = Seq(
     dependencyOverrides ++= Seq(
       Dependencies.jacksonDatabind,
@@ -146,19 +89,10 @@ object Modules {
     )
   )
 
-  /** The JVM flags the test suites need.
-    *
-    * Arrow's MemoryUtil cannot initialize without --add-opens; without it the
-    * first column batch throws "Failed to initialize MemoryUtil". The native
-    * library path points at native-storage's resources, which is where the
-    * Dockerfile writes the built libraries, so on a machine that has not built
-    * them only the tests that need them fail.
-    */
+  /** Test JVM settings for Arrow access and the native libraries built by Docker. */
   def nativeTest: Seq[Setting[_]] = Seq(
     fork := true,
-    // After forking, the working directory defaults to the subproject's own
-    // directory. Every 1.x test reads its fixtures by a path relative to the
-    // repository root, so pin it back and the paths keep their old meaning.
+    // Fixtures are addressed relative to the repository root.
     baseDirectory := (ThisBuild / baseDirectory).value,
     parallelExecution := true,
     logBuffered := false,

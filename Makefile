@@ -123,7 +123,7 @@ package: copy-native-libs
 # Run tests
 test: package
 	@echo "$(BLUE)Type-checking integration tests...$(NC)"
-	@$(SBT) "IntegrationTest/compile"
+	@$(SBT) "integration40/Test/compile"
 	@echo "$(BLUE)Running unit tests...$(NC)"
 	@$(SBT) test
 	@echo "$(GREEN)Tests complete$(NC)"
@@ -131,7 +131,7 @@ test: package
 # Type-check integration tests only (no Milvus/MinIO required at compile time)
 compile-it: package
 	@echo "$(BLUE)Type-checking integration tests...$(NC)"
-	@$(SBT) "IntegrationTest/compile"
+	@$(SBT) "integration40/Test/compile"
 	@echo "$(GREEN)Integration tests compile complete$(NC)"
 
 # Run demo
