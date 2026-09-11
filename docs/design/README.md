@@ -1,6 +1,6 @@
 # spark-milvus 2.0 设计（工作稿）
 
-标记：`[草稿]` 未讨论，`[讨论中]` 有分歧，`[已定]` 结论已进第 6 节决策日志。分章文件：[capabilities.md](capabilities.md) 功能规划，[modules.md](modules.md) 模块、包与目录，[overview.html](overview.html) 图解版，[lance-spark.md](lance-spark.md) 与 [lance-spark.html](lance-spark.html) 对照 Apache Lance 的 Spark 连接器。进入仓库的入口是项目 skill [.claude/skills/spark-milvus](../../.claude/skills/spark-milvus/SKILL.md)，它只做路由，内容都在本目录。
+标记：`[草稿]` 未讨论，`[讨论中]` 有分歧，`[已定]` 结论已进第 6 节决策日志。分章文件：[capabilities.md](capabilities.md) 功能规划，[modules.md](modules.md) 模块、包与目录，[overview.html](overview.html) 图解版，[lance-spark.md](lance-spark.md) 与 [lance-spark.html](lance-spark.html) 对照 Apache Lance 的 Spark 连接器。进入仓库的入口是 [AGENTS.md](../../AGENTS.md)（CLAUDE.md 是它的软链），它只做路由，内容都在本目录。
 
 ## 0 结论 `[草稿]`
 
@@ -218,4 +218,4 @@ flowchart LR
 | 2026-09-11 | 第 2 层的日志 | core 自带 slf4j 的 Logging 门面，不用 Spark 的。六个待迁文件只因为 Spark 的 Logging 才算 Spark 代码，全仓实际日志调用只有 7 处 |
 | 2026-09-11 | 存量 Spark 代码放 spark-base 还是单条线 | 放 spark-base。1.x 的 main 与 test 在 3.5.5、4.0.0、4.2.0 上都编得过，四条线各编一遍没有兼容风险，而单条线会让另外三条线一直是空的 |
 | 2026-09-11 | 代码与文档的语言 | 代码、注释、构建脚本、README 一律英文；docs/design 的设计文档保持中文 |
-| 2026-09-11 | 项目级 skill | .claude/skills/spark-milvus 作为唯一入口，只做路由不放内容；每条事实仍然只写在一个地方，skill 指过去 |
+| 2026-09-11 | 仓库的入口文档 | 仓库根的 AGENTS.md 是唯一入口，只做路由不放内容。CLAUDE.md 是它的软链，Codex 原生读 AGENTS.md，一份内容两个工具都认。不放 .claude/skills：那个目录在 .gitignore 里，而且只有 Claude 认得 |

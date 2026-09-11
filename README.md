@@ -48,7 +48,11 @@ protobuf definitions: `common.proto` and `schema.proto` are generated into
 files carrying gRPC services are generated into `client`. `milvus-storage`
 supplies the native storage library.
 
-## Design documents
+## Documents
+
+[AGENTS.md](AGENTS.md) is the entry point for working on this repository: it
+routes to whichever file answers a question and lists the rules any change has
+to satisfy. `CLAUDE.md` is a symlink to it.
 
 The 2.0 design lives in `docs/design`. Start with the overview, then the chapter
 you need.
@@ -63,7 +67,10 @@ you need.
 | [docs/design/lance-spark.html](docs/design/lance-spark.html) | The illustrated version of the comparison |
 
 `docs/reference-en.md` is the user-facing API reference for the connector
-options and entry points.
+options and entry points. [docs/contributing.md](docs/contributing.md) covers
+the build mechanics beyond this README, [docs/context.md](docs/context.md) what
+the design depends on outside this repository, and
+[docs/writing.md](docs/writing.md) the standard for documents here.
 
 ## Environment
 
