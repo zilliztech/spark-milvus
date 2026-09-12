@@ -2,7 +2,7 @@ import sbt._
 import sbt.Keys._
 
 /** Shared settings and build constraints for the 2.0 modules. See section 4 of
-  * docs/design/modules.md.
+  * docs/design/architecture/modules.md.
   */
 object Modules {
 
@@ -33,15 +33,15 @@ object Modules {
         }
         sys.error(
           s"${name.value} has ${offenders.size} Spark dependencies " +
-            "(constraint 1, section 4 of docs/design/modules.md)"
+            "(constraint 1, section 4 of docs/design/architecture/modules.md)"
         )
       }
     },
     Compile / compile := (Compile / compile).dependsOn(checkNoSpark).value
   )
 
-  /** The Scala modules shared across Spark lines: core, compat and client. */
-  val shared: Seq[Setting[_]] = Seq(
+  /** Layer 2's compile baseline, common dependencies and no-Spark check. */
+  val sparkFreeModuleSettings: Seq[Setting[_]] = Seq(
     crossScalaVersions := Versions.sharedScalas,
     scalacOptions ++= Seq("-release", Versions.sharedJavaRelease),
     javacOptions ++= Seq("--release", Versions.sharedJavaRelease),
@@ -50,9 +50,7 @@ object Modules {
       // The core logging facade is built on slf4j; at runtime it uses the copy
       // Spark ships.
       "org.slf4j" % "slf4j-api" % Versions.slf4j % "provided"
-    ),
-    // Module publication is not enabled yet.
-    publish / skip := true
+    )
   ) ++ noSparkImports
 
   /** The two layer-1 modules are plain Java, so their artifacts carry no Scala
@@ -61,23 +59,14 @@ object Modules {
   val javaOnly: Seq[Setting[_]] = Seq(
     crossPaths := false,
     autoScalaLibrary := false,
-    javacOptions ++= Seq("--release", Versions.sharedJavaRelease),
-    publish / skip := true
+    javacOptions ++= Seq("--release", Versions.sharedJavaRelease)
   )
 
   /** Compile settings for one Spark line's Java and Scala versions. */
   def perLine(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
     crossScalaVersions := l.scalas,
     scalacOptions ++= Seq("-release", l.javaRelease),
-    javacOptions ++= Seq("--release", l.javaRelease),
-    publish / skip := true
-  )
-
-  /** Remove when native-storage replaces the upstream Scala 2.13 binding. */
-  val legacyJni: Seq[Setting[_]] = Seq(
-    Compile / unmanagedJars += (ThisBuild / baseDirectory).value /
-      "milvus-storage" / "java" / "target" / "scala-2.13" /
-      "milvus-storage-jni_2.13-0.1.0-SNAPSHOT.jar"
+    javacOptions ++= Seq("--release", l.javaRelease)
   )
 
   /** Keep layer 2's Jackson artifacts aligned. Spark modules use Spark's set. */
@@ -117,10 +106,4 @@ object Modules {
         ((ThisBuild / baseDirectory).value / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
     )
   )
-
-  /** The shared source directory. spark-base is not an sbt project; each of the
-    * four lines adds it to its own source roots.
-    */
-  def sharedSource(root: File, dir: String): File =
-    root / dir / "src" / "main" / "scala"
 }

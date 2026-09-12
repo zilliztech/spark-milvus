@@ -1,15 +1,12 @@
 package com.zilliz.spark.connector.loon
 
-import scala.collection.JavaConverters._
-
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.spark.connector.MilvusOption
-import io.milvus.storage.MilvusStorageProperties
 
-/** Hands MilvusOption's storage configuration to the native layer.
+/** The `fs.*` key names, spelled once.
   *
-  * Parsing and validation live in `core.credential`; this object only adapts
-  * the option map to the upstream Java binding.
+  * Every name here is an alias for the one `core.credential.StorageProperties`
+  * defines, so the option a user writes and the key the C layer reads cannot
+  * drift apart. Parsing and validation live there; this object holds no logic.
   */
 object Properties {
 
@@ -38,18 +35,5 @@ object Properties {
     val FsGcpNativeWithoutAuth = "fs.gcp_native_without_auth"
     val FsGcpCredentialJson = "fs.gcp_credential_json"
     val FsUseCustomPartUpload = "fs.use_custom_part_upload"
-  }
-
-  def fromMilvusOption(milvusOption: MilvusOption): MilvusStorageProperties = {
-    val propsMap = StorageProperties.from(milvusOption.options)
-
-    val props = new MilvusStorageProperties()
-    props.create(new java.util.HashMap[String, String](propsMap.asJava))
-    if (!props.isValid) {
-      throw new IllegalStateException(
-        "Failed to create MilvusStorageProperties"
-      )
-    }
-    props
   }
 }

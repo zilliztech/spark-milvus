@@ -18,12 +18,25 @@ import com.zilliz.milvus.jni.storage.StorageNative
   * exercises both directions of the Arrow boundary and the column groups the
   * writer hands back, and the values have to survive the round trip.
   *
+  * It is also the regression test for milvus-storage#493, which is why the row
+  * count is what it is. `reader.record_batch_max_rows` defaults to 8192, so the
+  * packed reader only starts handing back sliced batches
+  * (`rb->Slice(min_rows)`) once more than 16384 rows are read. Below that the
+  * offset materialization in segment_reader_jni.cpp never runs, and a test that
+  * stayed under the boundary would pass just as happily against the broken
+  * ArrowArrayStream path.
+  *
+  * The check itself is that values stay strictly in step with the row offset.
+  * If a sliced batch were imported without honouring `ArrowArray.offset`, every
+  * batch after the first would restart from row 0 and the comparison fails.
+  *
   * Needs libnative-storage-jni, so it skips where the library is absent, which
   * is the state of CI.
   */
 class WriterRoundTripTest extends AnyFunSuite with Matchers {
 
-  private val rows = 5000
+  /** Over 2 * 8192, so the reader slices. See the class comment. */
+  private val rows = 20480
 
   private def skipWithoutLibrary(): Unit =
     try
@@ -160,6 +173,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       batchReader should not be 0L
 
       var seen = 0
+      var batches = 0
       var more = true
       while (more) {
         val array = ArrowArray.allocateNew(allocator)
@@ -174,6 +188,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
             val root =
               Data.importVectorSchemaRoot(allocator, array, batchSchema, null)
             try {
+              batches += 1
               val id = root.getVector("id").asInstanceOf[BigIntVector]
               val name = root.getVector("name").asInstanceOf[VarCharVector]
               var i = 0
@@ -192,6 +207,9 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       }
 
       seen shouldBe rows
+      // Three batches at the 8192 default: 8192, 8192, 4096. More than one is
+      // what makes this a slice regression rather than a single-batch read.
+      batches should be >= 3
     } finally {
       if (batchReader != 0L) StorageNative.recordBatchReaderDestroy(batchReader)
       if (reader != 0L) StorageNative.readerDestroySegment(reader)
@@ -201,6 +219,152 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       if (writer != 0L) StorageNative.writerDestroy(writer)
       if (readSchema != null) readSchema.close()
       if (writeSchema != null) writeSchema.close()
+      allocator.close()
+      Files
+        .walk(dir)
+        .sorted(java.util.Comparator.reverseOrder())
+        .forEach(Files.deleteIfExists(_))
+    }
+  }
+
+  /** Writes `count` rows starting at `from` into its own segment under `dir`,
+    * and returns that segment's single file path plus its row count.
+    */
+  private def writeSegment(
+      allocator: RootAllocator,
+      properties: java.util.Map[String, String],
+      segment: String,
+      from: Int,
+      count: Int
+  ): (String, Long) = {
+    val schemaStruct = ArrowSchema.allocateNew(allocator)
+    var handle = 0L
+    var groups = 0L
+    try {
+      Data.exportSchema(allocator, schema, null, schemaStruct)
+      handle = StorageNative.writerNew(
+        segment,
+        schemaStruct.memoryAddress(),
+        properties
+      )
+      val source = VectorSchemaRoot.create(schema, allocator)
+      try {
+        val id = source.getVector("id").asInstanceOf[BigIntVector]
+        val name = source.getVector("name").asInstanceOf[VarCharVector]
+        id.allocateNew(count)
+        name.allocateNew(count)
+        var i = 0
+        while (i < count) {
+          id.setSafe(i, (from + i).toLong * 7)
+          name.setSafe(i, s"row-${from + i}".getBytes("UTF-8"))
+          i += 1
+        }
+        source.setRowCount(count)
+        val array = ArrowArray.allocateNew(allocator)
+        try {
+          Data.exportVectorSchemaRoot(allocator, source, null, array)
+          StorageNative.writerWrite(handle, array.memoryAddress())
+          StorageNative.writerFlush(handle)
+        } finally array.close()
+      } finally source.close()
+
+      groups = StorageNative.writerClose(handle, null, null)
+      val files = StorageNative.nativeColumnGroupFiles(groups, 0)
+      val counts = StorageNative.nativeColumnGroupRowCounts(groups, 0)
+      require(
+        files.length == 1,
+        s"expected one file per segment, got ${files.toSeq}"
+      )
+      (files(0), counts(0))
+    } finally {
+      if (groups != 0L) StorageNative.nativeColumnGroupsDestroy(groups)
+      if (handle != 0L) StorageNative.writerDestroy(handle)
+      schemaStruct.close()
+    }
+  }
+
+  test("a column group holding several files reads every row of every file") {
+    skipWithoutLibrary()
+
+    // Regression for milvus-storage#657: a column group made of more than one
+    // file must report the sum of its files' rows, not the first file's. It is
+    // also the only check on the start/end accumulation columnGroupsCreate does
+    // when it lays the files of one group end to end.
+    val dir: Path = Files.createTempDirectory("native-multi-file")
+    val allocator = new RootAllocator(Long.MaxValue)
+    val properties = Map(
+      "fs.storage_type" -> "local",
+      "fs.root_path" -> dir.toAbsolutePath.toString
+    ).asJava
+
+    val perFile = 3000
+    var readSchema: ArrowSchema = null
+    var columnGroups = 0L
+    var reader = 0L
+    var batchReader = 0L
+
+    try {
+      val parts = (0 until 3).map { i =>
+        writeSegment(allocator, properties, s"segment-$i", i * perFile, perFile)
+      }
+      parts.map(_._2).sum shouldBe (3L * perFile)
+
+      columnGroups = StorageNative.columnGroupsCreate(
+        Array(Array("id", "name")),
+        Array(parts.map(_._1).toArray),
+        Array(parts.map(_._2).toArray),
+        "parquet"
+      )
+      columnGroups should not be 0L
+
+      readSchema = ArrowSchema.allocateNew(allocator)
+      Data.exportSchema(allocator, schema, null, readSchema)
+      reader = StorageNative.readerNew(
+        columnGroups,
+        readSchema.memoryAddress(),
+        Array("id", "name"),
+        properties
+      )
+      reader should not be 0L
+      batchReader = StorageNative.recordBatchReaderNew(reader, null)
+
+      var seen = 0
+      var more = true
+      while (more) {
+        val array = ArrowArray.allocateNew(allocator)
+        val batchSchema = ArrowSchema.allocateNew(allocator)
+        try {
+          more = StorageNative.recordBatchReaderReadNext(
+            batchReader,
+            array.memoryAddress(),
+            batchSchema.memoryAddress()
+          )
+          if (more) {
+            val root =
+              Data.importVectorSchemaRoot(allocator, array, batchSchema, null)
+            try {
+              val id = root.getVector("id").asInstanceOf[BigIntVector]
+              var i = 0
+              while (i < root.getRowCount) {
+                id.get(i) shouldBe seen.toLong * 7
+                seen += 1
+                i += 1
+              }
+            } finally root.close()
+          }
+        } finally {
+          array.close()
+          batchSchema.close()
+        }
+      }
+
+      // The whole point: every file's rows, not just the first file's.
+      seen shouldBe (3 * perFile)
+    } finally {
+      if (batchReader != 0L) StorageNative.recordBatchReaderDestroy(batchReader)
+      if (reader != 0L) StorageNative.readerDestroySegment(reader)
+      if (columnGroups != 0L) StorageNative.columnGroupsDestroy(columnGroups)
+      if (readSchema != null) readSchema.close()
       allocator.close()
       Files
         .walk(dir)

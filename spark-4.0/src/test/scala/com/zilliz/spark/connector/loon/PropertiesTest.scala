@@ -208,40 +208,43 @@ class PropertiesTest extends AnyFunSuite with Matchers {
   }
 
   // Validation itself lives in core.credential and is tested there
-  // (StoragePropertiesTest). These check that MilvusOption's map reaches it.
+  // (StoragePropertiesTest). These check that MilvusOption's map reaches it,
+  // which is what every reader and writer now does at construction.
 
-  test("fromMilvusOption reports a missing bucket name") {
+  test("a MilvusOption without a bucket name is rejected") {
     val err = intercept[IllegalArgumentException] {
-      Properties.fromMilvusOption(
-        MilvusOption(Map(MilvusOption.MilvusUri -> "http://localhost:19530"))
+      StorageProperties.from(
+        MilvusOption(
+          Map(MilvusOption.MilvusUri -> "http://localhost:19530")
+        ).options
       )
     }
     err.getMessage should include(Properties.FsConfig.FsBucketName)
   }
 
-  test("fromMilvusOption treats a blank value as missing") {
+  test("a blank value counts as missing") {
     val err = intercept[IllegalArgumentException] {
-      Properties.fromMilvusOption(
+      StorageProperties.from(
         MilvusOption(
           Map(
             MilvusOption.MilvusUri -> "http://localhost:19530",
             Properties.FsConfig.FsBucketName -> "   "
           )
-        )
+        ).options
       )
     }
     err.getMessage should include(Properties.FsConfig.FsBucketName)
   }
 
-  test("fromMilvusOption reports a missing endpoint once the bucket is given") {
+  test("a missing endpoint is reported once the bucket is given") {
     val err = intercept[IllegalArgumentException] {
-      Properties.fromMilvusOption(
+      StorageProperties.from(
         MilvusOption(
           Map(
             MilvusOption.MilvusUri -> "http://localhost:19530",
             Properties.FsConfig.FsBucketName -> "b"
           )
-        )
+        ).options
       )
     }
     err.getMessage should include(Properties.FsConfig.FsAddress)

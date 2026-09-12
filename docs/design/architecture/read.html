@@ -28,9 +28,9 @@
 <p>能力 R1、R2、R3、R4、R5、R8、R10、R14、R17。取字节和交接 Arrow 那一层见
 <a href="storage-io.html">storage-io.html</a>,分层见 <a href="modules.md">modules.md</a>。</p>
 
-<p class="thesis"><strong>今天第 3 层直接调第 1 层,读这条路上第 2 层是空的。</strong>
-两个 <code>PartitionReader</code> 都在 <code>spark-base</code>,都
-<code>import io.milvus.storage</code>(第 1 层的 JNI 绑定),中间不经过 <code>core</code>;
+<p class="thesis"><strong>第 3 层仍然直接调第 1 层,读这条路上第 2 层是空的。</strong>
+两个 <code>PartitionReader</code> 都在 <code>spark-base</code>,现在调的是
+<code>native-storage</code> 的 JNI(不再是上游绑定),中间仍然不经过 <code>core</code>;
 而 <code>core.read.plan</code> 与 <code>core.read.exec</code> 只有一个空的
 <code>package.scala</code>。本页先说清第 3 层现在怎么读的,再说要往第 2 层填什么。</p>
 
@@ -93,7 +93,7 @@
 <tr><th></th><th>V3 线</th><th>V2 线</th></tr>
 <tr><td>段怎么描述</td><td>manifest 路径 + <code>readVersion</code></td><td>列组:字段 id、文件路径、每文件行数</td></tr>
 <tr><td>列组清单</td><td>原生库读 manifest 得 <code>columnGroupsPtr</code></td><td><code>MilvusStorageColumnGroups.createFromGroups</code> 在 JVM 拼</td></tr>
-<tr><td>取字节、凭证、Arrow 出口</td><td colspan="2">都在上游绑定内部,JVM 侧看不到</td></tr>
+<tr><td>取字节、凭证、Arrow 出口</td><td colspan="2">都走 <code>native-storage</code> 的 JNI;凭证是 <code>StorageProperties.from(options)</code> 产出的 <code>fs.*</code> 属性包</td></tr>
 </table>
 
 <p><strong>所以改造只有一个切入点。</strong>要做的是换掉那一个调用,保留两种产生它输入的方式,
@@ -142,7 +142,7 @@ UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,�
 <table>
 <tr><th></th><th>状态</th></tr>
 <tr><td>driver 侧</td><td>做完了。<code>MilvusScan.storeFor</code> 建 <code>NativeObjectStore</code>,属性由连接器自己的 <code>fs.*</code> 选项与 <code>fs.s3a.*</code>/<code>fs.oss.*</code> 翻译出来的键合并,前者优先;桶为空时用 <code>fs.storage_type=local</code>。<code>core.io.hadoop</code> 已删除,core 与 compat 的主代码里没有一处 <code>org.apache.hadoop</code></td></tr>
-<tr><td>executor 侧</td><td>没动。两个 <code>PartitionReader</code> 的文件读取、凭证、Arrow 出口全在上游 <code>io.milvus.storage</code> 绑定里</td></tr>
+<tr><td>executor 侧</td><td>已经走我们的 JNI。还没做的是把分发与出口下沉到 <code>core.read.exec</code>——现在它们仍然是 spark 层的两个分支</td></tr>
 <tr><td>代价</td><td>driver 现在要能加载 <code>libmilvus-storage</code>。CI 不构建原生库,所以这条路径在 CI 上没有端到端覆盖;单元测试用 <code>LocalObjectStore</code> 覆盖各格式的解析</td></tr>
 </table>
 

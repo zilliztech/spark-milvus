@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.read
 
+import scala.collection.JavaConverters._
+
 import org.apache.arrow.c.{
   ArrowArray,
   ArrowSchema,
@@ -18,19 +20,13 @@ import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.unsafe.types.UTF8String
 
+import com.zilliz.milvus.jni.storage.StorageNative
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
-import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.serde.{ArrowAllocator, ArrowConverter}
 import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
-import io.milvus.storage.{
-  ArrowUtils,
-  MilvusStorageColumnGroups,
-  MilvusStorageProperties,
-  MilvusStorageReader,
-  NativeLibraryLoader
-}
 
 object MilvusPackedV2PartitionReader {
   private val ToleratedUnmappedColumns = Set("$meta")
@@ -201,9 +197,7 @@ class MilvusPackedV2PartitionReader(
 ) extends PartitionReader[InternalRow]
     with Logging {
 
-  NativeLibraryLoader.loadLibrary()
-
-  private val allocator = ArrowUtils.getAllocator
+  private val allocator = ArrowAllocator.get
   private val sourceSchema = schema
   private val pkField = milvusSchema.fields.find(_.isPrimaryKey).getOrElse {
     throw new IllegalArgumentException("No primary key field found in schema")
@@ -232,9 +226,8 @@ class MilvusPackedV2PartitionReader(
     fieldMappings.fieldIdToName.getOrElse(pkField.fieldID, pkField.name)
 
   private var arrowSchemaObj: ArrowSchema = null
-  private var readerProperties: MilvusStorageProperties = null
   private var columnGroupsPtr: Long = 0L
-  private var reader: MilvusStorageReader = null
+  private var readerHandle: Long = 0L
   private var rbrHandle: Long = 0L
   private var dictProvider: CDataDictionaryProvider = null
 
@@ -245,8 +238,6 @@ class MilvusPackedV2PartitionReader(
       )
     arrowSchemaObj = ArrowSchema.allocateNew(allocator)
     Data.exportSchema(allocator, arrowSchema, null, arrowSchemaObj)
-
-    readerProperties = Properties.fromMilvusOption(milvusOption)
 
     val cols = columnGroups.map { cg =>
       cg.fieldIds.flatMap(fieldMappings.fieldIdToName.get).toArray
@@ -261,22 +252,21 @@ class MilvusPackedV2PartitionReader(
       cg.fileRowCounts.toArray
     }.toArray
     columnGroupsPtr =
-      MilvusStorageColumnGroups.createFromGroups(cols, files, rowCounts)
+      StorageNative.columnGroupsCreate(cols, files, rowCounts, "parquet")
 
-    reader = new MilvusStorageReader()
-    reader.create(
+    readerHandle = StorageNative.readerNew(
       columnGroupsPtr,
       arrowSchemaObj.memoryAddress(),
       neededColumns,
-      readerProperties
+      StorageProperties.from(milvusOption.options).asJava
     )
-    if (!reader.isValid) {
+    if (readerHandle == 0L) {
       throw new IllegalStateException(
-        "Failed to create MilvusStorageReader for V2 packed segment"
+        "Failed to open the native reader for this V2 packed segment"
       )
     }
 
-    rbrHandle = reader.openRecordBatchReaderScala()
+    rbrHandle = StorageNative.recordBatchReaderNew(readerHandle, null)
     dictProvider = new CDataDictionaryProvider()
   } catch {
     case e: Throwable =>
@@ -285,9 +275,9 @@ class MilvusPackedV2PartitionReader(
   }
 
   /** Total rows the packed reader must deliver, recovered from the per-file row
-    * counts fed to `MilvusStorageColumnGroups.createFromGroups`. All column
-    * groups of a segment carry the same row total, so the head group's sum is
-    * the segment-wide expectation.
+    * counts fed to `StorageNative.columnGroupsCreate`. All column groups of a
+    * segment carry the same row total, so the head group's sum is the
+    * segment-wide expectation.
     *
     * This is the "not silently short" guard: a pre-fix milvus-storage library
     * (before milvus-storage#657) drops every file after the first in a
@@ -329,7 +319,7 @@ class MilvusPackedV2PartitionReader(
     val cSchema = ArrowSchema.allocateNew(allocator)
     var gotBatch = false
     try {
-      gotBatch = reader.readNextBatchScala(
+      gotBatch = StorageNative.recordBatchReaderReadNext(
         rbrHandle,
         cArr.memoryAddress(),
         cSchema.memoryAddress()
@@ -451,7 +441,7 @@ class MilvusPackedV2PartitionReader(
       currentBatch = null
     }
     if (rbrHandle != 0L) {
-      try reader.destroyRecordBatchReaderScala(rbrHandle)
+      try StorageNative.recordBatchReaderDestroy(rbrHandle)
       catch { case e: Throwable => logWarning("destroy rbrHandle failed", e) }
       rbrHandle = 0L
     }
@@ -460,13 +450,13 @@ class MilvusPackedV2PartitionReader(
       catch { case e: Throwable => logWarning("close dictProvider failed", e) }
       dictProvider = null
     }
-    if (reader != null) {
-      try reader.destroy()
+    if (readerHandle != 0L) {
+      try StorageNative.readerDestroySegment(readerHandle)
       catch { case e: Throwable => logWarning("destroy reader failed", e) }
-      reader = null
+      readerHandle = 0L
     }
     if (columnGroupsPtr != 0L) {
-      try MilvusStorageColumnGroups.destroy(columnGroupsPtr)
+      try StorageNative.columnGroupsDestroy(columnGroupsPtr)
       catch {
         case e: Throwable => logWarning("destroy columnGroupsPtr failed", e)
       }
@@ -478,13 +468,6 @@ class MilvusPackedV2PartitionReader(
         case e: Throwable => logWarning("close arrowSchemaObj failed", e)
       }
       arrowSchemaObj = null
-    }
-    if (readerProperties != null) {
-      try readerProperties.free()
-      catch {
-        case e: Throwable => logWarning("free readerProperties failed", e)
-      }
-      readerProperties = null
     }
   }
 }

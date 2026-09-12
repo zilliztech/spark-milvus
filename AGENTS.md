@@ -59,9 +59,10 @@ is true of `compat.offline` and `apps.legacy`, whose code is still sitting in
 Layer 3 holds the 1.x connector code as it was. Splitting it into catalog,
 table, scan, write, options, types and expr is the next refactor, not a move.
 
-Layer 1 is placeholders. All four Spark lines still consume the upstream
-milvus-storage Java binding as an unmanaged jar, which is also why the 3.5 line
-cannot produce Scala 2.12 artifacts yet.
+Layer 1 is written and in use: `native-storage` wraps the `loon_*` entry points
+for both reading and writing and loads its own libraries. The upstream
+milvus-storage Java binding is out of the build, so the 3.5 line cross-compiles
+for Scala 2.12 again. `native-vector` is still a placeholder.
 
 Six design questions are still open: 5, 10, 11, 13, 16 and 19 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them

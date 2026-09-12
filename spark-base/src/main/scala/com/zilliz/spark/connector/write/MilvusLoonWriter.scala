@@ -34,19 +34,14 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.unsafe.types.UTF8String
 
+import com.zilliz.milvus.jni.storage.StorageNative
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.MilvusTypes
 import com.zilliz.spark.connector.{DataTypeUtil, MilvusOption, MilvusSchemaUtil}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
-import io.milvus.storage.{
-  ArrowUtils,
-  MilvusStorageProperties,
-  MilvusStorageTransaction,
-  MilvusStorageWriter,
-  NativeLibraryLoader
-}
 
 /** MilvusLoonWriteTable provides write support for StorageV3 (segment-info
   * `storage_version = 3`, the manifest-based packed parquet format consumed by
@@ -223,7 +218,8 @@ class MilvusLoonPartitionWriter(
       MilvusOption.WriterVariableWidthBytesPerValue,
       defaultValue = 32.0
     )
-  private val writerProperties = Properties.fromMilvusOption(milvusOption)
+  private val writerProperties: java.util.Map[String, String] =
+    StorageProperties.from(milvusOption.options).asJava
 
   private val allocator = new RootAllocator(Long.MaxValue)
 
@@ -275,19 +271,21 @@ class MilvusLoonPartitionWriter(
   private val arrowSchemaC = ArrowSchema.allocateNew(allocator)
 
   // Create Storage V2 writer
-  private val writer = {
+  private val writerHandle: Long = {
     Data.exportSchema(allocator, arrowSchema, null, arrowSchemaC)
-
-    val w = new MilvusStorageWriter()
-    w.create(basePath, arrowSchemaC.memoryAddress(), writerProperties)
-
-    if (!w.isValid) {
+    val handle =
+      StorageNative.writerNew(
+        basePath,
+        arrowSchemaC.memoryAddress(),
+        writerProperties
+      )
+    if (handle == 0L) {
       arrowSchemaC.close()
-      writerProperties.free()
-      throw new IllegalStateException("Failed to create MilvusStorageWriter")
+      throw new IllegalStateException(
+        s"Failed to open the native writer at $basePath"
+      )
     }
-
-    w
+    handle
   }
 
   logInfo(
@@ -313,17 +311,19 @@ class MilvusLoonPartitionWriter(
       }
 
       // Close writer and get column groups pointer
-      val columnGroupsPtr = writer.close()
+      val columnGroupsPtr = StorageNative.writerClose(writerHandle, null, null)
 
       logInfo(
         s"Writer closed: partition=$partitionId, records=$totalRecordCount, columnGroupsPtr=$columnGroupsPtr"
       )
 
       // Commit column groups to manifest using Transaction
-      val transaction = new MilvusStorageTransaction()
+      // -1 is the latest version, 0 is fail-on-conflict, 1 retry: the same
+      // defaults the binding this replaces used.
+      val transaction =
+        StorageNative.transactionBegin(basePath, writerProperties, -1L, 0, 1)
       val committedVersion =
         try {
-          transaction.begin(basePath, writerProperties)
 
           milvusOption.options.get(
             MilvusOption.WriterCommitType.toLowerCase
@@ -343,15 +343,22 @@ class MilvusLoonPartitionWriter(
                     s"Missing field ID for backfill column '${f.name}'"
                   )
                 )
-                transaction.dropColumn(fieldId.toString)
+                StorageNative.transactionDropColumn(
+                  transaction,
+                  fieldId.toString
+                )
               }
-              transaction.addColumnGroups(columnGroupsPtr)
+              StorageNative.transactionAddColumnGroups(
+                transaction,
+                columnGroupsPtr
+              )
             case _ =>
-              transaction.appendFiles(columnGroupsPtr)
+              StorageNative.transactionAppendFiles(transaction, columnGroupsPtr)
           }
-          transaction.commit()
+          StorageNative.transactionCommit(transaction)
         } finally {
-          transaction.destroy()
+          StorageNative.transactionDestroy(transaction)
+          StorageNative.nativeColumnGroupsDestroy(columnGroupsPtr)
         }
 
       if (committedVersion < 0) {
@@ -414,8 +421,8 @@ class MilvusLoonPartitionWriter(
       // Use synchronized write for the first operation to avoid race conditions
       // in native library's S3 client initialization
       MilvusLoonPartitionWriter.synchronizedWrite {
-        writer.write(arrowArrayC.memoryAddress())
-        writer.flush()
+        StorageNative.writerWrite(writerHandle, arrowArrayC.memoryAddress())
+        StorageNative.writerFlush(writerHandle)
       }
       totalRecordCount += currentBatchSize
     } finally {
@@ -581,8 +588,8 @@ class MilvusLoonPartitionWriter(
     */
   private def cleanup(): Unit = {
     Try {
-      if (writer != null && writer.isValid) {
-        writer.destroy()
+      if (writerHandle != 0L) {
+        StorageNative.writerDestroy(writerHandle)
       }
     }.recover { case e: Exception =>
       logError(s"Error destroying writer: ${e.getMessage}")
@@ -591,7 +598,7 @@ class MilvusLoonPartitionWriter(
     // Close current root (not yet exported). Previously-exported roots were
     // already closed inside flushBatch right after export — the export-side
     // refcount keeps their buffers alive until C++ drops the cached shared_ptr,
-    // and `writer.destroy()` above already fired every remaining release
+    // and the writerDestroy above already fired every remaining release
     // callback, returning those buffers to the allocator.
     Try {
       if (root != null) root.close()
@@ -605,9 +612,7 @@ class MilvusLoonPartitionWriter(
       logError(s"Error closing ArrowSchema: ${e.getMessage}")
     }
 
-    Try {
-      if (writerProperties != null) writerProperties.free()
-    }.recover { case e: Exception =>
+    Try {}.recover { case e: Exception =>
       logError(s"Error freeing properties: ${e.getMessage}")
     }
 

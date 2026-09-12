@@ -15,140 +15,15 @@
 
 #include <jni.h>
 
-#include <cstring>
 #include <string>
 #include <vector>
 
 #include "milvus-storage/ffi_c.h"
+// The V2 packed writer lives under ffi_internal, but its entry points are
+// FFI_EXPORT and libmilvus-storage exports them.
+#include "milvus-storage/ffi_internal/v2_packed_writer_c.h"
+#include "jni_common.h"
 
-namespace {
-
-constexpr const char* kExceptionClass =
-    "com/zilliz/milvus/jni/storage/StorageNativeException";
-
-void ThrowNative(JNIEnv* env, LoonFFIResult* result) {
-  jclass cls = env->FindClass(kExceptionClass);
-  if (cls == nullptr) {
-    loon_ffi_free_result(result);
-    return;
-  }
-  jmethodID ctor = env->GetMethodID(cls, "<init>", "(ILjava/lang/String;)V");
-  const char* message = result->message != nullptr ? result->message : "";
-  jstring jmessage = env->NewStringUTF(message);
-  jobject exception =
-      env->NewObject(cls, ctor, static_cast<jint>(result->err_code), jmessage);
-  loon_ffi_free_result(result);
-  if (exception != nullptr) {
-    env->Throw(static_cast<jthrowable>(exception));
-  }
-}
-
-bool Check(JNIEnv* env, LoonFFIResult result) {
-  if (loon_ffi_is_success(&result)) {
-    loon_ffi_free_result(&result);
-    return true;
-  }
-  ThrowNative(env, &result);
-  return false;
-}
-
-void ThrowIllegalArgument(JNIEnv* env, const char* message) {
-  jclass cls = env->FindClass("java/lang/IllegalArgumentException");
-  if (cls != nullptr) env->ThrowNew(cls, message);
-}
-
-class Utf8 {
- public:
-  Utf8(JNIEnv* env, jstring value) : env_(env), value_(value) {
-    chars_ =
-        value_ != nullptr ? env_->GetStringUTFChars(value_, nullptr) : nullptr;
-  }
-  ~Utf8() {
-    if (chars_ != nullptr) env_->ReleaseStringUTFChars(value_, chars_);
-  }
-  Utf8(const Utf8&) = delete;
-  Utf8& operator=(const Utf8&) = delete;
-
-  const char* c_str() const { return chars_; }
-
- private:
-  JNIEnv* env_;
-  jstring value_;
-  const char* chars_;
-};
-
-// Builds LoonProperties from a java.util.Map<String,String> and frees it on
-// scope exit.
-class Properties {
- public:
-  Properties() : value_{nullptr, 0}, created_(false) {}
-  ~Properties() {
-    if (created_) loon_properties_free(&value_);
-  }
-  Properties(const Properties&) = delete;
-  Properties& operator=(const Properties&) = delete;
-
-  bool Build(JNIEnv* env, jobject map) {
-    if (map == nullptr) return true;
-
-    jclass map_class = env->GetObjectClass(map);
-    jmethodID entry_set =
-        env->GetMethodID(map_class, "entrySet", "()Ljava/util/Set;");
-    jobject set = env->CallObjectMethod(map, entry_set);
-    if (env->ExceptionCheck()) return false;
-    jclass set_class = env->GetObjectClass(set);
-    jmethodID to_array =
-        env->GetMethodID(set_class, "toArray", "()[Ljava/lang/Object;");
-    auto entries = static_cast<jobjectArray>(env->CallObjectMethod(set, to_array));
-    if (env->ExceptionCheck()) return false;
-
-    jsize count = env->GetArrayLength(entries);
-    std::vector<std::string> keys;
-    std::vector<std::string> values;
-    keys.reserve(count);
-    values.reserve(count);
-    for (jsize i = 0; i < count; ++i) {
-      jobject entry = env->GetObjectArrayElement(entries, i);
-      jclass entry_class = env->GetObjectClass(entry);
-      jmethodID get_key =
-          env->GetMethodID(entry_class, "getKey", "()Ljava/lang/Object;");
-      jmethodID get_value =
-          env->GetMethodID(entry_class, "getValue", "()Ljava/lang/Object;");
-      auto key = static_cast<jstring>(env->CallObjectMethod(entry, get_key));
-      auto value = static_cast<jstring>(env->CallObjectMethod(entry, get_value));
-      const char* key_chars = env->GetStringUTFChars(key, nullptr);
-      const char* value_chars = env->GetStringUTFChars(value, nullptr);
-      keys.emplace_back(key_chars != nullptr ? key_chars : "");
-      values.emplace_back(value_chars != nullptr ? value_chars : "");
-      if (key_chars != nullptr) env->ReleaseStringUTFChars(key, key_chars);
-      if (value_chars != nullptr) env->ReleaseStringUTFChars(value, value_chars);
-      env->DeleteLocalRef(entry);
-    }
-
-    std::vector<const char*> key_ptrs;
-    std::vector<const char*> value_ptrs;
-    key_ptrs.reserve(keys.size());
-    value_ptrs.reserve(values.size());
-    for (size_t i = 0; i < keys.size(); ++i) {
-      key_ptrs.push_back(keys[i].c_str());
-      value_ptrs.push_back(values[i].c_str());
-    }
-    if (!Check(env, loon_properties_create(key_ptrs.data(), value_ptrs.data(),
-                                           key_ptrs.size(), &value_))) {
-      return false;
-    }
-    created_ = true;
-    return true;
-  }
-
-  const LoonProperties* get() const { return created_ ? &value_ : nullptr; }
-
- private:
-  LoonProperties value_;
-  bool created_;
-};
-
-}  // namespace
 
 extern "C" {
 
@@ -328,6 +203,93 @@ Java_com_zilliz_milvus_jni_storage_StorageNative_segmentWriterDestroy(
   loon_segment_writer_destroy(static_cast<LoonSegmentWriterHandle>(handle));
 }
 
+// ==================== V2 packed writer ====================
+
+// Writes one file per column group at the given paths. groupOffsets and
+// groupIndices are the flattened per-group column index lists the C layer
+// takes: offsets[g]..offsets[g+1] bounds group g's slice of indices.
+JNIEXPORT jlong JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_packedWriterNew(
+    JNIEnv* env,
+    jclass,
+    jobjectArray paths,
+    jintArray group_offsets,
+    jintArray group_indices,
+    jlong arrow_schema_address,
+    jobject properties,
+    jlong buffer_size) {
+  if (paths == nullptr || group_offsets == nullptr || group_indices == nullptr ||
+      arrow_schema_address == 0) {
+    ThrowIllegalArgument(env, "paths, offsets, indices and schema are required");
+    return 0;
+  }
+  jsize path_count = env->GetArrayLength(paths);
+  std::vector<std::string> owned;
+  owned.reserve(path_count);
+  for (jsize i = 0; i < path_count; ++i) {
+    auto element = static_cast<jstring>(env->GetObjectArrayElement(paths, i));
+    const char* chars = env->GetStringUTFChars(element, nullptr);
+    owned.emplace_back(chars != nullptr ? chars : "");
+    if (chars != nullptr) env->ReleaseStringUTFChars(element, chars);
+    env->DeleteLocalRef(element);
+  }
+  std::vector<const char*> path_ptrs;
+  path_ptrs.reserve(owned.size());
+  for (const auto& value : owned) path_ptrs.push_back(value.c_str());
+
+  jsize offset_count = env->GetArrayLength(group_offsets);
+  jsize index_count = env->GetArrayLength(group_indices);
+  std::vector<jint> offsets(offset_count);
+  std::vector<jint> indices(index_count);
+  if (offset_count > 0) {
+    env->GetIntArrayRegion(group_offsets, 0, offset_count, offsets.data());
+  }
+  if (index_count > 0) {
+    env->GetIntArrayRegion(group_indices, 0, index_count, indices.data());
+  }
+
+  Properties props;
+  if (!props.Build(env, properties)) return 0;
+
+  LoonPackedWriterHandle handle = 0;
+  if (!Check(env, loon_packed_writer_new(
+                      path_ptrs.data(), static_cast<int32_t>(path_count),
+                      reinterpret_cast<const int32_t*>(offsets.data()),
+                      reinterpret_cast<const int32_t*>(indices.data()),
+                      static_cast<int32_t>(index_count),
+                      reinterpret_cast<ArrowSchema*>(arrow_schema_address),
+                      props.get(), static_cast<int64_t>(buffer_size),
+                      &handle))) {
+    return 0;
+  }
+  return static_cast<jlong>(handle);
+}
+
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_packedWriterWrite(
+    JNIEnv* env, jclass, jlong handle, jlong arrow_array_address) {
+  if (arrow_array_address == 0) {
+    ThrowIllegalArgument(env, "arrow array address must not be zero");
+    return;
+  }
+  Check(env, loon_packed_writer_write(
+                 static_cast<LoonPackedWriterHandle>(handle),
+                 reinterpret_cast<ArrowArray*>(arrow_array_address)));
+}
+
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_packedWriterClose(
+    JNIEnv* env, jclass, jlong handle) {
+  Check(env,
+        loon_packed_writer_close(static_cast<LoonPackedWriterHandle>(handle)));
+}
+
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_packedWriterDestroy(
+    JNIEnv*, jclass, jlong handle) {
+  loon_packed_writer_destroy(static_cast<LoonPackedWriterHandle>(handle));
+}
+
 // ==================== Transaction ====================
 
 JNIEXPORT jlong JNICALL
@@ -412,6 +374,25 @@ Java_com_zilliz_milvus_jni_storage_StorageNative_transactionAddColumnGroup(
                  &groups->column_group_array[index]));
 }
 
+// Adds every group, which is what a backfill commit does: drop the target
+// columns, then add the replacements in the same transaction.
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_transactionAddColumnGroups(
+    JNIEnv* env, jclass, jlong handle, jlong native_column_groups) {
+  auto* groups = reinterpret_cast<LoonColumnGroups*>(native_column_groups);
+  if (groups == nullptr) {
+    ThrowIllegalArgument(env, "column groups must not be null");
+    return;
+  }
+  for (uint32_t i = 0; i < groups->num_of_column_groups; ++i) {
+    if (!Check(env, loon_transaction_add_column_group(
+                        static_cast<LoonTransactionHandle>(handle),
+                        &groups->column_group_array[i]))) {
+      return;
+    }
+  }
+}
+
 JNIEXPORT void JNICALL
 Java_com_zilliz_milvus_jni_storage_StorageNative_transactionAddDeltaLog(
     JNIEnv* env, jclass, jlong handle, jstring path, jlong num_entries) {
@@ -425,6 +406,58 @@ JNIEXPORT void JNICALL
 Java_com_zilliz_milvus_jni_storage_StorageNative_transactionDestroy(
     JNIEnv*, jclass, jlong handle) {
   loon_transaction_destroy(static_cast<LoonTransactionHandle>(handle));
+}
+
+// ==================== Manifest ====================
+
+// Opens the manifest at base_path and hands back the LoonManifest it holds.
+//
+// Reading a manifest is a transaction that is begun, queried and dropped; the
+// manifest outlives it. Fills a three-element long[]: the manifest handle to
+// destroy, the address of the column groups inside it (its first member, which
+// is what a reader takes), and the version actually read.
+JNIEXPORT jlongArray JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_manifestOpen(
+    JNIEnv* env, jclass, jstring base_path, jobject properties, jlong read_version) {
+  Utf8 path(env, base_path);
+  Properties props;
+  if (!props.Build(env, properties)) return nullptr;
+
+  LoonTransactionHandle transaction = 0;
+  if (!Check(env, loon_transaction_begin(
+                      path.c_str(), props.get(),
+                      static_cast<int64_t>(read_version),
+                      LOON_TRANSACTION_RESOLVE_FAIL, 0, &transaction))) {
+    return nullptr;
+  }
+
+  int64_t version = 0;
+  if (!Check(env, loon_transaction_get_read_version(transaction, &version))) {
+    loon_transaction_destroy(transaction);
+    return nullptr;
+  }
+  LoonManifest* manifest = nullptr;
+  if (!Check(env, loon_transaction_get_manifest(transaction, &manifest))) {
+    loon_transaction_destroy(transaction);
+    return nullptr;
+  }
+  loon_transaction_destroy(transaction);
+
+  jlong values[3] = {
+      reinterpret_cast<jlong>(manifest),
+      manifest != nullptr
+          ? reinterpret_cast<jlong>(&manifest->column_groups)
+          : 0L,
+      static_cast<jlong>(version)};
+  jlongArray out = env->NewLongArray(3);
+  if (out != nullptr) env->SetLongArrayRegion(out, 0, 3, values);
+  return out;
+}
+
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_manifestDestroy(
+    JNIEnv*, jclass, jlong manifest) {
+  loon_manifest_destroy(reinterpret_cast<LoonManifest*>(manifest));
 }
 
 // ==================== Reading back a native LoonColumnGroups ====================

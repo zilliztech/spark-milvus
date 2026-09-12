@@ -102,6 +102,17 @@ public final class StorageNative {
             String[] neededColumns,
             Map<String, String> properties);
 
+    /**
+     * Opens a reader over C-allocated column groups, which is what
+     * {@link #manifestOpen} and the writers hand back. Otherwise identical to
+     * {@link #readerNew}.
+     */
+    public static native long readerNewNative(
+            long nativeColumnGroupsAddress,
+            long arrowSchemaAddress,
+            String[] neededColumns,
+            Map<String, String> properties);
+
     /** Named apart from {@link #readerDestroy}, which closes a file reader. */
     public static native void readerDestroySegment(long readerHandle);
 
@@ -185,6 +196,27 @@ public final class StorageNative {
     public static native void segmentWriterDestroy(long segmentWriterHandle);
 
     /**
+     * Opens the V2 packed writer, one file per column group.
+     *
+     * <p>{@code groupOffsets} and {@code groupIndices} are the flattened
+     * per-group column index lists the C layer takes: group {@code g} owns
+     * {@code groupIndices[groupOffsets[g] .. groupOffsets[g+1])}.
+     */
+    public static native long packedWriterNew(
+            String[] paths,
+            int[] groupOffsets,
+            int[] groupIndices,
+            long arrowSchemaAddress,
+            Map<String, String> properties,
+            long bufferSize);
+
+    public static native void packedWriterWrite(long packedWriterHandle, long arrowArrayAddress);
+
+    public static native void packedWriterClose(long packedWriterHandle);
+
+    public static native void packedWriterDestroy(long packedWriterHandle);
+
+    /**
      * Opens a manifest transaction.
      *
      * <p>{@code readVersion} is the manifest version the caller read, or 0 to
@@ -213,6 +245,10 @@ public final class StorageNative {
     public static native void transactionAddColumnGroup(
             long transactionHandle, long nativeColumnGroupsHandle, int index);
 
+    /** Adds every group of a C-allocated column groups handle. */
+    public static native void transactionAddColumnGroups(
+            long transactionHandle, long nativeColumnGroupsHandle);
+
     public static native void transactionAddDeltaLog(
             long transactionHandle, String path, long numEntries);
 
@@ -233,4 +269,17 @@ public final class StorageNative {
             long nativeColumnGroupsHandle, int index);
 
     public static native void nativeColumnGroupsDestroy(long nativeColumnGroupsHandle);
+
+    /**
+     * Reads the manifest at {@code basePath}.
+     *
+     * @param readVersion the version to read, or -1 for the latest
+     * @return three elements: the manifest handle to release with
+     *     {@link #manifestDestroy}, the address of the column groups inside it
+     *     for {@link #readerNewNative}, and the version actually read
+     */
+    public static native long[] manifestOpen(
+            String basePath, Map<String, String> properties, long readVersion);
+
+    public static native void manifestDestroy(long manifestHandle);
 }

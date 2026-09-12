@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import scala.collection.JavaConverters._
 
 import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
 import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
@@ -24,22 +25,15 @@ import org.apache.spark.sql.types.{
   StructType
 }
 
+import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.codec.FloatConverter
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
-import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.serde.{ArrowAllocator, ArrowConverter}
 import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
-import io.milvus.storage.{
-  ArrowUtils,
-  LatestColumnGroupsResult,
-  MilvusStorageManifest,
-  MilvusStorageProperties,
-  MilvusStorageReader,
-  NativeLibraryLoader
-}
 
 object MilvusLoonPartitionReader {
   private[read] val TimestampColumnName = "1"
@@ -151,9 +145,8 @@ class MilvusLoonPartitionReader(
     with Logging {
 
   // Load native library
-  NativeLibraryLoader.loadLibrary()
 
-  private val allocator = ArrowUtils.getAllocator
+  private val allocator = ArrowAllocator.get
 
   private val sourceSchema = schema
 
@@ -176,9 +169,13 @@ class MilvusLoonPartitionReader(
   // bubbling out.
   private var arrowSchemaObj: ArrowSchema = null
   private var arrowSchemaPtr: Long = 0L
-  private var readerProperties: MilvusStorageProperties = null
+  private var readerProperties: java.util.Map[String, String] = null
+  // The manifest owns the column groups it hands out, so both are kept: one to
+  // pass to the reader, one to release. The code this replaces never released
+  // the manifest, leaking one per partition.
+  private var manifestHandle: Long = 0L
   private var columnGroupsPtr: Long = 0L
-  private var reader: MilvusStorageReader = null
+  private var readerHandle: Long = 0L
   // Per-batch record batch reader handle (see milvus-storage
   // loon_record_batch_reader_*). We deliberately avoid the ArrowArrayStream
   // path because Arrow Java's `ArrowReader.loadNextBatch` shares one
@@ -203,50 +200,46 @@ class MilvusLoonPartitionReader(
     arrowSchemaObj = schemaObj
     arrowSchemaPtr = schemaPtr
 
-    // Reader properties from MilvusOption.
-    readerProperties = Properties.fromMilvusOption(milvusOption)
+    readerProperties = StorageProperties.from(milvusOption.options).asJava
 
-    // Column groups from manifest (specific version if provided, latest otherwise).
-    val manifestResult: LatestColumnGroupsResult = if (readVersion > 0) {
+    // Column groups from the manifest: a named version if one was planned,
+    // otherwise the latest.
+    if (readVersion > 0) {
       logInfo(
         s"Reading manifest at version $readVersion for path: $manifestPath"
       )
-      MilvusStorageManifest.getColumnGroupsScala(
+    }
+    val manifest =
+      StorageNative.manifestOpen(
         manifestPath,
         readerProperties,
-        readVersion
+        if (readVersion > 0) readVersion else -1L
       )
-    } else {
-      MilvusStorageManifest.getLatestColumnGroupsScala(
-        manifestPath,
-        readerProperties
-      )
-    }
-    if (manifestResult.readVersion == 0) {
+    manifestHandle = manifest(0)
+    columnGroupsPtr = manifest(1)
+    if (manifest(2) == 0L) {
       throw new IllegalStateException(
         s"No manifest file found at path: $manifestPath. " +
           "The milvus-storage format manifest files do not exist. " +
           "Please turn on useLoonFFI and compact the data before reading through Spark connector."
       )
     }
-    columnGroupsPtr = manifestResult.columnGroupsPtr
 
-    reader = new MilvusStorageReader()
-    reader.create(
+    readerHandle = StorageNative.readerNewNative(
       columnGroupsPtr,
       arrowSchemaPtr,
       columnNames,
       readerProperties
     )
-    if (!reader.isValid) {
+    if (readerHandle == 0L) {
       throw new IllegalStateException(
-        s"Failed to create MilvusStorageReader for path: $manifestPath."
+        s"Failed to open the native reader for path: $manifestPath."
       )
     }
 
     // Open the per-batch RecordBatchReader and eagerly load the first
     // batch so empty segments short-circuit upfront.
-    rbrHandle = reader.openRecordBatchReaderScala(null)
+    rbrHandle = StorageNative.recordBatchReaderNew(readerHandle, null)
     _currentBatch = pullNextBatch()
   } catch {
     case e: Throwable =>
@@ -260,7 +253,7 @@ class MilvusLoonPartitionReader(
     val arr = ArrowArray.allocateNew(allocator)
     val sch = ArrowSchema.allocateNew(allocator)
     try {
-      val hasBatch = reader.readNextBatchScala(
+      val hasBatch = StorageNative.recordBatchReaderReadNext(
         rbrHandle,
         arr.memoryAddress(),
         sch.memoryAddress()
@@ -412,15 +405,21 @@ class MilvusLoonPartitionReader(
       catch { case e: Throwable => logWarning("close currentBatch failed", e) }
       _currentBatch = null
     }
-    if (rbrHandle != 0L && reader != null) {
-      try reader.destroyRecordBatchReaderScala(rbrHandle)
+    if (rbrHandle != 0L) {
+      try StorageNative.recordBatchReaderDestroy(rbrHandle)
       catch { case e: Throwable => logWarning("destroy rbrHandle failed", e) }
       rbrHandle = 0L
     }
-    if (reader != null) {
-      try reader.destroy()
+    if (readerHandle != 0L) {
+      try StorageNative.readerDestroySegment(readerHandle)
       catch { case e: Throwable => logWarning("destroy reader failed", e) }
-      reader = null
+      readerHandle = 0L
+    }
+    if (manifestHandle != 0L) {
+      try StorageNative.manifestDestroy(manifestHandle)
+      catch { case e: Throwable => logWarning("destroy manifest failed", e) }
+      manifestHandle = 0L
+      columnGroupsPtr = 0L
     }
     if (arrowSchemaObj != null) {
       try arrowSchemaObj.close()
@@ -430,13 +429,7 @@ class MilvusLoonPartitionReader(
       arrowSchemaObj = null
       arrowSchemaPtr = 0L
     }
-    if (readerProperties != null) {
-      try readerProperties.free()
-      catch {
-        case e: Throwable => logWarning("free readerProperties failed", e)
-      }
-      readerProperties = null
-    }
+    readerProperties = null
   }
 
   private def createArrowSchema(): (ArrowSchema, Long) = {

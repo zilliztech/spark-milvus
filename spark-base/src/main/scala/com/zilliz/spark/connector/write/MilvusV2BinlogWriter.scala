@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector.write
 
 import scala.collection.mutable
+import scala.collection.JavaConverters._
 import scala.util.Try
 
 import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
@@ -14,10 +15,11 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types._
 
+import com.zilliz.milvus.jni.storage.StorageNative
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.{MilvusOption, MilvusSchemaUtil}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
-import io.milvus.storage.{MilvusPackedWriter, MilvusStorageProperties}
 
 /** Describes one parquet file produced by a backfill write into a StorageV2
   * (non-manifest packed parquet) segment.
@@ -58,8 +60,7 @@ object MilvusV2BinlogWriter {
   *   {rootPath}/insert_log/{coll}/{part}/{seg}/{fieldID}/{logID}
   * }}}
   *
-  * Files are produced via milvus-storage's
-  * [[io.milvus.storage.MilvusPackedWriter]] (the JNI wrapper around C++
+  * Files are produced via milvus-storage's `loon_packed_writer_*` (the C++
   * `PackedRecordBatchWriter`), so the on-disk footer carries milvus-storage's
   * full KV metadata trio:
   *   - `row_group_metadata` (per-row-group memsize/rownum/offset)
@@ -141,36 +142,39 @@ class MilvusV2BinlogWriter(
     Array.tabulate(newFieldNames.length)(i => Array(i))
   private val outputPaths: Array[String] = fields.map(_.bucketRelativePath)
 
-  // Build native properties from the carrier MilvusOption (same plumbing the
-  // V3 writer uses).
-  private val nativeProperties: MilvusStorageProperties =
-    Properties.fromMilvusOption(milvusOption)
+  // Built the same way the readers build theirs: core.credential parses and
+  // validates, and the map goes straight to the C layer.
+  private val nativeProperties: java.util.Map[String, String] =
+    StorageProperties.from(milvusOption.options).asJava
 
   // Open the native writer.
   private val arrowSchemaC: ArrowSchema = ArrowSchema.allocateNew(allocator)
   Data.exportSchema(allocator, arrowSchema, null, arrowSchemaC)
 
-  private val writer: MilvusPackedWriter = {
-    val w = new MilvusPackedWriter()
+  // The C layer takes the per-group column indices flattened: group g owns
+  // groupIndices[groupOffsets(g) until groupOffsets(g + 1)].
+  private val groupOffsets: Array[Int] =
+    columnGroups.scanLeft(0)(_ + _.length)
+  private val groupIndices: Array[Int] = columnGroups.flatten
+
+  private val writerHandle: Long =
     try {
-      w.create(
+      StorageNative.packedWriterNew(
         outputPaths,
-        columnGroups,
+        groupOffsets,
+        groupIndices,
         arrowSchemaC.memoryAddress(),
         nativeProperties,
-        bufferSize = 0L
+        0L
       )
     } catch {
       case e: Throwable =>
         // Cleanup partial state before rethrowing — the caller's `abort()` won't
         // run if the constructor itself threw.
         Try(arrowSchemaC.close())
-        Try(nativeProperties.free())
         Try(allocator.close())
         throw e
     }
-    w
-  }
   logInfo(
     s"V2 packed writer opened: segment=$segmentId, fields=${newFieldIds.mkString(",")}, " +
       s"paths=${outputPaths.mkString("[", ", ", "]")}"
@@ -219,7 +223,7 @@ class MilvusV2BinlogWriter(
     var firstErr: Throwable = null
     try {
       if (currentBatchSize > 0) flushBatch()
-      writer.close()
+      StorageNative.packedWriterClose(writerHandle)
     } catch {
       case e: Throwable => firstErr = e
     } finally {
@@ -256,7 +260,7 @@ class MilvusV2BinlogWriter(
     val cArray = ArrowArray.allocateNew(allocator)
     try {
       Data.exportVectorSchemaRoot(allocator, root, null, cArray)
-      writer.write(cArray.memoryAddress())
+      StorageNative.packedWriterWrite(writerHandle, cArray.memoryAddress())
       totalRows += currentBatchSize
     } finally {
       // The C++ writer's ImportRecordBatch moves the release callback out of
@@ -324,7 +328,7 @@ class MilvusV2BinlogWriter(
     // which fires every outstanding release callback and returns the buffers
     // they were pinning to the allocator. Only then is it safe to close the
     // allocator.
-    Try(writer.destroy()).failed.foreach(e =>
+    Try(StorageNative.packedWriterDestroy(writerHandle)).failed.foreach(e =>
       logError(s"error destroying packed writer: ${e.getMessage}")
     )
     Try(if (root != null) root.close()).failed.foreach(e =>
@@ -332,9 +336,6 @@ class MilvusV2BinlogWriter(
     )
     Try(if (arrowSchemaC != null) arrowSchemaC.close()).failed.foreach(e =>
       logError(s"error closing ArrowSchema: ${e.getMessage}")
-    )
-    Try(nativeProperties.free()).failed.foreach(e =>
-      logError(s"error freeing native properties: ${e.getMessage}")
     )
     Try(allocator.close()).failed.foreach(e =>
       logError(s"error closing allocator: ${e.getMessage}")

@@ -29,7 +29,6 @@ lazy val root = project
     name := "spark-milvus",
     moduleName := "spark-connector",
     CapabilityIndex.settings,
-    Modules.legacyJni,
     Compile / compile / parallelExecution := true,
     libraryDependencies ++= Dependencies.legacyRootDeps,
     publish / skip := false,
@@ -187,8 +186,7 @@ def sparkProject(l: Versions.SparkLine): Project =
       moduleName := s"spark-milvus-${l.id}",
       Modules.perLine(l),
       publish / skip := true,
-      Modules.legacyJni,
-      Compile / unmanagedSourceDirectories +=
+        Compile / unmanagedSourceDirectories +=
         (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "scala",
       Compile / unmanagedResourceDirectories +=
         (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "resources",
@@ -217,7 +215,6 @@ lazy val apps40 = project
     moduleName := "spark-milvus-apps-4.0",
     Modules.perLine(Versions.line("4.0")),
     publish / skip := true,
-    Modules.legacyJni,
     libraryDependencies ++=
       Dependencies.sparkDeps(Versions.line("4.0")) ++
         Dependencies.arrowDeps(Versions.line("4.0")) ++

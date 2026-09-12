@@ -39,37 +39,9 @@
 #include "arrow/status.h"
 
 #include "milvus-storage/ffi_c.h"
+#include "jni_common.h"
 
 namespace {
-
-constexpr const char* kExceptionClass =
-    "com/zilliz/milvus/jni/storage/StorageNativeException";
-
-void ThrowNative(JNIEnv* env, LoonFFIResult* result) {
-  jclass cls = env->FindClass(kExceptionClass);
-  if (cls == nullptr) {
-    loon_ffi_free_result(result);
-    return;
-  }
-  jmethodID ctor = env->GetMethodID(cls, "<init>", "(ILjava/lang/String;)V");
-  const char* message = result->message != nullptr ? result->message : "";
-  jstring jmessage = env->NewStringUTF(message);
-  jobject exception =
-      env->NewObject(cls, ctor, static_cast<jint>(result->err_code), jmessage);
-  loon_ffi_free_result(result);
-  if (exception != nullptr) {
-    env->Throw(static_cast<jthrowable>(exception));
-  }
-}
-
-bool Check(JNIEnv* env, LoonFFIResult result) {
-  if (loon_ffi_is_success(&result)) {
-    loon_ffi_free_result(&result);
-    return true;
-  }
-  ThrowNative(env, &result);
-  return false;
-}
 
 // An Arrow failure is not a LoonFFIResult, so it gets the same exception with
 // the arrow error code the C layer uses for the same class of problem.
@@ -85,27 +57,6 @@ void ThrowArrow(JNIEnv* env, const arrow::Status& status) {
   }
 }
 
-class Utf8 {
- public:
-  Utf8(JNIEnv* env, jstring value) : env_(env), value_(value) {
-    chars_ =
-        value_ != nullptr ? env_->GetStringUTFChars(value_, nullptr) : nullptr;
-  }
-  ~Utf8() {
-    if (chars_ != nullptr) {
-      env_->ReleaseStringUTFChars(value_, chars_);
-    }
-  }
-  Utf8(const Utf8&) = delete;
-  Utf8& operator=(const Utf8&) = delete;
-
-  const char* c_str() const { return chars_; }
-
- private:
-  JNIEnv* env_;
-  jstring value_;
-  const char* chars_;
-};
 
 // Copies a Java String[] into owned std::strings plus a parallel array of
 // pointers, which is the shape every loon_* entry point takes.
@@ -228,9 +179,11 @@ Java_com_zilliz_milvus_jni_storage_StorageNative_columnGroupsCreate(
       env->GetLongArrayRegion(counts, 0, file_count, row_counts.data());
     }
 
-    // start_index/end_index are the file's row range within the column group,
-    // so they accumulate across the group's files.
-    int64_t start = 0;
+    // start_index/end_index are the file's OWN zero-based row range, not a
+    // cumulative offset within the group: the packed reader intersects them
+    // against each file's own row groups, so a cumulative second file gets an
+    // empty overlap and its rows vanish with no error. That is
+    // milvus-storage#657, and WriterRoundTripTest's multi-file case pins it.
     for (jsize f = 0; f < file_count; ++f) {
       auto element = static_cast<jstring>(env->GetObjectArrayElement(paths, f));
       const char* chars = env->GetStringUTFChars(element, nullptr);
@@ -240,13 +193,12 @@ Java_com_zilliz_milvus_jni_storage_StorageNative_columnGroupsCreate(
 
       LoonColumnGroupFile file{};
       file.path = holder->paths[g].back().c_str();
-      file.start_index = start;
-      file.end_index = start + static_cast<int64_t>(row_counts[f]);
+      file.start_index = 0;
+      file.end_index = static_cast<int64_t>(row_counts[f]);
       file.property_keys = nullptr;
       file.property_values = nullptr;
       file.num_properties = 0;
       holder->files[g].push_back(file);
-      start = file.end_index;
     }
 
     LoonColumnGroup& group = holder->groups[g];
@@ -289,67 +241,48 @@ Java_com_zilliz_milvus_jni_storage_StorageNative_readerNew(
   StringArray columns;
   if (!columns.Build(env, needed_columns)) return 0;
 
-  LoonProperties props{nullptr, 0};
-  bool props_created = false;
-  if (properties != nullptr) {
-    // The property bag is built by the same helper storage_native_jni.cpp uses;
-    // duplicated here rather than exported, because that file is deliberately
-    // free of Arrow C++ and a shared header would drag this one's includes in.
-    jclass map_class = env->GetObjectClass(properties);
-    jmethodID entry_set =
-        env->GetMethodID(map_class, "entrySet", "()Ljava/util/Set;");
-    jobject set = env->CallObjectMethod(properties, entry_set);
-    if (env->ExceptionCheck()) return 0;
-    jclass set_class = env->GetObjectClass(set);
-    jmethodID to_array =
-        env->GetMethodID(set_class, "toArray", "()[Ljava/lang/Object;");
-    auto entries =
-        static_cast<jobjectArray>(env->CallObjectMethod(set, to_array));
-    if (env->ExceptionCheck()) return 0;
-
-    jsize count = env->GetArrayLength(entries);
-    std::vector<std::string> keys;
-    std::vector<std::string> values;
-    keys.reserve(count);
-    values.reserve(count);
-    for (jsize i = 0; i < count; ++i) {
-      jobject entry = env->GetObjectArrayElement(entries, i);
-      jclass entry_class = env->GetObjectClass(entry);
-      jmethodID get_key =
-          env->GetMethodID(entry_class, "getKey", "()Ljava/lang/Object;");
-      jmethodID get_value =
-          env->GetMethodID(entry_class, "getValue", "()Ljava/lang/Object;");
-      auto key = static_cast<jstring>(env->CallObjectMethod(entry, get_key));
-      auto value = static_cast<jstring>(env->CallObjectMethod(entry, get_value));
-      const char* key_chars = env->GetStringUTFChars(key, nullptr);
-      const char* value_chars = env->GetStringUTFChars(value, nullptr);
-      keys.emplace_back(key_chars != nullptr ? key_chars : "");
-      values.emplace_back(value_chars != nullptr ? value_chars : "");
-      if (key_chars != nullptr) env->ReleaseStringUTFChars(key, key_chars);
-      if (value_chars != nullptr) env->ReleaseStringUTFChars(value, value_chars);
-      env->DeleteLocalRef(entry);
-    }
-    std::vector<const char*> key_ptrs;
-    std::vector<const char*> value_ptrs;
-    for (size_t i = 0; i < keys.size(); ++i) {
-      key_ptrs.push_back(keys[i].c_str());
-      value_ptrs.push_back(values[i].c_str());
-    }
-    if (!Check(env, loon_properties_create(key_ptrs.data(), value_ptrs.data(),
-                                           key_ptrs.size(), &props))) {
-      return 0;
-    }
-    props_created = true;
-  }
+  Properties props;
+  if (!props.Build(env, properties)) return 0;
 
   LoonReaderHandle reader = 0;
-  bool ok = Check(env, loon_reader_new(
-                           &holder->value,
-                           reinterpret_cast<struct ArrowSchema*>(arrow_schema_address),
-                           columns.data(), columns.size(),
-                           props_created ? &props : nullptr, &reader));
-  if (props_created) loon_properties_free(&props);
-  return ok ? static_cast<jlong>(reader) : 0;
+  if (!Check(env, loon_reader_new(
+                      &holder->value,
+                      reinterpret_cast<struct ArrowSchema*>(arrow_schema_address),
+                      columns.data(), columns.size(), props.get(), &reader))) {
+    return 0;
+  }
+  return static_cast<jlong>(reader);
+}
+
+// Opens a reader over column groups the C layer allocated, which is what a
+// manifest read and a writer close hand back. Same as readerNew otherwise.
+JNIEXPORT jlong JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_readerNewNative(
+    JNIEnv* env,
+    jclass,
+    jlong native_column_groups,
+    jlong arrow_schema_address,
+    jobjectArray needed_columns,
+    jobject properties) {
+  auto* groups = reinterpret_cast<LoonColumnGroups*>(native_column_groups);
+  if (groups == nullptr || arrow_schema_address == 0) {
+    ThrowArrow(env, arrow::Status::Invalid(
+                        "column groups and arrow schema must not be null"));
+    return 0;
+  }
+  StringArray columns;
+  if (!columns.Build(env, needed_columns)) return 0;
+  Properties props;
+  if (!props.Build(env, properties)) return 0;
+
+  LoonReaderHandle reader = 0;
+  if (!Check(env, loon_reader_new(
+                      groups,
+                      reinterpret_cast<struct ArrowSchema*>(arrow_schema_address),
+                      columns.data(), columns.size(), props.get(), &reader))) {
+    return 0;
+  }
+  return static_cast<jlong>(reader);
 }
 
 JNIEXPORT void JNICALL

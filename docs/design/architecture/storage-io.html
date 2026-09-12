@@ -243,8 +243,10 @@ Spark 的 <code>ColumnarBatch</code> 没有表达行有效性的成员(3.5.5 与
 <table>
 <tr><th></th><th>状态</th></tr>
 <tr><td>交字节的面</td><td>已经到位。<code>NativeObjectStore</code> 走我们自己的 JNI(<code>native-storage</code>),driver 侧四类元数据读取全部经过它,<code>core.io.hadoop</code> 已删除</td></tr>
-<tr><td>交地址的面</td><td><code>native-storage</code> 已经封完读写两侧的 C 入口,真实数据验过(读 UAT 段 682000 行;写一个段再读回,值逐行对上)。第 3 层还没切——两个 <code>PartitionReader</code> 与两个 writer 仍然 <code>import io.milvus.storage</code></td></tr>
+<tr><td>交地址的面</td><td>已经到位。两个 <code>PartitionReader</code> 与两个 writer 都走 <code>native-storage</code> 的 JNI,上游 Java 绑定已从构建中移除,3.5 线的 Scala 2.12 因此解锁</td></tr>
 </table>
 
-<p>下一步是把交地址这一面的 C 入口一次封完,读写一起——两侧共用凭证、加载器和上面 2.1、2.2 那套结构体代码,
-分两次做等于写两遍。封完之后上游绑定才删得掉,<code>legacyJni</code> 那四处、Scala 2.12 出不了产物这些才跟着解决。</p>
+<p>两个面都走我们自己的 JNI 之后,上游绑定不再进构建:<code>legacyJni</code> 四处全摘,
+<code>project/Modules.scala</code> 里那个设置也删了,3.5 线在 Scala 2.12 上编得过。
+剩下的欠债是 2.5 那个过渡实现,结束条件是上游导出
+<code>loon_record_batch_reader_*</code>。</p>
