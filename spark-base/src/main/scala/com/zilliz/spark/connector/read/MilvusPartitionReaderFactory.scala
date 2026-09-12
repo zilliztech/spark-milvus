@@ -12,6 +12,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
+import com.zilliz.milvus.storage.read.plan.DeleteSource
 import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -68,7 +69,7 @@ class MilvusPartitionReaderFactory(
     partition match {
       case p: MilvusStorageV3InputPartition =>
         logInfo(
-          s"Creating V3 reader for partition with segmentID=${p.segmentID}"
+          s"Creating V3 reader for partition with segmentID=${p.spec.segmentId}"
         )
 
         val v2Schema = StructType(schema.fields.filterNot { field =>
@@ -76,12 +77,12 @@ class MilvusPartitionReaderFactory(
         })
 
         // Deserialize the protobuf schema
-        val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
+        val milvusSchema = CollectionSchema.parseFrom(p.spec.schemaBytes)
 
         // Create MilvusLoonPartitionReader directly
         val underlyingReader = new MilvusLoonPartitionReader(
           v2Schema,
-          p.manifestPath,
+          p.spec,
           milvusSchema,
           p.milvusOption,
           optionsMap,
@@ -89,10 +90,7 @@ class MilvusPartitionReaderFactory(
           p.queryVector,
           p.metricType,
           p.vectorColumn,
-          pushedFilters,
-          p.readVersion,
-          p.applyDeletes,
-          p.deletePlan
+          pushedFilters
         )
 
         val hasMetadataExtraFields = schema.fieldNames.exists { name =>
@@ -114,7 +112,7 @@ class MilvusPartitionReaderFactory(
                     resultValues(writeIdx) =
                       MilvusPartitionReaderFactory.stringValue(p.partitionName)
                   case MilvusOption.MilvusExtraColumnSegmentID =>
-                    resultValues(writeIdx) = p.segmentID
+                    resultValues(writeIdx) = p.spec.segmentId
                   case MilvusOption.MilvusExtraColumnRowOffset =>
                     resultValues(writeIdx) =
                       underlyingReader.lastReturnedRowOffset
@@ -135,15 +133,15 @@ class MilvusPartitionReaderFactory(
 
       case p: MilvusPackedV2InputPartition =>
         logInfo(
-          s"Creating packed-V2 reader for segmentID=${p.segmentID} " +
-            s"with ${p.columnGroups.size} column group(s)"
+          s"Creating packed-V2 reader for segmentID=${p.spec.segmentId} " +
+            s"with ${p.spec.dataFiles.size} data file(s)"
         )
 
         val innerSchema = StructType(schema.fields.filterNot { field =>
           isMetadataExtraField(field.name)
         })
 
-        val milvusSchema = CollectionSchema.parseFrom(p.milvusSchemaBytes)
+        val milvusSchema = CollectionSchema.parseFrom(p.spec.schemaBytes)
 
         val inheritedDeletePlan = p.inheritedDeletePlanPartitionId
           .map(partitionId =>
@@ -153,17 +151,21 @@ class MilvusPartitionReaderFactory(
             )
           )
           .getOrElse(MilvusDeletePlan.empty)
+        // The inherited plan is only resolvable here, where the executor-side
+        // context is, so the spec is finished off rather than rebuilt.
         val effectiveDeletePlan =
-          MilvusDeletePlan.union(inheritedDeletePlan, p.deletePlan)
+          MilvusDeletePlan.union(inheritedDeletePlan, p.spec.deletePlan)
+        val effectiveSpec = p.spec.copy(
+          deletes =
+            if (effectiveDeletePlan.isEmpty) DeleteSource.None
+            else DeleteSource.Materialized(effectiveDeletePlan)
+        )
 
         val underlying = new MilvusPackedV2PartitionReader(
           innerSchema,
-          p.columnGroups,
+          effectiveSpec,
           milvusSchema,
-          p.milvusOption,
-          p.neededColumnFieldIds,
-          p.applyDeletes,
-          effectiveDeletePlan
+          p.milvusOption
         )
 
         val hasMetadataExtraFields = schema.fieldNames.exists { name =>
@@ -183,10 +185,10 @@ class MilvusPartitionReaderFactory(
                 field.name match {
                   case MilvusOption.MilvusExtraColumnPartition =>
                     out(writeIdx) = MilvusPartitionReaderFactory.stringValue(
-                      p.partitionID.toString
+                      p.spec.partitionId.toString
                     )
                   case MilvusOption.MilvusExtraColumnSegmentID =>
-                    out(writeIdx) = p.segmentID
+                    out(writeIdx) = p.spec.segmentId
                   case MilvusOption.MilvusExtraColumnRowOffset =>
                     out(writeIdx) = underlying.lastReturnedRowOffset
                   case _ =>

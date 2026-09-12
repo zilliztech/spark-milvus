@@ -21,8 +21,8 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.milvus.jni.storage.StorageNative
-import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
+import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.serde.{ArrowAllocator, ArrowConverter}
 import com.zilliz.spark.connector.MilvusOption
@@ -188,14 +188,25 @@ object MilvusPackedV2PartitionReader {
 
 class MilvusPackedV2PartitionReader(
     schema: StructType,
-    columnGroups: Seq[V2ColumnGroup],
+    spec: InputSpec,
     milvusSchema: CollectionSchema,
-    milvusOption: MilvusOption,
-    neededColumnFieldIds: Seq[Long],
-    applyDeletes: Boolean,
-    deletePlan: MilvusDeletePlan
+    milvusOption: MilvusOption
 ) extends PartitionReader[InternalRow]
     with Logging {
+
+  // Everything storage-facing comes out of the spec the driver built. Parsing
+  // and validating the fs.* map happened there, once, rather than here per
+  // task.
+  private val columnGroups: Seq[V2ColumnGroup] = spec.layout match {
+    case SegmentLayout.ColumnGroups(groups) => groups
+    case other =>
+      throw new IllegalArgumentException(
+        s"packed-V2 reader needs a materialized column group layout, got $other"
+      )
+  }
+  private val neededColumnFieldIds: Seq[Long] = spec.neededFieldIds
+  private val applyDeletes: Boolean = spec.appliesDeletes
+  private val deletePlan: MilvusDeletePlan = spec.deletePlan
 
   private val allocator = ArrowAllocator.get
   private val sourceSchema = schema
@@ -258,7 +269,7 @@ class MilvusPackedV2PartitionReader(
       columnGroupsPtr,
       arrowSchemaObj.memoryAddress(),
       neededColumns,
-      StorageProperties.from(milvusOption.options).asJava
+      spec.properties.asJava
     )
     if (readerHandle == 0L) {
       throw new IllegalStateException(

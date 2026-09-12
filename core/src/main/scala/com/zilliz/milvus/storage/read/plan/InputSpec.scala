@@ -44,15 +44,32 @@ object SegmentLayout {
   * one; moving over is then a change of what the planner emits, not a change to
   * this type.
   */
-sealed trait DeleteSource extends Serializable
+sealed trait DeleteSource extends Serializable {
+
+  /** The plan to apply, for a reader that evaluates deletes itself rather than
+    * reading the delta logs.
+    *
+    * [[DeleteSource.Files]] throws here on purpose. Answering with an empty
+    * plan would let a reader that cannot read delta logs return deleted rows
+    * with no exception and no warning, which is the failure the delete path
+    * already had once.
+    */
+  def materializedPlan: MilvusDeletePlan
+}
 
 object DeleteSource {
 
-  /** Deletes are off for this read (`milvus.read.apply.deletes=false`). */
-  case object None extends DeleteSource
+  /** Deletes are off for this read (`milvus.read.apply.deletes=false`), or
+    * nothing was deleted from this segment.
+    */
+  case object None extends DeleteSource {
+    override def materializedPlan: MilvusDeletePlan = MilvusDeletePlan.empty
+  }
 
   /** The plan the driver already built. */
-  final case class Materialized(plan: MilvusDeletePlan) extends DeleteSource
+  final case class Materialized(plan: MilvusDeletePlan) extends DeleteSource {
+    override def materializedPlan: MilvusDeletePlan = plan
+  }
 
   /** Delta logs to read on the executor. `entryCounts` is parallel to `paths`
     * and lets a reader size its bitset before opening anything.
@@ -63,6 +80,12 @@ object DeleteSource {
       paths.size == entryCounts.size,
       s"${paths.size} delta log paths but ${entryCounts.size} entry counts"
     )
+
+    override def materializedPlan: MilvusDeletePlan =
+      throw new UnsupportedOperationException(
+        s"these ${paths.size} delta log(s) have not been read; a reader that " +
+          "cannot read them itself needs a materialized plan from the planner"
+      )
   }
 }
 
@@ -101,6 +124,19 @@ final case class InputSpec(
     case DeleteSource.None               => false
     case DeleteSource.Materialized(plan) => !plan.isEmpty
     case DeleteSource.Files(paths, _)    => paths.nonEmpty
+  }
+
+  /** The delete plan this partition applies. Shorthand for
+    * `deletes.materializedPlan`, which is what every reader needs today.
+    */
+  def deletePlan: MilvusDeletePlan = deletes.materializedPlan
+
+  /** The manifest version this partition was pinned to, or -1 when the layout
+    * names none (a column-group layout has no manifest at all).
+    */
+  def readVersionOrLatest: Long = layout match {
+    case SegmentLayout.Manifest(_, version) => version
+    case SegmentLayout.ColumnGroups(_)      => -1L
   }
 
   /** Every data file this partition will open, for logging and for the plan's

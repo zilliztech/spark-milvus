@@ -52,8 +52,14 @@ import org.apache.spark.sql.SparkSession
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusCollectionInfo}
 import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
 import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.MilvusDeltaLogReader
 import com.zilliz.milvus.storage.manifest.MilvusStorageV3ManifestReader
+import com.zilliz.milvus.storage.read.plan.{
+  DeleteSource,
+  InputSpec,
+  SegmentLayout
+}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.{
@@ -2077,16 +2083,23 @@ class MilvusScan(
       val segmentIDLong =
         try { segmentID.toLong }
         catch { case _: NumberFormatException => -1L }
+      val partitionIdLong =
+        try { partitionID.toLong }
+        catch { case _: NumberFormatException => Long.MinValue }
       MilvusStorageV3InputPartition(
-        segmentPath,
-        collectionInfo.schema.toByteArray,
+        InputSpec(
+          segmentId = segmentIDLong,
+          partitionId = partitionIdLong,
+          layout = SegmentLayout.Manifest(segmentPath),
+          schemaBytes = collectionInfo.schema.toByteArray,
+          properties = StorageProperties.from(milvusOption.options)
+        ),
         partitionID,
         milvusOption,
         vectorSearchConfig.map(_.topK),
         vectorSearchConfig.map(_.queryVector),
         vectorSearchConfig.map(_.metricType),
-        vectorSearchConfig.map(_.vectorColumn),
-        segmentIDLong
+        vectorSearchConfig.map(_.vectorColumn)
       )
     }
 
@@ -2368,6 +2381,18 @@ class MilvusScan(
       )
       .getOrElse(milvusOption)
 
+    // Parsed once for the whole plan rather than per partition: a bad storage
+    // configuration should fail planning, not every task.
+    val storageProperties = StorageProperties.from(milvusOption.options)
+    val canonicalStorageProperties =
+      StorageProperties.from(canonicalMilvusOption.options)
+    val applyDeletes = MilvusOption.readApplyDeletes(options)
+    def deleteSourceFor(
+        plan: com.zilliz.milvus.storage.delete.MilvusDeletePlan
+    ): DeleteSource =
+      if (!applyDeletes || plan.isEmpty) DeleteSource.None
+      else DeleteSource.Materialized(plan)
+
     val v3Partitions = manifestList.map { item =>
       val (basePath, parsedReadVersion) =
         MilvusSnapshotReader.parseManifestContent(item.manifest) match {
@@ -2407,22 +2432,25 @@ class MilvusScan(
         segmentID,
         com.zilliz.milvus.storage.delete.MilvusDeletePlan.empty
       )
+      val deletePlan = com.zilliz.milvus.storage.delete.MilvusDeletePlan.union(
+        inheritedDeletePlan,
+        ownDeletePlan
+      )
       MilvusStorageV3InputPartition(
-        basePath,
-        schemaBytes,
+        InputSpec(
+          segmentId = segmentID,
+          partitionId = partitionIdLong,
+          layout = SegmentLayout.Manifest(basePath, readVersion),
+          schemaBytes = schemaBytes,
+          properties = storageProperties,
+          deletes = deleteSourceFor(deletePlan)
+        ),
         partitionId,
         milvusOption,
         vectorSearchConfig.map(_.topK),
         vectorSearchConfig.map(_.queryVector),
         vectorSearchConfig.map(_.metricType),
-        vectorSearchConfig.map(_.vectorColumn),
-        segmentID,
-        readVersion,
-        applyDeletes = MilvusOption.readApplyDeletes(options),
-        deletePlan = com.zilliz.milvus.storage.delete.MilvusDeletePlan.union(
-          inheritedDeletePlan,
-          ownDeletePlan
-        )
+        vectorSearchConfig.map(_.vectorColumn)
       ): InputPartition
     }
 
@@ -2472,14 +2500,15 @@ class MilvusScan(
             ownDeletePlan
           )
         MilvusPackedV2InputPartition(
-          segmentID = seg.segmentId,
-          partitionID = seg.partitionId,
-          columnGroups = seg.columnGroups,
-          milvusSchemaBytes = schemaBytes,
-          milvusOption = canonicalMilvusOption,
-          neededColumnFieldIds = Seq.empty,
-          applyDeletes = MilvusOption.readApplyDeletes(options),
-          deletePlan = deletePlan,
+          InputSpec(
+            segmentId = seg.segmentId,
+            partitionId = seg.partitionId,
+            layout = SegmentLayout.ColumnGroups(seg.columnGroups),
+            schemaBytes = schemaBytes,
+            properties = canonicalStorageProperties,
+            deletes = deleteSourceFor(deletePlan)
+          ),
+          canonicalMilvusOption,
           inheritedDeletePlanPartitionId =
             if (inlineInheritedDeletePlans) None
             else

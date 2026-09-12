@@ -27,8 +27,8 @@ import org.apache.spark.sql.types.{
 
 import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.codec.FloatConverter
-import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
+import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.serde.{ArrowAllocator, ArrowConverter}
@@ -128,7 +128,7 @@ object MilvusLoonPartitionReader {
 // for Milvus 2.6+ version data source and milvus lake data
 class MilvusLoonPartitionReader(
     schema: StructType,
-    manifestPath: String, // Path to manifest in S3/MinIO
+    spec: InputSpec,
     milvusSchema: CollectionSchema,
     milvusOption: MilvusOption,
     optionsMap: Map[String, String],
@@ -136,15 +136,24 @@ class MilvusLoonPartitionReader(
     queryVector: Option[Array[Float]] = None,
     metricType: Option[String] = None,
     vectorColumn: Option[String] = None,
-    pushedFilters: Array[Filter] = Array.empty[Filter],
-    readVersion: Long =
-      -1L, // -1 = LATEST, >0 = specific manifest version from snapshot
-    applyDeletes: Boolean = true,
-    deletePlan: MilvusDeletePlan = MilvusDeletePlan.empty
+    pushedFilters: Array[Filter] = Array.empty[Filter]
 ) extends PartitionReader[InternalRow]
     with Logging {
 
   // Load native library
+
+  // Everything storage-facing comes out of the spec the driver built: the
+  // manifest location, the version pinned at planning time, the validated fs.*
+  // map, and the deletes.
+  private val (manifestPath: String, readVersion: Long) = spec.layout match {
+    case SegmentLayout.Manifest(basePath, version) => (basePath, version)
+    case other =>
+      throw new IllegalArgumentException(
+        s"loon reader needs a manifest layout, got $other"
+      )
+  }
+  private val applyDeletes: Boolean = spec.appliesDeletes
+  private val deletePlan: MilvusDeletePlan = spec.deletePlan
 
   private val allocator = ArrowAllocator.get
 
@@ -200,7 +209,7 @@ class MilvusLoonPartitionReader(
     arrowSchemaObj = schemaObj
     arrowSchemaPtr = schemaPtr
 
-    readerProperties = StorageProperties.from(milvusOption.options).asJava
+    readerProperties = spec.properties.asJava
 
     // Column groups from the manifest: a named version if one was planned,
     // otherwise the latest.

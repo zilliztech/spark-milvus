@@ -242,7 +242,13 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 driver 把主键 map 序列化进每个分区,也是 README 第 1 节列的 1.x 代价之一;
 <code>Files</code> 只给 delta log 路径、读留给 executor,是要去的方向。
 两个 case 都在,迁移就是换 planner 产出哪一种,不用改这个类型。
-spark 层的两个 <code>InputPartition</code> 改成携带它,是下一步。</li>
+spark 层的两个 <code>InputPartition</code> 已经改成携带它:
+<code>MilvusStorageV3InputPartition</code> 从 12 个字段降到 7 个,
+<code>MilvusPackedV2InputPartition</code> 从 9 个降到 3 个,
+留在分区上的只有 spark 侧与向量检索特有的那些。
+<strong>随之有一个产品可见的行为变化</strong>:
+<code>StorageProperties.from</code> 从每个 task 的 reader 构造里移到规划期跑一次,
+所以存储配置不全的读现在在规划期就失败,不再是每个 task 各失败一次。</li>
 
 <li><strong>写 <code>core.read.exec</code> 的 <code>SegmentReader</code> 与注册表。</strong>
 取代 <code>MilvusPartitionReaderFactory.createReader</code> 里按
