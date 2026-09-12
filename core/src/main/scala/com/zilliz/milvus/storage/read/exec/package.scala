@@ -1,9 +1,23 @@
 package com.zilliz.milvus.storage.read
 
-/** Batch reading, taking columns by row number, and the read outlet. This is
-  * where core calls into the native layer.
+/** Batch reading. The only place in core that opens a native handle.
   *
-  * Main types: SegmentReader, SegmentReaderRegistry, ColumnBatch, Take.
-  * Capabilities: R3, R4, R14, R17, G3 (see docs/design/capabilities.md).
+  * `SegmentReader` hands over one Arrow `VectorSchemaRoot` at a time and
+  * `SegmentReaderRegistry` opens the right one for a segment's layout, so the
+  * two layouts have one entry point instead of a branch per call site. The
+  * three ownership rules — a handle never crosses serialization, a constructor
+  * that throws releases what it took, `close()` is idempotent — are kept by
+  * `NativeSegmentReader` and explained in
+  * docs/design/architecture/storage-io.html section 3.
+  *
+  * `ColumnBatch` and `take` are not here yet. Decision 12 settled that the
+  * columnar outlet is worth building and decision 6 settled how vector columns
+  * are typed, but the Spark-facing half of that is a Spark type and belongs in
+  * layer 3; what crosses into core is still a `VectorSchemaRoot`.
+  *
+  * Main types: SegmentReader, SegmentReaderRegistry. Capabilities: R3, R4, R14,
+  * R17, G3 (see docs/design/capabilities.md). R4 and R17 name the columnar
+  * outlet and G3 the off-heap budget; the batch pull they both sit on is what
+  * exists today. Design: docs/design/architecture/read.html section 5.2.
   */
 package object exec

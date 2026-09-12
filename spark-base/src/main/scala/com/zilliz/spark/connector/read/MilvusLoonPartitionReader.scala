@@ -25,11 +25,15 @@ import org.apache.spark.sql.types.{
   StructType
 }
 
-import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
+import com.zilliz.milvus.storage.read.exec.{
+  SegmentReader,
+  SegmentReaderRegistry
+}
 import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
 import com.zilliz.milvus.storage.schema.FieldMetadata
+import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.serde.{ArrowAllocator, ArrowConverter}
 import com.zilliz.spark.connector.MilvusOption
@@ -176,79 +180,27 @@ class MilvusLoonPartitionReader(
   // Spark only calls close() on a fully-constructed reader, so any throw
   // from the init block below has to release its own resources before
   // bubbling out.
-  private var arrowSchemaObj: ArrowSchema = null
-  private var arrowSchemaPtr: Long = 0L
-  private var readerProperties: java.util.Map[String, String] = null
-  // The manifest owns the column groups it hands out, so both are kept: one to
-  // pass to the reader, one to release. The code this replaces never released
-  // the manifest, leaking one per partition.
-  private var manifestHandle: Long = 0L
-  private var columnGroupsPtr: Long = 0L
-  private var readerHandle: Long = 0L
-  // Per-batch record batch reader handle (see milvus-storage
-  // loon_record_batch_reader_*). We deliberately avoid the ArrowArrayStream
-  // path because Arrow Java's `ArrowReader.loadNextBatch` shares one
-  // VectorSchemaRoot across batches and ignores the ArrowArray `offset`
-  // field — when the underlying C++ reader emits `RecordBatch::Slice`
-  // results, every batch after the first would show the same data.
-  //
-  // `var` + sentinel 0L so close() can null it out and stay idempotent
-  // (Spark may call close() more than once on error paths).
-  private var rbrHandle: Long = 0L
-
+  private var segmentReader: SegmentReader = null
   private var _currentBatch: VectorSchemaRoot = null
   private var _currentRowIndex: Int = 0
   private var _currentBatchStartRowOffset: Long = 0L
   private var _lastReturnedRowOffset: Long = -1L
 
+  /** Row offset of the row `get()` last returned, for the row-offset metadata
+    * column. -1 before the first row.
+    */
   def lastReturnedRowOffset: Long = _lastReturnedRowOffset
 
   try {
-    // Create Arrow schema from Milvus schema.
-    val (schemaObj, schemaPtr) = createArrowSchema()
-    arrowSchemaObj = schemaObj
-    arrowSchemaPtr = schemaPtr
-
-    readerProperties = spec.properties.asJava
-
-    // Column groups from the manifest: a named version if one was planned,
-    // otherwise the latest.
-    if (readVersion > 0) {
-      logInfo(
-        s"Reading manifest at version $readVersion for path: $manifestPath"
-      )
-    }
-    val manifest =
-      StorageNative.manifestOpen(
-        manifestPath,
-        readerProperties,
-        if (readVersion > 0) readVersion else -1L
-      )
-    manifestHandle = manifest(0)
-    columnGroupsPtr = manifest(1)
-    if (manifest(2) == 0L) {
-      throw new IllegalStateException(
-        s"No manifest file found at path: $manifestPath. " +
-          "The milvus-storage format manifest files do not exist. " +
-          "Please turn on useLoonFFI and compact the data before reading through Spark connector."
-      )
-    }
-
-    readerHandle = StorageNative.readerNewNative(
-      columnGroupsPtr,
-      arrowSchemaPtr,
-      columnNames,
-      readerProperties
+    // Columns are matched by field id on this line, so the schema carries ids
+    // as names and so does the resolver.
+    segmentReader = SegmentReaderRegistry.open(
+      spec,
+      SchemaMapper.convertToArrowSchemaWithFieldIdNames(milvusSchema),
+      columnNames.toSeq,
+      id => Some(id.toString),
+      allocator
     )
-    if (readerHandle == 0L) {
-      throw new IllegalStateException(
-        s"Failed to open the native reader for path: $manifestPath."
-      )
-    }
-
-    // Open the per-batch RecordBatchReader and eagerly load the first
-    // batch so empty segments short-circuit upfront.
-    rbrHandle = StorageNative.recordBatchReaderNew(readerHandle, null)
     _currentBatch = pullNextBatch()
   } catch {
     case e: Throwable =>
@@ -257,23 +209,8 @@ class MilvusLoonPartitionReader(
   }
 
   // Pull the next batch as a freshly-owned VectorSchemaRoot, or null on EOF.
-  private def pullNextBatch(): VectorSchemaRoot = {
-    if (rbrHandle == 0L) return null
-    val arr = ArrowArray.allocateNew(allocator)
-    val sch = ArrowSchema.allocateNew(allocator)
-    try {
-      val hasBatch = StorageNative.recordBatchReaderReadNext(
-        rbrHandle,
-        arr.memoryAddress(),
-        sch.memoryAddress()
-      )
-      if (!hasBatch) null
-      else Data.importVectorSchemaRoot(allocator, arr, sch, null)
-    } finally {
-      arr.close()
-      sch.close()
-    }
-  }
+  private def pullNextBatch(): VectorSchemaRoot =
+    if (segmentReader == null) null else segmentReader.next().orNull
 
   // Vector search state
   private val vectorSearchEnabled = topK.isDefined && queryVector.isDefined
@@ -414,31 +351,11 @@ class MilvusLoonPartitionReader(
       catch { case e: Throwable => logWarning("close currentBatch failed", e) }
       _currentBatch = null
     }
-    if (rbrHandle != 0L) {
-      try StorageNative.recordBatchReaderDestroy(rbrHandle)
-      catch { case e: Throwable => logWarning("destroy rbrHandle failed", e) }
-      rbrHandle = 0L
+    if (segmentReader != null) {
+      try segmentReader.close()
+      catch { case e: Throwable => logWarning("close segmentReader failed", e) }
+      segmentReader = null
     }
-    if (readerHandle != 0L) {
-      try StorageNative.readerDestroySegment(readerHandle)
-      catch { case e: Throwable => logWarning("destroy reader failed", e) }
-      readerHandle = 0L
-    }
-    if (manifestHandle != 0L) {
-      try StorageNative.manifestDestroy(manifestHandle)
-      catch { case e: Throwable => logWarning("destroy manifest failed", e) }
-      manifestHandle = 0L
-      columnGroupsPtr = 0L
-    }
-    if (arrowSchemaObj != null) {
-      try arrowSchemaObj.close()
-      catch {
-        case e: Throwable => logWarning("close arrowSchemaObj failed", e)
-      }
-      arrowSchemaObj = null
-      arrowSchemaPtr = 0L
-    }
-    readerProperties = null
   }
 
   private def createArrowSchema(): (ArrowSchema, Long) = {

@@ -250,10 +250,14 @@ spark 层的两个 <code>InputPartition</code> 已经改成携带它:
 <code>StorageProperties.from</code> 从每个 task 的 reader 构造里移到规划期跑一次,
 所以存储配置不全的读现在在规划期就失败,不再是每个 task 各失败一次。</li>
 
-<li><strong>写 <code>core.read.exec</code> 的 <code>SegmentReader</code> 与注册表。</strong>
-取代 <code>MilvusPartitionReaderFactory.createReader</code> 里按
-<code>InputPartition</code> 类型的两个分支。V2 packed 的实现放
-<code>compat.v2packed</code>,启动时注册进来。</li>
+<li><s>写 <code>core.read.exec</code> 的 <code>SegmentReader</code> 与注册表。</s>已完成。
+开原生 reader、逐批取 Arrow、按序释放句柄这一整套从两个 spark reader 的构造块搬进 core,
+两处各写一遍变成一处;registry 按 <code>SegmentLayout</code> 分发。
+列名解析做成 <code>columnNameFor: Long =&gt; Option[String]</code> 参数而不是内聚进去——
+manifest 按字段 id 匹配列、schema 里字段名就是 id,列组布局用字段自己的名字,
+这不是 core 能替调用方决定的。<code>ColumnBatch</code> 与 <code>take</code> 仍不写:
+列式出口的 Spark 那一半是 Spark 类型,归第 3 层,进 core 的仍是
+<code>VectorSchemaRoot</code>。</li>
 
 <li><strong>列式出口。</strong>决策 12 定了做,决策 6 定了向量列默认转、
 另给 <code>milvus.read.vector.raw</code> 出原始字节。要新写

@@ -11,6 +11,12 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.jni.storage.StorageNative
+import com.zilliz.milvus.storage.read.exec.{
+  SegmentReader,
+  SegmentReaderRegistry
+}
+import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
+import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 
 /** Writes a segment through our JNI and reads it back through our JNI.
   *
@@ -98,12 +104,9 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     // each take ownership of the struct they are given, so handing the same one
     // to both fails with "Cannot import released ArrowSchema".
     var writeSchema: ArrowSchema = null
-    var readSchema: ArrowSchema = null
     var writer = 0L
     var written = 0L
-    var readColumnGroups = 0L
-    var reader = 0L
-    var batchReader = 0L
+    var segmentReader: SegmentReader = null
 
     try {
       writeSchema = ArrowSchema.allocateNew(allocator)
@@ -151,73 +154,64 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       )
       counts.map(_.sum).sum shouldBe rows.toLong
 
-      // --- read back ---
-      readColumnGroups = StorageNative.columnGroupsCreate(
-        columns.map(_.toArray).toArray,
-        files.map(_.toArray).toArray,
-        counts.toArray,
-        "parquet"
+      // --- read back, through the registry the Spark readers use ---
+      val spec = InputSpec(
+        segmentId = 1L,
+        partitionId = 1L,
+        layout = SegmentLayout.ColumnGroups(
+          Seq(
+            V2ColumnGroup(
+              fieldIds = Seq(0L, 1L),
+              filePaths = files.head.toSeq,
+              fileRowCounts = counts.head.toSeq
+            )
+          )
+        ),
+        schemaBytes = Array.emptyByteArray,
+        properties = Map(
+          "fs.storage_type" -> "local",
+          "fs.root_path" -> dir.toAbsolutePath.toString
+        )
       )
-      readColumnGroups should not be 0L
-
-      readSchema = ArrowSchema.allocateNew(allocator)
-      Data.exportSchema(allocator, schema, null, readSchema)
-      reader = StorageNative.readerNew(
-        readColumnGroups,
-        readSchema.memoryAddress(),
-        Array("id", "name"),
-        properties
+      // Field ids 0 and 1 stand for the two columns, in schema order.
+      val nameFor = Map(0L -> "id", 1L -> "name")
+      segmentReader = SegmentReaderRegistry.open(
+        spec,
+        schema,
+        Seq("id", "name"),
+        nameFor.get,
+        allocator
       )
-      reader should not be 0L
-      batchReader = StorageNative.recordBatchReaderNew(reader, null)
-      batchReader should not be 0L
 
       var seen = 0
       var batches = 0
-      var more = true
-      while (more) {
-        val array = ArrowArray.allocateNew(allocator)
-        val batchSchema = ArrowSchema.allocateNew(allocator)
+      var batch = segmentReader.next()
+      while (batch.isDefined) {
+        val root = batch.get
         try {
-          more = StorageNative.recordBatchReaderReadNext(
-            batchReader,
-            array.memoryAddress(),
-            batchSchema.memoryAddress()
-          )
-          if (more) {
-            val root =
-              Data.importVectorSchemaRoot(allocator, array, batchSchema, null)
-            try {
-              batches += 1
-              val id = root.getVector("id").asInstanceOf[BigIntVector]
-              val name = root.getVector("name").asInstanceOf[VarCharVector]
-              var i = 0
-              while (i < root.getRowCount) {
-                id.get(i) shouldBe seen.toLong * 7
-                new String(name.get(i), "UTF-8") shouldBe s"row-$seen"
-                seen += 1
-                i += 1
-              }
-            } finally root.close()
+          batches += 1
+          val id = root.getVector("id").asInstanceOf[BigIntVector]
+          val name = root.getVector("name").asInstanceOf[VarCharVector]
+          var i = 0
+          while (i < root.getRowCount) {
+            id.get(i) shouldBe seen.toLong * 7
+            new String(name.get(i), "UTF-8") shouldBe s"row-$seen"
+            seen += 1
+            i += 1
           }
-        } finally {
-          array.close()
-          batchSchema.close()
-        }
+        } finally root.close()
+        batch = segmentReader.next()
       }
 
+      segmentReader.deliveredRows shouldBe rows.toLong
       seen shouldBe rows
       // Three batches at the 8192 default: 8192, 8192, 4096. More than one is
       // what makes this a slice regression rather than a single-batch read.
       batches should be >= 3
     } finally {
-      if (batchReader != 0L) StorageNative.recordBatchReaderDestroy(batchReader)
-      if (reader != 0L) StorageNative.readerDestroySegment(reader)
-      if (readColumnGroups != 0L)
-        StorageNative.columnGroupsDestroy(readColumnGroups)
+      if (segmentReader != null) segmentReader.close()
       if (written != 0L) StorageNative.nativeColumnGroupsDestroy(written)
       if (writer != 0L) StorageNative.writerDestroy(writer)
-      if (readSchema != null) readSchema.close()
       if (writeSchema != null) writeSchema.close()
       allocator.close()
       Files

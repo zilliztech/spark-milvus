@@ -20,9 +20,13 @@ import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.unsafe.types.UTF8String
 
-import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
+import com.zilliz.milvus.storage.read.exec.{
+  SegmentReader,
+  SegmentReaderRegistry
+}
 import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
+import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.serde.{ArrowAllocator, ArrowConverter}
 import com.zilliz.spark.connector.MilvusOption
@@ -236,48 +240,17 @@ class MilvusPackedV2PartitionReader(
   private val pkColumnName =
     fieldMappings.fieldIdToName.getOrElse(pkField.fieldID, pkField.name)
 
-  private var arrowSchemaObj: ArrowSchema = null
-  private var columnGroupsPtr: Long = 0L
-  private var readerHandle: Long = 0L
-  private var rbrHandle: Long = 0L
+  private var segmentReader: SegmentReader = null
   private var dictProvider: CDataDictionaryProvider = null
 
   try {
-    val arrowSchema =
-      com.zilliz.milvus.storage.schema.SchemaMapper.convertToArrowSchema(
-        milvusSchema
-      )
-    arrowSchemaObj = ArrowSchema.allocateNew(allocator)
-    Data.exportSchema(allocator, arrowSchema, null, arrowSchemaObj)
-
-    val cols = columnGroups.map { cg =>
-      cg.fieldIds.flatMap(fieldMappings.fieldIdToName.get).toArray
-    }.toArray
-    val files = columnGroups.map(_.filePaths.toArray).toArray
-    val rowCounts = columnGroups.map { cg =>
-      require(
-        cg.fileRowCounts.size == cg.filePaths.size,
-        s"V2ColumnGroup with fields=${cg.fieldIds} has ${cg.filePaths.size} files " +
-          s"but ${cg.fileRowCounts.size} row counts; both must match"
-      )
-      cg.fileRowCounts.toArray
-    }.toArray
-    columnGroupsPtr =
-      StorageNative.columnGroupsCreate(cols, files, rowCounts, "parquet")
-
-    readerHandle = StorageNative.readerNew(
-      columnGroupsPtr,
-      arrowSchemaObj.memoryAddress(),
-      neededColumns,
-      spec.properties.asJava
+    segmentReader = SegmentReaderRegistry.open(
+      spec,
+      SchemaMapper.convertToArrowSchema(milvusSchema),
+      neededColumns.toSeq,
+      fieldMappings.fieldIdToName.get,
+      allocator
     )
-    if (readerHandle == 0L) {
-      throw new IllegalStateException(
-        "Failed to open the native reader for this V2 packed segment"
-      )
-    }
-
-    rbrHandle = StorageNative.recordBatchReaderNew(readerHandle, null)
     dictProvider = new CDataDictionaryProvider()
   } catch {
     case e: Throwable =>
@@ -323,30 +296,8 @@ class MilvusPackedV2PartitionReader(
       throw e
   }
 
-  private def loadNextBatch(): VectorSchemaRoot = {
-    if (rbrHandle == 0L) return null
-
-    val cArr = ArrowArray.allocateNew(allocator)
-    val cSchema = ArrowSchema.allocateNew(allocator)
-    var gotBatch = false
-    try {
-      gotBatch = StorageNative.recordBatchReaderReadNext(
-        rbrHandle,
-        cArr.memoryAddress(),
-        cSchema.memoryAddress()
-      )
-      if (!gotBatch) {
-        null
-      } else {
-        Data.importVectorSchemaRoot(allocator, cArr, cSchema, dictProvider)
-      }
-    } finally {
-      try cArr.close()
-      catch { case e: Throwable => logWarning("close cArr failed", e) }
-      try cSchema.close()
-      catch { case e: Throwable => logWarning("close cSchema failed", e) }
-    }
-  }
+  private def loadNextBatch(): VectorSchemaRoot =
+    if (segmentReader == null) null else segmentReader.next().orNull
 
   override def next(): Boolean = {
     while (true) {
@@ -451,34 +402,16 @@ class MilvusPackedV2PartitionReader(
       catch { case e: Throwable => logWarning("close currentBatch failed", e) }
       currentBatch = null
     }
-    if (rbrHandle != 0L) {
-      try StorageNative.recordBatchReaderDestroy(rbrHandle)
-      catch { case e: Throwable => logWarning("destroy rbrHandle failed", e) }
-      rbrHandle = 0L
-    }
     if (dictProvider != null) {
       try dictProvider.close()
       catch { case e: Throwable => logWarning("close dictProvider failed", e) }
       dictProvider = null
     }
-    if (readerHandle != 0L) {
-      try StorageNative.readerDestroySegment(readerHandle)
-      catch { case e: Throwable => logWarning("destroy reader failed", e) }
-      readerHandle = 0L
-    }
-    if (columnGroupsPtr != 0L) {
-      try StorageNative.columnGroupsDestroy(columnGroupsPtr)
-      catch {
-        case e: Throwable => logWarning("destroy columnGroupsPtr failed", e)
-      }
-      columnGroupsPtr = 0L
-    }
-    if (arrowSchemaObj != null) {
-      try arrowSchemaObj.close()
-      catch {
-        case e: Throwable => logWarning("close arrowSchemaObj failed", e)
-      }
-      arrowSchemaObj = null
+    if (segmentReader != null) {
+      try segmentReader.close()
+      catch { case e: Throwable => logWarning("close segmentReader failed", e) }
+      segmentReader = null
     }
   }
+
 }
