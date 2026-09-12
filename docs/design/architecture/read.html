@@ -235,8 +235,14 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 
 <div class="todo">
 <ol>
-<li><strong>写 <code>core.read.plan</code> 的 <code>InputSpec</code>。</strong>不依赖任何未定决策,
-可以先做。它把 spark 层那四个规划入口的产物变成一个可序列化的描述。</li>
+<li><s>写 <code>core.read.plan</code> 的 <code>InputSpec</code>。</s>已完成。
+<code>InputSpec</code> 只装描述,句柄开在 executor 上;段布局的两种来源(V3 的 manifest
+路径加版本、V2 已物化的列组)是 <code>SegmentLayout</code> 的两个 case,那是两条线唯一的实质差别。
+删除来源单独建模成 <code>DeleteSource</code>:<code>Materialized</code> 是今天的做法——
+driver 把主键 map 序列化进每个分区,也是 README 第 1 节列的 1.x 代价之一;
+<code>Files</code> 只给 delta log 路径、读留给 executor,是要去的方向。
+两个 case 都在,迁移就是换 planner 产出哪一种,不用改这个类型。
+spark 层的两个 <code>InputPartition</code> 改成携带它,是下一步。</li>
 
 <li><strong>写 <code>core.read.exec</code> 的 <code>SegmentReader</code> 与注册表。</strong>
 取代 <code>MilvusPartitionReaderFactory.createReader</code> 里按

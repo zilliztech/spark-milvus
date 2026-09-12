@@ -48,7 +48,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | `expr` | 中间表示、Milvus 文法解析器、列批求值器、反向打印器 | Expr、PlanParser、Evaluator、ExprPrinter、Bitmap |
 | `delete` | 删除文件解码，按行号置位 | DeleteBitset、DeltaLogDecoder |
 | `stats` | 段统计和 row group 统计的读取与剪枝 | SegmentStats、Pruner |
-| `read.plan` | 分区规划，纯 JVM，可序列化 | Partitioner、ReadPlan、InputSpec |
+| `read.plan` | 分区规划，纯 JVM，可序列化 | InputSpec、SegmentLayout、DeleteSource、ReadPlan。Partitioner 待 R19（决策 19）与 R16 定了再加，一段一分区之外还没有第二种切法 |
 | `read.exec` | 批读取、行号取列、出口；碰 native | SegmentReader、SegmentReaderRegistry、ColumnBatch、Take |
 | `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter、StagingLayout |
 | `write.commit` | 作业清单、提交、幂等 | JobManifest、Committer |
