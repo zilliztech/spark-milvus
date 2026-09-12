@@ -1,5 +1,5 @@
 <meta charset="utf-8">
-<title>对象存储认证：机制、覆盖与设计</title>
+<title>对象存储认证</title>
 <style>
   :root { color-scheme: light dark; }
   body { max-width: 48rem; margin: 2rem auto; padding: 0 1.2rem;
@@ -22,321 +22,246 @@
   .no { color: #c0392b; font-weight: 600; }
 </style>
 
-<h1>对象存储认证：机制、覆盖与设计</h1>
+<h1>对象存储认证：信息从哪来、怎么提取、怎么传下去</h1>
 <p>存储访问层的整体设计见 <a href="storage-access.html">storage-access.html</a>，
 模块边界见 <a href="modules.md">modules.md</a>。仓库内有配套 skill
 <code>.agents/skills/spark-milvus-storage-auth/</code>。</p>
 
 <div class="verdict">
-<strong>结论。</strong>连接器不构造凭证，只继承 Spark 给的 Configuration。写配置是第 4 层
-作业的事，因为只有作业知道自己要访问哪几个桶。现有逻辑保留，要治的是六处复制和写死的默认值。
-另外两件：AWS SDK v1 已于 2025-12-31 结束支持，我们自己的类名已换成 v2，
-但依赖删不掉，前置见 <a href="#platform-blocker">5.5</a>；JVM 侧只支持 S3 与 OSS，
-Azure 与 GCS 读不了，是真缺口。
+<strong>一条链，三段。</strong>Spark 的配置里带着「怎么取凭证」的参数；
+第 3 层把它们提取出来翻成 <code>fs.*</code>；<code>core.credential</code> 校验后原样交给 C，
+C 自己去换凭证。<strong>连接器不构造凭证，也不认识云。</strong>
 </div>
-
-<h2 id="mechanism">一、既有机制</h2>
-<p>Spark、Hive、Flink、Iceberg、Delta 都建在 Hadoop 兼容文件系统这套机制上。它由五件事组成。</p>
-
-<h3>1.1 一个入口，按 scheme 分发</h3>
-<p><code>FileSystem.get(URI, Configuration)</code> 是唯一入口。URI 的 scheme 通过
-<code>fs.&lt;scheme&gt;.impl</code> 选实现。<strong>抽象在文件访问 API 这一层，不在凭证这一层。</strong></p>
-
-<h3>1.2 认证不是 API，是配置键</h3>
-<p>没有任何跨文件系统的凭证接口。Kerberos 与 AKSK 没有共同结构，不可能统一。
-所以每个文件系统占一个键命名空间，谁都不管谁：</p>
-<table>
-<tr><th>文件系统</th><th>scheme</th><th>认证键</th><th>实现来自</th></tr>
-<tr><td>Amazon S3、MinIO</td><td>s3a</td><td><code>fs.s3a.access.key</code>、<code>secret.key</code>、<code>session.token</code>、<code>aws.credentials.provider</code>、<code>assumed.role.arn</code></td><td>hadoop-aws</td></tr>
-<tr><td>Azure Data Lake Gen2</td><td>abfs、abfss</td><td><code>fs.azure.account.auth.type</code>（SharedKey / OAuth / Custom / SAS）、<code>account.oauth.provider.type</code>、<code>account.key.&lt;account&gt;</code>、托管身份走 <code>account.oauth2.msi.*</code></td><td>hadoop-azure</td></tr>
-<tr><td>Google Cloud Storage</td><td>gs</td><td><code>fs.gs.auth.type</code>（APPLICATION_DEFAULT / SERVICE_ACCOUNT_JSON_KEYFILE / COMPUTE_ENGINE）、<code>auth.service.account.json.keyfile</code></td><td>GCS connector，Google 维护</td></tr>
-<tr><td>阿里云 OSS</td><td>oss</td><td><code>fs.oss.accessKeyId</code>、<code>accessKeySecret</code>、<code>credentials.provider</code></td><td>hadoop-aliyun</td></tr>
-<tr><td>腾讯云 COS</td><td>cosn</td><td><code>fs.cosn.userinfo.secretId</code>、<code>secretKey</code></td><td>hadoop-cos，腾讯维护</td></tr>
-<tr><td>HDFS</td><td>hdfs</td><td><code>dfs.*</code>，身份走 Kerberos 的 UGI</td><td>hadoop-hdfs</td></tr>
-</table>
-
-<h3>1.3 provider 链</h3>
-<p><code>fs.s3a.aws.credentials.provider</code> 是一串类名，按顺序尝试，第一个能给出凭证的胜出。
-abfs 与 gs 是同样的形状。默认链由实现的版本决定，不同版本不一样，这一点后面会咬人。</p>
-
-<h3>1.4 按桶、按账号覆盖</h3>
-<p><code>fs.s3a.bucket.&lt;桶名&gt;.&lt;键&gt;</code> 覆盖全局的 <code>fs.s3a.&lt;键&gt;</code>；
-hadoop-aws 在建 FileSystem 实例时把它提升成该实例的值。abfs 对应
-<code>fs.azure.account.key.&lt;account&gt;</code>。</p>
-<p><strong>一个作业用两套身份访问两个桶，只能靠这个机制。</strong>
-Spark 的会话级配置表达不了「读 A 桶用身份 X，写 B 桶用身份 Y」。</p>
-
-<h3>1.5 Spark 怎么接，凭证怎么到 executor</h3>
-<p><code>spark.hadoop.&lt;键&gt;</code> 拷进 Hadoop 的 <code>Configuration</code>；连接器取
-<code>sessionState.newHadoopConf()</code> 往下传。Kerberos 场景另有 delegation token：
-driver 收集后随任务分发给 executor，executor 不需要长期密钥。
-S3A 也有对应的 <code>fs.s3a.delegation.token.binding</code>。</p>
-
-<h2 id="coverage">二、各云的覆盖现状</h2>
-<p>Milvus 自己支持六种后端（<code>configs/milvus.yaml</code> 的 <code>cloudProvider</code>：
-aws、gcp、gcpnative、azure、aliyun、tencent，加 <code>storageType: local</code>）。
-我们两条通路的覆盖并不一致。</p>
-
-<table>
-<tr><th>后端</th><th>Milvus</th><th>我们的 JVM 侧</th><th>milvus-storage 的 C 侧</th></tr>
-<tr><td>Amazon S3、MinIO</td><td>是</td><td>hadoop-aws</td><td>s3</td></tr>
-<tr><td>阿里云 OSS</td><td>是</td><td>hadoop-aliyun</td><td>走 S3 兼容端点</td></tr>
-<tr><td>Google Cloud Storage</td><td>是</td><td class="no">无</td><td>gcp</td></tr>
-<tr><td>Azure Blob</td><td>是</td><td class="no">无</td><td>azure</td></tr>
-<tr><td>腾讯云 COS</td><td>是</td><td class="no">无</td><td>tencent，见 <a href="#c-coverage">2.1</a></td></tr>
-<tr><td>本地</td><td>是</td><td>file</td><td>local</td></tr>
-</table>
-
-<div class="gap">
-<p><strong>缺口</strong>：代码里只认 <code>s3://</code>、<code>s3a://</code>、<code>oss://</code>、
-<code>file://</code> 四种 scheme，依赖里只有 <code>hadoop-aws</code> 与 <code>hadoop-aliyun</code>。
-客户的 Milvus 建在 Azure 或 GCS 上时，我们连快照 JSON 都打不开，读在第一步就失败——
-而原生层本来能读那上面的数据文件。</p>
-</div>
-
-<h3 id="c-coverage">2.1 C 层已经解决了，包括国内三家</h3>
-<p>milvus-storage 的文件系统建在 <code>arrow::fs::FileSystem</code> 上，各云有自己的 producer。
-<code>cloud_provider</code> 认识七个：aws、aliyun、azure、gcp、huawei、tencent、local，
-比 Milvus 的 yaml 里列的还多一个华为。</p>
-<table>
-<tr><th>目录或文件</th><th>解决什么</th></tr>
-<tr><td><code>s3/provider/AliyunCredentialsProvider.cpp</code></td><td>阿里云凭证</td></tr>
-<tr><td><code>s3/provider/AliyunRAMCredentialsProvider.cpp</code>、<code>AliyunRAMSTSClient.cpp</code>、<code>AliyunSTSClient.cpp</code></td><td>阿里云 RAM 角色与 STS 临时凭证</td></tr>
-<tr><td><code>s3/provider/AliyunOIDCAssumeRoleChainProvider.cpp</code></td><td>阿里云 OIDC 角色链，ACK 上对应 IRSA 的那套</td></tr>
-<tr><td><code>s3/provider/TencentCloudCredentialsProvider.cpp</code>、<code>TencentCloudSTSClient.cpp</code></td><td>腾讯云与 STS</td></tr>
-<tr><td><code>s3/provider/HuaweiCloudCredentialsProvider.cpp</code>、<code>HuaweiCloudSTSClient.cpp</code></td><td>华为云与 STS</td></tr>
-<tr><td><code>azure/azurefs.cc</code>、<code>azure_sas_token_policy.cpp</code></td><td>Azure 文件系统与 SAS 令牌</td></tr>
-<tr><td><code>gcp/gcp_credential_provider.cpp</code>、<code>gcp_credential_registry.cpp</code></td><td>GCP 凭证</td></tr>
-<tr><td>Arrow 的 <code>LocalFileSystem</code></td><td>本地</td></tr>
-</table>
-<div class="gap">
-<p><strong>这基本定死了路线。</strong>JVM 侧补齐等于用 Scala 与 Hadoop 的方式重写一遍
-<code>AliyunRAMSTSClient</code>、<code>TencentCloudSTSClient</code>、<code>HuaweiCloudSTSClient</code>。
-而且 AWS 的 IRSA 顺序问题我们已经手工趟过一遍（见 <a href="#sdkv2">第五节</a>），
-阿里云的 OIDC 是同一类问题，C 层那个 <code>AliyunOIDCAssumeRoleChainProvider</code> 就是它的答案。
-按 AGENTS.md 的原则，在它旁边再建一条是标准的烟囱。</p>
-</div>
-
-<h2 id="principle">三、判断原则</h2>
-<ol>
-<li><strong>不构造凭证</strong>，把拿到的 <code>Configuration</code> 传给 <code>FileSystem.get</code>。</li>
-<li><strong>必须写配置时只写按桶或按账号的键</strong>，不写全局键——写全局键等于改整个会话的安全边界。</li>
-<li><strong>不覆盖已设好的 provider</strong>，只在缺失时补。</li>
-<li><strong>不内置默认值</strong>。端点、密钥、桶名没配就应该失败。</li>
-<li><strong>不重复</strong>。同一段逻辑只存在一处。</li>
-</ol>
-
-<h2 id="design">四、我们的设计</h2>
-
-<h3>4.1 JVM 侧：继承，不构造</h3>
-<p>已经是现状。<code>MilvusDataSource.scala:1609</code> 取
-<code>sessionState.newHadoopConf()</code>，没有会话时退回一个空
-<code>Configuration</code>。平台通过 <code>spark.hadoop.fs.s3a.*</code> 配置一次，
-连接器不写凭证代码。Iceberg 的 <code>HadoopFileIO</code> 与 Delta 都是这样。</p>
-<p><code>MilvusOption</code> 原来另有一条自造 <code>Configuration</code> 与
-<code>S3AFileSystem</code> 的路径，已删除：它属于早已无人调用的
-<code>MilvusS3Option</code>，删除不改变任何运行时行为。</p>
-
-<h3>4.2 写配置是第 4 层的事，不是连接器的</h3>
-<p>一个作业可能要用不同身份访问多个桶，会话级配置表达不了，只能由作业自己写按桶的键。
-这属于第 4 层。backfill 怎么做、S3 与 OSS 为什么不一样，见
-<a href="../apps/backfill-storage.html">backfill 的多桶存储访问</a>。</p>
-<p>无论谁写，都要守<a href="#principle">第三节</a>的五条：只写按桶或按账号的键，
-不覆盖已设好的 provider，不内置默认值。</p>
-
-<h3>4.3 原生侧：只传位置与模式，不传密钥</h3>
-<p>milvus-storage 的 C 层有自己的 SDK，在同一个 pod 里自己发现身份。它认识的键：</p>
-<table>
-<tr><th>类别</th><th>键</th></tr>
-<tr><td>身份模式</td><td><code>fs.use_iam</code>、<code>fs.role_arn</code>、<code>fs.session_name</code>、<code>fs.external_id</code>、<code>fs.iam_endpoint</code></td></tr>
-<tr><td>位置</td><td><code>fs.address</code>、<code>fs.bucket_name</code>、<code>fs.root_path</code>、<code>fs.region</code>、<code>fs.cloud_provider</code></td></tr>
-<tr><td>静态密钥</td><td><code>fs.access_key_id</code>、<code>fs.access_key_value</code></td></tr>
-<tr><td>各云专属</td><td><code>fs.azure_client_id</code>、<code>fs.azure_tenant_id</code>、<code>fs.gcp_credential_json</code>、<code>fs.gcp_target_service_account</code>、<code>fs.oss.endpoint</code></td></tr>
-</table>
-<p><code>fs.cpp:104</code> 与 <code>117</code> 里 <code>use_iam</code> 为真时走另一条分支，
-不取静态密钥。云上的正确配置是 <code>fs.use_iam=true</code> 加位置信息，一个密钥都不传。</p>
-
-<h3>4.4 两侧一致性</h3>
-<p>两个 SDK 各自发现，在干净的 IRSA 场景下得到同一个身份——同一个 pod、同一个 token 文件。
-只有<strong>一侧被显式配置、另一侧没有</strong>时才分叉。规则：两侧都不配，或两侧配一致。</p>
-
-<h3>4.5 要治的两处</h3>
-<p><strong>五处复制</strong>：<code>loon/Properties</code>（原生属性包）、
-<code>MilvusDataSource</code>（按桶 Hadoop 配置）、<code>MilvusBackfill</code>、
-<code>BackfillConfig</code>、<code>apps/tools</code> 下的
-<code>ListV2SegmentsApp</code> 与 <code>ReadSourceOnlyApp</code>，
-而 <code>core.credential</code> 是空包。逻辑正确但没有落点。
-<code>MilvusOption</code> 已不在此列，它那份随 <code>MilvusS3Option</code> 一起删了。</p>
-<p><strong>写死的默认值</strong>：<code>a-bucket</code>、<code>localhost:9000</code>、
-<code>minioadmin</code> 在生产路径上，漏配桶名会安静地连错桶。对应决策 21。</p>
-
-<h2 id="sdkv2">五、AWS SDK v1 升 v2 的设计</h2>
-
-<h3>5.1 为什么必须升</h3>
-<table>
-<tr><th>时间</th><th>事件</th></tr>
-<tr><td>2018-11</td><td>AWS SDK for Java 2.x GA，是对 1.11.x 的重写</td></tr>
-<tr><td>2024-07-31</td><td>1.x 进入维护模式，只收关键缺陷与安全更新</td></tr>
-<tr><td>2025-12-31</td><td>1.x <strong>结束支持</strong>，不再发版</td></tr>
-</table>
-<p>我们依赖 <code>com.amazonaws:aws-java-sdk-core:1.12.780</code>，它已经停止支持，
-不会再有安全补丁。这是供应链问题，不是技术偏好。</p>
-
-<h3 id="mapping">5.2 现在为什么还能跑：hadoop-aws 的映射与回退</h3>
-<p>我们钉 hadoop 3.4.1，hadoop-aws 3.4.x 已迁到 SDK v2。
-读 <code>CredentialProviderListFactory.java</code>，一个 provider 类名的解析顺序是：</p>
-<ol>
-<li>查内置的 v1→v2 映射表，只有五条，命中则替换并打 warn</li>
-<li>查用户配的 <code>fs.s3a.aws.credentials.provider.mapping</code>，命中则替换</li>
-<li>按 v2 类实例化</li>
-<li>失败且错误类型是「不是 v2 实现」，判断 <code>isAwsV1SdkAvailable()</code></li>
-<li>v1 SDK 在 classpath 上，用 <code>AwsV1BindingSupport</code> 按 v1 实例化，打 warn</li>
-<li>不在，抛异常</li>
-</ol>
-<p>内置映射表全部五条：</p>
-<table>
-<tr><th>v1 类名</th><th>映射到</th></tr>
-<tr><td><code>com.amazonaws.auth.AnonymousAWSCredentials</code></td><td>AnonymousAWSCredentialsProvider</td></tr>
-<tr><td><code>com.amazonaws.auth.EC2ContainerCredentialsProviderWrapper</code></td><td>IAMInstanceCredentialsProvider</td></tr>
-<tr><td><code>com.amazonaws.auth.InstanceProfileCredentialsProvider</code></td><td>IAMInstanceCredentialsProvider</td></tr>
-<tr><td><code>com.amazonaws.auth.EnvironmentVariableCredentialsProvider</code></td><td>v2 的 EnvironmentVariableCredentialsProvider</td></tr>
-<tr><td><code>com.amazonaws.auth.profile.ProfileCredentialsProvider</code></td><td>v2 的 ProfileCredentialsProvider</td></tr>
-</table>
-<p><code>fs.s3a.aws.credentials.provider.mapping</code> 的值是逗号分隔的
-<code>旧类名=新类名</code> 对，由 <code>S3AUtils.getTrimmedStringCollectionSplitByEquals</code> 解析。
-它是给改不了代码的人用的逃生口。</p>
-
-<h3>5.3 范围：全是字符串，没有代码（已完成）</h3>
-<p>升级前，全仓对 <code>com.amazonaws</code> 的引用只有五处，且全是配置值里的类名字符串，
-没有一处 import，所以不涉及代码迁移。现在这五处都已换成 v2，仓库里没有 v1 类名了。</p>
-<table>
-<tr><th>位置</th><th>原来</th><th>现在</th></tr>
-<tr><td><code>MilvusOption.scala</code></td><td><code>DefaultAWSCredentialsProviderChain</code></td><td>随 <code>MilvusS3Option</code> 删除</td></tr>
-<tr><td><code>MilvusBackfill.scala</code>、<code>ListV2SegmentsApp.scala</code></td><td><code>WebIdentityTokenCredentialsProvider</code></td><td><code>software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider</code></td></tr>
-<tr><td>同上</td><td><code>EnvironmentVariableCredentialsProvider</code></td><td>同名的 <code>software.amazon.awssdk</code> 版本</td></tr>
-<tr><td><code>BackfillAppTest.scala</code></td><td>断言里的字符串</td><td>跟着改</td></tr>
-</table>
-<p>换类名的同时必须加 <code>software.amazon.awssdk:sts</code>，原因见 <a href="#sts">5.6</a>。</p>
 
 <div class="warn">
-<p><strong>顺带发现一处不一致，比升级本身更值得注意。</strong>
-<code>MilvusOption.getConf</code> 用的是 <code>DefaultAWSCredentialsProviderChain</code>——
-正是 backfill 的注释指名「在 EKS 上会先拿到节点实例角色」的那条链。
-也就是说 backfill 刻意避开的缺陷，连接器自己的读路径还踩着。
-这条要和升级一起改，不能只换类名不换链。</p>
+<p><strong>第 3 层那段翻译是垫片，不是长期形态。</strong>
+按 <a href="storage-access.html#cred-fill">storage-access.html 3.3</a>，
+长期形态是产出配置的一方直接产出 <code>fs.*</code>，翻译这一步消失。
+垫片的退出条件就是那一天，在此之前它必须只做键名翻译，不加逻辑。</p>
 </div>
 
-<h3>5.4 目标映射（已落地）</h3>
+<h2 id="info">一、认证信息是什么</h2>
+
+<h3>1.1 三个来源</h3>
+<table>
+<tr><th>来源</th><th>长什么样</th><th>谁写的</th></tr>
+<tr><td>Spark 配置</td><td><code>spark.hadoop.fs.s3a.*</code>、<code>spark.hadoop.fs.oss.*</code></td><td>托管平台提交作业时注入，或自建 Spark 的用户自己写</td></tr>
+<tr><td>表选项</td><td><code>fs.address</code>、<code>fs.bucket_name</code>、<code>fs.use_iam</code> 这套</td><td>用户在 <code>.option()</code> 里给</td></tr>
+<tr><td>进程环境</td><td><code>AWS_WEB_IDENTITY_TOKEN_FILE</code>、<code>ALIBABA_CLOUD_OIDC_TOKEN_FILE</code> 等</td><td>K8s 投影进 pod，我们碰不到也不需要碰</td></tr>
+</table>
+
+<h3>1.2 传下来的不是凭证，是取凭证的参数</h3>
+<p>托管平台注入的全部内容：一个角色 ARN、一个会话名、一个 provider 类名。
+没有 access key，没有 secret，没有 session token。真正的机器身份是 K8s 投影进 pod 的
+web identity token 文件，两侧的 SDK 各自去读。</p>
+<pre><code>spark.hadoop.fs.s3a.aws.credentials.provider          = org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider
+spark.hadoop.fs.s3a.assumed.role.arn                  = &lt;客户数据角色 ARN&gt;
+spark.hadoop.fs.s3a.assumed.role.credentials.provider = com.amazonaws.auth.DefaultAWSCredentialsProviderChain
+
+spark.hadoop.fs.oss.assumed.role.arn          = &lt;客户数据角色 ARN&gt;
+spark.hadoop.fs.oss.assumed.role.session.name = &lt;实例 id 拼出的会话名&gt;
+spark.hadoop.fs.oss.credentials.provider      = com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider</code></pre>
+<p>这条性质决定了整个设计：<strong>可以把值提取出来换个键名交给 C，因为里面没有秘密</strong>。
+两侧做的是同一件两步动作，逐步对照见
+<a href="storage-access.html#cred-same">storage-access.html 3.4</a>。</p>
+
+<h3 id="mechanism">1.3 Hadoop 那套键是怎么组织的</h3>
+<p>Spark、Hive、Flink、Iceberg、Delta 都建在 Hadoop 兼容文件系统上。
+<strong>它抽象的是文件访问 API，不是认证。</strong>认证没有跨文件系统的接口——Kerberos 与 AKSK
+没有共同结构——所以每个文件系统占一个键命名空间，谁都不管谁。</p>
+<table>
+<tr><th>文件系统</th><th>scheme</th><th>认证键</th><th>实现来自</th></tr>
+<tr><td>Amazon S3、MinIO</td><td><code>s3a</code></td><td><code>fs.s3a.access.key</code>、<code>secret.key</code>、<code>session.token</code>、<code>aws.credentials.provider</code>、<code>assumed.role.arn</code></td><td>hadoop-aws</td></tr>
+<tr><td>阿里云 OSS</td><td><code>oss</code></td><td><code>fs.oss.accessKeyId</code>、<code>accessKeySecret</code>、<code>credentials.provider</code></td><td>hadoop-aliyun</td></tr>
+<tr><td>Azure Data Lake Gen2</td><td><code>abfs</code></td><td><code>fs.azure.account.auth.type</code>、<code>account.key.&lt;account&gt;</code>、<code>account.oauth2.msi.*</code></td><td>hadoop-azure，我们没带</td></tr>
+<tr><td>Google Cloud Storage</td><td><code>gs</code></td><td><code>fs.gs.auth.type</code>、<code>auth.service.account.json.keyfile</code></td><td>GCS connector，我们没带</td></tr>
+<tr><td>腾讯云 COS</td><td><code>cosn</code></td><td><code>fs.cosn.userinfo.secretId</code>、<code>secretKey</code></td><td>hadoop-cos，我们没带</td></tr>
+</table>
+<p>还有三条机制在提取时用得上：</p>
+<ol>
+<li><strong>provider 链</strong>：<code>fs.s3a.aws.credentials.provider</code> 是一串类名，按顺序尝试，
+第一个给出凭证的胜出。默认链由实现的版本决定，不同版本不一样——第五节就是被这一点咬的。</li>
+<li><strong>按桶覆盖</strong>：<code>fs.s3a.bucket.&lt;桶名&gt;.&lt;键&gt;</code> 覆盖全局的
+<code>fs.s3a.&lt;键&gt;</code>。一个作业用两套身份访问两个桶只能靠它，因为 Spark 的会话级配置
+表达不了「读 A 桶用身份 X，写 B 桶用身份 Y」。hadoop-aliyun 没有这个机制，
+backfill 因此只能改全局键再还原（见 <a href="../apps/backfill-storage.html">backfill-storage.html</a>）。</li>
+<li><strong><code>spark.hadoop.&lt;键&gt;</code> 透传</strong>：Spark 把这个前缀下的键拷进 Hadoop 的
+<code>Configuration</code>，连接器取 <code>sessionState.newHadoopConf()</code> 拿到。</li>
+</ol>
+
+<h2 id="extract">二、怎么提取</h2>
+
+<h3>2.1 一个出口</h3>
+<p>提取的结果只有一种形式：<strong>一个 <code>Map[String, String]</code>，键全是
+<code>fs.*</code></strong>，多桶时是 <code>extfs.&lt;名字&gt;.*</code>。
+<code>core.credential</code> 是唯一的出口，它校验必填项、拒绝空值，然后原样交给 C。</p>
+<p>输入有两处，出口只有一个：</p>
+<ol>
+<li><strong>用户在 <code>.option()</code> 里直接给的 <code>fs.*</code></strong>——不需要翻译，核对键名即可。</li>
+<li><strong>Spark 配置里的 <code>spark.hadoop.fs.*</code></strong>——由第 3 层的垫片读出来翻成
+<code>fs.*</code>。键名对照表在
+<a href="storage-access.html#cred-fill">storage-access.html 3.3</a>，不在这里重列。</li>
+</ol>
+<p>两处都不进 core：<code>core.credential</code> 收到的永远是已经翻好的 <code>fs.*</code>，
+它不认识 <code>s3a</code>、<code>oss</code>、<code>abfs</code> 这些 scheme。</p>
+
+<h3 id="dup">2.2 现在的两个坑</h3>
+
+<p><strong>坑一：用户选项有两套键名，差别只有大小写。</strong>
+<code>MilvusOption.scala</code> 里声明了一套 camelCase 的 <code>fs.*</code> 常量，
+而 <code>loon/Properties.scala</code> 读的、<a href="../../reference-cn.md">reference-cn.md</a>
+写的、C 认的都是 snake_case：</p>
+<table>
+<tr><th><code>MilvusOption</code> 声明的</th><th>实际生效的</th><th>被引用次数</th></tr>
+<tr><td><code>fs.bucketName</code></td><td><code>fs.bucket_name</code></td><td>2（都在一个三选一的兼容列表里）</td></tr>
+<tr><td><code>fs.accessKeyId</code> / <code>fs.accessKeyValue</code></td><td><code>fs.access_key_id</code> / <code>fs.access_key_value</code></td><td>0</td></tr>
+<tr><td><code>fs.storageType</code></td><td><code>fs.storage_type</code></td><td>0</td></tr>
+<tr><td><code>fs.cloudProvider</code></td><td><code>fs.cloud_provider</code></td><td>0</td></tr>
+<tr><td><code>fs.useIam</code></td><td><code>fs.use_iam</code></td><td>0</td></tr>
+</table>
+<p>十八个常量里十七个零引用。<strong>用户照着这批名字配，配了不生效，也不报错。</strong>
+只有桶名例外——<code>MilvusDataSource.connectorS3BucketOption</code> 依次试
+<code>fs.bucket_name</code>、<code>fs.bucketName</code>、<code>s3.bucketName</code> 三个拼法。
+这批常量随 <code>core.credential</code> 一起清掉，属于删除，按 AGENTS.md 要先确认。</p>
+
+<p><strong>坑二：同一段提取逻辑有五份。</strong><code>loon/Properties</code>（原生属性包）、
+<code>MilvusDataSource</code>（按桶 Hadoop 配置）、<code>MilvusBackfill</code>、
+<code>BackfillConfig</code>、<code>apps/tools</code> 下的 <code>ListV2SegmentsApp</code> 与
+<code>ReadSourceOnlyApp</code>，而 <code>core.credential</code> 是空包。
+逻辑本身正确，只是没有落点。</p>
+
+<h2 id="pass">三、怎么传下去</h2>
+
+<h3>3.1 一个 Map 一路到底</h3>
+<p>从 <code>core.credential</code> 出来之后，这个 map 不再被任何一层解释。
+<code>native-storage</code> 的 JNI 把它转成两个 <code>const char*</code> 数组调
+<code>loon_properties_create</code>，不看键名也不认识云；C 侧按
+<code>fs.storage_type</code> 与 <code>fs.cloud_provider</code> 分派，自己去换凭证。
+分派表见 <a href="storage-access.html#cred-providers">storage-access.html 3.2</a>。</p>
+
+<h3>3.2 到 executor 怎么传</h3>
+<p><strong>句柄不过界，map 过界。</strong>C 返回的 handle 是进程内指针，
+Spark 会把 <code>InputPartition</code> 序列化发到 executor，所以 <code>InputPartition</code>
+里只装描述——段路径、manifest 版本、要读的列名、<code>fs.*</code> 的 map。
+executor 拿到描述后才开句柄，读完关掉。细节见
+<a href="storage-access.html#bridge-jni">storage-access.html 4.1</a>。</p>
+<p>凭证本身不需要分发，因为传的从来不是凭证：每个 executor 进程各自持一个会自我刷新的
+provider，作业跑多久都不掉（<a href="storage-access.html#cred-refresh">3.6</a>）。</p>
+
+<h3>3.3 迁移期两条通路并存</h3>
+<p>C 通路接上之前，JVM 侧的 Hadoop 通路还在线上跑：<code>MilvusDataSource</code> 取
+<code>sessionState.newHadoopConf()</code> 往下传，第 4 层的作业按需写按桶的键。
+两条通路在干净的 IRSA/RRSA 场景下拿到同一个身份——同一个 pod、同一个 token 文件；
+<strong>只有一侧被显式配置、另一侧没有时才分叉</strong>。规则：两侧都不配，或两侧配一致。</p>
+<p>这期间守四条：不构造凭证；必须写配置时只写按桶或按账号的键，不写全局键；
+不覆盖已设好的 provider，只在缺失时补；不内置默认值，端点、密钥、桶名没配就应该失败。</p>
+
+<h2 id="local">四、local 与 remote 两种模式</h2>
+
+<div class="warn">
+<p><strong>两个「local」不是一回事，这是最容易混的地方。</strong></p>
+<ul>
+<li><code>--master local[*]</code> 是 <strong>Spark 的部署模式</strong>：driver 和 executor 跑在同一个
+JVM 进程里，不需要集群。</li>
+<li><code>fs.storage_type = local</code> 是 <strong>C 层的存储后端</strong>：读本地磁盘上的文件，
+不连对象存储，不需要任何凭证。</li>
+</ul>
+<p>两者正交。本地开发最常用的组合其实是「Spark local 模式 + <code>storage_type=remote</code> 连本机 MinIO」，
+不是两个 local 一起用。</p>
+</div>
+
+<h3>4.1 三种组合</h3>
+<table>
+<tr><th>组合</th><th>Spark</th><th><code>fs.storage_type</code></th><th>要什么</th><th>用来验什么</th></tr>
+<tr><td>A. 纯本地文件</td><td><code>local[*]</code></td><td><code>local</code></td><td>只要磁盘上有一份段数据</td><td>格式解析、读路径逻辑。不碰认证</td></tr>
+<tr><td>B. 本地 MinIO</td><td><code>local[*]</code></td><td><code>remote</code></td><td>本机 MinIO 在 9000，静态 AK/SK</td><td>静态密钥这条路径、端点与桶的配置、S3 协议行为</td></tr>
+<tr><td>C. 真集群</td><td>k8s</td><td><code>remote</code></td><td>EKS/ACK pod、IRSA 或 RRSA</td><td>AssumeRole 链、token 轮换。第六节那三条只能在这里验</td></tr>
+</table>
+<p><strong>组合 B 与 A 已在 UAT 数据上验过（2026-09-12）。</strong>取一个真实实例的段 binlog，
+本地后端和 AWS S3 后端经 JNI 各读一遍，字节一致；细节和 <code>fs.session_token</code> 的实证见
+<a href="storage-access.html#verify">storage-access.html 第八节</a>。</p>
+<p><strong>A 和 B 覆盖不了认证</strong>：A 根本不走凭证，B 只走静态密钥那一条分支
+（<code>fs.role_arn</code> 空且 <code>fs.use_iam</code> 假）。AssumeRole 与 web identity token
+两条路在本地无法构造，因为它们要的是 K8s 投影进来的 token 文件。</p>
+
+<h3 id="local-setup">4.2 本地要跑起来需要什么</h3>
+<ol>
+<li><strong>JDK 21。</strong>Java 26 上每个起 <code>SparkSession</code> 的测试都会以
+<code>UnsupportedOperationException: getSubject is not supported</code> 中止——
+<code>Subject.getSubject</code> 被移除而 Spark 还在调。看起来像代码问题，不是。</li>
+<li><strong>原生库。</strong><code>make build-milvus-storage</code> 后
+<code>make copy-native-libs</code>，需要 conan。不建就只有两个用例失败
+（<code>MilvusStorageFFITest</code>、<code>MilvusStorageMultiFileGroupTest</code>），其余照跑。
+在 macOS 上已验证可用，产物 <code>libmilvus-storage-jni.dylib</code>；
+构建前提与产物尺寸见 <a href="../../contributing.md">contributing.md</a>。</li>
+<li><strong>组合 B 还要一个 MinIO</strong>，监听 9000，建好桶。
+<code>integration-4.0</code> 的用例假定端点 <code>localhost:9000</code>、凭证
+<code>minioadmin/minioadmin</code>。</li>
+</ol>
+
+<h3 id="local-gap">4.3 现在缺什么</h3>
+<ol>
+<li><strong>仓库里没有起 MinIO 的东西。</strong>没有 docker-compose，
+<code>integration-4.0</code> 的注释写着「需要 MinIO 在 9000」，怎么起没有写。
+每个人自己想办法，而端点和凭证又写死在用例里。</li>
+<li><strong>组合 A 只被两个原生用例走过。</strong><code>fs.storage_type = local</code>
+只出现在 <code>MilvusStorageFFITest</code> 与 <code>MilvusStorageMultiFileGroupTest</code> 里，
+没有任何一个用例从 Spark 那一侧走这条路。
+（这两个用例本身已经能在本地跑了，见 <a href="../../contributing.md">contributing.md</a>。）</li>
+<li><strong>组合 B 的配置写死在用例里</strong>，不能换端点换桶。</li>
+</ol>
+<p>这三条是本地开发体验的事，不是设计问题，但它们决定了改动能不能被快速验证。
+<strong><code>core.credential</code> 落地时一起做</strong>：把端点、桶、凭证做成用例可配，
+给组合 A 补一条能在本地跑的读路径用例。</p>
+
+<h2 id="sdkv2">五、AWS SDK v1 升 v2</h2>
+
+<p><strong>必须升，理由是供应链不是技术。</strong>1.x 已于 2025-12-31 结束支持，不再有安全补丁。
+全仓对 <code>com.amazonaws</code> 的引用只有五处，全是配置值里的类名字符串，没有一处
+<code>import</code>，所以不涉及代码迁移。<strong>我们这边的类名已经换完</strong>：</p>
 <table>
 <tr><th>原来</th><th>现在</th></tr>
 <tr><td><code>com.amazonaws.auth.WebIdentityTokenCredentialsProvider</code></td><td><code>software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider</code></td></tr>
-<tr><td><code>com.amazonaws.auth.EnvironmentVariableCredentialsProvider</code></td><td><code>software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider</code></td></tr>
-<tr><td><code>com.amazonaws.auth.DefaultAWSCredentialsProviderChain</code>（在 MilvusOption 里）</td><td>随 <code>MilvusS3Option</code> 一起删除，不需要替换</td></tr>
+<tr><td><code>com.amazonaws.auth.EnvironmentVariableCredentialsProvider</code></td><td>同名的 <code>software.amazon.awssdk</code> 版本</td></tr>
+<tr><td><code>com.amazonaws.auth.DefaultAWSCredentialsProviderChain</code>（在 <code>MilvusOption</code> 里）</td><td>随 <code>MilvusS3Option</code> 一起删除</td></tr>
 </table>
-<p><code>org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider</code> 本来就是 hadoop 的 v2 类，不动。</p>
 
-<h3 id="platform-blocker">5.5 v1 依赖能不能删：取决于运行时谁提供</h3>
-<p>云上 <code>zilliz-cloud</code> 仓库的
-<code>vdc/region-group/activity-provider/activity-web/src/main/java/com/zilliz/cloud/activity/provider/service/spark/SparkCspRuntimeSupport.java</code>
-在提交作业时注入：</p>
-<pre><code>spark.hadoop.fs.s3a.aws.credentials.provider
-    = org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider
-spark.hadoop.fs.s3a.assumed.role.credentials.provider
-    = com.amazonaws.auth.DefaultAWSCredentialsProviderChain    ← v1 类名，第 51 行常量
-spark.hadoop.fs.oss.credentials.provider
-    = com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider</code></pre>
-<p>这个 v1 类名不在 hadoop-aws 的五条映射表里，必须有实现类在运行时 classpath 上。</p>
+<h3 id="sts">5.1 换类名必须同时加 sts 模块</h3>
+<p>v2 的 <code>WebIdentityTokenFileCredentialsProvider</code> 要
+<code>software.amazon.awssdk:sts</code> 才能工作，否则它会静默不生效、回落到链上的下一个
+provider——在 EKS 上就是节点实例角色。这个依赖已经加上，
+<code>StsWebIdentityCredentialsProviderFactory</code> 已在产物里。</p>
 
-<h4>已核实</h4>
-<ul>
-<li>平台确实注入 v1 类名，位置如上。</li>
-<li>同一个仓库的 <code>vdc/region/spark-data-service/pom.xml</code> 第 128-132 行自己声明了
-<code>com.amazonaws:aws-java-sdk-bundle:1.12.262</code>，compile 作用域；该模块用 maven-shade-plugin 打包。</li>
-<li>我们的 fat jar 里带 <code>com.amazonaws:aws-java-sdk-core:1.12.780</code>。</li>
-</ul>
-
-<h4>未核实</h4>
-<ul>
-<li>spark-data-service 的 shade 是否把 v1 类原样打进产物，还是做了 relocate 或排除。
-它的 Dockerfile 另有一批显式下载进 <code>/tmp/spark-runtime-jars</code> 的 jar，
-列表里没有 aws-java-sdk-bundle。</li>
-<li>两份 v1（1.12.262 与 1.12.780）同时在 classpath 上时哪份胜出。</li>
-<li>开源用户不经 spark-data-service，他们的 classpath 上有没有 v1。</li>
-</ul>
-
-<div class="warn">
-<p><strong>更正</strong>：本页早先写的是「实现类只可能来自我们的 fat jar，所以要平台先改常量」，
-这句不成立——spark-data-service 自己就带 v1 bundle。正确的说法是：
-<strong>删依赖的前置是查清运行时由谁提供 v1，而不是等平台改常量。</strong>
-这件事从任何一个仓库的构建文件都看不出来，要在真实部署上看 classpath。</p>
-<p>平台那个 v1 常量仍然建议换成 v2 的
-<code>software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider</code>，
-但那是独立的一件事，不是我们删依赖的前置。</p>
-</div>
-
-<h3 id="sts">5.6 v2 的 WebIdentity provider 需要 sts 模块</h3>
-<p>换类名时差点引入它本来要防的那个 bug。v2 的
-<code>WebIdentityTokenFileCredentialsProvider</code> 内部去找
-<code>WebIdentityTokenCredentialsProviderFactory</code> 的实现，那个实现是
-<code>software.amazon.awssdk:sts</code> 里的
-<code>StsWebIdentityCredentialsProviderFactory</code>。</p>
-<p>缺了这个模块，provider 构造不报错——类里有个
-<code>private final RuntimeException loadException</code> 字段把失败存起来——
-等到真去取凭证才抛。而在 provider <strong>链</strong>里，一个抛了就换下一个，
-于是落到 <code>IAMInstanceCredentialsProvider</code>，<strong>拿到节点角色</strong>。</p>
-<div class="warn">
-<p>改之前我们的 fat jar 里 <code>software/amazon/awssdk/services/sts/</code> 是 0 个类：
-<code>hadoopAws</code> 排除了 <code>software.amazon.awssdk:bundle</code>，
-而我们只单独加了 <code>s3</code> 与 <code>s3-transfer-manager</code>。
-所以换成 v2 类名的同时必须加 <code>software.amazon.awssdk:sts</code>，已加。</p>
-<p>顺带解释了 v1 为什么一直能工作：v1 的 <code>WebIdentityTokenCredentialsProvider</code>
-同样需要 STS，而 <code>com/amazonaws/services/securitytoken/</code> 在我们 jar 里也是 0 个类。
-它靠的是云上 spark-data-service 带的 <code>aws-java-sdk-bundle</code>。
-<strong>我们的 fat jar 从来不是自足的</strong>，这一点在开源部署上值得单独验。</p>
-</div>
-
-<h3>5.7 步骤与顺序</h3>
-<ol>
-<li><s>三处类名换成 v2，测试断言同步。</s><strong>已做</strong>，见 5.3。
-<code>MilvusOption</code> 那处不是换名，是随死代码一起删除。</li>
-<li><s>补上 <code>software.amazon.awssdk:sts</code>。</s><strong>已做</strong>，见 5.6。</li>
-<li><strong>未做</strong>：在真实 EKS 上验证。v1 的
-<code>WebIdentityTokenCredentialsProvider</code> 与 v2 的
-<code>WebIdentityTokenFileCredentialsProvider</code> 等价性没有验过。
-当初这条链存在就是因为默认链在 EKS 上拿错角色，而这类问题本地与 CI 都测不出来。</li>
-<li><strong>未做</strong>：查清运行时 v1 由谁提供，见 5.5。</li>
-<li>前两项都过了，才删 <code>com.amazonaws:aws-java-sdk-core</code>。</li>
-</ol>
-<div class="warn">
-<p>顺序不能颠倒。删依赖是编译期无感、连接时才炸的改动：provider 类名解析发生在
-建 FileSystem 的那一刻。先删依赖再验证，等于把一次可控的检查变成线上故障。</p>
-</div>
-
-<h3>5.8 为什么不选另外两条</h3>
-<table>
-<tr><th>方案</th><th>不选的理由</th></tr>
-<tr><td>保持现状</td><td>继续带一个已结束支持的依赖，且任何人以「统一到 v2」为由删它都会在运行时炸</td></tr>
-<tr><td>配 <code>provider.mapping</code></td><td>能工作，但多一项必须随处携带的配置；它是给改不了代码的人用的，我们改得了</td></tr>
-</table>
+<h3 id="platform-blocker">5.2 v1 依赖删不掉，原因在仓库外</h3>
+<p>云平台注入的 <code>spark.hadoop.fs.s3a.assumed.role.credentials.provider</code> 是
+<code>com.amazonaws.auth.DefaultAWSCredentialsProviderChain</code>——v1 类名，
+而且不在 hadoop-aws 那张只有五条的 v1→v2 映射表里，所以必须有 v1 实现类在运行时
+classpath 上。</p>
+<p>hadoop-aws 3.4.1 解析一个 provider 类名的顺序是：查内置五条映射 → 查用户配的
+<code>fs.s3a.aws.credentials.provider.mapping</code> → 按 v2 实例化 → 失败且错误是「不是 v2 实现」时，
+若 v1 SDK 在 classpath 上就用 <code>AwsV1BindingSupport</code> 按 v1 实例化，不在则抛异常。</p>
+<p><strong>顺序不可颠倒</strong>：先换类名、在真实 EKS 上验证、再删依赖。先删依赖会在建 FileSystem
+那一刻失败，而不是编译期。</p>
+<p>未核实的一点：<code>spark-data-service</code> 自己声明了
+<code>com.amazonaws:aws-java-sdk-bundle:1.12.262</code> 并用 shade 打包，
+但它是原样打进产物还是做了 relocate 或排除，没有确认。这决定了删掉我们这份依赖之后
+运行时还有没有 v1 类。</p>
 
 <h2 id="verified">六、实测事实</h2>
-<ul>
-<li>hadoop-aws 3.4.1 的 v1→v2 映射表只有五条，<code>WebIdentityTokenCredentialsProvider</code> 与
-<code>DefaultAWSCredentialsProviderChain</code> 都不在其中。读
+<ol>
+<li>hadoop-aws 3.4.1 的 v1→v2 映射表只有五条，<code>WebIdentityTokenCredentialsProvider</code>
+与 <code>DefaultAWSCredentialsProviderChain</code> 都不在其中。读
 <code>CredentialProviderListFactory.java</code> 源码得出。</li>
 <li>我们同时依赖 <code>software.amazon.awssdk:*:2.30.38</code> 与
 <code>com.amazonaws:aws-java-sdk-core:1.12.780</code>；后者的 jar 里确有
-<code>com/amazonaws/auth/WebIdentityTokenCredentialsProvider.class</code>。
-换名之前，我们配的链走的是 5.2 第 5 步的 v1 回退；换名之后我们自己不再触发它，
-但平台注入的那条仍然走这条路（见 5.5）。</li>
-<li>v2 的 <code>WebIdentityTokenFileCredentialsProvider</code> 与
-<code>DefaultCredentialsProvider</code> 都在 <code>auth-2.30.38.jar</code> 里。</li>
+<code>com/amazonaws/auth/WebIdentityTokenCredentialsProvider.class</code>。</li>
+<li><strong>EKS 上 SDK v1 默认链不可靠</strong>：不总是先取投影进来的 service-account token，
+会回落到节点的 EC2 实例角色。来自 <code>MilvusBackfill.scala</code> 的原注释。
+C 层那条没有这个问题——AWS C++ SDK 的默认链把 web identity 排在实例元数据之前。</li>
 <li>Milvus 的 <code>storageType</code> 只有 <code>local</code> 与 <code>remote</code>，
 本层永远不会去 HDFS 上找 manifest。用户自己的源数据走
-<code>spark.read.parquet(path)</code>（<code>MilvusBackfill.scala:733</code>），与本层无关。</li>
-<li>EKS 上 SDK v1 默认链不可靠：不总是先取投影进来的 service-account token，
-会回落到节点的 EC2 实例角色。来自 <code>MilvusBackfill.scala</code> 的原注释。</li>
-</ul>
+<code>spark.read.parquet(path)</code>，与本层无关。</li>
+</ol>
 
 <h2 id="rejected">七、被否决的方案</h2>
 <table>
@@ -345,14 +270,14 @@ spark.hadoop.fs.oss.credentials.provider
 <tr><td>默认什么都不配，让默认链发现</td><td>SDK v1 默认链在 EKS 上会拿到节点角色，这正是现有显式链要解决的问题</td></tr>
 <tr><td>删掉六处 provider 链逻辑</td><td>会连同跨账号双桶、平台 AssumeRole 两个真实场景和一个缺陷规避一起删掉</td></tr>
 <tr><td>先删 v1 依赖再换类名</td><td>连接时才失败，把可控验证变成线上故障</td></tr>
+<tr><td>把 Hadoop 键的翻译放进 core</td><td>等于把 Hadoop 按 scheme 分派本来替我们做的事捡回来，还是按云做的。见 <a href="storage-access.html#cred-fill">storage-access.html 3.3</a></td></tr>
 </table>
 
-<h2 id="open">八、未决</h2>
+<h2 id="open">八、剩下的</h2>
 <ol>
-<li>v2 的 WebIdentity provider 与 v1 的等价性，要在真实 EKS 上验。</li>
-<li>Azure 与 GCS 的缺口怎么补：JVM 侧加依赖，还是统一走 C 的 filesystem。取决于
-<a href="storage-access.html#open">那个路线决定</a>。</li>
-<li>腾讯云 COS 在 C 侧是否支持，未确认。</li>
-<li>六处复制收敛到哪：<code>core.credential</code> 还是第 3 层，同样取决于路线。</li>
-<li>决策 21：写死的开发默认值怎么删，这是对外可见的行为变化。</li>
+<li>v2 的 WebIdentity provider 与 v1 的等价性，要在真实 EKS 上验（组合 C）。
+本页这条 Hadoop 通路在 C 通路接上之前还在线上跑。</li>
+<li>五处复制与那批 camelCase 僵尸常量，等 <code>core.credential</code> 落地一起清。
+清常量属于删除，要先确认。</li>
+<li>本地测试环境的三个缺口（4.3），随 <code>core.credential</code> 一起做。</li>
 </ol>

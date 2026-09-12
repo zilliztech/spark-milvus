@@ -6,7 +6,7 @@
 
 跨语言共用的只在第 1 层，而且只有一半：
 1. storage 那半不用我们操心。上游 milvus-storage 自带 Python 绑定（`python/` 目录），Ray 直接用上游的包，和我们的 `native-storage` 无关。
-2. vector 那半是我们的。knowhere 既没有 C 接口也没有 Python 绑定，`native-vector/src/main/cpp` 里那层 `mv_*` C shim 是唯一的跨语言资产 —— Ray 要用 knowhere，消费的是它编出的 `.so` 加 C 头文件，不是 JNI 那半。所以 shim 的接口设计要按「会有第二个调用方」来定：只传地址和长度，配置用 JSON，不出现任何 JVM 的概念。功能编号见 [capabilities.md](capabilities.md)，名词沿用 README 第 0 节。
+2. vector 那半是我们的。knowhere 既没有 C 接口也没有 Python 绑定，`native-vector/src/main/cpp` 里那层 `mv_*` C shim 是唯一的跨语言资产 —— Ray 要用 knowhere，消费的是它编出的 `.so` 加 C 头文件，不是 JNI 那半。所以 shim 的接口设计要按「会有第二个调用方」来定：只传地址和长度，配置用 JSON，不出现任何 JVM 的概念。功能编号见 [capabilities.md](../capabilities.md)，名词沿用 [总体设计](../README.md) 第 0 节。
 
 ## 1 模块
 
@@ -14,7 +14,7 @@
 |---|---|---|---|---|
 | native-storage | 第 1 层 | `com.zilliz.milvus.jni.storage` | milvus-storage 的 C 接口 | `com.zilliz:spark-milvus-native-storage`，jar 内 `native/{os}-{arch}/` 平铺 .so |
 | native-vector | 第 1 层 | `com.zilliz.milvus.jni.vector` | knowhere 的 C shim | `com.zilliz:spark-milvus-native-vector`，同上布局。C shim 的 `.so` 与头文件另出一份，供 Ray 之类的非 JVM 调用方用 |
-| core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow（provided）、Hadoop FileSystem（provided）、milvus-proto 的消息类 | `com.zilliz:spark-milvus-core_<scala>` |
+| core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow（provided）、milvus-proto 的消息类；`hadoop-common` 只为 parquet-mr 的签名在编译类路径上，代码里不用 | `com.zilliz:spark-milvus-core_<scala>` |
 | compat | 第 2 层 | `com.zilliz.milvus.storage.compat` | core | `com.zilliz:spark-milvus-compat_<scala>` |
 | client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC；带 service 的 proto 在这里生成 | `com.zilliz:spark-milvus-client_<scala>` |
 | spark-base | 第 3 层 | `com.zilliz.spark.connector` | 不是 sbt project，是四条线引用的源码目录 | 无 |
@@ -42,7 +42,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | `manifest` | 一个段的 Manifest：列组、删除文件、统计、索引登记 | Manifest、ColumnGroup、ManifestReader |
 | `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型 | SchemaMapper、MilvusTypes、ArrowTypes、FieldMetadata |
 | `path` | 三种路径形态到 (bucket, key) | StoragePath、Located |
-| `io` | 对象存储读写的最小接口和它的实现 | ObjectStore、ObjectStoreFactory、FileInfo、SeekableInput |
+| `io` | 对象存储读写的最小接口和它唯一的实现（走 C 的 `loon_filesystem_*`） | ObjectStore、ObjectStoreFactory、NativeObjectStore、FileInfo |
 | `codec` | 列值的字节编解码，读写共用 | FloatConverter、SparseFloatVectorConverter |
 | `credential` | 对象存储凭证的取用和下发 | Credentials、CredentialSource |
 | `expr` | 中间表示、Milvus 文法解析器、列批求值器、反向打印器 | Expr、PlanParser、Evaluator、ExprPrinter、Bitmap |
@@ -177,7 +177,7 @@ spark-milvus/
 11. 目录镜像包名。1.x 的 41 个文件不是这样（文件在 `src/main/scala/read/`，包是 `com.zilliz.spark.connector.read`），迁移时一并对齐。
 12. 模块的显示名跟目录走，发布坐标用 `moduleName` 另设。根项目显示名 `spark-milvus`（等于仓库目录），坐标仍是 `com.zilliz:spark-connector`。sbt 的 project id 不能带点，所以命令行是 `spark40` 而目录是 `spark-4.0`。
 13. 第 2 层不用 Spark 的 Logging，用 core 的 `com.zilliz.milvus.storage.Logging`（slf4j，provided）。约束 1 的扫描会先去掉注释，注释里提 org.apache.spark 是合法的。
-14. core 读写存储只经 `io.ObjectStore`，源码里不出现 `org.apache.hadoop`。接口五个方法：`open`、`list`、`exists`、`stat`、`create`，没有 `rename` 和 `delete`（1.x 的 22 处调用点也没用过这两个）。Hadoop 实现放 core 的 `io.hadoop`，`hadoop-common` 标 provided，运行时用 Spark 自带的那份。executor 上拿到的是可序列化的 `ObjectStoreFactory`（一组配置字符串），不是活的 `Configuration`。
+14. core 读写存储只经 `io.ObjectStore`，源码里不出现 `org.apache.hadoop`。唯一实现是 `io.NativeObjectStore`，走 C 的 `loon_filesystem_*`；`io.hadoop` 已删除。`hadoop-common` 仍在 core 的编译依赖里，但不是给我们的代码用的——parquet-mr 的 `ParquetReader.Builder` 签名里有 `org.apache.hadoop.fs.Path`，类得在编译类路径上。测试用 core 测试源码里的 `LocalObjectStore`，只读本地盘，不需要原生库。executor 上拿到的是可序列化的 `ObjectStoreFactory`（一组配置字符串），不是活的 `Configuration`。
 15. milvus-proto 的生成分两处：不带 service 的 `common.proto`、`schema.proto` 在 core 生成（`grpc = false`），带 service 的五个在 client 生成（`grpc = true`），靠 include 路径引用 core 的产物，同一份 .proto 不生成两遍。core 用得上它们，是因为 Milvus 的存储格式本身由 protobuf 定义：快照里嵌着 CollectionSchema，Manifest 的字段描述来自 schema.proto，core 不另建一套 schema 模型。
 
 ## 5 1.x 到 2.0 的迁移对照
@@ -201,18 +201,18 @@ spark-milvus/
 | read/BackupMetaReader.scala | compat.backup | 已迁 |
 | MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数 |
 | sources/MilvusDataSource.scala（2880 行） | spark-base | 已搬。拆成 catalog、table、scan 并把规划逻辑下沉 core 是重构，未做 |
-| MilvusOption.scala、loon/Properties.scala | spark-base | 已搬。MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。Properties 产出上游 Java 绑定的类型，core 不该依赖它，留在第 3 层 |
-| read/MilvusLoonPartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusPackedV2PartitionReader.scala | spark-base | 已搬。重写为列式是重构，未做 |
+| MilvusOption.scala、loon/Properties.scala | spark-base | 已搬。MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。Properties 只剩 FsConfig 的键名常量，全是 core.credential.StorageProperties 的别名；产出上游绑定类型的 fromMilvusOption 已删除 |
+| read/MilvusLoonPartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusPackedV2PartitionReader.scala | spark-base | 已搬。两个 reader 已改调 native-storage 的 JNI，不再经上游绑定；分发与出口下沉 core.read.exec、重写为列式仍是重构，未做 |
 | serde/ArrowConverter.scala | spark-base | 已搬。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
 | filter/VectorBruteForceSearch.scala | spark-base | 已搬。它是从 MilvusLoonPartitionReader 的读路径里调的，不是 app；最终形态等决策 16 |
-| write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | spark-base | 已搬。去向等决策 14 |
+| write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | spark-base | 已搬，且已改调 native-storage 的 JNI（决策 14 选了自己封）。下沉 core.write.exec 仍是重构，未做 |
 | write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusUtil.scala 的 MilvusFieldData | spark-base | 已搬。整条 `format("milvus")` 写链是一个整体，上半截是 DataSource V2 的接口实现；下放 apps.legacy 要先有 W7 的注册表，那是重构 |
 | write/MilvusSparkNativeImportWriter.scala | 删除 | 已删，全仓零引用 |
 | operations/backfill/* | apps.backfill | 已迁，包名从 operations.backfill 改成 apps.backfill |
 | expressions/、extensions/ | apps.search | 已迁 |
 | tools/* | apps.tools | 已迁 |
 | src/test/**、src/it/** | 各模块的 src/test | 已迁。core 32、compat 43、client 20、spark-4.0 261、apps-4.0 212 个用例；integration-4.0 收 3 个集成用例 |
-| milvus-storage/java 的 Java 绑定 | native-storage | 未做。四条 Spark 线目前仍引用这个 unmanaged jar，它只发 2.13，所以 3.5 线的 Scala 2.12 产物也卡在这里 |
+| milvus-storage/java 的 Java 绑定 | native-storage | 已完成。读写两侧的 loon_* 入口都由 native-storage 封装，unmanaged jar 与 Modules.legacyJni 一并移除，3.5 线的 Scala 2.12 因此解锁（core、compat、client、spark35 的 main 与 test 在 ++2.12.20 下实测编过）。欠一笔：per-batch reader 是过渡实现，结束条件是上游导出 loon_record_batch_reader_*，见 storage-access 需求 7 |
 
 ### 5.1 搬运中暴露的事实
 

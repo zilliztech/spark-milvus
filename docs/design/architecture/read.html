@@ -229,30 +229,39 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 
 <h2 id="next">八、开发大纲</h2>
 
+<p><strong>第 1 层与第 3 层的对接已完成。</strong>两个 reader、两个 writer 都走
+<code>native-storage</code> 的 JNI,凭证四处统一 <code>StorageProperties.from</code>,
+上游绑定不再进构建,3.5 线的 Scala 2.12 解锁。剩下的是把分发与出口下沉到第 2 层。</p>
+
 <div class="todo">
 <ol>
-<li><strong>把交地址那一面的 C 入口一次封完,读写一起。</strong>reader 那组
-(<code>loon_record_batch_reader_*</code>、<code>loon_segment_reader_*</code>、
-<code>loon_exttable_read_manifest</code>)加 writer 那组,外加自己的加载器——
-<code>NativeStorageLibrary</code> 现在调的是 <code>io.milvus.storage.NativeLibraryLoader</code>,
-第 1 层反过来依赖了要被替换的东西。分两次做等于把凭证、加载器、结构体那套代码写两遍。</li>
+<li><strong>写 <code>core.read.plan</code> 的 <code>InputSpec</code>。</strong>不依赖任何未定决策,
+可以先做。它把 spark 层那四个规划入口的产物变成一个可序列化的描述。</li>
 
-<li><strong>凭证换成 <code>core.credential</code>。</strong>把
-<code>Properties.fromMilvusOption</code> 换成 <code>StorageProperties.from(options)</code>
-的 <code>fs.*</code> 属性包。一处改动同时服务两个 reader 和两个 writer。
-临时凭证今天只能走 <code>fs.use_iam</code> 加环境变量,属性包缺
-<code>fs.session_token</code>,见 <a href="storage-access.html#cgap">storage-access 3.7</a>。</li>
+<li><strong>写 <code>core.read.exec</code> 的 <code>SegmentReader</code> 与注册表。</strong>
+取代 <code>MilvusPartitionReaderFactory.createReader</code> 里按
+<code>InputPartition</code> 类型的两个分支。V2 packed 的实现放
+<code>compat.v2packed</code>,启动时注册进来。</li>
 
-<li><strong>reader 换过去。</strong>V2 线先换——它的列组清单是 JVM 拼的,不依赖原生 manifest 解析,
-改动面更小;V3 线随后。换完之后读出口移到 <code>core.read.exec</code>,
-spark 层只留 Spark 接口的对接。</li>
+<li><strong>列式出口。</strong>决策 12 定了做,决策 6 定了向量列默认转、
+另给 <code>milvus.read.vector.raw</code> 出原始字节。要新写
+<code>ColumnVector</code> 与 <code>ColumnarBatch</code> 的一侧,
+并处理有删除的批要物化存活行。</li>
 
-<li><strong>writer 换过去。</strong>backfill 分支走已有的 <code>BatchUpdateManifest</code>,可以做;
-append 分支等 Milvus 新增 <code>RegisterSegments</code>,那条不在我们手上。</li>
-
-<li><strong>删掉上游绑定。</strong>读写都搬完才删得掉,<code>legacyJni</code> 那四处、
-3.5 线出不了 Scala 2.12 产物,跟着一起解决。</li>
+<li><strong>写侧下沉 <code>core.write.exec</code> 与 <code>core.write.commit</code>。</strong>
+backfill 分支走已有的 <code>BatchUpdateManifest</code>,可以做;append 分支等 Milvus 新增
+<code>RegisterSegments</code>,那条不在我们手上(能力 W1)。</li>
 </ol>
 </div>
 
-<p>第 1、2、3 步做完,读这条路就不再经过上游绑定。第 4、5 步是写侧,能力 W1 的交付还等 Milvus 新增 <code>RegisterSegments</code>。</p>
+<h2 id="debt">九、欠的两笔</h2>
+<ol>
+<li><strong>per-batch reader 是过渡实现。</strong>结束条件是上游从
+<code>libmilvus-storage</code> 导出 <code>loon_record_batch_reader_*</code>,见
+<a href="storage-access.html#reqs">storage-access 需求 7</a>。在那之前
+<code>native-storage</code> 依赖 Arrow C++,而 Arrow C++ 没有稳定 ABI——头文件必须与
+<code>libmilvus-storage</code> 静态链进去的那份一致,不一致编译不报错、运行时崩。</li>
+<li><strong>CI 不构建原生库。</strong>所以每一个真正调 C 的套件在 CI 上都会 cancel:
+读 UAT 段、写回读、多文件列组、切片回归,全部只在开发机上跑过。
+这是目前最大的覆盖缺口。</li>
+</ol>

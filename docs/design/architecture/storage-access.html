@@ -58,8 +58,8 @@ Hadoop 侧的认证机制见 <a href="storage-auth.html">storage-auth.html</a>�
 <li><strong>OSS 要靠改全局状态才能用两套身份。</strong><code>hadoop-aliyun</code> 没有按桶配置，
 backfill 只能备份八个全局键、改写、还原，并禁用 FileSystem 缓存。
 这段代码隐含一个没人测的单线程前提。</li>
-<li><strong>3.5 线出不了 Scala 2.12 产物。</strong>四条 Spark 线都还引用上游 milvus-storage 的
-Java 绑定，它只发 2.13。</li>
+<li><strong>3.5 线出不了 Scala 2.12 产物。</strong>四条 Spark 线都引用上游 milvus-storage 的
+Java 绑定，它只发 2.13。<em>已解决</em>——绑定于 2026-09-12 从构建中移除。</li>
 </ol>
 
 <h3 id="paths">1.1 同一个位置的七种写法</h3>

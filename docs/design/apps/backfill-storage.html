@@ -84,15 +84,16 @@ backfill 目前是单线程驱动这些操作，所以没有暴露，但这个�
 <h2 id="root">四、根因与出路</h2>
 <p>根因是 <strong>hadoop-aliyun 不支持按桶配置</strong>，不是我们的代码写得不好。
 在 Hadoop 的框架内，除了改全局键再还原，没有别的表达方式。</p>
-<p>milvus-storage 的 C 层没有这个问题：<code>loon_filesystem_get(properties, path)</code>
-每次调用都带一份属性，天然按路径隔离，不存在需要备份还原的全局状态。
-这是<a href="../architecture/storage-access.html#open">路线决定</a>的一条具体证据，
-比「多云覆盖」那条更贴近现有痛点。</p>
+<p>milvus-storage 的 C 层有现成的表达方式：<code>extfs.&lt;名字&gt;.&lt;属性&gt;</code> 一次注册多套
+文件系统配置，<code>loon_filesystem_get(properties, path)</code> 按 address + bucket 匹配。
+源桶和 Milvus 桶各注册一个名字，不改任何共享状态，也就没有下面那条单线程前提。
+细节见 <a href="../architecture/storage-access.html#cred-multi">storage-access.html 3.5</a>。</p>
 
-<h2 id="open">五、未决</h2>
-<ol>
-<li>并发前提没有写下来也没有测试。若将来 backfill 内部并行化，OSS 这条路会出问题。</li>
-<li>这段逻辑与 <code>ListV2SegmentsApp</code> 里的一份副本重复，收敛到哪取决于路线决定。</li>
-<li>平台之外的环境里那条 provider 链是否真的能工作，取决于 STS 模块是否在 classpath 上，
-见 <a href="../architecture/storage-auth.html#sts">storage-auth.html 5.6</a>。</li>
-</ol>
+<h2 id="open">五、这段代码的归宿</h2>
+<p>两处副本一起换成 <code>extfs.*</code>：本页讲的这处，和 <code>ListV2SegmentsApp</code> 里的
+另一份。时间点是 <code>core.credential</code> 落地，见
+<a href="../architecture/storage-access.html#next">storage-access.html 第七节</a>。</p>
+<p>换完之后两件事一起消失：第三节那个没人测的单线程前提，
+以及平台之外那条 provider 链对 classpath 上有 STS 模块的依赖
+（<a href="../architecture/storage-auth.html#sts">storage-auth.html 5.6</a>）——
+C 层自带 STS 客户端。</p>

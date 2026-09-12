@@ -1,6 +1,6 @@
 # 2.0 功能规划 `[草稿]`
 
-51 条功能按用户入口分八组。读的 19 条全程不经 Milvus 服务；写的 7 条止于作业清单，登记归 Milvus（README 2.4）。优先级取值和顺序见 README 第 3 节，实现位置用 [modules.md](modules.md) 的包名。名词（段、列组、Manifest、快照、backfill）沿用 README 第 0 节。
+51 条功能按用户入口分八组。读的 19 条全程不经 Milvus 服务；写的 7 条止于作业清单，登记归 Milvus（README 2.4）。优先级取值和顺序见 README 第 3 节，实现位置用 [modules.md](architecture/modules.md) 的包名。名词（段、列组、Manifest、快照、backfill）沿用 README 第 0 节。
 
 ## 1 表读
 
@@ -127,5 +127,5 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 |---|---|
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
 | A7 | 清理暂存要 `spark.procedure`，那个包目前是空的，等第 3 层拆分 |
-| G5 | 指标要 native-storage 的 JNI 层留计数器，第 1 层还是占位 |
+| G5 | 指标要 native-storage 的 JNI 层留计数器。第 1 层已经写了（读写两侧的 loon_* 封装加自己的加载器），计数器还没加 |
 

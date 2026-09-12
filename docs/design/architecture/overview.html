@@ -175,7 +175,7 @@
     <div class="brand">spark-milvus <em>2.0</em></div>
     <nav class="top">
       <a href="#layers">分层</a><a href="#tree">目录</a><a href="#read">读</a><a href="#write">写</a>
-      <a href="#build">构建</a><a href="#caps">功能</a><a href="#order">顺序</a><a href="#open">未定</a><a href="lance-spark.html">lance 对照 →</a>
+      <a href="#build">构建</a><a href="#caps">功能</a><a href="#order">顺序</a><a href="#open">未定</a><a href="../research/lance-spark.html">lance 对照 →</a>
     </nav>
   </div>
 </header>
@@ -194,7 +194,7 @@
   <div class="fact"><b>6 → 2</b><span>一个向量值的拷贝次数</span></div>
   <div class="fact"><b>51</b><span>条功能，分八组</span></div>
   <div class="fact"><b>4</b><span>条 Spark 线各出产物</span></div>
-  <div class="fact"><b>12</b><span>条决策还没定</span></div>
+  <div class="fact"><b>6</b><span>条决策还没定</span></div>
 </div>
 
 <section id="layers">
@@ -864,17 +864,14 @@
 </section>
 
 <section id="open">
-  <h2><span class="n">08</span>还没定的 12 条</h2>
-  <p class="claim">其中三条挡在 P0 前面：类型映射决定 ColumnVector 怎么写，表读出口决定要不要多一次拷贝，SegmentWriter 决定原生层要不要连写一起包。</p>
+  <h2><span class="n">08</span>还没定的 6 条</h2>
+  <p class="claim">挡在 P0 前面的三条都已于 2026-09-12 定案：类型映射（6）、表读出口（12）、SegmentWriter（14），见总体设计第 6 节。剩下的六条都不挡 P0。</p>
 
   <div class="tw">
   <table>
     <thead><tr><th style="width:7%">编号</th><th style="width:26%">决策</th><th style="width:42%">选项</th><th>什么时候必须定</th></tr></thead>
     <tbody>
-      <tr><td class="mono">6</td><td>类型映射</td><td>Float16 与 BFloat16、Int8 向量、稀疏、Array 各选透传还是转换</td><td>列式 reader 动手前</td></tr>
-      <tr><td class="mono">12</td><td>表读出口是否压掉被过滤的行</td><td>压缩多一次拷贝，或交位图给 Spark 逐行跳过</td><td>列式 reader 动手前</td></tr>
-      <tr><td class="mono">14</td><td>SegmentWriter</td><td>复用 1.x 的写入器，或在新 JNI 上重写</td><td>storage JNI 定范围前</td></tr>
-      <tr><td class="mono">5</td><td>元数据列名</td><td><code>_segment_id</code> 还是 1.x 的 <code>$segment_id</code>；<code>partition</code> 列是否保留</td><td>接口层</td></tr>
+            <tr><td class="mono">5</td><td>元数据列名</td><td><code>_segment_id</code> 还是 1.x 的 <code>$segment_id</code>；<code>partition</code> 列是否保留</td><td>接口层</td></tr>
       <tr><td class="mono">11</td><td>谁建快照、建前是否先 Flush</td><td>Connector 的 CALL 建，或只用 Milvus 的自动快照</td><td>接口层</td></tr>
       <tr><td class="mono">17</td><td>Milvus 表达式解析器的 antlr runtime 放哪</td><td>核心层自带并重定位，或各 Spark 线各生成一份</td><td>谓词求值</td></tr>
       <tr><td class="mono">10</td><td>backfill 写模式的分布与排序</td><td>实现 Spark 的分布要求，或场景代码自己 shuffle</td><td>写路径</td></tr>
@@ -902,7 +899,7 @@
 </section>
 
 <footer>
-  设计文档在仓库的 <code>docs/design/</code>：<code>README.md</code> 总览与决策日志，<code>capabilities.md</code> 功能规划，<code>modules.md</code> 模块、包与目录，<a href="lance-spark.html">lance-spark 对照</a>。分支 <code>refactor/v2</code>，版本线 <code>2.0.0</code>。本页是工作稿，随决策更新。
+  <a href="../README.md">设计入口与决策日志</a>按主题组织文档；<a href="../capabilities.md">能力规划</a>定义功能承诺，<a href="modules.md">模块设计</a>定义包与目录，<a href="../engineering/sbt.html">sbt 规范</a>说明构建实践，<a href="../research/lance-spark.html">Lance 对比</a>记录外部方案。分支 <code>refactor/v2</code>，版本线 <code>2.0.0</code>。本页是工作稿，随决策更新。
 </footer>
 
 </div>
