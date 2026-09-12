@@ -28,6 +28,7 @@ find_library(MILVUS_STORAGE_LIB
 add_library(native-storage-jni SHARED
   storage_native_jni.cpp
   segment_reader_jni.cpp
+  writer_jni.cpp
 )
 
 # Arrow C++ headers. segment_reader_jni.cpp calls arrow::Concatenate,

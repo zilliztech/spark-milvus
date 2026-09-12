@@ -127,4 +127,110 @@ public final class StorageNative {
             long recordBatchReaderHandle, long arrayAddress, long schemaAddress);
 
     public static native void recordBatchReaderDestroy(long recordBatchReaderHandle);
+
+    // ---------------------------------------------------------------------
+    // Write path: the dataset writer, the segment writer, and the manifest
+    // transaction. Implemented in writer_jni.cpp.
+    //
+    // Two kinds of column-group handle appear below and they are not
+    // interchangeable. {@link #columnGroupsCreate} returns one built here from
+    // a Java layout, released with {@link #columnGroupsDestroy}. The writers
+    // return one the C layer allocated, released with
+    // {@link #nativeColumnGroupsDestroy}; only that kind can be appended to a
+    // transaction.
+    // ---------------------------------------------------------------------
+
+    /**
+     * Opens a writer at {@code basePath}.
+     *
+     * <p>{@code arrowSchemaAddress} is the address of an {@code ArrowSchema}
+     * the caller exported and keeps alive until the writer is destroyed.
+     */
+    public static native long writerNew(
+            String basePath, long arrowSchemaAddress, Map<String, String> properties);
+
+    /** Writes one batch, given the address of an exported {@code ArrowArray}. */
+    public static native void writerWrite(long writerHandle, long arrowArrayAddress);
+
+    public static native void writerFlush(long writerHandle);
+
+    /**
+     * Closes the writer and returns the column groups it produced.
+     *
+     * <p>The returned handle is C-allocated; release it with
+     * {@link #nativeColumnGroupsDestroy}. Both metadata arrays may be null.
+     */
+    public static native long writerClose(
+            long writerHandle, String[] metadataKeys, String[] metadataValues);
+
+    public static native void writerDestroy(long writerHandle);
+
+    /** Opens the packed segment writer. TEXT columns are out of scope, so no
+     * LOB configuration is exposed. */
+    public static native long segmentWriterNew(
+            long arrowSchemaAddress, String segmentPath, Map<String, String> properties);
+
+    public static native void segmentWriterWrite(long segmentWriterHandle, long arrowArrayAddress);
+
+    public static native void segmentWriterFlush(long segmentWriterHandle);
+
+    /**
+     * Closes the segment writer.
+     *
+     * @return two elements: the C-allocated column groups handle, and the
+     *     number of rows written. One array because close runs once.
+     */
+    public static native long[] segmentWriterClose(long segmentWriterHandle);
+
+    public static native void segmentWriterDestroy(long segmentWriterHandle);
+
+    /**
+     * Opens a manifest transaction.
+     *
+     * <p>{@code readVersion} is the manifest version the caller read, or 0 to
+     * let the C layer pick the latest. {@code resolveId} selects the conflict
+     * policy: 0 fails on conflict, 2 overwrites.
+     */
+    public static native long transactionBegin(
+            String basePath,
+            Map<String, String> properties,
+            long readVersion,
+            int resolveId,
+            int retryLimit);
+
+    /** @return the committed manifest version. */
+    public static native long transactionCommit(long transactionHandle);
+
+    public static native long transactionReadVersion(long transactionHandle);
+
+    public static native void transactionDropColumn(long transactionHandle, String column);
+
+    /** Appends every group of a C-allocated column groups handle. */
+    public static native void transactionAppendFiles(
+            long transactionHandle, long nativeColumnGroupsHandle);
+
+    /** Adds one group of a C-allocated column groups handle, by index. */
+    public static native void transactionAddColumnGroup(
+            long transactionHandle, long nativeColumnGroupsHandle, int index);
+
+    public static native void transactionAddDeltaLog(
+            long transactionHandle, String path, long numEntries);
+
+    public static native void transactionDestroy(long transactionHandle);
+
+    // Reading back what a writer produced, which is how a caller learns the
+    // paths and row counts it has to register.
+
+    public static native int nativeColumnGroupsCount(long nativeColumnGroupsHandle);
+
+    public static native String[] nativeColumnGroupFiles(
+            long nativeColumnGroupsHandle, int index);
+
+    public static native long[] nativeColumnGroupRowCounts(
+            long nativeColumnGroupsHandle, int index);
+
+    public static native String[] nativeColumnGroupColumns(
+            long nativeColumnGroupsHandle, int index);
+
+    public static native void nativeColumnGroupsDestroy(long nativeColumnGroupsHandle);
 }

@@ -48,10 +48,9 @@ lazy val nativeStorage = Project("native-storage", file("native-storage"))
     name := "native-storage",
     moduleName := "spark-milvus-native-storage",
     Modules.javaOnly,
-    // StorageNative loads libnative-storage-jni, which links against
-    // libmilvus-storage; the upstream loader extracts both. The dependency goes
-    // away with the binding it belongs to.
-    Modules.legacyJni,
+    // No dependency on the upstream binding: NativeStorageLibrary extracts and
+    // loads libmilvus-storage and libnative-storage-jni itself. Layer 1 is
+    // self-contained, which is the precondition for deleting that binding.
     publish / skip := true
   )
 

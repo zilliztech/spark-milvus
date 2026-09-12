@@ -178,7 +178,15 @@ try {
 </table>
 <p>写侧那个 schema 结构体活到 writer 关闭,不能在第一批之后释放。</p>
 
-<h3>2.4 不用 ArrowArrayStream</h3>
+<h3>2.4 一个消费方一份 schema</h3>
+<p><strong><code>loon_writer_new</code> 与 <code>loon_reader_new</code> 都接管交给它们的
+<code>ArrowSchema</code>。</strong>C Data Interface 的 schema 是移动语义,导入方拿走
+<code>release</code>。所以同一个导出好的结构体不能先给 writer 再给 reader——第二次会拿到
+<code>Cannot import released ArrowSchema</code>。每个消费方各导出一份。</p>
+<p>JVM 侧那一半仍然要 <code>close</code>:结构体的内存是 allocator 分配的,
+接管只拿走 <code>release</code>,不负责释放外壳。</p>
+
+<h3>2.5 不用 ArrowArrayStream</h3>
 <div class="warn">
 <strong>C 层有 <code>loon_segment_reader_get_stream</code>,上游 Java 绑定有
 <code>MilvusSegmentReader.getStream</code>,我们一处都不用。</strong>
@@ -235,7 +243,7 @@ Spark 的 <code>ColumnarBatch</code> 没有表达行有效性的成员(3.5.5 与
 <table>
 <tr><th></th><th>状态</th></tr>
 <tr><td>交字节的面</td><td>已经到位。<code>NativeObjectStore</code> 走我们自己的 JNI(<code>native-storage</code>),driver 侧四类元数据读取全部经过它,<code>core.io.hadoop</code> 已删除</td></tr>
-<tr><td>交地址的面</td><td>还在上游 Java 绑定里。两个 <code>PartitionReader</code> 与两个 writer 都 <code>import io.milvus.storage</code>,<code>native-storage</code> 只封了 <code>loon_filesystem_*</code></td></tr>
+<tr><td>交地址的面</td><td><code>native-storage</code> 已经封完读写两侧的 C 入口,真实数据验过(读 UAT 段 682000 行;写一个段再读回,值逐行对上)。第 3 层还没切——两个 <code>PartitionReader</code> 与两个 writer 仍然 <code>import io.milvus.storage</code></td></tr>
 </table>
 
 <p>下一步是把交地址这一面的 C 入口一次封完,读写一起——两侧共用凭证、加载器和上面 2.1、2.2 那套结构体代码,
