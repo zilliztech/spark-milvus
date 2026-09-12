@@ -113,6 +113,7 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
 
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
     val milvusOption = MilvusOption(options)
+    val rawVectors = MilvusOption.readVectorRaw(options)
 
     // Check for snapshot mode - use snapshot schema if provided
     MilvusOption.validateSnapshotModeOptions(options)
@@ -166,7 +167,7 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
           schema.fields.map(field =>
             StructField(
               field.name,
-              DataTypeUtil.toDataType(field),
+              DataTypeUtil.toDataType(field, rawVectors),
               field.nullable,
               DataTypeUtil.metadata(field)
             )
@@ -192,6 +193,11 @@ case class MilvusTable(
     with Logging {
   var milvusCollection: MilvusCollectionInfo = _
   var partitionID: Long = 0L
+  // Vector columns come out as stored bytes when the read asks for them raw,
+  // which changes the schema, so it is read here rather than at the reader.
+  private val rawVectors: Boolean = MilvusOption.readVectorRaw(
+    milvusOption.options
+  )
   // full_meta.json parsed during initFromBackup, threaded directly to the scan
   // planner (never through options, so it is neither re-serialized nor shipped
   // to executors).
@@ -667,7 +673,7 @@ case class MilvusTable(
     fields = fields ++ filteredFields.map(field =>
       StructField(
         field.name,
-        DataTypeUtil.toDataType(field),
+        DataTypeUtil.toDataType(field, rawVectors),
         field.nullable,
         DataTypeUtil.metadata(field)
       )

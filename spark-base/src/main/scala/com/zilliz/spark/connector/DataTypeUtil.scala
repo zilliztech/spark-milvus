@@ -35,6 +35,22 @@ object DataTypeUtil {
     builder.build()
   }
 
+  /** The Spark type a field is presented as.
+    *
+    * @param rawVectors
+    *   `milvus.read.vector.raw`: hand vector columns over as the bytes Milvus
+    *   stored rather than decoding them. Scalar columns are unaffected.
+    */
+  def toDataType(
+      fieldSchema: FieldSchema,
+      rawVectors: Boolean
+  ): SparkDataType =
+    if (rawVectors && MilvusTypes.isVectorType(fieldSchema.dataType)) {
+      DataTypes.BinaryType
+    } else {
+      toDataType(fieldSchema)
+    }
+
   def toDataType(fieldSchema: FieldSchema): SparkDataType = {
     val dataType = fieldSchema.dataType
     dataType match {

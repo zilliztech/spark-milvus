@@ -187,6 +187,7 @@ object MilvusOption {
     "milvus.snapshot.schema.bytes" // Base64 encoded protobuf CollectionSchema bytes
   val SnapshotMaxJsonBytes = "milvus.snapshot.max.json.bytes"
   val ReadApplyDeletes = "milvus.read.apply.deletes"
+  val ReadVectorRaw = "milvus.read.vector.raw"
   val ClientSnapshotName = "milvus.client.snapshot.name"
   val ClientSnapshotDescription = "milvus.client.snapshot.description"
   val ClientSnapshotCompactionProtectionSeconds =
@@ -330,6 +331,35 @@ object MilvusOption {
 
   def readApplyDeletes(options: CaseInsensitiveStringMap): Boolean = {
     readApplyDeletesFrom(key => Option(options.get(key)))
+  }
+
+  /** Whether vector columns come out as the bytes Milvus stored.
+    *
+    * Default false: vectors are decoded into Spark's own types (decision 6).
+    * True hands the stored bytes over as BinaryType, which is what a job that
+    * feeds them straight to a native library wants — converting to Array[Float]
+    * and back again is pure waste there.
+    */
+  private def readVectorRawFrom(
+      getOption: String => Option[String]
+  ): Boolean = {
+    getOption(ReadVectorRaw)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(_.equalsIgnoreCase("true"))
+      .getOrElse(false)
+  }
+
+  def readVectorRaw(options: Map[String, String]): Boolean = {
+    readVectorRawFrom { key =>
+      options.collectFirst {
+        case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
+      }
+    }
+  }
+
+  def readVectorRaw(options: CaseInsensitiveStringMap): Boolean = {
+    readVectorRawFrom(key => Option(options.get(key)))
   }
 
   private def clientSnapshotAutoCleanupFrom(

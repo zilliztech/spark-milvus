@@ -25,6 +25,14 @@ object MilvusTypes {
   def isDenseVectorType(dataType: MilvusDataType): Boolean =
     DenseVectorTypes.contains(dataType)
 
+  /** Every vector type, dense or sparse. What `milvus.read.vector.raw` acts on:
+    * a sparse vector is stored as bytes too, so raw mode hands those over
+    * unchanged just the same.
+    */
+  def isVectorType(dataType: MilvusDataType): Boolean =
+    isDenseVectorType(dataType) ||
+      dataType == MilvusDataType.SparseFloatVector
+
   /** Every vector field carries a dim, and it has to fit in an Int: the width
     * of Arrow's FixedSizeBinary is an int.
     */
