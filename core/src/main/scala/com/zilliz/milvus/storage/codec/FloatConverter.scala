@@ -111,14 +111,18 @@ object FloatConverter {
     }
 
     // Reconstruct the 16-bit bfloat16 value (little-endian: low byte first)
-    val bfloat16Bits = ((bytes(1) & 0xff) << 8) | (bytes(0) & 0xff)
+    bfloat16BitsToFloat(((bytes(1) & 0xff) << 8) | (bytes(0) & 0xff))
+  }
 
-    // To convert bfloat16 to float32, we essentially shift the 16 bits left by 16
-    // and pad the lower 16 bits with zeros. This is because bfloat16 has the
-    // same exponent range as float32, and its mantissa is the upper part of float32's.
-    val float32Bits = bfloat16Bits << 16
-
-    java.lang.Float.intBitsToFloat(float32Bits)
+  /** Same conversion from the 16 bits themselves.
+    *
+    * The columnar reader decodes straight out of an Arrow buffer and calls this
+    * once per element, so it must not allocate a `Seq[Byte]` to do it.
+    */
+  def bfloat16BitsToFloat(bits: Int): Float = {
+    // bfloat16 has float32's exponent range and its mantissa is float32's upper
+    // part, so widening is a shift with zero padding.
+    java.lang.Float.intBitsToFloat((bits & 0xffff) << 16)
   }
 
   def fromFloat16Bytes(bytes: Seq[Byte]): Float = {
@@ -129,8 +133,13 @@ object FloatConverter {
     }
 
     // Reconstruct the 16-bit float16 value (little-endian: low byte first)
-    val f16Bits = ((bytes(1) & 0xff) << 8) | (bytes(0) & 0xff)
+    float16BitsToFloat(((bytes(1) & 0xff) << 8) | (bytes(0) & 0xff))
+  }
 
+  /** Same conversion from the 16 bits themselves. See [[bfloat16BitsToFloat]]
+    * for why this exists separately.
+    */
+  def float16BitsToFloat(f16Bits: Int): Float = {
     // Extract float16 components: 1 sign bit, 5 exponent bits, 10 fraction bits
     val f16Sign = (f16Bits >>> 15) & 0x1
     val f16Exp = (f16Bits >>> 10) & 0x1f
