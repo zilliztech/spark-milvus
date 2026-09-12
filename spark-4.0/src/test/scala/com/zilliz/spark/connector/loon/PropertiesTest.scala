@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.loon
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.MilvusOption
 
 /** Unit tests for Properties and FsConfig constants
@@ -206,96 +207,50 @@ class PropertiesTest extends AnyFunSuite with Matchers {
     Properties.FsConfig.FsRegion should not be empty
   }
 
-  test("fromMilvusOption requires bucket name in IAM mode") {
-    val options = Map(
-      MilvusOption.MilvusUri -> "http://localhost:19530",
-      Properties.FsConfig.FsUseIam -> "true"
-    )
+  // Validation itself lives in core.credential and is tested there
+  // (StoragePropertiesTest). These check that MilvusOption's map reaches it.
 
+  test("fromMilvusOption reports a missing bucket name") {
     val err = intercept[IllegalArgumentException] {
-      Properties.fromMilvusOption(MilvusOption(options))
-    }
-
-    err.getMessage should include(Properties.FsConfig.FsBucketName)
-    err.getMessage should include(Properties.FsConfig.FsUseIam)
-    err.getMessage should include("must be set")
-  }
-
-  test("fromMilvusOption rejects blank bucket name in non-IAM mode") {
-    val options = Map(
-      MilvusOption.MilvusUri -> "http://localhost:19530",
-      Properties.FsConfig.FsBucketName -> "   "
-    )
-
-    val err = intercept[IllegalArgumentException] {
-      Properties.fromMilvusOption(MilvusOption(options))
-    }
-
-    err.getMessage should include(Properties.FsConfig.FsBucketName)
-    err.getMessage should include("must not be blank")
-    err.getMessage should not include (Properties.FsConfig.FsUseIam)
-  }
-
-  test("fromMilvusOption rejects blank bucket name in IAM mode") {
-    val options = Map(
-      MilvusOption.MilvusUri -> "http://localhost:19530",
-      Properties.FsConfig.FsUseIam -> "true",
-      Properties.FsConfig.FsBucketName -> "   "
-    )
-
-    val err = intercept[IllegalArgumentException] {
-      Properties.fromMilvusOption(MilvusOption(options))
-    }
-
-    err.getMessage should include(Properties.FsConfig.FsBucketName)
-    err.getMessage should include(Properties.FsConfig.FsUseIam)
-    err.getMessage should include("must not be blank")
-  }
-
-  test("fromMilvusOption trims fs.use_iam before IAM-mode validation") {
-    val options = Map(
-      MilvusOption.MilvusUri -> "http://localhost:19530",
-      Properties.FsConfig.FsUseIam -> " true "
-    )
-
-    val err = intercept[IllegalArgumentException] {
-      Properties.fromMilvusOption(MilvusOption(options))
-    }
-
-    err.getMessage should include(Properties.FsConfig.FsBucketName)
-    err.getMessage should include(Properties.FsConfig.FsUseIam)
-  }
-
-  test("normalizedFsUseIamValue trims whitespace before FFI forwarding") {
-    Properties.normalizedFsUseIamValue(
-      Map(Properties.FsConfig.FsUseIam -> " true ")
-    ) shouldBe Some("true")
-  }
-
-  test("normalizedFsBucketNameValue trims whitespace before FFI forwarding") {
-    Properties.normalizedFsBucketNameValue(
-      Map(Properties.FsConfig.FsBucketName -> " my-bucket ")
-    ) shouldBe Some("my-bucket")
-  }
-
-  test("normalizedFsBucketNameValue drops blank bucket names") {
-    Properties.normalizedFsBucketNameValue(
-      Map(Properties.FsConfig.FsBucketName -> "   ")
-    ) shouldBe None
-  }
-
-  test("normalizedAssumeRoleOptions forwards only non-blank role settings") {
-    Properties.normalizedAssumeRoleOptions(
-      Map(
-        Properties.FsConfig.FsRoleArn ->
-          " arn:aws:iam::123456789012:role/data-role ",
-        Properties.FsConfig.FsSessionName -> " spark-job ",
-        Properties.FsConfig.FsExternalId -> "   "
+      Properties.fromMilvusOption(
+        MilvusOption(Map(MilvusOption.MilvusUri -> "http://localhost:19530"))
       )
-    ) shouldBe Map(
-      Properties.FsConfig.FsRoleArn ->
-        "arn:aws:iam::123456789012:role/data-role",
-      Properties.FsConfig.FsSessionName -> "spark-job"
-    )
+    }
+    err.getMessage should include(Properties.FsConfig.FsBucketName)
+  }
+
+  test("fromMilvusOption treats a blank value as missing") {
+    val err = intercept[IllegalArgumentException] {
+      Properties.fromMilvusOption(
+        MilvusOption(
+          Map(
+            MilvusOption.MilvusUri -> "http://localhost:19530",
+            Properties.FsConfig.FsBucketName -> "   "
+          )
+        )
+      )
+    }
+    err.getMessage should include(Properties.FsConfig.FsBucketName)
+  }
+
+  test("fromMilvusOption reports a missing endpoint once the bucket is given") {
+    val err = intercept[IllegalArgumentException] {
+      Properties.fromMilvusOption(
+        MilvusOption(
+          Map(
+            MilvusOption.MilvusUri -> "http://localhost:19530",
+            Properties.FsConfig.FsBucketName -> "b"
+          )
+        )
+      )
+    }
+    err.getMessage should include(Properties.FsConfig.FsAddress)
+  }
+
+  test("FsConfig constants are the keys core.credential produces") {
+    Properties.FsConfig.FsBucketName shouldBe StorageProperties.BucketName
+    Properties.FsConfig.FsAddress shouldBe StorageProperties.Address
+    Properties.FsConfig.FsUseIam shouldBe StorageProperties.UseIam
+    Properties.FsConfig.FsRoleArn shouldBe StorageProperties.RoleArn
   }
 }

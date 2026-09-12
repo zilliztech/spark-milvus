@@ -7,14 +7,13 @@ import scala.collection.mutable
 import scala.util.control.NonFatal
 
 import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
-import org.apache.hadoop.conf.Configuration
 import org.apache.parquet.example.data.Group
 import org.apache.parquet.hadoop.api.ReadSupport
 import org.apache.parquet.hadoop.example.GroupReadSupport
 import org.apache.parquet.hadoop.ParquetReader
 import org.apache.parquet.io.{InputFile, SeekableInputStream}
 
-import com.zilliz.milvus.storage.io.hadoop.HadoopIO
+import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{V2DeltaLogFile, V2SegmentInfo}
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -35,7 +34,7 @@ object MilvusDeltaLogReader extends com.zilliz.milvus.storage.Logging {
       segments: Seq[V2SegmentInfo],
       milvusSchema: CollectionSchema,
       bucket: String,
-      hadoopConf: Configuration
+      store: ObjectStore
   ): Either[Throwable, Map[Long, MilvusDeletePlan]] = {
     val pkField = primaryKeyField(milvusSchema)
     val deleteOnlySegments = segments.filter(_.columnGroups.isEmpty)
@@ -46,12 +45,12 @@ object MilvusDeltaLogReader extends com.zilliz.milvus.storage.Logging {
         deleteOnlySegments,
         pkField,
         bucket,
-        hadoopConf
+        store
       )
       ownPlans <- sequence(
         dataSegments.map { seg =>
-          loadDeletePlan(seg.deltaLogs, pkField, bucket, hadoopConf).map {
-            ownPlan => seg.segmentId -> ownPlan
+          loadDeletePlan(seg.deltaLogs, pkField, bucket, store).map { ownPlan =>
+            seg.segmentId -> ownPlan
           }
         }
       )
@@ -86,7 +85,7 @@ object MilvusDeltaLogReader extends com.zilliz.milvus.storage.Logging {
       deleteOnlySegments: Seq[V2SegmentInfo],
       pkField: FieldSchema,
       bucket: String,
-      hadoopConf: Configuration
+      store: ObjectStore
   ): Either[Throwable, Map[Long, MilvusDeletePlan]] = {
     sequence(
       deleteOnlySegments.groupBy(_.partitionId).toSeq.map {
@@ -95,7 +94,7 @@ object MilvusDeltaLogReader extends com.zilliz.milvus.storage.Logging {
             segments.flatMap(_.deltaLogs),
             pkField,
             bucket,
-            hadoopConf
+            store
           ).map(partitionId -> _)
       }
     ).map(_.toMap)
@@ -130,15 +129,13 @@ object MilvusDeltaLogReader extends com.zilliz.milvus.storage.Logging {
       deltaLogs: Seq[V2DeltaLogFile],
       pkField: FieldSchema,
       bucket: String,
-      hadoopConf: Configuration
+      store: ObjectStore
   ): Either[Throwable, MilvusDeletePlan] = {
     try {
       validatePkType(pkField)
       val plans = deltaLogs.map { log =>
-        val fullyQualifiedPath =
-          StoragePath.resolvePath(log.logPath, bucket)
-        val bytes = HadoopIO.readAllBytes(hadoopConf, fullyQualifiedPath)
-        decodeDeletePlan(bytes, pkField, fullyQualifiedPath)
+        val at = StoragePath.parse(log.logPath, bucket)
+        decodeDeletePlan(store.readAll(at), pkField, at.key)
       }
       sequence(plans).map(MilvusDeletePlan.union)
     } catch {

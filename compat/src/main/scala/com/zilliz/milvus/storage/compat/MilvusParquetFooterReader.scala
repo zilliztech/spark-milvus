@@ -1,15 +1,14 @@
 package com.zilliz.milvus.storage.compat
 
-import java.net.URI
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.parquet.hadoop.util.HadoopStreams
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.io.InputFile
 import org.apache.parquet.schema.Type
+
+import com.zilliz.milvus.storage.io.ObjectStore
 
 /** Parquet kv-metadata produced by the milvus-storage packed writer
   * (StorageV2).
@@ -60,19 +59,17 @@ object MilvusParquetFooterReader extends com.zilliz.milvus.storage.Logging {
 
   /** Open the parquet file at `path` and return its kv-metadata projection.
     *
-    * The caller is responsible for handing in a `Configuration` that already
-    * has any per-bucket S3 credentials / endpoint set (see
-    * `MilvusBackfill.configureHadoopS3ForPath`). For local files a plain `new
-    * Configuration()` works.
+    * `path` is a key in `store`, which is already bound to the right bucket and
+    * credentials.
     *
     * @return
     *   `Right(meta)` on success. `Left(throwable)` on I/O or parse failure.
     */
   def read(
       path: String,
-      hadoopConf: Configuration
+      store: ObjectStore
   ): Either[Throwable, ParquetFooterMetadata] = {
-    readWithFileSystem(path, hadoopConf) { inputFile =>
+    readAt(path, store) { inputFile =>
       val parquet = ParquetFileReader.open(inputFile)
       try {
         val kv = parquet.getFooter.getFileMetaData.getKeyValueMetaData
@@ -110,9 +107,9 @@ object MilvusParquetFooterReader extends com.zilliz.milvus.storage.Logging {
     */
   def readFieldIdsFromSchema(
       path: String,
-      hadoopConf: Configuration
+      store: ObjectStore
   ): Either[Throwable, Seq[Long]] = {
-    readWithFileSystem(path, hadoopConf) { inputFile =>
+    readAt(path, store) { inputFile =>
       val parquet = ParquetFileReader.open(inputFile)
       try {
         fieldIdsFromMessageType(
@@ -145,54 +142,12 @@ object MilvusParquetFooterReader extends com.zilliz.milvus.storage.Logging {
     }.toSeq
   }
 
-  private def readWithFileSystem[T](
-      path: String,
-      hadoopConf: Configuration
-  )(read: InputFile => T): Either[Throwable, T] = {
-    var uri: URI = null
-    var fs: FileSystem = null
-    try {
-      uri = new URI(path)
-      val hadoopPath = new Path(uri)
-      fs = hadoopPath.getFileSystem(hadoopConf)
-      readWithFileSystem(fs, path)(read)
-    } catch {
-      case NonFatal(e) => Left(e)
-    } finally {
-      Option(uri).flatMap(uri => Option(uri.getScheme)).foreach { scheme =>
-        if (
-          fs != null && hadoopConf
-            .getBoolean(s"fs.$scheme.impl.disable.cache", false)
-        ) {
-          fs.close()
-        }
-      }
-    }
-  }
-
-  /** Read with a caller-supplied `FileSystem` (reused across many footer reads,
-    * e.g. all binlogs of a backup) instead of resolving a fresh one per file —
-    * with `fs.s3a.impl.disable.cache=true` every `FileSystem.get` otherwise
-    * constructs a whole S3A client + thread pool.
-    */
-  private[storage] def readWithFileSystem[T](
-      fs: FileSystem,
-      path: String
-  )(read: InputFile => T): Either[Throwable, T] = {
-    try {
-      val hadoopPath = new Path(path)
-      val fileStatus = fs.getFileStatus(hadoopPath)
-      val inputFile = new InputFile {
-        override def getLength: Long = fileStatus.getLen
-
-        override def newStream(): org.apache.parquet.io.SeekableInputStream =
-          HadoopStreams.wrap(fs.open(hadoopPath))
-      }
-      Right(read(inputFile))
-    } catch {
-      case NonFatal(e) => Left(e)
-    }
-  }
+  private def readAt[T](
+      key: String,
+      store: ObjectStore
+  )(read: InputFile => T): Either[Throwable, T] =
+    try Right(read(ObjectStoreInputFile(store, key)))
+    catch { case NonFatal(e) => Left(e) }
 
   /** The projection of a parquet footer the backup datasource needs to build a
     * `V2ColumnGroup`: the file's own top-level field IDs plus its total row
@@ -217,21 +172,9 @@ object MilvusParquetFooterReader extends com.zilliz.milvus.storage.Logging {
     */
   def readRowCount(
       path: String,
-      hadoopConf: Configuration
+      store: ObjectStore
   ): Either[Throwable, Long] = {
-    readWithFileSystem(path, hadoopConf) { inputFile =>
-      sumRowGroups(inputFile)
-    }
-  }
-
-  /** [[readRowCount]] with a caller-supplied `FileSystem` (reused across many
-    * files, e.g. all binlogs of a backup read).
-    */
-  def readRowCount(
-      fs: FileSystem,
-      path: String
-  ): Either[Throwable, Long] = {
-    readWithFileSystem(fs, path) { inputFile =>
+    readAt(path, store) { inputFile =>
       sumRowGroups(inputFile)
     }
   }
@@ -251,19 +194,9 @@ object MilvusParquetFooterReader extends com.zilliz.milvus.storage.Logging {
     */
   def readFieldIdsAndRowCount(
       path: String,
-      hadoopConf: Configuration
+      store: ObjectStore
   ): Either[Throwable, ParquetFooterInfo] = {
-    readWithFileSystem(path, hadoopConf) { inputFile =>
-      footerInfo(inputFile, path)
-    }
-  }
-
-  /** [[readFieldIdsAndRowCount]] with a caller-supplied `FileSystem`. */
-  def readFieldIdsAndRowCount(
-      fs: FileSystem,
-      path: String
-  ): Either[Throwable, ParquetFooterInfo] = {
-    readWithFileSystem(fs, path) { inputFile =>
+    readAt(path, store) { inputFile =>
       footerInfo(inputFile, path)
     }
   }

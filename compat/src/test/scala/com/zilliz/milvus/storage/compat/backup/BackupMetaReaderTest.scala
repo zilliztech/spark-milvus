@@ -30,6 +30,14 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType}
   */
 class BackupMetaReaderTest extends AnyFunSuite with Matchers {
 
+  /** Tests read local files, so the store carries no bucket. */
+  private def localStore: com.zilliz.milvus.storage.io.ObjectStore =
+    new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
+      new org.apache.hadoop.conf.Configuration(),
+      "",
+      "file"
+    )
+
   private val groupASchema: MessageType = Types
     .buildMessage()
     .required(PrimitiveTypeName.INT64)
@@ -59,7 +67,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       rows: List[SimpleGroupFactory => Group]
   ): Unit = {
     Files.createDirectories(target.getParent)
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     GroupWriteSupport.setSchema(schema, conf)
     val writer = ExampleParquetWriter
       .builder(new HPath(target.toUri))
@@ -485,7 +493,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       )
 
       val meta = BackupMetaReader
-        .readMeta(new Configuration(), dir.toString)
+        .readMeta(localStore, dir.toString)
         .getOrElse(fail("expected Right"))
       meta.name shouldBe "b1"
       meta.isSnapshotFormat shouldBe false
@@ -564,7 +572,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         .getOrElse(fail("expected Right"))
 
       val segments = BackupMetaReader
-        .toV2Segments(meta, new Configuration(), backupDir, collectionId = 444L)
+        .toV2Segments(meta, localStore, backupDir, collectionId = 444L)
         .getOrElse(fail("expected Right"))
 
       segments should have size 2
@@ -627,7 +635,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       val segments = BackupMetaReader
         .toV2Segments(
           twoColl,
-          new Configuration(),
+          localStore,
           backupDir,
           collectionId = 444L
         )
@@ -637,7 +645,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       BackupMetaReader
         .toV2Segments(
           twoColl,
-          new Configuration(),
+          localStore,
           backupDir,
           collectionId = 555L
         )
@@ -665,7 +673,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       val segments = BackupMetaReader
         .toV2Segments(
           meta,
-          new Configuration(),
+          localStore,
           backupDir,
           applyDeletes = false,
           collectionId = 444L
@@ -696,7 +704,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         .getOrElse(fail("expected Right"))
 
       val segments = BackupMetaReader
-        .toV2Segments(meta, new Configuration(), backupDir, collectionId = 444L)
+        .toV2Segments(meta, localStore, backupDir, collectionId = 444L)
         .getOrElse(fail("expected Right"))
 
       val seg = segments.find(_.segmentId == 777L).get
@@ -724,12 +732,17 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
   test(
     "buildV2Segment fails hard for non-L0 non-StorageV2 and keeps L0 without a storage version"
   ) {
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
 
     // StorageV3 data segment -> Left.
     val v3 = BackupMetaReader.SegmentBackup(segmentId = 1L, storageVersion = 3L)
     BackupMetaReader
-      .buildV2Segment(v3, conf, "/tmp/backup", applyDeletes = true)
+      .buildV2SegmentWithStore(
+        v3,
+        localStore,
+        "/tmp/backup",
+        applyDeletes = true
+      )
       .left
       .toOption
       .get
@@ -739,7 +752,12 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     // an error).
     val v1 = BackupMetaReader.SegmentBackup(segmentId = 2L, storageVersion = 0L)
     BackupMetaReader
-      .buildV2Segment(v1, conf, "/tmp/backup", applyDeletes = true)
+      .buildV2SegmentWithStore(
+        v1,
+        localStore,
+        "/tmp/backup",
+        applyDeletes = true
+      )
       .isLeft shouldBe true
 
     // L0 delete-only segment with storage_version 0/omitted (how Milvus 2.6
@@ -763,9 +781,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         )
       )
     )
-    BackupMetaReader.buildV2Segment(
+    BackupMetaReader.buildV2SegmentWithStore(
       l0NoVersion,
-      conf,
+      localStore,
       "/tmp/backup",
       applyDeletes = true
     ) match {
@@ -777,9 +795,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       case other => fail(s"expected Right(Some), got $other")
     }
     // With applyDeletes=false the L0 segment is skipped entirely.
-    BackupMetaReader.buildV2Segment(
+    BackupMetaReader.buildV2SegmentWithStore(
       l0NoVersion,
-      conf,
+      localStore,
       "/tmp/backup",
       applyDeletes = false
     ) shouldBe Right(None)
@@ -799,7 +817,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       .getOrElse(fail("expected Right"))
     val result = BackupMetaReader.toV2Segments(
       meta,
-      new Configuration(),
+      localStore,
       "s3a://bucket/backup/b1",
       collectionId = 444L
     )
@@ -870,7 +888,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
   test(
     "buildV2Segment fails hard when a non-empty StorageV2 segment has no binlogs"
   ) {
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     val seg = BackupMetaReader.SegmentBackup(
       segmentId = 9L,
       storageVersion = 2L,
@@ -878,7 +896,12 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       binlogs = Seq.empty
     )
     val err = BackupMetaReader
-      .buildV2Segment(seg, conf, "/tmp/backup", applyDeletes = true)
+      .buildV2SegmentWithStore(
+        seg,
+        localStore,
+        "/tmp/backup",
+        applyDeletes = true
+      )
       .left
       .toOption
       .get
@@ -886,9 +909,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
 
     // A genuinely empty segment (no rows, no binlogs) stays a soft empty.
     val zeroRowSeg = seg.copy(numOfRows = 0L)
-    BackupMetaReader.buildV2Segment(
+    BackupMetaReader.buildV2SegmentWithStore(
       zeroRowSeg,
-      conf,
+      localStore,
       "/tmp/backup",
       applyDeletes = true
     ) match {
@@ -968,9 +991,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         )
       )
       val err = BackupMetaReader
-        .buildV2Segment(
+        .buildV2SegmentWithStore(
           seg,
-          new Configuration(),
+          localStore,
           dir.toString,
           applyDeletes = true
         )
@@ -1035,9 +1058,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         )
       )
       val err = BackupMetaReader
-        .buildV2Segment(
+        .buildV2SegmentWithStore(
           seg,
-          new Configuration(),
+          localStore,
           dir.toString,
           applyDeletes = true
         )
@@ -1106,9 +1129,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
           )
         )
       )
-      BackupMetaReader.buildV2Segment(
+      BackupMetaReader.buildV2SegmentWithStore(
         seg,
-        new Configuration(),
+        localStore,
         dir.toString,
         applyDeletes = true
       ) match {

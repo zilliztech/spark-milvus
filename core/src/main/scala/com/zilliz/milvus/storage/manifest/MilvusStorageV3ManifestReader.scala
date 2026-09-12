@@ -1,17 +1,14 @@
 package com.zilliz.milvus.storage.manifest
 
 import java.io.ByteArrayInputStream
-import java.net.URI
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import org.apache.avro.file.DataFileStream
 import org.apache.avro.generic.{GenericDatumReader, GenericRecord}
 import org.apache.avro.util.Utf8
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileSystem, Path}
 
-import com.zilliz.milvus.storage.io.hadoop.HadoopIO
+import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
 
@@ -23,15 +20,12 @@ object MilvusStorageV3ManifestReader {
       basePath: String,
       readVersion: Long,
       bucket: String,
-      hadoopConf: Configuration
+      store: ObjectStore
   ): Either[Throwable, Seq[V2DeltaLogFile]] = {
     try {
-      val manifestPath = StoragePath.resolvePath(
-        manifestFilePath(basePath, readVersion),
-        bucket
-      )
-      val bytes = HadoopIO.readAllBytes(hadoopConf, manifestPath)
-      parseDeltaLogs(bytes, basePath)
+      val at =
+        StoragePath.parse(manifestFilePath(basePath, readVersion), bucket)
+      parseDeltaLogs(store.readAll(at), basePath)
     } catch {
       case NonFatal(e) => Left(e)
     }
@@ -52,46 +46,28 @@ object MilvusStorageV3ManifestReader {
   def latestManifestVersion(
       basePath: String,
       bucket: String,
-      hadoopConf: Configuration
+      store: ObjectStore
   ): Either[Throwable, Long] = {
-    var uri: URI = null
-    var fs: FileSystem = null
     try {
-      val metadataPath = StoragePath.resolvePath(
-        s"${basePath.stripSuffix("/")}/_metadata",
-        bucket
-      )
-      uri = new URI(metadataPath)
-      fs = FileSystem.get(uri, hadoopConf)
-      val path = new Path(uri)
-      if (!fs.exists(path)) {
+      val metadata =
+        StoragePath.parse(s"${basePath.stripSuffix("/")}/_metadata", bucket)
+      if (!store.exists(metadata.key)) {
         Right(0L)
       } else {
         Right(
-          fs.listStatus(path)
+          store
+            .list(metadata.key)
             .iterator
-            .flatMap(status =>
-              status.getPath.getName match {
-                case ManifestFileName(version) => Some(version.toLong)
-                case _                         => None
-              }
-            )
+            .map(info => info.path.substring(info.path.lastIndexOf('/') + 1))
+            .flatMap {
+              case ManifestFileName(version) => Some(version.toLong)
+              case _                         => None
+            }
             .foldLeft(0L)(math.max)
         )
       }
     } catch {
       case NonFatal(e) => Left(e)
-    } finally {
-      Option(uri).flatMap(uri => Option(uri.getScheme)).foreach { scheme =>
-        if (
-          fs != null && hadoopConf.getBoolean(
-            s"fs.$scheme.impl.disable.cache",
-            false
-          )
-        ) {
-          fs.close()
-        }
-      }
     }
   }
 
@@ -145,18 +121,24 @@ object MilvusStorageV3ManifestReader {
     }
   }
 
+  /** Places a delta log recorded in the manifest.
+    *
+    * `_delta/` is the only format knowledge here; joining and scheme handling
+    * belong to [[StoragePath]].
+    */
   def resolveManifestDeltaPath(
       basePath: String,
       path: String
   ): String = {
-    if (path == null || path.isEmpty) path
-    else if (path.startsWith("s3a://")) path
-    else if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
-    else if (path.startsWith("_delta/"))
-      s"${basePath.stripSuffix("/")}/$path"
-    else if (path.startsWith("/"))
-      s"${basePath.stripSuffix("/")}/_delta/${path.stripPrefix("/")}"
-    else s"${basePath.stripSuffix("/")}/_delta/$path"
+    if (path == null || path.isEmpty) return path
+    val base = StoragePath.parse(basePath)
+    val fragment =
+      if (path.contains("://") || path.stripPrefix("/").startsWith("_delta/")) {
+        path
+      } else {
+        s"_delta/${path.stripPrefix("/")}"
+      }
+    StoragePath.resolve(base, fragment).uri("s3a")
   }
 
   private def asString(v: Any): String = v match {

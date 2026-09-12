@@ -263,7 +263,8 @@ case class MilvusTable(
         val maxBytes = MilvusScan.backupMaxJsonBytes(
           new CaseInsensitiveStringMap(milvusOption.options.asJava)
         )
-        BackupMetaReader.readMeta(conf, dir, maxBytes) match {
+        BackupMetaReader
+          .readMeta(MilvusScan.storeFor(conf, ""), dir, maxBytes) match {
           case Left(err) =>
             if (needsSchema) {
               throw new IllegalArgumentException(
@@ -1073,6 +1074,22 @@ object MilvusScan extends Logging {
       case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
     }
   }
+
+  /** Wraps a Hadoop Configuration as an ObjectStore.
+    *
+    * The migration-period adapter: core and compat no longer take Hadoop types,
+    * and this is where the driver-side reads that still run on Hadoop get one.
+    * It goes away when these call sites move to the native factory.
+    */
+  private[sources] def storeFor(
+      conf: org.apache.hadoop.conf.Configuration,
+      bucket: String
+  ): com.zilliz.milvus.storage.io.ObjectStore =
+    new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
+      conf,
+      bucket,
+      "s3a"
+    )
 
   private[sources] def connectorS3BucketOption(
       options: scala.collection.Map[String, String]
@@ -1900,7 +1917,7 @@ class MilvusScan(
         V2SegmentLoader.loadV2Segments(
           metadata.manifestList,
           snapshotBucket.getOrElse(""),
-          hadoopConf,
+          MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse("")),
           manifestSchemaVersion = metadata.manifestSchemaVersion,
           applyDeletes = applyDeletes
         ) match {
@@ -1971,7 +1988,7 @@ class MilvusScan(
           inheritedDeleteSegments,
           pkField,
           snapshotBucket.getOrElse(""),
-          hadoopConf
+          MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
         ) match {
           case Right(plans) => plans
           case Left(err) =>
@@ -2153,7 +2170,7 @@ class MilvusScan(
           seg.deltaLogs,
           pkField,
           snapshotBucket.getOrElse(""),
-          hadoopConf
+          MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
         ) match {
           case Right(plan) => seg.segmentId -> plan
           case Left(err) =>
@@ -2202,7 +2219,7 @@ class MilvusScan(
               MilvusStorageV3ManifestReader.latestManifestVersion(
                 basePath,
                 snapshotBucket.getOrElse(""),
-                hadoopConf
+                MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
               ) match {
                 case Right(version) => version
                 case Left(err) =>
@@ -2220,7 +2237,7 @@ class MilvusScan(
                 basePath,
                 readVersion,
                 snapshotBucket.getOrElse(""),
-                hadoopConf
+                MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
               ) match {
                 case Right(logs) => logs
                 case Left(err) =>
@@ -2238,7 +2255,7 @@ class MilvusScan(
                   deltaLogs,
                   pkField.get,
                   snapshotBucket.getOrElse(""),
-                  hadoopConf
+                  MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
                 ) match {
                   case Right(plan) => Some(plan)
                   case Left(err) =>
@@ -2552,7 +2569,10 @@ class MilvusScan(
           inheritedDeleteSegments,
           pkField,
           snapshotBucketForRelativePaths.getOrElse(""),
-          snapshotHadoopConf
+          MilvusScan.storeFor(
+            snapshotHadoopConf,
+            snapshotBucketForRelativePaths.getOrElse("")
+          )
         ) match {
           case Right(plans) => plans
           case Left(err) =>
@@ -2600,7 +2620,7 @@ class MilvusScan(
     // read otherwise (e.g. a direct scan without table init).
     val meta = preParsedBackupMeta.getOrElse {
       BackupMetaReader.readMeta(
-        hadoopConf,
+        MilvusScan.storeFor(hadoopConf, ""),
         backupDir,
         MilvusScan.backupMaxJsonBytes(options)
       ) match {
@@ -2678,7 +2698,7 @@ class MilvusScan(
     }
     val v2Segments = BackupMetaReader.toV2Segments(
       meta,
-      hadoopConf,
+      MilvusScan.storeFor(hadoopConf, ""),
       backupDir,
       applyDeletes,
       coll.collectionId
@@ -2790,7 +2810,10 @@ class MilvusScan(
             inheritedDeleteSegments,
             pkField,
             MilvusScan.connectorS3BucketOption(optionsMap).getOrElse(""),
-            buildSnapshotHadoopConf("")
+            MilvusScan.storeFor(
+              buildSnapshotHadoopConf(""),
+              MilvusScan.connectorS3BucketOption(optionsMap).getOrElse("")
+            )
           ) match {
             case Right(plans) => plans
             case Left(err) =>
@@ -2834,7 +2857,7 @@ class MilvusScan(
     val hadoopConf = buildSnapshotHadoopConf(backupDir)
     val meta = preParsedBackupMeta.getOrElse {
       BackupMetaReader.readMeta(
-        hadoopConf,
+        MilvusScan.storeFor(hadoopConf, ""),
         backupDir,
         MilvusScan.backupMaxJsonBytes(options)
       ) match {
@@ -2871,7 +2894,10 @@ class MilvusScan(
         deleteOnlySegments,
         pkField,
         MilvusScan.snapshotBucket(backupDir).getOrElse(""),
-        hadoopConf
+        MilvusScan.storeFor(
+          hadoopConf,
+          MilvusScan.snapshotBucket(backupDir).getOrElse("")
+        )
       ) match {
         case Right(plans) => plans
         case Left(err) =>

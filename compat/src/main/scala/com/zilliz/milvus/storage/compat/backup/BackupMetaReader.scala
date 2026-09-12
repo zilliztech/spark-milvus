@@ -1,5 +1,6 @@
 package com.zilliz.milvus.storage.compat.backup
 
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.{
   Callable,
   ExecutorService,
@@ -20,11 +21,10 @@ import com.fasterxml.jackson.module.scala.{
   DefaultScalaModule,
   ScalaObjectMapper
 }
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.FileSystem
 
 import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
 import com.zilliz.milvus.storage.compat.MilvusParquetFooterReader
+import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.snapshot.{
   JsonTypeConverter,
   MilvusSnapshotReader,
@@ -237,39 +237,22 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
     * backup dir read over the driver's lifetime.
     */
   def readMeta(
-      hadoopConf: Configuration,
+      store: ObjectStore,
       backupDir: String,
       maxBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
   ): Either[Throwable, BackupInfo] = {
-    var uri: java.net.URI = null
-    var fs: FileSystem = null
     try {
       val metaFilePath = metaPath(backupDir)
-      uri = new java.net.URI(metaFilePath)
-      fs = FileSystem.get(uri, hadoopConf)
-      val in = fs.open(new org.apache.hadoop.fs.Path(uri))
-      try {
-        val json =
-          MilvusSnapshotReader.readUtf8WithLimit(in, metaFilePath, maxBytes)
-        Right(mapper.readValue[BackupInfo](json))
-      } finally {
-        in.close()
+      val size = store.size(metaFilePath)
+      if (size > maxBytes) {
+        throw new IllegalStateException(
+          s"$metaFilePath is $size bytes, over the $maxBytes limit"
+        )
       }
+      val json = new String(store.readAll(metaFilePath), StandardCharsets.UTF_8)
+      Right(mapper.readValue[BackupInfo](json))
     } catch {
       case NonFatal(e) => Left(e)
-    } finally {
-      Option(uri)
-        .flatMap(u => Option(u.getScheme))
-        .foreach { scheme =>
-          if (
-            fs != null && hadoopConf.getBoolean(
-              s"fs.$scheme.impl.disable.cache",
-              false
-            )
-          ) {
-            fs.close()
-          }
-        }
     }
   }
 
@@ -471,12 +454,11 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
     */
   def toV2Segments(
       info: BackupInfo,
-      hadoopConf: Configuration,
+      store: ObjectStore,
       backupDir: String,
       applyDeletes: Boolean = true,
       collectionId: Long
   ): Either[Throwable, Seq[V2SegmentInfo]] = {
-    var fs: FileSystem = null
     try {
       if (info.isSnapshotFormat) {
         throw new IllegalStateException(
@@ -484,10 +466,6 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
             "backups can be read as a datasource"
         )
       }
-      // One FileSystem reused across every segment's footer reads: with
-      // fs.s3a.impl.disable.cache=true, per-file FileSystem.get would otherwise
-      // construct a whole S3A client + thread pool for each binlog.
-      fs = FileSystem.get(new java.net.URI(backupBase(backupDir)), hadoopConf)
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
       info.collectionBackups
         .filter(_.collectionId == collectionId)
@@ -501,7 +479,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
             SegmentReadPool.submit(
               new Callable[Either[Throwable, Option[V2SegmentInfo]]] {
                 override def call(): Either[Throwable, Option[V2SegmentInfo]] =
-                  buildV2SegmentWithFs(seg, fs, backupDir, applyDeletes)
+                  buildV2SegmentWithStore(seg, store, backupDir, applyDeletes)
               }
             )
           }
@@ -520,33 +498,6 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       Right(out.toSeq)
     } catch {
       case NonFatal(e) => Left(e)
-    } finally {
-      closeIfNotCached(fs, hadoopConf)
-    }
-  }
-
-  /** Close a `FileSystem` only when its scheme has the cache disabled (i.e. the
-    * instance was created fresh for this read). A cached scheme (e.g. the
-    * process-wide `LocalFileSystem` for local paths) must NOT be closed: that
-    * evicts it from `FileSystem.CACHE` and fails every other holder with
-    * `IOException: Filesystem closed`.
-    */
-  private def closeIfNotCached(
-      fs: FileSystem,
-      hadoopConf: Configuration
-  ): Unit = {
-    try {
-      if (fs != null) {
-        val scheme = fs.getUri.getScheme
-        if (
-          scheme != null && hadoopConf
-            .getBoolean(s"fs.$scheme.impl.disable.cache", false)
-        ) {
-          fs.close()
-        }
-      }
-    } catch {
-      case NonFatal(_) => // close is best-effort; the read result already won
     }
   }
 
@@ -563,9 +514,9 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
     *   `Right(Some(seg))` for readable segments; `Left` for unsupported data
     *   segments (fails hard rather than returning a partial dataset).
     */
-  private[storage] def buildV2SegmentWithFs(
+  private[storage] def buildV2SegmentWithStore(
       seg: SegmentBackup,
-      fs: FileSystem,
+      store: ObjectStore,
       backupDir: String,
       applyDeletes: Boolean
   ): Either[Throwable, Option[V2SegmentInfo]] = {
@@ -631,8 +582,8 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
           // (which live in the parquet schema, not the backup meta) and its row
           // count; the remaining files' row counts are read in parallel.
           val headInfo = MilvusParquetFooterReader.readFieldIdsAndRowCount(
-            fs,
-            hadoopPaths.head
+            hadoopPaths.head,
+            store
           ) match {
             case Right(info) => info
             case Left(err) =>
@@ -645,7 +596,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
           }
           val tailRowCounts = if (hadoopPaths.size > 1) {
             readRowCountsInParallel(
-              fs,
+              store,
               hadoopPaths.tail,
               seg.segmentId,
               fieldBinlog.fieldId
@@ -707,26 +658,6 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
     }
   }
 
-  /** [[buildV2SegmentWithFs]] opening a fresh `FileSystem` from the config —
-    * for tests / single-segment use. Batch reads should go through
-    * [[toV2Segments]], which opens one `FileSystem` for all segments and reuses
-    * it across every footer read.
-    */
-  def buildV2Segment(
-      seg: SegmentBackup,
-      hadoopConf: Configuration,
-      backupDir: String,
-      applyDeletes: Boolean
-  ): Either[Throwable, Option[V2SegmentInfo]] = {
-    var fs: FileSystem = null
-    try {
-      fs = FileSystem.get(new java.net.URI(backupBase(backupDir)), hadoopConf)
-      buildV2SegmentWithFs(seg, fs, backupDir, applyDeletes)
-    } finally {
-      closeIfNotCached(fs, hadoopConf)
-    }
-  }
-
   private def emptyColumnGroupSegment(
       seg: SegmentBackup,
       backupDir: String
@@ -762,10 +693,10 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
     *
     * The predicate MUST match the planner's `inheritedDeleteSegments`
     * (`columnGroups.isEmpty && deltaLogs.nonEmpty` after
-    * `buildV2SegmentWithFs`): every L0 segment, plus a non-L0 StorageV2 segment
-    * with no binlogs and zero rows (emitted as an empty column-group segment).
-    * Otherwise a partition can be stamped with an inherited-delete marker that
-    * has no matching plan entry and silently resolves to
+    * `buildV2SegmentWithStore`): every L0 segment, plus a non-L0 StorageV2
+    * segment with no binlogs and zero rows (emitted as an empty column-group
+    * segment). Otherwise a partition can be stamped with an inherited-delete
+    * marker that has no matching plan entry and silently resolves to
     * `MilvusDeletePlan.empty`.
     */
   def deleteOnlySegments(
@@ -792,7 +723,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
     * opens), so no per-file S3A client is constructed.
     */
   private def readRowCountsInParallel(
-      fs: FileSystem,
+      store: ObjectStore,
       paths: Seq[String],
       segmentId: Long,
       slotFieldId: Long
@@ -801,7 +732,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       val futures = paths.map { p =>
         FooterReadPool.submit(new Callable[Long] {
           override def call(): Long =
-            MilvusParquetFooterReader.readRowCount(fs, p) match {
+            MilvusParquetFooterReader.readRowCount(p, store) match {
               case Right(n) => n
               case Left(err) =>
                 throw new RuntimeException(

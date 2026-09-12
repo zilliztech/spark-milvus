@@ -33,6 +33,14 @@ import org.scalatest.matchers.should.Matchers
   */
 class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
 
+  /** Tests read local files, so the store carries no bucket. */
+  private def localStore: com.zilliz.milvus.storage.io.ObjectStore =
+    new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
+      new org.apache.hadoop.conf.Configuration(),
+      "",
+      "file"
+    )
+
   test("parseGroupFieldIdList handles the multi-field sample") {
     val parsed =
       MilvusParquetFooterReader.parseGroupFieldIdList("100,0,1;101;102")
@@ -83,7 +91,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       .named("ts")
       .named("milvus_group")
 
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     GroupWriteSupport.setSchema(schema, conf)
     val writer = ExampleParquetWriter
       .builder(new HPath(tmp.toUri))
@@ -107,7 +115,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
     try {
       val result = MilvusParquetFooterReader.readFieldIdsFromSchema(
         tmp.toUri.toString,
-        new Configuration()
+        localStore
       )
       result shouldBe Right(Seq(100L, 0L, 1L))
     } finally {
@@ -125,7 +133,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       .named("new_field")
       .named("milvus_group")
 
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     GroupWriteSupport.setSchema(schema, conf)
     val writer = ExampleParquetWriter
       .builder(new HPath(tmp.toUri))
@@ -143,7 +151,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
     try {
       val result = MilvusParquetFooterReader.readFieldIdsFromSchema(
         tmp.toUri.toString,
-        new Configuration()
+        localStore
       )
       result shouldBe Right(Seq(105L))
     } finally {
@@ -154,21 +162,25 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
   test("readFieldIdsFromSchema returns Left for malformed URI") {
     val result = MilvusParquetFooterReader.readFieldIdsFromSchema(
       "s3a://bucket/path with spaces/[bad].parquet",
-      new Configuration()
+      localStore
     )
 
     result shouldBe a[Left[_, _]]
   }
 
   test("readFieldIdsFromSchema does not swallow fatal errors") {
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     conf.set("fs.fatal-footer.impl", classOf[FatalFooterFileSystem].getName)
 
+    // The store has to be the one carrying the fatal filesystem, otherwise the
+    // call never reaches it and the assertion proves nothing.
+    val store = new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
+      conf,
+      "bucket",
+      "fatal-footer"
+    )
     intercept[OutOfMemoryError] {
-      MilvusParquetFooterReader.readFieldIdsFromSchema(
-        "fatal-footer://bucket/file.parquet",
-        conf
-      )
+      MilvusParquetFooterReader.readFieldIdsFromSchema("file.parquet", store)
     }
   }
 
@@ -186,7 +198,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       .named("no_id")
       .named("milvus_group")
 
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     GroupWriteSupport.setSchema(schema, conf)
     val writer = ExampleParquetWriter
       .builder(new HPath(tmp.toUri))
@@ -204,7 +216,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
     try {
       val result = MilvusParquetFooterReader.readFieldIdsFromSchema(
         tmp.toUri.toString,
-        new Configuration()
+        localStore
       )
       result shouldBe a[Left[_, _]]
       result.left.toOption.get.getMessage should include("no_id")
@@ -227,7 +239,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       .named("row_id")
       .named("milvus_group")
 
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     GroupWriteSupport.setSchema(schema, conf)
     // parquet-mr only evaluates the row-group size once
     // recordCount >= DEFAULT_MINIMUM_RECORD_COUNT_FOR_CHECK (100), so with 3
@@ -257,7 +269,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       // The production path (used by the backup planner) returns field IDs and
       // the summed row count in a single open.
       val info = MilvusParquetFooterReader
-        .readFieldIdsAndRowCount(tmp.toUri.toString, new Configuration())
+        .readFieldIdsAndRowCount(tmp.toUri.toString, localStore)
         .getOrElse(fail("expected Right"))
       info.fieldIds shouldBe Seq(100L, 0L)
       info.rowCount shouldBe totalRows.toLong
@@ -266,7 +278,10 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       // sum would not reach totalRows).
       val parquet = org.apache.parquet.hadoop.ParquetFileReader.open(
         org.apache.parquet.hadoop.util.HadoopInputFile
-          .fromPath(new HPath(tmp.toUri), new Configuration())
+          .fromPath(
+            new HPath(tmp.toUri),
+            new org.apache.hadoop.conf.Configuration()
+          )
       )
       try {
         parquet.getFooter.getBlocks.size() should be >= 2
@@ -323,6 +338,8 @@ class FatalFooterFileSystem extends FileSystem {
 
   override def mkdirs(path: HPath, permission: FsPermission): Boolean = true
 
+  // Long enough that parquet gets past its "too small to be a parquet file"
+  // check and actually opens a stream, which is where the fatal error lives.
   override def getFileStatus(path: HPath): FileStatus =
-    new FileStatus(1L, false, 1, 1L, 0L, path)
+    new FileStatus(1024L, false, 1, 1024L, 0L, path)
 }

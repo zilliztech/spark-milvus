@@ -57,27 +57,26 @@ class V2SegmentLoaderTest
     with Matchers
     with BeforeAndAfterEach {
 
-  test("resolvePath uses OSS for Alibaba manifest and nested binlog paths") {
-    StoragePath.resolvePath(
-      "files/manifest.avro",
-      "managed-bucket",
-      "oss"
-    ) shouldBe "oss://managed-bucket/files/manifest.avro"
-    StoragePath.resolvePath(
-      "s3://managed-bucket/files/manifest.avro",
-      "managed-bucket",
-      "oss"
-    ) shouldBe "oss://managed-bucket/files/manifest.avro"
-    StoragePath.resolvePath(
-      "s3a://managed-bucket/files/snapshots/manifest.avro",
-      "managed-bucket",
-      "oss"
-    ) shouldBe "oss://managed-bucket/files/snapshots/manifest.avro"
-    StoragePath.resolvePath(
-      "s3a://managed-bucket/files/insert_log/1/2/3/4.parquet",
-      "managed-bucket",
-      "oss"
-    ) shouldBe "oss://managed-bucket/files/insert_log/1/2/3/4.parquet"
+  /** Tests read local files, so the store carries no bucket. */
+  private def localStore: com.zilliz.milvus.storage.io.ObjectStore =
+    new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
+      new org.apache.hadoop.conf.Configuration(),
+      "",
+      "file"
+    )
+
+  test("paths render as OSS for Alibaba, whatever scheme they arrived with") {
+    def oss(raw: String): String =
+      StoragePath.parse(raw, "managed-bucket").uri("oss")
+
+    oss("files/manifest.avro") shouldBe
+      "oss://managed-bucket/files/manifest.avro"
+    oss("s3://managed-bucket/files/manifest.avro") shouldBe
+      "oss://managed-bucket/files/manifest.avro"
+    oss("s3a://managed-bucket/files/snapshots/manifest.avro") shouldBe
+      "oss://managed-bucket/files/snapshots/manifest.avro"
+    oss("s3a://managed-bucket/files/insert_log/1/2/3/4.parquet") shouldBe
+      "oss://managed-bucket/files/insert_log/1/2/3/4.parquet"
   }
 
   override def beforeEach(): Unit = {
@@ -169,8 +168,7 @@ class V2SegmentLoaderTest
     out.toByteArray
   }
 
-  private def fileUriAsS3a(path: NPath): String =
-    "s3a://" + path.toUri.toString.stripPrefix("file://")
+  private def fileUri(path: NPath): String = path.toUri.toString
 
   /** Write a single-column parquet at `path` carrying the given field id, so
     * `readFieldIdsFromSchema` will return `Seq(fieldId)`.
@@ -187,7 +185,7 @@ class V2SegmentLoaderTest
       .named(columnName)
       .named("milvus_group")
 
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     GroupWriteSupport.setSchema(schema, conf)
     val writer = ExampleParquetWriter
       .builder(new HPath(path.toUri))
@@ -213,7 +211,7 @@ class V2SegmentLoaderTest
       .named("no_id")
       .named("milvus_group")
 
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     GroupWriteSupport.setSchema(schema, conf)
     val writer = ExampleParquetWriter
       .builder(new HPath(path.toUri))
@@ -235,7 +233,10 @@ class V2SegmentLoaderTest
     p
   }
 
-  test("loadV2Segments normalizes returned S3A binlog and delta paths") {
+  // Scheme rewriting with a real bucket is covered by the OSS test above. Here
+  // the paths carry no bucket, which is the shape a local run produces, and the
+  // loader has to hand them to Hadoop unchanged.
+  test("loadV2Segments passes bucket-less local paths through unchanged") {
     val parquet = mkTempParquet("v2loader-resolved-path-")
     val manifest = Files.createTempFile("v2loader-manifest-", ".avro")
     val deltaLog = manifest.resolveSibling("delete-log.bin")
@@ -243,13 +244,13 @@ class V2SegmentLoaderTest
       writeSingleFieldParquet(parquet, "pk", fieldId = 100)
       Files.write(
         manifest,
-        encodeManifest(fileUriAsS3a(parquet), fileUriAsS3a(deltaLog))
+        encodeManifest(fileUri(parquet), fileUri(deltaLog))
       )
 
       val result = V2SegmentLoader.loadV2Segments(
-        Seq(fileUriAsS3a(manifest)),
+        Seq(fileUri(manifest)),
         bucket = "",
-        hadoopConf = new Configuration(),
+        store = localStore,
         storageScheme = "file"
       )
 
@@ -312,7 +313,7 @@ class V2SegmentLoaderTest
       val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
         manifest,
         bucket = "",
-        new Configuration()
+        localStore
       )
 
       result shouldBe a[Right[_, _]]
@@ -353,7 +354,7 @@ class V2SegmentLoaderTest
       val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
         manifest,
         bucket = "",
-        new Configuration()
+        localStore
       )
 
       result shouldBe a[Left[_, _]]
@@ -387,7 +388,7 @@ class V2SegmentLoaderTest
       val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
         manifest,
         bucket = "",
-        new Configuration()
+        localStore
       )
 
       result shouldBe a[Left[_, _]]
@@ -415,7 +416,7 @@ class V2SegmentLoaderTest
     val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
       manifest,
       bucket = "",
-      new Configuration()
+      localStore
     )
 
     val Some(seg) = result.toOption.get
@@ -449,7 +450,7 @@ class V2SegmentLoaderTest
       val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
         manifest,
         bucket = "",
-        new Configuration(),
+        localStore,
         applyDeletes = true
       )
 
@@ -477,7 +478,7 @@ class V2SegmentLoaderTest
     val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
       manifest,
       bucket = "",
-      new Configuration(),
+      localStore,
       applyDeletes = false
     )
 
@@ -508,7 +509,7 @@ class V2SegmentLoaderTest
       val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
         manifest,
         bucket = "",
-        new Configuration(),
+        localStore,
         applyDeletes = false
       )
 
@@ -534,7 +535,7 @@ class V2SegmentLoaderTest
     val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
       manifest,
       bucket = "",
-      new Configuration()
+      localStore
     )
 
     result shouldBe Right(None)
@@ -543,7 +544,7 @@ class V2SegmentLoaderTest
   test("readAllBytes wraps malformed URI with path context") {
     val err = intercept[RuntimeException] {
       HadoopIO.readAllBytes(
-        new Configuration(),
+        new org.apache.hadoop.conf.Configuration(),
         "s3a://bucket/path with spaces/[bad].avro"
       )
     }
@@ -553,7 +554,7 @@ class V2SegmentLoaderTest
   }
 
   test("readAllBytes does not swallow fatal errors") {
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     conf.set("fs.fatal-v2.impl", classOf[FatalV2FileSystem].getName)
 
     intercept[OutOfMemoryError] {
@@ -562,7 +563,7 @@ class V2SegmentLoaderTest
   }
 
   test("readAllBytes closes the FileSystem instance when cache is disabled") {
-    val conf = new Configuration()
+    val conf = new org.apache.hadoop.conf.Configuration()
     conf.set(
       "fs.close-tracking-v2.impl",
       classOf[CloseTrackingV2FileSystem].getName
@@ -578,6 +579,14 @@ class V2SegmentLoaderTest
 }
 
 class CloseTrackingV2FileSystem extends FileSystem {
+
+  /** Tests read local files, so the store carries no bucket. */
+  private def localStore: com.zilliz.milvus.storage.io.ObjectStore =
+    new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
+      new org.apache.hadoop.conf.Configuration(),
+      "",
+      "file"
+    )
   private var uri: URI = _
 
   override def initialize(name: URI, conf: Configuration): Unit = {

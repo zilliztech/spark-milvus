@@ -158,7 +158,14 @@ object ListV2SegmentsApp {
           // carry the same group_field_id_list.
           val samplePath = entry.binlogFiles.head.binlogs.head.logPath
           val normalized = resolvePath(samplePath, bucket)
-          MilvusParquetFooterReader.read(normalized, hadoopConf) match {
+          MilvusParquetFooterReader.read(
+            normalized,
+            new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
+              hadoopConf,
+              "",
+              "s3a"
+            )
+          ) match {
             case Left(err) =>
               println(
                 s"    ERROR reading parquet footer at $normalized: ${err.getMessage}"

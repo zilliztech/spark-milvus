@@ -2,10 +2,8 @@ package com.zilliz.milvus.storage.compat.v2packed
 
 import scala.util.control.NonFatal
 
-import org.apache.hadoop.conf.Configuration
-
 import com.zilliz.milvus.storage.compat.MilvusParquetFooterReader
-import com.zilliz.milvus.storage.io.hadoop.HadoopIO
+import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.manifest.{
   AvroFieldBinlogEntry,
   AvroManifestEntry
@@ -49,9 +47,8 @@ object V2SegmentLoader extends com.zilliz.milvus.storage.Logging {
     * @param bucket
     *   S3 bucket that holds both the AVRO files and the segment parquet files.
     *   Empty string is accepted for unit-test / local-FS usage.
-    * @param hadoopConf
-    *   Pre-configured Hadoop `Configuration` (per-bucket S3A creds/endpoint
-    *   already set by the caller).
+    * @param store
+    *   Bound to the bucket and credentials these paths need.
     * @return
     *   `Right(segments)` on success; `Left(firstError)` on the first
     *   unrecoverable failure.
@@ -59,7 +56,7 @@ object V2SegmentLoader extends com.zilliz.milvus.storage.Logging {
   def loadV2Segments(
       manifestPaths: Seq[String],
       bucket: String,
-      hadoopConf: Configuration,
+      store: ObjectStore,
       manifestSchemaVersion: Int = 1,
       applyDeletes: Boolean = true,
       storageScheme: String = "s3a"
@@ -67,8 +64,8 @@ object V2SegmentLoader extends com.zilliz.milvus.storage.Logging {
     try {
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
       manifestPaths.foreach { rawPath =>
-        val avroPath = StoragePath.resolvePath(rawPath, bucket, storageScheme)
-        val avroBytes = HadoopIO.readAllBytes(hadoopConf, avroPath)
+        val avroPath = StoragePath.parse(rawPath, bucket).key
+        val avroBytes = store.readAll(avroPath)
         val entry =
           MilvusSegmentManifestReader
             .parse(avroBytes, manifestSchemaVersion) match {
@@ -82,7 +79,7 @@ object V2SegmentLoader extends com.zilliz.milvus.storage.Logging {
         buildV2SegmentInfoFromEntry(
           entry,
           bucket,
-          hadoopConf,
+          store,
           applyDeletes,
           storageScheme
         ) match {
@@ -111,7 +108,7 @@ object V2SegmentLoader extends com.zilliz.milvus.storage.Logging {
   def buildV2SegmentInfoFromEntry(
       entry: AvroManifestEntry,
       bucket: String,
-      hadoopConf: Configuration,
+      store: ObjectStore,
       applyDeletes: Boolean = true,
       storageScheme: String = "s3a"
   ): Either[Throwable, Option[V2SegmentInfo]] = {
@@ -184,7 +181,7 @@ object V2SegmentLoader extends com.zilliz.milvus.storage.Logging {
             }
             val samplePath = afb.binlogs.head.logPath
             MilvusParquetFooterReader
-              .readFieldIdsFromSchema(samplePath, hadoopConf) match {
+              .readFieldIdsFromSchema(samplePath, store) match {
               case Right(ids) => ids
               case Left(err) =>
                 throw new RuntimeException(
@@ -227,7 +224,7 @@ object V2SegmentLoader extends com.zilliz.milvus.storage.Logging {
         fieldBinlog.copy(binlogs =
           fieldBinlog.binlogs.map(log =>
             log.copy(logPath =
-              StoragePath.resolvePath(log.logPath, bucket, storageScheme)
+              StoragePath.parse(log.logPath, bucket).uri(storageScheme)
             )
           )
         )
