@@ -25,6 +25,7 @@ import com.fasterxml.jackson.module.scala.{
 import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
 import com.zilliz.milvus.storage.compat.MilvusParquetFooterReader
 import com.zilliz.milvus.storage.io.ObjectStore
+import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{
   JsonTypeConverter,
   MilvusSnapshotReader,
@@ -242,7 +243,9 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       maxBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
   ): Either[Throwable, BackupInfo] = {
     try {
-      val metaFilePath = metaPath(backupDir)
+      // The store is rooted at fs.bucket_name, so it takes the key, not the
+      // URI. StoragePath.parse hands a local path back unchanged.
+      val metaFilePath = StoragePath.parse(metaPath(backupDir)).key
       val size = store.size(metaFilePath)
       if (size > maxBytes) {
         throw new IllegalStateException(
@@ -570,11 +573,8 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
             )
           }
           val sorted = fieldBinlog.binlogs.sortBy(_.logId)
-          // Hadoop-qualified paths for the footer reads; the native reader
-          // gets bucket-relative keys in `filePaths`.
-          val hadoopPaths = sorted.map(b =>
-            qualifiedInsertLogPath(backupDir, seg, fieldBinlog.fieldId, b.logId)
-          )
+          // One path list now: the footer reads and the native reader both
+          // take bucket-relative keys.
           val nativePaths = sorted.map(b =>
             nativeInsertLogPath(backupDir, seg, fieldBinlog.fieldId, b.logId)
           )
@@ -582,22 +582,22 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
           // (which live in the parquet schema, not the backup meta) and its row
           // count; the remaining files' row counts are read in parallel.
           val headInfo = MilvusParquetFooterReader.readFieldIdsAndRowCount(
-            hadoopPaths.head,
+            nativePaths.head,
             store
           ) match {
             case Right(info) => info
             case Left(err) =>
               throw new RuntimeException(
-                s"failed to read footer of parquet ${hadoopPaths.head} " +
+                s"failed to read footer of parquet ${nativePaths.head} " +
                   s"(backup segment ${seg.segmentId}, slot " +
                   s"${fieldBinlog.fieldId}): ${err.getMessage}",
                 err
               )
           }
-          val tailRowCounts = if (hadoopPaths.size > 1) {
+          val tailRowCounts = if (nativePaths.size > 1) {
             readRowCountsInParallel(
               store,
-              hadoopPaths.tail,
+              nativePaths.tail,
               seg.segmentId,
               fieldBinlog.fieldId
             ) match {
@@ -768,8 +768,8 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
     * }}}
     *
     * Two path forms are produced:
-    *   - **qualified** (`qualifiedInsertLogPath` / `qualifiedDeltaLogPath`),
-    *     e.g. `s3a://bucket/backup/b1/binlogs/...`, consumed by the Hadoop-side
+    *   - **qualified** (`qualifiedDeltaLogPath`), e.g.
+    *     `s3a://bucket/backup/b1/binlogs/...`, consumed by the Hadoop-side
     *     reads (parquet footers, delta logs).
     *   - **native** (`nativeInsertLogPath`), e.g. `backup/b1/binlogs/...`,
     *     consumed by the milvus-storage native packed reader. Its
@@ -840,16 +840,6 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       s"${joinPrefix(prefix)}binlogs/delta_log/${seg.collectionId}/" +
         s"${seg.partitionId}/${seg.groupId}/${seg.segmentId}/$logId"
     }
-
-  /** Hadoop-qualified insert-log path (e.g.
-    * `s3a://bucket/backup/b1/binlogs/...`).
-    */
-  def qualifiedInsertLogPath(
-      backupDir: String,
-      seg: SegmentBackup,
-      slotFieldId: Long,
-      logId: Long
-  ): String = insertLogPath(backupBase(backupDir), seg, slotFieldId, logId)
 
   /** Native-reader bucket-relative insert-log key (e.g.
     * `backup/b1/binlogs/...`).

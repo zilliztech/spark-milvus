@@ -43,12 +43,14 @@ module table.
 The design documents describe the finished 2.0. Most of layer 2's computation is
 not written yet. Read them as a target, not as a description of the code.
 
-Done: the 1.x sources are all in their modules and `src/` no longer exists. 568
-unit tests pass. `core` has schema, codec, snapshot, manifest, delete, path and
-a Hadoop-backed reader; `compat` has the V2 packed and backup entry points;
-`client` is complete.
+Done: the 1.x sources are all in their modules and `src/` no longer exists. 605
+unit tests pass. `core` has schema, codec, snapshot, manifest, delete, path,
+credential and `io.ObjectStore` over the native filesystem; `compat` has the V2
+packed and backup entry points; `client` is complete. Every driver-side read
+opens storage through that one store, and no source file in `core` or `compat`
+mentions `org.apache.hadoop`.
 
-Not written: the `ObjectStore` interface itself, plus `credential`, `expr`,
+Not written: `expr`,
 `index`, `stats`, `read.plan`, `read.exec`, `write.commit` and `write.exec` in
 core. Their `package.scala` files exist and state what belongs there. The same
 is true of `compat.offline` and `apps.legacy`, whose code is still sitting in
@@ -61,7 +63,7 @@ Layer 1 is placeholders. All four Spark lines still consume the upstream
 milvus-storage Java binding as an unmanaged jar, which is also why the 3.5 line
 cannot produce Scala 2.12 artifacts yet.
 
-Nine design questions are still open: 5, 6, 10, 11, 12, 13, 14, 16 and 19 in
+Six design questions are still open: 5, 10, 11, 13, 16 and 19 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
 block specific packages, so check that list before starting on one.
 
@@ -92,8 +94,10 @@ writing Vortex column groups. Check it before designing around a gap.
 | What does the connector commit to doing? | [docs/design/capabilities.md](docs/design/capabilities.md) |
 | How is it layered, and what is still undecided? | [docs/design/README.md](docs/design/README.md) — read path, write path, priorities, open decisions in section 4, decision log in section 6 |
 | Which module and package does a thing belong to? | [docs/design/architecture/modules.md](docs/design/architecture/modules.md) — module table, package design, directory tree, build constraints in section 4, migration state in section 5 |
-| How does core reach object storage? | [docs/design/architecture/storage-access.html](docs/design/architecture/storage-access.html) — unfinished; records what is settled, what was ruled out, and the four facts still to check |
+| How does core reach object storage? | [docs/design/architecture/storage-access.html](docs/design/architecture/storage-access.html) — the route (JNI to the C filesystem), how credentials reach it, the next steps and the three facts still to verify; apply the skill [.agents/skills/spark-milvus-storage-access/SKILL.md](.agents/skills/spark-milvus-storage-access/SKILL.md) |
 | How are object storage credentials handled? | [docs/design/architecture/storage-auth.html](docs/design/architecture/storage-auth.html) for the mechanism, the rules and the measured facts; apply the skill [.agents/skills/spark-milvus-storage-auth/SKILL.md](.agents/skills/spark-milvus-storage-auth/SKILL.md) |
+| How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership. Read and write share it |
+| How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four planning entry points, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
 | How do we compare with the Lance Spark connector? | [docs/design/research/lance-spark.md](docs/design/research/lance-spark.md) |
 | Illustrated versions of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html), [docs/design/research/lance-spark.html](docs/design/research/lance-spark.html) |

@@ -81,11 +81,8 @@ object ReadSourceOnlyApp {
         V2SegmentLoader.loadV2Segments(
           metadata.manifestList,
           s3Bucket,
-          new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
-            hadoopConf,
-            s3Bucket,
-            "s3a"
-          ),
+          com.zilliz.spark.connector.loon.HadoopStorageConfig
+            .objectStore(hadoopConf, s3Bucket),
           manifestSchemaVersion = metadata.manifestSchemaVersion
         ) match {
           case Right(segs) => segs

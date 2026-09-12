@@ -1,0 +1,258 @@
+<meta charset="utf-8">
+<title>读路径</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 52rem; margin: 2rem auto; padding: 0 1.2rem;
+         font: 16px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.4rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.6rem; }
+  p.thesis { font-size: 1.05rem; }
+  figure { margin: 1.6rem 0; }
+  figure svg { max-width: 100%; height: auto; }
+  figcaption { font-size: .85rem; opacity: .75; margin-top: .6rem; line-height: 1.6; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .86em;
+         background: #8881; padding: .1em .35em; border-radius: 3px; }
+  pre { background: #8881; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .84rem; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .9rem; }
+  th, td { border: 1px solid #8884; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #8881; font-weight: 600; }
+  .warn { border-left: 3px solid #d08700; background: #d0870014; padding: .8rem 1rem; margin: 1.3rem 0; }
+  .open { border-left: 3px solid #8886; background: #88880f; padding: .8rem 1rem; margin: 1.3rem 0; }
+  .todo { border-left: 3px solid #1a7f37; background: #1a7f3714; padding: .8rem 1rem; margin: 1.3rem 0; }
+</style>
+
+<h1>读路径</h1>
+
+<p>能力 R1、R2、R3、R4、R5、R8、R10、R14、R17。取字节和交接 Arrow 那一层见
+<a href="storage-io.html">storage-io.html</a>,分层见 <a href="modules.md">modules.md</a>。</p>
+
+<p class="thesis"><strong>今天第 3 层直接调第 1 层,读这条路上第 2 层是空的。</strong>
+两个 <code>PartitionReader</code> 都在 <code>spark-base</code>,都
+<code>import io.milvus.storage</code>(第 1 层的 JNI 绑定),中间不经过 <code>core</code>;
+而 <code>core.read.plan</code> 与 <code>core.read.exec</code> 只有一个空的
+<code>package.scala</code>。本页先说清第 3 层现在怎么读的,再说要往第 2 层填什么。</p>
+
+<h2 id="one-path">一、读一张表只有一种读法</h2>
+
+<p><strong>表面上分很多种情况,实际只有一种读法。</strong>两个 <code>PartitionReader</code>
+最后都调同一个上游 <code>MilvusStorageReader</code>,唯一的实质差别是列组清单谁算出来的。</p>
+
+<figure>
+<svg viewBox="0 0 900 250" role="img"
+     aria-label="两种 InputPartition 各自的 PartitionReader 最终都调用同一个上游 MilvusStorageReader，唯一差别是列组清单由原生库读 manifest 得到还是由 JVM 从 parquet footer 拼出">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d08700"/>
+    </marker>
+  </defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.2">
+    <rect x="8" y="36" width="176" height="46" rx="3"/>
+    <rect x="8" y="158" width="176" height="46" rx="3"/>
+    <rect x="228" y="36" width="176" height="46" rx="3"/>
+    <rect x="228" y="158" width="176" height="46" rx="3"/>
+    <rect x="612" y="82" width="176" height="76" rx="3"/>
+  </g>
+  <g fill="currentColor" font-size="12" text-anchor="middle">
+    <text x="96" y="55">MilvusStorageV3</text><text x="96" y="70">InputPartition</text>
+    <text x="96" y="177">MilvusPackedV2</text><text x="96" y="192">InputPartition</text>
+    <text x="316" y="55">MilvusLoon</text><text x="316" y="70">PartitionReader</text>
+    <text x="316" y="177">MilvusPackedV2</text><text x="316" y="192">PartitionReader</text>
+    <text x="700" y="108">上游 MilvusStorageReader</text>
+    <text x="700" y="125">.create(列组, schema, 列名, 属性)</text>
+    <text x="700" y="142">.openRecordBatchReader()</text>
+    <text x="862" y="115">Arrow 批</text>
+    <text x="862" y="131">→ InternalRow</text>
+  </g>
+  <g stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ar)">
+    <line x1="184" y1="59" x2="222" y2="59"/>
+    <line x1="184" y1="181" x2="222" y2="181"/>
+    <line x1="788" y1="120" x2="812" y2="120"/>
+  </g>
+  <g stroke="#d08700" stroke-width="1.4" fill="none" marker-end="url(#ar2)">
+    <path d="M404,59 L500,59 L500,104 L606,104"/>
+    <path d="M404,181 L500,181 L500,136 L606,136"/>
+  </g>
+  <g fill="#d08700" font-size="11" text-anchor="middle">
+    <text x="452" y="28">原生库读 manifest,返回列组指针</text>
+    <text x="452" y="228">JVM 用 footer 恢复的字段 id、文件、行数拼列组</text>
+  </g>
+</svg>
+<figcaption>两条分区路线在 <code>MilvusStorageReader</code> 汇合。橙色的两条边是唯一不同的地方。</figcaption>
+</figure>
+
+<p>分发在 <code>MilvusPartitionReaderFactory.createReader</code>,按分区<strong>类型</strong>匹配,
+不读 <code>storage_version</code>;落到 <code>case _</code> 就抛
+<code>This connector requires Milvus 2.6+ (Storage V2)</code>。</p>
+
+<table>
+<tr><th></th><th>V3 线</th><th>V2 线</th></tr>
+<tr><td>段怎么描述</td><td>manifest 路径 + <code>readVersion</code></td><td>列组:字段 id、文件路径、每文件行数</td></tr>
+<tr><td>列组清单</td><td>原生库读 manifest 得 <code>columnGroupsPtr</code></td><td><code>MilvusStorageColumnGroups.createFromGroups</code> 在 JVM 拼</td></tr>
+<tr><td>取字节、凭证、Arrow 出口</td><td colspan="2">都在上游绑定内部,JVM 侧看不到</td></tr>
+</table>
+
+<p><strong>所以改造只有一个切入点。</strong>要做的是换掉那一个调用,保留两种产生它输入的方式,
+而不是把两条线各改一遍。</p>
+
+<p>V2 线多一道自查:driver 把每个列组文件的行数传下来,reader 累计实际交付的行数,少了就报错。
+这是防上游 milvus-storage#657 之前的版本在多文件列组里只读第一个文件——
+那个缺陷不抛异常,只会让 DataFrame 静悄悄变短。</p>
+
+<h2 id="plan">二、段从哪来:四个规划入口</h2>
+
+<p><strong>分岔全在 driver 侧。</strong>四个入口产出的形状一样:一组
+<code>InputPartition</code> 加每段的删除计划。</p>
+
+<table>
+<tr><th>入口</th><th>触发</th><th>产出</th></tr>
+<tr><td><code>planInputPartitionsFromClientSnapshot</code></td><td>默认路径:gRPC 建快照,服务端已把两类段分开返回</td><td>V3 + V2</td></tr>
+<tr><td><code>planInputPartitionsFromSnapshot</code></td><td>snapshot 模式,选项里直接给 manifest 列表和 V2 段列表</td><td>V3 + V2</td></tr>
+<tr><td><code>planInputPartitionsFromBackup</code></td><td>backup 模式,<code>BackupMetaReader.toV2Segments</code> 转备份元数据</td><td>只有 V2</td></tr>
+<tr><td><code>planInputPartitionsFromLegacyClient</code></td><td>指定了 partition/segment,快照快路径关掉时</td><td>只有 V3;遇到 V2 段报错,让用户改用快照模式</td></tr>
+</table>
+
+<p>driver 侧要开的四类文件——快照 manifest、V2 段的 manifest 与 parquet footer、删除日志、备份元数据——
+已经全部走 <a href="storage-io.html#two-faces">交字节那一面</a>。</p>
+
+<h2 id="v1">三、不支持 storage_version 0/1</h2>
+
+<p>三处挡在外面:legacy client 入口 <code>filter(_.storageVersion >= 2)</code> 后为空就抛
+<code>requires Milvus 2.6+</code>;按 segment 精确查时报 <code>storage_version &lt; 2</code>;
+工厂的 <code>case _</code>。没有任何路径会去读逐字段的 V1 binlog。</p>
+
+<p><code>insert_log/{collection}/{partition}/{segment}</code> 是 Milvus 放段数据的目录,
+与 storage_version 无关。V3 的 manifest basePath 就在这个目录下,
+<code>buildSnapshotPartitions</code> 正是靠 <code>pathParts.lastIndexOf("insert_log")</code>
+往后数两级反推 partitionID。看到 <code>insert_log</code> 就断定是 V1,是读错了——
+UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,末尾也是 <code>PAR1</code>,
+中间没有 Milvus 的 event 头,是一个 V2 列组的纯 parquet。</p>
+
+<p>全仓唯一解析 Milvus event 格式的地方是 <code>core.delete.MilvusDeltaLogReader</code>,
+它读删除日志,在 driver 上跑,两条线共用。</p>
+
+<h2 id="gap">四、离目标还差什么</h2>
+
+<p><strong>取字节那一面已经到位,交地址那一面一步没动。</strong></p>
+
+<table>
+<tr><th></th><th>状态</th></tr>
+<tr><td>driver 侧</td><td>做完了。<code>MilvusScan.storeFor</code> 建 <code>NativeObjectStore</code>,属性由连接器自己的 <code>fs.*</code> 选项与 <code>fs.s3a.*</code>/<code>fs.oss.*</code> 翻译出来的键合并,前者优先;桶为空时用 <code>fs.storage_type=local</code>。<code>core.io.hadoop</code> 已删除,core 与 compat 的主代码里没有一处 <code>org.apache.hadoop</code></td></tr>
+<tr><td>executor 侧</td><td>没动。两个 <code>PartitionReader</code> 的文件读取、凭证、Arrow 出口全在上游 <code>io.milvus.storage</code> 绑定里</td></tr>
+<tr><td>代价</td><td>driver 现在要能加载 <code>libmilvus-storage</code>。CI 不构建原生库,所以这条路径在 CI 上没有端到端覆盖;单元测试用 <code>LocalObjectStore</code> 覆盖各格式的解析</td></tr>
+</table>
+
+<h2 id="core">五、要往第 2 层填的两个包</h2>
+
+<p>分界线一句话:<strong><code>plan</code> 在 driver 上跑,产物必须可序列化;
+<code>exec</code> 在 executor 上跑,是 core 调原生层的唯一地方。</strong></p>
+
+<pre><code>段列表 ──plan──> InputSpec(可序列化,发到 executor)
+                    │
+                    └──exec──> SegmentReader ──> 批 ──> Spark</code></pre>
+
+<h3>5.1 core.read.plan</h3>
+<table>
+<tr><th>类型</th><th>是什么</th></tr>
+<tr><td><code>InputSpec</code></td><td>一个分区要读什么:段路径、<code>storage_version</code>、manifest 版本、列名、<code>fs.*</code> 属性、删除文件位置。只有描述,没有句柄、没有 <code>Configuration</code>、没有打开的资源</td></tr>
+<tr><td><code>ReadPlan</code></td><td>一组 <code>InputSpec</code>,加规划期就能算出来的总行数、字节数(供 R13)</td></tr>
+<tr><td><code>Partitioner</code></td><td>怎么切分区。默认一段一分区;R19 按分区报分区、R16 段选择落在这里</td></tr>
+</table>
+<p>剪枝(R9 段级、R10 row group 级)也在本包:规划期用统计信息把不需要的段和文件从
+<code>InputSpec</code> 里去掉。R10 依赖仓库外的两件事,见
+<a href="storage-access.html#bridge-prune">storage-access 4.5</a>。</p>
+
+<h3>5.2 core.read.exec</h3>
+<pre><code>trait SegmentReader extends AutoCloseable {
+  def next(): Option[ColumnBatch]              // 逐批，EOF 返回 None
+  def take(rowIds: Array[Long]): ColumnBatch   // R14 回表
+}
+
+SegmentReaderRegistry: storage_version -> SegmentReader 工厂</code></pre>
+<p><strong>注册表在 core,实现可以在 compat。</strong>V2 packed 的实现放
+<code>compat.v2packed</code>,启动时注册进来;<code>core</code> 不反向依赖
+<code>compat</code>。这是能力 K1 写死的约束。</p>
+<p>这个注册表取代 spark 层现在的做法——<code>MilvusPartitionReaderFactory.createReader</code>
+按 <code>InputPartition</code> 的具体类型做模式匹配,两条线各一个分支。
+分发移到 core,spark 层只留 Spark 接口的对接。</p>
+<p>两条线各自的列组清单怎么来留在各自的实现里,取字节与 Arrow 交接统一走
+<a href="storage-io.html">storage-io</a> 定的那两个面。所有权那三条规则同样在那篇。</p>
+
+<h2 id="columnar">六、列式出口:做,R4 已定</h2>
+
+<p><strong>今天全仓没有任何列式输出</strong>——没有 <code>ColumnarBatch</code>、没有
+<code>ArrowColumnVector</code>、没有 <code>supportColumnarReads</code>,
+两条读线都是行式 <code>PartitionReader[InternalRow]</code>。所以 R4 是从零开始。</p>
+
+<p>决策 12 选了做。出口形态:<strong>无删除的批原样包成 <code>ColumnarBatch</code> 直通,
+有删除的批把存活行物化成新的一批。</strong>物化无法回避,理由与代价见
+<a href="storage-io.html#cost">storage-io 第四节</a>。<code>ColumnBatch</code>
+的定义据此定型,<code>core.read.exec</code> 不再被挡。</p>
+
+<h3>6.1 向量列默认要转,零拷贝因此只落在标量列</h3>
+<p>Milvus 把所有向量类型都存成 Arrow 的 <code>FixedSizeBinary</code>,
+而 Spark 的 <code>ArrowColumnVector</code> 不认这个类型——4.1.3 的
+<code>initAccessor</code> 认的列表里没有 <code>FixedSizeBinaryVector</code>,
+也没有 <code>FixedSizeListVector</code>。原样塞进去会抛不支持的类型,
+所以向量列的容器必然要换。</p>
+<p>决策 6 选了默认转成 Spark 原生类型,与 1.x 的 <code>DataTypeUtil</code> 一致:</p>
+<table>
+<tr><th>Milvus 类型</th><th>存储里的 Arrow 类型</th><th>默认输出</th></tr>
+<tr><td>FloatVector</td><td><code>FixedSizeBinary(dim*4)</code></td><td><code>ArrayType(FloatType)</code></td></tr>
+<tr><td>Float16Vector / BFloat16Vector</td><td><code>FixedSizeBinary(dim*2)</code></td><td><code>ArrayType(FloatType)</code></td></tr>
+<tr><td>Int8Vector</td><td><code>FixedSizeBinary(dim)</code></td><td><code>ArrayType(ShortType)</code></td></tr>
+<tr><td>BinaryVector</td><td><code>FixedSizeBinary((dim+7)/8)</code></td><td><code>BinaryType</code></td></tr>
+<tr><td>SparseFloatVector</td><td><code>Binary</code></td><td><code>MapType(LongType, FloatType)</code></td></tr>
+</table>
+<p>代价:向量列逐元素转,零拷贝在默认路径上只剩标量列,而 Milvus 表的字节绝大部分是向量;
+fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
+<p>出口是读选项 <code>milvus.read.vector.raw</code>:打开后向量列出 <code>BinaryType</code>,
+字节不动,零拷贝成立。它服务的是把字节直接喂给原生库的批量作业(backfill、暴力搜索),
+那些场景转成 <code>Array[Float]</code> 再转回字节是纯浪费。</p>
+
+<h2 id="rest">七、其余没定的</h2>
+<ol>
+<li><strong>向量搜索这条分支怎么放。</strong>存量 <code>MilvusLoonPartitionReader</code> 里有
+<code>performSegmentVectorSearch</code>,和普通扫描是两条并行路径。它属于 V*,本页不设计,
+但 <code>SegmentReader</code> 接口要留得下它,不能设计成只能顺序扫。</li>
+<li><strong>R5 列裁剪怎么传到底。</strong><code>loon_segment_reader_open</code> 收
+<code>needed_columns</code>,V2 那条线怎么表达列裁剪要单独确认。</li>
+<li><strong>谓词。</strong>C 那条路不可用(<code>loon_segment_reader_get_filtered_stream</code>
+收下谓词、返回 OK、然后忽略,见
+<a href="storage-access.html#bridge-gap">storage-access 4.4</a>),由 <code>core.expr</code>
+在 JVM 侧求值。</li>
+</ol>
+
+<h2 id="next">八、开发大纲</h2>
+
+<div class="todo">
+<ol>
+<li><strong>把交地址那一面的 C 入口一次封完,读写一起。</strong>reader 那组
+(<code>loon_record_batch_reader_*</code>、<code>loon_segment_reader_*</code>、
+<code>loon_exttable_read_manifest</code>)加 writer 那组,外加自己的加载器——
+<code>NativeStorageLibrary</code> 现在调的是 <code>io.milvus.storage.NativeLibraryLoader</code>,
+第 1 层反过来依赖了要被替换的东西。分两次做等于把凭证、加载器、结构体那套代码写两遍。</li>
+
+<li><strong>凭证换成 <code>core.credential</code>。</strong>把
+<code>Properties.fromMilvusOption</code> 换成 <code>StorageProperties.from(options)</code>
+的 <code>fs.*</code> 属性包。一处改动同时服务两个 reader 和两个 writer。
+临时凭证今天只能走 <code>fs.use_iam</code> 加环境变量,属性包缺
+<code>fs.session_token</code>,见 <a href="storage-access.html#cgap">storage-access 3.7</a>。</li>
+
+<li><strong>reader 换过去。</strong>V2 线先换——它的列组清单是 JVM 拼的,不依赖原生 manifest 解析,
+改动面更小;V3 线随后。换完之后读出口移到 <code>core.read.exec</code>,
+spark 层只留 Spark 接口的对接。</li>
+
+<li><strong>writer 换过去。</strong>backfill 分支走已有的 <code>BatchUpdateManifest</code>,可以做;
+append 分支等 Milvus 新增 <code>RegisterSegments</code>,那条不在我们手上。</li>
+
+<li><strong>删掉上游绑定。</strong>读写都搬完才删得掉,<code>legacyJni</code> 那四处、
+3.5 线出不了 Scala 2.12 产物,跟着一起解决。</li>
+</ol>
+</div>
+
+<p>第 1、2、3 步做完,读这条路就不再经过上游绑定。第 4、5 步是写侧,能力 W1 的交付还等 Milvus 新增 <code>RegisterSegments</code>。</p>

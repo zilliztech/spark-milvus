@@ -16,11 +16,13 @@ package com.zilliz.milvus.storage
   * base class accepts a predicate, returns OK and ignores it for every format
   * except Vortex, which is out of scope. Predicates are evaluated in core.expr.
   *
-  * `io.hadoop` is the migration-period path and goes away when the JNI wrapper
-  * in native-storage lands.
+  * NativeObjectStore is the only implementation. The Hadoop-backed one that
+  * carried the migration is gone, and with it the last `org.apache.hadoop`
+  * reference in core's main sources. Tests use LocalObjectStore, in core's test
+  * sources, which reads the local disk and needs no native library.
   *
-  * Main types: ObjectStore, FileInfo, SeekableInput. Capabilities: R2, R3, W1
-  * (see docs/design/capabilities.md). Design:
+  * Main types: ObjectStore, ObjectStoreFactory, NativeObjectStore, FileInfo.
+  * Capabilities: R2, R3, W1 (see docs/design/capabilities.md). Design:
   * docs/design/architecture/storage-access.html section 4.
   */
 package object io

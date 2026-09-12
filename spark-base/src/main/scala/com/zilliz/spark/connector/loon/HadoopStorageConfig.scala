@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.loon
 import org.apache.hadoop.conf.Configuration
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
 
 /** Translates the Hadoop-style storage keys a runtime already has
   * (`spark.hadoop.fs.s3a.*`, `fs.oss.*`) into the `fs.*` keys
@@ -14,8 +15,9 @@ import com.zilliz.milvus.storage.credential.StorageProperties
   * config change. The long-term shape is for whoever produces the configuration
   * to emit `fs.*` directly; this shim goes away with the last such deployment.
   *
-  * It reads keys and renames them. It resolves no credentials and constructs
-  * nothing.
+  * The translation itself reads keys and renames them; it resolves no
+  * credentials. [[objectStore]] is the one place that turns the result into a
+  * live store, so every driver-side read opens storage the same way.
   */
 object HadoopStorageConfig {
 
@@ -67,6 +69,61 @@ object HadoopStorageConfig {
 
     val out = s3a ++ oss ++ provider
     out
+  }
+
+  /** Opens the store the driver reads snapshots, manifests, footers, delete
+    * files and backup metadata through.
+    *
+    * An empty `bucket` means the caller has no object-storage location: a local
+    * directory, or a path that names its own. That is `fs.storage_type=local`,
+    * which is the C layer's local backend and needs neither an endpoint nor
+    * credentials.
+    *
+    * Keys passed to the returned store are bucket-relative. The C filesystem
+    * wraps its backend in a subtree rooted at `fs.bucket_name` and appends
+    * whatever it is handed, so a fully qualified path arrives doubled.
+    */
+  def objectStore(conf: Configuration, bucket: String): ObjectStore = {
+    val trimmed = Option(bucket).map(_.trim).getOrElse("")
+    if (trimmed.isEmpty) {
+      return storeFrom(
+        Map(StorageProperties.StorageType -> StorageProperties.StorageTypeLocal)
+      )
+    }
+    storeFrom(
+      toFsProperties(conf) ++ Map(StorageProperties.BucketName -> trimmed)
+    )
+  }
+
+  /** Opens a store from an `fs.*` map that a caller has already assembled.
+    *
+    * Validation and defaults are [[StorageProperties.from]]'s; the only thing
+    * added here is the IAM fallback, which cannot live there because it is a
+    * statement about Hadoop-shaped configuration, not about `fs.*`.
+    */
+  def storeFrom(properties: Map[String, String]): ObjectStore =
+    NativeObjectStore
+      .Factory(StorageProperties.from(properties ++ iamFallback(properties)))
+      .open()
+
+  /** A deployment that injects no static keys expects the instance role to be
+    * used — IRSA on EKS, RRSA on ACK, an instance profile elsewhere. Hadoop
+    * spells that as the absence of `access.key`, so there is no key to
+    * translate; the C layer spells it `fs.use_iam`, which has to be set
+    * explicitly or its provider chain is never consulted.
+    */
+  private def iamFallback(
+      properties: Map[String, String]
+  ): Map[String, String] = {
+    val isLocal = properties
+      .get(StorageProperties.StorageType)
+      .exists(_.equalsIgnoreCase(StorageProperties.StorageTypeLocal))
+    val hasStaticKeys = properties.contains(StorageProperties.AccessKeyId) &&
+      properties.contains(StorageProperties.AccessKeyValue)
+    val assumesRole = properties.contains(StorageProperties.RoleArn)
+    val alreadySet = properties.contains(StorageProperties.UseIam)
+    if (isLocal || hasStaticKeys || assumesRole || alreadySet) Map.empty
+    else Map(StorageProperties.UseIam -> "true")
   }
 
   private def translate(

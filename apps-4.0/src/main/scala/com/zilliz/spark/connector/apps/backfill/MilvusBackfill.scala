@@ -1962,11 +1962,8 @@ object MilvusBackfill {
         .loadV2Segments(
           metadata.manifestList,
           config.s3BucketName,
-          new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
-            hadoopConf,
-            config.s3BucketName,
-            storageScheme(config)
-          ),
+          com.zilliz.spark.connector.loon.HadoopStorageConfig
+            .objectStore(hadoopConf, config.s3BucketName),
           manifestSchemaVersion = metadata.manifestSchemaVersion,
           applyDeletes = ApplyDeletesToSourceRows,
           storageScheme = storageScheme(config)

@@ -1,0 +1,242 @@
+<meta charset="utf-8">
+<title>存储通路</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 52rem; margin: 2rem auto; padding: 0 1.2rem;
+         font: 16px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.4rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.6rem; }
+  p.thesis { font-size: 1.05rem; }
+  figure { margin: 1.6rem 0; }
+  figure svg { max-width: 100%; height: auto; }
+  figcaption { font-size: .85rem; opacity: .75; margin-top: .6rem; line-height: 1.6; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .86em;
+         background: #8881; padding: .1em .35em; border-radius: 3px; }
+  pre { background: #8881; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .84rem; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .9rem; }
+  th, td { border: 1px solid #8884; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #8881; font-weight: 600; }
+  .warn { border-left: 3px solid #d08700; background: #d0870014; padding: .8rem 1rem; margin: 1.3rem 0; }
+  .open { border-left: 3px solid #8886; background: #88880f; padding: .8rem 1rem; margin: 1.3rem 0; }
+</style>
+
+<h1>存储通路</h1>
+
+<p>第 1 层与第 2 层之间的契约:对象存储上的字节怎么到 JVM,JVM 里的数据怎么回到对象存储。
+读写共用这一层,所以它单独一篇;读那一侧的现状与设计见
+<a href="read.html">read.html</a>,分层见 <a href="modules.md">modules.md</a>。</p>
+
+<p class="thesis"><strong>跨 JNI 边界的只有两样东西:小块元数据的字节,和大块列数据的地址。
+列数据本身从不进 JVM。</strong></p>
+
+<figure>
+<svg viewBox="0 0 980 400" role="img"
+     aria-label="对象存储、C 层、JVM 三者之间的数据通路。读元数据时字节跨过 JNI 边界进入 JVM 解析；读列数据时 C 层解出 Arrow，只有地址跨界；写列数据时 JVM 建好 Arrow，同样只有地址跨界，由 C 层写回对象存储。">
+  <defs>
+    <marker id="tipR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="tipL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <line x1="696" y1="40" x2="696" y2="376" stroke="currentColor" stroke-width="1"
+        stroke-dasharray="3 5" opacity=".55"/>
+  <text x="696" y="30" fill="currentColor" font-size="12" text-anchor="middle" opacity=".8">JNI 边界</text>
+
+  <g fill="none" stroke="currentColor" stroke-width="1.2">
+    <rect x="16" y="64" width="130" height="288" rx="3"/>
+    <rect x="376" y="64" width="210" height="288" rx="3"/>
+    <rect x="806" y="64" width="158" height="288" rx="3"/>
+  </g>
+  <g fill="currentColor" font-size="12.5" text-anchor="middle" font-weight="600">
+    <text x="81" y="56">对象存储</text>
+    <text x="481" y="56">C 层 libmilvus-storage</text>
+    <text x="885" y="56">JVM</text>
+  </g>
+
+  <g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#tipR)">
+    <line x1="146" y1="140" x2="370" y2="140"/>
+    <line x1="586" y1="140" x2="800" y2="140"/>
+  </g>
+  <g fill="currentColor" font-size="11" text-anchor="middle">
+    <text x="258" y="120">manifest、parquet footer</text>
+    <text x="258" y="134">删除日志、快照 JSON</text>
+    <text x="693" y="127">字节</text>
+    <text x="481" y="136">loon_filesystem_*</text>
+    <text x="885" y="130">解析 avro / json</text>
+    <text x="885" y="145">/ parquet footer</text>
+  </g>
+  <text x="81" y="145" fill="currentColor" font-size="11" text-anchor="middle">小文件</text>
+
+  <g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#tipR)">
+    <line x1="146" y1="228" x2="370" y2="228"/>
+  </g>
+  <g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#tipR)"
+     stroke-dasharray="5 4">
+    <line x1="586" y1="228" x2="800" y2="228"/>
+  </g>
+  <g fill="currentColor" font-size="11" text-anchor="middle">
+    <text x="258" y="215">列组 parquet</text>
+    <text x="693" y="215">只过地址</text>
+    <text x="481" y="217">loon_segment_reader</text>
+    <text x="481" y="232">解 parquet → Arrow</text>
+    <text x="885" y="218">Arrow 视图</text>
+    <text x="885" y="233">(指向 C 的内存)</text>
+  </g>
+  <text x="81" y="233" fill="currentColor" font-size="11" text-anchor="middle">大数据</text>
+
+  <g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#tipL)"
+     stroke-dasharray="5 4">
+    <line x1="800" y1="312" x2="586" y2="312"/>
+  </g>
+  <g stroke="currentColor" stroke-width="1.3" fill="none" marker-end="url(#tipL)">
+    <line x1="370" y1="312" x2="146" y2="312"/>
+  </g>
+  <g fill="currentColor" font-size="11" text-anchor="middle">
+    <text x="258" y="299">列组 parquet、manifest</text>
+    <text x="693" y="299">只过地址</text>
+    <text x="481" y="301">loon writer</text>
+    <text x="481" y="316">Arrow → parquet</text>
+    <text x="885" y="302">VectorSchemaRoot</text>
+    <text x="885" y="317">(JVM 的内存)</text>
+  </g>
+  <text x="81" y="317" fill="currentColor" font-size="11" text-anchor="middle">大数据</text>
+
+  <g fill="currentColor" font-size="11.5" text-anchor="start" opacity=".85">
+    <text x="16" y="100">读 · 元数据</text>
+    <text x="16" y="188">读 · 列数据</text>
+    <text x="16" y="272">写 · 列数据</text>
+  </g>
+</svg>
+<figcaption>
+实线表示字节真的流过去,虚线表示只交换一个地址。三行里只有第一行的字节跨过 JNI 边界。
+写完之后的段登记走 gRPC 到 Milvus,不经对象存储,也不过 JNI,所以不在图上。
+</figcaption>
+</figure>
+
+<h2 id="two-faces">一、第 1 层有两个面</h2>
+
+<p>两个面的接口形状不同,因为契约不同。</p>
+
+<table>
+<tr><th></th><th>交字节的面</th><th>交地址的面</th></tr>
+<tr><td>C 入口</td><td><code>loon_filesystem_*</code></td><td><code>loon_segment_reader_*</code>、<code>loon_record_batch_reader_*</code>、writer 那组</td></tr>
+<tr><td>JVM 接口</td><td><code>core.io.ObjectStore</code></td><td><code>core.read.exec</code> 的 <code>SegmentReader</code>(待写)</td></tr>
+<tr><td>方法长相</td><td><code>readAll(key): Array[Byte]</code></td><td>收发 <code>ArrowArray</code>/<code>ArrowSchema</code> 的地址</td></tr>
+<tr><td>谁解析格式</td><td>JVM</td><td>C</td></tr>
+<tr><td>在哪跑</td><td>driver 规划分区时</td><td>executor 扫段时</td></tr>
+</table>
+
+<p>分界线是<strong>文件大小和解析器归属</strong>。元数据是 avro、json、parquet footer,
+JVM 有现成解析器,文件又小,拷进来最省事。列数据量大,拷一次就等于白做零拷贝,
+而 C 那边本来就有完整的 parquet 解码器。</p>
+
+<p>删除日志走交字节这一面,但读出来的是真实的主键和时间戳值,不是元数据。
+它在这一侧的原因是格式是 parquet 而解析在 JVM(<code>core.delete.MilvusDeltaLogReader</code>),
+并且它在 driver 上读,一个段一份,量可控。</p>
+
+<h2 id="arrow">二、地址这一面怎么交接</h2>
+
+<p><strong>每批分配两个空的 C 结构体,让对面填,填完立刻释放结构体本身,数据留给拿到它的那一方。</strong></p>
+
+<h3>2.1 读:C 填,JVM 收</h3>
+<pre><code>val arr = ArrowArray.allocateNew(allocator)     // 两个空壳
+val sch = ArrowSchema.allocateNew(allocator)
+try {
+  reader.readNextBatchScala(rbrHandle, arr.memoryAddress(), sch.memoryAddress())
+  Data.importVectorSchemaRoot(allocator, arr, sch, null)   // 数据交给 root
+} finally {
+  arr.close(); sch.close()                      // 只释放空壳
+}</code></pre>
+<p>最后那两个 <code>close</code> 释放的是结构体本身。数据由
+<code>VectorSchemaRoot</code> 持有,它的释放由 allocator 管。</p>
+
+<h3>2.2 写:JVM 填,C 收</h3>
+<pre><code>// 打开 writer 时一次
+Data.exportSchema(allocator, arrowSchema, null, arrowSchemaC)
+w.create(basePath, arrowSchemaC.memoryAddress(), writerProperties)
+
+// 每批一次
+val arrowArrayC = ArrowArray.allocateNew(allocator)
+try {
+  Data.exportVectorSchemaRoot(allocator, root, null, arrowArrayC)
+  writer.write(arrowArrayC.memoryAddress())
+} finally {
+  arrowArrayC.close()
+}</code></pre>
+
+<h3>2.3 两侧不对称的三处</h3>
+<table>
+<tr><th></th><th>读</th><th>写</th></tr>
+<tr><td>schema 过界次数</td><td>每批一次(C 填),另加打开时一次(JVM 声明要哪些列)</td><td>只在打开时一次,之后每批只过 <code>ArrowArray</code></td></tr>
+<tr><td>schema 方向</td><td>打开时 JVM→C,每批 C→JVM</td><td>只有 JVM→C</td></tr>
+<tr><td><code>close()</code> 的含义</td><td>纯粹释放空壳,数据已归 <code>VectorSchemaRoot</code></td><td>成功时 C++ 的 <code>ImportRecordBatch</code> 已把 release 移走,<code>close</code> 只清结构体内存;失败时 release 还在,<code>close</code> 会掉一个导出侧引用</td></tr>
+</table>
+<p>写侧那个 schema 结构体活到 writer 关闭,不能在第一批之后释放。</p>
+
+<h3>2.4 不用 ArrowArrayStream</h3>
+<div class="warn">
+<strong>C 层有 <code>loon_segment_reader_get_stream</code>,上游 Java 绑定有
+<code>MilvusSegmentReader.getStream</code>,我们一处都不用。</strong>
+Arrow Java 的 <code>ArrowReader.loadNextBatch</code> 在多批之间共用同一个
+<code>VectorSchemaRoot</code>,并且忽略 <code>ArrowArray</code> 的 <code>offset</code> 字段。
+底层 C++ reader 一旦返回 <code>RecordBatch::Slice</code> 的结果,第一批之后的每一批都显示成同一份数据,
+不抛异常。这是 milvus-storage#493,<code>MilvusLoonPartitionReader</code> 第 182 行的注释记着,
+<code>MilvusStorageFFITest</code> 是它的回归用例。
+<p style="margin:.6rem 0 0">因此 <code>native-storage</code> 不封装 <code>ArrowArrayStream</code>。
+<code>jni/storage/arrow/package-info.java</code> 现在写着这个包封装 ArrowArray、ArrowSchema 和
+ArrowArrayStream,第三个要删掉,否则重写第 1 层时会有人照着它封一个用不上的东西。</p>
+</div>
+
+<h2 id="ownership">三、句柄的所有权</h2>
+
+<p><strong>这三条弄错了都不报错,所以写死。</strong></p>
+
+<ol>
+<li><strong>句柄不跨序列化边界。</strong>句柄是本进程内的指针。
+<code>InputSpec</code> 里只装描述(段路径、manifest 版本、要读的列、<code>fs.*</code> 属性),
+executor 拿到描述之后才开句柄。</li>
+
+<li><strong>构造到一半失败要自己回滚。</strong>Spark 只对构造完成的 reader 调
+<code>close()</code>,构造过程中开了一半的句柄它不管。所以构造块用
+<code>try/catch</code> 包住,失败时释放已经拿到的一切再抛;每个句柄字段用
+<code>var</code> 加 <code>0L</code>/<code>null</code> 初始化,让回滚能判断哪些已分配。
+<code>MilvusLoonPartitionReader</code> 的 <code>releaseAll()</code> 就是这个。</li>
+
+<li><strong><code>close()</code> 必须幂等。</strong>Spark 在错误路径上可能重复调用,
+释放后把字段置回哨兵值。</li>
+</ol>
+
+<h2 id="cost">四、这条性质的代价,以及决策 12</h2>
+
+<p><strong>「列数据不进 JVM」这句话有一个前提:JVM 不需要按行改动这批数据。删除生效时这个前提不成立。</strong></p>
+
+<p><code>MilvusDeletePlan</code> 按主键加时间戳查(<code>containsLongPk(pk, rowTs)</code>),
+判断一行删没删要先读出该行的 PK 列和 <code>timestamp</code> 列再查表。
+读这两列不破坏上面那条性质——Arrow 视图能直接读 C 的内存。
+破坏它的是下一步:留下来的行要交给 Spark,而
+Spark 的 <code>ColumnarBatch</code> 没有表达行有效性的成员(3.5.5 与 4.1.3 都只有 <code>setNumRows</code>、<code>numRows</code>、<code>column</code>、<code>getRow</code>),
+只能把存活行物化成新的一批,也就是把 C 的内存拷进 JVM。</p>
+
+<div class="open">
+<strong>决策 12 选了做 R4。</strong>无删除的段批原样包成 <code>ColumnarBatch</code> 直通,
+这条性质完整成立;有删除的段多读两列、全行扫描、再物化,这条性质在那一批上归零,
+比今天的行式还多一次拷贝。取这个代价的理由是有删除的段在多数情况下是少数,
+换来的是无删除的段省掉逐行 <code>arrowToInternalRow</code>。见
+<a href="../README.md">README 第 6 节</a>。
+</div>
+
+<h2 id="state">五、现在到哪一步</h2>
+
+<table>
+<tr><th></th><th>状态</th></tr>
+<tr><td>交字节的面</td><td>已经到位。<code>NativeObjectStore</code> 走我们自己的 JNI(<code>native-storage</code>),driver 侧四类元数据读取全部经过它,<code>core.io.hadoop</code> 已删除</td></tr>
+<tr><td>交地址的面</td><td>还在上游 Java 绑定里。两个 <code>PartitionReader</code> 与两个 writer 都 <code>import io.milvus.storage</code>,<code>native-storage</code> 只封了 <code>loon_filesystem_*</code></td></tr>
+</table>
+
+<p>下一步是把交地址这一面的 C 入口一次封完,读写一起——两侧共用凭证、加载器和上面 2.1、2.2 那套结构体代码,
+分两次做等于写两遍。封完之后上游绑定才删得掉,<code>legacyJni</code> 那四处、Scala 2.12 出不了产物这些才跟着解决。</p>

@@ -1,22 +1,28 @@
+import java.net.URI
 import scala.sys.process.Process
 
 import xerial.sbt.Sonatype._
-
 import Dependencies._
 
 // Shared defaults. Per-line Scala and Java settings live in Modules.
 ThisBuild / scalaVersion := Versions.scala213
 ThisBuild / versionScheme := Some("early-semver")
 
-lazy val milvusProtoDir =
-  Def.setting((ThisBuild / baseDirectory).value / "milvus-proto" / "proto")
-
 // Root keeps the existing cloud artifact while sources live in the modules.
-lazy val root = (project in file("."))
+lazy val root = project
+  .in(file("."))
   // Live-service suites run explicitly through integration40/test.
   .aggregate(
-    nativeStorage, nativeVector, core, compat, client,
-    spark35, spark40, spark41, spark42, apps40
+    nativeStorage,
+    nativeVector,
+    core,
+    compat,
+    client,
+    spark35,
+    spark40,
+    spark41,
+    spark42,
+    apps40
   )
   .dependsOn(spark40, apps40)
   .settings(
@@ -42,6 +48,10 @@ lazy val nativeStorage = Project("native-storage", file("native-storage"))
     name := "native-storage",
     moduleName := "spark-milvus-native-storage",
     Modules.javaOnly,
+    // StorageNative loads libnative-storage-jni, which links against
+    // libmilvus-storage; the upstream loader extracts both. The dependency goes
+    // away with the binding it belongs to.
+    Modules.legacyJni,
     publish / skip := true
   )
 
@@ -53,9 +63,13 @@ lazy val nativeVector = Project("native-vector", file("native-vector"))
     publish / skip := true
   )
 
+lazy val milvusProtoDir =
+  Def.setting((ThisBuild / baseDirectory).value / "milvus-proto" / "proto")
+
 // Layer 2: the core layer. All computation happens here, and no source file
 // mentions org.apache.spark.
-lazy val core = Project("core", file("core"))
+lazy val core = project
+  .in(file("core"))
   .dependsOn(nativeStorage, nativeVector)
   .settings(
     name := "core",
@@ -67,12 +81,27 @@ lazy val core = Project("core", file("core"))
     libraryDependencies ++= Seq(
       // Compiled against the interfaces only; the implementation arrives at
       // runtime at the version spark-<line> pinned.
-      "org.apache.arrow" % "arrow-vector" % Versions.line("4.0").arrow % "provided",
-      "org.apache.arrow" % "arrow-memory-core" % Versions.line("4.0").arrow % "provided",
-      "org.apache.arrow" % "arrow-c-data" % Versions.line("4.0").arrow % "provided",
-      "org.apache.arrow" % "arrow-format" % Versions.line("4.0").arrow % "provided",
-      // The only storage implementation goes through the Hadoop FileSystem
-      // API, using the copy Spark ships at runtime.
+      "org.apache.arrow" % "arrow-vector" % Versions
+        .line("4.0")
+        .arrow % "provided",
+      "org.apache.arrow" % "arrow-memory-core" % Versions
+        .line("4.0")
+        .arrow % "provided",
+      "org.apache.arrow" % "arrow-c-data" % Versions
+        .line("4.0")
+        .arrow % "provided",
+      "org.apache.arrow" % "arrow-format" % Versions
+        .line("4.0")
+        .arrow % "provided",
+      // The Arrow artifacts above are interfaces only. Allocating a buffer
+      // needs an allocation manager, which Spark supplies at runtime; core's
+      // own native tests have no Spark, so they bring their own.
+      "org.apache.arrow" % "arrow-memory-netty" % Versions
+        .line("4.0")
+        .arrow % Test,
+      // No source here imports Hadoop. parquet-mr does: ParquetReader.Builder
+      // names org.apache.hadoop.fs.Path in its signature, so the class has to
+      // be on the compile classpath even for the in-memory reads core does.
       hadoopCommon,
       // Three formats the storage layer itself needs: snapshots and backup
       // metadata are JSON, segment manifests are Avro, delete files and column
@@ -84,6 +113,10 @@ lazy val core = Project("core", file("core"))
       scalapbRuntime % "protobuf",
       scalaTest % Test
     ),
+    // The native suites here load libnative-storage-jni and hand Arrow C
+    // structs across, which needs the library path and the java.nio add-opens
+    // the Spark lines already get.
+    inConfig(Test)(Modules.nativeTest),
     // Storage schemas belong to core; service stubs in client reuse them.
     Compile / PB.protoSources := Seq(milvusProtoDir.value),
     Compile / PB.generate / includeFilter := "common.proto" | "schema.proto",
@@ -94,8 +127,11 @@ lazy val core = Project("core", file("core"))
 
 // Adapters for the three non-standard entry points. Each one produces a core
 // Snapshot or SegmentReader.
-lazy val compat = Project("compat", file("compat"))
-  .dependsOn(core)
+lazy val compat = project
+  .in(file("compat"))
+  // test->test as well: the format suites here share core's LocalObjectStore
+  // fixture, which stands in for the native store so parser tests need no .so.
+  .dependsOn(core % "compile->compile;test->test")
   .settings(
     name := "compat",
     moduleName := "spark-milvus-compat",
@@ -118,7 +154,8 @@ lazy val compat = Project("compat", file("compat"))
 
 // The client for the online Milvus service: the calls behind DDL, delete and
 // the procedures.
-lazy val client = Project("client", file("client"))
+lazy val client = project
+  .in(file("client"))
   .dependsOn(core)
   .settings(
     name := "client",
@@ -157,12 +194,14 @@ def sparkProject(l: Versions.SparkLine): Project =
       Compile / unmanagedResourceDirectories +=
         (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "resources",
       libraryDependencies ++=
-        Dependencies.sparkDeps(l) ++ Dependencies.arrowDeps(l) ++ Dependencies.legacyDeps(l),
+        Dependencies.sparkDeps(l) ++ Dependencies.arrowDeps(l) ++ Dependencies
+          .legacyDeps(l),
       libraryDependencies += scalaTest % Test,
       inConfig(Test)(Modules.nativeTest),
       // Per-line bundles are not published yet; add shading before enabling them.
       assembly / assemblyJarName := s"spark-milvus-${l.id}-bundle.jar",
-      assembly / artifact := (assembly / artifact).value.withClassifier(Some("bundle"))
+      assembly / artifact := (assembly / artifact).value
+        .withClassifier(Some("bundle"))
     )
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
@@ -171,7 +210,8 @@ lazy val spark41 = sparkProject(Versions.line("4.1"))
 lazy val spark42 = sparkProject(Versions.line("4.2"))
 
 // Layer 4: apps currently run on 4.0, so their sources need no shared directory.
-lazy val apps40 = Project("apps40", file("apps-4.0"))
+lazy val apps40 = project
+  .in(file("apps-4.0"))
   .dependsOn(spark40)
   .settings(
     name := "apps-4.0",
@@ -191,7 +231,8 @@ lazy val apps40 = Project("apps40", file("apps-4.0"))
   )
 
 // Integration tests use a separate project because they need live services.
-lazy val integration40 = Project("integration40", file("integration-4.0"))
+lazy val integration40 = project
+  .in(file("integration-4.0"))
   .dependsOn(spark40, apps40)
   .settings(
     name := "integration-4.0",
@@ -199,7 +240,9 @@ lazy val integration40 = Project("integration40", file("integration-4.0"))
     Modules.perLine(Versions.line("4.0")),
     publish / skip := true,
     libraryDependencies ++=
-      Dependencies.sparkDeps(Versions.line("4.0")).map(_.withConfigurations(Some("test"))),
+      Dependencies
+        .sparkDeps(Versions.line("4.0"))
+        .map(_.withConfigurations(Some("test"))),
     libraryDependencies += scalaTest % Test,
     inConfig(Test)(Modules.nativeTest)
   )
@@ -247,18 +290,15 @@ lazy val rootAssemblySettings: Seq[Setting[_]] = Seq(
     ExclusionRule("log4j", "log4j"),
     ExclusionRule("ch.qos.reload4j", "reload4j")
   ),
-
   assembly / assemblyExcludedJars := {
     val cp = (assembly / fullClasspath).value
     cp.filter(_.data.getName.startsWith("slf4j-api-"))
   },
-
   assembly / assemblyShadeRules := Seq(
     ShadeRule.rename("com.google.protobuf.**" -> "shade_proto.@1").inAll,
     ShadeRule.rename("com.google.common.**" -> "shade_googlecommon.@1").inAll
     // Arrow JNI bindings contain hardcoded class names, so Arrow stays unshaded.
   ),
-
   assembly / assemblyMergeStrategy := {
     case PathList("native", xs @ _*) => MergeStrategy.first
     case PathList("META-INF", "native-image", "io.netty", _*) =>
@@ -273,9 +313,11 @@ lazy val rootAssemblySettings: Seq[Setting[_]] = Seq(
       MergeStrategy.first
     case x if x.endsWith("module-info.class") =>
       MergeStrategy.discard
-    case PathList("org", "apache", "hadoop", xs @ _*) if xs.last == "package-info.class" =>
+    case PathList("org", "apache", "hadoop", xs @ _*)
+        if xs.last == "package-info.class" =>
       MergeStrategy.first
-    case PathList("software", "amazon", "awssdk", xs @ _*) if xs.last == "VersionInfo.class" =>
+    case PathList("software", "amazon", "awssdk", xs @ _*)
+        if xs.last == "VersionInfo.class" =>
       MergeStrategy.first
     case x =>
       val oldStrategy = (ThisBuild / assemblyMergeStrategy).value
@@ -283,40 +325,23 @@ lazy val rootAssemblySettings: Seq[Setting[_]] = Seq(
   }
 )
 
-// Packaging and publishing. Only the root artifact is released during migration.
-ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
-
-lazy val snapshotRepositoryUrl = sys.env.getOrElse(
-  "MAVEN_SNAPSHOT_REPOSITORY_URL",
-  "https://central.sonatype.com/repository/maven-snapshots/"
-)
-
-lazy val mavenCredentialsFile = file(sys.env.getOrElse(
-  "MAVEN_CREDENTIALS_FILE",
-  (Path.userHome / ".sbt" / "sonatype_central_credentials").getAbsolutePath
-))
-
+// Publication metadata shared by the build.
 ThisBuild / organizationName := "zilliz"
 ThisBuild / organizationHomepage := Some(url("https://zilliz.com/"))
 ThisBuild / description :=
   "Milvus Spark Connector to use in Spark ETLs to populate a Milvus vector database."
 
-// Remove all additional repository other than Maven Central from POM
-ThisBuild / pomIncludeRepository := { _ => false }
-ThisBuild / publishMavenStyle := true
-
-ThisBuild / publishTo := {
-  if (isSnapshot.value) Some("maven-snapshots" at snapshotRepositoryUrl)
-  else localStaging.value
-}
-
 ThisBuild / licenses := List(
-  "Server Side Public License v1" -> new URL(
-    "https://raw.githubusercontent.com/mongodb/mongo/refs/heads/master/LICENSE-Community.txt"
-  ),
-  "GNU Affero General Public License v3 (AGPLv3)" -> new URL(
-    "https://www.gnu.org/licenses/agpl-3.0.txt"
-  )
+  "Server Side Public License v1" -> URI
+    .create(
+      "https://raw.githubusercontent.com/mongodb/mongo/refs/heads/master/LICENSE-Community.txt"
+    )
+    .toURL,
+  "GNU Affero General Public License v3 (AGPLv3)" -> URI
+    .create(
+      "https://www.gnu.org/licenses/agpl-3.0.txt"
+    )
+    .toURL
 )
 ThisBuild / homepage := Some(
   url("https://github.com/zilliztech/milvus-spark-connector")
@@ -336,23 +361,51 @@ ThisBuild / developers := List(
   )
 )
 
+// Maven repository and publication policy.
+lazy val snapshotRepositoryUrl = sys.env.getOrElse(
+  "MAVEN_SNAPSHOT_REPOSITORY_URL",
+  "https://central.sonatype.com/repository/maven-snapshots/"
+)
+
+ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
+ThisBuild / publishMavenStyle := true
+
+// Remove all additional repository other than Maven Central from POM
+ThisBuild / pomIncludeRepository := { _ => false }
+
+ThisBuild / publishTo := {
+  if (isSnapshot.value) Some("maven-snapshots" at snapshotRepositoryUrl)
+  else localStaging.value
+}
+
+// Root publication inputs. Only the root artifact is released during migration.
 lazy val arch = System.getProperty("os.arch") match {
-  case "amd64" | "x86_64" => "amd64"
+  case "amd64" | "x86_64"  => "amd64"
   case "aarch64" | "arm64" => "arm64"
-  case other => other
+  case other               => other
 }
 
 // Docker supplies GIT_BRANCH; local builds use the current checkout.
 lazy val gitBranch = {
-  val branch = sys.env.getOrElse("GIT_BRANCH",
-    scala.util.Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim).getOrElse("unknown")
+  val branch = sys.env.getOrElse(
+    "GIT_BRANCH",
+    scala.util
+      .Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim)
+      .getOrElse("unknown")
   )
   branch.replaceAll("[^a-zA-Z0-9._-]", "-")
 }
 
+lazy val mavenCredentialsFile = file(
+  sys.env.getOrElse(
+    "MAVEN_CREDENTIALS_FILE",
+    (Path.userHome / ".sbt" / "sonatype_central_credentials").getAbsolutePath
+  )
+)
+
 lazy val rootPublishingSettings: Seq[Setting[_]] = Seq(
   organization := "com.zilliz",
-  version := s"2.0.0-${gitBranch}-${arch}-SNAPSHOT",
+  version := s"2.0.0-$gitBranch-$arch-SNAPSHOT",
   Compile / packageDoc / publishArtifact := false,
   Compile / packageSrc / publishArtifact := false,
 
@@ -365,15 +418,18 @@ lazy val rootPublishingSettings: Seq[Setting[_]] = Seq(
         s"${(apps40 / moduleName).value}_${(apps40 / scalaBinaryVersion).value}"
     )
     val removeBundledModules = new scala.xml.transform.RewriteRule {
-      override def transform(node: scala.xml.Node): Seq[scala.xml.Node] = node match {
-        case dependency: scala.xml.Elem
-            if dependency.label == "dependency" && bundledModules.contains(
-              (dependency \ "groupId").text -> (dependency \ "artifactId").text
-            ) => scala.xml.NodeSeq.Empty
-        case other => other
-      }
+      override def transform(node: scala.xml.Node): Seq[scala.xml.Node] =
+        node match {
+          case dependency: scala.xml.Elem
+              if dependency.label == "dependency" && bundledModules.contains(
+                (dependency \ "groupId").text -> (dependency \ "artifactId").text
+              ) =>
+            scala.xml.NodeSeq.Empty
+          case other => other
+        }
     }
-    val transformer = new scala.xml.transform.RuleTransformer(removeBundledModules)
+    val transformer =
+      new scala.xml.transform.RuleTransformer(removeBundledModules)
     (pom: scala.xml.Node) => transformer.transform(pom).head
   },
 
@@ -381,8 +437,6 @@ lazy val rootPublishingSettings: Seq[Setting[_]] = Seq(
   // explicit credentials file for the selected Maven repository.
   credentials += {
     if (mavenCredentialsFile.exists) Credentials(mavenCredentialsFile)
-    else {
-      Credentials(Path.userHome / ".sbt" / "sonatype.credentials")
-    }
+    else Credentials(Path.userHome / ".sbt" / "sonatype.credentials")
   }
 )

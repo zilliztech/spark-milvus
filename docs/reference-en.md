@@ -133,6 +133,7 @@ val s3Options = Map(
 | `MilvusOption.MilvusPartitionID` | String | No | "" | Partition ID, usually auto-retrieved |
 | `MilvusOption.MilvusSegmentID` | String | No | "" | Segment ID, for reading specific segments |
 | `MilvusOption.ReaderFieldIDs` | String | No | "" | Comma-separated field ID list, for reading specific fields |
+| `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
 
 ### 2.4 Write Parameters
 

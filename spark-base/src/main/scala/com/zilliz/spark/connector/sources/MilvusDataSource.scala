@@ -264,7 +264,15 @@ case class MilvusTable(
           new CaseInsensitiveStringMap(milvusOption.options.asJava)
         )
         BackupMetaReader
-          .readMeta(MilvusScan.storeFor(conf, ""), dir, maxBytes) match {
+          .readMeta(
+            MilvusScan.storeFor(
+              conf,
+              MilvusScan.snapshotBucket(dir).getOrElse(""),
+              milvusOption.options
+            ),
+            dir,
+            maxBytes
+          ) match {
           case Left(err) =>
             if (needsSchema) {
               throw new IllegalArgumentException(
@@ -1075,21 +1083,45 @@ object MilvusScan extends Logging {
     }
   }
 
-  /** Wraps a Hadoop Configuration as an ObjectStore.
+  /** The one place the driver opens object storage.
     *
-    * The migration-period adapter: core and compat no longer take Hadoop types,
-    * and this is where the driver-side reads that still run on Hadoop get one.
-    * It goes away when these call sites move to the native factory.
+    * Two sources feed it, and explicit beats inferred: the connector's own
+    * `fs.*` options win over the `fs.s3a.*` / `fs.oss.*` keys translated out of
+    * the Hadoop configuration, which are there for a deployment that only
+    * configures storage the Hadoop way.
+    *
+    * An empty `bucket` means no object-storage location — a local directory, or
+    * a path that carries its own bucket. That is the C layer's local backend,
+    * which needs neither an endpoint nor credentials.
+    *
+    * Keys handed to the store are bucket-relative: the C filesystem appends
+    * them to a subtree rooted at `fs.bucket_name`.
     */
   private[sources] def storeFor(
       conf: org.apache.hadoop.conf.Configuration,
-      bucket: String
-  ): com.zilliz.milvus.storage.io.ObjectStore =
-    new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
-      conf,
-      bucket,
-      "s3a"
-    )
+      bucket: String,
+      options: scala.collection.Map[String, String] = Map.empty
+  ): com.zilliz.milvus.storage.io.ObjectStore = {
+    val trimmed = Option(bucket).map(_.trim).getOrElse("")
+    if (trimmed.isEmpty) {
+      return com.zilliz.spark.connector.loon.HadoopStorageConfig
+        .objectStore(conf, "")
+    }
+    val declared = options.filter { case (k, _) =>
+      k.startsWith(
+        com.zilliz.milvus.storage.credential.StorageProperties.Prefix
+      ) ||
+      k.startsWith(
+        com.zilliz.milvus.storage.credential.StorageProperties.ExternalPrefix
+      )
+    }.toMap
+    val merged = com.zilliz.spark.connector.loon.HadoopStorageConfig
+      .toFsProperties(conf) ++ declared ++
+      Map(
+        com.zilliz.milvus.storage.credential.StorageProperties.BucketName -> trimmed
+      )
+    com.zilliz.spark.connector.loon.HadoopStorageConfig.storeFrom(merged)
+  }
 
   private[sources] def connectorS3BucketOption(
       options: scala.collection.Map[String, String]
@@ -1917,7 +1949,11 @@ class MilvusScan(
         V2SegmentLoader.loadV2Segments(
           metadata.manifestList,
           snapshotBucket.getOrElse(""),
-          MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse("")),
+          MilvusScan.storeFor(
+            hadoopConf,
+            snapshotBucket.getOrElse(""),
+            milvusOption.options
+          ),
           manifestSchemaVersion = metadata.manifestSchemaVersion,
           applyDeletes = applyDeletes
         ) match {
@@ -1988,7 +2024,11 @@ class MilvusScan(
           inheritedDeleteSegments,
           pkField,
           snapshotBucket.getOrElse(""),
-          MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
+          MilvusScan.storeFor(
+            hadoopConf,
+            snapshotBucket.getOrElse(""),
+            milvusOption.options
+          )
         ) match {
           case Right(plans) => plans
           case Left(err) =>
@@ -2170,7 +2210,11 @@ class MilvusScan(
           seg.deltaLogs,
           pkField,
           snapshotBucket.getOrElse(""),
-          MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
+          MilvusScan.storeFor(
+            hadoopConf,
+            snapshotBucket.getOrElse(""),
+            milvusOption.options
+          )
         ) match {
           case Right(plan) => seg.segmentId -> plan
           case Left(err) =>
@@ -2219,7 +2263,11 @@ class MilvusScan(
               MilvusStorageV3ManifestReader.latestManifestVersion(
                 basePath,
                 snapshotBucket.getOrElse(""),
-                MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
+                MilvusScan.storeFor(
+                  hadoopConf,
+                  snapshotBucket.getOrElse(""),
+                  milvusOption.options
+                )
               ) match {
                 case Right(version) => version
                 case Left(err) =>
@@ -2237,7 +2285,11 @@ class MilvusScan(
                 basePath,
                 readVersion,
                 snapshotBucket.getOrElse(""),
-                MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
+                MilvusScan.storeFor(
+                  hadoopConf,
+                  snapshotBucket.getOrElse(""),
+                  milvusOption.options
+                )
               ) match {
                 case Right(logs) => logs
                 case Left(err) =>
@@ -2255,7 +2307,11 @@ class MilvusScan(
                   deltaLogs,
                   pkField.get,
                   snapshotBucket.getOrElse(""),
-                  MilvusScan.storeFor(hadoopConf, snapshotBucket.getOrElse(""))
+                  MilvusScan.storeFor(
+                    hadoopConf,
+                    snapshotBucket.getOrElse(""),
+                    milvusOption.options
+                  )
                 ) match {
                   case Right(plan) => Some(plan)
                   case Left(err) =>
@@ -2571,7 +2627,8 @@ class MilvusScan(
           snapshotBucketForRelativePaths.getOrElse(""),
           MilvusScan.storeFor(
             snapshotHadoopConf,
-            snapshotBucketForRelativePaths.getOrElse("")
+            snapshotBucketForRelativePaths.getOrElse(""),
+            milvusOption.options
           )
         ) match {
           case Right(plans) => plans
@@ -2620,7 +2677,11 @@ class MilvusScan(
     // read otherwise (e.g. a direct scan without table init).
     val meta = preParsedBackupMeta.getOrElse {
       BackupMetaReader.readMeta(
-        MilvusScan.storeFor(hadoopConf, ""),
+        MilvusScan.storeFor(
+          hadoopConf,
+          MilvusScan.snapshotBucket(backupDir).getOrElse(""),
+          milvusOption.options
+        ),
         backupDir,
         MilvusScan.backupMaxJsonBytes(options)
       ) match {
@@ -2698,7 +2759,11 @@ class MilvusScan(
     }
     val v2Segments = BackupMetaReader.toV2Segments(
       meta,
-      MilvusScan.storeFor(hadoopConf, ""),
+      MilvusScan.storeFor(
+        hadoopConf,
+        MilvusScan.snapshotBucket(backupDir).getOrElse(""),
+        milvusOption.options
+      ),
       backupDir,
       applyDeletes,
       coll.collectionId
@@ -2812,7 +2877,8 @@ class MilvusScan(
             MilvusScan.connectorS3BucketOption(optionsMap).getOrElse(""),
             MilvusScan.storeFor(
               buildSnapshotHadoopConf(""),
-              MilvusScan.connectorS3BucketOption(optionsMap).getOrElse("")
+              MilvusScan.connectorS3BucketOption(optionsMap).getOrElse(""),
+              optionsMap
             )
           ) match {
             case Right(plans) => plans
@@ -2857,7 +2923,11 @@ class MilvusScan(
     val hadoopConf = buildSnapshotHadoopConf(backupDir)
     val meta = preParsedBackupMeta.getOrElse {
       BackupMetaReader.readMeta(
-        MilvusScan.storeFor(hadoopConf, ""),
+        MilvusScan.storeFor(
+          hadoopConf,
+          MilvusScan.snapshotBucket(backupDir).getOrElse(""),
+          milvusOption.options
+        ),
         backupDir,
         MilvusScan.backupMaxJsonBytes(options)
       ) match {
@@ -2896,7 +2966,8 @@ class MilvusScan(
         MilvusScan.snapshotBucket(backupDir).getOrElse(""),
         MilvusScan.storeFor(
           hadoopConf,
-          MilvusScan.snapshotBucket(backupDir).getOrElse("")
+          MilvusScan.snapshotBucket(backupDir).getOrElse(""),
+          milvusOption.options
         )
       ) match {
         case Right(plans) => plans

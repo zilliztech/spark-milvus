@@ -1,18 +1,8 @@
 package com.zilliz.milvus.storage.compat
 
-import java.net.URI
 import java.nio.file.Files
 
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{
-  FSDataInputStream,
-  FSDataOutputStream,
-  FileStatus,
-  FileSystem,
-  Path => HPath
-}
-import org.apache.hadoop.fs.permission.FsPermission
-import org.apache.hadoop.util.Progressable
+import org.apache.hadoop.fs.{Path => HPath}
 import org.apache.parquet.example.data.simple.SimpleGroupFactory
 import org.apache.parquet.hadoop.example.{
   ExampleParquetWriter,
@@ -35,11 +25,7 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
 
   /** Tests read local files, so the store carries no bucket. */
   private def localStore: com.zilliz.milvus.storage.io.ObjectStore =
-    new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
-      new org.apache.hadoop.conf.Configuration(),
-      "",
-      "file"
-    )
+    new com.zilliz.milvus.storage.io.LocalObjectStore()
 
   test("parseGroupFieldIdList handles the multi-field sample") {
     val parsed =
@@ -169,15 +155,10 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("readFieldIdsFromSchema does not swallow fatal errors") {
-    val conf = new org.apache.hadoop.conf.Configuration()
-    conf.set("fs.fatal-footer.impl", classOf[FatalFooterFileSystem].getName)
-
-    // The store has to be the one carrying the fatal filesystem, otherwise the
-    // call never reaches it and the assertion proves nothing.
-    val store = new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
-      conf,
-      "bucket",
-      "fatal-footer"
+    // The store is what fails, so the error has to travel back out through the
+    // reader; a store that succeeded would prove nothing.
+    val store = new com.zilliz.milvus.storage.io.FailingObjectStore(
+      new OutOfMemoryError("fatal")
     )
     intercept[OutOfMemoryError] {
       MilvusParquetFooterReader.readFieldIdsFromSchema("file.parquet", store)
@@ -292,54 +273,4 @@ class MilvusParquetFooterReaderTest extends AnyFunSuite with Matchers {
       Files.deleteIfExists(tmp)
     }
   }
-}
-
-class FatalFooterFileSystem extends FileSystem {
-  private var uri: URI = _
-
-  override def initialize(name: URI, conf: Configuration): Unit = {
-    super.initialize(name, conf)
-    uri = name
-  }
-
-  override def getUri: URI = uri
-
-  override def open(path: HPath, bufferSize: Int): FSDataInputStream =
-    throw new OutOfMemoryError("fatal")
-
-  override def create(
-      path: HPath,
-      permission: FsPermission,
-      overwrite: Boolean,
-      bufferSize: Int,
-      replication: Short,
-      blockSize: Long,
-      progress: Progressable
-  ): FSDataOutputStream = throw new UnsupportedOperationException
-
-  override def append(
-      path: HPath,
-      bufferSize: Int,
-      progress: Progressable
-  ): FSDataOutputStream = throw new UnsupportedOperationException
-
-  override def rename(src: HPath, dst: HPath): Boolean =
-    throw new UnsupportedOperationException
-
-  override def delete(path: HPath, recursive: Boolean): Boolean =
-    throw new UnsupportedOperationException
-
-  override def listStatus(path: HPath): Array[FileStatus] =
-    throw new UnsupportedOperationException
-
-  override def setWorkingDirectory(path: HPath): Unit = ()
-
-  override def getWorkingDirectory: HPath = new HPath("/")
-
-  override def mkdirs(path: HPath, permission: FsPermission): Boolean = true
-
-  // Long enough that parquet gets past its "too small to be a parquet file"
-  // check and actually opens a stream, which is where the fatal error lives.
-  override def getFileStatus(path: HPath): FileStatus =
-    new FileStatus(1024L, false, 1, 1024L, 0L, path)
 }

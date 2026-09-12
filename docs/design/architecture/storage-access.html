@@ -14,7 +14,7 @@
          background: #8881; padding: .1em .35em; border-radius: 3px; }
   pre { background: #8881; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .84rem; }
   pre code { background: none; padding: 0; }
-  .status { border-left: 3px solid #d08700; background: #d0870014; padding: .8rem 1rem; margin: 1.2rem 0; }
+  .status { border-left: 3px solid #1a7f37; background: #1a7f3714; padding: .8rem 1rem; margin: 1.2rem 0; }
   figure { margin: 1.6rem 0; }
   figcaption { font-size: .88rem; color: #8889; margin-top: .5rem; }
   svg { max-width: 100%; height: auto; }
@@ -22,10 +22,11 @@
 
 <h1>存储访问层设计</h1>
 <p>能力 R3。分层与包边界见 <a href="modules.md">modules.md</a>，
-认证机制见 <a href="storage-auth.html">storage-auth.html</a>。</p>
+Hadoop 侧的认证机制见 <a href="storage-auth.html">storage-auth.html</a>。</p>
 
 <div class="status">
-<strong>状态：待评审。</strong>第二节的设计是推荐方案，尚未写进决策日志。
+<strong>路线已定（2026-09-11）：打开文件全部经 milvus-storage 的 C filesystem，JVM 侧走 JNI。</strong>
+理由是格式实现与 Milvus 天然一致，升级时不需要两边再对一遍。
 </div>
 
 <h2 id="problem">一、要解决的问题</h2>
@@ -35,7 +36,7 @@
 <table>
 <tr><th>打开方式</th><th>用在哪</th><th>怎么配</th></tr>
 <tr><td><code>java.io.FileInputStream</code></td><td>快照 JSON</td><td>不配，只能读本地文件</td></tr>
-<tr><td><code>HadoopIO.readAllBytes</code></td><td>段 manifest、删除文件</td><td>收一个 Hadoop <code>Configuration</code></td></tr>
+<tr><td><code>HadoopIO.readAllBytes</code>(已删除)</td><td>段 manifest、删除文件</td><td>收一个 Hadoop <code>Configuration</code></td></tr>
 <tr><td><code>FileSystem.get</code> 直接调</td><td>parquet footer</td><td>同上，另加 parquet 的 <code>InputFile</code> 适配</td></tr>
 <tr><td>C++ 的 <code>loon_*</code></td><td>列组数据、索引文件</td><td>收一个 <code>fs.*</code> 属性包</td></tr>
 </table>
@@ -46,9 +47,11 @@
 <li><strong>配置在五个文件里各解析一遍</strong>，默认值和校验都不同。开发用的
 <code>a-bucket</code>、<code>localhost:9000</code>、<code>minioadmin</code> 落在生产路径上，
 非 IAM 模式漏配桶名会安静地连错桶。</li>
-<li><strong>路径在七处各归一一遍</strong>，规则不同。格式里同一个位置有六种写法，
-而 <code>resolveManifestDeltaPath</code> 这个函数同时做归一和拼 <code>_delta/</code>，
-把通用逻辑和格式知识混在一起。</li>
+<li><strong>路径在十二处各归一一遍</strong>，规则还不一致：有的认 <code>oss://</code>，有的只认
+<code>s3://</code> 和 <code>s3a://</code>，有的把不认的 scheme 当合法路径透传。
+其中 <code>resolveManifestDeltaPath</code> 同时做归一和拼 <code>_delta/</code>，把通用逻辑和格式知识
+混在一起；<code>MilvusBackfill</code> 里另有两处反向操作，从 URI 里把桶名抠出来——
+说明 <code>(bucket, key)</code> 这个表示已经有人需要了。</li>
 <li><strong>Azure 与 GCS 读不了。</strong>JVM 侧只带 hadoop-aws 与 hadoop-aliyun，
 代码只认 <code>s3://</code>、<code>s3a://</code>、<code>oss://</code>、<code>file://</code>。
 客户的 Milvus 建在 Azure 或 GCS 上时，第一步打开快照 JSON 就失败。</li>
@@ -59,6 +62,15 @@ backfill 只能备份八个全局键、改写、还原，并禁用 FileSystem �
 Java 绑定，它只发 2.13。</li>
 </ol>
 
+<h3 id="paths">1.1 同一个位置的七种写法</h3>
+<pre><code>s3a://bucket/key
+s3://bucket/key                                   → 改写成 s3a
+oss://bucket/key                                  → 阿里云，backfill 按 cloud provider 改写
+_delta/xxx                                        → 相对段基路径
+/xxx                                              → 带前导斜杠，仍相对段基路径
+files/insert_log/&lt;collection&gt;/&lt;partition&gt;/&lt;segment&gt;/&lt;field&gt;/&lt;log&gt;
+bucket/files/...                                  → 带桶名不带 scheme</code></pre>
+
 <h2 id="design">二、设计</h2>
 
 <p><strong>一条打开方式，一份配置，一种路径表示。</strong></p>
@@ -66,9 +78,9 @@ Java 绑定，它只发 2.13。</li>
 <ol>
 <li><strong>打开文件只经 milvus-storage 的 C filesystem</strong>，JVM 侧通过
 <code>native-storage</code> 的 JNI 调它。</li>
-<li><strong>配置只解析一次</strong>，在 <code>core.credential</code>，产出它的
-<code>properties</code>。</li>
-<li><strong>路径只有一种表示</strong>，在 <code>core.path</code>，格式里的六种写法在边界上收敛成
+<li><strong>配置只解析一次</strong>，在 <code>core.credential</code>，产出 C 层的
+<code>fs.*</code> 属性包。</li>
+<li><strong>路径只有一种表示</strong>，在 <code>core.path</code>，七种写法在边界上统一成
 <code>(bucket, key)</code>。</li>
 </ol>
 
@@ -89,7 +101,7 @@ Java 绑定，它只发 2.13。</li>
   <text x="50" y="161" font-size="12" fill="currentColor">C filesystem（七个云 + 本地）</text>
 
   <rect x="360" y="8" width="240" height="34" fill="none" stroke="currentColor"/>
-  <text x="372" y="30" font-size="12" fill="currentColor">用户选项</text>
+  <text x="372" y="30" font-size="12" fill="currentColor">用户选项 + spark.hadoop.fs.*</text>
   <line x1="480" y1="42" x2="480" y2="70" stroke="currentColor" marker-end="url(#a)"/>
   <rect x="360" y="74" width="112" height="32" fill="none" stroke="currentColor"/>
   <text x="372" y="95" font-size="12" fill="currentColor">core.path</text>
@@ -107,107 +119,421 @@ Java 绑定，它只发 2.13。</li>
 <table>
 <tr><th>包</th><th>职责</th><th>规模</th></tr>
 <tr><td><code>core.io</code></td><td>拿着 JNI 句柄，提供 open、read、list、stat、create</td><td>薄，是封装不是实现</td></tr>
-<tr><td><code>core.credential</code></td><td>用户选项转 <code>properties</code>，一次解析一次校验</td><td>今天散在五个文件里的逻辑收成一处</td></tr>
-<tr><td><code>core.path</code></td><td>六种路径写法转 <code>(bucket, key)</code></td><td>今天散在七处</td></tr>
+<tr><td><code>core.credential</code></td><td><code>fs.*</code> 与 <code>extfs.*</code> 转属性包，一次解析一次校验</td><td>今天散在五个文件里的逻辑合成一处</td></tr>
+<tr><td><code>core.path</code></td><td>七种路径写法转 <code>(bucket, key)</code></td><td>今天散在十二处</td></tr>
 <tr><td><code>native-storage</code></td><td>包 <code>loon_filesystem_*</code> 与 <code>loon_exttable_read_manifest</code></td><td>新代码，本设计的主要工作量</td></tr>
 </table>
 
-<h3>2.2 五个症状怎么被解决</h3>
+<h3 id="contract">2.2 core.path 产出什么</h3>
+<p>C 层已经有这个类型，<code>StorageUri{scheme, address, bucket_name, key}</code>，
+解析与渲染规则在 <code>fs.cpp</code>。<strong><code>core.path</code> 的产出必须跟它逐条对上，
+不能另立一套。</strong></p>
 <table>
-<tr><th>症状</th><th>解法</th></tr>
-<tr><td>配置解析五遍</td><td>只有 <code>core.credential</code> 一处解析</td></tr>
-<tr><td>路径归一七遍</td><td>只有 <code>core.path</code> 一处归一；格式知识（<code>_delta/</code>、<code>_metadata/manifest-N.avro</code>）留在 <code>core.delete</code> 与 <code>core.manifest</code></td></tr>
-<tr><td>Azure 与 GCS 读不了</td><td>C filesystem 有 azure 与 gcp 实现</td></tr>
-<tr><td>OSS 要改全局状态</td><td><code>loon_filesystem_get(properties, path)</code> 每次带一份属性，按路径隔离</td></tr>
-<tr><td>3.5 线出不了 2.12</td><td>上游 Java 绑定被 <code>native-storage</code> 取代</td></tr>
+<tr><th>输入</th><th>C 层怎么解</th></tr>
+<tr><td>解析不出 scheme</td><td><code>key</code> = 整个字符串，<code>bucket_name</code> 与 <code>address</code> 为空</td></tr>
+<tr><td><code>scheme://bucket/key</code></td><td>host 就是桶名，path 是 key</td></tr>
+<tr><td><code>scheme://address/bucket/key</code></td><td>Milvus 格式，只有 <code>include_address=true</code> 时这么解</td></tr>
+</table>
+<p>由此定三条：</p>
+<ol>
+<li><strong>类型是 <code>Located(bucket, key)</code>，<code>key</code> 是桶相对的，不带前导斜杠。</strong>
+<code>bucket</code> 允许为空——本地模式和纯相对路径都没有桶。</li>
+<li><strong>交给 C filesystem 的是 <code>key</code>，不是 <code>bucket/key</code>。</strong>
+<code>FilesystemCache</code> 把底层 filesystem 包在 <code>FileSystemProxy(bucket, fs)</code>
+这个子树里，桶名会自动补上；JVM 侧先拼一遍就出
+<code>a-bucket/a-bucket/files/…</code>，<code>MilvusV2BinlogWriter</code> 的注释记着这个坑。
+桶名走 <code>fs.bucket_name</code>，或多桶时走 <code>extfs.&lt;名字&gt;.bucket_name</code>。</li>
+<li><strong>无 scheme 的路径一律当 key。</strong>所以 <code>files/insert_log/…</code> 和
+<code>bucket/files/…</code> 这两种写法在字符串上分不开，<code>parse</code> 必须由调用方告诉它
+默认桶是什么，不能靠猜第一段是不是桶名。</li>
+</ol>
+<p>三个操作，格式知识一个都不带：</p>
+<pre><code>parse(raw: String, defaultBucket: String): Located   // 七种写法归一
+resolve(base: Located, child: String): Located       // 路径拼接
+uri(l: Located, scheme: String): String              // 渲染回 URI，给迁移期的 Hadoop 调用方</code></pre>
+<p><code>_delta/</code>、<code>_metadata/manifest-N.avro</code> 这些拼接留在
+<code>core.delete</code> 与 <code>core.manifest</code>，它们调 <code>resolve</code>。</p>
+
+<h3 id="why">2.3 为什么是这条路线</h3>
+<p><strong>因为要的东西 C 层已经写好了，而且比我们能在 JVM 侧写出来的更全。</strong></p>
+<ul>
+<li><strong>文件系统</strong>：<code>loon_filesystem_*</code> 是一整套——open、readat（含异步）、
+list_dir、stat、writer、create_dir、delete、指标，底座是 <code>arrow::fs::FileSystem</code>，
+后端有 s3、gcp、azure、local。</li>
+<li><strong>七朵云的凭证，含国内三家</strong>：阿里云的 RAM、STS 与 OIDC 角色链，腾讯与华为的
+STS 客户端。在 JVM 侧补齐等于用 Scala 重写这几家的 STS 客户端。</li>
+<li><strong>manifest 与写侧提交</strong>：<code>loon_exttable_read_manifest</code> 直接返回解析好的
+列组、删除日志与统计；<code>loon_transaction_*</code> 覆盖 <code>core.write.commit</code> 的大半。</li>
+</ul>
+<p>代价有两项。<strong>一是 <code>native-storage</code> 的 JNI 封装</strong>，本设计的主要工作量。
+<strong>二是存量部署要多一套配置</strong>：今天 <code>spark.hadoop.fs.*</code> 喂的是 Hadoop，C 层不认，
+翻译要落在这个仓库之外（3.3），托管平台那边要排期。这是离开 Hadoop 的真实代价——
+Hadoop 的按 scheme 分派本来替我们做了这件事。</p>
+<p>五个症状的去处：配置解析与路径归一各收进一个包；Azure 与 GCS 靠 C 的 azure、gcp 实现；
+OSS 的全局状态改写被 <code>extfs.*</code> 取代（3.5）；上游 Java 绑定被
+<code>native-storage</code> 取代，2.12 交叉编译解锁。</p>
+
+<h2 id="cred">三、凭证怎么到 C 层</h2>
+
+<p><strong>core 只认一套 <code>fs.*</code> 属性包，不认识云，也不认识 scheme。</strong>
+按云分派在 C 层的 <code>fs.cloud_provider</code>。这跟 Hadoop 时代 connector 把
+<code>Configuration</code> 原样传下去是同一个形状——屏蔽差异的那一层从 Hadoop 换成了 C，
+connector 两边都不认识云。</p>
+
+<h3 id="cred-contract">3.1 core 的输入契约</h3>
+<p>一个 <code>Map[String, String]</code>，键全是 <code>fs.*</code>，多桶时是
+<code>extfs.&lt;名字&gt;.*</code>（3.5）。<code>core.credential</code> 校验必填项、拒绝空值，
+然后原样交给 C。它不按云分支，不认识 <code>s3a</code>、<code>oss</code>、<code>abfs</code>
+这些 scheme，也没有任何一家云的名字出现在它的代码里。</p>
+
+<h3 id="cred-providers">3.2 C 拿到属性包之后做什么</h3>
+<p>两级分派，入口是 <code>fs.cpp</code> 的 <code>CreateArrowFileSystem</code>。</p>
+<table>
+<tr><th><code>fs.storage_type</code> + <code>fs.cloud_provider</code></th><th>filesystem 实现</th><th>凭证 provider</th></tr>
+<tr><td><code>local</code></td><td><code>LocalFileSystemProducer</code></td><td>无</td></tr>
+<tr><td><code>remote</code> + <code>azure</code></td><td><code>AzureFileSystemProducer</code></td><td><code>azurefs.cc</code>、SAS 令牌策略</td></tr>
+<tr><td><code>remote</code> + <code>gcp</code></td><td><code>GcpFileSystemProducer</code></td><td><code>gcp_credential_provider</code></td></tr>
+<tr><td rowspan="4"><code>remote</code> + <code>aws</code> / <code>aliyun</code> / <code>tencent</code> / <code>huawei</code></td><td rowspan="4"><code>S3FileSystemProducer</code>（四家都走 S3 协议）</td><td>aws：SDK 默认链；有 <code>fs.role_arn</code> 时 <code>STSAssumeRoleCredentialsProvider</code></td></tr>
+<tr><td>aliyun：<code>AliyunOIDCAssumeRoleChainProvider</code> 或 <code>AliyunRAMCredentialsProvider</code></td></tr>
+<tr><td>tencent：<code>TencentCloudCredentialsProvider</code>、<code>TencentCloudSTSClient</code></td></tr>
+<tr><td>huawei：<code>HuaweiCloudCredentialsProvider</code>、<code>HuaweiCloudSTSClient</code></td></tr>
+</table>
+<p><code>fs.storage_type</code> 只有 <code>local</code> 和 <code>remote</code>，与 Milvus 的
+<code>storageType</code> 一致——<strong>没有 HDFS</strong>，Milvus 不往 HDFS 上放数据。
+要支持一朵新的云，改的是这张分派表，core 与 JNI 一行不改。</p>
+
+<p><strong>C 从两个地方取凭证：属性包和进程环境。真正的凭证不走属性包</strong>——静态密钥是唯一例外。
+属性包里带的是「去哪里取」和「取谁的」：<code>fs.role_arn</code> 系列说 AssumeRole 成谁，
+<code>fs.use_iam</code> 说去环境里找，<code>fs.azure_*</code> 与
+<code>fs.gcp_target_service_account</code> 是那两家的跨租户参数。
+取值顺序写死在 <code>s3_filesystem_producer.cpp</code>：<code>fs.role_arn</code> 非空就 AssumeRole；
+否则 <code>fs.use_iam</code> 为真就按云选 STS provider；再否则用静态密钥
+（Azure 上 <code>fs.access_key_id</code> 是 account name，密钥是 <code>fs.access_key_value</code>）。</p>
+
+<p>进程环境读什么按云不同，但形状一样：托管 K8s 投影一个 web identity token 文件进 pod，
+环境变量指路。</p>
+<table>
+<tr><th>云</th><th>读的环境变量</th></tr>
+<tr><td>aws</td><td>AWS C++ SDK 默认链：env → profile → process → <code>AWS_WEB_IDENTITY_TOKEN_FILE</code> → SSO → 容器 URI → IMDS</td></tr>
+<tr><td>aliyun</td><td><code>ALIBABA_CLOUD_OIDC_TOKEN_FILE</code>、<code>ALIBABA_CLOUD_OIDC_PROVIDER_ARN</code>、<code>ALIBABA_CLOUD_ROLE_ARN</code></td></tr>
+<tr><td>tencent</td><td><code>TKE_REGION</code>、<code>TKE_ROLE_ARN</code>、<code>TKE_WEB_IDENTITY_TOKEN_FILE</code>、<code>TKE_PROVIDER_ID</code></td></tr>
+<tr><td>huawei</td><td><code>HUAWEICLOUD_SDK_REGION</code>、<code>HUAWEICLOUD_SDK_PROJECT_ID</code>、<code>HUAWEICLOUD_SDK_ID_TOKEN_FILE</code>、<code>HUAWEICLOUD_SDK_IDP_ID</code></td></tr>
+<tr><td>azure</td><td><code>ConfigureWorkloadIdentityCredential()</code> 或 <code>ConfigureManagedIdentityCredential(client_id)</code></td></tr>
+<tr><td>gcp</td><td><code>MakeGoogleDefaultCredentials()</code>：GCE 元数据或 ADC 文件</td></tr>
 </table>
 
-<h2 id="why">三、为什么是这个设计</h2>
-<p><strong>因为要的东西 C 层已经写好了，而且比我们能在 JVM 侧写出来的更全。</strong></p>
+<h3 id="cred-fill">3.3 谁来填这个属性包</h3>
+<p>用户直接给 <code>fs.*</code>，这是 core 认识的唯一形式。</p>
+<p>运行环境里已经有 Hadoop 风格配置的时候（<code>spark.hadoop.fs.s3a.assumed.role.arn</code>
+这类），把它翻成 <code>fs.*</code> <strong>不是 core 的事</strong>。翻译只有两个合法落点：</p>
+<ol>
+<li><strong>产出配置的那一方直接产出 <code>fs.*</code></strong>。托管平台自己就知道角色 ARN
+和端点，多注入一套键即可。这是长期形态。</li>
+<li><strong>第 3 层一个垫片</strong>，读 <code>spark.hadoop.fs.*</code> 产出 <code>fs.*</code>，
+只为让存量部署不改配置就能跑。它必须写明退出条件和时间点，否则就是
+<a href="../../../AGENTS.md">AGENTS.md</a> 禁止的烟囱。
+已实现为 <code>spark-base</code> 的 <code>HadoopStorageConfig</code>：纯键名翻译，
+按本表映射，<code>cloud_provider</code> 从出现键的命名空间推（s3a→aws、oss→aliyun），
+两个命名空间都在则留空让 C 层校验报错。退出条件是产出配置的一方直接产出 <code>fs.*</code>。</li>
+</ol>
+<p>两个落点都在 core 之外。下表是给它们用的，不是 core 的代码：</p>
+<table>
+<tr><th>Hadoop 侧的键（去掉 <code>spark.hadoop.</code> 前缀）</th><th><code>fs.*</code></th></tr>
+<tr><td><code>fs.s3a.assumed.role.arn</code> / <code>fs.oss.assumed.role.arn</code></td><td><code>fs.role_arn</code></td></tr>
+<tr><td><code>fs.s3a.assumed.role.external.id</code> / <code>fs.oss.assumed.role.external.id</code></td><td><code>fs.external_id</code></td></tr>
+<tr><td><code>fs.oss.assumed.role.session.name</code></td><td><code>fs.session_name</code></td></tr>
+<tr><td><code>fs.s3a.endpoint</code> / <code>fs.oss.endpoint</code></td><td><code>fs.address</code></td></tr>
+<tr><td><code>fs.s3a.endpoint.region</code></td><td><code>fs.region</code></td></tr>
+<tr><td><code>fs.s3a.access.key</code> / <code>fs.oss.accessKeyId</code></td><td><code>fs.access_key_id</code></td></tr>
+<tr><td><code>fs.s3a.secret.key</code> / <code>fs.oss.accessKeySecret</code></td><td><code>fs.access_key_value</code></td></tr>
+</table>
+<p>表里只有 s3a 和 oss，因为 Hadoop 侧只有这两家有实现可翻。这不构成 core 的能力边界：
+Azure、GCS、腾讯、华为的用户直接给 <code>fs.*</code>，与 AWS 用户给 <code>fs.*</code> 完全一样。</p>
+<p>值本身是可以复用的：平台注入的是角色 ARN、会话名、端点，不是 access key 或 session token，
+C 层认同样的输入（3.4）。<strong>可复用说的是值，不是说 core 应该去读它们。</strong></p>
 
-<h3>3.1 文件系统</h3>
-<pre><code>loon_filesystem_get(properties, path, path_len, out_handle)   // 内部有 FilesystemCache
-loon_filesystem_read_file_all(handle, path, path_len, out_data, out_size)
-loon_filesystem_open_reader / reader_readat(handle, offset, nbytes, out_data)
-loon_filesystem_reader_readat_async / reader_supports_async
-loon_filesystem_list_dir(handle, path, recursive, out_list)   // {path, is_dir, size, mtime_ns}
-loon_filesystem_get_file_info / get_path_info / get_file_stats
-loon_filesystem_open_writer / writer_write / writer_flush / writer_close
-loon_filesystem_write_file / create_dir / delete_file
-loon_filesystem_get_metrics / list_metrics / reset_metrics</code></pre>
-<p>底座是 <code>arrow::fs::FileSystem</code>，文件系统实现有 s3、gcp、azure、local。</p>
+<h3 id="cred-same">3.4 两边做的是同一件事</h3>
+<p>都是两步：先用 pod 的机器身份换一份临时凭证，再拿它调 AssumeRole 换成客户角色。</p>
+<table>
+<tr><th></th><th>第一步：机器身份</th><th>第二步：换成客户角色</th></tr>
+<tr><td>Hadoop + AWS</td><td><code>DefaultAWSCredentialsProviderChain</code> 读 <code>AWS_WEB_IDENTITY_TOKEN_FILE</code></td><td><code>AssumedRoleCredentialProvider</code> 调 <code>sts:AssumeRole</code></td></tr>
+<tr><td>C 层 + AWS</td><td>AWS C++ SDK 默认链读同一批环境变量</td><td><code>STSAssumeRoleCredentialsProvider</code>，输入 <code>fs.role_arn</code></td></tr>
+<tr><td>Hadoop + 阿里云</td><td>阿里云 SDK 的 <code>DefaultCredentialsProvider</code> 读 <code>ALIBABA_CLOUD_OIDC_TOKEN_FILE</code></td><td><code>ram_role_arn</code> 类型的 <code>Client</code></td></tr>
+<tr><td>C 层 + 阿里云</td><td><code>AliyunSTSAssumeRoleWebIdentityCredentialsProvider</code> 读同一批环境变量</td><td><code>AliyunRAMSTSClient.GetAssumeRoleCredentials</code></td></tr>
+</table>
+<p>C 层阿里云那条要求三个 <code>ALIBABA_CLOUD_*</code> 环境变量都在，缺任何一个直接报错不回落——
+那三个正是 ACK 的 RRSA 注入的。AWS C++ SDK 的默认链把
+<code>STSAssumeRoleWebIdentityCredentialsProvider</code> 排在
+<code>InstanceProfileCredentialsProvider</code> 之前，所以在 EKS 上先拿到投影进来的
+service-account token，不会回落到节点实例角色；Java v1 SDK 上那个顺序问题
+（<a href="storage-auth.html#verified">storage-auth.html 第六节</a>）在这条路上不存在。</p>
 
-<h3>3.2 七个云的凭证，含国内三家</h3>
-<p><code>cloud_provider</code> 认识 aws、aliyun、azure、gcp、huawei、tencent、local。
-<code>s3/provider/</code> 下有阿里云的 RAM、STS 与 OIDC 角色链（ACK 上对应 IRSA 的那套）、
-腾讯云与华为云的凭证与 STS 客户端。在 JVM 侧补齐等于用 Scala 重写这几家的 STS 客户端。
-明细见 <a href="storage-auth.html#c-coverage">storage-auth.html 2.1</a>。</p>
+<h3 id="cred-multi">3.5 多个桶用不同身份</h3>
+<p><code>extfs.&lt;名字&gt;.&lt;属性&gt;</code> 注册多套文件系统配置，<code>&lt;属性&gt;</code> 就是
+<code>fs.</code> 后面那一截：</p>
+<pre><code>extfs.source.address        = oss-cn-hangzhou-internal.aliyuncs.com
+extfs.source.bucket_name    = customer-bucket
+extfs.source.role_arn       = &lt;客户角色&gt;
+extfs.milvus.address        = ...
+extfs.milvus.bucket_name    = milvus-bucket</code></pre>
+<p><code>loon_filesystem_get(properties, path)</code> 拿到带 scheme 的路径时按 address + bucket
+匹配到对应的一组，匹配不上落回默认的 <code>fs.*</code>。</p>
+<p>backfill 今天要备份八个 <code>fs.oss.*</code> 全局键、改写、还原、禁用 FileSystem 缓存
+（见 <a href="../apps/backfill-storage.html">backfill-storage.html</a>），这套动作在
+<code>extfs.*</code> 下不存在：源桶和 Milvus 桶各注册一个名字，一次传进去，不改任何共享状态。</p>
 
-<h3>3.3 manifest 与写侧提交</h3>
-<pre><code>loon_exttable_read_manifest(path, properties, out_manifest)
-// 头文件原注释：output manifest (includes column groups, delta logs, and stats)
+<h3 id="cred-refresh">3.6 长作业的凭证刷新</h3>
+<p><strong>每个进程各自持一个会自我刷新的 provider，作业跑多久都不掉凭证。</strong>
+Hadoop 和 C 层都是这么做的，不是我们要挑的东西：hadoop-aws 的
+<code>AssumedRoleCredentialProvider</code> 按 <code>fs.s3a.assumed.role.session.duration</code>
+（默认 1h）到期前自己续；C 层 AWS 距过期 60 秒内重新 AssumeRole；C 层阿里云距过期 180 秒内
+重跑两步链，且第一步每次重新打开并读 <code>ALIBABA_CLOUD_OIDC_TOKEN_FILE</code>，
+所以 kubelet 轮换投影 token 之后读到的是新的那份。</p>
+<p>会过期的是另一种做法：driver 调一次 STS，把换出来的 access key、secret、session token
+随配置发给 executor。云上 Lance 那条路走的就是这个，凭证一过期作业就失败，只能靠调大
+duration 顶。<strong>我们不走这条。</strong></p>
 
-loon_transaction_begin / commit / get_manifest / get_read_version
-loon_transaction_add_column_group / add_delta_log / add_index_info / add_lob_file
-loon_transaction_update_stat / drop_column / drop_index / append_files</code></pre>
-<p>这覆盖了 <code>core.manifest</code> 与 <code>core.write.commit</code> 两个包的大半工作。</p>
+<h2 id="bridge">四、三层怎么衔接</h2>
 
-<h3>3.4 代价</h3>
-<p>平台要为我们接一套显式临时凭证：不走 Hadoop 的连接器拿不到 <code>spark.hadoop.fs.*</code>。
-这不是新问题，云上同一个文件里已经为 Lance 做过——解析卷路径、assume 角色、
-把临时凭证经 <code>storageOptions</code> 交过去。</p>
+<p><strong>三个边界，每个边界只许通过一种东西。</strong>越界的东西一旦变多，上一层就开始知道下一层的实现。</p>
 
-<h2 id="files">四、读一张表要打开哪些文件</h2>
+<figure>
+<svg viewBox="0 0 660 330" role="img" aria-label="从 Spark DataSource V2 到 C filesystem 的四个边界，以及每个边界上传递的东西">
+  <defs><marker id="b" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+    <polygon points="0 0, 8 3, 0 6" fill="currentColor"/></marker></defs>
+
+  <rect x="8" y="8" width="300" height="40" fill="none" stroke="currentColor"/>
+  <text x="20" y="26" font-size="12" fill="currentColor">Spark DataSource V2</text>
+  <text x="20" y="41" font-size="10" fill="currentColor">Scan · InputPartition · PartitionReader · BatchWrite</text>
+
+  <line x1="158" y1="48" x2="158" y2="76" stroke="currentColor" marker-end="url(#b)"/>
+  <text x="320" y="60" font-size="10" fill="currentColor">可序列化的 InputPartition；ColumnarBatch</text>
+
+  <rect x="8" y="80" width="300" height="40" fill="none" stroke="currentColor"/>
+  <text x="20" y="98" font-size="12" fill="currentColor">第 3 层 spark-&lt;line&gt;</text>
+  <text x="20" y="113" font-size="10" fill="currentColor">catalog · table · scan · write · options</text>
+
+  <line x1="158" y1="120" x2="158" y2="148" stroke="currentColor" marker-end="url(#b)"/>
+  <text x="320" y="132" font-size="10" fill="currentColor">(bucket, key)；fs.* 的 Map；Arrow 批</text>
+
+  <rect x="8" y="152" width="300" height="40" fill="none" stroke="currentColor"/>
+  <text x="20" y="170" font-size="12" fill="currentColor">第 2 层 core</text>
+  <text x="20" y="185" font-size="10" fill="currentColor">path · credential · io · manifest · expr · read · write</text>
+
+  <line x1="158" y1="192" x2="158" y2="220" stroke="currentColor" marker-end="url(#b)"/>
+  <text x="320" y="204" font-size="10" fill="currentColor">Map[String,String]；路径；ArrowArray/ArrowSchema</text>
+
+  <rect x="8" y="224" width="300" height="40" fill="none" stroke="currentColor"/>
+  <text x="20" y="242" font-size="12" fill="currentColor">第 1 层 native-storage（JNI）</text>
+  <text x="20" y="257" font-size="10" fill="currentColor">只搬运值，不认识键名，不认识云</text>
+
+  <line x1="158" y1="264" x2="158" y2="292" stroke="currentColor" marker-end="url(#b)"/>
+  <text x="320" y="276" font-size="10" fill="currentColor">const char* 数组；进程内 handle；每批 ArrowArray+Schema</text>
+
+  <rect x="8" y="296" width="300" height="26" fill="none" stroke="currentColor"/>
+  <text x="20" y="314" font-size="12" fill="currentColor">C：loon_* · 七种后端 · 按云分派</text>
+</svg>
+<figcaption>四个边界上允许通过的东西。handle 是进程内指针，任何一条边界都不许它向上跨进可序列化的对象里。</figcaption>
+</figure>
+
+<h3 id="bridge-jni">4.1 C 与 JVM 的衔接</h3>
+<table>
+<tr><th>边界上的东西</th><th>怎么过去</th><th>约束</th></tr>
+<tr><td>配置</td><td><code>Map[String,String]</code> 转成两个 <code>const char*</code> 数组，调 <code>loon_properties_create</code></td><td>JNI 不看键名，也不认识云。一旦它认识，云知识就有了第二个落点</td></tr>
+<tr><td>句柄</td><td><code>loon_*_new</code> / <code>_open</code> 返回的 handle 存成 JVM 侧的 <code>Long</code></td><td><strong>进程内指针，不可序列化</strong>。不许进 <code>InputPartition</code></td></tr>
+<tr><td>数据</td><td>Arrow C Data Interface：每批一组 <code>ArrowArray</code> + <code>ArrowSchema</code></td><td>零拷贝。<strong>不用 <code>ArrowArrayStream</code></strong>——Arrow Java 的 <code>loadNextBatch</code> 共享 <code>VectorSchemaRoot</code> 且忽略 <code>offset</code>，遇到 <code>RecordBatch::Slice</code> 会每批返回同一份数据。理由与替代读法见 <a href="storage-io.html#arrow">storage-io.html 第二节</a></td></tr>
+<tr><td>错误</td><td><code>LoonFFIResult</code> 转成 JVM 异常，然后 <code>loon_ffi_free_result</code></td><td>C 侧不抛异常过界；每个返回码都要判</td></tr>
+</table>
+<p><strong>句柄不可序列化这一条决定了读路径的形状。</strong>Spark 把 <code>InputPartition</code>
+序列化后发到 executor，所以它里面只能装<em>描述</em>——段路径、manifest 版本、要读的列名、
+<code>fs.*</code> 的 map。executor 拿到描述后才调 <code>loon_segment_reader_open</code> 开句柄，
+读完关掉。</p>
+
+<h3 id="bridge-size">4.2 原生库有多大，这是个约束</h3>
+<p><code>libmilvus-storage.dylib</code> <strong>481 MB</strong>，JNI 桥
+<code>libmilvus-storage-jni.dylib</code> 只有 177 KB。两个都要进产物：桥依赖大库。</p>
+<table>
+<tr><th>段</th><th>大小</th><th>是什么</th></tr>
+<tr><td><code>__TEXT</code></td><td>288 MB</td><td>代码。arrow 27.8 万个符号、rust bridge 4.6 万、parquet 2.9 万、AWS 1.4 万、Azure 0.6 万——整个依赖树静态链进来了</td></tr>
+<tr><td><code>__LINKEDIT</code></td><td>162 MB</td><td>102 万个符号。<code>strip -x</code> 后整库降到 315 MB</td></tr>
+<tr><td>其余</td><td>9 MB</td><td><code>__DATA_CONST</code> 与 <code>__DATA</code></td></tr>
+</table>
+<p>静态链接是有意的：JNI 库要能独立加载，不能要求宿主机装一堆动态库。
+<code>otool -L</code> 显示只有 folly、glog、protobuf、grpc 这几个还是动态依赖。</p>
+<p><strong>三条后果，都还没有人处理：</strong></p>
+<ol>
+<li><strong>没有 strip，白背 166 MB。</strong>Release 构建保留了全部符号，而这是要进 fat jar 的东西。
+剥离在 milvus-storage 的 CMake 做还是在我们的打包步骤做，没有定。</li>
+<li><strong>运行时要解压到磁盘。</strong><code>NativeLibraryLoader</code> 把 JAR 里
+<code>native/&lt;platform&gt;/</code> 下的库全部解压到临时目录再 <code>System.load</code>。
+每个 executor 进程启动都要写这近 500 MB。</li>
+<li><strong>多平台产物按平台各一份。</strong>一个同时带 linux 和 darwin 的 fat jar 是两倍。</li>
+</ol>
+<p>315 MB 仍然很大。真要再降只能让 arrow 改成动态链接，那是上游的构建策略，
+不是这一层能单方面定的。<strong>这条记在这里是因为它影响第 1 层怎么打包、fat jar 多大、
+executor 启动多久，而此前的设计里一个字都没提。</strong></p>
+
+<h3 id="bridge-conn">4.3 Connector 要的能力，C 给不给得了</h3>
+<p>逐条对。谓词下推不走 C 的入口（4.4），R10 依赖仓库外的两件事（4.5），其余对得上。</p>
+<table>
+<tr><th>能力</th><th>Spark 侧的接口</th><th>C 给什么</th><th>对得上吗</th></tr>
+<tr><td>R1 collection 是一张表</td><td><code>TableCatalog</code>、<code>Table</code></td><td>不给。这是 Milvus 元数据</td><td>JVM：快照 JSON + gRPC</td></tr>
+<tr><td>R16 分区和段选择</td><td><code>Batch.planInputPartitions</code></td><td><code>loon_exttable_read_manifest</code> 列出列组与文件</td><td>对得上</td></tr>
+<tr><td>R4 列式扫描，向量零拷贝</td><td><code>PartitionReader</code> + <code>ColumnarBatch</code></td><td><code>loon_segment_reader_get_stream</code> → <code>ArrowArrayStream</code></td><td>对得上</td></tr>
+<tr><td>R5 列裁剪</td><td><code>SupportsPushDownRequiredColumns</code></td><td><code>loon_segment_reader_open(needed_columns, …)</code></td><td>对得上</td></tr>
+<tr><td>R14 回表</td><td>按行号取</td><td><code>loon_segment_reader_take(row_indices, …)</code></td><td>对得上</td></tr>
+<tr><td>R17 交付下游列式算子</td><td><code>supportColumnarReads</code></td><td>Arrow 批</td><td>对得上</td></tr>
+<tr><td>R13 表统计</td><td><code>SupportsReportStatistics</code></td><td>行数从 <code>ColumnGroupFile</code> 的 <code>end_index - start_index</code> 求和；字节数从 <code>loon_filesystem_get_file_info</code></td><td>对得上。R13 要的是行数和字节数，不是列级 min/max</td></tr>
+<tr><td>R11 Limit 下推</td><td><code>SupportsPushDownLimit</code></td><td>无专门入参；流式读可以提前停</td><td>部分：JVM 侧读够就不再拉</td></tr>
+<tr><td>R8 删除生效</td><td>扫描内部</td><td>manifest 返回 delta log 列表，内容解析还没有</td><td>迁移期在 JVM，见<a href="#reqs">第六节</a>第 2 项</td></tr>
+<tr><td>R6/R7 谓词下推</td><td><code>SupportsPushDownV2Filters</code></td><td><code>get_filtered_stream(predicate)</code> 收一个字符串</td><td>不用 C 的入口，见 4.4</td></tr>
+<tr><td>R10 row group 级剪枝</td><td>扫描内部</td><td><code>FileRowGroupReader</code> 能按 row group 读</td><td><strong>对不上</strong>，见 4.5</td></tr>
+<tr><td>R19 按分区报分区</td><td><code>SupportsReportPartitioning</code></td><td>—</td><td>决策 19 未定</td></tr>
+<tr><td>W 写段</td><td><code>DataWriter</code></td><td><code>loon_segment_writer_new/write/flush/close</code> → <code>LoonSegmentWriteOutput</code></td><td>对得上</td></tr>
+<tr><td>W 提交</td><td><code>BatchWrite.commit</code></td><td><code>loon_transaction_begin/add_column_group/add_delta_log/commit</code></td><td>对得上；向 Milvus 登记还缺 RegisterSegments RPC，见 <a href="../README.md">README 第 5 节</a></td></tr>
+</table>
+<p>manifest 里有三个字段容易误认：<code>Manifest.stats</code> 是
+<code>map&lt;string, Statistics&gt;</code>，<code>Statistics</code> 只有 <code>{paths, metadata}</code>，
+装的是辅助统计文件的路径而不是 min/max；<code>ColumnGroupFile</code> 只有 <code>path</code>、
+<code>start_index</code>、<code>end_index</code> 和一个自由的 <code>properties</code>；
+<code>LoonChunkMetadata</code> 只有 <code>number_of_rows</code> 与 <code>estimated_memsz</code>。</p>
+
+<h3 id="bridge-gap">4.4 谓词下推：C 的入口是坏的，我们不用它</h3>
+<p><code>format_reader.h</code> 里基类是这样的：</p>
+<pre><code>[[nodiscard]] virtual arrow::Status set_predicate(const std::string& /*predicate*/) {
+  return arrow::Status::OK();
+}</code></pre>
+<p>参数名被注释掉了。收下一个谓词，返回成功，什么都不做。只有
+<code>VortexFormatReader</code> 覆写了它，而 Vortex 在
+<a href="../capabilities.md">capabilities.md</a> 第 10 节里明确不做。所以对 parquet 列组调
+<code>loon_segment_reader_get_filtered_stream</code>，不报错也不过滤，调用方拿到全量数据却以为
+已经过滤过了。</p>
+<p><strong>这是缺陷，不是「还没做」。</strong>接受参数、返回成功、忽略参数，正是
+<a href="../../../AGENTS.md">AGENTS.md</a> 里「禁止外围兜底」说的那个形状。基类该返回
+<code>NotImplemented</code>，这条列在<a href="#reqs">第六节</a>。我们这边则是
+<strong><code>core.io</code> 根本不暴露这个入口</strong>——不是「记得别调」，留着它早晚有人用。</p>
+<p><strong>但它修不修都不改变我们的设计。</strong>R6/R7 在 JVM 侧算是决策日志 2026-09-09 定的，
+理由与这个空实现无关：R7 要按 Milvus 的 <code>Plan.g4</code> 文法逐条复刻 JSON、Array、
+<code>json_contains</code> 的语义，C 层没有这套。真正省 I/O 的是 R10 那条统计剪枝（4.5）。</p>
+
+<h3 id="bridge-prune">4.5 R10 为什么只能在 C 里做</h3>
+<p><strong>不是「在 JVM 侧写一份 footer 解析是烟囱」，是写了递不进去。</strong>
+FFI 里没有任何 row group 相关的入参：<code>loon_segment_reader_open</code> 收
+<code>segment_path</code>、<code>version</code>、<code>schema</code>、
+<code>needed_columns</code>、<code>config</code>、<code>properties</code>，没有「只读这几个
+row group」这一项。JVM 侧就算把 footer 读了、把该跳的 row group 算出来，也没有地方把结果交出去。
+剪枝要真省 I/O，必须发生在读的那一侧。</p>
+<p>它要两边各做一件事：<strong>Milvus 写统计文件</strong>并登记进 manifest 的 <code>stats</code>
+（那个 map 的形状就是为此准备的，R9 的段级布隆过滤器走同一条路），
+<strong>milvus-storage 的 reader 用它剪 row group</strong>。两件都不在这个仓库里，
+已经在 <a href="../README.md">README 第 5 节</a>那张表里；在它们落地前 R10 不交付，
+它的优先级是 P1。</p>
+
+<h2 id="files">五、读一张表要打开哪些文件</h2>
 <p>五个入口分支，用户给的东西不同，最终都归结成一个对象存储路径：collection 名（调
 gRPC CreateSnapshot 拿 s3Location）、快照路径、<code>milvus.snapshot.manifests</code> 或
 <code>milvus.snapshot.v2.segments</code>、<code>milvus.backup.dir</code>、遗留 client 模式。</p>
+
+<p><strong>判断谁解析字节只看一条：格式属于 milvus-storage 就由 C 解析，属于 Milvus 的元数据
+才由 JVM 解析。</strong>milvus-storage 是 Milvus 原生的实现，格式以它为准；在 JVM 侧再写一份
+解析器，等于同一个格式有两份实现，版本一升就要对两遍。</p>
+
 <table>
-<tr><th>文件</th><th>路径怎么来</th><th>谁解析字节</th></tr>
-<tr><td>快照 JSON</td><td>起点路径本身</td><td>JVM</td></tr>
-<tr><td>V3 段 manifest</td><td><code>&lt;段基路径&gt;/_metadata/manifest-&lt;N&gt;.avro</code>，先列目录取最大 N</td><td>JVM，或改用 <code>loon_exttable_read_manifest</code></td></tr>
-<tr><td>V2 段 manifest</td><td>快照 JSON 的 <code>manifest_list</code> 列出的 avro，裸二进制无 OCF 头</td><td>JVM，外挂 avsc 按格式版本解</td></tr>
-<tr><td>删除文件</td><td><code>&lt;段基路径&gt;/_delta/&lt;文件名&gt;</code></td><td>JVM</td></tr>
-<tr><td>parquet footer</td><td>列组文件尾部，恢复 V2 packed 段的字段 id</td><td>JVM</td></tr>
-<tr><td>列组数据</td><td>manifest 里记的路径</td><td>C++</td></tr>
-<tr><td>索引文件</td><td>manifest 的索引登记</td><td>C++（未建）</td></tr>
+<tr><th>文件</th><th>格式是谁的</th><th>谁解析</th></tr>
+<tr><td>快照 JSON</td><td>Milvus 的元数据：collection schema、字段与类型、段列表、<code>base_path</code></td><td>JVM。这是 Meta 信息适配，connector 的本职</td></tr>
+<tr><td>段 manifest（快照 JSON 的 <code>manifest_list</code>）</td><td>Milvus 的元数据。Milvus 用 Go 的 avro 库自己解，内嵌 V1–V4 四个 schema，<code>SnapshotFormatVersion = 4</code>，milvus-storage 不认识它</td><td>JVM</td></tr>
+<tr><td>V3 段的 <code>_metadata/manifest-N.avro</code></td><td>milvus-storage</td><td>C，<code>loon_exttable_read_manifest</code></td></tr>
+<tr><td>删除文件</td><td>milvus-storage</td><td>C。今天 C 没有，<a href="#reqs">第六节</a>第 2 项</td></tr>
+<tr><td>parquet footer 的字段 id</td><td>milvus-storage（V2 packed）</td><td>C。今天 C 没有，<a href="#reqs">第六节</a>第 1 项</td></tr>
+<tr><td>列组数据</td><td>milvus-storage</td><td>C</td></tr>
+<tr><td>索引文件</td><td>milvus-storage</td><td>C（未建）</td></tr>
 </table>
-<p>用哪条通路由解析者决定，不由文件类别决定：列组 parquet 是数据，但 JVM 会打开它读
-footer——V2 packed 段的字段 id 只写在 parquet 的 schema 里。同一个物理文件，两侧都碰。</p>
+<p>那两项落地之前 JVM 侧的解析器还在跑。这是迁移期状态，不是设计，退出条件就是那两项。</p>
 
-<h3 id="paths">4.1 路径的六种写法</h3>
-<pre><code>s3a://bucket/key
-s3://bucket/key                                   → 改写成 s3a
-_delta/xxx                                        → 相对段基路径
-/xxx                                              → 带前导斜杠，仍相对段基路径
-files/insert_log/&lt;collection&gt;/&lt;partition&gt;/&lt;segment&gt;/&lt;field&gt;/&lt;log&gt;
-a-bucket/files/...                                → 带桶名不带 scheme</code></pre>
+<h3 id="cgap">5.1 V2 为什么不能砍</h3>
+<p><strong>V2 不是老版本，是当前默认。</strong>Milvus 的存储版本升级 compaction 里，
+目标版本取 <code>storage.StorageV2</code>，只有
+<code>paramtable.Get().CommonCfg.UseLoonFFI</code> 为真才改成 V3；而
+<code>common.storage.useLoonFFI</code> 默认 <code>false</code>（2.6.7 引入）。
+默认部署的 Milvus 新段写 V2，compaction 的目标版本也是 V2。</p>
+<p>只支持 V3 等于在默认配置的 Milvus 上一个段都读不了，而 K1「Storage V2 packed 段」在
+<a href="../capabilities.md">capabilities.md</a> 里是 P0。</p>
 
-<h2 id="open">五、还没定的</h2>
-<ol>
-<li><strong>OSS 走 S3 兼容端点是否与 <code>hadoop-aliyun</code> 行为一致。</strong>
-唯一剩下的未知。若真有差异，OSS 先继续走 Hadoop、其余走 C，两条并存一段，
-按 <a href="../../../AGENTS.md">AGENTS.md</a> 的说法这属于有收敛条件的临时状态。</li>
-<li><strong>决策 21</strong>：写死的开发默认值怎么删，这是对外可见的行为变化。
-与本路线无关，两条路都要定。</li>
-</ol>
-<p>决策 20（原生属性包由谁渲染）与 22（身份要不要进工厂签名）在本设计下消失：
-只有一份属性包，身份就在里面。</p>
+<h2 id="reqs">六、对 milvus-storage 的需求</h2>
 
-<h2 id="next">六、下一步</h2>
+<p>七项。<strong>每一项都不在 JVM 侧绕过</strong>——milvus-storage 是我们自己的仓库，缺什么补什么。</p>
+
+<table>
+<tr><th>#</th><th>需求</th><th>挡住什么</th><th>改动面</th></tr>
+<tr><td>1</td><td>读 V2 packed 的 parquet footer 取字段 id 的 FFI 出口。C++ 侧 <code>FieldIDList::Make(schema)</code> 与 <code>GetFieldIDMapping()</code> 已经有，缺的是出口</td><td>K1（P0）</td><td>50–100 行：一个结构体加一个函数</td></tr>
+<tr><td>2</td><td>解析删除文件的内容。manifest 已返回 delta log 列表，内容解析还没有</td><td>R8</td><td>未知。等决策 13 定了删除文件格式归谁</td></tr>
+<tr><td>3</td><td><code>FormatReader::set_predicate</code> 基类返回 <code>NotImplemented</code> 而不是 <code>OK</code>（4.3）</td><td>不挡我们，挡别的调用方</td><td>1 行。难在影响面：提之前要查 Milvus 侧有没有人在给非 Vortex 列组传非空谓词，有的话对方会当成 breaking change</td></tr>
+<tr><td>4</td><td>加 <code>fs.session_token</code> 属性。<code>ConfigureAccessKey</code> 的第三个参数就是它，只是没有属性喂</td><td>用户自带一份 STS 临时凭证当选项传进来的场景</td><td>约 20 行</td></tr>
+<tr><td>5</td><td>把 <code>fs.iam_endpoint</code> 接上。现在标着 Deprecated 读进 config 没人用，阿里云 STS 端点写死公网 <code>sts.aliyuncs.com</code></td><td>要求走内网 STS 的环境</td><td>约 30 行：<code>AliyunRAMSTSClient</code> 的写死端点改成构造参数</td></tr>
+<tr><td>6</td><td>阿里云路径认 <code>fs.load_frequency</code>。现在打一条 warning 忽略它，刷新提前量是常量 180 秒</td><td>不挡，会话时长不可调</td><td>约 40 行：穿过两层 provider 构造，还要处理 <code>kRefreshGraceMs</code></td></tr>
+<tr><td>7</td><td>把 <code>loon_record_batch_reader_new</code> / <code>_read_next</code> / <code>_destroy</code> 三个声明从 <code>ffi_jni.h</code> 挪进 <code>ffi_c.h</code> 并加 <code>FFI_EXPORT</code>，实现从 <code>src/jni/</code> 挪到 <code>src/ffi/</code></td><td>不挡，但决定我们要不要自己维护一份同样的实现</td><td>约 10 行的挪动。理由：现在它们只编进 <code>libmilvus-storage-jni</code>，而那个库正是我们要替换的上游 JNI shim；<code>libmilvus-storage</code> 只导出返回 <code>ArrowArrayStream</code> 的 <code>loon_get_record_batch_reader</code>，那条路因 Arrow Java 忽略 <code>offset</code> 不可用（见 4.1）。头文件里「非 JVM 调用方不需要这次拷贝」是关于谁该调用的说明，不构成不导出的理由——导出不强迫任何人调用</td></tr>
+</table>
+
+<p>第 1 项随 V3 普及会自然失效（5.1），但那取决于 <code>common.storage.useLoonFFI</code>
+什么时候默认打开，不由我们控制，所以按要做的排。</p>
+
+<p><strong>撤回过一项：</strong>「让 C 读段 manifest」。那是 Milvus 的元数据格式，
+<code>internal/snapshotio/snapshot.go</code> 里 Milvus 用 Go 的 avro 库自己解。
+让 milvus-storage 去认识上层的元数据格式，方向是反的。</p>
+
+<h3 id="reqs-pr">6.1 我们自己提 PR</h3>
+<p><strong>可行，瓶颈是 review 不是代码。</strong>仓库是公开的
+<code>milvus-io/milvus-storage</code>，最近 80 个提交里 jiaqizho 占 58 个——单一主力维护者，
+而我们 spark 侧一次都没提过。它有六条 CI，其中 <code>error-handling-ratchet</code> 说明错误处理
+有量化门槛；229 个源文件配 67 个测试文件，不带测试的 PR 基本过不了。</p>
+<p>按这个顺序提：<strong>先第 3 项</strong>——一行修复加一个测试，形态上是「帮你们发现一个静默失效」，
+最容易过，用来建立往来；<strong>第 7 项紧随其后</strong>，它是纯挪动、不改逻辑、已有测试覆盖，
+而且我们这边有一份现成的过渡实现可以作为「有人真的需要它」的证据；<strong>再把第 4、5、6 项打成一个 PR</strong>，
+三个属性都是同一套机械改动；<strong>第 1 项放最后</strong>，它要加 FFI 结构体，
+第一次接触就送这个，压在队列里的概率很高。</p>
+<p><strong>真正的瓶颈是维护者的时间。</strong>这六项里哪一项进了关键路径，与其提 PR 不如先找人对排期。</p>
+
+<h2 id="next">七、下一步</h2>
 <ol>
 <li><strong><code>native-storage</code> 的 JNI</strong>，包 <code>loon_filesystem_*</code> 与
 <code>loon_exttable_read_manifest</code>。本设计的主要工作量，第 1 层由此从「以后再说」
 变成关键路径。</li>
-<li><strong><code>core.path</code></strong>。两条路都要，可先做；顺带把
-<code>resolveManifestDeltaPath</code> 里的格式知识摘回 <code>core.delete</code>。</li>
-<li><strong><code>core.credential</code></strong>。五处解析收成一处。</li>
+<li><strong><code>core.path</code></strong>。十二处合成一处，产出 <code>(bucket, key)</code>；
+顺带把 <code>resolveManifestDeltaPath</code> 里的格式知识摘回 <code>core.delete</code>。
+不依赖 JNI，可先做。</li>
+<li><strong><code>core.credential</code></strong>。五处解析合成一处，只认 <code>fs.*</code>
+与 <code>extfs.*</code>，校验必填项。</li>
+<li><strong>删掉写死的开发默认值</strong>，缺一项就报错。生产路径上有两处：
+<code>loon/Properties.scala</code> 里 <code>fs.address</code>、<code>fs.bucket_name</code>
+与两个密钥的缺省值，<code>write/MilvusLoonWriter.scala</code> 的 <code>generateBasePath</code>
+里桶名缺省 <code>a-bucket</code>——那会把段写到读侧不会去找的路径上。
+这是对外可见的行为变化：今天漏配一项会连上开发用的 MinIO 并在请求时失败，改完是启动即报错。</li>
 </ol>
-<p>不依赖本设计、可并行的一条：第 3 层把 <code>MilvusDataSource</code> 那 2880 行拆成
-catalog、table、scan，<code>MilvusOption</code> 拆成 options。P0 里 R2、R5、R15、R17 的
-实现位置都落在这几个现在空着的包上。</p>
 
-<h2 id="rejected">七、曾经考虑过的方案</h2>
-<p>在 Scala 里定义 <code>ObjectStore</code> 接口、用 Hadoop FileSystem 实现。
-前提是「原生层只打开数据文件」，读 C 头文件后发现前提不成立：那一层已经有完整的
-文件系统、七个云的凭证和 manifest 解析。在它旁边再建一条 Scala 通路，
-是 AGENTS.md 禁止的烟囱。</p>
+<h2 id="verify">八、要在真实环境验的</h2>
+
+<div class="status">
+<strong>已验（2026-09-12，UAT aws-usw2）。</strong>JNI 真的能读出真实 Milvus 数据。
+取一个实例的段 binlog（4133761 字节），两条路各读一遍，字节的 sha256 完全一致：
+本地后端（<code>fs.storage_type=local</code>）读下载到磁盘的那份；AWS S3 后端读桶里的原对象。
+凭证走 pod 的 IRSA token 从本机 AssumeRole 换来。手工验证入口是
+<code>StorageNativeUatTest</code>，无凭证时自动 cancel，不进 CI。</div>
+
+<div class="warn">
+<strong>顺带实证了 3.7 的 <code>fs.session_token</code> 缺口是真挡路，不只是读代码推断的。</strong>
+临时凭证必带 session token。把 <code>fs.access_key_id</code> + <code>fs.access_key_value</code>
+放进属性包（没有 session token 的位置），C 层 HeadObject 直接 <code>ACCESS_DENIED</code>；
+同一份凭证用 aws cli 带上 token 能读、去掉 token 就 403，两相对照坐实了是 token 被丢了。
+改走 <code>fs.use_iam=true</code>、让 C 层默认链从进程环境读 <code>AWS_SESSION_TOKEN</code>，
+就读通了。<strong>结论：executor 上用临时凭证走 S3，今天只能靠 use_iam 加环境变量，
+属性包这条路要等上游加 <code>fs.session_token</code>（<a href="#reqs">第七节</a>第 4 项）。</strong></div>
+
+<ol>
+<li>EKS pod 里 C 层默认链拿到的是 IRSA 投影的 service-account token，不是节点实例角色。
+代码上成立（3.4）。本机用同一套 token 换出的凭证经 use_iam 读通了 UAT 桶，
+但那是本机默认链读环境变量，不等于 EKS pod 内的行为，仍要在 pod 里跑一次确认。</li>
+<li>ACK pod 里 RRSA 注入的三个环境变量齐全，OIDC 角色链两步都成功。</li>
+<li>OSS 经 arrow 的 S3 客户端读写与今天的 hadoop-aliyun 结果一致。C 层把阿里云当 S3 兼容端点，
+并强制 virtual-host 寻址。只有这一家有「和原来一致吗」的检查，因为只有 S3 和 OSS 今天有
+JVM 那条路可比；Azure、GCS、腾讯、华为是从读不了变成能读，没有「原来的行为」可对。</li>
+</ol>

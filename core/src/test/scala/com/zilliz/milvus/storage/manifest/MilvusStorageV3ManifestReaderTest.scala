@@ -6,11 +6,10 @@ import java.nio.file.Files
 import org.apache.avro.file.DataFileWriter
 import org.apache.avro.generic.{GenericData, GenericDatumWriter, GenericRecord}
 import org.apache.avro.Schema
-import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore
+import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
 
 class MilvusStorageV3ManifestReaderTest extends AnyFunSuite with Matchers {
@@ -88,7 +87,7 @@ class MilvusStorageV3ManifestReaderTest extends AnyFunSuite with Matchers {
     MilvusStorageV3ManifestReader.latestManifestVersion(
       basePath.toString,
       "",
-      new HadoopObjectStore(new Configuration(), "", "file")
+      new LocalObjectStore()
     ) shouldBe Right(11L)
   }
 

@@ -133,6 +133,7 @@ val s3Options = Map(
 | `MilvusOption.MilvusPartitionID` | String | 否 | "" | 分区 ID，通常自动获取 |
 | `MilvusOption.MilvusSegmentID` | String | 否 | "" | 段 ID，用于精确读取特定段 |
 | `MilvusOption.ReaderFieldIDs` | String | 否 | "" | 字段ID列表，逗号分隔，用于只读取部分字段，可以有效减少数据获取时间 |
+| `milvus.read.vector.raw` | Boolean | 否 | false | 向量列的输出类型。默认 false，向量转成 Spark 原生类型（`FloatVector`/`Float16Vector`/`BFloat16Vector` → `ArrayType(FloatType)`，`Int8Vector` → `ArrayType(ShortType)`，`SparseFloatVector` → `MapType(LongType, FloatType)`）。设为 true 时向量列输出 `BinaryType`，字节按存储原样给出，由调用方自己按 `dim` 与元素类型解析；这条路径不做逐元素转换，适合把字节直接交给下游原生库的批量作业 |
 
 ### 2.4 写入参数
 

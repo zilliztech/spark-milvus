@@ -32,11 +32,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
 
   /** Tests read local files, so the store carries no bucket. */
   private def localStore: com.zilliz.milvus.storage.io.ObjectStore =
-    new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
-      new org.apache.hadoop.conf.Configuration(),
-      "",
-      "file"
-    )
+    new com.zilliz.milvus.storage.io.LocalObjectStore()
 
   private val groupASchema: MessageType = Types
     .buildMessage()
@@ -321,28 +317,17 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     BackupMetaReader.metaPath("s3a://b/backup/b1//") shouldBe
       "s3a://b/backup/b1/meta/full_meta.json"
 
-    // Native reader gets bucket-relative keys; Hadoop reads get the qualified URI.
+    // Every insert-log read goes through the native store, so only the
+    // bucket-relative key is produced.
     BackupMetaReader.nativeInsertLogPath(
       "s3a://bucket/backup/b1",
       seg,
       103L,
       1L
     ) shouldBe "backup/b1/binlogs/insert_log/444/555/999/777/103/1"
-    BackupMetaReader.qualifiedInsertLogPath(
-      "s3a://bucket/backup/b1",
-      seg,
-      103L,
-      1L
-    ) shouldBe "s3a://bucket/backup/b1/binlogs/insert_log/444/555/999/777/103/1"
     // Bucket-root backup: native key has NO leading slash (a different S3 key).
     BackupMetaReader.nativeInsertLogPath("s3a://bucket", seg, 103L, 1L) shouldBe
       "binlogs/insert_log/444/555/999/777/103/1"
-    BackupMetaReader.qualifiedInsertLogPath(
-      "s3a://bucket",
-      seg,
-      103L,
-      1L
-    ) shouldBe "s3a://bucket/binlogs/insert_log/444/555/999/777/103/1"
 
     // Delta logs only feed the Hadoop delete-plan reader, so only qualified
     // paths exist. groupID level present for part != -1, omitted for part == -1.

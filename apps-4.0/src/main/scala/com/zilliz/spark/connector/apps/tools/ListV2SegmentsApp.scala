@@ -157,18 +157,18 @@ object ListV2SegmentsApp {
           // the real field IDs per column group. All files in the segment
           // carry the same group_field_id_list.
           val samplePath = entry.binlogFiles.head.binlogs.head.logPath
-          val normalized = resolvePath(samplePath, bucket)
+          // The store is rooted at the bucket, so it takes the key.
+          val key = com.zilliz.milvus.storage.path.StoragePath
+            .parse(resolvePath(samplePath, bucket), bucket)
+            .key
           MilvusParquetFooterReader.read(
-            normalized,
-            new com.zilliz.milvus.storage.io.hadoop.HadoopObjectStore(
-              hadoopConf,
-              "",
-              "s3a"
-            )
+            key,
+            com.zilliz.spark.connector.loon.HadoopStorageConfig
+              .objectStore(hadoopConf, bucket)
           ) match {
             case Left(err) =>
               println(
-                s"    ERROR reading parquet footer at $normalized: ${err.getMessage}"
+                s"    ERROR reading parquet footer at $key: ${err.getMessage}"
               )
 
             case Right(footer) =>
