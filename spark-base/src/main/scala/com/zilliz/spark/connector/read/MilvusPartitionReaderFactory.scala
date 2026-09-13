@@ -9,10 +9,12 @@ import org.apache.spark.sql.connector.read.{
 }
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
 import com.zilliz.milvus.storage.read.plan.DeleteSource
+import com.zilliz.spark.connector.serde.ArrowAllocator
 import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -63,6 +65,72 @@ class MilvusPartitionReaderFactory(
       requestedExtraColumns
     )
 
+  /** Whether this partition can be read a batch at a time.
+    *
+    * Both lines can, because both end at the same SegmentReader. It is off
+    * unless the read asks, since the row path is what every existing job runs
+    * and the two have to be shown to agree before the default moves.
+    */
+  override def supportColumnarReads(partition: InputPartition): Boolean =
+    MilvusOption.readColumnar(optionsMap) && partition.isInstanceOf[
+      MilvusInputPartition
+    ]
+
+  override def createColumnarReader(
+      partition: InputPartition
+  ): PartitionReader[ColumnarBatch] = partition match {
+    case p: MilvusInputPartition =>
+      val dataSchema = StructType(schema.fields.filterNot { field =>
+        isMetadataExtraField(field.name)
+      })
+      val setup = SegmentReadSetup(effectiveSpecOf(p), dataSchema)
+      val milvusSchema = CollectionSchema.parseFrom(p.spec.schemaBytes)
+      new MilvusColumnarPartitionReader(
+        schema,
+        setup.open(ArrowAllocator.get),
+        milvusSchema,
+        setup.isDeleted,
+        MilvusOption.readVectorRaw(optionsMap),
+        partitionNameOf(p),
+        p.spec.segmentId
+      )
+    case other =>
+      throw new IllegalArgumentException(
+        s"cannot read ${other.getClass.getName} a batch at a time"
+      )
+  }
+
+  /** The partition with its inherited delete plan folded in.
+    *
+    * Only the column-group line defers that: its inherited plan is looked up
+    * from the executor-side context rather than shipped per partition.
+    */
+  private def effectiveSpecOf(p: MilvusInputPartition): MilvusInputPartition =
+    p match {
+      case v2: MilvusPackedV2InputPartition =>
+        val inherited = v2.inheritedDeletePlanPartitionId
+          .map(partitionId =>
+            MilvusDeltaLogReader.effectiveInheritedDeletePlan(
+              partitionId,
+              packedV2DeleteContext.inheritedPlansByPartition
+            )
+          )
+          .getOrElse(MilvusDeletePlan.empty)
+        val combined = MilvusDeletePlan.union(inherited, v2.spec.deletePlan)
+        v2.copy(spec =
+          v2.spec.copy(deletes =
+            if (combined.isEmpty) DeleteSource.None
+            else DeleteSource.Materialized(combined)
+          )
+        )
+      case other => other
+    }
+
+  private def partitionNameOf(p: MilvusInputPartition): String = p match {
+    case v3: MilvusStorageV3InputPartition => v3.partitionName
+    case other                             => other.spec.partitionId.toString
+  }
+
   override def createReader(
       partition: InputPartition
   ): PartitionReader[InternalRow] = {
@@ -82,7 +150,7 @@ class MilvusPartitionReaderFactory(
         // Create MilvusLoonPartitionReader directly
         val underlyingReader = new MilvusLoonPartitionReader(
           v2Schema,
-          p.spec,
+          LoonReadSetup(p, v2Schema),
           milvusSchema,
           p.milvusOption,
           optionsMap,
@@ -163,7 +231,7 @@ class MilvusPartitionReaderFactory(
 
         val underlying = new MilvusPackedV2PartitionReader(
           innerSchema,
-          effectiveSpec,
+          PackedV2ReadSetup(p, innerSchema, effectiveSpec),
           milvusSchema,
           p.milvusOption
         )

@@ -132,7 +132,7 @@ object MilvusLoonPartitionReader {
 // for Milvus 2.6+ version data source and milvus lake data
 class MilvusLoonPartitionReader(
     schema: StructType,
-    spec: InputSpec,
+    setup: SegmentReadSetup,
     milvusSchema: CollectionSchema,
     milvusOption: MilvusOption,
     optionsMap: Map[String, String],
@@ -149,15 +149,16 @@ class MilvusLoonPartitionReader(
   // Everything storage-facing comes out of the spec the driver built: the
   // manifest location, the version pinned at planning time, the validated fs.*
   // map, and the deletes.
-  private val (manifestPath: String, readVersion: Long) = spec.layout match {
-    case SegmentLayout.Manifest(basePath, version) => (basePath, version)
-    case other =>
-      throw new IllegalArgumentException(
-        s"loon reader needs a manifest layout, got $other"
-      )
-  }
-  private val applyDeletes: Boolean = spec.appliesDeletes
-  private val deletePlan: MilvusDeletePlan = spec.deletePlan
+  private val (manifestPath: String, readVersion: Long) =
+    setup.spec.layout match {
+      case SegmentLayout.Manifest(basePath, version) => (basePath, version)
+      case other =>
+        throw new IllegalArgumentException(
+          s"loon reader needs a manifest layout, got $other"
+        )
+    }
+  private val applyDeletes: Boolean = setup.appliesDeletes
+  private val deletePlan: MilvusDeletePlan = setup.deletePlan
 
   private val allocator = ArrowAllocator.get
 
@@ -173,7 +174,7 @@ class MilvusLoonPartitionReader(
     milvusSchema.fields.find(_.isPrimaryKey)
   private val pkColumnName = pkField.map(_.fieldID.toString).getOrElse("")
 
-  private val columnNames = getColumnNames()
+  private val columnNames = setup.neededColumns.toArray
 
   // Native resource handles. Initialized to safe defaults so a partial-init
   // failure can roll back whatever was allocated so far via releaseAll().
@@ -192,15 +193,7 @@ class MilvusLoonPartitionReader(
   def lastReturnedRowOffset: Long = _lastReturnedRowOffset
 
   try {
-    // Columns are matched by field id on this line, so the schema carries ids
-    // as names and so does the resolver.
-    segmentReader = SegmentReaderRegistry.open(
-      spec,
-      SchemaMapper.convertToArrowSchemaWithFieldIdNames(milvusSchema),
-      columnNames.toSeq,
-      id => Some(id.toString),
-      allocator
-    )
+    segmentReader = setup.open(allocator)
     _currentBatch = pullNextBatch()
   } catch {
     case e: Throwable =>
@@ -311,35 +304,8 @@ class MilvusLoonPartitionReader(
 
   override def close(): Unit = releaseAll()
 
-  private def isDeleted(batch: VectorSchemaRoot, rowIndex: Int): Boolean = {
-    val pk = pkField.getOrElse {
-      throw new IllegalArgumentException(
-        "StorageV3 delete filtering requires a primary key field"
-      )
-    }
-    val pkVector = batch.getVector(pkColumnName)
-    if (pkVector == null) {
-      throw new IllegalStateException(
-        s"StorageV3 delete filtering requires PK column $pkColumnName to be loaded"
-      )
-    }
-    val rawTsVector = batch.getVector(
-      MilvusLoonPartitionReader.TimestampColumnName
-    )
-    if (rawTsVector == null) {
-      throw new IllegalStateException(
-        "StorageV3 delete filtering requires Timestamp column to be loaded"
-      )
-    }
-    MilvusPackedV2PartitionReader.rowDeleted(
-      deletePlan,
-      pk,
-      pkVector,
-      rawTsVector.asInstanceOf[BigIntVector],
-      rowIndex,
-      pkColumnName
-    )
-  }
+  private def isDeleted(batch: VectorSchemaRoot, rowIndex: Int): Boolean =
+    setup.isDeleted(batch, rowIndex)
 
   // Each native resource is released in its own try-catch so one failing
   // release doesn't strand the rest. Null/zero sentinels make this

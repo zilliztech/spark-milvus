@@ -6,6 +6,14 @@ import com.zilliz.milvus.storage.delete.MilvusDeletePlan
 import com.zilliz.milvus.storage.read.plan.InputSpec
 import com.zilliz.spark.connector.MilvusOption
 
+/** The two segment layouts a read can produce, so a caller can dispatch on
+  * which line a partition belongs to without matching on Spark's own type.
+  */
+sealed trait MilvusInputPartition extends InputPartition {
+  def spec: InputSpec
+  def milvusOption: MilvusOption
+}
+
 // InputPartition for milvus-segment-info `storage_version = 3` (StorageV3) —
 // the manifest-based packed parquet format consumed by milvus-storage's
 // `loon_reader_new` via `LoonManifest`. See `milvus/internal/storage/rw.go`
@@ -26,7 +34,7 @@ case class MilvusStorageV3InputPartition(
     queryVector: Option[Array[Float]] = None,
     metricType: Option[String] = None,
     vectorColumn: Option[String] = None
-) extends InputPartition
+) extends MilvusInputPartition
 
 /** InputPartition for milvus-segment-info `storage_version = 2` — the
   * non-manifest packed-parquet format. No `.milvus_manifest` file exists; the
@@ -41,7 +49,7 @@ case class MilvusPackedV2InputPartition(
     spec: InputSpec, // What to read: layout, schema, fs.* map, deletes
     milvusOption: MilvusOption,
     inheritedDeletePlanPartitionId: Option[Long] = None
-) extends InputPartition
+) extends MilvusInputPartition
 
 case class MilvusPackedV2DeleteContext(
     inheritedPlansByPartition: Map[Long, MilvusDeletePlan]

@@ -188,6 +188,7 @@ object MilvusOption {
   val SnapshotMaxJsonBytes = "milvus.snapshot.max.json.bytes"
   val ReadApplyDeletes = "milvus.read.apply.deletes"
   val ReadVectorRaw = "milvus.read.vector.raw"
+  val ReadColumnar = "milvus.read.columnar"
   val ClientSnapshotName = "milvus.client.snapshot.name"
   val ClientSnapshotDescription = "milvus.client.snapshot.description"
   val ClientSnapshotCompactionProtectionSeconds =
@@ -360,6 +361,33 @@ object MilvusOption {
 
   def readVectorRaw(options: CaseInsensitiveStringMap): Boolean = {
     readVectorRawFrom(key => Option(options.get(key)))
+  }
+
+  /** Whether the scan hands Spark whole batches instead of rows.
+    *
+    * Default false. The row path is what every existing job runs, and the two
+    * have to be shown to agree on real data before the default moves.
+    */
+  private def readColumnarFrom(
+      getOption: String => Option[String]
+  ): Boolean = {
+    getOption(ReadColumnar)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map(_.equalsIgnoreCase("true"))
+      .getOrElse(false)
+  }
+
+  def readColumnar(options: Map[String, String]): Boolean = {
+    readColumnarFrom { key =>
+      options.collectFirst {
+        case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
+      }
+    }
+  }
+
+  def readColumnar(options: CaseInsensitiveStringMap): Boolean = {
+    readColumnarFrom(key => Option(options.get(key)))
   }
 
   private def clientSnapshotAutoCleanupFrom(

@@ -1767,6 +1767,20 @@ class MilvusScan(
 
   override def toBatch: Batch = this
 
+  /** Whether Spark asks this scan for batches or for rows.
+    *
+    * PARTITION_DEFINED so the factory decides per partition, which is where the
+    * layout is known. It answers false unless `milvus.read.columnar` is on: the
+    * row path is what every existing job runs, and the two have to be shown to
+    * agree on real data before the default moves.
+    */
+  override def columnarSupportMode(): Scan.ColumnarSupportMode =
+    if (MilvusOption.readColumnar(options)) {
+      Scan.ColumnarSupportMode.PARTITION_DEFINED
+    } else {
+      Scan.ColumnarSupportMode.UNSUPPORTED
+    }
+
   private lazy val plannedSnapshotPartitions: Array[InputPartition] =
     computeInputPartitions()
 

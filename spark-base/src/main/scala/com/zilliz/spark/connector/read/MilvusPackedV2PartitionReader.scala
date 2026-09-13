@@ -192,15 +192,15 @@ object MilvusPackedV2PartitionReader {
 
 class MilvusPackedV2PartitionReader(
     schema: StructType,
-    spec: InputSpec,
+    setup: SegmentReadSetup,
     milvusSchema: CollectionSchema,
     milvusOption: MilvusOption
 ) extends PartitionReader[InternalRow]
     with Logging {
 
-  // Everything storage-facing comes out of the spec the driver built. Parsing
-  // and validating the fs.* map happened there, once, rather than here per
-  // task.
+  // The derivation lives in SegmentReadSetup, so the columnar reader gets the
+  // same answers rather than a second copy of the reasoning.
+  private val spec = setup.spec
   private val columnGroups: Seq[V2ColumnGroup] = spec.layout match {
     case SegmentLayout.ColumnGroups(groups) => groups
     case other =>
@@ -208,49 +208,21 @@ class MilvusPackedV2PartitionReader(
         s"packed-V2 reader needs a materialized column group layout, got $other"
       )
   }
-  private val neededColumnFieldIds: Seq[Long] = spec.neededFieldIds
-  private val applyDeletes: Boolean = spec.appliesDeletes
-  private val deletePlan: MilvusDeletePlan = spec.deletePlan
+  private val applyDeletes: Boolean = setup.appliesDeletes
+  private val deletePlan: MilvusDeletePlan = setup.deletePlan
 
   private val allocator = ArrowAllocator.get
   private val sourceSchema = schema
-  private val pkField = milvusSchema.fields.find(_.isPrimaryKey).getOrElse {
-    throw new IllegalArgumentException("No primary key field found in schema")
-  }
   private val fieldMappings =
     MilvusPackedV2PartitionReader.buildFieldMappings(milvusSchema)
   private val fieldNameToArrowColumn = fieldMappings.fieldNameToArrowColumn
-  private val effectiveNeededColumnFieldIds =
-    MilvusPackedV2PartitionReader.projectedFieldIds(
-      sourceSchema,
-      fieldMappings,
-      neededColumnFieldIds,
-      applyDeletes,
-      deletePlan,
-      pkField.fieldID,
-      tsFieldId = 1L
-    )
-  private val neededColumns: Array[String] =
-    MilvusPackedV2PartitionReader.resolveNeededColumns(
-      sourceSchema,
-      columnGroups,
-      fieldMappings,
-      effectiveNeededColumnFieldIds
-    )
-  private val pkColumnName =
-    fieldMappings.fieldIdToName.getOrElse(pkField.fieldID, pkField.name)
+  private val neededColumns: Array[String] = setup.neededColumns.toArray
 
   private var segmentReader: SegmentReader = null
   private var dictProvider: CDataDictionaryProvider = null
 
   try {
-    segmentReader = SegmentReaderRegistry.open(
-      spec,
-      SchemaMapper.convertToArrowSchema(milvusSchema),
-      neededColumns.toSeq,
-      fieldMappings.fieldIdToName.get,
-      allocator
-    )
+    segmentReader = setup.open(allocator)
     dictProvider = new CDataDictionaryProvider()
   } catch {
     case e: Throwable =>
@@ -373,28 +345,8 @@ class MilvusPackedV2PartitionReader(
     }
   }
 
-  private def isDeleted(rowIndex: Int): Boolean = {
-    val pkVector = currentBatch.getVector(pkColumnName)
-    if (pkVector == null) {
-      throw new IllegalStateException(
-        s"Packed V2 delete filtering requires PK column $pkColumnName to be loaded"
-      )
-    }
-    val rawTsVector = currentBatch.getVector("Timestamp")
-    if (rawTsVector == null) {
-      throw new IllegalStateException(
-        "Packed V2 delete filtering requires Timestamp column to be loaded"
-      )
-    }
-    MilvusPackedV2PartitionReader.rowDeleted(
-      deletePlan,
-      pkField,
-      pkVector,
-      rawTsVector.asInstanceOf[BigIntVector],
-      rowIndex,
-      pkColumnName
-    )
-  }
+  private def isDeleted(rowIndex: Int): Boolean =
+    setup.isDeleted(currentBatch, rowIndex)
 
   private def releaseAll(): Unit = {
     if (currentBatch != null) {
