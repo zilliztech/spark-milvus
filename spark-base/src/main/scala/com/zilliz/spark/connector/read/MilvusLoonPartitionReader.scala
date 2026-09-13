@@ -335,29 +335,6 @@ class MilvusLoonPartitionReader(
     (arrowSchemaC, arrowSchemaC.memoryAddress())
   }
 
-  private def getColumnNames(): Array[String] = {
-    // Convert column names to field IDs for manifest/reader matching.
-    // System fields are mapped to Milvus field IDs 0 and 1 and requested from storage.
-    val requested = sourceSchema.fieldNames.flatMap { name =>
-      fieldNameToId.get(name).map(_.toString)
-    }
-    if (!applyDeletes || deletePlan.isEmpty) {
-      requested
-    } else {
-      val pkId = pkField
-        .map(_.fieldID.toString)
-        .getOrElse(
-          throw new IllegalArgumentException(
-            "StorageV3 delete filtering requires a primary key field"
-          )
-        )
-      (requested ++ Seq(
-        pkId,
-        MilvusLoonPartitionReader.TimestampColumnName
-      )).distinct
-    }
-  }
-
   /** Perform per-segment vector search and maintain top-K results
     */
   private def performSegmentVectorSearch(): Unit = {

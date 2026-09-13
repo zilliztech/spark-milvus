@@ -1,6 +1,5 @@
 package com.zilliz.spark.connector.read
 
-import org.apache.spark.unsafe.types.UTF8String
 import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.spark.connector.MilvusOption
@@ -37,11 +36,4 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     )
   }
 
-  test("partition metadata values use Spark UTF8String representation") {
-    assert(
-      MilvusPartitionReaderFactory.stringValue("20") == UTF8String.fromString(
-        "20"
-      )
-    )
-  }
 }

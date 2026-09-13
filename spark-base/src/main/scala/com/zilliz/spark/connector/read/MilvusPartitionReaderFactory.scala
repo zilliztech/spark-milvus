@@ -10,7 +10,6 @@ import org.apache.spark.sql.connector.read.{
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
 import com.zilliz.milvus.storage.read.plan.DeleteSource
@@ -42,8 +41,6 @@ object MilvusPartitionReaderFactory {
   ): Boolean =
     requestedExtraColumns.contains(name)
 
-  private[read] def stringValue(value: String): UTF8String =
-    UTF8String.fromString(value)
 }
 
 // PartitionReaderFactory for Storage V2 (Milvus 2.6+)
