@@ -195,7 +195,7 @@ class MilvusPackedV2PartitionReader(
     setup: SegmentReadSetup,
     milvusSchema: CollectionSchema,
     milvusOption: MilvusOption
-) extends PartitionReader[InternalRow]
+) extends RowOffsetReader
     with Logging {
 
   // The derivation lives in SegmentReadSetup, so the columnar reader gets the

@@ -141,7 +141,7 @@ class MilvusLoonPartitionReader(
     metricType: Option[String] = None,
     vectorColumn: Option[String] = None,
     pushedFilters: Array[Filter] = Array.empty[Filter]
-) extends PartitionReader[InternalRow]
+) extends RowOffsetReader
     with Logging {
 
   // Load native library

@@ -161,43 +161,13 @@ class MilvusPartitionReaderFactory(
           pushedFilters
         )
 
-        val hasMetadataExtraFields = schema.fieldNames.exists { name =>
-          isMetadataExtraField(name)
-        }
-
-        if (hasMetadataExtraFields) {
-          new PartitionReader[InternalRow] {
-            override def next(): Boolean = underlyingReader.next()
-
-            override def get(): InternalRow = {
-              val row = underlyingReader.get()
-              val resultValues = new Array[Any](schema.fields.length)
-              var readIdx = 0
-
-              schema.fields.zipWithIndex.foreach { case (field, writeIdx) =>
-                field.name match {
-                  case MilvusOption.MilvusExtraColumnPartition =>
-                    resultValues(writeIdx) =
-                      MilvusPartitionReaderFactory.stringValue(p.partitionName)
-                  case MilvusOption.MilvusExtraColumnSegmentID =>
-                    resultValues(writeIdx) = p.spec.segmentId
-                  case MilvusOption.MilvusExtraColumnRowOffset =>
-                    resultValues(writeIdx) =
-                      underlyingReader.lastReturnedRowOffset
-                  case _ =>
-                    resultValues(writeIdx) = row.get(readIdx, field.dataType)
-                    readIdx += 1
-                }
-              }
-
-              InternalRow.fromSeq(resultValues.toSeq)
-            }
-
-            override def close(): Unit = underlyingReader.close()
-          }
-        } else {
-          underlyingReader
-        }
+        MetadataColumns.wrapRows(
+          underlyingReader,
+          schema,
+          requestedExtraColumns,
+          p.partitionName,
+          p.spec.segmentId
+        )
 
       case p: MilvusPackedV2InputPartition =>
         logInfo(
@@ -236,43 +206,13 @@ class MilvusPartitionReaderFactory(
           p.milvusOption
         )
 
-        val hasMetadataExtraFields = schema.fieldNames.exists { name =>
-          isMetadataExtraField(name)
-        }
-
-        if (hasMetadataExtraFields) {
-          new PartitionReader[InternalRow] {
-            override def next(): Boolean = underlying.next()
-
-            override def get(): InternalRow = {
-              val row = underlying.get()
-              val out = new Array[Any](schema.fields.length)
-              var readIdx = 0
-
-              schema.fields.zipWithIndex.foreach { case (field, writeIdx) =>
-                field.name match {
-                  case MilvusOption.MilvusExtraColumnPartition =>
-                    out(writeIdx) = MilvusPartitionReaderFactory.stringValue(
-                      p.spec.partitionId.toString
-                    )
-                  case MilvusOption.MilvusExtraColumnSegmentID =>
-                    out(writeIdx) = p.spec.segmentId
-                  case MilvusOption.MilvusExtraColumnRowOffset =>
-                    out(writeIdx) = underlying.lastReturnedRowOffset
-                  case _ =>
-                    out(writeIdx) = row.get(readIdx, field.dataType)
-                    readIdx += 1
-                }
-              }
-
-              InternalRow.fromSeq(out.toSeq)
-            }
-
-            override def close(): Unit = underlying.close()
-          }
-        } else {
-          underlying
-        }
+        MetadataColumns.wrapRows(
+          underlying,
+          schema,
+          requestedExtraColumns,
+          p.spec.partitionId.toString,
+          p.spec.segmentId
+        )
 
       case _ =>
         throw new IllegalArgumentException(

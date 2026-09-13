@@ -18,13 +18,10 @@ import com.zilliz.milvus.storage.read.exec.SegmentReader
 import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
 import com.zilliz.spark.connector.serde.ArrowAllocator
 import com.zilliz.spark.connector.types.{
-  ConstantColumn,
   MilvusSparseVectorColumn,
   MilvusVectorColumn,
-  RowOffsetColumn,
   SelectedRowsColumn
 }
-import com.zilliz.spark.connector.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 
 /** Hands Spark whole batches instead of rows.
@@ -138,38 +135,34 @@ class MilvusColumnarPartitionReader(
       root: VectorSchemaRoot,
       name: String,
       startOffset: Long
-  ): ColumnVector = name match {
-    case MilvusOption.MilvusExtraColumnPartition =>
-      ConstantColumn.ofString(partitionName)
-    case MilvusOption.MilvusExtraColumnSegmentID =>
-      ConstantColumn.ofLong(segmentId)
-    case MilvusOption.MilvusExtraColumnRowOffset =>
-      new RowOffsetColumn(startOffset)
-    case _ =>
-      val vector = root.getVector(name)
-      if (vector == null) {
-        throw new IllegalStateException(
-          s"the batch has no column '$name'; it carries " +
-            root.getSchema.getFields.toString
-        )
-      }
-      val milvusType = fieldsByName.get(name).map(_.dataType)
-      milvusType match {
-        case Some(t) if MilvusTypes.isDenseVectorType(t) =>
-          MilvusVectorColumn(
-            vector.asInstanceOf[FixedSizeBinaryVector],
-            t,
-            dimensionOf(name),
-            rawVectors
+  ): ColumnVector =
+    MetadataColumns
+      .columnFor(name, partitionName, segmentId, startOffset)
+      .getOrElse {
+        val vector = root.getVector(name)
+        if (vector == null) {
+          throw new IllegalStateException(
+            s"the batch has no column '$name'; it carries " +
+              root.getSchema.getFields.toString
           )
-        case Some(MilvusDataType.SparseFloatVector) if !rawVectors =>
-          MilvusSparseVectorColumn(vector.asInstanceOf[VarBinaryVector])
-        case _ =>
-          // Scalars, and sparse vectors asked for raw: Arrow's own wrapper
-          // already presents these without copying.
-          new ArrowColumnVector(vector)
+        }
+        val milvusType = fieldsByName.get(name).map(_.dataType)
+        milvusType match {
+          case Some(t) if MilvusTypes.isDenseVectorType(t) =>
+            MilvusVectorColumn(
+              vector.asInstanceOf[FixedSizeBinaryVector],
+              t,
+              dimensionOf(name),
+              rawVectors
+            )
+          case Some(MilvusDataType.SparseFloatVector) if !rawVectors =>
+            MilvusSparseVectorColumn(vector.asInstanceOf[VarBinaryVector])
+          case _ =>
+            // Scalars, and sparse vectors asked for raw: Arrow's own wrapper
+            // already presents these without copying.
+            new ArrowColumnVector(vector)
+        }
       }
-  }
 
   private def dimensionOf(name: String): Int = {
     val field = schema(name)
