@@ -6,9 +6,9 @@ description: Use when reviewing or changing the Spark-Milvus sbt build, module w
 # Maintain the Spark-Milvus build
 
 Read the repository [AGENTS.md](../../../AGENTS.md), then
-[sbt principles and practices](../../../docs/design/sbt.md). The document owns
+[sbt principles and practices](../../../docs/design/engineering/sbt.html). The document owns
 the build conventions; this skill applies them. Consult
-[modules.md](../../../docs/design/modules.md) when a change affects module
+[modules.md](../../../docs/design/architecture/modules.md) when a change affects module
 boundaries or compatibility, and [contributing.md](../../../docs/contributing.md)
 for build commands and environment constraints.
 

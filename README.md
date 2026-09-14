@@ -54,17 +54,18 @@ supplies the native storage library.
 routes to whichever file answers a question and lists the rules any change has
 to satisfy. `CLAUDE.md` is a symlink to it.
 
-The 2.0 design lives in `docs/design`. Start with the overview, then the chapter
-you need.
+The 2.0 design lives in `docs/design`. Its entry groups documents by the question
+you need to answer: architecture, engineering conventions or external research.
 
 | Document | What it answers |
 |---|---|
 | [docs/design/README.md](docs/design/README.md) | The layering, the read and write paths, priorities, open decisions, and the decision log |
 | [docs/design/capabilities.md](docs/design/capabilities.md) | The 51 capabilities the connector commits to, by id |
-| [docs/design/modules.md](docs/design/modules.md) | Modules, packages, directories, the twelve build constraints, and the 1.x to 2.0 migration table |
-| [docs/design/lance-spark.md](docs/design/lance-spark.md) | A layer-by-layer comparison against the Lance Spark connector |
-| [docs/design/overview.html](docs/design/overview.html) | The illustrated version of the design |
-| [docs/design/lance-spark.html](docs/design/lance-spark.html) | The illustrated version of the comparison |
+| [docs/design/architecture/modules.md](docs/design/architecture/modules.md) | Modules, packages, directories, the twelve build constraints, and the 1.x to 2.0 migration table |
+| [docs/design/architecture/overview.html](docs/design/architecture/overview.html) | The illustrated version of the design |
+| [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html) | Principles and practices for maintaining the sbt build |
+| [docs/design/research/lance-spark.md](docs/design/research/lance-spark.md) | A layer-by-layer comparison against the Lance Spark connector |
+| [docs/design/research/lance-spark.html](docs/design/research/lance-spark.html) | The illustrated version of the comparison |
 
 `docs/reference-en.md` is the user-facing API reference for the connector
 options and entry points. [docs/contributing.md](docs/contributing.md) covers

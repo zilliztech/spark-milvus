@@ -98,7 +98,7 @@ bucket/files/...                                  → 带桶名不带 scheme</co
   <text x="82" y="95" font-size="12" fill="currentColor">core.io（JNI 句柄）</text>
   <line x1="150" y1="106" x2="150" y2="136" stroke="currentColor" marker-end="url(#a)"/>
   <rect x="40" y="140" width="220" height="32" fill="none" stroke="currentColor"/>
-  <text x="50" y="161" font-size="12" fill="currentColor">C filesystem（七个云 + 本地）</text>
+  <text x="50" y="161" font-size="12" fill="currentColor">C filesystem（六个云 + 本地）</text>
 
   <rect x="360" y="8" width="240" height="34" fill="none" stroke="currentColor"/>
   <text x="372" y="30" font-size="12" fill="currentColor">用户选项 + spark.hadoop.fs.*</text>
@@ -160,7 +160,7 @@ uri(l: Located, scheme: String): String              // 渲染回 URI，给迁�
 <li><strong>文件系统</strong>：<code>loon_filesystem_*</code> 是一整套——open、readat（含异步）、
 list_dir、stat、writer、create_dir、delete、指标，底座是 <code>arrow::fs::FileSystem</code>，
 后端有 s3、gcp、azure、local。</li>
-<li><strong>七朵云的凭证，含国内三家</strong>：阿里云的 RAM、STS 与 OIDC 角色链，腾讯与华为的
+<li><strong>六朵云的凭证，含国内三家</strong>：阿里云的 RAM、STS 与 OIDC 角色链，腾讯与华为的
 STS 客户端。在 JVM 侧补齐等于用 Scala 重写这几家的 STS 客户端。</li>
 <li><strong>manifest 与写侧提交</strong>：<code>loon_exttable_read_manifest</code> 直接返回解析好的
 列组、删除日志与统计；<code>loon_transaction_*</code> 覆盖 <code>core.write.commit</code> 的大半。</li>
@@ -331,7 +331,7 @@ duration 顶。<strong>我们不走这条。</strong></p>
   <text x="320" y="276" font-size="10" fill="currentColor">const char* 数组；进程内 handle；每批 ArrowArray+Schema</text>
 
   <rect x="8" y="296" width="300" height="26" fill="none" stroke="currentColor"/>
-  <text x="20" y="314" font-size="12" fill="currentColor">C：loon_* · 七种后端 · 按云分派</text>
+  <text x="20" y="314" font-size="12" fill="currentColor">C：loon_* · 六个云 + 本地 · 按云分派</text>
 </svg>
 <figcaption>四个边界上允许通过的东西。handle 是进程内指针，任何一条边界都不许它向上跨进可序列化的对象里。</figcaption>
 </figure>

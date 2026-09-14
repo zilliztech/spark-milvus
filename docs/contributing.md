@@ -28,9 +28,11 @@ separately yet; external dependencies remain in the POM.
 
 ## Build files
 
-`build.sbt` starts with shared defaults and explicit module declarations, then
-groups root packaging and publishing at the end. Module-specific dependencies
-stay beside the module that uses them.
+Follow [sbt principles and practices](design/engineering/sbt.html) when reviewing
+or changing the build, using the repository's
+[sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md). `build.sbt` holds module
+wiring and publication decisions; root run, assembly and publication details
+are named settings in the same file.
 
 | File | What to change there |
 |---|---|
@@ -39,38 +41,78 @@ stay beside the module that uses them.
 | `project/Modules.scala` | Shared compile/test settings, checks and the temporary JNI dependency |
 | `project/plugins.sbt` | Build plugins and their meta-build dependencies |
 
-Reuse `Modules.jacksonPin` only in core, compat and client. Root, Spark and apps
-share `Modules.legacyJni` until the native-storage module replaces the upstream
-Scala binding. `Dependencies.legacyRootDeps` preserves the root artifact's
-existing dependency declarations, including its separate `legacyRootArrow`
-version; it is not the version matrix for the Spark modules.
+## Tests that need the native library
 
-Adding a Spark line means adding its version row, an explicit `sparkProject`
-declaration and an aggregate entry. Keep this wiring visible, and extract shared
-settings when they remove real duplication. The reasons for migration choices
-belong in the design decision log.
+Suites that call into C check for `libnative-storage-jni` first and cancel
+themselves when it is absent, so a machine without it still gets a green run
+with those suites reported as canceled rather than failed:
 
-## Tests that cannot pass locally
+- `StorageNativeTest` and `WriterRoundTripTest` in core
+- `MilvusLoonPartitionWriterLifecycleTest` in spark-4.0
 
-Two tests need `libmilvus-storage-jni`, which is built inside the Docker image
-and not on a developer machine. They fail with `UnsatisfiedLinkError` and that
-is expected:
-
-- `MilvusStorageFFITest`
-- `MilvusStorageMultiFileGroupTest`
+The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
+`StorageFullChainUatTest` in spark-4.0 — cancel on their own environment
+variables as well, so they stay canceled even with the library present.
 
 Everything else passes. A green run looks like this:
 
 | Module | Tests |
 |---|---|
-| core | 32 |
-| compat | 43 |
+| core | 82, plus 3 canceled |
+| compat | 40 |
 | client | 20 |
-| spark-4.0 | 261, of which the two above fail locally |
+| spark-4.0 | 307, plus 1 canceled |
 | apps-4.0 | 212 |
 
 `integration-4.0` needs a real Milvus on 19530 and MinIO on 9000; it compiles in
 CI but is not run there.
+
+## Building the native library
+
+`make build-milvus-storage && make copy-native-libs` builds
+`libmilvus-storage`, `libmilvus-storage-jni` and this repository's own
+`libnative-storage-jni`, and puts all three where `NativeLibraryLoader` can find
+them. `copy-native-libs` builds the last one itself when it is missing; `make
+build-native-jni` builds only it. With them in place the suites above run
+instead of cancelling. It needs conan, CMake and a Rust toolchain.
+
+This works on macOS. An earlier version of this page said the library is built
+inside the Docker image and not on a developer machine; that was wrong, and it
+described a broken local setup as if it were a property of the platform.
+milvus-storage supports macOS and has a CI job for it — `cpp-mac-ci.yml` builds
+on `macos-26` with conan 2.25.1, CMake 3.31.10 and LLVM 18 from brew.
+
+### Two things that will bite
+
+**Pin a CMake 3.x somewhere durable.** Several packages in the dependency chain
+cap their CMake policy range below 4, so the conan profile has to set
+`tools.cmake:cmake_program`. A path under `/tmp` disappears on cleanup and the
+build then fails with `cmake: No such file or directory` before compiling
+anything — the error names the missing binary, not the real problem.
+
+**The artifact is large.** `libmilvus-storage.dylib` is 481 MB, of which 162 MB
+is an unstripped symbol table (`strip -x` takes it to 315 MB); the two JNI
+bridges are 177 KB and 85 KB. Everything — arrow, parquet, the AWS/Azure/GCP SDKs, the Rust
+bridge — is linked statically so the library loads without help from the host.
+`native-storage/src/main/resources/native/` is gitignored, so none of this is
+committed. Section 4.2 of
+[storage-access.html](design/architecture/storage-access.html) covers what the
+size costs.
+
+### What the Makefile does per platform
+
+Three things differ between macOS and Linux, and the Makefile now derives all
+three from `uname`:
+
+| | macOS | Linux |
+|---|---|---|
+| Suffix | `.dylib` — `add_library(... SHARED)` sets no `SUFFIX` | `.so` |
+| Build output | `cpp/build/Release` — the `POST_BUILD` step that fills `build/Release/lib` sits inside `if(NOT APPLE)` in `cpp/CMakeLists.txt`, so that directory never exists here | `cpp/build/Release/lib` |
+| Resource path | `native/darwin-aarch64/` | `native/linux-<arch>/` |
+
+The resource path matters: `NativeLibraryLoader.stripPlatformPrefix` skips any
+JAR entry that is not under `native/<platform>/`, so a library copied flat into
+`native/` is silently never extracted.
 
 ## JVM version
 

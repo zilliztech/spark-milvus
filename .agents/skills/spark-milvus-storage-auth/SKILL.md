@@ -8,8 +8,12 @@ description: Use when touching object storage credentials, provider chains, per-
 Read [AGENTS.md](../../../AGENTS.md), then
 [the mechanism and design](../../../docs/design/architecture/storage-auth.html).
 That document owns the conventions and records the measured facts behind them;
-this skill applies it. The wider storage layer is in
-[storage-access.html](../../../docs/design/architecture/storage-access.html).
+this skill applies it.
+
+This skill covers the Hadoop path, which is how the connector reaches storage
+today. The 2.0 route replaces it with the C filesystem reached by JNI: see
+[spark-milvus-storage-access](../spark-milvus-storage-access/SKILL.md). While
+both exist, a change here should not make the Hadoop path harder to delete.
 
 ## Before changing anything
 
@@ -41,9 +45,9 @@ The JVM reaches object storage through Hadoop; milvus-storage reaches it through
 its own SDK in the same pod. Both discover the same identity when neither is
 explicitly configured. They diverge when one side is configured and the other is
 not, so configure both consistently or leave both alone. The native side takes
-location and mode — `fs.use_iam`, `fs.cloud_provider`, `fs.address`,
-`fs.bucket_name`, `fs.root_path`, `fs.region` — and no secrets when IAM is in
-use.
+location and mode and, when IAM is in use, no secrets; the full key-name table
+is section 3.3 of
+[storage-access.html](../../../docs/design/architecture/storage-access.html).
 
 ## Verifying a change
 

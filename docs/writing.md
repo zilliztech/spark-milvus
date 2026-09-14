@@ -36,6 +36,30 @@ Mechanics for the HTML files:
   for anything tabular, and anchors on the section headings so other documents
   can link to a specific part.
 
+## Design document layout
+
+Group detailed documents under `docs/design` by topic so readers can find the
+area they need. Reserve the top level for the overall entry, decision log and
+capability index. Detailed designs belong in topic directories.
+
+- `architecture/` holds the overall architecture and module boundaries.
+- `engineering/` holds build and development conventions, including sbt.
+- `research/` holds comparisons with external projects and alternative designs.
+
+Add other topic directories when actual subsystem documents need a home. Keep
+related documents together; add another level only when it separates meaningful
+subtopics. Do not create empty categories or wrap every document in its own
+directory.
+
+The design entry links each topic and explains when to read it. Add a topic
+overview only when readers need an introduction or navigation beyond the parent
+entry. Keep shared context at the parent level and detailed rules in their own
+documents; readers and agents follow only the branches relevant to their task.
+
+When adding or moving a document, update its parent entry, incoming links and
+any skill or build references in the same change. Directory organization does
+not change the format rules above.
+
 ## Structure
 
 1. **Essence first.** The first screen states the thing in one sentence. The
