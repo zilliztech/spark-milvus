@@ -20,7 +20,7 @@
 | R10 | row group 级剪枝 | 自动；标量列 min/max | core.stats 出剪枝结果，core.read.plan 执行 | 同上 | P1 |
 | R11 | Limit 下推 | `limit` | spark.scan | | P1 |
 | R18 | 运行时过滤 | 自动；join 侧的过滤值下推到段和 row group | spark.scan（SupportsRuntimeV2Filtering）→ core.stats | R9、R10 的统计到位 | P1 |
-| R12 | 元数据列 | `_segment_id`、`_row_offset`、`_timestamp`；`partition` 列是否保留、用 `_` 还是 1.x 的 `$` 见决策 5 | spark.table | | P1 |
+| R12 | 元数据列 | `_segment_id`、`_row_offset`、`_timestamp`；`partition` 列是否保留、用 `_` 还是 1.x 的 `$` 见决策 5 | spark.table 声明，spark.scan 拼进批和行 | | P1 |
 | R13 | 表统计 | 自动；行数和字节数给 Spark 选 join 策略 | spark.table ← core.snapshot | | P1 |
 | R14 | 回表 | 下游算子按 (段 id, 行号) 取列 | core.read.exec 的 take | R12 | P1 |
 | R15 | 类型覆盖 | 标量、VarChar、JSON、Array、Float/Float16/BFloat16/Int8/Binary/Sparse 向量、Text（大对象只在列批里放引用，正文按需取；引用带正文字节数，写侧才能在值还只有几百字节时按真实大小顶批量上限）、nullable 向量（变长 Binary，压紧后生成 valid 位图，非零拷贝） | core.schema 定 Milvus 与 Arrow 的映射，spark.types 定 Arrow 与 Spark 的映射 | 透传还是转换见决策 6 | P0 |
@@ -128,4 +128,16 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
 | A7 | 清理暂存要 `spark.procedure`，那个包目前是空的，等第 3 层拆分 |
 | G5 | 指标要 native-storage 的 JNI 层留计数器。第 1 层已经写了（读写两侧的 loon_* 封装加自己的加载器），计数器还没加 |
+| R1 | 三段名要 `spark.catalog` 的 MilvusCatalog；四条线的 catalog 包都只有 package.scala。今天读表走 `format("milvus")` 加 option |
+| R6 | Spark 谓词下推要 `spark.expr` 翻成 IR 再由 `core.expr` 求值，两个包都是零文件。现有下推在 MilvusDataSource 里且走 V1 的 `SupportsPushDownFilters`，接口选型见 README 第 4 节决策 20 |
+| R7 | Milvus 表达式要 `core.expr` 按 Plan.g4 解析求值，零文件 |
+| K2 | 离线 option 的段列表要 `compat.offline` 实现 SnapshotSource；包是空壳，规划代码仍在 `spark-base/sources`（modules.md 第 5 节记为过渡态） |
+| W7 | gRPC 小批量写要归 `apps.legacy`；包是空壳，整条 `format("milvus")` 写链还在 `spark-base/write`，下放要先有 W7 的注册表 |
+| A2 | 建索引、删索引的 CALL 要 `spark.procedure`（3.5 线是 `spark.functions`），全部是空壳；client 侧还要新增三个 RPC |
+| A3 | load / release / flush / compact 的 CALL，同 A2；client 侧还要新增三个 RPC |
+| A4 | 登记的 CALL 要 `spark.procedure` 加 `core.write.commit` 读作业清单，两端都是零文件；append 的登记 RPC 在 Milvus 侧也还没有（README 第 5 节） |
+| A5 | describe 的 CALL，同 A2 |
+| V1 | knowhere 的 C shim 与 JNI 要 `native-vector`，目前只有 package-info.java |
+| V2 | 加载 Milvus 建的索引要 `core.index`，零文件 |
+| V4 | 索引来源与缓存要 `core.index`，零文件 |
 

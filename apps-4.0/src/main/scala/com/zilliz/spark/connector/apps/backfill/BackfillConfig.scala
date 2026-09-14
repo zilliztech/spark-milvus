@@ -3,7 +3,7 @@ package com.zilliz.spark.connector.apps.backfill
 import org.apache.hadoop.conf.Configuration
 
 import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 /** Configuration for backfill operation
   *

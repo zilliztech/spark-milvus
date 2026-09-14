@@ -54,12 +54,12 @@ import com.zilliz.milvus.storage.snapshot.{
   V2SegmentInfo
 }
 import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.read.{
+import com.zilliz.spark.connector.scan.{
   MilvusPackedV2InputPartition,
   MilvusStorageV3InputPartition
 }
 import com.zilliz.spark.connector.serde.ArrowConverter
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(
@@ -304,7 +304,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     assert(partitions.length == 1)
     val spec = partitions.head
-      .asInstanceOf[com.zilliz.spark.connector.read.MilvusPackedV2InputPartition]
+      .asInstanceOf[com.zilliz.spark.connector.scan.MilvusPackedV2InputPartition]
       .spec
     assert(spec.properties("fs.bucket_name") == "backup-bucket")
   }
@@ -345,7 +345,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     val factory = scan.createReaderFactory()
     assert(
       factory.isInstanceOf[
-        com.zilliz.spark.connector.read.MilvusPartitionReaderFactory
+        com.zilliz.spark.connector.scan.MilvusPartitionReaderFactory
       ]
     )
   }

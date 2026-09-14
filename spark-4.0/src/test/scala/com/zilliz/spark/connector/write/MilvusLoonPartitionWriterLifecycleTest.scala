@@ -10,7 +10,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.jni.storage.StorageNative
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 /** The writer's resource lifecycle against the real native writer.
   *

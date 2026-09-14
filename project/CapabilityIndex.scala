@@ -72,13 +72,32 @@ object CapabilityIndex {
       .map(_.group(1))
       .toSet
 
+  /** Whether `dir` holds a source file other than its own package doc. */
+  private def hasSource(dir: File): Boolean =
+    (dir * ("*.scala" | "*.java")).get.exists { f =>
+      f.getName != "package.scala" && f.getName != "package-info.java"
+    }
+
   /** Every package doc, and the ids it claims. */
   private def packageDocIds(root: File): Map[File, Set[String]] = {
     val docs = Prefixes.flatMap(_._2).map(root / _).filter(_.isDirectory).flatMap { dir =>
       (dir ** ("package.scala" | "package-info.java")).get
     }
-    docs.map(f => f -> IdPattern.findAllMatchIn(IO.read(f)).map(_.group(1)).toSet).toMap
+    docs.map(f => f -> claimedIn(IO.read(f))).toMap
   }
+
+  /** The ids a package doc claims: those inside its `Capabilities: ... (see
+    * docs/design/capabilities.md)` sentence, which may wrap across lines. Ids
+    * anywhere else are prose — "Storage V2", "DataSource V2", "the RPC behind
+    * C1" — and must not count as a claim.
+    */
+  private val ClaimSentence: Regex =
+    raw"(?s)Capabilities:(.*?)\(see[\s*]+docs/design/capabilities\.md\)".r
+
+  private def claimedIn(doc: String): Set[String] =
+    ClaimSentence.findFirstMatchIn(doc)
+      .map(m => IdPattern.findAllMatchIn(m.group(1)).map(_.group(1)).toSet)
+      .getOrElse(Set.empty)
 
   /** Resolves one 实现位置 entry to the directories it could mean. An entry
     * that names no package at all (prose such as "spark 层汇总") resolves to
@@ -138,6 +157,14 @@ object CapabilityIndex {
             problems += s"${file.relativeTo(root).getOrElse(file)} claims $id, " +
               s"which has no row in $CapabilitiesDoc"
           }
+        }
+        // A package doc is the index's claim that the code for these ids is
+        // here. A directory holding nothing but the doc cannot make that claim:
+        // until code lands, the ids belong in section 11 instead.
+        if (ids.nonEmpty && !hasSource(file.getParentFile)) {
+          problems += s"${file.relativeTo(root).getOrElse(file)} claims " +
+            s"${ids.toSeq.sorted.mkString(", ")} but its package has no source " +
+            "file; move the ids to section 11 until code lands there"
         }
       }
 

@@ -4,7 +4,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.spark.connector.write.MilvusLoonPartitionWriter
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
 

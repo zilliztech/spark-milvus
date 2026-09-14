@@ -17,7 +17,8 @@ import org.apache.spark.sql.types._
 
 import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.spark.connector.{MilvusOption, MilvusSchemaUtil}
+import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.types.MilvusSchemaUtil
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
 

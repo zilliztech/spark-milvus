@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.table
 
 import org.apache.spark.sql.types._
 

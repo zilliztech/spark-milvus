@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector
+package com.zilliz.spark.connector.types
 
 import org.apache.spark.sql.types.DataTypes
 import org.scalatest.funsuite.AnyFunSuite

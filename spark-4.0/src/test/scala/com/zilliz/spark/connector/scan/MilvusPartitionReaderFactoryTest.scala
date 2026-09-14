@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.scan
 
 import org.apache.spark.sql.sources.{EqualTo, Filter}
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
@@ -7,7 +7,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class MilvusPartitionReaderFactoryTest extends AnyFunSuite {

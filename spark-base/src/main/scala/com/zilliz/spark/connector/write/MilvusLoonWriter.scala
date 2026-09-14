@@ -38,7 +38,8 @@ import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.MilvusTypes
-import com.zilliz.spark.connector.{DataTypeUtil, MilvusOption, MilvusSchemaUtil}
+import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.types.{DataTypeUtil, MilvusSchemaUtil}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.serde.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}

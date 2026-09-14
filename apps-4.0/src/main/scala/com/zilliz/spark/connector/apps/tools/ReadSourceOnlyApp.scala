@@ -6,8 +6,8 @@ import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
 import com.zilliz.milvus.storage.snapshot.{MilvusSnapshotReader, V2SegmentInfo}
-import com.zilliz.spark.connector.read.SnapshotSparkSchema
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.table.SnapshotSparkSchema
+import com.zilliz.spark.connector.options.MilvusOption
 
 /** Standalone reader-only verification app.
   *

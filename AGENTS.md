@@ -43,7 +43,7 @@ module table.
 The design documents describe the finished 2.0. Most of layer 2's computation is
 not written yet. Read them as a target, not as a description of the code.
 
-Done: the 1.x sources are all in their modules and `src/` no longer exists. 661
+Done: the 1.x sources are all in their modules and `src/` no longer exists. 671
 unit tests pass. `core` has schema, codec, snapshot, manifest, delete, path,
 credential and `io.ObjectStore` over the native filesystem; `compat` has the V2
 packed and backup entry points; `client` is complete. Every driver-side read
@@ -257,8 +257,12 @@ move together, and the part of it the build enforces.
 
 `sbt checkCapabilityIndex` runs in CI and fails when an id in `capabilities.md`
 appears in no `package.scala` and is not listed in its section 11, when an id in
-a `package.scala` does not exist in `capabilities.md`, or when 实现位置 names a
-package that does not exist on disk. Section 11 of capabilities.md is where a
+a `package.scala` does not exist in `capabilities.md`, when 实现位置 names a
+package that does not exist on disk, or when a `package.scala` claims ids but
+its directory holds no other source file. It reads ids only from the
+`Capabilities: … (see docs/design/capabilities.md)` sentence, so "Storage V2"
+in prose is not a claim of V2. It checks to the granularity of "code exists in
+the package"; a package with code and an unfinished capability passes. Section 11 of capabilities.md is where a
 capability with no home yet is declared, with the reason.
 
 The other rows are on you. Those are the ones that rot, so they are what a

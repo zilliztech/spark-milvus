@@ -21,7 +21,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.MilvusSchemaUtil
 
       // Test with various data types
       val df = Seq(
@@ -124,7 +124,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.MilvusSchemaUtil
 
       val df = Seq(
         (1L, "item1", Array(0.1f, 0.2f, 0.3f)),
@@ -160,7 +160,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.MilvusSchemaUtil
 
       val df = Seq(
         (1L, Array(0.1f, 0.2f), Array(0.1f, 0.2f, 0.3f, 0.4f)),
@@ -206,7 +206,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.MilvusSchemaUtil
       import org.apache.spark.sql.types._
 
       // Create DataFrame with Map type
@@ -245,7 +245,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.MilvusSchemaUtil
       import org.apache.spark.sql.types._
 
       val schema = StructType(
@@ -302,7 +302,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
   test(
     "useFieldIdAsName = true (V3 default) rewrites column names to fieldID"
   ) {
-    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.MilvusSchemaUtil
     import org.apache.spark.sql.types._
 
     val schema = StructType(
@@ -337,7 +337,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
   }
 
   test("field ID fallback avoids Milvus system field IDs") {
-    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.MilvusSchemaUtil
     import org.apache.spark.sql.types._
 
     val schema = StructType(
@@ -357,7 +357,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
   test(
     "useFieldIdAsName = false (V2 packed-parquet) preserves logical column names"
   ) {
-    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.MilvusSchemaUtil
     import org.apache.spark.sql.types._
 
     val schema = StructType(
@@ -387,7 +387,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
   }
 
   test("Milvus vector metadata produces exact internal Arrow types") {
-    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.MilvusSchemaUtil
     import com.zilliz.spark.connector.serde.ArrowConverter
     import io.milvus.grpc.schema.{DataType => MilvusDataType}
     import org.apache.arrow.vector.types.pojo.ArrowType
@@ -476,7 +476,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
       .getOrCreate()
 
     try {
-      import com.zilliz.spark.connector.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.MilvusSchemaUtil
       import org.apache.spark.sql.types._
 
       val schema = StructType(

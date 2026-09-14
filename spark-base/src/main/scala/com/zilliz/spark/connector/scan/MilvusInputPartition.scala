@@ -1,10 +1,10 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.scan
 
 import org.apache.spark.sql.connector.read.InputPartition
 
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
 import com.zilliz.milvus.storage.read.plan.InputSpec
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 /** The two segment layouts a read can produce, so a caller can dispatch on
   * which line a partition belongs to without matching on Spark's own type.

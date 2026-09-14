@@ -6,7 +6,7 @@ import org.apache.spark.sql.connector.write.{
   WriteBuilder
 }
 
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 case class MilvusWriteBuilder(
     milvusOptions: MilvusOption,

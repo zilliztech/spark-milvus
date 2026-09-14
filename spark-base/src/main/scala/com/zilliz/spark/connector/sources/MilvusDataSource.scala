@@ -30,8 +30,11 @@ import org.apache.spark.sql.connector.read.{
   PartitionReaderFactory,
   Scan,
   ScanBuilder,
+  Statistics,
   SupportsPushDownFilters,
-  SupportsPushDownRequiredColumns
+  SupportsPushDownLimit,
+  SupportsPushDownRequiredColumns,
+  SupportsReportStatistics
 }
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd
@@ -69,20 +72,17 @@ import com.zilliz.milvus.storage.snapshot.{
   V2DeltaLogFile,
   V2SegmentInfo
 }
-import com.zilliz.spark.connector.{
-  DataTypeUtil,
-  MilvusOption,
-  MilvusSchemaUtil,
-  VectorSearchConfig
-}
+import com.zilliz.spark.connector.options.{MilvusOption, VectorSearchConfig}
+import com.zilliz.spark.connector.types.{DataTypeUtil, MilvusSchemaUtil}
 import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.read.{
+import com.zilliz.spark.connector.scan.{
+  MilvusInputPartition,
   MilvusPackedV2DeleteContext,
   MilvusPackedV2InputPartition,
   MilvusPartitionReaderFactory,
-  MilvusStorageV3InputPartition,
-  SnapshotSparkSchema
+  MilvusStorageV3InputPartition
 }
+import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.serde.ArrowConverter
 import com.zilliz.spark.connector.write.{MilvusWrite, MilvusWriteBuilder}
 import io.milvus.grpc.schema.CollectionSchema
@@ -710,8 +710,21 @@ class MilvusScanBuilder(
 ) extends ScanBuilder
     with SupportsPushDownFilters
     with SupportsPushDownRequiredColumns
+    with SupportsPushDownLimit
     with Logging {
   private var currentSchema = schema
+
+  // Spark only offers a limit when nothing above the scan would change the
+  // row set: every filter pushed or none present. We take it per partition and
+  // report it as partial, so Spark keeps its own global Limit on top.
+  private var pushedLimit: Option[Int] = None
+
+  override def pushLimit(limit: Int): Boolean = {
+    pushedLimit = Some(limit)
+    true
+  }
+
+  override def isPartiallyPushed(): Boolean = true
   private var currentOptions = options
   private val extraColumns = options
     .getOrDefault(MilvusOption.MilvusExtraColumns, "")
@@ -917,12 +930,62 @@ class MilvusScanBuilder(
       currentSchema,
       currentOptions,
       pushedFilterArray,
-      preParsedBackupMeta
+      preParsedBackupMeta,
+      pushedLimit
     )
   }
 }
 
 object MilvusScan extends Logging {
+
+  /** Table statistics from a plan. Pure, so it is testable without storage.
+    *
+    * `numRows` is known only when every partition knows its own count; one
+    * unknown makes the total unknown rather than an undercount Spark would
+    * trust. `sizeInBytes` is rows times [[estimatedRowWidth]].
+    */
+  private[sources] def statisticsFor(
+      partitions: Array[InputPartition],
+      schema: StructType
+  ): Statistics = {
+    val specs = partitions.collect { case p: MilvusInputPartition => p.spec }
+    val rows = com.zilliz.milvus.storage.read.plan.ReadPlan(specs.toSeq).totalRows
+    val width = estimatedRowWidth(schema)
+    new Statistics {
+      override def numRows(): java.util.OptionalLong =
+        rows.fold(java.util.OptionalLong.empty())(java.util.OptionalLong.of)
+      override def sizeInBytes(): java.util.OptionalLong =
+        rows.fold(java.util.OptionalLong.empty())(r =>
+          java.util.OptionalLong.of(r * width)
+        )
+    }
+  }
+
+  /** Bytes per row of `schema`, as stored.
+    *
+    * A vector field is presented as an array but stored as a fixed-width blob,
+    * so its width is dimension times element width from the field metadata;
+    * Spark's own `defaultSize` for an array assumes one element and would put a
+    * 768-dimensional column at 4 bytes. Everything else takes `defaultSize`.
+    */
+  private[sources] def estimatedRowWidth(schema: StructType): Long =
+    schema.fields.map { field =>
+      val md = field.metadata
+      if (md.contains(FieldMetadata.MilvusVectorDimensionMetadataKey)) {
+        val dim = md.getLong(FieldMetadata.MilvusVectorDimensionMetadataKey)
+        val kind =
+          if (md.contains(FieldMetadata.MilvusDataTypeMetadataKey))
+            md.getString(FieldMetadata.MilvusDataTypeMetadataKey)
+          else ""
+        kind match {
+          case "Float16Vector" | "BFloat16Vector" => dim * 2
+          case "Int8Vector"                       => dim
+          case "BinaryVector"                     => (dim + 7) / 8
+          case _                                  => dim * 4
+        }
+      } else field.dataType.defaultSize.toLong
+    }.sum
+
   private[sources] case class SnapshotCleanupRegistration(
       session: SparkSession,
       executionId: Long
@@ -1745,11 +1808,21 @@ class MilvusScan(
     pushedFilters: Array[Filter] = Array.empty[Filter],
     // Backup meta already parsed at table init (threaded directly, never via
     // options, so it does not ride along on InputPartitions to executors).
-    preParsedBackupMeta: Option[BackupMetaReader.BackupInfo] = None
+    preParsedBackupMeta: Option[BackupMetaReader.BackupInfo] = None,
+    private[sources] val pushedLimit: Option[Int] = None
 ) extends Scan
     with Batch
+    with SupportsReportStatistics
     with Logging {
   private val milvusOption = MilvusOption(options)
+
+  /** Row count is the sum over planned partitions; the byte size is that count
+    * times an estimated row width. Both come from the plan already built, so
+    * this opens nothing. Spark uses them to pick a join strategy, which is what
+    * makes a broadcast join possible for a small collection.
+    */
+  override def estimateStatistics(): Statistics =
+    MilvusScan.statisticsFor(planInputPartitions(), schema)
 
   // Get vector search configuration from MilvusOption
   private val vectorSearchConfig = milvusOption.vectorSearchConfig
@@ -2959,7 +3032,8 @@ class MilvusScan(
       schema,
       optionsMap,
       pushedFilters,
-      MilvusPackedV2DeleteContext(inheritedPlansByPartition)
+      MilvusPackedV2DeleteContext(inheritedPlansByPartition),
+      pushedLimit
     )
   }
 

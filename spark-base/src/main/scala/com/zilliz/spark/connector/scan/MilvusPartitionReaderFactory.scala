@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.scan
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
@@ -14,11 +14,11 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
 import com.zilliz.milvus.storage.read.plan.DeleteSource
 import com.zilliz.spark.connector.serde.ArrowAllocator
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
 
 object MilvusPartitionReaderFactory {
-  private[read] def requestedExtraColumns(
+  private[scan] def requestedExtraColumns(
       optionsMap: Map[String, String]
   ): Set[String] = {
     optionsMap
@@ -35,7 +35,7 @@ object MilvusPartitionReaderFactory {
       .toSet
   }
 
-  private[read] def isMetadataExtraField(
+  private[scan] def isMetadataExtraField(
       name: String,
       requestedExtraColumns: Set[String]
   ): Boolean =
@@ -49,7 +49,9 @@ class MilvusPartitionReaderFactory(
     optionsMap: Map[String, String],
     pushedFilters: Array[Filter] = Array.empty[Filter],
     packedV2DeleteContext: MilvusPackedV2DeleteContext =
-      MilvusPackedV2DeleteContext.empty
+      MilvusPackedV2DeleteContext.empty,
+    // A pushed-down limit, applied per partition. None when Spark pushed none.
+    limit: Option[Int] = None
 ) extends PartitionReaderFactory
     with Logging {
 
@@ -92,6 +94,20 @@ class MilvusPartitionReaderFactory(
     })
 
   override def createColumnarReader(
+      partition: InputPartition
+  ): PartitionReader[ColumnarBatch] = {
+    val reader = batchReaderFor(partition)
+    limit.fold(reader)(n => new LimitedBatchReader(reader, n))
+  }
+
+  override def createReader(
+      partition: InputPartition
+  ): PartitionReader[InternalRow] = {
+    val reader = rowReaderFor(partition)
+    limit.fold(reader)(n => new LimitedRowReader(reader, n))
+  }
+
+  private def batchReaderFor(
       partition: InputPartition
   ): PartitionReader[ColumnarBatch] = partition match {
     case p: MilvusInputPartition =>
@@ -147,7 +163,7 @@ class MilvusPartitionReaderFactory(
     case other                             => other.spec.partitionId.toString
   }
 
-  override def createReader(
+  private def rowReaderFor(
       partition: InputPartition
   ): PartitionReader[InternalRow] = {
     partition match {

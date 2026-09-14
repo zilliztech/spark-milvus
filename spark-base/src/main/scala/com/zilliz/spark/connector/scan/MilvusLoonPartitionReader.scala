@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.scan
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -36,13 +36,13 @@ import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.serde.{ArrowAllocator, ArrowConverter}
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 object MilvusLoonPartitionReader {
-  private[read] val TimestampColumnName = "1"
+  private[scan] val TimestampColumnName = "1"
 
-  private[read] val SystemFieldAliases: Seq[(String, Long)] = Seq(
+  private[scan] val SystemFieldAliases: Seq[(String, Long)] = Seq(
     "RowID" -> 0L,
     "row_id" -> 0L,
     "rowid" -> 0L,
@@ -50,7 +50,7 @@ object MilvusLoonPartitionReader {
     "timestamp" -> 1L
   )
 
-  private[read] def buildFieldNameToId(
+  private[scan] def buildFieldNameToId(
       milvusSchema: CollectionSchema
   ): Map[String, Long] = {
     val userFieldNames = milvusSchema.fields.map(_.name).toSet
@@ -69,7 +69,7 @@ object MilvusLoonPartitionReader {
       rowOffset: Long
   )
 
-  private[read] def validateVectorSearchField(
+  private[scan] def validateVectorSearchField(
       field: StructField,
       metric: String
   ): Unit = {
@@ -91,7 +91,7 @@ object MilvusLoonPartitionReader {
     }
   }
 
-  private[read] def decodeBinaryTypeVectorForSearch(
+  private[scan] def decodeBinaryTypeVectorForSearch(
       bytes: Array[Byte],
       field: StructField
   ): Array[Float] = {

@@ -23,7 +23,7 @@ import com.zilliz.milvus.storage.snapshot.{
   V2ColumnGroup,
   V2SegmentInfo
 }
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 /** Tests for the `--mode` backfill parameter: CLI/config validation and the
   * `performJoin` merge semantics (replace vs coalesce vs overwrite).

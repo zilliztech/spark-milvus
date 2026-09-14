@@ -2,7 +2,7 @@ package com.zilliz.spark.connector.apps.backfill
 
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 /** Spark application entry point for running backfill via spark-submit.
   *

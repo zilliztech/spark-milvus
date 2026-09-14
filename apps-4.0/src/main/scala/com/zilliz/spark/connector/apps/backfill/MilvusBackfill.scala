@@ -20,13 +20,13 @@ import com.zilliz.milvus.storage.snapshot.{
   SnapshotMetadata,
   StorageV2ManifestItem
 }
-import com.zilliz.spark.connector.read.SnapshotSparkSchema
+import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.write.{
   MilvusLoonBatchWrite,
   MilvusLoonCommitMessage,
   MilvusLoonWriter
 }
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Backfill operation for Milvus collections

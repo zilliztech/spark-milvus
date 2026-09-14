@@ -69,7 +69,6 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | 包 | 职责 |
 |---|---|
 | `jni.storage` | StorageNative：每个 loon_* 一个 native 方法，句柄是 long，结果码转异常 |
-| `jni.storage.arrow` | ArrowArray、ArrowSchema、ArrowArrayStream 三个 C 结构体的分配与 release |
 | `jni.storage.loader` | 按 os 和 arch 解压 .so 到带版本号的目录后 System.load |
 
 包名用 `jni` 而不是 `native`：`native` 是 Java 的保留字，不能做包名。
@@ -180,6 +179,8 @@ spark-milvus/
 14. core 读写存储只经 `io.ObjectStore`，源码里不出现 `org.apache.hadoop`。唯一实现是 `io.NativeObjectStore`，走 C 的 `loon_filesystem_*`；`io.hadoop` 已删除。`hadoop-common` 仍在 core 的编译依赖里，但不是给我们的代码用的——parquet-mr 的 `ParquetReader.Builder` 签名里有 `org.apache.hadoop.fs.Path`，类得在编译类路径上。测试用 core 测试源码里的 `LocalObjectStore`，只读本地盘，不需要原生库。executor 上拿到的是可序列化的 `ObjectStoreFactory`（一组配置字符串），不是活的 `Configuration`。
 15. milvus-proto 的生成分两处：不带 service 的 `common.proto`、`schema.proto` 在 core 生成（`grpc = false`），带 service 的五个在 client 生成（`grpc = true`），靠 include 路径引用 core 的产物，同一份 .proto 不生成两遍。core 用得上它们，是因为 Milvus 的存储格式本身由 protobuf 定义：快照里嵌着 CollectionSchema，Manifest 的字段描述来自 schema.proto，core 不另建一套 schema 模型。
 
+补充（2026-09-14）：`checkCapabilityIndex` 只从 `package.scala` 的 `Capabilities: …（see docs/design/capabilities.md）` 这一句里读编号，正文里的「Storage V2」「DataSource V2」不再算认领；一个只有 `package.scala` 的目录不能认领任何编号，编号必须写进 capabilities.md 第 11 节直到代码落地。
+
 ## 5 1.x 到 2.0 的迁移对照
 
 41 个 1.x 源文件已经全部离开 `src/`，该目录不再存在。这一轮只做归属，不改语义：
@@ -192,7 +193,7 @@ spark-milvus/
 | read/MilvusSegmentManifestReader.scala、MilvusStorageV3ManifestReader.scala | core.manifest | 已迁 |
 | read/MilvusDeltaLogReader.scala、MilvusDeletePlan.scala | core.delete | 已迁。改按行号位图是重构，未做 |
 | src/main/resources/milvus-segment-manifest*.avsc | core 的 resources | 已迁。资源必须跟代码走，留在原处解码器会报 not found on classpath，而失败形式是返回 Left 不是抛异常 |
-| serde/DataTypeUtil.scala、SchemaUtil.scala | core.schema、spark-base | 已迁。core.schema 得到 MilvusTypes、ArrowTypes、SchemaMapper、FieldMetadata；Spark 那一半留在 spark-base |
+| serde/DataTypeUtil.scala、SchemaUtil.scala | core.schema、spark.types | 已迁。core.schema 得到 MilvusTypes、ArrowTypes、SchemaMapper、FieldMetadata；Spark 那一半是 spark.types 的 DataTypeUtil 与 MilvusSchemaUtil（文件名已改成对象名） |
 | MilvusUtil.scala 的 FloatConverter、SparseFloatVectorConverter | core.codec | 已迁。文档原来写「MilvusUtil 整个进 apps.legacy」，不成立：627 行里只有 307 行是 FieldData 打包，两个转换器是纯 JVM 的列值编解码，被 ArrowConverter 和读路径用着 |
 | MilvusUtil.scala 的 IntConverter | 删除 | 已删，全仓零引用 |
 | Exception.scala | core 与 client | 已迁。DataParseException、DataTypeException 进 core；三个 RPC 异常进 client |
@@ -201,12 +202,12 @@ spark-milvus/
 | read/BackupMetaReader.scala | compat.backup | 已迁 |
 | MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数 |
 | sources/MilvusDataSource.scala（2880 行） | spark-base | 已搬。拆成 catalog、table、scan 并把规划逻辑下沉 core 是重构，未做 |
-| MilvusOption.scala、loon/Properties.scala | spark-base | 已搬。MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。Properties 只剩 FsConfig 的键名常量，全是 core.credential.StorageProperties 的别名；产出上游绑定类型的 fromMilvusOption 已删除 |
+| MilvusOption.scala、loon/Properties.scala | spark.options、spark-base | 已搬。MilvusOption 在 spark.options；MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。Properties 只剩 FsConfig 的键名常量，全是 core.credential.StorageProperties 的别名；产出上游绑定类型的 fromMilvusOption 已删除 |
 | read/MilvusLoonPartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusPackedV2PartitionReader.scala | spark-base | 已搬。两个 reader 已改调 native-storage 的 JNI，不再经上游绑定；分发与出口下沉 core.read.exec、重写为列式仍是重构，未做 |
 | serde/ArrowConverter.scala | spark-base | 已搬。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
 | filter/VectorBruteForceSearch.scala | spark-base | 已搬。它是从 MilvusLoonPartitionReader 的读路径里调的，不是 app；最终形态等决策 16 |
 | write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | spark-base | 已搬，且已改调 native-storage 的 JNI（决策 14 选了自己封）。下沉 core.write.exec 仍是重构，未做 |
-| write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusUtil.scala 的 MilvusFieldData | spark-base | 已搬。整条 `format("milvus")` 写链是一个整体，上半截是 DataSource V2 的接口实现；下放 apps.legacy 要先有 W7 的注册表，那是重构 |
+| write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusFieldData.scala（原 MilvusUtil.scala） | spark-base | 已搬。整条 `format("milvus")` 写链是一个整体，上半截是 DataSource V2 的接口实现；下放 apps.legacy 要先有 W7 的注册表，那是重构 |
 | write/MilvusSparkNativeImportWriter.scala | 删除 | 已删，全仓零引用 |
 | operations/backfill/* | apps.backfill | 已迁，包名从 operations.backfill 改成 apps.backfill |
 | expressions/、extensions/ | apps.search | 已迁 |

@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.table
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -11,7 +11,7 @@ import com.zilliz.milvus.storage.snapshot.{
   V2DeltaLogFile
 }
 import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
-import com.zilliz.spark.connector.read.SnapshotSparkSchema
+import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import io.milvus.grpc.schema.{
   CollectionSchema => ProtoCollectionSchema,
   DataType
@@ -1090,7 +1090,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     ) shouldBe 4L
 
     import scala.collection.JavaConverters._
-    val arrowFields = com.zilliz.spark.connector.MilvusSchemaUtil
+    val arrowFields = com.zilliz.spark.connector.types.MilvusSchemaUtil
       .convertSparkSchemaToArrow(sparkSchema)
       .getFields
       .asScala

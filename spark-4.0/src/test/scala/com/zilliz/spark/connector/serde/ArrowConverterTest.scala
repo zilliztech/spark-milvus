@@ -34,7 +34,7 @@ import com.zilliz.milvus.storage.codec.{
   SparseFloatVectorConverter
 }
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.spark.connector.MilvusSchemaUtil
+import com.zilliz.spark.connector.types.MilvusSchemaUtil
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class ArrowConverterTest extends AnyFunSuite with Matchers {
@@ -187,7 +187,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
   }
 
   test("internalRowToArrow writes nullable dense arrays to VarBinary") {
-    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.MilvusSchemaUtil
 
     def write(
         field: StructField,
@@ -267,7 +267,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
   }
 
   test("internalRowToArrow rejects wrong-width nullable dense vectors") {
-    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.MilvusSchemaUtil
 
     def reject(
         field: StructField,
@@ -371,7 +371,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
   }
 
   test("internalRowToArrow rejects non-byte-aligned BinaryVector dimension") {
-    import com.zilliz.spark.connector.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.MilvusSchemaUtil
 
     val field = vectorField(
       "binary",

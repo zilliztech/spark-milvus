@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.scan
 
 import org.apache.arrow.vector.{VarBinaryVector, VectorSchemaRoot}
 import org.apache.spark.internal.Logging

@@ -7,7 +7,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 class MilvusV2BinlogWriterTest extends AnyFunSuite with Matchers {
 

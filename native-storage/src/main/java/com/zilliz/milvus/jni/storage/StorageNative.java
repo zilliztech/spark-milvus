@@ -1,5 +1,7 @@
 package com.zilliz.milvus.jni.storage;
 
+import com.zilliz.milvus.jni.storage.loader.NativeStorageLibrary;
+
 import java.util.Map;
 
 /**

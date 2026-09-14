@@ -13,7 +13,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
-import com.zilliz.spark.connector.{MilvusFieldData, MilvusOption}
+import com.zilliz.spark.connector.MilvusFieldData
+import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.loon.Properties
 import io.milvus.grpc.schema.DataType
 

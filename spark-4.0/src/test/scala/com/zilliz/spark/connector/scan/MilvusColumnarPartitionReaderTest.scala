@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.scan
 
 import scala.collection.JavaConverters._
 
@@ -17,7 +17,7 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.read.exec.SegmentReader
 import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 

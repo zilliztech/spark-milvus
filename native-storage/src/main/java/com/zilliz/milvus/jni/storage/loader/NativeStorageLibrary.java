@@ -1,4 +1,4 @@
-package com.zilliz.milvus.jni.storage;
+package com.zilliz.milvus.jni.storage.loader;
 
 import java.io.File;
 import java.io.IOException;
@@ -32,7 +32,7 @@ import java.util.jar.JarFile;
  * <p>Extraction is skipped entirely when {@code java.library.path} already
  * offers the library, which is how the build's own test JVMs run.
  */
-final class NativeStorageLibrary {
+public final class NativeStorageLibrary {
 
     private static final String LIBRARY_NAME = "native-storage-jni";
     private static final String DEPENDENCY_NAME = "milvus-storage";
@@ -43,7 +43,7 @@ final class NativeStorageLibrary {
 
     private NativeStorageLibrary() {}
 
-    static synchronized void load() {
+    public static synchronized void load() {
         if (loaded) {
             return;
         }

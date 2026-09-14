@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.scan
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read.PartitionReader
@@ -7,7 +7,7 @@ import org.apache.spark.sql.vectorized.ColumnVector
 import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.spark.connector.types.{ConstantColumn, RowOffsetColumn}
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 
 /** The three columns that describe where a row came from rather than what it
   * holds: which partition, which segment, and its offset within the segment.

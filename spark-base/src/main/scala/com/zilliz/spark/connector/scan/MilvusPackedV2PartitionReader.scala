@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.scan
 
 import scala.collection.JavaConverters._
 
@@ -29,19 +29,19 @@ import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.serde.{ArrowAllocator, ArrowConverter}
-import com.zilliz.spark.connector.MilvusOption
+import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 object MilvusPackedV2PartitionReader {
   private val ToleratedUnmappedColumns = Set("$meta")
 
-  private[read] case class FieldMappings(
+  private[scan] case class FieldMappings(
       fieldIdToName: Map[Long, String],
       fieldNameToId: Map[String, Long],
       fieldNameToArrowColumn: Map[String, String]
   )
 
-  private[read] val SystemFieldAliases: Seq[(String, (Long, String))] = Seq(
+  private[scan] val SystemFieldAliases: Seq[(String, (Long, String))] = Seq(
     "RowID" -> (0L, "RowID"),
     "row_id" -> (0L, "RowID"),
     "rowid" -> (0L, "RowID"),
@@ -49,7 +49,7 @@ object MilvusPackedV2PartitionReader {
     "timestamp" -> (1L, "Timestamp")
   )
 
-  private[read] def buildFieldMappings(
+  private[scan] def buildFieldMappings(
       milvusSchema: CollectionSchema
   ): FieldMappings = {
     val systemFields = Map(0L -> "RowID", 1L -> "Timestamp")
@@ -75,7 +75,7 @@ object MilvusPackedV2PartitionReader {
     )
   }
 
-  private[read] def projectedFieldIds(
+  private[scan] def projectedFieldIds(
       sourceSchema: StructType,
       fieldMappings: FieldMappings,
       neededColumnFieldIds: Seq[Long],
@@ -95,7 +95,7 @@ object MilvusPackedV2PartitionReader {
     }
   }
 
-  private[read] def rowDeleted(
+  private[scan] def rowDeleted(
       deletePlan: MilvusDeletePlan,
       pkField: FieldSchema,
       pkVector: org.apache.arrow.vector.ValueVector,
@@ -133,7 +133,7 @@ object MilvusPackedV2PartitionReader {
     }
   }
 
-  private[read] def resolveNeededColumns(
+  private[scan] def resolveNeededColumns(
       sourceSchema: StructType,
       columnGroups: Seq[V2ColumnGroup],
       fieldMappings: FieldMappings,

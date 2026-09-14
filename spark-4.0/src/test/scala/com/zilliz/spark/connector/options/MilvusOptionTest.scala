@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector
+package com.zilliz.spark.connector.options
 
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite

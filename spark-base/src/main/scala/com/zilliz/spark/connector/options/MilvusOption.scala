@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector
+package com.zilliz.spark.connector.options
 
 import java.net.URI
 import scala.collection.Map

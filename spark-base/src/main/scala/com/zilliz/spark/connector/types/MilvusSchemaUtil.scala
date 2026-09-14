@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector
+package com.zilliz.spark.connector.types
 
 import com.zilliz.milvus.storage.schema.ArrowTypes
 import com.zilliz.milvus.storage.schema.FieldMetadata
