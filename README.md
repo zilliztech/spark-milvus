@@ -55,7 +55,7 @@ routes to whichever file answers a question and lists the rules any change has
 to satisfy. `CLAUDE.md` is a symlink to it.
 
 The 2.0 design lives in `docs/design`. Its entry groups documents by the question
-you need to answer: architecture, engineering conventions or external research.
+you need to answer: architecture or engineering conventions.
 
 | Document | What it answers |
 |---|---|
@@ -64,8 +64,6 @@ you need to answer: architecture, engineering conventions or external research.
 | [docs/design/architecture/modules.md](docs/design/architecture/modules.md) | Modules, packages, directories, the twelve build constraints, and the 1.x to 2.0 migration table |
 | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) | The illustrated version of the design |
 | [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html) | Principles and practices for maintaining the sbt build |
-| [docs/design/research/lance-spark.md](docs/design/research/lance-spark.md) | A layer-by-layer comparison against the Lance Spark connector |
-| [docs/design/research/lance-spark.html](docs/design/research/lance-spark.html) | The illustrated version of the comparison |
 
 `docs/reference-en.md` is the user-facing API reference for the connector
 options and entry points. [docs/contributing.md](docs/contributing.md) covers

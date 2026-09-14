@@ -100,8 +100,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership. Read and write share it |
 | How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four planning entry points, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
-| How do we compare with the Lance Spark connector? | [docs/design/research/lance-spark.md](docs/design/research/lance-spark.md) |
-| Illustrated versions of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html), [docs/design/research/lance-spark.html](docs/design/research/lance-spark.html) |
+| Illustrated version of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) |
 | What options does a user pass? | [docs/reference-en.md](docs/reference-en.md), [docs/reference-cn.md](docs/reference-cn.md) |
 | What is a given package responsible for? | The `package.scala` or `package-info.java` in that package |
 | How do I build, test and run it? | [README.md](README.md), then [docs/contributing.md](docs/contributing.md) for the mechanics on top |

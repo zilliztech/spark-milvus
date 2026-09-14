@@ -19,7 +19,6 @@ to the parent directory.
 | Repository | What it settles |
 |---|---|
 | `milvus` (milvus-io/milvus) | The authority on what the write path can register. Reading DataCoord's RPC surface is how we established that backfill can ship on `BatchUpdateManifest` today, while append needs a new `RegisterSegments` RPC that does not exist yet. Also the authority on the on-disk delete-file format. |
-| `lance-spark` | The connector we compare against layer by layer. The comparison is written up in `docs/design/research/lance-spark.md`; the repository is where to check a claim about it. |
 
 ## Design decks
 
