@@ -11,6 +11,7 @@
 | backfill 怎么访问多个桶 | apps/ | [backfill 的多桶存储访问](apps/backfill-storage.html) |
 | 审查或修改构建、打包与发布配置 | engineering/ | [sbt 原则与实践](engineering/sbt.html) |
 | 对比外部方案、核对设计依据 | research/ | [Lance 分析](research/lance-spark.md)、[对比图解](research/lance-spark.html) |
+| 核对具体提交的 review 意见与修正依据 | reviews/ | [native 读写与列式出口 Review（a750662）](reviews/2026-09-13-native-read-write-a750662.html) |
 
 标记：`[草稿]` 未讨论，`[讨论中]` 有分歧，`[已定]` 结论已进第 6 节决策日志。
 

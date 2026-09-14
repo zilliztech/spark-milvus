@@ -270,8 +270,12 @@ class MilvusLoonPartitionWriter(
 
   private val arrowSchemaC = ArrowSchema.allocateNew(allocator)
 
-  // Create Storage V2 writer
-  private val writerHandle: Long = {
+  private var cleanedUp = false
+
+  // Create Storage V2 writer. Held in a `var` so `cleanup` can zero it after
+  // destroying: `loon_writer_destroy` is an unguarded `delete`, and `cleanup`
+  // runs from both `commit`'s finally and Spark's subsequent `close`.
+  private var writerHandle: Long = {
     Data.exportSchema(allocator, arrowSchema, null, arrowSchemaC)
     val handle =
       StorageNative.writerNew(
@@ -584,12 +588,22 @@ class MilvusLoonPartitionWriter(
       .getOrElse(Map.empty)
   }
 
-  /** Clean up resources
+  /** Release the native writer and every Arrow resource it pinned.
+    *
+    * Idempotent: `commit`, `abort` and `close` all reach it, and Spark's normal
+    * task path is commit followed by close.
     */
   private def cleanup(): Unit = {
+    // Spark calls commit() then close(), and commit() already cleans up in its
+    // finally, so this runs twice on every successful write. Everything below
+    // releases a native resource exactly once.
+    if (cleanedUp) return
+    cleanedUp = true
+
     Try {
       if (writerHandle != 0L) {
         StorageNative.writerDestroy(writerHandle)
+        writerHandle = 0L
       }
     }.recover { case e: Exception =>
       logError(s"Error destroying writer: ${e.getMessage}")

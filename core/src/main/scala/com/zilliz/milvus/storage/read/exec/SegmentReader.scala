@@ -113,7 +113,12 @@ private[exec] final class NativeSegmentReader(
 
       case SegmentLayout.ColumnGroups(groups) =>
         val columnNames =
-          groups.map(_.fieldIds.flatMap(columnNameFor).toArray).toArray
+          // `.toList` rather than passing columnNameFor straight to flatMap:
+          // Scala 2.12 does not convert an Option result of a function value,
+          // and the 3.5 line cross-compiles for 2.12.
+          groups
+            .map(_.fieldIds.flatMap(id => columnNameFor(id).toList).toArray)
+            .toArray
         val files = groups.map(_.filePaths.toArray).toArray
         val rowCounts = groups.map { group =>
           require(

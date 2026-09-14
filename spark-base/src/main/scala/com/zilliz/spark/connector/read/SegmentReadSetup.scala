@@ -46,11 +46,28 @@ sealed trait SegmentReadSetup {
   /** A field id to the column name this line uses for it. */
   def columnNameFor: Long => Option[String]
 
+  /** Spark output field name to the Arrow column it is read from, for the
+    * fields whose two names differ.
+    *
+    * The manifest line names every column by field id, so `vec` is read from
+    * the Arrow column `101`; the column-group line keeps the field's own name
+    * and only renames the system fields, where `row_id` is read from `RowID`.
+    * A reader that looks the Spark name up directly finds no column and fails
+    * on the first batch.
+    *
+    * Absent means the two names are the same, which is why [[arrowColumnFor]]
+    * rather than the map is what readers call.
+    */
+  def arrowColumnNames: Map[String, String]
+
   def pkColumnName: String
 
   def timestampColumnName: String
 
   protected def milvusSchema: CollectionSchema
+
+  final def arrowColumnFor(sparkFieldName: String): String =
+    arrowColumnNames.getOrElse(sparkFieldName, sparkFieldName)
 
   final def pkField: Option[FieldSchema] =
     milvusSchema.fields.find(_.isPrimaryKey)
@@ -139,6 +156,11 @@ final case class PackedV2ReadSetup(
   override val columnNameFor: Long => Option[String] =
     fieldMappings.fieldIdToName.get
 
+  // Only the system fields differ: a user field's Arrow column carries the
+  // field's own name.
+  override val arrowColumnNames: Map[String, String] =
+    fieldMappings.fieldNameToArrowColumn
+
   override val pkColumnName: String = pkField
     .map(field =>
       fieldMappings.fieldIdToName.getOrElse(field.fieldID, field.name)
@@ -198,6 +220,9 @@ final case class LoonReadSetup(
     SchemaMapper.convertToArrowSchemaWithFieldIdNames(milvusSchema)
 
   override val columnNameFor: Long => Option[String] = id => Some(id.toString)
+
+  override val arrowColumnNames: Map[String, String] =
+    fieldNameToId.map { case (name, id) => name -> id.toString }
 
   override val pkColumnName: String =
     pkField.map(_.fieldID.toString).getOrElse("")

@@ -67,11 +67,29 @@ class MilvusPartitionReaderFactory(
     * Both lines can, because both end at the same SegmentReader. It is off
     * unless the read asks, since the row path is what every existing job runs
     * and the two have to be shown to agree before the default moves.
+    *
+    * Two things the row reader does are not implemented columnar yet, and each
+    * of them sends the partition back to the row reader:
+    *
+    *   - A pushed-down filter. `MilvusScanBuilder.pushFilters` returns the
+    *     predicates it cannot handle to Spark and keeps the rest, and Spark's
+    *     contract is that the source evaluates what it kept. The columnar
+    *     reader does not, so a partition carrying pushed filters read columnar
+    *     returns rows that should have been filtered out, with no error.
+    *   - Vector search. `topK` and `queryVector` make the row reader run a
+    *     brute-force search instead of a scan; the columnar reader would ignore
+    *     them and return the whole segment.
+    *
+    * `MilvusPackedV2InputPartition` carries neither: its scan builder returns
+    * every predicate to Spark and it has no search parameters.
     */
   override def supportColumnarReads(partition: InputPartition): Boolean =
-    MilvusOption.readColumnar(optionsMap) && partition.isInstanceOf[
-      MilvusInputPartition
-    ]
+    MilvusOption.readColumnar(optionsMap) && (partition match {
+      case p: MilvusStorageV3InputPartition =>
+        pushedFilters.isEmpty && p.topK.isEmpty && p.queryVector.isEmpty
+      case _: MilvusInputPartition => pushedFilters.isEmpty
+      case _                       => false
+    })
 
   override def createColumnarReader(
       partition: InputPartition
@@ -87,6 +105,7 @@ class MilvusPartitionReaderFactory(
         setup.open(ArrowAllocator.get),
         milvusSchema,
         setup.isDeleted,
+        setup.arrowColumnFor,
         MilvusOption.readVectorRaw(optionsMap),
         partitionNameOf(p),
         p.spec.segmentId

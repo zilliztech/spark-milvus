@@ -277,6 +277,107 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("a column group whose file paths are short reads them all correctly") {
+    skipWithoutLibrary()
+
+    // Regression for the pointer lifetime in columnGroupsCreate: it used to
+    // take `c_str()` on each path right after pushing it onto a vector that was
+    // still growing. A path short enough for the small-string optimisation
+    // keeps its characters inside the string object, so growing the vector
+    // moves them and every pointer taken earlier dangles.
+    //
+    // The test above cannot catch this: the writer names its files
+    // `<segment>/_data/<uuid>.parquet`, which is far past the small-string
+    // threshold, so the characters live on the heap and survive the move.
+    val dir: Path = Files.createTempDirectory("native-short-paths")
+    val allocator = new RootAllocator(Long.MaxValue)
+    val properties = Map(
+      "fs.storage_type" -> "local",
+      "fs.root_path" -> dir.toAbsolutePath.toString
+    ).asJava
+
+    val perFile = 1000
+    val shortNames = Seq("a.pq", "b.pq", "c.pq")
+    var readSchema: ArrowSchema = null
+    var columnGroups = 0L
+    var reader = 0L
+    var batchReader = 0L
+
+    try {
+      val parts = (0 until 3).map { i =>
+        writeSegment(allocator, properties, s"segment-$i", i * perFile, perFile)
+      }
+      // Move each file to a name inside the small-string range. The path the C
+      // layer is handed is relative to fs.root_path.
+      val shortParts = parts.zip(shortNames).map { case ((path, count), name) =>
+        Files.move(dir.resolve(path), dir.resolve(name))
+        name.length should be < 16
+        (name, count)
+      }
+
+      columnGroups = StorageNative.columnGroupsCreate(
+        Array(Array("id", "name")),
+        Array(shortParts.map(_._1).toArray),
+        Array(shortParts.map(_._2).toArray),
+        "parquet"
+      )
+      columnGroups should not be 0L
+
+      readSchema = ArrowSchema.allocateNew(allocator)
+      Data.exportSchema(allocator, schema, null, readSchema)
+      reader = StorageNative.readerNew(
+        columnGroups,
+        readSchema.memoryAddress(),
+        Array("id", "name"),
+        properties
+      )
+      reader should not be 0L
+      batchReader = StorageNative.recordBatchReaderNew(reader, null)
+
+      var seen = 0
+      var more = true
+      while (more) {
+        val array = ArrowArray.allocateNew(allocator)
+        val batchSchema = ArrowSchema.allocateNew(allocator)
+        try {
+          more = StorageNative.recordBatchReaderReadNext(
+            batchReader,
+            array.memoryAddress(),
+            batchSchema.memoryAddress()
+          )
+          if (more) {
+            val root =
+              Data.importVectorSchemaRoot(allocator, array, batchSchema, null)
+            try {
+              val id = root.getVector("id").asInstanceOf[BigIntVector]
+              var i = 0
+              while (i < root.getRowCount) {
+                id.get(i) shouldBe seen.toLong * 7
+                seen += 1
+                i += 1
+              }
+            } finally root.close()
+          }
+        } finally {
+          array.close()
+          batchSchema.close()
+        }
+      }
+
+      seen shouldBe (3 * perFile)
+    } finally {
+      if (batchReader != 0L) StorageNative.recordBatchReaderDestroy(batchReader)
+      if (reader != 0L) StorageNative.readerDestroySegment(reader)
+      if (columnGroups != 0L) StorageNative.columnGroupsDestroy(columnGroups)
+      if (readSchema != null) readSchema.close()
+      allocator.close()
+      Files
+        .walk(dir)
+        .sorted(java.util.Comparator.reverseOrder())
+        .forEach(Files.deleteIfExists(_))
+    }
+  }
+
   test("a column group holding several files reads every row of every file") {
     skipWithoutLibrary()
 

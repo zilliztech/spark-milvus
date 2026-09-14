@@ -164,11 +164,9 @@ class MilvusLoonPartitionReader(
 
   private val sourceSchema = schema
 
-  private val fieldNameToId: Map[String, Long] =
-    MilvusLoonPartitionReader.buildFieldNameToId(milvusSchema)
-
-  private val fieldNameToIdString: Map[String, String] =
-    fieldNameToId.map { case (name, id) => name -> id.toString }
+  // Spark name to Arrow column name. Shared with the columnar reader through
+  // the setup so the two cannot name columns differently.
+  private val fieldNameToIdString: Map[String, String] = setup.arrowColumnNames
 
   private val pkField: Option[FieldSchema] =
     milvusSchema.fields.find(_.isPrimaryKey)

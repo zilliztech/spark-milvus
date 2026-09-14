@@ -103,6 +103,16 @@ RUN set -eux; \
 # Build milvus-storage native libraries using its Conan 2 Makefile.
 RUN cd milvus-storage/cpp && make java-lib
 
+# Build this repository's own JNI library. Every read and write since the
+# upstream Java binding came out of the build goes through it, and
+# NativeStorageLibrary loads it by name, so an image without it fails at the
+# first native call with UnsatisfiedLinkError. CMake writes the result next to
+# libmilvus-storage, which is where the packaging step below looks.
+RUN cmake -S native-storage/src/main/cpp -B native-storage/src/main/cpp/build \
+        -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build native-storage/src/main/cpp/build --parallel \
+    && test -f milvus-storage/cpp/build/Release/libnative-storage-jni.so
+
 # Package the JNI libraries and every transitive shared library under the
 # platform path expected by NativeLibraryLoader.
 RUN set -eux; \
@@ -116,6 +126,7 @@ RUN set -eux; \
     mkdir -p "${native_dir}"; \
     cp milvus-storage/cpp/build/Release/libmilvus-storage.so "${native_dir}/"; \
     cp milvus-storage/cpp/build/Release/libmilvus-storage-jni.so "${native_dir}/"; \
+    cp milvus-storage/cpp/build/Release/libnative-storage-jni.so "${native_dir}/"; \
     if [ -d "${libs_dir}" ]; then \
         find -L "${libs_dir}" -maxdepth 1 -type f \
             \( -name '*.so' -o -name '*.so.*' \) \
@@ -152,6 +163,7 @@ RUN set -eux; \
     test -s "${assembly_jar}"; \
     jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libmilvus-storage.so"; \
     jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libmilvus-storage-jni.so"; \
+    jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libnative-storage-jni.so"; \
     sha256sum "${assembly_jar}"; \
     publish_maven="${PUBLISH_MAVEN:-${PUBLISH_TO_CENTRAL}}"; \
     case "${publish_maven}" in true|false) ;; *) echo "PUBLISH_MAVEN must be true or false" >&2; exit 1 ;; esac; \

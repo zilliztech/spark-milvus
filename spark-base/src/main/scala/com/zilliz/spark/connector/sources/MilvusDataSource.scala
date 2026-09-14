@@ -1128,7 +1128,7 @@ object MilvusScan extends Logging {
       )
     }.toMap
     val merged = com.zilliz.spark.connector.loon.HadoopStorageConfig
-      .toFsProperties(conf) ++ declared ++
+      .toFsProperties(conf, trimmed) ++ declared ++
       Map(
         com.zilliz.milvus.storage.credential.StorageProperties.BucketName -> trimmed
       )
@@ -2403,8 +2403,14 @@ class MilvusScan(
 
     // Parsed once for the whole plan rather than per partition: a bad storage
     // configuration should fail planning, not every task.
-    val storageProperties = StorageProperties.from(milvusOption.options)
-    val canonicalStorageProperties =
+    //
+    // Lazy because the two layouts use different configurations and a plan
+    // rarely contains both. Backup planning reaches here with a bucket derived
+    // from `milvus.backup.dir` and no `fs.bucket_name`, produces column-group
+    // partitions only, and would otherwise fail validating the manifest-line
+    // configuration that no partition ends up using.
+    lazy val storageProperties = StorageProperties.from(milvusOption.options)
+    lazy val canonicalStorageProperties =
       StorageProperties.from(canonicalMilvusOption.options)
     val applyDeletes = MilvusOption.readApplyDeletes(options)
     def deleteSourceFor(

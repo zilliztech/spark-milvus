@@ -213,9 +213,9 @@ class MilvusPackedV2PartitionReader(
 
   private val allocator = ArrowAllocator.get
   private val sourceSchema = schema
-  private val fieldMappings =
-    MilvusPackedV2PartitionReader.buildFieldMappings(milvusSchema)
-  private val fieldNameToArrowColumn = fieldMappings.fieldNameToArrowColumn
+  // Spark name to Arrow column name. Shared with the columnar reader through
+  // the setup so the two cannot name columns differently.
+  private val fieldNameToArrowColumn = setup.arrowColumnNames
   private val neededColumns: Array[String] = setup.neededColumns.toArray
 
   private var segmentReader: SegmentReader = null

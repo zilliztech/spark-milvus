@@ -257,6 +257,58 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
+  // A backup read takes its bucket from milvus.backup.dir, which is what
+  // reference-cn.md promises, so fs.bucket_name is absent on purpose. Planning
+  // used to validate the un-bucketed configuration before looking at what the
+  // plan contained, and failed with "fs.bucket_name must be set" even though
+  // every partition it produced used the derived bucket.
+  //
+  // The other planning suites go through withStorageDefaults, which fills
+  // fs.bucket_name in; this case must not, or it tests nothing.
+  test("backup planning derives its bucket and never reads the raw options") {
+    val options = new ju.HashMap[String, String]()
+    options.put(MilvusOption.BackupDir, "s3a://backup-bucket/backup/b1")
+    options.put(MilvusOption.MilvusCollectionName, "demo")
+    options.put("fs.address", "localhost:9000")
+    options.put("fs.access_key_id", "ak")
+    options.put("fs.access_key_value", "sk")
+    assert(!options.containsKey("fs.bucket_name"))
+
+    val scan = new MilvusScan(
+      StructType(Seq(StructField("RowID", LongType, nullable = false))),
+      new CaseInsensitiveStringMap(options)
+    )
+
+    val segment = V2SegmentInfo(
+      segmentId = 1L,
+      partitionId = 0L,
+      numOfRows = 10L,
+      storageVersion = 2L,
+      columnGroups = Seq(
+        V2ColumnGroup(
+          fieldIds = Seq(100L),
+          filePaths = Seq("backup/b1/binlogs/1/100/1"),
+          fileRowCounts = Seq(10L)
+        )
+      )
+    )
+
+    val partitions = scan.buildSnapshotPartitions(
+      manifestList = Seq.empty,
+      defaultPartitionId = "0",
+      schemaBytes = Array.emptyByteArray,
+      v2Segments = Seq(segment),
+      v2DeletePlans = Map.empty,
+      forceCanonicalBucket = Some("backup-bucket")
+    )
+
+    assert(partitions.length == 1)
+    val spec = partitions.head
+      .asInstanceOf[com.zilliz.spark.connector.read.MilvusPackedV2InputPartition]
+      .spec
+    assert(spec.properties("fs.bucket_name") == "backup-bucket")
+  }
+
   test("backup createReaderFactory is self-contained without prior planning") {
     import com.fasterxml.jackson.databind.node.IntNode
     val schema = BackupMetaReader.BackupCollectionSchema(

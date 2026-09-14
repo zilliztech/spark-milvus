@@ -190,9 +190,14 @@ Java_com_zilliz_milvus_jni_storage_StorageNative_columnGroupsCreate(
       holder->paths[g].emplace_back(chars != nullptr ? chars : "");
       if (chars != nullptr) env->ReleaseStringUTFChars(element, chars);
       env->DeleteLocalRef(element);
-
+    }
+    // Take c_str() only once every path is in place. A path short enough for
+    // the small-string optimisation keeps its characters inside the string
+    // object, so growing the vector moves them and any pointer taken earlier
+    // dangles. The column loop above is split for the same reason.
+    for (jsize f = 0; f < file_count; ++f) {
       LoonColumnGroupFile file{};
-      file.path = holder->paths[g].back().c_str();
+      file.path = holder->paths[g][f].c_str();
       file.start_index = 0;
       file.end_index = static_cast<int64_t>(row_counts[f]);
       file.property_keys = nullptr;

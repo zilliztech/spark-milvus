@@ -18,6 +18,9 @@ import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
   * The translation itself reads keys and renames them; it resolves no
   * credentials. [[objectStore]] is the one place that turns the result into a
   * live store, so every driver-side read opens storage the same way.
+  *
+  * Every entry point takes the bucket being opened, because a Hadoop key can be
+  * set per bucket and that value wins over the global one.
   */
 object HadoopStorageConfig {
 
@@ -47,14 +50,28 @@ object HadoopStorageConfig {
     "accessKeySecret" -> StorageProperties.AccessKeyValue
   )
 
-  /** Reads the Hadoop keys out of `conf` and returns the `fs.*` map.
+  /** Reads the Hadoop keys for `bucket` out of `conf` and returns the `fs.*`
+    * map.
+    *
+    * Hadoop lets a key be set once globally and again for one bucket
+    * (`fs.s3a.bucket.<name>.access.key`), and the per-bucket value wins. A
+    * deployment that talks to two buckets with different endpoints or different
+    * credentials — backfill's source bucket and the Milvus storage bucket, for
+    * one — has its real configuration only in the per-bucket keys, so reading
+    * the global prefix alone picks up the wrong endpoint or no credentials at
+    * all. `BackfillConfig.resolveAwsS3AssumeRole` resolves the same way.
+    *
+    * An empty `bucket` reads the global keys only.
     *
     * Empty when neither an `fs.s3a.*` nor an `fs.oss.*` key is present, so a
     * caller can merge it over user options unconditionally.
     */
-  def toFsProperties(conf: Configuration): Map[String, String] = {
-    val s3a = translate(conf, S3A, s3aToFs)
-    val oss = translate(conf, OSS, ossToFs)
+  def toFsProperties(
+      conf: Configuration,
+      bucket: String = ""
+  ): Map[String, String] = {
+    val s3a = translate(conf, S3A, s3aToFs, bucket)
+    val oss = translate(conf, OSS, ossToFs, bucket)
 
     // Which backend runs is not a Hadoop key; Hadoop dispatches by scheme. Pick
     // the provider from whichever namespace supplied keys. Both present is a
@@ -91,7 +108,9 @@ object HadoopStorageConfig {
       )
     }
     storeFrom(
-      toFsProperties(conf) ++ Map(StorageProperties.BucketName -> trimmed)
+      toFsProperties(conf, trimmed) ++ Map(
+        StorageProperties.BucketName -> trimmed
+      )
     )
   }
 
@@ -126,15 +145,27 @@ object HadoopStorageConfig {
     else Map(StorageProperties.UseIam -> "true")
   }
 
+  /** Per-bucket key first, then the global one, matching how Hadoop's own
+    * connectors resolve a bucket's configuration.
+    */
   private def translate(
       conf: Configuration,
       prefix: String,
-      table: Map[String, String]
-  ): Map[String, String] =
+      table: Map[String, String],
+      bucket: String
+  ): Map[String, String] = {
+    val trimmedBucket = Option(bucket).map(_.trim).getOrElse("")
+    val bucketPrefix =
+      if (trimmedBucket.isEmpty) None else Some(s"${prefix}bucket.$trimmedBucket.")
+
+    def read(key: String): Option[String] =
+      Option(conf.get(key)).map(_.trim).filter(_.nonEmpty)
+
     table.iterator.flatMap { case (suffix, fsKey) =>
-      Option(conf.get(prefix + suffix))
-        .map(_.trim)
-        .filter(_.nonEmpty)
+      bucketPrefix
+        .flatMap(bp => read(bp + suffix))
+        .orElse(read(prefix + suffix))
         .map(fsKey -> _)
     }.toMap
+  }
 }

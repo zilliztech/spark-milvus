@@ -1,13 +1,9 @@
 package com.zilliz.spark.connector.read
 
-import org.apache.arrow.vector.{
-  FixedSizeBinaryVector,
-  VarBinaryVector,
-  VectorSchemaRoot
-}
+import org.apache.arrow.vector.{VarBinaryVector, VectorSchemaRoot}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.read.PartitionReader
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.vectorized.{
   ArrowColumnVector,
   ColumnVector,
@@ -20,7 +16,8 @@ import com.zilliz.spark.connector.serde.ArrowAllocator
 import com.zilliz.spark.connector.types.{
   MilvusSparseVectorColumn,
   MilvusVectorColumn,
-  SelectedRowsColumn
+  SelectedRowsColumn,
+  Utf8FromBinaryColumn
 }
 import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 
@@ -44,6 +41,7 @@ class MilvusColumnarPartitionReader(
     segmentReader: SegmentReader,
     milvusSchema: CollectionSchema,
     deleted: (VectorSchemaRoot, Int) => Boolean,
+    arrowColumnFor: String => String,
     rawVectors: Boolean,
     partitionName: String,
     segmentId: Long
@@ -93,7 +91,7 @@ class MilvusColumnarPartitionReader(
     rowsSeen += root.getRowCount.toLong
 
     val columns =
-      schema.fields.map(field => columnFor(root, field.name, startOffset))
+      schema.fields.map(field => columnFor(root, field, startOffset))
     val surviving = survivingRows(root)
     if (surviving == null) {
       new ColumnarBatch(columns, root.getRowCount)
@@ -133,36 +131,51 @@ class MilvusColumnarPartitionReader(
 
   private def columnFor(
       root: VectorSchemaRoot,
-      name: String,
+      field: StructField,
       startOffset: Long
-  ): ColumnVector =
+  ): ColumnVector = {
+    val name = field.name
     MetadataColumns
       .columnFor(name, partitionName, segmentId, startOffset)
       .getOrElse {
-        val vector = root.getVector(name)
+        // The Arrow column is not always named after the Spark field: the
+        // manifest line names columns by field id, so `vec` arrives as `101`.
+        val arrowName = arrowColumnFor(name)
+        val vector = root.getVector(arrowName)
         if (vector == null) {
           throw new IllegalStateException(
-            s"the batch has no column '$name'; it carries " +
-              root.getSchema.getFields.toString
+            s"the batch has no column '$arrowName' for field '$name'; it " +
+              s"carries ${root.getSchema.getFields.toString}"
           )
         }
         val milvusType = fieldsByName.get(name).map(_.dataType)
         milvusType match {
           case Some(t) if MilvusTypes.isDenseVectorType(t) =>
-            MilvusVectorColumn(
-              vector.asInstanceOf[FixedSizeBinaryVector],
-              t,
-              dimensionOf(name),
-              rawVectors
-            )
+            MilvusVectorColumn(vector, t, dimensionOf(name), rawVectors)
           case Some(MilvusDataType.SparseFloatVector) if !rawVectors =>
             MilvusSparseVectorColumn(vector.asInstanceOf[VarBinaryVector])
           case _ =>
-            // Scalars, and sparse vectors asked for raw: Arrow's own wrapper
-            // already presents these without copying.
-            new ArrowColumnVector(vector)
+            scalarColumn(field, vector)
         }
       }
+  }
+
+  /** A scalar column, wrapped for the type Spark's schema declares.
+    *
+    * The declared type and the stored type are not always the same: a JSON
+    * field is `StringType` to Spark and Arrow `Binary` on disk, and Spark's own
+    * `ArrowColumnVector` chooses its accessor from the stored type, so it would
+    * answer `getBinary` where Spark calls `getUTF8String`. Everything whose two
+    * types do agree goes through `ArrowColumnVector`, which wraps the Arrow
+    * vector without copying.
+    */
+  private def scalarColumn(
+      field: StructField,
+      vector: org.apache.arrow.vector.FieldVector
+  ): ColumnVector = (field.dataType, vector) match {
+    case (StringType, v: VarBinaryVector) => new Utf8FromBinaryColumn(v)
+    case _                                => new ArrowColumnVector(vector)
+  }
 
   private def dimensionOf(name: String): Int = {
     val field = schema(name)

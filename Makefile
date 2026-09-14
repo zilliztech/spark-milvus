@@ -10,8 +10,38 @@ JAVA_HOME ?= $(shell dirname $(shell dirname $(shell readlink -f $(shell which j
 # Directories
 RESOURCES_DIR := native-storage/src/main/resources
 MILVUS_STORAGE_CPP := milvus-storage/cpp
-MILVUS_STORAGE_BUILD := $(MILVUS_STORAGE_CPP)/build/Release/lib
 TARGET_DIR := target
+
+# Platform. Three things differ and all three bite:
+#   - suffix: add_library(... SHARED) sets no SUFFIX, so CMake emits .dylib on
+#     Apple and .so elsewhere.
+#   - build dir: cpp/build/Release/lib is filled by a POST_BUILD step that sits
+#     inside `if(NOT APPLE)` in cpp/CMakeLists.txt, so on macOS the libraries
+#     stay in cpp/build/Release and that lib/ directory never exists.
+#   - resource dir: NativeLibraryLoader.stripPlatformPrefix skips any entry that
+#     is not under native/<platform>/, so copying flat into native/ loads
+#     nothing.
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_S),Darwin)
+  LIB_SUFFIX := dylib
+  MILVUS_STORAGE_BUILD := $(MILVUS_STORAGE_CPP)/build/Release
+  NATIVE_PLATFORM := darwin-$(if $(filter arm64 aarch64,$(UNAME_M)),aarch64,x86_64)
+else
+  LIB_SUFFIX := so
+  MILVUS_STORAGE_BUILD := $(MILVUS_STORAGE_CPP)/build/Release/lib
+  NATIVE_PLATFORM := linux-$(if $(filter arm64 aarch64,$(UNAME_M)),aarch64,x86_64)
+endif
+NATIVE_DIR := $(RESOURCES_DIR)/native/$(NATIVE_PLATFORM)
+STORAGE_LIB := $(MILVUS_STORAGE_BUILD)/libmilvus-storage.$(LIB_SUFFIX)
+STORAGE_JNI_LIB := $(MILVUS_STORAGE_BUILD)/libmilvus-storage-jni.$(LIB_SUFFIX)
+
+# This repository's own JNI library. Its CMakeLists sets LIBRARY_OUTPUT_DIRECTORY
+# to whichever directory libmilvus-storage was found in, so it lands beside the
+# libraries above and copy-native-libs collects all three in one step.
+NATIVE_JNI_SRC := native-storage/src/main/cpp
+NATIVE_JNI_BUILD := $(NATIVE_JNI_SRC)/build
+NATIVE_JNI_LIB := $(MILVUS_STORAGE_BUILD)/libnative-storage-jni.$(LIB_SUFFIX)
 
 # Colors for output
 RED := \033[0;31m
@@ -21,10 +51,10 @@ BLUE := \033[0;34m
 NC := \033[0m # No Color
 
 # All phony targets
-.PHONY: all help check-deps init-submodules build-milvus-storage copy-native-libs clean package test compile-it run-demo rebuild quick-build status
+.PHONY: all help check-deps init-submodules build-milvus-storage build-native-jni copy-native-libs clean package test compile-it run-demo rebuild quick-build status
 
 # Default target
-all: clean build-milvus-storage copy-native-libs package
+all: clean build-milvus-storage build-native-jni copy-native-libs package
 
 # Help target
 help:
@@ -34,6 +64,7 @@ help:
 	@echo "  $(GREEN)all$(NC)                    - Complete build process"
 	@echo "  $(GREEN)clean$(NC)                  - Clean all build artifacts"
 	@echo "  $(GREEN)build-milvus-storage$(NC)   - Build milvus-storage with JNI support"
+	@echo "  $(GREEN)build-native-jni$(NC)       - Build this repository's libnative-storage-jni"
 	@echo "  $(GREEN)copy-native-libs$(NC)       - Copy native libraries to resources"
 	@echo "  $(GREEN)package$(NC)                - Package JAR with native libraries"
 	@echo "  $(GREEN)test$(NC)                   - Type-check tests (incl. integration) and run unit tests"
@@ -54,6 +85,7 @@ check-deps:
 	@command -v $(SBT) >/dev/null 2>&1 || { echo "$(RED)Error: sbt not found$(NC)"; exit 1; }
 	@command -v make >/dev/null 2>&1 || { echo "$(RED)Error: make not found$(NC)"; exit 1; }
 	@command -v conan >/dev/null 2>&1 || { echo "$(RED)Error: conan not found$(NC)"; exit 1; }
+	@command -v cmake >/dev/null 2>&1 || { echo "$(RED)Error: cmake not found$(NC)"; exit 1; }
 	@echo "$(GREEN)All dependencies found$(NC)"
 
 # Initialize Git submodules
@@ -71,28 +103,58 @@ build-milvus-storage: check-deps init-submodules
 		exit 1; \
 	fi
 	@cd $(MILVUS_STORAGE_CPP) && make java-lib
-	@if [ -f "$(MILVUS_STORAGE_BUILD)/libmilvus-storage.so" ] && [ -f "$(MILVUS_STORAGE_BUILD)/libmilvus-storage-jni.so" ]; then \
+	@if [ -f "$(STORAGE_LIB)" ] && [ -f "$(STORAGE_JNI_LIB)" ]; then \
 		echo "$(GREEN)✓ Successfully built milvus-storage with JNI$(NC)"; \
-		ls -lh $(MILVUS_STORAGE_BUILD)/*.so; \
+		ls -lh $(STORAGE_LIB) $(STORAGE_JNI_LIB); \
 	else \
 		echo "$(RED)Error: Failed to build milvus-storage JNI libraries$(NC)"; \
+		echo "$(YELLOW)Looked for $(STORAGE_LIB) and $(STORAGE_JNI_LIB)$(NC)"; \
+		exit 1; \
+	fi
+
+# Build this repository's JNI library
+#
+# Every read and write goes through it since the upstream Java binding left the
+# build, and NativeStorageLibrary loads it by name, so a jar without it fails at
+# the first native call with UnsatisfiedLinkError.
+#
+# It links against libmilvus-storage and reads its Arrow headers out of the
+# conan metadata that build generated, so build-milvus-storage has to run first.
+build-native-jni: build-milvus-storage
+	@echo "$(BLUE)Building libnative-storage-jni...$(NC)"
+	@cmake -S $(NATIVE_JNI_SRC) -B $(NATIVE_JNI_BUILD) -DCMAKE_BUILD_TYPE=Release
+	@cmake --build $(NATIVE_JNI_BUILD) --parallel
+	@if [ -f "$(NATIVE_JNI_LIB)" ]; then \
+		echo "$(GREEN)✓ Built libnative-storage-jni$(NC)"; \
+		ls -lh $(NATIVE_JNI_LIB); \
+	else \
+		echo "$(RED)Error: Failed to build libnative-storage-jni$(NC)"; \
+		echo "$(YELLOW)Looked for $(NATIVE_JNI_LIB)$(NC)"; \
 		exit 1; \
 	fi
 
 # Copy native libraries to resources directory
-copy-native-libs: $(RESOURCES_DIR)/native
-	@echo "$(BLUE)Copying native libraries to resources directory...$(NC)"
-	@if [ ! -f "$(MILVUS_STORAGE_BUILD)/libmilvus-storage.so" ] || [ ! -f "$(MILVUS_STORAGE_BUILD)/libmilvus-storage-jni.so" ]; then \
+copy-native-libs: $(NATIVE_DIR)
+	@echo "$(BLUE)Copying native libraries to $(NATIVE_DIR)...$(NC)"
+	@if [ ! -f "$(STORAGE_LIB)" ] || [ ! -f "$(STORAGE_JNI_LIB)" ]; then \
 		echo "$(YELLOW)Native libraries not found, building first...$(NC)"; \
 		$(MAKE) build-milvus-storage; \
 	fi
-	@cp $(MILVUS_STORAGE_BUILD)/*.so* $(RESOURCES_DIR)/native/
+	@if [ ! -f "$(NATIVE_JNI_LIB)" ]; then \
+		echo "$(YELLOW)libnative-storage-jni not found, building first...$(NC)"; \
+		$(MAKE) build-native-jni; \
+	fi
+	@cp $(MILVUS_STORAGE_BUILD)/*.$(LIB_SUFFIX)* $(NATIVE_DIR)/
+	@if [ ! -f "$(NATIVE_DIR)/libnative-storage-jni.$(LIB_SUFFIX)" ]; then \
+		echo "$(RED)Error: libnative-storage-jni did not reach $(NATIVE_DIR)$(NC)"; \
+		exit 1; \
+	fi
 	@echo "$(GREEN)✓ Copied native libraries to resources$(NC)"
-	@ls -lh $(RESOURCES_DIR)/native/ | head -20
+	@ls -lh $(NATIVE_DIR)/ | head -20
 
 # Create necessary directories
-$(RESOURCES_DIR)/native:
-	@mkdir -p $(RESOURCES_DIR)/native
+$(NATIVE_DIR):
+	@mkdir -p $(NATIVE_DIR)
 
 # Clean build artifacts
 clean:
@@ -112,6 +174,8 @@ clean-all: clean
 	@if [ -d "$(MILVUS_STORAGE_CPP)" ]; then \
 		cd $(MILVUS_STORAGE_CPP) && make clean; \
 	fi
+	@echo "$(BLUE)Cleaning libnative-storage-jni build...$(NC)"
+	@rm -rf $(NATIVE_JNI_BUILD)
 	@echo "$(GREEN)Clean all complete$(NC)"
 
 # Package JAR with native libraries
@@ -147,11 +211,12 @@ quick-build: copy-native-libs package
 # Show build status
 status:
 	@echo "$(BLUE)Build Status:$(NC)"
-	@echo -n "Milvus Storage SO: "
-	@if [ -f "$(MILVUS_STORAGE_BUILD)/libmilvus-storage.so" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
-	@echo -n "Milvus Storage JNI SO: "
-	@if [ -f "$(MILVUS_STORAGE_BUILD)/libmilvus-storage-jni.so" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
+	@echo "Platform: $(NATIVE_PLATFORM) (.$(LIB_SUFFIX))"
+	@echo -n "Milvus Storage lib: "
+	@if [ -f "$(STORAGE_LIB)" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
+	@echo -n "Milvus Storage JNI lib: "
+	@if [ -f "$(STORAGE_JNI_LIB)" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
 	@echo -n "Native libs in resources: "
-	@if [ -f "$(RESOURCES_DIR)/native/libmilvus-storage.so" ] && [ -f "$(RESOURCES_DIR)/native/libmilvus-storage-jni.so" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
+	@if [ -f "$(NATIVE_DIR)/libmilvus-storage.$(LIB_SUFFIX)" ] && [ -f "$(NATIVE_DIR)/libmilvus-storage-jni.$(LIB_SUFFIX)" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
 	@echo -n "JAR package: "
 	@if ls $(TARGET_DIR)/scala-$(SCALA_VERSION)/*.jar 1> /dev/null 2>&1; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
