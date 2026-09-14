@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read.plan
 
 import java.util.concurrent.{ConcurrentHashMap, Executors}
 import java.util.concurrent.atomic.AtomicBoolean
@@ -27,7 +27,7 @@ import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
   * itself, the executor those drops run on, and the shutdown-hook drain.
   */
 object ClientReadSnapshot extends Logging {
-  private[scan] case class SnapshotCleanupRegistration(
+  private[read] case class SnapshotCleanupRegistration(
       session: SparkSession,
       executionId: Long
   )
@@ -57,7 +57,7 @@ object ClientReadSnapshot extends Logging {
   private val CleanupDraining = new AtomicBoolean(false)
   private val CleanupSubmissionLock = new Object
 
-  private[scan] def drainPendingCleanupFutures(
+  private[read] def drainPendingCleanupFutures(
       timeout: FiniteDuration = SnapshotCleanupDrainTimeout
   ): Unit = {
     CleanupSubmissionLock.synchronized {
@@ -96,7 +96,7 @@ object ClientReadSnapshot extends Logging {
     logWarning("Failed to register client snapshot cleanup shutdown hook", e)
   }
 
-  private[scan] def generatedClientSnapshotName(
+  private[read] def generatedClientSnapshotName(
       collectionName: String,
       currentTimeMillis: Long = System.currentTimeMillis(),
       uuid: String = UUID.randomUUID().toString.replace("-", "")
@@ -113,7 +113,7 @@ object ClientReadSnapshot extends Logging {
     s"$prefix$safeCollectionName$suffix"
   }
 
-  private[scan] def parseClientSnapshotCompactionProtectionSeconds(
+  private[read] def parseClientSnapshotCompactionProtectionSeconds(
       options: CaseInsensitiveStringMap
   ): Long = {
     val value = StorageOptions.parsePositiveLongOption(
@@ -136,7 +136,7 @@ object ClientReadSnapshot extends Logging {
     value
   }
 
-  private[scan] def activeCleanupRegistration()
+  private[read] def activeCleanupRegistration()
       : Option[SnapshotCleanupRegistration] = {
     SparkSession.getActiveSession.orElse(SparkSession.getDefaultSession) match {
       case Some(session) =>
@@ -158,7 +158,7 @@ object ClientReadSnapshot extends Logging {
     }
   }
 
-  private[scan] def dropClientReadSnapshot(
+  private[read] def dropClientReadSnapshot(
       client: MilvusClient,
       databaseName: String,
       collectionName: String,
@@ -205,7 +205,7 @@ object ClientReadSnapshot extends Logging {
     )
   }
 
-  private[scan] def preserveResultWhenCloseFails(
+  private[read] def preserveResultWhenCloseFails(
       result: Try[Unit],
       close: => Unit,
       closeDescription: String
@@ -240,7 +240,7 @@ object ClientReadSnapshot extends Logging {
     }
   }
 
-  private[scan] def submitClientSnapshotCleanup(
+  private[read] def submitClientSnapshotCleanup(
       baseOptions: Map[String, String],
       databaseName: String,
       collectionName: String,
@@ -275,7 +275,7 @@ object ClientReadSnapshot extends Logging {
     }
   }
 
-  private[scan] def registerClientSnapshotCleanup(
+  private[read] def registerClientSnapshotCleanup(
       registration: SnapshotCleanupRegistration,
       baseOptions: Map[String, String],
       databaseName: String,

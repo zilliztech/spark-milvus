@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read
 
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.types._

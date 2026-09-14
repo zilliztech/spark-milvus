@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read
 
 import scala.jdk.CollectionConverters._
 
@@ -22,12 +22,13 @@ import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
 import com.zilliz.spark.connector.options.{ReadMode, StorageOptions}
 import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.scan.{
+import com.zilliz.spark.connector.read.{
   MilvusInputPartition,
   MilvusPackedV2DeleteContext,
   MilvusPartitionReaderFactory
 }
 import io.milvus.grpc.schema.CollectionSchema
+import com.zilliz.spark.connector.read.plan.{ScanContext, ClientSnapshotPlanner, LegacyClientPlanner, OptionSnapshotPlanner, BackupPlanner}
 
 class MilvusScan(
     schema: StructType,
@@ -36,13 +37,13 @@ class MilvusScan(
     // Backup meta already parsed at table init (threaded directly, never via
     // options, so it does not ride along on InputPartitions to executors).
     preParsedBackupMeta: Option[BackupMetaReader.BackupInfo] = None,
-    private[scan] val pushedLimit: Option[Int] = None
+    private[read] val pushedLimit: Option[Int] = None
 ) extends Scan
     with Batch
     with SupportsReportStatistics
     with Logging {
   private val milvusOption = MilvusOption(options)
-  private[scan] val ctx = new ScanContext(options, milvusOption)
+  private[read] val ctx = new ScanContext(options, milvusOption)
   private val readMode: ReadMode = MilvusOption.readMode(options)
 
   /** Row count is the sum over planned partitions; the byte size is that count
@@ -87,7 +88,7 @@ class MilvusScan(
     else computeInputPartitions()
   }
 
-  private[scan] def shouldCacheInputPartitions: Boolean =
+  private[read] def shouldCacheInputPartitions: Boolean =
     readMode != ReadMode.Client ||
       ClientSnapshotPlanner.canUseClientSnapshotFastPath(milvusOption)
 
@@ -221,7 +222,7 @@ object MilvusScan extends Logging {
     * unknown makes the total unknown rather than an undercount Spark would
     * trust. `sizeInBytes` is rows times [[estimatedRowWidth]].
     */
-  private[scan] def statisticsFor(
+  private[read] def statisticsFor(
       partitions: Array[InputPartition],
       schema: StructType
   ): Statistics = {
@@ -246,7 +247,7 @@ object MilvusScan extends Logging {
     * Spark's own `defaultSize` for an array assumes one element and would put a
     * 768-dimensional column at 4 bytes. Everything else takes `defaultSize`.
     */
-  private[scan] def estimatedRowWidth(schema: StructType): Long =
+  private[read] def estimatedRowWidth(schema: StructType): Long =
     schema.fields.map { field =>
       val md = field.metadata
       if (md.contains(FieldMetadata.MilvusVectorDimensionMetadataKey)) {

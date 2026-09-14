@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read.plan
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
@@ -10,7 +10,7 @@ import com.zilliz.spark.connector.options.MilvusOption
 /** What every planner needs from the scan: the options and the `MilvusOption`
   * parsed from them once.
   */
-private[scan] final class ScanContext(
+private[read] final class ScanContext(
     val options: CaseInsensitiveStringMap,
     val milvusOption: MilvusOption
 ) {
@@ -28,7 +28,7 @@ private[scan] final class ScanContext(
   * input partitions. Four exist today (client snapshot, legacy client, option
   * snapshot, backup); `core.read.plan` is where their common tail goes.
   */
-private[scan] abstract class PartitionPlanner(protected val ctx: ScanContext)
+private[read] abstract class PartitionPlanner(protected val ctx: ScanContext)
     extends Logging {
   protected def options: CaseInsensitiveStringMap = ctx.options
   protected def milvusOption: MilvusOption = ctx.milvusOption

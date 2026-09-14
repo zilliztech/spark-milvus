@@ -35,7 +35,7 @@ import com.zilliz.spark.connector.options.{
   StorageOptions
 }
 import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.scan.MilvusScanBuilder
+import com.zilliz.spark.connector.read.MilvusScanBuilder
 import com.zilliz.spark.connector.types.DataTypeUtil
 import com.zilliz.spark.connector.write.MilvusWriteBuilder
 import io.milvus.grpc.schema.CollectionSchema

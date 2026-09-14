@@ -11,21 +11,21 @@
 | R1 | collection 是一张表 | `spark.table("milvus.db.coll")`；SQL 里直接写三段名 | spark.catalog | C1 | P1 |
 | R2 | 读固定快照 | loadTable 的 `version` 指快照名，`timestamp` 指时间点；缺省最新 | core.snapshot、spark.catalog | 快照无保留策略，旧快照的段可能已被 compaction 或 GC 回收（README 第 5 节） | P0 |
 | R3 | 读不经 Milvus 服务 | 只配对象存储凭证即可读 | core.snapshot、core.path、core.credential、core.read | 靠 list `snapshots/{coll}/metadata/` 前缀选快照；catalog 文件是 README 第 5 节的 ask；凭证在 executor 上按需刷新，不是 driver 下发一次的静态值（长作业会过期） | P0 |
-| R4 | 列式扫描，向量零拷贝 | 自动 | core.read.exec、spark.scan、native-storage | 列组文件只认 Parquet；Vortex 列组见第 9 节 | P0 |
-| R5 | 列裁剪 | `select` | spark.scan → core.manifest 选列组 → core.read.plan | | P0 |
+| R4 | 列式扫描，向量零拷贝 | 自动 | core.read.exec、spark.read、native-storage | 列组文件只认 Parquet；Vortex 列组见第 9 节 | P0 |
+| R5 | 列裁剪 | `select` | spark.read → core.manifest 选列组 → core.read.plan | | P0 |
 | R6 | 谓词下推：Spark 谓词 | `where` 里的比较、IN、IS NULL、字符串前后缀、AND、OR、NOT | spark.expr 翻成 IR → core.expr 求值 | 只实现 DataSource V2 谓词，不实现 V1 Filter（第 9 节） | P1 |
 | R7 | 谓词下推：Milvus 表达式 | 表 option `milvus.filter`（2.0 新增），字符串按 Milvus 文法 | core.expr 用 Milvus 的表达式文法（Plan.g4）解析并求值 | JSON、Array、json_contains 语义按 Milvus 源码逐条复刻 | P1 |
 | R8 | 删除生效 | 自动；快照时间戳之前的删除 | core.delete | 两种删除文件格式的共存期见决策 13；1.x 的 `milvus.read.apply.deletes` 是去是留一并定 | P0 |
 | R9 | 段级剪枝 | 自动；主键等值和 IN 用段统计文件里的布隆过滤器剪段 | core.stats 出剪枝结果，core.snapshot 过滤段列表 | Milvus 侧写统计（README 第 5 节） | P1 |
 | R10 | row group 级剪枝 | 自动；标量列 min/max | core.stats 出剪枝结果，core.read.plan 执行 | 同上 | P1 |
-| R11 | Limit 下推 | `limit` | spark.scan | | P1 |
-| R18 | 运行时过滤 | 自动；join 侧的过滤值下推到段和 row group | spark.scan（SupportsRuntimeV2Filtering）→ core.stats | R9、R10 的统计到位 | P1 |
-| R12 | 元数据列 | `_segment_id`、`_row_offset`、`_timestamp`；`partition` 列是否保留、用 `_` 还是 1.x 的 `$` 见决策 5 | spark.table 声明，spark.scan 拼进批和行 | | P1 |
-| R13 | 表统计 | 自动；行数和字节数给 Spark 选 join 策略 | spark.scan ← core.read.plan | | P1 |
+| R11 | Limit 下推 | `limit` | spark.read | | P1 |
+| R18 | 运行时过滤 | 自动；join 侧的过滤值下推到段和 row group | spark.read（SupportsRuntimeV2Filtering）→ core.stats | R9、R10 的统计到位 | P1 |
+| R12 | 元数据列 | `_segment_id`、`_row_offset`、`_timestamp`；`partition` 列是否保留、用 `_` 还是 1.x 的 `$` 见决策 5 | spark.table 声明，spark.read 拼进批和行 | | P1 |
+| R13 | 表统计 | 自动；行数和字节数给 Spark 选 join 策略 | spark.read ← core.read.plan | | P1 |
 | R14 | 回表 | 下游算子按 (段 id, 行号) 取列 | core.read.exec 的 take | R12 | P1 |
 | R15 | 类型覆盖 | 标量、VarChar、JSON、Array、Float/Float16/BFloat16/Int8/Binary/Sparse 向量、Text（大对象只在列批里放引用，正文按需取；引用带正文字节数，写侧才能在值还只有几百字节时按真实大小顶批量上限）、nullable 向量（变长 Binary，压紧后生成 valid 位图，非零拷贝） | core.schema 定 Milvus 与 Arrow 的映射，spark.types 定 Arrow 与 Spark 的映射 | 透传还是转换见决策 6 | P0 |
-| R16 | 分区和段选择 | option `milvus.partitions`、`milvus.segments` | spark.scan → core.snapshot 过滤段列表 | 1.x 的 `milvus.partition.name`、`milvus.partition.id`、`milvus.segment.id` 映射到这两个键，见 K4 | P1 |
-| R19 | 按分区报分区 | 自动；同一分区的段落在同一个 Spark 分区，join 少一次 shuffle | spark.scan 的 SupportsReportPartitioning → core.read.plan | 只能按 partition id 分组，段内主键无序，做不到列级；收益待实测 | 待评估 |
+| R16 | 分区和段选择 | option `milvus.partitions`、`milvus.segments` | spark.read → core.snapshot 过滤段列表 | 1.x 的 `milvus.partition.name`、`milvus.partition.id`、`milvus.segment.id` 映射到这两个键，见 K4 | P1 |
+| R19 | 按分区报分区 | 自动；同一分区的段落在同一个 Spark 分区，join 少一次 shuffle | spark.read 的 SupportsReportPartitioning → core.read.plan | 只能按 partition id 分组，段内主键无序，做不到列级；收益待实测 | 待评估 |
 | R17 | 交付下游列式算子 | 列批、向量 buffer 地址、位图 | core.read.exec 的出口 | 出口是否压掉被过滤的行见决策 12；交给原生消费者的签名用裸 long 地址，不用 Arrow 的 Java 类型，否则调用方被绑死在我们 classloader 里的 Arrow 版本 | P0 |
 
 ## 2 表写

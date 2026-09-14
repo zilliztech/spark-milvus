@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read.plan
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.read.InputPartition
@@ -16,10 +16,7 @@ import com.zilliz.milvus.storage.snapshot.{
   V2SegmentInfo
 }
 import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.scan.{
-  MilvusPackedV2InputPartition,
-  MilvusStorageV3InputPartition
-}
+import com.zilliz.spark.connector.read.{MilvusPackedV2InputPartition, MilvusStorageV3InputPartition}
 
 /** The common tail of every planning entry point: a segment list plus its
   * delete plans becomes one `InputPartition` per segment.
@@ -28,7 +25,7 @@ import com.zilliz.spark.connector.scan.{
   * package only differ in where the segment list comes from.
   */
 object SnapshotPartitions extends Logging {
-  private[scan] def segmentIdForManifestItem(
+  private[read] def segmentIdForManifestItem(
       item: StorageV2ManifestItem,
       basePath: String
   ): Long = {
@@ -43,7 +40,7 @@ object SnapshotPartitions extends Logging {
     }
   }
 
-  private[scan] def build(
+  private[read] def build(
       ctx: ScanContext,
       manifestList: Seq[StorageV2ManifestItem],
       defaultPartitionId: String,

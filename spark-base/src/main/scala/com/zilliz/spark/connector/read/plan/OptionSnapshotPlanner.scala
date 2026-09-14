@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read.plan
 
 import scala.jdk.CollectionConverters._
 
@@ -12,7 +12,7 @@ import io.milvus.grpc.schema.CollectionSchema
 /** Snapshot mode: the manifest list and the V2 segment list arrive in the
   * options themselves, so no Milvus service is contacted.
   */
-private[scan] final class OptionSnapshotPlanner(ctx: ScanContext)
+private[read] final class OptionSnapshotPlanner(ctx: ScanContext)
     extends PartitionPlanner(ctx) {
 
   /** Plan input partitions from snapshot manifests (offline mode - no client

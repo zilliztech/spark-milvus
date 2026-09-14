@@ -1,17 +1,17 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read.plan
 
 import org.apache.spark.sql.connector.read.InputPartition
 
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusCollectionInfo}
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
-import com.zilliz.spark.connector.scan.MilvusStorageV3InputPartition
+import com.zilliz.spark.connector.read.MilvusStorageV3InputPartition
 
 /** Client mode, legacy path: `GetPersistentSegmentInfo` lists the segments and
   * each V3 segment becomes a partition. Taken when a partition or segment
   * selector is set, or when the service has no `CreateSnapshot`.
   */
-private[scan] final class LegacyClientPlanner(ctx: ScanContext)
+private[read] final class LegacyClientPlanner(ctx: ScanContext)
     extends PartitionPlanner(ctx) {
   def plan(
       client: MilvusClient,

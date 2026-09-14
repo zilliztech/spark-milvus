@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read.plan
 
 import java.net.URI
 import scala.jdk.CollectionConverters._
@@ -25,7 +25,7 @@ import io.milvus.grpc.schema.CollectionSchema
   * JSON it points at is read from object storage and planned like an option
   * snapshot. The snapshot is dropped when the Spark SQL execution ends.
   */
-private[scan] final class ClientSnapshotPlanner(ctx: ScanContext)
+private[read] final class ClientSnapshotPlanner(ctx: ScanContext)
     extends PartitionPlanner(ctx) {
 
   /** The partitions of a snapshot created on the service for this read, or
@@ -273,7 +273,7 @@ private[scan] final class ClientSnapshotPlanner(ctx: ScanContext)
     )
   }
 
-  private[scan] def readAllBytes(
+  private[read] def readAllBytes(
       conf: Configuration,
       path: String
   ): String = {
@@ -309,7 +309,7 @@ object ClientSnapshotPlanner {
     MilvusOption.SnapshotSchemaBytes
   )
 
-  private[scan] def storageV2ManifestBasePath(
+  private[read] def storageV2ManifestBasePath(
       item: StorageV2ManifestItem
   ): String = {
     MilvusSnapshotReader.parseManifestContent(item.manifest) match {
@@ -318,7 +318,7 @@ object ClientSnapshotPlanner {
     }
   }
 
-  private[scan] def validateSnapshotBucketForRelativeDataPaths(
+  private[read] def validateSnapshotBucketForRelativeDataPaths(
       snapshotPath: String,
       connectorBucket: Option[String],
       storageV2ManifestList: Seq[StorageV2ManifestItem],
@@ -344,7 +344,7 @@ object ClientSnapshotPlanner {
     }
   }
 
-  private[scan] def ensureClientSnapshotHasPackedSegments(
+  private[read] def ensureClientSnapshotHasPackedSegments(
       storageV2ManifestList: Seq[StorageV2ManifestItem],
       v2Segments: Seq[V2SegmentInfo],
       collectionName: String
@@ -358,7 +358,7 @@ object ClientSnapshotPlanner {
     }
   }
 
-  private[scan] def canUseClientSnapshotFastPath(
+  private[read] def canUseClientSnapshotFastPath(
       milvusOption: MilvusOption
   ): Boolean = {
     milvusOption.partitionName.isEmpty &&
@@ -366,7 +366,7 @@ object ClientSnapshotPlanner {
     milvusOption.segmentID.isEmpty
   }
 
-  private[scan] def buildClientSnapshotOptions(
+  private[read] def buildClientSnapshotOptions(
       baseOptions: Map[String, String],
       collectionName: String,
       collectionId: Long,
@@ -401,7 +401,7 @@ object ClientSnapshotPlanner {
     out
   }
 
-  private[scan] def validateClientSnapshotMetadata(
+  private[read] def validateClientSnapshotMetadata(
       metadata: SnapshotMetadata,
       snapshotPath: String
   ): SnapshotMetadata = {

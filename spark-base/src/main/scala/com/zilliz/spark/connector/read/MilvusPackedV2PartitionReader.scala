@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read
 
 import scala.collection.JavaConverters._
 
@@ -35,13 +35,13 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 object MilvusPackedV2PartitionReader {
   private val ToleratedUnmappedColumns = Set("$meta")
 
-  private[scan] case class FieldMappings(
+  private[read] case class FieldMappings(
       fieldIdToName: Map[Long, String],
       fieldNameToId: Map[String, Long],
       fieldNameToArrowColumn: Map[String, String]
   )
 
-  private[scan] val SystemFieldAliases: Seq[(String, (Long, String))] = Seq(
+  private[read] val SystemFieldAliases: Seq[(String, (Long, String))] = Seq(
     "RowID" -> (0L, "RowID"),
     "row_id" -> (0L, "RowID"),
     "rowid" -> (0L, "RowID"),
@@ -49,7 +49,7 @@ object MilvusPackedV2PartitionReader {
     "timestamp" -> (1L, "Timestamp")
   )
 
-  private[scan] def buildFieldMappings(
+  private[read] def buildFieldMappings(
       milvusSchema: CollectionSchema
   ): FieldMappings = {
     val systemFields = Map(0L -> "RowID", 1L -> "Timestamp")
@@ -75,7 +75,7 @@ object MilvusPackedV2PartitionReader {
     )
   }
 
-  private[scan] def projectedFieldIds(
+  private[read] def projectedFieldIds(
       sourceSchema: StructType,
       fieldMappings: FieldMappings,
       neededColumnFieldIds: Seq[Long],
@@ -95,7 +95,7 @@ object MilvusPackedV2PartitionReader {
     }
   }
 
-  private[scan] def rowDeleted(
+  private[read] def rowDeleted(
       deletePlan: MilvusDeletePlan,
       pkField: FieldSchema,
       pkVector: org.apache.arrow.vector.ValueVector,
@@ -133,7 +133,7 @@ object MilvusPackedV2PartitionReader {
     }
   }
 
-  private[scan] def resolveNeededColumns(
+  private[read] def resolveNeededColumns(
       sourceSchema: StructType,
       columnGroups: Seq[V2ColumnGroup],
       fieldMappings: FieldMappings,

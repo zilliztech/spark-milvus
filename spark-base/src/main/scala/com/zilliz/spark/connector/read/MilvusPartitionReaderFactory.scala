@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
@@ -18,7 +18,7 @@ import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
 
 object MilvusPartitionReaderFactory {
-  private[scan] def requestedExtraColumns(
+  private[read] def requestedExtraColumns(
       optionsMap: Map[String, String]
   ): Set[String] = {
     optionsMap
@@ -35,7 +35,7 @@ object MilvusPartitionReaderFactory {
       .toSet
   }
 
-  private[scan] def isMetadataExtraField(
+  private[read] def isMetadataExtraField(
       name: String,
       requestedExtraColumns: Set[String]
   ): Boolean =

@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read
 
 import org.apache.arrow.vector.BigIntVector
 import org.apache.spark.sql.types.{

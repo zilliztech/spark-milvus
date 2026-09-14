@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read.plan
 
 import org.apache.spark.sql.connector.read.InputPartition
 
@@ -12,7 +12,7 @@ import io.milvus.grpc.schema.CollectionSchema
   * `full_meta.json` is translated into the same `V2SegmentInfo` the snapshot
   * path uses, so delete planning and the packed-V2 reader are shared.
   */
-private[scan] final class BackupPlanner(
+private[read] final class BackupPlanner(
     ctx: ScanContext,
     preParsedBackupMeta: Option[BackupMetaReader.BackupInfo]
 ) extends PartitionPlanner(ctx) {

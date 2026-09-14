@@ -111,7 +111,7 @@ object CapabilityIndex {
     }.getOrElse(Seq.empty)
 
   /** Pulls the package names out of a 实现位置 cell, which is prose with
-    * package names embedded: "spark.scan 的 SupportsReportPartitioning →
+    * package names embedded: "spark.read 的 SupportsReportPartitioning →
     * core.read.plan".
     */
   private def locationsIn(cell: String): Seq[String] = {

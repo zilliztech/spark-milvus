@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.scan
+package com.zilliz.spark.connector.read.plan
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
@@ -21,7 +21,7 @@ import io.milvus.grpc.schema.CollectionSchema
   * carry them in the manifest at the read version, which is resolved here too.
   */
 object DeletePlanning extends Logging {
-  private[scan] case class V3DeletePlanning(
+  private[read] case class V3DeletePlanning(
       deletePlans: Map[
         Long,
         com.zilliz.milvus.storage.delete.MilvusDeletePlan
@@ -29,11 +29,11 @@ object DeletePlanning extends Logging {
       readVersions: Map[Long, Long]
   )
 
-  private[scan] object V3DeletePlanning {
+  private[read] object V3DeletePlanning {
     val empty: V3DeletePlanning = V3DeletePlanning(Map.empty, Map.empty)
   }
 
-  private[scan] def loadV2DeletePlans(
+  private[read] def loadV2DeletePlans(
       ctx: ScanContext,
       v2Segments: Seq[V2SegmentInfo],
       schemaBytes: Array[Byte],
@@ -79,7 +79,7 @@ object DeletePlanning extends Logging {
     }
   }
 
-  private[scan] def loadV3DeletePlanning(
+  private[read] def loadV3DeletePlanning(
       ctx: ScanContext,
       manifestList: Seq[StorageV2ManifestItem],
       schemaBytes: Array[Byte],
