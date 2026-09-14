@@ -195,14 +195,12 @@ definition that exists nowhere else in the repository. Use the official name for
 an official concept, define an abbreviation the first time it appears, and when
 you reach for a comparison, describe the thing instead.
 
-This is not a style preference. Asked what the storage access layer is for, an
-explanation in this session called it the part that "fetches bytes" as opposed
-to the packages that "interpret bytes". Both terms were invented on the spot and
-appear nowhere else, and the question had to be asked three times before the
-answer was concrete: reading one table means physically opening five kinds of
-file — the snapshot JSON, the segment manifest, a parquet footer, the delete
-files and the column group data — of which the JVM opens four and the native
-library opens the fifth. That sentence was available the whole time.
+This is not a style preference. "The layer that fetches bytes, as opposed to
+the layers that interpret them" names nothing a reader can check. "Reading one
+table means opening five kinds of file — the snapshot JSON, the segment
+manifest, a parquet footer, the delete files and the column group data, of which
+the JVM opens four and the native library opens the fifth" answers the same
+question and can be verified against the code. Write the second kind.
 `docs/writing.md` has the full list of banned forms; it applies to explanations,
 code comments and naming, not only to documents.
 

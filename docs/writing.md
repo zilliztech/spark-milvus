@@ -6,8 +6,7 @@ length and carried more information afterwards; what went was dilution.
 
 ## Format
 
-Markdown is pleasant to write and an agent writes these documents now, so ease
-of writing is not the constraint. Ease of *reading* is. HTML carries diagrams,
+Ease of writing is not the constraint here. Ease of *reading* is. HTML carries diagrams,
 tables that hold their shape, and cross-links; Markdown flattens all three.
 
 **HTML** for the detail level: every subsystem design under `docs/design`.
@@ -44,7 +43,6 @@ capability index. Detailed designs belong in topic directories.
 
 - `architecture/` holds the overall architecture and module boundaries.
 - `engineering/` holds build and development conventions, including sbt.
-- `research/` holds comparisons with external projects and alternative designs.
 
 Add other topic directories when actual subsystem documents need a home. Keep
 related documents together; add another level only when it separates meaningful
