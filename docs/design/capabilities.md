@@ -21,7 +21,7 @@
 | R11 | Limit 下推 | `limit` | spark.scan | | P1 |
 | R18 | 运行时过滤 | 自动；join 侧的过滤值下推到段和 row group | spark.scan（SupportsRuntimeV2Filtering）→ core.stats | R9、R10 的统计到位 | P1 |
 | R12 | 元数据列 | `_segment_id`、`_row_offset`、`_timestamp`；`partition` 列是否保留、用 `_` 还是 1.x 的 `$` 见决策 5 | spark.table 声明，spark.scan 拼进批和行 | | P1 |
-| R13 | 表统计 | 自动；行数和字节数给 Spark 选 join 策略 | spark.table ← core.snapshot | | P1 |
+| R13 | 表统计 | 自动；行数和字节数给 Spark 选 join 策略 | spark.scan ← core.read.plan | | P1 |
 | R14 | 回表 | 下游算子按 (段 id, 行号) 取列 | core.read.exec 的 take | R12 | P1 |
 | R15 | 类型覆盖 | 标量、VarChar、JSON、Array、Float/Float16/BFloat16/Int8/Binary/Sparse 向量、Text（大对象只在列批里放引用，正文按需取；引用带正文字节数，写侧才能在值还只有几百字节时按真实大小顶批量上限）、nullable 向量（变长 Binary，压紧后生成 valid 位图，非零拷贝） | core.schema 定 Milvus 与 Arrow 的映射，spark.types 定 Arrow 与 Spark 的映射 | 透传还是转换见决策 6 | P0 |
 | R16 | 分区和段选择 | option `milvus.partitions`、`milvus.segments` | spark.scan → core.snapshot 过滤段列表 | 1.x 的 `milvus.partition.name`、`milvus.partition.id`、`milvus.segment.id` 映射到这两个键，见 K4 | P1 |

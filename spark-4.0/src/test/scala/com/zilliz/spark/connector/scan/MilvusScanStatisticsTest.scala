@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.sources
+package com.zilliz.spark.connector.scan
 
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.types._
@@ -10,10 +10,6 @@ import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.scan.{
-  MilvusPackedV2InputPartition,
-  MilvusStorageV3InputPartition
-}
 
 /** R13: the statistics Spark uses to pick a join strategy. */
 class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
@@ -46,7 +42,9 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
       options
     )
 
-  test("row width: a vector is dimension times element width, not defaultSize") {
+  test(
+    "row width: a vector is dimension times element width, not defaultSize"
+  ) {
     val schema = StructType(
       Seq(
         StructField("id", LongType),
@@ -61,7 +59,9 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
 
   test("numRows and sizeInBytes come from the plan") {
     val schema =
-      StructType(Seq(StructField("id", LongType), vector("v", "FloatVector", 4L)))
+      StructType(
+        Seq(StructField("id", LongType), vector("v", "FloatVector", 4L))
+      )
     val stats = MilvusScan.statisticsFor(Array(v2(10L), v2(20L)), schema)
     stats.numRows().getAsLong shouldBe 30L
     stats.sizeInBytes().getAsLong shouldBe 30L * (8L + 16L)

@@ -3,12 +3,10 @@ package com.zilliz.spark.connector.options
 import java.net.URI
 import scala.collection.Map
 
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileStatus, Path}
+import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.client.api.MilvusConnectionParams
-import com.zilliz.milvus.client.MilvusConnectionException
 
 /** Vector search configuration for Milvus Storage V2
   */
@@ -290,6 +288,20 @@ object MilvusOption {
 
   def isBackupMode(options: CaseInsensitiveStringMap): Boolean =
     backupDir(options).isDefined
+
+  /** Where the read takes its segment list from, decided once from the options.
+    * Snapshot options win over `milvus.backup.dir`; the two together are
+    * rejected by `validateBackupModeOptions`.
+    */
+  def readMode(options: CaseInsensitiveStringMap): ReadMode =
+    if (isSnapshotMode(options)) ReadMode.Snapshot
+    else if (isBackupMode(options)) ReadMode.Backup
+    else ReadMode.Client
+
+  def readMode(options: Map[String, String]): ReadMode =
+    if (isSnapshotMode(options)) ReadMode.Snapshot
+    else if (isBackupMode(options)) ReadMode.Backup
+    else ReadMode.Client
 
   /** Backup mode reads a milvus-backup binlog-format export offline. It is
     * mutually exclusive with snapshot mode: pick one source of truth for the
@@ -581,4 +593,21 @@ object MilvusS3Option {
       options.getOrDefault(MilvusOption.S3PreloadPoolSize, "4").toInt
     )
   }
+}
+
+/** The three sources a read can take its segment list from. */
+sealed trait ReadMode
+
+object ReadMode {
+
+  /** The `milvus.snapshot.*` options carry the manifest and segment lists. */
+  case object Snapshot extends ReadMode
+
+  /** `milvus.backup.dir` points at a milvus-backup export. */
+  case object Backup extends ReadMode
+
+  /** A live Milvus service: the client snapshot fast path, or the legacy
+    * segment listing when a selector rules the fast path out.
+    */
+  case object Client extends ReadMode
 }

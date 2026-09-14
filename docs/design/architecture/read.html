@@ -110,10 +110,10 @@
 
 <table>
 <tr><th>入口</th><th>触发</th><th>产出</th></tr>
-<tr><td><code>planInputPartitionsFromClientSnapshot</code></td><td>默认路径:gRPC 建快照,服务端已把两类段分开返回</td><td>V3 + V2</td></tr>
-<tr><td><code>planInputPartitionsFromSnapshot</code></td><td>snapshot 模式,选项里直接给 manifest 列表和 V2 段列表</td><td>V3 + V2</td></tr>
-<tr><td><code>planInputPartitionsFromBackup</code></td><td>backup 模式,<code>BackupMetaReader.toV2Segments</code> 转备份元数据</td><td>只有 V2</td></tr>
-<tr><td><code>planInputPartitionsFromLegacyClient</code></td><td>指定了 partition/segment,快照快路径关掉时</td><td>只有 V3;遇到 V2 段报错,让用户改用快照模式</td></tr>
+<tr><td><code>ClientSnapshotPlanner</code></td><td>默认路径:gRPC 建快照,服务端已把两类段分开返回</td><td>V3 + V2</td></tr>
+<tr><td><code>OptionSnapshotPlanner</code></td><td>snapshot 模式,选项里直接给 manifest 列表和 V2 段列表</td><td>V3 + V2</td></tr>
+<tr><td><code>BackupPlanner</code></td><td>backup 模式,<code>BackupMetaReader.toV2Segments</code> 转备份元数据</td><td>只有 V2</td></tr>
+<tr><td><code>LegacyClientPlanner</code></td><td>指定了 partition/segment,快照快路径关掉时</td><td>只有 V3;遇到 V2 段报错,让用户改用快照模式</td></tr>
 </table>
 
 <p>driver 侧要开的四类文件——快照 manifest、V2 段的 manifest 与 parquet footer、删除日志、备份元数据——
@@ -127,7 +127,7 @@
 
 <p><code>insert_log/{collection}/{partition}/{segment}</code> 是 Milvus 放段数据的目录,
 与 storage_version 无关。V3 的 manifest basePath 就在这个目录下,
-<code>buildSnapshotPartitions</code> 正是靠 <code>pathParts.lastIndexOf("insert_log")</code>
+<code>SnapshotPartitions.build</code> 正是靠 <code>pathParts.lastIndexOf("insert_log")</code>
 往后数两级反推 partitionID。看到 <code>insert_log</code> 就断定是 V1,是读错了——
 UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,末尾也是 <code>PAR1</code>,
 中间没有 Milvus 的 event 头,是一个 V2 列组的纯 parquet。</p>
@@ -141,7 +141,7 @@ UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,�
 
 <table>
 <tr><th></th><th>状态</th></tr>
-<tr><td>driver 侧</td><td>做完了。<code>MilvusScan.storeFor</code> 建 <code>NativeObjectStore</code>,属性由连接器自己的 <code>fs.*</code> 选项与 <code>fs.s3a.*</code>/<code>fs.oss.*</code> 翻译出来的键合并,前者优先;桶为空时用 <code>fs.storage_type=local</code>。<code>core.io.hadoop</code> 已删除,core 与 compat 的主代码里没有一处 <code>org.apache.hadoop</code></td></tr>
+<tr><td>driver 侧</td><td>做完了。<code>StorageOptions.storeFor</code> 建 <code>NativeObjectStore</code>,属性由连接器自己的 <code>fs.*</code> 选项与 <code>fs.s3a.*</code>/<code>fs.oss.*</code> 翻译出来的键合并,前者优先;桶为空时用 <code>fs.storage_type=local</code>。<code>core.io.hadoop</code> 已删除,core 与 compat 的主代码里没有一处 <code>org.apache.hadoop</code></td></tr>
 <tr><td>executor 侧</td><td>已经走我们的 JNI。还没做的是把分发与出口下沉到 <code>core.read.exec</code>——现在它们仍然是 spark 层的两个分支</td></tr>
 <tr><td>代价</td><td>driver 现在要能加载 <code>libmilvus-storage</code>。CI 不构建原生库,所以这条路径在 CI 上没有端到端覆盖;单元测试用 <code>LocalObjectStore</code> 覆盖各格式的解析</td></tr>
 </table>

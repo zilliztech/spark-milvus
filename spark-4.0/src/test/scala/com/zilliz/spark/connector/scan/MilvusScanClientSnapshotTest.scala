@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.sources
+package com.zilliz.spark.connector.scan
 
 import java.{util => ju}
 import java.net.URI
@@ -17,7 +17,6 @@ import org.apache.hadoop.fs.{
 }
 import org.apache.hadoop.fs.permission.FsPermission
 import org.apache.hadoop.util.Progressable
-import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.types.{
   ArrayType,
   BinaryType,
@@ -54,12 +53,12 @@ import com.zilliz.milvus.storage.snapshot.{
   V2SegmentInfo
 }
 import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.scan.{
-  MilvusPackedV2InputPartition,
-  MilvusStorageV3InputPartition
+import com.zilliz.spark.connector.options.{
+  BackupSelection,
+  MilvusOption,
+  StorageOptions
 }
-import com.zilliz.spark.connector.serde.ArrowConverter
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.table.MilvusTable
 
 class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(
@@ -191,7 +190,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     "resolveClientSnapshotLocation prefixes bucket-relative snapshot locations"
   ) {
     assert(
-      MilvusScan.resolveClientSnapshotLocation(
+      StorageOptions.resolveClientSnapshotLocation(
         "files/snapshots/1/metadata/2.json",
         "a-bucket"
       ) == "s3a://a-bucket/files/snapshots/1/metadata/2.json"
@@ -200,7 +199,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
   test("resolveClientSnapshotLocation normalizes s3 scheme to s3a") {
     assert(
-      MilvusScan.resolveClientSnapshotLocation(
+      StorageOptions.resolveClientSnapshotLocation(
         "s3://a-bucket/files/snapshots/1/metadata/2.json",
         "ignored"
       ) == "s3a://a-bucket/files/snapshots/1/metadata/2.json"
@@ -211,7 +210,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     Seq("gs://a-bucket/files/snapshot.json", "file:///tmp/snapshot.json")
       .foreach { location =>
         val err = intercept[IllegalArgumentException] {
-          MilvusScan.resolveClientSnapshotLocation(location, "ignored")
+          StorageOptions.resolveClientSnapshotLocation(location, "ignored")
         }
         assert(
           err.getMessage.contains("Unsupported snapshot s3_location scheme")
@@ -221,7 +220,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
   test("snapshotBucket extracts authority when URI host is null") {
     assert(
-      MilvusScan.snapshotBucket(
+      StorageOptions.snapshotBucket(
         "s3a://snapshot_bucket/files/snapshots/1/metadata/2.json"
       ) == Some("snapshot_bucket")
     )
@@ -229,7 +228,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
   test("snapshotBucket returns None for bucket-relative snapshot locations") {
     assert(
-      MilvusScan.snapshotBucket("files/snapshots/1/metadata/2.json") == None
+      StorageOptions.snapshotBucket("files/snapshots/1/metadata/2.json") == None
     )
   }
 
@@ -237,20 +236,22 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     // Non-S3 locations carry no bucket to configure; explicit scheme
     // validation lives in resolveClientSnapshotLocation.
     assert(
-      MilvusScan.snapshotBucket("gs://a-bucket/files/snapshot.json") == None
+      StorageOptions.snapshotBucket("gs://a-bucket/files/snapshot.json") == None
     )
-    assert(MilvusScan.snapshotBucket("file:///data/backup/b1") == None)
+    assert(StorageOptions.snapshotBucket("file:///data/backup/b1") == None)
   }
 
   test("backupMaxJsonBytes honors milvus.snapshot.max.json.bytes") {
     val withLimit = new ju.HashMap[String, String]()
     withLimit.put(MilvusOption.SnapshotMaxJsonBytes, "1048576")
     assert(
-      MilvusScan.backupMaxJsonBytes(new CaseInsensitiveStringMap(withLimit)) ==
+      StorageOptions.backupMaxJsonBytes(
+        new CaseInsensitiveStringMap(withLimit)
+      ) ==
         1048576L
     )
     assert(
-      MilvusScan.backupMaxJsonBytes(
+      StorageOptions.backupMaxJsonBytes(
         new CaseInsensitiveStringMap(new ju.HashMap[String, String]())
       ) ==
         MilvusSnapshotReader.MaxSnapshotJsonBytes
@@ -293,7 +294,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       )
     )
 
-    val partitions = scan.buildSnapshotPartitions(
+    val partitions = SnapshotPartitions.build(
+      scan.ctx,
       manifestList = Seq.empty,
       defaultPartitionId = "0",
       schemaBytes = Array.emptyByteArray,
@@ -304,7 +306,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     assert(partitions.length == 1)
     val spec = partitions.head
-      .asInstanceOf[com.zilliz.spark.connector.scan.MilvusPackedV2InputPartition]
+      .asInstanceOf[
+        com.zilliz.spark.connector.scan.MilvusPackedV2InputPartition
+      ]
       .spec
     assert(spec.properties("fs.bucket_name") == "backup-bucket")
   }
@@ -384,20 +388,20 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
         Seq(coll("orders", 1L, "db1"), coll("orders", 2L, "db2"))
     )
     assert(
-      MilvusScan
+      BackupSelection
         .resolveBackupCollection(multi, "db1", "orders")
         .map(_.collectionId) ==
         Right(1L)
     )
     assert(
-      MilvusScan
+      BackupSelection
         .resolveBackupCollection(multi, "db2", "orders")
         .map(_.collectionId) ==
         Right(2L)
     )
-    assert(MilvusScan.resolveBackupCollection(multi, "db1", "nope").isLeft)
-    assert(MilvusScan.resolveBackupCollection(multi, "", "orders").isLeft)
-    assert(MilvusScan.resolveBackupCollection(multi, "", "").isLeft)
+    assert(BackupSelection.resolveBackupCollection(multi, "db1", "nope").isLeft)
+    assert(BackupSelection.resolveBackupCollection(multi, "", "orders").isLeft)
+    assert(BackupSelection.resolveBackupCollection(multi, "", "").isLeft)
 
     // "default" database is equivalent to an empty db_name (older backups omit
     // it), in both directions.
@@ -412,7 +416,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       )
     )
     assert(
-      MilvusScan
+      BackupSelection
         .resolveBackupCollection(defaultDb, "default", "orders")
         .map(_.collectionId) == Right(9L)
     )
@@ -427,7 +431,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       )
     )
     assert(
-      MilvusScan
+      BackupSelection
         .resolveBackupCollection(namedDefault, "", "orders")
         .map(_.collectionId) == Right(10L)
     )
@@ -450,12 +454,12 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       )
     )
     assert(
-      MilvusScan
+      BackupSelection
         .resolveBackupCollection(mixed, "default", "orders")
         .map(_.collectionId) == Right(11L)
     )
     assert(
-      MilvusScan
+      BackupSelection
         .resolveBackupCollection(mixed, "db2", "orders")
         .map(_.collectionId) == Right(12L)
     )
@@ -465,7 +469,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       collectionBackups = Seq(coll("only", 3L))
     )
     assert(
-      MilvusScan.resolveBackupCollection(single, "", "").map(_.collectionId) ==
+      BackupSelection
+        .resolveBackupCollection(single, "", "")
+        .map(_.collectionId) ==
         Right(3L)
     )
   }
@@ -474,7 +480,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     "validateSnapshotBucketForRelativeDataPaths rejects cross-bucket relative data paths"
   ) {
     val err = intercept[IllegalArgumentException] {
-      MilvusScan.validateSnapshotBucketForRelativeDataPaths(
+      ClientSnapshotPlanner.validateSnapshotBucketForRelativeDataPaths(
         "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
         Some("connector-bucket"),
         Seq(
@@ -495,7 +501,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     "validateSnapshotBucketForRelativeDataPaths rejects unset connector bucket with relative V3 paths"
   ) {
     val err = intercept[IllegalArgumentException] {
-      MilvusScan.validateSnapshotBucketForRelativeDataPaths(
+      ClientSnapshotPlanner.validateSnapshotBucketForRelativeDataPaths(
         "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
         None,
         Seq(
@@ -516,7 +522,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     "validateSnapshotBucketForRelativeDataPaths rejects unset connector bucket with relative V2 paths"
   ) {
     val err = intercept[IllegalArgumentException] {
-      MilvusScan.validateSnapshotBucketForRelativeDataPaths(
+      ClientSnapshotPlanner.validateSnapshotBucketForRelativeDataPaths(
         "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
         None,
         Seq.empty,
@@ -545,7 +551,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   test(
     "validateSnapshotBucketForRelativeDataPaths accepts cross-bucket fully-qualified data paths"
   ) {
-    MilvusScan.validateSnapshotBucketForRelativeDataPaths(
+    ClientSnapshotPlanner.validateSnapshotBucketForRelativeDataPaths(
       "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
       Some("connector-bucket"),
       Seq(
@@ -576,13 +582,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
   test("snapshotS3BucketForRelativePaths prefers snapshot bucket") {
     assert(
-      MilvusScan.snapshotS3BucketForRelativePaths(
+      StorageOptions.snapshotS3BucketForRelativePaths(
         "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json",
         Map(Properties.FsConfig.FsBucketName -> "connector-bucket")
       ) == Some("snapshot-bucket")
     )
     assert(
-      MilvusScan.snapshotS3BucketForRelativePaths(
+      StorageOptions.snapshotS3BucketForRelativePaths(
         "files/snapshots/1/metadata/2.json",
         Map(Properties.FsConfig.FsBucketName -> "connector-bucket")
       ) == Some("connector-bucket")
@@ -591,13 +597,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
   test("snapshotS3BucketForRelativePaths accepts connector bucket aliases") {
     assert(
-      MilvusScan.snapshotS3BucketForRelativePaths(
+      StorageOptions.snapshotS3BucketForRelativePaths(
         "files/snapshots/1/metadata/2.json",
         Map(MilvusOption.FsBucketName -> "connector-bucket")
       ) == Some("connector-bucket")
     )
     assert(
-      MilvusScan.snapshotS3BucketForRelativePaths(
+      StorageOptions.snapshotS3BucketForRelativePaths(
         "files/snapshots/1/metadata/2.json",
         Map(MilvusOption.S3BucketName -> "connector-bucket")
       ) == Some("connector-bucket")
@@ -606,13 +612,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
   test("snapshotBucketsToConfigure includes cross-bucket snapshot locations") {
     assert(
-      MilvusScan.snapshotBucketsToConfigure(
+      StorageOptions.snapshotBucketsToConfigure(
         "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json",
         "connector-bucket"
       ) == Seq("connector-bucket", "snapshot-bucket")
     )
     assert(
-      MilvusScan.snapshotBucketsToConfigure(
+      StorageOptions.snapshotBucketsToConfigure(
         "s3a://connector-bucket/files/snapshots/1/metadata/2.json",
         "connector-bucket"
       ) == Seq("connector-bucket")
@@ -621,7 +627,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
   test("resolveConnectorS3Bucket trims configured bucket") {
     assert(
-      MilvusScan.resolveConnectorS3Bucket(
+      StorageOptions.resolveConnectorS3Bucket(
         Map(Properties.FsConfig.FsBucketName -> " connector-bucket ")
       ) == "connector-bucket"
     )
@@ -631,7 +637,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     Seq(Map.empty[String, String], Map(Properties.FsConfig.FsBucketName -> " "))
       .foreach { options =>
         val err = intercept[IllegalArgumentException] {
-          MilvusScan.resolveConnectorS3Bucket(options)
+          StorageOptions.resolveConnectorS3Bucket(options)
         }
         assert(err.getMessage.contains(Properties.FsConfig.FsBucketName))
       }
@@ -640,7 +646,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   test("buildSnapshotHadoopConf disables S3A FileSystem cache") {
     val rawOptions = new ju.HashMap[String, String]()
     rawOptions.put(Properties.FsConfig.FsBucketName, "connector-bucket")
-    val conf = scanWithOptions(rawOptions).buildSnapshotHadoopConf(
+    val conf = scanWithOptions(rawOptions).ctx.hadoopConf(
       "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
     )
     assert(conf.get("fs.s3a.impl.disable.cache") == "true")
@@ -656,7 +662,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     rawOptions.put(Properties.FsConfig.FsRegion, "us-west-2")
     rawOptions.put(Properties.FsConfig.FsUseVirtualHost, "false")
 
-    val conf = scanWithOptions(rawOptions).buildSnapshotHadoopConf(
+    val conf = scanWithOptions(rawOptions).ctx.hadoopConf(
       "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json"
     )
 
@@ -692,7 +698,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     rawOptions.put(Properties.FsConfig.FsAccessKeyId, "ak")
     rawOptions.put(Properties.FsConfig.FsAccessKeyValue, "sk")
 
-    val conf = scanWithOptions(rawOptions).buildSnapshotHadoopConf(
+    val conf = scanWithOptions(rawOptions).ctx.hadoopConf(
       "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
     )
 
@@ -713,10 +719,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   test(
     "buildSnapshotHadoopConf accepts snapshot bucket without connector bucket"
   ) {
-    val conf = scanWithOptions(new ju.HashMap[String, String]())
-      .buildSnapshotHadoopConf(
-        "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json"
-      )
+    val conf = scanWithOptions(new ju.HashMap[String, String]()).ctx.hadoopConf(
+      "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json"
+    )
     assert(conf.get("fs.s3a.impl.disable.cache") == "true")
   }
 
@@ -728,10 +733,11 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       classOf[CloseTrackingFileSystem].getName
     )
     conf.set("fs.close-tracking.impl.disable.cache", "true")
-    val content = scanWithOptions(rawOptions).readAllBytes(
-      conf,
-      "close-tracking://bucket/snapshot.json"
-    )
+    val content =
+      new ClientSnapshotPlanner(scanWithOptions(rawOptions).ctx).readAllBytes(
+        conf,
+        "close-tracking://bucket/snapshot.json"
+      )
     assert(content == "{}")
     assert(CloseTrackingFileSystem.closeCount.get() == 1)
   }
@@ -745,10 +751,11 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       classOf[CloseTrackingFileSystem].getName
     )
     conf.set("fs.close-tracking.impl.disable.cache", "true")
-    val content = scanWithOptions(rawOptions).readAllBytes(
-      conf,
-      "/snapshot.json"
-    )
+    val content =
+      new ClientSnapshotPlanner(scanWithOptions(rawOptions).ctx).readAllBytes(
+        conf,
+        "/snapshot.json"
+      )
     assert(content == "{}")
     assert(CloseTrackingFileSystem.closeCount.get() == 0)
     assert(conf.get("fs.null.impl.disable.cache") == null)
@@ -761,19 +768,21 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       MilvusOption.MilvusUri -> "http://localhost:19530",
       MilvusOption.MilvusCollectionName -> "c"
     )
-    assert(MilvusScan.canUseClientSnapshotFastPath(MilvusOption(base)))
     assert(
-      !MilvusScan.canUseClientSnapshotFastPath(
+      ClientSnapshotPlanner.canUseClientSnapshotFastPath(MilvusOption(base))
+    )
+    assert(
+      !ClientSnapshotPlanner.canUseClientSnapshotFastPath(
         MilvusOption(base + (MilvusOption.MilvusPartitionName -> "p"))
       )
     )
     assert(
-      !MilvusScan.canUseClientSnapshotFastPath(
+      !ClientSnapshotPlanner.canUseClientSnapshotFastPath(
         MilvusOption(base + (MilvusOption.MilvusPartitionID -> "20"))
       )
     )
     assert(
-      !MilvusScan.canUseClientSnapshotFastPath(
+      !ClientSnapshotPlanner.canUseClientSnapshotFastPath(
         MilvusOption(base + (MilvusOption.MilvusSegmentID -> "30"))
       )
     )
@@ -1114,7 +1123,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       MilvusOption.SnapshotCollectionId -> "old",
       MilvusOption.SnapshotSchemaJson -> "stale-schema-json"
     )
-    val out = MilvusScan.buildClientSnapshotOptions(
+    val out = ClientSnapshotPlanner.buildClientSnapshotOptions(
       baseOptions = base,
       collectionName = "snapshot_collection",
       collectionId = 10L,
@@ -1134,7 +1143,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test("buildClientSnapshotOptions overrides relative-path bucket") {
-    val out = MilvusScan.buildClientSnapshotOptions(
+    val out = ClientSnapshotPlanner.buildClientSnapshotOptions(
       baseOptions = Map(
         Properties.FsConfig.FsBucketName.toUpperCase -> "connector-bucket"
       ),
@@ -1182,7 +1191,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
         value
       )
       val err = intercept[IllegalArgumentException] {
-        MilvusScan.parsePositiveLongOption(
+        StorageOptions.parsePositiveLongOption(
           new CaseInsensitiveStringMap(rawOptions),
           MilvusOption.ClientSnapshotCompactionProtectionSeconds,
           86400L
@@ -1200,7 +1209,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     val rawOptions = new ju.HashMap[String, String]()
     rawOptions.put(MilvusOption.SnapshotMaxJsonBytes, "not-a-number")
     val err = intercept[IllegalArgumentException] {
-      scanWithOptions(rawOptions).readAllBytes(
+      new ClientSnapshotPlanner(scanWithOptions(rawOptions).ctx).readAllBytes(
         new Configuration(),
         "close-tracking://bucket/snapshot.json"
       )
@@ -1217,7 +1226,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       (8L * 24L * 60L * 60L).toString
     )
     val err = intercept[IllegalArgumentException] {
-      MilvusScan.parseClientSnapshotCompactionProtectionSeconds(
+      ClientReadSnapshot.parseClientSnapshotCompactionProtectionSeconds(
         new CaseInsensitiveStringMap(rawOptions)
       )
     }
@@ -1229,7 +1238,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test("preserveResultWhenCloseFails keeps the original cleanup result") {
-    val ok = MilvusScan.preserveResultWhenCloseFails(
+    val ok = ClientReadSnapshot.preserveResultWhenCloseFails(
       Success(()),
       throw new RuntimeException("close failed"),
       "test client"
@@ -1237,7 +1246,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(ok == Success(()))
 
     val original = new RuntimeException("drop failed")
-    val failed = MilvusScan.preserveResultWhenCloseFails(
+    val failed = ClientReadSnapshot.preserveResultWhenCloseFails(
       Failure(original),
       (),
       "test client"
@@ -1249,7 +1258,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     "ensureClientSnapshotHasPackedSegments rejects filtered-empty snapshots"
   ) {
     val err = intercept[IllegalArgumentException] {
-      MilvusScan.ensureClientSnapshotHasPackedSegments(
+      ClientSnapshotPlanner.ensureClientSnapshotHasPackedSegments(
         Seq.empty,
         Seq.empty,
         "c"
@@ -1260,7 +1269,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test("generatedClientSnapshotName caps long collection names") {
-    val name = MilvusScan.generatedClientSnapshotName(
+    val name = ClientReadSnapshot.generatedClientSnapshotName(
       collectionName = "c" * 300,
       currentTimeMillis = 1L,
       uuid = "u" * 32
@@ -1271,7 +1280,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test("generatedClientSnapshotName sanitizes collection names") {
-    val name = MilvusScan.generatedClientSnapshotName(
+    val name = ClientReadSnapshot.generatedClientSnapshotName(
       collectionName = "col-name.with unicode值",
       currentTimeMillis = 1L,
       uuid = "u" * 32
@@ -1280,7 +1289,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 
   test("buildClientSnapshotOptions enables snapshot mode") {
-    val out = MilvusScan.buildClientSnapshotOptions(
+    val out = ClientSnapshotPlanner.buildClientSnapshotOptions(
       baseOptions = Map(MilvusOption.SnapshotMode.toUpperCase -> "false"),
       collectionName = "snapshot_collection",
       collectionId = 10L,
@@ -1300,7 +1309,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       collection = Collection(CollectionSchema("c", fields = Seq.empty))
     )
     val snapshotInfoErr = intercept[IllegalArgumentException] {
-      MilvusScan.validateClientSnapshotMetadata(
+      ClientSnapshotPlanner.validateClientSnapshotMetadata(
         missingSnapshotInfo,
         snapshotPath
       )
@@ -1312,7 +1321,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       collection = null
     )
     val collectionErr = intercept[IllegalArgumentException] {
-      MilvusScan.validateClientSnapshotMetadata(missingCollection, snapshotPath)
+      ClientSnapshotPlanner.validateClientSnapshotMetadata(
+        missingCollection,
+        snapshotPath
+      )
     }
     assert(collectionErr.getMessage.contains("collection"))
 
@@ -1321,7 +1333,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       collection = Collection(null)
     )
     val schemaErr = intercept[IllegalArgumentException] {
-      MilvusScan.validateClientSnapshotMetadata(missingSchema, snapshotPath)
+      ClientSnapshotPlanner.validateClientSnapshotMetadata(
+        missingSchema,
+        snapshotPath
+      )
     }
     assert(schemaErr.getMessage.contains("collection.schema"))
 
@@ -1332,7 +1347,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       storageV2ManifestList = Some(Seq.empty)
     )
     val emptyErr = intercept[IllegalArgumentException] {
-      MilvusScan.validateClientSnapshotMetadata(emptySnapshot, snapshotPath)
+      ClientSnapshotPlanner.validateClientSnapshotMetadata(
+        emptySnapshot,
+        snapshotPath
+      )
     }
     assert(emptyErr.getMessage.contains("client snapshot is empty"))
     assert(emptyErr.getMessage.contains("no manifests and no V2 segments"))
@@ -1449,7 +1467,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   test("snapshot planner attaches StorageV3 manifest delete plans") {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
     val deletePlan = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
-    val partitions = scan.buildSnapshotPartitions(
+    val partitions = SnapshotPartitions.build(
+      scan.ctx,
       manifestList = Seq(
         StorageV2ManifestItem(
           30L,
@@ -1473,7 +1492,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     "snapshot planner pins StorageV3 raw manifest path to resolved version"
   ) {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
-    val partitions = scan.buildSnapshotPartitions(
+    val partitions = SnapshotPartitions.build(
+      scan.ctx,
       manifestList = Seq(
         StorageV2ManifestItem(
           30L,
@@ -1499,7 +1519,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       20L -> MilvusDeletePlan.fromLongPks(Map(9L -> 140L))
     )
 
-    val partitions = scan.buildSnapshotPartitions(
+    val partitions = SnapshotPartitions.build(
+      scan.ctx,
       manifestList = Seq(
         StorageV2ManifestItem(
           30L,
@@ -1599,7 +1620,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
     val ownPlan = MilvusDeletePlan.fromLongPks(Map(9L -> 140L))
 
-    val partitions = scan.buildSnapshotPartitions(
+    val partitions = SnapshotPartitions.build(
+      scan.ctx,
       manifestList = Seq.empty,
       defaultPartitionId = "20",
       schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
@@ -1653,7 +1675,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
     val ownPlan = MilvusDeletePlan.fromLongPks(Map(9L -> 140L))
 
-    val partitions = scan.buildSnapshotPartitions(
+    val partitions = SnapshotPartitions.build(
+      scan.ctx,
       manifestList = Seq.empty,
       defaultPartitionId = "20",
       schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
@@ -1707,7 +1730,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     // group (slot 3) still reports field 100 from its own schema, and the newer
     // single-field group (slot 100) reports it too. buildSnapshotPartitions
     // must strip the overlapping field from the older slot.
-    val partitions = scan.buildSnapshotPartitions(
+    val partitions = SnapshotPartitions.build(
+      scan.ctx,
       manifestList = Seq.empty,
       defaultPartitionId = "20",
       schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),

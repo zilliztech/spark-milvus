@@ -56,8 +56,12 @@ core. Their `package.scala` files exist and state what belongs there. The same
 is true of `compat.offline` and `apps.legacy`, whose code is still sitting in
 `spark-base`.
 
-Layer 3 holds the 1.x connector code as it was. Splitting it into catalog,
-table, scan, write, options, types and expr is the next refactor, not a move.
+Layer 3 is split by package: `sources` holds only the `format("milvus")`
+entry point, `table` the table, `scan` the scan builder, the scan, the four
+planning entry points and the partition builder, `options` the option parsing
+and the driver's storage access, `types` the type mapping. The planners still
+hold the 1.x planning logic; moving it into `core.read.plan` is the next step.
+`catalog` and `expr` are empty.
 
 Layer 1 is written and in use: `native-storage` wraps the `loon_*` entry points
 for both reading and writing and loads its own libraries. The upstream

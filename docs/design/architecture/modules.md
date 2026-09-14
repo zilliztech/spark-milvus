@@ -201,7 +201,7 @@ spark-milvus/
 | read/MilvusParquetFooterReader.scala | compat 根包 | 已迁。v2packed 和 backup 都要用它 |
 | read/BackupMetaReader.scala | compat.backup | 已迁 |
 | MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数 |
-| sources/MilvusDataSource.scala（2880 行） | spark-base | 已搬。拆成 catalog、table、scan 并把规划逻辑下沉 core 是重构，未做 |
+| sources/MilvusDataSource.scala（2880 行） | spark.sources、spark.table、spark.scan、spark.options | 已拆成 14 个文件，最大 550 行。`sources` 只留 TableProvider（FQN 被 apps 和用户作业按字符串引用，不能动）；MilvusTable→spark.table；ScanBuilder、Scan、四个规划入口（ClientSnapshotPlanner、LegacyClientPlanner、OptionSnapshotPlanner、BackupPlanner）、SnapshotPartitions、DeletePlanning、ClientReadSnapshot→spark.scan；桶判定与 Hadoop 配置翻译（StorageOptions）、备份集合选取（BackupSelection）、ReadMode→spark.options。规划逻辑下沉 core.read.plan 未做，SnapshotPartitions.build 是要下沉的那部分 |
 | MilvusOption.scala、loon/Properties.scala | spark.options、spark-base | 已搬。MilvusOption 在 spark.options；MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。Properties 只剩 FsConfig 的键名常量，全是 core.credential.StorageProperties 的别名；产出上游绑定类型的 fromMilvusOption 已删除 |
 | read/MilvusLoonPartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusPackedV2PartitionReader.scala | spark-base | 已搬。两个 reader 已改调 native-storage 的 JNI，不再经上游绑定；分发与出口下沉 core.read.exec、重写为列式仍是重构，未做 |
 | serde/ArrowConverter.scala | spark-base | 已搬。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |

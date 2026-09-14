@@ -64,7 +64,7 @@ backup-side changes and works on any existing binlog-format export.
 | Packed read requires exact `fileRowCounts` | `MilvusPackedV2PartitionReader.scala`; `v2_column_groups_builder.h` |
 | Real field IDs are recoverable from each parquet file's own schema (`PARQUET:field_id`) | `MilvusParquetFooterReader.readFieldIdsFromSchema` |
 | Delta-log decoding uses only `logPath`; `entriesNum` is unused | `MilvusDeltaLogReader.scala` |
-| L0 (delete-only) segments have no column groups; they feed partition-scoped inherited delete plans | `MilvusDataSource.scala` |
+| L0 (delete-only) segments have no column groups; they feed partition-scoped inherited delete plans | `BackupPlanner.scala` |
 
 ## 3. Overall Design
 
@@ -73,13 +73,13 @@ A new **backup offline mode** sits alongside snapshot mode:
 ```
 MilvusDataSource / MilvusTable  isBackupMode? ─┐
                                               ▼
-MilvusScan.computeInputPartitions ──> planInputPartitionsFromBackup()
+MilvusScan.computeInputPartitions ──> BackupPlanner.plan()
                                               │   via BackupMetaReader
                                               ▼
                            (schemaBytes, Seq[V2SegmentInfo])
                                               │   reuse
                                               ▼
-                    buildSnapshotPartitions() → MilvusPackedV2InputPartition[]
+                    SnapshotPartitions.build() → MilvusPackedV2InputPartition[]
                                               │
               createReaderFactory() → MilvusPackedV2PartitionReader (unchanged)
 ```
@@ -183,7 +183,7 @@ Behavior:
   footer-read path the backup planner uses. (A `FileSystem` overload reuses one
   instance across a read.)
 
-### 4.4 `src/main/scala/sources/MilvusDataSource.scala`
+### 4.4 `spark-base/.../scan/BackupPlanner.scala` (was `sources/MilvusDataSource.scala`)
 
 - `MilvusDataSource.getTable` / `inferSchema`: allow backup mode without
   `milvus.uri`; enforce snapshot/backup mutual exclusion; return an empty
@@ -194,11 +194,11 @@ Behavior:
   `.schema()` is supplied and the meta is unreadable — so metadata rehydration
   for vector columns works like snapshot mode), and `schema()` handling for
   offline modes.
-- `MilvusScan.planInputPartitionsFromBackup()`: resolves the collection by
-  `milvus.database.name` + `milvus.collection.name` (`resolveBackupCollection`,
+- `BackupPlanner.plan()`: resolves the collection by
+  `milvus.database.name` + `milvus.collection.name` (`BackupSelection.resolveBackupCollection`,
   ambiguous names rejected), rejects partition/segment selectors, validates
   that the meta carries a collection schema with a primary key, builds
-  `V2SegmentInfo`, and hands everything to the shared `buildSnapshotPartitions`
+  `V2SegmentInfo`, and hands everything to the shared `SnapshotPartitions.build`
   with `inlineInheritedDeletePlans = false`: backup partitions carry a
   partition-scoped marker and the reader factory computes the shared L0 delete
   plan **independently from the parsed meta** (not as a planning side effect),
@@ -209,17 +209,16 @@ Behavior:
   reader factory. If table init did not parse the meta (e.g. its read failed
   while the planner's succeeded), the factory falls back to a fresh meta read
   rather than silently resolving every marker to an empty plan.
-- Shared `buildSnapshotPartitions` dedups each segment's column groups by slot
+- Shared `SnapshotPartitions.build` dedups each segment's column groups by slot
   (`V2SegmentInfo.dedupColumnGroupsBySlot`) so a field carried by an old
   multi-field group and a newer single-field group (add-field + backfill) is
   read from the newest owner — the same gap the snapshot read path had.
   `MilvusBackfill.dedupColumnGroupsBySlot` delegates to the same method, so the
   rule has a single implementation.
-- `MilvusScan.pushFilters`: backup mode returns all filters as unsupported
+- `MilvusScanBuilder.pushFilters`: backup mode returns all filters as unsupported
   (the packed-V2 reader has no filter pushdown), matching the packed-V2 snapshot
   path.
-- `MilvusScan.buildSnapshotHadoopConf` refactored into the companion
-  `buildHadoopConfForOptions(rawOptions, path)` so both the planner and table
+- `StorageOptions.buildHadoopConfForOptions(rawOptions, path)` is shared so both the planner and table
   schema rehydration share it. `snapshotBucket` now treats non-S3 schemes as
   "no bucket" (so `file://` backup dirs don't raise a snapshot-flavoured error).
 
