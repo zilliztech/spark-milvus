@@ -43,7 +43,7 @@ module table.
 The design documents describe the finished 2.0. Most of layer 2's computation is
 not written yet. Read them as a target, not as a description of the code.
 
-Done: the 1.x sources are all in their modules and `src/` no longer exists. 671
+Done: the 1.x sources are all in their modules and `src/` no longer exists. 662
 unit tests pass. `core` has schema, codec, snapshot, manifest, delete, path,
 credential and `io.ObjectStore` over the native filesystem; `compat` has the V2
 packed and backup entry points; `client` is complete. Every driver-side read

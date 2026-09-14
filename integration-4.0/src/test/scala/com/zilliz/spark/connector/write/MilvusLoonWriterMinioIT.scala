@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.loon
+package com.zilliz.spark.connector.write
 
 import scala.util.{Failure, Success}
 

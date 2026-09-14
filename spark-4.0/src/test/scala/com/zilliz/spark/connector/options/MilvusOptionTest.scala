@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.options
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import com.zilliz.milvus.storage.credential.StorageProperties
 
 /** Unit tests for MilvusOption parsing and validation
   */
@@ -492,5 +493,48 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
         MilvusOption.SnapshotV2Segments -> ""
       )
     )
+  }
+
+  // Validation itself lives in core.credential and is tested there
+  // (StoragePropertiesTest). These check that MilvusOption's map reaches it,
+  // which is what every reader and writer does at construction.
+
+  test("a MilvusOption without a bucket name is rejected") {
+    val err = intercept[IllegalArgumentException] {
+      StorageProperties.from(
+        MilvusOption(
+          Map(MilvusOption.MilvusUri -> "http://localhost:19530")
+        ).options
+      )
+    }
+    assert(err.getMessage.contains(StorageProperties.BucketName))
+  }
+
+  test("a blank value counts as missing") {
+    val err = intercept[IllegalArgumentException] {
+      StorageProperties.from(
+        MilvusOption(
+          Map(
+            MilvusOption.MilvusUri -> "http://localhost:19530",
+            StorageProperties.BucketName -> "   "
+          )
+        ).options
+      )
+    }
+    assert(err.getMessage.contains(StorageProperties.BucketName))
+  }
+
+  test("a missing endpoint is reported once the bucket is given") {
+    val err = intercept[IllegalArgumentException] {
+      StorageProperties.from(
+        MilvusOption(
+          Map(
+            MilvusOption.MilvusUri -> "http://localhost:19530",
+            StorageProperties.BucketName -> "b"
+          )
+        ).options
+      )
+    }
+    assert(err.getMessage.contains(StorageProperties.Address))
   }
 }
