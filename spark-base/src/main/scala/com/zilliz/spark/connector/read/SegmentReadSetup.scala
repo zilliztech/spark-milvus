@@ -13,6 +13,7 @@ import com.zilliz.milvus.storage.read.exec.{
 import com.zilliz.milvus.storage.read.plan.InputSpec
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 /** Everything a reader has to work out before it can open a segment: which
   * columns to ask the native layer for, what to call them, and how to tell a
@@ -171,7 +172,7 @@ final case class PackedV2ReadSetup(
 
   override val neededColumns: Seq[String] = {
     val columnGroups = spec.layout match {
-      case com.zilliz.milvus.storage.read.plan.SegmentLayout.ColumnGroups(gs) =>
+      case com.zilliz.milvus.storage.snapshot.SegmentLayout.ColumnGroups(gs) =>
         gs
       case other =>
         throw new IllegalArgumentException(

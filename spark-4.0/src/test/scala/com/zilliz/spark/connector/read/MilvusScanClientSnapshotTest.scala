@@ -1,22 +1,7 @@
 package com.zilliz.spark.connector.read
 
 import java.{util => ju}
-import java.net.URI
-import java.nio.charset.StandardCharsets
-import java.util.concurrent.atomic.AtomicInteger
-import scala.util.{Failure, Success}
 
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{
-  FSDataInputStream,
-  FSDataOutputStream,
-  FSInputStream,
-  FileStatus,
-  FileSystem,
-  Path
-}
-import org.apache.hadoop.fs.permission.FsPermission
-import org.apache.hadoop.util.Progressable
 import org.apache.spark.sql.types.{
   ArrayType,
   BinaryType,
@@ -31,24 +16,18 @@ import org.apache.spark.sql.types.{
 }
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
-import org.scalatest.BeforeAndAfterEach
 
 import com.zilliz.milvus.client.api.MilvusCollectionInfo
 import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
-import com.zilliz.milvus.storage.read.plan.{
-  DeleteSource,
-  InputSpec,
-  SegmentLayout
-}
+import com.zilliz.milvus.storage.read.plan.{DeleteSource, InputSpec}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.snapshot.{
-  Collection,
-  CollectionSchema,
   MilvusSnapshotReader,
-  SnapshotInfo,
-  SnapshotMetadata,
+  Snapshot,
+  SnapshotCatalog,
+  SnapshotOrigin,
   StorageV2ManifestItem,
   V2ColumnGroup,
   V2SegmentInfo
@@ -59,17 +38,13 @@ import com.zilliz.spark.connector.options.{
   StorageOptions
 }
 import com.zilliz.spark.connector.table.MilvusTable
-import com.zilliz.spark.connector.read.plan.{ClientSnapshotPlanner, SnapshotPartitions, ClientReadSnapshot}
+import com.zilliz.spark.connector.read.plan.SnapshotPartitions
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
-class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
+class MilvusScanClientSnapshotTest extends AnyFunSuite {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(
     io.milvus.grpc.schema.CollectionSchema(name = "c").toByteArray
   )
-
-  override def beforeEach(): Unit = {
-    super.beforeEach()
-    CloseTrackingFileSystem.reset()
-  }
 
   /** Storage configuration is parsed and validated while partitions are planned
     * now, not per task, so a scan that never had a bucket fails before it
@@ -156,6 +131,26 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
             .schema
         )
     )
+
+  /** A snapshot from its parts, the way every planner sees one. */
+  private def snapshotOf(
+      v3: Seq[StorageV2ManifestItem] = Seq.empty,
+      v2: Seq[V2SegmentInfo] = Seq.empty,
+      partitionIds: Seq[Long] = Seq(20L)
+  ): Snapshot =
+    SnapshotCatalog
+      .fromLists(
+        name = "t",
+        collectionId = 10L,
+        createdAt = None,
+        partitionIds = partitionIds,
+        schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+        v3Items = v3,
+        v2Segments = v2,
+        bucket = "",
+        origin = SnapshotOrigin.Options
+      )
+      .fold(e => throw e, identity)
 
   private def metadata(
       entries: (String, Long)*
@@ -297,11 +292,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      manifestList = Seq.empty,
-      defaultPartitionId = "0",
-      schemaBytes = Array.emptyByteArray,
-      v2Segments = Seq(segment),
-      v2DeletePlans = Map.empty,
+      snapshotOf(v2 = Seq(segment), partitionIds = Seq(0L)),
       forceCanonicalBucket = Some("backup-bucket")
     )
 
@@ -477,110 +468,6 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
-  test(
-    "validateSnapshotBucketForRelativeDataPaths rejects cross-bucket relative data paths"
-  ) {
-    val err = intercept[IllegalArgumentException] {
-      ClientSnapshotPlanner.validateSnapshotBucketForRelativeDataPaths(
-        "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
-        Some("connector-bucket"),
-        Seq(
-          StorageV2ManifestItem(
-            30L,
-            "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
-          )
-        ),
-        Seq.empty
-      )
-    }
-    assert(err.getMessage.contains("snapshot-bucket"))
-    assert(err.getMessage.contains("connector-bucket"))
-    assert(err.getMessage.contains("bucket-relative"))
-  }
-
-  test(
-    "validateSnapshotBucketForRelativeDataPaths rejects unset connector bucket with relative V3 paths"
-  ) {
-    val err = intercept[IllegalArgumentException] {
-      ClientSnapshotPlanner.validateSnapshotBucketForRelativeDataPaths(
-        "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
-        None,
-        Seq(
-          StorageV2ManifestItem(
-            30L,
-            "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
-          )
-        ),
-        Seq.empty
-      )
-    }
-    assert(err.getMessage.contains("snapshot-bucket"))
-    assert(err.getMessage.contains("<unset>"))
-    assert(err.getMessage.contains("files/insert_log/10/20/30"))
-  }
-
-  test(
-    "validateSnapshotBucketForRelativeDataPaths rejects unset connector bucket with relative V2 paths"
-  ) {
-    val err = intercept[IllegalArgumentException] {
-      ClientSnapshotPlanner.validateSnapshotBucketForRelativeDataPaths(
-        "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
-        None,
-        Seq.empty,
-        Seq(
-          V2SegmentInfo(
-            segmentId = 30L,
-            partitionId = 20L,
-            numOfRows = 1L,
-            storageVersion = 2L,
-            columnGroups = Seq(
-              V2ColumnGroup(
-                fieldIds = Seq(100L),
-                filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
-                fileRowCounts = Seq(1L)
-              )
-            )
-          )
-        )
-      )
-    }
-    assert(err.getMessage.contains("snapshot-bucket"))
-    assert(err.getMessage.contains("<unset>"))
-    assert(err.getMessage.contains("files/insert_log/10/20/30/100/1.parquet"))
-  }
-
-  test(
-    "validateSnapshotBucketForRelativeDataPaths accepts cross-bucket fully-qualified data paths"
-  ) {
-    ClientSnapshotPlanner.validateSnapshotBucketForRelativeDataPaths(
-      "s3a://snapshot-bucket/files/snapshots/1/metadata/snapshot.json",
-      Some("connector-bucket"),
-      Seq(
-        StorageV2ManifestItem(
-          30L,
-          "{\"ver\":7,\"base_path\":\"s3a://data-bucket/files/insert_log/10/20/30\"}"
-        )
-      ),
-      Seq(
-        V2SegmentInfo(
-          segmentId = 30L,
-          partitionId = 20L,
-          numOfRows = 1L,
-          storageVersion = 2L,
-          columnGroups = Seq(
-            V2ColumnGroup(
-              fieldIds = Seq(100L),
-              filePaths = Seq(
-                "s3a://data-bucket/files/insert_log/10/20/30/100/1.parquet"
-              ),
-              fileRowCounts = Seq(1L)
-            )
-          )
-        )
-      )
-    )
-  }
-
   test("snapshotS3BucketForRelativePaths prefers snapshot bucket") {
     assert(
       StorageOptions.snapshotS3BucketForRelativePaths(
@@ -724,69 +611,6 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json"
     )
     assert(conf.get("fs.s3a.impl.disable.cache") == "true")
-  }
-
-  test("readAllBytes closes the FileSystem instance when cache is disabled") {
-    val rawOptions = new ju.HashMap[String, String]()
-    val conf = new Configuration()
-    conf.set(
-      "fs.close-tracking.impl",
-      classOf[CloseTrackingFileSystem].getName
-    )
-    conf.set("fs.close-tracking.impl.disable.cache", "true")
-    val content =
-      new ClientSnapshotPlanner(scanWithOptions(rawOptions).ctx).readAllBytes(
-        conf,
-        "close-tracking://bucket/snapshot.json"
-      )
-    assert(content == "{}")
-    assert(CloseTrackingFileSystem.closeCount.get() == 1)
-  }
-
-  test("readAllBytes ignores cache close config for scheme-less paths") {
-    val rawOptions = new ju.HashMap[String, String]()
-    val conf = new Configuration()
-    conf.set("fs.defaultFS", "close-tracking://bucket")
-    conf.set(
-      "fs.close-tracking.impl",
-      classOf[CloseTrackingFileSystem].getName
-    )
-    conf.set("fs.close-tracking.impl.disable.cache", "true")
-    val content =
-      new ClientSnapshotPlanner(scanWithOptions(rawOptions).ctx).readAllBytes(
-        conf,
-        "/snapshot.json"
-      )
-    assert(content == "{}")
-    assert(CloseTrackingFileSystem.closeCount.get() == 0)
-    assert(conf.get("fs.null.impl.disable.cache") == null)
-  }
-
-  test(
-    "client snapshot fast path is disabled when partition or segment selectors are set"
-  ) {
-    val base = Map(
-      MilvusOption.MilvusUri -> "http://localhost:19530",
-      MilvusOption.MilvusCollectionName -> "c"
-    )
-    assert(
-      ClientSnapshotPlanner.canUseClientSnapshotFastPath(MilvusOption(base))
-    )
-    assert(
-      !ClientSnapshotPlanner.canUseClientSnapshotFastPath(
-        MilvusOption(base + (MilvusOption.MilvusPartitionName -> "p"))
-      )
-    )
-    assert(
-      !ClientSnapshotPlanner.canUseClientSnapshotFastPath(
-        MilvusOption(base + (MilvusOption.MilvusPartitionID -> "20"))
-      )
-    )
-    assert(
-      !ClientSnapshotPlanner.canUseClientSnapshotFastPath(
-        MilvusOption(base + (MilvusOption.MilvusSegmentID -> "30"))
-      )
-    )
   }
 
   test(
@@ -1113,248 +937,27 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     )
   }
 
-  test(
-    "buildClientSnapshotOptions preserves read options and adds snapshot options"
-  ) {
-    val base = Map(
-      MilvusOption.MilvusUri -> "http://localhost:19530",
-      MilvusOption.MilvusCollectionName -> "c",
-      MilvusOption.MilvusExtraColumns -> "partition",
-      MilvusOption.SnapshotMode -> "false",
-      MilvusOption.SnapshotCollectionId -> "old",
-      MilvusOption.SnapshotSchemaJson -> "stale-schema-json"
-    )
-    val out = ClientSnapshotPlanner.buildClientSnapshotOptions(
-      baseOptions = base,
-      collectionName = "snapshot_collection",
-      collectionId = 10L,
-      partitionIds = Seq(20L, 21L),
-      schemaBytesBase64 = "abc",
-      manifestList = Seq.empty,
-      v2Segments = Seq.empty
-    )
-    assert(out(MilvusOption.SnapshotMode) == "true")
-    assert(out(MilvusOption.MilvusCollectionName) == "snapshot_collection")
-    assert(out(MilvusOption.SnapshotCollectionId) == "10")
-    assert(out(MilvusOption.SnapshotPartitionIds) == "20,21")
-    assert(!out.contains(MilvusOption.SnapshotSchemaJson))
-    assert(out(MilvusOption.SnapshotSchemaBytes) == "abc")
-    assert(out.contains(MilvusOption.SnapshotManifests))
-    assert(out(MilvusOption.MilvusExtraColumns) == "partition")
-  }
-
-  test("buildClientSnapshotOptions overrides relative-path bucket") {
-    val out = ClientSnapshotPlanner.buildClientSnapshotOptions(
-      baseOptions = Map(
-        StorageProperties.BucketName.toUpperCase -> "connector-bucket"
-      ),
-      collectionName = "snapshot_collection",
-      collectionId = 10L,
-      partitionIds = Seq(20L),
-      schemaBytesBase64 = "abc",
-      manifestList = Seq.empty,
-      v2Segments = Seq.empty,
-      snapshotBucketForRelativePaths = Some("snapshot-bucket")
-    )
-    assert(out(StorageProperties.BucketName) == "snapshot-bucket")
-  }
-
   test("snapshot option keys use dotted lowercase suffixes") {
     assert(
       MilvusOption.SnapshotMaxJsonBytes == "milvus.snapshot.max.json.bytes"
     )
-    assert(
-      MilvusOption.ClientSnapshotCompactionProtectionSeconds ==
-        "milvus.client.snapshot.compaction.protection.seconds"
-    )
-    assert(
-      MilvusOption.ClientSnapshotAutoCleanup ==
-        "milvus.client.snapshot.auto.cleanup"
-    )
-  }
-
-  test("clientSnapshotAutoCleanup defaults to true and parses false") {
-    assert(
-      MilvusOption.clientSnapshotAutoCleanup(Map.empty[String, String])
-    )
-    assert(
-      !MilvusOption.clientSnapshotAutoCleanup(
-        Map(MilvusOption.ClientSnapshotAutoCleanup -> "false")
-      )
-    )
+    assert(MilvusOption.SnapshotPath == "milvus.snapshot.path")
+    assert(MilvusOption.ClientSnapshotName == "milvus.client.snapshot.name")
   }
 
   test("parsePositiveLongOption rejects non-numeric and non-positive values") {
     Seq("not-a-number", "0", "-1").foreach { value =>
       val rawOptions = new ju.HashMap[String, String]()
-      rawOptions.put(
-        MilvusOption.ClientSnapshotCompactionProtectionSeconds,
-        value
-      )
+      rawOptions.put(MilvusOption.SnapshotMaxJsonBytes, value)
       val err = intercept[IllegalArgumentException] {
         StorageOptions.parsePositiveLongOption(
           new CaseInsensitiveStringMap(rawOptions),
-          MilvusOption.ClientSnapshotCompactionProtectionSeconds,
+          MilvusOption.SnapshotMaxJsonBytes,
           86400L
         )
       }
-      assert(
-        err.getMessage.contains(
-          MilvusOption.ClientSnapshotCompactionProtectionSeconds
-        )
-      )
+      assert(err.getMessage.contains(MilvusOption.SnapshotMaxJsonBytes))
     }
-  }
-
-  test("readAllBytes reuses positive long parser for max json bytes") {
-    val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(MilvusOption.SnapshotMaxJsonBytes, "not-a-number")
-    val err = intercept[IllegalArgumentException] {
-      new ClientSnapshotPlanner(scanWithOptions(rawOptions).ctx).readAllBytes(
-        new Configuration(),
-        "close-tracking://bucket/snapshot.json"
-      )
-    }
-    assert(err.getMessage.contains(MilvusOption.SnapshotMaxJsonBytes))
-  }
-
-  test(
-    "parseClientSnapshotCompactionProtectionSeconds rejects excessive values"
-  ) {
-    val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(
-      MilvusOption.ClientSnapshotCompactionProtectionSeconds,
-      (8L * 24L * 60L * 60L).toString
-    )
-    val err = intercept[IllegalArgumentException] {
-      ClientReadSnapshot.parseClientSnapshotCompactionProtectionSeconds(
-        new CaseInsensitiveStringMap(rawOptions)
-      )
-    }
-    assert(
-      err.getMessage.contains(
-        MilvusOption.ClientSnapshotCompactionProtectionSeconds
-      )
-    )
-  }
-
-  test("preserveResultWhenCloseFails keeps the original cleanup result") {
-    val ok = ClientReadSnapshot.preserveResultWhenCloseFails(
-      Success(()),
-      throw new RuntimeException("close failed"),
-      "test client"
-    )
-    assert(ok == Success(()))
-
-    val original = new RuntimeException("drop failed")
-    val failed = ClientReadSnapshot.preserveResultWhenCloseFails(
-      Failure(original),
-      (),
-      "test client"
-    )
-    assert(failed == Failure(original))
-  }
-
-  test(
-    "ensureClientSnapshotHasPackedSegments rejects filtered-empty snapshots"
-  ) {
-    val err = intercept[IllegalArgumentException] {
-      ClientSnapshotPlanner.ensureClientSnapshotHasPackedSegments(
-        Seq.empty,
-        Seq.empty,
-        "c"
-      )
-    }
-    assert(err.getMessage.contains("No packed-parquet segments"))
-    assert(err.getMessage.contains("c"))
-  }
-
-  test("generatedClientSnapshotName caps long collection names") {
-    val name = ClientReadSnapshot.generatedClientSnapshotName(
-      collectionName = "c" * 300,
-      currentTimeMillis = 1L,
-      uuid = "u" * 32
-    )
-    assert(name.length <= 255)
-    assert(name.startsWith("spark_read_"))
-    assert(name.endsWith("_1_" + "u" * 32))
-  }
-
-  test("generatedClientSnapshotName sanitizes collection names") {
-    val name = ClientReadSnapshot.generatedClientSnapshotName(
-      collectionName = "col-name.with unicode值",
-      currentTimeMillis = 1L,
-      uuid = "u" * 32
-    )
-    assert(name == s"spark_read_col_name_with_unicode__1_${"u" * 32}")
-  }
-
-  test("buildClientSnapshotOptions enables snapshot mode") {
-    val out = ClientSnapshotPlanner.buildClientSnapshotOptions(
-      baseOptions = Map(MilvusOption.SnapshotMode.toUpperCase -> "false"),
-      collectionName = "snapshot_collection",
-      collectionId = 10L,
-      partitionIds = Seq(20L),
-      schemaBytesBase64 = "abc",
-      manifestList = Seq.empty,
-      v2Segments = Seq.empty
-    )
-    assert(MilvusOption.isSnapshotMode(out))
-    assert(!out.contains(MilvusOption.SnapshotMode.toUpperCase))
-  }
-
-  test("validateClientSnapshotMetadata rejects missing required fields") {
-    val snapshotPath = "s3a://bucket/snapshot.json"
-    val missingSnapshotInfo = SnapshotMetadata(
-      snapshotInfo = null,
-      collection = Collection(CollectionSchema("c", fields = Seq.empty))
-    )
-    val snapshotInfoErr = intercept[IllegalArgumentException] {
-      ClientSnapshotPlanner.validateClientSnapshotMetadata(
-        missingSnapshotInfo,
-        snapshotPath
-      )
-    }
-    assert(snapshotInfoErr.getMessage.contains("snapshot_info"))
-
-    val missingCollection = SnapshotMetadata(
-      snapshotInfo = SnapshotInfo("s"),
-      collection = null
-    )
-    val collectionErr = intercept[IllegalArgumentException] {
-      ClientSnapshotPlanner.validateClientSnapshotMetadata(
-        missingCollection,
-        snapshotPath
-      )
-    }
-    assert(collectionErr.getMessage.contains("collection"))
-
-    val missingSchema = SnapshotMetadata(
-      snapshotInfo = SnapshotInfo("s"),
-      collection = Collection(null)
-    )
-    val schemaErr = intercept[IllegalArgumentException] {
-      ClientSnapshotPlanner.validateClientSnapshotMetadata(
-        missingSchema,
-        snapshotPath
-      )
-    }
-    assert(schemaErr.getMessage.contains("collection.schema"))
-
-    val emptySnapshot = SnapshotMetadata(
-      snapshotInfo = SnapshotInfo("s"),
-      collection = Collection(CollectionSchema("c", fields = Seq.empty)),
-      manifestList = Seq.empty,
-      storageV2ManifestList = Some(Seq.empty)
-    )
-    val emptyErr = intercept[IllegalArgumentException] {
-      ClientSnapshotPlanner.validateClientSnapshotMetadata(
-        emptySnapshot,
-        snapshotPath
-      )
-    }
-    assert(emptyErr.getMessage.contains("client snapshot is empty"))
-    assert(emptyErr.getMessage.contains("no manifests and no V2 segments"))
   }
 
   test(
@@ -1382,7 +985,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(firstPartitions eq secondPartitions)
   }
 
-  test("client snapshot fast path caches planned input partitions") {
+  test("every read mode caches its planned input partitions") {
     val clientOptions = new ju.HashMap[String, String]()
     clientOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
     clientOptions.put(MilvusOption.MilvusCollectionName, "c")
@@ -1392,7 +995,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     partitionScopedOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
     partitionScopedOptions.put(MilvusOption.MilvusCollectionName, "c")
     partitionScopedOptions.put(MilvusOption.MilvusPartitionName, "p1")
-    assert(!scanWithOptions(partitionScopedOptions).shouldCacheInputPartitions)
+    assert(scanWithOptions(partitionScopedOptions).shouldCacheInputPartitions)
 
     val snapshotOptions = new ju.HashMap[String, String]()
     snapshotOptions.put(MilvusOption.SnapshotMode, "true")
@@ -1470,17 +1073,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     val deletePlan = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      manifestList = Seq(
+      snapshotOf(v3 = Seq(
         StorageV2ManifestItem(
           30L,
           "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
         )
-      ),
-      defaultPartitionId = "20",
-      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
-      v3DeletePlans = Map(30L -> deletePlan),
-      v2Segments = Seq.empty,
-      v2DeletePlans = Map.empty
+      ), partitionIds = Seq(20L)),
+      v3DeletePlans = Map(30L -> deletePlan)
     )
 
     val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
@@ -1495,17 +1094,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      manifestList = Seq(
+      snapshotOf(v3 = Seq(
         StorageV2ManifestItem(
           30L,
           "files/insert_log/10/20/30"
         )
-      ),
-      defaultPartitionId = "20",
-      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
-      v3ReadVersions = Map(30L -> 11L),
-      v2Segments = Seq.empty,
-      v2DeletePlans = Map.empty
+      ), partitionIds = Seq(20L)),
+      v3ReadVersions = Map(30L -> 11L)
     )
 
     val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
@@ -1522,7 +1117,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      manifestList = Seq(
+      snapshotOf(v3 = Seq(
         StorageV2ManifestItem(
           30L,
           "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
@@ -1531,12 +1126,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
           31L,
           "{\"ver\":7,\"base_path\":\"files/insert_log/10/21/31\"}"
         )
-      ),
-      defaultPartitionId = "20",
-      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+      ), partitionIds = Seq(20L)),
       v3DeletePlans = Map(30L -> v3Plan),
-      v2Segments = Seq.empty,
-      v2DeletePlans = Map.empty,
       inheritedDeletePlansByPartition = inheritedPlans
     )
 
@@ -1623,10 +1214,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      manifestList = Seq.empty,
-      defaultPartitionId = "20",
-      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
-      v2Segments = Seq(
+      snapshotOf(v2 = Seq(
         V2SegmentInfo(
           segmentId = 30L,
           partitionId = 20L,
@@ -1653,7 +1241,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
             )
           )
         )
-      ),
+      ), partitionIds = Seq(20L)),
       v2DeletePlans = Map(30L -> ownPlan),
       inheritedDeletePlansByPartition = inheritedPlans
     )
@@ -1678,10 +1266,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      manifestList = Seq.empty,
-      defaultPartitionId = "20",
-      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
-      v2Segments = Seq(
+      snapshotOf(v2 = Seq(
         V2SegmentInfo(
           segmentId = 30L,
           partitionId = 20L,
@@ -1708,7 +1293,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
             )
           )
         )
-      ),
+      ), partitionIds = Seq(20L)),
       v2DeletePlans = Map(30L -> ownPlan),
       inheritedDeletePlansByPartition = inheritedPlans,
       inlineInheritedDeletePlans = true
@@ -1733,10 +1318,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     // must strip the overlapping field from the older slot.
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      manifestList = Seq.empty,
-      defaultPartitionId = "20",
-      schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
-      v2Segments = Seq(
+      snapshotOf(v2 = Seq(
         V2SegmentInfo(
           segmentId = 30L,
           partitionId = 20L,
@@ -1757,8 +1339,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
             )
           )
         )
-      ),
-      v2DeletePlans = Map.empty,
+      ), partitionIds = Seq(20L)),
       inheritedDeletePlansByPartition = Map.empty,
       inlineInheritedDeletePlans = true
     )
@@ -1776,83 +1357,3 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   }
 }
 
-class CloseTrackingFileSystem extends FileSystem {
-  private var uri: URI = _
-
-  override def initialize(name: URI, conf: Configuration): Unit = {
-    super.initialize(name, conf)
-    uri = name
-  }
-
-  override def getUri: URI = uri
-
-  override def open(path: Path, bufferSize: Int): FSDataInputStream = {
-    val bytes = "{}".getBytes(StandardCharsets.UTF_8)
-    val in = new FSInputStream {
-      private var pos = 0
-
-      override def read(): Int = {
-        if (pos >= bytes.length) -1
-        else {
-          val value = bytes(pos) & 0xff
-          pos += 1
-          value
-        }
-      }
-
-      override def seek(newPos: Long): Unit = {
-        pos = newPos.toInt
-      }
-
-      override def getPos: Long = pos
-
-      override def seekToNewSource(targetPos: Long): Boolean = false
-    }
-    new FSDataInputStream(in)
-  }
-
-  override def close(): Unit = {
-    CloseTrackingFileSystem.closeCount.incrementAndGet()
-    super.close()
-  }
-
-  override def create(
-      path: Path,
-      permission: FsPermission,
-      overwrite: Boolean,
-      bufferSize: Int,
-      replication: Short,
-      blockSize: Long,
-      progress: Progressable
-  ): FSDataOutputStream = throw new UnsupportedOperationException
-
-  override def append(
-      path: Path,
-      bufferSize: Int,
-      progress: Progressable
-  ): FSDataOutputStream = throw new UnsupportedOperationException
-
-  override def rename(src: Path, dst: Path): Boolean =
-    throw new UnsupportedOperationException
-
-  override def delete(path: Path, recursive: Boolean): Boolean =
-    throw new UnsupportedOperationException
-
-  override def listStatus(path: Path): Array[FileStatus] =
-    throw new UnsupportedOperationException
-
-  override def setWorkingDirectory(path: Path): Unit = ()
-
-  override def getWorkingDirectory: Path = new Path("/")
-
-  override def mkdirs(path: Path, permission: FsPermission): Boolean = true
-
-  override def getFileStatus(path: Path): FileStatus =
-    new FileStatus(2L, false, 1, 2L, 0L, path)
-}
-
-object CloseTrackingFileSystem {
-  val closeCount = new AtomicInteger(0)
-
-  def reset(): Unit = closeCount.set(0)
-}

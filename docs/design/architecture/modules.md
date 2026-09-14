@@ -61,7 +61,6 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | 包 | 职责 |
 |---|---|
 | `v2packed` | Storage V2 packed 段的 SegmentReader |
-| `offline` | 1.x 离线 option 的段列表转 Snapshot，实现 SnapshotSource |
 | `backup` | milvus-backup 导出目录转 Snapshot，实现 SnapshotSource |
 
 ### 2.3 native-storage `com.zilliz.milvus.jni.storage`
@@ -122,9 +121,7 @@ CALL 走语法扩展，不走 `ProcedureCatalog`：后者是 Spark 4.0 才有的
 | 包 | 内容 |
 |---|---|
 | `backfill` | BackfillApp、配置、join 键、列映射、merge 模式、结果 JSON |
-| `tools` | ListV2SegmentsApp、ReadSourceOnlyApp |
 | `search` | VectorBruteForceSearch、SQL 函数扩展 |
-| `legacy` | gRPC Insert 的 TableProvider、DataSource V2 写栈、`format("milvus")` 短名注册 |
 
 四个包互不依赖，各自是独立入口。`format("milvus")` 的短名归 apps 之后，只有加载 apps jar 才能用旧写法；三段名 `milvus.db.coll` 不需要 apps。
 
@@ -145,14 +142,14 @@ spark-milvus/
     src/main/scala/com/zilliz/milvus/storage/{snapshot,manifest,schema,path,credential,expr,delete,stats,read,write,index}
     src/main/antlr4/               表达式文法（见第 4 节第 8 条）
     src/main/resources/            段清单的 Avro schema
-  compat/src/main/scala/com/zilliz/milvus/storage/compat/{v2packed,offline,backup}
+  compat/src/main/scala/com/zilliz/milvus/storage/compat/{v2packed,backup}
   client/
     src/main/scala/com/zilliz/milvus/client/{grpc,api}
     src/main/protobuf/             milvus-proto 子模块的引用
   spark-base/src/main/scala/com/zilliz/spark/connector/{sources,table,read,expr,types,write,options}
   spark-3.5/src/main/{scala,resources}/  catalog、functions、extensions、META-INF/services
   spark-4.0/  spark-4.1/  spark-4.2/     catalog、procedure、extensions、META-INF/services
-  apps-4.0/src/main/{scala,resources}/   com.zilliz.spark.connector.apps.{backfill,tools,search,legacy}
+  apps-4.0/src/main/{scala,resources}/   com.zilliz.spark.connector.apps.{backfill,search}
   integration-4.0/src/test/scala/  需要 MinIO 与 Milvus
   src/                             1.x 的代码，按模块逐个迁走
   docs/design/                     设计文档
@@ -209,7 +206,7 @@ spark-milvus/
 | serde/ArrowConverter.scala、ArrowAllocator.scala | spark.types | 已搬到 spark.types：它做的是 Arrow 值与 Spark InternalRow 的双向转换，就是 types 的职责。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
 | filter/VectorBruteForceSearch.scala | spark-base | 已搬。它是从 MilvusLoonPartitionReader 的读路径里调的，不是 app；最终形态等决策 16 |
 | write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | spark-base | 已搬，且已改调 native-storage 的 JNI（决策 14 选了自己封）。下沉 core.write.exec 仍是重构，未做 |
-| write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusFieldData.scala（原 MilvusUtil.scala） | spark.write | 已搬到 spark.write，MilvusFieldData 在内（它只被 MilvusInsertDataWriter 用）。整条 `format("milvus")` 写链是一个整体，上半截是 DataSource V2 的接口实现；下放 apps.legacy 要先有 W7 的注册表，那是重构 |
+| write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusFieldData.scala（原 MilvusUtil.scala） | 删除 | 2026-09-14 删除：gRPC Insert 是 1.x 的写路径（W7），2.0 不支持；MilvusFieldData 只剩集成测试造数据用，搬到 integration-4.0 的 testkit |
 | write/MilvusSparkNativeImportWriter.scala | 删除 | 已删，全仓零引用 |
 | operations/backfill/* | apps.backfill | 已迁，包名从 operations.backfill 改成 apps.backfill |
 | expressions/、extensions/ | apps.search | 已迁 |

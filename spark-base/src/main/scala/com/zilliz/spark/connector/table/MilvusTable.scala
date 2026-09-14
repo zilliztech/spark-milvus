@@ -9,12 +9,10 @@ import scala.util.control.NonFatal
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.catalog.{
   SupportsRead,
-  SupportsWrite,
   Table,
   TableCapability
 }
 import org.apache.spark.sql.connector.read.ScanBuilder
-import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.types.{
   LongType,
   MetadataBuilder,
@@ -28,7 +26,11 @@ import com.zilliz.milvus.client.api.{MilvusClient, MilvusCollectionInfo}
 import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.SchemaMapper
-import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
+import com.zilliz.milvus.storage.snapshot.{
+  MilvusSnapshotReader,
+  SnapshotCatalog,
+  V2SegmentResolver
+}
 import com.zilliz.spark.connector.options.{
   BackupSelection,
   ReadMode,
@@ -37,14 +39,12 @@ import com.zilliz.spark.connector.options.{
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.read.MilvusScanBuilder
 import com.zilliz.spark.connector.types.DataTypeUtil
-import com.zilliz.spark.connector.write.MilvusWriteBuilder
 import io.milvus.grpc.schema.CollectionSchema
 
 case class MilvusTable(
     milvusOption: MilvusOption,
     sparkSchema: Option[StructType]
 ) extends Table
-    with SupportsWrite
     with SupportsRead
     with Logging {
   var milvusCollection: MilvusCollectionInfo = _
@@ -197,6 +197,39 @@ case class MilvusTable(
   /** Initialize collection info from snapshot metadata (no client connection)
     */
   private def initFromSnapshot(): Unit = {
+    milvusOption.options.get(MilvusOption.SnapshotPath).map(_.trim).filter(_.nonEmpty) match {
+      case Some(path) => initFromSnapshotPath(path)
+      case None       => initFromSnapshotOptions()
+    }
+  }
+
+  /** `milvus.snapshot.path`: the snapshot JSON itself carries the collection
+    * id, the partitions and the schema. V2 segments are not materialized here;
+    * the scan planner does that.
+    */
+  private def initFromSnapshotPath(path: String): Unit = {
+    val bucket = StorageOptions.resolveConnectorS3Bucket(milvusOption.options)
+    val store = StorageOptions.storeFor(
+      StorageOptions.buildHadoopConfForOptions(milvusOption.options, ""),
+      bucket,
+      milvusOption.options
+    )
+    val snapshot =
+      new SnapshotCatalog(store, bucket, V2SegmentResolver.Skipped).read(path)
+    partitionID = snapshot.partitionIds.headOption.getOrElse(0L)
+    milvusCollection = MilvusCollectionInfo(
+      dbName = milvusOption.databaseName,
+      collectionName = milvusOption.collectionName,
+      collectionID = snapshot.collectionId,
+      schema = snapshot.schema
+    )
+    logInfo(
+      s"Initialized from snapshot $path: name=${snapshot.name}, collectionID=${snapshot.collectionId}, partitionID=$partitionID"
+    )
+  }
+
+  /** The 1.x form: collection id, partitions and schema arrive as options. */
+  private def initFromSnapshotOptions(): Unit = {
     // Get collection ID from options
     val collectionId = milvusOption.options
       .get(MilvusOption.SnapshotCollectionId)
@@ -305,10 +338,6 @@ case class MilvusTable(
     } finally {
       client.close()
     }
-  }
-
-  override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
-    MilvusWriteBuilder(milvusOption, info)
   }
 
   override def newScanBuilder(
@@ -543,7 +572,6 @@ case class MilvusTable(
 
   override def capabilities(): ju.Set[TableCapability] = {
     Set[TableCapability](
-      TableCapability.BATCH_WRITE,
       TableCapability.BATCH_READ
     ).asJava
   }

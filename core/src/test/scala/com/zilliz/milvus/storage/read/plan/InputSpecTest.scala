@@ -12,6 +12,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 class InputSpecTest extends AnyFunSuite with Matchers {
 

@@ -180,8 +180,13 @@ object V2SegmentLoader extends com.zilliz.milvus.storage.Logging {
               )
             }
             val samplePath = afb.binlogs.head.logPath
+            // The entry's paths were resolved to full URIs above for the
+            // executors; the store is bound to the bucket and takes the key.
             MilvusParquetFooterReader
-              .readFieldIdsFromSchema(samplePath, store) match {
+              .readFieldIdsFromSchema(
+                StoragePath.parse(samplePath, bucket).key,
+                store
+              ) match {
               case Right(ids) => ids
               case Left(err) =>
                 throw new RuntimeException(

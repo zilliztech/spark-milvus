@@ -9,9 +9,14 @@ import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.client.api.MilvusClient
-import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.milvus.storage.snapshot.{
+  MilvusSnapshotReader,
+  SnapshotCatalog,
+  V2SegmentResolver
+}
+import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import com.zilliz.spark.connector.table.MilvusTable
+import io.milvus.grpc.schema.CollectionSchema
 import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.types.DataTypeUtil
 
@@ -49,18 +54,39 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
     val isBackupMode = MilvusOption.isBackupMode(options)
 
     if (isSnapshotMode) {
-      // Try to get schema from snapshot JSON
-      Option(options.get(MilvusOption.SnapshotSchemaJson))
-        .flatMap { json =>
-          MilvusSnapshotReader.parseSnapshotMetadata(json) match {
-            case Right(metadata) =>
-              Some(
-                SnapshotSparkSchema.toSparkSchema(
-                  metadata.collection.schema,
-                  includeSystemFields = true
+      Option(options.get(MilvusOption.SnapshotPath))
+        .map(_.trim)
+        .filter(_.nonEmpty)
+        .map { path =>
+          // The snapshot JSON is the schema's source; V2 segments are not
+          // materialized for that.
+          val bucket =
+            StorageOptions.resolveConnectorS3Bucket(milvusOption.options)
+          val store = StorageOptions.storeFor(
+            StorageOptions.buildHadoopConfForOptions(milvusOption.options, ""),
+            bucket,
+            milvusOption.options
+          )
+          val snapshot = new SnapshotCatalog(
+            store,
+            bucket,
+            V2SegmentResolver.Skipped
+          ).read(path)
+          sparkSchemaOf(snapshot.schema, rawVectors)
+        }
+        .orElse {
+          // The 1.x form: the schema JSON travels in an option.
+          Option(options.get(MilvusOption.SnapshotSchemaJson)).flatMap { json =>
+            MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+              case Right(metadata) =>
+                Some(
+                  SnapshotSparkSchema.toSparkSchema(
+                    metadata.collection.schema,
+                    includeSystemFields = true
+                  )
                 )
-              )
-            case Left(_) => None
+              case Left(_) => None
+            }
           }
         }
         .getOrElse {
@@ -89,21 +115,28 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
             s"Failed to get collection schema: ${result.failed.get.getMessage}"
           )
         )
-        StructType(
-          schema.fields.map(field =>
-            StructField(
-              field.name,
-              DataTypeUtil.toDataType(field, rawVectors),
-              field.nullable,
-              DataTypeUtil.metadata(field)
-            )
-          )
-        )
+        sparkSchemaOf(schema, rawVectors)
       } finally {
         client.close()
       }
     }
   }
+
+  /** The Spark schema of a protobuf collection schema, one column per field. */
+  private def sparkSchemaOf(
+      schema: CollectionSchema,
+      rawVectors: Boolean
+  ): StructType =
+    StructType(
+      schema.fields.map(field =>
+        StructField(
+          field.name,
+          DataTypeUtil.toDataType(field, rawVectors),
+          field.nullable,
+          DataTypeUtil.metadata(field)
+        )
+      )
+    )
   override def supportsExternalMetadata = true
 
   override def shortName() = "milvus"

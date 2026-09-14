@@ -43,7 +43,7 @@ module table.
 The design documents describe the finished 2.0. Most of layer 2's computation is
 not written yet. Read them as a target, not as a description of the code.
 
-Done: the 1.x sources are all in their modules and `src/` no longer exists. 662
+Done: the 1.x sources are all in their modules and `src/` no longer exists. 641
 unit tests pass. `core` has schema, codec, snapshot, manifest, delete, path,
 credential and `io.ObjectStore` over the native filesystem; `compat` has the V2
 packed and backup entry points; `client` is complete. Every driver-side read
@@ -52,9 +52,7 @@ mentions `org.apache.hadoop`.
 
 Not written: `expr`,
 `index`, `stats`, `read.plan`, `read.exec`, `write.commit` and `write.exec` in
-core. Their `package.scala` files exist and state what belongs there. The same
-is true of `compat.offline` and `apps.legacy`, whose code is still sitting in
-`spark-base`.
+core. Their `package.scala` files exist and state what belongs there.
 
 Layer 3 is split by package: `sources` holds only the `format("milvus")`
 entry point, `table` the table, `scan` the scan builder, the scan, the four
@@ -68,7 +66,7 @@ for both reading and writing and loads its own libraries. The upstream
 milvus-storage Java binding is out of the build, so the 3.5 line cross-compiles
 for Scala 2.12 again. `native-vector` is still a placeholder.
 
-Six design questions are still open: 5, 10, 11, 13, 16 and 19 in
+Four design questions are still open: 10, 16, 19 and 20 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
 block specific packages, so check that list before starting on one.
 
@@ -103,6 +101,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How are object storage credentials handled? | [docs/design/architecture/storage-auth.html](docs/design/architecture/storage-auth.html) for the mechanism, the rules and the measured facts; apply the skill [.agents/skills/spark-milvus-storage-auth/SKILL.md](.agents/skills/spark-milvus-storage-auth/SKILL.md) |
 | How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership. Read and write share it |
 | How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four planning entry points, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
+| What is a Snapshot, and how do the four read entry points become one? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html) — `Snapshot` and `Segment`, the three delete states, what each source cannot supply, `SnapshotCatalog`, the boundary to `InputSpec`. Draft under review |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
 | Illustrated version of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) |
 | What options does a user pass? | [docs/reference-en.md](docs/reference-en.md), [docs/reference-cn.md](docs/reference-cn.md) |
@@ -211,8 +210,8 @@ code comments and naming, not only to documents.
 A documented interim state is not a patch. During a migration parts of the tree
 will sit in the wrong module on purpose. That is legitimate when it is written
 down, has a named end condition and someone is holding it; a patch is the one
-you intend to leave there. `compat.offline` and `apps.legacy` are empty right
-now for that reason, and section 5 of modules.md says so.
+you intend to leave there. The planners in `spark.read.plan` are the live
+example, and section 5 of modules.md says so.
 
 ## Rules any change has to satisfy
 

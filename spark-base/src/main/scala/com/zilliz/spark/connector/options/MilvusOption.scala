@@ -177,6 +177,12 @@ object MilvusOption {
   // footers; consumed by MilvusDataSource's snapshot planner to create
   // MilvusPackedV2InputPartition instances.
   val SnapshotV2Segments = "milvus.snapshot.v2.segments"
+
+  /** A snapshot JSON in the snapshot directory, as an `s3a://` URI or a key
+    * relative to `fs.bucket_name`. Snapshot mode without a Milvus service:
+    * the schema, the partitions and the segments all come from that file.
+    */
+  val SnapshotPath = "milvus.snapshot.path"
   val SnapshotCollectionId = "milvus.snapshot.collection.id"
   val SnapshotPartitionIds = "milvus.snapshot.partition.ids"
   val SnapshotSchemaJson =
@@ -187,12 +193,10 @@ object MilvusOption {
   val ReadApplyDeletes = "milvus.read.apply.deletes"
   val ReadVectorRaw = "milvus.read.vector.raw"
   val ReadColumnar = "milvus.read.columnar"
+  /** Client mode: read the snapshot of this name from the snapshot
+    * directory instead of the latest one.
+    */
   val ClientSnapshotName = "milvus.client.snapshot.name"
-  val ClientSnapshotDescription = "milvus.client.snapshot.description"
-  val ClientSnapshotCompactionProtectionSeconds =
-    "milvus.client.snapshot.compaction.protection.seconds"
-  val ClientSnapshotAutoCleanup =
-    "milvus.client.snapshot.auto.cleanup"
 
   private def nonEmptyOption(
       getOption: String => Option[String],
@@ -212,7 +216,8 @@ object MilvusOption {
         // keep optional keys with empty values (e.g. milvus.snapshot.manifests="")
         // must not trip the snapshot/backup mutual-exclusion check.
         nonEmptyOption(getOption, SnapshotManifests) ||
-        nonEmptyOption(getOption, SnapshotV2Segments)
+        nonEmptyOption(getOption, SnapshotV2Segments) ||
+        nonEmptyOption(getOption, SnapshotPath)
       }
   }
 
@@ -221,11 +226,17 @@ object MilvusOption {
   ): Unit = {
     val explicitSnapshotMode = getOption(SnapshotMode)
       .exists(_.trim.equalsIgnoreCase("true"))
-    val hasSnapshotData = nonEmptyOption(getOption, SnapshotManifests) ||
+    val hasSnapshotLists = nonEmptyOption(getOption, SnapshotManifests) ||
       nonEmptyOption(getOption, SnapshotV2Segments)
-    if (explicitSnapshotMode && !hasSnapshotData) {
+    val hasSnapshotPath = nonEmptyOption(getOption, SnapshotPath)
+    if (explicitSnapshotMode && !hasSnapshotLists && !hasSnapshotPath) {
       throw new IllegalArgumentException(
-        s"$SnapshotMode=true requires $SnapshotManifests or $SnapshotV2Segments"
+        s"$SnapshotMode=true requires $SnapshotPath, $SnapshotManifests or $SnapshotV2Segments"
+      )
+    }
+    if (hasSnapshotPath && hasSnapshotLists) {
+      throw new IllegalArgumentException(
+        s"$SnapshotPath and $SnapshotManifests / $SnapshotV2Segments are two sources for the same read; give one"
       )
     }
   }
@@ -400,31 +411,6 @@ object MilvusOption {
 
   def readColumnar(options: CaseInsensitiveStringMap): Boolean = {
     readColumnarFrom(key => Option(options.get(key)))
-  }
-
-  private def clientSnapshotAutoCleanupFrom(
-      getOption: String => Option[String]
-  ): Boolean = {
-    getOption(ClientSnapshotAutoCleanup)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .map(_.equalsIgnoreCase("true"))
-      .getOrElse(true)
-  }
-
-  def clientSnapshotAutoCleanup(options: Map[String, String]): Boolean = {
-    clientSnapshotAutoCleanupFrom { key =>
-      options.collectFirst {
-        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
-          value
-      }
-    }
-  }
-
-  def clientSnapshotAutoCleanup(
-      options: CaseInsensitiveStringMap
-  ): Boolean = {
-    clientSnapshotAutoCleanupFrom(key => Option(options.get(key)))
   }
 
   // Create MilvusOption from a map

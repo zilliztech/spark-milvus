@@ -15,8 +15,9 @@ import com.zilliz.milvus.storage.read.exec.{
   SegmentReader,
   SegmentReaderRegistry
 }
-import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
+import com.zilliz.milvus.storage.read.plan.InputSpec
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 /** Writes a segment through our JNI and reads it back through our JNI.
   *

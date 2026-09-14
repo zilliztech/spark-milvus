@@ -51,7 +51,7 @@ with those suites reported as canceled rather than failed:
 - `MilvusLoonPartitionWriterLifecycleTest` in spark-4.0
 
 The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
-`StorageFullChainUatTest` in spark-4.0 — cancel on their own environment
+`StorageFullChainUatTest` and `SnapshotReadUatTest` in spark-4.0 — cancel on their own environment
 variables as well, so they stay canceled even with the library present.
 
 Everything else passes. A green run looks like this:

@@ -31,13 +31,14 @@ import com.zilliz.milvus.storage.read.exec.{
   SegmentReader,
   SegmentReaderRegistry
 }
-import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
+import com.zilliz.milvus.storage.read.plan.InputSpec
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 object MilvusLoonPartitionReader {
   private[read] val TimestampColumnName = "1"

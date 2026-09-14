@@ -9,8 +9,9 @@ package com.zilliz.milvus.storage.path
   *   - scheme://b/k → the authority is the bucket, the rest is the key
   *
   * The Milvus three-segment form `scheme://address/bucket/key` is not produced
-  * here. The C side only reads it when asked to, and nothing above this layer
-  * has an address to put in it.
+  * here, but it is read: DescribeSnapshot's `s3_location` is
+  * `https://<endpoint>/<bucket>/<key>`, and for `http`/`https` the authority
+  * is the endpoint and the first path segment is the bucket.
   */
 object StoragePath {
 
@@ -54,6 +55,24 @@ object StoragePath {
     if (key.isEmpty) {
       throw new IllegalArgumentException(
         s"storage URI is missing the key: $trimmed"
+      )
+    }
+    val scheme = trimmed.substring(0, separator).toLowerCase
+    if (authority.nonEmpty && (scheme == "http" || scheme == "https")) {
+      // Path-style endpoint URL: scheme://endpoint/bucket/key. Milvus writes a
+      // snapshot's location this way (DescribeSnapshot's s3_location), so the
+      // authority is the S3 endpoint, not the bucket, and the first path
+      // segment is the bucket. Virtual-hosted (bucket.endpoint) is not produced
+      // by Milvus and is not handled here.
+      val bucketSlash = key.indexOf('/')
+      if (bucketSlash < 0) {
+        throw new IllegalArgumentException(
+          s"endpoint URI names a bucket but no key: $trimmed"
+        )
+      }
+      return Located(
+        key.substring(0, bucketSlash),
+        stripLeadingSlash(key.substring(bucketSlash + 1))
       )
     }
     if (authority.nonEmpty) Located(authority, key)

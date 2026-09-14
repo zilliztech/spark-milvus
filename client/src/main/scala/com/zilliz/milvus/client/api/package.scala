@@ -4,6 +4,6 @@ package com.zilliz.milvus.client
   * flush, compact, BatchUpdateManifest, and RegisterSegments once Milvus offers
   * it. Also converts between the protobuf DataType and the core type model.
   *
-  * Capabilities: C1, C2, W5, A1 through A6 (see docs/design/capabilities.md).
+  * Capabilities: C1, C2, W5, A1 (see docs/design/capabilities.md).
   */
 package object api

@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.write
+package com.zilliz.spark.connector.testkit
 
 import java.nio.{ByteBuffer, ByteOrder}
 

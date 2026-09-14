@@ -5,10 +5,11 @@ import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
-import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
+import com.zilliz.milvus.storage.read.plan.InputSpec
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
   test("requestedExtraColumns normalizes legacy aliases") {

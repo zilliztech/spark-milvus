@@ -6,14 +6,11 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
-import com.zilliz.milvus.storage.read.plan.{
-  DeleteSource,
-  InputSpec,
-  SegmentLayout
-}
+import com.zilliz.milvus.storage.read.plan.{DeleteSource, InputSpec}
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 /** The derivation both readers share.
   *

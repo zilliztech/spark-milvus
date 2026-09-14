@@ -136,14 +136,6 @@ val s3Options = Map(
 | `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
 | `milvus.read.columnar` | Boolean | No | false | How the scan delivers rows. With the default `false` Spark gets one row at a time. Set to `true` and it gets whole batches (`ColumnarBatch`), with vector columns typed as `milvus.read.vector.raw` decides. A batch with deleted rows is delivered as the surviving rows, because Spark's `ColumnarBatch` has no way to mark a row invalid |
 
-### 2.4 Write Parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `MilvusOption.MilvusInsertMaxBatchSize` | Int | No | 5000 | Maximum batch size for single insert operation |
-| `MilvusOption.WriterVariableWidthBytesPerValue` | Double | No | 32.0 | Initial Arrow buffer density for VARCHAR/JSON/binary writer columns; increase for wide variable-width values. Must be finite and positive. |
-| `MilvusOption.MilvusRetryCount` | Int | No | 3 | Number of retries on operation failure |
-| `MilvusOption.MilvusRetryInterval` | Int | No | 1000 | Retry interval in milliseconds |
 
 ### 2.5 Offline Backup Read Parameters
 
@@ -158,7 +150,8 @@ to snapshot). See `docs/backup-datasource-design.md` for the full design.
 | `MilvusOption.BackupDir` | String | No | "" | `milvus.backup.dir` — the backup directory, e.g. `s3a://bucket/backup/<name>`. **S3 only** (`s3://` is normalized to `s3a://`); local/`file://` dirs are rejected at planning because the packed reader requires S3. |
 | `MilvusOption.MilvusDatabaseName` | String | No | "" | Database the collection lives in. Passing `"default"` selects the default-database collection (matching a meta that records `""` or `"default"`); leaving the option empty performs single-candidate / ambiguity resolution instead — with both `default.orders` and `db2.orders` present, pass `"default"` (or `"db2"`) to disambiguate. |
 | `MilvusOption.MilvusCollectionName` | String | Conditional | - | Collection name inside the backup (matched with the database name, never `.head`). Required when the backup holds more than one collection. |
-| `MilvusOption.ReadApplyDeletes` | Boolean | No | true | `milvus.read.apply.deletes` — apply delete logs (L0/L1) while reading. |
+| `MilvusOption.SnapshotPath` | String | No | - | `milvus.snapshot.path` — a snapshot JSON in the snapshot directory (`s3a://bucket/files/snapshots/<coll>/metadata/<id>.json` or a key relative to `fs.bucket_name`). Reads it without a Milvus service: schema, partitions and segments all come from that file. Cannot be combined with `milvus.snapshot.manifests`. |
+| `MilvusOption.ClientSnapshotName` | String | No | latest | `milvus.client.snapshot.name` — with `milvus.uri`: read this snapshot of the collection from the snapshot directory instead of the latest one. The connector never creates snapshots; make one with Milvus or `CALL create_snapshot`. |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | No | 67108864 | `milvus.snapshot.max.json.bytes` — max size of the backup `full_meta.json`. |
 
 The Spark read schema must be provided via `.schema()` or is derived from the
@@ -188,19 +181,6 @@ val df = spark.read
   .load()
 ```
 
-### 3.2 Writing Data
-
-```scala
-df.write
-  .format("milvus")
-  .option(MilvusOption.MilvusUri, "http://localhost:19530")
-  .option(MilvusOption.MilvusToken, "your-token")
-  .option(MilvusOption.MilvusCollectionName, "your_collection")
-  .option(MilvusOption.MilvusDatabaseName, "your_database")
-  .option(MilvusOption.MilvusInsertMaxBatchSize, "1000")
-  .option(MilvusOption.MilvusRetryCount, "5")
-  .save()
-```
 
 ## 4. Data Schema
 
@@ -215,8 +195,6 @@ The output schema for `milvus` format depends on the Milvus collection schema an
 
 1. **Version Requirement**: This connector requires Milvus 2.6+ with Storage V2
 2. **SSL/TLS Configuration**: Supports both one-way and mutual TLS authentication, configure certificate files as needed
-3. **Batch Size**: Properly setting `MilvusOption.MilvusInsertMaxBatchSize` can optimize write performance
-4. **Retry Mechanism**: Built-in retry mechanism improves operation reliability
 5. **Parameter Constants**: It's recommended to use constants defined in the `MilvusOption` class to avoid string spelling errors
 
 ## 6. Supported Data Types

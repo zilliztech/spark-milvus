@@ -136,14 +136,6 @@ val s3Options = Map(
 | `milvus.read.vector.raw` | Boolean | 否 | false | 向量列的输出类型。默认 false，向量转成 Spark 原生类型（`FloatVector`/`Float16Vector`/`BFloat16Vector` → `ArrayType(FloatType)`，`Int8Vector` → `ArrayType(ShortType)`，`SparseFloatVector` → `MapType(LongType, FloatType)`）。设为 true 时向量列输出 `BinaryType`，字节按存储原样给出，由调用方自己按 `dim` 与元素类型解析；这条路径不做逐元素转换，适合把字节直接交给下游原生库的批量作业 |
 | `milvus.read.columnar` | Boolean | 否 | false | 读出口形态。默认 false，逐行交给 Spark。设为 true 时整批交付（`ColumnarBatch`），向量列按 `milvus.read.vector.raw` 决定的类型呈现；有删除的批交出去的是存活行构成的新批，因为 Spark 的 `ColumnarBatch` 没有标记某行无效的办法 |
 
-### 2.4 写入参数
-
-| 参数名 | 类型 | 必需 | 默认值 | 描述 |
-|--------|------|------|--------|------|
-| `MilvusOption.MilvusInsertMaxBatchSize` | Int | 否 | 5000 | 单次插入的最大批次大小 |
-| `MilvusOption.WriterVariableWidthBytesPerValue` | Double | 否 | 32.0 | VARCHAR/JSON/binary 写入列的 Arrow 初始 buffer 密度；宽变长字段可调大。必须是有限正数。 |
-| `MilvusOption.MilvusRetryCount` | Int | 否 | 3 | 操作失败时的重试次数 |
-| `MilvusOption.MilvusRetryInterval` | Int | 否 | 1000 | 重试间隔时间（毫秒） |
 
 ### 2.5 离线备份读取参数
 
@@ -154,7 +146,8 @@ val s3Options = Map(
 | `MilvusOption.BackupDir` | String | 否 | "" | `milvus.backup.dir` — 备份目录，如 `s3a://bucket/backup/<name>`。**仅支持 S3**（`s3://` 自动归一化为 `s3a://`）；本地/`file://` 目录在规划期被拒绝（packed reader 需要 S3）。 |
 | `MilvusOption.MilvusDatabaseName` | String | 否 | "" | collection 所在库。传 `"default"` 选择默认库的 collection（匹配 meta 记录为 `""` 或 `"default"`）；留空则走单候选/歧义判定——当同时存在 `default.orders` 与 `db2.orders` 时，需传 `"default"`（或 `"db2"`）消除歧义。 |
 | `MilvusOption.MilvusCollectionName` | String | 条件 | - | 备份内的 collection 名（与库名联合匹配，不用 `.head`）。备份含多个 collection 时必须指定。 |
-| `MilvusOption.ReadApplyDeletes` | Boolean | 否 | true | `milvus.read.apply.deletes` — 读取时应用删除日志（L0/L1）。 |
+| `MilvusOption.SnapshotPath` | String | 否 | - | `milvus.snapshot.path` — 快照目录里的一个快照 JSON（`s3a://bucket/files/snapshots/<coll>/metadata/<id>.json` 或相对 `fs.bucket_name` 的 key）。不经 Milvus 服务：schema、分区、段全部来自这个文件。不能与 `milvus.snapshot.manifests` 同时给。 |
+| `MilvusOption.ClientSnapshotName` | String | 否 | 最新 | `milvus.client.snapshot.name` — 配合 `milvus.uri`：读该 collection 快照目录里这个名字的快照，而不是最新的。连接器自己不建快照，先用 Milvus 或 `CALL create_snapshot` 建。 |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | 否 | 67108864 | `milvus.snapshot.max.json.bytes` — backup `full_meta.json` 大小上限。 |
 
 读取 schema 需通过 `.schema()` 提供，或从备份 meta 推导；未提供 `.schema()` 且 meta 读取失败时读取硬失败。读取动态集合（`enable_dynamic_field=true`）要求备份 meta 记录 `$meta` 字段——仅当 milvus-backup 带 etcd 访问（`--backup_index_extra`）且 **≥ v0.5.13** 时才捕获。两种备份形态会在规划期中止读取：跨多个 binlog 文件的 column group（未修复的 milvus-storage bug，见设计文档）与含 struct-array 字段（`struct_array_fields`）的集合。S3 凭证复用现有 `fs.*` 选项（`fs.address`、`fs.access_key_id`、`fs.access_key_value` ...）；桶取自 `milvus.backup.dir` URI。
@@ -174,19 +167,6 @@ val df = spark.read
   .load()
 ```
 
-### 3.2 写入数据
-
-```scala
-df.write
-  .format("milvus")
-  .option(MilvusOption.MilvusUri, "http://localhost:19530")
-  .option(MilvusOption.MilvusToken, "your-token")
-  .option(MilvusOption.MilvusCollectionName, "your_collection")
-  .option(MilvusOption.MilvusDatabaseName, "your_database")
-  .option(MilvusOption.MilvusInsertMaxBatchSize, "1000")
-  .option(MilvusOption.MilvusRetryCount, "5")
-  .save()
-```
 
 ## 4. 数据模式
 
@@ -201,8 +181,6 @@ df.write
 
 1. **版本要求**：此连接器需要 Milvus 2.6+ 和 Storage V2
 2. **SSL/TLS 配置**：支持单向和双向 TLS 认证，根据需要配置相应的证书文件
-3. **批次大小**：合理设置 `MilvusOption.MilvusInsertMaxBatchSize` 可以优化写入性能
-4. **重试机制**：内置重试机制可以提高操作的可靠性
 5. **参数常量**：建议使用 `MilvusOption` 类中定义的常量，避免字符串拼写错误
 
 ## 6. 支持的数据类型

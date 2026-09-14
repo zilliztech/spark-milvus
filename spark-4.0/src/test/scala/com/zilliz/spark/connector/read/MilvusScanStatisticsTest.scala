@@ -6,10 +6,11 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
+import com.zilliz.milvus.storage.read.plan.InputSpec
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 /** R13: the statistics Spark uses to pick a join strategy. */
 class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {

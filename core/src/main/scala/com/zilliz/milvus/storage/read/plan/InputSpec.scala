@@ -1,36 +1,7 @@
 package com.zilliz.milvus.storage.read.plan
 
 import com.zilliz.milvus.storage.delete.MilvusDeletePlan
-import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
-
-/** Where a segment's column groups come from.
-  *
-  * This is the only thing that differs between the two segment layouts, which
-  * is why it is the only thing modelled as a choice. Everything else a reader
-  * needs is the same for both and lives flat in [[InputSpec]].
-  */
-sealed trait SegmentLayout extends Serializable
-
-object SegmentLayout {
-
-  /** `storage_version = 3`: the native library reads the layout out of the
-    * manifest at `basePath`.
-    *
-    * @param readVersion
-    *   the manifest version to read, or -1 for the latest. A planner that
-    *   resolved a version pins it, so every task in the job reads the same one
-    *   even if a compaction commits a newer manifest meanwhile.
-    */
-  final case class Manifest(basePath: String, readVersion: Long = -1L)
-      extends SegmentLayout
-
-  /** `storage_version = 2`: no manifest exists, so the layout was recovered on
-    * the driver from the snapshot AVRO plus each parquet footer's
-    * `group_field_id_list` and is carried here already materialized.
-    */
-  final case class ColumnGroups(groups: Seq[V2ColumnGroup])
-      extends SegmentLayout
-}
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 /** Where the rows deleted from a segment come from.
   *

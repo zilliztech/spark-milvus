@@ -1,438 +1,183 @@
 package com.zilliz.spark.connector.read.plan
 
-import java.net.URI
-import scala.jdk.CollectionConverters._
-
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.sql.connector.read.InputPartition
 
 import com.zilliz.milvus.client.api.MilvusClient
-import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
-import com.zilliz.milvus.storage.delete.MilvusDeltaLogReader
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.snapshot.{
-  MilvusSnapshotReader,
-  SnapshotMetadata,
-  StorageV2ManifestItem,
-  V2SegmentInfo
+import com.zilliz.milvus.storage.snapshot.{Snapshot, SnapshotCatalog}
+import com.zilliz.spark.connector.options.{
+  MilvusOption,
+  StorageOptions,
+  V2SegmentResolvers
 }
-import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.options.StorageOptions
-import io.milvus.grpc.schema.CollectionSchema
 
-/** Client mode, fast path: `CreateSnapshot` on the service, then the snapshot
-  * JSON it points at is read from object storage and planned like an option
-  * snapshot. The snapshot is dropped when the Spark SQL execution ends.
+/** Client mode: the collection is named, the service answers which
+  * collection id that is, and the snapshot comes from the snapshot directory
+  * on object storage through [[SnapshotCatalog]]. Nothing is created on the
+  * service: a read needs a snapshot that already exists, made by Milvus or by
+  * `CALL create_snapshot` (capability A1).
+  *
+  * `milvus.client.snapshot.name` picks a snapshot by name; without it the
+  * latest one is read. `milvus.partition.name`, `milvus.partition.id` and
+  * `milvus.segment.id` narrow the segment list (R16).
   */
 private[read] final class ClientSnapshotPlanner(ctx: ScanContext)
     extends PartitionPlanner(ctx) {
 
-  /** The partitions of a snapshot created on the service for this read, or
-    * `None` when the fast path has to give way to the legacy segment listing.
-    */
-  def plan(client: MilvusClient): Option[Array[InputPartition]] = {
-    val snapshotName = Option(options.get(MilvusOption.ClientSnapshotName))
-      .filter(_.trim.nonEmpty)
-      .getOrElse(
-        ClientReadSnapshot.generatedClientSnapshotName(
-          milvusOption.collectionName
-        )
-      )
-    val description = Option(
-      options.get(MilvusOption.ClientSnapshotDescription)
-    ).filter(_.trim.nonEmpty).getOrElse("spark connector client read snapshot")
-    val protectionSeconds =
-      ClientReadSnapshot.parseClientSnapshotCompactionProtectionSeconds(options)
-
-    val cleanupRegistration = ClientReadSnapshot.activeCleanupRegistration()
-    if (cleanupRegistration.isEmpty) {
-      logWarning(
-        "Skipping client snapshot fast path because Spark SQL execution cleanup cannot be registered; " +
-          "falling back to legacy GetPersistentSegmentInfo read path"
-      )
-      return None
-    }
-
-    client.createSnapshotForRead(
-      milvusOption.databaseName,
-      milvusOption.collectionName,
-      snapshotName,
-      description,
-      protectionSeconds
-    ) match {
-      case scala.util.Success(snapshot) =>
-        val connectorBucket = StorageOptions.connectorS3BucketOption(
-          milvusOption.options
-        )
-        if (
-          connectorBucket.isEmpty && StorageOptions
-            .isBucketRelativeSnapshotLocation(snapshot.s3Location)
-        ) {
-          logWarning(
-            s"Skipping client snapshot fast path because ${StorageProperties.BucketName} is missing " +
-              "and the snapshot location is bucket-relative; falling back to legacy GetPersistentSegmentInfo read path"
-          )
-          ClientReadSnapshot.submitClientSnapshotCleanup(
-            options.asScala.toMap,
-            milvusOption.databaseName,
-            milvusOption.collectionName,
-            snapshot.name,
-            s"missing ${StorageProperties.BucketName} for bucket-relative snapshot location"
-          )
-          None
-        } else if (
-          ClientReadSnapshot.registerClientSnapshotCleanup(
-            cleanupRegistration.get,
-            options.asScala.toMap,
-            milvusOption.databaseName,
-            milvusOption.collectionName,
-            snapshot.name,
-            autoCleanup = MilvusOption.clientSnapshotAutoCleanup(options)
-          )
-        ) {
-          if (MilvusOption.clientSnapshotAutoCleanup(options)) {
-            logWarning(
-              s"Client read snapshot ${snapshot.name} will be dropped when the Spark SQL execution ends; " +
-                "an unclean driver exit can leave it behind and require manual cleanup."
-            )
-          }
-          val snapshotPath = StorageOptions.resolveClientSnapshotLocation(
-            snapshot.s3Location,
-            connectorBucket.getOrElse("")
-          )
-          Some(
-            planFromSnapshotPath(
-              snapshotPath,
-              forceCanonicalBucket = connectorBucket
-            )
-          )
-        } else {
-          ClientReadSnapshot.submitClientSnapshotCleanup(
-            options.asScala.toMap,
-            milvusOption.databaseName,
-            milvusOption.collectionName,
-            snapshot.name,
-            "cleanup registration failure"
-          )
-          None
-        }
-
-      case scala.util.Failure(e) if MilvusClient.isServiceNotImplemented(e) =>
-        logWarning(
-          "CreateSnapshot/DescribeSnapshot is not implemented by this Milvus service; " +
-            "falling back to legacy GetPersistentSegmentInfo read path"
-        )
-        None
-
-      case scala.util.Failure(e) =>
-        throw new RuntimeException(
-          s"Failed to create client read snapshot for collection ${milvusOption.collectionName}: ${e.getMessage}",
-          e
-        )
-    }
-  }
-
-  private def planFromSnapshotPath(
-      snapshotPath: String,
-      forceCanonicalBucket: Option[String]
-  ): Array[InputPartition] = {
-    val hadoopConf = ctx.hadoopConf(snapshotPath)
-    val snapshotJson = readAllBytes(hadoopConf, snapshotPath)
-    val metadata =
-      ClientSnapshotPlanner.validateClientSnapshotMetadata(
-        MilvusSnapshotReader.parseSnapshotMetadata(snapshotJson) match {
-          case Right(value) => value
-          case Left(err) =>
-            throw new IllegalArgumentException(
-              s"Failed to parse client-created snapshot metadata: ${err.getMessage}",
-              err
-            )
-        },
-        snapshotPath
-      )
-
-    val snapshotBucket = forceCanonicalBucket
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .orElse(
-        StorageOptions
-          .snapshotS3BucketForRelativePaths(snapshotPath, milvusOption.options)
-      )
-    val applyDeletes = MilvusOption.readApplyDeletes(options)
-    val v2Segments =
-      if (metadata.manifestList.nonEmpty) {
-        V2SegmentLoader.loadV2Segments(
-          metadata.manifestList,
-          snapshotBucket.getOrElse(""),
-          StorageOptions.storeFor(
-            hadoopConf,
-            snapshotBucket.getOrElse(""),
-            milvusOption.options
-          ),
-          manifestSchemaVersion = metadata.manifestSchemaVersion,
-          applyDeletes = applyDeletes
-        ) match {
-          case Right(segs) => segs
-          case Left(err) =>
-            throw new IllegalStateException(
-              s"Failed to load StorageV2 segments from client-created snapshot: ${err.getMessage}",
-              err
-            )
-        }
-      } else Seq.empty
-    val storageV2ManifestList =
-      metadata.storageV2ManifestList.getOrElse(Seq.empty)
-    ClientSnapshotPlanner.ensureClientSnapshotHasPackedSegments(
-      storageV2ManifestList,
-      v2Segments,
-      metadata.collection.schema.name
+  def plan(client: MilvusClient): Array[InputPartition] = {
+    val snapshot = select(client)
+    val bucket = Some(StorageOptions.resolveConnectorS3Bucket(milvusOption.options))
+    val hadoopConf = ctx.hadoopConf("")
+    val v3 = DeletePlanning.loadV3DeletePlanning(
+      ctx,
+      snapshot,
+      bucket,
+      hadoopConf,
+      errorContext = s"snapshot ${snapshot.name}"
     )
-    ClientSnapshotPlanner.validateSnapshotBucketForRelativeDataPaths(
-      snapshotPath,
-      StorageOptions.connectorS3BucketOption(milvusOption.options),
-      storageV2ManifestList,
-      v2Segments
+    val v2 = DeletePlanning.loadV2DeletePlans(
+      ctx,
+      snapshot,
+      bucket,
+      hadoopConf,
+      errorContext = s"snapshot ${snapshot.name}"
     )
-
-    val schemaBytes = MilvusSnapshotReader.toProtobufSchemaBytes(
-      metadata.collection.schema
+    val inherited = DeletePlanning.loadInheritedDeletePlans(
+      ctx,
+      snapshot,
+      bucket,
+      hadoopConf,
+      errorContext = s"snapshot ${snapshot.name}"
     )
-    val v3DeletePlanning =
-      DeletePlanning.loadV3DeletePlanning(
-        ctx,
-        storageV2ManifestList,
-        schemaBytes,
-        snapshotBucket,
-        hadoopConf,
-        errorContext = "client-created snapshot"
-      )
-    val v2DeletePlans =
-      DeletePlanning.loadV2DeletePlans(
-        ctx,
-        v2Segments,
-        schemaBytes,
-        snapshotBucket,
-        hadoopConf,
-        errorContext = "client-created snapshot"
-      )
-
-    val inheritedDeleteSegments =
-      v2Segments.filter(seg =>
-        seg.columnGroups.isEmpty && seg.deltaLogs.nonEmpty
-      )
-    val inheritedDeletePlansByPartition =
-      if (
-        !MilvusOption.readApplyDeletes(
-          options
-        ) || inheritedDeleteSegments.isEmpty
-      ) {
-        Map.empty[Long, com.zilliz.milvus.storage.delete.MilvusDeletePlan]
-      } else {
-        val pkField = CollectionSchema
-          .parseFrom(schemaBytes)
-          .fields
-          .find(_.isPrimaryKey)
-          .getOrElse {
-            throw new IllegalArgumentException(
-              "No primary key field found in schema"
-            )
-          }
-        MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
-          inheritedDeleteSegments,
-          pkField,
-          snapshotBucket.getOrElse(""),
-          StorageOptions.storeFor(
-            hadoopConf,
-            snapshotBucket.getOrElse(""),
-            milvusOption.options
-          )
-        ) match {
-          case Right(plans) => plans
-          case Left(err) =>
-            throw new IllegalStateException(
-              s"Failed to load inherited StorageV2 delete logs from client-created snapshot: ${err.getMessage}",
-              err
-            )
-        }
-      }
-
     SnapshotPartitions.build(
       ctx,
-      manifestList = storageV2ManifestList,
-      defaultPartitionId = metadata.snapshotInfo.partitionIds.headOption
-        .map(_.toString)
-        .getOrElse("0"),
-      schemaBytes = schemaBytes,
-      v3DeletePlans = v3DeletePlanning.deletePlans,
-      v3ReadVersions = v3DeletePlanning.readVersions,
-      v2Segments = v2Segments,
-      v2DeletePlans = v2DeletePlans,
-      inheritedDeletePlansByPartition = inheritedDeletePlansByPartition,
+      snapshot,
+      v3DeletePlans = v3.deletePlans,
+      v3ReadVersions = v3.readVersions,
+      v2DeletePlans = v2,
+      inheritedDeletePlansByPartition = inherited,
       inlineInheritedDeletePlans = true
     )
   }
 
-  private[read] def readAllBytes(
-      conf: Configuration,
-      path: String
-  ): String = {
-    val maxBytes = StorageOptions.parsePositiveLongOption(
-      options,
-      MilvusOption.SnapshotMaxJsonBytes,
-      MilvusSnapshotReader.MaxSnapshotJsonBytes
-    )
-    val uri = new URI(path)
-    val fs = FileSystem.get(uri, conf)
-    try {
-      val in = fs.open(new Path(uri))
-      try MilvusSnapshotReader.readUtf8WithLimit(in, path, maxBytes)
-      finally in.close()
-    } finally {
-      Option(uri.getScheme).foreach { scheme =>
-        if (conf.getBoolean(s"fs.$scheme.impl.disable.cache", false)) {
-          fs.close()
-        }
-      }
+  /** The snapshot this read is about, narrowed to the selected partitions and
+    * segments.
+    */
+  private[read] def select(client: MilvusClient): Snapshot = {
+    val collectionInfo = client
+      .getCollectionInfo(milvusOption.databaseName, milvusOption.collectionName)
+      .getOrElse(
+        throw new IllegalArgumentException(
+          s"Collection ${milvusOption.collectionName} not found"
+        )
+      )
+    val catalog = ClientSnapshotPlanner.catalog(ctx)
+    val rootPath =
+      milvusOption.options.getOrElse(StorageProperties.RootPath, "files")
+    val snapshot = Option(options.get(MilvusOption.ClientSnapshotName))
+      .map(_.trim)
+      .filter(_.nonEmpty) match {
+      case Some(name) => catalog.byName(rootPath, collectionInfo.collectionID, name)
+      case None       => catalog.latest(rootPath, collectionInfo.collectionID)
     }
+    logInfo(
+      s"Reading snapshot ${snapshot.name} of collection ${milvusOption.collectionName} " +
+        s"(${snapshot.segments.size} segments) from ${snapshot.origin}"
+    )
+    SegmentSelection.narrow(snapshot, milvusOption, partitionIdByName = name =>
+      client
+        .getPartitionID(milvusOption.databaseName, milvusOption.collectionName, name)
+        .getOrElse(
+          throw new IllegalArgumentException(
+            s"Partition '$name' not found in collection ${milvusOption.collectionName}"
+          )
+        )
+    )
   }
 }
 
 object ClientSnapshotPlanner {
-  private val SnapshotOptionKeys = Seq(
-    MilvusOption.SnapshotMode,
-    MilvusOption.SnapshotManifests,
-    MilvusOption.SnapshotV2Segments,
-    MilvusOption.SnapshotCollectionId,
-    MilvusOption.SnapshotPartitionIds,
-    MilvusOption.SnapshotSchemaJson,
-    MilvusOption.SnapshotSchemaBytes
-  )
 
-  private[read] def storageV2ManifestBasePath(
-      item: StorageV2ManifestItem
-  ): String = {
-    MilvusSnapshotReader.parseManifestContent(item.manifest) match {
-      case Right(content) => content.basePath
-      case Left(_)        => item.manifest
-    }
-  }
-
-  private[read] def validateSnapshotBucketForRelativeDataPaths(
-      snapshotPath: String,
-      connectorBucket: Option[String],
-      storageV2ManifestList: Seq[StorageV2ManifestItem],
-      v2Segments: Seq[V2SegmentInfo]
-  ): Unit = {
-    StorageOptions.snapshotBucket(snapshotPath).foreach { snapshot =>
-      val relativeStorageV3Paths = storageV2ManifestList
-        .map(storageV2ManifestBasePath)
-        .filter(StorageOptions.isBucketRelativeSnapshotLocation)
-      val relativeStorageV2Paths = v2Segments
-        .flatMap(_.columnGroups.flatMap(_.filePaths))
-        .filter(StorageOptions.isBucketRelativeSnapshotLocation)
-      val relativePaths = relativeStorageV3Paths ++ relativeStorageV2Paths
-      if (relativePaths.nonEmpty && !connectorBucket.contains(snapshot)) {
-        val connectorDescription = connectorBucket.getOrElse("<unset>")
-        throw new IllegalArgumentException(
-          s"Client-created snapshot metadata is in bucket '$snapshot' but " +
-            s"${StorageProperties.BucketName} is '$connectorDescription' and snapshot data paths are bucket-relative. " +
-            "Refusing to guess which bucket native executors should use; set the connector bucket to the data bucket or use fully-qualified data paths. " +
-            s"Example relative path: ${relativePaths.head}"
-        )
-      }
-    }
-  }
-
-  private[read] def ensureClientSnapshotHasPackedSegments(
-      storageV2ManifestList: Seq[StorageV2ManifestItem],
-      v2Segments: Seq[V2SegmentInfo],
-      collectionName: String
-  ): Unit = {
-    if (storageV2ManifestList.isEmpty && v2Segments.isEmpty) {
-      throw new IllegalArgumentException(
-        s"No packed-parquet segments (StorageV2/V3) found in client-created snapshot for collection " +
-          s"$collectionName. This connector requires Milvus 2.6+ with Storage V2 or V3. " +
-          "Please ensure the collection has been flushed and contains data."
-      )
-    }
-  }
-
-  private[read] def canUseClientSnapshotFastPath(
-      milvusOption: MilvusOption
-  ): Boolean = {
-    milvusOption.partitionName.isEmpty &&
-    milvusOption.partitionID.isEmpty &&
-    milvusOption.segmentID.isEmpty
-  }
-
-  private[read] def buildClientSnapshotOptions(
-      baseOptions: Map[String, String],
-      collectionName: String,
-      collectionId: Long,
-      partitionIds: Seq[Long],
-      schemaBytesBase64: String,
-      manifestList: Seq[StorageV2ManifestItem],
-      v2Segments: Seq[V2SegmentInfo],
-      snapshotBucketForRelativePaths: Option[String] = None
-  ): Map[String, String] = {
-    var out = baseOptions.filterNot { case (key, _) =>
-      SnapshotOptionKeys.exists(_.equalsIgnoreCase(key))
-    }
-    out = out ++ Map(
-      MilvusOption.SnapshotMode -> "true",
-      MilvusOption.MilvusCollectionName -> collectionName,
-      MilvusOption.SnapshotCollectionId -> collectionId.toString,
-      MilvusOption.SnapshotPartitionIds -> partitionIds.mkString(","),
-      MilvusOption.SnapshotSchemaBytes -> schemaBytesBase64,
-      MilvusOption.SnapshotManifests ->
-        MilvusSnapshotReader.serializeManifestList(manifestList)
+  /** A catalog bound to the connector's bucket, reading through the driver's
+    * object store, materializing V2 segments through compat.
+    */
+  private[read] def catalog(ctx: ScanContext): SnapshotCatalog = {
+    val bucket = StorageOptions.resolveConnectorS3Bucket(ctx.milvusOption.options)
+    val store = StorageOptions.storeFor(
+      ctx.hadoopConf(""),
+      bucket,
+      ctx.milvusOption.options
     )
-    if (v2Segments.nonEmpty) {
-      out += MilvusOption.SnapshotV2Segments ->
-        MilvusSnapshotReader.serializeV2Segments(v2Segments)
+    new SnapshotCatalog(
+      store,
+      bucket,
+      V2SegmentResolvers.packed(MilvusOption.readApplyDeletes(ctx.options)),
+      StorageOptions.backupMaxJsonBytes(ctx.options)
+    )
+  }
+}
+
+/** R16: the partition and segment selectors applied to a snapshot. A
+  * selector that matches nothing is an error, not an empty read.
+  */
+private[read] object SegmentSelection {
+
+  def narrow(
+      snapshot: Snapshot,
+      milvusOption: MilvusOption,
+      partitionIdByName: String => Long
+  ): Snapshot = {
+    val partitionFilter: Option[Long] =
+      if (milvusOption.partitionID.trim.nonEmpty) {
+        Some(parseId(MilvusOption.MilvusPartitionID, milvusOption.partitionID))
+      } else if (milvusOption.partitionName.trim.nonEmpty) {
+        Some(partitionIdByName(milvusOption.partitionName.trim))
+      } else None
+    val segmentFilter: Option[Long] =
+      if (milvusOption.segmentID.trim.nonEmpty)
+        Some(parseId(MilvusOption.MilvusSegmentID, milvusOption.segmentID))
+      else None
+    if (partitionFilter.isEmpty && segmentFilter.isEmpty) return snapshot
+
+    val byPartition = partitionFilter match {
+      case Some(p) => snapshot.segments.filter(_.partitionId == p)
+      case None    => snapshot.segments
     }
-    snapshotBucketForRelativePaths.foreach { bucket =>
-      out = out.filterNot { case (key, _) =>
-        key.equalsIgnoreCase(StorageProperties.BucketName)
-      }
-      out += StorageProperties.BucketName -> bucket
+    // A segment selector keeps the partition's delete-only segments: their
+    // deletes apply to the selected segment too.
+    val selected = segmentFilter match {
+      case Some(s) =>
+        val data = byPartition.filter(seg => seg.hasData && seg.id == s)
+        if (data.isEmpty) {
+          throw new IllegalArgumentException(
+            s"Segment $s not found in snapshot ${snapshot.name}" +
+              partitionFilter.map(p => s" partition $p").getOrElse("")
+          )
+        }
+        val partitions = data.map(_.partitionId).toSet
+        data ++ byPartition.filter(seg =>
+          !seg.hasData && partitions.contains(seg.partitionId)
+        )
+      case None =>
+        if (byPartition.isEmpty) {
+          throw new IllegalArgumentException(
+            s"Partition ${partitionFilter.get} has no segments in snapshot ${snapshot.name}"
+          )
+        }
+        byPartition
     }
-    out
+    snapshot.copy(
+      partitionIds = partitionFilter.map(Seq(_)).getOrElse(snapshot.partitionIds),
+      segments = selected
+    )
   }
 
-  private[read] def validateClientSnapshotMetadata(
-      metadata: SnapshotMetadata,
-      snapshotPath: String
-  ): SnapshotMetadata = {
-    if (metadata == null) {
-      throw new IllegalArgumentException(
-        s"Client-created snapshot metadata at $snapshotPath is missing metadata"
-      )
+  private def parseId(key: String, raw: String): Long =
+    try raw.trim.toLong
+    catch {
+      case _: NumberFormatException =>
+        throw new IllegalArgumentException(
+          s"Option '$key' must be a numeric id, got '$raw'"
+        )
     }
-    if (metadata.snapshotInfo == null) {
-      throw new IllegalArgumentException(
-        s"Client-created snapshot metadata at $snapshotPath is missing snapshot_info"
-      )
-    }
-    if (metadata.collection == null) {
-      throw new IllegalArgumentException(
-        s"Client-created snapshot metadata at $snapshotPath is missing collection"
-      )
-    }
-    if (metadata.collection.schema == null) {
-      throw new IllegalArgumentException(
-        s"Client-created snapshot metadata at $snapshotPath is missing collection.schema"
-      )
-    }
-    if (
-      metadata.manifestList.isEmpty &&
-      metadata.storageV2ManifestList.forall(_.isEmpty)
-    ) {
-      throw new IllegalArgumentException(
-        s"Invalid client-created snapshot metadata at $snapshotPath: client snapshot is empty: no manifests and no V2 segments"
-      )
-    }
-    metadata
-  }
 }

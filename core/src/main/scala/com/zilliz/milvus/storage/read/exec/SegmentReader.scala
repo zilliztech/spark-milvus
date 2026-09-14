@@ -8,8 +8,9 @@ import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.jni.storage.StorageNative
-import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
+import com.zilliz.milvus.storage.read.plan.InputSpec
 import com.zilliz.milvus.storage.Logging
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 /** Pulls Arrow batches out of one segment.
   *
