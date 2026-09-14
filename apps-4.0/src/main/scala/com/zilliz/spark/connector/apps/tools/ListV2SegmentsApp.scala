@@ -163,7 +163,7 @@ object ListV2SegmentsApp {
             .key
           MilvusParquetFooterReader.read(
             key,
-            com.zilliz.spark.connector.loon.HadoopStorageConfig
+            com.zilliz.spark.connector.options.HadoopStorageConfig
               .objectStore(hadoopConf, bucket)
           ) match {
             case Left(err) =>

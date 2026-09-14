@@ -1,9 +1,9 @@
-package com.zilliz.spark.connector.loon
+package com.zilliz.spark.connector.write
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.spark.connector.write.MilvusLoonPartitionWriter
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
 
 class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
@@ -34,7 +34,7 @@ class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
     "constructor validates variable-width density before bucket validation"
   ) {
     val options = Map(
-      Properties.FsConfig.FsBucketName -> "   ",
+      StorageProperties.BucketName -> "   ",
       MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> "NaN"
     )
 
@@ -48,6 +48,6 @@ class MilvusLoonWriterTest extends AnyFunSuite with Matchers {
     }
 
     err.getMessage should include(MilvusOption.WriterVariableWidthBytesPerValue)
-    err.getMessage should not include (Properties.FsConfig.FsBucketName)
+    err.getMessage should not include (StorageProperties.BucketName)
   }
 }

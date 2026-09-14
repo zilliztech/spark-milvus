@@ -15,7 +15,6 @@ import com.zilliz.milvus.storage.snapshot.{
   StorageV2ManifestItem,
   V2SegmentInfo
 }
-import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.scan.{
   MilvusPackedV2InputPartition,
@@ -72,7 +71,7 @@ object SnapshotPartitions extends Logging {
       .map(bucket =>
         ctx.milvusOption.copy(
           options = ctx.milvusOption.options ++
-            Map(Properties.FsConfig.FsBucketName -> bucket)
+            Map(StorageProperties.BucketName -> bucket)
         )
       )
       .getOrElse(ctx.milvusOption)

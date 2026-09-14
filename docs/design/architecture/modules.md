@@ -103,7 +103,8 @@ C shim（mv_* 包 knowhere::Index、BruteForce、BinarySet、Version，以及 Di
 | `expr` | DataSource V2 Predicate 到 IR 的翻译 | 否 |
 | `types` | Arrow 类型到 Spark 类型的映射，向量列的 Spark 表示 | 否 |
 | `write` | WriteBuilder、BatchWrite、DataWriterFactory、DataWriter；truncate、overwrite、backfill 模式 | 否 |
-| `options` | option 名、别名、校验；1.x 名字的映射和告警；把 compat 的实现注册进 core | 否 |
+| `options` | option 名、别名、校验；1.x 名字的映射和告警；把 compat 的实现注册进 core；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageConfig） | 否 |
+| `sources` | 只有 MilvusDataSource，`format("milvus")` 的 TableProvider。留在这个包名下是因为 apps 和用户作业按字符串引用它的全名 | 否 |
 | `procedure` | CALL 的语义：逻辑计划节点、物理节点、planner 策略 | 否 |
 | `extensions` | SparkSessionExtensions、SQL 解析器扩展、优化规则 | parser、AstBuilder、SessionExtensions 三个壳按线 |
 
@@ -147,7 +148,7 @@ spark-milvus/
   client/
     src/main/scala/com/zilliz/milvus/client/{grpc,api}
     src/main/protobuf/             milvus-proto 子模块的引用
-  spark-base/src/main/scala/com/zilliz/spark/connector/{table,scan,expr,types,write,options}
+  spark-base/src/main/scala/com/zilliz/spark/connector/{sources,table,scan,expr,types,write,options}
   spark-3.5/src/main/{scala,resources}/  catalog、functions、extensions、META-INF/services
   spark-4.0/  spark-4.1/  spark-4.2/     catalog、procedure、extensions、META-INF/services
   apps-4.0/src/main/{scala,resources}/   com.zilliz.spark.connector.apps.{backfill,tools,search,legacy}
@@ -202,12 +203,12 @@ spark-milvus/
 | read/BackupMetaReader.scala | compat.backup | 已迁 |
 | MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数 |
 | sources/MilvusDataSource.scala（2880 行） | spark.sources、spark.table、spark.scan、spark.options | 已拆成 14 个文件，最大 550 行。`sources` 只留 TableProvider（FQN 被 apps 和用户作业按字符串引用，不能动）；MilvusTable→spark.table；ScanBuilder、Scan、四个规划入口（ClientSnapshotPlanner、LegacyClientPlanner、OptionSnapshotPlanner、BackupPlanner）、SnapshotPartitions、DeletePlanning、ClientReadSnapshot→spark.scan；桶判定与 Hadoop 配置翻译（StorageOptions）、备份集合选取（BackupSelection）、ReadMode→spark.options。规划逻辑下沉 core.read.plan 未做，SnapshotPartitions.build 是要下沉的那部分 |
-| MilvusOption.scala、loon/Properties.scala | spark.options、spark-base | 已搬。MilvusOption 在 spark.options；MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。Properties 只剩 FsConfig 的键名常量，全是 core.credential.StorageProperties 的别名；产出上游绑定类型的 fromMilvusOption 已删除 |
+| MilvusOption.scala、loon/Properties.scala | spark.options | 已搬。MilvusOption 在 spark.options；MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。`loon/Properties.FsConfig` 的每个常量都是 core.credential.StorageProperties 的别名，调用方已全部改为直接用 StorageProperties，它只剩 PropertiesTest 一个引用，等批准删除；`loon/HadoopStorageConfig` 已搬到 spark.options，和 StorageOptions 是同一件事的两半 |
 | read/MilvusLoonPartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusPackedV2PartitionReader.scala | spark-base | 已搬。两个 reader 已改调 native-storage 的 JNI，不再经上游绑定；分发与出口下沉 core.read.exec、重写为列式仍是重构，未做 |
-| serde/ArrowConverter.scala | spark-base | 已搬。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
+| serde/ArrowConverter.scala、ArrowAllocator.scala | spark.types | 已搬到 spark.types：它做的是 Arrow 值与 Spark InternalRow 的双向转换，就是 types 的职责。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
 | filter/VectorBruteForceSearch.scala | spark-base | 已搬。它是从 MilvusLoonPartitionReader 的读路径里调的，不是 app；最终形态等决策 16 |
 | write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | spark-base | 已搬，且已改调 native-storage 的 JNI（决策 14 选了自己封）。下沉 core.write.exec 仍是重构，未做 |
-| write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusFieldData.scala（原 MilvusUtil.scala） | spark-base | 已搬。整条 `format("milvus")` 写链是一个整体，上半截是 DataSource V2 的接口实现；下放 apps.legacy 要先有 W7 的注册表，那是重构 |
+| write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusFieldData.scala（原 MilvusUtil.scala） | spark.write | 已搬到 spark.write，MilvusFieldData 在内（它只被 MilvusInsertDataWriter 用）。整条 `format("milvus")` 写链是一个整体，上半截是 DataSource V2 的接口实现；下放 apps.legacy 要先有 W7 的注册表，那是重构 |
 | write/MilvusSparkNativeImportWriter.scala | 删除 | 已删，全仓零引用 |
 | operations/backfill/* | apps.backfill | 已迁，包名从 operations.backfill 改成 apps.backfill |
 | expressions/、extensions/ | apps.search | 已迁 |

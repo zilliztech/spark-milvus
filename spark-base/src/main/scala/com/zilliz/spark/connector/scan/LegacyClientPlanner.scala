@@ -5,7 +5,6 @@ import org.apache.spark.sql.connector.read.InputPartition
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusCollectionInfo}
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
-import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.scan.MilvusStorageV3InputPartition
 
 /** Client mode, legacy path: `GetPersistentSegmentInfo` lists the segments and
@@ -22,7 +21,7 @@ private[scan] final class LegacyClientPlanner(ctx: ScanContext)
     val partition = milvusOption.partitionID
     val segment = milvusOption.segmentID
     val s3RootPath =
-      milvusOption.options.getOrElse(Properties.FsConfig.FsRootPath, "files")
+      milvusOption.options.getOrElse(StorageProperties.RootPath, "files")
 
     def createPartition(
         segmentID: String,

@@ -81,7 +81,7 @@ object ReadSourceOnlyApp {
         V2SegmentLoader.loadV2Segments(
           metadata.manifestList,
           s3Bucket,
-          com.zilliz.spark.connector.loon.HadoopStorageConfig
+          com.zilliz.spark.connector.options.HadoopStorageConfig
             .objectStore(hadoopConf, s3Bucket),
           manifestSchemaVersion = metadata.manifestSchemaVersion
         ) match {

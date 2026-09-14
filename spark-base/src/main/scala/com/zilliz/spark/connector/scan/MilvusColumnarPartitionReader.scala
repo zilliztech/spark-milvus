@@ -12,7 +12,7 @@ import org.apache.spark.sql.vectorized.{
 
 import com.zilliz.milvus.storage.read.exec.SegmentReader
 import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
-import com.zilliz.spark.connector.serde.ArrowAllocator
+import com.zilliz.spark.connector.types.ArrowAllocator
 import com.zilliz.spark.connector.types.{
   MilvusSparseVectorColumn,
   MilvusVectorColumn,

@@ -30,7 +30,7 @@ object Properties {
     val FsRoleArn = StorageProperties.RoleArn
     val FsSessionName = StorageProperties.SessionName
     val FsExternalId = StorageProperties.ExternalId
-    val FsUseVirtualHost = "fs.use_virtual_host"
+    val FsUseVirtualHost = StorageProperties.UseVirtualHost
     val FsRequestTimeoutMs = "fs.request_timeout_ms"
     val FsGcpNativeWithoutAuth = "fs.gcp_native_without_auth"
     val FsGcpCredentialJson = "fs.gcp_credential_json"

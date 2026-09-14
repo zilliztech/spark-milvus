@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.loon
+package com.zilliz.spark.connector.options
 
 import java.security.MessageDigest
 import scala.collection.JavaConverters._

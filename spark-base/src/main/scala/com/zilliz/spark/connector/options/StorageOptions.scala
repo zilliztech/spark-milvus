@@ -8,7 +8,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
-import com.zilliz.spark.connector.loon.Properties
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** How the driver reaches object storage from the options it was given.
@@ -116,7 +116,7 @@ object StorageOptions extends Logging {
   ): com.zilliz.milvus.storage.io.ObjectStore = {
     val trimmed = Option(bucket).map(_.trim).getOrElse("")
     if (trimmed.isEmpty) {
-      return com.zilliz.spark.connector.loon.HadoopStorageConfig
+      return HadoopStorageConfig
         .objectStore(conf, "")
     }
     val declared = options.filter { case (k, _) =>
@@ -127,19 +127,19 @@ object StorageOptions extends Logging {
         com.zilliz.milvus.storage.credential.StorageProperties.ExternalPrefix
       )
     }.toMap
-    val merged = com.zilliz.spark.connector.loon.HadoopStorageConfig
+    val merged = HadoopStorageConfig
       .toFsProperties(conf, trimmed) ++ declared ++
       Map(
         com.zilliz.milvus.storage.credential.StorageProperties.BucketName -> trimmed
       )
-    com.zilliz.spark.connector.loon.HadoopStorageConfig.storeFrom(merged)
+    HadoopStorageConfig.storeFrom(merged)
   }
 
   private[connector] def connectorS3BucketOption(
       options: scala.collection.Map[String, String]
   ): Option[String] = {
     Seq(
-      Properties.FsConfig.FsBucketName,
+      StorageProperties.BucketName,
       MilvusOption.FsBucketName,
       MilvusOption.S3BucketName
     ).view
@@ -152,7 +152,7 @@ object StorageOptions extends Logging {
   ): String = {
     connectorS3BucketOption(options).getOrElse {
       throw new IllegalArgumentException(
-        s"${Properties.FsConfig.FsBucketName} is required for client snapshot reads"
+        s"${StorageProperties.BucketName} is required for client snapshot reads"
       )
     }
   }
@@ -222,16 +222,16 @@ object StorageOptions extends Logging {
       .orElse(SparkSession.getDefaultSession)
       .map(_.sessionState.newHadoopConf())
       .getOrElse(new Configuration())
-    val endpoint = optionValue(rawOptions, Properties.FsConfig.FsAddress)
-    val accessKey = optionValue(rawOptions, Properties.FsConfig.FsAccessKeyId)
+    val endpoint = optionValue(rawOptions, StorageProperties.Address)
+    val accessKey = optionValue(rawOptions, StorageProperties.AccessKeyId)
     val secretKey =
-      optionValue(rawOptions, Properties.FsConfig.FsAccessKeyValue)
-    val useSsl = optionValue(rawOptions, Properties.FsConfig.FsUseSSL)
-    val region = optionValue(rawOptions, Properties.FsConfig.FsRegion)
-    val useIam = optionValue(rawOptions, Properties.FsConfig.FsUseIam)
+      optionValue(rawOptions, StorageProperties.AccessKeyValue)
+    val useSsl = optionValue(rawOptions, StorageProperties.UseSSL)
+    val region = optionValue(rawOptions, StorageProperties.Region)
+    val useIam = optionValue(rawOptions, StorageProperties.UseIam)
       .exists(_.trim.equalsIgnoreCase("true"))
     val useVirtualHost =
-      optionValue(rawOptions, Properties.FsConfig.FsUseVirtualHost)
+      optionValue(rawOptions, StorageProperties.UseVirtualHost)
         .filter(_.trim.nonEmpty)
     val pathStyle = optionValue(rawOptions, "fs.s3a.path.style.access")
       .orElse(

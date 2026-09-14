@@ -28,6 +28,7 @@ object StorageProperties {
   val RoleArn = "fs.role_arn"
   val SessionName = "fs.session_name"
   val ExternalId = "fs.external_id"
+  val UseVirtualHost = "fs.use_virtual_host"
 
   /** Value of `fs.storage_type` that reads the local filesystem, where bucket,
     * endpoint and credentials do not apply.

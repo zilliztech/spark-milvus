@@ -13,7 +13,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
 import com.zilliz.milvus.storage.read.plan.DeleteSource
-import com.zilliz.spark.connector.serde.ArrowAllocator
+import com.zilliz.spark.connector.types.ArrowAllocator
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.CollectionSchema
 

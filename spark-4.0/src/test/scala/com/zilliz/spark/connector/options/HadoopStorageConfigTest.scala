@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.loon
+package com.zilliz.spark.connector.options
 
 import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite

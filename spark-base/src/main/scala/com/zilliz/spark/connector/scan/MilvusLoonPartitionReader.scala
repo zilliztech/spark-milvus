@@ -35,7 +35,7 @@ import com.zilliz.milvus.storage.read.plan.{InputSpec, SegmentLayout}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.spark.connector.filter.VectorBruteForceSearch
-import com.zilliz.spark.connector.serde.{ArrowAllocator, ArrowConverter}
+import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 

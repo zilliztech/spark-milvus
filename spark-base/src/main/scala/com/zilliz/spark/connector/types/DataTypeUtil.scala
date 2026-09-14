@@ -6,7 +6,6 @@ import org.apache.spark.sql.types.{DataTypes, MetadataBuilder}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.MilvusTypes
 import com.zilliz.milvus.storage.DataParseException
-import com.zilliz.spark.connector.serde.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 /** Milvus type to Spark type. The Arrow half of the mapping lives in core, in

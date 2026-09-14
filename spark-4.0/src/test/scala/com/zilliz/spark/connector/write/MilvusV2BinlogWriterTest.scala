@@ -6,7 +6,7 @@ import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.spark.connector.loon.Properties
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
 
 class MilvusV2BinlogWriterTest extends AnyFunSuite with Matchers {
@@ -46,8 +46,8 @@ class MilvusV2BinlogWriterTest extends AnyFunSuite with Matchers {
   ) {
     val tempDir = Files.createTempDirectory("v2-binlog-writer-test-")
     val options = Map(
-      Properties.FsConfig.FsUseIam -> "true",
-      Properties.FsConfig.FsRootPath -> tempDir.toString,
+      StorageProperties.UseIam -> "true",
+      StorageProperties.RootPath -> tempDir.toString,
       MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> "NaN"
     )
 
@@ -65,6 +65,6 @@ class MilvusV2BinlogWriterTest extends AnyFunSuite with Matchers {
     }
 
     err.getMessage should include(MilvusOption.WriterVariableWidthBytesPerValue)
-    err.getMessage should not include (Properties.FsConfig.FsBucketName)
+    err.getMessage should not include (StorageProperties.BucketName)
   }
 }

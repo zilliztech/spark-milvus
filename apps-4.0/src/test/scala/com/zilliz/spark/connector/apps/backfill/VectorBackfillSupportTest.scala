@@ -12,7 +12,7 @@ import org.scalatest.BeforeAndAfterAll
 import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.{Field, TypeParam}
-import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class VectorBackfillSupportTest

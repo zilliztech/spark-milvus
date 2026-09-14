@@ -2,7 +2,7 @@ package com.zilliz.spark.connector.apps.backfill
 
 import org.apache.hadoop.conf.Configuration
 
-import com.zilliz.spark.connector.loon.Properties
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** Configuration for backfill operation
@@ -256,7 +256,7 @@ case class BackfillConfig(
         "fs.bucket_name" -> s3BucketName,
         "fs.root_path" -> s3RootPath,
         "fs.use_ssl" -> s3UseSSL.toString,
-        Properties.FsConfig.FsCloudProvider -> s3CloudProvider.trim,
+        StorageProperties.CloudProvider -> s3CloudProvider.trim,
         "fs.use_iam" -> s3UseIam.toString
       )
     )
@@ -300,7 +300,7 @@ case class BackfillConfig(
         "fs.use_ssl" -> s3UseSSL.toString,
         "fs.use_iam" -> s3UseIam.toString,
         "fs.region" -> s3Region,
-        Properties.FsConfig.FsCloudProvider -> s3CloudProvider.trim,
+        StorageProperties.CloudProvider -> s3CloudProvider.trim,
         "milvus.collection.name" -> s"segment_${segmentId}_backfill",
         "milvus.writer.customPath" -> segmentBasePath,
         "milvus.writer.commitType" -> "addfield",
@@ -410,15 +410,15 @@ case class BackfillConfig(
       options
     } else {
       options ++ Map(
-        Properties.FsConfig.FsAccessKeyId -> s3AccessKey,
-        Properties.FsConfig.FsAccessKeyValue -> s3SecretKey
+        StorageProperties.AccessKeyId -> s3AccessKey,
+        StorageProperties.AccessKeyValue -> s3SecretKey
       )
     }
 
     Seq(
-      Properties.FsConfig.FsRoleArn -> s3RoleArn,
-      Properties.FsConfig.FsSessionName -> s3RoleSessionName,
-      Properties.FsConfig.FsExternalId -> s3ExternalId
+      StorageProperties.RoleArn -> s3RoleArn,
+      StorageProperties.SessionName -> s3RoleSessionName,
+      StorageProperties.ExternalId -> s3ExternalId
     ).foldLeft(credentialOptions) { case (result, (key, value)) =>
       value.map(_.trim).filter(_.nonEmpty) match {
         case Some(normalized) => result + (key -> normalized)

@@ -42,6 +42,7 @@ import com.zilliz.milvus.storage.read.plan.{
   SegmentLayout
 }
 import com.zilliz.milvus.storage.schema.FieldMetadata
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.snapshot.{
   Collection,
   CollectionSchema,
@@ -52,7 +53,6 @@ import com.zilliz.milvus.storage.snapshot.{
   V2ColumnGroup,
   V2SegmentInfo
 }
-import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.options.{
   BackupSelection,
   MilvusOption,
@@ -584,13 +584,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
     assert(
       StorageOptions.snapshotS3BucketForRelativePaths(
         "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json",
-        Map(Properties.FsConfig.FsBucketName -> "connector-bucket")
+        Map(StorageProperties.BucketName -> "connector-bucket")
       ) == Some("snapshot-bucket")
     )
     assert(
       StorageOptions.snapshotS3BucketForRelativePaths(
         "files/snapshots/1/metadata/2.json",
-        Map(Properties.FsConfig.FsBucketName -> "connector-bucket")
+        Map(StorageProperties.BucketName -> "connector-bucket")
       ) == Some("connector-bucket")
     )
   }
@@ -628,24 +628,24 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   test("resolveConnectorS3Bucket trims configured bucket") {
     assert(
       StorageOptions.resolveConnectorS3Bucket(
-        Map(Properties.FsConfig.FsBucketName -> " connector-bucket ")
+        Map(StorageProperties.BucketName -> " connector-bucket ")
       ) == "connector-bucket"
     )
   }
 
   test("resolveConnectorS3Bucket rejects missing or blank bucket") {
-    Seq(Map.empty[String, String], Map(Properties.FsConfig.FsBucketName -> " "))
+    Seq(Map.empty[String, String], Map(StorageProperties.BucketName -> " "))
       .foreach { options =>
         val err = intercept[IllegalArgumentException] {
           StorageOptions.resolveConnectorS3Bucket(options)
         }
-        assert(err.getMessage.contains(Properties.FsConfig.FsBucketName))
+        assert(err.getMessage.contains(StorageProperties.BucketName))
       }
   }
 
   test("buildSnapshotHadoopConf disables S3A FileSystem cache") {
     val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(Properties.FsConfig.FsBucketName, "connector-bucket")
+    rawOptions.put(StorageProperties.BucketName, "connector-bucket")
     val conf = scanWithOptions(rawOptions).ctx.hadoopConf(
       "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
     )
@@ -654,13 +654,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
   test("buildSnapshotHadoopConf maps connector S3 options to S3A") {
     val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(Properties.FsConfig.FsBucketName, "connector-bucket")
-    rawOptions.put(Properties.FsConfig.FsAddress, "minio:9000")
-    rawOptions.put(Properties.FsConfig.FsAccessKeyId, "ak")
-    rawOptions.put(Properties.FsConfig.FsAccessKeyValue, "sk")
-    rawOptions.put(Properties.FsConfig.FsUseSSL, "false")
-    rawOptions.put(Properties.FsConfig.FsRegion, "us-west-2")
-    rawOptions.put(Properties.FsConfig.FsUseVirtualHost, "false")
+    rawOptions.put(StorageProperties.BucketName, "connector-bucket")
+    rawOptions.put(StorageProperties.Address, "minio:9000")
+    rawOptions.put(StorageProperties.AccessKeyId, "ak")
+    rawOptions.put(StorageProperties.AccessKeyValue, "sk")
+    rawOptions.put(StorageProperties.UseSSL, "false")
+    rawOptions.put(StorageProperties.Region, "us-west-2")
+    rawOptions.put(StorageProperties.UseVirtualHost, "false")
 
     val conf = scanWithOptions(rawOptions).ctx.hadoopConf(
       "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json"
@@ -693,10 +693,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
 
   test("buildSnapshotHadoopConf maps IAM mode without static credentials") {
     val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(Properties.FsConfig.FsBucketName, "connector-bucket")
-    rawOptions.put(Properties.FsConfig.FsUseIam, "true")
-    rawOptions.put(Properties.FsConfig.FsAccessKeyId, "ak")
-    rawOptions.put(Properties.FsConfig.FsAccessKeyValue, "sk")
+    rawOptions.put(StorageProperties.BucketName, "connector-bucket")
+    rawOptions.put(StorageProperties.UseIam, "true")
+    rawOptions.put(StorageProperties.AccessKeyId, "ak")
+    rawOptions.put(StorageProperties.AccessKeyValue, "sk")
 
     val conf = scanWithOptions(rawOptions).ctx.hadoopConf(
       "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
@@ -1145,7 +1145,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
   test("buildClientSnapshotOptions overrides relative-path bucket") {
     val out = ClientSnapshotPlanner.buildClientSnapshotOptions(
       baseOptions = Map(
-        Properties.FsConfig.FsBucketName.toUpperCase -> "connector-bucket"
+        StorageProperties.BucketName.toUpperCase -> "connector-bucket"
       ),
       collectionName = "snapshot_collection",
       collectionId = 10L,
@@ -1155,7 +1155,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       v2Segments = Seq.empty,
       snapshotBucketForRelativePaths = Some("snapshot-bucket")
     )
-    assert(out(Properties.FsConfig.FsBucketName) == "snapshot-bucket")
+    assert(out(StorageProperties.BucketName) == "snapshot-bucket")
   }
 
   test("snapshot option keys use dotted lowercase suffixes") {

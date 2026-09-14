@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.serde
+package com.zilliz.spark.connector.types
 
 import java.nio.{ByteBuffer, ByteOrder}
 import scala.collection.JavaConverters._

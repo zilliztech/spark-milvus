@@ -18,7 +18,6 @@ import com.zilliz.milvus.client.{MilvusRateLimitException, MilvusRpcException}
 import com.zilliz.milvus.client.api.MilvusClient
 import com.zilliz.milvus.storage.schema.MilvusTypes
 import com.zilliz.milvus.storage.DataTypeException
-import com.zilliz.spark.connector.MilvusFieldData
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{
   CollectionSchema,

@@ -19,8 +19,7 @@ import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.MilvusSchemaUtil
-import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.types.ArrowConverter
 
 /** Describes one parquet file produced by a backfill write into a StorageV2
   * (non-manifest packed parquet) segment.
@@ -95,13 +94,13 @@ class MilvusV2BinlogWriter(
     MilvusV2BinlogWriter.parseVariableWidthBytesPerValue(milvusOption.options)
 
   // Storage root comes from the same FS config the V3 writer already consumes
-  // — see com.zilliz.spark.connector.loon.Properties. Paths passed to the
+  // — see com.zilliz.milvus.storage.credential.StorageProperties. Paths passed to the
   // native writer are bucket-relative keys: milvus-storage's FilesystemCache
   // wraps the raw S3 filesystem in a FileSystemProxy(bucket, s3_fs) subtree,
   // so the bucket is prepended automatically. Passing "<bucket>/<key>" would
   // produce doubled-bucket paths like "a-bucket/a-bucket/files/...".
   private val rootPath: String = milvusOption.options
-    .getOrElse(Properties.FsConfig.FsRootPath, "files")
+    .getOrElse(StorageProperties.RootPath, "files")
     .stripSuffix("/")
 
   private case class PerFieldEntry(

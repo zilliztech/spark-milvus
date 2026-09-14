@@ -10,7 +10,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class MilvusLoonPartitionReaderTest extends AnyFunSuite {

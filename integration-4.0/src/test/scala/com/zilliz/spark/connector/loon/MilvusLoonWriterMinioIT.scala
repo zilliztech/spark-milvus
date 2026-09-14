@@ -6,6 +6,7 @@ import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.write.MilvusLoonWriter
 import com.zilliz.spark.connector.options.MilvusOption
 
@@ -35,14 +36,14 @@ class MilvusLoonWriterMinioIT extends AnyFunSuite with Matchers {
 
       // S3 configuration options
       val options = Map(
-        Properties.FsConfig.FsStorageType -> "remote",
-        Properties.FsConfig.FsAddress -> "localhost:9000",
-        Properties.FsConfig.FsBucketName -> "a-bucket",
-        Properties.FsConfig.FsRootPath -> "files",
-        Properties.FsConfig.FsAccessKeyId -> "minioadmin",
-        Properties.FsConfig.FsAccessKeyValue -> "minioadmin",
-        Properties.FsConfig.FsUseSSL -> "false",
-        Properties.FsConfig.FsRegion -> "us-east-1",
+        StorageProperties.StorageType -> "remote",
+        StorageProperties.Address -> "localhost:9000",
+        StorageProperties.BucketName -> "a-bucket",
+        StorageProperties.RootPath -> "files",
+        StorageProperties.AccessKeyId -> "minioadmin",
+        StorageProperties.AccessKeyValue -> "minioadmin",
+        StorageProperties.UseSSL -> "false",
+        StorageProperties.Region -> "us-east-1",
         MilvusOption.MilvusCollectionName -> "test_collection"
       )
 
@@ -82,14 +83,14 @@ class MilvusLoonWriterMinioIT extends AnyFunSuite with Matchers {
 
       // S3 configuration options with vector dimension
       val options = Map(
-        Properties.FsConfig.FsStorageType -> "remote",
-        Properties.FsConfig.FsAddress -> "localhost:9000",
-        Properties.FsConfig.FsBucketName -> "a-bucket",
-        Properties.FsConfig.FsRootPath -> "files",
-        Properties.FsConfig.FsAccessKeyId -> "minioadmin",
-        Properties.FsConfig.FsAccessKeyValue -> "minioadmin",
-        Properties.FsConfig.FsUseSSL -> "false",
-        Properties.FsConfig.FsRegion -> "us-east-1",
+        StorageProperties.StorageType -> "remote",
+        StorageProperties.Address -> "localhost:9000",
+        StorageProperties.BucketName -> "a-bucket",
+        StorageProperties.RootPath -> "files",
+        StorageProperties.AccessKeyId -> "minioadmin",
+        StorageProperties.AccessKeyValue -> "minioadmin",
+        StorageProperties.UseSSL -> "false",
+        StorageProperties.Region -> "us-east-1",
         MilvusOption.MilvusCollectionName -> "vector_test_collection",
         "vector.vector.dim" -> "4" // Specify vector dimension
       )

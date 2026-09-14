@@ -2,7 +2,6 @@ package com.zilliz.spark.connector.types
 
 import com.zilliz.milvus.storage.schema.ArrowTypes
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.spark.connector.serde.ArrowConverter
 
 /** Spark StructType to Arrow Schema. The Milvus CollectionSchema half moved to
   * com.zilliz.milvus.storage.schema.SchemaMapper in core.

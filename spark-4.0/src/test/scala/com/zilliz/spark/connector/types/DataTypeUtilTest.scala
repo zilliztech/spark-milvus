@@ -6,7 +6,6 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.DataParseException
-import com.zilliz.spark.connector.serde.ArrowConverter
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 

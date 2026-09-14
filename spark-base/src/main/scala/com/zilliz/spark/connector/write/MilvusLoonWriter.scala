@@ -40,8 +40,7 @@ import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.MilvusTypes
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.{DataTypeUtil, MilvusSchemaUtil}
-import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.serde.ArrowConverter
+import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** MilvusLoonWriteTable provides write support for StorageV3 (segment-info
@@ -526,11 +525,11 @@ class MilvusLoonPartitionWriter(
 
     // Extract S3 configuration from MilvusOption
     val bucket = milvusOption.options.getOrElse(
-      Properties.FsConfig.FsBucketName,
+      StorageProperties.BucketName,
       "a-bucket"
     )
     val rootPath =
-      milvusOption.options.getOrElse(Properties.FsConfig.FsRootPath, "files")
+      milvusOption.options.getOrElse(StorageProperties.RootPath, "files")
 
     // Include bucket name in the path for S3FileSystem
     s"$bucket/$rootPath/spark_write/$collectionName/$partitionName/$timestamp/task_${partitionId}_$taskId"

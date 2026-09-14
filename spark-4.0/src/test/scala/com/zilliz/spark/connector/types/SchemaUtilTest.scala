@@ -1,4 +1,4 @@
-package serde
+package com.zilliz.spark.connector.types
 
 import scala.collection.JavaConverters._
 
@@ -388,8 +388,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
   test("Milvus vector metadata produces exact internal Arrow types") {
     import com.zilliz.spark.connector.types.MilvusSchemaUtil
-    import com.zilliz.spark.connector.serde.ArrowConverter
-    import io.milvus.grpc.schema.{DataType => MilvusDataType}
+        import io.milvus.grpc.schema.{DataType => MilvusDataType}
     import org.apache.arrow.vector.types.pojo.ArrowType
     import org.apache.spark.sql.types._
 

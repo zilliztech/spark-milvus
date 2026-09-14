@@ -10,13 +10,13 @@ import org.apache.spark.sql.connector.read.InputPartition
 import com.zilliz.milvus.client.api.MilvusClient
 import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
 import com.zilliz.milvus.storage.delete.MilvusDeltaLogReader
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.snapshot.{
   MilvusSnapshotReader,
   SnapshotMetadata,
   StorageV2ManifestItem,
   V2SegmentInfo
 }
-import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.options.StorageOptions
 import io.milvus.grpc.schema.CollectionSchema
@@ -70,7 +70,7 @@ private[scan] final class ClientSnapshotPlanner(ctx: ScanContext)
             .isBucketRelativeSnapshotLocation(snapshot.s3Location)
         ) {
           logWarning(
-            s"Skipping client snapshot fast path because ${Properties.FsConfig.FsBucketName} is missing " +
+            s"Skipping client snapshot fast path because ${StorageProperties.BucketName} is missing " +
               "and the snapshot location is bucket-relative; falling back to legacy GetPersistentSegmentInfo read path"
           )
           ClientReadSnapshot.submitClientSnapshotCleanup(
@@ -78,7 +78,7 @@ private[scan] final class ClientSnapshotPlanner(ctx: ScanContext)
             milvusOption.databaseName,
             milvusOption.collectionName,
             snapshot.name,
-            s"missing ${Properties.FsConfig.FsBucketName} for bucket-relative snapshot location"
+            s"missing ${StorageProperties.BucketName} for bucket-relative snapshot location"
           )
           None
         } else if (
@@ -336,7 +336,7 @@ object ClientSnapshotPlanner {
         val connectorDescription = connectorBucket.getOrElse("<unset>")
         throw new IllegalArgumentException(
           s"Client-created snapshot metadata is in bucket '$snapshot' but " +
-            s"${Properties.FsConfig.FsBucketName} is '$connectorDescription' and snapshot data paths are bucket-relative. " +
+            s"${StorageProperties.BucketName} is '$connectorDescription' and snapshot data paths are bucket-relative. " +
             "Refusing to guess which bucket native executors should use; set the connector bucket to the data bucket or use fully-qualified data paths. " +
             s"Example relative path: ${relativePaths.head}"
         )
@@ -394,9 +394,9 @@ object ClientSnapshotPlanner {
     }
     snapshotBucketForRelativePaths.foreach { bucket =>
       out = out.filterNot { case (key, _) =>
-        key.equalsIgnoreCase(Properties.FsConfig.FsBucketName)
+        key.equalsIgnoreCase(StorageProperties.BucketName)
       }
-      out += Properties.FsConfig.FsBucketName -> bucket
+      out += StorageProperties.BucketName -> bucket
     }
     out
   }
