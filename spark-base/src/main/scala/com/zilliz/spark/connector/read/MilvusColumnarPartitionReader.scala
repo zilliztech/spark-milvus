@@ -3,7 +3,12 @@ package com.zilliz.spark.connector.read
 import org.apache.arrow.vector.{VarBinaryVector, VectorSchemaRoot}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.read.PartitionReader
-import org.apache.spark.sql.types.{StringType, StructField, StructType}
+import org.apache.spark.sql.types.{
+  ArrayType,
+  StringType,
+  StructField,
+  StructType
+}
 import org.apache.spark.sql.vectorized.{
   ArrowColumnVector,
   ColumnVector,
@@ -18,6 +23,7 @@ import com.zilliz.spark.connector.types.{
   SelectedRowsColumn,
   Utf8FromBinaryColumn
 }
+import com.zilliz.spark.connector.types.MilvusArrayColumn
 import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 
 /** Hands Spark whole batches instead of rows.
@@ -173,7 +179,10 @@ class MilvusColumnarPartitionReader(
       vector: org.apache.arrow.vector.FieldVector
   ): ColumnVector = (field.dataType, vector) match {
     case (StringType, v: VarBinaryVector) => new Utf8FromBinaryColumn(v)
-    case _                                => new ArrowColumnVector(vector)
+    // A Milvus Array field is stored as one serialized ScalarField per row.
+    case (ArrayType(elementType, _), v: VarBinaryVector) =>
+      new MilvusArrayColumn(v, elementType)
+    case _ => new ArrowColumnVector(vector)
   }
 
   private def dimensionOf(name: String): Int = {

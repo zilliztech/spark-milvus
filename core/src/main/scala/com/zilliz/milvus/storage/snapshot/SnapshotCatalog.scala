@@ -165,7 +165,10 @@ final class SnapshotCatalog(
     val files = list(rootPath, collectionId)
     if (files.isEmpty) {
       throw new IllegalArgumentException(
-        s"no snapshot under ${SnapshotCatalog.metadataPrefix(rootPath, collectionId)}"
+        s"no snapshot under ${SnapshotCatalog.metadataPrefix(rootPath, collectionId)}; " +
+          "the prefix is fs.root_path plus snapshots/<collection id>/metadata/, " +
+          "and fs.root_path must be the Milvus minio.rootPath (an instance id " +
+          "on Zilliz Cloud, files on a default self-managed Milvus)"
       )
     }
     // The directory holds only file names; name and create_ts are inside each

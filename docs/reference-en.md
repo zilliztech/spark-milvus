@@ -110,7 +110,7 @@ Each Spark partition is one segment. For a segment with `storage_version = 3`, `
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `MilvusOption.MilvusUri` | String | Conditional | - | Milvus server connection URI, format: `http://host:port` or `https://host:port`. Required for client mode; not required for snapshot/backup mode (offline reads). |
+| `MilvusOption.MilvusUri` | String | Conditional | - | Milvus server connection URI, format: `http://host:port` or `https://host:port`. Required for client mode; not required for snapshot/backup mode. Client mode also needs `fs.root_path` set to the Milvus `minio.rootPath` (an instance id on Zilliz Cloud, `files` on a default self-managed Milvus): the snapshot directory is `<root>/snapshots/<collection id>/metadata/` (offline reads). |
 | `MilvusOption.MilvusToken` | String | No | "" | Milvus server authentication token |
 | `MilvusOption.MilvusDatabaseName` | String | No | "" | Database name, defaults to default database |
 

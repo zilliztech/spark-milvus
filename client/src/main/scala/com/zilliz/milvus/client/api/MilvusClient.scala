@@ -37,6 +37,7 @@ import io.milvus.grpc.milvus.{
   ConnectRequest,
   CreateCollectionRequest,
   CreateDatabaseRequest,
+  CreatePartitionRequest,
   CreateSnapshotRequest,
   DeleteRequest,
   DescribeCollectionRequest,
@@ -883,6 +884,26 @@ class MilvusClient(params: MilvusConnectionParams)
         Failure(
           new Exception(s"Failed to get segment info: ${e.getMessage}")
         )
+    }
+  }
+
+  def createPartition(
+      dbName: String = "",
+      collectionName: String,
+      partitionName: String
+  ): Try[Status] = {
+    try {
+      val status = rpcStub.createPartition(
+        CreatePartitionRequest(
+          dbName = dbName,
+          collectionName = collectionName,
+          partitionName = partitionName
+        )
+      )
+      checkStatus("createPartition", status)
+    } catch {
+      case e: Exception =>
+        Failure(new Exception(s"Failed to create partition: ${e.getMessage}"))
     }
   }
 

@@ -110,7 +110,7 @@ val s3Options = Map(
 
 | 参数名 | 类型 | 必需 | 默认值 | 描述 |
 |--------|------|------|--------|------|
-| `MilvusOption.MilvusUri` | String | 条件 | - | Milvus 服务器连接 URI，格式：`http://host:port` 或 `https://host:port`。客户端模式必需；snapshot/backup 模式（离线读）不要求。 |
+| `MilvusOption.MilvusUri` | String | 条件 | - | Milvus 服务器连接 URI，格式：`http://host:port` 或 `https://host:port`。客户端模式必需；snapshot/backup 模式（离线读）不要求。。client 模式还要设 `fs.root_path` 为 Milvus 的 `minio.rootPath`（Zilliz Cloud 上是实例 id，自建 Milvus 默认 `files`）：快照目录是 `<root>/snapshots/<collection id>/metadata/` |
 | `MilvusOption.MilvusToken` | String | 否 | "" | Milvus 服务器认证令牌 |
 | `MilvusOption.MilvusDatabaseName` | String | 否 | "" | 数据库名称，默认为 default 数据库 |
 

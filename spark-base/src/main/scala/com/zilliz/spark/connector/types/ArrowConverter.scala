@@ -23,6 +23,7 @@ import com.zilliz.milvus.storage.codec.{
   FloatConverter,
   SparseFloatVectorConverter
 }
+import com.zilliz.milvus.storage.codec.ArrayCodec
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
@@ -182,7 +183,12 @@ object ArrowConverter extends Logging {
         )
 
       case ArrayType(elementType, _) =>
-        decodeListArray(vector, rowIndex, elementType)
+        vector match {
+          // A Milvus Array field: one serialized ScalarField per row.
+          case binary: VarBinaryVector =>
+            decodeStoredArray(binary.get(rowIndex), elementType)
+          case _ => decodeListArray(vector, rowIndex, elementType)
+        }
 
       case BinaryType =>
         vector match {
@@ -281,6 +287,30 @@ object ArrowConverter extends Logging {
       throw new IllegalArgumentException(
         s"Cannot read ${other.getClass.getSimpleName} as a binary-backed vector"
       )
+  }
+
+  /** The elements of a stored Array value, as the Spark element type. */
+  private[types] def decodeStoredArray(
+      bytes: Array[Byte],
+      elementType: DataType
+  ): ArrayData = {
+    val elements = ArrayCodec.elements(bytes)
+    val converted: Array[Any] = elementType match {
+      case BooleanType => elements.map(_.asInstanceOf[Boolean]).toArray
+      case ByteType    => elements.map(_.asInstanceOf[Int].toByte).toArray
+      case ShortType   => elements.map(_.asInstanceOf[Int].toShort).toArray
+      case IntegerType => elements.map(_.asInstanceOf[Int]).toArray
+      case LongType    => elements.map(_.asInstanceOf[Long]).toArray
+      case FloatType   => elements.map(_.asInstanceOf[Float]).toArray
+      case DoubleType  => elements.map(_.asInstanceOf[Double]).toArray
+      case StringType =>
+        elements.map(e => UTF8String.fromString(e.asInstanceOf[String])).toArray
+      case other =>
+        throw new IllegalArgumentException(
+          s"a Milvus Array cannot have elements of Spark type $other"
+        )
+    }
+    ArrayData.toArrayData(converted)
   }
 
   private def decodeListArray(
