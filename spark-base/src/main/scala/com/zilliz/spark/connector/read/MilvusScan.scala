@@ -58,7 +58,13 @@ class MilvusScan(
   override def toBatch: Batch = this
 
   override def columnarSupportMode(): Scan.ColumnarSupportMode =
-    if (MilvusOption.readColumnar(options)) Scan.ColumnarSupportMode.SUPPORTED
+    // SUPPORTED makes Spark skip the reader factory's per-partition check.
+    // Connector-owned filters and vector search run only in the row reader.
+    // Filters left for Spark stay outside this scan and allow columnar reads.
+    if (
+      MilvusOption.readColumnar(options) && pushedFilters.isEmpty &&
+      milvusOption.vectorSearch.isEmpty
+    ) Scan.ColumnarSupportMode.SUPPORTED
     else Scan.ColumnarSupportMode.UNSUPPORTED
 
   private lazy val plannedPartitions: Array[InputPartition] = plan()
