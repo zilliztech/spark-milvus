@@ -50,9 +50,11 @@ packed and backup entry points; `client` is complete. Every driver-side read
 opens storage through that one store, and no source file in `core` or `compat`
 mentions `org.apache.hadoop`.
 
-Not written: `expr`,
-`index`, `stats`, `read.plan`, `read.exec`, `write.commit` and `write.exec` in
-core. Their `package.scala` files exist and state what belongs there.
+Not written: `expr`, `index`, `stats` and `write.commit` in core. Their
+`package.scala` files exist and state what belongs there. `read.plan` holds
+the task description, `read.exec` opens the native reader, `write.exec` opens
+the native writer and commits the manifest; the driver-side partition builder
+and the job-level commit are still to come.
 
 Layer 3 is split by package: `sources` holds only the `format("milvus")`
 entry point, `table` the table, `read` the scan builder, the scan and the

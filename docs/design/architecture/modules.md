@@ -51,7 +51,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | `stats` | 段统计和 row group 统计的读取与剪枝 | SegmentStats、Pruner |
 | `read.plan` | 分区规划，纯 JVM，可序列化 | SegmentReadTask、SegmentLayout、DeleteSource、ReadPlan。Partitioner 待 R19（决策 19）与 R16 定了再加，一段一分区之外还没有第二种切法 |
 | `read.exec` | 批读取、行号取列、出口；碰 native | SegmentReader、SegmentReaderRegistry。ColumnBatch 与 Take 未写：列式出口的 Spark 侧是 Spark 类型，归第 3 层，进 core 的仍是 VectorSchemaRoot |
-| `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter、StagingLayout |
+| `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter（V3SegmentWriter、V2SegmentWriter）、WrittenColumnGroups、ManifestTransaction、StagingLayout |
 | `write.commit` | 作业清单、提交、幂等 | JobManifest、Committer |
 | `index` | 索引文件编解码、来源、缓存、写出 | IndexFileCodec、IndexSource、IndexCache、IndexWriter |
 
@@ -206,7 +206,7 @@ spark-milvus/
 | read/MilvusV3PartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusV2PartitionReader.scala | spark-base | 已搬。两个 reader 已改调 native-storage 的 JNI，不再经上游绑定；分发与出口下沉 core.read.exec、重写为列式仍是重构，未做 |
 | serde/ArrowConverter.scala、ArrowAllocator.scala | spark.types | 已搬到 spark.types：它做的是 Arrow 值与 Spark InternalRow 的双向转换，就是 types 的职责。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
 | filter/VectorBruteForceSearch.scala | spark-base | 已搬。它是从 MilvusV3PartitionReader 的读路径里调的，不是 app；最终形态等决策 16 |
-| write/MilvusV3Writer.scala、MilvusV2Writer.scala | spark-base | 已搬，且已改调 native-storage 的 JNI（决策 14 选了自己封）。下沉 core.write.exec 仍是重构，未做 |
+| write/MilvusV3Writer.scala、MilvusV2Writer.scala | spark.write → core.write.exec | 已搬；#07 把 native 调用剥进 core.write.exec（V3SegmentWriter、V2SegmentWriter、ManifestTransaction），spark.write 的两个类只剩行到 Arrow 批和 Spark 接口；暂存路径由 StagingLayout 定 |
 | write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusFieldData.scala（原 MilvusUtil.scala） | 删除 | 2026-09-14 删除：gRPC Insert 是 1.x 的写路径（W7），2.0 不支持；MilvusFieldData 只剩集成测试造数据用，搬到 integration-4.0 的 testkit |
 | write/MilvusSparkNativeImportWriter.scala | 删除 | 已删，全仓零引用 |
 | operations/backfill/* | apps.backfill | 已迁，包名从 operations.backfill 改成 apps.backfill |

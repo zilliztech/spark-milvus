@@ -1,9 +1,28 @@
 package com.zilliz.milvus.storage.write
 
-/** Writing segments out and the staging layout. This is where the write path
-  * calls into the native layer.
+/** Writing segments out. The only place in core that opens a native writer.
   *
-  * Main types: SegmentWriter, StagingLayout. Capabilities: none until code lands here; the ids this package is
-  * planned to carry are in section 11 of docs/design/capabilities.md..
+  * `SegmentWriter` takes Arrow batches and hands them to milvus-storage:
+  * `V3SegmentWriter` writes column groups under a segment base path and
+  * `finish()` returns them as `WrittenColumnGroups`, which
+  * `ManifestTransaction` appends to the segment's manifest or swaps in for
+  * existing columns (backfill); `V2SegmentWriter` writes one parquet file per
+  * column group at paths the caller names, the layout of a `storage_version =
+  * 2` segment. `StagingLayout` is where an append writes before the job is
+  * committed and registered: `{root}/staging/{job}/`, outside `insert_log/`,
+  * which DataCoord garbage-collects.
+  *
+  * The rules a writer keeps are the ones the reader keeps
+  * (docs/design/architecture/storage-io.html section 3): a handle never crosses
+  * serialization, a constructor that throws releases what it took, `close()` is
+  * idempotent. One rule is the writer's own: a batch handed to `write` is
+  * exported through the Arrow C Data Interface and the C++ writer keeps
+  * referring to its buffers until it flushes, so the caller builds a fresh
+  * `VectorSchemaRoot` per batch and never reuses one.
+  *
+  * Main types: SegmentWriter, V3SegmentWriter, V2SegmentWriter,
+  * WrittenColumnGroups, ManifestTransaction, StagingLayout. Capabilities: W1,
+  * W2 (see docs/design/capabilities.md). Design: docs/design/README.md section
+  * 2.4.
   */
 package object exec

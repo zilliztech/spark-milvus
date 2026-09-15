@@ -4,7 +4,6 @@ import scala.collection.mutable
 import scala.collection.JavaConverters._
 import scala.util.Try
 
-import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.{
   BaseVariableWidthVector,
@@ -15,11 +14,11 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types._
 
-import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.write.exec.V2SegmentWriter
 import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.types.SparkSchemaMapper
 import com.zilliz.spark.connector.types.ArrowConverter
+import com.zilliz.spark.connector.types.SparkSchemaMapper
 
 /** Describes one parquet file produced by a backfill write into a StorageV2
   * (non-manifest packed parquet) segment.
@@ -117,17 +116,12 @@ class MilvusV2Writer(
     PerFieldEntry(fid, logId, bucketRelative)
   }.toArray
 
-  // Allocator + Arrow schema for the WHOLE row (all N new fields together).
-  // The packed writer splits per column group internally, so we feed it
-  // batches that contain every column.
   private val allocator = new RootAllocator(Long.MaxValue)
   private val fieldNameToId: Map[String, Long] =
     newFieldNames.zip(newFieldIds).toMap
-  // V2 packed-parquet written by milvus segcore uses LOGICAL field names as
-  // parquet column names (with `PARQUET:field_id` metadata for cross-reference).
-  // The V2 reader matches columns by logical name, so we must emit the same
-  // shape — NOT the V3 fieldID-as-string convention. `useFieldIdAsName = false`
-  // keeps the logical name while still stamping `PARQUET:field_id` metadata.
+  // V2 parquet written by Milvus names its columns by the logical field name
+  // (with `PARQUET:field_id` metadata), and the V2 reader matches on that, so
+  // the writer keeps the logical name rather than V3's id-as-name.
   private val arrowSchema =
     SparkSchemaMapper.convertSparkSchemaToArrow(
       targetSchema,
@@ -135,60 +129,19 @@ class MilvusV2Writer(
       fieldIds = fieldNameToId,
       useFieldIdAsName = false
     )
-
-  // Single-field column groups: one parquet output per field, paths in the
-  // same order as `targetSchema.fields`.
-  private val columnGroups: Array[Array[Int]] =
-    Array.tabulate(newFieldNames.length)(i => Array(i))
-  private val outputPaths: Array[String] = fields.map(_.bucketRelativePath)
-
-  // Built the same way the readers build theirs: core.credential parses and
-  // validates, and the map goes straight to the C layer.
-  private val nativeProperties: java.util.Map[String, String] =
-    StorageProperties.from(milvusOption.options).asJava
-
-  // Open the native writer.
-  private val arrowSchemaC: ArrowSchema = ArrowSchema.allocateNew(allocator)
-  Data.exportSchema(allocator, arrowSchema, null, arrowSchemaC)
-
-  // The C layer takes the per-group column indices flattened: group g owns
-  // groupIndices[groupOffsets(g) until groupOffsets(g + 1)].
-  private val groupOffsets: Array[Int] =
-    columnGroups.scanLeft(0)(_ + _.length)
-  private val groupIndices: Array[Int] = columnGroups.flatten
-
-  private val writerHandle: Long =
-    try {
-      StorageNative.packedWriterNew(
-        outputPaths,
-        groupOffsets,
-        groupIndices,
-        arrowSchemaC.memoryAddress(),
-        nativeProperties,
-        0L
-      )
-    } catch {
-      case e: Throwable =>
-        // Cleanup partial state before rethrowing — the caller's `abort()` won't
-        // run if the constructor itself threw.
-        Try(arrowSchemaC.close())
-        Try(allocator.close())
-        throw e
-    }
+  // Single-field column groups: one parquet file per field, in schema order.
+  private val segmentWriter = new V2SegmentWriter(
+    paths = fields.map(_.bucketRelativePath).toSeq,
+    columnGroups = newFieldNames.indices.map(Seq(_)),
+    arrowSchema = arrowSchema,
+    properties = StorageProperties.from(milvusOption.options),
+    allocator = allocator
+  )
   logInfo(
     s"V2 packed writer opened: segment=$segmentId, fields=${newFieldIds.mkString(",")}, " +
-      s"paths=${outputPaths.mkString("[", ", ", "]")}"
+      s"paths=${fields.map(_.bucketRelativePath).mkString("[", ", ", "]")}"
   )
 
-  // Batch accumulation. The current `root` collects rows; each flush exports
-  // it via Arrow C Data Interface, hands the cArray to the C++ writer, then
-  // immediately closes the source root. The export retains each buffer on
-  // its own (verified in ArrowCDataRefcountTest across every backfill-
-  // relevant field type), so closing the source only drops the JVM-side ref —
-  // C++'s cached RecordBatch shared_ptr keeps the buffers alive and fires the
-  // release callback when it drops. This bounds per-writer direct memory to
-  // ~16 MB × numGroups, down from O(segment rows) that the old "retain every
-  // root until writer.close()" strategy incurred.
   private val batchSize: Int =
     if (milvusOption.insertMaxBatchSize > 0) milvusOption.insertMaxBatchSize
     else 5000
@@ -223,7 +176,7 @@ class MilvusV2Writer(
     var firstErr: Throwable = null
     try {
       if (currentBatchSize > 0) flushBatch()
-      StorageNative.packedWriterClose(writerHandle)
+      totalRows = segmentWriter.finish()
     } catch {
       case e: Throwable => firstErr = e
     } finally {
@@ -256,47 +209,23 @@ class MilvusV2Writer(
   private def flushBatch(): Unit = {
     if (currentBatchSize == 0) return
     root.setRowCount(currentBatchSize)
-
-    val cArray = ArrowArray.allocateNew(allocator)
-    try {
-      Data.exportVectorSchemaRoot(allocator, root, null, cArray)
-      StorageNative.packedWriterWrite(writerHandle, cArray.memoryAddress())
-      totalRows += currentBatchSize
-    } finally {
-      // The C++ writer's ImportRecordBatch moves the release callback out of
-      // this struct on success; on failure the release is still here and
-      // closing will fire it, dropping the export-side ref (source root still
-      // holds one ref, so buffers remain alive until abort/cleanup runs).
-      cArray.close()
-    }
-
-    // Fully build + allocate the replacement root BEFORE swapping `root`, so
-    // that if allocation throws, the field still points at the old root and
-    // cleanup() can release it. Otherwise an allocation failure mid-swap would
-    // leak the half-allocated newRoot and forget the old one.
-    //
-    // Old root's buffers are now referenced only by C++ via the export's
-    // retained ref, so closing `oldRoot` at the end just drops the JVM ref —
-    // buffers stay alive until C++ flushes the cached shared_ptr.
+    segmentWriter.write(root)
+    totalRows += currentBatchSize
+    // Build and allocate the replacement before swapping, so an allocation
+    // failure leaves `root` pointing at the old one for cleanup to release.
     val newRoot = VectorSchemaRoot.create(arrowSchema, allocator)
-    try {
-      allocateVectors(newRoot)
-    } catch {
+    try allocateVectors(newRoot)
+    catch {
       case t: Throwable =>
-        Try(newRoot.close()).failed.foreach(e =>
-          logError(
-            s"error closing newRoot after allocation failure: ${e.getMessage}"
-          )
-        )
+        Try(newRoot.close())
         throw t
     }
     val oldRoot = root
     root = newRoot
     currentBatchSize = 0
-    // Best-effort: the native write already succeeded and the batch is durable.
-    // Throwing out of flushBatch here would escape to Spark, trigger task retry,
-    // and duplicate the write. Log and continue — the allocator will still
-    // reclaim buffers once the C++ writer flushes its cached shared_ptrs.
+    // Closing the old root drops the JVM's reference only; the export keeps
+    // the buffers alive until C++ flushes. A failure here is logged, not
+    // thrown: the batch is already durable and a retry would duplicate it.
     Try(oldRoot.close()).failed.foreach(e =>
       logError(
         s"error closing old VectorSchemaRoot after flush: ${e.getMessage}"
@@ -324,18 +253,13 @@ class MilvusV2Writer(
   }
 
   private def cleanup(): Unit = {
-    // Destroying the writer first drops all C++-cached RecordBatch shared_ptrs,
-    // which fires every outstanding release callback and returns the buffers
-    // they were pinning to the allocator. Only then is it safe to close the
-    // allocator.
-    Try(StorageNative.packedWriterDestroy(writerHandle)).failed.foreach(e =>
-      logError(s"error destroying packed writer: ${e.getMessage}")
+    // The writer first: destroying it releases the buffers C++ still pins,
+    // and only then is the allocator free to close.
+    Try(segmentWriter.close()).failed.foreach(e =>
+      logError(s"error closing the segment writer: ${e.getMessage}")
     )
     Try(if (root != null) root.close()).failed.foreach(e =>
       logError(s"error closing current root: ${e.getMessage}")
-    )
-    Try(if (arrowSchemaC != null) arrowSchemaC.close()).failed.foreach(e =>
-      logError(s"error closing ArrowSchema: ${e.getMessage}")
     )
     Try(allocator.close()).failed.foreach(e =>
       logError(s"error closing allocator: ${e.getMessage}")

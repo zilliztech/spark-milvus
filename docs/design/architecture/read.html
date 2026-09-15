@@ -266,7 +266,7 @@ manifest 按字段 id 匹配列、schema 里字段名就是 id,列组布局用�
 <code>ColumnVector</code> 与 <code>ColumnarBatch</code> 的一侧,
 并处理有删除的批要物化存活行。</li>
 
-<li><strong>写侧下沉 <code>core.write.exec</code> 与 <code>core.write.commit</code>。</strong>
+<li><strong>写侧下沉 <code>core.write.exec</code> 与 <code>core.write.commit</code>。</strong><code>core.write.exec</code> 已做（#07）：两个 writer 的 native 调用进了 core，<code>ManifestTransaction</code> 提交清单；作业级提交是 #08。
 backfill 分支走已有的 <code>BatchUpdateManifest</code>,可以做;append 分支等 Milvus 新增
 <code>RegisterSegments</code>,那条不在我们手上(能力 W1)。</li>
 </ol>
