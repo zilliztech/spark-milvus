@@ -56,11 +56,12 @@ core. Their `package.scala` files exist and state what belongs there.
 
 Layer 3 is split by package: `sources` holds only the `format("milvus")`
 entry point, `table` the table, `read` the scan builder, the scan and the
-executor-side readers, `read.plan` the three planning entry points and the
-partition builder, `write` the two writers, `options` the option parsing and
-the driver's storage access, `types` the type mapping. The planners still
-hold the 1.x planning logic; moving it into `core.read.plan` is the next step.
-`catalog` and `expr` are empty. Names follow the Names section of
+executor-side readers, `read.plan` the partition builder and delete planning,
+`write` the two writers, `options` the option parsing, the driver's storage
+access and the choice of `SnapshotSource` for a read, `types` the type
+mapping. `getTable` resolves the `Snapshot` once and the table carries it to
+the scan; moving the partition builder into `core.read.plan` is the next
+step. `catalog` and `expr` are empty. Names follow the Names section of
 [docs/writing.md](docs/writing.md): the two storage lines are `V2` and `V3`
 everywhere, after the snapshot's `storage_version`.
 
@@ -103,7 +104,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How does core reach object storage? | [docs/design/architecture/storage-access.html](docs/design/architecture/storage-access.html) — the route (JNI to the C filesystem), how credentials reach it, the next steps and the three facts still to verify; apply the skill [.agents/skills/spark-milvus-storage-access/SKILL.md](.agents/skills/spark-milvus-storage-access/SKILL.md) |
 | How are object storage credentials handled? | [docs/design/architecture/storage-auth.html](docs/design/architecture/storage-auth.html) for the mechanism, the rules and the measured facts; apply the skill [.agents/skills/spark-milvus-storage-auth/SKILL.md](.agents/skills/spark-milvus-storage-auth/SKILL.md) |
 | How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership. Read and write share it |
-| How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four planning entry points, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
+| How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four snapshot sources, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
 | What is a Snapshot, and how do the four read entry points become one? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html) — `Snapshot` and `Segment`, the three delete states, what each source cannot supply, `SnapshotCatalog`, the boundary to `SegmentReadTask`. Draft under review |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
 | Illustrated version of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) |
@@ -213,8 +214,8 @@ code comments and naming, not only to documents.
 A documented interim state is not a patch. During a migration parts of the tree
 will sit in the wrong module on purpose. That is legitimate when it is written
 down, has a named end condition and someone is holding it; a patch is the one
-you intend to leave there. The planners in `spark.read.plan` are the live
-example, and section 5 of modules.md says so.
+you intend to leave there. `spark.read.plan` is the live example, and section
+5 of modules.md says so.
 
 ## Rules any change has to satisfy
 

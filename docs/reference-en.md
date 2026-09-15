@@ -154,9 +154,8 @@ to snapshot). See `docs/backup-datasource-design.md` for the full design.
 | `MilvusOption.ClientSnapshotName` | String | No | latest | `milvus.client.snapshot.name` — with `milvus.uri`: read this snapshot of the collection from the snapshot directory instead of the latest one. The connector never creates snapshots; make one with Milvus or `CALL create_snapshot`. |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | No | 67108864 | `milvus.snapshot.max.json.bytes` — max size of the backup `full_meta.json`. |
 
-The Spark read schema must be provided via `.schema()` or is derived from the
-backup meta; without `.schema()` the read fails loudly if the meta cannot be
-read. Reading a dynamic collection (`enable_dynamic_field=true`) requires the
+The Spark read schema is derived from the backup meta unless `.schema()` is
+given; a meta that cannot be read fails the read either way. Reading a dynamic collection (`enable_dynamic_field=true`) requires the
 backup meta to record the `$meta` field — captured only with milvus-backup
 etcd access (`--backup_index_extra`) and **v0.5.13+**. A column group spanning
 multiple binlog files is supported (milvus-storage#657 fixed the per-file row

@@ -593,8 +593,8 @@ object ReadMode {
   /** `milvus.backup.dir` points at a milvus-backup export. */
   case object Backup extends ReadMode
 
-  /** A live Milvus service: the client snapshot fast path, or the legacy
-    * segment listing when a selector rules the fast path out.
+  /** A live Milvus service names the collection; the snapshot itself comes from
+    * the snapshot directory (`milvus.client.snapshot.name` or the latest).
     */
   case object Client extends ReadMode
 }

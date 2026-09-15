@@ -8,118 +8,72 @@ import org.apache.spark.sql.sources.DataSourceRegister
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.milvus.client.api.MilvusClient
-import com.zilliz.milvus.storage.snapshot.{SnapshotCatalog, V2SegmentResolver}
-import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
-import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
+import com.zilliz.spark.connector.options.{MilvusOption, SnapshotSources}
 import com.zilliz.spark.connector.table.MilvusTable
-import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.types.SparkTypes
 import io.milvus.grpc.schema.CollectionSchema
 
 case class MilvusDataSource() extends TableProvider with DataSourceRegister {
+
+  /** The snapshot this read is about, resolved once. A failure here is the
+    * read's failure: there is no schema and no plan without it.
+    */
+  private def resolve(
+      milvusOption: MilvusOption,
+      withSegments: Boolean
+  ): com.zilliz.milvus.storage.snapshot.Snapshot =
+    SnapshotSources
+      .forRead(milvusOption, withSegments)
+      .snapshot()
+      .fold(
+        {
+          case e: IllegalArgumentException => throw e
+          case e =>
+            throw new IllegalArgumentException(
+              s"Cannot resolve the snapshot to read: ${e.getMessage}",
+              e
+            )
+        },
+        identity
+      )
+
+  private def validate(options: CaseInsensitiveStringMap): MilvusOption = {
+    val milvusOption = MilvusOption(options)
+    MilvusOption.validateSnapshotModeOptions(options)
+    MilvusOption.validateBackupModeOptions(options)
+    if (
+      milvusOption.uri.isEmpty && !MilvusOption.isSnapshotMode(options) &&
+      !MilvusOption.isBackupMode(options)
+    ) {
+      throw new IllegalArgumentException(
+        s"Option '${MilvusOption.MilvusUri}' is required for reading milvus data."
+      )
+    }
+    milvusOption
+  }
+
   override def getTable(
       schema: StructType,
       partitioning: Array[Transform],
       properties: ju.Map[String, String]
   ): Table = {
-    val options = new CaseInsensitiveStringMap(properties)
-    val milvusOption = MilvusOption(options)
-    MilvusOption.validateSnapshotModeOptions(options)
-    MilvusOption.validateBackupModeOptions(options)
-    val isSnapshotMode = MilvusOption.isSnapshotMode(options)
-    val isBackupMode = MilvusOption.isBackupMode(options)
-    if (milvusOption.uri.isEmpty && !isSnapshotMode && !isBackupMode) {
-      throw new IllegalArgumentException(
-        s"Option '${MilvusOption.MilvusUri}' is required for reading milvus data."
-      )
-    }
+    val milvusOption = validate(new CaseInsensitiveStringMap(properties))
     MilvusTable(
+      resolve(milvusOption, withSegments = true),
       milvusOption,
       Some(schema)
     )
   }
 
+  /** The Spark schema of the snapshot's collection schema, one column per
+    * field. Segments are not materialized for this.
+    */
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
-    val milvusOption = MilvusOption(options)
-    val rawVectors = MilvusOption.readVectorRaw(options)
-
-    // Check for snapshot mode - use snapshot schema if provided
-    MilvusOption.validateSnapshotModeOptions(options)
-    MilvusOption.validateBackupModeOptions(options)
-    val isSnapshotMode = MilvusOption.isSnapshotMode(options)
-    val isBackupMode = MilvusOption.isBackupMode(options)
-
-    if (isSnapshotMode) {
-      Option(options.get(MilvusOption.SnapshotPath))
-        .map(_.trim)
-        .filter(_.nonEmpty)
-        .map { path =>
-          // The snapshot JSON is the schema's source; V2 segments are not
-          // materialized for that.
-          val bucket =
-            StorageOptions.resolveConnectorS3Bucket(milvusOption.options)
-          val store = StorageOptions.storeFor(
-            StorageOptions.buildHadoopConfForOptions(milvusOption.options, ""),
-            bucket,
-            milvusOption.options
-          )
-          val snapshot = new SnapshotCatalog(
-            store,
-            bucket,
-            V2SegmentResolver.Skipped
-          ).read(path)
-          sparkSchemaOf(snapshot.schema, rawVectors)
-        }
-        .orElse {
-          // The 1.x form: the schema JSON travels in an option.
-          Option(options.get(MilvusOption.SnapshotSchemaJson)).flatMap { json =>
-            SnapshotJson.parse(json) match {
-              case Right(metadata) =>
-                Some(
-                  SnapshotSparkSchema.toSparkSchema(
-                    metadata.collection.schema,
-                    includeSystemFields = true
-                  )
-                )
-              case Left(_) => None
-            }
-          }
-        }
-        .getOrElse {
-          // If no snapshot schema provided, return empty schema
-          // The actual schema should be provided via .schema() call
-          StructType(Seq.empty)
-        }
-    } else if (isBackupMode) {
-      // Backup mode is fully offline: the schema is materialized from the
-      // backup's full_meta.json when the read plans its partitions. Return an
-      // empty schema here; callers supply the real schema via .schema().
-      StructType(Seq.empty)
-    } else {
-      // Client-based mode (existing behavior)
-      if (milvusOption.collectionName.isEmpty) {
-        throw new IllegalArgumentException("collectionName cannot be empty")
-      }
-      val client = MilvusClient(milvusOption.connectionParams)
-      try {
-        val result = client.getCollectionSchema(
-          milvusOption.databaseName,
-          milvusOption.collectionName
-        )
-        val schema = result.getOrElse(
-          throw new Exception(
-            s"Failed to get collection schema: ${result.failed.get.getMessage}"
-          )
-        )
-        sparkSchemaOf(schema, rawVectors)
-      } finally {
-        client.close()
-      }
-    }
+    val milvusOption = validate(options)
+    val snapshot = resolve(milvusOption, withSegments = false)
+    sparkSchemaOf(snapshot.schema, MilvusOption.readVectorRaw(options))
   }
 
-  /** The Spark schema of a protobuf collection schema, one column per field. */
   private def sparkSchemaOf(
       schema: CollectionSchema,
       rawVectors: Boolean
@@ -134,6 +88,7 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
         )
       )
     )
+
   override def supportsExternalMetadata = true
 
   override def shortName() = "milvus"

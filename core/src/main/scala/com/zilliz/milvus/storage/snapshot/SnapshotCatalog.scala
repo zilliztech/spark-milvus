@@ -133,6 +133,19 @@ final class SnapshotCatalog(
   }
 
   /** The snapshot with the latest `create_ts`. */
+  /** [[SnapshotSource]]s over this catalog, one per way of choosing. */
+  def at(location: String): SnapshotSource = SnapshotSource(read(location))
+
+  def latestOf(rootPath: String, collectionId: Long): SnapshotSource =
+    SnapshotSource(latest(rootPath, collectionId))
+
+  def named(
+      rootPath: String,
+      collectionId: Long,
+      name: String
+  ): SnapshotSource =
+    SnapshotSource(byName(rootPath, collectionId, name))
+
   def latest(rootPath: String, collectionId: Long): Snapshot =
     select(rootPath, collectionId, "latest")(_ => true)
 
@@ -310,7 +323,8 @@ object SnapshotCatalog extends Logging {
         schema = schema,
         partitionIds = partitionIds,
         segments = v3 ++ v2Segments.map(normalizeV2(_, bucket)),
-        origin = origin
+        origin = origin,
+        bucket = bucket
       )
     )
   }

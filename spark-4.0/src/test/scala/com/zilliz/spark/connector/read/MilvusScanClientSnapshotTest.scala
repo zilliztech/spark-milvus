@@ -19,6 +19,7 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.client.api.MilvusCollectionInfo
 import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
+import com.zilliz.milvus.storage.compat.backup.BackupSnapshotSource
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
@@ -37,8 +38,9 @@ import com.zilliz.milvus.storage.snapshot.json.{
 }
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.spark.connector.options.{
-  BackupSelection,
   MilvusOption,
+  OptionStringsSnapshotSource,
+  SnapshotSources,
   StorageOptions
 }
 import com.zilliz.spark.connector.read.plan.SnapshotPartitions
@@ -68,13 +70,32 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     filled
   }
 
+  private val rowIdSchema =
+    StructType(Seq(StructField("RowID", LongType, nullable = false)))
+
+  /** A scan over a given snapshot; the options only feed the context. */
   private def scanWithOptions(
-      rawOptions: ju.HashMap[String, String]
+      rawOptions: ju.HashMap[String, String],
+      snapshot: Snapshot = null
   ): MilvusScan = {
     new MilvusScan(
-      StructType(Seq(StructField("RowID", LongType, nullable = false))),
-      new CaseInsensitiveStringMap(withStorageDefaults(rawOptions))
+      rowIdSchema,
+      new CaseInsensitiveStringMap(withStorageDefaults(rawOptions)),
+      if (snapshot == null) snapshotOf() else snapshot
     )
+  }
+
+  /** A scan whose snapshot comes from the 1.x option strings, as a read without
+    * `milvus.snapshot.path` resolves it.
+    */
+  private def scanFromOptions(
+      rawOptions: ju.HashMap[String, String]
+  ): MilvusScan = {
+    val options = new CaseInsensitiveStringMap(withStorageDefaults(rawOptions))
+    val snapshot = new OptionStringsSnapshotSource(MilvusOption(options))
+      .snapshot()
+      .fold(e => throw e, identity)
+    new MilvusScan(rowIdSchema, options, snapshot)
   }
 
   private val vectorSnapshotSchemaJson =
@@ -137,7 +158,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   private def snapshotOf(
       v3: Seq[ManifestItemJson] = Seq.empty,
       v2: Seq[Segment] = Seq.empty,
-      partitionIds: Seq[Long] = Seq(20L)
+      partitionIds: Seq[Long] = Seq(20L),
+      bucket: String = "",
+      schemaBytes: Array[Byte] =
+        java.util.Base64.getDecoder.decode(emptySchemaBytes)
   ): Snapshot =
     SnapshotCatalog
       .fromLists(
@@ -145,10 +169,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         collectionId = 10L,
         createdAt = None,
         partitionIds = partitionIds,
-        schemaBytes = java.util.Base64.getDecoder.decode(emptySchemaBytes),
+        schemaBytes = schemaBytes,
         v3Items = v3,
         v2Segments = v2,
-        bucket = "",
+        bucket = bucket,
         origin = SnapshotOrigin.Options
       )
       .fold(e => throw e, identity)
@@ -180,7 +204,11 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     snapshotSchemaBytes.foreach(bytes =>
       options += MilvusOption.SnapshotSchemaBytes -> bytes
     )
-    MilvusTable(MilvusOption(options.toMap), Some(baseSchema)).schema()
+    val milvusOption = MilvusOption(options.toMap)
+    val snapshot = new OptionStringsSnapshotSource(milvusOption)
+      .snapshot()
+      .fold(e => throw e, identity)
+    MilvusTable(snapshot, milvusOption, Some(baseSchema)).schema()
   }
 
   test(
@@ -273,8 +301,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(!options.containsKey("fs.bucket_name"))
 
     val scan = new MilvusScan(
-      StructType(Seq(StructField("RowID", LongType, nullable = false))),
-      new CaseInsensitiveStringMap(options)
+      rowIdSchema,
+      new CaseInsensitiveStringMap(options),
+      snapshotOf(partitionIds = Seq(0L), bucket = "backup-bucket")
     )
 
     val segment = Segment.v2(
@@ -292,8 +321,11 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      snapshotOf(v2 = Seq(segment), partitionIds = Seq(0L)),
-      forceCanonicalBucket = Some("backup-bucket")
+      snapshotOf(
+        v2 = Seq(segment),
+        partitionIds = Seq(0L),
+        bucket = "backup-bucket"
+      )
     )
 
     assert(partitions.length == 1)
@@ -306,38 +338,28 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   }
 
   test("backup createReaderFactory is self-contained without prior planning") {
-    import com.fasterxml.jackson.databind.node.IntNode
-    val schema = BackupMetaReader.BackupCollectionSchema(
-      name = "demo",
-      fields = Seq(
-        BackupMetaReader.BackupFieldSchema(
-          fieldId = 100L,
-          name = "id",
-          isPrimaryKey = true,
-          rawDataType = Some(IntNode.valueOf(5))
-        )
-      )
-    )
-    val meta = BackupMetaReader.BackupInfo(
-      name = "b1",
-      collectionBackups = Seq(
-        BackupMetaReader.CollectionBackup(
-          collectionName = "demo",
-          collectionId = 444L,
-          schema = Some(schema)
-        )
-      )
-    )
     val options = new ju.HashMap[String, String]()
     options.put(MilvusOption.BackupDir, "s3a://bucket/backup/b1")
     options.put(MilvusOption.MilvusCollectionName, "demo")
-    val scan = new MilvusScan(
-      StructType(Seq(StructField("RowID", LongType, nullable = false))),
-      new CaseInsensitiveStringMap(options),
-      preParsedBackupMeta = Some(meta)
+    val segment = Segment.v2(
+      id = 1L,
+      partitionId = 0L,
+      rows = 10L,
+      columnGroups = Seq(
+        V2ColumnGroup(
+          fieldIds = Seq(100L),
+          filePaths = Seq("backup/b1/binlogs/1/100/1"),
+          fileRowCounts = Seq(10L)
+        )
+      )
     )
-    // No prior planInputPartitions call: the factory must compute its delete
-    // context on its own (no planning side effect).
+    val scan = new MilvusScan(
+      rowIdSchema,
+      new CaseInsensitiveStringMap(options),
+      snapshotOf(v2 = Seq(segment), partitionIds = Seq(0L), bucket = "bucket")
+    )
+    // No prior planInputPartitions call: the factory resolves its delete
+    // context from the snapshot the scan holds.
     val factory = scan.createReaderFactory()
     assert(
       factory.isInstanceOf[
@@ -346,25 +368,28 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
-  test(
-    "backup createReaderFactory fails loudly when the meta re-read fails"
-  ) {
-    // preParsedBackupMeta = None (table init failed) and the factory's fallback
-    // re-read also fails. The planner would have stamped inherited-delete
-    // markers, so the factory must NOT hand an empty plan — it must fail loudly
-    // rather than silently returning deleted rows.
-    val options = new ju.HashMap[String, String]()
-    options.put(MilvusOption.BackupDir, "/tmp/nonexistent-backup-xyz")
-    options.put(MilvusOption.MilvusCollectionName, "demo")
-    val scan = new MilvusScan(
-      StructType(Seq(StructField("RowID", LongType, nullable = false))),
-      new CaseInsensitiveStringMap(options),
-      preParsedBackupMeta = None
+  test("a backup whose meta cannot be read fails at the source, loudly") {
+    val options = Map(
+      MilvusOption.BackupDir -> "/tmp/nonexistent-backup-xyz",
+      MilvusOption.MilvusCollectionName -> "demo"
     )
-    val err = intercept[IllegalStateException] {
-      scan.createReaderFactory()
-    }
-    assert(err.getMessage.contains("re-read backup meta"))
+    val result = SnapshotSources
+      .forRead(MilvusOption(options), withSegments = false)
+      .snapshot()
+    assert(result.isLeft)
+    assert(result.left.get.getMessage.contains("backup meta"))
+  }
+
+  test("a backup read needs an object storage dir") {
+    val options = Map(
+      MilvusOption.BackupDir -> "/tmp/nonexistent-backup-xyz",
+      MilvusOption.MilvusCollectionName -> "demo"
+    )
+    val result = SnapshotSources
+      .forRead(MilvusOption(options), withSegments = true)
+      .snapshot()
+    assert(result.isLeft)
+    assert(result.left.get.getMessage.contains("object storage URI"))
   }
 
   test("resolveBackupCollection matches by name and database, never .head") {
@@ -380,20 +405,20 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         Seq(coll("orders", 1L, "db1"), coll("orders", 2L, "db2"))
     )
     assert(
-      BackupSelection
-        .resolveBackupCollection(multi, "db1", "orders")
+      BackupSnapshotSource
+        .selectCollection(multi, "db1", "orders")
         .map(_.collectionId) ==
         Right(1L)
     )
     assert(
-      BackupSelection
-        .resolveBackupCollection(multi, "db2", "orders")
+      BackupSnapshotSource
+        .selectCollection(multi, "db2", "orders")
         .map(_.collectionId) ==
         Right(2L)
     )
-    assert(BackupSelection.resolveBackupCollection(multi, "db1", "nope").isLeft)
-    assert(BackupSelection.resolveBackupCollection(multi, "", "orders").isLeft)
-    assert(BackupSelection.resolveBackupCollection(multi, "", "").isLeft)
+    assert(BackupSnapshotSource.selectCollection(multi, "db1", "nope").isLeft)
+    assert(BackupSnapshotSource.selectCollection(multi, "", "orders").isLeft)
+    assert(BackupSnapshotSource.selectCollection(multi, "", "").isLeft)
 
     // "default" database is equivalent to an empty db_name (older backups omit
     // it), in both directions.
@@ -408,8 +433,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       )
     )
     assert(
-      BackupSelection
-        .resolveBackupCollection(defaultDb, "default", "orders")
+      BackupSnapshotSource
+        .selectCollection(defaultDb, "default", "orders")
         .map(_.collectionId) == Right(9L)
     )
     val namedDefault = BackupMetaReader.BackupInfo(
@@ -423,8 +448,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       )
     )
     assert(
-      BackupSelection
-        .resolveBackupCollection(namedDefault, "", "orders")
+      BackupSnapshotSource
+        .selectCollection(namedDefault, "", "orders")
         .map(_.collectionId) == Right(10L)
     )
 
@@ -446,13 +471,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       )
     )
     assert(
-      BackupSelection
-        .resolveBackupCollection(mixed, "default", "orders")
+      BackupSnapshotSource
+        .selectCollection(mixed, "default", "orders")
         .map(_.collectionId) == Right(11L)
     )
     assert(
-      BackupSelection
-        .resolveBackupCollection(mixed, "db2", "orders")
+      BackupSnapshotSource
+        .selectCollection(mixed, "db2", "orders")
         .map(_.collectionId) == Right(12L)
     )
 
@@ -461,8 +486,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       collectionBackups = Seq(coll("only", 3L))
     )
     assert(
-      BackupSelection
-        .resolveBackupCollection(single, "", "")
+      BackupSnapshotSource
+        .selectCollection(single, "", "")
         .map(_.collectionId) ==
         Right(3L)
     )
@@ -884,16 +909,11 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       )
     )
 
-    val schema = new MilvusTable(MilvusOption(options), None) {
-      override def initInfo(): Unit = {
-        milvusCollection = MilvusCollectionInfo(
-          dbName = "",
-          collectionName = "c",
-          collectionID = 10L,
-          schema = collectionSchema
-        )
-      }
-    }.schema()
+    val schema = MilvusTable(
+      snapshotOf(schemaBytes = collectionSchema.toByteArray),
+      MilvusOption(options),
+      None
+    ).schema()
 
     assert(
       schema.fieldNames.toSeq == Seq(
@@ -921,7 +941,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
     val builder = new MilvusScanBuilder(
       schema,
-      new CaseInsensitiveStringMap(rawOptions)
+      new CaseInsensitiveStringMap(rawOptions),
+      snapshotOf()
     )
 
     builder.pruneColumns(
@@ -967,7 +988,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotMode, "true")
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val err = intercept[IllegalArgumentException] {
-      scanWithOptions(rawOptions).planInputPartitions()
+      scanFromOptions(rawOptions).planInputPartitions()
     }
     assert(err.getMessage.contains(MilvusOption.SnapshotManifests))
     assert(err.getMessage.contains(MilvusOption.SnapshotV2Segments))
@@ -978,29 +999,16 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotMode, "true")
     rawOptions.put(MilvusOption.SnapshotManifests, "[]")
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
-    val scan = scanWithOptions(rawOptions)
+    val scan = scanFromOptions(rawOptions)
     val firstPartitions = scan.planInputPartitions()
     val secondPartitions = scan.planInputPartitions()
     assert(firstPartitions.isEmpty)
     assert(firstPartitions eq secondPartitions)
   }
 
-  test("every read mode caches its planned input partitions") {
-    val clientOptions = new ju.HashMap[String, String]()
-    clientOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
-    clientOptions.put(MilvusOption.MilvusCollectionName, "c")
-    assert(scanWithOptions(clientOptions).shouldCacheInputPartitions)
-
-    val partitionScopedOptions = new ju.HashMap[String, String]()
-    partitionScopedOptions.put(MilvusOption.MilvusUri, "http://localhost:19530")
-    partitionScopedOptions.put(MilvusOption.MilvusCollectionName, "c")
-    partitionScopedOptions.put(MilvusOption.MilvusPartitionName, "p1")
-    assert(scanWithOptions(partitionScopedOptions).shouldCacheInputPartitions)
-
-    val snapshotOptions = new ju.HashMap[String, String]()
-    snapshotOptions.put(MilvusOption.SnapshotMode, "true")
-    snapshotOptions.put(MilvusOption.SnapshotManifests, "[]")
-    assert(scanWithOptions(snapshotOptions).shouldCacheInputPartitions)
+  test("a scan plans its input partitions once") {
+    val scan = scanWithOptions(new ju.HashMap[String, String]())
+    assert(scan.planInputPartitions() eq scan.planInputPartitions())
   }
 
   test("snapshot planner fails loudly on malformed manifest JSON") {
@@ -1009,7 +1017,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotManifests, "not-json")
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val err = intercept[Exception] {
-      scanWithOptions(rawOptions).planInputPartitions()
+      scanFromOptions(rawOptions).planInputPartitions()
     }
     assert(err.getMessage.contains("Failed to parse snapshot manifests"))
   }
@@ -1032,7 +1040,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotManifests, manifestJson)
     rawOptions.put(MilvusOption.SnapshotPartitionIds, "20,21")
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
-    val partitions = scanWithOptions(rawOptions).planInputPartitions()
+    val partitions = scanFromOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 2)
     val first = partitions(0).asInstanceOf[MilvusV3InputPartition]
     val second = partitions(1).asInstanceOf[MilvusV3InputPartition]
@@ -1060,7 +1068,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotManifests, manifestJson)
     rawOptions.put(MilvusOption.SnapshotPartitionIds, "20,21")
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
-    val partitions = scanWithOptions(rawOptions).planInputPartitions()
+    val partitions = scanFromOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 1)
     val partition = partitions.head.asInstanceOf[MilvusV3InputPartition]
     assert(partition.partitionName == "20")
@@ -1170,7 +1178,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotMode, "true")
     rawOptions.put(MilvusOption.SnapshotV2Segments, v2Json)
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
-    val partitions = scanWithOptions(rawOptions).planInputPartitions()
+    val partitions = scanFromOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 1)
     val partition = partitions.head.asInstanceOf[MilvusV2InputPartition]
     assert(partition.task.segmentId == 30L)
@@ -1264,7 +1272,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   }
 
   test(
-    "client snapshot partition planning inlines inherited L0 deletes into V2 partition plans"
+    "partition planning stamps V2 partitions with the inherited L0 delete marker"
   ) {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
     val inheritedPlans = Map(
@@ -1305,19 +1313,18 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         partitionIds = Seq(20L)
       ),
       v2DeletePlans = Map(30L -> ownPlan),
-      inheritedDeletePlansByPartition = inheritedPlans,
-      inlineInheritedDeletePlans = true
+      inheritedDeletePlansByPartition = inheritedPlans
     )
 
+    // The inherited plan is not shipped per partition: the partition carries
+    // the marker and the reader factory folds the plan in on the executor.
     val first = partitions(0).asInstanceOf[MilvusV2InputPartition]
     val second = partitions(1).asInstanceOf[MilvusV2InputPartition]
-    assert(first.inheritedDeletePlanPartitionId.isEmpty)
-    assert(first.task.deletePlan.containsLongPk(7L, 50L))
-    assert(first.task.deletePlan.containsLongPk(8L, 100L))
+    assert(first.inheritedDeletePlanPartitionId.contains(20L))
     assert(first.task.deletePlan.containsLongPk(9L, 130L))
-    assert(second.inheritedDeletePlanPartitionId.isEmpty)
-    assert(second.task.deletePlan.containsLongPk(7L, 50L))
-    assert(!second.task.deletePlan.containsLongPk(8L, 100L))
+    assert(!first.task.deletePlan.containsLongPk(7L, 50L))
+    assert(second.inheritedDeletePlanPartitionId.contains(21L))
+    assert(second.task.deletePlan.isEmpty)
   }
 
   test("snapshot planner dedups V2 column groups by slot before planning") {
@@ -1352,8 +1359,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         ),
         partitionIds = Seq(20L)
       ),
-      inheritedDeletePlansByPartition = Map.empty,
-      inlineInheritedDeletePlans = true
+      inheritedDeletePlansByPartition = Map.empty
     )
 
     val partition = partitions.head.asInstanceOf[MilvusV2InputPartition]

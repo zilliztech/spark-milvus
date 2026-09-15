@@ -497,6 +497,67 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("BackupSnapshotSource: schema-only snapshot from a local export") {
+    val dir = Files.createTempDirectory("milvus-backup-source-")
+    try {
+      val metaDir = Paths.get(dir.toString, "meta")
+      Files.createDirectories(metaDir)
+      Files.write(
+        Paths.get(metaDir.toString, "full_meta.json"),
+        backupFixture(
+          groupAPath = SourceKeys._1,
+          groupBPath = SourceKeys._2,
+          groupCPath = SourceKeys._3,
+          deltaPath = SourceKeys._4
+        ).getBytes("UTF-8")
+      )
+      val source = new BackupSnapshotSource(
+        localStore,
+        dir.toString,
+        databaseName = "",
+        collectionName = "demo",
+        applyDeletes = true,
+        maxJsonBytes = 1L << 20,
+        withSegments = false
+      )
+      val snapshot = source.snapshot().getOrElse(fail("expected Right"))
+      snapshot.name shouldBe "b1"
+      snapshot.collectionId shouldBe 444L
+      snapshot.schema.fields.map(_.name) should contain("id")
+      snapshot.segments shouldBe empty
+      snapshot.bucket shouldBe ""
+
+      // A read needs the segments, and the native reader needs object
+      // storage: a local dir is refused before anything is opened.
+      val forRead = new BackupSnapshotSource(
+        localStore,
+        dir.toString,
+        databaseName = "",
+        collectionName = "demo",
+        applyDeletes = true,
+        maxJsonBytes = 1L << 20,
+        withSegments = true
+      )
+      forRead.snapshot().left.get.getMessage should include(
+        "object storage URI"
+      )
+
+      // An unknown collection is an error, never another collection.
+      val wrong = new BackupSnapshotSource(
+        localStore,
+        dir.toString,
+        databaseName = "",
+        collectionName = "nope",
+        applyDeletes = true,
+        maxJsonBytes = 1L << 20,
+        withSegments = false
+      )
+      wrong.snapshot().left.get.getMessage should include("does not contain")
+    } finally {
+      deleteRecursively(dir)
+    }
+  }
+
   test("serialize/parse round-trips the parsed backup meta") {
     val json = backupFixture(
       groupAPath = SourceKeys._1,

@@ -60,7 +60,7 @@ A snapshot JSON produced by milvus-datacoord has two separate arrays:
   **V3** (despite the key name). Each carries a `basePath` and a `ver` that
   locates the loon manifest.
 
-`OptionSnapshotPlanner.plan` dispatches:
+`SnapshotPartitions.build` dispatches on each segment's layout:
 
 | Source                          | InputPartition                      | Reader                            |
 |---------------------------------|-------------------------------------|-----------------------------------|

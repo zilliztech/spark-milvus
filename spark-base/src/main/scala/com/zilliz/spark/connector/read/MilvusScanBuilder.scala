@@ -21,13 +21,13 @@ import org.apache.spark.sql.types.{
 }
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
+import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.options.MilvusOption
 
 class MilvusScanBuilder(
     schema: StructType,
     options: CaseInsensitiveStringMap,
-    preParsedBackupMeta: Option[BackupMetaReader.BackupInfo] = None
+    snapshot: Snapshot
 ) extends ScanBuilder
     with SupportsPushDownFilters
     with SupportsPushDownRequiredColumns
@@ -248,8 +248,8 @@ class MilvusScanBuilder(
     new MilvusScan(
       currentSchema,
       currentOptions,
+      snapshot,
       pushedFilterArray,
-      preParsedBackupMeta,
       pushedLimit
     )
   }

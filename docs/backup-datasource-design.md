@@ -73,7 +73,7 @@ A new **backup offline mode** sits alongside snapshot mode:
 ```
 MilvusDataSource / MilvusTable  isBackupMode? ─┐
                                               ▼
-MilvusScan.computeInputPartitions ──> BackupPlanner.plan()
+MilvusDataSource.getTable ──> BackupSnapshotSource.snapshot()
                                               │   via BackupMetaReader
                                               ▼
                            (schemaBytes, Seq[V2SegmentInfo])
@@ -183,19 +183,17 @@ Behavior:
   footer-read path the backup planner uses. (A `FileSystem` overload reuses one
   instance across a read.)
 
-### 4.4 `spark-base/.../scan/BackupPlanner.scala` (was `sources/MilvusDataSource.scala`)
+### 4.4 `compat/.../backup/BackupSnapshotSource.scala` (was `BackupPlanner` in `spark-base`, before that `sources/MilvusDataSource.scala`)
 
 - `MilvusDataSource.getTable` / `inferSchema`: allow backup mode without
-  `milvus.uri`; enforce snapshot/backup mutual exclusion; return an empty
-  schema from inference (callers supply `.schema()`).
-- `MilvusTable`: `isBackupMode`, `initFromBackup()` (materializes the collection
-  schema and collection id from the backup meta — matched by
-  `milvus.database.name` + `milvus.collection.name`; fails loudly when no
-  `.schema()` is supplied and the meta is unreadable — so metadata rehydration
-  for vector columns works like snapshot mode), and `schema()` handling for
-  offline modes.
-- `BackupPlanner.plan()`: resolves the collection by
-  `milvus.database.name` + `milvus.collection.name` (`BackupSelection.resolveBackupCollection`,
+  `milvus.uri`; enforce snapshot/backup mutual exclusion; both resolve the
+  snapshot through `SnapshotSources.forRead`, inference with
+  `withSegments = false` (schema from the meta, no footer reads).
+- `MilvusTable`: holds the `Snapshot` `getTable` resolved; `schema()` derives
+  from it, so metadata rehydration for vector columns works like snapshot
+  mode.
+- `BackupSnapshotSource.snapshot()`: resolves the collection by
+  `milvus.database.name` + `milvus.collection.name` (`BackupSnapshotSource.selectCollection`,
   ambiguous names rejected), rejects partition/segment selectors, validates
   that the meta carries a collection schema with a primary key, builds
   `V2SegmentInfo`, and hands everything to the shared `SnapshotPartitions.build`

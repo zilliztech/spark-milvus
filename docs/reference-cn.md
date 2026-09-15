@@ -150,7 +150,7 @@ val s3Options = Map(
 | `MilvusOption.ClientSnapshotName` | String | 否 | 最新 | `milvus.client.snapshot.name` — 配合 `milvus.uri`：读该 collection 快照目录里这个名字的快照，而不是最新的。连接器自己不建快照，先用 Milvus 或 `CALL create_snapshot` 建。 |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | 否 | 67108864 | `milvus.snapshot.max.json.bytes` — backup `full_meta.json` 大小上限。 |
 
-读取 schema 需通过 `.schema()` 提供，或从备份 meta 推导；未提供 `.schema()` 且 meta 读取失败时读取硬失败。读取动态集合（`enable_dynamic_field=true`）要求备份 meta 记录 `$meta` 字段——仅当 milvus-backup 带 etcd 访问（`--backup_index_extra`）且 **≥ v0.5.13** 时才捕获。两种备份形态会在规划期中止读取：跨多个 binlog 文件的 column group（未修复的 milvus-storage bug，见设计文档）与含 struct-array 字段（`struct_array_fields`）的集合。S3 凭证复用现有 `fs.*` 选项（`fs.address`、`fs.access_key_id`、`fs.access_key_value` ...）；桶取自 `milvus.backup.dir` URI。
+读取 schema 从备份 meta 推导，也可用 `.schema()` 指定；meta 读不到时两种情况都直接失败。读取动态集合（`enable_dynamic_field=true`）要求备份 meta 记录 `$meta` 字段——仅当 milvus-backup 带 etcd 访问（`--backup_index_extra`）且 **≥ v0.5.13** 时才捕获。两种备份形态会在规划期中止读取：跨多个 binlog 文件的 column group（未修复的 milvus-storage bug，见设计文档）与含 struct-array 字段（`struct_array_fields`）的集合。S3 凭证复用现有 `fs.*` 选项（`fs.address`、`fs.access_key_id`、`fs.access_key_value` ...）；桶取自 `milvus.backup.dir` URI。
 
 ## 3. 使用示例
 

@@ -4,14 +4,18 @@ import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema, FieldSchema}
 
 /** One fixed view of a collection: what a read plans against.
   *
-  * Every read entry point produces one of these and nothing downstream looks
-  * at the entry point's own format again. It stays on the driver; the
+  * Every read entry point produces one of these and nothing downstream looks at
+  * the entry point's own format again. It stays on the driver; the
   * per-partition projection that reaches executors is
   * `core.read.plan.SegmentReadTask`.
   *
   * Fields a source cannot supply are `Option` or carry an explicit state, so a
   * missing value is visible to the planner instead of defaulting to "none".
   * `docs/design/architecture/snapshot.html` is the design.
+  *
+  * @param bucket
+  *   the bucket every path in `segments` is a key of; the native reader is
+  *   rooted at it. Empty when the segments live on a local filesystem.
   */
 final case class Snapshot(
     name: String,
@@ -20,7 +24,8 @@ final case class Snapshot(
     schema: ProtoSchema,
     partitionIds: Seq[Long],
     segments: Seq[Segment],
-    origin: SnapshotOrigin
+    origin: SnapshotOrigin,
+    bucket: String
 ) {
 
   /** The schema as the bytes every `SegmentReadTask` carries. */
@@ -39,6 +44,45 @@ final case class Snapshot(
 
   def v3Segments: Seq[Segment] = segments.filter(_.storageVersion == 3)
   def v2Segments: Seq[Segment] = segments.filter(_.storageVersion == 2)
+
+  /** The segments of one partition and/or one data segment (capability R16).
+    *
+    * A selector that matches nothing is an error, not an empty read. A segment
+    * selector keeps its partition's delete-only segments, because their deletes
+    * apply to the selected segment too.
+    */
+  def narrow(partitionId: Option[Long], segmentId: Option[Long]): Snapshot = {
+    if (partitionId.isEmpty && segmentId.isEmpty) return this
+    val byPartition = partitionId match {
+      case Some(p) => segments.filter(_.partitionId == p)
+      case None    => segments
+    }
+    val selected = segmentId match {
+      case Some(s) =>
+        val data = byPartition.filter(seg => seg.hasData && seg.id == s)
+        if (data.isEmpty) {
+          throw new IllegalArgumentException(
+            s"Segment $s not found in snapshot $name" +
+              partitionId.map(p => s" partition $p").getOrElse("")
+          )
+        }
+        val partitions = data.map(_.partitionId).toSet
+        data ++ byPartition.filter(seg =>
+          !seg.hasData && partitions.contains(seg.partitionId)
+        )
+      case None =>
+        if (byPartition.isEmpty) {
+          throw new IllegalArgumentException(
+            s"Partition ${partitionId.get} has no segments in snapshot $name"
+          )
+        }
+        byPartition
+    }
+    copy(
+      partitionIds = partitionId.map(Seq(_)).getOrElse(partitionIds),
+      segments = selected
+    )
+  }
 }
 
 /** Which entry point produced a `Snapshot`; for errors and logs. */

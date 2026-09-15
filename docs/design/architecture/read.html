@@ -103,17 +103,19 @@
 这是防上游 milvus-storage#657 之前的版本在多文件列组里只读第一个文件——
 那个缺陷不抛异常,只会让 DataFrame 静悄悄变短。</p>
 
-<h2 id="plan">二、段从哪来:四个规划入口</h2>
+<h2 id="plan">二、段从哪来:一个 Snapshot,四个来源</h2>
 
-<p><strong>分岔全在 driver 侧。</strong>四个入口产出的形状一样:一组
-<code>InputPartition</code> 加每段的删除计划。</p>
+<p><strong>分岔只在 <code>getTable</code> 一处。</strong><code>spark.options.SnapshotSources.forRead</code> 按 <code>ReadMode</code> 构造一个
+<code>SnapshotSource</code>,调用一次得到 <code>Snapshot</code>;<code>MilvusTable</code> 持有它,交给 <code>MilvusScan</code>,
+规划只有一条路:<code>DeletePlanning</code> 出删除计划,<code>SnapshotPartitions.build</code> 出一组 <code>InputPartition</code>。
+设计见 <a href="snapshot.html#sources">snapshot.html 第二节</a>。</p>
 
 <table>
-<tr><th>入口</th><th>触发</th><th>产出</th></tr>
-<tr><td><code>ClientSnapshotPlanner</code></td><td>默认路径:gRPC 建快照,服务端已把两类段分开返回</td><td>V3 + V2</td></tr>
-<tr><td><code>OptionSnapshotPlanner</code></td><td>snapshot 模式,选项里直接给 manifest 列表和 V2 段列表</td><td>V3 + V2</td></tr>
-<tr><td><code>BackupPlanner</code></td><td>backup 模式,<code>BackupMetaReader.toV2Segments</code> 转备份元数据</td><td>只有 V2</td></tr>
-<tr><td><code>LegacyClientPlanner</code></td><td>指定了 partition/segment,快照快路径关掉时</td><td>只有 V3;遇到 V2 段报错,让用户改用快照模式</td></tr>
+<tr><th>来源</th><th>触发</th><th>产出</th></tr>
+<tr><td><code>SnapshotCatalog.at</code></td><td><code>milvus.snapshot.path</code>:直接读一个快照 JSON,不经服务</td><td>V3 + V2</td></tr>
+<tr><td><code>ClientSnapshotSource</code></td><td><code>milvus.uri</code>:DescribeCollection 取 id,快照目录里按名或取最新,R16 选择器过滤</td><td>V3 + V2</td></tr>
+<tr><td><code>BackupSnapshotSource</code></td><td><code>milvus.backup.dir</code>:<code>BackupMetaReader.toV2Segments</code> 转备份元数据</td><td>只有 V2</td></tr>
+<tr><td><code>OptionStringsSnapshotSource</code></td><td>1.x 的 option 串(backfill 读原表今天用),随 backfill 切到 catalog 后删</td><td>V3 + V2</td></tr>
 </table>
 
 <p>driver 侧要开的四类文件——快照 manifest、V2 段的 manifest 与 parquet footer、删除日志、备份元数据——

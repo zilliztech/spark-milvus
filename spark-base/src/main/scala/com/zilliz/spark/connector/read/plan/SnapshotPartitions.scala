@@ -16,8 +16,8 @@ import com.zilliz.spark.connector.read.{
 /** The common tail of every planning entry point: a [[Snapshot]] plus its
   * delete plans becomes one `InputPartition` per data segment.
   *
-  * This is the part that becomes `core.read.plan`; the planners in this
-  * package only differ in where the snapshot comes from.
+  * This is the part that becomes `core.read.plan`; the planners in this package
+  * only differ in where the snapshot comes from.
   */
 object SnapshotPartitions extends Logging {
 
@@ -27,12 +27,13 @@ object SnapshotPartitions extends Logging {
       v3DeletePlans: Map[Long, DeletePlan] = Map.empty,
       v3ReadVersions: Map[Long, Long] = Map.empty,
       v2DeletePlans: Map[Long, DeletePlan] = Map.empty,
-      inheritedDeletePlansByPartition: Map[Long, DeletePlan] = Map.empty,
-      inlineInheritedDeletePlans: Boolean = false,
-      forceCanonicalBucket: Option[String] = None
+      inheritedDeletePlansByPartition: Map[Long, DeletePlan] = Map.empty
   ): Array[InputPartition] = {
     val milvusOption = ctx.milvusOption
-    val canonicalMilvusOption = forceCanonicalBucket
+    // Every path in the snapshot is a key of `snapshot.bucket`, so that is the
+    // bucket the native reader is rooted at, whatever the raw options say (a
+    // backup read derives it from `milvus.backup.dir`).
+    val canonicalMilvusOption = Option(snapshot.bucket)
       .map(_.trim)
       .filter(_.nonEmpty)
       .map(bucket =>
@@ -112,17 +113,9 @@ object SnapshotPartitions extends Logging {
             s"segment ${seg.id} is storage_version 2 but carries a manifest layout"
           )
       }
-      val ownDeletePlan =
-        v2DeletePlans.getOrElse(seg.id, DeletePlan.empty)
-      val inheritedDeletePlan =
-        if (inlineInheritedDeletePlans)
-          DeltaLogReader.effectiveInheritedDeletePlan(
-            seg.partitionId,
-            inheritedDeletePlansByPartition
-          )
-        else DeletePlan.empty
-      val deletePlan =
-        DeletePlan.union(inheritedDeletePlan, ownDeletePlan)
+      // The inherited (L0) plan is not shipped per partition: the partition
+      // carries the marker and the reader factory resolves it once.
+      val deletePlan = v2DeletePlans.getOrElse(seg.id, DeletePlan.empty)
       MilvusV2InputPartition(
         SegmentReadTask(
           segmentId = seg.id,
@@ -134,12 +127,10 @@ object SnapshotPartitions extends Logging {
         ),
         canonicalMilvusOption,
         inheritedDeletePlanPartitionId =
-          if (inlineInheritedDeletePlans) None
-          else
-            DeltaLogReader.inheritedDeletePlanPartitionMarker(
-              seg.partitionId,
-              inheritedDeletePlansByPartition
-            )
+          DeltaLogReader.inheritedDeletePlanPartitionMarker(
+            seg.partitionId,
+            inheritedDeletePlansByPartition
+          )
       ): InputPartition
     }
 
