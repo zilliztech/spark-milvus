@@ -15,14 +15,46 @@ object Versions {
       scalas: Seq[String]
   )
 
-  /** Compile against the compatibility floor, with the Arrow version that
-    * Spark ships. The runtime test matrix is a separate choice.
+  /** Compile against the compatibility floor, with the Arrow version that Spark
+    * ships. The runtime test matrix is a separate choice.
     */
   val lines: Seq[SparkLine] = Seq(
-    SparkLine("3.5", "spark35", "3.5.5", "12.0.1", "4.9.3", "11", Seq(scala212, scala213)),
-    SparkLine("4.0", "spark40", "4.0.0", "18.1.0", "4.13.1", "17", Seq(scala213)),
-    SparkLine("4.1", "spark41", "4.1.1", "18.3.0", "4.13.1", "17", Seq(scala213)),
-    SparkLine("4.2", "spark42", "4.2.0", "19.0.0", "4.13.1", "17", Seq(scala213))
+    SparkLine(
+      "3.5",
+      "spark35",
+      "3.5.5",
+      "12.0.1",
+      "4.9.3",
+      "11",
+      Seq(scala212, scala213)
+    ),
+    SparkLine(
+      "4.0",
+      "spark40",
+      "4.0.0",
+      "18.1.0",
+      "4.13.1",
+      "17",
+      Seq(scala213)
+    ),
+    SparkLine(
+      "4.1",
+      "spark41",
+      "4.1.1",
+      "18.3.0",
+      "4.13.1",
+      "17",
+      Seq(scala213)
+    ),
+    SparkLine(
+      "4.2",
+      "spark42",
+      "4.2.0",
+      "19.0.0",
+      "4.13.1",
+      "17",
+      Seq(scala213)
+    )
   )
 
   def line(id: String): SparkLine =
@@ -52,6 +84,7 @@ object Versions {
   /** Supplies scala.jdk.CollectionConverters on Scala 2.12. */
   val scalaCollectionCompat = "2.12.0"
 
-  /** Retained for the root's existing assembly; Spark modules use their line. */
+  /** Retained for the root's existing assembly; Spark modules use their line.
+    */
   val legacyRootArrow = "17.0.0"
 }

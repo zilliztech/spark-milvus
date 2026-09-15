@@ -69,7 +69,8 @@ object Modules {
     javacOptions ++= Seq("--release", l.javaRelease)
   )
 
-  /** Keep layer 2's Jackson artifacts aligned. Spark modules use Spark's set. */
+  /** Keep layer 2's Jackson artifacts aligned. Spark modules use Spark's set.
+    */
   val jacksonPin: Seq[Setting[_]] = Seq(
     dependencyOverrides ++= Seq(
       Dependencies.jacksonDatabind,
@@ -78,7 +79,9 @@ object Modules {
     )
   )
 
-  /** Test JVM settings for Arrow access and the native libraries built by Docker. */
+  /** Test JVM settings for Arrow access and the native libraries built by
+    * Docker.
+    */
   def nativeTest: Seq[Setting[_]] = Seq(
     fork := true,
     // Fixtures are addressed relative to the repository root.

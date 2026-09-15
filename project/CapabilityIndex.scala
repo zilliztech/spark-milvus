@@ -1,7 +1,7 @@
+import scala.util.matching.Regex
+
 import sbt._
 import sbt.Keys._
-
-import scala.util.matching.Regex
 
 /** Checks that the capability index in docs/design/capabilities.md and the
   * capability ids declared in package docs still agree.
@@ -18,12 +18,14 @@ object CapabilityIndex {
 
   private val CapabilitiesDoc = "docs/design/capabilities.md"
 
-  /** A row in one of the capability tables: `| R1 | ... | ... | location | ...` */
+  /** A row in one of the capability tables: `| R1 | ... | ... | location | ...`
+    */
   private val RowPattern: Regex =
     raw"^\|\s*([RWCAVKOG]\d+)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|".r
 
   /** A row in section 11: `| R19 | reason |` */
-  private val UnplacedPattern: Regex = raw"^\|\s*([RWCAVKOG]\d+)\s*\|[^|]*\|\s*$$".r
+  private val UnplacedPattern: Regex =
+    raw"^\|\s*([RWCAVKOG]\d+)\s*\|[^|]*\|\s*$$".r
 
   private val IdPattern: Regex = raw"\b([RWCAVKOG]\d+)\b".r
 
@@ -36,8 +38,12 @@ object CapabilityIndex {
     "compat." -> Seq("compat/src/main/scala/com/zilliz/milvus/storage/compat"),
     "client." -> Seq("client/src/main/scala/com/zilliz/milvus/client"),
     "apps." -> Seq("apps-4.0/src/main/scala/com/zilliz/spark/connector/apps"),
-    "native-storage." -> Seq("native-storage/src/main/java/com/zilliz/milvus/jni/storage"),
-    "native-vector." -> Seq("native-vector/src/main/java/com/zilliz/milvus/jni/vector"),
+    "native-storage." -> Seq(
+      "native-storage/src/main/java/com/zilliz/milvus/jni/storage"
+    ),
+    "native-vector." -> Seq(
+      "native-vector/src/main/java/com/zilliz/milvus/jni/vector"
+    ),
     "spark." -> Seq(
       "spark-base/src/main/scala/com/zilliz/spark/connector",
       "spark-3.5/src/main/scala/com/zilliz/spark/connector",
@@ -59,15 +65,13 @@ object CapabilityIndex {
   // Regex pattern matching anchors the whole string, and these patterns only
   // cover the leading columns, so match explicitly.
   private def declaredIds(body: String): Map[String, String] =
-    body
-      .linesIterator
+    body.linesIterator
       .flatMap(line => RowPattern.findFirstMatchIn(line))
       .map(m => m.group(1) -> m.group(4).trim)
       .toMap
 
   private def unplacedIds(section11: String): Set[String] =
-    section11
-      .linesIterator
+    section11.linesIterator
       .flatMap(line => UnplacedPattern.findFirstMatchIn(line))
       .map(_.group(1))
       .toSet
@@ -80,9 +84,11 @@ object CapabilityIndex {
 
   /** Every package doc, and the ids it claims. */
   private def packageDocIds(root: File): Map[File, Set[String]] = {
-    val docs = Prefixes.flatMap(_._2).map(root / _).filter(_.isDirectory).flatMap { dir =>
-      (dir ** ("package.scala" | "package-info.java")).get
-    }
+    val docs =
+      Prefixes.flatMap(_._2).map(root / _).filter(_.isDirectory).flatMap {
+        dir =>
+          (dir ** ("package.scala" | "package-info.java")).get
+      }
     docs.map(f => f -> claimedIn(IO.read(f))).toMap
   }
 
@@ -95,27 +101,31 @@ object CapabilityIndex {
     raw"(?s)Capabilities:(.*?)\(see[\s*]+docs/design/capabilities\.md\)".r
 
   private def claimedIn(doc: String): Set[String] =
-    ClaimSentence.findFirstMatchIn(doc)
+    ClaimSentence
+      .findFirstMatchIn(doc)
       .map(m => IdPattern.findAllMatchIn(m.group(1)).map(_.group(1)).toSet)
       .getOrElse(Set.empty)
 
-  /** Resolves one 实现位置 entry to the directories it could mean. An entry
-    * that names no package at all (prose such as "spark 层汇总") resolves to
-    * nothing and is skipped.
+  /** Resolves one 实现位置 entry to the directories it could mean. An entry that
+    * names no package at all (prose such as "spark 层汇总") resolves to nothing
+    * and is skipped.
     */
   private def resolve(root: File, name: String): Seq[File] =
-    Prefixes.collectFirst {
-      case (prefix, roots) if name.startsWith(prefix) =>
-        val sub = name.stripPrefix(prefix).replace('.', '/')
-        roots.map(root / _ / sub)
-    }.getOrElse(Seq.empty)
+    Prefixes
+      .collectFirst {
+        case (prefix, roots) if name.startsWith(prefix) =>
+          val sub = name.stripPrefix(prefix).replace('.', '/')
+          roots.map(root / _ / sub)
+      }
+      .getOrElse(Seq.empty)
 
-  /** Pulls the package names out of a 实现位置 cell, which is prose with
-    * package names embedded: "spark.read 的 SupportsReportPartitioning →
+  /** Pulls the package names out of a 实现位置 cell, which is prose with package
+    * names embedded: "spark.read 的 SupportsReportPartitioning →
     * core.read.plan".
     */
   private def locationsIn(cell: String): Seq[String] = {
-    val token = raw"\b((?:core|compat|client|apps|spark|native-storage|native-vector)\.[a-zA-Z][a-zA-Z0-9.]*)".r
+    val token =
+      raw"\b((?:core|compat|client|apps|spark|native-storage|native-vector)\.[a-zA-Z][a-zA-Z0-9.]*)".r
     token.findAllMatchIn(cell).map(_.group(1).stripSuffix(".")).toSeq.distinct
   }
 

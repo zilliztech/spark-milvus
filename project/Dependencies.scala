@@ -16,19 +16,27 @@ object Dependencies {
     "com.thesamet.scalapb" %% "compilerplugin" % Versions.scalapb
   // The root keeps its existing Spark 4.0 dependencies during migration.
   lazy val sparkCore =
-    "org.apache.spark" %% "spark-core" % Versions.line("4.0").spark % "provided,test" excludeAll(
+    "org.apache.spark" %% "spark-core" % Versions
+      .line("4.0")
+      .spark % "provided,test" excludeAll (
       ExclusionRule(organization = "org.apache.arrow")
     )
   lazy val sparkSql =
-    "org.apache.spark" %% "spark-sql" % Versions.line("4.0").spark % "provided,test" excludeAll(
+    "org.apache.spark" %% "spark-sql" % Versions
+      .line("4.0")
+      .spark % "provided,test" excludeAll (
       ExclusionRule(organization = "org.apache.arrow")
     )
   lazy val sparkCatalyst =
-    "org.apache.spark" %% "spark-catalyst" % Versions.line("4.0").spark % "provided,test" excludeAll(
+    "org.apache.spark" %% "spark-catalyst" % Versions
+      .line("4.0")
+      .spark % "provided,test" excludeAll (
       ExclusionRule(organization = "org.apache.arrow")
     )
   lazy val sparkMLlib =
-    "org.apache.spark" %% "spark-mllib" % Versions.line("4.0").spark % "provided,test" excludeAll(
+    "org.apache.spark" %% "spark-mllib" % Versions
+      .line("4.0")
+      .spark % "provided,test" excludeAll (
       ExclusionRule(organization = "org.apache.arrow")
     )
   // Spark supplies Hadoop, Parquet and Avro; tests also need them locally.
@@ -44,7 +52,7 @@ object Dependencies {
   lazy val hadoopMapreduceClientCore =
     "org.apache.hadoop" % "hadoop-mapreduce-client-core" % Versions.hadoop
   lazy val hadoopAws =
-    "org.apache.hadoop" % "hadoop-aws" % Versions.hadoop % "provided,test" exclude("software.amazon.awssdk", "bundle")
+    "org.apache.hadoop" % "hadoop-aws" % Versions.hadoop % "provided,test" exclude ("software.amazon.awssdk", "bundle")
   lazy val hadoopAliyun =
     "org.apache.hadoop" % "hadoop-aliyun" % Versions.hadoop % "provided,test"
   lazy val awsSdkS3 =
@@ -65,11 +73,16 @@ object Dependencies {
     "com.fasterxml.jackson.core" % "jackson-databind" % Versions.jackson
 
   // The root's Arrow baseline is separate from the Spark-line matrix.
-  lazy val arrowFormat = "org.apache.arrow" % "arrow-format" % Versions.legacyRootArrow
-  lazy val arrowVector = "org.apache.arrow" % "arrow-vector" % Versions.legacyRootArrow
-  lazy val arrowMemoryCore = "org.apache.arrow" % "arrow-memory-core" % Versions.legacyRootArrow
-  lazy val arrowMemoryNetty = "org.apache.arrow" % "arrow-memory-netty" % Versions.legacyRootArrow
-  lazy val arrowCData = "org.apache.arrow" % "arrow-c-data" % Versions.legacyRootArrow
+  lazy val arrowFormat =
+    "org.apache.arrow" % "arrow-format" % Versions.legacyRootArrow
+  lazy val arrowVector =
+    "org.apache.arrow" % "arrow-vector" % Versions.legacyRootArrow
+  lazy val arrowMemoryCore =
+    "org.apache.arrow" % "arrow-memory-core" % Versions.legacyRootArrow
+  lazy val arrowMemoryNetty =
+    "org.apache.arrow" % "arrow-memory-netty" % Versions.legacyRootArrow
+  lazy val arrowCData =
+    "org.apache.arrow" % "arrow-c-data" % Versions.legacyRootArrow
 
   /** Spark supplies these modules; Arrow is selected explicitly below. */
   def sparkDeps(l: Versions.SparkLine): Seq[ModuleID] =
@@ -80,7 +93,12 @@ object Dependencies {
 
   /** The Arrow implementation for a Spark line. Core uses provided APIs. */
   def arrowDeps(l: Versions.SparkLine): Seq[ModuleID] =
-    Seq("arrow-vector", "arrow-memory-core", "arrow-c-data", "arrow-memory-netty")
+    Seq(
+      "arrow-vector",
+      "arrow-memory-core",
+      "arrow-c-data",
+      "arrow-memory-netty"
+    )
       .map(m => "org.apache.arrow" % m % l.arrow)
 
   /** Dependencies still needed by the migrated connector and app sources. */
