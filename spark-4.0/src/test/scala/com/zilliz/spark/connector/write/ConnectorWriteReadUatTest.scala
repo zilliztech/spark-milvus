@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.write
 
+import java.nio.charset.StandardCharsets
 import java.util.Base64
 
 import org.apache.spark.sql.functions._
@@ -12,7 +13,13 @@ import com.zilliz.milvus.storage.snapshot.json.{
   ManifestItemJson,
   SegmentListJson
 }
-import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
+import com.zilliz.milvus.storage.write.commit.{Committer, JobManifest}
+import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.spark.connector.options.{
+  HadoopStorageKeys,
+  MilvusOption,
+  StorageOptions
+}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
@@ -115,6 +122,31 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
       info(s"wrote ${basePaths.size} segment(s): ${basePaths.mkString(", ")}")
       basePaths.size shouldBe 2
 
+      // --- commit: the job manifest and the marker sit next to the segments ---
+      val jobPrefix = "(.*/staging/[^/]+)/".r
+        .findFirstMatchIn(basePaths.head)
+        .map(_.group(1))
+        .getOrElse(fail(s"no staging prefix in ${basePaths.head}"))
+      val store = HadoopStorageKeys.storeFrom(storage)
+      val manifest =
+        try {
+          store.exists(s"$jobPrefix/_committed") shouldBe true
+          JobManifest
+            .fromJson(
+              new String(
+                store.readAll(s"$jobPrefix/manifest.json"),
+                StandardCharsets.UTF_8
+              )
+            )
+            .fold(e => throw e, identity)
+        } finally store.close()
+      info(
+        s"job manifest: ${manifest.jobId}, ${manifest.segments.size} segments, ${manifest.rowCount} rows"
+      )
+      manifest.segments.map(_.basePath).sorted shouldBe basePaths.sorted
+      manifest.rowCount shouldBe rows.toLong
+      manifest.segments.foreach(_.manifestVersion shouldBe 1L)
+
       // --- read: the manifests the write produced, no service in between ---
       val manifests = SegmentListJson.encodeManifestItems(
         basePaths.zipWithIndex.map { case (path, i) =>
@@ -144,6 +176,23 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
         .load()
         .count()
       columnar shouldBe rows.toLong
+
+      // --- abort: the same committer deletes the job's files. The zero-byte
+      // directory markers milvus-storage created stay: the loon C API has no
+      // directory delete and refuses them as "not a file" ---
+      val cleanup = HadoopStorageKeys.storeFrom(storage)
+      try {
+        val layout =
+          StagingLayout(storage(StorageProperties.RootPath), manifest.jobId)
+        layout.prefix shouldBe jobPrefix
+        val deleted = new Committer(cleanup, layout).abort()
+        info(s"abort deleted $deleted files under $jobPrefix")
+        deleted should be >= 6 // two parquet, two manifests, manifest.json, _committed
+        cleanup
+          .list(jobPrefix, recursive = true)
+          .filterNot(_.isDirectory) shouldBe empty
+        cleanup.exists(s"$jobPrefix/_committed") shouldBe false
+      } finally cleanup.close()
     } finally spark.stop()
   }
 }

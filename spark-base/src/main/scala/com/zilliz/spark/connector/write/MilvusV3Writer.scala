@@ -36,12 +36,17 @@ import org.apache.spark.unsafe.types.UTF8String
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.MilvusTypes
+import com.zilliz.milvus.storage.write.commit.{
+  CommitOutcome,
+  CommittedSegment,
+  Committer
+}
 import com.zilliz.milvus.storage.write.exec.{
   ManifestTransaction,
   StagingLayout,
   V3SegmentWriter
 }
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 import com.zilliz.spark.connector.types.{SparkSchemaMapper, SparkTypes}
 import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
@@ -98,7 +103,9 @@ class MilvusV3Write(
   }
 }
 
-/** The V3 batch write: one job id, one writer factory, task commits logged.
+/** The V3 batch write: one job id, one writer factory, and the job-level commit
+  * through `core.write.commit.Committer`: the job manifest and the marker under
+  * the staging prefix on commit, the prefix's files deleted on abort.
   */
 class MilvusV3BatchWrite(
     schema: StructType,
@@ -112,6 +119,11 @@ class MilvusV3BatchWrite(
     */
   val jobId: String = java.util.UUID.randomUUID().toString
 
+  private val layout = StagingLayout(
+    milvusOption.options.getOrElse(StorageProperties.RootPath, "files"),
+    jobId
+  )
+
   override def createBatchWriterFactory(
       info: PhysicalWriteInfo
   ): DataWriterFactory = {
@@ -119,20 +131,40 @@ class MilvusV3BatchWrite(
   }
 
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
-    logInfo(s"Committed ${messages.length} partitions")
-    messages.foreach {
+    val segments = messages.toSeq.map {
       case msg: MilvusV3CommitMessage =>
-        logInfo(
-          s"Partition ${msg.partitionId} wrote ${msg.recordCount} records, manifest: ${msg.manifestPath}, version: ${msg.committedVersion}"
+        CommittedSegment(
+          msg.partitionId,
+          msg.manifestPath,
+          msg.committedVersion,
+          msg.recordCount
         )
-      case _ =>
-        logWarning("Unknown commit message type")
+      case other =>
+        throw new IllegalStateException(
+          s"unexpected commit message ${other.getClass.getName} in job $jobId"
+        )
+    }
+    withCommitter(_.commit(segments)) match {
+      case CommitOutcome.Committed =>
+        logInfo(
+          s"Job $jobId committed: ${segments.size} segments, ${segments.map(_.rowCount).sum} rows, manifest ${layout.manifest}"
+        )
+      case CommitOutcome.AlreadyCommitted =>
+        logInfo(s"Job $jobId was already committed; nothing written")
     }
   }
 
   override def abort(messages: Array[WriterCommitMessage]): Unit = {
-    logWarning(s"Aborting write for ${messages.length} partitions")
-    // TODO: Clean up S3 files if needed
+    val deleted = withCommitter(_.abort())
+    logWarning(
+      s"Job $jobId aborted: ${messages.length} task messages, $deleted files deleted under ${layout.prefix}"
+    )
+  }
+
+  private def withCommitter[A](f: Committer => A): A = {
+    val store = HadoopStorageKeys.storeFrom(milvusOption.options.toMap)
+    try f(new Committer(store, layout))
+    finally store.close()
   }
 }
 

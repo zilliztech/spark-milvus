@@ -26,4 +26,7 @@ final case class StagingLayout(rootPath: String, jobId: String) {
 
   /** The job manifest the committer writes. */
   def manifest: String = s"$prefix/manifest.json"
+
+  /** The marker the committer writes last; its presence means committed. */
+  def marker: String = s"$prefix/_committed"
 }

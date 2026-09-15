@@ -60,7 +60,7 @@ Table 接口表达不了的动作走 CALL：Spark 4 用 ProcedureCatalog，Spark
 | A1 | 快照 | `CALL milvus.system.create_snapshot('db.coll')`，drop、list、describe | spark.procedure → client.api | 建前是否先 Flush 见决策 11 | P1 |
 | A2 | 索引 | `create_index`、`drop_index`，可等待完成 | spark.procedure → client.api | client 新增 CreateIndex、DropIndex、DescribeIndex | P1 |
 | A3 | 生命周期 | `load`、`release`、`flush`、`compact` | spark.procedure → client.api | client 新增 LoadCollection、ReleaseCollection、ManualCompaction | P1 |
-| A4 | 登记 | `register('db.coll', staging => 's3://.../staging/<job-id>')`：读作业清单后登记 | spark.procedure → core.write.commit、client.api | backfill 分支走 BatchUpdateManifest，可先做；append 分支走 RegisterSegments，待 Milvus 新增 | P1 / append 待定 |
+| A4 | 登记 | `register('db.coll', staging => 's3://.../staging/<job-id>')`：读作业清单后登记 | spark.procedure → core.write.commit、client.api | 作业清单 `staging/{job}/manifest.json` 由 core.write.commit 写出（2026-09-15 落地）；CALL 一侧 `spark.procedure` 仍是零文件。backfill 分支走 BatchUpdateManifest，可先做；append 分支走 RegisterSegments，待 Milvus 新增 | P1 / append 待定 |
 | A5 | 描述 | `describe`：schema、段数、索引状态 | spark.procedure → client.api | | P1 |
 | A7 | 清理暂存 | `cleanup_staging('db.coll')`：删掉没登记成的作业前缀 | spark.procedure → core.write.commit | 作业被 kill 时 abort 不执行，暂存前缀会留垃圾 | P1 |
 
@@ -130,7 +130,6 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 | R7 | Milvus 表达式要 `core.expr` 按 Plan.g4 解析求值，零文件 |
 | A2 | 建索引、删索引的 CALL 要 `spark.procedure`（3.5 线是 `spark.functions`），全部是空壳；client 侧还要新增三个 RPC |
 | A3 | load / release / flush / compact 的 CALL，同 A2；client 侧还要新增三个 RPC |
-| A4 | 登记的 CALL 要 `spark.procedure` 加 `core.write.commit` 读作业清单，两端都是零文件；append 的登记 RPC 在 Milvus 侧也还没有（README 第 5 节） |
 | A5 | describe 的 CALL，同 A2 |
 | V1 | knowhere 的 C shim 与 JNI 要 `native-vector`，目前只有 package-info.java |
 | V2 | 加载 Milvus 建的索引要 `core.index`，零文件 |
