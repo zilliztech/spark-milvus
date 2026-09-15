@@ -9,9 +9,14 @@ package com.zilliz.milvus.storage.read
   * cannot survive serialization can be a field, and the reader opens what it
   * needs on the executor.
   *
-  * `Partitioner` is not here yet. One segment per partition is the only
-  * strategy, and a trait with a single implementation and no second caller
-  * would be guesswork. The two shapes that would need one are reporting a Spark
+  * `ReadPlan.of` is the planning itself: a `Snapshot` becomes one task per data
+  * segment, V3 first, each with its `fs.*` map, its manifest version and the
+  * delete plans the driver read. What Spark needs on top (the vector search,
+  * the partition name, the option map) is put on by `spark.read`.
+  *
+  * `Partitioner` is not here. One segment per partition is the only strategy,
+  * and a trait with a single implementation and no second caller would be
+  * guesswork. The two shapes that would need one are reporting a Spark
   * partition per Milvus partition, whose worth is decision 19 in section 4 of
   * docs/design/README.md and still open, and segment selection.
   *

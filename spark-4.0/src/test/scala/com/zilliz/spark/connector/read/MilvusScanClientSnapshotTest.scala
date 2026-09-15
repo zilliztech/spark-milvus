@@ -44,7 +44,6 @@ import com.zilliz.spark.connector.options.{
   OptionStringsSnapshotSource,
   StorageOptions
 }
-import com.zilliz.spark.connector.read.plan.SnapshotPartitions
 import com.zilliz.spark.connector.table.MilvusTable
 
 class MilvusScanClientSnapshotTest extends AnyFunSuite {
@@ -320,8 +319,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       )
     )
 
-    val partitions = SnapshotPartitions.build(
-      scan.ctx,
+    val partitions = scan.inputPartitions(
       snapshotOf(
         v2 = Seq(segment),
         partitionIds = Seq(0L),
@@ -575,7 +573,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   test("buildSnapshotHadoopConf disables S3A FileSystem cache") {
     val rawOptions = new ju.HashMap[String, String]()
     rawOptions.put(StorageProperties.BucketName, "connector-bucket")
-    val conf = scanWithOptions(rawOptions).ctx.hadoopConf(
+    val conf = scanWithOptions(rawOptions).hadoopConfFor(
       "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
     )
     assert(conf.get("fs.s3a.impl.disable.cache") == "true")
@@ -591,7 +589,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(StorageProperties.Region, "us-west-2")
     rawOptions.put(StorageProperties.UseVirtualHost, "false")
 
-    val conf = scanWithOptions(rawOptions).ctx.hadoopConf(
+    val conf = scanWithOptions(rawOptions).hadoopConfFor(
       "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json"
     )
 
@@ -627,7 +625,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(StorageProperties.AccessKeyId, "ak")
     rawOptions.put(StorageProperties.AccessKeyValue, "sk")
 
-    val conf = scanWithOptions(rawOptions).ctx.hadoopConf(
+    val conf = scanWithOptions(rawOptions).hadoopConfFor(
       "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
     )
 
@@ -648,7 +646,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   test(
     "buildSnapshotHadoopConf accepts snapshot bucket without connector bucket"
   ) {
-    val conf = scanWithOptions(new ju.HashMap[String, String]()).ctx.hadoopConf(
+    val conf = scanWithOptions(new ju.HashMap[String, String]()).hadoopConfFor(
       "s3a://snapshot-bucket/files/snapshots/1/metadata/2.json"
     )
     assert(conf.get("fs.s3a.impl.disable.cache") == "true")
@@ -1146,8 +1144,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   test("snapshot planner attaches StorageV3 manifest delete plans") {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
     val deletePlan = DeletePlan.fromLongPks(Map(7L -> 100L))
-    val partitions = SnapshotPartitions.build(
-      scan.ctx,
+    val partitions = scan.inputPartitions(
       snapshotOf(
         v3 = Seq(
           ManifestItemJson(
@@ -1170,8 +1167,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     "snapshot planner pins StorageV3 raw manifest path to resolved version"
   ) {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
-    val partitions = SnapshotPartitions.build(
-      scan.ctx,
+    val partitions = scan.inputPartitions(
       snapshotOf(
         v3 = Seq(
           ManifestItemJson(
@@ -1196,8 +1192,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       20L -> DeletePlan.fromLongPks(Map(9L -> 140L))
     )
 
-    val partitions = SnapshotPartitions.build(
-      scan.ctx,
+    val partitions = scan.inputPartitions(
       snapshotOf(
         v3 = Seq(
           ManifestItemJson(
@@ -1295,8 +1290,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
     val ownPlan = DeletePlan.fromLongPks(Map(9L -> 140L))
 
-    val partitions = SnapshotPartitions.build(
-      scan.ctx,
+    val partitions = scan.inputPartitions(
       snapshotOf(
         v2 = Seq(
           Segment.v2(
@@ -1348,8 +1342,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
     val ownPlan = DeletePlan.fromLongPks(Map(9L -> 140L))
 
-    val partitions = SnapshotPartitions.build(
-      scan.ctx,
+    val partitions = scan.inputPartitions(
       snapshotOf(
         v2 = Seq(
           Segment.v2(
@@ -1398,10 +1391,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
     // A segment that went through add-field + backfill: the old multi-field
     // group (slot 3) still reports field 100 from its own schema, and the newer
-    // single-field group (slot 100) reports it too. buildSnapshotPartitions
+    // single-field group (slot 100) reports it too. The planner
     // must strip the overlapping field from the older slot.
-    val partitions = SnapshotPartitions.build(
-      scan.ctx,
+    val partitions = scan.inputPartitions(
       snapshotOf(
         v2 = Seq(
           Segment.v2(

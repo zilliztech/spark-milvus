@@ -1,17 +1,19 @@
 package com.zilliz.spark.connector.read
 
-/** Driver-side planning, held here until `core.read.plan` exists.
+/** Driver-side reading of delete files, held here until it moves to the
+  * executor.
   *
-  * `MilvusScan` holds the `core.snapshot.Snapshot` the table was built from;
-  * `DeletePlanning` resolves its delete plans and `SnapshotPartitions.build`
-  * turns it into input partitions. Where the snapshot comes from is no longer
-  * decided here: `spark.options.SnapshotSources` picks the `SnapshotSource` in
-  * `getTable`.
+  * `DeletePlanning` reads every delete file a snapshot names into a
+  * `DeletePlan` on the driver, and `MilvusScan` hands those plans to
+  * `core.read.plan.ReadPlan.of`, which ships them inside each task as
+  * `DeleteSource.Materialized`. The planning itself left this package: the
+  * segment list becomes tasks in core, and `MilvusScan.inputPartitions` only
+  * wraps them into Spark's partitions.
   *
-  * Interim on purpose: everything here depends on Spark types, which layer 2
-  * forbids. `SnapshotPartitions.build` becomes `core.read.plan.Partitioner` and
-  * `DeletePlanning` moves to the executor with `DeleteSource.Files`; the
-  * package ends when both are gone. It claims no capability of its own; the ids
-  * stay with `read`.
+  * Interim on purpose: the package ends when the executor reads the delete
+  * files itself from `DeleteSource.Files`, which is a change of behaviour (the
+  * driver ships paths, not primary-key maps; an L0 file is read once per task)
+  * and has its own work item. It claims no capability of its own; the ids stay
+  * with `read`.
   */
 package object plan

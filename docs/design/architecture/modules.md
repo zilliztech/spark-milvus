@@ -49,7 +49,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | `expr` | 中间表示、Milvus 文法解析器、列批求值器、反向打印器 | Expr、PlanParser、Evaluator、ExprPrinter、Bitmap |
 | `delete` | 删除文件解码，按行号置位 | DeleteBitset、DeltaLogDecoder |
 | `stats` | 段统计和 row group 统计的读取与剪枝 | SegmentStats、Pruner |
-| `read.plan` | 分区规划，纯 JVM，可序列化 | SegmentReadTask、SegmentLayout、DeleteSource、ReadPlan。Partitioner 待 R19（决策 19）与 R16 定了再加，一段一分区之外还没有第二种切法 |
+| `read.plan` | 分区规划，纯 JVM，可序列化 | SegmentReadTask、SegmentLayout、DeleteSource、ReadPlan，`ReadPlan.of` 把 Snapshot 变成任务列表（#12）。Partitioner 待 R19（决策 19）与 R16 定了再加，一段一分区之外还没有第二种切法 |
 | `read.exec` | 批读取、行号取列、出口；碰 native | SegmentReader、SegmentReaderRegistry。ColumnBatch 与 Take 未写：列式出口的 Spark 侧是 Spark 类型，归第 3 层，进 core 的仍是 VectorSchemaRoot |
 | `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter（V3SegmentWriter、V2SegmentWriter）、WrittenColumnGroups、ManifestTransaction、StagingLayout |
 | `write.commit` | 作业清单、提交、幂等 | JobManifest、Committer |
@@ -100,7 +100,7 @@ C shim（mv_* 包 knowhere::Index、BruteForce、BinarySet、Version，以及 Di
 | `catalog` | MilvusCatalog：TableCatalog、SupportsNamespaces、loadTable 的快照重载 | 主体在 base，按线只留一个工厂方法 |
 | `table` | MilvusTable：持有 getTable 解析一次的 Snapshot，算 schema、能力集、元数据列，把 Snapshot 交给 scan；DeleteV2 | 否 |
 | `read` | ScanBuilder、Scan、Batch、InputPartition、ColumnarPartitionReader、ColumnVector 实现。包名与 `write` 和 `core.read` 对称，类名沿用 Spark 的 Scan | 否 |
-| `read.plan` | 过渡包：SnapshotPartitions、DeletePlanning、ScanContext。planner 已全部变成 SnapshotSource；全靠 Spark 类型，进不了第 2 层；SnapshotPartitions.build 变成 `core.read.plan`、DeletePlanning 下沉 executor 后这个包消失 | 否 |
+| `read.plan` | 过渡包，只剩 DeletePlanning：driver 读删除文件成 DeletePlan。SnapshotPartitions 已变成 `core.read.plan.ReadPlan.of`、ScanContext 已删（#12）；DeletePlanning 下沉 executor（`DeleteSource.Files`，#13）后这个包消失 | 否 |
 | `expr` | DataSource V2 Predicate 到 IR 的翻译 | 否 |
 | `types` | Arrow 类型到 Spark 类型的映射，向量列的 Spark 表示 | 否 |
 | `write` | WriteBuilder、BatchWrite、DataWriterFactory、DataWriter；truncate、overwrite、backfill 模式 | 否 |

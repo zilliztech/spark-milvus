@@ -131,28 +131,3 @@ final case class SegmentReadTask(
       gs.headOption.map(_.fileRowCounts.sum)
   }
 }
-
-/** A whole read: one [[SegmentReadTask]] per partition, plus what planning
-  * already knows about the total.
-  *
-  * The totals are what a Spark `Statistics` reports (capability R13). They are
-  * options because a manifest layout does not reveal its row count on the
-  * driver without opening the manifest, and guessing a number that feeds the
-  * optimizer is worse than admitting there is none.
-  */
-final case class ReadPlan(specs: Seq[SegmentReadTask]) extends Serializable {
-
-  def isEmpty: Boolean = specs.isEmpty
-
-  /** Sum of the per-partition expectations, or nothing when any partition
-    * cannot state one. A partial sum would read as the table's size.
-    */
-  def totalRows: Option[Long] =
-    if (specs.isEmpty) Some(0L)
-    else {
-      val counts = specs.map(_.expectedRows)
-      if (counts.forall(_.isDefined)) Some(counts.flatten.sum) else scala.None
-    }
-
-  def partitionsApplyingDeletes: Int = specs.count(_.appliesDeletes)
-}

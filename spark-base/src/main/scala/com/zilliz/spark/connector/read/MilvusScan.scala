@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import scala.jdk.CollectionConverters._
 
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.read.{
   Batch,
@@ -15,14 +16,17 @@ import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
+import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
+import com.zilliz.milvus.storage.read.plan.ReadPlan
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.milvus.storage.snapshot.{Snapshot, SnapshotOrigin}
-import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.read.plan.{
-  DeletePlanning,
-  ScanContext,
-  SnapshotPartitions
+import com.zilliz.milvus.storage.snapshot.{
+  SegmentLayout,
+  Snapshot,
+  SnapshotOrigin
 }
+import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
+import com.zilliz.spark.connector.read.plan.DeletePlanning
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** One read of one [[Snapshot]]: the table resolved it once, this plans one
@@ -40,7 +44,6 @@ class MilvusScan(
     with SupportsReportStatistics
     with Logging {
   private val milvusOption = MilvusOption(options)
-  private[read] val ctx = new ScanContext(options, milvusOption)
 
   /** Row count is the sum over planned partitions; the byte size is that count
     * times an estimated row width. Both come from the plan already built, so
@@ -66,10 +69,16 @@ class MilvusScan(
   private def bucket: Option[String] =
     Option(snapshot.bucket).map(_.trim).filter(_.nonEmpty)
 
+  /** Hadoop configuration for objects under `path`, from the connector's `fs.*`
+    * options plus per-bucket S3A settings.
+    */
+  private[read] def hadoopConfFor(path: String): Configuration =
+    StorageOptions.buildHadoopConfForOptions(milvusOption.options, path)
+
   /** Per-bucket Hadoop settings are keyed by the location being read. */
   private def hadoopConf = snapshot.origin match {
-    case SnapshotOrigin.Backup(dir) => ctx.hadoopConf(dir)
-    case _                          => ctx.hadoopConf("")
+    case SnapshotOrigin.Backup(dir) => hadoopConfFor(dir)
+    case _                          => hadoopConfFor("")
   }
 
   private def errorContext: String = s"snapshot ${snapshot.name}"
@@ -80,7 +89,7 @@ class MilvusScan(
     )
     val conf = hadoopConf
     val v3 = DeletePlanning.loadV3DeletePlanning(
-      ctx,
+      milvusOption,
       snapshot,
       bucket,
       conf,
@@ -88,21 +97,20 @@ class MilvusScan(
     )
     val v2 =
       DeletePlanning.loadV2DeletePlans(
-        ctx,
+        milvusOption,
         snapshot,
         bucket,
         conf,
         errorContext
       )
     val inherited = DeletePlanning.loadInheritedDeletePlans(
-      ctx,
+      milvusOption,
       snapshot,
       bucket,
       conf,
       errorContext
     )
-    SnapshotPartitions.build(
-      ctx,
+    inputPartitions(
       snapshot,
       v3DeletePlans = v3.deletePlans,
       v3ReadVersions = v3.readVersions,
@@ -111,11 +119,80 @@ class MilvusScan(
     )
   }
 
+  /** The plan, `core.read.plan.ReadPlan.of`, wrapped into Spark's input
+    * partitions: each task becomes the partition of its storage line, with what
+    * only this layer knows on it (the vector search, the partition name, the
+    * option map the reader factory reads, the L0 marker a V2 reader resolves on
+    * the executor).
+    */
+  private[read] def inputPartitions(
+      snapshot: Snapshot,
+      v3DeletePlans: Map[Long, DeletePlan] = Map.empty,
+      v3ReadVersions: Map[Long, Long] = Map.empty,
+      v2DeletePlans: Map[Long, DeletePlan] = Map.empty,
+      inheritedDeletePlansByPartition: Map[Long, DeletePlan] = Map.empty
+  ): Array[InputPartition] = {
+    // Every path in the snapshot is a key of `snapshot.bucket`, so that is the
+    // bucket the native reader is rooted at, whatever the raw options say (a
+    // backup read derives it from `milvus.backup.dir`).
+    val canonicalMilvusOption = bucket
+      .map(b =>
+        milvusOption.copy(
+          options = milvusOption.options ++
+            Map(StorageProperties.BucketName -> b)
+        )
+      )
+      .getOrElse(milvusOption)
+    // Parsed once for the whole plan rather than per partition: a bad storage
+    // configuration should fail planning, not every task.
+    val plan = ReadPlan.of(
+      snapshot,
+      properties = {
+        case 2 => StorageProperties.from(canonicalMilvusOption.options)
+        case _ => StorageProperties.from(milvusOption.options)
+      },
+      applyDeletes = MilvusOption.readApplyDeletes(options),
+      deletes = ReadPlan.Deletes(
+        v3BySegment = v3DeletePlans,
+        v2BySegment = v2DeletePlans,
+        inheritedByPartition = inheritedDeletePlansByPartition
+      ),
+      readVersions = v3ReadVersions
+    )
+    val vectorSearch = milvusOption.vectorSearch
+    plan.specs.map { task =>
+      task.layout match {
+        case SegmentLayout.Manifest(_, _) =>
+          MilvusV3InputPartition(
+            task,
+            task.partitionId.toString,
+            milvusOption,
+            vectorSearch.map(_.topK),
+            vectorSearch.map(_.queryVector),
+            vectorSearch.map(_.metricType),
+            vectorSearch.map(_.vectorColumn)
+          ): InputPartition
+        case SegmentLayout.ColumnGroups(_) =>
+          // The inherited (L0) plan is not shipped per partition: the
+          // partition carries the marker and the reader factory resolves it.
+          MilvusV2InputPartition(
+            task,
+            canonicalMilvusOption,
+            inheritedDeletePlanPartitionId =
+              DeltaLogReader.inheritedDeletePlanPartitionMarker(
+                task.partitionId,
+                inheritedDeletePlansByPartition
+              )
+          ): InputPartition
+      }
+    }.toArray
+  }
+
   override def createReaderFactory(): PartitionReaderFactory = {
     // The partition-scoped (L0) plans are resolved here, from the snapshot
     // the scan holds, so the factory does not depend on planning having run.
     val inheritedPlansByPartition = DeletePlanning.loadInheritedDeletePlans(
-      ctx,
+      milvusOption,
       snapshot,
       bucket,
       hadoopConf,

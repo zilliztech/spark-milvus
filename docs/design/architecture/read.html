@@ -161,8 +161,8 @@ UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,�
 <table>
 <tr><th>类型</th><th>是什么</th></tr>
 <tr><td><code>SegmentReadTask</code></td><td>一个分区要读什么:段路径、<code>storage_version</code>、manifest 版本、列名、<code>fs.*</code> 属性、删除文件位置。只有描述,没有句柄、没有 <code>Configuration</code>、没有打开的资源</td></tr>
-<tr><td><code>ReadPlan</code></td><td>一组 <code>SegmentReadTask</code>,加规划期就能算出来的总行数、字节数(供 R13)</td></tr>
-<tr><td><code>Partitioner</code></td><td>怎么切分区。默认一段一分区;R19 按分区报分区、R16 段选择落在这里</td></tr>
+<tr><td><code>ReadPlan</code></td><td>一组 <code>SegmentReadTask</code>,加规划期就能算出来的总行数、字节数(供 R13)。<code>ReadPlan.of(snapshot, properties, applyDeletes, deletes, readVersions)</code> 是规划本身:V3 段一个 manifest 任务、有数据的 V2 段一个列组任务、delete-only 段跳过,V3 任务带分区继承的 L0 删除和自己的删除之并,V2 任务只带自己的。已做(#12)</td></tr>
+<tr><td><code>Partitioner</code></td><td>怎么切分区。没有:一段一分区是唯一策略,R19 按分区报分区、R16 段选择定了再加,接口按那时的两种实现定</td></tr>
 </table>
 <p>剪枝(R9 段级、R10 row group 级)也在本包:规划期用统计信息把不需要的段和文件从
 <code>SegmentReadTask</code> 里去掉。R10 依赖仓库外的两件事,见
@@ -251,6 +251,14 @@ spark 层的两个 <code>InputPartition</code> 已经改成携带它:
 <strong>随之有一个产品可见的行为变化</strong>:
 <code>StorageProperties.from</code> 从每个 task 的 reader 构造里移到规划期跑一次,
 所以存储配置不全的读现在在规划期就失败,不再是每个 task 各失败一次。</li>
+
+<li><s>规划本身进 <code>core.read.plan</code>。</s>已完成(#12)。
+段列表怎么变成任务这段计算原来是 spark 层的 <code>SnapshotPartitions.build</code>,
+现在是 <code>ReadPlan.of</code>,输入输出全是 core 类型;<code>MilvusScan.inputPartitions</code>
+只把任务包成两种 <code>InputPartition</code>,加上向量检索、分区名、选项和 V2 的 L0 标记。
+纯搬,行为不变:规划的 50 个用例一个断言没改。<code>spark.read.plan</code> 只剩
+<code>DeletePlanning</code>——driver 读删除文件成主键 map——等删除读取下沉 executor(#13),
+那是行为改变,单独一单。</li>
 
 <li><s>写 <code>core.read.exec</code> 的 <code>SegmentReader</code> 与注册表。</s>已完成。
 开原生 reader、逐批取 Arrow、按序释放句柄这一整套从两个 spark reader 的构造块搬进 core,
