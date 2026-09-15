@@ -125,7 +125,8 @@ flowchart LR
 4. append 写模式：写新段目录。Milvus 今天没有登记外部新段的接口；DataCoord 内部已有 `CommitSegmentManifest` 的 NewSegment 原语，缺的是 RPC、id 分配和 WAL 广播，见第 5 节。
 5. 暂存位置要避开 GC：DataCoord 把 `insert_log/{coll}/{part}/{seg}` 下未登记的 V3 段目录在 `dataCoord.gc.missingTolerance`（默认 86400 秒）后回收；暂存前缀放在 `insert_log` 之外，登记时按最终路径写或移动。
 6. 索引随段一起写：SegmentWriter 可以在写段的同时用 knowhere 建索引，按 Milvus 的索引文件格式写到段目录旁并登记进该段的 Manifest（2.5 第 6 条）；Global Index 的中心点到桶的映射同样写进 Milvus Storage。作业清单带上索引文件，登记时一并交给 Milvus。
-7. append 不用 RequiresDistributionAndOrdering；backfill 写模式的按段分布和按行号排序见决策 10。truncate 和 overwrite 只接受全表。
+7. append 不用 RequiresDistributionAndOrdering；backfill 写模式的按段分布和按行号排序见决策 10。
+8. 入口、写的表从哪拿 schema、WriteBuilder 校验什么、选项去留，见 [write.html](architecture/write.html)。truncate 和 overwrite 只接受全表。
 
 ### 2.5 原生层
 
@@ -183,6 +184,7 @@ flowchart LR
 | 20 | 谓词下推用哪一代接口 | 现状：`MilvusScanBuilder` 实现的是 `SupportsPushDownFilters`，即 DataSource V1 的 `Filter`；capabilities 第 10 节写「不做 V1 Filter，只实现 V2 谓词」。a. 换成 `SupportsPushDownV2Filters`（`Predicate`），作为 R6 的前置一并做；b. 等 `core.expr` 的 ExprTranslator 一起换，少返工一次；c. 改设计承认保留 V1。要先弄清 V2 的 `Predicate` 是否覆盖 R6 列的全部谓词形态（比较、IN、IS NULL、字符串前后缀、AND/OR/NOT）以及四条线的接口差异 | R6、R7、W5；现有下推代码走在设计禁止的接口上 |
 | 16 | 向量查询入口、暴力搜索的形态与位置 | 入口：DataFrame 方法、SQL 函数、读选项三选几；执行：knowhere 的 BruteForce 在原生层，按 2026-09-14 日志不再保留 1.x JVM 实现作对拍或兜底；归属：spark 层能力还是 apps 场景。issue #125 [建议显式查询方法](architecture/vector-search.html#api)在 spark.read 构造全局 TopK 计划，待评审 | V5 与拟新增 V7；能力清单、模块规划及旧入口迁移一起定 |
 | 21 | issue #125 的索引查询支持范围与失败策略 | [方案草稿](architecture/vector-search.html#scope)提出首个互操作组合、V7 查询能力，以及[默认严格、无索引显式回退](architecture/vector-search.html#cache)的策略。目标引擎/格式与原生解码依赖先按[互操作步骤](architecture/vector-search.html#interop)验证；本行尚未形成实现承诺 | V1、V2、V4 的持久化加载部分，拟新增 V7；过滤实现仍依赖决策 20 |
+| 22 | 连接器写的段，系统字段 RowID（0）和 Timestamp（1）从哪来 | a. 写时向 Milvus 要 AllocID / AllocTimestamp（要活的 Milvus，纯连接器模式做不到）；b. 登记时由 Milvus 补（RegisterSegments 未定，能否改写文件要和 Milvus 侧一起定）；c. 写占位值（段内行号、作业时间），登记时只作排序。见 [write.html](architecture/write.html) 第六节 | W1 登记前提；core.write.exec 的列组切分 |
 
 ## 5 需要 Milvus 侧提供的 `[草稿]`
 
@@ -313,3 +315,4 @@ flowchart LR
 | 2026-09-15 | 提交前完整单元测试必须通过 | 每次提交在格式化及检查之后，使用 Java 21 运行根项目完整单元测试，包括只改文档的提交；测试任务所需编译一并执行。开发时的 testOnly 不能替代完整运行，失败、套件中止或未完成均不能提交，修复原因后重跑。不得新增排除、过滤、忽略或取消条件来获得通过；既有原生库和 UAT 取消按实际数量及原因报告，不计为通过。替代原先日常修改交给 CI 编译测试的规则，防止未经完整测试的改动进入提交。integration40 仍在根聚合之外；额外交叉版本检查、集成测试、原生库构建和发布按任务范围执行。规范由 sbt skill 和 sbt.html 维护，命令只在 contributing.md 维护。 |
 | 2026-09-15 | 备份元数据读取失败的单测复用 core 存储测试实现 | 保留 Spark 4.0 的两个备份失败测试，直接构造 BackupSnapshotSource 并传入 core 测试源码的 FailingObjectStore，使读取失败及其异常断言不依赖原生库是否安装：读取失败保留元数据路径和原始 IOException，非法 URI 在读取前失败。spark40 在自己的声明处增加 core 的 test→test 依赖，生产依赖和其他 Spark 线不变。复用已有存储测试实现，沿用 compat 的测试依赖方式；不为测试改变生产存储访问路径，不以取消用例掩盖原生库加载导致的失败。同次更正 modules.md 的两处旧说法：原生测试按条件取消，CI 不构建原生库；driver 的 core.io 也会加载 JNI，原生库并非只在 executor 使用。 |
 | 2026-09-15 | core.write.commit 落地：作业清单、标记文件、幂等与 abort | `Committer.commit` 先写 `staging/{job}/manifest.json`（`job_id`、`created_at`、`segments[]`，每段 `partition_id`、`base_path`、`manifest_version`、`row_count`，就是 task 的 commit message 加作业信息），再写 `staging/{job}/_committed`（内容是 job id）。标记文件是"提交完成"的信号：先清单后标记，不会出现有标记没清单的窗口；重跑同一作业看到标记就整个 no-op，不按段合并——Spark 的 `BatchWrite.commit` 带全量 message 只调一次，"部分 task 已提交"的状态不存在，按作业判比按段判少一个分支。标记里的 job id 对不上就抛异常，不静默跳过。`abort` 列出前缀下全部文件逐个删；目录条目删不掉：loon 的 C API 只有 `delete_file`，对目录返回 "Path is not a file"，没有目录删除，所以 S3 上 milvus-storage 写段时建的零字节目录标记（`…/_data/`、`…/_metadata/`）会留下，本地文件系统留空目录。等 milvus-storage 加目录删除再收，A7 清理暂存同样受此限。`MilvusV3BatchWrite.commit/abort` 改调 `Committer`，driver 用和 task 相同的 `fs.*` 开 `NativeObjectStore`。在 UAT 桶上验过：写→读→abort，清单和标记落在段旁边，abort 删掉 6 个文件。core.write.commit 不调 Milvus；登记（A4）还没有 CALL |
+| 2026-09-15 | 写路径成文：write.html | 新增 [write.html](architecture/write.html)，对照代码写。三个事实定了形状：(1) Spark 4.0 对 `supportsExternalMetadata=true` 的 TableProvider，`df.write.save()` 把 DataFrame 自己的 schema 传给 `getTable`、不调 `inferSchema`，`AppendData.byName` 对的是这份 schema，所以对照 collection schema 的校验只能由 WriteBuilder 做；(2) `format("milvus")` 返回的 `MilvusTable` 只声明 `BATCH_READ`，带 `BATCH_WRITE` 的 `MilvusV3WriteTable` 无人构造，Spark 退回 V1 写法而我们没有，这就是用户今天写不了的原因；(3) 四个 SaveMode 只有 append 走这条链，overwrite 要 `SupportsTruncate`（W4），另两个 Spark 自己不支持。定下的：写的表和读的表是同一个 Snapshot（三条来源，backup 拒写，`withSegments=false`）；字段 id 和向量维度从 schema 取，`milvus.writer.fieldIds` 与 `vector.<f>.dim` 提议删除待确认；校验规则一张表（同名、同类型不隐式转换、缺列看 nullable/默认值、autoID 拒写、function output 拒写、partition key 首版不做）；W2、W4 只在 WriteBuilder 上分支不另开链。登记前段还缺三样（系统字段、pk bloom filter、列组切分），系统字段来源开成决策 22。入口的实现是工作单 #11 |
