@@ -72,17 +72,16 @@ class MilvusPartitionReaderFactory(
     * Two things the row reader does are not implemented columnar yet, and each
     * of them sends the partition back to the row reader:
     *
-    *   - A pushed-down filter. `MilvusScanBuilder.pushFilters` returns the
-    *     predicates it cannot handle to Spark and keeps the rest, and Spark's
-    *     contract is that the source evaluates what it kept. The columnar
-    *     reader does not, so a partition carrying pushed filters read columnar
-    *     returns rows that should have been filtered out, with no error.
+    *   - A connector-owned filter. `MilvusScanBuilder` currently returns every
+    *     legacy `Filter` to Spark, so normal scans carry none. Keep this guard
+    *     because the columnar reader cannot evaluate filters supplied by a
+    *     future pushdown implementation or a directly constructed scan.
     *   - Vector search. `topK` and `queryVector` make the row reader run a
     *     brute-force search instead of a scan; the columnar reader would ignore
     *     them and return the whole segment.
     *
-    * `MilvusV2InputPartition` carries neither: its scan builder returns every
-    * predicate to Spark and it has no search parameters.
+    * Neither partition type currently carries connector-owned filters, and
+    * `MilvusV2InputPartition` also has no search parameters.
     */
   override def supportColumnarReads(partition: InputPartition): Boolean =
     MilvusOption.readColumnar(optionsMap) && (partition match {

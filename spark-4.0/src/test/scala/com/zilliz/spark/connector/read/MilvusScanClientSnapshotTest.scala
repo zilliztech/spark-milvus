@@ -972,11 +972,24 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
-  test("filters are pushed only when no V2 data segment is planned") {
-    import org.apache.spark.sql.sources.EqualTo
-    val schema = StructType(Seq(StructField("pk", LongType, nullable = false)))
-    val filters: Array[org.apache.spark.sql.sources.Filter] =
-      Array(EqualTo("pk", 1L))
+  test("scan builder leaves every filter in Spark") {
+    import org.apache.spark.sql.sources._
+    val schema =
+      StructType(Seq(StructField("score", LongType, nullable = true)))
+    val filters: Array[Filter] = Array(
+      EqualTo("score", 5L),
+      GreaterThan("score", 5L),
+      GreaterThanOrEqual("score", 5L),
+      LessThan("score", 10L),
+      LessThanOrEqual("score", 10L),
+      In("score", Array[Any](5L, null)),
+      IsNull("score"),
+      IsNotNull("score"),
+      And(IsNotNull("score"), LessThan("score", 10L)),
+      Or(IsNull("score"), EqualTo("score", 5L)),
+      Not(EqualTo("score", 5L)),
+      EqualTo("missing", 1L)
+    )
     val v2 = Segment.v2(
       id = 30L,
       partitionId = 20L,
@@ -989,20 +1002,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         )
       )
     )
-    // Only the V3 row reader evaluates a pushed filter; a V2 segment in the
-    // plan means Spark must keep the filter, whatever the options say.
-    val withV2 = new MilvusScanBuilder(
-      schema,
-      new CaseInsensitiveStringMap(new ju.HashMap[String, String]()),
-      snapshotOf(v2 = Seq(v2))
-    )
-    assert(withV2.pushFilters(filters).toSeq == filters.toSeq)
-    assert(withV2.pushedFilters().isEmpty)
-
-    val v3Only = new MilvusScanBuilder(
-      schema,
-      new CaseInsensitiveStringMap(new ju.HashMap[String, String]()),
-      snapshotOf(v3 =
+    val snapshots = Seq(
+      "V2" -> snapshotOf(v2 = Seq(v2)),
+      "V3" -> snapshotOf(v3 =
         Seq(
           ManifestItemJson(
             31L,
@@ -1011,8 +1013,22 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         )
       )
     )
-    assert(v3Only.pushFilters(filters).isEmpty)
-    assert(v3Only.pushedFilters().toSeq == filters.toSeq)
+
+    snapshots.foreach { case (layout, snapshot) =>
+      val builder = new MilvusScanBuilder(
+        schema,
+        new CaseInsensitiveStringMap(new ju.HashMap[String, String]()),
+        snapshot
+      )
+      assert(
+        builder.pushFilters(filters).sameElements(filters),
+        s"$layout filters were not returned to Spark"
+      )
+      assert(
+        builder.pushedFilters().isEmpty,
+        s"$layout filters were reported as pushed"
+      )
+    }
   }
 
   test("snapshot option keys use dotted lowercase suffixes") {
