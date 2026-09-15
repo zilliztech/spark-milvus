@@ -22,7 +22,7 @@ import com.zilliz.spark.connector.options.{ReadMode, StorageOptions}
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.read.{
   MilvusInputPartition,
-  MilvusPackedV2DeleteContext,
+  V2InheritedDeletes,
   MilvusPartitionReaderFactory
 }
 import com.zilliz.spark.connector.read.plan.{
@@ -57,7 +57,7 @@ class MilvusScan(
   override def estimateStatistics(): Statistics =
     MilvusScan.statisticsFor(planInputPartitions(), schema)
 
-  ctx.vectorSearchConfig.foreach { config =>
+  ctx.vectorSearch.foreach { config =>
     logInfo(
       s"Vector search enabled: topK=${config.topK}, metric=${config.metricType}, column=${config.vectorColumn}"
     )
@@ -137,14 +137,14 @@ class MilvusScan(
         // handling does not depend on Spark evaluating partitions first.
         new BackupPlanner(ctx, preParsedBackupMeta).inheritedDeletePlans()
       } else {
-        Map.empty[Long, com.zilliz.milvus.storage.delete.MilvusDeletePlan]
+        Map.empty[Long, com.zilliz.milvus.storage.delete.DeletePlan]
       }
 
     new MilvusPartitionReaderFactory(
       schema,
       optionsMap,
       pushedFilters,
-      MilvusPackedV2DeleteContext(inheritedPlansByPartition),
+      V2InheritedDeletes(inheritedPlansByPartition),
       pushedLimit
     )
   }
@@ -162,7 +162,7 @@ object MilvusScan extends Logging {
       partitions: Array[InputPartition],
       schema: StructType
   ): Statistics = {
-    val specs = partitions.collect { case p: MilvusInputPartition => p.spec }
+    val specs = partitions.collect { case p: MilvusInputPartition => p.task }
     val rows =
       com.zilliz.milvus.storage.read.plan.ReadPlan(specs.toSeq).totalRows
     val width = estimatedRowWidth(schema)

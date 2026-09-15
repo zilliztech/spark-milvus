@@ -34,7 +34,7 @@ import com.zilliz.milvus.storage.codec.{
   SparseFloatVectorConverter
 }
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.spark.connector.types.MilvusSchemaUtil
+import com.zilliz.spark.connector.types.SparkSchemaMapper
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class ArrowConverterTest extends AnyFunSuite with Matchers {
@@ -187,14 +187,14 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
   }
 
   test("internalRowToArrow writes nullable dense arrays to VarBinary") {
-    import com.zilliz.spark.connector.types.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.SparkSchemaMapper
 
     def write(
         field: StructField,
         value: ArrayData
     ): Array[Byte] = {
       val sparkSchema = StructType(Seq(field))
-      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+      val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(sparkSchema)
       val allocator = new RootAllocator(Long.MaxValue)
       try {
         val root = VectorSchemaRoot.create(arrowSchema, allocator)
@@ -267,7 +267,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
   }
 
   test("internalRowToArrow rejects wrong-width nullable dense vectors") {
-    import com.zilliz.spark.connector.types.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.SparkSchemaMapper
 
     def reject(
         field: StructField,
@@ -277,7 +277,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         vectorDimensions: Map[String, Int] = Map.empty
     ): Unit = {
       val sparkSchema = StructType(Seq(field))
-      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(
+      val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(
         sparkSchema,
         vectorDimensions
       )
@@ -371,7 +371,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
   }
 
   test("internalRowToArrow rejects non-byte-aligned BinaryVector dimension") {
-    import com.zilliz.spark.connector.types.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.SparkSchemaMapper
 
     val field = vectorField(
       "binary",
@@ -380,7 +380,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       Some(10)
     )
     val sparkSchema = StructType(Seq(field))
-    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+    val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(sparkSchema)
     val allocator = new RootAllocator(Long.MaxValue)
     try {
       val root = VectorSchemaRoot.create(arrowSchema, allocator)
@@ -402,7 +402,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
   test("internalRowToArrow rejects null dense vector array elements") {
     def reject(field: StructField, value: ArrayData): Unit = {
       val sparkSchema = StructType(Seq(field))
-      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+      val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(sparkSchema)
       val allocator = new RootAllocator(Long.MaxValue)
       try {
         val root = VectorSchemaRoot.create(arrowSchema, allocator)
@@ -516,7 +516,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       MilvusDataType.SparseFloatVector
     )
     val sparkSchema = StructType(Seq(field))
-    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+    val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(sparkSchema)
     arrowSchema.findField("sparse").getType shouldBe new ArrowType.Binary()
 
     val mapData = ArrayBasedMapData(
@@ -569,7 +569,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       error.getMessage should include("multiple of 8")
     }
 
-    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(sparkSchema)
+    val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(sparkSchema)
     val allocator = new RootAllocator(Long.MaxValue)
     try {
       val root = VectorSchemaRoot.create(arrowSchema, allocator)

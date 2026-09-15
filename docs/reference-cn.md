@@ -102,7 +102,7 @@ val s3Options = Map(
 
 ### 1.4 工作原理
 
-`MilvusDataReader` 使用 Storage V2 (Loon) FFI 接口读取数据。删除操作由存储层内部处理，无需单独的删除日志处理。
+每个 Spark 分区是一个段。`storage_version = 3` 的段由 `MilvusV3PartitionReader` 经 milvus-storage 的 C 接口打开段清单、拉取 Arrow 批；`storage_version = 2` 的段由 `MilvusV2PartitionReader` 以同样方式打开列组 parquet 文件。删除文件在 driver 上读成删除计划，reader 按主键和时间戳跳过已删行。
 
 ## 2. `milvus` 格式参数
 

@@ -15,7 +15,7 @@ import com.zilliz.milvus.storage.read.exec.{
   SegmentReader,
   SegmentReaderRegistry
 }
-import com.zilliz.milvus.storage.read.plan.InputSpec
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
@@ -156,7 +156,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       counts.map(_.sum).sum shouldBe rows.toLong
 
       // --- read back, through the registry the Spark readers use ---
-      val spec = InputSpec(
+      val task = SegmentReadTask(
         segmentId = 1L,
         partitionId = 1L,
         layout = SegmentLayout.ColumnGroups(
@@ -177,7 +177,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       // Field ids 0 and 1 stand for the two columns, in schema order.
       val nameFor = Map(0L -> "id", 1L -> "name")
       segmentReader = SegmentReaderRegistry.open(
-        spec,
+        task,
         schema,
         Seq("id", "name"),
         nameFor.get,

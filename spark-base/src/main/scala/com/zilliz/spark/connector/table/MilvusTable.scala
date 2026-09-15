@@ -38,7 +38,7 @@ import com.zilliz.spark.connector.options.{
 }
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.read.MilvusScanBuilder
-import com.zilliz.spark.connector.types.DataTypeUtil
+import com.zilliz.spark.connector.types.SparkTypes
 import io.milvus.grpc.schema.CollectionSchema
 
 case class MilvusTable(
@@ -379,7 +379,7 @@ case class MilvusTable(
       } else {
         collectionFieldByName.get(field.name) match {
           case Some(collectionField) =>
-            val collectionMetadata = DataTypeUtil.metadata(collectionField)
+            val collectionMetadata = SparkTypes.metadata(collectionField)
             val metadataBuilder = new MetadataBuilder()
               .withMetadata(field.metadata)
 
@@ -548,9 +548,9 @@ case class MilvusTable(
     fields = fields ++ filteredFields.map(field =>
       StructField(
         field.name,
-        DataTypeUtil.toDataType(field, rawVectors),
+        SparkTypes.toDataType(field, rawVectors),
         field.nullable,
-        DataTypeUtil.metadata(field)
+        SparkTypes.metadata(field)
       )
     )
     // Safely get maxFieldID, default to 100 if empty

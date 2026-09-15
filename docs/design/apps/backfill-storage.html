@@ -71,7 +71,7 @@ AssumeRole。判断走 <code>BackfillConfig.resolveAwsS3AssumeRole</code>，它�
 <p>第 3 步不可省：FileSystem 有实例缓存，不禁用的话第二次访问会拿到缓存里那个还揣着
 旧凭证的实例。</p>
 <p>另一处（<code>MilvusBackfill.scala:1947</code> 附近）走的是另一种隔离：克隆一份
-<code>Configuration</code> 给 V2SegmentLoader 读 AVRO 与 parquet footer，
+<code>Configuration</code> 给 FooterV2SegmentResolver 读 AVRO 与 parquet footer，
 不动会话里共享的那份。注释写明了目的是不污染共享的 OSS 凭证。</p>
 
 <div class="warn">

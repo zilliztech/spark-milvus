@@ -111,7 +111,7 @@ object ClientSnapshotPlanner {
     new SnapshotCatalog(
       store,
       bucket,
-      V2SegmentResolvers.packed(MilvusOption.readApplyDeletes(ctx.options)),
+      V2SegmentResolvers.footer(MilvusOption.readApplyDeletes(ctx.options)),
       StorageOptions.backupMaxJsonBytes(ctx.options)
     )
   }

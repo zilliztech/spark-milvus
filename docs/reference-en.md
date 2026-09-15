@@ -102,7 +102,7 @@ val s3Options = Map(
 
 ### 1.4 How It Works
 
-`MilvusDataReader` reads data using the Storage V2 (Loon) FFI interface. Delete operations are handled internally by the storage layer, so no separate delete log processing is needed.
+Each Spark partition is one segment. For a segment with `storage_version = 3`, `MilvusV3PartitionReader` opens the segment manifest through milvus-storage's C interface and pulls Arrow batches; for `storage_version = 2`, `MilvusV2PartitionReader` opens the column-group parquet files the same way. Delete files are read on the driver into a delete plan, and the reader drops deleted rows by primary key and timestamp.
 
 ## 2. `milvus` Format Parameters
 

@@ -116,7 +116,7 @@ object StorageOptions extends Logging {
   ): com.zilliz.milvus.storage.io.ObjectStore = {
     val trimmed = Option(bucket).map(_.trim).getOrElse("")
     if (trimmed.isEmpty) {
-      return HadoopStorageConfig
+      return HadoopStorageKeys
         .objectStore(conf, "")
     }
     val declared = options.filter { case (k, _) =>
@@ -127,12 +127,12 @@ object StorageOptions extends Logging {
         com.zilliz.milvus.storage.credential.StorageProperties.ExternalPrefix
       )
     }.toMap
-    val merged = HadoopStorageConfig
+    val merged = HadoopStorageKeys
       .toFsProperties(conf, trimmed) ++ declared ++
       Map(
         com.zilliz.milvus.storage.credential.StorageProperties.BucketName -> trimmed
       )
-    HadoopStorageConfig.storeFrom(merged)
+    HadoopStorageKeys.storeFrom(merged)
   }
 
   private[connector] def connectorS3BucketOption(

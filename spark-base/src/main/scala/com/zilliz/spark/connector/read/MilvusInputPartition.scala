@@ -2,32 +2,27 @@ package com.zilliz.spark.connector.read
 
 import org.apache.spark.sql.connector.read.InputPartition
 
-import com.zilliz.milvus.storage.delete.MilvusDeletePlan
-import com.zilliz.milvus.storage.read.plan.InputSpec
+import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** The two segment layouts a read can produce, so a caller can dispatch on
   * which line a partition belongs to without matching on Spark's own type.
   */
 sealed trait MilvusInputPartition extends InputPartition {
-  def spec: InputSpec
+  def task: SegmentReadTask
   def milvusOption: MilvusOption
 }
 
-// InputPartition for milvus-segment-info `storage_version = 3` (StorageV3) —
-// the manifest-based packed parquet format consumed by milvus-storage's
-// `loon_reader_new` via `LoonManifest`. See `milvus/internal/storage/rw.go`
-// for the authoritative segment-info enum (V1=0, V2=2, V3=3).
+// `storage_version = 3`: parquet column groups under a manifest, read by
+// milvus-storage's `loon_reader_new`. The enum is `milvus/internal/storage/rw.go`
+// (V1=0, V2=2, V3=3); milvus-storage's own name for the manifest format,
+// "format v2", is not used here.
 //
-// For the non-manifest packed-parquet format (segment-info
-// `storage_version = 2`, StorageV2) use [[MilvusPackedV2InputPartition]].
-//
-// Historical note: this class used to be called `MilvusStorageV2InputPartition`
-// because the underlying milvus-storage library calls its own manifest format
-// "format v2". That collided with the segment-info enum where V2 means
-// something different; the class was renamed to match the enum.
-case class MilvusStorageV3InputPartition(
-    spec: InputSpec, // What to read: layout, schema, fs.* map, deletes
+// `storage_version = 2` (column groups with no manifest) is
+// [[MilvusV2InputPartition]].
+case class MilvusV3InputPartition(
+    task: SegmentReadTask, // What to read: layout, schema, fs.* map, deletes
     partitionName: String, // Snapshot reads store the partition ID string here.
     milvusOption: MilvusOption,
     topK: Option[Int] = None,
@@ -39,23 +34,23 @@ case class MilvusStorageV3InputPartition(
 /** InputPartition for milvus-segment-info `storage_version = 2` — the
   * non-manifest packed-parquet format. No `.milvus_manifest` file exists; the
   * column-group layout is recovered from the snapshot AVRO + parquet footer
-  * kv-metadata by [[MilvusSegmentManifestReader]] +
-  * [[MilvusParquetFooterReader]] on the driver, and arrives here inside `spec`
+  * kv-metadata by [[SegmentManifestReader]] +
+  * [[ParquetFooterReader]] on the driver, and arrives here inside `task`
   * as `SegmentLayout.ColumnGroups`: one group per physical parquet file set.
-  * The reader projects `spec.neededFieldIds` across them and only opens the
+  * The reader projects `task.neededFieldIds` across them and only opens the
   * files of the groups carrying those columns.
   */
-case class MilvusPackedV2InputPartition(
-    spec: InputSpec, // What to read: layout, schema, fs.* map, deletes
+case class MilvusV2InputPartition(
+    task: SegmentReadTask, // What to read: layout, schema, fs.* map, deletes
     milvusOption: MilvusOption,
     inheritedDeletePlanPartitionId: Option[Long] = None
 ) extends MilvusInputPartition
 
-case class MilvusPackedV2DeleteContext(
-    inheritedPlansByPartition: Map[Long, MilvusDeletePlan]
+case class V2InheritedDeletes(
+    inheritedPlansByPartition: Map[Long, DeletePlan]
 )
 
-object MilvusPackedV2DeleteContext {
-  val empty: MilvusPackedV2DeleteContext =
-    MilvusPackedV2DeleteContext(Map.empty)
+object V2InheritedDeletes {
+  val empty: V2InheritedDeletes =
+    V2InheritedDeletes(Map.empty)
 }

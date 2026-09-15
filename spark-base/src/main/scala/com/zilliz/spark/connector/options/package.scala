@@ -5,7 +5,7 @@ package com.zilliz.spark.connector
   *
   * `ReadMode` is the one decision of which source a read takes its segments
   * from. `StorageOptions` turns the `fs.*` options into bucket, Hadoop
-  * configuration and the driver's `ObjectStore`, with `HadoopStorageConfig`
+  * configuration and the driver's `ObjectStore`, with `HadoopStorageKeys`
   * translating the other way, Hadoop's `fs.s3a.*` keys into `fs.*`;
   * `BackupSelection` picks the collection of a backup export. All are used
   * by the table and by the scan.

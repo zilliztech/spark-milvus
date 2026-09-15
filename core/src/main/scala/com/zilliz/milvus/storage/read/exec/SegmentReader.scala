@@ -8,7 +8,7 @@ import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.jni.storage.StorageNative
-import com.zilliz.milvus.storage.read.plan.InputSpec
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.Logging
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
@@ -43,14 +43,14 @@ trait SegmentReader extends AutoCloseable {
 object SegmentReaderRegistry {
 
   def open(
-      spec: InputSpec,
+      task: SegmentReadTask,
       arrowSchema: Schema,
       neededColumns: Seq[String],
       columnNameFor: Long => Option[String],
       allocator: BufferAllocator
   ): SegmentReader =
     new NativeSegmentReader(
-      spec,
+      task,
       arrowSchema,
       neededColumns,
       columnNameFor,
@@ -64,13 +64,13 @@ object SegmentReaderRegistry {
   * once (see docs/design/architecture/storage-io.html section 3):
   *
   *   - A handle never crosses a serialization boundary. It is opened here, on
-  *     the executor, from the description in `spec`.
+  *     the executor, from the description in `task`.
   *   - A constructor that throws releases what it already took. Nothing calls
   *     `close()` on an object that never finished being built.
   *   - `close()` is idempotent, because an error path may call it twice.
   */
 private[exec] final class NativeSegmentReader(
-    spec: InputSpec,
+    task: SegmentReadTask,
     arrowSchema: Schema,
     neededColumns: Seq[String],
     columnNameFor: Long => Option[String],
@@ -90,10 +90,10 @@ private[exec] final class NativeSegmentReader(
   try {
     schemaStruct = ArrowSchema.allocateNew(allocator)
     Data.exportSchema(allocator, arrowSchema, null, schemaStruct)
-    val properties = spec.properties.asJava
+    val properties = task.properties.asJava
     val columns = neededColumns.toArray
 
-    spec.layout match {
+    task.layout match {
       case SegmentLayout.Manifest(basePath, readVersion) =>
         val manifest =
           StorageNative.manifestOpen(basePath, properties, readVersion)
@@ -147,7 +147,7 @@ private[exec] final class NativeSegmentReader(
 
     if (readerHandle == 0L) {
       throw new IllegalStateException(
-        s"could not open a native reader for segment ${spec.segmentId}"
+        s"could not open a native reader for segment ${task.segmentId}"
       )
     }
     batchReaderHandle = StorageNative.recordBatchReaderNew(readerHandle, null)

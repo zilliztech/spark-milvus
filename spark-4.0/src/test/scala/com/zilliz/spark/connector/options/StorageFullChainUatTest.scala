@@ -44,7 +44,7 @@ class StorageFullChainUatTest extends AnyFunSuite with Matchers {
     conf.set("fs.s3a.endpoint", endpoint)
     conf.set("fs.s3a.endpoint.region", region)
 
-    val translated = HadoopStorageConfig.toFsProperties(conf)
+    val translated = HadoopStorageKeys.toFsProperties(conf)
     translated(StorageProperties.Address) shouldBe endpoint
     translated(StorageProperties.CloudProvider) shouldBe "aws"
 

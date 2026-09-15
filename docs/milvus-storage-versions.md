@@ -39,7 +39,7 @@ Only the **manifest layer** differs — V2 has none, V3 has an AVRO file.
 
 Consequences:
 
-- A class called `MilvusLoonXxxV2` may handle V3 (library sense) — **check
+- A class called `MilvusV3XxxV2` may handle V3 (library sense) — **check
   the class comment for which "V2" it uses**.
 - The snapshot JSON wire key `storagev2_manifest_list` carries V3 manifests.
   This is a historical mis-name baked into the datacoord snapshot writer;
@@ -54,7 +54,7 @@ Consequences:
 A snapshot JSON produced by milvus-datacoord has two separate arrays:
 
 - `manifest_list` — per-segment AVRO paths. These can contain **V1 or V2**
-  segments; `MilvusSegmentManifestReader` decodes each AVRO and branches on
+  segments; `SegmentManifestReader` decodes each AVRO and branches on
   the inner `storage_version` field.
 - `storagev2_manifest_list` — array of `StorageV2ManifestItem`. These are
   **V3** (despite the key name). Each carries a `basePath` and a `ver` that
@@ -64,8 +64,8 @@ A snapshot JSON produced by milvus-datacoord has two separate arrays:
 
 | Source                          | InputPartition                      | Reader                            |
 |---------------------------------|-------------------------------------|-----------------------------------|
-| `storagev2_manifest_list` items | `MilvusStorageV3InputPartition`     | `MilvusLoonPartitionReader`       |
-| `SnapshotV2Segments` option     | `MilvusPackedV2InputPartition`      | `MilvusPackedV2PartitionReader`   |
+| `storagev2_manifest_list` items | `MilvusV3InputPartition`     | `MilvusV3PartitionReader`       |
+| `SnapshotV2Segments` option     | `MilvusV2InputPartition`      | `MilvusV2PartitionReader`   |
 
 Both sources can coexist (mixed-version snapshot).
 
@@ -85,16 +85,16 @@ mode. See the "Client-mode V2 dispatch" task tracked separately.
 
 | Symbol                                 | Handles            |
 |----------------------------------------|--------------------|
-| `read/MilvusStorageV3InputPartition`   | V3 (loon manifest) |
-| `read/MilvusPackedV2InputPartition`    | V2 (non-manifest)  |
-| `read/MilvusLoonPartitionReader`       | V3                 |
-| `read/MilvusPackedV2PartitionReader`   | V2                 |
-| `read/MilvusSegmentManifestReader`     | Decodes per-segment AVROs; produces `AvroManifestEntry` with inner `storageVersion` field (can be 0/2/3 — 2 is then fed into `V2SegmentLoader`; 3 is exposed via `storagev2_manifest_list`; 0 is V1 and not supported for backfill) |
-| `read/MilvusParquetFooterReader`       | Reads `storage_version`/`group_field_id_list`/`row_group_metadata` from parquet footer KV (used only for V2 — V3 learns the same info from the loon manifest) |
-| `read/V2SegmentLoader`                 | Turns `AvroManifestEntry` + parquet footer into a `V2SegmentInfo` |
+| `read/MilvusV3InputPartition`   | V3 (loon manifest) |
+| `read/MilvusV2InputPartition`    | V2 (non-manifest)  |
+| `read/MilvusV3PartitionReader`       | V3                 |
+| `read/MilvusV2PartitionReader`   | V2                 |
+| `read/SegmentManifestReader`     | Decodes per-segment AVROs; produces `AvroManifestEntry` with inner `storageVersion` field (can be 0/2/3 — 2 is then fed into `FooterV2SegmentResolver`; 3 is exposed via `storagev2_manifest_list`; 0 is V1 and not supported for backfill) |
+| `read/ParquetFooterReader`       | Reads `storage_version`/`group_field_id_list`/`row_group_metadata` from parquet footer KV (used only for V2 — V3 learns the same info from the loon manifest) |
+| `read/FooterV2SegmentResolver`                 | Turns `AvroManifestEntry` + parquet footer into a `V2SegmentInfo` |
 | `read/V2SegmentInfo` / `V2ColumnGroup` | V2 runtime view    |
-| `write/MilvusLoonWriter`               | V3 writer (FFI transaction) |
-| `write/MilvusV2BinlogWriter`           | V2 writer (direct `AvroParquetWriter` per field) |
+| `write/MilvusV3Writer`               | V3 writer (FFI transaction) |
+| `write/MilvusV2Writer`           | V2 writer (direct `AvroParquetWriter` per field) |
 | `operations/backfill/V2SegmentArtifact` | V2 backfill output, consumed to patch snapshot AVRO |
 | `operations/backfill/SegmentBackfillResult.committedVersion` / `.manifestPaths` | V3 backfill output (new manifest version) |
 | JSON wire key `storagev2_manifest_list` | V3 manifest list — wire name is historical, frozen |
@@ -114,10 +114,10 @@ When you need to reason about storage versions, answer these in order:
    - milvus-storage C++ format name → use "library format v2" = server V3.
      Don't mix the two.
 2. **Do I have a manifest file?**
-   - Yes, at `_metadata/manifest-*.avro` → V3. Use `MilvusLoonPartitionReader`
-     / `MilvusLoonWriter`.
-   - No → V2. Use `MilvusPackedV2PartitionReader` /
-     `MilvusV2BinlogWriter`.
+   - Yes, at `_metadata/manifest-*.avro` → V3. Use `MilvusV3PartitionReader`
+     / `MilvusV3Writer`.
+   - No → V2. Use `MilvusV2PartitionReader` /
+     `MilvusV2Writer`.
 3. **Am I planning from a snapshot or a live Milvus client?**
    - Snapshot: look at both `manifest_list` (V1/V2) and
      `storagev2_manifest_list` (V3).

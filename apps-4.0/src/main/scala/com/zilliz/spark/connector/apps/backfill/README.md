@@ -332,7 +332,7 @@ Override via `customOutputPath` if needed.
 6. Validate join-key type compatibility and parquet-side cardinality, then
    left-join on the internal normalized key alias. Source keys may repeat.
 7. For each segment, repartition with a custom segment partitioner, sort by
-   `$row_offset`, and write per-segment binlogs via `MilvusLoonWriter`.
+   `$row_offset`, and write per-segment binlogs via `MilvusV3Writer`.
 8. Return a `BackfillResult` with manifest paths and per-segment stats.
 
 ## Testing helper

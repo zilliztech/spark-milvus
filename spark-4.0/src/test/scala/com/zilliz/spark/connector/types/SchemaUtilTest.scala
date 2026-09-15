@@ -8,7 +8,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.schema.FieldMetadata
 
-/** Test suite for MilvusSchemaUtil
+/** Test suite for SparkSchemaMapper
   */
 class SchemaUtilTest extends AnyFunSuite with Matchers {
 
@@ -21,7 +21,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.types.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.SparkSchemaMapper
 
       // Test with various data types
       val df = Seq(
@@ -58,7 +58,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
       // Convert without vector dimensions (embedding will be List)
       val arrowSchemaNoVec =
-        MilvusSchemaUtil.convertSparkSchemaToArrow(df.schema)
+        SparkSchemaMapper.convertSparkSchemaToArrow(df.schema)
 
       arrowSchemaNoVec should not be null
       arrowSchemaNoVec.getFields.size() shouldBe 8
@@ -124,7 +124,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.types.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.SparkSchemaMapper
 
       val df = Seq(
         (1L, "item1", Array(0.1f, 0.2f, 0.3f)),
@@ -134,7 +134,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
       // Convert with vector dimensions
       val vectorDimensions = Map("embedding" -> 3)
       val arrowSchema =
-        MilvusSchemaUtil.convertSparkSchemaToArrow(df.schema, vectorDimensions)
+        SparkSchemaMapper.convertSparkSchemaToArrow(df.schema, vectorDimensions)
 
       arrowSchema should not be null
       arrowSchema.getFields.size() shouldBe 3
@@ -160,7 +160,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.types.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.SparkSchemaMapper
 
       val df = Seq(
         (1L, Array(0.1f, 0.2f), Array(0.1f, 0.2f, 0.3f, 0.4f)),
@@ -172,7 +172,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
         "vec4d" -> 4
       )
       val arrowSchema =
-        MilvusSchemaUtil.convertSparkSchemaToArrow(df.schema, vectorDimensions)
+        SparkSchemaMapper.convertSparkSchemaToArrow(df.schema, vectorDimensions)
 
       arrowSchema.getFields.size() shouldBe 3
 
@@ -206,7 +206,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.types.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.SparkSchemaMapper
       import org.apache.spark.sql.types._
 
       // Create DataFrame with Map type
@@ -221,7 +221,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
         )
       )
 
-      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(schema)
+      val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(schema)
 
       arrowSchema.getFields.size() shouldBe 2
 
@@ -245,7 +245,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
     try {
       import spark.implicits._
-      import com.zilliz.spark.connector.types.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.SparkSchemaMapper
       import org.apache.spark.sql.types._
 
       val schema = StructType(
@@ -266,7 +266,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
         )
       )
 
-      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(schema)
+      val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(schema)
 
       arrowSchema.getFields.size() shouldBe 13
 
@@ -302,7 +302,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
   test(
     "useFieldIdAsName = true (V3 default) rewrites column names to fieldID"
   ) {
-    import com.zilliz.spark.connector.types.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.SparkSchemaMapper
     import org.apache.spark.sql.types._
 
     val schema = StructType(
@@ -314,7 +314,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
     )
 
     val fieldIds = Map("pk" -> 100L, "vec" -> 101L)
-    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(
+    val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(
       schema,
       vectorDimensions = Map("vec" -> 4),
       fieldIds = fieldIds
@@ -337,7 +337,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
   }
 
   test("field ID fallback avoids Milvus system field IDs") {
-    import com.zilliz.spark.connector.types.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.SparkSchemaMapper
     import org.apache.spark.sql.types._
 
     val schema = StructType(
@@ -347,7 +347,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
       )
     )
 
-    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(schema)
+    val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(schema)
     val metadata = arrowSchema.getFields.asScala.map(_.getMetadata)
 
     metadata.head.get("PARQUET:field_id") shouldBe "100"
@@ -357,7 +357,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
   test(
     "useFieldIdAsName = false (V2 packed-parquet) preserves logical column names"
   ) {
-    import com.zilliz.spark.connector.types.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.SparkSchemaMapper
     import org.apache.spark.sql.types._
 
     val schema = StructType(
@@ -369,7 +369,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
     )
 
     val fieldIds = Map("pk" -> 100L, "vec" -> 101L, "ts" -> 1L)
-    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(
+    val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(
       schema,
       vectorDimensions = Map("vec" -> 4),
       fieldIds = fieldIds,
@@ -387,7 +387,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
   }
 
   test("Milvus vector metadata produces exact internal Arrow types") {
-    import com.zilliz.spark.connector.types.MilvusSchemaUtil
+    import com.zilliz.spark.connector.types.SparkSchemaMapper
         import io.milvus.grpc.schema.{DataType => MilvusDataType}
     import org.apache.arrow.vector.types.pojo.ArrowType
     import org.apache.spark.sql.types._
@@ -451,7 +451,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
       )
     )
 
-    val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(schema)
+    val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(schema)
     val fields =
       arrowSchema.getFields.asScala.map(field => field.getName -> field).toMap
 
@@ -475,7 +475,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
       .getOrCreate()
 
     try {
-      import com.zilliz.spark.connector.types.MilvusSchemaUtil
+      import com.zilliz.spark.connector.types.SparkSchemaMapper
       import org.apache.spark.sql.types._
 
       val schema = StructType(
@@ -485,7 +485,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
         )
       )
 
-      val arrowSchema = MilvusSchemaUtil.convertSparkSchemaToArrow(schema)
+      val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(schema)
 
       arrowSchema.getFields.size() shouldBe 2
 

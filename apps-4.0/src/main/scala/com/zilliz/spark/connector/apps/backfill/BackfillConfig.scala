@@ -269,7 +269,7 @@ case class BackfillConfig(
     options
   }
 
-  /** Get S3 write options as a Map for MilvusLoonWriter
+  /** Get S3 write options as a Map for MilvusV3Writer
     */
   def getS3WriteOptions(
       collectionId: Long,

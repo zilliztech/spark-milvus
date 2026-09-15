@@ -11,7 +11,7 @@ import com.zilliz.milvus.storage.path.StoragePath
 /** Materializes the V2 packed segments a snapshot lists.
   *
   * A V2 segment has no manifest: its column groups come from the snapshot's
-  * Avro plus each parquet footer. That code is `compat.v2packed`, which core
+  * Avro plus each parquet footer. That code is `compat.v2`, which core
   * must not depend on (capability K1), so the catalog is handed the resolver.
   */
 trait V2SegmentResolver {
@@ -78,7 +78,7 @@ final class SnapshotCatalog(
     maxJsonBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
 ) extends Logging {
 
-  /** The snapshot at `location`: a bucket-relative key, or an `s3a://` /
+  /** The snapshot at `location`: a bucket-relative key, or a `s3a://` /
     * `s3://` URI whose bucket must match this catalog's.
     */
   def read(location: String): Snapshot = {

@@ -22,9 +22,9 @@ import com.zilliz.milvus.storage.snapshot.{
 }
 import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.write.{
-  MilvusLoonBatchWrite,
-  MilvusLoonCommitMessage,
-  MilvusLoonWriter
+  MilvusV3BatchWrite,
+  MilvusV3CommitMessage,
+  MilvusV3Writer
 }
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
@@ -612,7 +612,7 @@ object MilvusBackfill {
         }
 
       // Set of segment IDs that are StorageV2 (packed-parquet, no manifest).
-      // V3 segments continue to use the existing MilvusLoonWriter flow.
+      // V3 segments continue to use the existing MilvusV3Writer flow.
       val v2SegmentIdSet: Set[Long] = v2Segments.map(_.segmentId).toSet
 
       // Process each segment
@@ -1159,7 +1159,7 @@ object MilvusBackfill {
 
         // Pre-loaded StorageV2 (non-manifest packed parquet) segments — hand
         // them to the DataSource via SnapshotV2Segments so planner can emit
-        // MilvusPackedV2InputPartitions. Loading itself happened earlier in
+        // MilvusV2InputPartitions. Loading itself happened earlier in
         // `run()` via `loadV2Segments`.
         if (v2Segments.nonEmpty) {
           val segJson = MilvusSnapshotReader.serializeV2Segments(v2Segments)
@@ -1788,7 +1788,7 @@ object MilvusBackfill {
 
     val optionsMap = new CaseInsensitiveStringMap(writeOptions.asJava)
     val batchWrite =
-      new MilvusLoonBatchWrite(targetSchema, MilvusOption(optionsMap))
+      new MilvusV3BatchWrite(targetSchema, MilvusOption(optionsMap))
     val writer = batchWrite
       .createBatchWriterFactory(null)
       .createWriter(0, System.currentTimeMillis())
@@ -1841,7 +1841,7 @@ object MilvusBackfill {
 
       val commitMessage = writer.commit()
       val (manifestPaths, committedVersion) = commitMessage match {
-        case msg: MilvusLoonCommitMessage =>
+        case msg: MilvusV3CommitMessage =>
           (Seq(msg.manifestPath), msg.committedVersion)
         case _ => (Seq.empty[String], -1L)
       }
@@ -1905,7 +1905,7 @@ object MilvusBackfill {
     * int < 100, so "max slot wins" is equivalent to "newer single-field group
     * wins" under the current column-group naming convention. When Milvus's
     * snapshot starts emitting `FieldBinlog.child_fields`, this should be
-    * replaced by the authoritative mapping (see `V2SegmentLoader` line 88-94
+    * replaced by the authoritative mapping (see `FooterV2SegmentResolver` line 88-94
     * for the parquet-footer-based reconciliation that this defends against).
     *
     * Skips dedup entirely when any contributing group has `slotFieldId < 0L`
@@ -1944,7 +1944,7 @@ object MilvusBackfill {
   ]] = {
     if (metadata.manifestList.isEmpty) return Right(Seq.empty)
     try {
-      // Configure a private Hadoop view so V2SegmentLoader can read AVRO and
+      // Configure a private Hadoop view so FooterV2SegmentResolver can read AVRO and
       // parquet footers without mutating the Spark session's shared OSS
       // credentials. The main bucket (not the source bucket) holds these
       // snapshot artifacts.
@@ -1958,11 +1958,11 @@ object MilvusBackfill {
         isSource = false
       )
       hadoopConf.set("fs.oss.impl.disable.cache", "true")
-      com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
+      com.zilliz.milvus.storage.compat.v2.FooterV2SegmentResolver
         .loadV2Segments(
           metadata.manifestList,
           config.s3BucketName,
-          com.zilliz.spark.connector.options.HadoopStorageConfig
+          com.zilliz.spark.connector.options.HadoopStorageKeys
             .objectStore(hadoopConf, config.s3BucketName),
           manifestSchemaVersion = metadata.manifestSchemaVersion,
           applyDeletes = ApplyDeletesToSourceRows,
@@ -2033,7 +2033,7 @@ object MilvusBackfill {
 
   /** StorageV2 write path: writes one parquet per new field under
     * `files/insert_log/{coll}/{part}/{seg}/{newFieldID}/{logID}` via
-    * [[com.zilliz.spark.connector.write.MilvusV2BinlogWriter]]. Backfill always
+    * [[com.zilliz.spark.connector.write.MilvusV2Writer]]. Backfill always
     * emits single-field column groups, so `columnGroupID` in the path equals
     * the new field's ID (milvus convention for 1-field groups).
     */
@@ -2048,7 +2048,7 @@ object MilvusBackfill {
       config: BackfillConfig,
       startTime: Long
   ): Iterator[(SegmentBackfillResult, Option[Throwable])] = {
-    import com.zilliz.spark.connector.write.{MilvusV2BinlogWriter, V2BinlogFile}
+    import com.zilliz.spark.connector.write.{MilvusV2Writer, V2BinlogFile}
 
     // Build per-field mapping in targetSchema order.
     val fieldNames = targetSchema.fieldNames.toSeq
@@ -2086,7 +2086,7 @@ object MilvusBackfill {
       new CaseInsensitiveStringMap(writeOptions.asJava)
     )
 
-    val writer = new MilvusV2BinlogWriter(
+    val writer = new MilvusV2Writer(
       collectionId = collectionID,
       partitionId = partitionID,
       segmentId = segmentID,

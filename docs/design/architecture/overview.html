@@ -252,7 +252,7 @@
         <rect x="588" y="260" width="140" height="88" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/>
         <text x="600" y="278" font-size="12" font-weight="600" fill="currentColor" font-family="ui-monospace,monospace">compat</text>
         <g font-size="10.5" fill="currentColor" opacity=".78" font-family="ui-monospace,monospace">
-          <text x="600" y="298">v2packed</text><text x="600" y="316">offline</text><text x="600" y="334">backup</text>
+          <text x="600" y="298">v2</text><text x="600" y="316">offline</text><text x="600" y="334">backup</text>
         </g>
         <rect x="740" y="260" width="134" height="88" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/>
         <text x="752" y="278" font-size="12" font-weight="600" fill="currentColor" font-family="ui-monospace,monospace">client</text>
@@ -321,7 +321,7 @@
 │   ├── src/main/antlr4/              <span class="c">表达式文法</span>
 │   └── src/main/resources/           <span class="c">段清单的 Avro schema</span>
 ├── <span class="m">compat/</span><span class="lay">第 2 层</span>                      <span class="c">三个非标准入口的适配器</span>
-│   └── .../storage/compat/           <span class="c">v2packed · offline · backup</span>
+│   └── .../storage/compat/           <span class="c">v2 · offline · backup</span>
 ├── <span class="m">client/</span><span class="lay">第 2 层</span>                      <span class="c">Milvus 在线服务的客户端</span>
 │   ├── .../milvus/client/            <span class="c">grpc · api</span>
 │   └── src/main/protobuf/            <span class="c">milvus-proto 子模块的引用</span>
@@ -387,7 +387,7 @@
       <h4>compat 与 client</h4>
       <p class="role">第 2 层的另外两个模块。compat 的三个适配器产出 core 的 Snapshot 或 SegmentReader，由 spark 层在启动时注册进 core 的注册表，core 源码不出现 compat 的包名。</p>
       <dl>
-        <dt>v2packed</dt><dd>Storage V2 packed 段的 SegmentReader <em>K1</em></dd>
+        <dt>v2</dt><dd>Storage V2 packed 段的 SegmentReader <em>K1</em></dd>
         <dt>offline</dt><dd>1.x 离线 option 的段列表转 Snapshot <em>K2</em></dd>
         <dt>backup</dt><dd>milvus-backup 导出目录转 Snapshot <em>K3</em></dd>
         <dt>client.grpc</dt><dd>ScalaPB 生成的 stub，重试拦截器</dd>

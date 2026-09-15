@@ -141,7 +141,7 @@ bucket/files/...                                  → 带桶名不带 scheme</co
 <li><strong>交给 C filesystem 的是 <code>key</code>，不是 <code>bucket/key</code>。</strong>
 <code>FilesystemCache</code> 把底层 filesystem 包在 <code>FileSystemProxy(bucket, fs)</code>
 这个子树里，桶名会自动补上；JVM 侧先拼一遍就出
-<code>a-bucket/a-bucket/files/…</code>，<code>MilvusV2BinlogWriter</code> 的注释记着这个坑。
+<code>a-bucket/a-bucket/files/…</code>，<code>MilvusV2Writer</code> 的注释记着这个坑。
 桶名走 <code>fs.bucket_name</code>，或多桶时走 <code>extfs.&lt;名字&gt;.bucket_name</code>。</li>
 <li><strong>无 scheme 的路径一律当 key。</strong>所以 <code>files/insert_log/…</code> 和
 <code>bucket/files/…</code> 这两种写法在字符串上分不开，<code>parse</code> 必须由调用方告诉它
@@ -232,7 +232,7 @@ connector 两边都不认识云。</p>
 <li><strong>第 3 层一个垫片</strong>，读 <code>spark.hadoop.fs.*</code> 产出 <code>fs.*</code>，
 只为让存量部署不改配置就能跑。它必须写明退出条件和时间点，否则就是
 <a href="../../../AGENTS.md">AGENTS.md</a> 禁止的烟囱。
-已实现为 <code>spark-base</code> 的 <code>HadoopStorageConfig</code>：纯键名翻译，
+已实现为 <code>spark-base</code> 的 <code>HadoopStorageKeys</code>：纯键名翻译，
 按本表映射，<code>cloud_provider</code> 从出现键的命名空间推（s3a→aws、oss→aliyun），
 两个命名空间都在则留空让 C 层校验报错。退出条件是产出配置的一方直接产出 <code>fs.*</code>。</li>
 </ol>
@@ -505,7 +505,7 @@ gRPC CreateSnapshot 拿 s3Location）、快照路径、<code>milvus.snapshot.man
 与 <code>extfs.*</code>，校验必填项。</li>
 <li><strong>删掉写死的开发默认值</strong>，缺一项就报错。生产路径上有两处：
 <code>loon/Properties.scala</code> 里 <code>fs.address</code>、<code>fs.bucket_name</code>
-与两个密钥的缺省值，<code>write/MilvusLoonWriter.scala</code> 的 <code>generateBasePath</code>
+与两个密钥的缺省值，<code>write/MilvusV3Writer.scala</code> 的 <code>generateBasePath</code>
 里桶名缺省 <code>a-bucket</code>——那会把段写到读侧不会去找的路径上。
 这是对外可见的行为变化：今天漏配一项会连上开发用的 MinIO 并在请求时失败，改完是启动即报错。</li>
 </ol>

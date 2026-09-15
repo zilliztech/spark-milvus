@@ -6,7 +6,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.read.plan.InputSpec
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.options.MilvusOption
@@ -30,8 +30,8 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
     )
 
   private def v2(rows: Long): InputPartition =
-    MilvusPackedV2InputPartition(
-      InputSpec(
+    MilvusV2InputPartition(
+      SegmentReadTask(
         segmentId = rows,
         partitionId = 0L,
         layout = SegmentLayout.ColumnGroups(
@@ -73,8 +73,8 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
   // Spark would broadcast a table that is not small.
   test("one partition with an unknown count makes both statistics unknown") {
     val schema = StructType(Seq(StructField("id", LongType)))
-    val v3 = MilvusStorageV3InputPartition(
-      InputSpec(
+    val v3 = MilvusV3InputPartition(
+      SegmentReadTask(
         segmentId = 1L,
         partitionId = 0L,
         layout = SegmentLayout.Manifest("files/seg"),

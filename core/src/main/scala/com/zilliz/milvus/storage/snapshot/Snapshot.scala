@@ -7,7 +7,7 @@ import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema, FieldSchema}
   * Every read entry point produces one of these and nothing downstream looks
   * at the entry point's own format again. It stays on the driver; the
   * per-partition projection that reaches executors is
-  * `core.read.plan.InputSpec`.
+  * `core.read.plan.SegmentReadTask`.
   *
   * Fields a source cannot supply are `Option` or carry an explicit state, so a
   * missing value is visible to the planner instead of defaulting to "none".
@@ -23,7 +23,7 @@ final case class Snapshot(
     origin: SnapshotOrigin
 ) {
 
-  /** The schema as the bytes every `InputSpec` carries. */
+  /** The schema as the bytes every `SegmentReadTask` carries. */
   def schemaBytes: Array[Byte] = schema.toByteArray
 
   def primaryKeyField: Option[FieldSchema] = schema.fields.find(_.isPrimaryKey)

@@ -5,7 +5,7 @@ import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
-import com.zilliz.milvus.storage.read.plan.InputSpec
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -62,7 +62,7 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     new CaseInsensitiveStringMap(new java.util.HashMap[String, String]())
   )
 
-  private def spec(layout: SegmentLayout) = InputSpec(
+  private def task(layout: SegmentLayout) = SegmentReadTask(
     segmentId = 30L,
     partitionId = 20L,
     layout = layout,
@@ -73,16 +73,16 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
   private def v3(
       topK: Option[Int] = None,
       queryVector: Option[Array[Float]] = None
-  ) = MilvusStorageV3InputPartition(
-    spec(SegmentLayout.Manifest("files/seg")),
+  ) = MilvusV3InputPartition(
+    task(SegmentLayout.Manifest("files/seg")),
     "20",
     options,
     topK = topK,
     queryVector = queryVector
   )
 
-  private def v2() = MilvusPackedV2InputPartition(
-    spec(
+  private def v2() = MilvusV2InputPartition(
+    task(
       SegmentLayout.ColumnGroups(
         Seq(V2ColumnGroup(Seq(100L), Seq("a.parquet"), Seq(10L)))
       )

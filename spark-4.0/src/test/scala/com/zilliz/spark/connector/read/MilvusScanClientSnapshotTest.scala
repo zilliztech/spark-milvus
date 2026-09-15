@@ -19,8 +19,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.client.api.MilvusCollectionInfo
 import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
-import com.zilliz.milvus.storage.delete.MilvusDeletePlan
-import com.zilliz.milvus.storage.read.plan.{DeleteSource, InputSpec}
+import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.snapshot.{
@@ -297,12 +297,12 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
 
     assert(partitions.length == 1)
-    val spec = partitions.head
+    val task = partitions.head
       .asInstanceOf[
-        com.zilliz.spark.connector.read.MilvusPackedV2InputPartition
+        com.zilliz.spark.connector.read.MilvusV2InputPartition
       ]
-      .spec
-    assert(spec.properties("fs.bucket_name") == "backup-bucket")
+      .task
+    assert(task.properties("fs.bucket_name") == "backup-bucket")
   }
 
   test("backup createReaderFactory is self-contained without prior planning") {
@@ -1034,14 +1034,14 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val partitions = scanWithOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 2)
-    val first = partitions(0).asInstanceOf[MilvusStorageV3InputPartition]
-    val second = partitions(1).asInstanceOf[MilvusStorageV3InputPartition]
+    val first = partitions(0).asInstanceOf[MilvusV3InputPartition]
+    val second = partitions(1).asInstanceOf[MilvusV3InputPartition]
     assert(first.partitionName == "20")
-    assert(first.spec.segmentId == 30L)
-    assert(first.spec.readVersionOrLatest == 7L)
+    assert(first.task.segmentId == 30L)
+    assert(first.task.readVersionOrLatest == 7L)
     assert(second.partitionName == "21")
-    assert(second.spec.segmentId == 31L)
-    assert(second.spec.readVersionOrLatest == 8L)
+    assert(second.task.segmentId == 31L)
+    assert(second.task.readVersionOrLatest == 8L)
   }
 
   test(
@@ -1062,15 +1062,15 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val partitions = scanWithOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 1)
-    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
+    val partition = partitions.head.asInstanceOf[MilvusV3InputPartition]
     assert(partition.partitionName == "20")
-    assert(partition.spec.segmentId == 30L)
-    assert(partition.spec.readVersionOrLatest == 7L)
+    assert(partition.task.segmentId == 30L)
+    assert(partition.task.readVersionOrLatest == 7L)
   }
 
   test("snapshot planner attaches StorageV3 manifest delete plans") {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
-    val deletePlan = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
+    val deletePlan = DeletePlan.fromLongPks(Map(7L -> 100L))
     val partitions = SnapshotPartitions.build(
       scan.ctx,
       snapshotOf(v3 = Seq(
@@ -1082,10 +1082,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       v3DeletePlans = Map(30L -> deletePlan)
     )
 
-    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
-    assert(partition.spec.segmentId == 30L)
-    assert(partition.spec.deletePlan == deletePlan)
-    assert(partition.spec.appliesDeletes)
+    val partition = partitions.head.asInstanceOf[MilvusV3InputPartition]
+    assert(partition.task.segmentId == 30L)
+    assert(partition.task.deletePlan == deletePlan)
+    assert(partition.task.appliesDeletes)
   }
 
   test(
@@ -1103,16 +1103,16 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       v3ReadVersions = Map(30L -> 11L)
     )
 
-    val partition = partitions.head.asInstanceOf[MilvusStorageV3InputPartition]
-    assert(partition.spec.readVersionOrLatest == 11L)
+    val partition = partitions.head.asInstanceOf[MilvusV3InputPartition]
+    assert(partition.task.readVersionOrLatest == 11L)
   }
 
   test("snapshot planner applies inherited L0 delete plans to StorageV3") {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
-    val v3Plan = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
+    val v3Plan = DeletePlan.fromLongPks(Map(7L -> 100L))
     val inheritedPlans = Map(
-      -1L -> MilvusDeletePlan.fromLongPks(Map(8L -> 120L)),
-      20L -> MilvusDeletePlan.fromLongPks(Map(9L -> 140L))
+      -1L -> DeletePlan.fromLongPks(Map(8L -> 120L)),
+      20L -> DeletePlan.fromLongPks(Map(9L -> 140L))
     )
 
     val partitions = SnapshotPartitions.build(
@@ -1131,13 +1131,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       inheritedDeletePlansByPartition = inheritedPlans
     )
 
-    val first = partitions(0).asInstanceOf[MilvusStorageV3InputPartition]
-    val second = partitions(1).asInstanceOf[MilvusStorageV3InputPartition]
-    assert(first.spec.deletePlan.containsLongPk(7L, 50L))
-    assert(first.spec.deletePlan.containsLongPk(8L, 100L))
-    assert(first.spec.deletePlan.containsLongPk(9L, 130L))
-    assert(second.spec.deletePlan.containsLongPk(8L, 100L))
-    assert(!second.spec.deletePlan.containsLongPk(9L, 130L))
+    val first = partitions(0).asInstanceOf[MilvusV3InputPartition]
+    val second = partitions(1).asInstanceOf[MilvusV3InputPartition]
+    assert(first.task.deletePlan.containsLongPk(7L, 50L))
+    assert(first.task.deletePlan.containsLongPk(8L, 100L))
+    assert(first.task.deletePlan.containsLongPk(9L, 130L))
+    assert(second.task.deletePlan.containsLongPk(8L, 100L))
+    assert(!second.task.deletePlan.containsLongPk(9L, 130L))
   }
 
   test("snapshot planner accepts V2-only snapshot segments") {
@@ -1164,18 +1164,18 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val partitions = scanWithOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 1)
-    val partition = partitions.head.asInstanceOf[MilvusPackedV2InputPartition]
-    assert(partition.spec.segmentId == 30L)
-    assert(partition.spec.partitionId == 20L)
+    val partition = partitions.head.asInstanceOf[MilvusV2InputPartition]
+    assert(partition.task.segmentId == 30L)
+    assert(partition.task.partitionId == 20L)
   }
 
   test(
     "snapshot planner keeps inherited delete plan reference out of per-segment plan"
   ) {
-    val inherited = MilvusDeletePlan.fromLongPks(Map(7L -> 100L))
-    val segmentPlan = MilvusDeletePlan.fromLongPks(Map(9L -> 200L))
-    val partition = MilvusPackedV2InputPartition(
-      InputSpec(
+    val inherited = DeletePlan.fromLongPks(Map(7L -> 100L))
+    val segmentPlan = DeletePlan.fromLongPks(Map(9L -> 200L))
+    val partition = MilvusV2InputPartition(
+      SegmentReadTask(
         segmentId = 30L,
         partitionId = 20L,
         layout = SegmentLayout.ColumnGroups(
@@ -1197,7 +1197,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       inheritedDeletePlanPartitionId = Some(20L)
     )
 
-    assert(partition.spec.deletePlan == segmentPlan)
+    assert(partition.task.deletePlan == segmentPlan)
     assert(partition.inheritedDeletePlanPartitionId.contains(20L))
     assert(inherited.containsLongPk(7L, 50L))
   }
@@ -1207,10 +1207,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   ) {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
     val inheritedPlans = Map(
-      -1L -> MilvusDeletePlan.fromLongPks(Map(7L -> 100L)),
-      20L -> MilvusDeletePlan.fromLongPks(Map(8L -> 120L))
+      -1L -> DeletePlan.fromLongPks(Map(7L -> 100L)),
+      20L -> DeletePlan.fromLongPks(Map(8L -> 120L))
     )
-    val ownPlan = MilvusDeletePlan.fromLongPks(Map(9L -> 140L))
+    val ownPlan = DeletePlan.fromLongPks(Map(9L -> 140L))
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
@@ -1246,11 +1246,11 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       inheritedDeletePlansByPartition = inheritedPlans
     )
 
-    val first = partitions(0).asInstanceOf[MilvusPackedV2InputPartition]
-    val second = partitions(1).asInstanceOf[MilvusPackedV2InputPartition]
-    assert(first.spec.deletePlan == ownPlan)
+    val first = partitions(0).asInstanceOf[MilvusV2InputPartition]
+    val second = partitions(1).asInstanceOf[MilvusV2InputPartition]
+    assert(first.task.deletePlan == ownPlan)
     assert(first.inheritedDeletePlanPartitionId.contains(20L))
-    assert(second.spec.deletePlan == MilvusDeletePlan.empty)
+    assert(second.task.deletePlan == DeletePlan.empty)
     assert(second.inheritedDeletePlanPartitionId.contains(21L))
   }
 
@@ -1259,10 +1259,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   ) {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
     val inheritedPlans = Map(
-      -1L -> MilvusDeletePlan.fromLongPks(Map(7L -> 100L)),
-      20L -> MilvusDeletePlan.fromLongPks(Map(8L -> 120L))
+      -1L -> DeletePlan.fromLongPks(Map(7L -> 100L)),
+      20L -> DeletePlan.fromLongPks(Map(8L -> 120L))
     )
-    val ownPlan = MilvusDeletePlan.fromLongPks(Map(9L -> 140L))
+    val ownPlan = DeletePlan.fromLongPks(Map(9L -> 140L))
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
@@ -1299,15 +1299,15 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       inlineInheritedDeletePlans = true
     )
 
-    val first = partitions(0).asInstanceOf[MilvusPackedV2InputPartition]
-    val second = partitions(1).asInstanceOf[MilvusPackedV2InputPartition]
+    val first = partitions(0).asInstanceOf[MilvusV2InputPartition]
+    val second = partitions(1).asInstanceOf[MilvusV2InputPartition]
     assert(first.inheritedDeletePlanPartitionId.isEmpty)
-    assert(first.spec.deletePlan.containsLongPk(7L, 50L))
-    assert(first.spec.deletePlan.containsLongPk(8L, 100L))
-    assert(first.spec.deletePlan.containsLongPk(9L, 130L))
+    assert(first.task.deletePlan.containsLongPk(7L, 50L))
+    assert(first.task.deletePlan.containsLongPk(8L, 100L))
+    assert(first.task.deletePlan.containsLongPk(9L, 130L))
     assert(second.inheritedDeletePlanPartitionId.isEmpty)
-    assert(second.spec.deletePlan.containsLongPk(7L, 50L))
-    assert(!second.spec.deletePlan.containsLongPk(8L, 100L))
+    assert(second.task.deletePlan.containsLongPk(7L, 50L))
+    assert(!second.task.deletePlan.containsLongPk(8L, 100L))
   }
 
   test("snapshot planner dedups V2 column groups by slot before planning") {
@@ -1344,8 +1344,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       inlineInheritedDeletePlans = true
     )
 
-    val partition = partitions.head.asInstanceOf[MilvusPackedV2InputPartition]
-    val groups = partition.spec.layout match {
+    val partition = partitions.head.asInstanceOf[MilvusV2InputPartition]
+    val groups = partition.task.layout match {
       case SegmentLayout.ColumnGroups(gs) => gs
       case other => fail(s"expected a column group layout, got $other")
     }

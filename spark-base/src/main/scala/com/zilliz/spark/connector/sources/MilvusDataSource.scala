@@ -18,7 +18,7 @@ import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import com.zilliz.spark.connector.table.MilvusTable
 import io.milvus.grpc.schema.CollectionSchema
 import com.zilliz.spark.connector.table.SnapshotSparkSchema
-import com.zilliz.spark.connector.types.DataTypeUtil
+import com.zilliz.spark.connector.types.SparkTypes
 
 case class MilvusDataSource() extends TableProvider with DataSourceRegister {
   override def getTable(
@@ -131,9 +131,9 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
       schema.fields.map(field =>
         StructField(
           field.name,
-          DataTypeUtil.toDataType(field, rawVectors),
+          SparkTypes.toDataType(field, rawVectors),
           field.nullable,
-          DataTypeUtil.metadata(field)
+          SparkTypes.metadata(field)
         )
       )
     )

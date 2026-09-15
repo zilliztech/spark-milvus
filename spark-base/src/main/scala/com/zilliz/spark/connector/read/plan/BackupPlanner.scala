@@ -3,7 +3,7 @@ package com.zilliz.spark.connector.read.plan
 import org.apache.spark.sql.connector.read.InputPartition
 
 import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
-import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
+import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
 import com.zilliz.milvus.storage.snapshot.{
   Snapshot,
   SnapshotCatalog,
@@ -78,10 +78,10 @@ private[read] final class BackupPlanner(
     // semantics without downloading and PK-decoding the entire L0 delete set
     // twice on the driver.
     val inheritedDeletePlansByPartition =
-      if (!MilvusOption.readApplyDeletes(options)) Map.empty[Long, MilvusDeletePlan]
+      if (!MilvusOption.readApplyDeletes(options)) Map.empty[Long, DeletePlan]
       else
         snapshot.deleteOnlySegments
-          .map(seg => seg.partitionId -> MilvusDeletePlan.empty)
+          .map(seg => seg.partitionId -> DeletePlan.empty)
           .toMap
     SnapshotPartitions.build(
       ctx,
@@ -217,7 +217,7 @@ private[read] final class BackupPlanner(
     * re-read also fails: otherwise a partition-scoped marker would silently
     * resolve to an empty plan and deleted rows would come back as live.
     */
-  def inheritedDeletePlans(): Map[Long, MilvusDeletePlan] = {
+  def inheritedDeletePlans(): Map[Long, DeletePlan] = {
     val backupDir = MilvusOption.backupDir(options).getOrElse {
       return Map.empty
     }
@@ -248,7 +248,7 @@ private[read] final class BackupPlanner(
     if (deleteOnlySegments.isEmpty) Map.empty
     else {
       val bucket = StorageOptions.snapshotBucket(backupDir).getOrElse("")
-      MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+      DeltaLogReader.loadPartitionScopedDeletePlans(
         deleteOnlySegments,
         pkField,
         bucket,

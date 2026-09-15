@@ -4,7 +4,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.spark.connector.options.{StorageOptions, VectorSearchConfig}
+import com.zilliz.spark.connector.options.{StorageOptions, VectorSearch}
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** What every planner needs from the scan: the options and the `MilvusOption`
@@ -14,8 +14,8 @@ private[read] final class ScanContext(
     val options: CaseInsensitiveStringMap,
     val milvusOption: MilvusOption
 ) {
-  val vectorSearchConfig: Option[VectorSearchConfig] =
-    milvusOption.vectorSearchConfig
+  val vectorSearch: Option[VectorSearch] =
+    milvusOption.vectorSearch
 
   /** Hadoop configuration for objects under `path`, from the connector's `fs.*`
     * options plus per-bucket S3A settings.
@@ -32,6 +32,6 @@ private[read] abstract class PartitionPlanner(protected val ctx: ScanContext)
     extends Logging {
   protected def options: CaseInsensitiveStringMap = ctx.options
   protected def milvusOption: MilvusOption = ctx.milvusOption
-  protected def vectorSearchConfig: Option[VectorSearchConfig] =
-    ctx.vectorSearchConfig
+  protected def vectorSearch: Option[VectorSearch] =
+    ctx.vectorSearch
 }

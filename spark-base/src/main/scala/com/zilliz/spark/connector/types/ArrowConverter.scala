@@ -6,7 +6,6 @@ import java.nio.charset.{
   CodingErrorAction,
   StandardCharsets
 }
-import scala.collection.JavaConverters._
 
 import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex.{ListVector, MapVector, StructVector}

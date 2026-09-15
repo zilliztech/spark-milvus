@@ -1090,7 +1090,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     ) shouldBe 4L
 
     import scala.collection.JavaConverters._
-    val arrowFields = com.zilliz.spark.connector.types.MilvusSchemaUtil
+    val arrowFields = com.zilliz.spark.connector.types.SparkSchemaMapper
       .convertSparkSchemaToArrow(sparkSchema)
       .getFields
       .asScala

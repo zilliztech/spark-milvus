@@ -15,7 +15,7 @@ import org.apache.spark.unsafe.types.UTF8String
 /** Presents an Arrow `VarBinary` column as the string Spark's schema says it
   * is.
   *
-  * A Milvus JSON field is declared `StringType` by `DataTypeUtil` and stored as
+  * A Milvus JSON field is declared `StringType` by `SparkTypes` and stored as
   * Arrow `Binary` by `ArrowTypes`, so the declared type and the physical type
   * differ. Spark's own `ArrowColumnVector` picks its accessor from the physical
   * type and its binary accessor answers `getBinary` only, so a `StringType`

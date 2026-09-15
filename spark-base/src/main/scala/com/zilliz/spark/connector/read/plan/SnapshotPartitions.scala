@@ -4,13 +4,13 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.read.InputPartition
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
-import com.zilliz.milvus.storage.read.plan.{DeleteSource, InputSpec}
+import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
+import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, Snapshot}
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.read.{
-  MilvusPackedV2InputPartition,
-  MilvusStorageV3InputPartition
+  MilvusV2InputPartition,
+  MilvusV3InputPartition
 }
 
 /** The common tail of every planning entry point: a [[Snapshot]] plus its
@@ -24,10 +24,10 @@ object SnapshotPartitions extends Logging {
   private[read] def build(
       ctx: ScanContext,
       snapshot: Snapshot,
-      v3DeletePlans: Map[Long, MilvusDeletePlan] = Map.empty,
+      v3DeletePlans: Map[Long, DeletePlan] = Map.empty,
       v3ReadVersions: Map[Long, Long] = Map.empty,
-      v2DeletePlans: Map[Long, MilvusDeletePlan] = Map.empty,
-      inheritedDeletePlansByPartition: Map[Long, MilvusDeletePlan] = Map.empty,
+      v2DeletePlans: Map[Long, DeletePlan] = Map.empty,
+      inheritedDeletePlansByPartition: Map[Long, DeletePlan] = Map.empty,
       inlineInheritedDeletePlans: Boolean = false,
       forceCanonicalBucket: Option[String] = None
   ): Array[InputPartition] = {
@@ -56,7 +56,7 @@ object SnapshotPartitions extends Logging {
       StorageProperties.from(canonicalMilvusOption.options)
     val applyDeletes = MilvusOption.readApplyDeletes(ctx.options)
     val schemaBytes = snapshot.schemaBytes
-    def deleteSourceFor(plan: MilvusDeletePlan): DeleteSource =
+    def deleteSourceFor(plan: DeletePlan): DeleteSource =
       if (!applyDeletes || plan.isEmpty) DeleteSource.None
       else DeleteSource.Materialized(plan)
 
@@ -72,16 +72,16 @@ object SnapshotPartitions extends Logging {
       logInfo(
         s"Creating partition with manifestPath=$basePath, partitionID=${seg.partitionId}, segmentID=${seg.id}, readVersion=$readVersion"
       )
-      val inheritedDeletePlan = MilvusDeltaLogReader.effectiveInheritedDeletePlan(
+      val inheritedDeletePlan = DeltaLogReader.effectiveInheritedDeletePlan(
         seg.partitionId,
         inheritedDeletePlansByPartition
       )
       val ownDeletePlan =
-        v3DeletePlans.getOrElse(seg.id, MilvusDeletePlan.empty)
+        v3DeletePlans.getOrElse(seg.id, DeletePlan.empty)
       val deletePlan =
-        MilvusDeletePlan.union(inheritedDeletePlan, ownDeletePlan)
-      MilvusStorageV3InputPartition(
-        InputSpec(
+        DeletePlan.union(inheritedDeletePlan, ownDeletePlan)
+      MilvusV3InputPartition(
+        SegmentReadTask(
           segmentId = seg.id,
           partitionId = seg.partitionId,
           layout = SegmentLayout.Manifest(basePath, readVersion),
@@ -91,10 +91,10 @@ object SnapshotPartitions extends Logging {
         ),
         seg.partitionId.toString,
         milvusOption,
-        ctx.vectorSearchConfig.map(_.topK),
-        ctx.vectorSearchConfig.map(_.queryVector),
-        ctx.vectorSearchConfig.map(_.metricType),
-        ctx.vectorSearchConfig.map(_.vectorColumn)
+        ctx.vectorSearch.map(_.topK),
+        ctx.vectorSearch.map(_.queryVector),
+        ctx.vectorSearch.map(_.metricType),
+        ctx.vectorSearch.map(_.vectorColumn)
       ): InputPartition
     }
 
@@ -104,7 +104,7 @@ object SnapshotPartitions extends Logging {
       )
     }
 
-    val packedV2Partitions = snapshot.v2Segments.filter(_.hasData).map { seg =>
+    val v2Partitions = snapshot.v2Segments.filter(_.hasData).map { seg =>
       val groups = seg.layout match {
         case SegmentLayout.ColumnGroups(gs) => gs
         case SegmentLayout.Manifest(_, _) =>
@@ -113,18 +113,18 @@ object SnapshotPartitions extends Logging {
           )
       }
       val ownDeletePlan =
-        v2DeletePlans.getOrElse(seg.id, MilvusDeletePlan.empty)
+        v2DeletePlans.getOrElse(seg.id, DeletePlan.empty)
       val inheritedDeletePlan =
         if (inlineInheritedDeletePlans)
-          MilvusDeltaLogReader.effectiveInheritedDeletePlan(
+          DeltaLogReader.effectiveInheritedDeletePlan(
             seg.partitionId,
             inheritedDeletePlansByPartition
           )
-        else MilvusDeletePlan.empty
+        else DeletePlan.empty
       val deletePlan =
-        MilvusDeletePlan.union(inheritedDeletePlan, ownDeletePlan)
-      MilvusPackedV2InputPartition(
-        InputSpec(
+        DeletePlan.union(inheritedDeletePlan, ownDeletePlan)
+      MilvusV2InputPartition(
+        SegmentReadTask(
           segmentId = seg.id,
           partitionId = seg.partitionId,
           layout = SegmentLayout.ColumnGroups(groups),
@@ -136,7 +136,7 @@ object SnapshotPartitions extends Logging {
         inheritedDeletePlanPartitionId =
           if (inlineInheritedDeletePlans) None
           else
-            MilvusDeltaLogReader.inheritedDeletePlanPartitionMarker(
+            DeltaLogReader.inheritedDeletePlanPartitionMarker(
               seg.partitionId,
               inheritedDeletePlansByPartition
             )
@@ -149,12 +149,12 @@ object SnapshotPartitions extends Logging {
         s"Skipped $skippedDeleteOnlySegments StorageV2 delete-only segment(s) during snapshot partition planning"
       )
     }
-    if (packedV2Partitions.nonEmpty) {
+    if (v2Partitions.nonEmpty) {
       logInfo(
-        s"Created ${packedV2Partitions.size} packed-V2 partition(s) from snapshot metadata"
+        s"Created ${v2Partitions.size} V2 partition(s) from snapshot metadata"
       )
     }
 
-    (v3Partitions ++ packedV2Partitions).toArray
+    (v3Partitions ++ v2Partitions).toArray
   }
 }

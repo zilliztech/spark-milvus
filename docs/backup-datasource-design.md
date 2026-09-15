@@ -27,7 +27,7 @@ required.
 - Output: a Spark DataFrame supporting column pruning, `milvus.extra.columns`
   (`partition`, `$segment_id`, `$row_offset`), and the same delete semantics as
   snapshot reads (`milvus.read.apply.deletes`).
-- Reuse the existing StorageV2 packed read path (`MilvusPackedV2PartitionReader`
+- Reuse the existing StorageV2 packed read path (`MilvusV2PartitionReader`
   + the milvus-storage JNI reader) unchanged.
 - **No changes to milvus-backup**: existing binlog-format exports work as-is.
   One caveat: a dynamic collection (`enable_dynamic_field=true`) requires the
@@ -61,9 +61,9 @@ backup-side changes and works on any existing binlog-format export.
 | Full metadata lives in `meta/full_meta.json` (schema + partitions + segments incl. L0) | `milvus-backup/internal/meta/meta.go`, `meta_builder.go` |
 | `SegmentBackupInfo` carries id / `num_of_rows` / `storage_version` / `group_id` / `is_l0` / `binlogs` / `deltalogs` | `milvus-backup/core/proto/backup.proto` |
 | `Binlog` records only `log_path/log_size/log_id`; `entries_num` exists but is deprecated and unset | `backup.proto`; `coll_dml_task.go` |
-| Packed read requires exact `fileRowCounts` | `MilvusPackedV2PartitionReader.scala`; `v2_column_groups_builder.h` |
-| Real field IDs are recoverable from each parquet file's own schema (`PARQUET:field_id`) | `MilvusParquetFooterReader.readFieldIdsFromSchema` |
-| Delta-log decoding uses only `logPath`; `entriesNum` is unused | `MilvusDeltaLogReader.scala` |
+| Packed read requires exact `fileRowCounts` | `MilvusV2PartitionReader.scala`; `v2_column_groups_builder.h` |
+| Real field IDs are recoverable from each parquet file's own schema (`PARQUET:field_id`) | `ParquetFooterReader.readFieldIdsFromSchema` |
+| Delta-log decoding uses only `logPath`; `entriesNum` is unused | `DeltaLogReader.scala` |
 | L0 (delete-only) segments have no column groups; they feed partition-scoped inherited delete plans | `BackupPlanner.scala` |
 
 ## 3. Overall Design
@@ -79,9 +79,9 @@ MilvusScan.computeInputPartitions ──> BackupPlanner.plan()
                            (schemaBytes, Seq[V2SegmentInfo])
                                               │   reuse
                                               ▼
-                    SnapshotPartitions.build() → MilvusPackedV2InputPartition[]
+                    SnapshotPartitions.build() → MilvusV2InputPartition[]
                                               │
-              createReaderFactory() → MilvusPackedV2PartitionReader (unchanged)
+              createReaderFactory() → MilvusV2PartitionReader (unchanged)
 ```
 
 Branch precedence: snapshot mode > backup mode > client mode.
@@ -96,7 +96,7 @@ Two gaps versus a Milvus snapshot are closed in `BackupMetaReader`:
 2. **Slot → real field ID mapping** — the AVRO segment-info is not copied by
    the backup, so real field IDs are recovered from the **head file** of each
    column group via `readFieldIdsAndRowCount` (all files in a group share the
-   schema, matching `V2SegmentLoader`).
+   schema, matching `FooterV2SegmentResolver`).
 
 Path resolution: the `log_path` values in `full_meta.json` are the **original
 Milvus source keys** — milvus-backup copies each binlog into a separately
@@ -176,7 +176,7 @@ Behavior:
   re-serialized nor shipped to executors); a direct scan falls back to a fresh
   read.
 
-### 4.3 `src/main/scala/read/MilvusParquetFooterReader.scala`
+### 4.3 `src/main/scala/read/ParquetFooterReader.scala`
 
 - New `readFieldIdsAndRowCount(path, hadoopConf)` — field IDs + summed row-group
   row count from a single footer open (a `HEAD` + a single tail `GET`), the only
@@ -351,7 +351,7 @@ spark.read
   schema round-trip, column-group / row-count recovery against local parquet
   files written with parquet-mr (carrying `PARQUET:field_id`), L0 skipping with
   `applyDeletes = false`, StorageV1/V3 branches, and snapshot-format rejection.
-- `MilvusParquetFooterReaderTest` — `readFieldIdsAndRowCount` recovers field IDs
+- `ParquetFooterReaderTest` — `readFieldIdsAndRowCount` recovers field IDs
   and sums multiple row groups in one footer open.
 - `MilvusOptionTest` — `isBackupMode` and snapshot/backup mutual exclusion.
 - End-to-end: Milvus 2.6 → `milvus-backup create` → `spark.read` with

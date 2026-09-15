@@ -3,8 +3,8 @@ package com.zilliz.spark.connector.read.plan
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
 
-import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
-import com.zilliz.milvus.storage.manifest.MilvusStorageV3ManifestReader
+import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
+import com.zilliz.milvus.storage.manifest.V3ManifestReader
 import com.zilliz.milvus.storage.snapshot.{
   DeleteFiles,
   Segment,
@@ -25,7 +25,7 @@ import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 object DeletePlanning extends Logging {
 
   final case class V3DeletePlanning(
-      deletePlans: Map[Long, MilvusDeletePlan],
+      deletePlans: Map[Long, DeletePlan],
       readVersions: Map[Long, Long]
   )
 
@@ -48,7 +48,7 @@ object DeletePlanning extends Logging {
       snapshotBucket: Option[String],
       hadoopConf: Configuration,
       errorContext: String
-  ): Map[Long, MilvusDeletePlan] = {
+  ): Map[Long, DeletePlan] = {
     val applyDeletes = MilvusOption.readApplyDeletes(ctx.options)
     val dataSegments = snapshot.v2Segments.filter(s =>
       s.hasData && s.deletes.isInstanceOf[DeleteFiles.Listed]
@@ -58,7 +58,7 @@ object DeletePlanning extends Logging {
       val pkField = primaryKey(snapshot)
       dataSegments.map { seg =>
         val files = seg.deletes.asInstanceOf[DeleteFiles.Listed].files
-        MilvusDeltaLogReader.loadDeletePlan(
+        DeltaLogReader.loadDeletePlan(
           files,
           pkField,
           snapshotBucket.getOrElse(""),
@@ -105,7 +105,7 @@ object DeletePlanning extends Logging {
         val readVersion: Long =
           if (requestedReadVersion > 0L) requestedReadVersion
           else
-            MilvusStorageV3ManifestReader.latestManifestVersion(
+            V3ManifestReader.latestManifestVersion(
               basePath,
               snapshotBucket.getOrElse(""),
               store(ctx, hadoopConf, snapshotBucket)
@@ -119,7 +119,7 @@ object DeletePlanning extends Logging {
             }
         if (readVersion <= 0L) None
         else {
-          val deltaLogs = MilvusStorageV3ManifestReader.loadDeltaLogs(
+          val deltaLogs = V3ManifestReader.loadDeltaLogs(
             basePath,
             readVersion,
             snapshotBucket.getOrElse(""),
@@ -132,10 +132,10 @@ object DeletePlanning extends Logging {
                 err
               )
           }
-          val deletePlan: Option[MilvusDeletePlan] =
+          val deletePlan: Option[DeletePlan] =
             if (deltaLogs.isEmpty) None
             else
-              MilvusDeltaLogReader.loadDeletePlan(
+              DeltaLogReader.loadDeletePlan(
                 deltaLogs,
                 pkField.get,
                 snapshotBucket.getOrElse(""),
@@ -171,12 +171,12 @@ object DeletePlanning extends Logging {
       snapshotBucket: Option[String],
       hadoopConf: Configuration,
       errorContext: String
-  ): Map[Long, MilvusDeletePlan] = {
+  ): Map[Long, DeletePlan] = {
     val applyDeletes = MilvusOption.readApplyDeletes(ctx.options)
     val deleteOnly = snapshot.deleteOnlySegments
     if (!applyDeletes || deleteOnly.isEmpty) Map.empty
     else {
-      MilvusDeltaLogReader.loadPartitionScopedDeletePlans(
+      DeltaLogReader.loadPartitionScopedDeletePlans(
         deleteOnly.map(asV2Info),
         primaryKey(snapshot),
         snapshotBucket.getOrElse(""),

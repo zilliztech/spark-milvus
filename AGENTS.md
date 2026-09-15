@@ -55,11 +55,14 @@ Not written: `expr`,
 core. Their `package.scala` files exist and state what belongs there.
 
 Layer 3 is split by package: `sources` holds only the `format("milvus")`
-entry point, `table` the table, `scan` the scan builder, the scan, the four
-planning entry points and the partition builder, `options` the option parsing
-and the driver's storage access, `types` the type mapping. The planners still
+entry point, `table` the table, `read` the scan builder, the scan and the
+executor-side readers, `read.plan` the three planning entry points and the
+partition builder, `write` the two writers, `options` the option parsing and
+the driver's storage access, `types` the type mapping. The planners still
 hold the 1.x planning logic; moving it into `core.read.plan` is the next step.
-`catalog` and `expr` are empty.
+`catalog` and `expr` are empty. Names follow the Names section of
+[docs/writing.md](docs/writing.md): the two storage lines are `V2` and `V3`
+everywhere, after the snapshot's `storage_version`.
 
 Layer 1 is written and in use: `native-storage` wraps the `loon_*` entry points
 for both reading and writing and loads its own libraries. The upstream
@@ -101,7 +104,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How are object storage credentials handled? | [docs/design/architecture/storage-auth.html](docs/design/architecture/storage-auth.html) for the mechanism, the rules and the measured facts; apply the skill [.agents/skills/spark-milvus-storage-auth/SKILL.md](.agents/skills/spark-milvus-storage-auth/SKILL.md) |
 | How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership. Read and write share it |
 | How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four planning entry points, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
-| What is a Snapshot, and how do the four read entry points become one? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html) — `Snapshot` and `Segment`, the three delete states, what each source cannot supply, `SnapshotCatalog`, the boundary to `InputSpec`. Draft under review |
+| What is a Snapshot, and how do the four read entry points become one? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html) — `Snapshot` and `Segment`, the three delete states, what each source cannot supply, `SnapshotCatalog`, the boundary to `SegmentReadTask`. Draft under review |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
 | Illustrated version of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) |
 | What options does a user pass? | [docs/reference-en.md](docs/reference-en.md), [docs/reference-cn.md](docs/reference-cn.md) |

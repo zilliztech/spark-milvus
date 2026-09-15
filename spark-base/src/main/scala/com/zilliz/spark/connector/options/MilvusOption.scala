@@ -10,7 +10,7 @@ import com.zilliz.milvus.client.api.MilvusConnectionParams
 
 /** Vector search configuration for Milvus Storage V2
   */
-case class VectorSearchConfig(
+case class VectorSearch(
     queryVector: Array[Float],
     topK: Int,
     metricType: String,
@@ -38,7 +38,7 @@ case class MilvusOption(
     fieldIDs: String = "",
     extraColumns: Seq[String] = Seq.empty,
     options: Map[String, String] = Map.empty,
-    vectorSearchConfig: Option[VectorSearchConfig] = None
+    vectorSearch: Option[VectorSearch] = None
 ) {
 
   /** Just the fields needed to connect to Milvus. The client does not know
@@ -175,7 +175,7 @@ object MilvusOption {
   // StorageV2 (segment-info storage_version = 2, non-manifest packed parquet).
   // Populated by backfill after decoding the per-segment AVROs + parquet
   // footers; consumed by MilvusDataSource's snapshot planner to create
-  // MilvusPackedV2InputPartition instances.
+  // MilvusV2InputPartition instances.
   val SnapshotV2Segments = "milvus.snapshot.v2.segments"
 
   /** A snapshot JSON in the snapshot directory, as an `s3a://` URI or a key
@@ -449,7 +449,7 @@ object MilvusOption {
     val optionsMap = options.asScala.toMap
 
     // Parse vector search configuration
-    val vectorSearchConfig = parseVectorSearchConfig(options)
+    val vectorSearch = parseVectorSearch(options)
 
     MilvusOption(
       uri,
@@ -472,15 +472,15 @@ object MilvusOption {
       fieldIDs,
       extraColumns,
       optionsMap,
-      vectorSearchConfig
+      vectorSearch
     )
   }
 
   /** Parse vector search configuration from options
     */
-  private def parseVectorSearchConfig(
+  private def parseVectorSearch(
       options: CaseInsensitiveStringMap
-  ): Option[VectorSearchConfig] = {
+  ): Option[VectorSearch] = {
     val queryVectorStr = Option(options.get(VectorSearchQueryVector))
     val topKStr = Option(options.get(VectorSearchTopK))
 
@@ -497,7 +497,7 @@ object MilvusOption {
       val vectorColumn = Option(options.get(VectorSearchVectorColumn))
         .getOrElse("vector")
 
-      Some(VectorSearchConfig(queryVector, topK, metricType, vectorColumn))
+      Some(VectorSearch(queryVector, topK, metricType, vectorColumn))
     } catch {
       case _: Exception => None
     }

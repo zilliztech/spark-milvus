@@ -22,7 +22,7 @@ snapshot read, providing an offline read capability.
   actual reads require S3 (see §7).
 - Output: a Spark DataFrame with column pruning, `milvus.extra.columns` (partition /
   `$segment_id` / `$row_offset`), and delete semantics (apply deletes).
-- Reuse the existing StorageV2 packed read stack (`MilvusPackedV2PartitionReader` +
+- Reuse the existing StorageV2 packed read stack (`MilvusV2PartitionReader` +
   milvus-storage JNI) — **no changes to milvus-backup**.
 - **Excluded**: StorageV3 (loon manifest) segments, write/backfill, the client snapshot fast path.
 
@@ -41,9 +41,9 @@ zero changes to existing backups.
 | Full meta in `meta/full_meta.json` (schema + partitions + segments + L0) | `milvus-backup/internal/meta/meta.go:129-139`; `meta_builder.go:327-337` |
 | `SegmentBackupInfo`: id / `num_of_rows` / `storage_version` / `group_id` / `is_l0` / `binlogs` / `deltalogs` | `milvus-backup/core/proto/backup.proto:102-120` |
 | `Binlog` only records `log_path/log_size/log_id`; `entries_num` exists but is deprecated/unset | `backup.proto:494-501`; `coll_dml_task.go:101,131` |
-| Packed read requires exact `fileRowCounts` | `src/main/scala/read/MilvusPackedV2PartitionReader.scala:253-260`; `milvus-storage/cpp/include/milvus-storage/ffi_internal/v2_column_groups_builder.h:35-43` |
-| Real field IDs recoverable from the parquet's own schema `PARQUET:field_id` | `src/main/scala/read/MilvusParquetFooterReader.readFieldIdsFromSchema` |
-| Delta-log decoding uses only `logPath`; `entriesNum` unused | `src/main/scala/read/MilvusDeltaLogReader.scala:127-145` |
+| Packed read requires exact `fileRowCounts` | `src/main/scala/read/MilvusV2PartitionReader.scala:253-260`; `milvus-storage/cpp/include/milvus-storage/ffi_internal/v2_column_groups_builder.h:35-43` |
+| Real field IDs recoverable from the parquet's own schema `PARQUET:field_id` | `src/main/scala/read/ParquetFooterReader.readFieldIdsFromSchema` |
+| Delta-log decoding uses only `logPath`; `entriesNum` unused | `src/main/scala/read/DeltaLogReader.scala:127-145` |
 | L0 segments have no column groups, only delta logs → inherited partition-level delete plan | `src/main/scala/sources/MilvusDataSource.scala:1628-1662, 2269-2303` |
 
 ## 3. Overall Design
@@ -59,9 +59,9 @@ MilvusScan.computeInputPartitions ──> planInputPartitionsFromBackup()
                            (schemaBytes, Seq[V2SegmentInfo])
                                               │   reuse
                                               ▼
-                    buildSnapshotPartitions() → MilvusPackedV2InputPartition[]
+                    buildSnapshotPartitions() → MilvusV2InputPartition[]
                                               │
-              createReaderFactory() → MilvusPackedV2PartitionReader (unchanged)
+              createReaderFactory() → MilvusV2PartitionReader (unchanged)
 ```
 
 Branch precedence: `isSnapshotMode` > `isBackupMode` > client.
@@ -90,7 +90,7 @@ Embedded JSON model: `BackupInfo`, `CollectionBackupInfo`, `PartitionBackupInfo`
 schemapb, including `type_params`, `data_type`, `is_primary_key`, `element_type`, `is_dynamic`,
 `nullable`, etc.).
 
-### 4.3 `src/main/scala/read/MilvusParquetFooterReader.scala`
+### 4.3 `src/main/scala/read/ParquetFooterReader.scala`
 - New `readRowCount(path, hadoopConf): Either[Throwable, Long]`: sums
   `ParquetFileReader.getFooter.getBlocks` (per-file total row count), reusing the existing
   `readWithFileSystem`.

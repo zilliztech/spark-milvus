@@ -11,7 +11,7 @@ import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-import com.zilliz.milvus.storage.delete.{MilvusDeletePlan, MilvusDeltaLogReader}
+import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
 import com.zilliz.milvus.storage.read.plan.DeleteSource
 import com.zilliz.spark.connector.types.ArrowAllocator
 import com.zilliz.spark.connector.options.MilvusOption
@@ -48,8 +48,8 @@ class MilvusPartitionReaderFactory(
     schema: StructType,
     optionsMap: Map[String, String],
     pushedFilters: Array[Filter] = Array.empty[Filter],
-    packedV2DeleteContext: MilvusPackedV2DeleteContext =
-      MilvusPackedV2DeleteContext.empty,
+    v2InheritedDeletes: V2InheritedDeletes =
+      V2InheritedDeletes.empty,
     // A pushed-down limit, applied per partition. None when Spark pushed none.
     limit: Option[Int] = None
 ) extends PartitionReaderFactory
@@ -82,12 +82,12 @@ class MilvusPartitionReaderFactory(
     *     brute-force search instead of a scan; the columnar reader would ignore
     *     them and return the whole segment.
     *
-    * `MilvusPackedV2InputPartition` carries neither: its scan builder returns
+    * `MilvusV2InputPartition` carries neither: its scan builder returns
     * every predicate to Spark and it has no search parameters.
     */
   override def supportColumnarReads(partition: InputPartition): Boolean =
     MilvusOption.readColumnar(optionsMap) && (partition match {
-      case p: MilvusStorageV3InputPartition =>
+      case p: MilvusV3InputPartition =>
         pushedFilters.isEmpty && p.topK.isEmpty && p.queryVector.isEmpty
       case _: MilvusInputPartition => pushedFilters.isEmpty
       case _                       => false
@@ -114,8 +114,8 @@ class MilvusPartitionReaderFactory(
       val dataSchema = StructType(schema.fields.filterNot { field =>
         isMetadataExtraField(field.name)
       })
-      val setup = SegmentReadSetup(effectiveSpecOf(p), dataSchema)
-      val milvusSchema = CollectionSchema.parseFrom(p.spec.schemaBytes)
+      val setup = ColumnBinding(effectiveSpecOf(p), dataSchema)
+      val milvusSchema = CollectionSchema.parseFrom(p.task.schemaBytes)
       new MilvusColumnarPartitionReader(
         schema,
         setup.open(ArrowAllocator.get),
@@ -124,7 +124,7 @@ class MilvusPartitionReaderFactory(
         setup.arrowColumnFor,
         MilvusOption.readVectorRaw(optionsMap),
         partitionNameOf(p),
-        p.spec.segmentId
+        p.task.segmentId
       )
     case other =>
       throw new IllegalArgumentException(
@@ -139,18 +139,18 @@ class MilvusPartitionReaderFactory(
     */
   private def effectiveSpecOf(p: MilvusInputPartition): MilvusInputPartition =
     p match {
-      case v2: MilvusPackedV2InputPartition =>
+      case v2: MilvusV2InputPartition =>
         val inherited = v2.inheritedDeletePlanPartitionId
           .map(partitionId =>
-            MilvusDeltaLogReader.effectiveInheritedDeletePlan(
+            DeltaLogReader.effectiveInheritedDeletePlan(
               partitionId,
-              packedV2DeleteContext.inheritedPlansByPartition
+              v2InheritedDeletes.inheritedPlansByPartition
             )
           )
-          .getOrElse(MilvusDeletePlan.empty)
-        val combined = MilvusDeletePlan.union(inherited, v2.spec.deletePlan)
-        v2.copy(spec =
-          v2.spec.copy(deletes =
+          .getOrElse(DeletePlan.empty)
+        val combined = DeletePlan.union(inherited, v2.task.deletePlan)
+        v2.copy(task =
+          v2.task.copy(deletes =
             if (combined.isEmpty) DeleteSource.None
             else DeleteSource.Materialized(combined)
           )
@@ -159,17 +159,17 @@ class MilvusPartitionReaderFactory(
     }
 
   private def partitionNameOf(p: MilvusInputPartition): String = p match {
-    case v3: MilvusStorageV3InputPartition => v3.partitionName
-    case other                             => other.spec.partitionId.toString
+    case v3: MilvusV3InputPartition => v3.partitionName
+    case other                             => other.task.partitionId.toString
   }
 
   private def rowReaderFor(
       partition: InputPartition
   ): PartitionReader[InternalRow] = {
     partition match {
-      case p: MilvusStorageV3InputPartition =>
+      case p: MilvusV3InputPartition =>
         logInfo(
-          s"Creating V3 reader for partition with segmentID=${p.spec.segmentId}"
+          s"Creating V3 reader for partition with segmentID=${p.task.segmentId}"
         )
 
         val v2Schema = StructType(schema.fields.filterNot { field =>
@@ -177,12 +177,12 @@ class MilvusPartitionReaderFactory(
         })
 
         // Deserialize the protobuf schema
-        val milvusSchema = CollectionSchema.parseFrom(p.spec.schemaBytes)
+        val milvusSchema = CollectionSchema.parseFrom(p.task.schemaBytes)
 
-        // Create MilvusLoonPartitionReader directly
-        val underlyingReader = new MilvusLoonPartitionReader(
+        // Create MilvusV3PartitionReader directly
+        val underlyingReader = new MilvusV3PartitionReader(
           v2Schema,
-          LoonReadSetup(p, v2Schema),
+          V3ColumnBinding(p, v2Schema),
           milvusSchema,
           p.milvusOption,
           optionsMap,
@@ -198,42 +198,42 @@ class MilvusPartitionReaderFactory(
           schema,
           requestedExtraColumns,
           p.partitionName,
-          p.spec.segmentId
+          p.task.segmentId
         )
 
-      case p: MilvusPackedV2InputPartition =>
+      case p: MilvusV2InputPartition =>
         logInfo(
-          s"Creating packed-V2 reader for segmentID=${p.spec.segmentId} " +
-            s"with ${p.spec.dataFiles.size} data file(s)"
+          s"Creating V2 reader for segmentID=${p.task.segmentId} " +
+            s"with ${p.task.dataFiles.size} data file(s)"
         )
 
         val innerSchema = StructType(schema.fields.filterNot { field =>
           isMetadataExtraField(field.name)
         })
 
-        val milvusSchema = CollectionSchema.parseFrom(p.spec.schemaBytes)
+        val milvusSchema = CollectionSchema.parseFrom(p.task.schemaBytes)
 
         val inheritedDeletePlan = p.inheritedDeletePlanPartitionId
           .map(partitionId =>
-            MilvusDeltaLogReader.effectiveInheritedDeletePlan(
+            DeltaLogReader.effectiveInheritedDeletePlan(
               partitionId,
-              packedV2DeleteContext.inheritedPlansByPartition
+              v2InheritedDeletes.inheritedPlansByPartition
             )
           )
-          .getOrElse(MilvusDeletePlan.empty)
+          .getOrElse(DeletePlan.empty)
         // The inherited plan is only resolvable here, where the executor-side
-        // context is, so the spec is finished off rather than rebuilt.
+        // context is, so the task is finished off rather than rebuilt.
         val effectiveDeletePlan =
-          MilvusDeletePlan.union(inheritedDeletePlan, p.spec.deletePlan)
-        val effectiveSpec = p.spec.copy(
+          DeletePlan.union(inheritedDeletePlan, p.task.deletePlan)
+        val effectiveSpec = p.task.copy(
           deletes =
             if (effectiveDeletePlan.isEmpty) DeleteSource.None
             else DeleteSource.Materialized(effectiveDeletePlan)
         )
 
-        val underlying = new MilvusPackedV2PartitionReader(
+        val underlying = new MilvusV2PartitionReader(
           innerSchema,
-          PackedV2ReadSetup(p, innerSchema, effectiveSpec),
+          V2ColumnBinding(p, innerSchema, effectiveSpec),
           milvusSchema,
           p.milvusOption
         )
@@ -242,8 +242,8 @@ class MilvusPartitionReaderFactory(
           underlying,
           schema,
           requestedExtraColumns,
-          p.spec.partitionId.toString,
-          p.spec.segmentId
+          p.task.partitionId.toString,
+          p.task.segmentId
         )
 
       case _ =>

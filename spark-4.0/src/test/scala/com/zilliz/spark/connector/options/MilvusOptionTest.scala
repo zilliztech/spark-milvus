@@ -131,8 +131,8 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     val milvusOption = MilvusOption(options)
 
-    milvusOption.vectorSearchConfig shouldBe defined
-    val config = milvusOption.vectorSearchConfig.get
+    milvusOption.vectorSearch shouldBe defined
+    val config = milvusOption.vectorSearch.get
     config.queryVector shouldBe Array(0.1f, 0.2f, 0.3f, 0.4f)
     config.topK shouldBe 10
     config.metricType shouldBe "L2"
@@ -149,8 +149,8 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     val milvusOption = MilvusOption(options)
 
-    milvusOption.vectorSearchConfig shouldBe defined
-    val config = milvusOption.vectorSearchConfig.get
+    milvusOption.vectorSearch shouldBe defined
+    val config = milvusOption.vectorSearch.get
     config.metricType shouldBe "COSINE" // Should be uppercase
   }
 
@@ -162,7 +162,7 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     val milvusOption = MilvusOption(options)
 
-    milvusOption.vectorSearchConfig shouldBe None
+    milvusOption.vectorSearch shouldBe None
   }
 
   test("Vector search config is None when topK is missing") {
@@ -173,7 +173,7 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     val milvusOption = MilvusOption(options)
 
-    milvusOption.vectorSearchConfig shouldBe None
+    milvusOption.vectorSearch shouldBe None
   }
 
   test("Vector search uses default values for optional fields") {
@@ -185,8 +185,8 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
 
     val milvusOption = MilvusOption(options)
 
-    milvusOption.vectorSearchConfig shouldBe defined
-    val config = milvusOption.vectorSearchConfig.get
+    milvusOption.vectorSearch shouldBe defined
+    val config = milvusOption.vectorSearch.get
     config.metricType shouldBe "L2" // Default metric
     config.vectorColumn shouldBe "vector" // Default column name
   }

@@ -1,25 +1,14 @@
 package com.zilliz.spark.connector.read
 
+import com.zilliz.milvus.storage.read.exec.SegmentReader
+import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
+import com.zilliz.spark.connector.types.{MilvusSparseVectorColumn, MilvusVectorColumn, SelectedRowsColumn, Utf8FromBinaryColumn}
+import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 import org.apache.arrow.vector.{VarBinaryVector, VectorSchemaRoot}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
-import org.apache.spark.sql.vectorized.{
-  ArrowColumnVector,
-  ColumnVector,
-  ColumnarBatch
-}
-
-import com.zilliz.milvus.storage.read.exec.SegmentReader
-import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
-import com.zilliz.spark.connector.types.ArrowAllocator
-import com.zilliz.spark.connector.types.{
-  MilvusSparseVectorColumn,
-  MilvusVectorColumn,
-  SelectedRowsColumn,
-  Utf8FromBinaryColumn
-}
-import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
+import org.apache.spark.sql.vectorized.{ArrowColumnVector, ColumnVector, ColumnarBatch}
 
 /** Hands Spark whole batches instead of rows.
   *

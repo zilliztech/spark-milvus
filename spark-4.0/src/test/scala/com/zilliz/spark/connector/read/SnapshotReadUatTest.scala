@@ -127,7 +127,7 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
       options
     )
     val snapshot =
-      new SnapshotCatalog(store, bucket, V2SegmentResolvers.packed(true)).read(path)
+      new SnapshotCatalog(store, bucket, V2SegmentResolvers.footer(true)).read(path)
     info(
       s"snapshot ${snapshot.name}: collection ${snapshot.collectionId}, " +
         s"${snapshot.partitionIds.size} partitions, ${snapshot.segments.size} segments " +

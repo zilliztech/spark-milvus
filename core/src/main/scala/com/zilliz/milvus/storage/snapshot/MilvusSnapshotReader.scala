@@ -1,22 +1,10 @@
 package com.zilliz.milvus.storage.snapshot
 
 import com.fasterxml.jackson.annotation.{JsonAlias, JsonProperty}
-import com.fasterxml.jackson.databind.{
-  DeserializationFeature,
-  JsonNode,
-  ObjectMapper
-}
-import com.fasterxml.jackson.databind.cfg.CoercionAction
-import com.fasterxml.jackson.databind.cfg.CoercionInputShape
-import com.fasterxml.jackson.module.scala.{
-  DefaultScalaModule,
-  ScalaObjectMapper
-}
-
+import com.fasterxml.jackson.databind.cfg.{CoercionAction, CoercionInputShape}
+import com.fasterxml.jackson.databind.{DeserializationFeature, JsonNode, ObjectMapper}
+import com.fasterxml.jackson.module.scala.{DefaultScalaModule, ScalaObjectMapper}
 import com.zilliz.milvus.storage.manifest.AvroManifestEntry
-import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.milvus.storage.schema.MilvusTypes
-import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Helper object for converting JSON values that may be either numeric or
   * string to Long/Int Milvus snapshot JSON format may serialize numbers as
@@ -873,13 +861,13 @@ object MilvusSnapshotReader {
     *   Protobuf CollectionSchema bytes
     */
   def toProtobufSchemaBytes(schema: CollectionSchema): Array[Byte] = {
+    import io.milvus.grpc.common.KeyValuePair
     import io.milvus.grpc.schema.{
-      CollectionSchema => ProtoCollectionSchema,
       DataType,
       FieldSchema,
-      FieldState
+      FieldState,
+      CollectionSchema => ProtoCollectionSchema
     }
-    import io.milvus.grpc.common.KeyValuePair
 
     // Filter out system fields (RowID and Timestamp) - only include user fields
     val userFields =

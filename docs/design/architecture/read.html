@@ -58,10 +58,10 @@
     <rect x="612" y="82" width="176" height="76" rx="3"/>
   </g>
   <g fill="currentColor" font-size="12" text-anchor="middle">
-    <text x="96" y="55">MilvusStorageV3</text><text x="96" y="70">InputPartition</text>
-    <text x="96" y="177">MilvusPackedV2</text><text x="96" y="192">InputPartition</text>
-    <text x="316" y="55">MilvusLoon</text><text x="316" y="70">PartitionReader</text>
-    <text x="316" y="177">MilvusPackedV2</text><text x="316" y="192">PartitionReader</text>
+    <text x="96" y="55">MilvusV3</text><text x="96" y="70">InputPartition</text>
+    <text x="96" y="177">MilvusV2</text><text x="96" y="192">InputPartition</text>
+    <text x="316" y="55">MilvusV3</text><text x="316" y="70">PartitionReader</text>
+    <text x="316" y="177">MilvusV2</text><text x="316" y="192">PartitionReader</text>
     <text x="700" y="108">上游 MilvusStorageReader</text>
     <text x="700" y="125">.create(列组, schema, 列名, 属性)</text>
     <text x="700" y="142">.openRecordBatchReader()</text>
@@ -132,7 +132,7 @@
 UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,末尾也是 <code>PAR1</code>,
 中间没有 Milvus 的 event 头,是一个 V2 列组的纯 parquet。</p>
 
-<p>全仓唯一解析 Milvus event 格式的地方是 <code>core.delete.MilvusDeltaLogReader</code>,
+<p>全仓唯一解析 Milvus event 格式的地方是 <code>core.delete.DeltaLogReader</code>,
 它读删除日志,在 driver 上跑,两条线共用。</p>
 
 <h2 id="gap">四、离目标还差什么</h2>
@@ -151,19 +151,19 @@ UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,�
 <p>分界线一句话:<strong><code>plan</code> 在 driver 上跑,产物必须可序列化;
 <code>exec</code> 在 executor 上跑,是 core 调原生层的唯一地方。</strong></p>
 
-<pre><code>段列表 ──plan──> InputSpec(可序列化,发到 executor)
+<pre><code>段列表 ──plan──> SegmentReadTask(可序列化,发到 executor)
                     │
                     └──exec──> SegmentReader ──> 批 ──> Spark</code></pre>
 
 <h3>5.1 core.read.plan</h3>
 <table>
 <tr><th>类型</th><th>是什么</th></tr>
-<tr><td><code>InputSpec</code></td><td>一个分区要读什么:段路径、<code>storage_version</code>、manifest 版本、列名、<code>fs.*</code> 属性、删除文件位置。只有描述,没有句柄、没有 <code>Configuration</code>、没有打开的资源</td></tr>
-<tr><td><code>ReadPlan</code></td><td>一组 <code>InputSpec</code>,加规划期就能算出来的总行数、字节数(供 R13)</td></tr>
+<tr><td><code>SegmentReadTask</code></td><td>一个分区要读什么:段路径、<code>storage_version</code>、manifest 版本、列名、<code>fs.*</code> 属性、删除文件位置。只有描述,没有句柄、没有 <code>Configuration</code>、没有打开的资源</td></tr>
+<tr><td><code>ReadPlan</code></td><td>一组 <code>SegmentReadTask</code>,加规划期就能算出来的总行数、字节数(供 R13)</td></tr>
 <tr><td><code>Partitioner</code></td><td>怎么切分区。默认一段一分区;R19 按分区报分区、R16 段选择落在这里</td></tr>
 </table>
 <p>剪枝(R9 段级、R10 row group 级)也在本包:规划期用统计信息把不需要的段和文件从
-<code>InputSpec</code> 里去掉。R10 依赖仓库外的两件事,见
+<code>SegmentReadTask</code> 里去掉。R10 依赖仓库外的两件事,见
 <a href="storage-access.html#bridge-prune">storage-access 4.5</a>。</p>
 
 <h3>5.2 core.read.exec</h3>
@@ -174,7 +174,7 @@ UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,�
 
 SegmentReaderRegistry: storage_version -> SegmentReader 工厂</code></pre>
 <p><strong>注册表在 core,实现可以在 compat。</strong>V2 packed 的实现放
-<code>compat.v2packed</code>,启动时注册进来;<code>core</code> 不反向依赖
+<code>compat.v2</code>,启动时注册进来;<code>core</code> 不反向依赖
 <code>compat</code>。这是能力 K1 写死的约束。</p>
 <p>这个注册表取代 spark 层现在的做法——<code>MilvusPartitionReaderFactory.createReader</code>
 按 <code>InputPartition</code> 的具体类型做模式匹配,两条线各一个分支。
@@ -199,7 +199,7 @@ SegmentReaderRegistry: storage_version -> SegmentReader 工厂</code></pre>
 <code>initAccessor</code> 认的列表里没有 <code>FixedSizeBinaryVector</code>,
 也没有 <code>FixedSizeListVector</code>。原样塞进去会抛不支持的类型,
 所以向量列的容器必然要换。</p>
-<p>决策 6 选了默认转成 Spark 原生类型,与 1.x 的 <code>DataTypeUtil</code> 一致:</p>
+<p>决策 6 选了默认转成 Spark 原生类型,与 1.x 的 <code>SparkTypes</code> 一致:</p>
 <table>
 <tr><th>Milvus 类型</th><th>存储里的 Arrow 类型</th><th>默认输出</th></tr>
 <tr><td>FloatVector</td><td><code>FixedSizeBinary(dim*4)</code></td><td><code>ArrayType(FloatType)</code></td></tr>
@@ -216,7 +216,7 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 
 <h2 id="rest">七、其余没定的</h2>
 <ol>
-<li><strong>向量搜索这条分支怎么放。</strong>存量 <code>MilvusLoonPartitionReader</code> 里有
+<li><strong>向量搜索这条分支怎么放。</strong>存量 <code>MilvusV3PartitionReader</code> 里有
 <code>performSegmentVectorSearch</code>,和普通扫描是两条并行路径。它属于 V*,本页不设计,
 但 <code>SegmentReader</code> 接口要留得下它,不能设计成只能顺序扫。</li>
 <li><strong>R5 列裁剪怎么传到底。</strong><code>loon_segment_reader_open</code> 收
@@ -235,16 +235,16 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 
 <div class="todo">
 <ol>
-<li><s>写 <code>core.read.plan</code> 的 <code>InputSpec</code>。</s>已完成。
-<code>InputSpec</code> 只装描述,句柄开在 executor 上;段布局的两种来源(V3 的 manifest
+<li><s>写 <code>core.read.plan</code> 的 <code>SegmentReadTask</code>。</s>已完成。
+<code>SegmentReadTask</code> 只装描述,句柄开在 executor 上;段布局的两种来源(V3 的 manifest
 路径加版本、V2 已物化的列组)是 <code>SegmentLayout</code> 的两个 case,那是两条线唯一的实质差别。
 删除来源单独建模成 <code>DeleteSource</code>:<code>Materialized</code> 是今天的做法——
 driver 把主键 map 序列化进每个分区,也是 README 第 1 节列的 1.x 代价之一;
 <code>Files</code> 只给 delta log 路径、读留给 executor,是要去的方向。
 两个 case 都在,迁移就是换 planner 产出哪一种,不用改这个类型。
 spark 层的两个 <code>InputPartition</code> 已经改成携带它:
-<code>MilvusStorageV3InputPartition</code> 从 12 个字段降到 7 个,
-<code>MilvusPackedV2InputPartition</code> 从 9 个降到 3 个,
+<code>MilvusV3InputPartition</code> 从 12 个字段降到 7 个,
+<code>MilvusV2InputPartition</code> 从 9 个降到 3 个,
 留在分区上的只有 spark 侧与向量检索特有的那些。
 <strong>随之有一个产品可见的行为变化</strong>:
 <code>StorageProperties.from</code> 从每个 task 的 reader 构造里移到规划期跑一次,

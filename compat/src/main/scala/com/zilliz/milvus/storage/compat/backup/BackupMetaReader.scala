@@ -22,8 +22,8 @@ import com.fasterxml.jackson.module.scala.{
   ScalaObjectMapper
 }
 
-import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
-import com.zilliz.milvus.storage.compat.MilvusParquetFooterReader
+import com.zilliz.milvus.storage.compat.v2.FooterV2SegmentResolver
+import com.zilliz.milvus.storage.compat.ParquetFooterReader
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{
@@ -62,14 +62,14 @@ import io.milvus.grpc.schema.{
   * `log_path`. Three gaps vs. a Milvus snapshot are closed here:
   *   1. milvus-backup persists only `log_size` per binlog, not `entries_num`.
   *      Per-file row counts are recovered by reading each binlog's parquet
-  *      footer ([MilvusParquetFooterReader.readRowCount], with the head file's
+  *      footer ([ParquetFooterReader.readRowCount], with the head file's
   *      footer read once for both field IDs and its row count via
-  *      [MilvusParquetFooterReader.readFieldIdsAndRowCount]). 2. The AVRO
+  *      [ParquetFooterReader.readFieldIdsAndRowCount]). 2. The AVRO
   *      segment-info (and hence the slot -> real field ID mapping) is not
   *      copied by the backup; the real field IDs are recovered from the **head
   *      file** of each column group via that file's own parquet schema
-  *      ([MilvusParquetFooterReader.readFieldIdsAndRowCount]) — matching
-  *      V2SegmentLoader, which assumes all files in a group share the schema.
+  *      ([ParquetFooterReader.readFieldIdsAndRowCount]) — matching
+  *      FooterV2SegmentResolver, which assumes all files in a group share the schema.
   *      3. L0 delete-only segments are created by Milvus without a
   *      `StorageVersion` (0/omitted), so they are handled before any
   *      storage-version filtering.
@@ -581,7 +581,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
           // The head file's footer is read once for both the real field IDs
           // (which live in the parquet schema, not the backup meta) and its row
           // count; the remaining files' row counts are read in parallel.
-          val headInfo = MilvusParquetFooterReader.readFieldIdsAndRowCount(
+          val headInfo = ParquetFooterReader.readFieldIdsAndRowCount(
             nativePaths.head,
             store
           ) match {
@@ -697,7 +697,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
     * segment with no binlogs and zero rows (emitted as an empty column-group
     * segment). Otherwise a partition can be stamped with an inherited-delete
     * marker that has no matching plan entry and silently resolves to
-    * `MilvusDeletePlan.empty`.
+    * `DeletePlan.empty`.
     */
   def deleteOnlySegments(
       info: BackupInfo,
@@ -732,7 +732,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       val futures = paths.map { p =>
         FooterReadPool.submit(new Callable[Long] {
           override def call(): Long =
-            MilvusParquetFooterReader.readRowCount(p, store) match {
+            ParquetFooterReader.readRowCount(p, store) match {
               case Right(n) => n
               case Left(err) =>
                 throw new RuntimeException(

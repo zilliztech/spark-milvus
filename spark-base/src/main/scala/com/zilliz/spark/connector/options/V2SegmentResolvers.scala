@@ -1,6 +1,6 @@
 package com.zilliz.spark.connector.options
 
-import com.zilliz.milvus.storage.compat.v2packed.V2SegmentLoader
+import com.zilliz.milvus.storage.compat.v2.FooterV2SegmentResolver
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.snapshot.{V2SegmentInfo, V2SegmentResolver}
 
@@ -14,14 +14,14 @@ object V2SegmentResolvers {
     * each parquet footer. `applyDeletes = false` skips the delta logs, which
     * is what backfill wants when it aligns new column groups to physical rows.
     */
-  def packed(applyDeletes: Boolean): V2SegmentResolver = new V2SegmentResolver {
+  def footer(applyDeletes: Boolean): V2SegmentResolver = new V2SegmentResolver {
     def resolve(
         manifestPaths: Seq[String],
         bucket: String,
         store: ObjectStore,
         manifestSchemaVersion: Int
     ): Either[Throwable, Seq[V2SegmentInfo]] =
-      V2SegmentLoader.loadV2Segments(
+      FooterV2SegmentResolver.loadV2Segments(
         manifestPaths,
         bucket,
         store,

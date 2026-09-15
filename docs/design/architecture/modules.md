@@ -48,7 +48,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | `expr` | 中间表示、Milvus 文法解析器、列批求值器、反向打印器 | Expr、PlanParser、Evaluator、ExprPrinter、Bitmap |
 | `delete` | 删除文件解码，按行号置位 | DeleteBitset、DeltaLogDecoder |
 | `stats` | 段统计和 row group 统计的读取与剪枝 | SegmentStats、Pruner |
-| `read.plan` | 分区规划，纯 JVM，可序列化 | InputSpec、SegmentLayout、DeleteSource、ReadPlan。Partitioner 待 R19（决策 19）与 R16 定了再加，一段一分区之外还没有第二种切法 |
+| `read.plan` | 分区规划，纯 JVM，可序列化 | SegmentReadTask、SegmentLayout、DeleteSource、ReadPlan。Partitioner 待 R19（决策 19）与 R16 定了再加，一段一分区之外还没有第二种切法 |
 | `read.exec` | 批读取、行号取列、出口；碰 native | SegmentReader、SegmentReaderRegistry。ColumnBatch 与 Take 未写：列式出口的 Spark 侧是 Spark 类型，归第 3 层，进 core 的仍是 VectorSchemaRoot |
 | `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter、StagingLayout |
 | `write.commit` | 作业清单、提交、幂等 | JobManifest、Committer |
@@ -60,7 +60,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 
 | 包 | 职责 |
 |---|---|
-| `v2packed` | Storage V2 packed 段的 SegmentReader |
+| `v2` | Storage V2 packed 段的 SegmentReader |
 | `backup` | milvus-backup 导出目录转 Snapshot，实现 SnapshotSource |
 
 ### 2.3 native-storage `com.zilliz.milvus.jni.storage`
@@ -103,7 +103,7 @@ C shim（mv_* 包 knowhere::Index、BruteForce、BinarySet、Version，以及 Di
 | `expr` | DataSource V2 Predicate 到 IR 的翻译 | 否 |
 | `types` | Arrow 类型到 Spark 类型的映射，向量列的 Spark 表示 | 否 |
 | `write` | WriteBuilder、BatchWrite、DataWriterFactory、DataWriter；truncate、overwrite、backfill 模式 | 否 |
-| `options` | option 名、别名、校验；1.x 名字的映射和告警；把 compat 的实现注册进 core；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageConfig） | 否 |
+| `options` | option 名、别名、校验；1.x 名字的映射和告警；把 compat 的实现注册进 core；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageKeys） | 否 |
 | `sources` | 只有 MilvusDataSource，`format("milvus")` 的 TableProvider。留在这个包名下是因为 apps 和用户作业按字符串引用它的全名 | 否 |
 | `procedure` | CALL 的语义：逻辑计划节点、物理节点、planner 策略 | 否 |
 | `extensions` | SparkSessionExtensions、SQL 解析器扩展、优化规则 | parser、AstBuilder、SessionExtensions 三个壳按线 |
@@ -142,7 +142,7 @@ spark-milvus/
     src/main/scala/com/zilliz/milvus/storage/{snapshot,manifest,schema,path,credential,expr,delete,stats,read,write,index}
     src/main/antlr4/               表达式文法（见第 4 节第 8 条）
     src/main/resources/            段清单的 Avro schema
-  compat/src/main/scala/com/zilliz/milvus/storage/compat/{v2packed,backup}
+  compat/src/main/scala/com/zilliz/milvus/storage/compat/{v2,backup}
   client/
     src/main/scala/com/zilliz/milvus/client/{grpc,api}
     src/main/protobuf/             milvus-proto 子模块的引用
@@ -189,23 +189,23 @@ spark-milvus/
 | 1.x 文件 | 2.0 位置 | 状态 |
 |---|---|---|
 | read/MilvusSnapshotReader.scala | core.snapshot | 已迁。92 行 Spark 类型转换切成 spark-base 的 SnapshotSparkSchema，切完这个文件就是纯 JVM |
-| read/MilvusSegmentManifestReader.scala、MilvusStorageV3ManifestReader.scala | core.manifest | 已迁 |
-| read/MilvusDeltaLogReader.scala、MilvusDeletePlan.scala | core.delete | 已迁。改按行号位图是重构，未做 |
+| read/SegmentManifestReader.scala、V3ManifestReader.scala | core.manifest | 已迁 |
+| read/DeltaLogReader.scala、DeletePlan.scala | core.delete | 已迁。改按行号位图是重构，未做 |
 | src/main/resources/milvus-segment-manifest*.avsc | core 的 resources | 已迁。资源必须跟代码走，留在原处解码器会报 not found on classpath，而失败形式是返回 Left 不是抛异常 |
-| serde/DataTypeUtil.scala、SchemaUtil.scala | core.schema、spark.types | 已迁。core.schema 得到 MilvusTypes、ArrowTypes、SchemaMapper、FieldMetadata；Spark 那一半是 spark.types 的 DataTypeUtil 与 MilvusSchemaUtil（文件名已改成对象名） |
+| serde/SparkTypes.scala、SchemaUtil.scala | core.schema、spark.types | 已迁。core.schema 得到 MilvusTypes、ArrowTypes、SchemaMapper、FieldMetadata；Spark 那一半是 spark.types 的 SparkTypes 与 SparkSchemaMapper（文件名已改成对象名） |
 | MilvusUtil.scala 的 FloatConverter、SparseFloatVectorConverter | core.codec | 已迁。文档原来写「MilvusUtil 整个进 apps.legacy」，不成立：627 行里只有 307 行是 FieldData 打包，两个转换器是纯 JVM 的列值编解码，被 ArrowConverter 和读路径用着 |
 | MilvusUtil.scala 的 IntConverter | 删除 | 已删，全仓零引用 |
 | Exception.scala | core 与 client | 已迁。DataParseException、DataTypeException 进 core；三个 RPC 异常进 client |
-| read/V2SegmentLoader.scala | compat.v2packed | 已迁。resolvePath 与 readAllBytes 先下沉到 core 的 path 与 io.hadoop，否则 core 的两个 Manifest 解析器要反向依赖 compat |
-| read/MilvusParquetFooterReader.scala | compat 根包 | 已迁。v2packed 和 backup 都要用它 |
+| read/FooterV2SegmentResolver.scala | compat.v2 | 已迁。resolvePath 与 readAllBytes 先下沉到 core 的 path 与 io.hadoop，否则 core 的两个 Manifest 解析器要反向依赖 compat |
+| read/ParquetFooterReader.scala | compat 根包 | 已迁。v2 和 backup 都要用它 |
 | read/BackupMetaReader.scala | compat.backup | 已迁 |
 | MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数 |
 | sources/MilvusDataSource.scala（2880 行） | spark.sources、spark.table、spark.read、spark.options | 已拆成 14 个文件，最大 550 行。`sources` 只留 TableProvider（FQN 被 apps 和用户作业按字符串引用，不能动）；MilvusTable→spark.table；ScanBuilder、Scan、四个规划入口（ClientSnapshotPlanner、LegacyClientPlanner、OptionSnapshotPlanner、BackupPlanner）、SnapshotPartitions、DeletePlanning、ClientReadSnapshot→spark.read；桶判定与 Hadoop 配置翻译（StorageOptions）、备份集合选取（BackupSelection）、ReadMode→spark.options。规划逻辑下沉 core.read.plan 未做，SnapshotPartitions.build 是要下沉的那部分 |
-| MilvusOption.scala、loon/Properties.scala | spark.options | 已搬。MilvusOption 在 spark.options；MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。`loon/Properties.FsConfig` 的每个常量都是 core.credential.StorageProperties 的别名，调用方已全部改为直接用 StorageProperties，2026-09-14 连同 PropertiesTest 一起删除，`loon` 包不再存在；`loon/HadoopStorageConfig` 已搬到 spark.options，和 StorageOptions 是同一件事的两半 |
-| read/MilvusLoonPartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusPackedV2PartitionReader.scala | spark-base | 已搬。两个 reader 已改调 native-storage 的 JNI，不再经上游绑定；分发与出口下沉 core.read.exec、重写为列式仍是重构，未做 |
+| MilvusOption.scala、loon/Properties.scala | spark.options | 已搬。MilvusOption 在 spark.options；MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。`loon/Properties.FsConfig` 的每个常量都是 core.credential.StorageProperties 的别名，调用方已全部改为直接用 StorageProperties，2026-09-14 连同 PropertiesTest 一起删除，`loon` 包不再存在；`loon/HadoopStorageKeys` 已搬到 spark.options，和 StorageOptions 是同一件事的两半 |
+| read/MilvusV3PartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusV2PartitionReader.scala | spark-base | 已搬。两个 reader 已改调 native-storage 的 JNI，不再经上游绑定；分发与出口下沉 core.read.exec、重写为列式仍是重构，未做 |
 | serde/ArrowConverter.scala、ArrowAllocator.scala | spark.types | 已搬到 spark.types：它做的是 Arrow 值与 Spark InternalRow 的双向转换，就是 types 的职责。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
-| filter/VectorBruteForceSearch.scala | spark-base | 已搬。它是从 MilvusLoonPartitionReader 的读路径里调的，不是 app；最终形态等决策 16 |
-| write/MilvusLoonWriter.scala、MilvusV2BinlogWriter.scala | spark-base | 已搬，且已改调 native-storage 的 JNI（决策 14 选了自己封）。下沉 core.write.exec 仍是重构，未做 |
+| filter/VectorBruteForceSearch.scala | spark-base | 已搬。它是从 MilvusV3PartitionReader 的读路径里调的，不是 app；最终形态等决策 16 |
+| write/MilvusV3Writer.scala、MilvusV2Writer.scala | spark-base | 已搬，且已改调 native-storage 的 JNI（决策 14 选了自己封）。下沉 core.write.exec 仍是重构，未做 |
 | write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusFieldData.scala（原 MilvusUtil.scala） | 删除 | 2026-09-14 删除：gRPC Insert 是 1.x 的写路径（W7），2.0 不支持；MilvusFieldData 只剩集成测试造数据用，搬到 integration-4.0 的 testkit |
 | write/MilvusSparkNativeImportWriter.scala | 删除 | 已删，全仓零引用 |
 | operations/backfill/* | apps.backfill | 已迁，包名从 operations.backfill 改成 apps.backfill |

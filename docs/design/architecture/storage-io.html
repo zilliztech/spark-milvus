@@ -136,7 +136,7 @@ JVM 有现成解析器,文件又小,拷进来最省事。列数据量大,拷一�
 而 C 那边本来就有完整的 parquet 解码器。</p>
 
 <p>删除日志走交字节这一面,但读出来的是真实的主键和时间戳值,不是元数据。
-它在这一侧的原因是格式是 parquet 而解析在 JVM(<code>core.delete.MilvusDeltaLogReader</code>),
+它在这一侧的原因是格式是 parquet 而解析在 JVM(<code>core.delete.DeltaLogReader</code>),
 并且它在 driver 上读,一个段一份,量可控。</p>
 
 <h2 id="arrow">二、地址这一面怎么交接</h2>
@@ -193,7 +193,7 @@ try {
 Arrow Java 的 <code>ArrowReader.loadNextBatch</code> 在多批之间共用同一个
 <code>VectorSchemaRoot</code>,并且忽略 <code>ArrowArray</code> 的 <code>offset</code> 字段。
 底层 C++ reader 一旦返回 <code>RecordBatch::Slice</code> 的结果,第一批之后的每一批都显示成同一份数据,
-不抛异常。这是 milvus-storage#493,<code>MilvusLoonPartitionReader</code> 第 182 行的注释记着,
+不抛异常。这是 milvus-storage#493,<code>MilvusV3PartitionReader</code> 第 182 行的注释记着,
 <code>MilvusStorageFFITest</code> 是它的回归用例。
 <p style="margin:.6rem 0 0">因此 <code>native-storage</code> 不封装 <code>ArrowArrayStream</code>。
 <code>jni/storage/arrow/package-info.java</code> 现在写着这个包封装 ArrowArray、ArrowSchema 和
@@ -206,14 +206,14 @@ ArrowArrayStream,第三个要删掉,否则重写第 1 层时会有人照着它�
 
 <ol>
 <li><strong>句柄不跨序列化边界。</strong>句柄是本进程内的指针。
-<code>InputSpec</code> 里只装描述(段路径、manifest 版本、要读的列、<code>fs.*</code> 属性),
+<code>SegmentReadTask</code> 里只装描述(段路径、manifest 版本、要读的列、<code>fs.*</code> 属性),
 executor 拿到描述之后才开句柄。</li>
 
 <li><strong>构造到一半失败要自己回滚。</strong>Spark 只对构造完成的 reader 调
 <code>close()</code>,构造过程中开了一半的句柄它不管。所以构造块用
 <code>try/catch</code> 包住,失败时释放已经拿到的一切再抛;每个句柄字段用
 <code>var</code> 加 <code>0L</code>/<code>null</code> 初始化,让回滚能判断哪些已分配。
-<code>MilvusLoonPartitionReader</code> 的 <code>releaseAll()</code> 就是这个。</li>
+<code>MilvusV3PartitionReader</code> 的 <code>releaseAll()</code> 就是这个。</li>
 
 <li><strong><code>close()</code> 必须幂等。</strong>Spark 在错误路径上可能重复调用,
 释放后把字段置回哨兵值。</li>
@@ -223,7 +223,7 @@ executor 拿到描述之后才开句柄。</li>
 
 <p><strong>「列数据不进 JVM」这句话有一个前提:JVM 不需要按行改动这批数据。删除生效时这个前提不成立。</strong></p>
 
-<p><code>MilvusDeletePlan</code> 按主键加时间戳查(<code>containsLongPk(pk, rowTs)</code>),
+<p><code>DeletePlan</code> 按主键加时间戳查(<code>containsLongPk(pk, rowTs)</code>),
 判断一行删没删要先读出该行的 PK 列和 <code>timestamp</code> 列再查表。
 读这两列不破坏上面那条性质——Arrow 视图能直接读 C 的内存。
 破坏它的是下一步:留下来的行要交给 Spark,而

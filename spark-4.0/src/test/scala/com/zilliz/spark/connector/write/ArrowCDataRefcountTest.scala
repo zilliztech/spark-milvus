@@ -39,12 +39,12 @@ import org.scalatest.matchers.should.Matchers
   * not invalidate the exported buffers.
   *
   * This is the correctness precondition for the aggressive memory strategy in
-  * [[MilvusV2BinlogWriter]] / [[MilvusLoonWriter]]: close each
+  * [[MilvusV2Writer]] / [[MilvusV3Writer]]: close each
   * `VectorSchemaRoot` right after exporting it to the C++ writer, instead of
   * retaining every root until the writer closes (which caused per-segment
   * direct-memory growth proportional to row count).
   *
-  * The tests cover the Arrow types emitted by `MilvusSchemaUtil
+  * The tests cover the Arrow types emitted by `SparkSchemaMapper
   * .convertSparkSchemaToArrow` (the schema converter used by both writers):
   *   - fixed-width primitives: Int8, Int16, Int32, Int64, Float32, Float64
   *   - boolean (bit-packed validity + value)

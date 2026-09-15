@@ -89,6 +89,38 @@ not change the format rules above.
 - **Concrete examples beat abstract mechanism.** Walk one real address, one real
   row. Before-and-after beats a single diagram of the after.
 
+## Names
+
+Type, package and field names follow the same rule as prose: they name what
+the thing is, in the vocabulary of the thing being modelled, and they carry no
+word the reader has to translate.
+
+- **Use the vocabulary of what is modelled.** A Milvus concept takes Milvus's
+  own name: the two storage lines are `V2` and `V3`, after the snapshot's
+  `storage_version`, everywhere in the repository. A type that implements a
+  Spark interface takes the interface's name with a `Milvus` prefix
+  (`MilvusTable`, `MilvusScan`, `MilvusV3PartitionReader`), as Iceberg's
+  `SparkTable` and `SparkScan` do. The C library's names (`loon_*`, "packed")
+  stay inside `native-storage` and in prose that explains the library.
+- **No `Milvus` prefix in `core`, `compat` or `client`.** The package is
+  already `com.zilliz.milvus`; the prefix adds nothing there, and it exists in
+  layer 3 only to keep `MilvusScan` apart from Spark's `Scan`.
+- **No empty suffixes.** `Spec`, `Info`, `DTO`, `Util`, `Helper`, `Setup`,
+  `Context`, `Config`, `Planning`, `Selection` say nothing about the contents.
+  Name the noun the type holds: `SegmentReadTask`, not `InputSpec`;
+  `ColumnBinding`, not `SegmentReadSetup`; `SparkTypes`, not `DataTypeUtil`.
+  The exception is a name copied from a Milvus proto message
+  (`MilvusSegmentInfo` mirrors `SegmentInfo`).
+- **One concept, one name.** When two types describe the same thing from two
+  sides, the names say so (`V2SegmentResolver` and its implementation
+  `FooterV2SegmentResolver`), and a second vocabulary for the same pair (Loon
+  and Packed for V3 and V2) is a defect to fix, not a synonym to keep.
+- **A type that parses one kind of file is `<File>Reader`**: `DeltaLogReader`,
+  `V3ManifestReader`, `ParquetFooterReader`, `BackupMetaReader`.
+- **Interim code keeps its name until it moves.** The planners in
+  `spark.read.plan` dissolve into `core.read.plan`; renaming them first would
+  be a second rename.
+
 ## Diagrams
 
 Use vector graphics, never ASCII art. A diagram carries structure; the prose
