@@ -1041,16 +1041,24 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   }
 
   test(
-    "snapshot planner rejects explicit snapshot mode without segment hints"
+    "snapshot planner rejects explicit snapshot mode with neither segments nor a schema"
   ) {
     val rawOptions = new ju.HashMap[String, String]()
     rawOptions.put(MilvusOption.SnapshotMode, "true")
-    rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val err = intercept[IllegalArgumentException] {
       scanFromOptions(rawOptions).planInputPartitions()
     }
     assert(err.getMessage.contains(MilvusOption.SnapshotManifests))
     assert(err.getMessage.contains(MilvusOption.SnapshotV2Segments))
+    assert(err.getMessage.contains(MilvusOption.SnapshotSchemaBytes))
+  }
+
+  test("a schema alone is a snapshot with no segments: nothing to read") {
+    // What a pure-connector write resolves its table from.
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(MilvusOption.SnapshotMode, "true")
+    rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
+    assert(scanFromOptions(rawOptions).planInputPartitions().isEmpty)
   }
 
   test("snapshot planner returns no partitions for empty snapshots") {

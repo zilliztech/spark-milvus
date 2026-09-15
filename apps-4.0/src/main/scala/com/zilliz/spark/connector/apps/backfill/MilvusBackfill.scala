@@ -27,9 +27,10 @@ import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.write.{
   MilvusV3BatchWrite,
   MilvusV3CommitMessage,
-  MilvusV3Writer
+  MilvusV3Writer,
+  WriteSchema
 }
-import io.milvus.grpc.schema.{DataType => MilvusDataType}
+import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 
 /** Backfill operation for Milvus collections
   *
@@ -492,9 +493,10 @@ object MilvusBackfill {
         case Left(error)  => return Left(error)
         case Right(value) => value
       }
-      val newFieldNameToId = newFieldNames
-        .map(name => name -> targetFieldsByName(name).getFieldIDAsLong)
-        .toMap
+      // The writer takes field ids and dimensions from the collection schema.
+      val collectionSchema = CollectionSchema.parseFrom(
+        snapshotMetadata.collection.schema.toProtobufBytes
+      )
 
       // User parquet uses normal ingestion-friendly vector shapes (numeric
       // arrays, byte arrays, sparse maps/structs/JSON). Normalize vector
@@ -519,7 +521,7 @@ object MilvusBackfill {
           n,
           SnapshotSparkSchema.fieldToStructField(field)
         )
-        (n, newFieldNameToId(n), structField)
+        (n, field.getFieldIDAsLong, structField)
       }
 
       // Every mode writes parquet-side values with their current Spark types.
@@ -627,7 +629,7 @@ object MilvusBackfill {
         v2SegmentIdSet,
         config,
         newFieldNames,
-        newFieldNameToId,
+        collectionSchema,
         targetVectorFields
       ) match {
         case Left(error)    => return Left(error)
@@ -1569,7 +1571,7 @@ object MilvusBackfill {
       v2SegmentIdSet: Set[Long],
       config: BackfillConfig,
       newFieldNames: Seq[String],
-      fieldNameToId: Map[String, Long] = Map.empty,
+      collectionSchema: CollectionSchema,
       targetFieldOverrides: Map[
         String,
         org.apache.spark.sql.types.StructField
@@ -1599,14 +1601,27 @@ object MilvusBackfill {
 
       // Get the schema for new fields only (without $segment_id, $row_offset,
       // or the match flag)
-      val targetSchema = org.apache.spark.sql.types.StructType(
-        newFieldNames.map(fieldName =>
-          targetFieldOverrides.getOrElse(
-            fieldName,
-            preparedDF.schema.fields.find(_.name == fieldName).get
+      // The write schema: the new columns checked against the collection and
+      // carrying their field ids and dimensions, which is what names the
+      // columns in the written files.
+      val targetSchema =
+        try
+          WriteSchema.resolve(
+            org.apache.spark.sql.types.StructType(
+              newFieldNames.map(fieldName =>
+                targetFieldOverrides.getOrElse(
+                  fieldName,
+                  preparedDF.schema.fields.find(_.name == fieldName).get
+                )
+              )
+            ),
+            collectionSchema,
+            WriteSchema.Mode.Columns
           )
-        )
-      )
+        catch {
+          case e: IllegalArgumentException =>
+            return Left(SchemaValidationError(e.getMessage))
+        }
 
       val segmentIds = segmentToPartitionMap.keys.toArray
       val segmentPartitioner = new SegmentPartitioner(segmentIds)
@@ -1634,7 +1649,6 @@ object MilvusBackfill {
         spark.sparkContext.broadcast(segmentBasePathMap)
       val broadcastV2SegmentIdSet = spark.sparkContext.broadcast(v2SegmentIdSet)
       val broadcastTargetSchema = spark.sparkContext.broadcast(targetSchema)
-      val broadcastFieldNameToId = spark.sparkContext.broadcast(fieldNameToId)
 
       val results = repartitionedRDD
         .mapPartitions { iter =>
@@ -1647,8 +1661,7 @@ object MilvusBackfill {
               broadcastSegmentToPartitionMap.value,
               broadcastSegmentBasePathMap.value,
               broadcastV2SegmentIdSet.value,
-              broadcastTargetSchema.value,
-              broadcastFieldNameToId.value
+              broadcastTargetSchema.value
             )
         }
         .collect()
@@ -1660,7 +1673,6 @@ object MilvusBackfill {
       broadcastSegmentBasePathMap.unpersist()
       broadcastV2SegmentIdSet.unpersist()
       broadcastTargetSchema.unpersist()
-      broadcastFieldNameToId.unpersist()
 
       // Check for failures
       val failures = results.filter(_._2.isDefined)
@@ -1749,8 +1761,7 @@ object MilvusBackfill {
       segmentToPartitionMap: Map[Long, Long],
       segmentBasePathMap: Map[Long, String],
       v2SegmentIdSet: Set[Long],
-      targetSchema: org.apache.spark.sql.types.StructType,
-      fieldNameToId: Map[String, Long] = Map.empty
+      targetSchema: org.apache.spark.sql.types.StructType
   ): Iterator[(SegmentBackfillResult, Option[Throwable])] = {
 
     val firstRow = iter.next()
@@ -1768,7 +1779,6 @@ object MilvusBackfill {
         partitionID,
         collectionID,
         targetSchema,
-        fieldNameToId,
         config,
         startTime
       )
@@ -1777,14 +1787,9 @@ object MilvusBackfill {
     // Create writer — use manifest basePath if available, otherwise generate path
     val writeOptions = segmentBasePathMap.get(segmentID) match {
       case Some(basePath) =>
-        config.getS3WriteOptionsForBasePath(basePath, segmentID, fieldNameToId)
+        config.getS3WriteOptionsForBasePath(basePath, segmentID)
       case None =>
-        config.getS3WriteOptions(
-          collectionID,
-          partitionID,
-          segmentID,
-          fieldNameToId
-        )
+        config.getS3WriteOptions(collectionID, partitionID, segmentID)
     }
     val outputPath = writeOptions("milvus.writer.customPath")
 
@@ -2045,22 +2050,17 @@ object MilvusBackfill {
       partitionID: Long,
       collectionID: Long,
       targetSchema: org.apache.spark.sql.types.StructType,
-      fieldNameToId: Map[String, Long],
       config: BackfillConfig,
       startTime: Long
   ): Iterator[(SegmentBackfillResult, Option[Throwable])] = {
+    import com.zilliz.milvus.storage.schema.FieldMetadata
     import com.zilliz.spark.connector.write.{MilvusV2Writer, V2BinlogFile}
 
-    // Build per-field mapping in targetSchema order.
+    // Field ids in targetSchema order, from the metadata WriteSchema put there.
     val fieldNames = targetSchema.fieldNames.toSeq
-    val fieldIds = fieldNames.map { name =>
-      fieldNameToId.getOrElse(
-        name,
-        throw new IllegalStateException(
-          s"StorageV2 backfill for segment $segmentID: field '$name' has no field ID in the snapshot schema"
-        )
-      )
-    }
+    val fieldIds = targetSchema.fields.toSeq.map(
+      _.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
+    )
 
     // Simple monotonic logID allocator seeded by task-start nanos. Plan
     // names this as a future injection point (caller-provided global ID),
@@ -2080,8 +2080,7 @@ object MilvusBackfill {
     // it needs the FS config, not Hadoop S3A config.
     val writeOptions = config.getS3WriteOptionsForBasePath(
       s"${config.s3RootPath.stripSuffix("/")}/insert_log/$collectionID/$partitionID/$segmentID",
-      segmentID,
-      fieldNameToId
+      segmentID
     )
     val milvusOption = MilvusOption(
       new CaseInsensitiveStringMap(writeOptions.asJava)

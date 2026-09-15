@@ -31,9 +31,8 @@
 分层见 <a href="modules.md">modules.md</a>。</p>
 
 <p class="thesis"><strong>写一张表只有一种写法：Spark 的 DataSource V2 写协议，一个 Table、一个 WriteBuilder、每个 task 一个 SegmentWriter、driver 一个 Committer。</strong>
-后三段已经写完并在 UAT 桶上验过；缺的是第一段——<code>format("milvus")</code> 返回的
-<code>MilvusTable</code> 只声明 <code>BATCH_READ</code>，带 <code>BATCH_WRITE</code> 的
-<code>MilvusV3WriteTable</code> 没有任何地方构造它，所以用户今天写不了。本页定入口怎么接、写的表从哪拿
+四段都已写完并在 UAT 桶上验过（入口是 2026-09-15 的工作单 #11；在那之前 <code>format("milvus")</code>
+返回的 <code>MilvusTable</code> 只声明 <code>BATCH_READ</code>，用户写不了）。本页定入口怎么接、写的表从哪拿
 collection schema、校验什么、哪些选项留下。</p>
 
 <h2 id="chain">一、一条链，driver 两段、executor 一段</h2>
@@ -64,7 +63,7 @@ driver 再收齐 commit message 写作业清单。登记是之后的另一个动
     <text x="298" y="48" font-weight="600">executor · 每个 task</text>
     <text x="660" y="48" font-weight="600">driver · core.write.commit</text>
     <text x="30" y="82">MilvusDataSource.getTable</text>
-    <text x="30" y="98">→ Snapshot（schema，不带段）</text>
+    <text x="30" y="98">→ Snapshot（写只用它的 schema）</text>
     <text x="30" y="114">→ MilvusTable → WriteBuilder → BatchWrite</text>
     <text x="312" y="82">MilvusV3PartitionWriter：行 → Arrow 批</text>
     <text x="312" y="98">core.write.exec.V3SegmentWriter 写列组</text>
@@ -100,7 +99,7 @@ driver 再收齐 commit message 写作业清单。登记是之后的另一个动
       <strong>DataFrame 自己的 schema</strong>（全部字段置为 nullable），不调
       <code>inferSchema</code>。</li>
   <li>检查 <code>table.capabilities()</code> 含 <code>BATCH_WRITE</code>；不含就退回 V1 写法，
-      我们没有 V1 写法，用户看到的是不支持。这就是今天卡住的地方。</li>
+      我们没有 V1 写法，用户看到的是不支持。#11 之前卡在这里。</li>
   <li><code>AppendData.byName(relation, df)</code>：Spark 按名字把 DataFrame 列对到
       <code>table.schema()</code>。表的 schema 就是第 1 步传进来的 DataFrame schema，所以这一步在我们这里恒等，
       <strong>对照 collection schema 的校验 Spark 不会替我们做</strong>，落在 WriteBuilder。</li>
@@ -127,8 +126,11 @@ driver 再收齐 commit message 写作业清单。登记是之后的另一个动
 
 <p><strong>写不看段，但要 collection schema，而 schema 已经有三条来源，都产出 Snapshot。</strong>
 读路径的 <code>getTable</code> 通过 <code>SnapshotSources.forRead</code> 把 Snapshot 解析一次交给
-<code>MilvusTable</code>（<a href="snapshot.html">snapshot.html</a>）。写沿用它，只是
-<code>withSegments = false</code>：写新段不需要现有段的列表。</p>
+<code>MilvusTable</code>（<a href="snapshot.html">snapshot.html</a>）。写沿用它。写新段用不到现有段的列表，
+但 <code>getTable</code> 分不出后面是读还是写（Spark 两条路都传 schema 进来），而
+<code>withSegments = false</code> 只是跳过 V2 段的 footer 解析、段列表照旧，所以 <code>getTable</code>
+保持解析带段的 Snapshot；写因此多付一次段列表的代价（快照 Avro 一次读，V2 段各一次 footer）。
+把段列表推迟到 Scan 是 <code>read.plan</code> 下沉时的事。</p>
 
 <table>
 <tr><th>模式</th><th>schema 从哪来</th><th>写在什么场景</th></tr>
@@ -141,15 +143,12 @@ driver 再收齐 commit message 写作业清单。登记是之后的另一个动
 <p>这一条定了之后，写侧现在靠手填的两个选项就没有存在的理由：字段 id 由 schema 的
 <code>fieldID</code> 给，向量维度由 <code>type_params</code> 的 <code>dim</code> 给。</p>
 
-<div class="warn">
-<p><strong>删除提案，等人确认。</strong>去掉 <code>milvus.writer.fieldIds</code> 和
-<code>vector.&lt;field&gt;.dim</code> 两个写选项。依据：两者只在 <code>MilvusV3PartitionWriter</code>
-里被读（<code>parseFieldIds</code>、<code>extractVectorDimensions</code>），值就是 collection schema
-里的两列；写的表拿到 Snapshot 后从 <code>snapshot.schema</code> 取，选项成了第二份真相，填错会写出和
-collection 对不上的段。用户文档没有列过它们，仓库外没有已知调用方。如果依据错了，受影响的是
-<code>MilvusV3Writer.writeDataFrame</code> 的直接调用者（backfill 传的是
-<code>milvus.writer.customPath</code> 和 <code>commitType</code>，不传这两个）。</p>
-</div>
+<p>2026-09-15 经负责人同意删掉了 <code>milvus.writer.fieldIds</code> 和 <code>vector.&lt;field&gt;.dim</code>
+两个写选项，以及无人构造的 <code>MilvusV3WriteTable</code>。依据：两者只在
+<code>MilvusV3PartitionWriter</code> 里被读，值就是 collection schema 里的两列，选项是第二份真相，填错会写出和
+collection 对不上的段；用户文档没有列过它们。仓库内唯一的调用方是 backfill，它原来先读快照 schema
+再把字段 id 抄成字符串填进 <code>milvus.writer.fieldIds</code>，现在直接把 schema 交给
+<code>WriteSchema</code>。能力表 G2 行本来就写着 2.0 的写选项要替代 <code>milvus.writer.fieldIds</code>。</p>
 
 <p>留下的写选项：</p>
 
@@ -173,11 +172,11 @@ collection schema，规则按字段走：</p>
 <tr><td>DataFrame 的每一列在 collection 里有同名字段</td><td>写不能造字段；加字段是 DDL（C2）</td><td>报未知列</td></tr>
 <tr><td>列的 Spark 类型等于 <code>SparkTypes.toDataType(field)</code> 给出的类型</td><td>读写用同一份类型映射（R15）；向量列是 <code>ArrayType(FloatType)</code> 等，和读出来的形状一致，读回去再写不用转</td><td>报类型不符，不做隐式转换——Spark 的 <code>storeAssignmentPolicy</code> 在这条路上没有机会介入（第一节第 3 步）</td></tr>
 <tr><td>向量列每行长度等于 <code>dim</code>；BinaryVector 是 <code>dim/8</code> 字节</td><td>schema 的 <code>type_params</code></td><td>executor 上逐行查，第一条不合就让 task 失败；driver 查不了值</td></tr>
-<tr><td>collection 里每个字段都要在 DataFrame 里，除非 <code>nullable</code> 或有 <code>default_value</code></td><td>段文件按列组写，缺列没法补</td><td>报缺列；nullable 缺列写 null，有默认值的缺列写默认值</td></tr>
+<tr><td>collection 里每个字段（function output 除外）都要在 DataFrame 里</td><td>段文件按列组写，缺列没法补；Milvus 加载段时按字段 id 找每一列</td><td>报缺列，nullable 字段由调用方给 null 列。「nullable 缺列自动写 null、有 <code>default_value</code> 的缺列写默认值」是后续，要 writer 给不在行里的列补值</td></tr>
 <tr><td>主键必须在 DataFrame 里，且 collection 不能是 <code>autoID</code></td><td>autoID 的 id 由 Milvus 的分配器发，离线没有分配器</td><td>报 autoID 的 collection 不能经连接器写；这是 2.0 首版的边界，不是缺陷</td></tr>
 <tr><td><code>is_function_output</code> 的字段（BM25 出的稀疏向量）不能出现在 DataFrame 里</td><td>它由 Milvus 的 function 算，写入方给不了</td><td>报不可写列</td></tr>
 <tr><td>动态字段：<code>enable_dynamic_field</code> 时 schema 带 <code>is_dynamic</code> 的 JSON 字段（<code>$meta</code>）</td><td>按普通 JSON 列写，DataFrame 里给同名列</td><td>不给就按 nullable 处理</td></tr>
-<tr><td>分区：DataFrame 不带分区列；<code>milvus.partition.name</code> 给一个，缺省 <code>_default</code></td><td>段属于一个分区，Milvus 的分区不是列</td><td>partition key 的 collection 报不支持，分区由 key 哈希决定，2.0 首版不做</td></tr>
+<tr><td>分区：DataFrame 不带分区列，写出的段不属于任何分区，登记（A4）时定</td><td>段属于一个分区，Milvus 的分区不是列；作业清单里的 <code>partition_id</code> 是 Spark 的分区号</td><td>partition key 的 collection 报不支持，分区由 key 哈希决定，2.0 首版不做</td></tr>
 </table>
 
 <p>校验通过后 <code>MilvusV3PartitionWriter</code> 拿到的是 collection schema 投影到 DataFrame 列上的那份：
@@ -247,23 +246,24 @@ c. 写占位（RowID 用段内行号、Timestamp 用作业时间），登记时 
 
 <div class="todo">
 <ol>
-  <li><strong>入口。</strong><code>MilvusTable</code> 加 <code>SupportsWrite</code>，
-      <code>capabilities()</code> 在 <code>SnapshotOrigin</code> 不是 Backup 时加 <code>BATCH_WRITE</code>，
-      <code>newWriteBuilder</code> 返回 <code>MilvusV3WriteBuilder(info.schema, snapshot, milvusOption)</code>。
-      <code>MilvusDataSource.getTable</code> 对写不解析段：能否区分读写要看 Spark 传进来的是什么——
-      传了 schema 的是写（<code>supportsExternalMetadata</code> 那条路）或用户指定 schema 的读，
-      两者都不需要段列表提前物化，段列表本来就是 Scan 才取的，所以 <code>getTable</code> 一律
-      <code>withSegments = false</code>，Scan 需要时再取。<code>MilvusV3WriteTable</code> 删掉（删除提案，同上一节的两个选项一起确认）。</li>
-  <li><strong>校验。</strong>第三节的表落成 <code>spark.write.WriteSchemaCheck</code>（名字按 writing.md 的规则定），
-      在 <code>build()</code> 里跑；每条规则一个单测，不需要原生库。</li>
-  <li><strong>schema 进 writer。</strong><code>MilvusV3PartitionWriter</code> 从 collection schema 取字段 id 和维度，
-      <code>parseFieldIds</code>、<code>extractVectorDimensions</code> 和两个选项一起删；
-      <code>writeDataFrame</code> 改为要求 schema 来源（它是 backfill 和测试在用的直接入口，保留）。</li>
-  <li><strong>UAT。</strong><code>ConnectorWriteReadUatTest</code> 改走 <code>df.write.format("milvus")</code>，
-      纯连接器模式（<code>milvus.snapshot.schema.bytes</code>），写→读→abort；再加一个 client 模式的写，
-      对 <code>spark_uat_v3</code> 写 100 行到暂存前缀，用 CALL 登记之前只验清单。</li>
-  <li><strong>文档。</strong>reference-en/cn 加写的一节：入口、模式表、留下的选项；W1 行的入口注明
-      <code>format("milvus")</code> 是 catalog 落地前的形式。</li>
+  <li><strong>入口。已做（#11）。</strong><code>MilvusTable</code> 实现 <code>SupportsWrite</code>，
+      <code>SnapshotOrigin</code> 不是 Backup 时声明 <code>BATCH_WRITE</code>，
+      <code>newWriteBuilder</code> 返回 <code>MilvusV3WriteBuilder(info.schema, snapshot.schema, milvusOption)</code>；
+      <code>MilvusV3WriteTable</code> 删掉。<code>getTable</code> 仍解析带段的 Snapshot（第二节说了为什么）。
+      纯连接器写只有 schema 没有段，<code>milvus.snapshot.mode=true</code> 加
+      <code>milvus.snapshot.schema.bytes</code> 因此成为合法的快照选项组合：一个没有段的快照。</li>
+  <li><strong>校验。已做。</strong>第三节的表是 <code>spark.write.WriteSchema.resolve(dataFrame, collection, mode)</code>，
+      在 <code>build()</code> 里跑，产出带 Milvus 类型、字段 id、维度元数据的写 schema；<code>Mode.Append</code>
+      查完整性，<code>Mode.Columns</code>（backfill）只查给出的列。每条规则一个单测。</li>
+  <li><strong>schema 进 writer。已做。</strong><code>MilvusV3PartitionWriter</code> 从列元数据取字段 id 和维度，
+      <code>writeDataFrame(df, options, collection)</code> 要 collection schema，backfill 把快照里的 schema 交给它。</li>
+  <li><strong>UAT。做了纯连接器那半。</strong><code>ConnectorWriteReadUatTest</code> 走
+      <code>df.write.format("milvus").mode("append")</code>：overwrite 被 Spark 拒（缺 truncate）、缺列被
+      <code>WriteSchema</code> 拒、append 写两段、作业清单和标记、读回 3000 行、abort。client 模式的写没有跑：
+      它和纯连接器模式只差 schema 从 DescribeCollection 来，而暂存前缀会落在实例根路径
+      <code>{instance id}/staging/</code> 下，abort 删不掉的目录标记会留在实例前缀里。</li>
+  <li><strong>文档。已做。</strong>reference-en/cn 的 2.4 与 3.2 节；W1 行入口注明 <code>format("milvus")</code>
+      是 catalog 落地前的形式。</li>
 </ol>
-<p>第 6 节的三样和决策 22 不在这条工作单里，各自开单。</p>
+<p>第 6 节的三样和决策 22 各自开单；client 模式的写等 A4 登记一起在 UAT 上跑。</p>
 </div>

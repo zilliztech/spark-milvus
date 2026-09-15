@@ -18,4 +18,7 @@ object FieldMetadata {
     * lands as variable-width binary, and this is what recovers its width.
     */
   val MilvusVectorDimensionMetadataKey = "milvus.vector_dim"
+
+  /** The Milvus field id, which names the column in a written segment. */
+  val MilvusFieldIdMetadataKey = "milvus.field_id"
 }

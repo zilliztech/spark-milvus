@@ -137,6 +137,24 @@ val s3Options = Map(
 | `milvus.read.columnar` | Boolean | 否 | false | 读出口形态。默认 false，逐行交给 Spark。设为 true 时整批交付（`ColumnarBatch`），向量列按 `milvus.read.vector.raw` 决定的类型呈现；有删除的批交出去的是存活行构成的新批，因为 Spark 的 `ColumnarBatch` 没有标记某行无效的办法 |
 
 
+### 2.4 写入参数
+
+`df.write.format("milvus").mode("append")` 把 DataFrame 直接写成 Milvus 段到对象存储，不经 Milvus
+服务，也不做登记。表的解析和读一样，collection schema 来自三者之一：`milvus.uri` 加 collection
+名（取该 collection 最新的快照）、`milvus.snapshot.path`、或 `milvus.snapshot.schema.bytes`（只给
+schema，没有任何快照时用）。字段 id 和向量维度都从这份 schema 取。
+
+| 参数名 | 类型 | 必需 | 默认值 | 描述 |
+|--------|------|------|--------|------|
+| `fs.root_path` | String | 否 | `files` | 作业写到 `{root}/staging/{job-id}/` 下：每个 Spark 分区一个段目录，然后是 `manifest.json`（每个段的路径、manifest 版本、行数）和标记文件 `_committed`。 |
+| `MilvusOption.MilvusInsertMaxBatchSize` | Int | 否 | 1000 | 交给原生 writer 的每个 Arrow 批的行数。 |
+| `milvus.writer.variableWidthBytesPerValue` | Double | 否 | 32.0 | 变长列（字符串、JSON、二进制）每个值预留的初始字节数。 |
+
+写之前在 driver 上校验：DataFrame 的每一列都是 collection 的字段，Spark 类型与读出来的一致（向量列也接受
+`BinaryType` 原始字节）；除 Milvus function 输出外每个字段都要给（nullable 字段给一列 null）；collection
+不能用 `autoID`，不能有 partition key。只支持 `mode("append")`：`overwrite` 需要 truncate，Spark 会拒绝；
+`errorIfExists`/`ignore` 对这类数据源 Spark 不支持。
+
 ### 2.5 离线备份读取参数
 
 读取 milvus-backup 导出的 **binlog 格式**备份，无需任何 Milvus client 连接。已发布版本（v0.5.x）的 `milvus-backup create` 默认即 binlog 格式；`--format binlog` 仅存在于 milvus-backup master 分支（面向 Milvus 3.x，默认 snapshot）。完整设计见 `docs/backup-datasource-design.md`。
@@ -166,6 +184,22 @@ val df = spark.read
   .option(MilvusOption.ReaderFieldIDs, "1,2,100,101")  // 只读取指定字段
   .load()
 ```
+
+### 3.2 写入数据
+
+```scala
+df.write
+  .format("milvus")
+  .mode("append")
+  .option(MilvusOption.MilvusUri, "http://localhost:19530")
+  .option(MilvusOption.MilvusToken, "your-token")
+  .option(MilvusOption.MilvusCollectionName, "your_collection")
+  .option("fs.root_path", "files")           // 再加 fs.* 存储选项
+  .save()
+```
+
+段落在 `files/staging/<job-id>/` 下并带作业清单；登记之后才进入 collection（后续步骤，见
+`docs/design/capabilities.md` 的 A4）。已提交过的作业重跑不会再写。
 
 
 ## 4. 数据模式

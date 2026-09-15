@@ -19,6 +19,7 @@ object SparkTypes {
         FieldMetadata.MilvusDataTypeMetadataKey,
         fieldSchema.dataType.value
       )
+      .putLong(FieldMetadata.MilvusFieldIdMetadataKey, fieldSchema.fieldID)
 
     if (MilvusTypes.isDenseVectorType(fieldSchema.dataType)) {
       fieldSchema.typeParams

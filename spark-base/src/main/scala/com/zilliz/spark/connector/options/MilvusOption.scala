@@ -139,8 +139,6 @@ object MilvusOption {
   val WriterCustomPath = "milvus.writer.customPath"
   val WriterCommitType =
     "milvus.writer.commitType" // "addfield" for backfill, default "addfiles"
-  val WriterFieldIds =
-    "milvus.writer.fieldIds" // JSON map of field name -> field ID (e.g., "new_field:104,other_field:105")
   val WriterVariableWidthBytesPerValue =
     "milvus.writer.variableWidthBytesPerValue"
 
@@ -230,9 +228,15 @@ object MilvusOption {
     val hasSnapshotLists = nonEmptyOption(getOption, SnapshotManifests) ||
       nonEmptyOption(getOption, SnapshotV2Segments)
     val hasSnapshotPath = nonEmptyOption(getOption, SnapshotPath)
-    if (explicitSnapshotMode && !hasSnapshotLists && !hasSnapshotPath) {
+    // A schema alone is a snapshot with no segments: nothing to read, but
+    // everything a write needs.
+    val hasSchema = nonEmptyOption(getOption, SnapshotSchemaBytes) ||
+      nonEmptyOption(getOption, SnapshotSchemaJson)
+    if (
+      explicitSnapshotMode && !hasSnapshotLists && !hasSnapshotPath && !hasSchema
+    ) {
       throw new IllegalArgumentException(
-        s"$SnapshotMode=true requires $SnapshotPath, $SnapshotManifests or $SnapshotV2Segments"
+        s"$SnapshotMode=true requires $SnapshotPath, $SnapshotManifests, $SnapshotV2Segments or $SnapshotSchemaBytes"
       )
     }
     if (hasSnapshotPath && hasSnapshotLists) {
@@ -522,7 +526,6 @@ object MilvusOption {
   /** Generate vector dimension configuration key for a given field name Format:
     * vector.{fieldName}.dim
     */
-  def vectorDimKey(fieldName: String): String = s"vector.$fieldName.dim"
 
   /** Helper method to convert Map to CaseInsensitiveStringMap and create
     * MilvusOption

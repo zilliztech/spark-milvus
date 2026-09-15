@@ -274,13 +274,12 @@ case class BackfillConfig(
   def getS3WriteOptions(
       collectionId: Long,
       partitionId: Long,
-      segmentId: Long,
-      fieldNameToId: Map[String, Long] = Map.empty
+      segmentId: Long
   ): Map[String, String] = {
     val outputPath = customOutputPath.getOrElse(
       s"$s3RootPath/insert_log/$collectionId/$partitionId/$segmentId"
     )
-    getS3WriteOptionsForBasePath(outputPath, segmentId, fieldNameToId)
+    getS3WriteOptionsForBasePath(outputPath, segmentId)
   }
 
   /** Get S3 write options using a specific segment base path (e.g., from
@@ -288,10 +287,9 @@ case class BackfillConfig(
     */
   def getS3WriteOptionsForBasePath(
       segmentBasePath: String,
-      segmentId: Long,
-      fieldNameToId: Map[String, Long] = Map.empty
-  ): Map[String, String] = {
-    var opts = withS3Authentication(
+      segmentId: Long
+  ): Map[String, String] =
+    withS3Authentication(
       Map(
         "fs.storage_type" -> "remote",
         "fs.address" -> s3Endpoint,
@@ -307,14 +305,6 @@ case class BackfillConfig(
         "milvus.insertMaxBatchSize" -> batchSize.toString
       )
     )
-    // Pass field name -> field ID mapping for correct column naming
-    if (fieldNameToId.nonEmpty) {
-      opts = opts + ("milvus.writer.fieldIds" -> fieldNameToId
-        .map { case (k, v) => s"$k:$v" }
-        .mkString(","))
-    }
-    opts
-  }
 
   private[backfill] def withHadoopStorageAssumeRole(
       hadoopConf: Configuration,

@@ -137,6 +137,30 @@ Each Spark partition is one segment. For a segment with `storage_version = 3`, `
 | `milvus.read.columnar` | Boolean | No | false | How the scan delivers rows. With the default `false` Spark gets one row at a time. Set to `true` and it gets whole batches (`ColumnarBatch`), with vector columns typed as `milvus.read.vector.raw` decides. A batch with deleted rows is delivered as the surviving rows, because Spark's `ColumnarBatch` has no way to mark a row invalid |
 
 
+### 2.4 Write Parameters
+
+`df.write.format("milvus").mode("append")` writes the DataFrame as Milvus
+segments straight to object storage; no Milvus service is involved and nothing
+is registered. The table is resolved the same way as for a read, so the
+collection schema comes from one of: `milvus.uri` plus the collection name
+(the latest snapshot of the collection), `milvus.snapshot.path`, or
+`milvus.snapshot.schema.bytes` (a schema alone, for a write with no snapshot
+at all). Field ids and vector dimensions come from that schema.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `fs.root_path` | String | No | `files` | The job writes under `{root}/staging/{job-id}/`: one segment directory per Spark partition, then `manifest.json` (every segment's path, manifest version and row count) and the marker `_committed`. |
+| `MilvusOption.MilvusInsertMaxBatchSize` | Int | No | 1000 | Rows per Arrow batch handed to the native writer. |
+| `milvus.writer.variableWidthBytesPerValue` | Double | No | 32.0 | Initial bytes reserved per value of a variable-width column (strings, JSON, binary). |
+
+What the write checks before any task starts: every DataFrame column is a
+field of the collection with the same Spark type as a read gives it (vector
+columns may also be the raw `BinaryType` bytes); every field except Milvus
+function outputs is present (give a nullable field a null column); the
+collection does not use `autoID` or a partition key. Only `mode("append")` is
+supported: `overwrite` needs truncate and is refused by Spark, and
+`errorIfExists`/`ignore` are not supported by Spark for this kind of source.
+
 ### 2.5 Offline Backup Read Parameters
 
 Read a binlog-format milvus-backup export as a DataFrame without any Milvus
@@ -179,6 +203,24 @@ val df = spark.read
   .option(MilvusOption.ReaderFieldIDs, "1,2,100,101")  // Read only specified fields
   .load()
 ```
+
+### 3.2 Writing Data
+
+```scala
+df.write
+  .format("milvus")
+  .mode("append")
+  .option(MilvusOption.MilvusUri, "http://localhost:19530")
+  .option(MilvusOption.MilvusToken, "your-token")
+  .option(MilvusOption.MilvusCollectionName, "your_collection")
+  .option("fs.root_path", "files")           // plus the fs.* storage options
+  .save()
+```
+
+The segments land under `files/staging/<job-id>/` with a job manifest; they
+become part of the collection only when registered (a later step, see
+`docs/design/capabilities.md` A4). A rerun of a job that already committed
+writes nothing.
 
 
 ## 4. Data Schema

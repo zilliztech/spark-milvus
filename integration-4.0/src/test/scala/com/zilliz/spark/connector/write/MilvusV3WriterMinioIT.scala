@@ -9,6 +9,8 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.write.MilvusV3Writer
+import io.milvus.grpc.common.KeyValuePair
+import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 /** Integration tests for [[MilvusV3Writer]].
   *
@@ -47,8 +49,29 @@ class MilvusV3WriterMinioIT extends AnyFunSuite with Matchers {
         MilvusOption.MilvusCollectionName -> "test_collection"
       )
 
-      // Write using MilvusV3Writer API
-      val result = MilvusV3Writer.writeDataFrame(testData, options)
+      val collection = CollectionSchema(
+        name = "test_collection",
+        fields = Seq(
+          FieldSchema(
+            fieldID = 100,
+            name = "int64_field",
+            dataType = DataType.Int64,
+            isPrimaryKey = true
+          ),
+          FieldSchema(
+            fieldID = 101,
+            name = "int32_field",
+            dataType = DataType.Int32
+          ),
+          FieldSchema(
+            fieldID = 102,
+            name = "string_field",
+            dataType = DataType.VarChar,
+            typeParams = Seq(KeyValuePair("max_length", "64"))
+          )
+        )
+      )
+      val result = MilvusV3Writer.writeDataFrame(testData, options, collection)
 
       result match {
         case Success(manifestPaths) =>
@@ -91,12 +114,26 @@ class MilvusV3WriterMinioIT extends AnyFunSuite with Matchers {
         StorageProperties.AccessKeyValue -> "minioadmin",
         StorageProperties.UseSSL -> "false",
         StorageProperties.Region -> "us-east-1",
-        MilvusOption.MilvusCollectionName -> "vector_test_collection",
-        "vector.vector.dim" -> "4" // Specify vector dimension
+        MilvusOption.MilvusCollectionName -> "vector_test_collection"
       )
-
-      // Write using MilvusV3Writer API
-      val result = MilvusV3Writer.writeDataFrame(testData, options)
+      val collection = CollectionSchema(
+        name = "vector_test_collection",
+        fields = Seq(
+          FieldSchema(
+            fieldID = 100,
+            name = "id",
+            dataType = DataType.Int64,
+            isPrimaryKey = true
+          ),
+          FieldSchema(
+            fieldID = 101,
+            name = "vector",
+            dataType = DataType.FloatVector,
+            typeParams = Seq(KeyValuePair("dim", "4"))
+          )
+        )
+      )
+      val result = MilvusV3Writer.writeDataFrame(testData, options, collection)
 
       result match {
         case Success(manifestPaths) =>

@@ -13,11 +13,6 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, SaveMode}
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.connector.catalog.{
-  SupportsWrite,
-  Table,
-  TableCapability
-}
 import org.apache.spark.sql.connector.write.{
   BatchWrite,
   DataWriter,
@@ -49,48 +44,35 @@ import com.zilliz.milvus.storage.write.exec.{
 import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 import com.zilliz.spark.connector.types.{SparkSchemaMapper, SparkTypes}
 import com.zilliz.spark.connector.types.ArrowConverter
-import io.milvus.grpc.schema.{DataType => MilvusDataType}
+import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 
-/** Write support for `storage_version = 3`: parquet column groups under a
-  * manifest, written through milvus-storage's `loon_*` writer. V2 and V3 in
-  * this repository always mean the snapshot's `storage_version`; milvus-storage
-  * calls the same manifest format its "format v2".
-  */
-case class MilvusV3WriteTable(
-    milvusOption: MilvusOption,
-    sparkSchema: StructType
-) extends Table
-    with SupportsWrite
-    with Logging {
-
-  override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
-    new MilvusV3WriteBuilder(sparkSchema, milvusOption)
-  }
-
-  override def name(): String =
-    s"MilvusV3Write[${milvusOption.collectionName}]"
-
-  override def schema(): StructType = sparkSchema
-
-  override def capabilities(): ju.Set[TableCapability] = {
-    Set[TableCapability](
-      TableCapability.BATCH_WRITE
-    ).asJava
-  }
-}
-
-/** Write builder for Storage V2
+/** The write builder `MilvusTable.newWriteBuilder` returns: `build()` checks
+  * the DataFrame's schema against the collection's (`WriteSchema`) and the
+  * write goes out as `storage_version = 3` segments, parquet column groups
+  * under a manifest written through milvus-storage's `loon_*` writer. V2 and V3
+  * in this repository always mean the snapshot's `storage_version`;
+  * milvus-storage calls the same manifest format its "format v2".
+  *
+  * @param dataFrameSchema
+  *   what Spark passed in `LogicalWriteInfo`: the DataFrame's own schema
+  * @param collection
+  *   the collection schema of the snapshot the table was resolved from
   */
 class MilvusV3WriteBuilder(
-    schema: StructType,
+    dataFrameSchema: StructType,
+    collection: CollectionSchema,
     milvusOption: MilvusOption
 ) extends WriteBuilder
     with Logging {
 
-  override def build(): Write = new MilvusV3Write(schema, milvusOption)
+  override def build(): Write = new MilvusV3Write(
+    WriteSchema.resolve(dataFrameSchema, collection, WriteSchema.Mode.Append),
+    milvusOption
+  )
 }
 
-/** The V3 write.
+/** The V3 write. `schema` is the resolved write schema: every column carries
+  * its Milvus type, field id and, for dense vectors, dimension.
   */
 class MilvusV3Write(
     schema: StructType,
@@ -243,13 +225,20 @@ class MilvusV3PartitionWriter(
 
   private val allocator = new RootAllocator(Long.MaxValue)
 
-  private val vectorDimensions =
-    extractVectorDimensions(sparkSchema, milvusOption)
-  private val fieldIds = parseFieldIds(milvusOption)
+  // Field ids and dimensions come from the column metadata WriteSchema put
+  // there; a column without a field id would be named by position, which
+  // does not match any collection field, so it is refused.
+  private val fieldIds: Map[String, Long] = sparkSchema.fields.map { f =>
+    if (!f.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey)) {
+      throw new IllegalArgumentException(
+        s"Column '${f.name}' carries no Milvus field id; resolve the schema through WriteSchema first"
+      )
+    }
+    f.name -> f.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
+  }.toMap
   private val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(
     sparkSchema,
-    vectorDimensions,
-    fieldIds
+    fieldIds = fieldIds
   )
 
   // The segment directory: `milvus.writer.customPath` names it outright
@@ -381,53 +370,6 @@ class MilvusV3PartitionWriter(
     r.setRowCount(0)
   }
 
-  /** Vector dimensions from `vector.<field>.dim` options, for the dense vector
-    * fields of the schema.
-    */
-  private def extractVectorDimensions(
-      schema: StructType,
-      option: MilvusOption
-  ): Map[String, Int] = {
-    val vectorFields = schema.fields.collect {
-      case field
-          if field.metadata.contains(
-            FieldMetadata.MilvusDataTypeMetadataKey
-          ) && MilvusTypes.isDenseVectorType(
-            MilvusDataType.fromValue(
-              field.metadata
-                .getLong(FieldMetadata.MilvusDataTypeMetadataKey)
-                .toInt
-            )
-          ) =>
-        field.name
-      case field @ StructField(_, ArrayType(FloatType, _), _, _) => field.name
-    }
-    vectorFields.flatMap { fieldName =>
-      option.options.get(MilvusOption.vectorDimKey(fieldName)).flatMap {
-        dimStr =>
-          Try(dimStr.toInt).toOption.map(fieldName -> _)
-      }
-    }.toMap
-  }
-
-  /** `milvus.writer.fieldIds`: `name:id,name:id`. */
-  private def parseFieldIds(option: MilvusOption): Map[String, Long] = {
-    option.options
-      .get(MilvusOption.WriterFieldIds.toLowerCase)
-      .map { str =>
-        str
-          .split(",")
-          .flatMap { pair =>
-            val parts = pair.split(":", 2)
-            if (parts.length == 2) {
-              Try(parts(1).trim.toLong).toOption.map(parts(0).trim -> _)
-            } else None
-          }
-          .toMap
-      }
-      .getOrElse(Map.empty)
-  }
-
   /** Releases the native writer and every Arrow resource. Idempotent: Spark
     * calls commit and then close, and abort reaches it too.
     */
@@ -455,62 +397,61 @@ case class MilvusV3CommitMessage(
     committedVersion: Long
 ) extends WriterCommitMessage
 
-/** Helper object for DataFrame write operations
+/** The direct entry point, for callers that are not Spark's write protocol:
+  * backfill and the tests. `df.write.format("milvus")` goes through
+  * `MilvusTable.newWriteBuilder` and ends in the same `MilvusV3BatchWrite`.
   */
 object MilvusV3Writer extends Logging {
 
-  /** Write a DataFrame to S3 using Storage V2 format (FFI) This method writes
-    * directly to S3 without connecting to Milvus
+  /** Writes a DataFrame as V3 segments, one per Spark partition, and commits
+    * the job through `core.write.commit`.
     *
-    * @param df
-    *   DataFrame to write
-    * @param options
-    *   S3 configuration and write options Required options:
-    *   - fs.endpoint or fs.address: S3 endpoint (e.g., "localhost:9000")
-    *   - fs.bucket_name: S3 bucket name
-    *   - fs.access_key_id: S3 access key
-    *   - fs.access_key_value: S3 secret key
-    *   - fs.use_ssl: "true" or "false" Optional:
-    *   - fs.root_path: Root path in bucket (default: "files")
-    *   - milvus.collection.name: Collection name for path generation
-    *   - vector.{field_name}.dim: Vector dimension for float array fields
-    *   - milvus.writer.variableWidthBytesPerValue: initial bytes per
-    *     variable-width value (default: 32.0)
+    * The columns are checked against `collection` first: with
+    * `milvus.writer.commitType=addfield` (backfill) only the given columns have
+    * to be fields; otherwise the DataFrame has to carry every field. The `fs.*`
+    * options name the storage; `fs.root_path` is the root the staging prefix
+    * goes under; `milvus.writer.customPath` names an existing segment directory
+    * instead (backfill).
+    *
     * @return
-    *   Try containing manifest paths on success
+    *   the base path of every segment written
     */
   def writeDataFrame(
       df: DataFrame,
-      options: Map[String, String]
+      options: Map[String, String],
+      collection: CollectionSchema
   ): Try[Seq[String]] = {
 
     try {
       val optionsMap = new CaseInsensitiveStringMap(options.asJava)
       val milvusOption = MilvusOption(optionsMap)
-
-      // Write using Storage V2 FFI directly
-      val manifestPaths = writeV3(df, milvusOption)
-
-      Success(manifestPaths)
-
+      val mode =
+        if (
+          milvusOption.options
+            .get(MilvusOption.WriterCommitType.toLowerCase)
+            .contains("addfield")
+        ) WriteSchema.Mode.Columns
+        else WriteSchema.Mode.Append
+      val schema = WriteSchema.resolve(df.schema, collection, mode)
+      Success(writeV3(df, schema, milvusOption))
     } catch {
       case e: Exception =>
-        logError(s"Failed to write DataFrame to Storage V2: ${e.getMessage}", e)
+        logError(
+          s"Failed to write DataFrame as V3 segments: ${e.getMessage}",
+          e
+        )
         Failure(e)
     }
   }
 
-  /** Internal method to write using Storage V2 API
-    */
   private def writeV3(
       df: DataFrame,
+      schema: StructType,
       milvusOption: MilvusOption
   ): Seq[String] = {
 
-    val sparkSchema = df.schema
-
     // Create batch write
-    val batchWrite = new MilvusV3BatchWrite(sparkSchema, milvusOption)
+    val batchWrite = new MilvusV3BatchWrite(schema, milvusOption)
     val writerFactory = batchWrite.createBatchWriterFactory(null)
 
     // Execute write on each partition using queryExecution to get InternalRow

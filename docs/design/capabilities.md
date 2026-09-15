@@ -34,7 +34,7 @@
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
-| W1 | append 写新段 | `df.writeTo("milvus.db.coll").append()`；catalog（R1）落地前是 `df.write.format("milvus").mode("append")`，设计见 [write.html](architecture/write.html) | spark.write、core.write.exec、core.write.commit | 登记见 A4；RegisterSegments 未到位前不能交付，写出的段留在暂存前缀。对照 Milvus 自己写的 V3 段，连接器写的段还差三样才能被 Milvus 加载：系统字段 RowID（0）和 Timestamp（1）、主键的 bloom filter 统计（`_stats/bloom_filter.<pk>`，登记进清单的 stats）、列组切分要按 Milvus 的策略（系统字段一组，其余每字段一组）（2026-09-15 对照） | P1 |
+| W1 | append 写新段 | `df.writeTo("milvus.db.coll").append()`；catalog（R1）落地前是 `df.write.format("milvus").mode("append")`（2026-09-15 接通，UAT 验过），设计见 [write.html](architecture/write.html) | spark.write、core.write.exec、core.write.commit | 登记见 A4；RegisterSegments 未到位前不能交付，写出的段留在暂存前缀。对照 Milvus 自己写的 V3 段，连接器写的段还差三样才能被 Milvus 加载：系统字段 RowID（0）和 Timestamp（1）、主键的 bloom filter 统计（`_stats/bloom_filter.<pk>`，登记进清单的 stats）、列组切分要按 Milvus 的策略（系统字段一组，其余每字段一组）（2026-09-15 对照） | P1 |
 | W2 | backfill 只写新列组 | `.option("milvus.write.mode","backfill").option("milvus.write.columns","f")` | spark.write、core.write | AddCollectionField 先于登记；目标段必须 Flushed；段的 base_path 和 Manifest 版本只能从快照 metadata 取（README 第 5 节缺 API）；无段级冻结，与 compaction、索引、schema 变更竞争；写侧分布与排序见决策 10；登记见 A4 | P2 |
 | W3 | 原子提交 | 自动；暂存前缀、作业清单、幂等 commit、abort 清理 | core.write.commit | 暂存前缀避开 `insert_log`，否则 86400 秒后被 GC 回收 | P1 |
 | W4 | truncate 和 overwrite | `.overwrite()`，只接受全表 | spark.write | 登记见 A4 | P1 |
@@ -101,7 +101,7 @@ issue #125 的[索引查询开发方案](architecture/vector-search.html)处于�
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
 | G1 | 表 option | 快照名或时间点、`milvus.filter`、分区和段选择 | spark.options | R2、R7、R16 | P1 |
-| G2 | 写 option | 写完自动建快照、单段文件大小上限、写模式与列、索引参数 | spark.options → core.write | W2、W6；替代 1.x 的 `milvus.writer.commitType`、`milvus.writer.fieldIds` | P1 |
+| G2 | 写 option | 写完自动建快照、单段文件大小上限、写模式与列、索引参数 | spark.options → core.write | W2、W6；替代 1.x 的 `milvus.writer.commitType`（`milvus.writer.fieldIds` 与 `vector.<f>.dim` 已于 2026-09-15 删除，字段 id 和维度从 collection schema 取） | P1 |
 | G3 | 会话配置：内存与批 | off-heap 预算、批大小、预取上限 | spark.options → core.read.exec | 替代 1.x 的 `milvus.insertMaxBatchSize`、`s3.preloadPoolSize` | P1 |
 | G5 | 指标 | 会话配置开关；读写吞吐、拷贝次数、JNI 跨界耗时、native 内存占用 | native-storage 的 JNI 层留计数器，spark 层汇总 | 没有指标口径就量不出「拷贝 6 次降到 2 次」；native 分配的 buffer 归谁记账要和 G3 的 off-heap 预算对齐 | P1 |
 | G4 | 会话配置：索引与 GPU | 索引缓存上限、GPU 开关、两套服务的地址和凭证 | spark.options → core.index、core.credential | V4；GPU 产物见 README 2.7 | P2 |

@@ -204,11 +204,6 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     MilvusOption.isInt64PK("") shouldBe false
   }
 
-  test("vectorDimKey generates correct key format") {
-    MilvusOption.vectorDimKey("embedding") shouldBe "vector.embedding.dim"
-    MilvusOption.vectorDimKey("my_vector") shouldBe "vector.my_vector.dim"
-  }
-
   test("Parse TLS/SSL configuration") {
     val options = Map(
       MilvusOption.MilvusUri -> "https://milvus.example.com:19530",

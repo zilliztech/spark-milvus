@@ -6,10 +6,12 @@ import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.connector.catalog.{
   SupportsRead,
+  SupportsWrite,
   Table,
   TableCapability
 }
 import org.apache.spark.sql.connector.read.ScanBuilder
+import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.types.{
   LongType,
   MetadataBuilder,
@@ -20,10 +22,11 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
-import com.zilliz.milvus.storage.snapshot.Snapshot
+import com.zilliz.milvus.storage.snapshot.{Snapshot, SnapshotOrigin}
 import com.zilliz.spark.connector.options.{MilvusOption, ReadMode}
 import com.zilliz.spark.connector.read.MilvusScanBuilder
 import com.zilliz.spark.connector.types.SparkTypes
+import com.zilliz.spark.connector.write.MilvusV3WriteBuilder
 
 /** One collection as one read sees it: the [[Snapshot]] `getTable` resolved
   * through `SnapshotSources`, the Spark schema derived from it, and the scan
@@ -39,7 +42,8 @@ case class MilvusTable(
     milvusOption: MilvusOption,
     sparkSchema: Option[StructType]
 ) extends Table
-    with SupportsRead {
+    with SupportsRead
+    with SupportsWrite {
   // Vector columns come out as stored bytes when the read asks for them raw,
   // which changes the schema, so it is read here rather than at the reader.
   private val rawVectors: Boolean = MilvusOption.readVectorRaw(
@@ -273,9 +277,18 @@ case class MilvusTable(
     appendExtraColumns(StructType(fields), rejectLegacyAliases = false)
   }
 
+  /** The write goes through the same snapshot's collection schema. A backup is
+    * an exported, read-only copy, so a table resolved from one does not take
+    * writes.
+    */
+  override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder =
+    new MilvusV3WriteBuilder(info.schema(), snapshot.schema, milvusOption)
+
   override def capabilities(): ju.Set[TableCapability] = {
-    Set[TableCapability](
-      TableCapability.BATCH_READ
-    ).asJava
+    val writable = snapshot.origin match {
+      case SnapshotOrigin.Backup(_) => Set.empty[TableCapability]
+      case _                        => Set(TableCapability.BATCH_WRITE)
+    }
+    (Set[TableCapability](TableCapability.BATCH_READ) ++ writable).asJava
   }
 }

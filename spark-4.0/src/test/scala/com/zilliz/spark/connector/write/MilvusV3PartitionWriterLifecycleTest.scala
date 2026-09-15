@@ -11,6 +11,7 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.spark.connector.options.MilvusOption
+import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 /** The writer's resource lifecycle against the real native writer.
   *
@@ -38,11 +39,21 @@ class MilvusV3PartitionWriterLifecycleTest extends AnyFunSuite with Matchers {
         cancel("libnative-storage-jni is not on this machine")
     }
 
-  private val schema = StructType(
-    Seq(
-      StructField("id", LongType, nullable = false),
-      StructField("Timestamp", LongType, nullable = false)
-    )
+  private val schema = WriteSchema.resolve(
+    StructType(
+      Seq(
+        StructField("id", LongType, nullable = false),
+        StructField("Timestamp", LongType, nullable = false)
+      )
+    ),
+    CollectionSchema(
+      name = "lifecycle",
+      fields = Seq(
+        FieldSchema(fieldID = 100, name = "id", dataType = DataType.Int64),
+        FieldSchema(fieldID = 1, name = "Timestamp", dataType = DataType.Int64)
+      )
+    ),
+    WriteSchema.Mode.Columns
   )
 
   private def writerFor(dir: Path): MilvusV3PartitionWriter = {
@@ -50,7 +61,6 @@ class MilvusV3PartitionWriterLifecycleTest extends AnyFunSuite with Matchers {
     options.put("fs.storage_type", "local")
     options.put("fs.root_path", dir.toAbsolutePath.toString)
     options.put(MilvusOption.WriterCustomPath, "segment-0")
-    options.put(MilvusOption.WriterFieldIds, "id:100,Timestamp:1")
     new MilvusV3PartitionWriter(
       partitionId = 0,
       taskId = 0L,

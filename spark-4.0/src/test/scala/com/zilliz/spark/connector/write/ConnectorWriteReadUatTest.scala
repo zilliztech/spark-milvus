@@ -3,8 +3,8 @@ package com.zilliz.spark.connector.write
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 
+import org.apache.spark.sql.{AnalysisException, SparkSession}
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -24,9 +24,12 @@ import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 /** The connector alone, against the UAT bucket, with no Milvus service: a
-  * DataFrame is written as V3 segments through the connector's writer, and the
-  * same rows are read back through `format("milvus")` from the segment
-  * manifests the write produced (capabilities W1's write half and R3).
+  * DataFrame is written as V3 segments through
+  * `df.write.format("milvus").mode("append")`, the job manifest the commit
+  * wrote names the segments, and the same rows are read back through
+  * `format("milvus")` from those segment manifests (capabilities W1's write
+  * half, W3 and R3). The write is pure-connector: the collection schema comes
+  * from `milvus.snapshot.schema.bytes`, nothing is registered.
   *
   * Cancels unless the bucket is named:
   * {{{
@@ -61,8 +64,8 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
     )
   }
 
-  /** The collection schema the read needs, as the protobuf the snapshot would
-    * carry. Field ids match `milvus.writer.fieldIds` below.
+  /** The collection schema both the write and the read take, as the protobuf a
+    * snapshot would carry: field ids and the vector dimension come from it.
     */
   private val schemaBytes: String = Base64.getEncoder.encodeToString(
     CollectionSchema(
@@ -111,41 +114,71 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
         )
         .repartition(2)
 
-      // --- write: two tasks, two V3 segments under {root}/staging/{job}/ ---
-      val writeOptions = storage ++ Map(
+      // --- the table: snapshot mode with only a schema, no segments ---
+      val tableOptions = storage ++ Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotSchemaBytes -> schemaBytes,
+        MilvusOption.SnapshotCollectionId -> "1",
+        MilvusOption.SnapshotPartitionIds -> "0",
         MilvusOption.MilvusCollectionName -> "connector_rt",
-        MilvusOption.WriterFieldIds -> "id:100,name:101,v:102",
-        MilvusOption.vectorDimKey("v") -> dim.toString,
         MilvusOption.MilvusInsertMaxBatchSize -> "1000"
       )
-      val basePaths = MilvusV3Writer.writeDataFrame(df, writeOptions).get
-      info(s"wrote ${basePaths.size} segment(s): ${basePaths.mkString(", ")}")
-      basePaths.size shouldBe 2
 
-      // --- commit: the job manifest and the marker sit next to the segments ---
-      val jobPrefix = "(.*/staging/[^/]+)/".r
-        .findFirstMatchIn(basePaths.head)
-        .map(_.group(1))
-        .getOrElse(fail(s"no staging prefix in ${basePaths.head}"))
+      // --- what the write protocol refuses before any task starts ---
+      val overwrite = intercept[AnalysisException](
+        df.write.format("milvus").mode("overwrite").options(tableOptions).save()
+      )
+      info(
+        s"overwrite refused by Spark: ${overwrite.getMessage.linesIterator.next()}"
+      )
+      val incomplete = intercept[Exception](
+        df.drop("v")
+          .write
+          .format("milvus")
+          .mode("append")
+          .options(tableOptions)
+          .save()
+      )
+      incomplete.getMessage should include("missing from the DataFrame")
+
+      // --- write: two tasks, two V3 segments under {root}/staging/{job}/ ---
+      df.write.format("milvus").mode("append").options(tableOptions).save()
+
+      // --- commit: the job is the one staging prefix with a marker ---
+      val root = storage(StorageProperties.RootPath)
       val store = HadoopStorageKeys.storeFrom(storage)
-      val manifest =
+      val (layout, manifest) =
         try {
-          store.exists(s"$jobPrefix/_committed") shouldBe true
-          JobManifest
+          val committed = store
+            .list(s"$root/staging", recursive = false)
+            .filter(_.isDirectory)
+            .map(d =>
+              StagingLayout(root, d.path.stripSuffix("/").split("/").last)
+            )
+            .filter(l => store.exists(l.marker))
+          withClue(
+            s"one committed job expected under $root/staging; clean the prefix if earlier runs left markers: "
+          )(committed.size shouldBe 1)
+          val layout = committed.head
+          val manifest = JobManifest
             .fromJson(
-              new String(
-                store.readAll(s"$jobPrefix/manifest.json"),
-                StandardCharsets.UTF_8
-              )
+              new String(store.readAll(layout.manifest), StandardCharsets.UTF_8)
             )
             .fold(e => throw e, identity)
+          (layout, manifest)
         } finally store.close()
       info(
         s"job manifest: ${manifest.jobId}, ${manifest.segments.size} segments, ${manifest.rowCount} rows"
       )
-      manifest.segments.map(_.basePath).sorted shouldBe basePaths.sorted
+      manifest.jobId shouldBe layout.jobId
+      manifest.segments.size shouldBe 2
       manifest.rowCount shouldBe rows.toLong
-      manifest.segments.foreach(_.manifestVersion shouldBe 1L)
+      manifest.segments.foreach { seg =>
+        seg.manifestVersion shouldBe 1L
+        seg.basePath should startWith(layout.prefix + "/")
+      }
+      val basePaths = manifest.segments.map(_.basePath)
+      info(s"wrote ${basePaths.size} segment(s): ${basePaths.mkString(", ")}")
 
       // --- read: the manifests the write produced, no service in between ---
       val manifests = SegmentListJson.encodeManifestItems(
@@ -153,14 +186,8 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
           ManifestItemJson(i + 1L, s"""{"ver":-1,"base_path":"$path"}""")
         }
       )
-      val readOptions = storage ++ Map(
-        MilvusOption.SnapshotMode -> "true",
-        MilvusOption.SnapshotManifests -> manifests,
-        MilvusOption.SnapshotSchemaBytes -> schemaBytes,
-        MilvusOption.SnapshotCollectionId -> "1",
-        MilvusOption.SnapshotPartitionIds -> "0",
-        MilvusOption.MilvusCollectionName -> "connector_rt"
-      )
+      val readOptions =
+        tableOptions + (MilvusOption.SnapshotManifests -> manifests)
       val back = spark.read.format("milvus").options(readOptions).load()
       info(s"schema: ${back.schema.treeString}")
       val got = back.collect().map(r => r.getLong(0) -> r).toMap
@@ -182,16 +209,13 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
       // directory delete and refuses them as "not a file" ---
       val cleanup = HadoopStorageKeys.storeFrom(storage)
       try {
-        val layout =
-          StagingLayout(storage(StorageProperties.RootPath), manifest.jobId)
-        layout.prefix shouldBe jobPrefix
         val deleted = new Committer(cleanup, layout).abort()
-        info(s"abort deleted $deleted files under $jobPrefix")
+        info(s"abort deleted $deleted files under ${layout.prefix}")
         deleted should be >= 6 // two parquet, two manifests, manifest.json, _committed
         cleanup
-          .list(jobPrefix, recursive = true)
+          .list(layout.prefix, recursive = true)
           .filterNot(_.isDirectory) shouldBe empty
-        cleanup.exists(s"$jobPrefix/_committed") shouldBe false
+        cleanup.exists(layout.marker) shouldBe false
       } finally cleanup.close()
     } finally spark.stop()
   }
