@@ -9,8 +9,8 @@ import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.Logging
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.milvus.storage.Logging
 
 /** Pulls Arrow batches out of one segment.
   *

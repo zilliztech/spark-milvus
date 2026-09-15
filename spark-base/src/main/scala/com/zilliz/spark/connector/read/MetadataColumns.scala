@@ -6,8 +6,8 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnVector
 import org.apache.spark.unsafe.types.UTF8String
 
-import com.zilliz.spark.connector.types.{ConstantColumn, RowOffsetColumn}
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.types.{ConstantColumn, RowOffsetColumn}
 
 /** The three columns that describe where a row came from rather than what it
   * holds: which partition, which segment, and its offset within the segment.

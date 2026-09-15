@@ -388,7 +388,7 @@ class SchemaUtilTest extends AnyFunSuite with Matchers {
 
   test("Milvus vector metadata produces exact internal Arrow types") {
     import com.zilliz.spark.connector.types.SparkSchemaMapper
-        import io.milvus.grpc.schema.{DataType => MilvusDataType}
+    import io.milvus.grpc.schema.{DataType => MilvusDataType}
     import org.apache.arrow.vector.types.pojo.ArrowType
     import org.apache.spark.sql.types._
 

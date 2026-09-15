@@ -10,8 +10,8 @@ package com.zilliz.milvus.storage.path
   *
   * The Milvus three-segment form `scheme://address/bucket/key` is not produced
   * here, but it is read: DescribeSnapshot's `s3_location` is
-  * `https://<endpoint>/<bucket>/<key>`, and for `http`/`https` the authority
-  * is the endpoint and the first path segment is the bucket.
+  * `https://<endpoint>/<bucket>/<key>`, and for `http`/`https` the authority is
+  * the endpoint and the first path segment is the bucket.
   */
 object StoragePath {
 

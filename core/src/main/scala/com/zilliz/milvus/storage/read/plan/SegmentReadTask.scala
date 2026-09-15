@@ -132,8 +132,8 @@ final case class SegmentReadTask(
   }
 }
 
-/** A whole read: one [[SegmentReadTask]] per partition, plus what planning already
-  * knows about the total.
+/** A whole read: one [[SegmentReadTask]] per partition, plus what planning
+  * already knows about the total.
   *
   * The totals are what a Spark `Statistics` reports (capability R13). They are
   * options because a manifest layout does not reveal its row count on the

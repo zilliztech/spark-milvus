@@ -12,8 +12,8 @@ import com.zilliz.milvus.storage.read.exec.{
 }
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.SchemaMapper
-import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
 
 /** Everything a reader has to work out before it can open a segment: which
   * columns to ask the native layer for, what to call them, and how to tell a
@@ -52,9 +52,9 @@ sealed trait ColumnBinding {
     *
     * The manifest line names every column by field id, so `vec` is read from
     * the Arrow column `101`; the column-group line keeps the field's own name
-    * and only renames the system fields, where `row_id` is read from `RowID`.
-    * A reader that looks the Spark name up directly finds no column and fails
-    * on the first batch.
+    * and only renames the system fields, where `row_id` is read from `RowID`. A
+    * reader that looks the Spark name up directly finds no column and fails on
+    * the first batch.
     *
     * Absent means the two names are the same, which is why [[arrowColumnFor]]
     * rather than the map is what readers call.
@@ -133,7 +133,7 @@ object ColumnBinding {
       partition: MilvusInputPartition,
       schema: StructType
   ): ColumnBinding = partition match {
-    case p: MilvusV2InputPartition  => V2ColumnBinding(p, schema)
+    case p: MilvusV2InputPartition => V2ColumnBinding(p, schema)
     case p: MilvusV3InputPartition => V3ColumnBinding(p, schema)
   }
 }

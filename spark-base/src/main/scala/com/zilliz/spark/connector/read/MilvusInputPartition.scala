@@ -34,11 +34,11 @@ case class MilvusV3InputPartition(
 /** InputPartition for milvus-segment-info `storage_version = 2` — the
   * non-manifest packed-parquet format. No `.milvus_manifest` file exists; the
   * column-group layout is recovered from the snapshot AVRO + parquet footer
-  * kv-metadata by [[SegmentManifestReader]] +
-  * [[ParquetFooterReader]] on the driver, and arrives here inside `task`
-  * as `SegmentLayout.ColumnGroups`: one group per physical parquet file set.
-  * The reader projects `task.neededFieldIds` across them and only opens the
-  * files of the groups carrying those columns.
+  * kv-metadata by [[SegmentManifestReader]] + [[ParquetFooterReader]] on the
+  * driver, and arrives here inside `task` as `SegmentLayout.ColumnGroups`: one
+  * group per physical parquet file set. The reader projects
+  * `task.neededFieldIds` across them and only opens the files of the groups
+  * carrying those columns.
   */
 case class MilvusV2InputPartition(
     task: SegmentReadTask, // What to read: layout, schema, fs.* map, deletes

@@ -22,7 +22,11 @@ class LimitedReadersTest extends AnyFunSuite with Matchers {
 
   test("a row reader stops after the limit") {
     val r = new LimitedRowReader(new Rows(Seq(1L, 2L, 3L, 4L, 5L)), 3)
-    val seen = Iterator.continually(r.next()).takeWhile(identity).map(_ => r.get().getLong(0)).toList
+    val seen = Iterator
+      .continually(r.next())
+      .takeWhile(identity)
+      .map(_ => r.get().getLong(0))
+      .toList
     seen shouldBe List(1L, 2L, 3L)
   }
 
@@ -55,12 +59,15 @@ class LimitedReadersTest extends AnyFunSuite with Matchers {
       if (current != null) { current.close(); current = null }
       if (i >= sizes.size) return false
       val v = new BigIntVector("id", allocator)
-      v.allocateNew(sizes(i)); (0 until sizes(i)).foreach(j => v.setSafe(j, j.toLong)); v.setValueCount(sizes(i))
+      v.allocateNew(sizes(i));
+      (0 until sizes(i)).foreach(j => v.setSafe(j, j.toLong));
+      v.setValueCount(sizes(i))
       current = new ColumnarBatch(Array(new ArrowColumnVector(v)), sizes(i))
       true
     }
     override def get(): ColumnarBatch = current
-    override def close(): Unit = if (current != null) { current.close(); current = null }
+    override def close(): Unit =
+      if (current != null) { current.close(); current = null }
   }
 
   test("a batch reader cuts the last batch short and stops") {
@@ -75,7 +82,9 @@ class LimitedReadersTest extends AnyFunSuite with Matchers {
     } finally allocator.close()
   }
 
-  test("a batch limit that lands exactly on a boundary does not read another batch") {
+  test(
+    "a batch limit that lands exactly on a boundary does not read another batch"
+  ) {
     val allocator = new RootAllocator(Long.MaxValue)
     try {
       val r = new LimitedBatchReader(new Batches(Seq(3, 3), allocator), 3)

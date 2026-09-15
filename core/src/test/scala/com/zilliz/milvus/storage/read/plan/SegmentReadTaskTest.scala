@@ -11,8 +11,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.delete.DeletePlan
-import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 
 class SegmentReadTaskTest extends AnyFunSuite with Matchers {
 
@@ -125,9 +125,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     val plan = ReadPlan(
       Seq(
         v2Task,
-        v2Task.copy(layout =
-          SegmentLayout.Manifest("files/insert_log/1/2/4")
-        )
+        v2Task.copy(layout = SegmentLayout.Manifest("files/insert_log/1/2/4"))
       )
     )
     plan.totalRows shouldBe None
@@ -140,8 +138,7 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
 
   test("a plan counts the partitions that will evaluate deletes") {
     val withDeletes = v2Task.copy(
-      deletes =
-        DeleteSource.Materialized(DeletePlan.fromLongPks(Map(1L -> 1L)))
+      deletes = DeleteSource.Materialized(DeletePlan.fromLongPks(Map(1L -> 1L)))
     )
     ReadPlan(
       Seq(v2Task, withDeletes, withDeletes)

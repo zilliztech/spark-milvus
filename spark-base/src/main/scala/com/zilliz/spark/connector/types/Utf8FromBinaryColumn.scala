@@ -1,7 +1,11 @@
 package com.zilliz.spark.connector.types
 
+import java.nio.charset.{
+  CharacterCodingException,
+  CodingErrorAction,
+  StandardCharsets
+}
 import java.nio.ByteBuffer
-import java.nio.charset.{CharacterCodingException, CodingErrorAction, StandardCharsets}
 
 import org.apache.arrow.vector.VarBinaryVector
 import org.apache.spark.sql.types.{Decimal, StringType}

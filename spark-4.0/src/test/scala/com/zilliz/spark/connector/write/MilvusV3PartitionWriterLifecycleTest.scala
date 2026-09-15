@@ -21,9 +21,7 @@ import com.zilliz.spark.connector.options.MilvusOption
   * assertion cannot observe a double free — the process dies — so the check is
   * that the sequence completes at all.
   */
-class MilvusV3PartitionWriterLifecycleTest
-    extends AnyFunSuite
-    with Matchers {
+class MilvusV3PartitionWriterLifecycleTest extends AnyFunSuite with Matchers {
 
   private def skipWithoutLibrary(): Unit =
     try

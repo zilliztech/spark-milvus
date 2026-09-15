@@ -7,10 +7,10 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
-import com.zilliz.milvus.storage.snapshot.SegmentLayout
 
 /** The derivation both readers share.
   *

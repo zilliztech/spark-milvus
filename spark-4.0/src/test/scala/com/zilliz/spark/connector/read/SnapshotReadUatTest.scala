@@ -12,10 +12,10 @@ import com.zilliz.spark.connector.options.{
   V2SegmentResolvers
 }
 
-/** The whole read chain on a real snapshot in the UAT bucket: the snapshot
-  * JSON is read through `SnapshotCatalog` on the driver, planned into
-  * partitions, and every partition is read by the native reader on a local
-  * Spark executor. No Milvus service is involved (capability R3).
+/** The whole read chain on a real snapshot in the UAT bucket: the snapshot JSON
+  * is read through `SnapshotCatalog` on the driver, planned into partitions,
+  * and every partition is read by the native reader on a local Spark executor.
+  * No Milvus service is involved (capability R3).
   *
   * Cancels unless the environment names the snapshot:
   * {{{
@@ -34,7 +34,9 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
 
   private def storageOptions(): Map[String, String] = {
     val bucket = env("MILVUS_JNI_S3_BUCKET").getOrElse(
-      cancel("set MILVUS_JNI_S3_BUCKET, MILVUS_UAT_SNAPSHOT_PATH and AWS_* to reach the UAT bucket")
+      cancel(
+        "set MILVUS_JNI_S3_BUCKET, MILVUS_UAT_SNAPSHOT_PATH and AWS_* to reach the UAT bucket"
+      )
     )
     val region = env("MILVUS_JNI_S3_REGION").getOrElse("us-west-2")
     val endpoint =
@@ -51,7 +53,9 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
 
   private def snapshotPath(): String =
     env("MILVUS_UAT_SNAPSHOT_PATH").getOrElse(
-      cancel("set MILVUS_UAT_SNAPSHOT_PATH to a snapshot JSON in the UAT bucket")
+      cancel(
+        "set MILVUS_UAT_SNAPSHOT_PATH to a snapshot JSON in the UAT bucket"
+      )
     )
 
   /** Not part of the read. The other cases need a collection with flushed
@@ -59,10 +63,14 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
     * (capabilities C2 and A1) when `MILVUS_UAT_URI` is set, and prints the
     * snapshot location for `MILVUS_UAT_SNAPSHOT_PATH`.
     */
-  test("prepare: a collection with flushed rows and a snapshot of it (C2, A1)") {
+  test(
+    "prepare: a collection with flushed rows and a snapshot of it (C2, A1)"
+  ) {
     import io.milvus.grpc.schema._
     val uri = env("MILVUS_UAT_URI").getOrElse(
-      cancel("set MILVUS_UAT_URI (and MILVUS_UAT_TOKEN) to prepare a collection")
+      cancel(
+        "set MILVUS_UAT_URI (and MILVUS_UAT_TOKEN) to prepare a collection"
+      )
     )
     val collection = env("MILVUS_UAT_COLLECTION").getOrElse(
       "spark_uat_" + System.currentTimeMillis()
@@ -80,26 +88,75 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
         val schema = client.createCollectionSchema(
           name = collection,
           fields = Seq(
-            client.createCollectionField("id", isPrimary = true, dataType = DataType.Int64),
-            client.createCollectionField("name", dataType = DataType.VarChar, typeParams = Map("max_length" -> "64")),
-            client.createCollectionField("v", dataType = DataType.FloatVector, typeParams = Map("dim" -> dim.toString))
+            client.createCollectionField(
+              "id",
+              isPrimary = true,
+              dataType = DataType.Int64
+            ),
+            client.createCollectionField(
+              "name",
+              dataType = DataType.VarChar,
+              typeParams = Map("max_length" -> "64")
+            ),
+            client.createCollectionField(
+              "v",
+              dataType = DataType.FloatVector,
+              typeParams = Map("dim" -> dim.toString)
+            )
           )
         )
-        client.createCollection(collectionName = collection, schema = schema).get
+        client
+          .createCollection(collectionName = collection, schema = schema)
+          .get
         this.info(s"created collection $collection")
         val batch = 1000
         (0 until rows by batch).foreach { start =>
           val ids = (start until math.min(start + batch, rows)).map(_.toLong)
           val fields = Seq(
-            FieldData(`type` = DataType.Int64, fieldName = "id",
-              field = FieldData.Field.Scalars(ScalarField(data = ScalarField.Data.LongData(LongArray(data = ids))))),
-            FieldData(`type` = DataType.VarChar, fieldName = "name",
-              field = FieldData.Field.Scalars(ScalarField(data = ScalarField.Data.StringData(StringArray(data = ids.map(i => s"row-$i")))))),
-            FieldData(`type` = DataType.FloatVector, fieldName = "v",
-              field = FieldData.Field.Vectors(VectorField(dim = dim,
-                data = VectorField.Data.FloatVector(FloatArray(data = ids.flatMap(i => (0 until dim).map(d => (i * 10 + d).toFloat)))))))
+            FieldData(
+              `type` = DataType.Int64,
+              fieldName = "id",
+              field = FieldData.Field.Scalars(
+                ScalarField(data =
+                  ScalarField.Data.LongData(LongArray(data = ids))
+                )
+              )
+            ),
+            FieldData(
+              `type` = DataType.VarChar,
+              fieldName = "name",
+              field = FieldData.Field.Scalars(
+                ScalarField(data =
+                  ScalarField.Data.StringData(
+                    StringArray(data = ids.map(i => s"row-$i"))
+                  )
+                )
+              )
+            ),
+            FieldData(
+              `type` = DataType.FloatVector,
+              fieldName = "v",
+              field = FieldData.Field.Vectors(
+                VectorField(
+                  dim = dim,
+                  data = VectorField.Data.FloatVector(
+                    FloatArray(data =
+                      ids.flatMap(i =>
+                        (0 until dim).map(d => (i * 10 + d).toFloat)
+                      )
+                    )
+                  )
+                )
+              )
+            )
           )
-          client.insert(collectionName = collection, fieldsData = fields, numRows = ids.size).get
+          client
+            .insert(
+              collectionName = collection,
+              fieldsData = fields,
+              numRows = ids.size
+            )
+            .get
         }
         client.flush(collectionNames = Seq(collection)).get
         this.info(s"inserted $rows rows and flushed")
@@ -107,13 +164,23 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
       // Flush is asynchronous on the service and GetPersistentSegmentInfo is a
       // denied API on Zilliz Cloud, so the wait is a fixed pause; whether the
       // snapshot then holds every row is what the read cases check.
-      Thread.sleep(env("MILVUS_UAT_FLUSH_WAIT_MS").map(_.toLong).getOrElse(20000L))
+      Thread.sleep(
+        env("MILVUS_UAT_FLUSH_WAIT_MS").map(_.toLong).getOrElse(20000L)
+      )
       val name = "spark_uat_" + System.currentTimeMillis()
       val snapshot = client
-        .createSnapshotForRead("", collection, name, "spark-milvus UAT read", 86400L)
+        .createSnapshotForRead(
+          "",
+          collection,
+          name,
+          "spark-milvus UAT read",
+          86400L
+        )
         .get
       this.info(s"created snapshot ${snapshot.name} at ${snapshot.s3Location}")
-      this.info(s"export MILVUS_UAT_COLLECTION=$collection MILVUS_UAT_SNAPSHOT_PATH=${snapshot.s3Location}")
+      this.info(
+        s"export MILVUS_UAT_COLLECTION=$collection MILVUS_UAT_SNAPSHOT_PATH=${snapshot.s3Location}"
+      )
     } finally client.close()
   }
 
@@ -127,7 +194,8 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
       options
     )
     val snapshot =
-      new SnapshotCatalog(store, bucket, V2SegmentResolvers.footer(true)).read(path)
+      new SnapshotCatalog(store, bucket, V2SegmentResolvers.footer(true))
+        .read(path)
     info(
       s"snapshot ${snapshot.name}: collection ${snapshot.collectionId}, " +
         s"${snapshot.partitionIds.size} partitions, ${snapshot.segments.size} segments " +

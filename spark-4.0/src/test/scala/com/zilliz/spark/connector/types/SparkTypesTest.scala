@@ -9,8 +9,8 @@ import com.zilliz.milvus.storage.DataParseException
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
-/** The Spark half of SparkTypes. The Arrow half is covered by ArrowTypesTest
-  * in core.
+/** The Spark half of SparkTypes. The Arrow half is covered by ArrowTypesTest in
+  * core.
   */
 class SparkTypesTest extends AnyFunSuite with Matchers {
 

@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.options
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+
 import com.zilliz.milvus.storage.credential.StorageProperties
 
 /** Unit tests for MilvusOption parsing and validation

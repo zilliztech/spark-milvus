@@ -14,10 +14,10 @@ import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/** Tests for [[ParquetFooterReader]]. S3-backed reads need minio +
-  * hadoop-aws at runtime, but the field-id recovery path can be exercised
-  * against a local parquet written by parquet-mr's example writer — that writer
-  * honours per-column `id(...)` settings and writes them into Parquet's native
+/** Tests for [[ParquetFooterReader]]. S3-backed reads need minio + hadoop-aws
+  * at runtime, but the field-id recovery path can be exercised against a local
+  * parquet written by parquet-mr's example writer — that writer honours
+  * per-column `id(...)` settings and writes them into Parquet's native
   * `SchemaElement.field_id`, the same place milvus-storage writes them (via
   * arrow-cpp).
   */

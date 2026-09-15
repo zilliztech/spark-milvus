@@ -27,11 +27,11 @@ import com.zilliz.milvus.storage.read.exec.{
 }
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.SchemaMapper
-import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
-import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
-import com.zilliz.spark.connector.options.MilvusOption
-import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
+import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
+import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 object MilvusV2PartitionReader {
   private val ToleratedUnmappedColumns = Set("$meta")

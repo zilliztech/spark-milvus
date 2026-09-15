@@ -16,9 +16,14 @@ class StoragePathEndpointUrlTest extends AnyFunSuite {
     assert(located.key == "c48b/snapshots/1/metadata/2.json")
   }
 
-  test("http endpoint URL works the same, and s3a keeps the authority as bucket") {
+  test(
+    "http endpoint URL works the same, and s3a keeps the authority as bucket"
+  ) {
     assert(
-      StoragePath.parse("http://minio:9000/b/k/1.json") == Located("b", "k/1.json")
+      StoragePath.parse("http://minio:9000/b/k/1.json") == Located(
+        "b",
+        "k/1.json"
+      )
     )
     assert(StoragePath.parse("s3a://b/k/1.json") == Located("b", "k/1.json"))
   }

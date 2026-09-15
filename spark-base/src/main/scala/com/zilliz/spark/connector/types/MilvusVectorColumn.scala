@@ -1,7 +1,11 @@
 package com.zilliz.spark.connector.types
 
 import org.apache.arrow.memory.ArrowBuf
-import org.apache.arrow.vector.{FieldVector, FixedSizeBinaryVector, VarBinaryVector}
+import org.apache.arrow.vector.{
+  FieldVector,
+  FixedSizeBinaryVector,
+  VarBinaryVector
+}
 import org.apache.spark.sql.types.{
   ArrayType,
   BinaryType,
@@ -112,7 +116,12 @@ object MilvusVectorColumn {
       new MilvusVectorArrayColumn(
         blobs,
         sparkType(milvusType, raw = false),
-        new MilvusVectorElementColumn(blobs, milvusType, elementWidth, dimension),
+        new MilvusVectorElementColumn(
+          blobs,
+          milvusType,
+          elementWidth,
+          dimension
+        ),
         dimension,
         expected,
         milvusType

@@ -156,7 +156,8 @@ object HadoopStorageKeys {
   ): Map[String, String] = {
     val trimmedBucket = Option(bucket).map(_.trim).getOrElse("")
     val bucketPrefix =
-      if (trimmedBucket.isEmpty) None else Some(s"${prefix}bucket.$trimmedBucket.")
+      if (trimmedBucket.isEmpty) None
+      else Some(s"${prefix}bucket.$trimmedBucket.")
 
     def read(key: String): Option[String] =
       Option(conf.get(key)).map(_.trim).filter(_.nonEmpty)

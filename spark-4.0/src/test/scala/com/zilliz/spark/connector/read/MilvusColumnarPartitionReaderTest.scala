@@ -61,12 +61,11 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
   /** The same collection with the vector nullable, which is what moves its
     * physical type from FixedSizeBinary to VarBinary.
     */
-  private val nullableVectorSchema = milvusSchema.copy(fields =
-    milvusSchema.fields.map {
+  private val nullableVectorSchema =
+    milvusSchema.copy(fields = milvusSchema.fields.map {
       case f if f.name == "vec" => f.copy(nullable = true)
       case f                    => f
-    }
-  )
+    })
 
   private val jsonSchema = CollectionSchema(
     name = "t",
@@ -283,7 +282,8 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
           case f                    => f
         }
       )
-      val r = reader(Seq(root), schema = schema, collection = nullableVectorSchema)
+      val r =
+        reader(Seq(root), schema = schema, collection = nullableVectorSchema)
       try {
         r.next() shouldBe true
         val column = r.get().column(2)
@@ -300,7 +300,8 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
   test("a nullable dense vector whose row is the wrong width is refused") {
     val allocator = new RootAllocator(Long.MaxValue)
     try {
-      val root = VectorSchemaRoot.create(namedSchema(nullableVectorSchema), allocator)
+      val root =
+        VectorSchemaRoot.create(namedSchema(nullableVectorSchema), allocator)
       val id = root.getVector("id").asInstanceOf[BigIntVector]
       val ts = root.getVector("Timestamp").asInstanceOf[BigIntVector]
       val vec = root.getVector("vec").asInstanceOf[VarBinaryVector]
@@ -317,7 +318,8 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         case f if f.name == "vec" => f.copy(nullable = true)
         case f                    => f
       })
-      val r = reader(Seq(root), schema = schema, collection = nullableVectorSchema)
+      val r =
+        reader(Seq(root), schema = schema, collection = nullableVectorSchema)
       try {
         r.next() shouldBe true
         val err =
@@ -385,7 +387,9 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       try {
         r.next() shouldBe true
         val err =
-          intercept[IllegalArgumentException](r.get().column(2).getUTF8String(0))
+          intercept[IllegalArgumentException](
+            r.get().column(2).getUTF8String(0)
+          )
         err.getMessage should include("UTF-8")
       } finally r.close()
     } finally allocator.close()

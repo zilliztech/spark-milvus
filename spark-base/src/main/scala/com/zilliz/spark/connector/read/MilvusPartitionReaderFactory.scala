@@ -13,8 +13,8 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
 import com.zilliz.milvus.storage.read.plan.DeleteSource
-import com.zilliz.spark.connector.types.ArrowAllocator
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
 
 object MilvusPartitionReaderFactory {
@@ -48,8 +48,7 @@ class MilvusPartitionReaderFactory(
     schema: StructType,
     optionsMap: Map[String, String],
     pushedFilters: Array[Filter] = Array.empty[Filter],
-    v2InheritedDeletes: V2InheritedDeletes =
-      V2InheritedDeletes.empty,
+    v2InheritedDeletes: V2InheritedDeletes = V2InheritedDeletes.empty,
     // A pushed-down limit, applied per partition. None when Spark pushed none.
     limit: Option[Int] = None
 ) extends PartitionReaderFactory
@@ -82,8 +81,8 @@ class MilvusPartitionReaderFactory(
     *     brute-force search instead of a scan; the columnar reader would ignore
     *     them and return the whole segment.
     *
-    * `MilvusV2InputPartition` carries neither: its scan builder returns
-    * every predicate to Spark and it has no search parameters.
+    * `MilvusV2InputPartition` carries neither: its scan builder returns every
+    * predicate to Spark and it has no search parameters.
     */
   override def supportColumnarReads(partition: InputPartition): Boolean =
     MilvusOption.readColumnar(optionsMap) && (partition match {
@@ -160,7 +159,7 @@ class MilvusPartitionReaderFactory(
 
   private def partitionNameOf(p: MilvusInputPartition): String = p match {
     case v3: MilvusV3InputPartition => v3.partitionName
-    case other                             => other.task.partitionId.toString
+    case other                      => other.task.partitionId.toString
   }
 
   private def rowReaderFor(

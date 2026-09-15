@@ -50,8 +50,7 @@ case object EmptyDeletePlan extends DeletePlan {
   override val isEmpty: Boolean = true
 }
 
-final case class LongPkDeletePlan(values: Map[Long, Long])
-    extends DeletePlan {
+final case class LongPkDeletePlan(values: Map[Long, Long]) extends DeletePlan {
   override def containsLongPk(value: Long, rowTs: Long): Boolean =
     values.get(value).exists(_ >= rowTs)
   override def containsStringPk(value: String, rowTs: Long): Boolean = false
