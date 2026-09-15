@@ -34,101 +34,6 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
 
   private val mapper = new ObjectMapper()
 
-  def loadDeletePlansBySegment(
-      segments: Seq[Segment],
-      milvusSchema: CollectionSchema,
-      bucket: String,
-      store: ObjectStore
-  ): Either[Throwable, Map[Long, DeletePlan]] = {
-    val pkField = primaryKeyField(milvusSchema)
-    val deleteOnlySegments = segments.filterNot(_.hasData)
-    val dataSegments = segments.filter(_.hasData)
-
-    for {
-      globalPlans <- loadPartitionScopedDeletePlans(
-        deleteOnlySegments,
-        pkField,
-        bucket,
-        store
-      )
-      ownPlans <- sequence(
-        dataSegments.map { seg =>
-          loadDeletePlan(seg.deltaLogs, pkField, bucket, store).map { ownPlan =>
-            seg.id -> ownPlan
-          }
-        }
-      )
-    } yield mergeInheritedDeletePlans(
-      dataSegments,
-      globalPlans,
-      ownPlans.toMap
-    )
-  }
-
-  private val AllPartitionsId = -1L
-
-  def mergeInheritedDeletePlans(
-      dataSegments: Seq[Segment],
-      inheritedPlansByPartition: Map[Long, DeletePlan],
-      ownPlansBySegment: Map[Long, DeletePlan]
-  ): Map[Long, DeletePlan] = {
-    dataSegments.iterator.map { seg =>
-      val inheritedPlan = effectiveInheritedDeletePlan(
-        seg.partitionId,
-        inheritedPlansByPartition
-      )
-      val ownPlan = ownPlansBySegment.getOrElse(
-        seg.id,
-        DeletePlan.empty
-      )
-      seg.id -> DeletePlan.union(inheritedPlan, ownPlan)
-    }.toMap
-  }
-
-  def loadPartitionScopedDeletePlans(
-      deleteOnlySegments: Seq[Segment],
-      pkField: FieldSchema,
-      bucket: String,
-      store: ObjectStore
-  ): Either[Throwable, Map[Long, DeletePlan]] = {
-    sequence(
-      deleteOnlySegments.groupBy(_.partitionId).toSeq.map {
-        case (partitionId, segments) =>
-          loadDeletePlan(
-            segments.flatMap(_.deltaLogs),
-            pkField,
-            bucket,
-            store
-          ).map(partitionId -> _)
-      }
-    ).map(_.toMap)
-  }
-
-  def effectiveInheritedDeletePlan(
-      partitionId: Long,
-      inheritedPlansByPartition: Map[Long, DeletePlan]
-  ): DeletePlan = {
-    val collectionWidePlan = inheritedPlansByPartition.getOrElse(
-      AllPartitionsId,
-      DeletePlan.empty
-    )
-    val partitionPlan = inheritedPlansByPartition.getOrElse(
-      partitionId,
-      DeletePlan.empty
-    )
-    DeletePlan.union(collectionWidePlan, partitionPlan)
-  }
-
-  def inheritedDeletePlanPartitionMarker(
-      partitionId: Long,
-      inheritedPlansByPartition: Map[Long, DeletePlan]
-  ): Option[Long] =
-    if (
-      inheritedPlansByPartition.contains(AllPartitionsId) ||
-      inheritedPlansByPartition.contains(partitionId)
-    ) Some(partitionId)
-    else None
-
   def loadDeletePlan(
       deltaLogs: Seq[DeltaLogFile],
       pkField: FieldSchema,
@@ -556,14 +461,6 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
     val eventLength = buf.getInt()
     buf.getInt()
     ParsedHeader(typeCode, eventLength)
-  }
-
-  private def primaryKeyField(milvusSchema: CollectionSchema): FieldSchema = {
-    val pkField = milvusSchema.fields.find(_.isPrimaryKey).getOrElse {
-      throw new IllegalArgumentException("No primary key field found in schema")
-    }
-    validatePkType(pkField)
-    pkField
   }
 
   private def validatePkType(pkField: FieldSchema): Unit = {
