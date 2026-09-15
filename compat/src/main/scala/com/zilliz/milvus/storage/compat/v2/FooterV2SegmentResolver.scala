@@ -92,6 +92,27 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
     }
   }
 
+  /** A segment with no column groups and the delete files the manifest lists:
+    * an L0 segment, or a data segment whose binlog list is empty.
+    */
+  private def deleteOnlySegment(entry: AvroManifestEntry): Segment =
+    Segment.v2(
+      id = entry.segmentId,
+      partitionId = entry.partitionId,
+      rows = entry.numOfRows,
+      columnGroups = Seq.empty,
+      deltaLogs = entry.deltaLogFiles
+        .flatMap(_.binlogs)
+        .sortBy(_.logId)
+        .map(log =>
+          DeltaLogFile(
+            logId = log.logId,
+            logPath = log.logPath,
+            entriesNum = log.entriesNum
+          )
+        )
+    )
+
   /** Convert one parsed AVRO entry into a `Segment`. Extracted for
     * unit-testability — it needs only Hadoop FS, so local parquet files + a
     * hand-built `AvroManifestEntry` cover the full behavior matrix without
@@ -113,15 +134,20 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
     val resolvedEntry = resolveEntryPaths(entry, bucket, storageScheme)
     val isL0 = resolvedEntry.segmentLevel == 1L
 
-    if (resolvedEntry.storageVersion != 2L) {
+    // An L0 segment carries only delete files, and Milvus writes it with no
+    // storage_version (0). It is decided on before the version check: a
+    // version check first would drop it, and with it every delete it holds.
+    if (isL0 && !applyDeletes) {
+      logInfo(
+        s"skipping L0 delete-only segment ${resolvedEntry.segmentId} because applyDeletes=false"
+      )
+      Right(None)
+    } else if (isL0) {
+      Right(Some(deleteOnlySegment(resolvedEntry)))
+    } else if (resolvedEntry.storageVersion != 2L) {
       logInfo(
         s"skipping segment ${resolvedEntry.segmentId}: storage_version=${resolvedEntry.storageVersion} " +
           s"(!= 2); FooterV2SegmentResolver only handles StorageV2"
-      )
-      Right(None)
-    } else if (isL0 && !applyDeletes) {
-      logInfo(
-        s"skipping StorageV2 L0 delete-only segment ${resolvedEntry.segmentId} because applyDeletes=false"
       )
       Right(None)
     } else if (
@@ -132,26 +158,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
         s"segment ${resolvedEntry.segmentId} has no binlog files with entries; " +
           s"emitting as empty column-group list"
       )
-      Right(
-        Some(
-          Segment.v2(
-            id = resolvedEntry.segmentId,
-            partitionId = resolvedEntry.partitionId,
-            rows = resolvedEntry.numOfRows,
-            columnGroups = Seq.empty,
-            deltaLogs = resolvedEntry.deltaLogFiles
-              .flatMap(_.binlogs)
-              .sortBy(_.logId)
-              .map(log =>
-                DeltaLogFile(
-                  logId = log.logId,
-                  logPath = log.logPath,
-                  entriesNum = log.entriesNum
-                )
-              )
-          )
-        )
-      )
+      Right(Some(deleteOnlySegment(resolvedEntry)))
     } else {
       try {
         // Per-entry field-id recovery: each V2 parquet file holds exactly

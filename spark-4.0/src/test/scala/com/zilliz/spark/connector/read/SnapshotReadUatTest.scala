@@ -184,6 +184,57 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
     } finally client.close()
   }
 
+  /** Deletes rows of the prepared collection and takes a new snapshot, so the
+    * read cases can check that deleted rows stay out (capability R8). Needs
+    * `MILVUS_UAT_URI`, `MILVUS_UAT_COLLECTION` and `MILVUS_UAT_DELETE_IDS`
+    * (comma-separated primary keys).
+    */
+  test("prepare: delete rows and take a new snapshot (R8)") {
+    val uri = env("MILVUS_UAT_URI").getOrElse(
+      cancel("set MILVUS_UAT_URI (and MILVUS_UAT_TOKEN) to delete rows")
+    )
+    val collection = env("MILVUS_UAT_COLLECTION").getOrElse(
+      cancel("set MILVUS_UAT_COLLECTION to the prepared collection")
+    )
+    val ids = env("MILVUS_UAT_DELETE_IDS")
+      .map(_.split(",").map(_.trim.toInt).toSeq)
+      .getOrElse(cancel("set MILVUS_UAT_DELETE_IDS to the ids to delete"))
+    val client = com.zilliz.milvus.client.api.MilvusClient(
+      MilvusOption(
+        Map(MilvusOption.MilvusUri -> uri) ++
+          env("MILVUS_UAT_TOKEN").map(MilvusOption.MilvusToken -> _)
+      ).connectionParams
+    )
+    try {
+      client
+        .delete[Int](
+          collectionName = collection,
+          pkName = Some("id"),
+          pks = ids
+        )
+        .get
+      client.flush(collectionNames = Seq(collection)).get
+      this.info(s"deleted ${ids.size} rows of $collection and flushed")
+      Thread.sleep(
+        env("MILVUS_UAT_FLUSH_WAIT_MS").map(_.toLong).getOrElse(20000L)
+      )
+      val name = "spark_uat_del_" + System.currentTimeMillis()
+      val snapshot = client
+        .createSnapshotForRead(
+          "",
+          collection,
+          name,
+          "spark-milvus UAT delete read",
+          86400L
+        )
+        .get
+      this.info(s"created snapshot ${snapshot.name} at ${snapshot.s3Location}")
+      this.info(
+        s"export MILVUS_UAT_SNAPSHOT_PATH=${snapshot.s3Location} MILVUS_UAT_DELETED_IDS=${ids.mkString(",")}"
+      )
+    } finally client.close()
+  }
+
   test("SnapshotCatalog reads the snapshot JSON through the native store") {
     val options = storageOptions()
     val path = snapshotPath()
@@ -205,6 +256,11 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
     )
     snapshot.dataSegments should not be empty
     snapshot.primaryKeyField should not be empty
+    snapshot.segments.foreach(seg =>
+      info(
+        s"segment ${seg.id} v${seg.storageVersion} rows=${seg.rows} deletes=${seg.deletes}"
+      )
+    )
   }
 
   private def withSpark(f: SparkSession => Unit): Unit = {
@@ -239,6 +295,15 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
       env("MILVUS_UAT_EXPECTED_ROWS").foreach(e => rows shouldBe e.toLong)
       val sample = df.limit(3).collect()
       sample.foreach(r => info(r.toString.take(200)))
+      // Rows deleted before the snapshot was taken must not come back.
+      env("MILVUS_UAT_DELETED_IDS").foreach { ids =>
+        val deleted = ids.split(",").map(_.trim.toLong).toSeq
+        val present =
+          df.filter(org.apache.spark.sql.functions.col("id").isin(deleted: _*))
+            .count()
+        info(s"${deleted.size} deleted ids, $present of them present")
+        present shouldBe 0L
+      }
     }
   }
 

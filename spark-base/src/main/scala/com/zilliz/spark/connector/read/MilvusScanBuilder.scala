@@ -154,13 +154,13 @@ class MilvusScanBuilder(
   }
 
   override def pushFilters(filters: Array[Filter]): Array[Filter] = {
-    // V2 packed reader does not apply filters server-side yet — return all
-    // as unsupported so Spark applies them post-read.
-    // TODO: implement filter pushdown for V2 packed reader in a separate PR.
-    val isV2 = Option(options.get(MilvusOption.SnapshotV2Segments))
-      .exists(_.nonEmpty)
-    val isBackupMode = MilvusOption.isBackupMode(options)
-    if (isV2 || isBackupMode) {
+    // Only the V3 row reader evaluates a pushed filter. A read that plans a
+    // V2 data segment therefore pushes nothing, so Spark keeps every filter
+    // and applies it after the read. This is decided on the snapshot, not on
+    // the options: a snapshot read by path or through the service lists its
+    // V2 segments in the snapshot, and a filter pushed there would be
+    // accepted by Spark and evaluated by nobody.
+    if (snapshot.v2Segments.exists(_.hasData)) {
       pushedFilterArray = Array.empty
       return filters
     }

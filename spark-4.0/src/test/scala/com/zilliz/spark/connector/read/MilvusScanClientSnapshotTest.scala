@@ -974,6 +974,49 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
+  test("filters are pushed only when no V2 data segment is planned") {
+    import org.apache.spark.sql.sources.EqualTo
+    val schema = StructType(Seq(StructField("pk", LongType, nullable = false)))
+    val filters: Array[org.apache.spark.sql.sources.Filter] =
+      Array(EqualTo("pk", 1L))
+    val v2 = Segment.v2(
+      id = 30L,
+      partitionId = 20L,
+      rows = 1L,
+      columnGroups = Seq(
+        V2ColumnGroup(
+          Seq(100L),
+          Seq("files/insert_log/10/20/30/100/1"),
+          Seq(1L)
+        )
+      )
+    )
+    // Only the V3 row reader evaluates a pushed filter; a V2 segment in the
+    // plan means Spark must keep the filter, whatever the options say.
+    val withV2 = new MilvusScanBuilder(
+      schema,
+      new CaseInsensitiveStringMap(new ju.HashMap[String, String]()),
+      snapshotOf(v2 = Seq(v2))
+    )
+    assert(withV2.pushFilters(filters).toSeq == filters.toSeq)
+    assert(withV2.pushedFilters().isEmpty)
+
+    val v3Only = new MilvusScanBuilder(
+      schema,
+      new CaseInsensitiveStringMap(new ju.HashMap[String, String]()),
+      snapshotOf(v3 =
+        Seq(
+          ManifestItemJson(
+            31L,
+            "{\"ver\":1,\"base_path\":\"files/insert_log/10/20/31\"}"
+          )
+        )
+      )
+    )
+    assert(v3Only.pushFilters(filters).isEmpty)
+    assert(v3Only.pushedFilters().toSeq == filters.toSeq)
+  }
+
   test("snapshot option keys use dotted lowercase suffixes") {
     assert(
       MilvusOption.SnapshotMaxJsonBytes == "milvus.snapshot.max.json.bytes"

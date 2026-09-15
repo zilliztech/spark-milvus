@@ -440,6 +440,47 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test(
+    "an L0 segment with storage_version 0 becomes a delete-only segment"
+  ) {
+    // Milvus writes an L0 segment with no storage_version (0) and a
+    // partition id of -1 (all partitions). A version check before the L0
+    // check dropped it, and with it every delete it holds: a UAT snapshot
+    // taken after a delete read every row back.
+    val manifest = entry(
+      segmentId = 5008L,
+      binlogs = Seq.empty,
+      storageVersion = 0L,
+      segmentLevel = 1L,
+      partitionId = -1L,
+      deltaLogFiles = Seq(
+        AvroFieldBinlogEntry(
+          slotFieldId = 0L,
+          binlogs =
+            Seq(AvroBinlogEntry(13L, "files/delta_log/1/-1/5008/13", 10L))
+        )
+      )
+    )
+
+    val result = FooterV2SegmentResolver.segmentFromEntry(
+      manifest,
+      bucket = "",
+      localStore,
+      applyDeletes = true
+    )
+
+    val Some(seg) = result.toOption.get
+    seg.id shouldBe 5008L
+    seg.partitionId shouldBe -1L
+    seg.hasData shouldBe false
+    seg.deltaLogs.map(_.logId) shouldBe Seq(13L)
+
+    FooterV2SegmentResolver
+      .segmentFromEntry(manifest, bucket = "", localStore, applyDeletes = false)
+      .toOption
+      .get shouldBe None
+  }
+
   test("StorageV2 L0 segment is skipped when applyDeletes=false") {
     val manifest = entry(
       segmentId = 5006L,
