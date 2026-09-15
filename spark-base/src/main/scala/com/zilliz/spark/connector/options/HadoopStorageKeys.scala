@@ -122,8 +122,17 @@ object HadoopStorageKeys {
     */
   def storeFrom(properties: Map[String, String]): ObjectStore =
     NativeObjectStore
-      .Factory(StorageProperties.from(properties ++ iamFallback(properties)))
+      .Factory(canonicalProperties(properties))
       .open()
+
+  /** Validates one native property bag exactly as [[storeFrom]] does, without
+    * opening a handle. Executor tasks use this so driver metadata reads and
+    * executor segment reads cannot resolve aliases or IAM differently.
+    */
+  private[connector] def canonicalProperties(
+      properties: Map[String, String]
+  ): Map[String, String] =
+    StorageProperties.from(properties ++ iamFallback(properties))
 
   /** A deployment that injects no static keys expects the instance role to be
     * used — IRSA on EKS, RRSA on ACK, an instance profile elsewhere. Hadoop

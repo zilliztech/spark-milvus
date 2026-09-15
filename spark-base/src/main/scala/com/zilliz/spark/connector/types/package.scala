@@ -1,12 +1,14 @@
 package com.zilliz.spark.connector
 
-/** Arrow type to Spark type mapping, and how vector columns surface in Spark.
+/** The single Milvus-to-Spark type contract and its Arrow value conversion.
   *
-  * ArrowConverter turns Arrow values into InternalRow and back for the row
-  * readers and the writers; the ColumnVector implementations here are the
-  * columnar route that replaces its read half. MilvusArrayColumn and
-  * Utf8FromBinaryColumn cover the two fields whose stored type (Binary) differs
-  * from the declared one (array, string).
+  * `SparkTypes.toStructField` owns type, nullability and Milvus field metadata.
+  * Unsupported Milvus or Spark types fail instead of becoming binary or null.
+  * ArrowConverter turns supported values into InternalRow and back for row
+  * readers and writers; the ColumnVector implementations consume the same
+  * batches on the columnar route. MilvusArrayColumn and Utf8FromBinaryColumn
+  * cover the supported fields whose stored Arrow type differs from their Spark
+  * type.
   *
   * Capabilities: R15 (see docs/design/capabilities.md).
   */

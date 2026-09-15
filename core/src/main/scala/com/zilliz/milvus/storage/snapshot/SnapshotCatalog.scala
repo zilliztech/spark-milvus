@@ -1,6 +1,7 @@
 package com.zilliz.milvus.storage.snapshot
 
 import java.nio.charset.StandardCharsets
+import scala.util.control.NonFatal
 
 import com.zilliz.milvus.storage.io.{FileInfo, ObjectStore}
 import com.zilliz.milvus.storage.path.StoragePath
@@ -10,7 +11,10 @@ import com.zilliz.milvus.storage.snapshot.json.{
   SnapshotJson
 }
 import com.zilliz.milvus.storage.Logging
-import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema}
+import io.milvus.grpc.schema.{
+  CollectionSchema => ProtoSchema,
+  DataType => ProtoDataType
+}
 
 /** Materializes the V2 packed segments a snapshot lists.
   *
@@ -79,7 +83,8 @@ final class SnapshotCatalog(
     store: ObjectStore,
     bucket: String,
     v2: V2SegmentResolver,
-    maxJsonBytes: Long = SnapshotJson.MaxBytes
+    maxJsonBytes: Long = SnapshotJson.MaxBytes,
+    endpoint: String = ""
 ) extends Logging {
 
   /** The snapshot at `location`: a bucket-relative key, or a `s3a://` / `s3://`
@@ -113,7 +118,8 @@ final class SnapshotCatalog(
       SnapshotOrigin.Catalog(location),
       store,
       bucket,
-      v2
+      v2,
+      endpoint
     ) match {
       case Right(s) => s
       case Left(e) =>
@@ -147,19 +153,31 @@ final class SnapshotCatalog(
     SnapshotSource(byName(rootPath, collectionId, name))
 
   def latest(rootPath: String, collectionId: Long): Snapshot =
-    select(rootPath, collectionId, "latest")(_ => true)
+    select(rootPath, collectionId, "latest", requireCreatedAt = true)(_ => true)
 
   /** The snapshot named `name`. */
   def byName(rootPath: String, collectionId: Long, name: String): Snapshot =
-    select(rootPath, collectionId, s"named '$name'")(_.name == name)
+    select(rootPath, collectionId, s"named '$name'", requireCreatedAt = false)(
+      _.name == name
+    )
 
   /** The latest snapshot created at or before `timestamp`. */
   def asOf(rootPath: String, collectionId: Long, timestamp: Long): Snapshot =
-    select(rootPath, collectionId, s"as of $timestamp")(
+    select(
+      rootPath,
+      collectionId,
+      s"as of $timestamp",
+      requireCreatedAt = true
+    )(
       _.createdAt.exists(_ <= timestamp)
     )
 
-  private def select(rootPath: String, collectionId: Long, what: String)(
+  private def select(
+      rootPath: String,
+      collectionId: Long,
+      what: String,
+      requireCreatedAt: Boolean
+  )(
       keep: Snapshot => Boolean
   ): Snapshot = {
     val files = list(rootPath, collectionId)
@@ -174,14 +192,45 @@ final class SnapshotCatalog(
     // The directory holds only file names; name and create_ts are inside each
     // JSON, so every candidate is opened. README section 5 asks Milvus for a
     // catalog file that would make this one read.
-    val candidates = files.map(f => read(f.path)).filter(keep)
+    val snapshots = files.map(file => file.path -> read(file.path))
+    if (requireCreatedAt) {
+      val missingCreateTs = snapshots.collect {
+        case (path, snapshot) if snapshot.createdAt.isEmpty => path
+      }
+      if (missingCreateTs.nonEmpty) {
+        throw new IllegalArgumentException(
+          s"cannot select snapshot $what: create_ts is missing from ${missingCreateTs.sorted.mkString(", ")}"
+        )
+      }
+    }
+    val candidates = snapshots.filter { case (_, snapshot) => keep(snapshot) }
     if (candidates.isEmpty) {
       throw new IllegalArgumentException(
         s"no snapshot $what among ${files.size} under ${SnapshotCatalog
             .metadataPrefix(rootPath, collectionId)}"
       )
     }
-    candidates.maxBy(_.createdAt.getOrElse(Long.MinValue))
+    val missingCandidateCreateTs = candidates.collect {
+      case (path, snapshot) if snapshot.createdAt.isEmpty => path
+    }
+    if (candidates.size > 1 && missingCandidateCreateTs.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"cannot select snapshot $what: create_ts is missing from ${missingCandidateCreateTs.sorted
+            .mkString(", ")}"
+      )
+    }
+    val latestCreateTs = candidates.iterator.map { case (_, snapshot) =>
+      snapshot.createdAt.getOrElse(Long.MinValue)
+    }.max
+    val latest = candidates.filter { case (_, snapshot) =>
+      snapshot.createdAt.getOrElse(Long.MinValue) == latestCreateTs
+    }
+    if (latest.size > 1) {
+      throw new IllegalArgumentException(
+        s"cannot select snapshot $what: ${latest.map(_._1).sorted.mkString(", ")} share create_ts $latestCreateTs"
+      )
+    }
+    latest.head._2
   }
 }
 
@@ -230,7 +279,8 @@ object SnapshotCatalog extends Logging {
       origin: SnapshotOrigin,
       store: ObjectStore,
       bucket: String,
-      v2: V2SegmentResolver
+      v2: V2SegmentResolver,
+      endpoint: String = ""
   ): Either[Throwable, Snapshot] = {
     def bad(msg: String) = Left(new IllegalArgumentException(msg))
     if (metadata == null) return bad("snapshot metadata is missing")
@@ -266,7 +316,8 @@ object SnapshotCatalog extends Logging {
       v3Items = v3Items,
       v2Segments = v2Segments,
       bucket = bucket,
-      origin = origin
+      origin = origin,
+      endpoint = endpoint
     )
   }
 
@@ -288,53 +339,120 @@ object SnapshotCatalog extends Logging {
       v3Items: Seq[ManifestItemJson],
       v2Segments: Seq[Segment],
       bucket: String,
-      origin: SnapshotOrigin
-  ): Either[Throwable, Snapshot] = {
-    val defaultPartition = partitionIds.headOption
-    val v3 = v3Items.map { item =>
-      val (rawBasePath, version) =
-        ManifestContentJson.parse(item.manifest) match {
-          case Right(content) => (content.basePath, content.ver.toLong)
-          case Left(_)        => (item.manifest, -1L)
+      origin: SnapshotOrigin,
+      endpoint: String = ""
+  ): Either[Throwable, Snapshot] =
+    try {
+      val defaultPartition = partitionIds.headOption
+      val v3 = v3Items.map { item =>
+        val (rawBasePath, version) =
+          ManifestContentJson.parse(item.manifest) match {
+            case Right(content) => (content.basePath, content.ver.toLong)
+            case Left(_)        => (item.manifest, -1L)
+          }
+        val basePath =
+          keyIn(
+            bucket,
+            rawBasePath,
+            s"segment ${item.segmentID} manifest",
+            endpoint
+          )
+        val partitionId = partitionIdFromBasePath(basePath).getOrElse {
+          logWarning(
+            s"manifest path '$basePath' does not match insert_log/{collectionId}/{partitionId}/{segmentId}; " +
+              s"using partition ${defaultPartition.getOrElse(0L)}"
+          )
+          defaultPartition.getOrElse(0L)
         }
-      val basePath =
-        keyIn(bucket, rawBasePath, s"segment ${item.segmentID} manifest")
-      val partitionId = partitionIdFromBasePath(basePath).getOrElse {
-        logWarning(
-          s"manifest path '$basePath' does not match insert_log/{collectionId}/{partitionId}/{segmentId}; " +
-            s"using partition ${defaultPartition.getOrElse(0L)}"
+        Segment(
+          id = segmentIdForManifestItem(item, basePath),
+          partitionId = partitionId,
+          storageVersion = 3,
+          rows = None,
+          layout = SegmentLayout.Manifest(basePath, version),
+          deletes = DeleteFiles.InManifest
         )
-        defaultPartition.getOrElse(0L)
       }
-      Segment(
-        id = segmentIdForManifestItem(item, basePath),
-        partitionId = partitionId,
-        storageVersion = 3,
-        rows = None,
-        layout = SegmentLayout.Manifest(basePath, version),
-        deletes = DeleteFiles.InManifest
+      val schema =
+        try ProtoSchema.parseFrom(schemaBytes)
+        catch { case e: Exception => return Left(e) }
+      validateDynamicFieldSchema(name, schema)
+      val segments = v3 ++ v2Segments.map(normalizeV2(_, bucket, endpoint))
+      val invalidIds =
+        segments.iterator.map(_.id).filter(_ <= 0L).toSeq.distinct.sorted
+      if (invalidIds.nonEmpty) {
+        return Left(
+          new IllegalArgumentException(
+            s"snapshot '$name' contains non-positive segment id(s): ${invalidIds.mkString(", ")}"
+          )
+        )
+      }
+      val duplicateIds = segments
+        .groupBy(_.id)
+        .collect {
+          case (id, occurrences) if occurrences.size > 1 => id
+        }
+        .toSeq
+        .sorted
+      if (duplicateIds.nonEmpty) {
+        return Left(
+          new IllegalArgumentException(
+            s"snapshot '$name' contains duplicate segment id(s): ${duplicateIds.mkString(", ")}"
+          )
+        )
+      }
+      Right(
+        Snapshot(
+          name = name,
+          collectionId = collectionId,
+          createdAt = createdAt,
+          schema = schema,
+          partitionIds = partitionIds,
+          segments = segments,
+          origin = origin,
+          bucket = bucket
+        )
+      )
+    } catch { case NonFatal(e) => Left(e) }
+
+  /** A dynamic field is a stored JSON column with a service-assigned field ID.
+    * The ID cannot be reconstructed from the other fields after schema
+    * evolution, so an incomplete snapshot must fail instead of silently
+    * dropping dynamic values or guessing a physical column.
+    */
+  private def validateDynamicFieldSchema(
+      snapshotName: String,
+      schema: ProtoSchema
+  ): Unit = {
+    if (!schema.enableDynamicField) return
+
+    val dynamicCandidates =
+      schema.fields.filter(field => field.isDynamic || field.name == "$meta")
+    val valid = dynamicCandidates match {
+      case Seq(field) =>
+        field.name == "$meta" &&
+        field.isDynamic &&
+        field.dataType == ProtoDataType.JSON &&
+        field.fieldID > 1L
+      case _ => false
+    }
+    if (!valid) {
+      throw new IllegalArgumentException(
+        s"snapshot '$snapshotName' enables dynamic fields but its schema must " +
+          "contain exactly one '$meta' JSON field marked dynamic with an " +
+          "explicit non-system field id; the connector cannot infer that id"
       )
     }
-    val schema =
-      try ProtoSchema.parseFrom(schemaBytes)
-      catch { case e: Exception => return Left(e) }
-    Right(
-      Snapshot(
-        name = name,
-        collectionId = collectionId,
-        createdAt = createdAt,
-        schema = schema,
-        partitionIds = partitionIds,
-        segments = v3 ++ v2Segments.map(normalizeV2(_, bucket)),
-        origin = origin,
-        bucket = bucket
-      )
-    )
   }
 
   /** A path as the key the native reader takes, relative to `bucket`. */
-  private def keyIn(bucket: String, path: String, what: String): String = {
-    val located = StoragePath.parse(path, bucket)
+  private def keyIn(
+      bucket: String,
+      path: String,
+      what: String,
+      endpoint: String
+  ): String = {
+    val located = StoragePath.parseMilvus(path, bucket, endpoint)
     if (bucket.nonEmpty && located.hasBucket && located.bucket != bucket) {
       throw new IllegalArgumentException(
         s"$what is in bucket '${located.bucket}' but the read is bound to '$bucket': $path"
@@ -350,7 +468,11 @@ object SnapshotCatalog extends Logging {
   /** A V2 segment as the read needs it: column groups deduplicated by slot and
     * every file path a key relative to `bucket`.
     */
-  def normalizeV2(seg: Segment, bucket: String): Segment = {
+  def normalizeV2(
+      seg: Segment,
+      bucket: String,
+      endpoint: String = ""
+  ): Segment = {
     val bySlot = seg.dedupColumnGroupsBySlot
     if (bySlot.columnGroups != seg.columnGroups) {
       logWarning(
@@ -360,16 +482,38 @@ object SnapshotCatalog extends Logging {
           "may return an older group's values."
       )
     }
-    bySlot.copy(layout =
-      SegmentLayout.ColumnGroups(
-        bySlot.columnGroups.map(g =>
-          g.copy(filePaths =
-            g.filePaths.map(p =>
-              keyIn(bucket, p, s"segment ${seg.id} column group")
+    val normalizedDeletes = bySlot.deletes match {
+      case DeleteFiles.Listed(files) =>
+        DeleteFiles.Listed(
+          files.map(file =>
+            file.copy(logPath =
+              keyIn(
+                bucket,
+                file.logPath,
+                s"segment ${seg.id} delete log",
+                endpoint
+              )
             )
           )
         )
-      )
+      case other => other
+    }
+    bySlot.copy(
+      layout = SegmentLayout.ColumnGroups(
+        bySlot.columnGroups.map(g =>
+          g.copy(filePaths =
+            g.filePaths.map(p =>
+              keyIn(
+                bucket,
+                p,
+                s"segment ${seg.id} column group",
+                endpoint
+              )
+            )
+          )
+        )
+      ),
+      deletes = normalizedDeletes
     )
   }
 }

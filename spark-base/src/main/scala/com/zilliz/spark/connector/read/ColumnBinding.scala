@@ -20,6 +20,7 @@ import com.zilliz.milvus.storage.read.exec.{
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
+import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 /** Everything a reader has to work out before it can open a segment: which
@@ -85,7 +86,12 @@ sealed trait ColumnBinding {
 
   final def appliesDeletes: Boolean = task.appliesDeletes
 
-  final def open(allocator: BufferAllocator): SegmentReader =
+  final def open(allocator: BufferAllocator): SegmentReader = {
+    // Resolve and close the delete-file store before the segment reader opens
+    // its own native handles. This ordering applies to both the row and
+    // columnar callers; in particular, passing isDeleted as a function to the
+    // columnar reader must not defer delete I/O until its first batch.
+    deletePlan
     SegmentReaderRegistry.open(
       task,
       arrowSchema,
@@ -93,6 +99,7 @@ sealed trait ColumnBinding {
       columnNameFor,
       allocator
     )
+  }
 
   /** Whether the row at `rowIndex` of `batch` has been deleted.
     *
@@ -218,7 +225,8 @@ final case class V2ColumnBinding(
     )
     .getOrElse("")
 
-  override val timestampColumnName: String = "Timestamp"
+  override val timestampColumnName: String =
+    fieldMappings.fieldIdToName.getOrElse(1L, "Timestamp")
 
   override val neededColumns: Seq[String] = {
     val columnGroups = task.layout match {
@@ -251,8 +259,6 @@ object V2ColumnBinding {
   ): V2ColumnBinding =
     V2ColumnBinding(partition, schema, partition.task)
 
-  private val ToleratedUnmappedColumns = Set("$meta")
-
   private[read] case class FieldMappings(
       fieldIdToName: Map[Long, String],
       fieldNameToId: Map[String, Long],
@@ -264,7 +270,8 @@ object V2ColumnBinding {
     "row_id" -> (0L, "RowID"),
     "rowid" -> (0L, "RowID"),
     "Timestamp" -> (1L, "Timestamp"),
-    "timestamp" -> (1L, "Timestamp")
+    "timestamp" -> (1L, "Timestamp"),
+    MilvusOption.MilvusExtraColumnTimestamp -> (1L, "Timestamp")
   )
 
   private[read] def buildFieldMappings(
@@ -283,7 +290,8 @@ object V2ColumnBinding {
       alias -> id
     }.toMap
     val systemFieldNameToArrowColumn = systemAliases.map {
-      case (alias, (_, column)) => alias -> column
+      case (alias, (id, fallbackColumn)) =>
+        alias -> fieldIdToName.getOrElse(id, fallbackColumn)
     }.toMap
 
     FieldMappings(
@@ -337,9 +345,8 @@ object V2ColumnBinding {
         }
         neededColumnFieldIds
       } else {
-        val missingNames = sourceSchema.fieldNames.filterNot(name =>
-          fieldMappings.fieldNameToId.contains(name) ||
-            ToleratedUnmappedColumns.contains(name)
+        val missingNames = sourceSchema.fieldNames.filterNot(
+          fieldMappings.fieldNameToId.contains
         )
         if (missingNames.nonEmpty) {
           throw new IllegalArgumentException(
@@ -400,8 +407,19 @@ final case class V3ColumnBinding(
     V3ColumnBinding.TimestampColumnName
 
   override val neededColumns: Seq[String] = {
-    val requested =
+    val requested = if (task.neededFieldIds.nonEmpty) {
+      val knownIds = fieldNameToId.values.toSet
+      val missingIds = task.neededFieldIds.filterNot(knownIds)
+      if (missingIds.nonEmpty) {
+        throw new IllegalArgumentException(
+          s"V3 requested unknown field IDs: ${missingIds.distinct.mkString(",")}" +
+            s"; schema field IDs=${knownIds.toSeq.sorted.mkString(",")}"
+        )
+      }
+      task.neededFieldIds.map(_.toString)
+    } else {
       schema.fieldNames.toSeq.flatMap(fieldNameToId.get).map(_.toString)
+    }
     if (!appliesDeletes) requested
     else {
       val pk = pkField
@@ -429,7 +447,8 @@ object V3ColumnBinding {
     "row_id" -> 0L,
     "rowid" -> 0L,
     "Timestamp" -> 1L,
-    "timestamp" -> 1L
+    "timestamp" -> 1L,
+    MilvusOption.MilvusExtraColumnTimestamp -> 1L
   )
 
   private[read] def buildFieldNameToId(

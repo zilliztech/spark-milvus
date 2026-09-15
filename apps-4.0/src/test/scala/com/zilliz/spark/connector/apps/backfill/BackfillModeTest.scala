@@ -513,7 +513,7 @@ class BackfillModeTest
   private def buildOriginal(
       rows: Seq[(Int, java.lang.Integer, java.lang.String, Long, Long)]
   ): DataFrame = {
-    // columns: pk, f1 (nullable Int), f2 (nullable String), $segment_id, $row_offset
+    // columns: pk, f1 (nullable Int), f2 (nullable String), _segment_id, _row_offset
     val schema = StructType(
       Seq(
         StructField("pk", IntegerType, nullable = false),

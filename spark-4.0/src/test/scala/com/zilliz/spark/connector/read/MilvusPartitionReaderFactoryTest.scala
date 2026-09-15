@@ -14,14 +14,17 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
   test("requestedExtraColumns normalizes legacy aliases") {
     val requested = MilvusPartitionReaderFactory.requestedExtraColumns(
-      Map(MilvusOption.MilvusExtraColumns -> "partition,segment_id,row_offset")
+      Map(
+        MilvusOption.MilvusExtraColumns ->
+          "$segment_id,segment_id,$row_offset,row_offset,_timestamp"
+      )
     )
 
     assert(
       requested == Set(
-        MilvusOption.MilvusExtraColumnPartition,
         MilvusOption.MilvusExtraColumnSegmentID,
-        MilvusOption.MilvusExtraColumnRowOffset
+        MilvusOption.MilvusExtraColumnRowOffset,
+        MilvusOption.MilvusExtraColumnTimestamp
       )
     )
   }
@@ -31,7 +34,7 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
 
     assert(
       !MilvusPartitionReaderFactory.isMetadataExtraField(
-        MilvusOption.MilvusExtraColumnPartition,
+        MilvusOption.MilvusExtraColumnTimestamp,
         requested
       )
     )

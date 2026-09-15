@@ -21,7 +21,7 @@
 </style>
 
 <h1>存储访问层设计</h1>
-<p>能力 R3。分层与包边界见 <a href="modules.md">modules.md</a>，
+<p>对应<a href="../capabilities.md">能力索引</a>中的 R3。分层与包边界见 <a href="modules.md">modules.md</a>，
 Hadoop 侧的认证机制见 <a href="storage-auth.html">storage-auth.html</a>。</p>
 
 <div class="status">
@@ -31,7 +31,8 @@ Hadoop 侧的认证机制见 <a href="storage-auth.html">storage-auth.html</a>�
 
 <h2 id="problem">一、要解决的问题</h2>
 
-<p>读一张 Milvus 表要在对象存储上打开五种文件。<strong>现在一个进程里有四条互不相干的打开方式。</strong></p>
+<p>读一张 Milvus 表要在对象存储上打开五种文件。<strong>本设计落地前，一个进程里有四条互不相干的打开方式。</strong>
+下表是问题来源；当前实现见<a href="#next">第七节</a>。</p>
 
 <table>
 <tr><th>打开方式</th><th>用在哪</th><th>怎么配</th></tr>
@@ -41,7 +42,7 @@ Hadoop 侧的认证机制见 <a href="storage-auth.html">storage-auth.html</a>�
 <tr><td>C++ 的 <code>loon_*</code></td><td>列组数据、索引文件</td><td>收一个 <code>fs.*</code> 属性包</td></tr>
 </table>
 
-<p>四条路各自解析配置、各自归一路径、各自处理凭证，同一件事做了四遍且互不一致。今天的症状：</p>
+<p>四条路各自解析配置、各自归一路径、各自处理凭证，同一件事做了四遍且互不一致。当时的症状：</p>
 
 <ol>
 <li><strong>配置在五个文件里各解析一遍</strong>，默认值和校验都不同。开发用的
@@ -119,8 +120,8 @@ bucket/files/...                                  → 带桶名不带 scheme</co
 <table>
 <tr><th>包</th><th>职责</th><th>规模</th></tr>
 <tr><td><code>core.io</code></td><td>拿着 JNI 句柄，提供 open、read、list、stat、create</td><td>薄，是封装不是实现</td></tr>
-<tr><td><code>core.credential</code></td><td><code>fs.*</code> 与 <code>extfs.*</code> 转属性包，一次解析一次校验</td><td>今天散在五个文件里的逻辑合成一处</td></tr>
-<tr><td><code>core.path</code></td><td>七种路径写法转 <code>(bucket, key)</code></td><td>今天散在十二处</td></tr>
+<tr><td><code>core.credential</code></td><td><code>fs.*</code> 与 <code>extfs.*</code> 转属性包，一次解析一次校验</td><td>把原先散在五个文件里的逻辑合成一处</td></tr>
+<tr><td><code>core.path</code></td><td>七种路径写法转 <code>(bucket, key)</code></td><td>把原先散在十二处的逻辑合成一处</td></tr>
 <tr><td><code>native-storage</code></td><td>包 <code>loon_filesystem_*</code> 与 <code>loon_exttable_read_manifest</code></td><td>新代码，本设计的主要工作量</td></tr>
 </table>
 
@@ -149,10 +150,28 @@ bucket/files/...                                  → 带桶名不带 scheme</co
 </ol>
 <p>三个操作，格式知识一个都不带：</p>
 <pre><code>parse(raw: String, defaultBucket: String): Located   // 七种写法归一
+parseMilvus(raw: String, defaultBucket: String,
+            endpoint: String): Located              // 只用于 Milvus 产生的元数据
 resolve(base: Located, child: String): Located       // 路径拼接
 uri(l: Located, scheme: String): String              // 渲染回 URI，给迁移期的 Hadoop 调用方</code></pre>
 <p><code>_delta/</code>、<code>_metadata/manifest-N.avro</code> 这些拼接留在
 <code>core.delete</code> 与 <code>core.manifest</code>，它们调 <code>resolve</code>。</p>
+
+<p><strong>标准 URI 与 Milvus 元数据 URI 必须分开解析。</strong>用户输入
+<code>s3://bucket/key</code> 时，authority 永远是桶；不能因为它包含点号、看起来像主机名，或恰好与
+默认桶不同，就改成 endpoint。Milvus 的快照 JSON、段 Avro 与 footer 会产生另一种写法：
+<code>s3://endpoint:port/bucket/key</code>。只有这些已知元数据边界调用
+<code>parseMilvus</code>，并且只有 authority 显式带端口，或去掉 scheme 后与配置的
+<code>fs.address</code> 的 endpoint host 精确匹配时，才把 path 第一段解释为桶。这样 MinIO 自定义端点能读，普通的
+单标签桶与带点桶都不会被误判。</p>
+
+<p>这条归一覆盖快照 JSON 的 V3 base path 与 Avro 路径、V2 footer 中的数据和删除文件路径、
+V3 Manifest 列出的 delete path，以及 backfill 取得的段 base path。V3 delete path 在 driver 只归一为与
+<code>Snapshot.bucket</code> 一致的 key，内容仍由 executor 解码；跨桶直接失败。产物仍是同一个 <code>Located(bucket, key)</code>；endpoint 进入
+<code>fs.address</code>，不进入 key。Spark 边界接受 <code>s3.endpoint</code> 与
+<code>fs.s3a.endpoint</code> 作为 <code>fs.address</code> 的别名；path-style 依次取
+<code>fs.s3a.path.style.access</code>、<code>s3.pathStyleAccess</code>、
+<code>fs.use_virtual_host</code> 的反值，非 true/false 直接拒绝。</p>
 
 <h3 id="why">2.3 为什么是这条路线</h3>
 <p><strong>因为要的东西 C 层已经写好了，而且比我们能在 JVM 侧写出来的更全。</strong></p>
@@ -385,7 +404,7 @@ executor 启动多久，而此前的设计里一个字都没提。</strong></p>
 <tr><td>R17 交付下游列式算子</td><td><code>supportColumnarReads</code></td><td>Arrow 批</td><td>对得上</td></tr>
 <tr><td>R13 表统计</td><td><code>SupportsReportStatistics</code></td><td>行数从 <code>ColumnGroupFile</code> 的 <code>end_index - start_index</code> 求和；字节数从 <code>loon_filesystem_get_file_info</code></td><td>对得上。R13 要的是行数和字节数，不是列级 min/max</td></tr>
 <tr><td>R11 Limit 下推</td><td><code>SupportsPushDownLimit</code></td><td>无专门入参；流式读可以提前停</td><td>部分：JVM 侧读够就不再拉</td></tr>
-<tr><td>R8 删除生效</td><td>扫描内部</td><td>manifest 返回 delta log 列表，内容解析还没有</td><td>迁移期在 JVM，见<a href="#reqs">第六节</a>第 2 项</td></tr>
+<tr><td>R8 删除生效</td><td>扫描内部</td><td>V3 manifest 返回 delta log 描述；文件字节仍经 C filesystem 读取</td><td>driver 只列描述，executor 的 <code>core.read.exec.DeletePlans</code> 调 JVM <code>DeltaLogReader</code> 解析两种编码</td></tr>
 <tr><td>R6/R7 谓词下推</td><td><code>SupportsPushDownV2Filters</code></td><td><code>get_filtered_stream(predicate)</code> 收一个字符串</td><td>不用 C 的入口，见 4.4</td></tr>
 <tr><td>R10 row group 级剪枝</td><td>扫描内部</td><td><code>FileRowGroupReader</code> 能按 row group 读</td><td><strong>对不上</strong>，见 4.5</td></tr>
 <tr><td>R19 按分区报分区</td><td><code>SupportsReportPartitioning</code></td><td>—</td><td>决策 19 未定</td></tr>
@@ -430,25 +449,29 @@ row group」这一项。JVM 侧就算把 footer 读了、把该跳的 row group 
 它的优先级是 P1。</p>
 
 <h2 id="files">五、读一张表要打开哪些文件</h2>
-<p>五个入口分支，用户给的东西不同，最终都归结成一个对象存储路径：collection 名（调
-gRPC CreateSnapshot 拿 s3Location）、快照路径、<code>milvus.snapshot.manifests</code> 或
-<code>milvus.snapshot.v2.segments</code>、<code>milvus.backup.dir</code>、遗留 client 模式。</p>
+<p>用户可以给 client 模式的 collection、一个快照路径、option-string 段列表或
+<code>milvus.backup.dir</code>。前三种最终解析快照目录或显式段列表，backup 解析自己的
+<code>full_meta.json</code>；各来源完整物化一个 <code>Snapshot</code> 后进入同一条计划。</p>
 
-<p><strong>判断谁解析字节只看一条：格式属于 milvus-storage 就由 C 解析，属于 Milvus 的元数据
-才由 JVM 解析。</strong>milvus-storage 是 Milvus 原生的实现，格式以它为准；在 JVM 侧再写一份
-解析器，等于同一个格式有两份实现，版本一升就要对两遍。</p>
+<p><strong>打开对象只有一条路径，解析责任按现有格式能力分。</strong>
+所有字节都经 <code>core.io.ObjectStore</code> 与 C filesystem 取得。快照 JSON 和 Avro 是
+Milvus 元数据，由 JVM 适配；V3 Manifest 与列组由 milvus-storage 的 C 实现解析；
+两种删除编码目前由 <code>core.delete</code> 在 executor 的 JVM 解析。JVM 解析不得
+因此再打开 Hadoop filesystem 或另一个存储客户端。</p>
 
 <table>
 <tr><th>文件</th><th>格式是谁的</th><th>谁解析</th></tr>
 <tr><td>快照 JSON</td><td>Milvus 的元数据：collection schema、字段与类型、段列表、<code>base_path</code></td><td>JVM。这是 Meta 信息适配，connector 的本职</td></tr>
 <tr><td>段 manifest（快照 JSON 的 <code>manifest_list</code>）</td><td>Milvus 的元数据。Milvus 用 Go 的 avro 库自己解，内嵌 V1–V4 四个 schema，<code>SnapshotFormatVersion = 4</code>，milvus-storage 不认识它</td><td>JVM</td></tr>
 <tr><td>V3 段的 <code>_metadata/manifest-N.avro</code></td><td>milvus-storage</td><td>C，<code>loon_exttable_read_manifest</code></td></tr>
-<tr><td>删除文件</td><td>milvus-storage</td><td>C。今天 C 没有，<a href="#reqs">第六节</a>第 2 项</td></tr>
-<tr><td>parquet footer 的字段 id</td><td>milvus-storage（V2 packed）</td><td>C。今天 C 没有，<a href="#reqs">第六节</a>第 1 项</td></tr>
+<tr><td>删除文件</td><td>Milvus 的 V2 binlog 容器或 V3 两列 parquet</td><td>executor 的 JVM <code>DeltaLogReader</code> 解析；字节由任务属性打开的 C filesystem 读取</td></tr>
+<tr><td>parquet footer 的字段 id</td><td>milvus-storage（V2 packed）</td><td><code>compat.v2.FooterV2SegmentResolver</code> 在 driver 通过 <code>ObjectStore</code> 的范围读取恢复</td></tr>
 <tr><td>列组数据</td><td>milvus-storage</td><td>C</td></tr>
 <tr><td>索引文件</td><td>milvus-storage</td><td>C（未建）</td></tr>
 </table>
-<p>那两项落地之前 JVM 侧的解析器还在跑。这是迁移期状态，不是设计，退出条件就是那两项。</p>
+<p>删除文件在 JVM 解析是当前唯一实现，并且只发生在 executor；driver 发送的是路径与条数。
+V2 footer 恢复属于 compat 边界，V3 不走这一步。两者打开对象都复用 <code>core.io.ObjectStore</code>，
+不增加第二套存储客户端。</p>
 
 <h3 id="cgap">5.1 V2 为什么不能砍</h3>
 <p><strong>V2 不是老版本，是当前默认。</strong>Milvus 的存储版本升级 compaction 里，
@@ -461,12 +484,13 @@ gRPC CreateSnapshot 拿 s3Location）、快照路径、<code>milvus.snapshot.man
 
 <h2 id="reqs">六、对 milvus-storage 的需求</h2>
 
-<p>七项。<strong>每一项都不在 JVM 侧绕过</strong>——milvus-storage 是我们自己的仓库，缺什么补什么。</p>
+<p>下表保留原始七项以记录边界变化。第 2 项已明确由 connector 的 executor 承担；
+其余需求不在 JVM 侧另建并行实现。</p>
 
 <table>
 <tr><th>#</th><th>需求</th><th>挡住什么</th><th>改动面</th></tr>
-<tr><td>1</td><td>读 V2 packed 的 parquet footer 取字段 id 的 FFI 出口。C++ 侧 <code>FieldIDList::Make(schema)</code> 与 <code>GetFieldIDMapping()</code> 已经有，缺的是出口</td><td>K1（P0）</td><td>50–100 行：一个结构体加一个函数</td></tr>
-<tr><td>2</td><td>解析删除文件的内容。manifest 已返回 delta log 列表，内容解析还没有</td><td>R8</td><td>未知。等决策 13 定了删除文件格式归谁</td></tr>
+<tr><td>1</td><td>读 V2 packed 的 parquet footer 取字段 id 的 FFI 出口。C++ 侧 <code>FieldIDList::Make(schema)</code> 与 <code>GetFieldIDMapping()</code> 已经有，缺的是出口</td><td>不再阻塞 V2 读取；用于移除 compat 的 JVM footer 恢复器</td><td>50–100 行：一个结构体加一个函数</td></tr>
+<tr><td>2</td><td>解析删除文件的内容</td><td>已不阻塞 R8</td><td>连接器已在 executor 的 <code>DeltaLogReader</code> 识别两列 parquet 与旧 binlog 容器；driver 不解码</td></tr>
 <tr><td>3</td><td><code>FormatReader::set_predicate</code> 基类返回 <code>NotImplemented</code> 而不是 <code>OK</code>（4.3）</td><td>不挡我们，挡别的调用方</td><td>1 行。难在影响面：提之前要查 Milvus 侧有没有人在给非 Vortex 列组传非空谓词，有的话对方会当成 breaking change</td></tr>
 <tr><td>4</td><td>加 <code>fs.session_token</code> 属性。<code>ConfigureAccessKey</code> 的第三个参数就是它，只是没有属性喂</td><td>用户自带一份 STS 临时凭证当选项传进来的场景</td><td>约 20 行</td></tr>
 <tr><td>5</td><td>把 <code>fs.iam_endpoint</code> 接上。现在标着 Deprecated 读进 config 没人用，阿里云 STS 端点写死公网 <code>sts.aliyuncs.com</code></td><td>要求走内网 STS 的环境</td><td>约 30 行：<code>AliyunRAMSTSClient</code> 的写死端点改成构造参数</td></tr>
@@ -475,7 +499,8 @@ gRPC CreateSnapshot 拿 s3Location）、快照路径、<code>milvus.snapshot.man
 </table>
 
 <p>第 1 项随 V3 普及会自然失效（5.1），但那取决于 <code>common.storage.useLoonFFI</code>
-什么时候默认打开，不由我们控制，所以按要做的排。</p>
+什么时候默认打开，不由我们控制。当前 compat 的 JVM footer 恢复器已保证 V2 可读，
+该 FFI 出口是后续移除这个过渡实现的收口项，不是当前读链路的交付阻塞。</p>
 
 <p><strong>撤回过一项：</strong>「让 C 读段 manifest」。那是 Milvus 的元数据格式，
 <code>internal/snapshotio/snapshot.go</code> 里 Milvus 用 Go 的 avro 库自己解。
@@ -493,21 +518,17 @@ gRPC CreateSnapshot 拿 s3Location）、快照路径、<code>milvus.snapshot.man
 第一次接触就送这个，压在队列里的概率很高。</p>
 <p><strong>真正的瓶颈是维护者的时间。</strong>这六项里哪一项进了关键路径，与其提 PR 不如先找人对排期。</p>
 
-<h2 id="next">七、下一步</h2>
+<h2 id="next">七、当前实现</h2>
 <ol>
-<li><strong><code>native-storage</code> 的 JNI</strong>，包 <code>loon_filesystem_*</code> 与
-<code>loon_exttable_read_manifest</code>。本设计的主要工作量，第 1 层由此从「以后再说」
-变成关键路径。</li>
-<li><strong><code>core.path</code></strong>。十二处合成一处，产出 <code>(bucket, key)</code>；
-顺带把 <code>resolveManifestDeltaPath</code> 里的格式知识摘回 <code>core.delete</code>。
-不依赖 JNI，可先做。</li>
-<li><strong><code>core.credential</code></strong>。五处解析合成一处，只认 <code>fs.*</code>
-与 <code>extfs.*</code>，校验必填项。</li>
-<li><strong>删掉写死的开发默认值</strong>，缺一项就报错。生产路径上有两处：
-<code>loon/Properties.scala</code> 里 <code>fs.address</code>、<code>fs.bucket_name</code>
-与两个密钥的缺省值，<code>write/MilvusV3Writer.scala</code> 的 <code>generateBasePath</code>
-里桶名缺省 <code>a-bucket</code>——那会把段写到读侧不会去找的路径上。
-这是对外可见的行为变化：今天漏配一项会连上开发用的 MinIO 并在请求时失败，改完是启动即报错。</li>
+<li><strong><code>native-storage</code></strong> 已封装 filesystem、Manifest、reader 与 writer 的 C 入口；
+driver 的 <code>ObjectStore</code> 和 executor 的 <code>SegmentReader</code> 都走这一层。</li>
+<li><strong><code>core.path</code></strong> 已统一产出 <code>(bucket, key)</code>；标准用户 URI 与
+Milvus endpoint 形式分别由 <code>parse</code>、<code>parseMilvus</code> 处理。</li>
+<li><strong><code>core.credential</code></strong> 已把 <code>fs.*</code> 与 <code>extfs.*</code>
+归成一个属性包，必填项与已知布尔值在打开存储前严格校验。</li>
+<li><strong>资源所有权</strong> 已固定：Snapshot 来源在 driver 上完整物化描述后关闭 store；
+executor 根据任务重新打开删除文件与段 reader，各自在本进程关闭。句柄不进入
+<code>InputPartition</code>。</li>
 </ol>
 
 <h2 id="verify">八、要在真实环境验的</h2>
@@ -526,9 +547,12 @@ gRPC CreateSnapshot 拿 s3Location）、快照路径、<code>milvus.snapshot.man
 同一份凭证用 aws cli 带上 token 能读、去掉 token 就 403，两相对照坐实了是 token 被丢了。
 改走 <code>fs.use_iam=true</code>、让 C 层默认链从进程环境读 <code>AWS_SESSION_TOKEN</code>，
 就读通了。<strong>结论：executor 上用临时凭证走 S3，今天只能靠 use_iam 加环境变量，
-属性包这条路要等上游加 <code>fs.session_token</code>（<a href="#reqs">第七节</a>第 4 项）。</strong></div>
+属性包这条路要等上游加 <code>fs.session_token</code>（<a href="#reqs">第六节</a>第 4 项）。</strong></div>
 
 <ol>
+<li>自定义 MinIO/S3 兼容端点下，用 Milvus 实际产生的
+<code>s3://endpoint:port/bucket/key</code> 路径跑通快照 JSON、Avro、V2 footer、数据段和
+删除文件。单元测试只能证明路径规则，不能替代真实后端访问。</li>
 <li>EKS pod 里 C 层默认链拿到的是 IRSA 投影的 service-account token，不是节点实例角色。
 代码上成立（3.4）。本机用同一套 token 换出的凭证经 use_iam 读通了 UAT 桶，
 但那是本机默认链读环境变量，不等于 EKS pod 内的行为，仍要在 pod 里跑一次确认。</li>

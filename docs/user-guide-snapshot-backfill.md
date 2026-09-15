@@ -103,9 +103,10 @@ backfill it in the same operation. Supported physical-key Milvus types are
 Int8/16/32/64, String, and VarChar.
 Floating-point, JSON, Geometry, Text, Timestamptz, unknown, vector, array, map,
 and struct keys are rejected. Logical file/row keys are not supported.
-The names `segment_id`, `row_offset`, `$segment_id`, and `$row_offset` are
-reserved for backfill metadata and cannot be used as join keys.
-`$row_offset` only restores segment write order and is not a stable row identity.
+The canonical names `_segment_id` and `_row_offset`, together with the legacy
+aliases `segment_id`, `row_offset`, `$segment_id`, and `$row_offset`, are
+reserved for backfill metadata and cannot be used as join keys. `_row_offset`
+only restores segment write order and is not a stable row identity.
 
 **Type rules:**
 

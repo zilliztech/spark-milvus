@@ -29,12 +29,9 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
   *
   * The loop pulls a batch, hands out its rows one by one, skips a deleted row,
   * evaluates the pushed filters on a row when there are any, closes the batch
-  * and pulls the next. At EOF, when the layout states how many rows the segment
-  * holds (a column-group layout does), the count delivered has to match: a
-  * short read is an error, not a short DataFrame. A milvus-storage before #657
-  * dropped every file after the first of a column group with no error and no
-  * log, and the native cross-group row check cannot see it when every group has
-  * the same file split.
+  * and pulls the next. The `SegmentReader` opened by the binding owns the EOF
+  * row-count contract, so row and columnar consumers cannot disagree about a
+  * short read.
   *
   * A vector search replaces the scan: on the first `next()` the whole segment
   * is scored by `SegmentVectorSearch` and the top-k come out, each row with its
@@ -51,7 +48,6 @@ class MilvusRowPartitionReader(
   private val applyDeletes: Boolean = setup.appliesDeletes
   private val arrowColumnNames: Map[String, String] = setup.arrowColumnNames
   private val allocator = ArrowAllocator.get
-  private val expectedRows: Option[Long] = setup.task.expectedRows
 
   // Native handles start out null so a constructor that throws can release
   // whatever it took; Spark only closes a reader it got back.
@@ -59,8 +55,6 @@ class MilvusRowPartitionReader(
   private var currentBatch: VectorSchemaRoot = null
   private var currentRowIndex: Int = 0
   private var currentBatchStartRowOffset: Long = 0L
-  private var observedRows: Long = 0L
-  private var rowCountVerified = false
   private var _lastReturnedRowOffset: Long = -1L
 
   private var searchResults: Iterator[SegmentVectorSearch.Result] = null
@@ -131,7 +125,6 @@ class MilvusRowPartitionReader(
         val exhausted = currentBatch
         currentBatch = null
         currentBatchStartRowOffset += exhausted.getRowCount.toLong
-        observedRows += exhausted.getRowCount.toLong
         materialized += exhausted.getRowCount.toLong - deletedInBatch
         deletedInBatch = 0L
         exhausted.close()
@@ -139,7 +132,6 @@ class MilvusRowPartitionReader(
         currentRowIndex = 0
       }
       if (currentBatch == null) {
-        verifyRowCount()
         return false
       }
       if (isDeleted(currentBatch, currentRowIndex)) {
@@ -187,22 +179,6 @@ class MilvusRowPartitionReader(
     val metrics =
       if (segmentReader != null) segmentReader.metrics else finalMetrics
     ScanMetrics.taskValues(metrics, materialized)
-  }
-
-  /** Runs once, at EOF of a scan; a close before EOF skips it on purpose. */
-  private def verifyRowCount(): Unit = {
-    if (rowCountVerified) return
-    rowCountVerified = true
-    expectedRows.foreach { expected =>
-      if (observedRows != expected) {
-        throw new IllegalStateException(
-          s"segment ${setup.task.segmentId} delivered $observedRows rows, its layout states $expected " +
-            "(sum of per-file row counts); refusing to return a short DataFrame. " +
-            "A milvus-storage before milvus-storage#657 drops every file after " +
-            "the first of a column group"
-        )
-      }
-    }
   }
 
   // Each handle is released on its own so one failure does not strand the

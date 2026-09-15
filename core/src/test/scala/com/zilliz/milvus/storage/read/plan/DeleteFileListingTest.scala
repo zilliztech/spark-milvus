@@ -12,8 +12,10 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.io.{FailingObjectStore, LocalObjectStore}
 import com.zilliz.milvus.storage.snapshot.{
+  DeleteFiles,
   DeltaLogFile,
   Segment,
+  SegmentLayout,
   Snapshot,
   SnapshotCatalog,
   SnapshotOrigin,
@@ -37,9 +39,18 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
     )
   )
 
+  private val schemaWithoutPrimaryKey = CollectionSchema(
+    name = "c",
+    fields = Seq(
+      FieldSchema(fieldID = 101, name = "value", dataType = DataType.Int64)
+    )
+  )
+
   private def snapshotOf(
       v3: Seq[ManifestItemJson] = Seq.empty,
-      v2: Seq[Segment] = Seq.empty
+      v2: Seq[Segment] = Seq.empty,
+      collectionSchema: CollectionSchema = schema,
+      bucket: String = ""
   ): Snapshot =
     SnapshotCatalog
       .fromLists(
@@ -47,10 +58,10 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
         collectionId = 10L,
         createdAt = None,
         partitionIds = Seq(20L),
-        schemaBytes = schema.toByteArray,
+        schemaBytes = collectionSchema.toByteArray,
         v3Items = v3,
         v2Segments = v2,
-        bucket = "",
+        bucket = bucket,
         origin = SnapshotOrigin.Options
       )
       .fold(e => throw e, identity)
@@ -107,6 +118,16 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
     val target = dir.resolve(s"$basePath/_metadata/manifest-$version.avro")
     Files.createDirectories(target.getParent)
     Files.write(target, out.toByteArray)
+  }
+
+  private def writeUnparseableManifest(
+      dir: Path,
+      basePath: String,
+      version: Long
+  ): Unit = {
+    val target = dir.resolve(s"$basePath/_metadata/manifest-$version.avro")
+    Files.createDirectories(target.getParent)
+    Files.write(target, Array[Byte](1, 2, 3))
   }
 
   test("V2 segments list their own files, L0 segments list their partition's") {
@@ -167,23 +188,131 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("a V3 segment with no manifest yet lists nothing and pins nothing") {
+  test("a V3 delete-log endpoint URI becomes a bucket-relative key") {
     withDir { dir =>
+      val base = "files/insert_log/10/20/30"
+      val key = s"$base/_delta/9001"
+      writeManifest(
+        dir,
+        base,
+        3L,
+        Seq((s"s3://minio:9000/test-bucket/$key", 0, 4L))
+      )
+
       val listing = DeleteFileListing
         .of(
-          snapshotOf(v3 =
-            Seq(ManifestItemJson(30L, "files/insert_log/10/20/30"))
+          snapshotOf(
+            v3 = Seq(
+              ManifestItemJson(
+                30L,
+                s"""{"ver":3,"base_path":"$base"}"""
+              )
+            ),
+            bucket = "test-bucket"
           ),
           applyDeletes = true,
-          "",
-          new LocalObjectStore(dir.toString)
+          "test-bucket",
+          new LocalObjectStore(dir.toString),
+          endpoint = "minio:9000"
         )
         .fold(e => throw e, identity)
-      listing shouldBe DeleteFileListing.empty
+
+      listing.v3BySegment shouldBe Map(
+        30L -> Seq(DeltaLogFile(0L, key, 4L))
+      )
     }
   }
 
-  test("applyDeletes=false opens nothing") {
+  test("an unpinned V3 segment with no manifest fails closed") {
+    withDir { dir =>
+      val base = "files/insert_log/10/20/30"
+      Seq(true, false).foreach { applyDeletes =>
+        val result = DeleteFileListing.of(
+          snapshotOf(v3 = Seq(ManifestItemJson(30L, base))),
+          applyDeletes,
+          "",
+          new LocalObjectStore(dir.toString)
+        )
+        withClue(s"applyDeletes=$applyDeletes") {
+          result.isLeft shouldBe true
+          val message = result.left.toOption.get.getMessage
+          message should include("segment 30")
+          message should include(base)
+          message should include("latest manifest version must be positive")
+        }
+      }
+    }
+  }
+
+  test("unknown V2 and L0 delete state fails when deletes are enabled") {
+    val segments = Seq(
+      "V2 data" -> Segment(
+        id = 31L,
+        partitionId = 20L,
+        storageVersion = 2,
+        rows = Some(1L),
+        layout = SegmentLayout.ColumnGroups(Seq(group)),
+        deletes = DeleteFiles.Unknown
+      ),
+      "L0" -> Segment(
+        id = 32L,
+        partitionId = 20L,
+        storageVersion = 2,
+        rows = Some(0L),
+        layout = SegmentLayout.ColumnGroups(Seq.empty),
+        deletes = DeleteFiles.Unknown
+      )
+    )
+
+    segments.foreach { case (label, segment) =>
+      val result = DeleteFileListing.of(
+        snapshotOf(v2 = Seq(segment)),
+        applyDeletes = true,
+        "",
+        new LocalObjectStore()
+      )
+      withClue(label) {
+        result.isLeft shouldBe true
+        val message = result.left.toOption.get.getMessage
+        message should include(s"V2 segment ${segment.id}")
+        message should include("delete-file state is unknown")
+      }
+    }
+  }
+
+  test("unknown V2 and L0 delete state is ignored when deletes are disabled") {
+    val segments = Seq(
+      Segment(
+        id = 31L,
+        partitionId = 20L,
+        storageVersion = 2,
+        rows = Some(1L),
+        layout = SegmentLayout.ColumnGroups(Seq(group)),
+        deletes = DeleteFiles.Unknown
+      ),
+      Segment(
+        id = 32L,
+        partitionId = 20L,
+        storageVersion = 2,
+        rows = Some(0L),
+        layout = SegmentLayout.ColumnGroups(Seq.empty),
+        deletes = DeleteFiles.Unknown
+      )
+    )
+
+    DeleteFileListing
+      .of(
+        snapshotOf(v2 = segments),
+        applyDeletes = false,
+        "",
+        new FailingObjectStore(new IllegalStateException("must not be opened"))
+      )
+      .fold(e => throw e, identity) shouldBe DeleteFileListing.empty
+  }
+
+  test(
+    "a listed V3 version needs no storage access when deletes are disabled"
+  ) {
     val listing = DeleteFileListing
       .of(
         snapshotOf(v3 =
@@ -194,7 +323,68 @@ class DeleteFileListingTest extends AnyFunSuite with Matchers {
         new FailingObjectStore(new IllegalStateException("must not be opened"))
       )
       .fold(e => throw e, identity)
-    listing shouldBe DeleteFileListing.empty
+    listing shouldBe DeleteFileListing.empty.copy(
+      v3ReadVersions = Map(30L -> 3L)
+    )
+  }
+
+  test(
+    "a missing V3 version is pinned without parsing its manifest when deletes are disabled"
+  ) {
+    withDir { dir =>
+      val base = "files/insert_log/10/20/30"
+      writeUnparseableManifest(dir, base, 4L)
+      val own = DeltaLogFile(5L, "files/delta_log/10/20/31/5", 2L)
+      val l0 = DeltaLogFile(6L, "files/delta_log/10/20/32/6", 3L)
+      val listing = DeleteFileListing
+        .of(
+          snapshotOf(
+            v3 = Seq(ManifestItemJson(30L, base)),
+            v2 = Seq(
+              Segment.v2(31L, 20L, 1L, Seq(group), Seq(own)),
+              Segment.v2(32L, 20L, 0L, Seq.empty, Seq(l0))
+            )
+          ),
+          applyDeletes = false,
+          "",
+          new LocalObjectStore(dir.toString)
+        )
+        .fold(e => throw e, identity)
+
+      listing shouldBe DeleteFileListing.empty.copy(
+        v3ReadVersions = Map(30L -> 4L)
+      )
+    }
+  }
+
+  test(
+    "a schema without a primary key still pins V3 without listing any delete file"
+  ) {
+    withDir { dir =>
+      val base = "files/insert_log/10/20/30"
+      writeUnparseableManifest(dir, base, 5L)
+      val own = DeltaLogFile(5L, "files/delta_log/10/20/31/5", 2L)
+      val l0 = DeltaLogFile(6L, "files/delta_log/10/20/32/6", 3L)
+      val listing = DeleteFileListing
+        .of(
+          snapshotOf(
+            v3 = Seq(ManifestItemJson(30L, base)),
+            v2 = Seq(
+              Segment.v2(31L, 20L, 1L, Seq(group), Seq(own)),
+              Segment.v2(32L, 20L, 0L, Seq.empty, Seq(l0))
+            ),
+            collectionSchema = schemaWithoutPrimaryKey
+          ),
+          applyDeletes = true,
+          "",
+          new LocalObjectStore(dir.toString)
+        )
+        .fold(e => throw e, identity)
+
+      listing shouldBe DeleteFileListing.empty.copy(
+        v3ReadVersions = Map(30L -> 5L)
+      )
+    }
   }
 
   test("a manifest that cannot be read is an error, not an empty list") {

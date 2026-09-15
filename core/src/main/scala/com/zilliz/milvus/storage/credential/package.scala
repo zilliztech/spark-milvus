@@ -4,9 +4,10 @@ package com.zilliz.milvus.storage
   *
   * The output is a plain Map[String, String] whose keys are all `fs.*`, or
   * `extfs.<name>.*` when one job reaches more than one bucket. This package
-  * validates what is required and rejects blank values; it does not branch on
-  * cloud, and no cloud name or scheme (`s3a`, `oss`, `abfs`) appears in it.
-  * Dispatch by cloud happens in the C layer, keyed on `fs.cloud_provider`.
+  * validates what is required, rejects blank values, and accepts only `true` or
+  * `false` for known boolean properties; it does not branch on cloud, and no
+  * cloud name or scheme (`s3a`, `oss`, `abfs`) appears in it. Dispatch by cloud
+  * happens in the C layer, keyed on `fs.cloud_provider`.
   *
   * Translating Hadoop-style keys (`spark.hadoop.fs.s3a.*`) into `fs.*` is not
   * done here. It belongs to whoever produces the configuration, or to a layer-3

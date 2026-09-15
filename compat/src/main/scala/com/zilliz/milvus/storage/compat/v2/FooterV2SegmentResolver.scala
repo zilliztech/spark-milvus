@@ -9,7 +9,7 @@ import com.zilliz.milvus.storage.manifest.{
   AvroManifestEntry
 }
 import com.zilliz.milvus.storage.manifest.SegmentManifestReader
-import com.zilliz.milvus.storage.path.StoragePath
+import com.zilliz.milvus.storage.path.{Located, StoragePath}
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 import com.zilliz.milvus.storage.snapshot.Segment
 
@@ -18,7 +18,7 @@ import com.zilliz.milvus.storage.snapshot.Segment
   * Given the list of per-segment AVRO paths from `SnapshotJson.manifestList`
   * and the S3 bucket where those files live, this object:
   *
-  *   1. Fetches each AVRO via Hadoop FS. 2. Decodes with
+  *   1. Fetches each AVRO via [[ObjectStore]]. 2. Decodes with
   *      [[SegmentManifestReader]]. 3. Skips entries whose `storage_version !=
   *      2` (V1/V3 are handled elsewhere). 4. For each V2 entry, reads exactly
   *      one parquet footer's `group_field_id_list` kv-metadata to recover the
@@ -57,12 +57,14 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
       store: ObjectStore,
       manifestSchemaVersion: Int = 1,
       applyDeletes: Boolean = true,
-      storageScheme: String = "s3a"
+      storageScheme: String = "s3a",
+      endpoint: String = ""
   ): Either[Throwable, Seq[Segment]] = {
     try {
       val out = scala.collection.mutable.ArrayBuffer.empty[Segment]
       manifestPaths.foreach { rawPath =>
-        val avroPath = StoragePath.parse(rawPath, bucket).key
+        val avroPath =
+          metadataPath(rawPath, bucket, endpoint, "AVRO manifest").key
         val avroBytes = store.readAll(avroPath)
         val entry =
           SegmentManifestReader
@@ -79,7 +81,8 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
           bucket,
           store,
           applyDeletes,
-          storageScheme
+          storageScheme,
+          endpoint
         ) match {
           case Right(Some(seg)) => out += seg
           case Right(None)      => // skipped (storage version != 2)
@@ -129,7 +132,8 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
       bucket: String,
       store: ObjectStore,
       applyDeletes: Boolean = true,
-      storageScheme: String = "s3a"
+      storageScheme: String = "s3a",
+      endpoint: String = ""
   ): Either[Throwable, Option[Segment]] = {
     val isL0 = entry.segmentLevel == 1L
 
@@ -154,7 +158,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
       return Right(None)
     }
     val resolvedEntry =
-      try resolveEntryPaths(entry, bucket, storageScheme)
+      try resolveEntryPaths(entry, bucket, storageScheme, endpoint)
       catch { case NonFatal(e) => return Left(e) }
 
     if (isL0) {
@@ -197,7 +201,12 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
             // executors; the store is bound to the bucket and takes the key.
             ParquetFooterReader
               .readFieldIdsFromSchema(
-                StoragePath.parse(samplePath, bucket).key,
+                metadataPath(
+                  samplePath,
+                  bucket,
+                  endpoint,
+                  "parquet binlog"
+                ).key,
                 store
               ) match {
               case Right(ids) => ids
@@ -233,24 +242,52 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
   private def resolveEntryPaths(
       entry: AvroManifestEntry,
       bucket: String,
-      storageScheme: String
+      storageScheme: String,
+      endpoint: String
   ): AvroManifestEntry = {
     def resolveFieldBinlogs(
-        fieldBinlogs: Seq[AvroFieldBinlogEntry]
+        fieldBinlogs: Seq[AvroFieldBinlogEntry],
+        pathKind: String
     ): Seq[AvroFieldBinlogEntry] =
       fieldBinlogs.map(fieldBinlog =>
         fieldBinlog.copy(binlogs =
           fieldBinlog.binlogs.map(log =>
             log.copy(logPath =
-              StoragePath.parse(log.logPath, bucket).uri(storageScheme)
+              metadataPath(log.logPath, bucket, endpoint, pathKind)
+                .uri(storageScheme)
             )
           )
         )
       )
 
     entry.copy(
-      binlogFiles = resolveFieldBinlogs(entry.binlogFiles),
-      deltaLogFiles = resolveFieldBinlogs(entry.deltaLogFiles)
+      binlogFiles = resolveFieldBinlogs(entry.binlogFiles, "parquet binlog"),
+      deltaLogFiles = resolveFieldBinlogs(entry.deltaLogFiles, "delta log")
     )
+  }
+
+  /** Parses one path emitted by Milvus and keeps every V2 planning read inside
+    * the store's configured bucket. A bucket-less path inherits `bucket`; an
+    * explicitly different bucket is never reinterpreted as a key in the current
+    * store.
+    */
+  private def metadataPath(
+      rawPath: String,
+      bucket: String,
+      endpoint: String,
+      pathKind: String
+  ): Located = {
+    val located = StoragePath.parseMilvus(rawPath, bucket, endpoint)
+    val expectedBucket = Option(bucket).map(_.trim).getOrElse("")
+    if (
+      expectedBucket.nonEmpty && located.hasBucket &&
+      located.bucket != expectedBucket
+    ) {
+      throw new IllegalArgumentException(
+        s"$pathKind path is in bucket '${located.bucket}' but expected " +
+          s"bucket '$expectedBucket': $rawPath"
+      )
+    }
+    located
   }
 }

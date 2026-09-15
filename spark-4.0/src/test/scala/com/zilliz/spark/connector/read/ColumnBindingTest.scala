@@ -106,6 +106,58 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
 
     v2().timestampColumnName shouldBe "Timestamp"
     v3().timestampColumnName shouldBe "1"
+    v3().arrowColumnFor(
+      MilvusOption.MilvusExtraColumnTimestamp
+    ) shouldBe "1"
+  }
+
+  test("a dynamic field keeps its recorded id across both storage lines") {
+    val dynamicField = FieldSchema(
+      fieldID = 407L,
+      name = "$meta",
+      dataType = DataType.JSON,
+      isDynamic = true,
+      nullable = true
+    )
+    val dynamicSchema = milvusSchema.copy(
+      enableDynamicField = true,
+      fields = milvusSchema.fields :+ dynamicField
+    )
+    val outputSchema = StructType(Seq(StructField("$meta", StringType)))
+
+    val v2Task = task(
+      SegmentLayout.ColumnGroups(
+        Seq(
+          V2ColumnGroup(
+            fieldIds = Seq(407L),
+            filePaths = Seq("files/meta.parquet"),
+            fileRowCounts = Seq(10L)
+          )
+        )
+      )
+    ).copy(
+      schemaBytes = dynamicSchema.toByteArray,
+      neededFieldIds = Seq(407L)
+    )
+    val v2Binding = V2ColumnBinding(
+      MilvusV2InputPartition(v2Task, options),
+      outputSchema
+    )
+
+    val v3Task = task(SegmentLayout.Manifest("files/seg")).copy(
+      schemaBytes = dynamicSchema.toByteArray,
+      neededFieldIds = Seq(407L)
+    )
+    val v3Binding = V3ColumnBinding(
+      MilvusV3InputPartition(v3Task, "20", options),
+      outputSchema
+    )
+
+    v2Binding.columnNameFor(407L) shouldBe Some("$meta")
+    v2Binding.arrowColumnFor("$meta") shouldBe "$meta"
+    v2Binding.neededColumns shouldBe Seq("$meta")
+    v3Binding.arrowColumnFor("$meta") shouldBe "407"
+    v3Binding.neededColumns shouldBe Seq("407")
   }
 
   // The schema mapper prepends the system fields, so this is about naming
@@ -123,6 +175,70 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
   test("without deletes only the requested columns are read") {
     v3().neededColumns should contain theSameElementsAs Seq("100", "1", "101")
     v2().neededColumns should contain allOf ("id", "vec")
+  }
+
+  test("task field ids include a projected-away physical dependency") {
+    val projectedTask = task(SegmentLayout.Manifest("files/seg")).copy(
+      neededFieldIds = Seq(101L)
+    )
+    val binding = V3ColumnBinding(
+      MilvusV3InputPartition(projectedTask, "20", options),
+      StructType(Seq(StructField("id", LongType)))
+    )
+
+    binding.neededColumns shouldBe Seq("101")
+  }
+
+  test("the V2 timestamp alias follows the schema's physical field name") {
+    val renamedTimestamp = milvusSchema.copy(fields = milvusSchema.fields.map {
+      case field if field.fieldID == 1L => field.copy(name = "ts")
+      case field                        => field
+    })
+    val projectedTask = task(
+      SegmentLayout.ColumnGroups(
+        Seq(
+          V2ColumnGroup(
+            fieldIds = Seq(1L),
+            filePaths = Seq("files/ts.parquet"),
+            fileRowCounts = Seq(10L)
+          )
+        )
+      )
+    ).copy(schemaBytes = renamedTimestamp.toByteArray)
+    val binding = V2ColumnBinding(
+      MilvusV2InputPartition(projectedTask, options),
+      StructType(
+        Seq(
+          StructField(MilvusOption.MilvusExtraColumnTimestamp, LongType)
+        )
+      )
+    )
+
+    binding.arrowColumnFor(
+      MilvusOption.MilvusExtraColumnTimestamp
+    ) shouldBe "ts"
+    binding.timestampColumnName shouldBe "ts"
+    binding.neededColumns shouldBe Seq("ts")
+  }
+
+  test("the V3 timestamp metadata column reads stored field id 1") {
+    val binding = V3ColumnBinding(
+      MilvusV3InputPartition(
+        task(SegmentLayout.Manifest("files/seg")),
+        "20",
+        options
+      ),
+      StructType(
+        Seq(
+          StructField(MilvusOption.MilvusExtraColumnTimestamp, LongType)
+        )
+      )
+    )
+
+    binding.arrowColumnFor(
+      MilvusOption.MilvusExtraColumnTimestamp
+    ) shouldBe "1"
+    binding.neededColumns shouldBe Seq("1")
   }
 
   // Deletes are keyed by primary key and timestamp, so both columns have to be

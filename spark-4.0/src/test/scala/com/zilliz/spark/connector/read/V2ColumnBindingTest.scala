@@ -148,7 +148,7 @@ class V2ColumnBindingTest extends AnyFunSuite {
     assert(err.getMessage.contains("do not contain requested columns: value"))
   }
 
-  test("resolveNeededColumns tolerates synthetic $meta column") {
+  test("resolveNeededColumns rejects a $meta column missing from the schema") {
     val schema = CollectionSchema(
       fields = Seq(
         FieldSchema(name = "pk", fieldID = 100, dataType = DataType.Int64)
@@ -169,14 +169,16 @@ class V2ColumnBindingTest extends AnyFunSuite {
       )
     )
 
-    val columns = V2ColumnBinding.resolveNeededColumns(
-      sourceSchema,
-      columnGroups,
-      mappings,
-      neededColumnFieldIds = Seq.empty
-    )
+    val error = intercept[IllegalArgumentException] {
+      V2ColumnBinding.resolveNeededColumns(
+        sourceSchema,
+        columnGroups,
+        mappings,
+        neededColumnFieldIds = Seq.empty
+      )
+    }
 
-    assert(columns.toSeq == Seq("pk"))
+    assert(error.getMessage.contains("unknown columns: $meta"))
   }
 
   test("projectedFieldIds forces PK when delete filtering is enabled") {

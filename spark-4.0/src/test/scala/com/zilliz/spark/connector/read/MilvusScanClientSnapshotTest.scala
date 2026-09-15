@@ -194,7 +194,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       baseSchema: StructType,
       extraColumns: String,
       snapshotSchemaJson: Option[String] = Some(vectorSnapshotSchemaJson),
-      snapshotSchemaBytes: Option[String] = None
+      snapshotSchemaBytes: Option[String] = None,
+      selectedFieldIds: Option[String] = None
   ): StructType = {
     val options = scala.collection.mutable.Map(
       MilvusOption.SnapshotMode -> "true",
@@ -208,6 +209,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
     snapshotSchemaBytes.foreach(bytes =>
       options += MilvusOption.SnapshotSchemaBytes -> bytes
+    )
+    selectedFieldIds.foreach(ids =>
+      options += MilvusOption.ReaderFieldIDs -> ids
     )
     val milvusOption = MilvusOption(options.toMap)
     val snapshot = new OptionStringsSnapshotSource(milvusOption)
@@ -232,6 +236,23 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       StorageOptions.resolveClientSnapshotLocation(
         "s3://a-bucket/files/snapshots/1/metadata/2.json",
         "ignored"
+      ) == "s3a://a-bucket/files/snapshots/1/metadata/2.json"
+    )
+  }
+
+  test("resolveClientSnapshotLocation strips a Milvus endpoint authority") {
+    assert(
+      StorageOptions.resolveClientSnapshotLocation(
+        "s3://minio:9000/a-bucket/files/snapshots/1/metadata/2.json",
+        "a-bucket",
+        "minio:9000"
+      ) == "s3a://a-bucket/files/snapshots/1/metadata/2.json"
+    )
+    assert(
+      StorageOptions.resolveClientSnapshotLocation(
+        "s3://storage.internal/a-bucket/files/snapshots/1/metadata/2.json",
+        "a-bucket",
+        "https://storage.internal"
       ) == "s3a://a-bucket/files/snapshots/1/metadata/2.json"
     )
   }
@@ -339,6 +360,85 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       ]
       .task
     assert(task.properties("fs.bucket_name") == "backup-bucket")
+  }
+
+  test("planning carries translated storage aliases into executor tasks") {
+    val options = new ju.HashMap[String, String]()
+    options.put(MilvusOption.S3Endpoint, "minio:9000")
+    options.put(MilvusOption.S3PathStyleAccess, "true")
+    options.put(StorageProperties.AccessKeyId, "ak")
+    options.put(StorageProperties.AccessKeyValue, "sk")
+    val scan = new MilvusScan(
+      rowIdSchema,
+      new CaseInsensitiveStringMap(options),
+      snapshotOf(partitionIds = Seq(0L), bucket = "snapshot-bucket")
+    )
+    val segment = Segment.v2(
+      id = 1L,
+      partitionId = 0L,
+      rows = 10L,
+      columnGroups = Seq(
+        V2ColumnGroup(
+          fieldIds = Seq(100L),
+          filePaths = Seq("files/1.parquet"),
+          fileRowCounts = Seq(10L)
+        )
+      )
+    )
+
+    val task = scan
+      .inputPartitions(
+        snapshotOf(
+          v2 = Seq(segment),
+          partitionIds = Seq(0L),
+          bucket = "snapshot-bucket"
+        )
+      )
+      .head
+      .asInstanceOf[MilvusV2InputPartition]
+      .task
+
+    assert(task.properties(StorageProperties.BucketName) == "snapshot-bucket")
+    assert(task.properties(StorageProperties.Address) == "minio:9000")
+    assert(task.properties(StorageProperties.UseVirtualHost) == "false")
+    assert(task.properties(StorageProperties.AccessKeyId) == "ak")
+  }
+
+  test("planning carries the local storage mode into executor tasks") {
+    val segment = Segment.v2(
+      id = 1L,
+      partitionId = 0L,
+      rows = 1L,
+      columnGroups = Seq(
+        V2ColumnGroup(
+          fieldIds = Seq(100L),
+          filePaths = Seq("/tmp/1.parquet"),
+          fileRowCounts = Seq(1L)
+        )
+      )
+    )
+    val scan = new MilvusScan(
+      rowIdSchema,
+      new CaseInsensitiveStringMap(new ju.HashMap[String, String]()),
+      snapshotOf(
+        v2 = Seq(segment),
+        partitionIds = Seq(0L),
+        bucket = ""
+      )
+    )
+
+    val task = scan
+      .inputPartitions(scan.snapshot)
+      .head
+      .asInstanceOf[MilvusV2InputPartition]
+      .task
+
+    assert(
+      task.properties(StorageProperties.StorageType) ==
+        StorageProperties.StorageTypeLocal
+    )
+    assert(!task.properties.contains(StorageProperties.BucketName))
+    assert(!task.properties.contains(StorageProperties.Address))
   }
 
   test("backup createReaderFactory is self-contained without prior planning") {
@@ -648,6 +748,93 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
+  test("legacy endpoint and path-style aliases configure Hadoop and native") {
+    val options = Map(
+      StorageProperties.BucketName -> "connector-bucket",
+      MilvusOption.S3Endpoint -> "minio:9000",
+      MilvusOption.S3PathStyleAccess -> "true"
+    )
+    val conf = StorageOptions.buildHadoopConfForOptions(
+      options,
+      "s3a://connector-bucket/files/snapshot.json"
+    )
+
+    assert(conf.get("fs.s3a.endpoint") == "minio:9000")
+    assert(conf.get("fs.s3a.path.style.access") == "true")
+    assert(
+      conf.get("fs.s3a.bucket.connector-bucket.endpoint") == "minio:9000"
+    )
+    assert(
+      conf.get("fs.s3a.bucket.connector-bucket.path.style.access") == "true"
+    )
+
+    val native = StorageOptions.storagePropertiesFor(
+      new org.apache.hadoop.conf.Configuration(false),
+      "connector-bucket",
+      options
+    )
+    assert(native(StorageProperties.Address) == "minio:9000")
+    assert(native(StorageProperties.UseVirtualHost) == "false")
+  }
+
+  test("canonical endpoint and path-style options win over legacy aliases") {
+    val options = Map(
+      StorageProperties.Address -> "canonical:9000",
+      MilvusOption.S3Endpoint -> "legacy:9000",
+      "fs.s3a.path.style.access" -> "false",
+      MilvusOption.S3PathStyleAccess -> "true"
+    )
+
+    assert(StorageOptions.effectiveEndpoint(options).contains("canonical:9000"))
+    assert(StorageOptions.effectivePathStyleAccess(options).contains(false))
+  }
+
+  test("Hadoop endpoint option is shared with native storage") {
+    val options = Map("fs.s3a.endpoint" -> "hadoop-option:9000")
+
+    assert(
+      StorageOptions.effectiveEndpoint(options).contains("hadoop-option:9000")
+    )
+    val native = StorageOptions.storagePropertiesFor(
+      new org.apache.hadoop.conf.Configuration(false),
+      "connector-bucket",
+      options
+    )
+    assert(native(StorageProperties.Address) == "hadoop-option:9000")
+  }
+
+  test("storage boolean options reject invalid values") {
+    Seq(StorageProperties.UseSSL, StorageProperties.UseIam).foreach { key =>
+      Seq("sometimes", "", "   ").foreach { value =>
+        val error = intercept[IllegalArgumentException] {
+          StorageOptions.buildHadoopConfForOptions(Map(key -> value), "")
+        }
+        assert(error.getMessage.contains(key))
+      }
+    }
+    Seq(
+      "fs.s3a.path.style.access",
+      MilvusOption.S3PathStyleAccess,
+      StorageProperties.UseVirtualHost
+    ).foreach { key =>
+      Seq("sometimes", "", "   ").foreach { value =>
+        val pathStyleError = intercept[IllegalArgumentException] {
+          StorageOptions.effectivePathStyleAccess(Map(key -> value))
+        }
+        assert(pathStyleError.getMessage.contains(key))
+      }
+    }
+    val noFallback = intercept[IllegalArgumentException] {
+      StorageOptions.effectivePathStyleAccess(
+        Map(
+          "fs.s3a.path.style.access" -> "   ",
+          MilvusOption.S3PathStyleAccess -> "true"
+        )
+      )
+    }
+    assert(noFallback.getMessage.contains("fs.s3a.path.style.access"))
+  }
+
   test(
     "buildSnapshotHadoopConf accepts snapshot bucket without connector bucket"
   ) {
@@ -661,17 +848,22 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     "table schema emits canonical metadata extra column names from legacy aliases"
   ) {
     val schema = snapshotTableSchema(
-      StructType(Seq(StructField("pk", LongType, nullable = false))),
-      "partition,segment_id,row_offset"
+      StructType(Seq(StructField("binary_vec", BinaryType, nullable = false))),
+      "segment_id,row_offset,_timestamp"
     )
 
     assert(
       schema.fieldNames.toSeq == Seq(
-        "pk",
-        "partition",
-        "$segment_id",
-        "$row_offset"
+        "binary_vec",
+        "_segment_id",
+        "_row_offset",
+        "_timestamp"
       )
+    )
+    assert(
+      schema("_timestamp").metadata.getLong(
+        FieldMetadata.MilvusFieldIdMetadataKey
+      ) == 1L
     )
   }
 
@@ -680,12 +872,12 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   ) {
     val err = intercept[IllegalArgumentException] {
       snapshotTableSchema(
-        StructType(Seq(StructField("$segment_id", LongType, nullable = false))),
-        "$segment_id"
+        StructType(Seq(StructField("_segment_id", LongType, nullable = false))),
+        "_segment_id"
       )
     }
 
-    assert(err.getMessage.contains("$segment_id"))
+    assert(err.getMessage.contains("_segment_id"))
     assert(err.getMessage.contains("metadata extra column"))
   }
 
@@ -701,7 +893,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
 
     assert(err.getMessage.contains("segment_id"))
     assert(err.getMessage.contains("legacy alias"))
-    assert(err.getMessage.contains("$segment_id"))
+    assert(err.getMessage.contains("_segment_id"))
   }
 
   test(
@@ -716,7 +908,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
           StructField("json_payload", StringType, nullable = true)
         )
       ),
-      "partition"
+      "_timestamp"
     )
 
     assert(
@@ -754,7 +946,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         FieldMetadata.MilvusDataTypeMetadataKey
       ) == 23L
     )
-    assert(schema.fieldNames.toSeq.last == "partition")
+    assert(schema.fieldNames.toSeq.last == "_timestamp")
   }
 
   test(
@@ -784,6 +976,51 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       schema("binary_vec").metadata.getLong(
         FieldMetadata.MilvusVectorDimensionMetadataKey
       ) == 128L
+    )
+  }
+
+  test("fieldIDs and an external schema must describe the same projection") {
+    val selected = snapshotTableSchema(
+      StructType(
+        Seq(
+          StructField("float_vec", ArrayType(FloatType), nullable = true),
+          StructField("binary_vec", BinaryType, nullable = true)
+        )
+      ),
+      extraColumns = "",
+      selectedFieldIds = Some("101,100")
+    )
+    assert(selected.fieldNames.toSeq == Seq("float_vec", "binary_vec"))
+
+    val error = intercept[IllegalArgumentException] {
+      snapshotTableSchema(
+        StructType(
+          Seq(StructField("binary_vec", BinaryType, nullable = true))
+        ),
+        extraColumns = "",
+        selectedFieldIds = Some("101")
+      )
+    }
+    assert(error.getMessage.contains(MilvusOption.ReaderFieldIDs))
+    assert(error.getMessage.contains("schema ids=100"))
+  }
+
+  test("schema inference applies fieldIDs in their requested order") {
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(MilvusOption.SnapshotMode, "true")
+    rawOptions.put(MilvusOption.SnapshotSchemaBytes, vectorSnapshotSchemaBytes)
+    rawOptions.put(MilvusOption.ReaderFieldIDs, "103,100")
+
+    val schema = new com.zilliz.spark.connector.sources.MilvusDataSource()
+      .inferSchema(new CaseInsensitiveStringMap(rawOptions))
+
+    assert(schema.fieldNames.toSeq == Seq("json_payload", "binary_vec"))
+    assert(
+      schema.fields
+        .map(
+          _.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
+        )
+        .toSeq == Seq(103L, 100L)
     )
   }
 
@@ -835,41 +1072,29 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
-  test("snapshot mode does not overwrite existing milvus.data_type") {
-    val schema = snapshotTableSchema(
-      StructType(
-        Seq(
-          StructField(
-            "binary_vec",
-            BinaryType,
-            nullable = true,
-            metadata = metadata(
-              FieldMetadata.MilvusDataTypeMetadataKey -> 999L,
-              "custom.flag" -> 7L
+  test("snapshot mode rejects conflicting Milvus metadata") {
+    val error = intercept[IllegalArgumentException] {
+      snapshotTableSchema(
+        StructType(
+          Seq(
+            StructField(
+              "binary_vec",
+              BinaryType,
+              nullable = true,
+              metadata = metadata(
+                FieldMetadata.MilvusDataTypeMetadataKey -> 999L,
+                "custom.flag" -> 7L
+              )
             )
-          ),
-          StructField("legacy_bytes", ArrayType(ByteType), nullable = true)
-        )
-      ),
-      ""
-    )
+          )
+        ),
+        ""
+      )
+    }
 
-    assert(
-      schema("binary_vec").metadata.getLong(
-        FieldMetadata.MilvusDataTypeMetadataKey
-      ) == 999L
-    )
-    assert(schema("binary_vec").metadata.getLong("custom.flag") == 7L)
-    assert(
-      !schema("binary_vec").metadata.contains(
-        FieldMetadata.MilvusVectorDimensionMetadataKey
-      )
-    )
-    assert(
-      !schema("legacy_bytes").metadata.contains(
-        FieldMetadata.MilvusDataTypeMetadataKey
-      )
-    )
+    assert(error.getMessage.contains("binary_vec"))
+    assert(error.getMessage.contains(FieldMetadata.MilvusDataTypeMetadataKey))
+    assert(error.getMessage.contains("999"))
   }
 
   test("snapshot mode fails loudly on malformed snapshot schema json") {
@@ -936,12 +1161,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
 
     assert(
       schema.fieldNames.toSeq == Seq(
-        "RowID",
-        "Timestamp",
         "segment_id",
         "row_offset",
-        "$segment_id",
-        "$row_offset"
+        "_segment_id",
+        "_row_offset"
       )
     )
   }
@@ -950,12 +1173,18 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     "scan pruning preserves canonical metadata fields requested by legacy aliases"
   ) {
     val rawOptions = new ju.HashMap[String, String]()
-    rawOptions.put(MilvusOption.MilvusExtraColumns, "segment_id,row_offset")
+    rawOptions.put(
+      MilvusOption.MilvusExtraColumns,
+      "segment_id,row_offset,_timestamp"
+    )
+    val fieldId100 = metadata(FieldMetadata.MilvusFieldIdMetadataKey -> 100L)
+    val fieldId1 = metadata(FieldMetadata.MilvusFieldIdMetadataKey -> 1L)
     val schema = StructType(
       Seq(
-        StructField("pk", LongType, nullable = false),
-        StructField("$segment_id", LongType, nullable = false),
-        StructField("$row_offset", LongType, nullable = false)
+        StructField("pk", LongType, nullable = false, fieldId100),
+        StructField("_segment_id", LongType, nullable = false),
+        StructField("_row_offset", LongType, nullable = false),
+        StructField("_timestamp", LongType, nullable = false, fieldId1)
       )
     )
     val builder = new MilvusScanBuilder(
@@ -965,16 +1194,105 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
 
     builder.pruneColumns(
-      StructType(Seq(StructField("pk", LongType, nullable = false)))
+      schema
     )
 
     assert(
       builder.build().readSchema().fieldNames.toSeq == Seq(
         "pk",
-        "$segment_id",
-        "$row_offset"
+        "_segment_id",
+        "_row_offset",
+        "_timestamp"
       )
     )
+  }
+
+  test("reordered non-contiguous field ids reach every storage-line task") {
+    val collection = io.milvus.grpc.schema.CollectionSchema.parseFrom(
+      java.util.Base64.getDecoder.decode(vectorSnapshotSchemaBytes)
+    )
+    val externalSchema = StructType(
+      Seq(
+        StructField("json_payload", StringType, nullable = true),
+        StructField("binary_vec", BinaryType, nullable = true)
+      )
+    )
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(
+      StorageProperties.StorageType,
+      StorageProperties.StorageTypeLocal
+    )
+    rawOptions.put(MilvusOption.SnapshotMode, "true")
+    val snapshot = snapshotOf(
+      v3 = Seq(
+        ManifestItemJson(
+          31L,
+          "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/31\"}"
+        )
+      ),
+      v2 = Seq(
+        Segment.v2(
+          id = 30L,
+          partitionId = 20L,
+          rows = 1L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              fieldIds = Seq(100L, 103L),
+              filePaths = Seq("files/segment.parquet"),
+              fileRowCounts = Seq(1L)
+            )
+          )
+        )
+      ),
+      schemaBytes = collection.toByteArray
+    )
+    val options = new CaseInsensitiveStringMap(rawOptions)
+    val fullSchema = MilvusTable(
+      snapshot,
+      MilvusOption(options),
+      Some(externalSchema)
+    ).schema()
+    val builder = new MilvusScanBuilder(
+      fullSchema,
+      options,
+      snapshot
+    )
+    builder.pruneColumns(
+      StructType(Seq(fullSchema("binary_vec"), fullSchema("json_payload")))
+    )
+
+    val scan = builder.build().asInstanceOf[MilvusScan]
+    assert(
+      scan.readSchema().fieldNames.toSeq == Seq("binary_vec", "json_payload")
+    )
+    val tasks = scan
+      .inputPartitions(snapshot)
+      .map(_.asInstanceOf[MilvusInputPartition].task)
+    assert(tasks.length == 2)
+    assert(tasks.forall(_.neededFieldIds == Seq(100L, 103L)))
+  }
+
+  test("every storage line uses the bucket fixed by the snapshot") {
+    val options = new ju.HashMap[String, String]()
+    options.put(StorageProperties.BucketName, "configured-bucket")
+    options.put(StorageProperties.Address, "localhost:9000")
+    options.put(StorageProperties.UseIam, "true")
+    val snapshot = snapshotOf(
+      v3 = Seq(
+        ManifestItemJson(
+          30L,
+          "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
+        )
+      ),
+      bucket = "snapshot-bucket"
+    )
+    val task = new MilvusScan(
+      rowIdSchema,
+      new CaseInsensitiveStringMap(options),
+      snapshot
+    ).inputPartitions(snapshot).head.asInstanceOf[MilvusV3InputPartition].task
+
+    assert(task.properties(StorageProperties.BucketName) == "snapshot-bucket")
   }
 
   test("scan builder leaves every filter in Spark") {
@@ -1045,7 +1363,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   }
 
   test("parsePositiveLongOption rejects non-numeric and non-positive values") {
-    Seq("not-a-number", "0", "-1").foreach { value =>
+    Seq("not-a-number", "", "   ", "0", "-1").foreach { value =>
       val rawOptions = new ju.HashMap[String, String]()
       rawOptions.put(MilvusOption.SnapshotMaxJsonBytes, value)
       val err = intercept[IllegalArgumentException] {

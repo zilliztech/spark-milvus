@@ -1,7 +1,6 @@
 package com.zilliz.spark.connector.read
 
 import java.{util => ju}
-import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.internal.Logging
@@ -13,9 +12,10 @@ import org.apache.spark.sql.connector.read.{
   SupportsPushDownRequiredColumns
 }
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
+import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.options.MilvusOption
 
@@ -42,101 +42,102 @@ class MilvusScanBuilder(
 
   override def isPartiallyPushed: Boolean = true
   private var currentOptions = options
-  private val extraColumns = options
-    .getOrDefault(MilvusOption.MilvusExtraColumns, "")
-    .split(",")
-    .map(_.trim)
-    .filter(_.nonEmpty)
-    .map(MilvusOption.normalizeExtraColumnName)
-    .toSeq
+  private val extraColumns = MilvusOption.extraColumns(options)
 
   // Filters accepted by the connector. This remains empty until predicate
   // pushdown can preserve the complete Spark SQL semantics.
   private var pushedFilterArray: Array[Filter] = Array.empty[Filter]
 
   override def pruneColumns(requiredSchema: StructType): Unit = {
-    if (currentOptions.getOrDefault(MilvusOption.ReaderFieldIDs, "").nonEmpty) {
-      return
+    val fieldsByName = schema.fields.map(field => field.name -> field).toMap
+    val requestedFields = requiredSchema.fields.map { field =>
+      fieldsByName.getOrElse(
+        field.name,
+        throw new IllegalArgumentException(
+          s"Spark requested unknown field '${field.name}'; available fields: ${fieldsByName.keys.toSeq.sorted
+              .mkString(", ")}"
+        )
+      )
     }
-    val fieldName2ID = mutable.Map[String, Long]()
-    schema.fields
-      .filterNot(f => extraColumns.contains(f.name))
-      .zipWithIndex
-      .foreach { case (field, index) =>
-        if (index < 2) {
-          fieldName2ID(field.name) = index
-        } else {
-          fieldName2ID(field.name) = index + 98
-        }
+
+    def fieldId(field: StructField): Long = {
+      val metadata = field.metadata
+      if (
+        !metadata.contains(
+          FieldMetadata.MilvusFieldIdMetadataKey
+        )
+      ) {
+        throw new IllegalArgumentException(
+          s"Field '${field.name}' has no ${FieldMetadata.MilvusFieldIdMetadataKey} metadata; " +
+            "the scan cannot bind it to the fixed snapshot"
+        )
       }
-    var fieldNames = Seq[String]()
-    requiredSchema.fields.foreach(field => {
-      if (fieldName2ID.contains(field.name)) {
-        fieldNames = fieldNames :+ field.name
-      }
-    })
+      metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
+    }
+
+    val requestedDataFields = requestedFields.filterNot(field =>
+      extraColumns.contains(field.name) &&
+        MetadataColumns.isSyntheticColumn(field.name)
+    )
+    var scanFields = requestedFields.toSeq
+    var neededFieldIds = requestedDataFields.map(fieldId).toSeq
 
     // Add vector column if vector search is enabled
     val vectorColumn = Option(
       options.get(MilvusOption.VectorSearchVectorColumn)
-    ).getOrElse("vector")
-    val hasVectorSearch = Option(
-      options.get(MilvusOption.VectorSearchQueryVector)
-    ).isDefined
-    if (
-      hasVectorSearch && fieldName2ID.contains(vectorColumn) && !fieldNames
-        .contains(vectorColumn)
-    ) {
-      fieldNames = fieldNames :+ vectorColumn
+    ).map(_.trim).filter(_.nonEmpty).getOrElse("vector")
+    val hasVectorSearch =
+      Option(options.get(MilvusOption.VectorSearchQueryVector))
+        .exists(_.trim.nonEmpty)
+    if (hasVectorSearch) {
+      val vectorField = fieldsByName.getOrElse(
+        vectorColumn,
+        throw new IllegalArgumentException(
+          s"Vector search column '$vectorColumn' is not present in the read schema"
+        )
+      )
+      neededFieldIds = neededFieldIds :+ fieldId(vectorField)
+      if (!scanFields.exists(_.name == vectorField.name)) {
+        // The row reader performs vector search before Spark's projection
+        // above the scan. It therefore needs the vector in its own schema even
+        // when the final select does not expose it.
+        scanFields = scanFields :+ vectorField
+      }
     }
 
-    fieldNames = fieldNames.sortBy(fieldName => fieldName2ID(fieldName))
-    logInfo(s"fieldNames after sort: $fieldNames")
-    if (fieldNames.isEmpty && fieldName2ID.nonEmpty) {
-      val fallbackFieldName = fieldName2ID.minBy(_._2)._1
-      fieldNames = fieldNames :+ fallbackFieldName
-      logInfo(s"fieldNames after add fallback field: $fieldNames")
+    // A metadata-only or empty projection still needs one physical column so
+    // the native reader can produce batches and their row counts. This field
+    // is not added to Spark's output schema.
+    if (neededFieldIds.isEmpty) {
+      val fallbackId = schema.fields
+        .filterNot(field =>
+          extraColumns.contains(field.name) &&
+            MetadataColumns.isSyntheticColumn(field.name)
+        )
+        .map(fieldId)
+        .sorted
+        .headOption
+        .getOrElse(
+          throw new IllegalArgumentException(
+            "The fixed snapshot schema has no physical field to drive an empty or metadata-only projection"
+          )
+        )
+      neededFieldIds = Seq(fallbackId)
     }
+    neededFieldIds = neededFieldIds.distinct
+    logInfo(s"Milvus field ids required by the scan: $neededFieldIds")
 
     val tmpMap = new ju.HashMap[String, String]()
     options.asScala.foreach { case (key, value) =>
       tmpMap.put(key, value)
     }
-    // Only set ReaderFieldIDs if fieldNames is not empty
-    if (fieldNames.nonEmpty) {
-      val readerFieldIDsStr = fieldNames
-        .map(fieldName => fieldName2ID(fieldName).toString)
-        .mkString(",")
-      tmpMap.put(
-        MilvusOption.ReaderFieldIDs,
-        readerFieldIDsStr
-      )
-    }
-    if (
-      extraColumns.contains(MilvusOption.MilvusExtraColumnPartition) &&
-      !fieldNames.contains(MilvusOption.MilvusExtraColumnPartition)
-    ) {
-      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnPartition
-    }
-    if (
-      extraColumns.contains(MilvusOption.MilvusExtraColumnSegmentID) &&
-      !fieldNames.contains(MilvusOption.MilvusExtraColumnSegmentID)
-    ) {
-      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnSegmentID
-    }
-    if (
-      extraColumns.contains(MilvusOption.MilvusExtraColumnRowOffset) &&
-      !fieldNames.contains(MilvusOption.MilvusExtraColumnRowOffset)
-    ) {
-      fieldNames = fieldNames :+ MilvusOption.MilvusExtraColumnRowOffset
-    }
+    tmpMap.put(
+      MilvusOption.ReaderFieldIDs,
+      neededFieldIds.mkString(",")
+    )
 
     currentOptions = new CaseInsensitiveStringMap(tmpMap)
-    currentSchema = StructType(
-      fieldNames.map(fieldName =>
-        schema.fields.find(field => field.name == fieldName).get
-      )
-    )
+    currentSchema = StructType(scanFields)
   }
 
   override def pushFilters(filters: Array[Filter]): Array[Filter] = {

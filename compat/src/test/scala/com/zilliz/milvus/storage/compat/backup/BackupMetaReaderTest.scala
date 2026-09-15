@@ -1,6 +1,8 @@
 package com.zilliz.milvus.storage.compat.backup
 
 import java.nio.file.{Files, Paths}
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{Path => HPath}
@@ -872,6 +874,128 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     result.left.toOption.get.getMessage should include("snapshot format")
   }
 
+  test("toV2Segments waits for all footer reads before the store is closed") {
+    val slowReadStarted = new CountDownLatch(1)
+    val releaseSlowRead = new CountDownLatch(1)
+    val callReturned = new CountDownLatch(1)
+    val activeReads = new AtomicInteger(0)
+    val closedWhileReading = new AtomicBoolean(false)
+
+    val store = new com.zilliz.milvus.storage.io.ObjectStore {
+      override def readAll(key: String): Array[Byte] =
+        throw new UnsupportedOperationException
+
+      override def size(key: String): Long = {
+        if (key.endsWith("/1/101/1")) {
+          slowReadStarted.await(5L, TimeUnit.SECONDS)
+          throw new java.io.IOException("first footer failed")
+        }
+
+        activeReads.incrementAndGet()
+        slowReadStarted.countDown()
+        try {
+          var released = false
+          while (!released) {
+            try released = releaseSlowRead.await(5L, TimeUnit.SECONDS)
+            catch {
+              // A cancelled Future interrupts its worker but does not wait for
+              // that worker to stop using the shared store.
+              case _: InterruptedException => ()
+            }
+          }
+          throw new java.io.IOException("second footer failed")
+        } finally {
+          activeReads.decrementAndGet()
+        }
+      }
+
+      override def list(
+          key: String,
+          recursive: Boolean
+      ): Seq[com.zilliz.milvus.storage.io.FileInfo] = Seq.empty
+
+      override def exists(key: String): Boolean = false
+
+      override def readAt(
+          key: String,
+          offset: Long,
+          length: Long,
+          fileSize: Long
+      ): Array[Byte] = throw new UnsupportedOperationException
+
+      override def write(key: String, data: Array[Byte]): Unit =
+        throw new UnsupportedOperationException
+
+      override def createDir(key: String, recursive: Boolean): Unit =
+        throw new UnsupportedOperationException
+
+      override def delete(key: String): Unit =
+        throw new UnsupportedOperationException
+
+      override def close(): Unit =
+        if (activeReads.get() > 0) closedWhileReading.set(true)
+    }
+
+    def segment(id: Long): BackupMetaReader.SegmentBackup =
+      BackupMetaReader.SegmentBackup(
+        segmentId = id,
+        collectionId = 444L,
+        partitionId = 555L,
+        groupId = id,
+        numOfRows = 1L,
+        storageVersion = 2L,
+        binlogs = Seq(
+          BackupMetaReader.FieldBinlog(
+            fieldId = 101L,
+            binlogs = Seq(BackupMetaReader.Binlog(logId = 1L))
+          )
+        )
+      )
+
+    val info = BackupMetaReader.BackupInfo(
+      name = "concurrent-footer-failure",
+      collectionBackups = Seq(
+        BackupMetaReader.CollectionBackup(
+          collectionId = 444L,
+          partitionBackups = Seq(
+            BackupMetaReader.PartitionBackup(
+              partitionId = 555L,
+              segmentBackups = Seq(segment(1L), segment(2L))
+            )
+          )
+        )
+      )
+    )
+
+    var result: Either[Throwable, Seq[Segment]] = null
+    val caller = new Thread(() => {
+      try {
+        result = BackupMetaReader.toV2Segments(
+          info,
+          store,
+          "backup",
+          collectionId = 444L
+        )
+      } finally {
+        store.close()
+        callReturned.countDown()
+      }
+    })
+    caller.start()
+
+    slowReadStarted.await(5L, TimeUnit.SECONDS) shouldBe true
+    try {
+      callReturned.await(200L, TimeUnit.MILLISECONDS) shouldBe false
+    } finally {
+      releaseSlowRead.countDown()
+    }
+    callReturned.await(5L, TimeUnit.SECONDS) shouldBe true
+    caller.join()
+
+    result.isLeft shouldBe true
+    closedWhileReading.get() shouldBe false
+  }
+
   test(
     "toProtobufSchemaBytes rejects dynamic collections without a $meta record"
   ) {
@@ -897,7 +1021,9 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       fields = base.fields :+ BackupMetaReader.BackupFieldSchema(
         fieldId = 101L,
         name = "$meta",
-        rawDataType = Some(IntNode.valueOf(23))
+        rawDataType = Some(IntNode.valueOf(23)),
+        isDynamic = true,
+        nullable = true
       )
     )
     BackupMetaReader.toProtobufSchemaBytes(withMeta).nonEmpty shouldBe true

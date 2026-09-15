@@ -60,6 +60,30 @@ class StoragePropertiesTest extends AnyFunSuite with Matchers {
     )
   }
 
+  test("known boolean properties are strict and normalized") {
+    Seq(UseSSL, UseIam, UseVirtualHost).foreach { key =>
+      val error = failureFor(remote + (key -> "enabled"))
+      error should include(key)
+      error should include("enabled")
+    }
+
+    val out = from(remote ++ Map(UseSSL -> "TRUE", UseVirtualHost -> "False"))
+    out(UseSSL) shouldBe "true"
+    out(UseVirtualHost) shouldBe "false"
+  }
+
+  test("external boolean validation identifies its property group") {
+    val error = failureFor(
+      remote ++ Map(
+        "extfs.source.bucket_name" -> "customer-bucket",
+        "extfs.source.address" -> "endpoint",
+        "extfs.source.use_iam" -> "sometimes"
+      )
+    )
+    error should include("extfs.source.use_iam")
+    error should include("sometimes")
+  }
+
   test("a role ARN also means the native layer resolves credentials") {
     val out = from(
       remote - AccessKeyId - AccessKeyValue +

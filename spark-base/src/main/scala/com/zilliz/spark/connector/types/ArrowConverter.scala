@@ -69,7 +69,10 @@ object ArrowConverter extends Logging {
       val vector = root.getVector(arrowColumnName)
 
       if (vector == null) {
-        values(index) = null
+        throw new IllegalStateException(
+          s"the Arrow batch has no column '$arrowColumnName' for Spark field " +
+            s"'${field.name}'; it carries ${root.getSchema.getFields}"
+        )
       } else if (vector.isNull(rowIndex)) {
         values(index) = null
       } else {
@@ -261,8 +264,9 @@ object ArrowConverter extends Logging {
         ArrayBasedMapData(keys, values)
 
       case _ =>
-        logWarning(s"Unsupported Spark type: $sparkType, returning null")
-        null
+        throw new IllegalArgumentException(
+          s"Unsupported Spark type for Arrow conversion: $sparkType"
+        )
     }
   }
 

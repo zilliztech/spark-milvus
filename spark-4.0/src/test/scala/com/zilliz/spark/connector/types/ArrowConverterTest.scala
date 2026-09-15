@@ -745,6 +745,45 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("arrowToInternalRow refuses a requested column absent from the batch") {
+    val bytes = "present".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    withVariableWidthRoot("present", new ArrowType.Utf8(), bytes) { root =>
+      val err = intercept[IllegalStateException] {
+        ArrowConverter.arrowToInternalRow(
+          root,
+          0,
+          StructType(Seq(StructField("missing", StringType)))
+        )
+      }
+
+      err.getMessage should include("missing")
+      err.getMessage should include("present")
+    }
+  }
+
+  test("arrowToInternalRow refuses unsupported Spark types") {
+    val bytes = "2026-09-15".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+    withVariableWidthRoot("value", new ArrowType.Utf8(), bytes) { root =>
+      val err = intercept[IllegalArgumentException] {
+        ArrowConverter.arrowToInternalRow(
+          root,
+          0,
+          StructType(
+            Seq(
+              StructField(
+                "value",
+                org.apache.spark.sql.types.DateType
+              )
+            )
+          )
+        )
+      }
+
+      err.getMessage should include("Unsupported Spark type")
+      err.getMessage should include("DateType")
+    }
+  }
+
   test("arrowToInternalRow reads ByteType from TinyIntVector") {
     val allocator = new RootAllocator(Long.MaxValue)
     try {

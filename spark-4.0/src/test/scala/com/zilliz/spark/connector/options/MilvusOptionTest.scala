@@ -69,15 +69,16 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
   test("Parse extra columns configuration with canonical names") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
-      MilvusOption.MilvusExtraColumns -> "partition, $segment_id, $row_offset"
+      MilvusOption.MilvusExtraColumns ->
+        "_segment_id, _row_offset, _timestamp"
     )
 
     val milvusOption = MilvusOption(options)
 
     milvusOption.extraColumns should contain allOf (
-      MilvusOption.MilvusExtraColumnPartition,
       MilvusOption.MilvusExtraColumnSegmentID,
-      MilvusOption.MilvusExtraColumnRowOffset
+      MilvusOption.MilvusExtraColumnRowOffset,
+      MilvusOption.MilvusExtraColumnTimestamp
     )
     milvusOption.extraColumns.size shouldBe 3
   }
@@ -85,18 +86,32 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
   test("Parse legacy extra column aliases as canonical requests") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
-      MilvusOption.MilvusExtraColumns -> "partition, segment_id, row_offset"
+      MilvusOption.MilvusExtraColumns ->
+        "$segment_id, segment_id, $row_offset, row_offset, _timestamp"
     )
 
     val milvusOption = MilvusOption(options)
 
     milvusOption.extraColumns should contain allOf (
-      "partition",
-      "$segment_id",
-      "$row_offset"
+      "_segment_id",
+      "_row_offset",
+      "_timestamp"
     )
+    milvusOption.extraColumns.size shouldBe 3
     milvusOption.extraColumns should not contain "segment_id"
     milvusOption.extraColumns should not contain "row_offset"
+  }
+
+  test("extra columns reject partition, unknown names and empty entries") {
+    Seq("partition", "unknown", "_segment_id,,_row_offset").foreach { value =>
+      val error = intercept[IllegalArgumentException] {
+        MilvusOption(
+          Map(MilvusOption.MilvusExtraColumns -> value)
+        )
+      }
+      error.getMessage should include(MilvusOption.MilvusExtraColumns)
+      error.getMessage should include(value)
+    }
   }
 
   test("Parse empty extra columns") {
@@ -155,26 +170,91 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     config.metricType shouldBe "COSINE" // Should be uppercase
   }
 
-  test("Vector search config is None when query vector is missing") {
+  test("Vector search fails when query vector is missing") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
       MilvusOption.VectorSearchTopK -> "10"
     )
 
-    val milvusOption = MilvusOption(options)
-
-    milvusOption.vectorSearch shouldBe None
+    val error = intercept[IllegalArgumentException](MilvusOption(options))
+    error.getMessage should include(MilvusOption.VectorSearchQueryVector)
+    error.getMessage should include(MilvusOption.VectorSearchTopK)
   }
 
-  test("Vector search config is None when topK is missing") {
+  test("Vector search fails when topK is missing") {
     val options = Map(
       MilvusOption.MilvusUri -> "http://localhost:19530",
       MilvusOption.VectorSearchQueryVector -> "[0.1, 0.2, 0.3]"
     )
 
-    val milvusOption = MilvusOption(options)
+    val error = intercept[IllegalArgumentException](MilvusOption(options))
+    error.getMessage should include(MilvusOption.VectorSearchQueryVector)
+    error.getMessage should include(MilvusOption.VectorSearchTopK)
+  }
 
-    milvusOption.vectorSearch shouldBe None
+  test("Vector search fails on malformed values") {
+    Seq(
+      Map(
+        MilvusOption.VectorSearchMetric -> "COSINE"
+      ) -> MilvusOption.VectorSearchQueryVector,
+      Map(
+        MilvusOption.VectorSearchVectorColumn -> "embedding"
+      ) -> MilvusOption.VectorSearchQueryVector,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "   ",
+        MilvusOption.VectorSearchTopK -> "   "
+      ) -> MilvusOption.VectorSearchQueryVector,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "   ",
+        MilvusOption.VectorSearchTopK -> "10"
+      ) -> MilvusOption.VectorSearchQueryVector,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "[0.1, 0.2]",
+        MilvusOption.VectorSearchTopK -> "   "
+      ) -> MilvusOption.VectorSearchTopK,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "0.1,0.2",
+        MilvusOption.VectorSearchTopK -> "10"
+      ) -> MilvusOption.VectorSearchQueryVector,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "[]",
+        MilvusOption.VectorSearchTopK -> "10"
+      ) -> MilvusOption.VectorSearchQueryVector,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "[0.1, nope]",
+        MilvusOption.VectorSearchTopK -> "10"
+      ) -> MilvusOption.VectorSearchQueryVector,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "[0.1, NaN]",
+        MilvusOption.VectorSearchTopK -> "10"
+      ) -> MilvusOption.VectorSearchQueryVector,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "[0.1,]",
+        MilvusOption.VectorSearchTopK -> "10"
+      ) -> MilvusOption.VectorSearchQueryVector,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "[0.1, 0.2]",
+        MilvusOption.VectorSearchTopK -> "0"
+      ) -> MilvusOption.VectorSearchTopK,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "[0.1, 0.2]",
+        MilvusOption.VectorSearchTopK -> "10",
+        MilvusOption.VectorSearchMetric -> "unknown"
+      ) -> MilvusOption.VectorSearchMetric,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "[0.1, 0.2]",
+        MilvusOption.VectorSearchTopK -> "10",
+        MilvusOption.VectorSearchMetric -> "   "
+      ) -> MilvusOption.VectorSearchMetric,
+      Map(
+        MilvusOption.VectorSearchQueryVector -> "[0.1, 0.2]",
+        MilvusOption.VectorSearchTopK -> "10",
+        MilvusOption.VectorSearchVectorColumn -> "   "
+      ) -> MilvusOption.VectorSearchVectorColumn
+    ).foreach { case (options, expectedMessage) =>
+      val error = intercept[IllegalArgumentException](MilvusOption(options))
+      error.getMessage should include(expectedMessage)
+    }
   }
 
   test("Vector search uses default values for optional fields") {
@@ -321,6 +401,77 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     MilvusOption.isSnapshotMode(
       Map(MilvusOption.MilvusCollectionName -> "c")
     ) shouldBe false
+  }
+
+  test("read booleans reject invalid values") {
+    Seq(
+      MilvusOption.SnapshotMode -> ((options: Map[String, String]) =>
+        MilvusOption.isSnapshotMode(options)
+      ),
+      MilvusOption.ReadApplyDeletes -> ((options: Map[String, String]) =>
+        MilvusOption.readApplyDeletes(options)
+      ),
+      MilvusOption.ReadVectorRaw -> ((options: Map[String, String]) =>
+        MilvusOption.readVectorRaw(options)
+      ),
+      MilvusOption.ReadColumnar -> ((options: Map[String, String]) =>
+        MilvusOption.readColumnar(options)
+      )
+    ).foreach { case (key, parse) =>
+      Seq("truthy", "", "   ").foreach { value =>
+        val error = intercept[IllegalArgumentException](
+          parse(Map(key -> value))
+        )
+        error.getMessage should include(key)
+      }
+    }
+  }
+
+  test("partition and segment selectors parse strict distinct ids") {
+    MilvusOption.selectedPartitionIds(
+      Map(MilvusOption.MilvusPartitions -> "20, 21,20")
+    ) shouldBe Seq(20L, 21L)
+    MilvusOption.selectedSegmentIds(
+      Map(MilvusOption.MilvusSegments -> "30,31")
+    ) shouldBe Seq(30L, 31L)
+
+    Seq(
+      MilvusOption.MilvusPartitions -> "20,,21",
+      MilvusOption.MilvusPartitions -> "   ",
+      MilvusOption.MilvusSegments -> "",
+      MilvusOption.MilvusSegments -> "30,nope",
+      MilvusOption.MilvusSegments -> "30,-1"
+    ).foreach { case (key, value) =>
+      val error = intercept[IllegalArgumentException] {
+        if (key == MilvusOption.MilvusPartitions)
+          MilvusOption.selectedPartitionIds(Map(key -> value))
+        else MilvusOption.selectedSegmentIds(Map(key -> value))
+      }
+      error.getMessage should include(key)
+      if (value.trim.isEmpty) error.getMessage should include("empty")
+      else error.getMessage should include(value)
+    }
+  }
+
+  test("reader field ids are strict and case insensitive") {
+    MilvusOption.readerFieldIds(
+      Map(MilvusOption.ReaderFieldIDs.toUpperCase -> "101, 300")
+    ) shouldBe Seq(101L, 300L)
+
+    val error = intercept[IllegalArgumentException] {
+      MilvusOption.readerFieldIds(
+        Map(MilvusOption.ReaderFieldIDs -> "101,field")
+      )
+    }
+    error.getMessage should include(MilvusOption.ReaderFieldIDs)
+    error.getMessage should include("field")
+
+    val blank = intercept[IllegalArgumentException] {
+      MilvusOption.readerFieldIds(
+        Map(MilvusOption.ReaderFieldIDs -> "   ")
+      )
+    }
+    blank.getMessage should include(MilvusOption.ReaderFieldIDs)
   }
 }
 

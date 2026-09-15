@@ -20,8 +20,9 @@ snapshot read, providing an offline read capability.
 - Input: an S3 backup directory (`milvus.backup.dir`, e.g. `s3a://bucket/backup/<name>`).
   Local / `file://` dirs are exercised by the meta/footer mapping layer and unit tests only;
   actual reads require S3 (see §7).
-- Output: a Spark DataFrame with column pruning, `milvus.extra.columns` (partition /
-  `$segment_id` / `$row_offset`), and delete semantics (apply deletes).
+- Output: a Spark DataFrame with column pruning, `milvus.extra.columns`
+  (`_segment_id`, `_row_offset`, `_timestamp`), and delete semantics (apply
+  deletes).
 - Reuse the existing StorageV2 packed read stack (`MilvusV2PartitionReader` +
   milvus-storage JNI) — **no changes to milvus-backup**.
 - **Excluded**: StorageV3 (loon manifest) segments, write/backfill, the client snapshot fast path.
@@ -44,24 +45,25 @@ zero changes to existing backups.
 | Packed read requires exact `fileRowCounts` | `src/main/scala/read/MilvusV2PartitionReader.scala:253-260`; `milvus-storage/cpp/include/milvus-storage/ffi_internal/v2_column_groups_builder.h:35-43` |
 | Real field IDs recoverable from the parquet's own schema `PARQUET:field_id` | `src/main/scala/read/ParquetFooterReader.readFieldIdsFromSchema` |
 | Delta-log decoding uses only `logPath`; `entriesNum` unused | `src/main/scala/read/DeltaLogReader.scala:127-145` |
-| L0 segments have no column groups, only delta logs → inherited partition-level delete plan | `src/main/scala/sources/MilvusDataSource.scala:1628-1662, 2269-2303` |
+| L0 segments have no column groups; their delta-log descriptors stay on delete-only `Segment` records and are inherited by data tasks in the same partition (`-1` applies collection-wide) | `compat/src/main/scala/com/zilliz/milvus/storage/compat/backup/BackupMetaReader.scala`; `core/src/main/scala/com/zilliz/milvus/storage/read/plan/DeleteFileListing.scala` |
 
 ## 3. Overall Design
 
 Add a **backup offline mode**, parallel to snapshot mode:
 
 ```
-MilvusDataSource / MilvusTable  isBackupMode? ─┐
-                                              ▼
-MilvusScan.computeInputPartitions ──> planInputPartitionsFromBackup()
-                                              │   produced via BackupMetaReader
-                                              ▼
-                           (schemaBytes, Seq[V2SegmentInfo])
-                                              │   reuse
-                                              ▼
-                    buildSnapshotPartitions() → MilvusV2InputPartition[]
-                                              │
-              createReaderFactory() → MilvusV2PartitionReader (unchanged)
+MilvusDataSource / MilvusTable
+              │
+              ▼
+SnapshotSources.forRead() → BackupSnapshotSource → Snapshot
+                                                      │
+                                                      ▼
+                                 DeleteFileListing.of + ReadPlan.of
+                                                      │
+                                                      ▼
+                                      MilvusV2InputPartition[]
+                                                      │
+                          createReaderFactory() → MilvusV2PartitionReader
 ```
 
 Branch precedence: `isSnapshotMode` > `isBackupMode` > client.
@@ -98,11 +100,13 @@ schemapb, including `type_params`, `data_type`, `is_primary_key`, `element_type`
 ### 4.4 `src/main/scala/sources/MilvusDataSource.scala`
 - `MilvusTable.isBackupMode` → `initFromBackup()` (skips the client; schema from
   `BackupMetaReader` or the user's `.schema()`).
-- `MilvusScan.planInputPartitionsFromBackup()`:
-  1. Build the backup-bucket Hadoop conf (reuse `buildSnapshotHadoopConf`).
-  2. `BackupMetaReader.readMeta` → schema bytes + `V2SegmentInfo`.
-  3. Reuse `loadV2DeletePlans` (L1 segments) and `loadPartitionScopedDeletePlans` (L0 segments).
-  4. Call the existing `buildSnapshotPartitions(v2Segments=..., v2DeletePlans=...)`.
+- The current route is shared with the other snapshot sources:
+  1. `SnapshotSources.forRead` selects `BackupSnapshotSource`.
+  2. `BackupMetaReader` materializes the schema, data segments and delete-only L0
+     segments into one core `Snapshot`.
+  3. `MilvusScan` calls `DeleteFileListing.of` and `ReadPlan.of`; the driver lists
+     delete-file descriptors but does not decode delete plans.
+  4. Layer 3 wraps each `SegmentReadTask` as a `MilvusV2InputPartition`.
 
 ## 5. Data Mapping (`full_meta.json → V2SegmentInfo`)
 
@@ -139,9 +143,12 @@ planning.**
 ## 6. Delete Semantics (reuses existing logic)
 
 - `milvus.read.apply.deletes` (default true).
-- L1 segment `delta_log` → `loadV2DeletePlans` (segment-level plan).
-- L0 segment → `loadPartitionScopedDeletePlans` (`-1` = collection-wide delete).
-- Rows are filtered at read time by `(pk, timestamp)` inside the packed reader (`isDeleted`).
+- An L1 data segment keeps its own `delta_log` descriptors on the segment.
+- L0 delete-only segments remain in the `Snapshot`; `DeleteFileListing` adds the
+  current partition's descriptors and the collection-wide (`-1`) descriptors to
+  every affected data task.
+- The executor's `DeletePlans` reads and merges the task's files. Rows are then
+  filtered by `(pk, timestamp)` inside the packed reader (`isDeleted`).
 
 ## 7. Edge Cases & Limitations
 

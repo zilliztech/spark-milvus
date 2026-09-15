@@ -1,10 +1,11 @@
 package com.zilliz.spark.connector.table
 
-import org.apache.spark.sql.types._
+import org.apache.spark.sql.types.{DataType, StructField, StructType}
 
-import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
 import com.zilliz.milvus.storage.snapshot.json.{CollectionSchemaJson, FieldJson}
-import io.milvus.grpc.schema.{DataType => MilvusDataType}
+import com.zilliz.spark.connector.types.SparkTypes
+import io.milvus.grpc.common.KeyValuePair
+import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 /** The `CollectionSchemaJson` inside a snapshot to a Spark StructType.
   *
@@ -36,26 +37,8 @@ object SnapshotSparkSchema {
 
   /** Convert a FieldJson to Spark StructField with Milvus metadata preserved.
     */
-  def fieldToStructField(field: FieldJson): StructField = {
-    val metadata = new MetadataBuilder()
-      .putLong(FieldMetadata.MilvusDataTypeMetadataKey, field.dataType)
-    val milvusType = MilvusDataType.fromValue(field.dataType)
-    if (MilvusTypes.isDenseVectorType(milvusType)) {
-      field.getTypeParam("dim").foreach { rawDimension =>
-        metadata.putLong(
-          FieldMetadata.MilvusVectorDimensionMetadataKey,
-          MilvusTypes.parseVectorDimension(field.name, rawDimension)
-        )
-      }
-    }
-
-    StructField(
-      field.name,
-      dataTypeToSparkType(field.dataType, field.elementType),
-      nullable = field.nullable.getOrElse(true),
-      metadata = metadata.build()
-    )
-  }
+  def fieldToStructField(field: FieldJson): StructField =
+    SparkTypes.toStructField(toFieldSchema(field))
 
   /** Convert a FieldJson to Spark DataType
     *
@@ -68,41 +51,22 @@ object SnapshotSparkSchema {
     fieldToStructField(field).dataType
   }
 
-  /** Convert Milvus data type to Spark DataType
-    *
-    * @param dataType
-    *   Milvus data type integer code
-    * @param typeParams
-    *   Optional type parameters (e.g., dim for vectors, max_length for varchar)
-    * @return
-    *   Corresponding Spark DataType
+  /** Snapshot JSON is converted to the same protobuf field that the rest of the
+    * read path consumes. Missing booleans use protobuf defaults, matching
+    * CollectionSchemaJson.toProtobufBytes.
     */
-  private def dataTypeToSparkType(
-      dataType: Int,
-      elementType: Int
-  ): DataType = {
-    dataType match {
-      case 1   => BooleanType // Bool
-      case 2   => ByteType // Int8
-      case 3   => ShortType // Int16
-      case 4   => IntegerType // Int32
-      case 5   => LongType // Int64
-      case 10  => FloatType // Float
-      case 11  => DoubleType // Double
-      case 20  => StringType // String
-      case 21  => StringType // VarChar
-      case 22  => ArrayType(dataTypeToSparkType(elementType, 0)) // Array
-      case 23  => StringType // JSON (as string)
-      case 24  => StringType // Geometry
-      case 25  => StringType // Text
-      case 26  => LongType // Timestamptz
-      case 100 => BinaryType // BinaryVector
-      case 101 => ArrayType(FloatType) // FloatVector
-      case 102 => ArrayType(FloatType) // Float16Vector
-      case 103 => ArrayType(FloatType) // BFloat16Vector
-      case 104 => MapType(LongType, FloatType) // SparseFloatVector
-      case 105 => ArrayType(ShortType) // Int8Vector
-      case _   => BinaryType // Unknown types as binary
-    }
-  }
+  private def toFieldSchema(field: FieldJson): FieldSchema =
+    FieldSchema(
+      fieldID = field.getFieldIDAsLong,
+      name = field.name,
+      dataType = MilvusDataType.fromValue(field.dataType),
+      isPrimaryKey = field.isPrimaryKey.getOrElse(false),
+      isClusteringKey = field.isClusteringKey.getOrElse(false),
+      typeParams = field.typeParams.getOrElse(Seq.empty).map { param =>
+        KeyValuePair(key = param.key, value = param.value)
+      },
+      elementType = MilvusDataType.fromValue(field.elementType),
+      isPartitionKey = field.isPartitionKey.getOrElse(false),
+      nullable = field.nullable.getOrElse(false)
+    )
 }

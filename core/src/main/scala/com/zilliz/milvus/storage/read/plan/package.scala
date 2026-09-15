@@ -9,13 +9,12 @@ package com.zilliz.milvus.storage.read
   * cannot survive serialization can be a field, and the reader opens what it
   * needs on the executor.
   *
-  * `ReadPlan.of` is the planning itself: a `Snapshot` becomes one task per data
-  * segment, V3 first, each with its `fs.*` map, its manifest version and the
-  * delete files it applies. `DeleteFileListing.of` lists those files on the
-  * driver, opening a V3 segment's manifest to do so, and nothing on the driver
-  * reads a delete file: the executor does, through
-  * `core.read.exec.DeletePlans`. What Spark needs on top (the vector search,
-  * the partition name, the option map) is put on by `spark.read`.
+  * `ReadPlan.of` is the planning itself: one fixed `Snapshot` becomes one task
+  * per data segment, V3 first, each with its `fs.*` map, pinned manifest
+  * version, needed field ids and applicable delete-file descriptors.
+  * `DeleteFileListing.of` opens V3 manifests on the driver only to list files;
+  * it never decodes delete rows. The executor does that through
+  * `core.read.exec.DeletePlans`. What only Spark knows stays in `spark.read`.
   *
   * `Partitioner` is not here. One segment per partition is the only strategy,
   * and a trait with a single implementation and no second caller would be
@@ -24,7 +23,7 @@ package com.zilliz.milvus.storage.read
   * docs/design/README.md and still open, and segment selection.
   *
   * Main types: SegmentReadTask, SegmentLayout, DeleteSource, ReadPlan,
-  * DeleteFileListing. Capabilities: R3, R5, R10 (see
+  * DeleteFileListing. Capabilities: R3, R5, R8, R10, R13 (see
   * docs/design/capabilities.md). Design: docs/design/architecture/read.html
   * section 5.1.
   */

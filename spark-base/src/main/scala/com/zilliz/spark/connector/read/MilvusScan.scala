@@ -26,7 +26,11 @@ import com.zilliz.milvus.storage.snapshot.{
   SnapshotOrigin
 }
 import com.zilliz.spark.connector.metrics.ScanMetrics
-import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
+import com.zilliz.spark.connector.options.{
+  MilvusOption,
+  SnapshotSources,
+  StorageOptions
+}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** One read of one [[Snapshot]]: the table resolved it once, this plans one
@@ -99,29 +103,38 @@ class MilvusScan(
     // The delete files are listed here, which opens every V3 segment's
     // manifest; none of them is read here. The store is the driver's, rooted
     // at the snapshot's bucket.
-    val store = StorageOptions.storeFor(
-      hadoopConf,
-      bucket.getOrElse(""),
-      milvusOption.options
-    )
+    val applyDeletes = MilvusOption.readApplyDeletes(options)
+    def listDeletes(
+        store: com.zilliz.milvus.storage.io.ObjectStore
+    ): DeleteFileListing =
+      DeleteFileListing
+        .of(
+          snapshot,
+          applyDeletes,
+          bucket.getOrElse(""),
+          store,
+          StorageOptions.effectiveEndpoint(milvusOption.options).getOrElse("")
+        )
+        .fold(
+          e =>
+            throw new IllegalStateException(
+              s"cannot list the delete files of $errorContext: ${e.getMessage}",
+              e
+            ),
+          identity
+        )
     val deletes =
-      try
-        DeleteFileListing
-          .of(
-            snapshot,
-            MilvusOption.readApplyDeletes(options),
+      if (!DeleteFileListing.requiresStore(snapshot, applyDeletes)) {
+        listDeletes(null)
+      } else {
+        SnapshotSources.withStore(
+          StorageOptions.storeFor(
+            hadoopConf,
             bucket.getOrElse(""),
-            store
+            milvusOption.options
           )
-          .fold(
-            e =>
-              throw new IllegalStateException(
-                s"cannot list the delete files of $errorContext: ${e.getMessage}",
-                e
-              ),
-            identity
-          )
-      finally store.close()
+        )(listDeletes)
+      }
     inputPartitions(snapshot, deletes)
   }
 
@@ -146,16 +159,19 @@ class MilvusScan(
         )
       )
       .getOrElse(milvusOption)
+    val planProperties = StorageOptions.storagePropertiesFor(
+      hadoopConf,
+      bucket.getOrElse(""),
+      canonicalMilvusOption.options
+    )
     // Parsed once for the whole plan rather than per partition: a bad storage
     // configuration should fail planning, not every task.
     val plan = ReadPlan.of(
       snapshot,
-      properties = {
-        case 2 => StorageProperties.from(canonicalMilvusOption.options)
-        case _ => StorageProperties.from(milvusOption.options)
-      },
+      properties = _ => planProperties,
       applyDeletes = MilvusOption.readApplyDeletes(options),
-      deletes = deletes
+      deletes = deletes,
+      neededFieldIds = MilvusOption.readerFieldIds(options)
     )
     val vectorSearch = milvusOption.vectorSearch
     plan.specs.map { task =>
@@ -164,7 +180,7 @@ class MilvusScan(
           MilvusV3InputPartition(
             task,
             task.partitionId.toString,
-            milvusOption,
+            canonicalMilvusOption,
             vectorSearch.map(_.topK),
             vectorSearch.map(_.queryVector),
             vectorSearch.map(_.metricType),

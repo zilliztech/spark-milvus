@@ -24,19 +24,19 @@
 
 <h1>快照对象模型</h1>
 
-<p>能力 R2、R3、R9、R16、C3、K2、K3。规划期怎么把段变成分区见
+<p>对应<a href="../capabilities.md">能力索引</a>中的 R2、R3、R8、R9、R13、R16、C3、K3。规划期怎么把段变成分区见
 <a href="read.html">read.html</a> 第五节，分层见 <a href="modules.md">modules.md</a>。
-本页是工作单 #03、#04 的设计。#03（对象、SnapshotCatalog、使用点切换）已实现并在 UAT 真实快照上端到端跑通；#04（SnapshotSource 接口，四个入口变成来源，Table 持有 Snapshot）也已实现。</p>
+对象、<code>SnapshotCatalog</code>、<code>SnapshotSource</code> 与 Table 持有 Snapshot 均已实现。</p>
 
 <p class="thesis"><strong>读的唯一输入是一个 <code>Snapshot</code> 对象。</strong>
-段列表有两个来源，格式不同；统一的不是输入格式，是解析后的对象。两个来源各实现一个
-<code>SnapshotSource</code>，产出同一个 <code>Snapshot</code>；driver 把 <code>Snapshot</code>
-投影成每分区一个 <code>SegmentReadTask</code>；executor 只见 <code>SegmentReadTask</code>。
+段列表有四种入口，格式不同；统一的不是输入格式，是解析后的对象。各入口产出同一个
+<code>Snapshot</code>，公共出口再应用分区与段选择；driver 把 <code>Snapshot</code>
+投影成每个数据段一个 <code>SegmentReadTask</code>；executor 只见 <code>SegmentReadTask</code>。
 一个来源给不出的字段在对象上必须显式标为「未知」，不能用空值冒充「没有」。</p>
 
 <figure>
 <svg viewBox="0 0 920 260" role="img"
-     aria-label="两个来源各经一个 SnapshotSource 产出同一个 Snapshot；driver 上的 Partitioner 把 Snapshot 投影成 SegmentReadTask，发给 executor">
+     aria-label="两种持久化元数据格式各经 SnapshotSource 产出同一个 Snapshot；driver 上的 ReadPlan.of 把 Snapshot 投影成 SegmentReadTask，发给 executor">
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -64,7 +64,7 @@
     <text x="355" y="195" opacity=".7">compat.backup</text>
     <text x="575" y="142" font-weight="600">Snapshot</text>
     <text x="575" y="160" opacity=".7">driver 上，不序列化</text>
-    <text x="745" y="142">Partitioner</text>
+    <text x="745" y="142">ReadPlan.of</text>
     <text x="745" y="160" opacity=".7">core.read.plan</text>
     <text x="875" y="116">SegmentReadTask</text>
     <text x="875" y="152">SegmentReadTask</text>
@@ -88,7 +88,7 @@
     <text x="875" y="240">发到 executor</text>
   </g>
 </svg>
-<figcaption>两个来源之间的差别只在适配器里，<code>Snapshot</code> 之后没有分岔。1.x 的另外两个入口不在图上：靠 gRPC 列段的 legacy 入口随决策 11 退役，option 里塞段列表 JSON 的入口随 K2 删除（2.0 不兼容 1.x 接口）。</figcaption>
+<figcaption>图画出两种持久化元数据格式；client 模式先取 collection id 再进入 SnapshotCatalog，option-string 入口直接构造同一个对象。<code>Snapshot</code> 之后没有来源分岔。</figcaption>
 </figure>
 
 <h2 id="objects">一、对象</h2>
@@ -116,24 +116,24 @@
 <table>
 <tr><th>字段</th><th>类型</th><th>含义</th></tr>
 <tr><td><code>id</code>、<code>partitionId</code></td><td><code>Long</code></td><td></td></tr>
-<tr><td><code>storageVersion</code></td><td><code>Int</code></td><td>2 或 3。0 和 1 在解析期就拒绝（read.html 第三节）</td></tr>
+<tr><td><code>storageVersion</code></td><td><code>Int</code></td><td>数据段是 2 或 3；storage version 0 的 L0 段只提供删除文件，不进入数据 reader；其他数据布局在解析期拒绝</td></tr>
 <tr><td><code>rows</code></td><td><code>Option[Long]</code></td><td>行数。V2 段从 Avro 的 <code>entries_num</code> 得到；V3 段只有打开 Manifest 才知道，规划期是 <code>None</code>，R13 的统计因此可能是未知</td></tr>
-<tr><td><code>layout</code></td><td><code>SegmentLayout</code></td><td>V3：<code>Manifest(basePath, version)</code>，列组清单在 Manifest 里，由原生层读；V2：<code>ColumnGroups(groups)</code>，列组已在 driver 上从 Avro 加 parquet footer 物化。路径一律是相对读所绑定的桶的 key（原生 reader 以 <code>fs.bucket_name</code> 为根拼接给它的路径，全 URI 会被按三段式解析），来源给的任何拼法在 <code>SnapshotCatalog.fromLists</code> 归一，跨桶报错。这个类型今天在 <code>core.read.plan</code>，要移到 <code>core.snapshot</code>：它描述的是段在存储上长什么样，不是读计划</td></tr>
+<tr><td><code>layout</code></td><td><code>SegmentLayout</code></td><td>V3：<code>Manifest(basePath, version)</code>，executor 按钉住版本读列组清单；V2：<code>ColumnGroups(groups)</code>，列组已在 driver 上从 Avro 加 parquet footer 物化。路径都在来源边界归一成相对 <code>Snapshot.bucket</code> 的 key；用户 URI 按标准 S3 规则解析，Milvus 元数据中的 endpoint 形式只在 authority 带端口或 authority host 与已配置 endpoint host 精确匹配时识别，跨桶报错</td></tr>
 <tr><td><code>deletes</code></td><td><code>DeleteFiles</code></td><td>删除文件在哪，见 1.3</td></tr>
 <tr><td><code>indexFiles</code></td><td>设计字段，实体尚未实现</td><td>V2 的段级索引描述；需要区分已提供、确认未建、来源未知。快照 Avro 已定义 <code>index_files</code>，现解析器未保留；具体模型见 <a href="vector-search.html#metadata">索引查询方案</a></td></tr>
 </table>
 
 <h3 id="deletes">1.3 删除文件：三种状态，不能合并</h3>
 
-<p><strong>「有删除文件」「没有删除文件」「不知道有没有」是三种状态，今天的代码把第三种当成第二种，1.x 的 legacy 入口因此把已删除的行读回来。</strong>
-<code>LegacyClientPlanner</code> 造 <code>SegmentReadTask</code> 时不填 <code>deletes</code>，默认是
-<code>DeleteSource.None</code>，reader 于是不做删除过滤，没有任何报错。</p>
+<p><strong>「有删除文件」「没有删除文件」「不知道有没有」是三种状态，不能互相代替。</strong>
+来源把它明确写进 <code>Segment.deletes</code>；默认开启删除时，未知状态在规划期失败，读取失败则在
+executor 失败。两处都不允许退成空删除计划。</p>
 
 <pre><code>sealed trait DeleteFiles
 object DeleteFiles {
   case object Empty extends DeleteFiles                      // 来源确认没有删除
-  final case class Listed(files: Seq[DeltaLogRef]) extends DeleteFiles   // V2：Avro 里列了
-  final case class InManifest(version: Long) extends DeleteFiles         // V3：Manifest 该版本里列了，executor 上读
+  final case class Listed(files: Seq[DeltaLogFile]) extends DeleteFiles  // V2：Avro 里列了
+  case object InManifest extends DeleteFiles                             // V3：由 Segment.layout.Manifest 钉住的版本列出
   case object Unknown extends DeleteFiles                    // 来源给不出
 }</code></pre>
 
@@ -151,7 +151,7 @@ object DeleteFiles {
 <tr><td>backup</td><td><code>None</code></td><td>无</td><td>有</td><td><code>Listed</code></td><td>有</td><td>无</td></tr>
 </table>
 
-<h2 id="sources">二、两个来源，一个接口，一次解析</h2>
+<h2 id="sources">二、四种入口，一个接口，一次解析</h2>
 
 <p><strong>接口只有一个方法，没有参数：一个实现在构造时就绑定了自己的定位信息，调用它得到 <code>Snapshot</code>。</strong>
 定位信息各不相同（快照目录里的路径、backup 目录加 collection 名、option 串），所以它们是各实现的构造参数，接口不假装能统一。</p>
@@ -164,16 +164,23 @@ object DeleteFiles {
 <tr><th>来源</th><th>实现</th><th>包</th><th>构造参数</th><th>能力</th></tr>
 <tr><td>快照目录</td><td><code>SnapshotCatalog.at</code> / <code>latestOf</code> / <code>named</code>，见第三节</td><td><code>core.snapshot</code></td><td>catalog + 路径，或 collection 前缀 + 名或最新</td><td>R2、R3</td></tr>
 <tr><td>backup</td><td><code>BackupSnapshotSource</code></td><td><code>compat.backup</code></td><td>store + backup 目录 + db 名 + collection 名</td><td>K3</td></tr>
-<tr><td>在线服务</td><td><code>ClientSnapshotSource</code></td><td><code>spark.options</code>（要用 client 模块）</td><td>连接参数 + catalog；DescribeCollection 取 id，再走快照目录，R16 的选择器在结果上过滤</td><td>R1、R16</td></tr>
+<tr><td>在线服务</td><td><code>ClientSnapshotSource</code></td><td><code>spark.options</code>（要用 client 模块）</td><td>连接参数 + catalog；DescribeCollection 只取 id，再走快照目录</td><td>R1、R16</td></tr>
 <tr><td>option 串</td><td><code>OptionStringsSnapshotSource</code></td><td><code>spark.options</code>（过渡，随 backfill 切到 catalog 后删）</td><td><code>milvus.snapshot.*</code> 的几个 option</td><td>—</td></tr>
 </table>
 
 <p><strong>选择在 <code>getTable</code> 做一次，不在 core 做。</strong><code>spark.options.SnapshotSources.forRead</code> 按 <code>ReadMode</code> 构造上面某一个实现并调用一次；
 <code>MilvusTable</code> 以 <code>Snapshot</code> 为构造参数持有它，<code>newScanBuilder</code> 把它交给 <code>MilvusScanBuilder</code> 再到 <code>MilvusScan</code>，
-schema、分区规划、reader factory 的删除计划都从这一个对象取。Iceberg 的 <code>SparkTable</code> 持有 Iceberg <code>Table</code>、<code>SparkScan</code> 从它取，是同一个形状。
-<code>inferSchema</code> 在 <code>getTable</code> 之前被调用且拿不到 Table，所以它自己再解析一次，但只要 schema：V2 段不读 parquet footer（<code>V2SegmentResolver.Skipped</code>，backup 的 <code>withSegments = false</code>），产出的 <code>Snapshot</code> 没有段，不能拿去规划。
+schema、分区规划、reader factory 的删除描述都从这一个对象取。来源解析后，<code>SnapshotSources</code> 统一以
+<code>Snapshot.narrow</code> 应用 <code>milvus.partitions</code> 与 <code>milvus.segments</code>：两个都是逗号分隔的数值 id，
+任一 id 不存在就报错，同时给时取交集；保留所选数据段对应的分区 L0 与全 collection L0。
+<code>inferSchema</code> 在 <code>getTable</code> 之前被调用且拿不到 Table，所以它自己再解析一次，但只要 schema：V2 段不读 parquet footer（<code>V2SegmentResolver.Skipped</code>，backup 的 <code>withSegments = false</code>），产出的 <code>Snapshot</code> 没有段，不能拿去规划。<code>fieldIDs</code> 在这一次 schema 推导与后续 Table 构建中使用相同的快照字段 id；用户提供外部 schema 时，其字段集合必须与 <code>fieldIDs</code> 一致。
 core 里不放注册表：backup 是 compat 里唯一的实现，与 <code>V2SegmentResolver</code> 一样由第 3 层构造后传入即可，core 源码里不出现 compat 的包名（modules.md 2.2）。
 否决的写法是原设计的「<code>SnapshotSourceRegistry</code> 按 <code>ReadMode</code> 查」：<code>ReadMode</code> 是第 3 层的类型，core 引用不了它。</p>
+
+<p><strong><code>SnapshotSources</code> 同时拥有 driver store 的生命周期。</strong>catalog、client 与 backup
+来源都在 store 打开期间把需要的元数据、Avro 与 footer 完整物化；成功或失败后立即关闭。backup 的并发 footer
+任务先全部结束再关闭 store，主异常保留，关闭异常作为 suppressed exception 附上。返回的
+<code>Snapshot</code> 不持有 store 或 native handle。</p>
 
 <p>2.0 不在读时建快照：1.x 的「读前 CreateSnapshot、读完 DropSnapshot」快路径随 A6 一起删除（决策 11）。读之前快照必须已存在，由 Milvus 自动建或用户经 A1 的 CALL 建；连接器只经 <code>SnapshotCatalog</code> 选一个读。</p>
 
@@ -192,6 +199,11 @@ core 里不放注册表：backup 是 compat 里唯一的实现，与 <code>V2Seg
 <li><strong>补 V2 段的列组。</strong>JSON 的 <code>manifest_list</code> 指向 Avro 文件，Avro 里是 V2 段的 binlog 列表；
 列组的字段集合要再开每个 parquet 的 footer 读 <code>group_field_id_list</code>。这一步今天在 <code>compat.v2.FooterV2SegmentResolver</code>，
 位置不变，由 <code>SnapshotCatalog</code> 经注册表调用（K1 的约束：core 不依赖 compat）。</li>
+<li><strong>归一路径。</strong>用户直接给的 <code>s3a://bucket/key</code> 或
+<code>s3://bucket/key</code> 按标准 URI 解析。快照 JSON、Avro 与 footer 是 Milvus 产生的元数据，
+其中 <code>s3://endpoint:port/bucket/key</code> 只在 authority 显式带端口，或 authority host 与
+<code>fs.address</code> 的 endpoint host 精确匹配时按 endpoint 形式解析；其余情况 authority 仍是桶。段数据、删除文件与
+Manifest 最终都成为 <code>Snapshot.bucket</code> 下的 key。</li>
 <li><strong>不做的。</strong>不建快照、不删快照、不 Flush；建和删是 A1 的 CALL，在第 3 层经 <code>client.api</code>，不在读路径上。</li>
 </ol>
 
@@ -199,33 +211,35 @@ core 里不放注册表：backup 是 compat 里唯一的实现，与 <code>V2Seg
 
 <p><strong><code>Snapshot</code> 不实现 <code>Serializable</code>，这是有意的。</strong>
 它带整张 schema、全部段和索引定义，大小随段数增长；每个 task 需要的只是自己那一段。
-<code>core.read.plan</code> 的 <code>Partitioner</code> 把它投影成每段一个 <code>SegmentReadTask</code>，只有 <code>SegmentReadTask</code> 序列化发出去。</p>
+<code>core.read.plan.ReadPlan.of</code> 把它投影成每个数据段一个 <code>SegmentReadTask</code>，只有 <code>SegmentReadTask</code> 序列化发出去。</p>
 
 <table>
 <tr><th><code>Segment</code> 的字段</th><th>到 <code>SegmentReadTask</code></th></tr>
 <tr><td><code>id</code>、<code>partitionId</code>、<code>layout</code></td><td>原样</td></tr>
-<tr><td><code>Snapshot.schema</code></td><td><code>schemaBytes</code>，protobuf 字节，每个分区一份</td></tr>
-<tr><td><code>deletes</code></td><td><code>DeleteSource</code>：<code>Listed</code> 和 <code>InManifest</code> 变 <code>Files</code>，executor 上读；
+<tr><td><code>Snapshot.schema</code></td><td><code>schemaBytes</code>，protobuf 字节，每个分区一份；<code>neededFieldIds</code> 只引用其中的真实字段 id</td></tr>
+<tr><td><code>deletes</code></td><td><code>DeleteSource</code>：<code>Listed</code> 和 <code>InManifest</code> 变 <code>Files</code>；V3 Manifest 里的 delete path 先经 <code>parseMilvus</code> 归一成同一 <code>Snapshot.bucket</code> 下的 key，再由 executor 读；
 <code>Empty</code> 变 <code>None</code>；<code>Unknown</code> 在规划期已经报错，到不了这里。已做（#13）：<code>Materialized</code>（driver 读完删除日志把主键表塞进分区）不再由 planner 产出</td></tr>
-<tr><td><code>rows</code></td><td>不进 <code>SegmentReadTask</code>；<code>ReadPlan.totalRows</code> 从 <code>Snapshot</code> 算，给 R13</td></tr>
+<tr><td><code>rows</code> / V2 列组行数</td><td>已知值可由任务布局得到 <code>expectedRows</code>；registry 在读到 EOF 时与实际物理输出行数比较。<code>ReadPlan.totalRows</code> 仅在每个任务都有已知值时提供给 R13</td></tr>
 <tr><td><code>indexFiles</code></td><td>R7 落地时加字段</td></tr>
 </table>
 
-<p>R16 的分区和段选择、R9 的段级剪枝都在投影之前对 <code>Snapshot.segments</code> 过滤，是 <code>Partitioner</code> 的输入，不是新的来源。</p>
+<p>R16 的分区和段选择、R9 的段级剪枝都在投影之前对 <code>Snapshot.segments</code> 过滤，是
+<code>ReadPlan.of</code> 的输入，不是新的来源。</p>
 
-<h2 id="today">五、对到今天的代码</h2>
+<h2 id="today">五、实现状态</h2>
 
 <table>
-<tr><th>今天</th><th>之后</th><th>动作</th></tr>
-<tr><td><code>SnapshotJson</code> 及其子类（<code>core.snapshot.json</code>，JSON 的形状）</td><td>解析器的内部类型；<code>SnapshotCatalog.fromMetadata</code> 是唯一把它翻成 <code>Snapshot</code> 的地方</td><td>已做；降为 <code>private[snapshot]</code> 等 backfill 的 K2 路径删掉后</td></tr>
+<tr><th>原位置</th><th>目标边界</th><th>状态</th></tr>
+<tr><td><code>SnapshotJson</code> 及其子类（<code>core.snapshot.json</code>，JSON 的形状）</td><td>解析器的内部类型；<code>SnapshotCatalog.fromMetadata</code> 是唯一把它翻成 <code>Snapshot</code> 的地方</td><td>已做；等 option-string 过渡入口删除后降为 <code>private[snapshot]</code></td></tr>
 <tr><td><code>ManifestItemJson</code>（V3 段）与 <code>V2SegmentInfo</code>（V2 段）</td><td>一个 <code>Segment</code></td><td>已做；<code>V2SegmentInfo</code> 已删除，Avro、backup、option 串三个来源直接产 <code>Segment</code></td></tr>
 <tr><td><code>core.read.plan.SegmentLayout</code></td><td><code>core.snapshot.SegmentLayout</code></td><td>已做</td></tr>
-<tr><td><code>spark.read.plan.SnapshotPartitions.build</code>（今天 <code>Snapshot</code> 进、<code>InputPartition</code> 出）</td><td><code>core.read.plan.Partitioner</code>（<code>Snapshot</code> 进、<code>ReadPlan</code> 出），第 3 层只把 <code>SegmentReadTask</code> 包成 <code>InputPartition</code></td><td>输入已换成 <code>Snapshot</code>；下沉 core 未做</td></tr>
-<tr><td><code>spark.read.plan.DeletePlanning</code>（driver 读删除日志）</td><td>消失：删除文件位置进 <code>Segment.deletes</code>，读在 executor</td><td>已做（#13）：driver 只剩 <code>core.read.plan.DeleteFileListing</code> 列文件，executor 的 <code>core.read.exec.DeletePlans</code> 读</td></tr>
-<tr><td><code>ClientSnapshotPlanner</code></td><td><code>ClientSnapshotSource</code>；读前建快照那一半删除（A6 已删）</td><td>已做：DescribeCollection 取 id，catalog 按名或取最新，R16 的过滤是 <code>Snapshot.narrow</code></td></tr>
-<tr><td><code>OptionSnapshotPlanner</code></td><td>删除（K2 已删）。backfill 读原表今天靠它，先切到 <code>SnapshotCatalog</code></td><td>planner 已删；<code>milvus.snapshot.path</code> 走 <code>SnapshotCatalog.at</code>，option 串那一半是 <code>OptionStringsSnapshotSource</code>，等 backfill 切换后删</td></tr>
+<tr><td><code>spark.read.plan.SnapshotPartitions.build</code></td><td><code>core.read.plan.ReadPlan.of</code>（<code>Snapshot</code> 进、<code>ReadPlan</code> 出），第 3 层只把 <code>SegmentReadTask</code> 包成 <code>InputPartition</code></td><td>已完成；一段一 task 是当前唯一策略，不为单实现增加 <code>Partitioner</code> 接口</td></tr>
+<tr><td><code>spark.read.plan.DeletePlanning</code>（旧 driver 删除规划）</td><td>消失：删除文件位置进 <code>Segment.deletes</code>，读在 executor</td><td>已做（#13）：driver 只剩 <code>core.read.plan.DeleteFileListing</code> 列文件，executor 的 <code>core.read.exec.DeletePlans</code> 读</td></tr>
+<tr><td><code>ClientSnapshotPlanner</code></td><td><code>ClientSnapshotSource</code>；读前建快照那一半删除（A6 已删）</td><td>已做：DescribeCollection 取 id，catalog 按名或取最新；R16 过滤移到所有来源共享的 <code>SnapshotSources</code> 出口</td></tr>
+<tr><td><code>OptionSnapshotPlanner</code></td><td>旧 planner 删除；backfill 读原表先切到 <code>SnapshotCatalog</code></td><td>planner 已删；<code>milvus.snapshot.path</code> 走 <code>SnapshotCatalog.at</code>，option 串过渡入口由 <code>OptionStringsSnapshotSource</code> 承担，等 backfill 切换后删</td></tr>
 <tr><td><code>BackupPlanner</code></td><td><code>BackupSnapshotSource</code></td><td>已做（#04）</td></tr>
 <tr><td><code>MilvusTable</code> 构造时按模式各自读一遍存储或连服务，三个 <code>var</code></td><td>以 <code>Snapshot</code> 为构造参数，不做 IO</td><td>已做（#04）：<code>getTable</code> 解析一次，Table 到 Scan 传对象；<code>inferSchema</code> 只读 schema</td></tr>
+<tr><td>来源返回仍持有打开的 driver store</td><td>来源在 store 有效期内完整物化 Snapshot，公共包装器随后关闭</td><td>已做：成功、主读取失败与 close 失败都有确定的资源与异常语义；backup 并发任务结束后才关闭</td></tr>
 <tr><td><code>LegacyClientPlanner</code></td><td>删除。partition/segment 选择器改在 <code>Snapshot.segments</code> 上过滤（R16）</td><td>已做</td></tr>
 <tr><td><code>ClientReadSnapshot</code>（建、注册清理、重试删）</td><td>删除：它是 A6 的实现，A6 已删</td><td>已做</td></tr>
 </table>

@@ -23,9 +23,9 @@ trait SegmentReader extends AutoCloseable {
   /** The next batch, or nothing at end of stream. */
   def next(): Option[VectorSchemaRoot]
 
-  /** Rows handed over so far. A caller that knows how many to expect compares
-    * the two at the end: reading fewer than promised has to be an error, not a
-    * short result.
+  /** Rows handed over so far. The registry wraps a reader when its task
+    * declares an expected count, so reaching EOF with another count is an error
+    * rather than a partial result.
     */
   def deliveredRows: Long
 
@@ -53,14 +53,66 @@ object SegmentReaderRegistry {
       neededColumns: Seq[String],
       columnNameFor: Long => Option[String],
       allocator: BufferAllocator
-  ): SegmentReader =
-    new NativeSegmentReader(
+  ): SegmentReader = {
+    val reader = new NativeSegmentReader(
       task,
       arrowSchema,
       neededColumns,
       columnNameFor,
       allocator
     )
+    withExpectedRows(task, reader)
+  }
+
+  /** Apply the task's EOF row-count contract to any reader implementation. Kept
+    * separate from the native reader so row and columnar Spark consumers get
+    * the same check, and so the contract is testable without JNI.
+    */
+  private[exec] def withExpectedRows(
+      task: SegmentReadTask,
+      reader: SegmentReader
+  ): SegmentReader =
+    task.expectedRows match {
+      case Some(expected) =>
+        new ExpectedRowsSegmentReader(reader, task.segmentId, expected)
+      case None => reader
+    }
+}
+
+/** Verifies a physical row count only when the delegate reaches EOF. Closing a
+  * reader early is valid for a limit and deliberately does not run the check.
+  */
+private[exec] final class ExpectedRowsSegmentReader(
+    delegate: SegmentReader,
+    segmentId: Long,
+    expectedRows: Long
+) extends SegmentReader {
+
+  private var verified: Boolean = false
+
+  override def next(): Option[VectorSchemaRoot] = {
+    val batch = delegate.next()
+    if (batch.isEmpty) verify()
+    batch
+  }
+
+  override def deliveredRows: Long = delegate.deliveredRows
+
+  override def metrics: ReadMetrics = delegate.metrics
+
+  override def close(): Unit = delegate.close()
+
+  private def verify(): Unit = {
+    if (verified) return
+    if (deliveredRows != expectedRows) {
+      throw new IllegalStateException(
+        s"segment $segmentId reader delivered $deliveredRows physical rows, " +
+          s"expected $expectedRows; refusing to return a partial or " +
+          "corrupt result"
+      )
+    }
+    verified = true
+  }
 }
 
 /** [[SegmentReader]] over milvus-storage's C reader.

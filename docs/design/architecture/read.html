@@ -25,26 +25,25 @@
 
 <h1>读路径</h1>
 
-<p>能力 R1、R2、R3、R4、R5、R8、R10、R14、R17。取字节和交接 Arrow 那一层见
+<p>对应<a href="../capabilities.md">能力索引</a>中的 R2、R3、R4、R5、R8–R17。取字节和交接 Arrow 那一层见
 <a href="storage-io.html">storage-io.html</a>,分层见 <a href="modules.md">modules.md</a>。</p>
 
-<p class="thesis"><strong>读一张表只有一条路:driver 在 <code>core.read.plan</code> 规划出任务,executor 在 <code>core.read.exec</code> 开段,
-<code>spark.read</code> 用一个行式 reader 和一个列式 reader 把 Arrow 批交给 Spark。</strong>
-两条存储线的差别只剩列怎么命名,由 <code>ColumnBinding</code> 的两个实现承担;
-reader 的主循环不知道自己读的是哪条线。本页先说第 3 层现在怎么读,再说还差什么。</p>
+<p class="thesis"><strong>第 3 层只负责 Spark 接口，第 2 层完成规划和读取执行。</strong>
+<code>getTable</code> 解析一次固定 <code>Snapshot</code>，<code>core.read.plan</code> 把它变成可序列化任务，
+<code>core.read.exec</code> 在 executor 上打开第 1 层 JNI reader。行式与列式出口消费同一个
+<code>SegmentReader</code>；V2/V3 的列名差异由 <code>ColumnBinding</code> 封装，行式主循环不再分叉。</p>
 
 <h2 id="one-path">一、读一张表只有一种读法</h2>
 
-<p><strong>表面上分很多种情况,实际只有一种读法。</strong>两种 <code>InputPartition</code>
-都装一个 <code>SegmentReadTask</code>,<code>SegmentReaderRegistry.open</code> 按任务的
-<code>SegmentLayout</code> 开同一个 <code>NativeSegmentReader</code>;executor 侧只有一个行式 reader
-<code>MilvusRowPartitionReader</code> 和一个列式 reader <code>MilvusColumnarPartitionReader</code>,
-两条线共用。唯一的实质差别是列叫什么名字:manifest 布局的列名是字段 id,列组布局的列名是字段名,
-这一层差别封在 <code>V3ColumnBinding</code> / <code>V2ColumnBinding</code> 里。</p>
+<p><strong>表面上有 V2/V3、行式/列式，实际只有一个开段入口。</strong>
+两种 <code>InputPartition</code> 都携带 <code>SegmentReadTask</code>，
+<code>SegmentReaderRegistry</code> 按其 <code>SegmentLayout</code> 打开原生 reader；
+<code>MilvusRowPartitionReader</code> 和 <code>MilvusColumnarPartitionReader</code> 只决定把同一批 Arrow 数据呈现成
+<code>InternalRow</code> 还是 <code>ColumnarBatch</code>。</p>
 
 <figure>
 <svg viewBox="0 0 900 250" role="img"
-     aria-label="两种 InputPartition 经各自的 ColumnBinding 汇合到同一个行式或列式 reader，reader 通过 core.read.exec 的注册表打开同一个原生 reader">
+     aria-label="V2 与 V3 的 InputPartition 经各自 ColumnBinding 进入同一个行式或列式 reader，再由 core.read.exec 打开原生 reader">
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -105,10 +104,13 @@ reader 的主循环不知道自己读的是哪条线。本页先说第 3 层现�
 <tr><td>开段、取字节、凭证、Arrow 出口</td><td colspan="2">都是 <code>core.read.exec</code> 开的同一个 <code>NativeSegmentReader</code>;凭证是任务里的 <code>fs.*</code> 属性包</td></tr>
 </table>
 
-<p>行式 reader 有一道自查:<code>SegmentReadTask.expectedRows</code> 给出布局声明的行数时(列组布局给,manifest 布局不给),
-reader 在读完时对比实际交付的行数,少了就抛 <code>IllegalStateException</code>。
-这是防上游 milvus-storage#657 之前的版本在多文件列组里只读第一个文件——
-那个缺陷不抛异常,只会让 DataFrame 静悄悄变短。</p>
+<p>列裁剪传的是快照 schema 中的真实字段 id。V3 把 id 映射成 Manifest 列名，V2 把 id 映射成
+footer 里的字段名；缺少 <code>milvus.field_id</code>、请求未知字段或遇到存储中缺列都直接报错，
+不再按 Spark schema 的位置猜 id，也不以 null 补缺列。</p>
+
+<p>已知物理行数的任务由 <code>ExpectedRowsSegmentReader</code> 统一检查：只有读到 EOF 时才比较
+实际交付行数，少读或多读都失败。行式与列式共用这层；Limit 提前关闭 reader 是正常行为，
+没有读到 EOF，因此不做完整行数断言。</p>
 
 <h2 id="plan">二、段从哪来:一个 Snapshot,四个来源</h2>
 
@@ -120,42 +122,55 @@ reader 在读完时对比实际交付的行数,少了就抛 <code>IllegalStateEx
 <table>
 <tr><th>来源</th><th>触发</th><th>产出</th></tr>
 <tr><td><code>SnapshotCatalog.at</code></td><td><code>milvus.snapshot.path</code>:直接读一个快照 JSON,不经服务</td><td>V3 + V2</td></tr>
-<tr><td><code>ClientSnapshotSource</code></td><td><code>milvus.uri</code>:DescribeCollection 取 id,快照目录里按名或取最新,R16 选择器过滤</td><td>V3 + V2</td></tr>
+<tr><td><code>ClientSnapshotSource</code></td><td><code>milvus.uri</code>:DescribeCollection 取 id,快照目录里按名或取最新</td><td>V3 + V2</td></tr>
 <tr><td><code>BackupSnapshotSource</code></td><td><code>milvus.backup.dir</code>:<code>BackupMetaReader.toV2Segments</code> 转备份元数据</td><td>只有 V2</td></tr>
 <tr><td><code>OptionStringsSnapshotSource</code></td><td>1.x 的 option 串(backfill 读原表今天用),随 backfill 切到 catalog 后删</td><td>V3 + V2</td></tr>
 </table>
 
-<p>driver 侧要开的四类文件——快照 manifest、V2 段的 manifest 与 parquet footer、删除日志、备份元数据——
-已经全部走 <a href="storage-io.html#two-faces">交字节那一面</a>。</p>
+<p>四个来源解析完以后，统一调用 <code>Snapshot.narrow</code> 应用
+<code>milvus.partitions</code> 与 <code>milvus.segments</code>。每个请求 id 都要存在，两个选择器同时给时取交集；
+段 id 不属于所选分区时也报错，不返回意外的空读。收窄数据段不会丢掉适用于它们的分区 L0 与
+全 collection L0 删除段。</p>
 
-<h2 id="v1">三、不支持 storage_version 0/1</h2>
+<p>读取配置在 driver 规划期严格解析：布尔选项只接受 <code>true</code> / <code>false</code>，
+字段、分区与段列表不接受空项、负数或非数值，<code>milvus.snapshot.max.json.bytes</code>
+必须为正整数。<code>vector.search.query</code> 与 <code>vector.search.topK</code> 必须成对给出，
+前者是非空的有限数字数组，后者是正整数；显式提供的空白值同样非法，不能通过默认值关闭功能。</p>
 
-<p>三处挡在外面:legacy client 入口 <code>filter(_.storageVersion >= 2)</code> 后为空就抛
-<code>requires Milvus 2.6+</code>;按 segment 精确查时报 <code>storage_version &lt; 2</code>;
-工厂的 <code>case _</code>。没有任何路径会去读逐字段的 V1 binlog。</p>
+<p>动态字段同样遵循真实字段 ID 绑定：<code>enable_dynamic_field=true</code> 时，快照 schema 必须包含唯一的
+<code>$meta</code> JSON 字段、动态标记和非系统字段 ID。缺失或不一致会在规划期失败；连接器不会用
+“最大字段 ID + 1”猜测物理列，以免 schema 演进后静默丢失或读取错误数据。</p>
+
+<p>driver 为快照 JSON、V2 段 Avro、parquet footer 与备份元数据打开的
+<code>ObjectStore</code> 都由 <code>SnapshotSources</code> 管理。元数据完整物化后立即关闭；主读取失败、
+关闭失败与并发 footer 读取失败都保留原始错误，并在所有已启动工作结束后释放 store。
+删除文件内容不在这里读取。</p>
+
+<h2 id="v1">三、数据段只支持 storage_version 2/3</h2>
+
+<p>数据段只接受 <code>storage_version = 2</code> 或 <code>3</code>；其他布局在快照物化或任务规划时失败。
+L0 是删除段而不是数据段，按删除描述保留，不进入数据 reader。没有任何路径读取逐字段的 V1 binlog。</p>
 
 <p><code>insert_log/{collection}/{partition}/{segment}</code> 是 Milvus 放段数据的目录,
 与 storage_version 无关。V3 的 manifest basePath 就在这个目录下,
-<code>SnapshotPartitions.build</code> 正是靠 <code>pathParts.lastIndexOf("insert_log")</code>
-往后数两级反推 partitionID。看到 <code>insert_log</code> 就断定是 V1,是读错了——
-UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,末尾也是 <code>PAR1</code>,
-中间没有 Milvus 的 event 头,是一个 V2 列组的纯 parquet。</p>
+快照元数据提供 segment id、partition id 和 base path，规划不从目录层级反推这些 id。
+看到 <code>insert_log</code> 不能判断存储版本；V2 列组与 V3 段目录都可以位于该前缀下。</p>
 
 <p>全仓唯一解析 Milvus event 格式的地方是 <code>core.delete.DeltaLogReader</code>,
-它读删除日志,在 driver 上跑,两条线共用。</p>
+它在 executor 上读取任务描述的删除文件，两条存储线共用。</p>
 
-<h2 id="gap">四、离目标还差什么</h2>
+<h2 id="gap">四、当前边界</h2>
 
-<p><strong>取字节那一面已经到位,交地址那一面一步没动。</strong></p>
+<p><strong>driver 物化不可变描述，executor 打开可变进程资源。</strong></p>
 
 <table>
 <tr><th></th><th>状态</th></tr>
-<tr><td>driver 侧</td><td>做完了。<code>StorageOptions.storeFor</code> 建 <code>NativeObjectStore</code>,属性由连接器自己的 <code>fs.*</code> 选项与 <code>fs.s3a.*</code>/<code>fs.oss.*</code> 翻译出来的键合并,前者优先;桶为空时用 <code>fs.storage_type=local</code>。<code>core.io.hadoop</code> 已删除,core 与 compat 的主代码里没有一处 <code>org.apache.hadoop</code></td></tr>
-<tr><td>executor 侧</td><td>已经走我们的 JNI。还没做的是把分发与出口下沉到 <code>core.read.exec</code>——现在它们仍然是 spark 层的两个分支</td></tr>
+<tr><td>driver 侧</td><td><code>SnapshotSources</code> 解析并收窄一个 Snapshot；<code>DeleteFileListing</code> 只读取 V3 Manifest 以列出删除文件；<code>ReadPlan</code> 生成可序列化任务。driver 打开的 store 在描述物化完毕后关闭</td></tr>
+<tr><td>executor 侧</td><td><code>DeletePlans</code> 读取删除文件，<code>SegmentReaderRegistry</code> 打开数据 reader；两个资源都从任务携带的路径与 <code>fs.*</code> 重建，在本进程关闭</td></tr>
 <tr><td>代价</td><td>driver 现在要能加载 <code>libmilvus-storage</code>。CI 不构建原生库,所以这条路径在 CI 上没有端到端覆盖;单元测试用 <code>LocalObjectStore</code> 覆盖各格式的解析</td></tr>
 </table>
 
-<h2 id="core">五、要往第 2 层填的两个包</h2>
+<h2 id="core">五、第 2 层的两个读包</h2>
 
 <p>分界线一句话:<strong><code>plan</code> 在 driver 上跑,产物必须可序列化;
 <code>exec</code> 在 executor 上跑,是 core 调原生层的唯一地方。</strong></p>
@@ -167,9 +182,9 @@ UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,�
 <h3>5.1 core.read.plan</h3>
 <table>
 <tr><th>类型</th><th>是什么</th></tr>
-<tr><td><code>SegmentReadTask</code></td><td>一个分区要读什么:段路径、<code>storage_version</code>、manifest 版本、列名、<code>fs.*</code> 属性、删除文件位置。只有描述,没有句柄、没有 <code>Configuration</code>、没有打开的资源</td></tr>
-<tr><td><code>ReadPlan</code></td><td>一组 <code>SegmentReadTask</code>,加规划期就能算出来的总行数、字节数(供 R13)。<code>ReadPlan.of(snapshot, properties, applyDeletes, deletes, readVersions)</code> 是规划本身:V3 段一个 manifest 任务、有数据的 V2 段一个列组任务、delete-only 段跳过,V3 任务带分区继承的 L0 删除和自己的删除之并,V2 任务只带自己的。已做(#12)</td></tr>
-<tr><td><code>Partitioner</code></td><td>怎么切分区。没有:一段一分区是唯一策略,R19 按分区报分区、R16 段选择定了再加,接口按那时的两种实现定</td></tr>
+<tr><td><code>SegmentReadTask</code></td><td>一个分区要读什么：段 id、分区 id、布局、schema 字节、真实字段 id、<code>fs.*</code> 属性和删除文件描述。只有可序列化描述，没有句柄、<code>Configuration</code> 或打开的资源</td></tr>
+<tr><td><code>ReadPlan</code></td><td>一组 <code>SegmentReadTask</code>，加规划期可知的总行数。V3 每段一个钉住 Manifest 版本的任务；V2 每个有数据的段一个列组任务；delete-only 段只作为 L0 删除来源，不单独出任务</td></tr>
+<tr><td><code>DeleteFileListing</code></td><td>driver 只列适用于每段的删除文件：段自己的、本分区 L0、全 collection L0；内容留给 executor 解码</td></tr>
 </table>
 <p>剪枝(R9 段级、R10 row group 级)也在本包:规划期用统计信息把不需要的段和文件从
 <code>SegmentReadTask</code> 里去掉。R10 依赖仓库外的两件事,见
@@ -177,29 +192,29 @@ UAT 取下来的那个段文件 4133761 字节,偏移 0 是 <code>PAR1</code>,�
 
 <h3>5.2 core.read.exec</h3>
 <pre><code>trait SegmentReader extends AutoCloseable {
-  def next(): Option[ColumnBatch]              // 逐批，EOF 返回 None
-  def take(rowIds: Array[Long]): ColumnBatch   // R14 回表
+  def next(): Option[VectorSchemaRoot]   // 逐批，EOF 返回 None
+  def deliveredRows: Long                // 已交付物理行数
+  def metrics: ReadMetrics               // G5 当前累计值，close 后仍可读
 }
 
-SegmentReaderRegistry: storage_version -> SegmentReader 工厂</code></pre>
-<p><strong>注册表在 core,实现可以在 compat。</strong>V2 packed 的实现放
-<code>compat.v2</code>,启动时注册进来;<code>core</code> 不反向依赖
-<code>compat</code>。这是能力 K1 写死的约束。</p>
-<p>这个注册表已经取代 spark 层原来的做法——<code>MilvusPartitionReaderFactory.createReader</code>
-按 <code>InputPartition</code> 的具体类型做模式匹配,两条线各一个 reader。#06 之后分发在 core,
-spark 层一个行式 reader、一个列式 reader,只留 Spark 接口的对接。</p>
+SegmentReaderRegistry.open(task, schema, neededColumns, columnNameFor, allocator)</code></pre>
+<p><code>SegmentReaderRegistry</code> 按 <code>SegmentLayout</code> 处理两种段：V3 用 Manifest，V2 用
+已经物化的列组。V2 的 footer 恢复仍在 <code>compat.v2</code>，core 不反向依赖 compat。</p>
+<p>registry 还统一包上预期行数校验；<code>DeletePlans</code> 则在打开数据 reader 前把任务的
+<code>DeleteSource.Files</code> 读成删除计划，失败不退成空计划。</p>
 <p>两条线各自的列组清单怎么来留在各自的实现里,取字节与 Arrow 交接统一走
 <a href="storage-io.html">storage-io</a> 定的那两个面。所有权那三条规则同样在那篇。</p>
 
-<h2 id="columnar">六、列式出口:做,R4 已定</h2>
+<h2 id="columnar">六、行式与列式出口</h2>
 
 <p><strong>列式出口已有,且是默认</strong>:<code>MilvusColumnarPartitionReader</code>,<code>milvus.read.columnar=false</code> 才走行式;
 带向量检索的读回落行式,因为那一步(<code>SegmentVectorSearch</code>)逐行算距离,归属是决策 16。谓词今天不引起回落:ScanBuilder 一个谓词也不接,Spark 自己在列批上算。下面是它的设计。</p>
 
-<p>决策 12 选了做。出口形态:<strong>无删除的批原样包成 <code>ColumnarBatch</code> 直通,
-有删除的批经 <code>SelectedRowsColumn</code> 按存活行下标映射,不拷贝。</strong>理由与代价见
-<a href="storage-io.html#cost">storage-io 第四节</a>。<code>ColumnBatch</code>
-的定义据此定型,<code>core.read.exec</code> 不再被挡。</p>
+<p>无删除的批直接包装成 <code>ColumnarBatch</code>；有删除时通过
+<code>SelectedRowsColumn</code> 按存活行下标重映射，不复制整列 buffer。行式逐行跳过同一套
+<code>ColumnBinding.isDeleted</code> 判定。两种出口都在底层 reader 读到 EOF 时执行同一个物理行数校验，
+因此不会一条报短读、另一条静默返回。理由与代价见
+<a href="storage-io.html#cost">storage-io 第四节</a>。</p>
 
 <h3>6.1 向量列默认要转,零拷贝因此只落在标量列</h3>
 <p>Milvus 把所有向量类型都存成 Arrow 的 <code>FixedSizeBinary</code>,
@@ -222,24 +237,44 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 字节不动,零拷贝成立。它服务的是把字节直接喂给原生库的批量作业(backfill、暴力搜索),
 那些场景转成 <code>Array[Float]</code> 再转回字节是纯浪费。</p>
 
-<h2 id="rest">七、其余没定的</h2>
+<h3>6.2 元数据列</h3>
+<p><code>milvus.extra.columns</code> 的输出只包含三个规范名，并始终按下表顺序追加：</p>
+<table>
+<tr><th>列</th><th>来源</th><th>含义</th></tr>
+<tr><td><code>_segment_id</code></td><td><code>SegmentReadTask.segmentId</code></td><td>当前数据段 id，行式与列式都按 task 填</td></tr>
+<tr><td><code>_row_offset</code></td><td>reader 的物理行位置</td><td>删除过滤前在段内的行号；跨批连续，Limit 与删除不重新编号</td></tr>
+<tr><td><code>_timestamp</code></td><td>存储字段 id 1</td><td>V2 绑定到 <code>Timestamp</code>，V3 绑定到列名 <code>1</code>；这是数据列，不在 Spark 侧合成</td></tr>
+</table>
+<p>不提供 <code>partition</code> 元数据列；需要收窄数据时使用
+<code>milvus.partitions</code>。元数据投影也不能让 fallback 物理字段泄漏进输出 schema。</p>
+
+<h3>6.3 类型与 schema</h3>
+<p><code>SparkTypes.toStructField</code> 是快照 schema、Table 与 reader 共用的映射。字段名、真实字段
+id、Milvus 类型、nullable、主键/分区键/聚类键标记和向量维度都来自同一个
+<code>FieldSchema</code>。支持范围是 Bool、整数、浮点、String、VarChar、Text、JSON、标量 Array 与六种
+向量；Geometry、Timestamptz、ArrayOfVector/struct-array 和未知类型尚未实现。
+<code>fieldIDs</code> 在 <code>inferSchema</code> 和 Table 构建时都过同一份快照字段表；
+外部 <code>.schema()</code> 的非元数据字段必须恰好对应选中 id，名称和 Spark 类型不能与快照冲突。
+遇到不支持的类型、schema 中缺字段或 Arrow 批缺请求列时直接失败，不退成 BinaryType 或 null。</p>
+
+<h2 id="rest">七、不在本链路内的能力</h2>
 <ol>
 <li><strong>向量搜索这条分支怎么放。</strong><code>spark.read.SegmentVectorSearch</code>
 是行式 reader 的可选阶段(#06 从 V3 reader 里拆出),和普通扫描是两条并行路径。它属于 V*,本页不设计,
 但 <code>SegmentReader</code> 接口要留得下它,不能设计成只能顺序扫。</li>
-<li><strong>R5 列裁剪怎么传到底。</strong><code>loon_segment_reader_open</code> 收
-<code>needed_columns</code>,V2 那条线怎么表达列裁剪要单独确认。</li>
 <li><strong>谓词。</strong>C 那条路不可用(<code>loon_segment_reader_get_filtered_stream</code>
 收下谓词、返回 OK、然后忽略,见
 <a href="storage-access.html#bridge-gap">storage-access 4.4</a>),由 <code>core.expr</code>
 在 JVM 侧求值。</li>
+<li><strong>回表与 row group 剪枝。</strong><code>take</code>（R14）和统计驱动的 row group 剪枝
+（R10）仍是独立能力，不通过普通顺序扫描的外围分支模拟。</li>
 </ol>
 
-<h2 id="next">八、开发大纲</h2>
+<h2 id="next">八、实现状态</h2>
 
-<p><strong>第 1 层与第 3 层的对接已完成。</strong>行式与列式 reader、两个 writer 都走
-<code>native-storage</code> 的 JNI,凭证四处统一 <code>StorageProperties.from</code>,
-上游绑定不再进构建,3.5 线的 Scala 2.12 解锁。剩下的是把分发与出口下沉到第 2 层。</p>
+<p><strong>固定快照的普通读取链路已经贯通三层。</strong>第 3 层解析一次 Snapshot 并对接 Spark，
+第 2 层规划任务、读取删除文件并统一打开段 reader，第 1 层经 JNI 交付 Arrow 批。
+下面保留各次下沉的边界，未完成项只列不属于这条普通读取链路的能力。</p>
 
 <div class="todo">
 <ol>
@@ -287,10 +322,11 @@ manifest 按字段 id 匹配列、schema 里字段名就是 id,列组布局用�
 列式出口的 Spark 那一半是 Spark 类型,归第 3 层,进 core 的仍是
 <code>VectorSchemaRoot</code>。</li>
 
-<li><strong>列式出口。</strong>决策 12 定了做,决策 6 定了向量列默认转、
-另给 <code>milvus.read.vector.raw</code> 出原始字节。要新写
-<code>ColumnVector</code> 与 <code>ColumnarBatch</code> 的一侧,
-有删除的批经 <code>SelectedRowsColumn</code> 按下标映射。</li>
+<li><s>列式出口。</s>已完成。<code>milvus.read.columnar=true</code> 接到
+<code>PartitionReader[ColumnarBatch]</code>；向量默认转成 Spark 类型，
+<code>milvus.read.vector.raw=true</code> 输出原始字节；有删除的批只暴露存活行。
+<code>SelectedRowsColumn</code> 只按下标映射，不复制整列。行式和列式共用列绑定、删除判断与
+EOF 预期行数校验。</li>
 
 <li><strong>写侧下沉 <code>core.write.exec</code> 与 <code>core.write.commit</code>。</strong><code>core.write.exec</code> 已做（#07）：两个 writer 的 native 调用进了 core，<code>ManifestTransaction</code> 提交清单；作业级提交是 #08。
 backfill 分支走已有的 <code>BatchUpdateManifest</code>,可以做;append 分支等 Milvus 新增

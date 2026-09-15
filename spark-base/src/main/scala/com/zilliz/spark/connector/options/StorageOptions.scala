@@ -8,6 +8,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
 import com.zilliz.spark.connector.options.MilvusOption
 
@@ -26,7 +27,8 @@ object StorageOptions extends Logging {
 
   private[connector] def resolveClientSnapshotLocation(
       location: String,
-      bucket: String
+      bucket: String,
+      endpoint: String = ""
   ): String = {
     val trimmed = Option(location).map(_.trim).getOrElse("")
     if (trimmed.isEmpty) {
@@ -35,12 +37,8 @@ object StorageOptions extends Logging {
 
     val scheme = Option(new URI(trimmed).getScheme).map(_.toLowerCase)
     scheme match {
-      case Some("s3a") => trimmed
-      case Some("s3")  =>
-        // Not written as an interpolation: IntelliJ's Scala lexer reads the
-        // `//` of a nested "://" literal inside `${}` as a line comment and
-        // mis-parses the rest of the file.
-        "s3a://" + trimmed.substring(trimmed.indexOf("://") + 3)
+      case Some("s3a") | Some("s3") =>
+        StoragePath.parseMilvus(trimmed, bucket, endpoint).uri("s3a")
       case Some(other) =>
         throw new IllegalArgumentException(
           s"Unsupported snapshot s3_location scheme '$other': $trimmed"
@@ -95,6 +93,48 @@ object StorageOptions extends Logging {
     }
   }
 
+  /** Configured endpoint used by both Milvus-path detection and storage
+    * clients. The native `fs.address` key is authoritative; Hadoop's
+    * `fs.s3a.endpoint` and the legacy `s3.endpoint` spelling remain aliases.
+    */
+  private[connector] def effectiveEndpoint(
+      options: scala.collection.Map[String, String]
+  ): Option[String] =
+    Seq(
+      StorageProperties.Address,
+      "fs.s3a.endpoint",
+      MilvusOption.S3Endpoint
+    ).view
+      .flatMap(key => optionValue(options, key))
+      .map(_.trim)
+      .find(_.nonEmpty)
+
+  /** Path-style setting shared by Hadoop S3A and the native store.
+    * `fs.use_virtual_host` expresses the inverse, so it is converted once at
+    * this boundary.
+    */
+  private[connector] def effectivePathStyleAccess(
+      options: scala.collection.Map[String, String]
+  ): Option[Boolean] =
+    booleanOption(options, "fs.s3a.path.style.access")
+      .orElse(booleanOption(options, MilvusOption.S3PathStyleAccess))
+      .orElse(
+        booleanOption(options, StorageProperties.UseVirtualHost).map(!_)
+      )
+
+  private def booleanOption(
+      options: scala.collection.Map[String, String],
+      key: String
+  ): Option[Boolean] =
+    optionValue(options, key).map(_.trim).map {
+      case value if value.equalsIgnoreCase("true")  => true
+      case value if value.equalsIgnoreCase("false") => false
+      case value =>
+        throw new IllegalArgumentException(
+          s"Option '$key' must be 'true' or 'false', got '$value'"
+        )
+    }
+
   /** The one place the driver opens object storage.
     *
     * Two sources feed it, and explicit beats inferred: the connector's own
@@ -119,6 +159,23 @@ object StorageOptions extends Logging {
       return HadoopStorageKeys
         .objectStore(conf, "")
     }
+    HadoopStorageKeys.storeFrom(storagePropertiesFor(conf, trimmed, options))
+  }
+
+  /** The exact native `fs.*` bag for a bucket, exposed separately from the live
+    * store so alias translation stays unit-testable without loading JNI.
+    */
+  private[connector] def storagePropertiesFor(
+      conf: org.apache.hadoop.conf.Configuration,
+      bucket: String,
+      options: scala.collection.Map[String, String]
+  ): Map[String, String] = {
+    val trimmed = Option(bucket).map(_.trim).getOrElse("")
+    if (trimmed.isEmpty) {
+      return HadoopStorageKeys.canonicalProperties(
+        Map(StorageProperties.StorageType -> StorageProperties.StorageTypeLocal)
+      )
+    }
     val declared = options.filter { case (k, _) =>
       k.startsWith(
         com.zilliz.milvus.storage.credential.StorageProperties.Prefix
@@ -127,12 +184,21 @@ object StorageOptions extends Logging {
         com.zilliz.milvus.storage.credential.StorageProperties.ExternalPrefix
       )
     }.toMap
+    val translatedAliases =
+      effectiveEndpoint(options)
+        .map(StorageProperties.Address -> _)
+        .toMap ++
+        effectivePathStyleAccess(options)
+          .map(pathStyle =>
+            StorageProperties.UseVirtualHost -> (!pathStyle).toString
+          )
+          .toMap
     val merged = HadoopStorageKeys
-      .toFsProperties(conf, trimmed) ++ declared ++
+      .toFsProperties(conf, trimmed) ++ declared ++ translatedAliases ++
       Map(
         com.zilliz.milvus.storage.credential.StorageProperties.BucketName -> trimmed
       )
-    HadoopStorageKeys.storeFrom(merged)
+    HadoopStorageKeys.canonicalProperties(merged)
   }
 
   private[connector] def connectorS3BucketOption(
@@ -178,7 +244,6 @@ object StorageOptions extends Logging {
   ): Long = {
     val value = Option(options.get(key))
       .map(_.trim)
-      .filter(_.nonEmpty)
       .map { raw =>
         try raw.toLong
         catch {
@@ -222,21 +287,16 @@ object StorageOptions extends Logging {
       .orElse(SparkSession.getDefaultSession)
       .map(_.sessionState.newHadoopConf())
       .getOrElse(new Configuration())
-    val endpoint = optionValue(rawOptions, StorageProperties.Address)
+    val endpoint = effectiveEndpoint(rawOptions)
     val accessKey = optionValue(rawOptions, StorageProperties.AccessKeyId)
     val secretKey =
       optionValue(rawOptions, StorageProperties.AccessKeyValue)
-    val useSsl = optionValue(rawOptions, StorageProperties.UseSSL)
+    val useSsl = booleanOption(rawOptions, StorageProperties.UseSSL)
+      .map(_.toString)
     val region = optionValue(rawOptions, StorageProperties.Region)
-    val useIam = optionValue(rawOptions, StorageProperties.UseIam)
-      .exists(_.trim.equalsIgnoreCase("true"))
-    val useVirtualHost =
-      optionValue(rawOptions, StorageProperties.UseVirtualHost)
-        .filter(_.trim.nonEmpty)
-    val pathStyle = optionValue(rawOptions, "fs.s3a.path.style.access")
-      .orElse(
-        useVirtualHost.map(v => (!v.trim.equalsIgnoreCase("true")).toString)
-      )
+    val useIam =
+      booleanOption(rawOptions, StorageProperties.UseIam).getOrElse(false)
+    val pathStyle = effectivePathStyleAccess(rawOptions).map(_.toString)
 
     def setIfDefined(key: String, value: Option[String]): Unit = {
       value.map(_.trim).filter(_.nonEmpty).foreach(conf.set(key, _))

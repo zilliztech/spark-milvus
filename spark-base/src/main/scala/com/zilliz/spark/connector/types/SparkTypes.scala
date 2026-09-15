@@ -2,7 +2,12 @@ package com.zilliz.spark.connector.types
 
 import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.arrow.vector.types.FloatingPointPrecision
-import org.apache.spark.sql.types.{ArrayType, DataTypes, MetadataBuilder}
+import org.apache.spark.sql.types.{
+  ArrayType,
+  DataTypes,
+  MetadataBuilder,
+  StructField
+}
 import org.apache.spark.sql.types.{DataType => SparkDataType}
 
 import com.zilliz.milvus.storage.schema.{ArrowTypes, FieldMetadata, MilvusTypes}
@@ -15,6 +20,21 @@ import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
   * composition of the two (capability R15).
   */
 object SparkTypes {
+
+  /** The complete Spark field exposed for one Milvus field. Type, nullability
+    * and Milvus-owned metadata come from the same FieldSchema so callers cannot
+    * accidentally maintain independent mappings.
+    */
+  def toStructField(
+      fieldSchema: FieldSchema,
+      rawVectors: Boolean = false
+  ): StructField =
+    StructField(
+      fieldSchema.name,
+      toDataType(fieldSchema, rawVectors),
+      nullable = fieldSchema.nullable,
+      metadata = metadata(fieldSchema)
+    )
 
   def metadata(fieldSchema: FieldSchema) = {
     val builder = new MetadataBuilder()
@@ -96,44 +116,34 @@ object SparkTypes {
       arrowType: ArrowType,
       milvusType: MilvusDataType,
       elementType: MilvusDataType = MilvusDataType.None
-  ): SparkDataType = arrowType match {
-    case _: ArrowType.Bool => DataTypes.BooleanType
-    case int: ArrowType.Int =>
-      int.getBitWidth match {
-        case 8  => DataTypes.ByteType
-        case 16 => DataTypes.ShortType
-        case 32 => DataTypes.IntegerType
-        case 64 => DataTypes.LongType
-        case width =>
-          throw new DataParseException(
-            s"Unsupported Arrow integer width $width for Milvus type $milvusType"
-          )
-      }
-    case float: ArrowType.FloatingPoint =>
-      float.getPrecision match {
-        case FloatingPointPrecision.SINGLE => DataTypes.FloatType
-        case FloatingPointPrecision.DOUBLE => DataTypes.DoubleType
-        case precision =>
-          throw new DataParseException(
-            s"Unsupported Arrow floating point precision $precision for Milvus type $milvusType"
-          )
-      }
-    case _: ArrowType.Utf8 => DataTypes.StringType
-    case _: ArrowType.Binary =>
-      milvusType match {
-        case MilvusDataType.JSON => DataTypes.StringType
-        case MilvusDataType.Array =>
-          DataTypes.createArrayType(arrayElementType(elementType))
-        case MilvusDataType.Geometry =>
-          DataTypes.createArrayType(
-            DataTypes.BinaryType
-          ) // TODO: fubang support geometry
-        case MilvusDataType.SparseFloatVector =>
-          DataTypes.createMapType(DataTypes.LongType, DataTypes.FloatType)
-        case other =>
-          throw new DataParseException(s"Unsupported Milvus data type: $other")
-      }
-    case _: ArrowType.FixedSizeBinary
+  ): SparkDataType = (arrowType, milvusType) match {
+    case (_: ArrowType.Bool, MilvusDataType.Bool) => DataTypes.BooleanType
+    case (int: ArrowType.Int, MilvusDataType.Int8) if int.getBitWidth == 8 =>
+      DataTypes.ByteType
+    case (int: ArrowType.Int, MilvusDataType.Int16) if int.getBitWidth == 16 =>
+      DataTypes.ShortType
+    case (int: ArrowType.Int, MilvusDataType.Int32) if int.getBitWidth == 32 =>
+      DataTypes.IntegerType
+    case (int: ArrowType.Int, MilvusDataType.Int64) if int.getBitWidth == 64 =>
+      DataTypes.LongType
+    case (float: ArrowType.FloatingPoint, MilvusDataType.Float)
+        if float.getPrecision == FloatingPointPrecision.SINGLE =>
+      DataTypes.FloatType
+    case (float: ArrowType.FloatingPoint, MilvusDataType.Double)
+        if float.getPrecision == FloatingPointPrecision.DOUBLE =>
+      DataTypes.DoubleType
+    case (
+          _: ArrowType.Utf8,
+          MilvusDataType.String | MilvusDataType.VarChar | MilvusDataType.Text
+        ) =>
+      DataTypes.StringType
+    case (_: ArrowType.Binary, MilvusDataType.JSON) =>
+      DataTypes.StringType
+    case (_: ArrowType.Binary, MilvusDataType.Array) =>
+      DataTypes.createArrayType(arrayElementType(elementType))
+    case (_: ArrowType.Binary, MilvusDataType.SparseFloatVector) =>
+      DataTypes.createMapType(DataTypes.LongType, DataTypes.FloatType)
+    case (_: ArrowType.FixedSizeBinary, _)
         if MilvusTypes.isDenseVectorType(milvusType) =>
       // The column presents its elements as non-nullable, which is true of a
       // stored vector; the table schema has always said containsNull = true,
@@ -142,7 +152,7 @@ object SparkTypes {
         case ArrayType(element, _) => DataTypes.createArrayType(element)
         case other                 => other
       }
-    case other =>
+    case (other, _) =>
       throw new DataParseException(
         s"Unsupported Milvus data type: $milvusType (stored as Arrow $other)"
       )

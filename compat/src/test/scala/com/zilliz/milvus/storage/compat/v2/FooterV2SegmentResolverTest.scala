@@ -238,6 +238,74 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test(
+    "loadV2Segments strips Milvus endpoints from Avro, parquet and delete paths"
+  ) {
+    val root = Files.createTempDirectory("v2loader-endpoint-")
+    val parquet = root.resolve("data.parquet")
+    val manifest = root.resolve("manifest.avro")
+    val store =
+      new com.zilliz.milvus.storage.io.LocalObjectStore(root.toString)
+    try {
+      writeSingleFieldParquet(parquet, "pk", fieldId = 100)
+
+      Seq(
+        ("minio:9000", "minio:9000", "s3a"),
+        (
+          "oss-cn-hangzhou-internal.aliyuncs.com",
+          "https://oss-cn-hangzhou-internal.aliyuncs.com",
+          "oss"
+        )
+      ).foreach { case (authority, endpoint, storageScheme) =>
+        Files.write(
+          manifest,
+          encodeManifest(
+            s"s3://$authority/managed-bucket/data.parquet",
+            s"s3://$authority/managed-bucket/delete.bin"
+          )
+        )
+
+        val result = FooterV2SegmentResolver.loadV2Segments(
+          Seq(s"s3://$authority/managed-bucket/manifest.avro"),
+          bucket = "managed-bucket",
+          store = store,
+          storageScheme = storageScheme,
+          endpoint = endpoint
+        )
+
+        result shouldBe a[Right[_, _]]
+        val segment = result.toOption.get.head
+        segment.columnGroups.head.filePaths shouldBe
+          Seq(s"$storageScheme://managed-bucket/data.parquet")
+        segment.deltaLogs.map(_.logPath) shouldBe
+          Seq(s"$storageScheme://managed-bucket/delete.bin")
+      }
+    } finally {
+      store.close()
+      Files.deleteIfExists(manifest)
+      Files.deleteIfExists(parquet)
+      Files.deleteIfExists(root.resolve(".data.parquet.crc"))
+      Files.deleteIfExists(root)
+    }
+  }
+
+  test("loadV2Segments rejects an AVRO manifest in another bucket") {
+    val rawPath = "s3://other-bucket/files/snapshots/manifest.avro"
+    val result = FooterV2SegmentResolver.loadV2Segments(
+      Seq(rawPath),
+      bucket = "managed-bucket",
+      store = localStore
+    )
+
+    result shouldBe a[Left[_, _]]
+    val error = result.swap.toOption.get
+    error shouldBe an[IllegalArgumentException]
+    error.getMessage should include("AVRO manifest")
+    error.getMessage should include(rawPath)
+    error.getMessage should include("managed-bucket")
+    error.getMessage should include("other-bucket")
+  }
+
   private def entry(
       segmentId: Long,
       binlogs: Seq[AvroFieldBinlogEntry],
@@ -255,6 +323,65 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       binlogFiles = binlogs,
       deltaLogFiles = deltaLogFiles
     )
+
+  test("segmentFromEntry rejects a parquet binlog in another bucket") {
+    val rawPath = "s3a://other-bucket/files/insert_log/1/10/1001/100/1"
+    val manifest = entry(
+      segmentId = 1001L,
+      binlogs = Seq(
+        AvroFieldBinlogEntry(
+          slotFieldId = 100L,
+          binlogs = Seq(AvroBinlogEntry(1L, rawPath, 10L))
+        )
+      )
+    )
+
+    val result = FooterV2SegmentResolver.segmentFromEntry(
+      manifest,
+      bucket = "managed-bucket",
+      store = localStore
+    )
+
+    result shouldBe a[Left[_, _]]
+    val error = result.swap.toOption.get
+    error shouldBe an[IllegalArgumentException]
+    error.getMessage should include("parquet binlog")
+    error.getMessage should include(rawPath)
+    error.getMessage should include("managed-bucket")
+    error.getMessage should include("other-bucket")
+  }
+
+  test("segmentFromEntry rejects a delta log in another bucket") {
+    val rawPath = "s3://other-bucket/files/delta_log/1/-1/1002/1"
+    val manifest = entry(
+      segmentId = 1002L,
+      binlogs = Seq.empty,
+      storageVersion = 0L,
+      segmentLevel = 1L,
+      partitionId = -1L,
+      deltaLogFiles = Seq(
+        AvroFieldBinlogEntry(
+          slotFieldId = 0L,
+          binlogs = Seq(AvroBinlogEntry(1L, rawPath, 10L))
+        )
+      )
+    )
+
+    val result = FooterV2SegmentResolver.segmentFromEntry(
+      manifest,
+      bucket = "managed-bucket",
+      store = localStore,
+      applyDeletes = true
+    )
+
+    result shouldBe a[Left[_, _]]
+    val error = result.swap.toOption.get
+    error shouldBe an[IllegalArgumentException]
+    error.getMessage should include("delta log")
+    error.getMessage should include(rawPath)
+    error.getMessage should include("managed-bucket")
+    error.getMessage should include("other-bucket")
+  }
 
   test(
     "per-entry recovery returns each parquet's OWN field ids (backfill-safe)"

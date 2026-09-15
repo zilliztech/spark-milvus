@@ -174,6 +174,34 @@ class SparkTypesTest extends AnyFunSuite with Matchers {
       128L
   }
 
+  test("toStructField keeps nullability, field identity and key metadata") {
+    val fieldSchema = FieldSchema(
+      fieldID = 407L,
+      name = "keyed",
+      dataType = MilvusDataType.Int64,
+      isPrimaryKey = true,
+      isPartitionKey = true,
+      isClusteringKey = true,
+      nullable = true
+    )
+
+    val field = SparkTypes.toStructField(fieldSchema)
+
+    field.name shouldBe "keyed"
+    field.dataType shouldBe DataTypes.LongType
+    field.nullable shouldBe true
+    field.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey) shouldBe 407L
+    field.metadata.getBoolean(
+      FieldMetadata.MilvusPrimaryKeyMetadataKey
+    ) shouldBe true
+    field.metadata.getBoolean(
+      FieldMetadata.MilvusPartitionKeyMetadataKey
+    ) shouldBe true
+    field.metadata.getBoolean(
+      FieldMetadata.MilvusClusteringKeyMetadataKey
+    ) shouldBe true
+  }
+
   test("toDataType throws exception for unsupported array element type") {
     val fieldSchema = FieldSchema(
       dataType = MilvusDataType.Array,
@@ -218,6 +246,23 @@ class SparkTypesTest extends AnyFunSuite with Matchers {
   test("fromArrow refuses an Arrow Binary whose Milvus type it does not know") {
     an[DataParseException] should be thrownBy {
       SparkTypes.fromArrow(new ArrowType.Binary(), MilvusDataType.Int64)
+    }
+  }
+
+  test("fromArrow requires the Arrow and Milvus types to agree") {
+    an[DataParseException] should be thrownBy {
+      SparkTypes.fromArrow(new ArrowType.Utf8(), MilvusDataType.Int64)
+    }
+  }
+
+  test("toDataType refuses logical types whose readers are not implemented") {
+    Seq(MilvusDataType.Geometry, MilvusDataType.Timestamptz).foreach {
+      dataType =>
+        withClue(dataType) {
+          an[DataParseException] should be thrownBy {
+            SparkTypes.toDataType(FieldSchema(dataType = dataType))
+          }
+        }
     }
   }
 

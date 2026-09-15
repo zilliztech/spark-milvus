@@ -101,6 +101,20 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
     plan.specs.head.readVersionOrLatest shouldBe 11L
   }
 
+  test("an unpinned V3 segment cannot fall back to the executor's latest") {
+    val base = "files/insert_log/10/20/30"
+    val error = intercept[IllegalStateException] {
+      ReadPlan.of(
+        snapshotOf(v3 = Seq(ManifestItemJson(30L, base))),
+        properties,
+        applyDeletes = false
+      )
+    }
+    error.getMessage should include("segment 30")
+    error.getMessage should include(base)
+    error.getMessage should include("positive manifest version")
+  }
+
   test(
     "a task names the delete files it applies: the collection's L0 files, its partition's, then its own"
   ) {
@@ -172,6 +186,20 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
     task.layout shouldBe SegmentLayout.ColumnGroups(Seq(group))
     task.properties shouldBe v2Props
     plan.totalRows shouldBe Some(1L)
+  }
+
+  test("requested field ids are carried by every storage-line task") {
+    val plan = ReadPlan.of(
+      snapshotOf(v3 = Seq(v3Item), v2 = Seq(v2Segment(31L, Seq(group)))),
+      properties,
+      applyDeletes = false,
+      neededFieldIds = Seq(103L, 100L)
+    )
+
+    plan.specs.map(_.neededFieldIds) shouldBe Seq(
+      Seq(103L, 100L),
+      Seq(103L, 100L)
+    )
   }
 
   test("a delete-only V2 segment is no task, and V3 tasks come first") {

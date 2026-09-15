@@ -13,6 +13,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.slf4j.LoggerFactory
 
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
+import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.json.{
   CollectionSchemaJson,
   FieldJson,
@@ -648,7 +649,12 @@ object MilvusBackfill {
       val (collectionID, segmentToPartitionMap, segmentBasePathMap) =
         snapshotMetadataOpt match {
           case Some(metadata) =>
-            extractMetadataFromSnapshot(metadata, v2Segments)
+            extractMetadataFromSnapshot(
+              metadata,
+              v2Segments,
+              config.s3BucketName,
+              config.s3Endpoint
+            )
           case None =>
             val (colId, segPartMap) =
               retrieveMilvusMetadata(config, client) match {
@@ -1141,9 +1147,8 @@ object MilvusBackfill {
     )
   }
 
-  /** Read collection data with $segment_id and $row_offset metadata $segment_id
-    * and $row_offset are used to match with the original sequence of rows for
-    * each segment
+  /** Read collection data with _segment_id and _row_offset metadata. They are
+    * used to match with the original sequence of rows for each segment
     *
     * @param joinKey
     *   Resolved source fields used to match backfill input rows
@@ -1166,7 +1171,7 @@ object MilvusBackfill {
       options =
         options + (MilvusOption.ReaderFieldIDs -> allFieldIds.mkString(","))
       // Backfill writes one value per physical source row. Applying deletes
-      // would remove rows and invalidate $row_offset-based field alignment.
+      // would remove rows and invalidate _row_offset-based field alignment.
       options = options + (MilvusOption.ReadApplyDeletes ->
         ApplyDeletesToSourceRows.toString)
 
@@ -1627,7 +1632,7 @@ object MilvusBackfill {
   ): Either[BackfillError, Map[Long, SegmentBackfillResult]] = {
 
     try {
-      // Prepare data: select only needed columns and add $segment_id for
+      // Prepare data: select only needed columns and add _segment_id for
       // partitioning. Trailing column is the backfill match flag — retained
       // here so executors can count join-key-matched rows, stripped from the
       // projection that reaches the writer. In any source-reading mode
@@ -1647,7 +1652,7 @@ object MilvusBackfill {
           ) ++ flagColNames).map(col): _*
         )
 
-      // Get the schema for new fields only (without $segment_id, $row_offset,
+      // Get the schema for new fields only (without _segment_id, _row_offset,
       // or the match flag)
       // The write schema: the new columns checked against the collection and
       // carrying their field ids and dimensions, which is what names the
@@ -1674,19 +1679,19 @@ object MilvusBackfill {
       val segmentIds = segmentToPartitionMap.keys.toArray
       val segmentPartitioner = new SegmentPartitioner(segmentIds)
 
-      // Repartition using custom partitioner, then sort by $row_offset within each partition
+      // Repartition using custom partitioner, then sort by _row_offset within each partition
       // CRITICAL: .copy() is required because queryExecution.toRdd produces an iterator
       // that reuses the same UnsafeRow buffer. Without copy, keyBy/partitionBy's
       // ExternalSorter stores references to the same mutable buffer, causing all
       // rows to contain the last row's data.
       val repartitionedRDD = preparedDF.queryExecution.toRdd
         .map(_.copy()) // Materialize each row to avoid UnsafeRow reuse
-        .keyBy(_.getLong(0)) // $segment_id is at index 0
+        .keyBy(_.getLong(0)) // _segment_id is at index 0
         .partitionBy(segmentPartitioner)
         .values
         .mapPartitions(iter =>
           iter.toSeq.sortBy(_.getLong(1)).iterator
-        ) // Sort by $row_offset
+        ) // Sort by _row_offset
 
       // Broadcast configuration to executors
       val broadcastConfig = spark.sparkContext.broadcast(config)
@@ -1851,7 +1856,7 @@ object MilvusBackfill {
     val readsSourceFields = config.readsSourceFields
     val newFieldNames = targetSchema.fieldNames.toSeq
     val numNewFields = newFieldNames.size
-    // Row layout (fixed prefix): [$segment_id, $row_offset, ...newFields,
+    // Row layout (fixed prefix): [_segment_id, _row_offset, ...newFields,
     // __bf_matched__, (usedSrc, usedBf)*numNewFields in source-reading modes
     // (coalesce / overwrite) only].
     val matchFlagIdx = 2 + numNewFields
@@ -2016,7 +2021,8 @@ object MilvusBackfill {
               store,
               manifestSchemaVersion = metadata.manifestSchemaVersion,
               applyDeletes = ApplyDeletesToSourceRows,
-              storageScheme = storageScheme(config)
+              storageScheme = storageScheme(config),
+              endpoint = config.s3Endpoint
             )
         finally store.close()
       loaded match {
@@ -2145,7 +2151,7 @@ object MilvusBackfill {
 
     val readsSourceFields = config.readsSourceFields
     val numNewFields = fieldNames.size
-    // Row layout (fixed prefix): [$segment_id, $row_offset, ...newFields,
+    // Row layout (fixed prefix): [_segment_id, _row_offset, ...newFields,
     // __bf_matched__, (usedSrc, usedBf)*numNewFields in source-reading modes
     // (coalesce / overwrite) only].
     val matchFlagIdx = 2 + numNewFields
@@ -2257,9 +2263,11 @@ object MilvusBackfill {
     * derived from manifest basePaths:
     * {rootPath}/insert_log/{col_id}/{part_id}/{seg_id}
     */
-  private def extractMetadataFromSnapshot(
+  private[backfill] def extractMetadataFromSnapshot(
       metadata: SnapshotJson,
-      v2Segments: Seq[Segment] = Seq.empty
+      v2Segments: Seq[Segment] = Seq.empty,
+      bucket: String = "",
+      endpoint: String = ""
   ): (Long, Map[Long, Long], Map[Long, String]) = {
     val collectionID = metadata.snapshotInfo.collectionId
 
@@ -2272,23 +2280,33 @@ object MilvusBackfill {
       val segId = item.segmentID
       ManifestContentJson.parse(item.manifest) match {
         case Right(mc) =>
+          val located = StoragePath.parseMilvus(mc.basePath, bucket, endpoint)
+          if (
+            bucket.nonEmpty && located.hasBucket && located.bucket != bucket
+          ) {
+            throw new IllegalArgumentException(
+              s"segment $segId manifest is in bucket '${located.bucket}' " +
+                s"but backfill is bound to '$bucket': ${mc.basePath}"
+            )
+          }
+          val basePath = located.key
           // Extract partition ID from basePath: .../insert_log/{col_id}/{part_id}/{seg_id}
-          val parts = mc.basePath.split("/")
+          val parts = basePath.split("/")
           val insertLogIdx = parts.indexOf("insert_log")
           if (insertLogIdx >= 0 && insertLogIdx + 2 < parts.length) {
             try {
               val partitionId = parts(insertLogIdx + 2).toLong
-              segmentBasePathMap += (segId -> mc.basePath)
+              segmentBasePathMap += (segId -> basePath)
               segmentToPartitionMap += (segId -> partitionId)
             } catch {
               case _: NumberFormatException =>
                 logger.warn(
-                  s"Skipping segment $segId: failed to parse partition ID from basePath: ${mc.basePath}"
+                  s"Skipping segment $segId: failed to parse partition ID from basePath: $basePath"
                 )
             }
           } else {
             logger.warn(
-              s"Skipping segment $segId: basePath does not contain expected insert_log structure: ${mc.basePath}"
+              s"Skipping segment $segId: basePath does not contain expected insert_log structure: $basePath"
             )
           }
         case Left(e) =>
@@ -2680,16 +2698,16 @@ object MilvusBackfill {
     }
 
     try {
-      // Anything with a scheme other than file:// lives in the bucket: s3,
-      // s3a, oss, or the https form a Zilliz Cloud snapshot reports.
+      // A standard object-store URI lives in its named bucket. A path without
+      // a scheme and file:// remain local CLI input.
       val local = !snapshotPath.contains("://") ||
         snapshotPath.startsWith("file://")
       if (!local) {
 
         // The snapshot JSON is read the way every other driver-side read
         // goes: through the native store the fs.* options describe, at the
-        // (bucket, key) the path names in any of its spellings (https, s3,
-        // s3a, bucket-relative). Spark's Hadoop filesystem is not involved.
+        // (bucket, key) named by the user-supplied URI. Spark's Hadoop
+        // filesystem is not involved.
         import com.zilliz.milvus.storage.credential.StorageProperties
         import com.zilliz.milvus.storage.io.NativeObjectStore
         import com.zilliz.milvus.storage.path.StoragePath

@@ -6,6 +6,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
+import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
+
 /** Unit tests for BackfillApp.parseArgs,
   * MilvusBackfill.configureHadoopS3ForPath, the MilvusDataSource FQCN used by
   * spark.read.format(...), and the new IAM/IRSA invariants of
@@ -659,6 +661,39 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       cfg,
       "files"
     ) shouldBe "oss://managed-bucket/files"
+  }
+
+  test("snapshot metadata base paths strip the configured Milvus endpoint") {
+    val metadata = SnapshotJson
+      .parse(
+        """{
+          |  "snapshot_info": {
+          |    "name": "s1",
+          |    "collection_id": 10,
+          |    "partition_ids": [20],
+          |    "create_ts": 1
+          |  },
+          |  "collection": {"schema": {"name": "c", "fields": []}},
+          |  "manifest_list": [],
+          |  "storagev2_manifest_list": [{
+          |    "segmentID": 30,
+          |    "manifest": "{\"ver\":7,\"base_path\":\"s3://minio:9000/managed-bucket/files/insert_log/10/20/30\"}"
+          |  }]
+          |}""".stripMargin
+      )
+      .toOption
+      .get
+
+    val (collectionId, partitions, basePaths) =
+      MilvusBackfill.extractMetadataFromSnapshot(
+        metadata,
+        bucket = "managed-bucket",
+        endpoint = "minio:9000"
+      )
+
+    collectionId shouldBe 10L
+    partitions shouldBe Map(30L -> 20L)
+    basePaths shouldBe Map(30L -> "files/insert_log/10/20/30")
   }
 
   test("configureHadoopOssForPath preserves managed IAM provider") {
