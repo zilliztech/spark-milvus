@@ -59,7 +59,7 @@ sealed segment 是已经封存的数据段。选择这个组合是因为 nullabl
 <tr><td><code>core.snapshot</code>、<code>core.manifest</code></td><td><code>SnapshotJson.indexes</code> 是 <code>Seq[Any]</code>；实体 <code>Snapshot</code>、<code>Segment</code> 没有索引字段。<code>SegmentManifestReader</code> 只读到删除字段。</td><td>保留索引定义与段级文件引用，绑定快照、字段、构建及格式版本。</td></tr>
 <tr><td><code>native-vector</code>、<code>core.index</code></td><td>只有包说明和占位文档。</td><td>实现文件解码接口、Knowhere 加载/搜索、版本校验和缓存。</td></tr>
 <tr><td><code>core.read.plan</code>、<code>core.read.exec</code></td><td>已有 <code>SegmentReadTask</code> 和批读取；<code>SegmentReader</code> 只有 <code>next()</code>、<code>deliveredRows</code>，没有按行号取列接口。</td><td>统一规划查询任务；在共同 reader 中增加 <code>take</code>，供搜索和其他下游算子复用。</td></tr>
-<tr><td><code>spark.read.MilvusV3PartitionReader</code></td><td><code>performSegmentVectorSearch</code> 全扫向量、保留每段 K 条；搜索分支应用删除但不应用普通扫描的标量过滤。</td><td>将段内计算交给 core，搜索前生成排除位图。</td></tr>
+<tr><td><code>spark.read.SegmentVectorSearch</code></td><td><code>run</code> 全扫向量、保留每段 K 条；搜索分支应用删除但不应用普通扫描的标量过滤。</td><td>将段内计算交给 core，搜索前生成排除位图。</td></tr>
 <tr><td><code>spark.read.MilvusScan</code>、<code>spark.options</code></td><td>搜索结果追加距离值，但 scan 没有相应结果 schema；没有全局合并；错误的查询参数可能被解析成未开启搜索。</td><td>显式结果 schema、严格参数校验，以及属于公开查询入口的全局排序与 K 限制。</td></tr>
 </tbody></table></div>
 <p class="small">代码依据：

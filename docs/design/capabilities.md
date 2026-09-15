@@ -83,7 +83,7 @@ issue #125 的[索引查询开发方案](architecture/vector-search.html)处于�
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
-| K1 | Storage V2 packed 段 | 自动识别 storage_version=2 的段 | compat.v2 实现 core.read 的 SegmentReader | 分发靠 core 的注册表，不能让 core 依赖 compat | P0 |
+| K1 | Storage V2 packed 段 | 自动识别 storage_version=2 的段 | core.read.exec 按 SegmentLayout 开同一个 SegmentReader；compat.v2 只在 driver 上恢复列组布局；spark.read 一个行式 reader，列名规则在 V2ColumnBinding | 分发靠 core 的注册表，不能让 core 依赖 compat | P0 |
 | K3 | backup 目录 | `milvus.backup.dir` | compat.backup 实现 SnapshotSource | | P1 |
 
 ## 7 场景与工具

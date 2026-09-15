@@ -13,50 +13,7 @@ import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-class MilvusV3PartitionReaderTest extends AnyFunSuite {
-  test("delete filtering uses field-id column name for timestamp") {
-    assert(MilvusV3PartitionReader.TimestampColumnName == "1")
-  }
-
-  test("buildFieldNameToId exposes non-conflicting system aliases") {
-    val schema = CollectionSchema(
-      fields = Seq(
-        FieldSchema(name = "pk", fieldID = 100, dataType = DataType.Int64)
-      )
-    )
-
-    val mapping = MilvusV3PartitionReader.buildFieldNameToId(schema)
-
-    assert(mapping("RowID") == 0L)
-    assert(mapping("row_id") == 0L)
-    assert(mapping("rowid") == 0L)
-    assert(mapping("Timestamp") == 1L)
-    assert(mapping("timestamp") == 1L)
-    assert(mapping("pk") == 100L)
-  }
-
-  test("buildFieldNameToId preserves user fields that use system alias names") {
-    val schema = CollectionSchema(
-      fields = Seq(
-        FieldSchema(name = "RowID", fieldID = 100, dataType = DataType.Int64),
-        FieldSchema(
-          name = "Timestamp",
-          fieldID = 101,
-          dataType = DataType.Int64
-        ),
-        FieldSchema(name = "rowid", fieldID = 102, dataType = DataType.Int64)
-      )
-    )
-
-    val mapping = MilvusV3PartitionReader.buildFieldNameToId(schema)
-
-    assert(mapping("RowID") == 100L)
-    assert(mapping("Timestamp") == 101L)
-    assert(mapping("rowid") == 102L)
-    assert(mapping("row_id") == 0L)
-    assert(mapping("timestamp") == 1L)
-  }
-
+class SegmentVectorSearchTest extends AnyFunSuite {
   test("validateVectorSearchField rejects BinaryVector dense search") {
     val field = StructField(
       "binary_vec",
@@ -71,7 +28,7 @@ class MilvusV3PartitionReaderTest extends AnyFunSuite {
     )
 
     val err = intercept[IllegalArgumentException] {
-      MilvusV3PartitionReader.validateVectorSearchField(field, "L2")
+      SegmentVectorSearch.validateVectorSearchField(field, "L2")
     }
 
     assert(err.getMessage.contains("binary_vec"))
@@ -93,7 +50,7 @@ class MilvusV3PartitionReaderTest extends AnyFunSuite {
     )
 
     val err = intercept[IllegalArgumentException] {
-      MilvusV3PartitionReader.decodeBinaryTypeVectorForSearch(
+      SegmentVectorSearch.decodeBinaryTypeVectorForSearch(
         Array[Byte](1, 2, 3, 4),
         field
       )
@@ -119,7 +76,7 @@ class MilvusV3PartitionReaderTest extends AnyFunSuite {
       FloatConverter.toFloat16Bytes(-2.0f).toArray
 
     val decoded =
-      MilvusV3PartitionReader.decodeBinaryTypeVectorForSearch(bytes, field)
+      SegmentVectorSearch.decodeBinaryTypeVectorForSearch(bytes, field)
 
     assert(decoded.sameElements(Array(1.5f, -2.0f)))
   }
@@ -140,7 +97,7 @@ class MilvusV3PartitionReaderTest extends AnyFunSuite {
       FloatConverter.toBFloat16Bytes(-2.0f).toArray
 
     val decoded =
-      MilvusV3PartitionReader.decodeBinaryTypeVectorForSearch(bytes, field)
+      SegmentVectorSearch.decodeBinaryTypeVectorForSearch(bytes, field)
 
     assert(decoded.sameElements(Array(1.5f, -2.0f)))
   }

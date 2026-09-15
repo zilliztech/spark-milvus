@@ -102,7 +102,7 @@ val s3Options = Map(
 
 ### 1.4 工作原理
 
-每个 Spark 分区是一个段。`storage_version = 3` 的段由 `MilvusV3PartitionReader` 经 milvus-storage 的 C 接口打开段清单、拉取 Arrow 批；`storage_version = 2` 的段由 `MilvusV2PartitionReader` 以同样方式打开列组 parquet 文件。删除文件在 driver 上读成删除计划，reader 按主键和时间戳跳过已删行。
+每个 Spark 分区是一个段。executor 经 milvus-storage 的 C 接口打开它、拉取 Arrow 批：`storage_version = 3` 的段从段清单打开，`storage_version = 2` 的段从列组 parquet 文件打开，两条线用同一个 reader。executor 把该段的删除文件读成删除计划，按主键和时间戳跳过已删行。
 
 ## 2. `milvus` 格式参数
 

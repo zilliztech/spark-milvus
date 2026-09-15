@@ -99,7 +99,7 @@ word the reader has to translate.
   own name: the two storage lines are `V2` and `V3`, after the snapshot's
   `storage_version`, everywhere in the repository. A type that implements a
   Spark interface takes the interface's name with a `Milvus` prefix
-  (`MilvusTable`, `MilvusScan`, `MilvusV3PartitionReader`), as Iceberg's
+  (`MilvusTable`, `MilvusScan`, `MilvusRowPartitionReader`), as Iceberg's
   `SparkTable` and `SparkScan` do. The C library's names (`loon_*`, "packed")
   stay inside `native-storage` and in prose that explains the library.
 - **No `Milvus` prefix in `core`, `compat` or `client`.** The package is

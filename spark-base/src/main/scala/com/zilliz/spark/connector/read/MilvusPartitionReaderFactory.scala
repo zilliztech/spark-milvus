@@ -11,7 +11,7 @@ import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.options.{MilvusOption, VectorSearch}
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -134,74 +134,40 @@ class MilvusPartitionReaderFactory(
 
   private def rowReaderFor(
       partition: InputPartition
-  ): PartitionReader[InternalRow] = {
-    partition match {
-      case p: MilvusV3InputPartition =>
-        logInfo(
-          s"Creating V3 reader for partition with segmentID=${p.task.segmentId}"
-        )
-
-        val v2Schema = StructType(schema.fields.filterNot { field =>
-          isMetadataExtraField(field.name)
-        })
-
-        // Deserialize the protobuf schema
-        val milvusSchema = CollectionSchema.parseFrom(p.task.schemaBytes)
-
-        // Create MilvusV3PartitionReader directly
-        val underlyingReader = new MilvusV3PartitionReader(
-          v2Schema,
-          V3ColumnBinding(p, v2Schema),
-          milvusSchema,
-          p.milvusOption,
-          optionsMap,
-          p.topK,
-          p.queryVector,
-          p.metricType,
-          p.vectorColumn,
-          pushedFilters
-        )
-
-        MetadataColumns.wrapRows(
-          underlyingReader,
-          schema,
-          requestedExtraColumns,
-          p.partitionName,
-          p.task.segmentId
-        )
-
-      case p: MilvusV2InputPartition =>
-        logInfo(
-          s"Creating V2 reader for segmentID=${p.task.segmentId} " +
-            s"with ${p.task.dataFiles.size} data file(s)"
-        )
-
-        val innerSchema = StructType(schema.fields.filterNot { field =>
-          isMetadataExtraField(field.name)
-        })
-
-        val milvusSchema = CollectionSchema.parseFrom(p.task.schemaBytes)
-
-        val underlying = new MilvusV2PartitionReader(
-          innerSchema,
-          V2ColumnBinding(p, innerSchema),
-          milvusSchema,
-          p.milvusOption
-        )
-
-        MetadataColumns.wrapRows(
-          underlying,
-          schema,
-          requestedExtraColumns,
-          p.task.partitionId.toString,
-          p.task.segmentId
-        )
-
-      case _ =>
-        throw new IllegalArgumentException(
-          s"Unsupported partition type: ${partition.getClass.getName}. " +
-            "This connector requires Milvus 2.6+ (Storage V2)."
-        )
-    }
+  ): PartitionReader[InternalRow] = partition match {
+    case p: MilvusInputPartition =>
+      logInfo(s"Creating row reader for segment ${p.task.segmentId}")
+      val dataSchema = StructType(schema.fields.filterNot { field =>
+        isMetadataExtraField(field.name)
+      })
+      val search = p match {
+        case v3: MilvusV3InputPartition =>
+          for {
+            k <- v3.topK
+            q <- v3.queryVector
+          } yield VectorSearch(
+            queryVector = q,
+            topK = k,
+            metricType = v3.metricType.getOrElse("L2"),
+            vectorColumn = v3.vectorColumn.getOrElse("vector")
+          )
+        case _ => None
+      }
+      MetadataColumns.wrapRows(
+        new MilvusRowPartitionReader(
+          dataSchema,
+          ColumnBinding(p, dataSchema),
+          pushedFilters,
+          search
+        ),
+        schema,
+        requestedExtraColumns,
+        partitionNameOf(p),
+        p.task.segmentId
+      )
+    case other =>
+      throw new IllegalArgumentException(
+        s"cannot read ${other.getClass.getName} a row at a time"
+      )
   }
 }

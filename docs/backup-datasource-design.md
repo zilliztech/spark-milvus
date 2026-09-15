@@ -27,7 +27,7 @@ required.
 - Output: a Spark DataFrame supporting column pruning, `milvus.extra.columns`
   (`partition`, `$segment_id`, `$row_offset`), and the same delete semantics as
   snapshot reads (`milvus.read.apply.deletes`).
-- Reuse the existing StorageV2 packed read path (`MilvusV2PartitionReader`
+- Reuse the existing StorageV2 packed read path (`MilvusRowPartitionReader`
   + the milvus-storage JNI reader) unchanged.
 - **No changes to milvus-backup**: existing binlog-format exports work as-is.
   One caveat: a dynamic collection (`enable_dynamic_field=true`) requires the
@@ -61,7 +61,7 @@ backup-side changes and works on any existing binlog-format export.
 | Full metadata lives in `meta/full_meta.json` (schema + partitions + segments incl. L0) | `milvus-backup/internal/meta/meta.go`, `meta_builder.go` |
 | `SegmentBackupInfo` carries id / `num_of_rows` / `storage_version` / `group_id` / `is_l0` / `binlogs` / `deltalogs` | `milvus-backup/core/proto/backup.proto` |
 | `Binlog` records only `log_path/log_size/log_id`; `entries_num` exists but is deprecated and unset | `backup.proto`; `coll_dml_task.go` |
-| Packed read requires exact `fileRowCounts` | `MilvusV2PartitionReader.scala`; `v2_column_groups_builder.h` |
+| Packed read requires exact `fileRowCounts` | `MilvusRowPartitionReader.scala`; `v2_column_groups_builder.h` |
 | Real field IDs are recoverable from each parquet file's own schema (`PARQUET:field_id`) | `ParquetFooterReader.readFieldIdsFromSchema` |
 | Delta-log decoding uses only `logPath`; `entriesNum` is unused | `DeltaLogReader.scala` |
 | L0 (delete-only) segments have no column groups; they feed partition-scoped inherited delete plans | `BackupPlanner.scala` |
@@ -81,7 +81,7 @@ MilvusDataSource.getTable ──> BackupSnapshotSource.snapshot()
                                               ▼
                     SnapshotPartitions.build() → MilvusV2InputPartition[]
                                               │
-              createReaderFactory() → MilvusV2PartitionReader (unchanged)
+              createReaderFactory() → MilvusRowPartitionReader (unchanged)
 ```
 
 Branch precedence: snapshot mode > backup mode > client mode.

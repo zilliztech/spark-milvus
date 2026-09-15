@@ -193,8 +193,7 @@ try {
 Arrow Java 的 <code>ArrowReader.loadNextBatch</code> 在多批之间共用同一个
 <code>VectorSchemaRoot</code>,并且忽略 <code>ArrowArray</code> 的 <code>offset</code> 字段。
 底层 C++ reader 一旦返回 <code>RecordBatch::Slice</code> 的结果,第一批之后的每一批都显示成同一份数据,
-不抛异常。这是 milvus-storage#493,<code>MilvusV3PartitionReader</code> 第 182 行的注释记着,
-<code>MilvusStorageFFITest</code> 是它的回归用例。
+不抛异常。这是 milvus-storage#493,<code>MilvusStorageFFITest</code> 是它的回归用例。
 <p style="margin:.6rem 0 0">因此 <code>native-storage</code> 不封装 <code>ArrowArrayStream</code>。
 <code>jni/storage/arrow/package-info.java</code> 现在写着这个包封装 ArrowArray、ArrowSchema 和
 ArrowArrayStream,第三个要删掉,否则重写第 1 层时会有人照着它封一个用不上的东西。</p>
@@ -213,7 +212,7 @@ executor 拿到描述之后才开句柄。</li>
 <code>close()</code>,构造过程中开了一半的句柄它不管。所以构造块用
 <code>try/catch</code> 包住,失败时释放已经拿到的一切再抛;每个句柄字段用
 <code>var</code> 加 <code>0L</code>/<code>null</code> 初始化,让回滚能判断哪些已分配。
-<code>MilvusV3PartitionReader</code> 的 <code>releaseAll()</code> 就是这个。</li>
+<code>MilvusRowPartitionReader</code> 的 <code>releaseAll()</code> 就是这个。</li>
 
 <li><strong><code>close()</code> 必须幂等。</strong>Spark 在错误路径上可能重复调用,
 释放后把字段置回哨兵值。</li>

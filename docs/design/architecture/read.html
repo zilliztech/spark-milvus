@@ -28,20 +28,23 @@
 <p>能力 R1、R2、R3、R4、R5、R8、R10、R14、R17。取字节和交接 Arrow 那一层见
 <a href="storage-io.html">storage-io.html</a>,分层见 <a href="modules.md">modules.md</a>。</p>
 
-<p class="thesis"><strong>第 3 层仍然直接调第 1 层,读这条路上第 2 层是空的。</strong>
-两个 <code>PartitionReader</code> 都在 <code>spark-base</code>,现在调的是
-<code>native-storage</code> 的 JNI(不再是上游绑定),中间仍然不经过 <code>core</code>;
-而 <code>core.read.plan</code> 与 <code>core.read.exec</code> 只有一个空的
-<code>package.scala</code>。本页先说清第 3 层现在怎么读的,再说要往第 2 层填什么。</p>
+<p class="thesis"><strong>读一张表只有一条路:driver 在 <code>core.read.plan</code> 规划出任务,executor 在 <code>core.read.exec</code> 开段,
+<code>spark.read</code> 用一个行式 reader 和一个列式 reader 把 Arrow 批交给 Spark。</strong>
+两条存储线的差别只剩列怎么命名,由 <code>ColumnBinding</code> 的两个实现承担;
+reader 的主循环不知道自己读的是哪条线。本页先说第 3 层现在怎么读,再说还差什么。</p>
 
 <h2 id="one-path">一、读一张表只有一种读法</h2>
 
-<p><strong>表面上分很多种情况,实际只有一种读法。</strong>两个 <code>PartitionReader</code>
-最后都调同一个上游 <code>MilvusStorageReader</code>,唯一的实质差别是列组清单谁算出来的。</p>
+<p><strong>表面上分很多种情况,实际只有一种读法。</strong>两种 <code>InputPartition</code>
+都装一个 <code>SegmentReadTask</code>,<code>SegmentReaderRegistry.open</code> 按任务的
+<code>SegmentLayout</code> 开同一个 <code>NativeSegmentReader</code>;executor 侧只有一个行式 reader
+<code>MilvusRowPartitionReader</code> 和一个列式 reader <code>MilvusColumnarPartitionReader</code>,
+两条线共用。唯一的实质差别是列叫什么名字:manifest 布局的列名是字段 id,列组布局的列名是字段名,
+这一层差别封在 <code>V3ColumnBinding</code> / <code>V2ColumnBinding</code> 里。</p>
 
 <figure>
 <svg viewBox="0 0 900 250" role="img"
-     aria-label="两种 InputPartition 各自的 PartitionReader 最终都调用同一个上游 MilvusStorageReader，唯一差别是列组清单由原生库读 manifest 得到还是由 JVM 从 parquet footer 拼出">
+     aria-label="两种 InputPartition 经各自的 ColumnBinding 汇合到同一个行式或列式 reader，reader 通过 core.read.exec 的注册表打开同一个原生 reader">
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -51,55 +54,60 @@
     </marker>
   </defs>
   <g fill="none" stroke="currentColor" stroke-width="1.2">
-    <rect x="8" y="36" width="176" height="46" rx="3"/>
-    <rect x="8" y="158" width="176" height="46" rx="3"/>
-    <rect x="228" y="36" width="176" height="46" rx="3"/>
-    <rect x="228" y="158" width="176" height="46" rx="3"/>
-    <rect x="612" y="82" width="176" height="76" rx="3"/>
+    <rect x="8" y="36" width="150" height="46" rx="3"/>
+    <rect x="8" y="158" width="150" height="46" rx="3"/>
+    <rect x="422" y="36" width="176" height="46" rx="3"/>
+    <rect x="422" y="158" width="176" height="46" rx="3"/>
+    <rect x="660" y="82" width="200" height="76" rx="3"/>
+  </g>
+  <g fill="none" stroke="#d08700" stroke-width="1.4">
+    <rect x="212" y="36" width="150" height="46" rx="3"/>
+    <rect x="212" y="158" width="150" height="46" rx="3"/>
   </g>
   <g fill="currentColor" font-size="12" text-anchor="middle">
-    <text x="96" y="55">MilvusV3</text><text x="96" y="70">InputPartition</text>
-    <text x="96" y="177">MilvusV2</text><text x="96" y="192">InputPartition</text>
-    <text x="316" y="55">MilvusV3</text><text x="316" y="70">PartitionReader</text>
-    <text x="316" y="177">MilvusV2</text><text x="316" y="192">PartitionReader</text>
-    <text x="700" y="108">上游 MilvusStorageReader</text>
-    <text x="700" y="125">.create(列组, schema, 列名, 属性)</text>
-    <text x="700" y="142">.openRecordBatchReader()</text>
-    <text x="862" y="115">Arrow 批</text>
-    <text x="862" y="131">→ InternalRow</text>
+    <text x="83" y="55">MilvusV3</text><text x="83" y="70">InputPartition</text>
+    <text x="83" y="177">MilvusV2</text><text x="83" y="192">InputPartition</text>
+    <text x="510" y="55">MilvusRow</text><text x="510" y="70">PartitionReader</text>
+    <text x="510" y="177">MilvusColumnar</text><text x="510" y="192">PartitionReader</text>
+    <text x="760" y="108">core.read.exec</text>
+    <text x="760" y="125">SegmentReaderRegistry.open</text>
+    <text x="760" y="142">→ NativeSegmentReader</text>
+  </g>
+  <g fill="#d08700" font-size="12" text-anchor="middle">
+    <text x="287" y="55">V3ColumnBinding</text><text x="287" y="70">列名 = 字段 id</text>
+    <text x="287" y="177">V2ColumnBinding</text><text x="287" y="192">列名 = 字段名</text>
   </g>
   <g stroke="currentColor" stroke-width="1.2" fill="none" marker-end="url(#ar)">
-    <line x1="184" y1="59" x2="222" y2="59"/>
-    <line x1="184" y1="181" x2="222" y2="181"/>
-    <line x1="788" y1="120" x2="812" y2="120"/>
+    <line x1="158" y1="59" x2="206" y2="59"/>
+    <line x1="158" y1="181" x2="206" y2="181"/>
+    <path d="M598,59 L630,59 L630,104 L654,104"/>
+    <path d="M598,181 L630,181 L630,136 L654,136"/>
   </g>
   <g stroke="#d08700" stroke-width="1.4" fill="none" marker-end="url(#ar2)">
-    <path d="M404,59 L500,59 L500,104 L606,104"/>
-    <path d="M404,181 L500,181 L500,136 L606,136"/>
+    <path d="M362,59 L392,59 L392,120 L416,120"/>
+    <path d="M362,181 L392,181 L392,120"/>
   </g>
-  <g fill="#d08700" font-size="11" text-anchor="middle">
-    <text x="452" y="28">原生库读 manifest,返回列组指针</text>
-    <text x="452" y="228">JVM 用 footer 恢复的字段 id、文件、行数拼列组</text>
+  <g fill="currentColor" font-size="11" text-anchor="middle">
+    <text x="395" y="28">行式或列式,按选项与谓词选</text>
+    <text x="760" y="228">按 SegmentLayout 开段,两条线同一个原生 reader</text>
   </g>
 </svg>
-<figcaption>两条分区路线在 <code>MilvusStorageReader</code> 汇合。橙色的两条边是唯一不同的地方。</figcaption>
+<figcaption>两条分区路线在 <code>ColumnBinding</code> 之后就没有分别。橙色是两条线唯一不同的地方。</figcaption>
 </figure>
 
-<p>分发在 <code>MilvusPartitionReaderFactory.createReader</code>,按分区<strong>类型</strong>匹配,
-不读 <code>storage_version</code>;落到 <code>case _</code> 就抛
-<code>This connector requires Milvus 2.6+ (Storage V2)</code>。</p>
+<p>分发在 <code>MilvusPartitionReaderFactory</code>,只按出口选:有谓词或向量检索走行式,否则按
+<code>milvus.read.columnar</code>;不再按分区类型分支。落到不是 <code>MilvusInputPartition</code> 的分区就抛
+<code>IllegalArgumentException</code>。</p>
 
 <table>
 <tr><th></th><th>V3 线</th><th>V2 线</th></tr>
-<tr><td>段怎么描述</td><td>manifest 路径 + <code>readVersion</code></td><td>列组:字段 id、文件路径、每文件行数</td></tr>
-<tr><td>列组清单</td><td>原生库读 manifest 得 <code>columnGroupsPtr</code></td><td><code>MilvusStorageColumnGroups.createFromGroups</code> 在 JVM 拼</td></tr>
-<tr><td>取字节、凭证、Arrow 出口</td><td colspan="2">都走 <code>native-storage</code> 的 JNI;凭证是 <code>StorageProperties.from(options)</code> 产出的 <code>fs.*</code> 属性包</td></tr>
+<tr><td>段怎么描述</td><td><code>SegmentLayout.Manifest</code>:manifest 路径 + <code>readVersion</code></td><td><code>SegmentLayout.ColumnGroups</code>:字段 id、文件路径、每文件行数,driver 上由 <code>compat.v2</code> 从快照或 footer 恢复</td></tr>
+<tr><td>列名</td><td>字段 id 的字符串,时间戳列叫 <code>"1"</code></td><td>字段名</td></tr>
+<tr><td>开段、取字节、凭证、Arrow 出口</td><td colspan="2">都是 <code>core.read.exec</code> 开的同一个 <code>NativeSegmentReader</code>;凭证是任务里的 <code>fs.*</code> 属性包</td></tr>
 </table>
 
-<p><strong>所以改造只有一个切入点。</strong>要做的是换掉那一个调用,保留两种产生它输入的方式,
-而不是把两条线各改一遍。</p>
-
-<p>V2 线多一道自查:driver 把每个列组文件的行数传下来,reader 累计实际交付的行数,少了就报错。
+<p>行式 reader 有一道自查:<code>SegmentReadTask.expectedRows</code> 给出布局声明的行数时(列组布局给,manifest 布局不给),
+reader 在读完时对比实际交付的行数,少了就抛 <code>IllegalStateException</code>。
 这是防上游 milvus-storage#657 之前的版本在多文件列组里只读第一个文件——
 那个缺陷不抛异常,只会让 DataFrame 静悄悄变短。</p>
 
@@ -178,17 +186,16 @@ SegmentReaderRegistry: storage_version -> SegmentReader 工厂</code></pre>
 <p><strong>注册表在 core,实现可以在 compat。</strong>V2 packed 的实现放
 <code>compat.v2</code>,启动时注册进来;<code>core</code> 不反向依赖
 <code>compat</code>。这是能力 K1 写死的约束。</p>
-<p>这个注册表取代 spark 层现在的做法——<code>MilvusPartitionReaderFactory.createReader</code>
-按 <code>InputPartition</code> 的具体类型做模式匹配,两条线各一个分支。
-分发移到 core,spark 层只留 Spark 接口的对接。</p>
+<p>这个注册表已经取代 spark 层原来的做法——<code>MilvusPartitionReaderFactory.createReader</code>
+按 <code>InputPartition</code> 的具体类型做模式匹配,两条线各一个 reader。#06 之后分发在 core,
+spark 层一个行式 reader、一个列式 reader,只留 Spark 接口的对接。</p>
 <p>两条线各自的列组清单怎么来留在各自的实现里,取字节与 Arrow 交接统一走
 <a href="storage-io.html">storage-io</a> 定的那两个面。所有权那三条规则同样在那篇。</p>
 
 <h2 id="columnar">六、列式出口:做,R4 已定</h2>
 
-<p><strong>今天全仓没有任何列式输出</strong>——没有 <code>ColumnarBatch</code>、没有
-<code>ArrowColumnVector</code>、没有 <code>supportColumnarReads</code>,
-两条读线都是行式 <code>PartitionReader[InternalRow]</code>。所以 R4 是从零开始。</p>
+<p><strong>列式出口已有</strong>:<code>MilvusColumnarPartitionReader</code>,<code>milvus.read.columnar=true</code> 开启,
+有谓词或向量检索时回落行式。下面是它的设计。</p>
 
 <p>决策 12 选了做。出口形态:<strong>无删除的批原样包成 <code>ColumnarBatch</code> 直通,
 有删除的批把存活行物化成新的一批。</strong>物化无法回避,理由与代价见
@@ -218,8 +225,8 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 
 <h2 id="rest">七、其余没定的</h2>
 <ol>
-<li><strong>向量搜索这条分支怎么放。</strong>存量 <code>MilvusV3PartitionReader</code> 里有
-<code>performSegmentVectorSearch</code>,和普通扫描是两条并行路径。它属于 V*,本页不设计,
+<li><strong>向量搜索这条分支怎么放。</strong><code>spark.read.SegmentVectorSearch</code>
+是行式 reader 的可选阶段(#06 从 V3 reader 里拆出),和普通扫描是两条并行路径。它属于 V*,本页不设计,
 但 <code>SegmentReader</code> 接口要留得下它,不能设计成只能顺序扫。</li>
 <li><strong>R5 列裁剪怎么传到底。</strong><code>loon_segment_reader_open</code> 收
 <code>needed_columns</code>,V2 那条线怎么表达列裁剪要单独确认。</li>
@@ -231,7 +238,7 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 
 <h2 id="next">八、开发大纲</h2>
 
-<p><strong>第 1 层与第 3 层的对接已完成。</strong>两个 reader、两个 writer 都走
+<p><strong>第 1 层与第 3 层的对接已完成。</strong>行式与列式 reader、两个 writer 都走
 <code>native-storage</code> 的 JNI,凭证四处统一 <code>StorageProperties.from</code>,
 上游绑定不再进构建,3.5 线的 Scala 2.12 解锁。剩下的是把分发与出口下沉到第 2 层。</p>
 
@@ -264,6 +271,13 @@ executor 上 <code>core.read.exec.DeletePlans</code> 按任务读文件成 plan,
 <code>spark.read.plan</code> 包、V2 分区上的 L0 标记、reader factory 里的继承 plan 合并都删掉。
 代价:L0 文件对分区内每个段生效,现在每个 task 各读一遍(原来 driver 读一次),driver 不再持有任何主键 map。
 UAT 三个带删除的快照(V2 加 L0、V3 加 L0、V3 折进清单)都读回 2990 行。</li>
+
+<li><s>两个行式 reader 合成一个。</s>已完成(#06)。<code>MilvusV3PartitionReader</code> 与 <code>MilvusV2PartitionReader</code>
+各写一遍的主循环变成一个 <code>MilvusRowPartitionReader</code>:拉批、逐行交付、跳过已删行、有谓词时逐行求值、读完按
+<code>SegmentReadTask.expectedRows</code> 核对总行数(原来只有 V2 有这道自查,现在 manifest 布局给出行数时同样受益)。
+两条线的列名规则和从 schema 推需要哪些列,原来是两个 reader 的伴生对象,现在归各自的 <code>ColumnBinding</code>;
+向量检索拆成 <code>SegmentVectorSearch</code>,谓词求值拆成 <code>RowFilters</code>,都是纯函数,单独有用例。
+行为不变:UAT 的 V3 折进清单、V2 加 L0、全类型三个快照读回的行数与列值与合并前一致。</li>
 
 <li><s>写 <code>core.read.exec</code> 的 <code>SegmentReader</code> 与注册表。</s>已完成。
 开原生 reader、逐批取 Arrow、按序释放句柄这一整套从两个 spark reader 的构造块搬进 core,

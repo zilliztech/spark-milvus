@@ -102,7 +102,7 @@ val s3Options = Map(
 
 ### 1.4 How It Works
 
-Each Spark partition is one segment. For a segment with `storage_version = 3`, `MilvusV3PartitionReader` opens the segment manifest through milvus-storage's C interface and pulls Arrow batches; for `storage_version = 2`, `MilvusV2PartitionReader` opens the column-group parquet files the same way. Delete files are read on the driver into a delete plan, and the reader drops deleted rows by primary key and timestamp.
+Each Spark partition is one segment. The executor opens it through milvus-storage's C interface and pulls Arrow batches: from the segment manifest for `storage_version = 3`, from the column-group parquet files for `storage_version = 2`, with the same reader for both. The executor reads the segment's delete files into a delete plan and drops deleted rows by primary key and timestamp.
 
 ## 2. `milvus` Format Parameters
 

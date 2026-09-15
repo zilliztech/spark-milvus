@@ -13,7 +13,7 @@ import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-class MilvusV2PartitionReaderTest extends AnyFunSuite {
+class V2ColumnBindingTest extends AnyFunSuite {
   test(
     "lowercase system aliases are omitted when user fields use those names"
   ) {
@@ -28,7 +28,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
       )
     )
 
-    val mappings = MilvusV2PartitionReader.buildFieldMappings(schema)
+    val mappings = V2ColumnBinding.buildFieldMappings(schema)
 
     assert(mappings.fieldNameToId("row_id") == 100L)
     assert(mappings.fieldNameToId("timestamp") == 101L)
@@ -51,7 +51,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
       )
     )
 
-    val mappings = MilvusV2PartitionReader.buildFieldMappings(schema)
+    val mappings = V2ColumnBinding.buildFieldMappings(schema)
 
     assert(mappings.fieldNameToId("RowID") == 100L)
     assert(mappings.fieldNameToId("Timestamp") == 101L)
@@ -71,7 +71,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
         FieldSchema(name = "RowID", fieldID = 100, dataType = DataType.Int64)
       )
     )
-    val mappings = MilvusV2PartitionReader.buildFieldMappings(schema)
+    val mappings = V2ColumnBinding.buildFieldMappings(schema)
     val sourceSchema = StructType(Seq(StructField("RowID", LongType)))
     val columnGroups = Seq(
       V2ColumnGroup(
@@ -81,7 +81,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
       )
     )
 
-    val columns = MilvusV2PartitionReader.resolveNeededColumns(
+    val columns = V2ColumnBinding.resolveNeededColumns(
       sourceSchema,
       columnGroups,
       mappings,
@@ -99,10 +99,10 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
         FieldSchema(name = "pk", fieldID = 100, dataType = DataType.Int64)
       )
     )
-    val mappings = MilvusV2PartitionReader.buildFieldMappings(schema)
+    val mappings = V2ColumnBinding.buildFieldMappings(schema)
     val sourceSchema = StructType(Seq(StructField("pk", LongType)))
 
-    val columns = MilvusV2PartitionReader.resolveNeededColumns(
+    val columns = V2ColumnBinding.resolveNeededColumns(
       sourceSchema,
       columnGroups = Seq.empty,
       mappings,
@@ -121,7 +121,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
         FieldSchema(name = "value", fieldID = 101, dataType = DataType.Int64)
       )
     )
-    val mappings = MilvusV2PartitionReader.buildFieldMappings(schema)
+    val mappings = V2ColumnBinding.buildFieldMappings(schema)
     val sourceSchema = StructType(
       Seq(
         StructField("pk", LongType),
@@ -137,7 +137,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
     )
 
     val err = intercept[IllegalArgumentException] {
-      MilvusV2PartitionReader.resolveNeededColumns(
+      V2ColumnBinding.resolveNeededColumns(
         sourceSchema,
         columnGroups,
         mappings,
@@ -154,7 +154,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
         FieldSchema(name = "pk", fieldID = 100, dataType = DataType.Int64)
       )
     )
-    val mappings = MilvusV2PartitionReader.buildFieldMappings(schema)
+    val mappings = V2ColumnBinding.buildFieldMappings(schema)
     val sourceSchema = StructType(
       Seq(
         StructField("pk", LongType),
@@ -169,7 +169,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
       )
     )
 
-    val columns = MilvusV2PartitionReader.resolveNeededColumns(
+    val columns = V2ColumnBinding.resolveNeededColumns(
       sourceSchema,
       columnGroups,
       mappings,
@@ -191,10 +191,10 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
         FieldSchema(name = "value", fieldID = 101, dataType = DataType.Int64)
       )
     )
-    val mappings = MilvusV2PartitionReader.buildFieldMappings(schema)
+    val mappings = V2ColumnBinding.buildFieldMappings(schema)
     val sourceSchema = StructType(Seq(StructField("value", LongType)))
 
-    val projected = MilvusV2PartitionReader.projectedFieldIds(
+    val projected = V2ColumnBinding.projectedFieldIds(
       sourceSchema,
       mappings,
       neededColumnFieldIds = Seq(101L),
@@ -220,10 +220,10 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
         FieldSchema(name = "value", fieldID = 101, dataType = DataType.Int64)
       )
     )
-    val mappings = MilvusV2PartitionReader.buildFieldMappings(schema)
+    val mappings = V2ColumnBinding.buildFieldMappings(schema)
     val sourceSchema = StructType(Seq(StructField("value", LongType)))
 
-    val projected = MilvusV2PartitionReader.projectedFieldIds(
+    val projected = V2ColumnBinding.projectedFieldIds(
       sourceSchema,
       mappings,
       neededColumnFieldIds = Seq(101L),
@@ -255,7 +255,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
 
       val deletePlan = DeletePlan.fromLongPks(Map(1L -> 150L))
       assert(
-        !MilvusV2PartitionReader.rowDeleted(
+        !ColumnBinding.rowDeleted(
           deletePlan,
           pkField,
           pkVector,
@@ -267,7 +267,7 @@ class MilvusV2PartitionReaderTest extends AnyFunSuite {
 
       val laterDeletePlan = DeletePlan.fromLongPks(Map(1L -> 250L))
       assert(
-        MilvusV2PartitionReader.rowDeleted(
+        ColumnBinding.rowDeleted(
           laterDeletePlan,
           pkField,
           pkVector,

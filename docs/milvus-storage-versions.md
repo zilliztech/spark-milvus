@@ -60,12 +60,12 @@ A snapshot JSON produced by milvus-datacoord has two separate arrays:
   **V3** (despite the key name). Each carries a `basePath` and a `ver` that
   locates the loon manifest.
 
-`SnapshotPartitions.build` dispatches on each segment's layout:
+`ReadPlan.of` describes each segment by its layout; one reader handles both:
 
 | Source                          | InputPartition                      | Reader                            |
 |---------------------------------|-------------------------------------|-----------------------------------|
-| `storagev2_manifest_list` items | `MilvusV3InputPartition`     | `MilvusV3PartitionReader`       |
-| `SnapshotV2Segments` option     | `MilvusV2InputPartition`      | `MilvusV2PartitionReader`   |
+| `storagev2_manifest_list` items | `MilvusV3InputPartition`     | `MilvusRowPartitionReader` with `V3ColumnBinding` |
+| `SnapshotV2Segments` option     | `MilvusV2InputPartition`      | `MilvusRowPartitionReader` with `V2ColumnBinding` |
 
 Both sources can coexist (mixed-version snapshot).
 
@@ -87,8 +87,7 @@ mode. See the "Client-mode V2 dispatch" task tracked separately.
 |----------------------------------------|--------------------|
 | `read/MilvusV3InputPartition`   | V3 (loon manifest) |
 | `read/MilvusV2InputPartition`    | V2 (non-manifest)  |
-| `read/MilvusV3PartitionReader`       | V3                 |
-| `read/MilvusV2PartitionReader`   | V2                 |
+| `read/MilvusRowPartitionReader`  | V3 and V2; `V3ColumnBinding` / `V2ColumnBinding` supply the column names |
 | `read/SegmentManifestReader`     | Decodes per-segment AVROs; produces `AvroManifestEntry` with inner `storageVersion` field (can be 0/2/3 — 2 is then fed into `FooterV2SegmentResolver`; 3 is exposed via `storagev2_manifest_list`; 0 is V1 and not supported for backfill) |
 | `read/ParquetFooterReader`       | Reads `storage_version`/`group_field_id_list`/`row_group_metadata` from parquet footer KV (used only for V2 — V3 learns the same info from the loon manifest) |
 | `read/FooterV2SegmentResolver`                 | Turns `AvroManifestEntry` + parquet footer into a `V2SegmentInfo` |
@@ -114,10 +113,9 @@ When you need to reason about storage versions, answer these in order:
    - milvus-storage C++ format name → use "library format v2" = server V3.
      Don't mix the two.
 2. **Do I have a manifest file?**
-   - Yes, at `_metadata/manifest-*.avro` → V3. Use `MilvusV3PartitionReader`
-     / `MilvusV3Writer`.
-   - No → V2. Use `MilvusV2PartitionReader` /
-     `MilvusV2Writer`.
+   - Yes, at `_metadata/manifest-*.avro` → V3. Written by `MilvusV3Writer`.
+   - No → V2. Written by `MilvusV2Writer`.
+   Reading is the same `MilvusRowPartitionReader` either way.
 3. **Am I planning from a snapshot or a live Milvus client?**
    - Snapshot: look at both `manifest_list` (V1/V2) and
      `storagev2_manifest_list` (V3).
