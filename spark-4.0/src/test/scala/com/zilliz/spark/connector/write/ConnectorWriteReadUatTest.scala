@@ -36,6 +36,7 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
   *   MILVUS_JNI_S3_BUCKET=bucket
   *   MILVUS_JNI_S3_REGION=us-west-2            # optional
   *   MILVUS_UAT_WRITE_PREFIX=spark-uat-write   # optional, the fs.root_path used
+  *   MILVUS_UAT_KEEP_WRITE=true                # optional: skip the abort, keep the files
   *   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
   * }}}
   */
@@ -207,16 +208,22 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
       // --- abort: the same committer deletes the job's files. The zero-byte
       // directory markers milvus-storage created stay: the loon C API has no
       // directory delete and refuses them as "not a file" ---
-      val cleanup = HadoopStorageKeys.storeFrom(storage)
-      try {
-        val deleted = new Committer(cleanup, layout).abort()
-        info(s"abort deleted $deleted files under ${layout.prefix}")
-        deleted should be >= 6 // two parquet, two manifests, manifest.json, _committed
-        cleanup
-          .list(layout.prefix, recursive = true)
-          .filterNot(_.isDirectory) shouldBe empty
-        cleanup.exists(layout.marker) shouldBe false
-      } finally cleanup.close()
+      if (env("MILVUS_UAT_KEEP_WRITE").isDefined) {
+        info(
+          s"MILVUS_UAT_KEEP_WRITE set: leaving ${layout.prefix} for inspection"
+        )
+      } else {
+        val cleanup = HadoopStorageKeys.storeFrom(storage)
+        try {
+          val deleted = new Committer(cleanup, layout).abort()
+          info(s"abort deleted $deleted files under ${layout.prefix}")
+          deleted should be >= 6 // two parquet, two manifests, manifest.json, _committed
+          cleanup
+            .list(layout.prefix, recursive = true)
+            .filterNot(_.isDirectory) shouldBe empty
+          cleanup.exists(layout.marker) shouldBe false
+        } finally cleanup.close()
+      }
     } finally spark.stop()
   }
 }

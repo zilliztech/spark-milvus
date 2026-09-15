@@ -20,6 +20,15 @@ object SparkTypes {
         fieldSchema.dataType.value
       )
       .putLong(FieldMetadata.MilvusFieldIdMetadataKey, fieldSchema.fieldID)
+    if (fieldSchema.isPrimaryKey) {
+      builder.putBoolean(FieldMetadata.MilvusPrimaryKeyMetadataKey, true)
+    }
+    if (fieldSchema.isPartitionKey) {
+      builder.putBoolean(FieldMetadata.MilvusPartitionKeyMetadataKey, true)
+    }
+    if (fieldSchema.isClusteringKey) {
+      builder.putBoolean(FieldMetadata.MilvusClusteringKeyMetadataKey, true)
+    }
 
     if (MilvusTypes.isDenseVectorType(fieldSchema.dataType)) {
       fieldSchema.typeParams

@@ -20,9 +20,14 @@ package com.zilliz.milvus.storage.write
   * referring to its buffers until it flushes, so the caller builds a fresh
   * `VectorSchemaRoot` per batch and never reuses one.
   *
+  * `ColumnGroupSplit` is the rule Milvus applies when it splits a segment's
+  * columns into column groups, as the patterns of milvus-storage's
+  * `schema_based` writer policy; a segment the connector writes is laid out the
+  * way Milvus would have laid it out.
+  *
   * Main types: SegmentWriter, V3SegmentWriter, V2SegmentWriter,
-  * WrittenColumnGroups, ManifestTransaction, StagingLayout. Capabilities: W1,
-  * W2 (see docs/design/capabilities.md). Design: docs/design/README.md section
-  * 2.4.
+  * WrittenColumnGroups, ManifestTransaction, StagingLayout, ColumnGroupSplit.
+  * Capabilities: W1, W2 (see docs/design/capabilities.md). Design:
+  * docs/design/README.md section 2.4.
   */
 package object exec

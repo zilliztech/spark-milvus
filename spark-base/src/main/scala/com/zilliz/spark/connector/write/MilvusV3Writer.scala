@@ -37,6 +37,7 @@ import com.zilliz.milvus.storage.write.commit.{
   Committer
 }
 import com.zilliz.milvus.storage.write.exec.{
+  ColumnGroupSplit,
   ManifestTransaction,
   StagingLayout,
   V3SegmentWriter
@@ -258,8 +259,43 @@ class MilvusV3PartitionWriter(
         path
     }
 
-  private val segmentWriter =
-    new V3SegmentWriter(basePath, arrowSchema, writerProperties, allocator)
+  // Opened at the first flush, because the column-group split wants the
+  // average value size of each column and the first batch is the sample;
+  // a task that never flushes opens it in commit, split by schema alone.
+  private var segmentWriter: V3SegmentWriter = null
+
+  private def openSegmentWriter(sample: Option[VectorSchemaRoot]): Unit = {
+    val rows = sample.map(_.getRowCount).getOrElse(0)
+    val avgBytes: Map[Long, Long] = sample match {
+      case Some(root) if rows > 0 =>
+        sparkSchema.fields.zipWithIndex.map { case (f, i) =>
+          fieldIds(f.name) -> root.getVector(i).getBufferSize.toLong / rows
+        }.toMap
+      case _ => Map.empty
+    }
+    val columns = sparkSchema.fields.map { f =>
+      ColumnGroupSplit.Column(
+        fieldId = fieldIds(f.name),
+        dataType = MilvusDataType.fromValue(
+          f.metadata.getLong(FieldMetadata.MilvusDataTypeMetadataKey).toInt
+        ),
+        isKey = Seq(
+          FieldMetadata.MilvusPrimaryKeyMetadataKey,
+          FieldMetadata.MilvusPartitionKeyMetadataKey,
+          FieldMetadata.MilvusClusteringKeyMetadataKey
+        ).exists(k => f.metadata.contains(k) && f.metadata.getBoolean(k))
+      )
+    }
+    val patterns = ColumnGroupSplit.milvusPatterns(columns, avgBytes.get)
+    logInfo(s"Column groups of $basePath: ${patterns.mkString(", ")}")
+    segmentWriter = new V3SegmentWriter(
+      basePath,
+      arrowSchema,
+      writerProperties,
+      allocator,
+      patterns
+    )
+  }
 
   // The root accumulates one batch. A fresh one is built per flush: the C++
   // writer keeps referring to an exported batch's buffers until it flushes,
@@ -288,6 +324,7 @@ class MilvusV3PartitionWriter(
   override def commit(): WriterCommitMessage = {
     try {
       if (currentBatchSize > 0) flushBatch()
+      if (segmentWriter == null) openSegmentWriter(None)
       val rows = segmentWriter.rows
       val groups = segmentWriter.finish()
       val committedVersion =
@@ -330,6 +367,7 @@ class MilvusV3PartitionWriter(
   private def flushBatch(): Unit = {
     if (currentBatchSize == 0) return
     root.setRowCount(currentBatchSize)
+    if (segmentWriter == null) openSegmentWriter(Some(root))
     segmentWriter.write(root)
     // Build and allocate the replacement before swapping, so an allocation
     // failure leaves `root` pointing at the old one for cleanup to release.
@@ -376,8 +414,9 @@ class MilvusV3PartitionWriter(
   private def cleanup(): Unit = {
     if (cleanedUp) return
     cleanedUp = true
-    Try(segmentWriter.close()).recover { case e: Exception =>
-      logError(s"Error closing the segment writer: ${e.getMessage}")
+    Try(if (segmentWriter != null) segmentWriter.close()).recover {
+      case e: Exception =>
+        logError(s"Error closing the segment writer: ${e.getMessage}")
     }
     Try(if (root != null) root.close()).recover { case e: Exception =>
       logError(s"Error closing VectorSchemaRoot: ${e.getMessage}")

@@ -21,4 +21,11 @@ object FieldMetadata {
 
   /** The Milvus field id, which names the column in a written segment. */
   val MilvusFieldIdMetadataKey = "milvus.field_id"
+
+  /** Present and true on the primary key, the partition key and the clustering
+    * key; the column-group split puts those with the system fields.
+    */
+  val MilvusPrimaryKeyMetadataKey = "milvus.primary_key"
+  val MilvusPartitionKeyMetadataKey = "milvus.partition_key"
+  val MilvusClusteringKeyMetadataKey = "milvus.clustering_key"
 }

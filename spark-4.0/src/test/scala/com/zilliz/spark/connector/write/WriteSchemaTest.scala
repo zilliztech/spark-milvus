@@ -85,6 +85,10 @@ class WriteSchemaTest extends AnyFunSuite with Matchers {
     resolved("id").metadata.getLong(
       FieldMetadata.MilvusFieldIdMetadataKey
     ) shouldBe 100L
+    resolved("id").metadata
+      .getBoolean(FieldMetadata.MilvusPrimaryKeyMetadataKey) shouldBe true
+    resolved("name").metadata
+      .contains(FieldMetadata.MilvusPrimaryKeyMetadataKey) shouldBe false
   }
 
   test("a column that is no field of the collection is refused") {

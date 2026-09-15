@@ -34,7 +34,7 @@
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
-| W1 | append 写新段 | `df.writeTo("milvus.db.coll").append()`；catalog（R1）落地前是 `df.write.format("milvus").mode("append")`（2026-09-15 接通，UAT 验过），设计见 [write.html](architecture/write.html) | spark.write、core.write.exec、core.write.commit | 登记见 A4；RegisterSegments 未到位前不能交付，写出的段留在暂存前缀。对照 Milvus 自己写的 V3 段，连接器写的段还差三样才能被 Milvus 加载：系统字段 RowID（0）和 Timestamp（1）、主键的 bloom filter 统计（`_stats/bloom_filter.<pk>`，登记进清单的 stats）、列组切分要按 Milvus 的策略（系统字段一组，其余每字段一组）（2026-09-15 对照） | P1 |
+| W1 | append 写新段 | `df.writeTo("milvus.db.coll").append()`；catalog（R1）落地前是 `df.write.format("milvus").mode("append")`（2026-09-15 接通，UAT 验过），设计见 [write.html](architecture/write.html) | spark.write、core.write.exec、core.write.commit | 登记见 A4；RegisterSegments 未到位前不能交付，写出的段留在暂存前缀。对照 Milvus 自己写的 V3 段，连接器写的段还差三样才能被 Milvus 加载：系统字段 RowID（0）和 Timestamp（1）、主键的 bloom filter 统计（`_stats/bloom_filter.<pk>`，登记进清单的 stats）、列组切分要按 Milvus 的策略（`storagecommon/split_policy.go`：系统字段加主键、partition key、clustering key 一组，向量和 Text 各一组，平均每值 ≥1KB 的字段各一组，其余标量一组；2026-09-15 傍晚 #14 做掉，早先写的「其余每字段一组」是只看了一个标量字段得出的）（2026-09-15 对照） | P1 |
 | W2 | backfill 只写新列组 | `.option("milvus.write.mode","backfill").option("milvus.write.columns","f")` | spark.write、core.write | AddCollectionField 先于登记；目标段必须 Flushed；段的 base_path 和 Manifest 版本只能从快照 metadata 取（README 第 5 节缺 API）；无段级冻结，与 compaction、索引、schema 变更竞争；写侧分布与排序见决策 10；登记见 A4 | P2 |
 | W3 | 原子提交 | 自动；暂存前缀、作业清单、幂等 commit、abort 清理 | core.write.commit | 暂存前缀避开 `insert_log`，否则 86400 秒后被 GC 回收 | P1 |
 | W4 | truncate 和 overwrite | `.overwrite()`，只接受全表 | spark.write | 登记见 A4 | P1 |

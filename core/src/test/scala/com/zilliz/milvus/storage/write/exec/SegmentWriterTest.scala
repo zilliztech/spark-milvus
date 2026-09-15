@@ -187,6 +187,36 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("V3: column-group patterns split the columns the way they say") {
+    skipWithoutLibrary()
+    withDir { dir =>
+      val allocator = new RootAllocator(Long.MaxValue)
+      try {
+        val writer = new V3SegmentWriter(
+          "segment-split",
+          schema,
+          properties(dir),
+          allocator,
+          columnGroupPatterns = Seq("^100$")
+        )
+        val rows = batch(allocator, 0, 100)
+        writer.write(rows)
+        rows.close()
+        val groups = writer.finish()
+        try {
+          groups.size shouldBe 2
+          (0 until groups.size).map(
+            groups.columns(_)
+          ) should contain theSameElementsAs
+            Seq(Seq("100"), Seq("101"))
+          (0 until groups.size).foreach(i =>
+            groups.rowCounts(i).sum shouldBe 100L
+          )
+        } finally groups.close()
+      } finally allocator.close()
+    }
+  }
+
   test("V3: close without finish releases the writer once") {
     skipWithoutLibrary()
     withDir { dir =>

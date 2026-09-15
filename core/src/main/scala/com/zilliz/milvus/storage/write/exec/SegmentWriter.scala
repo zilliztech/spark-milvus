@@ -73,12 +73,16 @@ object SegmentWriter {
   *   `fs.root_path` for the local backend.
   * @param properties
   *   the `fs.*` map, already validated by `core.credential.StorageProperties`.
+  * @param columnGroupPatterns
+  *   how the columns split into column groups, from `ColumnGroupSplit`; empty
+  *   writes every column into one group.
   */
 final class V3SegmentWriter(
     val basePath: String,
     arrowSchema: Schema,
     properties: Map[String, String],
-    allocator: BufferAllocator
+    allocator: BufferAllocator,
+    columnGroupPatterns: Seq[String] = Seq.empty
 ) extends SegmentWriter
     with Logging {
 
@@ -92,7 +96,9 @@ final class V3SegmentWriter(
     handle = StorageNative.writerNew(
       basePath,
       schemaStruct.memoryAddress(),
-      properties.asJava
+      (properties ++ ColumnGroupSplit.writerProperties(
+        columnGroupPatterns
+      )).asJava
     )
     if (handle == 0L) {
       throw new IllegalStateException(
