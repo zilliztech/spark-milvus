@@ -7,8 +7,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.spark.connector.write.MilvusV3Writer
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.write.MilvusV3Writer
 
 /** Integration tests for [[MilvusV3Writer]].
   *

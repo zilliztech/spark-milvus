@@ -13,8 +13,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
-import com.zilliz.spark.connector.testkit.MilvusFieldData
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.testkit.MilvusFieldData
 import io.milvus.grpc.schema.DataType
 
 /** Integration test for MilvusBackfill operation
