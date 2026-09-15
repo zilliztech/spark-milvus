@@ -98,7 +98,7 @@ class MilvusV3Write(
   }
 }
 
-/** Batch write implementation for Storage V2
+/** The V3 batch write: one job id, one writer factory, task commits logged.
   */
 class MilvusV3BatchWrite(
     schema: StructType,
@@ -106,10 +106,16 @@ class MilvusV3BatchWrite(
 ) extends BatchWrite
     with Logging {
 
+  /** One id per write job: every task writes under `StagingLayout(root, jobId)`
+    * unless `milvus.writer.customPath` names the segment directory itself
+    * (backfill).
+    */
+  val jobId: String = java.util.UUID.randomUUID().toString
+
   override def createBatchWriterFactory(
       info: PhysicalWriteInfo
   ): DataWriterFactory = {
-    new MilvusV3WriterFactory(schema, milvusOption)
+    new MilvusV3WriterFactory(schema, milvusOption, jobId)
   }
 
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
@@ -134,7 +140,8 @@ class MilvusV3BatchWrite(
   */
 class MilvusV3WriterFactory(
     schema: StructType,
-    milvusOption: MilvusOption
+    milvusOption: MilvusOption,
+    jobId: String
 ) extends DataWriterFactory
     with Serializable {
 
@@ -146,7 +153,8 @@ class MilvusV3WriterFactory(
       partitionId,
       taskId,
       schema,
-      milvusOption
+      milvusOption,
+      jobId
     )
   }
 }
