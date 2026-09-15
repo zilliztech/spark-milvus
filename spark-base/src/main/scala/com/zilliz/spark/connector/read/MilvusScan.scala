@@ -23,6 +23,7 @@ import com.zilliz.spark.connector.read.plan.{
   ScanContext,
   SnapshotPartitions
 }
+import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** One read of one [[Snapshot]]: the table resolved it once, this plans one
   * partition per data segment and builds the reader factory from it. No storage
@@ -169,14 +170,20 @@ object MilvusScan extends Logging {
       if (md.contains(FieldMetadata.MilvusVectorDimensionMetadataKey)) {
         val dim = md.getLong(FieldMetadata.MilvusVectorDimensionMetadataKey)
         val kind =
-          if (md.contains(FieldMetadata.MilvusDataTypeMetadataKey))
-            md.getString(FieldMetadata.MilvusDataTypeMetadataKey)
-          else ""
+          if (md.contains(FieldMetadata.MilvusDataTypeMetadataKey)) {
+            val value = md.getLong(FieldMetadata.MilvusDataTypeMetadataKey)
+            if (value >= Int.MinValue && value <= Int.MaxValue)
+              Some(MilvusDataType.fromValue(value.toInt))
+            else None
+          } else None
         kind match {
-          case "Float16Vector" | "BFloat16Vector" => dim * 2
-          case "Int8Vector"                       => dim
-          case "BinaryVector"                     => (dim + 7) / 8
-          case _                                  => dim * 4
+          case Some(MilvusDataType.FloatVector) => dim * 4
+          case Some(MilvusDataType.Float16Vector) |
+              Some(MilvusDataType.BFloat16Vector) =>
+            dim * 2
+          case Some(MilvusDataType.Int8Vector)   => dim
+          case Some(MilvusDataType.BinaryVector) => (dim + 7) / 8
+          case _                                 => dim * 4
         }
       } else field.dataType.defaultSize.toLong
     }.sum
