@@ -68,10 +68,12 @@ Table 接口表达不了的动作走 CALL：Spark 4 用 ProcedureCatalog，Spark
 
 向量能力整组排 P2：加载、写出、缓存都要先有 knowhere 的 C 封装。
 
+issue #125 的[索引查询开发方案](architecture/vector-search.html)处于评审阶段：细化 V1、V2 和 V4 的持久化加载部分，并提议 V7 集合级向量查询。V7 尚未加入正式能力行，实现前须先确定 README 第 4 节的相关决策。
+
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
 | V1 | knowhere 封装 | 仓库内经 core.index 调用；下游算子直接依赖 native-vector | native-vector | knowhere 的 C shim | P2 |
-| V2 | 加载 Milvus 建的索引 | 自动；按快照或 Manifest 里的索引文件 | core.index | 索引文件路径登记在 Manifest 里（README 第 5 节） | P2 |
+| V2 | 加载 Milvus 建的索引 | 自动；按快照或 Manifest 里的索引文件 | core.index | 保留快照段记录的 index_files；使用 Manifest 索引登记时须核验目标版本（README 第 5 节）。加载契约见[方案](architecture/vector-search.html#metadata) | P2 |
 | V4 | 索引来源与缓存 | 自动；Milvus 建的、Spark 写回的、任务内即时建的三级，按 (build id, 索引版本, 段, 字段) 缓存 | core.index | | P2 |
 | V5 | 暴力搜索 | 入口与归属见决策 16 | native-vector 的 bruteforce | 决策 16 | P2 |
 

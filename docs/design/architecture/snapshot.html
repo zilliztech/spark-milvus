@@ -106,7 +106,7 @@
 <tr><td><code>schema</code></td><td><code>CollectionSchema</code>（protobuf）</td><td>C3：schema 来自快照，不经服务</td><td>JSON <code>collection.schema</code></td></tr>
 <tr><td><code>partitionIds</code></td><td><code>Seq[Long]</code></td><td>快照覆盖的分区；R16 的分区选择在这上面过滤</td><td><code>snapshot_info.partition_ids</code></td></tr>
 <tr><td><code>segments</code></td><td><code>Seq[Segment]</code></td><td>段列表，见 1.2</td><td><code>storagev2_manifest_list</code>（V3 段）加 <code>manifest_list</code> 指向的 Avro（V2 段）</td></tr>
-<tr><td><code>indexes</code></td><td><code>Seq[IndexRef]</code></td><td>索引定义，R7 加载索引用</td><td>JSON <code>indexes</code>；今天解析成 <code>Seq[Any]</code>；字段按 R7 定</td></tr>
+<tr><td><code>indexes</code></td><td><code>Seq[IndexRef]</code>（设计字段，实体尚未实现）</td><td>索引定义，V2 加载索引用</td><td>JSON <code>indexes</code>；今天解析成 <code>Seq[Any]</code>。定义与段文件的对应关系见 <a href="vector-search.html#metadata">索引查询方案</a></td></tr>
 <tr><td><code>origin</code></td><td><code>SnapshotOrigin</code></td><td>这份 <code>Snapshot</code> 是哪个来源产出的，报错和日志用</td><td>适配器填</td></tr>
 <tr><td><code>bucket</code></td><td><code>String</code></td><td><code>segments</code> 里每条路径都是相对它的 key，原生 reader 以它为根；本地文件系统时为空</td><td>快照目录读：连接器的 <code>fs.bucket_name</code>；backup：<code>milvus.backup.dir</code> 的桶</td></tr>
 </table>
@@ -120,7 +120,7 @@
 <tr><td><code>rows</code></td><td><code>Option[Long]</code></td><td>行数。V2 段从 Avro 的 <code>entries_num</code> 得到；V3 段只有打开 Manifest 才知道，规划期是 <code>None</code>，R13 的统计因此可能是未知</td></tr>
 <tr><td><code>layout</code></td><td><code>SegmentLayout</code></td><td>V3：<code>Manifest(basePath, version)</code>，列组清单在 Manifest 里，由原生层读；V2：<code>ColumnGroups(groups)</code>，列组已在 driver 上从 Avro 加 parquet footer 物化。路径一律是相对读所绑定的桶的 key（原生 reader 以 <code>fs.bucket_name</code> 为根拼接给它的路径，全 URI 会被按三段式解析），来源给的任何拼法在 <code>SnapshotCatalog.fromLists</code> 归一，跨桶报错。这个类型今天在 <code>core.read.plan</code>，要移到 <code>core.snapshot</code>：它描述的是段在存储上长什么样，不是读计划</td></tr>
 <tr><td><code>deletes</code></td><td><code>DeleteFiles</code></td><td>删除文件在哪，见 1.3</td></tr>
-<tr><td><code>indexFiles</code></td><td><code>Seq[IndexFileRef]</code></td><td>该段的索引文件，R7 用；今天没有来源填它</td></tr>
+<tr><td><code>indexFiles</code></td><td>设计字段，实体尚未实现</td><td>V2 的段级索引描述；需要区分已提供、确认未建、来源未知。快照 Avro 已定义 <code>index_files</code>，现解析器未保留；具体模型见 <a href="vector-search.html#metadata">索引查询方案</a></td></tr>
 </table>
 
 <h3 id="deletes">1.3 删除文件：三种状态，不能合并</h3>

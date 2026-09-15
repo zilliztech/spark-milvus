@@ -6,6 +6,7 @@
 |---|---|---|
 | 确认功能承诺、优先级和实现位置 | 顶层索引 | [能力规划](capabilities.md) |
 | 理解总体结构、确定模块与包的归属 | architecture/ | [架构图解](architecture/overview.html)、[模块与迁移](architecture/modules.md) |
+| 开发使用 Milvus 索引文件的向量查询 | architecture/ | [向量查询方案](architecture/vector-search.html)（issue #125，待评审） |
 | core 怎么访问对象存储、凭证怎么下发 | architecture/ | [存储访问层](architecture/storage-access.html)（未完待续） |
 | 改动对象存储凭证、provider 链、按桶配置 | architecture/ | [对象存储认证](architecture/storage-auth.html) |
 | backfill 怎么访问多个桶 | apps/ | [backfill 的多桶存储访问](apps/backfill-storage.html) |
@@ -132,8 +133,8 @@ flowchart LR
 2. 约定：只传地址和长度，Arrow 走 C Data Interface，配置用 JSON；谁分配谁释放，句柄配 destroy，Arrow 靠 release 回调，JVM 用 Cleaner 兜底；错误是返回码加消息。
 3. JNI 不用 Panama（JDK 22 才正式的外部函数接口），因为 Spark 4 最低 Java 17。
 4. 交给 native 的路径一律是桶内相对 key，桶来自 fs.bucket_name。
-5. 索引加载：索引文件在对象存储里按 Milvus binlog 格式切成多片，每片带事件头；加载时从快照的段列表拿路径，去掉事件头，按 SLICE_META（记录切片顺序的元信息）拼回 knowhere 的 BinarySet；DiskANN 先落本地目录。
-6. 索引写出是加载的逆过程：knowhere serialize 出 BinarySet，按 16MB 切片，每片加 binlog 事件头，写 SLICE_META，上传到该段的索引文件路径，用 milvus-storage 的 add_index_info 登记进 Manifest；索引版本按 knowhere 的版本区间标记，供 Milvus 加载时校验。
+5. 索引加载：从固定快照的段记录或已验证的 Manifest 索引登记取得文件引用，解析 Milvus binlog 的 descriptor/index events 与 payload 编码，再恢复 knowhere 的 BinarySet。payload 可能是原始字节或 Parquet 编码；出现 SLICE_META 时按记录拼接分片，未切片文件不要求它存在。不能只跳过固定长度的事件头。构建引擎、索引类型与格式版本都需互操作验证，详见[向量查询方案](architecture/vector-search.html#native)；DiskANN 还需要本地文件管理器。
+6. 索引写出：knowhere serialize 出 BinarySet，按目标 Milvus 格式的切片策略、事件和 payload 编码写出，发生切片时记录 SLICE_META；16 MiB 是可配置默认值，不是格式常量。上传到段索引路径并通过 milvus-storage 的 add_index_info 登记；索引版本和构建引擎需与加载端兼容。写出仍属 W6，不在 issue #125 的查询方案内。
 7. 索引来源三级，由 IndexSource 统一：Milvus 建的（快照段列表里）、Spark 建并按第 6 条写回的、任务内即时建的（只在内存，不写回）。
 
 ### 2.6 接口层
@@ -180,7 +181,8 @@ flowchart LR
 | 10 | backfill 写模式的按段分布和按行号排序 | a. 实现 RequiresDistributionAndOrdering；b. 场景代码自己 shuffle 后再写 | 写路径接口 |
 | 19 | 按分区报分区（capabilities R19）是否值得做 | a. 做，join 少一次 shuffle；b. 不做，段内主键无序，收益可能被 Milvus 的段分布抵消 | 需要实测 |
 | 20 | 谓词下推用哪一代接口 | 现状：`MilvusScanBuilder` 实现的是 `SupportsPushDownFilters`，即 DataSource V1 的 `Filter`；capabilities 第 10 节写「不做 V1 Filter，只实现 V2 谓词」。a. 换成 `SupportsPushDownV2Filters`（`Predicate`），作为 R6 的前置一并做；b. 等 `core.expr` 的 ExprTranslator 一起换，少返工一次；c. 改设计承认保留 V1。要先弄清 V2 的 `Predicate` 是否覆盖 R6 列的全部谓词形态（比较、IN、IS NULL、字符串前后缀、AND/OR/NOT）以及四条线的接口差异 | R6、R7、W5；现有下推代码走在设计禁止的接口上 |
-| 16 | 暴力搜索的形态与位置（能力已定保留，见决策日志） | 入口：DataFrame 方法、SQL 函数、读选项三选几；执行：knowhere 的 BruteForce 在原生层，JVM 实现作参照或兜底；归属：spark 层能力还是 apps 场景 | 能力清单和模块规划一起定 |
+| 16 | 向量查询入口、暴力搜索的形态与位置 | 入口：DataFrame 方法、SQL 函数、读选项三选几；执行：knowhere 的 BruteForce 在原生层，按 2026-09-14 日志不再保留 1.x JVM 实现作对拍或兜底；归属：spark 层能力还是 apps 场景。issue #125 [建议显式查询方法](architecture/vector-search.html#api)在 spark.read 构造全局 TopK 计划，待评审 | V5 与拟新增 V7；能力清单、模块规划及旧入口迁移一起定 |
+| 21 | issue #125 的索引查询支持范围与失败策略 | [方案草稿](architecture/vector-search.html#scope)提出首个互操作组合、V7 查询能力，以及[默认严格、无索引显式回退](architecture/vector-search.html#cache)的策略。目标引擎/格式与原生解码依赖先按[互操作步骤](architecture/vector-search.html#interop)验证；本行尚未形成实现承诺 | V1、V2、V4 的持久化加载部分，拟新增 V7；过滤实现仍依赖决策 20 |
 
 ## 5 需要 Milvus 侧提供的 `[草稿]`
 
@@ -191,13 +193,15 @@ flowchart LR
 | backfill 期间冻结目标段 | 无 | 段级租约，或把 ack 接到 CommitSegmentManifests 的串行路径，使 backfill 与 compaction、stats、索引、schema 变更互斥 | 2.4 backfill |
 | 登记时校验 Manifest 内容 | BatchUpdateManifest 不打开 Manifest 文件，不校验列和行数 | 登记时读 Manifest 校验列组、行数、schema 版本 | 2.4 |
 | 列级 min/max 统计，row group 统计剪枝 | milvus-storage 的 Parquet 谓词下推是空实现 | 写统计文件，reader 用统计剪枝 | 2.3 下推两级 |
-| Milvus 把索引文件写进段的 Manifest；加载 Connector 写回的索引 | milvus-storage 的 add_index_info 接口已有 | Milvus 服务填写并读取 Manifest 里的索引登记，校验 knowhere 版本区间 | 2.5 索引加载与写出 |
+| Milvus 把索引文件写进段的 Manifest；加载 Connector 写回的索引 | milvus-storage 的 add_index_info 接口已有；已有 V3 实测的索引引用在快照段记录 index_files 中，数据 Manifest 的 indexes 为空 | Manifest 的双向登记与读取仍需核验服务版本；加载现有索引先保留快照段记录，不能把本项当成唯一来源；校验引擎与格式版本 | 2.5 索引加载与 W6 写出，来源细节见[向量查询方案](architecture/vector-search.html#metadata) |
+| 索引 binlog 解码的 C 接口 | 当前 native-storage 未提供对应绑定，Milvus 的 C++ 加载链具有格式解析逻辑 | 在原生存储层复用/提供版本化解码接口，导出具名 payload 与释放函数；配套真实 Milvus 文件验证 | issue #125 原生加载，见[接口归属](architecture/vector-search.html#native-boundary) |
 | 自动快照加保留策略；快照目录里加 catalog 文件；格式契约文档 | 快照由 CreateSnapshot 手动建 | | 2.3 读入口，决策 11 |
 
 ## 6 决策日志
 
 | 日期 | 决策 | 结论 |
 |---|---|---|
+| 2026-09-15 | issue #125 开发方案与索引格式说明 | 新增 [vector-search.html](architecture/vector-search.html) 草稿，以 refactor/v2 a070569 为基线；查询入口、V7 能力和回退范围保留在开放决策 16、21，尚未批准或实现。修正原加载描述：需要解析事件与 payload 编码，SLICE_META 只在切片时存在，16 MiB 不是解码常量；快照段 index_files 与 V3 数据 Manifest 的索引登记是不同来源。决策 16 的 JVM 对拍文字按 2026-09-14 已定政策纠正；snapshot.html 的索引能力编号由 R7 改为 V2。 |
 | 2026-09-09 | 版本号与分支 | 2.0.0，refactor/v2 |
 | 2026-09-09 | 谓词求值位置 | 核心层 |
 | 2026-09-09 | Spark 用 knowhere 建的索引是否写回对象存储、按 Milvus 的索引文件格式登记进段清单，让 Milvus 在线也能加载 | 2.0 首版只做反方向（加载 Milvus 建的索引到 knowhere）和任务内即时建索引；写回随 Global Index（底库按中心点重分布、每桶建索引、映射写进格式）一起做，因为它是唯一需要写回的场景 |

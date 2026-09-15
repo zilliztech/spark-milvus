@@ -72,7 +72,7 @@ for both reading and writing and loads its own libraries. The upstream
 milvus-storage Java binding is out of the build, so the 3.5 line cross-compiles
 for Scala 2.12 again. `native-vector` is still a placeholder.
 
-Four design questions are still open: 10, 16, 19 and 20 in
+Five design questions are still open: 10, 16, 19, 20 and 21 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
 block specific packages, so check that list before starting on one.
 
@@ -107,6 +107,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How are object storage credentials handled? | [docs/design/architecture/storage-auth.html](docs/design/architecture/storage-auth.html) for the mechanism, the rules and the measured facts; apply the skill [.agents/skills/spark-milvus-storage-auth/SKILL.md](.agents/skills/spark-milvus-storage-auth/SKILL.md) |
 | How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership. Read and write share it |
 | How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four snapshot sources, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
+| How will vector queries use persisted Milvus indexes? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — issue #125 development proposal: index metadata, native loading, filtering, row retrieval, global TopK and validation; pending review |
 | What is a Snapshot, and how do the four read entry points become one? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html) — `Snapshot` and `Segment`, the three delete states, what each source cannot supply, `SnapshotCatalog`, the boundary to `SegmentReadTask`. Draft under review |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
 | Illustrated version of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) |

@@ -1,0 +1,254 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>使用 Milvus 索引文件完成向量查询 · 开发方案</title>
+<style>
+  :root { color-scheme: light dark; --accent: #237c83; --line: #8884; }
+  body { max-width: 58rem; margin: 2rem auto 4rem; padding: 0 1.1rem;
+    font: 16px/1.75 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.65rem; line-height: 1.4; margin: 1.3rem 0 .6rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.5rem; border-bottom: 1px solid var(--line); padding-bottom: .4rem; }
+  h3 { font-size: 1rem; margin-top: 1.6rem; }
+  a { color: var(--accent); text-underline-offset: .2em; overflow-wrap: anywhere; }
+  nav { display: flex; gap: .5rem 1rem; flex-wrap: wrap; font-size: .9rem; }
+  .home { display: inline-block; border: 1px solid var(--line); border-radius: .35rem; padding: .35rem .7rem; text-decoration: none; }
+  .status { border-left: 3px solid var(--accent); background: #237c8310; padding: .7rem 1rem; }
+  code { font: .85em ui-monospace, SFMono-Regular, Menlo, monospace; background: #8881; padding: .1em .3em; border-radius: 3px; overflow-wrap: anywhere; }
+  pre { overflow-x: auto; background: #8881; padding: 1rem; line-height: 1.6; }
+  pre code { padding: 0; background: none; overflow-wrap: normal; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+  th, td { text-align: left; vertical-align: top; border: 1px solid var(--line); padding: .6rem .7rem; overflow-wrap: anywhere; }
+  th { background: #8881; }
+  .table { overflow-x: auto; }
+  .table table { min-width: 37rem; }
+  li { margin: .45rem 0; }
+  figure { margin: 1.4rem 0; overflow-x: auto; }
+  svg { width: 100%; min-width: 740px; height: auto; }
+  figcaption, .small { font-size: .87rem; opacity: .8; }
+  @media (prefers-color-scheme: dark) { :root { --accent: #7ac8ce; } }
+  @media (max-width: 600px) { body { margin-top: 1rem; } h1 { font-size: 1.4rem; } }
+</style>
+
+<a class="home" href="/">← 返回站点目录</a>
+<h1>使用 Milvus 索引文件完成向量查询</h1>
+<p><strong>Spark 的每个任务加载固定快照中对应段的向量索引，执行搜索并读取命中行；Spark 合并所有段的候选，返回全局 TopK。</strong>
+TopK 指按指定距离或相似度排序的前 K 条结果。近似最近邻搜索（ANN）通过索引减少搜索工作量，其召回率需要相对于精确搜索验证。</p>
+<p class="status">本页是 <a href="https://github.com/zilliztech/spark-milvus/issues/125">issue #125</a> 的开发方案草稿，基于
+<a href="https://github.com/zilliztech/spark-milvus/tree/a07056935a156c053ccc6a74d317c4daf4329cd7">refactor/v2 · a070569</a>。
+本次交付设计文档，尚未实现或运行索引搜索。查询入口、回退策略和能力范围的建议待审阅；未定事项统一记录在总体设计第 4 节。</p>
+<nav aria-label="本页目录">
+  <a href="#scope">交付范围</a><a href="#current">当前代码</a><a href="#api">查询入口</a>
+  <a href="#execution">执行流程</a><a href="#metadata">索引元数据</a><a href="#native">原生接口</a>
+  <a href="#semantics">结果语义</a><a href="#cache">缓存与失败</a><a href="#delivery">开发顺序</a>
+</nav>
+
+<h2 id="scope">1. 交付从真实索引文件开始，到全局查询结果结束</h2>
+<p>本 issue 覆盖 V1 的原生加载与搜索接口、V2 的持久化索引加载、V4 的持久化索引缓存，以及拟新增的 V7「显式向量索引查询与全局 TopK」。
+V7 尚未加入正式能力承诺；评审通过后再同步能力行和实现包。若接受显式无索引回退提案，本 issue 同时实现 V5 的原生执行部分，入口和回退规则依决策 16。
+W6 索引写出、V4 的任务内建索引来源继续由各自设计承载。</p>
+<p>首个互操作验证目标建议为<strong>开源 Milvus 生成的 CPU HNSW、非空 FloatVector、COSINE、覆盖整个 sealed segment 的索引</strong>。
+sealed segment 是已经封存的数据段。选择这个组合是因为 nullable 向量需要额外的行号映射，DiskANN 需要本地文件管理器，云端 HNSW 还需要确认实际索引引擎。
+这些依赖核验完成后沿同一接口扩展支持矩阵；不能仅凭索引名称相同就声明兼容。</p>
+<p>Storage V2 和 V3 共用同一查询计划与索引执行器。它们的快照解析、列组读取与回表分别由现有存储适配承担。
+输入中任何段不满足支持条件，必须按明确策略处理，不能漏掉该段继续返回看似完整的答案。查询过程只读固定快照与对象存储。</p>
+
+<h2 id="current">2. 当前缺口分布在元数据、执行器和 Spark 结果计划</h2>
+<p>现有逐段暴力搜索不能通过替换一个距离函数变成索引搜索。需要改动的代码与原因如下。</p>
+<div class="table"><table>
+<thead><tr><th>现有位置</th><th>当前事实</th><th>本次改动</th></tr></thead>
+<tbody>
+<tr><td><code>core.snapshot</code>、<code>core.manifest</code></td><td><code>SnapshotJson.indexes</code> 是 <code>Seq[Any]</code>；实体 <code>Snapshot</code>、<code>Segment</code> 没有索引字段。<code>SegmentManifestReader</code> 只读到删除字段。</td><td>保留索引定义与段级文件引用，绑定快照、字段、构建及格式版本。</td></tr>
+<tr><td><code>native-vector</code>、<code>core.index</code></td><td>只有包说明和占位文档。</td><td>实现文件解码接口、Knowhere 加载/搜索、版本校验和缓存。</td></tr>
+<tr><td><code>core.read.plan</code>、<code>core.read.exec</code></td><td>已有 <code>SegmentReadTask</code> 和批读取；<code>SegmentReader</code> 只有 <code>next()</code>、<code>deliveredRows</code>，没有按行号取列接口。</td><td>统一规划查询任务；在共同 reader 中增加 <code>take</code>，供搜索和其他下游算子复用。</td></tr>
+<tr><td><code>spark.read.MilvusV3PartitionReader</code></td><td><code>performSegmentVectorSearch</code> 全扫向量、保留每段 K 条；搜索分支应用删除但不应用普通扫描的标量过滤。</td><td>将段内计算交给 core，搜索前生成排除位图。</td></tr>
+<tr><td><code>spark.read.MilvusScan</code>、<code>spark.options</code></td><td>搜索结果追加距离值，但 scan 没有相应结果 schema；没有全局合并；错误的查询参数可能被解析成未开启搜索。</td><td>显式结果 schema、严格参数校验，以及属于公开查询入口的全局排序与 K 限制。</td></tr>
+</tbody></table></div>
+<p class="small">代码依据：
+<a href="https://github.com/zilliztech/spark-milvus/blob/a07056935a156c053ccc6a74d317c4daf4329cd7/core/src/main/scala/com/zilliz/milvus/storage/snapshot/json/SnapshotJson.scala#L113">SnapshotJson</a>、
+<a href="https://github.com/zilliztech/spark-milvus/blob/a07056935a156c053ccc6a74d317c4daf4329cd7/core/src/main/scala/com/zilliz/milvus/storage/manifest/SegmentManifestReader.scala#L66">Avro 投影</a>、
+<a href="https://github.com/zilliztech/spark-milvus/blob/a07056935a156c053ccc6a74d317c4daf4329cd7/spark-base/src/main/scala/com/zilliz/spark/connector/read/MilvusV3PartitionReader.scala#L339">段内搜索</a>、
+<a href="https://github.com/zilliztech/spark-milvus/blob/a07056935a156c053ccc6a74d317c4daf4329cd7/core/src/main/scala/com/zilliz/milvus/storage/read/exec/SegmentReader.scala#L21">SegmentReader</a>。
+这些是源码核对结果，不是运行性能结论。</p>
+
+<h2 id="api">3. 推荐显式查询方法，返回的 DataFrame 已包含全局合并</h2>
+<p><strong>建议在 <code>spark-base</code> 的现有 <code>spark.read</code> 包提供 <code>MilvusSearch.search</code>。</strong>
+它接收快照定位和查询参数，构造计划，不立即执行 action。共享源码覆盖四条 Spark 线；<code>apps.search</code> 只放调用示例和作业。
+以下签名用于评审，尚不可调用。</p>
+<pre><code>val hits = MilvusSearch.search(
+  spark = spark,
+  options = Map("milvus.snapshot.path" -&gt; snapshotPath),
+  vectorColumn = "embedding",
+  queryVector = Array(0.1f, 0.2f, 0.3f),
+  k = 10,
+  metric = "COSINE",
+  searchParameters = Map("ef" -&gt; "64"),
+  filter = Some("category == \"books\""),
+  outputColumns = Seq("id", "name")
+)
+hits.show(false)</code></pre>
+<p><code>filter</code> 按既有 R7 的 Milvus 表达式契约进入 <code>core.expr</code>，示例表示在满足类别条件的行中搜索。
+搜索返回后的 <code>hits.filter(...)</code> 是对搜索结果再过滤，语义不同。R7 的解析器尚未实现，必须与共同的表达式求值器一并补齐本次支持的过滤范围，遇到不支持的表达式在执行前报错。</p>
+<ul>
+<li>输入是固定快照的定位、字段名、一个查询向量、K、metric、搜索参数、过滤表达式和输出列。任意 join/union 后的 DataFrame 不属于此入口的输入契约。</li>
+<li>解析复用 <code>SnapshotSources → MilvusTable</code>。同一个 <code>Snapshot</code> 经共同规划器生成任务；方法内不另写快照枚举或对象存储读取逻辑。</li>
+<li>返回列为请求的业务列加 <code>_segment_id: Long</code>、<code>_row_offset: Long</code>、<code>_score: Double</code>。规划期拒绝名称冲突；schema、InternalRow 和列批必须一致。</li>
+<li>单查询输入先完成交付；多查询批处理以后扩展请求结构，不在这一版假装支持。向量长度、有限数值、K、metric 和索引参数均严格校验；COSINE 的零向量按明确错误处理。</li>
+<li>旧 <code>vector.search.*</code> 入口和 JVM 暴力实现的退役在迁移步骤中提出；本方案不删除现有代码。若保留读选项，必须另行设计负责插入全局合并的 Spark 扩展，不能只改变 <code>PartitionReader</code>。</li>
+</ul>
+
+<h2 id="execution">4. 每段产候选，Spark 负责跨段合并</h2>
+<p>索引搜索是同一个读取任务的一种执行方式。普通扫描、筛选列读取和命中行回取共用 <code>SegmentReaderRegistry</code>。
+索引句柄只在 executor 创建。</p>
+<figure>
+<svg viewBox="0 0 950 285" role="img" aria-label="driver 解析一次 Snapshot；两个 executor 分别加载各自段的索引并搜索；每段回取候选行，Spark 全局合并为最终 TopK">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<g fill="none" stroke="currentColor" stroke-width="1.2">
+<rect x="10" y="108" width="160" height="64" rx="5"/>
+<rect x="220" y="45" width="200" height="66" rx="5" stroke="#237c83"/>
+<rect x="220" y="181" width="200" height="66" rx="5" stroke="#237c83"/>
+<rect x="480" y="45" width="180" height="66" rx="5" stroke="#237c83"/>
+<rect x="480" y="181" width="180" height="66" rx="5" stroke="#237c83"/>
+<rect x="735" y="108" width="205" height="64" rx="5"/>
+</g>
+<g fill="currentColor" font-size="14" text-anchor="middle">
+<text x="90" y="96" font-size="12">driver</text><text x="90" y="134">Snapshot</text><text x="90" y="155">共同读取计划</text>
+<text x="320" y="30" font-size="12">executor · 段 A</text><text x="320" y="71">IndexSource / IndexCache</text><text x="320" y="95">加载 A 的索引并搜索</text>
+<text x="320" y="166" font-size="12">executor · 段 B</text><text x="320" y="207">IndexSource / IndexCache</text><text x="320" y="231">加载 B 的索引并搜索</text>
+<text x="570" y="72">SegmentReader.take</text><text x="570" y="96">回取 A 的候选行</text>
+<text x="570" y="208">SegmentReader.take</text><text x="570" y="232">回取 B 的候选行</text>
+<text x="837" y="135">Spark 排序与 limit(K)</text><text x="837" y="158">全局 TopK DataFrame</text>
+</g>
+<g fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow)">
+<path d="M170,128 L218,78"/><path d="M170,152 L218,214"/>
+<path d="M420,78 H478"/><path d="M420,214 H478"/>
+<path d="M660,78 L733,128"/><path d="M660,214 L733,152"/>
+</g>
+</svg>
+<figcaption>候选包含物理行号和分数。搜索所用的删除与过滤位图在对应段内生成；它们不跨任务传递原生地址。</figcaption>
+</figure>
+<ol>
+<li>driver 固定快照、每段数据版本、索引构建和文件集合。<code>core.read.plan</code> 负责投影成可序列化 <code>SegmentReadTask</code>；Spark 只适配为 <code>InputPartition</code>。</li>
+<li>executor 先确定搜索执行方式，再打开所需数据列；不能沿用 reader 构造时立即拉取原始向量批的顺序。校验索引描述并获取缓存引用，首次加载时解析持久化文件并创建 Knowhere 索引。</li>
+<li>只读取构建删除/过滤位图所需的主键、时间戳和标量列。将位图与查询向量交给索引执行器，得到该段有效候选。</li>
+<li>以命中 offset 经共同 reader 的 <code>take</code> 读取输出列，恢复候选分数次序。首版每段回取局部候选，至多约 <code>段数 × K</code> 行，再送入全局合并。</li>
+<li><code>MilvusSearch.search</code> 组合 Spark 已有的 <code>orderBy + limit</code>，最终返回 K 条或全部可用结果。全量向量和索引对象都不收集到 driver。</li>
+</ol>
+<p>此处的全局排序属于向量查询方法构造的 Spark 计划，不实现通用 <code>SupportsPushDownTopN</code>。
+查询分支不得把普通扫描的局部 Limit 当作索引搜索前的行数截断，否则会排除本应参与搜索的数据。</p>
+
+<h2 id="metadata">5. 索引文件引用跟随固定快照，不能按目录猜测</h2>
+<p><strong>集合级索引定义与段级索引文件分开建模。</strong>根 JSON 的 <code>indexes</code> 说明字段上的索引定义，真正可加载的文件引用需要从快照对应的段记录取得。
+现有 Avro schema 已定义 <code>index_files</code>；解析器必须读取并保留它。V3 数据 Manifest 的索引登记是另一种来源，不能当成唯一前提。</p>
+<div class="table"><table>
+<thead><tr><th>模型变更</th><th>需要保存和校验的内容</th></tr></thead><tbody>
+<tr><td><code>Snapshot.indexes</code></td><td>字段 id、索引 id/名称、类型和参数。与 schema 的向量类型、维度和请求 metric 一致。</td></tr>
+<tr><td><code>SegmentIndex</code></td><td>collection/partition/segment/field/index/build id、文件引用、行数、序列化大小，以及来源提供的各类版本。区分 <code>index_version</code>（构建/路径版本）、<code>current_index_version</code>（向量格式版本）、<code>index_store_path_version</code>（文件路径布局版本）。</td></tr>
+<tr><td>索引状态</td><td><code>Available</code> 表示来源完整且有索引；<code>Unindexed</code> 表示权威来源明确无索引；<code>Unknown</code> 表示来源没有提供足够信息。空列表不能代替 Unknown。</td></tr>
+<tr><td><code>SegmentReadTask</code></td><td>固定的数据布局版本、不可变索引描述、查询、投影、删除来源和表达式中间表示。只携带描述和配置，不携带文件内容、已解码索引或 native pointer。</td></tr>
+</tbody></table></div>
+<p>索引读取从已选快照的段记录开始，补齐 <code>SegmentManifestReader → SnapshotCatalog → Segment → SegmentReadTask</code>。
+解析 Milvus 元数据仍由其现有解析器负责；milvus-storage 的 Manifest 与索引二进制格式由原生层解析。V2 resolver 和 backup 来源必须保留它们实际拥有的索引信息，缺信息就标 Unknown。</p>
+<p>所有路径经 <code>core.path</code> 归一，文件访问复用 <code>core.io.ObjectStore</code> 及 milvus-storage 的 C filesystem。
+同一版本同时决定索引、列组和删除视图；无法证明行号对应关系时拒绝加载。不能在搜索中重新查询在线最新索引，也不能通过列举 <code>index_files/</code> 找“最新”文件拼入旧快照。
+若来源没有某个版本字段，按其已验证的格式契约处理，不能虚构版本值。</p>
+
+<h2 id="native">6. 解码 Milvus 文件，再交给 Knowhere</h2>
+<p>Knowhere 的 <code>BinarySet</code> 是按名称组织的二进制块集合。对象存储中的一个索引文件并不一定就是一个可直接加载的块。
+加载必须处理以下步骤：</p>
+<ol>
+<li>校验对象大小和完整性，解析 Milvus 的 descriptor/index events。按 payload 类型处理原始字节、Parquet 编码及支持版本中的旧 STRING 编码；不能跳过一个固定长度文件头就认定完成解码。</li>
+<li>按目标版本验证过的文件命名规则取得 BinarySet entry name；Milvus 的内存索引加载链使用文件 basename，不能假设事件头含原始块名。出现 <code>SLICE_META</code> 时，按其记录的逻辑块名、分片数量和总长度还原；未切片对象不要求该字段存在。16 MiB 是某些版本的默认切片值，不是解码常量。</li>
+<li>验证构建引擎、索引类型、向量类型和格式版本，创建匹配的 Knowhere 实例，再调用 <code>Deserialize</code>。</li>
+<li>调用索引的 <code>Search</code>，传入查询、参数及排除位图；按已经验证的 label 映射输出段内物理行号和分数。</li>
+</ol>
+<p>解码格式的依据是 Milvus 的
+<a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/storage/DataCodec.cpp#L147">DataCodec</a>、
+<a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/storage/PayloadReader.cpp#L79">PayloadReader</a> 和
+<a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/common/Slice.cpp#L105">Slice</a>。
+实现时锁定目标 Milvus 版本并用它生成的文件验证这些格式分支。</p>
+
+<h3 id="native-boundary">6.1 C 接口与文件解析的归属</h3>
+<p><code>core.index.IndexFileCodec</code> 编排加载，二进制解析落在原生层。建议在 milvus-storage 补齐索引 binlog 解码的 C 接口，由 <code>native-storage</code> 包装；
+返回具名 payload 的地址/长度和明确释放函数。随后 <code>native-vector</code> 将这些 payload 组织为 BinarySet 并交给 Knowhere。
+payload 由存储库分配和释放；若向量库借用地址，owner 先销毁索引与 BinarySet，再调用存储库的释放函数，不能跨库默认 <code>delete[]</code>。
+这是需要实现的底层依赖，当前仓库没有该解码接口；不在 Scala 中重新实现一套索引 binlog/Parquet 解析器。</p>
+<p><code>native-vector</code> 的 <code>mv_*</code> 接口只接固定宽度数值、地址/长度、不透明句柄和 JSON。JNI 负责参数转换和错误码到异常的映射，C++ 异常不得跨 C 边界。</p>
+<div class="table"><table>
+<thead><tr><th>拟新增接口组</th><th>职责与资源所有权</th></tr></thead><tbody>
+<tr><td><code>mv_version</code> / 特性查询</td><td>返回 ABI 版本、构建版本、引擎与支持的索引/格式能力；加载前与文件描述核对。</td></tr>
+<tr><td><code>mv_binary_set_*</code></td><td>创建、加入具名块、销毁。第一版由 index owner 持有解码块直到索引关闭，除非相应实现已证明 Deserialize 完整复制。</td></tr>
+<tr><td><code>mv_index_create/load/search/destroy</code></td><td>创建和加载索引；查询向量与 bitmap 在同步调用期间借用；销毁只释放该对象持有的内存。</td></tr>
+<tr><td><code>mv_search_result_*</code></td><td>持有 label、score 和有效结果数。由 native 分配，调用者显式销毁；跨 JNI 导出前校验长度和所有权。</td></tr>
+<tr><td><code>mv_bruteforce</code></td><td>仅服务显式选择的无索引段回退及测试基准，复用相同 metric、bitmap 和结果契约。</td></tr>
+</tbody></table></div>
+<p>实现 <code>VectorNative.java</code>、C 头文件、C++ shim、loader、CMake 及构建接线。沿用
+<code>core → native-vector/native-storage</code> 的现有依赖，不增加反向依赖。构建步骤遵守仓库 sbt skill；打包同时核验 CPU 架构、C++ 运行时、Arrow/Parquet ABI、符号隔离和可分发依赖。
+本方案不把目标服务使用的原生库版本推定为项目已经集成的版本。</p>
+
+<h3 id="interop">6.2 首个里程碑必须使用 Milvus 生成的文件</h3>
+<p>已有本地实测材料证明：一个十万行 V3 段的索引引用位于快照段记录的 <code>index_files</code>，其数据 Manifest 的 <code>indexes</code> 为空。
+文件总量约 41.6 MB，声明 HNSW/COSINE，向量格式版本为 10；这些证据只证明存在索引文件，尚未证明它能被开源 Knowhere 加载。</p>
+<p>对应 Milvus 提交
+<a href="https://github.com/milvus-io/milvus/blob/bb20ce26f5bd23da794dfc2a1cbec98763e4f0f5/internal/core/thirdparty/knowhere/CMakeLists.txt#L18">bb20ce26f 使用 Knowhere v3.0.10</a>。
+该版本的 <a href="https://github.com/zilliztech/knowhere/blob/dd3dce0f46304628e6541e4a072d977744395d3a/src/index/hnsw/faiss_hnsw.cc#L3323">HNSW 注册名称随 Cardinal 构建选项变化</a>。
+因此先生成可复现的开源索引作为基准，再验证目标云端产物；云端兼容取决于对应引擎及可用原生依赖，不能靠修改 index type 名称尝试兼容。
+性能报告、样本路径和云端环境标识保留在验证产物中，不写入通用源码。</p>
+
+<h2 id="semantics">7. 删除、过滤、行号和分数必须在同一视图下解释</h2>
+<h3>7.1 先构造排除位图，再执行 TopK</h3>
+<p><code>core.delete</code> 结合主键和行时间戳处理删除，包含继承的 delete-only 段；不能把删除简化为一个主键集合。
+<code>core.expr</code> 对过滤列求值。两者输出按物理行号对齐的位图，合并后约定 1 表示排除。
+过滤为 false 或 null 的行都不参与搜索；索引 label 与物理行号的映射必须经过 fixture 验证。</p>
+<p>本次过滤入口共用核心中间表示与求值器。先实现有明确语义和测试的比较、IN、IS NULL、AND/OR/NOT；其他表达式拒绝或按后续支持矩阵扩展。
+R6 的 Spark 谓词入口按决策 20 统一为 V2 Predicate 翻译，R7 的字符串入口按 Milvus 文法解析，不能为索引查询单独复制求值逻辑。</p>
+<p>过滤后仍有至少 K 条有效数据时，不能因“先取 K 再过滤”只返回少量结果。优先使用索引的 bitmap 过滤；若该实现会产生不足 K 的候选，必须按其受支持的搜索参数扩大搜索或继续遍历，直到满足 K、确认有效数据不足，或明确报告搜索不能完成。
+允许调整的参数、最大尝试次数和搜索预算在锁定索引实现时定义；到达预算仍不足且有效行充足时明确失败，不能无限重试或静默改为暴力搜索。
+候选扩大不等于精确召回保证；召回率单独验证。读取主键和过滤列可能扫描整段，但不应因此读取所有原始向量逐条计算距离。</p>
+
+<h3>7.2 按物理行号回取业务列</h3>
+<p>在 <code>SegmentReader</code> 增加共同的 <code>take(offsets, columns)</code>。项目固定的 milvus-storage 提交
+<a href="https://github.com/milvus-io/milvus-storage/blob/cb22dfaa01175c429edbd0fb6794251f1a58f400/cpp/include/milvus-storage/ffi_c.h#L705">cb22dfaa 已声明 loon_take</a>，当前 <code>StorageNative</code> 尚未绑定。
+使用匹配的 reader handle 类型，返回 Arrow 批并遵守 C Data Interface 的 release 契约；批导入/释放后，还要通过 <code>loon_free_chunk_arrays</code> 释放外层结果数组。</p>
+<p>空 offsets 直接返回空结果，不调用拒绝空输入的 <code>loon_take</code>。其他情况先校验 offset 在段行数范围内，排序去重后调用 take，再依据映射恢复搜索次序。候选分数绑定原始 offset，不能和排序后的行错配。
+非 nullable FloatVector 首先验证一对一映射；nullable、压缩或重排行号的索引需要恢复其专用映射后才进入支持范围。</p>
+
+<h3>7.3 分数和全局排序是公开契约</h3>
+<p>建议 <code>_score</code> 按 Milvus 对应 metric 的含义返回：COSINE、IP 越大越好；L2 使用平方欧氏距离且越小越好。
+旧 JVM 实现对 L2 开根号，不能原封不动作为新分数契约。首个支持组合验证 COSINE；其他 metric 启用前各自核对数值与排序。</p>
+<p>每段最多交出 K 条有效候选。Spark 在这些候选上按 score 排序，再用 <code>_segment_id</code>、<code>_row_offset</code> 稳定打破平分并取 K。
+这是索引候选的全局 TopK，不承诺 ANN 与精确搜索返回相同 ID。native 封装先按锁定版本契约剔除正常缺位项（如 label = -1 及对应 padding score），返回有效结果数；再对真实命中的越界 label、非有限分数和维度不匹配报错，不得用最大值替代异常。</p>
+
+<h2 id="cache">8. 缓存按索引身份隔离，失败不能伪装成未建索引</h2>
+<p><code>IndexCache</code> 放在 executor 进程内，缓存键包含存储命名空间及访问身份、collection/segment/field/build id、索引格式与路径布局版本、文件集合和数据布局版本。
+敏感凭证不进入日志，也不直接作为持久化 cache key。索引对象可跨查询复用；删除与过滤位图按快照、删除源和查询生成，不能复用另一个查询的 bitmap。</p>
+<p>同一个键的并发首次加载只执行一次。缓存使用内存预算和引用计数；只有未被任务使用的对象可以逐出。
+预算包括下载缓冲、payload、分片拼接与加载中索引可能同时存在的峰值。只有验证相应实现的并发 Search 安全后，才允许多个任务同时使用同一索引；否则统一串行执行该实例的查询或使用独立查询上下文。每次查询的参数、bitmap 和结果内存独立。
+任务完成、取消、异常都释放引用；构造失败释放已分配资源；Cleaner 只作最后兜底。</p>
+<div class="table"><table>
+<thead><tr><th>状态</th><th>建议行为</th></tr></thead><tbody>
+<tr><td>已知、完整、兼容的索引</td><td>加载并搜索，记录 build、格式和缓存使用情况。</td></tr>
+<tr><td>来源确认未建索引</td><td>默认失败。只有用户明确选择无索引回退时，使用 native brute-force；混合索引/无索引段一起参与全局合并。</td></tr>
+<tr><td>缺少索引描述、覆盖不足、格式/引擎不支持</td><td>明确错误；不能推定为 Unindexed。指出受影响的段、字段及需要补齐的元数据或支持能力。</td></tr>
+<tr><td>文件丢失或损坏、鉴权失败、版本冲突、内存不足</td><td>传播错误。标准瞬时 I/O 重试可以执行，不能将这些错误转为暴力扫描或空结果。</td></tr>
+</tbody></table></div>
+<p>记录实际索引加载/搜索次数、下载字节、向量列读取字节、过滤列读取字节、回表行数、缓存命中、native 内存与分阶段耗时。
+显式回退还需记录段数与原因。这样才能区分索引查询、过滤扫描与暴力搜索，避免仅凭响应成功判断使用了索引。</p>
+
+<h2 id="delivery">9. 按依赖顺序实现，每一步都产生可验证结果</h2>
+<p>元数据解析和原生互操作可以并行；端到端集成必须等索引文件、位图和回表契约都可用。
+本页列出后续开发的完成条件，本轮未执行这些测试。</p>
+<div class="table"><table>
+<thead><tr><th>顺序</th><th>具体工作与文件</th><th>完成条件</th></tr></thead><tbody>
+<tr><td>0 · 锁定格式与依赖</td><td>用锁定版本 Milvus 原生读取代码制作最小互操作验证程序；确定 Knowhere 提交、构建引擎、CPU 架构，保存建表/插入/建索引/快照脚本和脱敏 fixture，核对目标云端产物。</td><td>真实索引可恢复为 BinarySet，并被目标库加载和搜索；记录支持矩阵。此步骤验证格式与引擎，正式 C 接口和 JNI 在步骤 2 交付。</td></tr>
+<tr><td>1 · 元数据贯通</td><td><code>SnapshotJson</code>、<code>SegmentManifestReader</code>、<code>SnapshotCatalog</code>、<code>Segment</code>、<code>SegmentReadTask</code>；补齐共同 <code>core.read.plan</code> 的查询描述与规划。</td><td>固定快照中的所有数据段都有明确索引状态；类型、版本、路径与覆盖校验可单测；序列化任务没有原生句柄。</td></tr>
+<tr><td>2 · 原生执行与缓存</td><td>milvus-storage 的索引解码接口；<code>native-storage</code> 的包装；<code>native-vector</code> 的 shim/JNI/loader；<code>core.index</code> 的 <code>IndexSource</code>、<code>IndexFileCodec</code>、<code>IndexCache</code>。</td><td>真实未切片/切片及支持编码均可加载；坏文件和不支持版本拒绝；并发加载、释放、取消和内存预算有测试。</td></tr>
+<tr><td>3 · 过滤与回表</td><td><code>core.delete</code>、<code>core.expr</code>；<code>spark.expr</code> 的 V2 翻译；<code>SegmentReader.take</code> 与 <code>StorageNative</code> 的 <code>loon_take</code> 绑定。</td><td>删除最近邻、低选择率过滤、null、重复主键时间戳、继承删除、乱序/重复 offset 均验证；输出列不含向量时仍可查询。</td></tr>
+<tr><td>4 · Spark 查询契约</td><td><code>spark.read.MilvusSearch</code>、共同 scan/reader 适配、schema 和参数校验；<code>apps.search</code> 示例。</td><td>两段以上查询的返回计划自带全局 TopK；K 大于/小于有效行数、投影、平分、混合段和明确回退均正确。</td></tr>
+<tr><td>5 · 构建与验收</td><td><code>native-vector</code> 的 CMake、Makefile/Docker 构建接线；<code>integration-4.0</code> 真实 Milvus/对象存储测试；四条 Spark 线和 Scala 交叉编译检查。</td><td>从分发 JAR 启动 executor 能加载依赖；原生内存检查通过；完成冷/热缓存下的召回、耗时和 I/O 对比。</td></tr>
+</tbody></table></div>
+<p>验收至少覆盖两段以上的合成数据：保证每段确实产生索引文件，并包含删除最相近向量、过滤后少于/多于 K、相同分数、无索引段、错误版本、丢失文件和任务重试。
+与目标 metric 一致的精确基准计算 recall@K；性能报告同时给出加载、过滤、搜索、回表和 Spark 合并耗时。cold cache 与 warm cache 分开记录，不事先承诺固定加速倍数。</p>
+<p>最终交付要求索引加载和搜索计数大于零，connector 不另行读取整个向量列执行 JVM/原生暴力扫描；允许读取生成位图所需的标量列。
+Knowhere 在特定 K 或过滤比例下可能<a href="https://github.com/zilliztech/knowhere/blob/dd3dce0f46304628e6541e4a072d977744395d3a/src/index/hnsw/faiss_hnsw.cc#L1382">内部选择暴力算法</a>，须按实际引擎记录这种行为；加载索引本身不保证每次都执行图遍历。性能用例需同时覆盖能使用 ANN 算法的参数和引擎自行选择暴力算法的边界。
+普通表扫描的行为、所有支持的 Spark 线及 Storage V2/V3 路径均需回归。新 API 和配置在启用时同步中英文 reference。</p>
+<p>实现前按评审结论关闭总体设计的相关决策，加入 V7 能力行，并使包说明与实际代码对应。
+替换旧 reader 计算逻辑后再提出旧入口和旧类型的具体删除清单；在移除文件、公开类型或测试前说明调用方影响并确认迁移安排。</p>
