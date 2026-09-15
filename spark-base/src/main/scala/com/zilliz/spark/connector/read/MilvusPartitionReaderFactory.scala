@@ -11,8 +11,6 @@ import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
-import com.zilliz.milvus.storage.read.plan.DeleteSource
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
@@ -48,7 +46,6 @@ class MilvusPartitionReaderFactory(
     schema: StructType,
     optionsMap: Map[String, String],
     pushedFilters: Array[Filter] = Array.empty[Filter],
-    v2InheritedDeletes: V2InheritedDeletes = V2InheritedDeletes.empty,
     // A pushed-down limit, applied per partition. None when Spark pushed none.
     limit: Option[Int] = None
 ) extends PartitionReaderFactory
@@ -112,7 +109,7 @@ class MilvusPartitionReaderFactory(
       val dataSchema = StructType(schema.fields.filterNot { field =>
         isMetadataExtraField(field.name)
       })
-      val setup = ColumnBinding(effectiveSpecOf(p), dataSchema)
+      val setup = ColumnBinding(p, dataSchema)
       val milvusSchema = CollectionSchema.parseFrom(p.task.schemaBytes)
       new MilvusColumnarPartitionReader(
         schema,
@@ -129,32 +126,6 @@ class MilvusPartitionReaderFactory(
         s"cannot read ${other.getClass.getName} a batch at a time"
       )
   }
-
-  /** The partition with its inherited delete plan folded in.
-    *
-    * Only the column-group line defers that: its inherited plan is looked up
-    * from the executor-side context rather than shipped per partition.
-    */
-  private def effectiveSpecOf(p: MilvusInputPartition): MilvusInputPartition =
-    p match {
-      case v2: MilvusV2InputPartition =>
-        val inherited = v2.inheritedDeletePlanPartitionId
-          .map(partitionId =>
-            DeltaLogReader.effectiveInheritedDeletePlan(
-              partitionId,
-              v2InheritedDeletes.inheritedPlansByPartition
-            )
-          )
-          .getOrElse(DeletePlan.empty)
-        val combined = DeletePlan.union(inherited, v2.task.deletePlan)
-        v2.copy(task =
-          v2.task.copy(deletes =
-            if (combined.isEmpty) DeleteSource.None
-            else DeleteSource.Materialized(combined)
-          )
-        )
-      case other => other
-    }
 
   private def partitionNameOf(p: MilvusInputPartition): String = p match {
     case v3: MilvusV3InputPartition => v3.partitionName
@@ -211,27 +182,9 @@ class MilvusPartitionReaderFactory(
 
         val milvusSchema = CollectionSchema.parseFrom(p.task.schemaBytes)
 
-        val inheritedDeletePlan = p.inheritedDeletePlanPartitionId
-          .map(partitionId =>
-            DeltaLogReader.effectiveInheritedDeletePlan(
-              partitionId,
-              v2InheritedDeletes.inheritedPlansByPartition
-            )
-          )
-          .getOrElse(DeletePlan.empty)
-        // The inherited plan is only resolvable here, where the executor-side
-        // context is, so the task is finished off rather than rebuilt.
-        val effectiveDeletePlan =
-          DeletePlan.union(inheritedDeletePlan, p.task.deletePlan)
-        val effectiveSpec = p.task.copy(
-          deletes =
-            if (effectiveDeletePlan.isEmpty) DeleteSource.None
-            else DeleteSource.Materialized(effectiveDeletePlan)
-        )
-
         val underlying = new MilvusV2PartitionReader(
           innerSchema,
-          V2ColumnBinding(p, innerSchema, effectiveSpec),
+          V2ColumnBinding(p, innerSchema),
           milvusSchema,
           p.milvusOption
         )

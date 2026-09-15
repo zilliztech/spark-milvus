@@ -206,7 +206,7 @@ core 里不放注册表：backup 是 compat 里唯一的实现，与 <code>V2Seg
 <tr><td><code>id</code>、<code>partitionId</code>、<code>layout</code></td><td>原样</td></tr>
 <tr><td><code>Snapshot.schema</code></td><td><code>schemaBytes</code>，protobuf 字节，每个分区一份</td></tr>
 <tr><td><code>deletes</code></td><td><code>DeleteSource</code>：<code>Listed</code> 和 <code>InManifest</code> 变 <code>Files</code>，executor 上读；
-<code>Empty</code> 变 <code>None</code>；<code>Unknown</code> 在规划期已经报错，到不了这里。今天的 <code>Materialized</code>（driver 读完删除日志把主键表塞进分区）是过渡，见 read.html 第八节</td></tr>
+<code>Empty</code> 变 <code>None</code>；<code>Unknown</code> 在规划期已经报错，到不了这里。已做（#13）：<code>Materialized</code>（driver 读完删除日志把主键表塞进分区）不再由 planner 产出</td></tr>
 <tr><td><code>rows</code></td><td>不进 <code>SegmentReadTask</code>；<code>ReadPlan.totalRows</code> 从 <code>Snapshot</code> 算，给 R13</td></tr>
 <tr><td><code>indexFiles</code></td><td>R7 落地时加字段</td></tr>
 </table>
@@ -221,7 +221,7 @@ core 里不放注册表：backup 是 compat 里唯一的实现，与 <code>V2Seg
 <tr><td><code>ManifestItemJson</code>（V3 段）与 <code>V2SegmentInfo</code>（V2 段）</td><td>一个 <code>Segment</code></td><td>已做；<code>V2SegmentInfo</code> 已删除，Avro、backup、option 串三个来源直接产 <code>Segment</code></td></tr>
 <tr><td><code>core.read.plan.SegmentLayout</code></td><td><code>core.snapshot.SegmentLayout</code></td><td>已做</td></tr>
 <tr><td><code>spark.read.plan.SnapshotPartitions.build</code>（今天 <code>Snapshot</code> 进、<code>InputPartition</code> 出）</td><td><code>core.read.plan.Partitioner</code>（<code>Snapshot</code> 进、<code>ReadPlan</code> 出），第 3 层只把 <code>SegmentReadTask</code> 包成 <code>InputPartition</code></td><td>输入已换成 <code>Snapshot</code>；下沉 core 未做</td></tr>
-<tr><td><code>spark.read.plan.DeletePlanning</code>（driver 读删除日志）</td><td>消失：删除文件位置进 <code>Segment.deletes</code>，读在 executor</td><td>输入已换成 <code>Segment.deletes</code>，三份继承删除的拷贝合成一份；下沉 executor 随 <code>DeleteSource.Files</code> 的启用</td></tr>
+<tr><td><code>spark.read.plan.DeletePlanning</code>（driver 读删除日志）</td><td>消失：删除文件位置进 <code>Segment.deletes</code>，读在 executor</td><td>已做（#13）：driver 只剩 <code>core.read.plan.DeleteFileListing</code> 列文件，executor 的 <code>core.read.exec.DeletePlans</code> 读</td></tr>
 <tr><td><code>ClientSnapshotPlanner</code></td><td><code>ClientSnapshotSource</code>；读前建快照那一半删除（A6 已删）</td><td>已做：DescribeCollection 取 id，catalog 按名或取最新，R16 的过滤是 <code>Snapshot.narrow</code></td></tr>
 <tr><td><code>OptionSnapshotPlanner</code></td><td>删除（K2 已删）。backfill 读原表今天靠它，先切到 <code>SnapshotCatalog</code></td><td>planner 已删；<code>milvus.snapshot.path</code> 走 <code>SnapshotCatalog.at</code>，option 串那一半是 <code>OptionStringsSnapshotSource</code>，等 backfill 切换后删</td></tr>
 <tr><td><code>BackupPlanner</code></td><td><code>BackupSnapshotSource</code></td><td>已做（#04）</td></tr>

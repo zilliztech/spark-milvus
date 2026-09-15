@@ -107,7 +107,7 @@
 
 <p><strong>分岔只在 <code>getTable</code> 一处。</strong><code>spark.options.SnapshotSources.forRead</code> 按 <code>ReadMode</code> 构造一个
 <code>SnapshotSource</code>,调用一次得到 <code>Snapshot</code>;<code>MilvusTable</code> 持有它,交给 <code>MilvusScan</code>,
-规划只有一条路:<code>DeletePlanning</code> 出删除计划,<code>SnapshotPartitions.build</code> 出一组 <code>InputPartition</code>。
+规划只有一条路:<code>core.read.plan.DeleteFileListing.of</code> 列出删除文件,<code>ReadPlan.of</code> 出任务,<code>MilvusScan.inputPartitions</code> 包成 <code>InputPartition</code>。
 设计见 <a href="snapshot.html#sources">snapshot.html 第二节</a>。</p>
 
 <table>
@@ -240,10 +240,9 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 <li><s>写 <code>core.read.plan</code> 的 <code>SegmentReadTask</code>。</s>已完成。
 <code>SegmentReadTask</code> 只装描述,句柄开在 executor 上;段布局的两种来源(V3 的 manifest
 路径加版本、V2 已物化的列组)是 <code>SegmentLayout</code> 的两个 case,那是两条线唯一的实质差别。
-删除来源单独建模成 <code>DeleteSource</code>:<code>Materialized</code> 是今天的做法——
-driver 把主键 map 序列化进每个分区,也是 README 第 1 节列的 1.x 代价之一;
-<code>Files</code> 只给 delta log 路径、读留给 executor,是要去的方向。
-两个 case 都在,迁移就是换 planner 产出哪一种,不用改这个类型。
+删除来源单独建模成 <code>DeleteSource</code>:<code>Files</code> 只给删除文件、读留给 executor,#13 起 planner 只产出它;
+<code>Materialized</code> 装一份现成的 plan,driver 不再产出(它曾把主键 map 序列化进每个分区,README 第 1 节列的 1.x 代价之一)。
+两个 case 都在,迁移就是换了 planner 产出哪一种,没改这个类型。
 spark 层的两个 <code>InputPartition</code> 已经改成携带它:
 <code>MilvusV3InputPartition</code> 从 12 个字段降到 7 个,
 <code>MilvusV2InputPartition</code> 从 9 个降到 3 个,
@@ -255,10 +254,16 @@ spark 层的两个 <code>InputPartition</code> 已经改成携带它:
 <li><s>规划本身进 <code>core.read.plan</code>。</s>已完成(#12)。
 段列表怎么变成任务这段计算原来是 spark 层的 <code>SnapshotPartitions.build</code>,
 现在是 <code>ReadPlan.of</code>,输入输出全是 core 类型;<code>MilvusScan.inputPartitions</code>
-只把任务包成两种 <code>InputPartition</code>,加上向量检索、分区名、选项和 V2 的 L0 标记。
-纯搬,行为不变:规划的 50 个用例一个断言没改。<code>spark.read.plan</code> 只剩
-<code>DeletePlanning</code>——driver 读删除文件成主键 map——等删除读取下沉 executor(#13),
-那是行为改变,单独一单。</li>
+只把任务包成两种 <code>InputPartition</code>,加上向量检索、分区名、选项。
+纯搬,行为不变:规划的 50 个用例一个断言没改。</li>
+
+<li><s>删除读取下沉 executor。</s>已完成(#13)。driver 上只剩 <code>DeleteFileListing.of</code>:
+V2 段的删除文件在快照里,V3 段的在它的 manifest 里(driver 打开 manifest 列文件、解析版本,不读删除文件),
+L0 段的文件按分区挂到该分区每个任务上;<code>ReadPlan.of</code> 把它们装进 <code>DeleteSource.Files</code>。
+executor 上 <code>core.read.exec.DeletePlans</code> 按任务读文件成 plan,读不到抛异常让 task 失败,不再有空 plan 兜底。
+<code>spark.read.plan</code> 包、V2 分区上的 L0 标记、reader factory 里的继承 plan 合并都删掉。
+代价:L0 文件对分区内每个段生效,现在每个 task 各读一遍(原来 driver 读一次),driver 不再持有任何主键 map。
+UAT 三个带删除的快照(V2 加 L0、V3 加 L0、V3 折进清单)都读回 2990 行。</li>
 
 <li><s>写 <code>core.read.exec</code> 的 <code>SegmentReader</code> 与注册表。</s>已完成。
 开原生 reader、逐批取 Arrow、按序释放句柄这一整套从两个 spark reader 的构造块搬进 core,

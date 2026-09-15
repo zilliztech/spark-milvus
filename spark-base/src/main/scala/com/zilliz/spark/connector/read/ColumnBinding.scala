@@ -7,6 +7,7 @@ import org.apache.spark.sql.types.StructType
 
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.exec.{
+  DeletePlans,
   SegmentReader,
   SegmentReaderRegistry
 }
@@ -73,7 +74,8 @@ sealed trait ColumnBinding {
   final def pkField: Option[FieldSchema] =
     milvusSchema.fields.find(_.isPrimaryKey)
 
-  final def deletePlan: DeletePlan = task.deletePlan
+  /** Read once per task, on the executor, from the files the task names. */
+  final lazy val deletePlan: DeletePlan = DeletePlans.of(task, pkField)
 
   final def appliesDeletes: Boolean = task.appliesDeletes
 

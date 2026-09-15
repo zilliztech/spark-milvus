@@ -3,7 +3,6 @@ package com.zilliz.milvus.storage.read.plan
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.snapshot.{
   DeltaLogFile,
   Segment,
@@ -16,8 +15,8 @@ import com.zilliz.milvus.storage.snapshot.{
 import com.zilliz.milvus.storage.snapshot.json.ManifestItemJson
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-/** `ReadPlan.of`: the seven shapes docs/design/architecture/read.html 5.1 and
-  * work item 12 name.
+/** `ReadPlan.of`: the shapes docs/design/architecture/read.html 5.1 and work
+  * items 12 and 13 name.
   */
 class ReadPlanTest extends AnyFunSuite with Matchers {
 
@@ -73,9 +72,14 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
     fileRowCounts = Seq(1L)
   )
 
+  private def log(id: Long) = DeltaLogFile(id, s"files/delta/$id", 5L)
+
   test("a V3 segment becomes a manifest task with the raw properties") {
-    val plan =
-      ReadPlan.of(snapshotOf(v3 = Seq(v3Item)), properties, applyDeletes = true)
+    val plan = ReadPlan.of(
+      snapshotOf(v3 = Seq(v3Item)),
+      properties,
+      applyDeletes = true
+    )
     plan.specs.map(_.segmentId) shouldBe Seq(30L)
     val task = plan.specs.head
     task.layout shouldBe SegmentLayout.Manifest("files/insert_log/10/20/30", 7L)
@@ -85,77 +89,88 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
     task.schemaBytes shouldBe schema.toByteArray
   }
 
-  test("a read version overrides the one the snapshot lists") {
+  test(
+    "a read version resolved by the listing overrides the one the snapshot lists"
+  ) {
     val plan = ReadPlan.of(
       snapshotOf(v3 = Seq(ManifestItemJson(30L, "files/insert_log/10/20/30"))),
       properties,
       applyDeletes = true,
-      readVersions = Map(30L -> 11L)
+      deletes = DeleteFileListing.empty.copy(v3ReadVersions = Map(30L -> 11L))
     )
     plan.specs.head.readVersionOrLatest shouldBe 11L
   }
 
   test(
-    "a V3 task carries the inherited plan of its partition united with its own"
+    "a task names the delete files it applies: the collection's L0 files, its partition's, then its own"
   ) {
-    val own = DeletePlan.fromLongPks(Map(7L -> 100L))
+    val listing = DeleteFileListing(
+      v3BySegment = Map(30L -> Seq(log(3))),
+      v2BySegment = Map(31L -> Seq(log(4))),
+      inheritedByPartition = Map(
+        -1L -> Seq(log(1)),
+        20L -> Seq(log(2)),
+        21L -> Seq(log(9))
+      ),
+      v3ReadVersions = Map.empty
+    )
+    val plan = ReadPlan.of(
+      snapshotOf(v3 = Seq(v3Item), v2 = Seq(v2Segment(31L, Seq(group)))),
+      properties,
+      applyDeletes = true,
+      deletes = listing
+    )
+    plan.specs.map(_.deletes) shouldBe Seq(
+      DeleteSource.Files(Seq(log(1), log(2), log(3))),
+      DeleteSource.Files(Seq(log(1), log(2), log(4)))
+    )
+    plan.partitionsApplyingDeletes shouldBe 2
+  }
+
+  test("a segment with no delete file of any kind carries DeleteSource.None") {
+    val listing = DeleteFileListing(
+      v3BySegment = Map.empty,
+      v2BySegment = Map.empty,
+      inheritedByPartition = Map(21L -> Seq(log(9))), // another partition
+      v3ReadVersions = Map.empty
+    )
     val plan = ReadPlan.of(
       snapshotOf(v3 = Seq(v3Item)),
       properties,
       applyDeletes = true,
-      deletes = ReadPlan.Deletes(
-        v3BySegment = Map(30L -> own),
-        v2BySegment = Map.empty,
-        inheritedByPartition = Map(
-          -1L -> DeletePlan.fromLongPks(Map(8L -> 120L)),
-          20L -> DeletePlan.fromLongPks(Map(9L -> 140L)),
-          21L -> DeletePlan.fromLongPks(Map(10L -> 160L))
-        )
-      )
+      deletes = listing
     )
-    val deletes = plan.specs.head.deletePlan
-    deletes.containsLongPk(7L, 99L) shouldBe true
-    deletes.containsLongPk(8L, 119L) shouldBe true
-    deletes.containsLongPk(9L, 139L) shouldBe true
-    deletes.containsLongPk(10L, 159L) shouldBe false // another partition's L0
+    plan.specs.head.deletes shouldBe DeleteSource.None
   }
 
-  test("applyDeletes=false drops every plan") {
+  test("applyDeletes=false ships no delete file") {
+    val listing = DeleteFileListing(
+      v3BySegment = Map(30L -> Seq(log(3))),
+      v2BySegment = Map(31L -> Seq(log(4))),
+      inheritedByPartition = Map(20L -> Seq(log(2))),
+      v3ReadVersions = Map.empty
+    )
     val plan = ReadPlan.of(
       snapshotOf(v3 = Seq(v3Item), v2 = Seq(v2Segment(31L, Seq(group)))),
       properties,
       applyDeletes = false,
-      deletes = ReadPlan.Deletes(
-        v3BySegment = Map(30L -> DeletePlan.fromLongPks(Map(7L -> 100L))),
-        v2BySegment = Map(31L -> DeletePlan.fromLongPks(Map(7L -> 100L))),
-        inheritedByPartition =
-          Map(20L -> DeletePlan.fromLongPks(Map(8L -> 120L)))
-      )
+      deletes = listing
     )
     plan.specs.map(_.deletes) shouldBe Seq(DeleteSource.None, DeleteSource.None)
     plan.partitionsApplyingDeletes shouldBe 0
   }
 
   test(
-    "a V2 segment becomes a column-group task with the canonical properties and only its own plan"
+    "a V2 segment becomes a column-group task with the canonical properties"
   ) {
-    val own = DeletePlan.fromLongPks(Map(7L -> 100L))
     val plan = ReadPlan.of(
       snapshotOf(v2 = Seq(v2Segment(31L, Seq(group)))),
       properties,
-      applyDeletes = true,
-      deletes = ReadPlan.Deletes(
-        v3BySegment = Map.empty,
-        v2BySegment = Map(31L -> own),
-        inheritedByPartition =
-          Map(20L -> DeletePlan.fromLongPks(Map(8L -> 120L)))
-      )
+      applyDeletes = true
     )
     val task = plan.specs.head
     task.layout shouldBe SegmentLayout.ColumnGroups(Seq(group))
     task.properties shouldBe v2Props
-    task.deletePlan.containsLongPk(7L, 99L) shouldBe true
-    task.deletePlan.containsLongPk(8L, 119L) shouldBe false
     plan.totalRows shouldBe Some(1L)
   }
 

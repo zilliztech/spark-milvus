@@ -11,6 +11,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 
@@ -81,8 +82,10 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
   test("delta log files survive serialization") {
     val task = v2Task.copy(
       deletes = DeleteSource.Files(
-        Seq("files/_delta/1", "files/_delta/2"),
-        Seq(10L, 20L)
+        Seq(
+          DeltaLogFile(1L, "files/_delta/1", 10L),
+          DeltaLogFile(2L, "files/_delta/2", 20L)
+        )
       )
     )
     roundTrip(task).deletes shouldBe task.deletes
@@ -104,13 +107,8 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
       .copy(deletes = DeleteSource.Materialized(DeletePlan.empty))
       .appliesDeletes shouldBe false
     v2Task
-      .copy(deletes = DeleteSource.Files(Seq.empty, Seq.empty))
+      .copy(deletes = DeleteSource.Files(Seq.empty))
       .appliesDeletes shouldBe false
-  }
-
-  test("delta log paths and entry counts have to be parallel") {
-    an[IllegalArgumentException] should be thrownBy
-      DeleteSource.Files(Seq("a", "b"), Seq(1L))
   }
 
   test("a plan sums the row counts its partitions state") {

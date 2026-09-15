@@ -42,15 +42,5 @@ case class MilvusV3InputPartition(
   */
 case class MilvusV2InputPartition(
     task: SegmentReadTask, // What to read: layout, schema, fs.* map, deletes
-    milvusOption: MilvusOption,
-    inheritedDeletePlanPartitionId: Option[Long] = None
+    milvusOption: MilvusOption
 ) extends MilvusInputPartition
-
-case class V2InheritedDeletes(
-    inheritedPlansByPartition: Map[Long, DeletePlan]
-)
-
-object V2InheritedDeletes {
-  val empty: V2InheritedDeletes =
-    V2InheritedDeletes(Map.empty)
-}

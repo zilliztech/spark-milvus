@@ -1,6 +1,5 @@
 package com.zilliz.milvus.storage.read.plan
 
-import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, Snapshot}
 import com.zilliz.milvus.storage.Logging
 
@@ -35,22 +34,6 @@ final case class ReadPlan(specs: Seq[SegmentReadTask]) extends Serializable {
   */
 object ReadPlan extends Logging {
 
-  /** The delete plans the driver has already read, keyed by segment id for a
-    * segment's own delete files and by partition id for the L0 delete-only
-    * segments that apply to every segment of a partition (`-1` for all).
-    * Reading them on the executor instead is `DeleteSource.Files`, which no
-    * planner emits yet.
-    */
-  final case class Deletes(
-      v3BySegment: Map[Long, DeletePlan],
-      v2BySegment: Map[Long, DeletePlan],
-      inheritedByPartition: Map[Long, DeletePlan]
-  )
-
-  object Deletes {
-    val none: Deletes = Deletes(Map.empty, Map.empty, Map.empty)
-  }
-
   /** @param properties
     *   the parsed `fs.*` map a task of the given `storage_version` carries. A
     *   function, and called at most once per version present, because the two
@@ -61,28 +44,26 @@ object ReadPlan extends Logging {
     * @param applyDeletes
     *   false turns every task's deletes into `DeleteSource.None`.
     * @param deletes
-    *   what the driver read. A V3 task carries the union of its partition's
-    *   inherited plan and its own; a V2 task carries only its own, because the
-    *   inherited plan is not shipped per partition but resolved once by the
-    *   reader factory from the same map.
-    * @param readVersions
-    *   a manifest version per V3 segment that overrides the one the layout
-    *   names, for a segment whose snapshot entry carried no version.
+    *   the delete files the driver listed. Every task carries the files it has
+    *   to apply as `DeleteSource.Files`: the L0 files of its partition and of
+    *   the whole collection, then its own. The executor reads them.
     */
   def of(
       snapshot: Snapshot,
       properties: Int => Map[String, String],
       applyDeletes: Boolean,
-      deletes: Deletes = Deletes.none,
-      readVersions: Map[Long, Long] = Map.empty
+      deletes: DeleteFileListing = DeleteFileListing.empty
   ): ReadPlan = {
     val propertiesByVersion =
       collection.mutable.Map.empty[Int, Map[String, String]]
     def propertiesFor(version: Int): Map[String, String] =
       propertiesByVersion.getOrElseUpdate(version, properties(version))
-    def deleteSourceFor(plan: DeletePlan): DeleteSource =
-      if (!applyDeletes || plan.isEmpty) DeleteSource.None
-      else DeleteSource.Materialized(plan)
+    def deleteSourceFor(segmentId: Long, partitionId: Long): DeleteSource = {
+      val files =
+        if (applyDeletes) deletes.filesFor(segmentId, partitionId)
+        else Seq.empty
+      if (files.isEmpty) DeleteSource.None else DeleteSource.Files(files)
+    }
     val schemaBytes = snapshot.schemaBytes
 
     val v3Tasks = snapshot.v3Segments.map { seg =>
@@ -93,16 +74,9 @@ object ReadPlan extends Logging {
             s"segment ${seg.id} is storage_version 3 but carries a column-group layout"
           )
       }
-      val readVersion = readVersions.getOrElse(seg.id, listedVersion)
+      val readVersion = deletes.v3ReadVersions.getOrElse(seg.id, listedVersion)
       logInfo(
         s"Planning segment ${seg.id} of partition ${seg.partitionId}: manifest $basePath at version $readVersion"
-      )
-      val plan = DeletePlan.union(
-        DeltaLogReader.effectiveInheritedDeletePlan(
-          seg.partitionId,
-          deletes.inheritedByPartition
-        ),
-        deletes.v3BySegment.getOrElse(seg.id, DeletePlan.empty)
       )
       SegmentReadTask(
         segmentId = seg.id,
@@ -110,7 +84,7 @@ object ReadPlan extends Logging {
         layout = SegmentLayout.Manifest(basePath, readVersion),
         schemaBytes = schemaBytes,
         properties = propertiesFor(3),
-        deletes = deleteSourceFor(plan)
+        deletes = deleteSourceFor(seg.id, seg.partitionId)
       )
     }
 
@@ -128,9 +102,7 @@ object ReadPlan extends Logging {
         layout = SegmentLayout.ColumnGroups(groups),
         schemaBytes = schemaBytes,
         properties = propertiesFor(2),
-        deletes = deleteSourceFor(
-          deletes.v2BySegment.getOrElse(seg.id, DeletePlan.empty)
-        )
+        deletes = deleteSourceFor(seg.id, seg.partitionId)
       )
     }
 

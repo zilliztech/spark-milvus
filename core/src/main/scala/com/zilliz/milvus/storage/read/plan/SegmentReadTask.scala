@@ -1,29 +1,27 @@
 package com.zilliz.milvus.storage.read.plan
 
 import com.zilliz.milvus.storage.delete.DeletePlan
-import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, SegmentLayout}
 
 /** Where the rows deleted from a segment come from.
   *
-  * Two cases, and the difference matters. [[Materialized]] is what the driver
-  * produces today: it reads every delta log and ships the resulting primary-key
-  * map inside each partition, which is one of the costs section 1 of
-  * docs/design/README.md lists against 1.x. [[Files]] names the delta logs and
-  * leaves the reading to the executor, which is where this is going.
-  *
-  * Modelling both keeps the current behaviour from being the only expressible
-  * one; moving over is then a change of what the planner emits, not a change to
-  * this type.
+  * [[Files]] is what the planner emits: the delete files that apply to the
+  * segment, its own and the partition's L0 ones, read on the executor by
+  * `core.read.exec.DeletePlans`. [[Materialized]] carries a plan already read;
+  * nothing on the driver produces it any more (it used to ship every
+  * primary-key map inside every partition, one of the costs section 1 of
+  * docs/design/README.md lists against 1.x), but a caller that has a plan in
+  * hand, a test above all, can still hand it over.
   */
 sealed trait DeleteSource extends Serializable {
 
-  /** The plan to apply, for a reader that evaluates deletes itself rather than
-    * reading the delta logs.
+  /** The plan, for a source that already holds one.
     *
     * [[DeleteSource.Files]] throws here on purpose. Answering with an empty
     * plan would let a reader that cannot read delta logs return deleted rows
     * with no exception and no warning, which is the failure the delete path
-    * already had once.
+    * already had once. The executor resolves files through
+    * `core.read.exec.DeletePlans`.
     */
   def materializedPlan: DeletePlan
 }
@@ -37,25 +35,19 @@ object DeleteSource {
     override def materializedPlan: DeletePlan = DeletePlan.empty
   }
 
-  /** The plan the driver already built. */
+  /** A plan already read. */
   final case class Materialized(plan: DeletePlan) extends DeleteSource {
     override def materializedPlan: DeletePlan = plan
   }
 
-  /** Delta logs to read on the executor. `entryCounts` is parallel to `paths`
-    * and lets a reader size its bitset before opening anything.
+  /** The delete files to read on the executor, each with its entry count so a
+    * reader can size what it builds before opening anything.
     */
-  final case class Files(paths: Seq[String], entryCounts: Seq[Long])
-      extends DeleteSource {
-    require(
-      paths.size == entryCounts.size,
-      s"${paths.size} delta log paths but ${entryCounts.size} entry counts"
-    )
-
+  final case class Files(files: Seq[DeltaLogFile]) extends DeleteSource {
     override def materializedPlan: DeletePlan =
       throw new UnsupportedOperationException(
-        s"these ${paths.size} delta log(s) have not been read; a reader that " +
-          "cannot read them itself needs a materialized plan from the planner"
+        s"these ${files.size} delete file(s) have not been read; " +
+          "core.read.exec.DeletePlans reads them on the executor"
       )
   }
 }
@@ -94,11 +86,12 @@ final case class SegmentReadTask(
   def appliesDeletes: Boolean = deletes match {
     case DeleteSource.None               => false
     case DeleteSource.Materialized(plan) => !plan.isEmpty
-    case DeleteSource.Files(paths, _)    => paths.nonEmpty
+    case DeleteSource.Files(files)       => files.nonEmpty
   }
 
-  /** The delete plan this partition applies. Shorthand for
-    * `deletes.materializedPlan`, which is what every reader needs today.
+  /** The plan of a source that already holds one; see
+    * [[DeleteSource.materializedPlan]]. A reader goes through
+    * `core.read.exec.DeletePlans`, which also reads files.
     */
   def deletePlan: DeletePlan = deletes.materializedPlan
 

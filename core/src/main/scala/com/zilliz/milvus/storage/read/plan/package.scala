@@ -11,7 +11,10 @@ package com.zilliz.milvus.storage.read
   *
   * `ReadPlan.of` is the planning itself: a `Snapshot` becomes one task per data
   * segment, V3 first, each with its `fs.*` map, its manifest version and the
-  * delete plans the driver read. What Spark needs on top (the vector search,
+  * delete files it applies. `DeleteFileListing.of` lists those files on the
+  * driver, opening a V3 segment's manifest to do so, and nothing on the driver
+  * reads a delete file: the executor does, through
+  * `core.read.exec.DeletePlans`. What Spark needs on top (the vector search,
   * the partition name, the option map) is put on by `spark.read`.
   *
   * `Partitioner` is not here. One segment per partition is the only strategy,
@@ -20,8 +23,9 @@ package com.zilliz.milvus.storage.read
   * partition per Milvus partition, whose worth is decision 19 in section 4 of
   * docs/design/README.md and still open, and segment selection.
   *
-  * Main types: SegmentReadTask, SegmentLayout, DeleteSource, ReadPlan.
-  * Capabilities: R3, R5, R10 (see docs/design/capabilities.md). Design:
-  * docs/design/architecture/read.html section 5.1.
+  * Main types: SegmentReadTask, SegmentLayout, DeleteSource, ReadPlan,
+  * DeleteFileListing. Capabilities: R3, R5, R10 (see
+  * docs/design/capabilities.md). Design: docs/design/architecture/read.html
+  * section 5.1.
   */
 package object plan

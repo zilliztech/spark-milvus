@@ -17,8 +17,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
-import com.zilliz.milvus.storage.read.plan.ReadPlan
+import com.zilliz.milvus.storage.read.plan.{DeleteFileListing, ReadPlan}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.{
   SegmentLayout,
@@ -26,7 +25,6 @@ import com.zilliz.milvus.storage.snapshot.{
   SnapshotOrigin
 }
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
-import com.zilliz.spark.connector.read.plan.DeletePlanning
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** One read of one [[Snapshot]]: the table resolved it once, this plans one
@@ -93,36 +91,33 @@ class MilvusScan(
     logInfo(
       s"Planning ${snapshot.segments.size} segment(s) of ${snapshot.name} from ${snapshot.origin}"
     )
-    val conf = hadoopConf
-    val v3 = DeletePlanning.loadV3DeletePlanning(
-      milvusOption,
-      snapshot,
-      bucket,
-      conf,
-      errorContext
+    // The delete files are listed here, which opens every V3 segment's
+    // manifest; none of them is read here. The store is the driver's, rooted
+    // at the snapshot's bucket.
+    val store = StorageOptions.storeFor(
+      hadoopConf,
+      bucket.getOrElse(""),
+      milvusOption.options
     )
-    val v2 =
-      DeletePlanning.loadV2DeletePlans(
-        milvusOption,
-        snapshot,
-        bucket,
-        conf,
-        errorContext
-      )
-    val inherited = DeletePlanning.loadInheritedDeletePlans(
-      milvusOption,
-      snapshot,
-      bucket,
-      conf,
-      errorContext
-    )
-    inputPartitions(
-      snapshot,
-      v3DeletePlans = v3.deletePlans,
-      v3ReadVersions = v3.readVersions,
-      v2DeletePlans = v2,
-      inheritedDeletePlansByPartition = inherited
-    )
+    val deletes =
+      try
+        DeleteFileListing
+          .of(
+            snapshot,
+            MilvusOption.readApplyDeletes(options),
+            bucket.getOrElse(""),
+            store
+          )
+          .fold(
+            e =>
+              throw new IllegalStateException(
+                s"cannot list the delete files of $errorContext: ${e.getMessage}",
+                e
+              ),
+            identity
+          )
+      finally store.close()
+    inputPartitions(snapshot, deletes)
   }
 
   /** The plan, `core.read.plan.ReadPlan.of`, wrapped into Spark's input
@@ -133,10 +128,7 @@ class MilvusScan(
     */
   private[read] def inputPartitions(
       snapshot: Snapshot,
-      v3DeletePlans: Map[Long, DeletePlan] = Map.empty,
-      v3ReadVersions: Map[Long, Long] = Map.empty,
-      v2DeletePlans: Map[Long, DeletePlan] = Map.empty,
-      inheritedDeletePlansByPartition: Map[Long, DeletePlan] = Map.empty
+      deletes: DeleteFileListing = DeleteFileListing.empty
   ): Array[InputPartition] = {
     // Every path in the snapshot is a key of `snapshot.bucket`, so that is the
     // bucket the native reader is rooted at, whatever the raw options say (a
@@ -158,12 +150,7 @@ class MilvusScan(
         case _ => StorageProperties.from(milvusOption.options)
       },
       applyDeletes = MilvusOption.readApplyDeletes(options),
-      deletes = ReadPlan.Deletes(
-        v3BySegment = v3DeletePlans,
-        v2BySegment = v2DeletePlans,
-        inheritedByPartition = inheritedDeletePlansByPartition
-      ),
-      readVersions = v3ReadVersions
+      deletes = deletes
     )
     val vectorSearch = milvusOption.vectorSearch
     plan.specs.map { task =>
@@ -179,39 +166,18 @@ class MilvusScan(
             vectorSearch.map(_.vectorColumn)
           ): InputPartition
         case SegmentLayout.ColumnGroups(_) =>
-          // The inherited (L0) plan is not shipped per partition: the
-          // partition carries the marker and the reader factory resolves it.
-          MilvusV2InputPartition(
-            task,
-            canonicalMilvusOption,
-            inheritedDeletePlanPartitionId =
-              DeltaLogReader.inheritedDeletePlanPartitionMarker(
-                task.partitionId,
-                inheritedDeletePlansByPartition
-              )
-          ): InputPartition
+          MilvusV2InputPartition(task, canonicalMilvusOption): InputPartition
       }
     }.toArray
   }
 
-  override def createReaderFactory(): PartitionReaderFactory = {
-    // The partition-scoped (L0) plans are resolved here, from the snapshot
-    // the scan holds, so the factory does not depend on planning having run.
-    val inheritedPlansByPartition = DeletePlanning.loadInheritedDeletePlans(
-      milvusOption,
-      snapshot,
-      bucket,
-      hadoopConf,
-      errorContext = "reader factory"
-    )
+  override def createReaderFactory(): PartitionReaderFactory =
     new MilvusPartitionReaderFactory(
       schema,
       options.asScala.toMap,
       pushedFilters,
-      V2InheritedDeletes(inheritedPlansByPartition),
       pushedLimit
     )
-  }
 }
 
 object MilvusScan extends Logging {
