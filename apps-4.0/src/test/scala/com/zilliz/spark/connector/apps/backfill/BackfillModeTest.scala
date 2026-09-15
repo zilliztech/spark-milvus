@@ -17,7 +17,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.milvus.storage.snapshot.{V2ColumnGroup, V2SegmentInfo}
+import com.zilliz.milvus.storage.snapshot.{Segment, V2ColumnGroup}
 import com.zilliz.milvus.storage.snapshot.json.{CollectionSchemaJson, FieldJson}
 import com.zilliz.spark.connector.options.MilvusOption
 
@@ -1236,12 +1236,11 @@ class BackfillModeTest
 
   // ============ dedupColumnGroupsBySlot ============
 
-  private def seg(groups: V2ColumnGroup*): V2SegmentInfo =
-    V2SegmentInfo(
-      segmentId = 1L,
+  private def seg(groups: V2ColumnGroup*): Segment =
+    Segment.v2(
+      id = 1L,
       partitionId = 2L,
-      numOfRows = 0L,
-      storageVersion = 2L,
+      rows = 0L,
       columnGroups = groups.toSeq
     )
 

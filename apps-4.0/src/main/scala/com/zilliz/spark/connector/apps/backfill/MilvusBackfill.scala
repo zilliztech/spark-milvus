@@ -21,6 +21,7 @@ import com.zilliz.milvus.storage.snapshot.json.{
   SegmentListJson,
   SnapshotJson
 }
+import com.zilliz.milvus.storage.snapshot.Segment
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.write.{
@@ -364,7 +365,7 @@ object MilvusBackfill {
     // parquet-footer join) so both the read path (which serializes them into
     // the DataSource option) and the write path (which dispatches per
     // segment's storage version) share the same view without hitting S3 twice.
-    val v2Segments: Seq[com.zilliz.milvus.storage.snapshot.V2SegmentInfo] =
+    val v2Segments: Seq[Segment] =
       snapshotMetadataOpt match {
         case Some(meta) if meta.manifestList.nonEmpty =>
           loadV2Segments(spark, meta, config) match {
@@ -614,7 +615,7 @@ object MilvusBackfill {
 
       // Set of segment IDs that are StorageV2 (packed-parquet, no manifest).
       // V3 segments continue to use the existing MilvusV3Writer flow.
-      val v2SegmentIdSet: Set[Long] = v2Segments.map(_.segmentId).toSet
+      val v2SegmentIdSet: Set[Long] = v2Segments.map(_.id).toSet
 
       // Process each segment
       val segmentResults = processSegments(
@@ -1104,7 +1105,7 @@ object MilvusBackfill {
       config: BackfillConfig,
       joinKey: ResolvedJoinKey,
       snapshotMetadata: Option[SnapshotJson],
-      v2Segments: Seq[com.zilliz.milvus.storage.snapshot.V2SegmentInfo],
+      v2Segments: Seq[Segment],
       extraReadFields: Seq[
         (String, Long, org.apache.spark.sql.types.StructField)
       ] = Seq.empty
@@ -1918,13 +1919,13 @@ object MilvusBackfill {
     * short-circuit dedup on every AVRO-loaded segment.
     */
   private[backfill] def dedupColumnGroupsBySlot(
-      seg: com.zilliz.milvus.storage.snapshot.V2SegmentInfo
-  ): com.zilliz.milvus.storage.snapshot.V2SegmentInfo = {
+      seg: Segment
+  ): Segment = {
     val before = seg.columnGroups
     val deduped = seg.dedupColumnGroupsBySlot
     if (before != deduped.columnGroups) {
       logger.info(
-        s"V2 dedup segment=${seg.segmentId}: removed overlapping field ids " +
+        s"V2 dedup segment=${seg.id}: removed overlapping field ids " +
           "claimed by older slots"
       )
     }
@@ -1941,9 +1942,7 @@ object MilvusBackfill {
       spark: SparkSession,
       metadata: SnapshotJson,
       config: BackfillConfig
-  ): Either[BackfillError, Seq[
-    com.zilliz.milvus.storage.snapshot.V2SegmentInfo
-  ]] = {
+  ): Either[BackfillError, Seq[Segment]] = {
     if (metadata.manifestList.isEmpty) return Right(Seq.empty)
     try {
       // Configure a private Hadoop view so FooterV2SegmentResolver can read AVRO and
@@ -2215,8 +2214,7 @@ object MilvusBackfill {
     */
   private def extractMetadataFromSnapshot(
       metadata: SnapshotJson,
-      v2Segments: Seq[com.zilliz.milvus.storage.snapshot.V2SegmentInfo] =
-        Seq.empty
+      v2Segments: Seq[Segment] = Seq.empty
   ): (Long, Map[Long, Long], Map[Long, String]) = {
     val collectionID = metadata.snapshotInfo.collectionId
 
@@ -2259,7 +2257,7 @@ object MilvusBackfill {
     // basePath — downstream dispatcher uses `v2SegmentIdSet` to pick the
     // V2-specific writer and construct per-field paths itself.
     for (seg <- v2Segments) {
-      segmentToPartitionMap += (seg.segmentId -> seg.partitionId)
+      segmentToPartitionMap += (seg.id -> seg.partitionId)
     }
 
     logger.info(

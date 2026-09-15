@@ -5,11 +5,7 @@ import java.nio.file.{Files, Paths}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.snapshot.{
-  DeltaLogFile,
-  V2ColumnGroup,
-  V2SegmentInfo
-}
+import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment, V2ColumnGroup}
 import com.zilliz.milvus.storage.snapshot.json.SegmentListJson
 
 /** Tests for [[SegmentManifestReader]] against a real milvus-produced
@@ -69,19 +65,19 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "toV2SegmentInfo joins AVRO binlog order with group_field_id_list positionally"
+    "toSegment joins AVRO binlog order with group_field_id_list positionally"
   ) {
     val entry = SegmentManifestReader.parse(avroBytes).toOption.get
     val result =
-      SegmentManifestReader.toV2SegmentInfo(
+      SegmentManifestReader.toSegment(
         entry,
         expectedGroupFieldIdList
       )
     result shouldBe a[Right[_, _]]
 
     val seg = result.toOption.get
-    seg.segmentId shouldBe 465602255560578628L
-    seg.storageVersion shouldBe 2L
+    seg.id shouldBe 465602255560578628L
+    seg.storageVersion shouldBe 2
     seg.columnGroups should have size 3
 
     // Group 0: /0/ directory carries real fields {100, 0, 1}.
@@ -105,14 +101,14 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     )
 
     // The AVRO slot id (AvroFieldBinlog.field_id) must be propagated onto
-    // V2ColumnGroup so MilvusBackfill.dedupColumnGroupsBySlot can resolve
+    // V2ColumnGroup so Segment.dedupColumnGroupsBySlot can resolve
     // multi-group fieldID conflicts. Slots match the per-group directory
     // names {0, 1, 102} for this fixture.
     seg.columnGroups.map(_.slotFieldId) shouldBe Seq(0L, 1L, 102L)
     seg.deltaLogs shouldBe empty
   }
 
-  test("toV2SegmentInfo flattens and sorts delta logs by logId") {
+  test("toSegment flattens and sorts delta logs by logId") {
     val entry = AvroManifestEntry(
       segmentId = 123L,
       partitionId = 456L,
@@ -141,7 +137,7 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     )
 
     val result =
-      SegmentManifestReader.toV2SegmentInfo(entry, Seq(Seq(100L)))
+      SegmentManifestReader.toSegment(entry, Seq(Seq(100L)))
 
     result shouldBe a[Right[_, _]]
     val seg = result.toOption.get
@@ -152,10 +148,10 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     )
   }
 
-  test("toV2SegmentInfo rejects non-StorageV2 entries") {
+  test("toSegment rejects non-StorageV2 entries") {
     val entry = SegmentManifestReader.parse(avroBytes).toOption.get
     val bogus = entry.copy(storageVersion = 0L) // StorageV1
-    val result = SegmentManifestReader.toV2SegmentInfo(bogus, Seq.empty)
+    val result = SegmentManifestReader.toSegment(bogus, Seq.empty)
     result shouldBe a[Left[_, _]]
     result.left.toOption.get.getMessage should include("storageVersion=2")
   }
@@ -168,11 +164,10 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     // when downstream code maps over the Seq (Scala emits unboxToLong). The
     // DTO stores JsonNode and converts via JsonValues.toLong on the
     // way back to hide this from callers.
-    val seg = V2SegmentInfo(
-      segmentId = 465602255560578628L,
+    val seg = Segment.v2(
+      id = 465602255560578628L,
       partitionId = 465602255560377588L,
-      numOfRows = 20480L,
-      storageVersion = 2L,
+      rows = 20480L,
       columnGroups = Seq(
         V2ColumnGroup(
           fieldIds = Seq(100L, 0L, 1L),
@@ -205,7 +200,7 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
       SegmentListJson.decodeV2Segments(json).toOption.get
     roundTripped should have size 1
     val got = roundTripped.head
-    got.segmentId shouldBe seg.segmentId
+    got.id shouldBe seg.id
     got.columnGroups(0).fieldIds shouldBe Seq(100L, 0L, 1L)
     got.columnGroups(0).fileRowCounts shouldBe Seq(20480L)
     // slotFieldId round-trips so slot-based dedup is not a silent no-op for
@@ -222,10 +217,10 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     deltaStrings shouldBe Seq("7", "9")
   }
 
-  test("toV2SegmentInfo fails when group count disagrees with AVRO") {
+  test("toSegment fails when group count disagrees with AVRO") {
     val entry = SegmentManifestReader.parse(avroBytes).toOption.get
     // AVRO has 3 binlog groups; feed a 2-group list.
-    val result = SegmentManifestReader.toV2SegmentInfo(
+    val result = SegmentManifestReader.toSegment(
       entry,
       Seq(Seq(100L, 0L, 1L), Seq(101L))
     )

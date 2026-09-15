@@ -8,11 +8,7 @@ import org.apache.avro.io.DecoderFactory
 import org.apache.avro.util.Utf8
 import org.apache.avro.Schema
 
-import com.zilliz.milvus.storage.snapshot.{
-  DeltaLogFile,
-  V2ColumnGroup,
-  V2SegmentInfo
-}
+import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment, V2ColumnGroup}
 
 /** Low-level mirror of one AVRO binlog group (`AvroFieldBinlog`):
   *   - `slotFieldId`: the value milvus writes for `AvroFieldBinlog.field_id`.
@@ -165,8 +161,8 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
   def supportedSchemaVersions: Seq[Int] = SchemaResources.keys.toSeq.sorted
 
   /** Join an AVRO entry with the segment's `group_field_id_list` kv-metadata
-    * (read from any one of the segment's parquet files) to produce the runtime
-    * `V2SegmentInfo` with real field IDs per column group.
+    * (read from any one of the segment's parquet files) to produce the
+    * `Segment` with real field IDs per column group.
     *
     * @param entry
     *   Parsed AVRO manifest (must have `storageVersion == 2L`).
@@ -175,10 +171,10 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
     *   by that group. Obtained from `ParquetFooterReader` by splitting the kv
     *   string `"100,0,1;101;102"` on `;` and then `,`.
     */
-  def toV2SegmentInfo(
+  def toSegment(
       entry: AvroManifestEntry,
       groupFieldIdList: Seq[Seq[Long]]
-  ): Either[Throwable, V2SegmentInfo] = {
+  ): Either[Throwable, Segment] = {
     if (entry.storageVersion != 2L) {
       Left(
         new IllegalArgumentException(
@@ -189,11 +185,10 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
     } else if (entry.binlogFiles.isEmpty) {
       // Empty segment — no column groups to build; downstream must handle.
       Right(
-        V2SegmentInfo(
-          segmentId = entry.segmentId,
+        Segment.v2(
+          id = entry.segmentId,
           partitionId = entry.partitionId,
-          numOfRows = entry.numOfRows,
-          storageVersion = entry.storageVersion,
+          rows = entry.numOfRows,
           columnGroups = Seq.empty,
           deltaLogs = entry.deltaLogFiles
             .flatMap(_.binlogs)
@@ -228,7 +223,7 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
             // Surface the AVRO slot id so downstream can dedup when the same
             // fieldID is claimed by multiple groups (e.g. an old multi-field
             // group at slot < 100 plus a backfill-written single-field group
-            // at slot == fieldID). See MilvusBackfill.dedupColumnGroupsBySlot.
+            // at slot == fieldID). See Segment.dedupColumnGroupsBySlot.
             slotFieldId = afb.slotFieldId
           )
         }
@@ -243,11 +238,10 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
           )
         )
       Right(
-        V2SegmentInfo(
-          segmentId = entry.segmentId,
+        Segment.v2(
+          id = entry.segmentId,
           partitionId = entry.partitionId,
-          numOfRows = entry.numOfRows,
-          storageVersion = entry.storageVersion,
+          rows = entry.numOfRows,
           columnGroups = cgs,
           deltaLogs = deltaLogs
         )

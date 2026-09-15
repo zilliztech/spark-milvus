@@ -15,7 +15,7 @@ import org.apache.parquet.io.{InputFile, SeekableInputStream}
 
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
-import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, V2SegmentInfo}
+import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment}
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
@@ -31,14 +31,14 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
   private val mapper = new ObjectMapper()
 
   def loadDeletePlansBySegment(
-      segments: Seq[V2SegmentInfo],
+      segments: Seq[Segment],
       milvusSchema: CollectionSchema,
       bucket: String,
       store: ObjectStore
   ): Either[Throwable, Map[Long, DeletePlan]] = {
     val pkField = primaryKeyField(milvusSchema)
-    val deleteOnlySegments = segments.filter(_.columnGroups.isEmpty)
-    val dataSegments = segments.filter(_.columnGroups.nonEmpty)
+    val deleteOnlySegments = segments.filterNot(_.hasData)
+    val dataSegments = segments.filter(_.hasData)
 
     for {
       globalPlans <- loadPartitionScopedDeletePlans(
@@ -50,7 +50,7 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
       ownPlans <- sequence(
         dataSegments.map { seg =>
           loadDeletePlan(seg.deltaLogs, pkField, bucket, store).map { ownPlan =>
-            seg.segmentId -> ownPlan
+            seg.id -> ownPlan
           }
         }
       )
@@ -64,7 +64,7 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
   private val AllPartitionsId = -1L
 
   def mergeInheritedDeletePlans(
-      dataSegments: Seq[V2SegmentInfo],
+      dataSegments: Seq[Segment],
       inheritedPlansByPartition: Map[Long, DeletePlan],
       ownPlansBySegment: Map[Long, DeletePlan]
   ): Map[Long, DeletePlan] = {
@@ -74,15 +74,15 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
         inheritedPlansByPartition
       )
       val ownPlan = ownPlansBySegment.getOrElse(
-        seg.segmentId,
+        seg.id,
         DeletePlan.empty
       )
-      seg.segmentId -> DeletePlan.union(inheritedPlan, ownPlan)
+      seg.id -> DeletePlan.union(inheritedPlan, ownPlan)
     }.toMap
   }
 
   def loadPartitionScopedDeletePlans(
-      deleteOnlySegments: Seq[V2SegmentInfo],
+      deleteOnlySegments: Seq[Segment],
       pkField: FieldSchema,
       bucket: String,
       store: ObjectStore

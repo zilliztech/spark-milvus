@@ -24,11 +24,11 @@ import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.{
+  Segment,
   Snapshot,
   SnapshotCatalog,
   SnapshotOrigin,
-  V2ColumnGroup,
-  V2SegmentInfo
+  V2ColumnGroup
 }
 import com.zilliz.milvus.storage.snapshot.json.{
   ManifestItemJson,
@@ -136,7 +136,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   /** A snapshot from its parts, the way every planner sees one. */
   private def snapshotOf(
       v3: Seq[ManifestItemJson] = Seq.empty,
-      v2: Seq[V2SegmentInfo] = Seq.empty,
+      v2: Seq[Segment] = Seq.empty,
       partitionIds: Seq[Long] = Seq(20L)
   ): Snapshot =
     SnapshotCatalog
@@ -277,11 +277,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       new CaseInsensitiveStringMap(options)
     )
 
-    val segment = V2SegmentInfo(
-      segmentId = 1L,
+    val segment = Segment.v2(
+      id = 1L,
       partitionId = 0L,
-      numOfRows = 10L,
-      storageVersion = 2L,
+      rows = 10L,
       columnGroups = Seq(
         V2ColumnGroup(
           fieldIds = Seq(100L),
@@ -1153,11 +1152,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   test("snapshot planner accepts V2-only snapshot segments") {
     val v2Json = SegmentListJson.encodeV2Segments(
       Seq(
-        V2SegmentInfo(
-          segmentId = 30L,
+        Segment.v2(
+          id = 30L,
           partitionId = 20L,
-          numOfRows = 1L,
-          storageVersion = 2L,
+          rows = 1L,
           columnGroups = Seq(
             V2ColumnGroup(
               fieldIds = Seq(100L),
@@ -1226,11 +1224,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       scan.ctx,
       snapshotOf(
         v2 = Seq(
-          V2SegmentInfo(
-            segmentId = 30L,
+          Segment.v2(
+            id = 30L,
             partitionId = 20L,
-            numOfRows = 1L,
-            storageVersion = 2L,
+            rows = 1L,
             columnGroups = Seq(
               V2ColumnGroup(
                 fieldIds = Seq(100L),
@@ -1239,11 +1236,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
               )
             )
           ),
-          V2SegmentInfo(
-            segmentId = 31L,
+          Segment.v2(
+            id = 31L,
             partitionId = 21L,
-            numOfRows = 1L,
-            storageVersion = 2L,
+            rows = 1L,
             columnGroups = Seq(
               V2ColumnGroup(
                 fieldIds = Seq(100L),
@@ -1281,11 +1277,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       scan.ctx,
       snapshotOf(
         v2 = Seq(
-          V2SegmentInfo(
-            segmentId = 30L,
+          Segment.v2(
+            id = 30L,
             partitionId = 20L,
-            numOfRows = 1L,
-            storageVersion = 2L,
+            rows = 1L,
             columnGroups = Seq(
               V2ColumnGroup(
                 fieldIds = Seq(100L),
@@ -1294,11 +1289,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
               )
             )
           ),
-          V2SegmentInfo(
-            segmentId = 31L,
+          Segment.v2(
+            id = 31L,
             partitionId = 21L,
-            numOfRows = 1L,
-            storageVersion = 2L,
+            rows = 1L,
             columnGroups = Seq(
               V2ColumnGroup(
                 fieldIds = Seq(100L),
@@ -1336,11 +1330,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       scan.ctx,
       snapshotOf(
         v2 = Seq(
-          V2SegmentInfo(
-            segmentId = 30L,
+          Segment.v2(
+            id = 30L,
             partitionId = 20L,
-            numOfRows = 2L,
-            storageVersion = 2L,
+            rows = 2L,
             columnGroups = Seq(
               V2ColumnGroup(
                 fieldIds = Seq(100L, 0L, 1L),

@@ -16,9 +16,9 @@ import com.zilliz.spark.connector.options.{
 }
 
 /** Backup mode: a milvus-backup binlog-format export is read offline. Its
-  * `full_meta.json` is translated into the same `V2SegmentInfo` the snapshot
-  * path uses and becomes a [[Snapshot]], so delete planning and the packed-V2
-  * reader are shared.
+  * `full_meta.json` is translated into the same `Segment` the snapshot path
+  * uses and becomes a [[Snapshot]], so delete planning and the packed-V2 reader
+  * are shared.
   */
 private[read] final class BackupPlanner(
     ctx: ScanContext,
@@ -93,8 +93,8 @@ private[read] final class BackupPlanner(
   }
 
   /** The export as a [[Snapshot]]: the selected collection's V2 segments,
-    * schema and partitions. Fails loudly on a snapshot-format backup, a
-    * missing schema, a missing primary key or an export with no data segment.
+    * schema and partitions. Fails loudly on a snapshot-format backup, a missing
+    * schema, a missing primary key or an export with no data segment.
     */
   private def snapshotFor(
       backupDir: String,
@@ -113,7 +113,7 @@ private[read] final class BackupPlanner(
       milvusOption.databaseName,
       milvusOption.collectionName
     ) match {
-      case Right(c)   => c
+      case Right(c)  => c
       case Left(msg) => throw new IllegalArgumentException(msg)
     }
     val schemaBytes = coll.schema
@@ -190,7 +190,8 @@ private[read] final class BackupPlanner(
       backupDir: String,
       hadoopConf: org.apache.hadoop.conf.Configuration,
       failure: String,
-      wrap: (String, Throwable) => RuntimeException = new IllegalArgumentException(_, _)
+      wrap: (String, Throwable) => RuntimeException =
+        new IllegalArgumentException(_, _)
   ): BackupMetaReader.BackupInfo =
     preParsedBackupMeta.getOrElse {
       BackupMetaReader.readMeta(
@@ -212,10 +213,10 @@ private[read] final class BackupPlanner(
     }
 
   /** The shared partition-scoped L0 delete plans for a backup read, from the
-    * parsed meta, independent of partition planning. Falls back to a fresh
-    * meta read when table init did not parse one, and fails loudly if that
-    * re-read also fails: otherwise a partition-scoped marker would silently
-    * resolve to an empty plan and deleted rows would come back as live.
+    * parsed meta, independent of partition planning. Falls back to a fresh meta
+    * read when table init did not parse one, and fails loudly if that re-read
+    * also fails: otherwise a partition-scoped marker would silently resolve to
+    * an empty plan and deleted rows would come back as live.
     */
   def inheritedDeletePlans(): Map[Long, DeletePlan] = {
     val backupDir = MilvusOption.backupDir(options).getOrElse {

@@ -3,26 +3,24 @@ package com.zilliz.milvus.storage.delete
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.snapshot.Segment
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
-import com.zilliz.milvus.storage.snapshot.V2SegmentInfo
 
 class DeltaLogReaderTest extends AnyFunSuite with Matchers {
   test("mergeInheritedDeletePlans keeps L0 deletes within the same partition") {
     val dataSegments = Seq(
-      V2SegmentInfo(
-        segmentId = 2L,
+      Segment.v2(
+        id = 2L,
         partitionId = 10L,
-        numOfRows = 100L,
-        storageVersion = 2L,
+        rows = 100L,
         columnGroups = Seq(
           V2ColumnGroup(Seq(100L, 1L), Seq("s3a://bucket/data-p10"), Seq(100L))
         )
       ),
-      V2SegmentInfo(
-        segmentId = 3L,
+      Segment.v2(
+        id = 3L,
         partitionId = 11L,
-        numOfRows = 100L,
-        storageVersion = 2L,
+        rows = 100L,
         columnGroups = Seq(
           V2ColumnGroup(Seq(100L, 1L), Seq("s3a://bucket/data-p11"), Seq(100L))
         )

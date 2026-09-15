@@ -6,11 +6,7 @@ import java.nio.file.{Files, Paths}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.snapshot.{
-  DeltaLogFile,
-  V2ColumnGroup,
-  V2SegmentInfo
-}
+import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment, V2ColumnGroup}
 import io.milvus.grpc.schema.{
   CollectionSchema => ProtoCollectionSchema,
   DataType
@@ -679,11 +675,10 @@ class SnapshotJsonTest extends AnyFunSuite with Matchers {
 
   test("serialize and deserialize V2 segments keeps delta logs") {
     val segments = Seq(
-      V2SegmentInfo(
-        segmentId = 10L,
+      Segment.v2(
+        id = 10L,
         partitionId = 20L,
-        numOfRows = 30L,
-        storageVersion = 2L,
+        rows = 30L,
         columnGroups = Seq(
           V2ColumnGroup(
             fieldIds = Seq(100L, 0L, 1L),

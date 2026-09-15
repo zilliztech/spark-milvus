@@ -246,11 +246,10 @@ class SnapshotCatalogTest extends AnyFunSuite {
           assert(paths == Seq("files/snapshots/10/manifests/1/40.avro"))
           Right(
             Seq(
-              V2SegmentInfo(
-                segmentId = 40L,
+              Segment.v2(
+                id = 40L,
                 partitionId = 20L,
-                numOfRows = 2L,
-                storageVersion = 2L,
+                rows = 2L,
                 columnGroups = Seq(
                   V2ColumnGroup(
                     Seq(100L, 0L, 1L),
@@ -267,11 +266,10 @@ class SnapshotCatalogTest extends AnyFunSuite {
                 ),
                 deltaLogs = Seq(DeltaLogFile(1L, "d.log", 1L))
               ),
-              V2SegmentInfo(
+              Segment.v2(
                 41L,
                 20L,
                 0L,
-                2L,
                 Seq.empty,
                 Seq(DeltaLogFile(2L, "l0.log", 3L))
               )

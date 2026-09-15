@@ -11,7 +11,7 @@ import com.zilliz.milvus.storage.manifest.{
 import com.zilliz.milvus.storage.manifest.SegmentManifestReader
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
-import com.zilliz.milvus.storage.snapshot.V2SegmentInfo
+import com.zilliz.milvus.storage.snapshot.Segment
 
 /** High-level loader for StorageV2 (non-manifest packed parquet) segments.
   *
@@ -23,9 +23,9 @@ import com.zilliz.milvus.storage.snapshot.V2SegmentInfo
   *      2` (V1/V3 are handled elsewhere). 4. For each V2 entry, reads exactly
   *      one parquet footer's `group_field_id_list` kv-metadata to recover the
   *      segment's column-group layout ([[ParquetFooterReader]]). 5. Calls
-  *      `SegmentManifestReader.toV2SegmentInfo` to join the two.
+  *      `SegmentManifestReader.toSegment` to join the two.
   *
-  * The resulting `Seq[V2SegmentInfo]` is the runtime view consumed by
+  * The resulting `Seq[Segment]` is the runtime view consumed by
   * `MilvusV2InputPartition` / `MilvusV2PartitionReader`.
   *
   * Path resolution: AVRO and parquet paths that Milvus writes are
@@ -58,9 +58,9 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
       manifestSchemaVersion: Int = 1,
       applyDeletes: Boolean = true,
       storageScheme: String = "s3a"
-  ): Either[Throwable, Seq[V2SegmentInfo]] = {
+  ): Either[Throwable, Seq[Segment]] = {
     try {
-      val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
+      val out = scala.collection.mutable.ArrayBuffer.empty[Segment]
       manifestPaths.foreach { rawPath =>
         val avroPath = StoragePath.parse(rawPath, bucket).key
         val avroBytes = store.readAll(avroPath)
@@ -74,7 +74,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
                 err
               )
           }
-        buildV2SegmentInfoFromEntry(
+        segmentFromEntry(
           entry,
           bucket,
           store,
@@ -92,8 +92,8 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
     }
   }
 
-  /** Convert one parsed AVRO entry into a runtime `V2SegmentInfo`. Extracted
-    * for unit-testability — it needs only Hadoop FS, so local parquet files + a
+  /** Convert one parsed AVRO entry into a `Segment`. Extracted for
+    * unit-testability — it needs only Hadoop FS, so local parquet files + a
     * hand-built `AvroManifestEntry` cover the full behavior matrix without
     * minio/S3.
     *
@@ -103,13 +103,13 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
     *   not StorageV2 and should be skipped; `Left(err)` with segment/slot
     *   context on any unrecoverable failure.
     */
-  def buildV2SegmentInfoFromEntry(
+  def segmentFromEntry(
       entry: AvroManifestEntry,
       bucket: String,
       store: ObjectStore,
       applyDeletes: Boolean = true,
       storageScheme: String = "s3a"
-  ): Either[Throwable, Option[V2SegmentInfo]] = {
+  ): Either[Throwable, Option[Segment]] = {
     val resolvedEntry = resolveEntryPaths(entry, bucket, storageScheme)
     val isL0 = resolvedEntry.segmentLevel == 1L
 
@@ -134,11 +134,10 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
       )
       Right(
         Some(
-          V2SegmentInfo(
-            segmentId = resolvedEntry.segmentId,
+          Segment.v2(
+            id = resolvedEntry.segmentId,
             partitionId = resolvedEntry.partitionId,
-            numOfRows = resolvedEntry.numOfRows,
-            storageVersion = resolvedEntry.storageVersion,
+            rows = resolvedEntry.numOfRows,
             columnGroups = Seq.empty,
             deltaLogs = resolvedEntry.deltaLogFiles
               .flatMap(_.binlogs)
@@ -195,7 +194,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
                 )
             }
           }
-        SegmentManifestReader.toV2SegmentInfo(
+        SegmentManifestReader.toSegment(
           resolvedEntry,
           groupFieldIdListPerEntry
         ) match {
@@ -203,7 +202,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
           case Left(err) =>
             Left(
               new RuntimeException(
-                s"failed to build V2SegmentInfo for segment ${resolvedEntry.segmentId}: " +
+                s"failed to build the segment for segment ${resolvedEntry.segmentId}: " +
                   err.getMessage,
                 err
               )

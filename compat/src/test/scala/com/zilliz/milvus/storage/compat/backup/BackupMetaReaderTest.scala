@@ -16,7 +16,7 @@ import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.snapshot.{V2ColumnGroup, V2SegmentInfo}
+import com.zilliz.milvus.storage.snapshot.{Segment, V2ColumnGroup}
 import io.milvus.grpc.schema.{CollectionSchema, DataType}
 
 /** Tests for [[BackupMetaReader]] — parses milvus-backup's `full_meta.json` and
@@ -345,7 +345,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "V2SegmentInfo.dedupColumnGroupsBySlot keeps the newest slot per field"
+    "Segment.dedupColumnGroupsBySlot keeps the newest slot per field"
   ) {
     val oldGroup = V2ColumnGroup(
       fieldIds = Seq(100L, 0L, 1L),
@@ -359,11 +359,10 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       fileRowCounts = Seq(1L),
       slotFieldId = 100L
     )
-    val seg = V2SegmentInfo(
-      segmentId = 1L,
+    val seg = Segment.v2(
+      id = 1L,
       partitionId = 1L,
-      numOfRows = 3L,
-      storageVersion = 2L,
+      rows = 3L,
       columnGroups = Seq(oldGroup, newGroup)
     )
     val deduped = seg.dedupColumnGroupsBySlot
@@ -380,13 +379,15 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       fileRowCounts = Seq(1L),
       slotFieldId = -1L
     )
-    V2SegmentInfo(
-      segmentId = 2L,
-      partitionId = 1L,
-      numOfRows = 1L,
-      storageVersion = 2L,
-      columnGroups = Seq(unknown)
-    ).dedupColumnGroupsBySlot.columnGroups shouldBe Seq(unknown)
+    Segment
+      .v2(
+        id = 2L,
+        partitionId = 1L,
+        rows = 1L,
+        columnGroups = Seq(unknown)
+      )
+      .dedupColumnGroupsBySlot
+      .columnGroups shouldBe Seq(unknown)
   }
 
   test(
@@ -407,7 +408,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       444L,
       "s3a://bucket/backup/b1"
     )
-    l0.map(_.segmentId) shouldBe Seq(888L)
+    l0.map(_.id) shouldBe Seq(888L)
     l0.head.columnGroups shouldBe Seq.empty
     l0.head.deltaLogs.map(_.logPath) shouldBe Seq(
       "s3a://bucket/backup/b1/binlogs/delta_log/444/-1/888/1"
@@ -454,7 +455,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
     )
     val segs =
       BackupMetaReader.deleteOnlySegments(meta2, 444L, "s3a://bucket/backup/b2")
-    segs.map(_.segmentId) shouldBe Seq(999L)
+    segs.map(_.id) shouldBe Seq(999L)
     segs.head.columnGroups shouldBe Seq.empty
     segs.head.deltaLogs.map(_.logPath) shouldBe Seq(
       "s3a://bucket/backup/b2/binlogs/delta_log/444/555/999/999/7"
@@ -561,10 +562,10 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         .getOrElse(fail("expected Right"))
 
       segments should have size 2
-      val seg = segments.find(_.segmentId == 777L).get
+      val seg = segments.find(_.id == 777L).get
       seg.partitionId shouldBe 555L
-      seg.numOfRows shouldBe 3L
-      seg.storageVersion shouldBe 2L
+      seg.rows shouldBe Some(3L)
+      seg.storageVersion shouldBe 2
       seg.columnGroups should have size 2
 
       // Reconstructed backup paths (groupId=777 level present for insert_log),
@@ -584,7 +585,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
       slot101.fileRowCounts shouldBe Seq(3L)
 
       // L0 delta logs reconstruct without the groupID level (partition == -1).
-      val l0 = segments.find(_.segmentId == 888L).get
+      val l0 = segments.find(_.id == 888L).get
       l0.columnGroups shouldBe empty
       l0.deltaLogs should have size 1
       l0.deltaLogs.head.logPath shouldBe
@@ -625,7 +626,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
           collectionId = 444L
         )
         .getOrElse(fail("expected Right"))
-      segments.map(_.segmentId) shouldBe Seq(777L, 888L)
+      segments.map(_.id) shouldBe Seq(777L, 888L)
 
       BackupMetaReader
         .toV2Segments(
@@ -664,7 +665,7 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
           collectionId = 444L
         )
         .getOrElse(fail("expected Right"))
-      segments.map(_.segmentId) shouldBe Seq(777L)
+      segments.map(_.id) shouldBe Seq(777L)
     } finally {
       deleteRecursively(dir)
     }
@@ -692,8 +693,8 @@ class BackupMetaReaderTest extends AnyFunSuite with Matchers {
         .toV2Segments(meta, localStore, backupDir, collectionId = 444L)
         .getOrElse(fail("expected Right"))
 
-      val seg = segments.find(_.segmentId == 777L).get
-      seg.numOfRows shouldBe 3L
+      val seg = segments.find(_.id == 777L).get
+      seg.rows shouldBe Some(3L)
       // Slot 103 spans two binlog files; per-file row counts must be recovered
       // (not group-cumulative), otherwise the packed reader silently truncates
       // the second file.

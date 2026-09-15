@@ -26,11 +26,7 @@ import com.zilliz.milvus.storage.compat.v2.FooterV2SegmentResolver
 import com.zilliz.milvus.storage.compat.ParquetFooterReader
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
-import com.zilliz.milvus.storage.snapshot.{
-  DeltaLogFile,
-  V2ColumnGroup,
-  V2SegmentInfo
-}
+import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment, V2ColumnGroup}
 import com.zilliz.milvus.storage.snapshot.json.{JsonValues, SnapshotJson}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{
@@ -52,12 +48,12 @@ import io.milvus.grpc.schema.{
   *     [[backupInsertLogPath]] / [[backupDeltaLogPath]]).
   *
   * This object translates the meta into the same runtime objects the snapshot
-  * read path consumes (`V2SegmentInfo`), so the backup can be read offline with
-  * the existing packed-V2 reader. The meta's `log_path` values are the
-  * **original Milvus source keys** — milvus-backup copies each binlog into a
-  * separate `DestKey` under the backup dir and records only the source key in
-  * the meta — so object paths are always reconstructed from `backupDir` plus
-  * the collection/partition/group/segment/field/log IDs, never taken from
+  * read path consumes (`Segment`), so the backup can be read offline with the
+  * existing packed-V2 reader. The meta's `log_path` values are the **original
+  * Milvus source keys** — milvus-backup copies each binlog into a separate
+  * `DestKey` under the backup dir and records only the source key in the meta —
+  * so object paths are always reconstructed from `backupDir` plus the
+  * collection/partition/group/segment/field/log IDs, never taken from
   * `log_path`. Three gaps vs. a Milvus snapshot are closed here:
   *   1. milvus-backup persists only `log_size` per binlog, not `entries_num`.
   *      Per-file row counts are recovered by reading each binlog's parquet
@@ -438,10 +434,10 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       }
     }
 
-  /** Build the runtime `V2SegmentInfo` list for the segments of the collection
-    * identified by `collectionId`. L0 delete-only segments keep an empty
-    * `columnGroups` so they feed the inherited delete-plan path, exactly like
-    * the snapshot reader.
+  /** Build the `Segment` list for the segments of the collection identified by
+    * `collectionId`. L0 delete-only segments keep an empty `columnGroups` so
+    * they feed the inherited delete-plan path, exactly like the snapshot
+    * reader.
     *
     * @param backupDir
     *   The full `milvus.backup.dir` (e.g. `s3a://bucket/backup/<name>` or a
@@ -460,7 +456,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       backupDir: String,
       applyDeletes: Boolean = true,
       collectionId: Long
-  ): Either[Throwable, Seq[V2SegmentInfo]] = {
+  ): Either[Throwable, Seq[Segment]] = {
     try {
       if (info.isSnapshotFormat) {
         throw new IllegalStateException(
@@ -468,7 +464,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
             "backups can be read as a datasource"
         )
       }
-      val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
+      val out = scala.collection.mutable.ArrayBuffer.empty[Segment]
       info.collectionBackups
         .filter(_.collectionId == collectionId)
         .foreach { coll =>
@@ -479,8 +475,8 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
           // large backup from stalling the driver.
           val futures = coll.allSegments.map { seg =>
             SegmentReadPool.submit(
-              new Callable[Either[Throwable, Option[V2SegmentInfo]]] {
-                override def call(): Either[Throwable, Option[V2SegmentInfo]] =
+              new Callable[Either[Throwable, Option[Segment]]] {
+                override def call(): Either[Throwable, Option[Segment]] =
                   buildV2SegmentWithStore(seg, store, backupDir, applyDeletes)
               }
             )
@@ -503,9 +499,9 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
     }
   }
 
-  /** Convert one backup segment into a `V2SegmentInfo` (or skip it), reusing
-    * the caller-supplied `FileSystem` for all footer reads (a backup read opens
-    * one FS for all segments, so per-file S3A client construction is avoided).
+  /** Convert one backup segment into a `Segment` (or skip it), reusing the
+    * caller-supplied `FileSystem` for all footer reads (a backup read opens one
+    * FS for all segments, so per-file S3A client construction is avoided).
     *
     * L0 delete-only segments are handled before any storage-version filtering:
     * Milvus creates them without a `StorageVersion` (0/omitted in the meta), so
@@ -521,7 +517,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       store: ObjectStore,
       backupDir: String,
       applyDeletes: Boolean
-  ): Either[Throwable, Option[V2SegmentInfo]] = {
+  ): Either[Throwable, Option[Segment]] = {
     if (seg.isL0) {
       if (!applyDeletes) {
         logInfo(
@@ -641,11 +637,10 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
         }
         Right(
           Some(
-            V2SegmentInfo(
-              segmentId = seg.segmentId,
+            Segment.v2(
+              id = seg.segmentId,
               partitionId = seg.partitionId,
-              numOfRows = seg.numOfRows,
-              storageVersion = seg.storageVersion,
+              rows = seg.numOfRows,
               columnGroups = columnGroups,
               deltaLogs = toDeltaLogs(seg, backupDir)
             )
@@ -660,12 +655,11 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
   private def emptyColumnGroupSegment(
       seg: SegmentBackup,
       backupDir: String
-  ): V2SegmentInfo =
-    V2SegmentInfo(
-      segmentId = seg.segmentId,
+  ): Segment =
+    Segment.v2(
+      id = seg.segmentId,
       partitionId = seg.partitionId,
-      numOfRows = seg.numOfRows,
-      storageVersion = seg.storageVersion,
+      rows = seg.numOfRows,
       columnGroups = Seq.empty,
       deltaLogs = toDeltaLogs(seg, backupDir)
     )
@@ -685,7 +679,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
         )
       )
 
-  /** Build the delete-only `V2SegmentInfo` list for a collection with no footer
+  /** Build the delete-only `Segment` list for a collection with no footer
     * reads. Used by the reader factory to compute the shared partition-scoped
     * delete plans independently of partition planning, so delete handling does
     * not depend on Spark evaluating partitions first.
@@ -702,7 +696,7 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       info: BackupInfo,
       collectionId: Long,
       backupDir: String
-  ): Seq[V2SegmentInfo] =
+  ): Seq[Segment] =
     info.collectionBackups
       .filter(_.collectionId == collectionId)
       .flatMap(_.allSegments)

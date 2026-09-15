@@ -9,8 +9,7 @@ import com.zilliz.milvus.storage.snapshot.{
   DeleteFiles,
   Segment,
   SegmentLayout,
-  Snapshot,
-  V2SegmentInfo
+  Snapshot
 }
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 
@@ -33,8 +32,16 @@ object DeletePlanning extends Logging {
     val empty: V3DeletePlanning = V3DeletePlanning(Map.empty, Map.empty)
   }
 
-  private def store(ctx: ScanContext, conf: Configuration, bucket: Option[String]) =
-    StorageOptions.storeFor(conf, bucket.getOrElse(""), ctx.milvusOption.options)
+  private def store(
+      ctx: ScanContext,
+      conf: Configuration,
+      bucket: Option[String]
+  ) =
+    StorageOptions.storeFor(
+      conf,
+      bucket.getOrElse(""),
+      ctx.milvusOption.options
+    )
 
   private def primaryKey(snapshot: Snapshot) =
     snapshot.primaryKeyField.getOrElse(
@@ -177,7 +184,7 @@ object DeletePlanning extends Logging {
     if (!applyDeletes || deleteOnly.isEmpty) Map.empty
     else {
       DeltaLogReader.loadPartitionScopedDeletePlans(
-        deleteOnly.map(asV2Info),
+        deleteOnly,
         primaryKey(snapshot),
         snapshotBucket.getOrElse(""),
         store(ctx, hadoopConf, snapshotBucket)
@@ -192,19 +199,4 @@ object DeletePlanning extends Logging {
     }
   }
 
-  /** The delta-log reader still takes the V2 record type; a delete-only
-    * segment maps onto it without loss.
-    */
-  private def asV2Info(seg: Segment): V2SegmentInfo =
-    V2SegmentInfo(
-      segmentId = seg.id,
-      partitionId = seg.partitionId,
-      numOfRows = seg.rows.getOrElse(0L),
-      storageVersion = 2L,
-      columnGroups = Seq.empty,
-      deltaLogs = seg.deletes match {
-        case DeleteFiles.Listed(files) => files
-        case _                         => Seq.empty
-      }
-    )
 }

@@ -24,7 +24,7 @@ trait V2SegmentResolver {
       bucket: String,
       store: ObjectStore,
       manifestSchemaVersion: Int
-  ): Either[Throwable, Seq[V2SegmentInfo]]
+  ): Either[Throwable, Seq[Segment]]
 }
 
 object V2SegmentResolver {
@@ -39,7 +39,7 @@ object V2SegmentResolver {
         bucket: String,
         store: ObjectStore,
         manifestSchemaVersion: Int
-    ): Either[Throwable, Seq[V2SegmentInfo]] = Right(Seq.empty)
+    ): Either[Throwable, Seq[Segment]] = Right(Seq.empty)
   }
 
   /** For a caller that knows the snapshot holds no V2 segments. */
@@ -49,7 +49,7 @@ object V2SegmentResolver {
         bucket: String,
         store: ObjectStore,
         manifestSchemaVersion: Int
-    ): Either[Throwable, Seq[V2SegmentInfo]] =
+    ): Either[Throwable, Seq[Segment]] =
       if (manifestPaths.isEmpty) Right(Seq.empty)
       else
         Left(
@@ -270,7 +270,7 @@ object SnapshotCatalog extends Logging {
       partitionIds: Seq[Long],
       schemaBytes: Array[Byte],
       v3Items: Seq[ManifestItemJson],
-      v2Segments: Seq[V2SegmentInfo],
+      v2Segments: Seq[Segment],
       bucket: String,
       origin: SnapshotOrigin
   ): Either[Throwable, Snapshot] = {
@@ -309,7 +309,7 @@ object SnapshotCatalog extends Logging {
         createdAt = createdAt,
         schema = schema,
         partitionIds = partitionIds,
-        segments = v3 ++ v2Segments.map(fromV2(_, bucket)),
+        segments = v3 ++ v2Segments.map(normalizeV2(_, bucket)),
         origin = origin
       )
     )
@@ -330,34 +330,29 @@ object SnapshotCatalog extends Logging {
     * by slot here, once, so every reader sees the same owner for a field, and
     * their file paths become keys relative to `bucket`.
     */
-  def fromV2(seg: V2SegmentInfo, bucket: String): Segment = {
+  /** A V2 segment as the read needs it: column groups deduplicated by slot and
+    * every file path a key relative to `bucket`.
+    */
+  def normalizeV2(seg: Segment, bucket: String): Segment = {
     val bySlot = seg.dedupColumnGroupsBySlot
-    val deduped = bySlot.copy(columnGroups =
-      bySlot.columnGroups.map(g =>
-        g.copy(filePaths =
-          g.filePaths.map(p =>
-            keyIn(bucket, p, s"segment ${seg.segmentId} column group")
-          )
-        )
-      )
-    )
     if (bySlot.columnGroups != seg.columnGroups) {
       logWarning(
-        s"V2 slot dedup re-attributed fields for segment ${seg.segmentId}: " +
+        s"V2 slot dedup re-attributed fields for segment ${seg.id}: " +
           "overlapping fields are now read from their max-slot group. This " +
           "assumes slot ids grow with write time; if they do not, the read " +
           "may return an older group's values."
       )
     }
-    Segment(
-      id = seg.segmentId,
-      partitionId = seg.partitionId,
-      storageVersion = 2,
-      rows = Some(seg.numOfRows),
-      layout = SegmentLayout.ColumnGroups(deduped.columnGroups),
-      deletes =
-        if (seg.deltaLogs.isEmpty) DeleteFiles.Empty
-        else DeleteFiles.Listed(seg.deltaLogs)
+    bySlot.copy(layout =
+      SegmentLayout.ColumnGroups(
+        bySlot.columnGroups.map(g =>
+          g.copy(filePaths =
+            g.filePaths.map(p =>
+              keyIn(bucket, p, s"segment ${seg.id} column group")
+            )
+          )
+        )
+      )
     )
   }
 }

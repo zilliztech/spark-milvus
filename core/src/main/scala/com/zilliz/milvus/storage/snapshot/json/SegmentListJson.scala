@@ -4,17 +4,14 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.node.LongNode
 import com.fasterxml.jackson.databind.JsonNode
 
-import com.zilliz.milvus.storage.snapshot.{
-  DeltaLogFile,
-  V2ColumnGroup,
-  V2SegmentInfo
-}
+import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment, V2ColumnGroup}
 
 /** The connector's own JSON for carrying a segment list through one Spark
   * option: `milvus.snapshot.manifests` holds `Seq[ManifestItemJson]`,
-  * `milvus.snapshot.v2.segments` holds `Seq[V2SegmentInfo]`. This is the 1.x
-  * form of a snapshot read, kept while backfill hands its own read the segments
-  * this way; it goes when `OptionSnapshotPlanner.fromOptionStrings` goes.
+  * `milvus.snapshot.v2.segments` holds `Seq[Segment]` (V2 segments). This is
+  * the 1.x form of a snapshot read, kept while backfill hands its own read the
+  * segments this way; it goes when `OptionSnapshotPlanner.fromOptionStrings`
+  * goes.
   *
   * Every number is written as a `LongNode` and read back through
   * `JsonValues.toLong`: Jackson's Scala module erases `Seq[Long]` and boxes a
@@ -30,13 +27,13 @@ object SegmentListJson {
   ): Either[Throwable, Seq[ManifestItemJson]] =
     Mapper.read[Seq[ManifestItemJson]](json)
 
-  def encodeV2Segments(segments: Seq[V2SegmentInfo]): String = {
+  def encodeV2Segments(segments: Seq[Segment]): String = {
     def long(v: Long): JsonNode = LongNode.valueOf(v)
     val items = segments.map { s =>
       V2SegmentJson(
-        rawSegmentId = Some(long(s.segmentId)),
+        rawSegmentId = Some(long(s.id)),
         rawPartitionId = Some(long(s.partitionId)),
-        rawNumOfRows = Some(long(s.numOfRows)),
+        rawNumOfRows = Some(long(s.rows.getOrElse(0L))),
         rawStorageVersion = Some(long(s.storageVersion)),
         columnGroups = s.columnGroups.map(cg =>
           V2ColumnGroupJson(
@@ -58,15 +55,14 @@ object SegmentListJson {
     Mapper.mapper.writeValueAsString(items)
   }
 
-  def decodeV2Segments(json: String): Either[Throwable, Seq[V2SegmentInfo]] =
+  def decodeV2Segments(json: String): Either[Throwable, Seq[Segment]] =
     Mapper
       .read[Seq[V2SegmentJson]](json)
       .map(_.map { d =>
-        V2SegmentInfo(
-          segmentId = d.segmentId,
+        Segment.v2(
+          id = d.segmentId,
           partitionId = d.partitionId,
-          numOfRows = d.numOfRows,
-          storageVersion = d.storageVersion,
+          rows = d.numOfRows,
           columnGroups = d.columnGroups.map(cg =>
             V2ColumnGroup(
               fieldIds = cg.fieldIds.map(JsonValues.toLong),
@@ -93,7 +89,7 @@ private[json] case class V2ColumnGroupJson(
     @JsonProperty("slot_field_id") rawSlotFieldId: Option[JsonNode] = None
 ) {
   // -1 is "slot unknown", for a list written before the field existed; the
-  // slot dedup in V2SegmentInfo is skipped for it rather than run on 0.
+  // slot dedup in Segment is skipped for it rather than run on 0.
   def slotFieldId: Long =
     rawSlotFieldId.map(JsonValues.toLong).getOrElse(-1L)
 }

@@ -29,7 +29,7 @@ import com.zilliz.milvus.storage.manifest.AvroBinlogEntry
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 
-/** Unit tests for [[FooterV2SegmentResolver.buildV2SegmentInfoFromEntry]].
+/** Unit tests for [[FooterV2SegmentResolver.segmentFromEntry]].
   *
   * Integration with S3/minio is covered by the backfill E2E test; here we
   * exercise the per-entry schema recovery, partial-empty fail-fast, and
@@ -284,7 +284,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
         )
       )
 
-      val result = FooterV2SegmentResolver.buildV2SegmentInfoFromEntry(
+      val result = FooterV2SegmentResolver.segmentFromEntry(
         manifest,
         bucket = "",
         localStore
@@ -292,7 +292,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
 
       result shouldBe a[Right[_, _]]
       val Some(seg) = result.toOption.get
-      seg.segmentId shouldBe 1001L
+      seg.id shouldBe 1001L
       seg.columnGroups.map(_.fieldIds) shouldBe Seq(Seq(100L), Seq(105L))
       seg.columnGroups.map(_.filePaths) shouldBe Seq(
         Seq(pq0.toUri.toString),
@@ -325,7 +325,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
         )
       )
 
-      val result = FooterV2SegmentResolver.buildV2SegmentInfoFromEntry(
+      val result = FooterV2SegmentResolver.segmentFromEntry(
         manifest,
         bucket = "",
         localStore
@@ -359,7 +359,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
         )
       )
 
-      val result = FooterV2SegmentResolver.buildV2SegmentInfoFromEntry(
+      val result = FooterV2SegmentResolver.segmentFromEntry(
         manifest,
         bucket = "",
         localStore
@@ -387,14 +387,14 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       )
     )
 
-    val result = FooterV2SegmentResolver.buildV2SegmentInfoFromEntry(
+    val result = FooterV2SegmentResolver.segmentFromEntry(
       manifest,
       bucket = "",
       localStore
     )
 
     val Some(seg) = result.toOption.get
-    seg.segmentId shouldBe 4004L
+    seg.id shouldBe 4004L
     seg.columnGroups shouldBe empty
   }
 
@@ -421,7 +421,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
         )
       )
 
-      val result = FooterV2SegmentResolver.buildV2SegmentInfoFromEntry(
+      val result = FooterV2SegmentResolver.segmentFromEntry(
         manifest,
         bucket = "",
         localStore,
@@ -430,7 +430,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
 
       result shouldBe a[Right[_, _]]
       val Some(seg) = result.toOption.get
-      seg.segmentId shouldBe 5005L
+      seg.id shouldBe 5005L
       seg.columnGroups.map(_.fieldIds) shouldBe Seq(Seq(100L))
       seg.deltaLogs shouldBe Seq(
         DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
@@ -449,7 +449,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       segmentLevel = 1L
     )
 
-    val result = FooterV2SegmentResolver.buildV2SegmentInfoFromEntry(
+    val result = FooterV2SegmentResolver.segmentFromEntry(
       manifest,
       bucket = "",
       localStore,
@@ -480,7 +480,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
         )
       )
 
-      val result = FooterV2SegmentResolver.buildV2SegmentInfoFromEntry(
+      val result = FooterV2SegmentResolver.segmentFromEntry(
         manifest,
         bucket = "",
         localStore,
@@ -489,7 +489,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
 
       result shouldBe a[Right[_, _]]
       val Some(seg) = result.toOption.get
-      seg.segmentId shouldBe 5007L
+      seg.id shouldBe 5007L
       seg.columnGroups.map(_.fieldIds) shouldBe Seq(Seq(100L))
       seg.deltaLogs shouldBe Seq(
         DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
@@ -506,7 +506,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       storageVersion = 3L // V3
     )
 
-    val result = FooterV2SegmentResolver.buildV2SegmentInfoFromEntry(
+    val result = FooterV2SegmentResolver.segmentFromEntry(
       manifest,
       bucket = "",
       localStore

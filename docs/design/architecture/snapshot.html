@@ -211,7 +211,7 @@ backup 的实现由 <code>spark.options</code> 在启动时注册，core 源码�
 <table>
 <tr><th>今天</th><th>之后</th><th>动作</th></tr>
 <tr><td><code>SnapshotJson</code> 及其子类（<code>core.snapshot.json</code>，JSON 的形状）</td><td>解析器的内部类型；<code>SnapshotCatalog.fromMetadata</code> 是唯一把它翻成 <code>Snapshot</code> 的地方</td><td>已做；降为 <code>private[snapshot]</code> 等 backfill 的 K2 路径删掉后</td></tr>
-<tr><td><code>ManifestItemJson</code>（V3 段）与 <code>V2SegmentInfo</code>（V2 段）</td><td>一个 <code>Segment</code></td><td>已做</td></tr>
+<tr><td><code>ManifestItemJson</code>（V3 段）与 <code>V2SegmentInfo</code>（V2 段）</td><td>一个 <code>Segment</code></td><td>已做；<code>V2SegmentInfo</code> 已删除，Avro、backup、option 串三个来源直接产 <code>Segment</code></td></tr>
 <tr><td><code>core.read.plan.SegmentLayout</code></td><td><code>core.snapshot.SegmentLayout</code></td><td>已做</td></tr>
 <tr><td><code>spark.read.plan.SnapshotPartitions.build</code>（今天 <code>Snapshot</code> 进、<code>InputPartition</code> 出）</td><td><code>core.read.plan.Partitioner</code>（<code>Snapshot</code> 进、<code>ReadPlan</code> 出），第 3 层只把 <code>SegmentReadTask</code> 包成 <code>InputPartition</code></td><td>输入已换成 <code>Snapshot</code>；下沉 core 未做</td></tr>
 <tr><td><code>spark.read.plan.DeletePlanning</code>（driver 读删除日志）</td><td>消失：删除文件位置进 <code>Segment.deletes</code>，读在 executor</td><td>输入已换成 <code>Segment.deletes</code>，三份继承删除的拷贝合成一份；下沉 executor 随 <code>DeleteSource.Files</code> 的启用</td></tr>
