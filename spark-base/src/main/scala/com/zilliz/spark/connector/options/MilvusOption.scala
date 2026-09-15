@@ -165,7 +165,7 @@ object MilvusOption {
   val BackupDir = "milvus.backup.dir"
 
   val SnapshotMode = "milvus.snapshot.mode" // "true" to enable snapshot mode
-  // JSON array of StorageV2ManifestItem. Despite the "V2" in the class name,
+  // JSON array of ManifestItemJson. Despite the "V2" in the class name,
   // these are StorageV3 loon manifests (segment-info storage_version = 3).
   // The class name + JSON wire key are historical: milvus-storage's library
   // calls its own manifest format "format v2", which collides with the
@@ -179,8 +179,8 @@ object MilvusOption {
   val SnapshotV2Segments = "milvus.snapshot.v2.segments"
 
   /** A snapshot JSON in the snapshot directory, as an `s3a://` URI or a key
-    * relative to `fs.bucket_name`. Snapshot mode without a Milvus service:
-    * the schema, the partitions and the segments all come from that file.
+    * relative to `fs.bucket_name`. Snapshot mode without a Milvus service: the
+    * schema, the partitions and the segments all come from that file.
     */
   val SnapshotPath = "milvus.snapshot.path"
   val SnapshotCollectionId = "milvus.snapshot.collection.id"
@@ -193,8 +193,9 @@ object MilvusOption {
   val ReadApplyDeletes = "milvus.read.apply.deletes"
   val ReadVectorRaw = "milvus.read.vector.raw"
   val ReadColumnar = "milvus.read.columnar"
-  /** Client mode: read the snapshot of this name from the snapshot
-    * directory instead of the latest one.
+
+  /** Client mode: read the snapshot of this name from the snapshot directory
+    * instead of the latest one.
     */
   val ClientSnapshotName = "milvus.client.snapshot.name"
 

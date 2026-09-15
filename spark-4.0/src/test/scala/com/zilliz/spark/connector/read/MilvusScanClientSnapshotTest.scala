@@ -19,27 +19,30 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.client.api.MilvusCollectionInfo
 import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.snapshot.{
-  MilvusSnapshotReader,
   Snapshot,
   SnapshotCatalog,
   SnapshotOrigin,
-  StorageV2ManifestItem,
   V2ColumnGroup,
   V2SegmentInfo
 }
+import com.zilliz.milvus.storage.snapshot.json.{
+  ManifestItemJson,
+  SegmentListJson,
+  SnapshotJson
+}
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.spark.connector.options.{
   BackupSelection,
   MilvusOption,
   StorageOptions
 }
-import com.zilliz.spark.connector.table.MilvusTable
 import com.zilliz.spark.connector.read.plan.SnapshotPartitions
-import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.spark.connector.table.MilvusTable
 
 class MilvusScanClientSnapshotTest extends AnyFunSuite {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(
@@ -121,20 +124,18 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
 
   private val vectorSnapshotSchemaBytes =
     java.util.Base64.getEncoder.encodeToString(
-      MilvusSnapshotReader
-        .toProtobufSchemaBytes(
-          MilvusSnapshotReader
-            .parseSnapshotMetadata(vectorSnapshotSchemaJson)
-            .toOption
-            .get
-            .collection
-            .schema
-        )
+      SnapshotJson
+        .parse(vectorSnapshotSchemaJson)
+        .toOption
+        .get
+        .collection
+        .schema
+        .toProtobufBytes
     )
 
   /** A snapshot from its parts, the way every planner sees one. */
   private def snapshotOf(
-      v3: Seq[StorageV2ManifestItem] = Seq.empty,
+      v3: Seq[ManifestItemJson] = Seq.empty,
       v2: Seq[V2SegmentInfo] = Seq.empty,
       partitionIds: Seq[Long] = Seq(20L)
   ): Snapshot =
@@ -250,7 +251,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       StorageOptions.backupMaxJsonBytes(
         new CaseInsensitiveStringMap(new ju.HashMap[String, String]())
       ) ==
-        MilvusSnapshotReader.MaxSnapshotJsonBytes
+        SnapshotJson.MaxBytes
     )
   }
 
@@ -1015,13 +1016,13 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   }
 
   test("snapshot planner tags V3 partitions with partition ID string") {
-    val manifestJson = MilvusSnapshotReader.serializeManifestList(
+    val manifestJson = SegmentListJson.encodeManifestItems(
       Seq(
-        StorageV2ManifestItem(
+        ManifestItemJson(
           30L,
           "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
         ),
-        StorageV2ManifestItem(
+        ManifestItemJson(
           31L,
           "{\"ver\":8,\"base_path\":\"files/insert_log/10/21/31\"}"
         )
@@ -1047,9 +1048,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   test(
     "snapshot planner falls back to default partition ID for unexpected V3 paths"
   ) {
-    val manifestJson = MilvusSnapshotReader.serializeManifestList(
+    val manifestJson = SegmentListJson.encodeManifestItems(
       Seq(
-        StorageV2ManifestItem(
+        ManifestItemJson(
           30L,
           "{\"ver\":7,\"base_path\":\"files/unexpected/10/20/30\"}"
         )
@@ -1073,12 +1074,15 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     val deletePlan = DeletePlan.fromLongPks(Map(7L -> 100L))
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      snapshotOf(v3 = Seq(
-        StorageV2ManifestItem(
-          30L,
-          "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
-        )
-      ), partitionIds = Seq(20L)),
+      snapshotOf(
+        v3 = Seq(
+          ManifestItemJson(
+            30L,
+            "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
+          )
+        ),
+        partitionIds = Seq(20L)
+      ),
       v3DeletePlans = Map(30L -> deletePlan)
     )
 
@@ -1094,12 +1098,15 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     val scan = scanWithOptions(new ju.HashMap[String, String]())
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      snapshotOf(v3 = Seq(
-        StorageV2ManifestItem(
-          30L,
-          "files/insert_log/10/20/30"
-        )
-      ), partitionIds = Seq(20L)),
+      snapshotOf(
+        v3 = Seq(
+          ManifestItemJson(
+            30L,
+            "files/insert_log/10/20/30"
+          )
+        ),
+        partitionIds = Seq(20L)
+      ),
       v3ReadVersions = Map(30L -> 11L)
     )
 
@@ -1117,16 +1124,19 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      snapshotOf(v3 = Seq(
-        StorageV2ManifestItem(
-          30L,
-          "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
+      snapshotOf(
+        v3 = Seq(
+          ManifestItemJson(
+            30L,
+            "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/30\"}"
+          ),
+          ManifestItemJson(
+            31L,
+            "{\"ver\":7,\"base_path\":\"files/insert_log/10/21/31\"}"
+          )
         ),
-        StorageV2ManifestItem(
-          31L,
-          "{\"ver\":7,\"base_path\":\"files/insert_log/10/21/31\"}"
-        )
-      ), partitionIds = Seq(20L)),
+        partitionIds = Seq(20L)
+      ),
       v3DeletePlans = Map(30L -> v3Plan),
       inheritedDeletePlansByPartition = inheritedPlans
     )
@@ -1141,7 +1151,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   }
 
   test("snapshot planner accepts V2-only snapshot segments") {
-    val v2Json = MilvusSnapshotReader.serializeV2Segments(
+    val v2Json = SegmentListJson.encodeV2Segments(
       Seq(
         V2SegmentInfo(
           segmentId = 30L,
@@ -1214,34 +1224,37 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      snapshotOf(v2 = Seq(
-        V2SegmentInfo(
-          segmentId = 30L,
-          partitionId = 20L,
-          numOfRows = 1L,
-          storageVersion = 2L,
-          columnGroups = Seq(
-            V2ColumnGroup(
-              fieldIds = Seq(100L),
-              filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
-              fileRowCounts = Seq(1L)
+      snapshotOf(
+        v2 = Seq(
+          V2SegmentInfo(
+            segmentId = 30L,
+            partitionId = 20L,
+            numOfRows = 1L,
+            storageVersion = 2L,
+            columnGroups = Seq(
+              V2ColumnGroup(
+                fieldIds = Seq(100L),
+                filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+                fileRowCounts = Seq(1L)
+              )
+            )
+          ),
+          V2SegmentInfo(
+            segmentId = 31L,
+            partitionId = 21L,
+            numOfRows = 1L,
+            storageVersion = 2L,
+            columnGroups = Seq(
+              V2ColumnGroup(
+                fieldIds = Seq(100L),
+                filePaths = Seq("files/insert_log/10/21/31/100/1.parquet"),
+                fileRowCounts = Seq(1L)
+              )
             )
           )
         ),
-        V2SegmentInfo(
-          segmentId = 31L,
-          partitionId = 21L,
-          numOfRows = 1L,
-          storageVersion = 2L,
-          columnGroups = Seq(
-            V2ColumnGroup(
-              fieldIds = Seq(100L),
-              filePaths = Seq("files/insert_log/10/21/31/100/1.parquet"),
-              fileRowCounts = Seq(1L)
-            )
-          )
-        )
-      ), partitionIds = Seq(20L)),
+        partitionIds = Seq(20L)
+      ),
       v2DeletePlans = Map(30L -> ownPlan),
       inheritedDeletePlansByPartition = inheritedPlans
     )
@@ -1266,34 +1279,37 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
 
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      snapshotOf(v2 = Seq(
-        V2SegmentInfo(
-          segmentId = 30L,
-          partitionId = 20L,
-          numOfRows = 1L,
-          storageVersion = 2L,
-          columnGroups = Seq(
-            V2ColumnGroup(
-              fieldIds = Seq(100L),
-              filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
-              fileRowCounts = Seq(1L)
+      snapshotOf(
+        v2 = Seq(
+          V2SegmentInfo(
+            segmentId = 30L,
+            partitionId = 20L,
+            numOfRows = 1L,
+            storageVersion = 2L,
+            columnGroups = Seq(
+              V2ColumnGroup(
+                fieldIds = Seq(100L),
+                filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+                fileRowCounts = Seq(1L)
+              )
+            )
+          ),
+          V2SegmentInfo(
+            segmentId = 31L,
+            partitionId = 21L,
+            numOfRows = 1L,
+            storageVersion = 2L,
+            columnGroups = Seq(
+              V2ColumnGroup(
+                fieldIds = Seq(100L),
+                filePaths = Seq("files/insert_log/10/21/31/100/1.parquet"),
+                fileRowCounts = Seq(1L)
+              )
             )
           )
         ),
-        V2SegmentInfo(
-          segmentId = 31L,
-          partitionId = 21L,
-          numOfRows = 1L,
-          storageVersion = 2L,
-          columnGroups = Seq(
-            V2ColumnGroup(
-              fieldIds = Seq(100L),
-              filePaths = Seq("files/insert_log/10/21/31/100/1.parquet"),
-              fileRowCounts = Seq(1L)
-            )
-          )
-        )
-      ), partitionIds = Seq(20L)),
+        partitionIds = Seq(20L)
+      ),
       v2DeletePlans = Map(30L -> ownPlan),
       inheritedDeletePlansByPartition = inheritedPlans,
       inlineInheritedDeletePlans = true
@@ -1318,28 +1334,31 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     // must strip the overlapping field from the older slot.
     val partitions = SnapshotPartitions.build(
       scan.ctx,
-      snapshotOf(v2 = Seq(
-        V2SegmentInfo(
-          segmentId = 30L,
-          partitionId = 20L,
-          numOfRows = 2L,
-          storageVersion = 2L,
-          columnGroups = Seq(
-            V2ColumnGroup(
-              fieldIds = Seq(100L, 0L, 1L),
-              filePaths = Seq("files/insert_log/10/20/30/3/1.parquet"),
-              fileRowCounts = Seq(2L),
-              slotFieldId = 3L
-            ),
-            V2ColumnGroup(
-              fieldIds = Seq(100L),
-              filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
-              fileRowCounts = Seq(2L),
-              slotFieldId = 100L
+      snapshotOf(
+        v2 = Seq(
+          V2SegmentInfo(
+            segmentId = 30L,
+            partitionId = 20L,
+            numOfRows = 2L,
+            storageVersion = 2L,
+            columnGroups = Seq(
+              V2ColumnGroup(
+                fieldIds = Seq(100L, 0L, 1L),
+                filePaths = Seq("files/insert_log/10/20/30/3/1.parquet"),
+                fileRowCounts = Seq(2L),
+                slotFieldId = 3L
+              ),
+              V2ColumnGroup(
+                fieldIds = Seq(100L),
+                filePaths = Seq("files/insert_log/10/20/30/100/1.parquet"),
+                fileRowCounts = Seq(2L),
+                slotFieldId = 100L
+              )
             )
           )
-        )
-      ), partitionIds = Seq(20L)),
+        ),
+        partitionIds = Seq(20L)
+      ),
       inheritedDeletePlansByPartition = Map.empty,
       inlineInheritedDeletePlans = true
     )
@@ -1356,4 +1375,3 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(groups.find(_.slotFieldId == 100L).get.fieldIds == Seq(100L))
   }
 }
-

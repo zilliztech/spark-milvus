@@ -7,8 +7,8 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** How the driver reaches object storage from the options it was given.
@@ -206,7 +206,7 @@ object StorageOptions extends Logging {
     parsePositiveLongOption(
       options,
       MilvusOption.SnapshotMaxJsonBytes,
-      MilvusSnapshotReader.MaxSnapshotJsonBytes
+      SnapshotJson.MaxBytes
     )
 
   /** Build a Hadoop `Configuration` for reading objects referenced by a

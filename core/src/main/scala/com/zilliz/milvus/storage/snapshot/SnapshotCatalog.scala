@@ -2,17 +2,21 @@ package com.zilliz.milvus.storage.snapshot
 
 import java.nio.charset.StandardCharsets
 
-import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema}
-
-import com.zilliz.milvus.storage.Logging
 import com.zilliz.milvus.storage.io.{FileInfo, ObjectStore}
 import com.zilliz.milvus.storage.path.StoragePath
+import com.zilliz.milvus.storage.snapshot.json.{
+  ManifestContentJson,
+  ManifestItemJson,
+  SnapshotJson
+}
+import com.zilliz.milvus.storage.Logging
+import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema}
 
 /** Materializes the V2 packed segments a snapshot lists.
   *
   * A V2 segment has no manifest: its column groups come from the snapshot's
-  * Avro plus each parquet footer. That code is `compat.v2`, which core
-  * must not depend on (capability K1), so the catalog is handed the resolver.
+  * Avro plus each parquet footer. That code is `compat.v2`, which core must not
+  * depend on (capability K1), so the catalog is handed the resolver.
   */
 trait V2SegmentResolver {
   def resolve(
@@ -25,9 +29,9 @@ trait V2SegmentResolver {
 
 object V2SegmentResolver {
 
-  /** For a caller that needs the snapshot's schema and partitions only: the
-    * V2 segments are left out rather than materialized. The resulting
-    * `Snapshot` must not be planned against.
+  /** For a caller that needs the snapshot's schema and partitions only: the V2
+    * segments are left out rather than materialized. The resulting `Snapshot`
+    * must not be planned against.
     */
   val Skipped: V2SegmentResolver = new V2SegmentResolver {
     def resolve(
@@ -56,8 +60,8 @@ object V2SegmentResolver {
   }
 }
 
-/** The main read entry point: snapshots Milvus wrote to the snapshot
-  * directory, read through `core.io.ObjectStore`.
+/** The main read entry point: snapshots Milvus wrote to the snapshot directory,
+  * read through `core.io.ObjectStore`.
   *
   * Layout, written by DataCoord:
   * {{{
@@ -68,18 +72,18 @@ object V2SegmentResolver {
   * @param store
   *   bound to `bucket`; keys handed to it are bucket-relative
   * @param bucket
-  *   the bucket every relative path in the snapshot resolves against; empty
-  *   for a local store
+  *   the bucket every relative path in the snapshot resolves against; empty for
+  *   a local store
   */
 final class SnapshotCatalog(
     store: ObjectStore,
     bucket: String,
     v2: V2SegmentResolver,
-    maxJsonBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
+    maxJsonBytes: Long = SnapshotJson.MaxBytes
 ) extends Logging {
 
-  /** The snapshot at `location`: a bucket-relative key, or a `s3a://` /
-    * `s3://` URI whose bucket must match this catalog's.
+  /** The snapshot at `location`: a bucket-relative key, or a `s3a://` / `s3://`
+    * URI whose bucket must match this catalog's.
     */
   def read(location: String): Snapshot = {
     val located = StoragePath.parse(location, bucket)
@@ -96,7 +100,7 @@ final class SnapshotCatalog(
       )
     }
     val json = new String(store.readAll(key), StandardCharsets.UTF_8)
-    val metadata = MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+    val metadata = SnapshotJson.parse(json) match {
       case Right(m) => m
       case Left(e) =>
         throw new IllegalArgumentException(
@@ -124,7 +128,8 @@ final class SnapshotCatalog(
   def list(rootPath: String, collectionId: Long): Seq[FileInfo] = {
     val prefix = SnapshotCatalog.metadataPrefix(rootPath, collectionId)
     if (!store.exists(prefix)) Seq.empty
-    else store.list(prefix).filter(f => !f.isDirectory && f.path.endsWith(".json"))
+    else
+      store.list(prefix).filter(f => !f.isDirectory && f.path.endsWith(".json"))
   }
 
   /** The snapshot with the latest `create_ts`. */
@@ -156,7 +161,8 @@ final class SnapshotCatalog(
     val candidates = files.map(f => read(f.path)).filter(keep)
     if (candidates.isEmpty) {
       throw new IllegalArgumentException(
-        s"no snapshot $what among ${files.size} under ${SnapshotCatalog.metadataPrefix(rootPath, collectionId)}"
+        s"no snapshot $what among ${files.size} under ${SnapshotCatalog
+            .metadataPrefix(rootPath, collectionId)}"
       )
     }
     candidates.maxBy(_.createdAt.getOrElse(Long.MinValue))
@@ -171,11 +177,11 @@ object SnapshotCatalog extends Logging {
     s"${head}snapshots/$collectionId/metadata/"
   }
 
-  /** Segment id of a V3 manifest entry: the id the entry carries, else the
-    * last path element of its base path, else 0.
+  /** Segment id of a V3 manifest entry: the id the entry carries, else the last
+    * path element of its base path, else 0.
     */
   def segmentIdForManifestItem(
-      item: StorageV2ManifestItem,
+      item: ManifestItemJson,
       basePath: String
   ): Long =
     if (item.segmentID != 0L) item.segmentID
@@ -187,8 +193,8 @@ object SnapshotCatalog extends Logging {
         catch { case _: NumberFormatException => 0L }
     }
 
-  /** Partition id of a V3 segment from its base path, which Milvus lays out
-    * as `.../insert_log/{collectionId}/{partitionId}/{segmentId}`.
+  /** Partition id of a V3 segment from its base path, which Milvus lays out as
+    * `.../insert_log/{collectionId}/{partitionId}/{segmentId}`.
     */
   def partitionIdFromBasePath(basePath: String): Option[Long] = {
     val parts = basePath.split("/").filter(_.nonEmpty)
@@ -204,7 +210,7 @@ object SnapshotCatalog extends Logging {
     * or schema, or listing no segments at all, is rejected.
     */
   def fromMetadata(
-      metadata: SnapshotMetadata,
+      metadata: SnapshotJson,
       origin: SnapshotOrigin,
       store: ObjectStore,
       bucket: String,
@@ -212,8 +218,10 @@ object SnapshotCatalog extends Logging {
   ): Either[Throwable, Snapshot] = {
     def bad(msg: String) = Left(new IllegalArgumentException(msg))
     if (metadata == null) return bad("snapshot metadata is missing")
-    if (metadata.snapshotInfo == null) return bad("snapshot is missing snapshot_info")
-    if (metadata.collection == null) return bad("snapshot is missing collection")
+    if (metadata.snapshotInfo == null)
+      return bad("snapshot is missing snapshot_info")
+    if (metadata.collection == null)
+      return bad("snapshot is missing collection")
     if (metadata.collection.schema == null)
       return bad("snapshot is missing collection.schema")
     val v3Items = metadata.storageV2ManifestList.getOrElse(Seq.empty)
@@ -230,7 +238,7 @@ object SnapshotCatalog extends Logging {
       case Left(e)     => return Left(e)
     }
     val schemaBytes =
-      try MilvusSnapshotReader.toProtobufSchemaBytes(metadata.collection.schema)
+      try metadata.collection.schema.toProtobufBytes
       catch { case e: Exception => return Left(e) }
     val info = metadata.snapshotInfo
     fromLists(
@@ -246,14 +254,14 @@ object SnapshotCatalog extends Logging {
     )
   }
 
-  /** A [[Snapshot]] from its parts, for every source that already holds the
-    * V3 manifest entries and the materialized V2 segments: the snapshot JSON,
-    * the 1.x option strings, a backup export.
+  /** A [[Snapshot]] from its parts, for every source that already holds the V3
+    * manifest entries and the materialized V2 segments: the snapshot JSON, the
+    * 1.x option strings, a backup export.
     *
-    * Every path in a [[Segment]] is a key relative to `bucket`, because that
-    * is what the native reader takes (it is rooted at `fs.bucket_name` and
-    * appends what it is given). Sources hand paths in whatever spelling they
-    * use; a path in another bucket is an error here, not a wrong read later.
+    * Every path in a [[Segment]] is a key relative to `bucket`, because that is
+    * what the native reader takes (it is rooted at `fs.bucket_name` and appends
+    * what it is given). Sources hand paths in whatever spelling they use; a
+    * path in another bucket is an error here, not a wrong read later.
     */
   def fromLists(
       name: String,
@@ -261,7 +269,7 @@ object SnapshotCatalog extends Logging {
       createdAt: Option[Long],
       partitionIds: Seq[Long],
       schemaBytes: Array[Byte],
-      v3Items: Seq[StorageV2ManifestItem],
+      v3Items: Seq[ManifestItemJson],
       v2Segments: Seq[V2SegmentInfo],
       bucket: String,
       origin: SnapshotOrigin
@@ -269,11 +277,12 @@ object SnapshotCatalog extends Logging {
     val defaultPartition = partitionIds.headOption
     val v3 = v3Items.map { item =>
       val (rawBasePath, version) =
-        MilvusSnapshotReader.parseManifestContent(item.manifest) match {
+        ManifestContentJson.parse(item.manifest) match {
           case Right(content) => (content.basePath, content.ver.toLong)
           case Left(_)        => (item.manifest, -1L)
         }
-      val basePath = keyIn(bucket, rawBasePath, s"segment ${item.segmentID} manifest")
+      val basePath =
+        keyIn(bucket, rawBasePath, s"segment ${item.segmentID} manifest")
       val partitionId = partitionIdFromBasePath(basePath).getOrElse {
         logWarning(
           s"manifest path '$basePath' does not match insert_log/{collectionId}/{partitionId}/{segmentId}; " +
@@ -326,7 +335,9 @@ object SnapshotCatalog extends Logging {
     val deduped = bySlot.copy(columnGroups =
       bySlot.columnGroups.map(g =>
         g.copy(filePaths =
-          g.filePaths.map(p => keyIn(bucket, p, s"segment ${seg.segmentId} column group"))
+          g.filePaths.map(p =>
+            keyIn(bucket, p, s"segment ${seg.segmentId} column group")
+          )
         )
       )
     )

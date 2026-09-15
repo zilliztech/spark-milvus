@@ -6,18 +6,18 @@ import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.snapshot.{
-  MilvusSnapshotReader,
   Snapshot,
   SnapshotCatalog,
   SnapshotOrigin
 }
+import com.zilliz.milvus.storage.snapshot.json.SegmentListJson
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 
 /** Snapshot mode: no Milvus service is contacted. The snapshot is either the
-  * JSON at `milvus.snapshot.path`, read through [[SnapshotCatalog]], or the
-  * 1.x form where the manifest list and the V2 segment list arrive as option
-  * strings (capability K2, deleted; the code stays until backfill's source
-  * read moves to the catalog).
+  * JSON at `milvus.snapshot.path`, read through [[SnapshotCatalog]], or the 1.x
+  * form where the manifest list and the V2 segment list arrive as option
+  * strings (capability K2, deleted; the code stays until backfill's source read
+  * moves to the catalog).
   */
 private[read] final class OptionSnapshotPlanner(ctx: ScanContext)
     extends PartitionPlanner(ctx) {
@@ -84,7 +84,7 @@ object OptionSnapshotPlanner {
     val v3Items =
       if (manifestsJson.isEmpty) Seq.empty
       else
-        MilvusSnapshotReader.deserializeManifestList(manifestsJson) match {
+        SegmentListJson.decodeManifestItems(manifestsJson) match {
           case Right(list) => list
           case Left(e) =>
             throw new IllegalArgumentException(
@@ -95,7 +95,7 @@ object OptionSnapshotPlanner {
     val v2Segments = Option(options.get(MilvusOption.SnapshotV2Segments))
       .filter(_.nonEmpty)
       .map { json =>
-        MilvusSnapshotReader.deserializeV2Segments(json) match {
+        SegmentListJson.decodeV2Segments(json) match {
           case Right(segs) => segs
           case Left(e) =>
             throw new IllegalArgumentException(
@@ -124,7 +124,9 @@ object OptionSnapshotPlanner {
       schemaBytes = schemaBytes,
       v3Items = v3Items,
       v2Segments = v2Segments,
-      bucket = StorageOptions.connectorS3BucketOption(options.asScala.toMap).getOrElse(""),
+      bucket = StorageOptions
+        .connectorS3BucketOption(options.asScala.toMap)
+        .getOrElse(""),
       origin = SnapshotOrigin.Options
     ) match {
       case Right(s) => s

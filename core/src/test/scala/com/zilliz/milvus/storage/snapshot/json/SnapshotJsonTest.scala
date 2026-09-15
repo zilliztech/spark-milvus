@@ -1,39 +1,44 @@
-package com.zilliz.spark.connector.table
+package com.zilliz.milvus.storage.snapshot.json
+
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Paths}
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.milvus.storage.snapshot.{Field, V2SegmentInfo}
 import com.zilliz.milvus.storage.snapshot.{
-  TypeParam,
+  DeltaLogFile,
   V2ColumnGroup,
-  V2DeltaLogFile
+  V2SegmentInfo
 }
-import com.zilliz.milvus.storage.snapshot.MilvusSnapshotReader
-import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import io.milvus.grpc.schema.{
   CollectionSchema => ProtoCollectionSchema,
   DataType
 }
 
-/** Test suite for MilvusSnapshotReader
+/** The snapshot JSON shapes, parsed from strings and from the sample file, and
+  * the option-string codec.
   */
-class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
+class SnapshotJsonTest extends AnyFunSuite with Matchers {
 
-  private val snapshotFilePath = "spark-4.0/src/test/data/sample_snapshot.json"
+  private val snapshotFilePath = "core/src/test/data/sample_snapshot.json"
+
+  private def readFile(path: String): Either[Throwable, SnapshotJson] =
+    SnapshotJson.parse(
+      new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8)
+    )
 
   test("readUtf8WithLimit reads utf8 content within limit") {
     val bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8)
     val in = new java.io.ByteArrayInputStream(bytes)
-    MilvusSnapshotReader.readUtf8WithLimit(in, "memory", 10) shouldBe "hello"
+    SnapshotJson.readUtf8WithLimit(in, "memory", 10) shouldBe "hello"
   }
 
   test("readUtf8WithLimit rejects content beyond limit") {
     val bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8)
     val in = new java.io.ByteArrayInputStream(bytes)
     val err = intercept[IllegalArgumentException] {
-      MilvusSnapshotReader.readUtf8WithLimit(in, "memory", 4)
+      SnapshotJson.readUtf8WithLimit(in, "memory", 4)
     }
     err.getMessage should include("exceeds")
   }
@@ -42,14 +47,14 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     val bytes = "hello".getBytes(java.nio.charset.StandardCharsets.UTF_8)
     val in = new java.io.ByteArrayInputStream(bytes)
     val err = intercept[IllegalArgumentException] {
-      MilvusSnapshotReader.readUtf8WithLimit(in, "memory", -1)
+      SnapshotJson.readUtf8WithLimit(in, "memory", -1)
     }
     err.getMessage should include("must be positive")
   }
 
   test("Parse complete snapshot metadata successfully") {
     val result =
-      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+      readFile(snapshotFilePath)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
@@ -88,7 +93,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
   test("Parse collection schema successfully") {
     val result =
-      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+      readFile(snapshotFilePath)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
@@ -175,7 +180,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     """
 
     val metadata =
-      MilvusSnapshotReader.parseSnapshotMetadata(json).toOption.get
+      SnapshotJson.parse(json).toOption.get
 
     metadata.collection.schema.version shouldBe 7
   }
@@ -186,10 +191,14 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       try source.mkString
       finally source.close()
 
-    val result = MilvusSnapshotReader.getPkName(json)
-
-    result shouldBe a[Right[_, _]]
-    result.toOption.get shouldBe "id"
+    SnapshotJson
+      .parse(json)
+      .toOption
+      .get
+      .collection
+      .schema
+      .primaryKey
+      .map(_.name) shouldBe Some("id")
   }
 
   test("Get primary key name fails when no primary key exists") {
@@ -219,12 +228,13 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     }
     """
 
-    val result = MilvusSnapshotReader.getPkName(jsonWithoutPk)
-
-    result shouldBe a[Left[_, _]]
-    result.left.toOption.get.getMessage should include(
-      "No primary key field found"
-    )
+    SnapshotJson
+      .parse(jsonWithoutPk)
+      .toOption
+      .get
+      .collection
+      .schema
+      .primaryKey shouldBe None
   }
 
   test("Parse consistency_level from snapshot JSON") {
@@ -257,7 +267,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     """
 
     val result =
-      MilvusSnapshotReader.parseSnapshotMetadata(jsonWithConsistencyLevel)
+      SnapshotJson.parse(jsonWithConsistencyLevel)
 
     result shouldBe a[Right[_, _]]
     result.toOption.get.collection.consistencyLevel shouldBe Some(2)
@@ -294,7 +304,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     """
 
     val result =
-      MilvusSnapshotReader.parseSnapshotMetadata(jsonWithUnknownFields)
+      SnapshotJson.parse(jsonWithUnknownFields)
 
     result shouldBe a[Right[_, _]]
     result.toOption.get.snapshotInfo.name shouldBe "test"
@@ -329,7 +339,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     """
 
     val metadata =
-      MilvusSnapshotReader.parseSnapshotMetadata(json).toOption.get
+      SnapshotJson.parse(json).toOption.get
 
     metadata.manifestSchemaVersion shouldBe 1
   }
@@ -364,7 +374,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     """
 
     val metadata =
-      MilvusSnapshotReader.parseSnapshotMetadata(json).toOption.get
+      SnapshotJson.parse(json).toOption.get
 
     metadata.manifestSchemaVersion shouldBe 4
   }
@@ -399,7 +409,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     """
 
     val metadata =
-      MilvusSnapshotReader.parseSnapshotMetadata(json).toOption.get
+      SnapshotJson.parse(json).toOption.get
 
     metadata.manifestSchemaVersion shouldBe 1
   }
@@ -435,16 +445,8 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     val jsonV3 =
       jsonV2.replace("\"format_version\": 2", "\"format_version\": 3")
 
-    MilvusSnapshotReader
-      .parseSnapshotMetadata(jsonV2)
-      .toOption
-      .get
-      .manifestSchemaVersion shouldBe 2
-    MilvusSnapshotReader
-      .parseSnapshotMetadata(jsonV3)
-      .toOption
-      .get
-      .manifestSchemaVersion shouldBe 3
+    SnapshotJson.parse(jsonV2).toOption.get.manifestSchemaVersion shouldBe 2
+    SnapshotJson.parse(jsonV3).toOption.get.manifestSchemaVersion shouldBe 3
   }
 
   test(
@@ -517,7 +519,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     }
     """
 
-    val result = MilvusSnapshotReader.parseSnapshotMetadata(json)
+    val result = SnapshotJson.parse(json)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
@@ -581,7 +583,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     }
     """
 
-    val result = MilvusSnapshotReader.parseSnapshotMetadata(json)
+    val result = SnapshotJson.parse(json)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
@@ -594,10 +596,14 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("Get Storage V2 manifest map from snapshot file") {
-    val result = MilvusSnapshotReader.getStorageV2ManifestMap(snapshotFilePath)
-
-    result shouldBe a[Right[_, _]]
-    val manifestMap = result.toOption.get
+    val manifestMap = readFile(
+      snapshotFilePath
+    ).toOption.get.storageV2ManifestList
+      .getOrElse(Seq.empty)
+      .map(item =>
+        item.segmentID -> ManifestContentJson.parse(item.manifest).toOption.get
+      )
+      .toMap
 
     // Verify map contains the expected segment ID
     manifestMap should contain key 462416429317820786L
@@ -611,74 +617,14 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     manifestMap should have size 1
   }
 
-  test(
-    "Convert snapshot schema to Spark StructType (excluding system fields)"
-  ) {
-    import org.apache.spark.sql.types._
-
-    val result =
-      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
-    result shouldBe a[Right[_, _]]
-    val metadata = result.toOption.get
-
-    // Convert to Spark schema without system fields
-    val sparkSchema = SnapshotSparkSchema.toSparkSchema(
-      metadata.collection.schema,
-      includeSystemFields = false
-    )
-
-    // Should have 5 user fields (excluding RowID and Timestamp)
-    sparkSchema.fields should have size 5
-
-    // Verify field names and types
-    val fieldNames = sparkSchema.fields.map(_.name)
-    fieldNames should contain allOf ("id", "int64", "float", "varchar", "vector")
-    fieldNames should not contain "RowID"
-    fieldNames should not contain "Timestamp"
-
-    // Verify data types
-    sparkSchema("id").dataType shouldBe LongType
-    sparkSchema("int64").dataType shouldBe LongType
-    sparkSchema("float").dataType shouldBe FloatType
-    sparkSchema("varchar").dataType shouldBe StringType
-    sparkSchema("vector").dataType shouldBe ArrayType(FloatType)
-    sparkSchema("vector").metadata.getLong(
-      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusDataTypeMetadataKey
-    ) shouldBe 101L
-  }
-
-  test(
-    "Convert snapshot schema to Spark StructType (including system fields)"
-  ) {
-    import org.apache.spark.sql.types._
-
-    val result =
-      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
-    result shouldBe a[Right[_, _]]
-    val metadata = result.toOption.get
-
-    // Convert to Spark schema with system fields
-    val sparkSchema = SnapshotSparkSchema.toSparkSchema(
-      metadata.collection.schema,
-      includeSystemFields = true
-    )
-
-    // Should have 7 fields (including RowID and Timestamp)
-    sparkSchema.fields should have size 7
-
-    // Verify field names
-    val fieldNames = sparkSchema.fields.map(_.name)
-    fieldNames should contain allOf ("id", "int64", "float", "varchar", "vector", "RowID", "Timestamp")
-  }
-
   test("Get field ID to name mapping") {
     val result =
-      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+      readFile(snapshotFilePath)
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
 
     val fieldIdMap =
-      MilvusSnapshotReader.getFieldIdMap(metadata.collection.schema)
+      metadata.collection.schema.fieldNamesById
 
     // Verify mappings
     fieldIdMap(100L) shouldBe "id"
@@ -692,12 +638,12 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
   test("Get field name to ID mapping") {
     val result =
-      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+      readFile(snapshotFilePath)
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
 
     val fieldNameToIdMap =
-      MilvusSnapshotReader.getFieldNameToIdMap(metadata.collection.schema)
+      metadata.collection.schema.fieldIdsByName
 
     // Verify mappings
     fieldNameToIdMap("id") shouldBe 100L
@@ -711,17 +657,17 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
 
   test("Serialize and deserialize manifest list") {
     val result =
-      MilvusSnapshotReader.readSnapshotMetadataFromFile(snapshotFilePath)
+      readFile(snapshotFilePath)
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
     val originalManifestList = metadata.storageV2ManifestList.get
 
     // Serialize
-    val json = MilvusSnapshotReader.serializeManifestList(originalManifestList)
+    val json = SegmentListJson.encodeManifestItems(originalManifestList)
     json should not be empty
 
     // Deserialize
-    val deserializeResult = MilvusSnapshotReader.deserializeManifestList(json)
+    val deserializeResult = SegmentListJson.decodeManifestItems(json)
     deserializeResult shouldBe a[Right[_, _]]
     val deserializedList = deserializeResult.toOption.get
 
@@ -746,12 +692,12 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
           )
         ),
         deltaLogs = Seq(
-          V2DeltaLogFile(
+          DeltaLogFile(
             logId = 9L,
             logPath = "files/delete_log/.../9",
             entriesNum = 2L
           ),
-          V2DeltaLogFile(
+          DeltaLogFile(
             logId = 11L,
             logPath = "files/delete_log/.../11",
             entriesNum = 1L
@@ -760,10 +706,10 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
       )
     )
 
-    val json = MilvusSnapshotReader.serializeV2Segments(segments)
+    val json = SegmentListJson.encodeV2Segments(segments)
     json should not be empty
 
-    val result = MilvusSnapshotReader.deserializeV2Segments(json)
+    val result = SegmentListJson.decodeV2Segments(json)
     result shouldBe a[Right[_, _]]
     val roundTripped = result.toOption.get
 
@@ -779,7 +725,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     val json =
       """[{"segment_id":1,"partition_id":1,"num_of_rows":1,"storage_version":2,""" +
         """"column_groups":[{"field_ids":[100],"file_paths":["p"],"file_row_counts":[1]}]}]"""
-    val segs = MilvusSnapshotReader.deserializeV2Segments(json).toOption.get
+    val segs = SegmentListJson.decodeV2Segments(json).toOption.get
     segs.head.columnGroups.head.slotFieldId shouldBe -1L
   }
 
@@ -834,7 +780,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     """
 
     val result =
-      MilvusSnapshotReader.parseSnapshotMetadata(jsonWithStringDataType)
+      SnapshotJson.parse(jsonWithStringDataType)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
@@ -882,7 +828,7 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     """
 
     val result =
-      MilvusSnapshotReader.parseSnapshotMetadata(jsonWithMixedDataType)
+      SnapshotJson.parse(jsonWithMixedDataType)
 
     result shouldBe a[Right[_, _]]
     val metadata = result.toOption.get
@@ -943,14 +889,9 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     }
     """
 
-    val schema = MilvusSnapshotReader
-      .parseSnapshotMetadata(json)
-      .toOption
-      .get
-      .collection
-      .schema
+    val schema = SnapshotJson.parse(json).toOption.get.collection.schema
     val proto = ProtoCollectionSchema.parseFrom(
-      MilvusSnapshotReader.toProtobufSchemaBytes(schema)
+      schema.toProtobufBytes
     )
 
     proto.name shouldBe "test"
@@ -978,147 +919,5 @@ class MilvusSnapshotReaderTest extends AnyFunSuite with Matchers {
     val dyn = proto.fields.find(_.name == "dyn").get
     dyn.dataType shouldBe DataType.JSON
     dyn.isDynamic shouldBe true
-  }
-
-  test("toSparkSchema uses array element type and snapshot nullable flag") {
-    val json = """
-    {
-      "snapshot-info": {
-        "name": "test",
-        "id": 1,
-        "collection_id": 1,
-        "partition_ids": [1],
-        "create_ts": 1
-      },
-      "collection": {
-        "schema": {
-          "name": "test",
-          "fields": [
-            {
-              "fieldID": 100,
-              "name": "id",
-              "data_type": "Int64",
-              "nullable": false
-            },
-            {
-              "fieldID": 101,
-              "name": "tags",
-              "data_type": "Array",
-              "element_type": "VarChar",
-              "nullable": true
-            }
-          ]
-        }
-      },
-      "indexes": [],
-      "manifest-list": []
-    }
-    """
-
-    val schema = MilvusSnapshotReader
-      .parseSnapshotMetadata(json)
-      .toOption
-      .get
-      .collection
-      .schema
-    val sparkSchema = SnapshotSparkSchema.toSparkSchema(schema)
-
-    sparkSchema("id").nullable shouldBe false
-    sparkSchema("tags").dataType shouldBe org.apache.spark.sql.types.ArrayType(
-      org.apache.spark.sql.types.StringType
-    )
-    sparkSchema("tags").nullable shouldBe true
-  }
-
-  test("toSparkSchema maps BinaryVector and Int8Vector consistently") {
-    import org.apache.spark.sql.types.{ArrayType, BinaryType, ShortType}
-
-    val json = """
-    {
-      "snapshot-info": {
-        "name": "test",
-        "id": 1,
-        "collection_id": 1,
-        "partition_ids": [1],
-        "create_ts": 1
-      },
-      "collection": {
-        "schema": {
-          "name": "test",
-          "fields": [
-            {
-              "fieldID": 100,
-              "name": "binary_vec",
-              "data_type": "BinaryVector",
-              "type_params": [{"key": "dim", "value": "128"}]
-            },
-            {
-              "fieldID": 101,
-              "name": "int8_vec",
-              "data_type": "Int8Vector",
-              "type_params": [{"key": "dim", "value": "4"}]
-            }
-          ]
-        }
-      },
-      "indexes": [],
-      "manifest-list": []
-    }
-    """
-
-    val schema = MilvusSnapshotReader
-      .parseSnapshotMetadata(json)
-      .toOption
-      .get
-      .collection
-      .schema
-    val sparkSchema = SnapshotSparkSchema.toSparkSchema(schema)
-
-    sparkSchema("binary_vec").dataType shouldBe BinaryType
-    sparkSchema("binary_vec").metadata.getLong(
-      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusDataTypeMetadataKey
-    ) shouldBe 100L
-    sparkSchema("binary_vec").metadata.getLong(
-      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusVectorDimensionMetadataKey
-    ) shouldBe 128L
-    sparkSchema("int8_vec").dataType shouldBe ArrayType(ShortType)
-    sparkSchema("int8_vec").metadata.getLong(
-      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusDataTypeMetadataKey
-    ) shouldBe 105L
-    sparkSchema("int8_vec").metadata.getLong(
-      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusVectorDimensionMetadataKey
-    ) shouldBe 4L
-
-    import scala.collection.JavaConverters._
-    val arrowFields = com.zilliz.spark.connector.types.SparkSchemaMapper
-      .convertSparkSchemaToArrow(sparkSchema)
-      .getFields
-      .asScala
-      .map(field => field.getName -> field)
-      .toMap
-    arrowFields("binary_vec").getMetadata.get("dim") shouldBe "128"
-    arrowFields("int8_vec").getMetadata.get("dim") shouldBe "4"
-  }
-
-  test("fieldToStructField preserves milvus.data_type metadata") {
-    val field = Field(
-      name = "binary_vec",
-      rawDataType =
-        Some(com.fasterxml.jackson.databind.node.IntNode.valueOf(100)),
-      typeParams = Some(Seq(TypeParam("dim", "128"))),
-      nullable = Some(false)
-    )
-
-    val structField = SnapshotSparkSchema.fieldToStructField(field)
-
-    structField.name shouldBe "binary_vec"
-    structField.dataType shouldBe org.apache.spark.sql.types.BinaryType
-    structField.nullable shouldBe false
-    structField.metadata.getLong(
-      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusDataTypeMetadataKey
-    ) shouldBe 100L
-    structField.metadata.getLong(
-      com.zilliz.milvus.storage.schema.FieldMetadata.MilvusVectorDimensionMetadataKey
-    ) shouldBe 128L
   }
 }

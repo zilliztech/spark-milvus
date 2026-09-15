@@ -56,7 +56,7 @@ A snapshot JSON produced by milvus-datacoord has two separate arrays:
 - `manifest_list` — per-segment AVRO paths. These can contain **V1 or V2**
   segments; `SegmentManifestReader` decodes each AVRO and branches on
   the inner `storage_version` field.
-- `storagev2_manifest_list` — array of `StorageV2ManifestItem`. These are
+- `storagev2_manifest_list` — array of `ManifestItemJson`. These are
   **V3** (despite the key name). Each carries a `basePath` and a `ver` that
   locates the loon manifest.
 
@@ -99,7 +99,7 @@ mode. See the "Client-mode V2 dispatch" task tracked separately.
 | `operations/backfill/SegmentBackfillResult.committedVersion` / `.manifestPaths` | V3 backfill output (new manifest version) |
 | JSON wire key `storagev2_manifest_list` | V3 manifest list — wire name is historical, frozen |
 | JSON wire key `manifest_list`            | Per-segment AVRO paths (V1 or V2) |
-| Spark option `milvus.snapshot.manifests` | Serialized `Seq[StorageV2ManifestItem]` — i.e. V3 |
+| Spark option `milvus.snapshot.manifests` | Serialized `Seq[ManifestItemJson]` — i.e. V3 |
 | Spark option `milvus.snapshot.v2.segments` | Serialized `Seq[V2SegmentInfo]` — i.e. V2 |
 
 ---
@@ -133,7 +133,7 @@ When you need to reason about storage versions, answer these in order:
   field ID. For single-field groups it happens to equal the field ID —
   backfill exploits this invariant but general code shouldn't.
 - **Don't rename `@JsonProperty("storagev2_manifest_list")`** on the
-  deserialize-only `SnapshotMetadata` case class — the wire key is produced
+  `SnapshotJson` case class — the wire key is produced
   by milvus-datacoord and renaming it here silently drops V3 parsing.
 - **V1 segments are read-only to this connector.** Backfill does not write
   binlog format; a collection that still has V1 segments must be flushed to

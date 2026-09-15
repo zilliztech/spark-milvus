@@ -27,7 +27,7 @@ import com.zilliz.milvus.storage.manifest.{
 }
 import com.zilliz.milvus.storage.manifest.AvroBinlogEntry
 import com.zilliz.milvus.storage.path.StoragePath
-import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
+import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 
 /** Unit tests for [[FooterV2SegmentResolver.buildV2SegmentInfoFromEntry]].
   *
@@ -433,7 +433,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       seg.segmentId shouldBe 5005L
       seg.columnGroups.map(_.fieldIds) shouldBe Seq(Seq(100L))
       seg.deltaLogs shouldBe Seq(
-        V2DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
+        DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
       )
     } finally {
       Files.deleteIfExists(pq0)
@@ -492,7 +492,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       seg.segmentId shouldBe 5007L
       seg.columnGroups.map(_.fieldIds) shouldBe Seq(Seq(100L))
       seg.deltaLogs shouldBe Seq(
-        V2DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
+        DeltaLogFile(9L, "s3a://bucket/delete-1", 1L)
       )
     } finally {
       Files.deleteIfExists(pq0)

@@ -11,7 +11,7 @@ import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.milvus.storage.snapshot.{Field, TypeParam}
+import com.zilliz.milvus.storage.snapshot.json.{FieldJson, KeyValueJson}
 import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
@@ -40,11 +40,11 @@ class VectorBackfillSupportTest
       dataType: MilvusDataType,
       dim: Option[Int] = None,
       nullable: Boolean = false
-  ): Field =
-    Field(
+  ): FieldJson =
+    FieldJson(
       name = name,
       rawDataType = Some(IntNode.valueOf(dataType.value)),
-      typeParams = dim.map(value => Seq(TypeParam("dim", value.toString))),
+      typeParams = dim.map(value => Seq(KeyValueJson("dim", value.toString))),
       nullable = Some(nullable)
     )
 

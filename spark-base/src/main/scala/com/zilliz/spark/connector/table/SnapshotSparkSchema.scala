@@ -3,28 +3,27 @@ package com.zilliz.spark.connector.table
 import org.apache.spark.sql.types._
 
 import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
-import com.zilliz.milvus.storage.snapshot.{CollectionSchema, Field}
+import com.zilliz.milvus.storage.snapshot.json.{CollectionSchemaJson, FieldJson}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
-/** The CollectionSchema inside a snapshot to a Spark StructType.
+/** The `CollectionSchemaJson` inside a snapshot to a Spark StructType.
   *
-  * This used to hang off MilvusSnapshotReader and was that file's only Spark
-  * dependency. Snapshot parsing belongs to layer 2 and Spark types to layer 3,
-  * hence the split.
+  * Parsing the snapshot JSON is layer 2 (`core.snapshot.json`); the Spark types
+  * are layer 3, so the mapping sits here.
   */
 object SnapshotSparkSchema {
 
-  /** Convert snapshot CollectionSchema to Spark StructType
+  /** Convert snapshot CollectionSchemaJson to Spark StructType
     *
     * @param schema
-    *   CollectionSchema from snapshot metadata
+    *   CollectionSchemaJson from snapshot metadata
     * @param includeSystemFields
     *   Whether to include RowID and Timestamp system fields
     * @return
     *   Spark StructType representing the collection schema
     */
   def toSparkSchema(
-      schema: CollectionSchema,
+      schema: CollectionSchemaJson,
       includeSystemFields: Boolean = false
   ): StructType = {
     val userFields = schema.fields
@@ -35,9 +34,9 @@ object SnapshotSparkSchema {
     StructType(userFields)
   }
 
-  /** Convert a Field to Spark StructField with Milvus metadata preserved.
+  /** Convert a FieldJson to Spark StructField with Milvus metadata preserved.
     */
-  def fieldToStructField(field: Field): StructField = {
+  def fieldToStructField(field: FieldJson): StructField = {
     val metadata = new MetadataBuilder()
       .putLong(FieldMetadata.MilvusDataTypeMetadataKey, field.dataType)
     val milvusType = MilvusDataType.fromValue(field.dataType)
@@ -58,14 +57,14 @@ object SnapshotSparkSchema {
     )
   }
 
-  /** Convert a Field to Spark DataType
+  /** Convert a FieldJson to Spark DataType
     *
     * @param field
-    *   Field from snapshot schema
+    *   FieldJson from snapshot schema
     * @return
     *   Corresponding Spark DataType
     */
-  def fieldToSparkType(field: Field): DataType = {
+  def fieldToSparkType(field: FieldJson): DataType = {
     fieldToStructField(field).dataType
   }
 

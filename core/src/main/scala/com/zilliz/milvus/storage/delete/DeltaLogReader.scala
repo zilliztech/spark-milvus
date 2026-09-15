@@ -15,7 +15,7 @@ import org.apache.parquet.io.{InputFile, SeekableInputStream}
 
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
-import com.zilliz.milvus.storage.snapshot.{V2DeltaLogFile, V2SegmentInfo}
+import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, V2SegmentInfo}
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
@@ -126,7 +126,7 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
     else None
 
   def loadDeletePlan(
-      deltaLogs: Seq[V2DeltaLogFile],
+      deltaLogs: Seq[DeltaLogFile],
       pkField: FieldSchema,
       bucket: String,
       store: ObjectStore

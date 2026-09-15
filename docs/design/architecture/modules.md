@@ -38,7 +38,8 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 
 | 包 | 职责 | 主要类型 |
 |---|---|---|
-| `snapshot` | 列快照目录，选快照，解析 JSON 和 Avro 成对象；分发 SnapshotSource | SnapshotCatalog、Snapshot、Segment、SnapshotSource、SnapshotSourceRegistry |
+| `snapshot` | 列快照目录，选快照，把 JSON 和 Avro 变成实体；分发 SnapshotSource | SnapshotCatalog、Snapshot、Segment、V2SegmentInfo、SnapshotSource、SnapshotSourceRegistry |
+| `snapshot.json` | 快照 JSON 文件的形状，一个 JSON 对象一个类型，名字带 `Json` 后缀；只描述不计算 | SnapshotJson、CollectionSchemaJson、FieldJson、SegmentJson、ManifestItemJson、SegmentListJson（option 串里的段列表，随 1.x option 读法一起删） |
 | `manifest` | 一个段的 Manifest：列组、删除文件、统计、索引登记 | Manifest、ColumnGroup、ManifestReader |
 | `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型 | SchemaMapper、MilvusTypes、ArrowTypes、FieldMetadata |
 | `path` | 三种路径形态到 (bucket, key) | StoragePath、Located |
@@ -188,7 +189,7 @@ spark-milvus/
 
 | 1.x 文件 | 2.0 位置 | 状态 |
 |---|---|---|
-| read/MilvusSnapshotReader.scala | core.snapshot | 已迁。92 行 Spark 类型转换切成 spark-base 的 SnapshotSparkSchema，切完这个文件就是纯 JVM |
+| read/MilvusSnapshotReader.scala | core.snapshot.json | 已迁。92 行 Spark 类型转换切成 spark-base 的 SnapshotSparkSchema；JSON 形状类进 core.snapshot.json 并改名（SnapshotJson、CollectionSchemaJson、FieldJson…），V2SegmentInfo 一族留在 core.snapshot，文件不再存在 |
 | read/SegmentManifestReader.scala、V3ManifestReader.scala | core.manifest | 已迁 |
 | read/DeltaLogReader.scala、DeletePlan.scala | core.delete | 已迁。改按行号位图是重构，未做 |
 | src/main/resources/milvus-segment-manifest*.avsc | core 的 resources | 已迁。资源必须跟代码走，留在原处解码器会报 not found on classpath，而失败形式是返回 Left 不是抛异常 |

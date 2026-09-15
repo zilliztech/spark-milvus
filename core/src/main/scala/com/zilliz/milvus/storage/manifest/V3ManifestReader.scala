@@ -10,7 +10,7 @@ import org.apache.avro.util.Utf8
 
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
-import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
+import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 
 object V3ManifestReader {
   private val PrimaryKeyDeltaLogType = 0
@@ -21,7 +21,7 @@ object V3ManifestReader {
       readVersion: Long,
       bucket: String,
       store: ObjectStore
-  ): Either[Throwable, Seq[V2DeltaLogFile]] = {
+  ): Either[Throwable, Seq[DeltaLogFile]] = {
     try {
       val at =
         StoragePath.parse(manifestFilePath(basePath, readVersion), bucket)
@@ -74,7 +74,7 @@ object V3ManifestReader {
   def parseDeltaLogs(
       avroBytes: Array[Byte],
       basePath: String
-  ): Either[Throwable, Seq[V2DeltaLogFile]] = {
+  ): Either[Throwable, Seq[DeltaLogFile]] = {
     try {
       val reader = new DataFileStream[GenericRecord](
         new ByteArrayInputStream(avroBytes),
@@ -98,7 +98,7 @@ object V3ManifestReader {
   private def projectDeltaLogs(
       rec: GenericRecord,
       basePath: String
-  ): Seq[V2DeltaLogFile] = {
+  ): Seq[DeltaLogFile] = {
     val raw = rec.get("delta_logs")
     if (raw == null) {
       Seq.empty
@@ -111,7 +111,7 @@ object V3ManifestReader {
         .filter(log => asLong(log.get("num_entries")) > 0L)
         .zipWithIndex
         .map { case (log, idx) =>
-          V2DeltaLogFile(
+          DeltaLogFile(
             logId = idx.toLong,
             logPath =
               resolveManifestDeltaPath(basePath, asString(log.get("path"))),

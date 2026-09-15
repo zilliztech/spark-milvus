@@ -26,11 +26,8 @@ import com.zilliz.milvus.client.api.{MilvusClient, MilvusCollectionInfo}
 import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.SchemaMapper
-import com.zilliz.milvus.storage.snapshot.{
-  MilvusSnapshotReader,
-  SnapshotCatalog,
-  V2SegmentResolver
-}
+import com.zilliz.milvus.storage.snapshot.{SnapshotCatalog, V2SegmentResolver}
+import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
 import com.zilliz.spark.connector.options.{
   BackupSelection,
   ReadMode,
@@ -197,7 +194,10 @@ case class MilvusTable(
   /** Initialize collection info from snapshot metadata (no client connection)
     */
   private def initFromSnapshot(): Unit = {
-    milvusOption.options.get(MilvusOption.SnapshotPath).map(_.trim).filter(_.nonEmpty) match {
+    milvusOption.options
+      .get(MilvusOption.SnapshotPath)
+      .map(_.trim)
+      .filter(_.nonEmpty) match {
       case Some(path) => initFromSnapshotPath(path)
       case None       => initFromSnapshotOptions()
     }
@@ -272,11 +272,9 @@ case class MilvusTable(
     * have snapshot data but need a protobuf schema structure
     */
   private def parseSnapshotSchemaJson(json: String): CollectionSchema = {
-    MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+    SnapshotJson.parse(json) match {
       case Right(metadata) =>
-        CollectionSchema.parseFrom(
-          MilvusSnapshotReader.toProtobufSchemaBytes(metadata.collection.schema)
-        )
+        CollectionSchema.parseFrom(metadata.collection.schema.toProtobufBytes)
       case Left(err) =>
         throw new IllegalArgumentException(
           s"Failed to parse ${MilvusOption.SnapshotSchemaJson}: $err"

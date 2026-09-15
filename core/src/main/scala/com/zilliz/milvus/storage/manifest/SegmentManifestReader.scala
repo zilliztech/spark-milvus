@@ -9,9 +9,8 @@ import org.apache.avro.util.Utf8
 import org.apache.avro.Schema
 
 import com.zilliz.milvus.storage.snapshot.{
-  Field,
+  DeltaLogFile,
   V2ColumnGroup,
-  V2DeltaLogFile,
   V2SegmentInfo
 }
 
@@ -173,8 +172,8 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
     *   Parsed AVRO manifest (must have `storageVersion == 2L`).
     * @param groupFieldIdList
     *   Positional list of groups, each element being the real field IDs carried
-    *   by that group. Obtained from `ParquetFooterReader` by splitting
-    *   the kv string `"100,0,1;101;102"` on `;` and then `,`.
+    *   by that group. Obtained from `ParquetFooterReader` by splitting the kv
+    *   string `"100,0,1;101;102"` on `;` and then `,`.
     */
   def toV2SegmentInfo(
       entry: AvroManifestEntry,
@@ -200,7 +199,7 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
             .flatMap(_.binlogs)
             .sortBy(_.logId)
             .map(log =>
-              V2DeltaLogFile(
+              DeltaLogFile(
                 logId = log.logId,
                 logPath = log.logPath,
                 entriesNum = log.entriesNum
@@ -237,7 +236,7 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
         .flatMap(_.binlogs)
         .sortBy(_.logId)
         .map(log =>
-          V2DeltaLogFile(
+          DeltaLogFile(
             logId = log.logId,
             logPath = log.logPath,
             entriesNum = log.entriesNum

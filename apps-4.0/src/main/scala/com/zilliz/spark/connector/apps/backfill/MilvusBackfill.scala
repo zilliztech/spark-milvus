@@ -13,20 +13,21 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.slf4j.LoggerFactory
 
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
-import com.zilliz.milvus.storage.snapshot.{
-  CollectionSchema,
-  Field,
-  MilvusSnapshotReader,
-  SnapshotMetadata,
-  StorageV2ManifestItem
+import com.zilliz.milvus.storage.snapshot.json.{
+  CollectionSchemaJson,
+  FieldJson,
+  ManifestContentJson,
+  ManifestItemJson,
+  SegmentListJson,
+  SnapshotJson
 }
+import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.write.{
   MilvusV3BatchWrite,
   MilvusV3CommitMessage,
   MilvusV3Writer
 }
-import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Backfill operation for Milvus collections
@@ -95,7 +96,7 @@ object MilvusBackfill {
     * types and never rely on Spark's case-insensitive resolver.
     */
   private[backfill] def resolveJoinKey(
-      schema: CollectionSchema,
+      schema: CollectionSchemaJson,
       spec: BackfillJoinKey
   ): Either[BackfillError, ResolvedJoinKey] = {
     val normalizedSpec = spec match {
@@ -197,9 +198,9 @@ object MilvusBackfill {
     * paths before source reads or writes begin.
     */
   private[backfill] def resolveBackfillTargetFields(
-      schema: CollectionSchema,
+      schema: CollectionSchemaJson,
       targetFieldNames: Seq[String]
-  ): Either[BackfillError, Map[String, Field]] = {
+  ): Either[BackfillError, Map[String, FieldJson]] = {
     val fieldsByName = schema.fields.map(field => field.name -> field).toMap
     val missing = targetFieldNames.filterNot(fieldsByName.contains)
     if (missing.nonEmpty) {
@@ -1102,7 +1103,7 @@ object MilvusBackfill {
       spark: SparkSession,
       config: BackfillConfig,
       joinKey: ResolvedJoinKey,
-      snapshotMetadata: Option[SnapshotMetadata],
+      snapshotMetadata: Option[SnapshotJson],
       v2Segments: Seq[com.zilliz.milvus.storage.snapshot.V2SegmentInfo],
       extraReadFields: Seq[
         (String, Long, org.apache.spark.sql.types.StructField)
@@ -1139,7 +1140,7 @@ object MilvusBackfill {
 
         // Convert snapshot schema to protobuf bytes and pass as Base64
         val schemaBytes =
-          MilvusSnapshotReader.toProtobufSchemaBytes(metadata.collection.schema)
+          metadata.collection.schema.toProtobufBytes
         val schemaBytesBase64 =
           java.util.Base64.getEncoder.encodeToString(schemaBytes)
         options =
@@ -1150,7 +1151,7 @@ object MilvusBackfill {
           // the DataSource can extract readVersion and lock reads to snapshot version
           if (manifestList.nonEmpty) {
             val manifestJson =
-              MilvusSnapshotReader.serializeManifestList(manifestList)
+              SegmentListJson.encodeManifestItems(manifestList)
             options = options + (MilvusOption.SnapshotManifests -> manifestJson)
           } else {
             logger.warn("No valid manifests found in snapshot")
@@ -1162,7 +1163,7 @@ object MilvusBackfill {
         // MilvusV2InputPartitions. Loading itself happened earlier in
         // `run()` via `loadV2Segments`.
         if (v2Segments.nonEmpty) {
-          val segJson = MilvusSnapshotReader.serializeV2Segments(v2Segments)
+          val segJson = SegmentListJson.encodeV2Segments(v2Segments)
           options = options + (MilvusOption.SnapshotV2Segments -> segJson)
           logger.info(
             s"Attached ${v2Segments.size} StorageV2 packed segment(s) to read options"
@@ -1905,8 +1906,9 @@ object MilvusBackfill {
     * int < 100, so "max slot wins" is equivalent to "newer single-field group
     * wins" under the current column-group naming convention. When Milvus's
     * snapshot starts emitting `FieldBinlog.child_fields`, this should be
-    * replaced by the authoritative mapping (see `FooterV2SegmentResolver` line 88-94
-    * for the parquet-footer-based reconciliation that this defends against).
+    * replaced by the authoritative mapping (see `FooterV2SegmentResolver` line
+    * 88-94 for the parquet-footer-based reconciliation that this defends
+    * against).
     *
     * Skips dedup entirely when any contributing group has `slotFieldId < 0L`
     * (the sentinel for "unknown slot", e.g. the snapshot-JSON DTO path that
@@ -1937,7 +1939,7 @@ object MilvusBackfill {
     */
   private def loadV2Segments(
       spark: SparkSession,
-      metadata: SnapshotMetadata,
+      metadata: SnapshotJson,
       config: BackfillConfig
   ): Either[BackfillError, Seq[
     com.zilliz.milvus.storage.snapshot.V2SegmentInfo
@@ -2008,12 +2010,12 @@ object MilvusBackfill {
       spark: SparkSession,
       snapshotPath: String,
       config: BackfillConfig
-  ): Either[BackfillError, Option[SnapshotMetadata]] = {
+  ): Either[BackfillError, Option[SnapshotJson]] = {
     if (snapshotPath == null || snapshotPath.isEmpty) return Right(None)
 
     readSnapshotJson(spark, snapshotPath, config) match {
       case Right(json) if json.nonEmpty =>
-        MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+        SnapshotJson.parse(json) match {
           case Right(metadata) => Right(Some(metadata))
           case Left(e) =>
             Left(
@@ -2033,9 +2035,9 @@ object MilvusBackfill {
 
   /** StorageV2 write path: writes one parquet per new field under
     * `files/insert_log/{coll}/{part}/{seg}/{newFieldID}/{logID}` via
-    * [[com.zilliz.spark.connector.write.MilvusV2Writer]]. Backfill always
-    * emits single-field column groups, so `columnGroupID` in the path equals
-    * the new field's ID (milvus convention for 1-field groups).
+    * [[com.zilliz.spark.connector.write.MilvusV2Writer]]. Backfill always emits
+    * single-field column groups, so `columnGroupID` in the path equals the new
+    * field's ID (milvus convention for 1-field groups).
     */
   private def processV2SegmentPartition(
       iter: Iterator[InternalRow],
@@ -2212,7 +2214,7 @@ object MilvusBackfill {
     * {rootPath}/insert_log/{col_id}/{part_id}/{seg_id}
     */
   private def extractMetadataFromSnapshot(
-      metadata: SnapshotMetadata,
+      metadata: SnapshotJson,
       v2Segments: Seq[com.zilliz.milvus.storage.snapshot.V2SegmentInfo] =
         Seq.empty
   ): (Long, Map[Long, Long], Map[Long, String]) = {
@@ -2225,7 +2227,7 @@ object MilvusBackfill {
     // V3 (manifest-based) segments: basePath carries partition id too.
     for (item <- manifestList) {
       val segId = item.segmentID
-      MilvusSnapshotReader.parseManifestContent(item.manifest) match {
+      ManifestContentJson.parse(item.manifest) match {
         case Right(mc) =>
           // Extract partition ID from basePath: .../insert_log/{col_id}/{part_id}/{seg_id}
           val parts = mc.basePath.split("/")

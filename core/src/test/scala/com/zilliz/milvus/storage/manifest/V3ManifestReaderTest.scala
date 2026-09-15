@@ -10,7 +10,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.io.LocalObjectStore
-import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
+import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 
 class V3ManifestReaderTest extends AnyFunSuite with Matchers {
   private val schema = new Schema.Parser().parse("""
@@ -54,7 +54,7 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
 
     result shouldBe a[Right[_, _]]
     result.toOption.get shouldBe Seq(
-      V2DeltaLogFile(
+      DeltaLogFile(
         0L,
         "files/insert_log/10/20/30/_delta/9001",
         3L

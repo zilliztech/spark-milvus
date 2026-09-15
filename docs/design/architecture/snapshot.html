@@ -179,8 +179,7 @@ backup 的实现由 <code>spark.options</code> 在启动时注册，core 源码�
 <li><strong>选快照。</strong>今天的入口：<code>milvus.snapshot.path</code> 直接给一个快照 JSON，不经服务；或给 <code>milvus.uri</code>，由 DescribeCollection 取 collection id 后按 <code>milvus.client.snapshot.name</code> 选名字、缺省取最新。R2 的三种写法：<code>version</code> 是快照名，精确匹配；<code>timestamp</code> 取
 <code>createdAt</code> 不晚于它的最新一个；两者都不给取 <code>createdAt</code> 最大的。目录里只有 JSON 文件名可用时，
 按时间点选要打开候选 JSON 读 <code>create_ts</code>；README 第五节向 Milvus 要的 catalog 文件到位后改为只读一个文件。</li>
-<li><strong>解析 JSON。</strong>今天 <code>MilvusSnapshotReader.parseSnapshotMetadata</code> 做的事，产物从
-<code>SnapshotMetadata</code>（JSON 的形状）改为 <code>Snapshot</code>。JSON 里 V3 段在 <code>storagev2_manifest_list</code>，
+<li><strong>解析 JSON。</strong><code>core.snapshot.json.SnapshotJson.parse</code> 得到 JSON 的形状 <code>SnapshotJson</code>，<code>SnapshotCatalog.fromMetadata</code> 把它变成 <code>Snapshot</code>。JSON 里 V3 段在 <code>storagev2_manifest_list</code>，
 每项是一段 <code>{"ver": N, "base_path": ...}</code>；键名里的 V2 指 milvus-storage 库的清单格式版本，不是段的 <code>storage_version</code>，
 解析器负责把这个名字翻正，对象上只剩 <code>storageVersion = 3</code>。</li>
 <li><strong>补 V2 段的列组。</strong>JSON 的 <code>manifest_list</code> 指向 Avro 文件，Avro 里是 V2 段的 binlog 列表；
@@ -211,8 +210,8 @@ backup 的实现由 <code>spark.options</code> 在启动时注册，core 源码�
 
 <table>
 <tr><th>今天</th><th>之后</th><th>动作</th></tr>
-<tr><td><code>SnapshotMetadata</code> 及其子类（<code>MilvusSnapshotReader.scala</code>，JSON 的形状）</td><td>解析器的内部类型；<code>SnapshotCatalog.fromMetadata</code> 是唯一把它翻成 <code>Snapshot</code> 的地方</td><td>已做；降为 <code>private[snapshot]</code> 等 backfill 的 K2 路径删掉后</td></tr>
-<tr><td><code>StorageV2ManifestItem</code>（V3 段）与 <code>V2SegmentInfo</code>（V2 段）</td><td>一个 <code>Segment</code></td><td>已做</td></tr>
+<tr><td><code>SnapshotJson</code> 及其子类（<code>core.snapshot.json</code>，JSON 的形状）</td><td>解析器的内部类型；<code>SnapshotCatalog.fromMetadata</code> 是唯一把它翻成 <code>Snapshot</code> 的地方</td><td>已做；降为 <code>private[snapshot]</code> 等 backfill 的 K2 路径删掉后</td></tr>
+<tr><td><code>ManifestItemJson</code>（V3 段）与 <code>V2SegmentInfo</code>（V2 段）</td><td>一个 <code>Segment</code></td><td>已做</td></tr>
 <tr><td><code>core.read.plan.SegmentLayout</code></td><td><code>core.snapshot.SegmentLayout</code></td><td>已做</td></tr>
 <tr><td><code>spark.read.plan.SnapshotPartitions.build</code>（今天 <code>Snapshot</code> 进、<code>InputPartition</code> 出）</td><td><code>core.read.plan.Partitioner</code>（<code>Snapshot</code> 进、<code>ReadPlan</code> 出），第 3 层只把 <code>SegmentReadTask</code> 包成 <code>InputPartition</code></td><td>输入已换成 <code>Snapshot</code>；下沉 core 未做</td></tr>
 <tr><td><code>spark.read.plan.DeletePlanning</code>（driver 读删除日志）</td><td>消失：删除文件位置进 <code>Segment.deletes</code>，读在 executor</td><td>输入已换成 <code>Segment.deletes</code>，三份继承删除的拷贝合成一份；下沉 executor 随 <code>DeleteSource.Files</code> 的启用</td></tr>

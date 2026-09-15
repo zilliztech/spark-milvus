@@ -9,16 +9,13 @@ import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.client.api.MilvusClient
-import com.zilliz.milvus.storage.snapshot.{
-  MilvusSnapshotReader,
-  SnapshotCatalog,
-  V2SegmentResolver
-}
+import com.zilliz.milvus.storage.snapshot.{SnapshotCatalog, V2SegmentResolver}
+import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import com.zilliz.spark.connector.table.MilvusTable
-import io.milvus.grpc.schema.CollectionSchema
 import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.types.SparkTypes
+import io.milvus.grpc.schema.CollectionSchema
 
 case class MilvusDataSource() extends TableProvider with DataSourceRegister {
   override def getTable(
@@ -77,7 +74,7 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
         .orElse {
           // The 1.x form: the schema JSON travels in an option.
           Option(options.get(MilvusOption.SnapshotSchemaJson)).flatMap { json =>
-            MilvusSnapshotReader.parseSnapshotMetadata(json) match {
+            SnapshotJson.parse(json) match {
               case Right(metadata) =>
                 Some(
                   SnapshotSparkSchema.toSparkSchema(

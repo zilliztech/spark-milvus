@@ -10,7 +10,7 @@ import org.apache.spark.sql.types._
 
 import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.milvus.storage.snapshot.Field
+import com.zilliz.milvus.storage.snapshot.json.FieldJson
 import com.zilliz.milvus.storage.DataParseException
 import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
@@ -46,18 +46,18 @@ private[backfill] object VectorBackfillSupport {
 
   private val mapper = new ObjectMapper()
 
-  def isVectorField(field: Field): Boolean =
+  def isVectorField(field: FieldJson): Boolean =
     VectorTypes.contains(MilvusDataType.fromValue(field.dataType))
 
   /** Spark schema used only inside backfill. BinaryType deliberately carries
     * the already-normalized Milvus row bytes so joins never widen or
     * reinterpret half/binary/int8/sparse vector values.
     */
-  def canonicalStructField(field: Field): StructField = {
+  def canonicalStructField(field: FieldJson): StructField = {
     val milvusType = MilvusDataType.fromValue(field.dataType)
     require(
       VectorTypes.contains(milvusType),
-      s"Field '${field.name}' is not a supported vector type: $milvusType"
+      s"FieldJson '${field.name}' is not a supported vector type: $milvusType"
     )
 
     val metadata = new MetadataBuilder()
@@ -83,7 +83,7 @@ private[backfill] object VectorBackfillSupport {
     */
   def normalizeVectorColumns(
       df: DataFrame,
-      targetFieldsByName: Map[String, Field]
+      targetFieldsByName: Map[String, FieldJson]
   ): Either[BackfillError, DataFrame] = {
     if (!targetFieldsByName.values.exists(isVectorField)) {
       return Right(df)
@@ -109,7 +109,7 @@ private[backfill] object VectorBackfillSupport {
 
   private def normalizeVectorColumn(
       inputField: StructField,
-      targetField: Field
+      targetField: FieldJson
   ): Either[BackfillError, Column] = {
     val fieldName = inputField.name
     val milvusType = MilvusDataType.fromValue(targetField.dataType)
@@ -319,7 +319,7 @@ private[backfill] object VectorBackfillSupport {
     }
   }
 
-  private def dimension(field: Field): Int = {
+  private def dimension(field: FieldJson): Int = {
     val dim = field
       .getTypeParam("dim")
       .flatMap(value => scala.util.Try(value.toInt).toOption)

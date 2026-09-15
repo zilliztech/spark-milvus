@@ -17,12 +17,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.milvus.storage.snapshot.{
-  CollectionSchema,
-  Field,
-  V2ColumnGroup,
-  V2SegmentInfo
-}
+import com.zilliz.milvus.storage.snapshot.{V2ColumnGroup, V2SegmentInfo}
+import com.zilliz.milvus.storage.snapshot.json.{CollectionSchemaJson, FieldJson}
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** Tests for the `--mode` backfill parameter: CLI/config validation and the
@@ -200,8 +196,8 @@ class BackfillModeTest
       partition: Boolean = false,
       dynamic: Boolean = false,
       functionOutput: Boolean = false
-  ): Field =
-    Field(
+  ): FieldJson =
+    FieldJson(
       fieldID = Some(LongNode.valueOf(id)),
       name = name,
       rawDataType = Some(IntNode.valueOf(dataType)),
@@ -213,7 +209,7 @@ class BackfillModeTest
     )
 
   test("resolveJoinKey resolves the default collection primary key") {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(
         snapshotField("id", 100L, 5, primary = true),
@@ -232,7 +228,7 @@ class BackfillModeTest
   }
 
   test("resolveJoinKey rejects a default PK join when the schema has no PK") {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(snapshotField("external_row_id", 101L, 21))
     )
@@ -247,7 +243,7 @@ class BackfillModeTest
   }
 
   test("resolveJoinKey accepts a physical field in a schema without a PK") {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(snapshotField("external_row_id", 101L, 21))
     )
@@ -267,7 +263,7 @@ class BackfillModeTest
   }
 
   test("resolveJoinKey requires an exact physical field name") {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(snapshotField("External_Row_ID", 101L, 21))
     )
@@ -286,7 +282,7 @@ class BackfillModeTest
   }
 
   test("resolveJoinKey trims a programmatic physical field name") {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(snapshotField("external_row_id", 101L, 21))
     )
@@ -312,7 +308,7 @@ class BackfillModeTest
     )
 
     reservedNames.zipWithIndex.foreach { case (name, index) =>
-      val schema = CollectionSchema(
+      val schema = CollectionSchemaJson(
         name = "c",
         fields = Seq(snapshotField(name, 101L + index, 21))
       )
@@ -330,7 +326,7 @@ class BackfillModeTest
   }
 
   test("resolveJoinKey rejects a default PK with a reserved metadata name") {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(
         snapshotField(
@@ -353,7 +349,7 @@ class BackfillModeTest
   }
 
   test("resolveJoinKey rejects a nullable physical field") {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(
         snapshotField(
@@ -390,7 +386,7 @@ class BackfillModeTest
 
     cases.zipWithIndex.foreach { case ((milvusType, sparkType), index) =>
       val name = s"key_$index"
-      val schema = CollectionSchema(
+      val schema = CollectionSchemaJson(
         name = "c",
         fields = Seq(snapshotField(name, 100L + index, milvusType))
       )
@@ -417,7 +413,7 @@ class BackfillModeTest
       100 -> "vector"
     ).foreach { case (milvusType, label) =>
       val name = s"${label}_key"
-      val schema = CollectionSchema(
+      val schema = CollectionSchemaJson(
         name = "c",
         fields = Seq(snapshotField(name, 101L, milvusType))
       )
@@ -433,7 +429,7 @@ class BackfillModeTest
   }
 
   test("resolveBackfillTargetFields accepts ordinary collection fields") {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(snapshotField("value", 101L, 21))
     )
@@ -463,7 +459,7 @@ class BackfillModeTest
     )
 
     cases.foreach { case (field, expectedRole) =>
-      val schema = CollectionSchema(name = "c", fields = Seq(field))
+      val schema = CollectionSchemaJson(name = "c", fields = Seq(field))
       val error = MilvusBackfill
         .resolveBackfillTargetFields(schema, Seq(field.name))
         .left
@@ -478,7 +474,7 @@ class BackfillModeTest
   test(
     "resolveBackfillTargetFields rejects a PK target selected beside a physical join key"
   ) {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(
         snapshotField("id", 100L, 5, primary = true),
@@ -497,7 +493,7 @@ class BackfillModeTest
   }
 
   test("resolveBackfillTargetFields reports missing snapshot fields") {
-    val schema = CollectionSchema(
+    val schema = CollectionSchemaJson(
       name = "c",
       fields = Seq(snapshotField("value", 101L, 21))
     )

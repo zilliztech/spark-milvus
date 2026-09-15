@@ -75,11 +75,11 @@ Branch precedence: `isSnapshotMode` > `isBackupMode` > client.
 - S3 config reuses existing `fs.*` / `s3.*`.
 
 ### 4.2 New `src/main/scala/read/BackupMetaReader.scala` (core)
-Parses backup `full_meta.json` with Jackson (mirroring `MilvusSnapshotReader`):
+Parses backup `full_meta.json` with Jackson (mirroring the snapshot JSON parser, now `core.snapshot.json`):
 ```scala
 object BackupMetaReader {
   def readMeta(hadoopConf: Configuration, backupDir: String,
-               maxBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes): Either[Throwable, BackupInfo]
+               maxBytes: Long = SnapshotJson.MaxBytes): Either[Throwable, BackupInfo]
   def toProtobufSchemaBytes(schema: BackupCollectionSchema): Array[Byte]
   def toV2Segments(info: BackupInfo, hadoopConf: Configuration, backupDir: String,
                    applyDeletes: Boolean, collectionId: Long): Either[Throwable, Seq[V2SegmentInfo]]

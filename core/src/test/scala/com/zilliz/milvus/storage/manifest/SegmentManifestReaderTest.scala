@@ -5,8 +5,12 @@ import java.nio.file.{Files, Paths}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.snapshot.{MilvusSnapshotReader, V2SegmentInfo}
-import com.zilliz.milvus.storage.snapshot.{V2ColumnGroup, V2DeltaLogFile}
+import com.zilliz.milvus.storage.snapshot.{
+  DeltaLogFile,
+  V2ColumnGroup,
+  V2SegmentInfo
+}
+import com.zilliz.milvus.storage.snapshot.json.SegmentListJson
 
 /** Tests for [[SegmentManifestReader]] against a real milvus-produced
   * per-segment AVRO.
@@ -142,9 +146,9 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     result shouldBe a[Right[_, _]]
     val seg = result.toOption.get
     seg.deltaLogs shouldBe Seq(
-      V2DeltaLogFile(7L, "files/delete_log/.../7", 3L),
-      V2DeltaLogFile(8L, "files/delete_log/.../8", 2L),
-      V2DeltaLogFile(9L, "files/delete_log/.../9", 1L)
+      DeltaLogFile(7L, "files/delete_log/.../7", 3L),
+      DeltaLogFile(8L, "files/delete_log/.../8", 2L),
+      DeltaLogFile(9L, "files/delete_log/.../9", 1L)
     )
   }
 
@@ -162,7 +166,7 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     // Regression: Jackson erases Seq[Long] → Seq[Object] and small JSON
     // integers come back as java.lang.Integer, causing a ClassCastException
     // when downstream code maps over the Seq (Scala emits unboxToLong). The
-    // DTO stores JsonNode and converts via JsonTypeConverter.toLong on the
+    // DTO stores JsonNode and converts via JsonValues.toLong on the
     // way back to hide this from callers.
     val seg = V2SegmentInfo(
       segmentId = 465602255560578628L,
@@ -184,21 +188,21 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
         )
       ),
       deltaLogs = Seq(
-        V2DeltaLogFile(
+        DeltaLogFile(
           logId = 7L,
           logPath = "files/delete_log/.../7",
           entriesNum = 3L
         ),
-        V2DeltaLogFile(
+        DeltaLogFile(
           logId = 9L,
           logPath = "files/delete_log/.../9",
           entriesNum = 1L
         )
       )
     )
-    val json = MilvusSnapshotReader.serializeV2Segments(Seq(seg))
+    val json = SegmentListJson.encodeV2Segments(Seq(seg))
     val roundTripped =
-      MilvusSnapshotReader.deserializeV2Segments(json).toOption.get
+      SegmentListJson.decodeV2Segments(json).toOption.get
     roundTripped should have size 1
     val got = roundTripped.head
     got.segmentId shouldBe seg.segmentId

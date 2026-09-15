@@ -10,21 +10,19 @@ import com.zilliz.milvus.storage.manifest.{
 }
 import com.zilliz.milvus.storage.manifest.SegmentManifestReader
 import com.zilliz.milvus.storage.path.StoragePath
-import com.zilliz.milvus.storage.snapshot.V2DeltaLogFile
+import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 import com.zilliz.milvus.storage.snapshot.V2SegmentInfo
 
 /** High-level loader for StorageV2 (non-manifest packed parquet) segments.
   *
-  * Given the list of per-segment AVRO paths from
-  * `SnapshotMetadata.manifestList` and the S3 bucket where those files live,
-  * this object:
+  * Given the list of per-segment AVRO paths from `SnapshotJson.manifestList`
+  * and the S3 bucket where those files live, this object:
   *
   *   1. Fetches each AVRO via Hadoop FS. 2. Decodes with
-  *      [[SegmentManifestReader]]. 3. Skips entries whose
-  *      `storage_version != 2` (V1/V3 are handled elsewhere). 4. For each V2
-  *      entry, reads exactly one parquet footer's `group_field_id_list`
-  *      kv-metadata to recover the segment's column-group layout
-  *      ([[ParquetFooterReader]]). 5. Calls
+  *      [[SegmentManifestReader]]. 3. Skips entries whose `storage_version !=
+  *      2` (V1/V3 are handled elsewhere). 4. For each V2 entry, reads exactly
+  *      one parquet footer's `group_field_id_list` kv-metadata to recover the
+  *      segment's column-group layout ([[ParquetFooterReader]]). 5. Calls
   *      `SegmentManifestReader.toV2SegmentInfo` to join the two.
   *
   * The resulting `Seq[V2SegmentInfo]` is the runtime view consumed by
@@ -43,7 +41,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
     *
     * @param manifestPaths
     *   Bucket-relative (or fully-qualified) paths as they appear in
-    *   `SnapshotMetadata.manifestList`.
+    *   `SnapshotJson.manifestList`.
     * @param bucket
     *   S3 bucket that holds both the AVRO files and the segment parquet files.
     *   Empty string is accepted for unit-test / local-FS usage.
@@ -146,7 +144,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
               .flatMap(_.binlogs)
               .sortBy(_.logId)
               .map(log =>
-                V2DeltaLogFile(
+                DeltaLogFile(
                   logId = log.logId,
                   logPath = log.logPath,
                   entriesNum = log.entriesNum

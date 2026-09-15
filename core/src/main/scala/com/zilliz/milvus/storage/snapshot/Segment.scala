@@ -64,7 +64,7 @@ object DeleteFiles {
   case object Empty extends DeleteFiles
 
   /** V2: the snapshot's Avro lists the delta logs. */
-  final case class Listed(files: Seq[V2DeltaLogFile]) extends DeleteFiles
+  final case class Listed(files: Seq[DeltaLogFile]) extends DeleteFiles
 
   /** V3: the manifest at the segment's read version lists them. */
   case object InManifest extends DeleteFiles

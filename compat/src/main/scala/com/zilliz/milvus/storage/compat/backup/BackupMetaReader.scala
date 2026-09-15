@@ -27,12 +27,11 @@ import com.zilliz.milvus.storage.compat.ParquetFooterReader
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{
-  JsonTypeConverter,
-  MilvusSnapshotReader,
+  DeltaLogFile,
   V2ColumnGroup,
-  V2DeltaLogFile,
   V2SegmentInfo
 }
+import com.zilliz.milvus.storage.snapshot.json.{JsonValues, SnapshotJson}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{
   CollectionSchema => ProtoCollectionSchema,
@@ -62,15 +61,15 @@ import io.milvus.grpc.schema.{
   * `log_path`. Three gaps vs. a Milvus snapshot are closed here:
   *   1. milvus-backup persists only `log_size` per binlog, not `entries_num`.
   *      Per-file row counts are recovered by reading each binlog's parquet
-  *      footer ([ParquetFooterReader.readRowCount], with the head file's
-  *      footer read once for both field IDs and its row count via
+  *      footer ([ParquetFooterReader.readRowCount], with the head file's footer
+  *      read once for both field IDs and its row count via
   *      [ParquetFooterReader.readFieldIdsAndRowCount]). 2. The AVRO
   *      segment-info (and hence the slot -> real field ID mapping) is not
   *      copied by the backup; the real field IDs are recovered from the **head
   *      file** of each column group via that file's own parquet schema
   *      ([ParquetFooterReader.readFieldIdsAndRowCount]) — matching
-  *      FooterV2SegmentResolver, which assumes all files in a group share the schema.
-  *      3. L0 delete-only segments are created by Milvus without a
+  *      FooterV2SegmentResolver, which assumes all files in a group share the
+  *      schema. 3. L0 delete-only segments are created by Milvus without a
   *      `StorageVersion` (0/omitted), so they are handled before any
   *      storage-version filtering.
   *
@@ -168,10 +167,10 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
       @JsonProperty("is_function_output") isFunctionOutput: Boolean = false,
       @JsonProperty("default_value_base64") defaultValueBase64: String = ""
   ) {
-    def dataType: Int = rawDataType.map(JsonTypeConverter.toInt).getOrElse(0)
+    def dataType: Int = rawDataType.map(JsonValues.toInt).getOrElse(0)
     def elementType: Int =
-      rawElementType.map(JsonTypeConverter.toInt).getOrElse(0)
-    def state: Int = rawState.map(JsonTypeConverter.toInt).getOrElse(0)
+      rawElementType.map(JsonValues.toInt).getOrElse(0)
+    def state: Int = rawState.map(JsonValues.toInt).getOrElse(0)
   }
 
   /** `backuppb.CollectionSchema` — a mirror of Milvus's schemapb. */
@@ -230,17 +229,17 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
 
   /** Read and parse the backup's `full_meta.json`.
     *
-    * The read is bounded ([[MilvusSnapshotReader.readUtf8WithLimit]]) so an
-    * oversized or pathological meta fails on the driver instead of being
-    * slurped into memory. No process-global cache is kept: the parse must
-    * reflect the exact Hadoop configuration (credentials/endpoint) and the
-    * current object at that path, and an unbounded cache would retain every
-    * backup dir read over the driver's lifetime.
+    * The read is bounded (the size check below) so an oversized or pathological
+    * meta fails on the driver instead of being slurped into memory. No
+    * process-global cache is kept: the parse must reflect the exact Hadoop
+    * configuration (credentials/endpoint) and the current object at that path,
+    * and an unbounded cache would retain every backup dir read over the
+    * driver's lifetime.
     */
   def readMeta(
       store: ObjectStore,
       backupDir: String,
-      maxBytes: Long = MilvusSnapshotReader.MaxSnapshotJsonBytes
+      maxBytes: Long = SnapshotJson.MaxBytes
   ): Either[Throwable, BackupInfo] = {
     try {
       // The store is rooted at fs.bucket_name, so it takes the key, not the
@@ -674,12 +673,12 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
   private def toDeltaLogs(
       seg: SegmentBackup,
       backupDir: String
-  ): Seq[V2DeltaLogFile] =
+  ): Seq[DeltaLogFile] =
     seg.deltalogs
       .flatMap(_.binlogs)
       .sortBy(_.logId)
       .map(b =>
-        V2DeltaLogFile(
+        DeltaLogFile(
           logId = b.logId,
           logPath = qualifiedDeltaLogPath(backupDir, seg, b.logId),
           entriesNum = b.entriesNum
