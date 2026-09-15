@@ -1,6 +1,6 @@
 ---
 name: spark-milvus-sbt
-description: Use when reviewing or changing the Spark-Milvus sbt build, module wiring, shared settings, Spark version matrix, test configurations, assembly or publication metadata.
+description: Use when preparing any Spark-Milvus commit, or reviewing or changing its sbt build, module wiring, shared settings, Spark version matrix, test configurations, assembly or publication metadata.
 ---
 
 # Maintain the Spark-Milvus build
@@ -11,6 +11,10 @@ the build conventions; this skill applies them. Consult
 [modules.md](../../../docs/design/architecture/modules.md) when a change affects module
 boundaries or compatibility, and [contributing.md](../../../docs/contributing.md)
 for build commands and environment constraints.
+
+For commit preparation without build changes, go directly to
+[validation](#validate-and-report-within-authorization); the build review steps
+below apply when build settings change.
 
 ## Establish the requested scope
 
@@ -50,8 +54,22 @@ and build comments in English, and the design document in Chinese.
 
 ## Validate and report within authorization
 
-Compare the before/after module graph, aggregation and affected dependency or
-publication settings. Run `git diff --check`. Follow the session's validation
+Before every commit, including documentation-only commits, run formatting and
+then the formatting checks using the
+[pre-commit formatting commands](../../../docs/contributing.md#formatting).
+Use the repository's pinned Scalafmt configuration and Java 21. Serialize
+formatting tasks: the four Spark projects share `spark-base`, and concurrent
+writes have truncated a source file. Do not run multiple formatter processes
+against the same checkout.
+
+Review the resulting diff before staging; a passing formatter check does not
+detect a source file accidentally reduced to empty content. Resolve formatting
+failures before committing, preserve concurrent work, and keep unrelated
+formatting repairs separate from functional changes. `git diff --check` is
+required too, but does not replace `scalafmtCheckAll`.
+
+When build settings change, compare the before/after module graph, aggregation
+and affected dependency or publication settings. Follow the session's validation
 scope: CI is the default compilation/test gate for ordinary changes here; do
 not start compilation, integration services or publishing without authorization.
 Report static checks separately from commands actually run, and do not claim

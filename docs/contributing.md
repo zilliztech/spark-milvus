@@ -134,9 +134,37 @@ them the first column batch throws `Failed to initialize MemoryUtil`.
 
 ## Formatting
 
-`sbt scalafmtAll` formats every module. Parts of the 1.x tree were never
-formatted, so a blanket run touches files unrelated to your change — revert
-those before committing rather than mixing them in.
+Before every commit, including documentation-only commits, run the formatter
+and its check with Java 21 from the repository root:
+
+```bash
+sbt 'set Global / concurrentRestrictions += Tags.limitAll(1)' scalafmtAll scalafmtCheckAll
+git diff --check
+```
+
+The restriction serializes tasks for this sbt session while preserving existing
+restrictions. All four Spark projects include `spark-base`, so an unrestricted
+aggregated `scalafmtAll` can write the same file concurrently. One such run
+truncated `Utf8FromBinaryColumn.scala` to a blank line. Do not run multiple
+formatter processes against the same checkout, and review the diff for missing
+code as well as formatting changes before staging. An empty Scala file can pass
+`scalafmtCheckAll`.
+
+The root commands cover the aggregated projects. When changing
+`integration-4.0`, which is outside that aggregate, also run:
+
+```bash
+sbt integration40/scalafmtAll integration40/scalafmtCheckAll
+```
+
+When changing `build.sbt` or Scala/sbt files under `project/`, also run
+`sbt scalafmtSbt scalafmtSbtCheck`. Use the pinned `.scalafmt.conf`; do not
+change its rules to make a check pass. Repeat the relevant check after further
+source edits and resolve failures before committing. Keep unrelated formatting
+repairs in a separate commit from functional changes, preserving other
+contributors' work. `git diff --check` checks whitespace errors and is not a
+substitute for Scalafmt. Compilation and tests follow the validation scope in
+the [sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md).
 
 ## The protobuf split
 
