@@ -126,7 +126,7 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 | A7 | 清理暂存要 `spark.procedure`，那个包目前是空的，等第 3 层拆分 |
 | G5 | 指标要 native-storage 的 JNI 层留计数器。第 1 层已经写了（读写两侧的 loon_* 封装加自己的加载器），计数器还没加 |
 | R1 | 三段名要 `spark.catalog` 的 MilvusCatalog；四条线的 catalog 包都只有 package.scala。今天读表走 `format("milvus")` 加 option |
-| R6 | Spark 谓词下推要 `spark.expr` 翻成 IR 再由 `core.expr` 求值，两个包都是零文件。现有下推在 MilvusDataSource 里且走 V1 的 `SupportsPushDownFilters`，接口选型见 README 第 4 节决策 20 |
+| R6 | Spark 谓词下推要 `spark.expr` 翻成 IR 再由 `core.expr` 求值，两个包都是零文件。`MilvusScanBuilder` 暂时保留 V1 的 `SupportsPushDownFilters` 接口，但不接受任何 `Filter`，全部作为 residual 交还 Spark 求值；接口选型见 README 第 4 节决策 20 |
 | R7 | Milvus 表达式要 `core.expr` 按 Plan.g4 解析求值，零文件 |
 | A2 | 建索引、删索引的 CALL 要 `spark.procedure`（3.5 线是 `spark.functions`），全部是空壳；client 侧还要新增三个 RPC |
 | A3 | load / release / flush / compact 的 CALL，同 A2；client 侧还要新增三个 RPC |
@@ -134,4 +134,3 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 | V1 | knowhere 的 C shim 与 JNI 要 `native-vector`，目前只有 package-info.java |
 | V2 | 加载 Milvus 建的索引要 `core.index`，零文件 |
 | V4 | 索引来源与缓存要 `core.index`，零文件 |
-

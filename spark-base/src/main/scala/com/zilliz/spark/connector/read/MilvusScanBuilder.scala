@@ -13,12 +13,7 @@ import org.apache.spark.sql.connector.read.{
   SupportsPushDownRequiredColumns
 }
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{
-  DataTypes => SparkDataTypes,
-  LongType,
-  StringType,
-  StructType
-}
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.snapshot.Snapshot
@@ -55,7 +50,8 @@ class MilvusScanBuilder(
     .map(MilvusOption.normalizeExtraColumnName)
     .toSeq
 
-  // Store the filters that can be pushed down
+  // Filters accepted by the connector. This remains empty until predicate
+  // pushdown can preserve the complete Spark SQL semantics.
   private var pushedFilterArray: Array[Filter] = Array.empty[Filter]
 
   override def pruneColumns(requiredSchema: StructType): Unit = {
@@ -79,16 +75,6 @@ class MilvusScanBuilder(
         fieldNames = fieldNames :+ field.name
       }
     })
-
-    // Add fields referenced in pushed filters to ensure they are not pruned
-    pushedFilterArray.foreach { filter =>
-      val filterColumns = extractFilterColumns(filter)
-      filterColumns.foreach { colName =>
-        if (fieldName2ID.contains(colName) && !fieldNames.contains(colName)) {
-          fieldNames = fieldNames :+ colName
-        }
-      }
-    }
 
     // Add vector column if vector search is enabled
     val vectorColumn = Option(
@@ -154,95 +140,15 @@ class MilvusScanBuilder(
   }
 
   override def pushFilters(filters: Array[Filter]): Array[Filter] = {
-    // Only the V3 row reader evaluates a pushed filter. A read that plans a
-    // V2 data segment therefore pushes nothing, so Spark keeps every filter
-    // and applies it after the read. This is decided on the snapshot, not on
-    // the options: a snapshot read by path or through the service lists its
-    // V2 segments in the snapshot, and a filter pushed there would be
-    // accepted by Spark and evaluated by nobody.
-    if (snapshot.v2Segments.exists(_.hasData)) {
-      pushedFilterArray = Array.empty
-      return filters
-    }
-    val (supportedFilters, unsupportedFilters) =
-      filters.partition(isSupportedFilter)
-    pushedFilterArray = supportedFilters
-    unsupportedFilters
+    // Spark removes accepted filters from its plan, so accepting one is safe
+    // only when the connector preserves the complete Spark SQL semantics. The
+    // current legacy Filter evaluator does not, notably for null comparisons;
+    // keep every filter in Spark until predicate pushdown is complete.
+    pushedFilterArray = Array.empty
+    filters
   }
 
   override def pushedFilters(): Array[Filter] = pushedFilterArray
-
-  private def isSupportedFilter(filter: Filter): Boolean = {
-    import org.apache.spark.sql.sources._
-    filter match {
-      // Support equality filters on string and numeric columns
-      case EqualTo(attr, _) => isStringOrNumericColumn(attr)
-      // Support numeric comparison filters only on numeric columns
-      case GreaterThan(attr, _)        => isNumericColumn(attr)
-      case GreaterThanOrEqual(attr, _) => isNumericColumn(attr)
-      case LessThan(attr, _)           => isNumericColumn(attr)
-      case LessThanOrEqual(attr, _)    => isNumericColumn(attr)
-      // Support IN filters on string and numeric columns
-      case In(attr, _)     => isStringOrNumericColumn(attr)
-      case IsNull(attr)    => isStringOrNumericColumn(attr)
-      case IsNotNull(attr) => isStringOrNumericColumn(attr)
-      // Support AND combinations of supported filters
-      case And(left, right) =>
-        isSupportedFilter(left) && isSupportedFilter(right)
-      // Support OR combinations of supported filters
-      case Or(left, right) =>
-        isSupportedFilter(left) && isSupportedFilter(right)
-      case _ => false
-    }
-  }
-
-  private def isStringOrNumericColumn(columnName: String): Boolean = {
-    schema.fields.find(_.name == columnName) match {
-      case Some(field) =>
-        field.dataType match {
-          case StringType | LongType | SparkDataTypes.IntegerType |
-              SparkDataTypes.DoubleType | SparkDataTypes.FloatType |
-              SparkDataTypes.BooleanType =>
-            true
-          case _ => false
-        }
-      case None => false
-    }
-  }
-
-  private def isNumericColumn(columnName: String): Boolean = {
-    schema.fields.find(_.name == columnName) match {
-      case Some(field) =>
-        field.dataType match {
-          case LongType | SparkDataTypes.IntegerType |
-              SparkDataTypes.DoubleType | SparkDataTypes.FloatType =>
-            true
-          case _ => false
-        }
-      case None => false
-    }
-  }
-
-  /** Extract all column names referenced in a filter
-    */
-  private def extractFilterColumns(filter: Filter): Seq[String] = {
-    import org.apache.spark.sql.sources._
-    filter match {
-      case EqualTo(attr, _)            => Seq(attr)
-      case GreaterThan(attr, _)        => Seq(attr)
-      case GreaterThanOrEqual(attr, _) => Seq(attr)
-      case LessThan(attr, _)           => Seq(attr)
-      case LessThanOrEqual(attr, _)    => Seq(attr)
-      case In(attr, _)                 => Seq(attr)
-      case IsNull(attr)                => Seq(attr)
-      case IsNotNull(attr)             => Seq(attr)
-      case And(left, right) =>
-        extractFilterColumns(left) ++ extractFilterColumns(right)
-      case Or(left, right) =>
-        extractFilterColumns(left) ++ extractFilterColumns(right)
-      case _ => Seq.empty
-    }
-  }
 
   override def build(): Scan = {
     new MilvusScan(
