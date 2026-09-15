@@ -1,0 +1,171 @@
+package com.zilliz.milvus.storage.stats
+
+import java.nio.charset.StandardCharsets
+
+import com.fasterxml.jackson.databind.ObjectMapper
+
+import io.milvus.grpc.schema.DataType
+
+import net.openhft.hashing.LongHashFunction
+
+/** The primary-key statistics Milvus keeps per segment,
+  * `_stats/bloom_filter.<field id>/<log id>`: the JSON `PrimaryKeyStats` of
+  * `internal/storage/stats.go`, a blocked bloom filter over the keys plus their
+  * minimum and maximum. Milvus routes deletes and prunes primary-key queries
+  * with it.
+  *
+  * An Int64 key is hashed as its 8 little-endian bytes, a VarChar key as its
+  * UTF-8 bytes, both with xxh3 (seed 0), as `stats.Update` does. The filter is
+  * sized for the number of keys at Milvus's default rate, so keys are collected
+  * first and the filter built at the end.
+  */
+final class PrimaryKeyStats private (
+    val fieldId: Long,
+    val pkType: DataType,
+    val filter: BlockedBloomFilter,
+    val minPk: Any,
+    val maxPk: Any,
+    val keys: Long
+) {
+
+  def mightContainLong(pk: Long): Boolean =
+    filter.mightContain(PrimaryKeyStats.hashLong(pk))
+
+  def mightContainString(pk: String): Boolean =
+    filter.mightContain(PrimaryKeyStats.hashString(pk))
+
+  /** The JSON Milvus writes, field for field and in its order. `max` and `min`
+    * are the legacy Int64 fields Milvus writes as 0.
+    */
+  def toJson: String = {
+    val pk: Any => String = {
+      case s: String => PrimaryKeyStats.mapper.writeValueAsString(s)
+      case other     => other.toString
+    }
+    s"""{"fieldID":$fieldId,"max":0,"min":0,"bfType":${PrimaryKeyStats.BlockedBfType},"bf":${filter.toJson},"pkType":${pkType.value},"maxPk":${pk(
+        maxPk
+      )},"minPk":${pk(minPk)}}"""
+  }
+
+  def toBytes: Array[Byte] = toJson.getBytes(StandardCharsets.UTF_8)
+}
+
+object PrimaryKeyStats {
+
+  /** `bloomfilter.BlockedBF` in Milvus's enumeration. */
+  val BlockedBfType: Int = 4
+
+  private val mapper = new ObjectMapper()
+  private val xxh3 = LongHashFunction.xx3()
+
+  def hashLong(pk: Long): Long = {
+    val bytes = new Array[Byte](8)
+    var i = 0
+    var v = pk
+    while (i < 8) { bytes(i) = (v & 0xff).toByte; v >>>= 8; i += 1 }
+    xxh3.hashBytes(bytes)
+  }
+
+  def hashString(pk: String): Long =
+    xxh3.hashBytes(pk.getBytes(StandardCharsets.UTF_8))
+
+  /** Collects the keys of one segment and builds the stats once they are all
+    * in, because the filter's size depends on their number.
+    */
+  final class Builder(fieldId: Long, pkType: DataType) {
+    require(
+      pkType == DataType.Int64 || pkType == DataType.VarChar,
+      s"a primary key is Int64 or VarChar, not $pkType"
+    )
+    private var hashes = new Array[Long](1024)
+    private var count = 0
+    private var minLong = Long.MaxValue
+    private var maxLong = Long.MinValue
+    private var minString: String = null
+    private var maxString: String = null
+
+    private def push(hash: Long): Unit = {
+      if (count == hashes.length)
+        hashes = java.util.Arrays.copyOf(hashes, hashes.length * 2)
+      hashes(count) = hash
+      count += 1
+    }
+
+    def addLong(pk: Long): Unit = {
+      require(pkType == DataType.Int64, s"an Int64 key on a $pkType field")
+      if (pk < minLong) minLong = pk
+      if (pk > maxLong) maxLong = pk
+      push(hashLong(pk))
+    }
+
+    def addString(pk: String): Unit = {
+      require(pkType == DataType.VarChar, s"a VarChar key on a $pkType field")
+      if (minString == null || pk.compareTo(minString) < 0) minString = pk
+      if (maxString == null || pk.compareTo(maxString) > 0) maxString = pk
+      push(hashString(pk))
+    }
+
+    def size: Int = count
+
+    def build(): PrimaryKeyStats = {
+      require(
+        count > 0,
+        "no primary key was added; a segment with no rows has no stats"
+      )
+      val filter = BlockedBloomFilter.sized(count.toLong)
+      var i = 0
+      while (i < count) { filter.add(hashes(i)); i += 1 }
+      pkType match {
+        case DataType.Int64 =>
+          new PrimaryKeyStats(
+            fieldId,
+            pkType,
+            filter,
+            minLong,
+            maxLong,
+            count.toLong
+          )
+        case _ =>
+          new PrimaryKeyStats(
+            fieldId,
+            pkType,
+            filter,
+            minString,
+            maxString,
+            count.toLong
+          )
+      }
+    }
+  }
+
+  /** Reads what Milvus (or this class) wrote. */
+  def fromJson(json: String): PrimaryKeyStats = {
+    val node = mapper.readTree(json)
+    val bfType = node.path("bfType").asInt(-1)
+    require(
+      bfType == BlockedBfType,
+      s"bfType $bfType is not the blocked bloom filter ($BlockedBfType)"
+    )
+    val bf = node.path("bf")
+    val blocks = Iterator
+      .range(0, bf.path("b").size())
+      .map(bf.path("b").get(_).asText())
+      .toSeq
+    val filter = BlockedBloomFilter.fromJson(bf.path("k").asInt(), blocks)
+    val pkType =
+      DataType.fromValue(node.path("pkType").asInt(DataType.Int64.value))
+    val (min, max) = pkType match {
+      case DataType.Int64 =>
+        (node.path("minPk").asLong(), node.path("maxPk").asLong())
+      case _ => (node.path("minPk").asText(), node.path("maxPk").asText())
+    }
+    new PrimaryKeyStats(
+      node.path("fieldID").asLong(),
+      pkType,
+      filter,
+      min,
+      max,
+      -1L
+    )
+  }
+}

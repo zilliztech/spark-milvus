@@ -29,8 +29,10 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.schema.MilvusTypes
+import com.zilliz.milvus.storage.stats.PrimaryKeyStats
 import com.zilliz.milvus.storage.write.commit.{
   CommitOutcome,
   CommittedSegment,
@@ -264,6 +266,73 @@ class MilvusV3PartitionWriter(
   // a task that never flushes opens it in commit, split by schema alone.
   private var segmentWriter: V3SegmentWriter = null
 
+  // The primary key column, when this write carries it (an append does, a
+  // backfill of other columns does not): its position, field id and type.
+  // Its keys are collected as batches flush and become the segment's
+  // bloom-filter stats at commit, the file Milvus keeps for delete routing
+  // and primary-key pruning.
+  private val primaryKey: Option[(Int, Long, MilvusDataType)] =
+    sparkSchema.fields.zipWithIndex.collectFirst {
+      case (f, i)
+          if f.metadata.contains(FieldMetadata.MilvusPrimaryKeyMetadataKey) &&
+            f.metadata.getBoolean(FieldMetadata.MilvusPrimaryKeyMetadataKey) =>
+        (
+          i,
+          fieldIds(f.name),
+          MilvusDataType.fromValue(
+            f.metadata.getLong(FieldMetadata.MilvusDataTypeMetadataKey).toInt
+          )
+        )
+    }
+  private val primaryKeyStats: Option[PrimaryKeyStats.Builder] =
+    primaryKey.map { case (_, id, dataType) =>
+      new PrimaryKeyStats.Builder(id, dataType)
+    }
+
+  private def collectPrimaryKeys(root: VectorSchemaRoot): Unit =
+    primaryKey.foreach { case (index, _, _) =>
+      val stats = primaryKeyStats.get
+      root.getVector(index) match {
+        case v: BigIntVector =>
+          var i = 0
+          while (i < root.getRowCount) { stats.addLong(v.get(i)); i += 1 }
+        case v: VarCharVector =>
+          var i = 0
+          while (i < root.getRowCount) {
+            stats.addString(
+              new String(v.get(i), java.nio.charset.StandardCharsets.UTF_8)
+            )
+            i += 1
+          }
+        case other =>
+          throw new IllegalStateException(
+            s"primary key column is ${other.getClass.getSimpleName}, not an Int64 or VarChar vector"
+          )
+      }
+    }
+
+  /** Writes `_stats/bloom_filter.<pk>/<id>` and returns the manifest entry for
+    * it, or nothing when this write carries no primary key or no row.
+    */
+  private def writePrimaryKeyStats(): Seq[ManifestTransaction.Stat] =
+    primaryKeyStats.filter(_.size > 0).toSeq.map { builder =>
+      val stats = builder.build()
+      val bytes = stats.toBytes
+      val path =
+        s"$basePath/_stats/bloom_filter.${stats.fieldId}/${System.currentTimeMillis()}"
+      val store = NativeObjectStore.Factory(writerProperties).open()
+      try store.write(path, bytes)
+      finally store.close()
+      logInfo(
+        s"Primary-key stats of $basePath: ${builder.size} keys, ${bytes.length} bytes at $path"
+      )
+      ManifestTransaction.Stat(
+        key = s"bloom_filter.${stats.fieldId}",
+        files = Seq(path),
+        metadata = Map("memory_size" -> bytes.length.toString)
+      )
+    }
+
   private def openSegmentWriter(sample: Option[VectorSchemaRoot]): Unit = {
     val rows = sample.map(_.getRowCount).getOrElse(0)
     val avgBytes: Map[Long, Long] = sample match {
@@ -348,7 +417,13 @@ class MilvusV3PartitionWriter(
               })
             case _ => ManifestTransaction.AppendFiles
           }
-          ManifestTransaction.commit(basePath, writerProperties, groups, change)
+          ManifestTransaction.commit(
+            basePath,
+            writerProperties,
+            groups,
+            change,
+            writePrimaryKeyStats()
+          )
         } finally groups.close()
       logInfo(
         s"Manifest committed: partition=$partitionId, records=$rows, basePath=$basePath, version=$committedVersion"
@@ -368,6 +443,7 @@ class MilvusV3PartitionWriter(
     if (currentBatchSize == 0) return
     root.setRowCount(currentBatchSize)
     if (segmentWriter == null) openSegmentWriter(Some(root))
+    collectPrimaryKeys(root)
     segmentWriter.write(root)
     // Build and allocate the replacement before swapping, so an allocation
     // failure leaves `root` pointing at the old one for cleanup to release.

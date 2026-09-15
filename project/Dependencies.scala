@@ -72,6 +72,12 @@ object Dependencies {
   lazy val jacksonDatabind =
     "com.fasterxml.jackson.core" % "jackson-databind" % Versions.jackson
 
+  /** xxh3 for the primary-key bloom filter (core.stats). Ships in the assembly:
+    * Spark does not carry it.
+    */
+  lazy val zeroAllocationHashing =
+    "net.openhft" % "zero-allocation-hashing" % Versions.zeroAllocationHashing
+
   // The root's Arrow baseline is separate from the Spark-line matrix.
   lazy val arrowFormat =
     "org.apache.arrow" % "arrow-format" % Versions.legacyRootArrow

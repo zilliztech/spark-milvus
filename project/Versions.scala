@@ -78,6 +78,9 @@ object Versions {
   /** Keep jackson-module-scala and jackson-databind on the same version. */
   val jackson = "2.17.3"
 
+  /** xxh3, the hash Milvus's primary-key bloom filter is keyed by. */
+  val zeroAllocationHashing = "0.16"
+
   /** The logging API provided by Spark 3.5 and compatible later lines. */
   val slf4j = "2.0.7"
 

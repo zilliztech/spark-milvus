@@ -209,8 +209,12 @@ abort 删整个前缀。这一点靠 task id 进路径保证，不需要 task �
 <ol>
   <li><strong>系统字段</strong> RowID（字段 0）和 Timestamp（字段 1）。Milvus 的 QueryNode 加载段时按字段 id 找它们。
       RowID 由 Milvus 的全局 id 分配器发，Timestamp 是写入时的 TSO；纯连接器模式两者都拿不到，见决策 22。</li>
-  <li><strong>主键的 bloom filter</strong>：<code>_stats/bloom_filter.&lt;pk&gt;</code>，登记进段 manifest 的 stats。
-      连接器写段时可以算，格式按 Milvus 的 <code>storage.BloomFilterSet</code>，放 <code>core.stats</code>（零文件）。</li>
+  <li><strong>主键的 bloom filter</strong>：已做（#15）。文件是 <code>_stats/bloom_filter.&lt;pk 字段 id&gt;/&lt;log id&gt;</code>，
+      内容是 Milvus <code>internal/storage/stats.go</code> 的 <code>PrimaryKeyStats</code> JSON：字段 id、bfType 4（BlockedBloomFilter）、
+      blobloom 分块过滤器（每块 512 位，16 个 little-endian uint32 转 base64url）、pkType、minPk、maxPk；键用 xxh3 哈希（Int64 取 8 字节 little-endian，VarChar 取 UTF-8），
+      容量按行数、误判率 0.001 定大小。<code>core.stats.BlockedBloomFilter</code> 是 blobloom 的逐位移植，<code>PrimaryKeyStats</code> 收集主键后一次建好；
+      task writer 在 commit 时写文件并用 <code>loon_transaction_update_stat</code> 登记进 manifest（key <code>bloom_filter.&lt;id&gt;</code>，metadata <code>memory_size</code>）。
+      验证：对 UAT 上 Milvus 写的那个文件，用同样的 3000 个键重建，输出逐字节相同。</li>
   <li><strong>列组切分</strong>：已做（#14）。Milvus 的规则（<code>internal/storagecommon/split_policy.go</code> 的默认策略）：
       系统字段加主键、partition key、clustering key 一组；平均每值 ≥1024 字节的字段各一组；向量和 Text 字段各一组；其余标量一组。
       <code>core.write.exec.ColumnGroupSplit</code> 把它表达成 milvus-storage <code>schema_based</code> 策略的正则列表（列名是字段 id），
@@ -219,7 +223,7 @@ abort 删整个前缀。这一点靠 task id 进路径保证，不需要 task �
 </ol>
 
 <p>这三样是登记（A4）的前提，不是入口的前提：入口接上后，纯连接器写→读的往返不依赖它们。
-三样各自是 W1 行"前提"列里的三条；3 已做，2 是新包（#15），1 等决策 22。</p>
+三样各自是 W1 行"前提"列里的三条；3、2 已做，1 等决策 22。</p>
 
 <div class="open">
 <p><strong>决策 22（README 第 4 节）：连接器写的段，RowID 和 Timestamp 从哪来。</strong>

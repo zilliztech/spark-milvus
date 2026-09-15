@@ -108,6 +108,9 @@ lazy val core = project
       jacksonScala,
       avro,
       parquetHadoop,
+      // The primary-key bloom filter a written segment carries is keyed by
+      // xxh3, as Milvus's is.
+      zeroAllocationHashing,
       scalapbRuntime % "protobuf",
       scalaTest % Test
     ),

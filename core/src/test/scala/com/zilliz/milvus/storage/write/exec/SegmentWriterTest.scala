@@ -217,6 +217,81 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("V3: a stats entry committed with the groups is in the manifest") {
+    skipWithoutLibrary()
+    withDir { dir =>
+      val allocator = new RootAllocator(Long.MaxValue)
+      try {
+        val writer =
+          new V3SegmentWriter(
+            "segment-stats",
+            schema,
+            properties(dir),
+            allocator
+          )
+        val rows = batch(allocator, 0, 10)
+        writer.write(rows)
+        rows.close()
+        val groups = writer.finish()
+        val statFile = dir.resolve("segment-stats/_stats/bloom_filter.100/7")
+        Files.createDirectories(statFile.getParent)
+        Files.write(statFile, "{\"fieldID\":100}".getBytes)
+        val version =
+          try
+            ManifestTransaction.commit(
+              "segment-stats",
+              properties(dir),
+              groups,
+              ManifestTransaction.AppendFiles,
+              Seq(
+                ManifestTransaction.Stat(
+                  "bloom_filter.100",
+                  Seq("segment-stats/_stats/bloom_filter.100/7"),
+                  Map("memory_size" -> "15")
+                )
+              )
+            )
+          finally groups.close()
+        version shouldBe 1L
+
+        // Read the manifest as Milvus's reader would: the stats map keyed by
+        // the entry, its paths relative to _stats/, its metadata as given.
+        val reader = new org.apache.avro.file.DataFileReader[
+          org.apache.avro.generic.GenericRecord
+        ](
+          dir.resolve("segment-stats/_metadata/manifest-1.avro").toFile,
+          new org.apache.avro.generic.GenericDatumReader[
+            org.apache.avro.generic.GenericRecord
+          ]()
+        )
+        try {
+          val manifest = reader.next()
+          val stats = manifest
+            .get("stats")
+            .asInstanceOf[
+              java.util.Map[AnyRef, org.apache.avro.generic.GenericRecord]
+            ]
+            .asScala
+            .map { case (k, v) => k.toString -> v }
+          val entry = stats("bloom_filter.100")
+          entry
+            .get("paths")
+            .asInstanceOf[java.util.List[AnyRef]]
+            .asScala
+            .map(_.toString) shouldBe
+            Seq("bloom_filter.100/7")
+          entry
+            .get("metadata")
+            .asInstanceOf[java.util.Map[AnyRef, AnyRef]]
+            .asScala
+            .map { case (k, v) => k.toString -> v.toString } shouldBe Map(
+            "memory_size" -> "15"
+          )
+        } finally reader.close()
+      } finally allocator.close()
+    }
+  }
+
   test("V3: close without finish releases the writer once") {
     skipWithoutLibrary()
     withDir { dir =>

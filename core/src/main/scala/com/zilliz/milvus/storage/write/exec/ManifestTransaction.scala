@@ -20,12 +20,23 @@ object ManifestTransaction {
     */
   final case class ReplaceColumns(columns: Seq[String]) extends Change
 
+  /** A statistics entry of the manifest: `key` (`bloom_filter.<field id>`), the
+    * files under the segment's `_stats/` that hold it, and metadata such as
+    * `memory_size`. Committing it replaces any entry of the same key.
+    */
+  final case class Stat(
+      key: String,
+      files: Seq[String],
+      metadata: Map[String, String]
+  )
+
   /** @return the committed manifest version. */
   def commit(
       basePath: String,
       properties: Map[String, String],
       groups: WrittenColumnGroups,
-      change: Change
+      change: Change,
+      stats: Seq[Stat] = Seq.empty
   ): Long = {
     // -1 reads the latest version; 0 fails on a conflicting commit; one retry.
     val transaction =
@@ -44,6 +55,15 @@ object ManifestTransaction {
               transaction,
               groups.nativeHandle
             )
+        }
+        stats.foreach { stat =>
+          StorageNative.transactionUpdateStat(
+            transaction,
+            stat.key,
+            stat.files.toArray,
+            stat.metadata.keys.toArray,
+            stat.metadata.values.toArray
+          )
         }
         StorageNative.transactionCommit(transaction)
       } finally StorageNative.transactionDestroy(transaction)

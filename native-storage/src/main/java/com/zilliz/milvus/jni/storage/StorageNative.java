@@ -254,6 +254,18 @@ public final class StorageNative {
     public static native void transactionAddDeltaLog(
             long transactionHandle, String path, long numEntries);
 
+    /**
+     * Records a statistics entry in the transaction: {@code key} (such as
+     * {@code bloom_filter.100}) with its files and metadata. Replaces an
+     * existing entry of the same key, as loon_transaction_update_stat does.
+     */
+    public static native void transactionUpdateStat(
+            long transactionHandle,
+            String key,
+            String[] files,
+            String[] metadataKeys,
+            String[] metadataValues);
+
     public static native void transactionDestroy(long transactionHandle);
 
     // Reading back what a writer produced, which is how a caller learns the

@@ -402,6 +402,49 @@ Java_com_zilliz_milvus_jni_storage_StorageNative_transactionAddDeltaLog(
                  static_cast<int64_t>(num_entries)));
 }
 
+namespace {
+
+// The UTF-8 strings of a Java String[], released with the object.
+class Utf8Array {
+ public:
+  Utf8Array(JNIEnv* env, jobjectArray values) : env_(env) {
+    jsize n = values != nullptr ? env->GetArrayLength(values) : 0;
+    for (jsize i = 0; i < n; ++i) {
+      auto value = static_cast<jstring>(env->GetObjectArrayElement(values, i));
+      strings_.emplace_back(new Utf8(env, value));
+      pointers_.push_back(strings_.back()->c_str());
+    }
+  }
+  const char* const* data() const { return pointers_.data(); }
+  size_t size() const { return pointers_.size(); }
+
+ private:
+  JNIEnv* env_;
+  std::vector<std::unique_ptr<Utf8>> strings_;
+  std::vector<const char*> pointers_;
+};
+
+}  // namespace
+
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_transactionUpdateStat(
+    JNIEnv* env, jclass, jlong handle, jstring key, jobjectArray files,
+    jobjectArray metadata_keys, jobjectArray metadata_values) {
+  Utf8 stat_key(env, key);
+  Utf8Array file_paths(env, files);
+  Utf8Array keys(env, metadata_keys);
+  Utf8Array values(env, metadata_values);
+  if (keys.size() != values.size()) {
+    ThrowIllegalArgument(env, "metadata keys and values differ in length");
+    return;
+  }
+  Check(env, loon_transaction_update_stat(
+                 static_cast<LoonTransactionHandle>(handle), stat_key.c_str(),
+                 file_paths.data(), file_paths.size(),
+                 keys.size() > 0 ? keys.data() : nullptr,
+                 values.size() > 0 ? values.data() : nullptr, keys.size()));
+}
+
 JNIEXPORT void JNICALL
 Java_com_zilliz_milvus_jni_storage_StorageNative_transactionDestroy(
     JNIEnv*, jclass, jlong handle) {
