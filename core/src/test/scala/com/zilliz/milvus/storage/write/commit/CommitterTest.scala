@@ -118,6 +118,18 @@ class CommitterTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test("registration is recorded once the segments are handed over") {
+    withStore { (store, layout, dir) =>
+      val committer = new Committer(store, layout)
+      committer.commit(segments)
+      committer.isRegistered shouldBe false
+      committer.manifest().segments shouldBe segments
+      committer.markRegistered(nowMillis = 5L)
+      committer.isRegistered shouldBe true
+      text(dir, "files/staging/job-1/_registered") shouldBe "5"
+    }
+  }
+
   test("JobManifest round-trips through JSON") {
     val manifest = JobManifest("j", 42L, segments)
     JobManifest.fromJson(manifest.toJson) shouldBe Right(manifest)

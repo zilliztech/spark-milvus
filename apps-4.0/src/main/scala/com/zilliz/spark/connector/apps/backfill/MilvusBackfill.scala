@@ -50,6 +50,49 @@ object MilvusBackfill {
     * `-1` sentinel was compared against partition -1 by those builds, which
     * rejected every segment ("no backfill segments passed pre-validation").
     */
+  /** Commits the job manifest of the V3 segments this run wrote into and
+    * returns the staging prefix, or "" when there was none to commit.
+    */
+  private def writeJobManifest(
+      spark: SparkSession,
+      config: BackfillConfig,
+      segmentResults: Map[Long, SegmentBackfillResult]
+  ): String = {
+    import com.zilliz.milvus.storage.credential.StorageProperties
+    import com.zilliz.milvus.storage.io.NativeObjectStore
+    import com.zilliz.milvus.storage.write.commit.{Committer, CommittedSegment}
+    import com.zilliz.milvus.storage.write.exec.StagingLayout
+
+    val segments = segmentResults.values.toSeq
+      .filter(_.committedVersion > 0L)
+      .sortBy(_.segmentId)
+      .map { r =>
+        CommittedSegment(
+          partitionId = 0,
+          basePath = r.outputPath,
+          manifestVersion = r.committedVersion,
+          rowCount = r.rowCount,
+          segmentId = Some(r.segmentId)
+        )
+      }
+    if (segments.isEmpty) return ""
+    val layout = StagingLayout(
+      config.stagingRoot.getOrElse(config.s3RootPath),
+      config.jobId.getOrElse(spark.sparkContext.applicationId)
+    )
+    val store = NativeObjectStore
+      .Factory(
+        StorageProperties.from(config.getS3WriteOptionsForBasePath("", 0L))
+      )
+      .open()
+    try new Committer(store, layout).commit(segments)
+    finally store.close()
+    logger.info(
+      s"Job manifest of ${segments.size} segment(s) committed at ${layout.manifest}"
+    )
+    layout.prefix
+  }
+
   private[backfill] def resolveResultPartitionId(
       partitionIDs: Set[Long]
   ): Long =
@@ -652,7 +695,12 @@ object MilvusBackfill {
         totalBackfillDataRows = backfillRowCount
       )
 
-      Right(result)
+      // The job manifest: every V3 segment this run wrote into, with its id
+      // and new manifest version, committed under the staging prefix for
+      // `register` to hand to Milvus.
+      val stagingPrefix = writeJobManifest(spark, config, segmentResults)
+
+      Right(result.copy(stagingPrefix = stagingPrefix))
 
     } catch {
       case e: Exception =>
@@ -1950,30 +1998,28 @@ object MilvusBackfill {
   ): Either[BackfillError, Seq[Segment]] = {
     if (metadata.manifestList.isEmpty) return Right(Seq.empty)
     try {
-      // Configure a private Hadoop view so FooterV2SegmentResolver can read AVRO and
-      // parquet footers without mutating the Spark session's shared OSS
-      // credentials. The main bucket (not the source bucket) holds these
-      // snapshot artifacts.
-      val hadoopConf = new org.apache.hadoop.conf.Configuration(
-        spark.sparkContext.hadoopConfiguration
-      )
-      configureHadoopStorageForPath(
-        hadoopConf,
-        storagePath(config, ""),
-        config,
-        isSource = false
-      )
-      hadoopConf.set("fs.oss.impl.disable.cache", "true")
-      com.zilliz.milvus.storage.compat.v2.FooterV2SegmentResolver
-        .loadV2Segments(
-          metadata.manifestList,
-          config.s3BucketName,
-          com.zilliz.spark.connector.options.HadoopStorageKeys
-            .objectStore(hadoopConf, config.s3BucketName),
-          manifestSchemaVersion = metadata.manifestSchemaVersion,
-          applyDeletes = ApplyDeletesToSourceRows,
-          storageScheme = storageScheme(config)
-        ) match {
+      // The Avro manifests and parquet footers are read through the native
+      // store the fs.* options describe (the main bucket, IAM or static
+      // keys), the same store every other driver-side read uses.
+      val store = com.zilliz.milvus.storage.io.NativeObjectStore
+        .Factory(
+          com.zilliz.milvus.storage.credential.StorageProperties
+            .from(config.getMilvusReadOptions)
+        )
+        .open()
+      val loaded =
+        try
+          com.zilliz.milvus.storage.compat.v2.FooterV2SegmentResolver
+            .loadV2Segments(
+              metadata.manifestList,
+              config.s3BucketName,
+              store,
+              manifestSchemaVersion = metadata.manifestSchemaVersion,
+              applyDeletes = ApplyDeletesToSourceRows,
+              storageScheme = storageScheme(config)
+            )
+        finally store.close()
+      loaded match {
         case Right(segs) =>
           // Workaround for Milvus snapshot not yet exposing FieldBinlog.child_fields:
           // some segments carry both an old multi-field column group (slot < 100,
@@ -2634,34 +2680,40 @@ object MilvusBackfill {
     }
 
     try {
-      // Check if it's an S3 path
-      if (
-        snapshotPath.startsWith("s3://") || snapshotPath.startsWith(
-          "s3a://"
-        ) || snapshotPath.startsWith("oss://")
-      ) {
+      // Anything with a scheme other than file:// lives in the bucket: s3,
+      // s3a, oss, or the https form a Zilliz Cloud snapshot reports.
+      val local = !snapshotPath.contains("://") ||
+        snapshotPath.startsWith("file://")
+      if (!local) {
 
-        // Construct full S3 path (ensure s3a:// scheme for Hadoop)
-        val s3Path = normalizeObjectStorageScheme(snapshotPath, config)
-
-        // Configure S3 settings on Spark's Hadoop Configuration (per-bucket
-        // so that snapshot bucket and backfill source bucket can use
-        // different credentials in the same Spark session).
-        val json = withScopedHadoopStorage(
-          spark,
-          s3Path,
-          config,
-          isSource = false
-        ) {
-          // Use Spark's DataFrame API to read the file (avoids Hadoop version issues)
-          spark.read.text(s3Path).collect().map(_.getString(0)).mkString("\n")
-        }
+        // The snapshot JSON is read the way every other driver-side read
+        // goes: through the native store the fs.* options describe, at the
+        // (bucket, key) the path names in any of its spellings (https, s3,
+        // s3a, bucket-relative). Spark's Hadoop filesystem is not involved.
+        import com.zilliz.milvus.storage.credential.StorageProperties
+        import com.zilliz.milvus.storage.io.NativeObjectStore
+        import com.zilliz.milvus.storage.path.StoragePath
+        val located = StoragePath.parse(snapshotPath, config.s3BucketName)
+        val properties = StorageProperties.from(
+          config.getMilvusReadOptions ++ Map(
+            StorageProperties.BucketName -> located.bucket
+          )
+        )
+        val store = NativeObjectStore.Factory(properties).open()
+        val json =
+          try
+            new String(
+              store.readAll(located.key),
+              java.nio.charset.StandardCharsets.UTF_8
+            )
+          finally store.close()
 
         Right(json)
 
       } else {
         // Local file path, read directly
-        val source = scala.io.Source.fromFile(snapshotPath)
+        val source =
+          scala.io.Source.fromFile(snapshotPath.stripPrefix("file://"))
         try {
           val json = source.mkString
           Right(json)

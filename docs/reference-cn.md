@@ -201,6 +201,30 @@ df.write
 段落在 `files/staging/<job-id>/` 下并带作业清单；登记之后才进入 collection（后续步骤，见
 `docs/design/capabilities.md` 的 A4）。已提交过的作业重跑不会再写。
 
+### 3.3 把 backfill 登记给 Milvus
+
+backfill 作业（`MilvusBackfill.run`）给每个已有段写一个新列组，并在
+`{stagingRoot}/staging/{jobId}/` 下提交作业清单（`BackfillConfig.stagingRoot`、`jobId`；前缀由
+`BackfillResult.stagingPrefix` 带回）。把新的 manifest 版本交给 Milvus 是单独一步：
+
+```scala
+import com.zilliz.spark.connector.procedure.Register
+
+Register.run(
+  Map(
+    MilvusOption.MilvusUri -> "http://localhost:19530",
+    MilvusOption.MilvusToken -> "your-token",
+    MilvusOption.MilvusCollectionName -> "your_collection",
+    "fs.bucket_name" -> "milvus-bucket"          // 再加其余 fs.* 存储选项
+  ),
+  stagingPrefix = result.stagingPrefix
+)
+```
+
+它读作业清单，用每个段的 id 和新 manifest 版本调 Milvus 的 `BatchUpdateManifest`，然后给作业打上已登记标记，
+第二次调用不再发送。只有写进已有段的作业能这样登记；新建段的作业（`df.write`）会被拒绝，要等 Milvus 的
+`RegisterSegments`。SQL 形式的 `CALL milvus.system.register(...)` 还没有。
+
 
 ## 4. 数据模式
 

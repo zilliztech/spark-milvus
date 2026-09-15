@@ -222,6 +222,35 @@ become part of the collection only when registered (a later step, see
 `docs/design/capabilities.md` A4). A rerun of a job that already committed
 writes nothing.
 
+### 3.3 Registering a backfill with Milvus
+
+A backfill job (`MilvusBackfill.run`) writes a new column group into each
+existing segment and commits a job manifest under
+`{stagingRoot}/staging/{jobId}/` (`BackfillConfig.stagingRoot`, `jobId`; the
+prefix comes back as `BackfillResult.stagingPrefix`). Handing the new
+manifest versions to Milvus is a separate call:
+
+```scala
+import com.zilliz.spark.connector.procedure.Register
+
+Register.run(
+  Map(
+    MilvusOption.MilvusUri -> "http://localhost:19530",
+    MilvusOption.MilvusToken -> "your-token",
+    MilvusOption.MilvusCollectionName -> "your_collection",
+    "fs.bucket_name" -> "milvus-bucket"          // plus the other fs.* options
+  ),
+  stagingPrefix = result.stagingPrefix
+)
+```
+
+It reads the job manifest, calls Milvus's `BatchUpdateManifest` with every
+segment's id and new manifest version, and marks the job registered so a
+second call does nothing. Only a job that wrote into existing segments can be
+registered this way; a job that created new segments (`df.write`) is refused
+until Milvus offers `RegisterSegments`. The SQL form `CALL
+milvus.system.register(...)` is not available yet.
+
 
 ## 4. Data Schema
 

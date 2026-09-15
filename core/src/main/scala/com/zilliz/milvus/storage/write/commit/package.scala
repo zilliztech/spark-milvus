@@ -4,14 +4,20 @@ package com.zilliz.milvus.storage.write
   * every task of a write has committed its own segment manifest.
   *
   * `Committer.commit` writes the `JobManifest` (every segment's base path,
-  * manifest version and row count) to `staging/{job}/manifest.json`, then the
-  * marker `staging/{job}/_committed`; a rerun that finds the marker does
-  * nothing. `Committer.abort` deletes the files under the staging prefix.
-  * Registration reads the job manifest and is a Spark procedure; nothing here
+  * manifest version, row count and, for a segment written into, its id) to
+  * `staging/{job}/manifest.json`, then the marker `staging/{job}/_committed`; a
+  * rerun that finds the marker does nothing. `Committer.abort` deletes the
+  * files under the staging prefix.
+  *
+  * `Registration.backfillItems` turns a job manifest into what Milvus's
+  * `BatchUpdateManifest` takes (segment id, manifest version) and refuses a job
+  * that created new segments, which Milvus cannot register yet;
+  * `Committer.markRegistered` records a registration so it runs once. The
+  * procedure that calls Milvus is `spark.procedure.Register`; nothing here
   * calls Milvus.
   *
-  * Main types: JobManifest, CommittedSegment, Committer, CommitOutcome.
-  * Capabilities: W3, A4 (see docs/design/capabilities.md); A4's procedure side
-  * is still to come. Design: docs/design/README.md section 2.4.
+  * Main types: JobManifest, CommittedSegment, Committer, CommitOutcome,
+  * Registration. Capabilities: W3, A4 (see docs/design/capabilities.md).
+  * Design: docs/design/README.md section 2.4.
   */
 package object commit

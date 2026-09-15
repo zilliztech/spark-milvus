@@ -82,6 +82,12 @@ case class BackfillConfig(
     batchSize: Int = 1024,
     customOutputPath: Option[String] = None,
 
+    // Where the job manifest goes: {stagingRoot}/staging/{jobId}/manifest.json,
+    // what `register` reads. Defaults to the storage root; a job id defaults
+    // to the Spark application id.
+    stagingRoot: Option[String] = None,
+    jobId: Option[String] = None,
+
     // Optional mapping: parquet column name -> Milvus field name.
     // When set, the backfill parquet is reprojected through this map before
     // join/write: parquet columns not listed as keys are dropped, and each

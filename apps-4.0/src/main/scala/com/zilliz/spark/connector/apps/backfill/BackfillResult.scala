@@ -88,7 +88,11 @@ case class BackfillResult(
     /** Coalesce-mode only: aggregated per new-field count of rows that took the
       * backfill data file value. Empty in overwrite mode.
       */
-    totalUsedDataFileByField: Map[String, Long] = Map.empty
+    totalUsedDataFileByField: Map[String, Long] = Map.empty,
+    /** `{root}/staging/{job}` where the job manifest and marker were written;
+      * what `register` takes. Empty when nothing was committed.
+      */
+    stagingPrefix: String = ""
 ) {
 
   private def matchRateStr(matched: Long, total: Long): String =

@@ -246,7 +246,7 @@ c. 写占位（RowID 用段内行号、Timestamp 用作业时间），登记时 
       WriteBuilder 校验目标列是 collection 里已有且 Flushed 段里还没有的字段，task 往已有段的 base_path
       写列组、以 ReplaceColumns 提交；分布与排序（每个 task 恰好对应一个已有段、行序与段内行号一致）见决策 10。
       今天 apps 里的 backfill 通过 <code>customPath</code> 和 <code>commitType</code> 绕过 WriteBuilder 直接用
-      <code>writeDataFrame</code>，W2 落地时收进来。</li>
+      <code>writeDataFrame</code>，W2 落地时收进来；它写完经 <code>Committer</code> 出作业清单（段 id 在里面），<code>Register.run</code> 读清单登记（#16，UAT 上在线可见）。</li>
 </ul>
 
 <h2 id="next">八、开发大纲</h2>

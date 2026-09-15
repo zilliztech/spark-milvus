@@ -29,4 +29,7 @@ final case class StagingLayout(rootPath: String, jobId: String) {
 
   /** The marker the committer writes last; its presence means committed. */
   def marker: String = s"$prefix/_committed"
+
+  /** The marker registration writes once Milvus has taken the segments. */
+  def registered: String = s"$prefix/_registered"
 }

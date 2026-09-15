@@ -32,11 +32,15 @@ import io.milvus.grpc.common.{
   KeyValuePair,
   Status
 }
-import io.milvus.grpc.common.{SegmentLevel, SegmentState}
+import io.milvus.grpc.common.{LoadState, SegmentLevel, SegmentState}
 import io.milvus.grpc.milvus.{
+  AddCollectionFieldRequest,
+  BatchUpdateManifestItem,
+  BatchUpdateManifestRequest,
   ConnectRequest,
   CreateCollectionRequest,
   CreateDatabaseRequest,
+  CreateIndexRequest,
   CreatePartitionRequest,
   CreateSnapshotRequest,
   DeleteRequest,
@@ -49,11 +53,14 @@ import io.milvus.grpc.milvus.{
   FlushRequest,
   GetImportStateRequest,
   GetImportStateResponse,
+  GetLoadStateRequest,
   GetPersistentSegmentInfoRequest,
   ImportRequest,
   InsertRequest,
+  LoadCollectionRequest,
   MilvusServiceGrpc,
   MutationResult,
+  QueryRequest,
   ShowPartitionsRequest
 }
 import io.milvus.grpc.schema.{
@@ -342,6 +349,185 @@ class MilvusClient(params: MilvusConnectionParams)
       case e: Exception =>
         Failure(
           new Exception(s"Failed to drop collection: ${e.getMessage}")
+        )
+    }
+  }
+
+  /** Registers new manifest versions of existing segments (capability A4, the
+    * backfill branch): Milvus advances each segment's manifest to the version
+    * given and broadcasts the change, so query nodes reload the segment. The
+    * segments must exist and be flushed; Milvus does not open the manifest to
+    * check it (docs/design/README.md section 5).
+    */
+  def batchUpdateManifest(
+      dbName: String,
+      collectionName: String,
+      items: Seq[(Long, Long)],
+      fieldNames: Seq[String] = Seq.empty
+  ): Try[Status] = {
+    try {
+      val status = rpcStub.batchUpdateManifest(
+        BatchUpdateManifestRequest(
+          dbName = dbName,
+          collectionName = collectionName,
+          fieldNames = fieldNames,
+          items = items.map { case (segmentId, version) =>
+            BatchUpdateManifestItem(
+              segmentId = segmentId,
+              manifestVersion = version
+            )
+          }
+        )
+      )
+      checkStatus("batchUpdateManifest", status)
+    } catch {
+      case e: Exception =>
+        Failure(
+          new Exception(
+            s"Failed to register ${items.size} manifest version(s) of $collectionName: ${e.getMessage}",
+            e
+          )
+        )
+    }
+  }
+
+  /** Adds a field to an existing collection. Milvus requires it nullable or
+    * with a default value, since existing rows have no value for it.
+    */
+  def addCollectionField(
+      dbName: String,
+      collectionName: String,
+      field: FieldSchema
+  ): Try[Status] = {
+    try {
+      val status = rpcStub.addCollectionField(
+        AddCollectionFieldRequest(
+          dbName = dbName,
+          collectionName = collectionName,
+          schema = ByteString.copyFrom(field.toByteArray)
+        )
+      )
+      checkStatus("addCollectionField", status)
+    } catch {
+      case e: Exception =>
+        Failure(
+          new Exception(
+            s"Failed to add field ${field.name} to $collectionName: ${e.getMessage}",
+            e
+          )
+        )
+    }
+  }
+
+  /** Builds an index on a field; Milvus needs one on every vector field before
+    * a collection can be loaded.
+    */
+  def createIndex(
+      dbName: String,
+      collectionName: String,
+      fieldName: String,
+      params: Map[String, String] =
+        Map("index_type" -> "AUTOINDEX", "metric_type" -> "L2")
+  ): Try[Status] = {
+    try {
+      val status = rpcStub.createIndex(
+        CreateIndexRequest(
+          dbName = dbName,
+          collectionName = collectionName,
+          fieldName = fieldName,
+          extraParams = params.map { case (k, v) => KeyValuePair(k, v) }.toSeq
+        )
+      )
+      checkStatus("createIndex", status)
+    } catch {
+      case e: Exception =>
+        Failure(
+          new Exception(
+            s"Failed to create index on $fieldName: ${e.getMessage}",
+            e
+          )
+        )
+    }
+  }
+
+  def loadCollection(dbName: String, collectionName: String): Try[Status] = {
+    try
+      checkStatus(
+        "loadCollection",
+        rpcStub.loadCollection(
+          LoadCollectionRequest(
+            dbName = dbName,
+            collectionName = collectionName
+          )
+        )
+      )
+    catch {
+      case e: Exception =>
+        Failure(
+          new Exception(s"Failed to load $collectionName: ${e.getMessage}", e)
+        )
+    }
+  }
+
+  /** The collection's load state: NotExist, NotLoad, Loading or Loaded. */
+  def getLoadState(dbName: String, collectionName: String): Try[LoadState] = {
+    try {
+      val response = rpcStub.getLoadState(
+        GetLoadStateRequest(dbName = dbName, collectionName = collectionName)
+      )
+      checkStatus(
+        "getLoadState",
+        response.status.getOrElse(
+          Status(
+            errorCode = ErrorCode.UnexpectedError,
+            reason = "load state is empty"
+          )
+        )
+      ).map(_ => response.state)
+    } catch {
+      case e: Exception =>
+        Failure(
+          new Exception(
+            s"Failed to get load state of $collectionName: ${e.getMessage}",
+            e
+          )
+        )
+    }
+  }
+
+  /** Scalar query, for reading rows back through the service. */
+  def query(
+      dbName: String,
+      collectionName: String,
+      expr: String,
+      outputFields: Seq[String]
+  ): Try[Seq[FieldData]] = {
+    try {
+      val results = rpcStub.query(
+        QueryRequest(
+          dbName = dbName,
+          collectionName = collectionName,
+          expr = expr,
+          outputFields = outputFields,
+          useDefaultConsistency = true
+        )
+      )
+      checkStatus(
+        "query",
+        results.status.getOrElse(
+          Status(
+            errorCode = ErrorCode.UnexpectedError,
+            reason = "Query status is empty"
+          )
+        )
+      ).map(_ => results.fieldsData)
+    } catch {
+      case e: Exception =>
+        Failure(
+          new Exception(
+            s"Failed to query $collectionName: ${e.getMessage}",
+            e
+          )
         )
     }
   }

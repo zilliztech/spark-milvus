@@ -43,6 +43,32 @@ final class Committer(store: ObjectStore, layout: StagingLayout) {
 
   def isCommitted: Boolean = store.exists(layout.marker)
 
+  def isRegistered: Boolean = store.exists(layout.registered)
+
+  /** The job manifest this job committed. */
+  def manifest(): JobManifest =
+    JobManifest
+      .fromJson(
+        new String(store.readAll(layout.manifest), StandardCharsets.UTF_8)
+      )
+      .fold(
+        e =>
+          throw new IllegalStateException(
+            s"cannot read ${layout.manifest}: ${e.getMessage}",
+            e
+          ),
+        identity
+      )
+
+  /** Records that Milvus has registered the job's segments; a second
+    * registration of the job then does nothing.
+    */
+  def markRegistered(nowMillis: Long = System.currentTimeMillis()): Unit =
+    store.write(
+      layout.registered,
+      nowMillis.toString.getBytes(StandardCharsets.UTF_8)
+    )
+
   def commit(
       segments: Seq[CommittedSegment],
       nowMillis: Long = System.currentTimeMillis()
