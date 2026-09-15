@@ -186,7 +186,7 @@ def sparkProject(l: Versions.SparkLine): Project =
       moduleName := s"spark-milvus-${l.id}",
       Modules.perLine(l),
       publish / skip := true,
-        Compile / unmanagedSourceDirectories +=
+      Compile / unmanagedSourceDirectories +=
         (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "scala",
       Compile / unmanagedResourceDirectories +=
         (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "resources",
@@ -203,6 +203,8 @@ def sparkProject(l: Versions.SparkLine): Project =
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
 lazy val spark40 = sparkProject(Versions.line("4.0"))
+  // Reuse core's ObjectStore fixtures for source tests without loading JNI.
+  .dependsOn(core % "test->test")
 lazy val spark41 = sparkProject(Versions.line("4.1"))
 lazy val spark42 = sparkProject(Versions.line("4.2"))
 

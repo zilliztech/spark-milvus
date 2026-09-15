@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector.read
 
 import java.{util => ju}
+import java.io.IOException
 
 import org.apache.spark.sql.types.{
   ArrayType,
@@ -22,6 +23,7 @@ import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
 import com.zilliz.milvus.storage.compat.backup.BackupSnapshotSource
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.io.FailingObjectStore
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.{
@@ -40,7 +42,6 @@ import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.spark.connector.options.{
   MilvusOption,
   OptionStringsSnapshotSource,
-  SnapshotSources,
   StorageOptions
 }
 import com.zilliz.spark.connector.read.plan.SnapshotPartitions
@@ -369,27 +370,42 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
   }
 
   test("a backup whose meta cannot be read fails at the source, loudly") {
-    val options = Map(
-      MilvusOption.BackupDir -> "/tmp/nonexistent-backup-xyz",
-      MilvusOption.MilvusCollectionName -> "demo"
+    val failure = new IOException("backup metadata is unavailable")
+    val source = new BackupSnapshotSource(
+      store = new FailingObjectStore(failure),
+      backupDir = "/backup/b1",
+      databaseName = "",
+      collectionName = "demo",
+      applyDeletes = true,
+      maxJsonBytes = 1L << 20,
+      withSegments = false
     )
-    val result = SnapshotSources
-      .forRead(MilvusOption(options), withSegments = false)
-      .snapshot()
+    val result = source.snapshot()
     assert(result.isLeft)
     assert(result.left.get.getMessage.contains("backup meta"))
+    assert(
+      result.left.get.getMessage.contains("/backup/b1/meta/full_meta.json")
+    )
+    assert(result.left.get.getCause eq failure)
   }
 
   test("a backup read needs an object storage dir") {
-    val options = Map(
-      MilvusOption.BackupDir -> "/tmp/nonexistent-backup-xyz",
-      MilvusOption.MilvusCollectionName -> "demo"
+    val source = new BackupSnapshotSource(
+      store = new FailingObjectStore(
+        new AssertionError("invalid backup URI must be rejected before reading")
+      ),
+      backupDir = "/backup/b1",
+      databaseName = "",
+      collectionName = "demo",
+      applyDeletes = true,
+      maxJsonBytes = 1L << 20,
+      withSegments = true
     )
-    val result = SnapshotSources
-      .forRead(MilvusOption(options), withSegments = true)
-      .snapshot()
+    val result = source.snapshot()
     assert(result.isLeft)
+    assert(result.left.get.isInstanceOf[IllegalArgumentException])
     assert(result.left.get.getMessage.contains("object storage URI"))
+    assert(result.left.get.getCause == null)
   }
 
   test("resolveBackupCollection matches by name and database, never .head") {

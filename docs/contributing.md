@@ -47,25 +47,20 @@ Suites that call into C check for `libnative-storage-jni` first and cancel
 themselves when it is absent, so a machine without it still gets a green run
 with those suites reported as canceled rather than failed:
 
-- `StorageNativeTest` and `WriterRoundTripTest` in core
+- `StorageNativeTest`, `WriterRoundTripTest` and `SegmentWriterTest` in core
 - `MilvusV3PartitionWriterLifecycleTest` in spark-4.0
 
 The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
 `StorageFullChainUatTest` and `SnapshotReadUatTest` in spark-4.0 — cancel on their own environment
 variables as well, so they stay canceled even with the library present.
 
-Everything else passes. A green run looks like this:
+Use the current run's summary to report successful, failed, canceled, ignored
+and pending tests, and completed or aborted suites. Name the native or UAT
+suites that canceled and state the missing library or environment prerequisite;
+canceled tests did not pass and provide no coverage for that run.
 
-| Module | Tests |
-|---|---|
-| core | 82, plus 3 canceled |
-| compat | 40 |
-| client | 20 |
-| spark-4.0 | 307, plus 1 canceled |
-| apps-4.0 | 212 |
-
-`integration-4.0` needs a real Milvus on 19530 and MinIO on 9000; it compiles in
-CI but is not run there.
+`integration-4.0` needs a real Milvus on 19530 and MinIO on 9000. It is outside
+the root aggregate, compiles in CI and is not run there.
 
 ## Building the native library
 
@@ -163,8 +158,32 @@ change its rules to make a check pass. Repeat the relevant check after further
 source edits and resolve failures before committing. Keep unrelated formatting
 repairs in a separate commit from functional changes, preserving other
 contributors' work. `git diff --check` checks whitespace errors and is not a
-substitute for Scalafmt. Compilation and tests follow the validation scope in
-the [sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md).
+substitute for Scalafmt. After formatting and checks pass, run the full unit
+test suite described below.
+
+## Unit tests
+
+Before every commit, including documentation-only commits, run the full root
+unit test suite with Java 21 from the repository root, after completing the
+[formatting and checks](#formatting):
+
+```bash
+sbt test
+```
+
+This runs the root aggregate and compiles the source and test code needed by
+its tests. The full run must pass before committing. A focused `testOnly` run
+is useful while fixing a test but does not replace this full run. Any test
+failure, aborted suite or incomplete run blocks
+the commit: fix the cause and rerun the full root suite. Do not add exclusions,
+filters, ignored tests or cancellation conditions to make the run pass.
+
+Existing native-library and UAT cancellation conditions remain part of the test
+setup; report them and the actual counts as described in
+[Tests that need the native library](#tests-that-need-the-native-library).
+The root run does not include `integration40/test`, which requires live Milvus
+and MinIO. Additional Scala cross-version checks, integration tests, native
+builds and publication follow the task's scope and authorization.
 
 ## The protobuf split
 

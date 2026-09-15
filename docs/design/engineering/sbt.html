@@ -106,7 +106,9 @@
 
 <p><strong>每次提交前先格式化，再检查格式，包括只改文档的提交。</strong> CI 检查整个聚合项目集合，只改文档也会遇到已有源码的格式错误。四条 Spark 线共享 <code>spark-base</code>，格式化任务必须串行执行，避免同时写同一个文件；格式检查通过后仍须审查差异，空文件也可能通过格式检查。命令、聚合之外的 integration 项目和构建文件的补充检查统一维护在 <a href="../../contributing.md#formatting">contributing.md 的 Formatting 一节</a>，由 <a href="../../../.agents/skills/spark-milvus-sbt/SKILL.md">sbt skill</a> 执行。格式修复不混入无关功能改动，<code>git diff --check</code> 不替代 Scalafmt 检查。</p>
 
-<p>除上述提交前格式化与检查外，其余验证按任务授权选择。日常整理默认由 CI 编译和测试；若执行了 <code>show</code>、<code>inspect</code>、<code>makePom</code> 或编译测试，应分别记录它们验证了什么。静态等价、构建加载、Maven 解析和实际 Spark 运行是不同层次的证据。</p>
+<p><strong>格式检查通过后，每次提交前必须在 Java 21 下运行根项目的完整单元测试，包括只改文档的提交。</strong> 测试任务所需的源码与测试编译属于这项验证；开发时的 <code>testOnly</code> 不能替代完整运行。测试失败、套件中止或运行未完成时不得提交，修复原因后重跑完整测试。不得通过新增排除、过滤、忽略或取消条件让结果通过。既有原生库和 UAT 环境条件导致的取消要逐项说明原因，并如实报告测试及套件数量；取消不等于通过。命令及结果记录要求统一维护在 <a href="../../contributing.md#unit-tests">contributing.md 的 Unit tests 一节</a>。</p>
+
+<p>根项目聚合不含需要真实 Milvus、MinIO 的 <code>integration40</code>。额外的 Scala 交叉版本检查、集成测试、原生库构建与发布仍按任务范围和授权执行。若执行了 <code>show</code>、<code>inspect</code>、<code>makePom</code> 或编译测试，应分别记录它们验证了什么。静态等价、构建加载、Maven 解析和实际 Spark 运行是不同层次的证据。</p>
 
 <p>审查时用具体维护动作检验可读性：增加一条 Spark 线、修改一个模块的依赖、判断一个项目是否发布。若仍需追踪多个含糊的 helper 才能作答，应先修正这些关系的表达。发布入口、能力、公共类型和测试的删除遵循 AGENTS.md 的说明与授权要求。</p>
 </main>
