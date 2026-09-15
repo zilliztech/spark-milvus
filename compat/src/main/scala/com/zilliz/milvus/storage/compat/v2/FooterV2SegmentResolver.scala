@@ -131,25 +131,34 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
       applyDeletes: Boolean = true,
       storageScheme: String = "s3a"
   ): Either[Throwable, Option[Segment]] = {
-    val resolvedEntry = resolveEntryPaths(entry, bucket, storageScheme)
-    val isL0 = resolvedEntry.segmentLevel == 1L
+    val isL0 = entry.segmentLevel == 1L
 
-    // An L0 segment carries only delete files, and Milvus writes it with no
-    // storage_version (0). It is decided on before the version check: a
-    // version check first would drop it, and with it every delete it holds.
+    // Decide on the entry before touching its paths. An L0 segment carries
+    // only delete files and Milvus writes it with no storage_version (0), so
+    // it is decided before the version check, or every delete it holds would
+    // be dropped. A V3 entry is skipped without resolving: its data and its
+    // delete files are in its own manifest, and the Avro lists a delete file
+    // with an empty log_path, which is not an error for a segment read
+    // elsewhere.
     if (isL0 && !applyDeletes) {
       logInfo(
-        s"skipping L0 delete-only segment ${resolvedEntry.segmentId} because applyDeletes=false"
+        s"skipping L0 delete-only segment ${entry.segmentId} because applyDeletes=false"
       )
-      Right(None)
-    } else if (isL0) {
-      Right(Some(deleteOnlySegment(resolvedEntry)))
-    } else if (resolvedEntry.storageVersion != 2L) {
+      return Right(None)
+    }
+    if (!isL0 && entry.storageVersion != 2L) {
       logInfo(
-        s"skipping segment ${resolvedEntry.segmentId}: storage_version=${resolvedEntry.storageVersion} " +
+        s"skipping segment ${entry.segmentId}: storage_version=${entry.storageVersion} " +
           s"(!= 2); FooterV2SegmentResolver only handles StorageV2"
       )
-      Right(None)
+      return Right(None)
+    }
+    val resolvedEntry =
+      try resolveEntryPaths(entry, bucket, storageScheme)
+      catch { case NonFatal(e) => return Left(e) }
+
+    if (isL0) {
+      Right(Some(deleteOnlySegment(resolvedEntry)))
     } else if (
       resolvedEntry.binlogFiles.isEmpty ||
       resolvedEntry.binlogFiles.forall(_.binlogs.isEmpty)

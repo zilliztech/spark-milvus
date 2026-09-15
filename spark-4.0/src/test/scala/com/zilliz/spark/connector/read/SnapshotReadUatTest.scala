@@ -451,8 +451,15 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
       bySegment.foreach { r =>
         info(s"segment ${r.getLong(0)} partition ${r.getString(1)}: ${r
             .getLong(2)} rows, offsets ${r.getLong(3)}..${r.getLong(4)}")
-        r.getLong(3) shouldBe 0L
-        r.getLong(4) shouldBe r.getLong(2) - 1
+        // $row_offset is the row's position in the segment, so deleted rows
+        // leave holes: the range covers at least n rows and, without
+        // deletes, exactly n.
+        val (n, lo, hi) = (r.getLong(2), r.getLong(3), r.getLong(4))
+        (hi - lo + 1) should be >= n
+        if (env("MILVUS_UAT_DELETED_IDS").isEmpty) {
+          lo shouldBe 0L
+          hi shouldBe n - 1
+        }
       }
       expected.foreach(e => bySegment.map(_.getLong(2)).sum shouldBe e)
       // Columnar read with a projection delivers the same rows.

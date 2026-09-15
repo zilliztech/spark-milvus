@@ -481,6 +481,36 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       .get shouldBe None
   }
 
+  test(
+    "a V3 entry whose delete file has no path is skipped, not an error"
+  ) {
+    // After Milvus folds an L0 delete into a V3 segment, the snapshot Avro
+    // for that segment lists the delete with log_path "" (the file is named
+    // in the segment's own manifest). The entry is not this resolver's to
+    // read; it must be skipped before any path is parsed.
+    val manifest = entry(
+      segmentId = 5009L,
+      binlogs = Seq(
+        AvroFieldBinlogEntry(
+          slotFieldId = 0L,
+          binlogs =
+            Seq(AvroBinlogEntry(1L, "files/insert_log/1/2/5009/0/1", 3000L))
+        )
+      ),
+      storageVersion = 3L,
+      deltaLogFiles = Seq(
+        AvroFieldBinlogEntry(
+          slotFieldId = 0L,
+          binlogs = Seq(AvroBinlogEntry(42L, "", 10L))
+        )
+      )
+    )
+    FooterV2SegmentResolver
+      .segmentFromEntry(manifest, bucket = "", localStore)
+      .toOption
+      .get shouldBe None
+  }
+
   test("StorageV2 L0 segment is skipped when applyDeletes=false") {
     val manifest = entry(
       segmentId = 5006L,

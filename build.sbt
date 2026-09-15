@@ -97,9 +97,9 @@ lazy val core = project
       "org.apache.arrow" % "arrow-memory-netty" % Versions
         .line("4.0")
         .arrow % Test,
-      // No source here imports Hadoop. parquet-mr does: ParquetReader.Builder
-      // names org.apache.hadoop.fs.Path in its signature, so the class has to
-      // be on the compile classpath even for the in-memory reads core does.
+      // No source here imports Hadoop. parquet-mr does: ParquetFileReader
+      // builds its codec factory on a Hadoop Configuration, so the class has
+      // to be on the classpath even for the in-memory reads core does.
       hadoopCommon,
       // Three formats the storage layer itself needs: snapshots and backup
       // metadata are JSON, segment manifests are Avro, delete files and column

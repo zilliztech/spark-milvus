@@ -1,17 +1,21 @@
 package com.zilliz.milvus.storage.delete
 
-import java.io.EOFException
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream, EOFException}
+import java.nio.charset.StandardCharsets
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import scala.collection.mutable
+import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
 import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
-import org.apache.parquet.example.data.Group
-import org.apache.parquet.hadoop.api.ReadSupport
-import org.apache.parquet.hadoop.example.GroupReadSupport
-import org.apache.parquet.hadoop.ParquetReader
+import org.apache.parquet.column.impl.ColumnReaderImpl
+import org.apache.parquet.format.{FileMetaData => ThriftFileMetaData, Util}
+import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.io.{InputFile, SeekableInputStream}
+import org.apache.parquet.io.api.PrimitiveConverter
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
+import org.apache.parquet.VersionParser
 
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
@@ -143,21 +147,38 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
     }
   }
 
+  /** Two encodings of a delete file are read, told apart by the first bytes
+    * (decision 13): a bare parquet file with a pk column and a ts column, which
+    * is what a V3 segment's `_delta/` holds, and the binlog event container of
+    * the V2 line, whose parquet payloads sit behind a descriptor event.
+    */
   private def decodeDeletePlan(
       bytes: Array[Byte],
       pkField: FieldSchema,
       path: String
   ): Either[Throwable, DeletePlan] = {
     try {
-      val container = parseContainer(bytes, path)
-      val plans = container.payloads.map { payload =>
-        decodePayloadPlan(payload, container.multiField, pkField, path)
+      if (isParquet(bytes)) {
+        Right(decodePayloadPlan(bytes, multiField = true, pkField, path))
+      } else {
+        val container = parseContainer(bytes, path)
+        val plans = container.payloads.map { payload =>
+          decodePayloadPlan(payload, container.multiField, pkField, path)
+        }
+        Right(DeletePlan.union(plans))
       }
-      Right(DeletePlan.union(plans))
     } catch {
       case NonFatal(e) => Left(e)
     }
   }
+
+  private val ParquetMagic = "PAR1".getBytes(StandardCharsets.US_ASCII)
+
+  private def isParquet(bytes: Array[Byte]): Boolean =
+    bytes.length >= 4 && java.util.Arrays.equals(
+      java.util.Arrays.copyOfRange(bytes, 0, 4),
+      ParquetMagic
+    )
 
   private def decodePayloadPlan(
       payload: Array[Byte],
@@ -167,25 +188,18 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
   ): DeletePlan = {
     val longs = mutable.HashMap.empty[Long, Long]
     val strings = mutable.HashMap.empty[String, Long]
-    val reader = newGroupReader(payload)
-    try {
-      var record = reader.read()
-      while (record != null) {
-        if (multiField) {
-          appendMultiFieldDelete(record, pkField, path, longs, strings)
-        } else {
-          appendLegacyDelete(
-            extractLegacyDelete(record, path),
-            pkField,
-            path,
-            longs,
-            strings
-          )
-        }
-        record = reader.read()
+    forEachRow(payload) { row =>
+      if (multiField) {
+        appendMultiFieldDelete(row, pkField, path, longs, strings)
+      } else {
+        appendLegacyDelete(
+          extractLegacyDelete(row, path),
+          pkField,
+          path,
+          longs,
+          strings
+        )
       }
-    } finally {
-      reader.close()
     }
 
     pkField.dataType match {
@@ -199,36 +213,36 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
   }
 
   private def appendMultiFieldDelete(
-      record: Group,
+      row: ParquetRow,
       pkField: FieldSchema,
       path: String,
       longs: mutable.Map[Long, Long],
       strings: mutable.Map[String, Long]
   ): Unit = {
-    val fieldCount = record.getType.getFieldCount
+    val fieldCount = row.columnCount
     if (fieldCount < 2) {
       throw new IllegalStateException(
         s"multi-field delete log payload in $path must contain pk and ts columns, found $fieldCount columns"
       )
     }
-    if (record.getFieldRepetitionCount(0) == 0) {
+    if (row.isNull(0)) {
       throw new IllegalStateException(
         s"multi-field delete log payload in $path is missing the pk value"
       )
     }
-    if (record.getFieldRepetitionCount(1) == 0) {
+    if (row.isNull(1)) {
       throw new IllegalStateException(
         s"multi-field delete log payload in $path is missing the ts value"
       )
     }
-    val deleteTs = record.getLong(1, 0)
+    val deleteTs = row.getLong(1)
 
     pkField.dataType match {
       case DataType.Int64 =>
-        val pk = record.getLong(0, 0)
+        val pk = row.getLong(0)
         longs.update(pk, math.max(longs.getOrElse(pk, Long.MinValue), deleteTs))
       case DataType.VarChar =>
-        val pk = record.getString(0, 0)
+        val pk = row.getString(0)
         strings.update(
           pk,
           math.max(strings.getOrElse(pk, Long.MinValue), deleteTs)
@@ -240,26 +254,142 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
     }
   }
 
-  private def extractLegacyDelete(record: Group, path: String): String = {
-    val fieldCount = record.getType.getFieldCount
+  private def extractLegacyDelete(row: ParquetRow, path: String): String = {
+    val fieldCount = row.columnCount
     if (fieldCount < 1) {
       throw new IllegalStateException(
         s"legacy delete log payload in $path is missing the delta column"
       )
     }
-    if (record.getFieldRepetitionCount(0) == 0) {
+    if (row.isNull(0)) {
       throw new IllegalStateException(
         s"legacy delete log payload in $path has an empty delta value"
       )
     }
-    record.getString(0, 0)
+    row.getString(0)
   }
 
-  private def newGroupReader(payload: Array[Byte]): ParquetReader[Group] =
-    new ParquetReader.Builder[Group](new InMemoryInputFile(payload)) {
-      override protected def getReadSupport(): ReadSupport[Group] =
-        new GroupReadSupport()
-    }.build()
+  /** Walks every row of a parquet payload, one row group at a time.
+    *
+    * The read goes through parquet's column readers, not its record assembly:
+    * the column readers address a column by its descriptor and need nothing
+    * from Hadoop's MapReduce classes, which record assembly's `ParquetReader`
+    * pulls in.
+    */
+  private def forEachRow(payload: Array[Byte])(f: ParquetRow => Unit): Unit = {
+    val file =
+      ParquetFileReader.open(new InMemoryInputFile(withColumnNames(payload)))
+    try {
+      val meta = file.getFooter.getFileMetaData
+      val columns = meta.getSchema.getColumns.asScala.toIndexedSeq
+      val writerVersion =
+        try VersionParser.parse(meta.getCreatedBy)
+        catch { case NonFatal(_) => null }
+      var pages = file.readNextRowGroup()
+      while (pages != null) {
+        val row = new ParquetRow(columns.map { column =>
+          new ColumnReaderImpl(
+            column,
+            pages.getPageReader(column),
+            NoConverter,
+            writerVersion
+          )
+        })
+        var remaining = pages.getRowCount
+        while (remaining > 0) {
+          f(row)
+          row.advance()
+          remaining -= 1
+        }
+        pages = file.readNextRowGroup()
+      }
+    } finally {
+      file.close()
+    }
+  }
+
+  /** Gives every unnamed column of a flat parquet file a name.
+    *
+    * parquet-mr identifies a column by its path of names, both in the schema
+    * and in the row group's column chunks. The `_delta` files milvus-storage
+    * writes for a V3 segment carry two columns with empty names, so parquet-mr
+    * sees one path twice, reads one chunk and fails on the other. Naming the
+    * columns in the footer, `column_0`, `column_1`, and so on, leaves the data
+    * pages untouched and makes the file readable. A file whose columns are all
+    * named is returned as is.
+    */
+  private def withColumnNames(payload: Array[Byte]): Array[Byte] = {
+    val footerLength = ByteBuffer
+      .wrap(payload, payload.length - 8, 4)
+      .order(ByteOrder.LITTLE_ENDIAN)
+      .getInt
+    val footerStart = payload.length - 8 - footerLength
+    val footer: ThriftFileMetaData = Util.readFileMetaData(
+      new ByteArrayInputStream(payload, footerStart, footerLength)
+    )
+    val elements = footer.getSchema.asScala
+    val leaves = elements.drop(1)
+    if (leaves.forall(e => !e.getName.isEmpty)) return payload
+    if (leaves.exists(e => e.isSetNum_children && e.getNum_children > 0)) {
+      throw new IllegalStateException(
+        "delete log parquet payload has unnamed columns in a nested schema"
+      )
+    }
+    leaves.zipWithIndex.foreach { case (leaf, i) =>
+      if (leaf.getName.isEmpty) leaf.setName(s"column_$i")
+    }
+    footer.getRow_groups.asScala.foreach { rowGroup =>
+      rowGroup.getColumns.asScala.zipWithIndex.foreach { case (chunk, i) =>
+        chunk.getMeta_data.setPath_in_schema(
+          java.util.List.of(leaves(i).getName)
+        )
+      }
+    }
+    val out = new ByteArrayOutputStream(payload.length)
+    out.write(payload, 0, footerStart)
+    val footerOut = new ByteArrayOutputStream(footerLength)
+    Util.writeFileMetaData(footer, footerOut)
+    footerOut.writeTo(out)
+    out.write(
+      ByteBuffer
+        .allocate(4)
+        .order(ByteOrder.LITTLE_ENDIAN)
+        .putInt(footerOut.size())
+        .array()
+    )
+    out.write(ParquetMagic)
+    out.toByteArray
+  }
+
+  /** The current row of a row group, read column by column. */
+  private final class ParquetRow(readers: IndexedSeq[ColumnReaderImpl]) {
+    def columnCount: Int = readers.size
+
+    def isNull(column: Int): Boolean = {
+      val reader = readers(column)
+      reader.getCurrentDefinitionLevel < reader.getDescriptor.getMaxDefinitionLevel
+    }
+
+    def getLong(column: Int): Long = readers(column).getLong
+
+    def getString(column: Int): String = {
+      val reader = readers(column)
+      reader.getDescriptor.getPrimitiveType.getPrimitiveTypeName match {
+        case PrimitiveTypeName.BINARY |
+            PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY =>
+          reader.getBinary.toStringUsingUTF8
+        case other =>
+          throw new IllegalStateException(
+            s"delete log column $column is $other, expected a string"
+          )
+      }
+    }
+
+    def advance(): Unit = readers.foreach(_.consume())
+  }
+
+  /** Column readers require a converter; the values are pulled directly. */
+  private object NoConverter extends PrimitiveConverter
 
   private def appendLegacyDelete(
       raw: String,
