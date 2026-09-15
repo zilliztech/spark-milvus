@@ -341,7 +341,7 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
     footer.getRow_groups.asScala.foreach { rowGroup =>
       rowGroup.getColumns.asScala.zipWithIndex.foreach { case (chunk, i) =>
         chunk.getMeta_data.setPath_in_schema(
-          java.util.List.of(leaves(i).getName)
+          java.util.Collections.singletonList[String](leaves(i).getName)
         )
       }
     }
