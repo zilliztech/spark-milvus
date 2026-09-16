@@ -226,13 +226,13 @@ executor 拿到描述之后才开句柄。</li>
 判断一行删没删要先读出该行的 PK 列和 <code>timestamp</code> 列再查表。
 读这两列不破坏上面那条性质——Arrow 视图能直接读 C 的内存。
 破坏它的是下一步:留下来的行要交给 Spark,而
-Spark 的 <code>ColumnarBatch</code> 没有表达行有效性的成员(3.5.5 与 4.1.3 都只有 <code>setNumRows</code>、<code>numRows</code>、<code>column</code>、<code>getRow</code>),
-只能把存活行物化成新的一批,也就是把 C 的内存拷进 JVM。</p>
+Spark 的 <code>ColumnarBatch</code> 没有表达行有效性的成员(3.5.5 与 4.1.3 都只有 <code>setNumRows</code>、<code>numRows</code>、<code>column</code>、<code>getRow</code>)。
+实现选的是不拷贝:<code>SelectedRowsColumn</code> 包住原列,持一张存活行下标表,每次取值多一次查表;
+本页早先写的「只能把存活行物化成新的一批」与代码不符,2026-09-16 改正。</p>
 
 <div class="open">
 <strong>决策 12 选了做 R4。</strong>无删除的段批原样包成 <code>ColumnarBatch</code> 直通,
-这条性质完整成立;有删除的段多读两列、全行扫描、再物化,这条性质在那一批上归零,
-比今天的行式还多一次拷贝。取这个代价的理由是有删除的段在多数情况下是少数,
+这条性质完整成立;有删除的段多读两列、全行扫描、再按下标映射,代价是每次取值多一次查表,不是拷贝。取这个代价的理由是有删除的段在多数情况下是少数,
 换来的是无删除的段省掉逐行 <code>arrowToInternalRow</code>。见
 <a href="../README.md">README 第 6 节</a>。
 </div>
@@ -255,7 +255,7 @@ DataSource V2 的 <code>CustomTaskMetric</code> 交给 Spark,在 SQL 页的算�
 <tr><td><code>jni.calls</code>、<code>jni.nanos</code></td><td>读、写</td><td>JVM 侧,包装类在每次 <code>StorageNative.*</code> 调用前后取 <code>System.nanoTime</code></td><td>跨界多少次、花了多久;按批跨界所以次数应等于批数加常数</td></tr>
 <tr><td><code>arrow.batches</code>、<code>arrow.bytes</code></td><td>读、写</td><td>JVM 侧,导入(读)或导出(写)时对 <code>VectorSchemaRoot</code> 每个向量的 <code>getBufferSize</code> 求和</td><td>吞吐:交接过界的 Arrow 字节数,除以 <code>jni.nanos</code> 就是通路带宽</td></tr>
 <tr><td><code>copies</code>、<code>copied.bytes</code></td><td>读</td><td>C 侧,<code>recordBatchReaderReadNext</code> 里每次 <code>arrow::Concatenate</code> 记一次和它的字节数;JVM 经 <code>recordBatchReaderStats(handle)</code> 取回</td><td>2.5 那个过渡实现今天到底拷了多少;上游导出 <code>loon_record_batch_reader_*</code> 后这两个数应归零</td></tr>
-<tr><td><code>rows.materialized</code></td><td>读</td><td>JVM 侧,行式 reader 每交付一行加一;列式 reader 只在有删除、物化存活行的那批加行数</td><td>「6 次到 2 次」的 JVM 那一半:直通的批这个数为 0</td></tr>
+<tr><td><code>rows.materialized</code></td><td>读</td><td>JVM 侧,行式 reader 每批结束时加上这批转成 <code>InternalRow</code> 的行数(触到的行减去按删除跳过的行);列式 reader 报 0,有删除的批经 <code>SelectedRowsColumn</code> 按下标映射,不转行</td><td>「6 次到 2 次」的 JVM 那一半:列式路径这个数为 0</td></tr>
 <tr><td><code>arrow.allocated.max</code></td><td>读、写</td><td>JVM 侧,<code>ArrowAllocator.get.getAllocatedMemory</code> 在每批之后取一次,记最大值;跨任务按 max 汇总,不按 sum</td><td>native 内存占用的可见部分,也是 G3 预算要卡的同一个数</td></tr>
 </table>
 
@@ -291,7 +291,7 @@ C 侧是 holder 里的一个整数自增。开关本身反而是一个 option、
 <ul>
 <li><code>native-storage</code>:C 侧 holder 里的计数,加一个 <code>recordBatchReaderStats(handle): long[]</code>。</li>
 <li><code>core.read.exec</code>:<code>SegmentReader.metrics: ReadMetrics</code>;<code>core.write.exec</code>:<code>SegmentWriter.metrics: WriteMetrics</code>。两个都是几个 long 的 case class,core 不知道 Spark。</li>
-<li><code>spark.read</code>、<code>spark.write</code>:把它们翻成 <code>CustomTaskMetric</code>,只此一处。</li>
+<li><code>spark.metrics</code>:把它们翻成 <code>CustomMetric</code> / <code>CustomTaskMetric</code>,读写两张清单,只此一处;<code>spark.read</code> 的两个 reader 和 <code>spark.write</code> 的 DataWriter 只是取值上报。</li>
 </ul>
 
 <p>验收在工作单 #01:core 里用本地后端读一个已知段,断言七个数落在预期范围;UAT 读 3000 行的段,

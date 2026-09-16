@@ -18,10 +18,14 @@ package com.zilliz.milvus.storage.read
   * `DeletePlans` reads a task's delete files (`DeleteSource.Files`) into the
   * plan the reader applies; a file that cannot be read fails the task.
   *
-  * Main types: SegmentReader, SegmentReaderRegistry, DeletePlans. Capabilities:
-  * R3, R4, R14, R17, G3 (see docs/design/capabilities.md). R4 and R17 name the
-  * columnar outlet and G3 the off-heap budget; the batch pull they both sit on
-  * is what exists today. Design: docs/design/architecture/read.html section
-  * 5.2.
+  * `SegmentReader.metrics` is what the read cost on the crossing, as
+  * `ReadMetrics`: calls and time, batches and bytes, the C side's copies, the
+  * allocator's peak (G5; docs/design/architecture/storage-io.html section 5).
+  *
+  * Main types: SegmentReader, SegmentReaderRegistry, DeletePlans, ReadMetrics.
+  * Capabilities: R3, R4, R14, R17, G3, G5 (see docs/design/capabilities.md). R4
+  * and R17 name the columnar outlet and G3 the off-heap budget; the batch pull
+  * they both sit on is what exists today. Design:
+  * docs/design/architecture/read.html section 5.2.
   */
 package object exec

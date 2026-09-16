@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector.read
 
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -33,6 +34,9 @@ final class LimitedRowReader(
   override def get(): InternalRow = underlying.get()
 
   override def close(): Unit = underlying.close()
+
+  override def currentMetricsValues(): Array[CustomTaskMetric] =
+    underlying.currentMetricsValues()
 }
 
 /** Stops a batch reader after `limit` rows, cutting the last batch short.
@@ -63,4 +67,7 @@ final class LimitedBatchReader(
   override def get(): ColumnarBatch = current
 
   override def close(): Unit = underlying.close()
+
+  override def currentMetricsValues(): Array[CustomTaskMetric] =
+    underlying.currentMetricsValues()
 }

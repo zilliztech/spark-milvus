@@ -101,7 +101,7 @@ issue #125 的[索引查询开发方案](architecture/vector-search.html)处于�
 | G1 | 表 option | 快照名或时间点、`milvus.filter`、分区和段选择 | spark.options | R2、R7、R16 | P1 |
 | G2 | 写 option | 写完自动建快照、单段文件大小上限、写模式与列、索引参数 | spark.options → core.write | W2、W6；替代 1.x 的 `milvus.writer.commitType`（`milvus.writer.fieldIds` 与 `vector.<f>.dim` 已于 2026-09-15 删除，字段 id 和维度从 collection schema 取） | P1 |
 | G3 | 会话配置：内存与批 | off-heap 预算、批大小、预取上限 | spark.options → core.read.exec | 替代 1.x 的 `milvus.insertMaxBatchSize`、`s3.preloadPoolSize` | P1 |
-| G5 | 指标 | 会话配置开关；读写吞吐、拷贝次数、JNI 跨界耗时、native 内存占用 | native-storage 的 JNI 层留计数器，spark 层汇总 | 没有指标口径就量不出「拷贝 6 次降到 2 次」；native 分配的 buffer 归谁记账要和 G3 的 off-heap 预算对齐 | P1 |
+| G5 | 指标 | 自动，Spark SQL 页的 scan / write 节点：JNI 调用次数与耗时、过界的 Arrow 批数与字节数、C 侧拷贝次数与字节数、物化成 InternalRow 的行数、allocator 峰值；不设开关（决策日志 2026-09-16） | native-storage 的 holder 计数，core.read.exec 的 ReadMetrics、core.write.exec 的 WriteMetrics，spark.metrics 翻成 CustomMetric | 设计见 [storage-io.html 第五节](architecture/storage-io.html#metrics)；量不到的两处（对象存储读取字节、native 内存总量）写在那里；allocator 峰值就是 G3 预算要卡的数 | P1 |
 | G4 | 会话配置：索引与 GPU | 索引缓存上限、GPU 开关、两套服务的地址和凭证 | spark.options → core.index、core.credential | V4；GPU 产物见 README 2.7 | P2 |
 
 ## 9 已知缺口
@@ -122,7 +122,6 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 |---|---|
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
 | A7 | 清理暂存要 `spark.procedure`，那个包目前是空的，等第 3 层拆分 |
-| G5 | 指标要 native-storage 的 JNI 层留计数器。第 1 层已经写了（读写两侧的 loon_* 封装加自己的加载器），计数器还没加 |
 | R1 | 三段名要 `spark.catalog` 的 MilvusCatalog；四条线的 catalog 包都只有 package.scala。今天读表走 `format("milvus")` 加 option |
 | R6 | Spark 谓词下推要 `spark.expr` 翻成 IR 再由 `core.expr` 求值，两个包都是零文件。`MilvusScanBuilder` 暂时保留 V1 的 `SupportsPushDownFilters` 接口，但不接受任何 `Filter`，全部作为 residual 交还 Spark 求值；接口选型见 README 第 4 节决策 20 |
 | R7 | Milvus 表达式要 `core.expr` 按 Plan.g4 解析求值，零文件 |

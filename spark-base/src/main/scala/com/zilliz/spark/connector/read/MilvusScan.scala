@@ -4,6 +4,7 @@ import scala.jdk.CollectionConverters._
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.connector.metric.CustomMetric
 import org.apache.spark.sql.connector.read.{
   Batch,
   InputPartition,
@@ -24,6 +25,7 @@ import com.zilliz.milvus.storage.snapshot.{
   Snapshot,
   SnapshotOrigin
 }
+import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
@@ -54,6 +56,9 @@ class MilvusScan(
   override def readSchema(): StructType = schema
 
   override def toBatch: Batch = this
+
+  override def supportedCustomMetrics(): Array[CustomMetric] =
+    ScanMetrics.supported
 
   override def columnarSupportMode(): Scan.ColumnarSupportMode =
     // SUPPORTED makes Spark skip the reader factory's per-partition check.

@@ -15,7 +15,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.codec.FloatConverter
-import com.zilliz.milvus.storage.read.exec.SegmentReader
+import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.common.KeyValuePair
@@ -124,6 +124,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
   /** Hands over the roots it was given, then stops. */
   private class FakeSegmentReader(roots: Seq[VectorSchemaRoot])
       extends SegmentReader {
+    override def metrics: ReadMetrics = ReadMetrics.Zero
     private var remaining = roots
     private var closed = false
     def isClosed: Boolean = closed

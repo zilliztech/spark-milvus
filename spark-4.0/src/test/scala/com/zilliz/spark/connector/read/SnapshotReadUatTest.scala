@@ -1,5 +1,11 @@
 package com.zilliz.spark.connector.read
 
+import org.apache.spark.sql.execution.adaptive.{
+  AdaptiveSparkPlanExec,
+  QueryStageExec
+}
+import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
+import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -796,6 +802,50 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
         info(s"${deleted.size} deleted ids, $present of them present")
         present shouldBe 0L
       }
+    }
+  }
+
+  /** The G5 metrics come back through the scan node of the executed plan: the
+    * row path converts every surviving row, the columnar path none.
+    */
+  test("the read's metrics reach the scan node (G5)") {
+    storageOptions(); snapshotPath()
+    withSpark { spark =>
+      def scanMetrics(columnar: Boolean): Map[String, Long] = {
+        val df =
+          if (columnar) read(spark, MilvusOption.ReadColumnar -> "true")
+          else read(spark)
+        val counted = df.groupBy().count()
+        val rows = counted.collect().head.getLong(0)
+        // Adaptive execution wraps the plan and hides each finished stage's
+        // subtree behind a QueryStageExec, so the walk has to open both.
+        def scansIn(plan: SparkPlan): Seq[BatchScanExec] = plan match {
+          case adaptive: AdaptiveSparkPlanExec => scansIn(adaptive.executedPlan)
+          case stage: QueryStageExec           => scansIn(stage.plan)
+          case scan: BatchScanExec             => Seq(scan)
+          case other => other.children.flatMap(scansIn)
+        }
+        val scans = scansIn(counted.queryExecution.executedPlan)
+        scans should have size 1
+        val metrics = scans.head.metrics.collect {
+          case (name, metric) if name.startsWith("milvus.") =>
+            name -> metric.value
+        }
+        info(s"columnar=$columnar rows=$rows metrics=${metrics.toSeq.sorted}")
+        metrics
+      }
+      val row = scanMetrics(columnar = false)
+      row("milvus.jni.calls") should be > 0L
+      row("milvus.jni.nanos") should be > 0L
+      row("milvus.arrow.batches") should be > 0L
+      row("milvus.arrow.bytes") should be > 0L
+      row("milvus.arrow.allocated.max") should be > 0L
+      env("MILVUS_UAT_EXPECTED_ROWS").foreach { e =>
+        row("milvus.rows.materialized") shouldBe e.toLong
+      }
+      val columnar = scanMetrics(columnar = true)
+      columnar("milvus.rows.materialized") shouldBe 0L
+      columnar("milvus.arrow.batches") shouldBe row("milvus.arrow.batches")
     }
   }
 

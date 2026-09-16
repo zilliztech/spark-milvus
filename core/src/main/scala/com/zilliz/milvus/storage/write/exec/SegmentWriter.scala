@@ -9,7 +9,7 @@ import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.jni.storage.StorageNative
-import com.zilliz.milvus.storage.Logging
+import com.zilliz.milvus.storage.{Logging, NativeCalls}
 
 /** Writes Arrow batches into one segment.
   *
@@ -26,6 +26,43 @@ trait SegmentWriter extends AutoCloseable {
 
   /** Rows handed to the native writer so far. */
   def rows: Long
+
+  /** What the write has cost on the crossing so far; valid after `close()` too.
+    */
+  def metrics: WriteMetrics
+}
+
+/** The counting every [[SegmentWriter]] does the same way: calls and their time
+  * through [[NativeCalls]], batches and their buffer bytes at `write`, the
+  * allocator's high-water mark after each batch.
+  */
+private[exec] trait CountingWriter { this: SegmentWriter =>
+  protected def allocator: BufferAllocator
+  protected val calls = new NativeCalls
+  private var batches: Long = 0L
+  private var arrowBytes: Long = 0L
+  private var allocatedMax: Long = 0L
+
+  protected def countBatch(batch: VectorSchemaRoot): Unit = {
+    batches += 1
+    var bytes = 0L
+    val vectors = batch.getFieldVectors
+    var i = 0
+    while (i < vectors.size()) {
+      bytes += vectors.get(i).getBufferSize.toLong
+      i += 1
+    }
+    arrowBytes += bytes
+    allocatedMax = math.max(allocatedMax, allocator.getAllocatedMemory)
+  }
+
+  override def metrics: WriteMetrics = WriteMetrics(
+    jniCalls = calls.calls,
+    jniNanos = calls.nanos,
+    batches = batches,
+    arrowBytes = arrowBytes,
+    allocatedMax = allocatedMax
+  )
 }
 
 object SegmentWriter {
@@ -81,9 +118,10 @@ final class V3SegmentWriter(
     val basePath: String,
     arrowSchema: Schema,
     properties: Map[String, String],
-    allocator: BufferAllocator,
+    protected val allocator: BufferAllocator,
     columnGroupPatterns: Seq[String] = Seq.empty
 ) extends SegmentWriter
+    with CountingWriter
     with Logging {
 
   private val schemaStruct: ArrowSchema = ArrowSchema.allocateNew(allocator)
@@ -93,12 +131,14 @@ final class V3SegmentWriter(
 
   try {
     Data.exportSchema(allocator, arrowSchema, null, schemaStruct)
-    handle = StorageNative.writerNew(
-      basePath,
-      schemaStruct.memoryAddress(),
-      (properties ++ ColumnGroupSplit.writerProperties(
-        columnGroupPatterns
-      )).asJava
+    handle = calls.timed(
+      StorageNative.writerNew(
+        basePath,
+        schemaStruct.memoryAddress(),
+        (properties ++ ColumnGroupSplit.writerProperties(
+          columnGroupPatterns
+        )).asJava
+      )
     )
     if (handle == 0L) {
       throw new IllegalStateException(
@@ -114,10 +154,11 @@ final class V3SegmentWriter(
   override def write(batch: VectorSchemaRoot): Unit = {
     val count = batch.getRowCount
     if (count == 0) return
+    countBatch(batch)
     SegmentWriter.exported(allocator, batch) { address =>
       SegmentWriter.serializingFirstWrite {
-        StorageNative.writerWrite(handle, address)
-        StorageNative.writerFlush(handle)
+        calls.timed(StorageNative.writerWrite(handle, address))
+        calls.timed(StorageNative.writerFlush(handle))
       }
     }
     written += count
@@ -133,7 +174,7 @@ final class V3SegmentWriter(
       throw new IllegalStateException(s"writer at $basePath already closed")
     }
     try {
-      val groups = StorageNative.writerClose(handle, null, null)
+      val groups = calls.timed(StorageNative.writerClose(handle, null, null))
       new WrittenColumnGroups(groups)
     } finally release()
   }
@@ -172,8 +213,9 @@ final class V2SegmentWriter(
     columnGroups: Seq[Seq[Int]],
     arrowSchema: Schema,
     properties: Map[String, String],
-    allocator: BufferAllocator
+    protected val allocator: BufferAllocator
 ) extends SegmentWriter
+    with CountingWriter
     with Logging {
   require(
     paths.size == columnGroups.size,
@@ -201,13 +243,15 @@ final class V2SegmentWriter(
     // The C layer takes the per-group column indices flattened: group g owns
     // indices[offsets(g) until offsets(g + 1)].
     val offsets = columnGroups.scanLeft(0)(_ + _.size).toArray
-    handle = StorageNative.packedWriterNew(
-      paths.toArray,
-      offsets,
-      columnGroups.flatten.toArray,
-      schemaStruct.memoryAddress(),
-      properties.asJava,
-      0L
+    handle = calls.timed(
+      StorageNative.packedWriterNew(
+        paths.toArray,
+        offsets,
+        columnGroups.flatten.toArray,
+        schemaStruct.memoryAddress(),
+        properties.asJava,
+        0L
+      )
     )
     if (handle == 0L) {
       throw new IllegalStateException(
@@ -223,9 +267,10 @@ final class V2SegmentWriter(
   override def write(batch: VectorSchemaRoot): Unit = {
     val count = batch.getRowCount
     if (count == 0) return
+    countBatch(batch)
     SegmentWriter.exported(allocator, batch) { address =>
       SegmentWriter.serializingFirstWrite {
-        StorageNative.packedWriterWrite(handle, address)
+        calls.timed(StorageNative.packedWriterWrite(handle, address))
       }
     }
     written += count
@@ -241,7 +286,7 @@ final class V2SegmentWriter(
       throw new IllegalStateException("packed writer already closed")
     }
     try {
-      StorageNative.packedWriterClose(handle)
+      calls.timed(StorageNative.packedWriterClose(handle))
       written
     } finally release()
   }

@@ -102,7 +102,8 @@ C shim（mv_* 包 knowhere::Index、BruteForce、BinarySet、Version，以及 Di
 | `read` | ScanBuilder、Scan、Batch、InputPartition、ColumnarPartitionReader、ColumnVector 实现。包名与 `write` 和 `core.read` 对称，类名沿用 Spark 的 Scan | 否 |
 | `expr` | DataSource V2 Predicate 到 IR 的翻译 | 否 |
 | `types` | Arrow 类型到 Spark 类型的映射，向量列的 Spark 表示 | 否 |
-| `write` | WriteBuilder、BatchWrite、DataWriterFactory、DataWriter；truncate、overwrite、backfill 模式 | 否 |
+| `write` | WriteBuilder、BatchWrite、DataWriterFactory、DataWriter；append 与 backfill 模式（truncate、overwrite 不做，能力表第 10 节） | 否 |
+| `metrics` | core 的 ReadMetrics / WriteMetrics 翻成 DataSource V2 的 CustomMetric / CustomTaskMetric，读写各一张清单；G5 | 否 |
 | `options` | option 名、别名、校验；ReadMode；按 ReadMode 构造这次读的 SnapshotSource（SnapshotSources，含 ClientSnapshotSource、OptionStringsSnapshotSource，把 compat 的 backup 实现和 V2 footer 解析器接进 core）；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageKeys） | 否 |
 | `sources` | 只有 MilvusDataSource，`format("milvus")` 的 TableProvider。留在这个包名下是因为 apps 和用户作业按字符串引用它的全名 | 否 |
 | `procedure` | CALL 的语义：逻辑计划节点、物理节点、planner 策略 | 否 |

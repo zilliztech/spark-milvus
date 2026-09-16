@@ -32,6 +32,11 @@ private[read] object SegmentVectorSearch extends Logging {
 
   final case class Result(row: InternalRow, distance: Double, rowOffset: Long)
 
+  /** The top-k in metric order, and how many rows were turned into
+    * `InternalRow` to score them (every row not deleted).
+    */
+  final case class Search(results: Iterator[Result], rowsMaterialized: Long)
+
   /** Scores every batch `batches` yields, closing each, and returns the top-k
     * in metric order. Deleted rows are skipped but still count towards the row
     * offset.
@@ -42,7 +47,7 @@ private[read] object SegmentVectorSearch extends Logging {
       arrowColumnNames: Map[String, String],
       batches: Iterator[VectorSchemaRoot],
       isDeleted: (VectorSchemaRoot, Int) => Boolean
-  ): Iterator[Result] = {
+  ): Search = {
     val k = search.topK
     val metric = search.metricType
     val vectorColIndex =
@@ -65,12 +70,14 @@ private[read] object SegmentVectorSearch extends Logging {
     val heap = scala.collection.mutable.PriorityQueue
       .empty[Result](if (larger) byDistance.reverse else byDistance)
     var rowCount = 0L
+    var materialized = 0L
 
     batches.foreach { batch =>
       try {
         var i = 0
         while (i < batch.getRowCount) {
           if (!isDeleted(batch, i)) {
+            materialized += 1
             val row = ArrowConverter.arrowToInternalRow(
               batch,
               i,
@@ -109,8 +116,9 @@ private[read] object SegmentVectorSearch extends Logging {
       s"Per-segment vector search completed: processed $rowCount rows, kept ${heap.size} top-K results"
     )
     val results = heap.dequeueAll
-    (if (larger) results.sortBy(-_.distance)
-     else results.sortBy(_.distance)).iterator
+    val ordered =
+      if (larger) results.sortBy(-_.distance) else results.sortBy(_.distance)
+    Search(ordered.iterator, materialized)
   }
 
   private def extractVector(

@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector.read
 
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnVector
@@ -90,6 +91,9 @@ object MetadataColumns {
       }
 
       override def close(): Unit = underlying.close()
+
+      override def currentMetricsValues(): Array[CustomTaskMetric] =
+        underlying.currentMetricsValues()
     }
   }
 }

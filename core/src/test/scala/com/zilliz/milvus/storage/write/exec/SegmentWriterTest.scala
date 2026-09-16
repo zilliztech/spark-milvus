@@ -152,8 +152,14 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
         writer.write(second)
         second.close()
         writer.rows shouldBe 5000L
+        // G5: one open, then write and flush per batch.
+        writer.metrics.batches shouldBe 2L
+        writer.metrics.jniCalls shouldBe 1L + 2L * 2L
+        writer.metrics.arrowBytes should be > (5000L * 8)
+        writer.metrics.allocatedMax should be > 0L
 
         val groups = writer.finish()
+        writer.metrics.jniCalls shouldBe 1L + 2L * 2L + 1L
         val version =
           try {
             groups.size should be > 0

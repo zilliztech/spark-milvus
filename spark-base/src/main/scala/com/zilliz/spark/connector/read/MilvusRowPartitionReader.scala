@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.read
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.{
   BinaryType,
@@ -16,7 +17,8 @@ import org.apache.spark.sql.types.{
   StructType
 }
 
-import com.zilliz.milvus.storage.read.exec.SegmentReader
+import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
+import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.options.VectorSearch
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 
@@ -63,6 +65,13 @@ class MilvusRowPartitionReader(
 
   private var searchResults: Iterator[SegmentVectorSearch.Result] = null
 
+  // Rows turned into InternalRow, for the metric of that name: counted per
+  // batch as the rows touched minus the ones skipped as deleted, which never
+  // get converted. A filtered-out row was converted to be evaluated.
+  private var materialized: Long = 0L
+  private var deletedInBatch: Long = 0L
+  private var finalMetrics: ReadMetrics = ReadMetrics.Zero
+
   /** Row offset of the row `get()` last returned, for the row-offset metadata
     * column; -1 before the first row.
     */
@@ -99,13 +108,15 @@ class MilvusRowPartitionReader(
   override def next(): Boolean = vectorSearch match {
     case Some(search) =>
       if (searchResults == null) {
-        searchResults = SegmentVectorSearch.run(
+        val result = SegmentVectorSearch.run(
           search,
           schema,
           arrowColumnNames,
           remainingBatches(),
           isDeleted
         )
+        searchResults = result.results
+        materialized += result.rowsMaterialized
       }
       searchResults.hasNext
     case None => nextRow()
@@ -121,6 +132,8 @@ class MilvusRowPartitionReader(
         currentBatch = null
         currentBatchStartRowOffset += exhausted.getRowCount.toLong
         observedRows += exhausted.getRowCount.toLong
+        materialized += exhausted.getRowCount.toLong - deletedInBatch
+        deletedInBatch = 0L
         exhausted.close()
         currentBatch = pullNextBatch()
         currentRowIndex = 0
@@ -131,6 +144,7 @@ class MilvusRowPartitionReader(
       }
       if (isDeleted(currentBatch, currentRowIndex)) {
         currentRowIndex += 1
+        deletedInBatch += 1
       } else if (pushedFilters.isEmpty) {
         return true
       } else {
@@ -169,6 +183,12 @@ class MilvusRowPartitionReader(
 
   override def close(): Unit = releaseAll()
 
+  override def currentMetricsValues(): Array[CustomTaskMetric] = {
+    val metrics =
+      if (segmentReader != null) segmentReader.metrics else finalMetrics
+    ScanMetrics.taskValues(metrics, materialized)
+  }
+
   /** Runs once, at EOF of a scan; a close before EOF skips it on purpose. */
   private def verifyRowCount(): Unit = {
     if (rowCountVerified) return
@@ -189,6 +209,9 @@ class MilvusRowPartitionReader(
   // rest; the null sentinels make a second close a no-op.
   private def releaseAll(): Unit = {
     if (currentBatch != null) {
+      // Rows touched in the batch being abandoned, less the deleted ones.
+      materialized += currentRowIndex.toLong - deletedInBatch
+      deletedInBatch = 0L
       try currentBatch.close()
       catch { case e: Throwable => logWarning("close currentBatch failed", e) }
       currentBatch = null
@@ -196,6 +219,7 @@ class MilvusRowPartitionReader(
     if (segmentReader != null) {
       try segmentReader.close()
       catch { case e: Throwable => logWarning("close segmentReader failed", e) }
+      finalMetrics = segmentReader.metrics
       segmentReader = null
     }
   }

@@ -139,6 +139,14 @@ public final class StorageNative {
     public static native boolean recordBatchReaderReadNext(
             long recordBatchReaderHandle, long arrayAddress, long schemaAddress);
 
+    /**
+     * Counters the batch reader keeps for metrics (capability G5): {@code
+     * {batches, copies, copiedBytes}}. A copy is one column materialized by
+     * {@code arrow::Concatenate} in {@link #recordBatchReaderReadNext} because
+     * it arrived sliced; the bytes are what that copy produced.
+     */
+    public static native long[] recordBatchReaderStats(long recordBatchReaderHandle);
+
     public static native void recordBatchReaderDestroy(long recordBatchReaderHandle);
 
     // ---------------------------------------------------------------------

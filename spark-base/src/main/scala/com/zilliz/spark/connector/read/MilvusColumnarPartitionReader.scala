@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import org.apache.arrow.vector.{VarBinaryVector, VectorSchemaRoot}
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.types.{
   ArrayType,
@@ -17,6 +18,7 @@ import org.apache.spark.sql.vectorized.{
 
 import com.zilliz.milvus.storage.read.exec.SegmentReader
 import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
+import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.types.{
   MilvusSparseVectorColumn,
   MilvusVectorColumn,
@@ -72,6 +74,11 @@ class MilvusColumnarPartitionReader(
   }
 
   override def get(): ColumnarBatch = batch
+
+  // Nothing here becomes an InternalRow: a batch with deletes is delivered
+  // through SelectedRowsColumn, which maps row positions and copies nothing.
+  override def currentMetricsValues(): Array[CustomTaskMetric] =
+    ScanMetrics.taskValues(segmentReader.metrics, rowsMaterialized = 0L)
 
   override def close(): Unit = {
     closeCurrent()

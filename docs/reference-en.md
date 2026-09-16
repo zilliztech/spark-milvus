@@ -104,6 +104,10 @@ val s3Options = Map(
 
 Each Spark partition is one segment. The executor opens it through milvus-storage's C interface and pulls Arrow batches: from the segment manifest for `storage_version = 3`, from the column-group parquet files for `storage_version = 2`, with the same reader for both. The executor reads the segment's delete files into a delete plan and drops deleted rows by primary key and timestamp.
 
+### 1.5 Metrics
+
+Every read and write reports what it cost on the C/JVM boundary as task metrics on the scan or write node of the Spark SQL page; nothing has to be switched on. A scan reports `milvus.jni.calls`, `milvus.jni.nanos`, `milvus.arrow.batches`, `milvus.arrow.bytes` (Arrow bytes handed over), `milvus.copies` and `milvus.copied.bytes` (columns the native side had to copy because a batch arrived sliced), `milvus.rows.materialized` (rows turned into Spark rows; zero on the columnar path) and `milvus.arrow.allocated.max` (the Arrow allocator's peak, the maximum over tasks). A write reports the first four and the peak. Bytes read from object storage for segment data are not among them: that read happens inside milvus-storage.
+
 ## 2. `milvus` Format Parameters
 
 ### 2.1 Connection Parameters

@@ -198,7 +198,7 @@ spark 层一个行式 reader、一个列式 reader,只留 Spark 接口的对接�
 有谓词或向量检索时回落行式。下面是它的设计。</p>
 
 <p>决策 12 选了做。出口形态:<strong>无删除的批原样包成 <code>ColumnarBatch</code> 直通,
-有删除的批把存活行物化成新的一批。</strong>物化无法回避,理由与代价见
+有删除的批经 <code>SelectedRowsColumn</code> 按存活行下标映射,不拷贝。</strong>理由与代价见
 <a href="storage-io.html#cost">storage-io 第四节</a>。<code>ColumnBatch</code>
 的定义据此定型,<code>core.read.exec</code> 不再被挡。</p>
 
@@ -291,7 +291,7 @@ manifest 按字段 id 匹配列、schema 里字段名就是 id,列组布局用�
 <li><strong>列式出口。</strong>决策 12 定了做,决策 6 定了向量列默认转、
 另给 <code>milvus.read.vector.raw</code> 出原始字节。要新写
 <code>ColumnVector</code> 与 <code>ColumnarBatch</code> 的一侧,
-并处理有删除的批要物化存活行。</li>
+有删除的批经 <code>SelectedRowsColumn</code> 按下标映射。</li>
 
 <li><strong>写侧下沉 <code>core.write.exec</code> 与 <code>core.write.commit</code>。</strong><code>core.write.exec</code> 已做（#07）：两个 writer 的 native 调用进了 core，<code>ManifestTransaction</code> 提交清单；作业级提交是 #08。
 backfill 分支走已有的 <code>BatchUpdateManifest</code>,可以做;append 分支等 Milvus 新增

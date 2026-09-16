@@ -8,9 +8,9 @@ import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.jni.storage.StorageNative
+import com.zilliz.milvus.storage.{Logging, NativeCalls}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
-import com.zilliz.milvus.storage.Logging
 
 /** Pulls Arrow batches out of one segment.
   *
@@ -28,6 +28,11 @@ trait SegmentReader extends AutoCloseable {
     * short result.
     */
   def deliveredRows: Long
+
+  /** What the read has cost on the crossing so far; valid after `close()` too,
+    * for a task that reports at its end.
+    */
+  def metrics: ReadMetrics
 }
 
 /** Opens a [[SegmentReader]] for a segment's layout.
@@ -87,6 +92,13 @@ private[exec] final class NativeSegmentReader(
   private var closed: Boolean = false
   private var delivered: Long = 0L
 
+  private val calls = new NativeCalls
+  private var batches: Long = 0L
+  private var arrowBytes: Long = 0L
+  private var allocatedMax: Long = 0L
+  // The C side's counters, read while the handle lives and kept past close.
+  private var nativeStats: Array[Long] = Array(0L, 0L, 0L)
+
   try {
     schemaStruct = ArrowSchema.allocateNew(allocator)
     Data.exportSchema(allocator, arrowSchema, null, schemaStruct)
@@ -95,8 +107,9 @@ private[exec] final class NativeSegmentReader(
 
     task.layout match {
       case SegmentLayout.Manifest(basePath, readVersion) =>
-        val manifest =
+        val manifest = calls.timed(
           StorageNative.manifestOpen(basePath, properties, readVersion)
+        )
         manifestHandle = manifest(0)
         columnGroupsHandle = manifest(1)
         if (manifest(2) == 0L) {
@@ -105,11 +118,13 @@ private[exec] final class NativeSegmentReader(
               "into the milvus-storage format"
           )
         }
-        readerHandle = StorageNative.readerNewNative(
-          columnGroupsHandle,
-          schemaStruct.memoryAddress(),
-          columns,
-          properties
+        readerHandle = calls.timed(
+          StorageNative.readerNewNative(
+            columnGroupsHandle,
+            schemaStruct.memoryAddress(),
+            columns,
+            properties
+          )
         )
 
       case SegmentLayout.ColumnGroups(groups) =>
@@ -130,18 +145,22 @@ private[exec] final class NativeSegmentReader(
           )
           group.fileRowCounts.toArray
         }.toArray
-        columnGroupsHandle = StorageNative.columnGroupsCreate(
-          columnNames,
-          files,
-          rowCounts,
-          "parquet"
+        columnGroupsHandle = calls.timed(
+          StorageNative.columnGroupsCreate(
+            columnNames,
+            files,
+            rowCounts,
+            "parquet"
+          )
         )
         ownsColumnGroups = true
-        readerHandle = StorageNative.readerNew(
-          columnGroupsHandle,
-          schemaStruct.memoryAddress(),
-          columns,
-          properties
+        readerHandle = calls.timed(
+          StorageNative.readerNew(
+            columnGroupsHandle,
+            schemaStruct.memoryAddress(),
+            columns,
+            properties
+          )
         )
     }
 
@@ -150,7 +169,8 @@ private[exec] final class NativeSegmentReader(
         s"could not open a native reader for segment ${task.segmentId}"
       )
     }
-    batchReaderHandle = StorageNative.recordBatchReaderNew(readerHandle, null)
+    batchReaderHandle =
+      calls.timed(StorageNative.recordBatchReaderNew(readerHandle, null))
   } catch {
     case e: Throwable =>
       release()
@@ -162,15 +182,27 @@ private[exec] final class NativeSegmentReader(
     val array = ArrowArray.allocateNew(allocator)
     val schema = ArrowSchema.allocateNew(allocator)
     try {
-      val hasBatch = StorageNative.recordBatchReaderReadNext(
-        batchReaderHandle,
-        array.memoryAddress(),
-        schema.memoryAddress()
+      val hasBatch = calls.timed(
+        StorageNative.recordBatchReaderReadNext(
+          batchReaderHandle,
+          array.memoryAddress(),
+          schema.memoryAddress()
+        )
       )
       if (!hasBatch) None
       else {
         val root = Data.importVectorSchemaRoot(allocator, array, schema, null)
         delivered += root.getRowCount.toLong
+        batches += 1
+        var bytes = 0L
+        val vectors = root.getFieldVectors
+        var i = 0
+        while (i < vectors.size()) {
+          bytes += vectors.get(i).getBufferSize.toLong
+          i += 1
+        }
+        arrowBytes += bytes
+        allocatedMax = math.max(allocatedMax, allocator.getAllocatedMemory)
         Some(root)
       }
     } finally {
@@ -183,6 +215,21 @@ private[exec] final class NativeSegmentReader(
 
   override def deliveredRows: Long = delivered
 
+  override def metrics: ReadMetrics = synchronized {
+    if (batchReaderHandle != 0L) {
+      nativeStats = StorageNative.recordBatchReaderStats(batchReaderHandle)
+    }
+    ReadMetrics(
+      jniCalls = calls.calls,
+      jniNanos = calls.nanos,
+      batches = batches,
+      arrowBytes = arrowBytes,
+      copies = nativeStats(1),
+      copiedBytes = nativeStats(2),
+      allocatedMax = allocatedMax
+    )
+  }
+
   override def close(): Unit = release()
 
   /** Releases everything still held, in reverse order of acquisition, and
@@ -193,21 +240,26 @@ private[exec] final class NativeSegmentReader(
     closed = true
 
     if (batchReaderHandle != 0L) {
-      try StorageNative.recordBatchReaderDestroy(batchReaderHandle)
+      try nativeStats = StorageNative.recordBatchReaderStats(batchReaderHandle)
+      catch {
+        case e: Throwable =>
+          logWarning("reading the batch reader stats failed", e)
+      }
+      try calls.timed(StorageNative.recordBatchReaderDestroy(batchReaderHandle))
       catch {
         case e: Throwable => logWarning("destroying the batch reader failed", e)
       }
       batchReaderHandle = 0L
     }
     if (readerHandle != 0L) {
-      try StorageNative.readerDestroySegment(readerHandle)
+      try calls.timed(StorageNative.readerDestroySegment(readerHandle))
       catch {
         case e: Throwable => logWarning("destroying the reader failed", e)
       }
       readerHandle = 0L
     }
     if (ownsColumnGroups && columnGroupsHandle != 0L) {
-      try StorageNative.columnGroupsDestroy(columnGroupsHandle)
+      try calls.timed(StorageNative.columnGroupsDestroy(columnGroupsHandle))
       catch {
         case e: Throwable =>
           logWarning("destroying the column groups failed", e)
@@ -217,7 +269,7 @@ private[exec] final class NativeSegmentReader(
       // The manifest owns the column groups it handed out, so destroying it
       // covers both. The code this replaces never did, leaking one manifest
       // per partition.
-      try StorageNative.manifestDestroy(manifestHandle)
+      try calls.timed(StorageNative.manifestDestroy(manifestHandle))
       catch {
         case e: Throwable => logWarning("destroying the manifest failed", e)
       }

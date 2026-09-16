@@ -104,7 +104,23 @@ struct ColumnGroupsHolder {
 
 struct RecordBatchReaderHolder {
   std::shared_ptr<arrow::RecordBatchReader> reader;
+  // Counters the JVM reads back through recordBatchReaderStats: batches
+  // handed over, and how many of their columns were materialized by
+  // Concatenate (with the bytes that copy produced). One holder is one Spark
+  // task, so nothing here is shared or locked.
+  int64_t batches = 0;
+  int64_t copies = 0;
+  int64_t copied_bytes = 0;
 };
+
+// Bytes an array's own buffers occupy; what one Concatenate copy cost.
+int64_t BufferBytes(const arrow::Array& array) {
+  int64_t total = 0;
+  for (const auto& buffer : array.data()->buffers) {
+    if (buffer != nullptr) total += buffer->size();
+  }
+  return total;
+}
 
 }  // namespace
 
@@ -371,10 +387,14 @@ Java_com_zilliz_milvus_jni_storage_StorageNative_recordBatchReaderReadNext(
         ThrowArrow(env, materialized.status());
         return JNI_FALSE;
       }
-      columns.push_back(materialized.MoveValueUnsafe());
+      auto copy = materialized.MoveValueUnsafe();
+      holder->copies += 1;
+      holder->copied_bytes += BufferBytes(*copy);
+      columns.push_back(std::move(copy));
     }
     batch = arrow::RecordBatch::Make(batch->schema(), batch->num_rows(), columns);
   }
+  holder->batches += 1;
 
   arrow::Status exported = arrow::ExportRecordBatch(*batch, out_array, out_schema);
   if (!exported.ok()) {
@@ -382,6 +402,23 @@ Java_com_zilliz_milvus_jni_storage_StorageNative_recordBatchReaderReadNext(
     return JNI_FALSE;
   }
   return JNI_TRUE;
+}
+
+// {batches, copies, copied_bytes} so far; see the holder.
+JNIEXPORT jlongArray JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_recordBatchReaderStats(
+    JNIEnv* env, jclass, jlong handle) {
+  auto* holder = reinterpret_cast<RecordBatchReaderHolder*>(handle);
+  jlong values[3] = {0, 0, 0};
+  if (holder != nullptr) {
+    values[0] = holder->batches;
+    values[1] = holder->copies;
+    values[2] = holder->copied_bytes;
+  }
+  jlongArray out = env->NewLongArray(3);
+  if (out == nullptr) return nullptr;
+  env->SetLongArrayRegion(out, 0, 3, values);
+  return out;
 }
 
 JNIEXPORT void JNICALL

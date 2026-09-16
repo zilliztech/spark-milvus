@@ -104,6 +104,10 @@ val s3Options = Map(
 
 每个 Spark 分区是一个段。executor 经 milvus-storage 的 C 接口打开它、拉取 Arrow 批：`storage_version = 3` 的段从段清单打开，`storage_version = 2` 的段从列组 parquet 文件打开，两条线用同一个 reader。executor 把该段的删除文件读成删除计划，按主键和时间戳跳过已删行。
 
+### 1.5 指标
+
+每次读写都把它在 C/JVM 边界上的开销作为任务指标报到 Spark SQL 页的 scan 或 write 节点上，不用打开任何开关。scan 报 `milvus.jni.calls`、`milvus.jni.nanos`、`milvus.arrow.batches`、`milvus.arrow.bytes`（过界的 Arrow 字节）、`milvus.copies` 与 `milvus.copied.bytes`（原生侧因批被切片而拷贝的列数与字节数）、`milvus.rows.materialized`（转成 Spark 行的行数，列式路径为 0）、`milvus.arrow.allocated.max`（Arrow allocator 峰值，跨任务取最大）。write 报前四个和峰值。段数据从对象存储读了多少字节不在其中：那次读取发生在 milvus-storage 内部。
+
 ## 2. `milvus` 格式参数
 
 ### 2.1 连接参数

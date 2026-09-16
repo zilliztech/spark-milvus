@@ -13,6 +13,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, SaveMode}
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.write.{
   BatchWrite,
   DataWriter,
@@ -42,8 +43,10 @@ import com.zilliz.milvus.storage.write.exec.{
   ColumnGroupSplit,
   ManifestTransaction,
   StagingLayout,
-  V3SegmentWriter
+  V3SegmentWriter,
+  WriteMetrics
 }
+import com.zilliz.spark.connector.metrics.WriteMetricsReport
 import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 import com.zilliz.spark.connector.types.{SparkSchemaMapper, SparkTypes}
 import com.zilliz.spark.connector.types.ArrowConverter
@@ -86,6 +89,9 @@ class MilvusV3Write(
   override def toBatch: BatchWrite = {
     new MilvusV3BatchWrite(schema, milvusOption)
   }
+
+  override def supportedCustomMetrics(): Array[CustomMetric] =
+    WriteMetricsReport.supported
 }
 
 /** The V3 batch write: one job id, one writer factory, and the job-level commit
@@ -438,6 +444,11 @@ class MilvusV3PartitionWriter(
   }
 
   override def close(): Unit = cleanup()
+
+  override def currentMetricsValues(): Array[CustomTaskMetric] =
+    WriteMetricsReport.taskValues(
+      if (segmentWriter != null) segmentWriter.metrics else WriteMetrics.Zero
+    )
 
   private def flushBatch(): Unit = {
     if (currentBatchSize == 0) return

@@ -209,6 +209,24 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       // Three batches at the 8192 default: 8192, 8192, 4096. More than one is
       // what makes this a slice regression rather than a single-batch read.
       batches should be >= 3
+
+      // The crossing's own account of the same read (G5). Calls so far: open
+      // the column groups, the reader and the batch reader, then one ReadNext
+      // per batch plus the one that returned EOF.
+      val metrics = segmentReader.metrics
+      metrics.batches shouldBe batches.toLong
+      metrics.jniCalls shouldBe 3L + batches + 1L
+      metrics.jniNanos should be > 0L
+      metrics.arrowBytes should be > (rows.toLong * 8)
+      metrics.allocatedMax should be > 0L
+      // Over 16384 rows the packed reader slices, so the C side copied.
+      metrics.copies should be > 0L
+      metrics.copiedBytes should be > 0L
+      segmentReader.close()
+      // Closing adds the three destroys and keeps the C side's counters.
+      val closed = segmentReader.metrics
+      closed.jniCalls shouldBe metrics.jniCalls + 3L
+      closed.copies shouldBe metrics.copies
     } finally {
       if (segmentReader != null) segmentReader.close()
       if (written != 0L) StorageNative.nativeColumnGroupsDestroy(written)
