@@ -205,6 +205,12 @@ def sparkProject(l: Versions.SparkLine): Project =
     )
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
+  // The UAT scenario suite runs on the oldest line too (work item #18); it is
+  // written against the 4.0 line and compiled here as a second consumer.
+  .settings(
+    Test / unmanagedSourceDirectories +=
+      (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "uat"
+  )
 lazy val spark40 = sparkProject(Versions.line("4.0"))
   // Reuse core's ObjectStore fixtures for source tests without loading JNI.
   .dependsOn(core % "test->test")
