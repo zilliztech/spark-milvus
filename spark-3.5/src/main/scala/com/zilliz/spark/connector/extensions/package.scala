@@ -1,8 +1,13 @@
 package com.zilliz.spark.connector
 
-/** SparkSessionExtensions, the SQL parser extension and the optimizer rules.
+/** SparkSessionExtensions, the `CALL milvus.system.<name>(...)` parser
+  * extension and the strategy that runs it. The grammar, the visitor, the
+  * logical and physical nodes and the extension class are shared
+  * (`spark-base`); this directory holds the parser antlr generates at this
+  * line's version and `MilvusSqlParser`, the `ParserInterface` adapter, which
+  * on Spark 3.5 has no `parseRoutineParam`. Design:
+  * docs/design/architecture/procedure.html.
   *
-  * capabilities.md does not pin any capability id to this package (see
-  * docs/design/capabilities.md).
+  * Capabilities: A4 (see docs/design/capabilities.md).
   */
 package object extensions

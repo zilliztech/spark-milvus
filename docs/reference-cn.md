@@ -302,7 +302,31 @@ Register.run(
 
 它读作业清单，用每个段的 id 和新 manifest 版本调 Milvus 的 `BatchUpdateManifest`，然后给作业打上已登记标记，
 第二次调用不再发送。只有写进已有段的作业能这样登记；新建段的作业（`df.write`）会被拒绝，要等 Milvus 的
-`RegisterSegments`。SQL 形式的 `CALL milvus.system.register(...)` 还没有。
+`RegisterSegments`。
+
+同一个动作的 SQL 形式。先给会话开连接器的 SQL 扩展：
+
+```
+--conf spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusSparkSessionExtensions
+```
+
+然后：
+
+```sql
+CALL milvus.system.register('your_db.your_collection',
+  staging          => 'files/staging/backfill-1789478390101',
+  `milvus.uri`     => 'http://localhost:19530',
+  `milvus.token`   => 'your-token',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+第一个参数是 collection，`'db.coll'`，或 `'coll'` 表示默认库；`staging` 是作业暂存前缀，相对桶的 key。
+其余参数都是连接或存储选项，键和 DataFrame 读时 `.option()` 的键一样，因为带点所以用反引号包住，值也一样。
+值只能是常量。结果是一张表，每段一行：`job_id`、`segment_id`、`manifest_version`、`status`（`registered`，
+作业此前已登记过则是 `already_registered`）。过程名不存在、缺参数、多参数、类型不对，都在解析时拒绝并列出参数表。
+不以 `CALL milvus.` 开头的语句不受影响，扩展可以常开。Spark 3.5 和 4.x 行为一样。
 
 
 ## 4. 数据模式

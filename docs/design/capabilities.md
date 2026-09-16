@@ -58,7 +58,7 @@ Table 接口表达不了的动作走 CALL：四条线走同一个 SQL 语法扩�
 | A1 | 快照 | `CALL milvus.system.create_snapshot('db.coll')`，drop、list、describe | spark.procedure → client.api | 建前是否先 Flush 见决策 11 | P1 |
 | A2 | 索引 | `create_index`、`drop_index`，可等待完成 | spark.procedure → client.api | client 新增 CreateIndex、DropIndex、DescribeIndex | P1 |
 | A3 | 生命周期 | `load`、`release`、`flush`、`compact` | spark.procedure → client.api | client 新增 LoadCollection、ReleaseCollection、ManualCompaction | P1 |
-| A4 | 登记 | `register('db.coll', staging => 's3://.../staging/<job-id>')`：读作业清单后登记 | spark.procedure → core.write.commit、client.api | backfill 分支已通（2026-09-15 #16）：`spark.procedure.Register.run` 读作业清单，`client.api.batchUpdateManifest` 走 Milvus 3.0 公开的 BatchUpdateManifest，UAT 上 backfill → register → 在线查到新列；SQL 的 `CALL` 前端未接（#17），先是 Scala 入口。append 分支走 RegisterSegments，待 Milvus 新增 | P1 / append 待定 |
+| A4 | 登记 | `CALL milvus.system.register('db.coll', staging => '{root}/staging/<job-id>', \`milvus.uri\` => ..., \`fs.*\` => ...)`（#17，2026-09-16 起，四条线）；Scala 入口 `Register.run` | spark.extensions → spark.procedure → core.write.commit、client.api | backfill 分支已通（2026-09-15 #16）：`spark.procedure.Register.run` 读作业清单，`client.api.batchUpdateManifest` 走 Milvus 3.0 公开的 BatchUpdateManifest，UAT 上 backfill → register → 在线查到新列；SQL 的 `CALL` 前端未接（#17），先是 Scala 入口。append 分支走 RegisterSegments，待 Milvus 新增 | P1 / append 待定 |
 | A5 | 描述 | `describe`：schema、段数、索引状态 | spark.procedure → client.api | | P1 |
 | A7 | 清理暂存 | `cleanup_staging('db.coll')`：删掉没登记成的作业前缀 | spark.procedure → core.write.commit | 作业被 kill 时 abort 不执行，暂存前缀会留垃圾 | P1 |
 

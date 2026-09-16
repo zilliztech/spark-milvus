@@ -353,8 +353,37 @@ It reads the job manifest, calls Milvus's `BatchUpdateManifest` with every
 segment's id and new manifest version, and marks the job registered so a
 second call does nothing. Only a job that wrote into existing segments can be
 registered this way; a job that created new segments (`df.write`) is refused
-until Milvus offers `RegisterSegments`. The SQL form `CALL
-milvus.system.register(...)` is not available yet.
+until Milvus offers `RegisterSegments`.
+
+The same call as SQL. Enable the connector's SQL extension on the session:
+
+```
+--conf spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusSparkSessionExtensions
+```
+
+then:
+
+```sql
+CALL milvus.system.register('your_db.your_collection',
+  staging          => 'files/staging/backfill-1789478390101',
+  `milvus.uri`     => 'http://localhost:19530',
+  `milvus.token`   => 'your-token',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+The first argument is the collection, `'db.coll'` or `'coll'` for the default
+database; `staging` is the job's staging prefix as a key relative to the
+bucket. Every other argument is a connection or storage option under its usual
+key, backquoted because the key contains dots, with the same values a
+DataFrame read takes. Values are constants only. The result is a table with
+one row per segment: `job_id`, `segment_id`, `manifest_version` and `status`
+(`registered`, or `already_registered` when the job had been registered
+before). A wrong procedure name, a missing or unknown argument or a wrong type
+is refused when the statement is parsed, with the parameters named. Statements
+that do not start with `CALL milvus.` are untouched, so the extension can stay
+on for every session. The extension works the same on Spark 3.5 and 4.x.
 
 
 ## 4. Data Schema

@@ -1,12 +1,14 @@
 package com.zilliz.spark.connector
 
-/** The procedures: what a `CALL milvus.system.<name>(...)` runs. The bodies
-  * live in `spark-base` and are plain Scala entry points; the SQL front (parser
-  * extension, logical node, planner strategy, decided 2026-09-10) is not wired
-  * yet, so a job calls them directly.
+/** The procedures: what a `CALL milvus.system.<name>(...)` runs. `Procedure` is
+  * the interface (parameters, result table, `run` on the driver), `Procedures`
+  * the registry by name, and each body is a plain Scala entry point a job can
+  * also call directly. The SQL front that reaches them is `spark.extensions`.
+  * Design: docs/design/architecture/procedure.html.
   *
   * `Register` hands a committed write job's segments to Milvus through
-  * `BatchUpdateManifest` (the backfill branch of A4).
+  * `BatchUpdateManifest` (the backfill branch of A4); `RegisterProcedure` is
+  * its CALL form.
   *
   * Capabilities: A4 (see docs/design/capabilities.md).
   */

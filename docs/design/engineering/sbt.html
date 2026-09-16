@@ -83,6 +83,8 @@
 
 <p>Hadoop 和 Netty 每条线各钉自己发行版的版本，并以 <code>dependencyOverrides</code>（<code>Dependencies.lineOverrides</code>）压住整个 classpath，不只是直接依赖。原因是 Arrow 的 Netty 分配器读 Netty 的内部结构：Arrow 12 按 Netty 4.1.82 编译，直接读 <code>PoolArena</code> 从 <code>SizeClasses</code> 继承的 <code>chunkSize</code>；Netty 4.1.118 起 <code>PoolArena</code> 不再继承 <code>SizeClasses</code>，第一次分配 buffer 就抛 <code>NoSuchFieldError</code>。3.5 线原来共用 4.0 的 Hadoop 3.4.1，它和 AWS SDK 一起把 Netty 抬到 4.1.118，3.5 线在测试 classpath 上一行数据都读不了（工作单 19，2026-09-16）。Netty 全家族压到同一版本，避免 buffer 与 handler 版本混搭。层 2 自己的测试仍用 <code>Versions.hadoop</code>。</p>
 
+<p>CALL 的文法 <code>spark-base/src/main/antlr4/MilvusCall.g4</code> 一份,<code>sbt-antlr4</code> 在每条 Spark 线上按本线的 <code>antlr</code> 版本生成解析器到 <code>target</code>(<code>Antlr4 / antlr4Version := l.antlr</code>),生成物的包名固定,共享源码对着它各编一次;antlr 运行时改标 <code>provided</code>,跑的是 Spark 自带的那份(3.5 线 4.9.3,4.x 4.13.1)。这是决策 17 的落地。</p>
+
 <p>3.5 线还有一条 JDK 约束：Arrow 12 的 <code>MemoryUtil</code> 反射找 <code>DirectByteBuffer(long, int)</code>，JDK 21 把它改成了 <code>(long, long)</code>，第一次经 C Data Interface 分配就抛 <code>UnsupportedOperationException</code>。单元测试不走这条路，仍在 JDK 21 上跑；UAT 场景套件在 3.5 线要用 JDK 17，<code>SPARK35_TEST_JAVA_HOME</code> 指到它，<code>spark35</code> 的 <code>Test / javaHome</code> 只在设了这个变量时生效。</p>
 
 <p><code>Dependencies</code> 集中共享坐标和需要一起维护的依赖组合；模块特有的依赖可以直接写在模块声明中。组合的名字要说明用途，不能仅因两个模块碰巧有相同的列表，就把它们绑定为同一种规则。</p>

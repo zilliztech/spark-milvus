@@ -184,6 +184,7 @@ lazy val client = project
 def sparkProject(l: Versions.SparkLine): Project =
   Project(l.projectId, file(s"spark-${l.id}"))
     .dependsOn(core, compat, client)
+    .enablePlugins(Antlr4Plugin)
     .settings(
       name := s"spark-${l.id}",
       moduleName := s"spark-milvus-${l.id}",
@@ -198,6 +199,20 @@ def sparkProject(l: Versions.SparkLine): Project =
           .legacyDeps(l),
       // The line's classpath is the distribution's: see Dependencies.lineOverrides.
       dependencyOverrides ++= Dependencies.lineOverrides(l),
+      // The CALL grammar is shared; its parser is generated here at this line's
+      // antlr version and runs on the antlr Spark ships, hence provided.
+      Antlr4 / sourceDirectory :=
+        (ThisBuild / baseDirectory).value / "spark-base" / "src" / "main" / "antlr4",
+      Antlr4 / antlr4Version := l.antlr,
+      Antlr4 / antlr4PackageName :=
+        Some("com.zilliz.spark.connector.extensions.parser"),
+      Antlr4 / antlr4GenListener := false,
+      Antlr4 / antlr4GenVisitor := true,
+      libraryDependencies := libraryDependencies.value.map { m =>
+        if (m.organization == "org.antlr" && m.name == "antlr4-runtime")
+          m % "provided"
+        else m
+      },
       libraryDependencies += scalaTest % Test,
       inConfig(Test)(Modules.nativeTest),
       // Per-line bundles are not published yet; add shading before enabling them.

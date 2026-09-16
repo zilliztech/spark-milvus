@@ -134,8 +134,8 @@ object Procedures { def byName(name: String): Option[Procedure] }   // 注册表
 
 <table>
 <tr><th>东西</th><th>放哪</th><th>为什么</th></tr>
-<tr><td>文法 <code>MilvusSql.g4</code></td><td><code>spark-base/src/main/antlr4/</code>,一份</td><td>决策 17:语法放共享目录</td></tr>
-<tr><td>antlr 生成的 lexer / parser / visitor</td><td>每条线的 <code>target</code>,构建时生成</td><td>3.5 线 antlr 4.9.3,4.x 4.13.1,生成码不通用;运行时用 Spark 自带的 antlr,依赖标 provided</td></tr>
+<tr><td>文法 <code>MilvusCall.g4</code></td><td><code>spark-base/src/main/antlr4/</code>,一份</td><td>决策 17:语法放共享目录</td></tr>
+<tr><td>antlr 生成的 <code>MilvusCallLexer</code> / <code>MilvusCallParser</code> / <code>MilvusCallBaseVisitor</code>（包 <code>extensions.parser</code>）</td><td>每条线的 <code>target</code>,构建时生成</td><td>3.5 线 antlr 4.9.3,4.x 4.13.1,生成码不通用;运行时用 Spark 自带的 antlr,依赖标 provided</td></tr>
 <tr><td><code>ParserInterface</code> 适配器 <code>MilvusSqlParser</code></td><td>每条线的 <code>extensions</code> 目录,3.5 一份、4.x 三份相同</td><td>4.0 起接口多了 <code>parseRoutineParam</code>,3.5 没有;这个类只做转发,几十行</td></tr>
 <tr><td>访问器、<code>CallProcedure</code>、策略、<code>CallProcedureExec</code>、<code>Procedure</code>、注册表、<code>MilvusSparkSessionExtensions</code></td><td><code>spark-base</code> 的 <code>extensions</code> 与 <code>procedure</code> 包</td><td>生成类在每条线里同名同包,共享源码对着各线的生成物各编一次</td></tr>
 </table>
@@ -167,13 +167,7 @@ object Procedures { def byName(name: String): Option[Procedure] }   // 注册表
 <li>reference 中英加「3.3 CALL」:启用方式、语法、register 的参数和输出。</li>
 </ul>
 
-<h2 id="open">七、要负责人定的</h2>
+<h2 id="open">七、已定</h2>
 
-<ol>
-<li>连接与存储选项放命名参数(本页方案)还是会话配置。本页选命名参数,理由在第一节末。</li>
-<li>删 3.5 线的 <code>spark.functions</code> 包。</li>
-<li>register 的输出表用第三节那四列。</li>
-</ol>
-
-<p>定了之后:决策日志一行,#17 进入实现,验收是 4.0 到 4.2 与 3.5 四条线上
-<code>spark.sql("CALL milvus.system.register(...)")</code> 跑通 #16 的 UAT 场景,并加进 #18 的场景套件。</p>
+<p>三件 2026-09-16 定案(决策日志同日):连接与存储选项走命名参数;3.5 线的 <code>spark.functions</code> 包删除;register 的结果表用第三节那四列。
+实现在同一天落地(#17):<code>spark.sql("CALL milvus.system.register(...)")</code> 在 UAT 上完成 #16 的登记。</p>

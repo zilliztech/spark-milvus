@@ -2711,7 +2711,14 @@ object MilvusBackfill {
         import com.zilliz.milvus.storage.credential.StorageProperties
         import com.zilliz.milvus.storage.io.NativeObjectStore
         import com.zilliz.milvus.storage.path.StoragePath
-        val located = StoragePath.parse(snapshotPath, config.s3BucketName)
+        // The path is what Milvus printed for the snapshot, so the
+        // scheme://endpoint/bucket/key form is accepted when the host is the
+        // configured endpoint, as SnapshotCatalog.read accepts it.
+        val located = StoragePath.parseMilvus(
+          snapshotPath,
+          config.s3BucketName,
+          config.s3Endpoint
+        )
         val properties = StorageProperties.from(
           config.getMilvusReadOptions ++ Map(
             StorageProperties.BucketName -> located.bucket

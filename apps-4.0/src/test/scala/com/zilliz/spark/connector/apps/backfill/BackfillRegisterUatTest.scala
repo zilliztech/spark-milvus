@@ -97,6 +97,10 @@ class BackfillRegisterUatTest extends AnyFunSuite with Matchers {
       .master("local[2]")
       .appName("backfill-register-uat")
       .config("spark.ui.enabled", "false")
+      .config(
+        "spark.sql.extensions",
+        "com.zilliz.spark.connector.extensions.MilvusSparkSessionExtensions"
+      )
       .getOrCreate()
     try {
       // The source: one row per key of the collection (ids 0..2999 on UAT),
@@ -150,9 +154,28 @@ class BackfillRegisterUatTest extends AnyFunSuite with Matchers {
         StorageProperties.UseIam -> "true",
         StorageProperties.RootPath -> rootPath
       ) ++ env("MILVUS_UAT_TOKEN").map(MilvusOption.MilvusToken -> _)
-      val outcome = Register.run(options, result.stagingPrefix)
-      info(s"registered: ${outcome.items.mkString(", ")}")
-      outcome.alreadyRegistered shouldBe false
+      // The SQL front (work item #17) first, then the Scala entry point,
+      // which finds the job already registered.
+      def sqlValue(v: String) = "'" + v.replace("'", "''") + "'"
+      val optionArgs = (options - MilvusOption.MilvusCollectionName)
+        .map { case (k, v) => s"`$k` => ${sqlValue(v)}" }
+        .mkString(",\n  ")
+      val call =
+        s"""CALL milvus.system.register(${sqlValue(collection)},
+           |  staging => ${sqlValue(result.stagingPrefix)},
+           |  $optionArgs)""".stripMargin
+      info(call.replaceAll("(`milvus.token` => )'[^']*'", "$1'***'"))
+      val registered = spark.sql(call).collect()
+      info(
+        s"CALL returned ${registered.length} row(s): ${registered.mkString(", ")}"
+      )
+      registered.length should be > 0
+      registered.foreach { r =>
+        r.getString(3) shouldBe "registered"
+        r.getLong(2) should be > 0L
+      }
+      val again = spark.sql(call).collect()
+      again.foreach(r => r.getString(3) shouldBe "already_registered")
       Register
         .run(options, result.stagingPrefix)
         .alreadyRegistered shouldBe true
