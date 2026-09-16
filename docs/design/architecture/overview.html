@@ -374,7 +374,7 @@
         <dt>scan</dt><dd>ScanBuilder、Scan、InputPartition、ColumnVector 实现 <em>R4 R5 R11 R16 R18</em></dd>
         <dt>expr</dt><dd>DataSource V2 谓词翻成中间表示 <em>R6</em></dd>
         <dt>types</dt><dd>Arrow 类型到 Spark 类型的映射，向量列的表示 <em>R15</em></dd>
-        <dt>write</dt><dd>WriteBuilder、BatchWrite、DataWriter；三种写模式 <em>W1–W4</em></dd>
+        <dt>write</dt><dd>WriteBuilder、BatchWrite、DataWriter；两种写模式 <em>W1 W2</em></dd>
         <dt>options</dt><dd>option 名、别名、校验；把 compat 的实现注册进 core <em>K4 G1–G4</em></dd>
         <dt>catalog</dt><dd>三段名、命名空间、loadTable 的快照重载 <em>R1 R2 C1 C2</em></dd>
         <dt>procedure</dt><dd>Spark 4 的 CALL <em>A1–A5</em></dd>
@@ -767,7 +767,6 @@
         <span class="chip wait"><span class="id">W1</span>append 写新段</span>
         <span class="chip p2"><span class="id">W2</span>backfill 写新列组</span>
         <span class="chip p1"><span class="id">W3</span>原子提交</span>
-        <span class="chip wait"><span class="id">W4</span>truncate 与 overwrite</span>
         <span class="chip p1"><span class="id">W5</span>DELETE</span>
         <span class="chip p2"><span class="id">W6</span>索引随段写出</span>
         <span class="chip p3"><span class="id">W7</span>gRPC 小批量兜底</span>

@@ -25,7 +25,7 @@
 
 <h1>写路径</h1>
 
-<p>能力 W1、W3，以及 W2、W4、A4 在这条路上的接口。段怎么写出去见
+<p>能力 W1、W3，以及 W2、A4 在这条路上的接口。段怎么写出去见
 <code>core.write.exec</code> 的 package.scala，作业级提交见 <code>core.write.commit</code>，
 取字节和交接 Arrow 那一层见 <a href="storage-io.html">storage-io.html</a>，
 分层见 <a href="modules.md">modules.md</a>。</p>
@@ -113,7 +113,7 @@ driver 再收齐 commit message 写作业清单。登记是之后的另一个动
 <table>
 <tr><th>SaveMode</th><th>Spark 做什么</th><th>我们</th></tr>
 <tr><td><code>append</code></td><td><code>AppendData</code>，要 <code>BATCH_WRITE</code></td><td>W1，本页</td></tr>
-<tr><td><code>overwrite</code></td><td><code>OverwriteByExpression(true)</code>，要 WriteBuilder 实现 <code>SupportsTruncate</code>，否则 <code>TableCapabilityCheck</code> 报错</td><td>W4，工作单 #09 先写设计；本页只留接口位置</td></tr>
+<tr><td><code>overwrite</code></td><td><code>OverwriteByExpression(true)</code>，要 WriteBuilder 实现 <code>SupportsTruncate</code>，否则 <code>TableCapabilityCheck</code> 报错</td><td>不做（能力表第 10 节，2026-09-16 定）：不实现 <code>SupportsTruncate</code>，Spark 在分析阶段拒绝，数据不动</td></tr>
 <tr><td><code>errorIfExists</code> / <code>ignore</code></td><td>TableProvider 不带 catalog 时直接抛不支持，Spark 自己的限制</td><td>不做；表存不存在是 C2 的事</td></tr>
 </table>
 
@@ -233,15 +233,12 @@ c. 写占位（RowID 用段内行号、Timestamp 用作业时间），登记时 
 选项取决于 RegisterSegments 的设计，那条在 Milvus 侧（README 第 5 节）。在定之前，client 模式可以先走 a。</p>
 </div>
 
-<h2 id="modes">七、W2 和 W4 在这条链上的位置</h2>
+<h2 id="modes">七、W2 在这条链上的位置</h2>
 
-<p><strong>两种模式不另开链，只在 WriteBuilder 上多一个分支。</strong></p>
+<p><strong>backfill 不另开链，只在 WriteBuilder 上多一个分支。</strong>overwrite 和 truncate 不做：理由在能力表第 10 节，
+全量刷新在 Milvus 侧 drop/recreate 或全表 delete 之后再 append。</p>
 
 <ul>
-  <li><strong>W4 overwrite / truncate</strong>：<code>MilvusV3WriteBuilder</code> 实现
-      <code>SupportsTruncate</code>，<code>truncate()</code> 记一个标志进 BatchWrite；作业清单多一个
-      <code>replaces_all: true</code>，登记时由 Milvus 把 collection 现有段全部标删再登记新段。
-      只接受全表；按谓词的 overwrite 不做（能力表第 10 节）。设计在工作单 #09。</li>
   <li><strong>W2 backfill</strong>：<code>milvus.write.mode=backfill</code> 加 <code>milvus.write.columns</code>，
       WriteBuilder 校验目标列是 collection 里已有且 Flushed 段里还没有的字段，task 往已有段的 base_path
       写列组、以 ReplaceColumns 提交；分布与排序（每个 task 恰好对应一个已有段、行序与段内行号一致）见决策 10。

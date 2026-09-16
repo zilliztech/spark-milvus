@@ -158,8 +158,12 @@ field of the collection with the same Spark type as a read gives it (vector
 columns may also be the raw `BinaryType` bytes); every field except Milvus
 function outputs is present (give a nullable field a null column); the
 collection does not use `autoID` or a partition key. Only `mode("append")` is
-supported: `overwrite` needs truncate and is refused by Spark, and
-`errorIfExists`/`ignore` are not supported by Spark for this kind of source.
+supported. `overwrite` is deliberately not supported: it would make every
+existing row of the collection invisible and Milvus has no rollback, so Spark
+refuses it at analysis time and no data is touched. For a full refresh, drop
+and recreate the collection on the Milvus side, or delete all rows through the
+SDK, then append. `errorIfExists`/`ignore` are not supported by Spark for this
+kind of source.
 
 ### 2.5 Offline Backup Read Parameters
 

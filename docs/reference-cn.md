@@ -152,7 +152,8 @@ schema，没有任何快照时用）。字段 id 和向量维度都从这份 sch
 
 写之前在 driver 上校验：DataFrame 的每一列都是 collection 的字段，Spark 类型与读出来的一致（向量列也接受
 `BinaryType` 原始字节）；除 Milvus function 输出外每个字段都要给（nullable 字段给一列 null）；collection
-不能用 `autoID`，不能有 partition key。只支持 `mode("append")`：`overwrite` 需要 truncate，Spark 会拒绝；
+不能用 `autoID`，不能有 partition key。只支持 `mode("append")`。`overwrite` 有意不支持：它会让 collection 的全部旧数据不可见，且 Milvus 没有回滚，
+所以 Spark 在分析阶段拒绝它，数据不动；全量刷新请在 Milvus 侧 drop 并重建 collection，或用 SDK 全表 delete，再 append。
 `errorIfExists`/`ignore` 对这类数据源 Spark 不支持。
 
 ### 2.5 离线备份读取参数
