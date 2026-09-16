@@ -52,7 +52,7 @@ Milvus Spark Connector 提供了 **`milvus`** 数据源格式，用于 Milvus �
 
 此外，还提供了一个便捷的 `MilvusDataReader` 工具类，用于简化集合数据的读取操作。
 
-## Catalog 目录、三段表名与快照时间旅行
+## Catalog 目录、表 DDL 与快照时间旅行
 
 注册一次 `MilvusCatalog` 后，Milvus collection 可作为 Spark 三段表名使用。Spark 会移除
 `spark.sql.catalog.milvus.` 前缀，再把其余连接、对象存储和读取选项交给 Connector。
@@ -81,7 +81,7 @@ val atTime = spark.sql(
 )
 ```
 
-同一个 Catalog 通过 Spark 的只读目录命令列出 Milvus database 与 collection：
+同一个 Catalog 通过 Spark 的目录命令列出 Milvus database 与 collection：
 
 ```sql
 SHOW NAMESPACES IN milvus;
@@ -105,11 +105,78 @@ Scan 始终使用本次解析出的同一个固定快照。对象存储配置需
 时间旅行选择的是快照元数据，不承诺历史数据保留。Connector 不负责保留旧段文件；compaction
 或垃圾回收可能使已经选中的旧快照无法读取。
 
+### CREATE 与 DROP TABLE
+
+`CREATE TABLE` 先创建一个 Milvus collection，再为每个向量字段创建索引。主键、有歧义的 Milvus
+字段类型、类型参数和向量索引都通过明确的表属性传入：
+
+```sql
+CREATE TABLE milvus.default.products (
+  id BIGINT NOT NULL,
+  title STRING,
+  embedding ARRAY<FLOAT>
+)
+TBLPROPERTIES (
+  'milvus.primary.key' = 'id',
+  'milvus.field.title.data_type' = 'varchar',
+  'milvus.field.title.max_length' = '512',
+  'milvus.field.embedding.data_type' = 'float_vector',
+  'milvus.field.embedding.dim' = '768',
+  'milvus.index.embedding' =
+    '{"index_type":"HNSW","metric_type":"COSINE","M":16,"efConstruction":200}'
+);
+
+DROP TABLE milvus.default.products;
+```
+
+| 属性 | 取值与约束 |
+|---|---|
+| `milvus.primary.key` | 必填的 schema 字段；必须非空，且映射成 Milvus Int64 或 VarChar；不支持 AutoID。 |
+| `milvus.field.<field>.data_type` | Spark String、Array、Binary、Map 字段必填。值是大小写不敏感的 snake_case：`varchar`、`text`、`json`、`array`、`float_vector`、`float16_vector`、`bfloat16_vector`、`int8_vector`、`binary_vector`、`sparse_float_vector`。 |
+| `milvus.field.<field>.max_length` | VarChar 与 `Array<String>` 必填的正整数。 |
+| `milvus.field.<field>.max_capacity` | Array 必填的正整数。 |
+| `milvus.field.<field>.dim` | 所有稠密向量必填的正整数；BinaryVector 的维度还必须是 8 的倍数。 |
+| `milvus.index.<field>` | 每个向量字段必填的 JSON object。`index_type` 与 `metric_type` 是必填字符串，`index_name` 是可选字符串；其他键作为 Milvus index params，值只能是字符串、数字或布尔值。 |
+
+这里的 `milvus.index.<field>` 是 Catalog 表属性，值是一个用于在线 CreateIndex 的完整 JSON object；
+它与段内索引写出所用的 DataFrame write option 相互独立。
+
+Spark Boolean、Byte、Short、Int、Long、Float、Double 分别直接映射为 Milvus Bool、Int8、Int16、
+Int32、Int64、Float、Double，这些字段反而不能再写 `data_type`。String 只接受 `varchar`、`text`、
+`json`；Boolean、Short、Int、Long、Float、Double、String 元素的标量 Array 可写 `array`，
+`Array<Float>` 还可写 `float_vector`、`float16_vector`、`bfloat16_vector`，`Array<Short>` 可写
+`int8_vector`。Catalog 拒绝 `Array<Byte>`：现有读链会把 Milvus Int8 Array 固定呈现为
+`Array<Short>`，接受它会导致第一次快照后的 Spark schema 改变。Binary 只接受 `binary_vector`；只有精确的
+`Map<Long, Float>` 接受 `sparse_float_vector`。
+
+Catalog 接受 Spark SQL 默认的 `ArrayType.containsNull=true` 与 `MapType.valueContainsNull=true` schema
+标记，因为 SQL DDL 无法可靠表达元素级 NOT NULL，而且这两个标记不能证明实际数据一定含 null 元素。
+字段本身的 nullable 仍会保留并约束主键。元素级 null 不属于 Catalog DDL 合同，调用方不能由这两个标记
+推断后续写入支持 null 元素。
+
+属性名里的字段引用区分大小写，只有 `data_type` 值不区分大小写。正整数属性必须是 Int 范围内的规范
+十进制 `[1-9][0-9]*`。索引 JSON 拒绝重复键、尾随内容、null、array、嵌套 object、空的必填值和
+重复的显式 index name。table `comment` 成为 collection description，column comment 成为 field
+description；存在 `provider` 时只能是 `milvus`，Spark 的 `owner` 属性忽略。字段无效、Milvus 或
+bookkeeping 属性未知、类型不兼容、列特性不支持或包含 partition transform，都会在发出任何 RPC 前失败。
+
+创建 collection 和创建索引是分开的 Milvus 操作，不是一个事务。如果 collection 创建成功后某个索引
+请求失败，collection 和此前成功的索引会保留。`CREATE TABLE` 不创建 Connector 快照；只有 Milvus
+产生快照以后，Catalog 才能读取这张表。CTAS 当前不能完成：collection 创建后没有可供 Spark 写入的
+Connector 快照，命令会失败并可能留下需要显式删除的空 collection；collection 创建、段写入和段登记
+本身也没有共同事务。
+
+CREATE 预检确认 database 不存在时抛 `NoSuchNamespaceException`，确认 collection 已存在时抛
+`TableAlreadyExistsException`。`DROP TABLE` 在确认 database 或 collection 任一不存在时返回 `false`；
+认证、授权、传输和服务故障仍然报错。存在性
+检查与变更是分开的远端调用，因此条件 DDL 可能与其他客户端竞争，最终以 Milvus 对变更请求的响应为准。
+
 Catalog 表和目录发现只支持 client 模式，必须配置 `milvus.uri`。目录发现只访问 Milvus 服务，
 不读取快照元数据或对象存储。确认不存在的 database 按 Spark 的 namespace 不存在错误返回。认证、
 授权、网络、超时、限流及其他服务故障原样报错；空结果只来自成功的目录响应。离线的
-`milvus.snapshot.path` 与 `milvus.backup.dir` 仍通过 `format("milvus")` 读取。Catalog 的元数据接口
-保持只读，不支持对 namespace 或 table 执行 CREATE、ALTER、DROP、RENAME。
+`milvus.snapshot.path` 与 `milvus.backup.dir` 仍通过 `format("milvus")` 读取。namespace 的
+CREATE/ALTER/DROP 与 table 的 ALTER/RENAME 仍不支持。table CREATE/DROP 不支持 AutoID、dynamic
+field、partition key、table constraint、generated/default/identity column 或 Spark partition transform。
 
 ## 1. `MilvusDataReader` 便捷读取方法
 

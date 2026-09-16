@@ -48,8 +48,7 @@ Done: the 1.x sources are all in their modules and `src/` no longer exists.
 `core` has schema, codec, snapshot, manifest, delete, path,
 credential and `io.ObjectStore` over the native filesystem; `compat` has the V2
 packed and backup entry points; `client` has the RPCs required by the currently
-implemented paths, including ListDatabases and ShowCollections for read-only
-Catalog discovery.
+implemented paths, including Catalog discovery and collection/index DDL.
 Every driver-side read opens storage through that one store, and no source file
 in `core` or `compat` mentions `org.apache.hadoop`.
 
@@ -74,7 +73,10 @@ partition planning is in `core.read.plan`. `catalog`
 implements three-part table loading and latest/name/timestamp
 snapshot selection. It also maps Milvus databases to one-level Spark
 namespaces and collections to tables for `SHOW NAMESPACES` and `SHOW TABLES`;
-Catalog DDL remains unimplemented. `expr` translates supported DataSource V2
+`CREATE TABLE` validates the Spark schema and Milvus table properties before it
+creates a collection and its vector indexes, while `DROP TABLE` preserves
+Spark's confirmed-absence result. Namespace mutation, table alteration and
+rename remain unsupported. `expr` translates supported DataSource V2
 predicates into core `PredicateExpr` values and leaves each unsupported
 predicate tree with Spark. Names follow the Names
 section of [docs/writing.md](docs/writing.md): the two storage lines are `V2`
@@ -132,7 +134,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership, the metrics taken on the crossing (G5). Read and write share it |
 | How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four snapshot sources, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
 | How does Spark predicate pushdown preserve semantics? | [docs/design/architecture/expressions.html](docs/design/architecture/expressions.html) — the DataSource V2 support matrix, residual contract, three-valued logic, field-id binding, hidden predicate columns and row/columnar execution |
-| How does Catalog discovery work, and how does a three-part table name select one fixed snapshot? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — one-level namespaces, table listing, absence and failure semantics, catalog configuration, identifier rules, latest/version/timestamp selection, HybridTS conversion and the read-only boundary |
+| How do Catalog discovery, table DDL and fixed-snapshot loading work? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — one-level namespaces, table listing, identifier and property rules, CREATE/DROP sequencing and failure semantics, latest/version/timestamp selection and HybridTS conversion |
 | How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment still lacks before registration, the development outline |
 | How does a `CALL milvus.system.<name>(...)` statement become a call? | [docs/design/architecture/procedure.html](docs/design/architecture/procedure.html) — the grammar, parser extension, logical node and strategy, per-line generated pieces, procedure contracts and bounded-wait semantics |
 | How do vector queries use persisted Milvus indexes? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — issue #125 index metadata, Knowhere loading, pre-search filtering, projected row retrieval, global TopK and real-instance validation; the existing BruteForce entry point is documented separately |

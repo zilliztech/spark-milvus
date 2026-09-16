@@ -20,6 +20,13 @@ search, retrieves projected hit rows, and returns global TopK. See the
 Cardinal index files require a Cardinal-enabled build of the pinned Knowhere
 revision; the plain upstream CI artifact does not contain that engine.
 
+`MilvusCatalog` exposes databases and collections as Spark namespaces and
+tables, loads latest or time-travel snapshots, and implements collection
+`CREATE TABLE` / `DROP TABLE` with validated Milvus field and index properties.
+Creating a collection does not create a connector snapshot; it becomes readable
+after Milvus produces one. See the
+[Catalog contract](docs/design/architecture/catalog.html).
+
 ## Project structure
 
 The build has eleven sbt modules in four layers. Dependencies only point
@@ -70,6 +77,7 @@ you need to answer: architecture or engineering conventions.
 | [docs/design/capabilities.md](docs/design/capabilities.md) | The 51 capabilities the connector commits to, by id |
 | [docs/design/architecture/modules.md](docs/design/architecture/modules.md) | Modules, packages, directories, the twelve build constraints, and the 1.x to 2.0 migration table |
 | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) | The illustrated version of the design |
+| [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) | Catalog discovery, three-part tables, CREATE/DROP properties, and fixed-snapshot loading |
 | [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html) | Principles and practices for maintaining the sbt build |
 
 `docs/reference-en.md` is the user-facing API reference for the connector

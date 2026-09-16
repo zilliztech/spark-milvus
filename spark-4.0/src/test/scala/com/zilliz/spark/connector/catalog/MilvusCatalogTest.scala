@@ -77,7 +77,15 @@ class RoutingMilvusCatalog
       columns: Array[Column],
       partitions: Array[Transform],
       properties: ju.Map[String, String]
-  ): Table = unsupportedCreate()
+  ): Table =
+    createTable(
+      MilvusCatalogDdlTestSupport.createRequest(
+        identifier,
+        columns,
+        partitions,
+        properties
+      )
+    )
 }
 
 class MilvusCatalogTest extends AnyFunSuite {
@@ -133,7 +141,15 @@ class MilvusCatalogTest extends AnyFunSuite {
           columns: Array[Column],
           partitions: Array[Transform],
           properties: ju.Map[String, String]
-      ): Table = unsupportedCreate()
+      ): Table =
+        createTable(
+          MilvusCatalogDdlTestSupport.createRequest(
+            identifier,
+            columns,
+            partitions,
+            properties
+          )
+        )
     }
 
   test("catalog discovery exposes one database namespace level") {
@@ -395,7 +411,7 @@ class MilvusCatalogTest extends AnyFunSuite {
     assert(calls.isEmpty)
   }
 
-  test("namespace and table mutations are explicitly unsupported") {
+  test("namespace, alter, and rename mutations remain unsupported") {
     val milvus = new MilvusCatalog
     val identifier = Identifier.of(Array("database"), "collection")
     val properties = ju.Collections.emptyMap[String, String]()
@@ -410,17 +426,8 @@ class MilvusCatalogTest extends AnyFunSuite {
       milvus.dropNamespace(Array("database"), cascade = false)
     )
     assertThrows[UnsupportedOperationException](
-      milvus.createTable(
-        identifier,
-        Array.empty[Column],
-        Array.empty[Transform],
-        properties
-      )
-    )
-    assertThrows[UnsupportedOperationException](
       milvus.alterTable(identifier)
     )
-    assertThrows[UnsupportedOperationException](milvus.dropTable(identifier))
     assertThrows[UnsupportedOperationException](
       milvus.renameTable(identifier, identifier)
     )
@@ -443,11 +450,18 @@ class MilvusCatalogTest extends AnyFunSuite {
             columns: Array[Column],
             partitions: Array[Transform],
             properties: ju.Map[String, String]
-        ): Table = unsupportedCreate()
+        ): Table =
+          createTable(
+            MilvusCatalogDdlTestSupport.createRequest(
+              identifier,
+              columns,
+              partitions,
+              properties
+            )
+          )
       }
     absent.initialize("milvus", CaseInsensitiveStringMap.empty())
     assertThrows[NoSuchTableException](absent.loadTable(identifier))
-    assert(!absent.tableExists(identifier))
 
     val missingSnapshot = new SnapshotNotFoundException("missing snapshot-7")
     val versioned = new MilvusCatalogBase((_, _) => throw missingSnapshot) {
@@ -456,7 +470,15 @@ class MilvusCatalogTest extends AnyFunSuite {
           columns: Array[Column],
           partitions: Array[Transform],
           properties: ju.Map[String, String]
-      ): Table = unsupportedCreate()
+      ): Table =
+        createTable(
+          MilvusCatalogDdlTestSupport.createRequest(
+            identifier,
+            columns,
+            partitions,
+            properties
+          )
+        )
     }
     versioned.initialize("milvus", CaseInsensitiveStringMap.empty())
     assert(
@@ -472,7 +494,15 @@ class MilvusCatalogTest extends AnyFunSuite {
           columns: Array[Column],
           partitions: Array[Transform],
           properties: ju.Map[String, String]
-      ): Table = unsupportedCreate()
+      ): Table =
+        createTable(
+          MilvusCatalogDdlTestSupport.createRequest(
+            identifier,
+            columns,
+            partitions,
+            properties
+          )
+        )
     }
     milvus.initialize("milvus", CaseInsensitiveStringMap.empty())
     assert(

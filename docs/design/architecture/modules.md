@@ -102,7 +102,7 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 
 | 包 | 职责 | 按线 |
 |---|---|---|
-| `catalog` | MilvusCatalog：只读 TableCatalog 与 SupportsNamespaces；database 是唯一一层 namespace，collection 是 table；目录发现、三段名、loadTable 的快照重载属 C1/R1/R2，DDL 属 C2 | 主体在 base，按线只留公开类与 createTable 签名适配 |
+| `catalog` | MilvusCatalog：TableCatalog 与 SupportsNamespaces；database 是唯一一层 namespace，collection 是 table；目录发现、三段名与 loadTable 快照重载属 C1/R1/R2，schema/属性校验后创建 collection 与向量索引、确认存在后删除 collection 属 C2；namespace 变更及 table alter/rename 不支持 | 主体在 base，按线只留公开类与 createTable 输入适配 |
 | `table` | MilvusTables 统一校验并解析固定 Snapshot，供 DataSource 与 Catalog 构造 MilvusTable；MilvusTable 算 schema、能力集、元数据列并把 Snapshot 交给 scan | 否 |
 | `read` | ScanBuilder、Scan、Batch、InputPartition、ColumnarPartitionReader、ColumnVector 实现。包名与 `write` 和 `core.read` 对称，类名沿用 Spark 的 Scan | 否 |
 | `expr` | DataSource V2 Predicate 到 `PredicateExpr` 的翻译；每个不完整支持的谓词树作为 residual 交还 Spark | 否 |
@@ -205,7 +205,7 @@ spark-milvus/
 | read/FooterV2SegmentResolver.scala | compat.v2 | 已迁。resolvePath 与 readAllBytes 先下沉到 core 的 path 与 io.hadoop，否则 core 的两个 Manifest 解析器要反向依赖 compat |
 | read/ParquetFooterReader.scala | compat 根包 | 已迁。v2 和 backup 都要用它 |
 | read/BackupMetaReader.scala | compat.backup | 已迁 |
-| MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数；Catalog 目录所需的 ListDatabases、ShowCollections 已接入并校验响应状态 |
+| MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数；Catalog 的 ListDatabases、ShowCollections、collection create/drop 与 vector index create 均经 client.api 接入并校验响应状态 |
 | sources/MilvusDataSource.scala（2880 行） | spark.sources、spark.table、spark.read、spark.options | 已拆成 14 个文件，最大 550 行。`sources` 只留 TableProvider（FQN 被 apps 和用户作业按字符串引用，不能动）；MilvusTable→spark.table；ScanBuilder、Scan、四个规划入口（ClientSnapshotPlanner、LegacyClientPlanner、OptionSnapshotPlanner、BackupPlanner）、SnapshotPartitions、DeletePlanning、ClientReadSnapshot→spark.read（四个规划入口后来在 #04 全部变成 SnapshotSource，见 snapshot.html 第二节）；桶判定与 Hadoop 配置翻译（StorageOptions）、备份集合选取（BackupSelection）、ReadMode→spark.options。规划逻辑下沉 core.read.plan 未做，SnapshotPartitions.build 是要下沉的那部分 |
 | MilvusOption.scala、loon/Properties.scala | spark.options | 已搬。MilvusOption 在 spark.options；MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。`loon/Properties.FsConfig` 的每个常量都是 core.credential.StorageProperties 的别名，调用方已全部改为直接用 StorageProperties，2026-09-14 连同 PropertiesTest 一起删除，`loon` 包不再存在；`loon/HadoopStorageKeys` 已搬到 spark.options，和 StorageOptions 是同一件事的两半 |
 | read/MilvusV3PartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusV2PartitionReader.scala | spark.read | 已搬。开段下沉 core.read.exec 的注册表；#06 两个行式 reader 合成 `MilvusRowPartitionReader`，两条线的列名规则归 `ColumnBinding`，向量检索拆成 `SegmentVectorSearch`；列式出口是 `MilvusColumnarPartitionReader` |

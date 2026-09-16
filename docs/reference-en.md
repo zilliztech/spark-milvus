@@ -61,7 +61,7 @@ Milvus Spark Connector provides the **`milvus`** data source format for reading 
 
 Additionally, a convenient `MilvusDataReader` utility class is provided to simplify collection data reading operations.
 
-## Catalog Discovery, Tables, and Snapshot Time Travel
+## Catalog Discovery, Table DDL, and Snapshot Time Travel
 
 Register `MilvusCatalog` once to use a Milvus collection as a three-part Spark
 table. Spark removes the `spark.sql.catalog.milvus.` prefix and passes the
@@ -92,7 +92,7 @@ val atTime = spark.sql(
 ```
 
 The same Catalog exposes Milvus databases and collections through Spark's
-read-only discovery commands:
+discovery commands:
 
 ```sql
 SHOW NAMESPACES IN milvus;
@@ -124,6 +124,89 @@ Time travel selects snapshot metadata; it is not a retention guarantee. The
 connector does not retain historical segment files, so compaction or garbage
 collection can make a selected older snapshot unreadable.
 
+### CREATE and DROP TABLE
+
+`CREATE TABLE` creates one Milvus collection and then creates an index for each
+vector field. The primary key, ambiguous Milvus field types, type parameters,
+and vector indexes are explicit table properties:
+
+```sql
+CREATE TABLE milvus.default.products (
+  id BIGINT NOT NULL,
+  title STRING,
+  embedding ARRAY<FLOAT>
+)
+TBLPROPERTIES (
+  'milvus.primary.key' = 'id',
+  'milvus.field.title.data_type' = 'varchar',
+  'milvus.field.title.max_length' = '512',
+  'milvus.field.embedding.data_type' = 'float_vector',
+  'milvus.field.embedding.dim' = '768',
+  'milvus.index.embedding' =
+    '{"index_type":"HNSW","metric_type":"COSINE","M":16,"efConstruction":200}'
+);
+
+DROP TABLE milvus.default.products;
+```
+
+| Property | Value and rules |
+|---|---|
+| `milvus.primary.key` | Required schema field. It must be non-null and map to Milvus Int64 or VarChar. AutoID is not supported. |
+| `milvus.field.<field>.data_type` | Required for Spark String, Array, Binary, and Map fields. Values are case-insensitive snake_case: `varchar`, `text`, `json`, `array`, `float_vector`, `float16_vector`, `bfloat16_vector`, `int8_vector`, `binary_vector`, or `sparse_float_vector`. |
+| `milvus.field.<field>.max_length` | Required positive integer for VarChar and `Array<String>`. |
+| `milvus.field.<field>.max_capacity` | Required positive integer for Array. |
+| `milvus.field.<field>.dim` | Required positive integer for every dense vector. BinaryVector dimensions must also be divisible by 8. |
+| `milvus.index.<field>` | Required JSON object for every vector field. `index_type` and `metric_type` are required strings; `index_name` is an optional string. Other entries become Milvus index parameters and must have scalar string, number, or boolean values. |
+
+Here `milvus.index.<field>` is a Catalog table property whose value is one JSON
+object for the online CreateIndex operation. It is separate from the DataFrame
+write option used for segment index output.
+
+Spark Boolean, Byte, Short, Int, Long, Float, and Double map directly to Milvus
+Bool, Int8, Int16, Int32, Int64, Float, and Double; `data_type` is rejected on
+those fields. String accepts only `varchar`, `text`, or `json`. A supported
+scalar Array accepts `array`; `Array<Float>` additionally accepts
+`float_vector`, `float16_vector`, or `bfloat16_vector`, and `Array<Short>`
+accepts `int8_vector`. Scalar arrays support Boolean, Short, Int, Long, Float,
+Double, and String elements. `Array<Byte>` is rejected because existing reads
+expose a Milvus Int8 Array as `Array<Short>`, so accepting it would change the
+Spark schema after the first snapshot. Binary accepts only `binary_vector`. Only the exact
+`Map<Long, Float>` shape accepts `sparse_float_vector`.
+
+Catalog accepts Spark SQL's default `ArrayType.containsNull=true` and
+`MapType.valueContainsNull=true` schema flags because SQL DDL cannot reliably
+express element-level NOT NULL and the flags do not prove that null elements
+will be written. Top-level field nullability is preserved and still constrains
+the primary key. Element-level null support is outside the Catalog DDL contract;
+callers must not infer that later writes accept null elements from these flags.
+
+Field references in property names are case-sensitive; only `data_type` values
+are case-insensitive. Positive integer properties use canonical decimal form
+`[1-9][0-9]*` in the Int range. Index JSON rejects duplicate keys, trailing
+content, nulls, arrays, nested objects, blank required values, and duplicate
+explicit index names. Table `comment` becomes the collection description and
+column comments become field descriptions. `provider`, when present, must be
+`milvus`; Spark's `owner` property is ignored. Invalid fields, unknown Milvus
+or bookkeeping properties, incompatible types, unsupported column features,
+and partition transforms fail before any RPC is sent.
+
+Collection creation and index creation are separate Milvus operations, not one
+transaction. If an index request fails after the collection was created, the
+collection and any earlier indexes remain. `CREATE TABLE` does not create a
+connector snapshot; the table becomes readable through the Catalog only after
+Milvus produces a snapshot. CTAS cannot currently complete: after collection
+creation there is no connector snapshot that Spark can load for the write, so
+the command can fail while leaving an empty collection that must be dropped
+explicitly. Collection creation, segment writing, and segment registration also
+have no shared transaction.
+
+Before CREATE, a confirmed missing database becomes `NoSuchNamespaceException`
+and a confirmed existing collection becomes `TableAlreadyExistsException`.
+`DROP TABLE` returns `false` when either the database or collection is confirmed absent.
+Authentication, authorization, transport, and service failures remain errors.
+Existence checks and mutations are separate remote calls, so conditional DDL
+can race with another client; the Milvus response to the mutation is final.
+
 Catalog tables and discovery require client mode (`milvus.uri`). Discovery
 contacts only the Milvus service; it does not read snapshot metadata or object
 storage. A confirmed missing database is reported as Spark's missing-namespace
@@ -131,8 +214,10 @@ error. Authentication, authorization, network, timeout, rate-limit, and other
 service failures are reported as errors. Empty results only come from a
 successful discovery response. Offline `milvus.snapshot.path` and
 `milvus.backup.dir` reads remain on
-`format("milvus")`. The Catalog is read-only for metadata: CREATE, ALTER, DROP,
-and RENAME operations on namespaces or tables are unsupported.
+`format("milvus")`. Namespace CREATE/ALTER/DROP and table ALTER/RENAME remain
+unsupported. Table CREATE/DROP does not support AutoID, dynamic fields,
+partition keys, table constraints, generated/default/identity columns, or Spark partition
+transforms.
 
 ## 1. `MilvusDataReader` Convenient Reading Method
 

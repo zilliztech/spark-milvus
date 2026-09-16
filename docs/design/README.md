@@ -6,7 +6,7 @@
 |---|---|---|
 | 确认功能承诺、优先级和实现位置 | 顶层索引 | [能力规划](capabilities.md) |
 | 理解总体结构、确定模块与包的归属 | architecture/ | [架构图解](architecture/overview.html)、[模块与迁移](architecture/modules.md) |
-| 开发只读目录、三段表名与快照时间旅行入口 | architecture/ | [只读 Catalog](architecture/catalog.html) |
+| 开发目录发现、三段表名、表 DDL 与快照时间旅行入口 | architecture/ | [Catalog](architecture/catalog.html) |
 | 开发使用 Milvus 索引文件的向量查询 | architecture/ | [向量查询实现与验收](architecture/vector-search.html)（issue #125，真实 HNSW 验收通过，原生产物限制见第 6.4 节） |
 | core 怎么访问对象存储、凭证怎么下发 | architecture/ | [存储访问层](architecture/storage-access.html)（未完待续） |
 | 改动对象存储凭证、provider 链、按桶配置 | architecture/ | [对象存储认证](architecture/storage-auth.html) |
@@ -170,7 +170,7 @@ flowchart LR
 | P0 | 1 | sbt 拆 core、native、spark4，依赖规则进构建 | 不拆，后面每一项都在旧结构上打补丁 |
 | P0 | 2 | 核心层对象模型与 SnapshotCatalog；SchemaMapper 合并四份映射；StoragePath | 读的唯一入口 |
 | P0 | 3 | storage JNI、列式 reader、ColumnVector、DeleteBitset | 拷贝 6 次到 2 次；下游算子能拿到地址 |
-| P1 | 4 | Catalog 目录与三段名、元数据列、统计、DataSource V2 谓词、Limit | 目录发现、三段名和回表 |
+| P1 | 4 | Catalog 目录、三段名与表 DDL，元数据列、统计、DataSource V2 谓词、Limit | 目录发现、建表删表、三段名和回表 |
 | P1 | 5 | SparkPredicateTranslator、PredicateExpr、PredicateEvaluator | R6 对齐 Spark SQL；R7 对齐 Milvus 表达式语义 |
 | P1 | 6 | SegmentWriter、Committer、register Procedure | backfill 登记走 BatchUpdateManifest 可先做；append 等第 5 节的 RPC |
 | P2 | 7 | 接入上游 Knowhere Java/JNI 产物、索引加载、索引写出与登记、BruteForce；backfill 写模式 | 库加载可独立交付；索引执行依赖列式 reader 和写路径 |
@@ -206,8 +206,9 @@ flowchart LR
 
 | 日期 | 决策 | 结论 |
 |---|---|---|
+| 2026-09-16 | Catalog C2 的建表属性与非事务语义 | 本决定取代同日「只读目录合同」中拒绝 table create/drop 的部分，目录和 namespace 合同不变。`CREATE TABLE` 以 Spark schema 为字段清单：Boolean、Byte、Short、Int、Long、Float、Double 可直接映射，String、Array、Binary、Map 必须用 `milvus.field.<field>.data_type` 消除歧义；`milvus.primary.key` 必须指向非空 Int64 或 VarChar 字段，VarChar、Array、稠密向量分别要求 `max_length`、`max_capacity`、`dim`，每个向量字段还必须提供 `milvus.index.<field>` JSON。标量 Array 支持 Boolean、Short、Int、Long、Float、Double、String 元素；`Array<Byte>` 因现有读链把 Milvus Int8 Array 呈现为 `Array<Short>` 而拒绝，避免快照出现后 schema 改型。Spark SQL 无法可靠表达元素级 NOT NULL，故 Catalog 接受 Array/Map 默认的元素 nullable schema 标记，但这不承诺后续写入支持 null 元素；字段 nullable 仍保留并约束主键。所有 schema、属性、列特性和分区变换先在 driver 完整校验，再预检 database 存在且 collection 不存在，随后创建 collection 并逐个创建索引；这些远端阶段没有事务，索引失败时已经创建的 collection 保留并把原错误报给用户。成功建表返回的不是可读 Table，因为 Catalog 不能伪造在线侧负责产生的快照；读仍从已有快照开始。`DROP TABLE` 预检 database 与 collection，任一确认不存在返回 `false`，否则才调用删除；检查和变更之间仍有条件 DDL 竞态。CTAS 当前不能完成：collection 创建后没有可供 Spark 写入的 Connector 快照，失败可能留下需要显式删除的空 collection；即使以后接通，collection 创建、Spark 写段和段登记也没有共同事务。拒绝把字段规则塞进另一个 JSON：按字段命名的表属性能在发 RPC 前精确定位错误，也避免再造一套 schema。namespace 变更以及 table alter/rename 继续不支持。详见 [catalog.html](architecture/catalog.html)。 |
 | 2026-09-16 | 决策 20：Spark 谓词下推只实现 DataSource V2 | `MilvusScanBuilder` 改为只实现 `SupportsPushDownV2Filters`，不同时保留 V1 `SupportsPushDownFilters`：Spark 的下推规则会优先选择 V1，两者并存会使 V2 实现不可达。Spark 3.5、4.0、4.1 的 V2 主接口相同，4.2 只新增有默认实现的迭代下推开关，因此 `spark-base` 共用一份实现。V2 `Predicate` 能表达 R6 承诺的比较、IN、空值判断、字符串前后缀与 AND/OR/NOT；每个顶层谓词完整翻译才接受，任一后代不支持就整棵作为 residual 交还 Spark。普通扫描翻成按字段 id 和类型绑定的 `PredicateExpr`，由 `PredicateEvaluator` 在 Arrow 列批上求值；带 `vector.search.*` 的读取不接受 Spark 谓词，整棵留给 Spark 在 TopK 后求值。R7 已有的 `MilvusSearch.filter` / `vector.search.filter` 继续由手写 `PlanParser` 产生 `Expr`，并由既有 `Evaluator` 在索引搜索前执行，不随本决定重写；表读取的 `milvus.filter` option 仍不在本次范围。设计见 [expressions.html](architecture/expressions.html)。 |
-| 2026-09-16 | Catalog 的只读目录合同 | C1 与 R1 保持两条路径：`ListDatabases` 把 Milvus database 原样映射成唯一一层 Spark namespace，`ShowCollections(database)` 把该库的全部 collection 映射成 table；目录不读快照或对象存储，collection 没有可读快照时仍可列出。根目录列 database，已存在的 database 没有子 namespace；`SHOW TABLES` 必须显式给一段 database，不设隐式 default，也不跨库摊平。Catalog 不缓存目录，顺序不作合同；成功的空响应是空结果，只有确认不存在才转 `NoSuchNamespaceException` / `false`，认证、网络、限流等故障保留。namespace 与 table 的 create、alter、drop、rename 继续拒绝。主体与四条线共用，设计见 [catalog.html](architecture/catalog.html)。 |
+| 2026-09-16 | Catalog 的只读目录合同 | C1 与 R1 保持两条路径：`ListDatabases` 把 Milvus database 原样映射成唯一一层 Spark namespace，`ShowCollections(database)` 把该库的全部 collection 映射成 table；目录不读快照或对象存储，collection 没有可读快照时仍可列出。根目录列 database，已存在的 database 没有子 namespace；`SHOW TABLES` 必须显式给一段 database，不设隐式 default，也不跨库摊平。Catalog 不缓存目录，顺序不作合同；成功的空响应是空结果，只有确认不存在才转 `NoSuchNamespaceException` / `false`，认证、网络、限流等故障保留。本行原先拒绝所有 table mutation；create/drop 部分现由同日 C2 决定取代，namespace mutation 与 table alter/rename 仍拒绝。主体与四条线共用，设计见 [catalog.html](architecture/catalog.html)。 |
 | 2026-09-16 | issue #135 的只读 Catalog 边界 | R1 的已知三段名加载与 C1 的目录枚举解耦：`loadTable` 只用现有 `getCollectionInfo` 取得 collection id，不新增 ListDatabases/ShowCollections。三个 loadTable 重载共享 [catalog.html](architecture/catalog.html) 的一条路径，分别选最新、快照名和时间点；Spark Unix 微秒在 catalog 边界转换成该物理毫秒的最大 Milvus HybridTS，core 继续保存和比较原始 `create_ts`。该项只交付 R1，SupportsNamespaces、列表与 DDL 均不在该项范围；C1 后续按上一行的独立目录合同接入。主体在 spark-base，按线只保留公开类和 createTable 签名适配。 |
 | 2026-09-16 | 暴力搜索核心保留原生分数，旧入口独立转换 L2 | core.index.BruteForceSearch 保留 Knowhere 的 Float32 平方 L2；Spark 旧逐段入口仅在输出时取平方根，索引模式的显式无索引回退原样输出平方分数。拒绝先开方再平方，因为原始 2.0 会变成 2.0000000000000004，破坏混合索引/无索引段的同分排序。验收覆盖 L2=2 和混合段全局决胜规则；见 [分数契约](architecture/vector-search.html#semantics)。 |
 | 2026-09-16 | 合并 G5 后索引查询汇总内部 reader 指标 | 上游读取指标从普通 SegmentReader 获取，而本地索引查询在过滤和回表时独立打开 reader；只保留默认值会把实际 JNI、批数和拷贝报告为零。内部 reader 关闭时把最终 ReadMetrics 传回分区 reader，累计量求和、allocator 高水位取最大值，显式无索引回退复用同一规则。见 [storage-io 第 5.4 节](architecture/storage-io.html#metrics)。 |
