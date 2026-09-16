@@ -237,12 +237,72 @@ Spark 的 <code>ColumnarBatch</code> 没有表达行有效性的成员(3.5.5 与
 <a href="../README.md">README 第 6 节</a>。
 </div>
 
-<h2 id="state">五、现在到哪一步</h2>
+<h2 id="metrics">五、指标:这条通路上量什么(G5)</h2>
+
+<p class="thesis"><strong>一条 Spark 任务读一个段,报七个数;写一个段,报四个数。全部由句柄自己记,任务结束时经
+DataSource V2 的 <code>CustomTaskMetric</code> 交给 Spark,在 SQL 页的算子节点上可见。</strong>
+没有这些数,README 第 1 节「6 次拷贝降到 2 次」和 2.4 的批大小、off-heap 预算(G3)都量不出来。</p>
+
+<h3>5.1 每个数在哪一侧取</h3>
+
+<p><strong>原则:谁持有句柄谁记数,不设全局计数器。</strong>C 侧的数记在句柄的 holder 结构体里
+(<code>RecordBatchReaderHolder</code>、writer 的 holder),JVM 侧的数记在包装句柄的对象里
+(<code>NativeSegmentReader</code>、<code>SegmentWriter</code>)。一个句柄对应一个 Spark 任务,
+所以按任务上报不需要任何汇总表,也没有锁。</p>
+
+<table>
+<tr><th>数</th><th>读 / 写</th><th>在哪取</th><th>回答什么问题</th></tr>
+<tr><td><code>jni.calls</code>、<code>jni.nanos</code></td><td>读、写</td><td>JVM 侧,包装类在每次 <code>StorageNative.*</code> 调用前后取 <code>System.nanoTime</code></td><td>跨界多少次、花了多久;按批跨界所以次数应等于批数加常数</td></tr>
+<tr><td><code>arrow.batches</code>、<code>arrow.bytes</code></td><td>读、写</td><td>JVM 侧,导入(读)或导出(写)时对 <code>VectorSchemaRoot</code> 每个向量的 <code>getBufferSize</code> 求和</td><td>吞吐:交接过界的 Arrow 字节数,除以 <code>jni.nanos</code> 就是通路带宽</td></tr>
+<tr><td><code>copies</code>、<code>copied.bytes</code></td><td>读</td><td>C 侧,<code>recordBatchReaderReadNext</code> 里每次 <code>arrow::Concatenate</code> 记一次和它的字节数;JVM 经 <code>recordBatchReaderStats(handle)</code> 取回</td><td>2.5 那个过渡实现今天到底拷了多少;上游导出 <code>loon_record_batch_reader_*</code> 后这两个数应归零</td></tr>
+<tr><td><code>rows.materialized</code></td><td>读</td><td>JVM 侧,行式 reader 每交付一行加一;列式 reader 只在有删除、物化存活行的那批加行数</td><td>「6 次到 2 次」的 JVM 那一半:直通的批这个数为 0</td></tr>
+<tr><td><code>arrow.allocated.max</code></td><td>读、写</td><td>JVM 侧,<code>ArrowAllocator.get.getAllocatedMemory</code> 在每批之后取一次,记最大值;跨任务按 max 汇总,不按 sum</td><td>native 内存占用的可见部分,也是 G3 预算要卡的同一个数</td></tr>
+</table>
+
+<h3>5.2 两处量不到,写在前面</h3>
+
+<ol>
+<li><strong>段数据从对象存储读了多少字节,量不到。</strong>交地址的那一面,读文件发生在 <code>libmilvus-storage</code>
+自己的文件系统里,不经过我们的 JNI;经过我们 JNI 的 <code>readFileAll</code> / <code>readerReadAt</code> 只有 driver 侧的元数据。
+所以「读吞吐」报的是交接过界的 Arrow 字节,不是对象存储的字节。要后者得上游在 <code>loon_segment_reader_*</code> 上暴露读取统计。</li>
+<li><strong>native 内存的总量,量不到。</strong><code>libmilvus-storage</code> 内部的 Arrow 内存池不可见。
+<code>arrow.allocated.max</code> 只覆盖 JVM allocator 记账的部分:JVM 自己分配的 buffer,加上 C Data 导入时以
+<code>ForeignAllocation</code> 登记进来的 C 侧 buffer。导入的 buffer 由 allocator 释放,所以这个数在 JVM 侧就能算准;
+它就是 G3 将来要限的数,两条能力用同一个口径。</li>
+</ol>
+
+<h3>5.3 不设开关</h3>
+
+<p>能力表 G5 那行写的是「会话配置开关」。这里不设:每个数每批加一次,一批几千行,一次
+<code>System.nanoTime</code> 加一次 <code>LongAdder.add</code> 在批的代价里量不出来;
+C 侧是 holder 里的一个整数自增。开关本身反而是一个 option、一处 executor 上的判断和一份文档。
+如果实测某个数有代价,先去掉那个数,不加开关。</p>
+
+<h3>5.4 怎么到 Spark UI</h3>
+
+<p>读:<code>MilvusScan.supportedCustomMetrics</code> 声明七个 <code>CustomMetric</code>(六个 sum、一个 max),
+<code>MilvusRowPartitionReader</code> 与 <code>MilvusColumnarPartitionReader</code> 的 <code>currentMetricsValues</code>
+从 <code>SegmentReader.metrics</code> 取当前值;Spark 在任务结束时收走。写:<code>Write.supportedCustomMetrics</code> 加
+<code>DataWriter.currentMetricsValues</code>,从 <code>SegmentWriter.metrics</code> 取。四条 Spark 线(3.5 到 4.2)接口一致。
+不做 Prometheus 之类的外部导出:Spark 已经把任务级指标聚到 SQL 页和事件日志里,再导一遍是第二条路。</p>
+
+<h3>5.5 类型放哪</h3>
+
+<ul>
+<li><code>native-storage</code>:C 侧 holder 里的计数,加一个 <code>recordBatchReaderStats(handle): long[]</code>。</li>
+<li><code>core.read.exec</code>:<code>SegmentReader.metrics: ReadMetrics</code>;<code>core.write.exec</code>:<code>SegmentWriter.metrics: WriteMetrics</code>。两个都是几个 long 的 case class,core 不知道 Spark。</li>
+<li><code>spark.read</code>、<code>spark.write</code>:把它们翻成 <code>CustomTaskMetric</code>,只此一处。</li>
+</ul>
+
+<p>验收在工作单 #01:core 里用本地后端读一个已知段,断言七个数落在预期范围;UAT 读 3000 行的段,
+SQL 页上看到这七个数。</p>
+
+<h2 id="state">六、现在到哪一步</h2>
 
 <table>
 <tr><th></th><th>状态</th></tr>
 <tr><td>交字节的面</td><td>已经到位。<code>NativeObjectStore</code> 走我们自己的 JNI(<code>native-storage</code>),driver 侧四类元数据读取全部经过它,<code>core.io.hadoop</code> 已删除</td></tr>
-<tr><td>交地址的面</td><td>已经到位。两个 <code>PartitionReader</code> 与两个 writer 都走 <code>native-storage</code> 的 JNI,上游 Java 绑定已从构建中移除,3.5 线的 Scala 2.12 因此解锁</td></tr>
+<tr><td>交地址的面</td><td>已经到位。行式与列式 reader 与两个 writer 都走 <code>native-storage</code> 的 JNI,上游 Java 绑定已从构建中移除,3.5 线的 Scala 2.12 因此解锁</td></tr>
 </table>
 
 <p>两个面都走我们自己的 JNI 之后,上游绑定不再进构建:<code>legacyJni</code> 四处全摘,
