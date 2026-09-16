@@ -7,10 +7,10 @@ import org.apache.spark.sql.connector.read.{
   PartitionReader,
   PartitionReaderFactory
 }
-import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
+import com.zilliz.milvus.storage.expr.PredicateExpr
 import com.zilliz.spark.connector.options.{MilvusOption, VectorSearch}
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
@@ -33,7 +33,7 @@ object MilvusPartitionReaderFactory {
 class MilvusPartitionReaderFactory(
     schema: StructType,
     optionsMap: Map[String, String],
-    pushedFilters: Array[Filter] = Array.empty[Filter],
+    pushedExpression: Option[PredicateExpr] = None,
     // A pushed-down limit, applied per partition. None when Spark pushed none.
     limit: Option[Int] = None
 ) extends PartitionReaderFactory
@@ -53,19 +53,9 @@ class MilvusPartitionReaderFactory(
     * Both lines use the same SegmentReader. Columnar reads are enabled by
     * default; callers may explicitly select the row path.
     *
-    * Two things the row reader does are not implemented columnar yet, and each
-    * of them sends the partition back to the row reader:
-    *
-    *   - A connector-owned filter. `MilvusScanBuilder` currently returns every
-    *     legacy `Filter` to Spark, so normal scans carry none. Keep this guard
-    *     because the columnar reader cannot evaluate filters supplied by a
-    *     future pushdown implementation or a directly constructed scan.
-    *   - Vector search. `topK` and `queryVector` make the row reader run a
-    *     brute-force search instead of a scan; the columnar reader would ignore
-    *     them and return the whole segment.
-    *
-    * Persisted-index search is supported by both partition types and also
-    * requires the row reader.
+    * A connector-owned predicate stays columnar: both readers evaluate the same
+    * core expression directly against each Arrow batch. Brute-force and
+    * persisted-index searches still require the row reader.
     */
   override def supportColumnarReads(partition: InputPartition): Boolean =
     MilvusOption.readColumnar(optionsMap) && (partition match {
@@ -73,8 +63,8 @@ class MilvusPartitionReaderFactory(
           if p.milvusOption.vectorSearch.exists(_.mode == "index") =>
         false
       case p: MilvusV3InputPartition =>
-        pushedFilters.isEmpty && p.topK.isEmpty && p.queryVector.isEmpty
-      case _: MilvusInputPartition => pushedFilters.isEmpty
+        p.topK.isEmpty && p.queryVector.isEmpty
+      case _: MilvusInputPartition => true
       case _                       => false
     })
 
@@ -110,7 +100,9 @@ class MilvusPartitionReaderFactory(
         MilvusOption.readVectorRaw(optionsMap),
         partitionNameOf(p),
         p.task.segmentId,
-        requestedExtraColumns
+        requestedExtraColumns,
+        pushedExpression,
+        setup.columnNameFor
       )
     case other =>
       throw new IllegalArgumentException(
@@ -153,7 +145,7 @@ class MilvusPartitionReaderFactory(
         new MilvusRowPartitionReader(
           dataSchema,
           ColumnBinding(p, dataSchema),
-          pushedFilters,
+          pushedExpression,
           search,
           includeSearchScore =
             schema.fieldNames.contains(MilvusOption.VectorSearchScore),

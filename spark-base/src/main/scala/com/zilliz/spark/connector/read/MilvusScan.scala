@@ -14,11 +14,11 @@ import org.apache.spark.sql.connector.read.{
   Statistics,
   SupportsReportStatistics
 }
-import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.expr.PredicateExpr
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.read.plan.{DeleteFileListing, ReadPlan}
 import com.zilliz.milvus.storage.schema.FieldMetadata
@@ -43,7 +43,7 @@ class MilvusScan(
     schema: StructType,
     options: CaseInsensitiveStringMap,
     private[read] val snapshot: Snapshot,
-    pushedFilters: Array[Filter] = Array.empty[Filter],
+    pushedExpression: Option[PredicateExpr] = None,
     private[read] val pushedLimit: Option[Int] = None
 ) extends Scan
     with Batch
@@ -71,12 +71,10 @@ class MilvusScan(
 
   override def columnarSupportMode(): Scan.ColumnarSupportMode =
     // SUPPORTED makes Spark skip the reader factory's per-partition check.
-    // Connector-owned filters and vector search run only in the row reader.
-    // Filters left for Spark stay outside this scan and allow columnar reads.
-    if (
-      MilvusOption.readColumnar(options) && pushedFilters.isEmpty &&
-      milvusOption.vectorSearch.isEmpty
-    ) Scan.ColumnarSupportMode.SUPPORTED
+    // The core evaluator consumes Arrow batches before either reader exposes
+    // them, so an accepted predicate does not force row materialization.
+    if (MilvusOption.readColumnar(options) && milvusOption.vectorSearch.isEmpty)
+      Scan.ColumnarSupportMode.SUPPORTED
     else Scan.ColumnarSupportMode.UNSUPPORTED
 
   private lazy val plannedPartitions: Array[InputPartition] = plan()
@@ -201,7 +199,7 @@ class MilvusScan(
     new MilvusPartitionReaderFactory(
       schema,
       options.asScala.toMap,
-      pushedFilters,
+      pushedExpression,
       pushedLimit
     )
 }

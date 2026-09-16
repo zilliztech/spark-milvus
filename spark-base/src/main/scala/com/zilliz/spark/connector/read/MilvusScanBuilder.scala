@@ -4,19 +4,21 @@ import java.{util => ju}
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.connector.expressions.filter.Predicate
 import org.apache.spark.sql.connector.read.{
   Scan,
   ScanBuilder,
-  SupportsPushDownFilters,
   SupportsPushDownLimit,
-  SupportsPushDownRequiredColumns
+  SupportsPushDownRequiredColumns,
+  SupportsPushDownV2Filters
 }
-import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
+import com.zilliz.milvus.storage.expr.{And, PredicateExpr}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.Snapshot
+import com.zilliz.spark.connector.expr.SparkPredicateTranslator
 import com.zilliz.spark.connector.options.MilvusOption
 
 class MilvusScanBuilder(
@@ -24,7 +26,7 @@ class MilvusScanBuilder(
     options: CaseInsensitiveStringMap,
     snapshot: Snapshot
 ) extends ScanBuilder
-    with SupportsPushDownFilters
+    with SupportsPushDownV2Filters
     with SupportsPushDownRequiredColumns
     with SupportsPushDownLimit
     with Logging {
@@ -45,9 +47,16 @@ class MilvusScanBuilder(
   private val extraColumns = MilvusOption.extraColumns(options)
   private val vectorSearch = MilvusOption(options).vectorSearch
 
-  // Filters accepted by the connector. This remains empty until predicate
-  // pushdown can preserve the complete Spark SQL semantics.
-  private var pushedFilterArray: Array[Filter] = Array.empty[Filter]
+  private var pushedPredicateArray: Array[Predicate] = Array.empty[Predicate]
+  private var pushedExpression: Option[PredicateExpr] = None
+  private var predicateFieldIds: Set[Long] = Set.empty
+
+  // None means Spark did not prune the scan, so the native reader keeps its
+  // existing all-fields behavior. Some(empty) is a real empty projection and
+  // still needs either a predicate field or one fallback physical field to
+  // drive the Arrow batches and their row counts.
+  private var projectedFieldIds: Option[Seq[Long]] = None
+  private var emptyProjectionFallbackId: Option[Long] = None
 
   override def pruneColumns(requiredSchema: StructType): Unit = {
     val fieldsByName = schema.fields.map(field => field.name -> field).toMap
@@ -92,9 +101,7 @@ class MilvusScanBuilder(
     val vectorColumn = Option(
       options.get(MilvusOption.VectorSearchVectorColumn)
     ).map(_.trim).filter(_.nonEmpty).getOrElse("vector")
-    val hasVectorSearch =
-      Option(options.get(MilvusOption.VectorSearchQueryVector))
-        .exists(_.trim.nonEmpty)
+    val hasVectorSearch = vectorSearch.nonEmpty
     if (hasVectorSearch) {
       val vectorField = fieldsByName.getOrElse(
         vectorColumn,
@@ -128,41 +135,80 @@ class MilvusScanBuilder(
             "The fixed snapshot schema has no physical field to drive an empty or metadata-only projection"
           )
         )
-      neededFieldIds = Seq(fallbackId)
+      emptyProjectionFallbackId = Some(fallbackId)
+    } else {
+      emptyProjectionFallbackId = None
     }
-    neededFieldIds = neededFieldIds.distinct
-    logInfo(s"Milvus field ids required by the scan: $neededFieldIds")
-
-    val tmpMap = new ju.HashMap[String, String]()
-    options.asScala.foreach { case (key, value) =>
-      tmpMap.put(key, value)
-    }
-    tmpMap.put(
-      MilvusOption.ReaderFieldIDs,
-      neededFieldIds.mkString(",")
-    )
-
-    currentOptions = new CaseInsensitiveStringMap(tmpMap)
+    projectedFieldIds = Some(neededFieldIds.distinct)
     currentSchema = StructType(scanFields)
+    refreshReaderFieldIds()
   }
 
-  override def pushFilters(filters: Array[Filter]): Array[Filter] = {
-    // Spark removes accepted filters from its plan, so accepting one is safe
-    // only when the connector preserves the complete Spark SQL semantics. The
-    // current legacy Filter evaluator does not, notably for null comparisons;
-    // keep every filter in Spark until predicate pushdown is complete.
-    pushedFilterArray = Array.empty
-    filters
+  override def pushPredicates(
+      predicates: Array[Predicate]
+  ): Array[Predicate] = {
+    // The current vector-search stage has not defined whether filtering occurs
+    // before or after its per-segment top-k. Preserve its existing behavior by
+    // leaving every predicate in Spark until that contract is settled.
+    if (vectorSearch.nonEmpty) {
+      pushedPredicateArray = Array.empty
+      pushedExpression = None
+      predicateFieldIds = Set.empty
+      refreshReaderFieldIds()
+      return predicates
+    }
+
+    val accepted =
+      Array.newBuilder[(Predicate, SparkPredicateTranslator.Translated)]
+    val residual = Array.newBuilder[Predicate]
+    predicates.foreach { predicate =>
+      SparkPredicateTranslator.translate(predicate, schema) match {
+        case Some(translated) => accepted += predicate -> translated
+        case None             => residual += predicate
+      }
+    }
+    val translated = accepted.result()
+    pushedPredicateArray = translated.map(_._1)
+    pushedExpression = translated.iterator
+      .map(_._2.expr)
+      .reduceLeftOption[PredicateExpr](And.apply)
+    predicateFieldIds = translated.iterator.flatMap(_._2.fieldIds).toSet
+    refreshReaderFieldIds()
+    residual.result()
   }
 
-  override def pushedFilters(): Array[Filter] = pushedFilterArray
+  override def pushedPredicates(): Array[Predicate] =
+    pushedPredicateArray.clone()
+
+  /** Recompute the native projection from the two independently mutable Spark
+    * callbacks. Spark normally pushes predicates before pruning columns, but
+    * the DataSource contract does not make correctness depend on that order.
+    */
+  private def refreshReaderFieldIds(): Unit =
+    projectedFieldIds.foreach { projected =>
+      val selected = (projected ++ predicateFieldIds.toSeq.sorted).distinct
+      val neededFieldIds =
+        if (selected.nonEmpty) selected
+        else emptyProjectionFallbackId.toSeq
+      logInfo(s"Milvus field ids required by the scan: $neededFieldIds")
+      val tmpMap = new ju.HashMap[String, String]()
+      options.asScala.foreach { case (key, value) =>
+        tmpMap.put(key, value)
+      }
+      tmpMap.put(
+        MilvusOption.ReaderFieldIDs,
+        neededFieldIds.mkString(",")
+      )
+      currentOptions = new CaseInsensitiveStringMap(tmpMap)
+    }
 
   override def build(): Scan = {
+    refreshReaderFieldIds()
     new MilvusScan(
       currentSchema,
       currentOptions,
       snapshot,
-      pushedFilterArray,
+      pushedExpression,
       pushedLimit
     )
   }

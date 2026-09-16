@@ -4,19 +4,13 @@ import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.metric.CustomTaskMetric
-import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{
-  BinaryType,
-  BooleanType,
-  DoubleType,
-  FloatType,
-  IntegerType,
-  LongType,
-  ShortType,
-  StringType,
-  StructType
-}
+import org.apache.spark.sql.types.StructType
 
+import com.zilliz.milvus.storage.expr.{
+  Bitmap,
+  PredicateEvaluator,
+  PredicateExpr
+}
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.options.VectorSearch
@@ -28,8 +22,8 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
   * `ColumnBinding`'s; the loop here does not know which line it reads.
   *
   * The loop pulls a batch, hands out its rows one by one, skips a deleted row,
-  * evaluates the pushed filters on a row when there are any, closes the batch
-  * and pulls the next. The `SegmentReader` opened by the binding owns the EOF
+  * evaluates the pushed expression once per Arrow batch, closes the batch and
+  * pulls the next. The `SegmentReader` opened by the binding owns the EOF
   * row-count contract, so row and columnar consumers cannot disagree about a
   * short read.
   *
@@ -40,12 +34,17 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 class MilvusRowPartitionReader(
     schema: StructType,
     setup: ColumnBinding,
-    pushedFilters: Array[Filter] = Array.empty[Filter],
+    pushedExpression: Option[PredicateExpr] = None,
     vectorSearch: Option[VectorSearch] = None,
     includeSearchScore: Boolean = true,
     searchScorePosition: Option[Int] = None
 ) extends RowOffsetReader
     with Logging {
+
+  require(
+    pushedExpression.isEmpty || vectorSearch.isEmpty,
+    "predicate pushdown is not defined for vector search"
+  )
 
   private val applyDeletes: Boolean = setup.appliesDeletes
   private val arrowColumnNames: Map[String, String] = setup.arrowColumnNames
@@ -55,17 +54,16 @@ class MilvusRowPartitionReader(
   // whatever it took; Spark only closes a reader it got back.
   private var segmentReader: SegmentReader = null
   private var currentBatch: VectorSchemaRoot = null
+  private var currentPredicateBitmap: Bitmap = null
   private var currentRowIndex: Int = 0
   private var currentBatchStartRowOffset: Long = 0L
   private var _lastReturnedRowOffset: Long = -1L
 
   private var searchResults: Iterator[SegmentVectorSearch.Result] = null
 
-  // Rows turned into InternalRow, for the metric of that name: counted per
-  // batch as the rows touched minus the ones skipped as deleted, which never
-  // get converted. A filtered-out row was converted to be evaluated.
+  // Rows actually turned into InternalRow. Predicate evaluation stays on Arrow
+  // vectors, so neither deleted nor filtered-out rows contribute.
   private var materialized: Long = 0L
-  private var deletedInBatch: Long = 0L
   private var finalMetrics: ReadMetrics = ReadMetrics.Zero
 
   /** Row offset of the row `get()` last returned, for the row-offset metadata
@@ -76,7 +74,7 @@ class MilvusRowPartitionReader(
   try {
     if (!vectorSearch.exists(_.mode == "index")) {
       segmentReader = setup.open(allocator)
-      currentBatch = pullNextBatch()
+      loadNextBatch()
     }
   } catch {
     case e: Throwable =>
@@ -97,7 +95,7 @@ class MilvusRowPartitionReader(
 
       override def hasNext: Boolean = {
         if (!exhausted && currentBatch == null) {
-          currentBatch = pullNextBatch()
+          loadNextBatch()
           exhausted = currentBatch == null
         }
         !exhausted
@@ -107,15 +105,37 @@ class MilvusRowPartitionReader(
         if (!hasNext) throw new NoSuchElementException("No remaining batch")
         val batch = currentBatch
         currentBatch = null
+        currentPredicateBitmap = null
         batch
       }
     }
+
+  private def loadNextBatch(): Unit = {
+    currentBatch = pullNextBatch()
+    currentPredicateBitmap =
+      if (currentBatch == null) null
+      else
+        pushedExpression
+          .map(
+            PredicateEvaluator.evaluate(
+              _,
+              currentBatch,
+              setup.columnNameFor
+            )
+          )
+          .orNull
+  }
 
   private def isDeleted(batch: VectorSchemaRoot, rowIndex: Int): Boolean =
     applyDeletes && !setup.deletePlan.isEmpty && setup.isDeleted(
       batch,
       rowIndex
     )
+
+  private def isExcluded(batch: VectorSchemaRoot, rowIndex: Int): Boolean =
+    isDeleted(batch, rowIndex) ||
+      (currentPredicateBitmap != null &&
+        currentPredicateBitmap.isExcluded(rowIndex))
 
   override def next(): Boolean = vectorSearch match {
     case Some(search) =>
@@ -152,30 +172,19 @@ class MilvusRowPartitionReader(
       ) {
         val exhausted = currentBatch
         currentBatch = null
+        currentPredicateBitmap = null
         currentBatchStartRowOffset += exhausted.getRowCount.toLong
-        materialized += exhausted.getRowCount.toLong - deletedInBatch
-        deletedInBatch = 0L
         exhausted.close()
-        currentBatch = pullNextBatch()
+        loadNextBatch()
         currentRowIndex = 0
       }
       if (currentBatch == null) {
         return false
       }
-      if (isDeleted(currentBatch, currentRowIndex)) {
+      if (isExcluded(currentBatch, currentRowIndex)) {
         currentRowIndex += 1
-        deletedInBatch += 1
-      } else if (pushedFilters.isEmpty) {
-        return true
       } else {
-        val row = ArrowConverter.arrowToInternalRow(
-          currentBatch,
-          currentRowIndex,
-          schema,
-          arrowColumnNames
-        )
-        if (RowFilters.matches(pushedFilters, row, schema)) return true
-        currentRowIndex += 1
+        return true
       }
     }
     false
@@ -207,6 +216,7 @@ class MilvusRowPartitionReader(
         arrowColumnNames
       )
       currentRowIndex += 1
+      materialized += 1L
       row
   }
 
@@ -222,12 +232,10 @@ class MilvusRowPartitionReader(
   // rest; the null sentinels make a second close a no-op.
   private def releaseAll(): Unit = {
     if (currentBatch != null) {
-      // Rows touched in the batch being abandoned, less the deleted ones.
-      materialized += currentRowIndex.toLong - deletedInBatch
-      deletedInBatch = 0L
       try currentBatch.close()
       catch { case e: Throwable => logWarning("close currentBatch failed", e) }
       currentBatch = null
+      currentPredicateBitmap = null
     }
     if (segmentReader != null) {
       try segmentReader.close()
@@ -236,96 +244,4 @@ class MilvusRowPartitionReader(
       segmentReader = null
     }
   }
-}
-
-/** Evaluates Spark's DataSource V1 `Filter`s on a row, the way the row reader
-  * always has. A filter on a column not in the schema and a filter kind not
-  * listed here pass the row; Spark re-evaluates every filter it pushed, so a
-  * pass here is never a wrong result. Decision 20 is about replacing these with
-  * the V2 predicates.
-  */
-private[read] object RowFilters {
-
-  def matches(
-      filters: Array[Filter],
-      row: InternalRow,
-      schema: StructType
-  ): Boolean =
-    filters.forall(evaluate(_, row, schema))
-
-  def evaluate(
-      filter: Filter,
-      row: InternalRow,
-      schema: StructType
-  ): Boolean = {
-    import org.apache.spark.sql.sources._
-    def index(attr: String): Int =
-      try schema.fieldIndex(attr)
-      catch { case _: IllegalArgumentException => -1 }
-    def compareAt(attr: String, value: Any)(test: Int => Boolean): Boolean = {
-      val i = index(attr)
-      i == -1 || test(compareValues(valueAt(row, i, schema), value))
-    }
-    filter match {
-      case EqualTo(attr, value)            => compareAt(attr, value)(_ == 0)
-      case GreaterThan(attr, value)        => compareAt(attr, value)(_ > 0)
-      case GreaterThanOrEqual(attr, value) => compareAt(attr, value)(_ >= 0)
-      case LessThan(attr, value)           => compareAt(attr, value)(_ < 0)
-      case LessThanOrEqual(attr, value)    => compareAt(attr, value)(_ <= 0)
-      case In(attr, values) =>
-        val i = index(attr)
-        i == -1 || {
-          val v = valueAt(row, i, schema)
-          values.exists(compareValues(v, _) == 0)
-        }
-      case IsNull(attr) =>
-        val i = index(attr)
-        i == -1 || row.isNullAt(i)
-      case IsNotNull(attr) =>
-        val i = index(attr)
-        i == -1 || !row.isNullAt(i)
-      case And(left, right) =>
-        evaluate(left, row, schema) && evaluate(right, row, schema)
-      case Or(left, right) =>
-        evaluate(left, row, schema) || evaluate(right, row, schema)
-      case _ => true
-    }
-  }
-
-  private def valueAt(row: InternalRow, i: Int, schema: StructType): Any =
-    if (row.isNullAt(i)) null
-    else
-      schema.fields(i).dataType match {
-        case LongType    => row.getLong(i)
-        case IntegerType => row.getInt(i)
-        case ShortType   => row.getShort(i)
-        case FloatType   => row.getFloat(i)
-        case DoubleType  => row.getDouble(i)
-        case BooleanType => row.getBoolean(i)
-        case StringType  => row.getUTF8String(i).toString
-        case BinaryType  => row.getBinary(i)
-        case other       => row.get(i, other)
-      }
-
-  private def compareValues(rowValue: Any, filterValue: Any): Int =
-    (rowValue, filterValue) match {
-      case (null, null)               => 0
-      case (null, _)                  => -1
-      case (_, null)                  => 1
-      case (rv: Long, fv: Long)       => rv.compareTo(fv)
-      case (rv: Long, fv: Int)        => rv.compareTo(fv.toLong)
-      case (rv: Int, fv: Int)         => rv.compareTo(fv)
-      case (rv: Int, fv: Long)        => rv.toLong.compareTo(fv)
-      case (rv: Short, fv: Short)     => rv.compareTo(fv)
-      case (rv: Short, fv: Int)       => rv.toInt.compareTo(fv)
-      case (rv: Float, fv: Float)     => rv.compareTo(fv)
-      case (rv: Float, fv: Double)    => rv.toDouble.compareTo(fv)
-      case (rv: Double, fv: Double)   => rv.compareTo(fv)
-      case (rv: Double, fv: Float)    => rv.compareTo(fv.toDouble)
-      case (rv: Boolean, fv: Boolean) => rv.compareTo(fv)
-      case (rv: String, fv: String)   => rv.compareTo(fv)
-      case (rv: Array[Byte], fv: Array[Byte]) =>
-        java.util.Arrays.compare(rv, fv)
-      case _ => rowValue.toString.compareTo(filterValue.toString)
-    }
 }

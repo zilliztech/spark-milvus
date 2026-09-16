@@ -249,8 +249,8 @@ sbt 仅构建固定源码中的 Java API，输出进入模块的 target 缓存�
 <p><code>core.delete</code> 结合主键和行时间戳处理删除，包含继承的 delete-only 段；不能把删除简化为一个主键集合。
 <code>core.expr</code> 对过滤列求值。两者输出按物理行号对齐的位图，合并后约定 1 表示排除。
 过滤为 false 或 null 的行都不参与搜索；索引 label 与物理行号的映射必须经过 fixture 验证。</p>
-<p>本次过滤入口共用核心中间表示与求值器，已实现比较、IN、IS NULL、AND/OR/NOT；其他表达式明确拒绝。
-R6 的 Spark 谓词入口按决策 20 统一为 V2 Predicate 翻译，R7 的字符串入口按 Milvus 文法解析，不能为索引查询单独复制求值逻辑。</p>
+<p>索引查询的 <code>MilvusSearch.filter</code> / <code>vector.search.filter</code> 使用既有 <code>Expr</code>、手写 <code>PlanParser</code> 与 <code>Evaluator</code>，已实现比较、IN、IS NULL、AND/OR/NOT；其他表达式明确拒绝。
+R6 的普通扫描入口按<a href="expressions.html">谓词设计</a>把 DataSource V2 Predicate 翻成字段 id / 类型绑定的 <code>PredicateExpr</code>，由 <code>PredicateEvaluator</code> 求值；带 <code>vector.search.*</code> 的读取不接受 Spark 谓词，整棵作为 residual 由 Spark 在 TopK 后求值。两条合同不能混淆彼此的语义和过滤顺序。</p>
 <p>过滤后仍有至少 K 条有效数据时，不能因“先取 K 再过滤”只返回少量结果。优先使用索引的 bitmap 过滤；若该实现会产生不足 K 的候选，必须按其受支持的搜索参数扩大搜索或继续遍历，直到满足 K、确认有效数据不足，或明确报告搜索不能完成。
 允许调整的参数为 ef，最多 8 次尝试，规则见第 6.3 节；仍不足且有效行充足时明确失败，不能无限重试或静默改为暴力搜索。
 候选扩大不等于精确召回保证；召回率单独验证。读取主键和过滤列可能扫描整段，但不应因此读取所有原始向量逐条计算距离。</p>

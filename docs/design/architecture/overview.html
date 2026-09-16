@@ -194,7 +194,7 @@
   <div class="fact"><b>6 → 2</b><span>一个向量值的拷贝次数</span></div>
   <div class="fact"><b>51</b><span>条功能，分八组</span></div>
   <div class="fact"><b>4</b><span>条 Spark 线各出产物</span></div>
-  <div class="fact"><b>6</b><span>条决策还没定</span></div>
+  <div class="fact"><b>5</b><span>条决策还没定</span></div>
 </div>
 
 <section id="layers">
@@ -318,7 +318,7 @@
 │   │      <span class="c">snapshot · manifest · schema · path · credential</span>
 │   │      <span class="c">expr · delete · stats · index</span>
 │   │      <span class="c">read/{plan,exec} · write/{exec,commit}</span>
-│   ├── src/main/antlr4/              <span class="c">表达式文法</span>
+│   ├── src/main/antlr4/              <span class="c">空目录说明；R7 PlanParser 已手写实现</span>
 │   └── src/main/resources/           <span class="c">段清单的 Avro schema</span>
 ├── <span class="m">compat/</span><span class="lay">第 2 层</span>                      <span class="c">三个非标准入口的适配器</span>
 │   └── .../storage/compat/           <span class="c">v2 · offline · backup</span>
@@ -355,14 +355,14 @@
         <dt>schema</dt><dd>字段 id、名字、Milvus 类型、Arrow 类型的唯一映射 <em>R15 C3</em></dd>
         <dt>path</dt><dd>三种路径形态归一成 (bucket, key) <em>R3</em></dd>
         <dt>credential</dt><dd>对象存储凭证的取用和下发 <em>R3 W1</em></dd>
-        <dt>expr</dt><dd>中间表示、Milvus 文法解析器、列批求值器 <em>R6 R7</em></dd>
+        <dt>expr</dt><dd>R7 的 Expr / PlanParser / Evaluator；R6 的 PredicateExpr / PredicateEvaluator / Bitmap <em>R6 R7</em></dd>
         <dt>delete</dt><dd>删除文件解码，按行号置位 <em>R8</em></dd>
         <dt>stats</dt><dd>段统计与 row group 统计的读取和剪枝 <em>R9 R10 R18</em></dd>
         <dt>read.plan</dt><dd>分区规划，纯 JVM，可序列化 <em>R3 R5 R10</em></dd>
         <dt>read.exec</dt><dd>批读取、按行号取列、出口；碰 native <em>R4 R14 R17</em></dd>
         <dt>write.exec</dt><dd>段写出、暂存布局；碰 native <em>W1 W2</em></dd>
         <dt>write.commit</dt><dd>作业清单、提交、幂等 <em>W3</em></dd>
-        <dt>index</dt><dd>索引文件编解码、来源、缓存、写出 <em>V2 V4 W6</em></dd>
+        <dt>index</dt><dd>持久化索引选择、加载、排除位图、搜索与段内 TopK；跨任务缓存和写出待实现 <em>V2 V4 V7 W6</em></dd>
       </dl>
     </div>
 
@@ -418,7 +418,7 @@
 
   <figure>
     <div class="figbox">
-      <svg viewBox="0 0 920 330" role="img" aria-label="读路径：driver 上 SnapshotCatalog 选快照、SchemaMapper 出 schema、ExprTranslator 出谓词中间表示、Partitioner 一段一分区，经可序列化的 InputPartition 下发给 executor，executor 读批、合成位图、交出列批">
+      <svg viewBox="0 0 920 330" role="img" aria-label="读路径：driver 上 SnapshotCatalog 选快照、SchemaMapper 出 schema、SparkPredicateTranslator 出谓词中间表示、Partitioner 一段一分区，经可序列化的 InputPartition 下发给 executor，executor 读批、合成位图、交出列批">
         <defs>
           <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
@@ -441,9 +441,9 @@
           <text x="216" y="93" fill="currentColor" opacity=".7">Milvus ↔ Arrow 类型</text>
 
           <rect x="374" y="40" width="160" height="60" fill="var(--surface)" stroke="var(--ours)"/>
-          <text x="386" y="60" font-weight="600" fill="currentColor">ExprTranslator</text>
-          <text x="386" y="78" fill="currentColor" opacity=".7">两个入口翻成同一套</text>
-          <text x="386" y="93" fill="currentColor" opacity=".7">中间表示，能推的先推</text>
+          <text x="386" y="60" font-size="10.5" font-weight="600" fill="currentColor">SparkPredicateTranslator</text>
+          <text x="386" y="78" fill="currentColor" opacity=".7">V2 Predicate → PredicateExpr</text>
+          <text x="386" y="93" fill="currentColor" opacity=".7">R7 PlanParser 保持独立合同</text>
 
           <rect x="554" y="40" width="150" height="60" fill="var(--surface)" stroke="var(--ours)"/>
           <text x="566" y="60" font-weight="600" fill="currentColor">Partitioner</text>
@@ -475,8 +475,8 @@
           <text x="244" y="264" fill="currentColor" opacity=".7">一段算一次，缓存</text>
 
           <rect x="432" y="210" width="180" height="66" fill="var(--surface)" stroke="var(--ours)"/>
-          <text x="444" y="230" font-weight="600" fill="currentColor">ExprEval</text>
-          <text x="444" y="248" fill="currentColor" opacity=".7">IR 在列批上按列求值</text>
+          <text x="444" y="230" font-weight="600" fill="currentColor">PredicateEvaluator</text>
+          <text x="444" y="248" fill="currentColor" opacity=".7">PredicateExpr 在列批求值</text>
           <text x="444" y="264" fill="currentColor" opacity=".7">每批出一张位图</text>
         </g>
         <line x1="212" y1="243" x2="230" y2="243" stroke="currentColor" marker-end="url(#ar2)"/>
@@ -718,7 +718,7 @@
   </figure>
 
   <div class="note">
-    <b>Arrow 和 antlr 不能钉在核心层。</b>核心层是四条线共用的单一产物，钉一个 Arrow 版本就等于重犯 1.x 的病根：1.x 把 Arrow 钉在 17.0.0，而 Spark 4 用的是 18，部署时只能靠 <code>userClassPathFirst</code> 顶着。antlr 同理，Spark 3.5 带 4.9.3、4.x 带 4.13.1，生成的解析器不通用，放哪还没定。
+    <b>Arrow 由 Spark 线提供，core 的 Milvus 表达式解析器手写。</b>核心层是四条线共用的单一产物；Spark 3.5 带 antlr 4.9.3，4.x 带 4.13.1，生成码不能成为 core 的公共实现。只有 SQL 扩展文法放在共享源码目录并按线生成，运行时使用本线 Spark 自带的 antlr。R7 的标量 PlanParser 已用于索引查询过滤；表读取的 <code>milvus.filter</code> 与 JSON/Array 语义仍待扩展。
   </div>
 </section>
 
@@ -796,13 +796,14 @@
     </div>
 
     <div class="grp">
-      <h4>向量与索引 · 4 条</h4>
-      <p>整组排 P2：采用 Knowhere PR #1829；当前交付<a href="vector-search.html#native-brute-force">库加载与现有入口的 BruteForce</a>，持久化索引执行仍待实现。</p>
+      <h4>向量与索引 · 5 条</h4>
+      <p>整组排 P2：采用 Knowhere PR #1829；库加载、现有入口的 BruteForce、持久化 HNSW 加载、搜索、回表与全局 TopK 已接通。跨任务缓存、索引写出及更多索引格式仍待实现。</p>
       <div class="chips">
         <span class="chip p2"><span class="id">V1</span>knowhere 封装</span>
         <span class="chip p2"><span class="id">V2</span>加载 Milvus 的索引</span>
         <span class="chip p2"><span class="id">V4</span>索引来源与缓存</span>
         <span class="chip p2"><span class="id">V5</span>暴力搜索</span>
+        <span class="chip p2"><span class="id">V7</span>持久化索引查询</span>
       </div>
     </div>
 
@@ -852,29 +853,27 @@
     <li><b>核心层对象模型<span class="tag">P0</span></b><span>SnapshotCatalog 与 Snapshot、Segment、Manifest；四份类型映射合并成一份；路径归一。</span></li>
     <li><b>列式读<span class="tag">P0</span></b><span>自有 storage JNI、ColumnVector、DeleteBitset。拷贝从 6 次降到 2 次，下游算子拿得到地址。</span></li>
     <li><b>接口层<span class="tag">P1</span></b><span>Catalog、元数据列、统计、V2 谓词、Limit。三段名和回表在这一步到位。</span></li>
-    <li><b>谓词求值<span class="tag">P1</span></b><span>ExprTranslator、中间表示、求值器。语义按 Milvus 源码逐条复刻。</span></li>
+    <li><b>谓词求值<span class="tag">P1</span></b><span>R6 的 V2 Predicate 翻译、PredicateExpr 与列批位图已接通；R7 的既有 Expr / PlanParser / Evaluator 用于索引搜索前过滤，表读取 option 与 JSON/Array 语义后续实现。</span></li>
     <li><b>写路径<span class="tag">P1</span></b><span>SegmentWriter、Committer、register。backfill 分支可先做，append 等 Milvus 的 RPC，两件事可以并行谈。</span></li>
-    <li><b>向量层<span class="tag">P2</span></b><span>接入上游 Knowhere Java/JNI 产物、索引加载与写出、暴力搜索；backfill 改成写模式。</span></li>
+    <li><b>向量层<span class="tag">P2</span></b><span>上游 Knowhere Java/JNI、持久化索引加载、搜索与暴力搜索已接通；索引写出和跨任务缓存后续实现。</span></li>
     <li><b>产物与基准<span class="tag">P3</span></b><span>native jar 打包、四条 Spark 线的 CI 矩阵、读吞吐与拷贝次数与写端到端的基准；macOS 与 GPU 产物。</span></li>
     <li><b>2.0.0 发布<span class="tag">P3</span></b><span>云上作业切换坐标与 SHA。</span></li>
   </ol>
 </section>
 
 <section id="open">
-  <h2><span class="n">08</span>还没定的 6 条</h2>
-  <p class="claim">挡在 P0 前面的三条都已于 2026-09-12 定案：类型映射（6）、表读出口（12）、SegmentWriter（14），见总体设计第 6 节。剩下的六条都不挡 P0。</p>
+  <h2><span class="n">08</span>还没定的 5 条</h2>
+  <p class="claim">谓词接口选择已定为 DataSource V2，共享实现覆盖四条 Spark 线。当前五条未决项以总体设计第 4 节为准。</p>
 
   <div class="tw">
   <table>
     <thead><tr><th style="width:7%">编号</th><th style="width:26%">决策</th><th style="width:42%">选项</th><th>什么时候必须定</th></tr></thead>
     <tbody>
-            <tr><td class="mono">5</td><td>元数据列名</td><td><code>_segment_id</code> 还是 1.x 的 <code>$segment_id</code>；<code>partition</code> 列是否保留</td><td>接口层</td></tr>
-      <tr><td class="mono">11</td><td>谁建快照、建前是否先 Flush</td><td>Connector 的 CALL 建，或只用 Milvus 的自动快照</td><td>接口层</td></tr>
-      <tr><td class="mono">17</td><td>Milvus 表达式解析器的 antlr runtime 放哪</td><td>核心层自带并重定位，或各 Spark 线各生成一份</td><td>谓词求值</td></tr>
       <tr><td class="mono">10</td><td>backfill 写模式的分布与排序</td><td>实现 Spark 的分布要求，或场景代码自己 shuffle</td><td>写路径</td></tr>
-      <tr><td class="mono">13</td><td>删除文件格式的共存期</td><td>两列 Parquet 与旧 binlog 容器格式认哪几种</td><td>不阻塞</td></tr>
-      <tr><td class="mono">15</td><td>Scala 版本范围</td><td>已定跟 lance-spark 一样，交叉编译范围待确认</td><td>构建</td></tr>
-      <tr><td class="mono">16</td><td>集合级查询与其余旧入口</td><td>现有逐段查询已确定使用 Knowhere BruteForce；集合级入口与其他旧入口迁移待定</td><td>向量层</td></tr>
+      <tr><td class="mono">19</td><td>按分区报告 Spark 分区</td><td>实测 join 收益后决定是否实现</td><td>读优化</td></tr>
+      <tr><td class="mono">16</td><td>其余旧向量入口迁移</td><td>集合级 MilvusSearch.search 已确定，旧逐段入口保留；是否统一 SQL 入口及何时退役旧入口仍待定</td><td>不阻塞 V7</td></tr>
+      <tr><td class="mono">21</td><td>扩大索引兼容范围与跨任务缓存</td><td>首个非 nullable FloatVector/HNSW 范围已落地；nullable ID 映射、加密文件与跨任务缓存仍待实现</td><td>后续 V2、V4 扩展</td></tr>
+      <tr><td class="mono">22</td><td>写段的系统字段来源</td><td>写时分配、登记时补齐或写入占位值</td><td>append 登记</td></tr>
     </tbody>
   </table>
   </div>

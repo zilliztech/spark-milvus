@@ -47,7 +47,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client�
 | `io` | 对象存储读写的最小接口和它唯一的实现（走 C 的 `loon_filesystem_*`） | ObjectStore、ObjectStoreFactory、NativeObjectStore、FileInfo |
 | `codec` | 列值与 Milvus binlog 共同封装的字节编解码，文件访问归 io | FloatConverter、SparseFloatVectorConverter、BinlogCodec（从 DeltaLogReader 提取，删除及索引复用） |
 | `credential` | 对象存储凭证的取用和下发 | Credentials、CredentialSource |
-| `expr` | 中间表示、Milvus 标量文法子集、三值逻辑与 Arrow 列批求值 | Expr、PlanParser、Evaluator；Spark Predicate 翻译仍待 R6 |
+| `expr` | R7 的手写 Milvus 标量文法与名称绑定求值；R6 的字段 id / 类型绑定表示、三值逻辑与 Arrow 列批位图 | R7：Expr、PlanParser、Evaluator；R6：PredicateExpr、PredicateEvaluator、Bitmap。Spark V2 Predicate 翻译归第 3 层；表读取的 `milvus.filter` 与 JSON/Array 语义仍待扩展 |
 | `delete` | 删除文件解码，按行号置位 | DeleteBitset、DeltaLogDecoder |
 | `stats` | 段统计：写侧的主键 bloom filter，读侧的剪枝（未做） | PrimaryKeyStats、BlockedBloomFilter（blobloom 的逐位移植，#15）；SegmentStats、Pruner 待 R9/R10 |
 | `read.plan` | 分区规划，纯 JVM，可序列化 | SegmentReadTask、SegmentLayout、DeleteSource、ReadPlan、DeleteFileListing：`DeleteFileListing.of` 在 driver 上列删除文件（V3 段要开 manifest），`ReadPlan.of` 把 Snapshot 变成任务列表，任务带 `DeleteSource.Files`（#12、#13）。Partitioner 待 R19（决策 19）与 R16 定了再加，一段一分区之外还没有第二种切法 |
@@ -105,7 +105,7 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 | `catalog` | MilvusCatalog：只读 TableCatalog 与 SupportsNamespaces；database 是唯一一层 namespace，collection 是 table；目录发现、三段名、loadTable 的快照重载属 C1/R1/R2，DDL 属 C2 | 主体在 base，按线只留公开类与 createTable 签名适配 |
 | `table` | MilvusTables 统一校验并解析固定 Snapshot，供 DataSource 与 Catalog 构造 MilvusTable；MilvusTable 算 schema、能力集、元数据列并把 Snapshot 交给 scan | 否 |
 | `read` | ScanBuilder、Scan、Batch、InputPartition、ColumnarPartitionReader、ColumnVector 实现。包名与 `write` 和 `core.read` 对称，类名沿用 Spark 的 Scan | 否 |
-| `expr` | DataSource V2 Predicate 到 IR 的翻译 | 否 |
+| `expr` | DataSource V2 Predicate 到 `PredicateExpr` 的翻译；每个不完整支持的谓词树作为 residual 交还 Spark | 否 |
 | `types` | Arrow 类型到 Spark 类型的映射，向量列的 Spark 表示 | 否 |
 | `write` | WriteBuilder、BatchWrite、DataWriterFactory、DataWriter；append 与 backfill 模式（truncate、overwrite 不做，能力表第 10 节） | 否 |
 | `metrics` | core 的 ReadMetrics / WriteMetrics 翻成 DataSource V2 的 CustomMetric / CustomTaskMetric，读写各一张清单；G5 | 否 |
@@ -146,7 +146,7 @@ spark-milvus/
     src/main/cpp/                  上游 C/JNI 归属说明，代码由 Knowhere 提供
   core/
     src/main/scala/com/zilliz/milvus/storage/{snapshot,manifest,schema,path,credential,expr,delete,stats,read,write,index}
-    src/main/antlr4/               表达式文法（见第 4 节第 8 条）
+    src/main/antlr4/               空目录说明；R7 解析器按第 4 节第 8 条手写
     src/main/resources/            段清单的 Avro schema
   compat/src/main/scala/com/zilliz/milvus/storage/compat/{v2,backup}
   client/

@@ -13,7 +13,7 @@
 | R3 | 读不经 Milvus 服务 | 只配对象存储凭证即可读 | core.snapshot、core.path、core.credential、core.read | driver 的每个 ObjectStore 只活到 Snapshot 或删除文件清单物化完成，成功失败都关闭；Milvus 元数据里的 `s3://endpoint:port/bucket/key` 只在已知元数据边界按已配置端点识别，用户 URI 仍按标准 S3 规则解析；凭证在 executor 上按需刷新，不由 driver 下发一次性的静态值 | P0 |
 | R4 | 列式扫描，向量可零拷贝 | 默认 `milvus.read.columnar=true`，设为 false 使用行式；向量原始字节再设 `milvus.read.vector.raw=true`；向量搜索仍走行式 | core.read.exec、spark.read、native-storage | 行式与列式消费同一个 `SegmentReader`；已知行数的段在读到 EOF 时统一核对物理输出行数，短读直接失败；列组文件只认 Parquet，Vortex 列组见第 10 节 | P0 |
 | R5 | 列裁剪 | `select`，可再用 `fieldIDs` 限定数值字段 id | spark.read → core.manifest 选列组 → core.read.plan | 字段 id 只取自快照 schema 的 `milvus.field_id` metadata；`fieldIDs` 在 inferSchema 和 Table 都生效，外部 schema 必须选同一组 id 且名称、类型不冲突；缺失、未知或非数值 id 报错，不按列序号猜 | P0 |
-| R6 | 谓词下推：Spark 谓词 | `where` 里的比较、IN、IS NULL、字符串前后缀、AND、OR、NOT | spark.expr 翻成 IR → core.expr 求值 | 只实现 DataSource V2 谓词，不实现 V1 Filter（第 9 节） | P1 |
+| R6 | 谓词下推：Spark 谓词 | `where` 里的比较、IN、IS NULL、字符串前后缀、AND、OR、NOT；设计见 [expressions.html](architecture/expressions.html) | spark.expr 翻成 IR → core.expr 求值 | 只实现 DataSource V2 谓词，不实现 V1 Filter（第 10 节）；每个顶层谓词完整翻译才接受，否则整棵留给 Spark；向量搜索读取全部 residual | P1 |
 | R7 | 谓词下推：Milvus 表达式 | 已实现 MilvusSearch 的 filter 标量子集；表 option `milvus.filter` 仍待接入 | core.expr 用 Milvus 的表达式文法（Plan.g4）解析并求值 | 当前比较、IN、IS NULL、逻辑运算；JSON、Array、json_contains 待按 Milvus 源码逐条复刻 | P1 |
 | R8 | 删除生效 | 默认自动；`milvus.read.apply.deletes=false` 可显式关闭 | core.delete、core.read.plan、core.read.exec | driver 只把段内、本分区 L0 与全 collection L0 的删除文件描述装进任务；executor 读取、合并并关闭这些文件，读不到就让 task 失败，不返回空删除计划。`_delta/` 两种编码都认（决策 13 撤销）。backfill 按物理行对齐列组时不应用删除，那是 W2 内部读法 | P0 |
 | R9 | 段级剪枝 | 自动；主键等值和 IN 用段统计文件里的布隆过滤器剪段 | core.stats 出剪枝结果，core.snapshot 过滤段列表 | Milvus 侧写统计（README 第 5 节） | P1 |
@@ -64,9 +64,9 @@ Table 接口表达不了的动作走 CALL：四条线走同一个 SQL 语法扩�
 
 ## 5 向量与索引
 
-向量能力整组排 P2：原生接口采用 Knowhere PR #1829 的固定提交。V1 当前交付库加载、C ABI 校验及版本查询；V5 为现有逐段查询接入原生 BruteForce。索引文件加载、写出、缓存仍待实现。
+向量能力整组排 P2：原生接口采用 Knowhere PR #1829 的固定提交。V1 已交付库加载、C ABI 校验、版本查询和持久化索引封装；V5 为现有逐段查询接入原生 BruteForce。V2、V7 已接通首个非 nullable FloatVector/HNSW 范围的索引加载、搜索、回表和全局 TopK；索引写出、更多格式与跨任务缓存仍待实现。
 
-issue #125 的[索引查询开发方案](architecture/vector-search.html)中，[库加载契约](architecture/vector-search.html#library-loading)已经确定；V1 的索引执行、V2 和 V4 的持久化加载部分及提议的 V7 集合级向量查询仍待评审。V7 尚未加入正式能力行，实现前须先确定 README 第 4 节的相关决策。
+issue #125 的[索引查询设计](architecture/vector-search.html)已经落地首个互操作范围。当前每个查询任务独占并关闭自己的索引；V4 的跨任务缓存及其他索引来源仍待扩展。
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
@@ -111,7 +111,7 @@ issue #125 的[索引查询开发方案](architecture/vector-search.html)中，[
 
 ## 10 不做
 
-TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tantivy 文本索引）；GIS 表达式；struct 数组表达式；random_sample；DataSource V1 Filter（1.x 走 V1，2.0 只实现 V2 谓词，见 R6）；Vortex 列组的读写（milvus-storage 支持，Connector 不接）；truncate 和 overwrite（2026-09-16 定，原 W4）：`mode("overwrite")` 是 Spark ETL 模板里的常见写法，接进来后改个表名就让生产 collection 的全部旧数据不可见，Milvus 没有回滚；不接时 Spark 在分析阶段报 `Table does not support overwrite`，数据不动，全量刷新改为在 Milvus 侧 drop/recreate 或 SDK 全表 delete 后再 append，误操作要在 Milvus 的界面或 SDK 里显式做。1.x 没有这个能力，不接不是退化；以后有明确需求再加，加是兼容的，加了再拿掉不是。DELETE（2026-09-16 定，原 W5）：`DELETE FROM milvus.db.coll WHERE ...` 会把谓词翻成 Milvus 表达式后调 Milvus 的 Delete RPC，删的是生产 collection 的在线数据，谓词写宽了没有回滚；Milvus SDK 已经用同一套表达式语法提供 delete，连接器接进来只是把同一个删除动作换到 Spark 作业里发，多一个出错的地方，不多一种能力。连接器的职责是读写存储格式的文件，不碰在线数据的删除。不接的代价为零：用户在 SDK 里执行同一条表达式。随之 `core.expr` 不再需要把中间表示打印回 Milvus 语法的 ExprPrinter，决策 20 只剩 R6 和 R7 两条依赖。
+TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tantivy 文本索引）；GIS 表达式；struct 数组表达式；random_sample；DataSource V1 Filter（1.x 走 V1，2.0 只实现 V2 谓词，见 R6）；Vortex 列组的读写（milvus-storage 支持，Connector 不接）；truncate 和 overwrite（2026-09-16 定，原 W4）：`mode("overwrite")` 是 Spark ETL 模板里的常见写法，接进来后改个表名就让生产 collection 的全部旧数据不可见，Milvus 没有回滚；不接时 Spark 在分析阶段报 `Table does not support overwrite`，数据不动，全量刷新改为在 Milvus 侧 drop/recreate 或 SDK 全表 delete 后再 append，误操作要在 Milvus 的界面或 SDK 里显式做。1.x 没有这个能力，不接不是退化；以后有明确需求再加，加是兼容的，加了再拿掉不是。DELETE（2026-09-16 定，原 W5）：`DELETE FROM milvus.db.coll WHERE ...` 会把谓词翻成 Milvus 表达式后调 Milvus 的 Delete RPC，删的是生产 collection 的在线数据，谓词写宽了没有回滚；Milvus SDK 已经用同一套表达式语法提供 delete，连接器接进来只是把同一个删除动作换到 Spark 作业里发，多一个出错的地方，不多一种能力。连接器的职责是读写存储格式的文件，不碰在线数据的删除。不接的代价为零：用户在 SDK 里执行同一条表达式。随之 `core.expr` 不再需要把中间表示打印回 Milvus 语法的 ExprPrinter。
 
 ## 11 尚未落地
 
@@ -123,7 +123,6 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 |---|---|
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
 | A7 | 清理暂存要 `spark.procedure`，那个包目前是空的，等第 3 层拆分 |
-| R6 | Spark 谓词下推要 `spark.expr` 翻成 IR；`core.expr` 已有 R7 标量子集，Spark 翻译尚未落地。`MilvusScanBuilder` 暂时保留 V1 的 `SupportsPushDownFilters` 接口，但不接受任何 `Filter`，全部作为 residual 交还 Spark 求值；接口选型见 README 第 4 节决策 20 |
 | A2 | 建索引、删索引的 CALL 要 `spark.procedure`（3.5 线是 `spark.functions`），全部是空壳；client 侧还要新增三个 RPC |
 | A3 | load / release / flush / compact 的 CALL，同 A2；client 侧还要新增三个 RPC |
 | A5 | describe 的 CALL，同 A2 |

@@ -87,7 +87,7 @@
     <path d="M362,181 L392,181 L392,120"/>
   </g>
   <g fill="currentColor" font-size="11" text-anchor="middle">
-    <text x="395" y="28">行式或列式,按选项与谓词选</text>
+    <text x="395" y="28">行式或列式,按读选项选择</text>
     <text x="760" y="228">按 SegmentLayout 开段,两条线同一个原生 reader</text>
   </g>
 </svg>
@@ -209,11 +209,14 @@ SegmentReaderRegistry.open(task, schema, neededColumns, columnNameFor, allocator
 <h2 id="columnar">六、行式与列式出口</h2>
 
 <p><strong>列式出口已有,且是默认</strong>:<code>MilvusColumnarPartitionReader</code>,<code>milvus.read.columnar=false</code> 才走行式;
-带向量检索的读回落行式,因为那一步(<code>SegmentVectorSearch</code>)逐行算距离,归属是决策 16。谓词今天不引起回落:ScanBuilder 一个谓词也不接,Spark 自己在列批上算。下面是它的设计。</p>
+带向量检索的读回落行式,因为那一步(<code>SegmentVectorSearch</code>)逐行算距离,归属是决策 16。
+普通扫描接受的 DataSource V2 谓词由 <code>core.expr</code> 对 Arrow 批求值,不引起行式回落;
+完整语义见<a href="expressions.html">谓词下推设计</a>。</p>
 
-<p>无删除的批直接包装成 <code>ColumnarBatch</code>；有删除时通过
-<code>SelectedRowsColumn</code> 按存活行下标重映射，不复制整列 buffer。行式逐行跳过同一套
-<code>ColumnBinding.isDeleted</code> 判定。两种出口都在底层 reader 读到 EOF 时执行同一个物理行数校验，
+<p>没有删除和谓词排除的批直接包装成 <code>ColumnarBatch</code>；需要排除行时,reader 逐行计算
+<code>isDeleted || predicateBitmap.isExcluded</code>。列式出口通过 <code>SelectedRowsColumn</code>
+按存活行下标重映射,不复制整列 buffer；行式出口在物化 <code>InternalRow</code> 前直接跳过该行。
+两种出口都在底层 reader 读到 EOF 时执行同一个物理行数校验，
 因此不会一条报短读、另一条静默返回。理由与代价见
 <a href="storage-io.html#cost">storage-io 第四节</a>。</p>
 
@@ -263,10 +266,13 @@ id、Milvus 类型、nullable、主键/分区键/聚类键标记和向量维度�
 <li><strong>向量搜索这条分支怎么放。</strong><code>spark.read.SegmentVectorSearch</code>
 是行式 reader 的可选阶段(#06 从 V3 reader 里拆出),和普通扫描是两条并行路径。它属于 V*,本页不设计,
 但 <code>SegmentReader</code> 接口要留得下它,不能设计成只能顺序扫。</li>
-<li><strong>谓词。</strong>C 那条路不可用(<code>loon_segment_reader_get_filtered_stream</code>
-收下谓词、返回 OK、然后忽略,见
-<a href="storage-access.html#bridge-gap">storage-access 4.4</a>),由 <code>core.expr</code>
-在 JVM 侧求值。</li>
+<li><strong>两种谓词入口。</strong>R7 的手写 <code>PlanParser</code> 已用于
+<code>MilvusSearch.filter</code> / <code>vector.search.filter</code>，在持久化索引搜索前求值；普通表读取的
+<code>milvus.filter</code> option 仍未接入。R6 的 Spark V2 谓词按<a href="expressions.html">独立设计</a>
+只在普通扫描的 JVM Arrow 批上求值；带 <code>vector.search.*</code> 的读取全部作为 residual 留给 Spark，
+因此 Spark 条件在 TopK 后执行。C 的
+<code>loon_segment_reader_get_filtered_stream</code> 会忽略传入谓词,连接器不调用它,见
+<a href="storage-access.html#bridge-gap">storage-access 4.4</a>。</li>
 <li><strong>回表与 row group 剪枝。</strong><code>take</code>（R14）和统计驱动的 row group 剪枝
 （R10）仍是独立能力，不通过普通顺序扫描的外围分支模拟。</li>
 </ol>
@@ -311,7 +317,8 @@ UAT 三个带删除的快照(V2 加 L0、V3 加 L0、V3 折进清单)都读回 2
 各写一遍的主循环变成一个 <code>MilvusRowPartitionReader</code>:拉批、逐行交付、跳过已删行、有谓词时逐行求值、读完按
 <code>SegmentReadTask.expectedRows</code> 核对总行数(原来只有 V2 有这道自查,现在 manifest 布局给出行数时同样受益)。
 两条线的列名规则和从 schema 推需要哪些列,原来是两个 reader 的伴生对象,现在归各自的 <code>ColumnBinding</code>;
-向量检索拆成 <code>SegmentVectorSearch</code>,谓词求值拆成 <code>RowFilters</code>,都是纯函数,单独有用例。
+向量检索拆成 <code>SegmentVectorSearch</code>;当时拆出的 V1 <code>RowFilters</code> 是过渡实现,
+R6 由 <code>spark.expr</code> 翻译 V2 Predicate,再由 <code>core.expr</code> 对列批统一求值。
 行为不变:UAT 的 V3 折进清单、V2 加 L0、全类型三个快照读回的行数与列值与合并前一致。</li>
 
 <li><s>写 <code>core.read.exec</code> 的 <code>SegmentReader</code> 与注册表。</s>已完成。

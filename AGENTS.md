@@ -55,10 +55,13 @@ in `core` or `compat` mentions `org.apache.hadoop`.
 
 `core.index` loads persisted index files and executes vector queries through
 Knowhere; `BruteForceSearch` retains the per-segment brute-force path.
-`core.expr` implements the validated scalar subset of Milvus expressions.
-Index caching and writing remain unwritten. `stats` writes primary-key bloom filters; `write.commit` holds
-job manifests and registration. `read.plan` builds tasks and lists delete files;
-`read.exec` reads them on the executor and opens the segment reader.
+`core.expr` holds two explicit scalar contracts: `Expr` / `PlanParser` /
+`Evaluator` for Milvus syntax used by persisted-index filters, and the
+schema-bound `PredicateExpr` / `PredicateEvaluator` / `Bitmap` for Spark V2
+predicate pushdown. Index caching and writing remain unwritten. `stats` writes
+primary-key bloom filters; `write.commit` holds job manifests and registration.
+`read.plan` builds tasks and lists delete files; `read.exec` reads them on the
+executor and opens the segment reader.
 
 Layer 3 is split by package: `sources` holds only the `format("milvus")`
 entry point, `table` the table, `read` the scan builder, the scan and the
@@ -71,7 +74,9 @@ partition planning is in `core.read.plan`. `catalog`
 implements three-part table loading and latest/name/timestamp
 snapshot selection. It also maps Milvus databases to one-level Spark
 namespaces and collections to tables for `SHOW NAMESPACES` and `SHOW TABLES`;
-Catalog DDL remains unimplemented. `expr` is empty. Names follow the Names
+Catalog DDL remains unimplemented. `expr` translates supported DataSource V2
+predicates into core `PredicateExpr` values and leaves each unsupported
+predicate tree with Spark. Names follow the Names
 section of [docs/writing.md](docs/writing.md): the two storage lines are `V2`
 and `V3` everywhere, after the snapshot's `storage_version`.
 
@@ -84,7 +89,7 @@ native resource loader. Persisted HNSW loading uses upstream BinarySet and index
 search APIs; Cardinal stream files require a Cardinal-enabled build. Real-file
 compatibility and validation results are recorded in the vector search design.
 
-Six design questions are still open: 10, 16, 19, 20, 21 and 22 in
+Five design questions are still open: 10, 16, 19, 21 and 22 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
 block specific packages, so check that list before starting on one.
 
@@ -119,6 +124,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How are object storage credentials handled? | [docs/design/architecture/storage-auth.html](docs/design/architecture/storage-auth.html) for the mechanism, the rules and the measured facts; apply the skill [.agents/skills/spark-milvus-storage-auth/SKILL.md](.agents/skills/spark-milvus-storage-auth/SKILL.md) |
 | How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership, the metrics taken on the crossing (G5). Read and write share it |
 | How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four snapshot sources, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
+| How does Spark predicate pushdown preserve semantics? | [docs/design/architecture/expressions.html](docs/design/architecture/expressions.html) — the DataSource V2 support matrix, residual contract, three-valued logic, field-id binding, hidden predicate columns and row/columnar execution |
 | How does Catalog discovery work, and how does a three-part table name select one fixed snapshot? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — one-level namespaces, table listing, absence and failure semantics, catalog configuration, identifier rules, latest/version/timestamp selection, HybridTS conversion and the read-only boundary |
 | How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment still lacks before registration, the development outline |
 | How does a `CALL milvus.system.<name>(...)` statement become a call? | [docs/design/architecture/procedure.html](docs/design/architecture/procedure.html) — the grammar, the parser extension, the logical node and strategy, what is generated per Spark line, the procedure interface; design under review (#17) |

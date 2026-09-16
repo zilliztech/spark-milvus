@@ -2,7 +2,8 @@ package com.zilliz.spark.connector.read
 
 import scala.collection.JavaConverters._
 
-import org.apache.spark.sql.sources.{EqualTo, Filter}
+import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
+import org.apache.spark.sql.connector.expressions.filter.Predicate
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
@@ -114,10 +115,14 @@ class SegmentIndexSearchPlanningTest extends AnyFunSuite {
       )
       builder.pruneColumns(projection)
       assert(builder.build().readSchema() == projection)
-      val filters =
-        Array[Filter](EqualTo("id", 1L))
-      assert(builder.pushFilters(filters).sameElements(filters))
-      assert(builder.pushedFilters().isEmpty)
+      val predicates = Array(
+        new Predicate(
+          "=",
+          Array[Expression](Expressions.column("id"), Expressions.literal(1L))
+        )
+      )
+      assert(builder.pushPredicates(predicates).sameElements(predicates))
+      assert(builder.pushedPredicates().isEmpty)
     }
   }
 

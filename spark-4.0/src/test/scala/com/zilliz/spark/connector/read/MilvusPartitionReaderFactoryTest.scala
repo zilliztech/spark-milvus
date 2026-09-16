@@ -1,10 +1,10 @@
 package com.zilliz.spark.connector.read
 
-import org.apache.spark.sql.sources.{EqualTo, Filter}
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.zilliz.milvus.storage.expr.{FieldRef, IsNotNull, PredicateExpr}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
@@ -95,11 +95,11 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
 
   private def factory(
       columnar: Boolean,
-      pushedFilters: Array[Filter] = Array.empty
+      pushedExpression: Option[PredicateExpr] = None
   ) = new MilvusPartitionReaderFactory(
     schema,
     Map(MilvusOption.ReadColumnar -> columnar.toString),
-    pushedFilters
+    pushedExpression
   )
 
   test(
@@ -112,15 +112,13 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     assert(factory(columnar = true).supportColumnarReads(v3()))
   }
 
-  // The scan builder keeps the predicates it said it would evaluate, and Spark
-  // does not re-apply them. The columnar reader does not evaluate them, so a
-  // partition that carries any goes back to the row reader instead of silently
-  // returning rows that should have been filtered out.
-  test("a pushed-down filter sends the partition back to the row reader") {
-    val withFilter =
-      factory(columnar = true, Array[Filter](EqualTo("id", 1L)))
-    assert(!withFilter.supportColumnarReads(v3()))
-    assert(!withFilter.supportColumnarReads(v2()))
+  test("a pushed-down predicate keeps both storage lines columnar") {
+    val withPredicate = factory(
+      columnar = true,
+      Some(IsNotNull(FieldRef(100L, DataType.Int64)))
+    )
+    assert(withPredicate.supportColumnarReads(v3()))
+    assert(withPredicate.supportColumnarReads(v2()))
   }
 
   // topK and queryVector make the row reader run a brute-force search. The
