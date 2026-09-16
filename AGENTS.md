@@ -47,7 +47,8 @@ Done: the 1.x sources are all in their modules and `src/` no longer exists. 641
 unit tests pass. `core` has schema, codec, snapshot, manifest, delete, path,
 credential and `io.ObjectStore` over the native filesystem; `compat` has the V2
 packed and backup entry points; `client` has the RPCs required by the currently
-implemented paths, while C1 still needs ListDatabases and ShowCollections.
+implemented paths, including ListDatabases and ShowCollections for read-only
+Catalog discovery.
 Every driver-side read opens storage through that one store, and no source file
 in `core` or `compat` mentions `org.apache.hadoop`.
 
@@ -66,10 +67,11 @@ mapping. DataSource `getTable` and Catalog `loadTable` share `MilvusTables`,
 which resolves the `Snapshot` once before the table carries it to the scan;
 moving the partition builder into `core.read.plan` is the next step. `catalog`
 implements three-part table loading and latest/name/timestamp
-snapshot selection; namespace listing and DDL remain unimplemented. `expr` is
-empty. Names follow the Names section of
-[docs/writing.md](docs/writing.md): the two storage lines are `V2` and `V3`
-everywhere, after the snapshot's `storage_version`.
+snapshot selection. It also maps Milvus databases to one-level Spark
+namespaces and collections to tables for `SHOW NAMESPACES` and `SHOW TABLES`;
+Catalog DDL remains unimplemented. `expr` is empty. Names follow the Names
+section of [docs/writing.md](docs/writing.md): the two storage lines are `V2`
+and `V3` everywhere, after the snapshot's `storage_version`.
 
 Layer 1 is written and in use: `native-storage` wraps the `loon_*` entry points
 for both reading and writing and loads its own libraries. The upstream
@@ -111,7 +113,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How are object storage credentials handled? | [docs/design/architecture/storage-auth.html](docs/design/architecture/storage-auth.html) for the mechanism, the rules and the measured facts; apply the skill [.agents/skills/spark-milvus-storage-auth/SKILL.md](.agents/skills/spark-milvus-storage-auth/SKILL.md) |
 | How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership, the metrics taken on the crossing (G5). Read and write share it |
 | How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four snapshot sources, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
-| How does a three-part table name select one fixed snapshot? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — catalog configuration, identifier rules, latest/version/timestamp selection, HybridTS conversion and the read-only boundary |
+| How does Catalog discovery work, and how does a three-part table name select one fixed snapshot? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — one-level namespaces, table listing, absence and failure semantics, catalog configuration, identifier rules, latest/version/timestamp selection, HybridTS conversion and the read-only boundary |
 | How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment still lacks before registration, the development outline |
 | How does a `CALL milvus.system.<name>(...)` statement become a call? | [docs/design/architecture/procedure.html](docs/design/architecture/procedure.html) — the grammar, the parser extension, the logical node and strategy, what is generated per Spark line, the procedure interface; design under review (#17) |
 | How will vector queries use persisted Milvus indexes? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — issue #125 development proposal: index metadata, native loading, filtering, row retrieval, global TopK and validation; pending review |

@@ -21,6 +21,7 @@ import com.google.protobuf.ByteString
 
 import com.zilliz.milvus.client.{
   CollectionNotFoundException,
+  DatabaseNotFoundException,
   MilvusConnectionException,
   MilvusRateLimitException,
   MilvusRpcException
@@ -58,10 +59,14 @@ import io.milvus.grpc.milvus.{
   GetPersistentSegmentInfoRequest,
   ImportRequest,
   InsertRequest,
+  ListDatabasesRequest,
+  ListDatabasesResponse,
   LoadCollectionRequest,
   MilvusServiceGrpc,
   MutationResult,
   QueryRequest,
+  ShowCollectionsRequest,
+  ShowCollectionsResponse,
   ShowPartitionsRequest
 }
 import io.milvus.grpc.schema.{
@@ -214,6 +219,7 @@ class MilvusClient(params: MilvusConnectionParams)
     val reason = Option(status.reason).getOrElse("")
     if (
       status.code == MilvusClient.RateLimitErrorCode ||
+      status.errorCode == ErrorCode.RateLimit ||
       reason.toLowerCase.contains(MilvusClient.RateLimitReasonMarker)
     ) {
       Failure(new MilvusRateLimitException(s"Failed to $api: $reason"))
@@ -221,6 +227,74 @@ class MilvusClient(params: MilvusConnectionParams)
       Failure(new Exception(s"Failed to $api: $reason"))
     }
   }
+
+  /** Lists every database visible to the configured Milvus identity. */
+  def listDatabases(): Try[Seq[String]] =
+    rpcCall("listDatabases")(listDatabasesRPC()).flatMap { response =>
+      checkResponseStatus("listDatabases", response.status)
+        .map(_ => response.dbNames)
+    }
+
+  /** Lists every collection in `dbName`.
+    *
+    * A confirmed missing database is kept distinct from transport,
+    * authorization, and other RPC failures so the Spark catalog can expose the
+    * corresponding namespace semantics without turning failures into an empty
+    * listing.
+    */
+  def showCollections(dbName: String): Try[Seq[String]] =
+    rpcCall(s"showCollections for database '$dbName'")(
+      showCollectionsRPC(dbName)
+    ).flatMap { response =>
+      response.status match {
+        case Some(status) if MilvusClient.isDatabaseNotFound(status) =>
+          Failure(
+            new DatabaseNotFoundException(
+              s"Milvus database '$dbName' does not exist"
+            )
+          )
+        case status =>
+          checkResponseStatus(
+            s"showCollections for database '$dbName'",
+            status
+          )
+            .map(_ => response.collectionNames)
+      }
+    }
+
+  private def rpcCall[A](operation: String)(call: => A): Try[A] =
+    Try(call).recoverWith { case error =>
+      val detail = Option(error.getMessage)
+        .filter(_.nonEmpty)
+        .map(message => s": $message")
+        .getOrElse("")
+      val wrapped = new MilvusRpcException(s"Failed to $operation$detail")
+      wrapped.initCause(error)
+      Failure(wrapped)
+    }
+
+  private def checkResponseStatus(
+      api: String,
+      status: Option[Status]
+  ): Try[Status] =
+    status match {
+      case Some(value) => checkStatus(api, value)
+      case None =>
+        Failure(
+          new MilvusRpcException(s"Failed to $api: response status is missing")
+        )
+    }
+
+  /** Package-visible seams keep the public API testable without opening a real
+    * channel or adding a runtime client abstraction.
+    */
+  private[api] def listDatabasesRPC(): ListDatabasesResponse =
+    rpcStub.listDatabases(ListDatabasesRequest())
+
+  private[api] def showCollectionsRPC(
+      dbName: String
+  ): ShowCollectionsResponse =
+    rpcStub.showCollections(ShowCollectionsRequest(dbName = dbName))
 
   def createDatabase(
       dbName: String,
@@ -1227,6 +1301,9 @@ object MilvusClient {
       status.errorCode == ErrorCode.CollectionNameNotFound) ||
       status.code == CollectionNotFoundCode ||
       status.code == DatabaseNotFoundCode
+
+  private[client] def isDatabaseNotFound(status: Status): Boolean =
+    status.code == DatabaseNotFoundCode
 
   def isServiceNotImplemented(t: Throwable): Boolean = {
     val visited = java.util.Collections.newSetFromMap(

@@ -6,7 +6,7 @@
 |---|---|---|
 | 确认功能承诺、优先级和实现位置 | 顶层索引 | [能力规划](capabilities.md) |
 | 理解总体结构、确定模块与包的归属 | architecture/ | [架构图解](architecture/overview.html)、[模块与迁移](architecture/modules.md) |
-| 开发三段表名与快照时间旅行入口 | architecture/ | [只读 Catalog](architecture/catalog.html) |
+| 开发只读目录、三段表名与快照时间旅行入口 | architecture/ | [只读 Catalog](architecture/catalog.html) |
 | 开发使用 Milvus 索引文件的向量查询 | architecture/ | [向量查询方案](architecture/vector-search.html)（issue #125，待评审） |
 | core 怎么访问对象存储、凭证怎么下发 | architecture/ | [存储访问层](architecture/storage-access.html)（未完待续） |
 | 改动对象存储凭证、provider 链、按桶配置 | architecture/ | [对象存储认证](architecture/storage-auth.html) |
@@ -143,7 +143,7 @@ flowchart LR
 
 | 槽位 | 2.0 |
 |---|---|
-| Catalog | 三段名 `milvus.db.coll`；loadTable 的 version 和 timestamp 对应快照名和时间点；createTable、dropTable 走 gRPC |
+| Catalog | database 是单层 namespace、collection 是 table；`SHOW NAMESPACES` 与 `SHOW TABLES` 走目录 RPC；三段名 `milvus.db.coll`；loadTable 的 version 和 timestamp 对应快照名和时间点；createTable、dropTable 走 gRPC |
 | Table | schema 来自快照；元数据列 segment id、row offset、timestamp（名字见决策 5）；行数字节数来自快照；不实现 DeleteV2（能力表第 10 节） |
 | ScanBuilder | 列裁剪、DataSource V2 谓词、Limit、RuntimeV2Filtering；不实现 V1 Filter |
 | 旁路 | `CALL milvus.system.<name>(...)`，四条线同一个 SQL 语法扩展（[procedure.html](architecture/procedure.html)）；清单见 capabilities.md 第 4 节 |
@@ -167,7 +167,7 @@ flowchart LR
 | P0 | 1 | sbt 拆 core、native、spark4，依赖规则进构建 | 不拆，后面每一项都在旧结构上打补丁 |
 | P0 | 2 | 核心层对象模型与 SnapshotCatalog；SchemaMapper 合并四份映射；StoragePath | 读的唯一入口 |
 | P0 | 3 | storage JNI、列式 reader、ColumnVector、DeleteBitset | 拷贝 6 次到 2 次；下游算子能拿到地址 |
-| P1 | 4 | Catalog、元数据列、统计、DataSource V2 谓词、Limit | 三段名和回表 |
+| P1 | 4 | Catalog 目录与三段名、元数据列、统计、DataSource V2 谓词、Limit | 目录发现、三段名和回表 |
 | P1 | 5 | ExprTranslator、IR、求值器 | 谓词语义对齐 Milvus |
 | P1 | 6 | SegmentWriter、Committer、register Procedure | backfill 登记走 BatchUpdateManifest 可先做；append 等第 5 节的 RPC |
 | P2 | 7 | knowhere 的 C shim 和 JNI、索引加载、索引写出与登记、BruteForce；backfill 写模式 | 依赖列式 reader 和写路径 |
@@ -204,7 +204,8 @@ flowchart LR
 
 | 日期 | 决策 | 结论 |
 |---|---|---|
-| 2026-09-16 | issue #135 的只读 Catalog 边界 | R1 的已知三段名加载与 C1 的目录枚举解耦：`loadTable` 只用现有 `getCollectionInfo` 取得 collection id，不新增 ListDatabases/ShowCollections。三个 loadTable 重载共享 [catalog.html](architecture/catalog.html) 的一条路径，分别选最新、快照名和时间点；Spark Unix 微秒在 catalog 边界转换成该物理毫秒的最大 Milvus HybridTS，core 继续保存和比较原始 `create_ts`。Catalog 只接受 client 模式，不实现 SupportsNamespaces、列表、DDL、缓存或第二条读链。主体在 spark-base，按线只保留公开类和 createTable 签名适配。 |
+| 2026-09-16 | Catalog 的只读目录合同 | C1 与 R1 保持两条路径：`ListDatabases` 把 Milvus database 原样映射成唯一一层 Spark namespace，`ShowCollections(database)` 把该库的全部 collection 映射成 table；目录不读快照或对象存储，collection 没有可读快照时仍可列出。根目录列 database，已存在的 database 没有子 namespace；`SHOW TABLES` 必须显式给一段 database，不设隐式 default，也不跨库摊平。Catalog 不缓存目录，顺序不作合同；成功的空响应是空结果，只有确认不存在才转 `NoSuchNamespaceException` / `false`，认证、网络、限流等故障保留。namespace 与 table 的 create、alter、drop、rename 继续拒绝。主体与四条线共用，设计见 [catalog.html](architecture/catalog.html)。 |
+| 2026-09-16 | issue #135 的只读 Catalog 边界 | R1 的已知三段名加载与 C1 的目录枚举解耦：`loadTable` 只用现有 `getCollectionInfo` 取得 collection id，不新增 ListDatabases/ShowCollections。三个 loadTable 重载共享 [catalog.html](architecture/catalog.html) 的一条路径，分别选最新、快照名和时间点；Spark Unix 微秒在 catalog 边界转换成该物理毫秒的最大 Milvus HybridTS，core 继续保存和比较原始 `create_ts`。该项只交付 R1，SupportsNamespaces、列表与 DDL 均不在该项范围；C1 后续按上一行的独立目录合同接入。主体在 spark-base，按线只保留公开类和 createTable 签名适配。 |
 | 2026-09-15 | issue #125 开发方案与索引格式说明 | 新增 [vector-search.html](architecture/vector-search.html) 草稿，以 refactor/v2 a070569 为基线；查询入口、V7 能力和回退范围保留在开放决策 16、21，尚未批准或实现。修正原加载描述：需要解析事件与 payload 编码，SLICE_META 只在切片时存在，16 MiB 不是解码常量；快照段 index_files 与 V3 数据 Manifest 的索引登记是不同来源。决策 16 的 JVM 对拍文字按 2026-09-14 已定政策纠正；snapshot.html 的索引能力编号由 R7 改为 V2。 |
 | 2026-09-09 | 版本号与分支 | 2.0.0，refactor/v2 |
 | 2026-09-09 | 谓词求值位置 | 核心层 |

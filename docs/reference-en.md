@@ -14,7 +14,7 @@ Milvus Spark Connector provides the **`milvus`** data source format for reading 
 
 Additionally, a convenient `MilvusDataReader` utility class is provided to simplify collection data reading operations.
 
-## Catalog Tables and Snapshot Time Travel
+## Catalog Discovery, Tables, and Snapshot Time Travel
 
 Register `MilvusCatalog` once to use a Milvus collection as a three-part Spark
 table. Spark removes the `spark.sql.catalog.milvus.` prefix and passes the
@@ -44,6 +44,24 @@ val atTime = spark.sql(
 )
 ```
 
+The same Catalog exposes Milvus databases and collections through Spark's
+read-only discovery commands:
+
+```sql
+SHOW NAMESPACES IN milvus;
+SHOW TABLES IN milvus.default;
+SHOW TABLES IN milvus.default LIKE 'product*';
+```
+
+A Milvus database is one Spark namespace and a collection is a table in that
+namespace. There are no nested namespaces. `SHOW TABLES` therefore requires an
+explicit database; `SHOW TABLES IN milvus` does not implicitly select
+`default` or combine collections from several databases. An existing database
+with no collections returns no rows. Collections are listed from Milvus
+metadata even when they do not yet have a readable snapshot. Spark applies the
+optional `LIKE` pattern after discovery. Names are preserved as returned by
+Milvus, and result order is unspecified.
+
 The identifier must contain exactly one database and one collection. Those two
 names override `milvus.database.name` and `milvus.collection.name` in catalog
 configuration. An ordinary load selects the latest snapshot; `VERSION AS OF`
@@ -59,10 +77,15 @@ Time travel selects snapshot metadata; it is not a retention guarantee. The
 connector does not retain historical segment files, so compaction or garbage
 collection can make a selected older snapshot unreadable.
 
-Catalog tables require client mode (`milvus.uri`). Offline
-`milvus.snapshot.path` and `milvus.backup.dir` reads remain on
-`format("milvus")`. This catalog does not implement namespace/table listing or
-CREATE, ALTER, DROP, and RENAME operations.
+Catalog tables and discovery require client mode (`milvus.uri`). Discovery
+contacts only the Milvus service; it does not read snapshot metadata or object
+storage. A confirmed missing database is reported as Spark's missing-namespace
+error. Authentication, authorization, network, timeout, rate-limit, and other
+service failures are reported as errors. Empty results only come from a
+successful discovery response. Offline `milvus.snapshot.path` and
+`milvus.backup.dir` reads remain on
+`format("milvus")`. The Catalog is read-only for metadata: CREATE, ALTER, DROP,
+and RENAME operations on namespaces or tables are unsupported.
 
 ## 1. `MilvusDataReader` Convenient Reading Method
 

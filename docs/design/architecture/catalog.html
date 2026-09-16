@@ -22,13 +22,13 @@
 
 <h1>只读 Catalog</h1>
 
-<p>对应<a href="../capabilities.md">能力索引</a>中的 R1、R2。固定快照与四种来源见
+<p>对应<a href="../capabilities.md">能力索引</a>中的 R1、R2、C1。固定快照与四种来源见
 <a href="snapshot.html">snapshot.html</a>，读取执行见 <a href="read.html">read.html</a>。</p>
 
-<p class="thesis"><strong>Catalog 只把 Spark 的三段表名和时间旅行参数翻译成一个固定
-<code>Snapshot</code>，随后交给现有 <code>MilvusTable</code>；它不另建读取链路。</strong>
-普通加载取最新快照，版本加载按快照名精确匹配，时间加载把 Spark 的 Unix 微秒转换成
-Milvus HybridTS 上界后选择不晚于该边界的最新快照。</p>
+<p class="thesis"><strong>Catalog 有两条互不混合的只读路径：目录发现只调用 Milvus 的
+<code>ListDatabases</code> 和 <code>ShowCollections</code>；表加载把 Spark 三段表名和时间旅行参数
+翻译成一个固定 <code>Snapshot</code>，随后交给现有 <code>MilvusTable</code>。</strong>目录发现不打开
+对象存储、不读取快照、不规划 Scan；表加载也不靠先列全库或全 collection 来确认一个已知名字。</p>
 
 <h2 id="contract">一、名称与配置</h2>
 
@@ -47,20 +47,77 @@ spark.sql.catalog.milvus.fs.region = us-west-2
 spark.sql.catalog.milvus.fs.use_ssl = true
 spark.sql.catalog.milvus.fs.use_iam = true</code></pre>
 
-<pre><code>SELECT id, embedding FROM milvus.default.products</code></pre>
+<pre><code>SHOW NAMESPACES IN milvus;
+SHOW TABLES IN milvus.default;
+SELECT id, embedding FROM milvus.default.products;</code></pre>
 
 <table>
 <tr><th>输入</th><th>处理</th><th>原因</th></tr>
 <tr><td><code>spark.sql.catalog.&lt;name&gt;.*</code></td><td>Spark 去掉前缀后交给 <code>initialize</code>；Catalog 保存不可变副本</td><td>一次注册可承载连接、对象存储和读取选项</td></tr>
-<tr><td>database、collection</td><td>总是由本次 <code>Identifier</code> 覆盖同名配置</td><td>一个 Catalog 可以安全加载多张表，初始化配置不能把名字串到另一张表</td></tr>
+<tr><td>database、collection</td><td>表加载与目录发现都以本次标识符为准；初始化配置里的同名 option 不限制目录，也不覆盖标识符</td><td>一个 Catalog 可以安全访问多个 database 和 collection</td></tr>
 <tr><td>snapshot、backup 离线模式</td><td>拒绝</td><td>离线文件没有可验证的三段目录关系，继续由 <code>format("milvus")</code> 承载</td></tr>
 </table>
 
 <p>已知表名的加载只调用现有 <code>getCollectionInfo(database, collection)</code> 取得 collection id；
-它不依赖列数据库或列 collection 的 RPC。<code>SHOW NAMESPACES</code>、<code>SHOW TABLES</code> 属于 C1，
-本阶段不实现 <code>SupportsNamespaces</code>。</p>
+它不先调用目录 RPC。目录发现只需 <code>milvus.uri</code> 与认证配置；对象存储配置只在加载表和读取
+数据时使用。</p>
 
-<h2 id="path">二、一次解析，沿用一条读链</h2>
+<h2 id="discovery">二、单层目录</h2>
+
+<p><strong>Catalog 根目录的直接子项是 Milvus database，database 的直接表是 collection；没有第二层
+namespace。</strong>目录名与 collection 名按 Milvus 返回值原样交给 Spark，不转小写、不裁空白、不改名、
+不去重。返回顺序不是接口合同，调用方和测试不能依赖服务端顺序。</p>
+
+<figure>
+<svg viewBox="0 0 820 230" role="img" aria-label="Milvus Catalog 根目录下一层是 database，每个 database 下是 collection table">
+  <g fill="none" stroke="currentColor" stroke-width="1.2">
+    <rect x="20" y="84" width="180" height="58" rx="3"/>
+    <rect x="292" y="34" width="180" height="58" rx="3"/>
+    <rect x="292" y="138" width="180" height="58" rx="3"/>
+    <rect x="604" y="8" width="190" height="58" rx="3"/>
+    <rect x="604" y="86" width="190" height="58" rx="3"/>
+    <line x1="200" y1="113" x2="246" y2="113"/>
+    <line x1="246" y1="63" x2="246" y2="167"/>
+    <line x1="246" y1="63" x2="292" y2="63"/>
+    <line x1="246" y1="167" x2="292" y2="167"/>
+    <line x1="472" y1="63" x2="548" y2="63"/>
+    <line x1="548" y1="37" x2="548" y2="115"/>
+    <line x1="548" y1="37" x2="604" y2="37"/>
+    <line x1="548" y1="115" x2="604" y2="115"/>
+  </g>
+  <g fill="currentColor" font-size="12" text-anchor="middle">
+    <text x="110" y="108">Milvus Catalog</text><text x="110" y="125">root</text>
+    <text x="382" y="58">database_a</text><text x="382" y="75">namespace</text>
+    <text x="382" y="162">database_b</text><text x="382" y="179">namespace</text>
+    <text x="699" y="32">collection_1</text><text x="699" y="49">table</text>
+    <text x="699" y="110">collection_2</text><text x="699" y="127">table</text>
+  </g>
+</svg>
+</figure>
+
+<table>
+<tr><th>Spark Catalog 调用</th><th>结果</th><th>远端调用</th></tr>
+<tr><td><code>listNamespaces()</code> 或 <code>listNamespaces([])</code></td><td>每个 database 变成一段 namespace：<code>[database]</code></td><td><code>ListDatabases</code></td></tr>
+<tr><td><code>listNamespaces([database])</code></td><td>database 存在时返回空数组，因为它是叶子；不存在时抛 <code>NoSuchNamespaceException</code></td><td><code>ListDatabases</code>，只核验存在性</td></tr>
+<tr><td><code>namespaceExists([database])</code></td><td>成功列库且名字存在才是 <code>true</code>；确认不存在才是 <code>false</code></td><td><code>ListDatabases</code></td></tr>
+<tr><td><code>loadNamespaceMetadata([database])</code></td><td>存在时返回空属性表；不存在时抛 <code>NoSuchNamespaceException</code></td><td><code>ListDatabases</code></td></tr>
+<tr><td><code>listTables([database])</code></td><td>每个 collection 变成 <code>Identifier.of([database], collection)</code></td><td><code>ShowCollections</code>，类型为全部 collection</td></tr>
+</table>
+
+<p>空 database 的 <code>listTables</code> 返回空数组，不等于 database 不存在。<code>ShowCollections</code>
+列出 Milvus 元数据里的全部 collection，即使某个 collection 还没有可读快照；目录发现不以快照目录
+是否存在来过滤结果。<code>SHOW TABLES ... LIKE</code> 的匹配由 Spark 在结果上完成，Connector 不另发
+带模式的 RPC。</p>
+
+<p><code>listNamespaces</code> 收到两段或更多段时抛 <code>NoSuchNamespaceException</code>；
+<code>listTables</code> 必须恰有一段 database，根目录和嵌套名字都抛同一 Spark 标准异常。因此
+<code>SHOW TABLES IN milvus</code> 不会隐式使用 <code>default</code>，也不会把多个 database 的
+collection 摊成一张表。<code>namespaceExists</code> 对根目录或嵌套名字返回 <code>false</code>。</p>
+
+<p>Catalog 不缓存目录。每次发现都创建一个短生命周期的 <code>MilvusClient</code>，成功和失败都关闭；
+结果反映本次 RPC 对当前凭证可见的 database 与 collection。</p>
+
+<h2 id="path">三、一次解析，沿用一条读链</h2>
 
 <p><strong>三个入口只在快照选择方式上不同。</strong> 选中的 <code>Snapshot</code> 在
 <code>loadTable</code> 内解析一次并放进 <code>MilvusTable</code>；schema、ScanBuilder、分区规划和 reader
@@ -98,7 +155,7 @@ spark.sql.catalog.milvus.fs.use_iam = true</code></pre>
 <tr><td><code>loadTable(identifier, timestamp)</code></td><td>Unix 微秒先转 HybridTS 上界，再调用 <code>asOf</code></td></tr>
 </table>
 
-<h2 id="time">三、时间参数在 Catalog 边界换单位</h2>
+<h2 id="time">四、时间参数在 Catalog 边界换单位</h2>
 
 <p><strong>Spark 的时间是 Unix epoch 微秒，<code>snapshot_info.create_ts</code> 是 Milvus
 HybridTS。</strong> 后者的高位是 Unix epoch 毫秒，低 18 位是同一毫秒内的逻辑时钟；它表示各
@@ -115,10 +172,10 @@ logical 大于 0 的快照会被漏掉。负时间饱和到 <code>Long.MinValue<
 <p><strong>时间旅行只选择已有快照元数据，不提供保留策略。</strong> Connector 不保留旧段文件；
 compaction 或 GC 回收快照引用的段后，按名字或时间选中该快照仍可能在读取数据文件时失败。</p>
 
-<h2 id="errors">四、失败与只读边界</h2>
+<h2 id="errors">五、失败与只读边界</h2>
 
 <p><strong>无效请求在 driver 规划期失败，只把能够确认的“不存在”翻成 Spark 标准语义。</strong>
-名称层级错误、空版本、非 client 模式给出 <code>IllegalArgumentException</code>；Milvus 明确返回
+表名层级错误、空版本、非 client 模式给出 <code>IllegalArgumentException</code>；表加载中 Milvus 明确返回
 collection / database 不存在时，Catalog 抛 <code>NoSuchTableException</code>，使
 <code>tableExists</code> 和 SQL 缺表行为符合 Spark 约定。collection 已存在但指定名字或时间点
 没有快照候选时，保留含选择条件和 metadata prefix 的 <code>SnapshotNotFoundException</code>；整个
@@ -126,14 +183,23 @@ prefix 为空也保留明确错误，因为它可能是尚无快照，也可能�
 缺失或冲突的 <code>create_ts</code>、网络、认证、对象存储和解析异常同样保留原错误链，不能被改成
 空表或 <code>false</code>。</p>
 
-<div class="warn"><strong>只读是接口边界。</strong> <code>listTables</code>、create、alter、drop、rename
-都明确抛出 <code>UnsupportedOperationException</code>。本阶段不新增列表 RPC、缓存、DDL、Procedure、
-Scan、对象存储或原生实现。这里的“只读”只指 Catalog 元数据操作；已加载的 <code>MilvusTable</code>
-仍沿用现有 append 写链。</div>
+<p>目录发现只把两类已确认的结果翻成 Spark 语义：成功 RPC 的空名字列表是空结果；Milvus 明确报告
+database 不存在时是 <code>NoSuchNamespaceException</code>，而 <code>namespaceExists</code> 才返回
+<code>false</code>。认证、授权、网络、超时、限流、RPC 不可用、非成功状态与响应解析失败保留原异常链，
+不能伪装成空目录、空 collection 列表或 namespace 不存在。异常带操作名与请求的 database，但不带
+token 或对象存储密钥。</p>
 
-<h2 id="versions">五、四条 Spark 线</h2>
+<div class="warn"><strong>只读边界覆盖元数据修改；目录发现属于读取。</strong>
+<code>createNamespace</code>、<code>alterNamespace</code>、<code>dropNamespace</code> 以及 table 的
+create、alter、drop、rename 都明确抛出 <code>UnsupportedOperationException</code>。Catalog 不提供
+namespace owner、comment、location、database id 或创建时间；<code>loadNamespaceMetadata</code> 只确认
+database 存在并返回空表。目录发现也不新增缓存、Procedure、Scan、对象存储或原生实现。已加载的
+<code>MilvusTable</code> 仍沿用现有 append 写链。</div>
 
-<p><strong>三个 <code>loadTable</code> 签名在 Spark 3.5、4.0、4.1、4.2 一致，主体放在
-<code>spark-base</code>。</strong> 每条线只保留公开的无参 <code>MilvusCatalog</code> 和本线首选
-<code>createTable</code> 签名；它们都把 create 明确判为不支持。测试先验证共享行为，再让四条线各自
-编译，Spark 3.5 同时验证 Scala 2.12 与 2.13。</p>
+<h2 id="versions">六、四条 Spark 线</h2>
+
+<p><strong><code>TableCatalog</code> 与 <code>SupportsNamespaces</code> 的这组接口在 Spark 3.5、4.0、
+4.1、4.2 共用一份主体，放在 <code>spark-base</code>。</strong> 每条线只保留公开的无参
+<code>MilvusCatalog</code> 和本线首选 <code>createTable</code> 签名；它们都把 create 明确判为不支持。
+行为测试覆盖目录矩阵、异常保真、Spark SQL 路由和表加载；同一份共享实现再由四条线分别编译，
+Spark 3.5 同时验证 Scala 2.12 与 2.13。</p>
