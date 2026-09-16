@@ -701,10 +701,21 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
       )
     }
     withSpark { spark =>
-      val df = read(spark)
-      info(s"schema: ${df.schema.treeString}")
-      val rows = df.collect().map(r => r.getLong(r.fieldIndex("id")) -> r).toMap
-      rows.size shouldBe 100
+      // Both outlets, value by value: the columnar path is the default and
+      // the row path is what `false` selects.
+      Seq("true", "false").foreach { columnar =>
+        val df = read(spark, MilvusOption.ReadColumnar -> columnar)
+        info(s"columnar=$columnar schema: ${df.schema.treeString}")
+        val rows =
+          df.collect().map(r => r.getLong(r.fieldIndex("id")) -> r).toMap
+        rows.size shouldBe 100
+        checkTypes(rows)
+      }
+    }
+  }
+
+  private def checkTypes(rows: Map[Long, org.apache.spark.sql.Row]): Unit = {
+    {
       Seq(0L, 1L, 2L, 3L, 50L, 99L).foreach { i =>
         val r = rows(i)
         withClue(s"row $i: ") {
@@ -728,8 +739,6 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
           )
         }
       }
-      val columnar = read(spark, MilvusOption.ReadColumnar -> "true").collect()
-      columnar.length shouldBe 100
     }
   }
 
@@ -813,8 +822,7 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
     withSpark { spark =>
       def scanMetrics(columnar: Boolean): Map[String, Long] = {
         val df =
-          if (columnar) read(spark, MilvusOption.ReadColumnar -> "true")
-          else read(spark)
+          read(spark, MilvusOption.ReadColumnar -> columnar.toString)
         val counted = df.groupBy().count()
         val rows = counted.collect().head.getLong(0)
         // Adaptive execution wraps the plan and hides each finished stage's
@@ -852,9 +860,9 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
   test("the columnar reader delivers the same row count") {
     storageOptions(); snapshotPath()
     withSpark { spark =>
-      val rowCount = read(spark).count()
-      val columnar = read(spark, MilvusOption.ReadColumnar -> "true").count()
-      info(s"row path $rowCount rows, columnar path $columnar rows")
+      val rowCount = read(spark, MilvusOption.ReadColumnar -> "false").count()
+      val columnar = read(spark).count()
+      info(s"row path $rowCount rows, columnar path (default) $columnar rows")
       columnar shouldBe rowCount
     }
   }

@@ -95,8 +95,7 @@ reader 的主循环不知道自己读的是哪条线。本页先说第 3 层现�
 <figcaption>两条分区路线在 <code>ColumnBinding</code> 之后就没有分别。橙色是两条线唯一不同的地方。</figcaption>
 </figure>
 
-<p>分发在 <code>MilvusPartitionReaderFactory</code>,只按出口选:有谓词或向量检索走行式,否则按
-<code>milvus.read.columnar</code>;不再按分区类型分支。落到不是 <code>MilvusInputPartition</code> 的分区就抛
+<p>分发在 <code>MilvusPartitionReaderFactory</code>,只按出口选:默认列式,<code>milvus.read.columnar=false</code> 或带向量检索时走行式;不再按分区类型分支。落到不是 <code>MilvusInputPartition</code> 的分区就抛
 <code>IllegalArgumentException</code>。</p>
 
 <table>
@@ -194,8 +193,8 @@ spark 层一个行式 reader、一个列式 reader,只留 Spark 接口的对接�
 
 <h2 id="columnar">六、列式出口:做,R4 已定</h2>
 
-<p><strong>列式出口已有</strong>:<code>MilvusColumnarPartitionReader</code>,<code>milvus.read.columnar=true</code> 开启,
-有谓词或向量检索时回落行式。下面是它的设计。</p>
+<p><strong>列式出口已有,且是默认</strong>:<code>MilvusColumnarPartitionReader</code>,<code>milvus.read.columnar=false</code> 才走行式;
+带向量检索的读回落行式,因为那一步(<code>SegmentVectorSearch</code>)逐行算距离,归属是决策 16。谓词今天不引起回落:ScanBuilder 一个谓词也不接,Spark 自己在列批上算。下面是它的设计。</p>
 
 <p>决策 12 选了做。出口形态:<strong>无删除的批原样包成 <code>ColumnarBatch</code> 直通,
 有删除的批经 <code>SelectedRowsColumn</code> 按存活行下标映射,不拷贝。</strong>理由与代价见

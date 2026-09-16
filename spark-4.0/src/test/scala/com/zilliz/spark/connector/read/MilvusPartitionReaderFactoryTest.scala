@@ -95,14 +95,18 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
       pushedFilters: Array[Filter] = Array.empty
   ) = new MilvusPartitionReaderFactory(
     schema,
-    if (columnar) Map(MilvusOption.ReadColumnar -> "true") else Map.empty,
+    Map(MilvusOption.ReadColumnar -> columnar.toString),
     pushedFilters
   )
 
-  test("columnar is off unless the read asks for it") {
+  test(
+    "columnar is the default; milvus.read.columnar=false takes the row path"
+  ) {
+    val byDefault = new MilvusPartitionReaderFactory(schema, Map.empty)
+    assert(byDefault.supportColumnarReads(v3()))
+    assert(byDefault.supportColumnarReads(v2()))
     assert(!factory(columnar = false).supportColumnarReads(v3()))
     assert(factory(columnar = true).supportColumnarReads(v3()))
-    assert(factory(columnar = true).supportColumnarReads(v2()))
   }
 
   // The scan builder keeps the predicates it said it would evaluate, and Spark

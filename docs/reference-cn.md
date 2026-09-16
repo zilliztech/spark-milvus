@@ -138,7 +138,7 @@ val s3Options = Map(
 | `MilvusOption.MilvusSegmentID` | String | 否 | "" | 段 ID，用于精确读取特定段 |
 | `MilvusOption.ReaderFieldIDs` | String | 否 | "" | 字段ID列表，逗号分隔，用于只读取部分字段，可以有效减少数据获取时间 |
 | `milvus.read.vector.raw` | Boolean | 否 | false | 向量列的输出类型。默认 false，向量转成 Spark 原生类型（`FloatVector`/`Float16Vector`/`BFloat16Vector` → `ArrayType(FloatType)`，`Int8Vector` → `ArrayType(ShortType)`，`SparseFloatVector` → `MapType(LongType, FloatType)`）。设为 true 时向量列输出 `BinaryType`，字节按存储原样给出，由调用方自己按 `dim` 与元素类型解析；这条路径不做逐元素转换，适合把字节直接交给下游原生库的批量作业 |
-| `milvus.read.columnar` | Boolean | 否 | false | 读出口形态。默认 false，逐行交给 Spark。设为 true 时整批交付（`ColumnarBatch`），向量列按 `milvus.read.vector.raw` 决定的类型呈现；有删除的批交出去的是存活行构成的新批，因为 Spark 的 `ColumnarBatch` 没有标记某行无效的办法 |
+| `milvus.read.columnar` | Boolean | 否 | true | 读出口形态。默认 true，整批交付（`ColumnarBatch`），直接包住原生 buffer 不拷贝，向量列按 `milvus.read.vector.raw` 决定的类型呈现；有删除的批按存活行下标映射交付，同样不拷贝。设为 false 逐行交给 Spark。带 `vector.search.*` 的读一律走行式，因为那一步要逐行算距离 |
 
 
 ### 2.4 写入参数

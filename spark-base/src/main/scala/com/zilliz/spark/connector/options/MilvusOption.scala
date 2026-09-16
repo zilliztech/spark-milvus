@@ -393,8 +393,11 @@ object MilvusOption {
 
   /** Whether the scan hands Spark whole batches instead of rows.
     *
-    * Default false. The row path is what every existing job runs, and the two
-    * have to be shown to agree on real data before the default moves.
+    * Default true since 2026-09-16: the columnar outlet is what the 2.0 read
+    * path exists for (P0 in the design README), and the two outlets were shown
+    * to agree on UAT (V2 and V3 segments, the three delete states, every
+    * supported type, value by value). `false` takes the row path; a read with
+    * vector search takes it regardless, because that stage scores rows.
     */
   private def readColumnarFrom(
       getOption: String => Option[String]
@@ -403,7 +406,7 @@ object MilvusOption {
       .map(_.trim)
       .filter(_.nonEmpty)
       .map(_.equalsIgnoreCase("true"))
-      .getOrElse(false)
+      .getOrElse(true)
   }
 
   def readColumnar(options: Map[String, String]): Boolean = {
