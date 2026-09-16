@@ -45,8 +45,31 @@ RUN set -eux; \
         exit 1; \
     fi
 
-# Install CMake (architecture-aware, same pattern as milvus-storage)
-RUN wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-$(uname -m).tar.gz" | tar --strip-components=1 -xz -C /usr/local
+# Install CMake from public upstream releases. Download to a file so truncated
+# responses can be retried and rejected before extraction.
+RUN set -eux; \
+    cmake_version='3.27.5'; \
+    cmake_arch="$(uname -m)"; \
+    case "${cmake_arch}" in \
+        x86_64) cmake_sha256='138c68addae825b16ed78d792dafef5e0960194833f48bd77e7e0429c6bc081c' ;; \
+        aarch64) cmake_sha256='2ffaf176d0f93c332abaffbf3ce82fc8c90e49e0fcee8dc16338bcfbb150ead7' ;; \
+        *) echo "Unsupported CMake architecture: ${cmake_arch}" >&2; exit 1 ;; \
+    esac; \
+    cmake_archive="cmake-${cmake_version}-linux-${cmake_arch}.tar.gz"; \
+    cmake_path="/tmp/${cmake_archive}"; \
+    download_cmake() { \
+        rm -f "${cmake_path}"; \
+        curl --fail --location \
+            --connect-timeout 30 --max-time 300 \
+            --retry 3 --retry-all-errors --retry-delay 5 \
+            --output "${cmake_path}" "$1" && \
+        printf '%s  %s\n' "${cmake_sha256}" "${cmake_path}" | sha256sum --check --strict -; \
+    }; \
+    download_cmake "https://cmake.org/files/v3.27/${cmake_archive}" || \
+        download_cmake "https://github.com/Kitware/CMake/releases/download/v${cmake_version}/${cmake_archive}"; \
+    tar --strip-components=1 -xzf "${cmake_path}" -C /usr/local; \
+    rm -f "${cmake_path}"; \
+    cmake --version
 
 # The pinned milvus-storage submodule requires Conan 2.
 ENV CONAN_HOME=/root/.conan2
