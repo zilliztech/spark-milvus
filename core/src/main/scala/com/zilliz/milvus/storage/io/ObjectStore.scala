@@ -31,6 +31,10 @@ trait ObjectStore extends AutoCloseable {
 
   def list(key: String, recursive: Boolean = false): Seq[FileInfo]
 
+  /** True when the key exists, false only when the backend confirms it does
+    * not. Any other failure to find out (permission, network, throttling)
+    * throws: callers decide what to write from this answer.
+    */
   def exists(key: String): Boolean
 
   /** Reads one range. `fileSize` is passed in because the backend needs it to

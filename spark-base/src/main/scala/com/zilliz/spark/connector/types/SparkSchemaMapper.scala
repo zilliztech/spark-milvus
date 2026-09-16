@@ -81,10 +81,32 @@ object SparkSchemaMapper {
           }
       }
 
+    def milvusScalarType(field: StructField): Option[MilvusDataType] =
+      Option(field.metadata)
+        .filter(_.contains(FieldMetadata.MilvusDataTypeMetadataKey))
+        .map(_.getLong(FieldMetadata.MilvusDataTypeMetadataKey).toInt)
+        .map(MilvusDataType.fromValue)
+        .filterNot(vectorTypes.contains)
+
     val fields = sparkSchema.fields.zipWithIndex.map { case (field, idx) =>
       val vectorType = milvusVectorType(field)
       val dim = vectorType.map(vectorDimension(field, _)).getOrElse(0)
       val arrowType: ArrowType = vectorType match {
+        // A column that says which Milvus type it is gets the column type
+        // Milvus writes for that type; the Spark type alone cannot tell a JSON
+        // string from a VarChar or a Milvus Array from an Arrow List
+        // (review 749178e #04).
+        case None
+            if milvusScalarType(field).exists(t =>
+              t == MilvusDataType.Array || t == MilvusDataType.JSON
+            ) =>
+          ArrowTypes.toArrowType(0, milvusScalarType(field).get)
+        case None
+            if milvusScalarType(field).contains(MilvusDataType.Geometry) ||
+              milvusScalarType(field).contains(MilvusDataType.ArrayOfVector) =>
+          throw new IllegalArgumentException(
+            s"Writing Milvus ${milvusScalarType(field).get} field '${field.name}' is not supported"
+          )
         case Some(milvusType) if denseVectorTypes.contains(milvusType) =>
           // Milvus uses variable-width Binary for nullable dense vectors so a
           // null row does not have to carry a fixed-width payload. Non-nullable

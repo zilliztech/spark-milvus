@@ -97,16 +97,20 @@ object SnapshotSources {
               .contains(StorageProperties.StorageTypeLocal)
           ) ""
           else StorageOptions.resolveConnectorS3Bucket(milvusOption.options)
+        val conf =
+          StorageOptions.buildHadoopConfForOptions(milvusOption.options, "")
         managedSource(
-          StorageOptions.storeFor(
-            StorageOptions.buildHadoopConfForOptions(milvusOption.options, ""),
-            bucket,
-            milvusOption.options
-          )
+          StorageOptions.storeFor(conf, bucket, milvusOption.options)
         ) { store =>
           new ClientSnapshotSource(
             milvusOption,
-            catalog(milvusOption, withSegments, bucket, store),
+            catalog(
+              milvusOption,
+              withSegments,
+              bucket,
+              store,
+              StorageOptions.storeEndpoint(conf, bucket, milvusOption.options)
+            ),
             snapshotReference
           ).snapshot().fold(throw _, identity)
         }
@@ -138,23 +142,31 @@ object SnapshotSources {
     val bucket = StorageOptions
       .snapshotS3BucketForRelativePaths(path, milvusOption.options)
       .getOrElse("")
+    val conf =
+      StorageOptions.buildHadoopConfForOptions(milvusOption.options, path)
     managedSource(
-      StorageOptions.storeFor(
-        StorageOptions.buildHadoopConfForOptions(milvusOption.options, path),
+      StorageOptions.storeFor(conf, bucket, milvusOption.options)
+    )(store =>
+      catalog(
+        milvusOption,
+        withSegments,
         bucket,
-        milvusOption.options
-      )
-    )(store => catalog(milvusOption, withSegments, bucket, store).read(path))
+        store,
+        StorageOptions.storeEndpoint(conf, bucket, milvusOption.options)
+      ).read(path)
+    )
   }
 
+  /** `endpoint` is the one `store` was opened with, so a Milvus-form URI is
+    * recognized against the storage actually reached.
+    */
   private def catalog(
       milvusOption: MilvusOption,
       withSegments: Boolean,
       bucket: String,
-      store: ObjectStore
+      store: ObjectStore,
+      endpoint: String
   ): SnapshotCatalog = {
-    val endpoint =
-      StorageOptions.effectiveEndpoint(milvusOption.options).getOrElse("")
     new SnapshotCatalog(
       store,
       bucket,
@@ -369,6 +381,9 @@ final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
       )
     val collectionId =
       option(MilvusOption.SnapshotCollectionId).map(_.toLong).getOrElse(0L)
+    val bucket = StorageOptions
+      .connectorS3BucketOption(milvusOption.options)
+      .getOrElse("")
     SnapshotCatalog.fromLists(
       name = "options",
       collectionId = collectionId,
@@ -377,13 +392,13 @@ final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
       schemaBytes = schemaBytes,
       v3Items = v3Items,
       v2Segments = v2Segments,
-      bucket = StorageOptions
-        .connectorS3BucketOption(milvusOption.options)
-        .getOrElse(""),
+      bucket = bucket,
       origin = SnapshotOrigin.Options,
-      endpoint = StorageOptions
-        .effectiveEndpoint(milvusOption.options)
-        .getOrElse("")
+      endpoint = StorageOptions.storeEndpoint(
+        StorageOptions.buildHadoopConfForOptions(milvusOption.options, ""),
+        bucket,
+        milvusOption.options
+      )
     ) match {
       case Right(s) => s
       case Left(e) =>

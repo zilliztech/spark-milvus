@@ -35,14 +35,18 @@ object SchemaMapper {
     }
   }
 
+  /** The system columns the schema does not declare, decided by field id alone.
+    * Milvus reserves only the exact names RowID and Timestamp (proxy
+    * validateReservedFieldNames), so a user field spelled `timestamp` or
+    * `row_id` is an ordinary field with its own id and never stands in for id 0
+    * or 1 (review 749178e #06).
+    */
   def missingSystemFields(
       collectionSchema: CollectionSchema
   ): Seq[FieldSchema] = {
-    val existingNames = collectionSchema.fields.map(_.name.toLowerCase).toSet
     val existingFieldIds = collectionSchema.fields.map(_.fieldID).toSet
     CanonicalSystemFields.filterNot(field =>
-      systemFieldNameAliases(field).exists(existingNames.contains) ||
-        existingFieldIds.contains(field.fieldID)
+      existingFieldIds.contains(field.fieldID)
     )
   }
 

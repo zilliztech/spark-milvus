@@ -160,7 +160,8 @@ object SparkTypes {
 
   /** The element type of a Milvus Array: the scalar types, and nothing else.
     * Int8 elements are presented as ShortType, as they always have been; the
-    * decoders in ArrowConverter and MilvusArrayColumn read either width.
+    * decoders in ArrowConverter (row path) and MilvusArrayColumn (columnar)
+    * read either width, and the writer encodes both as IntData.
     */
   private def arrayElementType(elementType: MilvusDataType): SparkDataType =
     elementType match {

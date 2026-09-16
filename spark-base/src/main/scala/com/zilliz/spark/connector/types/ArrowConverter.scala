@@ -145,6 +145,22 @@ object ArrowConverter extends Logging {
       case StringType =>
         utf8StringFromVariableWidth(vector, rowIndex)
 
+      // A Milvus Array is known from the field's type, not from its layout:
+      // it is VarBinary like a nullable dense vector, so it has to be matched
+      // before the vector cases (review 749178e #05).
+      case ArrayType(elementType, _)
+          if milvusType.contains(MilvusDataType.Array) =>
+        vector match {
+          case binary: VarBinaryVector =>
+            decodeStoredArray(binary.get(rowIndex), elementType)
+          case list: ListVector =>
+            decodeListArray(list, rowIndex, elementType)
+          case other =>
+            throw new IllegalArgumentException(
+              s"a Milvus Array is stored as Binary or List, not ${other.getClass.getSimpleName}"
+            )
+        }
+
       case ArrayType(ByteType, _) if isBinaryBackedVector(vector) =>
         val bytes = binaryVectorBytes(vector, rowIndex)
         milvusType match {
@@ -620,6 +636,11 @@ object ArrowConverter extends Logging {
           .asInstanceOf[SmallIntVector]
           .set(rowIndex, record.getShort(colIndex))
 
+      case ByteType =>
+        vector
+          .asInstanceOf[TinyIntVector]
+          .set(rowIndex, record.getByte(colIndex))
+
       case FloatType =>
         vector
           .asInstanceOf[Float4Vector]
@@ -644,8 +665,60 @@ object ArrowConverter extends Logging {
           // density-based initial capacity. `set` throws IndexOutOfBounds
           // instead of reallocating, which blows up whenever strings average
           // more than the configured density (32 bytes).
-          vector.asInstanceOf[VarCharVector].setSafe(rowIndex, str.getBytes)
+          vector match {
+            case chars: VarCharVector => chars.setSafe(rowIndex, str.getBytes)
+            // JSON: Milvus stores the text as Binary (serde.go byteEntry).
+            case binary: VarBinaryVector =>
+              binary.setSafe(rowIndex, str.getBytes)
+            case other =>
+              throw new IllegalArgumentException(
+                s"Cannot write a string into ${other.getClass.getSimpleName}"
+              )
+          }
         }
+
+      // A Milvus Array: one serialized ScalarField per row, the value Milvus
+      // itself writes (payload_writer.go AddOneArrayToPayload). Matched before
+      // the binary-backed vector cases, which share the VarBinary layout
+      // (review 749178e #04).
+      case ArrayType(elementType, _)
+          if milvusType.contains(MilvusDataType.Array) =>
+        val binary = vector match {
+          case b: VarBinaryVector => b
+          case other =>
+            throw new IllegalArgumentException(
+              s"a Milvus Array is written as Binary, not into ${other.getClass.getSimpleName}"
+            )
+        }
+        val arrayData = record.getArray(colIndex)
+        val elements = (0 until arrayData.numElements()).map { i =>
+          if (arrayData.isNullAt(i)) {
+            throw new IllegalArgumentException(
+              s"a Milvus Array cannot hold a null element (index $i)"
+            )
+          }
+          elementType match {
+            case BooleanType => arrayData.getBoolean(i)
+            case ByteType    => arrayData.getByte(i).toInt
+            case ShortType   => arrayData.getShort(i).toInt
+            case IntegerType => arrayData.getInt(i)
+            case LongType    => arrayData.getLong(i)
+            case FloatType   => arrayData.getFloat(i)
+            case DoubleType  => arrayData.getDouble(i)
+            case StringType  => arrayData.getUTF8String(i).toString
+            case other =>
+              throw new IllegalArgumentException(
+                s"a Milvus Array cannot have elements of Spark type $other"
+              )
+          }
+        }
+        binary.setSafe(
+          rowIndex,
+          ArrayCodec.encode(
+            ArrowConverter.arrayElementType(elementType),
+            elements
+          )
+        )
 
       case ArrayType(FloatType, _) if isBinaryBackedVector(vector) =>
         val arrayData = record.getArray(colIndex)
@@ -860,10 +933,32 @@ object ArrowConverter extends Logging {
 
         mapVector.endValue(rowIndex, mapData.numElements())
 
+      // A value that cannot be written must fail the task: logging and
+      // moving on commits a null in its place (review 749178e #01).
       case _ =>
-        logWarning(s"Unsupported Spark type for writing: $sparkType")
+        throw new IllegalArgumentException(
+          s"Unsupported Spark type for writing: $sparkType into ${vector.getClass.getSimpleName}"
+        )
     }
   }
+
+  /** The Milvus element type an Array column is encoded as, from the Spark
+    * element type the write schema carries. Int8, Int16 and Int32 elements all
+    * travel as `IntData`, so the narrower Spark types map to Int32.
+    */
+  private[types] def arrayElementType(sparkType: DataType): MilvusDataType =
+    sparkType match {
+      case BooleanType                        => MilvusDataType.Bool
+      case ByteType | ShortType | IntegerType => MilvusDataType.Int32
+      case LongType                           => MilvusDataType.Int64
+      case FloatType                          => MilvusDataType.Float
+      case DoubleType                         => MilvusDataType.Double
+      case StringType                         => MilvusDataType.VarChar
+      case other =>
+        throw new IllegalArgumentException(
+          s"a Milvus Array cannot have elements of Spark type $other"
+        )
+    }
 
   /** Add a Spark InternalRow to an Arrow VectorSchemaRoot
     *

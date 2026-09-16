@@ -21,6 +21,16 @@ class MetricsTest extends AnyFunSuite {
     assert(reported.map(_.name()).toSet == declared)
   }
 
+  test("Spark can re-create every declared metric from its class name") {
+    // The driver's SQL listener aggregates task values through a new instance
+    // made from the metric's class name, with the no-argument constructor.
+    (ScanMetrics.supported ++ WriteMetricsReport.supported).foreach { m =>
+      val copy = m.getClass.getConstructor().newInstance()
+      assert(copy.name() == m.name())
+      assert(copy.description() == m.description())
+    }
+  }
+
   test("task values carry the counted numbers") {
     val values = ScanMetrics
       .taskValues(
@@ -45,7 +55,7 @@ class MetricsTest extends AnyFunSuite {
   }
 
   test("the allocator peak aggregates by max and reads in bytes") {
-    val metric = new MaxBytesMetric("m", "d")
+    val metric = new ArrowAllocatedMaxMetric
     assert(
       metric.aggregateTaskMetrics(Array(10L, 3L << 20, 2L << 20)) == "3.0 MiB"
     )
@@ -55,7 +65,7 @@ class MetricsTest extends AnyFunSuite {
 
   test("a sum metric adds the tasks up") {
     assert(
-      new SumMetric("m", "d").aggregateTaskMetrics(Array(1L, 2L, 3L)) == "6"
+      new JniCallsMetric().aggregateTaskMetrics(Array(1L, 2L, 3L)) == "6"
     )
   }
 }

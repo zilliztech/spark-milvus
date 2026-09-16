@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.apps.backfill
 import org.apache.hadoop.conf.Configuration
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.spark.connector.options.HadoopStorageKeys
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** Configuration for backfill operation
@@ -83,8 +84,9 @@ case class BackfillConfig(
     customOutputPath: Option[String] = None,
 
     // Where the job manifest goes: {stagingRoot}/staging/{jobId}/manifest.json,
-    // what `register` reads. Defaults to the storage root; a job id defaults
-    // to the Spark application id.
+    // what `register` reads. Defaults to the storage root. Without a job id
+    // each run gets a new one; a given id that is already committed is refused
+    // before anything is written.
     stagingRoot: Option[String] = None,
     jobId: Option[String] = None,
 
@@ -468,15 +470,14 @@ object BackfillConfig {
   private[backfill] val HadoopOssAssumedRoleProvider =
     "com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider"
 
+  // One effective-provider rule for the connector and backfill: the
+  // connector's Hadoop key translation decides with the same predicates
+  // (review 749178e #08).
   private[backfill] def isAssumedRoleProvider(provider: String): Boolean =
-    provider
-      .split(',')
-      .exists(_.trim == HadoopS3AssumedRoleProvider)
+    HadoopStorageKeys.names(provider, Set(HadoopS3AssumedRoleProvider))
 
   private[backfill] def isOssAssumeRoleProvider(provider: String): Boolean =
-    provider
-      .split(',')
-      .exists(_.trim == HadoopOssAssumedRoleProvider)
+    HadoopStorageKeys.names(provider, Set(HadoopOssAssumedRoleProvider))
 
   private[backfill] def resolveAwsS3AssumeRole(
       hadoopConf: Configuration,
@@ -490,9 +491,11 @@ object BackfillConfig {
     def bucketOrGlobal(bucketKey: String, globalKey: String): Option[String] =
       getTrimmed(bucketKey).orElse(getTrimmed(globalKey))
 
-    val provider = bucketOrGlobal(
-      s"$bucketPrefix.aws.credentials.provider",
-      HadoopS3CredentialsProvider
+    val provider = HadoopStorageKeys.effectiveProvider(
+      hadoopConf,
+      "fs.s3a.",
+      "aws.credentials.provider",
+      bucketName
     )
     if (!provider.exists(isAssumedRoleProvider)) return None
 

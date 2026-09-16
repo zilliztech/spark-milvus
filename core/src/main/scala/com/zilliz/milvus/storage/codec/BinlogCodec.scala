@@ -53,7 +53,10 @@ object BinlogCodec {
       if (length < 17 || length.toLong > bytes.length.toLong - start)
         fail(s"event length $length at $start")
       val end = start + length
-      if (next != 0 && next != end)
+      // Milvus's serde writers leave NextPosition at newEventHeader's -1
+      // (internal/storage/serde_delta.go, serde_events.go), and its readers
+      // never look at it; a value that is set has to name the event end.
+      if (next != 0 && next != -1 && next != end)
         fail(s"next position $next differs from event end $end")
       (kind, end)
     }

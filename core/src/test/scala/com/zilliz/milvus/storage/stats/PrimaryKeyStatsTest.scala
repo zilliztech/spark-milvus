@@ -57,6 +57,42 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
     back.toJson shouldBe stats.toJson
   }
 
+  // Review 749178e #12: Milvus compares VarChar keys as Go strings, i.e.
+  // unsigned UTF-8 bytes; Java's String order is UTF-16 and disagrees above
+  // the BMP.
+  test("VarChar bounds follow Milvus's UTF-8 byte order") {
+    val pua = new String(Character.toChars(0xe000))
+    val emoji = new String(Character.toChars(0x1f600))
+    val b = new PrimaryKeyStats.Builder(101L, DataType.VarChar)
+    Seq(emoji, pua).foreach(b.addString)
+    val s = b.build()
+    s.minPk shouldBe pua
+    s.maxPk shouldBe emoji
+
+    def utf8(x: String) = x.getBytes(StandardCharsets.UTF_8)
+    val keys = Seq("row-0", "中文", "Ａ", pua, emoji, "")
+    val mixed = new PrimaryKeyStats.Builder(101L, DataType.VarChar)
+    keys.foreach(mixed.addString)
+    val m = mixed.build()
+    keys.foreach { k =>
+      withClue(s"key ${k.codePoints().toArray.mkString(",")}: ") {
+        java.util.Arrays.compareUnsigned(
+          utf8(m.minPk.toString),
+          utf8(k)
+        ) should be <= 0
+        java.util.Arrays.compareUnsigned(
+          utf8(k),
+          utf8(m.maxPk.toString)
+        ) should be <= 0
+      }
+    }
+    m.maxPk shouldBe emoji
+    m.minPk shouldBe ""
+    val back = PrimaryKeyStats.fromJson(m.toJson)
+    back.minPk shouldBe m.minPk
+    back.maxPk shouldBe m.maxPk
+  }
+
   test("a key of the wrong type and an empty segment are refused") {
     val builder = new PrimaryKeyStats.Builder(100L, DataType.Int64)
     an[IllegalArgumentException] should be thrownBy builder.addString("x")

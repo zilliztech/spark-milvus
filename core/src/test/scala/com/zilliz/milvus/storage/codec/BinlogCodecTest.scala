@@ -48,6 +48,19 @@ class BinlogCodecTest extends AnyFunSuite with Matchers {
     intercept[IllegalArgumentException](BinlogCodec.parse(badPost, "post.bin"))
   }
 
+  test("an event whose next position Milvus left unset (-1) parses") {
+    // Milvus's serde writers (internal/storage/serde_delta.go and
+    // serde_events.go) never set NextPosition, so newEventHeader's -1 reaches
+    // the file; every L0 delete binlog on the UAT instance has it.
+    val valid = BinlogFixture.encode(Array[Byte](1, 2, 3), eventType = 3)
+    val descriptorEnd =
+      ByteBuffer.wrap(valid).order(ByteOrder.LITTLE_ENDIAN).getInt(17)
+    val unset = BinlogFixture.intAt(valid, descriptorEnd + 13, -1)
+    val file = BinlogCodec.parse(unset, "delta.bin")
+    file.events.map(_.kind) shouldBe Vector(3)
+    file.events.head.payload.toSeq shouldBe Seq[Byte](1, 2, 3)
+  }
+
   test("descriptor extras must be an object and encryption is rejected") {
     Seq("[]", "null", " ").foreach { extras =>
       intercept[IllegalArgumentException] {

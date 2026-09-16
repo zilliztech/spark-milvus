@@ -388,6 +388,96 @@ class SnapshotCatalogTest extends AnyFunSuite {
     }
   }
 
+  // Review 749178e #07: an older snapshot whose V2 files are gone must not
+  // stop the newest one, or a named one, from being read.
+  test("selection materializes only the chosen snapshot") {
+    withDir { dir =>
+      def withV2(name: String, ts: Long, avro: String) =
+        snapshotJson(name, ts, Seq.empty)
+          .replace("\"manifest_list\": []", s"\"manifest_list\": [\"$avro\"]")
+      write(
+        dir,
+        "files/snapshots/10/metadata/1.json",
+        withV2("s1", 100L, "files/snapshots/10/manifests/1/40.avro")
+      )
+      write(
+        dir,
+        "files/snapshots/10/metadata/2.json",
+        withV2("s2", 200L, "files/snapshots/10/manifests/2/50.avro")
+      )
+      // Snapshot JSON without format_version: Avro schema version 1.
+      Seq(40L -> "1/40.avro", 50L -> "2/50.avro").foreach { case (id, file) =>
+        writeAvro(
+          dir,
+          s"files/snapshots/10/manifests/$file",
+          SegmentManifestFixture.encode(
+            version = 1,
+            segmentId = id,
+            rows = 1L,
+            storageVersion = 2L
+          )
+        )
+      }
+      val calls = scala.collection.mutable.ListBuffer.empty[Seq[Long]]
+      val resolver = new V2SegmentResolver {
+        override def resolve(
+            entries: Seq[AvroManifestEntry],
+            bucket: String,
+            store: ObjectStore
+        ): Either[Throwable, Seq[Segment]] = {
+          calls += entries.map(_.segmentId)
+          if (entries.exists(_.segmentId == 40L))
+            Left(
+              new java.io.IOException(
+                "failed to read bytes from files/insert_log/10/20/40/100/1"
+              )
+            )
+          else
+            Right(
+              Seq(
+                Segment.v2(
+                  id = 50L,
+                  partitionId = 20L,
+                  rows = 1L,
+                  columnGroups = Seq(
+                    V2ColumnGroup(
+                      Seq(100L),
+                      Seq("files/insert_log/10/20/50/100/1"),
+                      Seq(1L),
+                      slotFieldId = 100L
+                    )
+                  ),
+                  deltaLogs = Seq.empty
+                )
+              )
+            )
+        }
+      }
+      val c =
+        new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
+      assert(c.latest("files", 10L).name == "s2")
+      assert(
+        calls.toList == List(Seq(50L))
+      )
+      assert(c.byName("files", 10L, "s2").name == "s2")
+      assert(c.asOf("files", 10L, 250L).name == "s2")
+      val broken = intercept[IllegalArgumentException](
+        c.byName("files", 10L, "s1")
+      )
+      assert(
+        broken.getMessage.contains("invalid snapshot at") &&
+          broken.getMessage.contains("files/snapshots/10/metadata/1.json")
+      )
+      assert(broken.getMessage.contains("failed to read bytes"))
+      // Metadata that cannot be parsed still fails selection.
+      write(dir, "files/snapshots/10/metadata/3.json", "{not json")
+      assert(
+        intercept[IllegalArgumentException](c.latest("files", 10L)).getMessage
+          .contains("failed to parse snapshot metadata")
+      )
+    }
+  }
+
   test("snapshot materialization rejects unsafe segment ids") {
     withDir { dir =>
       write(

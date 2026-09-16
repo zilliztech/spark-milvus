@@ -211,7 +211,7 @@ abort 删整个前缀。这一点靠 task id 进路径保证，不需要 task �
       RowID 由 Milvus 的全局 id 分配器发，Timestamp 是写入时的 TSO；纯连接器模式两者都拿不到，见决策 22。</li>
   <li><strong>主键的 bloom filter</strong>：已做（#15）。文件是 <code>_stats/bloom_filter.&lt;pk 字段 id&gt;/&lt;log id&gt;</code>，
       内容是 Milvus <code>internal/storage/stats.go</code> 的 <code>PrimaryKeyStats</code> JSON：字段 id、bfType 4（BlockedBloomFilter）、
-      blobloom 分块过滤器（每块 512 位，16 个 little-endian uint32 转 base64url）、pkType、minPk、maxPk；键用 xxh3 哈希（Int64 取 8 字节 little-endian，VarChar 取 UTF-8），
+      blobloom 分块过滤器（每块 512 位，16 个 little-endian uint32 转 base64url）、pkType、minPk、maxPk（VarChar 的上下界按 UTF-8 无符号字节序取，即 Go 字符串比较，与 Milvus 的 primary_key.go 一致；Java 的 String 序在 BMP 之外与之相反，审查 749178e #12）；键用 xxh3 哈希（Int64 取 8 字节 little-endian，VarChar 取 UTF-8），
       容量按行数、误判率 0.001 定大小。<code>core.stats.BlockedBloomFilter</code> 是 blobloom 的逐位移植，<code>PrimaryKeyStats</code> 收集主键后一次建好；
       task writer 在 commit 时写文件并用 <code>loon_transaction_update_stat</code> 登记进 manifest（key <code>bloom_filter.&lt;id&gt;</code>，metadata <code>memory_size</code>）。
       验证：对 UAT 上 Milvus 写的那个文件，用同样的 3000 个键重建，输出逐字节相同。</li>

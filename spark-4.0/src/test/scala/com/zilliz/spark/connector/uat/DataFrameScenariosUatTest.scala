@@ -545,24 +545,35 @@ class DataFrameScenariosUatTest
     )
     val root = storage(StorageProperties.RootPath)
 
-    bothOutlets { columnar =>
-      val written = 500L
-      val df = v3(columnar)
-        .filter(col("id") < written)
-        .withColumn("name", concat(col("name"), lit("-x")))
-        .repartition(2)
-      df.write.format("milvus").mode("append").options(tableOptions).save()
-
+    // Other suites (the backfill) commit jobs under the same prefix, so the
+    // scenario looks for the job its own write added.
+    def committedJobs(): Set[StagingLayout] = {
       val store = HadoopStorageKeys.storeFrom(storage)
-      try {
-        val committed = store
+      try
+        store
           .list(s"$root/staging", recursive = false)
           .filter(_.isDirectory)
           .map(d =>
             StagingLayout(root, d.path.stripSuffix("/").split("/").last)
           )
           .filter(l => store.exists(l.marker))
-        withClue(s"one committed job expected under $root/staging: ")(
+          .toSet
+      finally store.close()
+    }
+
+    bothOutlets { columnar =>
+      val written = 500L
+      val df = v3(columnar)
+        .filter(col("id") < written)
+        .withColumn("name", concat(col("name"), lit("-x")))
+        .repartition(2)
+      val before = committedJobs()
+      df.write.format("milvus").mode("append").options(tableOptions).save()
+
+      val store = HadoopStorageKeys.storeFrom(storage)
+      try {
+        val committed = (committedJobs() -- before).toSeq
+        withClue(s"one new committed job expected under $root/staging: ")(
           committed.size shouldBe 1
         )
         val layout = committed.head

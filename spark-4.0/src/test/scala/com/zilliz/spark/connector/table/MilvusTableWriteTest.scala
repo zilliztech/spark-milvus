@@ -93,4 +93,41 @@ class MilvusTableWriteTest extends AnyFunSuite with Matchers {
       "Fields n of collection 'c' are missing from the DataFrame"
     )
   }
+
+  // Review 749178e #10: the executor writer took the raw options while the
+  // read resolved aliases, Hadoop keys and the IAM fallback; a read that works
+  // must not fail the write with "fs.access_key_id must be set".
+  test("the task writer gets the storage properties the read side resolves") {
+    import com.zilliz.milvus.storage.credential.StorageProperties
+    val iamOptions = MilvusOption(
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotSchemaBytes -> java.util.Base64.getEncoder
+          .encodeToString(collection.toByteArray),
+        MilvusOption.MilvusCollectionName -> "c",
+        StorageProperties.BucketName -> "b",
+        StorageProperties.Address -> "s3.us-west-2.amazonaws.com",
+        StorageProperties.UseSSL -> "true"
+      )
+    )
+    val table =
+      MilvusTable(snapshotOf(SnapshotOrigin.Options), iamOptions, None)
+    val info = new LogicalWriteInfo {
+      override def queryId(): String = "q"
+      override def schema(): StructType =
+        StructType(Seq(StructField("id", LongType), StructField("n", LongType)))
+      override def options(): CaseInsensitiveStringMap =
+        new CaseInsensitiveStringMap(java.util.Collections.emptyMap())
+    }
+    val batch = table.newWriteBuilder(info).build().toBatch
+    val writer = batch.createBatchWriterFactory(null).createWriter(0, 0L)
+    try {
+      val storage = batch
+        .asInstanceOf[com.zilliz.spark.connector.write.MilvusV3BatchWrite]
+        .storage
+      storage(StorageProperties.UseIam) shouldBe "true"
+      storage(StorageProperties.BucketName) shouldBe "b"
+      storage(StorageProperties.UseSSL) shouldBe "true"
+    } finally writer.close()
+  }
 }

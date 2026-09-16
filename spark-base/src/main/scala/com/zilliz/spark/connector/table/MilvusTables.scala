@@ -1,6 +1,6 @@
 package com.zilliz.spark.connector.table
 
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.schema.SchemaMapper
@@ -120,6 +120,28 @@ private[connector] object MilvusTables {
     val selectedFields =
       if (selectedFieldIds.isEmpty) schema.fields
       else selectedFieldIds.map(id => fieldsById(id).head)
-    StructType(selectedFields.map(SparkTypes.toStructField(_, rawVectors)))
+    val fields = selectedFields.map(SparkTypes.toStructField(_, rawVectors))
+    rejectCaseInsensitiveDuplicates(fields)
+    StructType(fields)
+  }
+
+  /** Selecting system field 1 ("Timestamp") next to a user field named
+    * "timestamp" gives two columns Spark cannot tell apart, since it resolves
+    * names case-insensitively. That is refused with the alternative named.
+    */
+  private[connector] def rejectCaseInsensitiveDuplicates(
+      fields: Seq[StructField]
+  ): Unit = {
+    val clashes = fields
+      .groupBy(_.name.toLowerCase(java.util.Locale.ROOT))
+      .collect { case (_, same) if same.size > 1 => same.map(_.name) }
+      .toSeq
+    if (clashes.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Option '${MilvusOption.ReaderFieldIDs}' selects fields whose names differ only in case: " +
+          s"${clashes.map(_.mkString(" and ")).mkString("; ")}; " +
+          s"read the Milvus timestamp through '${MilvusOption.MilvusExtraColumns}=${MilvusOption.MilvusExtraColumnTimestamp}' instead"
+      )
+    }
   }
 }

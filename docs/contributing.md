@@ -74,7 +74,7 @@ themselves when it is absent, so a machine without it still gets a green run
 with those suites reported as canceled rather than failed:
 
 - `StorageNativeTest`, `WriterRoundTripTest`, `SegmentWriterTest` and `SegmentReaderTakeTest` in core
-- `MilvusV3PartitionWriterLifecycleTest` in spark-4.0
+- `MilvusV3PartitionWriterLifecycleTest` and `HadoopEndpointSnapshotTest` in spark-4.0
 
 The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
 `StorageFullChainUatTest`, `SnapshotReadUatTest`, `ConnectorWriteReadUatTest`

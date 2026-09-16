@@ -452,8 +452,24 @@ S3 credentials use the existing `fs.*` options (`fs.address`,
 
 For S3-compatible endpoints, `fs.address` is the canonical endpoint option;
 DataFrame options `fs.s3a.endpoint` and `s3.endpoint` are aliases, in that
-priority order. Existing Spark/Hadoop `fs.s3a.endpoint` configuration is also
-translated to the same native property.
+priority order. Existing Spark/Hadoop `fs.s3a.*` / `fs.oss.*` configuration is
+also translated, per bucket first: the endpoint, region, role and static keys,
+`connection.ssl.enabled` (`connection.secure.enabled` for OSS) to `fs.use_ssl`
+(true when unset, as in Hadoop, unless the endpoint carries its own `http://` or
+`https://`), and an explicitly set `path.style.access`. The effective
+credential provider decides what is used, as it does in Hadoop: a bucket whose
+provider is `SimpleAWSCredentialsProvider` uses its keys and not a globally
+configured role. An explicit `fs.*` option always wins over the translated value.
+A temporary credential (keys plus `fs.s3a.session.token` or `fs.oss.securityToken`)
+cannot be translated, because the native storage layer takes no session token.
+When the three values are the driver's `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, which Spark copies into those
+keys, the keys are left out and the native default chain reads the same
+variables. Any other temporary credential is rejected; set `fs.use_iam=true` or
+pass long-term keys as `fs.access_key_id` and `fs.access_key_value`.
+The endpoint that results is also the one Milvus-produced
+`https://<endpoint>/<bucket>/<key>` locations are recognized against, including
+an endpoint that only the Hadoop configuration supplies.
 Milvus metadata may spell an object as
 `s3://endpoint:port/bucket/key`. The connector recognizes that form only while
 decoding Milvus-produced metadata (an explicit authority port, or an authority

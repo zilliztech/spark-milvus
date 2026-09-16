@@ -251,9 +251,14 @@ connector 两边都不认识云。</p>
 <li><strong>第 3 层一个垫片</strong>，读 <code>spark.hadoop.fs.*</code> 产出 <code>fs.*</code>，
 只为让存量部署不改配置就能跑。它必须写明退出条件和时间点，否则就是
 <a href="../../../AGENTS.md">AGENTS.md</a> 禁止的烟囱。
-已实现为 <code>spark-base</code> 的 <code>HadoopStorageKeys</code>：纯键名翻译，
-按本表映射，<code>cloud_provider</code> 从出现键的命名空间推（s3a→aws、oss→aliyun），
-两个命名空间都在则留空让 C 层校验报错。退出条件是产出配置的一方直接产出 <code>fs.*</code>。</li>
+已实现为 <code>spark-base</code> 的 <code>HadoopStorageKeys</code>：按本表映射，
+翻译结果是 Hadoop 对这个桶实际会用的配置，不是所有出现的键（审查 749178e #08、#09）：
+桶级 provider 键优先、全局次之，有效 provider 链不含 AssumedRole 时不翻角色键，不含 Simple、Temporary 或 AssumedRole 时不翻静态密钥；两级都没设时按 Hadoop 自带的默认链判断（含 Temporary 与 Simple，不含 AssumedRole），没加载默认值时全翻；
+临时凭证（密钥加 <code>session.token</code>，链会用到 token）翻不过去，因为属性包没有 token 的位置（3.7）：三个值正好是本进程的 <code>AWS_ACCESS_KEY_ID</code>、<code>AWS_SECRET_ACCESS_KEY</code>、<code>AWS_SESSION_TOKEN</code> 时（Spark 把 driver 的这三个环境变量抄进 s3a 键），密钥不下传、记一条 warning，由原生默认链读同一组变量；其他临时凭证报错，指向 <code>fs.use_iam</code> 或长期密钥（2026-09-16）；
+只提供了 Hadoop 自带默认值（core-default.xml 里的 ssl、path style、provider 链）的命名空间不参与翻译；
+TLS 开关没设时取 Hadoop 的值，也就是开，端点自带 scheme 时以 scheme 为准；path style 只翻部署显式设过的值。
+<code>cloud_provider</code> 从出现键的命名空间推（s3a→aws、oss→aliyun），
+两个命名空间都在则留空让 C 层校验报错。driver 解析快照、manifest 位置时认的端点取自打开存储的同一个属性包，只由 Hadoop 键给出的端点同样认得。退出条件是产出配置的一方直接产出 <code>fs.*</code>。</li>
 </ol>
 <p>两个落点都在 core 之外。下表是给它们用的，不是 core 的代码：</p>
 <table>
@@ -265,6 +270,9 @@ connector 两边都不认识云。</p>
 <tr><td><code>fs.s3a.endpoint.region</code></td><td><code>fs.region</code></td></tr>
 <tr><td><code>fs.s3a.access.key</code> / <code>fs.oss.accessKeyId</code></td><td><code>fs.access_key_id</code></td></tr>
 <tr><td><code>fs.s3a.secret.key</code> / <code>fs.oss.accessKeySecret</code></td><td><code>fs.access_key_value</code></td></tr>
+<tr><td><code>fs.s3a.connection.ssl.enabled</code> / <code>fs.oss.connection.secure.enabled</code></td><td><code>fs.use_ssl</code>（没设时为 true）</td></tr>
+<tr><td><code>fs.s3a.path.style.access</code></td><td><code>fs.use_virtual_host</code> 取反（只在部署显式设置时）</td></tr>
+<tr><td><code>fs.s3a.aws.credentials.provider</code> / <code>fs.oss.credentials.provider</code></td><td>不翻译，决定上面角色键与密钥键是否翻译</td></tr>
 </table>
 <p>表里只有 s3a 和 oss，因为 Hadoop 侧只有这两家有实现可翻。这不构成 core 的能力边界：
 Azure、GCS、腾讯、华为的用户直接给 <code>fs.*</code>，与 AWS 用户给 <code>fs.*</code> 完全一样。</p>

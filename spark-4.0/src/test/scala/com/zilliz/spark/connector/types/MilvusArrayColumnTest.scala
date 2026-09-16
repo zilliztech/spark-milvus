@@ -8,7 +8,13 @@ import org.apache.spark.sql.types._
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import io.milvus.grpc.schema.{LongArray, ScalarField, StringArray}
+import io.milvus.grpc.schema.{
+  FloatArray,
+  IntArray,
+  LongArray,
+  ScalarField,
+  StringArray
+}
 
 /** A Milvus Array column arrives as one serialized ScalarField per row; the row
   * path and the columnar path must both give the elements back.
@@ -81,6 +87,72 @@ class MilvusArrayColumnTest extends AnyFunSuite with Matchers {
     withVector(Seq(Some(longs(1L)))) { v =>
       an[IllegalArgumentException] should be thrownBy
         new MilvusArrayColumn(v, DecimalType(10, 2))
+    }
+  }
+
+  private def floats(values: Float*): Array[Byte] =
+    ScalarField(data =
+      ScalarField.Data.FloatData(FloatArray(data = values))
+    ).toByteArray
+
+  private def ints(values: Int*): Array[Byte] =
+    ScalarField(data =
+      ScalarField.Data.IntData(IntArray(data = values))
+    ).toByteArray
+
+  // Review 749178e #05: the row path took an Array<Float/Int8/Int16> value
+  // for a binary-backed vector because both are VarBinary, and failed.
+  test(
+    "the row path decodes Float and Int8/Int16 element arrays like the columnar path"
+  ) {
+    import org.apache.arrow.vector.VectorSchemaRoot
+    import com.zilliz.milvus.storage.schema.FieldMetadata
+    import com.zilliz.spark.connector.types.ArrowConverter
+    import io.milvus.grpc.schema.{DataType => MilvusDataType}
+    val arrayMetadata = new MetadataBuilder()
+      .putLong(
+        FieldMetadata.MilvusDataTypeMetadataKey,
+        MilvusDataType.Array.value
+      )
+      .build()
+    def check(
+        rows: Seq[Option[Array[Byte]]],
+        elementType: DataType
+    )(
+        expect: (Int, org.apache.spark.sql.catalyst.util.ArrayData) => Unit
+    ): Unit =
+      withVector(rows) { v =>
+        val root = new VectorSchemaRoot(
+          java.util.Arrays.asList(v.getField),
+          java.util.Arrays.asList[org.apache.arrow.vector.FieldVector](v),
+          rows.size
+        )
+        val schema = StructType(
+          Seq(StructField("arr", ArrayType(elementType), true, arrayMetadata))
+        )
+        val column = new MilvusArrayColumn(v, elementType)
+        rows.indices.foreach { i =>
+          val row = ArrowConverter.arrowToInternalRow(root, i, schema)
+          if (rows(i).isEmpty) {
+            row.isNullAt(0) shouldBe true
+            column.isNullAt(i) shouldBe true
+          } else {
+            expect(i, row.getArray(0))
+            expect(i, column.getArray(i))
+          }
+        }
+        column.close()
+      }
+    check(
+      Seq(Some(floats(1.5f, -2f)), Some(floats()), None),
+      FloatType
+    ) {
+      case (0, a) => a.toFloatArray.toSeq shouldBe Seq(1.5f, -2f)
+      case (_, a) => a.numElements shouldBe 0
+    }
+    check(Seq(Some(ints(-128, 127)), Some(ints()), None), ShortType) {
+      case (0, a) => a.toShortArray.toSeq shouldBe Seq[Short](-128, 127)
+      case (_, a) => a.numElements shouldBe 0
     }
   }
 }
