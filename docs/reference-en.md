@@ -351,7 +351,7 @@ to snapshot). See `docs/backup-datasource-design.md` for the full design.
 | `MilvusOption.MilvusDatabaseName` | String | No | "" | Database the collection lives in. Passing `"default"` selects the default-database collection (matching a meta that records `""` or `"default"`); leaving the option empty performs single-candidate / ambiguity resolution instead — with both `default.orders` and `db2.orders` present, pass `"default"` (or `"db2"`) to disambiguate. |
 | `MilvusOption.MilvusCollectionName` | String | Conditional | - | Collection name inside the backup (matched with the database name, never `.head`). Required when the backup holds more than one collection. |
 | `MilvusOption.SnapshotPath` | String | No | - | `milvus.snapshot.path` — a snapshot JSON in the snapshot directory: `s3a://bucket/files/snapshots/<coll>/metadata/<id>.json`, a key relative to `fs.bucket_name`, or the `https://<endpoint>/bucket/files/...` form Milvus's CreateSnapshot prints as `s3_location` (accepted when the host is the configured endpoint). Reads it without a Milvus service: schema, partitions and segments all come from that file. Cannot be combined with `milvus.snapshot.manifests`. |
-| `MilvusOption.ClientSnapshotName` | String | No | latest | `milvus.client.snapshot.name` — for `format("milvus")` with `milvus.uri`, read this named snapshot instead of the latest one. Catalog loads ignore this option: use `VERSION AS OF`. The connector never creates snapshots; make one with Milvus or `CALL create_snapshot`. |
+| `MilvusOption.ClientSnapshotName` | String | No | latest | `milvus.client.snapshot.name` — for `format("milvus")` with `milvus.uri`, read this named snapshot instead of the latest one. Catalog loads ignore this option: use `VERSION AS OF`. Reads never create snapshots automatically; make one with Milvus or `CALL milvus.system.create_snapshot(...)`. |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | No | 67108864 | `milvus.snapshot.max.json.bytes` — positive maximum size of a snapshot JSON or backup `full_meta.json`. |
 
 The Spark read schema is derived from the backup meta unless `.schema()` is
@@ -463,9 +463,9 @@ CALL milvus.system.register('your_db.your_collection',
   `fs.use_iam`     => 'true')
 ```
 
-The first argument is the collection, `'db.coll'` or `'coll'` for the default
-database; `staging` is the job's staging prefix as a key relative to the
-bucket. Every other argument is a connection or storage option under its usual
+The first argument is the collection: use `'db.coll'`; for `'coll'`, use
+`milvus.database.name` when supplied and use `default` only when it is absent. `staging` is the job's
+staging prefix as a key relative to the bucket. Every other argument is a connection or storage option under its usual
 key, backquoted because the key contains dots, with the same values a
 DataFrame read takes. Values are constants only. The result is a table with
 one row per segment: `job_id`, `segment_id`, `manifest_version` and `status`
@@ -474,6 +474,41 @@ before). A wrong procedure name, a missing or unknown argument or a wrong type
 is refused when the statement is parsed, with the parameters named. Statements
 that do not start with `CALL milvus.` are untouched, so the extension can stay
 on for every session. The extension works the same on Spark 3.5 and 4.x.
+
+### 3.4 Managing Milvus with `CALL`
+
+The management procedures use the same SQL extension and argument rules shown
+above. Each statement must include `milvus.uri` and any required authentication
+options. Write the target as `db.collection`. For an unqualified `collection`,
+the procedure uses `milvus.database.name` when supplied and uses `default` only
+when that option is absent.
+
+| Procedure | Required arguments | Optional arguments | Result |
+|-----------|--------------------|--------------------|--------|
+| `create_snapshot` | `collection`, `name` | `description`; `compaction_protection_seconds` (default `0`) | One row containing `database`, `collection`, `snapshot`, `description`, `partition_names`, `create_ts`, and `s3_location` |
+| `drop_snapshot` | `collection`, `name` | — | One row with `status = dropped` |
+| `list_snapshots` | `collection` | — | One row per snapshot name; an empty collection of snapshots returns an empty table |
+| `describe_snapshot` | `collection`, `name` | — | The same snapshot metadata columns as `create_snapshot` |
+| `create_index` | `collection`, `field`, `index_name` | `index_type` (default `AUTOINDEX`), `metric_type` (default `L2`), `params`, `wait`, `timeout_seconds` | One row with the field, index name, and state: `submitted` without waiting, or `Finished` after successful waiting |
+| `drop_index` | `collection`, `index_name` | — | One row with `status = dropped` |
+| `load` | `collection` | `wait`, `timeout_seconds` | One row with `state = submitted`, or `LoadStateLoaded` after waiting |
+| `release` | `collection` | — | One row with `status = released` |
+| `flush` | `collection` | — | One row with `status = submitted`; this means Milvus accepted the request, not that persistence has completed |
+| `compact` | `collection` | `wait`, `timeout_seconds` | The compaction ID, plan count, state, and plan-state counts; counts are NULL when the call only submits the work |
+| `describe` | `collection` | — | Collection ID, persistent segment count, load state, and one row for each schema field/index pair; index columns are NULL for a field without an index |
+
+`create_index`, `load`, and `compact` submit work and return immediately by
+default. Set `wait => true` to poll for completion. While waiting,
+`timeout_seconds` defaults to 600 and must be positive; supplying it without
+`wait => true` is an error. Each polling RPC uses the remaining overall wait
+budget as its deadline, so one status request cannot extend the operation past
+the configured timeout. A Milvus failure state or an expired timeout fails the
+statement instead of returning a successful-looking row.
+
+`register` remains limited to a committed backfill that updates manifests for
+existing segments. It does not register segments created by `df.write`.
+`cleanup_staging` is not exposed in this release, and none of the management
+procedures discovers or deletes staging prefixes.
 
 
 ## 4. Data Schema

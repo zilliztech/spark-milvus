@@ -24,8 +24,9 @@
 
 <h1>CALL 过程</h1>
 
-<p>能力 A1 到 A5、A7 的 SQL 入口。过程体本身（登记、建快照、建索引）各在自己的能力行里,本页只讲
-<code>CALL milvus.system.&lt;name&gt;(...)</code> 这条语句怎么从文本变成一次调用。工作单 #17。</p>
+<p>能力 A1 到 A5 的 SQL 入口，并记录 A7 尚未实现的安全边界。本页同时规定
+<code>CALL milvus.system.&lt;name&gt;(...)</code> 怎么从文本变成一次调用，以及每个已实现过程的参数、结果表、
+等待和失败语义。SQL 前端由 issue #17 落地；管理过程由 issue #141 补齐。</p>
 
 <p class="thesis"><strong>一个解析器扩展认出 <code>CALL milvus.system.*</code>,把它变成一个带过程和参数的逻辑节点;
 一条 planner 策略把节点变成在 driver 上跑过程体的物理节点;结果是一张表。四条线共用一份代码,
@@ -54,7 +55,7 @@ identifier    : IDENTIFIER | BACKQUOTED_IDENTIFIER ;</code></pre>
 
 <table>
 <tr><th>规则</th><th>定的是什么</th></tr>
-<tr><td>第一个位置参数是 collection,写法 <code>'db.coll'</code>;<code>'coll'</code> 表示 default 库</td><td>和读写选项 <code>milvus.database.name</code>、<code>milvus.collection.name</code> 同一份解析,一处实现</td></tr>
+<tr><td>第一个位置参数是 collection，写法 <code>'db.coll'</code>；只写 <code>'coll'</code> 时先取 <code>milvus.database.name</code>，未提供才使用 <code>default</code></td><td>和读写选项 <code>milvus.database.name</code>、<code>milvus.collection.name</code> 同一份解析，一处实现</td></tr>
 <tr><td>过程自己的参数用裸标识符命名:<code>staging => '...'</code></td><td>每个过程声明自己的参数表,名字、类型、是否必填</td></tr>
 <tr><td>连接和存储选项用反引号包住的选项名命名:<code>`milvus.uri` => '...'</code></td><td>选项名和 <code>.option()</code> 的键完全一样,不另起一套拼写;反引号是 SQL 标识符里带点的标准写法</td></tr>
 <tr><td>值只能是常量</td><td>过程在 driver 上跑,不需要表达式;文法不依赖 Spark 的表达式文法,四条线一份</td></tr>
@@ -62,9 +63,8 @@ identifier    : IDENTIFIER | BACKQUOTED_IDENTIFIER ;</code></pre>
 </table>
 
 <p>连接与存储选项走命名参数而不是会话配置。只读 <code>MilvusCatalog</code> 已能为表加载
-保存这些属性，但 CALL 前端尚未实现，也没有把 Catalog 属性接入过程执行。第一版因此要求语句
-显式携带所需选项，让一条语句自足、复制出来就能跑。以后是否允许 Catalog 属性提供默认值，
-由 procedure 实现统一决定；语句中的显式参数始终覆盖默认值。</p>
+保存这些属性，但 CALL 是独立语句，不能从语法中确定要借用哪一个 Catalog 实例。每条语句因此
+显式携带所需选项，让语句自足、复制出来就能跑。语句中的显式参数始终是唯一配置来源。</p>
 
 <h2 id="flow">二、一次调用怎么走</h2>
 
@@ -101,11 +101,11 @@ identifier    : IDENTIFIER | BACKQUOTED_IDENTIFIER ;</code></pre>
 <code>parsePlan</code> 先把文本去注释、压空白、转小写,以 <code>call milvus.</code> 开头的才交给 antlr 生成的解析器,
 其余全部原样交给 <code>delegate</code>。Spark 4 自己也有 <code>CALL</code> 语句(<code>ProcedureCatalog</code>),
 不以 <code>milvus.</code> 开头的 CALL 不碰。其它 <code>parseExpression</code> 等方法全部转发。</li>
-<li><strong>逻辑节点。</strong><code>CallProcedure(procedure: Procedure, args: Map[String, Any])</code>,
+<li><strong>逻辑节点。</strong><code>CallProcedure(procedure: Procedure, args: ProcedureArgs)</code>,
 <code>LeafCommand</code>,<code>output</code> 来自 <code>procedure.outputSchema</code>。
 参数在建节点时按过程的参数表对好:位置参数按顺序填,命名参数按名字填,缺必填、多了不认识的、类型不对,都在这里抛。</li>
 <li><strong>策略。</strong><code>injectPlannerStrategy</code> 装一条只认 <code>CallProcedure</code> 的策略,产出 <code>CallProcedureExec</code>。</li>
-<li><strong>物理节点。</strong><code>LeafV2CommandExec</code>,<code>run()</code> 在 driver 上调 <code>procedure.run(args)</code>,
+<li><strong>物理节点。</strong><code>CallProcedureExec</code> 是 <code>LeafExecNode</code>，在 driver 上调 <code>procedure.run(args)</code>,
 把 <code>Seq[Row]</code> 转成 <code>InternalRow</code>。<code>spark.sql("CALL ...")</code> 拿到的 DataFrame 就是这张表,
 <code>.show()</code>、<code>.collect()</code> 都行。</li>
 </ol>
@@ -121,14 +121,50 @@ identifier    : IDENTIFIER | BACKQUOTED_IDENTIFIER ;</code></pre>
 object Procedures { def byName(name: String): Option[Procedure] }   // 注册表,静态</code></pre>
 
 <p><code>ProcedureArgs</code> 装两部分:过程自己的参数(按参数表取值),和连接、存储选项(反引号命名参数收集成的
-<code>Map[String, String]</code>,交给现有的 <code>MilvusOption</code> 解析)。过程体不碰 SQL,不碰 Spark 计划;
-<code>Register.run(options, stagingPrefix)</code> 就是今天的入口,只包一层 <code>Procedure</code>。</p>
+<code>Map[String, String]</code>,交给现有的 <code>MilvusOption</code> 解析)。过程体不碰 SQL,不碰 Spark 计划。
+普通管理过程共用 collection 解析、client 创建与关闭、可选等待；<code>register</code> 另需对象存储，继续复用
+<code>Register.run(options, stagingPrefix)</code>。</p>
 
 <table>
-<tr><th>过程</th><th>参数</th><th>输出表</th></tr>
-<tr><td><code>register</code>(A4)</td><td><code>collection</code>(位置),<code>staging</code>(必填,作业暂存前缀,相对桶的 key)</td><td>每段一行:<code>job_id STRING, segment_id BIGINT, manifest_version BIGINT, status STRING</code>,status 是 <code>registered</code> 或 <code>already_registered</code></td></tr>
-<tr><td>A1、A2、A3、A5、A7</td><td colspan="2">同一骨架,各自的能力行定参数和输出;本单只做 register</td></tr>
+<tr><th>过程</th><th>过程参数（不含反引号连接选项）</th><th>输出表</th></tr>
+<tr><td><code>create_snapshot</code></td><td><code>collection</code>,<code>name</code>；可选 <code>description</code>、<code>compaction_protection_seconds</code>（默认 0）</td><td>一行快照元数据：database、collection、snapshot、description、partition_names、create_ts、s3_location</td></tr>
+<tr><td><code>drop_snapshot</code></td><td><code>collection</code>,<code>name</code></td><td>一行 database、collection、snapshot、status=<code>dropped</code></td></tr>
+<tr><td><code>list_snapshots</code></td><td><code>collection</code></td><td>每个名称一行：database、collection、snapshot；成功的空响应就是空表</td></tr>
+<tr><td><code>describe_snapshot</code></td><td><code>collection</code>,<code>name</code></td><td>与 <code>create_snapshot</code> 相同的一行快照元数据</td></tr>
+<tr><td><code>create_index</code></td><td><code>collection</code>,<code>field</code>,<code>index_name</code>；可选 <code>index_type</code>（默认 AUTOINDEX）、<code>metric_type</code>（默认 L2）、<code>params</code>、<code>wait</code>（默认 false）、<code>timeout_seconds</code>（等待时默认 600）</td><td>一行 database、collection、field、index_name、state；不等待是 <code>submitted</code>，等待成功是 <code>Finished</code></td></tr>
+<tr><td><code>drop_index</code></td><td><code>collection</code>,<code>index_name</code></td><td>一行 database、collection、index_name、status=<code>dropped</code></td></tr>
+<tr><td><code>load</code></td><td><code>collection</code>；可选 <code>wait</code>、<code>timeout_seconds</code></td><td>一行 database、collection、state；不等待是 <code>submitted</code>，等待成功是 <code>LoadStateLoaded</code></td></tr>
+<tr><td><code>release</code></td><td><code>collection</code></td><td>一行 database、collection、status=<code>released</code></td></tr>
+<tr><td><code>flush</code></td><td><code>collection</code></td><td>一行 database、collection、status=<code>submitted</code>；Flush RPC 成功只表示请求已接收，不伪装成数据已落盘</td></tr>
+<tr><td><code>compact</code></td><td><code>collection</code>；可选 <code>wait</code>、<code>timeout_seconds</code></td><td>一行 compaction_id、plan_count、state 与 executing/completed/failed/timeout 计划数；不等待的 state 是 <code>submitted</code></td></tr>
+<tr><td><code>describe</code></td><td><code>collection</code></td><td>每个 schema 字段至少一行，同时带 collection id、segment count、load state；字段有索引时每个索引一行，附 index id、名称、状态与进度</td></tr>
+<tr><td><code>register</code></td><td><code>collection</code>,<code>staging</code>（作业暂存前缀,相对桶的 key）</td><td>每段一行：job_id、segment_id、manifest_version、status；status 是 <code>registered</code> 或 <code>already_registered</code></td></tr>
 </table>
+
+<h3 id="procedure-common">3.1 共同行为</h3>
+
+<ul>
+<li><code>collection</code> 只接受 <code>db.collection</code> 或 <code>collection</code>。后一种写法先取连接选项 <code>milvus.database.name</code>，未提供才使用 <code>default</code>；空名称、多余的点在发 RPC 前拒绝。</li>
+<li>普通管理过程每次调用只创建一个 <code>MilvusClient</code>，在 driver 上顺序完成该过程所需 RPC，并在成功或失败时关闭。成功的空列表保持空列表；响应缺 status、网络、认证和超时错误以及除下述情况外的非成功 status 都使过程失败。唯一例外是 <code>DescribeIndex</code> 明确返回 <code>IndexNotExist</code>：<code>describeIndexes</code> 将它规范为空索引列表，使无索引 collection 的 <code>describe</code> 仍能输出 schema 字段。</li>
+<li>名称、说明、字段名、索引名和索引参数不做连接器侧语义改写；只拒绝空的必填字符串、负数保护期和非正等待超时。</li>
+<li><code>describe</code> 的 segment count 是 <code>GetPersistentSegmentInfo</code> 返回的段数，不把各段 <code>num_rows</code> 相加冒充当前可见行数。schema 字段按 Milvus 顺序输出；同一字段有多个索引时输出多行，无索引时索引列为 NULL。</li>
+</ul>
+
+<h3 id="procedure-wait">3.2 有界等待</h3>
+
+<p><code>create_index</code>、<code>load</code> 和 <code>compact</code> 默认只提交一次 RPC。显式
+<code>wait =&gt; true</code> 才轮询，<code>timeout_seconds</code> 默认 600 秒；给出 timeout 却不打开 wait 是参数错误，
+避免一个看似生效的参数被忽略。等待规则如下：</p>
+
+<table>
+<tr><th>过程</th><th>成功终态</th><th>失败终态</th></tr>
+<tr><td>create_index</td><td><code>Finished</code></td><td><code>Failed</code>；错误包含 Milvus 的 fail_reason</td></tr>
+<tr><td>load</td><td><code>LoadStateLoaded</code></td><td><code>LoadStateNotExist</code></td></tr>
+<tr><td>compact</td><td><code>Completed</code> 且 failed/timeout plan 都为 0</td><td>未定义状态，或 Completed 时仍有 failed/timeout plan</td></tr>
+</table>
+
+<p>其它中间状态继续轮询，超过截止时间抛出包含过程名、collection 和最后状态的异常。
+每次状态 RPC 都以当时剩余的整体等待时间为 deadline，单次 RPC 不能越过 <code>timeout_seconds</code> 的总截止时间。轮询只在 driver 上发生，不创建 Spark job，不把 client 或凭证序列化给 executor。</p>
 
 <h2 id="lines">四、哪些按线各一份</h2>
 
@@ -151,23 +187,25 @@ object Procedures { def byName(name: String): Option[Procedure] }   // 注册表
 
 <table>
 <tr><th>情况</th><th>用户看到</th></tr>
-<tr><td>过程名不存在</td><td><code>unknown procedure milvus.system.foo; known: register</code>,解析期</td></tr>
+<tr><td>过程名不存在</td><td><code>unknown procedure milvus.system.foo; known: register, create_snapshot, ...</code>,解析期；完整列表来自静态注册表</td></tr>
 <tr><td>缺必填参数、不认识的参数、类型不对</td><td><code>procedure register: missing argument 'staging'; parameters: collection STRING, staging STRING</code>,解析期</td></tr>
-<tr><td>连接或存储选项不全</td><td><code>MilvusOption</code> 今天的错误,原样,前面加过程名</td></tr>
-<tr><td>Milvus 拒绝(collection 不存在、BatchUpdateManifest 失败)</td><td>client 的异常原样上抛,不吞、不转成空表</td></tr>
+<tr><td>连接或存储选项不全</td><td>普通管理过程明确指出缺少 <code>milvus.uri</code>；register 保留其连接与对象存储选项校验</td></tr>
+<tr><td>Milvus 拒绝（collection 不存在、状态失败、BatchUpdateManifest 失败）</td><td>client 的异常原样上抛,不吞、不转成空表</td></tr>
 <tr><td>作业清单不存在、标记文件缺失</td><td><code>Register.run</code> 今天的异常</td></tr>
 </table>
 
 <h2 id="index">六、对能力表和模块表的改动</h2>
 
 <ul>
-<li>能力表第 4 节的引言「Spark 4 用 ProcedureCatalog,Spark 3.5 是同名函数」改成「四条线走同一个 SQL 语法扩展」;README 第 2 节的旁路一行同改。</li>
-<li>3.5 线的 <code>spark.functions</code> 包(今天只有 package.scala)不再有用途,提议删除,等负责人同意。</li>
-<li><code>spark.extensions</code> 认领 A4(以及后续 CALL 的编号);<code>spark.procedure</code> 不变。</li>
-<li>reference 中英加「3.3 CALL」:启用方式、语法、register 的参数和输出。</li>
+<li><code>spark.extensions</code> 提供四条线共用的 SQL 前端；<code>spark.procedure</code> 认领 A1–A5 并实现全部过程体。</li>
+<li><code>client.api</code> 提供快照、索引、生命周期、描述与登记所需的 RPC 封装，并校验响应状态。</li>
+<li>中英文 reference 的 CALL 章节公开列出命令、参数、结果和等待规则，不使用内部工作项缩写。</li>
+<li>A7 仍列在「尚未落地」：作业清单没有 collection 所有权，保留期与活跃作业判定未定，不能安全提供批量清理。</li>
 </ul>
 
-<h2 id="open">七、已定</h2>
+<h2 id="open">七、已定与边界</h2>
 
 <p>三件 2026-09-16 定案(决策日志同日):连接与存储选项走命名参数;3.5 线的 <code>spark.functions</code> 包删除;register 的结果表用第三节那四列。
-实现在同一天落地(#17):<code>spark.sql("CALL milvus.system.register(...)")</code> 在 UAT 上完成 #16 的登记。</p>
+实现在同一天落地(#17):<code>spark.sql("CALL milvus.system.register(...)")</code> 在 UAT 上完成 #16 的登记。
+#141 随后补齐第三节所列管理过程及其 client RPC、资源关闭和有界等待测试。</p>
+<p>本轮不实现 <code>cleanup_staging</code>，也不为 append 虚构 <code>RegisterSegments</code>；二者分别等待安全清理契约和 Milvus 服务端公开 API。</p>

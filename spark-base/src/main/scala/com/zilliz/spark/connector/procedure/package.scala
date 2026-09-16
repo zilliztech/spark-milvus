@@ -6,10 +6,13 @@ package com.zilliz.spark.connector
   * also call directly. The SQL front that reaches them is `spark.extensions`.
   * Design: docs/design/architecture/procedure.html.
   *
-  * `Register` hands a committed write job's segments to Milvus through
-  * `BatchUpdateManifest` (the backfill branch of A4); `RegisterProcedure` is
-  * its CALL form.
+  * Snapshot, index, collection-lifecycle, and describe procedures delegate to
+  * `client.api` and own their client for the duration of one driver-side call.
+  * `Register` additionally reads a committed write job and hands its existing
+  * segments to Milvus through `BatchUpdateManifest` (the backfill branch of
+  * A4). Append registration and staging cleanup remain outside this package's
+  * implemented contract.
   *
-  * Capabilities: A4 (see docs/design/capabilities.md).
+  * Capabilities: A1, A2, A3, A4, A5 (see docs/design/capabilities.md).
   */
 package object procedure

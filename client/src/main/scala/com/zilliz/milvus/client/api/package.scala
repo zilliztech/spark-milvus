@@ -7,6 +7,6 @@ package com.zilliz.milvus.client
   * prepare data; the connector's SQL surface does not call it (section 10 of
   * capabilities.md).
   *
-  * Capabilities: C1, C2, A1 (see docs/design/capabilities.md).
+  * Capabilities: C1, C2, A1, A2, A3, A4, A5 (see docs/design/capabilities.md).
   */
 package object api

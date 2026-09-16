@@ -25,7 +25,7 @@
 
 展开后 11 个 sbt project：native 两个、core、compat、client、spark 四条线、apps 一个、integration 一个。交叉编译由 `crossScalaVersions` 控制，不增加 project 数。
 
-只有 spark 必须按线拆：接口差异（Spark 4.0 才有的 ProcedureCatalog）、Arrow、antlr、Java 目标版本都是按线定的。fat jar 不单独成模块，assembly 是 spark-`<line>` 上的一个任务；apps 和 integration 各只建一个，加线是加一行配置。
+只有 spark 必须按线拆：`TableCatalog` 与 `ParserInterface` 的方法集有差异，Arrow、antlr、Java 目标版本也按线定。fat jar 不单独成模块，assembly 是 spark-`<line>` 上的一个任务；apps 和 integration 各只建一个，加线是加一行配置。
 
 Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；core、compat、client、spark-base 交叉编译两个版本；apps 和 integration 跟随所在线。
 
@@ -111,7 +111,7 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 | `metrics` | core 的 ReadMetrics / WriteMetrics 翻成 DataSource V2 的 CustomMetric / CustomTaskMetric，读写各一张清单；G5 | 否 |
 | `options` | option 名、别名、校验；ReadMode；按 ReadMode 构造这次读的 SnapshotSource（SnapshotSources，含 ClientSnapshotSource、OptionStringsSnapshotSource，把 compat 的 backup 实现和 V2 footer 解析器接进 core）；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageKeys） | 否 |
 | `sources` | 只有 MilvusDataSource，`format("milvus")` 的 TableProvider。留在这个包名下是因为 apps 和用户作业按字符串引用它的全名 | 否 |
-| `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、注册表、`Register` 与它的 CALL 形式；节点和策略在 `extensions` | 否 |
+| `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、静态注册表、共用的 collection/client/有界等待规则；已实现快照、索引、load/release/flush/compact、describe，以及 backfill `Register`；节点和策略在 `extensions`，append 登记与暂存清理尚未实现 | 否 |
 | `extensions` | SparkSessionExtensions、`CALL milvus.system.<name>(...)` 的解析器扩展、CallProcedure 节点与策略；文法 `spark-base/src/main/antlr4/MilvusCall.g4` 一份，设计见 procedure.html | antlr 生成的解析器按线（本线 antlr 版本），`MilvusSqlParser` 适配器按线（4.0 起多 `parseRoutineParam`）；其余共享 |
 
 按线的还有 `META-INF/services` 资源。
@@ -129,7 +129,7 @@ CALL 走语法扩展，不走 `ProcedureCatalog`：后者是 Spark 4.0 才有的
 | `backfill` | BackfillApp、配置、join 键、列映射、merge 模式、结果 JSON |
 | `search` | VectorBruteForceSearch、SQL 函数扩展 |
 
-四个包互不依赖，各自是独立入口。`format("milvus")` 的短名归 apps 之后，只有加载 apps jar 才能用旧写法；三段名 `milvus.db.coll` 不需要 apps。
+两个包互不依赖，各自是独立入口。`format("milvus")` 的短名归 apps 之后，只有加载 apps jar 才能用旧写法；三段名 `milvus.db.coll` 不需要 apps。
 
 ## 3 目录
 
@@ -152,9 +152,9 @@ spark-milvus/
   client/
     src/main/scala/com/zilliz/milvus/client/{grpc,api}
     src/main/protobuf/             milvus-proto 子模块的引用
-  spark-base/src/main/scala/com/zilliz/spark/connector/{catalog,sources,table,read,expr,types,write,options}
-  spark-3.5/src/main/{scala,resources}/  catalog、functions、extensions、META-INF/services
-  spark-4.0/  spark-4.1/  spark-4.2/     catalog、procedure、extensions、META-INF/services
+  spark-base/src/main/scala/com/zilliz/spark/connector/{catalog,sources,table,read,expr,types,write,options,procedure,extensions}
+  spark-3.5/src/main/{scala,resources}/  catalog、ParserInterface 适配、antlr 生成物、META-INF/services
+  spark-4.0/  spark-4.1/  spark-4.2/     catalog、ParserInterface 适配、antlr 生成物、META-INF/services
   apps-4.0/src/main/{scala,resources}/   com.zilliz.spark.connector.apps.{backfill,search}
   integration-4.0/src/test/scala/  需要 MinIO 与 Milvus
   src/                             1.x 的代码，按模块逐个迁走

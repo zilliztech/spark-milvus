@@ -220,7 +220,7 @@
         <text x="76" y="64" font-size="11.5" fill="currentColor" opacity=".65">SQL 与 DataFrame · Catalyst 计划与调度 · driver 规划，executor 执行</text>
         <rect x="694" y="24" width="196" height="52" fill="var(--ours-soft)" stroke="var(--ours)" stroke-width="1"/>
         <text x="710" y="46" font-size="13" font-weight="600" fill="var(--ours)">apps · 入口与遗留</text>
-        <text x="710" y="64" font-size="11" fill="var(--ours)" opacity=".85">backfill · tools · search · legacy</text>
+        <text x="710" y="64" font-size="11" fill="var(--ours)" opacity=".85">backfill · search</text>
 
         <!-- row 1: layer 3 -->
         <rect x="60" y="98" width="830" height="104" fill="var(--ours-soft)" stroke="var(--ours)" stroke-width="1.5"/>
@@ -235,7 +235,7 @@
           <rect x="524" y="134" width="80" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="564" y="150" text-anchor="middle">write</text>
           <rect x="612" y="134" width="92" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="658" y="150" text-anchor="middle">options</text>
         </g>
-        <text x="76" y="182" font-size="11" fill="var(--ours)" opacity=".85" font-family="ui-monospace,monospace">按 Spark 线各一份：procedure（4.x） · functions（3.5） · extensions · META-INF/services</text>
+        <text x="76" y="182" font-size="11" fill="var(--ours)" opacity=".85" font-family="ui-monospace,monospace">按 Spark 线各一份：catalog 适配 · SQL parser 适配与生成物 · META-INF/services</text>
 
         <!-- row 2: layer 2 -->
         <rect x="60" y="224" width="830" height="140" fill="var(--ours-soft)" stroke="var(--ours)" stroke-width="1.5"/>
@@ -327,12 +327,12 @@
 │   └── src/main/protobuf/            <span class="c">milvus-proto 子模块的引用</span>
 │
 ├── <span class="u">spark-base/</span><span class="lay">第 3 层</span>                  <span class="c">四条线共享的源码，不是 project</span>
-│   └── .../spark/connector/          <span class="c">catalog · table · read · expr · types · write · options</span>
-├── <span class="m">spark-3.5/</span>                    <span class="c">catalog · functions · extensions · services</span>
-├── <span class="m">spark-4.0/</span> <span class="m">spark-4.1/</span> <span class="m">spark-4.2/</span>  <span class="c">catalog · procedure · extensions · services</span>
+│   └── .../spark/connector/          <span class="c">catalog · table · read · expr · types · write · options · procedure · extensions</span>
+├── <span class="m">spark-3.5/</span>                    <span class="c">catalog · extensions parser 适配 · services</span>
+├── <span class="m">spark-4.0/</span> <span class="m">spark-4.1/</span> <span class="m">spark-4.2/</span>  <span class="c">catalog · extensions parser 适配 · services</span>
 │                                     <span class="c">fat jar 是各线上的 assembly 任务，不单独成模块</span>
 │
-├── <span class="m">apps-4.0/</span><span class="lay">第 4 层</span>                    <span class="c">backfill · tools · search · legacy</span>
+├── <span class="m">apps-4.0/</span><span class="lay">第 4 层</span>                    <span class="c">backfill · search</span>
 │                                     <span class="c">只在云上跑的那条线上建，别的线按需加</span>
 ├── <span class="m">integration-4.0/</span>              <span class="c">需要 MinIO 与 Milvus，跑一条线</span>
 │
@@ -368,7 +368,7 @@
 
     <div class="pkg">
       <h4>spark/base 与各线</h4>
-      <p class="role">第 3 层。只做翻译，Spark 索取什么就交出什么。base 是共享源码，四条线各编译一次；按线不同的只有 catalog、procedure 或 functions、extensions 和服务注册文件。</p>
+      <p class="role">第 3 层。只做翻译，Spark 索取什么就交出什么。base 是共享源码，四条线各编译一次；按线不同的只有 catalog 与 parser 接口适配、antlr 生成物和服务注册文件。</p>
       <dl>
         <dt>table</dt><dd>schema、能力集、元数据列、统计 <em>R12 R13</em></dd>
         <dt>read</dt><dd>ScanBuilder、Scan、InputPartition、ColumnVector 实现 <em>R4 R5 R11 R16 R18</em></dd>
@@ -377,9 +377,8 @@
         <dt>write</dt><dd>WriteBuilder、BatchWrite、DataWriter；两种写模式 <em>W1 W2</em></dd>
         <dt>options</dt><dd>option 名、别名、校验；把 compat 的实现注册进 core <em>K4 G1–G4</em></dd>
         <dt>catalog</dt><dd>database 的单层 namespace、collection 列表、三段名与 loadTable 快照重载已落地；DDL 仍属 C2 <em>C1 R1 R2</em></dd>
-        <dt>procedure</dt><dd>Spark 4 的 CALL <em>A1–A5</em></dd>
-        <dt>functions</dt><dd>Spark 3.5 上同一批动作的函数入口 <em>A1–A5</em></dd>
-        <dt>extensions</dt><dd>SparkSessionExtensions、SQL 解析器扩展、优化规则</dd>
+        <dt>procedure</dt><dd>四条线共用的 CALL 过程体：快照、索引、生命周期、登记与描述 <em>A1–A5</em></dd>
+        <dt>extensions</dt><dd>四条线共用的 CALL 节点与 planner 策略；parser 接口适配和 antlr 生成物按线</dd>
       </dl>
     </div>
 
@@ -397,16 +396,15 @@
 
     <div class="pkg">
       <h4>native 与 apps</h4>
-      <p class="role">第 1 层的包名用 jni 而不是 native：native 是 Java 的保留字。第 4 层的四个包各自是独立入口，删掉任何一个不影响其他。</p>
+      <p class="role">第 1 层的包名用 jni 而不是 native：native 是 Java 的保留字。第 4 层的两个包各自是独立入口，删掉任何一个不影响另一个。</p>
       <dl>
         <dt>jni.storage</dt><dd>StorageNative：每个 loon_* 一个 native 方法 <em>R4 W1</em></dd>
         <dt>… .arrow</dt><dd>三个 Arrow C 结构体的分配与 release</dd>
         <dt>… .loader</dt><dd>按 os 和 arch 解压 .so 后加载</dd>
         <dt>jni.vector</dt><dd>NativeVectorLibrary：上游加载；NativeVectorSearch：调用上游 BruteForce <em>V1（部分） V5</em></dd>
         <dt>apps.backfill</dt><dd>作业、CLI、结果 JSON <em>O1</em></dd>
-        <dt>apps.tools</dt><dd>两个调试工具 <em>O2</em></dd>
         <dt>core.index</dt><dd>BruteForceSearch 管理原生查询缓冲、排除位图和每段 TopK；Spark 只适配类型 <em>V5</em></dd>
-        <dt>apps.legacy</dt><dd>gRPC Insert 的写栈与 format("milvus") 短名 <em>W7</em></dd>
+        <dt>apps.search</dt><dd>向量查询的 Spark SQL 表达式与扩展入口 <em>V5 V7</em></dd>
       </dl>
     </div>
   </div>
@@ -783,8 +781,8 @@
     </div>
 
     <div class="grp">
-      <h4>CALL · 7 条</h4>
-      <p>Table 接口表达不了的动作；Spark 3.5 上是同名函数。</p>
+      <h4>CALL · 6 条</h4>
+      <p>Table 接口表达不了的动作；四条线走同一个 SQL 扩展。A1–A5 已实现，A7 仍待安全清理契约。</p>
       <div class="chips">
         <span class="chip p1"><span class="id">A1</span>快照</span>
         <span class="chip p1"><span class="id">A2</span>索引</span>

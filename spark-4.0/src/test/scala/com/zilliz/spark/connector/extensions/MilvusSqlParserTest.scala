@@ -80,6 +80,57 @@ class MilvusSqlParserTest extends AnyFunSuite with BeforeAndAfterAll {
     ).asInstanceOf[CallProcedure]
     assert(call.args.string("collection") == "c")
     assert(call.args.string("staging") == "p")
+
+    val options = parse(
+      "CALL milvus.system.register('c', 'p', `MILVUS.URI` => 'http://localhost:19530')"
+    ).asInstanceOf[CallProcedure]
+    assert(
+      options.args.options == Map(
+        "MILVUS.URI" -> "http://localhost:19530"
+      )
+    )
+  }
+
+  test("every management procedure is reachable through the shared parser") {
+    val calls = Seq(
+      "create_snapshot" ->
+        "CALL milvus.system.create_snapshot('db.c', 's', description => 'daily', compaction_protection_seconds => 60)",
+      "drop_snapshot" ->
+        "CALL milvus.system.drop_snapshot('db.c', 's')",
+      "list_snapshots" ->
+        "CALL milvus.system.list_snapshots('db.c')",
+      "describe_snapshot" ->
+        "CALL milvus.system.describe_snapshot('db.c', 's')",
+      "create_index" ->
+        "CALL milvus.system.create_index('db.c', 'vector', 'vector_idx', wait => true, timeout_seconds => 30)",
+      "drop_index" ->
+        "CALL milvus.system.drop_index('db.c', 'vector_idx')",
+      "load" ->
+        "CALL milvus.system.load('db.c', wait => true, timeout_seconds => 30)",
+      "release" ->
+        "CALL milvus.system.release('db.c')",
+      "flush" ->
+        "CALL milvus.system.flush('db.c')",
+      "compact" ->
+        "CALL milvus.system.compact('db.c', wait => false)",
+      "describe" ->
+        "CALL milvus.system.describe('db.c')"
+    )
+
+    val parsed = calls.map { case (name, sql) =>
+      val call = parse(sql).asInstanceOf[CallProcedure]
+      assert(call.procedure.name == name)
+      name -> call
+    }.toMap
+
+    assert(
+      parsed("create_snapshot").args.long(
+        "compaction_protection_seconds"
+      ) == 60L
+    )
+    assert(parsed("create_index").args.boolean("wait"))
+    assert(parsed("create_index").args.long("timeout_seconds") == 30L)
+    assert(!parsed("compact").args.boolean("wait"))
   }
 
   test("string escapes: doubled quote and backslash") {
@@ -122,6 +173,11 @@ class MilvusSqlParserTest extends AnyFunSuite with BeforeAndAfterAll {
         "CALL milvus.system.register('c', staging => 'p', staging => 'q')"
       )
         .contains("given twice")
+    )
+    assert(
+      refused(
+        "CALL milvus.system.register('c', 'p', `milvus.uri` => 'a', `MILVUS.URI` => 'b')"
+      ).contains("option 'MILVUS.URI' given twice")
     )
     assert(
       refused(

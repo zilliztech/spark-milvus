@@ -36,7 +36,7 @@ time: a source file in `core`, `compat` or `client` that mentions
 | 2 | `client` | The gRPC client for the online Milvus service |
 | 3 | `spark-base` | Connector sources shared by every Spark line. Not an sbt project, just a source directory. |
 | 3 | `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | One project per maintained Spark line. Each pins its own Spark, Arrow, antlr and Java version and compiles the shared sources. |
-| 4 | `apps-4.0` | The jobs users run: backfill, brute-force search, diagnostic tools, and the legacy gRPC insert path |
+| 4 | `apps-4.0` | The jobs users run: backfill and vector search |
 | — | `integration-4.0` | Integration tests. Needs a real Milvus and MinIO; never published. |
 
 Why the core layer carries no Spark dependency: one artifact serves all four
@@ -44,9 +44,9 @@ Spark lines, its tests run without a SparkSession, and the boundary is checked
 by the compiler instead of by review. Ray cannot reuse it — Ray is Python and
 cannot depend on a JVM jar. What it can share is the C ABI in layer 1.
 
-Only the Spark layer has to be split per line, because the interfaces differ:
-`ProcedureCatalog` exists only in Spark 4.0 and later, and Arrow, antlr and the
-Java target version are pinned per line. The fat jar is an `assembly` task on
+Only the Spark layer has to be split per line, because the `TableCatalog` and
+`ParserInterface` method sets differ, and Arrow, antlr and the Java target
+version are pinned per line. The fat jar is an `assembly` task on
 `spark-<line>`, not a module of its own.
 
 Two git submodules sit at the repository root. `milvus-proto` supplies the

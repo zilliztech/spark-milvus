@@ -55,6 +55,15 @@ class GrpcRetryInterceptor(
                 if (status.isOk) {
                   // Call succeeded
                   super.onClose(status, trailers)
+                } else if (
+                  callOptions
+                    .getOption(GrpcRetryInterceptor.DisableRetries)
+                    .booleanValue()
+                ) {
+                  // Procedure polling owns its retry schedule. Forward the
+                  // failure immediately so an interceptor backoff cannot run
+                  // past the procedure's overall deadline.
+                  super.onClose(status, trailers)
                 } else {
                   val statusCode = status.getCode
                   if (nonRetryableCodes.contains(statusCode)) {
@@ -66,7 +75,18 @@ class GrpcRetryInterceptor(
                     println(
                       s"gRPC call failed with retryable status: $statusCode. Retrying in $currentDelay ms."
                     )
-                    Thread.sleep(currentDelay)
+                    try Thread.sleep(currentDelay)
+                    catch {
+                      case interrupted: InterruptedException =>
+                        Thread.currentThread().interrupt()
+                        super.onClose(
+                          GrpcStatus.CANCELLED
+                            .withDescription("gRPC retry interrupted")
+                            .withCause(interrupted),
+                          trailers
+                        )
+                        return
+                    }
                     currentDelay = Math.min(
                       (currentDelay * delayMultiplier).toLong,
                       maxDelayMillis
@@ -89,4 +109,12 @@ class GrpcRetryInterceptor(
       }
     }
   }
+}
+
+object GrpcRetryInterceptor {
+  private[client] val DisableRetries: CallOptions.Key[java.lang.Boolean] =
+    CallOptions.Key.createWithDefault(
+      "spark-milvus-disable-client-retries",
+      java.lang.Boolean.FALSE
+    )
 }
