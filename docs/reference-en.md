@@ -288,6 +288,26 @@ the query must be a non-empty JSON-style array of finite numbers and `topK`
 must be a positive integer. Any provided vector-search option must be non-blank;
 a partial or malformed configuration fails during planning.
 
+#### Spark predicate pushdown
+
+Spark SQL and DataFrame `where` conditions use DataSource V2 predicate
+pushdown. Bool fields support equality, inequality, null-safe equality (`<=>`),
+`IN`, and null checks. Numeric fields support all six comparisons, `<=>`, `IN`, and null
+checks. String, VarChar, and Text fields additionally support prefix and suffix
+conditions. These operators preserve Spark SQL three-valued NULL semantics in
+both row and columnar reads.
+
+Each predicate tree is pushed only when the connector supports the whole tree.
+Unsupported operators, casts, nested references, JSON, Array, Geometry, vector,
+and synthetic metadata predicates remain in Spark's plan and are evaluated by
+Spark. A predicate-only column is read internally without being added to the
+result schema. Reads using `vector.search.*` do not push Spark predicates:
+each tree remains residual and Spark evaluates it after vector TopK. To filter
+before persisted-index search, use `MilvusSearch.search(..., filter = ...)` or
+the corresponding `vector.search.filter` option; that separate Milvus scalar
+expression subset is parsed by `PlanParser`. The DataSource V1 Filter API and
+the ordinary table-read `milvus.filter` option are not supported.
+
 
 ### 2.4 Write Parameters
 

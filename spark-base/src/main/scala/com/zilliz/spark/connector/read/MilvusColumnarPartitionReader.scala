@@ -16,6 +16,11 @@ import org.apache.spark.sql.vectorized.{
   ColumnarBatch
 }
 
+import com.zilliz.milvus.storage.expr.{
+  Bitmap,
+  PredicateEvaluator,
+  PredicateExpr
+}
 import com.zilliz.milvus.storage.read.exec.SegmentReader
 import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
 import com.zilliz.spark.connector.metrics.ScanMetrics
@@ -37,11 +42,10 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
   * are presented by `MilvusVectorColumn`, which decodes one element at a time
   * out of the same buffer.
   *
-  * Deletes are the one thing that costs. Spark's `ColumnarBatch` carries a row
-  * count and nothing else — there is no way to mark a row invalid — so a batch
-  * with deleted rows is delivered as a selection over the surviving ones. That
-  * is decision 12, and the cost it names: a batch with no deletes passes
-  * through untouched, a batch with deletes pays an int per surviving row.
+  * Deletes and pushed predicates produce the same exclusion decision. Spark's
+  * `ColumnarBatch` carries a row count and nothing else, so a batch with any
+  * excluded row is delivered as a selection over the surviving ones. A batch
+  * where every row survives still passes through without an identity array.
   */
 class MilvusColumnarPartitionReader(
     schema: StructType,
@@ -52,7 +56,9 @@ class MilvusColumnarPartitionReader(
     rawVectors: Boolean,
     partitionName: String,
     segmentId: Long,
-    requestedExtraColumns: Set[String] = Set.empty
+    requestedExtraColumns: Set[String] = Set.empty,
+    pushedExpression: Option[PredicateExpr] = None,
+    columnNameFor: Long => Option[String] = (_: Long) => None
 ) extends PartitionReader[ColumnarBatch]
     with Logging {
 
@@ -103,9 +109,12 @@ class MilvusColumnarPartitionReader(
     val startOffset = rowsSeen
     rowsSeen += root.getRowCount.toLong
 
+    val predicateBitmap = pushedExpression
+      .map(PredicateEvaluator.evaluate(_, root, columnNameFor))
+      .orNull
+    val surviving = survivingRows(root, predicateBitmap)
     val columns =
       schema.fields.map(field => columnFor(root, field, startOffset))
-    val surviving = survivingRows(root)
     if (surviving == null) {
       new ColumnarBatch(columns, root.getRowCount)
     } else {
@@ -122,25 +131,36 @@ class MilvusColumnarPartitionReader(
     * it should cost nothing at all, not an allocation plus an indirection per
     * access.
     */
-  private def survivingRows(root: VectorSchemaRoot): Array[Int] = {
+  private def survivingRows(
+      root: VectorSchemaRoot,
+      predicateBitmap: Bitmap
+  ): Array[Int] = {
     val rows = root.getRowCount
-    var anyDeleted = false
+    var anyExcluded = false
     var i = 0
-    while (i < rows && !anyDeleted) {
-      if (deleted(root, i)) anyDeleted = true
+    while (i < rows && !anyExcluded) {
+      if (isExcluded(root, i, predicateBitmap)) anyExcluded = true
       i += 1
     }
-    if (!anyDeleted) return null
+    if (!anyExcluded) return null
 
     val keep = Array.newBuilder[Int]
     keep.sizeHint(rows)
     var j = 0
     while (j < rows) {
-      if (!deleted(root, j)) keep += j
+      if (!isExcluded(root, j, predicateBitmap)) keep += j
       j += 1
     }
     keep.result()
   }
+
+  private def isExcluded(
+      root: VectorSchemaRoot,
+      row: Int,
+      predicateBitmap: Bitmap
+  ): Boolean =
+    deleted(root, row) ||
+      (predicateBitmap != null && predicateBitmap.isExcluded(row))
 
   private def columnFor(
       root: VectorSchemaRoot,

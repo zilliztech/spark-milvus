@@ -1,11 +1,11 @@
 # core antlr4 sources
 
-Plan.g4 belongs here: the grammar for Milvus expressions, from which the
-PlanParser in `core.expr` is generated. It carries capability R7.
+This directory intentionally contains no grammar. The R7 scalar `PlanParser` is
+handwritten in `core.expr`; core is one artifact shared by Spark lines whose
+antlr runtimes are not interchangeable. R6 uses the schema-bound
+`PredicateExpr` and `PredicateEvaluator` in the same Spark-free package; it
+does not parse Milvus expression strings or change Plan.g4 evaluation rules.
 
-Where the antlr runtime lives is decision 17 in docs/design/README.md. Either
-core ships and relocates it, or Plan.g4 moves to the shared source directory and
-each Spark line generates its own parser with its own antlr version. Spark 3.5
-ships antlr 4.9.3 and the 4.x lines ship 4.13.1, the generated code is not
-interchangeable, and core is a single artifact across all lines. Until that is
-settled, this directory holds only the grammar file.
+SQL extension grammars are different: they live under `spark-base`, are
+generated once per Spark line, and use that line's Spark-provided antlr runtime.
+The decision is recorded in section 6 of `docs/design/README.md` (2026-09-10).

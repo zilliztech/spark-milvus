@@ -1295,24 +1295,41 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(task.properties(StorageProperties.BucketName) == "snapshot-bucket")
   }
 
-  test("scan builder leaves every filter in Spark") {
-    import org.apache.spark.sql.sources._
-    val schema =
-      StructType(Seq(StructField("score", LongType, nullable = true)))
-    val filters: Array[Filter] = Array(
-      EqualTo("score", 5L),
-      GreaterThan("score", 5L),
-      GreaterThanOrEqual("score", 5L),
-      LessThan("score", 10L),
-      LessThanOrEqual("score", 10L),
-      In("score", Array[Any](5L, null)),
-      IsNull("score"),
-      IsNotNull("score"),
-      And(IsNotNull("score"), LessThan("score", 10L)),
-      Or(IsNull("score"), EqualTo("score", 5L)),
-      Not(EqualTo("score", 5L)),
-      EqualTo("missing", 1L)
+  test("scan builder accepts exact V2 predicates and returns residuals") {
+    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
+    import org.apache.spark.sql.connector.expressions.filter.Predicate
+    val schema = StructType(
+      Seq(
+        StructField(
+          "score",
+          LongType,
+          nullable = true,
+          metadata(
+            FieldMetadata.MilvusFieldIdMetadataKey -> 100L,
+            FieldMetadata.MilvusDataTypeMetadataKey ->
+              io.milvus.grpc.schema.DataType.Int64.value.toLong
+          )
+        )
+      )
     )
+    def predicate(name: String, children: Expression*): Predicate =
+      new Predicate(name, children.toArray)
+    val accepted = predicate(
+      ">",
+      Expressions.column("score"),
+      Expressions.literal(5L)
+    )
+    val contains = predicate(
+      "CONTAINS",
+      Expressions.column("score"),
+      Expressions.literal(5L)
+    )
+    val missing = predicate(
+      "=",
+      Expressions.column("missing"),
+      Expressions.literal(1L)
+    )
+    val predicates = Array(accepted, contains, missing)
     val v2 = Segment.v2(
       id = 30L,
       partitionId = 20L,
@@ -1344,13 +1361,135 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         snapshot
       )
       assert(
-        builder.pushFilters(filters).sameElements(filters),
-        s"$layout filters were not returned to Spark"
+        builder
+          .pushPredicates(predicates)
+          .sameElements(Array(contains, missing)),
+        s"$layout residual predicates were not returned to Spark"
       )
       assert(
-        builder.pushedFilters().isEmpty,
-        s"$layout filters were reported as pushed"
+        builder.pushedPredicates().sameElements(Array(accepted)),
+        s"$layout accepted predicate was not reported as pushed"
       )
+    }
+  }
+
+  test("vector search leaves every V2 predicate in Spark") {
+    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
+    import org.apache.spark.sql.connector.expressions.filter.Predicate
+    val schema = StructType(
+      Seq(
+        StructField(
+          "score",
+          LongType,
+          nullable = true,
+          metadata(
+            FieldMetadata.MilvusFieldIdMetadataKey -> 100L,
+            FieldMetadata.MilvusDataTypeMetadataKey ->
+              io.milvus.grpc.schema.DataType.Int64.value.toLong
+          )
+        )
+      )
+    )
+    val options = new ju.HashMap[String, String]()
+    options.put(MilvusOption.VectorSearchQueryVector, "[1.0]")
+    options.put(MilvusOption.VectorSearchTopK, "1")
+    val builder = new MilvusScanBuilder(
+      schema,
+      new CaseInsensitiveStringMap(options),
+      snapshotOf()
+    )
+    val predicate = new Predicate(
+      ">",
+      Array[Expression](
+        Expressions.column("score"),
+        Expressions.literal(5L)
+      )
+    )
+
+    assert(
+      builder.pushPredicates(Array(predicate)).sameElements(Array(predicate))
+    )
+    assert(builder.pushedPredicates().isEmpty)
+  }
+
+  test("filter-only fields are read for either push and prune callback order") {
+    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
+    import org.apache.spark.sql.connector.expressions.filter.Predicate
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = io.milvus.grpc.schema.DataType.Int64,
+          isPrimaryKey = true
+        ),
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 101L,
+          name = "score",
+          dataType = io.milvus.grpc.schema.DataType.Int64
+        )
+      )
+    )
+    val snapshot = snapshotOf(
+      v3 = Seq(
+        ManifestItemJson(
+          31L,
+          "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/31\"}"
+        )
+      ),
+      v2 = Seq(
+        Segment.v2(
+          id = 30L,
+          partitionId = 20L,
+          rows = 1L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              Seq(100L, 101L),
+              Seq("files/segment.parquet"),
+              Seq(1L)
+            )
+          )
+        )
+      ),
+      schemaBytes = collection.toByteArray
+    )
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(
+      StorageProperties.StorageType,
+      StorageProperties.StorageTypeLocal
+    )
+    val options = new CaseInsensitiveStringMap(rawOptions)
+    val fullSchema = MilvusTable(
+      snapshot,
+      MilvusOption(options),
+      None
+    ).schema()
+    val predicate = new Predicate(
+      ">",
+      Array[Expression](
+        Expressions.column("score"),
+        Expressions.literal(5L)
+      )
+    )
+
+    Seq(true, false).foreach { pushFirst =>
+      val builder = new MilvusScanBuilder(fullSchema, options, snapshot)
+      if (pushFirst) {
+        assert(builder.pushPredicates(Array(predicate)).isEmpty)
+        builder.pruneColumns(StructType(Seq(fullSchema("id"))))
+      } else {
+        builder.pruneColumns(StructType(Seq(fullSchema("id"))))
+        assert(builder.pushPredicates(Array(predicate)).isEmpty)
+      }
+
+      val scan = builder.build().asInstanceOf[MilvusScan]
+      assert(scan.readSchema().fieldNames.toSeq == Seq("id"))
+      val tasks = scan
+        .inputPartitions(snapshot)
+        .map(_.asInstanceOf[MilvusInputPartition].task)
+      assert(tasks.length == 2)
+      assert(tasks.forall(_.neededFieldIds == Seq(100L, 101L)))
     }
   }
 

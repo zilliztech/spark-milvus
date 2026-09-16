@@ -1,8 +1,7 @@
 package com.zilliz.spark.connector
 
-/** Translates DataSource V2 predicates into the core expression IR.
+/** Translates exact DataSource V2 predicate trees into core `PredicateExpr`.
   *
-  * Capabilities: none until code lands here; the ids this package is planned to
-  * carry are in section 11 of docs/design/capabilities.md..
+  * Capabilities: R6 (see docs/design/capabilities.md).
   */
 package object expr

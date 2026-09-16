@@ -693,10 +693,11 @@ class DataFrameScenariosUatTest
       val filtered =
         v3Deleted(columnar).filter(col("id") < 100).groupBy().count()
       filtered.collect().head.getLong(0) shouldBe 90L
-      // Spark evaluates the filter itself; the reader still converts every
-      // surviving row on the row path and none on the columnar path.
+      // The core evaluator excludes rows while they are still in Arrow. The
+      // row outlet materializes only the 90 rows that survive both predicate
+      // and deletes; the columnar outlet materializes no InternalRow objects.
       scanMetrics(filtered)("milvus.rows.materialized") shouldBe
-        (if (columnar) 0L else rows - deletedIds.size)
+        (if (columnar) 0L else 90L)
     }
   }
 }

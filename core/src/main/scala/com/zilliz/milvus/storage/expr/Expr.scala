@@ -9,8 +9,11 @@ import java.lang.{
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.{Arrays, Locale}
 
-/** Scalar predicates use three-valued logic. Only Some(true) admits a row;
-  * comparisons with null remain unknown through AND, OR and NOT.
+/** The scalar subset parsed from a Milvus Plan.g4 filter string.
+  *
+  * Only Some(true) admits a row; comparisons with null remain unknown through
+  * AND, OR and NOT. DataSource V2 predicates use [[PredicateExpr]] because
+  * their literal typing and floating-point semantics follow Spark SQL.
   */
 sealed trait Expr extends Serializable {
   def fields: Set[String]

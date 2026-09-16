@@ -210,9 +210,10 @@ Behavior:
   read from the newest owner — the same gap the snapshot read path had.
   `MilvusBackfill.dedupColumnGroupsBySlot` delegates to the same method, so the
   rule has a single implementation.
-- `MilvusScanBuilder.pushFilters`: backup mode returns all filters as unsupported
-  (the packed-V2 reader has no filter pushdown), matching the packed-V2 snapshot
-  path.
+- `MilvusScanBuilder.pushPredicates`: backup mode follows the same exact
+  DataSource V2 predicate translation as the snapshot paths. Translatable
+  predicates become a `PredicateExpr` evaluated by the reader; unsupported or
+  inexact predicates stay residual for Spark to evaluate.
 - `StorageOptions.buildHadoopConfForOptions(rawOptions, path)` is shared so both the planner and table
   schema rehydration share it. `snapshotBucket` now treats non-S3 schemes as
   "no bucket" (so `file://` backup dirs don't raise a snapshot-flavoured error).

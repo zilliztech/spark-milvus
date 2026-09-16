@@ -253,6 +253,20 @@ Map；executor 读取并关闭适用于本段的删除文件，再按主键和�
 `vector.search.topK` 同时给出时才启用向量搜索：query 必须是非空 JSON 风格的有限数字数组，
 `topK` 必须是正整数；任一显式提供的向量搜索选项都不能是空白值，缺项或格式错误都在规划期失败。
 
+#### Spark 谓词下推
+
+Spark SQL 与 DataFrame 的 `where` 条件通过 DataSource V2 下推。Bool 字段支持等于、不等于、null-safe
+等值（`<=>`）、`IN` 和空值判断；数值字段支持六种比较、`<=>`、`IN` 和空值判断；String、
+VarChar、Text 还支持前缀与后缀条件。行式与列式读取都保持 Spark SQL 的三值 NULL 语义。
+
+连接器只在整棵谓词树都受支持时接受它。未支持的操作符、cast、嵌套引用，以及 JSON、Array、
+Geometry、向量和合成元数据列上的谓词留在 Spark 计划中，由 Spark 求值。只被谓词引用的列会在
+内部读取，不会出现在结果 schema。带 `vector.search.*` 的读取不下推 Spark 谓词：整棵条件作为
+residual 留给 Spark，在向量 TopK 之后求值。要在持久化索引搜索前过滤，使用
+`MilvusSearch.search(..., filter = ...)` 或对应的 `vector.search.filter` option；这条独立的 Milvus
+标量表达式子集由 `PlanParser` 解析。DataSource V1 Filter 接口和普通表读取的 `milvus.filter` option
+均不支持。
+
 
 ### 2.4 写入参数
 

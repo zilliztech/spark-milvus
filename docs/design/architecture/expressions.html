@@ -1,0 +1,284 @@
+<meta charset="utf-8">
+<title>Spark 谓词下推</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --ink: #20242a;
+    --muted: #667085;
+    --line: #98a2b344;
+    --surface: #f7f8fa;
+    --accent: #176b87;
+    --accent-soft: #176b8714;
+    --warn: #9a6700;
+    --warn-soft: #d0870014;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #edf1f5;
+      --muted: #aeb8c4;
+      --line: #d0d5dd33;
+      --surface: #171b21;
+      --accent: #67c8e5;
+      --accent-soft: #67c8e514;
+      --warn: #e6b450;
+      --warn-soft: #e6b45014;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    max-width: 56rem;
+    margin: 2.5rem auto 4rem;
+    padding: 0 1.25rem;
+    color: var(--ink);
+    font: 16px/1.72 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+  }
+  h1 { margin: 0 0 .35rem; font-size: 1.85rem; letter-spacing: -.02em; }
+  h2 {
+    margin: 2.8rem 0 1rem;
+    padding-bottom: .38rem;
+    border-bottom: 1px solid var(--line);
+    font-size: 1.2rem;
+  }
+  h3 { margin: 1.8rem 0 .65rem; font-size: 1rem; }
+  p { margin: .75rem 0; }
+  .lede { max-width: 48rem; margin: .6rem 0 1.4rem; font-size: 1.08rem; }
+  .meta { color: var(--muted); font-size: .9rem; }
+  .claim {
+    margin: 1rem 0 1.3rem;
+    padding: .85rem 1rem;
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+  }
+  .warning {
+    margin: 1.2rem 0;
+    padding: .8rem 1rem;
+    border-left: 3px solid var(--warn);
+    background: var(--warn-soft);
+  }
+  code {
+    border-radius: 3px;
+    background: var(--line);
+    padding: .1em .32em;
+    font: .88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  table { width: 100%; margin: 1rem 0 1.4rem; border-collapse: collapse; font-size: .91rem; }
+  th, td { padding: .52rem .65rem; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { background: var(--surface); font-weight: 650; }
+  ul, ol { padding-left: 1.35rem; }
+  li { margin: .35rem 0; }
+  figure { margin: 1.5rem 0; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption { margin-top: .55rem; color: var(--muted); font-size: .86rem; }
+  a { color: var(--accent); }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
+</style>
+
+<h1>Spark 谓词下推</h1>
+
+<p class="meta">能力 R6 · <code>spark.expr</code> 翻译 · <code>core.expr</code> 求值</p>
+
+<p class="lede"><strong>连接器只接受能够完整保持 Spark SQL 语义的 DataSource V2
+<code>Predicate</code>，在 executor 的 Arrow 列批上求值，并把不支持的整个谓词留给 Spark。</strong></p>
+
+<p>本设计覆盖<a href="../capabilities.md">能力索引</a>中的 R6。R7 已有的手写
+<code>PlanParser</code> 与 <code>MilvusSearch.filter</code> / <code>vector.search.filter</code> 标量子集
+保留既有 <code>Expr</code> / <code>Evaluator</code> 合同，不由本设计重写。R6 使用按字段 id 和类型绑定的
+<code>PredicateExpr</code> / <code>PredicateEvaluator</code>；普通表读取的 <code>milvus.filter</code> option 以及 JSON、Array、
+<code>json_contains</code> 语义仍未接入。读任务、删除和列式出口见
+<a href="read.html">读路径</a>，模块边界见<a href="modules.md">模块设计</a>。</p>
+
+<h2 id="surface">一、公开语义</h2>
+
+<p><strong>一次普通 <code>where</code> 可以同时包含已支持与未支持的顶层谓词，Spark 仍得到完整结果。</strong>
+<code>MilvusScanBuilder</code> 实现 <code>SupportsPushDownV2Filters</code>。对 Spark 传入数组中的每个
+顶层 <code>Predicate</code>，翻译成功就由连接器执行，翻译失败就把原对象作为 residual 返回给 Spark。
+一个谓词树内部不拆分：任意子节点不支持，整棵树都不下推。</p>
+
+<table>
+  <thead>
+    <tr><th>字段类型</th><th>连接器接受</th><th>留给 Spark</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Bool</td>
+      <td><code>=</code>、<code>&lt;&gt;</code>、<code>&lt;=&gt;</code>、<code>IN</code>、
+          <code>IS NULL</code>、<code>IS NOT NULL</code></td>
+      <td>有序比较、字符串操作</td>
+    </tr>
+    <tr>
+      <td>Int8 / Int16 / Int32 / Int64、Float / Double</td>
+      <td><code>=</code>、<code>&lt;&gt;</code>、<code>&lt;</code>、<code>&lt;=</code>、
+          <code>&gt;</code>、<code>&gt;=</code>、<code>&lt;=&gt;</code>、<code>IN</code>、
+          <code>IS NULL</code>、<code>IS NOT NULL</code></td>
+      <td>算术表达式、cast、函数调用</td>
+    </tr>
+    <tr>
+      <td>String / VarChar / Text</td>
+      <td>数字类型所列比较与空值判断，加 <code>STARTS_WITH</code>、
+          <code>ENDS_WITH</code></td>
+      <td><code>CONTAINS</code>、正则、非二进制 collation</td>
+    </tr>
+    <tr>
+      <td>JSON、Array、Geometry、向量</td>
+      <td>无</td>
+      <td>全部谓词；JSON 与 Array 的 Milvus 语义留给 R7</td>
+    </tr>
+    <tr>
+      <td><code>_timestamp</code></td>
+      <td>schema metadata 将它绑定到真实字段 id 1 时，按 Int64 处理</td>
+      <td>缺少真实字段 metadata 时全部保留</td>
+    </tr>
+    <tr>
+      <td><code>_segment_id</code>、<code>_row_offset</code></td>
+      <td>无</td>
+      <td>它们是 reader 合成列，不进入核心求值器</td>
+    </tr>
+  </tbody>
+</table>
+
+<p><code>AND</code>、<code>OR</code>、<code>NOT</code> 只有在全部后代都能翻译时才接受。
+Spark 可能传入的其他 V2 表达式节点、嵌套 <code>NamedReference</code> 和未知操作符均保留。
+2.0 不实现 DataSource V1 <code>Filter</code>，ScanBuilder 也不同时实现 V1 与 V2 接口。</p>
+
+<h2 id="driver">二、driver 只翻译和绑定</h2>
+
+<p><strong>driver 把 Spark 对象变成按 Milvus 字段 id 引用的可序列化 <code>PredicateExpr</code>，executor
+不接收 Spark 表达式对象。</strong>翻译器只接受单段 <code>NamedReference</code>，从固定快照产生的
+<code>StructField</code> metadata 读取 <code>milvus.field_id</code> 与 Milvus 逻辑类型，再把 Spark
+字面量规范化成对应的核心类型。翻译时找不到字段，或字段 metadata 缺失、损坏、与 Spark 类型冲突，
+该谓词原样留给 Spark。</p>
+
+<figure>
+  <svg viewBox="0 0 900 245" role="img"
+       aria-label="driver 把 Spark V2 Predicate 翻译为 core PredicateExpr，executor 在 Arrow 批上求值得到过滤位图，行式与列式 reader 共享结果">
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+      </marker>
+    </defs>
+    <g fill="none" stroke="currentColor" stroke-width="1.2">
+      <rect x="18" y="36" width="168" height="54" rx="4"/>
+      <rect x="236" y="36" width="174" height="54" rx="4"/>
+      <rect x="490" y="36" width="170" height="54" rx="4"/>
+      <rect x="712" y="36" width="170" height="54" rx="4"/>
+      <rect x="490" y="160" width="170" height="54" rx="4"/>
+      <rect x="712" y="160" width="170" height="54" rx="4"/>
+      <path d="M186,63 H230" marker-end="url(#arrow)"/>
+      <path d="M410,63 H484" marker-end="url(#arrow)"/>
+      <path d="M660,63 H706" marker-end="url(#arrow)"/>
+      <path d="M575,90 V154" marker-end="url(#arrow)"/>
+      <path d="M660,187 H706" marker-end="url(#arrow)"/>
+      <line x1="450" y1="16" x2="450" y2="229" stroke-dasharray="4 4" opacity=".45"/>
+    </g>
+    <g fill="currentColor" font-size="12" text-anchor="middle">
+      <text x="102" y="58">Spark V2 Predicate</text><text x="102" y="75">where 条件</text>
+      <text x="323" y="58">spark.expr</text><text x="323" y="75">翻译、field id 绑定</text>
+      <text x="575" y="58">core.expr PredicateExpr</text><text x="575" y="75">可序列化描述</text>
+      <text x="797" y="58">PredicateEvaluator</text><text x="797" y="75">逐 Arrow 批求值</text>
+      <text x="575" y="182">逐行删除判定</text><text x="575" y="199">deleted(root, row)</text>
+      <text x="797" y="182">合并排除判定</text><text x="797" y="199">生成存活位置</text>
+      <text x="225" y="22">driver</text><text x="675" y="22">executor</text>
+    </g>
+  </svg>
+  <figcaption>跨 driver/executor 边界的只有不可变表达式描述。Arrow vector、Spark
+  <code>Predicate</code> 和打开的句柄都不跨边界。</figcaption>
+</figure>
+
+<p>字面量必须能够无损归一到字段类型。整数越界、字符串与数字混用、集合中出现不兼容类型等情况
+使该 Spark 谓词成为 residual；翻译器不靠 <code>toString</code> 比较，也不做会改变结果的隐式转换。
+同一字段在 V2 段按字段名存储、在 V3 段按字段 id 存储，这个差异由 executor 的
+<code>columnNameFor(fieldId)</code> 处理，<code>PredicateExpr</code> 不保存物理列名或 ordinal。</p>
+
+<h2 id="projection">三、输出列与求值列分开</h2>
+
+<p><strong>谓词引用的列即使没有被 <code>select</code> 输出，也必须从段中读取；读取它不改变 Spark
+看到的 schema。</strong>ScanBuilder 分别维护输出 schema 与内部所需字段 id。内部集合是投影字段、
+谓词字段、删除与其他 reader 内部字段的并集；输出仍严格等于 Spark 的 required schema。</p>
+
+<p>例如 <code>df.select("title").where($"price" &gt; 10)</code> 会读取 <code>title</code> 与
+<code>price</code>，求值后只交付 <code>title</code>。Spark 可以先调用 <code>pushPredicates</code>，也可以先调用
+<code>pruneColumns</code>；两种顺序产生相同的内部字段集合。空投影与仅元数据投影所需的 fallback
+物理列遵守同一规则，任何内部列都不能泄漏到输出。</p>
+
+<h2 id="nulls">四、求值采用 Spark SQL 三值逻辑</h2>
+
+<p><strong>每个子表达式的结果是 TRUE、FALSE 或 UNKNOWN，最终只有 TRUE 行通过。</strong>
+核心求值器在列批内保留 UNKNOWN，直到整棵树求值完成；最终 <code>Bitmap</code> 以 bit=1 表示该行
+应排除。FALSE 与 UNKNOWN 都置 1。reader 逐行把该结果与既有删除判定做逻辑 OR，
+不需要构造第二张删除位图。</p>
+
+<table>
+  <thead><tr><th>A</th><th>B</th><th>A AND B</th><th>A OR B</th><th>NOT A</th></tr></thead>
+  <tbody>
+    <tr><td>TRUE</td><td>TRUE</td><td>TRUE</td><td>TRUE</td><td>FALSE</td></tr>
+    <tr><td>TRUE</td><td>FALSE</td><td>FALSE</td><td>TRUE</td><td>FALSE</td></tr>
+    <tr><td>TRUE</td><td>UNKNOWN</td><td>UNKNOWN</td><td>TRUE</td><td>FALSE</td></tr>
+    <tr><td>FALSE</td><td>FALSE</td><td>FALSE</td><td>FALSE</td><td>TRUE</td></tr>
+    <tr><td>FALSE</td><td>UNKNOWN</td><td>FALSE</td><td>UNKNOWN</td><td>TRUE</td></tr>
+    <tr><td>UNKNOWN</td><td>UNKNOWN</td><td>UNKNOWN</td><td>UNKNOWN</td><td>UNKNOWN</td></tr>
+  </tbody>
+</table>
+
+<ul>
+  <li>普通比较、<code>STARTS_WITH</code> 和 <code>ENDS_WITH</code> 遇到 NULL 返回 UNKNOWN。</li>
+  <li><code>&lt;=&gt;</code> 是 null-safe equality：两个 NULL 为 TRUE，只有一侧 NULL 为 FALSE，结果没有 UNKNOWN。</li>
+  <li><code>IN</code> 只要有一个相等项就为 TRUE；没有命中且候选含 NULL 时为 UNKNOWN；其余为 FALSE。空候选集为 FALSE。</li>
+  <li><code>IS NULL</code> 与 <code>IS NOT NULL</code> 始终返回 TRUE 或 FALSE。</li>
+  <li>Float 与 Double 遵守 Spark 的数值比较：NaN 与自身相等并大于所有非 NaN 数值，<code>-0.0</code> 与 <code>0.0</code> 相等。</li>
+  <li>String、VarChar 与 Text 使用默认二进制 collation 的 UTF-8 等值、顺序与前后缀语义。</li>
+</ul>
+
+<h2 id="executor">五、executor 先确定存活行，再交付或计数</h2>
+
+<p><strong>同一个 <code>PredicateEvaluator</code> 对行式和列式出口求整批位图，过滤发生在 Limit 之前。</strong>
+每个 Arrow 批先完成表达式求值，reader 再逐行合并谓词排除与删除判定。行式 reader 只迭代存活位置；
+列式 reader 用存活位置数组构造 <code>SelectedRowsColumn</code>，继续保持列式默认路径，不复制整列 buffer。</p>
+
+<ol>
+  <li><code>SegmentReader</code> 读取包含输出列和内部求值列的 Arrow 批。</li>
+  <li><code>PredicateEvaluator</code> 按 field id 找列，生成表达式排除位图。</li>
+  <li>reader 逐行计算 <code>deleted(root, row) || predicateBitmap.isExcluded(row)</code>。</li>
+  <li>reader 交付存活行；分区 Limit 只对已交付的存活行计数。</li>
+  <li>批与 reader 按原有所有权规则关闭，谓词求值不延长 Arrow buffer 生命周期。</li>
+</ol>
+
+<p>全过滤批返回零行并继续读取下一批。删除关闭时只省略删除位图，表达式仍执行。已知物理行数的
+EOF 校验统计 native reader 交付的物理行数，不用过滤后的行数替代。</p>
+
+<h2 id="errors">六、失败和边界保持可见</h2>
+
+<p><strong>不支持的 Spark 语法留给 Spark，已经接受的谓词在执行失败时让 task 失败。</strong>
+这两类情况不能互相转换。</p>
+
+<table>
+  <thead><tr><th>情况</th><th>结果</th></tr></thead>
+  <tbody>
+    <tr><td>操作符、字段类型、字面量形状或嵌套引用不在支持矩阵</td><td>整个顶层 Predicate 作为 residual 返回</td></tr>
+    <tr><td>翻译器找不到字段 id metadata，或 metadata 与 Spark 类型冲突</td><td>整个顶层 Predicate 作为 residual 返回</td></tr>
+    <tr><td>Spark 要求物理读取的 required schema 字段缺少 field id</td><td>既有列裁剪校验使规划失败</td></tr>
+    <tr><td>executor 找不到已绑定字段、Arrow vector 类型不符、批长度不一致</td><td>task 失败；不返回空结果或全 false</td></tr>
+    <tr><td>带 <code>vector.search.*</code> 的读</td><td>不接受任何 Spark predicate，全部作为 residual 留给 Spark，在 TopK 后求值；索引搜索前只执行显式的 <code>MilvusSearch.filter</code> / <code>vector.search.filter</code></td></tr>
+    <tr><td>Milvus 表达式字符串</td><td>R7 的手写 <code>PlanParser</code> 已支持索引查询的标量子集；普通表读取的 <code>milvus.filter</code> option、JSON 和 Array 语义不在本设计范围</td></tr>
+  </tbody>
+</table>
+
+<div class="warning"><strong>R7 与 R6 保持独立入口。</strong>现有手写 <code>PlanParser</code> 已交付
+索引查询所需的标量子集；普通表读取 option、JSON path、JSON null 与缺失值、Array 和
+<code>json_contains</code> 的 Milvus 语义仍需扩展。核心模块不会引入 antlr。</div>
+
+<h2 id="invariants">七、实现必须保持的合同</h2>
+
+<ul>
+  <li>四条 Spark 线共用一份 V2 翻译实现；Spark 4.2 的可选接口扩展不产生第二条路径。</li>
+  <li>同一输入在行式与列式出口得到相同行集合，在 V2 与 V3 段得到相同结果。</li>
+  <li>投影掉谓词列、删除与谓词同时生效、NULL 组合、空批和全过滤批都不改变输出 schema。</li>
+  <li>所有 accepted predicates 都由连接器完整执行；所有 residual predicates 都由 Spark 完整执行。</li>
+  <li><code>core.expr</code> 源码不依赖 Spark，表达式描述不持有 Arrow vector、native handle 或打开的资源。</li>
+</ul>
+
+<footer>
+  <a href="../README.md">总体设计与决策日志</a>记录接口选择；
+  <a href="../capabilities.md">能力索引</a>定义 R6 与 R7 的边界；
+  <a href="read.html">读路径</a>定义任务、删除、Limit 与两种出口。
+</footer>

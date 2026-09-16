@@ -15,6 +15,13 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.codec.FloatConverter
+import com.zilliz.milvus.storage.expr.{
+  Comparison,
+  ComparisonOperator,
+  FieldRef,
+  PredicateExpr
+}
+import com.zilliz.milvus.storage.expr.Literal.IntegerValue
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.spark.connector.options.MilvusOption
@@ -198,7 +205,9 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       arrowColumnFor: String => String = identity,
       collection: CollectionSchema = milvusSchema,
       rawVectors: Boolean = false,
-      requestedExtraColumns: Set[String] = Set.empty
+      requestedExtraColumns: Set[String] = Set.empty,
+      pushedExpression: Option[PredicateExpr] = None,
+      columnNameFor: Long => Option[String] = (_: Long) => None
   ) = new MilvusColumnarPartitionReader(
     schema,
     new FakeSegmentReader(roots.toList),
@@ -208,7 +217,9 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     rawVectors = rawVectors,
     partitionName = "20",
     segmentId = 30L,
-    requestedExtraColumns = requestedExtraColumns
+    requestedExtraColumns = requestedExtraColumns,
+    pushedExpression = pushedExpression,
+    columnNameFor = columnNameFor
   )
 
   test("a batch with no deletes carries every row") {
@@ -426,6 +437,72 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         val vec = batch.column(2)
         (0 until 2).map(vec.getArray(0).getFloat) shouldBe Seq(1f, 1f)
         (0 until 2).map(vec.getArray(1).getFloat) shouldBe Seq(4f, 4f)
+      } finally r.close()
+    } finally allocator.close()
+  }
+
+  test(
+    "predicate and delete exclusions combine without exposing filter fields"
+  ) {
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val root = namedRoot(
+        allocator,
+        Seq(1L, 2L, 3L, 4L),
+        Seq(Seq(1f, 1f), Seq(2f, 2f), Seq(3f, 3f), Seq(4f, 4f))
+      )
+      val expression = Comparison(
+        FieldRef(100L, DataType.Int64),
+        ComparisonOperator.GreaterThan,
+        IntegerValue(2L)
+      )
+      val outputSchema = StructType(Seq(sparkSchema("vec")))
+      val r = reader(
+        Seq(root),
+        deleted = (_, row) => row == 3,
+        schema = outputSchema,
+        pushedExpression = Some(expression),
+        columnNameFor = id => if (id == 100L) Some("id") else None
+      )
+      try {
+        r.next() shouldBe true
+        val batch = r.get()
+        batch.numCols() shouldBe 1
+        batch.numRows() shouldBe 1
+        (0 until 2).map(batch.column(0).getArray(0).getFloat) shouldBe
+          Seq(3f, 3f)
+      } finally r.close()
+    } finally allocator.close()
+  }
+
+  test("predicate binding uses field-id column names on the manifest line") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val root = buildRoot(
+        allocator,
+        fieldIdSchema(milvusSchema),
+        "100",
+        "1",
+        "101",
+        Seq(1L, 2L, 3L),
+        Seq(Seq(1f, 1f), Seq(2f, 2f), Seq(3f, 3f))
+      )
+      val expression = Comparison(
+        FieldRef(100L, DataType.Int64),
+        ComparisonOperator.GreaterThanOrEqual,
+        IntegerValue(2L)
+      )
+      val r = reader(
+        Seq(root),
+        arrowColumnFor = byFieldId(milvusSchema),
+        pushedExpression = Some(expression),
+        columnNameFor = id => Some(id.toString)
+      )
+      try {
+        r.next() shouldBe true
+        val batch = r.get()
+        batch.numRows() shouldBe 2
+        (0 until 2).map(batch.column(0).getLong) shouldBe Seq(2L, 3L)
       } finally r.close()
     } finally allocator.close()
   }

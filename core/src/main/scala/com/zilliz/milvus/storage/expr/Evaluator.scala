@@ -7,8 +7,11 @@ import org.apache.arrow.vector.VectorSchemaRoot
 
 import io.milvus.grpc.schema.{DataType, FieldSchema}
 
-/** Validates scalar types before execution and reads only fields named by the
-  * expression. The same IR can be used by a future Spark predicate translator.
+/** Validates and evaluates the scalar subset parsed by [[PlanParser]].
+  *
+  * Its literal coercion and floating-point behavior follow Milvus Plan.g4.
+  * DataSource V2 predicates use [[PredicateExpr]] and [[PredicateEvaluator]],
+  * whose contract follows Spark SQL instead.
   */
 object Evaluator {
   def validate(expr: Expr, fields: Seq[FieldSchema]): Unit = {

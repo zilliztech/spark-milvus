@@ -53,11 +53,11 @@ spark-milvus 2.0 是读写 Milvus Storage 的 Spark Connector：一个 collectio
 ```mermaid
 flowchart TB
   subgraph L3["第 3 层 · Connector 接口（driver 与 executor）"]
-    C3["MilvusCatalog · MilvusTable · MilvusScan · MilvusWrite · Procedures"]
+    C3["MilvusCatalog · MilvusTable · MilvusScan · SparkPredicateTranslator · MilvusWrite · Procedures"]
   end
   subgraph L2["第 2 层 · 核心层（driver 与 executor，无 Spark 依赖）"]
-    C2d["driver：SnapshotCatalog · SchemaMapper · ExprTranslator · Partitioner · Committer"]
-    C2e["executor：Reader · DeleteBitset · ExprEval · IndexSource · SegmentWriter"]
+    C2d["driver：SnapshotCatalog · SchemaMapper · ReadPlan · Committer"]
+    C2e["executor：Reader · DeleteBitset · PredicateEvaluator · IndexSource · SegmentWriter"]
   end
   subgraph L1["第 1 层 · 原生层（只在 executor 加载）"]
     C1["storage JNI → milvus-storage C 接口 ｜ 上游 Knowhere Java API → JNI → C 接口"]
@@ -83,7 +83,7 @@ flowchart TB
 | DeleteBitset | 快照时间戳之前生效的删除，按行号置位 | 段目录的 `_delta/` 文件 |
 | StoragePath | 桶内相对 key、标准 S3、Milvus 格式（`s3://<endpoint>/<bucket>/<key>`）三种形态到 (bucket, key) 的归一 | issue #118 的设计稿，未实现；1.x 现有逻辑是几处前缀替换 |
 | SchemaMapper | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；Spark 类型的映射在 spark 层 | 快照 schema |
-| Expr IR | Spark 谓词和 Milvus 表达式翻成的同一套中间表示 | ExprTranslator |
+| 谓词表示 | R6 使用按字段 id 和类型绑定的 PredicateExpr；R7 保留按字段名求值的 Expr 与手写 PlanParser | R6 来自 spark.expr 的 SparkPredicateTranslator；R7 已用于 MilvusSearch.filter |
 
 ### 2.3 读路径
 
@@ -92,20 +92,23 @@ flowchart TB
 ```mermaid
 flowchart LR
   subgraph D["driver"]
-    SC["SnapshotCatalog<br/>列快照目录，选最新或指定"] --> SM["SchemaMapper"] --> ET["ExprTranslator<br/>谓词 → IR，能下推的先下推"] --> PT["Partitioner<br/>一段一分区"]
+    SC["SnapshotCatalog<br/>列快照目录，选最新或指定"] --> SM["SchemaMapper"]
+    SM --> ET["SparkPredicateTranslator<br/>V2 谓词 → PredicateExpr"]
+    SM --> PT["ReadPlan<br/>一段一分区"]
   end
-  PT -- "InputPartition：段 id、Manifest、列组、删除文件、索引文件、IR、临时凭证、批预算" --> R
+  ET -- "reader factory：输出 schema、PredicateExpr、limit" --> R
+  PT -- "InputPartition：段、schema、field ids、fs.*、删除文件" --> R
   subgraph E["executor · 每个 task"]
-    R["Reader<br/>ArrowArrayStream → ColumnarBatch"] --> B["DeleteBitset OR ExprEval → 位图"] --> O["出口"]
+    R["Reader<br/>ArrowArrayStream → Arrow 批"] --> B["delete 判定 OR PredicateExpr 排除位图<br/>→ 存活位置"] --> O["行式或列式出口"]
   end
-  O --> S["表读：过滤后的 ColumnarBatch → Spark"]
+  O --> S["表读：InternalRow 或过滤后的 ColumnarBatch → Spark"]
   O --> A["下游列式算子：向量地址 + 位图"]
 ```
 
-1. 下推两级都依赖第 5 节的统计 ask：主键 bloom filter（段统计文件里的布隆过滤器）剪段；row group 级 min/max 剪枝。目前 milvus-storage 的 Parquet 谓词下推是空实现。
+1. 统计剪枝是独立优化，不是 R6 的前提：R6 在已经读出的 Arrow 批上求值。R9 用主键 bloom filter 剪段，R10 用 min/max 剪 row group；R10 仍受第 5 节列出的仓库外缺口限制，目前 milvus-storage 的 Parquet 谓词下推是空实现。
 2. 自实现的 ColumnVector 只持地址、length、offset，不搬字节；批用完再释放，处理期间 buffer 不动。
-3. DeleteBitset 一段算一次并缓存；ExprEval 在列批上按列求值出位图 `[已定：放核心层]`；删除 OR 谓词合成一张位图，1 表示过滤。
-4. 表读的出口是否压缩掉被过滤的行、算不算一次拷贝，待定（决策 12）。按行号取列用 Arrow 的 take。
+3. executor 对每个 Arrow 批合并删除判定与 `PredicateExpr` 排除位图，得到存活行位置；位图中 1 表示排除。
+4. 决策 12 已定：行式出口跳过被排除的位置；列式出口用 `SelectedRowsColumn` 按存活位置映射，不复制整列。按行号取列仍由 R14 单独实现。
 5. 拷贝次数：Parquet 解码 1 次，聚成 UnsafeRow 1 次；下游是列式算子时只有前一次。
 
 ### 2.4 写路径
@@ -168,7 +171,7 @@ flowchart LR
 | P0 | 2 | 核心层对象模型与 SnapshotCatalog；SchemaMapper 合并四份映射；StoragePath | 读的唯一入口 |
 | P0 | 3 | storage JNI、列式 reader、ColumnVector、DeleteBitset | 拷贝 6 次到 2 次；下游算子能拿到地址 |
 | P1 | 4 | Catalog 目录与三段名、元数据列、统计、DataSource V2 谓词、Limit | 目录发现、三段名和回表 |
-| P1 | 5 | ExprTranslator、IR、求值器 | 谓词语义对齐 Milvus |
+| P1 | 5 | SparkPredicateTranslator、PredicateExpr、PredicateEvaluator | R6 对齐 Spark SQL；R7 对齐 Milvus 表达式语义 |
 | P1 | 6 | SegmentWriter、Committer、register Procedure | backfill 登记走 BatchUpdateManifest 可先做；append 等第 5 节的 RPC |
 | P2 | 7 | 接入上游 Knowhere Java/JNI 产物、索引加载、索引写出与登记、BruteForce；backfill 写模式 | 库加载可独立交付；索引执行依赖列式 reader 和写路径 |
 | P3 | 8 | native jar 打包、四条 Spark 线的子项目和 CI 矩阵、基准（读吞吐、拷贝次数、写端到端）；macOS 和 GPU 产物 | 打包工作，不影响设计 |
@@ -182,7 +185,6 @@ flowchart LR
 |---|---|---|---|
 | 10 | backfill 写模式的按段分布和按行号排序 | a. 实现 RequiresDistributionAndOrdering；b. 场景代码自己 shuffle 后再写 | 写路径接口 |
 | 19 | 按分区报分区（capabilities R19）是否值得做 | a. 做，join 少一次 shuffle；b. 不做，段内主键无序，收益可能被 Milvus 的段分布抵消 | 需要实测 |
-| 20 | 谓词下推用哪一代接口 | 现状：`MilvusScanBuilder` 实现的是 `SupportsPushDownFilters`，即 DataSource V1 的 `Filter`，但不接受任何谓词，全部作为 residual 交还 Spark 求值；capabilities 第 10 节写「不做 V1 Filter，只实现 V2 谓词」。a. 换成 `SupportsPushDownV2Filters`（`Predicate`），作为 R6 的前置一并做；b. 等 `core.expr` 的 ExprTranslator 一起换，少返工一次；c. 改设计承认保留 V1。要先弄清 V2 的 `Predicate` 是否覆盖 R6 列的全部谓词形态（比较、IN、IS NULL、字符串前后缀、AND/OR/NOT）以及四条线的接口差异 | R6、R7；正式实现下推前仍需确定接口 |
 | 16 | 其余旧向量入口迁移 | 集合级 MilvusSearch.search 已按 2026-09-16 用户要求确定，旧逐段入口保留；未来是否统一 SQL 入口以及旧入口的退役仍待定 | 不阻塞 V7 |
 | 21 | 扩大索引兼容范围与跨任务缓存 | 当前实现非 nullable FloatVector、内存 HNSW、严格加载、无索引显式回退及任务独占资源；Faiss 与 Cardinal 格式已有分派，真实 Cardinal version 10 HNSW/COSINE 已通过专项验证。nullable ID 映射、加密文件与跨任务缓存尚未实现 | 后续 V2、V4 扩展；不阻塞当前已定契约 |
 | 22 | 连接器写的段，系统字段 RowID（0）和 Timestamp（1）从哪来 | a. 写时向 Milvus 要 AllocID / AllocTimestamp（要活的 Milvus，纯连接器模式做不到）；b. 登记时由 Milvus 补（RegisterSegments 未定，能否改写文件要和 Milvus 侧一起定）；c. 写占位值（段内行号、作业时间），登记时只作排序。见 [write.html](architecture/write.html) 第六节 | W1 登记前提；core.write.exec 的列组切分 |
@@ -204,6 +206,7 @@ flowchart LR
 
 | 日期 | 决策 | 结论 |
 |---|---|---|
+| 2026-09-16 | 决策 20：Spark 谓词下推只实现 DataSource V2 | `MilvusScanBuilder` 改为只实现 `SupportsPushDownV2Filters`，不同时保留 V1 `SupportsPushDownFilters`：Spark 的下推规则会优先选择 V1，两者并存会使 V2 实现不可达。Spark 3.5、4.0、4.1 的 V2 主接口相同，4.2 只新增有默认实现的迭代下推开关，因此 `spark-base` 共用一份实现。V2 `Predicate` 能表达 R6 承诺的比较、IN、空值判断、字符串前后缀与 AND/OR/NOT；每个顶层谓词完整翻译才接受，任一后代不支持就整棵作为 residual 交还 Spark。普通扫描翻成按字段 id 和类型绑定的 `PredicateExpr`，由 `PredicateEvaluator` 在 Arrow 列批上求值；带 `vector.search.*` 的读取不接受 Spark 谓词，整棵留给 Spark 在 TopK 后求值。R7 已有的 `MilvusSearch.filter` / `vector.search.filter` 继续由手写 `PlanParser` 产生 `Expr`，并由既有 `Evaluator` 在索引搜索前执行，不随本决定重写；表读取的 `milvus.filter` option 仍不在本次范围。设计见 [expressions.html](architecture/expressions.html)。 |
 | 2026-09-16 | Catalog 的只读目录合同 | C1 与 R1 保持两条路径：`ListDatabases` 把 Milvus database 原样映射成唯一一层 Spark namespace，`ShowCollections(database)` 把该库的全部 collection 映射成 table；目录不读快照或对象存储，collection 没有可读快照时仍可列出。根目录列 database，已存在的 database 没有子 namespace；`SHOW TABLES` 必须显式给一段 database，不设隐式 default，也不跨库摊平。Catalog 不缓存目录，顺序不作合同；成功的空响应是空结果，只有确认不存在才转 `NoSuchNamespaceException` / `false`，认证、网络、限流等故障保留。namespace 与 table 的 create、alter、drop、rename 继续拒绝。主体与四条线共用，设计见 [catalog.html](architecture/catalog.html)。 |
 | 2026-09-16 | issue #135 的只读 Catalog 边界 | R1 的已知三段名加载与 C1 的目录枚举解耦：`loadTable` 只用现有 `getCollectionInfo` 取得 collection id，不新增 ListDatabases/ShowCollections。三个 loadTable 重载共享 [catalog.html](architecture/catalog.html) 的一条路径，分别选最新、快照名和时间点；Spark Unix 微秒在 catalog 边界转换成该物理毫秒的最大 Milvus HybridTS，core 继续保存和比较原始 `create_ts`。该项只交付 R1，SupportsNamespaces、列表与 DDL 均不在该项范围；C1 后续按上一行的独立目录合同接入。主体在 spark-base，按线只保留公开类和 createTable 签名适配。 |
 | 2026-09-16 | 暴力搜索核心保留原生分数，旧入口独立转换 L2 | core.index.BruteForceSearch 保留 Knowhere 的 Float32 平方 L2；Spark 旧逐段入口仅在输出时取平方根，索引模式的显式无索引回退原样输出平方分数。拒绝先开方再平方，因为原始 2.0 会变成 2.0000000000000004，破坏混合索引/无索引段的同分排序。验收覆盖 L2=2 和混合段全局决胜规则；见 [分数契约](architecture/vector-search.html#semantics)。 |
@@ -340,9 +343,9 @@ flowchart LR
 | 2026-09-15 | 固定快照读取契约收口（#132） | 四个来源先各自完整物化一个 `Snapshot`，`SnapshotSources` 在同一出口应用 `milvus.partitions` 与 `milvus.segments`，不存在的数值 id 报错、两个选择器同时给时取交集，并保留适用于所选数据段的分区 L0 与全 collection L0；driver 为快照元数据打开的 `ObjectStore` 由该出口管理，成功、解析失败与并发 footer 失败都在工作结束后关闭。路径解析拆成两个边界：用户传入的标准 S3 URI 始终把 authority 当桶；只有 Milvus 产生的元数据在 authority 带端口或等于 `fs.address` 时按 `s3://endpoint/bucket/key` 解析，快照 JSON、Avro、footer、数据与删除文件统一成桶内 key。Table 的字段 id、类型、nullable、键标记与向量维度只取快照 schema，不按 ordinal 猜；支持类型是一份封闭清单，未支持类型与丢失列直接失败。读取元数据列只留 `_segment_id`、`_row_offset`、`_timestamp`，前两列由任务和 reader 位置产生，`_timestamp` 读取存储字段 id 1。布尔 option 只认 true/false，字段、分区与段选择列表只认无空项的非负整数，快照大小上限和 `topK` 只认正整数，`vector.search.query` / `topK` 缺一项或有非数值都报错。行式、列式共用 `SegmentReaderRegistry` 的 EOF 行数核对，已知行数不符时两条出口都拒绝返回短结果；Limit 提前关闭不触发 EOF 核对。旧文档中「删除文件在 driver 解码」「没有列式输出」「只有 V2 做短读校验」三处描述随此项更正 |
 | 2026-09-15 | 删除过滤保留公开的显式退出选项（#132） | 固定快照读取需要同时覆盖「应用删除」和「按物理行读」两种确定语义，因此 `milvus.read.apply.deletes` 保留为公开读 option，默认 true，只有显式 false 才关闭。它不是 backfill 专用的内部信号；这更正了 2026-09-14 「2.0 不兼容 1.x 连接器的接口」日志中关于 R8 开关的结论 |
 | 2026-09-16 | W4 truncate 与 overwrite 不接，移入能力表第 10 节 | 能力本身就是让 collection 的全部旧数据不可见，实现方式（发全表 Delete，或登记不含旧段的 manifest）只决定不可见怎么发生，消不掉误用：`mode("overwrite")` 是 Spark ETL 模板的常见写法，改个表名就清掉生产 collection，Milvus 没有回滚。不接的代价：全量刷新要在 Milvus 侧 drop/recreate 或 SDK 全表 delete 后再 append，多一步，但那一步是在 Milvus 里显式做的。1.x 没有表级 overwrite（v1.6.0 的 `overwrite` 是 backfill 的列合并模式），不接不是退化。能力只加不减：发布后再加不破坏任何人，再拿掉是破坏性变更。工作单 #09 取消，`spark.write` 不再认领 W4。 |
-| 2026-09-16 | W5 DELETE 不接，移入能力表第 10 节 | `DELETE FROM … WHERE …` 是把谓词翻成 Milvus 表达式后调 Milvus 的 Delete RPC，删的是生产 collection 的在线数据，谓词写宽了没有回滚。Milvus SDK 已经用同一套表达式提供 delete，连接器接进来只是把同一个动作换到 Spark 作业里发：多一个出错的地方，不多一种能力。连接器的职责是读写存储格式的文件，在线数据的删除留给 Milvus 自己的入口。不接的代价为零。随之 `core.expr` 去掉 ExprPrinter（中间表示打印回 Milvus 语法，只有 W5 用），决策 20 挡的只剩 R6、R7；`spark.table`、`client.api`、`client.grpc` 不再认领 W5，client 的 `delete` 方法留给测试和造数据的作业。 |
+| 2026-09-16 | W5 DELETE 不接，移入能力表第 10 节 | `DELETE FROM … WHERE …` 是把谓词翻成 Milvus 表达式后调 Milvus 的 Delete RPC，删的是生产 collection 的在线数据，谓词写宽了没有回滚。Milvus SDK 已经用同一套表达式提供 delete，连接器接进来只是把同一个删除动作换到 Spark 作业里发：多一个出错的地方，不多一种能力。连接器的职责是读写存储格式的文件，在线数据的删除留给 Milvus 自己的入口。不接的代价为零。随之 `core.expr` 去掉 ExprPrinter（中间表示打印回 Milvus 语法，只有 W5 用）；`spark.table`、`client.api`、`client.grpc` 不再认领 W5，client 的 `delete` 方法留给测试和造数据的作业。 |
 | 2026-09-16 | G5 指标落地：句柄自己记数，经 DataSource V2 CustomMetric 上报，不设开关 | 设计在 storage-io.html 第五节。谁持有句柄谁记数：C 侧 `RecordBatchReaderHolder` 记批数、`Concatenate` 拷贝次数和字节，`recordBatchReaderStats` 取回；JVM 侧 `NativeSegmentReader` / 两个 `SegmentWriter` 记 JNI 调用次数与耗时、过界的 Arrow 批数与字节、allocator 峰值；`spark.metrics` 一处翻成 `CustomMetric`，读七个数、写四个数，四条 Spark 线接口一致。不设开关：每批一次 `nanoTime` 和一次加法，一批几千行，量不出代价；能力表 G5 行原写的「会话配置开关」是设计前的设想，那时担心的是按分配钩内存池、按值记拷贝，两个数都换成了不进循环的口径。两处量不到写在设计里：段数据从对象存储读的字节数（在 libmilvus-storage 内部），native 内存总量（其内存池不可见）。拒绝的做法：全局计数器加锁（一个句柄一个任务，不需要）、Prometheus 导出（Spark 已聚到 SQL 页和事件日志，第二条路）。顺带改正一处文档：storage-io 第四节和 read.html 第六节说有删除的批「物化存活行」，代码是 `SelectedRowsColumn` 按下标映射，不拷贝。首次实测：本地 20480 行的 V2 段读回，`copies` > 0，证实 2.5 节那个过渡实现今天确实在拷。 |
 | 2026-09-16 | #10：Spark 侧类型映射以 (Arrow 类型, Milvus 逻辑类型) 为键，Milvus 到 Spark 的直连表删除 | `SparkTypes.toDataType` 原来是一张 Milvus → Spark 的表，27 个分支，和 core 的 `ArrowTypes`（Milvus → Arrow）平行，README 第 1 节「类型映射四份」剩下的这一份。现在 `toDataType` = `ArrowTypes.toArrowType` 再 `SparkTypes.fromArrow`，R15 行写的分工（core.schema 定 Milvus↔Arrow，spark.types 定 Arrow↔Spark）成为事实。`fromArrow` 的键是 Arrow 类型加 Milvus 逻辑类型，第二个键省不掉：Milvus 把 JSON、Array、Geometry、稀疏向量都存成 Arrow Binary，所有稠密向量都存成 FixedSizeBinary，只看 Arrow 分不出 JSON 字符串和稀疏向量、float 向量和 float16 向量。稠密向量那几行委托给 `MilvusVectorColumn.sparkType`，向量的 Spark 形状只在那一处；表 schema 里 `containsNull = true` 照旧，列自己说 false（存储的向量没有空元素），`WriteSchema` 比较时忽略可空性。保留的两处历史：Array 的 Int8 元素仍是 ShortType；dim 缺失时按宽度 0 建 Arrow 类型，类型判断只看 Arrow 的种类。行为变化只有一处，是补齐不是改动：Text 字段原来抛 Unsupported，现在经 Utf8 得到 StringType。旧的 22 个用例一个断言没改。 |
-| 2026-09-16 | `milvus.read.columnar` 默认改为 true | 列式出口是 2.0 读路径的目的（第 3 节 P0：拷贝 6 次到 2 次），默认 false 是列式落地那天留的保守值，条件是「两条出口在真实数据上一致」。条件已满足：UAT 上 V2、V3 段，三种删除状态，全类型 13 列逐值核对，行式与列式一致。翻过来之后默认读的拷贝次数从 6 降到 2（无删除的批）；`false` 留给行式。带 `vector.search.*` 的读仍走行式：`SegmentVectorSearch` 逐行算距离，归属是决策 16，定了之后这个回落一起消。谓词不引起回落：ScanBuilder 一个谓词也不接（决策 20），Spark 自己在列批上过滤，R6 落地时求值在 core.expr 出位图，列式 reader 按位图映射，不需要行式。 |
+| 2026-09-16 | `milvus.read.columnar` 默认改为 true | 列式出口是 2.0 读路径的目的（第 3 节 P0：拷贝 6 次到 2 次），默认 false 是列式落地那天留的保守值，条件是「两条出口在真实数据上一致」。条件已满足：UAT 上 V2、V3 段，三种删除状态，全类型 13 列逐值核对，行式与列式一致。翻过来之后默认读的拷贝次数从 6 降到 2（无删除的批）；`false` 留给行式。带 `vector.search.*` 的读仍走行式：`SegmentVectorSearch` 逐行算距离，归属是决策 16，定了之后这个回落一起消。普通扫描的 R6 谓词由 core.expr 出位图，列式 reader 按位图映射，不需要行式。 |
 | 2026-09-16 | #19：Hadoop 与 Netty 按 Spark 线钉，整条 classpath 用 dependencyOverrides 压住 | #18 的场景套件在 3.5 线跑不起来：Arrow 12（Spark 3.5 自带）的 Netty 分配器读 `PoolArena` 从 `SizeClasses` 继承的 `chunkSize`，Netty 4.1.118 起 `PoolArena` 不再继承它，第一次分配就 `NoSuchFieldError`。4.1.118 来自全仓共用的 hadoop-common 3.4.1（经 curator、zookeeper）和 AWS SDK 2.30 的 netty-nio-client，Spark 3.5.5 自带的是 Hadoop 3.3.4、Netty 4.1.96，那一对能用（4.1.96 到 4.1.100 的 `PoolArena` 还继承 `SizeClasses`，javap 验过）。做法：`SparkLine` 加 `hadoop`、`netty` 两个字段，四条线各写自己发行版的值（3.5：3.3.4 / 4.1.96；4.0：3.4.1 / 4.1.118；4.1：3.4.2 / 4.2.7；4.2：3.5.0 / 4.2.13），`Dependencies.lineOverrides` 把 Arrow、Netty 全家族、Hadoop 五个 artifact 压到线的版本。拒绝的做法：只换 Hadoop 版本（AWS SDK 照样把 Netty 抬上去）、给 3.5 线换 `arrow-memory-unsafe` 分配器（和真集群上 Spark 自带的 netty 分配器不一致，测的就不是运行的）。顺带更正一个误判：#19 开单时说 3.5 线上同时有 Arrow 18，那是把 4.0 线的 classpath 混进了同一份输出，3.5 线只有 Arrow 12。另一处一起修的是 `SnapshotCatalog.read`：2026-09-16 的「fail closed」提交改用只认标准形式的 `StoragePath.parse`，Milvus CreateSnapshot 返回的 `https://<endpoint>/bucket/key` 被当成桶名不符而拒绝；改回 `parseMilvus`，host 等于配置的 endpoint 时按 Milvus 形式解析。 |
 | 2026-09-16 | #17：CALL 的 SQL 前端落地，三处设计选择定案 | 设计在 procedure.html。定案：(1) 连接与存储选项走命名参数，反引号包住的选项名就是 `.option()` 的键（`\`milvus.uri\` => '...'`），不另开会话配置命名空间——今天没有 catalog 替 SQL 用户保存连接，一条语句要自足；R1 落地后 catalog 给默认值。(2) 3.5 线走同一个语法扩展，`spark.functions` 包删除；能力表第 4 节「3.5 同名函数」的说法随之删除。(3) register 的结果表四列：job_id、segment_id、manifest_version、status。实现形状：文法只有常量，不依赖 Spark 表达式文法，一份文法四条线用；解析期就查过程、对参数、定输出列，所以不需要分析器规则；`CallProcedure` 是 `LeafCommand`，Spark 按命令急切执行，`CallProcedureExec`（`LeafExecNode`）在 driver 上跑一次过程体。按线各一份的只有 antlr 生成物和 `ParserInterface` 适配器（4.0 起多 `parseRoutineParam`）。不以 `CALL milvus.` 开头的语句全部交还 Spark，Spark 4 自己的 CALL 不碰。拒绝的做法：`ProcedureCatalog`（2026-09-10 已否）；把值做成 Spark 表达式（要嵌整套表达式文法，四条线不通用）；把选项做成 JSON 字符串或 map 参数（多一层编码，键的拼写就有了第二套）。UAT：apps40 的 `BackfillRegisterUatTest` 改为先走 `spark.sql("CALL ...")` 登记、再用 Scala 入口验证幂等。 |
