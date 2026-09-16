@@ -45,7 +45,7 @@
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
-| C1 | 数据库和 collection 目录 | `SHOW NAMESPACES`、`SHOW TABLES` | spark.catalog → client.api | client 新增 ListDatabases、ShowCollections；已知表的 `DESCRIBE TABLE` 由 R1 加载 | P1 |
+| C1 | 数据库和 collection 目录 | `SHOW NAMESPACES IN milvus`、`SHOW TABLES IN milvus.db` | spark.catalog → client.api | 已实现：ListDatabases 把 database 映射成单层 namespace，ShowCollections 列该 database 的全部 collection；目录不读快照或对象存储，只把确认不存在翻成 Spark 的 namespace 不存在语义；已知表的 `DESCRIBE TABLE` 由 R1 加载 | P1 |
 | C2 | 建表删表 | `CREATE TABLE milvus.db.coll (...) TBLPROPERTIES (...)`、`DROP TABLE` | spark.catalog → client.api | 向量维度、主键、索引参数走表属性 | P1 |
 | C3 | schema 来自快照 | 自动 | core.schema | | P0 |
 

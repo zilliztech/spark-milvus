@@ -53,6 +53,18 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
     }
   }
 
+  test("legacy RateLimit error code returns MilvusRateLimitException") {
+    val status = Status(
+      code = 0,
+      errorCode = ErrorCode.RateLimit,
+      reason = "request quota reached"
+    )
+    client.checkStatus("insert", status) match {
+      case Failure(_: MilvusRateLimitException) => succeed
+      case other => fail(s"expected MilvusRateLimitException, got $other")
+    }
+  }
+
   test("case-insensitive reason matching classifies as rate limit") {
     val status = Status(
       code = 99,
@@ -133,6 +145,12 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
     assert(MilvusClient.isCollectionNotFound(legacyMissingName))
     assert(MilvusClient.isCollectionNotFound(missingDatabase))
     assert(!MilvusClient.isCollectionNotFound(unrelated))
+
+    assert(MilvusClient.isDatabaseNotFound(missingDatabase))
+    assert(!MilvusClient.isDatabaseNotFound(current))
+    assert(!MilvusClient.isDatabaseNotFound(legacy))
+    assert(!MilvusClient.isDatabaseNotFound(legacyMissingName))
+    assert(!MilvusClient.isDatabaseNotFound(unrelated))
   }
 
   test("classifies grpc UNIMPLEMENTED as service not implemented") {

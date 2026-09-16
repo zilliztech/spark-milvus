@@ -3,7 +3,7 @@ package com.zilliz.milvus.client
 /** Milvus could not be reached. */
 case class MilvusConnectionException(message: String) extends Exception(message)
 
-/** An RPC came back with a non-success status. */
+/** An RPC failed during transport or response validation. */
 case class MilvusRpcException(message: String) extends Exception(message)
 
 /** Milvus is rate limiting; the caller should back off and retry. */
@@ -14,4 +14,8 @@ case class MilvusRateLimitException(message: String) extends Exception(message)
   * paths and must not be classified as absence.
   */
 final class CollectionNotFoundException(message: String)
+    extends Exception(message)
+
+/** A database lookup established that the requested database does not exist. */
+final class DatabaseNotFoundException(message: String)
     extends Exception(message)

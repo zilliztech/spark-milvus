@@ -4,7 +4,10 @@ import java.{util => ju}
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
-import org.apache.spark.sql.catalyst.analysis.NoSuchTableException
+import org.apache.spark.sql.catalyst.analysis.{
+  NoSuchNamespaceException,
+  NoSuchTableException
+}
 import org.apache.spark.sql.connector.catalog.{
   Column,
   Identifier,
@@ -17,7 +20,10 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 
-import com.zilliz.milvus.client.CollectionNotFoundException
+import com.zilliz.milvus.client.{
+  CollectionNotFoundException,
+  DatabaseNotFoundException
+}
 import com.zilliz.milvus.storage.snapshot.SnapshotNotFoundException
 import com.zilliz.spark.connector.options.{MilvusOption, SnapshotReference}
 
@@ -28,7 +34,7 @@ object MilvusCatalogTest {
   )
 }
 
-object RoutingMilvusCatalog {
+object RoutingMilvusCatalog extends MilvusCatalogDiscovery {
   private val calls = ArrayBuffer.empty[SnapshotReference]
 
   private val table = new Table {
@@ -48,10 +54,24 @@ object RoutingMilvusCatalog {
     calls += reference
     table
   }
+
+  override def listDatabases(
+      options: CaseInsensitiveStringMap
+  ): Seq[String] = Seq("database")
+
+  override def listCollections(
+      options: CaseInsensitiveStringMap,
+      database: String
+  ): Seq[String] =
+    if (database == "database") Seq("collection", "metrics")
+    else throw new DatabaseNotFoundException(s"missing $database")
 }
 
 class RoutingMilvusCatalog
-    extends MilvusCatalogBase(RoutingMilvusCatalog.load) {
+    extends MilvusCatalogBase(
+      RoutingMilvusCatalog.load,
+      RoutingMilvusCatalog
+    ) {
   override def createTable(
       identifier: Identifier,
       columns: Array[Column],
@@ -63,6 +83,33 @@ class RoutingMilvusCatalog
 class MilvusCatalogTest extends AnyFunSuite {
   import MilvusCatalogTest.LoadCall
 
+  private final class StubDiscovery(
+      databaseResult: Either[Exception, Seq[String]],
+      collectionResults: Map[String, Either[Exception, Seq[String]]]
+  ) extends MilvusCatalogDiscovery {
+    val databaseOptions = ArrayBuffer.empty[Map[String, String]]
+    val collectionCalls =
+      ArrayBuffer.empty[(String, Map[String, String])]
+
+    override def listDatabases(
+        options: CaseInsensitiveStringMap
+    ): Seq[String] = {
+      databaseOptions += options.asCaseSensitiveMap().asScala.toMap
+      databaseResult.fold(throw _, identity)
+    }
+
+    override def listCollections(
+        options: CaseInsensitiveStringMap,
+        database: String
+    ): Seq[String] = {
+      collectionCalls +=
+        database -> options.asCaseSensitiveMap().asScala.toMap
+      collectionResults
+        .getOrElse(database, Right(Seq.empty))
+        .fold(throw _, identity)
+    }
+  }
+
   private val loadedTable = new Table {
     override def name(): String = "loaded"
     override def schema(): StructType = StructType(Nil)
@@ -71,12 +118,16 @@ class MilvusCatalogTest extends AnyFunSuite {
   }
 
   private def catalog(
-      calls: ArrayBuffer[LoadCall]
+      calls: ArrayBuffer[LoadCall],
+      discovery: MilvusCatalogDiscovery = MilvusCatalogDiscovery.default
   ): MilvusCatalogBase =
-    new MilvusCatalogBase((options, reference) => {
-      calls += LoadCall(options.asCaseSensitiveMap().asScala.toMap, reference)
-      loadedTable
-    }) {
+    new MilvusCatalogBase(
+      (options, reference) => {
+        calls += LoadCall(options.asCaseSensitiveMap().asScala.toMap, reference)
+        loadedTable
+      },
+      discovery
+    ) {
       override def createTable(
           identifier: Identifier,
           columns: Array[Column],
@@ -84,6 +135,159 @@ class MilvusCatalogTest extends AnyFunSuite {
           properties: ju.Map[String, String]
       ): Table = unsupportedCreate()
     }
+
+  test("catalog discovery exposes one database namespace level") {
+    val discovery = new StubDiscovery(
+      Right(Seq("analytics", "Default", "analytics")),
+      Map("analytics" -> Right(Seq("events", "RawEvents")))
+    )
+    val loads = ArrayBuffer.empty[LoadCall]
+    val milvus = catalog(loads, discovery)
+    val options = new ju.HashMap[String, String]()
+    options.put(MilvusOption.MilvusUri, "http://milvus:19530")
+    options.put("MILVUS.DATABASE.NAME", "configured-db")
+    options.put("Milvus.Collection.Name", "configured-collection")
+    milvus.initialize("milvus", new CaseInsensitiveStringMap(options))
+
+    assert(
+      milvus.listNamespaces().map(_.toSeq).toSeq ==
+        Seq(Seq("analytics"), Seq("Default"), Seq("analytics"))
+    )
+    assert(
+      milvus.listNamespaces(Array.empty[String]).map(_.toSeq).toSeq ==
+        Seq(Seq("analytics"), Seq("Default"), Seq("analytics"))
+    )
+    assert(milvus.listNamespaces(Array("analytics")).isEmpty)
+    assert(milvus.namespaceExists(Array("Default")))
+    assert(milvus.loadNamespaceMetadata(Array("analytics")).isEmpty)
+
+    val tables = milvus.listTables(Array("analytics"))
+    assert(
+      tables.map(_.namespace().toSeq).toSeq == Seq.fill(2)(Seq("analytics"))
+    )
+    assert(tables.map(_.name()).toSeq == Seq("events", "RawEvents"))
+    assert(milvus.listTables(Array("Default")).isEmpty)
+    assert(loads.isEmpty)
+
+    val collectionOptions = discovery.collectionCalls.head._2
+    assert(
+      collectionOptions(MilvusOption.MilvusDatabaseName) == "analytics"
+    )
+    assert(
+      !collectionOptions.keys.exists(
+        _.equalsIgnoreCase(MilvusOption.MilvusCollectionName)
+      )
+    )
+    assert(
+      discovery.databaseOptions.forall(options =>
+        !options.keys.exists(
+          _.equalsIgnoreCase(MilvusOption.MilvusCollectionName)
+        )
+      )
+    )
+    assert(
+      discovery.databaseOptions.forall(
+        _(MilvusOption.MilvusDatabaseName).isEmpty
+      )
+    )
+    assert(
+      discovery.databaseOptions.forall(
+        _.keys.count(_.equalsIgnoreCase(MilvusOption.MilvusDatabaseName)) == 1
+      )
+    )
+  }
+
+  test("catalog discovery reports invalid and missing namespaces precisely") {
+    val discovery = new StubDiscovery(
+      Right(Seq("present")),
+      Map(
+        "missing" -> Left(
+          new DatabaseNotFoundException("missing database")
+        ),
+        "wrapped" -> Left(
+          new IllegalStateException(
+            "wrapped missing database",
+            new DatabaseNotFoundException("missing database")
+          )
+        )
+      )
+    )
+    val milvus = catalog(ArrayBuffer.empty[LoadCall], discovery)
+    milvus.initialize("milvus", CaseInsensitiveStringMap.empty())
+
+    Seq(
+      Array.empty[String],
+      Array("one", "two"),
+      Array(" "),
+      Array(null: String)
+    ).foreach { namespace =>
+      assertThrows[NoSuchNamespaceException](milvus.listTables(namespace))
+    }
+    assertThrows[NoSuchNamespaceException](
+      milvus.listNamespaces(Array("present", "nested"))
+    )
+    assertThrows[NoSuchNamespaceException](
+      milvus.listNamespaces(Array("missing"))
+    )
+    assertThrows[NoSuchNamespaceException](
+      milvus.loadNamespaceMetadata(Array("missing"))
+    )
+    assert(!milvus.namespaceExists(Array.empty[String]))
+    assert(!milvus.namespaceExists(Array("present", "nested")))
+    assert(!milvus.namespaceExists(Array("missing")))
+    assertThrows[NoSuchNamespaceException](
+      milvus.listTables(Array("missing"))
+    )
+    assertThrows[NoSuchNamespaceException](
+      milvus.listTables(Array("wrapped"))
+    )
+  }
+
+  test(
+    "catalog discovery preserves service failures and rejects offline modes"
+  ) {
+    val databaseFailure = new IllegalStateException("service unavailable")
+    val failedDatabases = new StubDiscovery(
+      Left(databaseFailure),
+      Map.empty
+    )
+    val milvus = catalog(ArrayBuffer.empty[LoadCall], failedDatabases)
+    milvus.initialize("milvus", CaseInsensitiveStringMap.empty())
+    assert(
+      intercept[IllegalStateException](milvus.listNamespaces()) eq
+        databaseFailure
+    )
+    assert(
+      intercept[IllegalStateException](
+        milvus.namespaceExists(Array("database"))
+      ) eq databaseFailure
+    )
+
+    val collectionFailure = new IllegalStateException("permission denied")
+    val failedCollections = new StubDiscovery(
+      Right(Seq("database")),
+      Map("database" -> Left(collectionFailure))
+    )
+    val tables = catalog(ArrayBuffer.empty[LoadCall], failedCollections)
+    tables.initialize("milvus", CaseInsensitiveStringMap.empty())
+    assert(
+      intercept[IllegalStateException](
+        tables.listTables(Array("database"))
+      ) eq collectionFailure
+    )
+
+    Seq(MilvusOption.SnapshotPath, MilvusOption.BackupDir).foreach { key =>
+      val offline = new ju.HashMap[String, String]()
+      offline.put(MilvusOption.MilvusUri, "http://milvus:19530")
+      offline.put(key, "/metadata")
+      val catalog = new StubDiscovery(Right(Seq("database")), Map.empty)
+      val configured = this.catalog(ArrayBuffer.empty[LoadCall], catalog)
+      configured.initialize("milvus", new CaseInsensitiveStringMap(offline))
+
+      assertThrows[IllegalArgumentException](configured.listNamespaces())
+      assert(catalog.databaseOptions.isEmpty)
+    }
+  }
 
   test("identifier names override copied catalog options") {
     val calls = ArrayBuffer.empty[LoadCall]
@@ -191,12 +395,20 @@ class MilvusCatalogTest extends AnyFunSuite {
     assert(calls.isEmpty)
   }
 
-  test("listing and table mutations are explicitly unsupported") {
+  test("namespace and table mutations are explicitly unsupported") {
     val milvus = new MilvusCatalog
     val identifier = Identifier.of(Array("database"), "collection")
     val properties = ju.Collections.emptyMap[String, String]()
 
-    assertThrows[UnsupportedOperationException](milvus.listTables(Array("db")))
+    assertThrows[UnsupportedOperationException](
+      milvus.createNamespace(Array("database"), properties)
+    )
+    assertThrows[UnsupportedOperationException](
+      milvus.alterNamespace(Array("database"))
+    )
+    assertThrows[UnsupportedOperationException](
+      milvus.dropNamespace(Array("database"), cascade = false)
+    )
     assertThrows[UnsupportedOperationException](
       milvus.createTable(
         identifier,
@@ -269,7 +481,7 @@ class MilvusCatalogTest extends AnyFunSuite {
     )
   }
 
-  test("Spark routes latest, version, and timestamp table loads") {
+  test("Spark routes discovery and fixed-snapshot table loads") {
     RoutingMilvusCatalog.reset()
     val spark = SparkSession
       .builder()
@@ -288,6 +500,23 @@ class MilvusCatalogTest extends AnyFunSuite {
       .getOrCreate()
 
     try {
+      val namespaces = spark.sql("SHOW NAMESPACES IN routing").collect()
+      assert(namespaces.map(_.getString(0)).toSeq == Seq("database"))
+
+      val tables = spark.sql("SHOW TABLES IN routing.database").collect()
+      assert(
+        tables
+          .map(row => (row.getString(0), row.getString(1), row.getBoolean(2)))
+          .toSeq ==
+          Seq(
+            ("database", "collection", false),
+            ("database", "metrics", false)
+          )
+      )
+      val matching =
+        spark.sql("SHOW TABLES IN routing.database LIKE 'coll*'").collect()
+      assert(matching.map(_.getString(1)).toSeq == Seq("collection"))
+
       spark.table("routing.database.collection").schema
       spark
         .sql(

@@ -14,7 +14,7 @@ Milvus Spark Connector 提供了 **`milvus`** 数据源格式，用于 Milvus �
 
 此外，还提供了一个便捷的 `MilvusDataReader` 工具类，用于简化集合数据的读取操作。
 
-## Catalog 三段表名与快照时间旅行
+## Catalog 目录、三段表名与快照时间旅行
 
 注册一次 `MilvusCatalog` 后，Milvus collection 可作为 Spark 三段表名使用。Spark 会移除
 `spark.sql.catalog.milvus.` 前缀，再把其余连接、对象存储和读取选项交给 Connector。
@@ -43,6 +43,20 @@ val atTime = spark.sql(
 )
 ```
 
+同一个 Catalog 通过 Spark 的只读目录命令列出 Milvus database 与 collection：
+
+```sql
+SHOW NAMESPACES IN milvus;
+SHOW TABLES IN milvus.default;
+SHOW TABLES IN milvus.default LIKE 'product*';
+```
+
+一个 Milvus database 对应一层 Spark namespace，其中的 collection 对应 table；不支持嵌套
+namespace。因此 `SHOW TABLES` 必须显式指定 database；`SHOW TABLES IN milvus` 不会隐式选择
+`default`，也不会合并多个 database 的 collection。已存在但没有 collection 的 database 返回空结果。
+collection 直接按 Milvus 元数据列出，即使它还没有可读快照也会出现。可选的 `LIKE` 模式由 Spark
+在目录结果上执行。名称保持 Milvus 返回的原样，结果顺序不作保证。
+
 标识符必须恰好包含一个 database 和一个 collection；这两个名字会覆盖 Catalog 配置里的
 `milvus.database.name` 与 `milvus.collection.name`。普通加载取最新快照，`VERSION AS OF`
 按快照名精确匹配，`TIMESTAMP AS OF` 取 Milvus HybridTS 边界不晚于 Spark 解析后时刻的最新快照。
@@ -53,9 +67,11 @@ Scan 始终使用本次解析出的同一个固定快照。对象存储配置需
 时间旅行选择的是快照元数据，不承诺历史数据保留。Connector 不负责保留旧段文件；compaction
 或垃圾回收可能使已经选中的旧快照无法读取。
 
-Catalog 表只支持 client 模式，必须配置 `milvus.uri`。离线的 `milvus.snapshot.path` 与
-`milvus.backup.dir` 仍通过 `format("milvus")` 读取。当前 Catalog 不支持 namespace/table 列表，
-也不支持 CREATE、ALTER、DROP、RENAME。
+Catalog 表和目录发现只支持 client 模式，必须配置 `milvus.uri`。目录发现只访问 Milvus 服务，
+不读取快照元数据或对象存储。确认不存在的 database 按 Spark 的 namespace 不存在错误返回。认证、
+授权、网络、超时、限流及其他服务故障原样报错；空结果只来自成功的目录响应。离线的
+`milvus.snapshot.path` 与 `milvus.backup.dir` 仍通过 `format("milvus")` 读取。Catalog 的元数据接口
+保持只读，不支持对 namespace 或 table 执行 CREATE、ALTER、DROP、RENAME。
 
 ## 1. `MilvusDataReader` 便捷读取方法
 
