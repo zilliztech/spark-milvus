@@ -795,7 +795,8 @@ object ReadMode {
   case object Backup extends ReadMode
 
   /** A live Milvus service names the collection; the snapshot itself comes from
-    * the snapshot directory (`milvus.client.snapshot.name` or the latest).
+    * the snapshot directory. DataSource loads use `milvus.client.snapshot.name`
+    * or latest; Catalog loads select explicitly.
     */
   case object Client extends ReadMode
 }

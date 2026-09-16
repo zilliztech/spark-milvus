@@ -61,9 +61,10 @@ identifier    : IDENTIFIER | BACKQUOTED_IDENTIFIER ;</code></pre>
 <tr><td>大小写:关键字和过程名不分,参数名不分,值原样</td><td>和 Spark SQL 一致</td></tr>
 </table>
 
-<p>连接与存储选项走命名参数而不是会话配置,理由:今天没有 catalog(R1 未做),
-没有一个地方能替 SQL 用户保存连接;命名参数让一条语句自足,复制出来就能跑。
-R1 落地后 catalog 的属性给这些选项默认值,语句里可以省。</p>
+<p>连接与存储选项走命名参数而不是会话配置。只读 <code>MilvusCatalog</code> 已能为表加载
+保存这些属性，但 CALL 前端尚未实现，也没有把 Catalog 属性接入过程执行。第一版因此要求语句
+显式携带所需选项，让一条语句自足、复制出来就能跑。以后是否允许 Catalog 属性提供默认值，
+由 procedure 实现统一决定；语句中的显式参数始终覆盖默认值。</p>
 
 <h2 id="flow">二、一次调用怎么走</h2>
 

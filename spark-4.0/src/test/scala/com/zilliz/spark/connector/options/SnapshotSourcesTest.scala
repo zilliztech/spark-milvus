@@ -125,4 +125,24 @@ class SnapshotSourcesTest extends AnyFunSuite {
     assert(error.getMessage.contains(MilvusOption.MilvusPartitionID))
     assert(error.getMessage.contains(MilvusOption.MilvusPartitions))
   }
+
+  test("catalog snapshot selection rejects offline read modes") {
+    val option = MilvusOption(
+      Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotSchemaBytes -> java.util.Base64.getEncoder
+          .encodeToString(snapshot.schema.toByteArray)
+      )
+    )
+
+    val error = intercept[IllegalArgumentException](
+      SnapshotSources.forRead(
+        option,
+        withSegments = true,
+        SnapshotReference.Latest
+      )
+    )
+    assert(error.getMessage.contains("requires client mode"))
+    assert(error.getMessage.contains("format(\"milvus\")"))
+  }
 }

@@ -1,0 +1,139 @@
+<meta charset="utf-8">
+<title>只读 Catalog</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 52rem; margin: 2rem auto; padding: 0 1.2rem;
+         font: 16px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.4rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+  p.thesis { font-size: 1.05rem; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .86em;
+         background: #8881; padding: .1em .35em; border-radius: 3px; }
+  pre { background: #8881; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .84rem; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .9rem; }
+  th, td { border: 1px solid #8884; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #8881; font-weight: 600; }
+  .warn { border-left: 3px solid #d08700; background: #d0870014; padding: .8rem 1rem; margin: 1.3rem 0; }
+  figure { margin: 1.5rem 0; }
+  figure svg { max-width: 100%; height: auto; }
+  figcaption { font-size: .85rem; opacity: .75; margin-top: .5rem; }
+</style>
+
+<h1>只读 Catalog</h1>
+
+<p>对应<a href="../capabilities.md">能力索引</a>中的 R1、R2。固定快照与四种来源见
+<a href="snapshot.html">snapshot.html</a>，读取执行见 <a href="read.html">read.html</a>。</p>
+
+<p class="thesis"><strong>Catalog 只把 Spark 的三段表名和时间旅行参数翻译成一个固定
+<code>Snapshot</code>，随后交给现有 <code>MilvusTable</code>；它不另建读取链路。</strong>
+普通加载取最新快照，版本加载按快照名精确匹配，时间加载把 Spark 的 Unix 微秒转换成
+Milvus HybridTS 上界后选择不晚于该边界的最新快照。</p>
+
+<h2 id="contract">一、名称与配置</h2>
+
+<p><strong>只接受 <code>catalog.database.collection</code>。</strong> Spark 已经从标识符中移除了
+catalog 名，传给 <code>MilvusCatalog</code> 的 <code>Identifier</code> 必须恰有一段 namespace；它是
+Milvus database，table name 是 collection。二段名没有默认 database，四段名也不截断。</p>
+
+<pre><code>spark.sql.catalog.milvus = com.zilliz.spark.connector.catalog.MilvusCatalog
+spark.sql.catalog.milvus.milvus.uri = https://example-milvus:19530
+spark.sql.catalog.milvus.milvus.token = user:password
+spark.sql.catalog.milvus.fs.address = s3.us-west-2.amazonaws.com
+spark.sql.catalog.milvus.fs.bucket_name = your-milvus-bucket
+spark.sql.catalog.milvus.fs.root_path = files
+spark.sql.catalog.milvus.fs.cloud_provider = aws
+spark.sql.catalog.milvus.fs.region = us-west-2
+spark.sql.catalog.milvus.fs.use_ssl = true
+spark.sql.catalog.milvus.fs.use_iam = true</code></pre>
+
+<pre><code>SELECT id, embedding FROM milvus.default.products</code></pre>
+
+<table>
+<tr><th>输入</th><th>处理</th><th>原因</th></tr>
+<tr><td><code>spark.sql.catalog.&lt;name&gt;.*</code></td><td>Spark 去掉前缀后交给 <code>initialize</code>；Catalog 保存不可变副本</td><td>一次注册可承载连接、对象存储和读取选项</td></tr>
+<tr><td>database、collection</td><td>总是由本次 <code>Identifier</code> 覆盖同名配置</td><td>一个 Catalog 可以安全加载多张表，初始化配置不能把名字串到另一张表</td></tr>
+<tr><td>snapshot、backup 离线模式</td><td>拒绝</td><td>离线文件没有可验证的三段目录关系，继续由 <code>format("milvus")</code> 承载</td></tr>
+</table>
+
+<p>已知表名的加载只调用现有 <code>getCollectionInfo(database, collection)</code> 取得 collection id；
+它不依赖列数据库或列 collection 的 RPC。<code>SHOW NAMESPACES</code>、<code>SHOW TABLES</code> 属于 C1，
+本阶段不实现 <code>SupportsNamespaces</code>。</p>
+
+<h2 id="path">二、一次解析，沿用一条读链</h2>
+
+<p><strong>三个入口只在快照选择方式上不同。</strong> 选中的 <code>Snapshot</code> 在
+<code>loadTable</code> 内解析一次并放进 <code>MilvusTable</code>；schema、ScanBuilder、分区规划和 reader
+使用同一个对象，不在 executor 或 scan 创建时重新查询最新快照。</p>
+
+<figure>
+<svg viewBox="0 0 860 150" role="img" aria-label="Spark loadTable 经 MilvusCatalog、SnapshotSources 和 SnapshotCatalog 得到固定 Snapshot，再进入 MilvusTable 与现有扫描链">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.2">
+    <rect x="8" y="45" width="132" height="54" rx="3"/>
+    <rect x="180" y="45" width="132" height="54" rx="3"/>
+    <rect x="352" y="45" width="132" height="54" rx="3"/>
+    <rect x="524" y="45" width="132" height="54" rx="3"/>
+    <rect x="696" y="45" width="156" height="54" rx="3"/>
+    <line x1="140" y1="72" x2="174" y2="72" marker-end="url(#arrow)"/>
+    <line x1="312" y1="72" x2="346" y2="72" marker-end="url(#arrow)"/>
+    <line x1="484" y1="72" x2="518" y2="72" marker-end="url(#arrow)"/>
+    <line x1="656" y1="72" x2="690" y2="72" marker-end="url(#arrow)"/>
+  </g>
+  <g fill="currentColor" font-size="12" text-anchor="middle">
+    <text x="74" y="66">Spark</text><text x="74" y="83">loadTable</text>
+    <text x="246" y="66">MilvusCatalog</text><text x="246" y="83">名称 + 版本</text>
+    <text x="418" y="66">SnapshotSources</text><text x="418" y="83">client 来源</text>
+    <text x="590" y="66">SnapshotCatalog</text><text x="590" y="83">选一个 Snapshot</text>
+    <text x="774" y="66">MilvusTable</text><text x="774" y="83">现有 scan / reader</text>
+  </g>
+</svg>
+<figcaption>Catalog 新增的是左侧翻译；<code>SnapshotCatalog</code> 之后的表、规划与执行不分叉。</figcaption>
+</figure>
+
+<table>
+<tr><th>Spark 调用</th><th>快照选择</th></tr>
+<tr><td><code>loadTable(identifier)</code></td><td><code>SnapshotCatalog.latest</code></td></tr>
+<tr><td><code>loadTable(identifier, version)</code></td><td>非空的 <code>version</code> 作为快照名，调用 <code>byName</code></td></tr>
+<tr><td><code>loadTable(identifier, timestamp)</code></td><td>Unix 微秒先转 HybridTS 上界，再调用 <code>asOf</code></td></tr>
+</table>
+
+<h2 id="time">三、时间参数在 Catalog 边界换单位</h2>
+
+<p><strong>Spark 的时间是 Unix epoch 微秒，<code>snapshot_info.create_ts</code> 是 Milvus
+HybridTS。</strong> 后者的高位是 Unix epoch 毫秒，低 18 位是同一毫秒内的逻辑时钟；它表示各
+channel seek position 的最小快照边界，不是 API 调用完成时间。<code>Snapshot.createdAt</code> 保留
+原始 HybridTS，core 的 <code>SnapshotCatalog.asOf</code> 合同不改变。SQL 时间字面量先按
+<code>spark.sql.session.timeZone</code> 解析；<code>loadTable(identifier, timestamp)</code> 收到的是
+UTC epoch 微秒。</p>
+
+<p>Catalog 先令 <code>millis = floorDiv(epochMicros, 1000)</code>，再生成该毫秒的最大 HybridTS：
+<code>(millis &lt;&lt; 18) | ((1 &lt;&lt; 18) - 1)</code>。低 18 位必须全为 1，否则同一毫秒内
+logical 大于 0 的快照会被漏掉。负时间饱和到 <code>Long.MinValue</code>，超过 HybridTS 可表示范围的
+时间饱和到 <code>Long.MaxValue</code>，两端都不发生移位溢出。</p>
+
+<p><strong>时间旅行只选择已有快照元数据，不提供保留策略。</strong> Connector 不保留旧段文件；
+compaction 或 GC 回收快照引用的段后，按名字或时间选中该快照仍可能在读取数据文件时失败。</p>
+
+<h2 id="errors">四、失败与只读边界</h2>
+
+<p><strong>无效请求在 driver 规划期失败，只把能够确认的“不存在”翻成 Spark 标准语义。</strong>
+名称层级错误、空版本、非 client 模式给出 <code>IllegalArgumentException</code>；Milvus 明确返回
+collection / database 不存在时，Catalog 抛 <code>NoSuchTableException</code>，使
+<code>tableExists</code> 和 SQL 缺表行为符合 Spark 约定。collection 已存在但指定名字或时间点
+没有快照候选时，保留含选择条件和 metadata prefix 的 <code>SnapshotNotFoundException</code>；整个
+prefix 为空也保留明确错误，因为它可能是尚无快照，也可能是 bucket 或 <code>fs.root_path</code> 配错。
+缺失或冲突的 <code>create_ts</code>、网络、认证、对象存储和解析异常同样保留原错误链，不能被改成
+空表或 <code>false</code>。</p>
+
+<div class="warn"><strong>只读是接口边界。</strong> <code>listTables</code>、create、alter、drop、rename
+都明确抛出 <code>UnsupportedOperationException</code>。本阶段不新增列表 RPC、缓存、DDL、Procedure、
+Scan、对象存储或原生实现。这里的“只读”只指 Catalog 元数据操作；已加载的 <code>MilvusTable</code>
+仍沿用现有 append 写链。</div>
+
+<h2 id="versions">五、四条 Spark 线</h2>
+
+<p><strong>三个 <code>loadTable</code> 签名在 Spark 3.5、4.0、4.1、4.2 一致，主体放在
+<code>spark-base</code>。</strong> 每条线只保留公开的无参 <code>MilvusCatalog</code> 和本线首选
+<code>createTable</code> 签名；它们都把 create 明确判为不支持。测试先验证共享行为，再让四条线各自
+编译，Spark 3.5 同时验证 Scala 2.12 与 2.13。</p>

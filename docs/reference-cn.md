@@ -14,6 +14,49 @@ Milvus Spark Connector 提供了 **`milvus`** 数据源格式，用于 Milvus �
 
 此外，还提供了一个便捷的 `MilvusDataReader` 工具类，用于简化集合数据的读取操作。
 
+## Catalog 三段表名与快照时间旅行
+
+注册一次 `MilvusCatalog` 后，Milvus collection 可作为 Spark 三段表名使用。Spark 会移除
+`spark.sql.catalog.milvus.` 前缀，再把其余连接、对象存储和读取选项交给 Connector。
+
+```scala
+spark.conf.set(
+  "spark.sql.catalog.milvus",
+  "com.zilliz.spark.connector.catalog.MilvusCatalog"
+)
+spark.conf.set("spark.sql.catalog.milvus.milvus.uri", "http://localhost:19530")
+spark.conf.set("spark.sql.catalog.milvus.milvus.token", "your-token")
+spark.conf.set("spark.sql.catalog.milvus.fs.address", "s3.us-west-2.amazonaws.com")
+spark.conf.set("spark.sql.catalog.milvus.fs.bucket_name", "your-milvus-bucket")
+spark.conf.set("spark.sql.catalog.milvus.fs.root_path", "files")
+spark.conf.set("spark.sql.catalog.milvus.fs.cloud_provider", "aws")
+spark.conf.set("spark.sql.catalog.milvus.fs.region", "us-west-2")
+spark.conf.set("spark.sql.catalog.milvus.fs.use_ssl", "true")
+spark.conf.set("spark.sql.catalog.milvus.fs.use_iam", "true")
+
+val latest = spark.table("milvus.default.products")
+val named = spark.sql(
+  "SELECT * FROM milvus.default.products VERSION AS OF 'release-2026-09'"
+)
+val atTime = spark.sql(
+  "SELECT * FROM milvus.default.products TIMESTAMP AS OF '2026-09-16 08:00:00'"
+)
+```
+
+标识符必须恰好包含一个 database 和一个 collection；这两个名字会覆盖 Catalog 配置里的
+`milvus.database.name` 与 `milvus.collection.name`。普通加载取最新快照，`VERSION AS OF`
+按快照名精确匹配，`TIMESTAMP AS OF` 取 Milvus HybridTS 边界不晚于 Spark 解析后时刻的最新快照。
+时间字面量先按 `spark.sql.session.timeZone` 解析，Catalog 收到 UTC epoch 微秒。返回的 Table 与后续
+Scan 始终使用本次解析出的同一个固定快照。对象存储配置需按部署替换；不能使用 IAM 时，以
+`fs.access_key_id` 和 `fs.access_key_value` 替代 `fs.use_iam=true`。
+
+时间旅行选择的是快照元数据，不承诺历史数据保留。Connector 不负责保留旧段文件；compaction
+或垃圾回收可能使已经选中的旧快照无法读取。
+
+Catalog 表只支持 client 模式，必须配置 `milvus.uri`。离线的 `milvus.snapshot.path` 与
+`milvus.backup.dir` 仍通过 `format("milvus")` 读取。当前 Catalog 不支持 namespace/table 列表，
+也不支持 CREATE、ALTER、DROP、RENAME。
+
 ## 1. `MilvusDataReader` 便捷读取方法
 
 `MilvusDataReader` 提供了一个便捷的方法来读取集合数据。
@@ -104,7 +147,7 @@ val s3Options = Map(
 
 ### 1.4 工作原理
 
-`getTable` 只解析一次不可变快照。schema、选中的段、统计和扫描计划都来自同一个
+表加载（`getTable` 或 Catalog 的 `loadTable`）只解析一次不可变快照。schema、选中的段、统计和扫描计划都来自同一个
 `Snapshot`，扫描期间不会再向服务或对象存储查询更新的视图。driver 用于物化快照元数据的
 每个对象存储句柄都会在成功或失败后关闭，不会进入 executor 任务。每个 Spark 分区读取一个数据段：
 `storage_version = 3` 由 executor 打开钉住版本的段 Manifest；`storage_version = 2`
@@ -186,7 +229,7 @@ schema，没有任何快照时用）。字段 id 和向量维度都从这份 sch
 | `MilvusOption.MilvusDatabaseName` | String | 否 | "" | collection 所在库。传 `"default"` 选择默认库的 collection（匹配 meta 记录为 `""` 或 `"default"`）；留空则走单候选/歧义判定——当同时存在 `default.orders` 与 `db2.orders` 时，需传 `"default"`（或 `"db2"`）消除歧义。 |
 | `MilvusOption.MilvusCollectionName` | String | 条件 | - | 备份内的 collection 名（与库名联合匹配，不用 `.head`）。备份含多个 collection 时必须指定。 |
 | `MilvusOption.SnapshotPath` | String | 否 | - | `milvus.snapshot.path` — 快照目录里的一个快照 JSON：`s3a://bucket/files/snapshots/<coll>/metadata/<id>.json`，相对 `fs.bucket_name` 的 key，或 Milvus CreateSnapshot 返回的 `s3_location` 形式 `https://<endpoint>/bucket/files/...`（host 是配置的 endpoint 时接受）。不经 Milvus 服务：schema、分区、段全部来自这个文件。不能与 `milvus.snapshot.manifests` 同时给。 |
-| `MilvusOption.ClientSnapshotName` | String | 否 | 最新 | `milvus.client.snapshot.name` — 配合 `milvus.uri`：读该 collection 快照目录里这个名字的快照，而不是最新的。连接器自己不建快照，先用 Milvus 或 `CALL create_snapshot` 建。 |
+| `MilvusOption.ClientSnapshotName` | String | 否 | 最新 | `milvus.client.snapshot.name` — 只作用于配有 `milvus.uri` 的 `format("milvus")` 读取：按名字取快照，而不是最新快照。Catalog 忽略此 option，按名字读取请用 `VERSION AS OF`。连接器自己不建快照，先用 Milvus 或 `CALL create_snapshot` 建。 |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | 否 | 67108864 | `milvus.snapshot.max.json.bytes` — 快照 JSON 或 backup `full_meta.json` 的正整数大小上限。 |
 
 读取 schema 从备份 meta 推导，也可用 `.schema()` 指定；meta 读不到时两种情况都直接失败。读取动态集合（`enable_dynamic_field=true`）要求备份 meta 记录 `$meta` 字段——仅当 milvus-backup 带 etcd 访问（`--backup_index_extra`）且 **≥ v0.5.13** 时才捕获。跨多个 binlog 文件的 column group 已支持（milvus-storage#657 已修复每文件行范围编码）。含 struct-array 字段（`struct_array_fields`）的集合仍会在规划期中止读取。S3 凭证复用现有 `fs.*` 选项（`fs.address`、`fs.access_key_id`、`fs.access_key_value` ...）；桶取自 `milvus.backup.dir` URI。

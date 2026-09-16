@@ -102,7 +102,7 @@
 <tr><th>字段</th><th>类型</th><th>含义</th><th>主路径的来源</th></tr>
 <tr><td><code>name</code></td><td><code>String</code></td><td>快照名，R2 的 <code>version</code> 指的就是它</td><td>JSON <code>snapshot_info.name</code></td></tr>
 <tr><td><code>collectionId</code></td><td><code>Long</code></td><td></td><td><code>snapshot_info.collection_id</code></td></tr>
-<tr><td><code>createdAt</code></td><td><code>Option[Long]</code></td><td>建快照的时间戳，R2 按时间点选快照用它比较</td><td><code>snapshot_info.create_ts</code></td></tr>
+<tr><td><code>createdAt</code></td><td><code>Option[Long]</code></td><td>各 channel seek position 的最小 Milvus HybridTS，R2 按时间点选快照用它比较</td><td><code>snapshot_info.create_ts</code></td></tr>
 <tr><td><code>schema</code></td><td><code>CollectionSchema</code>（protobuf）</td><td>C3：schema 来自快照，不经服务</td><td>JSON <code>collection.schema</code></td></tr>
 <tr><td><code>partitionIds</code></td><td><code>Seq[Long]</code></td><td>快照覆盖的分区；R16 的分区选择在这上面过滤</td><td><code>snapshot_info.partition_ids</code></td></tr>
 <tr><td><code>segments</code></td><td><code>Seq[Segment]</code></td><td>段列表，见 1.2</td><td><code>storagev2_manifest_list</code>（V3 段）加 <code>manifest_list</code> 指向的 Avro（V2 段）</td></tr>
@@ -168,7 +168,8 @@ object DeleteFiles {
 <tr><td>option 串</td><td><code>OptionStringsSnapshotSource</code></td><td><code>spark.options</code>（过渡，随 backfill 切到 catalog 后删）</td><td><code>milvus.snapshot.*</code> 的几个 option</td><td>—</td></tr>
 </table>
 
-<p><strong>选择在 <code>getTable</code> 做一次，不在 core 做。</strong><code>spark.options.SnapshotSources.forRead</code> 按 <code>ReadMode</code> 构造上面某一个实现并调用一次；
+<p><strong>选择在表加载时做一次，不在 core 做。</strong>DataSource 的 <code>getTable</code> 与 Catalog 的
+<code>loadTable</code> 共用 <code>MilvusTables.load</code>；它让 <code>spark.options.SnapshotSources.forRead</code> 按 <code>ReadMode</code> 构造上面某一个实现并调用一次；
 <code>MilvusTable</code> 以 <code>Snapshot</code> 为构造参数持有它，<code>newScanBuilder</code> 把它交给 <code>MilvusScanBuilder</code> 再到 <code>MilvusScan</code>，
 schema、分区规划、reader factory 的删除描述都从这一个对象取。来源解析后，<code>SnapshotSources</code> 统一以
 <code>Snapshot.narrow</code> 应用 <code>milvus.partitions</code> 与 <code>milvus.segments</code>：两个都是逗号分隔的数值 id，
@@ -190,8 +191,9 @@ core 里不放注册表：backup 是 compat 里唯一的实现，与 <code>V2Seg
 走 <code>core.io.ObjectStore</code>，不碰 Hadoop。</p>
 
 <ol>
-<li><strong>选快照。</strong>今天的入口：<code>milvus.snapshot.path</code> 直接给一个快照 JSON，不经服务；或给 <code>milvus.uri</code>，由 DescribeCollection 取 collection id 后按 <code>milvus.client.snapshot.name</code> 选名字、缺省取最新。R2 的三种写法：<code>version</code> 是快照名，精确匹配；<code>timestamp</code> 取
-<code>createdAt</code> 不晚于它的最新一个；两者都不给取 <code>createdAt</code> 最大的。目录里只有 JSON 文件名可用时，
+<li><strong>选快照。</strong>今天的入口：<code>milvus.snapshot.path</code> 直接给一个快照 JSON，不经服务；或给 <code>milvus.uri</code>，由 DescribeCollection 取 collection id。<code>format("milvus")</code> 按 <code>milvus.client.snapshot.name</code> 选名字、缺省取最新；Catalog 的 R2 三种写法里，<code>version</code> 是快照名，精确匹配，<code>timestamp</code> 取
+<code>createdAt</code> 不晚于它的最新一个；两者都不给取 <code>createdAt</code> 最大的。Spark 传入 Unix 微秒，
+catalog 按 <a href="catalog.html#time">catalog.html 第三节</a>转换成 HybridTS 上界后再比较。目录里只有 JSON 文件名可用时，
 按时间点选要打开候选 JSON 读 <code>create_ts</code>；README 第五节向 Milvus 要的 catalog 文件到位后改为只读一个文件。</li>
 <li><strong>解析 JSON。</strong><code>core.snapshot.json.SnapshotJson.parse</code> 得到 JSON 的形状 <code>SnapshotJson</code>，<code>SnapshotCatalog.fromMetadata</code> 把它变成 <code>Snapshot</code>。JSON 里 V3 段在 <code>storagev2_manifest_list</code>，
 每项是一段 <code>{"ver": N, "base_path": ...}</code>；键名里的 V2 指 milvus-storage 库的清单格式版本，不是段的 <code>storage_version</code>，

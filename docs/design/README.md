@@ -6,6 +6,7 @@
 |---|---|---|
 | 确认功能承诺、优先级和实现位置 | 顶层索引 | [能力规划](capabilities.md) |
 | 理解总体结构、确定模块与包的归属 | architecture/ | [架构图解](architecture/overview.html)、[模块与迁移](architecture/modules.md) |
+| 开发三段表名与快照时间旅行入口 | architecture/ | [只读 Catalog](architecture/catalog.html) |
 | 开发使用 Milvus 索引文件的向量查询 | architecture/ | [向量查询方案](architecture/vector-search.html)（issue #125，待评审） |
 | core 怎么访问对象存储、凭证怎么下发 | architecture/ | [存储访问层](architecture/storage-access.html)（未完待续） |
 | 改动对象存储凭证、provider 链、按桶配置 | architecture/ | [对象存储认证](architecture/storage-auth.html) |
@@ -203,6 +204,7 @@ flowchart LR
 
 | 日期 | 决策 | 结论 |
 |---|---|---|
+| 2026-09-16 | issue #135 的只读 Catalog 边界 | R1 的已知三段名加载与 C1 的目录枚举解耦：`loadTable` 只用现有 `getCollectionInfo` 取得 collection id，不新增 ListDatabases/ShowCollections。三个 loadTable 重载共享 [catalog.html](architecture/catalog.html) 的一条路径，分别选最新、快照名和时间点；Spark Unix 微秒在 catalog 边界转换成该物理毫秒的最大 Milvus HybridTS，core 继续保存和比较原始 `create_ts`。Catalog 只接受 client 模式，不实现 SupportsNamespaces、列表、DDL、缓存或第二条读链。主体在 spark-base，按线只保留公开类和 createTable 签名适配。 |
 | 2026-09-15 | issue #125 开发方案与索引格式说明 | 新增 [vector-search.html](architecture/vector-search.html) 草稿，以 refactor/v2 a070569 为基线；查询入口、V7 能力和回退范围保留在开放决策 16、21，尚未批准或实现。修正原加载描述：需要解析事件与 payload 编码，SLICE_META 只在切片时存在，16 MiB 不是解码常量；快照段 index_files 与 V3 数据 Manifest 的索引登记是不同来源。决策 16 的 JVM 对拍文字按 2026-09-14 已定政策纠正；snapshot.html 的索引能力编号由 R7 改为 V2。 |
 | 2026-09-09 | 版本号与分支 | 2.0.0，refactor/v2 |
 | 2026-09-09 | 谓词求值位置 | 核心层 |
@@ -221,7 +223,7 @@ flowchart LR
 | 2026-09-10 | Spark 与 Arrow 的版本钉法 | Spark 取每条线最低的维护 patch（编译版本就是兼容下限），Arrow 与本线 Spark 自带的对齐；4.2 线的 Arrow 从 18.3.0 改成 19.0.0 |
 | 2026-09-10 | CALL 的实现方式 | 走自己的 SQL 语法扩展加逻辑节点加 planner 策略，不用 Spark 4.0 才有的 ProcedureCatalog：后者要为 3.5 再写一套函数入口，同一批动作两份实现 |
 | 2026-09-10 | 决策 17 antlr | SQL 扩展的语法放共享目录、每条线各生成一份、运行时用 Spark 自带的；core 里的 Milvus 表达式解析器不用 antlr（core 是跨线单产物，生成码不通用），改手写 |
-| 2026-09-10 | catalog 的按线拆分 | 主体进 spark-base，按线只留一个工厂方法 |
+| 2026-09-10 | catalog 的按线拆分（由 2026-09-16 issue #135 决策细化） | 主体进 spark-base；按线只留公开 Catalog 类及该 Spark 线要求的 createTable 签名适配 |
 | 2026-09-11 | 目录与命名 | 目录全部平铺，不设分组目录（分组目录不是 sbt 模块，在 IDE 里与真模块混同）；模块显示名跟目录一致，发布坐标另设 moduleName；只有一个消费者的共享源码目录不设（apps 与 integration 的 base 删掉），spark-base 有四个消费者保留 |
 | 2026-09-11 | 共享源码不做成 project | IDE 里那个合成的 spark-base-sources 模块来自「多个项目声明同一个源码根」，把 spark-base 做成 project 去不掉它，只多一个模块和一次编译；最低线的 API 约束由 spark-3.5 本来就提供 |
 | 2026-09-11 | 核心层无 Spark 依赖的理由 | 更正：不是为了给 Ray 复用（Ray 是 Python，依赖不了 JVM 的 jar，它共用的是第 1 层的 C 接口）。理由是四条 Spark 线共用一个产物、测试不拉 SparkSession、边界有编译期检查 |

@@ -26,14 +26,14 @@ import com.zilliz.spark.connector.read.MilvusScanBuilder
 import com.zilliz.spark.connector.types.SparkTypes
 import com.zilliz.spark.connector.write.MilvusV3WriteBuilder
 
-/** One collection as one read sees it: the [[Snapshot]] `getTable` resolved
-  * through `SnapshotSources`, the Spark schema derived from it, and the scan
-  * builder that plans against it. Opens nothing itself.
+/** One collection as one table load sees it: the [[Snapshot]] `MilvusTables`
+  * resolved through `SnapshotSources`, the Spark schema derived from it, and
+  * the scan builder that plans against it. Opens nothing itself.
   *
   * @param sparkSchema
-  *   the schema Spark passed to `getTable`: the user's `.schema()` or the
-  *   inferred one. Outside client mode it is the read schema, with the Milvus
-  *   type metadata restored from the snapshot.
+  *   for a DataSource load, the schema Spark passed to `getTable`: the user's
+  *   `.schema()` or the inferred one. Outside client mode it is the read
+  *   schema, with the Milvus type metadata restored from the snapshot.
   */
 case class MilvusTable(
     snapshot: Snapshot,

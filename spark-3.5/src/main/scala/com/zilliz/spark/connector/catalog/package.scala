@@ -1,10 +1,10 @@
 package com.zilliz.spark.connector
 
-/** MilvusCatalog: TableCatalog, SupportsNamespaces, and the loadTable overload
-  * that resolves a snapshot. The createTable signature differs between Spark
-  * lines, which is why this package is per line rather than shared.
+/** MilvusCatalog: a read-only TableCatalog for one database namespace and the
+  * loadTable overloads that resolve latest, named, or as-of snapshots. Listing
+  * and DDL are deliberately unsupported. The createTable signature differs
+  * between Spark lines, so each line keeps one thin public class.
   *
-  * Capabilities: none until code lands here; the ids this package is planned to
-  * carry are in section 11 of docs/design/capabilities.md..
+  * Capabilities: R1, R2 (see docs/design/capabilities.md).
   */
 package object catalog

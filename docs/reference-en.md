@@ -14,6 +14,56 @@ Milvus Spark Connector provides the **`milvus`** data source format for reading 
 
 Additionally, a convenient `MilvusDataReader` utility class is provided to simplify collection data reading operations.
 
+## Catalog Tables and Snapshot Time Travel
+
+Register `MilvusCatalog` once to use a Milvus collection as a three-part Spark
+table. Spark removes the `spark.sql.catalog.milvus.` prefix and passes the
+remaining connection, storage, and read options to the connector.
+
+```scala
+spark.conf.set(
+  "spark.sql.catalog.milvus",
+  "com.zilliz.spark.connector.catalog.MilvusCatalog"
+)
+spark.conf.set("spark.sql.catalog.milvus.milvus.uri", "http://localhost:19530")
+spark.conf.set("spark.sql.catalog.milvus.milvus.token", "your-token")
+spark.conf.set("spark.sql.catalog.milvus.fs.address", "s3.us-west-2.amazonaws.com")
+spark.conf.set("spark.sql.catalog.milvus.fs.bucket_name", "your-milvus-bucket")
+spark.conf.set("spark.sql.catalog.milvus.fs.root_path", "files")
+spark.conf.set("spark.sql.catalog.milvus.fs.cloud_provider", "aws")
+spark.conf.set("spark.sql.catalog.milvus.fs.region", "us-west-2")
+spark.conf.set("spark.sql.catalog.milvus.fs.use_ssl", "true")
+spark.conf.set("spark.sql.catalog.milvus.fs.use_iam", "true")
+
+val latest = spark.table("milvus.default.products")
+val named = spark.sql(
+  "SELECT * FROM milvus.default.products VERSION AS OF 'release-2026-09'"
+)
+val atTime = spark.sql(
+  "SELECT * FROM milvus.default.products TIMESTAMP AS OF '2026-09-16 08:00:00'"
+)
+```
+
+The identifier must contain exactly one database and one collection. Those two
+names override `milvus.database.name` and `milvus.collection.name` in catalog
+configuration. An ordinary load selects the latest snapshot; `VERSION AS OF`
+matches a snapshot name exactly; `TIMESTAMP AS OF` selects the latest snapshot
+whose Milvus HybridTS boundary is not after the instant Spark resolved. The
+timestamp literal is interpreted using `spark.sql.session.timeZone` before the
+Catalog receives UTC epoch microseconds. The resolved snapshot is fixed for the
+returned table and its scans. Replace the storage values for the deployment;
+when IAM is unavailable, use `fs.access_key_id` and `fs.access_key_value`
+instead of `fs.use_iam=true`.
+
+Time travel selects snapshot metadata; it is not a retention guarantee. The
+connector does not retain historical segment files, so compaction or garbage
+collection can make a selected older snapshot unreadable.
+
+Catalog tables require client mode (`milvus.uri`). Offline
+`milvus.snapshot.path` and `milvus.backup.dir` reads remain on
+`format("milvus")`. This catalog does not implement namespace/table listing or
+CREATE, ALTER, DROP, and RENAME operations.
+
 ## 1. `MilvusDataReader` Convenient Reading Method
 
 `MilvusDataReader` provides a convenient method to read collection data.
@@ -104,7 +154,8 @@ val s3Options = Map(
 
 ### 1.4 How It Works
 
-`getTable` resolves exactly one immutable snapshot. That same `Snapshot` supplies
+Table loading (`getTable` or Catalog `loadTable`) resolves exactly one immutable
+snapshot. That same `Snapshot` supplies
 the schema, selected segments, statistics, and scan plan; a scan never asks the
 service or storage for a newer view. The driver closes every object store used
 to materialize snapshot metadata on both success and failure, before executor
@@ -210,7 +261,7 @@ to snapshot). See `docs/backup-datasource-design.md` for the full design.
 | `MilvusOption.MilvusDatabaseName` | String | No | "" | Database the collection lives in. Passing `"default"` selects the default-database collection (matching a meta that records `""` or `"default"`); leaving the option empty performs single-candidate / ambiguity resolution instead — with both `default.orders` and `db2.orders` present, pass `"default"` (or `"db2"`) to disambiguate. |
 | `MilvusOption.MilvusCollectionName` | String | Conditional | - | Collection name inside the backup (matched with the database name, never `.head`). Required when the backup holds more than one collection. |
 | `MilvusOption.SnapshotPath` | String | No | - | `milvus.snapshot.path` — a snapshot JSON in the snapshot directory: `s3a://bucket/files/snapshots/<coll>/metadata/<id>.json`, a key relative to `fs.bucket_name`, or the `https://<endpoint>/bucket/files/...` form Milvus's CreateSnapshot prints as `s3_location` (accepted when the host is the configured endpoint). Reads it without a Milvus service: schema, partitions and segments all come from that file. Cannot be combined with `milvus.snapshot.manifests`. |
-| `MilvusOption.ClientSnapshotName` | String | No | latest | `milvus.client.snapshot.name` — with `milvus.uri`: read this snapshot of the collection from the snapshot directory instead of the latest one. The connector never creates snapshots; make one with Milvus or `CALL create_snapshot`. |
+| `MilvusOption.ClientSnapshotName` | String | No | latest | `milvus.client.snapshot.name` — for `format("milvus")` with `milvus.uri`, read this named snapshot instead of the latest one. Catalog loads ignore this option: use `VERSION AS OF`. The connector never creates snapshots; make one with Milvus or `CALL create_snapshot`. |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | No | 67108864 | `milvus.snapshot.max.json.bytes` — positive maximum size of a snapshot JSON or backup `full_meta.json`. |
 
 The Spark read schema is derived from the backup meta unless `.schema()` is

@@ -97,8 +97,8 @@ C shim（mv_* 包 knowhere::Index、BruteForce、BinarySet、Version，以及 Di
 
 | 包 | 职责 | 按线 |
 |---|---|---|
-| `catalog` | MilvusCatalog：TableCatalog、SupportsNamespaces、loadTable 的快照重载 | 主体在 base，按线只留一个工厂方法 |
-| `table` | MilvusTable：持有 getTable 解析一次的 Snapshot，算 schema、能力集、元数据列，把 Snapshot 交给 scan | 否 |
+| `catalog` | MilvusCatalog：只读 TableCatalog、三段名、loadTable 的快照重载；目录枚举与 DDL 分属 C1、C2 | 主体在 base，按线只留公开类与 createTable 签名适配 |
+| `table` | MilvusTables 统一校验并解析固定 Snapshot，供 DataSource 与 Catalog 构造 MilvusTable；MilvusTable 算 schema、能力集、元数据列并把 Snapshot 交给 scan | 否 |
 | `read` | ScanBuilder、Scan、Batch、InputPartition、ColumnarPartitionReader、ColumnVector 实现。包名与 `write` 和 `core.read` 对称，类名沿用 Spark 的 Scan | 否 |
 | `expr` | DataSource V2 Predicate 到 IR 的翻译 | 否 |
 | `types` | Arrow 类型到 Spark 类型的映射，向量列的 Spark 表示 | 否 |
@@ -147,7 +147,7 @@ spark-milvus/
   client/
     src/main/scala/com/zilliz/milvus/client/{grpc,api}
     src/main/protobuf/             milvus-proto 子模块的引用
-  spark-base/src/main/scala/com/zilliz/spark/connector/{sources,table,read,expr,types,write,options}
+  spark-base/src/main/scala/com/zilliz/spark/connector/{catalog,sources,table,read,expr,types,write,options}
   spark-3.5/src/main/{scala,resources}/  catalog、functions、extensions、META-INF/services
   spark-4.0/  spark-4.1/  spark-4.2/     catalog、procedure、extensions、META-INF/services
   apps-4.0/src/main/{scala,resources}/   com.zilliz.spark.connector.apps.{backfill,search}
