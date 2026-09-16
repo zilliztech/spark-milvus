@@ -20,6 +20,7 @@ import com.fasterxml.jackson.module.scala.{
 import com.google.protobuf.ByteString
 
 import com.zilliz.milvus.client.{
+  CollectionNotFoundException,
   MilvusConnectionException,
   MilvusRateLimitException,
   MilvusRpcException
@@ -805,6 +806,14 @@ class MilvusClient(params: MilvusConnectionParams)
   ): Try[MilvusCollectionInfo] = {
     try {
       val collectionInfo = describeCollectionRPC(dbName, collectionName)
+      collectionInfo.status.foreach { status =>
+        if (MilvusClient.isCollectionNotFound(status)) {
+          throw new CollectionNotFoundException(
+            s"Milvus collection '$dbName.$collectionName' does not exist"
+          )
+        }
+        checkStatus("get collection info", status).get
+      }
       Success(
         MilvusCollectionInfo(
           dbName = dbName,
@@ -818,9 +827,13 @@ class MilvusClient(params: MilvusConnectionParams)
         )
       )
     } catch {
+      case e: CollectionNotFoundException => Failure(e)
       case e: Exception =>
         Failure(
-          new Exception(s"Failed to get collection info: ${e.getMessage}")
+          new Exception(
+            s"Failed to get collection info: ${e.getMessage}",
+            e
+          )
         )
     }
   }
@@ -1165,6 +1178,8 @@ object MilvusClient {
   // Case-insensitive reason marker used as a fallback when error code is not set.
   val RateLimitReasonMarker: String = "rate limit exceeded"
   val ServiceNotImplementedMarker: String = "service not implemented"
+  private[client] val CollectionNotFoundCode: Int = 100
+  private[client] val DatabaseNotFoundCode: Int = 800
 
   private val SnapshotRpcNames: Set[String] = Set(
     "createsnapshot",
@@ -1206,6 +1221,12 @@ object MilvusClient {
     }
     false
   }
+
+  private[client] def isCollectionNotFound(status: Status): Boolean =
+    (status.errorCode == ErrorCode.CollectionNotExists ||
+      status.errorCode == ErrorCode.CollectionNameNotFound) ||
+      status.code == CollectionNotFoundCode ||
+      status.code == DatabaseNotFoundCode
 
   def isServiceNotImplemented(t: Throwable): Boolean = {
     val visited = java.util.Collections.newSetFromMap(

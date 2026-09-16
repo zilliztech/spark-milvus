@@ -327,7 +327,7 @@
 │   └── src/main/protobuf/            <span class="c">milvus-proto 子模块的引用</span>
 │
 ├── <span class="u">spark-base/</span><span class="lay">第 3 层</span>                  <span class="c">四条线共享的源码，不是 project</span>
-│   └── .../spark/connector/          <span class="c">table · scan · expr · types · write · options</span>
+│   └── .../spark/connector/          <span class="c">catalog · table · read · expr · types · write · options</span>
 ├── <span class="m">spark-3.5/</span>                    <span class="c">catalog · functions · extensions · services</span>
 ├── <span class="m">spark-4.0/</span> <span class="m">spark-4.1/</span> <span class="m">spark-4.2/</span>  <span class="c">catalog · procedure · extensions · services</span>
 │                                     <span class="c">fat jar 是各线上的 assembly 任务，不单独成模块</span>
@@ -371,12 +371,12 @@
       <p class="role">第 3 层。只做翻译，Spark 索取什么就交出什么。base 是共享源码，四条线各编译一次；按线不同的只有 catalog、procedure 或 functions、extensions 和服务注册文件。</p>
       <dl>
         <dt>table</dt><dd>schema、能力集、元数据列、统计 <em>R12 R13</em></dd>
-        <dt>scan</dt><dd>ScanBuilder、Scan、InputPartition、ColumnVector 实现 <em>R4 R5 R11 R16 R18</em></dd>
+        <dt>read</dt><dd>ScanBuilder、Scan、InputPartition、ColumnVector 实现 <em>R4 R5 R11 R16 R18</em></dd>
         <dt>expr</dt><dd>DataSource V2 谓词翻成中间表示 <em>R6</em></dd>
         <dt>types</dt><dd>Arrow 类型到 Spark 类型的映射，向量列的表示 <em>R15</em></dd>
         <dt>write</dt><dd>WriteBuilder、BatchWrite、DataWriter；两种写模式 <em>W1 W2</em></dd>
         <dt>options</dt><dd>option 名、别名、校验；把 compat 的实现注册进 core <em>K4 G1–G4</em></dd>
-        <dt>catalog</dt><dd>三段名、命名空间、loadTable 的快照重载 <em>R1 R2 C1 C2</em></dd>
+        <dt>catalog</dt><dd>三段名与 loadTable 的快照重载已落地；命名空间列表和 DDL 仍属 C1、C2 <em>R1 R2</em></dd>
         <dt>procedure</dt><dd>Spark 4 的 CALL <em>A1–A5</em></dd>
         <dt>functions</dt><dd>Spark 3.5 上同一批动作的函数入口 <em>A1–A5</em></dd>
         <dt>extensions</dt><dd>SparkSessionExtensions、SQL 解析器扩展、优化规则</dd>
@@ -671,7 +671,7 @@
         <rect x="16" y="170" width="250" height="72" fill="var(--surface)" stroke="var(--ours)" stroke-width="1.4"/>
         <text x="30" y="192" font-size="12.5" font-weight="600" fill="var(--ours)">spark-base</text>
         <text x="30" y="210" font-size="10.5" fill="currentColor" opacity=".75">不是一个 project，只是源码目录</text>
-        <text x="30" y="226" font-size="10.5" fill="currentColor" opacity=".75">table · scan · expr · types · write · options</text>
+        <text x="30" y="226" font-size="10.5" fill="currentColor" opacity=".75">catalog · table · read · expr · types · write · options</text>
 
         <g stroke="currentColor" marker-end="url(#ar5)" opacity=".8">
           <line x1="266" y1="200" x2="316" y2="70"/><line x1="266" y1="202" x2="316" y2="140"/>

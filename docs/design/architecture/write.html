@@ -117,19 +117,19 @@ driver 再收齐 commit message 写作业清单。登记是之后的另一个动
 <tr><td><code>errorIfExists</code> / <code>ignore</code></td><td>TableProvider 不带 catalog 时直接抛不支持，Spark 自己的限制</td><td>不做；表存不存在是 C2 的事</td></tr>
 </table>
 
-<p>W1 那一行写的入口是 <code>df.writeTo("milvus.db.coll").append()</code>。三段名要
-<code>spark.catalog</code> 的 MilvusCatalog（R1、C1），四条线的 catalog 包都还是空的。
-<code>format("milvus")</code> 加选项是今天读表用的同一种过渡形式，写先接这个；catalog 落地后
-<code>writeTo</code> 走 <code>catalog.loadTable</code> 拿到同一个 <code>MilvusTable</code>，下面的链一样。</p>
+<p>W1 那一行写的入口是 <code>df.writeTo("milvus.db.coll").append()</code>。
+<code>MilvusCatalog</code> 已实现 R1 的已知三段名加载；<code>writeTo</code> 走
+<code>catalog.loadTable</code> 拿到与 <code>format("milvus")</code> 相同的 <code>MilvusTable</code>，
+下面的链一样。SHOW/LIST 的 C1 与建删表的 C2 仍未实现，不影响已知名字加载。</p>
 
 <h2 id="schema">二、写的表和读的表是同一个 Snapshot</h2>
 
 <p><strong>写不看段，但要 collection schema，而 schema 已经有三条来源，都产出 Snapshot。</strong>
-读路径的 <code>getTable</code> 通过 <code>SnapshotSources.forRead</code> 把 Snapshot 解析一次交给
+表加载（<code>getTable</code> / <code>loadTable</code>）通过 <code>SnapshotSources.forRead</code> 把 Snapshot 解析一次交给
 <code>MilvusTable</code>（<a href="snapshot.html">snapshot.html</a>）。写沿用它。写新段用不到现有段的列表，
-但 <code>getTable</code> 分不出后面是读还是写（Spark 两条路都传 schema 进来），而
+但表加载分不出后面是读还是写（Spark 两条路都传 schema 进来），而
 <code>withSegments = false</code> 只是跳过 V2 段的 footer 解析、段列表照旧，所以 <code>getTable</code>
-保持解析带段的 Snapshot；写因此多付一次段列表的代价（快照 Avro 一次读，V2 段各一次 footer）。
+因此保持解析带段的 Snapshot；写会多付一次段列表的代价（快照 Avro 一次读，V2 段各一次 footer）。
 把段列表推迟到 Scan 是 <code>read.plan</code> 下沉时的事。</p>
 
 <table>

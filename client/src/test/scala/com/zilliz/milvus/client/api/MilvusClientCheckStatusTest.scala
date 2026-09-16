@@ -101,6 +101,40 @@ class MilvusClientCheckStatusTest extends AnyFunSuite {
     assert(client.checkStatus("insert", status).isFailure)
   }
 
+  test("classifies current and legacy collection-not-found statuses") {
+    val current = Status(
+      code = MilvusClient.CollectionNotFoundCode,
+      errorCode = ErrorCode.UnexpectedError,
+      reason = "collection not found"
+    )
+    val legacy = Status(
+      code = 0,
+      errorCode = ErrorCode.CollectionNotExists,
+      reason = "can't find collection"
+    )
+    val missingDatabase = Status(
+      code = MilvusClient.DatabaseNotFoundCode,
+      errorCode = ErrorCode.UnexpectedError,
+      reason = "database not found"
+    )
+    val legacyMissingName = Status(
+      code = 0,
+      errorCode = ErrorCode.CollectionNameNotFound,
+      reason = "collection name not found"
+    )
+    val unrelated = Status(
+      code = 1,
+      errorCode = ErrorCode.UnexpectedError,
+      reason = "permission denied"
+    )
+
+    assert(MilvusClient.isCollectionNotFound(current))
+    assert(MilvusClient.isCollectionNotFound(legacy))
+    assert(MilvusClient.isCollectionNotFound(legacyMissingName))
+    assert(MilvusClient.isCollectionNotFound(missingDatabase))
+    assert(!MilvusClient.isCollectionNotFound(unrelated))
+  }
+
   test("classifies grpc UNIMPLEMENTED as service not implemented") {
     val err = new StatusRuntimeException(
       GrpcStatus.UNIMPLEMENTED.withDescription("unknown method CreateSnapshot")

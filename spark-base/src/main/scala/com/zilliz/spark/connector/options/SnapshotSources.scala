@@ -15,19 +15,34 @@ import com.zilliz.milvus.storage.snapshot.{
 }
 import com.zilliz.milvus.storage.snapshot.json.{SegmentListJson, SnapshotJson}
 
+/** Which fixed snapshot a table load asks the client-backed source to resolve.
+  * The DataSource entry keeps its configured name-or-latest behavior; Catalog
+  * overloads state their request explicitly.
+  */
+private[connector] sealed trait SnapshotReference
+
+private[connector] object SnapshotReference {
+  case object Configured extends SnapshotReference
+  case object Latest extends SnapshotReference
+  final case class Named(name: String) extends SnapshotReference
+  final case class AtOrBefore(hybridTimestamp: Long) extends SnapshotReference
+}
+
 /** The [[SnapshotSource]] of a read, chosen from its options. This is where
   * compat's backup source and the client are wired in; core knows neither.
   *
-  * `getTable` calls `forRead` with `withSegments = true` once and hands the
-  * `Snapshot` to the table and the scan. `inferSchema` calls it with
-  * `withSegments = false`: the snapshot JSON or backup meta is read for the
-  * schema, but no parquet footer is opened and the result has no segments.
+  * `MilvusTables` calls `forRead` with `withSegments = true` once for either
+  * `getTable` or `loadTable`, then hands the `Snapshot` to the table and scan.
+  * `inferSchema` calls it with `withSegments = false`: the snapshot JSON or
+  * backup meta is read for the schema, but no parquet footer is opened and the
+  * result has no segments.
   */
 object SnapshotSources {
 
   def forRead(
       milvusOption: MilvusOption,
-      withSegments: Boolean
+      withSegments: Boolean,
+      snapshotReference: SnapshotReference = SnapshotReference.Configured
   ): SnapshotSource = {
     rejectLegacySelectors(milvusOption)
     val selectedPartitions =
@@ -36,6 +51,7 @@ object SnapshotSources {
       MilvusOption.selectedSegmentIds(milvusOption.options)
     val source = MilvusOption.readMode(milvusOption.options) match {
       case ReadMode.Snapshot =>
+        requireConfiguredReference(ReadMode.Snapshot, snapshotReference)
         milvusOption.options
           .get(MilvusOption.SnapshotPath)
           .map(_.trim)
@@ -44,6 +60,7 @@ object SnapshotSources {
           case None       => new OptionStringsSnapshotSource(milvusOption)
         }
       case ReadMode.Backup =>
+        requireConfiguredReference(ReadMode.Backup, snapshotReference)
         val dir = MilvusOption.backupDir(milvusOption.options).get
         val bucket = StorageOptions
           .snapshotS3BucketForRelativePaths(dir, milvusOption.options)
@@ -79,13 +96,25 @@ object SnapshotSources {
         ) { store =>
           new ClientSnapshotSource(
             milvusOption,
-            catalog(milvusOption, withSegments, bucket, store)
+            catalog(milvusOption, withSegments, bucket, store),
+            snapshotReference
           ).snapshot().fold(throw _, identity)
         }
     }
     if (withSegments) narrowed(source, selectedPartitions, selectedSegments)
     else source
   }
+
+  private def requireConfiguredReference(
+      mode: ReadMode,
+      snapshotReference: SnapshotReference
+  ): Unit =
+    if (snapshotReference != SnapshotReference.Configured) {
+      throw new IllegalArgumentException(
+        s"Catalog snapshot selection requires client mode, but the options select ${mode.toString.toLowerCase} mode; " +
+          s"""use '${MilvusOption.MilvusUri}' in the catalog and keep offline snapshot or backup reads on format("milvus")"""
+      )
+    }
 
   /** A catalog bound to the connector's bucket, reading through the driver's
     * object store; V2 segments are materialized through compat's footer
@@ -195,14 +224,16 @@ object SnapshotSources {
   }
 }
 
-/** Client mode: the service names the collection id, the snapshot comes from
-  * the snapshot directory (`milvus.client.snapshot.name` or the latest), and
-  * the common source wrapper applies partition and segment selectors after it
-  * resolves.
+/** Client mode: the service names the collection id and the snapshot comes from
+  * the snapshot directory. DataSource loads use `milvus.client.snapshot.name`
+  * or latest; Catalog loads pass an explicit latest, name, or as-of reference.
+  * The common source wrapper applies partition and segment selectors after
+  * resolution.
   */
 final class ClientSnapshotSource(
     milvusOption: MilvusOption,
-    catalog: SnapshotCatalog
+    catalog: SnapshotCatalog,
+    snapshotReference: SnapshotReference = SnapshotReference.Configured
 ) extends SnapshotSource {
 
   def snapshot(): Either[Throwable, Snapshot] =
@@ -220,20 +251,40 @@ final class ClientSnapshotSource(
           milvusOption.databaseName,
           milvusOption.collectionName
         )
-        .getOrElse(
-          throw new IllegalArgumentException(
-            s"Collection ${milvusOption.collectionName} not found"
-          )
+        .fold(
+          error =>
+            throw new IllegalArgumentException(
+              s"Cannot resolve Milvus collection '${milvusOption.databaseName}.${milvusOption.collectionName}': ${error.getMessage}",
+              error
+            ),
+          identity
         )
       val rootPath =
         milvusOption.options.getOrElse(StorageProperties.RootPath, "files")
-      val snapshot = milvusOption.options
-        .get(MilvusOption.ClientSnapshotName)
-        .map(_.trim)
-        .filter(_.nonEmpty) match {
-        case Some(name) =>
+      val snapshot = snapshotReference match {
+        case SnapshotReference.Configured =>
+          milvusOption.options
+            .get(MilvusOption.ClientSnapshotName)
+            .map(_.trim)
+            .filter(_.nonEmpty) match {
+            case Some(name) =>
+              catalog.byName(rootPath, collectionInfo.collectionID, name)
+            case None => catalog.latest(rootPath, collectionInfo.collectionID)
+          }
+        case SnapshotReference.Latest =>
+          catalog.latest(rootPath, collectionInfo.collectionID)
+        case SnapshotReference.Named(name) if name.nonEmpty =>
           catalog.byName(rootPath, collectionInfo.collectionID, name)
-        case None => catalog.latest(rootPath, collectionInfo.collectionID)
+        case SnapshotReference.Named(_) =>
+          throw new IllegalArgumentException(
+            "Snapshot version must not be empty"
+          )
+        case SnapshotReference.AtOrBefore(hybridTimestamp) =>
+          catalog.asOf(
+            rootPath,
+            collectionInfo.collectionID,
+            hybridTimestamp
+          )
       }
       snapshot
     }

@@ -164,7 +164,9 @@ final class SnapshotCatalog(
       _.name == name
     )
 
-  /** The latest snapshot created at or before `timestamp`. */
+  /** The latest snapshot whose raw HybridTS boundary is at or before
+    * `timestamp`.
+    */
   def asOf(rootPath: String, collectionId: Long, timestamp: Long): Snapshot =
     select(
       rootPath,
@@ -208,7 +210,7 @@ final class SnapshotCatalog(
     }
     val candidates = snapshots.filter { case (_, snapshot) => keep(snapshot) }
     if (candidates.isEmpty) {
-      throw new IllegalArgumentException(
+      throw new SnapshotNotFoundException(
         s"no snapshot $what among ${files.size} under ${SnapshotCatalog
             .metadataPrefix(rootPath, collectionId)}"
       )

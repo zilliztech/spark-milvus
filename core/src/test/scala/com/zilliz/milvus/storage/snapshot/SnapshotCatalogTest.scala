@@ -125,12 +125,14 @@ class SnapshotCatalogTest extends AnyFunSuite {
       assert(c.byName("files", 10L, "s3").name == "s3")
       assert(c.asOf("files", 10L, 250L).name == "s3")
       assert(c.asOf("files", 10L, 100L).name == "s1")
-      val none = intercept[IllegalArgumentException](c.asOf("files", 10L, 50L))
+      val none =
+        intercept[SnapshotNotFoundException](c.asOf("files", 10L, 50L))
       assert(none.getMessage.contains("as of 50"))
       val missing =
-        intercept[IllegalArgumentException](c.byName("files", 10L, "nope"))
+        intercept[SnapshotNotFoundException](c.byName("files", 10L, "nope"))
       assert(missing.getMessage.contains("named 'nope'"))
       val empty = intercept[IllegalArgumentException](c.latest("files", 11L))
+      assert(!empty.isInstanceOf[SnapshotNotFoundException])
       assert(empty.getMessage.contains("snapshots/11/metadata/"))
     }
   }

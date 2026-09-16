@@ -1,7 +1,8 @@
 package com.zilliz.spark.connector
 
-/** MilvusTable: the fixed Snapshot's schema, capability set and metadata
-  * columns.
+/** MilvusTables validates and resolves one fixed Snapshot for both DataSource
+  * and Catalog loads, then constructs MilvusTable. MilvusTable owns that
+  * Snapshot's schema, capability set and metadata columns.
   *
   * Field identity, Milvus type, nullability, key flags and vector dimensions
   * all come from the Snapshot schema. `_segment_id` and `_row_offset` are

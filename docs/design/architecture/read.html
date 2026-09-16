@@ -29,7 +29,7 @@
 <a href="storage-io.html">storage-io.html</a>,分层见 <a href="modules.md">modules.md</a>。</p>
 
 <p class="thesis"><strong>第 3 层只负责 Spark 接口，第 2 层完成规划和读取执行。</strong>
-<code>getTable</code> 解析一次固定 <code>Snapshot</code>，<code>core.read.plan</code> 把它变成可序列化任务，
+表加载（<code>getTable</code> / <code>loadTable</code>）解析一次固定 <code>Snapshot</code>，<code>core.read.plan</code> 把它变成可序列化任务，
 <code>core.read.exec</code> 在 executor 上打开第 1 层 JNI reader。行式与列式出口消费同一个
 <code>SegmentReader</code>；V2/V3 的列名差异由 <code>ColumnBinding</code> 封装，行式主循环不再分叉。</p>
 
@@ -114,7 +114,8 @@ footer 里的字段名；缺少 <code>milvus.field_id</code>、请求未知字�
 
 <h2 id="plan">二、段从哪来:一个 Snapshot,四个来源</h2>
 
-<p><strong>分岔只在 <code>getTable</code> 一处。</strong><code>spark.options.SnapshotSources.forRead</code> 按 <code>ReadMode</code> 构造一个
+<p><strong>分岔只在表加载一处。</strong>DataSource 的 <code>getTable</code> 与 Catalog 的 <code>loadTable</code>
+都调用 <code>MilvusTables.load</code>；它让 <code>spark.options.SnapshotSources.forRead</code> 按 <code>ReadMode</code> 构造一个
 <code>SnapshotSource</code>,调用一次得到 <code>Snapshot</code>;<code>MilvusTable</code> 持有它,交给 <code>MilvusScan</code>,
 规划只有一条路:<code>core.read.plan.DeleteFileListing.of</code> 列出删除文件,<code>ReadPlan.of</code> 出任务,<code>MilvusScan.inputPartitions</code> 包成 <code>InputPartition</code>。
 设计见 <a href="snapshot.html#sources">snapshot.html 第二节</a>。</p>
@@ -122,7 +123,7 @@ footer 里的字段名；缺少 <code>milvus.field_id</code>、请求未知字�
 <table>
 <tr><th>来源</th><th>触发</th><th>产出</th></tr>
 <tr><td><code>SnapshotCatalog.at</code></td><td><code>milvus.snapshot.path</code>:直接读一个快照 JSON,不经服务</td><td>V3 + V2</td></tr>
-<tr><td><code>ClientSnapshotSource</code></td><td><code>milvus.uri</code>:DescribeCollection 取 id,快照目录里按名或取最新</td><td>V3 + V2</td></tr>
+<tr><td><code>ClientSnapshotSource</code></td><td><code>milvus.uri</code>:DescribeCollection 取 id；DataSource 按配置名或最新，Catalog 按 latest/version/timestamp</td><td>V3 + V2</td></tr>
 <tr><td><code>BackupSnapshotSource</code></td><td><code>milvus.backup.dir</code>:<code>BackupMetaReader.toV2Segments</code> 转备份元数据</td><td>只有 V2</td></tr>
 <tr><td><code>OptionStringsSnapshotSource</code></td><td>1.x 的 option 串(backfill 读原表今天用),随 backfill 切到 catalog 后删</td><td>V3 + V2</td></tr>
 </table>

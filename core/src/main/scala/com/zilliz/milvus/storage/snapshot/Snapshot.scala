@@ -16,6 +16,9 @@ import io.milvus.grpc.schema.{CollectionSchema => ProtoSchema, FieldSchema}
   * @param bucket
   *   the bucket every path in `segments` is a key of; the native reader is
   *   rooted at it. Empty when the segments live on a local filesystem.
+  * @param createdAt
+  *   the raw Milvus HybridTS from `snapshot_info.create_ts`; its physical part
+  *   is an epoch millisecond and its low 18 bits are the logical clock.
   */
 final case class Snapshot(
     name: String,
