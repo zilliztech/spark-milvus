@@ -291,7 +291,7 @@ C 侧是 holder 里的一个整数自增。开关本身反而是一个 option、
 <ul>
 <li>milvus-storage 上游 JNI 的 holder 持有计数，<code>MilvusStorageReader.recordBatchReaderStatsScala(handle)</code> 返回三个 long；<code>native-storage</code> 编译与打包该绑定。</li>
 <li><code>core.read.exec</code>:<code>SegmentReader.metrics: ReadMetrics</code>;<code>core.write.exec</code>:<code>SegmentWriter.metrics: WriteMetrics</code>。两个都是几个 long 的 case class,core 不知道 Spark。</li>
-<li><code>spark.metrics</code>:把它们翻成 <code>CustomMetric</code> / <code>CustomTaskMetric</code>,读写两张清单,只此一处;<code>spark.read</code> 的两个 reader 和 <code>spark.write</code> 的 DataWriter 只是取值上报。</li>
+<li><code>spark.metrics</code>:把它们翻成 <code>CustomMetric</code> / <code>CustomTaskMetric</code>,读写两张清单,只此一处;<code>spark.read</code> 的两个 reader 和 <code>spark.write</code> 的 DataWriter 只是取值上报。每个指标一个无参构造的类:driver 的 SQL 监听器按计划里记下的类名新建实例来聚合任务值,带参构造的类在这一步报错,SQL 页上就没有数(2026-09-16 UAT 发现)。</li>
 </ul>
 
 <p>验收在工作单 #01:core 里用本地后端读一个已知段,断言七个数落在预期范围;UAT 读 3000 行的段,

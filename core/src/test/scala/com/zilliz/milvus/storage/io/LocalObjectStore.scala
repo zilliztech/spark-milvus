@@ -28,7 +28,17 @@ final class LocalObjectStore(root: String = "") extends ObjectStore {
 
   override def size(key: String): Long = Files.size(resolve(key))
 
-  override def exists(key: String): Boolean = Files.exists(resolve(key))
+  // The ObjectStore contract: false only for a confirmed absence.
+  override def exists(key: String): Boolean =
+    try {
+      Files.readAttributes(
+        resolve(key),
+        classOf[java.nio.file.attribute.BasicFileAttributes]
+      )
+      true
+    } catch {
+      case _: NoSuchFileException => false
+    }
 
   override def list(key: String, recursive: Boolean): Seq[FileInfo] = {
     val start = resolve(key)

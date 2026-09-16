@@ -25,6 +25,7 @@ object StorageOptions extends Logging {
     "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
   private val SimpleAwsCredentialsProvider =
     "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+  private val s3aProviderKey = "fs.s3a.aws.credentials.provider"
 
   private[connector] def resolveClientSnapshotLocation(
       location: String,
@@ -200,6 +201,54 @@ object StorageOptions extends Logging {
     HadoopStorageKeys.canonicalProperties(merged)
   }
 
+  /** The endpoint of the store [[storeFor]] opens for the same arguments. A
+    * snapshot or manifest URI in Milvus's `https://<endpoint>/<bucket>/<key>`
+    * form is recognized against this value, so an endpoint that reaches the
+    * store only through the session's Hadoop keys is recognized too.
+    */
+  private[connector] def storeEndpoint(
+      conf: org.apache.hadoop.conf.Configuration,
+      bucket: String,
+      options: scala.collection.Map[String, String]
+  ): String =
+    storagePropertiesFor(conf, bucket, options)
+      .getOrElse(StorageProperties.Address, "")
+
+  /** The native `fs.*` bag a write uses, resolved once on the driver the way a
+    * read resolves it: aliases, the session's Hadoop keys and the IAM fallback
+    * included. The task writers and the job committer take this map as it is,
+    * so a read that works cannot leave a write that fails on the same options
+    * (review 749178e #10).
+    *
+    * A declared `fs.storage_type=local` keeps its declared `fs.*` (the local
+    * backend is rooted at `fs.root_path`). Otherwise the bucket is the
+    * snapshot's, else the option's.
+    */
+  private[connector] def writeStorageProperties(
+      options: scala.collection.Map[String, String],
+      snapshotBucket: String
+  ): Map[String, String] = {
+    val declaredLocal = optionValue(options, StorageProperties.StorageType)
+      .exists(_.trim.equalsIgnoreCase(StorageProperties.StorageTypeLocal))
+    if (declaredLocal) {
+      return HadoopStorageKeys.canonicalProperties(options.toMap)
+    }
+    val bucket = Option(snapshotBucket)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .orElse(connectorS3BucketOption(options))
+      .getOrElse(
+        throw new IllegalArgumentException(
+          s"${StorageProperties.BucketName} must be set to write"
+        )
+      )
+    storagePropertiesFor(
+      buildHadoopConfForOptions(options, ""),
+      bucket,
+      options
+    )
+  }
+
   private[connector] def connectorS3BucketOption(
       options: CollectionMap[String, String]
   ): Option[String] = {
@@ -301,6 +350,18 @@ object StorageOptions extends Logging {
       value.map(_.trim).filter(_.nonEmpty).foreach(conf.set(key, _))
     }
 
+    // The session's own chain, read before this method changes it: a managed
+    // runtime selects an AssumeRole provider for its data role, and fs.use_iam
+    // names only the source credential that role is assumed from, so that
+    // provider is kept (review 749178e #08; BackfillConfig does the same).
+    val sessionProvider =
+      Option(conf.getTrimmed(s3aProviderKey)).filter(_.nonEmpty)
+    def assumesRole(prefix: String): Boolean =
+      Option(conf.getTrimmed(s"$prefix.aws.credentials.provider"))
+        .filter(_.nonEmpty)
+        .orElse(sessionProvider)
+        .exists(HadoopStorageKeys.namesAssumedRole)
+
     def configureS3A(prefix: String): Unit = {
       setIfDefined(s"$prefix.endpoint", endpoint)
       setIfDefined(s"$prefix.connection.ssl.enabled", useSsl)
@@ -310,10 +371,12 @@ object StorageOptions extends Logging {
       if (useIam) {
         conf.unset(s"$prefix.access.key")
         conf.unset(s"$prefix.secret.key")
-        conf.set(
-          s"$prefix.aws.credentials.provider",
-          DefaultAwsCredentialsProvider
-        )
+        if (!assumesRole(prefix)) {
+          conf.set(
+            s"$prefix.aws.credentials.provider",
+            DefaultAwsCredentialsProvider
+          )
+        }
       } else {
         setIfDefined(s"$prefix.access.key", accessKey)
         setIfDefined(s"$prefix.secret.key", secretKey)

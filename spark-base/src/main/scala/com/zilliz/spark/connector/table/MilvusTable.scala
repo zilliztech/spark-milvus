@@ -22,7 +22,11 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
 import com.zilliz.milvus.storage.snapshot.{Snapshot, SnapshotOrigin}
-import com.zilliz.spark.connector.options.{MilvusOption, ReadMode}
+import com.zilliz.spark.connector.options.{
+  MilvusOption,
+  ReadMode,
+  StorageOptions
+}
 import com.zilliz.spark.connector.read.MilvusScanBuilder
 import com.zilliz.spark.connector.types.SparkTypes
 import com.zilliz.spark.connector.write.MilvusV3WriteBuilder
@@ -350,6 +354,7 @@ case class MilvusTable(
       if (selectedFieldIds.isEmpty) snapshot.schema.fields
       else selectedFieldIds.map(id => fieldsById(id).head)
     val fields = snapshotFields.map(SparkTypes.toStructField(_, rawVectors))
+    MilvusTables.rejectCaseInsensitiveDuplicates(fields)
     appendExtraColumns(StructType(fields), rejectLegacyAliases = false)
   }
 
@@ -358,7 +363,16 @@ case class MilvusTable(
     * writes.
     */
   override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder =
-    new MilvusV3WriteBuilder(info.schema(), snapshot.schema, milvusOption)
+    new MilvusV3WriteBuilder(
+      info.schema(),
+      snapshot.schema,
+      milvusOption,
+      () =>
+        StorageOptions.writeStorageProperties(
+          milvusOption.options,
+          snapshot.bucket
+        )
+    )
 
   override def capabilities(): ju.Set[TableCapability] = {
     val writable = snapshot.origin match {

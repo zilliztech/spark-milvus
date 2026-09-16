@@ -98,7 +98,13 @@ final class SnapshotCatalog(
     * (CreateSnapshot's `s3_location`), recognised only when the host is this
     * catalog's endpoint.
     */
-  def read(location: String): Snapshot = {
+  def read(location: String): Snapshot =
+    materialize(location, metadata(location))
+
+  /** The parsed JSON at `location`, with the bucket and size checks; opens no
+    * segment file. Selection reads every candidate this far and no further.
+    */
+  private def metadata(location: String): SnapshotJson = {
     val located = StoragePath.parseMilvus(location, bucket, endpoint)
     if (bucket.nonEmpty && located.hasBucket && located.bucket != bucket) {
       throw new IllegalArgumentException(
@@ -113,7 +119,7 @@ final class SnapshotCatalog(
       )
     }
     val json = new String(store.readAll(key), StandardCharsets.UTF_8)
-    val metadata = SnapshotJson.parse(json) match {
+    val parsed = SnapshotJson.parse(json) match {
       case Right(m) => m
       case Left(e) =>
         throw new IllegalArgumentException(
@@ -121,6 +127,18 @@ final class SnapshotCatalog(
           e
         )
     }
+    if (parsed.snapshotInfo == null) {
+      throw new IllegalArgumentException(
+        s"invalid snapshot at $location: snapshot is missing snapshot_info"
+      )
+    }
+    parsed
+  }
+
+  /** The snapshot the metadata describes: V2 segments are resolved here, so
+    * this is where segment files are opened.
+    */
+  private def materialize(location: String, metadata: SnapshotJson): Snapshot =
     SnapshotCatalog.fromMetadata(
       metadata,
       SnapshotOrigin.Catalog(location),
@@ -136,7 +154,6 @@ final class SnapshotCatalog(
           e
         )
     }
-  }
 
   /** Every snapshot metadata file of a collection, unordered. */
   def list(rootPath: String, collectionId: Long): Seq[FileInfo] = {
@@ -161,12 +178,14 @@ final class SnapshotCatalog(
     SnapshotSource(byName(rootPath, collectionId, name))
 
   def latest(rootPath: String, collectionId: Long): Snapshot =
-    select(rootPath, collectionId, "latest", requireCreatedAt = true)(_ => true)
+    select(rootPath, collectionId, "latest", requireCreatedAt = true)((_, _) =>
+      true
+    )
 
   /** The snapshot named `name`. */
   def byName(rootPath: String, collectionId: Long, name: String): Snapshot =
     select(rootPath, collectionId, s"named '$name'", requireCreatedAt = false)(
-      _.name == name
+      (snapshotName, _) => snapshotName == name
     )
 
   /** The latest snapshot whose raw HybridTS boundary is at or before
@@ -178,9 +197,7 @@ final class SnapshotCatalog(
       collectionId,
       s"as of $timestamp",
       requireCreatedAt = true
-    )(
-      _.createdAt.exists(_ <= timestamp)
-    )
+    )((_, createdAt) => createdAt.exists(_ <= timestamp))
 
   private def select(
       rootPath: String,
@@ -188,7 +205,7 @@ final class SnapshotCatalog(
       what: String,
       requireCreatedAt: Boolean
   )(
-      keep: Snapshot => Boolean
+      keep: (String, Option[Long]) => Boolean
   ): Snapshot = {
     val files = list(rootPath, collectionId)
     if (files.isEmpty) {
@@ -200,12 +217,29 @@ final class SnapshotCatalog(
       )
     }
     // The directory holds only file names; name and create_ts are inside each
-    // JSON, so every candidate is opened. README section 5 asks Milvus for a
-    // catalog file that would make this one read.
-    val snapshots = files.map(file => file.path -> read(file.path))
+    // JSON, so every candidate's JSON is read (README section 5 asks Milvus for
+    // a catalog file that would make this one read). Only the chosen one is
+    // materialized: an older snapshot whose segment files are gone must not
+    // stop a newer one from being read (review 749178e #07).
+    final case class Candidate(
+        path: String,
+        json: SnapshotJson,
+        name: String,
+        createdAt: Option[Long]
+    )
+    val snapshots = files.map { file =>
+      val json = metadata(file.path)
+      val info = json.snapshotInfo
+      Candidate(
+        file.path,
+        json,
+        info.name,
+        info.rawCreateTs.map(_ => info.createTs)
+      )
+    }
     if (requireCreatedAt) {
       val missingCreateTs = snapshots.collect {
-        case (path, snapshot) if snapshot.createdAt.isEmpty => path
+        case c if c.createdAt.isEmpty => c.path
       }
       if (missingCreateTs.nonEmpty) {
         throw new IllegalArgumentException(
@@ -213,7 +247,7 @@ final class SnapshotCatalog(
         )
       }
     }
-    val candidates = snapshots.filter { case (_, snapshot) => keep(snapshot) }
+    val candidates = snapshots.filter(c => keep(c.name, c.createdAt))
     if (candidates.isEmpty) {
       throw new SnapshotNotFoundException(
         s"no snapshot $what among ${files.size} under ${SnapshotCatalog
@@ -221,7 +255,7 @@ final class SnapshotCatalog(
       )
     }
     val missingCandidateCreateTs = candidates.collect {
-      case (path, snapshot) if snapshot.createdAt.isEmpty => path
+      case c if c.createdAt.isEmpty => c.path
     }
     if (candidates.size > 1 && missingCandidateCreateTs.nonEmpty) {
       throw new IllegalArgumentException(
@@ -229,18 +263,17 @@ final class SnapshotCatalog(
             .mkString(", ")}"
       )
     }
-    val latestCreateTs = candidates.iterator.map { case (_, snapshot) =>
-      snapshot.createdAt.getOrElse(Long.MinValue)
-    }.max
-    val latest = candidates.filter { case (_, snapshot) =>
-      snapshot.createdAt.getOrElse(Long.MinValue) == latestCreateTs
-    }
+    val latestCreateTs = candidates.iterator
+      .map(_.createdAt.getOrElse(Long.MinValue))
+      .max
+    val latest =
+      candidates.filter(_.createdAt.getOrElse(Long.MinValue) == latestCreateTs)
     if (latest.size > 1) {
       throw new IllegalArgumentException(
-        s"cannot select snapshot $what: ${latest.map(_._1).sorted.mkString(", ")} share create_ts $latestCreateTs"
+        s"cannot select snapshot $what: ${latest.map(_.path).sorted.mkString(", ")} share create_ts $latestCreateTs"
       )
     }
-    latest.head._2
+    materialize(latest.head.path, latest.head.json)
   }
 }
 

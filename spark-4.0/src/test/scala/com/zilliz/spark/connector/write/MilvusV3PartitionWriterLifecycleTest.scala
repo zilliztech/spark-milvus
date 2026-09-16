@@ -62,7 +62,13 @@ class MilvusV3PartitionWriterLifecycleTest extends AnyFunSuite with Matchers {
       partitionId = 0,
       taskId = 0L,
       sparkSchema = schema,
-      milvusOption = MilvusOption(new CaseInsensitiveStringMap(options))
+      milvusOption = MilvusOption(new CaseInsensitiveStringMap(options)),
+      storage = com.zilliz.milvus.storage.credential.StorageProperties.from(
+        Map(
+          "fs.storage_type" -> "local",
+          "fs.root_path" -> dir.toAbsolutePath.toString
+        )
+      )
     )
   }
 

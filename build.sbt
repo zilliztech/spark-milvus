@@ -283,7 +283,8 @@ lazy val uatScenarios: Seq[Setting[_]] = Seq(
 // Layer 4: apps currently run on 4.0, so their sources need no shared directory.
 lazy val apps40 = project
   .in(file("apps-4.0"))
-  .dependsOn(spark40)
+  // Reuse core's ObjectStore fixtures, as spark40 does.
+  .dependsOn(spark40, core % "test->test")
   .settings(
     name := "apps-4.0",
     moduleName := "spark-milvus-apps-4.0",

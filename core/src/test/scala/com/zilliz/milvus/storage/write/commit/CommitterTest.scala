@@ -90,6 +90,36 @@ class CommitterTest extends AnyFunSuite with Matchers {
     }
   }
 
+  // Review 749178e #03: a marker lookup that fails is not an absent marker.
+  test("a failed marker lookup stops the commit before anything is written") {
+    withStore { (store, layout, _) =>
+      val written = scala.collection.mutable.ListBuffer.empty[String]
+      val failing = new com.zilliz.milvus.storage.io.ObjectStore {
+        def readAll(key: String): Array[Byte] = store.readAll(key)
+        def size(key: String): Long = store.size(key)
+        def list(key: String, recursive: Boolean) = store.list(key, recursive)
+        def exists(key: String): Boolean =
+          throw new RuntimeException(s"access denied: $key")
+        def readAt(key: String, offset: Long, length: Long, fileSize: Long) =
+          store.readAt(key, offset, length, fileSize)
+        def write(key: String, data: Array[Byte]): Unit = {
+          written += key
+          store.write(key, data)
+        }
+        def createDir(key: String, recursive: Boolean): Unit =
+          store.createDir(key, recursive)
+        def delete(key: String): Unit = store.delete(key)
+        def close(): Unit = store.close()
+      }
+      val committer = new Committer(failing, layout)
+      intercept[RuntimeException](committer.commit(segments)).getMessage should
+        include("access denied")
+      intercept[RuntimeException](committer.isRegistered).getMessage should
+        include("access denied")
+      written shouldBe empty
+    }
+  }
+
   test("abort deletes every file under the staging prefix") {
     withStore { (store, layout, dir) =>
       store.write(layout.segment(0, 1) + "/0.parquet", Array[Byte](1, 2, 3))

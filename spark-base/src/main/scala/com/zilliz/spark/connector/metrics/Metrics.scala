@@ -9,15 +9,20 @@ import org.apache.spark.sql.connector.metric.{
 import com.zilliz.milvus.storage.read.exec.ReadMetrics
 import com.zilliz.milvus.storage.write.exec.WriteMetrics
 
-/** A metric Spark sums over tasks. */
-final class SumMetric(metricName: String, metricDescription: String)
+/** A metric Spark sums over tasks.
+  *
+  * Each declared metric is its own class with a no-argument constructor: the
+  * driver's SQL listener aggregates task values through an instance it makes
+  * from the class name the plan recorded.
+  */
+abstract class SumMetric(metricName: String, metricDescription: String)
     extends CustomSumMetric {
   override def name(): String = metricName
   override def description(): String = metricDescription
 }
 
 /** A metric Spark takes the maximum of over tasks, shown in bytes. */
-final class MaxBytesMetric(metricName: String, metricDescription: String)
+abstract class MaxBytesMetric(metricName: String, metricDescription: String)
     extends CustomMetric {
   override def name(): String = metricName
   override def description(): String = metricDescription
@@ -26,6 +31,31 @@ final class MaxBytesMetric(metricName: String, metricDescription: String)
     MaxBytesMetric.format(max)
   }
 }
+
+final class JniCallsMetric extends SumMetric(ScanMetrics.JniCalls, "JNI calls")
+final class JniNanosMetric
+    extends SumMetric(ScanMetrics.JniNanos, "time in JNI calls (ns)")
+final class ArrowBatchesMetric
+    extends SumMetric(ScanMetrics.ArrowBatches, "Arrow batches handed over")
+final class ArrowBytesMetric
+    extends SumMetric(ScanMetrics.ArrowBytes, "Arrow bytes handed over")
+final class CopiesMetric
+    extends SumMetric(
+      ScanMetrics.Copies,
+      "columns copied in C (sliced batches)"
+    )
+final class CopiedBytesMetric
+    extends SumMetric(ScanMetrics.CopiedBytes, "bytes those copies produced")
+final class RowsMaterializedMetric
+    extends SumMetric(
+      ScanMetrics.RowsMaterialized,
+      "rows turned into InternalRow"
+    )
+final class ArrowAllocatedMaxMetric
+    extends MaxBytesMetric(
+      ScanMetrics.ArrowAllocatedMax,
+      "Arrow allocator peak (bytes)"
+    )
 
 object MaxBytesMetric {
   def format(bytes: Long): String = {
@@ -61,14 +91,14 @@ object ScanMetrics {
   val ArrowAllocatedMax = "milvus.arrow.allocated.max"
 
   def supported: Array[CustomMetric] = Array(
-    new SumMetric(JniCalls, "JNI calls"),
-    new SumMetric(JniNanos, "time in JNI calls (ns)"),
-    new SumMetric(ArrowBatches, "Arrow batches handed over"),
-    new SumMetric(ArrowBytes, "Arrow bytes handed over"),
-    new SumMetric(Copies, "columns copied in C (sliced batches)"),
-    new SumMetric(CopiedBytes, "bytes those copies produced"),
-    new SumMetric(RowsMaterialized, "rows turned into InternalRow"),
-    new MaxBytesMetric(ArrowAllocatedMax, "Arrow allocator peak (bytes)")
+    new JniCallsMetric,
+    new JniNanosMetric,
+    new ArrowBatchesMetric,
+    new ArrowBytesMetric,
+    new CopiesMetric,
+    new CopiedBytesMetric,
+    new RowsMaterializedMetric,
+    new ArrowAllocatedMaxMetric
   )
 
   def taskValues(
@@ -90,18 +120,18 @@ object ScanMetrics {
   * what `core.write.exec` counted on the crossing.
   */
 object WriteMetricsReport {
-  val JniCalls = "milvus.jni.calls"
-  val JniNanos = "milvus.jni.nanos"
-  val ArrowBatches = "milvus.arrow.batches"
-  val ArrowBytes = "milvus.arrow.bytes"
-  val ArrowAllocatedMax = "milvus.arrow.allocated.max"
+  val JniCalls: String = ScanMetrics.JniCalls
+  val JniNanos: String = ScanMetrics.JniNanos
+  val ArrowBatches: String = ScanMetrics.ArrowBatches
+  val ArrowBytes: String = ScanMetrics.ArrowBytes
+  val ArrowAllocatedMax: String = ScanMetrics.ArrowAllocatedMax
 
   def supported: Array[CustomMetric] = Array(
-    new SumMetric(JniCalls, "JNI calls"),
-    new SumMetric(JniNanos, "time in JNI calls (ns)"),
-    new SumMetric(ArrowBatches, "Arrow batches handed over"),
-    new SumMetric(ArrowBytes, "Arrow bytes handed over"),
-    new MaxBytesMetric(ArrowAllocatedMax, "Arrow allocator peak (bytes)")
+    new JniCallsMetric,
+    new JniNanosMetric,
+    new ArrowBatchesMetric,
+    new ArrowBytesMetric,
+    new ArrowAllocatedMaxMetric
   )
 
   def taskValues(metrics: WriteMetrics): Array[CustomTaskMetric] = Array(

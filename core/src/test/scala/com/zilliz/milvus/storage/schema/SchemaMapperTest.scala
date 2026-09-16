@@ -8,7 +8,12 @@ import org.scalatest.matchers.should.Matchers
 /** Milvus CollectionSchema to Arrow Schema. */
 class SchemaMapperTest extends AnyFunSuite with Matchers {
 
-  test("system fields are not appended over case-insensitive name conflicts") {
+  // Review 749178e #06: Milvus reserves only the exact names RowID and
+  // Timestamp, so row_id(100) and timestamp(101) are user fields and ids 0 and
+  // 1 still have to be there.
+  test(
+    "system fields are appended by id even when a user field is named like one"
+  ) {
     import io.milvus.grpc.schema.{
       CollectionSchema => MilvusCollectionSchema,
       DataType => MilvusDataType,
@@ -30,10 +35,17 @@ class SchemaMapperTest extends AnyFunSuite with Matchers {
       )
     )
 
-    val arrowSchema = SchemaMapper.convertToArrowSchema(schema)
-    val names = arrowSchema.getFields.asScala.map(_.getName)
-
-    names shouldBe Seq("row_id", "timestamp")
+    SchemaMapper
+      .convertToArrowSchema(schema)
+      .getFields
+      .asScala
+      .map(_.getName) shouldBe Seq("RowID", "Timestamp", "row_id", "timestamp")
+    SchemaMapper
+      .convertToArrowSchemaWithFieldIdNames(schema)
+      .getFields
+      .asScala
+      .map(_.getName) shouldBe Seq("0", "1", "100", "101")
+    SchemaMapper.missingSystemFields(schema).map(_.fieldID) shouldBe Seq(0L, 1L)
   }
 
   test("Milvus collection schema uses Binary for nullable dense vectors") {

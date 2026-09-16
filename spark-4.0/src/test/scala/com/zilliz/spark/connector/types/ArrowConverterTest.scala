@@ -996,4 +996,228 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
       err.getMessage should include(FieldMetadata.MilvusDataTypeMetadataKey)
     }
   }
+
+  // Review 749178e #01: a ByteType value was only logged, so every Int8 value
+  // written became null.
+  test(
+    "internalRowToArrow writes ByteType to TinyIntVector and reads it back"
+  ) {
+    val sparkSchema = StructType(Seq(StructField("i8", ByteType)))
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val schema = new Schema(
+        Seq(
+          new Field("i8", FieldType.nullable(new ArrowType.Int(8, true)), null)
+        ).asJava
+      )
+      val root = VectorSchemaRoot.create(schema, allocator)
+      try {
+        root.allocateNew()
+        val values = Seq[Byte](-128, 0, 7, 127)
+        values.zipWithIndex.foreach { case (v, i) =>
+          ArrowConverter.internalRowToArrow(
+            root,
+            i,
+            InternalRow(v),
+            sparkSchema
+          )
+        }
+        ArrowConverter.internalRowToArrow(
+          root,
+          values.size,
+          InternalRow(null),
+          sparkSchema
+        )
+        root.setRowCount(values.size + 1)
+        val vector =
+          root
+            .getVector("i8")
+            .asInstanceOf[org.apache.arrow.vector.TinyIntVector]
+        values.zipWithIndex.foreach { case (v, i) =>
+          vector.isNull(i) shouldBe false
+          vector.get(i) shouldBe v
+          ArrowConverter
+            .arrowToInternalRow(root, i, sparkSchema)
+            .getByte(0) shouldBe v
+        }
+        vector.isNull(values.size) shouldBe true
+      } finally root.close()
+    } finally allocator.close()
+  }
+
+  test(
+    "internalRowToArrow refuses a type it cannot write instead of dropping it"
+  ) {
+    val sparkSchema = StructType(
+      Seq(StructField("d", org.apache.spark.sql.types.DecimalType(10, 2)))
+    )
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val schema = new Schema(
+        Seq(
+          new Field("d", FieldType.nullable(new ArrowType.Int(32, true)), null)
+        ).asJava
+      )
+      val root = VectorSchemaRoot.create(schema, allocator)
+      try {
+        root.allocateNew()
+        an[IllegalArgumentException] should be thrownBy
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow(org.apache.spark.sql.types.Decimal(1)),
+            sparkSchema
+          )
+      } finally root.close()
+    } finally allocator.close()
+  }
+
+  private def milvusField(
+      name: String,
+      dataType: org.apache.spark.sql.types.DataType,
+      milvusType: MilvusDataType,
+      fieldId: Long
+  ): StructField =
+    StructField(
+      name,
+      dataType,
+      nullable = true,
+      new MetadataBuilder()
+        .putLong(FieldMetadata.MilvusDataTypeMetadataKey, milvusType.value)
+        .putLong(FieldMetadata.MilvusFieldIdMetadataKey, fieldId)
+        .build()
+    )
+
+  // Review 749178e #04: a Milvus Array is stored as Binary, one serialized
+  // ScalarField per row (payload_writer.go AddOneArrayToPayload); the writer
+  // built a childless Arrow List instead and every task failed.
+  test(
+    "a Milvus Array is written as one ScalarField per row, every element type"
+  ) {
+    import com.zilliz.milvus.storage.codec.ArrayCodec
+    val cases: Seq[(org.apache.spark.sql.types.DataType, Seq[Any], Seq[Any])] =
+      Seq(
+        (
+          org.apache.spark.sql.types.BooleanType,
+          Seq(true, false),
+          Seq(true, false)
+        ),
+        (ShortType, Seq[Short](-128, 127), Seq(-128, 127)),
+        (org.apache.spark.sql.types.IntegerType, Seq(1, -2, 3), Seq(1, -2, 3)),
+        (LongType, Seq(1L, Long.MaxValue), Seq(1L, Long.MaxValue)),
+        (FloatType, Seq(1.5f, -2f), Seq(1.5f, -2f)),
+        (
+          org.apache.spark.sql.types.DoubleType,
+          Seq(0.25, -1.0),
+          Seq(0.25, -1.0)
+        ),
+        (
+          StringType,
+          Seq(
+            org.apache.spark.unsafe.types.UTF8String.fromString("a"),
+            org.apache.spark.unsafe.types.UTF8String.fromString("中")
+          ),
+          Seq("a", "中")
+        )
+      )
+    cases.foreach { case (elementType, sparkValues, stored) =>
+      withClue(s"elements $elementType: ") {
+        val field = milvusField(
+          "arr",
+          ArrayType(elementType),
+          MilvusDataType.Array,
+          105L
+        )
+        val sparkSchema = StructType(Seq(field))
+        val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(
+          sparkSchema,
+          fieldIds = Map("arr" -> 105L)
+        )
+        arrowSchema.getFields.get(0).getType shouldBe a[ArrowType.Binary]
+        val allocator = new RootAllocator(Long.MaxValue)
+        try {
+          val root = VectorSchemaRoot.create(arrowSchema, allocator)
+          try {
+            root.allocateNew()
+            ArrowConverter.internalRowToArrow(
+              root,
+              0,
+              InternalRow(ArrayData.toArrayData(sparkValues.toArray)),
+              sparkSchema
+            )
+            ArrowConverter.internalRowToArrow(
+              root,
+              1,
+              InternalRow(ArrayData.toArrayData(Array.empty[Any])),
+              sparkSchema
+            )
+            ArrowConverter.internalRowToArrow(
+              root,
+              2,
+              InternalRow(null),
+              sparkSchema
+            )
+            root.setRowCount(3)
+            val v = root.getVector(0).asInstanceOf[VarBinaryVector]
+            ArrayCodec.elements(v.get(0)) shouldBe stored
+            // An empty array must not serialize to zero bytes: Milvus reads a
+            // zero-length Binary value as null (segcore FieldData.cpp).
+            v.get(1).length should be > 0
+            ArrayCodec.elements(v.get(1)) shouldBe Seq.empty
+            v.isNull(2) shouldBe true
+            // And the connector reads back what it wrote, on the row path.
+            // The column is named by field id, as the manifest records it.
+            val names = Map("arr" -> "105")
+            val back =
+              ArrowConverter.arrowToInternalRow(root, 0, sparkSchema, names)
+            back.getArray(0).numElements() shouldBe stored.size
+            ArrowConverter
+              .arrowToInternalRow(root, 1, sparkSchema, names)
+              .getArray(0)
+              .numElements() shouldBe 0
+            ArrowConverter
+              .arrowToInternalRow(root, 2, sparkSchema, names)
+              .isNullAt(0) shouldBe true
+          } finally root.close()
+        } finally allocator.close()
+      }
+    }
+  }
+
+  // Same cause as #04: Milvus stores JSON as Binary (serde.go byteEntry), the
+  // writer made it Utf8.
+  test("a Milvus JSON field is written as Binary holding the JSON text") {
+    val field = milvusField("j", StringType, MilvusDataType.JSON, 106L)
+    val sparkSchema = StructType(Seq(field))
+    val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(
+      sparkSchema,
+      fieldIds = Map("j" -> 106L)
+    )
+    arrowSchema.getFields.get(0).getType shouldBe a[ArrowType.Binary]
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val root = VectorSchemaRoot.create(arrowSchema, allocator)
+      try {
+        root.allocateNew()
+        val json = """{"k":1,"tag":"中"}"""
+        ArrowConverter.internalRowToArrow(
+          root,
+          0,
+          InternalRow(
+            org.apache.spark.unsafe.types.UTF8String.fromString(json)
+          ),
+          sparkSchema
+        )
+        root.setRowCount(1)
+        new String(
+          root.getVector(0).asInstanceOf[VarBinaryVector].get(0),
+          java.nio.charset.StandardCharsets.UTF_8
+        ) shouldBe json
+        ArrowConverter
+          .arrowToInternalRow(root, 0, sparkSchema, Map("j" -> "106"))
+          .getUTF8String(0)
+          .toString shouldBe json
+      } finally root.close()
+    } finally allocator.close()
+  }
 }

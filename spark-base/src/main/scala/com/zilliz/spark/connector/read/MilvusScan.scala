@@ -116,7 +116,11 @@ class MilvusScan(
           applyDeletes,
           bucket.getOrElse(""),
           store,
-          StorageOptions.effectiveEndpoint(milvusOption.options).getOrElse("")
+          StorageOptions.storeEndpoint(
+            hadoopConf,
+            bucket.getOrElse(""),
+            milvusOption.options
+          )
         )
         .fold(
           e =>

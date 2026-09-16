@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.read
 
+import scala.collection.JavaConverters._
+
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
@@ -109,6 +111,72 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     v3().arrowColumnFor(
       MilvusOption.MilvusExtraColumnTimestamp
     ) shouldBe "1"
+  }
+
+  // Review 749178e #06: a user field named "timestamp" is not field 1; the
+  // schema handed to the native reader must still hold field 1, which delete
+  // application asks for.
+  test("a user field named timestamp does not displace stored field 1") {
+    val schema = CollectionSchema(
+      name = "t",
+      fields = Seq(
+        FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = DataType.Int64,
+          isPrimaryKey = true
+        ),
+        FieldSchema(
+          fieldID = 101L,
+          name = "timestamp",
+          dataType = DataType.Int64
+        ),
+        FieldSchema(
+          fieldID = 102L,
+          name = "vec",
+          dataType = DataType.FloatVector,
+          typeParams = Seq(io.milvus.grpc.common.KeyValuePair("dim", "4"))
+        )
+      )
+    )
+    val deletes =
+      DeleteSource.Materialized(DeletePlan.fromLongPks(Map(1L -> 100L)))
+    val wanted = StructType(Seq(StructField("vec", ArrayType(FloatType))))
+    val v3Binding = V3ColumnBinding(
+      MilvusV3InputPartition(
+        task(SegmentLayout.Manifest("files/seg"), deletes)
+          .copy(schemaBytes = schema.toByteArray),
+        "20",
+        options
+      ),
+      wanted
+    )
+    v3Binding.neededColumns should contain("1")
+    v3Binding.arrowSchema.getFields.asScala.map(_.getName) should contain("1")
+    v3Binding.arrowSchema.getFields.asScala.map(_.getName) should contain("101")
+
+    val v2Binding = V2ColumnBinding(
+      MilvusV2InputPartition(
+        task(
+          SegmentLayout.ColumnGroups(
+            Seq(
+              V2ColumnGroup(
+                fieldIds = Seq(100L, 1L, 101L, 102L),
+                filePaths = Seq("files/a.parquet"),
+                fileRowCounts = Seq(10L)
+              )
+            )
+          ),
+          deletes
+        ).copy(schemaBytes = schema.toByteArray),
+        options
+      ),
+      wanted
+    )
+    v2Binding.neededColumns should contain("Timestamp")
+    v2Binding.arrowSchema.getFields.asScala.map(_.getName) should contain(
+      "Timestamp"
+    )
   }
 
   test("a dynamic field keeps its recorded id across both storage lines") {

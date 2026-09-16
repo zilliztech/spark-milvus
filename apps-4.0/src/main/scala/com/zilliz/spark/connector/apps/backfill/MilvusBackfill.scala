@@ -59,10 +59,7 @@ object MilvusBackfill {
       config: BackfillConfig,
       segmentResults: Map[Long, SegmentBackfillResult]
   ): String = {
-    import com.zilliz.milvus.storage.credential.StorageProperties
-    import com.zilliz.milvus.storage.io.NativeObjectStore
-    import com.zilliz.milvus.storage.write.commit.{Committer, CommittedSegment}
-    import com.zilliz.milvus.storage.write.exec.StagingLayout
+    import com.zilliz.milvus.storage.write.commit.CommittedSegment
 
     val segments = segmentResults.values.toSeq
       .filter(_.committedVersion > 0L)
@@ -77,21 +74,88 @@ object MilvusBackfill {
         )
       }
     if (segments.isEmpty) return ""
-    val layout = StagingLayout(
+    val store = stagingStore(config)
+    try commitJobManifest(store, stagingLayoutFor(config), segments)
+    finally store.close()
+  }
+
+  /** The job id of one run: the caller's, else a new one. Two runs never share
+    * an id by default, even in one Spark application (review 749178e #02,
+    * decided 2026-09-16); `run` resolves it once and keeps it.
+    */
+  private[backfill] def jobIdFor(
+      spark: SparkSession,
+      config: BackfillConfig
+  ): String =
+    config.jobId.getOrElse(java.util.UUID.randomUUID().toString)
+
+  private def stagingLayoutFor(
+      config: BackfillConfig
+  ): com.zilliz.milvus.storage.write.exec.StagingLayout =
+    com.zilliz.milvus.storage.write.exec.StagingLayout(
       config.stagingRoot.getOrElse(config.s3RootPath),
-      config.jobId.getOrElse(spark.sparkContext.applicationId)
+      config.jobId.getOrElse(
+        throw new IllegalStateException(
+          "the job id is resolved at the start of run"
+        )
+      )
     )
-    val store = NativeObjectStore
+
+  private def stagingStore(
+      config: BackfillConfig
+  ): com.zilliz.milvus.storage.io.ObjectStore = {
+    import com.zilliz.milvus.storage.credential.StorageProperties
+    import com.zilliz.milvus.storage.io.NativeObjectStore
+    NativeObjectStore
       .Factory(
         StorageProperties.from(config.getS3WriteOptionsForBasePath("", 0L))
       )
       .open()
-    try new Committer(store, layout).commit(segments)
-    finally store.close()
-    logger.info(
-      s"Job manifest of ${segments.size} segment(s) committed at ${layout.manifest}"
-    )
-    layout.prefix
+  }
+
+  /** Refuses a job id that already has a committed manifest, before a single
+    * segment is written: a caller that names an id owns it, and reusing one is
+    * an error, not a rerun (decided 2026-09-16).
+    */
+  private[backfill] def ensureJobIdUnused(
+      store: com.zilliz.milvus.storage.io.ObjectStore,
+      layout: com.zilliz.milvus.storage.write.exec.StagingLayout
+  ): Unit =
+    if (
+      new com.zilliz.milvus.storage.write.commit.Committer(
+        store,
+        layout
+      ).isCommitted
+    ) {
+      throw new IllegalStateException(
+        s"job '${layout.jobId}' is already committed at ${layout.prefix}; " +
+          "a backfill job id cannot be reused, give this run a new one"
+      )
+    }
+
+  /** Commits this run's manifest. A manifest found already committed under the
+    * id can only belong to another run (the id was checked before writing), so
+    * it is an error; returning its prefix would hand the other run's versions
+    * to `register`.
+    */
+  private[backfill] def commitJobManifest(
+      store: com.zilliz.milvus.storage.io.ObjectStore,
+      layout: com.zilliz.milvus.storage.write.exec.StagingLayout,
+      segments: Seq[com.zilliz.milvus.storage.write.commit.CommittedSegment]
+  ): String = {
+    import com.zilliz.milvus.storage.write.commit.{CommitOutcome, Committer}
+    new Committer(store, layout).commit(segments) match {
+      case CommitOutcome.Committed =>
+        logger.info(
+          s"Job manifest of ${segments.size} segment(s) committed at ${layout.manifest}"
+        )
+        layout.prefix
+      case CommitOutcome.AlreadyCommitted =>
+        throw new IllegalStateException(
+          s"job '${layout.jobId}' was committed by another run at ${layout.prefix} " +
+            "while this run was writing; its manifest versions were not recorded"
+        )
+    }
   }
 
   private[backfill] def resolveResultPartitionId(
@@ -390,6 +454,9 @@ object MilvusBackfill {
       case Right(_) => // Continue
     }
 
+    // One job id for the whole run.
+    val runConfig = config.copy(jobId = Some(jobIdFor(spark, config)))
+
     // OSS source reads use a local-checkpointed RDD to sever the external
     // storage lineage while scoped credentials are installed. Keep the actual
     // persisted RDD so its blocks can be released after the transformed
@@ -669,6 +736,23 @@ object MilvusBackfill {
       val v2SegmentIdSet: Set[Long] = v2Segments.map(_.id).toSet
 
       // Process each segment
+      // The job id is checked before the first segment is written.
+      try {
+        val store = stagingStore(runConfig)
+        try ensureJobIdUnused(store, stagingLayoutFor(runConfig))
+        finally store.close()
+      } catch {
+        case e: Exception =>
+          return Left(
+            WriteError(
+              segmentId = 0L,
+              outputPath = stagingLayoutFor(runConfig).prefix,
+              message = e.getMessage,
+              cause = Some(e)
+            )
+          )
+      }
+
       val segmentResults = processSegments(
         spark,
         joinedDF,
@@ -704,7 +788,7 @@ object MilvusBackfill {
       // The job manifest: every V3 segment this run wrote into, with its id
       // and new manifest version, committed under the staging prefix for
       // `register` to hand to Milvus.
-      val stagingPrefix = writeJobManifest(spark, config, segmentResults)
+      val stagingPrefix = writeJobManifest(spark, runConfig, segmentResults)
 
       Right(result.copy(stagingPrefix = stagingPrefix))
 
@@ -1847,8 +1931,15 @@ object MilvusBackfill {
     val outputPath = writeOptions("milvus.writer.customPath")
 
     val optionsMap = new CaseInsensitiveStringMap(writeOptions.asJava)
+    // The task builds its write here, on the executor: the explicit fs.* of
+    // writeOptions is the whole storage configuration.
     val batchWrite =
-      new MilvusV3BatchWrite(targetSchema, MilvusOption(optionsMap))
+      new MilvusV3BatchWrite(
+        targetSchema,
+        MilvusOption(optionsMap),
+        com.zilliz.spark.connector.options.HadoopStorageKeys
+          .canonicalProperties(writeOptions)
+      )
     val writer = batchWrite
       .createBatchWriterFactory(null)
       .createWriter(0, System.currentTimeMillis())

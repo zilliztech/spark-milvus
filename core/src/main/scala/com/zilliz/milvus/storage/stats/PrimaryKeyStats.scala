@@ -69,6 +69,21 @@ object PrimaryKeyStats {
   def hashString(pk: String): Long =
     xxh3.hashBytes(pk.getBytes(StandardCharsets.UTF_8))
 
+  /** The order Milvus keeps VarChar keys in: Go string comparison, which is
+    * unsigned byte order over UTF-8 (primary_key.go, stats.go). Java's
+    * String.compareTo orders UTF-16 code units and disagrees above the BMP, so
+    * bounds computed with it exclude keys Milvus has (review 749178e #12). Any
+    * code that compares against minPk/maxPk uses this order.
+    */
+  def compareVarChar(a: Array[Byte], b: Array[Byte]): Int =
+    java.util.Arrays.compareUnsigned(a, b)
+
+  def compareVarChar(a: String, b: String): Int =
+    compareVarChar(
+      a.getBytes(StandardCharsets.UTF_8),
+      b.getBytes(StandardCharsets.UTF_8)
+    )
+
   /** Collects the keys of one segment and builds the stats once they are all
     * in, because the filter's size depends on their number.
     */
@@ -83,6 +98,8 @@ object PrimaryKeyStats {
     private var maxLong = Long.MinValue
     private var minString: String = null
     private var maxString: String = null
+    private var minUtf8: Array[Byte] = null
+    private var maxUtf8: Array[Byte] = null
 
     private def push(hash: Long): Unit = {
       if (count == hashes.length)
@@ -100,9 +117,14 @@ object PrimaryKeyStats {
 
     def addString(pk: String): Unit = {
       require(pkType == DataType.VarChar, s"a VarChar key on a $pkType field")
-      if (minString == null || pk.compareTo(minString) < 0) minString = pk
-      if (maxString == null || pk.compareTo(maxString) > 0) maxString = pk
-      push(hashString(pk))
+      val utf8 = pk.getBytes(StandardCharsets.UTF_8)
+      if (minUtf8 == null || compareVarChar(utf8, minUtf8) < 0) {
+        minUtf8 = utf8; minString = pk
+      }
+      if (maxUtf8 == null || compareVarChar(utf8, maxUtf8) > 0) {
+        maxUtf8 = utf8; maxString = pk
+      }
+      push(xxh3.hashBytes(utf8))
     }
 
     def size: Int = count

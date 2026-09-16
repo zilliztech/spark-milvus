@@ -371,7 +371,17 @@ schema，没有任何快照时用）。字段 id 和向量维度都从这份 sch
 
 S3 兼容存储以 `fs.address` 为规范端点选项；DataFrame option
 `fs.s3a.endpoint` 和 `s3.endpoint` 依此为别名。已有 Spark/Hadoop 配置中的
-`fs.s3a.endpoint` 也会被翻译为同一个原生属性。
+`fs.s3a.*`、`fs.oss.*` 也会被翻译，桶级优先：端点、region、角色与静态密钥，
+`connection.ssl.enabled`（OSS 为 `connection.secure.enabled`）翻成 `fs.use_ssl`
+（没设时与 Hadoop 一样为 true，端点自带 `http://` 或 `https://` 时以端点为准），
+以及显式设置过的 `path.style.access`。用哪套凭证由有效的 credential provider 决定，与
+Hadoop 一致：provider 是 `SimpleAWSCredentialsProvider` 的桶用它自己的密钥，不用全局配置的角色。
+显式的 `fs.*` 选项总是优先于翻译结果。
+临时凭证（密钥加 `fs.s3a.session.token` 或 `fs.oss.securityToken`）翻不过去，原生存储层没有
+session token 属性。三个值正好是 driver 进程的 `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、
+`AWS_SESSION_TOKEN` 时（Spark 会把这三个环境变量抄进这几个键），密钥不下传，原生默认链读同一组环境变量；
+其他临时凭证直接报错，改设 `fs.use_iam=true`，或用 `fs.access_key_id`、`fs.access_key_value` 给长期密钥。
+翻译得到的端点也是识别 Milvus 产生的 `https://<endpoint>/<bucket>/<key>` 位置时用的端点，只由 Hadoop 配置给出的端点同样认得。
 Milvus 产生的元数据可能把对象写成
 `s3://endpoint:port/bucket/key`。连接器只在解析 Milvus 元数据时识别这种形式：authority
 显式带端口，或 authority host 与已配置 endpoint host 精确匹配时，才把后续第一段作为桶；最终与

@@ -113,4 +113,51 @@ class StorageNativeTest
         fs.readFileAll("absent")
     }
   }
+
+  // Review 749178e #03: only a confirmed absence is "does not exist"; a denied
+  // or failed lookup has to reach the caller, or a commit marker that is there
+  // but unreadable reads as missing and the job manifest is written over.
+  test("exists is false only for a missing key; a denied lookup throws") {
+    assume(available, "libmilvus-storage-jni is not on this machine")
+    // LOON_FILE_NOT_FOUND in milvus-storage's ffi_error_code.h.
+    val fileNotFound = 12
+    assume(
+      System.getProperty("user.name") != "root",
+      "root ignores directory permissions"
+    )
+    val store = NativeObjectStore
+      .Factory(
+        Map(
+          "fs.storage_type" -> "local",
+          "fs.root_path" -> root.toAbsolutePath.toString
+        )
+      )
+      .open()
+    val locked = root.resolve("locked")
+    try {
+      store.createDir("locked", recursive = true)
+      store.write("locked/_committed", "job-1".getBytes(StandardCharsets.UTF_8))
+      store.exists("locked/_committed") shouldBe true
+      store.exists("absent") shouldBe false
+      intercept[MilvusStorageException](
+        store.size("absent")
+      ).errorCode() shouldBe fileNotFound
+
+      Files.setPosixFilePermissions(
+        locked,
+        java.util.Collections
+          .emptySet[java.nio.file.attribute.PosixFilePermission]()
+      )
+      val denied = intercept[MilvusStorageException](
+        store.exists("locked/_committed")
+      )
+      denied.errorCode() should not be fileNotFound
+    } finally {
+      Files.setPosixFilePermissions(
+        locked,
+        java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")
+      )
+      store.close()
+    }
+  }
 }

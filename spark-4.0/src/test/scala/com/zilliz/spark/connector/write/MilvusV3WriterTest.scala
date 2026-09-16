@@ -43,7 +43,8 @@ class MilvusV3WriterTest extends AnyFunSuite with Matchers {
         partitionId = 1,
         taskId = 1L,
         sparkSchema = org.apache.spark.sql.types.StructType(Nil),
-        milvusOption = MilvusOption(options)
+        milvusOption = MilvusOption(options),
+        storage = Map(StorageProperties.StorageType -> "local")
       )
     }
 

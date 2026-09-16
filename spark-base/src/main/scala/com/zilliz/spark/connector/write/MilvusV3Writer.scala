@@ -47,7 +47,11 @@ import com.zilliz.milvus.storage.write.exec.{
   WriteMetrics
 }
 import com.zilliz.spark.connector.metrics.WriteMetricsReport
-import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
+import com.zilliz.spark.connector.options.{
+  HadoopStorageKeys,
+  MilvusOption,
+  StorageOptions
+}
 import com.zilliz.spark.connector.types.{SparkSchemaMapper, SparkTypes}
 import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
@@ -63,18 +67,25 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
   *   what Spark passed in `LogicalWriteInfo`: the DataFrame's own schema
   * @param collection
   *   the collection schema of the snapshot the table was resolved from
+  * @param resolveStorage
+  *   resolves the native `fs.*` bag on the driver
+  *   (`StorageOptions.writeStorageProperties`); every task and the committer
+  *   use the result as it is. Called after the schema check, so a DataFrame
+  *   that does not fit the collection is reported first.
   */
 class MilvusV3WriteBuilder(
     dataFrameSchema: StructType,
     collection: CollectionSchema,
-    milvusOption: MilvusOption
+    milvusOption: MilvusOption,
+    resolveStorage: () => Map[String, String]
 ) extends WriteBuilder
     with Logging {
 
-  override def build(): Write = new MilvusV3Write(
-    WriteSchema.resolve(dataFrameSchema, collection, WriteSchema.Mode.Append),
-    milvusOption
-  )
+  override def build(): Write = {
+    val schema =
+      WriteSchema.resolve(dataFrameSchema, collection, WriteSchema.Mode.Append)
+    new MilvusV3Write(schema, milvusOption, resolveStorage())
+  }
 }
 
 /** The V3 write. `schema` is the resolved write schema: every column carries
@@ -82,12 +93,13 @@ class MilvusV3WriteBuilder(
   */
 class MilvusV3Write(
     schema: StructType,
-    milvusOption: MilvusOption
+    milvusOption: MilvusOption,
+    storage: Map[String, String]
 ) extends Write
     with Logging {
 
   override def toBatch: BatchWrite = {
-    new MilvusV3BatchWrite(schema, milvusOption)
+    new MilvusV3BatchWrite(schema, milvusOption, storage)
   }
 
   override def supportedCustomMetrics(): Array[CustomMetric] =
@@ -100,7 +112,8 @@ class MilvusV3Write(
   */
 class MilvusV3BatchWrite(
     schema: StructType,
-    milvusOption: MilvusOption
+    milvusOption: MilvusOption,
+    private[connector] val storage: Map[String, String]
 ) extends BatchWrite
     with Logging {
 
@@ -111,14 +124,14 @@ class MilvusV3BatchWrite(
   val jobId: String = java.util.UUID.randomUUID().toString
 
   private val layout = StagingLayout(
-    milvusOption.options.getOrElse(StorageProperties.RootPath, "files"),
+    storage.getOrElse(StorageProperties.RootPath, "files"),
     jobId
   )
 
   override def createBatchWriterFactory(
       info: PhysicalWriteInfo
   ): DataWriterFactory = {
-    new MilvusV3WriterFactory(schema, milvusOption, jobId)
+    new MilvusV3WriterFactory(schema, milvusOption, jobId, storage)
   }
 
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
@@ -153,7 +166,7 @@ class MilvusV3BatchWrite(
   }
 
   private def withCommitter[A](f: Committer => A): A = {
-    val store = HadoopStorageKeys.storeFrom(milvusOption.options.toMap)
+    val store = HadoopStorageKeys.storeFrom(storage)
     try f(new Committer(store, layout))
     finally store.close()
   }
@@ -164,7 +177,8 @@ class MilvusV3BatchWrite(
 class MilvusV3WriterFactory(
     schema: StructType,
     milvusOption: MilvusOption,
-    jobId: String
+    jobId: String,
+    storage: Map[String, String]
 ) extends DataWriterFactory
     with Serializable {
 
@@ -177,6 +191,7 @@ class MilvusV3WriterFactory(
       taskId,
       schema,
       milvusOption,
+      storage,
       jobId
     )
   }
@@ -218,6 +233,7 @@ class MilvusV3PartitionWriter(
     taskId: Long,
     sparkSchema: StructType,
     milvusOption: MilvusOption,
+    storage: Map[String, String],
     jobId: String = "job"
 ) extends DataWriter[InternalRow]
     with Logging {
@@ -229,8 +245,7 @@ class MilvusV3PartitionWriter(
       MilvusOption.WriterVariableWidthBytesPerValue,
       defaultValue = 32.0
     )
-  private val writerProperties: Map[String, String] =
-    StorageProperties.from(milvusOption.options)
+  private val writerProperties: Map[String, String] = storage
 
   private val allocator = new RootAllocator(Long.MaxValue)
 
@@ -260,7 +275,7 @@ class MilvusV3PartitionWriter(
         customPath
       case None =>
         val path = StagingLayout(
-          milvusOption.options.getOrElse(StorageProperties.RootPath, "files"),
+          storage.getOrElse(StorageProperties.RootPath, "files"),
           jobId
         ).segment(partitionId, taskId)
         logInfo(s"Writing to staging path: $path")
@@ -559,7 +574,9 @@ object MilvusV3Writer extends Logging {
         ) WriteSchema.Mode.Columns
         else WriteSchema.Mode.Append
       val schema = WriteSchema.resolve(df.schema, collection, mode)
-      Success(writeV3(df, schema, milvusOption))
+      val storage =
+        StorageOptions.writeStorageProperties(milvusOption.options, "")
+      Success(writeV3(df, schema, milvusOption, storage))
     } catch {
       case e: Exception =>
         logError(
@@ -573,11 +590,12 @@ object MilvusV3Writer extends Logging {
   private def writeV3(
       df: DataFrame,
       schema: StructType,
-      milvusOption: MilvusOption
+      milvusOption: MilvusOption,
+      storage: Map[String, String]
   ): Seq[String] = {
 
     // Create batch write
-    val batchWrite = new MilvusV3BatchWrite(schema, milvusOption)
+    val batchWrite = new MilvusV3BatchWrite(schema, milvusOption, storage)
     val writerFactory = batchWrite.createBatchWriterFactory(null)
 
     // Execute write on each partition using queryExecution to get InternalRow

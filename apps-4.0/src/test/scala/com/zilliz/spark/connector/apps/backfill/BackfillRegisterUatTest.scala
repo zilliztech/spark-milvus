@@ -224,4 +224,168 @@ class BackfillRegisterUatTest extends AnyFunSuite with Matchers {
       } finally client.close()
     } finally spark.stop()
   }
+
+  /** Review 749178e #02: two backfills in one application shared the
+    * application id as job id, and the second run's manifest versions were
+    * dropped in favour of the first run's manifest. The first run writes score
+    * \= id * 5, the second score = id * 2; only the second is registered, so
+    * the collection ends with the values the `run` case expects.
+    */
+  test(
+    "#02: two backfills in one session get their own jobs; the second is the one registered"
+  ) {
+    val uri = env("MILVUS_UAT_URI").getOrElse(cancel("set MILVUS_UAT_URI"))
+    val collection = env("MILVUS_UAT_BACKFILL_COLLECTION")
+      .getOrElse(cancel("set MILVUS_UAT_BACKFILL_COLLECTION"))
+    val snapshotPath = env("MILVUS_UAT_SNAPSHOT_PATH")
+      .getOrElse(cancel("set MILVUS_UAT_SNAPSHOT_PATH"))
+    val bucket =
+      env("MILVUS_JNI_S3_BUCKET").getOrElse(cancel("set MILVUS_JNI_S3_BUCKET"))
+    val rootPath = env("MILVUS_JNI_S3_ROOT_PATH")
+      .getOrElse(cancel("set MILVUS_JNI_S3_ROOT_PATH, the instance's root"))
+    val region = env("MILVUS_JNI_S3_REGION").getOrElse("us-west-2")
+    val stagingRoot =
+      env("MILVUS_UAT_WRITE_PREFIX").getOrElse("spark-uat-write")
+
+    val spark = SparkSession
+      .builder()
+      .master("local[2]")
+      .appName("backfill-two-runs-uat")
+      .config("spark.ui.enabled", "false")
+      .config(
+        "spark.sql.extensions",
+        "com.zilliz.spark.connector.extensions.MilvusSparkSessionExtensions"
+      )
+      .getOrCreate()
+    try {
+      def source(factor: Long): String = {
+        val path = java.nio.file.Files
+          .createTempDirectory(s"backfill-src-x$factor")
+          .resolve("source.parquet")
+          .toString
+        spark
+          .range(3000)
+          .select(col("id").as("pk"), (col("id") * factor).as(newField))
+          .write
+          .parquet(path)
+        path
+      }
+      val config = BackfillConfig(
+        milvusUri = uri,
+        milvusToken = env("MILVUS_UAT_TOKEN").getOrElse(""),
+        collectionName = collection,
+        s3Endpoint = s"s3.$region.amazonaws.com",
+        s3BucketName = bucket,
+        s3AccessKey = "",
+        s3SecretKey = "",
+        s3UseSSL = true,
+        s3RootPath = rootPath,
+        s3Region = region,
+        s3UseIam = true,
+        stagingRoot = Some(stagingRoot)
+      )
+      def run(factor: Long, cfg: BackfillConfig) =
+        MilvusBackfill.run(spark, source(factor), snapshotPath, cfg)
+
+      val first = run(5L, config).fold(e => fail(s"first run: $e"), identity)
+      val second = run(2L, config).fold(e => fail(s"second run: $e"), identity)
+      info(s"first ${first.stagingPrefix}, second ${second.stagingPrefix}")
+      // Before the fix both were <stagingRoot>/staging/<applicationId>.
+      first.stagingPrefix should not be second.stagingPrefix
+      val versionOf = (r: BackfillResult) =>
+        r.segmentResults.values
+          .map(s => s.segmentId -> s.committedVersion)
+          .toMap
+      versionOf(second).foreach { case (segment, version) =>
+        version should be > versionOf(first)(segment)
+      }
+
+      val options = Map(
+        MilvusOption.MilvusUri -> uri,
+        MilvusOption.MilvusCollectionName -> collection,
+        StorageProperties.BucketName -> bucket,
+        StorageProperties.Address -> s"s3.$region.amazonaws.com",
+        StorageProperties.Region -> region,
+        StorageProperties.CloudProvider -> "aws",
+        StorageProperties.UseSSL -> "true",
+        StorageProperties.UseIam -> "true",
+        StorageProperties.RootPath -> rootPath
+      ) ++ env("MILVUS_UAT_TOKEN").map(MilvusOption.MilvusToken -> _)
+
+      // Each job's manifest names its own run's versions.
+      Seq(first, second).foreach { r =>
+        val store = com.zilliz.spark.connector.options.HadoopStorageKeys
+          .storeFrom(options)
+        try {
+          val manifest = new com.zilliz.milvus.storage.write.commit.Committer(
+            store,
+            Register.layoutOf(r.stagingPrefix)
+          ).manifest()
+          manifest.segments
+            .map(s => s.segmentId.getOrElse(-1L) -> s.manifestVersion)
+            .toMap shouldBe versionOf(r)
+        } finally store.close()
+      }
+
+      // An explicitly reused id is refused before anything is written.
+      val reusedId = Register.layoutOf(second.stagingPrefix).jobId
+      run(9L, config.copy(jobId = Some(reusedId))) match {
+        case Left(e) =>
+          info(s"reuse refused: $e")
+          e.toString should include("cannot be reused")
+        case Right(r) => fail(s"a reused job id was accepted: $r")
+      }
+
+      def sqlValue(v: String) = "'" + v.replace("'", "''") + "'"
+      val optionArgs = (options - MilvusOption.MilvusCollectionName)
+        .map { case (k, v) => s"`$k` => ${sqlValue(v)}" }
+        .mkString(",\n  ")
+      val registered = spark
+        .sql(
+          s"""CALL milvus.system.register(${sqlValue(collection)},
+             |  staging => ${sqlValue(second.stagingPrefix)},
+             |  $optionArgs)""".stripMargin
+        )
+        .collect()
+      registered.map(_.getString(3)).toSet shouldBe Set("registered")
+      registered.map(r => r.getLong(1) -> r.getLong(2)).toMap shouldBe
+        versionOf(second)
+
+      val client = clientOf(uri)
+      try {
+        client.loadCollection("default", collection).get
+        val deadline = System.currentTimeMillis() + 300000L
+        var state = client.getLoadState("default", collection).get
+        while (
+          state != io.milvus.grpc.common.LoadState.LoadStateLoaded &&
+          System.currentTimeMillis() < deadline
+        ) {
+          Thread.sleep(3000)
+          state = client.getLoadState("default", collection).get
+        }
+        // The registered version is the second run's: id * 2, not id * 5.
+        val deadline2 = System.currentTimeMillis() + 120000L
+        def scores(): Seq[Long] = client
+          .query(
+            "default",
+            collection,
+            "id in [10, 11, 12]",
+            Seq("id", newField)
+          )
+          .get
+          .find(_.fieldName == newField)
+          .map(_.getScalars.getLongData.data.sorted)
+          .getOrElse(Seq.empty)
+        var got = scores()
+        while (
+          got != Seq(20L, 22L, 24L) && System.currentTimeMillis() < deadline2
+        ) {
+          Thread.sleep(3000)
+          got = scores()
+        }
+        info(s"scores for ids 10..12: $got")
+        got shouldBe Seq(20L, 22L, 24L)
+      } finally client.close()
+    } finally spark.stop()
+  }
 }
