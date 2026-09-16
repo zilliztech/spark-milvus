@@ -7,7 +7,7 @@ ARG TARGETARCH
 ARG MAVEN_SNAPSHOT_REPOSITORY_URL=https://central.sonatype.com/repository/maven-snapshots/
 ARG MAVEN_CREDENTIALS_FILE=/root/.sbt/sonatype_central_credentials
 
-# Stage 1: Build milvus-storage native libraries and Java binding
+# Stage 1: Build milvus-storage native libraries and the connector
 FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS builder
 
 ARG GIT_BRANCH
@@ -103,45 +103,9 @@ RUN set -eux; \
 # Build milvus-storage native libraries using its Conan 2 Makefile.
 RUN cd milvus-storage/cpp && make java-lib
 
-# Build this repository's own JNI library. Every read and write since the
-# upstream Java binding came out of the build goes through it, and
-# NativeStorageLibrary loads it by name, so an image without it fails at the
-# first native call with UnsatisfiedLinkError. CMake writes the result next to
-# libmilvus-storage, which is where the packaging step below looks.
-RUN cmake -S native-storage/src/main/cpp -B native-storage/src/main/cpp/build \
-        -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build native-storage/src/main/cpp/build --parallel \
-    && test -f milvus-storage/cpp/build/Release/libnative-storage-jni.so
-
-# Package the JNI libraries and every transitive shared library under the
-# platform path expected by NativeLibraryLoader.
-RUN set -eux; \
-    case "$(uname -m)" in \
-        x86_64|amd64) native_platform=linux-x86_64 ;; \
-        aarch64|arm64) native_platform=linux-aarch64 ;; \
-        *) echo "Unsupported build architecture: $(uname -m)" >&2; exit 1 ;; \
-    esac; \
-    native_dir="native-storage/src/main/resources/native/${native_platform}"; \
-    libs_dir="milvus-storage/cpp/build/Release/libs"; \
-    mkdir -p "${native_dir}"; \
-    cp milvus-storage/cpp/build/Release/libmilvus-storage.so "${native_dir}/"; \
-    cp milvus-storage/cpp/build/Release/libmilvus-storage-jni.so "${native_dir}/"; \
-    cp milvus-storage/cpp/build/Release/libnative-storage-jni.so "${native_dir}/"; \
-    if [ -d "${libs_dir}" ]; then \
-        find -L "${libs_dir}" -maxdepth 1 -type f \
-            \( -name '*.so' -o -name '*.so.*' \) \
-            -exec cp -L {} "${native_dir}/" \;; \
-        for subdir in ossl-modules engines-3; do \
-            if [ -d "${libs_dir}/${subdir}" ]; then \
-                mkdir -p "${native_dir}/${subdir}"; \
-                cp -rL "${libs_dir}/${subdir}/." "${native_dir}/${subdir}/"; \
-            fi; \
-        done; \
-    fi; \
-    milvus-storage/java/patch_native_runpath.sh "${native_dir}"
-
-# Build the milvus-storage Java binding consumed as an unmanaged JAR below.
-RUN cd milvus-storage/java && bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt package"
+# Use the same native resource layout and dependency packaging as local builds.
+# The native-storage sbt module compiles the upstream Java/Scala API below.
+RUN make copy-native-libs
 
 # Build and optionally publish the runnable assembly as the primary Maven JAR.
 ENV GIT_BRANCH=${GIT_BRANCH}
@@ -163,7 +127,6 @@ RUN set -eux; \
     test -s "${assembly_jar}"; \
     jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libmilvus-storage.so"; \
     jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libmilvus-storage-jni.so"; \
-    jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libnative-storage-jni.so"; \
     sha256sum "${assembly_jar}"; \
     publish_maven="${PUBLISH_MAVEN:-${PUBLISH_TO_CENTRAL}}"; \
     case "${publish_maven}" in true|false) ;; *) echo "PUBLISH_MAVEN must be true or false" >&2; exit 1 ;; esac; \

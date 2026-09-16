@@ -3,7 +3,7 @@ package com.zilliz.milvus.storage.index
 import java.nio.file.Files
 import java.util.HashMap
 
-import com.zilliz.milvus.jni.storage.StorageNative
+import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
 
 /** Explicit real-native verification; missing libraries fail this main. */
 object BruteForceSearchSmoke {
@@ -25,14 +25,18 @@ object BruteForceSearchSmoke {
     val properties = new HashMap[String, String]()
     properties.put("fs.storage_type", "local")
     properties.put("fs.root_path", directory.toString)
-    val handle = StorageNative.filesystemGet(properties, "")
+    val nativeProperties = new MilvusStorageProperties()
+    var filesystem: MilvusStorageFileSystem = null
     try {
+      nativeProperties.create(properties)
+      filesystem = new MilvusStorageFileSystem(nativeProperties, "")
       val content = Array[Byte](1, 2, 3)
-      StorageNative.writeFile(handle, "check", content)
-      assert(StorageNative.readFileAll(handle, "check").sameElements(content))
-      StorageNative.deleteFile(handle, "check")
+      filesystem.writeFile("check", content)
+      assert(filesystem.readFileAll("check").sameElements(content))
+      filesystem.deleteFile("check")
     } finally {
-      StorageNative.filesystemDestroy(handle)
+      try if (filesystem != null) filesystem.close()
+      finally nativeProperties.free()
       Files.deleteIfExists(directory.resolve("check"))
       Files.delete(directory)
     }

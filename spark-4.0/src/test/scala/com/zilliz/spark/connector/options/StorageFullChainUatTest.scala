@@ -1,13 +1,13 @@
 package com.zilliz.spark.connector.options
 
 import java.security.MessageDigest
-import scala.collection.JavaConverters._
 
+import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.credential.StorageProperties
+import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
 
 /** The whole path a real read takes: Hadoop-style config as a platform injects
   * it, translated to fs.*, validated, handed through JNI to the C library,
@@ -40,7 +40,7 @@ class StorageFullChainUatTest extends AnyFunSuite with Matchers {
       env("MILVUS_JNI_S3_ENDPOINT").getOrElse(s"s3.$region.amazonaws.com")
 
     // Start where Spark does: Hadoop keys, as a managed platform injects them.
-    val conf = new org.apache.hadoop.conf.Configuration(false)
+    val conf = new Configuration(false)
     conf.set("fs.s3a.endpoint", endpoint)
     conf.set("fs.s3a.endpoint.region", region)
 
@@ -57,12 +57,18 @@ class StorageFullChainUatTest extends AnyFunSuite with Matchers {
     )
     val props = StorageProperties.from(userOptions)
 
-    val fs = StorageNative.filesystemGet(props.asJava, "")
+    val properties = new MilvusStorageProperties()
+    var fs: MilvusStorageFileSystem = null
     try {
-      val bytes = StorageNative.readFileAll(fs, key)
+      properties.create(props)
+      fs = new MilvusStorageFileSystem(properties, "")
+      val bytes = fs.readFileAll(key)
       info(s"full chain read ${bytes.length} bytes from s3://$bucket/$key")
       env("MILVUS_JNI_EXPECTED_SHA256").foreach(e => sha256(bytes) shouldBe e)
       bytes.length should be > 0
-    } finally StorageNative.filesystemDestroy(fs)
+    } finally {
+      try if (fs != null) fs.close()
+      finally properties.free()
+    }
   }
 }

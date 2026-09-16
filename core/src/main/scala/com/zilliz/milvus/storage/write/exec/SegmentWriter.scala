@@ -8,8 +8,12 @@ import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
-import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.{Logging, NativeCalls}
+import io.milvus.storage.{
+  MilvusPackedWriter,
+  MilvusStorageProperties,
+  MilvusStorageWriter
+}
 
 /** Writes Arrow batches into one segment.
   *
@@ -84,8 +88,8 @@ object SegmentWriter {
 
   /** Exports `batch` and hands its address to `send`; the C struct is released
     * afterwards. On success the C++ side has already moved the release callback
-    * out of the struct, so closing it frees only the struct; on failure the
-    * release is still there and closing it drops the export's reference.
+    * out of the struct, so closing it frees only the struct; on failure any
+    * remaining release callback is invoked before the struct is closed.
     */
   private[exec] def exported(
       allocator: BufferAllocator,
@@ -95,7 +99,10 @@ object SegmentWriter {
     try {
       Data.exportVectorSchemaRoot(allocator, batch, null, array)
       send(array.memoryAddress())
-    } finally array.close()
+    } finally {
+      try if (array.snapshot().release != 0L) array.release()
+      finally array.close()
+    }
   }
 }
 
@@ -125,28 +132,31 @@ final class V3SegmentWriter(
     with Logging {
 
   private val schemaStruct: ArrowSchema = ArrowSchema.allocateNew(allocator)
-  private var handle: Long = 0L
+  private var writer: MilvusStorageWriter = null
+  private var nativeProperties: MilvusStorageProperties = null
   private var written: Long = 0L
   private var closed = false
 
   try {
+    schemaStruct.save(new ArrowSchema.Snapshot())
     Data.exportSchema(allocator, arrowSchema, null, schemaStruct)
-    handle = calls.timed(
-      StorageNative.writerNew(
-        basePath,
-        schemaStruct.memoryAddress(),
-        (properties ++ ColumnGroupSplit.writerProperties(
-          columnGroupPatterns
-        )).asJava
+    nativeProperties = calls.timed(new MilvusStorageProperties())
+    calls.timed(
+      nativeProperties.create(
+        properties ++ ColumnGroupSplit.writerProperties(columnGroupPatterns)
       )
     )
-    if (handle == 0L) {
+    writer = new MilvusStorageWriter()
+    calls.timed(
+      writer.create(basePath, schemaStruct.memoryAddress(), nativeProperties)
+    )
+    if (!writer.isValid) {
       throw new IllegalStateException(
         s"could not open the native writer at $basePath"
       )
     }
   } catch {
-    case NonFatal(e) =>
+    case e: Throwable =>
       release()
       throw e
   }
@@ -157,8 +167,8 @@ final class V3SegmentWriter(
     countBatch(batch)
     SegmentWriter.exported(allocator, batch) { address =>
       SegmentWriter.serializingFirstWrite {
-        calls.timed(StorageNative.writerWrite(handle, address))
-        calls.timed(StorageNative.writerFlush(handle))
+        calls.timed(writer.write(address))
+        calls.timed(writer.flush())
       }
     }
     written += count
@@ -174,7 +184,7 @@ final class V3SegmentWriter(
       throw new IllegalStateException(s"writer at $basePath already closed")
     }
     try {
-      val groups = calls.timed(StorageNative.writerClose(handle, null, null))
+      val groups = calls.timed(writer.close())
       new WrittenColumnGroups(groups)
     } finally release()
   }
@@ -184,15 +194,25 @@ final class V3SegmentWriter(
   private def release(): Unit = synchronized {
     if (closed) return
     closed = true
-    if (handle != 0L) {
-      try StorageNative.writerDestroy(handle)
+    if (writer != null) {
+      try calls.timed(writer.destroy())
       catch {
         case NonFatal(e) => logWarning(s"destroying the writer failed", e)
       }
-      handle = 0L
+      writer = null
     }
-    try schemaStruct.close()
-    catch {
+    if (nativeProperties != null) {
+      try calls.timed(nativeProperties.free())
+      catch {
+        case NonFatal(e) =>
+          logWarning("freeing the writer properties failed", e)
+      }
+      nativeProperties = null
+    }
+    try {
+      try if (schemaStruct.snapshot().release != 0L) schemaStruct.release()
+      finally schemaStruct.close()
+    } catch {
       case NonFatal(e) => logWarning("closing the arrow schema failed", e)
     }
   }
@@ -234,32 +254,33 @@ final class V2SegmentWriter(
   }
 
   private val schemaStruct: ArrowSchema = ArrowSchema.allocateNew(allocator)
-  private var handle: Long = 0L
+  private var writer: MilvusPackedWriter = null
+  private var nativeProperties: MilvusStorageProperties = null
   private var written: Long = 0L
   private var closed = false
 
   try {
+    schemaStruct.save(new ArrowSchema.Snapshot())
     Data.exportSchema(allocator, arrowSchema, null, schemaStruct)
-    // The C layer takes the per-group column indices flattened: group g owns
-    // indices[offsets(g) until offsets(g + 1)].
-    val offsets = columnGroups.scanLeft(0)(_ + _.size).toArray
-    handle = calls.timed(
-      StorageNative.packedWriterNew(
+    nativeProperties = calls.timed(new MilvusStorageProperties())
+    calls.timed(nativeProperties.create(properties))
+    writer = new MilvusPackedWriter()
+    calls.timed(
+      writer.create(
         paths.toArray,
-        offsets,
-        columnGroups.flatten.toArray,
+        columnGroups.map(_.toArray).toArray,
         schemaStruct.memoryAddress(),
-        properties.asJava,
+        nativeProperties,
         0L
       )
     )
-    if (handle == 0L) {
+    if (!writer.isValid) {
       throw new IllegalStateException(
         s"could not open the native packed writer for ${paths.mkString(", ")}"
       )
     }
   } catch {
-    case NonFatal(e) =>
+    case e: Throwable =>
       release()
       throw e
   }
@@ -270,7 +291,7 @@ final class V2SegmentWriter(
     countBatch(batch)
     SegmentWriter.exported(allocator, batch) { address =>
       SegmentWriter.serializingFirstWrite {
-        calls.timed(StorageNative.packedWriterWrite(handle, address))
+        calls.timed(writer.write(address))
       }
     }
     written += count
@@ -286,7 +307,7 @@ final class V2SegmentWriter(
       throw new IllegalStateException("packed writer already closed")
     }
     try {
-      calls.timed(StorageNative.packedWriterClose(handle))
+      calls.timed(writer.close())
       written
     } finally release()
   }
@@ -296,15 +317,25 @@ final class V2SegmentWriter(
   private def release(): Unit = synchronized {
     if (closed) return
     closed = true
-    if (handle != 0L) {
-      try StorageNative.packedWriterDestroy(handle)
+    if (writer != null) {
+      try calls.timed(writer.destroy())
       catch {
         case NonFatal(e) => logWarning("destroying the packed writer failed", e)
       }
-      handle = 0L
+      writer = null
     }
-    try schemaStruct.close()
-    catch {
+    if (nativeProperties != null) {
+      try calls.timed(nativeProperties.free())
+      catch {
+        case NonFatal(e) =>
+          logWarning("freeing the writer properties failed", e)
+      }
+      nativeProperties = null
+    }
+    try {
+      try if (schemaStruct.snapshot().release != 0L) schemaStruct.release()
+      finally schemaStruct.close()
+    } catch {
       case NonFatal(e) => logWarning("closing the arrow schema failed", e)
     }
   }

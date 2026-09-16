@@ -125,7 +125,7 @@
 <table>
 <tr><th></th><th>交字节的面</th><th>交地址的面</th></tr>
 <tr><td>C 入口</td><td><code>loon_filesystem_*</code></td><td><code>loon_segment_reader_*</code>、<code>loon_record_batch_reader_*</code>、writer 那组</td></tr>
-<tr><td>JVM 接口</td><td><code>core.io.ObjectStore</code></td><td><code>core.read.exec</code> 的 <code>SegmentReader</code>(待写)</td></tr>
+<tr><td>JVM 接口</td><td><code>core.io.ObjectStore</code></td><td><code>core.read.exec</code> 的 <code>SegmentReader</code></td></tr>
 <tr><td>方法长相</td><td><code>readAll(key): Array[Byte]</code></td><td>收发 <code>ArrowArray</code>/<code>ArrowSchema</code> 的地址</td></tr>
 <tr><td>谁解析格式</td><td>JVM</td><td>C</td></tr>
 <tr><td>在哪跑</td><td>driver 规划分区时</td><td>executor 扫段时</td></tr>
@@ -174,7 +174,7 @@ try {
 <tr><th></th><th>读</th><th>写</th></tr>
 <tr><td>schema 过界次数</td><td>每批一次(C 填),另加打开时一次(JVM 声明要哪些列)</td><td>只在打开时一次,之后每批只过 <code>ArrowArray</code></td></tr>
 <tr><td>schema 方向</td><td>打开时 JVM→C,每批 C→JVM</td><td>只有 JVM→C</td></tr>
-<tr><td><code>close()</code> 的含义</td><td>纯粹释放空壳,数据已归 <code>VectorSchemaRoot</code></td><td>成功时 C++ 的 <code>ImportRecordBatch</code> 已把 release 移走,<code>close</code> 只清结构体内存;失败时 release 还在,<code>close</code> 会掉一个导出侧引用</td></tr>
+<tr><td><code>close()</code> 的含义</td><td>纯粹释放空壳,数据已归 <code>VectorSchemaRoot</code></td><td>成功时 C++ 的 <code>ImportRecordBatch</code> 已把 release 移走,<code>close</code> 只清结构体内存;失败时若 release 还在,先调用 <code>release()</code> 释放导出引用,再用 <code>close()</code> 释放结构体</td></tr>
 </table>
 <p>写侧那个 schema 结构体活到 writer 关闭,不能在第一批之后释放。</p>
 
@@ -194,9 +194,7 @@ Arrow Java 的 <code>ArrowReader.loadNextBatch</code> 在多批之间共用同�
 <code>VectorSchemaRoot</code>,并且忽略 <code>ArrowArray</code> 的 <code>offset</code> 字段。
 底层 C++ reader 一旦返回 <code>RecordBatch::Slice</code> 的结果,第一批之后的每一批都显示成同一份数据,
 不抛异常。这是 milvus-storage#493,<code>MilvusStorageFFITest</code> 是它的回归用例。
-<p style="margin:.6rem 0 0">因此 <code>native-storage</code> 不封装 <code>ArrowArrayStream</code>。
-<code>jni/storage/arrow/package-info.java</code> 现在写着这个包封装 ArrowArray、ArrowSchema 和
-ArrowArrayStream,第三个要删掉,否则重写第 1 层时会有人照着它封一个用不上的东西。</p>
+<p style="margin:.6rem 0 0">Connector 调用上游 <code>MilvusStorageReader.openRecordBatchReaderScala</code> 和 <code>readNextBatchScala</code>，每批分别导入新的 ArrowArray/ArrowSchema。切片物化和复制统计统一实现在上游 JNI。上游仍为其他调用方保留 stream 接口。</p>
 </div>
 
 <h2 id="ownership">三、句柄的所有权</h2>
@@ -252,7 +250,7 @@ DataSource V2 的 <code>CustomTaskMetric</code> 交给 Spark,在 SQL 页的算�
 
 <table>
 <tr><th>数</th><th>读 / 写</th><th>在哪取</th><th>回答什么问题</th></tr>
-<tr><td><code>jni.calls</code>、<code>jni.nanos</code></td><td>读、写</td><td>JVM 侧,包装类在每次 <code>StorageNative.*</code> 调用前后取 <code>System.nanoTime</code></td><td>跨界多少次、花了多久;按批跨界所以次数应等于批数加常数</td></tr>
+<tr><td><code>jni.calls</code>、<code>jni.nanos</code></td><td>读、写</td><td>JVM 侧,包装类在每次 上游 JNI 调用前后取 <code>System.nanoTime</code></td><td>跨界多少次、花了多久;按批跨界所以次数应等于批数加常数</td></tr>
 <tr><td><code>arrow.batches</code>、<code>arrow.bytes</code></td><td>读、写</td><td>JVM 侧,导入(读)或导出(写)时对 <code>VectorSchemaRoot</code> 每个向量的 <code>getBufferSize</code> 求和</td><td>吞吐:交接过界的 Arrow 字节数,除以 <code>jni.nanos</code> 就是通路带宽</td></tr>
 <tr><td><code>copies</code>、<code>copied.bytes</code></td><td>读</td><td>C 侧,<code>recordBatchReaderReadNext</code> 里每次 <code>arrow::Concatenate</code> 记一次和它的字节数;JVM 经 <code>recordBatchReaderStats(handle)</code> 取回</td><td>2.5 那个过渡实现今天到底拷了多少;上游导出 <code>loon_record_batch_reader_*</code> 后这两个数应归零</td></tr>
 <tr><td><code>rows.materialized</code></td><td>读</td><td>JVM 侧,行式 reader 每批结束时加上这批转成 <code>InternalRow</code> 的行数(触到的行减去按删除跳过的行);列式 reader 报 0,有删除的批经 <code>SelectedRowsColumn</code> 按下标映射,不转行</td><td>「6 次到 2 次」的 JVM 那一半:列式路径这个数为 0</td></tr>
@@ -291,7 +289,7 @@ C 侧是 holder 里的一个整数自增。开关本身反而是一个 option、
 <h3>5.5 类型放哪</h3>
 
 <ul>
-<li><code>native-storage</code>:C 侧 holder 里的计数,加一个 <code>recordBatchReaderStats(handle): long[]</code>。</li>
+<li>milvus-storage 上游 JNI 的 holder 持有计数，<code>MilvusStorageReader.recordBatchReaderStatsScala(handle)</code> 返回三个 long；<code>native-storage</code> 编译与打包该绑定。</li>
 <li><code>core.read.exec</code>:<code>SegmentReader.metrics: ReadMetrics</code>;<code>core.write.exec</code>:<code>SegmentWriter.metrics: WriteMetrics</code>。两个都是几个 long 的 case class,core 不知道 Spark。</li>
 <li><code>spark.metrics</code>:把它们翻成 <code>CustomMetric</code> / <code>CustomTaskMetric</code>,读写两张清单,只此一处;<code>spark.read</code> 的两个 reader 和 <code>spark.write</code> 的 DataWriter 只是取值上报。</li>
 </ul>
@@ -299,15 +297,34 @@ C 侧是 holder 里的一个整数自增。开关本身反而是一个 option、
 <p>验收在工作单 #01:core 里用本地后端读一个已知段,断言七个数落在预期范围;UAT 读 3000 行的段,
 SQL 页上看到这七个数。</p>
 
-<h2 id="state">六、现在到哪一步</h2>
+<h2 id="upstream-jni">六、JNI 统一由 milvus-storage 提供</h2>
+
+<p>2026-09-16 按用户要求迁移：Connector 移除自有 C++ JNI、<code>StorageNative</code> native 声明、异常类型及原生加载器，直接使用 milvus-storage 子模块的 <code>io.milvus.storage</code> 绑定。<code>native-storage</code> 仍是第 1 层构建模块，编译固定子模块的 Java/Scala API、打包 <code>libmilvus-storage-jni</code> 及其依赖；不再编译 <code>libnative-storage-jni</code>，不保留旧类名的转发接口。现有 R4、写执行及 G5 的行为保持。</p>
+
+<p>文件系统访问、批读取复制统计、写出列组信息、manifest 的完整释放和 transaction 的统计登记已在 milvus-storage 子模块补齐。实现归 <code>cpp/src/jni</code> 与 <code>java/src/main</code>；Connector 的 <code>core.io</code>、<code>core.read.exec</code>、<code>core.write.exec</code> 调用这些上游对象，不引入 Hadoop 或另一套 C 桥接。上游已经存在的 reader、writer、transaction 接口直接复用。</p>
+
+<p><code>take</code> 必须由上游拥有整个 <code>loon_take</code> 返回数组，并暴露可逐批读取、提前关闭的结果句柄，统一调用 <code>loon_free_chunk_arrays</code>；调用方不计算连续数组的释放地址。每批继续导出独立 ArrowArray/ArrowSchema，保留切片归零及复制计数。manifest 与其借用的 column groups 分开管理，reader 关闭后释放完整 manifest。Java 方法抛出的异常立即返回，UTF 字符串及局部引用在失败路径释放，不转换成空值。</p>
+
+<p>上游当前 API 含 Scala，因此按 Connector 的 Scala 2.12/2.13 矩阵从固定子模块源码编译，不引入只支持 2.13 的预编译 JAR，也不传递上游示例构建中的 Spark 依赖。Arrow 仍由各 Spark 线选择。原生加载使用上游加载器，按当前平台提取到独立临时目录；与 Knowhere 的共享依赖继续通过完整资源摘要与重定位检查核验。</p>
+
+<p>验收依次覆盖源码与 Scala 交叉编译、原生异常与加载检查、本地文件和 Arrow 读写及 take、真实 UAT 快照与持久化索引查询、最终 assembly 的加载和运行。取消的测试单列原因，不作为通过；当前结果见下节。</p>
+
+<h2 id="state">七、现在到哪一步</h2>
+
+<p>2026-09-16，上游 JNI 迁移已实现并创建 <a href="https://github.com/milvus-io/milvus-storage/pull/681">milvus-storage PR #681</a>。Connector 的子模块固定该 PR 已公开的提交 <code>514bb496e44b95cf7a4b87bc6c061593a63096e0</code>，它基于上游 main 的 <code>7f8e0b9d</code>。该提交的 Java/Scala API 源码与本地已验收提交 <code>c0916b8</code> 相同；这一源码核对不代表已在 main 的新依赖组合上完成原生运行验证。</p>
+
+<p>当前主工作区原生资源和兼容记录仍保留已验收的 v4 组合，更新子模块不会隐式重建或替换原生产物。重放到 Connector 上游 <code>d995e64</code> 后，串行格式检查、能力索引检查和 root 完整单元测试重新通过：1002 项通过、0 失败，66 项因缺少 UAT 配置或真实文件 fixture 取消。本轮包含上游新增的谓词下推、procedure 和 Catalog DDL 测试，使用公开子模块的 Java/Scala 源码和本地 v4 原生资源；没有重新执行真实 UAT 或 assembly 验收，下表对应结果仍属于此前的 v4 验收。详细命令、产物摘要和归档日志见 <a href="/root/zilliz/milvus-spark-demo/UPSTREAM_JNI_RESULTS.md">上游 JNI 迁移验证报告</a>。</p>
+
+<p>提交上游 PR 前的 v5 只增量重建存储库，并通过 9/9 C++ 列组构造测试、19/19 上游 Java/Scala API 测试及 5 个原生入口/依赖的重定位与立即加载检查。v5 没有重复完整 Connector、Knowhere、真实 UAT 或 assembly 验收；PR 在 main 新依赖基线上的运行结果另由其 CI 记录。</p>
+
+<p>公开提交的 Java CI 已通过；C++ build 和 lint 在构建启用 <code>WITH_UT</code> 的目标时失败：<code>loon</code> 缺少 <code>rust/cxx.h</code>，<code>Test_FFI</code> 缺少 gRPC/OpenTelemetry 链接依赖。这些上游构建问题尚未修复。Connector 的常规原生构建调用 <code>make java-lib</code>，明确禁用 <code>WITH_UT</code>；本次提交前检查没有重跑完整 Docker 构建。</p>
 
 <table>
-<tr><th></th><th>状态</th></tr>
-<tr><td>交字节的面</td><td>已经到位。<code>NativeObjectStore</code> 走我们自己的 JNI(<code>native-storage</code>),driver 侧四类元数据读取全部经过它,<code>core.io.hadoop</code> 已删除</td></tr>
-<tr><td>交地址的面</td><td>已经到位。行式与列式 reader 与两个 writer 都走 <code>native-storage</code> 的 JNI,上游 Java 绑定已从构建中移除,3.5 线的 Scala 2.12 因此解锁</td></tr>
+<tr><th>路径</th><th>迁移状态</th></tr>
+<tr><td>文件字节</td><td><code>NativeObjectStore</code> 已改用上游 <code>MilvusStorageFileSystem</code>；对象存储仍统一经 C filesystem，properties 与 filesystem 分别持有并释放。</td></tr>
+<tr><td>Arrow 地址</td><td><code>SegmentReader</code>、两个 writer 和 manifest transaction 已改用上游 API；逐批读取、take、统计和完整 manifest 所有权由上游实现。</td></tr>
+<tr><td>v4 编译与单元测试</td><td>root 完整测试 912 通过、0 失败，66 项因缺少 UAT 配置或真实文件 fixture 取消；上游 API 4 个套件 19/19 通过，无取消。Scala 2.12.20 交叉编译通过，包括 Spark 3.5 主源码与测试源码；不代表 2.12 原生运行已验证。</td></tr>
+<tr><td>v4 真实 UAT</td><td>重新读取实例 <code>in01-5589f90cf7ca72c</code> 的 100000 行快照；持久化索引的无过滤、标量过滤及 NULL 过滤三个查询均通过，ID 召回率均为 1.0，返回行号与 Knowhere JNI 直调一致。日志与逐查询结果归档在上述报告。</td></tr>
+<tr><td>v4 assembly</td><td>构建及资源审计通过，两个独立 JVM 中的两种原生加载顺序、缓存真实 UAT 索引的加载与搜索均通过。同一 JAR 经 SparkSubmit 默认父加载器优先方式的完整索引查询通过，并断言 Connector/storage/Knowhere 类来自该 JAR。直接使用 assembly 优先 Java classpath 仍触发既有 Jackson 版本冲突，保留为限制。</td></tr>
+<tr><td>严格 JNI 与其他限制</td><td>v4 完整测试功能断言通过，但检查器保留 27 条告警，已独立复现为 Arrow 25 条及 BLAS 2 条，不能声称严格 JNI 检查全部通过。UAT 的既有 Spark UI 自定义指标构造器告警不影响当次查询断言，指标展示仍有缺口。Knowhere 的 DiskANN 测试失败及许可证材料限制仍保留，<code>publication.allowed=false</code>。</td></tr>
 </table>
-
-<p>两个面都走我们自己的 JNI 之后,上游绑定不再进构建:<code>legacyJni</code> 四处全摘,
-<code>project/Modules.scala</code> 里那个设置也删了,3.5 线在 Scala 2.12 上编得过。
-剩下的欠债是 2.5 那个过渡实现,结束条件是上游导出
-<code>loon_record_batch_reader_*</code>。</p>

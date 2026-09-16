@@ -2,18 +2,22 @@ package com.zilliz.milvus.storage.io
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
-import scala.collection.JavaConverters._
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.milvus.jni.storage.{StorageNative, StorageNativeException}
+import io.milvus.storage.{
+  MilvusStorageException,
+  MilvusStorageFileSystem,
+  MilvusStorageProperties,
+  NativeLibraryLoader
+}
 
 /** Exercises the C filesystem through JNI on the local backend, which needs no
   * credentials and no object store.
   *
-  * Needs libnative-storage-jni, so it is skipped when the library is absent —
+  * Needs libmilvus-storage-jni, so it is skipped when the library is absent —
   * the same treatment the other native suites get.
   */
 class StorageNativeTest
@@ -26,7 +30,7 @@ class StorageNativeTest
 
   override def beforeAll(): Unit = {
     root = Files.createTempDirectory("native-storage-test")
-    try StorageNative.filesystemDestroy(open())
+    try NativeLibraryLoader.loadLibrary()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
         available = false
@@ -34,21 +38,23 @@ class StorageNativeTest
     }
   }
 
-  private def open(): Long =
-    StorageNative.filesystemGet(
-      Map(
-        "fs.storage_type" -> "local",
-        "fs.root_path" -> root.toAbsolutePath.toString
-      ).asJava,
-      ""
-    )
-
-  private def withFs(body: Long => Unit): Unit = {
-    assume(available, "libnative-storage-jni is not on this machine")
-    val fs = open()
-    fs should not be 0L
-    try body(fs)
-    finally StorageNative.filesystemDestroy(fs)
+  private def withFs(body: MilvusStorageFileSystem => Unit): Unit = {
+    assume(available, "libmilvus-storage-jni is not on this machine")
+    val properties = new MilvusStorageProperties()
+    var fs: MilvusStorageFileSystem = null
+    try {
+      properties.create(
+        Map(
+          "fs.storage_type" -> "local",
+          "fs.root_path" -> root.toAbsolutePath.toString
+        )
+      )
+      fs = new MilvusStorageFileSystem(properties, "")
+      body(fs)
+    } finally {
+      try if (fs != null) fs.close()
+      finally properties.free()
+    }
   }
 
   // Paths are keys relative to fs.root_path. The C layer wraps the backend in a
@@ -62,24 +68,25 @@ class StorageNativeTest
       // writeFile does not create parents. Object storage has no directories so
       // this only shows on the local backend, but core.io has to be explicit
       // about it rather than let the difference leak upward.
-      StorageNative.createDir(fs, "seg", true)
-      StorageNative.writeFile(fs, key, payload)
-      StorageNative.readFileAll(fs, key) shouldBe payload
-      StorageNative.fileSize(fs, key) shouldBe payload.length.toLong
+      fs.createDir("seg", true)
+      fs.writeFile(key, payload)
+      fs.readFileAll(key) shouldBe payload
+      fs.fileSize(key) shouldBe payload.length.toLong
+      fs.exists(key) shouldBe true
       Files.exists(root.resolve(key)) shouldBe true
 
-      val entries = StorageNative.listDir(fs, "seg", false)
+      val entries = fs.list("seg", false)
       entries.map(_.path) should not be empty
 
-      StorageNative.deleteFile(fs, key)
+      fs.deleteFile(key)
+      fs.exists(key) shouldBe false
       Files.exists(root.resolve(key)) shouldBe false
     }
   }
 
   test("an absolute path is appended to fs.root_path, not honoured") {
     withFs { fs =>
-      an[StorageNativeException] should be thrownBy StorageNative.writeFile(
-        fs,
+      an[MilvusStorageException] should be thrownBy fs.writeFile(
         root.resolve("absolute.bin").toString,
         Array[Byte](1)
       )
@@ -90,20 +97,20 @@ class StorageNativeTest
     withFs { fs =>
       val key = "ranged.bin"
       val payload = "0123456789".getBytes(StandardCharsets.UTF_8)
-      StorageNative.writeFile(fs, key, payload)
+      fs.writeFile(key, payload)
 
-      val reader = StorageNative.openReader(fs, key, payload.length.toLong)
+      val reader = fs.openReader(key, payload.length.toLong)
       try {
-        StorageNative.readerReadAt(reader, 3L, 3L) shouldBe
+        reader.readAt(3L, 3L) shouldBe
           "345".getBytes(StandardCharsets.UTF_8)
-      } finally StorageNative.readerDestroy(reader)
+      } finally reader.close()
     }
   }
 
   test("a failed C call arrives as an exception, not a return code") {
     withFs { fs =>
-      an[StorageNativeException] should be thrownBy
-        StorageNative.readFileAll(fs, "absent")
+      an[MilvusStorageException] should be thrownBy
+        fs.readFileAll("absent")
     }
   }
 }

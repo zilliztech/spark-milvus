@@ -31,7 +31,7 @@ class BlockedBloomFilterTest extends AnyFunSuite with Matchers {
     val filter = BlockedBloomFilter.sized(10L)
     filter.add(0x0000000100000000L) // h1 = 1, h2 = 0: block 0
     val json = filter.toJson
-    json should startWith(s"{\"k\":${filter.k},\"b\":[\"")
+    json should startWith("{\"k\":" + filter.k + ",\"b\":[\"")
     val back = BlockedBloomFilter.fromJson(filter.k, Seq(json.split("\"")(5)))
     back shouldBe filter
     back.mightContain(0x0000000100000000L) shouldBe true

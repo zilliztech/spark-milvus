@@ -53,8 +53,9 @@ object Modules {
     )
   ) ++ noSparkImports
 
-  /** The two layer-1 modules are plain Java, so their artifacts carry no Scala
-    * suffix.
+  /** Knowhere's layer-1 module is plain Java, so its artifact carries no Scala
+    * suffix. Storage compiles upstream Scala sources for each shared Scala
+    * line.
     */
   val javaOnly: Seq[Setting[_]] = Seq(
     crossPaths := false,

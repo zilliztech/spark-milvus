@@ -1,18 +1,25 @@
 package com.zilliz.milvus.storage.write.exec
 
 import java.nio.file.{Files, Path}
+import java.util.{List => JavaList}
+import java.util.{Map => JavaMap}
+import java.util.Collections
+import java.util.Comparator
 import scala.collection.JavaConverters._
 
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.{BigIntVector, VarCharVector, VectorSchemaRoot}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
+import org.apache.avro.file.DataFileReader
+import org.apache.avro.generic.GenericDatumReader
+import org.apache.avro.generic.GenericRecord
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.read.exec.SegmentReaderRegistry
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
+import io.milvus.storage.NativeLibraryLoader
 
 /** The two segment writers against the real native library, on the local
   * backend: what they write reads back through the registry the readers use.
@@ -22,17 +29,12 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
 
   private def skipWithoutLibrary(): Unit =
     try
-      StorageNative.filesystemDestroy(
-        StorageNative.filesystemGet(
-          Map("fs.storage_type" -> "local").asJava,
-          ""
-        )
-      )
+      NativeLibraryLoader.loadLibrary()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
-        cancel("libnative-storage-jni is not on this machine")
+        cancel("libmilvus-storage-jni is not on this machine")
       case _: RuntimeException =>
-        cancel("libnative-storage-jni is not on this machine")
+        cancel("libmilvus-storage-jni is not on this machine")
     }
 
   private val schema = new Schema(
@@ -40,12 +42,12 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
       new Field(
         "100",
         new FieldType(false, new ArrowType.Int(64, true), null),
-        java.util.Collections.emptyList[Field]()
+        Collections.emptyList[Field]()
       ),
       new Field(
         "101",
         new FieldType(false, new ArrowType.Utf8(), null),
-        java.util.Collections.emptyList[Field]()
+        Collections.emptyList[Field]()
       )
     ).asJava
   )
@@ -63,7 +65,7 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
           null,
           Map("PARQUET:field_id" -> f.getName).asJava
         ),
-        java.util.Collections.emptyList[Field]()
+        Collections.emptyList[Field]()
       )
     }.asJava
   )
@@ -132,7 +134,7 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
     finally
       Files
         .walk(dir)
-        .sorted(java.util.Comparator.reverseOrder())
+        .sorted(Comparator.reverseOrder())
         .forEach(Files.deleteIfExists(_))
   }
 
@@ -152,14 +154,14 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
         writer.write(second)
         second.close()
         writer.rows shouldBe 5000L
-        // G5: one open, then write and flush per batch.
+        // G5: allocate and create properties, open, then write and flush per batch.
         writer.metrics.batches shouldBe 2L
-        writer.metrics.jniCalls shouldBe 1L + 2L * 2L
+        writer.metrics.jniCalls shouldBe 3L + 2L * 2L
         writer.metrics.arrowBytes should be > (5000L * 8)
         writer.metrics.allocatedMax should be > 0L
 
         val groups = writer.finish()
-        writer.metrics.jniCalls shouldBe 1L + 2L * 2L + 1L
+        writer.metrics.jniCalls shouldBe 3L + 2L * 2L + 3L
         val version =
           try {
             groups.size should be > 0
@@ -262,12 +264,12 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
 
         // Read the manifest as Milvus's reader would: the stats map keyed by
         // the entry, its paths relative to _stats/, its metadata as given.
-        val reader = new org.apache.avro.file.DataFileReader[
-          org.apache.avro.generic.GenericRecord
+        val reader = new DataFileReader[
+          GenericRecord
         ](
           dir.resolve("segment-stats/_metadata/manifest-1.avro").toFile,
-          new org.apache.avro.generic.GenericDatumReader[
-            org.apache.avro.generic.GenericRecord
+          new GenericDatumReader[
+            GenericRecord
           ]()
         )
         try {
@@ -275,20 +277,20 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
           val stats = manifest
             .get("stats")
             .asInstanceOf[
-              java.util.Map[AnyRef, org.apache.avro.generic.GenericRecord]
+              JavaMap[AnyRef, GenericRecord]
             ]
             .asScala
             .map { case (k, v) => k.toString -> v }
           val entry = stats("bloom_filter.100")
           entry
             .get("paths")
-            .asInstanceOf[java.util.List[AnyRef]]
+            .asInstanceOf[JavaList[AnyRef]]
             .asScala
             .map(_.toString) shouldBe
             Seq("bloom_filter.100/7")
           entry
             .get("metadata")
-            .asInstanceOf[java.util.Map[AnyRef, AnyRef]]
+            .asInstanceOf[JavaMap[AnyRef, AnyRef]]
             .asScala
             .map { case (k, v) => k.toString -> v.toString } shouldBe Map(
             "memory_size" -> "15"

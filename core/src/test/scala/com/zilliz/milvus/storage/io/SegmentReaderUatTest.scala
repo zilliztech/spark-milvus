@@ -1,5 +1,7 @@
 package com.zilliz.milvus.storage.io
 
+import java.nio.file.Paths
+import java.util.Collections
 import scala.collection.JavaConverters._
 
 import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
@@ -7,6 +9,8 @@ import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.arrow.vector.types.FloatingPointPrecision
 import org.apache.arrow.vector.VectorSchemaRoot
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{Path => HadoopPath}
 import org.apache.parquet.hadoop.util.HadoopInputFile
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
@@ -14,10 +18,15 @@ import org.apache.parquet.schema.Type.Repetition
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.jni.storage.StorageNative
+import io.milvus.storage.{
+  MilvusStorageColumnGroups,
+  MilvusStorageProperties,
+  MilvusStorageReader,
+  NativeLibraryLoader
+}
 
-/** Reads a real Milvus V2 column-group parquet through our own JNI, start to
-  * finish: column groups, reader, per-batch Arrow, row count.
+/** Reads a real Milvus V2 column-group parquet through the upstream JNI, start
+  * to finish: column groups, reader, per-batch Arrow, row count.
   *
   * Driven by an environment variable so it stays out of CI, which has neither
   * the native library nor the file:
@@ -47,8 +56,8 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
   private def arrowSchemaOf(path: String): Schema = {
     val reader = ParquetFileReader.open(
       HadoopInputFile.fromPath(
-        new org.apache.hadoop.fs.Path(path),
-        new org.apache.hadoop.conf.Configuration()
+        new HadoopPath(path),
+        new Configuration()
       )
     )
     try {
@@ -77,7 +86,7 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
         new Field(
           column.getName,
           new FieldType(nullable, arrowType, null),
-          java.util.Collections.emptyList[Field]()
+          Collections.emptyList[Field]()
         )
       }
       new Schema(fields.asJava)
@@ -87,30 +96,25 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
   private def rowCountOf(path: String): Long = {
     val reader = ParquetFileReader.open(
       HadoopInputFile.fromPath(
-        new org.apache.hadoop.fs.Path(path),
-        new org.apache.hadoop.conf.Configuration()
+        new HadoopPath(path),
+        new Configuration()
       )
     )
     try reader.getFooter.getBlocks.asScala.map(_.getRowCount).sum
     finally reader.close()
   }
 
-  test("reads every row of a real segment through our JNI") {
+  test("reads every row of a real segment through the upstream JNI") {
     val path = uatFile
     // Same gate the other native suites use: touch the library and skip when
     // it is absent, which is the state of CI.
     try
-      StorageNative.filesystemDestroy(
-        StorageNative.filesystemGet(
-          Map("fs.storage_type" -> "local").asJava,
-          ""
-        )
-      )
+      NativeLibraryLoader.loadLibrary()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
-        cancel("libnative-storage-jni is not on this machine")
+        cancel("libmilvus-storage-jni is not on this machine")
       case _: RuntimeException =>
-        cancel("libnative-storage-jni is not on this machine")
+        cancel("libmilvus-storage-jni is not on this machine")
     }
 
     val schema = arrowSchemaOf(path)
@@ -121,7 +125,8 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
     val allocator = new RootAllocator(Long.MaxValue)
     var schemaStruct: ArrowSchema = null
     var columnGroups = 0L
-    var reader = 0L
+    var reader: MilvusStorageReader = null
+    var nativeProperties: MilvusStorageProperties = null
     var batchReader = 0L
     var delivered = 0L
     var batches = 0
@@ -133,8 +138,8 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
       // The C layer roots the local backend at fs.root_path and appends the
       // key, so the directory goes in the properties and the column group
       // carries the file name.
-      val file = java.nio.file.Paths.get(path).toAbsolutePath
-      columnGroups = StorageNative.columnGroupsCreate(
+      val file = Paths.get(path).toAbsolutePath
+      columnGroups = MilvusStorageColumnGroups.createFromGroups(
         Array(columns.toArray),
         Array(Array(file.getFileName.toString)),
         Array(Array(expectedRows)),
@@ -146,15 +151,18 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
         "fs.storage_type" -> "local",
         "fs.root_path" -> file.getParent.toString
       ).asJava
-      reader = StorageNative.readerNew(
+      nativeProperties = new MilvusStorageProperties()
+      nativeProperties.create(properties)
+      reader = new MilvusStorageReader()
+      reader.create(
         columnGroups,
         schemaStruct.memoryAddress(),
         columns.toArray,
-        properties
+        nativeProperties
       )
-      reader should not be 0L
+      reader.isValid shouldBe true
 
-      batchReader = StorageNative.recordBatchReaderNew(reader, null)
+      batchReader = reader.openRecordBatchReaderScala()
       batchReader should not be 0L
 
       var more = true
@@ -162,7 +170,7 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
         val array = ArrowArray.allocateNew(allocator)
         val batchSchema = ArrowSchema.allocateNew(allocator)
         try {
-          more = StorageNative.recordBatchReaderReadNext(
+          more = reader.readNextBatchScala(
             batchReader,
             array.memoryAddress(),
             batchSchema.memoryAddress()
@@ -186,9 +194,10 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
       delivered shouldBe expectedRows
       batches should be > 0
     } finally {
-      if (batchReader != 0L) StorageNative.recordBatchReaderDestroy(batchReader)
-      if (reader != 0L) StorageNative.readerDestroySegment(reader)
-      if (columnGroups != 0L) StorageNative.columnGroupsDestroy(columnGroups)
+      if (batchReader != 0L) reader.destroyRecordBatchReaderScala(batchReader)
+      if (reader != null) reader.destroy()
+      if (nativeProperties != null) nativeProperties.free()
+      if (columnGroups != 0L) MilvusStorageColumnGroups.destroy(columnGroups)
       if (schemaStruct != null) schemaStruct.close()
       // Closing the allocator asserts every buffer was released, so a handle
       // this test forgot fails it rather than passing quietly.

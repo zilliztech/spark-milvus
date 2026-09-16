@@ -1,12 +1,12 @@
-# native-storage C sources
+# Upstream storage JNI
 
-Holds the JNI sources that wrap milvus-storage's `loon_*` C interface. Each
-`loon_*` entry point maps to one native method on
-`com.zilliz.milvus.jni.storage.StorageNative`; handles are longs and result
-codes become exceptions.
+The JNI implementation and Java/Scala API belong to the pinned `milvus-storage`
+submodule, under `cpp/src/jni` and `java/src/main`. This connector does not
+compile a separate C++ bridge or declare its own native methods.
 
-No JNI type appears in a C header; JNI lives only in the `jni` package
-(constraint 2, section 4 of docs/design/architecture/modules.md).
+The `native-storage` sbt module cross-compiles that upstream API for Scala 2.12
+and 2.13. Native builds produce `libmilvus-storage-jni`; resources retain the
+upstream `native/{os}-{arch}/` layout and are loaded by its `NativeLibraryLoader`.
 
-The build and patchelf scripts land here when the module is implemented. The
-artifacts go into the jar flattened under `native/{os}-{arch}/`.
+See [the I/O design](../../../../docs/design/architecture/storage-io.html#upstream-jni)
+for ownership, Arrow transfer and validation requirements.

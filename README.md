@@ -36,7 +36,7 @@ time: a source file in `core`, `compat` or `client` that mentions
 
 | Layer | Module | What it holds |
 |---|---|---|
-| 1 | `native-storage` | JNI over the `loon_*` C interface of milvus-storage |
+| 1 | `native-storage` | Compiles and packages the pinned milvus-storage JNI and Java/Scala API |
 | 1 | `native-vector` | Loads pinned Knowhere PR #1829 artifacts and delegates BruteForce through its upstream Java API and JNI |
 | 2 | `core` | The storage format itself: snapshots, manifests, delete files, schema, codecs, statistics, planning, segment read and write, indexes, object-storage access. No Spark. |
 | 2 | `compat` | Adapters for three non-standard read entry points: Storage V2 packed segments, an offline segment list passed through options, and a milvus-backup export directory |

@@ -17,7 +17,6 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
 import com.zilliz.milvus.storage.codec.BinlogFixture
 import com.zilliz.milvus.storage.manifest.{
@@ -41,6 +40,7 @@ import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
+import io.milvus.storage.{MilvusStorageProperties, MilvusStorageTransaction}
 
 import io.knowhere.{DType, Knowhere}
 
@@ -431,13 +431,19 @@ object SegmentIndexSearchSmoke {
     )
     val deltaPath =
       writeDeletes(directory, allocator, properties, base, segment)
-    val transaction =
-      StorageNative.transactionBegin(base, properties.asJava, -1, 0, 1)
+    val nativeProperties = new MilvusStorageProperties()
+    var transaction: MilvusStorageTransaction = null
     val version =
       try {
-        StorageNative.transactionAddDeltaLog(transaction, "delete.parquet", 2L)
-        StorageNative.transactionCommit(transaction)
-      } finally StorageNative.transactionDestroy(transaction)
+        nativeProperties.create(properties)
+        transaction = new MilvusStorageTransaction()
+        transaction.begin(base, nativeProperties.getPtr, -1L, 0, 1)
+        transaction.addDeltaLog("delete.parquet", 2L)
+        transaction.commit()
+      } finally {
+        try if (transaction != null) transaction.destroy()
+        finally nativeProperties.free()
+      }
     val index = writeIndex(directory, vectors, segment)
     val descriptor = SegmentIndex(
       10L,

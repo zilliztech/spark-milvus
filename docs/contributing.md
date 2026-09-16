@@ -63,17 +63,17 @@ are named settings in the same file.
 |---|---|
 | `project/Versions.scala` | Library versions and the Spark line matrix |
 | `project/Dependencies.scala` | Dependency coordinates, scopes and dependency groups |
-| `project/Modules.scala` | Shared compile/test settings, checks and the temporary JNI dependency |
+| `project/Modules.scala` | Shared compile/test settings, checks and Scala cross-version settings |
 | `project/KnowhereBuild.scala` | Pinned upstream API compilation, native artifact verification and packaged JNI smoke |
 | `project/plugins.sbt` | Build plugins and their meta-build dependencies |
 
 ## Tests that need the native library
 
-Suites that call into C check for `libnative-storage-jni` first and cancel
+Suites that call into C check for upstream `libmilvus-storage-jni` first and cancel
 themselves when it is absent, so a machine without it still gets a green run
 with those suites reported as canceled rather than failed:
 
-- `StorageNativeTest`, `WriterRoundTripTest` and `SegmentWriterTest` in core
+- `StorageNativeTest`, `WriterRoundTripTest`, `SegmentWriterTest` and `SegmentReaderTakeTest` in core
 - `MilvusV3PartitionWriterLifecycleTest` in spark-4.0
 
 The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
@@ -97,18 +97,36 @@ the root aggregate, compiles in CI and is not run there.
 
 ## Building the native library
 
-`make build-milvus-storage && make copy-native-libs` builds
-`libmilvus-storage`, `libmilvus-storage-jni` and this repository's own
-`libnative-storage-jni`, and puts all three where `NativeLibraryLoader` can find
-them. `copy-native-libs` builds the last one itself when it is missing; `make
-build-native-jni` builds only it. With them in place the suites above run
-instead of cancelling. It needs conan, CMake and a Rust toolchain.
+`make build-milvus-storage && make copy-native-libs` builds and copies
+upstream `libmilvus-storage`, `libmilvus-storage-jni` and their dependencies
+under `native-storage/src/main/resources/native/<platform>/`. The JNI methods
+and `NativeLibraryLoader` belong to milvus-storage. The former Connector
+`libnative-storage-jni`, its C++ sources and `build-native-jni` target have been
+removed. Building requires Conan, CMake and a Rust toolchain.
 
-This works on macOS. An earlier version of this page said the library is built
-inside the Docker image and not on a developer machine; that was wrong, and it
-described a broken local setup as if it were a property of the platform.
-milvus-storage supports macOS and has a CI job for it — `cpp-mac-ci.yml` builds
+Initialize the pinned submodule before compiling:
+
+```bash
+git submodule update --init milvus-storage
+```
+
+The `native-storage` sbt module compiles `milvus-storage/java/src/main` for
+Scala 2.12 and 2.13 instead of importing upstream's sbt project or a Scala 2.13
+binary JAR. `Compile / sourceGenerators` copies the upstream Java/Scala sources
+to `sourceManaged` with `Sync`; Connector formatting operates on its own
+sources and does not rewrite the submodule. Arrow is `provided`, with the Spark
+4.0 line as the API compilation baseline and each Spark line supplying runtime
+Arrow. Source compilation does not start a native build.
+
+The upstream JNI migration is implemented and has fresh cross-version,
+unit, native load-order and real UAT snapshot/index results. Current results
+and remaining JNI diagnostics and packaging limitations are recorded in
+[the storage I/O validation state](design/architecture/storage-io.html#state).
+
+Upstream milvus-storage supports local macOS builds: `cpp-mac-ci.yml` builds
 on `macos-26` with conan 2.25.1, CMake 3.31.10 and LLVM 18 from brew.
+This JNI migration has been tested on Linux x86_64 only; the upstream CI job
+does not establish that this modified dependency combination works on macOS.
 
 ### Two things that will bite
 
@@ -118,10 +136,12 @@ cap their CMake policy range below 4, so the conan profile has to set
 build then fails with `cmake: No such file or directory` before compiling
 anything — the error names the missing binary, not the real problem.
 
-**The artifact is large.** `libmilvus-storage.dylib` is 481 MB, of which 162 MB
-is an unstripped symbol table (`strip -x` takes it to 315 MB); the two JNI
-bridges are 177 KB and 85 KB. Everything — arrow, parquet, the AWS/Azure/GCP SDKs, the Rust
-bridge — is linked statically so the library loads without help from the host.
+**The artifact is large.** An earlier macOS build measured
+`libmilvus-storage.dylib` at 481 MB, including 162 MB of symbols, and its
+upstream JNI bridge at 177 KB. Those measurements are not the size of the
+current candidate. Native builds include Arrow, Parquet, cloud SDKs and the
+Rust bridge; the dependency closure also contains shared libraries. Validate
+the complete packaged dependency set rather than assuming fully static linkage.
 `native-storage/src/main/resources/native/` is gitignored, so none of this is
 committed. Section 4.2 of
 [storage-access.html](design/architecture/storage-access.html) covers what the
@@ -129,18 +149,19 @@ size costs.
 
 ### What the Makefile does per platform
 
-Three things differ between macOS and Linux, and the Makefile now derives all
-three from `uname`:
+The Makefile derives the library suffix and resource platform from `uname`.
+Both platforms copy the upstream engines from `Release` and Conan dependencies
+from `Release/libs`, preserving the `ossl-modules` and `engines-3` subdirectories.
 
 | | macOS | Linux |
 |---|---|---|
 | Suffix | `.dylib` — `add_library(... SHARED)` sets no `SUFFIX` | `.so` |
-| Build output | `cpp/build/Release` — the `POST_BUILD` step that fills `build/Release/lib` sits inside `if(NOT APPLE)` in `cpp/CMakeLists.txt`, so that directory never exists here | `cpp/build/Release/lib` |
+| Build output | `cpp/build/Release` and `cpp/build/Release/libs` | `cpp/build/Release` and `cpp/build/Release/libs` |
 | Resource path | `native/darwin-aarch64/` | `native/linux-<arch>/` |
 
-The resource path matters: `NativeLibraryLoader.stripPlatformPrefix` skips any
-JAR entry that is not under `native/<platform>/`, so a library copied flat into
-`native/` is silently never extracted.
+The upstream `NativeLibraryLoader` selects resources under
+`native/<platform>/`. A library copied directly into `native/` is outside that
+platform directory and cannot satisfy the packaged-library load.
 
 ## Knowhere library loading
 
@@ -212,7 +233,8 @@ rejects conflicting Knowhere resources.
 
 When storage and Knowhere are packaged together, the build scans
 `native-vector/storage-compatibility*.properties`. Exactly one record must match
-the platform, storage engine SHA-256 and Knowhere platform JAR SHA-256; zero or
+the platform, storage engine SHA-256, full storage-native resource fingerprint
+and Knowhere platform JAR SHA-256; zero or
 multiple matches fail the build. Each record lists dependency hashes and audited
 SONAME aliases. The build generates storage's
 shared dependency resources from the original Knowhere dependency bytes, including
@@ -228,11 +250,12 @@ Milvus binlog/Parquet payloads and optional `SLICE_META`, or a Cardinal raw
 `_mem.index.bin` stream. Payload markers select the matching Faiss or Cardinal
 engine; a shared HNSW name alone does not establish format compatibility.
 Each task owns and closes its index. There is no cross-task index cache.
-Real UAT Cardinal HNSW deserialize/search passed against direct JNI results
-and an independent 100,000-row reference. Subsequent relocation inspection
-found unresolved AWS CRT and Folly/libaio symbols in the native dependencies;
-the exercised paths do not establish complete native link compatibility.
-A corrected native rebuild and immediate-binding validation are in progress.
+The upstream JNI migration and corrected native dependency build have passed
+fresh real UAT Cardinal HNSW queries against direct JNI results and an
+independent 100,000-row reference. Actual storage entry-library relocation and
+both native load orders also passed. The complete validation record, remaining
+third-party JNI diagnostics and packaging limitations are in
+[the storage I/O validation state](design/architecture/storage-io.html#state).
 Local OSS fixtures do not replace real-instance-data validation. Tests live in
 `/root/zilliz/milvus-spark-demo`.
 

@@ -24,7 +24,7 @@ every rule below refers to.
 
 | Layer | Modules | What lives there |
 |---|---|---|
-| 1 | `native-storage`, `native-vector` | Storage JNI over milvus-storage's `loon_*`; vector library loading through Knowhere's upstream C/JNI and Java API. Nothing above this layer loads a `.so`. |
+| 1 | `native-storage`, `native-vector` | Storage uses milvus-storage's upstream JNI and Java/Scala API; vector library loading through Knowhere's upstream C/JNI and Java API. Nothing above this layer loads a `.so`. |
 | 2 | `core`, `compat`, `client` | The Milvus storage format and the client for the online service. All computation happens here. No Spark: a source file mentioning `org.apache.spark` fails the build. |
 | 3 | `spark-base`, `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | The DataSource V2 surface. `spark-base` is a shared source directory, not a project; each line project compiles it against its own Spark, Arrow, antlr and Java version. |
 | 4 | `apps-4.0` | The jobs users run: backfill and vector search. |
@@ -89,10 +89,12 @@ implemented across all four Spark lines. Append registration still waits for a
 Milvus `RegisterSegments` API; staging cleanup remains unimplemented until its
 ownership and retention contract is defined.
 
-Layer 1 is written and in use: `native-storage` wraps the `loon_*` entry points
-for both reading and writing and loads its own libraries. The upstream
-milvus-storage Java binding is out of the build, so the 3.5 line cross-compiles
-for Scala 2.12 again. `native-vector` integrates loading and BruteForce from the pinned
+Layer 1 uses the upstream milvus-storage JNI and Java/Scala API.
+`native-storage` compiles the pinned submodule's API for Scala 2.12 and 2.13
+and packages `libmilvus-storage-jni`; it does not maintain a second JNI
+implementation. Upstream additions, ownership rules and current validation
+results are in [storage-io.html](docs/design/architecture/storage-io.html#state).
+`native-vector` integrates loading and BruteForce from the pinned
 Knowhere PR #1829 artifacts; Knowhere owns the C interface, JNI, Java API and
 native resource loader. Persisted HNSW loading uses upstream BinarySet and index
 search APIs; Cardinal stream files require a Cardinal-enabled build. Real-file

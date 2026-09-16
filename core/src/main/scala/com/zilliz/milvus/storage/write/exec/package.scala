@@ -1,6 +1,6 @@
 package com.zilliz.milvus.storage.write
 
-/** Writing segments out. The only place in core that opens a native writer.
+/** Writing segments out through the upstream milvus-storage bindings.
   *
   * `SegmentWriter` takes Arrow batches and hands them to milvus-storage:
   * `V3SegmentWriter` writes column groups under a segment base path and
@@ -18,7 +18,12 @@ package com.zilliz.milvus.storage.write
   * idempotent. One rule is the writer's own: a batch handed to `write` is
   * exported through the Arrow C Data Interface and the C++ writer keeps
   * referring to its buffers until it flushes, so the caller builds a fresh
-  * `VectorSchemaRoot` per batch and never reuses one.
+  * `VectorSchemaRoot` per batch and never reuses one. V3SegmentWriter owns a
+  * MilvusStorageWriter, V2SegmentWriter owns a MilvusPackedWriter, and each
+  * retains its MilvusStorageProperties until destruction. WrittenColumnGroups
+  * owns the returned native groups; ManifestTransaction owns an upstream
+  * transaction until commit finishes or fails. All JNI declarations and native
+  * loading belong to milvus-storage.
   *
   * `ColumnGroupSplit` is the rule Milvus applies when it splits a segment's
   * columns into column groups, as the patterns of milvus-storage's

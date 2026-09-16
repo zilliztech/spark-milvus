@@ -2,13 +2,14 @@ package com.zilliz.milvus.storage.io
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
+import java.nio.file.Paths
 import java.security.MessageDigest
-import scala.collection.JavaConverters._
+import scala.collection.mutable
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.jni.storage.StorageNative
+import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
 
 /** Reads a real Milvus object through JNI, both from the local filesystem and
   * from the S3 bucket it was captured from.
@@ -36,34 +37,39 @@ class StorageNativeUatTest extends AnyFunSuite with Matchers {
     val file = env("MILVUS_JNI_LOCAL_FILE").getOrElse(
       cancel("set MILVUS_JNI_LOCAL_FILE to a downloaded binlog")
     )
-    val source: Path = java.nio.file.Paths.get(file)
+    val source: Path = Paths.get(file)
     val expected = Files.readAllBytes(source)
 
     val root = source.getParent
     val key = root.relativize(source).toString
 
-    val fs = StorageNative.filesystemGet(
-      Map(
-        "fs.storage_type" -> "local",
-        "fs.root_path" -> root.toString
-      ).asJava,
-      ""
-    )
+    val properties = new MilvusStorageProperties()
+    var fs: MilvusStorageFileSystem = null
     try {
-      val actual = StorageNative.readFileAll(fs, key)
+      properties.create(
+        Map(
+          "fs.storage_type" -> "local",
+          "fs.root_path" -> root.toString
+        )
+      )
+      fs = new MilvusStorageFileSystem(properties, "")
+      val actual = fs.readFileAll(key)
       actual.length shouldBe expected.length
       sha256(actual) shouldBe sha256(expected)
 
-      StorageNative.fileSize(fs, key) shouldBe expected.length.toLong
+      fs.fileSize(key) shouldBe expected.length.toLong
 
       // A ranged read against the middle of the file, checked against the same
       // slice of what S3 handed us.
-      val reader = StorageNative.openReader(fs, key, expected.length.toLong)
+      val reader = fs.openReader(key, expected.length.toLong)
       try {
-        val chunk = StorageNative.readerReadAt(reader, 1024L, 4096L)
+        val chunk = reader.readAt(1024L, 4096L)
         chunk shouldBe expected.slice(1024, 1024 + 4096)
-      } finally StorageNative.readerDestroy(reader)
-    } finally StorageNative.filesystemDestroy(fs)
+      } finally reader.close()
+    } finally {
+      try if (fs != null) fs.close()
+      finally properties.free()
+    }
   }
 
   test("s3 backend reads the same object out of the UAT bucket") {
@@ -80,7 +86,7 @@ class StorageNativeUatTest extends AnyFunSuite with Matchers {
       cancel("set AWS_SECRET_ACCESS_KEY")
     )
 
-    val props = scala.collection.mutable.Map(
+    val props = mutable.Map(
       "fs.storage_type" -> "remote",
       "fs.cloud_provider" -> "aws",
       "fs.address" -> endpoint,
@@ -102,14 +108,20 @@ class StorageNativeUatTest extends AnyFunSuite with Matchers {
       env("AWS_SESSION_TOKEN").foreach(t => props += "fs.session_token" -> t)
     }
 
-    val fs = StorageNative.filesystemGet(props.toMap.asJava, "")
+    val properties = new MilvusStorageProperties()
+    var fs: MilvusStorageFileSystem = null
     try {
-      val actual = StorageNative.readFileAll(fs, key)
+      properties.create(props.toMap)
+      fs = new MilvusStorageFileSystem(properties, "")
+      val actual = fs.readFileAll(key)
       info(s"read ${actual.length} bytes from s3://$bucket/$key")
       env("MILVUS_JNI_EXPECTED_SHA256").foreach { expected =>
         sha256(actual) shouldBe expected
       }
       actual.length should be > 0
-    } finally StorageNative.filesystemDestroy(fs)
+    } finally {
+      try if (fs != null) fs.close()
+      finally properties.free()
+    }
   }
 }

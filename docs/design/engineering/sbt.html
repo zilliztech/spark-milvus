@@ -75,7 +75,7 @@
 
 <p>apps 和 integration 使用具体项目声明，目录、代码依赖和所属 Spark 线就近可见。integration 使用普通 <code>Test</code> 配置，并在 root 的聚合列表之外；调用 <code>integration40/Test/compile</code> 编译，调用 <code>integration40/test</code> 才运行需要 Milvus、MinIO 的测试。</p>
 
-<p>共享源码的路径直接写在对应源码设置旁边；单纯拼一次路径不需要一个包装函数。JNI JAR 路径和测试 JVM 选项会被多个项目共同使用，保留有明确用途的设置片段。</p>
+<p>共享源码的路径直接写在对应源码设置旁边；单纯拼一次路径不需要一个包装函数。测试 JVM 选项会被多个项目共同使用，保留有明确用途的设置片段。</p>
 
 <h2 id="dependencies">4 版本与依赖的写法</h2>
 
@@ -90,6 +90,9 @@
 <p><code>Dependencies</code> 集中共享坐标和需要一起维护的依赖组合；模块特有的依赖可以直接写在模块声明中。组合的名字要说明用途，不能仅因两个模块碰巧有相同的列表，就把它们绑定为同一种规则。</p>
 
 <p>依赖声明要能解释三件事：编译用什么、运行时由谁提供、是否进入交付的 JAR。<code>provided</code> 和 <code>Test</code> 属于契约。Jackson 对齐只用于 core、compat、client，Spark 线使用自身的一组运行时依赖。整理配置时保留已有的版本、scope 和 exclusions，版本升级单独说明原因和验证依据。</p>
+
+<p><code>native-storage</code> 从固定的 <code>milvus-storage/java/src/main</code> 编译上游 Java/Scala 绑定，使用 <code>Modules.sparkFreeModuleSettings</code> 交叉编译 Scala 2.12/2.13，Arrow 按 4.0 线编译并标为 <code>provided</code>。不引入上游 sbt 项目或仅支持 Scala 2.13 的预编译 JAR。<code>Compile / sourceGenerators</code> 用 <code>Sync</code> 将上游源码复制到 <code>sourceManaged</code>，格式化不触及子模块原文件；清理仅作用于该任务曾生成的副本。初始化子模块是编译前提。</p>
+<p>存储 JNI 和 <code>NativeLibraryLoader</code> 均归上游；资源打包 <code>libmilvus-storage-jni</code>、storage 引擎及依赖，不再构建或加载 <code>libnative-storage-jni</code>。本次迁移已有新的 Scala 交叉编译、单元测试、原生加载及真实 UAT 结果；严格 JNI 告警与最终打包运行的边界见<a href="../architecture/storage-io.html#state">存储 I/O 验收状态</a>。</p>
 
 <p><code>native-vector</code> 的 Knowhere API 尚未发布到公共 Maven 仓库，因此由 <code>KnowhereBuild.settings</code> 从固定提交且带 SHA-256 校验的源码归档编译上游 Java API，作为编译依赖传递给 core。
 原生引擎由显式脚本构建，平台 JAR 通过 <code>knowhere.native.jar</code> 选择并验证来源和摘要。它只含资源，通过 <code>Compile / unmanagedJars</code> 随模块依赖传递到 core、Spark 的运行时及 assembly；只放 Runtime 会在现有项目间编译依赖映射中丢失。普通编译和单元测试不隐式启动 Conan/CMake。
@@ -106,7 +109,7 @@
 <ul>
 <li>根产物沿用现有 <code>spark-connector</code> 坐标、带分支与架构的版本，以及 Docker 查找的 assembly 文件名。分线发布契约和下游迁移验证就绪后，再替换这一交付入口。</li>
 <li><code>legacyRootDeps</code> 保留旧根产物的依赖声明；<code>legacyRootArrow</code> 只说明该声明的来源，最终解析版本还受依赖图影响。它不作为 Spark 线的 Arrow 基线。</li>
-<li><code>legacyJni</code> 已随上游 Scala 2.13 JNI JAR 一并移除（2026-09-12）：native-storage 接手读写两侧的 <code>loon_*</code> 入口之后，这个 unmanaged jar 不再进构建。core、compat、client 与 spark35 在 <code>++2.12.20</code> 下实测编过；是否发布 Spark 3.5 的 Scala 2.12 产物是独立的交付决定。</li>
+<li><code>legacyJni</code> 与上游预编译 Scala 2.13 JAR 于 2026-09-12 移除。2026-09-16 改为从上游源码按当前 Scala 版本编译，新绑定的 Scala 2.12 交叉编译已通过；旧 unmanaged JAR 不恢复。</li>
 <li>Maven POM 排除已嵌入、尚未独立发布的模块依赖，外部依赖保留。JAR 内容和依赖元数据分别核对；Maven POM 的处理不能证明本地 Ivy 发布也正确。</li>
 </ul>
 
@@ -128,7 +131,7 @@
 共享依赖从 Knowhere 平台 JAR 生成到 storage 的 managed resources，同路径原始资源不进入该次打包；
 源目录和 Knowhere JAR 保持不变。不选 Knowhere 时恢复原始资源，资源同步必须覆盖选项切换。
 这个构建规则不增加两个原生模块之间的依赖，也不改变运行时加载顺序。</p>
-<p>Linux 原生资源在打包前检查 <code>libmilvus-storage.so</code> 和 <code>libnative-storage-jni.so</code> 的重定位；选择 Knowhere 后，还要检查共享依赖替换后的完整目录。检查进程清空 <code>LD_PRELOAD</code> 和 <code>LD_LIBRARY_PATH</code>，解析 <code>ldd -r</code> 的诊断输出，出现未定义符号、缺库或缺符号版本即失败；该命令遇到未定义符号可能仍返回 0，不能只看退出码。跨平台打包需要在对应 Linux 架构的执行环境验收，不在宿主平台假装执行成功。</p>
+<p>Linux 原生资源在打包前检查 <code>libmilvus-storage.so</code> 和 <code>libmilvus-storage-jni.so</code> 的重定位；选择 Knowhere 后，还要检查共享依赖替换后的完整目录。检查进程清空 <code>LD_PRELOAD</code> 和 <code>LD_LIBRARY_PATH</code>，解析 <code>ldd -r</code> 的诊断输出，出现未定义符号、缺库或缺符号版本即失败；该命令遇到未定义符号可能仍返回 0，不能只看退出码。跨平台打包需要在对应 Linux 架构的执行环境验收，不在宿主平台假装执行成功。</p>
 <p>新增兼容记录之前，两个入口库各自在独立进程中通过 <code>dlopen(RTLD_NOW | RTLD_LOCAL)</code>，强制立即解析动态符号；再以 <code>LD_BIND_NOW=1</code> 启动两个独立 JVM，分别先加载 storage 或 Knowhere，执行文件读写与实际搜索。JVM 只预加载自身 JRE 的 <code>libjsig</code>；缺失依赖必须在原生链接时声明，不能靠预加载 Folly 或 libaio 通过验收。真实实例数据与最终 JAR 的运行测试验证存储访问、索引格式和 C++ 对象兼容性，不能由重定位检查替代。</p>
 <p><code>KnowhereBuild.settings</code> 从已校验来源与 JAR 摘要的 provenance 读取 <code>build.with_cardinal</code>，生成 <code>META-INF/milvus/knowhere-runtime.properties</code>。运行时由 <code>NativeVectorLibrary.RuntimeInfo.cardinalSupported()</code> 读取；没有选平台产物或使用任意 <code>knowhere.native.path</code> 覆盖时不声明 Cardinal 能力。该记录说明构建特性，不代替真实索引反序列化、搜索或 storage 共存验证。</p>
 </main>

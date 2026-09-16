@@ -41,16 +41,45 @@ lazy val root = project
     rootPublishingSettings
   )
 
-// Layer 1: the two native library wrappers. Plain Java, no Scala suffix.
+// Layer 1: upstream native bindings. Storage's Scala API is cross-built;
+// Knowhere's API is plain Java.
 lazy val nativeStorage = Project("native-storage", file("native-storage"))
   .settings(KnowhereBuild.storageSettings)
   .settings(
     name := "native-storage",
     moduleName := "spark-milvus-native-storage",
-    Modules.javaOnly,
-    // No dependency on the upstream binding: NativeStorageLibrary extracts and
-    // loads libmilvus-storage and libnative-storage-jni itself. Layer 1 is
-    // self-contained, which is the precondition for deleting that binding.
+    Modules.sparkFreeModuleSettings,
+    // Compile the pinned upstream API against this build's Scala version.
+    // Importing upstream's sbt project would also import its Spark/Arrow pins.
+    Compile / sourceGenerators += Def.task {
+      val upstream =
+        (ThisBuild / baseDirectory).value / "milvus-storage" / "java" / "src" / "main"
+      require(
+        (upstream / "java" / "io" / "milvus" / "storage" / "NativeLibraryLoader.java").isFile,
+        "Initialize milvus-storage before compiling: git submodule update --init milvus-storage"
+      )
+      val output = (Compile / sourceManaged).value / "milvus-storage"
+      val sources =
+        ((upstream / "java" ** "*.java") +++ (upstream / "scala" ** "*.scala")).get
+      val mappings = sources.map { source =>
+        source -> (output / IO.relativize(upstream, source).get)
+      }
+      // Generated copies keep this repository's formatter out of upstream's
+      // sources. Sync removes only previously generated files that disappeared.
+      Sync.sync(streams.value.cacheStoreFactory.make("storage-api"))(mappings)
+      mappings.map(_._2)
+    }.taskValue,
+    libraryDependencies ++= Seq(
+      "org.apache.arrow" % "arrow-vector" % Versions
+        .line("4.0")
+        .arrow % "provided",
+      "org.apache.arrow" % "arrow-memory-core" % Versions
+        .line("4.0")
+        .arrow % "provided",
+      "org.apache.arrow" % "arrow-c-data" % Versions
+        .line("4.0")
+        .arrow % "provided"
+    ),
     publish / skip := true
   )
 
@@ -121,7 +150,7 @@ lazy val core = project
       scalapbRuntime % "protobuf",
       scalaTest % Test
     ),
-    // The native suites here load libnative-storage-jni and hand Arrow C
+    // The native suites here load libmilvus-storage-jni and hand Arrow C
     // structs across, which needs the library path and the java.nio add-opens
     // the Spark lines already get.
     inConfig(Test)(Modules.nativeTest),

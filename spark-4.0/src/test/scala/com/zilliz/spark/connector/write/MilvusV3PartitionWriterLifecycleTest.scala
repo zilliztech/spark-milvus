@@ -1,6 +1,8 @@
 package com.zilliz.spark.connector.write
 
 import java.nio.file.{Files, Path}
+import java.util.Comparator
+import java.util.HashMap
 import scala.collection.JavaConverters._
 
 import org.apache.spark.sql.catalyst.InternalRow
@@ -9,9 +11,9 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
+import io.milvus.storage.NativeLibraryLoader
 
 /** The writer's resource lifecycle against the real native writer.
   *
@@ -26,17 +28,12 @@ class MilvusV3PartitionWriterLifecycleTest extends AnyFunSuite with Matchers {
 
   private def skipWithoutLibrary(): Unit =
     try
-      StorageNative.filesystemDestroy(
-        StorageNative.filesystemGet(
-          Map("fs.storage_type" -> "local").asJava,
-          ""
-        )
-      )
+      NativeLibraryLoader.loadLibrary()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
-        cancel("libnative-storage-jni is not on this machine")
+        cancel("libmilvus-storage-jni is not on this machine")
       case _: RuntimeException =>
-        cancel("libnative-storage-jni is not on this machine")
+        cancel("libmilvus-storage-jni is not on this machine")
     }
 
   private val schema = WriteSchema.resolve(
@@ -57,7 +54,7 @@ class MilvusV3PartitionWriterLifecycleTest extends AnyFunSuite with Matchers {
   )
 
   private def writerFor(dir: Path): MilvusV3PartitionWriter = {
-    val options = new java.util.HashMap[String, String]()
+    val options = new HashMap[String, String]()
     options.put("fs.storage_type", "local")
     options.put("fs.root_path", dir.toAbsolutePath.toString)
     options.put(MilvusOption.WriterCustomPath, "segment-0")
@@ -75,7 +72,7 @@ class MilvusV3PartitionWriterLifecycleTest extends AnyFunSuite with Matchers {
     finally
       Files
         .walk(dir)
-        .sorted(java.util.Comparator.reverseOrder())
+        .sorted(Comparator.reverseOrder())
         .forEach(Files.deleteIfExists(_))
   }
 

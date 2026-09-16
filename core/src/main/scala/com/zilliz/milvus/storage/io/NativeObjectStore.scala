@@ -1,36 +1,31 @@
 package com.zilliz.milvus.storage.io
 
-import scala.collection.JavaConverters._
-
-import com.zilliz.milvus.jni.storage.{StorageNative, StorageNativeException}
+import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
 
 /** [[ObjectStore]] over milvus-storage's C filesystem.
   *
   * The handle is a pointer inside this process: never serialize it, and close
   * the store when the task ends.
   */
-final class NativeObjectStore private (handle: Long) extends ObjectStore {
+final class NativeObjectStore private (
+    filesystem: MilvusStorageFileSystem,
+    properties: MilvusStorageProperties
+) extends ObjectStore {
 
   private var closed = false
 
   override def readAll(key: String): Array[Byte] =
-    StorageNative.readFileAll(active, key)
+    active.readFileAll(key)
 
-  override def size(key: String): Long = StorageNative.fileSize(active, key)
+  override def size(key: String): Long = active.fileSize(key)
 
   override def list(key: String, recursive: Boolean): Seq[FileInfo] =
-    StorageNative
-      .listDir(active, key, recursive)
+    active
+      .list(key, recursive)
       .toSeq
       .map(e => FileInfo(e.path, e.isDirectory, e.size, e.modifiedNanos))
 
-  override def exists(key: String): Boolean =
-    try {
-      StorageNative.fileSize(active, key)
-      true
-    } catch {
-      case _: StorageNativeException => false
-    }
+  override def exists(key: String): Boolean = active.exists(key)
 
   override def readAt(
       key: String,
@@ -38,32 +33,33 @@ final class NativeObjectStore private (handle: Long) extends ObjectStore {
       length: Long,
       fileSize: Long
   ): Array[Byte] = {
-    val reader = StorageNative.openReader(active, key, fileSize)
-    try StorageNative.readerReadAt(reader, offset, length)
-    finally StorageNative.readerDestroy(reader)
+    val reader = active.openReader(key, fileSize)
+    try reader.readAt(offset, length)
+    finally reader.close()
   }
 
   override def write(key: String, data: Array[Byte]): Unit =
-    StorageNative.writeFile(active, key, data)
+    active.writeFile(key, data)
 
   override def createDir(key: String, recursive: Boolean): Unit =
-    StorageNative.createDir(active, key, recursive)
+    active.createDir(key, recursive)
 
   override def delete(key: String): Unit =
-    StorageNative.deleteFile(active, key)
+    active.deleteFile(key)
 
   override def close(): Unit = synchronized {
     if (!closed) {
-      StorageNative.filesystemDestroy(handle)
       closed = true
+      try filesystem.close()
+      finally properties.free()
     }
   }
 
-  private def active: Long = {
+  private def active: MilvusStorageFileSystem = {
     if (closed) {
       throw new IllegalStateException("object store is closed")
     }
-    handle
+    filesystem
   }
 }
 
@@ -74,9 +70,25 @@ object NativeObjectStore {
     */
   final case class Factory(properties: Map[String, String])
       extends ObjectStoreFactory {
-    override def open(path: String): ObjectStore =
-      new NativeObjectStore(
-        StorageNative.filesystemGet(properties.asJava, path)
-      )
+    override def open(path: String): ObjectStore = {
+      val nativeProperties = new MilvusStorageProperties()
+      var filesystem: MilvusStorageFileSystem = null
+      try {
+        nativeProperties.create(properties)
+        filesystem = new MilvusStorageFileSystem(nativeProperties, path)
+        new NativeObjectStore(filesystem, nativeProperties)
+      } catch {
+        case failure: Throwable =>
+          try if (filesystem != null) filesystem.close()
+          catch {
+            case closeFailure: Throwable => failure.addSuppressed(closeFailure)
+          }
+          try nativeProperties.free()
+          catch {
+            case closeFailure: Throwable => failure.addSuppressed(closeFailure)
+          }
+          throw failure
+      }
+    }
   }
 }

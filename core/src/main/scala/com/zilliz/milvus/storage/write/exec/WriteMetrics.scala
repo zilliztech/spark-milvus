@@ -4,8 +4,8 @@ package com.zilliz.milvus.storage.write.exec
   * docs/design/architecture/storage-io.html section 5.
   *
   * @param jniCalls
-  *   calls into `StorageNative` by this writer, the open and the finishing
-  *   close included
+  *   calls into the upstream milvus-storage binding by this writer, the open
+  *   and the finishing close included
   * @param jniNanos
   *   wall time spent inside those calls
   * @param batches

@@ -256,9 +256,10 @@ R6 的普通扫描入口按<a href="expressions.html">谓词设计</a>把 DataSo
 候选扩大不等于精确召回保证；召回率单独验证。读取主键和过滤列可能扫描整段，但不应因此读取所有原始向量逐条计算距离。</p>
 
 <h3>7.2 按物理行号回取业务列</h3>
-<p><code>SegmentReader.take(offsets, columns)</code> 已接通 <code>StorageNative</code> 对
-<a href="https://github.com/milvus-io/milvus-storage/blob/cb22dfaa01175c429edbd0fb6794251f1a58f400/cpp/include/milvus-storage/ffi_c.h#L705">loon_take</a> 与 Manifest reader 对应入口的绑定。
-使用匹配的 reader handle 类型，返回 Arrow 批并遵守 C Data Interface 的 release 契约；批导入/释放后，还要通过 <code>loon_free_chunk_arrays</code> 释放外层结果数组。</p>
+<p><code>SegmentReader.take(offsets, columns)</code> 调用上游 <code>MilvusStorageReader.takeRecordBatchReaderScala</code>，由该 JNI 调用
+<a href="https://github.com/milvus-io/milvus-storage/blob/cb22dfaa01175c429edbd0fb6794251f1a58f400/cpp/include/milvus-storage/ffi_c.h#L705">loon_take</a>。
+上游 JNI 把返回数组导入独立持有 Arrow 批的 reader，并释放外层结果数组；源 segment reader 可以先关闭。
+JVM 逐批导入时遵守 C Data Interface 的 release 契约，使用完毕或提前结束时通过 <code>destroyRecordBatchReaderScala</code> 关闭结果 reader。迁移设计见 <a href="storage-io.html#upstream-jni">storage-io 第六节</a>。</p>
 <p>空 offsets 直接返回空结果，不调用拒绝空输入的 <code>loon_take</code>。其他情况先校验 offset 在段行数范围内，排序去重后调用 take，再依据映射恢复搜索次序。候选分数绑定原始 offset，不能和排序后的行错配。
 非 nullable FloatVector 首先验证一对一映射；nullable、剔除部分行后压缩 ID 或重排行号的索引需要恢复其专用映射后才进入支持范围。</p>
 

@@ -1,8 +1,6 @@
 package com.zilliz.milvus.storage.write.exec
 
-import scala.collection.JavaConverters._
-
-import com.zilliz.milvus.jni.storage.StorageNative
+import io.milvus.storage.{MilvusStorageProperties, MilvusStorageTransaction}
 
 /** Records written column groups in a V3 segment's manifest: one transaction on
   * the latest manifest version, committed as the next version.
@@ -39,34 +37,32 @@ object ManifestTransaction {
       stats: Seq[Stat] = Seq.empty
   ): Long = {
     // -1 reads the latest version; 0 fails on a conflicting commit; one retry.
-    val transaction =
-      StorageNative.transactionBegin(basePath, properties.asJava, -1L, 0, 1)
+    val nativeProperties = new MilvusStorageProperties()
+    var transaction: MilvusStorageTransaction = null
     val version =
       try {
+        nativeProperties.create(properties)
+        transaction = new MilvusStorageTransaction()
+        transaction.begin(basePath, nativeProperties.getPtr, -1L, 0, 1)
         change match {
           case AppendFiles =>
-            StorageNative.transactionAppendFiles(
-              transaction,
-              groups.nativeHandle
-            )
+            transaction.appendFiles(groups.nativeHandle)
           case ReplaceColumns(columns) =>
-            columns.foreach(StorageNative.transactionDropColumn(transaction, _))
-            StorageNative.transactionAddColumnGroups(
-              transaction,
-              groups.nativeHandle
-            )
+            columns.foreach(transaction.dropColumn)
+            transaction.addColumnGroups(groups.nativeHandle)
         }
         stats.foreach { stat =>
-          StorageNative.transactionUpdateStat(
-            transaction,
+          transaction.updateStat(
             stat.key,
             stat.files.toArray,
-            stat.metadata.keys.toArray,
-            stat.metadata.values.toArray
+            stat.metadata
           )
         }
-        StorageNative.transactionCommit(transaction)
-      } finally StorageNative.transactionDestroy(transaction)
+        transaction.commit()
+      } finally {
+        try if (transaction != null) transaction.destroy()
+        finally nativeProperties.free()
+      }
     if (version < 0) {
       throw new IllegalStateException(
         s"committing the manifest at $basePath failed (version $version)"

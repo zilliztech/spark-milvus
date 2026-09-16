@@ -20,14 +20,13 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.jni.storage.{StorageNative, StorageNativeException}
-import com.zilliz.milvus.jni.storage.loader.NativeStorageLibrary
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
 import com.zilliz.milvus.storage.write.exec.{
   ManifestTransaction,
   V3SegmentWriter
 }
+import io.milvus.storage.{MilvusStorageException, NativeLibraryLoader}
 
 /** Native random row retrieval over real local parquet files. */
 class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
@@ -54,10 +53,10 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
   private def withFixture(
       body: (Path, RootAllocator, Map[String, String]) => Unit
   ): Unit = {
-    try NativeStorageLibrary.load()
+    try NativeLibraryLoader.loadLibrary()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
-        cancel("libnative-storage-jni is not on this machine")
+        cancel("libmilvus-storage-jni is not on this machine")
     }
     val directory = Files.createTempDirectory("segment-reader-take")
     val allocator = new RootAllocator(Long.MaxValue)
@@ -345,7 +344,7 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
       try {
         Files.move(file, hidden)
         try
-          intercept[StorageNativeException](reader.take(Array(0L), Seq("100")))
+          intercept[MilvusStorageException](reader.take(Array(0L), Seq("100")))
         finally Files.move(hidden, file)
         val selected = reader.take(Array(1L), Seq("100"))
         try readIds(selected)._1 shouldBe Seq(11L)

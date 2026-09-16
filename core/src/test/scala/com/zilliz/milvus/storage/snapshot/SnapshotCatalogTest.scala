@@ -77,7 +77,10 @@ class SnapshotCatalogTest extends AnyFunSuite {
   private val avroKey = "files/snapshots/10/manifests/1/30.avro"
 
   private def indexedSnapshotJson: String = snapshotJson("indexed", 100L)
-    .replace("\"manifest_list\": []", s"\"manifest_list\": [\"$avroKey\"]")
+    .replace(
+      "\"manifest_list\": []",
+      "\"manifest_list\": [\"" + avroKey + "\"]"
+    )
     .replace(
       "\"indexes\": []",
       """"format_version": 4,
@@ -197,7 +200,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
         "snapshot.json",
         snapshotJson("with-l0", 100L).replace(
           "\"manifest_list\": []",
-          s"\"manifest_list\": [\"$key\"]"
+          "\"manifest_list\": [\"" + key + "\"]"
         )
       )
       val missing =

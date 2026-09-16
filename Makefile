@@ -12,36 +12,23 @@ RESOURCES_DIR := native-storage/src/main/resources
 MILVUS_STORAGE_CPP := milvus-storage/cpp
 TARGET_DIR := target
 
-# Platform. Three things differ and all three bite:
-#   - suffix: add_library(... SHARED) sets no SUFFIX, so CMake emits .dylib on
-#     Apple and .so elsewhere.
-#   - build dir: cpp/build/Release/lib is filled by a POST_BUILD step that sits
-#     inside `if(NOT APPLE)` in cpp/CMakeLists.txt, so on macOS the libraries
-#     stay in cpp/build/Release and that lib/ directory never exists.
-#   - resource dir: NativeLibraryLoader.stripPlatformPrefix skips any entry that
-#     is not under native/<platform>/, so copying flat into native/ loads
-#     nothing.
+# CMake writes the engine and JNI libraries to Release on both platforms.
+# Conan collects their shared dependencies, including provider directories,
+# under Release/libs. NativeLibraryLoader selects native/<platform>/ resources.
+MILVUS_STORAGE_BUILD := $(MILVUS_STORAGE_CPP)/build/Release
+MILVUS_STORAGE_DEPS := $(MILVUS_STORAGE_BUILD)/libs
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_S),Darwin)
   LIB_SUFFIX := dylib
-  MILVUS_STORAGE_BUILD := $(MILVUS_STORAGE_CPP)/build/Release
   NATIVE_PLATFORM := darwin-$(if $(filter arm64 aarch64,$(UNAME_M)),aarch64,x86_64)
 else
   LIB_SUFFIX := so
-  MILVUS_STORAGE_BUILD := $(MILVUS_STORAGE_CPP)/build/Release/lib
   NATIVE_PLATFORM := linux-$(if $(filter arm64 aarch64,$(UNAME_M)),aarch64,x86_64)
 endif
 NATIVE_DIR := $(RESOURCES_DIR)/native/$(NATIVE_PLATFORM)
 STORAGE_LIB := $(MILVUS_STORAGE_BUILD)/libmilvus-storage.$(LIB_SUFFIX)
 STORAGE_JNI_LIB := $(MILVUS_STORAGE_BUILD)/libmilvus-storage-jni.$(LIB_SUFFIX)
-
-# This repository's own JNI library. Its CMakeLists sets LIBRARY_OUTPUT_DIRECTORY
-# to whichever directory libmilvus-storage was found in, so it lands beside the
-# libraries above and copy-native-libs collects all three in one step.
-NATIVE_JNI_SRC := native-storage/src/main/cpp
-NATIVE_JNI_BUILD := $(NATIVE_JNI_SRC)/build
-NATIVE_JNI_LIB := $(MILVUS_STORAGE_BUILD)/libnative-storage-jni.$(LIB_SUFFIX)
 
 # Colors for output
 RED := \033[0;31m
@@ -51,10 +38,10 @@ BLUE := \033[0;34m
 NC := \033[0m # No Color
 
 # All phony targets
-.PHONY: all help check-deps init-submodules build-milvus-storage build-native-jni copy-native-libs clean package test compile-it run-demo rebuild quick-build status
+.PHONY: all help check-deps init-submodules build-milvus-storage copy-native-libs clean package test compile-it run-demo rebuild quick-build status
 
 # Default target
-all: clean build-milvus-storage build-native-jni copy-native-libs package
+all: clean build-milvus-storage copy-native-libs package
 
 # Help target
 help:
@@ -64,7 +51,6 @@ help:
 	@echo "  $(GREEN)all$(NC)                    - Complete build process"
 	@echo "  $(GREEN)clean$(NC)                  - Clean all build artifacts"
 	@echo "  $(GREEN)build-milvus-storage$(NC)   - Build milvus-storage with JNI support"
-	@echo "  $(GREEN)build-native-jni$(NC)       - Build this repository's libnative-storage-jni"
 	@echo "  $(GREEN)copy-native-libs$(NC)       - Copy native libraries to resources"
 	@echo "  $(GREEN)package$(NC)                - Package JAR with native libraries"
 	@echo "  $(GREEN)test$(NC)                   - Type-check tests (incl. integration) and run unit tests"
@@ -112,27 +98,6 @@ build-milvus-storage: check-deps init-submodules
 		exit 1; \
 	fi
 
-# Build this repository's JNI library
-#
-# Every read and write goes through it since the upstream Java binding left the
-# build, and NativeStorageLibrary loads it by name, so a jar without it fails at
-# the first native call with UnsatisfiedLinkError.
-#
-# It links against libmilvus-storage and reads its Arrow headers out of the
-# conan metadata that build generated, so build-milvus-storage has to run first.
-build-native-jni: build-milvus-storage
-	@echo "$(BLUE)Building libnative-storage-jni...$(NC)"
-	@cmake -S $(NATIVE_JNI_SRC) -B $(NATIVE_JNI_BUILD) -DCMAKE_BUILD_TYPE=Release
-	@cmake --build $(NATIVE_JNI_BUILD) --parallel
-	@if [ -f "$(NATIVE_JNI_LIB)" ]; then \
-		echo "$(GREEN)✓ Built libnative-storage-jni$(NC)"; \
-		ls -lh $(NATIVE_JNI_LIB); \
-	else \
-		echo "$(RED)Error: Failed to build libnative-storage-jni$(NC)"; \
-		echo "$(YELLOW)Looked for $(NATIVE_JNI_LIB)$(NC)"; \
-		exit 1; \
-	fi
-
 # Copy native libraries to resources directory
 copy-native-libs: $(NATIVE_DIR)
 	@echo "$(BLUE)Copying native libraries to $(NATIVE_DIR)...$(NC)"
@@ -140,13 +105,25 @@ copy-native-libs: $(NATIVE_DIR)
 		echo "$(YELLOW)Native libraries not found, building first...$(NC)"; \
 		$(MAKE) build-milvus-storage; \
 	fi
-	@if [ ! -f "$(NATIVE_JNI_LIB)" ]; then \
-		echo "$(YELLOW)libnative-storage-jni not found, building first...$(NC)"; \
-		$(MAKE) build-native-jni; \
+	@rm -f "$(NATIVE_DIR)/libnative-storage-jni.$(LIB_SUFFIX)"
+	@cp -L "$(STORAGE_LIB)" "$(STORAGE_JNI_LIB)" "$(NATIVE_DIR)/"
+	@set -e; \
+	test -d "$(MILVUS_STORAGE_DEPS)"; \
+	for library in "$(MILVUS_STORAGE_DEPS)"/*.$(LIB_SUFFIX)*; do \
+		[ -f "$$library" ] || continue; \
+		cp -L "$$library" "$(NATIVE_DIR)/"; \
+	done; \
+	for subdir in ossl-modules engines-3; do \
+		if [ -d "$(MILVUS_STORAGE_DEPS)/$$subdir" ]; then \
+			mkdir -p "$(NATIVE_DIR)/$$subdir"; \
+			cp -RL "$(MILVUS_STORAGE_DEPS)/$$subdir/." "$(NATIVE_DIR)/$$subdir/"; \
+		fi; \
+	done
+	@if [ "$(UNAME_S)" != Darwin ]; then \
+		bash "$(MILVUS_STORAGE_CPP)/../java/patch_native_runpath.sh" "$(NATIVE_DIR)"; \
 	fi
-	@cp $(MILVUS_STORAGE_BUILD)/*.$(LIB_SUFFIX)* $(NATIVE_DIR)/
-	@if [ ! -f "$(NATIVE_DIR)/libnative-storage-jni.$(LIB_SUFFIX)" ]; then \
-		echo "$(RED)Error: libnative-storage-jni did not reach $(NATIVE_DIR)$(NC)"; \
+	@if [ ! -f "$(NATIVE_DIR)/libmilvus-storage-jni.$(LIB_SUFFIX)" ]; then \
+		echo "$(RED)Error: libmilvus-storage-jni did not reach $(NATIVE_DIR)$(NC)"; \
 		exit 1; \
 	fi
 	@echo "$(GREEN)✓ Copied native libraries to resources$(NC)"
@@ -174,8 +151,6 @@ clean-all: clean
 	@if [ -d "$(MILVUS_STORAGE_CPP)" ]; then \
 		cd $(MILVUS_STORAGE_CPP) && make clean; \
 	fi
-	@echo "$(BLUE)Cleaning libnative-storage-jni build...$(NC)"
-	@rm -rf $(NATIVE_JNI_BUILD)
 	@echo "$(GREEN)Clean all complete$(NC)"
 
 # Package JAR with native libraries

@@ -1,6 +1,9 @@
 package com.zilliz.milvus.storage.io
 
 import java.nio.file.{Files, Path}
+import java.util.{Map => JavaMap}
+import java.util.Collections
+import java.util.Comparator
 import scala.collection.JavaConverters._
 
 import org.apache.arrow.c.{ArrowArray, ArrowSchema, Data}
@@ -10,7 +13,6 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.jni.storage.StorageNative
 import com.zilliz.milvus.storage.read.exec.{
   SegmentReader,
   SegmentReaderRegistry
@@ -18,8 +20,16 @@ import com.zilliz.milvus.storage.read.exec.{
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
+import io.milvus.storage.{
+  MilvusStorageColumnGroups,
+  MilvusStorageProperties,
+  MilvusStorageReader,
+  MilvusStorageWriter,
+  NativeLibraryLoader
+}
 
-/** Writes a segment through our JNI and reads it back through our JNI.
+/** Writes a segment through milvus-storage's JNI and reads it back through
+  * milvus-storage's JNI.
   *
   * This is the strongest check the write path has without a live Milvus: it
   * exercises both directions of the Arrow boundary and the column groups the
@@ -29,15 +39,15 @@ import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
   * count is what it is. `reader.record_batch_max_rows` defaults to 8192, so the
   * packed reader only starts handing back sliced batches
   * (`rb->Slice(min_rows)`) once more than 16384 rows are read. Below that the
-  * offset materialization in segment_reader_jni.cpp never runs, and a test that
-  * stayed under the boundary would pass just as happily against the broken
+  * offset materialization in milvus_storage_reader.cpp never runs, and a test
+  * that stayed under the boundary would pass just as happily against the broken
   * ArrowArrayStream path.
   *
   * The check itself is that values stay strictly in step with the row offset.
   * If a sliced batch were imported without honouring `ArrowArray.offset`, every
   * batch after the first would restart from row 0 and the comparison fails.
   *
-  * Needs libnative-storage-jni, so it skips where the library is absent, which
+  * Needs libmilvus-storage-jni, so it skips where the library is absent, which
   * is the state of CI.
   */
 class WriterRoundTripTest extends AnyFunSuite with Matchers {
@@ -47,17 +57,12 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
 
   private def skipWithoutLibrary(): Unit =
     try
-      StorageNative.filesystemDestroy(
-        StorageNative.filesystemGet(
-          Map("fs.storage_type" -> "local").asJava,
-          ""
-        )
-      )
+      NativeLibraryLoader.loadLibrary()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
-        cancel("libnative-storage-jni is not on this machine")
+        cancel("libmilvus-storage-jni is not on this machine")
       case _: RuntimeException =>
-        cancel("libnative-storage-jni is not on this machine")
+        cancel("libmilvus-storage-jni is not on this machine")
     }
 
   private val schema = new Schema(
@@ -65,12 +70,12 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       new Field(
         "id",
         new FieldType(false, new ArrowType.Int(64, true), null),
-        java.util.Collections.emptyList[Field]()
+        Collections.emptyList[Field]()
       ),
       new Field(
         "name",
         new FieldType(false, new ArrowType.Utf8(), null),
-        java.util.Collections.emptyList[Field]()
+        Collections.emptyList[Field]()
       )
     ).asJava
   )
@@ -89,7 +94,9 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     root.setRowCount(rows)
   }
 
-  test("a segment written through our JNI reads back with the same values") {
+  test(
+    "a segment written through milvus-storage's JNI reads back with the same values"
+  ) {
     skipWithoutLibrary()
 
     val dir: Path = Files.createTempDirectory("native-writer-roundtrip")
@@ -105,7 +112,8 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     // each take ownership of the struct they are given, so handing the same one
     // to both fails with "Cannot import released ArrowSchema".
     var writeSchema: ArrowSchema = null
-    var writer = 0L
+    var writer: MilvusStorageWriter = null
+    var nativeProperties: MilvusStorageProperties = null
     var written = 0L
     var segmentReader: SegmentReader = null
 
@@ -114,12 +122,15 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       Data.exportSchema(allocator, schema, null, writeSchema)
 
       // --- write ---
-      writer = StorageNative.writerNew(
+      nativeProperties = new MilvusStorageProperties()
+      nativeProperties.create(properties)
+      writer = new MilvusStorageWriter()
+      writer.create(
         "segment",
         writeSchema.memoryAddress(),
-        properties
+        nativeProperties
       )
-      writer should not be 0L
+      writer.isValid shouldBe true
 
       val source = VectorSchemaRoot.create(schema, allocator)
       try {
@@ -127,24 +138,24 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
         val array = ArrowArray.allocateNew(allocator)
         try {
           Data.exportVectorSchemaRoot(allocator, source, null, array)
-          StorageNative.writerWrite(writer, array.memoryAddress())
-          StorageNative.writerFlush(writer)
+          writer.write(array.memoryAddress())
+          writer.flush()
         } finally array.close()
       } finally source.close()
 
-      written = StorageNative.writerClose(writer, null, null)
+      written = writer.close()
       written should not be 0L
 
-      val groupCount = StorageNative.nativeColumnGroupsCount(written)
+      val groupCount = MilvusStorageColumnGroups.count(written)
       groupCount should be > 0
       val files = (0 until groupCount).map(
-        StorageNative.nativeColumnGroupFiles(written, _)
+        MilvusStorageColumnGroups.files(written, _)
       )
       val counts = (0 until groupCount).map(
-        StorageNative.nativeColumnGroupRowCounts(written, _)
+        MilvusStorageColumnGroups.fileRowCounts(written, _)
       )
       val columns = (0 until groupCount).map(
-        StorageNative.nativeColumnGroupColumns(written, _)
+        MilvusStorageColumnGroups.columns(written, _)
       )
       info(
         s"wrote $groupCount column group(s): " +
@@ -211,11 +222,11 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       batches should be >= 3
 
       // The crossing's own account of the same read (G5). Calls so far: open
-      // the column groups, the reader and the batch reader, then one ReadNext
-      // per batch plus the one that returned EOF.
+      // properties allocation and creation, the column groups, the reader and
+      // the batch reader, then one ReadNext per batch and the EOF call.
       val metrics = segmentReader.metrics
       metrics.batches shouldBe batches.toLong
-      metrics.jniCalls shouldBe 3L + batches + 1L
+      metrics.jniCalls shouldBe 5L + batches + 1L
       metrics.jniNanos should be > 0L
       metrics.arrowBytes should be > (rows.toLong * 8)
       metrics.allocatedMax should be > 0L
@@ -223,19 +234,21 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       metrics.copies should be > 0L
       metrics.copiedBytes should be > 0L
       segmentReader.close()
-      // Closing adds the three destroys and keeps the C side's counters.
+      // Closing adds three destroys and frees the properties. Native counters
+      // remain available after close.
       val closed = segmentReader.metrics
-      closed.jniCalls shouldBe metrics.jniCalls + 3L
+      closed.jniCalls shouldBe metrics.jniCalls + 4L
       closed.copies shouldBe metrics.copies
     } finally {
       if (segmentReader != null) segmentReader.close()
-      if (written != 0L) StorageNative.nativeColumnGroupsDestroy(written)
-      if (writer != 0L) StorageNative.writerDestroy(writer)
+      if (written != 0L) MilvusStorageColumnGroups.destroy(written)
+      if (writer != null) writer.destroy()
+      if (nativeProperties != null) nativeProperties.free()
       if (writeSchema != null) writeSchema.close()
       allocator.close()
       Files
         .walk(dir)
-        .sorted(java.util.Comparator.reverseOrder())
+        .sorted(Comparator.reverseOrder())
         .forEach(Files.deleteIfExists(_))
     }
   }
@@ -245,20 +258,24 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     */
   private def writeSegment(
       allocator: RootAllocator,
-      properties: java.util.Map[String, String],
+      properties: JavaMap[String, String],
       segment: String,
       from: Int,
       count: Int
   ): (String, Long) = {
     val schemaStruct = ArrowSchema.allocateNew(allocator)
-    var handle = 0L
+    var writer: MilvusStorageWriter = null
+    var nativeProperties: MilvusStorageProperties = null
     var groups = 0L
     try {
       Data.exportSchema(allocator, schema, null, schemaStruct)
-      handle = StorageNative.writerNew(
+      nativeProperties = new MilvusStorageProperties()
+      nativeProperties.create(properties)
+      writer = new MilvusStorageWriter()
+      writer.create(
         segment,
         schemaStruct.memoryAddress(),
-        properties
+        nativeProperties
       )
       val source = VectorSchemaRoot.create(schema, allocator)
       try {
@@ -276,22 +293,23 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
         val array = ArrowArray.allocateNew(allocator)
         try {
           Data.exportVectorSchemaRoot(allocator, source, null, array)
-          StorageNative.writerWrite(handle, array.memoryAddress())
-          StorageNative.writerFlush(handle)
+          writer.write(array.memoryAddress())
+          writer.flush()
         } finally array.close()
       } finally source.close()
 
-      groups = StorageNative.writerClose(handle, null, null)
-      val files = StorageNative.nativeColumnGroupFiles(groups, 0)
-      val counts = StorageNative.nativeColumnGroupRowCounts(groups, 0)
+      groups = writer.close()
+      val files = MilvusStorageColumnGroups.files(groups, 0)
+      val counts = MilvusStorageColumnGroups.fileRowCounts(groups, 0)
       require(
         files.length == 1,
         s"expected one file per segment, got ${files.toSeq}"
       )
       (files(0), counts(0))
     } finally {
-      if (groups != 0L) StorageNative.nativeColumnGroupsDestroy(groups)
-      if (handle != 0L) StorageNative.writerDestroy(handle)
+      if (groups != 0L) MilvusStorageColumnGroups.destroy(groups)
+      if (writer != null) writer.destroy()
+      if (nativeProperties != null) nativeProperties.free()
       schemaStruct.close()
     }
   }
@@ -319,7 +337,8 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     val shortNames = Seq("a.pq", "b.pq", "c.pq")
     var readSchema: ArrowSchema = null
     var columnGroups = 0L
-    var reader = 0L
+    var reader: MilvusStorageReader = null
+    var nativeProperties: MilvusStorageProperties = null
     var batchReader = 0L
 
     try {
@@ -334,7 +353,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
         (name, count)
       }
 
-      columnGroups = StorageNative.columnGroupsCreate(
+      columnGroups = MilvusStorageColumnGroups.createFromGroups(
         Array(Array("id", "name")),
         Array(shortParts.map(_._1).toArray),
         Array(shortParts.map(_._2).toArray),
@@ -344,14 +363,17 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
 
       readSchema = ArrowSchema.allocateNew(allocator)
       Data.exportSchema(allocator, schema, null, readSchema)
-      reader = StorageNative.readerNew(
+      nativeProperties = new MilvusStorageProperties()
+      nativeProperties.create(properties)
+      reader = new MilvusStorageReader()
+      reader.create(
         columnGroups,
         readSchema.memoryAddress(),
         Array("id", "name"),
-        properties
+        nativeProperties
       )
-      reader should not be 0L
-      batchReader = StorageNative.recordBatchReaderNew(reader, null)
+      reader.isValid shouldBe true
+      batchReader = reader.openRecordBatchReaderScala()
 
       var seen = 0
       var more = true
@@ -359,7 +381,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
         val array = ArrowArray.allocateNew(allocator)
         val batchSchema = ArrowSchema.allocateNew(allocator)
         try {
-          more = StorageNative.recordBatchReaderReadNext(
+          more = reader.readNextBatchScala(
             batchReader,
             array.memoryAddress(),
             batchSchema.memoryAddress()
@@ -385,14 +407,15 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
 
       seen shouldBe (3 * perFile)
     } finally {
-      if (batchReader != 0L) StorageNative.recordBatchReaderDestroy(batchReader)
-      if (reader != 0L) StorageNative.readerDestroySegment(reader)
-      if (columnGroups != 0L) StorageNative.columnGroupsDestroy(columnGroups)
+      if (batchReader != 0L) reader.destroyRecordBatchReaderScala(batchReader)
+      if (reader != null) reader.destroy()
+      if (nativeProperties != null) nativeProperties.free()
+      if (columnGroups != 0L) MilvusStorageColumnGroups.destroy(columnGroups)
       if (readSchema != null) readSchema.close()
       allocator.close()
       Files
         .walk(dir)
-        .sorted(java.util.Comparator.reverseOrder())
+        .sorted(Comparator.reverseOrder())
         .forEach(Files.deleteIfExists(_))
     }
   }
@@ -414,7 +437,8 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
     val perFile = 3000
     var readSchema: ArrowSchema = null
     var columnGroups = 0L
-    var reader = 0L
+    var reader: MilvusStorageReader = null
+    var nativeProperties: MilvusStorageProperties = null
     var batchReader = 0L
 
     try {
@@ -423,7 +447,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       }
       parts.map(_._2).sum shouldBe (3L * perFile)
 
-      columnGroups = StorageNative.columnGroupsCreate(
+      columnGroups = MilvusStorageColumnGroups.createFromGroups(
         Array(Array("id", "name")),
         Array(parts.map(_._1).toArray),
         Array(parts.map(_._2).toArray),
@@ -433,14 +457,17 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
 
       readSchema = ArrowSchema.allocateNew(allocator)
       Data.exportSchema(allocator, schema, null, readSchema)
-      reader = StorageNative.readerNew(
+      nativeProperties = new MilvusStorageProperties()
+      nativeProperties.create(properties)
+      reader = new MilvusStorageReader()
+      reader.create(
         columnGroups,
         readSchema.memoryAddress(),
         Array("id", "name"),
-        properties
+        nativeProperties
       )
-      reader should not be 0L
-      batchReader = StorageNative.recordBatchReaderNew(reader, null)
+      reader.isValid shouldBe true
+      batchReader = reader.openRecordBatchReaderScala()
 
       var seen = 0
       var more = true
@@ -448,7 +475,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
         val array = ArrowArray.allocateNew(allocator)
         val batchSchema = ArrowSchema.allocateNew(allocator)
         try {
-          more = StorageNative.recordBatchReaderReadNext(
+          more = reader.readNextBatchScala(
             batchReader,
             array.memoryAddress(),
             batchSchema.memoryAddress()
@@ -475,14 +502,15 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       // The whole point: every file's rows, not just the first file's.
       seen shouldBe (3 * perFile)
     } finally {
-      if (batchReader != 0L) StorageNative.recordBatchReaderDestroy(batchReader)
-      if (reader != 0L) StorageNative.readerDestroySegment(reader)
-      if (columnGroups != 0L) StorageNative.columnGroupsDestroy(columnGroups)
+      if (batchReader != 0L) reader.destroyRecordBatchReaderScala(batchReader)
+      if (reader != null) reader.destroy()
+      if (nativeProperties != null) nativeProperties.free()
+      if (columnGroups != 0L) MilvusStorageColumnGroups.destroy(columnGroups)
       if (readSchema != null) readSchema.close()
       allocator.close()
       Files
         .walk(dir)
-        .sorted(java.util.Comparator.reverseOrder())
+        .sorted(Comparator.reverseOrder())
         .forEach(Files.deleteIfExists(_))
     }
   }

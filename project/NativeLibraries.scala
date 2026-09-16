@@ -9,7 +9,7 @@ import scala.io.Source
 object NativeLibraries {
   private val entryLibraries = Vector(
     "libmilvus-storage.so",
-    "libnative-storage-jni.so"
+    "libmilvus-storage-jni.so"
   )
 
   private def resources(directory: File): Vector[(String, File)] = {
@@ -53,6 +53,10 @@ object NativeLibraries {
     require(
       System.getProperty("os.name").equalsIgnoreCase("Linux"),
       "Linux native relocation checks require a Linux host"
+    )
+    require(
+      !new File(directory, "libnative-storage-jni.so").exists(),
+      s"Obsolete connector JNI found in $directory; package only the upstream milvus-storage JNI"
     )
     entryLibraries.foreach { name =>
       val library = new File(directory, name)

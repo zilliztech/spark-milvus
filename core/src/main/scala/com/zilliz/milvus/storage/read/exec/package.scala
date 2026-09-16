@@ -1,6 +1,6 @@
 package com.zilliz.milvus.storage.read
 
-/** Batch reading. The only place in core that opens a native handle.
+/** Batch reading. Owns the upstream milvus-storage reader objects in core.
   *
   * `SegmentReader` hands over one Arrow `VectorSchemaRoot` at a time and
   * `SegmentReaderRegistry` opens the right one for a segment's layout, so the
@@ -8,12 +8,17 @@ package com.zilliz.milvus.storage.read
   * three ownership rules — a handle never crosses serialization, a constructor
   * that throws releases what it took, `close()` is idempotent — are kept by
   * `NativeSegmentReader` and explained in
-  * docs/design/architecture/storage-io.html section 3.
+  * docs/design/architecture/storage-io.html section 3. The reader keeps
+  * MilvusStorageProperties alive until it is destroyed, and closes an owned
+  * manifest only after the reader has released its borrowed column groups. JNI
+  * and native library loading belong to milvus-storage.
   *
   * `SegmentReader.take` retrieves sorted, unique physical row indices with a
-  * per-call projection through `loon_take`. Its `TakeResult` owns unread
-  * batches independently of the source reader; each returned root is owned by
-  * the caller. Sequential streams open only on the first `next()` call.
+  * per-call projection through the upstream reader's takeRecordBatchReaderScala
+  * and `loon_take`. Its `TakeResult` owns unread batches independently of the
+  * source reader; each returned root is owned by the caller. The upstream
+  * binding frees the complete native result array. Sequential streams open only
+  * on the first `next()` call.
   *
   * `ColumnBatch` is not here yet. Decision 12 settled that the columnar outlet
   * is worth building and decision 6 settled how vector columns are typed, but

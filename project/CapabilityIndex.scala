@@ -39,7 +39,8 @@ object CapabilityIndex {
     "client." -> Seq("client/src/main/scala/com/zilliz/milvus/client"),
     "apps." -> Seq("apps-4.0/src/main/scala/com/zilliz/spark/connector/apps"),
     "native-storage." -> Seq(
-      "native-storage/src/main/java/com/zilliz/milvus/jni/storage"
+      "milvus-storage/java/src/main/scala/io/milvus/storage",
+      "milvus-storage/java/src/main/java/io/milvus/storage"
     ),
     "native-vector." -> Seq(
       "native-vector/src/main/java/com/zilliz/milvus/jni/vector"
