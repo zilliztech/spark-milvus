@@ -8,10 +8,9 @@ package com.zilliz.milvus.storage.path
   *   - no scheme → the whole string is the key, the caller's bucket wins
   *   - scheme://b/k → the authority is the bucket, the rest is the key
   *
-  * The Milvus three-segment form `scheme://address/bucket/key` is not produced
-  * here, but it is read: DescribeSnapshot's `s3_location` is
-  * `https://<endpoint>/<bucket>/<key>`, and for `http`/`https` the authority is
-  * the endpoint and the first path segment is the bucket.
+  * Milvus-produced `scheme://address/bucket/key` paths go through
+  * [[parseMilvus]]. This general parser never guesses that an authority is an
+  * endpoint.
   */
 object StoragePath {
 
@@ -57,27 +56,61 @@ object StoragePath {
         s"storage URI is missing the key: $trimmed"
       )
     }
-    val scheme = trimmed.substring(0, separator).toLowerCase
-    if (authority.nonEmpty && (scheme == "http" || scheme == "https")) {
-      // Path-style endpoint URL: scheme://endpoint/bucket/key. Milvus writes a
-      // snapshot's location this way (DescribeSnapshot's s3_location), so the
-      // authority is the S3 endpoint, not the bucket, and the first path
-      // segment is the bucket. Virtual-hosted (bucket.endpoint) is not produced
-      // by Milvus and is not handled here.
-      val bucketSlash = key.indexOf('/')
-      if (bucketSlash < 0) {
-        throw new IllegalArgumentException(
-          s"endpoint URI names a bucket but no key: $trimmed"
-        )
-      }
-      return Located(
-        key.substring(0, bucketSlash),
-        stripLeadingSlash(key.substring(bucketSlash + 1))
-      )
-    }
     if (authority.nonEmpty) Located(authority, key)
     else if (bucketHint.nonEmpty) Located(bucketHint, key)
     else Located("", trimmed)
+  }
+
+  /** Parses a path emitted by Milvus metadata.
+    *
+    * With a custom object-storage endpoint, Milvus writes
+    * `scheme://endpoint/bucket/key` instead of the standard
+    * `scheme://bucket/key`. The two forms are distinguished only when the
+    * authority carries an explicit port, or its host exactly matches the
+    * configured endpoint host. No path-segment or dotted-host heuristic is
+    * used, because either would rewrite valid standard bucket URIs.
+    *
+    * Callers must use this method only for paths produced by Milvus. User input
+    * continues through [[parse]].
+    */
+  def parseMilvus(
+      raw: String,
+      defaultBucket: String = "",
+      endpoint: String = ""
+  ): Located = {
+    val standard = parse(raw, defaultBucket)
+    val trimmed = raw.trim
+    val separator = trimmed.indexOf(SchemeSeparator)
+    if (separator < 0) return standard
+
+    val authorityAndPath = trimmed.substring(separator + SchemeSeparator.length)
+    val slash = authorityAndPath.indexOf('/')
+    if (slash < 0) return standard
+
+    val authority = authorityAndPath.substring(0, slash)
+    if (
+      authority.isEmpty ||
+      (!hasExplicitPort(authority) && !matchesEndpointHost(authority, endpoint))
+    ) {
+      return standard
+    }
+
+    val bucketAndKey =
+      stripLeadingSlash(authorityAndPath.substring(slash + 1))
+    val bucketSlash = bucketAndKey.indexOf('/')
+    if (bucketSlash < 0) {
+      throw new IllegalArgumentException(
+        s"endpoint URI names a bucket but no key: $trimmed"
+      )
+    }
+    val bucket = bucketAndKey.substring(0, bucketSlash)
+    val key = stripLeadingSlash(bucketAndKey.substring(bucketSlash + 1))
+    if (bucket.isEmpty || key.isEmpty) {
+      throw new IllegalArgumentException(
+        s"endpoint URI is missing the bucket or key: $trimmed"
+      )
+    }
+    Located(bucket, key)
   }
 
   /** Joins a fragment onto a location.
@@ -109,4 +142,53 @@ object StoragePath {
 
   private def trim(value: String): String =
     Option(value).map(_.trim).getOrElse("")
+
+  private def hasExplicitPort(authority: String): Boolean = {
+    val hostPort = withoutUserInfo(authority)
+    val colon = hostPort.lastIndexOf(':')
+    colon >= 0 && colon < hostPort.length - 1 &&
+    hostPort.substring(colon + 1).forall(_.isDigit) &&
+    (!hostPort.startsWith("[") || hostPort.substring(0, colon).endsWith("]"))
+  }
+
+  private def matchesEndpointHost(
+      authority: String,
+      endpoint: String
+  ): Boolean = {
+    val expected = endpointHost(endpoint)
+    expected.nonEmpty && authorityHost(authority).equalsIgnoreCase(expected)
+  }
+
+  private def endpointHost(endpoint: String): String = {
+    val value = trim(endpoint)
+    if (value.isEmpty) return ""
+    val separator = value.indexOf(SchemeSeparator)
+    val withoutScheme =
+      if (separator < 0) value
+      else value.substring(separator + SchemeSeparator.length)
+    authorityHost(withoutScheme.takeWhile(_ != '/'))
+  }
+
+  private def authorityHost(authority: String): String = {
+    val hostPort = withoutUserInfo(authority)
+    if (hostPort.startsWith("[")) {
+      val close = hostPort.indexOf(']')
+      if (close >= 0) hostPort.substring(0, close + 1).toLowerCase
+      else hostPort.toLowerCase
+    } else {
+      val colon = hostPort.lastIndexOf(':')
+      val host =
+        if (
+          colon >= 0 && colon < hostPort.length - 1 &&
+          hostPort.substring(colon + 1).forall(_.isDigit)
+        ) hostPort.substring(0, colon)
+        else hostPort
+      host.toLowerCase
+    }
+  }
+
+  private def withoutUserInfo(authority: String): String = {
+    val at = authority.lastIndexOf('@')
+    if (at < 0) authority else authority.substring(at + 1)
+  }
 }

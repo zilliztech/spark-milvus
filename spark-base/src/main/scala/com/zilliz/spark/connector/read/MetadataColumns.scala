@@ -5,24 +5,29 @@ import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.read.PartitionReader
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnVector
-import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.{ConstantColumn, RowOffsetColumn}
 
-/** The three columns that describe where a row came from rather than what it
-  * holds: which partition, which segment, and its offset within the segment.
+/** The two columns synthesized from the physical read position: which segment
+  * produced a row and its offset within that segment.
   *
-  * They are not in the data, so every reader has to splice them in, and there
-  * are two shapes to splice them into — a row and a batch — times two storage
-  * lines. One place knows the names and what each one means; the shapes differ
-  * and nothing else does.
+  * `_timestamp` is also a metadata extra column at the Spark API, but it is
+  * stored data (Milvus field id 1). It therefore passes through the normal
+  * column binding instead of being synthesized here.
   */
 object MetadataColumns {
 
-  /** Whether this column is one of the three rather than a real field. */
+  private val SyntheticColumns = Set(
+    MilvusOption.MilvusExtraColumnSegmentID,
+    MilvusOption.MilvusExtraColumnRowOffset
+  )
+
+  def isSyntheticColumn(name: String): Boolean = SyntheticColumns(name)
+
+  /** Whether this requested column is synthesized rather than stored. */
   def isMetadataColumn(name: String, requested: Set[String]): Boolean =
-    requested.contains(name)
+    requested.contains(name) && isSyntheticColumn(name)
 
   /** The column for `name`, or nothing when it is a real field the data
     * carries.
@@ -37,8 +42,6 @@ object MetadataColumns {
       segmentId: Long,
       startOffset: Long
   ): Option[ColumnVector] = name match {
-    case MilvusOption.MilvusExtraColumnPartition =>
-      Some(ConstantColumn.ofString(partitionName))
     case MilvusOption.MilvusExtraColumnSegmentID =>
       Some(ConstantColumn.ofLong(segmentId))
     case MilvusOption.MilvusExtraColumnRowOffset =>
@@ -76,11 +79,11 @@ object MetadataColumns {
         var readIndex = 0
         schema.fields.zipWithIndex.foreach { case (field, writeIndex) =>
           field.name match {
-            case MilvusOption.MilvusExtraColumnPartition =>
-              values(writeIndex) = UTF8String.fromString(partitionName)
-            case MilvusOption.MilvusExtraColumnSegmentID =>
+            case MilvusOption.MilvusExtraColumnSegmentID
+                if requested.contains(field.name) =>
               values(writeIndex) = segmentId
-            case MilvusOption.MilvusExtraColumnRowOffset =>
+            case MilvusOption.MilvusExtraColumnRowOffset
+                if requested.contains(field.name) =>
               values(writeIndex) = underlying.lastReturnedRowOffset
             case _ =>
               values(writeIndex) = row.get(readIndex, field.dataType)

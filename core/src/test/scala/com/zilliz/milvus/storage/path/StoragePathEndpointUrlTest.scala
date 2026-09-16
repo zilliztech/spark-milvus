@@ -9,8 +9,9 @@ import org.scalatest.funsuite.AnyFunSuite
 class StoragePathEndpointUrlTest extends AnyFunSuite {
 
   test("https endpoint URL: first path segment is the bucket") {
-    val located = StoragePath.parse(
-      "https://s3.us-west-2.amazonaws.com/zilliz-aws-abc/c48b/snapshots/1/metadata/2.json"
+    val located = StoragePath.parseMilvus(
+      "https://s3.us-west-2.amazonaws.com/zilliz-aws-abc/c48b/snapshots/1/metadata/2.json",
+      endpoint = "https://s3.us-west-2.amazonaws.com"
     )
     assert(located.bucket == "zilliz-aws-abc")
     assert(located.key == "c48b/snapshots/1/metadata/2.json")
@@ -20,7 +21,7 @@ class StoragePathEndpointUrlTest extends AnyFunSuite {
     "http endpoint URL works the same, and s3a keeps the authority as bucket"
   ) {
     assert(
-      StoragePath.parse("http://minio:9000/b/k/1.json") == Located(
+      StoragePath.parseMilvus("http://minio:9000/b/k/1.json") == Located(
         "b",
         "k/1.json"
       )
@@ -30,7 +31,10 @@ class StoragePathEndpointUrlTest extends AnyFunSuite {
 
   test("an endpoint URL with only a bucket and no key is refused") {
     val err = intercept[IllegalArgumentException](
-      StoragePath.parse("https://s3.us-west-2.amazonaws.com/bucket-only")
+      StoragePath.parseMilvus(
+        "https://s3.us-west-2.amazonaws.com/bucket-only",
+        endpoint = "s3.us-west-2.amazonaws.com"
+      )
     )
     assert(err.getMessage.contains("no key"))
   }

@@ -5,9 +5,10 @@ import java.{util => ju}
 import org.apache.spark.sql.connector.catalog.{Table, TableProvider}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.sources.DataSourceRegister
-import org.apache.spark.sql.types.{StructField, StructType}
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
+import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.spark.connector.options.{MilvusOption, SnapshotSources}
 import com.zilliz.spark.connector.table.MilvusTable
 import com.zilliz.spark.connector.types.SparkTypes
@@ -71,23 +72,44 @@ case class MilvusDataSource() extends TableProvider with DataSourceRegister {
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
     val milvusOption = validate(options)
     val snapshot = resolve(milvusOption, withSegments = false)
-    sparkSchemaOf(snapshot.schema, MilvusOption.readVectorRaw(options))
+    sparkSchemaOf(
+      snapshot.schema,
+      MilvusOption.readVectorRaw(options),
+      MilvusOption.readerFieldIds(options)
+    )
   }
 
   private def sparkSchemaOf(
       schema: CollectionSchema,
-      rawVectors: Boolean
-  ): StructType =
-    StructType(
-      schema.fields.map(field =>
-        StructField(
-          field.name,
-          SparkTypes.toDataType(field, rawVectors),
-          field.nullable,
-          SparkTypes.metadata(field)
-        )
+      rawVectors: Boolean,
+      selectedFieldIds: Seq[Long]
+  ): StructType = {
+    val allFields = SchemaMapper.missingSystemFields(schema) ++ schema.fields
+    val fieldsById = allFields.groupBy(_.fieldID)
+    val duplicateIds = fieldsById
+      .collect {
+        case (id, fields) if fields.size > 1 => id
+      }
+      .toSeq
+      .sorted
+    if (duplicateIds.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Snapshot schema contains duplicate field id(s): ${duplicateIds.mkString(", ")}"
       )
-    )
+    }
+    val missingIds = selectedFieldIds.filterNot(fieldsById.contains)
+    if (missingIds.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Option '${MilvusOption.ReaderFieldIDs}' requests unknown field id(s) ${missingIds
+            .mkString(", ")}; " +
+          s"snapshot field ids are ${fieldsById.keys.toSeq.sorted.mkString(", ")}"
+      )
+    }
+    val selectedFields =
+      if (selectedFieldIds.isEmpty) schema.fields
+      else selectedFieldIds.map(id => fieldsById(id).head)
+    StructType(selectedFields.map(SparkTypes.toStructField(_, rawVectors)))
+  }
 
   override def supportsExternalMetadata = true
 

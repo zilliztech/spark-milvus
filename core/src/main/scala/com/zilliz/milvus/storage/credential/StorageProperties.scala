@@ -106,23 +106,41 @@ object StorageProperties {
       group: Map[String, String],
       label: String
   ): Map[String, String] = {
-    val isRemote = !group(StorageType).equalsIgnoreCase(StorageTypeLocal)
-    if (!isRemote) return group - AccessKeyId - AccessKeyValue
+    val normalized = Seq(UseSSL, UseIam, UseVirtualHost).foldLeft(group) {
+      case (properties, key) =>
+        properties.get(key) match {
+          case None => properties
+          case Some(raw) if raw.equalsIgnoreCase("true") =>
+            properties.updated(key, "true")
+          case Some(raw) if raw.equalsIgnoreCase("false") =>
+            properties.updated(key, "false")
+          case Some(raw) =>
+            val name =
+              if (label.isEmpty) key
+              else label + key.substring(Prefix.length)
+            throw new IllegalArgumentException(
+              s"$name must be 'true' or 'false', got '$raw'"
+            )
+        }
+    }
+    val isRemote =
+      !normalized(StorageType).equalsIgnoreCase(StorageTypeLocal)
+    if (!isRemote) return normalized - AccessKeyId - AccessKeyValue
 
-    require(group, BucketName, label)
-    require(group, Address, label)
+    require(normalized, BucketName, label)
+    require(normalized, Address, label)
 
     // Under IAM or AssumeRole the native layer resolves credentials itself, and
     // sending empty keys would override whatever it finds. Otherwise both keys
     // are needed: one without the other signs requests the backend rejects.
-    val assumesRole = group.contains(RoleArn)
-    val usesIam = group.get(UseIam).exists(_.equalsIgnoreCase("true"))
+    val assumesRole = normalized.contains(RoleArn)
+    val usesIam = normalized.get(UseIam).contains("true")
     if (assumesRole || usesIam) {
-      group - AccessKeyId - AccessKeyValue
+      normalized - AccessKeyId - AccessKeyValue
     } else {
-      require(group, AccessKeyId, label)
-      require(group, AccessKeyValue, label)
-      group
+      require(normalized, AccessKeyId, label)
+      require(normalized, AccessKeyValue, label)
+      normalized
     }
   }
 

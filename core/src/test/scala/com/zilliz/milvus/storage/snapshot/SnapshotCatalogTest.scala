@@ -12,6 +12,11 @@ import com.zilliz.milvus.storage.snapshot.json.{
   SnapshotInfoJson,
   SnapshotJson
 }
+import io.milvus.grpc.schema.{
+  CollectionSchema => ProtoSchema,
+  DataType,
+  FieldSchema
+}
 
 /** R2, R3: the snapshot directory is the read entry point, and the snapshot
   * JSON's shape becomes the model.
@@ -130,6 +135,117 @@ class SnapshotCatalogTest extends AnyFunSuite {
     }
   }
 
+  test("snapshot selection rejects missing or ambiguous create_ts") {
+    withDir { dir =>
+      write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
+      write(dir, "files/snapshots/10/metadata/2.json", snapshotJson("s2", 100L))
+      val tied = intercept[IllegalArgumentException](
+        catalog(dir).latest("files", 10L)
+      )
+      assert(tied.getMessage.contains("share create_ts 100"))
+      assert(tied.getMessage.contains("1.json"))
+      assert(tied.getMessage.contains("2.json"))
+
+      val withoutCreateTs =
+        snapshotJson("s3", 300L).replace(", \"create_ts\": 300", "")
+      write(dir, "files/snapshots/10/metadata/3.json", withoutCreateTs)
+      val c = catalog(dir)
+      assert(c.byName("files", 10L, "s3").name == "s3")
+      val latest = intercept[IllegalArgumentException](c.latest("files", 10L))
+      assert(latest.getMessage.contains("create_ts"))
+      assert(latest.getMessage.contains("3.json"))
+      val asOf = intercept[IllegalArgumentException](c.asOf("files", 10L, 200L))
+      assert(asOf.getMessage.contains("create_ts"))
+    }
+  }
+
+  test("snapshot materialization rejects unsafe segment ids") {
+    withDir { dir =>
+      write(
+        dir,
+        "files/snapshots/10/metadata/1.json",
+        snapshotJson(
+          "invalid",
+          100L,
+          Seq((-1L, "files/insert_log/10/20/-1"))
+        )
+      )
+      val invalid = intercept[IllegalArgumentException](
+        catalog(dir).read("files/snapshots/10/metadata/1.json")
+      )
+      assert(invalid.getMessage.contains("non-positive segment id(s): -1"))
+
+      write(
+        dir,
+        "files/snapshots/10/metadata/0.json",
+        snapshotJson(
+          "zero",
+          100L,
+          Seq((0L, "files/insert_log/10/20/not-a-segment-id"))
+        )
+      )
+      val zero = intercept[IllegalArgumentException](
+        catalog(dir).read("files/snapshots/10/metadata/0.json")
+      )
+      assert(zero.getMessage.contains("non-positive segment id(s): 0"))
+
+      write(
+        dir,
+        "files/snapshots/10/metadata/3.json",
+        snapshotJson(
+          "same-line-duplicate",
+          100L,
+          Seq(
+            (30L, "files/insert_log/10/20/30"),
+            (30L, "files/insert_log/10/20/31")
+          )
+        )
+      )
+      val sameLineDuplicate = intercept[IllegalArgumentException](
+        catalog(dir).read("files/snapshots/10/metadata/3.json")
+      )
+      assert(
+        sameLineDuplicate.getMessage.contains("duplicate segment id(s): 30")
+      )
+
+      val json = snapshotJson("duplicate", 200L).replace(
+        "\"manifest_list\": []",
+        "\"manifest_list\": [\"files/snapshots/10/manifests/2/30.avro\"]"
+      )
+      write(dir, "files/snapshots/10/metadata/2.json", json)
+      val resolver = new V2SegmentResolver {
+        def resolve(
+            paths: Seq[String],
+            bucket: String,
+            store: com.zilliz.milvus.storage.io.ObjectStore,
+            version: Int
+        ) = Right(
+          Seq(
+            Segment.v2(
+              id = 30L,
+              partitionId = 20L,
+              rows = 1L,
+              columnGroups = Seq(
+                V2ColumnGroup(
+                  Seq(100L),
+                  Seq("files/insert_log/10/20/30/100/1"),
+                  Seq(1L),
+                  slotFieldId = 100L
+                )
+              ),
+              deltaLogs = Seq.empty
+            )
+          )
+        )
+      }
+      val duplicate = intercept[IllegalArgumentException](
+        new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
+          .read("files/snapshots/10/metadata/2.json")
+      )
+      assert(duplicate.getMessage.contains("duplicate segment id(s): 30"))
+    }
+  }
+
   test("metadataPrefix follows DataCoord's layout") {
     assert(
       SnapshotCatalog.metadataPrefix(
@@ -160,6 +276,96 @@ class SnapshotCatalogTest extends AnyFunSuite {
       assert(err.getMessage.contains("bucket 'b'"))
       assert(c.read("s3a://a/files/snapshots/10/metadata/1.json").name == "s1")
     }
+  }
+
+  test("fromLists returns path-normalization failures as Left") {
+    val metadata = SnapshotJson
+      .parse(
+        snapshotJson(
+          "other-bucket",
+          100L,
+          Seq((30L, "s3://other/files/insert_log/10/20/30"))
+        )
+      )
+      .toOption
+      .get
+    val result = SnapshotCatalog.fromLists(
+      name = "other-bucket",
+      collectionId = 10L,
+      createdAt = Some(100L),
+      partitionIds = Seq(20L),
+      schemaBytes = metadata.collection.schema.toProtobufBytes,
+      v3Items = metadata.storageV2ManifestList.get,
+      v2Segments = Seq.empty,
+      bucket = "expected",
+      origin = SnapshotOrigin.Options
+    )
+    assert(result.isLeft)
+    assert(result.left.get.getMessage.contains("bucket 'other'"))
+  }
+
+  test("dynamic snapshots require the authoritative $meta field schema") {
+    val metadata = SnapshotJson
+      .parse(snapshotJson("dynamic", 100L))
+      .toOption
+      .get
+    val baseSchema = ProtoSchema(
+      name = "c",
+      enableDynamicField = true,
+      fields = Seq(
+        FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = DataType.Int64,
+          isPrimaryKey = true
+        )
+      )
+    )
+
+    def materialize(schema: ProtoSchema) =
+      SnapshotCatalog.fromLists(
+        name = "dynamic",
+        collectionId = 10L,
+        createdAt = Some(100L),
+        partitionIds = Seq(20L),
+        schemaBytes = schema.toByteArray,
+        v3Items = metadata.storageV2ManifestList.get,
+        v2Segments = Seq.empty,
+        bucket = "",
+        origin = SnapshotOrigin.Options
+      )
+
+    val dynamicField = FieldSchema(
+      fieldID = 407L,
+      name = "$meta",
+      dataType = DataType.JSON,
+      isDynamic = true,
+      nullable = true
+    )
+    Seq(
+      Seq.empty,
+      Seq(dynamicField.copy(isDynamic = false)),
+      Seq(dynamicField.copy(dataType = DataType.Int64)),
+      Seq(dynamicField.copy(fieldID = 1L)),
+      Seq(
+        dynamicField,
+        dynamicField.copy(fieldID = 408L, name = "other_dynamic")
+      ),
+      Seq(dynamicField, dynamicField.copy(fieldID = 408L, isDynamic = false))
+    ).foreach { fields =>
+      val invalid = materialize(baseSchema.copy(fields = fields)).left.get
+      assert(invalid.getMessage.contains("$meta"))
+      assert(invalid.getMessage.contains("cannot infer that id"))
+    }
+
+    val snapshot = materialize(
+      baseSchema.copy(fields = baseSchema.fields :+ dynamicField)
+    ).toOption.get
+
+    val resolved = snapshot.schema.fields.find(_.isDynamic).get
+    assert(resolved.name == "$meta")
+    assert(resolved.fieldID == 407L)
+    assert(resolved.dataType == DataType.JSON)
   }
 
   test("a snapshot over the size limit is refused before parsing") {
@@ -292,6 +498,86 @@ class SnapshotCatalogTest extends AnyFunSuite {
         )
       )
       assert(snapshot.deleteOnlySegments.map(_.id) == Seq(41L))
+    }
+  }
+
+  test(
+    "Milvus endpoint paths become bucket-relative V3, V2 data and delete keys"
+  ) {
+    withDir { dir =>
+      val json = snapshotJson(
+        "s1",
+        100L,
+        Seq(
+          (
+            30L,
+            "s3://minio:9000/milvus-bucket/files/insert_log/10/20/30"
+          )
+        )
+      ).replace(
+        "\"manifest_list\": []",
+        "\"manifest_list\": [\"s3://minio:9000/milvus-bucket/files/snapshots/10/manifests/1/40.avro\"]"
+      )
+      write(dir, "files/snapshots/10/metadata/1.json", json)
+
+      val resolver = new V2SegmentResolver {
+        def resolve(
+            paths: Seq[String],
+            bucket: String,
+            store: com.zilliz.milvus.storage.io.ObjectStore,
+            v: Int
+        ) = {
+          Right(
+            Seq(
+              Segment.v2(
+                id = 40L,
+                partitionId = 20L,
+                rows = 1L,
+                columnGroups = Seq(
+                  V2ColumnGroup(
+                    Seq(100L),
+                    Seq(
+                      "s3://minio:9000/milvus-bucket/files/insert_log/10/20/40/100/1"
+                    ),
+                    Seq(1L),
+                    slotFieldId = 100L
+                  )
+                ),
+                deltaLogs = Seq(
+                  DeltaLogFile(
+                    1L,
+                    "s3://minio:9000/milvus-bucket/files/delta_log/10/20/40/1",
+                    1L
+                  )
+                )
+              )
+            )
+          )
+        }
+      }
+
+      val snapshot = new SnapshotCatalog(
+        new LocalObjectStore(dir.toString),
+        bucket = "milvus-bucket",
+        resolver,
+        endpoint = "minio:9000"
+      ).read("files/snapshots/10/metadata/1.json")
+
+      val v3 = snapshot.v3Segments.head
+      assert(
+        v3.layout == SegmentLayout.Manifest(
+          "files/insert_log/10/20/30",
+          7L
+        )
+      )
+      val v2 = snapshot.v2Segments.head
+      assert(
+        v2.columnGroups.head.filePaths ==
+          Seq("files/insert_log/10/20/40/100/1")
+      )
+      assert(
+        v2.deltaLogs.map(_.logPath) == Seq("files/delta_log/10/20/40/1")
+      )
     }
   }
 }

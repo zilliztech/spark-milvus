@@ -4,6 +4,7 @@ import scala.util.control.NonFatal
 
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.manifest.V3ManifestReader
+import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{
   DeleteFiles,
   DeltaLogFile,
@@ -55,29 +56,59 @@ object DeleteFileListing {
   val empty: DeleteFileListing =
     DeleteFileListing(Map.empty, Map.empty, Map.empty, Map.empty)
 
-  /** Lists the delete files of `snapshot`. With `applyDeletes` false, or a
-    * schema without a primary key, nothing is opened and the listing is empty.
-    * A manifest that cannot be read is the read's failure, not an empty list.
+  /** Whether listing has to open object storage. V2 delete files are already
+    * named by the snapshot; V3 needs its manifest only to resolve an unpinned
+    * version or to list enabled delete files.
+    */
+  def requiresStore(snapshot: Snapshot, applyDeletes: Boolean): Boolean = {
+    val listsV3Deletes = applyDeletes && snapshot.primaryKeyField.nonEmpty
+    snapshot.v3Segments.exists { segment =>
+      val version = segment.layout match {
+        case SegmentLayout.Manifest(_, readVersion) => readVersion
+        case SegmentLayout.ColumnGroups(_)          => -1L
+      }
+      version <= 0L || listsV3Deletes
+    }
+  }
+
+  /** Resolves every V3 manifest version and lists the applicable delete files
+    * of `snapshot`.
+    *
+    * Version resolution is unconditional: a task with an unpinned manifest
+    * would otherwise choose whatever is latest when the executor opens it,
+    * which is no longer the snapshot the driver planned. Delta logs are read
+    * from a manifest only when deletes are enabled and the schema has a primary
+    * key. A manifest that has to be read and cannot be is the read's failure,
+    * not an empty list.
     */
   def of(
       snapshot: Snapshot,
       applyDeletes: Boolean,
       bucket: String,
-      store: ObjectStore
+      store: ObjectStore,
+      endpoint: String = ""
   ): Either[Throwable, DeleteFileListing] =
-    // Without a primary key nothing can be deleted, so there is nothing to
-    // list and no manifest to open.
-    if (!applyDeletes || snapshot.primaryKeyField.isEmpty) Right(empty)
-    else
-      try Right(list(snapshot, bucket, store))
-      catch { case NonFatal(e) => Left(e) }
+    try {
+      if (applyDeletes) validateV2DeleteState(snapshot)
+      Right(
+        list(
+          snapshot,
+          listDeleteFiles = applyDeletes && snapshot.primaryKeyField.nonEmpty,
+          bucket,
+          store,
+          endpoint
+        )
+      )
+    } catch { case NonFatal(e) => Left(e) }
 
   private def list(
       snapshot: Snapshot,
+      listDeleteFiles: Boolean,
       bucket: String,
-      store: ObjectStore
+      store: ObjectStore,
+      endpoint: String
   ): DeleteFileListing = {
-    val v3 = snapshot.v3Segments.flatMap { seg =>
+    val v3 = snapshot.v3Segments.map { seg =>
       val (basePath, listedVersion) = seg.layout match {
         case SegmentLayout.Manifest(path, version) => (path, version)
         case SegmentLayout.ColumnGroups(_) =>
@@ -98,38 +129,77 @@ object DeleteFileListing {
                 ),
               identity
             )
-      if (readVersion <= 0L) None
-      else {
-        val files = V3ManifestReader
-          .loadDeltaLogs(basePath, readVersion, bucket, store)
-          .fold(
-            e =>
-              throw new IllegalStateException(
-                s"cannot list the delete files of segment ${seg.id} from manifest $readVersion at $basePath: ${e.getMessage}",
-                e
-              ),
-            identity
-          )
-        Some((seg.id, readVersion, files))
+      if (readVersion <= 0L) {
+        throw new IllegalStateException(
+          s"cannot pin V3 segment ${seg.id} at $basePath: " +
+            s"latest manifest version must be positive, got $readVersion"
+        )
       }
+      val files =
+        if (!listDeleteFiles) Seq.empty[DeltaLogFile]
+        else
+          V3ManifestReader
+            .loadDeltaLogs(basePath, readVersion, bucket, store)
+            .fold(
+              e =>
+                throw new IllegalStateException(
+                  s"cannot list the delete files of segment ${seg.id} from manifest $readVersion at $basePath: ${e.getMessage}",
+                  e
+                ),
+              identity
+            )
+            .map(file =>
+              file.copy(logPath = deleteLogKey(file.logPath, bucket, endpoint))
+            )
+      (seg.id, readVersion, files)
     }
-    val v2 = snapshot.v2Segments.collect {
-      case seg if seg.hasData =>
-        seg.deletes match {
-          case DeleteFiles.Listed(files) => seg.id -> files
-          case _                         => seg.id -> Seq.empty[DeltaLogFile]
+    val v2 =
+      if (!listDeleteFiles) Seq.empty[(Long, Seq[DeltaLogFile])]
+      else
+        snapshot.v2Segments.collect {
+          case seg if seg.hasData =>
+            seg.deletes match {
+              case DeleteFiles.Listed(files) => seg.id -> files
+              case _ => seg.id -> Seq.empty[DeltaLogFile]
+            }
         }
-    }
-    val inherited = snapshot.deleteOnlySegments
-      .groupBy(_.partitionId)
-      .map { case (partitionId, segs) =>
-        partitionId -> segs.flatMap(_.deltaLogs)
-      }
+    val inherited =
+      if (!listDeleteFiles) Map.empty[Long, Seq[DeltaLogFile]]
+      else
+        snapshot.deleteOnlySegments
+          .groupBy(_.partitionId)
+          .map { case (partitionId, segs) =>
+            partitionId -> segs.flatMap(_.deltaLogs)
+          }
     DeleteFileListing(
-      v3BySegment = v3.map { case (id, _, files) => id -> files }.toMap,
+      v3BySegment = v3.collect {
+        case (id, _, files) if files.nonEmpty => id -> files
+      }.toMap,
       v2BySegment = v2.filter(_._2.nonEmpty).toMap,
       inheritedByPartition = inherited.filter(_._2.nonEmpty),
       v3ReadVersions = v3.map { case (id, version, _) => id -> version }.toMap
     )
+  }
+
+  private def validateV2DeleteState(snapshot: Snapshot): Unit =
+    snapshot.v2Segments.find(_.deletes == DeleteFiles.Unknown).foreach { seg =>
+      throw new IllegalStateException(
+        s"cannot plan deletes for V2 segment ${seg.id} in snapshot '${snapshot.name}' " +
+          s"from ${snapshot.origin}: its delete-file state is unknown"
+      )
+    }
+
+  private def deleteLogKey(
+      path: String,
+      bucket: String,
+      endpoint: String
+  ): String = {
+    val located = StoragePath.parseMilvus(path, bucket, endpoint)
+    if (bucket.nonEmpty && located.hasBucket && located.bucket != bucket) {
+      throw new IllegalArgumentException(
+        s"delete log is in bucket '${located.bucket}' but the read is bound to '$bucket': $path"
+      )
+    }
+    located.key
   }
 }

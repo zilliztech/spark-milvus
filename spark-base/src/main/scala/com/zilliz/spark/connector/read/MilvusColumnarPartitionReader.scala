@@ -51,7 +51,8 @@ class MilvusColumnarPartitionReader(
     arrowColumnFor: String => String,
     rawVectors: Boolean,
     partitionName: String,
-    segmentId: Long
+    segmentId: Long,
+    requestedExtraColumns: Set[String] = Set.empty
 ) extends PartitionReader[ColumnarBatch]
     with Logging {
 
@@ -147,8 +148,11 @@ class MilvusColumnarPartitionReader(
       startOffset: Long
   ): ColumnVector = {
     val name = field.name
-    MetadataColumns
-      .columnFor(name, partitionName, segmentId, startOffset)
+    val metadataColumn =
+      if (requestedExtraColumns.contains(name))
+        MetadataColumns.columnFor(name, partitionName, segmentId, startOffset)
+      else None
+    metadataColumn
       .getOrElse {
         // The Arrow column is not always named after the Spark field: the
         // manifest line names columns by field id, so `vec` arrives as `101`.

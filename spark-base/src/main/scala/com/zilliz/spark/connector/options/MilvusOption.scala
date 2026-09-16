@@ -72,23 +72,40 @@ object MilvusOption {
   val MilvusCollectionID = "milvus.collection.id"
   val MilvusPartitionID = "milvus.partition.id"
   val MilvusSegmentID = "milvus.segment.id"
+  val MilvusPartitions = "milvus.partitions"
+  val MilvusSegments = "milvus.segments"
   val MilvusFieldID = "milvus.field.id"
   val MilvusInsertMaxBatchSize = "milvus.insertMaxBatchSize"
   val MilvusRetryCount = "milvus.retry.count"
   val MilvusRetryInterval = "milvus.retry.interval"
 
   val MilvusExtraColumns = "milvus.extra.columns"
+  // Kept as a source-compatibility constant. The partition name is not part of
+  // the metadata-column contract and is rejected by extraColumnsFrom.
   val MilvusExtraColumnPartition = "partition"
-  val MilvusExtraColumnSegmentID = "$segment_id"
-  val MilvusExtraColumnRowOffset = "$row_offset"
-  private[connector] val MilvusExtraColumnSegmentIDAlias = "segment_id"
-  private[connector] val MilvusExtraColumnRowOffsetAlias = "row_offset"
+  val MilvusExtraColumnSegmentID = "_segment_id"
+  val MilvusExtraColumnRowOffset = "_row_offset"
+  val MilvusExtraColumnTimestamp = "_timestamp"
+  private[connector] val MilvusExtraColumnSegmentIDAlias = "$segment_id"
+  private[connector] val MilvusExtraColumnRowOffsetAlias = "$row_offset"
+  private val MilvusExtraColumnSegmentIDBareAlias = "segment_id"
+  private val MilvusExtraColumnRowOffsetBareAlias = "row_offset"
+
+  private val SupportedExtraColumns = Set(
+    MilvusExtraColumnSegmentID,
+    MilvusExtraColumnRowOffset,
+    MilvusExtraColumnTimestamp
+  )
 
   private[connector] def normalizeExtraColumnName(name: String): String =
     name match {
-      case MilvusExtraColumnSegmentIDAlias => MilvusExtraColumnSegmentID
-      case MilvusExtraColumnRowOffsetAlias => MilvusExtraColumnRowOffset
-      case other                           => other
+      case MilvusExtraColumnSegmentIDAlias |
+          MilvusExtraColumnSegmentIDBareAlias =>
+        MilvusExtraColumnSegmentID
+      case MilvusExtraColumnRowOffsetAlias |
+          MilvusExtraColumnRowOffsetBareAlias =>
+        MilvusExtraColumnRowOffset
+      case other => other
     }
 
   // reader config
@@ -203,14 +220,28 @@ object MilvusOption {
   ): Boolean =
     getOption(key).exists(_.trim.nonEmpty)
 
+  private def booleanOption(
+      getOption: String => Option[String],
+      key: String,
+      defaultValue: => Boolean
+  ): Boolean =
+    getOption(key).map(_.trim) match {
+      case None                                       => defaultValue
+      case Some(raw) if raw.equalsIgnoreCase("true")  => true
+      case Some(raw) if raw.equalsIgnoreCase("false") => false
+      case Some(raw) =>
+        throw new IllegalArgumentException(
+          s"Option '$key' must be 'true' or 'false', got '$raw'"
+        )
+    }
+
   private def isSnapshotModeFrom(
       getOption: String => Option[String]
-  ): Boolean = {
-    getOption(SnapshotMode)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .map(_.equalsIgnoreCase("true"))
-      .getOrElse {
+  ): Boolean =
+    booleanOption(
+      getOption,
+      SnapshotMode,
+      defaultValue = {
         // Only a non-empty hint enables snapshot mode: config templates that
         // keep optional keys with empty values (e.g. milvus.snapshot.manifests="")
         // must not trip the snapshot/backup mutual-exclusion check.
@@ -218,13 +249,16 @@ object MilvusOption {
         nonEmptyOption(getOption, SnapshotV2Segments) ||
         nonEmptyOption(getOption, SnapshotPath)
       }
-  }
+    )
 
   private def validateSnapshotModeOptionsFrom(
       getOption: String => Option[String]
   ): Unit = {
-    val explicitSnapshotMode = getOption(SnapshotMode)
-      .exists(_.trim.equalsIgnoreCase("true"))
+    val explicitSnapshotMode = booleanOption(
+      getOption,
+      SnapshotMode,
+      defaultValue = false
+    )
     val hasSnapshotLists = nonEmptyOption(getOption, SnapshotManifests) ||
       nonEmptyOption(getOption, SnapshotV2Segments)
     val hasSnapshotPath = nonEmptyOption(getOption, SnapshotPath)
@@ -341,13 +375,8 @@ object MilvusOption {
 
   private def readApplyDeletesFrom(
       getOption: String => Option[String]
-  ): Boolean = {
-    getOption(ReadApplyDeletes)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .map(_.equalsIgnoreCase("true"))
-      .getOrElse(true)
-  }
+  ): Boolean =
+    booleanOption(getOption, ReadApplyDeletes, defaultValue = true)
 
   def readApplyDeletes(options: Map[String, String]): Boolean = {
     readApplyDeletesFrom { key =>
@@ -371,13 +400,8 @@ object MilvusOption {
     */
   private def readVectorRawFrom(
       getOption: String => Option[String]
-  ): Boolean = {
-    getOption(ReadVectorRaw)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .map(_.equalsIgnoreCase("true"))
-      .getOrElse(false)
-  }
+  ): Boolean =
+    booleanOption(getOption, ReadVectorRaw, defaultValue = false)
 
   def readVectorRaw(options: Map[String, String]): Boolean = {
     readVectorRawFrom { key =>
@@ -401,13 +425,110 @@ object MilvusOption {
     */
   private def readColumnarFrom(
       getOption: String => Option[String]
-  ): Boolean = {
-    getOption(ReadColumnar)
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .map(_.equalsIgnoreCase("true"))
-      .getOrElse(true)
+  ): Boolean =
+    booleanOption(getOption, ReadColumnar, defaultValue = true)
+
+  private def selectedIdsFrom(
+      getOption: String => Option[String],
+      key: String
+  ): Seq[Long] =
+    getOption(key).map(_.trim) match {
+      case None => Seq.empty
+      case Some(raw) =>
+        val values = raw.split(",", -1).toSeq.map(_.trim)
+        if (values.exists(_.isEmpty)) {
+          throw new IllegalArgumentException(
+            s"Option '$key' must be a comma-separated list of numeric ids without empty entries, got '$raw'"
+          )
+        }
+        values.map { value =>
+          val id =
+            try value.toLong
+            catch {
+              case _: NumberFormatException =>
+                throw new IllegalArgumentException(
+                  s"Option '$key' must contain numeric ids, got '$value' in '$raw'"
+                )
+            }
+          if (id < 0L) {
+            throw new IllegalArgumentException(
+              s"Option '$key' must contain non-negative ids, got '$value' in '$raw'"
+            )
+          }
+          id
+        }.distinct
+    }
+
+  private def extraColumnsFrom(
+      getOption: String => Option[String]
+  ): Seq[String] = {
+    val raw = getOption(MilvusExtraColumns).map(_.trim).getOrElse("")
+    if (raw.isEmpty) return Seq.empty
+    val values = raw.split(",", -1).toSeq.map(_.trim)
+    if (values.exists(_.isEmpty)) {
+      throw new IllegalArgumentException(
+        s"Option '$MilvusExtraColumns' must be a comma-separated list without empty entries, got '$raw'"
+      )
+    }
+    val normalized = values.map(normalizeExtraColumnName)
+    val unsupported = normalized.filterNot(SupportedExtraColumns).distinct
+    if (unsupported.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Option '$MilvusExtraColumns' contains unsupported column(s) ${unsupported
+            .mkString(", ")}; " +
+          s"supported columns are ${SupportedExtraColumns.toSeq.sorted.mkString(", ")}"
+      )
+    }
+    normalized.distinct
   }
+
+  def extraColumns(options: Map[String, String]): Seq[String] =
+    extraColumnsFrom { key =>
+      options.collectFirst {
+        case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
+      }
+    }
+
+  def extraColumns(options: CaseInsensitiveStringMap): Seq[String] =
+    extraColumnsFrom(key => Option(options.get(key)))
+
+  def selectedPartitionIds(options: Map[String, String]): Seq[Long] =
+    selectedIdsFrom(
+      key =>
+        options.collectFirst {
+          case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
+        },
+      MilvusPartitions
+    )
+
+  def selectedPartitionIds(
+      options: CaseInsensitiveStringMap
+  ): Seq[Long] =
+    selectedIdsFrom(key => Option(options.get(key)), MilvusPartitions)
+
+  def selectedSegmentIds(options: Map[String, String]): Seq[Long] =
+    selectedIdsFrom(
+      key =>
+        options.collectFirst {
+          case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
+        },
+      MilvusSegments
+    )
+
+  def selectedSegmentIds(options: CaseInsensitiveStringMap): Seq[Long] =
+    selectedIdsFrom(key => Option(options.get(key)), MilvusSegments)
+
+  def readerFieldIds(options: Map[String, String]): Seq[Long] =
+    selectedIdsFrom(
+      key =>
+        options.collectFirst {
+          case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
+        },
+      ReaderFieldIDs
+    )
+
+  def readerFieldIds(options: CaseInsensitiveStringMap): Seq[Long] =
+    selectedIdsFrom(key => Option(options.get(key)), ReaderFieldIDs)
 
   def readColumnar(options: Map[String, String]): Boolean = {
     readColumnarFrom { key =>
@@ -444,13 +565,7 @@ object MilvusOption {
     val retryInterval =
       options.getOrDefault(MilvusRetryInterval, "1000").toInt
     val fieldIDs = options.getOrDefault(ReaderFieldIDs, "")
-    val extraColumns = options
-      .getOrDefault(MilvusExtraColumns, "")
-      .split(",")
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .map(normalizeExtraColumnName)
-      .toSeq
+    val extraColumns = MilvusOption.extraColumns(options)
 
     // Convert CaseInsensitiveStringMap to regular Map for storage
     import scala.collection.JavaConverters._
@@ -489,25 +604,78 @@ object MilvusOption {
   private def parseVectorSearch(
       options: CaseInsensitiveStringMap
   ): Option[VectorSearch] = {
-    val queryVectorStr = Option(options.get(VectorSearchQueryVector))
-    val topKStr = Option(options.get(VectorSearchTopK))
+    def value(key: String): Option[String] =
+      Option(options.get(key)).map { value =>
+        val trimmed = value.trim
+        if (trimmed.isEmpty) {
+          throw new IllegalArgumentException(
+            s"Option '$key' must not be empty"
+          )
+        }
+        trimmed
+      }
 
-    if (queryVectorStr.isEmpty || topKStr.isEmpty) {
+    val queryVectorStr = value(VectorSearchQueryVector)
+    val topKStr = value(VectorSearchTopK)
+    val metricTypeStr = value(VectorSearchMetric)
+    val vectorColumnStr = value(VectorSearchVectorColumn)
+
+    if (
+      Seq(queryVectorStr, topKStr, metricTypeStr, vectorColumnStr).forall(
+        _.isEmpty
+      )
+    ) {
       return None
+    }
+    if (queryVectorStr.isEmpty) {
+      throw new IllegalArgumentException(
+        s"Options '$VectorSearchQueryVector' and '$VectorSearchTopK' must be set together"
+      )
+    }
+    if (topKStr.isEmpty) {
+      throw new IllegalArgumentException(
+        s"Options '$VectorSearchQueryVector' and '$VectorSearchTopK' must be set together"
+      )
     }
 
     try {
       val queryVector = parseQueryVector(queryVectorStr.get)
-      val topK = topKStr.get.toInt
-      val metricType = Option(options.get(VectorSearchMetric))
+      val topK =
+        try topKStr.get.toInt
+        catch {
+          case _: NumberFormatException =>
+            throw new IllegalArgumentException(
+              s"Option '$VectorSearchTopK' must be a positive integer, got '${topKStr.get}'"
+            )
+        }
+      if (queryVector.isEmpty) {
+        throw new IllegalArgumentException(
+          s"Option '$VectorSearchQueryVector' must contain at least one number"
+        )
+      }
+      if (topK <= 0) {
+        throw new IllegalArgumentException(
+          s"Option '$VectorSearchTopK' must be positive, got '$topK'"
+        )
+      }
+      val metricType = metricTypeStr
         .getOrElse("L2")
         .toUpperCase
-      val vectorColumn = Option(options.get(VectorSearchVectorColumn))
-        .getOrElse("vector")
+      if (!Set("L2", "IP", "COSINE").contains(metricType)) {
+        throw new IllegalArgumentException(
+          s"Option '$VectorSearchMetric' must be one of L2, IP or COSINE, got '$metricType'"
+        )
+      }
+      val vectorColumn = vectorColumnStr.getOrElse("vector")
 
       Some(VectorSearch(queryVector, topK, metricType, vectorColumn))
     } catch {
-      case _: Exception => None
+      case e: IllegalArgumentException => throw e
+      case e: Exception =>
+        throw new IllegalArgumentException(
+          s"Invalid vector search options: ${e.getMessage}",
+          e
+        )
     }
   }
 
@@ -515,11 +683,38 @@ object MilvusOption {
     * 0.3, ...]"
     */
   private def parseQueryVector(jsonStr: String): Array[Float] = {
-    jsonStr.trim
-      .stripPrefix("[")
-      .stripSuffix("]")
-      .split(",")
-      .map(_.trim.toFloat)
+    val trimmed = jsonStr.trim
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+      throw new IllegalArgumentException(
+        s"Option '$VectorSearchQueryVector' must be a JSON-style numeric array, got '$jsonStr'"
+      )
+    }
+    val body = trimmed.substring(1, trimmed.length - 1).trim
+    if (body.isEmpty) return Array.empty[Float]
+    body
+      .split(",", -1)
+      .map { value =>
+        val number = value.trim
+        if (number.isEmpty) {
+          throw new IllegalArgumentException(
+            s"Option '$VectorSearchQueryVector' contains an empty element in '$jsonStr'"
+          )
+        }
+        val parsed =
+          try number.toFloat
+          catch {
+            case _: NumberFormatException =>
+              throw new IllegalArgumentException(
+                s"Option '$VectorSearchQueryVector' contains a non-numeric value '$number'"
+              )
+          }
+        if (!java.lang.Float.isFinite(parsed)) {
+          throw new IllegalArgumentException(
+            s"Option '$VectorSearchQueryVector' contains a non-finite value '$number'"
+          )
+        }
+        parsed
+      }
   }
 
   def isInt64PK(milvusPKType: String): Boolean = {

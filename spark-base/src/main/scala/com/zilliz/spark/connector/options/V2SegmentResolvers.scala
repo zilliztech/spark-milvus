@@ -14,7 +14,10 @@ object V2SegmentResolvers {
     * parquet footer. `applyDeletes = false` skips the delta logs, which is what
     * backfill wants when it aligns new column groups to physical rows.
     */
-  def footer(applyDeletes: Boolean): V2SegmentResolver = new V2SegmentResolver {
+  def footer(
+      applyDeletes: Boolean,
+      endpoint: String = ""
+  ): V2SegmentResolver = new V2SegmentResolver {
     def resolve(
         manifestPaths: Seq[String],
         bucket: String,
@@ -26,7 +29,8 @@ object V2SegmentResolvers {
         bucket,
         store,
         manifestSchemaVersion = manifestSchemaVersion,
-        applyDeletes = applyDeletes
+        applyDeletes = applyDeletes,
+        endpoint = endpoint
       )
   }
 }

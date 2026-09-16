@@ -5,6 +5,7 @@ import scala.util.control.NonFatal
 import com.zilliz.milvus.client.api.MilvusClient
 import com.zilliz.milvus.storage.compat.backup.BackupSnapshotSource
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.snapshot.{
   Snapshot,
   SnapshotCatalog,
@@ -27,64 +28,165 @@ object SnapshotSources {
   def forRead(
       milvusOption: MilvusOption,
       withSegments: Boolean
-  ): SnapshotSource =
-    MilvusOption.readMode(milvusOption.options) match {
+  ): SnapshotSource = {
+    rejectLegacySelectors(milvusOption)
+    val selectedPartitions =
+      MilvusOption.selectedPartitionIds(milvusOption.options)
+    val selectedSegments =
+      MilvusOption.selectedSegmentIds(milvusOption.options)
+    val source = MilvusOption.readMode(milvusOption.options) match {
       case ReadMode.Snapshot =>
         milvusOption.options
           .get(MilvusOption.SnapshotPath)
           .map(_.trim)
           .filter(_.nonEmpty) match {
-          case Some(path) => catalog(milvusOption, withSegments).at(path)
+          case Some(path) => catalogSource(milvusOption, withSegments, path)
           case None       => new OptionStringsSnapshotSource(milvusOption)
         }
       case ReadMode.Backup =>
         val dir = MilvusOption.backupDir(milvusOption.options).get
-        new BackupSnapshotSource(
-          store = StorageOptions.storeFor(
+        val bucket = StorageOptions
+          .snapshotS3BucketForRelativePaths(dir, milvusOption.options)
+          .getOrElse("")
+        managedSource(
+          StorageOptions.storeFor(
             StorageOptions.buildHadoopConfForOptions(milvusOption.options, dir),
-            StorageOptions.snapshotBucket(dir).getOrElse(""),
+            bucket,
             milvusOption.options
-          ),
-          backupDir = dir,
-          databaseName = milvusOption.databaseName,
-          collectionName = milvusOption.collectionName,
-          applyDeletes = MilvusOption.readApplyDeletes(milvusOption.options),
-          maxJsonBytes = StorageOptions.backupMaxJsonBytes(
-            caseInsensitive(milvusOption.options)
-          ),
-          withSegments = withSegments
-        )
+          )
+        ) { store =>
+          new BackupSnapshotSource(
+            store = store,
+            backupDir = dir,
+            databaseName = milvusOption.databaseName,
+            collectionName = milvusOption.collectionName,
+            applyDeletes = MilvusOption.readApplyDeletes(milvusOption.options),
+            maxJsonBytes = StorageOptions.backupMaxJsonBytes(
+              caseInsensitive(milvusOption.options)
+            ),
+            withSegments = withSegments
+          ).snapshot().fold(throw _, identity)
+        }
       case ReadMode.Client =>
-        new ClientSnapshotSource(
-          milvusOption,
-          catalog(milvusOption, withSegments)
-        )
+        val bucket =
+          StorageOptions.resolveConnectorS3Bucket(milvusOption.options)
+        managedSource(
+          StorageOptions.storeFor(
+            StorageOptions.buildHadoopConfForOptions(milvusOption.options, ""),
+            bucket,
+            milvusOption.options
+          )
+        ) { store =>
+          new ClientSnapshotSource(
+            milvusOption,
+            catalog(milvusOption, withSegments, bucket, store)
+          ).snapshot().fold(throw _, identity)
+        }
     }
+    if (withSegments) narrowed(source, selectedPartitions, selectedSegments)
+    else source
+  }
 
   /** A catalog bound to the connector's bucket, reading through the driver's
     * object store; V2 segments are materialized through compat's footer
     * resolver, or skipped when the caller wants no segments.
     */
+  private def catalogSource(
+      milvusOption: MilvusOption,
+      withSegments: Boolean,
+      path: String
+  ): SnapshotSource = {
+    val bucket = StorageOptions
+      .snapshotS3BucketForRelativePaths(path, milvusOption.options)
+      .getOrElse("")
+    managedSource(
+      StorageOptions.storeFor(
+        StorageOptions.buildHadoopConfForOptions(milvusOption.options, path),
+        bucket,
+        milvusOption.options
+      )
+    )(store => catalog(milvusOption, withSegments, bucket, store).read(path))
+  }
+
   private def catalog(
       milvusOption: MilvusOption,
-      withSegments: Boolean
+      withSegments: Boolean,
+      bucket: String,
+      store: ObjectStore
   ): SnapshotCatalog = {
-    val bucket = StorageOptions.resolveConnectorS3Bucket(milvusOption.options)
-    val store = StorageOptions.storeFor(
-      StorageOptions.buildHadoopConfForOptions(milvusOption.options, ""),
-      bucket,
-      milvusOption.options
-    )
+    val endpoint =
+      StorageOptions.effectiveEndpoint(milvusOption.options).getOrElse("")
     new SnapshotCatalog(
       store,
       bucket,
       if (withSegments)
         V2SegmentResolvers.footer(
-          MilvusOption.readApplyDeletes(milvusOption.options)
+          MilvusOption.readApplyDeletes(milvusOption.options),
+          endpoint
         )
       else V2SegmentResolver.Skipped,
-      StorageOptions.backupMaxJsonBytes(caseInsensitive(milvusOption.options))
+      StorageOptions.backupMaxJsonBytes(caseInsensitive(milvusOption.options)),
+      endpoint
     )
+  }
+
+  private[connector] def narrowed(
+      source: SnapshotSource,
+      partitionIds: Seq[Long],
+      segmentIds: Seq[Long]
+  ): SnapshotSource =
+    SnapshotSource(
+      source
+        .snapshot()
+        .fold(throw _, identity)
+        .narrow(partitionIds, segmentIds)
+    )
+
+  private def rejectLegacySelectors(milvusOption: MilvusOption): Unit = {
+    val legacy = Seq(
+      MilvusOption.MilvusPartitionName -> milvusOption.partitionName,
+      MilvusOption.MilvusPartitionID -> milvusOption.partitionID,
+      MilvusOption.MilvusSegmentID -> milvusOption.segmentID
+    ).collect { case (key, value) if value.trim.nonEmpty => key }
+    if (legacy.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Legacy read selector(s) ${legacy.mkString(", ")} are not supported; " +
+          s"use '${MilvusOption.MilvusPartitions}' and '${MilvusOption.MilvusSegments}' with comma-separated numeric ids"
+      )
+    }
+  }
+
+  /** Builds one snapshot while owning one driver-side store. The store closes
+    * after all metadata has been materialized, on both success and failure.
+    */
+  private[connector] def managedSource(
+      open: => ObjectStore
+  )(build: ObjectStore => Snapshot): SnapshotSource =
+    SnapshotSource(withStore(open)(build))
+
+  private[connector] def withStore[A](
+      open: => ObjectStore
+  )(use: ObjectStore => A): A = {
+    val store = open
+    useAndClose(store.close())(use(store))
+  }
+
+  private[connector] def useAndClose[A](close: => Unit)(use: => A): A = {
+    var primaryFailure: Throwable = null
+    try use
+    catch {
+      case failure: Throwable =>
+        primaryFailure = failure
+        throw failure
+    } finally {
+      try close
+      catch {
+        case closeFailure: Throwable =>
+          if (primaryFailure == null) throw closeFailure
+          if (closeFailure ne primaryFailure)
+            primaryFailure.addSuppressed(closeFailure)
+      }
+    }
   }
 
   private def caseInsensitive(options: scala.collection.Map[String, String]) = {
@@ -95,7 +197,8 @@ object SnapshotSources {
 
 /** Client mode: the service names the collection id, the snapshot comes from
   * the snapshot directory (`milvus.client.snapshot.name` or the latest), and
-  * the partition and segment selectors narrow it (capability R16).
+  * the common source wrapper applies partition and segment selectors after it
+  * resolves.
   */
 final class ClientSnapshotSource(
     milvusOption: MilvusOption,
@@ -111,7 +214,7 @@ final class ClientSnapshotSource(
       throw new IllegalArgumentException("collectionName cannot be empty")
     }
     val client = MilvusClient(milvusOption.connectionParams)
-    try {
+    SnapshotSources.useAndClose(client.close()) {
       val collectionInfo = client
         .getCollectionInfo(
           milvusOption.databaseName,
@@ -132,42 +235,9 @@ final class ClientSnapshotSource(
           catalog.byName(rootPath, collectionInfo.collectionID, name)
         case None => catalog.latest(rootPath, collectionInfo.collectionID)
       }
-      val partitionId: Option[Long] =
-        if (milvusOption.partitionID.trim.nonEmpty)
-          Some(
-            parseId(MilvusOption.MilvusPartitionID, milvusOption.partitionID)
-          )
-        else if (milvusOption.partitionName.trim.nonEmpty)
-          Some(
-            client
-              .getPartitionID(
-                milvusOption.databaseName,
-                milvusOption.collectionName,
-                milvusOption.partitionName.trim
-              )
-              .getOrElse(
-                throw new IllegalArgumentException(
-                  s"Partition '${milvusOption.partitionName.trim}' not found in collection ${milvusOption.collectionName}"
-                )
-              )
-          )
-        else None
-      val segmentId: Option[Long] =
-        if (milvusOption.segmentID.trim.nonEmpty)
-          Some(parseId(MilvusOption.MilvusSegmentID, milvusOption.segmentID))
-        else None
-      snapshot.narrow(partitionId, segmentId)
-    } finally client.close()
-  }
-
-  private def parseId(key: String, raw: String): Long =
-    try raw.trim.toLong
-    catch {
-      case _: NumberFormatException =>
-        throw new IllegalArgumentException(
-          s"Option '$key' must be a numeric id, got '$raw'"
-        )
+      snapshot
     }
+  }
 }
 
 /** The 1.x form: the collection id, partitions, schema and segment lists travel
@@ -251,7 +321,10 @@ final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
       bucket = StorageOptions
         .connectorS3BucketOption(milvusOption.options)
         .getOrElse(""),
-      origin = SnapshotOrigin.Options
+      origin = SnapshotOrigin.Options,
+      endpoint = StorageOptions
+        .effectiveEndpoint(milvusOption.options)
+        .getOrElse("")
     ) match {
       case Right(s) => s
       case Left(e) =>

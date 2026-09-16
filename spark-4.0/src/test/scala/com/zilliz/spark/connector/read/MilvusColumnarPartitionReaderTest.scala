@@ -189,7 +189,8 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       schema: StructType = sparkSchema,
       arrowColumnFor: String => String = identity,
       collection: CollectionSchema = milvusSchema,
-      rawVectors: Boolean = false
+      rawVectors: Boolean = false,
+      requestedExtraColumns: Set[String] = Set.empty
   ) = new MilvusColumnarPartitionReader(
     schema,
     new FakeSegmentReader(roots.toList),
@@ -198,7 +199,8 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     arrowColumnFor,
     rawVectors = rawVectors,
     partitionName = "20",
-    segmentId = 30L
+    segmentId = 30L,
+    requestedExtraColumns = requestedExtraColumns
   )
 
   test("a batch with no deletes carries every row") {
@@ -433,30 +435,82 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     } finally allocator.close()
   }
 
-  test("the metadata columns come from the partition, not the data") {
+  test("metadata columns combine read position with the stored timestamp") {
     val allocator = new RootAllocator(Long.MaxValue)
     try {
       val schema = StructType(
         sparkSchema.fields.toSeq ++ Seq(
-          StructField(MilvusOption.MilvusExtraColumnPartition, StringType),
           StructField(MilvusOption.MilvusExtraColumnSegmentID, LongType),
-          StructField(MilvusOption.MilvusExtraColumnRowOffset, LongType)
+          StructField(MilvusOption.MilvusExtraColumnRowOffset, LongType),
+          StructField(MilvusOption.MilvusExtraColumnTimestamp, LongType)
         )
       )
       val first =
         namedRoot(allocator, Seq(1L, 2L), Seq(Seq(1f, 1f), Seq(2f, 2f)))
       val second = namedRoot(allocator, Seq(3L), Seq(Seq(3f, 3f)))
-      val r = reader(Seq(first, second), schema = schema)
+      val r = reader(
+        Seq(first, second),
+        schema = schema,
+        arrowColumnFor = name =>
+          if (name == MilvusOption.MilvusExtraColumnTimestamp) "Timestamp"
+          else name,
+        requestedExtraColumns = Set(
+          MilvusOption.MilvusExtraColumnSegmentID,
+          MilvusOption.MilvusExtraColumnRowOffset,
+          MilvusOption.MilvusExtraColumnTimestamp
+        )
+      )
       try {
         r.next() shouldBe true
         val batch = r.get()
-        batch.column(3).getUTF8String(0).toString shouldBe "20"
-        batch.column(4).getLong(1) shouldBe 30L
+        batch.column(3).getLong(1) shouldBe 30L
         // Row offsets count from the start of the segment, not of the batch.
-        (0 until 2).map(batch.column(5).getLong) shouldBe Seq(0L, 1L)
+        (0 until 2).map(batch.column(4).getLong) shouldBe Seq(0L, 1L)
+        (0 until 2).map(batch.column(5).getLong) shouldBe Seq(100L, 101L)
 
         r.next() shouldBe true
-        r.get().column(5).getLong(0) shouldBe 2L
+        r.get().column(4).getLong(0) shouldBe 2L
+        r.get().column(5).getLong(0) shouldBe 100L
+      } finally r.close()
+    } finally allocator.close()
+  }
+
+  test("a real field with a metadata-like name is not synthesized") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val collection = CollectionSchema(
+        name = "t",
+        fields = Seq(
+          FieldSchema(
+            fieldID = 102L,
+            name = MilvusOption.MilvusExtraColumnSegmentID,
+            dataType = DataType.Int64
+          )
+        )
+      )
+      val root = VectorSchemaRoot.create(namedSchema(collection), allocator)
+      val values = root
+        .getVector(MilvusOption.MilvusExtraColumnSegmentID)
+        .asInstanceOf[BigIntVector]
+      values.allocateNew(1)
+      values.setSafe(0, 77L)
+      root.setRowCount(1)
+      val r = reader(
+        Seq(root),
+        schema = StructType(
+          Seq(
+            StructField(
+              MilvusOption.MilvusExtraColumnSegmentID,
+              LongType,
+              nullable = false
+            )
+          )
+        ),
+        collection = collection
+      )
+      try {
+        r.next() shouldBe true
+        r.get().column(0).getLong(0) shouldBe 77L
       } finally r.close()
     } finally allocator.close()
   }

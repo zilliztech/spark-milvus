@@ -18,26 +18,14 @@ import io.milvus.grpc.schema.CollectionSchema
 object MilvusPartitionReaderFactory {
   private[read] def requestedExtraColumns(
       optionsMap: Map[String, String]
-  ): Set[String] = {
-    optionsMap
-      .collectFirst {
-        case (key, value)
-            if key.equalsIgnoreCase(MilvusOption.MilvusExtraColumns) =>
-          value
-      }
-      .toSeq
-      .flatMap(_.split(","))
-      .map(_.trim)
-      .filter(_.nonEmpty)
-      .map(MilvusOption.normalizeExtraColumnName)
-      .toSet
-  }
+  ): Set[String] = MilvusOption.extraColumns(optionsMap).toSet
 
   private[read] def isMetadataExtraField(
       name: String,
       requestedExtraColumns: Set[String]
   ): Boolean =
-    requestedExtraColumns.contains(name)
+    requestedExtraColumns.contains(name) &&
+      MetadataColumns.isSyntheticColumn(name)
 
 }
 
@@ -119,7 +107,8 @@ class MilvusPartitionReaderFactory(
         setup.arrowColumnFor,
         MilvusOption.readVectorRaw(optionsMap),
         partitionNameOf(p),
-        p.task.segmentId
+        p.task.segmentId,
+        requestedExtraColumns
       )
     case other =>
       throw new IllegalArgumentException(

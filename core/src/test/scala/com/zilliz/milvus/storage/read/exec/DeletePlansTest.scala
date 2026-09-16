@@ -83,4 +83,22 @@ class DeletePlansTest extends AnyFunSuite with Matchers {
         new LocalObjectStore("core/src/test/data")
       )
   }
+
+  test("closing a delete store never hides the primary read failure") {
+    val readFailure = new IllegalStateException("delete read failed")
+    val closeFailure = new IllegalStateException("store close failed")
+    val thrown = intercept[IllegalStateException] {
+      DeletePlans.useAndClose(throw closeFailure)(throw readFailure)
+    }
+    thrown shouldBe readFailure
+    thrown.getSuppressed.toSeq shouldBe Seq(closeFailure)
+  }
+
+  test("a delete store close failure is reported after a successful read") {
+    val closeFailure = new IllegalStateException("store close failed")
+    val thrown = intercept[IllegalStateException] {
+      DeletePlans.useAndClose(throw closeFailure)(DeletePlan.empty)
+    }
+    thrown shouldBe closeFailure
+  }
 }

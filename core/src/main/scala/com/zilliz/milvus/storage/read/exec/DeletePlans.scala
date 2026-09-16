@@ -20,10 +20,27 @@ object DeletePlans {
     task.deletes match {
       case DeleteSource.Files(_) =>
         val store = NativeObjectStore.Factory(task.properties).open()
-        try of(task, pkField, store)
-        finally store.close()
+        useAndClose(store.close())(of(task, pkField, store))
       case _ => of(task, pkField, null)
     }
+
+  private[exec] def useAndClose[A](close: => Unit)(use: => A): A = {
+    var primaryFailure: Throwable = null
+    try use
+    catch {
+      case failure: Throwable =>
+        primaryFailure = failure
+        throw failure
+    } finally {
+      try close
+      catch {
+        case closeFailure: Throwable =>
+          if (primaryFailure == null) throw closeFailure
+          if (closeFailure ne primaryFailure)
+            primaryFailure.addSuppressed(closeFailure)
+      }
+    }
+  }
 
   def of(
       task: SegmentReadTask,

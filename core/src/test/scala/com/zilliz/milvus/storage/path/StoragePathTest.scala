@@ -121,4 +121,60 @@ class StoragePathTest extends AnyFunSuite with Matchers {
   test("parse and uri round-trip, normalising s3 to the asked-for scheme") {
     StoragePath.parse("s3://a/files/x").uri("s3a") shouldBe "s3a://a/files/x"
   }
+
+  test("parse never treats a user URI authority as an endpoint") {
+    StoragePath.parse(
+      "https://storage.internal/milvus-bucket/files/x",
+      Bucket
+    ) shouldBe Located("storage.internal", "milvus-bucket/files/x")
+  }
+
+  test("parseMilvus recognizes an endpoint authority with an explicit port") {
+    StoragePath.parseMilvus(
+      "s3://minio:9000/milvus-bucket/files/x",
+      Bucket
+    ) shouldBe Located("milvus-bucket", "files/x")
+  }
+
+  test("parseMilvus recognizes an exact configured endpoint host") {
+    StoragePath.parseMilvus(
+      "https://storage.internal/milvus-bucket/files/x",
+      Bucket,
+      "https://STORAGE.internal:443"
+    ) shouldBe Located("milvus-bucket", "files/x")
+  }
+
+  test("parseMilvus leaves standard dotted and single-label buckets intact") {
+    StoragePath.parseMilvus(
+      "s3://bucket.with.dots/milvus-bucket/files/x",
+      Bucket,
+      "storage.internal"
+    ) shouldBe Located("bucket.with.dots", "milvus-bucket/files/x")
+    StoragePath.parseMilvus(
+      "s3://archive/milvus-bucket/files/x",
+      Bucket,
+      "storage.internal"
+    ) shouldBe Located("archive", "milvus-bucket/files/x")
+  }
+
+  test("parseMilvus does not use the configured bucket as a path heuristic") {
+    StoragePath.parseMilvus(
+      "s3://other-bucket/milvus-bucket/files/x",
+      Bucket
+    ) shouldBe Located("other-bucket", "milvus-bucket/files/x")
+  }
+
+  test("parseMilvus detects ported endpoint paths that java.net.URI rejects") {
+    StoragePath.parseMilvus(
+      "s3://minio:9000/milvus-bucket/files/key with space",
+      Bucket
+    ) shouldBe Located("milvus-bucket", "files/key with space")
+  }
+
+  test("parseMilvus requires a key after the endpoint and bucket") {
+    val error = intercept[IllegalArgumentException] {
+      StoragePath.parseMilvus("s3://minio:9000/milvus-bucket", Bucket)
+    }
+    error.getMessage should include("no key")
+  }
 }

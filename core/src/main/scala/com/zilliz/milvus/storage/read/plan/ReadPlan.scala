@@ -52,7 +52,8 @@ object ReadPlan extends Logging {
       snapshot: Snapshot,
       properties: Int => Map[String, String],
       applyDeletes: Boolean,
-      deletes: DeleteFileListing = DeleteFileListing.empty
+      deletes: DeleteFileListing = DeleteFileListing.empty,
+      neededFieldIds: Seq[Long] = Seq.empty
   ): ReadPlan = {
     val propertiesByVersion =
       collection.mutable.Map.empty[Int, Map[String, String]]
@@ -75,6 +76,12 @@ object ReadPlan extends Logging {
           )
       }
       val readVersion = deletes.v3ReadVersions.getOrElse(seg.id, listedVersion)
+      if (readVersion <= 0L) {
+        throw new IllegalStateException(
+          s"cannot plan V3 segment ${seg.id} at $basePath without a positive manifest version; " +
+            "resolve and pin the version before building the read plan"
+        )
+      }
       logInfo(
         s"Planning segment ${seg.id} of partition ${seg.partitionId}: manifest $basePath at version $readVersion"
       )
@@ -84,6 +91,7 @@ object ReadPlan extends Logging {
         layout = SegmentLayout.Manifest(basePath, readVersion),
         schemaBytes = schemaBytes,
         properties = propertiesFor(3),
+        neededFieldIds = neededFieldIds,
         deletes = deleteSourceFor(seg.id, seg.partitionId)
       )
     }
@@ -102,6 +110,7 @@ object ReadPlan extends Logging {
         layout = SegmentLayout.ColumnGroups(groups),
         schemaBytes = schemaBytes,
         properties = propertiesFor(2),
+        neededFieldIds = neededFieldIds,
         deletes = deleteSourceFor(seg.id, seg.partitionId)
       )
     }

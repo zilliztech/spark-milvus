@@ -1,7 +1,6 @@
 package com.zilliz.spark.connector.table
 
 import java.{util => ju}
-import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.connector.catalog.{
@@ -15,7 +14,6 @@ import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.types.{
   LongType,
   MetadataBuilder,
-  StringType,
   StructField,
   StructType
 }
@@ -53,6 +51,8 @@ case class MilvusTable(
   val fieldIDs: Seq[String] =
     if (milvusOption.fieldIDs.nonEmpty) milvusOption.fieldIDs.split(",").toSeq
     else Seq.empty
+  private val selectedFieldIds: Seq[Long] =
+    MilvusOption.readerFieldIds(milvusOption.options)
 
   override def newScanBuilder(
       options: CaseInsensitiveStringMap
@@ -79,61 +79,124 @@ case class MilvusTable(
   private def rehydrateSnapshotSchemaMetadata(
       baseSchema: StructType
   ): StructType = {
-    val collectionFieldByName = snapshot.schema.fields.map { field =>
-      field.name -> field
-    }.toMap
+    val collectionFieldByName =
+      (SchemaMapper.missingSystemFields(
+        snapshot.schema
+      ) ++ snapshot.schema.fields)
+        .map(field => field.name -> field)
+        .toMap
+
+    def conflictingMetadata(
+        field: StructField,
+        key: String,
+        expected: Any,
+        actual: Any
+    ): Nothing =
+      throw new IllegalArgumentException(
+        s"Field '${field.name}' has $key=$actual, but snapshot schema requires $expected"
+      )
 
     val fields = baseSchema.fields.map { field =>
       if (milvusOption.extraColumns.contains(field.name)) {
         field
       } else {
+        val normalizedExtraName =
+          MilvusOption.normalizeExtraColumnName(field.name)
+        if (
+          normalizedExtraName != field.name &&
+          milvusOption.extraColumns.contains(normalizedExtraName)
+        ) {
+          throw new IllegalArgumentException(
+            s"Field '${field.name}' is a legacy alias for metadata extra column '$normalizedExtraName'; " +
+              s"use '$normalizedExtraName' in the schema or remove it and request '$normalizedExtraName' via ${MilvusOption.MilvusExtraColumns}"
+          )
+        }
         collectionFieldByName.get(field.name) match {
           case Some(collectionField) =>
+            val expectedType = SparkTypes.toDataType(
+              collectionField,
+              rawVectors
+            )
+            if (field.dataType != expectedType) {
+              throw new IllegalArgumentException(
+                s"Field '${field.name}' has Spark type ${field.dataType.catalogString}, " +
+                  s"but snapshot field ${collectionField.fieldID} requires ${expectedType.catalogString}"
+              )
+            }
             val collectionMetadata = SparkTypes.metadata(collectionField)
             val metadataBuilder = new MetadataBuilder()
               .withMetadata(field.metadata)
 
-            if (
-              !field.metadata.contains(FieldMetadata.MilvusDataTypeMetadataKey)
-            ) {
-              metadataBuilder.putLong(
-                FieldMetadata.MilvusDataTypeMetadataKey,
-                collectionMetadata.getLong(
-                  FieldMetadata.MilvusDataTypeMetadataKey
-                )
-              )
-            }
-            val existingTypeMatchesCollection =
-              !field.metadata.contains(
-                FieldMetadata.MilvusDataTypeMetadataKey
-              ) || field.metadata.getLong(
-                FieldMetadata.MilvusDataTypeMetadataKey
-              ) == collectionMetadata.getLong(
-                FieldMetadata.MilvusDataTypeMetadataKey
-              )
-            if (
-              collectionMetadata.contains(
-                FieldMetadata.MilvusVectorDimensionMetadataKey
-              ) && !field.metadata.contains(
-                FieldMetadata.MilvusVectorDimensionMetadataKey
-              ) && existingTypeMatchesCollection
-            ) {
-              metadataBuilder.putLong(
-                FieldMetadata.MilvusVectorDimensionMetadataKey,
-                collectionMetadata.getLong(
-                  FieldMetadata.MilvusVectorDimensionMetadataKey
-                )
-              )
+            Seq(
+              FieldMetadata.MilvusDataTypeMetadataKey,
+              FieldMetadata.MilvusFieldIdMetadataKey,
+              FieldMetadata.MilvusVectorDimensionMetadataKey
+            ).foreach { key =>
+              if (collectionMetadata.contains(key)) {
+                val expected = collectionMetadata.getLong(key)
+                if (field.metadata.contains(key)) {
+                  val actual = field.metadata.getLong(key)
+                  if (actual != expected) {
+                    conflictingMetadata(field, key, expected, actual)
+                  }
+                } else {
+                  metadataBuilder.putLong(key, expected)
+                }
+              }
             }
 
-            field.copy(metadata = metadataBuilder.build())
+            Seq(
+              FieldMetadata.MilvusPrimaryKeyMetadataKey,
+              FieldMetadata.MilvusPartitionKeyMetadataKey,
+              FieldMetadata.MilvusClusteringKeyMetadataKey
+            ).foreach { key =>
+              val expected = collectionMetadata.contains(key) &&
+                collectionMetadata.getBoolean(key)
+              if (field.metadata.contains(key)) {
+                val actual = field.metadata.getBoolean(key)
+                if (actual != expected) {
+                  conflictingMetadata(field, key, expected, actual)
+                }
+              } else if (expected) {
+                metadataBuilder.putBoolean(key, true)
+              }
+            }
+
+            field.copy(
+              nullable = collectionField.nullable,
+              metadata = metadataBuilder.build()
+            )
           case None =>
-            field
+            throw new IllegalArgumentException(
+              s"Field '${field.name}' is not present in snapshot schema; available fields: ${collectionFieldByName.keys.toSeq.sorted
+                  .mkString(", ")}"
+            )
         }
       }
     }
 
     StructType(fields)
+  }
+
+  /** `fieldIDs` and an externally supplied schema describe the same physical
+    * projection. Reject a mismatch instead of silently reading a different set
+    * of fields from the schema Spark exposes.
+    */
+  private def validateExternalProjection(schema: StructType): Unit = {
+    if (selectedFieldIds.isEmpty) return
+
+    val actualIds = schema.fields
+      .filterNot(field => milvusOption.extraColumns.contains(field.name))
+      .map(_.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey))
+      .toSeq
+    val missing = selectedFieldIds.filterNot(actualIds.contains)
+    val unexpected = actualIds.filterNot(selectedFieldIds.contains)
+    if (missing.nonEmpty || unexpected.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Option '${MilvusOption.ReaderFieldIDs}' and the supplied Spark schema select different fields; " +
+          s"option ids=${selectedFieldIds.mkString(",")}, schema ids=${actualIds.mkString(",")}"
+      )
+    }
   }
 
   private def appendExtraColumns(
@@ -183,14 +246,6 @@ case class MilvusTable(
     }
 
     addIfRequested(
-      MilvusOption.MilvusExtraColumnPartition,
-      StructField(
-        MilvusOption.MilvusExtraColumnPartition,
-        StringType,
-        nullable = true
-      )
-    )
-    addIfRequested(
       MilvusOption.MilvusExtraColumnSegmentID,
       StructField(
         MilvusOption.MilvusExtraColumnSegmentID,
@@ -206,6 +261,32 @@ case class MilvusTable(
         nullable = false
       )
     )
+    if (
+      milvusOption.extraColumns.contains(
+        MilvusOption.MilvusExtraColumnTimestamp
+      )
+    ) {
+      val timestamp =
+        (snapshot.schema.fields ++ SchemaMapper.missingSystemFields(
+          snapshot.schema
+        )).find(_.fieldID == 1L)
+          .getOrElse(
+            throw new IllegalArgumentException(
+              "Snapshot schema cannot provide Milvus timestamp field id 1"
+            )
+          )
+      if (timestamp.dataType != io.milvus.grpc.schema.DataType.Int64) {
+        throw new IllegalArgumentException(
+          s"Snapshot field id 1 must be the Int64 timestamp, got ${timestamp.dataType}"
+        )
+      }
+      addIfRequested(
+        MilvusOption.MilvusExtraColumnTimestamp,
+        SparkTypes
+          .toStructField(timestamp, rawVectors = false)
+          .copy(name = MilvusOption.MilvusExtraColumnTimestamp)
+      )
+    }
 
     StructType(fields)
   }
@@ -216,64 +297,46 @@ case class MilvusTable(
     if (
       readMode != ReadMode.Client && sparkSchema.isDefined && sparkSchema.get.nonEmpty
     ) {
+      val hydrated = rehydrateSnapshotSchemaMetadata(sparkSchema.get)
+      validateExternalProjection(hydrated)
       return appendExtraColumns(
-        rehydrateSnapshotSchemaMetadata(sparkSchema.get),
+        hydrated,
         rejectLegacyAliases = true
       )
     }
 
-    // Client-based mode or snapshot mode without provided schema: compute from milvusCollection
-    var fields = Seq[StructField]()
-    val fieldName2ID = mutable.Map[String, Long]()
-    snapshot.schema.fields.zipWithIndex.foreach { case (field, index) =>
-      fieldName2ID(field.name) = if (field.fieldID == 0) {
-        index + 100
-      } else {
-        field.fieldID
+    // Client-based mode or snapshot mode without provided schema: derive every
+    // id and type from the fixed snapshot. The two canonical system fields are
+    // the only fields core may add; user and dynamic field ids are never
+    // inferred from their position.
+    val allSnapshotFields =
+      SchemaMapper.missingSystemFields(
+        snapshot.schema
+      ) ++ snapshot.schema.fields
+    val fieldsById = allSnapshotFields.groupBy(_.fieldID)
+    val duplicateIds = fieldsById
+      .collect {
+        case (id, fields) if fields.size > 1 => id
       }
-    }
-    val missingSystemFields = SchemaMapper
-      .missingSystemFields(snapshot.schema)
-      .map(_.fieldID)
-      .toSet
-    if (
-      missingSystemFields.contains(0L) &&
-      (fieldIDs.isEmpty || fieldIDs.contains("0"))
-    ) {
-      fields = fields :+ StructField("RowID", LongType, nullable = false)
-    }
-    if (
-      missingSystemFields.contains(1L) &&
-      (fieldIDs.isEmpty || fieldIDs.contains("1"))
-    ) {
-      fields = fields :+ StructField("Timestamp", LongType, nullable = false)
-    }
-    val filteredFields = snapshot.schema.fields
-      .filter(field =>
-        fieldIDs.isEmpty || fieldIDs.contains(fieldName2ID(field.name).toString)
+      .toSeq
+      .sorted
+    if (duplicateIds.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Snapshot schema contains duplicate field id(s): ${duplicateIds.mkString(", ")}"
       )
-    fields = fields ++ filteredFields.map(field =>
-      StructField(
-        field.name,
-        SparkTypes.toDataType(field, rawVectors),
-        field.nullable,
-        SparkTypes.metadata(field)
-      )
-    )
-    // Safely get maxFieldID, default to 100 if empty
-    val maxFieldID =
-      if (fieldName2ID.values.nonEmpty) fieldName2ID.values.max else 100L
-    // Only append $meta if the schema loop did not already emit it (backup
-    // mode materializes $meta from the meta, unlike client mode where
-    // DescribeCollection omits dynamic fields).
-    val alreadyHasMeta = fields.exists(_.name == "$meta")
-    if (
-      !alreadyHasMeta &&
-      snapshot.schema.enableDynamicField &&
-      (fieldIDs.isEmpty || fieldIDs.contains((maxFieldID + 1).toString))
-    ) {
-      fields = fields :+ StructField("$meta", StringType, nullable = true)
     }
+    val missingIds = selectedFieldIds.filterNot(fieldsById.contains)
+    if (missingIds.nonEmpty) {
+      throw new IllegalArgumentException(
+        s"Option '${MilvusOption.ReaderFieldIDs}' requests unknown field id(s) ${missingIds
+            .mkString(", ")}; " +
+          s"snapshot field ids are ${fieldsById.keys.toSeq.sorted.mkString(", ")}"
+      )
+    }
+    val snapshotFields =
+      if (selectedFieldIds.isEmpty) snapshot.schema.fields
+      else selectedFieldIds.map(id => fieldsById(id).head)
+    val fields = snapshotFields.map(SparkTypes.toStructField(_, rawVectors))
     appendExtraColumns(StructType(fields), rejectLegacyAliases = false)
   }
 

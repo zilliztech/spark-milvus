@@ -128,7 +128,7 @@ source row with the same key. Its Spark type must match exactly. Supported
 physical-key Milvus types are Int8, Int16, Int32, Int64, String, and VarChar.
 Floating-point, JSON, Geometry, Text, Timestamptz, unknown, array/struct/map,
 and vector fields are rejected. Logical file/row keys are not supported;
-`$row_offset` is used only to restore physical segment order and is not a
+`_row_offset` is used only to restore physical segment order and is not a
 stable logical row ID.
 
 Backfill targets must be ordinary writable collection fields. Primary keys,
@@ -326,13 +326,13 @@ Override via `customOutputPath` if needed.
    explicit physical keys require a snapshot.
 4. Read the new-field parquet, configuring S3A credentials for the source
    bucket as needed.
-5. Read the selected join column + `$segment_id` / `$row_offset` via
+5. Read the selected join column + `_segment_id` / `_row_offset` via
    `spark.read.format("com.zilliz.spark.connector.sources.MilvusDataSource")`
    in snapshot mode (FQCN avoids shortName collisions with other connectors).
 6. Validate join-key type compatibility and parquet-side cardinality, then
    left-join on the internal normalized key alias. Source keys may repeat.
 7. For each segment, repartition with a custom segment partitioner, sort by
-   `$row_offset`, and write per-segment binlogs via `MilvusV3Writer`.
+   `_row_offset`, and write per-segment binlogs via `MilvusV3Writer`.
 8. Return a `BackfillResult` with manifest paths and per-segment stats.
 
 ## Testing helper

@@ -1,12 +1,12 @@
 package com.zilliz.spark.connector.read
 
+import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.execution.adaptive.{
   AdaptiveSparkPlanExec,
   QueryStageExec
 }
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -406,22 +406,30 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
       def count(extra: (String, String)*): Long =
         spark.read.format("milvus").options(base ++ extra).load().count()
       count() shouldBe 3500L
-      count(MilvusOption.MilvusPartitionName -> "p1") shouldBe 1500L
-      count(MilvusOption.MilvusPartitionName -> "p2") shouldBe 1000L
-      count(MilvusOption.MilvusPartitionName -> "_default") shouldBe 1000L
+      val perPartition = snapshot.partitionIds.map { partitionId =>
+        partitionId -> count(
+          MilvusOption.MilvusPartitions -> partitionId.toString
+        )
+      }
+      perPartition.foreach(_._2 should be > 0L)
+      perPartition.map(_._2).sum shouldBe 3500L
+      val firstTwo = perPartition.take(2)
+      count(
+        MilvusOption.MilvusPartitions -> firstTwo.map(_._1).mkString(",")
+      ) shouldBe firstTwo.map(_._2).sum
       // Every data segment read alone, and the parts add up to the whole.
       val perSegment = snapshot.dataSegments.map { seg =>
-        val n = count(MilvusOption.MilvusSegmentID -> seg.id.toString)
+        val n = count(MilvusOption.MilvusSegments -> seg.id.toString)
         info(s"segment ${seg.id} (partition ${seg.partitionId}): $n rows")
         n should be > 0L
         n
       }
       perSegment.sum shouldBe 3500L
       an[Exception] should be thrownBy count(
-        MilvusOption.MilvusPartitionName -> "no-such-partition"
+        MilvusOption.MilvusPartitions -> Long.MaxValue.toString
       )
       an[Exception] should be thrownBy count(
-        MilvusOption.MilvusSegmentID -> "1"
+        MilvusOption.MilvusSegments -> Long.MaxValue.toString
       )
     }
   }
@@ -444,30 +452,32 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
       }
       val withMeta = read(
         spark,
-        MilvusOption.MilvusExtraColumns -> "partition,$segment_id,$row_offset"
+        MilvusOption.MilvusExtraColumns ->
+          "_segment_id,_row_offset,_timestamp"
       )
       val bySegment = withMeta
-        .groupBy(col("$segment_id"), col("partition"))
+        .groupBy(col("_segment_id"))
         .agg(
           count("*").as("n"),
-          min("$row_offset").as("lo"),
-          max("$row_offset").as("hi")
+          min("_row_offset").as("lo"),
+          max("_row_offset").as("hi"),
+          min("_timestamp").as("first_ts")
         )
         .collect()
       bySegment.foreach { r =>
-        info(s"segment ${r.getLong(0)} partition ${r.getString(1)}: ${r
-            .getLong(2)} rows, offsets ${r.getLong(3)}..${r.getLong(4)}")
-        // $row_offset is the row's position in the segment, so deleted rows
+        info(s"segment ${r.getLong(0)}: ${r.getLong(1)} rows, offsets ${r
+            .getLong(2)}..${r.getLong(3)}, first timestamp ${r.getLong(4)}")
+        // _row_offset is the row's position in the segment, so deleted rows
         // leave holes: the range covers at least n rows and, without
         // deletes, exactly n.
-        val (n, lo, hi) = (r.getLong(2), r.getLong(3), r.getLong(4))
+        val (n, lo, hi) = (r.getLong(1), r.getLong(2), r.getLong(3))
         (hi - lo + 1) should be >= n
         if (env("MILVUS_UAT_DELETED_IDS").isEmpty) {
           lo shouldBe 0L
           hi shouldBe n - 1
         }
       }
-      expected.foreach(e => bySegment.map(_.getLong(2)).sum shouldBe e)
+      expected.foreach(e => bySegment.map(_.getLong(1)).sum shouldBe e)
       // Columnar read with a projection delivers the same rows.
       val columnar = read(spark, MilvusOption.ReadColumnar -> "true")
         .select("id", "name")
@@ -476,12 +486,12 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
     }
   }
 
-  /** A collection with one field of every scalar type the connector maps, an
-    * array, a JSON, a nullable column, a float vector and a binary vector; 100
-    * rows with values derived from the id, so the read case can check every
-    * column. Needs `MILVUS_UAT_TYPES_COLLECTION`.
+  /** A collection with representative scalar fields, an Int64 array, JSON, a
+    * nullable column, a float vector and a binary vector; 100 rows with values
+    * derived from the id, so the read case can check every column. Needs
+    * `MILVUS_UAT_TYPES_COLLECTION`.
     */
-  test("prepare: one column of every supported type (R15)") {
+  test("prepare: representative scalar, array, nullable and vector fields") {
     import io.milvus.grpc.schema._
     import com.google.protobuf.ByteString
     val uri = env("MILVUS_UAT_URI").getOrElse(cancel("set MILVUS_UAT_URI"))
@@ -690,10 +700,11 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
     } finally client.close()
   }
 
-  /** Every column of the types collection reads back with the value it was
-    * written with. Needs `MILVUS_UAT_SNAPSHOT_PATH` of that collection.
+  /** Every column of the representative types collection reads back with the
+    * value it was written with on both reader shapes. Needs
+    * `MILVUS_UAT_SNAPSHOT_PATH` of that collection.
     */
-  test("every supported type reads back (R15)") {
+  test("representative types read back on row and columnar paths") {
     storageOptions(); snapshotPath()
     if (!env("MILVUS_UAT_TYPES_SNAPSHOT").contains("true")) {
       cancel(
@@ -701,44 +712,49 @@ class SnapshotReadUatTest extends AnyFunSuite with Matchers {
       )
     }
     withSpark { spark =>
-      // Both outlets, value by value: the columnar path is the default and
-      // the row path is what `false` selects.
-      Seq("true", "false").foreach { columnar =>
-        val df = read(spark, MilvusOption.ReadColumnar -> columnar)
-        info(s"columnar=$columnar schema: ${df.schema.treeString}")
-        val rows =
-          df.collect().map(r => r.getLong(r.fieldIndex("id")) -> r).toMap
-        rows.size shouldBe 100
-        checkTypes(rows)
-      }
-    }
-  }
-
-  private def checkTypes(rows: Map[Long, org.apache.spark.sql.Row]): Unit = {
-    {
-      Seq(0L, 1L, 2L, 3L, 50L, 99L).foreach { i =>
-        val r = rows(i)
-        withClue(s"row $i: ") {
-          r.getBoolean(r.fieldIndex("b")) shouldBe (i % 2 == 0)
-          r.getByte(r.fieldIndex("i8")).toLong shouldBe i % 100
-          r.getShort(r.fieldIndex("i16")).toLong shouldBe i * 100
-          r.getInt(r.fieldIndex("i32")).toLong shouldBe i * 1000
-          r.getFloat(r.fieldIndex("f")) shouldBe i * 0.5f
-          r.getDouble(r.fieldIndex("d")) shouldBe i * 0.25
-          r.getString(r.fieldIndex("s")) shouldBe s"row-$i"
-          r.getString(r.fieldIndex("j")) should include(s""""k":$i""")
-          r.getSeq[Long](r.fieldIndex("arr")) shouldBe Seq(i, i + 1, i + 2)
-          if (i % 3 == 0) r.isNullAt(r.fieldIndex("opt")) shouldBe true
-          else r.getInt(r.fieldIndex("opt")).toLong shouldBe i
-          r.getSeq[Float](r.fieldIndex("v")) shouldBe (0 until 4).map(d =>
-            (i * 10 + d).toFloat
-          )
-          r.getAs[Array[Byte]](r.fieldIndex("bv")).toSeq shouldBe Seq(
-            (i & 0xff).toByte,
-            ((i >> 8) & 0xff).toByte
-          )
+      def assertValues(path: String, collected: Array[Row]): Unit = {
+        val rows = collected
+          .map(row => row.getLong(row.fieldIndex("id")) -> row)
+          .toMap
+        withClue(s"$path reader: ") {
+          rows.size shouldBe 100
+        }
+        Seq(0L, 1L, 2L, 3L, 50L, 99L).foreach { i =>
+          val row = rows(i)
+          withClue(s"$path reader, row $i: ") {
+            row.getBoolean(row.fieldIndex("b")) shouldBe (i % 2 == 0)
+            row.getByte(row.fieldIndex("i8")).toLong shouldBe i % 100
+            row.getShort(row.fieldIndex("i16")).toLong shouldBe i * 100
+            row.getInt(row.fieldIndex("i32")).toLong shouldBe i * 1000
+            row.getFloat(row.fieldIndex("f")) shouldBe i * 0.5f
+            row.getDouble(row.fieldIndex("d")) shouldBe i * 0.25
+            row.getString(row.fieldIndex("s")) shouldBe s"row-$i"
+            row.getString(row.fieldIndex("j")) should include(s""""k":$i""")
+            row.getSeq[Long](row.fieldIndex("arr")) shouldBe Seq(
+              i,
+              i + 1,
+              i + 2
+            )
+            if (i % 3 == 0) row.isNullAt(row.fieldIndex("opt")) shouldBe true
+            else row.getInt(row.fieldIndex("opt")).toLong shouldBe i
+            row.getSeq[Float](row.fieldIndex("v")) shouldBe (0 until 4).map(
+              dimension => (i * 10 + dimension).toFloat
+            )
+            row.getAs[Array[Byte]](row.fieldIndex("bv")).toSeq shouldBe Seq(
+              (i & 0xff).toByte,
+              ((i >> 8) & 0xff).toByte
+            )
+          }
         }
       }
+
+      val columnar = read(spark)
+      info(s"schema: ${columnar.schema.treeString}")
+      assertValues("columnar", columnar.collect())
+      assertValues(
+        "row",
+        read(spark, MilvusOption.ReadColumnar -> "false").collect()
+      )
     }
   }
 

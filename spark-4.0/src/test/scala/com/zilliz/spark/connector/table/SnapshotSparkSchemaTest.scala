@@ -3,6 +3,8 @@ package com.zilliz.spark.connector.table
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
+import com.fasterxml.jackson.databind.node.LongNode
+import org.apache.arrow.vector.types.pojo.ArrowType
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -12,6 +14,7 @@ import com.zilliz.milvus.storage.snapshot.json.{
   KeyValueJson,
   SnapshotJson
 }
+import com.zilliz.milvus.storage.DataParseException
 
 /** A snapshot's CollectionSchemaJson to a Spark StructType. */
 class SnapshotSparkSchemaTest extends AnyFunSuite with Matchers {
@@ -189,16 +192,21 @@ class SnapshotSparkSchemaTest extends AnyFunSuite with Matchers {
       .asScala
       .map(field => field.getName -> field)
       .toMap
-    arrowFields("binary_vec").getMetadata.get("dim") shouldBe "128"
-    arrowFields("int8_vec").getMetadata.get("dim") shouldBe "4"
+    arrowFields("binary_vec").getType shouldBe
+      new ArrowType.FixedSizeBinary(16)
+    arrowFields("int8_vec").getType shouldBe new ArrowType.FixedSizeBinary(4)
   }
 
   test("fieldToStructField preserves milvus.data_type metadata") {
     val field = FieldJson(
+      fieldID = Some(LongNode.valueOf(407L)),
       name = "binary_vec",
       rawDataType =
         Some(com.fasterxml.jackson.databind.node.IntNode.valueOf(100)),
+      isPrimaryKey = Some(true),
+      isClusteringKey = Some(true),
       typeParams = Some(Seq(KeyValueJson("dim", "128"))),
+      isPartitionKey = Some(true),
       nullable = Some(false)
     )
 
@@ -213,5 +221,60 @@ class SnapshotSparkSchemaTest extends AnyFunSuite with Matchers {
     structField.metadata.getLong(
       FieldMetadata.MilvusVectorDimensionMetadataKey
     ) shouldBe 128L
+    structField.metadata.getLong(
+      FieldMetadata.MilvusFieldIdMetadataKey
+    ) shouldBe 407L
+    structField.metadata.getBoolean(
+      FieldMetadata.MilvusPrimaryKeyMetadataKey
+    ) shouldBe true
+    structField.metadata.getBoolean(
+      FieldMetadata.MilvusPartitionKeyMetadataKey
+    ) shouldBe true
+    structField.metadata.getBoolean(
+      FieldMetadata.MilvusClusteringKeyMetadataKey
+    ) shouldBe true
+  }
+
+  test("a recorded dynamic field keeps its type, id and nullability") {
+    val field = FieldJson(
+      fieldID = Some(LongNode.valueOf(407L)),
+      name = "$meta",
+      rawDataType =
+        Some(com.fasterxml.jackson.databind.node.IntNode.valueOf(23)),
+      isDynamic = Some(true),
+      nullable = Some(true)
+    )
+
+    val structField = SnapshotSparkSchema.fieldToStructField(field)
+
+    structField.name shouldBe "$meta"
+    structField.dataType shouldBe org.apache.spark.sql.types.StringType
+    structField.nullable shouldBe true
+    structField.metadata.getLong(
+      FieldMetadata.MilvusFieldIdMetadataKey
+    ) shouldBe 407L
+    structField.metadata.getLong(
+      FieldMetadata.MilvusDataTypeMetadataKey
+    ) shouldBe 23L
+  }
+
+  test("a missing nullable flag uses the protobuf non-nullable default") {
+    val field = FieldJson(
+      name = "id",
+      rawDataType = Some(com.fasterxml.jackson.databind.node.IntNode.valueOf(5))
+    )
+
+    SnapshotSparkSchema.fieldToStructField(field).nullable shouldBe false
+  }
+
+  test("snapshot fields use SparkTypes unsupported-type failures") {
+    val field = FieldJson(
+      name = "unsupported",
+      rawDataType =
+        Some(com.fasterxml.jackson.databind.node.IntNode.valueOf(26))
+    )
+
+    an[DataParseException] should be thrownBy
+      SnapshotSparkSchema.fieldToSparkType(field)
   }
 }

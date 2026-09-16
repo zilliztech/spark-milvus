@@ -3,8 +3,10 @@ package com.zilliz.milvus.storage.compat.backup
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.{
   Callable,
+  ExecutionException,
   ExecutorService,
   Executors,
+  Future,
   ThreadFactory
 }
 import java.util.concurrent.atomic.AtomicInteger
@@ -481,22 +483,53 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
               }
             )
           }
-          futures.foreach { f =>
-            f.get() match {
+          awaitFutures(futures)
+            .map {
+              case Right(result) => result
+              case Left(error)   => Left(error)
+            }
+            .foreach {
               case Right(Some(v2)) => out += v2
               case Right(None)     => // L0 segment skipped (applyDeletes=false)
-              case Left(e)         =>
-                // One bad segment shouldn't leave a burst of wasted driver-side
-                // S3 footer reads running after the read has already failed.
-                futures.foreach(_.cancel(true))
-                throw e
+              case Left(e)         => throw e
             }
-          }
         }
       Right(out.toSeq)
     } catch {
       case NonFatal(e) => Left(e)
     }
+  }
+
+  /** Waits for every submitted storage read before reporting an error.
+    *
+    * The caller owns the shared ObjectStore and closes it as soon as
+    * `toV2Segments` returns. Cancelling a running future does not wait for its
+    * thread to leave a native read, so returning on the first failure can close
+    * the store while another footer task is still using it.
+    */
+  private def awaitFutures[A](
+      futures: Seq[Future[A]]
+  ): Seq[Either[Throwable, A]] = {
+    var interrupted: InterruptedException = null
+    val results = futures.map { future =>
+      var result = Option.empty[Either[Throwable, A]]
+      while (result.isEmpty) {
+        try result = Some(Right(future.get()))
+        catch {
+          case e: InterruptedException =>
+            if (interrupted == null) interrupted = e
+          case e: ExecutionException =>
+            result = Some(Left(Option(e.getCause).getOrElse(e)))
+          case NonFatal(e) => result = Some(Left(e))
+        }
+      }
+      result.get
+    }
+    if (interrupted != null) {
+      Thread.currentThread().interrupt()
+      throw interrupted
+    }
+    results
   }
 
   /** Convert one backup segment into a `Segment` (or skip it), reusing the
@@ -737,7 +770,11 @@ object BackupMetaReader extends com.zilliz.milvus.storage.Logging {
             }
         })
       }
-      Right(futures.map(_.get()))
+      val results = awaitFutures(futures)
+      results.collectFirst { case Left(error) => error } match {
+        case Some(error) => Left(error)
+        case None        => Right(results.collect { case Right(rows) => rows })
+      }
     } catch {
       case NonFatal(e) => Left(e)
     }

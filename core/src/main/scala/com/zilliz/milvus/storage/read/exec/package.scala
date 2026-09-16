@@ -15,17 +15,19 @@ package com.zilliz.milvus.storage.read
   * are typed, but the Spark-facing half of that is a Spark type and belongs in
   * layer 3; what crosses into core is still a `VectorSchemaRoot`.
   *
-  * `DeletePlans` reads a task's delete files (`DeleteSource.Files`) into the
-  * plan the reader applies; a file that cannot be read fails the task.
+  * `DeletePlans` reads and closes a task's delete files (`DeleteSource.Files`)
+  * on the executor; an unreadable file fails the task. The registry wraps both
+  * Spark output modes in the same expected-row check: reaching EOF with a
+  * different physical count fails instead of returning a short DataFrame.
   *
   * `SegmentReader.metrics` is what the read cost on the crossing, as
   * `ReadMetrics`: calls and time, batches and bytes, the C side's copies, the
   * allocator's peak (G5; docs/design/architecture/storage-io.html section 5).
   *
   * Main types: SegmentReader, SegmentReaderRegistry, DeletePlans, ReadMetrics.
-  * Capabilities: R3, R4, R14, R17, G3, G5 (see docs/design/capabilities.md). R4
-  * and R17 name the columnar outlet and G3 the off-heap budget; the batch pull
-  * they both sit on is what exists today. Design:
-  * docs/design/architecture/read.html section 5.2.
+  * Capabilities: R3, R4, R8, R14, R17, G3, G5 (see
+  * docs/design/capabilities.md). R4 and R17 name the columnar outlet and G3 the
+  * off-heap budget; the batch pull they both sit on is what exists today.
+  * Design: docs/design/architecture/read.html section 5.2.
   */
 package object exec

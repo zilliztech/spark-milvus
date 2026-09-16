@@ -40,7 +40,8 @@ val milvusDFWithOptions = MilvusDataReader.read(
     collectionName = "your_collection",
     options = Map(
       MilvusOption.MilvusDatabaseName -> "your_database",
-      MilvusOption.MilvusPartitionName -> "your_partition"
+      MilvusOption.MilvusPartitions -> "100,101",
+      MilvusOption.MilvusSegments -> "2001,2002"
     )
   )
 )
@@ -59,7 +60,8 @@ val milvusDFWithOptions = MilvusDataReader.read(
 
 **Basic Connection Parameters:**
 - `MilvusOption.MilvusDatabaseName` - Database name
-- `MilvusOption.MilvusPartitionName` - Partition name
+- `MilvusOption.MilvusPartitions` - Comma-separated numeric partition IDs
+- `MilvusOption.MilvusSegments` - Comma-separated numeric segment IDs
 
 **S3 Storage Parameters:**
 - `MilvusOption.S3Endpoint` - S3 service endpoint
@@ -102,7 +104,19 @@ val s3Options = Map(
 
 ### 1.4 How It Works
 
-Each Spark partition is one segment. The executor opens it through milvus-storage's C interface and pulls Arrow batches: from the segment manifest for `storage_version = 3`, from the column-group parquet files for `storage_version = 2`, with the same reader for both. The executor reads the segment's delete files into a delete plan and drops deleted rows by primary key and timestamp.
+`getTable` resolves exactly one immutable snapshot. That same `Snapshot` supplies
+the schema, selected segments, statistics, and scan plan; a scan never asks the
+service or storage for a newer view. The driver closes every object store used
+to materialize snapshot metadata on both success and failure, before executor
+tasks are serialized. Each Spark partition then reads one data segment. For
+`storage_version = 3`, the executor opens the pinned segment
+manifest; for `storage_version = 2`, it opens the column-group parquet files
+listed by the task; both storage lines share the same row reader. The driver
+sends delete-file descriptors, not decoded
+primary-key maps. Each executor reads and closes the delete files that apply to
+its segment, then drops rows by primary key and timestamp. An unreadable delete
+file or a segment that yields fewer rows than its declared count fails the task
+instead of returning incomplete data.
 
 ### 1.5 Metrics
 
@@ -132,13 +146,26 @@ Every read and write reports what it cost on the C/JVM boundary as task metrics 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `MilvusOption.MilvusCollectionName` | String | Conditional | - | Collection name. Required for client mode; in backup mode required only when the backup holds more than one collection. |
-| `MilvusOption.MilvusPartitionName` | String | No | "" | Partition name, operates on all partitions when empty |
 | `MilvusOption.MilvusCollectionID` | String | No | "" | Collection ID, usually auto-retrieved |
-| `MilvusOption.MilvusPartitionID` | String | No | "" | Partition ID, usually auto-retrieved |
-| `MilvusOption.MilvusSegmentID` | String | No | "" | Segment ID, for reading specific segments |
-| `MilvusOption.ReaderFieldIDs` | String | No | "" | Comma-separated field ID list, for reading specific fields |
+| `MilvusOption.MilvusPartitions` (`milvus.partitions`) | String | No | unset | Comma-separated numeric partition IDs. The selector is applied after any snapshot source resolves. Every requested ID must exist; duplicates are ignored without changing the first-seen order. |
+| `MilvusOption.MilvusSegments` (`milvus.segments`) | String | No | unset | Comma-separated numeric segment IDs. It may be combined with `milvus.partitions`, in which case the scan reads their intersection. Every requested ID must exist. |
+| `MilvusOption.ReaderFieldIDs` (`fieldIDs`) | String | No | unset | Comma-separated numeric field IDs, applied during both schema inference and table creation. Each requested ID must exist in the snapshot schema; Spark projection can further prune this set. With an external `.schema()`, its non-metadata fields must select exactly these IDs and their names and Spark types must match the snapshot. |
+| `MilvusOption.MilvusExtraColumns` (`milvus.extra.columns`) | String | No | "" | Comma-separated metadata columns. The supported names are `_segment_id`, `_row_offset`, and `_timestamp`; see section 4. |
+| `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | No | true | Apply all segment-local, partition-level L0, and collection-level L0 deletes visible in the fixed snapshot. Setting this to `false` is explicit opt-out; any provided value besides `true` or `false`, including a blank value, is rejected. |
 | `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
-| `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. A read with `vector.search.*` options takes the row path regardless, because that stage scores rows |
+| `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. A read with `vector.search.*` options takes the row path regardless, because that stage scores rows. Row and columnar readers use the same expected-row guard. |
+
+Provided selector lists reject blank values, empty entries, and non-numeric
+values. Boolean read options
+(`milvus.snapshot.mode`, `milvus.read.apply.deletes`,
+`milvus.read.vector.raw`, and `milvus.read.columnar`) accept only `true` or
+`false`, case-insensitively; a blank value or misspelling is an error rather
+than a default. A provided `milvus.snapshot.max.json.bytes` must be a positive
+integer. Vector search is
+enabled only when `vector.search.query` and `vector.search.topK` are both set:
+the query must be a non-empty JSON-style array of finite numbers and `topK`
+must be a positive integer. Any provided vector-search option must be non-blank;
+a partial or malformed configuration fails during planning.
 
 
 ### 2.4 Write Parameters
@@ -184,7 +211,7 @@ to snapshot). See `docs/backup-datasource-design.md` for the full design.
 | `MilvusOption.MilvusCollectionName` | String | Conditional | - | Collection name inside the backup (matched with the database name, never `.head`). Required when the backup holds more than one collection. |
 | `MilvusOption.SnapshotPath` | String | No | - | `milvus.snapshot.path` — a snapshot JSON in the snapshot directory (`s3a://bucket/files/snapshots/<coll>/metadata/<id>.json` or a key relative to `fs.bucket_name`). Reads it without a Milvus service: schema, partitions and segments all come from that file. Cannot be combined with `milvus.snapshot.manifests`. |
 | `MilvusOption.ClientSnapshotName` | String | No | latest | `milvus.client.snapshot.name` — with `milvus.uri`: read this snapshot of the collection from the snapshot directory instead of the latest one. The connector never creates snapshots; make one with Milvus or `CALL create_snapshot`. |
-| `MilvusOption.SnapshotMaxJsonBytes` | Long | No | 67108864 | `milvus.snapshot.max.json.bytes` — max size of the backup `full_meta.json`. |
+| `MilvusOption.SnapshotMaxJsonBytes` | Long | No | 67108864 | `milvus.snapshot.max.json.bytes` — positive maximum size of a snapshot JSON or backup `full_meta.json`. |
 
 The Spark read schema is derived from the backup meta unless `.schema()` is
 given; a meta that cannot be read fails the read either way. Reading a dynamic collection (`enable_dynamic_field=true`) requires the
@@ -197,6 +224,22 @@ S3 credentials use the existing `fs.*` options (`fs.address`,
 `fs.access_key_id`, `fs.access_key_value`, ...); the bucket comes from the
 `milvus.backup.dir` URI.
 
+For S3-compatible endpoints, `fs.address` is the canonical endpoint option;
+DataFrame options `fs.s3a.endpoint` and `s3.endpoint` are aliases, in that
+priority order. Existing Spark/Hadoop `fs.s3a.endpoint` configuration is also
+translated to the same native property.
+Milvus metadata may spell an object as
+`s3://endpoint:port/bucket/key`. The connector recognizes that form only while
+decoding Milvus-produced metadata (an explicit authority port, or an authority
+host equal to the configured endpoint host), and normalizes it to the same `(bucket,
+key)` as `s3a://bucket/key`. A user-supplied standard S3 URI always treats its
+authority as the bucket. Path-style access is taken from
+`fs.s3a.path.style.access`, then `s3.pathStyleAccess`, then the inverse of
+`fs.use_virtual_host`; each setting is strictly boolean.
+Snapshot JSON, Avro, V2 footers, V3 manifests, data files, and delete files
+must all normalize to the snapshot's one bucket; a cross-bucket reference
+fails during planning.
+
 ## 3. Usage Examples
 
 ### 3.1 Reading Data
@@ -208,7 +251,10 @@ val df = spark.read
   .option(MilvusOption.MilvusToken, "your-token")
   .option(MilvusOption.MilvusCollectionName, "your_collection")
   .option(MilvusOption.MilvusDatabaseName, "your_database")
-  .option(MilvusOption.ReaderFieldIDs, "1,2,100,101")  // Read only specified fields
+  .option(MilvusOption.MilvusPartitions, "100,101")
+  .option(MilvusOption.MilvusSegments, "2001,2002")
+  .option(MilvusOption.ReaderFieldIDs, "100,101")  // Read only specified collection fields
+  .option(MilvusOption.MilvusExtraColumns, "_segment_id,_row_offset,_timestamp")
   .load()
 ```
 
@@ -266,8 +312,23 @@ milvus.system.register(...)` is not available yet.
 
 The output schema for `milvus` format depends on the Milvus collection schema and includes:
 
-- User-defined fields (based on collection schema)
-- `$meta` (StringType) - Dynamic fields (if enabled)
+- Collection fields selected by Spark projection and `fieldIDs`. Each field
+  keeps the snapshot's name, field ID, Milvus data type, nullability, key flags,
+  and vector dimension in its Spark metadata.
+- `$meta` when the collection schema records its authoritative field ID as one
+  JSON field marked dynamic. If dynamic fields are enabled but that definition
+  is missing or inconsistent, planning fails; the connector never guesses the
+  physical field ID.
+- Requested metadata columns, appended in the fixed order shown below
+  regardless of request order:
+  - `_segment_id` (`LongType`, non-null): the data segment ID.
+  - `_row_offset` (`LongType`, non-null): the physical row position in that
+    segment before delete filtering.
+  - `_timestamp` (`LongType`, snapshot nullability): the stored Milvus system
+    timestamp field with field ID `1`; it is read from storage, not synthesized.
+
+The connector does not expose a `partition` metadata column. Partition and
+segment selection uses `milvus.partitions` and `milvus.segments`.
 
 ## 5. Important Notes
 
@@ -278,11 +339,10 @@ The output schema for `milvus` format depends on the Milvus collection schema an
 ## 6. Supported Data Types
 
 ### 6.1 Scalar Types
-- Bool
-- Int8, Int16, Int32, Int64
-- Float, Double
-- String, VarChar
-- JSON
+- Bool (`BooleanType`)
+- Int8, Int16, Int32, Int64 (`ByteType`, `ShortType`, `IntegerType`, `LongType`)
+- Float, Double (`FloatType`, `DoubleType`)
+- String, VarChar, Text, JSON (`StringType`)
 
 ### 6.2 Vector Types
 - FloatVector
@@ -293,4 +353,9 @@ The output schema for `milvus` format depends on the Milvus collection schema an
 - SparseFloatVector
 
 ### 6.3 Complex Types
-- Array (supports scalar element types)
+- Array of Bool, Int8, Int16, Int32, Int64, Float, Double, String, or VarChar
+
+This is a closed support list. Geometry, Timestamptz,
+ArrayOfVector/struct-array fields, and unknown future Milvus types are not
+silently converted to binary or null: schema resolution or value conversion
+fails explicitly and reports the unsupported type.
