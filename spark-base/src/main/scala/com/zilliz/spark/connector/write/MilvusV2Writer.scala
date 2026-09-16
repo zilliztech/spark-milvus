@@ -134,7 +134,7 @@ class MilvusV2Writer(
     paths = fields.map(_.bucketRelativePath).toSeq,
     columnGroups = newFieldNames.indices.map(Seq(_)),
     arrowSchema = arrowSchema,
-    properties = StorageProperties.from(milvusOption.options),
+    properties = MilvusOption.writerProperties(milvusOption),
     allocator = allocator
   )
   logInfo(

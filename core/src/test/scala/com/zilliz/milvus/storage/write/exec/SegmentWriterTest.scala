@@ -372,9 +372,17 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
     layout.segment(2, 7L) shouldBe "files/staging/job-1/2/task_2_7"
     layout.manifest shouldBe "files/staging/job-1/manifest.json"
     StagingLayout("", "j").prefix shouldBe "staging/j"
+    StagingLayout("files", "job.1").prefix shouldBe
+      "files/staging/job.1"
     an[IllegalArgumentException] should be thrownBy StagingLayout(
       "files",
       "a/b"
     )
+    Seq(".", "..", "a\\b", "a\nb", " job").foreach { jobId =>
+      an[IllegalArgumentException] should be thrownBy StagingLayout(
+        "files",
+        jobId
+      )
+    }
   }
 }

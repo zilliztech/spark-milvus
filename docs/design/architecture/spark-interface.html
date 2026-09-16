@@ -1,0 +1,113 @@
+<meta charset="utf-8">
+<title>Spark 接口边界</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 54rem; margin: 2rem auto; padding: 0 1.2rem;
+         font: 16px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.4rem; border-bottom: 1px solid #8884; padding-bottom: .3rem; }
+  h3 { font-size: 1rem; margin-top: 1.6rem; }
+  p.thesis { font-size: 1.05rem; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .86em;
+         background: #8881; padding: .1em .35em; border-radius: 3px; }
+  pre { background: #8881; padding: .8rem 1rem; border-radius: 4px; overflow-x: auto; font-size: .84rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .9rem; }
+  th, td { border: 1px solid #8884; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #8881; font-weight: 600; }
+  .warn { border-left: 3px solid #d08700; background: #d0870014; padding: .8rem 1rem; margin: 1.3rem 0; }
+  .done { border-left: 3px solid #1a7f37; background: #1a7f3714; padding: .8rem 1rem; margin: 1.3rem 0; }
+</style>
+
+<h1>Spark 接口边界</h1>
+
+<p>本页说明第 3 层怎样把 Spark DataSource V2 调用变成第 2 层的可序列化描述，以及怎样把执行结果交回 Spark。
+模块分层见 <a href="modules.md">modules.md</a>，读写机制分别见
+<a href="read.html">read.html</a> 与 <a href="write.html">write.html</a>，用户 option 见
+<a href="../../reference-cn.md">中文参考</a>和<a href="../../reference-en.md">英文参考</a>。</p>
+
+<p class="thesis"><strong>第 3 层解析 Spark 输入、固定一次跨层合同；第 2 层不接收 Spark 类型，也不重新解释用户字符串。</strong>
+driver 把 option、schema 和固定 Snapshot 变成类型化配置与任务描述；executor 只按描述打开资源。
+四条 Spark 线共享 <code>spark-base</code> 主体，只有 Spark 公共接口确实不同的适配代码留在按线模块。</p>
+
+<h2 id="entry">一、三个 Spark 入口</h2>
+
+<table>
+<tr><th>入口</th><th>第 3 层职责</th><th>交给第 2 层</th></tr>
+<tr><td><code>format("milvus")</code> 读</td><td><code>MilvusDataSource</code> 解析一次 Snapshot；<code>MilvusScanBuilder</code> 处理投影、谓词与 Limit；<code>MilvusScan</code> 生成 Spark 分区</td><td><code>Snapshot</code>、<code>ReadPlan</code>、<code>SegmentReadTask</code></td></tr>
+<tr><td><code>format("milvus")</code> 写</td><td><code>MilvusTable</code> 与 WriteBuilder 校验 DataFrame schema；每个 Spark task 持有一个 segment writer；driver 汇总 commit message</td><td><code>V2SegmentWriter</code> / <code>V3SegmentWriter</code>、<code>Committer</code></td></tr>
+<tr><td>Catalog 与 CALL</td><td>按 Spark 线适配公开接口、SQL parser 与输出 Row；主体仍放共享目录</td><td><code>client.api</code> 与已有 snapshot、write commit 类型</td></tr>
+</table>
+
+<p>读取的表必须持有已经解析好的 <code>Snapshot</code>，scan 不再次访问服务以决定读哪个版本。
+写入先从同一 Snapshot schema 取得字段 id、逻辑类型和向量维度。连接服务、读取对象存储与打开 JNI 句柄各自只有现有的一条路径；
+第 3 层不能为某一种 Spark 入口另建一套存储访问。</p>
+
+<h2 id="packages">二、共享包的职责</h2>
+
+<table>
+<tr><th>包</th><th>允许持有</th><th>不允许持有</th></tr>
+<tr><td><code>spark.sources</code></td><td>DataSource V2 format 入口</td><td>读取、写入或 Catalog 语义</td></tr>
+<tr><td><code>spark.table</code></td><td>固定 Snapshot、Spark schema、read/write capability</td><td>native 句柄</td></tr>
+<tr><td><code>spark.options</code></td><td>option 名、严格解析、SnapshotSource 与 driver 存储接线</td><td>executor 资源、未校验的数值跨层传递</td></tr>
+<tr><td><code>spark.read</code></td><td>Scan、InputPartition、ColumnBinding、最终 PartitionReader</td><td>段格式读取实现</td></tr>
+<tr><td><code>spark.write</code></td><td>WriteBuilder、Spark task writer、commit message 适配</td><td>原生 writer 调用细节</td></tr>
+<tr><td><code>spark.types</code></td><td>Arrow 与 Spark 类型互转、Arrow allocator 根与 task child</td><td>Milvus 对象存储访问</td></tr>
+</table>
+
+<p>跨层类型必须能单独解释其所有字段。<code>SegmentReadTask</code> 保存段 id、布局、schema 字节、投影字段 id、
+删除文件、索引描述、<code>fs.*</code> 与 <code>ReadLimits</code>；不保存 Spark <code>Configuration</code>、allocator、reader 或其他进程内对象。
+写 task 接收已经验证的 <code>MilvusOption</code> 与带 Milvus metadata 的 Spark schema，原生资源在 executor 构造。</p>
+
+<h2 id="options">三、option 在 driver 只解析一次</h2>
+
+<p>所有用户提供的正整数、正长整型和布尔值走 <code>OptionParsing</code>。键不区分大小写；值先去除首尾空白。
+正数只接受十进制数字且必须大于零，id 列表按各自合同接受非负值；布尔只接受不区分大小写的
+<code>true</code> / <code>false</code>。空白、负数、零、非十进制形式和溢出都抛
+<code>IllegalArgumentException</code>，错误同时给出 option 键与原始值。未提供时保持既有默认值。</p>
+
+<table>
+<tr><th>用户 option</th><th>类型与默认值</th><th>跨层形式</th><th>执行映射</th></tr>
+<tr><td><code>milvus.read.batch.max.rows</code></td><td>正 Int，8192</td><td rowspan="3"><code>ReadLimits</code>，保存在每个 <code>SegmentReadTask</code></td><td><code>reader.record_batch_max_rows</code></td></tr>
+<tr><td><code>milvus.read.batch.max.bytes</code></td><td>正 Long，33554432；最大 4294967296</td><td><code>reader.record_batch_max_size</code></td></tr>
+<tr><td><code>milvus.read.arrow.max.bytes</code></td><td>正 Long，<code>Long.MaxValue</code></td><td>task Arrow child allocator 的最大分配字节</td></tr>
+<tr><td><code>milvus.write.file.rolling.bytes</code></td><td>正 Long，2147483648</td><td><code>MilvusOption.writeFileRollingBytes</code></td><td><code>writer.file_rolling.size</code></td></tr>
+</table>
+
+<p>原始 <code>fs.*</code> bag 只负责存储位置和认证。即使用户同时传入上表中的上游原生键，
+类型化 read/write 值也覆盖它，防止跳过 connector 的范围校验。rolling 属性只传给 segment writer；
+ObjectStore、统计文件与 manifest 提交继续使用纯存储属性。</p>
+
+<h2 id="ownership">四、executor 资源所有权</h2>
+
+<pre><code>进程级 Arrow root（connector 生命周期）
+  └─ task child（PartitionReader 生命周期，有 maxBytes）
+       ├─ SegmentReader 的 Arrow C Data struct 与导入批
+       ├─ 行式/列式当前批
+       └─ vector search 的回表批</code></pre>
+
+<p><code>MilvusPartitionReaderFactory</code> 创建 task child，然后用它打开 <code>SegmentReader</code>。
+行式与列式基础 reader 都明确持有 child；metadata 与 Limit 包装器把 <code>close</code> 委托到底层。
+正常关闭先释放当前批，再关闭 native reader，最后关闭 child。基础 reader 的关闭幂等；factory 在构造失败时关闭已经取得的每个资源，
+因为 Spark 不会关闭一个没有成功返回的 reader。<code>SegmentReader</code> 只借用调用方 allocator，不得关闭 child；task 更不能关闭进程级 root。</p>
+
+<div class="warn"><strong>边界：</strong><code>milvus.read.arrow.max.bytes</code> 只覆盖 Arrow Java allocator 能核算的内存。
+milvus-storage 的 native 内存池目前没有 per-reader 限额接口。上游也没有独立的每 task 预取队列上限属性，
+因此 G3 不声明已经提供 prefetch limit。</div>
+
+<h2 id="delivery">五、交付顺序与验收门</h2>
+
+<ol>
+  <li>先在本页、读写设计与决策日志确定 option 名、默认值、跨层类型和资源所有权。</li>
+  <li>在 <code>spark.options</code> 严格解析；解析失败必须发生在 driver 规划或写构建阶段。</li>
+  <li>把读取限制加入可序列化任务并在 <code>core.read.exec</code> 映射；把 rolling 限制只传给两个原生 segment writer。</li>
+  <li>建立 task child allocator；覆盖行式、列式、向量路径、构造失败、正常关闭与重复关闭。</li>
+  <li>同步能力表、双语 reference 与相关 <code>package.scala</code>，再跑每条受影响 Spark 线的编译和聚焦测试。</li>
+</ol>
+
+<div class="done"><strong>验收：</strong>默认值不改变既有行为；option 大小写不影响解析；空值、零、负数、非数字与溢出错误包含键和值；
+read task 序列化后保留全部限制；原生属性使用类型化值；关闭 task child 后全局 root 仍可分配；V2/V3 writer 都得到同一个 rolling 属性。</div>
+
+<h2 id="outside">六、不在本设计内的项</h2>
+
+<p>本页不增加 <code>milvus.filter</code>，不改变 W6 索引构建参数，不建立索引/GPU/cache 预算，也不以 connector 本地开关绕过
+milvus-storage 尚未提供的 native 内存与预取接口。这些能力必须先有各自设计和上游可调用接口，才能加入跨层合同。</p>

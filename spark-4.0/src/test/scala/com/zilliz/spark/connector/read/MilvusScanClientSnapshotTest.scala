@@ -23,16 +23,19 @@ import com.zilliz.milvus.storage.compat.backup.BackupMetaReader
 import com.zilliz.milvus.storage.compat.backup.BackupSnapshotSource
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.DeletePlan
-import com.zilliz.milvus.storage.io.FailingObjectStore
+import com.zilliz.milvus.storage.io.{FailingObjectStore, FileInfo, ObjectStore}
 import com.zilliz.milvus.storage.read.plan.{
   DeleteFileListing,
   DeleteSource,
+  ReadLimits,
   SegmentReadTask
 }
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.{
+  DeleteFiles,
   DeltaLogFile,
   Segment,
+  SegmentStatistics,
   Snapshot,
   SnapshotCatalog,
   SnapshotOrigin,
@@ -44,6 +47,7 @@ import com.zilliz.milvus.storage.snapshot.json.{
   SnapshotJson
 }
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.milvus.storage.stats.PrimaryKeyStats
 import com.zilliz.spark.connector.options.{
   MilvusOption,
   OptionStringsSnapshotSource,
@@ -439,6 +443,34 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
     assert(!task.properties.contains(StorageProperties.BucketName))
     assert(!task.properties.contains(StorageProperties.Address))
+  }
+
+  test("planning carries validated read limits into executor tasks") {
+    val segment = Segment.v2(
+      id = 1L,
+      partitionId = 0L,
+      rows = 1L,
+      columnGroups = Seq(
+        V2ColumnGroup(Seq(100L), Seq("/tmp/1.parquet"), Seq(1L))
+      )
+    )
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(MilvusOption.ReadBatchMaxRows, "2048")
+    rawOptions.put(MilvusOption.ReadBatchMaxBytes, "16777216")
+    rawOptions.put(MilvusOption.ReadArrowMaxBytes, "67108864")
+    val snapshot = snapshotOf(
+      v2 = Seq(segment),
+      partitionIds = Seq(0L),
+      bucket = ""
+    )
+
+    val task = new MilvusScan(
+      rowIdSchema,
+      new CaseInsensitiveStringMap(rawOptions),
+      snapshot
+    ).inputPartitions(snapshot).head.asInstanceOf[MilvusV2InputPartition].task
+
+    assert(task.limits == ReadLimits(2048, 16777216L, 67108864L))
   }
 
   test("backup createReaderFactory is self-contained without prior planning") {
@@ -1410,6 +1442,269 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       builder.pushPredicates(Array(predicate)).sameElements(Array(predicate))
     )
     assert(builder.pushedPredicates().isEmpty)
+  }
+
+  test(
+    "runtime primary-key filters accumulate by intersection and are idempotent"
+  ) {
+    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
+    import org.apache.spark.sql.connector.expressions.filter.Predicate
+    import com.zilliz.milvus.storage.stats.PrimaryKeyValue.LongValue
+
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = io.milvus.grpc.schema.DataType.Int64,
+          isPrimaryKey = true
+        )
+      )
+    )
+    val snapshot = snapshotOf(schemaBytes = collection.toByteArray)
+    val options = new CaseInsensitiveStringMap(new ju.HashMap[String, String]())
+    val fullSchema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+    def in(values: Long*): Predicate = new Predicate(
+      "IN",
+      (Seq[Expression](Expressions.column("id")) ++
+        values.map(Expressions.literal)).toArray
+    )
+    val builder = new MilvusScanBuilder(fullSchema, options, snapshot)
+    assert(builder.pushPredicates(Array(in(2L, 3L))).isEmpty)
+    val scan = builder.build().asInstanceOf[MilvusScan]
+
+    assert(
+      scan.filterAttributes().map(_.fieldNames().mkString(".")).toSeq == Seq(
+        "id"
+      )
+    )
+    scan.filter(Array(in(1L, 2L)))
+    assert(scan.currentPrimaryKeyFilter.get.values == Set(LongValue(2L)))
+    scan.filter(Array(in(2L, 4L)))
+    scan.filter(Array(in(2L, 4L)))
+    assert(scan.currentPrimaryKeyFilter.get.values == Set(LongValue(2L)))
+
+    val range = new Predicate(
+      ">",
+      Array[Expression](Expressions.column("id"), Expressions.literal(0L))
+    )
+    scan.filter(Array(range))
+    assert(scan.currentPrimaryKeyFilter.get.values == Set(LongValue(2L)))
+  }
+
+  test("runtime filters replan from cached Bloom statistics") {
+    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
+    import org.apache.spark.sql.connector.expressions.filter.Predicate
+
+    val primaryKey = io.milvus.grpc.schema.FieldSchema(
+      fieldID = 100L,
+      name = "id",
+      dataType = io.milvus.grpc.schema.DataType.Int64,
+      isPrimaryKey = true
+    )
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(primaryKey)
+    )
+    val values = Seq(101L, 202L, 303L)
+    val statistics = values.map { value =>
+      val builder = new PrimaryKeyStats.Builder(
+        primaryKey.fieldID,
+        primaryKey.dataType
+      )
+      builder.addLong(value)
+      value -> builder.build()
+    }
+    statistics.foreach { case (value, stats) =>
+      values.filterNot(_ == value).foreach { other =>
+        assert(!stats.mightContainLong(other))
+      }
+    }
+    val stored = scala.collection.mutable.Map(
+      statistics.map { case (value, stats) =>
+        s"stats/$value" -> stats.toBytes
+      }: _*
+    )
+    var storeOpens = 0
+    var statisticsReads = 0
+
+    val segments = values.zipWithIndex.map { case (value, index) =>
+      Segment.v2(
+        id = 30L + index,
+        partitionId = 20L,
+        rows = 1L,
+        columnGroups = Seq(
+          V2ColumnGroup(
+            Seq(primaryKey.fieldID),
+            Seq(s"data/${30L + index}"),
+            Seq(1L)
+          )
+        ),
+        statistics = SegmentStatistics.Listed(
+          Map(primaryKey.fieldID -> Seq(s"stats/$value"))
+        )
+      )
+    }
+    val snapshot = snapshotOf(
+      v2 = segments,
+      schemaBytes = collection.toByteArray
+    )
+    val options = new CaseInsensitiveStringMap(
+      new ju.HashMap[String, String]()
+    )
+    val fullSchema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+    val scan = new MilvusScan(fullSchema, options, snapshot) {
+      override private[read] def openPlanningStore(): ObjectStore = {
+        storeOpens += 1
+        new ObjectStore {
+          override def readAll(key: String): Array[Byte] = {
+            statisticsReads += 1
+            stored(key)
+          }
+          override def size(key: String): Long = stored(key).length.toLong
+          override def list(
+              key: String,
+              recursive: Boolean
+          ): Seq[FileInfo] = Seq.empty
+          override def exists(key: String): Boolean = stored.contains(key)
+          override def readAt(
+              key: String,
+              offset: Long,
+              length: Long,
+              fileSize: Long
+          ): Array[Byte] =
+            stored(key).slice(offset.toInt, (offset + length).toInt)
+          override def write(key: String, data: Array[Byte]): Unit =
+            throw new UnsupportedOperationException("read-only test store")
+          override def createDir(key: String, recursive: Boolean): Unit =
+            throw new UnsupportedOperationException("read-only test store")
+          override def delete(key: String): Unit = stored.remove(key)
+          override def close(): Unit = ()
+        }
+      }
+    }
+    def in(selected: Long*): Predicate = new Predicate(
+      "IN",
+      (Seq[Expression](Expressions.column("id")) ++
+        selected.map(Expressions.literal)).toArray
+    )
+    def plannedSegmentIds(): Seq[Long] =
+      scan
+        .planInputPartitions()
+        .map(_.asInstanceOf[MilvusInputPartition].task.segmentId)
+        .toSeq
+
+    scan.filter(Array(in(101L, 202L)))
+    assert(plannedSegmentIds() == Seq(30L, 31L))
+    assert(storeOpens == 1)
+    assert(statisticsReads == 3)
+
+    stored.clear()
+    scan.filter(Array(in(202L, 303L)))
+    assert(plannedSegmentIds() == Seq(31L))
+    assert(storeOpens == 1)
+    assert(statisticsReads == 3)
+    val cached = scan.planInputPartitions()
+    scan.filter(Array(in(202L, 303L)))
+    assert(scan.planInputPartitions() eq cached)
+  }
+
+  test("optional Bloom loading cannot hide an invalid V2 delete contract") {
+    import com.zilliz.milvus.storage.expr.{
+      Comparison,
+      ComparisonOperator,
+      FieldRef,
+      Literal
+    }
+
+    val primaryKey = io.milvus.grpc.schema.FieldSchema(
+      fieldID = 100L,
+      name = "id",
+      dataType = io.milvus.grpc.schema.DataType.Int64,
+      isPrimaryKey = true
+    )
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(primaryKey)
+    )
+    val segment = Segment
+      .v2(
+        id = 30L,
+        partitionId = 20L,
+        rows = 1L,
+        columnGroups = Seq(
+          V2ColumnGroup(Seq(100L), Seq("data/30"), Seq(1L))
+        )
+      )
+      .copy(
+        deletes = DeleteFiles.Unknown,
+        statistics = SegmentStatistics.Unknown
+      )
+    val snapshot = snapshotOf(
+      v2 = Seq(segment),
+      schemaBytes = collection.toByteArray
+    )
+    val options = new CaseInsensitiveStringMap(
+      new ju.HashMap[String, String]()
+    )
+    val schema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+    val scan = new MilvusScan(
+      schema,
+      options,
+      snapshot,
+      pushedExpression = Some(
+        Comparison(
+          FieldRef(100L, io.milvus.grpc.schema.DataType.Int64),
+          ComparisonOperator.EqualTo,
+          Literal.IntegerValue(1L)
+        )
+      ),
+      planningSchema = schema
+    )
+
+    val error = intercept[IllegalStateException](scan.planInputPartitions())
+    assert(error.getMessage.contains("delete-file state is unknown"))
+  }
+
+  test("vector TopK scans do not advertise or accept runtime filtering") {
+    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
+    import org.apache.spark.sql.connector.expressions.filter.Predicate
+
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = io.milvus.grpc.schema.DataType.Int64,
+          isPrimaryKey = true
+        ),
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 101L,
+          name = "vector",
+          dataType = io.milvus.grpc.schema.DataType.FloatVector,
+          typeParams = Seq(io.milvus.grpc.common.KeyValuePair("dim", "1"))
+        )
+      )
+    )
+    val snapshot = snapshotOf(schemaBytes = collection.toByteArray)
+    val raw = new ju.HashMap[String, String]()
+    raw.put(MilvusOption.VectorSearchQueryVector, "[1.0]")
+    raw.put(MilvusOption.VectorSearchTopK, "1")
+    val options = new CaseInsensitiveStringMap(raw)
+    val fullSchema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+    val scan = new MilvusScanBuilder(fullSchema, options, snapshot)
+      .build()
+      .asInstanceOf[MilvusScan]
+    val runtime = new Predicate(
+      "=",
+      Array[Expression](Expressions.column("id"), Expressions.literal(1L))
+    )
+
+    assert(scan.filterAttributes().isEmpty)
+    scan.filter(Array(runtime))
+    assert(scan.currentPrimaryKeyFilter.isEmpty)
   }
 
   test("filter-only fields are read for either push and prune callback order") {

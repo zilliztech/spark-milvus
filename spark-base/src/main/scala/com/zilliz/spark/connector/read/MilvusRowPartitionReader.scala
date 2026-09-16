@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.read
 
+import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
@@ -37,7 +38,9 @@ class MilvusRowPartitionReader(
     pushedExpression: Option[PredicateExpr] = None,
     vectorSearch: Option[VectorSearch] = None,
     includeSearchScore: Boolean = true,
-    searchScorePosition: Option[Int] = None
+    searchScorePosition: Option[Int] = None,
+    allocator: BufferAllocator = ArrowAllocator.get,
+    taskAllocatorOwner: Option[AutoCloseable] = None
 ) extends RowOffsetReader
     with Logging {
 
@@ -48,11 +51,11 @@ class MilvusRowPartitionReader(
 
   private val applyDeletes: Boolean = setup.appliesDeletes
   private val arrowColumnNames: Map[String, String] = setup.arrowColumnNames
-  private val allocator = ArrowAllocator.get
 
   // Native handles start out null so a constructor that throws can release
   // whatever it took; Spark only closes a reader it got back.
   private var segmentReader: SegmentReader = null
+  private var allocatorOwner: AutoCloseable = taskAllocatorOwner.orNull
   private var currentBatch: VectorSchemaRoot = null
   private var currentPredicateBitmap: Bitmap = null
   private var currentRowIndex: Int = 0
@@ -238,10 +241,21 @@ class MilvusRowPartitionReader(
       currentPredicateBitmap = null
     }
     if (segmentReader != null) {
-      try segmentReader.close()
-      catch { case e: Throwable => logWarning("close segmentReader failed", e) }
-      finalMetrics = segmentReader.metrics
+      val owned = segmentReader
       segmentReader = null
+      try owned.close()
+      catch { case e: Throwable => logWarning("close segmentReader failed", e) }
+      try finalMetrics = owned.metrics
+      catch { case e: Throwable => logWarning("read final metrics failed", e) }
+    }
+    if (allocatorOwner != null) {
+      val owned = allocatorOwner
+      try {
+        owned.close()
+        allocatorOwner = null
+      } catch {
+        case e: Throwable => logWarning("close task allocator failed", e)
+      }
     }
   }
 }

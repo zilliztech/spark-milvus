@@ -59,7 +59,12 @@ object MilvusBackfill {
       config: BackfillConfig,
       segmentResults: Map[Long, SegmentBackfillResult]
   ): String = {
-    import com.zilliz.milvus.storage.write.commit.CommittedSegment
+    import com.zilliz.milvus.storage.write.commit.{
+      CommittedSegment,
+      JobDescriptor,
+      JobOwner,
+      JobWriteMode
+    }
 
     val segments = segmentResults.values.toSeq
       .filter(_.committedVersion > 0L)
@@ -74,8 +79,24 @@ object MilvusBackfill {
         )
       }
     if (segments.isEmpty) return ""
+    val descriptor = Option(config.collectionName)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map { collection =>
+        val database = Option(config.databaseName)
+          .map(_.trim)
+          .filter(_.nonEmpty)
+          .getOrElse("default")
+        JobDescriptor(JobOwner(database, collection), JobWriteMode.Backfill)
+      }
     val store = stagingStore(config)
-    try commitJobManifest(store, stagingLayoutFor(config), segments)
+    try
+      commitJobManifest(
+        store,
+        stagingLayoutFor(config),
+        segments,
+        descriptor
+      )
     finally store.close()
   }
 
@@ -141,10 +162,14 @@ object MilvusBackfill {
   private[backfill] def commitJobManifest(
       store: com.zilliz.milvus.storage.io.ObjectStore,
       layout: com.zilliz.milvus.storage.write.exec.StagingLayout,
-      segments: Seq[com.zilliz.milvus.storage.write.commit.CommittedSegment]
+      segments: Seq[com.zilliz.milvus.storage.write.commit.CommittedSegment],
+      descriptor: Option[
+        com.zilliz.milvus.storage.write.commit.JobDescriptor
+      ] = None
   ): String = {
     import com.zilliz.milvus.storage.write.commit.{CommitOutcome, Committer}
-    new Committer(store, layout).commit(segments) match {
+    new Committer(store, layout)
+      .commit(segments, descriptor = descriptor) match {
       case CommitOutcome.Committed =>
         logger.info(
           s"Job manifest of ${segments.size} segment(s) committed at ${layout.manifest}"

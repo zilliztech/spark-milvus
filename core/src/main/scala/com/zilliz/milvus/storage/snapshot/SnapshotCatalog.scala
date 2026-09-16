@@ -539,7 +539,8 @@ object SnapshotCatalog extends Logging {
           storageVersion = 3,
           rows = None,
           layout = SegmentLayout.Manifest(basePath, version),
-          deletes = DeleteFiles.InManifest
+          deletes = DeleteFiles.InManifest,
+          statistics = SegmentStatistics.InManifest
         )
       }
       val schema =

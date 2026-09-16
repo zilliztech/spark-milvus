@@ -234,10 +234,14 @@ object SegmentVectorSearchSmoke {
       val binding = V3ColumnBinding(partition, schema)
       val sharedAllocator = ArrowAllocator.get
       val baseline = sharedAllocator.getAllocatedMemory
+      val invalidAllocator = ArrowAllocator.forReadTask(1L, 64L * 1024L * 1024L)
       val invalid = new MilvusRowPartitionReader(
         schema,
         binding,
-        vectorSearch = Some(VectorSearch(Array(0f, 0f), 2, "HAMMING", "vector"))
+        vectorSearch =
+          Some(VectorSearch(Array(0f, 0f), 2, "HAMMING", "vector")),
+        allocator = invalidAllocator.allocator,
+        taskAllocatorOwner = Some(invalidAllocator)
       )
       try {
         assert(
@@ -255,15 +259,19 @@ object SegmentVectorSearchSmoke {
         }
       } finally invalid.close()
       invalid.close()
+      assert(invalidAllocator.isClosed)
       assert(
         sharedAllocator.getAllocatedMemory == baseline,
         "Validation failure leaked the prefetched batch"
       )
 
+      val readerAllocator = ArrowAllocator.forReadTask(1L, 64L * 1024L * 1024L)
       val reader = new MilvusRowPartitionReader(
         schema,
         binding,
-        vectorSearch = Some(VectorSearch(Array(0f, 0f), 2, "L2", "vector"))
+        vectorSearch = Some(VectorSearch(Array(0f, 0f), 2, "L2", "vector")),
+        allocator = readerAllocator.allocator,
+        taskAllocatorOwner = Some(readerAllocator)
       )
       val results = Vector.newBuilder[(Long, Double, Long)]
       try {
@@ -276,11 +284,32 @@ object SegmentVectorSearchSmoke {
           ))
         }
       } finally reader.close()
+      assert(readerAllocator.isClosed)
       assert(results.result() == Vector((12L, 0d, 2L), (11L, 2d, 1L)))
       assert(
         sharedAllocator.getAllocatedMemory == baseline,
         "Successful reader search leaked buffers"
       )
+
+      val indexAllocator = ArrowAllocator.forReadTask(1L, 1024L)
+      val indexReader = new MilvusRowPartitionReader(
+        schema,
+        binding,
+        vectorSearch = Some(
+          VectorSearch(
+            Array(0f, 0f),
+            2,
+            "L2",
+            "vector",
+            mode = "index"
+          )
+        ),
+        allocator = indexAllocator.allocator,
+        taskAllocatorOwner = Some(indexAllocator)
+      )
+      indexReader.close()
+      indexReader.close()
+      assert(indexAllocator.isClosed)
     } finally {
       val paths = Files.walk(directory)
       try

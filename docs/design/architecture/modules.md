@@ -49,11 +49,11 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；native-storage、core、
 | `credential` | 对象存储凭证的取用和下发 | Credentials、CredentialSource |
 | `expr` | R7 的手写 Milvus 标量文法与名称绑定求值；R6 的字段 id / 类型绑定表示、三值逻辑与 Arrow 列批位图 | R7：Expr、PlanParser、Evaluator；R6：PredicateExpr、PredicateEvaluator、Bitmap。Spark V2 Predicate 翻译归第 3 层；表读取的 `milvus.filter` 与 JSON/Array 语义仍待扩展 |
 | `delete` | 删除文件解码，按行号置位 | DeleteBitset、DeltaLogDecoder |
-| `stats` | 段统计：写侧的主键 bloom filter，读侧的剪枝（未做） | PrimaryKeyStats、BlockedBloomFilter（blobloom 的逐位移植，#15）；SegmentStats、Pruner 待 R9/R10 |
+| `stats` | 段统计：写侧的主键 bloom filter，读侧的保守剪枝 | PrimaryKeyStats、BlockedBloomFilter（blobloom 的逐位移植，#15）、PrimaryKeyFilter、PrimaryKeyBloomPruner（R9/R18 段级）；R10 row-group min/max 仍等仓库外依赖 |
 | `read.plan` | 分区规划，纯 JVM，可序列化 | SegmentReadTask、SegmentLayout、DeleteSource、ReadPlan、DeleteFileListing：`DeleteFileListing.of` 在 driver 上列删除文件（V3 段要开 manifest），`ReadPlan.of` 把 Snapshot 变成任务列表，任务带 `DeleteSource.Files`（#12、#13）。Partitioner 待 R19（决策 19）与 R16 定了再加，一段一分区之外还没有第二种切法 |
 | `read.exec` | 批读取、行号取列、出口；碰 native | SegmentReader、SegmentReaderRegistry、TakeResult；take 包装 loon_take，接收有序唯一行号。列式出口的 Spark 类型归第 3 层，进 core 的仍是 VectorSchemaRoot |
 | `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter（V3SegmentWriter、V2SegmentWriter）、WrittenColumnGroups、ManifestTransaction、StagingLayout |
-| `write.commit` | 作业清单、提交、幂等 | JobManifest、Committer |
+| `write.commit` | 作业清单、所有权、心跳、提交、幂等，以及 A7 的 fail-closed 候选审计与文件删除；完整目录删除等待原生 API | JobManifest、Committer、StagingCleaner |
 | `index` | 持久化索引选择、加载、排除位图、向量执行与段内 TopK | SegmentIndexQuery、IndexFileCodec、MilvusIndexFileDecoder、PersistedIndexSearch、BruteForceSearch；索引来源随 Snapshot 固定，任务独占并关闭。IndexCache、IndexWriter 待实现 |
 
 ### 2.2 compat `com.zilliz.milvus.storage.compat`
@@ -112,7 +112,7 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 | `metrics` | core 的 ReadMetrics / WriteMetrics 翻成 DataSource V2 的 CustomMetric / CustomTaskMetric，读写各一张清单；G5 | 否 |
 | `options` | option 名、别名、校验；ReadMode；按 ReadMode 构造这次读的 SnapshotSource（SnapshotSources，含 ClientSnapshotSource、OptionStringsSnapshotSource，把 compat 的 backup 实现和 V2 footer 解析器接进 core）；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageKeys） | 否 |
 | `sources` | 只有 MilvusDataSource，`format("milvus")` 的 TableProvider。留在这个包名下是因为 apps 和用户作业按字符串引用它的全名 | 否 |
-| `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、静态注册表、共用的 collection/client/有界等待规则；已实现快照、索引、load/release/flush/compact、describe，以及 backfill `Register`；节点和策略在 `extensions`，append 登记与暂存清理尚未实现 | 否 |
+| `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、静态注册表、共用的 collection/client/有界等待规则；已实现快照、索引、load/release/flush/compact、describe、backfill `Register`，以及 A7 的 `CleanupStagingProcedure`；节点和策略在 `extensions`，append 登记与完整目录删除尚未实现 | 否 |
 | `extensions` | SparkSessionExtensions、`CALL milvus.system.<name>(...)` 的解析器扩展、CallProcedure 节点与策略；文法 `spark-base/src/main/antlr4/MilvusCall.g4` 一份，设计见 procedure.html | antlr 生成的解析器按线（本线 antlr 版本），`MilvusSqlParser` 适配器按线（4.0 起多 `parseRoutineParam`）；其余共享 |
 
 按线的还有 `META-INF/services` 资源。

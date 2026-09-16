@@ -10,8 +10,11 @@ import com.zilliz.milvus.storage.manifest.{
 }
 import com.zilliz.milvus.storage.manifest.SegmentManifestReader
 import com.zilliz.milvus.storage.path.{Located, StoragePath}
-import com.zilliz.milvus.storage.snapshot.DeltaLogFile
-import com.zilliz.milvus.storage.snapshot.Segment
+import com.zilliz.milvus.storage.snapshot.{
+  DeltaLogFile,
+  Segment,
+  SegmentStatistics
+}
 
 /** High-level loader for StorageV2 (non-manifest packed parquet) segments.
   *
@@ -139,7 +142,14 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
             logPath = log.logPath,
             entriesNum = log.entriesNum
           )
-        )
+        ),
+      statistics = SegmentStatistics.Listed(
+        entry.statsLogFiles
+          .groupBy(_.slotFieldId)
+          .map { case (fieldId, groups) =>
+            fieldId -> groups.flatMap(_.binlogs).sortBy(_.logId).map(_.logPath)
+          }
+      )
     )
 
   /** Convert one parsed AVRO entry into a `Segment`. Extracted for

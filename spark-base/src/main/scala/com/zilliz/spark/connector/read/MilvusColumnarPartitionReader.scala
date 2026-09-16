@@ -21,7 +21,7 @@ import com.zilliz.milvus.storage.expr.{
   PredicateEvaluator,
   PredicateExpr
 }
-import com.zilliz.milvus.storage.read.exec.SegmentReader
+import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
 import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.types.{
@@ -58,7 +58,8 @@ class MilvusColumnarPartitionReader(
     segmentId: Long,
     requestedExtraColumns: Set[String] = Set.empty,
     pushedExpression: Option[PredicateExpr] = None,
-    columnNameFor: Long => Option[String] = (_: Long) => None
+    columnNameFor: Long => Option[String] = (_: Long) => None,
+    taskAllocatorOwner: Option[AutoCloseable] = None
 ) extends PartitionReader[ColumnarBatch]
     with Logging {
 
@@ -68,10 +69,13 @@ class MilvusColumnarPartitionReader(
   private var current: VectorSchemaRoot = null
   private var batch: ColumnarBatch = null
   private var rowsSeen: Long = 0L
+  private var ownedSegmentReader: SegmentReader = segmentReader
+  private var allocatorOwner: AutoCloseable = taskAllocatorOwner.orNull
+  private var finalMetrics: ReadMetrics = ReadMetrics.Zero
 
   override def next(): Boolean = {
     closeCurrent()
-    segmentReader.next() match {
+    ownedSegmentReader.next() match {
       case None => false
       case Some(root) =>
         current = root
@@ -85,11 +89,33 @@ class MilvusColumnarPartitionReader(
   // Nothing here becomes an InternalRow: a batch with deletes is delivered
   // through SelectedRowsColumn, which maps row positions and copies nothing.
   override def currentMetricsValues(): Array[CustomTaskMetric] =
-    ScanMetrics.taskValues(segmentReader.metrics, rowsMaterialized = 0L)
+    ScanMetrics.taskValues(
+      if (ownedSegmentReader != null) ownedSegmentReader.metrics
+      else finalMetrics,
+      rowsMaterialized = 0L
+    )
 
   override def close(): Unit = {
     closeCurrent()
-    segmentReader.close()
+    if (ownedSegmentReader != null) {
+      val owned = ownedSegmentReader
+      ownedSegmentReader = null
+      try owned.close()
+      catch {
+        case e: Throwable => logWarning("closing segment reader failed", e)
+      }
+      try finalMetrics = owned.metrics
+      catch { case e: Throwable => logWarning("read final metrics failed", e) }
+    }
+    if (allocatorOwner != null) {
+      val owned = allocatorOwner
+      try {
+        owned.close()
+        allocatorOwner = null
+      } catch {
+        case e: Throwable => logWarning("closing task allocator failed", e)
+      }
+    }
   }
 
   private def closeCurrent(): Unit = {

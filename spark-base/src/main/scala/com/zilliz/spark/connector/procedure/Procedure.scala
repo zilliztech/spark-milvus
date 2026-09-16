@@ -53,6 +53,7 @@ object Procedures {
 
   val all: Seq[Procedure] = Seq(
     RegisterProcedure,
+    CleanupStagingProcedure,
     CreateSnapshotProcedure,
     DropSnapshotProcedure,
     ListSnapshotsProcedure,

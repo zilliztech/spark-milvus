@@ -11,7 +11,9 @@ import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.client.api.MilvusConnectionParams
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.expr.PlanParser
+import com.zilliz.milvus.storage.read.plan.ReadLimits
 
 /** Vector search configuration for Milvus Storage V2
   */
@@ -47,7 +49,9 @@ case class MilvusOption(
     fieldIDs: String = "",
     extraColumns: Seq[String] = Seq.empty,
     options: Map[String, String] = Map.empty,
-    vectorSearch: Option[VectorSearch] = None
+    vectorSearch: Option[VectorSearch] = None,
+    readLimits: ReadLimits = ReadLimits.Default,
+    writeFileRollingBytes: Long = MilvusOption.DefaultWriteFileRollingBytes
 ) {
 
   /** Just the fields needed to connect to Milvus. The client does not know
@@ -87,6 +91,14 @@ object MilvusOption {
   val MilvusInsertMaxBatchSize = "milvus.insertMaxBatchSize"
   val MilvusRetryCount = "milvus.retry.count"
   val MilvusRetryInterval = "milvus.retry.interval"
+  val ReadBatchMaxRows = "milvus.read.batch.max.rows"
+  val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
+  val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
+  val WriteFileRollingBytes = "milvus.write.file.rolling.bytes"
+
+  val DefaultWriteFileRollingBytes: Long = 2L * 1024L * 1024L * 1024L
+  private[connector] val NativeWriterFileRollingSize =
+    "writer.file_rolling.size"
 
   val MilvusExtraColumns = "milvus.extra.columns"
   // Kept as a source-compatibility constant. The partition name is not part of
@@ -238,16 +250,7 @@ object MilvusOption {
       getOption: String => Option[String],
       key: String,
       defaultValue: => Boolean
-  ): Boolean =
-    getOption(key).map(_.trim) match {
-      case None                                       => defaultValue
-      case Some(raw) if raw.equalsIgnoreCase("true")  => true
-      case Some(raw) if raw.equalsIgnoreCase("false") => false
-      case Some(raw) =>
-        throw new IllegalArgumentException(
-          s"Option '$key' must be 'true' or 'false', got '$raw'"
-        )
-    }
+  ): Boolean = OptionParsing.boolean(getOption, key, defaultValue)
 
   private def isSnapshotModeFrom(
       getOption: String => Option[String]
@@ -447,33 +450,7 @@ object MilvusOption {
   private def selectedIdsFrom(
       getOption: String => Option[String],
       key: String
-  ): Seq[Long] =
-    getOption(key).map(_.trim) match {
-      case None => Seq.empty
-      case Some(raw) =>
-        val values = raw.split(",", -1).toSeq.map(_.trim)
-        if (values.exists(_.isEmpty)) {
-          throw new IllegalArgumentException(
-            s"Option '$key' must be a comma-separated list of numeric ids without empty entries, got '$raw'"
-          )
-        }
-        values.map { value =>
-          val id =
-            try value.toLong
-            catch {
-              case _: NumberFormatException =>
-                throw new IllegalArgumentException(
-                  s"Option '$key' must contain numeric ids, got '$value' in '$raw'"
-                )
-            }
-          if (id < 0L) {
-            throw new IllegalArgumentException(
-              s"Option '$key' must contain non-negative ids, got '$value' in '$raw'"
-            )
-          }
-          id
-        }.distinct
-    }
+  ): Seq[Long] = OptionParsing.nonNegativeLongList(getOption, key)
 
   private def extraColumnsFrom(
       getOption: String => Option[String]
@@ -575,13 +552,41 @@ object MilvusOption {
     val partitionID = options.getOrDefault(MilvusPartitionID, "")
     val segmentID = options.getOrDefault(MilvusSegmentID, "")
     val fieldID = options.getOrDefault(MilvusFieldID, "")
-    val insertMaxBatchSize =
-      options.getOrDefault(MilvusInsertMaxBatchSize, "5000").toInt
-    val retryCount = options.getOrDefault(MilvusRetryCount, "3").toInt
+    val getOption = (key: String) => OptionParsing.value(options, key)
+    val insertMaxBatchSize = OptionParsing.positiveInt(
+      getOption,
+      MilvusInsertMaxBatchSize,
+      5000
+    )
+    val retryCount =
+      OptionParsing.positiveInt(getOption, MilvusRetryCount, 3)
     val retryInterval =
-      options.getOrDefault(MilvusRetryInterval, "1000").toInt
+      OptionParsing.positiveInt(getOption, MilvusRetryInterval, 1000)
     val fieldIDs = options.getOrDefault(ReaderFieldIDs, "")
     val extraColumns = MilvusOption.extraColumns(options)
+    val readLimits = ReadLimits(
+      OptionParsing.positiveInt(
+        getOption,
+        ReadBatchMaxRows,
+        ReadLimits.DefaultBatchMaxRows
+      ),
+      OptionParsing.positiveLong(
+        getOption,
+        ReadBatchMaxBytes,
+        ReadLimits.DefaultBatchMaxBytes,
+        ReadLimits.MaxBatchBytes
+      ),
+      OptionParsing.positiveLong(
+        getOption,
+        ReadArrowMaxBytes,
+        ReadLimits.DefaultArrowMaxBytes
+      )
+    )
+    val writeFileRollingBytes = OptionParsing.positiveLong(
+      getOption,
+      WriteFileRollingBytes,
+      DefaultWriteFileRollingBytes
+    )
 
     // Convert CaseInsensitiveStringMap to regular Map for storage
     import scala.collection.JavaConverters._
@@ -591,27 +596,29 @@ object MilvusOption {
     val vectorSearch = parseVectorSearch(options)
 
     MilvusOption(
-      uri,
-      token,
-      serverPemPath,
-      clientKeyPath,
-      clientPemPath,
-      caPemPath,
-      databaseName,
-      collectionName,
-      partitionName,
-      collectionPKType,
-      insertMaxBatchSize,
-      retryCount,
-      retryInterval,
-      collectionID,
-      partitionID,
-      segmentID,
-      fieldID,
-      fieldIDs,
-      extraColumns,
-      optionsMap,
-      vectorSearch
+      uri = uri,
+      token = token,
+      serverPemPath = serverPemPath,
+      clientKeyPath = clientKeyPath,
+      clientPemPath = clientPemPath,
+      caPemPath = caPemPath,
+      databaseName = databaseName,
+      collectionName = collectionName,
+      partitionName = partitionName,
+      collectionPKType = collectionPKType,
+      insertMaxBatchSize = insertMaxBatchSize,
+      retryCount = retryCount,
+      retryInterval = retryInterval,
+      collectionID = collectionID,
+      partitionID = partitionID,
+      segmentID = segmentID,
+      fieldID = fieldID,
+      fieldIDs = fieldIDs,
+      extraColumns = extraColumns,
+      options = optionsMap,
+      vectorSearch = vectorSearch,
+      readLimits = readLimits,
+      writeFileRollingBytes = writeFileRollingBytes
     )
   }
 
@@ -650,17 +657,10 @@ object MilvusOption {
       )
     }
     val queryVector = parseQueryVector(queryVectorStr.get)
-    val topK =
-      try topKStr.get.toInt
-      catch {
-        case _: NumberFormatException =>
-          throw new IllegalArgumentException(
-            s"Option '$VectorSearchTopK' must be a positive integer, got '${topKStr.get}'"
-          )
-      }
-    require(
-      topK > 0,
-      s"Option '$VectorSearchTopK' must be positive, got '$topK'"
+    val topK = OptionParsing.positiveInt(
+      key => if (key == VectorSearchTopK) topKStr else None,
+      VectorSearchTopK,
+      1
     )
     val metricType = value(VectorSearchMetric)
       .getOrElse("L2")
@@ -707,17 +707,11 @@ object MilvusOption {
           .toMap
       }
       .getOrElse(Map.empty[String, String])
-    val allowUnindexed = value(VectorSearchAllowUnindexed)
-      .map(_.toLowerCase(Locale.ROOT))
-      .map {
-        case "true"  => true
-        case "false" => false
-        case other =>
-          throw new IllegalArgumentException(
-            s"Option '$VectorSearchAllowUnindexed' must be 'true' or 'false', got '$other'"
-          )
-      }
-      .getOrElse(false)
+    val allowUnindexed = OptionParsing.boolean(
+      key => Option(options.get(key)),
+      VectorSearchAllowUnindexed,
+      defaultValue = false
+    )
     require(
       mode == "index" || (filter.isEmpty && parameters.isEmpty && !allowUnindexed),
       "Filter, search parameters and unindexed fallback require vector.search.mode=index"
@@ -781,6 +775,23 @@ object MilvusOption {
     import scala.collection.JavaConverters._
     apply(new CaseInsensitiveStringMap(options.asJava))
   }
+
+  /** Native writer properties derived from validated connector options. */
+  private[connector] def writerProperties(
+      option: MilvusOption
+  ): scala.collection.immutable.Map[String, String] =
+    writerProperties(option, StorageProperties.from(option.options))
+
+  /** Add validated writer limits to the storage properties already resolved on
+    * the driver. This keeps storage credentials and endpoint selection
+    * identical for the task writer, manifest commit, and job committer.
+    */
+  private[connector] def writerProperties(
+      option: MilvusOption,
+      storage: scala.collection.immutable.Map[String, String]
+  ): scala.collection.immutable.Map[String, String] =
+    storage +
+      (NativeWriterFileRollingSize -> option.writeFileRollingBytes.toString)
 }
 
 case class MilvusS3Option(
@@ -815,6 +826,7 @@ case class MilvusS3Option(
 
 object MilvusS3Option {
   def apply(options: CaseInsensitiveStringMap): MilvusS3Option = {
+    val getOption = (key: String) => OptionParsing.value(options, key)
     new MilvusS3Option(
       options.get(MilvusOption.ReaderType),
       options.get(MilvusOption.S3FileSystemTypeName),
@@ -823,11 +835,27 @@ object MilvusS3Option {
       options.getOrDefault(MilvusOption.S3Endpoint, "localhost:9000"),
       options.getOrDefault(MilvusOption.S3AccessKey, "minioadmin"),
       options.getOrDefault(MilvusOption.S3SecretKey, "minioadmin"),
-      options.getOrDefault(MilvusOption.S3UseSSL, "false").toBoolean,
-      options.getOrDefault(MilvusOption.S3PathStyleAccess, "true").toBoolean,
+      OptionParsing.boolean(
+        getOption,
+        MilvusOption.S3UseSSL,
+        defaultValue = false
+      ),
+      OptionParsing.boolean(
+        getOption,
+        MilvusOption.S3PathStyleAccess,
+        defaultValue = true
+      ),
       options.getOrDefault(MilvusOption.MilvusCollectionPKType, ""),
-      options.getOrDefault(MilvusOption.S3MaxConnections, "32").toInt,
-      options.getOrDefault(MilvusOption.S3PreloadPoolSize, "4").toInt
+      OptionParsing.positiveInt(
+        getOption,
+        MilvusOption.S3MaxConnections,
+        32
+      ),
+      OptionParsing.positiveInt(
+        getOption,
+        MilvusOption.S3PreloadPoolSize,
+        4
+      )
     )
   }
 }

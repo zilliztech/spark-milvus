@@ -209,7 +209,8 @@ class MilvusScanBuilder(
       currentOptions,
       snapshot,
       pushedExpression,
-      pushedLimit
+      pushedLimit,
+      planningSchema = schema
     )
   }
 }

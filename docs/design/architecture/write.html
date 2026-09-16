@@ -191,15 +191,33 @@ Arrow schema 的列名是字段 id（和 Milvus 自己写的段一致，见 09-1
 <code>insert_log/</code> 之外，避开 DataCoord 的 GC。这一段是 #07，规则在
 <code>core.write.exec</code> 的 package.scala 和 <a href="storage-io.html">storage-io.html</a> 第三节。</p>
 
+<p><code>milvus.write.file.rolling.bytes</code> 在 driver 解析为严格正长整型，默认 2147483648；
+V2 与 V3 的 task writer 都把它映射为上游属性 <code>writer.file_rolling.size</code>。
+上游按写入的未压缩 Arrow 字节累计，达到阈值后滚动列组文件；它不是对象存储单次上传大小，
+也不是最终 Parquet 文件的精确大小。该属性只交给 <code>V2SegmentWriter</code> / <code>V3SegmentWriter</code>，
+不混入写统计文件或提交 manifest 所用的 <code>ObjectStore</code> 属性包。</p>
+
 <p>Spark 重试 task 会用新的 task id 再写一个段目录，旧目录留在暂存前缀里；作业清单只记成功的那份，
-abort 删整个前缀。这一点靠 task id 进路径保证，不需要 task 之间协调。</p>
+abort 删这个前缀下能列出的文件。这一点靠 task id 进路径保证，不需要 task 之间协调。</p>
 
 <h2 id="commit">五、driver：作业清单与标记，已做</h2>
 
 <p><code>MilvusV3BatchWrite.commit</code> 把 commit message 交给
 <code>core.write.commit.Committer</code>：先写 <code>staging/{job}/manifest.json</code>，再写
-<code>staging/{job}/_committed</code>；重跑看到标记整个 no-op；<code>abort</code> 删前缀下所有文件。
+<code>staging/{job}/_committed</code>；重跑看到标记整个 no-op；<code>abort</code> 删前缀下所有文件但不删除目录条目。
 这一段是 #08，格式和幂等规则在决策日志 09-15 那行。</p>
+
+<p>为了让被 kill、来不及执行 abort 的作业以后能够安全识别，append 的 driver 在返回 writer
+factory、启动 executor task 之前先写 <code>owner.json</code> 和 <code>_heartbeat</code>，之后每 60 秒更新
+心跳，commit 或 abort 前停止。owner 写明格式版本、job id、database、collection、
+<code>write_mode=append</code> 和创建时间；第二版 <code>manifest.json</code> 重复这些字段。只有 client/catalog
+写或显式给出 database 与 collection 的 snapshot 写能得到 collection owner；没有 owner 的离线写仍能提交和读取，
+但 <code>cleanup_staging</code> 永远不会自动删除它。backfill 清单明确写
+<code>write_mode=backfill</code>，也永远不进入自动清理。完整候选规则见
+<a href="procedure.html#procedure-cleanup">CALL 过程 3.3 节</a>。</p>
+
+<p><code>abort</code> 与当前清理过程都只能删文件。固定的上游 JNI 没有目录删除出口，因此对象存储目录标记和
+本地空目录仍会留下；不能用 Hadoop 或 <code>java.io</code> 开第二条删除路径。</p>
 
 <h2 id="register">六、登记之前，段还差三样</h2>
 

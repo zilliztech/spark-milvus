@@ -1,6 +1,26 @@
 package com.zilliz.spark.connector.types
 
-import org.apache.arrow.memory.RootAllocator
+import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
+
+/** One read task's Arrow allocation scope.
+  *
+  * The final Spark partition reader owns this object. Closing it never closes
+  * the process-wide root, and a repeated close is a no-op.
+  */
+private[connector] final class TaskArrowAllocator private[types] (
+    val allocator: BufferAllocator
+) extends AutoCloseable {
+  private var closed = false
+
+  override def close(): Unit = synchronized {
+    if (!closed) {
+      allocator.close()
+      closed = true
+    }
+  }
+
+  private[connector] def isClosed: Boolean = synchronized { closed }
+}
 
 /** The allocator every Arrow buffer this connector owns comes from.
   *
@@ -9,12 +29,23 @@ import org.apache.arrow.memory.RootAllocator
   * `org.apache.spark.sql.util.ArrowUtils.rootAllocator` would be the natural
   * choice but it is `private[sql]`.
   *
-  * The limit is unbounded, which matches what the connector did before. Capping
-  * it against the executor's off-heap budget is capability G3.
+  * The root remains unbounded so unrelated tasks do not share one arbitrary
+  * cap. Each read task gets a child whose limit comes from its serialized
+  * [[com.zilliz.milvus.storage.read.plan.ReadLimits]].
   */
 object ArrowAllocator {
 
   private lazy val root: RootAllocator = new RootAllocator(Long.MaxValue)
 
   def get: RootAllocator = root
+
+  private[connector] def forReadTask(
+      segmentId: Long,
+      maxBytes: Long
+  ): TaskArrowAllocator = {
+    require(maxBytes > 0L, s"maxBytes must be positive, got $maxBytes")
+    new TaskArrowAllocator(
+      root.newChildAllocator(s"milvus-read-segment-$segmentId", 0L, maxBytes)
+    )
+  }
 }

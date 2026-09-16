@@ -128,14 +128,13 @@ object StorageOptions extends Logging {
       options: CollectionMap[String, String],
       key: String
   ): Option[Boolean] =
-    optionValue(options, key).map(_.trim).map {
-      case value if value.equalsIgnoreCase("true")  => true
-      case value if value.equalsIgnoreCase("false") => false
-      case value =>
-        throw new IllegalArgumentException(
-          s"Option '$key' must be 'true' or 'false', got '$value'"
-        )
-    }
+    optionValue(options, key).map(_ =>
+      OptionParsing.boolean(
+        candidate => optionValue(options, candidate),
+        key,
+        defaultValue = false
+      )
+    )
 
   /** The one place the driver opens object storage.
     *
@@ -289,26 +288,12 @@ object StorageOptions extends Logging {
       options: CaseInsensitiveStringMap,
       key: String,
       defaultValue: Long
-  ): Long = {
-    val value = Option(options.get(key))
-      .map(_.trim)
-      .map { raw =>
-        try raw.toLong
-        catch {
-          case _: NumberFormatException =>
-            throw new IllegalArgumentException(
-              s"Option '$key' must be a positive long, got '$raw'"
-            )
-        }
-      }
-      .getOrElse(defaultValue)
-    if (value <= 0) {
-      throw new IllegalArgumentException(
-        s"Option '$key' must be positive, got $value"
-      )
-    }
-    value
-  }
+  ): Long =
+    OptionParsing.positiveLong(
+      candidate => OptionParsing.value(options, candidate),
+      key,
+      defaultValue
+    )
 
   /** Backup `full_meta.json` size limit, honoring
     * `milvus.snapshot.max.json.bytes` (the same option the snapshot read uses).

@@ -145,4 +145,37 @@ class SnapshotSourcesTest extends AnyFunSuite {
     assert(error.getMessage.contains("requires client mode"))
     assert(error.getMessage.contains("format(\"milvus\")"))
   }
+
+  test("option-string snapshot ids are strict and case insensitive") {
+    val base = Map(
+      MilvusOption.SnapshotMode -> "true",
+      MilvusOption.SnapshotSchemaBytes -> java.util.Base64.getEncoder
+        .encodeToString(snapshot.schema.toByteArray)
+    )
+    val valid = new OptionStringsSnapshotSource(
+      MilvusOption(
+        base ++ Map(
+          MilvusOption.SnapshotCollectionId.toUpperCase -> " 10 ",
+          MilvusOption.SnapshotPartitionIds.toUpperCase -> "0, 20"
+        )
+      )
+    ).snapshot().toOption.get
+    assert(valid.collectionId == 10L)
+    assert(valid.partitionIds == Seq(0L, 20L))
+
+    Seq(
+      MilvusOption.SnapshotCollectionId -> "",
+      MilvusOption.SnapshotCollectionId -> "0",
+      MilvusOption.SnapshotCollectionId -> "9223372036854775808",
+      MilvusOption.SnapshotPartitionIds -> "",
+      MilvusOption.SnapshotPartitionIds -> "1,,2",
+      MilvusOption.SnapshotPartitionIds -> "-1"
+    ).foreach { case (key, value) =>
+      val error = new OptionStringsSnapshotSource(
+        MilvusOption(base + (key -> value))
+      ).snapshot().left.toOption.get
+      assert(error.getMessage.contains(key))
+      assert(error.getMessage.contains(s"'$value'"))
+    }
+  }
 }
