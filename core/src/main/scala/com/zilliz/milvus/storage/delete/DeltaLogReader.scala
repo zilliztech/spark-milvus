@@ -17,19 +17,15 @@ import org.apache.parquet.io.api.PrimitiveConverter
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.apache.parquet.VersionParser
 
+import com.zilliz.milvus.storage.codec.BinlogCodec
+import com.zilliz.milvus.storage.codec.BinlogCodec.{forEachRow, ParquetRow}
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment}
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
-  private val MagicNumber = 0xfffabc
-  private val DescriptorEventType: Byte = 0
   private val DeleteEventType: Byte = 2
-  private val EventTypeCount = 8
-  private val BaseEventHeaderSize = 17
-  private val DescriptorEventDataFixPartSize = 52
-  private val DeleteEventDataFixPartSize = 16
   private val MultiFieldVersion = "MULTI_FIELD"
 
   private val mapper = new ObjectMapper()
@@ -174,128 +170,6 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
     row.getString(0)
   }
 
-  /** Walks every row of a parquet payload, one row group at a time.
-    *
-    * The read goes through parquet's column readers, not its record assembly:
-    * the column readers address a column by its descriptor and need nothing
-    * from Hadoop's MapReduce classes, which record assembly's `ParquetReader`
-    * pulls in.
-    */
-  private def forEachRow(payload: Array[Byte])(f: ParquetRow => Unit): Unit = {
-    val file =
-      ParquetFileReader.open(new InMemoryInputFile(withColumnNames(payload)))
-    try {
-      val meta = file.getFooter.getFileMetaData
-      val columns = meta.getSchema.getColumns.asScala.toIndexedSeq
-      val writerVersion =
-        try VersionParser.parse(meta.getCreatedBy)
-        catch { case NonFatal(_) => null }
-      var pages = file.readNextRowGroup()
-      while (pages != null) {
-        val row = new ParquetRow(columns.map { column =>
-          new ColumnReaderImpl(
-            column,
-            pages.getPageReader(column),
-            NoConverter,
-            writerVersion
-          )
-        })
-        var remaining = pages.getRowCount
-        while (remaining > 0) {
-          f(row)
-          row.advance()
-          remaining -= 1
-        }
-        pages = file.readNextRowGroup()
-      }
-    } finally {
-      file.close()
-    }
-  }
-
-  /** Gives every unnamed column of a flat parquet file a name.
-    *
-    * parquet-mr identifies a column by its path of names, both in the schema
-    * and in the row group's column chunks. The `_delta` files milvus-storage
-    * writes for a V3 segment carry two columns with empty names, so parquet-mr
-    * sees one path twice, reads one chunk and fails on the other. Naming the
-    * columns in the footer, `column_0`, `column_1`, and so on, leaves the data
-    * pages untouched and makes the file readable. A file whose columns are all
-    * named is returned as is.
-    */
-  private def withColumnNames(payload: Array[Byte]): Array[Byte] = {
-    val footerLength = ByteBuffer
-      .wrap(payload, payload.length - 8, 4)
-      .order(ByteOrder.LITTLE_ENDIAN)
-      .getInt
-    val footerStart = payload.length - 8 - footerLength
-    val footer: ThriftFileMetaData = Util.readFileMetaData(
-      new ByteArrayInputStream(payload, footerStart, footerLength)
-    )
-    val elements = footer.getSchema.asScala
-    val leaves = elements.drop(1)
-    if (leaves.forall(e => !e.getName.isEmpty)) return payload
-    if (leaves.exists(e => e.isSetNum_children && e.getNum_children > 0)) {
-      throw new IllegalStateException(
-        "delete log parquet payload has unnamed columns in a nested schema"
-      )
-    }
-    leaves.zipWithIndex.foreach { case (leaf, i) =>
-      if (leaf.getName.isEmpty) leaf.setName(s"column_$i")
-    }
-    footer.getRow_groups.asScala.foreach { rowGroup =>
-      rowGroup.getColumns.asScala.zipWithIndex.foreach { case (chunk, i) =>
-        chunk.getMeta_data.setPath_in_schema(
-          java.util.Collections.singletonList[String](leaves(i).getName)
-        )
-      }
-    }
-    val out = new ByteArrayOutputStream(payload.length)
-    out.write(payload, 0, footerStart)
-    val footerOut = new ByteArrayOutputStream(footerLength)
-    Util.writeFileMetaData(footer, footerOut)
-    footerOut.writeTo(out)
-    out.write(
-      ByteBuffer
-        .allocate(4)
-        .order(ByteOrder.LITTLE_ENDIAN)
-        .putInt(footerOut.size())
-        .array()
-    )
-    out.write(ParquetMagic)
-    out.toByteArray
-  }
-
-  /** The current row of a row group, read column by column. */
-  private final class ParquetRow(readers: IndexedSeq[ColumnReaderImpl]) {
-    def columnCount: Int = readers.size
-
-    def isNull(column: Int): Boolean = {
-      val reader = readers(column)
-      reader.getCurrentDefinitionLevel < reader.getDescriptor.getMaxDefinitionLevel
-    }
-
-    def getLong(column: Int): Long = readers(column).getLong
-
-    def getString(column: Int): String = {
-      val reader = readers(column)
-      reader.getDescriptor.getPrimitiveType.getPrimitiveTypeName match {
-        case PrimitiveTypeName.BINARY |
-            PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY =>
-          reader.getBinary.toStringUsingUTF8
-        case other =>
-          throw new IllegalStateException(
-            s"delete log column $column is $other, expected a string"
-          )
-      }
-    }
-
-    def advance(): Unit = readers.foreach(_.consume())
-  }
-
-  /** Column readers require a converter; the values are pulled directly. */
-  private object NoConverter extends PrimitiveConverter
-
   private def appendLegacyDelete(
       raw: String,
       pkField: FieldSchema,
@@ -380,87 +254,15 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
       bytes: Array[Byte],
       path: String
   ): ParsedContainer = {
-    val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-    val magic = buf.getInt()
-    if (magic != MagicNumber) {
-      throw new IllegalStateException(
-        f"invalid deltalog magic number in $path: expected 0x$MagicNumber%x got 0x$magic%x"
-      )
-    }
-
-    val descriptorHeader = readHeader(buf, s"descriptor header in $path")
-    if (descriptorHeader.typeCode != DescriptorEventType) {
-      throw new IllegalStateException(
-        s"expected descriptor event at start of $path, got type ${descriptorHeader.typeCode}"
-      )
-    }
-
-    skipFully(
-      buf,
-      DescriptorEventDataFixPartSize,
-      s"descriptor fix part in $path"
+    val container = BinlogCodec.parse(bytes, path)
+    ParsedContainer(
+      Option(container.extras.get("version"))
+        .exists(_.asText() == MultiFieldVersion),
+      container.events
+        .filter(_.kind == DeleteEventType)
+        .map(_.payload)
+        .filter(_.nonEmpty)
     )
-    val postHeaderLengths = new Array[Int](EventTypeCount)
-    var idx = 0
-    while (idx < EventTypeCount) {
-      ensureRemaining(buf, 1, s"descriptor post-header lengths in $path")
-      postHeaderLengths(idx) = buf.get() & 0xff
-      idx += 1
-    }
-    ensureRemaining(buf, 4, s"descriptor extras length in $path")
-    val extraLength = buf.getInt()
-    if (extraLength < 0) {
-      throw new IllegalStateException(
-        s"negative descriptor extras length $extraLength in $path"
-      )
-    }
-    ensureRemaining(buf, extraLength, s"descriptor extras in $path")
-    val extraBytes = new Array[Byte](extraLength)
-    buf.get(extraBytes)
-    val extras =
-      if (extraBytes.isEmpty) mapper.createObjectNode()
-      else mapper.readTree(extraBytes)
-    val multiField =
-      Option(extras.get("version")).exists(_.asText() == MultiFieldVersion)
-
-    val payloads = mutable.ArrayBuffer.empty[Array[Byte]]
-    while (buf.hasRemaining) {
-      val header = readHeader(buf, s"event header in $path")
-      val fixPartSize =
-        if (header.typeCode >= 0 && header.typeCode < postHeaderLengths.length)
-          postHeaderLengths(header.typeCode)
-        else 0
-      if (fixPartSize < 0) {
-        throw new IllegalStateException(
-          s"negative event fix-part size $fixPartSize in $path"
-        )
-      }
-      ensureRemaining(buf, fixPartSize, s"event fix part in $path")
-      skipFully(buf, fixPartSize, s"event fix part in $path")
-      val payloadLength = header.eventLength - BaseEventHeaderSize - fixPartSize
-      if (payloadLength < 0) {
-        throw new IllegalStateException(
-          s"negative event payload length $payloadLength in $path"
-        )
-      }
-      ensureRemaining(buf, payloadLength, s"event payload in $path")
-      val payload = new Array[Byte](payloadLength)
-      buf.get(payload)
-      if (header.typeCode == DeleteEventType && payload.nonEmpty) {
-        payloads += payload
-      }
-    }
-
-    ParsedContainer(multiField = multiField, payloads = payloads.toSeq)
-  }
-
-  private def readHeader(buf: ByteBuffer, context: String): ParsedHeader = {
-    ensureRemaining(buf, BaseEventHeaderSize, context)
-    buf.getLong()
-    val typeCode = buf.get()
-    val eventLength = buf.getInt()
-    buf.getInt()
-    ParsedHeader(typeCode, eventLength)
   }
 
   private def validatePkType(pkField: FieldSchema): Unit = {
@@ -483,23 +285,6 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
       throw new IllegalStateException(s"expected numeric $context, got $other")
   }
 
-  private def ensureRemaining(
-      buf: ByteBuffer,
-      needed: Int,
-      context: String
-  ): Unit = {
-    if (buf.remaining() < needed) {
-      throw new EOFException(
-        s"unexpected EOF while reading $context: need $needed bytes, only ${buf.remaining()} remain"
-      )
-    }
-  }
-
-  private def skipFully(buf: ByteBuffer, length: Int, context: String): Unit = {
-    ensureRemaining(buf, length, context)
-    buf.position(buf.position() + length)
-  }
-
   private def sequence[A](
       items: Seq[Either[Throwable, A]]
   ): Either[Throwable, Seq[A]] = {
@@ -511,88 +296,9 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
     Right(out.toSeq)
   }
 
-  private final case class ParsedHeader(typeCode: Byte, eventLength: Int)
   private final case class ParsedContainer(
       multiField: Boolean,
       payloads: Seq[Array[Byte]]
   )
 
-  private final class InMemoryInputFile(bytes: Array[Byte]) extends InputFile {
-    override def getLength: Long = bytes.length.toLong
-
-    override def newStream(): SeekableInputStream =
-      new SeekableInputStream {
-        private var pos = 0
-
-        override def getPos: Long = pos.toLong
-
-        override def seek(newPos: Long): Unit = {
-          if (newPos < 0 || newPos > bytes.length) {
-            throw new EOFException(
-              s"invalid seek position $newPos for in-memory parquet payload of ${bytes.length} bytes"
-            )
-          }
-          pos = newPos.toInt
-        }
-
-        override def read(): Int = {
-          if (pos >= bytes.length) -1
-          else {
-            val value = bytes(pos) & 0xff
-            pos += 1
-            value
-          }
-        }
-
-        override def read(b: Array[Byte], off: Int, len: Int): Int = {
-          if (pos >= bytes.length) {
-            -1
-          } else {
-            val toRead = math.min(len, bytes.length - pos)
-            System.arraycopy(bytes, pos, b, off, toRead)
-            pos += toRead
-            toRead
-          }
-        }
-
-        override def readFully(target: Array[Byte]): Unit =
-          readFully(target, 0, target.length)
-
-        override def read(target: ByteBuffer): Int = {
-          if (pos >= bytes.length) {
-            -1
-          } else {
-            val toRead = math.min(target.remaining(), bytes.length - pos)
-            target.put(bytes, pos, toRead)
-            pos += toRead
-            toRead
-          }
-        }
-
-        override def readFully(target: ByteBuffer): Unit = {
-          val len = target.remaining()
-          ensureAvailable(len)
-          target.put(bytes, pos, len)
-          pos += len
-        }
-
-        override def readFully(
-            target: Array[Byte],
-            start: Int,
-            len: Int
-        ): Unit = {
-          ensureAvailable(len)
-          System.arraycopy(bytes, pos, target, start, len)
-          pos += len
-        }
-
-        private def ensureAvailable(len: Int): Unit = {
-          if (pos + len > bytes.length) {
-            throw new EOFException(
-              s"unexpected EOF while reading in-memory parquet payload: need $len bytes at offset $pos, payload size=${bytes.length}"
-            )
-          }
-        }
-      }
-  }
 }

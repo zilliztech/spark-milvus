@@ -13,6 +13,13 @@ Two lines exist right now. The 1.x line is frozen at tag `v1.6.0` and only takes
 fixes. The 2.0 line is a rewrite on branch `refactor/v2`, versioned
 `2.0.0-{branch}-{arch}-SNAPSHOT`.
 
+Persisted vector-index queries use `MilvusSearch.search`, which loads the
+snapshot's HNSW index files, applies deletions and scalar predicates before
+search, retrieves projected hit rows, and returns global TopK. See the
+[query contract](docs/reference-en.md#persisted-index-search-refactorv2).
+Cardinal index files require a Cardinal-enabled build of the pinned Knowhere
+revision; the plain upstream CI artifact does not contain that engine.
+
 ## Project structure
 
 The build has eleven sbt modules in four layers. Dependencies only point
@@ -23,7 +30,7 @@ time: a source file in `core`, `compat` or `client` that mentions
 | Layer | Module | What it holds |
 |---|---|---|
 | 1 | `native-storage` | JNI over the `loon_*` C interface of milvus-storage |
-| 1 | `native-vector` | JNI over the `mv_*` C shim around knowhere |
+| 1 | `native-vector` | Loads pinned Knowhere PR #1829 artifacts and delegates BruteForce through its upstream Java API and JNI |
 | 2 | `core` | The storage format itself: snapshots, manifests, delete files, schema, codecs, statistics, planning, segment read and write, indexes, object-storage access. No Spark. |
 | 2 | `compat` | Adapters for three non-standard read entry points: Storage V2 packed segments, an offline segment list passed through options, and a milvus-backup export directory |
 | 2 | `client` | The gRPC client for the online Milvus service |
@@ -125,6 +132,11 @@ alias spark-submit-wrapper="/xxx/spark-submit-wrapper.sh"
 ```
 
 ## Building
+
+Knowhere library loading uses the Java API and JNI from pinned PR #1829.
+The API builds automatically; the native platform JAR is selected explicitly.
+See [Knowhere library loading](docs/contributing.md#knowhere-library-loading)
+for the native build/import script, packaging and real JNI smoke command.
 
 ```bash
 sbt clean compile package publishLocal   # compile and publish to the local repository

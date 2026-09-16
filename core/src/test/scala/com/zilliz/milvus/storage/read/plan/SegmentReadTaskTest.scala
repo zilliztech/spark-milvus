@@ -11,6 +11,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.snapshot.{SegmentIndex, SegmentIndexes}
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
@@ -61,6 +62,36 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     )
     val copy = roundTrip(task)
     copy.layout shouldBe SegmentLayout.Manifest("files/insert_log/1/2/3", 11L)
+  }
+
+  test(
+    "persisted index metadata and snapshot rows survive task serialization"
+  ) {
+    val index = SegmentIndex(
+      1L,
+      7L,
+      451L,
+      101L,
+      469076449917763071L,
+      469076449917967340L,
+      "v_hnsw",
+      Map("index_type" -> "HNSW", "metric_type" -> "COSINE"),
+      Vector("files/index_files/build/1/7/451/_mem.index.bin"),
+      4500L,
+      4096L,
+      1L,
+      Some(10),
+      None
+    )
+    val task = v2Task.copy(
+      layout = SegmentLayout.Manifest("files/insert_log/1/7/451", 11L),
+      indexes = SegmentIndexes.Available(Vector(index)),
+      snapshotRows = Some(4500L)
+    )
+    val copy = roundTrip(task)
+    copy.indexes shouldBe task.indexes
+    copy.expectedRows shouldBe Some(4500L)
+    copy.readVersionOrLatest shouldBe 11L
   }
 
   test("a materialized delete plan survives serialization") {

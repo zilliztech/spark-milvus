@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.read
 
+import java.util.OptionalLong
 import scala.jdk.CollectionConverters._
 
 import org.apache.hadoop.conf.Configuration
@@ -18,6 +19,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.read.plan.{DeleteFileListing, ReadPlan}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.{
@@ -48,6 +50,9 @@ class MilvusScan(
     with SupportsReportStatistics
     with Logging {
   private val milvusOption = MilvusOption(options)
+  milvusOption.vectorSearch.filter(_.mode == "index").foreach { search =>
+    SegmentIndexSearch.validate(search, snapshot.schema)
+  }
 
   /** Row count is the sum over planned partitions; the byte size is that count
     * times an estimated row width. Both come from the plan already built, so
@@ -105,7 +110,7 @@ class MilvusScan(
     // at the snapshot's bucket.
     val applyDeletes = MilvusOption.readApplyDeletes(options)
     def listDeletes(
-        store: com.zilliz.milvus.storage.io.ObjectStore
+        store: ObjectStore
     ): DeleteFileListing =
       DeleteFileListing
         .of(
@@ -215,15 +220,13 @@ object MilvusScan extends Logging {
   ): Statistics = {
     val specs = partitions.collect { case p: MilvusInputPartition => p.task }
     val rows =
-      com.zilliz.milvus.storage.read.plan.ReadPlan(specs.toSeq).totalRows
+      ReadPlan(specs.toSeq).totalRows
     val width = estimatedRowWidth(schema)
     new Statistics {
-      override def numRows(): java.util.OptionalLong =
-        rows.fold(java.util.OptionalLong.empty())(java.util.OptionalLong.of)
-      override def sizeInBytes(): java.util.OptionalLong =
-        rows.fold(java.util.OptionalLong.empty())(r =>
-          java.util.OptionalLong.of(r * width)
-        )
+      override def numRows(): OptionalLong =
+        rows.fold(OptionalLong.empty())(OptionalLong.of)
+      override def sizeInBytes(): OptionalLong =
+        rows.fold(OptionalLong.empty())(r => OptionalLong.of(r * width))
     }
   }
 

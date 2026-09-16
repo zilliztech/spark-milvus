@@ -1,7 +1,11 @@
 package com.zilliz.milvus.storage.read.plan
 
 import com.zilliz.milvus.storage.delete.DeletePlan
-import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, SegmentLayout}
+import com.zilliz.milvus.storage.snapshot.{
+  DeltaLogFile,
+  SegmentIndexes,
+  SegmentLayout
+}
 
 /** Where the rows deleted from a segment come from.
   *
@@ -76,7 +80,9 @@ final case class SegmentReadTask(
     schemaBytes: Array[Byte],
     properties: Map[String, String],
     neededFieldIds: Seq[Long] = Seq.empty,
-    deletes: DeleteSource = DeleteSource.None
+    deletes: DeleteSource = DeleteSource.None,
+    indexes: SegmentIndexes = SegmentIndexes.Unknown,
+    snapshotRows: Option[Long] = None
 ) extends Serializable {
 
   /** True when this partition has to evaluate deletes at all. A reader checks
@@ -112,15 +118,16 @@ final case class SegmentReadTask(
     case SegmentLayout.ColumnGroups(gs) => gs.flatMap(_.filePaths)
   }
 
-  /** Rows this partition is expected to deliver, when the layout says.
+  /** Physical rows recorded by the snapshot, or by its column groups when the
+    * source has no snapshot Avro count.
     *
     * All column groups of a segment carry the same row total, so one group's
     * sum is the segment's. A reader compares this against what it actually
     * delivered: a short read has to be an error, not a short DataFrame.
     */
-  def expectedRows: Option[Long] = layout match {
+  def expectedRows: Option[Long] = snapshotRows.orElse(layout match {
     case SegmentLayout.Manifest(_, _) => scala.None
     case SegmentLayout.ColumnGroups(gs) =>
       gs.headOption.map(_.fileRowCounts.sum)
-  }
+  })
 }

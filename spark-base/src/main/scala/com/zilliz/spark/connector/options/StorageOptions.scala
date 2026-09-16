@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector.options
 
 import java.net.URI
+import scala.collection.{Map => CollectionMap}
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
@@ -8,9 +9,9 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
-import com.zilliz.spark.connector.options.MilvusOption
 
 /** How the driver reaches object storage from the options it was given.
   *
@@ -85,7 +86,7 @@ object StorageOptions extends Logging {
   }
 
   private[connector] def optionValue(
-      options: scala.collection.Map[String, String],
+      options: CollectionMap[String, String],
       key: String
   ): Option[String] = {
     options.collectFirst {
@@ -98,7 +99,7 @@ object StorageOptions extends Logging {
     * `fs.s3a.endpoint` and the legacy `s3.endpoint` spelling remain aliases.
     */
   private[connector] def effectiveEndpoint(
-      options: scala.collection.Map[String, String]
+      options: CollectionMap[String, String]
   ): Option[String] =
     Seq(
       StorageProperties.Address,
@@ -114,7 +115,7 @@ object StorageOptions extends Logging {
     * this boundary.
     */
   private[connector] def effectivePathStyleAccess(
-      options: scala.collection.Map[String, String]
+      options: CollectionMap[String, String]
   ): Option[Boolean] =
     booleanOption(options, "fs.s3a.path.style.access")
       .orElse(booleanOption(options, MilvusOption.S3PathStyleAccess))
@@ -123,7 +124,7 @@ object StorageOptions extends Logging {
       )
 
   private def booleanOption(
-      options: scala.collection.Map[String, String],
+      options: CollectionMap[String, String],
       key: String
   ): Option[Boolean] =
     optionValue(options, key).map(_.trim).map {
@@ -150,15 +151,11 @@ object StorageOptions extends Logging {
     * them to a subtree rooted at `fs.bucket_name`.
     */
   private[connector] def storeFor(
-      conf: org.apache.hadoop.conf.Configuration,
+      conf: Configuration,
       bucket: String,
-      options: scala.collection.Map[String, String] = Map.empty
-  ): com.zilliz.milvus.storage.io.ObjectStore = {
+      options: CollectionMap[String, String] = Map.empty
+  ): ObjectStore = {
     val trimmed = Option(bucket).map(_.trim).getOrElse("")
-    if (trimmed.isEmpty) {
-      return HadoopStorageKeys
-        .objectStore(conf, "")
-    }
     HadoopStorageKeys.storeFrom(storagePropertiesFor(conf, trimmed, options))
   }
 
@@ -166,24 +163,26 @@ object StorageOptions extends Logging {
     * store so alias translation stays unit-testable without loading JNI.
     */
   private[connector] def storagePropertiesFor(
-      conf: org.apache.hadoop.conf.Configuration,
+      conf: Configuration,
       bucket: String,
-      options: scala.collection.Map[String, String]
+      options: CollectionMap[String, String]
   ): Map[String, String] = {
     val trimmed = Option(bucket).map(_.trim).getOrElse("")
-    if (trimmed.isEmpty) {
-      return HadoopStorageKeys.canonicalProperties(
-        Map(StorageProperties.StorageType -> StorageProperties.StorageTypeLocal)
-      )
-    }
     val declared = options.filter { case (k, _) =>
       k.startsWith(
-        com.zilliz.milvus.storage.credential.StorageProperties.Prefix
+        StorageProperties.Prefix
       ) ||
       k.startsWith(
-        com.zilliz.milvus.storage.credential.StorageProperties.ExternalPrefix
+        StorageProperties.ExternalPrefix
       )
     }.toMap
+    if (trimmed.isEmpty) {
+      return HadoopStorageKeys.canonicalProperties(
+        Map(
+          StorageProperties.StorageType -> StorageProperties.StorageTypeLocal
+        ) ++ declared
+      )
+    }
     val translatedAliases =
       effectiveEndpoint(options)
         .map(StorageProperties.Address -> _)
@@ -196,13 +195,13 @@ object StorageOptions extends Logging {
     val merged = HadoopStorageKeys
       .toFsProperties(conf, trimmed) ++ declared ++ translatedAliases ++
       Map(
-        com.zilliz.milvus.storage.credential.StorageProperties.BucketName -> trimmed
+        StorageProperties.BucketName -> trimmed
       )
     HadoopStorageKeys.canonicalProperties(merged)
   }
 
   private[connector] def connectorS3BucketOption(
-      options: scala.collection.Map[String, String]
+      options: CollectionMap[String, String]
   ): Option[String] = {
     Seq(
       StorageProperties.BucketName,
@@ -214,7 +213,7 @@ object StorageOptions extends Logging {
   }
 
   private[connector] def resolveConnectorS3Bucket(
-      options: scala.collection.Map[String, String]
+      options: CollectionMap[String, String]
   ): String = {
     connectorS3BucketOption(options).getOrElse {
       throw new IllegalArgumentException(
@@ -225,7 +224,7 @@ object StorageOptions extends Logging {
 
   private[connector] def snapshotS3BucketForRelativePaths(
       snapshotPath: String,
-      options: scala.collection.Map[String, String]
+      options: CollectionMap[String, String]
   ): Option[String] = {
     snapshotBucket(snapshotPath).orElse(connectorS3BucketOption(options))
   }
@@ -280,7 +279,7 @@ object StorageOptions extends Logging {
     * scan planner and table-level schema rehydration (backup mode) share it.
     */
   private[connector] def buildHadoopConfForOptions(
-      rawOptions: scala.collection.Map[String, String],
+      rawOptions: CollectionMap[String, String],
       path: String
   ): Configuration = {
     val conf = SparkSession.getActiveSession

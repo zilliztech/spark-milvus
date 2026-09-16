@@ -50,9 +50,8 @@ class MilvusPartitionReaderFactory(
 
   /** Whether this partition can be read a batch at a time.
     *
-    * Both lines can, because both end at the same SegmentReader. It is off
-    * unless the read asks, since the row path is what every existing job runs
-    * and the two have to be shown to agree before the default moves.
+    * Both lines use the same SegmentReader. Columnar reads are enabled by
+    * default; callers may explicitly select the row path.
     *
     * Two things the row reader does are not implemented columnar yet, and each
     * of them sends the partition back to the row reader:
@@ -65,11 +64,14 @@ class MilvusPartitionReaderFactory(
     *     brute-force search instead of a scan; the columnar reader would ignore
     *     them and return the whole segment.
     *
-    * Neither partition type currently carries connector-owned filters, and
-    * `MilvusV2InputPartition` also has no search parameters.
+    * Persisted-index search is supported by both partition types and also
+    * requires the row reader.
     */
   override def supportColumnarReads(partition: InputPartition): Boolean =
     MilvusOption.readColumnar(optionsMap) && (partition match {
+      case p: MilvusInputPartition
+          if p.milvusOption.vectorSearch.exists(_.mode == "index") =>
+        false
       case p: MilvusV3InputPartition =>
         pushedFilters.isEmpty && p.topK.isEmpty && p.queryVector.isEmpty
       case _: MilvusInputPartition => pushedFilters.isEmpty
@@ -127,27 +129,39 @@ class MilvusPartitionReaderFactory(
     case p: MilvusInputPartition =>
       logInfo(s"Creating row reader for segment ${p.task.segmentId}")
       val dataSchema = StructType(schema.fields.filterNot { field =>
-        isMetadataExtraField(field.name)
+        isMetadataExtraField(field.name) ||
+        (p.milvusOption.vectorSearch.exists(
+          _.mode == "index"
+        ) && field.name == MilvusOption.VectorSearchScore)
       })
-      val search = p match {
-        case v3: MilvusV3InputPartition =>
-          for {
-            k <- v3.topK
-            q <- v3.queryVector
-          } yield VectorSearch(
-            queryVector = q,
-            topK = k,
-            metricType = v3.metricType.getOrElse("L2"),
-            vectorColumn = v3.vectorColumn.getOrElse("vector")
-          )
-        case _ => None
-      }
+      val search = p.milvusOption.vectorSearch
+        .filter(_.mode == "index")
+        .orElse(p match {
+          case v3: MilvusV3InputPartition =>
+            for {
+              k <- v3.topK
+              q <- v3.queryVector
+            } yield VectorSearch(
+              queryVector = q,
+              topK = k,
+              metricType = v3.metricType.getOrElse("L2"),
+              vectorColumn = v3.vectorColumn.getOrElse("vector")
+            )
+          case _ => None
+        })
       MetadataColumns.wrapRows(
         new MilvusRowPartitionReader(
           dataSchema,
           ColumnBinding(p, dataSchema),
           pushedFilters,
-          search
+          search,
+          includeSearchScore =
+            schema.fieldNames.contains(MilvusOption.VectorSearchScore),
+          searchScorePosition = Option(
+            schema.fields
+              .filterNot(f => isMetadataExtraField(f.name))
+              .indexWhere(_.name == MilvusOption.VectorSearchScore)
+          ).filter(_ >= 0)
         ),
         schema,
         requestedExtraColumns,

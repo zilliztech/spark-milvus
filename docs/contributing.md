@@ -26,6 +26,31 @@ Only the root assembly is published during the migration. Its POM omits the
 embedded `spark40` and `apps40` module dependencies, which are not published
 separately yet; external dependencies remain in the POM.
 
+Use root's `assembly` for the runnable fat jar. Per-line assembly tasks do not
+yet share its merge and shading rules: `spark40/assembly` currently fails on
+module descriptors, Netty version metadata and FastDoubleParser notices. A
+successful source-classpath test does not validate those unfinished bundles.
+
+## Imports
+
+Import types and objects at the top of Scala and Java source files, then use
+their short names in code. Do not write fully qualified names inline in method
+calls, constructors, type annotations or method signatures. Resolve name
+conflicts with descriptive Scala import aliases or imported enclosing types.
+Follow the import grouping and ordering in `.scalafmt.conf`.
+
+For example:
+
+```scala
+import com.zilliz.milvus.storage.expr.PlanParser
+
+filter.foreach(PlanParser.parse)
+```
+
+Do not write `filter.foreach(com.zilliz.milvus.storage.expr.PlanParser.parse)`.
+Package declarations, imports and class-name strings required by reflection or
+configuration still use the complete package name.
+
 ## Build files
 
 Follow [sbt principles and practices](design/engineering/sbt.html) when reviewing
@@ -39,6 +64,7 @@ are named settings in the same file.
 | `project/Versions.scala` | Library versions and the Spark line matrix |
 | `project/Dependencies.scala` | Dependency coordinates, scopes and dependency groups |
 | `project/Modules.scala` | Shared compile/test settings, checks and the temporary JNI dependency |
+| `project/KnowhereBuild.scala` | Pinned upstream API compilation, native artifact verification and packaged JNI smoke |
 | `project/plugins.sbt` | Build plugins and their meta-build dependencies |
 
 ## Tests that need the native library
@@ -115,6 +141,135 @@ three from `uname`:
 The resource path matters: `NativeLibraryLoader.stripPlatformPrefix` skips any
 JAR entry that is not under `native/<platform>/`, so a library copied flat into
 `native/` is silently never extracted.
+
+## Knowhere library loading
+
+`native-vector/knowhere.properties` pins the Knowhere PR #1829 source commit
+and archive checksum. `native-vector` builds the original upstream Java sources
+with `javac --release 11`; it does not implement another C API or JNI bridge.
+The API JAR is cached under `native-vector/target/knowhere`. An ordinary compile
+or unit-test run needs a JDK, `tar` and network access for the first source
+download, but does not compile or load the native engine.
+
+Build the pinned upstream native engine explicitly on the target Linux
+architecture, using the prerequisites listed by the script:
+
+```bash
+JAVA_HOME=/path/to/jdk21 scripts/build-knowhere.sh build --jobs 2
+```
+
+For persisted Cardinal indexes, build that engine from the same pinned Knowhere
+revision and its pinned Cardinal tags:
+
+```bash
+JAVA_HOME=/path/to/jdk21 scripts/build-knowhere.sh build --jobs 16 \
+  --with-cardinal --cardinal-repository /path/to/authorized/cardinal-clone
+```
+
+On success this writes a separate `target/knowhere-native/<revision>/cardinal/<platform>`
+artifact and records `build.with_cardinal=true`, the Cardinal revisions and the
+actual CMake configuration. It does not replace the existing OSS artifact.
+The upstream Cardinal recipe uses `-march=native`; treat this build as a local
+verification artifact until CPU portability has been separately established.
+The connector derives `META-INF/milvus/knowhere-runtime.properties` from the
+selected, checksum-verified artifact's `build.with_cardinal` provenance field.
+`NativeVectorLibrary.RuntimeInfo.cardinalSupported()` exposes that feature;
+an arbitrary `knowhere.native.path` override does not establish Cardinal support.
+Validate the storage/Knowhere dependency combination before registering its hashes.
+
+At the pinned revision, the Cardinal build currently stops at an upstream
+DiskANN C test that expects an exact distance from quantized refinement. The
+equivalent Java test also fails (1.0306964 versus 1.0); their assertions have
+not been changed or skipped. The real HNSW version-10 acceptance used a separate
+local diagnostic artifact with `build.validated=false`. Its dependency
+compatibility record does not certify a successful upstream suite or a release.
+See the measured results and limitations in the
+[vector design](design/architecture/vector-search.html#interop). Normal builds
+remain fail-closed until the upstream test contract is corrected.
+
+For the pinned Linux x86-64 revision, `scripts/build-knowhere.sh import-ci`
+can instead import its already-built CI artifact. It verifies the exact source
+tree and artifact digests, and retains the upstream test and toolchain records.
+Both paths leave the platform JAR and a `.jar.properties` provenance sidecar
+under `target/knowhere-native/<revision>/<platform>/`. The sidecar binds the JAR
+checksum to the pinned source revision. Keep these files together.
+
+Select that absolute JAR path for a native smoke or an assembly:
+
+```bash
+sbt -Dknowhere.native.jar=/absolute/path/to/knowhere-jni-1.0.0-SNAPSHOT-linux-x86_64.jar \
+  native-vector/knowhereSmoke
+sbt -Dknowhere.native.jar=/absolute/path/to/knowhere-jni-1.0.0-SNAPSHOT-linux-x86_64.jar \
+  assembly
+```
+
+The selection is validated against the source pin, JAR checksum, platform,
+C ABI, manifest and library checksums. It is optional for ordinary reads;
+without it an assembly carries the Java API only, and requesting vector loading
+fails with a missing-platform-JAR error. Assembly preserves `io.knowhere` class
+names, upstream licenses and `native/knowhere/1/<platform>/` resources, and
+rejects conflicting Knowhere resources.
+
+When storage and Knowhere are packaged together, the build scans
+`native-vector/storage-compatibility*.properties`. Exactly one record must match
+the platform, storage engine SHA-256 and Knowhere platform JAR SHA-256; zero or
+multiple matches fail the build. Each record lists dependency hashes and audited
+SONAME aliases. The build generates storage's
+shared dependency resources from the original Knowhere dependency bytes, including
+their aliases and license records. This prevents the loaders from selecting
+different Folly binaries depending on load order. Original storage resources and
+the upstream Knowhere JAR remain unchanged. An unverified pair fails the combined
+build; validate both search/load orders and the full storage suite before
+registering another pair. Without Knowhere, ordinary storage resources are used.
+
+`MilvusSearch.search` now constructs a global TopK DataFrame using
+`core.index.SegmentIndexQuery` and `PersistedIndexSearch`. The loader reads
+Milvus binlog/Parquet payloads and optional `SLICE_META`, or a Cardinal raw
+`_mem.index.bin` stream. Payload markers select the matching Faiss or Cardinal
+engine; a shared HNSW name alone does not establish format compatibility.
+Each task owns and closes its index. There is no cross-task index cache.
+Real UAT Cardinal HNSW deserialize/search passed against direct JNI results
+and an independent 100,000-row reference. Subsequent relocation inspection
+found unresolved AWS CRT and Folly/libaio symbols in the native dependencies;
+the exercised paths do not establish complete native link compatibility.
+A corrected native rebuild and immediate-binding validation are in progress.
+Local OSS fixtures do not replace real-instance-data validation. Tests live in
+`/root/zilliz/milvus-spark-demo`.
+
+The existing `vector.search.*` reader calls `core.index.BruteForceSearch` and
+`Knowhere.bruteForce`. It scans vectors and merges batch hits into per-segment
+TopK; it does not load persisted index files. Missing native libraries fail the
+query. Request validation and merge tests run in the ordinary suite. Explicit
+real-native checks require the selected platform JAR and the JRE's `libjsig`:
+
+```bash
+sbt -java-home "$JAVA_HOME" -Dknowhere.native.jar=/absolute/path/to/platform.jar \
+  "set core / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
+  "set spark40 / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
+  'core/Test/runMain com.zilliz.milvus.storage.index.BruteForceSearchSmoke storage-first' \
+  'core/Test/runMain com.zilliz.milvus.storage.index.BruteForceSearchSmoke knowhere-first' \
+  'spark40/Test/runMain com.zilliz.spark.connector.read.SegmentVectorSearchSmoke'
+```
+
+`NativeVectorLibrary.load()` explicitly initializes the upstream binding and
+reports the native C ABI and index format versions. The upstream loader owns
+extraction and `System.load`, including the optional development override
+`-Dknowhere.native.path=/absolute/path/to/libknowhere_jni.so`. The override does
+not verify build provenance or package checksums and requires its dependencies
+to be available. A library load does not validate persisted Milvus index files.
+
+For HotSpot, preload the **running JRE's** `lib/libjsig.so` before JVM startup.
+Apply this to each driver or executor JVM that will load Knowhere; Java code
+cannot establish signal chaining after startup. Do not package another JDK's
+`libjsig` into the connector. The explicit smoke task supplies it automatically,
+uses only packaged adapter/API/native JARs plus its test entry point, clears
+build-library paths, and checks `-Xcheck:jni` diagnostics. Missing libraries or
+failed native calls fail the smoke; it never cancels itself. Its log is
+`native-vector/target/knowhere-smoke/jni.log`.
+
+The pinned upstream native package reports missing `milvus-common` license
+material. Preserve `missing-licenses.txt` and the bundled license records;
+complete the upstream material before distributing native artifacts.
 
 ## JVM version
 

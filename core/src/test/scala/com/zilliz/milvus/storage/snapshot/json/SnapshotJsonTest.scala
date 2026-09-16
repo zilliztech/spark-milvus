@@ -17,6 +17,20 @@ import io.milvus.grpc.schema.{
   */
 class SnapshotJsonTest extends AnyFunSuite with Matchers {
 
+  test("missing indexes and build ids are distinct from explicit empty lists") {
+    val prefix =
+      """{"snapshot_info":{"name":"s"},"collection":{"schema":{"name":"c","fields":[]}}"""
+    val missing = SnapshotJson.parse(prefix + "}").toOption.get
+    missing.indexes shouldBe None
+    missing.buildIds shouldBe None
+    val empty = SnapshotJson
+      .parse(prefix + """, "indexes":[], "build_ids":[]}""")
+      .toOption
+      .get
+    empty.indexes shouldBe Some(Seq.empty)
+    empty.buildIds shouldBe Some(Vector.empty)
+  }
+
   private val snapshotFilePath = "core/src/test/data/sample_snapshot.json"
 
   private def readFile(path: String): Either[Throwable, SnapshotJson] =

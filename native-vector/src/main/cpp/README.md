@@ -1,15 +1,20 @@
-# native-vector C sources
+# native-vector native code ownership
 
-Holds the `mv_*` C shim over knowhere and its JNI layer. `mv_*` wraps
-`knowhere::Index`, BruteForce, BinarySet, Version, and the local FileManager
-DiskANN needs. On the JNI side it maps to
-`com.zilliz.milvus.jni.vector.VectorNative`.
+Knowhere PR [#1829](https://github.com/zilliztech/knowhere/pull/1829) supplies
+the C interface, JNI, Java API and native resource loader. Build its source from
+`LawrenceTL92/knowhere-contrib`, branch `codex/knowhere-jni-pr`, pinned to commit
+`9dc2b8ad537502d408bc33af05727453295d6622`.
 
-No JNI type appears in a C header; JNI lives only in the `jni` package
-(constraint 2, section 4 of docs/design/architecture/modules.md).
+The connector consumes these artifacts through `NativeVectorLibrary` in
+`com.zilliz.milvus.jni.vector`. Calling the upstream
+`io.knowhere.Knowhere.cAbiVersion()` triggers its loader; the connector verifies
+C ABI version 1 and exposes version information. It does not maintain another
+C shim, JNI declaration or native resource extractor.
 
-The build scripts land here when the module is implemented. The artifacts go
-into the jar flattened under `native/{os}-{arch}/`.
+Keep upstream resources under `native/knowhere/1/<platform>/`. The upstream
+loader owns platform selection, checksums, extraction and dependency loading.
+Do not relocate the `io.knowhere` Java package when building an assembly.
+Preload the JRE's `libjsig` before starting the JVM, as required by this build.
 
-knowhere has no C interface of its own, so this shim is the only cross-language
-asset in layer 1 — design its `.so` and header for a second, non-JVM caller.
+Persisted Milvus index decoding and search are subsequent work. The governing
+design is [vector-search.html](../../../../docs/design/architecture/vector-search.html#library-loading).

@@ -27,6 +27,39 @@ import com.zilliz.milvus.storage.snapshot.json.SegmentListJson
   */
 class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
 
+  test(
+    "all manifest versions decode exact index ids, parameters and distinct versions"
+  ) {
+    val index = SegmentManifestFixture.index()
+    SegmentManifestReader.supportedSchemaVersions.foreach { version =>
+      val bytes = SegmentManifestFixture.encode(
+        version = version,
+        indexes = Vector(index)
+      )
+      val entry =
+        SegmentManifestReader.parse(bytes, version).fold(throw _, identity)
+      val expected =
+        if (version == 1) index.copy(indexStorePathVersion = None) else index
+      entry.indexFiles shouldBe Some(Vector(expected))
+      entry.numOfRows shouldBe 2L
+    }
+  }
+
+  test(
+    "an explicitly empty index array is known, and truncated index bytes fail"
+  ) {
+    val bytes = SegmentManifestFixture.encode()
+    SegmentManifestReader.parse(bytes, 4).toOption.get.indexFiles shouldBe Some(
+      Vector.empty
+    )
+    val indexed = SegmentManifestFixture.encode(indexes =
+      Vector(SegmentManifestFixture.index())
+    )
+    SegmentManifestReader
+      .parse(indexed.take(indexed.length / 2), 4)
+      .isLeft shouldBe true
+  }
+
   private val avroBytes: Array[Byte] =
     Files.readAllBytes(Paths.get("core/src/test/data/seg_manifest.avro"))
 

@@ -1,9 +1,9 @@
 package com.zilliz.milvus.storage
 
-/** Index file encoding and decoding, index sources, caching and writing.
+/** Vector execution and its buffers, exclusions and per-segment top-k.
   *
-  * Main types: IndexFileCodec, IndexSource, IndexCache, IndexWriter.
-  * Capabilities: none until code lands here; the ids this package is planned to
-  * carry are in section 11 of docs/design/capabilities.md..
+  * Main types: BruteForceSearch, PersistedIndexSearch, MilvusIndexFileDecoder,
+  * SegmentIndexQuery. IndexCache and IndexWriter remain planned; loaded indexes
+  * are task-owned. Capabilities: V2, V5, V7 (see docs/design/capabilities.md).
   */
 package object index

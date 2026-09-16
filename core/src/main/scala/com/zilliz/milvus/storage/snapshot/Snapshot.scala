@@ -28,7 +28,9 @@ final case class Snapshot(
     partitionIds: Seq[Long],
     segments: Seq[Segment],
     origin: SnapshotOrigin,
-    bucket: String
+    bucket: String,
+    indexes: Option[Vector[CollectionIndex]] = None,
+    buildIds: Option[Vector[Long]] = None
 ) {
 
   /** The schema as the bytes every `SegmentReadTask` carries. */

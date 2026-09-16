@@ -286,6 +286,8 @@ C 侧是 holder 里的一个整数自增。开关本身反而是一个 option、
 <code>DataWriter.currentMetricsValues</code>,从 <code>SegmentWriter.metrics</code> 取。四条 Spark 线(3.5 到 4.2)接口一致。
 不做 Prometheus 之类的外部导出:Spark 已经把任务级指标聚到 SQL 页和事件日志里,再导一遍是第二条路。</p>
 
+<p>索引查询在过滤扫描和命中行回表时分别打开 <code>SegmentReader</code>。这两个 reader 的最终指标必须传回同一个 <code>MilvusRowPartitionReader</code>，不能因为其普通扫描 reader 未打开就上报零。计数、耗时和字节数相加，allocator 高水位取最大值；显式无索引回退按同一规则汇总。这里统计 storage JNI 与 Arrow 交接，Knowhere 搜索耗时仍由索引执行记录。</p>
+
 <h3>5.5 类型放哪</h3>
 
 <ul>

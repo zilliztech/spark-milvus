@@ -15,6 +15,7 @@
 
 #include <jni.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 

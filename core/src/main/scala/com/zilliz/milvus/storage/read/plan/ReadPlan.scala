@@ -7,9 +7,8 @@ import com.zilliz.milvus.storage.Logging
   * already knows about the total.
   *
   * The totals are what a Spark `Statistics` reports (capability R13). They are
-  * options because a manifest layout does not reveal its row count on the
-  * driver without opening the manifest, and guessing a number that feeds the
-  * optimizer is worse than admitting there is none.
+  * options because some sources provide neither snapshot Avro row counts nor
+  * materialized column groups. A missing count must not be guessed.
   */
 final case class ReadPlan(specs: Seq[SegmentReadTask]) extends Serializable {
 
@@ -92,7 +91,9 @@ object ReadPlan extends Logging {
         schemaBytes = schemaBytes,
         properties = propertiesFor(3),
         neededFieldIds = neededFieldIds,
-        deletes = deleteSourceFor(seg.id, seg.partitionId)
+        deletes = deleteSourceFor(seg.id, seg.partitionId),
+        indexes = seg.indexes,
+        snapshotRows = seg.rows
       )
     }
 
@@ -111,7 +112,9 @@ object ReadPlan extends Logging {
         schemaBytes = schemaBytes,
         properties = propertiesFor(2),
         neededFieldIds = neededFieldIds,
-        deletes = deleteSourceFor(seg.id, seg.partitionId)
+        deletes = deleteSourceFor(seg.id, seg.partitionId),
+        indexes = seg.indexes,
+        snapshotRows = seg.rows
       )
     }
 

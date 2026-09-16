@@ -29,7 +29,19 @@ final case class ReadMetrics(
     copies: Long,
     copiedBytes: Long,
     allocatedMax: Long
-)
+) {
+
+  /** Aggregate readers in one task; allocator high-water marks are not sums. */
+  def +(other: ReadMetrics): ReadMetrics = ReadMetrics(
+    jniCalls + other.jniCalls,
+    jniNanos + other.jniNanos,
+    batches + other.batches,
+    arrowBytes + other.arrowBytes,
+    copies + other.copies,
+    copiedBytes + other.copiedBytes,
+    math.max(allocatedMax, other.allocatedMax)
+  )
+}
 
 object ReadMetrics {
   val Zero: ReadMetrics = ReadMetrics(0L, 0L, 0L, 0L, 0L, 0L, 0L)

@@ -4,6 +4,10 @@ import java.nio.charset.StandardCharsets
 import scala.util.control.NonFatal
 
 import com.zilliz.milvus.storage.io.{FileInfo, ObjectStore}
+import com.zilliz.milvus.storage.manifest.{
+  AvroManifestEntry,
+  SegmentManifestReader
+}
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.json.{
   ManifestContentJson,
@@ -24,10 +28,9 @@ import io.milvus.grpc.schema.{
   */
 trait V2SegmentResolver {
   def resolve(
-      manifestPaths: Seq[String],
+      entries: Seq[AvroManifestEntry],
       bucket: String,
-      store: ObjectStore,
-      manifestSchemaVersion: Int
+      store: ObjectStore
   ): Either[Throwable, Seq[Segment]]
 }
 
@@ -39,26 +42,28 @@ object V2SegmentResolver {
     */
   val Skipped: V2SegmentResolver = new V2SegmentResolver {
     def resolve(
-        manifestPaths: Seq[String],
+        entries: Seq[AvroManifestEntry],
         bucket: String,
-        store: ObjectStore,
-        manifestSchemaVersion: Int
+        store: ObjectStore
     ): Either[Throwable, Seq[Segment]] = Right(Seq.empty)
   }
 
   /** For a caller that knows the snapshot holds no V2 segments. */
   val Unavailable: V2SegmentResolver = new V2SegmentResolver {
     def resolve(
-        manifestPaths: Seq[String],
+        entries: Seq[AvroManifestEntry],
         bucket: String,
-        store: ObjectStore,
-        manifestSchemaVersion: Int
+        store: ObjectStore
     ): Either[Throwable, Seq[Segment]] =
-      if (manifestPaths.isEmpty) Right(Seq.empty)
+      if (
+        !entries.exists(entry =>
+          entry.storageVersion == 2L || entry.segmentLevel == 1L
+        )
+      ) Right(Seq.empty)
       else
         Left(
           new IllegalStateException(
-            s"snapshot lists ${manifestPaths.size} V2 segment manifest(s) but no V2 resolver is configured"
+            s"snapshot lists ${entries.count(entry => entry.storageVersion == 2L || entry.segmentLevel == 1L)} V2 or L0 segment manifest(s) but no V2 resolver is configured"
           )
         )
   }
@@ -299,12 +304,24 @@ object SnapshotCatalog extends Logging {
     if (metadata.manifestList.isEmpty && v3Items.isEmpty) {
       return bad("snapshot is empty: no manifests and no V2 segments")
     }
-    val v2Segments = v2.resolve(
-      metadata.manifestList,
-      bucket,
-      store,
-      metadata.manifestSchemaVersion
-    ) match {
+    val entries =
+      try {
+        metadata.manifestList.map { path =>
+          val key = keyIn(bucket, path, "segment snapshot Avro", endpoint)
+          SegmentManifestReader.parse(
+            store.readAll(key),
+            metadata.manifestSchemaVersion
+          ) match {
+            case Right(entry) => entry
+            case Left(error) =>
+              throw new IllegalArgumentException(
+                s"failed to decode segment snapshot Avro $key: ${error.getMessage}",
+                error
+              )
+          }
+        }
+      } catch { case NonFatal(error) => return Left(error) }
+    val v2Segments = v2.resolve(entries, bucket, store) match {
       case Right(segs) => segs
       case Left(e)     => return Left(e)
     }
@@ -312,7 +329,7 @@ object SnapshotCatalog extends Logging {
       try metadata.collection.schema.toProtobufBytes
       catch { case e: Exception => return Left(e) }
     val info = metadata.snapshotInfo
-    fromLists(
+    val snapshot = fromLists(
       name = info.name,
       collectionId = info.collectionId,
       createdAt = info.rawCreateTs.map(_ => info.createTs),
@@ -323,6 +340,120 @@ object SnapshotCatalog extends Logging {
       bucket = bucket,
       origin = origin,
       endpoint = endpoint
+    )
+    snapshot.flatMap { value =>
+      try Right(attachIndexes(value, metadata, entries, endpoint))
+      catch { case NonFatal(error) => Left(error) }
+    }
+  }
+
+  private def attachIndexes(
+      snapshot: Snapshot,
+      metadata: SnapshotJson,
+      entries: Seq[AvroManifestEntry],
+      endpoint: String
+  ): Snapshot = {
+    val definitions = metadata.indexes.map(_.map(_.toIndex).toVector)
+    definitions.foreach(_.foreach { index =>
+      require(
+        index.collectionId == snapshot.collectionId,
+        s"collection index ${index.indexId} belongs to collection ${index.collectionId}, expected ${snapshot.collectionId}"
+      )
+      require(
+        snapshot.schema.fields.exists(_.fieldID == index.fieldId),
+        s"collection index ${index.indexId} names unknown field ${index.fieldId}"
+      )
+    })
+    val bySegment = entries.groupBy(_.segmentId)
+    require(
+      bySegment.forall(_._2.size == 1),
+      "snapshot lists duplicate segment Avro records"
+    )
+    val segments = snapshot.segments.map { segment =>
+      bySegment.get(segment.id).map(_.head) match {
+        case None => segment
+        case Some(entry) =>
+          require(
+            entry.partitionId == segment.partitionId,
+            s"segment ${segment.id} has conflicting snapshot partition ids"
+          )
+          require(
+            entry.storageVersion == segment.storageVersion ||
+              (entry.segmentLevel == 1L && !segment.hasData),
+            s"segment ${segment.id} has conflicting snapshot storage versions"
+          )
+          require(
+            entry.numOfRows >= 0L,
+            s"segment ${segment.id} has negative row count"
+          )
+          val indexes = entry.indexFiles match {
+            case None => SegmentIndexes.Unknown
+            case Some(files) =>
+              val available = files.filter(_.filePaths.nonEmpty).map { index =>
+                require(
+                  index.segmentId == segment.id,
+                  s"index ${index.indexId} names segment ${index.segmentId}, expected ${segment.id}"
+                )
+                require(
+                  index.rowCount == entry.numOfRows,
+                  s"index ${index.indexId} has ${index.rowCount} rows but segment ${segment.id} has ${entry.numOfRows}"
+                )
+                require(
+                  index.buildId > 0L,
+                  s"index ${index.indexId} has no build id"
+                )
+                require(
+                  index.filePaths.forall(_.nonEmpty),
+                  s"index ${index.indexId} contains an empty file path"
+                )
+                metadata.buildIds.foreach { ids =>
+                  require(
+                    ids.contains(index.buildId),
+                    s"index ${index.indexId} build ${index.buildId} is absent from snapshot build_ids"
+                  )
+                }
+                definitions.foreach { all =>
+                  require(
+                    all.exists(d =>
+                      d.indexId == index.indexId && d.fieldId == index.fieldId
+                    ),
+                    s"segment index ${index.indexId} for field ${index.fieldId} is absent from snapshot indexes"
+                  )
+                }
+                SegmentIndex(
+                  collectionId = snapshot.collectionId,
+                  partitionId = entry.partitionId,
+                  segmentId = segment.id,
+                  fieldId = index.fieldId,
+                  indexId = index.indexId,
+                  buildId = index.buildId,
+                  name = index.name,
+                  parameters = index.parameters,
+                  filePaths = index.filePaths.map(path =>
+                    keyIn(
+                      snapshot.bucket,
+                      path,
+                      s"index ${index.indexId}",
+                      endpoint
+                    )
+                  ),
+                  rowCount = index.rowCount,
+                  serializedSize = index.serializedSize,
+                  indexVersion = index.indexVersion,
+                  currentIndexVersion = index.currentIndexVersion,
+                  indexStorePathVersion = index.indexStorePathVersion
+                )
+              }
+              if (available.isEmpty) SegmentIndexes.Unindexed
+              else SegmentIndexes.Available(available)
+          }
+          segment.copy(rows = Some(entry.numOfRows), indexes = indexes)
+      }
+    }
+    snapshot.copy(
+      segments = segments,
+      indexes = definitions,
+      buildIds = metadata.buildIds
     )
   }
 

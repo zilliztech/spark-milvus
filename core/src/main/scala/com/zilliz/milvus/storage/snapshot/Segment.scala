@@ -4,7 +4,8 @@ package com.zilliz.milvus.storage.snapshot
   *
   * V2 and V3 segments are the same type; the difference is confined to
   * [[SegmentLayout]]. `rows` is known for a V2 segment (the snapshot's Avro
-  * carries it) and unknown for a V3 segment until its manifest is opened.
+  * carries it); a V3 segment can also carry it when its snapshot Avro is
+  * present.
   */
 final case class Segment(
     id: Long,
@@ -12,7 +13,8 @@ final case class Segment(
     storageVersion: Int,
     rows: Option[Long],
     layout: SegmentLayout,
-    deletes: DeleteFiles
+    deletes: DeleteFiles,
+    indexes: SegmentIndexes = SegmentIndexes.Unknown
 ) {
 
   /** False for a delete-only (L0) segment, which has no column groups. */

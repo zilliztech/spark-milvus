@@ -32,47 +32,41 @@
 <h1>使用 Milvus 索引文件完成向量查询</h1>
 <p><strong>Spark 的每个任务加载固定快照中对应段的向量索引，执行搜索并读取命中行；Spark 合并所有段的候选，返回全局 TopK。</strong>
 TopK 指按指定距离或相似度排序的前 K 条结果。近似最近邻搜索（ANN）通过索引减少搜索工作量，其召回率需要相对于精确搜索验证。</p>
-<p class="status">本页是 <a href="https://github.com/zilliztech/spark-milvus/issues/125">issue #125</a> 的开发方案草稿，基于
-<a href="https://github.com/zilliztech/spark-milvus/tree/a07056935a156c053ccc6a74d317c4daf4329cd7">refactor/v2 · a070569</a>。
-本次交付设计文档，尚未实现或运行索引搜索。查询入口、回退策略和能力范围的建议待审阅；未定事项统一记录在总体设计第 4 节。</p>
+<p class="status">本页是 <a href="https://github.com/zilliztech/spark-milvus/issues/125">issue #125</a> 在 refactor/v2 的实现契约。
+2026-09-16 已接入类型化索引元数据、持久化文件解码、Knowhere 加载与搜索、过滤位图、按行号回表及 Spark 全局 TopK；索引由任务独占，不设跨任务缓存。
+2026-09-16 04:48 UTC，真实 UAT 的十万行 HNSW/COSINE 查询验收通过：原始 JNI 对照、独立全量参考、标量/空值过滤和回表均通过。上游 DiskANN 测试仍失败，当前 Cardinal 产物仅供本机验证，详见第 6.4 节。扩展范围统一记录在总体设计第 4 节。</p>
 <nav aria-label="本页目录">
   <a href="#scope">交付范围</a><a href="#current">当前代码</a><a href="#api">查询入口</a>
   <a href="#execution">执行流程</a><a href="#metadata">索引元数据</a><a href="#native">原生接口</a>
-  <a href="#semantics">结果语义</a><a href="#cache">缓存与失败</a><a href="#delivery">开发顺序</a>
+  <a href="#semantics">结果语义</a><a href="#cache">资源与失败</a><a href="#delivery">实现与验收</a>
 </nav>
 
 <h2 id="scope">1. 交付从真实索引文件开始，到全局查询结果结束</h2>
-<p>本 issue 覆盖 V1 的原生加载与搜索接口、V2 的持久化索引加载、V4 的持久化索引缓存，以及拟新增的 V7「显式向量索引查询与全局 TopK」。
-V7 尚未加入正式能力承诺；评审通过后再同步能力行和实现包。若接受显式无索引回退提案，本 issue 同时实现 V5 的原生执行部分，入口和回退规则依决策 16。
-W6 索引写出、V4 的任务内建索引来源继续由各自设计承载。</p>
-<p>首个互操作验证目标建议为<strong>开源 Milvus 生成的 CPU HNSW、非空 FloatVector、COSINE、覆盖整个 sealed segment 的索引</strong>。
-sealed segment 是已经封存的数据段。选择这个组合是因为 nullable 向量需要额外的行号映射，DiskANN 需要本地文件管理器，云端 HNSW 还需要确认实际索引引擎。
-这些依赖核验完成后沿同一接口扩展支持矩阵；不能仅凭索引名称相同就声明兼容。</p>
+<p>本次实现 V1 的原生接口、V2 的持久化索引加载、V5 的原生暴力执行，以及 V7「显式向量索引查询与全局 TopK」。
+索引入口默认严格加载，只有权威来源明确无索引且用户设置 <code>allowUnindexed=true</code> 时才回退。V4 跨任务缓存与 W6 索引写出不在本次实现中。</p>
+<p>当前代码范围为<strong>非 nullable FloatVector、CPU HNSW、L2/IP/COSINE，且索引覆盖整个 sealed segment</strong>。
+sealed segment 是已经封存的数据段。文件路径支持 Milvus binlog/Parquet 封装及 Cardinal 原始 CARD 流，按真实 payload 标识选择 Faiss 或 Cardinal 引擎。
+nullable 行号映射、DiskANN 本地文件管理器、Faiss 量化与 multi-view 索引尚未支持；Cardinal 已验证的真实样本及边界见第 6.4 节。</p>
 <p>Storage V2 和 V3 共用同一查询计划与索引执行器。它们的快照解析、列组读取与回表分别由现有存储适配承担。
 输入中任何段不满足支持条件，必须按明确策略处理，不能漏掉该段继续返回看似完整的答案。查询过程只读固定快照与对象存储。</p>
 
-<h2 id="current">2. 当前缺口分布在元数据、执行器和 Spark 结果计划</h2>
-<p>现有逐段暴力搜索不能通过替换一个距离函数变成索引搜索。需要改动的代码与原因如下。</p>
+<h2 id="current">2. 当前实现贯通元数据、执行器和 Spark 结果计划</h2>
+<p>持久化索引与原有逐段暴力搜索共用读取适配；索引执行、过滤和格式解析留在 core。</p>
 <div class="table"><table>
-<thead><tr><th>现有位置</th><th>当前事实</th><th>本次改动</th></tr></thead>
+<thead><tr><th>位置</th><th>当前实现</th><th>边界</th></tr></thead>
 <tbody>
-<tr><td><code>core.snapshot</code>、<code>core.manifest</code></td><td><code>SnapshotJson.indexes</code> 是 <code>Seq[Any]</code>；实体 <code>Snapshot</code>、<code>Segment</code> 没有索引字段。<code>SegmentManifestReader</code> 只读到删除字段。</td><td>保留索引定义与段级文件引用，绑定快照、字段、构建及格式版本。</td></tr>
-<tr><td><code>native-vector</code>、<code>core.index</code></td><td>只有包说明和占位文档。</td><td>实现文件解码接口、Knowhere 加载/搜索、版本校验和缓存。</td></tr>
-<tr><td><code>core.read.plan</code>、<code>core.read.exec</code></td><td>已有 <code>SegmentReadTask</code> 和批读取；<code>SegmentReader</code> 只有 <code>next()</code>、<code>deliveredRows</code>，没有按行号取列接口。</td><td>统一规划查询任务；在共同 reader 中增加 <code>take</code>，供搜索和其他下游算子复用。</td></tr>
-<tr><td><code>spark.read.SegmentVectorSearch</code></td><td><code>run</code> 全扫向量、保留每段 K 条；搜索分支应用删除但不应用普通扫描的标量过滤。</td><td>将段内计算交给 core，搜索前生成排除位图。</td></tr>
-<tr><td><code>spark.read.MilvusScan</code>、<code>spark.options</code></td><td>搜索结果追加距离值，但 scan 没有相应结果 schema；没有全局合并；错误的查询参数可能被解析成未开启搜索。</td><td>显式结果 schema、严格参数校验，以及属于公开查询入口的全局排序与 K 限制。</td></tr>
+<tr><td><code>core.snapshot</code>、<code>core.manifest</code></td><td><code>CollectionIndex</code>、<code>SegmentIndex</code> 与 <code>SegmentIndexes</code> 保留定义、文件及版本，并传入读取任务。</td><td>Unknown 与权威 Unindexed 分开，不能用空列表掩盖缺失元数据。</td></tr>
+<tr><td><code>native-vector</code>、<code>core.index</code></td><td><code>SegmentIndexQuery</code> 协调过滤与索引选择；<code>IndexFileCodec</code>、<code>PersistedIndexSearch</code> 调上游 BinarySet、deserialize、search。</td><td>任务独占索引并关闭；无缓存。已验证真实 Cardinal version 10 HNSW/COSINE 样本。</td></tr>
+<tr><td><code>core.read.plan</code>、<code>core.read.exec</code></td><td><code>SegmentReadTask</code> 携带索引元数据；<code>SegmentReader.take</code> 通过 native-storage 回取指定行和列。</td><td>V2 列组与 V3 Manifest 使用同一接口，输出行号必须与索引 label 对应。</td></tr>
+<tr><td><code>spark.read.SegmentVectorSearch</code>、<code>SegmentIndexSearch</code></td><td>前者适配原有暴力入口，后者适配 core 的索引执行并将 take 输出转换为 Spark 行。</td><td>只有显式无索引回退才进入暴力路径。</td></tr>
+<tr><td><code>spark.read.MilvusSearch</code>、<code>spark.options</code></td><td>严格校验请求，声明结果元数据列，返回带全局排序及 limit 的 DataFrame。</td><td>普通 scan 不增加通用 TopN 下推。</td></tr>
 </tbody></table></div>
-<p class="small">代码依据：
-<a href="https://github.com/zilliztech/spark-milvus/blob/a07056935a156c053ccc6a74d317c4daf4329cd7/core/src/main/scala/com/zilliz/milvus/storage/snapshot/json/SnapshotJson.scala#L113">SnapshotJson</a>、
-<a href="https://github.com/zilliztech/spark-milvus/blob/a07056935a156c053ccc6a74d317c4daf4329cd7/core/src/main/scala/com/zilliz/milvus/storage/manifest/SegmentManifestReader.scala#L66">Avro 投影</a>、
-<a href="https://github.com/zilliztech/spark-milvus/blob/a07056935a156c053ccc6a74d317c4daf4329cd7/spark-base/src/main/scala/com/zilliz/spark/connector/read/MilvusV3PartitionReader.scala#L339">段内搜索</a>、
-<a href="https://github.com/zilliztech/spark-milvus/blob/a07056935a156c053ccc6a74d317c4daf4329cd7/core/src/main/scala/com/zilliz/milvus/storage/read/exec/SegmentReader.scala#L21">SegmentReader</a>。
-这些是源码核对结果，不是运行性能结论。</p>
 
-<h2 id="api">3. 推荐显式查询方法，返回的 DataFrame 已包含全局合并</h2>
-<p><strong>建议在 <code>spark-base</code> 的现有 <code>spark.read</code> 包提供 <code>MilvusSearch.search</code>。</strong>
+<h2 id="api">3. 显式查询方法，返回的 DataFrame 包含全局合并</h2>
+<p>2026-09-16：用户要求完成使用索引的开发，本节确定为实现契约。新增入口采用下述显式方法；旧逐段暴力入口保留。索引入口默认严格使用持久化索引，缺失信息、损坏文件、不兼容引擎均报错。仅来源明确无索引时允许显式选择原生暴力回退。索引对象由任务独占并关闭，跨任务缓存仍属 V4 后续能力，不作为本次正确性的前提。</p>
+<p><strong><code>spark-base</code> 的 <code>spark.read</code> 包提供 <code>MilvusSearch.search</code>。</strong>
 它接收快照定位和查询参数，构造计划，不立即执行 action。共享源码覆盖四条 Spark 线；<code>apps.search</code> 只放调用示例和作业。
-以下签名用于评审，尚不可调用。</p>
+当前调用方式如下；真实 Cardinal 运行状态见第 6.4 节。</p>
 <pre><code>val hits = MilvusSearch.search(
   spark = spark,
   options = Map("milvus.snapshot.path" -&gt; snapshotPath),
@@ -86,13 +80,13 @@ sealed segment 是已经封存的数据段。选择这个组合是因为 nullabl
 )
 hits.show(false)</code></pre>
 <p><code>filter</code> 按既有 R7 的 Milvus 表达式契约进入 <code>core.expr</code>，示例表示在满足类别条件的行中搜索。
-搜索返回后的 <code>hits.filter(...)</code> 是对搜索结果再过滤，语义不同。R7 的解析器尚未实现，必须与共同的表达式求值器一并补齐本次支持的过滤范围，遇到不支持的表达式在执行前报错。</p>
+搜索返回后的 <code>hits.filter(...)</code> 是对搜索结果再过滤，语义不同。<code>PlanParser</code> 与 <code>Evaluator</code> 实现比较、IN、IS NULL、AND/OR/NOT 及三值逻辑；不支持的表达式在执行前报错。</p>
 <ul>
 <li>输入是固定快照的定位、字段名、一个查询向量、K、metric、搜索参数、过滤表达式和输出列。任意 join/union 后的 DataFrame 不属于此入口的输入契约。</li>
 <li>解析复用 <code>SnapshotSources → MilvusTable</code>。同一个 <code>Snapshot</code> 经共同规划器生成任务；方法内不另写快照枚举或对象存储读取逻辑。</li>
 <li>返回列为请求的业务列加 <code>_segment_id: Long</code>、<code>_row_offset: Long</code>、<code>_score: Double</code>。规划期拒绝名称冲突；schema、InternalRow 和列批必须一致。</li>
 <li>单查询输入先完成交付；多查询批处理以后扩展请求结构，不在这一版假装支持。向量长度、有限数值、K、metric 和索引参数均严格校验；COSINE 的零向量按明确错误处理。</li>
-<li>旧 <code>vector.search.*</code> 入口和 JVM 暴力实现的退役在迁移步骤中提出；本方案不删除现有代码。若保留读选项，必须另行设计负责插入全局合并的 Spark 扩展，不能只改变 <code>PartitionReader</code>。</li>
+<li>旧 <code>vector.search.*</code> 暴力入口保留段内 TopK；全局结果由显式 <code>MilvusSearch.search</code> 构造。没有添加负责推导全局合并的 Spark 扩展规则。</li>
 </ul>
 
 <h2 id="execution">4. 每段产候选，Spark 负责跨段合并</h2>
@@ -111,8 +105,8 @@ hits.show(false)</code></pre>
 </g>
 <g fill="currentColor" font-size="14" text-anchor="middle">
 <text x="90" y="96" font-size="12">driver</text><text x="90" y="134">Snapshot</text><text x="90" y="155">共同读取计划</text>
-<text x="320" y="30" font-size="12">executor · 段 A</text><text x="320" y="71">IndexSource / IndexCache</text><text x="320" y="95">加载 A 的索引并搜索</text>
-<text x="320" y="166" font-size="12">executor · 段 B</text><text x="320" y="207">IndexSource / IndexCache</text><text x="320" y="231">加载 B 的索引并搜索</text>
+<text x="320" y="30" font-size="12">executor · 段 A</text><text x="320" y="71">SegmentIndexQuery</text><text x="320" y="95">加载 A 的索引并搜索</text>
+<text x="320" y="166" font-size="12">executor · 段 B</text><text x="320" y="207">SegmentIndexQuery</text><text x="320" y="231">加载 B 的索引并搜索</text>
 <text x="570" y="72">SegmentReader.take</text><text x="570" y="96">回取 A 的候选行</text>
 <text x="570" y="208">SegmentReader.take</text><text x="570" y="232">回取 B 的候选行</text>
 <text x="837" y="135">Spark 排序与 limit(K)</text><text x="837" y="158">全局 TopK DataFrame</text>
@@ -127,7 +121,7 @@ hits.show(false)</code></pre>
 </figure>
 <ol>
 <li>driver 固定快照、每段数据版本、索引构建和文件集合。<code>core.read.plan</code> 负责投影成可序列化 <code>SegmentReadTask</code>；Spark 只适配为 <code>InputPartition</code>。</li>
-<li>executor 先确定搜索执行方式，再打开所需数据列；不能沿用 reader 构造时立即拉取原始向量批的顺序。校验索引描述并获取缓存引用，首次加载时解析持久化文件并创建 Knowhere 索引。</li>
+<li>executor 先确定搜索执行方式，再打开所需数据列。校验索引描述后为本任务解析持久化文件并创建 Knowhere 索引；不会先拉取原始向量批，也不获取跨任务缓存。</li>
 <li>只读取构建删除/过滤位图所需的主键、时间戳和标量列。将位图与查询向量交给索引执行器，得到该段有效候选。</li>
 <li>以命中 offset 经共同 reader 的 <code>take</code> 读取输出列，恢复候选分数次序。首版每段回取局部候选，至多约 <code>段数 × K</code> 行，再送入全局合并。</li>
 <li><code>MilvusSearch.search</code> 组合 Spark 已有的 <code>orderBy + limit</code>，最终返回 K 条或全部可用结果。全量向量和索引对象都不收集到 driver。</li>
@@ -143,10 +137,10 @@ hits.show(false)</code></pre>
 <tr><td><code>Snapshot.indexes</code></td><td>字段 id、索引 id/名称、类型和参数。与 schema 的向量类型、维度和请求 metric 一致。</td></tr>
 <tr><td><code>SegmentIndex</code></td><td>collection/partition/segment/field/index/build id、文件引用、行数、序列化大小，以及来源提供的各类版本。区分 <code>index_version</code>（构建/路径版本）、<code>current_index_version</code>（向量格式版本）、<code>index_store_path_version</code>（文件路径布局版本）。</td></tr>
 <tr><td>索引状态</td><td><code>Available</code> 表示来源完整且有索引；<code>Unindexed</code> 表示权威来源明确无索引；<code>Unknown</code> 表示来源没有提供足够信息。空列表不能代替 Unknown。</td></tr>
-<tr><td><code>SegmentReadTask</code></td><td>固定的数据布局版本、不可变索引描述、查询、投影、删除来源和表达式中间表示。只携带描述和配置，不携带文件内容、已解码索引或 native pointer。</td></tr>
+<tr><td><code>SegmentReadTask</code></td><td>固定的数据布局版本、不可变索引描述和删除来源；查询另以 <code>SegmentIndexQuery.Request</code> 传入执行器。跨进程只携带描述和配置，不携带文件内容、已解码索引或 native pointer。</td></tr>
 </tbody></table></div>
 <p>索引读取从已选快照的段记录开始，补齐 <code>SegmentManifestReader → SnapshotCatalog → Segment → SegmentReadTask</code>。
-解析 Milvus 元数据仍由其现有解析器负责；milvus-storage 的 Manifest 与索引二进制格式由原生层解析。V2 resolver 和 backup 来源必须保留它们实际拥有的索引信息，缺信息就标 Unknown。</p>
+解析 Milvus 元数据仍由其现有解析器负责；milvus-storage 的 Manifest 由原生层解析。Milvus binlog 的共同事件与 Parquet payload 解析归 core.codec，索引加载归 core.index。V2 resolver 和 backup 来源必须保留它们实际拥有的索引信息，缺信息就标 Unknown。</p>
 <p>所有路径经 <code>core.path</code> 归一，文件访问复用 <code>core.io.ObjectStore</code> 及 milvus-storage 的 C filesystem。
 同一版本同时决定索引、列组和删除视图；无法证明行号对应关系时拒绝加载。不能在搜索中重新查询在线最新索引，也不能通过列举 <code>index_files/</code> 找“最新”文件拼入旧快照。
 若来源没有某个版本字段，按其已验证的格式契约处理，不能虚构版本值。</p>
@@ -155,7 +149,7 @@ hits.show(false)</code></pre>
 <p>Knowhere 的 <code>BinarySet</code> 是按名称组织的二进制块集合。对象存储中的一个索引文件并不一定就是一个可直接加载的块。
 加载必须处理以下步骤：</p>
 <ol>
-<li>校验对象大小和完整性，解析 Milvus 的 descriptor/index events。按 payload 类型处理原始字节、Parquet 编码及支持版本中的旧 STRING 编码；不能跳过一个固定长度文件头就认定完成解码。</li>
+<li>校验对象大小并识别文件格式。Milvus envelope 解析 descriptor/index events，再按 NONE、INT8 Parquet 或旧 STRING payload 解码；Cardinal 原始流按第 6.3 节校验 CARD footer。不能跳过一个固定长度文件头就认定完成解码。</li>
 <li>按目标版本验证过的文件命名规则取得 BinarySet entry name；Milvus 的内存索引加载链使用文件 basename，不能假设事件头含原始块名。出现 <code>SLICE_META</code> 时，按其记录的逻辑块名、分片数量和总长度还原；未切片对象不要求该字段存在。16 MiB 是某些版本的默认切片值，不是解码常量。</li>
 <li>验证构建引擎、索引类型、向量类型和格式版本，创建匹配的 Knowhere 实例，再调用 <code>Deserialize</code>。</li>
 <li>调用索引的 <code>Search</code>，传入查询、参数及排除位图；按已经验证的 label 映射输出段内物理行号和分数。</li>
@@ -166,89 +160,144 @@ hits.show(false)</code></pre>
 <a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/common/Slice.cpp#L105">Slice</a>。
 实现时锁定目标 Milvus 版本并用它生成的文件验证这些格式分支。</p>
 
-<h3 id="native-boundary">6.1 C 接口与文件解析的归属</h3>
-<p><code>core.index.IndexFileCodec</code> 编排加载，二进制解析落在原生层。建议在 milvus-storage 补齐索引 binlog 解码的 C 接口，由 <code>native-storage</code> 包装；
-返回具名 payload 的地址/长度和明确释放函数。随后 <code>native-vector</code> 将这些 payload 组织为 BinarySet 并交给 Knowhere。
-payload 由存储库分配和释放；若向量库借用地址，owner 先销毁索引与 BinarySet，再调用存储库的释放函数，不能跨库默认 <code>delete[]</code>。
-这是需要实现的底层依赖，当前仓库没有该解码接口；不在 Scala 中重新实现一套索引 binlog/Parquet 解析器。</p>
-<p><code>native-vector</code> 的 <code>mv_*</code> 接口只接固定宽度数值、地址/长度、不透明句柄和 JSON。JNI 负责参数转换和错误码到异常的映射，C++ 异常不得跨 C 边界。</p>
+<h3 id="library-loading">6.1 当前交付：加载 Knowhere PR #1829 的原生产物</h3>
+<p><strong>Knowhere 的 C 接口、JNI、Java API 和原生库加载器由上游分支提供。</strong>
+构建来源固定为 <a href="https://github.com/zilliztech/knowhere/pull/1829">PR #1829</a> 的
+<code>LawrenceTL92/knowhere-contrib</code> 仓库、<code>codex/knowhere-jni-pr</code> 分支，提交
+<a href="https://github.com/LawrenceTL92/knowhere-contrib/tree/9dc2b8ad537502d408bc33af05727453295d6622"><code>9dc2b8ad537502d408bc33af05727453295d6622</code></a>。
+Connector 的 <code>native-vector</code> 消费该提交编译的 Java 和原生产物；原先计划在本仓库编写 <code>mv_*</code> shim 和 JNI 的方案由此替代。</p>
+<p><code>NativeVectorLibrary</code> 是 Connector 的加载入口：可以显式初始化，暴力和索引搜索在首次使用时调用同一个入口。
+它调用上游 <code>io.knowhere.Knowhere.cAbiVersion()</code>，触发上游加载器；上游绑定校验 C 接口的二进制兼容版本（ABI）为 <code>1</code>，Connector 读取版本范围供诊断。
+同一类加载器内的并发调用共享已完成的初始化；加载失败和版本不匹配直接传播，不能被解释成无索引、空结果或自动切换搜索算法。
+当前普通扫描不需要向量库，不能在 Connector 类初始化或打开普通扫描时强制加载。</p>
+<p>原生产物保留上游 <code>native/knowhere/1/&lt;platform&gt;</code> 布局。平台选择、依赖集合、校验和验证、临时目录提取及本地库加载顺序都由上游加载器负责；
+本仓库不增加第二个提取器、<code>System.load</code> 路径或 native 方法声明。打包保留 <code>io.knowhere</code> 包名，不能通过 shading 改写 JNI 所依赖的 Java 类名。
+上游 Java API 以 Java 11 为基线；本模块不引入 Spark 或 Arrow。</p>
+<p>该上游构建需要在 JVM 启动前预加载 JRE 的 <code>libjsig</code>，使原生库与 JVM 的信号处理兼容。启动脚本和实际 driver/executor 环境必须在启动进程时满足该条件，
+Java 加载入口无法在 JVM 已启动后补做它。构建和部署同时核验目标平台、CPU 架构、依赖集合及 C++ 运行时；具体命令见
+<a href="../../contributing.md#knowhere-library-loading">库加载构建说明</a>。</p>
+<p><code>native-vector/knowhere.properties</code> 是提交、源码归档摘要与 API 版本的共同来源。
+sbt 仅构建固定源码中的 Java API，输出进入模块的 target 缓存；原生编译显式调用 <code>scripts/build-knowhere.sh build</code>。
+已有固定 CI 产物可通过同一脚本的 <code>import-ci</code> 校验源树及摘要后导入。平台 JAR 保持上游字节不变，旁置文件记录来源提交与 JAR 摘要。
+<code>-Dknowhere.native.jar</code> 选择的平台 JAR 进入运行时和 assembly，构建校验来源、平台、ABI 和文件摘要；普通编译不要求原生库。</p>
+<p>库加载的验证条件是：从固定提交编译的分发产物中加载 JNI，校验 ABI 和版本；重复及并发初始化正确；缺少产物、错误平台或不兼容 ABI 明确失败。
+纯 JVM 测试覆盖初始化状态和错误传播，实际原生产物的独立 JVM 测试验证启动环境、资源打包及上游加载行为。
+持久化文件解码、<code>Deserialize</code>、搜索、回表和 Spark 全局 TopK 已接入代码；它们的运行验收必须使用实际索引，库加载成功不能代替。跨任务缓存尚未实现。</p>
+<p>2026-09-16 的库加载实测中，与既有 native-storage 以两种顺序加载并查询版本均通过；额外的真实搜索探针发现，先加载现有 storage 的 Folly 再启动 Knowhere 搜索线程会崩溃。
+相同 Folly 版本的两套构建不能据名称推定二进制兼容。第 6.2 节的共享依赖打包已解决所记录 OSS 和 Cardinal 组合的该问题；两个组合分别通过两种顺序的真实 L2/IP/COSINE BruteForce、排除位图与 storage I/O。兼容记录只认精确二进制摘要，固定加载顺序不作为解决方案。</p>
+<p>随后对完整重定位的检查发现，旧 Arrow 存在 9 个未导出的 AWS CRT 引用，合并后的 Folly 存在 4 个缺少 libaio 依赖声明的引用。上述延迟绑定下的功能通过仅覆盖实际执行路径；修正原生依赖的重新编译尚在进行。新产物按 <a href="../engineering/sbt.html#validation">原生验收规则</a> 检查全部符号、立即绑定加载及两种加载顺序，再运行真实实例回归。</p>
+
+<h3 id="native-brute-force">6.2 当前查询入口改用 Knowhere BruteForce</h3>
+<p>现有 <code>vector.search.*</code> 入口保留逐段扫描，由 <code>io.knowhere.Knowhere.bruteForce</code> 对每批向量计算 TopK。
+不为每批临时建立 FLAT 索引，也不读取持久化索引文件。集合级持久化查询使用第 3 节的 <code>MilvusSearch.search</code>。</p>
+<p><code>spark.read.SegmentVectorSearch</code> 只做 Spark 字段校验、Arrow 到向量值的转换以及命中行复制。
+<code>core.index.BruteForceSearch</code> 管理每批的向量缓冲、排除位图、原生调用和跨批 TopK；结果携带原始段内行号和调用方提供的行值。
+<code>native-vector</code> 的 <code>NativeVectorSearch</code> 触发已定义的库加载，再委托上游 Java API；不声明新的 JNI 方法。</p>
+<p>一批对应一次同步调用。基向量、查询、位图、ID 和分数使用 Arrow allocator 分配的直接缓冲，调用结束后释放；查询生命周期通过 <code>close</code> 结束。
+排除位图按最低位优先编码，1 表示删除或向量为 null；保留这些行的位置以维持原始 row offset。
+有效向量的维度必须与查询相同，元素必须是有限值；空查询、非法 K、错误维度和格式损坏明确报错，不跳过异常或回退 JVM 距离计算。
+每批至多返回 K 条，核心层合并为每段 K 条，只有进入候选集的行才复制；批数增长不增加保留行数。</p>
+<p>Knowhere 输出 float32 分数。IP 和 COSINE 降序；L2 原生为平方距离。<code>core.index.BruteForceSearch</code> 保留原生分数并据此合并 TopK；只有旧逐段入口的 <code>spark.read.SegmentVectorSearch</code> 在输出时对 L2 取一次平方根，保持该入口的欧氏距离语义。索引模式显式允许的无索引回退沿用平方距离，不执行开方后再平方。
+删除和 null 在搜索前排除，不能先取 K 再删；未填满的原生结果（ID=-1）不返回。
+相等分数按已返回候选的段内行号排序，原生在第 K 名处的并列截断不承诺稳定 ID。此旧入口只保证段内 TopK，集合级合并由 <code>MilvusSearch.search</code> 提供。</p>
+<p>这条路径会同时使用 storage 与 Knowhere。两者同名的动态依赖必须来自已验证的同一组产物，不能通过强制先加载 Knowhere 或预加载某份 Folly 掩盖冲突。
+交付验证包含两种加载顺序的真实 BruteForce、L2/IP/COSINE、跨批 TopK、删除/null、非法数据及缓冲释放；原生库缺失或调用失败直接报错。</p>
+<p>当前 Linux x86-64 的已验证组合采用 Knowhere 平台 JAR 内的共享依赖作为共同版本。
+选中 <code>knowhere.native.jar</code> 时，构建将其非 Knowhere 引擎库生成到 storage 的 managed resources，并同步替换 storage 中指向相同 SONAME 的文件别名；
+原始资源保留在源码目录，产物中每个 storage 资源路径只有一份有效文件。Knowhere 自身的平台 JAR 与 manifest 不变，两种加载顺序解析到字节相同的共享库。
+构建扫描 <code>native-vector/storage-compatibility*.properties</code>，要求平台、storage 引擎摘要与 Knowhere JAR 摘要恰好匹配一条记录；缺失或重复匹配均失败。每条记录保存共享库摘要及 SONAME 别名，其他组合必须验证后登记，不能自动混用依赖。
+不选 Knowhere 时 storage 的打包保持原样。验证记录涵盖两种顺序的 BruteForce 和本地读写，完整 storage UT 随最终产物配置运行。</p>
+
+<h3 id="native-boundary">6.3 索引文件解析与原生资源的归属</h3>
+<p>源码核对更正了初稿的依赖假设：固定的 milvus-storage 没有 Milvus index binlog 解码接口；现有 <code>core.delete.DeltaLogReader</code> 已在 JVM 解码同一种 descriptor/events 和 Parquet payload。将共同格式解析提取至 <code>core.codec.BinlogCodec</code>，删除与索引两条调用复用它；不再新增另一套 C 格式实现。文件访问仍全部经过 ObjectStore → native-storage → C filesystem，codec 只接受已经读到的字节，不访问文件系统。这个归属符合第二层负责 Milvus 存储格式、第一层只包装已有原生接口的分层。</p>
+<p><code>core.index.MilvusIndexFileDecoder</code> 校验 index event、标识及 payload 类型，再由加载器按文件名与 SLICE_META 还原 BinarySet。单对象长度必须能由 JVM byte array 表达，超限在分配前失败。BinarySet.write 复制 payload，固定 Knowhere C API 的 deserialize 再复制 BinarySet 并由索引实例持有；因此解码 payload 复制完成后释放、输入 BinarySet 在 deserialize 后释放，索引在任务结束时关闭。加密文件和 nullable 行号映射在具备相应实现前明确拒绝，不当成无索引。</p>
+<p>真实云端文件还存在另一种已核对的格式：Cardinal 直接写出的 <code>_mem.index.bin</code> 没有 Milvus descriptor/event。其最后 24 字节是 little-endian 的 CARD magic、序列化版本、global metadata offset 与 tenant metadata offset。<code>IndexFileCodec</code> 只在文件列表恰有这一个文件、footer 版本为 1 且两个偏移在文件内且顺序正确时采用这条格式分支；不能把任意非 binlog 文件当作原始索引。该文件不含 Milvus collection/segment/build 标识，来源依靠快照钉住的对象路径；加载后仍验证索引维度和行数。</p>
+<p>Cardinal v3.0.8 的 <code>know/cardinal.cc</code> 中，<code>Serialize</code> 的 FileManager 分支和 BinarySet 分支调用同一个 <code>index_-&gt;Save</code>：前者写 <code>_mem.index.bin</code>，后者写 <code>BinarySet[Type()]</code>。因此 HNSW 的 CARD 文件完整字节可交给 <code>BinarySet["HNSW"]</code>，再通过上游 Java/JNI 的 <code>deserialize</code> 加载；不需要另写 JNI、抽取原始向量或重新建索引。这个转换依赖 Cardinal 引擎，不能用于开源 Faiss HNSW。构建从已验证的平台 JAR provenance 生成 <code>META-INF/milvus/knowhere-runtime.properties</code> 的 <code>with_cardinal</code>，<code>NativeVectorLibrary.RuntimeInfo.cardinalSupported()</code> 暴露这一事实；缺少该能力时，在反序列化之前明确拒绝 CARD 文件。</p>
+<p>引擎选择依据完整逻辑 payload 的格式标识，不依据文件是否有 Milvus envelope。复制切片时只额外保留前 4 与后 24 字节，不二次下载：CARD footer 对应 Cardinal，要求 vector index version ≥9；Faiss 的 <code>IHNf</code>（Float32 HNSW Flat）与 <code>IHN9</code>（HNSW FlatCosine）对应 Faiss，要求 version ≥6。含 Cardinal 的 Knowhere 将 Faiss 注册为 <code>HNSW_DEPRECATED</code>，未含 Cardinal 时注册为 <code>HNSW</code>；两者的 BinarySet key 都是 <code>HNSW</code>。<code>NativeVectorIndex.Loader.load(engineType)</code> 把 factory 的 engine name 与 payload key 分开，同一个产物可加载这两种已支持的文件。Faiss 的量化 HNSW、multi-view 和没有已核对格式标识的旧文件明确拒绝，不让错误引擎先尝试反序列化。</p>
+<p>首版加载边界为单个对象不超过 256 MiB、组装后的 BinarySet 总计不超过 1 GiB、SLICE_META 不超过 1 MiB。复制到原生 BinarySet 使用 1 MiB 临时缓冲；超限报错，不能等待分配失败后回退。搜索仅接收 HNSW 的 <code>ef</code> 参数，必须为正整数且不小于 topK；默认取 <code>max(64, topK)</code>。过滤后候选不足时至多尝试 8 次，逐次扩大 ef；仍不足明确失败，不执行 connector 自行决定的全量向量扫描。</p>
+<p>这些对象与组装 payload 上限不等于原生引擎内部的反序列化内存预算：当前上游 C/JNI 没有暴露该预算控制，不能声称仅靠外层长度校验即可安全加载任意内部损坏的文件。交付日志记录每个对象实际读取的字节数、格式与引擎选择、成功的原生 deserialize 次数、search 调用次数和耗时；不会把快照声明的 serializedSize 当成实际读取量，也不记录凭证或存储 properties。</p>
+<p><code>core.index</code> 经 <code>native-vector</code> 使用固定提交提供的接口。C 接口、JNI 参数转换、异常转换与资源释放契约由 Knowhere 上游维护；
+缺失能力继续在上游补齐。当前调用边界如下，运行兼容性仍按实际文件验证。</p>
 <div class="table"><table>
-<thead><tr><th>拟新增接口组</th><th>职责与资源所有权</th></tr></thead><tbody>
-<tr><td><code>mv_version</code> / 特性查询</td><td>返回 ABI 版本、构建版本、引擎与支持的索引/格式能力；加载前与文件描述核对。</td></tr>
-<tr><td><code>mv_binary_set_*</code></td><td>创建、加入具名块、销毁。第一版由 index owner 持有解码块直到索引关闭，除非相应实现已证明 Deserialize 完整复制。</td></tr>
-<tr><td><code>mv_index_create/load/search/destroy</code></td><td>创建和加载索引；查询向量与 bitmap 在同步调用期间借用；销毁只释放该对象持有的内存。</td></tr>
-<tr><td><code>mv_search_result_*</code></td><td>持有 label、score 和有效结果数。由 native 分配，调用者显式销毁；跨 JNI 导出前校验长度和所有权。</td></tr>
-<tr><td><code>mv_bruteforce</code></td><td>仅服务显式选择的无索引段回退及测试基准，复用相同 metric、bitmap 和结果契约。</td></tr>
+<thead><tr><th>能力</th><th>职责与资源所有权</th></tr></thead><tbody>
+<tr><td>版本与特性查询</td><td>区分 C ABI 版本、库构建版本、引擎与索引格式能力；文件加载前核对后三者，不能把 ABI 校验当成文件兼容校验。</td></tr>
+<tr><td>BinarySet</td><td>创建、分配具名块并分块复制；上游 Deserialize 持有独立副本，输入 BinarySet 随即关闭，副本由索引拥有。</td></tr>
+<tr><td>索引创建、加载、搜索与关闭</td><td>按上游接口传入配置、查询向量和 bitmap，遵守同步调用中的借用契约及句柄释放责任。</td></tr>
+<tr><td>搜索结果读取与释放</td><td>取得 label、score 和有效结果数；按照上游结果对象的生命周期读取并释放，校验长度与行号范围。</td></tr>
+<tr><td>BruteForce</td><td>入口与回退规则依决策 16、21；与索引搜索复用 metric、bitmap 和结果契约。</td></tr>
 </tbody></table></div>
-<p>实现 <code>VectorNative.java</code>、C 头文件、C++ shim、loader、CMake 及构建接线。沿用
+<p>消费上游 Java 和原生产物并接通 Connector 的加载入口。沿用
 <code>core → native-vector/native-storage</code> 的现有依赖，不增加反向依赖。构建步骤遵守仓库 sbt skill；打包同时核验 CPU 架构、C++ 运行时、Arrow/Parquet ABI、符号隔离和可分发依赖。
 本方案不把目标服务使用的原生库版本推定为项目已经集成的版本。</p>
 
-<h3 id="interop">6.2 首个里程碑必须使用 Milvus 生成的文件</h3>
+<h3 id="interop">6.4 索引查询的首个里程碑必须使用 Milvus 生成的文件</h3>
 <p>已有本地实测材料证明：一个十万行 V3 段的索引引用位于快照段记录的 <code>index_files</code>，其数据 Manifest 的 <code>indexes</code> 为空。
-文件总量约 41.6 MB，声明 HNSW/COSINE，向量格式版本为 10；这些证据只证明存在索引文件，尚未证明它能被开源 Knowhere 加载。</p>
+文件总量约 41.6 MB，声明 HNSW/COSINE，向量格式版本为 10；2026-09-16 经 NativeObjectStore 读取真实对象后确认其 CARD footer，必须使用包含 Cardinal 的 Knowhere 构建。开源构建的 ABI/版本范围正确不表示它能加载这个文件。</p>
 <p>对应 Milvus 提交
 <a href="https://github.com/milvus-io/milvus/blob/bb20ce26f5bd23da794dfc2a1cbec98763e4f0f5/internal/core/thirdparty/knowhere/CMakeLists.txt#L18">bb20ce26f 使用 Knowhere v3.0.10</a>。
 该版本的 <a href="https://github.com/zilliztech/knowhere/blob/dd3dce0f46304628e6541e4a072d977744395d3a/src/index/hnsw/faiss_hnsw.cc#L3323">HNSW 注册名称随 Cardinal 构建选项变化</a>。
-因此先生成可复现的开源索引作为基准，再验证目标云端产物；云端兼容取决于对应引擎及可用原生依赖，不能靠修改 index type 名称尝试兼容。
+验证使用目标实例的真实索引与真实数据独立全量参考：本地 Spark 直接读取 S3 索引，另将同一 UAT 快照的十万行向量读出，以独立 Double COSINE 计算参考结果；没有使用 Milvus 在线 Search 服务对拍。本地生成的开源索引只能补充格式测试，不能替代真实实例数据验收。固定 PR 的 WITH_CARDINAL 构建分别钉住 Cardinal v2.5.112 与 v3.0.8；保持同一套上游 C/JNI 接口，按实际引擎格式加载。云端兼容取决于对应引擎及可用原生依赖，不能只因元数据同为 HNSW 就推定字节兼容。
 性能报告、样本路径和云端环境标识保留在验证产物中，不写入通用源码。</p>
+
+<p><strong>2026-09-16 04:48 UTC 的实际结果：</strong>Spark 4.0 / Java 21 / local[2]，读取真实快照的 100,000 行、128 维向量作为独立参考；查询向量取其中一行，topK=10、ef=256。无过滤、标量组合过滤和空值过滤三种查询分别排除 0、80,000、90,000 行；投影值、物理行号、排序、与原始 JNI 的命中集合及 Float32 分数全部通过。三个查询的严格 Top10 ID 召回率均为 100%，最大分数绝对误差分别为 5.4300e-5、6.6219e-5、5.9342e-5；该结果只描述此样本和这三个查询，不构成其他查询的召回保证。</p>
+<p>每次查询读取同一个 41,606,363 字节的已有索引，一次 deserialize、一次 search，没有回退。端到端耗时约 18.9、19.8、21.5 秒，主要耗在约 15–16 秒的索引读取；search 调用约 13、8、4 毫秒。没有跨查询缓存，不能把原生调用时间写成完整查询延迟。测试未调用在线 Search 服务，未创建或修改远端对象。</p>
+<p>本次 Cardinal 平台 JAR SHA-256 为 <code>e57bcca5a96e5cb0a249d79d8f0d6e758c994b80f4b3b4dab40e39b5b6ced726</code>，对应 storage 共存记录为 <code>native-vector/storage-compatibility-cardinal.properties</code>。原始上游 CTest 为 2/3、Java/JNI 为 10/11、Python 为 13/13，JNI 诊断通过；C 和 Java 的 DiskANN v1 精确距离断言失败，量化结果为 1.0306964 而期望值为 1.0。原始断言未修改，正常构建脚本仍失败退出；单独诊断产物保留 <code>build.validated=false</code>。HNSW version 10 / Cardinal v2 的专项通过不改写这些失败。</p>
+<p>Cardinal 的上游配置含 <code>-march=native</code>，本机为 Intel Xeon Gold 6338、GLIBC 2.35，未验证其他 CPU/旧 GLIBC；打包器另有 milvus-common 许可证材料缺项。本次证明本机真实 HNSW 查询可用，不把诊断产物作为可分发版本。中文报告和日志存于同一工作区的 <code>milvus-spark-demo/INDEX_RESULTS.md</code> 与 <code>reports/persisted-index-search/</code>。</p>
 
 <h2 id="semantics">7. 删除、过滤、行号和分数必须在同一视图下解释</h2>
 <h3>7.1 先构造排除位图，再执行 TopK</h3>
 <p><code>core.delete</code> 结合主键和行时间戳处理删除，包含继承的 delete-only 段；不能把删除简化为一个主键集合。
 <code>core.expr</code> 对过滤列求值。两者输出按物理行号对齐的位图，合并后约定 1 表示排除。
 过滤为 false 或 null 的行都不参与搜索；索引 label 与物理行号的映射必须经过 fixture 验证。</p>
-<p>本次过滤入口共用核心中间表示与求值器。先实现有明确语义和测试的比较、IN、IS NULL、AND/OR/NOT；其他表达式拒绝或按后续支持矩阵扩展。
+<p>本次过滤入口共用核心中间表示与求值器，已实现比较、IN、IS NULL、AND/OR/NOT；其他表达式明确拒绝。
 R6 的 Spark 谓词入口按决策 20 统一为 V2 Predicate 翻译，R7 的字符串入口按 Milvus 文法解析，不能为索引查询单独复制求值逻辑。</p>
 <p>过滤后仍有至少 K 条有效数据时，不能因“先取 K 再过滤”只返回少量结果。优先使用索引的 bitmap 过滤；若该实现会产生不足 K 的候选，必须按其受支持的搜索参数扩大搜索或继续遍历，直到满足 K、确认有效数据不足，或明确报告搜索不能完成。
-允许调整的参数、最大尝试次数和搜索预算在锁定索引实现时定义；到达预算仍不足且有效行充足时明确失败，不能无限重试或静默改为暴力搜索。
+允许调整的参数为 ef，最多 8 次尝试，规则见第 6.3 节；仍不足且有效行充足时明确失败，不能无限重试或静默改为暴力搜索。
 候选扩大不等于精确召回保证；召回率单独验证。读取主键和过滤列可能扫描整段，但不应因此读取所有原始向量逐条计算距离。</p>
 
 <h3>7.2 按物理行号回取业务列</h3>
-<p>在 <code>SegmentReader</code> 增加共同的 <code>take(offsets, columns)</code>。项目固定的 milvus-storage 提交
-<a href="https://github.com/milvus-io/milvus-storage/blob/cb22dfaa01175c429edbd0fb6794251f1a58f400/cpp/include/milvus-storage/ffi_c.h#L705">cb22dfaa 已声明 loon_take</a>，当前 <code>StorageNative</code> 尚未绑定。
+<p><code>SegmentReader.take(offsets, columns)</code> 已接通 <code>StorageNative</code> 对
+<a href="https://github.com/milvus-io/milvus-storage/blob/cb22dfaa01175c429edbd0fb6794251f1a58f400/cpp/include/milvus-storage/ffi_c.h#L705">loon_take</a> 与 Manifest reader 对应入口的绑定。
 使用匹配的 reader handle 类型，返回 Arrow 批并遵守 C Data Interface 的 release 契约；批导入/释放后，还要通过 <code>loon_free_chunk_arrays</code> 释放外层结果数组。</p>
 <p>空 offsets 直接返回空结果，不调用拒绝空输入的 <code>loon_take</code>。其他情况先校验 offset 在段行数范围内，排序去重后调用 take，再依据映射恢复搜索次序。候选分数绑定原始 offset，不能和排序后的行错配。
-非 nullable FloatVector 首先验证一对一映射；nullable、压缩或重排行号的索引需要恢复其专用映射后才进入支持范围。</p>
+非 nullable FloatVector 首先验证一对一映射；nullable、剔除部分行后压缩 ID 或重排行号的索引需要恢复其专用映射后才进入支持范围。</p>
 
 <h3>7.3 分数和全局排序是公开契约</h3>
-<p>建议 <code>_score</code> 按 Milvus 对应 metric 的含义返回：COSINE、IP 越大越好；L2 使用平方欧氏距离且越小越好。
+<p><code>_score</code> 按 Milvus 对应 metric 的含义返回：COSINE、IP 越大越好；L2 使用平方欧氏距离且越小越好。
 旧 JVM 实现对 L2 开根号，不能原封不动作为新分数契约。首个支持组合验证 COSINE；其他 metric 启用前各自核对数值与排序。</p>
+<p>索引段与显式无索引回退段都把 Knowhere 的原生 Float32 分数直接转成 Double。不能把回退段的欧氏距离重新平方来恢复分数：平方距离 2.0 经该运算会变成 2.0000000000000004，使原本同分的索引与回退候选在全局排序中不再同分。验收同时检查旧逐段入口返回 sqrt(2)、索引模式回退返回 2.0，以及混合段同分候选仍按段号和行号排序。</p>
+<p><code>_score</code> 保留 Knowhere 返回的 Float32 数值，不读原始向量重新计算。字段的 FloatVector 类型不表示索引内部保存了全部原始 Float32：真实 UAT 的 CARD metadata 指定 RBQ3 搜索、RBQ8 重排，最高精度数据集仍是 RBQ8。Cardinal v3.0.8 的 <code>SearcherDispatcher</code> 选择已有数据集中的最高精度 refiner，<code>Refiner</code> 依照其量化配置计算距离；<code>HasRawData</code> 对该组合返回 false。<code>evaluator_quant_tolerance_ratio</code> 用于量化选择，不是分数误差上限。因此这种索引返回近似分数，不承诺与原始向量独立计算的 COSINE 相差小于固定阈值。这里的 Cardinal 内部量化与尚未支持的 Faiss 量化 payload 是不同的序列化格式。</p>
+<p>真实数据验收分别检查两个问题：通过原始上游 Knowhere Java/JNI 直接加载同一个 CARD 文件，用相同 query、ef 和基于参考行构造的排除位图，核对 Connector 的命中行号与分数是否保持引擎结果；另以真实 Float32 向量独立计算精确 TopK，报告严格 ID 召回率、允许 Float32 舍入差异的边界召回率及分数误差。后者衡量这份持久化索引的近似搜索质量，不把未经引擎保证的误差阈值当作接口正确性断言，也不通过读取全量原始向量改写查询结果。</p>
 <p>每段最多交出 K 条有效候选。Spark 在这些候选上按 score 排序，再用 <code>_segment_id</code>、<code>_row_offset</code> 稳定打破平分并取 K。
 这是索引候选的全局 TopK，不承诺 ANN 与精确搜索返回相同 ID。native 封装先按锁定版本契约剔除正常缺位项（如 label = -1 及对应 padding score），返回有效结果数；再对真实命中的越界 label、非有限分数和维度不匹配报错，不得用最大值替代异常。</p>
 
-<h2 id="cache">8. 缓存按索引身份隔离，失败不能伪装成未建索引</h2>
-<p><code>IndexCache</code> 放在 executor 进程内，缓存键包含存储命名空间及访问身份、collection/segment/field/build id、索引格式与路径布局版本、文件集合和数据布局版本。
-敏感凭证不进入日志，也不直接作为持久化 cache key。索引对象可跨查询复用；删除与过滤位图按快照、删除源和查询生成，不能复用另一个查询的 bitmap。</p>
-<p>同一个键的并发首次加载只执行一次。缓存使用内存预算和引用计数；只有未被任务使用的对象可以逐出。
-预算包括下载缓冲、payload、分片拼接与加载中索引可能同时存在的峰值。只有验证相应实现的并发 Search 安全后，才允许多个任务同时使用同一索引；否则统一串行执行该实例的查询或使用独立查询上下文。每次查询的参数、bitmap 和结果内存独立。
-任务完成、取消、异常都释放引用；构造失败释放已分配资源；Cleaner 只作最后兜底。</p>
+<h2 id="cache">8. 任务独占索引，失败不能伪装成未建索引</h2>
+<p>当前每个任务创建自己的 <code>PersistedIndexSearch</code>，搜索后在 finally 中关闭索引；构造异常释放已分配的 BinarySet、解码对象和临时缓冲。查询向量、参数、位图及结果缓冲均为此次调用所有，不跨任务共享。</p>
+<p><code>IndexCache</code> 尚未实现。V4 扩展需要解决身份隔离、并发搜索、引用计数、峰值内存与取消释放；它不改变本次任务独占的资源契约，也不作为当前查询正确性的前提。</p>
 <div class="table"><table>
-<thead><tr><th>状态</th><th>建议行为</th></tr></thead><tbody>
-<tr><td>已知、完整、兼容的索引</td><td>加载并搜索，记录 build、格式和缓存使用情况。</td></tr>
+<thead><tr><th>状态</th><th>实现行为</th></tr></thead><tbody>
+<tr><td>已知、完整、兼容的索引</td><td>任务加载并搜索，记录 build、格式、实际读取量和原生调用次数。</td></tr>
 <tr><td>来源确认未建索引</td><td>默认失败。只有用户明确选择无索引回退时，使用 native brute-force；混合索引/无索引段一起参与全局合并。</td></tr>
 <tr><td>缺少索引描述、覆盖不足、格式/引擎不支持</td><td>明确错误；不能推定为 Unindexed。指出受影响的段、字段及需要补齐的元数据或支持能力。</td></tr>
 <tr><td>文件丢失或损坏、鉴权失败、版本冲突、内存不足</td><td>传播错误。标准瞬时 I/O 重试可以执行，不能将这些错误转为暴力扫描或空结果。</td></tr>
 </tbody></table></div>
-<p>记录实际索引加载/搜索次数、下载字节、向量列读取字节、过滤列读取字节、回表行数、缓存命中、native 内存与分阶段耗时。
-显式回退还需记录段数与原因。这样才能区分索引查询、过滤扫描与暴力搜索，避免仅凭响应成功判断使用了索引。</p>
+<p>当前 info 日志记录对象读取量、格式与引擎选择、deserialize/search 次数、命中数、排除行数及对应耗时。存储读取量是 ObjectStore 实际返回的字节，不是快照的 serializedSize，也不计作 HTTP 重试的线上流量。向量列/过滤列 I/O、回表和峰值内存需要验证工具另外测量；目前没有缓存命中指标。</p>
 
-<h2 id="delivery">9. 按依赖顺序实现，每一步都产生可验证结果</h2>
-<p>元数据解析和原生互操作可以并行；端到端集成必须等索引文件、位图和回表契约都可用。
-本页列出后续开发的完成条件，本轮未执行这些测试。</p>
+<h2 id="delivery">9. 实现状态与运行验收分开记录</h2>
+<p>类型化元数据、索引执行、过滤回表和 Spark 查询计划已写入代码。真实 UAT Cardinal 文件的 deserialize/search、原始 JNI 对照、真实数据独立全量参考及 Spark 查询验收已通过。原生产物的上游 DiskANN 测试失败单独保留，不属于已验证的 HNSW 查询结果。</p>
 <div class="table"><table>
-<thead><tr><th>顺序</th><th>具体工作与文件</th><th>完成条件</th></tr></thead><tbody>
-<tr><td>0 · 锁定格式与依赖</td><td>用锁定版本 Milvus 原生读取代码制作最小互操作验证程序；确定 Knowhere 提交、构建引擎、CPU 架构，保存建表/插入/建索引/快照脚本和脱敏 fixture，核对目标云端产物。</td><td>真实索引可恢复为 BinarySet，并被目标库加载和搜索；记录支持矩阵。此步骤验证格式与引擎，正式 C 接口和 JNI 在步骤 2 交付。</td></tr>
-<tr><td>1 · 元数据贯通</td><td><code>SnapshotJson</code>、<code>SegmentManifestReader</code>、<code>SnapshotCatalog</code>、<code>Segment</code>、<code>SegmentReadTask</code>；补齐共同 <code>core.read.plan</code> 的查询描述与规划。</td><td>固定快照中的所有数据段都有明确索引状态；类型、版本、路径与覆盖校验可单测；序列化任务没有原生句柄。</td></tr>
-<tr><td>2 · 原生执行与缓存</td><td>milvus-storage 的索引解码接口；<code>native-storage</code> 的包装；<code>native-vector</code> 的 shim/JNI/loader；<code>core.index</code> 的 <code>IndexSource</code>、<code>IndexFileCodec</code>、<code>IndexCache</code>。</td><td>真实未切片/切片及支持编码均可加载；坏文件和不支持版本拒绝；并发加载、释放、取消和内存预算有测试。</td></tr>
-<tr><td>3 · 过滤与回表</td><td><code>core.delete</code>、<code>core.expr</code>；<code>spark.expr</code> 的 V2 翻译；<code>SegmentReader.take</code> 与 <code>StorageNative</code> 的 <code>loon_take</code> 绑定。</td><td>删除最近邻、低选择率过滤、null、重复主键时间戳、继承删除、乱序/重复 offset 均验证；输出列不含向量时仍可查询。</td></tr>
-<tr><td>4 · Spark 查询契约</td><td><code>spark.read.MilvusSearch</code>、共同 scan/reader 适配、schema 和参数校验；<code>apps.search</code> 示例。</td><td>两段以上查询的返回计划自带全局 TopK；K 大于/小于有效行数、投影、平分、混合段和明确回退均正确。</td></tr>
-<tr><td>5 · 构建与验收</td><td><code>native-vector</code> 的 CMake、Makefile/Docker 构建接线；<code>integration-4.0</code> 真实 Milvus/对象存储测试；四条 Spark 线和 Scala 交叉编译检查。</td><td>从分发 JAR 启动 executor 能加载依赖；原生内存检查通过；完成冷/热缓存下的召回、耗时和 I/O 对比。</td></tr>
+<thead><tr><th>部分</th><th>当前代码</th><th>验证要求</th></tr></thead><tbody>
+<tr><td>库加载</td><td>固定 Knowhere 提交的 Java/JNI、平台 JAR 校验与 <code>NativeVectorLibrary</code> 已接入。</td><td>ABI 与版本查询、重复及并发初始化、错误传播有测试；每个新平台产物独立验证。</td></tr>
+<tr><td>0 · 索引格式</td><td>已按固定源码实现 envelope/Parquet、切片和 CARD 流分支；真实 UAT 文件已下载并识别。</td><td>真实文件由目标库反序列化和搜索；用真实数据独立全量参考核对结果。JNI 加载测试不能替代。</td></tr>
+<tr><td>1 · 元数据贯通</td><td><code>SnapshotJson</code>、<code>SegmentManifestReader</code>、<code>SnapshotCatalog</code>、<code>Segment</code>、<code>SegmentReadTask</code> 已传递类型化索引描述。</td><td>固定快照中的数据段有明确索引状态；类型、版本、路径与覆盖校验；序列化任务没有原生句柄。</td></tr>
+<tr><td>2 · 原生执行</td><td><code>BinlogCodec</code>、<code>MilvusIndexFileDecoder</code>、<code>IndexFileCodec</code>、<code>PersistedIndexSearch</code> 已通过 <code>NativeVectorIndex</code> 接通原始上游 API。</td><td>真实未切片/切片、Faiss 与 Cardinal 文件分别验证；错误传播与资源关闭。跨任务缓存不在当前代码中。</td></tr>
+<tr><td>3 · 过滤与回表</td><td><code>SegmentIndexQuery</code> 使用 <code>core.delete</code>、<code>core.expr</code>；<code>SegmentReader.take</code> 已绑定原生接口。Spark V2 Predicate 翻译不在本次字符串过滤路径中。</td><td>删除、低选择率过滤、null 标量、继承删除与行号映射；输出列不含向量时仍可查询。</td></tr>
+<tr><td>4 · Spark 查询契约</td><td><code>spark.read.MilvusSearch</code>、共同 scan/reader 适配、schema 和参数校验已接入；真实数据测试位于 <code>milvus-spark-demo</code>。</td><td>两段以上查询的返回计划自带全局 TopK；K 大于/小于有效行数、投影、平分、混合段和明确回退分别验证。</td></tr>
+<tr><td>5 · 构建与验收</td><td>上游 Knowhere 原生产物的构建、分发与 executor 启动环境；<code>milvus-spark-demo</code> 的真实 UAT 对象存储测试；四条 Spark 线和 Scala 交叉编译检查。</td><td>从分发 JAR 启动 executor 能加载依赖；原生资源释放检查；完成真实数据参考对比，并记录底层文件缓存状态、耗时和 I/O。</td></tr>
 </tbody></table></div>
 <p>验收至少覆盖两段以上的合成数据：保证每段确实产生索引文件，并包含删除最相近向量、过滤后少于/多于 K、相同分数、无索引段、错误版本、丢失文件和任务重试。
-与目标 metric 一致的精确基准计算 recall@K；性能报告同时给出加载、过滤、搜索、回表和 Spark 合并耗时。cold cache 与 warm cache 分开记录，不事先承诺固定加速倍数。</p>
+与目标 metric 一致的精确基准计算 recall@K；性能报告同时给出加载、过滤、搜索、回表和 Spark 合并耗时。重复查询仍会重新加载索引，底层文件缓存的冷/热状态另行注明，不事先承诺固定加速倍数。</p>
 <p>最终交付要求索引加载和搜索计数大于零，connector 不另行读取整个向量列执行 JVM/原生暴力扫描；允许读取生成位图所需的标量列。
 Knowhere 在特定 K 或过滤比例下可能<a href="https://github.com/zilliztech/knowhere/blob/dd3dce0f46304628e6541e4a072d977744395d3a/src/index/hnsw/faiss_hnsw.cc#L1382">内部选择暴力算法</a>，须按实际引擎记录这种行为；加载索引本身不保证每次都执行图遍历。性能用例需同时覆盖能使用 ANN 算法的参数和引擎自行选择暴力算法的边界。
 普通表扫描的行为、所有支持的 Spark 线及 Storage V2/V3 路径均需回归。新 API 和配置在启用时同步中英文 reference。</p>
-<p>实现前按评审结论关闭总体设计的相关决策，加入 V7 能力行，并使包说明与实际代码对应。
-替换旧 reader 计算逻辑后再提出旧入口和旧类型的具体删除清单；在移除文件、公开类型或测试前说明调用方影响并确认迁移安排。</p>
+<p>相关已定契约见总体设计的决策日志及 V7 能力行。扩展或移除旧入口时继续同步包说明和 reference；在移除文件、公开类型或测试前说明调用方影响并确认迁移安排。</p>

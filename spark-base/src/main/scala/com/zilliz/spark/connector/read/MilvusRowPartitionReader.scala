@@ -41,7 +41,9 @@ class MilvusRowPartitionReader(
     schema: StructType,
     setup: ColumnBinding,
     pushedFilters: Array[Filter] = Array.empty[Filter],
-    vectorSearch: Option[VectorSearch] = None
+    vectorSearch: Option[VectorSearch] = None,
+    includeSearchScore: Boolean = true,
+    searchScorePosition: Option[Int] = None
 ) extends RowOffsetReader
     with Logging {
 
@@ -72,8 +74,10 @@ class MilvusRowPartitionReader(
   def lastReturnedRowOffset: Long = _lastReturnedRowOffset
 
   try {
-    segmentReader = setup.open(allocator)
-    currentBatch = pullNextBatch()
+    if (!vectorSearch.exists(_.mode == "index")) {
+      segmentReader = setup.open(allocator)
+      currentBatch = pullNextBatch()
+    }
   } catch {
     case e: Throwable =>
       releaseAll()
@@ -83,15 +87,29 @@ class MilvusRowPartitionReader(
   private def pullNextBatch(): VectorSchemaRoot =
     if (segmentReader == null) null else segmentReader.next().orNull
 
-  /** The batches from the one already pulled onward; each is owned by whoever
-    * takes it.
+  /** Keeps a prefetched batch owned by this reader until `next()` transfers it.
+    * Query validation may fail without consuming the iterator, in which case
+    * `close()` still releases that batch.
     */
-  private def remainingBatches(): Iterator[VectorSchemaRoot] = {
-    val first = currentBatch
-    currentBatch = null
-    Iterator.single(first).filter(_ != null) ++
-      Iterator.continually(pullNextBatch()).takeWhile(_ != null)
-  }
+  private def remainingBatches(): Iterator[VectorSchemaRoot] =
+    new Iterator[VectorSchemaRoot] {
+      private var exhausted = currentBatch == null
+
+      override def hasNext: Boolean = {
+        if (!exhausted && currentBatch == null) {
+          currentBatch = pullNextBatch()
+          exhausted = currentBatch == null
+        }
+        !exhausted
+      }
+
+      override def next(): VectorSchemaRoot = {
+        if (!hasNext) throw new NoSuchElementException("No remaining batch")
+        val batch = currentBatch
+        currentBatch = null
+        batch
+      }
+    }
 
   private def isDeleted(batch: VectorSchemaRoot, rowIndex: Int): Boolean =
     applyDeletes && !setup.deletePlan.isEmpty && setup.isDeleted(
@@ -102,13 +120,23 @@ class MilvusRowPartitionReader(
   override def next(): Boolean = vectorSearch match {
     case Some(search) =>
       if (searchResults == null) {
-        val result = SegmentVectorSearch.run(
-          search,
-          schema,
-          arrowColumnNames,
-          remainingBatches(),
-          isDeleted
-        )
+        val result = if (search.mode == "index") {
+          SegmentIndexSearch.run(
+            search,
+            schema,
+            setup,
+            allocator,
+            metrics => finalMetrics = finalMetrics + metrics
+          )
+        } else {
+          SegmentVectorSearch.run(
+            search,
+            schema,
+            arrowColumnNames,
+            remainingBatches(),
+            isDeleted
+          )
+        }
         searchResults = result.results
         materialized += result.rowsMaterialized
       }
@@ -154,10 +182,19 @@ class MilvusRowPartitionReader(
   }
 
   override def get(): InternalRow = vectorSearch match {
-    case Some(_) =>
+    case Some(search) =>
       val result = searchResults.next()
       _lastReturnedRowOffset = result.rowOffset
-      InternalRow.fromSeq(result.row.toSeq(schema) :+ result.distance)
+      if (search.mode == "index" && !includeSearchScore) result.row
+      else {
+        val values = result.row.toSeq(schema)
+        val position = searchScorePosition.getOrElse(values.size)
+        require(
+          position >= 0 && position <= values.size,
+          "Invalid search score position"
+        )
+        InternalRow.fromSeq(values.patch(position, Seq(result.distance), 0))
+      }
     case None =>
       if (currentBatch == null) {
         throw new IllegalStateException("No batch loaded")

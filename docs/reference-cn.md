@@ -2,6 +2,44 @@
 
 本文档详细说明了 Milvus Spark Connector 的所有参数配置。
 
+## 持久化索引查询（refactor/v2）
+
+`com.zilliz.spark.connector.read.MilvusSearch.search` 返回包含跨段全局 TopK
+计划的 DataFrame，调用 `collect`、`show` 等 action 时才执行搜索：
+
+```scala
+val hits = MilvusSearch.search(
+  spark, options, "embedding", queryVector, 10, "COSINE",
+  searchParameters = Map("ef" -> "256"),
+  filter = Some("category == \"documents\" and rating >= 2.0"),
+  outputColumns = Seq("id", "title")
+)
+hits.show(false)
+```
+
+`options` 复用普通读取的快照与存储参数。结果在业务列后添加 `_segment_id`、
+`_row_offset` 和 `_score`；COSINE/IP 分数降序，L2 返回平方欧氏距离并升序，
+同分按段 ID 和段内物理行号排序。查询向量必须匹配非 nullable FloatVector
+字段的维度及索引 metric；COSINE 查询不得为零向量。
+`_score` 保留 Knowhere 返回值。包含向量量化的索引（如 Cardinal 的 RBQ）
+可能返回近似分数；Connector 不读取原始向量重算分数。
+
+`filter` 在搜索前应用。支持标量比较（`==`、`!=`、`<`、`<=`、`>`、`>=`）、
+`in`、`not in`、`is null`、`is not null`、`and`、`or`、`not` 和括号。
+未知字段、错误类型和不支持的语法在执行前报错。对结果 DataFrame 再调用 `filter`
+是过滤已选中的结果，不能替代这里的条件。表达式暂不支持 JSON、数组和函数。
+
+缺失索引元数据、损坏文件、格式不兼容均报错。只有元数据明确表示目标字段无索引时，
+`allowUnindexed = true` 才允许原生暴力搜索，默认 `false`。索引由每个任务独占并关闭，
+尚无跨查询缓存。搜索参数只支持整数 `ef`，且不得小于 K。
+加密索引和 nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用
+Cardinal 的固定版本原生产物，见[构建说明](contributing.md#knowhere-library-loading)。
+
+底层读取选项在 query/topK/metric/column 之外增加 `vector.search.mode=index`、
+`vector.search.parameters`（JSON 对象）、`vector.search.filter`、
+`vector.search.allowUnindexed`。仅设置读取选项返回的是每段候选；全局 TopK 使用上述
+`MilvusSearch.search` 方法。旧 `vector.search.*` 的默认模式仍为 `brute_force`。
+
 ## 版本兼容性
 
 **此连接器需要 Milvus 2.6 或更高版本**（Storage V2）。
@@ -371,6 +409,26 @@ CALL milvus.system.register('your_db.your_collection',
 5. **参数常量**：建议使用 `MilvusOption` 类中定义的常量，避免字符串拼写错误
 
 ## 6. 支持的数据类型
+
+### refactor/v2 的逐段向量查询
+
+现有 reader 搜索选项对每批向量调用 Knowhere BruteForce，再合并为每个 segment 的 TopK。
+它扫描数据文件；此入口尚未加载 Milvus 持久化索引文件，也不合并集合级 TopK。
+
+| 选项 | 含义 |
+|---|---|
+| `vector.search.query` | 查询浮点数组，例如 `[0.1,0.2]` |
+| `vector.search.topK` | 每段返回条数，必须为正数 |
+| `vector.search.metric` | `L2`（默认）、`IP` 或 `COSINE` |
+| `vector.search.column` | 向量字段名，默认 `vector` |
+
+L2 仍返回欧氏距离，即 Knowhere 平方距离的平方根；IP 与 COSINE 返回相似度，按降序排列。
+原生分数为 float32，与原先 JVM 双精度计算可能有少量误差。删除行和 null 向量在 TopK 前排除；
+维度错误、数组内 null 元素、损坏的二进制值和非有限元素导致查询失败。
+
+构建时选择已验证的 Knowhere 原生 JAR；每个使用它的 JVM 启动前须预加载自身 JRE 的 libjsig，见
+[原生库配置](contributing.md#knowhere-library-loading)。缺库或原生调用失败直接报错，reader 不回退 JVM 距离计算。
+独立的遗留 DataFrame/UDF 工具保持原实现。
 
 ### 6.1 标量类型
 - Bool（`BooleanType`）

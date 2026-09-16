@@ -14,8 +14,18 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
       readMetrics: ReadMetrics = ReadMetrics.Zero
   ) extends SegmentReader {
     var closed: Boolean = false
+    var taken: Option[(Seq[Long], Seq[String], Int)] = None
 
     override def next(): Option[VectorSchemaRoot] = None
+
+    override def take(
+        rowIndices: Array[Long],
+        columns: Seq[String],
+        parallelism: Int
+    ): SegmentReader.TakeResult = {
+      taken = Some((rowIndices.toSeq, columns, parallelism))
+      SegmentReader.EmptyTakeResult
+    }
 
     override def deliveredRows: Long = rows
 
@@ -86,6 +96,21 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
     )
 
     guarded.metrics shouldBe metrics
+  }
+
+  test("take delegates physical offsets without verifying sequential EOF") {
+    val delegate = new StubReader(rows = 0L)
+    val guarded = SegmentReaderRegistry.withExpectedRows(
+      v2Task(expectedRows = 3L),
+      delegate
+    )
+    val result = guarded.take(Array(1L, 2L), Seq("100"), parallelism = 2)
+    result.next() shouldBe None
+    result.close()
+    delegate.taken shouldBe Some((Seq(1L, 2L), Seq("100"), 2))
+    guarded.deliveredRows shouldBe 0L
+    guarded.close()
+    delegate.closed shouldBe true
   }
 
   test("a manifest reader is unchanged when its row count is unknown") {

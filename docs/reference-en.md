@@ -2,6 +2,53 @@
 
 This document provides a comprehensive guide to all parameter configurations for the Milvus Spark Connector.
 
+## Persisted index search (refactor/v2)
+
+`com.zilliz.spark.connector.read.MilvusSearch.search` returns a lazy DataFrame
+with global TopK across the snapshot's segments:
+
+```scala
+val hits = MilvusSearch.search(
+  spark, options, "embedding", queryVector, 10, "COSINE",
+  searchParameters = Map("ef" -> "256"),
+  filter = Some("category == \"documents\" and rating >= 2.0"),
+  outputColumns = Seq("id", "title")
+)
+hits.show(false)
+```
+
+`options` uses the same snapshot/storage settings as `spark.read.format("milvus")`.
+The result adds `_segment_id`, `_row_offset`, and `_score`. COSINE/IP sort
+descending; L2 uses squared Euclidean distance and sorts ascending. Ties sort by
+segment and physical row offset. The query must match a non-nullable FloatVector
+field and the stored HNSW metric. A COSINE query must have nonzero norm.
+`_score` preserves the value returned by Knowhere. Indexes containing vector
+quantization, such as Cardinal RBQ, can return approximate scores; the connector
+does not read the original vectors to recompute them.
+
+The filter runs before index search. Supported scalar syntax is comparison
+(`==`, `!=`, `<`, `<=`, `>`, `>=`), `in`, `not in`, `is null`, `is not null`,
+`and`, `or`, `not`, and parentheses. Unknown fields, incompatible literals and
+unsupported syntax fail before execution. Filtering the returned DataFrame
+instead filters the already selected hits. JSON, arrays and functions are not
+yet supported in this expression subset.
+
+Missing index metadata, corrupt files and incompatible formats fail explicitly.
+`allowUnindexed = true` enables native brute-force only for segments whose
+metadata confirms the requested field has no index. Default is `false`.
+Each task owns and closes its loaded index; cross-query caching is not yet implemented.
+HNSW `ef` is the only supported search parameter and must be an integer at least K.
+Encrypted indexes and nullable-vector ID mappings are unsupported.
+Cardinal `_mem.index.bin` requires the pinned Cardinal-enabled native build;
+see [native build instructions](contributing.md#knowhere-library-loading).
+
+The underlying scan options are `vector.search.mode=index`,
+`vector.search.parameters` (JSON object), `vector.search.filter`, and
+`vector.search.allowUnindexed`, in addition to query/topK/metric/column.
+Use `MilvusSearch.search` to obtain global TopK; scan options alone return
+per-segment candidates. The existing `brute_force` mode remains the default
+for legacy `vector.search.*` reads.
+
 ## Version Compatibility
 
 **This connector requires Milvus 2.6 or later** (Storage V2).
@@ -440,6 +487,32 @@ segment selection uses `milvus.partitions` and `milvus.segments`.
 5. **Parameter Constants**: It's recommended to use constants defined in the `MilvusOption` class to avoid string spelling errors
 
 ## 6. Supported Data Types
+
+### Per-segment vector search in refactor/v2
+
+The existing reader search options call Knowhere BruteForce once per vector
+batch, then merge the batch results into each segment's TopK. This scans the
+data files; persisted Milvus index files and collection-wide TopK merging are
+not implemented by this entry point.
+
+| Option | Meaning |
+|---|---|
+| `vector.search.query` | Query float array, for example `[0.1,0.2]` |
+| `vector.search.topK` | Positive number of results per segment |
+| `vector.search.metric` | `L2` (default), `IP`, or `COSINE` |
+| `vector.search.column` | Vector field name; default `vector` |
+
+L2 results remain Euclidean distances (square root of Knowhere's squared L2).
+IP and COSINE return similarity, ordered largest first. Native float32 scores
+can differ slightly from the former JVM double-precision calculation. Deleted
+rows and null vectors are excluded before TopK; invalid dimensions, null array
+elements, malformed binary values and non-finite elements fail the search.
+
+Build with the validated Knowhere native JAR and start every JVM that uses it
+with its own JRE's `libjsig` preloaded; see [native setup](contributing.md#knowhere-library-loading).
+Missing libraries or native failures are reported to the caller; this reader
+does not fall back to JVM vector distance calculations. The separate legacy
+DataFrame/UDF utilities retain their existing implementation.
 
 ### 6.1 Scalar Types
 - Bool (`BooleanType`)

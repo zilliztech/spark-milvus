@@ -1,10 +1,19 @@
 package com.zilliz.milvus.storage.read.exec
 
+import java.nio.charset.StandardCharsets.UTF_8
+
+import org.apache.arrow.vector.{
+  BigIntVector,
+  ValueVector,
+  VarBinaryVector,
+  VarCharVector
+}
+
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.delete.{DeletePlan, DeltaLogReader}
 import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
-import io.milvus.grpc.schema.FieldSchema
+import io.milvus.grpc.schema.{DataType, FieldSchema}
 
 /** The delete plan a task applies, read on the executor from the files the task
   * names.
@@ -14,6 +23,41 @@ import io.milvus.grpc.schema.FieldSchema
   * (docs/design/architecture/snapshot.html section 3).
   */
 object DeletePlans {
+
+  /** Evaluates the primary-key/timestamp rule shared by scans and index masks.
+    */
+  def rowDeleted(
+      plan: DeletePlan,
+      pkField: FieldSchema,
+      pk: ValueVector,
+      timestamp: ValueVector,
+      row: Int
+  ): Boolean = {
+    require(
+      pk != null && timestamp != null,
+      "Delete filtering requires primary key and timestamp columns"
+    )
+    if (pk.isNull(row) || timestamp.isNull(row)) return false
+    val rowTs = timestamp.asInstanceOf[BigIntVector].get(row)
+    pkField.dataType match {
+      case DataType.Int64 =>
+        plan.containsLongPk(pk.asInstanceOf[BigIntVector].get(row), rowTs)
+      case DataType.VarChar =>
+        val bytes = pk match {
+          case value: VarCharVector   => value.get(row)
+          case value: VarBinaryVector => value.get(row)
+          case other =>
+            throw new IllegalStateException(
+              s"Delete filtering expected a VarChar/VarBinary primary key, got ${other.getClass.getSimpleName}"
+            )
+        }
+        plan.containsStringPk(new String(bytes, UTF_8), rowTs)
+      case other =>
+        throw new IllegalArgumentException(
+          s"Delete filtering only supports Int64/VarChar primary keys, got $other"
+        )
+    }
+  }
 
   /** Opens the task's storage, reads its delete files and closes it. */
   def of(task: SegmentReadTask, pkField: Option[FieldSchema]): DeletePlan =

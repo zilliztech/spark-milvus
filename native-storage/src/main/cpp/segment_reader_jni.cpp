@@ -27,6 +27,7 @@
 #include <jni.h>
 
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <string>
 #include <vector>
@@ -121,6 +122,20 @@ int64_t BufferBytes(const arrow::Array& array) {
   }
   return total;
 }
+
+// loon_take owns the outer array allocation; importing a batch moves its
+// release callback, but does not free that outer allocation. On an error this
+// also releases every batch that has not yet been imported.
+struct TakeOutput {
+  ArrowArray* arrays = nullptr;
+  size_t count = 0;
+  ArrowSchema schema{};
+
+  ~TakeOutput() {
+    if (schema.release != nullptr) schema.release(&schema);
+    loon_free_chunk_arrays(arrays, count);
+  }
+};
 
 }  // namespace
 
@@ -310,6 +325,92 @@ JNIEXPORT void JNICALL
 Java_com_zilliz_milvus_jni_storage_StorageNative_readerDestroySegment(
     JNIEnv*, jclass, jlong reader) {
   loon_reader_destroy(static_cast<LoonReaderHandle>(reader));
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_zilliz_milvus_jni_storage_StorageNative_readerTake(
+    JNIEnv* env, jclass, jlong reader, jlongArray row_indices,
+    jobjectArray needed_columns, jint parallelism) {
+  if (reader == 0 || row_indices == nullptr || parallelism <= 0) {
+    ThrowIllegalArgument(
+        env, "reader and row indices are required; parallelism must be positive");
+    return 0;
+  }
+  const jsize count = env->GetArrayLength(row_indices);
+  if (count == 0) {
+    ThrowIllegalArgument(env, "row indices must not be empty");
+    return 0;
+  }
+
+  try {
+    std::vector<jlong> java_indices(static_cast<size_t>(count));
+    env->GetLongArrayRegion(row_indices, 0, count, java_indices.data());
+    if (env->ExceptionCheck()) return 0;
+    std::vector<int64_t> indices(java_indices.begin(), java_indices.end());
+    for (size_t i = 0; i < indices.size(); ++i) {
+      if (indices[i] < 0 || (i > 0 && indices[i] <= indices[i - 1])) {
+        ThrowIllegalArgument(
+            env, "row indices must be nonnegative, sorted and unique");
+        return 0;
+      }
+    }
+    StringArray columns;
+    if (!columns.Build(env, needed_columns) || env->ExceptionCheck()) return 0;
+
+    TakeOutput output;
+    if (!Check(env, loon_take(
+                        static_cast<LoonReaderHandle>(reader), indices.data(),
+                        indices.size(), static_cast<size_t>(parallelism),
+                        columns.data(), columns.size(), &output.arrays,
+                        &output.count, &output.schema))) {
+      return 0;
+    }
+    if (output.arrays == nullptr || output.count == 0 ||
+        output.schema.release == nullptr) {
+      ThrowArrow(env, arrow::Status::Invalid(
+                          "loon_take returned no batches for nonempty indices"));
+      return 0;
+    }
+    auto imported_schema = arrow::ImportSchema(&output.schema);
+    if (!imported_schema.ok()) {
+      ThrowArrow(env, imported_schema.status());
+      return 0;
+    }
+    auto schema = imported_schema.MoveValueUnsafe();
+    std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+    batches.reserve(output.count);
+    int64_t rows = 0;
+    for (size_t i = 0; i < output.count; ++i) {
+      auto imported = arrow::ImportRecordBatch(&output.arrays[i], schema);
+      if (!imported.ok()) {
+        ThrowArrow(env, imported.status());
+        return 0;
+      }
+      auto batch = imported.MoveValueUnsafe();
+      rows += batch->num_rows();
+      batches.push_back(std::move(batch));
+    }
+    if (rows != static_cast<int64_t>(indices.size())) {
+      ThrowArrow(env, arrow::Status::Invalid(
+                          "loon_take returned ", rows, " rows for ",
+                          indices.size(), " requested indices"));
+      return 0;
+    }
+    auto batch_reader = arrow::RecordBatchReader::Make(std::move(batches), schema);
+    if (!batch_reader.ok()) {
+      ThrowArrow(env, batch_reader.status());
+      return 0;
+    }
+    auto holder = std::make_unique<RecordBatchReaderHolder>();
+    holder->reader = batch_reader.MoveValueUnsafe();
+    return reinterpret_cast<jlong>(holder.release());
+  } catch (const std::exception& error) {
+    ThrowArrow(env, arrow::Status::UnknownError(error.what()));
+    return 0;
+  } catch (...) {
+    ThrowArrow(env, arrow::Status::UnknownError("unexpected failure in loon_take JNI"));
+    return 0;
+  }
 }
 
 JNIEXPORT jlong JNICALL

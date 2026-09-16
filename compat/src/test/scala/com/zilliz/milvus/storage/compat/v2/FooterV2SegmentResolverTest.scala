@@ -64,7 +64,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       try new Schema.Parser().parse(in)
       finally in.close()
     val lastFieldIndex = full.getFields.asScala.indexWhere(
-      _.name == "deltalog_files"
+      _.name == "index_files"
     )
     val schema = Schema.createRecord(
       full.getName,
@@ -134,6 +134,9 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
 
     record.put("binlog_files", Seq(fieldBinlog(binlogPath, 1L)).asJava)
     record.put("deltalog_files", Seq(fieldBinlog(deltaLogPath, 2L)).asJava)
+    record.put("statslog_files", Seq.empty[GenericRecord].asJava)
+    record.put("bm25_statslog_files", Seq.empty[GenericRecord].asJava)
+    record.put("index_files", Seq.empty[GenericRecord].asJava)
 
     val out = new ByteArrayOutputStream()
     val encoder = EncoderFactory.get().directBinaryEncoder(out, null)

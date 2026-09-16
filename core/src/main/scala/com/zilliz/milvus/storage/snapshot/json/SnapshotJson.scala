@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.LongNode
 import com.fasterxml.jackson.databind.JsonNode
 
 import com.zilliz.milvus.storage.manifest.AvroManifestEntry
+import com.zilliz.milvus.storage.snapshot.CollectionIndex
 
 /** `snapshot_info`. */
 case class SnapshotInfoJson(
@@ -99,10 +100,39 @@ case class SegmentJson(
     rawStorageVersion.map(JsonValues.toLong).getOrElse(0L)
 }
 
-/** The snapshot file. `manifest_list` names the Avro segment manifests of the
-  * `storage_version = 2` segments; `storagev2_manifest_list` carries the
-  * `storage_version = 3` segments. `format_version` decides the Avro schema of
-  * the manifests.
+/** One collection index definition, including the actual engine parameters. */
+case class CollectionIndexJson(
+    @JsonProperty("collection_id") @JsonAlias(
+      Array("collectionID")
+    ) rawCollectionId: Option[JsonNode] = None,
+    @JsonProperty("field_id") @JsonAlias(Array("fieldID")) rawFieldId: Option[
+      JsonNode
+    ] = None,
+    @JsonProperty("index_id") @JsonAlias(Array("indexID")) rawIndexId: Option[
+      JsonNode
+    ] = None,
+    @JsonProperty("index_name") name: String = "",
+    @JsonProperty("type_params") typeParameters: Seq[KeyValueJson] = Seq.empty,
+    @JsonProperty("index_params") indexParameters: Seq[KeyValueJson] =
+      Seq.empty,
+    @JsonProperty("user_index_params") userIndexParameters: Seq[KeyValueJson] =
+      Seq.empty
+) {
+  def toIndex: CollectionIndex = CollectionIndex(
+    collectionId = rawCollectionId.map(JsonValues.toLong).getOrElse(0L),
+    fieldId = rawFieldId.map(JsonValues.toLong).getOrElse(0L),
+    indexId = rawIndexId.map(JsonValues.toLong).getOrElse(0L),
+    name = name,
+    typeParameters = typeParameters.map(p => p.key -> p.value).toMap,
+    indexParameters = indexParameters.map(p => p.key -> p.value).toMap,
+    userIndexParameters = userIndexParameters.map(p => p.key -> p.value).toMap
+  )
+}
+
+/** The snapshot file. `manifest_list` names segment Avro records for both V2
+  * and V3 segments; `storagev2_manifest_list` carries the V3 data manifests.
+  * `format_version` decides the Avro schema. Omitted index metadata remains
+  * unknown, distinct from an explicitly empty list.
   */
 case class SnapshotJson(
     @JsonProperty("snapshot_info") @JsonAlias(
@@ -110,7 +140,7 @@ case class SnapshotJson(
     ) snapshotInfo: SnapshotInfoJson,
     @JsonProperty("collection") collection: CollectionJson,
     @JsonProperty("format_version") formatVersion: Option[Int] = None,
-    @JsonProperty("indexes") indexes: Seq[Any] = Seq.empty,
+    @JsonProperty("indexes") indexes: Option[Seq[CollectionIndexJson]] = None,
     @JsonProperty("manifest_list") @JsonAlias(
       Array("manifest-list")
     ) manifestList: Seq[String] = Seq.empty,
@@ -120,8 +150,11 @@ case class SnapshotJson(
     @JsonProperty("segments") segments: Seq[SegmentJson] = Seq.empty,
     @JsonProperty("segment_infos") @JsonAlias(
       Array("segment-infos", "segmentInfos")
-    ) segmentInfos: Seq[SegmentJson] = Seq.empty
+    ) segmentInfos: Seq[SegmentJson] = Seq.empty,
+    @JsonProperty("build_ids") rawBuildIds: Option[JsonNode] = None
 ) {
+  def buildIds: Option[Vector[Long]] =
+    rawBuildIds.map(JsonValues.toLongSeq(_).toVector)
   def allSegments: Seq[SegmentJson] =
     if (segments.nonEmpty) segments else segmentInfos
 

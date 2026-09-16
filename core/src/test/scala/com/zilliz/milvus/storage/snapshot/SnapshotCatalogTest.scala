@@ -5,7 +5,12 @@ import java.nio.file.{Files, Path}
 
 import org.scalatest.funsuite.AnyFunSuite
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
+import com.zilliz.milvus.storage.io.{LocalObjectStore, ObjectStore}
+import com.zilliz.milvus.storage.manifest.{
+  AvroManifestEntry,
+  SegmentManifestFixture
+}
+import com.zilliz.milvus.storage.read.plan.ReadPlan
 import com.zilliz.milvus.storage.snapshot.json.{
   CollectionJson,
   CollectionSchemaJson,
@@ -68,6 +73,225 @@ class SnapshotCatalogTest extends AnyFunSuite {
       bucket = "",
       V2SegmentResolver.Unavailable
     )
+
+  private val avroKey = "files/snapshots/10/manifests/1/30.avro"
+
+  private def indexedSnapshotJson: String = snapshotJson("indexed", 100L)
+    .replace("\"manifest_list\": []", s"\"manifest_list\": [\"$avroKey\"]")
+    .replace(
+      "\"indexes\": []",
+      """"format_version": 4,
+      "indexes": [{"collectionID":"10","fieldID":"101","indexID":"469076449917763071",
+        "index_name":"v_hnsw","type_params":[{"key":"dim","value":"4"}],
+        "index_params":[{"key":"index_type","value":"HNSW"},{"key":"M","value":"30"}],
+        "user_index_params":[{"key":"M","value":"16"}]}],
+      "build_ids":["469076449917967340"]"""
+    )
+
+  private def writeAvro(dir: Path, key: String, bytes: Array[Byte]): Unit = {
+    val path = dir.resolve(key)
+    Files.createDirectories(path.getParent)
+    Files.write(path, bytes)
+  }
+
+  test("snapshot index definitions and exact segment builds reach read tasks") {
+    withDir { dir =>
+      val index = SegmentManifestFixture.index()
+      writeAvro(
+        dir,
+        avroKey,
+        SegmentManifestFixture.encode(indexes =
+          Vector(
+            index.copy(filePaths = index.filePaths.map("s3a://bucket/" + _))
+          )
+        )
+      )
+      write(dir, "snapshot.json", indexedSnapshotJson)
+      val snapshot = new SnapshotCatalog(
+        new LocalObjectStore(dir.toString),
+        "bucket",
+        V2SegmentResolver.Unavailable
+      )
+        .read("snapshot.json")
+      val definition = snapshot.indexes.get.head
+      assert(definition.indexId == 469076449917763071L)
+      assert(definition.indexParameters("M") == "30")
+      assert(definition.userIndexParameters("M") == "16")
+      assert(snapshot.buildIds.contains(Vector(469076449917967340L)))
+      val segment = snapshot.segments.head
+      assert(segment.rows.contains(2L))
+      val actual =
+        segment.indexes.asInstanceOf[SegmentIndexes.Available].indexes.head
+      assert(
+        actual.collectionId == 10L && actual.partitionId == 20L && actual.segmentId == 30L
+      )
+      assert(actual.filePaths == index.filePaths)
+      assert(actual.parameters == index.parameters)
+      assert(actual.indexVersion == 1L)
+      assert(actual.currentIndexVersion.contains(10))
+      assert(actual.indexStorePathVersion.contains(0))
+      val plan = ReadPlan.of(
+        snapshot,
+        _ => Map.empty,
+        applyDeletes = false,
+        neededFieldIds = Seq(100L)
+      )
+      assert(plan.specs.head.indexes == segment.indexes)
+      assert(plan.specs.head.readVersionOrLatest == 7L)
+      assert(plan.specs.head.snapshotRows.contains(2L))
+      assert(plan.specs.head.neededFieldIds == Seq(100L))
+      assert(plan.totalRows.contains(2L))
+    }
+  }
+
+  test("snapshot Avro and index paths honor the configured Milvus endpoint") {
+    withDir { dir =>
+      val endpoint = "minio:9000"
+      val prefix = s"s3://$endpoint/bucket/"
+      val index = SegmentManifestFixture.index()
+      writeAvro(
+        dir,
+        avroKey,
+        SegmentManifestFixture.encode(indexes =
+          Vector(index.copy(filePaths = index.filePaths.map(prefix + _)))
+        )
+      )
+      write(
+        dir,
+        "snapshot.json",
+        indexedSnapshotJson.replace(avroKey, prefix + avroKey)
+      )
+      val snapshot = new SnapshotCatalog(
+        new LocalObjectStore(dir.toString),
+        "bucket",
+        V2SegmentResolver.Unavailable,
+        endpoint = endpoint
+      ).read("snapshot.json")
+      val loaded = snapshot.segments.head.indexes
+        .asInstanceOf[SegmentIndexes.Available]
+        .indexes
+        .head
+      assert(loaded.filePaths == index.filePaths)
+    }
+  }
+
+  test(
+    "L0 Avro entries require a resolver and retain global deletes with index metadata"
+  ) {
+    withDir { dir =>
+      val key = "files/snapshots/10/manifests/1/41.avro"
+      writeAvro(
+        dir,
+        key,
+        SegmentManifestFixture.encode(
+          version = 1,
+          segmentId = 41L,
+          partitionId = -1L,
+          rows = 0L,
+          storageVersion = 0L,
+          segmentLevel = 1L
+        )
+      )
+      write(
+        dir,
+        "snapshot.json",
+        snapshotJson("with-l0", 100L).replace(
+          "\"manifest_list\": []",
+          s"\"manifest_list\": [\"$key\"]"
+        )
+      )
+      val missing =
+        intercept[IllegalArgumentException](catalog(dir).read("snapshot.json"))
+      assert(missing.getMessage.contains("no V2 resolver"))
+      val resolver = new V2SegmentResolver {
+        override def resolve(
+            entries: Seq[AvroManifestEntry],
+            bucket: String,
+            store: ObjectStore
+        ): Either[Throwable, Seq[Segment]] = {
+          assert(entries.head.segmentLevel == 1L)
+          Right(
+            Seq(
+              Segment.v2(
+                41L,
+                -1L,
+                0L,
+                Seq.empty,
+                Seq(DeltaLogFile(1L, "l0.log", 1L))
+              )
+            )
+          )
+        }
+      }
+      val snapshot =
+        new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
+          .read("snapshot.json")
+          .narrow(Seq(20L), Seq(30L))
+      assert(snapshot.dataSegments.map(_.id) == Seq(30L))
+      assert(snapshot.deleteOnlySegments.map(_.id) == Seq(41L))
+      assert(
+        snapshot.deleteOnlySegments.head.deltaLogs.map(_.logPath) == Seq(
+          "l0.log"
+        )
+      )
+    }
+  }
+
+  test(
+    "absent segment metadata stays unknown and an empty Avro index list is unindexed"
+  ) {
+    withDir { dir =>
+      write(dir, "snapshot.json", snapshotJson("plain", 100L))
+      assert(
+        catalog(dir)
+          .read("snapshot.json")
+          .segments
+          .head
+          .indexes == SegmentIndexes.Unknown
+      )
+      writeAvro(dir, avroKey, SegmentManifestFixture.encode())
+      write(dir, "snapshot.json", indexedSnapshotJson)
+      val snapshot = catalog(dir).read("snapshot.json")
+      assert(snapshot.segments.head.indexes == SegmentIndexes.Unindexed)
+      assert(
+        Segment.v2(1L, 2L, 0L, Seq.empty).indexes == SegmentIndexes.Unknown
+      )
+    }
+  }
+
+  test(
+    "inconsistent index identity, row counts, builds and buckets fail snapshot resolution"
+  ) {
+    withDir { dir =>
+      val index = SegmentManifestFixture.index()
+      val invalid = Seq(
+        index.copy(segmentId = 31L) -> "expected 30",
+        index.copy(rowCount = 3L) -> "has 3 rows",
+        index.copy(buildId = 123L) -> "build_ids",
+        index.copy(indexId = 123L) -> "absent from snapshot indexes",
+        index.copy(filePaths =
+          Vector("s3://other/index.bin")
+        ) -> "bound to 'bucket'"
+      )
+      write(dir, "snapshot.json", indexedSnapshotJson)
+      invalid.foreach { case (badIndex, expected) =>
+        writeAvro(
+          dir,
+          avroKey,
+          SegmentManifestFixture.encode(indexes = Vector(badIndex))
+        )
+        val error = intercept[IllegalArgumentException] {
+          new SnapshotCatalog(
+            new LocalObjectStore(dir.toString),
+            "bucket",
+            V2SegmentResolver.Unavailable
+          )
+            .read("snapshot.json")
+        }
+        assert(error.getMessage.contains(expected), error.getMessage)
+      }
+    }
+  }
 
   test(
     "reads a V3 snapshot: segment id, partition from the path, version pinned"
@@ -217,10 +441,9 @@ class SnapshotCatalogTest extends AnyFunSuite {
       write(dir, "files/snapshots/10/metadata/2.json", json)
       val resolver = new V2SegmentResolver {
         def resolve(
-            paths: Seq[String],
+            entries: Seq[AvroManifestEntry],
             bucket: String,
-            store: com.zilliz.milvus.storage.io.ObjectStore,
-            version: Int
+            store: ObjectStore
         ) = Right(
           Seq(
             Segment.v2(
@@ -240,6 +463,11 @@ class SnapshotCatalogTest extends AnyFunSuite {
           )
         )
       }
+      writeAvro(
+        dir,
+        "files/snapshots/10/manifests/2/30.avro",
+        SegmentManifestFixture.encode(version = 1, storageVersion = 2L)
+      )
       val duplicate = intercept[IllegalArgumentException](
         new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
           .read("files/snapshots/10/metadata/2.json")
@@ -473,12 +701,12 @@ class SnapshotCatalogTest extends AnyFunSuite {
       )
       val resolver = new V2SegmentResolver {
         def resolve(
-            paths: Seq[String],
+            entries: Seq[AvroManifestEntry],
             bucket: String,
-            store: com.zilliz.milvus.storage.io.ObjectStore,
-            v: Int
+            store: ObjectStore
         ) = {
-          assert(paths == Seq("files/snapshots/10/manifests/1/40.avro"))
+          assert(entries.map(_.segmentId) == Seq(40L))
+          assert(entries.head.indexFiles.contains(Vector.empty))
           Right(
             Seq(
               Segment.v2(
@@ -512,6 +740,15 @@ class SnapshotCatalogTest extends AnyFunSuite {
           )
         }
       }
+      writeAvro(
+        dir,
+        "files/snapshots/10/manifests/1/40.avro",
+        SegmentManifestFixture.encode(
+          version = 1,
+          segmentId = 40L,
+          storageVersion = 2L
+        )
+      )
       val snapshot =
         new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
           .read("files/snapshots/10/metadata/1.json")
@@ -551,10 +788,9 @@ class SnapshotCatalogTest extends AnyFunSuite {
 
       val resolver = new V2SegmentResolver {
         def resolve(
-            paths: Seq[String],
+            entries: Seq[AvroManifestEntry],
             bucket: String,
-            store: com.zilliz.milvus.storage.io.ObjectStore,
-            v: Int
+            store: ObjectStore
         ) = {
           Right(
             Seq(
@@ -585,6 +821,16 @@ class SnapshotCatalogTest extends AnyFunSuite {
         }
       }
 
+      writeAvro(
+        dir,
+        "files/snapshots/10/manifests/1/40.avro",
+        SegmentManifestFixture.encode(
+          version = 1,
+          segmentId = 40L,
+          rows = 1L,
+          storageVersion = 2L
+        )
+      )
       val snapshot = new SnapshotCatalog(
         new LocalObjectStore(dir.toString),
         bucket = "milvus-bucket",

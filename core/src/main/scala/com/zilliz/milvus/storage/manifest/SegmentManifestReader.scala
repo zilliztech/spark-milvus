@@ -1,6 +1,7 @@
 package com.zilliz.milvus.storage.manifest
 
 import java.io.ByteArrayInputStream
+import java.util.{List => JavaList}
 import scala.jdk.CollectionConverters._
 
 import org.apache.avro.generic.{GenericDatumReader, GenericRecord}
@@ -29,7 +30,25 @@ case class AvroBinlogEntry(
     entriesNum: Long
 )
 
-/** The subset of AVRO `ManifestEntry` fields that backfill actually needs.
+/** The index descriptor carried by a segment Avro record. Collection and
+  * partition identity are supplied by the enclosing snapshot and segment.
+  */
+case class AvroIndexFileEntry(
+    segmentId: Long,
+    fieldId: Long,
+    indexId: Long,
+    buildId: Long,
+    name: String,
+    parameters: Map[String, String],
+    filePaths: Vector[String],
+    rowCount: Long,
+    serializedSize: Long,
+    indexVersion: Long,
+    currentIndexVersion: Option[Int],
+    indexStorePathVersion: Option[Int]
+)
+
+/** The AVRO `ManifestEntry` fields used by snapshot and segment planning.
   *
   * `storageVersion` uses the authoritative constants from
   * `milvus/internal/storage/rw.go`: StorageV1=0, StorageV2=2, StorageV3=3.
@@ -41,7 +60,8 @@ case class AvroManifestEntry(
     numOfRows: Long,
     storageVersion: Long,
     binlogFiles: Seq[AvroFieldBinlogEntry],
-    deltaLogFiles: Seq[AvroFieldBinlogEntry]
+    deltaLogFiles: Seq[AvroFieldBinlogEntry],
+    indexFiles: Option[Vector[AvroIndexFileEntry]] = None
 )
 
 /** Decoder for per-segment manifest AVRO files written by milvus-datacoord.
@@ -63,7 +83,7 @@ case class AvroManifestEntry(
   */
 object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
 
-  private val LastNeededField = "deltalog_files"
+  private val LastNeededField = "index_files"
 
   private val SchemaResources: Map[Int, String] = Map(
     1 -> "/milvus-segment-manifest-v1.avsc",
@@ -133,7 +153,7 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
   }
 
   /** Decode the raw bytes of one per-segment `*.avro` file into the subset of
-    * fields needed by backfill.
+    * fields needed by snapshot and segment planning.
     *
     * @return
     *   `Right(entry)` on success, or `Left(throwable)` on any parse error.
@@ -292,19 +312,55 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
       numOfRows = asLong(rec.get("num_of_rows")),
       storageVersion = asLong(rec.get("storage_version")),
       binlogFiles = projectFieldBinlogs(rec.get("binlog_files")),
-      deltaLogFiles = projectFieldBinlogs(rec.get("deltalog_files"))
+      deltaLogFiles = projectFieldBinlogs(rec.get("deltalog_files")),
+      indexFiles = Some(projectIndexes(rec.get("index_files")))
     )
+  }
+
+  private def projectIndexes(value: Any): Vector[AvroIndexFileEntry] = {
+    value.asInstanceOf[JavaList[GenericRecord]].asScala.toVector.map { rec =>
+      def optionalInt(name: String): Option[Int] =
+        Option(rec.getSchema.getField(name))
+          .map(_ => asLong(rec.get(name)).toInt)
+      val parameters = rec
+        .get("index_params")
+        .asInstanceOf[JavaList[GenericRecord]]
+        .asScala
+        .map { pair =>
+          asString(pair.get("key")) -> asString(pair.get("value"))
+        }
+        .toMap
+      AvroIndexFileEntry(
+        segmentId = asLong(rec.get("segment_id")),
+        fieldId = asLong(rec.get("field_id")),
+        indexId = asLong(rec.get("index_id")),
+        buildId = asLong(rec.get("build_id")),
+        name = asString(rec.get("index_name")),
+        parameters = parameters,
+        filePaths = rec
+          .get("index_file_paths")
+          .asInstanceOf[JavaList[Any]]
+          .asScala
+          .map(asString)
+          .toVector,
+        rowCount = asLong(rec.get("num_rows")),
+        serializedSize = asLong(rec.get("serialized_size")),
+        indexVersion = asLong(rec.get("index_version")),
+        currentIndexVersion = optionalInt("current_index_version"),
+        indexStorePathVersion = optionalInt("index_store_path_version")
+      )
+    }
   }
 
   private def projectFieldBinlogs(v: Any): Seq[AvroFieldBinlogEntry] = {
     // Avro arrays deserialize to java.util.List (actually GenericData.Array).
-    val list = v.asInstanceOf[java.util.List[GenericRecord]]
+    val list = v.asInstanceOf[JavaList[GenericRecord]]
     list.asScala.toSeq.map { afb =>
       AvroFieldBinlogEntry(
         slotFieldId = asLong(afb.get("field_id")),
         binlogs = afb
           .get("binlogs")
-          .asInstanceOf[java.util.List[GenericRecord]]
+          .asInstanceOf[JavaList[GenericRecord]]
           .asScala
           .toSeq
           .map(bl =>

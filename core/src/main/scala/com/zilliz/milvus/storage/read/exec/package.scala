@@ -10,10 +10,15 @@ package com.zilliz.milvus.storage.read
   * `NativeSegmentReader` and explained in
   * docs/design/architecture/storage-io.html section 3.
   *
-  * `ColumnBatch` and `take` are not here yet. Decision 12 settled that the
-  * columnar outlet is worth building and decision 6 settled how vector columns
-  * are typed, but the Spark-facing half of that is a Spark type and belongs in
-  * layer 3; what crosses into core is still a `VectorSchemaRoot`.
+  * `SegmentReader.take` retrieves sorted, unique physical row indices with a
+  * per-call projection through `loon_take`. Its `TakeResult` owns unread
+  * batches independently of the source reader; each returned root is owned by
+  * the caller. Sequential streams open only on the first `next()` call.
+  *
+  * `ColumnBatch` is not here yet. Decision 12 settled that the columnar outlet
+  * is worth building and decision 6 settled how vector columns are typed, but
+  * the Spark-facing half of that is a Spark type and belongs in layer 3; what
+  * crosses into core is still a `VectorSchemaRoot`.
   *
   * `DeletePlans` reads and closes a task's delete files (`DeleteSource.Files`)
   * on the executor; an unreadable file fails the task. The registry wraps both

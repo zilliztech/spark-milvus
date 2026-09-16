@@ -269,7 +269,7 @@
         <text x="88" y="457" font-size="10.5" fill="currentColor" opacity=".7">包上游现成的 C 接口 <tspan font-family="ui-monospace,monospace">loon_*</tspan>，我们写 JNI</text>
         <rect x="482" y="422" width="392" height="44" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/>
         <text x="494" y="440" font-size="12" font-weight="600" fill="currentColor" font-family="ui-monospace,monospace">native-vector</text>
-        <text x="494" y="457" font-size="10.5" fill="currentColor" opacity=".7">knowhere 没有 C 接口，我们写 C shim 加 JNI</text>
+        <text x="494" y="457" font-size="10.5" fill="currentColor" opacity=".7">加载 Knowhere 上游提供的 Java API 与 JNI</text>
 
         <!-- row 4: storage -->
         <rect x="60" y="502" width="830" height="46" fill="var(--up-soft)" stroke="var(--up)" stroke-width="1"/>
@@ -311,7 +311,7 @@
 │   └── build/                        <span class="c">构建与 patchelf 脚本</span>
 ├── <span class="m">native-vector/</span><span class="lay">第 1 层</span>
 │   ├── src/main/java/                <span class="c">com.zilliz.milvus.jni.vector</span>
-│   └── src/main/cpp/                 <span class="c">mv_* 的 C shim 与 JNI</span>
+│   └── src/main/cpp/                 <span class="c">上游 C/JNI 归属说明</span>
 │
 ├── <span class="m">core/</span><span class="lay">第 2 层</span>                        <span class="c">无 Spark 依赖，编译期强制</span>
 │   ├── src/main/scala/com/zilliz/milvus/storage/
@@ -402,10 +402,10 @@
         <dt>jni.storage</dt><dd>StorageNative：每个 loon_* 一个 native 方法 <em>R4 W1</em></dd>
         <dt>… .arrow</dt><dd>三个 Arrow C 结构体的分配与 release</dd>
         <dt>… .loader</dt><dd>按 os 和 arch 解压 .so 后加载</dd>
-        <dt>jni.vector</dt><dd>VectorNative：mv_* 的 native 方法 <em>V1 V5</em></dd>
+        <dt>jni.vector</dt><dd>NativeVectorLibrary：上游加载；NativeVectorSearch：调用上游 BruteForce <em>V1（部分） V5</em></dd>
         <dt>apps.backfill</dt><dd>作业、CLI、结果 JSON <em>O1</em></dd>
         <dt>apps.tools</dt><dd>两个调试工具 <em>O2</em></dd>
-        <dt>apps.search</dt><dd>暴力搜索的 JVM 实现，作对拍 <em>V5</em></dd>
+        <dt>core.index</dt><dd>BruteForceSearch 管理原生查询缓冲、排除位图和每段 TopK；Spark 只适配类型 <em>V5</em></dd>
         <dt>apps.legacy</dt><dd>gRPC Insert 的写栈与 format("milvus") 短名 <em>W7</em></dd>
       </dl>
     </div>
@@ -797,7 +797,7 @@
 
     <div class="grp">
       <h4>向量与索引 · 4 条</h4>
-      <p>整组排 P2：都要先有 knowhere 的 C 封装。</p>
+      <p>整组排 P2：采用 Knowhere PR #1829；当前交付<a href="vector-search.html#native-brute-force">库加载与现有入口的 BruteForce</a>，持久化索引执行仍待实现。</p>
       <div class="chips">
         <span class="chip p2"><span class="id">V1</span>knowhere 封装</span>
         <span class="chip p2"><span class="id">V2</span>加载 Milvus 的索引</span>
@@ -854,7 +854,7 @@
     <li><b>接口层<span class="tag">P1</span></b><span>Catalog、元数据列、统计、V2 谓词、Limit。三段名和回表在这一步到位。</span></li>
     <li><b>谓词求值<span class="tag">P1</span></b><span>ExprTranslator、中间表示、求值器。语义按 Milvus 源码逐条复刻。</span></li>
     <li><b>写路径<span class="tag">P1</span></b><span>SegmentWriter、Committer、register。backfill 分支可先做，append 等 Milvus 的 RPC，两件事可以并行谈。</span></li>
-    <li><b>向量层<span class="tag">P2</span></b><span>knowhere 的 C shim 与 JNI、索引加载与写出、暴力搜索；backfill 改成写模式。</span></li>
+    <li><b>向量层<span class="tag">P2</span></b><span>接入上游 Knowhere Java/JNI 产物、索引加载与写出、暴力搜索；backfill 改成写模式。</span></li>
     <li><b>产物与基准<span class="tag">P3</span></b><span>native jar 打包、四条 Spark 线的 CI 矩阵、读吞吐与拷贝次数与写端到端的基准；macOS 与 GPU 产物。</span></li>
     <li><b>2.0.0 发布<span class="tag">P3</span></b><span>云上作业切换坐标与 SHA。</span></li>
   </ol>
@@ -874,7 +874,7 @@
       <tr><td class="mono">10</td><td>backfill 写模式的分布与排序</td><td>实现 Spark 的分布要求，或场景代码自己 shuffle</td><td>写路径</td></tr>
       <tr><td class="mono">13</td><td>删除文件格式的共存期</td><td>两列 Parquet 与旧 binlog 容器格式认哪几种</td><td>不阻塞</td></tr>
       <tr><td class="mono">15</td><td>Scala 版本范围</td><td>已定跟 lance-spark 一样，交叉编译范围待确认</td><td>构建</td></tr>
-      <tr><td class="mono">16</td><td>暴力搜索的形态与位置</td><td>入口三选几；原生层还是 JVM；spark 层能力还是 apps 场景</td><td>向量层</td></tr>
+      <tr><td class="mono">16</td><td>集合级查询与其余旧入口</td><td>现有逐段查询已确定使用 Knowhere BruteForce；集合级入口与其他旧入口迁移待定</td><td>向量层</td></tr>
     </tbody>
   </table>
   </div>

@@ -7,7 +7,7 @@
 | 确认功能承诺、优先级和实现位置 | 顶层索引 | [能力规划](capabilities.md) |
 | 理解总体结构、确定模块与包的归属 | architecture/ | [架构图解](architecture/overview.html)、[模块与迁移](architecture/modules.md) |
 | 开发只读目录、三段表名与快照时间旅行入口 | architecture/ | [只读 Catalog](architecture/catalog.html) |
-| 开发使用 Milvus 索引文件的向量查询 | architecture/ | [向量查询方案](architecture/vector-search.html)（issue #125，待评审） |
+| 开发使用 Milvus 索引文件的向量查询 | architecture/ | [向量查询实现与验收](architecture/vector-search.html)（issue #125，真实 HNSW 验收通过，原生产物限制见第 6.4 节） |
 | core 怎么访问对象存储、凭证怎么下发 | architecture/ | [存储访问层](architecture/storage-access.html)（未完待续） |
 | 改动对象存储凭证、provider 链、按桶配置 | architecture/ | [对象存储认证](architecture/storage-auth.html) |
 | backfill 怎么访问多个桶 | apps/ | [backfill 的多桶存储访问](apps/backfill-storage.html) |
@@ -60,7 +60,7 @@ flowchart TB
     C2e["executor：Reader · DeleteBitset · ExprEval · IndexSource · SegmentWriter"]
   end
   subgraph L1["第 1 层 · 原生层（只在 executor 加载）"]
-    C1["storage JNI → milvus-storage C 接口 ｜ vector JNI → C shim → knowhere"]
+    C1["storage JNI → milvus-storage C 接口 ｜ 上游 Knowhere Java API → JNI → C 接口"]
   end
   L3 --> L2 --> L1
 ```
@@ -131,13 +131,13 @@ flowchart LR
 
 ### 2.5 原生层
 
-1. 要写四样：storage JNI；knowhere 没有 C 接口，先写一层 C 函数包它的 C++ 接口（C shim）再包 JNI；索引文件加载链；DiskANN 用的本地 FileManager。
+1. storage JNI 由本仓库实现；Knowhere 的 C 接口、JNI、Java API 与加载器采用 PR #1829 的固定提交，由 `native-vector` 接入并核验 C ABI。固定来源和库加载契约见[向量查询设计第 6.1 节](architecture/vector-search.html#library-loading)。内存 HNSW 的持久化加载与搜索已接入代码，真实 Cardinal version 10 HNSW/COSINE 样本已通过查询验收，上游 DiskANN 测试失败单独记录；DiskANN 所需本地文件管理不在当前实现中。
 2. 约定：只传地址和长度，Arrow 走 C Data Interface，配置用 JSON；谁分配谁释放，句柄配 destroy，Arrow 靠 release 回调，JVM 用 Cleaner 兜底；错误是返回码加消息。
 3. JNI 不用 Panama（JDK 22 才正式的外部函数接口），因为 Spark 4 最低 Java 17。
 4. 交给 native 的路径一律是桶内相对 key，桶来自 fs.bucket_name。
-5. 索引加载：从固定快照的段记录或已验证的 Manifest 索引登记取得文件引用，解析 Milvus binlog 的 descriptor/index events 与 payload 编码，再恢复 knowhere 的 BinarySet。payload 可能是原始字节或 Parquet 编码；出现 SLICE_META 时按记录拼接分片，未切片文件不要求它存在。不能只跳过固定长度的事件头。构建引擎、索引类型与格式版本都需互操作验证，详见[向量查询方案](architecture/vector-search.html#native)；DiskANN 还需要本地文件管理器。
+5. 索引加载：固定快照携带 `SegmentIndex` 描述，`SegmentIndexQuery` 校验覆盖与索引选择。`IndexFileCodec` 将 Milvus binlog/Parquet 封装（含 SLICE_META）或 Cardinal 原始 CARD 流恢复为 BinarySet，再按 payload 标识选引擎。对象只由 ObjectStore 读取，任务独占索引并关闭，无跨任务缓存。构建特性和实际格式都需验证，详见[向量查询实现](architecture/vector-search.html#native)。
 6. 索引写出：knowhere serialize 出 BinarySet，按目标 Milvus 格式的切片策略、事件和 payload 编码写出，发生切片时记录 SLICE_META；16 MiB 是可配置默认值，不是格式常量。上传到段索引路径并通过 milvus-storage 的 add_index_info 登记；索引版本和构建引擎需与加载端兼容。写出仍属 W6，不在 issue #125 的查询方案内。
-7. 索引来源三级，由 IndexSource 统一：Milvus 建的（快照段列表里）、Spark 建并按第 6 条写回的、任务内即时建的（只在内存，不写回）。
+7. 当前只加载快照钉住的持久化索引；权威无索引可按显式选项执行原生暴力回退。Spark 写回索引与任务内建索引属于后续范围，不在当前执行中生成临时索引。
 
 ### 2.6 接口层
 
@@ -170,7 +170,7 @@ flowchart LR
 | P1 | 4 | Catalog 目录与三段名、元数据列、统计、DataSource V2 谓词、Limit | 目录发现、三段名和回表 |
 | P1 | 5 | ExprTranslator、IR、求值器 | 谓词语义对齐 Milvus |
 | P1 | 6 | SegmentWriter、Committer、register Procedure | backfill 登记走 BatchUpdateManifest 可先做；append 等第 5 节的 RPC |
-| P2 | 7 | knowhere 的 C shim 和 JNI、索引加载、索引写出与登记、BruteForce；backfill 写模式 | 依赖列式 reader 和写路径 |
+| P2 | 7 | 接入上游 Knowhere Java/JNI 产物、索引加载、索引写出与登记、BruteForce；backfill 写模式 | 库加载可独立交付；索引执行依赖列式 reader 和写路径 |
 | P3 | 8 | native jar 打包、四条 Spark 线的子项目和 CI 矩阵、基准（读吞吐、拷贝次数、写端到端）；macOS 和 GPU 产物 | 打包工作，不影响设计 |
 | P3 | 9 | 2.0.0 发布，云上作业切换 | |
 
@@ -183,8 +183,8 @@ flowchart LR
 | 10 | backfill 写模式的按段分布和按行号排序 | a. 实现 RequiresDistributionAndOrdering；b. 场景代码自己 shuffle 后再写 | 写路径接口 |
 | 19 | 按分区报分区（capabilities R19）是否值得做 | a. 做，join 少一次 shuffle；b. 不做，段内主键无序，收益可能被 Milvus 的段分布抵消 | 需要实测 |
 | 20 | 谓词下推用哪一代接口 | 现状：`MilvusScanBuilder` 实现的是 `SupportsPushDownFilters`，即 DataSource V1 的 `Filter`，但不接受任何谓词，全部作为 residual 交还 Spark 求值；capabilities 第 10 节写「不做 V1 Filter，只实现 V2 谓词」。a. 换成 `SupportsPushDownV2Filters`（`Predicate`），作为 R6 的前置一并做；b. 等 `core.expr` 的 ExprTranslator 一起换，少返工一次；c. 改设计承认保留 V1。要先弄清 V2 的 `Predicate` 是否覆盖 R6 列的全部谓词形态（比较、IN、IS NULL、字符串前后缀、AND/OR/NOT）以及四条线的接口差异 | R6、R7；正式实现下推前仍需确定接口 |
-| 16 | 向量查询入口、暴力搜索的形态与位置 | 入口：DataFrame 方法、SQL 函数、读选项三选几；执行：knowhere 的 BruteForce 在原生层，按 2026-09-14 日志不再保留 1.x JVM 实现作对拍或兜底；归属：spark 层能力还是 apps 场景。issue #125 [建议显式查询方法](architecture/vector-search.html#api)在 spark.read 构造全局 TopK 计划，待评审 | V5 与拟新增 V7；能力清单、模块规划及旧入口迁移一起定 |
-| 21 | issue #125 的索引查询支持范围与失败策略 | [方案草稿](architecture/vector-search.html#scope)提出首个互操作组合、V7 查询能力，以及[默认严格、无索引显式回退](architecture/vector-search.html#cache)的策略。目标引擎/格式与原生解码依赖先按[互操作步骤](architecture/vector-search.html#interop)验证；本行尚未形成实现承诺 | V1、V2、V4 的持久化加载部分，拟新增 V7；过滤实现仍依赖决策 20 |
+| 16 | 其余旧向量入口迁移 | 集合级 MilvusSearch.search 已按 2026-09-16 用户要求确定，旧逐段入口保留；未来是否统一 SQL 入口以及旧入口的退役仍待定 | 不阻塞 V7 |
+| 21 | 扩大索引兼容范围与跨任务缓存 | 当前实现非 nullable FloatVector、内存 HNSW、严格加载、无索引显式回退及任务独占资源；Faiss 与 Cardinal 格式已有分派，真实 Cardinal version 10 HNSW/COSINE 已通过专项验证。nullable ID 映射、加密文件与跨任务缓存尚未实现 | 后续 V2、V4 扩展；不阻塞当前已定契约 |
 | 22 | 连接器写的段，系统字段 RowID（0）和 Timestamp（1）从哪来 | a. 写时向 Milvus 要 AllocID / AllocTimestamp（要活的 Milvus，纯连接器模式做不到）；b. 登记时由 Milvus 补（RegisterSegments 未定，能否改写文件要和 Milvus 侧一起定）；c. 写占位值（段内行号、作业时间），登记时只作排序。见 [write.html](architecture/write.html) 第六节 | W1 登记前提；core.write.exec 的列组切分 |
 
 ## 5 需要 Milvus 侧提供的 `[草稿]`
@@ -197,7 +197,7 @@ flowchart LR
 | 登记时校验 Manifest 内容 | BatchUpdateManifest 不打开 Manifest 文件，不校验列和行数 | 登记时读 Manifest 校验列组、行数、schema 版本 | 2.4 |
 | 列级 min/max 统计，row group 统计剪枝 | milvus-storage 的 Parquet 谓词下推是空实现 | 写统计文件，reader 用统计剪枝 | 2.3 下推两级 |
 | Milvus 把索引文件写进段的 Manifest；加载 Connector 写回的索引 | milvus-storage 的 add_index_info 接口已有；已有 V3 实测的索引引用在快照段记录 index_files 中，数据 Manifest 的 indexes 为空 | Manifest 的双向登记与读取仍需核验服务版本；加载现有索引先保留快照段记录，不能把本项当成唯一来源；校验引擎与格式版本 | 2.5 索引加载与 W6 写出，来源细节见[向量查询方案](architecture/vector-search.html#metadata) |
-| 索引 binlog 解码的 C 接口 | 当前 native-storage 未提供对应绑定，Milvus 的 C++ 加载链具有格式解析逻辑 | 在原生存储层复用/提供版本化解码接口，导出具名 payload 与释放函数；配套真实 Milvus 文件验证 | issue #125 原生加载，见[接口归属](architecture/vector-search.html#native-boundary) |
+| 索引格式与引擎兼容性 | 现有 core binlog/Parquet codec 复用，Cardinal 通过同一 Knowhere 提交的构建特性启用 | 新格式或加密支持需要对应引擎/格式契约及真实文件验证，不建立另一个文件访问路径 | issue #125，见[接口归属](architecture/vector-search.html#native-boundary) |
 | 自动快照加保留策略；快照目录里加 catalog 文件；格式契约文档 | 快照由 CreateSnapshot 手动建 | | 2.3 读入口，决策 11 |
 
 ## 6 决策日志
@@ -206,6 +206,17 @@ flowchart LR
 |---|---|---|
 | 2026-09-16 | Catalog 的只读目录合同 | C1 与 R1 保持两条路径：`ListDatabases` 把 Milvus database 原样映射成唯一一层 Spark namespace，`ShowCollections(database)` 把该库的全部 collection 映射成 table；目录不读快照或对象存储，collection 没有可读快照时仍可列出。根目录列 database，已存在的 database 没有子 namespace；`SHOW TABLES` 必须显式给一段 database，不设隐式 default，也不跨库摊平。Catalog 不缓存目录，顺序不作合同；成功的空响应是空结果，只有确认不存在才转 `NoSuchNamespaceException` / `false`，认证、网络、限流等故障保留。namespace 与 table 的 create、alter、drop、rename 继续拒绝。主体与四条线共用，设计见 [catalog.html](architecture/catalog.html)。 |
 | 2026-09-16 | issue #135 的只读 Catalog 边界 | R1 的已知三段名加载与 C1 的目录枚举解耦：`loadTable` 只用现有 `getCollectionInfo` 取得 collection id，不新增 ListDatabases/ShowCollections。三个 loadTable 重载共享 [catalog.html](architecture/catalog.html) 的一条路径，分别选最新、快照名和时间点；Spark Unix 微秒在 catalog 边界转换成该物理毫秒的最大 Milvus HybridTS，core 继续保存和比较原始 `create_ts`。该项只交付 R1，SupportsNamespaces、列表与 DDL 均不在该项范围；C1 后续按上一行的独立目录合同接入。主体在 spark-base，按线只保留公开类和 createTable 签名适配。 |
+| 2026-09-16 | 暴力搜索核心保留原生分数，旧入口独立转换 L2 | core.index.BruteForceSearch 保留 Knowhere 的 Float32 平方 L2；Spark 旧逐段入口仅在输出时取平方根，索引模式的显式无索引回退原样输出平方分数。拒绝先开方再平方，因为原始 2.0 会变成 2.0000000000000004，破坏混合索引/无索引段的同分排序。验收覆盖 L2=2 和混合段全局决胜规则；见 [分数契约](architecture/vector-search.html#semantics)。 |
+| 2026-09-16 | 合并 G5 后索引查询汇总内部 reader 指标 | 上游读取指标从普通 SegmentReader 获取，而本地索引查询在过滤和回表时独立打开 reader；只保留默认值会把实际 JNI、批数和拷贝报告为零。内部 reader 关闭时把最终 ReadMetrics 传回分区 reader，累计量求和、allocator 高水位取最大值，显式无索引回退复用同一规则。见 [storage-io 第 5.4 节](architecture/storage-io.html#metrics)。 |
+| 2026-09-16 | 代码通过 import 引用类型与对象 | 用户要求调用处使用简名，完整包名统一放在 import；Scala 同名冲突使用有含义的导入别名。规则写入 [开发规范](../contributing.md#imports)，AGENTS.md 作为入口，现有两处 PlanParser 调用随本次修正。 |
+| 2026-09-16 | 原生兼容验收同时要求完整重定位和实际运行 | 旧 Arrow 的 9 个 AWS CRT 引用未导出，Knowhere Folly 的 4 个 libaio 引用未声明依赖；此前延迟绑定下的功能测试没有暴露全部错误。重新构建固定版本 storage 并修正依赖链接，打包前检查原始与合并目录的两个入口库，拒绝未解析符号。兼容记录增加全部 storage 原生资源清单摘要；登记前独立 RTLD_NOW 加载、两种 JVM 加载顺序和真实实例测试均须通过，不靠额外预加载绕过。见 [sbt 验收规则](engineering/sbt.html#validation)。 |
+| 2026-09-16 | 读取构建分支名的 Git 子进程清空预加载环境 | 带 JRE libjsig 预加载的 sbt 启动 Git 时，Git 会把信号 API 弃用警告写入标准输出，原先整段输出被当作分支名拼入版本号和 assembly 文件名。仅在该 Git 子进程中清空 LD_PRELOAD，保留 sbt 与测试 JVM 的预加载；不通过过滤警告或强制 GIT_BRANCH 掩盖问题。版本格式、显式分支覆盖和模块依赖保持原契约，见 [sbt 交付职责](engineering/sbt.html#delivery)。 |
+| 2026-09-16 | Cardinal 依赖共存与真实 HNSW 验收按精确产物记录，上游失败独立保留 | storage 与 Cardinal 平台产物按 SHA-256 匹配共同依赖记录，两种加载顺序均经文件读写和实际搜索验证；真实 UAT 十万行 HNSW/COSINE 在 Spark 与原始 JNI 对照及三种过滤下通过。上游 DiskANN v1 的 C/Java 精确距离断言仍失败，诊断产物保留 build.validated=false，不修改断言或排除测试取得绿色状态。该专项结果不推广到其他索引类型、CPU 或分发许可，细节见 [向量查询第 6.4 节](architecture/vector-search.html#interop)。 |
+| 2026-09-16 | 保留量化索引分数，分别验证调用结果和搜索质量 | 真实 CARD metadata 为 RBQ3 搜索 / RBQ8 重排，Cardinal v3.0.8 的最高精度数据集仍是 RBQ8，HasRawData=false；FloatVector 字段不代表索引保留原始 Float32，量化容差参数也不是分数误差界。Connector 保留 Knowhere 分数，不扫描原始向量重算。真实验收用同一文件的上游 Java/JNI 直接调用核对命中行号和分数，再用真实 Float32 独立全量参考报告 ID/边界召回率及分数误差；不把任意固定分数误差或召回阈值当作该索引已有保证。详见 [分数契约](architecture/vector-search.html#semantics)。 |
+| 2026-09-16 | issue #125 持久化索引执行契约 | 用户要求完成使用索引的开发。MilvusSearch.search 复用现有 DataSource V2 的 Snapshot/ReadPlan/reader，添加全局排序及 limit；core.index 负责加载和搜索、SegmentReader.take 回取命中行，L2 score 返回平方距离。非 nullable FloatVector/HNSW 为首个范围，bitmap 在搜索前排除删除和显式过滤，未知/损坏/不兼容均失败，仅权威无索引允许显式回退。格式归属更正：固定存储库无 index decoder，而 DeltaLogReader 已有同一 binlog/Parquet 解析；提取共同 core.codec.BinlogCodec 给删除和索引使用，文件仍只经 ObjectStore。任务独占索引并关闭，缓存单独落地。R7 字符串过滤可使用共同 core.expr，不依赖 R6 的 Spark V2 谓词翻译接口，因此决策 20 只阻塞 R6。 |
+| 2026-09-16 | 真实云端 HNSW 采用 Cardinal 原始索引流 | 从目标 UAT 的快照路径经 NativeObjectStore 读到真实 `_mem.index.bin`，其末尾为 Cardinal CARD footer，不能交给只有开源 Faiss HNSW 的 Knowhere。固定 PR 的 WITH_CARDINAL 构建使用其钉住的 Cardinal v2.5.112/v3.0.8，不新增 connector JNI。Cardinal `Serialize` 对 FileManager 和 BinarySet 使用相同的 `Index::Save` 流；严格验证 footer 后将完整字节传给 BinarySet[HNSW]，是对应引擎已有接口的恢复方式。运行时从校验过的平台产物 provenance 获取 `with_cardinal`，缺少能力提前拒绝；Faiss IHNf/IHN9 与 CARD 按 payload 标识选择引擎，含 Cardinal 时 Faiss 使用上游 HNSW_DEPRECATED factory 名，BinarySet key 仍为 HNSW。Milvus event/Parquet 与 CARD 两种格式都归 core.index，存储访问继续统一 ObjectStore；真实实例索引与真实数据独立全量参考是验收条件，不能用新建的本地索引替代。详见 [vector-search.html](architecture/vector-search.html#native-boundary)。 |
+| 2026-09-16 | 现有逐段向量查询改用 Knowhere BruteForce | 用户明确要求替换当前实现。保留 vector.search.* 和段内 TopK 语义；spark.read 适配行与向量，core.index 管理缓冲、排除位图和 TopK，native-vector 委托上游 Knowhere.bruteForce。不建立临时 FLAT，不保留 JVM 距离计算兜底；原生 L2 取平方根以保留已有欧氏距离返回值。null 与删除在搜索前排除，维度错误和非有限值报错。持久化索引文件与集合级 TopK 尚未接入。机制见[原生暴力搜索](architecture/vector-search.html#native-brute-force)。 |
+| 2026-09-16 | Knowhere 库加载采用 PR #1829 的上游 Java/JNI 产物 | 用户指定 `LawrenceTL92/knowhere-contrib` 的 `codex/knowhere-jni-pr` 分支，构建固定提交 `9dc2b8ad537502d408bc33af05727453295d6622`。C 接口、JNI、Java API、平台选择、校验和、临时提取与依赖加载都由上游维护；Connector 的 `NativeVectorLibrary` 调用 `io.knowhere.Knowhere.cAbiVersion()` 触发加载，校验 C ABI=1 并提供版本信息，失败直接传播。替换本仓库自行实现 `mv_*` shim/JNI 的计划，避免重复维护绑定与加载器；更正 modules.md 原先「Knowhere 没有 C 接口和 Python 绑定」的说法。Java API 基线为 11，不引入 Arrow/Spark，assembly 保留 `io.knowhere` 包名及上游资源布局；JRE `libjsig` 在 JVM 启动前预加载。当前交付仅为库加载，决策 21 的索引格式、解码依赖与失败策略仍开放。契约见[第 6.1 节](architecture/vector-search.html#library-loading)。 |
 | 2026-09-15 | issue #125 开发方案与索引格式说明 | 新增 [vector-search.html](architecture/vector-search.html) 草稿，以 refactor/v2 a070569 为基线；查询入口、V7 能力和回退范围保留在开放决策 16、21，尚未批准或实现。修正原加载描述：需要解析事件与 payload 编码，SLICE_META 只在切片时存在，16 MiB 不是解码常量；快照段 index_files 与 V3 数据 Manifest 的索引登记是不同来源。决策 16 的 JVM 对拍文字按 2026-09-14 已定政策纠正；snapshot.html 的索引能力编号由 R7 改为 V2。 |
 | 2026-09-09 | 版本号与分支 | 2.0.0，refactor/v2 |
 | 2026-09-09 | 谓词求值位置 | 核心层 |

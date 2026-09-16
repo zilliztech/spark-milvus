@@ -12,6 +12,7 @@ import org.apache.spark.sql.connector.catalog.{
 import org.apache.spark.sql.connector.read.ScanBuilder
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.types.{
+  DoubleType,
   LongType,
   MetadataBuilder,
   StructField,
@@ -25,6 +26,7 @@ import com.zilliz.spark.connector.options.{MilvusOption, ReadMode}
 import com.zilliz.spark.connector.read.MilvusScanBuilder
 import com.zilliz.spark.connector.types.SparkTypes
 import com.zilliz.spark.connector.write.MilvusV3WriteBuilder
+import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** One collection as one table load sees it: the [[Snapshot]] `MilvusTables`
   * resolved through `SnapshotSources`, the Spark schema derived from it, and
@@ -204,6 +206,17 @@ case class MilvusTable(
       rejectLegacyAliases: Boolean
   ): StructType = {
     var fields = baseSchema.fields.toSeq
+    if (milvusOption.vectorSearch.exists(_.mode == "index")) {
+      require(
+        !fields.exists(_.name == MilvusOption.VectorSearchScore),
+        "Collection field conflicts with vector search _score"
+      )
+      fields = fields :+ StructField(
+        MilvusOption.VectorSearchScore,
+        DoubleType,
+        nullable = false
+      )
+    }
 
     def failIfPresent(alias: String, canonical: String): Unit = {
       if (rejectLegacyAliases && fields.exists(_.name == alias)) {
@@ -275,7 +288,7 @@ case class MilvusTable(
               "Snapshot schema cannot provide Milvus timestamp field id 1"
             )
           )
-      if (timestamp.dataType != io.milvus.grpc.schema.DataType.Int64) {
+      if (timestamp.dataType != MilvusDataType.Int64) {
         throw new IllegalArgumentException(
           s"Snapshot field id 1 must be the Int64 timestamp, got ${timestamp.dataType}"
         )

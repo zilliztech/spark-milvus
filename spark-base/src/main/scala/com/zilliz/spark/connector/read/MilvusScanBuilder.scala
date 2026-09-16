@@ -43,6 +43,7 @@ class MilvusScanBuilder(
   override def isPartiallyPushed: Boolean = true
   private var currentOptions = options
   private val extraColumns = MilvusOption.extraColumns(options)
+  private val vectorSearch = MilvusOption(options).vectorSearch
 
   // Filters accepted by the connector. This remains empty until predicate
   // pushdown can preserve the complete Spark SQL semantics.
@@ -58,6 +59,11 @@ class MilvusScanBuilder(
               .mkString(", ")}"
         )
       )
+    }
+
+    if (vectorSearch.exists(_.mode == "index")) {
+      currentSchema = StructType(requestedFields)
+      return
     }
 
     def fieldId(field: StructField): Long = {

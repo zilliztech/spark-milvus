@@ -11,10 +11,10 @@
 | R1 | collection 是一张表 | `spark.table("milvus.db.coll")`；SQL 里直接写三段名 | spark.catalog | 已知名字用现有 `getCollectionInfo` 取得 collection id；SHOW/LIST 另属 C1 | P1 |
 | R2 | 读固定快照 | loadTable 的 `version` 指快照名，`timestamp` 指时间点；缺省最新 | core.snapshot、spark.catalog | 表加载（`getTable` / `loadTable`）解析一次，Table、schema、统计与 Scan 共用同一个 `Snapshot`；快照无保留策略，旧快照的段可能已被 compaction 或 GC 回收（README 第 5 节） | P0 |
 | R3 | 读不经 Milvus 服务 | 只配对象存储凭证即可读 | core.snapshot、core.path、core.credential、core.read | driver 的每个 ObjectStore 只活到 Snapshot 或删除文件清单物化完成，成功失败都关闭；Milvus 元数据里的 `s3://endpoint:port/bucket/key` 只在已知元数据边界按已配置端点识别，用户 URI 仍按标准 S3 规则解析；凭证在 executor 上按需刷新，不由 driver 下发一次性的静态值 | P0 |
-| R4 | 列式扫描，向量可零拷贝 | `milvus.read.columnar=true`；向量原始字节再设 `milvus.read.vector.raw=true`；默认仍为行式 | core.read.exec、spark.read、native-storage | 行式与列式消费同一个 `SegmentReader`；已知行数的段在读到 EOF 时统一核对物理输出行数，短读直接失败；列组文件只认 Parquet，Vortex 列组见第 10 节 | P0 |
+| R4 | 列式扫描，向量可零拷贝 | 默认 `milvus.read.columnar=true`，设为 false 使用行式；向量原始字节再设 `milvus.read.vector.raw=true`；向量搜索仍走行式 | core.read.exec、spark.read、native-storage | 行式与列式消费同一个 `SegmentReader`；已知行数的段在读到 EOF 时统一核对物理输出行数，短读直接失败；列组文件只认 Parquet，Vortex 列组见第 10 节 | P0 |
 | R5 | 列裁剪 | `select`，可再用 `fieldIDs` 限定数值字段 id | spark.read → core.manifest 选列组 → core.read.plan | 字段 id 只取自快照 schema 的 `milvus.field_id` metadata；`fieldIDs` 在 inferSchema 和 Table 都生效，外部 schema 必须选同一组 id 且名称、类型不冲突；缺失、未知或非数值 id 报错，不按列序号猜 | P0 |
 | R6 | 谓词下推：Spark 谓词 | `where` 里的比较、IN、IS NULL、字符串前后缀、AND、OR、NOT | spark.expr 翻成 IR → core.expr 求值 | 只实现 DataSource V2 谓词，不实现 V1 Filter（第 9 节） | P1 |
-| R7 | 谓词下推：Milvus 表达式 | 表 option `milvus.filter`（2.0 新增），字符串按 Milvus 文法 | core.expr 用 Milvus 的表达式文法（Plan.g4）解析并求值 | JSON、Array、json_contains 语义按 Milvus 源码逐条复刻 | P1 |
+| R7 | 谓词下推：Milvus 表达式 | 已实现 MilvusSearch 的 filter 标量子集；表 option `milvus.filter` 仍待接入 | core.expr 用 Milvus 的表达式文法（Plan.g4）解析并求值 | 当前比较、IN、IS NULL、逻辑运算；JSON、Array、json_contains 待按 Milvus 源码逐条复刻 | P1 |
 | R8 | 删除生效 | 默认自动；`milvus.read.apply.deletes=false` 可显式关闭 | core.delete、core.read.plan、core.read.exec | driver 只把段内、本分区 L0 与全 collection L0 的删除文件描述装进任务；executor 读取、合并并关闭这些文件，读不到就让 task 失败，不返回空删除计划。`_delta/` 两种编码都认（决策 13 撤销）。backfill 按物理行对齐列组时不应用删除，那是 W2 内部读法 | P0 |
 | R9 | 段级剪枝 | 自动；主键等值和 IN 用段统计文件里的布隆过滤器剪段 | core.stats 出剪枝结果，core.snapshot 过滤段列表 | Milvus 侧写统计（README 第 5 节） | P1 |
 | R10 | row group 级剪枝 | 自动；标量列 min/max | core.stats 出剪枝结果，core.read.plan 执行 | 同上 | P1 |
@@ -64,16 +64,17 @@ Table 接口表达不了的动作走 CALL：四条线走同一个 SQL 语法扩�
 
 ## 5 向量与索引
 
-向量能力整组排 P2：加载、写出、缓存都要先有 knowhere 的 C 封装。
+向量能力整组排 P2：原生接口采用 Knowhere PR #1829 的固定提交。V1 当前交付库加载、C ABI 校验及版本查询；V5 为现有逐段查询接入原生 BruteForce。索引文件加载、写出、缓存仍待实现。
 
-issue #125 的[索引查询开发方案](architecture/vector-search.html)处于评审阶段：细化 V1、V2 和 V4 的持久化加载部分，并提议 V7 集合级向量查询。V7 尚未加入正式能力行，实现前须先确定 README 第 4 节的相关决策。
+issue #125 的[索引查询开发方案](architecture/vector-search.html)中，[库加载契约](architecture/vector-search.html#library-loading)已经确定；V1 的索引执行、V2 和 V4 的持久化加载部分及提议的 V7 集合级向量查询仍待评审。V7 尚未加入正式能力行，实现前须先确定 README 第 4 节的相关决策。
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
-| V1 | knowhere 封装 | 仓库内经 core.index 调用；下游算子直接依赖 native-vector | native-vector | knowhere 的 C shim | P2 |
+| V1 | Knowhere 接入 | NativeVectorLibrary 加载及版本查询；NativeVectorIndex 包装持久化加载和搜索 | native-vector | 固定 Knowhere PR #1829 的 Java/JNI/原生产物，C ABI=1；Cardinal 文件要求对应构建特性 | P2 |
 | V2 | 加载 Milvus 建的索引 | 自动；按快照或 Manifest 里的索引文件 | core.index | 保留快照段记录的 index_files；使用 Manifest 索引登记时须核验目标版本（README 第 5 节）。加载契约见[方案](architecture/vector-search.html#metadata) | P2 |
 | V4 | 索引来源与缓存 | 自动；Milvus 建的、Spark 写回的、任务内即时建的三级，按 (build id, 索引版本, 段, 字段) 缓存 | core.index | | P2 |
-| V5 | 暴力搜索 | 入口与归属见决策 16 | native-vector 的 bruteforce | 决策 16 | P2 |
+| V5 | 暴力搜索 | 现有 vector.search.*，每段 TopK | spark.read、core.index、native-vector | 上游 Knowhere.bruteForce；[执行设计](architecture/vector-search.html#native-brute-force)；集合级入口仍见决策 16 | P2 |
+| V7 | 持久化索引向量查询 | MilvusSearch.search 返回带全局 TopK 的 DataFrame | spark.read、core.index | V2、R7、SegmentReader.take；[查询契约](architecture/vector-search.html#api) | P2 |
 
 ## 6 兼容入口
 
@@ -122,11 +123,8 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 |---|---|
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
 | A7 | 清理暂存要 `spark.procedure`，那个包目前是空的，等第 3 层拆分 |
-| R6 | Spark 谓词下推要 `spark.expr` 翻成 IR 再由 `core.expr` 求值，两个包都是零文件。`MilvusScanBuilder` 暂时保留 V1 的 `SupportsPushDownFilters` 接口，但不接受任何 `Filter`，全部作为 residual 交还 Spark 求值；接口选型见 README 第 4 节决策 20 |
-| R7 | Milvus 表达式要 `core.expr` 按 Plan.g4 解析求值，零文件 |
+| R6 | Spark 谓词下推要 `spark.expr` 翻成 IR；`core.expr` 已有 R7 标量子集，Spark 翻译尚未落地。`MilvusScanBuilder` 暂时保留 V1 的 `SupportsPushDownFilters` 接口，但不接受任何 `Filter`，全部作为 residual 交还 Spark 求值；接口选型见 README 第 4 节决策 20 |
 | A2 | 建索引、删索引的 CALL 要 `spark.procedure`（3.5 线是 `spark.functions`），全部是空壳；client 侧还要新增三个 RPC |
 | A3 | load / release / flush / compact 的 CALL，同 A2；client 侧还要新增三个 RPC |
 | A5 | describe 的 CALL，同 A2 |
-| V1 | knowhere 的 C shim 与 JNI 要 `native-vector`，目前只有 package-info.java |
-| V2 | 加载 Milvus 建的索引要 `core.index`，零文件 |
-| V4 | 索引来源与缓存要 `core.index`，零文件 |
+| V4 | 持久化索引来源已跟随快照传递；跨任务缓存、其他来源仍未实现，当前每个查询任务持有并关闭自己的索引 |

@@ -119,6 +119,18 @@ public final class StorageNative {
     public static native void readerDestroySegment(long readerHandle);
 
     /**
+     * Retrieves sorted, unique, nonnegative physical row indices using {@code loon_take}.
+     *
+     * <p>The indices must not be empty and parallelism must be positive. Null or
+     * empty columns use the reader's default projection. The returned handle owns
+     * the selected batches independently of the source reader; consume it through
+     * {@link #recordBatchReaderReadNext} and release it with
+     * {@link #recordBatchReaderDestroy}, including when consumption stops early.
+     */
+    public static native long readerTake(
+            long readerHandle, long[] rowIndices, String[] columns, int parallelism);
+
+    /**
      * Opens the per-batch reader.
      *
      * <p>Deliberately not the {@code ArrowArrayStream} form: Arrow Java's

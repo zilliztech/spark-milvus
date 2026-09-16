@@ -1,12 +1,17 @@
 package com.zilliz.spark.connector.options
 
+import java.lang.{Float => JavaFloat}
 import java.net.URI
+import java.util.Locale
 import scala.collection.Map
 
+import com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.client.api.MilvusConnectionParams
+import com.zilliz.milvus.storage.expr.PlanParser
 
 /** Vector search configuration for Milvus Storage V2
   */
@@ -14,7 +19,11 @@ case class VectorSearch(
     queryVector: Array[Float],
     topK: Int,
     metricType: String,
-    vectorColumn: String
+    vectorColumn: String,
+    mode: String = "brute_force",
+    searchParameters: Map[String, String] = Map.empty,
+    filter: Option[String] = None,
+    allowUnindexed: Boolean = false
 )
 
 case class MilvusOption(
@@ -119,6 +128,11 @@ object MilvusOption {
   val VectorSearchMetric = "vector.search.metric"
   val VectorSearchVectorColumn = "vector.search.column"
   val VectorSearchIdColumn = "vector.search.idColumn"
+  val VectorSearchMode = "vector.search.mode"
+  val VectorSearchParameters = "vector.search.parameters"
+  val VectorSearchFilter = "vector.search.filter"
+  val VectorSearchAllowUnindexed = "vector.search.allowUnindexed"
+  val VectorSearchScore = "_score"
 
   // s3 config
   val S3FileSystemTypeName = "s3.fs"
@@ -615,106 +629,139 @@ object MilvusOption {
         trimmed
       }
 
+    val searchKeys = Seq(
+      VectorSearchQueryVector,
+      VectorSearchTopK,
+      VectorSearchMetric,
+      VectorSearchVectorColumn,
+      VectorSearchMode,
+      VectorSearchParameters,
+      VectorSearchFilter,
+      VectorSearchAllowUnindexed
+    )
+    if (!searchKeys.exists(options.containsKey)) return None
     val queryVectorStr = value(VectorSearchQueryVector)
     val topKStr = value(VectorSearchTopK)
-    val metricTypeStr = value(VectorSearchMetric)
-    val vectorColumnStr = value(VectorSearchVectorColumn)
-
-    if (
-      Seq(queryVectorStr, topKStr, metricTypeStr, vectorColumnStr).forall(
-        _.isEmpty
-      )
-    ) {
-      return None
-    }
-    if (queryVectorStr.isEmpty) {
+    if (queryVectorStr.isEmpty || topKStr.isEmpty) {
       throw new IllegalArgumentException(
         s"Options '$VectorSearchQueryVector' and '$VectorSearchTopK' must be set together"
       )
     }
-    if (topKStr.isEmpty) {
-      throw new IllegalArgumentException(
-        s"Options '$VectorSearchQueryVector' and '$VectorSearchTopK' must be set together"
-      )
-    }
-
-    try {
-      val queryVector = parseQueryVector(queryVectorStr.get)
-      val topK =
-        try topKStr.get.toInt
-        catch {
-          case _: NumberFormatException =>
-            throw new IllegalArgumentException(
-              s"Option '$VectorSearchTopK' must be a positive integer, got '${topKStr.get}'"
-            )
-        }
-      if (queryVector.isEmpty) {
-        throw new IllegalArgumentException(
-          s"Option '$VectorSearchQueryVector' must contain at least one number"
-        )
-      }
-      if (topK <= 0) {
-        throw new IllegalArgumentException(
-          s"Option '$VectorSearchTopK' must be positive, got '$topK'"
-        )
-      }
-      val metricType = metricTypeStr
-        .getOrElse("L2")
-        .toUpperCase
-      if (!Set("L2", "IP", "COSINE").contains(metricType)) {
-        throw new IllegalArgumentException(
-          s"Option '$VectorSearchMetric' must be one of L2, IP or COSINE, got '$metricType'"
-        )
-      }
-      val vectorColumn = vectorColumnStr.getOrElse("vector")
-
-      Some(VectorSearch(queryVector, topK, metricType, vectorColumn))
-    } catch {
-      case e: IllegalArgumentException => throw e
-      case e: Exception =>
-        throw new IllegalArgumentException(
-          s"Invalid vector search options: ${e.getMessage}",
-          e
-        )
-    }
-  }
-
-  /** Parse query vector from JSON string format Expected format: "[0.1, 0.2,
-    * 0.3, ...]"
-    */
-  private def parseQueryVector(jsonStr: String): Array[Float] = {
-    val trimmed = jsonStr.trim
-    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
-      throw new IllegalArgumentException(
-        s"Option '$VectorSearchQueryVector' must be a JSON-style numeric array, got '$jsonStr'"
-      )
-    }
-    val body = trimmed.substring(1, trimmed.length - 1).trim
-    if (body.isEmpty) return Array.empty[Float]
-    body
-      .split(",", -1)
-      .map { value =>
-        val number = value.trim
-        if (number.isEmpty) {
+    val queryVector = parseQueryVector(queryVectorStr.get)
+    val topK =
+      try topKStr.get.toInt
+      catch {
+        case _: NumberFormatException =>
           throw new IllegalArgumentException(
-            s"Option '$VectorSearchQueryVector' contains an empty element in '$jsonStr'"
+            s"Option '$VectorSearchTopK' must be a positive integer, got '${topKStr.get}'"
           )
-        }
-        val parsed =
-          try number.toFloat
+      }
+    require(
+      topK > 0,
+      s"Option '$VectorSearchTopK' must be positive, got '$topK'"
+    )
+    val metricType = value(VectorSearchMetric)
+      .getOrElse("L2")
+      .toUpperCase(Locale.ROOT)
+    val vectorColumn = value(VectorSearchVectorColumn).getOrElse("vector")
+    require(
+      Set("L2", "IP", "COSINE").contains(metricType),
+      s"Option '$VectorSearchMetric' must be one of L2, IP or COSINE, got '$metricType'"
+    )
+    val mode = value(VectorSearchMode).getOrElse("brute_force")
+    require(
+      Set("index", "brute_force").contains(mode),
+      s"Unknown '$VectorSearchMode': '$mode'"
+    )
+    val filter =
+      Option(options.get(VectorSearchFilter)).map(_.trim).filter(_.nonEmpty)
+    filter.foreach(PlanParser.parse)
+    val parameters = value(VectorSearchParameters)
+      .map { json =>
+        import scala.jdk.CollectionConverters._
+        val node =
+          try new ObjectMapper().enable(FAIL_ON_TRAILING_TOKENS).readTree(json)
           catch {
-            case _: NumberFormatException =>
+            case e: Exception =>
               throw new IllegalArgumentException(
-                s"Option '$VectorSearchQueryVector' contains a non-numeric value '$number'"
+                s"Option '$VectorSearchParameters' must be a JSON object",
+                e
               )
           }
-        if (!java.lang.Float.isFinite(parsed)) {
-          throw new IllegalArgumentException(
-            s"Option '$VectorSearchQueryVector' contains a non-finite value '$number'"
-          )
-        }
-        parsed
+        require(
+          node != null && node.isObject,
+          s"Option '$VectorSearchParameters' must be a JSON object"
+        )
+        node
+          .fields()
+          .asScala
+          .map { e =>
+            require(
+              e.getValue.isValueNode && !e.getValue.isNull,
+              s"Option '$VectorSearchParameters' must contain scalar values"
+            )
+            e.getKey -> e.getValue.asText()
+          }
+          .toMap
       }
+      .getOrElse(Map.empty[String, String])
+    val allowUnindexed = value(VectorSearchAllowUnindexed)
+      .map(_.toLowerCase(Locale.ROOT))
+      .map {
+        case "true"  => true
+        case "false" => false
+        case other =>
+          throw new IllegalArgumentException(
+            s"Option '$VectorSearchAllowUnindexed' must be 'true' or 'false', got '$other'"
+          )
+      }
+      .getOrElse(false)
+    require(
+      mode == "index" || (filter.isEmpty && parameters.isEmpty && !allowUnindexed),
+      "Filter, search parameters and unindexed fallback require vector.search.mode=index"
+    )
+    Some(
+      VectorSearch(
+        queryVector,
+        topK,
+        metricType,
+        vectorColumn,
+        mode,
+        parameters,
+        filter,
+        allowUnindexed
+      )
+    )
+  }
+
+  /** Parse the nonempty JSON numeric array used as the search vector. */
+  private def parseQueryVector(jsonStr: String): Array[Float] = {
+    val node =
+      try new ObjectMapper().enable(FAIL_ON_TRAILING_TOKENS).readTree(jsonStr)
+      catch {
+        case e: Exception =>
+          throw new IllegalArgumentException(
+            s"Option '$VectorSearchQueryVector' must be a JSON numeric array",
+            e
+          )
+      }
+    require(
+      node != null && node.isArray && node.size() > 0,
+      s"Option '$VectorSearchQueryVector' must be a nonempty JSON array"
+    )
+    Array.tabulate(node.size()) { index =>
+      val value = node.get(index)
+      require(
+        value.isNumber,
+        s"Option '$VectorSearchQueryVector' elements must be numbers"
+      )
+      val parsed = value.floatValue()
+      require(
+        JavaFloat.isFinite(parsed),
+        s"Option '$VectorSearchQueryVector' contains a non-finite value"
+      )
+      parsed
+    }
   }
 
   def isInt64PK(milvusPKType: String): Boolean = {

@@ -133,6 +133,14 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       case Nil          => None
     }
     override def deliveredRows: Long = 0L
+    override def take(
+        rowIndices: Array[Long],
+        columns: Seq[String],
+        parallelism: Int
+    ): SegmentReader.TakeResult =
+      throw new UnsupportedOperationException(
+        "this sequential batch fixture does not support take"
+      )
     override def close(): Unit = closed = true
   }
 

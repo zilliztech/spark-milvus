@@ -1,15 +1,9 @@
 package com.zilliz.spark.connector.read
 
 import org.apache.arrow.memory.BufferAllocator
-import org.apache.arrow.vector.{
-  BigIntVector,
-  VarBinaryVector,
-  VarCharVector,
-  VectorSchemaRoot
-}
+import org.apache.arrow.vector.{BigIntVector, ValueVector, VectorSchemaRoot}
 import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.exec.{
@@ -146,39 +140,12 @@ object ColumnBinding {
   private[read] def rowDeleted(
       deletePlan: DeletePlan,
       pkField: FieldSchema,
-      pkVector: org.apache.arrow.vector.ValueVector,
+      pkVector: ValueVector,
       tsVector: BigIntVector,
       rowIndex: Int,
       pkColumnName: String
   ): Boolean = {
-    if (pkVector.isNull(rowIndex) || tsVector.isNull(rowIndex)) {
-      false
-    } else {
-      val rowTs = tsVector.get(rowIndex)
-      pkField.dataType match {
-        case DataType.Int64 =>
-          deletePlan.containsLongPk(
-            pkVector.asInstanceOf[BigIntVector].get(rowIndex),
-            rowTs
-          )
-        case DataType.VarChar =>
-          val value = pkVector match {
-            case v: VarCharVector =>
-              UTF8String.fromBytes(v.get(rowIndex)).toString
-            case v: VarBinaryVector =>
-              UTF8String.fromBytes(v.get(rowIndex)).toString
-            case other =>
-              throw new IllegalStateException(
-                s"V2 delete filtering expected VarChar/VarBinary PK vector for $pkColumnName, got ${other.getClass.getSimpleName}"
-              )
-          }
-          deletePlan.containsStringPk(value, rowTs)
-        case other =>
-          throw new IllegalArgumentException(
-            s"V2 delete filtering only supports Int64/VarChar PKs, got $other"
-          )
-      }
-    }
+    DeletePlans.rowDeleted(deletePlan, pkField, pkVector, tsVector, rowIndex)
   }
 
   /** Builds the setup for whichever line the partition belongs to.
@@ -228,9 +195,9 @@ final case class V2ColumnBinding(
   override val timestampColumnName: String =
     fieldMappings.fieldIdToName.getOrElse(1L, "Timestamp")
 
-  override val neededColumns: Seq[String] = {
+  override lazy val neededColumns: Seq[String] = {
     val columnGroups = task.layout match {
-      case com.zilliz.milvus.storage.snapshot.SegmentLayout.ColumnGroups(gs) =>
+      case SegmentLayout.ColumnGroups(gs) =>
         gs
       case other =>
         throw new IllegalArgumentException(
@@ -406,7 +373,7 @@ final case class V3ColumnBinding(
   override val timestampColumnName: String =
     V3ColumnBinding.TimestampColumnName
 
-  override val neededColumns: Seq[String] = {
+  override lazy val neededColumns: Seq[String] = {
     val requested = if (task.neededFieldIds.nonEmpty) {
       val knownIds = fieldNameToId.values.toSet
       val missingIds = task.neededFieldIds.filterNot(knownIds)

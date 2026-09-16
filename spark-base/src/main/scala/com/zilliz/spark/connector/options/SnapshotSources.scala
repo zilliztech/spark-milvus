@@ -1,6 +1,10 @@
 package com.zilliz.spark.connector.options
 
+import java.util.Base64
+import scala.collection.{Map => CollectionMap}
 import scala.util.control.NonFatal
+
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.client.api.MilvusClient
 import com.zilliz.milvus.storage.compat.backup.BackupSnapshotSource
@@ -14,6 +18,7 @@ import com.zilliz.milvus.storage.snapshot.{
   V2SegmentResolver
 }
 import com.zilliz.milvus.storage.snapshot.json.{SegmentListJson, SnapshotJson}
+import io.milvus.grpc.schema.CollectionSchema
 
 /** Which fixed snapshot a table load asks the client-backed source to resolve.
   * The DataSource entry keeps its configured name-or-latest behavior; Catalog
@@ -33,9 +38,9 @@ private[connector] object SnapshotReference {
   *
   * `MilvusTables` calls `forRead` with `withSegments = true` once for either
   * `getTable` or `loadTable`, then hands the `Snapshot` to the table and scan.
-  * `inferSchema` calls it with `withSegments = false`: the snapshot JSON or
-  * backup meta is read for the schema, but no parquet footer is opened and the
-  * result has no segments.
+  * `inferSchema` calls it with `withSegments = false`: backup segment loading
+  * and V2 parquet footer resolution are skipped. Catalog snapshots still read
+  * segment Avro metadata to validate index descriptors; V3 layouts remain.
   */
 object SnapshotSources {
 
@@ -86,7 +91,12 @@ object SnapshotSources {
         }
       case ReadMode.Client =>
         val bucket =
-          StorageOptions.resolveConnectorS3Bucket(milvusOption.options)
+          if (
+            StorageOptions
+              .optionValue(milvusOption.options, StorageProperties.StorageType)
+              .contains(StorageProperties.StorageTypeLocal)
+          ) ""
+          else StorageOptions.resolveConnectorS3Bucket(milvusOption.options)
         managedSource(
           StorageOptions.storeFor(
             StorageOptions.buildHadoopConfForOptions(milvusOption.options, ""),
@@ -218,9 +228,9 @@ object SnapshotSources {
     }
   }
 
-  private def caseInsensitive(options: scala.collection.Map[String, String]) = {
+  private def caseInsensitive(options: CollectionMap[String, String]) = {
     import scala.jdk.CollectionConverters._
-    new org.apache.spark.sql.util.CaseInsensitiveStringMap(options.asJava)
+    new CaseInsensitiveStringMap(options.asJava)
   }
 }
 
@@ -336,7 +346,7 @@ final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
       .getOrElse(Seq.empty)
     val schemaBytes = option(MilvusOption.SnapshotSchemaBytes)
       .map { base64 =>
-        try java.util.Base64.getDecoder.decode(base64)
+        try Base64.getDecoder.decode(base64)
         catch {
           case NonFatal(e) =>
             throw new IllegalArgumentException(
@@ -355,9 +365,7 @@ final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
         }
       })
       .getOrElse(
-        io.milvus.grpc.schema
-          .CollectionSchema(name = milvusOption.collectionName)
-          .toByteArray
+        CollectionSchema(name = milvusOption.collectionName).toByteArray
       )
     val collectionId =
       option(MilvusOption.SnapshotCollectionId).map(_.toLong).getOrElse(0L)

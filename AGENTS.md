@@ -24,7 +24,7 @@ every rule below refers to.
 
 | Layer | Modules | What lives there |
 |---|---|---|
-| 1 | `native-storage`, `native-vector` | JNI over two C libraries: milvus-storage's `loon_*` and a `mv_*` shim around knowhere. Nothing above this layer loads a `.so`. |
+| 1 | `native-storage`, `native-vector` | Storage JNI over milvus-storage's `loon_*`; vector library loading through Knowhere's upstream C/JNI and Java API. Nothing above this layer loads a `.so`. |
 | 2 | `core`, `compat`, `client` | The Milvus storage format and the client for the online service. All computation happens here. No Spark: a source file mentioning `org.apache.spark` fails the build. |
 | 3 | `spark-base`, `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | The DataSource V2 surface. `spark-base` is a shared source directory, not a project; each line project compiles it against its own Spark, Arrow, antlr and Java version. |
 | 4 | `apps-4.0` | The jobs users run: backfill, brute-force search, diagnostic tools, the legacy gRPC insert path. |
@@ -34,17 +34,18 @@ suites need a live Milvus and MinIO.
 
 Only layer 3 splits per Spark line, because the interfaces differ there.
 `ProcedureCatalog` exists only in Spark 4.0 and later, and Arrow, antlr and the
-Java target are pinned per line. The fat jar is an `assembly` task on
-`spark-<line>`, not a module of its own. [README.md](README.md) has the full
-module table.
+Java target are pinned per line. Each `spark-<line>` declares an `assembly`
+task, not another module. During migration, the usable fat jar is still root's
+`assembly`: its merge and shading rules are not yet wired into the per-line
+tasks. [README.md](README.md) has the full module table.
 
 ## Where the work stands
 
 The design documents describe the finished 2.0. Most of layer 2's computation is
 not written yet. Read them as a target, not as a description of the code.
 
-Done: the 1.x sources are all in their modules and `src/` no longer exists. 641
-unit tests pass. `core` has schema, codec, snapshot, manifest, delete, path,
+Done: the 1.x sources are all in their modules and `src/` no longer exists.
+`core` has schema, codec, snapshot, manifest, delete, path,
 credential and `io.ObjectStore` over the native filesystem; `compat` has the V2
 packed and backup entry points; `client` has the RPCs required by the currently
 implemented paths, including ListDatabases and ShowCollections for read-only
@@ -52,20 +53,21 @@ Catalog discovery.
 Every driver-side read opens storage through that one store, and no source file
 in `core` or `compat` mentions `org.apache.hadoop`.
 
-Not written: `expr`, `index`, `stats` and `write.commit` in core. Their
-`package.scala` files exist and state what belongs there. `read.plan` holds
-the task description, `read.exec` opens the native reader, `write.exec` opens
-the native writer and commits the manifest; the driver-side partition builder
-and the job-level commit are still to come.
+`core.index` loads persisted index files and executes vector queries through
+Knowhere; `BruteForceSearch` retains the per-segment brute-force path.
+`core.expr` implements the validated scalar subset of Milvus expressions.
+Index caching and writing remain unwritten. `stats` writes primary-key bloom filters; `write.commit` holds
+job manifests and registration. `read.plan` builds tasks and lists delete files;
+`read.exec` reads them on the executor and opens the segment reader.
 
 Layer 3 is split by package: `sources` holds only the `format("milvus")`
 entry point, `table` the table, `read` the scan builder, the scan and the
-executor-side readers, `read.plan` the partition builder and delete planning,
+executor-side readers,
 `write` the two writers, `options` the option parsing, the driver's storage
 access and the choice of `SnapshotSource` for a read, `types` the type
 mapping. DataSource `getTable` and Catalog `loadTable` share `MilvusTables`,
 which resolves the `Snapshot` once before the table carries it to the scan;
-moving the partition builder into `core.read.plan` is the next step. `catalog`
+partition planning is in `core.read.plan`. `catalog`
 implements three-part table loading and latest/name/timestamp
 snapshot selection. It also maps Milvus databases to one-level Spark
 namespaces and collections to tables for `SHOW NAMESPACES` and `SHOW TABLES`;
@@ -76,7 +78,11 @@ and `V3` everywhere, after the snapshot's `storage_version`.
 Layer 1 is written and in use: `native-storage` wraps the `loon_*` entry points
 for both reading and writing and loads its own libraries. The upstream
 milvus-storage Java binding is out of the build, so the 3.5 line cross-compiles
-for Scala 2.12 again. `native-vector` is still a placeholder.
+for Scala 2.12 again. `native-vector` integrates loading and BruteForce from the pinned
+Knowhere PR #1829 artifacts; Knowhere owns the C interface, JNI, Java API and
+native resource loader. Persisted HNSW loading uses upstream BinarySet and index
+search APIs; Cardinal stream files require a Cardinal-enabled build. Real-file
+compatibility and validation results are recorded in the vector search design.
 
 Six design questions are still open: 10, 16, 19, 20, 21 and 22 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
@@ -116,7 +122,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How does Catalog discovery work, and how does a three-part table name select one fixed snapshot? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — one-level namespaces, table listing, absence and failure semantics, catalog configuration, identifier rules, latest/version/timestamp selection, HybridTS conversion and the read-only boundary |
 | How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment still lacks before registration, the development outline |
 | How does a `CALL milvus.system.<name>(...)` statement become a call? | [docs/design/architecture/procedure.html](docs/design/architecture/procedure.html) — the grammar, the parser extension, the logical node and strategy, what is generated per Spark line, the procedure interface; design under review (#17) |
-| How will vector queries use persisted Milvus indexes? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — issue #125 development proposal: index metadata, native loading, filtering, row retrieval, global TopK and validation; pending review |
+| How do vector queries use persisted Milvus indexes? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — issue #125 index metadata, Knowhere loading, pre-search filtering, projected row retrieval, global TopK and real-instance validation; the existing BruteForce entry point is documented separately |
 | What is a Snapshot, and how do the four read entry points become one? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html) — `Snapshot` and `Segment`, the three delete states, what each source cannot supply, `SnapshotCatalog`, the boundary to `SegmentReadTask`. Draft under review |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
 | Illustrated version of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) |
@@ -258,6 +264,10 @@ follow-up.
 
 Code, comments, build scripts and `README.md` are English. The design documents
 under `docs/design` are Chinese. Do not mix within a file.
+
+Use imports and short type or object names in code; follow the
+[import rules](docs/contributing.md#imports) instead of writing fully qualified
+names at call sites or in type annotations.
 
 ## Keeping the index true
 

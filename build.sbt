@@ -43,6 +43,7 @@ lazy val root = project
 
 // Layer 1: the two native library wrappers. Plain Java, no Scala suffix.
 lazy val nativeStorage = Project("native-storage", file("native-storage"))
+  .settings(KnowhereBuild.storageSettings)
   .settings(
     name := "native-storage",
     moduleName := "spark-milvus-native-storage",
@@ -58,6 +59,12 @@ lazy val nativeVector = Project("native-vector", file("native-vector"))
     name := "native-vector",
     moduleName := "spark-milvus-native-vector",
     Modules.javaOnly,
+    KnowhereBuild.settings,
+    libraryDependencies ++= Seq(
+      "junit" % "junit" % "4.13.2" % Test,
+      "com.github.sbt" % "junit-interface" % "0.13.3" % Test
+    ),
+    Test / fork := true,
     publish / skip := true
   )
 
@@ -335,7 +342,10 @@ lazy val rootAssemblySettings: Seq[Setting[_]] = Seq(
     // Arrow JNI bindings contain hardcoded class names, so Arrow stays unshaded.
   ),
   assembly / assemblyMergeStrategy := {
-    case PathList("native", xs @ _*) => MergeStrategy.first
+    // Knowhere's manifest checksums describe one complete native dependency set.
+    // Conflicting resources must fail packaging instead of selecting one copy.
+    case PathList("native", "knowhere", xs @ _*) => MergeStrategy.deduplicate
+    case PathList("native", xs @ _*)             => MergeStrategy.first
     case PathList("META-INF", "native-image", "io.netty", _*) =>
       MergeStrategy.discard
     case PathList("META-INF", "io.netty.versions.properties") =>
@@ -424,8 +434,15 @@ lazy val arch = System.getProperty("os.arch") match {
 lazy val gitBranch = {
   val branch = sys.env.getOrElse(
     "GIT_BRANCH",
+    // The JVM needs libjsig, but preloading it into git can pollute stdout.
     scala.util
-      .Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim)
+      .Try(
+        Process(
+          "git rev-parse --abbrev-ref HEAD",
+          None,
+          "LD_PRELOAD" -> ""
+        ).!!.trim
+      )
       .getOrElse("unknown")
   )
   branch.replaceAll("[^a-zA-Z0-9._-]", "-")

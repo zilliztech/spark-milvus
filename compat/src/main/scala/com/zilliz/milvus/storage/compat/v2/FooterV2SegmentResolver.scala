@@ -61,21 +61,47 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
       endpoint: String = ""
   ): Either[Throwable, Seq[Segment]] = {
     try {
-      val out = scala.collection.mutable.ArrayBuffer.empty[Segment]
-      manifestPaths.foreach { rawPath =>
+      val entries = manifestPaths.map { rawPath =>
         val avroPath =
           metadataPath(rawPath, bucket, endpoint, "AVRO manifest").key
         val avroBytes = store.readAll(avroPath)
-        val entry =
-          SegmentManifestReader
-            .parse(avroBytes, manifestSchemaVersion) match {
-            case Right(e) => e
-            case Left(err) =>
-              throw new RuntimeException(
-                s"failed to decode segment manifest $avroPath: ${err.getMessage}",
-                err
-              )
-          }
+        SegmentManifestReader
+          .parse(avroBytes, manifestSchemaVersion) match {
+          case Right(e) => e
+          case Left(err) =>
+            throw new RuntimeException(
+              s"failed to decode segment manifest $avroPath: ${err.getMessage}",
+              err
+            )
+        }
+      }
+      resolveEntries(
+        entries,
+        bucket,
+        store,
+        applyDeletes,
+        storageScheme,
+        endpoint
+      )
+    } catch {
+      case NonFatal(e) => Left(e)
+    }
+  }
+
+  /** Resolve the Avro records already decoded by SnapshotCatalog, so index
+    * planning and V2 footer recovery use the same snapshot bytes.
+    */
+  def resolveEntries(
+      entries: Seq[AvroManifestEntry],
+      bucket: String,
+      store: ObjectStore,
+      applyDeletes: Boolean = true,
+      storageScheme: String = "s3a",
+      endpoint: String = ""
+  ): Either[Throwable, Seq[Segment]] = {
+    try {
+      val out = scala.collection.mutable.ArrayBuffer.empty[Segment]
+      entries.foreach { entry =>
         segmentFromEntry(
           entry,
           bucket,
