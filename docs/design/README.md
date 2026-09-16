@@ -145,7 +145,7 @@ flowchart LR
 | Catalog | 三段名 `milvus.db.coll`；loadTable 的 version 和 timestamp 对应快照名和时间点；createTable、dropTable 走 gRPC |
 | Table | schema 来自快照；元数据列 segment id、row offset、timestamp（名字见决策 5）；行数字节数来自快照；不实现 DeleteV2（能力表第 10 节） |
 | ScanBuilder | 列裁剪、DataSource V2 谓词、Limit、RuntimeV2Filtering；不实现 V1 Filter |
-| 旁路 | Spark 4 用 ProcedureCatalog 的 CALL，Spark 3.5 暴露为同名函数；清单见 capabilities.md 第 4 节 |
+| 旁路 | `CALL milvus.system.<name>(...)`，四条线同一个 SQL 语法扩展（[procedure.html](architecture/procedure.html)）；清单见 capabilities.md 第 4 节 |
 
 ### 2.7 产物与版本
 

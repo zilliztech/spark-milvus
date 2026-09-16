@@ -51,7 +51,7 @@
 
 ## 4 CALL
 
-Table 接口表达不了的动作走 CALL：Spark 4 用 ProcedureCatalog，Spark 3.5 是同名函数。
+Table 接口表达不了的动作走 CALL：四条线走同一个 SQL 语法扩展（决策日志 2026-09-10，设计见 [procedure.html](architecture/procedure.html)），不用 Spark 4.0 才有的 ProcedureCatalog，3.5 线不另做同名函数。
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
