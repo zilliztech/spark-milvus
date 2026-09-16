@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.types
 
+import org.apache.arrow.vector.types.pojo.ArrowType
 import org.apache.spark.sql.types.DataTypes
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -183,5 +184,50 @@ class SparkTypesTest extends AnyFunSuite with Matchers {
     an[DataParseException] should be thrownBy {
       SparkTypes.toDataType(fieldSchema)
     }
+  }
+
+  test(
+    "toDataType goes through the Arrow type: Text reads back as StringType"
+  ) {
+    // Text has no row in any Milvus-to-Spark table; ArrowTypes stores it as
+    // Utf8, so it arrives here as a string like VarChar does.
+    val fieldSchema = FieldSchema(dataType = MilvusDataType.Text)
+    SparkTypes.toDataType(fieldSchema) shouldBe DataTypes.StringType
+  }
+
+  test("JSON stays StringType although Arrow stores it as Binary") {
+    val fieldSchema = FieldSchema(dataType = MilvusDataType.JSON)
+    SparkTypes.toDataType(fieldSchema) shouldBe DataTypes.StringType
+    SparkTypes.fromArrow(
+      new ArrowType.Binary(),
+      MilvusDataType.JSON
+    ) shouldBe DataTypes.StringType
+  }
+
+  test("a nullable dense vector is still Array[Float]") {
+    val fieldSchema = FieldSchema(
+      dataType = MilvusDataType.FloatVector,
+      nullable = true,
+      typeParams = Seq(KeyValuePair("dim", "4"))
+    )
+    SparkTypes.toDataType(fieldSchema) shouldBe DataTypes.createArrayType(
+      DataTypes.FloatType
+    )
+  }
+
+  test("fromArrow refuses an Arrow Binary whose Milvus type it does not know") {
+    an[DataParseException] should be thrownBy {
+      SparkTypes.fromArrow(new ArrowType.Binary(), MilvusDataType.Int64)
+    }
+  }
+
+  test("toDataType converts Array with Int8 element to Spark Array[Short]") {
+    val fieldSchema = FieldSchema(
+      dataType = MilvusDataType.Array,
+      elementType = MilvusDataType.Int8
+    )
+    SparkTypes.toDataType(fieldSchema) shouldBe DataTypes.createArrayType(
+      DataTypes.ShortType
+    )
   }
 }

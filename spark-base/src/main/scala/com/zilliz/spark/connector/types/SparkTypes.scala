@@ -1,15 +1,18 @@
 package com.zilliz.spark.connector.types
 
+import org.apache.arrow.vector.types.pojo.ArrowType
+import org.apache.arrow.vector.types.FloatingPointPrecision
+import org.apache.spark.sql.types.{ArrayType, DataTypes, MetadataBuilder}
 import org.apache.spark.sql.types.{DataType => SparkDataType}
-import org.apache.spark.sql.types.{DataTypes, MetadataBuilder}
 
-import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.milvus.storage.schema.MilvusTypes
+import com.zilliz.milvus.storage.schema.{ArrowTypes, FieldMetadata, MilvusTypes}
 import com.zilliz.milvus.storage.DataParseException
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
-/** Milvus type to Spark type. The Arrow half of the mapping lives in core, in
-  * com.zilliz.milvus.storage.schema.ArrowTypes。
+/** Arrow type to Spark type, and the field metadata a Milvus field carries into
+  * a Spark schema. The Milvus-to-Arrow half of the mapping is core's
+  * `com.zilliz.milvus.storage.schema.ArrowTypes`; a field's Spark type is the
+  * composition of the two (capability R15).
   */
 object SparkTypes {
 
@@ -60,57 +63,105 @@ object SparkTypes {
       toDataType(fieldSchema)
     }
 
+  /** The Spark type a field is presented as: its Milvus type becomes an Arrow
+    * type through core's `ArrowTypes`, and that Arrow type comes to
+    * [[fromArrow]]. There is no direct Milvus-to-Spark table.
+    */
   def toDataType(fieldSchema: FieldSchema): SparkDataType = {
-    val dataType = fieldSchema.dataType
-    dataType match {
-      case MilvusDataType.Bool    => DataTypes.BooleanType
-      case MilvusDataType.Int8    => DataTypes.ByteType
-      case MilvusDataType.Int16   => DataTypes.ShortType
-      case MilvusDataType.Int32   => DataTypes.IntegerType
-      case MilvusDataType.Int64   => DataTypes.LongType
-      case MilvusDataType.Float   => DataTypes.FloatType
-      case MilvusDataType.Double  => DataTypes.DoubleType
-      case MilvusDataType.String  => DataTypes.StringType
-      case MilvusDataType.VarChar => DataTypes.StringType
-      case MilvusDataType.JSON    => DataTypes.StringType
-      case MilvusDataType.Array =>
-        val elementType = fieldSchema.elementType
-        val sparkElementType = elementType match {
-          case MilvusDataType.Bool    => DataTypes.BooleanType
-          case MilvusDataType.Int8    => DataTypes.ShortType
-          case MilvusDataType.Int16   => DataTypes.ShortType
-          case MilvusDataType.Int32   => DataTypes.IntegerType
-          case MilvusDataType.Int64   => DataTypes.LongType
-          case MilvusDataType.Float   => DataTypes.FloatType
-          case MilvusDataType.Double  => DataTypes.DoubleType
-          case MilvusDataType.String  => DataTypes.StringType
-          case MilvusDataType.VarChar => DataTypes.StringType
-          case _ =>
-            throw new DataParseException(
-              s"Unsupported Milvus data element type: $elementType"
-            )
-        }
-        DataTypes.createArrayType(sparkElementType)
-      case MilvusDataType.Geometry =>
-        DataTypes.createArrayType(
-          DataTypes.BinaryType
-        ) // TODO: fubang support geometry
-      case MilvusDataType.FloatVector =>
-        DataTypes.createArrayType(DataTypes.FloatType)
-      case MilvusDataType.BinaryVector =>
-        DataTypes.BinaryType
-      case MilvusDataType.Int8Vector =>
-        DataTypes.createArrayType(DataTypes.ShortType)
-      case MilvusDataType.Float16Vector =>
-        DataTypes.createArrayType(DataTypes.FloatType)
-      case MilvusDataType.BFloat16Vector =>
-        DataTypes.createArrayType(DataTypes.FloatType)
-      case MilvusDataType.SparseFloatVector =>
-        DataTypes.createMapType(DataTypes.LongType, DataTypes.FloatType)
-      case _ =>
+    // The Arrow kind is what decides the Spark type; the byte width it is
+    // built with does not matter here, so a field without a dim maps too.
+    val dim = fieldSchema.typeParams
+      .find(_.key == "dim")
+      .map(p =>
+        MilvusTypes.parseVectorDimension(fieldSchema.name, p.value).toInt
+      )
+      .getOrElse(0)
+    fromArrow(
+      ArrowTypes.toArrowType(dim, fieldSchema.dataType),
+      fieldSchema.dataType,
+      fieldSchema.elementType
+    )
+  }
+
+  /** Arrow type to Spark type, keyed by the Arrow type and the Milvus logical
+    * type. The second key cannot be dropped: Milvus stores JSON, Array,
+    * Geometry and sparse vectors all as Arrow Binary and every dense vector as
+    * FixedSizeBinary, so the Arrow type alone cannot tell a JSON string from a
+    * sparse vector or a float vector from a float16 one.
+    *
+    * @param elementType
+    *   the element type of a Milvus Array; ignored for every other field
+    */
+  def fromArrow(
+      arrowType: ArrowType,
+      milvusType: MilvusDataType,
+      elementType: MilvusDataType = MilvusDataType.None
+  ): SparkDataType = arrowType match {
+    case _: ArrowType.Bool => DataTypes.BooleanType
+    case int: ArrowType.Int =>
+      int.getBitWidth match {
+        case 8  => DataTypes.ByteType
+        case 16 => DataTypes.ShortType
+        case 32 => DataTypes.IntegerType
+        case 64 => DataTypes.LongType
+        case width =>
+          throw new DataParseException(
+            s"Unsupported Arrow integer width $width for Milvus type $milvusType"
+          )
+      }
+    case float: ArrowType.FloatingPoint =>
+      float.getPrecision match {
+        case FloatingPointPrecision.SINGLE => DataTypes.FloatType
+        case FloatingPointPrecision.DOUBLE => DataTypes.DoubleType
+        case precision =>
+          throw new DataParseException(
+            s"Unsupported Arrow floating point precision $precision for Milvus type $milvusType"
+          )
+      }
+    case _: ArrowType.Utf8 => DataTypes.StringType
+    case _: ArrowType.Binary =>
+      milvusType match {
+        case MilvusDataType.JSON => DataTypes.StringType
+        case MilvusDataType.Array =>
+          DataTypes.createArrayType(arrayElementType(elementType))
+        case MilvusDataType.Geometry =>
+          DataTypes.createArrayType(
+            DataTypes.BinaryType
+          ) // TODO: fubang support geometry
+        case MilvusDataType.SparseFloatVector =>
+          DataTypes.createMapType(DataTypes.LongType, DataTypes.FloatType)
+        case other =>
+          throw new DataParseException(s"Unsupported Milvus data type: $other")
+      }
+    case _: ArrowType.FixedSizeBinary
+        if MilvusTypes.isDenseVectorType(milvusType) =>
+      // The column presents its elements as non-nullable, which is true of a
+      // stored vector; the table schema has always said containsNull = true,
+      // and WriteSchema compares types ignoring nullability.
+      MilvusVectorColumn.sparkType(milvusType, raw = false) match {
+        case ArrayType(element, _) => DataTypes.createArrayType(element)
+        case other                 => other
+      }
+    case other =>
+      throw new DataParseException(
+        s"Unsupported Milvus data type: $milvusType (stored as Arrow $other)"
+      )
+  }
+
+  /** The element type of a Milvus Array: the scalar types, and nothing else.
+    * Int8 elements are presented as ShortType, as they always have been; the
+    * decoders in ArrowConverter and MilvusArrayColumn read either width.
+    */
+  private def arrayElementType(elementType: MilvusDataType): SparkDataType =
+    elementType match {
+      case MilvusDataType.Int8 => DataTypes.ShortType
+      case MilvusDataType.Bool | MilvusDataType.Int16 | MilvusDataType.Int32 |
+          MilvusDataType.Int64 | MilvusDataType.Float | MilvusDataType.Double |
+          MilvusDataType.String | MilvusDataType.VarChar =>
+        fromArrow(ArrowTypes.toArrowType(0, elementType), elementType)
+      case other =>
         throw new DataParseException(
-          s"Unsupported Milvus data type: $dataType"
+          s"Unsupported Milvus data element type: $other"
         )
     }
-  }
 }

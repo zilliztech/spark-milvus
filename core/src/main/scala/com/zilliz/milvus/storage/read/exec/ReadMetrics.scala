@@ -4,8 +4,8 @@ package com.zilliz.milvus.storage.read.exec
   * see it. Design: docs/design/architecture/storage-io.html section 5.
   *
   * @param jniCalls
-  *   calls into `StorageNative` by this reader, the opens included; the
-  *   closes land after Spark's last read of the values
+  *   calls into `StorageNative` by this reader, the opens included; the closes
+  *   land after Spark's last read of the values
   * @param jniNanos
   *   wall time spent inside those calls
   * @param batches
