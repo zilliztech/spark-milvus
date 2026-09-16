@@ -185,7 +185,7 @@ schema，没有任何快照时用）。字段 id 和向量维度都从这份 sch
 | `MilvusOption.BackupDir` | String | 否 | "" | `milvus.backup.dir` — 备份目录，如 `s3a://bucket/backup/<name>`。**仅支持 S3**（`s3://` 自动归一化为 `s3a://`）；本地/`file://` 目录在规划期被拒绝（packed reader 需要 S3）。 |
 | `MilvusOption.MilvusDatabaseName` | String | 否 | "" | collection 所在库。传 `"default"` 选择默认库的 collection（匹配 meta 记录为 `""` 或 `"default"`）；留空则走单候选/歧义判定——当同时存在 `default.orders` 与 `db2.orders` 时，需传 `"default"`（或 `"db2"`）消除歧义。 |
 | `MilvusOption.MilvusCollectionName` | String | 条件 | - | 备份内的 collection 名（与库名联合匹配，不用 `.head`）。备份含多个 collection 时必须指定。 |
-| `MilvusOption.SnapshotPath` | String | 否 | - | `milvus.snapshot.path` — 快照目录里的一个快照 JSON（`s3a://bucket/files/snapshots/<coll>/metadata/<id>.json` 或相对 `fs.bucket_name` 的 key）。不经 Milvus 服务：schema、分区、段全部来自这个文件。不能与 `milvus.snapshot.manifests` 同时给。 |
+| `MilvusOption.SnapshotPath` | String | 否 | - | `milvus.snapshot.path` — 快照目录里的一个快照 JSON：`s3a://bucket/files/snapshots/<coll>/metadata/<id>.json`，相对 `fs.bucket_name` 的 key，或 Milvus CreateSnapshot 返回的 `s3_location` 形式 `https://<endpoint>/bucket/files/...`（host 是配置的 endpoint 时接受）。不经 Milvus 服务：schema、分区、段全部来自这个文件。不能与 `milvus.snapshot.manifests` 同时给。 |
 | `MilvusOption.ClientSnapshotName` | String | 否 | 最新 | `milvus.client.snapshot.name` — 配合 `milvus.uri`：读该 collection 快照目录里这个名字的快照，而不是最新的。连接器自己不建快照，先用 Milvus 或 `CALL create_snapshot` 建。 |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | 否 | 67108864 | `milvus.snapshot.max.json.bytes` — 快照 JSON 或 backup `full_meta.json` 的正整数大小上限。 |
 

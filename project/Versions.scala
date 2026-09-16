@@ -12,7 +12,14 @@ object Versions {
       arrow: String,
       antlr: String,
       javaRelease: String,
-      scalas: Seq[String]
+      scalas: Seq[String],
+      /** The Hadoop and Netty versions the Spark distribution ships. A line's
+        * test classpath pins every Hadoop and Netty artifact to them, because
+        * Arrow's Netty allocation manager reads Netty internals: Arrow 12 on
+        * Netty 4.1.118 fails at the first buffer (work item 19).
+        */
+      hadoop: String,
+      netty: String
   )
 
   /** Compile against the compatibility floor, with the Arrow version that Spark
@@ -26,7 +33,9 @@ object Versions {
       "12.0.1",
       "4.9.3",
       "11",
-      Seq(scala212, scala213)
+      Seq(scala212, scala213),
+      hadoop = "3.3.4",
+      netty = "4.1.96.Final"
     ),
     SparkLine(
       "4.0",
@@ -35,7 +44,9 @@ object Versions {
       "18.1.0",
       "4.13.1",
       "17",
-      Seq(scala213)
+      Seq(scala213),
+      hadoop = "3.4.1",
+      netty = "4.1.118.Final"
     ),
     SparkLine(
       "4.1",
@@ -44,7 +55,9 @@ object Versions {
       "18.3.0",
       "4.13.1",
       "17",
-      Seq(scala213)
+      Seq(scala213),
+      hadoop = "3.4.2",
+      netty = "4.2.7.Final"
     ),
     SparkLine(
       "4.2",
@@ -53,7 +66,9 @@ object Versions {
       "19.0.0",
       "4.13.1",
       "17",
-      Seq(scala213)
+      Seq(scala213),
+      hadoop = "3.5.0",
+      netty = "4.2.13.Final"
     )
   )
 
@@ -68,6 +83,8 @@ object Versions {
   val grpcJava = "1.37.0"
   val parquet = "1.13.1"
   val parquetAvro = "1.15.2"
+
+  /** Layer 2's own tests; each Spark line pins its distribution's version. */
   val hadoop = "3.4.1"
   val avro = "1.12.0"
   val awsSdkV2 = "2.30.38"

@@ -87,11 +87,14 @@ final class SnapshotCatalog(
     endpoint: String = ""
 ) extends Logging {
 
-  /** The snapshot at `location`: a bucket-relative key, or a `s3a://` / `s3://`
-    * URI whose bucket must match this catalog's.
+  /** The snapshot at `location`: a bucket-relative key, a `s3a://` / `s3://`
+    * URI whose bucket must match this catalog's, or the
+    * `scheme://endpoint/bucket/key` form Milvus prints for its own snapshots
+    * (CreateSnapshot's `s3_location`), recognised only when the host is this
+    * catalog's endpoint.
     */
   def read(location: String): Snapshot = {
-    val located = StoragePath.parse(location, bucket)
+    val located = StoragePath.parseMilvus(location, bucket, endpoint)
     if (bucket.nonEmpty && located.hasBucket && located.bucket != bucket) {
       throw new IllegalArgumentException(
         s"snapshot $location is in bucket '${located.bucket}', catalog is bound to '$bucket'"

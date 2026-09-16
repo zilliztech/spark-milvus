@@ -51,8 +51,15 @@ with those suites reported as canceled rather than failed:
 - `MilvusV3PartitionWriterLifecycleTest` in spark-4.0
 
 The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
-`StorageFullChainUatTest`, `SnapshotReadUatTest` and `ConnectorWriteReadUatTest` in spark-4.0 — cancel on their own environment
-variables as well, so they stay canceled even with the library present.
+`StorageFullChainUatTest`, `SnapshotReadUatTest`, `ConnectorWriteReadUatTest`
+and the scenario suite `uat.DataFrameScenariosUatTest` in spark-4.0 — cancel
+on their own environment variables as well, so they stay canceled even with
+the library present. The scenario suite is also compiled into the 3.5, 4.1 and
+4.2 lines, so `spark35/testOnly ...DataFrameScenariosUatTest` runs the same
+scenarios there. The 3.5 line needs a JDK 17 for that run: Arrow 12, which
+Spark 3.5 ships, cannot allocate on JDK 21. Name it in
+`SPARK35_TEST_JAVA_HOME` and the line's test JVM forks from it; unit tests do
+not allocate through the C Data Interface and run on the build's JDK 21.
 
 Use the current run's summary to report successful, failed, canceled, ignored
 and pending tests, and completed or aborted suites. Name the native or UAT

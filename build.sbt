@@ -196,6 +196,8 @@ def sparkProject(l: Versions.SparkLine): Project =
       libraryDependencies ++=
         Dependencies.sparkDeps(l) ++ Dependencies.arrowDeps(l) ++ Dependencies
           .legacyDeps(l),
+      // The line's classpath is the distribution's: see Dependencies.lineOverrides.
+      dependencyOverrides ++= Dependencies.lineOverrides(l),
       libraryDependencies += scalaTest % Test,
       inConfig(Test)(Modules.nativeTest),
       // Per-line bundles are not published yet; add shading before enabling them.
@@ -205,17 +207,27 @@ def sparkProject(l: Versions.SparkLine): Project =
     )
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
-  // The UAT scenario suite runs on the oldest line too (work item #18); it is
-  // written against the 4.0 line and compiled here as a second consumer.
+  .settings(uatScenarios)
+  // Arrow 12, which Spark 3.5 ships, cannot allocate on JDK 21 (its MemoryUtil
+  // looks up DirectByteBuffer(long, int), gone in 21), so a UAT run of this
+  // line forks the test JVM from a JDK 17 when one is named. Unit tests do not
+  // allocate through the C Data Interface and stay on the build's JDK.
   .settings(
-    Test / unmanagedSourceDirectories +=
-      (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "uat"
+    Test / javaHome := sys.env.get("SPARK35_TEST_JAVA_HOME").map(file)
   )
 lazy val spark40 = sparkProject(Versions.line("4.0"))
   // Reuse core's ObjectStore fixtures for source tests without loading JNI.
   .dependsOn(core % "test->test")
-lazy val spark41 = sparkProject(Versions.line("4.1"))
-lazy val spark42 = sparkProject(Versions.line("4.2"))
+lazy val spark41 = sparkProject(Versions.line("4.1")).settings(uatScenarios)
+lazy val spark42 = sparkProject(Versions.line("4.2")).settings(uatScenarios)
+
+// The UAT scenario suite (work item #18) lives in the 4.0 line's tests and is
+// compiled into every other line as a second consumer, so one suite runs on
+// all four.
+lazy val uatScenarios: Seq[Setting[_]] = Seq(
+  Test / unmanagedSourceDirectories +=
+    (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "uat"
+)
 
 // Layer 4: apps currently run on 4.0, so their sources need no shared directory.
 lazy val apps40 = project
@@ -230,6 +242,7 @@ lazy val apps40 = project
       Dependencies.sparkDeps(Versions.line("4.0")) ++
         Dependencies.arrowDeps(Versions.line("4.0")) ++
         Dependencies.legacyDeps(Versions.line("4.0")),
+    dependencyOverrides ++= Dependencies.lineOverrides(Versions.line("4.0")),
     // Only apps reaches for OSS types, and only in a test that asserts the
     // Aliyun credential provider name. The four Spark lines never touch them.
     libraryDependencies += hadoopAliyun,

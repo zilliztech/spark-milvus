@@ -47,8 +47,9 @@ object Dependencies {
     "org.apache.parquet" % "parquet-avro" % Versions.parquetAvro
   lazy val avro =
     "org.apache.avro" % "avro" % Versions.avro % "provided,test"
-  lazy val hadoopCommon =
-    "org.apache.hadoop" % "hadoop-common" % Versions.hadoop % "provided,test" exclude ("javax.activation", "activation")
+  lazy val hadoopCommon = hadoopCommonAt(Versions.hadoop)
+  def hadoopCommonAt(version: String): ModuleID =
+    "org.apache.hadoop" % "hadoop-common" % version % "provided,test" exclude ("javax.activation", "activation")
   lazy val hadoopMapreduceClientCore =
     "org.apache.hadoop" % "hadoop-mapreduce-client-core" % Versions.hadoop
   lazy val hadoopAws =
@@ -107,11 +108,51 @@ object Dependencies {
     )
       .map(m => "org.apache.arrow" % m % l.arrow)
 
+  /** What a Spark line's classpath resolves to no matter who asks for them: the
+    * Arrow, Netty and Hadoop versions its Spark distribution ships. Netty is
+    * the one that bites: hadoop-common 3.4.1 and the AWS SDK both raise it to
+    * 4.1.118, where PoolArena no longer extends SizeClasses, and Arrow 12's
+    * allocation manager fails on its first buffer with NoSuchFieldError (work
+    * item 19). Pinning the whole Netty family keeps its modules on one version.
+    */
+  def lineOverrides(l: Versions.SparkLine): Seq[ModuleID] =
+    Seq(
+      "arrow-vector",
+      "arrow-memory-core",
+      "arrow-memory-netty",
+      "arrow-c-data",
+      "arrow-format"
+    ).map(m => "org.apache.arrow" % m % l.arrow) ++
+      Seq(
+        "netty-buffer",
+        "netty-common",
+        "netty-handler",
+        "netty-handler-proxy",
+        "netty-codec",
+        "netty-codec-http",
+        "netty-codec-http2",
+        "netty-codec-socks",
+        "netty-resolver",
+        "netty-transport",
+        "netty-transport-native-unix-common",
+        "netty-transport-classes-epoll",
+        "netty-transport-native-epoll",
+        "netty-transport-classes-kqueue",
+        "netty-transport-native-kqueue"
+      ).map(m => "io.netty" % m % l.netty) ++
+      Seq(
+        "hadoop-common",
+        "hadoop-auth",
+        "hadoop-annotations",
+        "hadoop-client-api",
+        "hadoop-client-runtime"
+      ).map(m => "org.apache.hadoop" % m % l.hadoop)
+
   /** Dependencies still needed by the migrated connector and app sources. */
   def legacyDeps(l: Versions.SparkLine): Seq[ModuleID] = Seq(
     ("org.apache.spark" %% "spark-mllib" % l.spark % "provided,test")
       .excludeAll(ExclusionRule(organization = "org.apache.arrow")),
-    hadoopCommon,
+    hadoopCommonAt(l.hadoop),
     // Shipped, not compiled against: these supply the credential provider
     // classes that fs.s3a.aws.credentials.provider names by string. Removing
     // one fails when a FileSystem is built, not at compile time. See

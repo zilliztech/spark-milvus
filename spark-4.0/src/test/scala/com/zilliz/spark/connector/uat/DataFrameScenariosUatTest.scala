@@ -217,16 +217,23 @@ class DataFrameScenariosUatTest
 
       val withMeta = v3(
         columnar,
-        MilvusOption.MilvusExtraColumns -> "partition,$segment_id,$row_offset"
+        MilvusOption.MilvusExtraColumns -> "_segment_id,_row_offset,_timestamp"
       )
       val bySegment = withMeta
-        .groupBy(col("$segment_id"), col("partition"))
-        .agg(count("*").as("n"), max("$row_offset").as("hi"))
+        .groupBy(col("_segment_id"))
+        .agg(
+          count("*").as("n"),
+          max("_row_offset").as("hi"),
+          min("_timestamp").as("ts")
+        )
         .collect()
-      bySegment.map(_.getLong(2)).sum shouldBe rows
+      bySegment.map(_.getLong(1)).sum shouldBe rows
       // Row offsets are positions in the segment; with no deletes they run
-      // from 0 to n - 1 in every segment.
-      bySegment.foreach(r => r.getLong(3) shouldBe r.getLong(2) - 1)
+      // from 0 to n - 1 in every segment. Timestamps are Milvus's, positive.
+      bySegment.foreach { r =>
+        r.getLong(2) shouldBe r.getLong(1) - 1
+        r.getLong(3) should be > 0L
+      }
 
       df.select((col("id") % 10).as("d")).distinct().count() shouldBe 10L
       val top = df.orderBy(col("id").desc).limit(2).collect()
@@ -270,6 +277,20 @@ class DataFrameScenariosUatTest
       MilvusOption.MilvusCollectionName -> collection
     ) ++ env("MILVUS_UAT_TOKEN").map(MilvusOption.MilvusToken -> _)
 
+    // Selectors take numeric ids; names are the client's to resolve.
+    val client = com.zilliz.milvus.client.api.MilvusClient(
+      MilvusOption(
+        Map(MilvusOption.MilvusUri -> uri) ++
+          env("MILVUS_UAT_TOKEN").map(MilvusOption.MilvusToken -> _)
+      ).connectionParams
+    )
+    val partitionIds: Map[String, Long] =
+      try
+        Seq("_default", "p1", "p2")
+          .map(n => n -> client.getPartitionID("", collection, n).get)
+          .toMap
+      finally client.close()
+
     bothOutlets { columnar =>
       def read(extra: (String, String)*): DataFrame =
         spark.read
@@ -278,13 +299,15 @@ class DataFrameScenariosUatTest
             base ++ extra + (MilvusOption.ReadColumnar -> columnar.toString)
           )
           .load()
+      def partition(name: String): DataFrame =
+        read(MilvusOption.MilvusPartitions -> partitionIds(name).toString)
 
       val all = read()
       all.count() shouldBe 3500L
 
-      val default = read(MilvusOption.MilvusPartitionName -> "_default")
-      val p1 = read(MilvusOption.MilvusPartitionName -> "p1")
-      val p2 = read(MilvusOption.MilvusPartitionName -> "p2")
+      val default = partition("_default")
+      val p1 = partition("p1")
+      val p2 = partition("p2")
       default.count() shouldBe 1000L
       p1.count() shouldBe 1500L
       p2.count() shouldBe 1000L
@@ -298,12 +321,12 @@ class DataFrameScenariosUatTest
 
       // p1 spans two segments; row offsets restart at 0 in each.
       val p1Meta = read(
-        MilvusOption.MilvusPartitionName -> "p1",
-        MilvusOption.MilvusExtraColumns -> "$segment_id,$row_offset"
+        MilvusOption.MilvusPartitions -> partitionIds("p1").toString,
+        MilvusOption.MilvusExtraColumns -> "_segment_id,_row_offset"
       )
       val segments = p1Meta
-        .groupBy(col("$segment_id"))
-        .agg(count("*").as("n"), min("$row_offset"), max("$row_offset"))
+        .groupBy(col("_segment_id"))
+        .agg(count("*").as("n"), min("_row_offset"), max("_row_offset"))
         .collect()
       segments.length shouldBe 2
       segments.foreach { r =>
@@ -311,8 +334,22 @@ class DataFrameScenariosUatTest
         r.getLong(3) shouldBe r.getLong(1) - 1
       }
       val one = segments.head.getLong(0)
-      read(MilvusOption.MilvusSegmentID -> one.toString).count() shouldBe
+      read(MilvusOption.MilvusSegments -> one.toString).count() shouldBe
         segments.head.getLong(1)
+      // Both selectors together read their intersection.
+      read(
+        MilvusOption.MilvusPartitions -> partitionIds("p1").toString,
+        MilvusOption.MilvusSegments -> one.toString
+      ).count() shouldBe segments.head.getLong(1)
+      // A segment outside the selected partition is refused, not emptied:
+      // every requested id has to exist in what the scan reads.
+      val outside = intercept[IllegalArgumentException](
+        read(
+          MilvusOption.MilvusPartitions -> partitionIds("p2").toString,
+          MilvusOption.MilvusSegments -> one.toString
+        ).count()
+      )
+      outside.getMessage should include("not found in partition")
     }
   }
 

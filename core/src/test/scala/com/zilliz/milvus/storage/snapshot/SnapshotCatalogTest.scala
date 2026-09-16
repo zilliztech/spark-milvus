@@ -278,6 +278,33 @@ class SnapshotCatalogTest extends AnyFunSuite {
     }
   }
 
+  test(
+    "the endpoint form Milvus prints is read when the host is the catalog's"
+  ) {
+    withDir { dir =>
+      write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
+      val c = new SnapshotCatalog(
+        new LocalObjectStore(dir.toString),
+        "a",
+        V2SegmentResolver.Unavailable,
+        endpoint = "s3.us-west-2.amazonaws.com"
+      )
+      // CreateSnapshot's s3_location: scheme://endpoint/bucket/key.
+      assert(
+        c.read(
+          "https://s3.us-west-2.amazonaws.com/a/files/snapshots/10/metadata/1.json"
+        ).name == "s1"
+      )
+      // Another host is a bucket in the standard form, and a foreign one.
+      val err = intercept[IllegalArgumentException](
+        c.read(
+          "https://s3.eu-west-1.amazonaws.com/a/files/snapshots/10/metadata/1.json"
+        )
+      )
+      assert(err.getMessage.contains("bucket 's3.eu-west-1.amazonaws.com'"))
+    }
+  }
+
   test("fromLists returns path-normalization failures as Left") {
     val metadata = SnapshotJson
       .parse(
