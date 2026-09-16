@@ -46,7 +46,7 @@
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
 | C1 | 数据库和 collection 目录 | `SHOW NAMESPACES IN milvus`、`SHOW TABLES IN milvus.db` | spark.catalog → client.api | 已实现：ListDatabases 把 database 映射成单层 namespace，ShowCollections 列该 database 的全部 collection；目录不读快照或对象存储，只把确认不存在翻成 Spark 的 namespace 不存在语义；已知表的 `DESCRIBE TABLE` 由 R1 加载 | P1 |
-| C2 | 建表删表 | `CREATE TABLE milvus.db.coll (...) TBLPROPERTIES (...)`、`DROP TABLE` | spark.catalog → client.api | 向量维度、主键、索引参数走表属性 | P1 |
+| C2 | 建表删表 | `CREATE TABLE milvus.db.coll (...) TBLPROPERTIES (...)`、`DROP TABLE` | spark.catalog → client.api | 已实现；`milvus.primary.key` 指定非空 Int64/VarChar 主键，歧义字段用 `milvus.field.<field>.*` 明确 Milvus 类型及维度/长度/容量，每个向量字段用 `milvus.index.<field>` JSON 定义索引；CREATE 先校验并预检名称，再创建 collection 与索引，不创建快照且不是跨步骤事务；DROP 在确认 database 或 collection 不存在时返回 `false` | P1 |
 | C3 | schema 来自快照 | 自动 | core.schema | | P0 |
 
 ## 4 CALL
@@ -107,7 +107,7 @@ issue #125 的[索引查询设计](architecture/vector-search.html)已经落地�
 
 ## 9 已知缺口
 
-原子的 CREATE TABLE AS SELECT。Lance 这类元数据权威在格式内的表可以实现 Spark 的 StagedTable，建表和写入一次提交；Milvus Storage 的权威在 etcd 和 DataCoord，C2 建表走 gRPC、W1 的登记是独立的 CALL，两步之间必然有窗口。CTAS 失败会留下一张空表，用户要自己删。
+CREATE TABLE AS SELECT 当前不能完成。C2 创建 collection 后不生成 Connector 快照，Spark 因而没有可加载并继续写入的 Table；失败可能留下空 collection，用户要显式删除。即使以后接通，Milvus Storage 的权威在 etcd 和 DataCoord，C2 建表走 gRPC、W1 的登记是独立的 CALL，两步之间也必然有窗口，不能提供 StagedTable 式原子提交。
 
 ## 10 不做
 

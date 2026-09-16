@@ -1,5 +1,5 @@
 <meta charset="utf-8">
-<title>只读 Catalog</title>
+<title>Catalog：目录、表 DDL 与固定快照</title>
 <style>
   :root { color-scheme: light dark; }
   body { max-width: 52rem; margin: 2rem auto; padding: 0 1.2rem;
@@ -20,15 +20,16 @@
   figcaption { font-size: .85rem; opacity: .75; margin-top: .5rem; }
 </style>
 
-<h1>只读 Catalog</h1>
+<h1>Catalog：目录、表 DDL 与固定快照</h1>
 
-<p>对应<a href="../capabilities.md">能力索引</a>中的 R1、R2、C1。固定快照与四种来源见
+<p>对应<a href="../capabilities.md">能力索引</a>中的 R1、R2、C1、C2。固定快照与四种来源见
 <a href="snapshot.html">snapshot.html</a>，读取执行见 <a href="read.html">read.html</a>。</p>
 
-<p class="thesis"><strong>Catalog 有两条互不混合的只读路径：目录发现只调用 Milvus 的
-<code>ListDatabases</code> 和 <code>ShowCollections</code>；表加载把 Spark 三段表名和时间旅行参数
-翻译成一个固定 <code>Snapshot</code>，随后交给现有 <code>MilvusTable</code>。</strong>目录发现不打开
-对象存储、不读取快照、不规划 Scan；表加载也不靠先列全库或全 collection 来确认一个已知名字。</p>
+<p class="thesis"><strong>Catalog 有三条明确分开的路径：目录发现只调用
+<code>ListDatabases</code> 和 <code>ShowCollections</code>；表加载把三段表名和时间旅行参数翻译成一个
+固定 <code>Snapshot</code>；表 DDL 先完整校验 Spark schema 与 Milvus 表属性，再调用 collection 和
+index RPC。</strong>目录发现不打开对象存储、不读取快照、不规划 Scan；创建 collection 不伪造快照，
+因此新表只有在 Milvus 产生快照后才能通过现有 <code>MilvusTable</code> 读取。</p>
 
 <h2 id="contract">一、名称与配置</h2>
 
@@ -172,7 +173,137 @@ logical 大于 0 的快照会被漏掉。负时间饱和到 <code>Long.MinValue<
 <p><strong>时间旅行只选择已有快照元数据，不提供保留策略。</strong> Connector 不保留旧段文件；
 compaction 或 GC 回收快照引用的段后，按名字或时间选中该快照仍可能在读取数据文件时失败。</p>
 
-<h2 id="errors">五、失败与只读边界</h2>
+<h2 id="create">五、CREATE TABLE 的公开合同</h2>
+
+<p><strong>CREATE 的输入只有三段表名、Spark schema 和一组扁平表属性。</strong> Catalog 先在
+driver 上把三者完整转换成 collection schema 与向量索引请求；任何未知属性、无效字段引用、类型冲突、
+分区变换或不支持的列特性都会在第一个 RPC 前失败。通过校验后先确认 database 存在且 collection 不存在，
+再创建 collection，并按字段创建向量索引。连接、认证和 database 仍取自 Catalog 初始化配置与三段表名。每次 create/drop 使用一个短生命周期
+client，成功和远端失败都执行 <code>close</code>；关闭失败单独传播，已有主失败时则成为 suppressed cause。
+校验失败发生在 client 创建以前。</p>
+
+<pre><code>CREATE TABLE milvus.default.products (
+  id BIGINT NOT NULL,
+  title STRING,
+  embedding ARRAY&lt;FLOAT&gt;
+)
+TBLPROPERTIES (
+  'milvus.primary.key' = 'id',
+  'milvus.field.title.data_type' = 'varchar',
+  'milvus.field.title.max_length' = '512',
+  'milvus.field.embedding.data_type' = 'float_vector',
+  'milvus.field.embedding.dim' = '768',
+  'milvus.index.embedding' =
+    '{"index_type":"HNSW","metric_type":"COSINE","M":16,"efConstruction":200}'
+);</code></pre>
+
+<h3 id="create-properties">5.1 属性文法</h3>
+
+<table>
+<tr><th>属性</th><th>值</th><th>约束</th></tr>
+<tr><td><code>milvus.primary.key</code></td><td>schema 中的字段名</td><td>必填；字段必须非空，Milvus 类型必须是 Int64 或 VarChar；autoID 不支持</td></tr>
+<tr><td><code>milvus.field.&lt;field&gt;.data_type</code></td><td>下表列出的 snake_case 名</td><td>类型值大小写不敏感；String、Array、Binary、Map 必填，不能与 Spark 类型冲突</td></tr>
+<tr><td><code>milvus.field.&lt;field&gt;.dim</code></td><td>规范正整数</td><td>所有稠密向量必填；BinaryVector 还要求维度是 8 的倍数</td></tr>
+<tr><td><code>milvus.field.&lt;field&gt;.max_length</code></td><td>规范正整数</td><td>VarChar 和 Array&lt;String&gt; 必填，其他类型拒绝</td></tr>
+<tr><td><code>milvus.field.&lt;field&gt;.max_capacity</code></td><td>规范正整数</td><td>Array 必填，其他类型拒绝</td></tr>
+<tr><td><code>milvus.index.&lt;field&gt;</code></td><td>JSON object</td><td>每个向量字段恰好一个；标量字段不能配置</td></tr>
+</table>
+
+<p>本节的 <code>milvus.index.&lt;field&gt;</code> 是 Catalog <code>TBLPROPERTIES</code>，值为一个完整
+JSON object，用来调用在线侧 CreateIndex；它不是 W6 中供段内索引写出使用的 DataFrame write option，
+两者由不同入口解析，不能互换值格式。</p>
+
+<p><code>data_type</code> 只接受以下值：</p>
+
+<pre><code>varchar                text                    json
+array                  float_vector            float16_vector
+bfloat16_vector        int8_vector             binary_vector
+sparse_float_vector</code></pre>
+
+<table>
+<tr><th>Spark 类型</th><th>允许的 Milvus 类型</th><th>附加约束</th></tr>
+<tr><td>Boolean / Byte / Short / Int / Long / Float / Double</td><td>Bool / Int8 / Int16 / Int32 / Int64 / Float / Double，按顺序固定映射</td><td>不能再指定 <code>data_type</code></td></tr>
+<tr><td>String</td><td>varchar、text、json</td><td>varchar 要 <code>max_length</code></td></tr>
+<tr><td>Array&lt;Boolean|Short|Int|Long|Float|Double|String&gt;</td><td>array</td><td>要 <code>max_capacity</code>；String 元素还要 <code>max_length</code></td></tr>
+<tr><td>Array&lt;Float&gt;</td><td>float_vector、float16_vector、bfloat16_vector</td><td>要 <code>dim</code> 和索引</td></tr>
+<tr><td>Array&lt;Short&gt;</td><td>int8_vector</td><td>要 <code>dim</code> 和索引</td></tr>
+<tr><td>Binary</td><td>binary_vector</td><td>要 <code>dim</code> 和索引，维度是 8 的倍数</td></tr>
+<tr><td>Map&lt;Long, Float&gt;</td><td>sparse_float_vector</td><td>要索引；其他 key/value 组合拒绝</td></tr>
+</table>
+
+<p>字段名在 <code>milvus.primary.key</code>、<code>milvus.field.&lt;field&gt;.*</code> 和
+<code>milvus.index.&lt;field&gt;</code> 中按 schema 原名精确匹配，只有 <code>data_type</code> 的值不区分
+大小写。整数参数必须是落在 Int 范围内的规范十进制正整数，形式为 <code>[1-9][0-9]*</code>；不接受
+正号、前导零、空白或小数。未知 Spark 类型直接拒绝，不能退化成 Binary 或 String。Milvus Int8 Array
+在现有读链中固定呈现为 <code>Array&lt;Short&gt;</code>，因此 Catalog 拒绝会在读取后变成另一种 schema 的
+<code>Array&lt;Byte&gt;</code>；本合同不为它新增第二套元素类型属性。</p>
+
+<p>Spark SQL 生成的 <code>ArrayType.containsNull</code> 和 <code>MapType.valueContainsNull</code> 默认可为
+true，而且 SQL DDL 没有可靠的元素 NOT NULL 表达；Catalog 接受这两个 schema 标记，不把它们解释成
+Milvus 支持 null 元素。字段本身的 <code>nullable</code> 仍保留并用于主键校验。元素级 null 不在 Catalog
+建表合同内，调用方不能据此认为后续写入支持 null 元素。</p>
+
+<p>索引 JSON 必须是 object，且必须有字符串 <code>index_type</code> 和字符串
+<code>metric_type</code>；可选的 <code>index_name</code> 也必须是字符串。其余键原样成为 Milvus index
+params，但键必须非空，值只能是字符串、数字或布尔值，并规范成字符串交给 Milvus；null、array 和嵌套
+object 都拒绝。解析拒绝重复 JSON key 和尾随内容；<code>index_type</code>、<code>metric_type</code> 以及
+存在时的 <code>index_name</code> 都不能为空，同一次 CREATE 内显式 <code>index_name</code> 不能重复。属性名拼错、字段不存在、
+同一类型上出现无意义的 <code>dim</code>/<code>max_length</code>/<code>max_capacity</code>，以及向量没有索引，
+都属于定义错误，不能被忽略。</p>
+
+<p>Spark 自己附带的建表属性只有三项得到明确处理：<code>provider</code> 省略或等于
+<code>milvus</code>；table <code>comment</code> 成为 collection description；column comment 成为对应
+field description；<code>owner</code> 由 Spark 管理，Catalog 忽略。其他非 Milvus bookkeeping 属性以及
+所有未知的 <code>milvus.*</code> 属性都拒绝。</p>
+
+<h3 id="create-sequence">5.2 创建顺序与可见性</h3>
+
+<figure>
+<svg viewBox="0 0 860 160" role="img" aria-label="CREATE TABLE 先完整校验和预检，再创建 collection，随后逐个创建向量索引；快照由 Milvus 单独产生">
+  <defs><marker id="create-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.2">
+    <rect x="8" y="45" width="150" height="56" rx="3"/><rect x="224" y="45" width="150" height="56" rx="3"/>
+    <rect x="440" y="45" width="150" height="56" rx="3"/><rect x="656" y="45" width="196" height="56" rx="3"/>
+    <line x1="158" y1="73" x2="218" y2="73" marker-end="url(#create-arrow)"/>
+    <line x1="374" y1="73" x2="434" y2="73" marker-end="url(#create-arrow)"/>
+    <line x1="590" y1="73" x2="650" y2="73" marker-end="url(#create-arrow)"/>
+  </g>
+  <g fill="currentColor" font-size="12" text-anchor="middle">
+    <text x="83" y="67">本地完整校验</text><text x="83" y="84">再预检名称</text>
+    <text x="299" y="67">CreateCollection</text><text x="299" y="84">一次</text>
+    <text x="515" y="67">CreateIndex</text><text x="515" y="84">每个向量字段</text>
+    <text x="754" y="67">Milvus CreateSnapshot</text><text x="754" y="84">另一个生命周期</text>
+  </g>
+</svg>
+<figcaption>本地校验后先确认 database 存在且 collection 不存在；远端没有跨 RPC 事务，最后的快照也不由 CREATE TABLE 代办。</figcaption>
+</figure>
+
+<p><strong>CREATE 成功只表示 collection 与索引请求成功，不表示已经有可读快照。</strong>Catalog
+不生成空快照，也不把刚提交的 schema 包成一个本地 Table；共享 <code>createTable</code> 因而返回
+<code>null</code>，而不是伪造一个随后无法扫描的 <code>MilvusTable</code>。在线侧产生快照后，既有的固定
+快照读链才会看到该 collection。</p>
+
+<div class="warn"><strong>创建 collection 与创建索引不是一个事务。</strong>如果 collection 已成功而
+后续某个索引 RPC 失败，Catalog 保留已经创建的 collection 和此前成功的索引，并把原错误交给用户；
+它不会自动 drop collection 回滚。自动回滚可能删除并发方已开始使用的 collection，也会掩盖真实失败。
+当前不支持可完成的 CTAS：collection 创建后没有可供 Spark 写入的 Connector 快照，命令会失败并可能留下
+空 collection，需要用户显式删除。即使以后接通，collection 创建、Spark 写段和段登记也没有共同事务。</div>
+
+<h2 id="drop">六、DROP TABLE 与条件竞态</h2>
+
+<p><code>dropTable</code> 使用三段表名构造短生命周期客户端，先确认 database 与 collection 是否存在。
+任一确认不存在都返回 <code>false</code>；两者存在时调用 DropCollection，成功返回 <code>true</code>。认证、授权、网络、超时、
+限流和非成功状态都保留为错误，不能伪装成 <code>false</code>。</p>
+
+<p>Spark 的 <code>IF EXISTS</code> / <code>IF NOT EXISTS</code> 与 Catalog 的存在性检查都是条件 DDL，
+不是服务端 compare-and-set。检查以后到 create/drop RPC 以前，另一个客户端可能创建或删除同名
+collection；最终结果以 Milvus 对变更 RPC 的响应为准，Connector 不吞掉这类竞态，也不靠重试改变语义。</p>
+
+<p>CREATE 预检确认 database 不存在时抛 <code>NoSuchNamespaceException</code>，确认 collection 已存在时
+抛 <code>TableAlreadyExistsException</code>。两项只转换已确认的元数据结果；预检本身的服务故障仍保留。
+预检以后仍可能发生并发变更，因此它用于给 Spark 标准错误，不提供锁。</p>
+
+<h2 id="errors">七、失败与不支持的修改</h2>
 
 <p><strong>无效请求在 driver 规划期失败，只把能够确认的“不存在”翻成 Spark 标准语义。</strong>
 表名层级错误、空版本、非 client 模式给出 <code>IllegalArgumentException</code>；表加载中 Milvus 明确返回
@@ -189,17 +320,20 @@ database 不存在时是 <code>NoSuchNamespaceException</code>，而 <code>names
 不能伪装成空目录、空 collection 列表或 namespace 不存在。异常带操作名与请求的 database，但不带
 token 或对象存储密钥。</p>
 
-<div class="warn"><strong>只读边界覆盖元数据修改；目录发现属于读取。</strong>
+<div class="warn"><strong>DDL 只开放 collection 的 create 与 drop。</strong>
 <code>createNamespace</code>、<code>alterNamespace</code>、<code>dropNamespace</code> 以及 table 的
-create、alter、drop、rename 都明确抛出 <code>UnsupportedOperationException</code>。Catalog 不提供
+alter、rename 都明确抛出 <code>UnsupportedOperationException</code>。autoID、dynamic field、partition
+key、table constraint、generated/default/identity column 与 Spark partition transform 也不在合同内。Catalog 不提供
 namespace owner、comment、location、database id 或创建时间；<code>loadNamespaceMetadata</code> 只确认
-database 存在并返回空表。目录发现也不新增缓存、Procedure、Scan、对象存储或原生实现。已加载的
+database 存在并返回空表。表 DDL 不新增 Procedure、Scan、对象存储或原生实现。已加载的
 <code>MilvusTable</code> 仍沿用现有 append 写链。</div>
 
-<h2 id="versions">六、四条 Spark 线</h2>
+<h2 id="versions">八、四条 Spark 线</h2>
 
 <p><strong><code>TableCatalog</code> 与 <code>SupportsNamespaces</code> 的这组接口在 Spark 3.5、4.0、
 4.1、4.2 共用一份主体，放在 <code>spark-base</code>。</strong> 每条线只保留公开的无参
-<code>MilvusCatalog</code> 和本线首选 <code>createTable</code> 签名；它们都把 create 明确判为不支持。
-行为测试覆盖目录矩阵、异常保真、Spark SQL 路由和表加载；同一份共享实现再由四条线分别编译，
-Spark 3.5 同时验证 Scala 2.12 与 2.13。</p>
+<code>MilvusCatalog</code> 和本线的 <code>createTable</code> 输入适配：3.5 接收
+<code>StructType</code>，4.0 接收 <code>Column[]</code>，4.1/4.2 接收 <code>TableInfo</code>，随后都调用
+同一份 schema/属性校验与 RPC 编排。行为测试覆盖目录矩阵、属性和类型校验、发 RPC 前失败、create/drop
+路由、索引阶段失败、客户端关闭、Spark SQL 路由和表加载；共享主体由四条线分别编译，Spark 3.5 同时
+验证 Scala 2.12 与 2.13。</p>

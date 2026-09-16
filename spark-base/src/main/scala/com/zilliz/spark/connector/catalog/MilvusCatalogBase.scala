@@ -6,7 +6,8 @@ import scala.util.Try
 
 import org.apache.spark.sql.catalyst.analysis.{
   NoSuchNamespaceException,
-  NoSuchTableException
+  NoSuchTableException,
+  TableAlreadyExistsException
 }
 import org.apache.spark.sql.connector.catalog.{
   Identifier,
@@ -30,13 +31,15 @@ import com.zilliz.spark.connector.options.{
 }
 import com.zilliz.spark.connector.table.MilvusTables
 
-/** Shared read-only TableCatalog behavior. Spark-line sources implement only
-  * the createTable signature preferred by that line and reject it explicitly.
+/** Shared TableCatalog behavior. Spark-line sources normalize only the
+  * createTable signature preferred by that line.
   */
 private[catalog] abstract class MilvusCatalogBase(
     tableLoader: (CaseInsensitiveStringMap, SnapshotReference) => Table =
       MilvusCatalogBase.defaultTableLoader,
-    discovery: MilvusCatalogDiscovery = MilvusCatalogDiscovery.default
+    discovery: MilvusCatalogDiscovery = MilvusCatalogDiscovery.default,
+    ddlClientFactory: MilvusCatalogDdlClientFactory =
+      MilvusCatalogDdlClientFactory.default
 ) extends TableCatalog
     with SupportsNamespaces {
 
@@ -80,7 +83,7 @@ private[catalog] abstract class MilvusCatalogBase(
     val database = singleNamespace(namespace)
     try {
       discovery
-        .listCollections(discoveryOptions(database), database)
+        .listCollections(onlineOptions(database), database)
         .map(collection => Identifier.of(Array(database), collection))
         .toArray
     } catch {
@@ -99,7 +102,7 @@ private[catalog] abstract class MilvusCatalogBase(
     path.length match {
       case 0 =>
         discovery
-          .listDatabases(discoveryOptions())
+          .listDatabases(onlineOptions())
           .map(database => Array(database))
           .toArray
       case 1 if validName(path.head) =>
@@ -112,7 +115,7 @@ private[catalog] abstract class MilvusCatalogBase(
   override def namespaceExists(namespace: Array[String]): Boolean = {
     val path = namespacePath(namespace)
     if (path.length != 1 || !validName(path.head)) false
-    else discovery.listDatabases(discoveryOptions()).contains(path.head)
+    else discovery.listDatabases(onlineOptions()).contains(path.head)
   }
 
   override def loadNamespaceMetadata(
@@ -143,19 +146,72 @@ private[catalog] abstract class MilvusCatalogBase(
       changes: TableChange*
   ): Table = unsupported("altering tables")
 
+  override def tableExists(identifier: Identifier): Boolean =
+    withDdlClient(identifier) { (client, database, collection) =>
+      client.databaseExists(database) &&
+      client.collectionExists(database, collection)
+    }
+
   override def dropTable(identifier: Identifier): Boolean =
-    unsupported("dropping tables")
+    withDdlClient(identifier) { (client, database, collection) =>
+      if (
+        !client.databaseExists(database) ||
+        !client.collectionExists(database, collection)
+      ) false
+      else {
+        client.dropCollection(database, collection)
+        true
+      }
+    }
 
   override def renameTable(
       oldIdentifier: Identifier,
       newIdentifier: Identifier
   ): Unit = unsupported("renaming tables")
 
-  protected final def unsupportedCreate(): Nothing =
-    unsupported("creating tables")
+  protected final def createTable(request: MilvusCatalogCreate): Table = {
+    val normalized = MilvusCatalogDdl.normalize(request)
+    withDdlClient(request.identifier) { (client, database, collection) =>
+      if (!client.databaseExists(database)) {
+        throw new NoSuchNamespaceException(Array(database))
+      }
+      if (client.collectionExists(database, collection)) {
+        throw new TableAlreadyExistsException(request.identifier)
+      }
+      client.createCollection(normalized)
+      normalized.indexes.foreach(client.createIndex(normalized, _))
+    }
+    // Creating the online collection does not create the connector snapshot
+    // that MilvusTable requires. Returning a fabricated table would make a
+    // successful DDL look readable before a snapshot exists.
+    null
+  }
+
+  private def withDdlClient[A](
+      identifier: Identifier
+  )(
+      operation: (MilvusCatalogDdlClient, String, String) => A
+  ): A = {
+    val (database, collection) = tableName(identifier)
+    val client = ddlClientFactory.open(onlineOptions(database))
+    var failure: Throwable = null
+    try operation(client, database, collection)
+    catch {
+      case error: Throwable =>
+        failure = error
+        throw error
+    } finally {
+      try client.close()
+      catch {
+        case closeError: Throwable if failure != null =>
+          failure.addSuppressed(closeError)
+        case closeError: Throwable => throw closeError
+      }
+    }
+  }
 
   private def requireDatabase(database: String): Unit = {
-    if (!discovery.listDatabases(discoveryOptions()).contains(database)) {
+    if (!discovery.listDatabases(onlineOptions()).contains(database)) {
       throw new NoSuchNamespaceException(Array(database))
     }
   }
@@ -181,7 +237,7 @@ private[catalog] abstract class MilvusCatalogBase(
       namespace.map(name => Option(name).getOrElse(""))
     )
 
-  private def discoveryOptions(
+  private def onlineOptions(
       database: String = ""
   ): CaseInsensitiveStringMap = {
     val options = new ju.HashMap[String, String]()
@@ -191,12 +247,12 @@ private[catalog] abstract class MilvusCatalogBase(
       }
     }
     options.put(MilvusOption.MilvusDatabaseName, database)
-    val discoveryOptions = new CaseInsensitiveStringMap(options)
-    MilvusOption.readMode(discoveryOptions) match {
-      case ReadMode.Client => discoveryOptions
+    val onlineOptions = new CaseInsensitiveStringMap(options)
+    MilvusOption.readMode(onlineOptions) match {
+      case ReadMode.Client => onlineOptions
       case _ =>
         throw new IllegalArgumentException(
-          "MilvusCatalog discovery requires client mode; snapshot and backup options are not supported"
+          "MilvusCatalog online operations require client mode; snapshot and backup options are not supported"
         )
     }
   }
@@ -221,7 +277,9 @@ private[catalog] abstract class MilvusCatalogBase(
     }
   }
 
-  private def tableName(identifier: Identifier): (String, String) = {
+  private[catalog] final def tableName(
+      identifier: Identifier
+  ): (String, String) = {
     if (identifier == null) {
       throw new IllegalArgumentException(
         s"Milvus table name must be ${initializedName()}.<database>.<collection>"
@@ -260,7 +318,7 @@ private[catalog] abstract class MilvusCatalogBase(
 
   private def unsupported(operation: String): Nothing =
     throw new UnsupportedOperationException(
-      s"MilvusCatalog is read-only and does not support $operation"
+      s"MilvusCatalog does not support $operation"
     )
 }
 
@@ -274,7 +332,7 @@ private[catalog] object MilvusCatalogBase {
       : (CaseInsensitiveStringMap, SnapshotReference) => Table =
     (options, reference) => MilvusTables.load(options, None, reference)
 
-  private def isMissing(error: Throwable): Boolean =
+  private[catalog] def isMissing(error: Throwable): Boolean =
     hasCause(error, classOf[CollectionNotFoundException])
 
   private def isMissingDatabase(error: Throwable): Boolean =
@@ -339,13 +397,13 @@ private[catalog] object MilvusCatalogDiscovery {
     }
   }
 
-  private def connectionParams(
+  private[catalog] def connectionParams(
       options: CaseInsensitiveStringMap
   ): MilvusConnectionParams = {
     val uri = value(options, MilvusOption.MilvusUri).trim
     if (uri.isEmpty) {
       throw new IllegalArgumentException(
-        s"Option '${MilvusOption.MilvusUri}' is required for catalog discovery"
+        s"Option '${MilvusOption.MilvusUri}' is required for online catalog operations"
       )
     }
     MilvusConnectionParams(
