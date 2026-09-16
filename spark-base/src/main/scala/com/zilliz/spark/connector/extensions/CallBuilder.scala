@@ -71,6 +71,7 @@ object CallBuilder {
       var positional = Vector.empty[Any]
       var named = Map.empty[String, Any]
       var options = Map.empty[String, String]
+      var normalizedOptions = Set.empty[String]
       ctx.argument().asScala.foreach {
         case p: MilvusCallParser.PositionalArgumentContext =>
           if (named.nonEmpty || options.nonEmpty) {
@@ -84,12 +85,14 @@ object CallBuilder {
           val value = constantValue(n.constant())
           if (n.identifier().BACKQUOTED_IDENTIFIER() != null) {
             // A backquoted name is a connection or storage option key.
-            if (options.contains(key)) {
+            val normalized = key.toLowerCase(java.util.Locale.ROOT)
+            if (normalizedOptions.contains(normalized)) {
               throw new IllegalArgumentException(
                 s"procedure ${procedure.name}: option '$key' given twice"
               )
             }
             options += key -> optionText(procedure, key, value)
+            normalizedOptions += normalized
           } else {
             val lower = key.toLowerCase(java.util.Locale.ROOT)
             if (named.contains(lower)) {

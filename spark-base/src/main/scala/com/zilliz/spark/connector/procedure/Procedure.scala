@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.procedure
 
+import java.util.Locale
+
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.sql.Row
 
@@ -24,6 +26,13 @@ final case class ProcedureArgs(
   def string(name: String): String = values(name).asInstanceOf[String]
   def stringOpt(name: String): Option[String] =
     values.get(name).collect { case s: String => s }
+  def long(name: String): Long = values(name).asInstanceOf[Long]
+  def longOpt(name: String): Option[Long] =
+    values.get(name).collect { case value: Long => value }
+  def boolean(name: String): Boolean = values(name).asInstanceOf[Boolean]
+  def booleanOpt(name: String): Option[Boolean] =
+    values.get(name).collect { case value: Boolean => value }
+  def contains(name: String): Boolean = values.contains(name)
 }
 
 /** A procedure a `CALL milvus.system.<name>(...)` statement runs on the driver.
@@ -42,8 +51,33 @@ trait Procedure {
 object Procedures {
   val Namespace: Seq[String] = Seq("milvus", "system")
 
-  val all: Seq[Procedure] = Seq(RegisterProcedure)
+  val all: Seq[Procedure] = Seq(
+    RegisterProcedure,
+    CreateSnapshotProcedure,
+    DropSnapshotProcedure,
+    ListSnapshotsProcedure,
+    DescribeSnapshotProcedure,
+    CreateIndexProcedure,
+    DropIndexProcedure,
+    LoadProcedure,
+    ReleaseProcedure,
+    FlushProcedure,
+    CompactProcedure,
+    DescribeProcedure
+  )
+
+  private val byNormalizedName: Map[String, Procedure] = {
+    val entries =
+      all.map(procedure => procedure.name.toLowerCase(Locale.ROOT) -> procedure)
+    require(
+      entries.map(_._1).distinct.size == entries.size,
+      "procedure names must be unique ignoring case"
+    )
+    entries.toMap
+  }
 
   def byName(name: String): Option[Procedure] =
-    all.find(_.name.equalsIgnoreCase(name))
+    Option(name).flatMap(value =>
+      byNormalizedName.get(value.toLowerCase(Locale.ROOT))
+    )
 }

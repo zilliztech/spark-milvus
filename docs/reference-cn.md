@@ -297,7 +297,7 @@ schema，没有任何快照时用）。字段 id 和向量维度都从这份 sch
 | `MilvusOption.MilvusDatabaseName` | String | 否 | "" | collection 所在库。传 `"default"` 选择默认库的 collection（匹配 meta 记录为 `""` 或 `"default"`）；留空则走单候选/歧义判定——当同时存在 `default.orders` 与 `db2.orders` 时，需传 `"default"`（或 `"db2"`）消除歧义。 |
 | `MilvusOption.MilvusCollectionName` | String | 条件 | - | 备份内的 collection 名（与库名联合匹配，不用 `.head`）。备份含多个 collection 时必须指定。 |
 | `MilvusOption.SnapshotPath` | String | 否 | - | `milvus.snapshot.path` — 快照目录里的一个快照 JSON：`s3a://bucket/files/snapshots/<coll>/metadata/<id>.json`，相对 `fs.bucket_name` 的 key，或 Milvus CreateSnapshot 返回的 `s3_location` 形式 `https://<endpoint>/bucket/files/...`（host 是配置的 endpoint 时接受）。不经 Milvus 服务：schema、分区、段全部来自这个文件。不能与 `milvus.snapshot.manifests` 同时给。 |
-| `MilvusOption.ClientSnapshotName` | String | 否 | 最新 | `milvus.client.snapshot.name` — 只作用于配有 `milvus.uri` 的 `format("milvus")` 读取：按名字取快照，而不是最新快照。Catalog 忽略此 option，按名字读取请用 `VERSION AS OF`。连接器自己不建快照，先用 Milvus 或 `CALL create_snapshot` 建。 |
+| `MilvusOption.ClientSnapshotName` | String | 否 | 最新 | `milvus.client.snapshot.name` — 只作用于配有 `milvus.uri` 的 `format("milvus")` 读取：按名字取快照，而不是最新快照。Catalog 忽略此 option，按名字读取请用 `VERSION AS OF`。读取不会自动建快照；先用 Milvus 或 `CALL milvus.system.create_snapshot(...)` 建。 |
 | `MilvusOption.SnapshotMaxJsonBytes` | Long | 否 | 67108864 | `milvus.snapshot.max.json.bytes` — 快照 JSON 或 backup `full_meta.json` 的正整数大小上限。 |
 
 读取 schema 从备份 meta 推导，也可用 `.schema()` 指定；meta 读不到时两种情况都直接失败。读取动态集合（`enable_dynamic_field=true`）要求备份 meta 记录 `$meta` 字段——仅当 milvus-backup 带 etcd 访问（`--backup_index_extra`）且 **≥ v0.5.13** 时才捕获。跨多个 binlog 文件的 column group 已支持（milvus-storage#657 已修复每文件行范围编码）。含 struct-array 字段（`struct_array_fields`）的集合仍会在规划期中止读取。S3 凭证复用现有 `fs.*` 选项（`fs.address`、`fs.access_key_id`、`fs.access_key_value` ...）；桶取自 `milvus.backup.dir` URI。
@@ -390,11 +390,39 @@ CALL milvus.system.register('your_db.your_collection',
   `fs.use_iam`     => 'true')
 ```
 
-第一个参数是 collection，`'db.coll'`，或 `'coll'` 表示默认库；`staging` 是作业暂存前缀，相对桶的 key。
+第一个参数是 collection：可以写 `'db.coll'`；只写 `'coll'` 时使用 `milvus.database.name`，未提供则使用 `default`。`staging` 是作业暂存前缀，相对桶的 key。
 其余参数都是连接或存储选项，键和 DataFrame 读时 `.option()` 的键一样，因为带点所以用反引号包住，值也一样。
 值只能是常量。结果是一张表，每段一行：`job_id`、`segment_id`、`manifest_version`、`status`（`registered`，
 作业此前已登记过则是 `already_registered`）。过程名不存在、缺参数、多参数、类型不对，都在解析时拒绝并列出参数表。
 不以 `CALL milvus.` 开头的语句不受影响，扩展可以常开。Spark 3.5 和 4.x 行为一样。
+
+### 3.4 用 `CALL` 管理 Milvus
+
+管理过程沿用上面的 SQL 扩展和参数规则。每条语句都要显式提供 `milvus.uri` 和所需认证选项。
+目标可以写成 `db.collection`；只写 `collection` 时先使用 `milvus.database.name`，
+未提供该选项才使用 `default`。
+
+| 过程 | 必填参数 | 可选参数 | 结果 |
+|------|----------|----------|------|
+| `create_snapshot` | `collection`、`name` | `description`；`compaction_protection_seconds`（默认 `0`） | 一行 `database`、`collection`、`snapshot`、`description`、`partition_names`、`create_ts`、`s3_location` |
+| `drop_snapshot` | `collection`、`name` | — | 一行，`status = dropped` |
+| `list_snapshots` | `collection` | — | 每个快照名称一行；没有快照时返回空表 |
+| `describe_snapshot` | `collection`、`name` | — | 与 `create_snapshot` 相同的快照元数据列 |
+| `create_index` | `collection`、`field`、`index_name` | `index_type`（默认 `AUTOINDEX`）、`metric_type`（默认 `L2`）、`params`、`wait`、`timeout_seconds` | 一行字段、索引名和状态；不等待时为 `submitted`，等待成功时为 `Finished` |
+| `drop_index` | `collection`、`index_name` | — | 一行，`status = dropped` |
+| `load` | `collection` | `wait`、`timeout_seconds` | 一行；不等待时 `state = submitted`，等待成功时为 `LoadStateLoaded` |
+| `release` | `collection` | — | 一行，`status = released` |
+| `flush` | `collection` | — | 一行，`status = submitted`；只表示 Milvus 已接受请求，不表示持久化已经完成 |
+| `compact` | `collection` | `wait`、`timeout_seconds` | compaction ID、计划数、状态及各计划状态计数；只提交不等待时，各状态计数为 NULL |
+| `describe` | `collection` | — | collection ID、持久段数量、加载状态，以及每个 schema 字段与索引组合一行；字段没有索引时索引列为 NULL |
+
+`create_index`、`load`、`compact` 默认只提交任务并立即返回。设置 `wait => true` 才轮询完成状态；
+等待时 `timeout_seconds` 默认 600，且必须是正数。未设置 `wait => true` 却提供 timeout 会报错。
+每次轮询 RPC 都以当时剩余的整体等待时间为 deadline，不允许单次状态请求越过设定的超时时间。
+Milvus 返回失败状态或等待超时时，整条语句失败，不返回看似成功的结果行。
+
+`register` 仍只用于已经提交、且只更新已有段 manifest 的 backfill 作业，不能登记 `df.write`
+新建的段。本版本不提供 `cleanup_staging`；其它管理过程也不会发现或删除 staging 前缀。
 
 
 ## 4. 数据模式

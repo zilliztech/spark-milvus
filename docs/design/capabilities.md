@@ -55,11 +55,11 @@ Table 接口表达不了的动作走 CALL：四条线走同一个 SQL 语法扩�
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
-| A1 | 快照 | `CALL milvus.system.create_snapshot('db.coll')`，drop、list、describe | spark.procedure → client.api | 建前是否先 Flush 见决策 11 | P1 |
-| A2 | 索引 | `create_index`、`drop_index`，可等待完成 | spark.procedure → client.api | client 新增 CreateIndex、DropIndex、DescribeIndex | P1 |
-| A3 | 生命周期 | `load`、`release`、`flush`、`compact` | spark.procedure → client.api | client 新增 LoadCollection、ReleaseCollection、ManualCompaction | P1 |
-| A4 | 登记 | `CALL milvus.system.register('db.coll', staging => '{root}/staging/<job-id>', \`milvus.uri\` => ..., \`fs.*\` => ...)`（#17，2026-09-16 起，四条线）；Scala 入口 `Register.run` | spark.extensions → spark.procedure → core.write.commit、client.api | backfill 分支已通（2026-09-15 #16）：`spark.procedure.Register.run` 读作业清单，`client.api.batchUpdateManifest` 走 Milvus 3.0 公开的 BatchUpdateManifest，UAT 上 backfill → register → 在线查到新列；SQL 的 `CALL` 前端未接（#17），先是 Scala 入口。append 分支走 RegisterSegments，待 Milvus 新增 | P1 / append 待定 |
-| A5 | 描述 | `describe`：schema、段数、索引状态 | spark.procedure → client.api | | P1 |
+| A1 | 快照 | `create_snapshot('db.coll', 'name')`、`drop_snapshot`、`list_snapshots`、`describe_snapshot` | spark.extensions → spark.procedure → client.api | 已实现；连接器转发在线侧快照 RPC，不自行决定建前 Flush | P1 |
+| A2 | 索引 | `create_index`、`drop_index`；创建可显式等待完成 | spark.extensions → spark.procedure → client.api | 已实现；默认只提交，等待有 600 秒默认上限并识别 Failed 终态 | P1 |
+| A3 | 生命周期 | `load`、`release`、`flush`、`compact` | spark.extensions → spark.procedure → client.api | 已实现；load/compact 可显式有界等待，flush 只报告请求已提交 | P1 |
+| A4 | 登记 | `CALL milvus.system.register('db.coll', staging => '{root}/staging/<job-id>', \`milvus.uri\` => ..., \`fs.*\` => ...)`（#17，2026-09-16 起，四条线）；Scala 入口 `Register.run` | spark.extensions → spark.procedure → core.write.commit、client.api | backfill 分支已通：SQL 与 Scala 入口都读作业清单，经公开的 BatchUpdateManifest 登记并写幂等标记；append 分支仍等 Milvus 提供 RegisterSegments | P1 / append 待定 |
+| A5 | 描述 | `describe`：collection id、schema、段数、load 与索引状态 | spark.extensions → spark.procedure → client.api | 已实现；按 schema 顺序输出，无索引字段保留一行且索引列为 NULL，不把段行数相加冒充当前行数 | P1 |
 | A7 | 清理暂存 | `cleanup_staging('db.coll')`：删掉没登记成的作业前缀 | spark.procedure → core.write.commit | 作业被 kill 时 abort 不执行，暂存前缀会留垃圾 | P1 |
 
 ## 5 向量与索引
@@ -122,8 +122,5 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 | 编号 | 为什么还没有 |
 |---|---|
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
-| A7 | 清理暂存要 `spark.procedure`，那个包目前是空的，等第 3 层拆分 |
-| A2 | 建索引、删索引的 CALL 要 `spark.procedure`（3.5 线是 `spark.functions`），全部是空壳；client 侧还要新增三个 RPC |
-| A3 | load / release / flush / compact 的 CALL，同 A2；client 侧还要新增三个 RPC |
-| A5 | describe 的 CALL，同 A2 |
+| A7 | 作业清单尚不记录 collection 所有权，也没有暂存保留期与活跃作业判定；对象存储目录标记的删除能力也未补齐，在这些安全边界明确前不能提供批量清理 |
 | V4 | 持久化索引来源已跟随快照传递；跨任务缓存、其他来源仍未实现，当前每个查询任务持有并关闭自己的索引 |

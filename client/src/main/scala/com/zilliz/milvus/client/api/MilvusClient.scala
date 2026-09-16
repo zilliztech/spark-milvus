@@ -29,8 +29,10 @@ import com.zilliz.milvus.client.{
 import com.zilliz.milvus.client.grpc.GrpcRetryInterceptor
 import io.milvus.grpc.common.{
   ClientInfo,
+  CompactionState,
   ConsistencyLevel,
   ErrorCode,
+  IndexState,
   KeyValuePair,
   Status
 }
@@ -48,23 +50,35 @@ import io.milvus.grpc.milvus.{
   DeleteRequest,
   DescribeCollectionRequest,
   DescribeCollectionResponse,
+  DescribeIndexRequest,
+  DescribeIndexResponse,
   DescribeSnapshotRequest,
   DescribeSnapshotResponse,
   DropCollectionRequest,
+  DropIndexRequest,
   DropSnapshotRequest,
   FlushRequest,
+  GetCompactionStateRequest,
+  GetCompactionStateResponse,
   GetImportStateRequest,
   GetImportStateResponse,
   GetLoadStateRequest,
+  GetLoadStateResponse,
   GetPersistentSegmentInfoRequest,
+  GetPersistentSegmentInfoResponse,
   ImportRequest,
   InsertRequest,
   ListDatabasesRequest,
   ListDatabasesResponse,
+  ListSnapshotsRequest,
+  ListSnapshotsResponse,
   LoadCollectionRequest,
+  ManualCompactionRequest,
+  ManualCompactionResponse,
   MilvusServiceGrpc,
   MutationResult,
   QueryRequest,
+  ReleaseCollectionRequest,
   ShowCollectionsRequest,
   ShowCollectionsResponse,
   ShowPartitionsRequest
@@ -94,12 +108,15 @@ import io.grpc.Status.Code
   */
 class MilvusClient(params: MilvusConnectionParams)
     extends com.zilliz.milvus.storage.Logging {
+  private val DefaultRpcTimeoutMillis = TimeUnit.SECONDS.toMillis(10)
+
   private val retryInterceptor = new GrpcRetryInterceptor(
     maxRetries = 5,
     initialDelayMillis = 500,
     delayMultiplier = 2.0,
     maxDelayMillis = 5000
   )
+  @volatile private var channelInitialized = false
   private lazy val channel: ManagedChannel = {
     val uri = new URI(params.uri)
     val scheme = uri.getScheme
@@ -159,7 +176,9 @@ class MilvusClient(params: MilvusConnectionParams)
     if (isHttps) {
       channelBuilder = channelBuilder.useTransportSecurity()
     }
-    channelBuilder.build()
+    val built = channelBuilder.build()
+    channelInitialized = true
+    built
   }
   private lazy val stub: MilvusServiceGrpc.MilvusServiceBlockingStub = {
     val server = MilvusServiceGrpc
@@ -184,7 +203,16 @@ class MilvusClient(params: MilvusConnectionParams)
   }
 
   private def rpcStub: MilvusServiceGrpc.MilvusServiceBlockingStub =
-    stub.withDeadlineAfter(10, TimeUnit.SECONDS)
+    stub.withDeadlineAfter(DefaultRpcTimeoutMillis, TimeUnit.MILLISECONDS)
+
+  private def rpcStub(
+      timeoutMillis: Long
+  ): MilvusServiceGrpc.MilvusServiceBlockingStub = {
+    require(timeoutMillis > 0L, "RPC timeout must be positive")
+    stub
+      .withOption(GrpcRetryInterceptor.DisableRetries, java.lang.Boolean.TRUE)
+      .withDeadlineAfter(timeoutMillis, TimeUnit.MILLISECONDS)
+  }
 
   private lazy val httpClient: HttpClient = {
     HttpClient
@@ -503,27 +531,190 @@ class MilvusClient(params: MilvusConnectionParams)
       fieldName: String,
       params: Map[String, String] =
         Map("index_type" -> "AUTOINDEX", "metric_type" -> "L2")
+  ): Try[Status] =
+    createIndex(dbName, collectionName, fieldName, params, indexName = "")
+
+  def createIndex(
+      dbName: String,
+      collectionName: String,
+      fieldName: String,
+      params: Map[String, String],
+      indexName: String
   ): Try[Status] = {
-    try {
-      val status = rpcStub.createIndex(
-        CreateIndexRequest(
-          dbName = dbName,
-          collectionName = collectionName,
-          fieldName = fieldName,
-          extraParams = params.map { case (k, v) => KeyValuePair(k, v) }.toSeq
-        )
-      )
-      checkStatus("createIndex", status)
-    } catch {
-      case e: Exception =>
-        Failure(
-          new Exception(
-            s"Failed to create index on $fieldName: ${e.getMessage}",
-            e
-          )
-        )
+    val request = CreateIndexRequest(
+      dbName = dbName,
+      collectionName = collectionName,
+      fieldName = fieldName,
+      extraParams = params.map { case (key, value) =>
+        KeyValuePair(key, value)
+      }.toSeq,
+      indexName = indexName
+    )
+    rpcCall(s"create index '$indexName' on field '$fieldName'")(
+      createIndexRPC(request)
+    ).flatMap(checkStatus("createIndex", _))
+  }
+
+  /** Returns every index matching the optional field and index names. */
+  def describeIndexes(
+      dbName: String,
+      collectionName: String,
+      fieldName: String = "",
+      indexName: String = ""
+  ): Try[Seq[MilvusIndexInfo]] =
+    describeIndexes(
+      dbName,
+      collectionName,
+      fieldName,
+      indexName,
+      DefaultRpcTimeoutMillis
+    )
+
+  def describeIndexes(
+      dbName: String,
+      collectionName: String,
+      fieldName: String,
+      indexName: String,
+      timeoutMillis: Long
+  ): Try[Seq[MilvusIndexInfo]] = {
+    val request = DescribeIndexRequest(
+      dbName = dbName,
+      collectionName = collectionName,
+      fieldName = fieldName,
+      indexName = indexName
+    )
+    rpcCall(s"describe indexes for collection '$collectionName'")(
+      describeIndexesRPC(request, timeoutMillis)
+    ).flatMap { response =>
+      response.status match {
+        case Some(status) if status.errorCode == ErrorCode.IndexNotExist =>
+          Success(Seq.empty)
+        case status =>
+          checkResponseStatus("describeIndexes", status).map { _ =>
+            response.indexDescriptions.map { index =>
+              MilvusIndexInfo(
+                indexName = index.indexName,
+                indexID = index.indexID,
+                params = index.params
+                  .map(param => param.key -> param.value)
+                  .toMap,
+                fieldName = index.fieldName,
+                indexedRows = index.indexedRows,
+                totalRows = index.totalRows,
+                state = index.state,
+                failReason = index.indexStateFailReason,
+                pendingIndexRows = index.pendingIndexRows,
+                minIndexVersion = index.minIndexVersion,
+                maxIndexVersion = index.maxIndexVersion
+              )
+            }
+          }
+      }
     }
   }
+
+  /** Drops the named index from a collection. */
+  def dropIndex(
+      dbName: String,
+      collectionName: String,
+      indexName: String
+  ): Try[Unit] = {
+    val request = DropIndexRequest(
+      dbName = dbName,
+      collectionName = collectionName,
+      indexName = indexName
+    )
+    rpcCall(s"drop index '$indexName' from collection '$collectionName'")(
+      dropIndexRPC(request)
+    ).flatMap(checkStatus("dropIndex", _)).map(_ => ())
+  }
+
+  /** Releases a loaded collection from Milvus query nodes. */
+  def releaseCollection(
+      dbName: String,
+      collectionName: String
+  ): Try[Unit] = {
+    val request = ReleaseCollectionRequest(
+      dbName = dbName,
+      collectionName = collectionName
+    )
+    rpcCall(s"release collection '$collectionName'")(
+      releaseCollectionRPC(request)
+    ).flatMap(checkStatus("releaseCollection", _)).map(_ => ())
+  }
+
+  /** Submits a manual compaction for a collection. */
+  def manualCompaction(
+      dbName: String,
+      collectionName: String
+  ): Try[MilvusCompactionInfo] = {
+    val request = ManualCompactionRequest(
+      dbName = dbName,
+      collectionName = collectionName
+    )
+    rpcCall(s"start compaction for collection '$collectionName'")(
+      manualCompactionRPC(request)
+    ).flatMap { response =>
+      checkResponseStatus("manualCompaction", response.status).map { _ =>
+        MilvusCompactionInfo(
+          compactionID = response.compactionID,
+          compactionPlanCount = response.compactionPlanCount
+        )
+      }
+    }
+  }
+
+  /** Returns the current state and plan counts of a submitted compaction. */
+  def getCompactionState(compactionID: Long): Try[MilvusCompactionState] =
+    getCompactionState(compactionID, DefaultRpcTimeoutMillis)
+
+  def getCompactionState(
+      compactionID: Long,
+      timeoutMillis: Long
+  ): Try[MilvusCompactionState] = {
+    val request = GetCompactionStateRequest(compactionID = compactionID)
+    rpcCall(s"get state for compaction '$compactionID'")(
+      getCompactionStateRPC(request, timeoutMillis)
+    ).flatMap { response =>
+      checkResponseStatus("getCompactionState", response.status).map { _ =>
+        MilvusCompactionState(
+          state = response.state,
+          executingPlanCount = response.executingPlanNo,
+          timeoutPlanCount = response.timeoutPlanNo,
+          completedPlanCount = response.completedPlanNo,
+          failedPlanCount = response.failedPlanNo
+        )
+      }
+    }
+  }
+
+  private[api] def createIndexRPC(request: CreateIndexRequest): Status =
+    rpcStub.createIndex(request)
+
+  private[api] def describeIndexesRPC(
+      request: DescribeIndexRequest,
+      timeoutMillis: Long
+  ): DescribeIndexResponse =
+    rpcStub(timeoutMillis).describeIndex(request)
+
+  private[api] def dropIndexRPC(request: DropIndexRequest): Status =
+    rpcStub.dropIndex(request)
+
+  private[api] def releaseCollectionRPC(
+      request: ReleaseCollectionRequest
+  ): Status =
+    rpcStub.releaseCollection(request)
+
+  private[api] def manualCompactionRPC(
+      request: ManualCompactionRequest
+  ): ManualCompactionResponse =
+    rpcStub.manualCompaction(request)
+
+  private[api] def getCompactionStateRPC(
+      request: GetCompactionStateRequest,
+      timeoutMillis: Long
+  ): GetCompactionStateResponse =
+    rpcStub(timeoutMillis).getCompactionState(request)
 
   def loadCollection(dbName: String, collectionName: String): Try[Status] = {
     try
@@ -545,10 +736,18 @@ class MilvusClient(params: MilvusConnectionParams)
   }
 
   /** The collection's load state: NotExist, NotLoad, Loading or Loaded. */
-  def getLoadState(dbName: String, collectionName: String): Try[LoadState] = {
+  def getLoadState(dbName: String, collectionName: String): Try[LoadState] =
+    getLoadState(dbName, collectionName, DefaultRpcTimeoutMillis)
+
+  def getLoadState(
+      dbName: String,
+      collectionName: String,
+      timeoutMillis: Long
+  ): Try[LoadState] = {
     try {
-      val response = rpcStub.getLoadState(
-        GetLoadStateRequest(dbName = dbName, collectionName = collectionName)
+      val response = getLoadStateRPC(
+        GetLoadStateRequest(dbName = dbName, collectionName = collectionName),
+        timeoutMillis
       )
       checkStatus(
         "getLoadState",
@@ -569,6 +768,12 @@ class MilvusClient(params: MilvusConnectionParams)
         )
     }
   }
+
+  private[api] def getLoadStateRPC(
+      request: GetLoadStateRequest,
+      timeoutMillis: Long
+  ): GetLoadStateResponse =
+    rpcStub(timeoutMillis).getLoadState(request)
 
   /** Scalar query, for reading rows back through the service. */
   def query(
@@ -630,7 +835,7 @@ class MilvusClient(params: MilvusConnectionParams)
     } catch {
       case e: Exception =>
         Failure(
-          new Exception(s"Failed to flush collection: ${e.getMessage}")
+          new Exception(s"Failed to flush collection: ${e.getMessage}", e)
         )
     }
   }
@@ -800,7 +1005,7 @@ class MilvusClient(params: MilvusConnectionParams)
     }
   }
 
-  private def describeCollectionRPC(
+  private[api] def describeCollectionRPC(
       dbName: String,
       collectionName: String
   ): DescribeCollectionResponse = {
@@ -880,13 +1085,13 @@ class MilvusClient(params: MilvusConnectionParams)
   ): Try[MilvusCollectionInfo] = {
     try {
       val collectionInfo = describeCollectionRPC(dbName, collectionName)
-      collectionInfo.status.foreach { status =>
-        if (MilvusClient.isCollectionNotFound(status)) {
+      collectionInfo.status match {
+        case Some(status) if MilvusClient.isCollectionNotFound(status) =>
           throw new CollectionNotFoundException(
             s"Milvus collection '$dbName.$collectionName' does not exist"
           )
-        }
-        checkStatus("get collection info", status).get
+        case status =>
+          checkResponseStatus("get collection info", status).get
       }
       Success(
         MilvusCollectionInfo(
@@ -912,6 +1117,83 @@ class MilvusClient(params: MilvusConnectionParams)
     }
   }
 
+  /** Creates one snapshot without rolling it back if a later read fails. */
+  def createSnapshot(
+      dbName: String,
+      collectionName: String,
+      snapshotName: String,
+      description: String,
+      compactionProtectionSeconds: Long
+  ): Try[Unit] = {
+    val request = CreateSnapshotRequest(
+      name = snapshotName,
+      description = description,
+      dbName = dbName,
+      collectionName = collectionName,
+      compactionProtectionSeconds = compactionProtectionSeconds
+    )
+    rpcCall(s"create snapshot '$snapshotName'")(createSnapshotRPC(request))
+      .flatMap(checkStatus("createSnapshot", _))
+      .map(_ => ())
+  }
+
+  private[api] def createSnapshotRPC(request: CreateSnapshotRequest): Status =
+    rpcStub.createSnapshot(request)
+
+  /** Lists the snapshots that belong to a collection. */
+  def listSnapshots(
+      dbName: String,
+      collectionName: String
+  ): Try[Seq[String]] = {
+    val request = ListSnapshotsRequest(
+      dbName = dbName,
+      collectionName = collectionName
+    )
+    rpcCall(s"list snapshots for collection '$collectionName'")(
+      listSnapshotsRPC(request)
+    ).flatMap { response =>
+      checkResponseStatus("listSnapshots", response.status)
+        .map(_ => response.snapshots)
+    }
+  }
+
+  /** Returns the metadata stored for one snapshot. */
+  def describeSnapshot(
+      dbName: String,
+      collectionName: String,
+      snapshotName: String
+  ): Try[MilvusSnapshotInfo] = {
+    val request = DescribeSnapshotRequest(
+      name = snapshotName,
+      dbName = dbName,
+      collectionName = collectionName
+    )
+    rpcCall(s"describe snapshot '$snapshotName'")(
+      describeSnapshotRPC(request)
+    ).flatMap { response =>
+      checkResponseStatus("describeSnapshot", response.status).map { _ =>
+        MilvusSnapshotInfo(
+          name = response.name,
+          description = response.description,
+          collectionName = response.collectionName,
+          partitionNames = response.partitionNames,
+          createTs = response.createTs,
+          s3Location = response.s3Location
+        )
+      }
+    }
+  }
+
+  private[api] def listSnapshotsRPC(
+      request: ListSnapshotsRequest
+  ): ListSnapshotsResponse =
+    rpcStub.listSnapshots(request)
+
+  private[api] def describeSnapshotRPC(
+      request: DescribeSnapshotRequest
+  ): DescribeSnapshotResponse =
+    rpcStub.describeSnapshot(request)
+
   def createSnapshotForRead(
       dbName: String,
       collectionName: String,
@@ -919,39 +1201,19 @@ class MilvusClient(params: MilvusConnectionParams)
       description: String,
       compactionProtectionSeconds: Long
   ): Try[MilvusSnapshotInfo] = {
-    val createStatus =
-      try {
-        rpcStub.createSnapshot(
-          CreateSnapshotRequest(
-            name = snapshotName,
-            description = description,
-            dbName = dbName,
-            collectionName = collectionName,
-            compactionProtectionSeconds = compactionProtectionSeconds
-          )
-        )
-      } catch {
-        case e: StatusRuntimeException => return Failure(e)
-        case e: Exception              => return Failure(e)
-      }
-
-    checkStatus("createSnapshot", createStatus).flatMap { _ =>
-      describeSnapshotForReadWithRetry(
+    createSnapshot(
+      dbName,
+      collectionName,
+      snapshotName,
+      description,
+      compactionProtectionSeconds
+    ).flatMap { _ =>
+      describeSnapshotWithRetry(
         dbName,
         collectionName,
         snapshotName
       ) match {
-        case Success(snapshot) =>
-          Success(
-            MilvusSnapshotInfo(
-              name = snapshot.name,
-              description = snapshot.description,
-              collectionName = snapshot.collectionName,
-              partitionNames = snapshot.partitionNames,
-              createTs = snapshot.createTs,
-              s3Location = snapshot.s3Location
-            )
-          )
+        case success @ Success(_) => success
         case Failure(e) =>
           dropSnapshot(dbName, collectionName, snapshotName) match {
             case Failure(dropErr) =>
@@ -966,35 +1228,25 @@ class MilvusClient(params: MilvusConnectionParams)
     }
   }
 
-  private def describeSnapshotForReadWithRetry(
+  /** Retries snapshot metadata reads to cover the short visibility delay that
+    * can follow a successful create request.
+    */
+  def describeSnapshotWithRetry(
       dbName: String,
       collectionName: String,
       snapshotName: String,
       maxAttempts: Int = 3
-  ): Try[DescribeSnapshotResponse] = {
+  ): Try[MilvusSnapshotInfo] = {
+    if (maxAttempts <= 0) {
+      return Failure(
+        new IllegalArgumentException(
+          s"maxAttempts must be positive, got $maxAttempts"
+        )
+      )
+    }
     var lastFailure = Option.empty[Throwable]
     (1 to maxAttempts).foreach { attempt =>
-      val result =
-        try {
-          val snapshot = rpcStub.describeSnapshot(
-            DescribeSnapshotRequest(
-              name = snapshotName,
-              dbName = dbName,
-              collectionName = collectionName
-            )
-          )
-          checkStatus(
-            "describeSnapshot",
-            snapshot.status.getOrElse(
-              Status(
-                errorCode = ErrorCode.UnexpectedError,
-                reason = "DescribeSnapshot Status is empty"
-              )
-            )
-          ).map(_ => snapshot)
-        } catch {
-          case e: Exception => Failure(e)
-        }
+      val result = describeSnapshot(dbName, collectionName, snapshotName)
 
       result match {
         case success @ Success(_) => return success
@@ -1005,7 +1257,12 @@ class MilvusClient(params: MilvusConnectionParams)
               s"describeSnapshot failed for $snapshotName (attempt $attempt/$maxAttempts)",
               e
             )
-            TimeUnit.MILLISECONDS.sleep(200L * attempt)
+            try TimeUnit.MILLISECONDS.sleep(200L * attempt)
+            catch {
+              case interrupted: InterruptedException =>
+                Thread.currentThread().interrupt()
+                return Failure(interrupted)
+            }
           }
       }
     }
@@ -1041,13 +1298,12 @@ class MilvusClient(params: MilvusConnectionParams)
       collectionName: String
   ): Try[Seq[MilvusSegmentInfo]] = {
     try {
-      val segments = rpcStub.getPersistentSegmentInfo(
-        GetPersistentSegmentInfoRequest(
-          dbName = dbName,
-          collectionName = collectionName
-        )
+      val request = GetPersistentSegmentInfoRequest(
+        dbName = dbName,
+        collectionName = collectionName
       )
-      Success(
+      val segments = getSegmentsRPC(request)
+      checkResponseStatus("getSegments", segments.status).map { _ =>
         segments.infos.map(info =>
           MilvusSegmentInfo(
             segmentID = info.segmentID,
@@ -1059,14 +1315,19 @@ class MilvusClient(params: MilvusConnectionParams)
             storageVersion = info.storageVersion
           )
         )
-      )
+      }
     } catch {
       case e: Exception =>
         Failure(
-          new Exception(s"Failed to get segments: ${e.getMessage}")
+          new Exception(s"Failed to get segments: ${e.getMessage}", e)
         )
     }
   }
+
+  private[api] def getSegmentsRPC(
+      request: GetPersistentSegmentInfoRequest
+  ): GetPersistentSegmentInfoResponse =
+    rpcStub.getPersistentSegmentInfo(request)
 
   def getSegmentInfo(
       collectionID: Long,
@@ -1239,7 +1500,7 @@ class MilvusClient(params: MilvusConnectionParams)
   }
 
   def close(): Unit = {
-    channel.shutdownNow()
+    if (channelInitialized) channel.shutdownNow()
   }
 }
 
@@ -1374,6 +1635,33 @@ case class MilvusSnapshotInfo(
     partitionNames: Seq[String],
     createTs: Long,
     s3Location: String
+)
+
+case class MilvusIndexInfo(
+    indexName: String,
+    indexID: Long,
+    params: Map[String, String],
+    fieldName: String,
+    indexedRows: Long,
+    totalRows: Long,
+    state: IndexState,
+    failReason: String,
+    pendingIndexRows: Long,
+    minIndexVersion: Int,
+    maxIndexVersion: Int
+)
+
+case class MilvusCompactionInfo(
+    compactionID: Long,
+    compactionPlanCount: Int
+)
+
+case class MilvusCompactionState(
+    state: CompactionState,
+    executingPlanCount: Long,
+    timeoutPlanCount: Long,
+    completedPlanCount: Long,
+    failedPlanCount: Long
 )
 
 case class MilvusSegmentInfo(

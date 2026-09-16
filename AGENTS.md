@@ -27,14 +27,14 @@ every rule below refers to.
 | 1 | `native-storage`, `native-vector` | Storage JNI over milvus-storage's `loon_*`; vector library loading through Knowhere's upstream C/JNI and Java API. Nothing above this layer loads a `.so`. |
 | 2 | `core`, `compat`, `client` | The Milvus storage format and the client for the online service. All computation happens here. No Spark: a source file mentioning `org.apache.spark` fails the build. |
 | 3 | `spark-base`, `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | The DataSource V2 surface. `spark-base` is a shared source directory, not a project; each line project compiles it against its own Spark, Arrow, antlr and Java version. |
-| 4 | `apps-4.0` | The jobs users run: backfill, brute-force search, diagnostic tools, the legacy gRPC insert path. |
+| 4 | `apps-4.0` | The jobs users run: backfill and vector search. |
 
 `integration-4.0` sits outside the layering and outside root's aggregate: its
 suites need a live Milvus and MinIO.
 
-Only layer 3 splits per Spark line, because the interfaces differ there.
-`ProcedureCatalog` exists only in Spark 4.0 and later, and Arrow, antlr and the
-Java target are pinned per line. Each `spark-<line>` declares an `assembly`
+Only layer 3 splits per Spark line, because the `TableCatalog` and
+`ParserInterface` method sets differ there, while Arrow, antlr and the Java
+target are also pinned per line. Each `spark-<line>` declares an `assembly`
 task, not another module. During migration, the usable fat jar is still root's
 `assembly`: its merge and shading rules are not yet wired into the per-line
 tasks. [README.md](README.md) has the full module table.
@@ -79,6 +79,13 @@ predicates into core `PredicateExpr` values and leaves each unsupported
 predicate tree with Spark. Names follow the Names
 section of [docs/writing.md](docs/writing.md): the two storage lines are `V2`
 and `V3` everywhere, after the snapshot's `storage_version`.
+
+`procedure` owns the driver-side bodies behind the shared
+`CALL milvus.system.<name>(...)` SQL extension. Snapshot, index,
+load/release/flush/compact, collection describe, and backfill register are
+implemented across all four Spark lines. Append registration still waits for a
+Milvus `RegisterSegments` API; staging cleanup remains unimplemented until its
+ownership and retention contract is defined.
 
 Layer 1 is written and in use: `native-storage` wraps the `loon_*` entry points
 for both reading and writing and loads its own libraries. The upstream
@@ -127,7 +134,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How does Spark predicate pushdown preserve semantics? | [docs/design/architecture/expressions.html](docs/design/architecture/expressions.html) — the DataSource V2 support matrix, residual contract, three-valued logic, field-id binding, hidden predicate columns and row/columnar execution |
 | How does Catalog discovery work, and how does a three-part table name select one fixed snapshot? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — one-level namespaces, table listing, absence and failure semantics, catalog configuration, identifier rules, latest/version/timestamp selection, HybridTS conversion and the read-only boundary |
 | How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment still lacks before registration, the development outline |
-| How does a `CALL milvus.system.<name>(...)` statement become a call? | [docs/design/architecture/procedure.html](docs/design/architecture/procedure.html) — the grammar, the parser extension, the logical node and strategy, what is generated per Spark line, the procedure interface; design under review (#17) |
+| How does a `CALL milvus.system.<name>(...)` statement become a call? | [docs/design/architecture/procedure.html](docs/design/architecture/procedure.html) — the grammar, parser extension, logical node and strategy, per-line generated pieces, procedure contracts and bounded-wait semantics |
 | How do vector queries use persisted Milvus indexes? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — issue #125 index metadata, Knowhere loading, pre-search filtering, projected row retrieval, global TopK and real-instance validation; the existing BruteForce entry point is documented separately |
 | What is a Snapshot, and how do the four read entry points become one? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html) — `Snapshot` and `Segment`, the three delete states, what each source cannot supply, `SnapshotCatalog`, the boundary to `SegmentReadTask`. Draft under review |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |

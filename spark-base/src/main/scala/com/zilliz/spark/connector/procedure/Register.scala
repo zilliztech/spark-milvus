@@ -18,8 +18,8 @@ import io.milvus.grpc.common.Status
   * job that created new segments is refused, because Milvus has no
   * RegisterSegments yet.
   *
-  * This is the procedure's body. `CALL milvus.system.register(...)` in SQL is
-  * not wired yet; until it is, a job calls `Register.run` directly.
+  * This is the procedure's body. SQL calls it through [[RegisterProcedure]];
+  * jobs that already hold an option map may call `Register.run` directly.
   */
 object Register extends Logging {
 
