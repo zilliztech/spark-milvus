@@ -2,7 +2,7 @@ package com.zilliz.milvus.storage.stats
 
 import java.nio.charset.StandardCharsets
 
-import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 
 import io.milvus.grpc.schema.DataType
 
@@ -163,26 +163,92 @@ object PrimaryKeyStats {
   /** Reads what Milvus (or this class) wrote. */
   def fromJson(json: String): PrimaryKeyStats = {
     val node = mapper.readTree(json)
-    val bfType = node.path("bfType").asInt(-1)
+    require(
+      node != null && node.isObject,
+      "primary-key stats must be a JSON object"
+    )
+    fromNode(node)
+  }
+
+  /** Reads either `StatsWriter.Generate`'s single object or `GenerateList`'s
+    * compound array. An empty compound file is invalid: a caller cannot use it
+    * to prove that a segment has no matching key.
+    */
+  def fromBytes(bytes: Array[Byte]): Seq[PrimaryKeyStats] = {
+    val root = mapper.readTree(bytes)
+    require(root != null, "primary-key stats JSON must not be empty")
+    if (root.isObject) Seq(fromNode(root))
+    else if (root.isArray) {
+      require(root.size() > 0, "compound primary-key stats must not be empty")
+      Iterator.range(0, root.size()).map(i => fromNode(root.get(i))).toSeq
+    } else {
+      throw new IllegalArgumentException(
+        "primary-key stats root must be an object or array"
+      )
+    }
+  }
+
+  private def fromNode(node: JsonNode): PrimaryKeyStats = {
+    require(
+      node != null && node.isObject,
+      "primary-key stats entry must be an object"
+    )
+    val fieldIdNode = required(node, "fieldID")
+    requireIntegralLong(fieldIdNode, "fieldID")
+    val fieldId = fieldIdNode.longValue()
+
+    val bfTypeNode = required(node, "bfType")
+    requireIntegralInt(bfTypeNode, "bfType")
+    val bfType = bfTypeNode.intValue()
     require(
       bfType == BlockedBfType,
       s"bfType $bfType is not the blocked bloom filter ($BlockedBfType)"
     )
-    val bf = node.path("bf")
+    val bf = required(node, "bf")
+    require(bf.isObject, "primary-key stats bf must be an object")
+    val kNode = required(bf, "k")
+    requireIntegralInt(kNode, "bf.k")
+    val blocksNode = required(bf, "b")
+    require(blocksNode.isArray, "primary-key stats bf.b must be an array")
     val blocks = Iterator
-      .range(0, bf.path("b").size())
-      .map(bf.path("b").get(_).asText())
+      .range(0, blocksNode.size())
+      .map { index =>
+        val block = blocksNode.get(index)
+        require(
+          block != null && block.isTextual,
+          s"primary-key stats bf.b[$index] must be a string"
+        )
+        block.textValue()
+      }
       .toSeq
-    val filter = BlockedBloomFilter.fromJson(bf.path("k").asInt(), blocks)
-    val pkType =
-      DataType.fromValue(node.path("pkType").asInt(DataType.Int64.value))
+    val filter = BlockedBloomFilter.fromJson(kNode.intValue(), blocks)
+
+    val pkTypeNode = required(node, "pkType")
+    requireIntegralInt(pkTypeNode, "pkType")
+    val pkType = DataType.fromValue(pkTypeNode.intValue())
+    require(
+      pkType == DataType.Int64 || pkType == DataType.VarChar,
+      s"unsupported primary-key stats type $pkType"
+    )
+    Seq("min", "max").foreach { name =>
+      requireIntegralLong(required(node, name), name)
+    }
     val (min, max) = pkType match {
       case DataType.Int64 =>
-        (node.path("minPk").asLong(), node.path("maxPk").asLong())
-      case _ => (node.path("minPk").asText(), node.path("maxPk").asText())
+        val minPk = required(node, "minPk")
+        val maxPk = required(node, "maxPk")
+        requireIntegralLong(minPk, "minPk")
+        requireIntegralLong(maxPk, "maxPk")
+        (minPk.longValue(), maxPk.longValue())
+      case _ =>
+        val minPk = required(node, "minPk")
+        val maxPk = required(node, "maxPk")
+        require(minPk.isTextual, "primary-key stats minPk must be a string")
+        require(maxPk.isTextual, "primary-key stats maxPk must be a string")
+        (minPk.textValue(), maxPk.textValue())
     }
     new PrimaryKeyStats(
-      node.path("fieldID").asLong(),
+      fieldId,
       pkType,
       filter,
       min,
@@ -190,4 +256,25 @@ object PrimaryKeyStats {
       -1L
     )
   }
+
+  private def required(parent: JsonNode, name: String): JsonNode = {
+    val value = parent.get(name)
+    require(
+      value != null && !value.isNull,
+      s"primary-key stats $name is missing"
+    )
+    value
+  }
+
+  private def requireIntegralLong(value: JsonNode, name: String): Unit =
+    require(
+      value.isIntegralNumber && value.canConvertToLong,
+      s"primary-key stats $name must be a 64-bit integer"
+    )
+
+  private def requireIntegralInt(value: JsonNode, name: String): Unit =
+    require(
+      value.isIntegralNumber && value.canConvertToInt,
+      s"primary-key stats $name must be a 32-bit integer"
+    )
 }

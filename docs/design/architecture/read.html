@@ -166,7 +166,7 @@ L0 是删除段而不是数据段，按删除描述保留，不进入数据 read
 
 <table>
 <tr><th></th><th>状态</th></tr>
-<tr><td>driver 侧</td><td><code>SnapshotSources</code> 解析并收窄一个 Snapshot；<code>DeleteFileListing</code> 只读取 V3 Manifest 以列出删除文件；<code>ReadPlan</code> 生成可序列化任务。driver 打开的 store 在描述物化完毕后关闭</td></tr>
+<tr><td>driver 侧</td><td><code>SnapshotSources</code> 解析并收窄一个 Snapshot；<code>DeleteFileListing</code> 只读取 V3 Manifest 以列出删除文件；<code>PrimaryKeyBloomPruner</code> 读取段级主键统计并保守地剪段；<code>ReadPlan</code> 生成可序列化任务。driver 打开的 store 在描述物化完毕后关闭</td></tr>
 <tr><td>executor 侧</td><td><code>DeletePlans</code> 读取删除文件，<code>SegmentReaderRegistry</code> 打开数据 reader；两个资源都从任务携带的路径与 <code>fs.*</code> 重建，在本进程关闭</td></tr>
 <tr><td>代价</td><td>driver 现在要能加载 <code>libmilvus-storage</code>。CI 不构建原生库,所以这条路径在 CI 上没有端到端覆盖;单元测试用 <code>LocalObjectStore</code> 覆盖各格式的解析</td></tr>
 </table>
@@ -187,11 +187,27 @@ L0 是删除段而不是数据段，按删除描述保留，不进入数据 read
 <tr><td><code>ReadPlan</code></td><td>一组 <code>SegmentReadTask</code>，加规划期可知的总行数。V3 每段一个钉住 Manifest 版本的任务；V2 每个有数据的段一个列组任务；delete-only 段只作为 L0 删除来源，不单独出任务</td></tr>
 <tr><td><code>DeleteFileListing</code></td><td>driver 只列适用于每段的删除文件：段自己的、本分区 L0、全 collection L0；内容留给 executor 解码</td></tr>
 </table>
-<p>剪枝(R9 段级、R10 row group 级)也在本包:规划期用统计信息把不需要的段和文件从
-<code>SegmentReadTask</code> 里去掉。R10 依赖仓库外的两件事,见
+<p>R9 在任务生成前由 <code>core.stats</code> 判定可移除的数据段，
+<code>core.snapshot</code> 应用该结果；本包只把剪后的快照变成任务。R10 仍未实现，
+不在 JVM 中用段级统计模拟 row group 剪枝；它依赖仓库外的两件事，见
 <a href="storage-access.html#bridge-prune">storage-access 4.5</a>。</p>
 
-<h3>5.2 core.read.exec</h3>
+<h3 id="primary-key-pruning">5.2 主键 Bloom 段级剪枝与运行时过滤</h3>
+<p>R9 只从主键的等值和 <code>IN</code> 提取有限候选值。布尔组合遵循可证明的集合语义：
+<code>AND</code> 与其他条件并存时可使用已知的主键集合，两个主键集合取交集；
+<code>OR</code> 只有两边都能提取主键集合时才取并集。<code>NOT</code>、范围、其他字段、
+类型不符或无法翻译的条件不产生剪枝输入。这个过程只改变要读的段，R6 仍在行上执行完整谓词。</p>
+<p>V2 从 segment manifest 的 <code>statslog_files</code> 取主键字段的统计路径；V3 从已钉住版本的
+Manifest <code>stats["bloom_filter.&lt;field id&gt;"]</code> 取路径。路径只通过
+<code>core.io.ObjectStore</code> 打开。Milvus 的 <code>StatsWriter.Generate</code> 写单个 JSON object，
+<code>GenerateList</code> 写 JSON array；读取者同时接受两种根形状。路径集合中有 basename 为
+<code>1</code> 的 compound 文件时与 Milvus 一样只读该文件，否则每个列出的文件都是该段的一部分。</p>
+<p>只有所有相关文件都成功读取、JSON 中每个统计都与主键字段及类型匹配，并且每个候选值在每个统计中都确定不存在时，才移除段。任意路径缺失、空文件、损坏 JSON、不支持的 Bloom 类型、字段或主键类型不匹配、以及跨 bucket 路径都保留该段。Bloom 的假阳性也只会多读一个段，不会丢行。</p>
+<p>R18 在固定 Snapshot 的普通扫描上实现
+<code>SupportsRuntimeV2Filtering</code>，只向 Spark 公布主键属性。每次 <code>filter</code> 调用提取一个主键集合，与该 Scan 先前收到的集合继续取交集；相同输入幂等。变化后废弃已生成的 partition 数组，但复用 driver 上按段和路径缓存的统计输入，只在内存中重新判定。剪后 Snapshot 保留每个剩余数据段所在分区的 L0 和 collection 级 L0，不把删除来源当成数据段剪掉。</p>
+<p>带 <code>vector.search.*</code> 的 TopK 读取不公布运行时过滤属性，也不接受该剪枝；Spark 的运行时条件仍在 TopK 之后执行，不改变 TopK 候选集语义。R18 只做段级剪枝，不声称 row group 剪枝；后者仍是 R10 的仓库外依赖。</p>
+
+<h3>5.3 core.read.exec</h3>
 <pre><code>trait SegmentReader extends AutoCloseable {
   def next(): Option[VectorSchemaRoot]   // 逐批，EOF 返回 None
   def deliveredRows: Long                // 已交付物理行数
@@ -205,6 +221,26 @@ SegmentReaderRegistry.open(task, schema, neededColumns, columnNameFor, allocator
 <code>DeleteSource.Files</code> 读成删除计划，失败不退成空计划。</p>
 <p>两条线各自的列组清单怎么来留在各自的实现里,取字节与 Arrow 交接统一走
 <a href="storage-io.html">storage-io</a> 定的那两个面。所有权那三条规则同样在那篇。</p>
+
+<h3 id="resource-limits">5.4 每个任务的批大小与 Arrow 上限</h3>
+<p>driver 把三个用户值严格解析成 <code>ReadLimits</code>，由 <code>ReadPlan.of</code> 放进每个
+<code>SegmentReadTask</code>，随 Spark 分区序列化到 executor。<code>SegmentReaderRegistry</code> 在打开
+原生 reader 时把 <code>batchMaxRows</code> 映射为
+<code>reader.record_batch_max_rows</code>，把 <code>batchMaxBytes</code> 映射为
+<code>reader.record_batch_max_size</code>；类型化值覆盖原始属性包中同名键，避免绕过 driver 校验。</p>
+<table>
+<tr><th>用户 option</th><th>默认值</th><th>生效点</th></tr>
+<tr><td><code>milvus.read.batch.max.rows</code></td><td>8192</td><td>原生 reader 每批最大行数</td></tr>
+<tr><td><code>milvus.read.batch.max.bytes</code></td><td>33554432，最大 4294967296</td><td>原生 reader 每批目标字节上限</td></tr>
+<tr><td><code>milvus.read.arrow.max.bytes</code></td><td><code>Long.MaxValue</code></td><td>当前 Spark read task 的 Arrow child allocator 硬上限</td></tr>
+</table>
+<p><code>MilvusPartitionReaderFactory</code> 为每个任务从进程级 root 建一个 child allocator；行式、列式、
+暴力搜索与持久化索引回表都使用它。最终的基础 <code>PartitionReader</code> 明确持有 child，先关闭当前批和
+<code>SegmentReader</code>，再关闭 child；metadata 与 Limit 包装器只委托 <code>close</code>。构造中途失败时
+factory 关闭已打开的 reader 和 child，重复关闭是空操作，任何任务都不会关闭进程级 root。</p>
+<p class="warn">Arrow 上限约束由该 child 分配或导入的 JVM Arrow buffer，不包含
+<code>libmilvus-storage</code> 自己的 native 内存池。上游当前没有每个 reader 的预取队列上限接口，
+所以 G3 的预取上限仍未映射，不能用批字节上限冒充。</p>
 
 <h2 id="columnar">六、行式与列式出口</h2>
 
@@ -312,6 +348,13 @@ executor 上 <code>core.read.exec.DeletePlans</code> 按任务读文件成 plan,
 <code>spark.read.plan</code> 包、V2 分区上的 L0 标记、reader factory 里的继承 plan 合并都删掉。
 代价:L0 文件对分区内每个段生效,现在每个 task 各读一遍(原来 driver 读一次),driver 不再持有任何主键 map。
 UAT 三个带删除的快照(V2 加 L0、V3 加 L0、V3 折进清单)都读回 2990 行。</li>
+
+<li><s>R9 段级主键 Bloom 剪枝与 R18 段级运行时过滤。</s>已完成。
+<code>SegmentStatistics</code> 显式区分 V2 列出的 statslog、V3 Manifest 内统计和不可知；
+<code>PrimaryKeyBloomPruner</code> 一次读取并缓存每段的统计输入，单 object、compound array、
+多非 compound 文件都按本节的保守规则判定。<code>MilvusScan</code> 只在普通扫描实现
+<code>SupportsRuntimeV2Filtering</code>，重复调用累计取交集并重建 partition 数组，不重读统计。
+R10 仍列在 capabilities 第 11 节，没有 row-group 实现或代理。</li>
 
 <li><s>两个行式 reader 合成一个。</s>已完成(#06)。<code>MilvusV3PartitionReader</code> 与 <code>MilvusV2PartitionReader</code>
 各写一遍的主循环变成一个 <code>MilvusRowPartitionReader</code>:拉批、逐行交付、跳过已删行、有谓词时逐行求值、读完按

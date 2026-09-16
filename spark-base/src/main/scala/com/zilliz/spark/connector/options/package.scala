@@ -13,6 +13,11 @@ package com.zilliz.spark.connector
   * and `ObjectStore`; Milvus-only endpoint-style paths are recognized only at
   * metadata boundaries.
   *
+  * Numeric and Boolean user values go through one strict parser. Read batch and
+  * task Arrow limits become a typed `ReadLimits` carried in every
+  * `SegmentReadTask`; the write rolling limit is mapped once to the upstream
+  * `writer.file_rolling.size` property.
+  *
   * Capabilities: R16, W6, G1, G2, G3, G4 (see docs/design/capabilities.md).
   */
 package object options

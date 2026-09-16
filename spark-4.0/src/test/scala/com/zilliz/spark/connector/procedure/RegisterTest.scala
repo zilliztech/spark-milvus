@@ -115,5 +115,14 @@ class RegisterTest extends AnyFunSuite with Matchers {
     an[IllegalArgumentException] should be thrownBy Register.layoutOf(
       "files/job-1"
     )
+    Register.layoutOf("files/staging/job.1") shouldBe StagingLayout(
+      "files",
+      "job.1"
+    )
+    Seq(".", "..", "a\\b").foreach { jobId =>
+      an[IllegalArgumentException] should be thrownBy Register.layoutOf(
+        s"files/staging/$jobId"
+      )
+    }
   }
 }

@@ -36,8 +36,9 @@ package com.zilliz.milvus.storage.read
   *
   * Main types: SegmentReader, SegmentReaderRegistry, DeletePlans, ReadMetrics.
   * Capabilities: R3, R4, R8, R14, R17, G3, G5 (see
-  * docs/design/capabilities.md). R4 and R17 name the columnar outlet and G3 the
-  * off-heap budget; the batch pull they both sit on is what exists today.
-  * Design: docs/design/architecture/read.html section 5.2.
+  * docs/design/capabilities.md). R4 and R17 name the columnar outlet. G3 maps
+  * typed row/byte batch limits to the upstream reader; the Spark reader owns a
+  * bounded child allocator that outlives every imported batch. Design:
+  * docs/design/architecture/read.html section 5.2.
   */
 package object exec

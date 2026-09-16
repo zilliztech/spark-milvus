@@ -45,6 +45,66 @@ final class Committer(store: ObjectStore, layout: StagingLayout) {
 
   def isRegistered: Boolean = store.exists(layout.registered)
 
+  /** Writes immutable ownership before executor tasks start, then records a
+    * liveness heartbeat. Repeating it for the same owner is safe; changing the
+    * owner or write mode of an existing job is refused.
+    */
+  def start(
+      descriptor: JobDescriptor,
+      nowMillis: Long = System.currentTimeMillis()
+  ): Unit = {
+    require(nowMillis >= 0L, "job creation time must be non-negative")
+    store.createDir(layout.prefix, recursive = true)
+    val expected = JobOwnerManifest(
+      JobOwnerManifest.CurrentVersion,
+      layout.jobId,
+      nowMillis,
+      descriptor.owner,
+      descriptor.writeMode.name
+    )
+    val owner =
+      if (store.exists(layout.owner)) {
+        val existing = ownerManifest()
+        if (
+          existing.formatVersion != JobOwnerManifest.CurrentVersion ||
+          existing.jobId != layout.jobId ||
+          existing.owner != descriptor.owner ||
+          existing.writeMode != descriptor.writeMode.name
+        ) {
+          throw new IllegalStateException(
+            s"${layout.owner} does not describe ${descriptor.owner.database}.${descriptor.owner.collection} " +
+              s"${descriptor.writeMode.name} job ${layout.jobId}"
+          )
+        }
+        existing
+      } else {
+        store.write(
+          layout.owner,
+          expected.toJson.getBytes(StandardCharsets.UTF_8)
+        )
+        expected
+      }
+    writeHeartbeat(owner, nowMillis)
+  }
+
+  /** Refreshes driver liveness for a job that has already written ownership. */
+  def heartbeat(nowMillis: Long = System.currentTimeMillis()): Unit =
+    writeHeartbeat(ownerManifest(), nowMillis)
+
+  def ownerManifest(): JobOwnerManifest =
+    JobOwnerManifest
+      .fromJson(
+        new String(store.readAll(layout.owner), StandardCharsets.UTF_8)
+      )
+      .fold(
+        e =>
+          throw new IllegalStateException(
+            s"cannot read ${layout.owner}: ${e.getMessage}",
+            e
+          ),
+        identity
+      )
+
   /** The job manifest this job committed. */
   def manifest(): JobManifest =
     JobManifest
@@ -71,7 +131,8 @@ final class Committer(store: ObjectStore, layout: StagingLayout) {
 
   def commit(
       segments: Seq[CommittedSegment],
-      nowMillis: Long = System.currentTimeMillis()
+      nowMillis: Long = System.currentTimeMillis(),
+      descriptor: Option[JobDescriptor] = None
   ): CommitOutcome = {
     if (store.exists(layout.marker)) {
       val marked =
@@ -83,7 +144,27 @@ final class Committer(store: ObjectStore, layout: StagingLayout) {
       }
       return CommitOutcome.AlreadyCommitted
     }
-    val manifest = JobManifest(layout.jobId, nowMillis, segments)
+    val owner = descriptor.map { value =>
+      start(value, nowMillis)
+      ownerManifest()
+    }
+    val manifest = owner match {
+      case Some(value) =>
+        JobManifest(
+          layout.jobId,
+          value.createdAtMillis,
+          segments,
+          formatVersion = Some(JobManifest.CurrentVersion),
+          owner = Some(value.owner),
+          writeMode = Some(value.writeMode)
+        )
+      case None =>
+        // Keep the legacy shape for callers that cannot name an owner. It is
+        // still registrable, but cleanup deliberately refuses to infer its
+        // collection or write mode.
+        JobManifest(layout.jobId, nowMillis, segments)
+    }
+    store.createDir(layout.prefix, recursive = true)
     store.write(
       layout.manifest,
       manifest.toJson.getBytes(StandardCharsets.UTF_8)
@@ -98,5 +179,30 @@ final class Committer(store: ObjectStore, layout: StagingLayout) {
       store.list(layout.prefix, recursive = true).filterNot(_.isDirectory)
     files.foreach(f => store.delete(f.path))
     files.size
+  }
+
+  private def writeHeartbeat(
+      owner: JobOwnerManifest,
+      nowMillis: Long
+  ): Unit = {
+    if (owner.jobId != layout.jobId) {
+      throw new IllegalStateException(
+        s"${layout.owner} belongs to job '${owner.jobId}', not '${layout.jobId}'"
+      )
+    }
+    if (nowMillis < owner.createdAtMillis) {
+      throw new IllegalArgumentException(
+        s"heartbeat $nowMillis precedes job creation ${owner.createdAtMillis}"
+      )
+    }
+    val heartbeat = JobHeartbeat(
+      JobHeartbeat.CurrentVersion,
+      layout.jobId,
+      nowMillis
+    )
+    store.write(
+      layout.heartbeat,
+      heartbeat.toJson.getBytes(StandardCharsets.UTF_8)
+    )
   }
 }

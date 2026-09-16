@@ -312,13 +312,20 @@ Map；executor 读取并关闭适用于本段的删除文件，再按主键和�
 | `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | 否 | true | 应用固定快照可见的段内删除、本分区 L0 删除与全 collection L0 删除。设为 `false` 是显式关闭；只要显式提供，除 `true`、`false` 外的值（包括空白值）都会报错。 |
 | `milvus.read.vector.raw` | Boolean | 否 | false | 向量列的输出类型。默认 false，向量转成 Spark 原生类型（`FloatVector`/`Float16Vector`/`BFloat16Vector` → `ArrayType(FloatType)`，`Int8Vector` → `ArrayType(ShortType)`，`SparseFloatVector` → `MapType(LongType, FloatType)`）。设为 true 时向量列输出 `BinaryType`，字节按存储原样给出，由调用方自己按 `dim` 与元素类型解析；这条路径不做逐元素转换，适合把字节直接交给下游原生库的批量作业 |
 | `milvus.read.columnar` | Boolean | 否 | true | 读出口形态。默认 true，整批交付（`ColumnarBatch`），直接包住原生 buffer 不拷贝，向量列按 `milvus.read.vector.raw` 决定的类型呈现；有删除的批按存活行下标映射交付，同样不拷贝。设为 false 逐行交给 Spark。带 `vector.search.*` 的读一律走行式，因为那一步要逐行算距离。行式和列式 reader 共用同一套预期行数校验。 |
+| `milvus.read.batch.max.rows` | Int | 否 | 8192 | 每个 milvus-storage record batch 请求的最大正行数，映射为 `reader.record_batch_max_rows`。 |
+| `milvus.read.batch.max.bytes` | Long | 否 | 33554432 | 每个原生 record batch 的正目标字节上限，映射为 `reader.record_batch_max_size`；当前上游最大值为 4294967296（4 GiB）。 |
+| `milvus.read.arrow.max.bytes` | Long | 否 | 9223372036854775807 | 每个 Spark read task 独占的 Arrow child allocator 正硬上限。覆盖行式、列式与向量路径导入/读取的 Arrow buffer，不包含 milvus-storage 独立的 native 内存池。 |
 
 显式提供的选择器列表不接受空白值、空项或非数值。布尔读选项（`milvus.snapshot.mode`、
 `milvus.read.apply.deletes`、`milvus.read.vector.raw`、`milvus.read.columnar`）只接受
 不区分大小写的 `true` 或 `false`；空白值和拼写错误都会直接报错，不会回退到默认值。
+正整数/正 Long option 不接受空白、零、负数、非十进制和溢出值，错误同时给出键与原始值。
 显式提供的 `milvus.snapshot.max.json.bytes` 必须是正整数。只有 `vector.search.query` 与
 `vector.search.topK` 同时给出时才启用向量搜索：query 必须是非空 JSON 风格的有限数字数组，
 `topK` 必须是正整数；任一显式提供的向量搜索选项都不能是空白值，缺项或格式错误都在规划期失败。
+既有 connector 值遵循同一规则：`milvus.insertMaxBatchSize`（默认 5000）、
+`milvus.retry.count`（3）、`milvus.retry.interval`（1000）、`s3.maxConnections`（32）和
+`s3.preloadPoolSize`（4）都是正 Int；`s3.useSSL` 与 `s3.pathStyleAccess` 是严格 Boolean。
 
 #### Spark 谓词下推
 
@@ -344,9 +351,10 @@ schema，没有任何快照时用）。字段 id 和向量维度都从这份 sch
 
 | 参数名 | 类型 | 必需 | 默认值 | 描述 |
 |--------|------|------|--------|------|
-| `fs.root_path` | String | 否 | `files` | 作业写到 `{root}/staging/{job-id}/` 下：每个 Spark 分区一个段目录，然后是 `manifest.json`（每个段的路径、manifest 版本、行数）和标记文件 `_committed`。 |
-| `MilvusOption.MilvusInsertMaxBatchSize` | Int | 否 | 1000 | 交给原生 writer 的每个 Arrow 批的行数。 |
+| `fs.root_path` | String | 否 | `files` | 作业写到 `{root}/staging/{job-id}/` 下。task 启动前先写 collection 所有权 `owner.json`，每 60 秒刷新 `_heartbeat`；commit 再写带所有权的 `manifest.json` 与 `_committed`。 |
+| `MilvusOption.MilvusInsertMaxBatchSize` | Int | 否 | 5000 | 交给原生 writer 的每个 Arrow 批的正行数。 |
 | `milvus.writer.variableWidthBytesPerValue` | Double | 否 | 32.0 | 变长列（字符串、JSON、二进制）每个值预留的初始字节数。 |
+| `milvus.write.file.rolling.bytes` | Long | 否 | 2147483648 | V2/V3 原生 writer 共用的未压缩字节滚动正阈值，映射为 `writer.file_rolling.size`。它控制列组文件滚动，不是对象存储上传大小，也不保证最终 Parquet 文件的精确大小。 |
 
 写之前在 driver 上校验：DataFrame 的每一列都是 collection 的字段，Spark 类型与读出来的一致（向量列也接受
 `BinaryType` 原始字节）；除 Milvus function 输出外每个字段都要给（nullable 字段给一列 null）；collection
@@ -475,7 +483,8 @@ CALL milvus.system.register('your_db.your_collection',
 
 ### 3.4 用 `CALL` 管理 Milvus
 
-管理过程沿用上面的 SQL 扩展和参数规则。每条语句都要显式提供 `milvus.uri` 和所需认证选项。
+管理过程沿用上面的 SQL 扩展和参数规则。会调用 Milvus 的过程要显式提供 `milvus.uri` 和所需认证选项；
+`cleanup_staging` 只打开语句给出的 `fs.*` 存储，不连接 Milvus。
 目标可以写成 `db.collection`；只写 `collection` 时先使用 `milvus.database.name`，
 未提供该选项才使用 `default`。
 
@@ -492,6 +501,7 @@ CALL milvus.system.register('your_db.your_collection',
 | `flush` | `collection` | — | 一行，`status = submitted`；只表示 Milvus 已接受请求，不表示持久化已经完成 |
 | `compact` | `collection` | `wait`、`timeout_seconds` | compaction ID、计划数、状态及各计划状态计数；只提交不等待时，各状态计数为 NULL |
 | `describe` | `collection` | — | collection ID、持久段数量、加载状态，以及每个 schema 字段与索引组合一行；字段没有索引时索引列为 NULL |
+| `cleanup_staging` | `collection` | `retention_seconds`（默认 `604800`，最小 `300`）、`dry_run`（默认 `true`） | `{fs.root_path}/staging` 每个子目录一行：所有权、写模式、动作与原因、最后心跳、候选/已删文件数、残留目录数和 `prefix_deleted` |
 
 `create_index`、`load`、`compact` 默认只提交任务并立即返回。设置 `wait => true` 才轮询完成状态；
 等待时 `timeout_seconds` 默认 600，且必须是正数。未设置 `wait => true` 却提供 timeout 会报错。
@@ -499,7 +509,26 @@ CALL milvus.system.register('your_db.your_collection',
 Milvus 返回失败状态或等待超时时，整条语句失败，不返回看似成功的结果行。
 
 `register` 仍只用于已经提交、且只更新已有段 manifest 的 backfill 作业，不能登记 `df.write`
-新建的段。本版本不提供 `cleanup_staging`；其它管理过程也不会发现或删除 staging 前缀。
+新建的段。
+
+`cleanup_staging` 只选择版本化 owner 与目标 collection 精确一致、模式明确为 `append`、没有
+`_registered`，且心跳与前缀内每个文件修改时间都早于保留期截止点的作业。存在 manifest 或 commit
+标记时还会校验其一致性，删除前把完整状态再读一次。缺失、旧格式、损坏、发生变化、属于其它
+collection、仍活跃、已经登记的作业，以及所有 backfill 作业，都逐项返回 `preserved`；一个坏作业
+不会阻止或授权删除其它作业。例如：
+
+```sql
+CALL milvus.system.cleanup_staging('your_db.your_collection',
+  retention_seconds => 604800,
+  dry_run            => true,
+  `fs.bucket_name`   => 'milvus-bucket',
+  `fs.address`       => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`       => 'true')
+```
+
+先审查 dry-run 的结果，再显式设置 `dry_run => false`。当前固定的原生文件系统只暴露文件删除，没有
+递归目录删除；实际执行会删除合格的文件对象，但会报告对象存储目录标记或本地空目录仍在，
+`prefix_deleted` 在 milvus-storage 补出对应 API 前始终为 `false`。
 
 
 ## 4. 数据模式

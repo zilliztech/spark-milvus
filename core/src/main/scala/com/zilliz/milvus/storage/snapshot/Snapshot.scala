@@ -50,6 +50,29 @@ final case class Snapshot(
   def v3Segments: Seq[Segment] = segments.filter(_.storageVersion == 3)
   def v2Segments: Seq[Segment] = segments.filter(_.storageVersion == 2)
 
+  /** Retains only the named data segments after an optimization such as R9.
+    * Delete-only segments are not candidates for data pruning: partition L0
+    * sources remain for retained data in that partition, and collection-wide L0
+    * sources remain whenever any data segment remains.
+    */
+  def retainDataSegments(segmentIds: Set[Long]): Snapshot = {
+    val retainedData = dataSegments.filter(segment => segmentIds(segment.id))
+    val retainedPartitions = retainedData.iterator.map(_.partitionId).toSet
+    val keepGlobalDeletes = retainedData.nonEmpty
+    val retainedSegments = segments.filter { segment =>
+      if (segment.hasData) segmentIds(segment.id)
+      else
+        segment.deletes != DeleteFiles.Empty &&
+        ((segment.partitionId == -1L && keepGlobalDeletes) ||
+          retainedPartitions(segment.partitionId))
+    }
+    val orderedPartitions =
+      (partitionIds ++ retainedData.map(_.partitionId)).distinct.filter(
+        retainedPartitions
+      )
+    copy(partitionIds = orderedPartitions, segments = retainedSegments)
+  }
+
   /** The selected partitions and/or data segments (capability R16).
     *
     * Selection preserves snapshot order. Every requested id must exist after

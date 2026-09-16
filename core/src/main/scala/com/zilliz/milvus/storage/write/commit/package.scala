@@ -16,8 +16,17 @@ package com.zilliz.milvus.storage.write
   * procedure that calls Milvus is `spark.procedure.Register`; nothing here
   * calls Milvus.
   *
+  * `StagingCleaner` implements A7's fail-closed ownership, heartbeat, retention
+  * and dry-run decisions, and deletes eligible file objects. The native
+  * filesystem has no directory-delete binding yet, so it reports the remaining
+  * directory entries and never claims that the prefix was removed. Backfill,
+  * registered jobs, legacy manifests and inconsistent metadata are always
+  * preserved.
+  *
   * Main types: JobManifest, CommittedSegment, Committer, CommitOutcome,
-  * Registration. Capabilities: W3, A4 (see docs/design/capabilities.md).
-  * Design: docs/design/README.md section 2.4.
+  * Registration, StagingCleaner. Capabilities: W3, A4, A7 (see
+  * docs/design/capabilities.md). A7 remains partial until native recursive
+  * directory deletion is available. Design: docs/design/README.md section 2.4
+  * and docs/design/architecture/procedure.html section 3.3.
   */
 package object commit

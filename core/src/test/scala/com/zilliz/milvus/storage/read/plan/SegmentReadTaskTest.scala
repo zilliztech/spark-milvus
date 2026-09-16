@@ -47,10 +47,12 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
   // Shipping this object to an executor is the whole reason it exists, so a
   // field that cannot survive the trip is a defect, not an inconvenience.
   test("a V2 task survives serialization") {
-    val copy = roundTrip(v2Task)
+    val task = v2Task.copy(limits = ReadLimits(1024, 8388608L, 67108864L))
+    val copy = roundTrip(task)
     copy.segmentId shouldBe 451L
     copy.partitionId shouldBe 7L
-    copy.properties shouldBe v2Task.properties
+    copy.properties shouldBe task.properties
+    copy.limits shouldBe task.limits
     copy.dataFiles shouldBe group.filePaths
     copy.expectedRows shouldBe Some(4500L)
   }

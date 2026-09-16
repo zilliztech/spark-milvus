@@ -12,6 +12,11 @@ import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 
+final case class ManifestStatistic(
+    paths: Seq[String],
+    metadata: Map[String, String]
+)
+
 object V3ManifestReader {
   private val PrimaryKeyDeltaLogType = 0
   private val ManifestFileName = """manifest-(\d+)\.avro""".r
@@ -26,6 +31,22 @@ object V3ManifestReader {
       val at =
         StoragePath.parse(manifestFilePath(basePath, readVersion), bucket)
       parseDeltaLogs(store.readAll(at), basePath)
+    } catch {
+      case NonFatal(e) => Left(e)
+    }
+  }
+
+  /** Loads the auxiliary-statistics map from one pinned StorageV3 manifest. */
+  def loadStatistics(
+      basePath: String,
+      readVersion: Long,
+      bucket: String,
+      store: ObjectStore
+  ): Either[Throwable, Map[String, ManifestStatistic]] = {
+    try {
+      val at =
+        StoragePath.parse(manifestFilePath(basePath, readVersion), bucket)
+      parseStatistics(store.readAll(at), basePath)
     } catch {
       case NonFatal(e) => Left(e)
     }
@@ -95,6 +116,26 @@ object V3ManifestReader {
     }
   }
 
+  def parseStatistics(
+      avroBytes: Array[Byte],
+      basePath: String
+  ): Either[Throwable, Map[String, ManifestStatistic]] = {
+    try {
+      val reader = new DataFileStream[GenericRecord](
+        new ByteArrayInputStream(avroBytes),
+        new GenericDatumReader[GenericRecord]()
+      )
+      try {
+        if (!reader.hasNext) Right(Map.empty)
+        else Right(projectStatistics(reader.next(), basePath))
+      } finally {
+        reader.close()
+      }
+    } catch {
+      case NonFatal(e) => Left(e)
+    }
+  }
+
   private def projectDeltaLogs(
       rec: GenericRecord,
       basePath: String
@@ -139,6 +180,72 @@ object V3ManifestReader {
         s"_delta/${path.stripPrefix("/")}"
       }
     StoragePath.resolve(base, fragment).uri("s3a")
+  }
+
+  /** Places a statistics path recorded relative to the segment's `_stats`
+    * directory. Absolute paths and already-prefixed `_stats/` paths retain
+    * their meaning.
+    */
+  def resolveManifestStatisticsPath(
+      basePath: String,
+      path: String
+  ): String = {
+    if (path == null || path.isEmpty) return path
+    val base = StoragePath.parse(basePath)
+    if (path.contains("://")) {
+      return StoragePath.resolve(base, path).uri("s3a")
+    }
+
+    val baseKey = base.key.stripSuffix("/")
+    val candidateKey = path.stripPrefix("/")
+    val comparableBase = baseKey.stripPrefix("/")
+    val alreadyUnderBase =
+      candidateKey == comparableBase ||
+        candidateKey.startsWith(s"$comparableBase/")
+    if (alreadyUnderBase) {
+      return if (base.hasBucket) base.copy(key = candidateKey).uri("s3a")
+      else path
+    }
+    if (path.startsWith("/")) return path
+
+    val fragment =
+      if (candidateKey.startsWith("_stats/")) candidateKey
+      else s"_stats/$candidateKey"
+    StoragePath.resolve(base, fragment).uri("s3a")
+  }
+
+  private def projectStatistics(
+      rec: GenericRecord,
+      basePath: String
+  ): Map[String, ManifestStatistic] = {
+    if (rec.getSchema.getField("stats") == null || rec.get("stats") == null) {
+      return Map.empty
+    }
+    rec
+      .get("stats")
+      .asInstanceOf[java.util.Map[Any, GenericRecord]]
+      .asScala
+      .iterator
+      .map { case (rawName, stat) =>
+        val paths = stat
+          .get("paths")
+          .asInstanceOf[java.util.List[Any]]
+          .asScala
+          .map(path => resolveManifestStatisticsPath(basePath, asString(path)))
+          .toSeq
+        val metadata =
+          Option(stat.get("metadata"))
+            .map(
+              _.asInstanceOf[java.util.Map[Any, Any]].asScala.iterator
+                .map { case (key, value) =>
+                  asString(key) -> asString(value)
+                }
+                .toMap
+            )
+            .getOrElse(Map.empty)
+        asString(rawName) -> ManifestStatistic(paths, metadata)
+      }
+      .toMap
   }
 
   private def asString(v: Any): String = v match {

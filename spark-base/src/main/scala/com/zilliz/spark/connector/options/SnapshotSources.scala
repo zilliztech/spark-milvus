@@ -324,8 +324,11 @@ final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
     try Right(build())
     catch { case NonFatal(e) => Left(e) }
 
+  private def rawOption(key: String): Option[String] =
+    OptionParsing.value(milvusOption.options, key)
+
   private def option(key: String): Option[String] =
-    milvusOption.options.get(key).map(_.trim).filter(_.nonEmpty)
+    rawOption(key).map(_.trim).filter(_.nonEmpty)
 
   private def build(): Snapshot = {
     MilvusOption.validateSnapshotModeOptions(milvusOption.options)
@@ -353,9 +356,10 @@ final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
         }
       }
       .getOrElse(Seq.empty)
-    val partitionIds = option(MilvusOption.SnapshotPartitionIds)
-      .map(_.split(",").map(_.trim).filter(_.nonEmpty).map(_.toLong).toSeq)
-      .getOrElse(Seq.empty)
+    val partitionIds = OptionParsing.nonNegativeLongList(
+      rawOption,
+      MilvusOption.SnapshotPartitionIds
+    )
     val schemaBytes = option(MilvusOption.SnapshotSchemaBytes)
       .map { base64 =>
         try Base64.getDecoder.decode(base64)
@@ -379,8 +383,11 @@ final class OptionStringsSnapshotSource(milvusOption: MilvusOption)
       .getOrElse(
         CollectionSchema(name = milvusOption.collectionName).toByteArray
       )
-    val collectionId =
-      option(MilvusOption.SnapshotCollectionId).map(_.toLong).getOrElse(0L)
+    val collectionId = OptionParsing.positiveLong(
+      rawOption,
+      MilvusOption.SnapshotCollectionId,
+      defaultValue = 0L
+    )
     val bucket = StorageOptions
       .connectorS3BucketOption(milvusOption.options)
       .getOrElse("")

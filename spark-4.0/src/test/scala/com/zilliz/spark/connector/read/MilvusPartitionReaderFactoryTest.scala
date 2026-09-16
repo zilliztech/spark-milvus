@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.read
 
+import scala.jdk.CollectionConverters._
+
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
@@ -8,7 +10,8 @@ import com.zilliz.milvus.storage.expr.{FieldRef, IsNotNull, PredicateExpr}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.options.{MilvusOption, VectorSearch}
+import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
@@ -129,5 +132,33 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     assert(
       !f.supportColumnarReads(v3(queryVector = Some(Array(1f, 2f))))
     )
+  }
+
+  test("row-reader construction failure closes its task allocator") {
+    val expression = IsNotNull(FieldRef(100L, DataType.Int64))
+    val searchOptions = options.copy(
+      vectorSearch = Some(
+        VectorSearch(
+          Array(1f),
+          topK = 1,
+          metricType = "L2",
+          vectorColumn = "vector",
+          mode = "index"
+        )
+      )
+    )
+    val partition = MilvusV3InputPartition(
+      task(SegmentLayout.Manifest("files/seg")),
+      "20",
+      searchOptions
+    )
+    val root = ArrowAllocator.get
+    val childrenBefore = root.getChildAllocators.asScala.size
+
+    intercept[IllegalArgumentException] {
+      factory(columnar = false, Some(expression)).createReader(partition)
+    }
+
+    assert(root.getChildAllocators.asScala.size == childrenBefore)
   }
 }

@@ -10,7 +10,7 @@ package com.zilliz.milvus.storage.write.exec
   * manifest (`core.write.commit`) lives at [[manifest]].
   */
 final case class StagingLayout(rootPath: String, jobId: String) {
-  require(jobId.nonEmpty && !jobId.contains('/'), s"bad job id '$jobId'")
+  require(StagingLayout.isSafeJobId(jobId), s"bad job id '$jobId'")
 
   private val root = Option(rootPath).map(_.trim.stripSuffix("/")).getOrElse("")
 
@@ -27,9 +27,33 @@ final case class StagingLayout(rootPath: String, jobId: String) {
   /** The job manifest the committer writes. */
   def manifest: String = s"$prefix/manifest.json"
 
+  /** Immutable collection ownership, written before executor tasks start. */
+  def owner: String = s"$prefix/owner.json"
+
+  /** Driver liveness, refreshed while executor tasks may still be writing. */
+  def heartbeat: String = s"$prefix/_heartbeat"
+
   /** The marker the committer writes last; its presence means committed. */
   def marker: String = s"$prefix/_committed"
 
   /** The marker registration writes once Milvus has taken the segments. */
   def registered: String = s"$prefix/_registered"
+}
+
+object StagingLayout {
+
+  private val SafeJobId = "[A-Za-z0-9][A-Za-z0-9._-]*".r
+
+  /** Job ids are one storage-key component, not arbitrary paths. This accepts
+    * the UUID, Spark application and backfill ids used by the connector while
+    * refusing dot segments, separators, whitespace and control characters.
+    */
+  def isSafeJobId(jobId: String): Boolean =
+    Option(jobId).exists(value => SafeJobId.pattern.matcher(value).matches())
+
+  /** `{root}/staging`, whose immediate children are job ids. */
+  def jobsRoot(rootPath: String): String = {
+    val root = Option(rootPath).map(_.trim.stripSuffix("/")).getOrElse("")
+    (if (root.isEmpty) "" else root + "/") + "staging"
+  }
 }

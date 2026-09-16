@@ -52,7 +52,8 @@ object ReadPlan extends Logging {
       properties: Int => Map[String, String],
       applyDeletes: Boolean,
       deletes: DeleteFileListing = DeleteFileListing.empty,
-      neededFieldIds: Seq[Long] = Seq.empty
+      neededFieldIds: Seq[Long] = Seq.empty,
+      limits: ReadLimits = ReadLimits.Default
   ): ReadPlan = {
     val propertiesByVersion =
       collection.mutable.Map.empty[Int, Map[String, String]]
@@ -93,7 +94,8 @@ object ReadPlan extends Logging {
         neededFieldIds = neededFieldIds,
         deletes = deleteSourceFor(seg.id, seg.partitionId),
         indexes = seg.indexes,
-        snapshotRows = seg.rows
+        snapshotRows = seg.rows,
+        limits = limits
       )
     }
 
@@ -114,7 +116,8 @@ object ReadPlan extends Logging {
         neededFieldIds = neededFieldIds,
         deletes = deleteSourceFor(seg.id, seg.partitionId),
         indexes = seg.indexes,
-        snapshotRows = seg.rows
+        snapshotRows = seg.rows,
+        limits = limits
       )
     }
 

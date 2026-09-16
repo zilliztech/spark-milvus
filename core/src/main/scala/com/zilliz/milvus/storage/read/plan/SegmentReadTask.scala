@@ -82,7 +82,8 @@ final case class SegmentReadTask(
     neededFieldIds: Seq[Long] = Seq.empty,
     deletes: DeleteSource = DeleteSource.None,
     indexes: SegmentIndexes = SegmentIndexes.Unknown,
-    snapshotRows: Option[Long] = None
+    snapshotRows: Option[Long] = None,
+    limits: ReadLimits = ReadLimits.Default
 ) extends Serializable {
 
   /** True when this partition has to evaluate deletes at all. A reader checks
