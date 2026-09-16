@@ -98,7 +98,7 @@ C shim（mv_* 包 knowhere::Index、BruteForce、BinarySet、Version，以及 Di
 | 包 | 职责 | 按线 |
 |---|---|---|
 | `catalog` | MilvusCatalog：TableCatalog、SupportsNamespaces、loadTable 的快照重载 | 主体在 base，按线只留一个工厂方法 |
-| `table` | MilvusTable：持有 getTable 解析一次的 Snapshot，算 schema、能力集、元数据列，把 Snapshot 交给 scan；DeleteV2 | 否 |
+| `table` | MilvusTable：持有 getTable 解析一次的 Snapshot，算 schema、能力集、元数据列，把 Snapshot 交给 scan | 否 |
 | `read` | ScanBuilder、Scan、Batch、InputPartition、ColumnarPartitionReader、ColumnVector 实现。包名与 `write` 和 `core.read` 对称，类名沿用 Spark 的 Scan | 否 |
 | `expr` | DataSource V2 Predicate 到 IR 的翻译 | 否 |
 | `types` | Arrow 类型到 Spark 类型的映射，向量列的 Spark 表示 | 否 |

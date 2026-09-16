@@ -37,7 +37,6 @@
 | W1 | append 写新段 | `df.writeTo("milvus.db.coll").append()`；catalog（R1）落地前是 `df.write.format("milvus").mode("append")`（2026-09-15 接通，UAT 验过），设计见 [write.html](architecture/write.html) | spark.write、core.write.exec、core.write.commit | 登记见 A4；RegisterSegments 未到位前不能交付，写出的段留在暂存前缀。对照 Milvus 自己写的 V3 段，连接器写的段还差三样才能被 Milvus 加载：系统字段 RowID（0）和 Timestamp（1）、主键的 bloom filter 统计（`_stats/bloom_filter.<pk>`，登记进清单的 stats；2026-09-15 晚 #15 做掉，core.stats 写出和 Milvus 逐字节相同的文件）、列组切分要按 Milvus 的策略（`storagecommon/split_policy.go`：系统字段加主键、partition key、clustering key 一组，向量和 Text 各一组，平均每值 ≥1KB 的字段各一组，其余标量一组；2026-09-15 傍晚 #14 做掉，早先写的「其余每字段一组」是只看了一个标量字段得出的）（2026-09-15 对照） | P1 |
 | W2 | backfill 只写新列组 | `.option("milvus.write.mode","backfill").option("milvus.write.columns","f")` | spark.write、core.write | AddCollectionField 先于登记；目标段必须 Flushed；段的 base_path 和 Manifest 版本只能从快照 metadata 取（README 第 5 节缺 API）；无段级冻结，与 compaction、索引、schema 变更竞争；写侧分布与排序见决策 10；登记见 A4 | P2 |
 | W3 | 原子提交 | 自动；暂存前缀、作业清单、幂等 commit、abort 清理 | core.write.commit | 暂存前缀避开 `insert_log`，否则 86400 秒后被 GC 回收 | P1 |
-| W5 | DELETE | `DELETE FROM milvus.db.coll WHERE ...`，只接能翻成 Milvus 表达式的谓词 | spark.table 的 DeleteV2 → core.expr 的 ExprPrinter → client.api | Milvus 在线 | P1 |
 | W6 | 索引随段写出 | 写 option `milvus.index.<field>=HNSW,...` | spark.options 校验，core.index 编码与登记，native-vector 建索引 | Milvus 认 Manifest 里的索引登记（README 第 5 节）。三条约束：分片按段 id 的连续区间切，不交错；规划与构建钉同一个快照版本，提交时才碰活的元数据；调优参数只在 Spark 层消费，不透传给 knowhere | P2 |
 
 ## 3 目录与 DDL
@@ -111,7 +110,7 @@ issue #125 的[索引查询开发方案](architecture/vector-search.html)处于�
 
 ## 10 不做
 
-TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tantivy 文本索引）；GIS 表达式；struct 数组表达式；random_sample；DataSource V1 Filter（1.x 走 V1，2.0 只实现 V2 谓词，见 R6）；Vortex 列组的读写（milvus-storage 支持，Connector 不接）；truncate 和 overwrite（2026-09-16 定，原 W4）：`mode("overwrite")` 是 Spark ETL 模板里的常见写法，接进来后改个表名就让生产 collection 的全部旧数据不可见，Milvus 没有回滚；不接时 Spark 在分析阶段报 `Table does not support overwrite`，数据不动，全量刷新改为在 Milvus 侧 drop/recreate 或 SDK 全表 delete 后再 append，误操作要在 Milvus 的界面或 SDK 里显式做。1.x 没有这个能力，不接不是退化；以后有明确需求再加，加是兼容的，加了再拿掉不是。
+TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tantivy 文本索引）；GIS 表达式；struct 数组表达式；random_sample；DataSource V1 Filter（1.x 走 V1，2.0 只实现 V2 谓词，见 R6）；Vortex 列组的读写（milvus-storage 支持，Connector 不接）；truncate 和 overwrite（2026-09-16 定，原 W4）：`mode("overwrite")` 是 Spark ETL 模板里的常见写法，接进来后改个表名就让生产 collection 的全部旧数据不可见，Milvus 没有回滚；不接时 Spark 在分析阶段报 `Table does not support overwrite`，数据不动，全量刷新改为在 Milvus 侧 drop/recreate 或 SDK 全表 delete 后再 append，误操作要在 Milvus 的界面或 SDK 里显式做。1.x 没有这个能力，不接不是退化；以后有明确需求再加，加是兼容的，加了再拿掉不是。DELETE（2026-09-16 定，原 W5）：`DELETE FROM milvus.db.coll WHERE ...` 会把谓词翻成 Milvus 表达式后调 Milvus 的 Delete RPC，删的是生产 collection 的在线数据，谓词写宽了没有回滚；Milvus SDK 已经用同一套表达式语法提供 delete，连接器接进来只是把同一个删除动作换到 Spark 作业里发，多一个出错的地方，不多一种能力。连接器的职责是读写存储格式的文件，不碰在线数据的删除。不接的代价为零：用户在 SDK 里执行同一条表达式。随之 `core.expr` 不再需要把中间表示打印回 Milvus 语法的 ExprPrinter，决策 20 只剩 R6 和 R7 两条依赖。
 
 ## 11 尚未落地
 

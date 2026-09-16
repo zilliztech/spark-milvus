@@ -355,7 +355,7 @@
         <dt>schema</dt><dd>字段 id、名字、Milvus 类型、Arrow 类型的唯一映射 <em>R15 C3</em></dd>
         <dt>path</dt><dd>三种路径形态归一成 (bucket, key) <em>R3</em></dd>
         <dt>credential</dt><dd>对象存储凭证的取用和下发 <em>R3 W1</em></dd>
-        <dt>expr</dt><dd>中间表示、Milvus 文法解析器、列批求值器、反向打印器 <em>R6 R7 W5</em></dd>
+        <dt>expr</dt><dd>中间表示、Milvus 文法解析器、列批求值器 <em>R6 R7</em></dd>
         <dt>delete</dt><dd>删除文件解码，按行号置位 <em>R8</em></dd>
         <dt>stats</dt><dd>段统计与 row group 统计的读取和剪枝 <em>R9 R10 R18</em></dd>
         <dt>read.plan</dt><dd>分区规划，纯 JVM，可序列化 <em>R3 R5 R10</em></dd>
@@ -370,7 +370,7 @@
       <h4>spark/base 与各线</h4>
       <p class="role">第 3 层。只做翻译，Spark 索取什么就交出什么。base 是共享源码，四条线各编译一次；按线不同的只有 catalog、procedure 或 functions、extensions 和服务注册文件。</p>
       <dl>
-        <dt>table</dt><dd>schema、能力集、元数据列、统计、DeleteV2 <em>R12 R13 W5</em></dd>
+        <dt>table</dt><dd>schema、能力集、元数据列、统计 <em>R12 R13</em></dd>
         <dt>scan</dt><dd>ScanBuilder、Scan、InputPartition、ColumnVector 实现 <em>R4 R5 R11 R16 R18</em></dd>
         <dt>expr</dt><dd>DataSource V2 谓词翻成中间表示 <em>R6</em></dd>
         <dt>types</dt><dd>Arrow 类型到 Spark 类型的映射，向量列的表示 <em>R15</em></dd>
@@ -391,7 +391,7 @@
         <dt>offline</dt><dd>1.x 离线 option 的段列表转 Snapshot <em>K2</em></dd>
         <dt>backup</dt><dd>milvus-backup 导出目录转 Snapshot <em>K3</em></dd>
         <dt>client.grpc</dt><dd>ScalaPB 生成的 stub，重试拦截器</dd>
-        <dt>client.api</dt><dd>DDL、Delete、快照、索引、生命周期、登记；proto 的 DataType 与 core 的 MilvusType 互转 <em>C1 C2 W5 A1–A5</em></dd>
+        <dt>client.api</dt><dd>DDL、Delete、快照、索引、生命周期、登记；proto 的 DataType 与 core 的 MilvusType 互转 <em>C1 C2 A1–A5</em></dd>
       </dl>
     </div>
 
@@ -767,7 +767,6 @@
         <span class="chip wait"><span class="id">W1</span>append 写新段</span>
         <span class="chip p2"><span class="id">W2</span>backfill 写新列组</span>
         <span class="chip p1"><span class="id">W3</span>原子提交</span>
-        <span class="chip p1"><span class="id">W5</span>DELETE</span>
         <span class="chip p2"><span class="id">W6</span>索引随段写出</span>
         <span class="chip p3"><span class="id">W7</span>gRPC 小批量兜底</span>
       </div>
