@@ -57,25 +57,16 @@ RUN set -eux; \
     esac; \
     cmake_archive="cmake-${cmake_version}-linux-${cmake_arch}.tar.gz"; \
     cmake_path="/tmp/${cmake_archive}"; \
-    downloaded=false; \
-    for cmake_url in \
-        "https://cmake.org/files/v3.27/${cmake_archive}" \
-        "https://github.com/Kitware/CMake/releases/download/v${cmake_version}/${cmake_archive}"; do \
-        for attempt in 1 2 3; do \
-            rm -f "${cmake_path}"; \
-            if curl --fail --location \
-                --connect-timeout 30 --max-time 300 \
-                --retry 2 --retry-all-errors --retry-delay 5 \
-                --output "${cmake_path}" "${cmake_url}" \
-                && echo "${cmake_sha256}  ${cmake_path}" | sha256sum --check --strict -; then \
-                downloaded=true; \
-                break 2; \
-            fi; \
-            echo "CMake download attempt ${attempt} failed from ${cmake_url}" >&2; \
-            sleep "$((attempt * 5))"; \
-        done; \
-    done; \
-    test "${downloaded}" = true; \
+    download_cmake() { \
+        rm -f "${cmake_path}"; \
+        curl --fail --location \
+            --connect-timeout 30 --max-time 300 \
+            --retry 3 --retry-all-errors --retry-delay 5 \
+            --output "${cmake_path}" "$1" && \
+        printf '%s  %s\n' "${cmake_sha256}" "${cmake_path}" | sha256sum --check --strict -; \
+    }; \
+    download_cmake "https://cmake.org/files/v3.27/${cmake_archive}" || \
+        download_cmake "https://github.com/Kitware/CMake/releases/download/v${cmake_version}/${cmake_archive}"; \
     tar --strip-components=1 -xzf "${cmake_path}" -C /usr/local; \
     rm -f "${cmake_path}"; \
     cmake --version
