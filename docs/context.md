@@ -20,6 +20,21 @@ to the parent directory.
 |---|---|
 | `milvus` (milvus-io/milvus) | The authority on what the write path can register. Reading DataCoord's RPC surface is how we established that backfill can ship on `BatchUpdateManifest` today, while append needs a new `RegisterSegments` RPC that does not exist yet. Also the authority on the on-disk delete-file format. |
 
+## Native vector implementation references
+
+[Cardinal Aquila](https://github.com/zilliztech/cardinal/tree/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include)
+is a private reference for deferred Knowhere JNI extensions. Its 11 JNI
+entries cover clustering, partition deduplication, Isolation Forest and local
+Parquet conversion; they are outside initial implementation, acceptance and
+publication scope. The initial JNI delivery covers generic index operations,
+brute-force search and resource management. Knowhere's Cardinal adapter does not automatically build
+these JNI sources. The [JNI design](design/architecture/knowhere-jni.html#cardinal-reference)
+records the reference commit, deferred operation mapping and proposed tests;
+the [dependency build design](design/engineering/native-dependencies.html)
+records how actual backend revisions and artifacts are locked. Source access
+does not imply that the implementation is already part of the public Knowhere
+build or that an existing Java artifact has been verified.
+
 ## Design decks
 
 Three HTML decks live outside the repository, in a sibling
