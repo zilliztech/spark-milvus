@@ -204,7 +204,7 @@ Manifest <code>stats["bloom_filter.&lt;field id&gt;"]</code> 取路径。路径�
 <code>1</code> 的 compound 文件时与 Milvus 一样只读该文件，否则每个列出的文件都是该段的一部分。</p>
 <p>只有所有相关文件都成功读取、JSON 中每个统计都与主键字段及类型匹配，并且每个候选值在每个统计中都确定不存在时，才移除段。任意路径缺失、空文件、损坏 JSON、不支持的 Bloom 类型、字段或主键类型不匹配、以及跨 bucket 路径都保留该段。Bloom 的假阳性也只会多读一个段，不会丢行。</p>
 <p>R18 在固定 Snapshot 的普通扫描上实现
-<code>SupportsRuntimeV2Filtering</code>，只向 Spark 公布主键属性。每次 <code>filter</code> 调用提取一个主键集合，与该 Scan 先前收到的集合继续取交集；相同输入幂等。变化后废弃已生成的 partition 数组，但复用 driver 上按段和路径缓存的统计输入，只在内存中重新判定。剪后 Snapshot 保留每个剩余数据段所在分区的 L0 和 collection 级 L0，不把删除来源当成数据段剪掉。</p>
+<code>SupportsRuntimeV2Filtering</code>，只向 Spark 公布主键属性，且只在主键在读取列里时公布：Spark 按 Scan 的输出列解析这些属性，Spark 4.2 在规划每个 Scan 时都解析（SPARK-56467），主键被列裁剪去掉时公布它会让查询在规划阶段报错；按主键 join 时主键总在输出列里。每次 <code>filter</code> 调用提取一个主键集合，与该 Scan 先前收到的集合继续取交集；相同输入幂等。变化后废弃已生成的 partition 数组，但复用 driver 上按段和路径缓存的统计输入，只在内存中重新判定。剪后 Snapshot 保留每个剩余数据段所在分区的 L0 和 collection 级 L0，不把删除来源当成数据段剪掉。</p>
 <p>带 <code>vector.search.*</code> 的 TopK 读取不公布运行时过滤属性，也不接受该剪枝；Spark 的运行时条件仍在 TopK 之后执行，不改变 TopK 候选集语义。R18 只做段级剪枝，不声称 row group 剪枝；后者仍是 R10 的仓库外依赖。</p>
 
 <h3>5.3 core.read.exec</h3>

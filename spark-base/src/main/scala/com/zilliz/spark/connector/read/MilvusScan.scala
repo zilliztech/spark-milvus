@@ -106,8 +106,14 @@ class MilvusScan(
       Scan.ColumnarSupportMode.SUPPORTED
     else Scan.ColumnarSupportMode.UNSUPPORTED
 
+  /** The primary key, when the scan reads it. Spark resolves these references
+    * against the scan output, and Spark 4.2 does so whenever it plans the scan
+    * (SPARK-56467), so a key pruned out of `readSchema()` cannot be offered. A
+    * join on the key keeps it in the output.
+    */
   override def filterAttributes(): Array[NamedReference] =
     runtimePrimaryKey
+      .filter(field => schema.fieldNames.contains(field.name))
       .map(field => Array(Expressions.column(field.name)))
       .getOrElse(Array.empty[NamedReference])
 

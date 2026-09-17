@@ -1493,6 +1493,41 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(scan.currentPrimaryKeyFilter.get.values == Set(LongValue(2L)))
   }
 
+  // Spark 4.2 resolves filterAttributes() against the scan output whenever it
+  // plans the scan (SPARK-56467), so a primary key pruned out of readSchema()
+  // failed every such query with "Unable to resolve id".
+  test("the primary key is a runtime filter attribute only when it is read") {
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = io.milvus.grpc.schema.DataType.Int64,
+          isPrimaryKey = true
+        ),
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 101L,
+          name = "name",
+          dataType = io.milvus.grpc.schema.DataType.VarChar
+        )
+      )
+    )
+    val snapshot = snapshotOf(schemaBytes = collection.toByteArray)
+    val options = new CaseInsensitiveStringMap(new ju.HashMap[String, String]())
+    val fullSchema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+    def attributes(columns: String*): Seq[String] = {
+      val builder = new MilvusScanBuilder(fullSchema, options, snapshot)
+      builder.pruneColumns(StructType(columns.map(fullSchema(_))))
+      val scan = builder.build().asInstanceOf[MilvusScan]
+      scan.filterAttributes().map(_.fieldNames().mkString(".")).toSeq
+    }
+
+    assert(attributes("name").isEmpty)
+    assert(attributes().isEmpty)
+    assert(attributes("id", "name") == Seq("id"))
+  }
+
   test("runtime filters replan from cached Bloom statistics") {
     import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
     import org.apache.spark.sql.connector.expressions.filter.Predicate
