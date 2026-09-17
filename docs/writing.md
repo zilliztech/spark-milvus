@@ -102,6 +102,14 @@ word the reader has to translate.
   (`MilvusTable`, `MilvusScan`, `MilvusRowPartitionReader`), as Iceberg's
   `SparkTable` and `SparkScan` do. The C library's names (`loon_*`, "packed")
   stay inside `native-storage` and in prose that explains the library.
+- **Milvus objects keep Milvus names; format-neutral types take neutral ones.**
+  `Snapshot`, `Segment`, `SegmentLayout` and `SegmentReadTask` name Milvus
+  objects only. The table model every input produces is `TableVersion`, its
+  units are `DataUnit`s, the type that interprets one format is a
+  `TableFormat`, and an input's or output's map from location to identity is a
+  `StorageBinding` (docs/design/architecture/table-version.html). Another
+  format's version or unit never takes the Milvus word, even where that format
+  uses it: an Iceberg snapshot id is the version of an Iceberg `TableVersion`.
 - **No `Milvus` prefix in `core`, `compat` or `client`.** The package is
   already `com.zilliz.milvus`; the prefix adds nothing there, and it exists in
   layer 3 only to keep `MilvusScan` apart from Spark's `Scan`.

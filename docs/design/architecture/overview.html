@@ -350,7 +350,7 @@
       <h4>core</h4>
       <p class="role">第 2 层。全部计算在这里，源码不出现 org.apache.spark。</p>
       <dl>
-        <dt>snapshot</dt><dd>列快照目录，选快照，解析成 Snapshot；所有来源共用的表描述 <em>R2 R3 R9 R13 R16 C3</em></dd>
+        <dt>snapshot</dt><dd>列快照目录，选快照，解析成 Snapshot（Milvus 快照，将演进为 TableVersion 的 Milvus 私有部分） <em>R2 R3 R9 R13 R16 C3</em></dd>
         <dt>manifest</dt><dd>一个段的列组、删除文件、统计、索引登记 <em>R5</em></dd>
         <dt>schema</dt><dd>字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；外表源类型规则与向量布局 <em>R15 C3</em></dd>
         <dt>path</dt><dd>三种路径形态归一成 (bucket, key) <em>R3</em></dd>
@@ -965,6 +965,7 @@
       <tr><td class="mono">22</td><td>写段的系统字段来源</td><td>写时分配、登记时补齐或写入占位值</td><td>append 登记</td></tr>
       <tr><td class="mono">23</td><td>R7 的 JSON、Array 与 <code>json_contains</code> 语义基线</td><td>实现 Milvus 2.6+ 的稳定共同子集，或钉住版本并按服务版本分派；还需明确 null、缺失路径、异构数组、数值转换与错误语义</td><td>不阻塞标量子集；阻塞 JSON/Array 扩展</td></tr>
       <tr><td class="mono">24</td><td>SQL 函数 vector_knn 的去留</td><td>删除：它在 JVM 里对数组排 TopK，是又一条暴力搜索路径；保留：它作用于任意 DataFrame，不读 collection</td><td>统一入口落地时</td></tr>
+      <tr><td class="mono">26</td><td>各开放格式的 TableFormat 用哪种读取实现</td><td>milvus-storage 的格式读取器；该格式的 Java 库；该格式的 Spark 数据源（只提供扫描）</td><td>按格式逐个定，看能力与存储后端</td></tr>
     </tbody>
   </table>
   </div>
@@ -984,7 +985,7 @@
       <tr><td>milvus-storage</td><td><code>loon_reader_new</code> 接受空 schema</td><td>R20，合入前外表段打不开</td></tr>
       <tr><td>milvus-storage</td><td>按 external_spec 拼外部文件系统属性的 C 接口</td><td>R20 的客户桶凭证</td></tr>
       <tr><td>milvus-storage</td><td>JNI 对切片批只重写偏移和位图</td><td>R4 零拷贝</td></tr>
-      <tr><td>milvus-storage</td><td>JNI 绑定文件系统读取字节与外表展开接口</td><td>G5；决策 25 的开放格式接入</td></tr>
+      <tr><td>milvus-storage</td><td>JNI 绑定文件系统读取字节与外表展开接口</td><td>G5；决策 26 选用 milvus-storage 读开放格式时</td></tr>
       <tr><td>Knowhere</td><td>C/Java 接口开放线程池大小</td><td>V5、V7、W6、G4</td></tr>
     </tbody>
   </table>

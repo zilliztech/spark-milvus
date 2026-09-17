@@ -34,7 +34,7 @@
 投影成每个数据段一个 <code>SegmentReadTask</code>；executor 只见 <code>SegmentReadTask</code>。
 一个来源给不出的字段在对象上必须显式标为「未知」，不能用空值冒充「没有」。</p>
 
-<p><strong>决策 25（2026-09-17）把 <code>Snapshot</code> 定为所有来源共用的表描述。</strong>开放格式与用户声明的 schema 以后也产出它；单元布局统一成 milvus-storage 的列组，删除分为单元内（格式读取器执行）与跨单元按键删除（<code>core.delete</code> 执行），行身份显式声明。表描述的结论与原理见 <a href="table-description.html">table-description.html</a>；本页描述的是今天的 Milvus 来源。</p>
+<p><strong>本页的 <code>Snapshot</code> 只指 Milvus 快照。</strong>决策 25（2026-09-17 修订）把各种输入共用的表模型定为 <code>TableVersion</code>，由今天的 <code>Snapshot</code> 演进：格式中立的部分进 <code>TableVersion</code>，本页的 Milvus 字段成为它的 Milvus 私有部分，由 Milvus 的 <code>TableFormat</code> 解释，见 <a href="table-version.html">table-version.html</a>。本页描述的是今天的 Milvus 来源。</p>
 
 <figure>
 <svg viewBox="0 0 920 260" role="img"
@@ -326,6 +326,7 @@ Milvus v3.0.0 起支持 external collection，schema 的 <code>external_source</
 
 <h2 id="rules">六、字段的取舍标准</h2>
 
+<p>本节的标准管 Milvus 快照，即 <code>TableVersion</code> 的 Milvus 私有部分；公共部分的字段由 <a href="table-version.html">table-version.html</a> 管。</p>
 <p><strong>字段跟着消费者走，不跟着 Milvus 走。</strong>快照 JSON 是 DataCoord 的内部结构
 （milvus <code>internal/datacoord/snapshot.go</code> 的 <code>SnapshotData</code>），段 manifest 是 milvus-storage 的
 <code>manifest.h</code>，两者都没有公开契约，键名和格式版本都改过。模型取它们的语义，不取它们的结构；每个字段能回答

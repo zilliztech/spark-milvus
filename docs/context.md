@@ -8,7 +8,7 @@ follow the pointer when you need it.
 
 | Path | What it is | Why it matters here |
 |---|---|---|
-| `milvus-proto` | The Milvus protobuf definitions | `common.proto` and `schema.proto` are generated into `core`, the five service files into `client`. The storage format's schema *is* `schema.proto`, so core does not build a parallel model of it. |
+| `milvus-proto` | The Milvus protobuf definitions | `common.proto` and `schema.proto` are generated into `core`, the five service files into `client`. Milvus data's schema *is* `schema.proto`: the Milvus `TableFormat` uses it directly and maps it to the format-neutral schema of `TableVersion` (column ids, Arrow types, vector layouts) instead of copying it. |
 | `milvus-storage` | The native storage library, also known as Loon | Supplies the `loon_*` C interface that `native-storage` wraps, and ships its own Python bindings, which is why Ray does not need anything from us for the storage half. |
 
 ## Repositories expected alongside this one

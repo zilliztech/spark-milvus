@@ -1,0 +1,185 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>表版本</title>
+<style>
+  :root { color-scheme: light dark; --accent: #237c83; --line: #8884;
+    --access: #1f7a55; --format: #2f5fa8; --compute: #7a4ca8; }
+  body { max-width: 58rem; margin: 2rem auto 4rem; padding: 0 1.1rem;
+    font: 16px/1.75 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.65rem; line-height: 1.4; margin: 1.3rem 0 .6rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.5rem; border-bottom: 1px solid var(--line); padding-bottom: .4rem; }
+  a { color: var(--accent); text-underline-offset: .2em; overflow-wrap: anywhere; }
+  nav { display: flex; gap: .5rem 1rem; flex-wrap: wrap; font-size: .9rem; }
+  .home { display: inline-block; border: 1px solid var(--line); border-radius: .35rem; padding: .35rem .7rem; text-decoration: none; }
+  code { font: .85em ui-monospace, SFMono-Regular, Menlo, monospace; background: #8881; padding: .1em .3em; border-radius: 3px; overflow-wrap: anywhere; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+  th, td { text-align: left; vertical-align: top; border: 1px solid var(--line); padding: .55rem .7rem; overflow-wrap: anywhere; }
+  th { background: #8881; }
+  .table { overflow-x: auto; }
+  .parts td:first-child, .parts th:first-child { white-space: nowrap; }
+  li { margin: .45rem 0; }
+  figure { margin: 1.4rem 0; overflow-x: auto; }
+  svg { width: 100%; min-width: 760px; height: auto; }
+  figcaption { font-size: .87rem; opacity: .8; }
+  @media (prefers-color-scheme: dark) { :root { --accent: #7ac8ce; --access: #7fd1ad; --format: #8fb3ec; --compute: #c5a3ec; } }
+  @media (max-width: 600px) { body { margin-top: 1rem; } h1 { font-size: 1.4rem; } }
+</style>
+
+<a class="home" href="/">← 返回站点目录</a>
+<h1>表版本</h1>
+<p><strong>每份输入在一个固定版本下描述成一个 <code>TableVersion</code>（表版本）：公共部分供规划和计算使用，私有部分只由该格式的 <code>TableFormat</code> 解释；身份放在输入自己的 <code>StorageBinding</code> 里，不进表版本。计算只接收格式中立的列批和声明过的能力。</strong></p>
+<nav aria-label="本页目录">
+  <a href="#conclusion">结论</a><a href="#objects">对象</a><a href="#compute">计算怎么接</a><a href="#formats">各格式怎么填</a><a href="#code">与现有代码的对应</a><a href="#tradeoffs">否决与代价</a>
+</nav>
+
+<h2 id="conclusion">一、结论</h2>
+<ol>
+<li><code>TableVersion</code> 是所有输入共用的表模型，由今天的 <code>Snapshot</code> 演进而来（决策 25，2026-09-17 修订）。Milvus 快照、milvus-backup 导出、Milvus 外表和直接读的开放格式都产出它。</li>
+<li>表版本分两部分。公共部分是版本、schema、单元和能力；私有部分是该格式自己的元数据，只有该格式的 <code>TableFormat</code> 读。计算和 Spark 层不按私有部分分支。</li>
+<li>身份不在表版本里。每份输入、每份输出各有一个 <code>StorageBinding</code>，记录「位置 → 身份」；生成任务时，按单元引用的位置取属性包。</li>
+<li>删除、合并、系统字段和类型规则都在 <code>TableFormat</code> 内部执行，读取器交出的批里只有有效行，或用排除位图标出无效行。<code>core.delete</code> 只服务 Milvus。</li>
+<li>行地址按单元声明种类，索引按列声明 label 对应哪种地址。各格式之间不共用一种地址编码。</li>
+<li>计算有两种输入：表输入（表版本加它的 <code>TableFormat</code>，能力按声明）和 DataFrame 输入（只能扫描）。能力不匹配在 driver 规划时报错。</li>
+<li><code>Snapshot</code>、<code>Segment</code>、<code>SegmentLayout</code>、<code>SegmentReadTask</code> 只指 Milvus 的对象。格式中立的名字是 <code>TableVersion</code>、<code>DataUnit</code>、<code>TableFormat</code>、<code>UnitReadTask</code>、<code>UnitReader</code>、<code>StorageBinding</code>、<code>ColumnId</code>、<code>VectorLayout</code>。代码改名随模型拆分一起做。</li>
+</ol>
+<div class="table"><table class="parts">
+<thead><tr><th>部分</th><th>公共部分</th><th>私有部分（示例）</th></tr></thead><tbody>
+<tr><td>版本</td><td>格式定义的版本标识，读取时钉住</td><td>Milvus 快照名与 create_ts；Iceberg snapshot id；Lance dataset version</td></tr>
+<tr><td>schema</td><td>每列一个 <code>ColumnId</code>、名字、Arrow 类型、可空性；向量列另带 <code>VectorLayout</code>；格式声明的键列（可选）</td><td>Milvus 的 protobuf schema、系统字段规则；Iceberg 的 identifier fields</td></tr>
+<tr><td>单元</td><td><code>DataUnit</code>：id、行数、字节数、位置引用、地址种类</td><td>Milvus 段布局（Manifest 或列组）与 L0 删除；Iceberg 数据文件、删除文件与 sequence number；Lance fragment 与删除向量</td></tr>
+<tr><td>能力</td><td>扫描；按地址取行；各向量列的索引（引擎、metric、索引版本、label 对应的地址种类）；统计</td><td>Milvus 的索引元数据与 build id</td></tr>
+<tr><td>身份</td><td colspan="2">不在表版本里，见 <code>StorageBinding</code></td></tr>
+</tbody></table></div>
+
+<h2 id="objects">二、对象</h2>
+<figure>
+<svg viewBox="0 0 1000 360" role="img" aria-label="输入 A 是客户 S3 上的 Parquet 目录，输入 B 是我们 S3 上的 Milvus 快照，各有 StorageBinding 与 TableFormat；两个 TableFormat 各产出一个 TableVersion，含公共部分与私有部分；driver 把单元规划成 UnitReadTask，属性包取自各自输入的 StorageBinding；executor 上的 UnitReader 交出列批给计算；输入 C 是任意 DataFrame，只能扫描，直接进入计算；计算结果写到输出 D，输出有自己的 StorageBinding 与格式">
+<defs><marker id="arrow-tv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<g fill="none" stroke="currentColor" stroke-width="1.1" opacity=".55">
+<rect x="6" y="14" width="260" height="108" rx="6"/><rect x="6" y="138" width="260" height="108" rx="6"/>
+<rect x="6" y="276" width="260" height="62" rx="6"/>
+</g>
+<g fill="none" stroke-width="1.6">
+<rect x="18" y="44" width="236" height="30" rx="4" style="stroke:var(--access)"/><rect x="18" y="82" width="236" height="30" rx="4" style="stroke:var(--format)"/>
+<rect x="18" y="168" width="236" height="30" rx="4" style="stroke:var(--access)"/><rect x="18" y="206" width="236" height="30" rx="4" style="stroke:var(--format)"/>
+<rect x="304" y="30" width="206" height="200" rx="6" style="stroke:var(--format)"/>
+<rect x="548" y="30" width="200" height="200" rx="6" style="stroke:var(--format)"/>
+<rect x="786" y="30" width="208" height="200" rx="6" style="stroke:var(--compute)"/>
+<rect x="786" y="266" width="208" height="72" rx="6" style="stroke:var(--access)"/>
+</g>
+<g fill="currentColor" font-size="13" text-anchor="middle">
+<text x="136" y="34" font-size="14" font-weight="600">输入 A · 查询集</text>
+<text x="136" y="64" font-size="12" style="fill:var(--access)">StorageBinding：客户 S3 → 身份 A</text>
+<text x="136" y="102" font-size="12" style="fill:var(--format)">TableFormat：Parquet 目录</text>
+<text x="136" y="158" font-size="14" font-weight="600">输入 B · 被搜索的数据</text>
+<text x="136" y="188" font-size="12" style="fill:var(--access)">StorageBinding：我们的 S3 → 身份 B</text>
+<text x="136" y="226" font-size="12" style="fill:var(--format)">TableFormat：Milvus</text>
+<text x="136" y="300" font-size="14" font-weight="600">输入 C · 任意 DataFrame</text>
+<text x="136" y="322">能力只有扫描</text>
+<text x="407" y="54" font-size="14" font-weight="600">TableVersion</text>
+<text x="407" y="74" font-size="12" opacity=".75">每份输入一个，在 driver 上</text>
+<text x="407" y="106">公共部分</text>
+<text x="407" y="126">版本 · schema · 单元 · 能力</text>
+<text x="407" y="162">私有部分</text>
+<text x="407" y="182">只由所属 TableFormat 读</text>
+<text x="407" y="212" opacity=".75">没有凭证</text>
+<text x="648" y="54" font-weight="600">UnitReadTask → UnitReader</text>
+<text x="648" y="86">每个单元一个任务</text>
+<text x="648" y="106">属性包取自该输入的</text>
+<text x="648" y="124">StorageBinding</text>
+<text x="648" y="160">executor 上交出列批</text>
+<text x="648" y="180">按能力提供按地址取行</text>
+<text x="648" y="200">与索引句柄</text>
+<text x="890" y="54" font-size="14" font-weight="600">计算</text>
+<text x="890" y="86">精确 TopK · 索引 TopK</text>
+<text x="890" y="106">K-means · 标量查询</text>
+<text x="890" y="146">只见列批、VectorLayout、</text>
+<text x="890" y="166">排除位图、地址列、索引句柄</text>
+<text x="890" y="206" opacity=".75">能力在规划时核对</text>
+<text x="890" y="292" font-size="14" font-weight="600">输出 D</text>
+<text x="890" y="314" font-size="12" style="fill:var(--access)">自己的 StorageBinding 与格式</text>
+</g>
+<g fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow-tv)">
+<path d="M254,97 H302"/><path d="M254,221 H302"/>
+<path d="M510,130 H546"/>
+<path d="M748,130 H784"/>
+<path d="M266,307 H768 V180 H784"/>
+<path d="M890,230 V264"/>
+</g>
+<g fill="currentColor" font-size="12" text-anchor="middle" opacity=".8">
+<text x="278" y="90">描述</text><text x="278" y="214">描述</text>
+<text x="528" y="123">规划</text><text x="766" y="123">列批</text>
+<text x="520" y="300">DataFrame 的分区直接进入计算</text>
+<text x="914" y="252">写</text>
+</g>
+</svg>
+<figcaption>绿色是访问，蓝色是格式，紫色是计算；箭头是数据流。输入 A、B 的身份只在生成单元任务时并进属性包，不进 TableVersion。</figcaption>
+</figure>
+<ol>
+<li><strong>各种格式在一个版本下都是「一份 schema 加一组单元」。</strong>单元在各格式里分别是 Milvus 的段、Iceberg 的数据文件、Hudi 的 file slice、Lance 的 fragment、Paimon 的 split。<code>TableVersion</code> 按这个形状定义，任何格式都能填进去。</li>
+<li><strong>公共部分只放下游据此做决定的信息，不含任何一种格式的专有概念。</strong>规划用行数和字节数，投影用列，搜索用向量布局，回表和索引结果用地址种类，能力核对用能力声明。collection id、分区 id、storage_version、Milvus 类型、protobuf schema 都在 Milvus 私有部分。</li>
+<li><strong>schema 以 Arrow 类型为中立类型系统。</strong>每列用 <code>ColumnId</code> 标识，标识由格式给出：Milvus 用字段 id，Iceberg 与 Lance 用各自的 field id，没有 id 的 Parquet 用列名。向量列带 <code>VectorLayout</code>，即元素类型、维度和数据缓冲的排列（Milvus 的 FixedSizeBinary、开放格式的 FixedSizeList 或 List），计算按布局直接读缓冲，不复制。<code>VectorLayout</code> 就是 <a href="read.html#types">read.html 6.4</a> 里放在 <code>core.schema</code> 的向量布局描述。Spark 类型映射、谓词绑定和列裁剪都按 <code>ColumnId</code> 与 Arrow 类型工作。</li>
+<li><strong><code>TableFormat</code> 解释私有部分，做三件事。</strong>
+  <ol>
+  <li>描述（driver）：按输入的位置、<code>StorageBinding</code> 和版本选择，产出 <code>TableVersion</code>。</li>
+  <li>规划（driver）：按投影和谓词、用该格式自己的统计剪掉单元，产出 <code>UnitReadTask</code>。</li>
+  <li>打开（executor）：<code>UnitReader</code> 交出 Arrow 批；声明了能力的，再提供按地址取行和索引句柄。</li>
+  </ol></li>
+<li><strong>删除由所属格式执行。</strong>Milvus 的 L0 删除和「主键加行时间戳」规则在 Milvus 的 <code>TableFormat</code> 里，经 <code>core.delete</code> 执行。Iceberg 的 equality delete 按 Iceberg 的规则执行：键可以是多列，null 与 null 相等，先后按文件的 sequence number 比；它与 Milvus 规则不同，两者不共用实现。Hudi、Paimon 的按键合并发生在一个单元之内，由读取器执行。</li>
+<li><strong>行地址按单元声明。</strong>声明三件事：地址种类（删除前的物理位置、删除后的位置、稳定行 id）；是否支持按地址取行；地址总是和单元 id 一起出现，不编码进同一个整数。Milvus 普通段的地址是删除前的段内物理行号，索引 label 就是它；Milvus 外表的地址由 Milvus 的 <code>TableFormat</code> 按外表规则声明（<a href="read.html#rules">read.html 1.1</a>）；直接读 Lance 时用 Lance 自己的行地址。外表路径和直接读的路径各自声明，互不通用。</li>
+<li><strong>能力在规划时核对。</strong>计算声明需要什么，表版本声明能提供什么；不匹配时在 driver 报错，并列出不满足的单元。不从格式名或存储位置推断能力。</li>
+<li><strong>身份属于输入和输出。</strong><code>StorageBinding</code> 随输入或输出传递，单元只记位置引用；同一个表版本换一份绑定，就能以另一个身份读。按桶配置的 Hadoop 键只在输入没给身份时用来推导（<a href="storage-auth.html">storage-auth.html</a>）。</li>
+</ol>
+
+<h2 id="compute">三、计算怎么接</h2>
+<p><strong>计算只接收格式中立的数据：列批、按 <code>VectorLayout</code> 解释的向量缓冲、排除位图、按需的地址列和索引句柄。</strong>计算不打开存储、不解析 schema、不执行删除规则。</p>
+<ol>
+<li><strong>表输入。</strong><code>UnitReader</code> 在 executor 上交出批；能力按表版本的声明。Spark 层按单元分发任务，再全局合并结果。</li>
+<li><strong>DataFrame 输入。</strong>任意 Spark 数据源或 join 的结果，只声明「扫描」。K-means、精确 TopK 可以直接使用；要求索引或按地址取行的计算在规划时拒绝。只需要扫描的开放格式场景，先用该格式的 Spark 数据源交 DataFrame 即可，需要固定版本、回表或索引时再为它写 <code>TableFormat</code>。</li>
+<li><strong>索引。</strong><code>TableFormat</code> 为单元提供索引句柄和 label 对应的地址种类；计算在句柄上探查，回表经同一单元的 <code>UnitReader</code> 按地址取行。今天的 <code>SegmentIndexQuery</code> 按此拆成两半：打开段、算排除位图、加载索引文件归 Milvus 的 <code>TableFormat</code>；在向量缓冲或索引句柄上求 TopK 归计算。</li>
+<li><strong>写。</strong>写接收数据和输出的 <code>StorageBinding</code> 与格式，不接收输入的表版本。写 Milvus 段时，目标 collection 的 schema 由目标的 Milvus <code>TableFormat</code> 给出。</li>
+</ol>
+<p>例：客户桶里的 Parquet 查询集（输入 A）查我们桶里的 Milvus 快照（输入 B），结果写到另一个桶的 Parquet（输出 D）。三份绑定各自独立；精确模式只要求 B 能扫描，索引模式还要求 B 的向量列声明了可用的索引，并且支持按地址取行。</p>
+
+<h2 id="formats">四、各格式怎么填</h2>
+<div class="table"><table>
+<thead><tr><th>格式</th><th>版本</th><th>ColumnId</th><th>单元</th><th>删除</th><th>地址</th><th>读取实现</th></tr></thead><tbody>
+<tr><td>Milvus 快照、milvus-backup</td><td>快照名与 create_ts；backup 目录</td><td>字段 id</td><td>段</td><td>L0 与「主键加行时间戳」，经 <code>core.delete</code></td><td>删除前的段内物理行号</td><td>milvus-storage（今天的实现）</td></tr>
+<tr><td>Milvus 外表</td><td>快照</td><td>字段 id（含 Milvus 合成的主键与时间戳）</td><td>段</td><td>外部格式自带的删除由 milvus-storage 读取器执行</td><td>按外表规则声明（<a href="read.html#rules">read.html 1.1</a>）</td><td>milvus-storage</td></tr>
+<tr><td>Parquet 目录</td><td>钉住时的文件列表（路径、大小、修改时间）</td><td>field_id，或列名</td><td>文件</td><td>无</td><td>删除前的物理行号</td><td>待定（决策 26）</td></tr>
+<tr><td>Iceberg</td><td>snapshot id</td><td>Iceberg field id</td><td>数据文件</td><td>Iceberg 规则</td><td>待定</td><td>待定（决策 26）</td></tr>
+<tr><td>Lance</td><td>dataset version</td><td>Lance field id</td><td>fragment</td><td>删除向量</td><td>Lance 行地址</td><td>待定（决策 26）</td></tr>
+<tr><td>Hudi</td><td>commit instant</td><td>列名</td><td>file slice</td><td>file slice 内按键合并</td><td>待定</td><td>待定（决策 26）</td></tr>
+</tbody></table></div>
+<p>读取实现按格式逐个选定（<a href="../README.md">README 第 4 节决策 26</a>）。判据是该格式要提供的能力（固定版本、按地址取行、索引），以及要覆盖的存储后端：milvus-storage 的文件系统只有本地与云对象存储，没有 HDFS。</p>
+
+<h2 id="code">五、与现有代码的对应</h2>
+<div class="table"><table>
+<thead><tr><th>今天</th><th>演进后</th><th>说明</th></tr></thead><tbody>
+<tr><td><code>Snapshot</code></td><td><code>TableVersion</code> 的公共部分，加上 Milvus 私有部分；<code>Snapshot</code> 这个名字留给后者</td><td><code>collectionId</code>、<code>partitionIds</code>、protobuf <code>schema</code>、<code>origin</code>、段上的 <code>storageVersion</code> 进私有部分；<code>bucket</code> 改为单元的位置引用；可写性改为能力声明</td></tr>
+<tr><td><code>Segment</code>、<code>SegmentLayout</code></td><td>Milvus 私有部分里的单元描述</td><td>名字不变</td></tr>
+<tr><td><code>SegmentReadTask</code></td><td><code>UnitReadTask</code> 中属于 Milvus 的一种</td><td><code>properties</code> 在生成任务时从 <code>StorageBinding</code> 取</td></tr>
+<tr><td><code>SegmentReader</code>、<code>SegmentReaderRegistry</code></td><td><code>UnitReader</code>；注册表按 <code>TableFormat</code> 分派</td><td><code>take</code> 的地址种类按单元声明；「期望行数」只表示可见行数，与地址上限分开</td></tr>
+<tr><td><code>SnapshotSource</code> 与四个入口</td><td>Milvus <code>TableFormat</code> 的「描述」</td><td>入口仍是四个</td></tr>
+<tr><td><code>SchemaMapper</code>、<code>MilvusTypes</code></td><td>Milvus <code>TableFormat</code> 内部：Milvus 类型 → Arrow 类型与 <code>VectorLayout</code></td><td><code>SparkTypes</code>、谓词绑定、列裁剪改按 <code>ColumnId</code> 与 Arrow 类型</td></tr>
+<tr><td><code>core.delete</code></td><td>Milvus <code>TableFormat</code> 专用</td><td>开放格式的删除不经它</td></tr>
+<tr><td><code>SegmentIndexQuery</code></td><td>拆成 Milvus <code>TableFormat</code> 的一侧与计算的一侧</td><td>见第三节第 3 条</td></tr>
+<tr><td><code>ReadPlan.of</code></td><td>对表版本的单元生成 <code>UnitReadTask</code></td><td>属性包按单元的位置从 <code>StorageBinding</code> 取，不按 storage_version 取</td></tr>
+<tr><td><code>MilvusTable</code>、<code>MilvusScan</code></td><td>暂不改名</td><td>实现拆分时再定</td></tr>
+</tbody></table></div>
+<p>顺序：拆分之前，backfill 先改为经 <code>SnapshotCatalog</code> 取快照，否则新字段还要在 option 串里再实现一遍。改名与模型拆分在同一个变更里完成，不留类型别名。Milvus 的 protobuf schema 只在 Milvus <code>TableFormat</code> 内部使用（<a href="modules.md">modules.md</a> 约束 15）。</p>
+
+<h2 id="tradeoffs">六、否决与代价</h2>
+<p><strong>否决的做法：</strong></p>
+<ol>
+<li><strong>决策 25 最初的形态。</strong>公共 schema 用 Milvus 类型与字段 id，所有单元都交给 milvus-storage 列组，跨格式共用一套删除规则，各格式共用 <code>(单元编号 &lt;&lt; 32) | 行号</code> 的地址编码，存储位置的凭证放进表模型。这样直接读的开放格式要带上 Milvus 语义，Iceberg 的删除规则装不进 Milvus 的实现，读取实现在目标组合定下之前就被选定，计算也会拿到凭证。</li>
+<li><strong><code>Snapshot</code> 保持 Milvus 专用，开放格式只走 DataFrame。</strong>开放格式一旦需要固定版本的多轮读取、按地址取行或索引，就要再建一套表模型。</li>
+<li><strong>另建一套表模型，与 <code>Snapshot</code>、milvus-storage 清单并存。</strong>三套模型各自演进。</li>
+<li><strong>照 XTable 做格式间的语义翻译。</strong>它的公共模型不含删除，官方说明只同步写时复制视图。</li>
+</ol>
+<p><strong>代价：</strong></p>
+<ol>
+<li>schema 改为 <code>ColumnId</code> 加 Arrow 类型后，今天按 Milvus <code>FieldSchema</code> 和 <code>milvus.field_id</code> 工作的 Spark 类型映射、谓词绑定、列裁剪、向量解码都要改。</li>
+<li>DataFrame 输入进入原生计算时，要把行转成向量缓冲，有复制开销；性能关键的场景走表输入。</li>
+<li>各开放格式的读取实现分别选定（决策 26），不同实现覆盖的存储后端和能力不同，设计要逐个格式写明。</li>
+</ol>

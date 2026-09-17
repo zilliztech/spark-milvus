@@ -7,7 +7,7 @@
 | 确认功能承诺、优先级和实现位置 | 顶层索引 | [能力规划](capabilities.md) |
 | 理解总体结构、确定模块与包的归属 | architecture/ | [架构图解](architecture/overview.html)、[模块与迁移](architecture/modules.md) |
 | 开发目录发现、三段表名、表 DDL 与快照时间旅行入口 | architecture/ | [Catalog](architecture/catalog.html) |
-| 理解表描述：各数据源怎么映射到同一种内部结构 | architecture/ | [表描述](architecture/table-description.html)（决策 25） |
+| 理解表版本：各种输入怎样描述成同一种表模型，又怎样交给读、搜索和建索引 | architecture/ | [表版本](architecture/table-version.html)（决策 25） |
 | 开发向量搜索与建索引 | architecture/ | [向量搜索与建索引](architecture/vector-search.html)（单查询索引搜索已实现；查询集、exact 模式、建索引待实现） |
 | core 怎么访问对象存储、凭证怎么下发 | architecture/ | [存储访问层](architecture/storage-access.html)（未完待续） |
 | 改动对象存储凭证、provider 链、按桶配置 | architecture/ | [对象存储认证](architecture/storage-auth.html) |
@@ -75,7 +75,7 @@ flowchart TB
 
 ### 2.2 核心层对象模型
 
-读的唯一入口是 Snapshot：主路径从快照目录选一个快照，只认 Storage V3；1.x 的三条非标准入口作适配器产出同一个 Snapshot 或 SegmentReader（capabilities.md 的 K1 到 K3）。
+读的唯一入口是 Snapshot（Milvus 快照；各种输入共用的表模型是由它演进的 TableVersion，见 [表版本](architecture/table-version.html)）：主路径从快照目录选一个快照，只认 Storage V3；1.x 的三条非标准入口作适配器产出同一个 Snapshot 或 SegmentReader（capabilities.md 的 K1 到 K3）。
 
 | 类型 | 含义 | 来源 |
 |---|---|---|
@@ -193,6 +193,7 @@ flowchart LR
 | 22 | 连接器写的段，系统字段 RowID（0）和 Timestamp（1）从哪来 | a. 写时向 Milvus 要 AllocID / AllocTimestamp（要活的 Milvus，纯连接器模式做不到）；b. 登记时由 Milvus 补（RegisterSegments 未定，能否改写文件要和 Milvus 侧一起定）；c. 写占位值（段内行号、作业时间），登记时只作排序。见 [write.html](architecture/write.html) 第六节 | W1 登记前提；core.write.exec 的列组切分 |
 | 23 | R7 的 JSON、Array 与 `json_contains` 以哪一版 Milvus 语义为准 | a. 只实现 Milvus 2.6+ 稳定共同子集；b. 以明确版本为基线并按服务版本分派。还需钉死 JSON null 与缺失路径、异构/嵌套数组、数值转换、类型不匹配和畸形值的结果 | 不阻塞已交付的标量子集；阻塞 R7 的 JSON/Array 扩展 |
 | 24 | SQL 函数 `vector_knn` 的去留 | a. 删除：它在 JVM 里对 `collect_list` 得到的数组排 TopK，是精确搜索之外的又一条暴力搜索路径；b. 保留：它作用于任意 DataFrame 的数组列，不读 collection，和 V5 解决的不是同一个问题 | V8；删除要同步中英文 reference 与 apps 的测试 |
+| 26 | 各开放格式的 `TableFormat` 用哪种读取实现 | a. milvus-storage 的格式读取器（经 JNI；Milvus 外表已在用；文件系统只有本地与云对象存储，没有 HDFS）；b. 该格式的 Java 库（如 iceberg-core）；c. 该格式的 Spark 数据源，只提供扫描，作为 DataFrame 输入 | 按格式逐个定，判据是该格式要提供的能力（固定版本、按地址取行、索引）和要覆盖的存储后端；[表版本](architecture/table-version.html) 第四节 |
 
 ## 5 需要 Milvus 侧提供的 `[草稿]`
 
@@ -212,7 +213,7 @@ flowchart LR
 | 上游 JNI 绑定文件系统读取字节 | C 接口 `loon_filesystem_get_metrics` 自 #630 起已有，`filesystem_jni.cpp` 没有绑定 | Java 绑定可按文件系统取读取字节 | G5；R20 性能第 2 项 |
 | 外表分片切点对齐 row group | DataNode 按固定行数切大文件（`SplitFileToFragments`），`loon_exttable_get_file_info` 只返回行数，拿不到 row group 边界；切点所在的 row group 被相邻两段各读一次再切片 | `loon_exttable_get_file_info` 返回 row group 边界，切点落在边界上 | R20 读取性能；先用 G5 读取字节量出浪费比例 |
 | Knowhere 的 C/Java 接口开放线程池大小 | 暴力搜索、索引搜索、建索引都在 Knowhere 的进程级线程池里算；PR #1829 的接口不初始化也不开放这些池，默认大小定义在 Knowhere 依赖的外部库里，未核对 | 接口能设置搜索与建索引线程池的大小 | V5、V7、W6、G4；Spark 按 executor 核数配置，避免与任务线程争核 |
-| milvus-storage 的 Java 绑定开放外表展开接口 | C 接口 `loon_exttable_explore` 与各格式的 `Format::explore` 已有；PR #681 与 main 的 JNI 都没有绑定 | Java 能按格式、位置和版本拿到列组文件条目 | 决策 25；开放格式接入表描述 |
+| milvus-storage 的 Java 绑定开放外表展开接口 | C 接口 `loon_exttable_explore` 与各格式的 `Format::explore` 已有；PR #681 与 main 的 JNI 都没有绑定 | Java 能按格式、位置和版本拿到列组文件条目 | 决策 26 选用 milvus-storage 读开放格式时 |
 
 ## 6 决策日志
 
@@ -390,10 +391,11 @@ flowchart LR
 | 2026-09-17 | W6 建索引的入口是过程，不是写 option | 负责人选过程：`CALL milvus.system.build_index(...)` 在 driver 上另起 Spark 作业，每段一个任务，回读向量列交给 Knowhere 构建，编码索引文件后写出，返回索引记录。否决的是写 option `milvus.index.<field>` 在写段任务里直接建：写入和建索引的失败连在一起，也不能给已有的段补建；在 DataSource 的 BatchWrite.commit 里起作业同样否决。Knowhere 构建接口要求一次传入整段向量并自行复制，每个任务的内存至少是两份原始向量加图结构 |
 | 2026-09-17 | 写快照是核心能力（W8），归 core.write.commit | 负责人认可。Milvus master 的 RestoreSnapshot 支持 external：从任意 S3 位置读快照，目标 collection 必须不存在，恢复时复制段文件与各类索引文件并重新分配 build id（`internal/datacoord/snapshot_manager.go`、`copy_segment_task.go`；3.0.x 是否包含未核对）。连接器写出快照 JSON 与段 Avro 清单即可让 Spark 写的段与索引整体上线。core.snapshot 只读，写出放 core.write.commit，与 backfill 登记同属“交付给 Milvus”，JSON 形状复用 core.snapshot.json。否决的是让 core.snapshot 同时负责读写 |
 | 2026-09-17 | 外表类型规则下沉到第 2 层 | 外表设计原把源类型的转换表只放在 spark.types。暴力搜索和建索引在 core 里就要把 Arrow 数据缓冲交给 Knowhere，同样要认 list、fixed_size_list、fixed_size_binary 等布局。改为：合法性规则（照抄 `NormalizeExternalArrow`）和每种向量布局的描述（元素类型、维度、数据缓冲）放 core.schema，spark.types 与 core.index 共用；数据仍从源类型直接转成目标表示，不经 Milvus 内部表示，2026-09-16 的决定不变 |
-| 2026-09-17 | 决策 25 定：表描述中间层沿用 `Snapshot` 演进 | 负责人选沿用。读、写、搜索、建索引交接所依据的内部结构（只作内部接口）以 `Snapshot` 为表一级，单元布局统一成 milvus-storage 的列组（列、格式、带行范围与格式属性的文件），删除拆成两类：单元内按位置删除与按键合并留给格式读取器，跨单元按键删除（键列加排序依据：Milvus 比行时间戳，Iceberg 比文件序号）由 core.delete 执行；行身份显式声明，位置地址必有，键列与稳定 id 可选。依据是对 Milvus、Iceberg v3、Delta、Hudi、Lance、Paimon、Parquet 目录与 XTable、milvus-storage、lance-spark 的调研：结构上各格式都是「版本下的 schema 加一组由文件组成的单元」，`Snapshot` 已是这个形状，milvus-storage 的列组已与格式无关并被 Milvus 外表用来包装 Parquet、Vortex、Iceberg、Lance。否决的是全新设计一套模型（与 `Snapshot`、milvus-storage 清单并存三套），以及照 XTable 做语义翻译（其公共模型不含删除，官方说明只同步写时复制视图）。设计见 [table-description.html](architecture/table-description.html)，形态表里的各项在实现前逐项细化；开放格式与用户声明 schema 的接入另列能力行 |
+| 2026-09-17 | 决策 25 定：表描述中间层沿用 `Snapshot` 演进 | 负责人选沿用。读、写、搜索、建索引交接所依据的内部结构（只作内部接口）以 `Snapshot` 为表一级，单元布局统一成 milvus-storage 的列组（列、格式、带行范围与格式属性的文件），删除拆成两类：单元内按位置删除与按键合并留给格式读取器，跨单元按键删除（键列加排序依据：Milvus 比行时间戳，Iceberg 比文件序号）由 core.delete 执行；行身份显式声明，位置地址必有，键列与稳定 id 可选。依据是对 Milvus、Iceberg v3、Delta、Hudi、Lance、Paimon、Parquet 目录与 XTable、milvus-storage、lance-spark 的调研：结构上各格式都是「版本下的 schema 加一组由文件组成的单元」，`Snapshot` 已是这个形状，milvus-storage 的列组已与格式无关并被 Milvus 外表用来包装 Parquet、Vortex、Iceberg、Lance。否决的是全新设计一套模型（与 `Snapshot`、milvus-storage 清单并存三套），以及照 XTable 做语义翻译（其公共模型不含删除，官方说明只同步写时复制视图）。设计见 [table-version.html](architecture/table-version.html)（原 table-description.html，同日按修订改名），形态表里的各项在实现前逐项细化；开放格式与用户声明 schema 的接入另列能力行 |
 | 2026-09-17 | 外表设计不单独成文，拆入各自的主题文档 | 负责人同意删除 `external-collection.html`。决策 25 之后 external collection 是一种数据源，它的读取规则对所有段适用，按主题归位：四条读取规则进 [read.html 1.1](architecture/read.html#rules)，源类型对照表进 [read.html 6.4](architecture/read.html#types)，外表快照、存储布局、五种源格式、系统字段合成与快照格式 5 进 [snapshot.html 3.1](architecture/snapshot.html#external)，客户桶凭证的四层规则进 [storage-auth.html 3.4](architecture/storage-auth.html#external)，切片批与读取字节两项上游改进进 [storage-io.html 第五节](architecture/storage-io.html#metrics)；被否决的方案已在本节，上游需求在第 5 节，开发顺序与实跑确认项进内部任务。只与 Milvus 自身运维有关的内容（GC、索引检查、统计任务、compaction）不再记录 |
 | 2026-09-17 | 向量搜索设计重写，定下查询集入口的实现 | 负责人同意重写 [vector-search.html](architecture/vector-search.html)：只保留结论、原理与好处，issue #125 的实测结果、产物摘要与环境记录移到内部验收记录。查询集入口定为：`MilvusSearch.search` 接收 `queries`（`query_id` 加向量）与 `mode`；driver 收集查询矩阵并广播，受 `milvus.search.queries.max.bytes` 约束；第一阶段 `parallelize` 段任务，每段由 core.index 的 `SegmentSearch` 按组执行查询（每组受 `milvus.search.group.max.bytes` 约束），只输出查询序号、段 id、行号与分数；按查询以 `functions.udaf` 包装的有界 TopK 聚合合并；第二阶段按段重新分区后 `take` 输出列，经 `createDataFrame` 组成结果；指标走 `milvus.search.*` 累加器；搜索与建索引作业以 `spark.task.cpus` 等于 executor 核数提交。exact 模式覆盖五种稠密向量类型，由 Knowhere 按原生类型计算。否决的是继续用 DataSource V2 扫描承载搜索：选项只能是字符串，查询矩阵无法随任务下发，合并后的回表也不能在同一次扫描里完成；以及每段先回表再合并：回表量随段数成倍增长 |
 | 2026-09-17 | 不做跨任务索引缓存 | 负责人同意删除。一个任务对应一个段，只加载本段的索引一次，所有查询组共用，任务结束时关闭，一次计算内没有重复加载。缓存来自更早的 kNN join 设计：广播小底库时，按查询分区切出的多个任务要用同一份底库索引。按段切任务后这个场景不存在；底库小时应广播原始向量做暴力搜索，也不需要索引。跨任务缓存还要自管原生内存、executor 生命周期和任务落点，Spark 都不感知，一次性批作业结束即失效。V4 去掉缓存，G4 去掉缓存上限，决策 21 只留兼容范围 |
 | 2026-09-17 | 精确扫描有多组查询时，段只读一次 | 负责人同意。查询集超过 `milvus.search.group.max.bytes` 分成多组时，任务读一遍整段并保留各批的向量缓冲与排除位图，各组依次在这些批上调用 Knowhere。内存多占一段向量列，计入任务的 allocator 上限；Milvus 的段默认不超过 1 GB。否决的做法：每组重读一遍段（同一次计算里重复读取），以及每批一次算完所有组（所有组的 TopK 同时驻留，内存随查询数乘 K 增长）。设计见 [vector-search.html 2.3](architecture/vector-search.html#exact) |
 | 2026-09-17 | 删除能力 V4 | 负责人同意整行删除。去掉缓存后 V4 只剩三种索引来源：Milvus 建的由 V2 加载，Spark 写回的由 W6、W8 交付后同样经快照段记录由 V2 加载，任务内即时建与设计冲突（快照确认未建索引的段报错，或在 `allowUnindexed` 打开时改用精确扫描）。README 2.5 第 7 条的「任务内建临时索引（V4）」一并删除。编号 V4 不再复用 |
 | 2026-09-17 | 向量搜索第一阶段按（段组，查询组）划分任务；K 的范围、搜索指标与成本写进设计 | 负责人同意。原设计每段一个任务，合并阶段的 shuffle 是「段数 × 查询数 × K × 24 字节」，K 到万级时压过其他成本。现在段按向量列字节均衡分成与 executor 数相同的段组，查询集按 `milvus.search.group.max.bytes` 分组，每个（段组，查询组）是一个任务；任务逐段执行本组查询、在任务内合并，shuffle 降到「段组数 × 查询数 × K × 24 字节」。搜索任务本来每个 executor 同时只跑一个，并行度不变；代价是任务失败时要重做的段更多。一个任务只有一组查询，任务内存是一批向量（或一个段的索引）加本组 TopK，每个段在任务内只读一次、索引只加载一次，同日「精确扫描多组时保留各批缓冲」一条由此作废：在多段任务里保留缓冲会让内存随段组大小增长。否决的做法：每段一个任务（shuffle 随段数增长）；多段任务里多组共用（要么保留全部段的数据，要么所有组的 TopK 同时驻留）。K 为正整数，K × 28 字节不超过 group 上限，不跟随 Milvus 在线服务的 topK 上限 16384。累加器名单与两种模式的成本写进 [vector-search.html 1.3、1.4](architecture/vector-search.html#cost) |
+| 2026-09-17 | 决策 25 修订：表模型改名 `TableVersion`，按组合原则分成公共部分与各格式的私有部分 | 负责人定名字并要求按 AGENTS.md 的组合原则修订。`TableVersion` 由今天的 `Snapshot` 演进，是所有输入共用的表模型：公共部分是版本、schema（每列一个 `ColumnId`、Arrow 类型、可空性，向量列带 `VectorLayout`）、单元（`DataUnit`：id、行数、字节数、位置引用、地址种类）和能力声明（扫描、按地址取行、各向量列的索引、统计）；私有部分只由该格式的 `TableFormat` 解释，Milvus 的 collection id、分区、storage_version、protobuf schema、L0 删除和索引元数据都在这里。`TableFormat` 负责描述、规划和打开单元；删除、合并、系统字段、类型规则都在它内部，`core.delete` 只服务 Milvus，Iceberg 的 equality delete 按 Iceberg 规则另行执行。身份不进表模型：每份输入、每份输出一个 `StorageBinding`，生成 `UnitReadTask` 时按单元的位置取属性包。行地址按单元声明种类，索引按列声明 label 对应的地址，各格式不共用地址编码。计算只接收格式中立的列批、向量缓冲、排除位图、地址列和索引句柄；输入是表输入或只能扫描的 DataFrame 输入，能力在 driver 规划时核对。`Snapshot`、`Segment`、`SegmentLayout`、`SegmentReadTask` 只指 Milvus 对象，中立的名字是 `TableVersion`、`DataUnit`、`TableFormat`、`UnitReadTask`、`UnitReader`、`StorageBinding`、`ColumnId`、`VectorLayout`；代码改名随模型拆分一起做，不留类型别名，拆分前 backfill 先改为经 `SnapshotCatalog` 取快照。`table-description.html` 改名为 `table-version.html`；modules.md 约束 15、context.md、writing.md 的命名规则、snapshot.html 随之修订。否决：原形态（公共 schema 用 Milvus 类型与字段 id，所有单元交给 milvus-storage 列组，跨格式共用删除规则与 `(单元编号 << 32) | 行号` 地址编码，凭证放进表模型）：直接读的开放格式要带上 Milvus 语义，读取实现在目标组合定下前被选定，计算拿到凭证；`Snapshot` 保持 Milvus 专用、开放格式只走 DataFrame：开放格式需要固定版本、按地址取行或索引时还要再建模型。各开放格式的读取实现见决策 26 |

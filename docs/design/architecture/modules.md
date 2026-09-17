@@ -39,7 +39,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；native-storage、core、
 
 | 包 | 职责 | 主要类型 |
 |---|---|---|
-| `snapshot` | 列快照目录，选快照，把 JSON 和 Avro 变成实体；SnapshotSource 接口；`Snapshot` 是所有来源共用的表描述（决策 25，见 [table-description.html](table-description.html)） | SnapshotCatalog、Snapshot、Segment、CollectionIndex、SegmentIndex、SegmentIndexes、V2ColumnGroup、DeltaLogFile、SnapshotSource |
+| `snapshot` | 列快照目录，选快照，把 JSON 和 Avro 变成实体；SnapshotSource 接口；`Snapshot` 是 Milvus 快照，将演进为所有输入共用的 `TableVersion`，Milvus 字段成为它的 Milvus 私有部分（决策 25，见 [table-version.html](table-version.html)） | SnapshotCatalog、Snapshot、Segment、CollectionIndex、SegmentIndex、SegmentIndexes、V2ColumnGroup、DeltaLogFile、SnapshotSource |
 | `snapshot.json` | 快照 JSON 文件的形状，一个 JSON 对象一个类型，名字带 `Json` 后缀；只描述不计算 | SnapshotJson、CollectionSchemaJson、FieldJson、SegmentJson、ManifestItemJson、SegmentListJson（option 串里的段列表，随 1.x option 读法一起删） |
 | `manifest` | 一个段的 Manifest：列组、删除文件、统计、索引登记 | Manifest、ColumnGroup、ManifestReader |
 | `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型；外表源类型的合法性规则与向量布局描述（R20 待实现，spark.types 与 index 共用） | SchemaMapper、MilvusTypes、ArrowTypes、FieldMetadata |
@@ -184,7 +184,7 @@ spark-milvus/
 12. 模块的显示名跟目录走，发布坐标用 `moduleName` 另设。根项目显示名 `spark-milvus`（等于仓库目录），坐标仍是 `com.zilliz:spark-connector`。sbt 的 project id 不能带点，所以命令行是 `spark40` 而目录是 `spark-4.0`。
 13. 第 2 层不用 Spark 的 Logging，用 core 的 `com.zilliz.milvus.storage.Logging`（slf4j，provided）。约束 1 的扫描会先去掉注释，注释里提 org.apache.spark 是合法的。
 14. core 读写存储只经 `io.ObjectStore`，源码里不出现 `org.apache.hadoop`。唯一实现是 `io.NativeObjectStore`，走 C 的 `loon_filesystem_*`；`io.hadoop` 已删除。`hadoop-common` 仍在 core 的编译依赖里，但不是给我们的代码用的——parquet-mr 的 `ParquetReader.Builder` 签名里有 `org.apache.hadoop.fs.Path`，类得在编译类路径上。测试复用 core 测试源码里的 `LocalObjectStore` 和 `FailingObjectStore`，不需要原生库；compat 与 spark40 通过 `test->test` 依赖取得这些测试实现，其他 Spark 线及生产依赖不受影响。executor 上拿到的是可序列化的 `ObjectStoreFactory`（一组配置字符串），不是活的 `Configuration`。
-15. milvus-proto 的生成分两处：不带 service 的 `common.proto`、`schema.proto` 在 core 生成（`grpc = false`），带 service 的五个在 client 生成（`grpc = true`），靠 include 路径引用 core 的产物，同一份 .proto 不生成两遍。core 用得上它们，是因为 Milvus 的存储格式本身由 protobuf 定义：快照里嵌着 CollectionSchema，Manifest 的字段描述来自 schema.proto，core 不另建一套 schema 模型。
+15. milvus-proto 的生成分两处：不带 service 的 `common.proto`、`schema.proto` 在 core 生成（`grpc = false`），带 service 的五个在 client 生成（`grpc = true`），靠 include 路径引用 core 的产物，同一份 .proto 不生成两遍。core 用得上它们，是因为 Milvus 的存储格式本身由 protobuf 定义：快照里嵌着 CollectionSchema，Manifest 的字段描述来自 schema.proto。Milvus 数据的 schema 就是 CollectionSchema，Milvus 的 `TableFormat` 直接使用它，不另建副本；`TableVersion` 的中立 schema（列标识、Arrow 类型、向量布局，见 [table-version.html](table-version.html)）由它映射而来，protobuf schema 只在 Milvus 的 `TableFormat` 内部使用。
 
 补充（2026-09-14）：`checkCapabilityIndex` 只从 `package.scala` 的 `Capabilities: …（see docs/design/capabilities.md）` 这一句里读编号，正文里的「Storage V2」「DataSource V2」不再算认领；一个只有 `package.scala` 的目录不能认领任何编号，编号必须写进 capabilities.md 第 11 节直到代码落地。
 
