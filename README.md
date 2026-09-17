@@ -167,3 +167,8 @@ For more detailed information about how to use the connector, see the [ **API Re
 ## License
 
 This project is licensed under the Server Side Public License v1 (SSPLv1) and the GNU Affero General Public License v3 (AGPLv3).
+## Automated PR review
+
+AI review covers all changed files, including documentation, using fixed Git
+objects without executing PR code. See the [operation guide](.github/ai-review/README.md)
+for repository policy, coverage reports, deployment and incomplete reviews.

@@ -1,0 +1,53 @@
+name: AI Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open PR number to review
+        required: true
+        type: number
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  review:
+    if: vars.ENABLE_AI_REVIEW == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      # Only trusted default-branch code is executed. The program reads PR
+      # source through a separate bare Git repository, with no checkout.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/ai-review
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Review every changed file
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODEL_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          REVIEW_OUTPUT_DIR: ${{ runner.temp }}/ai-review-output
+        run: node .github/ai-review/main.mjs
+      - name: Preserve findings and coverage, including incomplete runs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ai-review-${{ github.event.pull_request.number || inputs.pr_number }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-output/
+          if-no-files-found: warn
+          retention-days: 14
