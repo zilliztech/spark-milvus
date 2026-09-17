@@ -1,0 +1,104 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>集成测试的 Helm 执行 · Spark-Milvus</title>
+<style>
+  :root { color-scheme: light dark; --paper: #fafaf8; --ink: #202824; --muted: #53615a; --line: #d7dfd9; --link: #16654b; --code: #eef2ee; --note: #edf7f1; }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #171c19; --ink: #e5ebe6; --muted: #a5b2a9; --line: #39473e; --link: #83d3ae; --code: #242d27; --note: #1d3026; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.8 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 48px 28px 88px; }
+  h1 { margin: 0 0 18px; font-size: 32px; line-height: 1.4; }
+  h2 { margin: 44px 0 16px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 22px; }
+  p, li { margin: 12px 0; }
+  a { color: var(--link); text-underline-offset: 3px; }
+  code { font: .9em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code); padding: 2px 5px; border-radius: 3px; }
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14px; }
+  th, td { padding: 10px 12px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { background: var(--code); }
+  .lead { font-size: 19px; }
+  .state { margin: 22px 0; padding: 14px 18px; border-left: 4px solid var(--link); background: var(--note); }
+  .muted { color: var(--muted); }
+  nav { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 20px 0; font-size: 14px; }
+</style>
+<main lang="zh-CN">
+<h1>集成测试的 Helm 执行</h1>
+
+<p class="lead"><code>spark-milvus-integration</code> Chart 只创建一个 Kubernetes Job；Job 在单个 Pod 内以 Spark <code>local[*]</code> 运行 <code>integration40/test</code>，访问已有的 Milvus 和对象存储。</p>
+
+<div class="state"><strong>当前状态：</strong>Chart 的部署合同已经确定。现有发布镜像没有测试运行器，三个 integration suite 仍写死本机 Milvus/MinIO 配置，因此本次只能验收 Chart 的 lint 与渲染；镜像和测试配置完成前，不能声称端到端测试可运行。</div>
+
+<nav aria-label="目录">
+  <a href="#boundary">边界</a>
+  <a href="#inputs">输入</a>
+  <a href="#lifecycle">生命周期</a>
+  <a href="#image">镜像合同</a>
+  <a href="#isolation">隔离</a>
+  <a href="#acceptance">验收</a>
+</nav>
+
+<h2 id="boundary">1. Chart 只调度测试</h2>
+
+<table>
+  <thead><tr><th>Chart 创建</th><th>Chart 不创建</th></tr></thead>
+  <tbody><tr><td>一个 <code>batch/v1 Job</code></td><td>Milvus、MinIO/S3、Secret、Service、RBAC、PVC、Spark Operator</td></tr></tbody>
+</table>
+
+<p>现有测试显式使用 <code>local[*]</code>，所以第一版不使用 <code>SparkApplication</code>。若后续要验证 Kubernetes driver/executor 分布式执行，需要单独改造测试入口、镜像和权限，不能通过修改这个 Job 的 master 参数获得。</p>
+
+<h2 id="inputs">2. 普通配置与凭据分开交付</h2>
+
+<table>
+  <thead><tr><th>输入</th><th>传递方式</th><th>约束</th></tr></thead>
+  <tbody>
+    <tr><td>镜像 repository/digest、Milvus URI/database、对象存储 endpoint/bucket/root/region</td><td>Helm values</td><td>values schema 拒绝空的必填项，镜像必须使用 <code>sha256</code> digest</td></tr>
+    <tr><td>Milvus token</td><td>已有 Secret 的单个 key</td><td>Chart 不接受明文 token</td></tr>
+    <tr><td>对象存储 AK/SK</td><td>已有 Secret 的两个 key</td><td>分别注入 <code>AWS_ACCESS_KEY_ID</code> 与 <code>AWS_SECRET_ACCESS_KEY</code></td></tr>
+  </tbody>
+</table>
+
+<p><code>objectStorage.rootPath</code> 是 Milvus 实例已有的数据根目录，读取必须保持它不变；测试产生的新对象写到 <code>&lt;writePrefix&gt;/&lt;runId&gt;</code>。Chart 不把 AK/SK 写进 ConfigMap、模板或日志。</p>
+
+<h2 id="lifecycle">3. 一次 release 对应一次测试</h2>
+
+<ol>
+  <li>CI 生成唯一的 Helm release 和 <code>runId</code>。</li>
+  <li>命名空间及其 Secret 由集群既有流程预先创建；运行脚本拒绝创建命名空间或覆盖同名 release。</li>
+  <li>运行脚本先执行 <code>helm lint --strict</code>，再安装 Job，并分别监控 Complete、Failed 与 <code>CreateContainerConfigError</code>；脚本不主动读取凭据 Secret 的 data。Helm 默认以 Secret 保存 release metadata，CI 身份仍需具备 Helm 自身要求的 Secret 权限。</li>
+  <li>Job 失败不由 Kubernetes 重试：<code>backoffLimit</code> 固定为 0，避免重复写入。</li>
+  <li>成功或失败都先收集 Helm 状态、Job 日志、资源描述和相关 Events。</li>
+  <li>收集完成后卸载 release；成功测试若卸载失败，CI 仍判失败。TTL 只负责 CI 被强制中断后的 Job 兜底回收。</li>
+</ol>
+
+<p>安装不使用 <code>--atomic</code>。该参数会在失败时先删除 Job，使 CI 失去诊断现场。</p>
+
+<h2 id="image">4. 测试镜像提供固定入口</h2>
+
+<p>Chart 固定调用 <code>/opt/spark-milvus/bin/run-integration-tests</code>。测试镜像必须：</p>
+
+<ul>
+  <li>使用 Java 21，并包含 Spark 4.0、已编译的 integration 测试和运行测试所需的依赖；</li>
+  <li>包含同一份已验证的 storage/Knowhere 原生 bundle；当前默认调度到 amd64；</li>
+  <li>包含 backfill 测试需要的 Python 与 pymilvus；</li>
+  <li>以明确的数字 UID 非 root 用户运行，保证工作目录、sbt 缓存与临时目录可写；</li>
+  <li>执行完整 <code>integration40/test</code>，并原样返回测试退出码。</li>
+</ul>
+
+<p>发布用 Dockerfile 的 final stage 只有 Connector assembly，不能用作这个测试镜像。</p>
+
+<h2 id="isolation">5. runId 必须进入所有可变资源</h2>
+
+<p>Helm 已把 <code>runId</code> 传入 <code>CI_RUN_ID</code>，并用于测试写入前缀。测试代码还必须用它派生 collection、snapshot 和 writer 路径，并在结束时只删除本次运行拥有的资源。仅给每次运行换一个时间戳不能证明重试安全。</p>
+
+<h2 id="acceptance">6. 验收分两步</h2>
+
+<table>
+  <thead><tr><th>当前可验</th><th>镜像与测试改造后再验</th></tr></thead>
+  <tbody>
+    <tr><td>values schema、<code>helm lint</code>、模板渲染、Secret 只以引用出现、运行脚本语法</td><td>全部 integration suite 确实执行；无失败、中止或意外取消；并发运行互不覆盖；失败现场可取；资源按 runId 清理</td></tr>
+  </tbody>
+</table>
+
+<p class="muted">Chart 与运行说明位于 <a href="../../../deploy/helm/spark-milvus-integration/README.md"><code>deploy/helm/spark-milvus-integration</code></a>。</p>
+</main>

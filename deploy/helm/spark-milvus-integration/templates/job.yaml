@@ -1,0 +1,112 @@
+{{- $imageRepository := required "image.repository is required" .Values.image.repository -}}
+{{- $imageDigest := required "image.digest is required" .Values.image.digest -}}
+{{- $milvusUri := required "milvus.uri is required" .Values.milvus.uri -}}
+{{- $milvusSecret := required "milvus.credentials.existingSecret is required" .Values.milvus.credentials.existingSecret -}}
+{{- $storageEndpoint := required "objectStorage.endpoint is required" .Values.objectStorage.endpoint -}}
+{{- $storageBucket := required "objectStorage.bucket is required" .Values.objectStorage.bucket -}}
+{{- $storageSecret := required "objectStorage.credentials.existingSecret is required" .Values.objectStorage.credentials.existingSecret -}}
+{{- $runId := default .Release.Name .Values.runId -}}
+{{- $writePrefix := printf "%s/%s" (trimSuffix "/" .Values.objectStorage.writePrefix) $runId -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "spark-milvus-integration.fullname" . }}
+  labels:
+    {{- include "spark-milvus-integration.labels" . | nindent 4 }}
+  {{- with .Values.job.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "spark-milvus-integration.labels" . | nindent 8 }}
+      {{- with .Values.pod.annotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      automountServiceAccountToken: {{ .Values.pod.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.pod.terminationGracePeriodSeconds }}
+      {{- with .Values.pod.serviceAccountName }}
+      serviceAccountName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: integration-test
+          image: {{ printf "%s@%s" $imageRepository $imageDigest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.runner.command | nindent 12 }}
+          {{- with .Values.runner.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          terminationMessagePolicy: FallbackToLogsOnError
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            - name: CI_RUN_ID
+              value: {{ $runId | quote }}
+            - name: MILVUS_UAT_URI
+              value: {{ $milvusUri | quote }}
+            - name: MILVUS_UAT_DATABASE
+              value: {{ .Values.milvus.database | quote }}
+            - name: MILVUS_UAT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $milvusSecret | quote }}
+                  key: {{ .Values.milvus.credentials.tokenKey | quote }}
+            - name: MILVUS_JNI_S3_ENDPOINT
+              value: {{ $storageEndpoint | quote }}
+            - name: MILVUS_JNI_S3_BUCKET
+              value: {{ $storageBucket | quote }}
+            - name: MILVUS_JNI_S3_ROOT_PATH
+              value: {{ .Values.objectStorage.rootPath | quote }}
+            - name: MILVUS_JNI_S3_REGION
+              value: {{ .Values.objectStorage.region | quote }}
+            - name: MILVUS_JNI_S3_USE_SSL
+              value: {{ .Values.objectStorage.useSSL | quote }}
+            - name: MILVUS_JNI_S3_USE_VIRTUAL_HOST
+              value: {{ .Values.objectStorage.useVirtualHost | quote }}
+            - name: MILVUS_UAT_WRITE_PREFIX
+              value: {{ $writePrefix | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.objectStorage.region | quote }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $storageSecret | quote }}
+                  key: {{ .Values.objectStorage.credentials.accessKeyIdKey | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $storageSecret | quote }}
+                  key: {{ .Values.objectStorage.credentials.secretAccessKeyKey | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

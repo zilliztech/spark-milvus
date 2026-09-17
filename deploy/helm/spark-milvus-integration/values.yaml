@@ -1,0 +1,81 @@
+nameOverride: ""
+fullnameOverride: ""
+
+# Defaults to the Helm release name. CI may set a separate stable identifier.
+runId: ""
+
+# Internal marker set by run.sh so it only cleans up releases it created.
+ownershipToken: ""
+
+image:
+  # Both values are required. The digest makes the executed image immutable.
+  repository: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+runner:
+  # The integration-test image owns this executable. The release image does not.
+  command:
+    - /opt/spark-milvus/bin/run-integration-tests
+  args: []
+
+milvus:
+  uri: ""
+  database: default
+  credentials:
+    existingSecret: ""
+    tokenKey: milvus-token
+
+objectStorage:
+  # These values must describe the object storage used by the target Milvus.
+  endpoint: ""
+  bucket: ""
+  rootPath: files
+  region: us-west-2
+  useSSL: true
+  useVirtualHost: true
+
+  # Test-owned writes use <writePrefix>/<runId>. rootPath stays the Milvus root.
+  writePrefix: spark-milvus-ci
+  credentials:
+    existingSecret: ""
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key
+
+job:
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 3600
+  annotations: {}
+
+pod:
+  annotations: {}
+  serviceAccountName: ""
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 30
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 4Gi
+  limits:
+    cpu: "4"
+    memory: 8Gi
+
+# The current unified storage and Knowhere native bundle is validated on amd64.
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+tolerations: []
+affinity: {}
