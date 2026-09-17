@@ -53,3 +53,36 @@ test('manual dispatch reviews a real documentation diff and publishes a SHA-stam
     assert.ok(writes[0].body.includes(head));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('a first-batch model failure preserves pending documentation coverage in artifacts and the PR summary', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ai-review-failure-'));
+  try {
+    await writeFile(join(root, 'event.json'), JSON.stringify({ inputs: { pr_number: '42' } }));
+    const writes = [];
+    const fetchImpl = async (url, init) => {
+      let data;
+      if (url.startsWith('https://model.invalid/')) {
+        data = { choices: [{ finish_reason: 'stop', message: { content: 'The documentation looks correct.' } }] };
+      } else if (init.method !== 'GET') {
+        writes.push(JSON.parse(init.body)); data = {};
+      } else if (url.includes('/comments?')) data = [];
+      else data = { number: 42, state: 'open', base: { sha: 'base', ref: 'main' }, head: { sha: 'head' } };
+      return new Response(JSON.stringify(data), { status: 200 });
+    };
+    const repository = {
+      changes: async () => [{ path: 'docs/guide.md', kind: 'text', status: 'A', patch: '@@ -0,0 +1 @@\n+Incorrect instructions.\n' }],
+      listFiles: async () => ({ files: [] }),
+      close: async () => {},
+    };
+    const exitCode = await run({ env: { GITHUB_REPOSITORY: 'example/repo', GITHUB_TOKEN: 'test-only', GITHUB_RUN_ID: '1', GITHUB_EVENT_PATH: join(root, 'event.json'), REVIEW_OUTPUT_DIR: join(root, 'output'), MODEL_API_KEY: 'test-only', MODEL_BASE_URL: 'https://model.invalid' }, fetchImpl, repositoryFactory: async () => repository });
+    assert.equal(exitCode, 1);
+    const report = JSON.parse(await readFile(join(root, 'output/review.json'), 'utf8'));
+    assert.equal(report.complete, false);
+    assert.deepEqual(report.coverage, [{ id: '1', path: 'docs/guide.md', part: 1, reviewedBy: [] }]);
+    assert.match(report.limitations.join(' '), /invalid review JSON/);
+    assert.equal(writes.length, 1);
+    assert.match(writes[0].body, /INCOMPLETE/);
+    assert.match(writes[0].body, /Coverage: 0\/1 chunks across 1 changed files/);
+    assert.doesNotMatch(writes[0].body, /LGTM/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
