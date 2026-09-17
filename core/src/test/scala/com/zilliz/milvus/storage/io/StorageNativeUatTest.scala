@@ -9,6 +9,7 @@ import scala.collection.mutable
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
 
 /** Reads a real Milvus object through JNI, both from the local filesystem and
@@ -43,6 +44,7 @@ class StorageNativeUatTest extends AnyFunSuite with Matchers {
     val root = source.getParent
     val key = root.relativize(source).toString
 
+    NativeStorageLibrary.load()
     val properties = new MilvusStorageProperties()
     var fs: MilvusStorageFileSystem = null
     try {

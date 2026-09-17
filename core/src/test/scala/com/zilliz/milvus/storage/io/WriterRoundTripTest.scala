@@ -13,6 +13,7 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.read.exec.{
   SegmentReader,
   SegmentReaderRegistry
@@ -24,8 +25,7 @@ import io.milvus.storage.{
   MilvusStorageColumnGroups,
   MilvusStorageProperties,
   MilvusStorageReader,
-  MilvusStorageWriter,
-  NativeLibraryLoader
+  MilvusStorageWriter
 }
 
 /** Writes a segment through milvus-storage's JNI and reads it back through
@@ -57,7 +57,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
 
   private def skipWithoutLibrary(): Unit =
     try
-      NativeLibraryLoader.loadLibrary()
+      NativeStorageLibrary.load()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
         cancel("libmilvus-storage-jni is not on this machine")
@@ -356,8 +356,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       columnGroups = MilvusStorageColumnGroups.createFromGroups(
         Array(Array("id", "name")),
         Array(shortParts.map(_._1).toArray),
-        Array(shortParts.map(_._2).toArray),
-        "parquet"
+        Array(shortParts.map(_._2).toArray)
       )
       columnGroups should not be 0L
 
@@ -450,8 +449,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       columnGroups = MilvusStorageColumnGroups.createFromGroups(
         Array(Array("id", "name")),
         Array(parts.map(_._1).toArray),
-        Array(parts.map(_._2).toArray),
-        "parquet"
+        Array(parts.map(_._2).toArray)
       )
       columnGroups should not be 0L
 

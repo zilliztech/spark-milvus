@@ -20,13 +20,14 @@ import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
 import com.zilliz.milvus.storage.write.exec.{
   ManifestTransaction,
   V3SegmentWriter
 }
-import io.milvus.storage.{MilvusStorageException, NativeLibraryLoader}
+import io.milvus.storage.MilvusStorageException
 
 /** Native random row retrieval over real local parquet files. */
 class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
@@ -53,7 +54,7 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
   private def withFixture(
       body: (Path, RootAllocator, Map[String, String]) => Unit
   ): Unit = {
-    try NativeLibraryLoader.loadLibrary()
+    try NativeStorageLibrary.load()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
         cancel("libmilvus-storage-jni is not on this machine")

@@ -774,3 +774,11 @@ This is a closed support list. Geometry, Timestamptz,
 ArrayOfVector/struct-array fields, and unknown future Milvus types are not
 silently converted to binary or null: schema resolution or value conversion
 fails explicitly and reports the unsupported type.
+
+## Native dependency bundle
+
+Build with `-Dmilvus.native.bundle=/absolute/path/to/platform.jar` to include
+both JNI libraries and their unified dynamic dependencies in the connector JAR.
+The runtime extracts and verifies them once per class loader. This build option
+is mutually exclusive with `knowhere.native.jar`; an incompatible explicit
+`knowhere.native.path` is rejected. See [building and validation](contributing.md#unified-native-bundle).

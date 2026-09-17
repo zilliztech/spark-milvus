@@ -1,9 +1,10 @@
 # native-vector native code ownership
 
 Knowhere PR [#1829](https://github.com/zilliztech/knowhere/pull/1829) supplies
-the C interface, JNI, Java API and native resource loader. Build its source from
-`LawrenceTL92/knowhere-contrib`, branch `codex/knowhere-jni-pr`, pinned to commit
-`9dc2b8ad537502d408bc33af05727453295d6622`.
+the C interface, JNI, Java API and native resource loader. The root `knowhere`
+submodule follows `LawrenceTL92/knowhere-contrib` branch
+`codex/knowhere-jni-pr`; the superproject gitlink pins the exact commit used by
+the build.
 
 The connector consumes these artifacts through `NativeVectorLibrary` in
 `com.zilliz.milvus.jni.vector`. Calling the upstream

@@ -1,5 +1,6 @@
 package com.zilliz.milvus.storage.io
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
 
 /** [[ObjectStore]] over milvus-storage's C filesystem.
@@ -71,6 +72,7 @@ object NativeObjectStore {
   final case class Factory(properties: Map[String, String])
       extends ObjectStoreFactory {
     override def open(path: String): ObjectStore = {
+      NativeStorageLibrary.load()
       val nativeProperties = new MilvusStorageProperties()
       var filesystem: MilvusStorageFileSystem = null
       try {

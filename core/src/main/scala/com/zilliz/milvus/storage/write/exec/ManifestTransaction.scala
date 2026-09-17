@@ -1,5 +1,6 @@
 package com.zilliz.milvus.storage.write.exec
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import io.milvus.storage.{MilvusStorageProperties, MilvusStorageTransaction}
 
 /** Records written column groups in a V3 segment's manifest: one transaction on
@@ -36,6 +37,7 @@ object ManifestTransaction {
       change: Change,
       stats: Seq[Stat] = Seq.empty
   ): Long = {
+    NativeStorageLibrary.load()
     // -1 reads the latest version; 0 fails on a conflicting commit; one retry.
     val nativeProperties = new MilvusStorageProperties()
     var transaction: MilvusStorageTransaction = null

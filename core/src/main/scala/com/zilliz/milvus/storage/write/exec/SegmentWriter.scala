@@ -8,6 +8,7 @@ import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.{Logging, NativeCalls}
 import io.milvus.storage.{
   MilvusPackedWriter,
@@ -131,6 +132,8 @@ final class V3SegmentWriter(
     with CountingWriter
     with Logging {
 
+  NativeStorageLibrary.load()
+
   private val schemaStruct: ArrowSchema = ArrowSchema.allocateNew(allocator)
   private var writer: MilvusStorageWriter = null
   private var nativeProperties: MilvusStorageProperties = null
@@ -237,6 +240,8 @@ final class V2SegmentWriter(
 ) extends SegmentWriter
     with CountingWriter
     with Logging {
+  NativeStorageLibrary.load()
+
   require(
     paths.size == columnGroups.size,
     s"${paths.size} paths for ${columnGroups.size} column groups"

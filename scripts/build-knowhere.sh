@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build or import the pinned upstream Knowhere JNI package for local verification.
+# Build the root Knowhere submodule or import its historical JNI package for local verification.
 set -euo pipefail
 
 usage() {
@@ -7,13 +7,15 @@ usage() {
 Usage: scripts/build-knowhere.sh build [--jobs N] [--with-cardinal] [--cardinal-repository REPOSITORY]
        scripts/build-knowhere.sh import-ci [--artifact-dir DIRECTORY]
 
-build compiles the revision in native-vector/knowhere.properties, runs the
+build compiles the revision fixed by the root knowhere Git submodule, runs the
 upstream C/JNI tests, and packages its native dependencies. Install the upstream
 prerequisites first: Linux, GCC/G++/Fortran 12, Conan 2, CMake 3, Maven, JDK 11+,
 Python 3, patchelf, binutils, libaio development headers and autotools.
 
-import-ci imports the fixed PR #1829 CI package after checking source provenance
-and artifact checksums. --artifact-dir reuses an already extracted CI artifact.
+import-ci imports the historical 9dc2b8ad PR #1829 CI package after checking
+source provenance and artifact checksums. It is available only when the root
+submodule is checked out at that historical revision; current revisions must be
+built. --artifact-dir reuses an already extracted CI artifact.
 Both commands require JAVA_HOME and keep artifacts, licenses and verification
 logs under target/knowhere-native/<revision>/<platform>. Nothing is published or
 installed into Maven. The current upstream package has missing license material;
@@ -29,7 +31,6 @@ USAGE
 
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null || fail "Required tool not found: $1"; }
-property() { sed -n "s/^${1//./\\.}=//p" "$pin"; }
 verify_sha() { printf '%s  %s\n' "$1" "$2" | sha256sum --check --status || fail "SHA-256 mismatch: $2"; }
 
 action=${1:---help}
@@ -53,11 +54,24 @@ while (($#)); do
 done
 [[ $jobs =~ ^[1-9][0-9]*$ && $jobs -le 32 ]] || fail 'Use between 1 and 32 build jobs'
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-pin=$root/native-vector/knowhere.properties
-[[ -f $pin ]] || fail "Missing pin file: $pin"
-revision=$(property revision)
-repository=$(property repository)
-[[ $revision =~ ^[a-f0-9]{40}$ && -n $repository ]] || fail 'Invalid Knowhere revision or repository'
+require git
+gitmodules=$root/.gitmodules
+[[ -f $gitmodules ]] || fail "Missing submodule configuration: $gitmodules"
+git -C "$root" ls-files --error-unmatch -- .gitmodules >/dev/null 2>&1 || \
+  fail 'The root .gitmodules file must be version controlled'
+mapfile -t repositories < <(git -C "$root" config --file "$gitmodules" --get-all submodule.knowhere.url 2>/dev/null || true)
+((${#repositories[@]} == 1)) || fail 'Tracked .gitmodules must contain exactly one submodule.knowhere.url'
+repository=${repositories[0]}
+[[ $repository =~ ^https://[^[:space:]]+$ && ! $repository =~ ^https://[^/@[:space:]]+@ ]] || \
+  fail 'submodule.knowhere.url must be a non-empty HTTPS URL without user information'
+submodule=$root/knowhere
+[[ -d $submodule && -e $submodule/.git ]] || fail 'Initialize the root knowhere Git submodule first'
+read -r gitlink_mode revision gitlink_stage gitlink_path < <(git -C "$root" ls-files --stage -- knowhere)
+[[ $gitlink_mode == 160000 && $gitlink_stage == 0 && $gitlink_path == knowhere && $revision =~ ^[a-f0-9]{40}$ ]] || \
+  fail 'Knowhere must be recorded as one Git submodule entry'
+[[ $(git -C "$submodule" rev-parse HEAD) == "$revision" ]] || \
+  fail 'Knowhere submodule HEAD differs from the recorded gitlink'
+[[ $revision =~ ^[a-f0-9]{40}$ ]] || fail 'Invalid Knowhere submodule revision'
 [[ $(uname -s) == Linux ]] || fail 'Upstream platform packaging currently supports Linux only'
 case "$(uname -m)" in
   x86_64) platform=linux-x86_64 ;;
@@ -76,12 +90,14 @@ output=$root/target/knowhere-native/$revision$variant/$platform
 mkdir -p "$output"
 verification=$(mktemp -d "$output/verification-XXXXXXXX")
 exec > >(tee "$verification/run.log") 2>&1
-printf 'Knowhere revision: %s\nPlatform: %s\nVerification: %s\n' "$revision" "$platform" "$verification"
+printf 'Knowhere revision: %s\nKnowhere repository: %s\nPlatform: %s\nVerification: %s\n' \
+  "$revision" "$repository" "$platform" "$verification"
 
 if [[ $action == import-ci ]]; then
   require gh
   require jq
-  [[ $revision == 9dc2b8ad537502d408bc33af05727453295d6622 && $platform == linux-x86_64 ]] || fail 'No verified CI artifact is recorded for this revision/platform; use build'
+  [[ $revision == 9dc2b8ad537502d408bc33af05727453295d6622 && $platform == linux-x86_64 ]] || \
+    fail "import-ci is limited to historical revision 9dc2b8ad537502d408bc33af05727453295d6622 on linux-x86_64; current submodule revision $revision must use build"
   ci_repo=zilliztech/knowhere
   ci_run=34990984807
   ci_artifact=10409177308
@@ -126,7 +142,7 @@ else
   mkdir -p "$work"
   if [[ ! -d $source_dir ]]; then
     git init -q "$source_dir"
-    git -C "$source_dir" fetch --depth=1 "$repository" "$revision"
+    git -C "$source_dir" fetch --depth=1 "$submodule" "$revision"
     git -C "$source_dir" checkout -q --detach FETCH_HEAD
   fi
   [[ $(git -C "$source_dir" rev-parse HEAD) == "$revision" ]] || fail 'Build checkout does not match the pin'
@@ -192,6 +208,7 @@ else
   jars=$source_dir/java/target
   cp -R "$jars/surefire-reports" "$verification/surefire-reports"
   source_provenance="git.repository=$repository
+git.object.source=$submodule
 build.source=$source_dir
 build.jobs=$jobs
 $cardinal_provenance"

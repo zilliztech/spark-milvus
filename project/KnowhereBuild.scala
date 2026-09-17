@@ -4,6 +4,7 @@ import java.net.URI
 import java.nio.file.{Files, StandardCopyOption}
 import java.security.MessageDigest
 import java.util.{Locale, Properties}
+import java.util.concurrent.TimeUnit
 import java.util.jar.JarFile
 import scala.collection.JavaConverters._
 import scala.sys.process.{Process, ProcessLogger}
@@ -26,19 +27,25 @@ object KnowhereBuild {
   val knowhereSmoke = taskKey[Unit](
     "Run the real Knowhere JNI smoke with packaged JARs in a fresh JVM"
   )
+  val knowhereRuntimeJar = taskKey[File](
+    "Packaged shared native runtime used by the isolated JNI smoke"
+  )
   val knowhereStorageResources = taskKey[Seq[File]](
     "Package the tested common native dependency binaries for storage and Knowhere"
   )
 
   val storageSettings: Seq[Setting[_]] = Seq(
     knowhereNativeJar := sys.props.get("knowhere.native.jar").map(file),
-    knowhereStorageResources := storageResources(
-      knowhereNativeJar.value,
-      (ThisBuild / baseDirectory).value / "native-vector",
-      (Compile / resourceDirectory).value,
-      (Compile / resourceManaged).value,
-      streams.value.log
-    ),
+    knowhereStorageResources := (if (NativeBundle.selected.nonEmpty) Seq.empty
+                                 else
+                                   storageResources(
+                                     knowhereNativeJar.value,
+                                     (ThisBuild / baseDirectory).value,
+                                     (ThisBuild / baseDirectory).value / "native-vector",
+                                     (Compile / resourceDirectory).value,
+                                     (Compile / resourceManaged).value,
+                                     streams.value.log
+                                   )),
     Compile / resourceGenerators += knowhereStorageResources.taskValue,
     Compile / unmanagedResources := {
       val managedRoot = (Compile / resourceManaged).value
@@ -50,7 +57,12 @@ object KnowhereBuild {
       val sourceRoots = (Compile / unmanagedResourceDirectories).value
       (Compile / unmanagedResources).value.filterNot { resource =>
         sourceRoots.exists { root =>
-          IO.relativize(root, resource).exists(replacements)
+          IO.relativize(root, resource).exists { relative =>
+            replacements(
+              relative
+            ) || (NativeBundle.selected.nonEmpty && relative
+              .startsWith("native/"))
+          }
         }
       }
     }
@@ -60,13 +72,21 @@ object KnowhereBuild {
     knowhereNativeJar := sys.props.get("knowhere.native.jar").map(file),
     Compile / resourceGenerators += Def.task {
       val selected = knowhereNativeJar.value
-      val enabled = selected.exists { jar =>
-        validateNative(
-          jar,
-          readPin(baseDirectory.value / "knowhere.properties")
-        )
-        properties(file(jar.getAbsolutePath + ".properties"))
-          .getProperty("build.with_cardinal", "false") == "true"
+      val enabled = NativeBundle.validatedNativeBundle.value match {
+        case Some(bundle) =>
+          NativeBundle.metadata(bundle).getProperty("with_cardinal") == "true"
+        case None =>
+          selected.exists { jar =>
+            validateNative(
+              jar,
+              readPin(
+                (ThisBuild / baseDirectory).value,
+                baseDirectory.value / "knowhere.properties"
+              )
+            )
+            properties(file(jar.getAbsolutePath + ".properties"))
+              .getProperty("build.with_cardinal", "false") == "true"
+          }
       }
       val content = s"with_cardinal=$enabled\n"
       val output =
@@ -76,7 +96,10 @@ object KnowhereBuild {
       Seq(output)
     }.taskValue,
     knowhereApiJar := buildApi(
-      readPin(baseDirectory.value / "knowhere.properties"),
+      readPin(
+        (ThisBuild / baseDirectory).value,
+        baseDirectory.value / "knowhere.properties"
+      ),
       target.value / "knowhere",
       javaHome.value.getOrElse(file(sys.props("java.home"))),
       streams.value.log
@@ -85,17 +108,39 @@ object KnowhereBuild {
     // Inter-project dependencies export Compile's unmanaged JARs. A Runtime-only
     // JAR would disappear from core, the Spark projects and root's assembly.
     // This resource-only JAR adds no Java classes to the compile API.
-    Compile / unmanagedJars ++= selectedNative(
-      knowhereNativeJar.value,
-      readPin(baseDirectory.value / "knowhere.properties")
-    ),
+    Compile / unmanagedJars ++= (if (
+                                   NativeBundle.validatedNativeBundle.value.nonEmpty
+                                 ) {
+                                   require(
+                                     knowhereNativeJar.value.isEmpty,
+                                     "Do not combine milvus.native.bundle and knowhere.native.jar"
+                                   )
+                                   Seq.empty
+                                 } else
+                                   selectedNative(
+                                     knowhereNativeJar.value,
+                                     readPin(
+                                       (ThisBuild / baseDirectory).value,
+                                       baseDirectory.value / "knowhere.properties"
+                                     )
+                                   )),
     verifyKnowhereNative := {
-      val jar = knowhereNativeJar.value.getOrElse(
-        sys.error(
-          "Select a built Knowhere platform JAR with -Dknowhere.native.jar=/absolute/path/to/platform.jar"
+      val bundle = NativeBundle.validatedNativeBundle.value
+      val jar = bundle
+        .orElse(knowhereNativeJar.value)
+        .getOrElse(
+          sys.error(
+            "Select a built Knowhere platform JAR with -Dknowhere.native.jar=/absolute/path/to/platform.jar"
+          )
         )
-      )
-      validateNative(jar, readPin(baseDirectory.value / "knowhere.properties"))
+      if (bundle.isEmpty)
+        validateNative(
+          jar,
+          readPin(
+            (ThisBuild / baseDirectory).value,
+            baseDirectory.value / "knowhere.properties"
+          )
+        )
       streams.value.log.info(s"Verified Knowhere platform JAR: $jar")
       jar
     },
@@ -104,10 +149,12 @@ object KnowhereBuild {
       smoke(
         (Compile / packageBin).value,
         knowhereApiJar.value,
+        knowhereRuntimeJar.value,
         verifyKnowhereNative.value,
         (Test / classDirectory).value,
         javaHome.value.getOrElse(file(sys.props("java.home"))),
         target.value,
+        (ThisBuild / baseDirectory).value / "knowhere",
         streams.value.log
       )
     }
@@ -115,13 +162,12 @@ object KnowhereBuild {
 
   private final case class Pin(
       repository: String,
+      source: File,
       revision: String,
-      archiveUrl: String,
-      archiveSha256: String,
       apiVersion: String
   )
 
-  private def readPin(path: File): Pin = {
+  private def readPin(repositoryRoot: File, path: File): Pin = {
     val values = properties(path)
     def required(key: String): String =
       Option(values.getProperty(key))
@@ -129,30 +175,68 @@ object KnowhereBuild {
         .getOrElse(
           sys.error(s"Missing $key in $path")
         )
-    val result = Pin(
-      required("repository"),
-      required("revision"),
-      required("archive.url"),
-      required("archive.sha256"),
-      required("api.version")
+    val repository = required("repository")
+    require(
+      new URI(repository).getScheme == "https",
+      "Knowhere repository requires HTTPS"
+    )
+    val source = repositoryRoot / "knowhere"
+    val revision = knowhereRevision(repositoryRoot)
+    val changed = gitOutput(
+      source,
+      Seq(
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--",
+        "LICENSE",
+        "java/src/main/java",
+        "java/scripts/check_jni_diagnostics.py"
+      )
     )
     require(
-      result.revision.matches("[a-f0-9]{40}"),
-      "Knowhere must pin a full Git commit"
+      changed.isEmpty,
+      "Knowhere Java API sources must match the pinned submodule revision"
+    )
+    Pin(
+      repository,
+      source,
+      revision,
+      s"1.0.0-${revision.take(12)}"
+    )
+  }
+
+  def knowhereRevision(repositoryRoot: File): String = {
+    val source = repositoryRoot / "knowhere"
+    require(
+      (source / ".git").exists &&
+        (source / "java" / "src" / "main" / "java").isDirectory,
+      "Knowhere submodule is not initialized. Run `git submodule update --init knowhere`."
+    )
+    val revision = gitOutput(source, Seq("rev-parse", "HEAD"))
+    require(
+      revision.matches("[a-f0-9]{40}"),
+      s"Knowhere submodule HEAD is not a full Git commit: $revision"
+    )
+    val gitlink = gitOutput(
+      repositoryRoot,
+      Seq("ls-files", "--stage", "--", "knowhere")
+    ).split("\\r?\\n").filter(_.nonEmpty).toVector
+    require(
+      gitlink.size == 1,
+      "Knowhere must be recorded as one Git submodule entry"
+    )
+    val fields = gitlink.head.split("\\s+", 4)
+    require(
+      fields.length == 4 && fields(0) == "160000" &&
+        fields(1).matches("[a-f0-9]{40}") && fields(3) == "knowhere",
+      s"Invalid Knowhere Git submodule entry: ${gitlink.head}"
     )
     require(
-      result.archiveSha256.matches("[a-f0-9]{64}"),
-      "Knowhere must pin the source archive SHA-256"
+      fields(1) == revision,
+      s"Knowhere submodule HEAD $revision does not match the recorded gitlink ${fields(1)}"
     )
-    require(
-      result.apiVersion.matches("[A-Za-z0-9._-]+"),
-      "Invalid Knowhere API version"
-    )
-    require(
-      new URI(result.archiveUrl).getScheme == "https",
-      "Knowhere source archives require HTTPS"
-    )
-    result
+    revision
   }
 
   private def buildApi(pin: Pin, root: File, jdk: File, log: Logger): File = {
@@ -160,8 +244,7 @@ object KnowhereBuild {
     val output = directory / s"knowhere-jni-${pin.apiVersion}.jar"
     val outputDigest = directory / "api.sha256"
     val inputStamp = directory / "api-inputs.txt"
-    val expectedInputs =
-      s"${pin.revision}\n${pin.archiveSha256}\n${pin.apiVersion}\nrelease=11\n"
+    val expectedInputs = s"${pin.revision}\n${pin.apiVersion}\nrelease=11\n"
     if (
       output.isFile && outputDigest.isFile && inputStamp.isFile &&
       IO.read(inputStamp) == expectedInputs && IO
@@ -170,48 +253,13 @@ object KnowhereBuild {
     ) return output
 
     IO.createDirectory(directory)
-    val archive = directory / "source.tar.gz"
-    if (!archive.isFile || digest(archive) != pin.archiveSha256) {
-      log.info(s"Downloading Knowhere Java API sources at ${pin.revision}")
-      val temporary = directory / "source.tar.gz.download"
-      val connection = new URI(pin.archiveUrl).toURL.openConnection()
-      connection.setConnectTimeout(30000)
-      connection.setReadTimeout(60000)
-      val input = connection.getInputStream
-      try
-        Files.copy(input, temporary.toPath, StandardCopyOption.REPLACE_EXISTING)
-      finally input.close()
-      requireDigest(temporary, pin.archiveSha256)
-      Files.move(
-        temporary.toPath,
-        archive.toPath,
-        StandardCopyOption.REPLACE_EXISTING,
-        StandardCopyOption.ATOMIC_MOVE
-      )
-    }
-
-    // Re-extract from the verified archive when rebuilding, so edits to a cached
-    // source tree never become a different API under the same source revision.
-    val source = directory / "source"
     val classes = directory / "classes"
-    IO.delete(source)
     IO.delete(classes)
-    IO.createDirectory(source)
     IO.createDirectory(classes)
-    run(
-      Seq(
-        "tar",
-        "-xzf",
-        archive.getAbsolutePath,
-        "--strip-components=1",
-        "-C",
-        source.getAbsolutePath
-      ),
-      log
-    )
-    val sources = (source / "java" / "src" / "main" / "java" ** "*.java").get
-      .sortBy(_.getPath)
-    require(sources.nonEmpty, "Pinned Knowhere archive has no Java API sources")
+    val sources =
+      (pin.source / "java" / "src" / "main" / "java" ** "*.java").get
+        .sortBy(_.getPath)
+    require(sources.nonEmpty, "Knowhere submodule has no Java API sources")
     val javac = jdk / "bin" / "javac"
     val jarTool = jdk / "bin" / "jar"
     require(
@@ -236,10 +284,10 @@ object KnowhereBuild {
     )
     val metadata = classes / "META-INF" / "knowhere"
     IO.createDirectory(metadata)
-    IO.copyFile(source / "LICENSE", metadata / "LICENSE")
+    IO.copyFile(pin.source / "LICENSE", metadata / "LICENSE")
     IO.write(
       metadata / "source.properties",
-      s"repository=${pin.repository}\ngit.revision=${pin.revision}\narchive.sha256=${pin.archiveSha256}\n"
+      s"repository=${pin.repository}\ngit.revision=${pin.revision}\n"
     )
     val manifest = directory / "MANIFEST.MF"
     IO.write(
@@ -283,6 +331,7 @@ object KnowhereBuild {
 
   private def storageResources(
       selected: Option[File],
+      repositoryRoot: File,
       vectorDirectory: File,
       sourceDirectory: File,
       outputDirectory: File,
@@ -305,7 +354,13 @@ object KnowhereBuild {
     val engine = originalNative / "libmilvus-storage.so"
 
     val native = selected.get
-    validateNative(native, readPin(vectorDirectory / "knowhere.properties"))
+    validateNative(
+      native,
+      readPin(
+        repositoryRoot,
+        vectorDirectory / "knowhere.properties"
+      )
+    )
     val storageDigest = digest(engine)
     val storageResourcesDigest = NativeLibraries.fingerprint(originalNative)
     val nativeDigest = digest(native)
@@ -456,10 +511,12 @@ object KnowhereBuild {
   private def smoke(
       adapter: File,
       api: File,
+      runtime: File,
       native: File,
       testClasses: File,
       jdk: File,
       target: File,
+      knowhereSource: File,
       log: Logger
   ): Unit = {
     val signalLibrary = jdk / "lib" / "libjsig.so"
@@ -472,12 +529,13 @@ object KnowhereBuild {
     val workingDirectory =
       Files.createTempDirectory(directory.toPath, "process-").toFile
     val output = directory / "jni.log"
-    val classpath = Seq(adapter, api, native, testClasses)
+    val classpath = Seq(adapter, api, runtime, native, testClasses)
       .map(_.getAbsolutePath)
       .mkString(File.pathSeparator)
     val process = new JavaProcessBuilder(
       (jdk / "bin" / "java").getAbsolutePath,
       "-Xcheck:jni",
+      "-XX:-CreateCoredumpOnCrash",
       s"-Djava.io.tmpdir=${workingDirectory.getAbsolutePath}",
       "-cp",
       classpath,
@@ -489,6 +547,7 @@ object KnowhereBuild {
     val environment = process.environment()
     Seq(
       "LD_LIBRARY_PATH",
+      "LD_AUDIT",
       "CLASSPATH",
       "JAVA_TOOL_OPTIONS",
       "JDK_JAVA_OPTIONS",
@@ -496,11 +555,17 @@ object KnowhereBuild {
     )
       .foreach(environment.remove)
     environment.put("LD_PRELOAD", signalLibrary.getAbsolutePath)
+    environment.put("LD_BIND_NOW", "1")
     log.info(s"Running packaged Knowhere JNI smoke; log: $output")
-    val exit = process.start().waitFor()
+    val running = process.start()
+    if (!running.waitFor(180, TimeUnit.SECONDS)) {
+      running.destroyForcibly().waitFor()
+      sys.error(s"Knowhere JNI smoke timed out; inspect $output")
+    }
+    val exit = running.exitValue()
     IO.readLines(output).foreach(line => log.info(line))
     val checker =
-      api.getParentFile / "source" / "java" / "scripts" / "check_jni_diagnostics.py"
+      knowhereSource / "java" / "scripts" / "check_jni_diagnostics.py"
     require(
       checker.isFile,
       s"Pinned Knowhere JNI diagnostic checker is missing: $checker"
@@ -665,5 +730,23 @@ object KnowhereBuild {
       exit == 0,
       s"Knowhere build command failed ($exit): ${command.head}"
     )
+  }
+
+  private def gitOutput(directory: File, arguments: Seq[String]): String = {
+    val output = new StringBuilder
+    val errors = new StringBuilder
+    val command = Seq("git") ++ arguments
+    val exit = Process(command, directory, "LD_PRELOAD" -> "").!(
+      ProcessLogger(
+        line => output.append(line).append('\n'),
+        line => errors.append(line).append('\n')
+      )
+    )
+    require(
+      exit == 0,
+      s"Git command failed ($exit) in $directory: ${command
+          .mkString(" ")}\n${errors.result().trim}"
+    )
+    output.result().trim
   }
 }

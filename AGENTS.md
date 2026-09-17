@@ -24,12 +24,12 @@ The 2.0 line is a rewrite on branch `refactor/v2`, versioned
 
 ## The four layers
 
-Eleven sbt modules, and dependencies only point downward. This is the model
+Twelve sbt modules, and dependencies only point downward. This is the model
 every rule below refers to.
 
 | Layer | Modules | What lives there |
 |---|---|---|
-| 1 | `native-storage`, `native-vector` | Storage uses milvus-storage's upstream JNI and Java/Scala API; vector library loading through Knowhere's upstream C/JNI and Java API. Nothing above this layer loads a `.so`. |
+| 1 | `native-runtime`, `native-storage`, `native-vector` | Storage uses milvus-storage's upstream JNI and Java/Scala API; vector library loading through Knowhere's upstream C/JNI and Java API. `native-runtime` verifies and extracts the unified platform bundle for both bindings. Nothing above this layer loads a `.so`. |
 | 2 | `core`, `compat`, `client` | The Milvus storage format and the client for the online service. All computation happens here. No Spark: a source file mentioning `org.apache.spark` fails the build. |
 | 3 | `spark-base`, `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | The DataSource V2 surface. `spark-base` is a shared source directory, not a project; each line project compiles it against its own Spark, Arrow, antlr and Java version. |
 | 4 | `apps-4.0` | The jobs users run: backfill and vector search. |
@@ -104,14 +104,19 @@ waits for milvus-storage to expose recursive directory deletion.
 
 Layer 1 uses the upstream milvus-storage JNI and Java/Scala API.
 `native-storage` compiles the pinned submodule's API for Scala 2.12 and 2.13
-and packages `libmilvus-storage-jni`; it does not maintain a second JNI
-implementation. Upstream additions, ownership rules and current validation
+and hands the selected JNI path to its upstream loader; it does not maintain a
+second JNI implementation. `native-runtime` validates and extracts the unified
+platform JAR that supplies `libmilvus-storage-jni` and its dependencies. Without
+a unified bundle, the upstream loader retains its packaged-resource and system
+library fallback. Upstream additions, ownership rules and current validation
 results are in [storage-io.html](docs/design/architecture/storage-io.html#state).
-`native-vector` integrates loading and BruteForce from the pinned
-Knowhere PR #1829 artifacts; Knowhere owns the C interface, JNI, Java API and
-native resource loader. Persisted HNSW loading uses upstream BinarySet and index
-search APIs; Cardinal stream files require a Cardinal-enabled build. Real-file
-compatibility and validation results are recorded in the vector search design.
+`native-vector` compiles the pinned `knowhere` submodule's Java API and
+integrates its loader and BruteForce implementation; Knowhere owns the C
+interface, JNI, Java API and native resource loader. The submodule follows the
+PR #1829 branch while the superproject gitlink fixes the exact source revision.
+Persisted HNSW loading uses upstream BinarySet and index search APIs; Cardinal
+stream files require a Cardinal-enabled build. Real-file compatibility and
+validation results are recorded in the vector search design.
 
 Seven design questions are still open: 10, 19, 21, 22, 23, 24 and 26 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
@@ -163,6 +168,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | What is a given package responsible for? | The `package.scala` or `package-info.java` in that package |
 | How do I build, test and run it? | [README.md](README.md), then [docs/contributing.md](docs/contributing.md) for the mechanics on top |
 | How do we review or change the sbt build? | [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html) for principles and practice; apply the repository skill [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md) for build work |
+| Why and how should storage and Knowhere share native dependencies? | [docs/design/engineering/native-libraries.html](docs/design/engineering/native-libraries.html) — rationale, benefits and maintenance costs of an independent CMake build; pins every upstream Conan recipe revision in `native-build/dependencies.json`, selects the newer conflicting dependency versions, declares integration link relationships in CMake, and packages one native JAR with shared extraction; the historical Knowhere `9dc2b8ad` Cardinal bundle built with the superseded recipe implementation passed native and real-data validation, while the current `1fff20db` gitlink requires a rebuilt bundle and fresh validation |
 | What must run before every commit? | Apply [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md); [formatting](docs/contributing.md#formatting) and [unit tests](docs/contributing.md#unit-tests) in the contributing guide hold the required commands and constraints |
 | What sits outside this repository? | [docs/context.md](docs/context.md) |
 | How should a document here be written? | [docs/writing.md](docs/writing.md) |

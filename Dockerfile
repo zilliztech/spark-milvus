@@ -1,30 +1,37 @@
 # syntax=docker/dockerfile:1.4
-# Build spark-milvus connector with milvus-storage native libraries
+# Build spark-milvus with the native resources selected for the worker platform
 
 # Build arguments
 ARG GIT_BRANCH=unknown
 ARG TARGETARCH
 ARG MAVEN_SNAPSHOT_REPOSITORY_URL=https://central.sonatype.com/repository/maven-snapshots/
 ARG MAVEN_CREDENTIALS_FILE=/root/.sbt/sonatype_central_credentials
+ARG NATIVE_JOBS=50
+ARG NATIVE_BUILD_OPTIONS
+# Optional prebuilt JAR and .properties sidecar inside the build context.
+ARG NATIVE_BUNDLE
 
-# Stage 1: Build milvus-storage native libraries and the connector
+# Stage 1: Build the unified native bundle and the connector
 FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS builder
 
 ARG GIT_BRANCH
 ARG TARGETARCH
 ARG MAVEN_SNAPSHOT_REPOSITORY_URL
 ARG MAVEN_CREDENTIALS_FILE
+ARG NATIVE_JOBS
+ARG NATIVE_BUILD_OPTIONS
+ARG NATIVE_BUNDLE
 
 USER root
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# Install dependencies for building and packaging milvus-storage
+# The unified native source profile pins GCC 12, including OpenBLAS's Fortran compiler.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates wget curl git g++ gcc make ccache gdb \
+    ca-certificates wget curl git g++ gcc gcc-12 g++-12 gfortran-12 make ccache gdb \
     python3 python3-pip \
-    zip unzip \
+    zip unzip pkg-config ninja-build \
     automake autoconf libtool patchelf libaio-dev \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/aclocal-1.16 /usr/bin/aclocal-1.15 \
@@ -84,28 +91,17 @@ WORKDIR /workspace
 
 COPY . .
 
-# Initialize git submodules
+# Initialize missing submodules without resetting source revisions copied from the build context.
 RUN git config --global --add safe.directory /workspace && \
     git config --global --add safe.directory /workspace/milvus-proto && \
     git config --global --add safe.directory /workspace/milvus-storage && \
-    git submodule update --init --recursive
+    git config --global --add safe.directory /workspace/knowhere && \
+    make init-missing-submodules
 
-# Apache removes superseded releases from dlcdn; keep the pinned recipe and
-# checksum, but use the durable archive endpoint for its Avro source.
-RUN set -eux; \
-    avro_ref='libavrocpp/1.12.1.1@milvus/dev#cde7bb587a29f6f233bae7e18b71815d'; \
-    conan download "${avro_ref}" -r default-conan-local2 --only-recipe; \
-    avro_recipe="$(conan cache path "${avro_ref}")"; \
-    sed -i 's#https://dlcdn.apache.org/avro/#https://archive.apache.org/dist/avro/#' \
-        "${avro_recipe}/conandata.yml"; \
-    grep -Fq 'https://archive.apache.org/dist/avro/' "${avro_recipe}/conandata.yml"
-
-# Build milvus-storage native libraries using its Conan 2 Makefile.
-RUN cd milvus-storage/cpp && make java-lib
-
-# Use the same native resource layout and dependency packaging as local builds.
-# The native-storage sbt module compiles the upstream Java/Scala API below.
-RUN make copy-native-libs
+# Linux x86_64 builds both engines; arm64 retains the existing storage build
+# unless a matching prebuilt unified bundle is explicitly supplied.
+RUN make native-resources "NATIVE_JOBS=${NATIVE_JOBS}" \
+    "NATIVE_BUILD_OPTIONS=${NATIVE_BUILD_OPTIONS}" "NATIVE_BUNDLE=${NATIVE_BUNDLE}"
 
 # Build and optionally publish the runnable assembly as the primary Maven JAR.
 ENV GIT_BRANCH=${GIT_BRANCH}
@@ -121,18 +117,48 @@ RUN set -eux; \
         aarch64|arm64) native_platform=linux-aarch64 ;; \
         *) echo "Unsupported build architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
-    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt 'compile; Test/compile; integration40/Test/compile; assembly'"; \
+    set --; \
+    if [ -n "${NATIVE_BUNDLE}" ] || [ "${native_platform}" = linux-x86_64 ]; then \
+        native_bundle="${NATIVE_BUNDLE:-/workspace/target/native-build/${native_platform}/milvus-native-${native_platform}.jar}"; \
+        native_bundle="$(readlink -f "${native_bundle}")"; \
+        test -s "${native_bundle}"; \
+        test -s "${native_bundle}.properties"; \
+        set -- "-Dmilvus.native.bundle=${native_bundle}"; \
+    fi; \
+    sbt "$@" "compile; Test/compile; integration40/Test/compile; assembly"; \
     assembly_jar="$(find target/scala-2.13 -maxdepth 1 -type f -name 'spark-connector-assembly-*.jar' -print -quit)"; \
     test -n "${assembly_jar}"; \
     test -s "${assembly_jar}"; \
-    jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libmilvus-storage.so"; \
-    jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libmilvus-storage-jni.so"; \
+    entries_file="$(mktemp)"; \
+    manifest_file="$(mktemp)"; \
+    jar tf "${assembly_jar}" > "${entries_file}"; \
+    if [ "$#" -gt 0 ]; then \
+        resource_prefix="native/milvus/1/${native_platform}/"; \
+        grep -Fqx "${resource_prefix}manifest.properties" "${entries_file}"; \
+        unzip -p "${assembly_jar}" "${resource_prefix}manifest.properties" > "${manifest_file}"; \
+        for entry in libmilvus-storage-jni.so libknowhere_jni.so; do \
+            if ! grep -Fqx "${resource_prefix}${entry}" "${entries_file}"; then \
+                canonical="$(awk -F= -v key="alias.${entry}" '$1 == key { print $2 }' "${manifest_file}")"; \
+                test -n "${canonical}"; \
+                grep -Fqx "${resource_prefix}${canonical}" "${entries_file}"; \
+            fi; \
+        done; \
+        if grep -Eq '^native/(knowhere/|linux-[^/]+/)' "${entries_file}"; then \
+            echo "Assembly unexpectedly contains legacy native resources" >&2; \
+            exit 1; \
+        fi; \
+    else \
+        for entry in libmilvus-storage.so libmilvus-storage-jni.so; do \
+            grep -Fqx "native/${native_platform}/${entry}" "${entries_file}"; \
+        done; \
+    fi; \
+    rm -f "${entries_file}" "${manifest_file}"; \
     sha256sum "${assembly_jar}"; \
     publish_maven="${PUBLISH_MAVEN:-${PUBLISH_TO_CENTRAL}}"; \
     case "${publish_maven}" in true|false) ;; *) echo "PUBLISH_MAVEN must be true or false" >&2; exit 1 ;; esac; \
     if [ "${publish_maven}" = "true" ]; then \
         test -s "${MAVEN_CREDENTIALS_FILE}"; \
-        bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publish"; \
+        sbt "$@" publish; \
     fi
 
 # Stage 2: retain only the built package for local inspection. The release

@@ -294,7 +294,7 @@ C 侧是 holder 里的一个整数自增。开关本身反而是一个 option、
 <h3>5.5 类型放哪</h3>
 
 <ul>
-<li>milvus-storage 上游 JNI 的 holder 持有计数，<code>MilvusStorageReader.recordBatchReaderStatsScala(handle)</code> 返回三个 long；<code>native-storage</code> 编译与打包该绑定。</li>
+<li>milvus-storage 上游 JNI 的 holder 持有计数，<code>MilvusStorageReader.recordBatchReaderStatsScala(handle)</code> 返回三个 long；<code>native-storage</code> 编译该绑定，原生库资源由统一平台包或上游回退路径提供。</li>
 <li><code>core.read.exec</code>:<code>SegmentReader.metrics: ReadMetrics</code>;<code>core.write.exec</code>:<code>SegmentWriter.metrics: WriteMetrics</code>。两个都是几个 long 的 case class,core 不知道 Spark。</li>
 <li><code>spark.metrics</code>:把它们翻成 <code>CustomMetric</code> / <code>CustomTaskMetric</code>,读写两张清单,只此一处;<code>spark.read</code> 的两个 reader 和 <code>spark.write</code> 的 DataWriter 只是取值上报。每个指标一个无参构造的类:driver 的 SQL 监听器按计划里记下的类名新建实例来聚合任务值,带参构造的类在这一步报错,SQL 页上就没有数(2026-09-16 UAT 发现)。</li>
 </ul>
@@ -304,32 +304,42 @@ SQL 页上看到这七个数。</p>
 
 <h2 id="upstream-jni">六、JNI 统一由 milvus-storage 提供</h2>
 
-<p>2026-09-16 按用户要求迁移：Connector 移除自有 C++ JNI、<code>StorageNative</code> native 声明、异常类型及原生加载器，直接使用 milvus-storage 子模块的 <code>io.milvus.storage</code> 绑定。<code>native-storage</code> 仍是第 1 层构建模块，编译固定子模块的 Java/Scala API、打包 <code>libmilvus-storage-jni</code> 及其依赖；不再编译 <code>libnative-storage-jni</code>，不保留旧类名的转发接口。现有 R4、写执行及 G5 的行为保持。</p>
+<p>2026-09-16 按用户要求迁移：Connector 移除自有 C++ JNI、<code>StorageNative</code> native 声明、异常类型及原生加载器，直接使用 milvus-storage 子模块的 <code>io.milvus.storage</code> 绑定。<code>native-storage</code> 仍是第 1 层构建模块，编译固定子模块的 Java/Scala API，并把 native-runtime 选出的 JNI 路径交给上游加载器；统一平台包提供 <code>libmilvus-storage-jni</code> 及其依赖，没有统一包时保留上游资源与系统库回退。不再编译 <code>libnative-storage-jni</code>，不保留旧类名的转发接口。现有 R4、写执行及 G5 的行为保持。</p>
 
 <p>文件系统访问、批读取复制统计、写出列组信息、manifest 的完整释放和 transaction 的统计登记已在 milvus-storage 子模块补齐。实现归 <code>cpp/src/jni</code> 与 <code>java/src/main</code>；Connector 的 <code>core.io</code>、<code>core.read.exec</code>、<code>core.write.exec</code> 调用这些上游对象，不引入 Hadoop 或另一套 C 桥接。上游已经存在的 reader、writer、transaction 接口直接复用。</p>
 
 <p><code>take</code> 必须由上游拥有整个 <code>loon_take</code> 返回数组，并暴露可逐批读取、提前关闭的结果句柄，统一调用 <code>loon_free_chunk_arrays</code>；调用方不计算连续数组的释放地址。每批继续导出独立 ArrowArray/ArrowSchema，保留切片归零及复制计数。manifest 与其借用的 column groups 分开管理，reader 关闭后释放完整 manifest。Java 方法抛出的异常立即返回，UTF 字符串及局部引用在失败路径释放，不转换成空值。</p>
 
-<p>上游当前 API 含 Scala，因此按 Connector 的 Scala 2.12/2.13 矩阵从固定子模块源码编译，不引入只支持 2.13 的预编译 JAR，也不传递上游示例构建中的 Spark 依赖。Arrow 仍由各 Spark 线选择。原生加载使用上游加载器，按当前平台提取到独立临时目录；与 Knowhere 的共享依赖继续通过完整资源摘要与重定位检查核验。</p>
+<p>上游当前 API 含 Scala，因此按 Connector 的 Scala 2.12/2.13 矩阵从固定子模块源码编译，不引入只支持 2.13 的预编译 JAR，也不传递上游示例构建中的 Spark 依赖。Arrow 仍由各 Spark 线选择。统一平台包模式由 native-runtime 校验 storage、Knowhere 及共同依赖并只解压到一个目录；Connector 的 <code>NativeStorageLibrary</code> 取得其中 <code>libmilvus-storage-jni.so</code> 的绝对路径，临时写入 <code>milvus.storage.native.path</code>，再由上游 <code>NativeLibraryLoader</code> 执行 <code>System.load</code>，调用结束后恢复原属性。显式路径指向另一文件或上游加载器在交接前已经完成加载时直接报错。没有统一平台包时，仍由上游加载器选择原有平台资源或系统库路径。</p>
 
 <p>验收依次覆盖源码与 Scala 交叉编译、原生异常与加载检查、本地文件和 Arrow 读写及 take、真实 UAT 快照与持久化索引查询、最终 assembly 的加载和运行。取消的测试单列原因，不作为通过；当前结果见下节。</p>
 
 <h2 id="state">七、现在到哪一步</h2>
 
-<p>2026-09-16，上游 JNI 迁移已实现并创建 <a href="https://github.com/milvus-io/milvus-storage/pull/681">milvus-storage PR #681</a>。Connector 的子模块固定该 PR 已公开的提交 <code>514bb496e44b95cf7a4b87bc6c061593a63096e0</code>，它基于上游 main 的 <code>7f8e0b9d</code>。该提交的 Java/Scala API 源码与本地已验收提交 <code>c0916b8</code> 相同；这一源码核对不代表已在 main 的新依赖组合上完成原生运行验证。</p>
+<p><strong>2026-09-17 当前源码状态：</strong>milvus-storage 子模块已更新到上游 <code>main</code> 的 <code>7eb13578</code>，Knowhere 已作为根目录子模块固定到 PR #1829 分支的 <code>1fff20db</code>。当前组合尚未重建。下面的统一包、Connector 和真实 UAT 结果来自 storage <code>5689301</code> 与 Knowhere <code>9dc2b8ad</code>，只作为历史证据。</p>
 
-<p>当前主工作区原生资源和兼容记录仍保留已验收的 v4 组合，更新子模块不会隐式重建或替换原生产物。重放到 Connector 上游 <code>d995e64</code> 后，串行格式检查、能力索引检查和 root 完整单元测试重新通过：1002 项通过、0 失败，66 项因缺少 UAT 配置或真实文件 fixture 取消。本轮包含上游新增的谓词下推、procedure 和 Catalog DDL 测试，使用公开子模块的 Java/Scala 源码和本地 v4 原生资源；没有重新执行真实 UAT 或 assembly 验收，下表对应结果仍属于此前的 v4 验收。详细命令、产物摘要和归档日志见 <a href="/root/zilliz/milvus-spark-demo/UPSTREAM_JNI_RESULTS.md">上游 JNI 迁移验证报告</a>。</p>
+<p><strong>旧 gitlink、旧构建实现的完整结果：</strong>storage <code>5689301</code> 与 Knowhere <code>9dc2b8ad</code> 由独立 CMake 和一张 Conan 依赖图构建；该实现用仓库内完整自有 recipe 处理 Folly、gRPC、milvus-common、OpenTelemetry，现已由固定上游 recipe revision 与 CMake 显式链接关系取代。旧 Cardinal 构建以 <code>phase=complete</code>、退出码 0 完成；原生辅助测试 63/63、Knowhere C API 3/3、164/164 个库审计和 5 个立即加载入口通过，bundle 含 164 个库与 173 个版本名别名。该旧实现还曾在没有复用 lock 的目录从源码重建四个自有 recipe 包，再复用生成的完整 lock。</p>
 
-<p>提交上游 PR 前的 v5 只增量重建存储库，并通过 9/9 C++ 列组构造测试、19/19 上游 Java/Scala API 测试及 5 个原生入口/依赖的重定位与立即加载检查。v5 没有重复完整 Connector、Knowhere、真实 UAT 或 assembly 验收；PR 在 main 新依赖基线上的运行结果另由其 CI 记录。</p>
+<p>该历史统一平台 JAR SHA-256 为 <code>4bc2488e9f38f590f9346b27a34725f4d63bddd1b518740784ad0d32c8c54c5e</code>，<code>verifyNativeBundle</code> 与 <code>knowhereSmoke</code> 通过；storage-first、Knowhere-first 和并发初始化都从同一个解压目录运行。根测试 1,025 项通过、66 项因相应环境或数据缺失取消，失败和中止为 0；最终 assembly SHA-256 为 <code>be37535bcd3ffecec1c4c9bdb74336bc10cf50b08be18e8080a2928a50f7064c</code>。真实 UAT 持久化索引套件 1/1 通过：读取十万行，三次 Cardinal HNSW version 10 查询各反序列化和搜索一次，排除 0、80,000、90,000 行，精确召回率为 1，行号和分数与 JNI 直调一致，没有 Connector 暴力回退。该旧批次没有重跑开源 Knowhere 变体。</p>
 
-<p>公开提交的 Java CI 已通过；C++ build 和 lint 在构建启用 <code>WITH_UT</code> 的目标时失败：<code>loon</code> 缺少 <code>rust/cxx.h</code>，<code>Test_FFI</code> 缺少 gRPC/OpenTelemetry 链接依赖。这些上游构建问题尚未修复。Connector 的常规原生构建调用 <code>make java-lib</code>，明确禁用 <code>WITH_UT</code>；本次提交前检查没有重跑完整 Docker 构建。</p>
+<p><strong>上游迁移历史：</strong>2026-09-16，上游 JNI 迁移已实现并创建 <a href="https://github.com/milvus-io/milvus-storage/pull/681">milvus-storage PR #681</a>。当时 Connector 的子模块固定该 PR 已公开的提交 <code>514bb496e44b95cf7a4b87bc6c061593a63096e0</code>，它基于上游 main 的 <code>7f8e0b9d</code>。该提交的 Java/Scala API 源码与本地已验收提交 <code>c0916b8</code> 相同；这一源码核对本身不代表原生运行验证，旧统一包的结果由上一段单独给出。</p>
+
+<p><strong>显式路径入口：</strong>2026-09-17，上游加载器的 <code>milvus.storage.native.path</code> 支持及测试已通过 <a href="https://github.com/milvus-io/milvus-storage/pull/690">milvus-storage PR #690</a> squash 合入 <code>main</code>，合入提交为 <code>7eb1357899a98c4875d51a55b135b7f8d79461ff</code>；它与原 PR 提交 <code>2ed8d933</code> 的 patch-id 相同。根目录子模块与 superproject gitlink 均指向该 <code>main</code> 提交；Knowhere gitlink 为 <code>1fff20db</code>。现有统一平台 JAR 记录的是两个更早的 revision，完整 Connector 原生测试前必须重建并重新生成 provenance；不能只因 JNI 二进制接口未变就改写产物记录。</p>
+
+<p><strong>v4 历史记录：</strong>重放到 Connector 上游 <code>d995e64</code> 后，串行格式检查、能力索引检查和 root 完整单元测试曾通过 1002 项，0 失败，66 项因缺少 UAT 配置或真实文件 fixture 取消。该批次使用公开子模块的 Java/Scala 源码和本地 v4 原生资源，没有重新执行真实 UAT 或 assembly；它不再描述当前统一平台包。详细命令、产物摘要和日志属于外部验证归档。</p>
+
+<p><strong>v5 历史记录：</strong>提交上游 PR 前只增量重建存储库，并通过 9/9 C++ 列组构造测试、19/19 上游 Java/Scala API 测试及 5 个原生入口/依赖的重定位与立即加载检查。v5 没有重复完整 Connector、Knowhere、真实 UAT 或 assembly 验收；它也不作为当前统一平台包的证据。</p>
+
+<p><strong>上游 CI 历史记录：</strong>当时公开提交的 Java CI 已通过；C++ build 和 lint 在启用 <code>WITH_UT</code> 时因 <code>loon</code> 缺少 <code>rust/cxx.h</code>、<code>Test_FFI</code> 缺少 gRPC/OpenTelemetry 链接依赖而失败。随后旧 gitlink、旧自有 recipe 实现完成了共同依赖的构建与最终运行验收，但这不改写当时上游 CI 的结果，也不证明当前固定上游 recipe 方案。</p>
 
 <table>
 <tr><th>路径</th><th>迁移状态</th></tr>
 <tr><td>文件字节</td><td><code>NativeObjectStore</code> 已改用上游 <code>MilvusStorageFileSystem</code>；对象存储仍统一经 C filesystem，properties 与 filesystem 分别持有并释放。</td></tr>
 <tr><td>Arrow 地址</td><td><code>SegmentReader</code>、两个 writer 和 manifest transaction 已改用上游 API；逐批读取、take、统计和完整 manifest 所有权由上游实现。</td></tr>
-<tr><td>v4 编译与单元测试</td><td>root 完整测试 912 通过、0 失败，66 项因缺少 UAT 配置或真实文件 fixture 取消；上游 API 4 个套件 19/19 通过，无取消。Scala 2.12.20 交叉编译通过，包括 Spark 3.5 主源码与测试源码；不代表 2.12 原生运行已验证。</td></tr>
-<tr><td>v4 真实 UAT</td><td>重新读取实例 <code>in01-5589f90cf7ca72c</code> 的 100000 行快照；持久化索引的无过滤、标量过滤及 NULL 过滤三个查询均通过，ID 召回率均为 1.0，返回行号与 Knowhere JNI 直调一致。日志与逐查询结果归档在上述报告。</td></tr>
-<tr><td>v4 assembly</td><td>构建及资源审计通过，两个独立 JVM 中的两种原生加载顺序、缓存真实 UAT 索引的加载与搜索均通过。同一 JAR 经 SparkSubmit 默认父加载器优先方式的完整索引查询通过，并断言 Connector/storage/Knowhere 类来自该 JAR。直接使用 assembly 优先 Java classpath 仍触发既有 Jackson 版本冲突，保留为限制。</td></tr>
-<tr><td>严格 JNI 与其他限制</td><td>v4 完整测试功能断言通过，但检查器保留 27 条告警，已独立复现为 Arrow 25 条及 BLAS 2 条，不能声称严格 JNI 检查全部通过。UAT 的既有 Spark UI 自定义指标构造器告警不影响当次查询断言，指标展示仍有缺口。Knowhere 的 DiskANN 测试失败及许可证材料限制仍保留，<code>publication.allowed=false</code>。</td></tr>
+<tr><td>当前 gitlink 组合</td><td>storage <code>7eb13578</code>、Knowhere <code>1fff20db</code>；Java/Scala 源码编译单独验证，统一原生包、完整 Connector 与真实数据尚待重建和复验。</td></tr>
+<tr><td>旧统一包</td><td>storage <code>5689301</code>、Knowhere <code>9dc2b8ad</code> 的旧自有 recipe 实现通过 63/63 原生辅助测试、C API 3/3、164/164 动态库审计、5 个立即加载入口、统一 JAR 验证、最终 assembly 与三种 JVM 加载顺序；当前实现已改为固定上游 recipe revision 与 CMake 显式链接。</td></tr>
+<tr><td>旧 Connector 与 UAT</td><td>相同旧组合的 root 完整测试 1,025 通过、0 失败、0 中止，66 项因对应环境或数据缺失取消；真实实例十万行的三个持久化索引查询通过。这些结果不覆盖当前 gitlink。</td></tr>
+<tr><td>v4 历史编译与单元测试</td><td>root 完整测试 912 通过、0 失败，66 项取消；上游 API 4 个套件 19/19 通过。Scala 2.12.20 交叉编译通过；这些数量不再是当前测试基线。</td></tr>
+<tr><td>v4 历史 UAT 与 assembly</td><td>曾重新读取实例 <code>in01-5589f90cf7ca72c</code> 的 100000 行快照并验证三种查询及两种加载顺序；该结果属于独立资源和兼容记录，不替代当前统一包的复验。</td></tr>
+<tr><td>限制</td><td>旧 gitlink 组合的完整动态库审计已通过；该批次没有重跑开源 Knowhere 变体，也没有覆盖其他 CPU、ARM 或 macOS。既有 Spark SQL UI 自定义指标构造器告警不影响当次查询断言，指标展示仍有缺口。v4 检查器的 Arrow/BLAS 告警和原始上游 DiskANN 断言失败保留为历史记录，不能与旧完整审计或 C API 3/3 混为同一检查。</td></tr>
 </table>

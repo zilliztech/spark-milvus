@@ -13,6 +13,8 @@ project/target
 note.md
 build/
 native-storage/src/main/resources/native/
+__pycache__/
+*.pyc
 .sbt/
 
 examples/

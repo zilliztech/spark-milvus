@@ -32,7 +32,7 @@
 <h1>向量搜索与建索引</h1>
 <p><strong>向量搜索只有一个入口：输入一组查询，Spark 按段并行、按查询合并，Knowhere 在每个任务里一次算完整组查询；精确扫描和索引探查是同一个段内执行器的两种策略；建索引是写之后单独的一步。</strong></p>
 <p>TopK 是按距离或相似度排序的前 K 条结果。精确搜索把每个向量都算一次距离；近似最近邻搜索（ANN）借助索引只算一部分向量。Knowhere 是 Milvus 的向量检索引擎库，负责距离计算、建索引和索引搜索。</p>
-<p class="status">单条查询的索引搜索已实现，范围是非 nullable FloatVector 的 HNSW 索引。查询集入口、exact 模式、建索引与快照交付待实现，对应能力行 V5、V7、W6、W8。</p>
+<p class="status">单条查询的索引搜索已实现，范围是非 nullable FloatVector 的 HNSW 索引。查询集入口、exact 模式、建索引与快照交付待实现，对应能力行 V5、V7、W6、W8。统一构建已改为固定上游 Conan recipe revision，并在独立 CMake 中显式声明集成链接；当前 Knowhere gitlink 为 <code>1fff20db</code>，旧 <code>9dc2b8ad</code> 产物的验收只作为历史，当前组合须重新构建和复验。</p>
 <nav aria-label="本页目录">
   <a href="#overall">结论</a><a href="#api">入口</a><a href="#layers">分层</a><a href="#failures">失败与资源</a><a href="#cost">成本与模式</a>
   <a href="#execution">执行链</a><a href="#native">Knowhere 对接</a><a href="#exact">精确扫描</a><a href="#metadata">索引探查</a>
@@ -466,18 +466,17 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <li>索引的引擎与参数取目标 Milvus 能加载的组合：面向云上用含 Cardinal 的 Knowhere 构建，参数与云上的自动索引一致，该产物在云上作业运行时提供。第一版建向量索引，范围与 2.4、2.5 的加载器一致。</li>
 <li>建好的索引由 2.4 的加载器读回搜索，与精确扫描比较召回率。</li>
 </ol>
-
 <h3 id="library-loading">2.8 原生库加载与打包</h3>
-<p><strong>Knowhere 的 C 接口、JNI、Java API 和原生库加载器来自上游 PR #1829 的固定提交，连接器只通过 <code>NativeVectorLibrary</code> 这一个入口加载。</strong>
-固定来源是 <a href="https://github.com/zilliztech/knowhere/pull/1829">PR #1829</a> 在 <code>LawrenceTL92/knowhere-contrib</code> 的提交，提交号、源码归档摘要与 API 版本记在 <code>native-vector/knowhere.properties</code>。</p>
+<p><strong>milvus-storage 与 Knowhere 的固定源码在同一张 Conan 依赖图中构建，所有原生库进入一个平台 JAR，并由 <code>native-runtime</code> 校验后解压到同一目录。</strong>
+milvus-storage 与 Knowhere 的精确 revision 分别由 superproject gitlink 固定；Knowhere 使用 PR #1829 分支提供的 C 接口、JNI 与 Java API，Connector 不维护第二套 JNI。</p>
 <ol>
-<li><code>NativeVectorLibrary</code> 调用上游 <code>Knowhere.cAbiVersion()</code> 触发加载，校验 C ABI 为 1，并报告构建特性；同一类加载器内共享初始化结果，加载失败与版本不符直接报错。向量库在第一次向量搜索或建索引时加载。</li>
-<li>原生产物保持上游的 <code>native/knowhere/1/&lt;platform&gt;</code> 布局，平台选择、依赖集合、校验与临时目录提取由上游加载器完成；打包保留 <code>io.knowhere</code> 包名。</li>
-<li>上游构建要求 JVM 启动时预加载 JRE 的 <code>libjsig</code>，driver 与 executor 的启动命令都要带上。</li>
-<li>sbt 从固定源码构建 Java API；原生产物由 <code>scripts/build-knowhere.sh</code> 构建或导入，<code>-Dknowhere.native.jar</code> 选择平台 JAR 进入运行时与 assembly，构建校验来源、平台、ABI 与摘要。</li>
-<li>milvus-storage 与 Knowhere 共用的动态库来自同一组已验证的产物：选中 Knowhere 平台 JAR 时，构建把其中的共享依赖放进 storage 的资源并替换同名别名，按 <code>native-vector/storage-compatibility*.properties</code> 里恰好一条摘要记录匹配。</li>
-<li><code>META-INF/milvus/knowhere-runtime.properties</code> 从平台产物的校验记录生成，<code>NativeVectorLibrary.RuntimeInfo.cardinalSupported()</code> 据此报告是否含 Cardinal。</li>
+<li><code>native-build/dependencies.json</code> 固定直接依赖的完整上游 Conan reference 与 recipe revision。独立 CMake 同时编译 storage、Knowhere、两个 JNI 和 Cardinal，并显式链接同一套公共动态库；构建不修改两个上游仓库。</li>
+<li>平台 JAR 使用 <code>native/milvus/1/&lt;platform&gt;/</code>，包含两个 JNI、两个引擎、Cardinal 插件、公共依赖、版本名别名、许可证、manifest 与规范化 provenance。打包前检查 RPATH、DT_NEEDED、未解析符号、五个立即加载入口和 C API acceptance。</li>
+<li><code>native-runtime</code> 校验平台、源码 revision、构建特性、文件集合、别名与 SHA-256，再把整套资源一次解压到同一个私有目录。<code>NativeStorageLibrary</code> 与 <code>NativeVectorLibrary</code> 把该目录中的 JNI 绝对路径交给各自上游加载器；上层不单独解压或覆盖同名依赖。</li>
+<li><code>META-INF/milvus/knowhere-runtime.properties</code> 从统一包的 provenance 生成，报告实际构建是否包含 Cardinal。JVM 启动前仍须预加载自身 JRE 的 <code>libjsig</code>。</li>
+<li>旧的独立 storage/Knowhere 平台 JAR、<code>storage-compatibility*.properties</code> 合并和 <code>native/knowhere/1/</code> 布局只属于迁移前产物，统一包不能同时携带这些资源。</li>
 </ol>
+<p>旧 gitlink 组合曾完成真实 Cardinal HNSW/COSINE 查询验收；当前 storage <code>7eb1357</code> 与 Knowhere <code>1fff20d</code> 必须由统一构建重新产出并完成加载顺序、assembly 与真实文件复验。构建机制和验收项见<a href="../engineering/native-libraries.html">原生构建设计</a>。</p>
 
 <h3 id="interop">2.9 真实文件兼容</h3>
 <p><strong>能否加载一份索引文件，由它的引擎和格式版本决定，按目标 Milvus 写出的真实文件验证。</strong>
@@ -486,6 +485,13 @@ Milvus <a href="https://github.com/milvus-io/milvus/blob/bb20ce26f5bd23da794dfc2
 云上写出的 CARD 文件需要含 Cardinal 的构建；Cardinal 构建带 <code>-march=native</code>，运行节点的 CPU 要支持构建机启用的指令集。
 兼容性的判据是：用目标实例的真实索引与真实数据，核对连接器的命中行号与分数同上游 Knowhere Java 接口直接加载的结果一致，并以独立计算的精确 TopK 衡量召回率。
 Knowhere 在部分 K 与过滤比例下会在索引内部改用暴力搜索（<a href="https://github.com/zilliztech/knowhere/blob/dd3dce0f46304628e6541e4a072d977744395d3a/src/index/hnsw/faiss_hnsw.cc#L1382">faiss_hnsw.cc</a>），性能测量同时覆盖这两种走法。实测记录另行保存。</p>
+
+<p><strong>2026-09-17 旧 gitlink、旧自有 recipe 实现的历史结果：</strong>以下产物使用 Knowhere <code>9dc2b8ad</code>，不能代表当前 <code>1fff20db</code> gitlink 或固定上游 recipe 方案。Cardinal 构建完成，C API 3/3、164/164 个库审计和 5 个立即加载入口通过。统一平台 JAR SHA-256 为 <code>4bc2488e9f38f590f9346b27a34725f4d63bddd1b518740784ad0d32c8c54c5e</code>，大小 279,399,197 字节；三种 JVM 加载顺序均使用一个解压目录，最终 assembly SHA-256 为 <code>be37535bcd3ffecec1c4c9bdb74336bc10cf50b08be18e8080a2928a50f7064c</code>。</p>
+<p>真实 UAT 持久化索引套件 1/1 通过，读取 100,000 行。无过滤、标量组合过滤和空值过滤分别排除 0、80,000、90,000 行；三个 Cardinal HNSW version 10 查询都恰好调用一次 deserialize 和一次 search，严格 Top10 ID 召回率均为 1，物理行号和 Float32 分数与上游 JNI 直调一致，metric 不匹配被明确拒绝，没有 Connector 暴力回退。既有 Spark SQL UI 指标构造器告警不影响查询断言。</p>
+<p><strong>2026-09-16 04:48 UTC 的历史结果：</strong>Spark 4.0 / Java 21 / local[2]，读取真实快照的 100,000 行、128 维向量作为独立参考；查询向量取其中一行，topK=10、ef=256。无过滤、标量组合过滤和空值过滤三种查询分别排除 0、80,000、90,000 行；投影值、物理行号、排序、与原始 JNI 的命中集合及 Float32 分数全部通过。三个查询的严格 Top10 ID 召回率均为 100%，最大分数绝对误差分别为 5.4300e-5、6.6219e-5、5.9342e-5；该结果只描述当时依赖补丁批次的样本和三个查询，不构成其他查询或当前开源变体的验收。</p>
+<p>每次查询读取同一个 41,606,363 字节的已有索引，一次 deserialize、一次 search，没有回退。端到端耗时约 18.9、19.8、21.5 秒，主要耗在约 15–16 秒的索引读取；search 调用约 13、8、4 毫秒。没有跨查询缓存，不能把原生调用时间写成完整查询延迟。测试未调用在线 Search 服务，未创建或修改远端对象。</p>
+<p>历史 Cardinal 平台 JAR SHA-256 为 <code>e57bcca5a96e5cb0a249d79d8f0d6e758c994b80f4b3b4dab40e39b5b6ced726</code>，当时对应 <code>native-vector/storage-compatibility-cardinal.properties</code> 和 Knowhere <code>9dc2b8ad</code>。原始上游 CTest 为 2/3、Java/JNI 为 10/11、Python 为 13/13；C 和 Java 的 DiskANN v1 精确距离断言失败，量化结果为 1.0306964 而期望值为 1.0，诊断产物保留 <code>build.validated=false</code>。当前 PR 分支已经修改 DiskANN 测试合同；新 gitlink 必须按新测试重建，不能把旧失败或项目自有 acceptance fixture 的结果写成当前上游测试结果。</p>
+<p>Cardinal 的配置含 <code>-march=native</code>，验证主机为 Intel Xeon Gold 6338、GLIBC 2.35，未验证其他 CPU、旧 GLIBC、ARM 或 macOS。该旧批次只重新构建 Cardinal 变体，没有重新运行开源 Knowhere 变体。中文报告和日志属于外部 <code>milvus-spark-demo</code> 验证材料。</p>
 
 <h2 id="simplicity">三、简洁性带来的好处</h2>
 <ol>

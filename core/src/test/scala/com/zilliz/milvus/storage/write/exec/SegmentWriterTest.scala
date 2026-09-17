@@ -16,10 +16,10 @@ import org.apache.avro.generic.GenericRecord
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.read.exec.SegmentReaderRegistry
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
-import io.milvus.storage.NativeLibraryLoader
 
 /** The two segment writers against the real native library, on the local
   * backend: what they write reads back through the registry the readers use.
@@ -29,7 +29,7 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
 
   private def skipWithoutLibrary(): Unit =
     try
-      NativeLibraryLoader.loadLibrary()
+      NativeStorageLibrary.load()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
         cancel("libmilvus-storage-jni is not on this machine")

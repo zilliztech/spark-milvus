@@ -4,3 +4,7 @@
 [submodule "milvus-storage"]
 	path = milvus-storage
 	url = https://github.com/milvus-io/milvus-storage.git
+[submodule "knowhere"]
+	path = knowhere
+	url = https://github.com/LawrenceTL92/knowhere-contrib.git
+	branch = codex/knowhere-jni-pr

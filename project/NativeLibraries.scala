@@ -11,6 +11,10 @@ object NativeLibraries {
     "libmilvus-storage.so",
     "libmilvus-storage-jni.so"
   )
+  private val unifiedLoadEntries = Vector(
+    "libmilvus-storage-jni.so",
+    "libknowhere_jni.so"
+  )
 
   private def resources(directory: File): Vector[(String, File)] = {
     val root = directory.toPath.toAbsolutePath.normalize()
@@ -58,23 +62,25 @@ object NativeLibraries {
       !new File(directory, "libnative-storage-jni.so").exists(),
       s"Obsolete connector JNI found in $directory; package only the upstream milvus-storage JNI"
     )
-    entryLibraries.foreach { name =>
+    validateEntries(directory, entryLibraries, log)
+  }
+
+  def validateUnifiedLinux(directory: File, log: String => Unit): Unit =
+    validateEntries(directory, unifiedLoadEntries, log)
+
+  def validateEntries(
+      directory: File,
+      names: Seq[String],
+      log: String => Unit
+  ): Unit = {
+    names.foreach { name =>
       val library = new File(directory, name)
       require(library.isFile, s"Missing native entry library: $library")
-      val builder = new ProcessBuilder("ldd", "-r", library.getAbsolutePath)
-      builder.redirectErrorStream(true)
-      val environment = builder.environment()
-      environment.remove("LD_PRELOAD")
-      environment.remove("LD_LIBRARY_PATH")
-      environment.put("LC_ALL", "C")
-      val process = builder.start()
-      val source = Source.fromInputStream(process.getInputStream, "UTF-8")
-      val output =
-        try source.mkString
-        finally source.close()
-      val exit = process.waitFor()
+      val (exit, output) =
+        nativeCheck(Seq("ldd", "-r", library.getAbsolutePath))
       val unresolved = output.linesIterator.exists { line =>
-        line.contains("undefined symbol:") || line.contains("not found")
+        line.contains("undefined symbol:") || line.contains("not found") || line
+          .contains("Relink `")
       }
       require(
         exit == 0 && !unresolved,
@@ -82,6 +88,30 @@ object NativeLibraries {
       )
       log(s"Verified native relocations: $library")
     }
+  }
+
+  private def nativeCheck(
+      arguments: Seq[String]
+  ): (Int, String) = {
+    val builder = new ProcessBuilder(arguments: _*)
+    builder.redirectErrorStream(true)
+    val environment = builder.environment()
+    Seq(
+      "LD_PRELOAD",
+      "LD_LIBRARY_PATH",
+      "LD_AUDIT",
+      "LD_DEBUG",
+      "LD_BIND_NOW"
+    ).foreach(
+      environment.remove
+    )
+    environment.put("LC_ALL", "C")
+    val process = builder.start()
+    val source = Source.fromInputStream(process.getInputStream, "UTF-8")
+    val output =
+      try source.mkString
+      finally source.close()
+    (process.waitFor(), output)
   }
 
   /** Check the same source resources and managed replacements sbt will copy,

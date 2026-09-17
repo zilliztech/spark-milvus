@@ -3,6 +3,7 @@ package com.zilliz.milvus.storage.index
 import java.nio.file.Files
 import java.util.HashMap
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
 
 /** Explicit real-native verification; missing libraries fail this main. */
@@ -21,6 +22,9 @@ object BruteForceSearchSmoke {
   }
 
   private def storage(): Unit = {
+    val originalPath = System.getProperty("milvus.storage.native.path")
+    NativeStorageLibrary.load()
+    assert(System.getProperty("milvus.storage.native.path") == originalPath)
     val directory = Files.createTempDirectory("bruteforce-storage-")
     val properties = new HashMap[String, String]()
     properties.put("fs.storage_type", "local")

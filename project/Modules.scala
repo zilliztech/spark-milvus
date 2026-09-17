@@ -80,9 +80,7 @@ object Modules {
     )
   )
 
-  /** Test JVM settings for Arrow access and the native libraries built by
-    * Docker.
-    */
+  /** Test JVM settings for Arrow access and the selected native libraries. */
   def nativeTest: Seq[Setting[_]] = Seq(
     fork := true,
     // Fixtures are addressed relative to the repository root.
@@ -90,8 +88,11 @@ object Modules {
     parallelExecution := true,
     logBuffered := false,
     javaOptions := {
-      val nativeDir =
-        ((ThisBuild / baseDirectory).value / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
+      val root = (ThisBuild / baseDirectory).value
+      val nativeDir = (if (NativeBundle.selected.nonEmpty)
+                         root / "target" / "empty-native-path"
+                       else
+                         root / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
       Seq(
         "-Xss2m",
         "-Xmx4g",
@@ -115,9 +116,12 @@ object Modules {
         "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED"
       )
     },
-    envVars := Map(
-      "LD_LIBRARY_PATH" ->
-        ((ThisBuild / baseDirectory).value / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
-    )
+    envVars := (if (NativeBundle.selected.nonEmpty)
+                  Map("LD_LIBRARY_PATH" -> "", "LD_BIND_NOW" -> "1")
+                else
+                  Map(
+                    "LD_LIBRARY_PATH" ->
+                      ((ThisBuild / baseDirectory).value / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
+                  ))
   )
 }

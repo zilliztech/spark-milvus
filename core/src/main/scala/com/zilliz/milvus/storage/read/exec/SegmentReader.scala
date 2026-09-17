@@ -5,6 +5,7 @@ import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.{Logging, NativeCalls}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
@@ -225,6 +226,7 @@ object SegmentReaderRegistry {
       columnNameFor: Long => Option[String],
       allocator: BufferAllocator
   ): SegmentReader = {
+    NativeStorageLibrary.load()
     val reader = new NativeSegmentReader(
       task,
       arrowSchema,
@@ -383,8 +385,7 @@ private[exec] final class NativeSegmentReader(
           MilvusStorageColumnGroups.createFromGroups(
             columnNames,
             files,
-            rowCounts,
-            "parquet"
+            rowCounts
           )
         )
         ownsColumnGroups = true

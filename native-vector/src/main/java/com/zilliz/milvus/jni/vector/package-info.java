@@ -1,7 +1,7 @@
 /**
  * Executor-side initialization and search through the upstream Knowhere binding.
  * NativeVectorLibrary reports the loaded C ABI and index format versions;
- * io.knowhere owns JNI, extraction and native resource lifetimes.
+ * io.knowhere owns JNI loading; native-runtime owns unified resource extraction.
  *
  * NativeVectorSearch delegates synchronous brute-force search on borrowed buffers.
  *

@@ -13,6 +13,7 @@ lazy val root = project
   .in(file("."))
   // Live-service suites run explicitly through integration40/test.
   .aggregate(
+    nativeRuntime,
     nativeStorage,
     nativeVector,
     core,
@@ -43,7 +44,22 @@ lazy val root = project
 
 // Layer 1: upstream native bindings. Storage's Scala API is cross-built;
 // Knowhere's API is plain Java.
+lazy val nativeRuntime = Project("native-runtime", file("native-runtime"))
+  .settings(
+    name := "native-runtime",
+    moduleName := "spark-milvus-native-runtime",
+    Modules.javaOnly,
+    NativeBundle.settings,
+    libraryDependencies ++= Seq(
+      "junit" % "junit" % "4.13.2" % Test,
+      "com.github.sbt" % "junit-interface" % "0.13.3" % Test
+    ),
+    Test / fork := true,
+    publish / skip := true
+  )
+
 lazy val nativeStorage = Project("native-storage", file("native-storage"))
+  .dependsOn(nativeRuntime)
   .settings(KnowhereBuild.storageSettings)
   .settings(
     name := "native-storage",
@@ -78,17 +94,22 @@ lazy val nativeStorage = Project("native-storage", file("native-storage"))
         .arrow % "provided",
       "org.apache.arrow" % "arrow-c-data" % Versions
         .line("4.0")
-        .arrow % "provided"
+        .arrow % "provided",
+      "junit" % "junit" % "4.13.2" % Test,
+      "com.github.sbt" % "junit-interface" % "0.13.3" % Test
     ),
     publish / skip := true
   )
 
 lazy val nativeVector = Project("native-vector", file("native-vector"))
+  .dependsOn(nativeRuntime)
   .settings(
     name := "native-vector",
     moduleName := "spark-milvus-native-vector",
     Modules.javaOnly,
     KnowhereBuild.settings,
+    NativeBundle.validatedNativeBundle := (nativeRuntime / NativeBundle.validatedNativeBundle).value,
+    KnowhereBuild.knowhereRuntimeJar := (nativeRuntime / Compile / packageBin).value,
     libraryDependencies ++= Seq(
       "junit" % "junit" % "4.13.2" % Test,
       "com.github.sbt" % "junit-interface" % "0.13.3" % Test
@@ -328,10 +349,10 @@ lazy val rootRunSettings: Seq[Setting[_]] = Seq(
     "-Djava.library.path=.",
     "--add-opens=java.base/java.nio=ALL-UNNAMED"
   ),
-  run / envVars := Map(
-    "LD_PRELOAD" -> (baseDirectory.value / "native-storage" / "src" / "main" /
-      "resources" / "native" / "libmilvus-storage.so").getAbsolutePath
-  ),
+  run / envVars := {
+    val jdk = javaHome.value.getOrElse(file(sys.props("java.home")))
+    Map("LD_PRELOAD" -> (jdk / "lib" / "libjsig.so").getAbsolutePath)
+  },
   Compile / run / fullClasspath :=
     (Compile / run / fullClasspath).value ++ (Test / fullClasspath).value
 )
@@ -374,8 +395,11 @@ lazy val rootAssemblySettings: Seq[Setting[_]] = Seq(
   assembly / assemblyMergeStrategy := {
     // Knowhere's manifest checksums describe one complete native dependency set.
     // Conflicting resources must fail packaging instead of selecting one copy.
-    case PathList("native", "knowhere", xs @ _*) => MergeStrategy.deduplicate
-    case PathList("native", xs @ _*)             => MergeStrategy.first
+    case PathList("native", "knowhere", xs @ _*) =>
+      NativeBundle.nativeMergeStrategy
+    case PathList("native", "milvus", xs @ _*) =>
+      NativeBundle.nativeMergeStrategy
+    case PathList("native", xs @ _*) => MergeStrategy.first
     case PathList("META-INF", "native-image", "io.netty", _*) =>
       MergeStrategy.discard
     case PathList("META-INF", "io.netty.versions.properties") =>

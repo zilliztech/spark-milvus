@@ -629,3 +629,10 @@ L2 仍返回欧氏距离，即 Knowhere 平方距离的平方根；IP 与 COSINE
 
 以上是封闭的支持列表。Geometry、Timestamptz、ArrayOfVector/struct-array 与未来
 未知 Milvus 类型不会静默降级为二进制或 null；schema 解析或值转换会直接失败，并报告不支持的类型。
+
+## 原生依赖资源包
+
+构建时使用 `-Dmilvus.native.bundle=/absolute/path/to/platform.jar`，将两个 JNI
+及统一的动态依赖打入 Connector JAR。运行时每个类加载器只校验、解压一次。
+此构建选项与 `knowhere.native.jar` 互斥；指向其他库的显式
+`knowhere.native.path` 会被拒绝。参见[构建与验收](contributing.md#unified-native-bundle)。

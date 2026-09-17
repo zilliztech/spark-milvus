@@ -92,17 +92,20 @@
 <p>依赖声明要能解释三件事：编译用什么、运行时由谁提供、是否进入交付的 JAR。<code>provided</code> 和 <code>Test</code> 属于契约。Jackson 对齐只用于 core、compat、client，Spark 线使用自身的一组运行时依赖。整理配置时保留已有的版本、scope 和 exclusions，版本升级单独说明原因和验证依据。</p>
 
 <p><code>native-storage</code> 从固定的 <code>milvus-storage/java/src/main</code> 编译上游 Java/Scala 绑定，使用 <code>Modules.sparkFreeModuleSettings</code> 交叉编译 Scala 2.12/2.13，Arrow 按 4.0 线编译并标为 <code>provided</code>。不引入上游 sbt 项目或仅支持 Scala 2.13 的预编译 JAR。<code>Compile / sourceGenerators</code> 用 <code>Sync</code> 将上游源码复制到 <code>sourceManaged</code>，格式化不触及子模块原文件；清理仅作用于该任务曾生成的副本。初始化子模块是编译前提。</p>
-<p>存储 JNI 和 <code>NativeLibraryLoader</code> 均归上游；资源打包 <code>libmilvus-storage-jni</code>、storage 引擎及依赖，不再构建或加载 <code>libnative-storage-jni</code>。本次迁移已有新的 Scala 交叉编译、单元测试、原生加载及真实 UAT 结果；严格 JNI 告警与最终打包运行的边界见<a href="../architecture/storage-io.html#state">存储 I/O 验收状态</a>。</p>
+<p>存储 JNI 和 <code>NativeLibraryLoader</code> 均归上游；资源打包 <code>libmilvus-storage-jni</code>、storage 引擎及依赖，不再构建或加载 <code>libnative-storage-jni</code>。该迁移已有 Scala 交叉编译、单元测试、原生加载及真实 UAT 结果；严格 JNI 告警与最终打包运行的边界见<a href="../architecture/storage-io.html#state">存储 I/O 验收状态</a>。</p>
 
-<p><code>native-vector</code> 的 Knowhere API 尚未发布到公共 Maven 仓库，因此由 <code>KnowhereBuild.settings</code> 从固定提交且带 SHA-256 校验的源码归档编译上游 Java API，作为编译依赖传递给 core。
+<p><code>native-vector</code> 的 Knowhere API 尚未发布到公共 Maven 仓库，因此由 <code>KnowhereBuild.settings</code> 直接编译根目录 <code>knowhere</code> 子模块的 <code>java/src/main/java</code>。子模块跟随 PR #1829 的分支，superproject gitlink 固定精确提交；普通构建不下载源码归档，未初始化子模块时直接给出初始化命令。生成的 Java 11 API JAR 作为编译依赖传递给 core，缓存键包含 gitlink revision。
 原生引擎由显式脚本构建，平台 JAR 通过 <code>knowhere.native.jar</code> 选择并验证来源和摘要。它只含资源，通过 <code>Compile / unmanagedJars</code> 随模块依赖传递到 core、Spark 的运行时及 assembly；只放 Runtime 会在现有项目间编译依赖映射中丢失。普通编译和单元测试不隐式启动 Conan/CMake。
 <code>knowhereSmoke</code> 单独验证实际 JAR 加载，不能用未执行 smoke 的普通 UT 代替原生运行验证。操作命令见 <a href="../../contributing.md#knowhere-library-loading">构建说明</a>。</p>
+
+<p>统一平台包通过 <code>-Dmilvus.native.bundle=/absolute/path/bundle.jar</code> 选择，由 <code>native-runtime / validatedNativeBundle</code> 统一验证并传递资源。类路径、<code>verifyNativeBundle</code> 与向量模块的验证命令依赖同一任务，使用同一个解压目录和缓存。它与 <code>knowhere.native.jar</code> 互斥；选择后 storage 的旧 native resources 不进入 classpath，避免产生第二个目录。两个绑定都依赖纯 Java 的 native-runtime，不互相依赖。<a href="native-libraries.html">独立 CMake 构建</a>使用 <code>dependencies.json</code> 固定的全部上游 recipe revision，在 CMake 目标中声明集成链接关系后产出该包。旧自有 recipe 实现下 Knowhere <code>9dc2b8ad</code> 的 Cardinal 原生构建、JVM 加载、assembly 和真实数据验证曾通过；当前 <code>1fff20db</code> gitlink 的原生包仍须重建和复验。迁移前按 <code>storage-compatibility*.properties</code> 复制资源的办法只保留为历史路径，不参与统一包。</p>
 
 <h2 id="delivery">5 root 的交付职责</h2>
 
 <p>root 在模块声明处明确承担仓库任务聚合和迁移期的 assembly 交付；主 Maven JAR 绑定到 assembly，assembly 与发布都不向子项目聚合。子模块是否发布在自己的声明处可见。</p>
 
 <p>root 的运行参数、assembly 规则、发布元数据分别使用 <code>rootRunSettings</code>、<code>rootAssemblySettings</code>、<code>rootPublishingSettings</code> 三个命名片段，并在 root 声明处应用。片段保留在同一份 <code>build.sbt</code> 中，维护者可以按职责展开，不引入额外的项目、插件或配置框架。片段内的设置继承应用处的项目作用域，避免在文件尾部继续追加离散的 <code>root / ...</code> 覆盖。</p>
+<p>原生资源采用 <code>NativeBundle.nativeMergeStrategy</code>：单一来源直接传递输入流，重复来源用固定缓冲区计算 SHA-256 和字节数，内容不同则失败。不能用通用 <code>deduplicate</code> 将数百 MB 的动态库整体缓冲到堆内。sbt-assembly 2.1.1 的 <code>CustomMergeStrategy</code> 会关闭 assembly 产物缓存，重复 assembly 会重新打包；增量编译和原生构建、验证缓存保持有效。受限堆回归及实际 4 GB 堆打包结果见<a href="native-libraries.html#package">原生资源设计</a>。</p>
 
 <p>迁移期仍保留以下交付条件：</p>
 
@@ -126,12 +129,8 @@
 <p>根项目聚合不含需要真实 Milvus、MinIO 的 <code>integration40</code>。额外的 Scala 交叉版本检查、集成测试、原生库构建与发布仍按任务范围和授权执行。若执行了 <code>show</code>、<code>inspect</code>、<code>makePom</code> 或编译测试，应分别记录它们验证了什么。静态等价、构建加载、Maven 解析和实际 Spark 运行是不同层次的证据。</p>
 
 <p>审查时用具体维护动作检验可读性：增加一条 Spark 线、修改一个模块的依赖、判断一个项目是否发布。若仍需追踪多个含糊的 helper 才能作答，应先修正这些关系的表达。发布入口、能力、公共类型和测试的删除遵循 AGENTS.md 的说明与授权要求。</p>
-<p>同时选择 Knowhere 和 storage 原生产物时，<code>KnowhereBuild.storageSettings</code> 按
-<code>native-vector/storage-compatibility*.properties</code> 核验已测试的二进制组合。扫描全部记录后，平台、storage 引擎 SHA-256、storage 全部原生资源的路径与 SHA-256 清单摘要、Knowhere 平台 JAR SHA-256 必须恰好匹配一条；没有匹配或多条匹配均使构建失败。清单覆盖 JNI、Arrow、AWS SDK 及其依赖，避免只更换依赖却继续使用旧的共存验证记录。各记录独立列出共享库摘要和 SONAME 别名，不把新编译产物自动当成兼容。
-共享依赖从 Knowhere 平台 JAR 生成到 storage 的 managed resources，同路径原始资源不进入该次打包；
-源目录和 Knowhere JAR 保持不变。不选 Knowhere 时恢复原始资源，资源同步必须覆盖选项切换。
-这个构建规则不增加两个原生模块之间的依赖，也不改变运行时加载顺序。</p>
-<p>Linux 原生资源在打包前检查 <code>libmilvus-storage.so</code> 和 <code>libmilvus-storage-jni.so</code> 的重定位；选择 Knowhere 后，还要检查共享依赖替换后的完整目录。检查进程清空 <code>LD_PRELOAD</code> 和 <code>LD_LIBRARY_PATH</code>，解析 <code>ldd -r</code> 的诊断输出，出现未定义符号、缺库或缺符号版本即失败；该命令遇到未定义符号可能仍返回 0，不能只看退出码。跨平台打包需要在对应 Linux 架构的执行环境验收，不在宿主平台假装执行成功。</p>
-<p>新增兼容记录之前，两个入口库各自在独立进程中通过 <code>dlopen(RTLD_NOW | RTLD_LOCAL)</code>，强制立即解析动态符号；再以 <code>LD_BIND_NOW=1</code> 启动两个独立 JVM，分别先加载 storage 或 Knowhere，执行文件读写与实际搜索。JVM 只预加载自身 JRE 的 <code>libjsig</code>；缺失依赖必须在原生链接时声明，不能靠预加载 Folly 或 libaio 通过验收。真实实例数据与最终 JAR 的运行测试验证存储访问、索引格式和 C++ 对象兼容性，不能由重定位检查替代。</p>
-<p><code>KnowhereBuild.settings</code> 从已校验来源与 JAR 摘要的 provenance 读取 <code>build.with_cardinal</code>，生成 <code>META-INF/milvus/knowhere-runtime.properties</code>。运行时由 <code>NativeVectorLibrary.RuntimeInfo.cardinalSupported()</code> 读取；没有选平台产物或使用任意 <code>knowhere.native.path</code> 覆盖时不声明 Cardinal 能力。该记录说明构建特性，不代替真实索引反序列化、搜索或 storage 共存验证。</p>
+<p>选择统一平台包时，<code>NativeBundle.validate</code> 核对平台、manifest、每个实际库和版本名别名的路径、长度及 SHA-256；provenance 固定 storage、Knowhere、Cardinal 源码 revision、Conan lock 摘要、规范化的直接上游 recipe reference、依赖 graph 摘要和库来源，不包含构建机绝对路径。完整 Conan graph、编译命令和 CMake trace 留在外部 <code>NATIVE_WORK_DIR</code>。旧自有 recipe 实现下的 Knowhere <code>9dc2b8ad</code> Cardinal 包核对了 164 个库和 173 个别名；资源 JAR 的 SHA-256 为 <code>4bc2488e9f38f590f9346b27a34725f4d63bddd1b518740784ad0d32c8c54c5e</code>。</p>
+<p>打包前对全部 Linux ELF 库检查动态依赖、SONAME、相对搜索路径和未定义符号；普通库执行 <code>ldd -r</code>，5 个入口执行 <code>dlopen(RTLD_NOW | RTLD_LOCAL)</code> 立即绑定，出现缺库、缺符号或错误符号版本即失败。检查进程清空额外的 <code>LD_PRELOAD</code> 和 <code>LD_LIBRARY_PATH</code>；JVM 只在启动时预加载自身 JRE 的 <code>libjsig</code>，不能靠预加载 Folly 或 libaio 通过验收。跨平台包必须在对应架构执行这些检查。</p>
+<p>最终 assembly 还要在 <code>LD_BIND_NOW=1</code> 下分别执行 storage-first、Knowhere-first 和并发初始化，确认两个绑定从同一个解压目录加载并完成文件访问与实际搜索。真实实例的索引反序列化、搜索和回表单独验收，因为重定位与库加载检查不能证明索引格式或 C++ 对象兼容。历史 Knowhere <code>9dc2b8ad</code> Cardinal 组合已通过这三种加载顺序和真实十万行查询；该批次没有重跑开源 Knowhere 变体。当前 <code>1fff20db</code> 必须重新执行这些检查。</p>
+<p><code>KnowhereBuild.settings</code> 从 <code>NativeBundle.validatedNativeBundle</code> 已校验的 bundle metadata 读取 <code>with_cardinal</code>，生成 <code>META-INF/milvus/knowhere-runtime.properties</code>。运行时由 <code>NativeVectorLibrary.RuntimeInfo.cardinalSupported()</code> 读取；没有选统一平台包或使用任意 <code>knowhere.native.path</code> 覆盖时不声明 Cardinal 能力。迁移前的 <code>KnowhereBuild.storageSettings</code>、<code>storage-compatibility*.properties</code> 和从 Knowhere JAR 复制共享库的流程只适用于旧独立产物，其历史记录不作为统一包的兼容证明。</p>
 </main>

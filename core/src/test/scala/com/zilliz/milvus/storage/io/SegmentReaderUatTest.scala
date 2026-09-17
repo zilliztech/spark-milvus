@@ -18,11 +18,11 @@ import org.apache.parquet.schema.Type.Repetition
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import io.milvus.storage.{
   MilvusStorageColumnGroups,
   MilvusStorageProperties,
-  MilvusStorageReader,
-  NativeLibraryLoader
+  MilvusStorageReader
 }
 
 /** Reads a real Milvus V2 column-group parquet through the upstream JNI, start
@@ -109,7 +109,7 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
     // Same gate the other native suites use: touch the library and skip when
     // it is absent, which is the state of CI.
     try
-      NativeLibraryLoader.loadLibrary()
+      NativeStorageLibrary.load()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
         cancel("libmilvus-storage-jni is not on this machine")
@@ -142,8 +142,7 @@ class SegmentReaderUatTest extends AnyFunSuite with Matchers {
       columnGroups = MilvusStorageColumnGroups.createFromGroups(
         Array(columns.toArray),
         Array(Array(file.getFileName.toString)),
-        Array(Array(expectedRows)),
-        "parquet"
+        Array(Array(expectedRows))
       )
       columnGroups should not be 0L
 

@@ -6,6 +6,7 @@ import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.credential.StorageProperties
 import io.milvus.storage.{MilvusStorageFileSystem, MilvusStorageProperties}
 
@@ -57,6 +58,7 @@ class StorageFullChainUatTest extends AnyFunSuite with Matchers {
     )
     val props = StorageProperties.from(userOptions)
 
+    NativeStorageLibrary.load()
     val properties = new MilvusStorageProperties()
     var fs: MilvusStorageFileSystem = null
     try {

@@ -1,11 +1,12 @@
 # Milvus Spark Connector Makefile
 # Author: Zilliz
-# Description: Simplified build system using milvus-storage JNI library
+# Description: Build both upstream JNI libraries with one dynamic dependency set
 
 # Configuration
 SCALA_VERSION := 2.13
 SBT := sbt
 JAVA_HOME ?= $(shell dirname $(shell dirname $(shell readlink -f $(shell which java))))
+export JAVA_HOME
 
 # Directories
 RESOURCES_DIR := native-storage/src/main/resources
@@ -30,6 +31,29 @@ NATIVE_DIR := $(RESOURCES_DIR)/native/$(NATIVE_PLATFORM)
 STORAGE_LIB := $(MILVUS_STORAGE_BUILD)/libmilvus-storage.$(LIB_SUFFIX)
 STORAGE_JNI_LIB := $(MILVUS_STORAGE_BUILD)/libmilvus-storage-jni.$(LIB_SUFFIX)
 
+# Unified source builds currently use the validated Linux x86_64 GCC 12 profile.
+# Linux aarch64 can consume a separately built, matching platform JAR and sidecar.
+# NATIVE_BUNDLE selects a prebuilt input; NATIVE_BUNDLE_OUTPUT names local output.
+NATIVE_WORK_DIR ?= $(CURDIR)/$(TARGET_DIR)/native-build/$(NATIVE_PLATFORM)
+NATIVE_JOBS ?= 50
+NATIVE_BUILD_OPTIONS ?=
+NATIVE_BUNDLE ?=
+NATIVE_BUNDLE_OUTPUT ?= $(NATIVE_WORK_DIR)/milvus-native-$(NATIVE_PLATFORM).jar
+# GNU Make's abspath treats spaces as separate paths. Keep each input intact.
+absolute_path = $(if $(filter /%,$(firstword $(1))),$(1),$(CURDIR)/$(1))
+NATIVE_BUNDLE_JAR := $(call absolute_path,$(if $(strip $(NATIVE_BUNDLE)),$(NATIVE_BUNDLE),$(NATIVE_BUNDLE_OUTPUT)))
+# Keep the existing storage build on platforms without a unified source profile.
+# A prebuilt unified bundle is always explicit and must match the target platform.
+ifneq ($(strip $(NATIVE_BUNDLE)),)
+  NATIVE_PREREQUISITE := native-bundle
+else ifeq ($(NATIVE_PLATFORM),linux-x86_64)
+  NATIVE_PREREQUISITE := native-bundle
+else
+  NATIVE_PREREQUISITE := copy-native-libs
+endif
+NATIVE_SBT = $(SBT) $(if $(filter native-bundle,$(NATIVE_PREREQUISITE)),"-Dmilvus.native.bundle=$(NATIVE_BUNDLE_JAR)")
+NATIVE_TEST_ENV = $(if $(filter Linux,$(UNAME_S)),LD_PRELOAD="$(JAVA_HOME)/lib/libjsig.so")
+
 # Colors for output
 RED := \033[0;31m
 GREEN := \033[0;32m
@@ -38,10 +62,10 @@ BLUE := \033[0;34m
 NC := \033[0m # No Color
 
 # All phony targets
-.PHONY: all help check-deps init-submodules build-milvus-storage copy-native-libs clean package test compile-it run-demo rebuild quick-build status
+.PHONY: all help check-deps init-submodules init-missing-submodules native-build native-bundle native-resources build-milvus-storage copy-native-libs clean clean-all package test compile-it run-demo rebuild quick-build status
 
 # Default target
-all: clean build-milvus-storage copy-native-libs package
+all: package
 
 # Help target
 help:
@@ -50,9 +74,12 @@ help:
 	@echo "$(YELLOW)Available targets:$(NC)"
 	@echo "  $(GREEN)all$(NC)                    - Complete build process"
 	@echo "  $(GREEN)clean$(NC)                  - Clean all build artifacts"
-	@echo "  $(GREEN)build-milvus-storage$(NC)   - Build milvus-storage with JNI support"
-	@echo "  $(GREEN)copy-native-libs$(NC)       - Copy native libraries to resources"
-	@echo "  $(GREEN)package$(NC)                - Package JAR with native libraries"
+	@echo "  $(GREEN)native-build$(NC)           - Build unified native dependencies (Linux x86_64)"
+	@echo "  $(GREEN)native-bundle$(NC)          - Build and package, or select NATIVE_BUNDLE"
+	@echo "  $(GREEN)native-resources$(NC)       - Prepare unified or existing platform storage resources"
+	@echo "  $(GREEN)build-milvus-storage$(NC)   - Legacy standalone storage JNI build"
+	@echo "  $(GREEN)copy-native-libs$(NC)       - Legacy storage resource packaging"
+	@echo "  $(GREEN)package$(NC)                - Package JAR with the selected platform resources"
 	@echo "  $(GREEN)test$(NC)                   - Type-check tests (incl. integration) and run unit tests"
 	@echo "  $(GREEN)compile-it$(NC)             - Type-check integration tests (no external services)"
 	@echo "  $(GREEN)run-demo$(NC)               - Run demo"
@@ -62,6 +89,13 @@ help:
 	@echo "$(YELLOW)Environment variables:$(NC)"
 	@echo "  JAVA_HOME=$(JAVA_HOME)"
 	@echo "  SCALA_VERSION=$(SCALA_VERSION)"
+	@echo "  NATIVE_WORK_DIR=$(NATIVE_WORK_DIR)"
+	@echo "  NATIVE_JOBS=$(NATIVE_JOBS) (1..50)"
+	@echo "  NATIVE_BUILD_OPTIONS=$(NATIVE_BUILD_OPTIONS) (for example --with-cardinal)"
+	@echo "  NATIVE_BUNDLE=$(NATIVE_BUNDLE) (prebuilt Linux platform JAR plus .properties)"
+	@echo "  NATIVE_BUNDLE_OUTPUT=$(NATIVE_BUNDLE_OUTPUT)"
+	@echo "  Without NATIVE_BUNDLE, Linux x86_64 builds both engines; other platforms retain storage-only builds."
+	@echo "  Unified bundles require Linux; their source profile currently supports x86_64."
 
 # Check system dependencies
 check-deps:
@@ -80,15 +114,50 @@ init-submodules:
 	@git submodule update --init --recursive
 	@echo "$(GREEN)Submodules initialized$(NC)"
 
+# Preserve initialized worktrees so the builder records their actual revisions and changes.
+init-missing-submodules:
+	@set -e; for submodule in milvus-storage milvus-proto knowhere; do \
+		if [ ! -e "$$submodule/.git" ]; then git submodule update --init --recursive -- "$$submodule"; fi; \
+	done
+
+# Build both upstream engines; the script validates the job limit and host profile.
+native-build: init-missing-submodules
+	@echo "$(BLUE)Building unified native libraries with $(NATIVE_JOBS) jobs...$(NC)"
+	@bash scripts/build-native.sh --work-dir "$(call absolute_path,$(NATIVE_WORK_DIR))" \
+		--jobs "$(NATIVE_JOBS)" $(NATIVE_BUILD_OPTIONS)
+
+ifneq ($(strip $(NATIVE_BUNDLE)),)
+native-bundle: init-missing-submodules
+	@test "$(UNAME_S)" = Linux || { echo "Unified native bundles require Linux; use the explicit legacy storage targets on macOS."; exit 1; }
+	@test -s "$(NATIVE_BUNDLE_JAR)" || { echo "Missing prebuilt NATIVE_BUNDLE: $(NATIVE_BUNDLE_JAR)"; exit 1; }
+	@test -s "$(NATIVE_BUNDLE_JAR).properties" || { echo "Missing native bundle checksum sidecar: $(NATIVE_BUNDLE_JAR).properties"; exit 1; }
+	@echo "$(GREEN)Selected prebuilt bundle: $(NATIVE_BUNDLE_JAR) (sbt verifies platform, provenance and libraries)$(NC)"
+else
+native-bundle: native-build
+	@python3 scripts/package-native.py \
+		--lib-dir "$(call absolute_path,$(NATIVE_WORK_DIR))/bundle/lib" \
+		--provenance "$(call absolute_path,$(NATIVE_WORK_DIR))/bundle/provenance.json" \
+		--evidence "$(call absolute_path,$(NATIVE_WORK_DIR))/bundle/provenance" \
+		--licenses "$(call absolute_path,$(NATIVE_WORK_DIR))/bundle/licenses" \
+		--output "$(NATIVE_BUNDLE_JAR)"
+endif
+
+# Make and Docker share the same platform selection.
+native-resources: $(NATIVE_PREREQUISITE)
+
 # Build milvus-storage with JNI support
-build-milvus-storage: check-deps init-submodules
+build-milvus-storage: check-deps init-missing-submodules
 	@echo "$(BLUE)Building milvus-storage with JNI support...$(NC)"
+	@case "$(NATIVE_JOBS)" in ''|*[!0-9]*) echo "NATIVE_JOBS must be between 1 and 50"; exit 1 ;; esac; \
+		test "$(NATIVE_JOBS)" -ge 1 && test "$(NATIVE_JOBS)" -le 50
 	@if [ ! -d "$(MILVUS_STORAGE_CPP)" ]; then \
 		echo "$(RED)Error: milvus-storage/cpp directory not found$(NC)"; \
 		echo "$(YELLOW)Run 'make init-submodules' first$(NC)"; \
 		exit 1; \
 	fi
-	@cd $(MILVUS_STORAGE_CPP) && make java-lib
+	@CARGO_BUILD_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL="$(NATIVE_JOBS)" \
+		$(MAKE) -C "$(MILVUS_STORAGE_CPP)" java-lib \
+		'CONAN_SETTINGS=$$(libcxx_setting) -s:h build_type=$$(build_type) -s:b build_type=$$(build_type) -c:h tools.build:jobs=$(NATIVE_JOBS) -c:b tools.build:jobs=$(NATIVE_JOBS)'
 	@if [ -f "$(STORAGE_LIB)" ] && [ -f "$(STORAGE_JNI_LIB)" ]; then \
 		echo "$(GREEN)✓ Successfully built milvus-storage with JNI$(NC)"; \
 		ls -lh $(STORAGE_LIB) $(STORAGE_JNI_LIB); \
@@ -98,13 +167,9 @@ build-milvus-storage: check-deps init-submodules
 		exit 1; \
 	fi
 
-# Copy native libraries to resources directory
-copy-native-libs: $(NATIVE_DIR)
+# Incrementally rebuild before copying so existing libraries cannot become stale.
+copy-native-libs: build-milvus-storage $(NATIVE_DIR)
 	@echo "$(BLUE)Copying native libraries to $(NATIVE_DIR)...$(NC)"
-	@if [ ! -f "$(STORAGE_LIB)" ] || [ ! -f "$(STORAGE_JNI_LIB)" ]; then \
-		echo "$(YELLOW)Native libraries not found, building first...$(NC)"; \
-		$(MAKE) build-milvus-storage; \
-	fi
 	@rm -f "$(NATIVE_DIR)/libnative-storage-jni.$(LIB_SUFFIX)"
 	@cp -L "$(STORAGE_LIB)" "$(STORAGE_JNI_LIB)" "$(NATIVE_DIR)/"
 	@set -e; \
@@ -153,40 +218,44 @@ clean-all: clean
 	fi
 	@echo "$(GREEN)Clean all complete$(NC)"
 
-# Package JAR with native libraries
-package: copy-native-libs
-	@echo "$(BLUE)Packaging JAR with native libraries...$(NC)"
-	@$(SBT) package
+# Package JAR with the platform's selected native resources.
+package: native-resources
+	@echo "$(BLUE)Packaging JAR with $(NATIVE_PREREQUISITE)...$(NC)"
+	@$(NATIVE_SBT) package
 	@echo "$(GREEN)Packaging complete$(NC)"
 
 # Run tests
 test: package
 	@echo "$(BLUE)Type-checking integration tests...$(NC)"
-	@$(SBT) "integration40/Test/compile"
+	@$(NATIVE_SBT) "integration40/Test/compile"
 	@echo "$(BLUE)Running unit tests...$(NC)"
-	@$(SBT) test
+	@$(NATIVE_TEST_ENV) $(NATIVE_SBT) test
 	@echo "$(GREEN)Tests complete$(NC)"
 
 # Type-check integration tests only (no Milvus/MinIO required at compile time)
 compile-it: package
 	@echo "$(BLUE)Type-checking integration tests...$(NC)"
-	@$(SBT) "integration40/Test/compile"
+	@$(NATIVE_SBT) "integration40/Test/compile"
 	@echo "$(GREEN)Integration tests compile complete$(NC)"
 
 # Run demo
 run-demo: package
 	@echo "$(BLUE)Running demo...$(NC)"
-	@$(SBT) "runMain com.zilliz.spark.connector.jni.MilvusStorageJNI"
+	@$(NATIVE_TEST_ENV) $(NATIVE_SBT) "runMain com.zilliz.spark.connector.jni.MilvusStorageJNI"
 
 # Development targets
-rebuild: clean-all all
+rebuild:
+	@$(MAKE) clean-all
+	@$(MAKE) all
 
-quick-build: copy-native-libs package
+quick-build: package
 
 # Show build status
 status:
 	@echo "$(BLUE)Build Status:$(NC)"
 	@echo "Platform: $(NATIVE_PLATFORM) (.$(LIB_SUFFIX))"
+	@echo -n "Unified native bundle: "
+	@if [ -s "$(NATIVE_BUNDLE_JAR)" ] && [ -s "$(NATIVE_BUNDLE_JAR).properties" ]; then echo "$(GREEN)$(NATIVE_BUNDLE_JAR)$(NC)"; else echo "$(YELLOW)not built$(NC)"; fi
 	@echo -n "Milvus Storage lib: "
 	@if [ -f "$(STORAGE_LIB)" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
 	@echo -n "Milvus Storage JNI lib: "

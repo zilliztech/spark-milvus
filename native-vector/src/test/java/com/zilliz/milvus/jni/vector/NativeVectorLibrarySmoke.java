@@ -8,6 +8,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -16,6 +17,7 @@ import java.util.concurrent.Future;
 /** Explicit native smoke: requires the real platform JAR and pre-JVM libjsig. */
 public final class NativeVectorLibrarySmoke {
     public static void main(String[] args) throws Exception {
+        String originalPath = System.getProperty("knowhere.native.path");
         ExecutorService pool = Executors.newFixedThreadPool(4);
         NativeVectorLibrary.RuntimeInfo info;
         try {
@@ -35,6 +37,9 @@ public final class NativeVectorLibrarySmoke {
         }
         if (info.cAbiVersion() != 1) {
             throw new AssertionError("Unexpected C ABI: " + info);
+        }
+        if (!Objects.equals(originalPath, System.getProperty("knowhere.native.path"))) {
+            throw new AssertionError("Successful initialization changed the application's native path override");
         }
         // An actual JNI operation verifies more than a successful System.load.
         ByteBuffer vectors = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder());

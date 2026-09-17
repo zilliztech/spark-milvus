@@ -11,9 +11,10 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
-import io.milvus.storage.NativeLibraryLoader
 
 /** The writer's resource lifecycle against the real native writer.
   *
@@ -28,7 +29,7 @@ class MilvusV3PartitionWriterLifecycleTest extends AnyFunSuite with Matchers {
 
   private def skipWithoutLibrary(): Unit =
     try
-      NativeLibraryLoader.loadLibrary()
+      NativeStorageLibrary.load()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
         cancel("libmilvus-storage-jni is not on this machine")
@@ -63,7 +64,7 @@ class MilvusV3PartitionWriterLifecycleTest extends AnyFunSuite with Matchers {
       taskId = 0L,
       sparkSchema = schema,
       milvusOption = MilvusOption(new CaseInsensitiveStringMap(options)),
-      storage = com.zilliz.milvus.storage.credential.StorageProperties.from(
+      storage = StorageProperties.from(
         Map(
           "fs.storage_type" -> "local",
           "fs.root_path" -> dir.toAbsolutePath.toString

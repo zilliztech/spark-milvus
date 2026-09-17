@@ -65,6 +65,7 @@ are named settings in the same file.
 | `project/Dependencies.scala` | Dependency coordinates, scopes and dependency groups |
 | `project/Modules.scala` | Shared compile/test settings, checks and Scala cross-version settings |
 | `project/KnowhereBuild.scala` | Pinned upstream API compilation, native artifact verification and packaged JNI smoke |
+| `project/NativeBundle.scala` | Unified native resource selection, source pins, manifest and ELF validation |
 | `project/plugins.sbt` | Build plugins and their meta-build dependencies |
 
 ## Tests that need the native library
@@ -97,17 +98,19 @@ the root aggregate, compiles in CI and is not run there.
 
 ## Building the native library
 
-`make build-milvus-storage && make copy-native-libs` builds and copies
+For a bundle containing both storage and Knowhere, use the
+[unified native build](#unified-native-bundle) below. The standalone migration
+targets `make build-milvus-storage && make copy-native-libs` build and copy
 upstream `libmilvus-storage`, `libmilvus-storage-jni` and their dependencies
 under `native-storage/src/main/resources/native/<platform>/`. The JNI methods
 and `NativeLibraryLoader` belong to milvus-storage. The former Connector
 `libnative-storage-jni`, its C++ sources and `build-native-jni` target have been
 removed. Building requires Conan, CMake and a Rust toolchain.
 
-Initialize the pinned submodule before compiling:
+Initialize the pinned native source submodules before compiling:
 
 ```bash
-git submodule update --init milvus-storage
+git submodule update --init milvus-storage knowhere
 ```
 
 The `native-storage` sbt module compiles `milvus-storage/java/src/main` for
@@ -163,14 +166,155 @@ The upstream `NativeLibraryLoader` selects resources under
 `native/<platform>/`. A library copied directly into `native/` is outside that
 platform directory and cannot satisfy the packaged-library load.
 
+## Unified native bundle
+
+The unified Linux platform JAR contains both upstream JNI entry libraries and
+one dynamically linked dependency set. The implementation and acceptance status
+are documented in [the native build design](design/engineering/native-libraries.html).
+The native build is explicit; ordinary sbt compilation does not start Conan or
+CMake. The independent project in `native-build/` defines both engines, their
+upstream JNI implementations and the optional Cardinal plugins without executing
+their upstream CMake files. One Conan host graph supplies shared dependencies
+to one CMake/Ninja build tree.
+
+Build both engines, package their shared dependencies, and select the result:
+
+```bash
+make native-bundle NATIVE_JOBS=50 NATIVE_BUILD_OPTIONS=--with-cardinal
+make package NATIVE_BUNDLE="$PWD/target/native-build/linux-x86_64/milvus-native-linux-x86_64.jar"
+```
+
+The source build currently uses the Linux x86_64 GCC 12 profile in
+`native-build/profiles/`. It needs Conan 2, CMake 3.27.5, Ninja, the profile's
+compilers, Rust, a JDK, `patchelf` and access to the pinned source repositories
+and Conan recipes. `--with-cardinal` also needs access to both pinned Cardinal
+revisions. `dependencies.json` selects the newer version when the two source
+recipes conflict. Every dependency uses the exact upstream recipe revision in
+`native-build/dependencies.json`; the repository does not export replacement
+recipes or rewrite cached recipes. Integration-specific link relationships live
+in `native-build/cmake/Storage.cmake`, `Knowhere.cmake` and `Cardinal.cmake`.
+Conan can reuse a cached package only when the recipe revision, configuration
+and package ID match.
+
+`NATIVE_JOBS` accepts 1 through 50. The driver builds the Rust bridge first with
+one Ninja job and up to `NATIVE_JOBS` Cargo jobs. It then builds the C++ targets
+with up to `NATIVE_JOBS` Ninja jobs and limits any Cargo recheck to one job.
+This sequencing prevents the Rust and C++ schedulers from each starting a full
+parallel build at once. Engine and JNI targets are installed under
+`NATIVE_WORK_DIR/install/lib/` before their dependency closure is staged.
+
+The build records source changes, recipe identities, dependency locks, the
+resolved graph, compiler commands and library hashes under `NATIVE_WORK_DIR`.
+The resource JAR's provenance embeds only normalized source and package
+identities and digests of the lock, graph, build inputs, libraries, audit
+results and external evidence. Collected licenses are packaged alongside it.
+The JAR does not embed build-machine absolute paths. Full source snapshots, the
+complete Conan graph, `compile_commands.json`, native build commands, the
+build-input backup and the expanded CMake trace remain under `NATIVE_WORK_DIR`.
+Reusing a work directory requires identical source and build inputs. Repeated
+builds validate a new candidate before replacing
+`bundle/`; previous successful bundles and failed candidates remain available
+for diagnosis. Pass `--conan-lock` through `NATIVE_BUILD_OPTIONS` to reuse a
+reviewed complete dependency lock in another build directory. See
+[native-build/README.md](../native-build/README.md) for the directory layout and
+cache options.
+
+On Linux x86_64, `make all`, `package` and `quick-build` use the unified bundle.
+`NATIVE_BUNDLE` selects an existing Linux platform JAR and skips native
+compilation; otherwise `NATIVE_WORK_DIR` holds the build and Conan reuses
+compatible cached packages. Linux aarch64 and macOS retain the existing
+storage-only build when no bundle is selected. Linux aarch64 can consume a
+matching prebuilt unified bundle; the source profile does not cross-compile it.
+Docker uses the same `native-resources` target as Make. Both native build paths
+limit concurrency to `NATIVE_JOBS` (1..50) and preserve initialized submodule
+checkouts. The storage-only resource target always invokes the incremental
+build before copying, including when previous libraries already exist.
+This does not establish joint Storage/Knowhere support on platforms
+without a validated unified bundle.
+
+Select the resulting resource-only JAR and its `.properties` checksum sidecar:
+
+```bash
+sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-linux-x86_64.jar \
+  native-runtime/verifyNativeBundle native-vector/knowhereSmoke
+sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-linux-x86_64.jar test assembly
+```
+
+Before native tests, preload the selected JRE's `lib/libjsig.so` as described
+below. The resulting root assembly contains the bundle resources. At runtime,
+one class loader extracts and verifies them in one private directory; both
+upstream JNI loaders use that directory. The external `.properties` checksum
+sidecar is a build input and is not needed next to the deployed assembly.
+
+Bundle-selected test JVMs use immediate native symbol binding and an empty
+external library path. No external library directory or runtime mutation of
+`java.library.path` is needed.
+
+The system provides glibc, libstdc++, libgcc_s and `libz.so.1`. Zulu JDKs load
+system zlib before connector initialization; a second bundled copy cannot
+override those existing symbol bindings. Native checks verify the required
+zlib symbol versions against the system provider. Other non-system dependencies
+are packaged together. Cardinal's two plugins are checked with their declared
+Knowhere parent callbacks; other libraries must resolve independently.
+
+`milvus.native.bundle` and `knowhere.native.jar` are mutually exclusive. When a
+unified bundle is selected, the old storage resources do not enter the build
+classpath. A malformed bundle fails; it never falls back to those old resources.
+An explicit `knowhere.native.path` pointing elsewhere is rejected at runtime.
+The connector sets this property only during Knowhere initialization under a
+JVM-shared lock, then restores its prior value on success or failure. Multiple
+isolated copies of the Connector's JNI bindings in one JVM remain unsupported.
+Legacy input options and records below remain available during migration; their
+previous validation results do not validate a newly built bundle.
+
+Storage uses the same explicit-path handoff. `NativeStorageLibrary` obtains the
+verified `libmilvus-storage-jni.so` path from `native-runtime`, temporarily sets
+`milvus.storage.native.path`, calls the upstream `NativeLibraryLoader`, and
+restores the prior property on success or failure. The upstream loader owns
+`System.load`. A different configured path, or an upstream loader initialized
+before this handoff, fails visibly instead of selecting another library. When
+no unified bundle is present, the adapter leaves selection to the upstream
+loader, which keeps its packaged-resource and system-library-path behavior.
+
+### Checking native resource merging
+
+Assembly passes through a single native resource without buffering it. When
+multiple JARs supply the same path, `NativeBundle.nativeMergeStrategy` compares
+SHA-256 and byte length using a fixed-size buffer and rejects differing content.
+The plugin's general `deduplicate` strategy buffers whole entries and exhausted
+a 4 GB heap with the current 478 MB storage library. The streaming strategy
+passes the same assembly command at 4 GB. With sbt-assembly 2.1.1, a custom merge
+strategy disables assembly output caching, so repeated assembly commands repack
+the JAR; compilation, native validation and native build caches remain enabled.
+
+After changing that strategy, run its bounded-memory regression probe from the
+repository root. First run an sbt command to compile the build definition, then
+use Java 21:
+
+```bash
+native_probe_cp="$(cat project/target/streams/compile/dependencyClasspath/_global/streams/export):$PWD/project/target/scala-2.12/sbt-1.0/classes"
+mkdir -p target/native-merge-probe
+"$JAVA_HOME/bin/java" -Xmx256m -cp "$native_probe_cp" scala.tools.nsc.Main \
+  -classpath "$native_probe_cp" -d target/native-merge-probe \
+  scripts/tests/NativeMergeProbe.scala
+"$JAVA_HOME/bin/java" -Xmx64m \
+  -cp "target/native-merge-probe:$native_probe_cp" NativeMergeProbe
+```
+
+The probe compares two streams larger than 512 MB with a 64 MB heap, verifies
+single-resource pass-through, rejects content and length differences, and checks
+stream closure after an I/O failure. Also run assembly with the real bundle;
+the probe does not validate the final artifact or its runtime classpath.
+
 ## Knowhere library loading
 
-`native-vector/knowhere.properties` pins the Knowhere PR #1829 source commit
-and archive checksum. `native-vector` builds the original upstream Java sources
-with `javac --release 11`; it does not implement another C API or JNI bridge.
-The API JAR is cached under `native-vector/target/knowhere`. An ordinary compile
-or unit-test run needs a JDK, `tar` and network access for the first source
-download, but does not compile or load the native engine.
+The root `knowhere` submodule follows the Knowhere PR #1829 branch; the
+superproject gitlink fixes the exact commit used by every build. `native-vector`
+compiles `knowhere/java/src/main/java` with `javac --release 11`; it does not
+implement another C API or JNI bridge. The API JAR is cached under
+`native-vector/target/knowhere`. An ordinary compile or unit-test run needs a
+JDK and an initialized submodule, but does not download source or compile or
+load the native engine.
 
 Build the pinned upstream native engine explicitly on the target Linux
 architecture, using the prerequisites listed by the script:
@@ -198,22 +342,19 @@ selected, checksum-verified artifact's `build.with_cardinal` provenance field.
 an arbitrary `knowhere.native.path` override does not establish Cardinal support.
 Validate the storage/Knowhere dependency combination before registering its hashes.
 
-At the pinned revision, the Cardinal build currently stops at an upstream
-DiskANN C test that expects an exact distance from quantized refinement. The
-equivalent Java test also fails (1.0306964 versus 1.0); their assertions have
-not been changed or skipped. The real HNSW version-10 acceptance used a separate
-local diagnostic artifact with `build.validated=false`. Its dependency
-compatibility record does not certify a successful upstream suite or a release.
-See the measured results and limitations in the
-[vector design](design/architecture/vector-search.html#interop). Normal builds
-remain fail-closed until the upstream test contract is corrected.
+The earlier `9dc2b8ad` checkout stopped at an upstream DiskANN exact-distance
+assertion when Cardinal used quantized refinement. That result remains
+historical: the current PR branch has changed the DiskANN tests and must be
+rebuilt and validated from its new gitlink before any native or real-data result
+is claimed. See the measured results and limitations in the
+[vector design](design/architecture/vector-search.html#interop).
 
-For the pinned Linux x86-64 revision, `scripts/build-knowhere.sh import-ci`
-can instead import its already-built CI artifact. It verifies the exact source
-tree and artifact digests, and retains the upstream test and toolchain records.
-Both paths leave the platform JAR and a `.jar.properties` provenance sidecar
-under `target/knowhere-native/<revision>/<platform>/`. The sidecar binds the JAR
-checksum to the pinned source revision. Keep these files together.
+`scripts/build-knowhere.sh import-ci` only accepts a CI artifact explicitly
+registered for the current gitlink. No artifact is registered for the current
+PR branch head, so use `build`. A successful path leaves the platform JAR and a
+`.jar.properties` provenance sidecar under
+`target/knowhere-native/<revision>/<platform>/`. The sidecar binds the JAR
+checksum to the submodule revision. Keep these files together.
 
 Select that absolute JAR path for a native smoke or an assembly:
 
@@ -250,14 +391,15 @@ Milvus binlog/Parquet payloads and optional `SLICE_META`, or a Cardinal raw
 `_mem.index.bin` stream. Payload markers select the matching Faiss or Cardinal
 engine; a shared HNSW name alone does not establish format compatibility.
 Each task owns and closes its index. There is no cross-task index cache.
-The upstream JNI migration and corrected native dependency build have passed
-fresh real UAT Cardinal HNSW queries against direct JNI results and an
+The historical Knowhere `9dc2b8ad` JNI migration and corrected native dependency
+build passed real UAT Cardinal HNSW queries against direct JNI results and an
 independent 100,000-row reference. Actual storage entry-library relocation and
-both native load orders also passed. The complete validation record, remaining
-third-party JNI diagnostics and packaging limitations are in
+both native load orders also passed for that artifact. The current `1fff20db`
+gitlink requires a rebuilt native bundle and a fresh validation run. The complete
+validation record, remaining third-party JNI diagnostics and packaging limitations are in
 [the storage I/O validation state](design/architecture/storage-io.html#state).
 Local OSS fixtures do not replace real-instance-data validation. Tests live in
-`/root/zilliz/milvus-spark-demo`.
+the external `milvus-spark-demo` validation project.
 
 The existing `vector.search.*` reader calls `core.index.BruteForceSearch` and
 `Knowhere.bruteForce`. It scans vectors and merges batch hits into per-segment

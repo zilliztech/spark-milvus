@@ -243,4 +243,4 @@ owner；中途失败返回 <code>delete_failed</code> 与已删数量，留下�
 <p>三件 2026-09-16 定案(决策日志同日):连接与存储选项走命名参数;3.5 线的 <code>spark.functions</code> 包删除;register 的结果表用第三节那四列。
 实现在同一天落地(#17):<code>spark.sql("CALL milvus.system.register(...)")</code> 在 UAT 上完成 #16 的登记。
 #141 随后补齐第三节所列管理过程及其 client RPC、资源关闭和有界等待测试。</p>
-<p>本轮实现 <code>cleanup_staging</code> 的安全判定、审计和文件删除，但不把仍有目录条目的前缀报告成已删除；完整前缀删除等待 milvus-storage 的 C FFI/JNI 出口。仍不为 append 虚构 <code>RegisterSegments</code>，它继续等待 Milvus 服务端公开 API。</p>
+<p><code>cleanup_staging</code> 已实现安全判定、审计和文件删除，但不把仍有目录条目的前缀报告成已删除；完整前缀删除等待 milvus-storage 的 C FFI/JNI 出口。append 登记继续等待 Milvus 服务端公开 <code>RegisterSegments</code> API。</p>

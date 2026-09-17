@@ -29,15 +29,16 @@ after Milvus produces one. See the
 
 ## Project structure
 
-The build has eleven sbt modules in four layers. Dependencies only point
+The build has twelve sbt modules in four layers. Dependencies only point
 downward, and the boundary between layer 2 and layer 3 is enforced at compile
 time: a source file in `core`, `compat` or `client` that mentions
 `org.apache.spark` fails the build.
 
 | Layer | Module | What it holds |
 |---|---|---|
+| 1 | `native-runtime` | Verifies and extracts one unified native dependency bundle shared by both upstream bindings |
 | 1 | `native-storage` | Compiles and packages the pinned milvus-storage JNI and Java/Scala API |
-| 1 | `native-vector` | Loads pinned Knowhere PR #1829 artifacts and delegates BruteForce through its upstream Java API and JNI |
+| 1 | `native-vector` | Compiles the pinned Knowhere PR #1829 Java API and delegates vector operations through its upstream JNI |
 | 2 | `core` | The storage format itself: snapshots, manifests, delete files, schema, codecs, statistics, planning, segment read and write, indexes, object-storage access. No Spark. |
 | 2 | `compat` | Adapters for three non-standard read entry points: Storage V2 packed segments, an offline segment list passed through options, and a milvus-backup export directory |
 | 2 | `client` | The gRPC client for the online Milvus service |
@@ -56,11 +57,19 @@ Only the Spark layer has to be split per line, because the `TableCatalog` and
 version are pinned per line. The fat jar is an `assembly` task on
 `spark-<line>`, not a module of its own.
 
-Two git submodules sit at the repository root. `milvus-proto` supplies the
+Three git submodules sit at the repository root. `milvus-proto` supplies the
 protobuf definitions: `common.proto` and `schema.proto` are generated into
 `core` because the storage format itself is defined in protobuf, and the five
 files carrying gRPC services are generated into `client`. `milvus-storage`
-supplies the native storage library.
+supplies the native storage library. `knowhere` tracks the PR #1829 branch and
+supplies the C API, JNI and Java sources used by `native-vector` and the unified
+native build.
+
+Initialize all three at their recorded gitlinks before compiling:
+
+```bash
+git submodule update --init milvus-proto milvus-storage knowhere
+```
 
 ## Documents
 
@@ -153,14 +162,16 @@ sbt test                                 # unit tests, all modules
 sbt integration40/test                   # integration tests, needs Milvus and MinIO
 ```
 
-`sbt compile` builds all eleven modules. To work on one, prefix the command with
+`sbt compile` builds all twelve modules. To work on one, prefix the command with
 its project id: `core/test`, `spark40/compile`, `apps40/test`. The ids drop the
 dot, so the project for `spark-4.0` is `spark40`.
 
 ### Docker
 
-The Docker build handles every dependency, including the native milvus-storage
-library.
+The Docker build handles the native dependencies on an architecture-native
+worker. Linux x86_64 builds the unified Storage/Knowhere bundle. Linux aarch64
+retains the existing storage-only build, or accepts a matching prebuilt unified
+JAR and its `.properties` sidecar through `NATIVE_BUNDLE`.
 
 ```bash
 docker build -t spark-milvus .                                  # current architecture
@@ -171,6 +182,9 @@ docker build --build-arg PUBLISH_TO_CENTRAL=false -t spark-milvus .
 |---|---|---|
 | `GIT_BRANCH` | `unknown` | Goes into the version string |
 | `PUBLISH_TO_CENTRAL` | `true` | Whether to publish to Maven Central Snapshots |
+| `NATIVE_BUNDLE` | empty | Prebuilt unified Linux JAR inside the build context, with its checksum sidecar |
+| `NATIVE_JOBS` | `50` | Native build concurrency, from 1 to 50 |
+| `NATIVE_BUILD_OPTIONS` | empty | Unified source build options, including `--conan-lock` and `--with-cardinal` |
 
 The version is derived as `2.0.0-{branch}-{arch}-SNAPSHOT`, for example
 `2.0.0-refactor-v2-amd64-SNAPSHOT`.

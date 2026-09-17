@@ -2,16 +2,18 @@ package com.zilliz.milvus.storage.io
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
+import java.nio.file.attribute.{PosixFilePermission, PosixFilePermissions}
+import java.util.Collections
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import io.milvus.storage.{
   MilvusStorageException,
   MilvusStorageFileSystem,
-  MilvusStorageProperties,
-  NativeLibraryLoader
+  MilvusStorageProperties
 }
 
 /** Exercises the C filesystem through JNI on the local backend, which needs no
@@ -30,7 +32,7 @@ class StorageNativeTest
 
   override def beforeAll(): Unit = {
     root = Files.createTempDirectory("native-storage-test")
-    try NativeLibraryLoader.loadLibrary()
+    try NativeStorageLibrary.load()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
         available = false
@@ -145,8 +147,7 @@ class StorageNativeTest
 
       Files.setPosixFilePermissions(
         locked,
-        java.util.Collections
-          .emptySet[java.nio.file.attribute.PosixFilePermission]()
+        Collections.emptySet[PosixFilePermission]()
       )
       val denied = intercept[MilvusStorageException](
         store.exists("locked/_committed")
@@ -155,7 +156,7 @@ class StorageNativeTest
     } finally {
       Files.setPosixFilePermissions(
         locked,
-        java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")
+        PosixFilePermissions.fromString("rwx------")
       )
       store.close()
     }
