@@ -8,6 +8,16 @@ const definitions = {
   search: { description: 'Search literal text in fixed Git objects. Follow next_offset for more.', properties: { ref: properties.ref, pattern: { type: 'string' }, offset: properties.offset, limit: properties.limit }, required: ['pattern'] },
 };
 
+// Tool arguments are model output, never gateway response text; keep them readable even when malformed.
+function describeArguments(raw) {
+  if (typeof raw !== 'string') return raw ?? null;
+  try { return JSON.parse(raw); } catch { return { unparsed: raw.slice(0, 500) }; }
+}
+
+function describeUsage(usage) {
+  return usage && typeof usage === 'object' ? { promptTokens: usage.prompt_tokens ?? null, completionTokens: usage.completion_tokens ?? null } : null;
+}
+
 export class Model {
   constructor({ url, key, model, fetchImpl = fetch, maxToolRounds = 16 }) {
     const endpoint = new URL(url);
@@ -19,7 +29,7 @@ export class Model {
     this.maxToolRounds = maxToolRounds;
   }
 
-  async complete({ system, payload, tools }) {
+  async complete({ system, payload, tools, onRound = async () => {} }) {
     const messages = [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(payload) }];
     const toolFailures = [];
     const available = Object.keys(tools).map(name => {
@@ -28,43 +38,66 @@ export class Model {
       return { type: 'function', function: { name, description, parameters: { type: 'object', properties, required, additionalProperties: false } } };
     });
     for (let round = 0; round <= this.maxToolRounds; round++) {
-      const response = await this.fetch(this.url, {
-        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(180_000),
-        headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: this.model, messages, max_tokens: 8192, response_format: { type: 'json_object' },
-          ...(available.length ? { tools: available } : {}),
-        }),
-      });
+      const started = Date.now();
+      // One trace entry per request: which tools were asked for and how the round ended. Model and gateway text is never copied into it.
+      const entry = { round, elapsedMs: 0, httpStatus: null, finishReason: null, usage: null, contentChars: 0, toolCalls: [] };
+      const record = async () => { entry.elapsedMs = Date.now() - started; await onRound(entry); };
+      const fail = async message => { await record(); throw new Error(message); };
+      let response;
+      try {
+        response = await this.fetch(this.url, {
+          method: 'POST', redirect: 'error', signal: AbortSignal.timeout(180_000),
+          headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: this.model, messages, max_tokens: 8192, response_format: { type: 'json_object' },
+            ...(available.length ? { tools: available } : {}),
+          }),
+        });
+      } catch (error) {
+        // Only the error class is traced: a transport message can name the gateway host, which is a secret.
+        entry.error = error.name || 'Error';
+        await record();
+        throw error;
+      }
+      entry.httpStatus = response.status;
       // Never log gateway response bodies: they can contain echoed request credentials.
-      if (!response.ok) throw new Error(`Model request failed: HTTP ${response.status}`);
+      if (!response.ok) await fail(`Model request failed: HTTP ${response.status}`);
       const data = await response.json();
       const choice = data.choices?.[0];
-      if (!choice || choice.finish_reason === 'length') throw new Error('Model response missing or truncated');
-      const message = choice.message;
+      const message = choice?.message;
+      entry.finishReason = choice?.finish_reason ?? null;
+      entry.usage = describeUsage(data.usage);
+      entry.contentChars = typeof message?.content === 'string' ? message.content.length : 0;
+      entry.toolCalls = (message?.tool_calls || []).map(call => ({ name: call.function?.name ?? null, arguments: describeArguments(call.function?.arguments) }));
+      if (!choice || choice.finish_reason === 'length') await fail('Model response missing or truncated');
       if (message?.tool_calls?.length) {
-        if (round === this.maxToolRounds) throw new Error('Model tool budget exhausted; review incomplete');
-        if (message.tool_calls.length > 32) throw new Error('Too many tool calls; review incomplete');
+        if (round === this.maxToolRounds) await fail('Model tool budget exhausted; review incomplete');
+        if (message.tool_calls.length > 32) await fail('Too many tool calls; review incomplete');
         messages.push(message);
-        for (const call of message.tool_calls) {
+        for (const [index, call] of message.tool_calls.entries()) {
           let result;
           const name = call.function?.name;
-          if (!Object.hasOwn(tools, name)) throw new Error('Model requested an unavailable tool');
+          if (!Object.hasOwn(tools, name)) await fail('Model requested an unavailable tool');
           try {
             result = await tools[name](JSON.parse(call.function.arguments));
           } catch (error) {
             result = { error: error.message };
             toolFailures.push(`${name}: ${error.message}`);
+            entry.toolCalls[index].error = error.message;
           }
-          messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+          const content = JSON.stringify(result);
+          entry.toolCalls[index].resultChars = content.length;
+          messages.push({ role: 'tool', tool_call_id: call.id, content });
         }
+        await record();
         continue;
       }
-      if (choice.finish_reason !== 'stop' || typeof message?.content !== 'string') throw new Error('Model did not finish a structured review');
+      if (choice.finish_reason !== 'stop' || typeof message?.content !== 'string') await fail('Model did not finish a structured review');
       const text = message.content.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
       let parsed;
-      try { parsed = JSON.parse(text); } catch { throw new Error('Model returned invalid review JSON'); }
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('Model returned invalid review object');
+      try { parsed = JSON.parse(text); } catch { await fail('Model returned invalid review JSON'); }
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') await fail('Model returned invalid review object');
+      await record();
       // Execution failures are trusted program state; model output cannot erase them.
       return { ...parsed, toolFailures };
     }
