@@ -17,10 +17,15 @@ export async function run({ env = process.env, fetchImpl = fetch, repositoryFact
   let exitCode = 0;
   let report = { complete: false, findings: [], disputed: [], limitations: ['Review has not completed.'], coverage: [] };
 
-  async function save(result) {
+  let saving = Promise.resolve();
+  function save(result) {
     report = result;
-    await writeFile(join(output, 'review.json'), JSON.stringify({ head: pr?.head.sha, base: pr?.base.sha, ...result }, null, 2));
-    if (pr) await writeFile(join(output, 'review.md'), renderSummary(pr, result, runUrl));
+    // Both reviewers report progress concurrently; one write at a time keeps review.json from interleaving two snapshots.
+    saving = saving.catch(() => {}).then(async () => {
+      await writeFile(join(output, 'review.json'), JSON.stringify({ head: pr?.head.sha, base: pr?.base.sha, ...result }, null, 2));
+      if (pr) await writeFile(join(output, 'review.md'), renderSummary(pr, result, runUrl));
+    });
+    return saving;
   }
 
   try {

@@ -50,9 +50,13 @@ fail the job or submit REQUEST_CHANGES; branch protection is configured
 separately by maintainers.
 
 The `ai-review-<PR>-<attempt>` artifact contains the complete diff inventory,
-structured findings, reviewer disagreements, limitations and per-chunk coverage.
-Partial reports are saved as the run progresses. A cancelled/timed-out run is
-not a completed review; consult its workflow status and stamped summary SHA.
+structured findings, reviewer disagreements, limitations, per-chunk coverage and
+the per-round model trace: for every request, the reviewer, stage, batch,
+elapsed time, HTTP status, finish reason, token usage, and each requested tool
+with its arguments and result size. Model and gateway response text is never
+recorded. The report is saved after every round, so a cancelled/timed-out run
+keeps the trace up to its last completed request. Such a run is not a completed
+review; consult its workflow status and stamped summary SHA.
 Comments that exceed GitHub's size limit link to the full artifact rather than
 claiming that omitted report details are absent.
 

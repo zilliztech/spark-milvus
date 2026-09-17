@@ -76,3 +76,36 @@ test('type-change file headers are not interpreted as diff content lines', () =>
   assert.deepEqual([...diffLines(patch)].sort(), ['LEFT:1', 'RIGHT:1']);
   assert.ok(diffLines('@@ -0,0 +1 @@\n+++ actual source text\n').has('RIGHT:1'));
 });
+
+test('the trace names the reviewer, stage and batch of every round and is saved as it grows', async () => {
+  const model = new Model({ url: 'https://model.invalid', key: 'test-only', model: 'test', fetchImpl: async (_url, init) => {
+    const messages = JSON.parse(init.body).messages;
+    const payload = JSON.parse(messages[1].content);
+    const choice = messages.some(m => m.role === 'tool')
+      ? { finish_reason: 'stop', message: { content: JSON.stringify({ reviewed: payload.units.map(u => u.id), findings: [], limitations: [] }) } }
+      : { finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: 'read', function: { name: 'read_file', arguments: '{"path":"reader.scala"}' } }] } };
+    return new Response(JSON.stringify({ choices: [choice] }), { status: 200 });
+  } });
+  const saved = [];
+  const result = await runReview({ changes: [change(finding.path, patch)], config, rules: '', context: {}, repository: { readFile: async () => ({ content: 'val reader = 1' }) }, model, onProgress: async r => { saved.push(r.trace.length); } });
+  assert.equal(result.complete, true);
+  assert.equal(result.trace.length, 4);
+  assert.deepEqual([...new Set(result.trace.map(t => t.reviewer))].sort(), ['architecture', 'storage']);
+  assert.ok(result.trace.every(t => t.stage === 'review' && t.batch === 0 && t.group === null));
+  assert.deepEqual(result.trace.filter(t => t.reviewer === 'storage').map(t => t.round), [0, 1]);
+  assert.ok(saved.includes(1), 'saved after the first round');
+  assert.ok(!JSON.stringify(result.trace).includes('val reader'));
+});
+
+test('a failing reviewer waits for its sibling, so both traces are complete before the failure surfaces', async () => {
+  const model = { complete: async ({ payload, onRound }) => {
+    await onRound({ round: 0, toolCalls: [] });
+    if (payload.reviewer === 'architecture') throw new Error('Model tool budget exhausted; review incomplete');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await onRound({ round: 1, toolCalls: [] });
+    return { reviewed: payload.units.map(u => u.id), findings: [], limitations: [] };
+  } };
+  let last;
+  await assert.rejects(runReview({ changes: [change(finding.path, patch)], config, rules: '', context: {}, repository: {}, model, onProgress: async r => { last = r; } }), /budget/);
+  assert.deepEqual(last.trace.map(t => `${t.reviewer}:${t.round}`).sort(), ['architecture:0', 'storage:0', 'storage:1']);
+});
