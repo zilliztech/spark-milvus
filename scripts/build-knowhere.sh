@@ -197,8 +197,12 @@ else
   source build/Release/generators/conanrun.sh
   set -u
   ctest --test-dir build/Release --output-on-failure | tee "$verification/ctest.log"
+  # Cardinal's DiskANN refines with RBQ8 and reports quantized distances; the upstream
+  # DiskAnnIT test applies a relative tolerance only when told the engine is approximate.
+  mvn_argline=-Xcheck:jni
+  if [[ $with_cardinal == true ]]; then mvn_argline="$mvn_argline -Dknowhere.test.approximateDistances=true"; fi
   LD_PRELOAD="$JAVA_HOME/lib/libjsig.so${LD_PRELOAD:+:$LD_PRELOAD}" mvn -B -f java/pom.xml test \
-    -Dtest=KnowhereTest,DiskAnnIT -DargLine=-Xcheck:jni \
+    -Dtest=KnowhereTest,DiskAnnIT "-DargLine=$mvn_argline" \
     "-Dknowhere.native.path=$source_dir/build/Release/java/libknowhere_jni.so" 2>&1 | tee "$verification/jni-maven.log"
   python3 java/scripts/check_jni_diagnostics.py "$verification/jni-maven.log" java/target/surefire-reports
   python3 -m unittest discover -s java/tests -v
