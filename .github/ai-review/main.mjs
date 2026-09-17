@@ -15,7 +15,7 @@ export async function run({ env = process.env, fetchImpl = fetch, repositoryFact
   const runUrl = `https://github.com/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`;
   let pr, repository;
   let exitCode = 0;
-  let report = { complete: false, findings: [], disputed: [], limitations: ['Review has not completed.'], coverage: [] };
+  let report = { complete: false, findings: [], disputed: [], limitations: ['Review has not completed.'], caveats: [], coverage: [] };
 
   let saving = Promise.resolve();
   function save(result) {

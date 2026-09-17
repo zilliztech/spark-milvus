@@ -39,8 +39,10 @@ export class Model {
     });
     for (let round = 0; round <= this.maxToolRounds; round++) {
       const started = Date.now();
+      // The last request forbids tools, so an exhausted budget still yields a structured answer; review.mjs records the exhaustion.
+      const forced = round === this.maxToolRounds;
       // One trace entry per request: which tools were asked for and how the round ended. Model and gateway text is never copied into it.
-      const entry = { round, elapsedMs: 0, httpStatus: null, finishReason: null, usage: null, contentChars: 0, toolCalls: [] };
+      const entry = { round, forced, elapsedMs: 0, httpStatus: null, finishReason: null, usage: null, contentChars: 0, toolCalls: [] };
       const record = async () => { entry.elapsedMs = Date.now() - started; await onRound(entry); };
       const fail = async message => { await record(); throw new Error(message); };
       let response;
@@ -50,7 +52,7 @@ export class Model {
           headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: this.model, messages, max_tokens: 8192, response_format: { type: 'json_object' },
-            ...(available.length ? { tools: available } : {}),
+            ...(available.length ? { tools: available, ...(forced ? { tool_choice: 'none' } : {}) } : {}),
           }),
         });
       } catch (error) {
@@ -98,8 +100,8 @@ export class Model {
       try { parsed = JSON.parse(text); } catch { await fail('Model returned invalid review JSON'); }
       if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') await fail('Model returned invalid review object');
       await record();
-      // Execution failures are trusted program state; model output cannot erase them.
-      return { ...parsed, toolFailures };
+      // Execution state is trusted program state; model output can neither erase nor inject it.
+      return { ...parsed, toolFailures, exhaustedAfter: forced ? this.maxToolRounds : 0 };
     }
     throw new Error('Model review incomplete');
   }
