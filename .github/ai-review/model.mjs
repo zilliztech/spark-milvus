@@ -31,7 +31,10 @@ export class Model {
       const response = await this.fetch(this.url, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(180_000),
         headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: this.model, messages, max_tokens: 8192, ...(available.length ? { tools: available } : {}) }),
+        body: JSON.stringify({
+          model: this.model, messages, max_tokens: 8192, response_format: { type: 'json_object' },
+          ...(available.length ? { tools: available } : {}),
+        }),
       });
       // Never log gateway response bodies: they can contain echoed request credentials.
       if (!response.ok) throw new Error(`Model request failed: HTTP ${response.status}`);

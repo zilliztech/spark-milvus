@@ -74,6 +74,8 @@ export async function runReview({ changes, config, rules, context, repository, m
   if (config.reviewers?.length !== 2 || new Set(config.reviewers.map(r => r.id)).size !== 2) throw new Error('Exactly two distinct reviewers are required');
   const plan = planReview(changes, config.batchChars);
   const result = { complete: false, findings: [], disputed: [], limitations: [...plan.limitations], coverage: plan.units.map(u => ({ id: u.id, path: u.path, part: u.part, reviewedBy: [] })) };
+  // Preserve the pending file inventory even if the first model request fails.
+  await onProgress(result);
   const tools = {
     read_file: args => repository.readFile(args),
     list_files: args => repository.listFiles(args),

@@ -19,7 +19,8 @@ arbitrary network endpoints. GitHub publication is performed by the program.
    into `refactor/v2` alone does not deploy the default-branch program.
 2. Keep the existing `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` repository
    secrets. The gateway must support the configured model's OpenAI-compatible
-   chat-completions API with function tools. Secret values are never copied
+   chat-completions API with function tools and JSON output
+   (`response_format: {"type": "json_object"}`). Secret values are never copied
    into the repository or artifacts.
 3. Set repository variable `ENABLE_AI_REVIEW=true`. PR-Agent then keeps its
    description and labels while disabling automatic review and code suggestions.
