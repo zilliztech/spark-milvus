@@ -101,6 +101,7 @@ C 接口、JNI native 方法、`io.knowhere` Java API 和原生资源加载器�
 `src/main/cpp/README.md` 记录原生代码的上游归属，Connector 中不保留第二份实现。
 现有 vector.search.* 经 core.index.BruteForceSearch 调用上游 BruteForce，按批计算、合并段内 TopK；这个逐段入口随统一入口的 exact 模式删除（决策日志 2026-09-17）。建索引（W6）调用同一上游的 build 与 serialize；搜索和建索引线程池的大小等上游接口开放后在本模块设置。索引入口经 NativeVectorIndex 调用同一上游的 BinarySet、deserialize、search；不新增 Knowhere JNI。文件格式在 core 解释，Cardinal stream 要求经过特性校验的 WITH_CARDINAL 构建。
 Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 BinarySet key 分开。统一平台包的 provenance 生成 `META-INF/milvus/knowhere-runtime.properties`，并由 native-runtime 校验两个 JNI、全部依赖、别名和摘要后一次解压；`storage-compatibility*.properties` 只属于迁移前的独立产物组合，统一包不再据它复制或覆盖库。旧 gitlink、旧自有 Conan recipe 实现的 Cardinal 组合曾通过真实 HNSW/COSINE 查询；当前构建使用固定上游 recipe revision 与 CMake 显式链接，子模块 revision 尚待重建，结果及验收边界见 [原生构建验收](../engineering/native-libraries.html#validation) 以及 [向量搜索第 2.9 节](vector-search.html#interop)。
+绑定本身的接口、内存所有权、与核心和 Connector 的能力对照以及线程模型见 [Knowhere JNI 实现方案](knowhere-jni.html)。
 
 ### 2.5 client `com.zilliz.milvus.client`
 

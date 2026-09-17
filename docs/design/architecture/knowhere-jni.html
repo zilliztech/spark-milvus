@@ -1,0 +1,195 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowhere JNI 实现方案 · Spark-Milvus</title>
+<style>
+  :root{color-scheme:light dark;--paper:#fafaf8;--ink:#202824;--muted:#53615a;--line:#d7dfd9;--link:#16654b;--code:#eef2ee;--accent:#e6f1e9}
+  @media(prefers-color-scheme:dark){:root{--paper:#171c19;--ink:#e5ebe6;--muted:#a5b2a9;--line:#39473e;--link:#83d3ae;--code:#242d27;--accent:#253b2c}}
+  *{box-sizing:border-box}html{scroll-padding-top:24px}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.85 system-ui,"PingFang SC","Microsoft YaHei",sans-serif}
+  main{max-width:1040px;margin:auto;padding:48px 30px 88px}h1{font-size:32px;line-height:1.35;margin:0 0 24px}h2{font-size:23px;line-height:1.5;margin:44px 0 18px;padding-top:20px;border-top:1px solid var(--line)}h3{font-size:18px;margin:28px 0 12px}p{margin:14px 0}.lead{font-size:20px}.meta{color:var(--muted);font-size:14px}
+  a{color:var(--link);text-underline-offset:3px;overflow-wrap:anywhere}a:focus-visible{outline:2px solid var(--link);outline-offset:4px}nav{display:flex;flex-wrap:wrap;gap:6px 20px;padding:18px 0;font-size:14px}
+  code{font:.88em/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:2px 4px;overflow-wrap:anywhere}pre{background:var(--code);border:1px solid var(--line);padding:18px;overflow-x:auto;border-radius:5px}pre code{padding:0;white-space:pre;overflow-wrap:normal}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:14px}th,td{text-align:left;vertical-align:top;border:1px solid var(--line);padding:10px 12px;overflow-wrap:anywhere}th{background:var(--code)}ul,ol{padding-left:25px}li{margin:8px 0}.notice{border-left:4px solid var(--link);background:var(--accent);padding:12px 18px}.check{list-style:none;padding:0}.check li::before{content:"□ ";color:var(--link)}.figure{overflow-x:auto}svg{display:block;min-width:720px;width:100%;height:auto}svg text{fill:var(--ink);font:15px system-ui,sans-serif}svg rect{fill:var(--code);stroke:var(--line)}svg .publication{fill:var(--accent)}svg path{stroke:var(--link);fill:none;stroke-width:2}svg marker path{fill:var(--link);stroke:none}
+  details{margin:28px 0;border:1px solid var(--line);padding:14px 18px}summary{cursor:pointer;font-weight:600}
+  .table-scroll{overflow-x:auto}.jni-parity{min-width:900px;table-layout:fixed}
+  @media(max-width:600px){main{padding:28px 18px 56px}h1{font-size:27px}table{font-size:13px}th,td{padding:8px}h2{font-size:21px}}
+  @media print{main{max-width:none;padding:0}nav{display:none}pre{white-space:pre-wrap}pre code{white-space:pre-wrap}h2,h3{break-after:avoid}tr{break-inside:avoid}}
+</style>
+
+<main lang="zh-CN">
+<h1>Knowhere JNI 实现方案</h1>
+<p class="lead">为 spark-milvus 提供 Knowhere 的索引构建、加载、搜索、序列化与暴力搜索 C ABI / Java JNI 绑定。Cardinal Aquila 的 11 项扩展首期暂缓。</p>
+<p>Java 11 API 经 JNI 调用 C ABI，再由 C++ 调用 Knowhere 与计算后端。索引文件编码、对象存储、缓存和登记由 Connector 第二层处理；本页定义绑定实现，<a href="../engineering/native-libraries.html">独立 CMake 构建方案</a>定义原生产物的统一构建与打包。</p>
+<p class="meta">2026-09-15 · 首期实现与双架构运行验证完成 · 发布材料仍待补齐，流水线后续推进。2026-09-17 补充能力对照（1.1 节）与线程模型（3.1 节）。</p>
+<nav aria-label="目录"><a href="#scope">完整能力清单</a><a href="#implementation">实现路径</a><a href="#api">接口与内存</a><a href="#build">构建产物</a><a href="#tasks">开发与贡献</a><a href="#acceptance">验收</a></nav>
+
+<h2 id="scope">1. 完整能力清单</h2>
+<p id="capability-overview"><strong>首期交付包含通用索引、暴力搜索和共用资源管理；DiskANN 按索引类型提供文件适配。</strong> 下表统一列出用途与验收要求；功能分组不等于 JNI 方法数量。</p>
+<p id="connector-requirement">“spark-milvus 是否必需”按<a href="../capabilities.md">v2 已规划功能</a>判断。经用户与 Knowhere 负责人确认，Cardinal 11 项首期暂缓，不进入实现、验收或发布条件；表中的行为与测试保留为后续参考。native-vector 已按 PR #1829 的固定提交接入加载、暴力搜索与索引搜索；表中描述的是绑定能力，Connector 实际用到的子集见 1.1 节。</p>
+<div class="table-scroll"><table class="jni-parity" id="jni-capabilities" aria-describedby="connector-requirement"><colgroup><col style="width:20%"><col style="width:20%"><col style="width:33%"><col style="width:27%"></colgroup><thead><tr><th scope="col">能力 / JNI 操作</th><th scope="col">spark-milvus 是否必需</th><th scope="col">用途与行为</th><th scope="col">验收要求（暂缓项供参考）</th></tr></thead>
+<tbody><tr><th colspan="4" scope="rowgroup">通用索引、暴力搜索与共用契约</th></tr>
+<tr><td>索引创建与释放：<code>create / close</code></td><td>必需</td><td>按索引类型、dtype 和格式版本创建对象，释放索引及缓存持有的 native 资源。支撑 V1、V2、V4、W6。</td><td>按支持的类型创建；未知组合明确失败；重复 close 和关闭后调用符合约定。</td></tr>
+<tr><td>索引构建：<code>build</code></td><td>必需</td><td>从向量数据构建段索引或任务内索引，支撑 W6 和 V4。索引内部训练由 Build 调用链完成，不要求调用 Aquila 的 trainSample/trainAssign。</td><td>FLAT 结果精确；HNSW、IVF_FLAT 达到测试约定的召回；构建后可搜索与导出。</td></tr>
+<tr><td>索引加载：<code>deserialize</code></td><td>必需</td><td>core.index 从 Milvus 索引文件还原 BinarySet，再交给 native 加载，支撑 V2、V4。</td><td>读取固定索引 fixture，并完成序列化往返；搜索结果保持一致，错误格式版本失败。</td></tr>
+<tr><td>索引写出：<code>serialize</code></td><td>必需</td><td>native 产出 BinarySet，由 core.index 编码为 Milvus 索引文件并登记，支撑 W6。</td><td>导出后关闭原索引，由新对象加载并搜索；名称、长度和数据完整保留。</td></tr>
+<tr><td>BinarySet 创建、追加、枚举、长度、分块读取与释放</td><td>必需</td><td>让 JVM 传入、取出具名索引 blob，连接加载与写出流程；大条目不能限制在单个 Java 数组内。支撑 V2、W6。</td><td>多条目、空集、大条目分块读写与提前关闭测试；校验所有权及 64 位长度。</td></tr>
+<tr><td>索引检索：<code>search</code></td><td>索引消费时必需</td><td>让 V1 提供给下游的绑定可以查询 V2/V4 加载或缓存的索引，返回 ID 和距离并接收过滤位图。该底层入口不单独定义新的 Spark SQL 检索语法。</td><td>核对 top-k 的 ID、距离及过滤位图；验证查询与输出缓冲区的容量。</td></tr>
+<tr><td>暴力搜索：<code>bruteforce</code></td><td>必需</td><td>对基向量与查询向量执行距离计算、top-k 和过滤，支撑 V5；一次调用接受多条查询。Spark 侧的查询集入口见<a href="vector-search.html#api">向量搜索与建索引 1.1</a>（决策 16 已定：唯一入口，exact 与 index 两种策略）。</td><td>固定向量与查询，对照精确 top-k；过滤后结果正确，直接写调用方输出缓冲区。</td></tr>
+<tr><td>DiskANN 本地 FileManager 与文件加载适配</td><td>使用 DiskANN 时必需</td><td>按总体设计 2.5，将落到本地的索引文件交给需要 FileManager 的索引实现；普通内存索引不要求该适配。</td><td>Linux 本地索引文件构建、加载与搜索往返通过后，才声明支持 DiskANN。</td></tr>
+<tr><td>版本信息、参数与 buffer 校验、句柄所有权、异常转换、动态库加载</td><td>共用必需契约</td><td>保证以上接口能安全交接地址、区分索引格式版本并释放资源。它们可能由多项方法或内部机制实现，不能按表格行数计算 JNI 方法总数。</td><td>纯 C 调用、无效参数、溢出、关闭后调用、内存检查和干净 JRE 加载全部通过。</td></tr>
+</tbody><tbody><tr id="cardinal-reference"><th colspan="4" scope="rowgroup">首期暂缓 · Cardinal Aquila：聚类 5 项、去重 1 项、Isolation Forest 4 项、文件转换 1 项</th></tr>
+<tr id="ref-sampleVectors"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/clustering_jni.h#L10">sampleVectors</a></td><td><strong>非必需；首期暂缓。</strong>R14 回表按段和行号取列，不读取 fbin 抽样文件。</td><td>按行号从 fbin 读取 float32 向量，保持所请求行号的顺序，写回数组；成功返回 0。</td><td>固定文件读取行号 [2, 0, 2]，校验顺序、重复行与所有输出值。</td></tr>
+<tr id="ref-trainSample"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/clustering_jni.h#L15">trainSample</a></td><td><strong>非必需；首期暂缓。</strong>未承诺独立的 KMeans 抽样流程；W6 通过索引 build 入口执行建索引。</td><td>按比例抽样到新 fbin；比例为 (0,1]，数量至少 1，参考实现使用种子 42 并按原行号排序后写出。</td><td>比对数量、抽样行与文件格式；比例 1 保留全量，非法比例失败。</td></tr>
+<tr id="ref-trainPreprocess"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/clustering_jni.h#L19">trainPreprocess</a></td><td><strong>非必需；首期暂缓。</strong>未承诺 KMeans 预处理文件与训练状态管理；索引内部训练不要求暴露此入口。</td><td>生成预处理数据和训练状态文件，支持 fp32、sq8、sq4 与 ADSampling epsilon。</td><td>三种 precision 分别生成文件，并由下一阶段成功读取；不能只覆盖 fp32。</td></tr>
+<tr id="ref-trainAssign"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/clustering_jni.h#L24">trainAssign</a></td><td><strong>非必需；首期暂缓。</strong>未承诺分布式 KMeans 的中心迭代与统计聚合；W6 不直接调用该步骤。</td><td>执行一次中心分配；输入中心为 float32，输出每簇 double sums、int counts、double costs；cost 为平方 L2 累加。</td><td>固定样本与中心，比对 counts、sums 和 costs；由调用方聚合、更新中心后再迭代。</td></tr>
+<tr id="ref-assign"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/clustering_jni.h#L30">assign</a></td><td><strong>非必需；首期暂缓。</strong>最近聚类中心分配未列入 v2 功能；V5 暴力搜索走通用 BF 接口。</td><td>从源 fbin 分批分配到最近中心；写回每行 int 簇编号和 float 距离，返回处理行数。</td><td>固定中心与有明确间隔的簇，核对行顺序、距离及跨批输出；保留 epsilon 参数。</td></tr>
+<tr id="ref-dedupPartition"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/dedup_jni.h#L10">dedupPartition</a></td><td><strong>非必需；首期暂缓。</strong>未承诺向量相似去重；R8 删除生效依据删除记录，不计算相似连通分量。</td><td>读取 fbin、ids、dist、clst；根据 l2/cosine 阈值找相似边，合并连通分量，写回 int64 component IDs 与 byte 代表标记，返回行数。</td><td>强制 BF 与 Index 两条路径；验证阈值边界、连通分量、代表选择、配置参数和四文件行数一致性。</td></tr>
+<tr id="ref-iforestScoreBatch"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/iforest_jni.h#L10">iforestScoreBatch</a></td><td><strong>非必需；首期暂缓。</strong>v2 未承诺异常评分；下游应用需要时可调用该入口。</td><td>Java float[] 输入；读取平铺森林结构，输出每行 anomaly score。</td><td>固定森林与向量，对照评分公式及参考实现，验证树数组和根索引。</td></tr>
+<tr id="ref-iforestScoreFromAddress"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/iforest_jni.h#L16">iforestScoreFromAddress</a></td><td><strong>非必需；首期暂缓。</strong>R17 交付向量地址供下游消费，不要求 Connector 执行 Isolation Forest 评分。</td><td>从调用方提供的 native 地址读取向量，森林和输出仍为 Java 数组；与数组版本调用同一评分计算。</td><td>与数组入口结果一致；加入地址、长度、存活期校验，不用 Java float[] 复制取代地址入口。</td></tr>
+<tr id="ref-iforestTrain"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/iforest_jni.h#L22">iforestTrain</a></td><td><strong>非必需；首期暂缓。</strong>v2 未承诺 Isolation Forest 模型训练。</td><td>Java float[] 输入；参数包括 nTrees、nSamples、maxFeatures、randomSeed，输出平铺森林。参考实现返回缓冲区跨度 nTrees × (2 × nSamples + 1)，并非实际使用节点数。</td><td>固定种子训练并评分；校验树根、子节点偏移和容量，区分预留跨度与实际节点数。</td></tr>
+<tr id="ref-iforestTrainFromAddress"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/iforest_jni.h#L28">iforestTrainFromAddress</a></td><td><strong>非必需；首期暂缓。</strong>地址输入是训练能力的另一入口；R17 不要求 Connector 执行模型训练。</td><td>native 地址输入；其余训练参数与输出和数组入口一致。</td><td>与数组入口使用相同输入和种子，比较可达树结构及评分；检查借用内存生命周期。</td></tr>
+<tr id="ref-parquetToFbin"><td><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/include/jni/materialize_jni.h#L10">parquetToFbin</a></td><td><strong>非必需；首期暂缓。</strong>R4 通过存储 JNI 读取 Parquet 并交接 Arrow 批次，无需生成 fbin/ids。</td><td>本地 Parquet 按批读取 int64 ID 与 <code>list&lt;float32&gt;</code> 向量，写 fbin 与 ids；返回行数，并写回维度。</td><td>固定多 row-group Parquet，校验完整二进制输出、列选择、维度、空值/类型错误和空输入。</td></tr>
+</tbody></table></div>
+<p>通用能力依据<a href="../README.md#25-原生层">总体设计原生层</a>、<a href="../capabilities.md#5-向量与索引">V1/V2/V4/V5</a>和 <a href="../capabilities.md#2-表写">W6</a>。Cardinal 核对基线为 <a href="https://github.com/zilliztech/cardinal/commit/19f2a027cb12dd5cf3d7c493940df15120a64c66">19f2a027cb12dd5cf3d7c493940df15120a64c66</a>：11 个 JNI 入口调用 9 个 C 入口，Isolation Forest 的数组/地址版本共享计算函数。暂缓项恢复开发时，再评审功能、参数、输出语义、格式和接口命名。</p>
+
+<h3 id="capability-matrix">1.1 核心、绑定与 Connector 的能力对照</h3>
+<p><strong>绑定开放的是核心能力的一个子集，Connector 又只用了其中两项；每层缺口归属不同的仓库。</strong>绑定列以 PR #1829 的 8c6017b 为准，其 <code>c_api.h</code> 与全部 <code>io.knowhere</code> 源码与 Connector 钉住的 9dc2b8ad 逐字节相同。Connector 列以 refactor/v2 @ 2d1b825 为准。</p>
+<div class="table-scroll"><table><thead><tr><th>能力</th><th>Knowhere 核心</th><th>C API / JNI</th><th>Connector 现状</th><th>缺口归属</th></tr></thead><tbody>
+<tr><td>多查询（一次传 nq 条）</td><td>有，每条查询一个任务</td><td>有，<code>queries.rows</code> 不设上限</td><td>nq 写死为 1</td><td>Connector，见<a href="vector-search.html#exact">向量搜索与建索引 2.3</a></td></tr>
+<tr><td>过滤位图</td><td>有</td><td>有，1 表示排除</td><td>用于删除与 null</td><td>无</td></tr>
+<tr><td>向量类型</td><td>fp32、fp16、bf16、int8、bin1、稀疏、EmbList</td><td>fp32、fp16、bf16、int8、bin1</td><td>只传 fp32，fp16/bf16 在 JVM 放宽</td><td>Connector</td></tr>
+<tr><td>距离</td><td>L2、IP、COSINE、HAMMING、JACCARD、BM25 等</td><td>JSON 透传，不校验</td><td>L2、IP、COSINE</td><td>Connector</td></tr>
+<tr><td>索引加载</td><td>BinarySet、文件加载、mmap</td><td>仅 BinarySet</td><td>BinarySet 分块写入</td><td>绑定，mmap 未开放</td></tr>
+<tr><td>索引构建</td><td>Build、Train、Add、BuildAsync</td><td>一次性 Build；DiskANN 走文件</td><td>未使用</td><td>暂不需要</td></tr>
+<tr><td>范围搜索、迭代器</td><td>索引与暴力搜索都有</td><td>无</td><td>无</td><td>绑定，有场景再开</td></tr>
+<tr><td>按 id 取原始向量</td><td>有</td><td>无</td><td>用存储层 take 回表</td><td>暂不需要</td></tr>
+<tr><td>线程池、SIMD、BLAS 配置</td><td>有，搜索池可运行中调整</td><td>线程池大小：PR #1829 自 1fff20db 起提供 resize/size 四个 C 函数与 Java 方法；SIMD、BLAS 仍无</td><td>无</td><td>Connector 升级 pin 后接入，见 3.1 节</td></tr>
+<tr><td>内存估算、Size()</td><td>有</td><td>无</td><td>无</td><td>绑定，资源规划用</td></tr>
+<tr><td>取消（OpContext）</td><td>有</td><td>无</td><td>无</td><td>绑定，任务取消用</td></tr>
+<tr><td>稀疏向量</td><td>有</td><td>无，需先定 CSR 布局</td><td>无</td><td>绑定</td></tr>
+<tr><td>聚类 KMEANS</td><td>有，fp32</td><td>无</td><td>无，Aquila 项暂缓</td><td>后续</td></tr>
+</tbody></table></div>
+
+<h2 id="implementation">2. 实现路径与代码归属</h2>
+<p>JNI（Java Native Interface）负责 Java 与 native 的参数和生命周期交接；C ABI（Application Binary Interface）规定编译后函数和数据的交接。<a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/python/knowhere/knowhere.i">Knowhere 核对基线</a>已有 Python SWIG 绑定，尚无 Java/JNI 和公共 C API。当前实现新增 <code>knowhere_*</code> C 接口与 <code>io.knowhere</code> Java 包，基于 Java 11，无 Spark、Scala、Arrow Java 或 Hadoop 依赖。当前 Connector 设计中的 <code>mv_*</code> 尚无已发布实现。</p>
+<p>首期 C 合同采用 <code>knowhere_vectors</code>（地址、字节数、行数、维度、dtype）、<code>knowhere_bitset</code> 与 <code>knowhere_search_result</code> 传递批次；资源使用不重用的 64 位句柄。错误返回状态码，线程本地消息由 JNI 立即转换；创建时校验索引格式版本。Java 使用 direct ByteBuffer 的 position/limit 作为有效区域。dense 五种 dtype 按上游注册组合分派，FLAT、HNSW、IVF_FLAT 与 BF 用真实调用验证；DiskANN 以启用构建及文件往返测试确定支持。</p>
+<h3 id="files">2.1 首期 C ABI、JNI 与 Java API 均由 Knowhere 维护</h3>
+<table><thead><tr><th>实现文件</th><th>职责</th></tr></thead><tbody>
+<tr><td><code>include/knowhere/c_api.h</code><br><code>src/c_api/c_api.cc</code></td><td>C ABI：固定宽度整数、opaque handle、地址、长度和 JSON；C++ 实现调用现有 Factory、Index、BruteForce、BinarySet 与版本入口。</td></tr>
+<tr><td><code>java/src/main/cpp/knowhere_jni.cc</code></td><td>JNI 只做参数转换、生命周期交接和错误转换；调用 C API。</td></tr>
+<tr><td><code>java/src/main/java/io/knowhere/Knowhere.java</code><br><code>KnowhereIndex.java</code>、<code>BinarySet.java</code>、<code>KnowhereException.java</code>、<code>NativeLibraryLoader.java</code></td><td>Java 11 公共接口与加载。可关闭对象使用 AutoCloseable；无 Spark、Scala 或 Arrow Java 类型。</td></tr>
+<tr><td><code>java/pom.xml</code>、<code>java/README.md</code>、<code>java/CMakeLists.txt</code>、根 <code>CMakeLists.txt</code>、<code>conanfile.py</code></td><td>接入默认关闭的 C API/JNI 构建选项；生成 Java JAR、独立 C 库和 JNI 库。Conan 开启 JNI 时启用 C API。</td></tr>
+<tr><td><code>tests/c_api/test_c_api.c</code>、<code>test_concurrency.c</code>、<code>test_diskann.c</code>、<code>java/src/test/java/io/knowhere/</code>、<code>java/tests/</code>、<code>.github/workflows/jni.yaml</code></td><td>纯 C 编译、行为、内存和 JAR 加载测试。上游测试不需要内部 Nexus 凭据。</td></tr>
+</tbody></table>
+
+<h2 id="api">3. 明确接口、内存所有权与错误传播</h2>
+<p>首期索引与暴力搜索接口映射到 Knowhere 的现有入口。</p>
+<table><thead><tr><th>操作</th><th>已存在的上游入口</th><th>接口约定</th></tr></thead><tbody>
+<tr><td>create / destroy</td><td><a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/include/knowhere/index/index_factory.h">IndexFactory::Create</a> / Index 析构</td><td>索引名称、dtype、索引格式版本分开传入；保留注册组合失败的真实错误。</td></tr>
+<tr><td>build / search</td><td><a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/include/knowhere/index/index.h">Index::Build / Search</a></td><td>同步调用；输入借用期间保持存活；ANN 结果复制到调用方的 ID 和距离缓冲区后释放临时结果。</td></tr>
+<tr><td>brute force</td><td><a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/include/knowhere/comp/brute_force.h">BruteForce::SearchWithBuf</a></td><td>直接写调用方的 int64 ID、float32 distance 缓冲区；rows、dim、dtype、容量均显式传递。</td></tr>
+<tr><td>serialize / deserialize</td><td>Index::Serialize / Deserialize 与 <a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/include/knowhere/binaryset.h">BinarySet</a></td><td>保留“名称 → blob”结构，按条目、64 位长度和分块读写；不将整个索引强制塞入单个 Java 数组。</td></tr>
+<tr><td>DiskANN 本地文件</td><td><a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/python/knowhere/knowhere.i">现有 Python Factory 中的 LocalFileManager + Pack</a></td><td>本地 FileManager 适配通过独立的 C 与 JNI 文件往返测试验证。只有 Linux 本地文件 roundtrip 通过才在产物 features 中标记支持；不能用普通 Create 代替后宣称可读 DiskANN。</td></tr>
+</tbody></table>
+<p>内存契约必须写入 C 头文件和 Java API：direct buffer 的位置、有效长度和 native 字节序明确；检查 rows × dim 和 nq × k 的溢出、空指针及容量。输入 DataSet 为借用；若特定索引需要在 build 后保留输入，由 native 对象持有受控副本。BinarySet 在 deserialize 后是否仍被索引引用，要由实现明确保留或复制，并以调用方提前关闭 BinarySet 的测试验证。</p>
+<p>DiskANN 的构建入口为 <code>buildFromFile(parameters)</code>：C ABI 传入空 vectors，底库从 <code>data_path</code> 读取训练文件，并在 <code>index_prefix</code> 生成索引文件。该版本的 DiskANN Serialize 不把这些文件放入 BinarySet；Deserialize 仍通过本地路径加载，不能把其 BinarySet 当作可独立搬迁的完整索引。生成的索引文件须保留到所有使用它们的索引关闭。</p>
+<p>过滤位图按低位优先、<strong>1 表示排除</strong>、连续 public row ID 定义；首版单批 BF 使用从 0 开始的 row ID，跨批 offset 由更高层显式处理。首版每个 index handle 串行使用；close 幂等，close 后操作失败。C++ 异常在 C ABI 内转换为 code/message，JNI 转成 Java 异常；不把失败变成空结果。</p>
+<p>Java 的搜索入口采用以下签名。index 对象保存创建时的 dtype；该搜索接口的所有 ByteBuffer 必须为 direct buffer，以当前 position 到 limit 为有效区域，数值采用 native 字节序。JNI 传递有效起点和剩余字节数，避免 C 层误读 buffer 容量以外或 position 之前的数据。</p>
+<pre><code>public void search(
+    ByteBuffer queries, long queryRows, int dimension, int topK,
+    ByteBuffer excludedRows, long excludedBitCount,
+    ByteBuffer outputIds, ByteBuffer outputDistances,
+    String searchParameters);
+
+public BinarySet serialize();
+public void deserialize(BinarySet data, String loadParameters);
+public void close();</code></pre>
+<p><code>excludedRows</code> 仅在 <code>excludedBitCount=0</code> 时允许 null；非空位图覆盖 index 的全部 public row ID。输出有效区至少分别为 <code>queryRows × topK × 8</code> 和 <code>queryRows × topK × 4</code> 字节。<code>queryRows=0</code> 返回成功且不写输出；<code>topK≤0</code> 或容量溢出返回参数错误。接口不改变调用方 buffer 的 position/limit，实际写入内容以输入行数和 topK 确定。</p>
+<p>公开 dtype 包括 fp32、bin1、fp16、bf16、int8；每类先验证已有受支持组合再声明支持。稀疏向量需要明确独立的 CSR/条目布局后接入，不能把 dense 地址解释成上游 C++ sparse 对象。首个产物的能力列表必须与通过的测试一致。完整 v2 向量能力仍按 capability 的后续任务实现，不由“JNI PR 合并”自动视为完成。</p>
+<p>Java API 版本、C ABI 版本与索引格式版本分别记录。创建或加载索引时传入其格式版本；Maven version 不能替代这一参数。上游 <a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/include/knowhere/version.h">Version</a> 的 current/maximum 不能证明任意 Milvus 索引均可读取，兼容范围以实际测试为准。</p>
+
+<h3 id="threads">3.1 线程模型：每条查询一个任务，任务内单线程</h3>
+<p><strong>Knowhere 的搜索并行度等于一次调用的查询数。</strong><a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/src/common/comp/brute_force.cc">brute_force.cc</a> 的 <code>SearchWithBuf</code> 与 <a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/src/index/hnsw/faiss_hnsw.cc">faiss_hnsw.cc</a> 的搜索都对每条查询向全局搜索池 <code>push</code> 一个任务，任务内 <code>ScopedSearchOmpSetter(1)</code> 把 OpenMP 与 OpenBLAS 线程数设为 1。nq = 1 的调用只占一个线程。</p>
+<p>全局搜索池在首次使用时按 <code>std::thread::hardware_concurrency()</code> 懒创建，进程内所有调用共享；核心的 <code>KnowhereConfig::SetSearchThreadPoolSize</code> 与 <code>SetBuildThreadPoolSize</code> 可在运行中调整大小。首期绑定没有开放配置入口；PR #1829 自 1fff20db（2026-09-17）起增加 <code>knowhere_search_thread_pool_resize</code>、<code>knowhere_search_thread_pool_size</code> 与 build 池的对应函数，Java 为 <code>Knowhere.resizeSearchThreadPool</code>、<code>searchThreadPoolSize</code>、<code>resizeBuildThreadPool</code>、<code>buildThreadPoolSize</code>；大小限定 1 到 INT32_MAX，读取在池创建前返回 0。Linux x86-64 上 C 测试 3/3、JNI 测试 11/11 通过，macOS arm64 同样通过。SIMD、BLAS 阈值与日志仍无入口。</p>
+<p>对 Connector 的含义：现状每个 Spark 任务一条查询，并行度来自任务数，池大小无关紧要；改为多查询后每次调用把 nq 个任务推进池，c 个并发任务的 CPU 需求为 c × 池大小。pin 升级后，Connector 在 executor 首次搜索前调用 <code>Knowhere.resizeSearchThreadPool(spark.executor.cores)</code>；Spark 侧的处理见<a href="vector-search.html#api">向量搜索与建索引 1.1</a>。</p>
+
+<h2 id="build">4. 上游构建提供 Java JAR、native 库与加载器</h2>
+<p>现有工程使用 C++20、Conan 2。实现增加默认关闭的 <code>WITH_C_API</code>、<code>WITH_JNI</code> 选项；开启 JNI 时同时开启 C API。根 CMake 与 Conan 显式接入新增源码，保持现有 C++ 和 Python 构建入口。具体命令与工具版本写入 <code>java/README.md</code>；通用绑定在公共 CI 验证。按索引类型启用 Cardinal 后端时，在有对应权限的环境补充索引验证；首期不接入 Aquila 计算/JNI，也不为 parquetToFbin 新增 Arrow C++/Parquet 依赖。</p>
+<table><thead><tr><th>构建输出</th><th>责任与验收要求</th></tr></thead><tbody>
+<tr><td><code>knowhere-jni.jar</code></td><td>Java 11 API、异常、资源句柄、加载器；普通 Java JAR，不带 Scala 后缀或框架运行依赖。</td></tr>
+<tr><td><code>libknowhere.so</code></td><td>原有 C++ 底库；记录来源提交、平台与编译特性。</td></tr>
+<tr><td><code>libknowhere_c.so</code> 与 <code>include/knowhere/c_api.h</code></td><td>独立 C ABI，纯 C 调用者可使用，不依赖 JVM 类型。</td></tr>
+<tr><td><code>libknowhere_jni.so</code></td><td>Java 与 C ABI 之间的 JNI 实现，与同一构建的 C 库配套。</td></tr>
+<tr><td>平台资源包与元数据</td><td>包含运行所需的动态依赖、许可证、文件摘要、Java/C ABI 版本、已验证的算法/dtype/平台和首期接口测试记录；若启用 Cardinal 索引后端，记录其实际源码版本。由上游定义输出布局，发布流水线按契约收集和校验。</td></tr>
+</tbody></table>
+<p>加载器读取 <code>native/knowhere/&lt;version&gt;/&lt;platform&gt;/</code> 中的资源，按版本、平台与内容摘要提取到缓存目录，原子完成提取并核对全部摘要，再按 manifest 的 <code>entryLibrary</code> 一次加载 JNI 根库，由系统动态链接器建立整个依赖加载组。逐个 System.load 依赖库会破坏 <code>milvus-common</code> 引用 <code>libknowhere</code> 导出符号的解析，Linux 独立包已复现该问题。平台包必须包含所需动态依赖；在干净 JRE 容器检查 RPATH/RUNPATH 与 <code>DT_NEEDED</code>，不能依赖构建机的库路径。JNI PR 在本地生成的包上完成这些测试，不需要先上传 Nexus。</p>
+<p id="signal-chaining">当前固定版本的 Folly 共享库在加载时将 SIGPIPE 设为忽略，会覆盖 HotSpot 的处理器。运行契约采用 <a href="https://docs.oracle.com/en/java/javase/15/vm/signal-chaining.html">HotSpot 官方信号链机制</a>：Linux 在 JVM 启动前预加载同一 JRE 的 <code>$JAVA_HOME/lib/libjsig.so</code>；macOS 开发环境使用其 <code>libjsig.dylib</code>。加载器在 JVM 启动后才执行，不能由 Java 层事后加载替代。平台 JAR 不携带另一套 JDK 的 libjsig，干净 JRE 验收使用容器内 JRE 自带的库；不能仅以测试断言通过忽略信号处理器冲突。</p>
+<p>首批目标是 Linux x86_64 与 Linux aarch64 的 CPU 构建；能力列表只记录通过测试的组合。工具链、CPU 最低指令集和运行库要求随产物输出。面向云上 executor 的最终镜像选择，以及 Storage 与 Knowhere 在同一 JVM 的共存验收，归<a href="../engineering/native-libraries.html#load">独立 CMake 构建方案</a>。</p>
+<p>向流水线交付的是私仓（满足首期范围后可切上游）的仓库地址、受审查的完整源码 SHA 和上游基线、可重复调用的构建入口、上述产物布局和能力测试记录。内部 Maven 坐标、classifier、依赖组合版本、不可覆盖发布及“最新”解析规则仅在<a href="../engineering/native-libraries.html#package">独立 CMake 构建方案的产物一节</a>维护。流水线不在打包阶段修改 C ABI 或 Java API。</p>
+
+<h2 id="tasks">5. 开发与上游贡献</h2>
+<p>上游贡献草稿：<a href="https://github.com/zilliztech/knowhere/pull/1829">Knowhere PR #1829 — Add a C API and Java JNI bindings</a>；通过 <code>LawrenceTL92/knowhere-contrib</code> 的 <code>codex/knowhere-jni-pr</code> 分支提交。私仓继续作为合入前的开发来源。</p>
+<p id="repository">在 <code>/Users/lawrance/Desktop/workspace/knowhere</code> 使用<a href="https://github.com/LawrenceTL92/knowhere">LawrenceTL92/knowhere 私仓</a>（保留上游历史），<code>origin</code> 指向私仓、<code>upstream</code> 指向 <code>zilliztech/knowhere</code>，开发分支为 <code>codex/knowhere-jni</code>。公开仓库的 <a href="https://docs.github.com/en/pull-requests/reference/forks#visibility-of-forks">fork 不能设为私有</a>；公开贡献通过另建的公开 fork 提交，仅包含可公开修改。</p>
+<ol>
+<li id="k0">记录私仓地址、上游基线与源码 SHA；已有本地目录先确认归属。</li>
+<li id="k1">按本页定稿的首期通用接口实现 C ABI，以实际测试确认索引支持矩阵；发布与打包由独立 CMake 构建方案承接。</li>
+<li id="k2">实现 Java API 与 JNI；DiskANN FileManager 适配使用独立文件测试验收。</li>
+<li id="k3">接入 CMake/Conan、索引依赖和加载器，生成首期产物。</li>
+<li id="k4">通过下节验收，向上游提交 <code>Add a C API and Java JNI bindings</code> PR。</li>
+</ol>
+<p>开发和 PR 可独立于发布流水线推进。上游合入前，<a href="../engineering/native-libraries.html#build">统一构建</a>使用通过完整验收的私仓 SHA；上游具备首期能力并重新验收后再切换，暂缓的 11 项不阻塞切换。内部发布配置由 Spark-Milvus 维护。</p>
+
+<h2 id="acceptance">6. 首期验收</h2>
+<p><strong>2026-09-16 更新：</strong>当前 PR 与私仓提交为 <code>c85fb76a</code>。已修复 CI 管道失败状态传递，并将 DiskANN 用例改为 BF 召回与逐项结果校验；x86_64 服务器 C 3/3、JNI 11/11、DiskANN 连续构建 20/20 通过，最新 GitHub CI 待完成。已删除额外添加的许可材料 CI 检查及通知，不列入本期 JNI 验收条件。</p>
+<p>逐项测试场景、执行方式与原始证据见中文验收报告（报告与原始日志保存在仓库外）。</p>
+<p><strong>2026-09-15 实测结果：</strong>首期绑定已实现，私仓与 <a href="https://github.com/zilliztech/knowhere/pull/1829">Draft PR #1829</a> 的原验收提交为 <code>9dc2b8ad537502d408bc33af05727453295d6622</code>，私仓最新代码位于 <a href="https://github.com/LawrenceTL92/knowhere/tree/codex/knowhere-jni-pr"><code>codex/knowhere-jni-pr</code></a>。macOS 的 C 测试 2/2、AddressSanitizer 2/2、Java 11 JNI 10/10 通过；Linux ARM 的 C 测试 3/3、Java 17 JNI 11/11、打包测试 13/13 通过；Linux x86_64 在 Ubuntu 22.04 / GCC 12.3 服务器以 64 并行编译成功，C 测试 3/3、JNI 11/11、打包测试 13/13 通过。x86_64 验证修正了打包测试对 dpkg 库路径的假设，该用例也在 ARM 上通过，C/C++/Java 实现未改动。</p>
+<p>两套 Linux 平台 JAR 均在断网、无源码或 Conan 缓存挂载的干净 JRE 11/17/21 中完成真实索引往返与 BF 验证。所有最终 JVM 测试预载同一 JRE 的 libjsig，通过 JNI/信号诊断检查。x86_64 包包含 14 个动态库，实测引用最高 GLIBC_2.35；ARM 包引用最高 GLIBC_2.38。这些记录限定已测环境，不表示更旧运行镜像已通过验证。这些是原验收记录，本轮 CI 修复与复验状态见上方更新；发布材料缺项见下段。</p>
+<p>当前固定版本 <code>milvus-common/1.0.0-b589c5a</code> 源码与 Conan 包缺少其声明的 LICENSE/NOTICE，且包含另行声明 Boost 许可的 <code>flat_hash_map</code>。平台包会保留并上报缺失材料；正式分发前需由上游补齐，不能用单份 Apache 文本清空报告。</p>
+<p>验收覆盖首期通用接口、资源管理、构建与加载。必需用例缺项或跳过时不得标记完成；暂缓的 Aquila 11 项不列入本期必需用例，产物 features 也不声明支持。</p>
+<p>算法测试覆盖 FLAT 精确结果、HNSW 和 IVF_FLAT 的召回、BF 过滤，以及 create → build → serialize → close → create → deserialize → search。DiskANN 使用本地文件独立验证。</p>
+<p>验证接口的固定案例：基向量 <code>[(0,0),(1,0),(0,2)]</code>，查询 <code>(0,0)</code>，平方 L2、topK=2，FLAT/BF 返回 ID <code>[0,1]</code>、距离 <code>[0,1]</code>；设置位图第 0 位后返回 <code>[1,2]</code>、距离 <code>[1,4]</code>。序列化重建后结果不变；无效容量、dtype/索引组合和已关闭句柄必须返回明确错误。</p>
+<table><thead><tr><th>范围</th><th>通过条件</th></tr></thead><tbody>
+<tr><td>首期功能完整度</td><td>通过 Java→JNI→native 执行创建/释放、构建、搜索、BF、BinarySet 读写与序列化往返；声明支持的算法和 DiskANN 文件适配有对应测试。</td></tr>
+<tr><td>C ABI 与错误</td><td>纯 C 测试可编译并调用；无效 dtype、容量、参数和关闭后操作均产生明确错误；C++ 异常不穿过 C ABI。</td></tr>
+<tr><td>内存与生命周期</td><td>position/limit、输出容量、溢出、位图、重复关闭、失败释放和 BinarySet 提前关闭均有测试；native 内存检查无越界、泄漏或双重释放。</td></tr>
+<tr><td>构建与加载</td><td>Java 11 字节码，Java 11/17/21 加载；各承诺平台从本地构建的完整 JAR 加载并执行真实调用，无外部源码目录或构建机库路径依赖。</td></tr>
+<tr><td>能力声明</td><td>算法、dtype 与索引格式兼容范围有测试记录；DiskANN 只有通过本地文件往返测试才声明支持；不将未测试组合写入 features。</td></tr>
+<tr><td>上游 PR</td><td>源码、构建入口、使用说明、测试和已知支持范围齐全；公共上游 CI 不依赖内部 Nexus 或 Spark-Milvus。</td></tr>
+</tbody></table>
+<p>Nexus 发布、两库共存和 Connector 全矩阵验收见<a href="../engineering/native-libraries.html#validation">独立 CMake 构建方案的验收一节</a>；本页以独立构建的绑定产物完成验收。</p>
+
+
+<details id="cardinal-deferred"><summary>暂缓能力的实现研究（不进入首期任务与验收）</summary>
+<p>以下为此前对 Cardinal Aquila 的源码核对和扩展设计，供后续恢复开发时参考；其中的实现要求、文件与测试均已暂缓。</p>
+<h3 id="cardinal-integration">Cardinal 接入与 Aquila 构建参考</h3>
+<p>Knowhere 的 <a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/CMakeLists.txt">WITH_CARDINAL 构建</a>引入 Cardinal 的 Knowhere 适配，Cardinal 的 <a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/know/libcardinal.cmake#L1">know/libcardinal.cmake</a>将索引和聚类适配编进 Knowhere。该接入不包含 Aquila 的 JNI 或其文件计算入口，开启 WITH_CARDINAL 不能证明 11 项已经具备。</p>
+<p>Knowhere 核对基线分别锁定 Cardinal v1 <code>v2.5.112</code> 和 v2 <code>v3.0.8</code>，对应 SHA 为 <code>1b38fec866d5faa9d4d999923a6b0ef8741c9124</code> 与 <code>be4bf251b13e8722869fdda64db45050e614c037</code>；它们不是本次 Aquila 参考 SHA。底库适配升级与 Aquila 功能接入需要共同验证，不能只把参考 master 替换进 recipe 就宣告兼容。</p>
+<p>参考提交的 <a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/CMakeLists.txt#L133">根构建</a>没有将 Aquila JNI 加入 shared library；<a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/CMakeLists.txt#L10">aquila_test</a>只编译聚类、抽样、去重和 Isolation Forest 的 C++ 测试，未编译 materialize 或 Java/JNI 测试。若恢复这些扩展，需要新增显式构建目标、Java 声明、加载器及 JAR 验收。不能把头文件存在或 C++ 单测通过当作 JNI 产物完成。</p>
+<table><thead><tr><th>Aquila 功能</th><th>公开 Knowhere 已有基础</th><th>仍需接入或实现</th></tr></thead><tbody>
+<tr><td>聚类文件流程</td><td>Cluster Train/Assign/GetCentroids，Faiss KMEANS</td><td>抽样文件、fp32/sq8/sq4 预处理与 state、每簇 sums/counts/costs；普通 Train 不等于这组分阶段接口</td></tr>
+<tr><td>分区去重</td><td>BF/ANN 搜索与距离结果</td><td>四文件读取、阈值连边、连通分量和代表选择；Cardinal 量化与执行参数不能直接映射为 Faiss/HNSW 并假定等价</td></tr>
+<tr><td>Isolation Forest</td><td>未发现对应的公开训练/评分 API</td><td>完整训练、平铺森林与评分实现；Aquila 自己实现算法并调用 Cardinal 线程池</td></tr>
+<tr><td>Parquet 转换</td><td>无对等文件转换入口</td><td>Arrow C++/Parquet 读取、fbin/ids 输出及格式校验；与 Knowhere 的 MaterializedViewSearchInfo 无关</td></tr>
+</tbody></table>
+<p>公开接口依据见 <a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/include/knowhere/cluster/cluster_node.h#L26">ClusterNode</a> 与 <a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/src/cluster/kmeans/faiss_kmeans.cc#L335">Faiss KMEANS 注册</a>。上表说明缺少的计算与文件处理，不能只增加 Java native 声明来完成。</p>
+<p>Cardinal 是私有仓库；内部构建可接入其计算实现，这些扩展恢复开发时再评审公开贡献范围，私有实现不直接复制到公开 PR。参考仓库未提供这组 JNI 对应的 Java/Scala 源码，需要补齐 Java 声明、加载器和测试。</p>
+
+<h3 id="cardinal-mechanism">聚类、去重、异常评分与文件转换参考</h3>
+<p><strong>聚类：</strong>Java 交给 native 文件路径和当前中心，native 抽样、预处理和分配，再把每簇 sums/counts/costs 返回。<a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/src/clustering.cpp#L191">trainAssign 实现</a>只执行一次分配与统计；多轮中心更新、跨分区聚合由调用方组织，不应把“存在训练 JNI”解释为 native 已完成完整的分布式 KMeans 调度。</p>
+<p><strong>去重：</strong><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/src/dedup.cpp#L182">dedupPartition 实现</a>按数据量选择 BF 或 Cardinal Index，取 top-k 候选后按阈值连边，再用 union-find 合并。即使头文件仍写 range_filter，当前代码也不能理解为枚举阈值内全部邻居。L2 输入阈值会平方；cosine 是相似度阈值，BF 路径依赖已归一化向量。代表是同一分量中 <code>.dist</code> 值最小的行；component ID 来自并查集根的原始 ID，未必等于代表 ID。这些语义必须用测试锁定。</p>
+<p>去重参数完整覆盖参考实现的 <code>adsampling_epsilon0</code>、<code>index_threshold</code>、<code>bf_batch_size</code>、<code>index_batch_size</code>、<code>index_query_batch</code>、<code>ef</code>、<code>graph_width</code>、<code>topk</code>、<code>bf_quant_type</code>、<code>build_quant_type</code>、<code>search_quant_type</code>、<code>refine_quant_type</code>、<code>kmeansfast_precision</code>、<code>kmeansfast_epsilon</code>，见<a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/src/dedup.cpp#L33">配置解析</a>。四个 batch/threshold 大小参数中的 <code>index_threshold</code> 与三个 batch 参数按 MB 计算，不能当行数传入。</p>
+<p><strong>Isolation Forest：</strong><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/src/iforest.cpp#L158">训练与评分</a>使用平铺数组保存节点特征、分割值、左右子节点和树根。训练调用 Cardinal build pool，评分调用 search pool。评分为平均路径长度经 <code>2^(-平均路径长度 / avgPath)</code> 归一化；叶节点的路径修正值保存在 splitValue 中。两个 FromAddress 入口借用 native 向量内存，不能在方法返回前释放或修改该区域。</p>
+<p><strong>文件转换：</strong><a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/src/materialize.cpp#L30">parquetToFbin</a>由 Arrow C++ 读取本地 Parquet；fbin 格式为 little-endian 的两个 int32（行数、维度）及 float32 行数据，ids 为行数、1 及 int64 ID。参考实现写出原始向量，没有归一化步骤；cosine 去重的归一化前提由调用方满足。该本地转换能力恢复开发时再加入绑定，Milvus snapshot、binlog、对象存储与索引登记仍属于 Connector 的现有职责。</p>
+<h3 id="vector-ops-contract">扩展恢复时的数组、地址与文件契约</h3>
+<p>参考 JNI 对字符串使用 RAII 释放 UTF 字符；数组输入以 JNI_ABORT 结束访问，输出以 mode=0 写回。新接口验证所有数组容量、维度、乘法溢出及路径参数；地址入口增加有效字节数，保持调用方持有内存直到同步调用结束。地址不是可由 JNI 自动验证有效性的对象，调用方必须保证其来自仍存活的分配。</p>
+<p>Isolation Forest 输出节点数组容量至少为 <code>nTrees × (2 × nSamples + 1)</code>，树根数组至少为 nTrees；遍历前校验根、子节点及 feature 下标。参考头文件将返回值描述为节点数，但<a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/src/iforest.cpp#L266">实现返回预留跨度</a>，新 API 必须把两者区分清楚，不能只根据实际可达节点数分配后交给该实现。</p>
+<p>参考<a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/src/jni/iforest_jni.cpp#L52">数组入口</a>在训练/评分期间持有 GetPrimitiveArrayCritical，而底层还会调度线程池并等待。新绑定保留数组功能，但使用受控复制或常规数组访问来跨越长计算，避免长时间占用 critical region；地址入口维持借用。所有 native 异常在边界转换，分配失败保留 JVM 异常，清理用 RAII，不能只释放资源却让 C++ 异常越过 JNI。</p>
+<p>合法输入的功能与格式按参考版本对齐；非法 JSON、短数组、错误维度、空地址等由新接口明确报错。参考 dedup 对部分非法配置回落默认值、部分 C 头文件只写 -1 错误，而实现已有细分错误码，这些不是新接口需要复制的行为。差异测试应分别记录成功路径等价与错误检查增强。</p>
+
+<p>此前拟新增的扩展文件：</p>
+<table><thead><tr><th>暂缓文件</th><th>原拟职责</th></tr></thead><tbody>
+<tr><td><code>include/knowhere/vector_ops_c.h</code>、<code>src/c_api/vector_ops_c.cc</code></td><td>承接 11 项 JNI 所需的 9 组计算能力，显式传递数组/地址长度、文件路径与输出容量；恢复开发时先确定后端与公开贡献范围，不假定现有 Index API 能覆盖全部。</td></tr>
+<tr><td><code>java/src/main/java/io/knowhere/VectorOps.java</code>、<code>java/src/main/cpp/vector_ops_jni.cc</code></td><td>逐项提供表中 11 个操作，保留 Isolation Forest 的 Java 数组和 native 地址两类入口；声明、实现与导出符号由同一清单验证。</td></tr>
+</tbody></table>
+<p>参考仓库的 <a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/tests/test_clustering.cpp#L26">聚类测试</a>、<a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/tests/test_dedup.cpp#L81">去重测试</a>、<a href="https://github.com/zilliztech/cardinal/blob/19f2a027cb12dd5cf3d7c493940df15120a64c66/aquila/tests/test_iforest.cpp#L1">Isolation Forest 测试</a>可供扩展恢复时设计 fixture 和断言。届时需补 Java/JNI 调用、FromAddress 与数组对照、Parquet 转换和输出容量/失败路径测试。这里记录的是计划，不宣称 Cardinal 测试或新 JNI 已运行通过。</p>
+</details>
+</main>

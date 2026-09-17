@@ -349,6 +349,16 @@ rebuilt and validated from its new gitlink before any native or real-data result
 is claimed. See the measured results and limitations in the
 [vector design](design/architecture/vector-search.html#interop).
 
+The gitlink now points at 29210a33, where the upstream DiskANN tests keep the
+exact check for OSS DiskANN and, in Cardinal builds, check ordering, recall and
+a 0.05 + 0.02 x distance tolerance instead (the C test through
+`KNOWHERE_WITH_CARDINAL`; `DiskAnnIT` through
+`-Dknowhere.test.approximateDistances=true`, which `scripts/build-knowhere.sh`
+passes only with `--with-cardinal`). Both `build-knowhere.sh` variants at that
+revision passed ctest, the JNI suite and `native-vector/knowhereSmoke` on Linux
+x86-64; the unified `native-build` bundle has not been rebuilt at this gitlink
+yet, so its validation is still due.
+
 `scripts/build-knowhere.sh import-ci` only accepts a CI artifact explicitly
 registered for the current gitlink. No artifact is registered for the current
 PR branch head, so use `build`. A successful path leaves the platform JAR and a
