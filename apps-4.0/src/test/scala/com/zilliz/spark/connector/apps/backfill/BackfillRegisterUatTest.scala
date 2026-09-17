@@ -225,14 +225,14 @@ class BackfillRegisterUatTest extends AnyFunSuite with Matchers {
     } finally spark.stop()
   }
 
-  /** Review 749178e #02: two backfills in one application shared the
-    * application id as job id, and the second run's manifest versions were
-    * dropped in favour of the first run's manifest. The first run writes score
-    * \= id * 5, the second score = id * 2; only the second is registered, so
-    * the collection ends with the values the `run` case expects.
+  /** Two backfills in one application shared the application id as job id, and
+    * the second run's manifest versions were dropped in favour of the first
+    * run's manifest. The first run writes score \= id * 5, the second score =
+    * id * 2; only the second is registered, so the collection ends with the
+    * values the `run` case expects.
     */
   test(
-    "#02: two backfills in one session get their own jobs; the second is the one registered"
+    "two backfills in one session get their own jobs; the second is the one registered"
   ) {
     val uri = env("MILVUS_UAT_URI").getOrElse(cancel("set MILVUS_UAT_URI"))
     val collection = env("MILVUS_UAT_BACKFILL_COLLECTION")

@@ -100,8 +100,8 @@ class MilvusArrayColumnTest extends AnyFunSuite with Matchers {
       ScalarField.Data.IntData(IntArray(data = values))
     ).toByteArray
 
-  // Review 749178e #05: the row path took an Array<Float/Int8/Int16> value
-  // for a binary-backed vector because both are VarBinary, and failed.
+  // The row path took an Array<Float/Int8/Int16> value for a binary-backed
+  // vector because both are VarBinary, and failed.
   test(
     "the row path decodes Float and Int8/Int16 element arrays like the columnar path"
   ) {

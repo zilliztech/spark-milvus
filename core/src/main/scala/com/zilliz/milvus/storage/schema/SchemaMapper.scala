@@ -28,7 +28,7 @@ object SchemaMapper {
     * Milvus reserves only the exact names RowID and Timestamp (proxy
     * validateReservedFieldNames), so a user field spelled `timestamp` or
     * `row_id` is an ordinary field with its own id and never stands in for id 0
-    * or 1 (review 749178e #06).
+    * or 1.
     */
   def missingSystemFields(
       collectionSchema: CollectionSchema

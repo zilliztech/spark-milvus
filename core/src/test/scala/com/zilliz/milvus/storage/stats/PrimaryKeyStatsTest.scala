@@ -57,9 +57,8 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
     back.toJson shouldBe stats.toJson
   }
 
-  // Review 749178e #12: Milvus compares VarChar keys as Go strings, i.e.
-  // unsigned UTF-8 bytes; Java's String order is UTF-16 and disagrees above
-  // the BMP.
+  // Milvus compares VarChar keys as Go strings, i.e. unsigned UTF-8 bytes;
+  // Java's String order is UTF-16 and disagrees above the BMP.
   test("VarChar bounds follow Milvus's UTF-8 byte order") {
     val pua = new String(Character.toChars(0xe000))
     val emoji = new String(Character.toChars(0x1f600))

@@ -566,13 +566,13 @@ object HadoopStorageKeys extends Logging {
     * present key is translated, except a role together with static keys, which
     * is refused.
     *
-    * TLS (#09): Hadoop's switch becomes `fs.use_ssl`; when the deployment never
-    * set it, Hadoop's default applies, which is TLS on (decided 2026-09-16),
-    * unless the endpoint carries its own scheme. Path-style addressing is
-    * translated only when the deployment set it: Hadoop ships a default for it,
-    * and that default is not a statement about this storage. A namespace that
-    * supplies no location, role or key contributes nothing, because Hadoop's
-    * shipped defaults are not a storage configuration.
+    * TLS: Hadoop's switch becomes `fs.use_ssl`; when the deployment never set
+    * it, Hadoop's default applies, which is TLS on (decided 2026-09-16), unless
+    * the endpoint carries its own scheme. Path-style addressing is translated
+    * only when the deployment set it: Hadoop ships a default for it, and that
+    * default is not a statement about this storage. A namespace that supplies
+    * no location, role or key contributes nothing, because Hadoop's shipped
+    * defaults are not a storage configuration.
     *
     * A temporary credential (keys plus a session token, with a chain that uses
     * the token) cannot be translated: the native layer takes no session token

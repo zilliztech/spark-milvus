@@ -114,9 +114,9 @@ class StorageNativeTest
     }
   }
 
-  // Review 749178e #03: only a confirmed absence is "does not exist"; a denied
-  // or failed lookup has to reach the caller, or a commit marker that is there
-  // but unreadable reads as missing and the job manifest is written over.
+  // Only a confirmed absence is "does not exist"; a denied or failed lookup has
+  // to reach the caller, or a commit marker that is there but unreadable reads
+  // as missing and the job manifest is written over.
   test("exists is false only for a missing key; a denied lookup throws") {
     assume(available, "libmilvus-storage-jni is not on this machine")
     // LOON_FILE_NOT_FOUND in milvus-storage's ffi_error_code.h.

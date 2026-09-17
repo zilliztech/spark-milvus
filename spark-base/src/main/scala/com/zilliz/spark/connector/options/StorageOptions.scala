@@ -217,8 +217,7 @@ object StorageOptions extends Logging {
   /** The native `fs.*` bag a write uses, resolved once on the driver the way a
     * read resolves it: aliases, the session's Hadoop keys and the IAM fallback
     * included. The task writers and the job committer take this map as it is,
-    * so a read that works cannot leave a write that fails on the same options
-    * (review 749178e #10).
+    * so a read that works cannot leave a write that fails on the same options.
     *
     * A declared `fs.storage_type=local` keeps its declared `fs.*` (the local
     * backend is rooted at `fs.root_path`). Otherwise the bucket is the

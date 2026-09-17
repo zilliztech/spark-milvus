@@ -8,9 +8,8 @@ import org.scalatest.matchers.should.Matchers
 /** Milvus CollectionSchema to Arrow Schema. */
 class SchemaMapperTest extends AnyFunSuite with Matchers {
 
-  // Review 749178e #06: Milvus reserves only the exact names RowID and
-  // Timestamp, so row_id(100) and timestamp(101) are user fields and ids 0 and
-  // 1 still have to be there.
+  // Milvus reserves only the exact names RowID and Timestamp, so row_id(100)
+  // and timestamp(101) are user fields and ids 0 and 1 still have to be there.
   test(
     "system fields are appended by id even when a user field is named like one"
   ) {

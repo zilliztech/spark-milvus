@@ -94,9 +94,9 @@ class MilvusTableWriteTest extends AnyFunSuite with Matchers {
     )
   }
 
-  // Review 749178e #10: the executor writer took the raw options while the
-  // read resolved aliases, Hadoop keys and the IAM fallback; a read that works
-  // must not fail the write with "fs.access_key_id must be set".
+  // The executor writer took the raw options while the read resolved aliases,
+  // Hadoop keys and the IAM fallback; a read that works must not fail the write
+  // with "fs.access_key_id must be set".
   test("the batch write gets the storage properties the read side resolves") {
     import com.zilliz.milvus.storage.credential.StorageProperties
     val iamOptions = MilvusOption(

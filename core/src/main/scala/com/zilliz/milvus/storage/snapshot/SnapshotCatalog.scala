@@ -220,7 +220,7 @@ final class SnapshotCatalog(
     // JSON, so every candidate's JSON is read (README section 5 asks Milvus for
     // a catalog file that would make this one read). Only the chosen one is
     // materialized: an older snapshot whose segment files are gone must not
-    // stop a newer one from being read (review 749178e #07).
+    // stop a newer one from being read.
     final case class Candidate(
         path: String,
         json: SnapshotJson,

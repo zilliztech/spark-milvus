@@ -8,7 +8,7 @@ import org.scalatest.BeforeAndAfterAll
 import com.zilliz.milvus.storage.credential.StorageProperties
 
 /** A session configured the way the managed platform configures it: a global
-  * AssumedRole provider and the customer-data role. Review 749178e #08.
+  * AssumedRole provider and the customer-data role.
   */
 class PlatformRoleStorageTest
     extends AnyFunSuite

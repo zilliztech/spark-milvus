@@ -150,7 +150,7 @@ class CommitterTest extends AnyFunSuite with Matchers {
     }
   }
 
-  // Review 749178e #03: a marker lookup that fails is not an absent marker.
+  // A marker lookup that fails is not an absent marker.
   test("a failed marker lookup stops the commit before anything is written") {
     withStore { (store, layout, _) =>
       val written = scala.collection.mutable.ListBuffer.empty[String]

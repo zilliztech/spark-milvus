@@ -997,8 +997,7 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
     }
   }
 
-  // Review 749178e #01: a ByteType value was only logged, so every Int8 value
-  // written became null.
+  // A ByteType value was only logged, so every Int8 value written became null.
   test(
     "internalRowToArrow writes ByteType to TinyIntVector and reads it back"
   ) {
@@ -1088,9 +1087,9 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
         .build()
     )
 
-  // Review 749178e #04: a Milvus Array is stored as Binary, one serialized
-  // ScalarField per row (payload_writer.go AddOneArrayToPayload); the writer
-  // built a childless Arrow List instead and every task failed.
+  // A Milvus Array is stored as Binary, one serialized ScalarField per row
+  // (payload_writer.go AddOneArrayToPayload); the writer built a childless
+  // Arrow List instead and every task failed.
   test(
     "a Milvus Array is written as one ScalarField per row, every element type"
   ) {
@@ -1214,8 +1213,8 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
     }
   }
 
-  // Same cause as #04: Milvus stores JSON as Binary (serde.go byteEntry), the
-  // writer made it Utf8.
+  // Same cause as the Array case: Milvus stores JSON as Binary (serde.go
+  // byteEntry), the writer made it Utf8.
   test("a Milvus JSON field is written as Binary holding the JSON text") {
     val field = milvusField("j", StringType, MilvusDataType.JSON, 106L)
     val sparkSchema = StructType(Seq(field))

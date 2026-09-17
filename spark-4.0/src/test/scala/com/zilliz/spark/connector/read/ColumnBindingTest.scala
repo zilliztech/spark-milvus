@@ -113,9 +113,8 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     ) shouldBe "1"
   }
 
-  // Review 749178e #06: a user field named "timestamp" is not field 1; the
-  // schema handed to the native reader must still hold field 1, which delete
-  // application asks for.
+  // A user field named "timestamp" is not field 1; the schema handed to the
+  // native reader must still hold field 1, which delete application asks for.
   test("a user field named timestamp does not displace stored field 1") {
     val schema = CollectionSchema(
       name = "t",

@@ -13,9 +13,8 @@ import io.milvus.storage.NativeLibraryLoader
 
 /** The endpoint a snapshot URI is recognized against is the one the driver's
   * store uses, including an endpoint only the session's Hadoop keys supply.
-  * Found by the review 749178e #09 Spark job on UAT. The snapshot is read
-  * through the local native backend, so the suite needs libmilvus-storage-jni
-  * and cancels without it.
+  * Found by a Spark job on UAT. The snapshot is read through the local native
+  * backend, so the suite needs libmilvus-storage-jni and cancels without it.
   */
 class HadoopEndpointSnapshotTest
     extends AnyFunSuite

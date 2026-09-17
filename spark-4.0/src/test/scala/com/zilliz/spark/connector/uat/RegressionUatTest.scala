@@ -32,11 +32,10 @@ import io.milvus.grpc.schema.{
   FieldSchema
 }
 
-/** Spark jobs that drive the public entry points the way the findings of the
-  * 2026-09-16 review of 749178e were triggered, against the UAT instance. Each
-  * test names the findings it exercises. Everything written goes under a fresh
-  * prefix below `MILVUS_UAT_WRITE_PREFIX` and is deleted at the end; a
-  * collection a test creates is dropped.
+/** Spark jobs that drive the public entry points the way the defects fixed on
+  * 2026-09-16 were triggered, against the UAT instance. Everything written goes
+  * under a fresh prefix below `MILVUS_UAT_WRITE_PREFIX` and is deleted at the
+  * end; a collection a test creates is dropped.
   *
   * Environment: `MILVUS_JNI_S3_BUCKET`, `MILVUS_JNI_S3_REGION`,
   * `MILVUS_JNI_S3_ROOT_PATH`, `AWS_*` (the instance role's temporary
@@ -45,7 +44,7 @@ import io.milvus.grpc.schema.{
   * `MILVUS_UAT_URI`, `MILVUS_UAT_TOKEN`, `MILVUS_UAT_PARTS_COLLECTION`,
   * `MILVUS_UAT_WRITE_PREFIX` (default spark-uat-write).
   */
-class ReviewFindingsUatTest
+class RegressionUatTest
     extends AnyFunSuite
     with Matchers
     with BeforeAndAfterAll {
@@ -57,16 +56,16 @@ class ReviewFindingsUatTest
   private lazy val bucket = need("MILVUS_JNI_S3_BUCKET")
   private lazy val region = env("MILVUS_JNI_S3_REGION").getOrElse("us-west-2")
   private lazy val endpoint = s"s3.$region.amazonaws.com"
-  private lazy val reviewRoot =
-    s"${env("MILVUS_UAT_WRITE_PREFIX").getOrElse("spark-uat-write")}/review-${System.currentTimeMillis()}"
+  private lazy val suiteRoot =
+    s"${env("MILVUS_UAT_WRITE_PREFIX").getOrElse("spark-uat-write")}/regression-${System.currentTimeMillis()}"
 
   /** No keys, no fs.use_iam: the IAM fallback has to supply the identity, on
-    * the read and on the write (#10). Spark copies the driver's AWS_*
-    * variables, the instance role's temporary credential, into the session's
-    * s3a keys; those go to the native default chain, which reads the same
-    * variables with their session token.
+    * the read and on the write. Spark copies the driver's AWS_* variables, the
+    * instance role's temporary credential, into the session's s3a keys; those
+    * go to the native default chain, which reads the same variables with their
+    * session token.
     */
-  private def storage(root: String = reviewRoot): Map[String, String] = Map(
+  private def storage(root: String = suiteRoot): Map[String, String] = Map(
     StorageProperties.BucketName -> bucket,
     StorageProperties.Address -> endpoint,
     StorageProperties.Region -> region,
@@ -81,7 +80,7 @@ class ReviewFindingsUatTest
       sparkSession = SparkSession
         .builder()
         .master("local[2]")
-        .appName("review-findings-uat")
+        .appName("regression-uat")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
         .getOrCreate()
@@ -99,9 +98,9 @@ class ReviewFindingsUatTest
       val s = store()
       try {
         val files =
-          s.list(reviewRoot, recursive = true).filterNot(_.isDirectory)
+          s.list(suiteRoot, recursive = true).filterNot(_.isDirectory)
         files.foreach(f => s.delete(f.path))
-        info(s"deleted ${files.size} files under $reviewRoot")
+        info(s"deleted ${files.size} files under $suiteRoot")
       } finally s.close()
     }
     if (sparkSession != null) sparkSession.stop()
@@ -156,7 +155,7 @@ class ReviewFindingsUatTest
     spark.read
       .format("milvus")
       .options(
-        schemaOptions(schema, reviewRoot) ++ Map(
+        schemaOptions(schema, suiteRoot) ++ Map(
           MilvusOption.SnapshotManifests -> manifests,
           MilvusOption.ReadColumnar -> columnar.toString
         )
@@ -187,21 +186,21 @@ class ReviewFindingsUatTest
     ).connectionParams
   )
 
-  // ------------------------------------------------------------ #01 #04 #10 JSON
+  // ------------------------------------------------------------ all types
 
   test(
-    "#01 #04 #10: the all-types collection written back through df.write reads back value for value"
+    "the all-types collection written back through df.write reads back value for value"
   ) {
     val snapshotPath = need("MILVUS_UAT_TYPES_SNAPSHOT_PATH")
-    val root = s"$reviewRoot/types"
+    val root = s"$suiteRoot/types"
     val options = storage(root) + (MilvusOption.SnapshotPath -> snapshotPath)
     val source = spark.read.format("milvus").options(options).load()
     source.schema("i8").dataType shouldBe ByteType
     source.schema("arr").dataType shouldBe ArrayType(LongType)
     source.schema("j").dataType shouldBe StringType
     // No keys and no fs.use_iam in `options`: before the fix every task failed
-    // with "fs.access_key_id must be set" (#10); arr made every task fail with
-    // "Lists have one child Field" (#04); i8 was written as null (#01).
+    // with "fs.access_key_id must be set"; arr made every task fail with
+    // "Lists have one child Field"; i8 was written as null.
     source
       .repartition(2)
       .write
@@ -236,10 +235,10 @@ class ReviewFindingsUatTest
     }
   }
 
-  // ------------------------------------------------------------ #04 #05
+  // ------------------------------------------------------------ arrays
 
   private val arraysSchema = CollectionSchema(
-    name = "review_arrays",
+    name = "uat_arrays",
     fields = Seq(
       FieldSchema(
         fieldID = 100,
@@ -270,10 +269,10 @@ class ReviewFindingsUatTest
   )
 
   test(
-    "#04 #05: arrays of every element type are written and read back on both outlets"
+    "arrays of every element type are written and read back on both outlets"
   ) {
     need("MILVUS_JNI_S3_BUCKET")
-    val root = s"$reviewRoot/arrays"
+    val root = s"$suiteRoot/arrays"
     val sparkSchema = StructType(
       Seq(
         StructField("id", LongType),
@@ -322,7 +321,7 @@ class ReviewFindingsUatTest
     val expected = byId(df, "id")
     Seq(true, false).foreach { columnar =>
       withClue(s"columnar=$columnar: ") {
-        // Before #05 the row path failed on a_f, a_i8 and a_i16 with
+        // Before the fix the row path failed on a_f, a_i8 and a_i16 with
         // "Cannot decode binary-backed vector ... for Milvus type Array".
         val back = readBack(arraysSchema, manifest, columnar)
           .select(df.columns.map(col): _*)
@@ -333,13 +332,13 @@ class ReviewFindingsUatTest
     }
   }
 
-  // ------------------------------------------------------------ #12
+  // ------------------------------------------------------------ VarChar primary key
 
-  test("#12: a VarChar primary key's bounds follow Milvus's UTF-8 byte order") {
+  test("a VarChar primary key's bounds follow Milvus's UTF-8 byte order") {
     need("MILVUS_JNI_S3_BUCKET")
-    val root = s"$reviewRoot/varchar-pk"
+    val root = s"$suiteRoot/varchar-pk"
     val schema = CollectionSchema(
-      name = "review_varchar_pk",
+      name = "uat_varchar_pk",
       fields = Seq(
         FieldSchema(
           fieldID = 100,
@@ -389,9 +388,9 @@ class ReviewFindingsUatTest
     } finally s.close()
   }
 
-  // ------------------------------------------------------------ #09
+  // ------------------------------------------------------------ Hadoop-only endpoint
 
-  test("#09: a Hadoop-only endpoint on port 443 is reached over TLS") {
+  test("a Hadoop-only endpoint on port 443 is reached over TLS") {
     val snapshotPath = need("MILVUS_UAT_V3_DELETED_SNAPSHOT")
     val hadoop = spark.sparkContext.hadoopConfiguration
     hadoop.set("fs.s3a.endpoint", s"$endpoint:443")
@@ -413,13 +412,13 @@ class ReviewFindingsUatTest
     }
   }
 
-  // ------------------------------------------------------------ #08
+  // ------------------------------------------------------------ session AssumeRole
 
   test(
-    "#08: with a session-wide AssumeRole, fs.use_iam keeps the role and static keys drop it"
+    "with a session-wide AssumeRole, fs.use_iam keeps the role and static keys drop it"
   ) {
     val snapshotPath = need("MILVUS_UAT_V3_DELETED_SNAPSHOT")
-    val fakeRole = "arn:aws:iam::000000000000:role/spark-milvus-review-08"
+    val fakeRole = "arn:aws:iam::000000000000:role/spark-milvus-uat-fake"
     val base = Map(
       MilvusOption.SnapshotPath -> snapshotPath,
       StorageProperties.BucketName -> bucket,
@@ -431,8 +430,8 @@ class ReviewFindingsUatTest
       spark.read.format("milvus").options(base ++ extra).load().count()
     val iam = Map(StorageProperties.UseIam -> "true")
     val keys = Map(
-      StorageProperties.AccessKeyId -> "AKIAREVIEW08",
-      StorageProperties.AccessKeyValue -> "review-08"
+      StorageProperties.AccessKeyId -> "AKIAUATFAKE1",
+      StorageProperties.AccessKeyValue -> "uat-fake-secret"
     )
     read(iam) shouldBe 2990L
 
@@ -461,7 +460,7 @@ class ReviewFindingsUatTest
       resolved(iam).get(StorageProperties.RoleArn) shouldBe Some(fakeRole)
       resolved(keys).get(StorageProperties.RoleArn) shouldBe None
       resolved(keys).get(StorageProperties.AccessKeyId) shouldBe Some(
-        "AKIAREVIEW08"
+        "AKIAUATFAKE1"
       )
     } finally {
       hadoop.unset("fs.s3a.aws.credentials.provider")
@@ -469,13 +468,13 @@ class ReviewFindingsUatTest
     }
   }
 
-  // ------------------------------------------------------------ #06
+  // ------------------------------------------------------------ user field named timestamp
 
   test(
-    "#06: a user field named timestamp does not break a read that applies deletes"
+    "a user field named timestamp does not break a read that applies deletes"
   ) {
     need("MILVUS_JNI_S3_BUCKET")
-    val name = s"spark_uat_review_ts_${System.currentTimeMillis()}"
+    val name = s"spark_uat_ts_field_${System.currentTimeMillis()}"
     val c = client()
     try {
       import io.milvus.grpc.schema._
@@ -549,7 +548,13 @@ class ReviewFindingsUatTest
         env("MILVUS_UAT_FLUSH_WAIT_MS").map(_.toLong).getOrElse(20000L)
       )
       val snapshot = c
-        .createSnapshotForRead("", name, s"${name}_s", "review #06", 3600L)
+        .createSnapshotForRead(
+          "",
+          name,
+          s"${name}_s",
+          "user field named timestamp",
+          3600L
+        )
         .get
       info(s"snapshot ${snapshot.name} at ${snapshot.s3Location}")
       Seq(true, false).foreach { columnar =>
@@ -586,10 +591,10 @@ class ReviewFindingsUatTest
     }
   }
 
-  // ------------------------------------------------------------ #07
+  // ------------------------------------------------------------ broken older snapshot
 
   test(
-    "#07: a broken older snapshot does not stop the latest from being read"
+    "a broken older snapshot does not stop the latest from being read"
   ) {
     val collection = need("MILVUS_UAT_PARTS_COLLECTION")
     val instanceRoot = need("MILVUS_JNI_S3_ROOT_PATH")
@@ -597,7 +602,7 @@ class ReviewFindingsUatTest
     val collectionId =
       try c.getCollectionInfo("", collection).get.collectionID
       finally c.close()
-    val scratchRoot = s"$reviewRoot/catalog"
+    val scratchRoot = s"$suiteRoot/catalog"
     val source = s"$instanceRoot/snapshots/$collectionId/metadata"
     val target = s"$scratchRoot/snapshots/$collectionId/metadata"
     val s = store()
@@ -620,7 +625,7 @@ class ReviewFindingsUatTest
       val snapshotInfo = tree
         .get("snapshot_info")
         .asInstanceOf[com.fasterxml.jackson.databind.node.ObjectNode]
-      snapshotInfo.put("name", "review07-broken")
+      snapshotInfo.put("name", "uat-broken-older")
       snapshotInfo.put("create_ts", 1L)
       val items = tree
         .get("storagev2_manifest_list")
@@ -646,7 +651,7 @@ class ReviewFindingsUatTest
     val broken = intercept[Exception](
       spark.read
         .format("milvus")
-        .options(base + (MilvusOption.ClientSnapshotName -> "review07-broken"))
+        .options(base + (MilvusOption.ClientSnapshotName -> "uat-broken-older"))
         .load()
         .count()
     )

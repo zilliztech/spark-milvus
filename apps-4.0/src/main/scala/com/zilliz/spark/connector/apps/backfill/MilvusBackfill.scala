@@ -101,8 +101,8 @@ object MilvusBackfill {
   }
 
   /** The job id of one run: the caller's, else a new one. Two runs never share
-    * an id by default, even in one Spark application (review 749178e #02,
-    * decided 2026-09-16); `run` resolves it once and keeps it.
+    * an id by default, even in one Spark application (decided 2026-09-16);
+    * `run` resolves it once and keeps it.
     */
   private[backfill] def jobIdFor(
       spark: SparkSession,

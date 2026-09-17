@@ -252,7 +252,7 @@ connector 两边都不认识云。</p>
 只为让存量部署不改配置就能跑。它必须写明退出条件和时间点，否则就是
 <a href="../../../AGENTS.md">AGENTS.md</a> 禁止的烟囱。
 已实现为 <code>spark-base</code> 的 <code>HadoopStorageKeys</code>：按本表映射，
-翻译结果是 Hadoop 对这个桶实际会用的配置，不是所有出现的键（审查 749178e #08、#09）：
+翻译结果是 Hadoop 对这个桶实际会用的配置，不是所有出现的键：
 桶级 provider 键优先、全局次之，按链的顺序取 Hadoop 实际会用的来源：已设的静态密钥排在前面就用密钥，环境类来源（环境变量、web identity、容器或实例角色、默认链）排在前面就交给原生默认链，整条链只有 AssumedRole 才翻角色键；原生层表达不了的链报错，不猜：角色与其他来源混用、环境类来源排在已设的静态密钥之前、AssumeRole 由静态密钥签名（<code>assumed.role.credentials.provider</code> 走到已设的 Simple，Hadoop 的默认值就是 Simple）、连接器不认识的 provider 类、OSS 的 provider 写成列表（hadoop-aliyun 只接受一个类）（2026-09-17）；报错可以用选项绕开：选项给了静态密钥或 <code>fs.role_arn</code> 时身份由选项定，不判断 Hadoop 的链，<code>fs.use_iam=true</code> 只保留只有 AssumedRole 的会话链、其余换成默认链；读另一种云的桶时，没有端点、角色或密钥的命名空间跳过；与本进程 <code>AWS_*</code> 相同的静态密钥可以签 AssumeRole，原生默认链读的就是这组变量；两级都没设时照旧全翻，但角色与静态密钥同时出现时报错；
 临时凭证（密钥加 <code>session.token</code>，链会用到 token）翻不过去，因为属性包没有 token 的位置（3.7）：三个值正好是本进程的 <code>AWS_ACCESS_KEY_ID</code>、<code>AWS_SECRET_ACCESS_KEY</code>、<code>AWS_SESSION_TOKEN</code> 时（Spark 把 driver 的这三个环境变量抄进 s3a 键），密钥不下传、记一条 warning，由原生默认链读同一组变量；其他临时凭证报错，指向 <code>fs.use_iam</code> 或长期密钥（2026-09-16）；
 只提供了 Hadoop 自带默认值（core-default.xml 里的 ssl、path style、provider 链）的命名空间不参与翻译；

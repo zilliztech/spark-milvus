@@ -12,8 +12,8 @@ import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.write.commit.{CommittedSegment, JobManifest}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
 
-/** Review 749178e #02: two backfills in one application shared a job id, and
-  * the second one's manifest versions were silently dropped.
+/** Two backfills in one application shared a job id, and the second one's
+  * manifest versions were silently dropped.
   */
 class BackfillJobManifestTest
     extends AnyFunSuite

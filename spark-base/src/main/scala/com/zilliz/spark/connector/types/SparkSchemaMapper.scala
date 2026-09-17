@@ -94,8 +94,7 @@ object SparkSchemaMapper {
       val arrowType: ArrowType = vectorType match {
         // A column that says which Milvus type it is gets the column type
         // Milvus writes for that type; the Spark type alone cannot tell a JSON
-        // string from a VarChar or a Milvus Array from an Arrow List
-        // (review 749178e #04).
+        // string from a VarChar or a Milvus Array from an Arrow List.
         case None
             if milvusScalarType(field).exists(t =>
               t == MilvusDataType.Array || t == MilvusDataType.JSON

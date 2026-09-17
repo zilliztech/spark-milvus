@@ -388,8 +388,8 @@ class SnapshotCatalogTest extends AnyFunSuite {
     }
   }
 
-  // Review 749178e #07: an older snapshot whose V2 files are gone must not
-  // stop the newest one, or a named one, from being read.
+  // An older snapshot whose V2 files are gone must not stop the newest one, or
+  // a named one, from being read.
   test("selection materializes only the chosen snapshot") {
     withDir { dir =>
       def withV2(name: String, ts: Long, avro: String) =

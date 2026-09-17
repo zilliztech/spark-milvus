@@ -72,8 +72,8 @@ object PrimaryKeyStats {
   /** The order Milvus keeps VarChar keys in: Go string comparison, which is
     * unsigned byte order over UTF-8 (primary_key.go, stats.go). Java's
     * String.compareTo orders UTF-16 code units and disagrees above the BMP, so
-    * bounds computed with it exclude keys Milvus has (review 749178e #12). Any
-    * code that compares against minPk/maxPk uses this order.
+    * bounds computed with it exclude keys Milvus has. Any code that compares
+    * against minPk/maxPk uses this order.
     */
   def compareVarChar(a: Array[Byte], b: Array[Byte]): Int =
     java.util.Arrays.compareUnsigned(a, b)

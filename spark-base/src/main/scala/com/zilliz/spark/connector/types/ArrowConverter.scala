@@ -147,7 +147,7 @@ object ArrowConverter extends Logging {
 
       // A Milvus Array is known from the field's type, not from its layout:
       // it is VarBinary like a nullable dense vector, so it has to be matched
-      // before the vector cases (review 749178e #05).
+      // before the vector cases.
       case ArrayType(elementType, _)
           if milvusType.contains(MilvusDataType.Array) =>
         vector match {
@@ -975,7 +975,7 @@ object ArrowConverter extends Logging {
         mapVector.endValue(rowIndex, mapData.numElements())
 
       // A value that cannot be written must fail the task: logging and
-      // moving on commits a null in its place (review 749178e #01).
+      // moving on commits a null in its place.
       case _ =>
         throw new IllegalArgumentException(
           s"Unsupported Spark type for writing: $sparkType into ${vector.getClass.getSimpleName}"

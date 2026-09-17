@@ -176,9 +176,9 @@ class HadoopStorageKeysTest extends AnyFunSuite with Matchers {
     "org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider"
   private val Simple = "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
 
-  // Review 749178e #08: the native side has to use the identity Hadoop would
-  // use for the bucket. A per-bucket Simple provider with static keys does not
-  // assume the globally configured role.
+  // The native side has to use the identity Hadoop would use for the bucket. A
+  // per-bucket Simple provider with static keys does not assume the globally
+  // configured role.
   test(
     "a per-bucket Simple provider with static keys does not inherit the global role"
   ) {
@@ -253,9 +253,9 @@ class HadoopStorageKeysTest extends AnyFunSuite with Matchers {
     instance should not contain key(StorageProperties.AccessKeyId)
   }
 
-  // Review 749178e #09: Hadoop's TLS switch reaches fs.use_ssl, per-bucket
-  // first; unset means Hadoop's default, TLS on (decided 2026-09-16), unless
-  // the endpoint names its own scheme.
+  // Hadoop's TLS switch reaches fs.use_ssl, per-bucket first; unset means
+  // Hadoop's default, TLS on (decided 2026-09-16), unless the endpoint names
+  // its own scheme.
   test(
     "Hadoop's TLS switch reaches fs.use_ssl, per bucket first, TLS by default"
   ) {
