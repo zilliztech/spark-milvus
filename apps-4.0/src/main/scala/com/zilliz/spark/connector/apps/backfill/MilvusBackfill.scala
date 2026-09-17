@@ -9,6 +9,7 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.slf4j.LoggerFactory
 
@@ -23,12 +24,12 @@ import com.zilliz.milvus.storage.snapshot.json.{
   SnapshotJson
 }
 import com.zilliz.milvus.storage.snapshot.Segment
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.write.{
-  MilvusV3BatchWrite,
   MilvusV3CommitMessage,
   MilvusV3Writer,
+  MilvusV3WriterFactory,
   WriteSchema
 }
 import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
@@ -785,7 +786,7 @@ object MilvusBackfill {
         segmentToPartitionMap,
         segmentBasePathMap,
         v2SegmentIdSet,
-        config,
+        runConfig,
         newFieldNames,
         collectionSchema,
         targetVectorFields
@@ -1916,6 +1917,24 @@ object MilvusBackfill {
   /** Process a single partition containing exactly one segment This is called
     * by each Spark executor to write one segment's data
     */
+  /** The writer of one segment's new column groups, built on the executor. The
+    * rows go into the segment's own directory (`milvus.writer.customPath`) and
+    * the run's job manifest is written once by the driver, so the segment write
+    * opens no job of its own and writes nothing under the staging prefix. The
+    * explicit `fs.*` of `writeOptions` is the whole storage configuration.
+    */
+  private[backfill] def segmentWriter(
+      targetSchema: StructType,
+      writeOptions: Map[String, String],
+      jobId: String
+  ): DataWriter[InternalRow] =
+    new MilvusV3WriterFactory(
+      targetSchema,
+      MilvusOption(new CaseInsensitiveStringMap(writeOptions.asJava)),
+      jobId,
+      HadoopStorageKeys.canonicalProperties(writeOptions)
+    ).createWriter(0, System.currentTimeMillis())
+
   private def processSegmentPartition(
       iter: Iterator[InternalRow],
       config: BackfillConfig,
@@ -1955,19 +1974,15 @@ object MilvusBackfill {
     }
     val outputPath = writeOptions("milvus.writer.customPath")
 
-    val optionsMap = new CaseInsensitiveStringMap(writeOptions.asJava)
-    // The task builds its write here, on the executor: the explicit fs.* of
-    // writeOptions is the whole storage configuration.
-    val batchWrite =
-      new MilvusV3BatchWrite(
-        targetSchema,
-        MilvusOption(optionsMap),
-        com.zilliz.spark.connector.options.HadoopStorageKeys
-          .canonicalProperties(writeOptions)
+    val writer = segmentWriter(
+      targetSchema,
+      writeOptions,
+      config.jobId.getOrElse(
+        throw new IllegalStateException(
+          "the job id is resolved at the start of run"
+        )
       )
-    val writer = batchWrite
-      .createBatchWriterFactory(null)
-      .createWriter(0, System.currentTimeMillis())
+    )
 
     val readsSourceFields = config.readsSourceFields
     val newFieldNames = targetSchema.fieldNames.toSeq
@@ -2022,7 +2037,6 @@ object MilvusBackfill {
         case _ => (Seq.empty[String], -1L)
       }
 
-      batchWrite.commit(Array(commitMessage))
       writer.close()
 
       val (usedSrcByField, usedBfByField) =

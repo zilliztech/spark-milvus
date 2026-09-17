@@ -741,7 +741,9 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     options("fs.use_ssl") shouldBe "true"
     options("fs.region") shouldBe "us-west-2"
     options("fs.cloud_provider") shouldBe "aliyun"
-    options("milvus.collection.name") shouldBe "segment_789_backfill"
+    // A segment write belongs to the run's job; it names no collection of its
+    // own, which used to become the owner of a job opened for each segment.
+    options should not contain key("milvus.collection.name")
     options(
       "milvus.writer.customPath"
     ) shouldBe "files/insert_log/123/456/789"

@@ -307,7 +307,6 @@ case class BackfillConfig(
         "fs.use_iam" -> s3UseIam.toString,
         "fs.region" -> s3Region,
         StorageProperties.CloudProvider -> s3CloudProvider.trim,
-        "milvus.collection.name" -> s"segment_${segmentId}_backfill",
         "milvus.writer.customPath" -> segmentBasePath,
         "milvus.writer.commitType" -> "addfield",
         "milvus.insertMaxBatchSize" -> batchSize.toString
