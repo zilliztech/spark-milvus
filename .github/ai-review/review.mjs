@@ -70,21 +70,33 @@ function validateFinding(finding, changes) {
   return { ...finding, id: findingId(finding) };
 }
 
+// A failed reviewer does not abandon its sibling mid-request: wait for both, so traces and tool failures are
+// complete and no late progress report can overwrite the final one.
+async function settle(promises) {
+  const settled = await Promise.allSettled(promises);
+  const failed = settled.find(s => s.status === 'rejected');
+  if (failed) throw failed.reason;
+  return settled.map(s => s.value);
+}
+
 export async function runReview({ changes, config, rules, context, repository, model, onProgress = async () => {} }) {
   if (config.reviewers?.length !== 2 || new Set(config.reviewers.map(r => r.id)).size !== 2) throw new Error('Exactly two distinct reviewers are required');
   const plan = planReview(changes, config.batchChars);
-  const result = { complete: false, findings: [], disputed: [], limitations: [...plan.limitations], coverage: plan.units.map(u => ({ id: u.id, path: u.path, part: u.part, reviewedBy: [] })) };
+  const result = { complete: false, findings: [], disputed: [], limitations: [...plan.limitations], coverage: plan.units.map(u => ({ id: u.id, path: u.path, part: u.part, reviewedBy: [] })), trace: [] };
   // Preserve the pending file inventory even if the first model request fails.
   await onProgress(result);
+  // Every model request leaves a trace entry: reviewer, stage, batch, requested tools, sizes and finish reason.
+  // Saved after each round, so a cancelled or timed-out run keeps the trace up to its last completed request.
+  const traced = (reviewer, stage, batch, group = null) => async entry => { result.trace.push({ reviewer: reviewer.id, stage, batch, group, ...entry }); await onProgress(result); };
   const tools = {
     read_file: args => repository.readFile(args),
     list_files: args => repository.listFiles(args),
     search: args => repository.search(args),
   };
   const allCandidates = new Map();
-  for (const units of plan.batches) {
-    const replies = await Promise.all(config.reviewers.map(async reviewer => {
-      const response = await model.complete({ system: `${instructions}\n\nRepository policy:\n${rules}\n\nYour focus: ${reviewer.focus}`, payload: { stage: 'review', reviewer: reviewer.id, context, units }, tools });
+  for (const [batch, units] of plan.batches.entries()) {
+    const replies = await settle(config.reviewers.map(async reviewer => {
+      const response = await model.complete({ system: `${instructions}\n\nRepository policy:\n${rules}\n\nYour focus: ${reviewer.focus}`, payload: { stage: 'review', reviewer: reviewer.id, context, units }, tools, onRound: traced(reviewer, 'review', batch) });
       const reviewed = requireArray(response.reviewed, 'coverage');
       if (reviewed.length !== units.length || new Set(reviewed).size !== units.length || units.some(u => !reviewed.includes(u.id))) throw new Error(`${reviewer.id}: incomplete or invalid coverage`);
       return { reviewer, response };
@@ -106,9 +118,9 @@ export async function runReview({ changes, config, rules, context, repository, m
       if (!group || JSON.stringify([...group, candidate]).length > config.batchChars) groups.push(group = []);
       group.push(candidate);
     }
-    for (const group of groups) {
-      const decisions = await Promise.all(config.reviewers.map(async reviewer => {
-        const response = await model.complete({ system: `${instructions}\n\nRepository policy:\n${rules}\n\nYour focus: ${reviewer.focus}`, payload: { stage: 'cross_check', reviewer: reviewer.id, context, candidates: group }, tools });
+    for (const [index, group] of groups.entries()) {
+      const decisions = await settle(config.reviewers.map(async reviewer => {
+        const response = await model.complete({ system: `${instructions}\n\nRepository policy:\n${rules}\n\nYour focus: ${reviewer.focus}`, payload: { stage: 'cross_check', reviewer: reviewer.id, context, candidates: group }, tools, onRound: traced(reviewer, 'cross_check', batch, index) });
         const accepted = requireArray(response.accepted, 'accepted candidates');
         const rejected = requireArray(response.rejected, 'rejected candidates');
         const ids = [...accepted, ...rejected.map(r => r.id)];
