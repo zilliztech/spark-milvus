@@ -396,3 +396,11 @@ which throws the same way from the other direction.
 Write the message in English, explain why rather than what, and name the
 verification you actually ran. When a change contradicts a design document, say
 so in the message and fix the document in the same commit.
+
+## Automated PR review
+
+GitHub AI review covers all changed files, including documentation and generated
+files. It reads fixed Git objects and never executes PR code. See the
+[review operation guide](../.github/ai-review/README.md) for deployment, coverage
+reports and incomplete runs, and the [design](design/engineering/ai-review.html)
+for execution boundaries and repository policy.

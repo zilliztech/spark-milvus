@@ -47,7 +47,7 @@ jobs:
           config.fallback_models: '["openai/deepseek-v4-flash"]'
           config.custom_model_max_tokens: "128000"
           LITELLM_DROP_PARAMS: "true"
-          github_action_config.auto_review: "true"
+          github_action_config.auto_review: ${{ vars.ENABLE_AI_REVIEW != 'true' && 'true' || 'false' }}
           github_action_config.auto_describe: "true"
-          github_action_config.auto_improve: "true"
+          github_action_config.auto_improve: ${{ vars.ENABLE_AI_REVIEW != 'true' && 'true' || 'false' }}
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "synchronize"]'

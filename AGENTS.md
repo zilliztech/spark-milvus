@@ -151,6 +151,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | What options does a user pass? | [docs/reference-en.md](docs/reference-en.md), [docs/reference-cn.md](docs/reference-cn.md) |
 | What is a given package responsible for? | The `package.scala` or `package-info.java` in that package |
 | How do I build, test and run it? | [README.md](README.md), then [docs/contributing.md](docs/contributing.md) for the mechanics on top |
+| How does GitHub AI review work? | [docs/design/engineering/ai-review.html](docs/design/engineering/ai-review.html) — complete PR coverage, trusted execution, repository rules and validation |
 | How do we review or change the sbt build? | [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html) for principles and practice; apply the repository skill [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md) for build work |
 | What must run before every commit? | Apply [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md); [formatting](docs/contributing.md#formatting) and [unit tests](docs/contributing.md#unit-tests) in the contributing guide hold the required commands and constraints |
 | What sits outside this repository? | [docs/context.md](docs/context.md) |

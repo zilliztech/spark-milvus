@@ -1,0 +1,29 @@
+<meta charset="utf-8">
+<html lang="zh-CN">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitHub AI 审查 · Spark-Milvus</title>
+<style>
+body{max-width:1000px;margin:40px auto;padding:0 24px;font:16px/1.8 system-ui,sans-serif;color:#202824}h1,h2{line-height:1.4}h2{margin-top:36px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccd5cf;padding:10px;text-align:left;vertical-align:top}code{background:#eef2ee;padding:2px 4px;overflow-wrap:anywhere}a{color:#16654b}@media(prefers-color-scheme:dark){body{background:#171c19;color:#e5ebe6}code{background:#29312c}a{color:#83d3ae}th,td{border-color:#526158}}
+</style>
+<h1>GitHub AI 审查</h1>
+<p>GitHub Actions 对每个 PR 的全部改动进行双 reviewer 审查，包括文档、测试、配置、锁文件和生成文件。沿用多 reviewer 交叉核实与固定汇总评论的机制，独立实现公开仓库可维护的代码。通用执行程序位于 <code>.github/ai-review/</code>，仓库策略由 <code>config.json</code> 和 <code>rules.md</code> 定义，不复制私有仓库的 Action 源码。</p>
+<h2 id="section-1">1. 执行与源码边界</h2>
+<p><code>ai-review.yml</code> 由 <code>pull_request_target</code> 或维护者手动触发。执行程序从可信默认分支的确定 SHA 加载，checkout 不保存认证信息。PR 的 base/head SHA 在运行开始时固定；独立 bare Git 仓库仅获取 Git 对象，不检出文件、不初始化子模块、不运行 PR 的脚本、构建、测试或依赖安装。模型工具只读这些对象，不能读取 runner 文件系统、环境变量或调用任意命令。符号链接只返回链接文本，不跟随目标。</p>
+<p>模型使用已有网关凭据，GitHub token 仅供程序发布评论。模型不能指定网络地址或 GitHub API 请求。仓库规则来自可信执行版本，分支架构背景从本次 base SHA 的 AGENTS.md/CLAUDE.md/README.md 读取；PR 中的规则修改只作为待审数据，不改变本次执行策略。发布前再次检查 PR 的 base/head SHA，过期结果不发布。</p>
+<h2 id="section-2">2. 全部变更的覆盖</h2>
+<p>每次运行审查完整 PR diff，避免 force push、base 更新或上一轮截断造成增量遗漏。Git 根据 merge base 列出全部文件，不依赖 GitHub files API 的文件数量上限。不按路径、扩展名或文件大小排除。文本 diff 分块，每块有稳定编号；每个 reviewer 必须明确返回其覆盖的编号。单行超长也继续分块，不丢弃尾部。读取文件与搜索结果使用分页，并返回剩余位置。</p>
+<p>二进制文件、子模块以及 Git LFS 外部对象展示对象标识、模式和变更信息，并列为需要人工检查的内容。无法解码、模型响应截断、工具预算用尽、网络失败或缺少覆盖编号均不能生成 LGTM。运行将结果与覆盖清单写成 artifact；失败时保持失败状态。GitHub 评论只显示摘要并链接完整运行记录，不能把评论长度限制当作审查范围限制。</p>
+<h2 id="section-3">3. 问题核实与发布</h2>
+<p>两个明确角色分别检查架构与数据正确性、存储与 native 资源管理；两者都检查文档与公开接口。第一轮独立提出结构化问题；第二轮分别核实双方候选。程序只发布两者均确认的问题，保留未形成一致结论的条目供人工判断。问题必须指出本次修改中的位置、具体触发条件、错误结果和代码或文档证据。没有证据的风格建议不发布。</p>
+<p>每个 reviewer 的工具和问题属于本次调用，不使用全局“当前 reviewer”变量。发布使用固定 head SHA；只有有效 diff 行可以成为行内评论，其余问题留在汇总。重复问题依据结构化身份去重。汇总通过 marker 定位，并核对机器人作者；已有用户评论不能伪造审查状态。全量复审重新生成当前问题列表，不把旧摘要当作已完成审查的证明。严重问题不自动提交 REQUEST_CHANGES；不完整审查会失败，是否配置分支保护由仓库维护者决定。</p>
+<h2 id="section-4">4. 仓库规则与现有工作流</h2>
+<p>规则引用已有 <a href="../../../AGENTS.md">AGENTS.md</a>、<a href="../README.md">设计决策</a>、包职责与相关设计文件。1.x 与 2.0 的架构和兼容要求按目标分支判断；不能把尚未实现的设计当作当前 PR 的回归。文档检查包括代码一致性、命令参数、链接和能力索引同步；公开 API、配置、存储格式与发布行为必须考虑仓库外使用者。</p>
+<p>启用开关为 <code>ENABLE_AI_REVIEW=true</code>。新审查启用时 PR-Agent 保留描述与标签，关闭自动 review 和代码建议；新审查关闭时保留旧行为。先将工作流与程序部署到 upstream 默认分支，再启用开关；只在 fork 或特性分支添加文件不会部署默认分支工作流。</p>
+<h2 id="section-5">5. 实施与验证</h2>
+<table><thead><tr><th>步骤</th><th>文件与责任</th><th>验证依据</th></tr></thead><tbody>
+<tr><td>Git 对象访问</td><td>repository.mjs：固定提交、完整文件清单、diff、分页读取与搜索</td><td>临时真实 Git 仓库覆盖文档、重命名、删除、符号链接、二进制、超长文本及路径字符</td></tr>
+<tr><td>审查执行</td><td>review.mjs、model.mjs：分块、双 reviewer、结构化核实、覆盖结果</td><td>确定性模型替身验证遗漏、截断、撤回、分歧与工具预算；不调用付费模型</td></tr>
+<tr><td>GitHub 接入</td><td>github.mjs、main.mjs、工作流与仓库规则</td><td>HTTP 替身验证分页、机器人评论归属、固定 SHA、去重与过期结果；workflow 静态检查</td></tr>
+<tr><td>交付</td><td>操作说明、索引与决策记录</td><td>一次完整 Node 测试和 workflow 校验；部署与实际模型运行须分别报告，不能用本地测试代替上线证据</td></tr>
+</tbody></table>
+</html>
