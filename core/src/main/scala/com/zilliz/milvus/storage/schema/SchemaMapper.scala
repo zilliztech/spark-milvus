@@ -24,17 +24,6 @@ object SchemaMapper {
     FieldSchema(name = "Timestamp", fieldID = 1, dataType = DataType.Int64)
   )
 
-  /** System columns have been spelled several ways across versions. Match on
-    * the id; the name is only a fallback.
-    */
-  def systemFieldNameAliases(field: FieldSchema): Set[String] = {
-    field.fieldID match {
-      case 0 => Set("rowid", "row_id")
-      case 1 => Set("timestamp")
-      case _ => Set(field.name.toLowerCase)
-    }
-  }
-
   /** The system columns the schema does not declare, decided by field id alone.
     * Milvus reserves only the exact names RowID and Timestamp (proxy
     * validateReservedFieldNames), so a user field spelled `timestamp` or
