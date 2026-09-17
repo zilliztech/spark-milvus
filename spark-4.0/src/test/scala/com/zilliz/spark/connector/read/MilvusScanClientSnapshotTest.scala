@@ -287,13 +287,27 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     )
   }
 
-  test("snapshotBucket returns None for unsupported (non-S3) schemes") {
-    // Non-S3 locations carry no bucket to configure; explicit scheme
-    // validation lives in resolveClientSnapshotLocation.
+  // A gs:// location used to count as "no bucket", so the read opened the
+  // local backend and read the key from the local root instead.
+  test("snapshotBucket reads every object-store scheme and refuses others") {
     assert(
-      StorageOptions.snapshotBucket("gs://a-bucket/files/snapshot.json") == None
+      StorageOptions.snapshotBucket("gs://a-bucket/files/snapshot.json") ==
+        Some("a-bucket")
+    )
+    assert(
+      StorageOptions.snapshotBucket("oss://o-bucket/files/snapshot.json") ==
+        Some("o-bucket")
     )
     assert(StorageOptions.snapshotBucket("file:///data/backup/b1") == None)
+    assert(
+      StorageOptions.snapshotBucket(
+        "https://s3.us-west-2.amazonaws.com/b/files/snapshot.json"
+      ) == None
+    )
+    val unknown = intercept[IllegalArgumentException](
+      StorageOptions.snapshotBucket("hdfs://namenode/files/snapshot.json")
+    )
+    assert(unknown.getMessage.contains("hdfs"))
   }
 
   test("backupMaxJsonBytes honors milvus.snapshot.max.json.bytes") {

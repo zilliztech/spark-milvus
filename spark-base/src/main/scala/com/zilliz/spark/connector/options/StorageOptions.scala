@@ -54,6 +54,14 @@ object StorageOptions extends Logging {
     }
   }
 
+  /** The bucket a snapshot or backup location names. An object-store URI (`s3`,
+    * `s3a`, `gs`, `oss`) carries it as its authority. A `file` URI and a
+    * bucket-relative key carry none, and neither does Milvus's
+    * `http(s)://<endpoint>/<bucket>/<key>` form, whose bucket is resolved
+    * against the configured endpoint and bucket. Any other scheme is refused:
+    * the native filesystem cannot open it, and treating it as bucket-less would
+    * read a different file from the local backend.
+    */
   private[connector] def snapshotBucket(location: String): Option[String] = {
     val trimmed = Option(location).map(_.trim).getOrElse("")
     if (trimmed.isEmpty) {
@@ -61,18 +69,19 @@ object StorageOptions extends Logging {
     } else {
       val uri = new URI(trimmed)
       Option(uri.getScheme).map(_.toLowerCase) match {
-        case Some("s3a") | Some("s3") =>
+        case Some("s3a" | "s3" | "gs" | "oss") =>
           Option(uri.getHost).orElse {
             Option(uri.getAuthority)
               .map(_.takeWhile(_ != '@'))
               .map(_.split(":").head)
               .filter(_.nonEmpty)
           }
-        // Non-S3 schemes (e.g. `file://` for a local snapshot/backup dir) carry
-        // no bucket to configure; treat them as "no bucket". Explicit scheme
-        // validation lives in resolveClientSnapshotLocation.
-        case Some(_) => None
-        case None    => None
+        case Some("file" | "http" | "https") => None
+        case Some(other) =>
+          throw new IllegalArgumentException(
+            s"Unsupported storage location scheme '$other' in $trimmed; use s3, s3a, gs, oss or file, or a bucket-relative key with ${StorageProperties.BucketName}"
+          )
+        case None => None
       }
     }
   }

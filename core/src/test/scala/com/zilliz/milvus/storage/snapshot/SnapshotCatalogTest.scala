@@ -601,6 +601,26 @@ class SnapshotCatalogTest extends AnyFunSuite {
     }
   }
 
+  // A catalog over a store with no bucket (the local backend) used to skip
+  // the bucket check and read the location's key from the local root.
+  test("a store with no bucket refuses a location that names one") {
+    withDir { dir =>
+      write(dir, "files/snapshots/10/metadata/1.json", snapshotJson("s1", 100L))
+      val c = new SnapshotCatalog(
+        new LocalObjectStore(dir.toString),
+        "",
+        V2SegmentResolver.Unavailable
+      )
+      Seq(
+        "gs://b/files/snapshots/10/metadata/1.json",
+        "https://s3.us-west-2.amazonaws.com/b/files/snapshots/10/metadata/1.json"
+      ).foreach { location =>
+        intercept[IllegalArgumentException](c.read(location))
+      }
+      assert(c.read("files/snapshots/10/metadata/1.json").name == "s1")
+    }
+  }
+
   test(
     "the endpoint form Milvus prints is read when the host is the catalog's"
   ) {

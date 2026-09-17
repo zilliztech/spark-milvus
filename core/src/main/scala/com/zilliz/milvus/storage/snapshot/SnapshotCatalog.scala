@@ -102,13 +102,19 @@ final class SnapshotCatalog(
     materialize(location, metadata(location))
 
   /** The parsed JSON at `location`, with the bucket and size checks; opens no
-    * segment file. Selection reads every candidate this far and no further.
+    * segment file. Selection reads every candidate this far and no further. A
+    * location that names a bucket must name this catalog's; over a store with
+    * no bucket (the local backend) it is refused rather than read as a local
+    * key.
     */
   private def metadata(location: String): SnapshotJson = {
     val located = StoragePath.parseMilvus(location, bucket, endpoint)
-    if (bucket.nonEmpty && located.hasBucket && located.bucket != bucket) {
+    if (located.hasBucket && located.bucket != bucket) {
+      val boundTo =
+        if (bucket.isEmpty) "a store with no bucket (the local backend)"
+        else s"bucket '$bucket'"
       throw new IllegalArgumentException(
-        s"snapshot $location is in bucket '${located.bucket}', catalog is bound to '$bucket'"
+        s"snapshot $location is in bucket '${located.bucket}', catalog is bound to $boundTo"
       )
     }
     val key = located.key
