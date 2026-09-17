@@ -10,6 +10,7 @@ import org.apache.spark.sql.types.StructType
 
 import com.zilliz.milvus.storage.index.SegmentIndexQuery
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReaderRegistry}
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.spark.connector.options.VectorSearch
 import com.zilliz.spark.connector.types.{ArrowConverter, SparkTypes}
 import io.milvus.grpc.schema.CollectionSchema
@@ -31,6 +32,14 @@ private[read] object SegmentIndexSearch extends Logging {
 
   def validate(search: VectorSearch, schema: CollectionSchema): Unit =
     SegmentIndexQuery.validate(request(search), schema)
+
+  /** Fails planning when a segment of the plan cannot serve the search. */
+  def checkPlan(
+      search: VectorSearch,
+      schema: CollectionSchema,
+      tasks: Seq[SegmentReadTask]
+  ): Unit =
+    SegmentIndexQuery.checkPlan(request(search), schema, tasks)
 
   def run(
       search: VectorSearch,

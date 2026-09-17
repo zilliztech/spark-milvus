@@ -2,6 +2,7 @@ package com.zilliz.milvus.storage.index
 
 import java.lang.{Float => JavaFloat}
 import java.util.BitSet
+import scala.util.Try
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.types.pojo.Schema
@@ -16,7 +17,11 @@ import com.zilliz.milvus.storage.read.exec.{
   SegmentReaderRegistry
 }
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.snapshot.{SegmentIndexes, SegmentLayout}
+import com.zilliz.milvus.storage.snapshot.{
+  SegmentIndex,
+  SegmentIndexes,
+  SegmentLayout
+}
 import com.zilliz.milvus.storage.Logging
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
@@ -126,14 +131,16 @@ object SegmentIndexQuery extends Logging {
     Validated(field, dimension, expression)
   }
 
-  def run(
+  /** The persisted index that serves `fieldId` in `task`'s segment, checked
+    * against what the snapshot pinned: `None` only when the snapshot says the
+    * segment has no index and the request allows that. Planning checks every
+    * task with this before any runs; `run` checks again on the executor.
+    */
+  def selectIndex(
       request: Request,
-      task: SegmentReadTask,
-      arrowSchema: Schema,
-      columnNameFor: Long => Option[String],
-      allocator: BufferAllocator,
-      reportMetrics: ReadMetrics => Unit = _ => ()
-  ): Result = {
+      fieldId: Long,
+      task: SegmentReadTask
+  ): Option[SegmentIndex] = {
     task.layout match {
       case SegmentLayout.Manifest(_, version) =>
         require(
@@ -142,14 +149,12 @@ object SegmentIndexQuery extends Logging {
         )
       case _ =>
     }
-    val collection = CollectionSchema.parseFrom(task.schemaBytes)
-    val prepared = validated(request, collection)
     val selected = task.indexes match {
       case SegmentIndexes.Available(indexes) =>
-        val matches = indexes.filter(_.fieldId == prepared.field.fieldID)
+        val matches = indexes.filter(_.fieldId == fieldId)
         require(
           matches.size <= 1,
-          s"Ambiguous index for segment ${task.segmentId}, field ${prepared.field.fieldID}"
+          s"Ambiguous index for segment ${task.segmentId}, field $fieldId"
         )
         matches.headOption
       case SegmentIndexes.Unindexed => None
@@ -160,8 +165,62 @@ object SegmentIndexQuery extends Logging {
     }
     require(
       selected.nonEmpty || request.allowUnindexed,
-      s"No persisted index for segment ${task.segmentId}, field ${prepared.field.fieldID}"
+      s"No persisted index for segment ${task.segmentId}, field $fieldId"
     )
+    selected.foreach { descriptor =>
+      require(
+        descriptor.segmentId == task.segmentId && descriptor.partitionId == task.partitionId,
+        s"Index identity differs from the pinned segment ${task.segmentId}"
+      )
+      require(
+        descriptor.metricType.exists(_.equalsIgnoreCase(request.metric)),
+        s"Query metric differs from the persisted index metric of segment ${task.segmentId}"
+      )
+      require(
+        task.expectedRows.contains(descriptor.rowCount),
+        s"Index row count differs from the pinned segment ${task.segmentId}"
+      )
+      require(
+        descriptor.rowCount > 0 && descriptor.rowCount <= Int.MaxValue,
+        s"Segment ${task.segmentId} bitmap exceeds supported row count"
+      )
+    }
+    selected
+  }
+
+  /** Checks a whole plan before any task runs and names every segment that
+    * cannot serve the request.
+    */
+  def checkPlan(
+      request: Request,
+      schema: CollectionSchema,
+      tasks: Seq[SegmentReadTask]
+  ): Unit = {
+    val fieldId = validated(request, schema).field.fieldID
+    val failures = tasks.flatMap { task =>
+      Try(selectIndex(request, fieldId, task)).failed.toOption.map(_.getMessage)
+    }
+    if (failures.nonEmpty) {
+      val shown = failures.take(20).mkString("; ")
+      val rest =
+        if (failures.size > 20) s"; ${failures.size - 20} more" else ""
+      throw new IllegalArgumentException(
+        s"Index search cannot run on ${failures.size} of ${tasks.size} segments: $shown$rest"
+      )
+    }
+  }
+
+  def run(
+      request: Request,
+      task: SegmentReadTask,
+      arrowSchema: Schema,
+      columnNameFor: Long => Option[String],
+      allocator: BufferAllocator,
+      reportMetrics: ReadMetrics => Unit = _ => ()
+  ): Result = {
+    val collection = CollectionSchema.parseFrom(task.schemaBytes)
+    val prepared = validated(request, collection)
+    val selected = selectIndex(request, prepared.field.fieldID, task)
     val pkField = collection.fields.find(_.isPrimaryKey)
     val deletes = DeletePlans.of(task, pkField)
     require(
@@ -185,22 +244,6 @@ object SegmentIndexQuery extends Logging {
       return Unindexed(selection)
     }
     val descriptor = selected.get
-    require(
-      descriptor.segmentId == task.segmentId && descriptor.partitionId == task.partitionId,
-      "Index identity differs from the pinned segment"
-    )
-    require(
-      descriptor.metricType.exists(_.equalsIgnoreCase(request.metric)),
-      "Query metric differs from persisted index metric"
-    )
-    require(
-      task.expectedRows.contains(descriptor.rowCount),
-      "Index row count differs from the pinned segment"
-    )
-    require(
-      descriptor.rowCount > 0 && descriptor.rowCount <= Int.MaxValue,
-      "Segment bitmap exceeds supported row count"
-    )
     val excluded = new BitSet(descriptor.rowCount.toInt)
     if (selection.neededColumns.nonEmpty) {
       val reader = SegmentReaderRegistry.open(

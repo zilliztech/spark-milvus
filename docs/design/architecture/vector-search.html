@@ -109,8 +109,9 @@ spark-base <code>filter</code> 包的 <code>VectorBruteForceSearch</code> 连同
 <div class="table"><table>
 <thead><tr><th>情况</th><th>行为</th></tr></thead><tbody>
 <tr><td>段有完整、兼容的索引（index 模式）</td><td>本任务加载、搜索、关闭</td></tr>
-<tr><td>快照确认该段未建索引（index 模式）</td><td>报错；<code>allowUnindexed = true</code> 时该段改用精确扫描</td></tr>
-<tr><td>快照缺索引描述，或覆盖、格式、引擎不受支持</td><td>报错，写明段、字段和所缺内容</td></tr>
+<tr><td>快照确认该段未建索引（index 模式）</td><td>规划时在 driver 上报错；<code>allowUnindexed = true</code> 时该段改用精确扫描</td></tr>
+<tr><td>快照缺索引描述，或索引的段、metric、行数与钉住的段不符</td><td>规划时在 driver 上报错，一次列出所有不满足的段；executor 上的同一检查保留</td></tr>
+<tr><td>索引覆盖、文件格式、引擎不受支持</td><td>任务加载索引时报错，写明段、字段和所缺内容</td></tr>
 <tr><td>文件丢失或损坏、鉴权失败、版本不符、内存不足</td><td>原样传播；对象存储的瞬时错误按标准重试</td></tr>
 <tr><td>查询集超过上限、<code>query_id</code> 重复、向量非法</td><td>在 driver 上报错</td></tr>
 <tr><td>过滤后有效行少于 K</td><td>该查询返回全部有效行</td></tr>

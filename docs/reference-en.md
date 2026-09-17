@@ -33,7 +33,9 @@ unsupported syntax fail before execution. Filtering the returned DataFrame
 instead filters the already selected hits. JSON, arrays and functions are not
 yet supported in this expression subset.
 
-Missing index metadata, corrupt files and incompatible formats fail explicitly.
+Missing index metadata, and an index whose metric or row count differs from
+its segment, fail while the query is planned, naming every such segment;
+corrupt files and incompatible formats fail when a task loads the index.
 `allowUnindexed = true` enables native brute-force only for segments whose
 metadata confirms the requested field has no index. Default is `false`.
 Each task owns and closes its loaded index; cross-query caching is not yet implemented.

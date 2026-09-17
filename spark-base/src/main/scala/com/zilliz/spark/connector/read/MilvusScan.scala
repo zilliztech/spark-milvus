@@ -315,6 +315,9 @@ class MilvusScan(
       neededFieldIds = MilvusOption.readerFieldIds(options),
       limits = milvusOption.readLimits
     )
+    milvusOption.vectorSearch.filter(_.mode == "index").foreach { search =>
+      SegmentIndexSearch.checkPlan(search, snapshot.schema, plan.specs)
+    }
     plan.specs.map { task =>
       task.layout match {
         case SegmentLayout.Manifest(_, _) =>

@@ -11,6 +11,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.{
+  Segment,
+  SegmentIndexes,
   SegmentLayout,
   Snapshot,
   SnapshotOrigin,
@@ -157,6 +159,44 @@ class SegmentIndexSearchPlanningTest extends AnyFunSuite {
     )
     builder.pruneColumns(StructType(Seq(score)))
     assert(builder.build().readSchema() == StructType(Seq(score)))
+  }
+
+  // Whether a segment can serve the search is known on the driver: the
+  // snapshot names its builds, says it has none, or says nothing. A segment
+  // that cannot serve it fails planning instead of failing in every task.
+  test("index search refuses unusable segments while planning") {
+    def partitionsOver(segment: Segment, allowUnindexed: Boolean) = {
+      val configured =
+        if (allowUnindexed)
+          options.updated(MilvusOption.VectorSearchAllowUnindexed, "true")
+        else options
+      val scan = new MilvusScanBuilder(
+        StructType(
+          Seq(
+            StructField("id", LongType),
+            StructField("_score", DoubleType, nullable = false)
+          )
+        ),
+        new CaseInsensitiveStringMap(configured.asJava),
+        snapshot
+      ).build().asInstanceOf[MilvusScan]
+      scan.inputPartitions(snapshot.copy(segments = Seq(segment)))
+    }
+    val segment = Segment.v2(
+      3L,
+      2L,
+      3L,
+      Seq(V2ColumnGroup(Seq(100L, 101L), Seq("absent.parquet"), Seq(3L)))
+    )
+    val unknown = intercept[IllegalArgumentException](
+      partitionsOver(segment, allowUnindexed = false)
+    )
+    assert(unknown.getMessage.contains("segment 3"))
+    val unindexed = segment.copy(indexes = SegmentIndexes.Unindexed)
+    intercept[IllegalArgumentException](
+      partitionsOver(unindexed, allowUnindexed = false)
+    )
+    assert(partitionsOver(unindexed, allowUnindexed = true).length == 1)
   }
 
   test("both V2 and V3 index partitions force the search row reader") {
