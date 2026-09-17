@@ -109,3 +109,37 @@ test('a failing reviewer waits for its sibling, so both traces are complete befo
   await assert.rejects(runReview({ changes: [change(finding.path, patch)], config, rules: '', context: {}, repository: {}, model, onProgress: async r => { last = r; } }), /budget/);
   assert.deepEqual(last.trace.map(t => `${t.reviewer}:${t.round}`).sort(), ['architecture:0', 'storage:0', 'storage:1']);
 });
+
+test('two reviewers describing the same changed line are one finding with merged evidence and both reporters', async () => {
+  const other = { ...finding, title: 'Deleted rows are returned', priority: 'P2', evidence: [{ path: 'docs/read.md', ref: 'base', line: 4, detail: 'The base documented the correct flag.' }] };
+  const model = { complete: async ({ payload }) => {
+    if (payload.stage === 'review') return { reviewed: payload.units.map(u => u.id), findings: [payload.reviewer === 'architecture' ? finding : other], limitations: [] };
+    assert.equal(payload.candidates.length, 1);
+    assert.equal(payload.candidates[0].reportedBy, undefined, 'the cross-check does not learn who reported a candidate');
+    return { accepted: payload.candidates.map(c => c.id), rejected: [], limitations: [] };
+  } };
+  const result = await runReview({ changes: [change(finding.path, patch)], config, rules: '', context: {}, repository: {}, model });
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].title, finding.title);
+  assert.equal(result.findings[0].priority, 'P1');
+  assert.deepEqual([...result.findings[0].reportedBy].sort(), ['architecture', 'storage']);
+  assert.equal(result.findings[0].evidence.length, 2);
+  assert.equal(result.complete, true);
+});
+
+test('what a reviewer says it could not verify is a caveat, and a complete review stays complete', async () => {
+  const model = { complete: async ({ payload }) => ({ reviewed: payload.units.map(u => u.id), findings: [], limitations: payload.reviewer === 'storage' ? ['The workflow was not executed.'] : [] }) };
+  const result = await runReview({ changes: [change(finding.path, patch)], config, rules: '', context: {}, repository: {}, model });
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.caveats, ['storage: The workflow was not executed.']);
+  assert.deepEqual(result.limitations, []);
+});
+
+test('a reviewer that used its whole tool budget still contributes its answer, and the exhaustion is a limitation', async () => {
+  const model = { complete: async ({ payload }) => ({ reviewed: payload.units.map(u => u.id), findings: [], limitations: [], exhaustedAfter: payload.reviewer === 'storage' ? 16 : 0 }) };
+  const result = await runReview({ changes: [change(finding.path, patch)], config, rules: '', context: {}, repository: {}, model });
+  assert.equal(result.complete, false);
+  assert.equal(result.coverage[0].reviewedBy.length, 2);
+  assert.match(result.limitations.join(' '), /storage: tool budget exhausted after 16 rounds/);
+  assert.deepEqual(result.caveats, []);
+});

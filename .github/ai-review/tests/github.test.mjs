@@ -56,3 +56,25 @@ test('unsupported content and reviewer disagreements cannot produce LGTM', () =>
   assert.doesNotMatch(renderSummary(pr, { ...empty, complete: false, limitations: ['Binary file: a.png'] }, runUrl), /LGTM/);
   assert.doesNotMatch(renderSummary(pr, { ...empty, disputed: [{ priority: 'P2', path: 'x', title: 'Contract unclear', scenario: 'Failure possible' }] }, runUrl), /LGTM/);
 });
+
+test('reviewer caveats are published without INCOMPLETE and without an unqualified LGTM', () => {
+  const body = renderSummary(pr, { ...empty, caveats: ['storage: The workflow was not executed.'] }, runUrl);
+  assert.match(body, /No confirmed findings; 1 reviewer caveat/);
+  assert.match(body, /\*\*Reviewer caveats\*\*/);
+  assert.match(body, /storage: The workflow was not executed\./);
+  assert.doesNotMatch(body, /INCOMPLETE/);
+  assert.doesNotMatch(body, /LGTM/);
+});
+
+test('a finding reported by both reviewers says so in the summary and inline', async () => {
+  const finding = { id: 'abc', path: 'docs/a.md', line: 2, side: 'RIGHT', priority: 'P1', title: 'Wrong command', scenario: 'The command fails.', reportedBy: ['a', 'b'], evidence: [{ path: 'reader.scala', ref: 'head', line: 3, detail: 'No such option.' }] };
+  assert.match(renderSummary(pr, { ...empty, findings: [finding] }, runUrl), /Wrong command · reported by both reviewers/);
+  const writes = [];
+  const github = new GitHub('example/repo', 'test-only', async (url, init) => {
+    if (init.method !== 'GET') { writes.push({ url, body: JSON.parse(init.body) }); return json({}); }
+    if (url.includes('/comments')) return json([]);
+    return json(pr);
+  });
+  await github.publish(pr, { ...empty, findings: [finding] }, runUrl);
+  assert.match(writes.find(w => w.url.endsWith('/reviews')).body.comments[0].body, /reported by both reviewers/);
+});

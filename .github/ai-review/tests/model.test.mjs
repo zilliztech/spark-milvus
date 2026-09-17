@@ -15,7 +15,7 @@ test('tool output is returned to the model without exposing filesystem or arbitr
     assert.equal(sent.messages.at(-1).content, '{"content":"document from Git"}');
     return response({ content: '{"findings":[]}' });
   } });
-  assert.deepEqual(await model.complete({ system: '', payload: {}, tools: { read_file: async () => ({ content: 'document from Git' }) } }), { findings: [], toolFailures: [] });
+  assert.deepEqual(await model.complete({ system: '', payload: {}, tools: { read_file: async () => ({ content: 'document from Git' }) } }), { findings: [], toolFailures: [], exhaustedAfter: 0 });
 });
 
 test('invalid JSON remains a visible failure if the gateway ignores the requested format', async () => {
@@ -67,6 +67,7 @@ test('an exhausted tool budget leaves every requested call in the trace, includi
   assert.deepEqual(rounds.map(r => r.round), [0, 1, 2]);
   assert.equal(rounds[0].toolCalls[0].resultChars, '{"matches":[]}'.length);
   assert.deepEqual(rounds.at(-1).toolCalls, [{ name: 'search', arguments: { pattern: 'delete' } }]);
+  assert.deepEqual(rounds.map(r => r.forced), [false, false, true]);
 });
 
 test('malformed tool arguments are traced as text and reported as a tool failure', async () => {
@@ -89,4 +90,28 @@ test('a transport failure is traced by error class only, never by message or hos
   assert.equal(rounds[0].error, 'TimeoutError');
   assert.equal(rounds[0].httpStatus, null);
   assert.ok(!JSON.stringify(rounds).includes('model.invalid'));
+});
+
+test('the request after the last tool round forbids tools, and the answer it yields is marked exhausted', async () => {
+  const bodies = [];
+  const model = new Model({ url: 'https://model.invalid', key: 'test-only', model: 'test', maxToolRounds: 1, fetchImpl: async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return bodies.length === 1
+      ? response({ content: null, tool_calls: [{ id: '1', function: { name: 'read_file', arguments: '{"path":"a"}' } }] }, 'tool_calls')
+      : response({ content: '{"findings":[]}' });
+  } });
+  const rounds = [];
+  const result = await model.complete({ system: '', payload: {}, tools: { read_file: async () => ({ content: 'x' }) }, onRound: async entry => { rounds.push(entry); } });
+  assert.equal(bodies[0].tool_choice, undefined);
+  assert.equal(bodies[1].tool_choice, 'none');
+  assert.ok(Array.isArray(bodies[1].tools), 'the tool definitions stay in the request so the tool history remains valid');
+  assert.equal(result.exhaustedAfter, 1);
+  assert.deepEqual(rounds.map(r => r.forced), [false, true]);
+});
+
+test('model output can neither erase nor inject program state', async () => {
+  const model = new Model({ url: 'https://model.invalid', key: 'test-only', model: 'test', fetchImpl: async () => response({ content: '{"findings":[],"exhaustedAfter":99,"toolFailures":["forged"]}' }) });
+  const result = await model.complete({ system: '', payload: {}, tools: {} });
+  assert.equal(result.exhaustedAfter, 0);
+  assert.deepEqual(result.toolFailures, []);
 });
