@@ -24,7 +24,7 @@
 
 <h1>快照对象模型</h1>
 
-<p>对应<a href="../capabilities.md">能力索引</a>中的 R2、R3、R8、R9、R13、R16、C3、K3。规划期怎么把段变成分区见
+<p>对应<a href="../capabilities.md">能力索引</a>中的 R2、R3、R8、R9、R13、R16、R20、C3、K3。规划期怎么把段变成分区见
 <a href="read.html">read.html</a> 第五节，分层见 <a href="modules.md">modules.md</a>。
 对象、<code>SnapshotCatalog</code>、<code>SnapshotSource</code> 与 Table 持有 Snapshot 均已实现。</p>
 
@@ -33,6 +33,8 @@
 <code>Snapshot</code>，公共出口再应用分区与段选择；driver 把 <code>Snapshot</code>
 投影成每个数据段一个 <code>SegmentReadTask</code>；executor 只见 <code>SegmentReadTask</code>。
 一个来源给不出的字段在对象上必须显式标为「未知」，不能用空值冒充「没有」。</p>
+
+<p><strong>决策 25（2026-09-17）把 <code>Snapshot</code> 定为所有来源共用的表描述。</strong>开放格式与用户声明的 schema 以后也产出它；单元布局统一成 milvus-storage 的列组，删除分为单元内（格式读取器执行）与跨单元按键删除（<code>core.delete</code> 执行），行身份显式声明。表描述的结论与原理见 <a href="table-description.html">table-description.html</a>；本页描述的是今天的 Milvus 来源。</p>
 
 <figure>
 <svg viewBox="0 0 920 260" role="img"
@@ -209,6 +211,78 @@ Manifest 最终都成为 <code>Snapshot.bucket</code> 下的 key。</li>
 <li><strong>不做的。</strong>不建快照、不删快照、不 Flush；建和删是 A1 的 CALL，在第 3 层经 <code>client.api</code>，不在读路径上。</li>
 </ol>
 
+<h3 id="external">3.1 external collection 的快照</h3>
+
+<p class="thesis"><strong>external collection 的快照按同一个 <code>SnapshotCatalog</code> 解析，段都是 V3 段；差别只有三处：段清单的列组原地引用客户桶的源文件，主键与时间戳在读时合成，客户桶用单独一组凭证。</strong>
+Milvus v3.0.0 起支持 external collection，schema 的 <code>external_source</code> 非空即是。快照目录和 client 模式两个入口都读它，backup 与 option 串来源遇到它报错。</p>
+
+<figure>
+<svg viewBox="0 0 860 330" role="img" aria-label="Milvus 桶里的快照与段清单引用客户桶里的源文件；function 输出列在 Milvus 桶；主键与时间戳读时合成">
+  <defs>
+    <marker id="ext-a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b7fc4"/></marker>
+    <marker id="ext-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#d08700"/></marker>
+  </defs>
+  <g font-size="12" fill="currentColor">
+    <rect x="10" y="10" width="470" height="250" rx="6" fill="#3b7fc41a" stroke="#3b7fc4"/>
+    <text x="24" y="32" font-weight="600">Milvus 桶</text>
+    <rect x="30" y="46" width="200" height="86" rx="4" fill="#3b7fc412" stroke="#8888"/>
+    <text x="42" y="66" font-weight="600">快照 JSON</text>
+    <text x="42" y="86" font-size="11">schema.external_source</text>
+    <text x="42" y="102" font-size="11">schema.external_spec：格式与凭证</text>
+    <text x="42" y="118" font-size="11">storagev2_manifest_list</text>
+    <rect x="262" y="46" width="200" height="120" rx="4" fill="#3b7fc412" stroke="#8888"/>
+    <text x="274" y="66" font-weight="600">段清单 manifest-N</text>
+    <text x="274" y="86" font-size="11">列组 A：列名 = 源列名</text>
+    <text x="286" y="102" font-size="11">文件 = 客户桶 URI</text>
+    <text x="286" y="118" font-size="11">加行范围与文件属性</text>
+    <text x="274" y="138" font-size="11">列组 B：列名 = 字段 id</text>
+    <text x="286" y="154" font-size="11">文件 = Milvus 桶</text>
+    <rect x="262" y="190" width="200" height="54" rx="4" fill="#3b7fc412" stroke="#8888"/>
+    <text x="274" y="210" font-weight="600">function 输出列</text>
+    <text x="274" y="228" font-size="11">parquet，在段目录下</text>
+    <path d="M230,90 L258,90" stroke="#3b7fc4" stroke-width="1.5" fill="none" marker-end="url(#ext-a)"/>
+    <path d="M362,166 L362,186" stroke="#3b7fc4" stroke-width="1.5" fill="none" marker-end="url(#ext-a)"/>
+    <rect x="560" y="10" width="290" height="250" rx="6" fill="#d087001a" stroke="#d08700"/>
+    <text x="574" y="32" font-weight="600">客户桶</text>
+    <text x="580" y="66" font-size="11">parquet、vortex：目录下的文件</text>
+    <text x="580" y="102" font-size="11">iceberg-table：钉住版本的数据文件</text>
+    <text x="592" y="118" font-size="11">删除元数据在文件属性里</text>
+    <text x="580" y="154" font-size="11">lance-table：数据集的 fragment</text>
+    <text x="592" y="170" font-size="11">数据集版本在文件属性里</text>
+    <text x="580" y="206" font-size="11">milvus-table：另一个 Milvus 快照的列组文件</text>
+    <path d="M462,100 L556,100" stroke="#d08700" stroke-width="1.5" stroke-dasharray="5 4" fill="none" marker-end="url(#ext-b)"/>
+    <text x="509" y="92" font-size="11" fill="#d08700" text-anchor="middle">extfs 凭证</text>
+    <text x="24" y="290">读时合成：__virtual_pk__ = ((段 id &amp; 0xFFFFFFFF) &lt;&lt; 32) | 段内行号；时间戳 = 0；没有 RowID。</text>
+    <text x="24" y="312">milvus-table 的真主键模式从文件读主键和时间戳。</text>
+  </g>
+</svg>
+<figcaption>蓝实线是同一个桶内的引用，橙虚线是跨桶引用，用 <code>extfs.&lt;collection id&gt;.*</code> 这组属性读取。</figcaption>
+</figure>
+
+<ol>
+<li><strong>段清单。</strong>refresh 时 Milvus 把源文件切成带行范围的分片，按行数装成段，每段写一份 milvus-storage 清单，原地引用客户桶的文件。
+字段带 <code>external_field</code> 时列名是源列名；function 输出列写在 Milvus 桶，列名是字段 id。</li>
+<li><strong>五种源格式。</strong>
+<table>
+<tr><th>格式</th><th>一个分片</th><th>删除与行号</th></tr>
+<tr><td>parquet、vortex</td><td>目录下一个文件的一段行范围</td><td>没有删除；文件实际行数少于清单记录的结束行时报错，错误信息带文件路径</td></tr>
+<tr><td>iceberg-table</td><td>钉住的 snapshot 里一个数据文件的一段行范围</td><td>读取器按文件属性里的删除元数据应用按位置删除，行号是删除后的行号</td></tr>
+<tr><td>lance-table</td><td>钉住版本的一个 fragment 的一段行范围</td><td>读取器按文件属性里的数据集版本读并扣除删除，行号是删除后的行号</td></tr>
+<tr><td>milvus-table</td><td>源快照的一个 V3 段</td><td>虚拟主键模式按合成主键判断删除；真主键模式按源主键和源时间戳判断删除，都走 <code>core.delete</code></td></tr>
+</table></li>
+<li><strong>系统字段。</strong>主键是虚拟主键 <code>((段 id &amp; 0xFFFFFFFF) &lt;&lt; 32) | 段内行号</code>，时间戳为 0。段内行号就是读出的 <code>_row_offset</code>，两者用同一个值。
+<code>Segment</code> 上记下系统字段来源，<code>read.html</code> 1.1 的第 4 条按它取值。</li>
+<li><strong>凭证。</strong>快照里的 <code>external_spec</code> 原样带着格式、钉住的版本和客户桶凭证；连接器按它拼出
+<code>extfs.&lt;collection id&gt;.*</code>，规则见 <a href="storage-auth.html#external">storage-auth.html 3.4</a>。快照 JSON 不写进日志。</li>
+<li><strong>快照格式。</strong>解析器认 <code>format_version</code> 1 到 5；版本 5 在段记录的 <code>commit_timestamp</code> 之后多一个 <code>manifest_has_index</code>，普通 collection 同样适用。</li>
+<li><strong>版本与 refresh。</strong>iceberg、lance 按清单钉住的版本读。refresh 重建的段换了段 id，虚拟主键随之改变；同一次 refresh 产生的快照之间，行身份一致。</li>
+</ol>
+
+<p><strong>好处。</strong>外表不新增来源，也不新增段布局，读取链路与普通 collection 相同；源格式的细节交给 milvus-storage 的读取器，
+连接器读出的行号和虚拟主键与 Milvus 一致，搜索结果能直接与在线查询对账。</p>
+
+<p class="open">状态：R20 待实现。今天的解析器认格式 1 到 4，不识别 <code>external_source</code>。</p>
+
 <h2 id="boundary">四、边界：Snapshot 留在 driver，SegmentReadTask 去 executor</h2>
 
 <p><strong><code>Snapshot</code> 不实现 <code>Serializable</code>，这是有意的。</strong>
@@ -275,6 +349,8 @@ Manifest 最终都成为 <code>Snapshot.bucket</code> 下的 key。</li>
 <tr><th>模型字段</th><th>Milvus 定义</th><th>键</th><th>消费者</th></tr>
 <tr><td><code>Snapshot.name</code>、<code>createdAt</code>、<code>partitionIds</code></td><td><code>datapb.SnapshotInfo</code></td><td><code>snapshot_info.name</code>、<code>create_ts</code>、<code>partition_ids</code></td><td>R2、R16</td></tr>
 <tr><td><code>Snapshot.schema</code></td><td><code>datapb.CollectionDescription</code></td><td><code>collection.schema</code></td><td>C3</td></tr>
+<tr><td>外表的 schema 字段</td><td><code>schemapb.CollectionSchema</code>、<code>FieldSchema</code>（milvus-proto v3.0.1）</td><td><code>external_source</code>、<code>external_spec</code>、字段的 <code>external_field</code></td><td>R20</td></tr>
+<tr><td>段记录格式 5</td><td>段记录 Avro</td><td><code>manifest_has_index</code>，在 <code>commit_timestamp</code> 之后</td><td>R20 顺带，普通 collection 同样适用</td></tr>
 <tr><td><code>Snapshot.indexes</code></td><td><code>indexpb.IndexInfo</code></td><td><code>indexes</code></td><td>R7</td></tr>
 <tr><td><code>Segment</code>（V3）</td><td><code>datapb.SegmentDescription</code></td><td><code>storagev2_manifest_list[i]</code>：<code>{ver, base_path}</code></td><td>R3、R13、R16</td></tr>
 <tr><td><code>Segment</code>（V2）</td><td>同上，经 <code>manifests/{snapshot_id}/{segment_id}.avro</code></td><td>Avro 的 binlog 列表 + parquet footer 的 <code>group_field_id_list</code></td><td>K1</td></tr>

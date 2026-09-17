@@ -156,6 +156,26 @@ provider，作业跑多久都不掉（<a href="storage-access.html#cred-refresh"
 <p>这期间守四条：不构造凭证；必须写配置时只写按桶或按账号的键，不写全局键；
 不覆盖已设好的 provider，只在缺失时补；不内置默认值，端点、密钥、桶名没配就应该失败。</p>
 
+<h3 id="external">3.4 客户桶：external collection 的 extfs 属性</h3>
+<p><strong>读 external collection 时，任务里的属性包除了 Milvus 桶的 <code>fs.*</code>，还带一组 <code>extfs.&lt;collection id&gt;.*</code>；这组属性由快照里的 <code>external_spec</code> 按 Milvus 的四层规则拼出，在 <code>core.credential</code> 生成。</strong></p>
+<p>milvus-storage 按「带 scheme 的路径 → address 加 bucket → extfs 组」选文件系统，组名只是标签，连接器与 Milvus 一样用 collection id。四层规则：</p>
+<ol>
+<li><strong>第 0 层</strong>：布尔字段置 false（<code>anonymous</code> 除外），继承 <code>fs.max_connections</code>。</li>
+<li><strong>第 1 层</strong>：从 <code>external_source</code> 的 URI 取 <code>storage_type=remote</code>、<code>use_ssl</code>、<code>address</code>（URI 的 host）、<code>bucket_name</code>（路径第一段）。</li>
+<li><strong>第 2 层</strong>：<code>external_spec.extfs</code> 的键按 Milvus 的白名单写入。</li>
+<li><strong>第 3 层</strong>：有 <code>endpoint_url</code> 时 address 取它、bucket 取 URI 的 host；否则按 <code>cloud_provider</code> 和 <code>region</code> 推导标准端点，URI 的 host 不是云端点时改写成 AWS 形式；非 Azure 的 address 补 scheme。
+iceberg-table 另把 <code>external_spec.snapshot_id</code> 写到 <code>reader.exttable.snapshot_id</code>。</li>
+</ol>
+<p><code>external_spec</code> 原样使用，快照 JSON 不写进日志。spec 里不带密钥时，由进程身份完成认证，这是部署条件：</p>
+<ul>
+<li><code>role_arn</code>：C 层用进程的默认凭证链调 STS AssumeRole，客户角色的信任策略要包含 Spark 作业的身份。</li>
+<li>Azure broker：向 <code>azure_credential_endpoint</code> 发 JSON POST 换 SAS token，Spark pod 要能访问这个地址。</li>
+<li><code>use_iam</code>、GCP 服务账号模拟、匿名：由进程所在环境提供。</li>
+</ul>
+<p>这段逻辑是 Milvus 核心库 <code>InjectExternalSpecProperties</code>（<code>internal/core/src/storage/loon_ffi/util.cpp</code>）的移植，属于记录在案的过渡实现：
+每一层在代码注释里写明对应 <code>util.cpp</code> 的哪段；milvus-storage 提供同一功能的 C 接口后，连接器改为调用它并删掉移植（README 第 5 节）。</p>
+<p><strong>好处。</strong>一个作业用两套身份读两个桶，只靠属性包里的两组键，不改任何共享配置；连接器与 Milvus 为同一张外表生成相同的属性，读到的是同一批文件。</p>
+
 <h2 id="local">四、local 与 remote 两种模式</h2>
 
 <div class="warn">

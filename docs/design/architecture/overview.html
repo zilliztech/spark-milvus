@@ -174,7 +174,7 @@
   <div class="topin">
     <div class="brand">spark-milvus <em>2.0</em></div>
     <nav class="top">
-      <a href="#layers">分层</a><a href="#tree">目录</a><a href="#read">读</a><a href="#write">写</a>
+      <a href="#layers">分层</a><a href="#tree">目录</a><a href="#read">读</a><a href="#write">写</a><a href="#search">搜索</a>
       <a href="#build">构建</a><a href="#caps">功能</a><a href="#order">顺序</a><a href="#open">未定</a>
     </nav>
   </div>
@@ -184,7 +184,7 @@
 
 <div class="hero">
   <h1>把 Milvus 的数据格式接进 Spark，这次分层做</h1>
-  <p class="lede">2.0 让一个 collection 在 Spark 里是一张表：读直接读对象存储上的快照，不经 Milvus 服务；写按 Milvus Storage 格式落文件，登记归 Milvus。代码分三层，核心层不依赖 Spark，原生层封装 milvus-storage 和 knowhere。</p>
+  <p class="lede">2.0 让一个 collection 在 Spark 里是一张表：读直接读对象存储上的快照，不经 Milvus 服务；写按 Milvus Storage 格式落文件，登记归 Milvus；向量搜索输入一组查询，按段并行、按查询合并。代码分四层，核心层不依赖 Spark，原生层只接 milvus-storage 和 Knowhere 的上游绑定。</p>
   <p class="sub">1.x 在 <code>v1.6.0</code> 冻结，2.0 在 <code>refactor/v2</code> 上重写。下面七张图是当前的规划，绿色是我们要写的，灰色是不改的，琥珀色是卡在 Milvus 侧的。</p>
 </div>
 
@@ -192,14 +192,14 @@
   <div class="fact"><b>33/41</b><span>1.x 源文件 import Spark</span></div>
   <div class="fact"><b>2879</b><span>行的单个 DataSource 文件</span></div>
   <div class="fact"><b>6 → 2</b><span>一个向量值的拷贝次数</span></div>
-  <div class="fact"><b>45</b><span>条功能，分八组</span></div>
+  <div class="fact"><b>48</b><span>条功能，分八组</span></div>
   <div class="fact"><b>4</b><span>条 Spark 线各出产物</span></div>
   <div class="fact"><b>6</b><span>条决策还没定</span></div>
 </div>
 
 <section id="layers">
   <h2><span class="n">01</span>分层与模块</h2>
-  <p class="claim">1.x 的七条路径各带一套入口、配置、凭证和类型处理，没有一层封装 Milvus Storage 的读写。2.0 把这一层抽出来：接口层只做翻译，核心层做全部计算，原生层只封装两个 C++ 库。</p>
+  <p class="claim">1.x 的七条路径各带一套入口、配置、凭证和类型处理，没有一层封装 Milvus Storage 的读写。2.0 把这一层抽出来：接口层只做翻译，核心层做全部计算，原生层只接两个上游库的 JNI 与 Java API。</p>
 
   <figure>
     <div class="figbox">
@@ -219,7 +219,7 @@
         <text x="76" y="46" font-size="13" font-weight="600" fill="currentColor">用户与 Spark</text>
         <text x="76" y="64" font-size="11.5" fill="currentColor" opacity=".65">SQL 与 DataFrame · Catalyst 计划与调度 · driver 规划，executor 执行</text>
         <rect x="694" y="24" width="196" height="52" fill="var(--ours-soft)" stroke="var(--ours)" stroke-width="1"/>
-        <text x="710" y="46" font-size="13" font-weight="600" fill="var(--ours)">apps · 入口与遗留</text>
+        <text x="710" y="46" font-size="13" font-weight="600" fill="var(--ours)">apps · 作业入口</text>
         <text x="710" y="64" font-size="11" fill="var(--ours)" opacity=".85">backfill · search</text>
 
         <!-- row 1: layer 3 -->
@@ -228,14 +228,15 @@
         <text x="240" y="121" font-size="11.5" fill="var(--ours)" opacity=".8">只做翻译：Spark 索取什么就交出什么，不做计算</text>
         <g font-size="11.5" fill="currentColor" font-family="ui-monospace,monospace">
           <rect x="76" y="134" width="92" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="122" y="150" text-anchor="middle">catalog</text>
-          <rect x="176" y="134" width="80" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="216" y="150" text-anchor="middle">table</text>
-          <rect x="264" y="134" width="80" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="304" y="150" text-anchor="middle">scan</text>
-          <rect x="352" y="134" width="76" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="390" y="150" text-anchor="middle">expr</text>
-          <rect x="436" y="134" width="80" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="476" y="150" text-anchor="middle">types</text>
-          <rect x="524" y="134" width="80" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="564" y="150" text-anchor="middle">write</text>
-          <rect x="612" y="134" width="92" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="658" y="150" text-anchor="middle">options</text>
+          <rect x="176" y="134" width="92" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="222" y="150" text-anchor="middle">table</text>
+          <rect x="276" y="134" width="92" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="322" y="150" text-anchor="middle">read</text>
+          <rect x="376" y="134" width="92" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="422" y="150" text-anchor="middle">expr</text>
+          <rect x="476" y="134" width="92" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="522" y="150" text-anchor="middle">types</text>
+          <rect x="576" y="134" width="92" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="622" y="150" text-anchor="middle">write</text>
+          <rect x="676" y="134" width="92" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="722" y="150" text-anchor="middle">options</text>
+          <rect x="776" y="134" width="98" height="24" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/><text x="825" y="150" text-anchor="middle">procedure</text>
         </g>
-        <text x="76" y="182" font-size="11" fill="var(--ours)" opacity=".85" font-family="ui-monospace,monospace">按 Spark 线各一份：catalog 适配 · SQL parser 适配与生成物 · META-INF/services</text>
+        <text x="76" y="182" font-size="11" fill="var(--ours)" opacity=".85" font-family="ui-monospace,monospace">另有 sources · metrics · extensions；按 Spark 线各一份：catalog 适配 · SQL parser 生成物 · services</text>
 
         <!-- row 2: layer 2 -->
         <rect x="60" y="224" width="830" height="140" fill="var(--ours-soft)" stroke="var(--ours)" stroke-width="1.5"/>
@@ -245,28 +246,28 @@
         <rect x="76" y="260" width="500" height="88" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/>
         <text x="88" y="278" font-size="12" font-weight="600" fill="currentColor" font-family="ui-monospace,monospace">core</text>
         <g font-size="10.5" fill="currentColor" opacity=".78" font-family="ui-monospace,monospace">
-          <text x="88" y="298">snapshot · manifest · schema · path · credential</text>
+          <text x="88" y="298">snapshot · manifest · schema · path · io · codec · credential</text>
           <text x="88" y="316">expr · delete · stats</text>
           <text x="88" y="334">read.plan / read.exec · write.exec / write.commit · index</text>
         </g>
         <rect x="588" y="260" width="140" height="88" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/>
         <text x="600" y="278" font-size="12" font-weight="600" fill="currentColor" font-family="ui-monospace,monospace">compat</text>
         <g font-size="10.5" fill="currentColor" opacity=".78" font-family="ui-monospace,monospace">
-          <text x="600" y="298">v2</text><text x="600" y="316">offline</text><text x="600" y="334">backup</text>
+          <text x="600" y="298">v2</text><text x="600" y="316">backup</text>
         </g>
         <rect x="740" y="260" width="134" height="88" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/>
         <text x="752" y="278" font-size="12" font-weight="600" fill="currentColor" font-family="ui-monospace,monospace">client</text>
         <g font-size="10.5" fill="currentColor" opacity=".78" font-family="ui-monospace,monospace">
-          <text x="752" y="298">grpc · api</text><text x="752" y="316">DDL · Delete</text><text x="752" y="334">Procedure 的调用</text>
+          <text x="752" y="298">grpc · api</text><text x="752" y="316">目录 · DDL · 快照</text><text x="752" y="334">索引 · 登记 · 恢复</text>
         </g>
 
         <!-- row 3: layer 1 -->
         <rect x="60" y="386" width="830" height="94" fill="var(--ours-soft)" stroke="var(--ours)" stroke-width="1.5"/>
         <text x="76" y="409" font-size="13" font-weight="600" fill="var(--ours)">第 1 层 · 原生库</text>
-        <text x="196" y="409" font-size="11.5" fill="var(--ours)" opacity=".8">C 接口加 JNI；头文件不出现 JNI 类型</text>
+        <text x="196" y="409" font-size="11.5" fill="var(--ours)" opacity=".8">上游的 C 接口、JNI 与 Java API；.so 只在这一层加载</text>
         <rect x="76" y="422" width="392" height="44" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/>
         <text x="88" y="440" font-size="12" font-weight="600" fill="currentColor" font-family="ui-monospace,monospace">native-storage</text>
-        <text x="88" y="457" font-size="10.5" fill="currentColor" opacity=".7">包上游现成的 C 接口 <tspan font-family="ui-monospace,monospace">loon_*</tspan>，我们写 JNI</text>
+        <text x="88" y="457" font-size="10.5" fill="currentColor" opacity=".7">编译上游 milvus-storage 的 Java/Scala API，打包它的 JNI 库</text>
         <rect x="482" y="422" width="392" height="44" fill="var(--surface)" stroke="var(--ours)" stroke-width=".8"/>
         <text x="494" y="440" font-size="12" font-weight="600" fill="currentColor" font-family="ui-monospace,monospace">native-vector</text>
         <text x="494" y="457" font-size="10.5" fill="currentColor" opacity=".7">加载 Knowhere 上游提供的 Java API 与 JNI</text>
@@ -280,11 +281,11 @@
         <g font-size="10.5" fill="currentColor" opacity=".55" text-anchor="end" font-family="system-ui,sans-serif">
           <text x="884" y="196">driver 与 executor</text>
           <text x="884" y="358">driver 与 executor</text>
-          <text x="884" y="474">只在 executor 加载</text>
+          <text x="884" y="477">只在 executor 加载</text>
         </g>
       </svg>
     </div>
-    <figcaption>四层与依赖方向。apps 里的场景和遗留代码留在同一个仓库，用模块隔离，不进核心层；核心层无 Spark 依赖不是为了给 Ray 复用（Ray 是 Python，用不了 JVM 的 jar），是为了让它在四条 Spark 线上只编一次、测试不用拉起 SparkSession。Ray 那边共用的是第 1 层的 C 接口，Python 绑定压在上面。</figcaption>
+    <figcaption>四层与依赖方向。apps 的作业留在同一个仓库，用模块隔离，不进核心层。核心层不依赖 Spark，四条 Spark 线共用一份编译产物，测试不用拉起 SparkSession。Ray 是 Python 程序，它和我们共用的是第 1 层的 C 接口。</figcaption>
   </figure>
 
   <div class="key">
@@ -297,48 +298,48 @@
 
 <section id="tree">
   <h2><span class="n">02</span>目录与包</h2>
-  <p class="claim">每个模块一个目录，每个包一个职责。<code>spark-base</code> 不是独立模块，而是四条 Spark 线共同引用的源码目录；1.x 源码已全部迁入所属模块，根目录的 <code>src/</code> 已移除。</p>
+  <p class="claim">每个模块一个目录，每个包一个职责。<code>spark-base</code> 不是独立模块，是四条 Spark 线共同引用的源码目录；存储库和 proto 是上游子模块。</p>
 
   <figure>
     <div class="figbox">
 <pre class="tree"><span class="d">spark-milvus/</span>
 ├── <span class="f">build.sbt</span>                     <span class="c">聚合、版本、发布</span>
 ├── <span class="d">project/</span>                      <span class="c">Versions.scala 版本矩阵，Modules.scala 构建约束</span>
+├── <span class="u">milvus-storage/</span> <span class="u">milvus-proto/</span>  <span class="c">上游子模块：存储库与 JNI、Milvus 的 proto</span>
 │
 ├── <span class="m">native-storage/</span><span class="lay">第 1 层</span>
-│   ├── src/main/java/                <span class="c">com.zilliz.milvus.jni.storage</span>
-│   ├── src/main/cpp/                 <span class="c">包 loon_* C 接口的 JNI 源码</span>
-│   └── build/                        <span class="c">构建与 patchelf 脚本</span>
+│   └── src/main/resources/native/    <span class="c">libmilvus-storage-jni 与依赖库，按平台存放</span>
 ├── <span class="m">native-vector/</span><span class="lay">第 1 层</span>
 │   ├── src/main/java/                <span class="c">com.zilliz.milvus.jni.vector</span>
-│   └── src/main/cpp/                 <span class="c">上游 C/JNI 归属说明</span>
+│   └── knowhere.properties           <span class="c">钉住的 Knowhere 提交、摘要与 ABI</span>
 │
 ├── <span class="m">core/</span><span class="lay">第 2 层</span>                        <span class="c">无 Spark 依赖，编译期强制</span>
 │   ├── src/main/scala/com/zilliz/milvus/storage/
-│   │      <span class="c">snapshot · manifest · schema · path · credential</span>
+│   │      <span class="c">snapshot · manifest · schema · path · io · codec · credential</span>
 │   │      <span class="c">expr · delete · stats · index</span>
 │   │      <span class="c">read/{plan,exec} · write/{exec,commit}</span>
-│   ├── src/main/antlr4/              <span class="c">空目录说明；R7 PlanParser 已手写实现</span>
+│   ├── src/main/antlr4/              <span class="c">空目录说明；R7 PlanParser 手写</span>
 │   └── src/main/resources/           <span class="c">段清单的 Avro schema</span>
-├── <span class="m">compat/</span><span class="lay">第 2 层</span>                      <span class="c">三个非标准入口的适配器</span>
-│   └── .../storage/compat/           <span class="c">v2 · offline · backup</span>
+├── <span class="m">compat/</span><span class="lay">第 2 层</span>                      <span class="c">两个非标准入口的适配器</span>
+│   └── .../storage/compat/           <span class="c">v2 · backup</span>
 ├── <span class="m">client/</span><span class="lay">第 2 层</span>                      <span class="c">Milvus 在线服务的客户端</span>
 │   ├── .../milvus/client/            <span class="c">grpc · api</span>
 │   └── src/main/protobuf/            <span class="c">milvus-proto 子模块的引用</span>
 │
 ├── <span class="u">spark-base/</span><span class="lay">第 3 层</span>                  <span class="c">四条线共享的源码，不是 project</span>
-│   └── .../spark/connector/          <span class="c">catalog · table · read · expr · types · write · options · procedure · extensions</span>
+│   ├── .../spark/connector/          <span class="c">sources · catalog · table · read · expr · types · write</span>
+│   │                                 <span class="c">metrics · options · procedure · extensions</span>
+│   └── src/main/antlr4/              <span class="c">CALL 文法，按线生成</span>
 ├── <span class="m">spark-3.5/</span>                    <span class="c">catalog · extensions parser 适配 · services</span>
 ├── <span class="m">spark-4.0/</span> <span class="m">spark-4.1/</span> <span class="m">spark-4.2/</span>  <span class="c">catalog · extensions parser 适配 · services</span>
 │                                     <span class="c">fat jar 是各线上的 assembly 任务，不单独成模块</span>
 │
 ├── <span class="m">apps-4.0/</span><span class="lay">第 4 层</span>                    <span class="c">backfill · search</span>
-│                                     <span class="c">只在云上跑的那条线上建，别的线按需加</span>
 ├── <span class="m">integration-4.0/</span>              <span class="c">需要 MinIO 与 Milvus，跑一条线</span>
-│
-└── <span class="d">docs/design/</span>                  <span class="c">本文与三份设计文档</span></pre>
+├── <span class="d">scripts/</span>                      <span class="c">Knowhere 原生产物的构建与导入、演示脚本</span>
+└── <span class="d">docs/design/</span>                  <span class="c">设计入口、能力规划与各主题设计</span></pre>
     </div>
-    <figcaption>目录树。绿色是 2.0 的模块，灰色是共享源码目录。四条 Spark 线的目录名就是线号，产物名带线号和 Scala 版本。</figcaption>
+    <figcaption>目录树。绿色是模块，灰色是共享源码目录和上游子模块。四条 Spark 线的目录名就是线号，产物名带线号和 Scala 版本。</figcaption>
   </figure>
 
   <h3>包的职责</h3>
@@ -347,40 +348,42 @@
   <div class="pkgs">
     <div class="pkg">
       <h4>core</h4>
-      <p class="role">第 2 层。全部计算在这里，源码不出现 org.apache.spark。对外只暴露 snapshot、read、write、index、schema、expr 六个包。</p>
+      <p class="role">第 2 层。全部计算在这里，源码不出现 org.apache.spark。</p>
       <dl>
-        <dt>snapshot</dt><dd>列快照目录，选快照，解析成对象；分发 SnapshotSource <em>R2 R3 R9 R13 R16 C3</em></dd>
+        <dt>snapshot</dt><dd>列快照目录，选快照，解析成 Snapshot；所有来源共用的表描述 <em>R2 R3 R9 R13 R16 C3</em></dd>
         <dt>manifest</dt><dd>一个段的列组、删除文件、统计、索引登记 <em>R5</em></dd>
-        <dt>schema</dt><dd>字段 id、名字、Milvus 类型、Arrow 类型的唯一映射 <em>R15 C3</em></dd>
+        <dt>schema</dt><dd>字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；外表源类型规则与向量布局 <em>R15 C3</em></dd>
         <dt>path</dt><dd>三种路径形态归一成 (bucket, key) <em>R3</em></dd>
-        <dt>io</dt><dd>经原生文件系统读写对象存储 <em>R2 R3 W1</em></dd>
-        <dt>codec</dt><dd>列值与 Milvus binlog 的字节编解码 <em>R15 W3 V2</em></dd>
-        <dt>credential</dt><dd>对象存储凭证的取用和下发 <em>R3</em></dd>
+        <dt>io</dt><dd>对象存储读写，唯一实现走 C 的 loon_filesystem_* <em>R2 R3 W1</em></dd>
+        <dt>codec</dt><dd>列值与 Milvus binlog 封装的编解码，删除文件与索引文件共用 <em>R15 W3 V2</em></dd>
+        <dt>credential</dt><dd>对象存储凭证的取用和下发 <em>R3 G4</em></dd>
         <dt>expr</dt><dd>R7 的 Expr / PlanParser / Evaluator；R6 的 PredicateExpr / PredicateEvaluator / Bitmap <em>R6 R7</em></dd>
         <dt>delete</dt><dd>删除文件解码，按行号置位 <em>R8</em></dd>
-        <dt>stats</dt><dd>段级主键统计与保守剪枝；R10 row group 剪枝等待仓库外依赖 <em>R9 R18</em></dd>
-        <dt>read.plan</dt><dd>分区与删除文件规划，纯 JVM，可序列化 <em>R3 R5 R8 R13</em></dd>
+        <dt>stats</dt><dd>写侧主键 bloom filter，读侧段级保守剪枝 <em>R9 R18</em></dd>
+        <dt>read.plan</dt><dd>段任务规划，纯 JVM，可序列化 <em>R3 R5 R8 R13</em></dd>
         <dt>read.exec</dt><dd>批读取、按行号取列、出口；碰 native <em>R3 R4 R8 R14 R17 G3 G5</em></dd>
         <dt>write.exec</dt><dd>段写出、暂存布局；碰 native <em>W1 W2 G2 G5</em></dd>
-        <dt>write.commit</dt><dd>作业清单、提交、幂等与暂存清理 <em>W3 A4 A7</em></dd>
-        <dt>index</dt><dd>持久化索引选择、加载、排除位图、搜索与段内 TopK；跨任务缓存和写出待实现 <em>V2 V5 V7</em></dd>
+        <dt>write.commit</dt><dd>作业清单、提交、幂等、暂存清理；快照写出待实现 <em>W3 A4 A7</em></dd>
+        <dt>index</dt><dd>索引加载、排除位图、段内 TopK；段内执行器与建索引待实现 <em>V2 V5 V7</em></dd>
       </dl>
     </div>
 
     <div class="pkg">
-      <h4>spark/base 与各线</h4>
-      <p class="role">第 3 层。只做翻译，Spark 索取什么就交出什么。base 是共享源码，四条线各编译一次；按线不同的只有 catalog 与 parser 接口适配、antlr 生成物和服务注册文件。</p>
+      <h4>spark-base 与各线</h4>
+      <p class="role">第 3 层。只做翻译，Spark 索取什么就交出什么。spark-base 是共享源码，四条线各编译一次；按线不同的只有 catalog 与 parser 接口适配、antlr 生成物和服务注册文件。</p>
       <dl>
-        <dt>table</dt><dd>schema、能力集、元数据列、统计 <em>R12</em></dd>
-        <dt>read</dt><dd>ScanBuilder、Scan、InputPartition、reader 与运行时过滤 <em>R4 R5 R7 R11 R12 R13 R16 R18 V5 V7 G3</em></dd>
-        <dt>expr</dt><dd>DataSource V2 谓词翻成中间表示 <em>R6</em></dd>
+        <dt>sources</dt><dd><code>format("milvus")</code> 的入口</dd>
+        <dt>table</dt><dd>MilvusTables 解析一次 Snapshot；MilvusTable 出 schema、能力集、元数据列 <em>R12</em></dd>
+        <dt>read</dt><dd>ScanBuilder、Scan、InputPartition、reader 与运行时过滤；向量搜索入口 MilvusSearch <em>R4 R5 R7 R11–R13 R16 R18 V5 V7 G3</em></dd>
+        <dt>expr</dt><dd>DataSource V2 谓词翻成 PredicateExpr <em>R6</em></dd>
         <dt>types</dt><dd>Arrow 类型到 Spark 类型的映射，向量列的表示 <em>R15 G3</em></dd>
-        <dt>write</dt><dd>WriteBuilder、BatchWrite、DataWriter；两种写模式 <em>W1 W2 G2</em></dd>
-        <dt>options</dt><dd>option 名、别名、校验、SnapshotSource 与 driver 存储配置 <em>R16 G1 G2 G3</em></dd>
-        <dt>catalog</dt><dd>database 的单层 namespace、collection 列表、三段名、快照重载，以及校验后创建/删除 collection <em>R1 R2 C1 C2</em></dd>
-        <dt>procedure</dt><dd>四条线共用的 CALL 过程体：快照、索引、生命周期、登记、描述与暂存清理 <em>A1 A2 A3 A4 A5 A7</em></dd>
-        <dt>extensions</dt><dd>四条线共用的 CALL 节点与 planner 策略；parser 接口适配和 antlr 生成物按线 <em>A1 A2 A3 A4 A5</em></dd>
-        <dt>metrics</dt><dd>读写任务的 Spark CustomMetric 适配 <em>G5</em></dd>
+        <dt>write</dt><dd>WriteBuilder、BatchWrite、DataWriter；append 与 backfill <em>W1 W2 G2</em></dd>
+        <dt>metrics</dt><dd>core 的读写计数翻成 Spark 的自定义指标 <em>G5</em></dd>
+        <dt>options</dt><dd>option 名、别名、校验；选这次读的 SnapshotSource；fs.* 的翻译 <em>R16 G1–G4</em></dd>
+        <dt>catalog</dt><dd>database 的单层 namespace、collection 列表、三段名、快照重载，以及校验后建删 collection <em>R1 R2 C1 C2</em></dd>
+        <dt>procedure</dt><dd>CALL 过程体：快照、索引、生命周期、登记、描述、暂存清理；build_index 与 restore_snapshot 待实现 <em>A1–A5 A7</em></dd>
+        <dt>extensions</dt><dd>CALL 的节点与 planner 策略；parser 适配和 antlr 生成物按线 <em>A1–A5</em></dd>
+        <dt>filter</dt><dd>1.x 的 JVM 暴力搜索，随精确搜索模式落地删除</dd>
       </dl>
     </div>
 
@@ -390,22 +393,19 @@
       <dl>
         <dt>v2</dt><dd>Storage V2 packed 段的 SegmentReader <em>K1</em></dd>
         <dt>backup</dt><dd>milvus-backup 导出目录转 Snapshot <em>K3</em></dd>
-        <dt>client.grpc</dt><dd>读 RPC 的重试（RpcRetry）</dd>
-        <dt>client.api</dt><dd>DDL、Delete、快照、索引、生命周期、登记；proto 的 DataType 与 core 的 MilvusType 互转 <em>C1 C2 A1 A2 A3 A4 A5</em></dd>
+        <dt>client.grpc</dt><dd>读 RPC 在一次调用的总期限内重发，写 RPC 只发一次</dd>
+        <dt>client.api</dt><dd>目录、DDL、快照、索引、生命周期、BatchUpdateManifest；RegisterSegments 与 RestoreSnapshot 待接 <em>C1 C2 A1–A5</em></dd>
       </dl>
     </div>
 
     <div class="pkg">
       <h4>native 与 apps</h4>
-      <p class="role">第 1 层的包名用 jni 而不是 native：native 是 Java 的保留字。第 4 层的两个包各自是独立入口，删掉任何一个不影响另一个。</p>
+      <p class="role">第 1 层的存储绑定是上游的 <code>io.milvus.storage</code>，本仓库只编译和打包；向量的包名用 jni 而不是 native，native 是 Java 的保留字。第 4 层的两个包各自是独立入口，删掉任何一个不影响另一个。</p>
       <dl>
-        <dt>jni.storage</dt><dd>StorageNative：每个 loon_* 一个 native 方法 <em>R4 W1</em></dd>
-        <dt>… .arrow</dt><dd>三个 Arrow C 结构体的分配与 release</dd>
-        <dt>… .loader</dt><dd>按 os 和 arch 解压 .so 后加载</dd>
-        <dt>jni.vector</dt><dd>NativeVectorLibrary：上游加载；NativeVectorSearch：调用上游 BruteForce <em>V1（部分） V5</em></dd>
+        <dt>io.milvus.storage</dt><dd>milvus-storage 的 Java/Scala API 与 libmilvus-storage-jni，子模块钉在固定提交</dd>
+        <dt>jni.vector</dt><dd>NativeVectorLibrary 加载并校验特性；NativeVectorSearch 调上游暴力搜索；NativeVectorIndex 管索引资源 <em>V1 V5</em></dd>
         <dt>apps.backfill</dt><dd>作业、CLI、结果 JSON <em>O1</em></dd>
-        <dt>core.index</dt><dd>BruteForceSearch 管理原生查询缓冲、排除位图和每段 TopK；Spark 只适配类型 <em>V5</em></dd>
-        <dt>apps.search</dt><dd>向量查询的 Spark SQL 表达式与扩展入口 <em>V5</em></dd>
+        <dt>apps.search</dt><dd>SQL 向量函数；精确 KNN 基准与召回评测作业待实现 <em>V8</em></dd>
       </dl>
     </div>
   </div>
@@ -417,7 +417,7 @@
 
   <figure>
     <div class="figbox">
-      <svg viewBox="0 0 920 330" role="img" aria-label="读路径：driver 上 SnapshotCatalog 选快照、SchemaMapper 出 schema、SparkPredicateTranslator 出谓词中间表示、Partitioner 一段一分区，经可序列化的 InputPartition 下发给 executor，executor 读批、合成位图、交出列批">
+      <svg viewBox="0 0 920 330" role="img" aria-label="读路径：driver 上 SnapshotCatalog 选快照、SchemaMapper 出 schema、SparkPredicateTranslator 出谓词中间表示、ReadPlan 一段一个任务，经可序列化的 InputPartition 下发给 executor，executor 读批、合成位图、交出列批">
         <defs>
           <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
@@ -441,13 +441,13 @@
 
           <rect x="374" y="40" width="160" height="60" fill="var(--surface)" stroke="var(--ours)"/>
           <text x="386" y="60" font-size="10.5" font-weight="600" fill="currentColor">SparkPredicateTranslator</text>
-          <text x="386" y="78" fill="currentColor" opacity=".7">V2 Predicate → PredicateExpr</text>
-          <text x="386" y="93" fill="currentColor" opacity=".7">R7 PlanParser 保持独立合同</text>
+          <text x="386" y="78" fill="currentColor" opacity=".7">V2 谓词 → PredicateExpr</text>
+          <text x="386" y="93" fill="currentColor" opacity=".7">R7 PlanParser 另行保留</text>
 
           <rect x="554" y="40" width="150" height="60" fill="var(--surface)" stroke="var(--ours)"/>
-          <text x="566" y="60" font-weight="600" fill="currentColor">Partitioner</text>
-          <text x="566" y="78" fill="currentColor" opacity=".7">一段一分区</text>
-          <text x="566" y="93" fill="currentColor" opacity=".7">小段合并，大段按预算拆</text>
+          <text x="566" y="60" font-weight="600" fill="currentColor">ReadPlan</text>
+          <text x="566" y="78" fill="currentColor" opacity=".7">一段一个任务</text>
+          <text x="566" y="93" fill="currentColor" opacity=".7">driver 上列出删除文件</text>
         </g>
 
         <line x1="184" y1="70" x2="202" y2="70" stroke="currentColor" marker-end="url(#ar2)"/>
@@ -456,8 +456,8 @@
 
         <rect x="724" y="40" width="180" height="60" fill="var(--sunk)" stroke="var(--line)" stroke-dasharray="4 3"/>
         <text x="736" y="60" font-size="11.5" font-weight="600" fill="currentColor">InputPartition</text>
-        <text x="736" y="77" font-size="10.5" fill="currentColor" opacity=".7">段 id · Manifest 与版本 · 列组</text>
-        <text x="736" y="92" font-size="10.5" fill="currentColor" opacity=".7">删除与索引路径 · IR · 临时凭证</text>
+        <text x="736" y="77" font-size="10.5" fill="currentColor" opacity=".7">段 id · 列组布局 · 字段 id</text>
+        <text x="736" y="92" font-size="10.5" fill="currentColor" opacity=".7">删除文件 · 索引描述 · fs.* 属性</text>
         <line x1="704" y1="70" x2="722" y2="70" stroke="currentColor" marker-end="url(#ar2)"/>
         <line x1="814" y1="100" x2="814" y2="150" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
         <text x="822" y="130" font-size="10.5" fill="currentColor" opacity=".6">序列化下发</text>
@@ -471,7 +471,7 @@
           <rect x="232" y="210" width="180" height="66" fill="var(--surface)" stroke="var(--ours)"/>
           <text x="244" y="230" font-weight="600" fill="currentColor">DeleteBitset</text>
           <text x="244" y="248" fill="currentColor" opacity=".7">删除文件按行号置位</text>
-          <text x="244" y="264" fill="currentColor" opacity=".7">一段算一次，缓存</text>
+          <text x="244" y="264" fill="currentColor" opacity=".7">一段算一次，各批共用</text>
 
           <rect x="432" y="210" width="180" height="66" fill="var(--surface)" stroke="var(--ours)"/>
           <text x="444" y="230" font-weight="600" fill="currentColor">PredicateEvaluator</text>
@@ -482,7 +482,7 @@
         <line x1="412" y1="243" x2="430" y2="243" stroke="currentColor" marker-end="url(#ar2)"/>
         <line x1="612" y1="243" x2="644" y2="230" stroke="currentColor" marker-end="url(#ar2)"/>
         <line x1="612" y1="243" x2="644" y2="278" stroke="currentColor" marker-end="url(#ar2)"/>
-        <text x="622" y="222" font-size="10" fill="currentColor" opacity=".55">删除 OR 谓词</text>
+        <text x="560" y="298" font-size="10" fill="currentColor" opacity=".55">删除 OR 谓词</text>
 
         <rect x="650" y="204" width="254" height="42" fill="var(--surface)" stroke="var(--ours)"/>
         <text x="662" y="222" font-size="11.5" font-weight="600" fill="currentColor">表读出口</text>
@@ -520,7 +520,7 @@
           <rect x="404" y="78" width="110" height="38" fill="var(--up-soft)" stroke="var(--up)"/>
           <text x="416" y="95" fill="currentColor">Concatenate</text><text x="416" y="110" fill="currentColor" opacity=".65">绕导入器</text>
           <rect x="536" y="78" width="164" height="38" fill="var(--up-soft)" stroke="var(--up)"/>
-          <text x="548" y="95" fill="currentColor">逐行装箱</text><text x="548" y="110" fill="currentColor" opacity=".65">byte[] · Array[Float] · ArrayData</text>
+          <text x="548" y="95" fill="currentColor">逐行装箱</text><text x="548" y="110" fill="currentColor" opacity=".65">拆成三层 JVM 对象</text>
           <rect x="738" y="78" width="120" height="38" fill="var(--up-soft)" stroke="var(--up)"/>
           <text x="750" y="95" fill="currentColor">UnsafeRow</text><text x="750" y="110" fill="currentColor" opacity=".65">行算子</text>
         </g>
@@ -531,7 +531,7 @@
         <g font-size="10.5" fill="currentColor" opacity=".7" text-anchor="middle">
           <text x="190" y="90">1</text><text x="384" y="90">1</text><text x="524" y="90">3</text><text x="718" y="90">1</text>
         </g>
-        <text x="870" y="101" font-size="15" font-weight="600" fill="currentColor" text-anchor="end" font-family="ui-monospace,monospace">6 次</text>
+        <text x="908" y="101" font-size="15" font-weight="600" fill="currentColor" text-anchor="end" font-family="ui-monospace,monospace">6 次</text>
 
         <text x="16" y="160" font-size="12" font-weight="600" fill="var(--ours)">2.0 · 列式入口</text>
         <g font-size="11">
@@ -553,11 +553,11 @@
         <g font-size="10.5" fill="currentColor" opacity=".7" text-anchor="middle">
           <text x="190" y="184">1</text><text x="384" y="184">0</text><text x="524" y="184">0</text><text x="718" y="184">1</text>
         </g>
-        <text x="870" y="195" font-size="15" font-weight="600" fill="var(--ours)" text-anchor="end" font-family="ui-monospace,monospace">2 次</text>
+        <text x="908" y="195" font-size="15" font-weight="600" fill="var(--ours)" text-anchor="end" font-family="ui-monospace,monospace">2 次</text>
         <text x="536" y="236" font-size="11" fill="var(--ours)">下游是列式算子时，最后一次也没有 — 只剩 1 次</text>
       </svg>
     </div>
-    <figcaption>同一个 FloatVector 值从对象存储到 Spark 算子。多出的四次里，JNI 那次是为了绕过 Arrow Java 的导入器不读 offset，JVM 那三次是行式 reader 把向量拆成三层对象。</figcaption>
+    <figcaption>同一个 FloatVector 值从对象存储到 Spark 算子。多出的四次里，JNI 那次是为了绕过 Arrow Java 的导入器不读 offset，JVM 那三次是行式 reader 把向量拆成三层对象。上游 JNI 今天对 packed reader 切出的批仍整列拷贝一次，只重写偏移和位图的改动已列入上游需求。</figcaption>
   </figure>
 </section>
 
@@ -598,8 +598,8 @@
         </g>
         <line x1="192" y1="82" x2="226" y2="82" stroke="currentColor" marker-end="url(#ar4)"/>
         <line x1="440" y1="82" x2="474" y2="82" stroke="currentColor" marker-end="url(#ar4)"/>
-        <text x="452" y="74" font-size="10" fill="currentColor" opacity=".6" text-anchor="middle">段路径</text>
-        <text x="452" y="96" font-size="10" fill="currentColor" opacity=".6" text-anchor="middle">行数</text>
+        <text x="458" y="74" font-size="10" fill="currentColor" opacity=".6" text-anchor="middle">段路径</text>
+        <text x="458" y="96" font-size="10" fill="currentColor" opacity=".6" text-anchor="middle">行数</text>
 
         <rect x="16" y="146" width="656" height="40" fill="var(--sunk)" stroke="var(--line)" stroke-dasharray="4 3"/>
         <text x="28" y="164" font-size="11.5" font-weight="600" fill="currentColor">对象存储：staging/{job}/ 暂存的段目录与作业清单</text>
@@ -636,16 +636,106 @@
         <text x="16" y="288" font-size="10.5" fill="currentColor" opacity=".6">切段、分配新 id、重建 Manifest</text>
       </svg>
     </div>
-    <figcaption>写路径与两条登记线。9 月 10 日读 Milvus master 得出的结论：backfill 现在就能做，append 卡在缺一个 RPC。</figcaption>
+    <figcaption>写路径与两条登记线。backfill 的登记已经走通，append 卡在 Milvus 缺一个 RPC。</figcaption>
   </figure>
 
-  <div class="note">
-    <b>纠正一处早先的判断。</b>此前把登记写成「走 External Collection refresh」，是我看表面得出的误判。refresh 是给 external collection 扫描外部数据源用的，它会重新切段、分配新段 id、在 Milvus 自己的路径下重建 Manifest，不采纳写入方的段目录，对原生 collection 直接拒绝。设计里已经删掉这条。
-  </div>
+</section>
+
+<section id="search">
+  <h2><span class="n">05</span>向量搜索与建索引</h2>
+  <p class="claim">向量搜索只有一个入口：输入一组查询，按段并行、按查询合并，合并后才回表取输出列。精确扫描和索引探查是同一个段内执行器的两种策略；建索引是写之后单独的一步，经 Milvus 的外部快照恢复交付。</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 920 330" role="img" aria-label="上半是一次搜索：driver 广播查询集，每段一个任务调用 Knowhere 算整组查询，Spark 按 query_id 有界合并，再按段回表；下半是建索引：build_index 作业每段构建并写出索引文件，driver 写出作业清单与快照，Milvus 的 RestoreSnapshot 建出新 collection，给已有 collection 补索引要等 Milvus 按段 Manifest 加载">
+        <defs>
+          <marker id="ar6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+          </marker>
+          <marker id="ar6w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="var(--wait)"/>
+          </marker>
+        </defs>
+
+        <text x="16" y="28" font-size="11.5" font-weight="600" fill="currentColor" opacity=".6" font-family="system-ui,sans-serif">搜索 · 第一阶段算候选，第二阶段回表</text>
+        <text x="16" y="198" font-size="11.5" font-weight="600" fill="currentColor" opacity=".6" font-family="system-ui,sans-serif">建索引 · 写之后单独的作业</text>
+        <line x1="16" y1="176" x2="904" y2="176" stroke="currentColor" stroke-width="1" opacity=".2" stroke-dasharray="3 4"/>
+
+        <g>
+          <rect x="16" y="44" width="160" height="78" fill="var(--surface)" stroke="var(--ours)"/>
+          <text x="28" y="64" font-size="11.5" font-weight="600" fill="currentColor">MilvusSearch.search</text>
+          <text x="28" y="80" font-size="10" fill="currentColor" opacity=".55">driver</text>
+          <text x="28" y="96" font-size="10.5" fill="currentColor" opacity=".78">解析快照，广播查询集</text>
+          <rect x="204" y="44" width="188" height="78" fill="var(--surface)" stroke="var(--ours)"/>
+          <text x="216" y="64" font-size="11.5" font-weight="600" fill="currentColor">SegmentSearch</text>
+          <text x="216" y="80" font-size="10" fill="currentColor" opacity=".55">executor，一组段一组查询</text>
+          <text x="216" y="96" font-size="10.5" fill="currentColor" opacity=".78">exact：逐批读向量</text>
+          <text x="216" y="111" font-size="10.5" fill="currentColor" opacity=".78">index：每段索引加载一次</text>
+          <rect x="412" y="44" width="136" height="78" fill="var(--up-soft)" stroke="var(--up)"/>
+          <text x="424" y="64" font-size="11.5" font-weight="600" fill="currentColor">Knowhere</text>
+          <text x="424" y="80" font-size="10" fill="currentColor" opacity=".55">上游库</text>
+          <text x="424" y="96" font-size="10.5" fill="currentColor" opacity=".78">一次调用算整组查询</text>
+          <text x="424" y="111" font-size="10.5" fill="currentColor" opacity=".78">每条查询 ≤ K 条</text>
+          <rect x="578" y="44" width="152" height="78" fill="var(--surface)" stroke="var(--ours)"/>
+          <text x="590" y="64" font-size="11.5" font-weight="600" fill="currentColor">按 query_id 合并</text>
+          <text x="590" y="80" font-size="10" fill="currentColor" opacity=".55">Spark 聚合</text>
+          <text x="590" y="96" font-size="10.5" fill="currentColor" opacity=".78">有界 TopK</text>
+          <text x="590" y="111" font-size="10.5" fill="currentColor" opacity=".78">每条候选 24 字节</text>
+          <rect x="752" y="44" width="152" height="78" fill="var(--surface)" stroke="var(--ours)"/>
+          <text x="764" y="64" font-size="11.5" font-weight="600" fill="currentColor">按段回表</text>
+          <text x="764" y="80" font-size="10" fill="currentColor" opacity=".55">第二阶段</text>
+          <text x="764" y="96" font-size="10.5" fill="currentColor" opacity=".78">take 输出列</text>
+          <text x="764" y="111" font-size="10.5" fill="currentColor" opacity=".78">每条查询 K 行</text>
+        </g>
+        <g stroke="currentColor" marker-end="url(#ar6)">
+          <line x1="176" y1="83" x2="202" y2="83"/>
+          <line x1="392" y1="83" x2="410" y2="83"/>
+          <line x1="548" y1="83" x2="576" y2="83" stroke-dasharray="4 3"/>
+          <line x1="730" y1="83" x2="750" y2="83" stroke-dasharray="4 3"/>
+        </g>
+        <text x="204" y="146" font-size="10.5" fill="currentColor" opacity=".6">两种策略输入输出相同；快照确认未建索引的段，allowUnindexed 打开时改用精确扫描</text>
+
+        <g>
+          <rect x="16" y="214" width="160" height="78" fill="var(--surface)" stroke="var(--ours)"/>
+          <text x="28" y="234" font-size="11.5" font-weight="600" fill="currentColor">CALL build_index</text>
+          <text x="28" y="250" font-size="10" fill="currentColor" opacity=".55">driver</text>
+          <text x="28" y="266" font-size="10.5" fill="currentColor" opacity=".78">另起 Spark 作业</text>
+          <text x="28" y="281" font-size="10.5" fill="currentColor" opacity=".78">钉住快照，按段分任务</text>
+          <rect x="204" y="214" width="188" height="78" fill="var(--surface)" stroke="var(--ours)"/>
+          <text x="216" y="234" font-size="11.5" font-weight="600" fill="currentColor">IndexWriter</text>
+          <text x="216" y="250" font-size="10" fill="currentColor" opacity=".55">executor，每段一个任务</text>
+          <text x="216" y="266" font-size="10.5" fill="currentColor" opacity=".78">整段向量交 Knowhere 构建</text>
+          <text x="216" y="281" font-size="10.5" fill="currentColor" opacity=".78">按 Milvus 格式写索引文件</text>
+          <rect x="412" y="214" width="136" height="78" fill="var(--surface)" stroke="var(--ours)"/>
+          <text x="424" y="234" font-size="11.5" font-weight="600" fill="currentColor">作业清单与快照</text>
+          <text x="424" y="250" font-size="10" fill="currentColor" opacity=".55">core.write.commit</text>
+          <text x="424" y="266" font-size="10.5" fill="currentColor" opacity=".78">快照 JSON</text>
+          <text x="424" y="281" font-size="10.5" fill="currentColor" opacity=".78">段 Avro 清单</text>
+          <rect x="578" y="214" width="152" height="78" fill="var(--up-soft)" stroke="var(--up)"/>
+          <text x="590" y="234" font-size="11.5" font-weight="600" fill="currentColor">RestoreSnapshot</text>
+          <text x="590" y="250" font-size="10" fill="currentColor" opacity=".55">restore_snapshot 发起</text>
+          <text x="590" y="266" font-size="10.5" fill="currentColor" opacity=".78">复制段文件与索引文件</text>
+          <text x="590" y="281" font-size="10.5" fill="currentColor" opacity=".78">建出新 collection</text>
+          <rect x="752" y="214" width="152" height="78" fill="var(--wait-soft)" stroke="var(--wait)" stroke-dasharray="5 3"/>
+          <text x="764" y="234" font-size="11.5" font-weight="600" fill="var(--wait)">给已有 collection 补索引</text>
+          <text x="764" y="250" font-size="10" fill="var(--wait)" opacity=".55">Milvus 侧</text>
+          <text x="764" y="266" font-size="10.5" fill="var(--wait)" opacity=".78">按段 Manifest 的</text>
+          <text x="764" y="281" font-size="10.5" fill="var(--wait)" opacity=".78">indexes 加载索引</text>
+        </g>
+        <g stroke="currentColor" marker-end="url(#ar6)">
+          <line x1="176" y1="253" x2="202" y2="253"/>
+          <line x1="392" y1="253" x2="410" y2="253"/>
+          <line x1="548" y1="253" x2="576" y2="253"/>
+        </g>
+        <path d="M480,292 V312 H828 V296" fill="none" stroke="var(--wait)" stroke-dasharray="5 3" marker-end="url(#ar6w)"/>
+      </svg>
+    </div>
+    <figcaption>绿色是我们写的，灰色是上游已有的，琥珀色要等 Milvus 支持。黑色虚线是跨任务的 shuffle：候选按 query_id 汇总，命中行按段重新分区。设计见 <a href="vector-search.html">vector-search.html</a>。</figcaption>
+  </figure>
 </section>
 
 <section id="build">
-  <h2><span class="n">05</span>构建矩阵</h2>
+  <h2><span class="n">06</span>构建矩阵</h2>
   <p class="claim">跟 lance-spark 一样：一份源码，每条维护中的 Spark 线编译一次，各自钉本线的 Spark、Arrow、antlr 和 Java 版本。共用模块必须按最低的那条线编译。</p>
 
   <figure>
@@ -663,37 +753,37 @@
         <g font-size="10.5" fill="currentColor" opacity=".75">
           <text x="30" y="92">Java 11（3.5 线的下限）</text>
           <text x="30" y="108">Scala 2.12 与 2.13 交叉编译</text>
-          <text x="30" y="124">Arrow 只用 C Data Interface，标 provided</text>
+          <text x="30" y="124">Arrow Java 标 provided，版本随 Spark 线</text>
           <text x="30" y="140">不出现 org.apache.spark</text>
         </g>
 
         <rect x="16" y="170" width="250" height="72" fill="var(--surface)" stroke="var(--ours)" stroke-width="1.4"/>
         <text x="30" y="192" font-size="12.5" font-weight="600" fill="var(--ours)">spark-base</text>
         <text x="30" y="210" font-size="10.5" fill="currentColor" opacity=".75">不是一个 project，只是源码目录</text>
-        <text x="30" y="226" font-size="10.5" fill="currentColor" opacity=".75">catalog · table · read · expr · types · write · options</text>
+        <text x="30" y="226" font-size="10.5" fill="currentColor" opacity=".75">read · write · catalog · procedure 等 12 个包</text>
 
         <g stroke="currentColor" marker-end="url(#ar5)" opacity=".8">
           <line x1="266" y1="200" x2="316" y2="70"/><line x1="266" y1="202" x2="316" y2="140"/>
           <line x1="266" y1="206" x2="316" y2="210"/><line x1="266" y1="210" x2="316" y2="280"/>
         </g>
-        <text x="272" y="256" font-size="10" fill="currentColor" opacity=".5">各引一次</text>
+        <text x="272" y="304" font-size="10" fill="currentColor" opacity=".5">各引一次</text>
 
         <g font-size="11">
           <rect x="320" y="44" width="352" height="52" fill="var(--ours-soft)" stroke="var(--ours)"/>
           <text x="334" y="64" font-weight="600" fill="var(--ours)" font-family="ui-monospace,monospace">spark-3.5</text>
-          <text x="334" y="82" fill="currentColor" opacity=".8">Spark 3.5.5 · Arrow 12.0.1 · antlr 4.9.3 · Java 11 · Scala 2.12 与 2.13</text>
+          <text x="334" y="82" fill="currentColor" opacity=".8" font-size="10.5">Spark 3.5.5 · Arrow 12.0.1 · antlr 4.9.3 · Java 11 · Scala 2.12/2.13</text>
 
           <rect x="320" y="114" width="352" height="52" fill="var(--ours-soft)" stroke="var(--ours)"/>
           <text x="334" y="134" font-weight="600" fill="var(--ours)" font-family="ui-monospace,monospace">spark-4.0</text>
-          <text x="334" y="152" fill="currentColor" opacity=".8">Spark 4.0.0 · Arrow 18.1.0 · antlr 4.13 · Java 17 · Scala 2.13</text>
+          <text x="334" y="152" fill="currentColor" opacity=".8">Spark 4.0.0 · Arrow 18.1.0 · antlr 4.13.1 · Java 17 · Scala 2.13</text>
 
           <rect x="320" y="184" width="352" height="52" fill="var(--ours-soft)" stroke="var(--ours)"/>
           <text x="334" y="204" font-weight="600" fill="var(--ours)" font-family="ui-monospace,monospace">spark-4.1</text>
-          <text x="334" y="222" fill="currentColor" opacity=".8">Spark 4.1.1 · Arrow 18.3.0 · antlr 4.13 · Java 17 · Scala 2.13</text>
+          <text x="334" y="222" fill="currentColor" opacity=".8">Spark 4.1.1 · Arrow 18.3.0 · antlr 4.13.1 · Java 17 · Scala 2.13</text>
 
           <rect x="320" y="254" width="352" height="52" fill="var(--ours-soft)" stroke="var(--ours)"/>
           <text x="334" y="274" font-weight="600" fill="var(--ours)" font-family="ui-monospace,monospace">spark-4.2</text>
-          <text x="334" y="292" fill="currentColor" opacity=".8">Spark 4.2.0 · Arrow 19.0.0 · antlr 4.13 · Java 17 · Scala 2.13</text>
+          <text x="334" y="292" fill="currentColor" opacity=".8">Spark 4.2.0 · Arrow 19.0.0 · antlr 4.13.1 · Java 17 · Scala 2.13</text>
         </g>
 
         <g stroke="currentColor" marker-end="url(#ar5)" opacity=".8">
@@ -703,7 +793,7 @@
         <g font-size="10.5">
           <rect x="708" y="50" width="196" height="40" fill="var(--surface)" stroke="var(--line)"/>
           <text x="720" y="66" fill="currentColor" font-family="ui-monospace,monospace">spark-milvus-3.5</text>
-          <text x="720" y="81" fill="currentColor" opacity=".6">加 bundle classifier 的 fat jar；2.12 与 2.13 各一套</text>
+          <text x="720" y="81" fill="currentColor" opacity=".6">fat jar，2.12 与 2.13 各一套</text>
           <rect x="708" y="120" width="196" height="40" fill="var(--surface)" stroke="var(--line)"/>
           <text x="720" y="136" fill="currentColor" font-family="ui-monospace,monospace">spark-milvus-4.0</text>
           <rect x="708" y="190" width="196" height="40" fill="var(--surface)" stroke="var(--line)"/>
@@ -722,20 +812,21 @@
 </section>
 
 <section id="caps">
-  <h2><span class="n">06</span>功能地图</h2>
-  <p class="claim">45 条功能分八组，每条都写清用户怎么用、哪个包实现、依赖什么。读的 19 条全程不经 Milvus 服务；写的 4 条止于作业清单。</p>
+  <h2><span class="n">07</span>功能地图</h2>
+  <p class="claim">48 条功能分八组，每条都写清用户怎么用、哪个包实现、依赖什么。读的 20 条全程不经 Milvus 服务；写的 5 条止于作业清单或快照。</p>
 
   <div class="key">
     <span><i class="sw ours"></i>P0 · 骨架，不做后面都在旧结构上打补丁</span>
     <span><i class="sw oursl"></i>P1 · 接口与写路径</span>
-    <span><i class="sw up"></i>P2 · 依赖列式读</span>
-    <span><i class="sw wait"></i>卡在 Milvus 侧</span>
+    <span><i class="sw up"></i>P2 · 向量、backfill 与建索引</span>
+    <span><i class="sw"></i>待评估</span>
+    <span><i class="sw wait"></i>卡在上游</span>
   </div>
 
   <div class="groups">
     <div class="grp">
-      <h4>表读 · 19 条</h4>
-      <p>快照定视图，列式 reader 出批，剪枝和谓词求值都在核心层。</p>
+      <h4>表读 · 20 条</h4>
+      <p>快照定视图，列式 reader 出批，剪枝和谓词求值都在核心层；外表和普通 collection 走同一条读路径。</p>
       <div class="chips">
         <span class="chip p0"><span class="id">R2</span>读固定快照</span>
         <span class="chip p0"><span class="id">R3</span>不经 Milvus 服务</span>
@@ -744,6 +835,7 @@
         <span class="chip p0"><span class="id">R8</span>删除生效</span>
         <span class="chip p0"><span class="id">R15</span>类型覆盖</span>
         <span class="chip p0"><span class="id">R17</span>交出列批与地址</span>
+        <span class="chip wait"><span class="id">R20</span>读 external collection</span>
         <span class="chip p1"><span class="id">R1</span>三段名</span>
         <span class="chip p1"><span class="id">R6</span>Spark 谓词下推</span>
         <span class="chip p1"><span class="id">R7</span>Milvus 表达式</span>
@@ -760,13 +852,14 @@
     </div>
 
     <div class="grp">
-      <h4>表写 · 4 条</h4>
-      <p>写止于作业清单，登记归 Milvus。</p>
+      <h4>表写 · 5 条</h4>
+      <p>写止于作业清单或快照，登记和恢复归 Milvus。</p>
       <div class="chips">
         <span class="chip wait"><span class="id">W1</span>append 写新段</span>
         <span class="chip p2"><span class="id">W2</span>backfill 写新列组</span>
         <span class="chip p1"><span class="id">W3</span>原子提交</span>
-        <span class="chip p2"><span class="id">W6</span>索引随段写出</span>
+        <span class="chip p2"><span class="id">W6</span>建索引</span>
+        <span class="chip p2"><span class="id">W8</span>写快照恢复成新表</span>
       </div>
     </div>
 
@@ -782,7 +875,7 @@
 
     <div class="grp">
       <h4>CALL · 6 条</h4>
-      <p>Table 接口表达不了的动作；四条线走同一个 SQL 扩展。A1–A5 已实现；A7 已完成 fail-closed 审计和文件对象清理，递归删除目录项仍等待 milvus-storage 接口。</p>
+      <p>Table 接口表达不了的动作；四条线走同一个 SQL 扩展。六条都已实现，A4 的 append 分支等 RegisterSegments，A7 的目录删除等上游接口。</p>
       <div class="chips">
         <span class="chip p1"><span class="id">A1</span>快照</span>
         <span class="chip p1"><span class="id">A2</span>索引</span>
@@ -795,13 +888,13 @@
 
     <div class="grp">
       <h4>向量与索引 · 5 条</h4>
-      <p>整组排 P2：采用 Knowhere PR #1829；库加载、现有入口的 BruteForce、持久化 HNSW 加载、搜索、回表与全局 TopK 已接通。跨任务缓存、索引写出及更多索引格式仍待实现。</p>
+      <p>整组排 P2。统一入口输入查询集，精确与索引是段内两种策略；单条查询的索引搜索已接通，查询集入口与精确模式待实现。</p>
       <div class="chips">
-        <span class="chip p2"><span class="id">V1</span>knowhere 封装</span>
-        <span class="chip p2"><span class="id">V2</span>加载 Milvus 的索引</span>
-        <span class="chip p2"><span class="id">V4</span>索引来源与缓存</span>
-        <span class="chip p2"><span class="id">V5</span>暴力搜索</span>
+        <span class="chip p2"><span class="id">V1</span>Knowhere 接入</span>
+        <span class="chip p2"><span class="id">V2</span>加载 Milvus 建的索引</span>
+        <span class="chip p2"><span class="id">V5</span>精确搜索</span>
         <span class="chip p2"><span class="id">V7</span>持久化索引查询</span>
+        <span class="chip p2"><span class="id">V8</span>SQL 向量函数</span>
       </div>
     </div>
 
@@ -815,50 +908,52 @@
     </div>
 
     <div class="grp">
-      <h4>用户场景 · 1 条</h4>
-      <p>在 apps 模块，是连接器语义之外的独立入口。</p>
+      <h4>场景与工具 · 2 条</h4>
+      <p>在 apps 模块，各自独立入口，只调用 Connector 的公开接口。</p>
       <div class="chips">
         <span class="chip p2"><span class="id">O1</span>backfill 作业</span>
+        <span class="chip p2"><span class="id">O3</span>精确 KNN 基准与召回评测</span>
       </div>
     </div>
 
     <div class="grp">
       <h4>配置 · 5 条</h4>
-      <p>1.x 的 89 个键在这里收敛并映射。</p>
+      <p>1.x 的 89 个配置键在这里重新定名并映射。</p>
       <div class="chips">
         <span class="chip p1"><span class="id">G1</span>表 option</span>
         <span class="chip p1"><span class="id">G2</span>写 option</span>
         <span class="chip p1"><span class="id">G3</span>内存与批</span>
-        <span class="chip p2"><span class="id">G4</span>索引缓存与 GPU</span>
+        <span class="chip p2"><span class="id">G4</span>索引线程池与 GPU</span>
         <span class="chip p1"><span class="id">G5</span>指标</span>
       </div>
     </div>
   </div>
 
   <h3>不做的</h3>
-  <p>TopN 和 Aggregates 下推、UPDATE 和 MERGE、text_match 一族、GIS 表达式、struct 数组表达式、random_sample、DataSource V1 Filter、Vortex 列组的读写。前六项 1.x 也没有；V1 Filter 是 1.x 今天在走的路，2.0 只实现 V2 谓词，对老用户是可见变化。</p>
+  <p>TopN 和 Aggregates 下推、UPDATE 和 MERGE、text_match 一族、GIS 表达式、struct 数组表达式、random_sample、DataSource V1 Filter、Vortex 列组的读写、truncate 与 overwrite、SQL 的 DELETE。V1 Filter 是 1.x 今天在走的路，2.0 只实现 V2 谓词，对老用户是可见变化。overwrite 和 DELETE 会改动生产 collection 且无法回滚，全量刷新和删除在 Milvus 侧显式做。</p>
 </section>
 
 <section id="order">
-  <h2><span class="n">07</span>顺序</h2>
+  <h2><span class="n">08</span>顺序</h2>
   <p class="claim">只有依赖，没有日期。判据是先做让下游列式算子能接上的部分：读路径是一切的基础，写路径的 append 等 Milvus 侧的接口，搜索层依赖列式读。</p>
 
   <ol class="steps">
     <li><b>拆模块<span class="tag">P0</span></b><span>sbt 拆 core、native、spark 四条线，依赖规则进构建。不拆，后面每一项都在旧结构上打补丁。</span></li>
     <li><b>核心层对象模型<span class="tag">P0</span></b><span>SnapshotCatalog 与 Snapshot、Segment、Manifest；四份类型映射合并成一份；路径归一。</span></li>
-    <li><b>列式读<span class="tag">P0</span></b><span>自有 storage JNI、ColumnVector、DeleteBitset。拷贝从 6 次降到 2 次，下游算子拿得到地址。</span></li>
-    <li><b>接口层<span class="tag">P1</span></b><span>Catalog、元数据列、统计、V2 谓词、Limit。三段名和回表在这一步到位。</span></li>
+    <li><b>列式读<span class="tag">P0</span></b><span>milvus-storage 上游 JNI、列式 reader、ColumnVector、删除位图。拷贝从 6 次降到 2 次，下游算子拿得到地址。</span></li>
+    <li><b>读外表<span class="tag">P0</span></b><span>external collection 和普通 collection 一样是表，走同一条读路径；等 milvus-storage 接受空 schema。</span></li>
+    <li><b>接口层<span class="tag">P1</span></b><span>Catalog 目录、三段名与表 DDL，元数据列、统计、V2 谓词、Limit。回表在这一步到位。</span></li>
     <li><b>谓词求值<span class="tag">P1</span></b><span>R6 的 V2 Predicate 翻译、PredicateExpr 与列批位图已接通；R7 的 Expr / PlanParser / Evaluator 已同时接入普通表 <code>milvus.filter</code> 与索引搜索前过滤，只有 JSON/Array 与 <code>json_contains</code> 语义等待决策 23。</span></li>
     <li><b>写路径<span class="tag">P1</span></b><span>SegmentWriter、Committer、register。backfill 分支可先做，append 等 Milvus 的 RPC，两件事可以并行谈。</span></li>
-    <li><b>向量层<span class="tag">P2</span></b><span>上游 Knowhere Java/JNI、持久化索引加载、搜索与暴力搜索已接通；索引写出和跨任务缓存后续实现。</span></li>
+    <li><b>向量层<span class="tag">P2</span></b><span>上游 Knowhere Java/JNI 与单条查询的索引搜索已接通；查询集入口（V5、V7）、建索引（W6）与快照交付（W8）待实现；backfill 写模式。</span></li>
     <li><b>产物与基准<span class="tag">P3</span></b><span>native jar 打包、四条 Spark 线的 CI 矩阵、读吞吐与拷贝次数与写端到端的基准；macOS 与 GPU 产物。</span></li>
     <li><b>2.0.0 发布<span class="tag">P3</span></b><span>云上作业切换坐标与 SHA。</span></li>
   </ol>
 </section>
 
 <section id="open">
-  <h2><span class="n">08</span>还没定的 6 条</h2>
-  <p class="claim">谓词接口选择已定为 DataSource V2，共享实现覆盖四条 Spark 线。当前六条未决项以总体设计第 4 节为准。</p>
+  <h2><span class="n">09</span>还没定的 6 条</h2>
+  <p class="claim">以总体设计第 4 节为准。</p>
 
   <div class="tw">
   <table>
@@ -866,25 +961,31 @@
     <tbody>
       <tr><td class="mono">10</td><td>backfill 写模式的分布与排序</td><td>实现 Spark 的分布要求，或场景代码自己 shuffle</td><td>写路径</td></tr>
       <tr><td class="mono">19</td><td>按分区报告 Spark 分区</td><td>实测 join 收益后决定是否实现</td><td>读优化</td></tr>
-      <tr><td class="mono">16</td><td>其余旧向量入口迁移</td><td>集合级 MilvusSearch.search 已确定，旧逐段入口保留；是否统一 SQL 入口及何时退役旧入口仍待定</td><td>不阻塞 V7</td></tr>
-      <tr><td class="mono">21</td><td>扩大索引兼容范围与跨任务缓存</td><td>首个非 nullable FloatVector/HNSW 范围已落地；nullable ID 映射、加密文件与跨任务缓存仍待实现</td><td>后续 V2、V4 扩展</td></tr>
+      <tr><td class="mono">21</td><td>扩大索引兼容范围</td><td>首个非 nullable FloatVector/HNSW 范围已落地；开源 Milvus 默认的 HNSW_SQ、nullable 映射、DiskANN 与加密文件待定</td><td>后续 V2 扩展</td></tr>
       <tr><td class="mono">22</td><td>写段的系统字段来源</td><td>写时分配、登记时补齐或写入占位值</td><td>append 登记</td></tr>
       <tr><td class="mono">23</td><td>R7 的 JSON、Array 与 <code>json_contains</code> 语义基线</td><td>实现 Milvus 2.6+ 的稳定共同子集，或钉住版本并按服务版本分派；还需明确 null、缺失路径、异构数组、数值转换与错误语义</td><td>不阻塞标量子集；阻塞 JSON/Array 扩展</td></tr>
+      <tr><td class="mono">24</td><td>SQL 函数 vector_knn 的去留</td><td>删除：它在 JVM 里对数组排 TopK，是又一条暴力搜索路径；保留：它作用于任意 DataFrame，不读 collection</td><td>统一入口落地时</td></tr>
     </tbody>
   </table>
   </div>
 
-  <h3>要 Milvus 侧提供的</h3>
+  <h3>要上游提供的</h3>
   <div class="tw">
   <table>
-    <thead><tr><th style="width:30%">事项</th><th style="width:34%">现状</th><th>缺口</th></tr></thead>
+    <thead><tr><th style="width:16%">上游</th><th style="width:50%">事项</th><th>影响</th></tr></thead>
     <tbody>
-      <tr><td>登记外部写入的新段</td><td>没有接口</td><td>新增 RegisterSegments RPC，内部原语已有，缺 RPC、id 分配和广播</td></tr>
-      <tr><td>读段当前的路径与 Manifest 版本</td><td>没有公开 API，只能从快照 metadata 取</td><td>暴露出来，否则每次 backfill 前都要先打快照</td></tr>
-      <tr><td>backfill 期间冻结目标段</td><td>登记的 ack 路径不持段级锁</td><td>段级租约，或把 ack 接到串行的提交路径</td></tr>
-      <tr><td>列级 min/max 统计</td><td>milvus-storage 的 Parquet 谓词下推是空实现</td><td>写统计文件，reader 才能做两级剪枝</td></tr>
-      <tr><td>索引文件写进段的 Manifest</td><td>milvus-storage 的接口已有</td><td>Milvus 服务填写并读取，校验 knowhere 版本区间</td></tr>
-      <tr><td>自动快照与保留策略</td><td>快照靠手动建，旧快照的段可能已被回收</td><td>自动快照、保留策略、快照目录里加一个 catalog 文件</td></tr>
+      <tr><td>Milvus</td><td>登记外部写入的新段（RegisterSegments RPC）</td><td>W1 append</td></tr>
+      <tr><td>Milvus</td><td>暴露段当前的路径与 Manifest 版本</td><td>W2 backfill，否则每次先打快照</td></tr>
+      <tr><td>Milvus</td><td>backfill 期间冻结目标段；登记时校验 Manifest 内容</td><td>W2 backfill</td></tr>
+      <tr><td>Milvus</td><td>按段 Manifest 的 indexes 加载索引</td><td>W6 给已有 collection 补索引</td></tr>
+      <tr><td>Milvus</td><td>自动快照与保留策略，快照目录里加 catalog 文件</td><td>R2</td></tr>
+      <tr><td>Milvus</td><td>外表分片的切点落在 row group 边界</td><td>R20 读取性能</td></tr>
+      <tr><td>Milvus 与 milvus-storage</td><td>写 row group 统计，reader 按统计剪枝</td><td>R10</td></tr>
+      <tr><td>milvus-storage</td><td><code>loon_reader_new</code> 接受空 schema</td><td>R20，合入前外表段打不开</td></tr>
+      <tr><td>milvus-storage</td><td>按 external_spec 拼外部文件系统属性的 C 接口</td><td>R20 的客户桶凭证</td></tr>
+      <tr><td>milvus-storage</td><td>JNI 对切片批只重写偏移和位图</td><td>R4 零拷贝</td></tr>
+      <tr><td>milvus-storage</td><td>JNI 绑定文件系统读取字节与外表展开接口</td><td>G5；决策 25 的开放格式接入</td></tr>
+      <tr><td>Knowhere</td><td>C/Java 接口开放线程池大小</td><td>V5、V7、W6、G4</td></tr>
     </tbody>
   </table>
   </div>

@@ -20,6 +20,9 @@ package com.zilliz.spark.connector
   * core `Expr` on the driver; schema binding and execution belong to
   * `spark.read` and `core.expr`.
   *
-  * Capabilities: R16, G1, G2, G3 (see docs/design/capabilities.md).
+  * Index building (W6) takes no write option; its parameters belong to the
+  * `build_index` procedure.
+  *
+  * Capabilities: R16, G1, G2, G3, G4 (see docs/design/capabilities.md).
   */
 package object options

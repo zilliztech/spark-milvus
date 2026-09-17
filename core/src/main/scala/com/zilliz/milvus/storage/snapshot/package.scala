@@ -15,7 +15,13 @@ package com.zilliz.milvus.storage
   * intersects the common partition and segment selectors; `retainDataSegments`
   * applies optimizer output. Both retain the applicable partition and
   * collection-wide L0 delete segments. See
-  * docs/design/architecture/snapshot.html and vector-search.html section 5.
+  * docs/design/architecture/snapshot.html and vector-search.html section 2.4.
+  *
+  * `Snapshot` is the table description every source produces (decision 25):
+  * open formats and user-declared schemas will produce it too, with
+  * milvus-storage column groups as the unit layout. See
+  * docs/design/architecture/table-description.html.
+  *
   * Capabilities: R2, R3, R9, R13, R16, C3 (see docs/design/capabilities.md).
   */
 package object snapshot

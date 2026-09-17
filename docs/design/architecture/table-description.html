@@ -1,0 +1,118 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>表描述</title>
+<style>
+  :root { color-scheme: light dark; --accent: #237c83; --line: #8884; }
+  body { max-width: 58rem; margin: 2rem auto 4rem; padding: 0 1.1rem;
+    font: 16px/1.75 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 1.65rem; line-height: 1.4; margin: 1.3rem 0 .6rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.5rem; border-bottom: 1px solid var(--line); padding-bottom: .4rem; }
+  a { color: var(--accent); text-underline-offset: .2em; overflow-wrap: anywhere; }
+  nav { display: flex; gap: .5rem 1rem; flex-wrap: wrap; font-size: .9rem; }
+  .home { display: inline-block; border: 1px solid var(--line); border-radius: .35rem; padding: .35rem .7rem; text-decoration: none; }
+  code { font: .85em ui-monospace, SFMono-Regular, Menlo, monospace; background: #8881; padding: .1em .3em; border-radius: 3px; overflow-wrap: anywhere; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+  th, td { text-align: left; vertical-align: top; border: 1px solid var(--line); padding: .55rem .7rem; overflow-wrap: anywhere; }
+  th { background: #8881; }
+  .table { overflow-x: auto; }
+  li { margin: .45rem 0; }
+  figure { margin: 1.4rem 0; overflow-x: auto; }
+  svg { width: 100%; min-width: 740px; height: auto; }
+  figcaption { font-size: .87rem; opacity: .8; }
+  @media (prefers-color-scheme: dark) { :root { --accent: #7ac8ce; } }
+  @media (max-width: 600px) { body { margin-top: 1rem; } h1 { font-size: 1.4rem; } }
+</style>
+
+<a class="home" href="/">← 返回站点目录</a>
+<h1>表描述</h1>
+<p><strong>连接器的读、写、搜索、建索引只认一种内部结构：表描述。表一级是 <code>Snapshot</code>，单元一级是 milvus-storage 的列组；每种数据源只负责把自己的元数据翻译成表描述。</strong></p>
+<nav aria-label="本页目录">
+  <a href="#conclusion">结论</a><a href="#principle">原理</a><a href="#simplicity">简洁性的好处</a><a href="#benefits">设计的好处</a>
+</nav>
+
+<h2 id="conclusion">一、结论</h2>
+<ol>
+<li><code>Snapshot</code> 是所有数据源共用的表描述。Milvus 快照、milvus-backup 导出、开放格式、用户声明的 schema 都产出它（决策 25）。</li>
+<li>表描述是内部接口，用来解耦模块、扩展数据源、组合功能，不对外公开。</li>
+<li>单元一级是 milvus-storage 的列组：哪些列、什么格式、哪些文件的哪几行，以及每个文件的格式属性。</li>
+<li>删除在两处执行：单元内的删除与合并由格式读取器执行，跨单元的按键删除由 <code>core.delete</code> 执行。</li>
+<li>行身份以位置地址为准，即单元编号加单元内行号；键列与稳定行 id 是可选规则。</li>
+</ol>
+<div class="table"><table>
+<thead><tr><th>部分</th><th>表描述里的形态</th></tr></thead><tbody>
+<tr><td>版本</td><td>数据源自己的版本号，原样记录：Milvus 快照、Iceberg 与 Paimon 的 snapshot id、Lance 的版本</td></tr>
+<tr><td>schema</td><td>字段 id、Milvus 类型、向量维度、主键</td></tr>
+<tr><td>单元</td><td>一组列组，或一个在 executor 上展开成列组的 milvus-storage 清单</td></tr>
+<tr><td>跨单元删除</td><td>键列、删除文件、先后依据：行时间戳或文件序号</td></tr>
+<tr><td>行身份</td><td>位置地址必有；键列、稳定行 id 按数据源提供</td></tr>
+<tr><td>索引与统计</td><td>可用、确认无、未知三态，载荷按引擎和统计种类区分</td></tr>
+<tr><td>位置与凭证</td><td>每个存储位置一组 <code>fs.*</code> 或 <code>extfs.*</code> 属性</td></tr>
+</tbody></table></div>
+
+<h2 id="principle">二、原理</h2>
+<figure>
+<svg viewBox="0 0 950 300" role="img" aria-label="四类数据源翻译成表一级的 Snapshot；Snapshot 里有版本、schema、行身份规则、跨单元按键删除、索引统计与位置凭证，并包含多个单元；单元是 milvus-storage 的列组，交给格式读取器；跨单元删除交给 core.delete；两者汇入读、搜索、建索引、写">
+<defs><marker id="arrow-td" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<g fill="none" stroke="currentColor" stroke-width="1.2">
+<rect x="4" y="36" width="170" height="44" rx="5"/><rect x="4" y="96" width="170" height="44" rx="5"/>
+<rect x="4" y="156" width="170" height="44" rx="5"/><rect x="4" y="216" width="170" height="44" rx="5"/>
+<rect x="580" y="40" width="160" height="56" rx="5"/><rect x="580" y="176" width="160" height="56" rx="5"/>
+<rect x="790" y="108" width="150" height="76" rx="5"/>
+</g>
+<g fill="none" stroke="#237c83" stroke-width="1.8"><rect x="210" y="20" width="330" height="266" rx="6"/></g>
+<g fill="none" stroke="#b0661f" stroke-width="1.8">
+<rect x="225" y="132" width="145" height="140" rx="5"/><rect x="385" y="132" width="145" height="140" rx="5"/>
+</g>
+<g fill="currentColor" font-size="14" text-anchor="middle">
+<text x="89" y="24" font-size="12">数据源的翻译</text>
+<g font-size="13"><text x="89" y="63">Milvus 快照、backup</text><text x="89" y="123">Iceberg、Lance、Paimon</text>
+<text x="89" y="183">Parquet 目录</text><text x="89" y="243">用户声明的 schema</text></g>
+<text x="375" y="44">表一级：Snapshot（JVM）</text>
+<text x="375" y="70" font-size="13">版本 · schema（字段 id、类型、主键）</text>
+<text x="375" y="92" font-size="13">行身份规则 · 跨单元按键删除</text>
+<text x="375" y="114" font-size="13">索引与统计 · 存储位置与凭证</text>
+<text x="297" y="156">单元 A</text><text x="457" y="156">单元 B</text>
+<g font-size="13">
+<text x="297" y="182">列组：列、格式</text><text x="297" y="202">文件与行范围</text><text x="297" y="222">格式属性</text>
+<text x="297" y="246">单元内删除或合并</text><text x="297" y="264">由读取器执行</text>
+<text x="457" y="182">列组：列、格式</text><text x="457" y="202">文件与行范围</text><text x="457" y="222">格式属性</text>
+<text x="457" y="246">单元内删除或合并</text><text x="457" y="264">由读取器执行</text>
+</g>
+<text x="660" y="63">core.delete</text><text x="660" y="85" font-size="13">跨单元按键删除</text>
+<text x="660" y="199">milvus-storage</text><text x="660" y="221" font-size="13">格式读取器</text>
+<text x="865" y="140">读、搜索</text><text x="865" y="164">建索引、写</text>
+</g>
+<g fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow-td)">
+<path d="M174,58 H208"/><path d="M174,118 H208"/><path d="M174,178 H208"/><path d="M174,238 H208"/>
+<path d="M540,68 H578"/><path d="M540,204 H578"/>
+<path d="M740,68 L788,128"/><path d="M740,204 L788,164"/>
+</g>
+</svg>
+<figcaption>蓝框在连接器的 JVM 里，橙框由 milvus-storage 解释。</figcaption>
+</figure>
+<ol>
+<li><strong>每种数据源在一个版本下都是一份 schema 加一组单元，单元由文件组成。</strong>单元在各数据源里分别是 Milvus 的段、Iceberg 的数据文件、Hudi 的 file slice、Lance 的 fragment、Paimon 的 split。表描述按这个形状定义，任何数据源都能填进去。</li>
+<li><strong>表一级放下游模块据此做决定的信息。</strong>规划用行数和大小，剪枝用分区和统计，投影用列与文件的对应，回表和索引结果用位置地址，搜索用向量类型和维度，跨单元删除用键列和先后依据。</li>
+<li><strong>单元一级只说明读哪些文件的哪几行。</strong>格式特有的信息原样放进文件的属性，交给该格式的读取器解释：Iceberg 的删除元数据、Lance 的数据集版本、Paimon 的合并方式都在这里。Milvus 的外表用同一种列组包装 Parquet、Vortex、Iceberg 和 Lance。</li>
+<li><strong>删除归到能执行它的地方。</strong>删除向量只涉及一个单元，按键合并发生在一个 Hudi file slice 或一个 Paimon split 之内，这两类由读取器执行。Milvus 的主键删除和 Iceberg 未分区的按列值删除跨越单元，由表一级执行，规则相同：同键且更早的数据被删除，Milvus 按行时间戳比先后，Iceberg 按文件序号比先后。</li>
+<li><strong>行身份统一成位置地址。</strong>位置地址是 <code>(单元编号 &lt;&lt; 32) | 单元内行号</code>，Milvus 外表的虚拟主键与 Lance 的行地址都是这个形式。回表按它取列，Milvus 索引的 label 与 Lance 索引引用的都是它。</li>
+<li><strong>翻译在 driver 上做一次。</strong>executor 收到的是单元描述，读批次的路径保持今天的样子。</li>
+</ol>
+
+<h2 id="simplicity">三、简洁性带来的好处</h2>
+<ol>
+<li><strong>下游只认一种结构。</strong>读、写、搜索、建索引四个模块不区分数据源，接入新数据源时下游代码不动。</li>
+<li><strong>读取只有一条链路。</strong>所有单元都以列组交给 milvus-storage，投影、切片、批大小、指标各只有一份实现。</li>
+<li><strong>概念数量不增加。</strong>表一级沿用 <code>Snapshot</code>，单元一级沿用 milvus-storage 列组，两者都已在代码里运行。</li>
+<li><strong>数据路径没有额外开销。</strong>表描述只在 driver 规划时存在，不转换数据，executor 逐行逐批的开销与今天相同。</li>
+</ol>
+
+<h2 id="benefits">四、这样设计带来的好处</h2>
+<ol>
+<li><strong>接入新数据源只写一个翻译。</strong>开放格式由 milvus-storage 展开成列组，用户声明的 schema 直接填进表描述。</li>
+<li><strong>各格式按原语义读出。</strong>删除向量、按键合并由该格式的读取器执行，读出的行与原格式一致。</li>
+<li><strong>功能可以任意组合。</strong>模块之间传递同一种结构，例如读一份 Iceberg 数据、建索引、写成 Milvus 快照，三步交接的都是表描述。</li>
+<li><strong>Milvus 数据的读法保持一致。</strong>Milvus 快照翻译成表描述后读出的结果与今天相同，现有单测和 UAT 套件直接验收。</li>
+<li><strong>与 Milvus 用同一种文件描述。</strong>连接器和 Milvus 外表都用 milvus-storage 列组描述文件，同一份数据在两边的文件、行范围和格式属性一致。</li>
+<li><strong>精确搜索、索引搜索、建索引共用行身份。</strong>三者都按位置地址定位行，搜索结果可以直接回表，也可以直接和索引结果比对召回率。</li>
+</ol>

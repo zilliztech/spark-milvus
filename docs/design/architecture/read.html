@@ -25,7 +25,7 @@
 
 <h1>读路径</h1>
 
-<p>对应<a href="../capabilities.md">能力索引</a>中的 R2、R3、R4、R5、R8–R17。取字节和交接 Arrow 那一层见
+<p>对应<a href="../capabilities.md">能力索引</a>中的 R2、R3、R4、R5、R8–R17、R20。取字节和交接 Arrow 那一层见
 <a href="storage-io.html">storage-io.html</a>,分层见 <a href="modules.md">modules.md</a>。</p>
 
 <p class="thesis"><strong>第 3 层只负责 Spark 接口，第 2 层完成规划和读取执行。</strong>
@@ -111,6 +111,29 @@ footer 里的字段名；缺少 <code>milvus.field_id</code>、请求未知字�
 <p>已知物理行数的任务由 <code>ExpectedRowsSegmentReader</code> 统一检查：只有读到 EOF 时才比较
 实际交付行数，少读或多读都失败。行式与列式共用这层；Limit 提前关闭 reader 是正常行为，
 没有读到 EOF，因此不做完整行数断言。</p>
+
+<h3 id="rules">1.1 所有段共用的四条读取规则</h3>
+
+<p class="thesis"><strong>普通 collection 的 V2、V3 段和 external collection 的段按同样四条规则读，每条都照 Milvus 自己打开段的方式定。</strong>
+external collection 的段是 V3 段，清单里的列组原地引用客户桶的源文件（<a href="snapshot.html#external">snapshot.html 3.1</a>）。</p>
+
+<table>
+<tr><th>规则</th><th>内容</th><th>普通 collection 的情况</th><th>Milvus 的对应实现</th></tr>
+<tr><td>列名</td><td>字段带 <code>external_field</code> 时取源列名，否则取字段 id；milvus-table 来源一律取字段 id；清单里已从 schema 删除的字段跳过</td><td>V3 列名都是字段 id；V2 列名是字段名，由 <code>V2ColumnBinding</code> 负责</td><td><code>StorageColumnResolver.ManifestStoredColumnName</code></td></tr>
+<tr><td>读取 schema</td><td>所有段用空 schema 打开，每列输出类型取自文件</td><td>文件里就是 Milvus 内部类型，输出不变</td><td>segcore 调 <code>Reader::create</code> 时传空 schema</td></tr>
+<tr><td>类型</td><td>一张源类型对照表把合法的源类型转成 Spark 类型，见 6.4</td><td>对照表里 fixed_size_binary、binary 等几行</td><td><code>NormalizeExternalArrow</code></td></tr>
+<tr><td>系统字段</td><td>规划时为每个段标明主键和时间戳从文件读，还是读时合成</td><td>从文件读</td><td><code>SynthesizeExternalSystemFields</code></td></tr>
+</table>
+
+<p><strong>原理。</strong>milvus-storage 的 Reader 用调用方给的 schema 声明输出类型，数组仍按文件里的类型读出，两者之间不做转换；
+传空 schema 时，输出类型取自各列组文件，对 parquet、vortex、iceberg、lance、milvus-table 五种源格式都成立。
+这一条依赖 milvus-storage 的 <code>loon_reader_new</code> 接受空 schema，见 <a href="../README.md">README 第 5 节</a>。
+列名规则让 <code>V3ColumnBinding</code> 一个类同时覆盖普通段和外表段；系统字段来源是段上的一个标记，reader 按它取值，读取路径不分叉。</p>
+
+<p><strong>好处。</strong>打开段只有一种写法；外表不需要单独的绑定类或读取路径；类型对照表只有一份，放在 <code>core.schema</code>，
+Spark 出口和向量计算都读它；连接器读出的列、行号与 Milvus 读同一个段时一致。</p>
+
+<p class="todo">状态：R20 待实现。今天的代码按字段 id 取 V3 列名，按 Milvus 类型构造读取 schema。</p>
 
 <h2 id="plan">二、段从哪来:一个 Snapshot,四个来源</h2>
 
@@ -245,7 +268,7 @@ factory 关闭已打开的 reader 和 child，重复关闭是空操作，任何�
 <h2 id="columnar">六、行式与列式出口</h2>
 
 <p><strong>列式出口已有,且是默认</strong>:<code>MilvusColumnarPartitionReader</code>,<code>milvus.read.columnar=false</code> 才走行式;
-带向量检索的读回落行式,因为那一步(<code>SegmentVectorSearch</code>)逐行算距离,归属是决策 16。
+带向量检索的读回落行式,因为那一步(<code>SegmentVectorSearch</code>)逐行算距离;这个逐段入口随统一搜索入口的 exact 模式删除(决策 16,见 <a href="vector-search.html#overall">vector-search.html 第一节</a>)。
 普通扫描接受的 DataSource V2 谓词由 <code>core.expr.PredicateEvaluator</code> 对 Arrow 批求值，
 <code>milvus.filter</code> 由 <code>core.expr.Evaluator</code> 对同一批求值；两者各自产生排除位图，
 都不引起行式回落。完整语义见<a href="expressions.html">谓词下推设计</a>。</p>
@@ -284,7 +307,7 @@ fp16 与 bf16 还要内存翻倍,dim=1024 存储里 2KB、Spark 侧 4KB。</p>
 <tr><th>列</th><th>来源</th><th>含义</th></tr>
 <tr><td><code>_segment_id</code></td><td><code>SegmentReadTask.segmentId</code></td><td>当前数据段 id，行式与列式都按 task 填</td></tr>
 <tr><td><code>_row_offset</code></td><td>reader 的物理行位置</td><td>删除过滤前在段内的行号；跨批连续，Limit 与删除不重新编号</td></tr>
-<tr><td><code>_timestamp</code></td><td>存储字段 id 1</td><td>V2 绑定到 <code>Timestamp</code>，V3 绑定到列名 <code>1</code>；这是数据列，不在 Spark 侧合成</td></tr>
+<tr><td><code>_timestamp</code></td><td>存储字段 id 1</td><td>V2 绑定到 <code>Timestamp</code>，V3 绑定到列名 <code>1</code>；这是数据列，不在 Spark 侧合成。external collection 的段按 1.1 的系统字段规则读时合成，值为 0</td></tr>
 </table>
 <p>不提供 <code>partition</code> 元数据列；需要收窄数据时使用
 <code>milvus.partitions</code>。元数据投影也不能让 fallback 物理字段泄漏进输出 schema。</p>
@@ -297,6 +320,27 @@ id、Milvus 类型、nullable、主键/分区键/聚类键标记和向量维度�
 <code>fieldIDs</code> 在 <code>inferSchema</code> 和 Table 构建时都过同一份快照字段表；
 外部 <code>.schema()</code> 的非元数据字段必须恰好对应选中 id，名称和 Spark 类型不能与快照冲突。
 遇到不支持的类型、schema 中缺字段或 Arrow 批缺请求列时直接失败，不退成 BinaryType 或 null。</p>
+
+<h3 id="types">6.4 源类型对照表</h3>
+<p><strong>一张对照表覆盖普通段和外表段的所有源类型，源类型直接转成 Spark 类型。</strong>合法性规则照 Milvus 的
+<code>NormalizeExternalArrow</code>（<code>internal/core/src/storage/Util.cpp</code>）；不在表里的类型报错，错误信息带字段名和实际类型。</p>
+<table>
+<tr><th>Milvus 字段类型</th><th>合法的源 Arrow 类型</th><th>普通 collection 写出的</th><th>Spark 输出</th></tr>
+<tr><td>所有类型</td><td>先归一变体：string_view、large_string 按 string；binary_view、large_binary 按 binary；large_list、list_view 按 list</td><td>—</td><td>—</td></tr>
+<tr><td>稠密向量</td><td>fixed_size_binary（非 nullable）、binary（nullable）、数值元素的 list 或 fixed_size_list；宽度按维度校验</td><td>fixed_size_binary、binary</td><td>按 6.1</td></tr>
+<tr><td>稀疏向量</td><td>binary</td><td>binary</td><td>按 6.1</td></tr>
+<tr><td>Timestamptz</td><td>timestamp 或 int64</td><td>int64</td><td>按 6.3</td></tr>
+<tr><td>VarChar、String、Text、JSON</td><td>string 或 binary</td><td>按字段</td><td>按 6.3</td></tr>
+<tr><td>Array</td><td>list，或 protobuf 编码的 binary</td><td>binary</td><td>Spark 数组</td></tr>
+<tr><td>Geometry</td><td>string（WKT）或 binary（WKB）</td><td>binary</td><td>按 6.3</td></tr>
+<tr><td>标量数值、布尔</td><td>同名 Arrow 类型，按 <code>ValidateScalarArrowType</code> 校验</td><td>同名类型</td><td>按 6.3</td></tr>
+</table>
+<p><strong>原理。</strong>对照表放在 <code>core.schema</code>，内容是两样：合法性规则，以及每种向量布局的描述（元素类型、维度、数据缓冲的位置）。
+<code>spark.types</code> 按它呈现值：向量列统一由 <code>MilvusVectorColumn</code> 呈现，它在 fixed_size_binary、binary 之外支持 list 与 fixed_size_list，
+访问时从 Arrow 缓冲区逐个取元素，不预先拷贝；行式出口 <code>ArrowConverter</code> 与列式出口按同一张表选转换。
+<code>core.index</code> 按它把 Arrow 数据缓冲直接交给 Knowhere，精确搜索和建索引都走这条路（<a href="vector-search.html#native">vector-search.html 2.2</a>）。</p>
+<p><strong>好处。</strong>Spark 出口和向量计算读同一份描述，外表的向量不论写成哪种布局，读出的值与 Milvus 一致；数据从源类型直接转成目标表示，不经过 Milvus 内部表示的中间拷贝。</p>
+<p class="todo">状态：R20 待实现。今天的对照只覆盖普通 collection 写出的类型。</p>
 
 <h2 id="rest">七、不在本链路内的能力</h2>
 <ol>

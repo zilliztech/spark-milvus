@@ -64,7 +64,9 @@ Knowhere; `BruteForceSearch` retains the per-segment brute-force path.
 `Evaluator` for Milvus syntax used by ordinary table and persisted-index
 filters, and the schema-bound `PredicateExpr` / `PredicateEvaluator` / `Bitmap`
 for Spark V2 predicate pushdown. JSON/Array Milvus expressions wait on decision
-23; index caching and writing remain unwritten. `stats` writes
+23. Index writing remains unwritten; the vector search design moves both modes
+behind one query-set entry and deletes the two older brute-force paths when that
+entry lands. `stats` writes
 primary-key bloom filters and reads V2/V3 segment statistics for conservative
 R9/R18 segment pruning; R10 row-group pruning remains blocked on
 milvus-storage. `write.commit` holds job manifests and registration.
@@ -111,7 +113,7 @@ native resource loader. Persisted HNSW loading uses upstream BinarySet and index
 search APIs; Cardinal stream files require a Cardinal-enabled build. Real-file
 compatibility and validation results are recorded in the vector search design.
 
-Six design questions are still open: 10, 16, 19, 21, 22 and 23 in
+Six design questions are still open: 10, 19, 21, 22, 23 and 24 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
 block specific packages, so check that list before starting on one.
 
@@ -151,7 +153,9 @@ writing Vortex column groups. Check it before designing around a gap.
 | How do Catalog discovery, table DDL and fixed-snapshot loading work? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — one-level namespaces, table listing, identifier and property rules, CREATE/DROP sequencing and failure semantics, latest/version/timestamp selection and HybridTS conversion |
 | How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment still lacks before registration, the development outline |
 | How does a `CALL milvus.system.<name>(...)` statement become a call? | [docs/design/architecture/procedure.html](docs/design/architecture/procedure.html) — the grammar, parser extension, logical node and strategy, per-line generated pieces, procedure contracts and bounded-wait semantics |
-| How do vector queries use persisted Milvus indexes? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — issue #125 index metadata, Knowhere loading, pre-search filtering, projected row retrieval, global TopK and real-instance validation; the existing BruteForce entry point is documented separately |
+| How do Milvus, lakehouse and user-declared data map to one internal table description? | [docs/design/architecture/table-description.html](docs/design/architecture/table-description.html) — decision 25: `Snapshot` is the table description every source produces, milvus-storage column groups are its units, in-unit deletes run in the format reader and cross-unit key deletes in `core.delete`, row identity is the positional address; the principle and what the simplicity buys |
+| How do vector search and index building work? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — conclusion: one `MilvusSearch.search` entry taking a query set with `mode` exact or index, its result schema, scope, options and failure behaviour, layer duties; principle: the two Spark stages (candidates then take), the Knowhere buffer contract and zero-copy conditions, exact scan, index probe from snapshot metadata, index file decoding and engine choice, result semantics, index building through `build_index` and external snapshot restore, native library loading and real-file compatibility; then what the simplicity and the design buy |
+| How is an external collection read? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html#external) section 3.1 — how Milvus stores one, the five source formats, synthesized primary key and timestamp; the four read rules every segment shares and the source type table are in [read.html](docs/design/architecture/read.html#rules) 1.1 and 6.4; customer-bucket `extfs.*` credentials in [storage-auth.html](docs/design/architecture/storage-auth.html#external) 3.4. Opening an external segment needs milvus-storage `loon_reader_new` to accept a null schema |
 | What is a Snapshot, and how do the four read entry points become one? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html) — `Snapshot` and `Segment`, the three delete states, what each source cannot supply, `SnapshotCatalog`, the boundary to `SegmentReadTask`. Draft under review |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
 | Illustrated version of the above | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) |

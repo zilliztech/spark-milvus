@@ -9,8 +9,11 @@ package com.zilliz.milvus.storage
   * field", codec answers "what does one value of that type look like in bytes".
   *
   * BinlogCodec owns the common event envelope and flat Parquet payload used by
-  * deletion files and persisted index files. It opens no storage itself. Main
-  * types: FloatConverter, SparseFloatVectorConverter, ArrayCodec, BinlogCodec.
-  * Capabilities: R15, W3, V2 (see docs/design/capabilities.md).
+  * deletion files and persisted index files. It opens no storage itself.
+  * Encoding index files for W6 is planned here, beside the decoder, so both
+  * directions share one format definition.
+  *
+  * Main types: FloatConverter, SparseFloatVectorConverter, ArrayCodec,
+  * BinlogCodec. Capabilities: R15, W3, V2 (see docs/design/capabilities.md).
   */
 package object codec

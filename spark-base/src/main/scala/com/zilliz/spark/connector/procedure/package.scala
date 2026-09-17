@@ -14,6 +14,11 @@ package com.zilliz.spark.connector
   * and file-object deletion; recursive directory deletion remains blocked on a
   * native filesystem API, so it never reports a staging prefix deleted.
   *
+  * Planned: `build_index` (W6) starts a Spark job that reads written segments
+  * back and builds their vector indexes; `restore_snapshot` (W8) asks Milvus to
+  * restore a connector-written snapshot into a new collection. Design:
+  * docs/design/architecture/vector-search.html section 2.7.
+  *
   * Capabilities: A1, A2, A3, A4, A5, A7 (see docs/design/capabilities.md).
   */
 package object procedure

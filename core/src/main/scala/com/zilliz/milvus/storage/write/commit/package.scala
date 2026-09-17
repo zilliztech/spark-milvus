@@ -23,6 +23,11 @@ package com.zilliz.milvus.storage.write
   * registered jobs, legacy manifests and inconsistent metadata are always
   * preserved.
   *
+  * Planned for W8: writing a snapshot, that is the snapshot JSON (the shapes in
+  * `core.snapshot.json`) and the segment Avro manifests, including the index
+  * records W6 produces, so that Milvus can restore it into a new collection.
+  * `core.snapshot` stays read-only.
+  *
   * Main types: JobManifest, CommittedSegment, Committer, CommitOutcome,
   * Registration, StagingCleaner. Capabilities: W3, A4, A7 (see
   * docs/design/capabilities.md). A7 remains partial until native recursive
