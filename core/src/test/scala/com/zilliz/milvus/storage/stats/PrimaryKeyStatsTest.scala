@@ -93,6 +93,41 @@ class PrimaryKeyStatsTest extends AnyFunSuite with Matchers {
     back.maxPk shouldBe m.maxPk
   }
 
+  test("reader accepts both a generated object and a compound array") {
+    val first = new PrimaryKeyStats.Builder(100L, DataType.Int64)
+    first.addLong(7L)
+    val second = new PrimaryKeyStats.Builder(100L, DataType.Int64)
+    second.addLong(9L)
+
+    PrimaryKeyStats.fromBytes(first.build().toBytes) should have size 1
+    val compound =
+      s"[${first.build().toJson},${second.build().toJson}]"
+        .getBytes(StandardCharsets.UTF_8)
+    val parsed = PrimaryKeyStats.fromBytes(compound)
+    parsed should have size 2
+    parsed.head.mightContainLong(7L) shouldBe true
+    parsed(1).mightContainLong(9L) shouldBe true
+  }
+
+  test("damaged or weakly typed JSON is rejected instead of defaulted") {
+    val builder = new PrimaryKeyStats.Builder(100L, DataType.Int64)
+    builder.addLong(7L)
+    val valid = builder.build().toJson
+
+    an[IllegalArgumentException] should be thrownBy PrimaryKeyStats.fromJson(
+      valid.replace("\"fieldID\":100", "\"fieldID\":\"100\"")
+    )
+    an[IllegalArgumentException] should be thrownBy PrimaryKeyStats.fromJson(
+      valid.replace("\"minPk\":7", "\"minPk\":\"7\"")
+    )
+    an[IllegalArgumentException] should be thrownBy PrimaryKeyStats.fromJson(
+      valid.replace("\"maxPk\":7,", "")
+    )
+    an[IllegalArgumentException] should be thrownBy PrimaryKeyStats.fromBytes(
+      "[]".getBytes(StandardCharsets.UTF_8)
+    )
+  }
+
   test("a key of the wrong type and an empty segment are refused") {
     val builder = new PrimaryKeyStats.Builder(100L, DataType.Int64)
     an[IllegalArgumentException] should be thrownBy builder.addString("x")

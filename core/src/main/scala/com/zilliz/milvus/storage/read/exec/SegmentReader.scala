@@ -204,6 +204,19 @@ private[exec] final class NativeTakeResult(
   * `columnNameFor` is for; it is not something this object can decide.
   */
 object SegmentReaderRegistry {
+  private[exec] val RecordBatchMaxRows = "reader.record_batch_max_rows"
+  private[exec] val RecordBatchMaxSize = "reader.record_batch_max_size"
+
+  /** Native properties for one validated task. Typed limits deliberately win
+    * over any raw key in the filesystem property bag.
+    */
+  private[exec] def nativeProperties(
+      task: SegmentReadTask
+  ): Map[String, String] =
+    task.properties ++ Map(
+      RecordBatchMaxRows -> task.limits.batchMaxRows.toString,
+      RecordBatchMaxSize -> task.limits.batchMaxBytes.toString
+    )
 
   def open(
       task: SegmentReadTask,
@@ -323,7 +336,7 @@ private[exec] final class NativeSegmentReader(
     schemaStruct.save(new ArrowSchema.Snapshot())
     Data.exportSchema(allocator, arrowSchema, null, schemaStruct)
     properties = calls.timed(new MilvusStorageProperties())
-    calls.timed(properties.create(task.properties))
+    calls.timed(properties.create(SegmentReaderRegistry.nativeProperties(task)))
     reader = new MilvusStorageReader()
     val columns = neededColumns.toArray
 

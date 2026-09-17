@@ -8,8 +8,9 @@ package com.zilliz.spark.connector
   * readers and writers; the ColumnVector implementations consume the same
   * batches on the columnar route. MilvusArrayColumn and Utf8FromBinaryColumn
   * cover the supported fields whose stored Arrow type differs from their Spark
-  * type.
+  * type. `ArrowAllocator` keeps the process root alive and creates a bounded
+  * child for each read task; the final partition reader owns that child.
   *
-  * Capabilities: R15 (see docs/design/capabilities.md).
+  * Capabilities: R15, G3 (see docs/design/capabilities.md).
   */
 package object types

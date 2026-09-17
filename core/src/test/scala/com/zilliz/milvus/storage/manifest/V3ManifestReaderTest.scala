@@ -2,6 +2,7 @@ package com.zilliz.milvus.storage.manifest
 
 import java.io.ByteArrayOutputStream
 import java.nio.file.Files
+import scala.jdk.CollectionConverters._
 
 import org.apache.avro.file.DataFileWriter
 import org.apache.avro.generic.{GenericData, GenericDatumWriter, GenericRecord}
@@ -30,6 +31,20 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
                   {"name": "path", "type": "string"},
                   {"name": "type", "type": "int"},
                   {"name": "num_entries", "type": "long"}
+                ]
+              }
+            }
+          },
+          {
+            "name": "stats",
+            "type": {
+              "type": "map",
+              "values": {
+                "type": "record",
+                "name": "SegmentStatistic",
+                "fields": [
+                  {"name": "paths", "type": {"type": "array", "items": "string"}},
+                  {"name": "metadata", "type": {"type": "map", "values": "string"}}
                 ]
               }
             }
@@ -69,6 +84,43 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
     ) shouldBe "files/insert_log/10/20/30/_metadata/manifest-7.avro"
   }
 
+  test("parseStatistics resolves relative paths and keeps metadata") {
+    val bytes = writeManifest(
+      Seq.empty,
+      Map(
+        "bloom_filter.100" -> (
+          Seq(
+            "files/insert_log/10/20/30/_stats/bloom_filter.100/1",
+            "_stats/bloom_filter.100/9",
+            "s3://other/files/insert_log/10/20/30/_stats/bloom_filter.100/11"
+          ),
+          Map("memory_size" -> "2048")
+        )
+      )
+    )
+
+    V3ManifestReader
+      .parseStatistics(bytes, "files/insert_log/10/20/30") shouldBe Right(
+      Map(
+        "bloom_filter.100" -> ManifestStatistic(
+          Seq(
+            "files/insert_log/10/20/30/_stats/bloom_filter.100/1",
+            "files/insert_log/10/20/30/_stats/bloom_filter.100/9",
+            "s3a://other/files/insert_log/10/20/30/_stats/bloom_filter.100/11"
+          ),
+          Map("memory_size" -> "2048")
+        )
+      )
+    )
+  }
+
+  test("resolveManifestStatisticsPath preserves a local absolute path") {
+    V3ManifestReader.resolveManifestStatisticsPath(
+      "/tmp/segment",
+      "/tmp/segment/_stats/bloom_filter.100/1"
+    ) shouldBe "/tmp/segment/_stats/bloom_filter.100/1"
+  }
+
   test("resolveManifestDeltaPath preserves absolute deltalog paths") {
     V3ManifestReader.resolveManifestDeltaPath(
       "files/insert_log/10/20/30",
@@ -92,7 +144,8 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
   }
 
   private def writeManifest(
-      deltaLogs: Seq[(String, Int, Long)]
+      deltaLogs: Seq[(String, Int, Long)],
+      stats: Map[String, (Seq[String], Map[String, String])] = Map.empty
   ): Array[Byte] = {
     val deltaSchema = schema
       .getField("delta_logs")
@@ -111,6 +164,16 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
       arr.add(log)
     }
     rec.put("delta_logs", arr)
+    val statsSchema = schema.getField("stats").schema().getValueType
+    rec.put(
+      "stats",
+      stats.map { case (name, (paths, metadata)) =>
+        val stat = new GenericData.Record(statsSchema)
+        stat.put("paths", paths.asJava)
+        stat.put("metadata", metadata.asJava)
+        name -> stat
+      }.asJava
+    )
 
     val out = new ByteArrayOutputStream()
     val writer =

@@ -58,7 +58,9 @@ Knowhere; `BruteForceSearch` retains the per-segment brute-force path.
 `Evaluator` for Milvus syntax used by persisted-index filters, and the
 schema-bound `PredicateExpr` / `PredicateEvaluator` / `Bitmap` for Spark V2
 predicate pushdown. Index caching and writing remain unwritten. `stats` writes
-primary-key bloom filters; `write.commit` holds job manifests and registration.
+primary-key bloom filters and reads V2/V3 segment statistics for conservative
+R9/R18 segment pruning; R10 row-group pruning remains blocked on
+milvus-storage. `write.commit` holds job manifests and registration.
 `read.plan` builds tasks and lists delete files; `read.exec` reads them on the
 executor and opens the segment reader.
 
@@ -86,8 +88,10 @@ and `V3` everywhere, after the snapshot's `storage_version`.
 `CALL milvus.system.<name>(...)` SQL extension. Snapshot, index,
 load/release/flush/compact, collection describe, and backfill register are
 implemented across all four Spark lines. Append registration still waits for a
-Milvus `RegisterSegments` API; staging cleanup remains unimplemented until its
-ownership and retention contract is defined.
+Milvus `RegisterSegments` API. Staging cleanup now records collection ownership
+and driver heartbeats, audits stale unregistered append jobs fail-closed, and
+deletes their file objects; removing the remaining directory entries still
+waits for milvus-storage to expose recursive directory deletion.
 
 Layer 1 uses the upstream milvus-storage JNI and Java/Scala API.
 `native-storage` compiles the pinned submodule's API for Scala 2.12 and 2.13
@@ -135,6 +139,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How are object storage credentials handled? | [docs/design/architecture/storage-auth.html](docs/design/architecture/storage-auth.html) for the mechanism, the rules and the measured facts; apply the skill [.agents/skills/spark-milvus-storage-auth/SKILL.md](.agents/skills/spark-milvus-storage-auth/SKILL.md) |
 | How do bytes and Arrow cross between C and the JVM? | [docs/design/architecture/storage-io.html](docs/design/architecture/storage-io.html) — layer 1's two faces, the per-batch Arrow handshake, handle ownership, the metrics taken on the crossing (G5). Read and write share it |
 | How does a read run, today and as designed? | [docs/design/architecture/read.html](docs/design/architecture/read.html) — the four snapshot sources, the one executor read path, `core.read.plan` and `core.read.exec`, the development outline |
+| How does layer 3 turn Spark calls and options into cross-layer contracts? | [docs/design/architecture/spark-interface.html](docs/design/architecture/spark-interface.html) — shared package responsibilities, typed option delivery, task resource ownership, delivery order and acceptance gates |
 | How does Spark predicate pushdown preserve semantics? | [docs/design/architecture/expressions.html](docs/design/architecture/expressions.html) — the DataSource V2 support matrix, residual contract, three-valued logic, field-id binding, hidden predicate columns and row/columnar execution |
 | How do Catalog discovery, table DDL and fixed-snapshot loading work? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — one-level namespaces, table listing, identifier and property rules, CREATE/DROP sequencing and failure semantics, latest/version/timestamp selection and HybridTS conversion |
 | How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment still lacks before registration, the development outline |

@@ -24,7 +24,7 @@
 
 <h1>CALL 过程</h1>
 
-<p>能力 A1 到 A5 的 SQL 入口，并记录 A7 尚未实现的安全边界。本页同时规定
+<p>能力 A1 到 A5 的 SQL 入口，以及 A7 在当前原生文件系统能力下可安全实现的部分。本页同时规定
 <code>CALL milvus.system.&lt;name&gt;(...)</code> 怎么从文本变成一次调用，以及每个已实现过程的参数、结果表、
 等待和失败语义。SQL 前端由 issue #17 落地；管理过程由 issue #141 补齐。</p>
 
@@ -139,6 +139,7 @@ object Procedures { def byName(name: String): Option[Procedure] }   // 注册表
 <tr><td><code>compact</code></td><td><code>collection</code>；可选 <code>wait</code>、<code>timeout_seconds</code></td><td>一行 compaction_id、plan_count、state 与 executing/completed/failed/timeout 计划数；不等待的 state 是 <code>submitted</code></td></tr>
 <tr><td><code>describe</code></td><td><code>collection</code></td><td>每个 schema 字段至少一行，同时带 collection id、segment count、load state；字段有索引时每个索引一行，附 index id、名称、状态与进度</td></tr>
 <tr><td><code>register</code></td><td><code>collection</code>,<code>staging</code>（作业暂存前缀,相对桶的 key）</td><td>每段一行：job_id、segment_id、manifest_version、status；status 是 <code>registered</code> 或 <code>already_registered</code></td></tr>
+<tr><td><code>cleanup_staging</code></td><td><code>collection</code>；可选 <code>retention_seconds</code>（默认 604800，最小 300）、<code>dry_run</code>（默认 true）</td><td>每个暂存子目录一行：所有权、写模式、动作与原因、最后心跳、候选/已删文件数、仍有的目录数及 <code>prefix_deleted</code>。当前只删文件，<code>prefix_deleted</code> 恒为 false</td></tr>
 </table>
 
 <h3 id="procedure-common">3.1 共同行为</h3>
@@ -166,6 +167,40 @@ object Procedures { def byName(name: String): Option[Procedure] }   // 注册表
 <p>其它中间状态继续轮询，超过截止时间抛出包含过程名、collection 和最后状态的异常。
 每次状态 RPC 都以当时剩余的整体等待时间为 deadline，单次 RPC 不能越过 <code>timeout_seconds</code> 的总截止时间。轮询只在 driver 上发生，不创建 Spark job，不把 client 或凭证序列化给 executor。</p>
 
+<h3 id="procedure-cleanup">3.3 暂存清理的安全边界</h3>
+
+<p><code>cleanup_staging</code> 不连接 Milvus；它用语句携带的 <code>fs.*</code> 打开
+<code>fs.root_path/staging/</code>。append 作业在启动 executor task 前先写
+<code>owner.json</code>，内容含格式版本、job id、database、collection、
+<code>write_mode=append</code> 与创建时间；随后 driver 每 60 秒改写
+<code>_heartbeat</code>。commit 与 abort 都先停止心跳。commit 写出的第二版
+<code>manifest.json</code> 重复 owner、write mode 和创建时间，清理时两份必须逐项一致。
+旧清单仍可由 <code>register</code> 读取，但因缺少这些所有权字段，清理必须保留。</p>
+
+<p>一个 job 只有同时满足以下条件才成为文件删除候选：</p>
+<ol>
+<li><code>owner.json</code> 和 <code>_heartbeat</code> 都存在、格式正确、版本受支持且 job id 与目录名一致；</li>
+<li>owner 的 database 与 collection 与本次过程目标精确相同，写模式明确为 append；backfill 无条件保留；</li>
+<li><code>_registered</code> 不存在；存在即保留，不根据内容或时间猜测；</li>
+<li><code>manifest.json</code> 存在时，其 owner、模式、job id 与创建时间必须和 owner 文件一致；<code>_committed</code> 存在时还必须有 manifest，且标记内容必须等于 job id。只有 manifest 没有标记是 commit 在两次写入之间中止的合法残留，仍可按同样规则清理；</li>
+<li>最后心跳不早于创建时间、不在当前时间之后，且距本次调用至少达到保留期；前缀内每个文件都必须有有效的 <code>modifiedNanos</code>，最新值不能晚于当前时间或保留期截止点；</li>
+<li>job id 必须是以字母或数字开头、只含字母、数字、点、下划线和连字符的单个 key 组件，明确拒绝 <code>.</code>、<code>..</code>、路径分隔符、空白与控制字符。存储层列出的每个待删文件还必须位于初次枚举得到的同一个精确 job 目录下；</li>
+<li>删除前再读一次 owner、心跳、登记、提交状态及完整文件 fingerprint；任何变化都取消本次删除。</li>
+</ol>
+
+<p>缺文件、旧格式、损坏 JSON、时间矛盾、未知版本、所有权不符和 marker 不一致都按 job
+返回 <code>preserved</code>，不会因一个坏目录中止其它目录，也不会用目录修改时间推断。
+<code>dry_run=true</code> 只返回 <code>would_delete_files</code>。显式
+<code>dry_run=false</code> 才逐个调用 <code>core.io.ObjectStore.delete</code>，并且先删数据、最后删
+owner；中途失败返回 <code>delete_failed</code> 与已删数量，留下的 owner 供下一次审计。</p>
+
+<div class="warn">
+<strong>这不是完整的 A7。</strong>固定的 milvus-storage JNI 只公开
+<code>deleteFile</code>；底层 Arrow filesystem 虽有 <code>DeleteDir</code> 与
+<code>DeleteDirContents</code>，C FFI/JNI 没有出口。对象存储的零字节目录标记和本地空目录因此不能删除。
+过程会把当前看见的目录数与 <code>prefix_deleted=false</code> 明确返回，绝不经 Hadoop、
+<code>java.io</code> 或本地路径特例绕过。完整前缀删除要等上游补齐递归目录删除后再完成。</div>
+
 <h2 id="lines">四、哪些按线各一份</h2>
 
 <table>
@@ -189,7 +224,7 @@ object Procedures { def byName(name: String): Option[Procedure] }   // 注册表
 <tr><th>情况</th><th>用户看到</th></tr>
 <tr><td>过程名不存在</td><td><code>unknown procedure milvus.system.foo; known: register, create_snapshot, ...</code>,解析期；完整列表来自静态注册表</td></tr>
 <tr><td>缺必填参数、不认识的参数、类型不对</td><td><code>procedure register: missing argument 'staging'; parameters: collection STRING, staging STRING</code>,解析期</td></tr>
-<tr><td>连接或存储选项不全</td><td>普通管理过程明确指出缺少 <code>milvus.uri</code>；register 保留其连接与对象存储选项校验</td></tr>
+<tr><td>连接或存储选项不全</td><td>普通管理过程明确指出缺少 <code>milvus.uri</code>；register 校验连接与对象存储选项；cleanup_staging 不要求 URI，只校验打开原生文件系统所需的 <code>fs.*</code></td></tr>
 <tr><td>Milvus 拒绝（collection 不存在、状态失败、BatchUpdateManifest 失败）</td><td>client 的异常原样上抛,不吞、不转成空表</td></tr>
 <tr><td>作业清单不存在、标记文件缺失</td><td><code>Register.run</code> 今天的异常</td></tr>
 </table>
@@ -197,10 +232,10 @@ object Procedures { def byName(name: String): Option[Procedure] }   // 注册表
 <h2 id="index">六、对能力表和模块表的改动</h2>
 
 <ul>
-<li><code>spark.extensions</code> 提供四条线共用的 SQL 前端；<code>spark.procedure</code> 认领 A1–A5 并实现全部过程体。</li>
+<li><code>spark.extensions</code> 提供四条线共用的 SQL 前端；<code>spark.procedure</code> 认领 A1–A5 与 A7，并实现全部过程体。</li>
 <li><code>client.api</code> 提供快照、索引、生命周期、描述与登记所需的 RPC 封装，并校验响应状态。</li>
 <li>中英文 reference 的 CALL 章节公开列出命令、参数、结果和等待规则，不使用内部工作项缩写。</li>
-<li>A7 仍列在「尚未落地」：作业清单没有 collection 所有权，保留期与活跃作业判定未定，不能安全提供批量清理。</li>
+<li>A7 不再列在「尚未落地」：owner、心跳、保留期、dry-run 和逐文件删除已落地；能力行与结果表明确保留 milvus-storage 递归目录删除这一上游缺口。</li>
 </ul>
 
 <h2 id="open">七、已定与边界</h2>
@@ -208,4 +243,4 @@ object Procedures { def byName(name: String): Option[Procedure] }   // 注册表
 <p>三件 2026-09-16 定案(决策日志同日):连接与存储选项走命名参数;3.5 线的 <code>spark.functions</code> 包删除;register 的结果表用第三节那四列。
 实现在同一天落地(#17):<code>spark.sql("CALL milvus.system.register(...)")</code> 在 UAT 上完成 #16 的登记。
 #141 随后补齐第三节所列管理过程及其 client RPC、资源关闭和有界等待测试。</p>
-<p>本轮不实现 <code>cleanup_staging</code>，也不为 append 虚构 <code>RegisterSegments</code>；二者分别等待安全清理契约和 Milvus 服务端公开 API。</p>
+<p>本轮实现 <code>cleanup_staging</code> 的安全判定、审计和文件删除，但不把仍有目录条目的前缀报告成已删除；完整前缀删除等待 milvus-storage 的 C FFI/JNI 出口。仍不为 append 虚构 <code>RegisterSegments</code>，它继续等待 Milvus 服务端公开 API。</p>

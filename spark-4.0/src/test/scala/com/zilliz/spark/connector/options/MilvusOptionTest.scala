@@ -5,6 +5,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.read.plan.ReadLimits
 
 /** Unit tests for MilvusOption parsing and validation
   */
@@ -25,6 +26,9 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     milvusOption.retryCount shouldBe 3
     milvusOption.retryInterval shouldBe 1000
     milvusOption.insertMaxBatchSize shouldBe 5000
+    milvusOption.readLimits shouldBe ReadLimits.Default
+    milvusOption.writeFileRollingBytes shouldBe
+      MilvusOption.DefaultWriteFileRollingBytes
   }
 
   test("Parse all connection options") {
@@ -473,6 +477,47 @@ class MilvusOptionTest extends AnyFunSuite with Matchers {
     }
     blank.getMessage should include(MilvusOption.ReaderFieldIDs)
   }
+
+  test("resource limits parse once with strict case-insensitive keys") {
+    val parsed = MilvusOption(
+      Map(
+        MilvusOption.ReadBatchMaxRows.toUpperCase -> " 2048 ",
+        MilvusOption.ReadBatchMaxBytes.toUpperCase -> "16777216",
+        MilvusOption.ReadArrowMaxBytes.toUpperCase -> "67108864",
+        MilvusOption.WriteFileRollingBytes.toUpperCase -> "1073741824",
+        StorageProperties.StorageType -> StorageProperties.StorageTypeLocal
+      )
+    )
+
+    parsed.readLimits shouldBe ReadLimits(2048, 16777216L, 67108864L)
+    parsed.writeFileRollingBytes shouldBe 1073741824L
+    MilvusOption.writerProperties(parsed)(
+      MilvusOption.NativeWriterFileRollingSize
+    ) shouldBe "1073741824"
+  }
+
+  test("integer and long options reject blank, non-positive and overflow") {
+    val invalid = Seq(
+      MilvusOption.MilvusInsertMaxBatchSize -> "",
+      MilvusOption.MilvusRetryCount -> "0",
+      MilvusOption.MilvusRetryInterval -> "-1",
+      MilvusOption.ReadBatchMaxRows -> "2147483648",
+      MilvusOption.ReadBatchMaxRows -> "1.5",
+      MilvusOption.ReadBatchMaxBytes -> "0",
+      MilvusOption.ReadBatchMaxBytes ->
+        (ReadLimits.MaxBatchBytes + 1L).toString,
+      MilvusOption.ReadArrowMaxBytes -> "9223372036854775808",
+      MilvusOption.WriteFileRollingBytes -> "-10"
+    )
+
+    invalid.foreach { case (key, value) =>
+      val error = intercept[IllegalArgumentException] {
+        MilvusOption(Map(key -> value))
+      }
+      error.getMessage should include(key)
+      error.getMessage should include(s"'$value'")
+    }
+  }
 }
 
 /** Unit tests for MilvusS3Option
@@ -578,6 +623,25 @@ class MilvusS3OptionTest extends AnyFunSuite with Matchers {
     // Test absolute S3 path (should not be modified)
     val path2 = s3Option.getFilePath("s3a://other-bucket/other-path")
     path2.toString shouldBe "s3a://other-bucket/other-path"
+  }
+
+  test("S3 booleans and positive integers use strict parsing") {
+    import scala.collection.JavaConverters._
+
+    Seq(
+      MilvusOption.S3UseSSL -> "yes",
+      MilvusOption.S3PathStyleAccess -> "",
+      MilvusOption.S3MaxConnections -> "0",
+      MilvusOption.S3PreloadPoolSize -> "2147483648"
+    ).foreach { case (key, value) =>
+      val error = intercept[IllegalArgumentException] {
+        MilvusS3Option(
+          new CaseInsensitiveStringMap(Map(key.toUpperCase -> value).asJava)
+        )
+      }
+      error.getMessage should include(key)
+      error.getMessage should include(s"'$value'")
+    }
   }
 
   test("isBackupMode is true only when milvus.backup.dir is set") {

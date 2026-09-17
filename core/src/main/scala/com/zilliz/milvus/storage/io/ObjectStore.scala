@@ -52,6 +52,10 @@ trait ObjectStore extends AutoCloseable {
 
   def createDir(key: String, recursive: Boolean = true): Unit
 
+  /** Deletes one file. Directories are not accepted by the current native
+    * binding, including object-store directory marker objects reported as
+    * directories by [[list]].
+    */
   def delete(key: String): Unit
 }
 

@@ -11,6 +11,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.zilliz.milvus.storage.expr.PredicateExpr
+import com.zilliz.milvus.storage.read.exec.SegmentReader
 import com.zilliz.spark.connector.options.{MilvusOption, VectorSearch}
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
@@ -26,6 +27,18 @@ object MilvusPartitionReaderFactory {
   ): Boolean =
     requestedExtraColumns.contains(name) &&
       MetadataColumns.isSyntheticColumn(name)
+
+  private[read] def closeAfterFailure(
+      resource: AutoCloseable,
+      failure: Throwable
+  ): Unit =
+    if (resource != null) {
+      try resource.close()
+      catch {
+        case closeFailure: Throwable =>
+          if (closeFailure ne failure) failure.addSuppressed(closeFailure)
+      }
+    }
 
 }
 
@@ -72,14 +85,24 @@ class MilvusPartitionReaderFactory(
       partition: InputPartition
   ): PartitionReader[ColumnarBatch] = {
     val reader = batchReaderFor(partition)
-    limit.fold(reader)(n => new LimitedBatchReader(reader, n))
+    try limit.fold(reader)(n => new LimitedBatchReader(reader, n))
+    catch {
+      case failure: Throwable =>
+        MilvusPartitionReaderFactory.closeAfterFailure(reader, failure)
+        throw failure
+    }
   }
 
   override def createReader(
       partition: InputPartition
   ): PartitionReader[InternalRow] = {
     val reader = rowReaderFor(partition)
-    limit.fold(reader)(n => new LimitedRowReader(reader, n))
+    try limit.fold(reader)(n => new LimitedRowReader(reader, n))
+    catch {
+      case failure: Throwable =>
+        MilvusPartitionReaderFactory.closeAfterFailure(reader, failure)
+        throw failure
+    }
   }
 
   private def batchReaderFor(
@@ -91,19 +114,39 @@ class MilvusPartitionReaderFactory(
       })
       val setup = ColumnBinding(p, dataSchema)
       val milvusSchema = CollectionSchema.parseFrom(p.task.schemaBytes)
-      new MilvusColumnarPartitionReader(
-        schema,
-        setup.open(ArrowAllocator.get),
-        milvusSchema,
-        setup.isDeleted,
-        setup.arrowColumnFor,
-        MilvusOption.readVectorRaw(optionsMap),
-        partitionNameOf(p),
+      val taskAllocator = ArrowAllocator.forReadTask(
         p.task.segmentId,
-        requestedExtraColumns,
-        pushedExpression,
-        setup.columnNameFor
+        p.task.limits.arrowMaxBytes
       )
+      var segmentReader: SegmentReader = null
+      try {
+        segmentReader = setup.open(taskAllocator.allocator)
+        new MilvusColumnarPartitionReader(
+          schema,
+          segmentReader,
+          milvusSchema,
+          setup.isDeleted,
+          setup.arrowColumnFor,
+          MilvusOption.readVectorRaw(optionsMap),
+          partitionNameOf(p),
+          p.task.segmentId,
+          requestedExtraColumns,
+          pushedExpression,
+          setup.columnNameFor,
+          taskAllocatorOwner = Some(taskAllocator)
+        )
+      } catch {
+        case failure: Throwable =>
+          MilvusPartitionReaderFactory.closeAfterFailure(
+            segmentReader,
+            failure
+          )
+          MilvusPartitionReaderFactory.closeAfterFailure(
+            taskAllocator,
+            failure
+          )
+          throw failure
+      }
     case other =>
       throw new IllegalArgumentException(
         s"cannot read ${other.getClass.getName} a batch at a time"
@@ -141,25 +184,46 @@ class MilvusPartitionReaderFactory(
             )
           case _ => None
         })
-      MetadataColumns.wrapRows(
-        new MilvusRowPartitionReader(
+      val setup = ColumnBinding(p, dataSchema)
+      val includeSearchScore =
+        schema.fieldNames.contains(MilvusOption.VectorSearchScore)
+      val searchScorePosition = Option(
+        schema.fields
+          .filterNot(f => isMetadataExtraField(f.name))
+          .indexWhere(_.name == MilvusOption.VectorSearchScore)
+      ).filter(_ >= 0)
+      val taskAllocator = ArrowAllocator.forReadTask(
+        p.task.segmentId,
+        p.task.limits.arrowMaxBytes
+      )
+      var rowReader: MilvusRowPartitionReader = null
+      try {
+        rowReader = new MilvusRowPartitionReader(
           dataSchema,
-          ColumnBinding(p, dataSchema),
+          setup,
           pushedExpression,
           search,
-          includeSearchScore =
-            schema.fieldNames.contains(MilvusOption.VectorSearchScore),
-          searchScorePosition = Option(
-            schema.fields
-              .filterNot(f => isMetadataExtraField(f.name))
-              .indexWhere(_.name == MilvusOption.VectorSearchScore)
-          ).filter(_ >= 0)
-        ),
-        schema,
-        requestedExtraColumns,
-        partitionNameOf(p),
-        p.task.segmentId
-      )
+          includeSearchScore = includeSearchScore,
+          searchScorePosition = searchScorePosition,
+          allocator = taskAllocator.allocator,
+          taskAllocatorOwner = Some(taskAllocator)
+        )
+        MetadataColumns.wrapRows(
+          rowReader,
+          schema,
+          requestedExtraColumns,
+          partitionNameOf(p),
+          p.task.segmentId
+        )
+      } catch {
+        case failure: Throwable =>
+          MilvusPartitionReaderFactory.closeAfterFailure(rowReader, failure)
+          MilvusPartitionReaderFactory.closeAfterFailure(
+            taskAllocator,
+            failure
+          )
+          throw failure
+      }
     case other =>
       throw new IllegalArgumentException(
         s"cannot read ${other.getClass.getName} a row at a time"

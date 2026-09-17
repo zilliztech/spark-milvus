@@ -151,6 +151,11 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     override def close(): Unit = closed = true
   }
 
+  private class TrackingOwner extends AutoCloseable {
+    var closes = 0
+    override def close(): Unit = closes += 1
+  }
+
   private def floatBytes(values: Seq[Float]): Array[Byte] =
     values.flatMap(FloatConverter.toFloatBytes).toArray
 
@@ -605,6 +610,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     try {
       val root = namedRoot(allocator, Seq(1L), Seq(Seq(1f, 1f)))
       val fake = new FakeSegmentReader(List(root))
+      val owner = new TrackingOwner
       val r = new MilvusColumnarPartitionReader(
         sparkSchema,
         fake,
@@ -613,11 +619,14 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         identity,
         rawVectors = false,
         partitionName = "20",
-        segmentId = 30L
+        segmentId = 30L,
+        taskAllocatorOwner = Some(owner)
       )
       r.next() shouldBe true
       r.close()
+      r.close()
       fake.isClosed shouldBe true
+      owner.closes shouldBe 1
     } finally allocator.close()
   }
 
