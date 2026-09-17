@@ -605,8 +605,34 @@ object ArrowConverter extends Logging {
       colIndex,
       sparkType,
       None,
-      None
+      None,
+      WriteLimits.Unchecked
     )
+
+  /** The write schema's facts about a column that the value checks need, from
+    * its field metadata (SparkTypes.metadata): the column name for the error,
+    * and an Array's element type.
+    */
+  private final case class WriteLimits(
+      column: String,
+      elementType: Option[MilvusDataType]
+  )
+
+  private object WriteLimits {
+    val Unchecked: WriteLimits = WriteLimits("", None)
+
+    def of(field: StructField): WriteLimits =
+      WriteLimits(
+        column = field.name,
+        elementType = Option(field.metadata)
+          .filter(_.contains(FieldMetadata.MilvusElementTypeMetadataKey))
+          .map(m =>
+            MilvusDataType.fromValue(
+              m.getLong(FieldMetadata.MilvusElementTypeMetadataKey).toInt
+            )
+          )
+      )
+  }
 
   private def sparkValueToArrowValue(
       vector: FieldVector,
@@ -615,7 +641,8 @@ object ArrowConverter extends Logging {
       colIndex: Int,
       sparkType: DataType,
       milvusType: Option[MilvusDataType],
-      vectorDimension: Option[Int]
+      vectorDimension: Option[Int],
+      limits: WriteLimits
   ): Unit = {
     if (record.isNullAt(colIndex)) {
       vector.setNull(rowIndex)
@@ -666,7 +693,8 @@ object ArrowConverter extends Logging {
           // instead of reallocating, which blows up whenever strings average
           // more than the configured density (32 bytes).
           vector match {
-            case chars: VarCharVector => chars.setSafe(rowIndex, str.getBytes)
+            case chars: VarCharVector =>
+              chars.setSafe(rowIndex, str.getBytes)
             // JSON: Milvus stores the text as Binary (serde.go byteEntry).
             case binary: VarBinaryVector =>
               binary.setSafe(rowIndex, str.getBytes)
@@ -679,10 +707,16 @@ object ArrowConverter extends Logging {
 
       // A Milvus Array: one serialized ScalarField per row, the value Milvus
       // itself writes (payload_writer.go AddOneArrayToPayload). Matched before
-      // the binary-backed vector cases, which share the VarBinary layout
-      // (review 749178e #04).
+      // the binary-backed vector cases, which share the VarBinary layout. The
+      // collection's element type comes from the write schema: Int8, Int16
+      // and Int32 elements all arrive as Spark integers of one width.
       case ArrayType(elementType, _)
           if milvusType.contains(MilvusDataType.Array) =>
+        val milvusElementType = limits.elementType.getOrElse(
+          throw new IllegalArgumentException(
+            s"Column '${limits.column}' is a Milvus Array, but the write schema carries no element type"
+          )
+        )
         val binary = vector match {
           case b: VarBinaryVector => b
           case other =>
@@ -712,13 +746,17 @@ object ArrowConverter extends Logging {
               )
           }
         }
-        binary.setSafe(
-          rowIndex,
-          ArrayCodec.encode(
-            ArrowConverter.arrayElementType(elementType),
-            elements
-          )
-        )
+        val encoded =
+          try
+            ArrayCodec.encode(milvusElementType, elements)
+          catch {
+            case e: IllegalArgumentException =>
+              throw new IllegalArgumentException(
+                s"Column '${limits.column}': ${e.getMessage}",
+                e
+              )
+          }
+        binary.setSafe(rowIndex, encoded)
 
       case ArrayType(FloatType, _) if isBinaryBackedVector(vector) =>
         val arrayData = record.getArray(colIndex)
@@ -851,7 +889,8 @@ object ArrowConverter extends Logging {
               0,
               elementType,
               None,
-              None
+              None,
+              WriteLimits.Unchecked
             )
           }
         }
@@ -918,7 +957,8 @@ object ArrowConverter extends Logging {
             0,
             keyType,
             None,
-            None
+            None,
+            WriteLimits.Unchecked
           )
           sparkValueToArrowValue(
             structVector.getChild("value"),
@@ -927,7 +967,8 @@ object ArrowConverter extends Logging {
             0,
             valueType,
             None,
-            None
+            None,
+            WriteLimits.Unchecked
           )
         }
 
@@ -941,24 +982,6 @@ object ArrowConverter extends Logging {
         )
     }
   }
-
-  /** The Milvus element type an Array column is encoded as, from the Spark
-    * element type the write schema carries. Int8, Int16 and Int32 elements all
-    * travel as `IntData`, so the narrower Spark types map to Int32.
-    */
-  private[types] def arrayElementType(sparkType: DataType): MilvusDataType =
-    sparkType match {
-      case BooleanType                        => MilvusDataType.Bool
-      case ByteType | ShortType | IntegerType => MilvusDataType.Int32
-      case LongType                           => MilvusDataType.Int64
-      case FloatType                          => MilvusDataType.Float
-      case DoubleType                         => MilvusDataType.Double
-      case StringType                         => MilvusDataType.VarChar
-      case other =>
-        throw new IllegalArgumentException(
-          s"a Milvus Array cannot have elements of Spark type $other"
-        )
-    }
 
   /** Add a Spark InternalRow to an Arrow VectorSchemaRoot
     *
@@ -986,7 +1009,8 @@ object ArrowConverter extends Logging {
         colIndex,
         field.dataType,
         milvusDataType(field),
-        milvusVectorDimension(field, vector)
+        milvusVectorDimension(field, vector),
+        WriteLimits.of(field)
       )
     }
   }

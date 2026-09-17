@@ -26,7 +26,7 @@ import com.zilliz.milvus.client.{
   MilvusRateLimitException,
   MilvusRpcException
 }
-import com.zilliz.milvus.client.grpc.GrpcRetryInterceptor
+import com.zilliz.milvus.client.grpc.RpcRetry
 import io.milvus.grpc.common.{
   ClientInfo,
   CompactionState,
@@ -81,7 +81,8 @@ import io.milvus.grpc.milvus.{
   ReleaseCollectionRequest,
   ShowCollectionsRequest,
   ShowCollectionsResponse,
-  ShowPartitionsRequest
+  ShowPartitionsRequest,
+  ShowPartitionsResponse
 }
 import io.milvus.grpc.schema.{
   CollectionSchema,
@@ -110,12 +111,10 @@ class MilvusClient(params: MilvusConnectionParams)
     extends com.zilliz.milvus.storage.Logging {
   private val DefaultRpcTimeoutMillis = TimeUnit.SECONDS.toMillis(10)
 
-  private val retryInterceptor = new GrpcRetryInterceptor(
-    maxRetries = 5,
-    initialDelayMillis = 500,
-    delayMultiplier = 2.0,
-    maxDelayMillis = 5000
-  )
+  /** Reads are sent again after UNAVAILABLE or Milvus rate limiting; writes are
+    * sent once (see [[read]]).
+    */
+  private val readRetry = RpcRetry()
   @volatile private var channelInitialized = false
   private lazy val channel: ManagedChannel = {
     val uri = new URI(params.uri)
@@ -131,10 +130,7 @@ class MilvusClient(params: MilvusConnectionParams)
       }
     }
 
-    val interceptors = Seq(
-      getConnectionMetadataInterceptor(),
-      retryInterceptor
-    )
+    val interceptors = Seq(getConnectionMetadataInterceptor())
     var channelBuilder = if (params.serverPemPath.nonEmpty) {
       val sslContext = GrpcSslContexts
         .forClient()
@@ -170,8 +166,9 @@ class MilvusClient(params: MilvusConnectionParams)
       .keepAliveTimeout(10, TimeUnit.SECONDS)
       .keepAliveWithoutCalls(false)
       .idleTimeout(5, TimeUnit.MINUTES)
+      // Transparent retry of a stream the server never started. No per-method
+      // retry policy is configured: reads retry in `read`, writes do not.
       .enableRetry()
-      .maxRetryAttempts(5)
       .intercept(interceptors: _*)
     if (isHttps) {
       channelBuilder = channelBuilder.useTransportSecurity()
@@ -202,17 +199,28 @@ class MilvusClient(params: MilvusConnectionParams)
     server
   }
 
+  /** The stub a write goes out on: one call, one deadline. */
   private def rpcStub: MilvusServiceGrpc.MilvusServiceBlockingStub =
     stub.withDeadlineAfter(DefaultRpcTimeoutMillis, TimeUnit.MILLISECONDS)
 
-  private def rpcStub(
-      timeoutMillis: Long
-  ): MilvusServiceGrpc.MilvusServiceBlockingStub = {
-    require(timeoutMillis > 0L, "RPC timeout must be positive")
-    stub
-      .withOption(GrpcRetryInterceptor.DisableRetries, java.lang.Boolean.TRUE)
-      .withDeadlineAfter(timeoutMillis, TimeUnit.MILLISECONDS)
-  }
+  /** One read-only RPC. Every attempt is a new call with the time left of
+    * `timeoutMillis`, so a procedure polling with its remaining time never
+    * waits past it. UNAVAILABLE and Milvus rate limiting in the response status
+    * are sent again; the last answer is returned as it came.
+    */
+  private def read[A](timeoutMillis: Long)(
+      call: MilvusServiceGrpc.MilvusServiceBlockingStub => A
+  )(status: A => Option[Status]): A =
+    readRetry
+      .run(timeoutMillis)(left =>
+        call(stub.withDeadlineAfter(left, TimeUnit.MILLISECONDS))
+      ) { result =>
+        RpcRetry.isUnavailable(result) ||
+        result.toOption
+          .flatMap(status)
+          .exists(MilvusClient.isRateLimited)
+      }
+      .get
 
   private lazy val httpClient: HttpClient = {
     HttpClient
@@ -245,11 +253,7 @@ class MilvusClient(params: MilvusConnectionParams)
     }
     // Failure path: classify rate limit vs other errors.
     val reason = Option(status.reason).getOrElse("")
-    if (
-      status.code == MilvusClient.RateLimitErrorCode ||
-      status.errorCode == ErrorCode.RateLimit ||
-      reason.toLowerCase.contains(MilvusClient.RateLimitReasonMarker)
-    ) {
+    if (MilvusClient.isRateLimited(status)) {
       Failure(new MilvusRateLimitException(s"Failed to $api: $reason"))
     } else {
       Failure(new Exception(s"Failed to $api: $reason"))
@@ -317,12 +321,16 @@ class MilvusClient(params: MilvusConnectionParams)
     * channel or adding a runtime client abstraction.
     */
   private[api] def listDatabasesRPC(): ListDatabasesResponse =
-    rpcStub.listDatabases(ListDatabasesRequest())
+    read(DefaultRpcTimeoutMillis)(_.listDatabases(ListDatabasesRequest()))(
+      _.status
+    )
 
   private[api] def showCollectionsRPC(
       dbName: String
   ): ShowCollectionsResponse =
-    rpcStub.showCollections(ShowCollectionsRequest(dbName = dbName))
+    read(DefaultRpcTimeoutMillis)(
+      _.showCollections(ShowCollectionsRequest(dbName = dbName))
+    )(_.status)
 
   def createDatabase(
       dbName: String,
@@ -695,7 +703,7 @@ class MilvusClient(params: MilvusConnectionParams)
       request: DescribeIndexRequest,
       timeoutMillis: Long
   ): DescribeIndexResponse =
-    rpcStub(timeoutMillis).describeIndex(request)
+    read(timeoutMillis)(_.describeIndex(request))(_.status)
 
   private[api] def dropIndexRPC(request: DropIndexRequest): Status =
     rpcStub.dropIndex(request)
@@ -714,7 +722,7 @@ class MilvusClient(params: MilvusConnectionParams)
       request: GetCompactionStateRequest,
       timeoutMillis: Long
   ): GetCompactionStateResponse =
-    rpcStub(timeoutMillis).getCompactionState(request)
+    read(timeoutMillis)(_.getCompactionState(request))(_.status)
 
   def loadCollection(dbName: String, collectionName: String): Try[Status] = {
     try
@@ -773,7 +781,7 @@ class MilvusClient(params: MilvusConnectionParams)
       request: GetLoadStateRequest,
       timeoutMillis: Long
   ): GetLoadStateResponse =
-    rpcStub(timeoutMillis).getLoadState(request)
+    read(timeoutMillis)(_.getLoadState(request))(_.status)
 
   /** Scalar query, for reading rows back through the service. */
   def query(
@@ -783,15 +791,15 @@ class MilvusClient(params: MilvusConnectionParams)
       outputFields: Seq[String]
   ): Try[Seq[FieldData]] = {
     try {
-      val results = rpcStub.query(
-        QueryRequest(
-          dbName = dbName,
-          collectionName = collectionName,
-          expr = expr,
-          outputFields = outputFields,
-          useDefaultConsistency = true
-        )
+      val request = QueryRequest(
+        dbName = dbName,
+        collectionName = collectionName,
+        expr = expr,
+        outputFields = outputFields,
+        useDefaultConsistency = true
       )
+      val results =
+        read(DefaultRpcTimeoutMillis)(_.query(request))(_.status)
       checkStatus(
         "query",
         results.status.getOrElse(
@@ -931,9 +939,9 @@ class MilvusClient(params: MilvusConnectionParams)
 
   def getImportState(taskId: Long): Try[GetImportStateResponse] = {
     try {
-      val importStateResult = rpcStub.getImportState(
-        GetImportStateRequest(task = taskId)
-      )
+      val importStateResult = read(DefaultRpcTimeoutMillis)(
+        _.getImportState(GetImportStateRequest(task = taskId))
+      )(_.status)
       val status = importStateResult.status.getOrElse(
         Status(
           errorCode = ErrorCode.UnexpectedError,
@@ -1009,12 +1017,11 @@ class MilvusClient(params: MilvusConnectionParams)
       dbName: String,
       collectionName: String
   ): DescribeCollectionResponse = {
-    return rpcStub.describeCollection(
-      DescribeCollectionRequest(
-        dbName = dbName,
-        collectionName = collectionName
-      )
+    val request = DescribeCollectionRequest(
+      dbName = dbName,
+      collectionName = collectionName
     )
+    read(DefaultRpcTimeoutMillis)(_.describeCollection(request))(_.status)
   }
 
   def getPKName(dbName: String, collectionName: String): Try[String] = {
@@ -1187,12 +1194,12 @@ class MilvusClient(params: MilvusConnectionParams)
   private[api] def listSnapshotsRPC(
       request: ListSnapshotsRequest
   ): ListSnapshotsResponse =
-    rpcStub.listSnapshots(request)
+    read(DefaultRpcTimeoutMillis)(_.listSnapshots(request))(_.status)
 
   private[api] def describeSnapshotRPC(
       request: DescribeSnapshotRequest
   ): DescribeSnapshotResponse =
-    rpcStub.describeSnapshot(request)
+    read(DefaultRpcTimeoutMillis)(_.describeSnapshot(request))(_.status)
 
   def createSnapshotForRead(
       dbName: String,
@@ -1327,7 +1334,9 @@ class MilvusClient(params: MilvusConnectionParams)
   private[api] def getSegmentsRPC(
       request: GetPersistentSegmentInfoRequest
   ): GetPersistentSegmentInfoResponse =
-    rpcStub.getPersistentSegmentInfo(request)
+    read(DefaultRpcTimeoutMillis)(_.getPersistentSegmentInfo(request))(
+      _.status
+    )
 
   def getSegmentInfo(
       collectionID: Long,
@@ -1441,18 +1450,24 @@ class MilvusClient(params: MilvusConnectionParams)
     }
   }
 
+  private def showPartitionsRPC(
+      dbName: String,
+      collectionName: String
+  ): ShowPartitionsResponse = {
+    val request = ShowPartitionsRequest(
+      dbName = dbName,
+      collectionName = collectionName
+    )
+    read(DefaultRpcTimeoutMillis)(_.showPartitions(request))(_.status)
+  }
+
   def getPartitionID(
       dbName: String,
       collectionName: String,
       partitionName: String
   ): Try[Long] = {
     try {
-      val partitionInfos = rpcStub.showPartitions(
-        ShowPartitionsRequest(
-          dbName = dbName,
-          collectionName = collectionName
-        )
-      )
+      val partitionInfos = showPartitionsRPC(dbName, collectionName)
       Success(
         partitionInfos.partitionNames.zipWithIndex
           .find(_._1 == partitionName)
@@ -1476,12 +1491,7 @@ class MilvusClient(params: MilvusConnectionParams)
       collectionName: String
   ): Try[Seq[MilvusPartitionInfo]] = {
     try {
-      val partitionInfos = rpcStub.showPartitions(
-        ShowPartitionsRequest(
-          dbName = dbName,
-          collectionName = collectionName
-        )
-      )
+      val partitionInfos = showPartitionsRPC(dbName, collectionName)
       Success(
         partitionInfos.partitionIDs.zip(partitionInfos.partitionNames).map {
           case (id, name) =>
@@ -1510,6 +1520,19 @@ object MilvusClient {
 
   // Milvus ErrServiceRateLimit (also matches gRPC RESOURCE_EXHAUSTED numeric value).
   val RateLimitErrorCode: Int = 8
+
+  /** Whether a response status is Milvus rate limiting. A success status never
+    * is, whatever its reason text says.
+    */
+  private[client] def isRateLimited(status: Status): Boolean =
+    !(status.code == 0 && status.errorCode == ErrorCode.Success) && (
+      status.code == RateLimitErrorCode ||
+        status.errorCode == ErrorCode.RateLimit ||
+        Option(status.reason)
+          .getOrElse("")
+          .toLowerCase
+          .contains(RateLimitReasonMarker)
+    )
   // Case-insensitive reason marker used as a fallback when error code is not set.
   val RateLimitReasonMarker: String = "rate limit exceeded"
   val ServiceNotImplementedMarker: String = "service not implemented"

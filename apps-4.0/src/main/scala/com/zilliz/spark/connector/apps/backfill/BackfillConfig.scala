@@ -358,6 +358,7 @@ case class BackfillConfig(
       hadoopConf.getTrimmed(BackfillConfig.HadoopOssAssumedRoleArn)
     ).filter(_.nonEmpty)
 
+    val roleTaken = HadoopStorageKeys.ossRoleTaken(hadoopConf, "")
     if (roleArn.isEmpty && BackfillConfig.isOssAssumeRoleProvider(provider)) {
       throw new IllegalArgumentException(
         s"${BackfillConfig.HadoopOssAssumedRoleArn} must be set when " +
@@ -367,6 +368,7 @@ case class BackfillConfig(
     }
 
     roleArn
+      .filter(_ => roleTaken)
       .map { arn =>
         withNativeAssumeRole(
           arn,
@@ -470,12 +472,9 @@ object BackfillConfig {
   private[backfill] val HadoopOssAssumedRoleProvider =
     "com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider"
 
-  // One effective-provider rule for the connector and backfill: the
-  // connector's Hadoop key translation decides with the same predicates
-  // (review 749178e #08).
-  private[backfill] def isAssumedRoleProvider(provider: String): Boolean =
-    HadoopStorageKeys.names(provider, Set(HadoopS3AssumedRoleProvider))
-
+  // One provider rule for the connector and backfill: the connector's Hadoop
+  // key translation decides the identity, including refusing a chain the
+  // native layer cannot express.
   private[backfill] def isOssAssumeRoleProvider(provider: String): Boolean =
     HadoopStorageKeys.names(provider, Set(HadoopOssAssumedRoleProvider))
 
@@ -491,13 +490,7 @@ object BackfillConfig {
     def bucketOrGlobal(bucketKey: String, globalKey: String): Option[String] =
       getTrimmed(bucketKey).orElse(getTrimmed(globalKey))
 
-    val provider = HadoopStorageKeys.effectiveProvider(
-      hadoopConf,
-      "fs.s3a.",
-      "aws.credentials.provider",
-      bucketName
-    )
-    if (!provider.exists(isAssumedRoleProvider)) return None
+    if (!HadoopStorageKeys.s3aAssumesRole(hadoopConf, bucketName)) return None
 
     val roleArn = bucketOrGlobal(
       s"$bucketPrefix.assumed.role.arn",

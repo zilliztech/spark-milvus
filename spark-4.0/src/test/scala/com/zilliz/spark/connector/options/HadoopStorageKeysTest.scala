@@ -209,7 +209,11 @@ class HadoopStorageKeysTest extends AnyFunSuite with Matchers {
         "fs.s3a.access.key" -> "ak",
         "fs.s3a.secret.key" -> "sk",
         "fs.s3a.bucket.b.aws.credentials.provider" -> AssumedRole,
-        "fs.s3a.bucket.b.assumed.role.arn" -> "arn:aws:iam::1:role/bucket"
+        "fs.s3a.bucket.b.assumed.role.arn" -> "arn:aws:iam::1:role/bucket",
+        // As the managed platform sets it: the environment's identity signs
+        // AssumeRole, so the inherited static keys play no part.
+        "fs.s3a.bucket.b.assumed.role.credentials.provider" ->
+          "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
       ),
       "b"
     )
@@ -386,6 +390,193 @@ class HadoopStorageKeysTest extends AnyFunSuite with Matchers {
         c,
         "b1",
         environment + ("AWS_SESSION_TOKEN" -> "other")
+      )
+    )
+  }
+
+  // Hadoop tries a provider chain in order and uses the first provider that
+  // yields credentials. The native layer takes one identity: static keys, its
+  // default chain, or a role assumed with its default chain. A chain whose
+  // outcome the connector cannot express that way is refused, not guessed.
+  private val Env =
+    "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider"
+  private val DefaultChainV1 =
+    "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+  private val roleAndKeys = Seq(
+    "fs.s3a.access.key" -> "ak",
+    "fs.s3a.secret.key" -> "sk",
+    "fs.s3a.assumed.role.arn" -> "arn:aws:iam::1:role/r",
+    "fs.s3a.endpoint" -> "s3.us-west-2.amazonaws.com"
+  )
+  private def translated(pairs: (String, String)*): Map[String, String] =
+    HadoopStorageKeys.canonicalProperties(
+      HadoopStorageKeys.toFsProperties(conf(pairs: _*), "b") +
+        (StorageProperties.BucketName -> "b")
+    )
+
+  test(
+    "static keys ahead of a role: Hadoop uses the keys, so does the connector"
+  ) {
+    val out = translated(
+      roleAndKeys :+ ("fs.s3a.aws.credentials.provider" -> s"$Simple,$AssumedRole"): _*
+    )
+    out should not contain key(StorageProperties.RoleArn)
+    out(StorageProperties.AccessKeyId) shouldBe "ak"
+  }
+
+  test("a chain that mixes a role with another identity source is refused") {
+    Seq(s"$AssumedRole,$Simple", s"$AssumedRole,$Env", s"$Env,$AssumedRole")
+      .foreach { chain =>
+        withClue(chain) {
+          val e = intercept[IllegalArgumentException](
+            translated(
+              roleAndKeys :+ ("fs.s3a.aws.credentials.provider" -> chain): _*
+            )
+          )
+          e.getMessage should include(StorageProperties.RoleArn)
+          e.getMessage should include(StorageProperties.UseIam)
+        }
+      }
+  }
+
+  test(
+    "an environment provider ahead of static keys is refused when keys are set"
+  ) {
+    intercept[IllegalArgumentException](
+      translated(
+        "fs.s3a.aws.credentials.provider" -> s"$Env,$Simple",
+        "fs.s3a.access.key" -> "ak",
+        "fs.s3a.secret.key" -> "sk",
+        "fs.s3a.endpoint" -> "s3.us-west-2.amazonaws.com"
+      )
+    )
+    // Without keys the static provider never applies: the environment's
+    // identity, which the native default chain also resolves.
+    translated(
+      "fs.s3a.aws.credentials.provider" -> s"$Env,$Simple",
+      "fs.s3a.endpoint" -> "s3.us-west-2.amazonaws.com"
+    )(StorageProperties.UseIam) shouldBe "true"
+  }
+
+  test("a role whose STS call Hadoop signs with the static keys is refused") {
+    // Hadoop's default fs.s3a.assumed.role.credentials.provider is Simple, so
+    // the keys sign AssumeRole; the native layer can only sign it with its
+    // default chain.
+    intercept[IllegalArgumentException](
+      translated(
+        roleAndKeys :+ ("fs.s3a.aws.credentials.provider" -> AssumedRole): _*
+      )
+    ).getMessage should include("assumed.role.credentials.provider")
+    // Signed by the environment's identity (the managed platform's setting):
+    // the role is kept and the keys play no part.
+    val platform = translated(
+      roleAndKeys ++ Seq(
+        "fs.s3a.aws.credentials.provider" -> AssumedRole,
+        "fs.s3a.assumed.role.credentials.provider" -> DefaultChainV1
+      ): _*
+    )
+    platform(StorageProperties.RoleArn) shouldBe "arn:aws:iam::1:role/r"
+    platform should not contain key(StorageProperties.AccessKeyId)
+  }
+
+  test("a provider class the connector cannot map is refused") {
+    intercept[IllegalArgumentException](
+      translated(
+        "fs.s3a.aws.credentials.provider" -> "com.example.VaultCredentialsProvider",
+        "fs.s3a.endpoint" -> "s3.us-west-2.amazonaws.com"
+      )
+    ).getMessage should include("com.example.VaultCredentialsProvider")
+  }
+
+  test("an OSS provider list is refused, as hadoop-aliyun takes one class") {
+    intercept[IllegalArgumentException](
+      HadoopStorageKeys.toFsProperties(
+        conf(
+          "fs.oss.credentials.provider" ->
+            "com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider,org.apache.hadoop.fs.aliyun.oss.AliyunCredentialsProvider",
+          "fs.oss.assumed.role.arn" -> "acs:ram::1:role/r",
+          "fs.oss.endpoint" -> "oss-cn-hangzhou.aliyuncs.com"
+        ),
+        "b"
+      )
+    )
+  }
+
+  test("with no provider configured, a role together with keys is refused") {
+    intercept[IllegalArgumentException](translated(roleAndKeys: _*))
+  }
+
+  test(
+    "options that name the identity win over a chain that would be refused"
+  ) {
+    val refused = conf(
+      "fs.s3a.aws.credentials.provider" -> s"$Env,$AssumedRole",
+      "fs.s3a.assumed.role.arn" -> "arn:aws:iam::1:role/session"
+    )
+    val base = Map(
+      StorageProperties.BucketName -> "b",
+      StorageProperties.Address -> "s3.us-west-2.amazonaws.com"
+    )
+    val withKeys = StorageOptions.storagePropertiesFor(
+      refused,
+      "b",
+      base ++ Map(
+        StorageProperties.AccessKeyId -> "ak",
+        StorageProperties.AccessKeyValue -> "sk"
+      )
+    )
+    withKeys(StorageProperties.AccessKeyId) shouldBe "ak"
+    withKeys should not contain key(StorageProperties.RoleArn)
+    val withRole = StorageOptions.storagePropertiesFor(
+      refused,
+      "b",
+      base + (StorageProperties.RoleArn -> "arn:aws:iam::1:role/declared")
+    )
+    withRole(StorageProperties.RoleArn) shouldBe "arn:aws:iam::1:role/declared"
+    intercept[IllegalArgumentException](
+      StorageOptions.storagePropertiesFor(refused, "b", base)
+    )
+  }
+
+  test("an OSS chain the connector cannot map does not stop an S3 bucket") {
+    val c = conf(
+      "fs.oss.credentials.provider" ->
+        "com.aliyun.oss.common.auth.EnvironmentVariableCredentialsProvider",
+      "fs.s3a.access.key" -> "ak",
+      "fs.s3a.secret.key" -> "sk",
+      "fs.s3a.endpoint" -> "s3.us-west-2.amazonaws.com"
+    )
+    HadoopStorageKeys.toFsProperties(c, "b")(
+      StorageProperties.AccessKeyId
+    ) shouldBe "ak"
+    // For an OSS bucket that chain is the one Hadoop uses, and it is judged.
+    intercept[IllegalArgumentException](
+      HadoopStorageKeys.toFsProperties(
+        c,
+        "b",
+        declared = Map(StorageProperties.CloudProvider -> "aliyun")
+      )
+    )
+  }
+
+  test("keys from this process's environment may sign AssumeRole") {
+    // The native default chain signs with the same variables Spark copied.
+    val environment = Map(
+      "AWS_ACCESS_KEY_ID" -> "ak",
+      "AWS_SECRET_ACCESS_KEY" -> "sk"
+    )
+    val c = conf(
+      roleAndKeys :+ ("fs.s3a.aws.credentials.provider" -> AssumedRole): _*
+    )
+    val out = HadoopStorageKeys.toFsProperties(c, "b", environment)
+    out(StorageProperties.RoleArn) shouldBe "arn:aws:iam::1:role/r"
+    out should not contain key(StorageProperties.AccessKeyId)
+    HadoopStorageKeys.s3aAssumesRole(c, "b", environment) shouldBe true
+    intercept[IllegalArgumentException](
+      HadoopStorageKeys.s3aAssumesRole(
+        c,
+        "b",
+        environment + ("AWS_ACCESS_KEY_ID" -> "other")
       )
     )
   }

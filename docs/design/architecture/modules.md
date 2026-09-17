@@ -96,7 +96,7 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 
 | 包 | 职责 |
 |---|---|
-| `grpc` | ScalaPB 生成的 stub，重试拦截器 |
+| `grpc` | RpcRetry：读 RPC 在一次调用的总期限内遇到 UNAVAILABLE 或 Milvus 限流时重发，每次重发是新的调用；写 RPC 只发一次。ScalaPB 生成的 stub 在 `io.milvus.grpc` |
 | `api` | MilvusClient：ListDatabases、ShowCollections、DDL、describe、Delete、快照、索引、load、release、flush、compact、BatchUpdateManifest、RegisterSegments（待 Milvus 提供）；proto 的 DataType 与 core 的 MilvusType 互转 |
 
 ### 2.6 spark `com.zilliz.spark.connector`
@@ -206,7 +206,7 @@ spark-milvus/
 | read/FooterV2SegmentResolver.scala | compat.v2 | 已迁。resolvePath 与 readAllBytes 先下沉到 core 的 path 与 io.hadoop，否则 core 的两个 Manifest 解析器要反向依赖 compat |
 | read/ParquetFooterReader.scala | compat 根包 | 已迁。v2 和 backup 都要用它 |
 | read/BackupMetaReader.scala | compat.backup | 已迁 |
-| MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数；Catalog 的 ListDatabases、ShowCollections、collection create/drop 与 vector index create 均经 client.api 接入并校验响应状态 |
+| MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc，2026-09-17 删除（它在失败后重启已关闭的调用，从未真正重发），读 RPC 的重试改为 client.api 的调用封装经 client.grpc.RpcRetry；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数；Catalog 的 ListDatabases、ShowCollections、collection create/drop 与 vector index create 均经 client.api 接入并校验响应状态 |
 | sources/MilvusDataSource.scala（2880 行） | spark.sources、spark.table、spark.read、spark.options | 已拆成 14 个文件，最大 550 行。`sources` 只留 TableProvider（FQN 被 apps 和用户作业按字符串引用，不能动）；MilvusTable→spark.table；ScanBuilder、Scan、四个规划入口（ClientSnapshotPlanner、LegacyClientPlanner、OptionSnapshotPlanner、BackupPlanner）、SnapshotPartitions、DeletePlanning、ClientReadSnapshot→spark.read（四个规划入口后来在 #04 全部变成 SnapshotSource，见 snapshot.html 第二节）；桶判定与 Hadoop 配置翻译（StorageOptions）、备份集合选取（BackupSelection）、ReadMode→spark.options。任务构造与删除文件规划已下沉 `core.read.plan`，Spark 侧只把 `ReadPlan` 包成 `InputPartition` |
 | MilvusOption.scala、loon/Properties.scala | spark.options | 已搬。MilvusOption 在 spark.options；MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。`loon/Properties.FsConfig` 的每个常量都是 core.credential.StorageProperties 的别名，调用方已全部改为直接用 StorageProperties，2026-09-14 连同 PropertiesTest 一起删除，`loon` 包不再存在；`loon/HadoopStorageKeys` 已搬到 spark.options，和 StorageOptions 是同一件事的两半 |
 | read/MilvusV3PartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusV2PartitionReader.scala | spark.read | 已搬。开段下沉 core.read.exec 的注册表；#06 两个行式 reader 合成 `MilvusRowPartitionReader`，两条线的列名规则归 `ColumnBinding`，向量检索拆成 `SegmentVectorSearch`；列式出口是 `MilvusColumnarPartitionReader` |

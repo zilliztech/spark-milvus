@@ -134,7 +134,7 @@ driver 再收齐 commit message 写作业清单。登记是之后的另一个动
 
 <table>
 <tr><th>模式</th><th>schema 从哪来</th><th>写在什么场景</th></tr>
-<tr><td>client（<code>milvus.uri</code>）</td><td>DescribeCollection</td><td>有活的 Milvus，写完由用户 CALL 登记</td></tr>
+<tr><td>client（<code>milvus.uri</code>）</td><td>快照 JSON 的 schema：DescribeCollection 只给 collection id，快照取最新的或 <code>milvus.client.snapshot.name</code> 指定的</td><td>有活的 Milvus，写完由用户 CALL 登记</td></tr>
 <tr><td>snapshot（<code>milvus.snapshot.path</code>）</td><td>快照 JSON 的 schema</td><td>离线，按某个快照的 schema 写</td></tr>
 <tr><td>snapshot（<code>milvus.snapshot.schema.bytes</code>）</td><td>选项里的 protobuf</td><td>纯连接器，没有 Milvus 也没有快照目录；<code>ConnectorWriteReadUatTest</code> 走的就是它</td></tr>
 <tr><td>backup（<code>milvus.backup.dir</code>）</td><td>—</td><td>拒绝：backup 是导出的只读副本，<code>SnapshotOrigin.Backup</code> 的表不声明 <code>BATCH_WRITE</code></td></tr>
@@ -172,6 +172,7 @@ collection schema，规则按字段走：</p>
 <tr><td>DataFrame 的每一列在 collection 里有同名字段</td><td>写不能造字段；加字段是 DDL（C2）</td><td>报未知列</td></tr>
 <tr><td>列的 Spark 类型等于 <code>SparkTypes.toDataType(field)</code> 给出的类型</td><td>读写用同一份类型映射（R15）；向量列是 <code>ArrayType(FloatType)</code> 等，和读出来的形状一致，读回去再写不用转</td><td>报类型不符，不做隐式转换——Spark 的 <code>storeAssignmentPolicy</code> 在这条路上没有机会介入（第一节第 3 步）</td></tr>
 <tr><td>向量列每行长度等于 <code>dim</code>；BinaryVector 是 <code>dim/8</code> 字节</td><td>schema 的 <code>type_params</code></td><td>executor 上逐行查，第一条不合就让 task 失败；driver 查不了值</td></tr>
+<tr><td><code>Array&lt;Int8&gt;</code>、<code>Array&lt;Int16&gt;</code> 的元素在该类型的范围内</td><td>Milvus proxy 在 insert 时查（<code>internal/proxy/fieldvalidator/validate_util.go</code> 的 <code>verifyOverflowByRange</code>）；Int8、Int16、Int32 数组元素在 Spark 里和段文件里是同一种形状，只有元素类型分得清范围，所以写 schema 的列元数据带上元素类型，检查在 <code>core.codec.ArrayCodec.encode</code>。proxy 同时查的 <code>max_capacity</code>、<code>max_length</code> 暂不查：两者可以在建表后用 AlterCollectionField 改，写 schema 取自快照，拿快照里的旧值去查会误拒或漏查，要等写入按集合当前的 schema 校验</td><td>executor 上逐行查，第一条不合就让 task 失败（2026-09-17）</td></tr>
 <tr><td>collection 里每个字段（function output 除外）都要在 DataFrame 里</td><td>段文件按列组写，缺列没法补；Milvus 加载段时按字段 id 找每一列</td><td>报缺列，nullable 字段由调用方给 null 列。「nullable 缺列自动写 null、有 <code>default_value</code> 的缺列写默认值」是后续，要 writer 给不在行里的列补值</td></tr>
 <tr><td>主键必须在 DataFrame 里，且 collection 不能是 <code>autoID</code></td><td>autoID 的 id 由 Milvus 的分配器发，离线没有分配器</td><td>报 autoID 的 collection 不能经连接器写；这是 2.0 首版的边界，不是缺陷</td></tr>
 <tr><td><code>is_function_output</code> 的字段（BM25 出的稀疏向量）不能出现在 DataFrame 里</td><td>它由 Milvus 的 function 算，写入方给不了</td><td>报不可写列</td></tr>
@@ -282,7 +283,7 @@ c. 写占位（RowID 用段内行号、Timestamp 用作业时间），登记时 
   <li><strong>UAT。做了纯连接器那半。</strong><code>ConnectorWriteReadUatTest</code> 走
       <code>df.write.format("milvus").mode("append")</code>：overwrite 被 Spark 拒（缺 truncate）、缺列被
       <code>WriteSchema</code> 拒、append 写两段、作业清单和标记、读回 3000 行、abort。client 模式的写没有跑：
-      它和纯连接器模式只差 schema 从 DescribeCollection 来，而暂存前缀会落在实例根路径
+      它和纯连接器模式只差 schema 从实例的快照来，而暂存前缀会落在实例根路径
       <code>{instance id}/staging/</code> 下，abort 删不掉的目录标记会留在实例前缀里。</li>
   <li><strong>文档。已做。</strong>reference-en/cn 的 2.4 与 3.2 节；W1 行入口注明 <code>format("milvus")</code>
       是 catalog 落地前的形式。</li>

@@ -13,6 +13,13 @@ import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.functions
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types.{
+  ArrayType,
+  LongType,
+  ShortType,
+  StructField,
+  StructType
+}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
@@ -51,7 +58,7 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
   *   MILVUS_UAT_URI / MILVUS_UAT_TOKEN           client mode, S5 and S11
   *   MILVUS_UAT_PARTS_COLLECTION                 S5
   *   MILVUS_UAT_BACKFILL_COLLECTION              S11 (takes its own snapshot)
-  *   MILVUS_UAT_WRITE_PREFIX                     S10 staging, default
+  *   MILVUS_UAT_WRITE_PREFIX                     S10 and S13 staging, default
   *                                               spark-uat-write
   * }}}
   * Scenarios whose variables are missing cancel; nothing else is touched.
@@ -531,6 +538,29 @@ class DataFrameScenariosUatTest
     ).toByteArray
   )
 
+  /** The jobs committed under `root/staging`. */
+  private def committedUnder(
+      storage: Map[String, String],
+      root: String
+  ): Set[StagingLayout] = {
+    val store = HadoopStorageKeys.storeFrom(storage)
+    try
+      store
+        .list(s"$root/staging", recursive = false)
+        .filter(_.isDirectory)
+        .map(d => StagingLayout(root, d.path.stripSuffix("/").split("/").last))
+        .filter(l => store.exists(l.marker))
+        .toSet
+    finally store.close()
+  }
+
+  private def messages(error: Throwable): String =
+    Iterator
+      .iterate(error)(_.getCause)
+      .takeWhile(_ != null)
+      .map(e => Option(e.getMessage).getOrElse(""))
+      .mkString(" <- ")
+
   test("S10 read, transform, write back to staging, read the segments, abort") {
     val storage = storageOptions() + (StorageProperties.RootPath -> env(
       "MILVUS_UAT_WRITE_PREFIX"
@@ -547,19 +577,7 @@ class DataFrameScenariosUatTest
 
     // Other suites (the backfill) commit jobs under the same prefix, so the
     // scenario looks for the job its own write added.
-    def committedJobs(): Set[StagingLayout] = {
-      val store = HadoopStorageKeys.storeFrom(storage)
-      try
-        store
-          .list(s"$root/staging", recursive = false)
-          .filter(_.isDirectory)
-          .map(d =>
-            StagingLayout(root, d.path.stripSuffix("/").split("/").last)
-          )
-          .filter(l => store.exists(l.marker))
-          .toSet
-      finally store.close()
-    }
+    def committedJobs(): Set[StagingLayout] = committedUnder(storage, root)
 
     bothOutlets { columnar =>
       val written = 500L
@@ -709,6 +727,98 @@ class DataFrameScenariosUatTest
       // and deletes; the columnar outlet materializes no InternalRow objects.
       scanMetrics(filtered)("milvus.rows.materialized") shouldBe
         (if (columnar) 0L else 90L)
+    }
+  }
+
+  // ---------------------------------------------------------------- S13
+
+  /** An Int8 array element goes out only within [-128, 127], as the Milvus
+    * proxy checks on insert; the Spark column is a short array, the same as an
+    * Int16 array's. A value that fails stops the job, and nothing is committed.
+    */
+  test("S13 an Int8 array element out of range stops the write") {
+    val root = env("MILVUS_UAT_WRITE_PREFIX").getOrElse("spark-uat-write")
+    val storage = storageOptions() + (StorageProperties.RootPath -> root)
+    val schema = CollectionSchema(
+      name = "uat_scenarios_int8_array",
+      fields = Seq(
+        FieldSchema(
+          fieldID = 100,
+          name = "id",
+          dataType = DataType.Int64,
+          isPrimaryKey = true
+        ),
+        FieldSchema(
+          fieldID = 101,
+          name = "a8",
+          dataType = DataType.Array,
+          elementType = DataType.Int8,
+          nullable = true,
+          typeParams = Seq(KeyValuePair("max_capacity", "4"))
+        )
+      )
+    )
+    val options = storage ++ Map(
+      MilvusOption.SnapshotMode -> "true",
+      MilvusOption.SnapshotSchemaBytes -> Base64.getEncoder
+        .encodeToString(schema.toByteArray),
+      MilvusOption.SnapshotCollectionId -> "1",
+      MilvusOption.SnapshotPartitionIds -> "0",
+      MilvusOption.MilvusCollectionName -> schema.name
+    )
+    val sparkSchema = StructType(
+      Seq(StructField("id", LongType), StructField("a8", ArrayType(ShortType)))
+    )
+    val before = committedUnder(storage, root)
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(
+        Seq(Row(1L, Seq[Short](-128, 127)), Row(2L, Seq[Short](128))),
+        1
+      ),
+      sparkSchema
+    )
+    val error = intercept[Exception](
+      df.write.format("milvus").mode("append").options(options).save()
+    )
+    messages(error) should include("outside [-128, 127]")
+    committedUnder(storage, root) shouldBe before
+  }
+
+  // ---------------------------------------------------------------- S14
+
+  /** A session chain whose outcome depends on the machine is refused at the
+    * read, before any storage call: the environment's identity first, an
+    * assumed role behind it. `fs.use_iam=true` names the identity the read
+    * should take instead, and the same read then runs.
+    */
+  test("S14 a session chain the native layer cannot take stops the read") {
+    val path = need("MILVUS_UAT_V3_DELETED_SNAPSHOT")
+    val hadoop = spark.sparkContext.hadoopConfiguration
+    hadoop.set(
+      "fs.s3a.aws.credentials.provider",
+      "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider," +
+        "org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider"
+    )
+    hadoop.set(
+      "fs.s3a.assumed.role.arn",
+      "arn:aws:iam::000000000000:role/spark-milvus-uat-s14"
+    )
+    def read(options: Map[String, String]): Long =
+      spark.read
+        .format("milvus")
+        .options(options + (MilvusOption.SnapshotPath -> path))
+        .load()
+        .count()
+    try {
+      val error = intercept[Exception](
+        read(storageOptions() - StorageProperties.UseIam)
+      )
+      messages(error) should include("environment's identity")
+      messages(error) should include(StorageProperties.UseIam)
+      read(storageOptions()) shouldBe rows - deletedIds.size
+    } finally {
+      hadoop.unset("fs.s3a.aws.credentials.provider")
+      hadoop.unset("fs.s3a.assumed.role.arn")
     }
   }
 }

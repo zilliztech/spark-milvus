@@ -193,7 +193,8 @@ object StorageOptions extends Logging {
           )
           .toMap
     val merged = HadoopStorageKeys
-      .toFsProperties(conf, trimmed) ++ declared ++ translatedAliases ++
+      .toFsProperties(conf, trimmed, declared = declared) ++ declared ++
+      translatedAliases ++
       Map(
         StorageProperties.BucketName -> trimmed
       )
@@ -337,15 +338,16 @@ object StorageOptions extends Logging {
 
     // The session's own chain, read before this method changes it: a managed
     // runtime selects an AssumeRole provider for its data role, and fs.use_iam
-    // names only the source credential that role is assumed from, so that
-    // provider is kept (review 749178e #08; BackfillConfig does the same).
+    // names only the source credential that role is assumed from, so a chain
+    // that is only that role is kept. Any other chain gives way to the default
+    // chain fs.use_iam asks for.
     val sessionProvider =
       Option(conf.getTrimmed(s3aProviderKey)).filter(_.nonEmpty)
     def assumesRole(prefix: String): Boolean =
       Option(conf.getTrimmed(s"$prefix.aws.credentials.provider"))
         .filter(_.nonEmpty)
         .orElse(sessionProvider)
-        .exists(HadoopStorageKeys.namesAssumedRole)
+        .exists(HadoopStorageKeys.onlyAssumedRole)
 
     def configureS3A(prefix: String): Unit = {
       setIfDefined(s"$prefix.endpoint", endpoint)

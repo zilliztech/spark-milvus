@@ -19,6 +19,12 @@ object FieldMetadata {
     */
   val MilvusVectorDimensionMetadataKey = "milvus.vector_dim"
 
+  /** An Array field's element type, the Milvus DataType enum value as a Long.
+    * Int8, Int16 and Int32 elements share one physical form, so only this key
+    * tells their ranges apart.
+    */
+  val MilvusElementTypeMetadataKey = "milvus.element_type"
+
   /** The Milvus field id, which names the column in a written segment. */
   val MilvusFieldIdMetadataKey = "milvus.field_id"
 

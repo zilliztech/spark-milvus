@@ -382,7 +382,8 @@ Milvus，也不能由 Milvus 加载。append 登记仍受设计决策 22 和 Mil
 
 写之前在 driver 上校验：DataFrame 的每一列都是 collection 的字段，Spark 类型与读出来的一致（向量列也接受
 `BinaryType` 原始字节）；除 Milvus function 输出外每个字段都要给（nullable 字段给一列 null）；collection
-不能用 `autoID`，不能有 partition key。只支持 `mode("append")`。`overwrite` 有意不支持：它会让 collection 的全部旧数据不可见，且 Milvus 没有回滚，
+不能用 `autoID`，不能有 partition key。`Array<Int8>`、`Array<Int16>` 的元素要在该类型的取值范围内，与 Milvus proxy 对 insert
+的检查一致；越界的值让任务失败。只支持 `mode("append")`。`overwrite` 有意不支持：它会让 collection 的全部旧数据不可见，且 Milvus 没有回滚，
 所以 Spark 在分析阶段拒绝它，数据不动；全量刷新请在 Milvus 侧 drop 并重建 collection，或用 SDK 全表 delete，再 append。
 `errorIfExists`/`ignore` 对这类数据源 Spark 不支持。
 
@@ -407,7 +408,14 @@ S3 兼容存储以 `fs.address` 为规范端点选项；DataFrame option
 `connection.ssl.enabled`（OSS 为 `connection.secure.enabled`）翻成 `fs.use_ssl`
 （没设时与 Hadoop 一样为 true，端点自带 `http://` 或 `https://` 时以端点为准），
 以及显式设置过的 `path.style.access`。用哪套凭证由有效的 credential provider 决定，与
-Hadoop 一致：provider 是 `SimpleAWSCredentialsProvider` 的桶用它自己的密钥，不用全局配置的角色。
+Hadoop 一致，按链的顺序：provider 是 `SimpleAWSCredentialsProvider` 的桶用它自己的密钥，不用全局配置的角色；
+链的第一项是静态密钥且已设，就用密钥。原生层每个桶只接受一种身份，照 Hadoop 的方式表达不了的链直接报错，要求改用 `fs.*` 选项：
+角色与其他来源混用；环境类来源排在已设的静态密钥之前；AssumeRole 由静态密钥签名（`fs.s3a.assumed.role.credentials.provider`
+含 `SimpleAWSCredentialsProvider`，这是它的默认值）；连接器不认识的 provider 类；`fs.oss.credentials.provider` 写成列表。
+两级都没配 provider 时，角色和静态密钥同时出现也报错。选项里给了静态密钥（`fs.access_key_id` 加 `fs.access_key_value`）或
+`fs.role_arn` 时，身份由选项决定，不再判断 Hadoop 的链；`fs.use_iam=true` 只在会话链只有 AssumedRole 时保留它，其他链换成默认链。
+读 S3 桶时会话里的 OSS 键、读 OSS 桶时的 S3A 键，没有端点、角色或密钥就跳过。与 driver 的 `AWS_*` 环境变量相同的静态密钥
+可以为 AssumeRole 签名，因为原生默认链读的就是这组变量。
 显式的 `fs.*` 选项总是优先于翻译结果。
 临时凭证（密钥加 `fs.s3a.session.token` 或 `fs.oss.securityToken`）翻不过去，原生存储层没有
 session token 属性。三个值正好是 driver 进程的 `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、

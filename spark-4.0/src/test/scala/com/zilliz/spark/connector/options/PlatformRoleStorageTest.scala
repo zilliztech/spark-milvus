@@ -66,4 +66,26 @@ class PlatformRoleStorageTest
     )
     out(StorageProperties.RoleArn) shouldBe "arn:aws:iam::1:role/platform"
   }
+
+  test("fs.use_iam replaces a session chain that is not only a role") {
+    val providerKey = "fs.s3a.aws.credentials.provider"
+    val hadoop = spark.sparkContext.hadoopConfiguration
+    val saved = hadoop.get(providerKey)
+    hadoop.set(
+      providerKey,
+      "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider," +
+        "org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider"
+    )
+    try {
+      val base = Map(
+        StorageProperties.BucketName -> "b",
+        StorageProperties.Address -> "s3.us-west-2.amazonaws.com"
+      )
+      val out = native(base + (StorageProperties.UseIam -> "true"))
+      out should not contain key(StorageProperties.RoleArn)
+      out(StorageProperties.UseIam) shouldBe "true"
+      // Without it the session chain decides, and it cannot be taken.
+      intercept[IllegalArgumentException](native(base))
+    } finally hadoop.set(providerKey, saved)
+  }
 }

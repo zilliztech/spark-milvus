@@ -1095,24 +1095,45 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
     "a Milvus Array is written as one ScalarField per row, every element type"
   ) {
     import com.zilliz.milvus.storage.codec.ArrayCodec
-    val cases: Seq[(org.apache.spark.sql.types.DataType, Seq[Any], Seq[Any])] =
+    val cases: Seq[
+      (org.apache.spark.sql.types.DataType, MilvusDataType, Seq[Any], Seq[Any])
+    ] =
       Seq(
         (
           org.apache.spark.sql.types.BooleanType,
+          MilvusDataType.Bool,
           Seq(true, false),
           Seq(true, false)
         ),
-        (ShortType, Seq[Short](-128, 127), Seq(-128, 127)),
-        (org.apache.spark.sql.types.IntegerType, Seq(1, -2, 3), Seq(1, -2, 3)),
-        (LongType, Seq(1L, Long.MaxValue), Seq(1L, Long.MaxValue)),
-        (FloatType, Seq(1.5f, -2f), Seq(1.5f, -2f)),
+        (ShortType, MilvusDataType.Int8, Seq[Short](-128, 127), Seq(-128, 127)),
+        (
+          ShortType,
+          MilvusDataType.Int16,
+          Seq[Short](-300, 300),
+          Seq(-300, 300)
+        ),
+        (
+          org.apache.spark.sql.types.IntegerType,
+          MilvusDataType.Int32,
+          Seq(1, -2, 3),
+          Seq(1, -2, 3)
+        ),
+        (
+          LongType,
+          MilvusDataType.Int64,
+          Seq(1L, Long.MaxValue),
+          Seq(1L, Long.MaxValue)
+        ),
+        (FloatType, MilvusDataType.Float, Seq(1.5f, -2f), Seq(1.5f, -2f)),
         (
           org.apache.spark.sql.types.DoubleType,
+          MilvusDataType.Double,
           Seq(0.25, -1.0),
           Seq(0.25, -1.0)
         ),
         (
           StringType,
+          MilvusDataType.VarChar,
           Seq(
             org.apache.spark.unsafe.types.UTF8String.fromString("a"),
             org.apache.spark.unsafe.types.UTF8String.fromString("中")
@@ -1120,13 +1141,22 @@ class ArrowConverterTest extends AnyFunSuite with Matchers {
           Seq("a", "中")
         )
       )
-    cases.foreach { case (elementType, sparkValues, stored) =>
-      withClue(s"elements $elementType: ") {
-        val field = milvusField(
+    cases.foreach { case (elementType, milvusElement, sparkValues, stored) =>
+      withClue(s"elements $milvusElement: ") {
+        val plain = milvusField(
           "arr",
           ArrayType(elementType),
           MilvusDataType.Array,
           105L
+        )
+        val field = plain.copy(metadata =
+          new MetadataBuilder()
+            .withMetadata(plain.metadata)
+            .putLong(
+              FieldMetadata.MilvusElementTypeMetadataKey,
+              milvusElement.value.toLong
+            )
+            .build()
         )
         val sparkSchema = StructType(Seq(field))
         val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(

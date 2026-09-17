@@ -455,7 +455,9 @@ What the write checks before any task starts: every DataFrame column is a
 field of the collection with the same Spark type as a read gives it (vector
 columns may also be the raw `BinaryType` bytes); every field except Milvus
 function outputs is present (give a nullable field a null column); the
-collection does not use `autoID` or a partition key. Only `mode("append")` is
+collection does not use `autoID` or a partition key. An `Array<Int8>` or
+`Array<Int16>` element must be within its type's range, as the Milvus proxy
+checks on insert; a value outside it stops the task. Only `mode("append")` is
 supported. `overwrite` is deliberately not supported: it would make every
 existing row of the collection invisible and Milvus has no rollback, so Spark
 refuses it at analysis time and no data is touched. For a full refresh, drop
@@ -498,9 +500,25 @@ also translated, per bucket first: the endpoint, region, role and static keys,
 `connection.ssl.enabled` (`connection.secure.enabled` for OSS) to `fs.use_ssl`
 (true when unset, as in Hadoop, unless the endpoint carries its own `http://` or
 `https://`), and an explicitly set `path.style.access`. The effective
-credential provider decides what is used, as it does in Hadoop: a bucket whose
-provider is `SimpleAWSCredentialsProvider` uses its keys and not a globally
-configured role. An explicit `fs.*` option always wins over the translated value.
+credential provider chain decides what is used, in order, as it does in Hadoop:
+a bucket whose provider is `SimpleAWSCredentialsProvider` uses its keys and not a
+globally configured role, and a chain that starts with static keys that are set
+uses them. The native layer takes one identity per bucket, so a chain it cannot
+take the same way fails and asks for `fs.*` options: a role mixed with another
+source, an environment provider ahead of static keys that are set, a role whose
+AssumeRole call Hadoop signs with static keys (`fs.s3a.assumed.role.credentials.provider`
+naming `SimpleAWSCredentialsProvider`, its default), a provider class the
+connector does not know, or a list in `fs.oss.credentials.provider`. With no
+provider configured, a role together with static keys fails the same way.
+Static keys (`fs.access_key_id` with `fs.access_key_value`) or `fs.role_arn`
+given as options decide the identity, and the Hadoop chain is then not judged;
+`fs.use_iam=true` keeps a session chain only when it is an AssumedRole provider
+alone and otherwise uses the default chain. The OSS keys of a session reading
+an S3 bucket, and the S3A keys of one reading an OSS bucket, are skipped when
+they supply no endpoint, role or key. Static keys that equal the driver's
+`AWS_*` variables may sign an AssumeRole call, because the native default chain
+reads the same variables. An explicit `fs.*` option always wins over the
+translated value.
 A temporary credential (keys plus `fs.s3a.session.token` or `fs.oss.securityToken`)
 cannot be translated, because the native storage layer takes no session token.
 When the three values are the driver's `AWS_ACCESS_KEY_ID`,

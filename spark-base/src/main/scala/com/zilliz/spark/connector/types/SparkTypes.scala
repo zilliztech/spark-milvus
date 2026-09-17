@@ -64,6 +64,16 @@ object SparkTypes {
         }
     }
 
+    // An Array's element type goes to the writer: Int8 and Int16 elements
+    // share Int32's Spark and physical form, and only the element type bounds
+    // them as the Milvus proxy does on insert.
+    if (fieldSchema.dataType == MilvusDataType.Array) {
+      builder.putLong(
+        FieldMetadata.MilvusElementTypeMetadataKey,
+        fieldSchema.elementType.value.toLong
+      )
+    }
+
     builder.build()
   }
 
@@ -161,7 +171,8 @@ object SparkTypes {
   /** The element type of a Milvus Array: the scalar types, and nothing else.
     * Int8 elements are presented as ShortType, as they always have been; the
     * decoders in ArrowConverter (row path) and MilvusArrayColumn (columnar)
-    * read either width, and the writer encodes both as IntData.
+    * read either width, and the writer encodes both as IntData, bounded by the
+    * element type the field metadata carries.
     */
   private def arrayElementType(elementType: MilvusDataType): SparkDataType =
     elementType match {

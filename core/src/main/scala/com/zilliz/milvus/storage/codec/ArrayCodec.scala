@@ -48,6 +48,11 @@ object ArrayCodec {
     * empty array, so the value is never zero bytes; segcore reads a zero-length
     * Binary value as null (FieldData.cpp).
     *
+    * An Int8 or Int16 element has to be within its type's range, as the Milvus
+    * proxy checks on insert (internal/proxy/fieldvalidator/validate_util.go
+    * verifyOverflowByRange): the three integer types share `IntData`, so only
+    * the element type tells their ranges apart.
+    *
     * @param values
     *   Boolean, Int, Long, Float, Double or String, as [[elements]] returns
     *   them; Int8 and Int16 elements are Ints.
@@ -69,9 +74,21 @@ object ArrayCodec {
           BoolArray(as[Boolean]("a Boolean") { case b: Boolean => b })
         )
       case DataType.Int8 | DataType.Int16 | DataType.Int32 =>
-        ScalarField.Data.IntData(
-          IntArray(as[Int]("an Int") { case i: Int => i })
-        )
+        val ints = as[Int]("an Int") { case i: Int => i }
+        val range = elementType match {
+          case DataType.Int8 => Some((Byte.MinValue.toInt, Byte.MaxValue.toInt))
+          case DataType.Int16 =>
+            Some((Short.MinValue.toInt, Short.MaxValue.toInt))
+          case _ => None
+        }
+        range.foreach { case (low, high) =>
+          ints.find(i => i < low || i > high).foreach { bad =>
+            throw new IllegalArgumentException(
+              s"an Array<$elementType> element $bad is outside [$low, $high]"
+            )
+          }
+        }
+        ScalarField.Data.IntData(IntArray(ints))
       case DataType.Int64 =>
         ScalarField.Data.LongData(
           LongArray(as[Long]("a Long") { case l: Long => l })

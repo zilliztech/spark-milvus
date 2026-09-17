@@ -802,4 +802,31 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.s3Endpoint shouldBe "custom:9000"
     config.s3BucketName shouldBe "custom-bucket"
   }
+
+  test(
+    "withHadoopStorageAssumeRole refuses a chain that mixes a role with another source"
+  ) {
+    // Hadoop uses the environment's identity whenever it yields credentials
+    // and the role only after it; the native writer can take one of the two.
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider," +
+        BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    intercept[IllegalArgumentException](
+      config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
+    )
+  }
 }
