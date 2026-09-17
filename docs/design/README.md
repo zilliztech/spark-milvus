@@ -17,7 +17,9 @@
 
 ## 0 结论 `[草稿]`
 
-spark-milvus 2.0 是读写 Milvus Storage 的 Spark Connector：一个 collection 在 Spark 里是一张表，读直接读对象存储上的快照，不经 Milvus 服务；写按 Milvus Storage 格式直接落对象存储，再由 Milvus 登记：已有段的新 Manifest 版本走 Milvus 现有的 BatchUpdateManifest 接口，新段的登记要 Milvus 新增接口（2.4）。代码分三层：Connector 接口层只做翻译，核心层做全部计算且不依赖 Spark，原生层封装 milvus-storage 和 knowhere 两个 C++ 库。1.x 在 tag v1.6.0 冻结，2.0 在分支 refactor/v2 上重写。
+spark-milvus 2.0 在 Spark 上读写 Milvus 数据、直接读开放格式，并在这些数据上做计算。Milvus 数据这一部分是读写 Milvus Storage 的 Spark Connector：一个 collection 在 Spark 里是一张表，读直接读对象存储上的快照，不经 Milvus 服务；写按 Milvus Storage 格式直接落对象存储，再由 Milvus 登记：已有段的新 Manifest 版本走 Milvus 现有的 BatchUpdateManifest 接口，新段的登记要 Milvus 新增接口（2.4）。代码分三层：Connector 接口层只做翻译，核心层做全部计算且不依赖 Spark，原生层封装 milvus-storage 和 knowhere 两个 C++ 库。1.x 在 tag v1.6.0 冻结，2.0 在分支 refactor/v2 上重写。
+
+直接读开放格式（Parquet、Lance、Iceberg、Hudi，按各自格式的规则解释）和在任意输入上做的计算（K-means 这类）2026-09-17 纳入范围，两部分都还没有设计。一个任务由输入、计算、输出组合而成，每份输入和输出各自绑定位置、身份和格式，规则见 [AGENTS.md](../../AGENTS.md) 的组合原则。
 
 名词：
 1. Milvus Storage：Milvus 的表格式，当前版本 V3，上游代码里也叫 Loon。milvus-storage 是读写它的 C++ 库。
@@ -25,7 +27,7 @@ spark-milvus 2.0 是读写 Milvus Storage 的 Spark Connector：一个 collectio
 3. 段：存储和加载的单位，sealed 段只读，落在对象存储。列组：段的列分成的几个 Parquet 文件。Storage V2 是 2.0 之前的段布局，多列合在一个 Parquet 文件里、没有 Manifest；Storage V3 每段带 Manifest。
 4. 快照：etcd 里的段元数据落到对象存储的 JSON 加 Avro，由 Milvus 生成。
 5. backfill：给已有 collection 的段补写新列组的作业，1.x 里是仓库自带的独立应用。
-6. 下游列式算子：在同一个 Spark 作业里直接消费 Arrow 列批的向量算子（聚类、去重、相似度 join 一类），不在本仓库。Connector 交给它们的是列批加 knowhere 封装，向量和位图以地址交出。
+6. 下游列式算子：在同一个 Spark 作业里直接消费 Arrow 列批的向量算子（聚类、去重、相似度 join 一类）。这类计算 2026-09-17 纳入本项目范围，按组合原则接入，入口和实现待设计。Connector 交给它们的是列批加 knowhere 封装，向量和位图以地址交出。
 
 ## 1 1.x 的问题 `[草稿]`
 
@@ -365,3 +367,4 @@ flowchart LR
 | 2026-09-17 | 写入检查 Int8、Int16 数组元素的范围，写 schema 带上元素类型 | Int8、Int16、Int32 数组元素在 Spark 里都是整数，在段文件里都是 `IntData`；写 schema 原来不带元素类型，`Array<Int8>` 列里的 128 照样写进段，而 Milvus proxy 的 insert 会拒绝它（`validate_util.go` 的 `verifyOverflowByRange`）。做法：`SparkTypes.metadata` 给 Array 列加元素类型键（`core.schema.FieldMetadata.MilvusElementTypeMetadataKey`），`ArrowConverter` 按它编码，范围检查在 `core.codec.ArrayCodec.encode`；按 Spark 元素类型推 Milvus 元素类型的 `ArrowConverter.arrayElementType` 删除。今天能让坏值进入在线集合的只有 backfill，append 的新段还不能登记。proxy 同一次 insert 还查 `max_capacity` 与 `max_length`，这两项暂不查：两者可以在建表后改（`schema_evolution.go` 的 `validateNumericBoundsEvolution`），而写 schema 取自快照（client 模式也是，DescribeCollection 只取 collection id），拿快照里的旧值查会误拒调大后合法的值；要等写入按集合当前的 schema 校验。 |
 | 2026-09-17 | Hadoop 凭证链按顺序解释，原生层表达不了的链报错 | 负责人选报错。Hadoop 按顺序试 provider，用第一个拿到凭证的；连接器原来只看链里有没有某个类，`Simple,AssumedRole` 与 `AssumedRole,Simple` 都翻成角色。原生层每个桶只有三种身份：静态密钥、默认链（`fs.use_iam`）、用默认链换来的角色。现在按顺序走链：已设的静态密钥排在前就用密钥，环境类来源排在前就交给默认链，整条链只有 AssumedRole 才用角色。报错的形状：角色与其他来源混用；环境类来源排在已设的静态密钥之前（用哪个取决于机器）；AssumeRole 由静态密钥签名（`assumed.role.credentials.provider` 默认是 Simple，原生层只能用默认链签）；不认识的 provider 类；OSS 的 provider 写成列表；没配 provider 时角色与密钥同时出现。报错可以用选项绕开：选项给了静态密钥或 `fs.role_arn` 时身份由选项定，不判断链；`fs.use_iam=true` 只保留只有 AssumedRole 的会话链，其余换成默认链；读另一种云的桶时，没有端点、角色或密钥的命名空间跳过；与本进程 `AWS_*` 相同的静态密钥可以签 AssumeRole，原生默认链读的是同一组变量。backfill 判断是否走角色改用同一套规则（`HadoopStorageKeys.s3aAssumesRole`、`ossRoleTaken`）。云上注入的是单个 AssumedRole 加 `DefaultAWSCredentialsProviderChain` 签名，OSS 是单个角色类，不受影响（zilliz-cloud 的 `SparkCspRuntimeSupport`、`SparkTemplateService`）。否决：按顺序取第一个能在配置里判定的 provider（排在前面的环境类来源判定不了）；只记 warning（身份照样悄悄变）。 |
 | 2026-09-17 | Milvus 客户端的重试移到调用封装：读 RPC 在一次调用的总期限内重发，写 RPC 只发一次 | 负责人选封装层，同意删除 `GrpcRetryInterceptor`、`DisableRetries` 和它们的测试。拦截器失败后先把失败交给调用方，再重启同一个已结束的调用，gRPC 报 "Already started" 并被吞进日志，结果从未重发，只多等 500 ms；通道上的 `maxRetryAttempts` 没有服务配置也不起作用，一并去掉，`enableRetry` 留着管服务端没开始处理的流。现在 `client.grpc.RpcRetry` 每次重发都新建调用，所有尝试共用一次调用的总期限（默认 10 秒，过程轮询传剩余时间），重发条件是 gRPC UNAVAILABLE 或响应里的 Milvus 限流。走重试的读 RPC：listDatabases、showCollections、describeCollection、describeIndex、getLoadState、getCompactionState、query、getImportState、listSnapshots、describeSnapshot、getPersistentSegmentInfo、showPartitions。写 RPC（insert、delete、import、建删库表和分区、建删索引、load、release、flush、compact、快照、登记）只发一次：响应丢了时服务端可能已经执行。否决：gRPC 自带的按方法重试策略（1.37 里是实验接口，按字符串配方法，查不到响应体里的限流）；修拦截器（等于重写 gRPC 的 RetriableStream）。 |
+| 2026-09-17 | 范围扩到开放格式直接读和计算，组合原则写进 AGENTS.md | 负责人定。一个任务由输入、计算、输出组合而成：每份输入和输出各自绑定位置、身份和格式，任务选一种计算；换其中一项，其余两项不改，不为某个组合单独写入口，例如客户桶里的查询集查我们桶里的 collection，就是普通搜索接两份输入。AGENTS.md 的 Principles 加五条：任务是独立选择的组合，访问、格式、计算各管一件事；身份绑定到输入或输出，同桶同 endpoint 的两份输入可以用不同身份，按桶配置的 Hadoop 键只在输入没给身份时用来推导；格式由读取规则决定，同一批 Parquet 或 Lance 文件注册成 Milvus 外表是 Milvus 数据，直接读是开放格式，两条路径互不依赖、不共用行身份；读格式、用索引、按地址取行是三种能力，计算声明所需、输入声明所供，对不上在规划时报错；先定目标组合再拆实现，`Snapshot` 继续演进，不另加表模型。范围：直接读 Parquet、Lance、Iceberg、Hudi 和 K-means 这类计算纳入本项目，第 0 节和名词 6 随之改写；两部分尚未设计，能力行在设计时补。否决：为某个场景组合单独写入口（每加一种组合就多一条路径）；身份跟会话走（一个作业只能有一套身份，多桶作业只能改共享配置顺序切换）。后续按这组原则对照现有设计和代码，逐项修订不符合的地方。 |

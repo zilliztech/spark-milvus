@@ -13,6 +13,11 @@ lists a snapshot, plans one Spark partition per segment, and pulls Arrow column
 batches out of the segment files. A write produces segment files in the same
 format and registers them back with Milvus.
 
+Since 2026-09-17 the project also covers reading open formats directly
+(Parquet, Lance, Iceberg, Hudi, each read by its own rules) and computations
+such as K-means over any input, combined as the composition principles below
+describe. Neither part is designed or written yet.
+
 Two lines exist. The 1.x line is frozen at tag `v1.6.0` and takes fixes only.
 The 2.0 line is a rewrite on branch `refactor/v2`, versioned
 `2.0.0-{branch}-{arch}-SNAPSHOT`. Everything below describes 2.0.
@@ -217,6 +222,53 @@ non-standard read entry points implement a single `SnapshotSource` and a single
 `SegmentReader`; they do not each get their own path from top to bottom. When
 you find yourself building a second parallel route, the first route is the thing
 to change.
+
+**A job is a composition of independent choices.** Each input a job reads is
+bound to a location, the identity that opens it, and a format. The job picks a
+computation. Each output is bound to its own location, identity and format. A
+job may read several inputs with different bindings. A new scenario is
+supported by changing one of these choices; no code path is written for one
+particular combination. Searching a query set in a customer's bucket against a
+collection in ours is the ordinary search given two inputs.
+
+The three parts own separate concerns. Access decides where the data is and
+which identity opens it. Format turns files into valid data (schema, version,
+deletes, merges) and, when a computation asks for them, index information and
+row locations. Computation consumes the columns and vectors it needs; it never
+sees a storage address, a credential or a format. Changing the storage or the
+identity changes only the access binding, changing the format changes only how
+the files are read, and a new computation reuses both. These parts are not
+modules: the four layers stay as they are.
+
+**An identity is bound to an input or an output.** Two inputs in the same
+bucket behind the same endpoint may use different identities. The order the
+inputs are read in, concurrency and task retries leave each input with the
+identity it was bound to. Rewriting the session's shared Hadoop configuration to
+switch identity binds nothing. Hadoop's per-bucket keys remain a way to derive
+an input's identity when its options name none, and they never override an
+identity the input states.
+
+**A format is the set of rules the data is read by; the file type does not
+decide it.** Parquet or Lance files registered as a Milvus external collection
+are Milvus data, like a snapshot or a milvus-backup export: Milvus schema and
+types, system fields, the synthesized primary key, the snapshot version, Milvus
+delete rules and Milvus indexes apply. The same files read directly are an open
+format: that format's own version, schema, deletes and row addresses apply, and
+no collection id, Milvus system field or Milvus type is required. The two paths
+do not depend on each other and do not share a row identity.
+
+**Capabilities are declared and checked, never inferred.** Reading a format,
+using its index and fetching a row by its address are three capabilities. A
+computation states which it requires, an input states which it provides, and a
+mismatch fails when the job is planned. A format's name and the data's location
+imply no capability: a Lance dataset with a vector index does not thereby hold
+an index Knowhere can load.
+
+**The target composition is agreed before the implementation is split.** Which
+combinations the project supports is decided first, and the design states which
+of them work today. Which of Spark data sources, milvus-storage, DataFrames and
+`Snapshot` carries each part is decided afterwards, by evolving the existing
+types; `Snapshot` evolves, and no second table model is added beside it.
 
 **Refactor when the design needs it, and never weigh the effort.** "That is too
 big a change" is not a reason to keep a wrong design; effort is not an input to
