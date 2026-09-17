@@ -16,11 +16,7 @@ import org.apache.spark.sql.vectorized.{
   ColumnarBatch
 }
 
-import com.zilliz.milvus.storage.expr.{
-  Bitmap,
-  PredicateEvaluator,
-  PredicateExpr
-}
+import com.zilliz.milvus.storage.expr.{Bitmap, Expr, PredicateExpr}
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
 import com.zilliz.spark.connector.metrics.ScanMetrics
@@ -59,7 +55,8 @@ class MilvusColumnarPartitionReader(
     requestedExtraColumns: Set[String] = Set.empty,
     pushedExpression: Option[PredicateExpr] = None,
     columnNameFor: Long => Option[String] = (_: Long) => None,
-    taskAllocatorOwner: Option[AutoCloseable] = None
+    taskAllocatorOwner: Option[AutoCloseable] = None,
+    milvusFilter: Option[Expr] = None
 ) extends PartitionReader[ColumnarBatch]
     with Logging {
 
@@ -135,10 +132,16 @@ class MilvusColumnarPartitionReader(
     val startOffset = rowsSeen
     rowsSeen += root.getRowCount.toLong
 
-    val predicateBitmap = pushedExpression
-      .map(PredicateEvaluator.evaluate(_, root, columnNameFor))
+    val filterBitmap = BatchFilterEvaluator
+      .exclusions(
+        root,
+        milvusFilter,
+        pushedExpression,
+        arrowColumnFor,
+        columnNameFor
+      )
       .orNull
-    val surviving = survivingRows(root, predicateBitmap)
+    val surviving = survivingRows(root, filterBitmap)
     val columns =
       schema.fields.map(field => columnFor(root, field, startOffset))
     if (surviving == null) {
@@ -159,13 +162,13 @@ class MilvusColumnarPartitionReader(
     */
   private def survivingRows(
       root: VectorSchemaRoot,
-      predicateBitmap: Bitmap
+      filterBitmap: Bitmap
   ): Array[Int] = {
     val rows = root.getRowCount
     var anyExcluded = false
     var i = 0
     while (i < rows && !anyExcluded) {
-      if (isExcluded(root, i, predicateBitmap)) anyExcluded = true
+      if (isExcluded(root, i, filterBitmap)) anyExcluded = true
       i += 1
     }
     if (!anyExcluded) return null
@@ -174,7 +177,7 @@ class MilvusColumnarPartitionReader(
     keep.sizeHint(rows)
     var j = 0
     while (j < rows) {
-      if (!isExcluded(root, j, predicateBitmap)) keep += j
+      if (!isExcluded(root, j, filterBitmap)) keep += j
       j += 1
     }
     keep.result()
@@ -183,10 +186,10 @@ class MilvusColumnarPartitionReader(
   private def isExcluded(
       root: VectorSchemaRoot,
       row: Int,
-      predicateBitmap: Bitmap
+      filterBitmap: Bitmap
   ): Boolean =
     deleted(root, row) ||
-      (predicateBitmap != null && predicateBitmap.isExcluded(row))
+      (filterBitmap != null && filterBitmap.isExcluded(row))
 
   private def columnFor(
       root: VectorSchemaRoot,

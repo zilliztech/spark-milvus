@@ -13,7 +13,7 @@ package com.zilliz.milvus.storage
   * done here. It belongs to whoever produces the configuration, or to a layer-3
   * shim with a written exit condition.
   *
-  * Main types: StorageProperties. Capabilities: R3, G4 (see
+  * Main types: StorageProperties. Capabilities: R3 (see
   * docs/design/capabilities.md). Design:
   * docs/design/architecture/storage-access.html section 3 and
   * storage-auth.html.

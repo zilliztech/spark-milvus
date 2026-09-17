@@ -357,6 +357,7 @@ Every read and write reports what it cost on the C/JVM boundary as task metrics 
 | `MilvusOption.MilvusSegments` (`milvus.segments`) | String | No | unset | Comma-separated numeric segment IDs. It may be combined with `milvus.partitions`, in which case the scan reads their intersection. Every requested ID must exist. |
 | `MilvusOption.ReaderFieldIDs` (`fieldIDs`) | String | No | unset | Comma-separated numeric field IDs, applied during both schema inference and table creation. Each requested ID must exist in the snapshot schema; Spark projection can further prune this set. With an external `.schema()`, its non-metadata fields must select exactly these IDs and their names and Spark types must match the snapshot. |
 | `MilvusOption.MilvusExtraColumns` (`milvus.extra.columns`) | String | No | "" | Comma-separated metadata columns. The supported names are `_segment_id`, `_row_offset`, and `_timestamp`; see section 4. |
+| `MilvusOption.MilvusFilter` (`milvus.filter`) | String | No | unset | Milvus scalar expression for an ordinary table read. It is parsed and validated against the fixed snapshot during planning, evaluated in both row and columnar readers, and combined with Spark predicates and deletes before Limit. It cannot be combined with `vector.search.*`; use `vector.search.filter` for vector search. |
 | `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | No | true | Apply all segment-local, partition-level L0, and collection-level L0 deletes visible in the fixed snapshot. Setting this to `false` is explicit opt-out; any provided value besides `true` or `false`, including a blank value, is rejected. |
 | `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
 | `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. A read with `vector.search.*` options takes the row path regardless, because that stage scores rows. Row and columnar readers use the same expected-row guard. |
@@ -398,9 +399,34 @@ Spark. A predicate-only column is read internally without being added to the
 result schema. Reads using `vector.search.*` do not push Spark predicates:
 each tree remains residual and Spark evaluates it after vector TopK. To filter
 before persisted-index search, use `MilvusSearch.search(..., filter = ...)` or
-the corresponding `vector.search.filter` option; that separate Milvus scalar
-expression subset is parsed by `PlanParser`. The DataSource V1 Filter API and
-the ordinary table-read `milvus.filter` option are not supported.
+the corresponding `vector.search.filter` option. The DataSource V1 Filter API
+is not supported.
+
+#### Milvus scalar filter
+
+An ordinary table read can use the same scalar Milvus expression subset:
+
+```scala
+spark.read
+  .format("milvus")
+  .options(readOptions)
+  .option("milvus.filter", "category == \"documents\" and rating >= 2.0")
+  .load()
+```
+
+Supported fields are Bool, integer, Float, Double, String, VarChar, and Text.
+The syntax includes `==`, `!=`, `<`, `<=`, `>`, `>=`, `IN`, `NOT IN`,
+`IS NULL`, `IS NOT NULL`, `AND`, `OR`, and `NOT`; Bool comparisons are limited
+to `==` and `!=`. Filter-only fields are read
+internally but do not enter the result schema. When a Spark `where` condition
+is also pushed, both conditions must pass; deletes are then applied and Limit
+counts only surviving rows. A blank or malformed expression, an unknown field,
+or an incompatible literal fails planning instead of being ignored.
+
+`milvus.filter` is for ordinary scans only and cannot be combined with any
+`vector.search.*` option. Vector search uses `vector.search.filter` before
+TopK. JSON paths, Array predicates, and `json_contains` are not in the current
+scalar subset.
 
 
 ### 2.4 Write Parameters
@@ -412,6 +438,11 @@ collection schema comes from one of: `milvus.uri` plus the collection name
 (the latest snapshot of the collection), `milvus.snapshot.path`, or
 `milvus.snapshot.schema.bytes` (a schema alone, for a write with no snapshot
 at all). Field ids and vector dimensions come from that schema.
+
+The current staged segments omit the Milvus system fields RowID (field 0) and
+Timestamp (field 1). They therefore cannot be registered with or loaded by
+Milvus yet; append registration remains blocked by design decision 22 and a
+Milvus `RegisterSegments` API.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|

@@ -309,6 +309,7 @@ Map；executor 读取并关闭适用于本段的删除文件，再按主键和�
 | `MilvusOption.MilvusSegments` (`milvus.segments`) | String | 否 | 未设置 | 逗号分隔的数值段 ID。可与 `milvus.partitions` 同时使用，此时读取二者交集；每个 ID 都必须存在。 |
 | `MilvusOption.ReaderFieldIDs` (`fieldIDs`) | String | 否 | 未设置 | 逗号分隔的数值字段 ID，在 schema 推导和 Table 构建时都生效。每个 ID 都必须存在于快照 schema，Spark 投影还可在此基础上继续裁剪。外部 `.schema()` 的非元数据字段必须恰好选中这些 ID，字段名和 Spark 类型也必须与快照一致。 |
 | `MilvusOption.MilvusExtraColumns` (`milvus.extra.columns`) | String | 否 | "" | 逗号分隔的元数据列，只支持 `_segment_id`、`_row_offset`、`_timestamp`，见第 4 节。 |
+| `MilvusOption.MilvusFilter` (`milvus.filter`) | String | 否 | 未设置 | 普通表读取使用的 Milvus 标量表达式。规划期按固定快照完成解析与校验，行式和列式 reader 都执行，并在 Limit 前与 Spark 谓词、删除共同生效。不能与 `vector.search.*` 混用；向量搜索使用 `vector.search.filter`。 |
 | `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | 否 | true | 应用固定快照可见的段内删除、本分区 L0 删除与全 collection L0 删除。设为 `false` 是显式关闭；只要显式提供，除 `true`、`false` 外的值（包括空白值）都会报错。 |
 | `milvus.read.vector.raw` | Boolean | 否 | false | 向量列的输出类型。默认 false，向量转成 Spark 原生类型（`FloatVector`/`Float16Vector`/`BFloat16Vector` → `ArrayType(FloatType)`，`Int8Vector` → `ArrayType(ShortType)`，`SparseFloatVector` → `MapType(LongType, FloatType)`）。设为 true 时向量列输出 `BinaryType`，字节按存储原样给出，由调用方自己按 `dim` 与元素类型解析；这条路径不做逐元素转换，适合把字节直接交给下游原生库的批量作业 |
 | `milvus.read.columnar` | Boolean | 否 | true | 读出口形态。默认 true，整批交付（`ColumnarBatch`），直接包住原生 buffer 不拷贝，向量列按 `milvus.read.vector.raw` 决定的类型呈现；有删除的批按存活行下标映射交付，同样不拷贝。设为 false 逐行交给 Spark。带 `vector.search.*` 的读一律走行式，因为那一步要逐行算距离。行式和列式 reader 共用同一套预期行数校验。 |
@@ -337,9 +338,29 @@ VarChar、Text 还支持前缀与后缀条件。行式与列式读取都保持 S
 Geometry、向量和合成元数据列上的谓词留在 Spark 计划中，由 Spark 求值。只被谓词引用的列会在
 内部读取，不会出现在结果 schema。带 `vector.search.*` 的读取不下推 Spark 谓词：整棵条件作为
 residual 留给 Spark，在向量 TopK 之后求值。要在持久化索引搜索前过滤，使用
-`MilvusSearch.search(..., filter = ...)` 或对应的 `vector.search.filter` option；这条独立的 Milvus
-标量表达式子集由 `PlanParser` 解析。DataSource V1 Filter 接口和普通表读取的 `milvus.filter` option
-均不支持。
+`MilvusSearch.search(..., filter = ...)` 或对应的 `vector.search.filter` option。DataSource V1 Filter
+接口不支持。
+
+#### Milvus 标量过滤
+
+普通表读取可以使用同一套 Milvus 标量表达式子集：
+
+```scala
+spark.read
+  .format("milvus")
+  .options(readOptions)
+  .option("milvus.filter", "category == \"documents\" and rating >= 2.0")
+  .load()
+```
+
+支持 Bool、整数、Float、Double、String、VarChar 与 Text 字段；语法包括 `==`、`!=`、`<`、`<=`、
+`>`、`>=`、`IN`、`NOT IN`、`IS NULL`、`IS NOT NULL`、`AND`、`OR`、`NOT`；Bool 比较只支持
+`==` 与 `!=`。只用于过滤的字段会在
+内部读取，但不会进入结果 schema。若同时下推 Spark `where`，两者都必须通过；随后应用删除，Limit 只统计
+最终存活行。空白或错误表达式、未知字段、不兼容字面量都在规划期报错，不会被忽略。
+
+`milvus.filter` 只用于普通扫描，不能与任何 `vector.search.*` option 混用；向量搜索在 TopK 前使用
+`vector.search.filter`。当前标量子集不含 JSON path、Array 谓词和 `json_contains`。
 
 
 ### 2.4 写入参数
@@ -348,6 +369,9 @@ residual 留给 Spark，在向量 TopK 之后求值。要在持久化索引搜�
 服务，也不做登记。表的解析和读一样，collection schema 来自三者之一：`milvus.uri` 加 collection
 名（取该 collection 最新的快照）、`milvus.snapshot.path`、或 `milvus.snapshot.schema.bytes`（只给
 schema，没有任何快照时用）。字段 id 和向量维度都从这份 schema 取。
+
+当前暂存段还不包含 Milvus 系统字段 RowID（字段 0）和 Timestamp（字段 1），因此暂时不能登记到
+Milvus，也不能由 Milvus 加载。append 登记仍受设计决策 22 和 Milvus `RegisterSegments` API 阻塞。
 
 | 参数名 | 类型 | 必需 | 默认值 | 描述 |
 |--------|------|------|--------|------|

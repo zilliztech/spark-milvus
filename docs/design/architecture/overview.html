@@ -192,9 +192,9 @@
   <div class="fact"><b>33/41</b><span>1.x 源文件 import Spark</span></div>
   <div class="fact"><b>2879</b><span>行的单个 DataSource 文件</span></div>
   <div class="fact"><b>6 → 2</b><span>一个向量值的拷贝次数</span></div>
-  <div class="fact"><b>51</b><span>条功能，分八组</span></div>
+  <div class="fact"><b>45</b><span>条功能，分八组</span></div>
   <div class="fact"><b>4</b><span>条 Spark 线各出产物</span></div>
-  <div class="fact"><b>5</b><span>条决策还没定</span></div>
+  <div class="fact"><b>6</b><span>条决策还没定</span></div>
 </div>
 
 <section id="layers">
@@ -297,7 +297,7 @@
 
 <section id="tree">
   <h2><span class="n">02</span>目录与包</h2>
-  <p class="claim">每个模块一个目录，每个包一个职责。<code>spark/base</code> 和 <code>apps/base</code> 不是独立模块，只是四条 Spark 线共同引用的源码目录；1.x 的代码还在根目录的 <code>src/</code> 里，迁移一个模块一个模块来。</p>
+  <p class="claim">每个模块一个目录，每个包一个职责。<code>spark-base</code> 不是独立模块，而是四条 Spark 线共同引用的源码目录；1.x 源码已全部迁入所属模块，根目录的 <code>src/</code> 已移除。</p>
 
   <figure>
     <div class="figbox">
@@ -336,10 +336,9 @@
 │                                     <span class="c">只在云上跑的那条线上建，别的线按需加</span>
 ├── <span class="m">integration-4.0/</span>              <span class="c">需要 MinIO 与 Milvus，跑一条线</span>
 │
-├── <span class="u">src/</span>                          <span class="c">1.x 的代码，原地不动，按模块逐个迁走</span>
 └── <span class="d">docs/design/</span>                  <span class="c">本文与三份设计文档</span></pre>
     </div>
-    <figcaption>目录树。绿色是 2.0 的模块，灰色是共享源码目录和还没迁的 1.x 代码。四条 Spark 线的目录名就是线号，产物名带线号和 Scala 版本。</figcaption>
+    <figcaption>目录树。绿色是 2.0 的模块，灰色是共享源码目录。四条 Spark 线的目录名就是线号，产物名带线号和 Scala 版本。</figcaption>
   </figure>
 
   <h3>包的职责</h3>
@@ -350,19 +349,21 @@
       <h4>core</h4>
       <p class="role">第 2 层。全部计算在这里，源码不出现 org.apache.spark。对外只暴露 snapshot、read、write、index、schema、expr 六个包。</p>
       <dl>
-        <dt>snapshot</dt><dd>列快照目录，选快照，解析成对象；分发 SnapshotSource <em>R2 R3 R13 R16 C3</em></dd>
-        <dt>manifest</dt><dd>一个段的列组、删除文件、统计、索引登记 <em>R4 R5</em></dd>
+        <dt>snapshot</dt><dd>列快照目录，选快照，解析成对象；分发 SnapshotSource <em>R2 R3 R9 R13 R16 C3</em></dd>
+        <dt>manifest</dt><dd>一个段的列组、删除文件、统计、索引登记 <em>R5</em></dd>
         <dt>schema</dt><dd>字段 id、名字、Milvus 类型、Arrow 类型的唯一映射 <em>R15 C3</em></dd>
         <dt>path</dt><dd>三种路径形态归一成 (bucket, key) <em>R3</em></dd>
-        <dt>credential</dt><dd>对象存储凭证的取用和下发 <em>R3 W1</em></dd>
+        <dt>io</dt><dd>经原生文件系统读写对象存储 <em>R2 R3 W1</em></dd>
+        <dt>codec</dt><dd>列值与 Milvus binlog 的字节编解码 <em>R15 W3 V2</em></dd>
+        <dt>credential</dt><dd>对象存储凭证的取用和下发 <em>R3</em></dd>
         <dt>expr</dt><dd>R7 的 Expr / PlanParser / Evaluator；R6 的 PredicateExpr / PredicateEvaluator / Bitmap <em>R6 R7</em></dd>
         <dt>delete</dt><dd>删除文件解码，按行号置位 <em>R8</em></dd>
-        <dt>stats</dt><dd>段统计与 row group 统计的读取和剪枝 <em>R9 R10 R18</em></dd>
-        <dt>read.plan</dt><dd>分区规划，纯 JVM，可序列化 <em>R3 R5 R10</em></dd>
-        <dt>read.exec</dt><dd>批读取、按行号取列、出口；碰 native <em>R4 R14 R17</em></dd>
-        <dt>write.exec</dt><dd>段写出、暂存布局；碰 native <em>W1 W2</em></dd>
-        <dt>write.commit</dt><dd>作业清单、提交、幂等 <em>W3</em></dd>
-        <dt>index</dt><dd>持久化索引选择、加载、排除位图、搜索与段内 TopK；跨任务缓存和写出待实现 <em>V2 V4 V7 W6</em></dd>
+        <dt>stats</dt><dd>段级主键统计与保守剪枝；R10 row group 剪枝等待仓库外依赖 <em>R9 R18</em></dd>
+        <dt>read.plan</dt><dd>分区与删除文件规划，纯 JVM，可序列化 <em>R3 R5 R8 R13</em></dd>
+        <dt>read.exec</dt><dd>批读取、按行号取列、出口；碰 native <em>R3 R4 R8 R14 R17 G3 G5</em></dd>
+        <dt>write.exec</dt><dd>段写出、暂存布局；碰 native <em>W1 W2 G2 G5</em></dd>
+        <dt>write.commit</dt><dd>作业清单、提交、幂等与暂存清理 <em>W3 A4 A7</em></dd>
+        <dt>index</dt><dd>持久化索引选择、加载、排除位图、搜索与段内 TopK；跨任务缓存和写出待实现 <em>V2 V5 V7</em></dd>
       </dl>
     </div>
 
@@ -370,27 +371,27 @@
       <h4>spark/base 与各线</h4>
       <p class="role">第 3 层。只做翻译，Spark 索取什么就交出什么。base 是共享源码，四条线各编译一次；按线不同的只有 catalog 与 parser 接口适配、antlr 生成物和服务注册文件。</p>
       <dl>
-        <dt>table</dt><dd>schema、能力集、元数据列、统计 <em>R12 R13</em></dd>
-        <dt>read</dt><dd>ScanBuilder、Scan、InputPartition、ColumnVector 实现 <em>R4 R5 R11 R16 R18</em></dd>
+        <dt>table</dt><dd>schema、能力集、元数据列、统计 <em>R12</em></dd>
+        <dt>read</dt><dd>ScanBuilder、Scan、InputPartition、reader 与运行时过滤 <em>R4 R5 R7 R11 R12 R13 R16 R18 V5 V7 G3</em></dd>
         <dt>expr</dt><dd>DataSource V2 谓词翻成中间表示 <em>R6</em></dd>
-        <dt>types</dt><dd>Arrow 类型到 Spark 类型的映射，向量列的表示 <em>R15</em></dd>
-        <dt>write</dt><dd>WriteBuilder、BatchWrite、DataWriter；两种写模式 <em>W1 W2</em></dd>
-        <dt>options</dt><dd>option 名、别名、校验；把 compat 的实现注册进 core <em>K4 G1–G4</em></dd>
-        <dt>catalog</dt><dd>database 的单层 namespace、collection 列表、三段名、快照重载，以及校验后创建/删除 collection <em>C1 C2 R1 R2</em></dd>
-        <dt>procedure</dt><dd>四条线共用的 CALL 过程体：快照、索引、生命周期、登记与描述 <em>A1–A5</em></dd>
-        <dt>extensions</dt><dd>四条线共用的 CALL 节点与 planner 策略；parser 接口适配和 antlr 生成物按线</dd>
+        <dt>types</dt><dd>Arrow 类型到 Spark 类型的映射，向量列的表示 <em>R15 G3</em></dd>
+        <dt>write</dt><dd>WriteBuilder、BatchWrite、DataWriter；两种写模式 <em>W1 W2 G2</em></dd>
+        <dt>options</dt><dd>option 名、别名、校验、SnapshotSource 与 driver 存储配置 <em>R16 G1 G2 G3</em></dd>
+        <dt>catalog</dt><dd>database 的单层 namespace、collection 列表、三段名、快照重载，以及校验后创建/删除 collection <em>R1 R2 C1 C2</em></dd>
+        <dt>procedure</dt><dd>四条线共用的 CALL 过程体：快照、索引、生命周期、登记、描述与暂存清理 <em>A1 A2 A3 A4 A5 A7</em></dd>
+        <dt>extensions</dt><dd>四条线共用的 CALL 节点与 planner 策略；parser 接口适配和 antlr 生成物按线 <em>A1 A2 A3 A4 A5</em></dd>
+        <dt>metrics</dt><dd>读写任务的 Spark CustomMetric 适配 <em>G5</em></dd>
       </dl>
     </div>
 
     <div class="pkg">
       <h4>compat 与 client</h4>
-      <p class="role">第 2 层的另外两个模块。compat 的三个适配器产出 core 的 Snapshot 或 SegmentReader，由 spark 层在启动时注册进 core 的注册表，core 源码不出现 compat 的包名。</p>
+      <p class="role">第 2 层的另外两个模块。compat 的两个适配器产出 core 的 Snapshot 或 SegmentReader，由 spark 层在启动时注册进 core 的注册表，core 源码不出现 compat 的包名。</p>
       <dl>
         <dt>v2</dt><dd>Storage V2 packed 段的 SegmentReader <em>K1</em></dd>
-        <dt>offline</dt><dd>1.x 离线 option 的段列表转 Snapshot <em>K2</em></dd>
         <dt>backup</dt><dd>milvus-backup 导出目录转 Snapshot <em>K3</em></dd>
         <dt>client.grpc</dt><dd>ScalaPB 生成的 stub，重试拦截器</dd>
-        <dt>client.api</dt><dd>DDL、Delete、快照、索引、生命周期、登记；proto 的 DataType 与 core 的 MilvusType 互转 <em>C1 C2 A1–A5</em></dd>
+        <dt>client.api</dt><dd>DDL、Delete、快照、索引、生命周期、登记；proto 的 DataType 与 core 的 MilvusType 互转 <em>C1 C2 A1 A2 A3 A4 A5</em></dd>
       </dl>
     </div>
 
@@ -404,7 +405,7 @@
         <dt>jni.vector</dt><dd>NativeVectorLibrary：上游加载；NativeVectorSearch：调用上游 BruteForce <em>V1（部分） V5</em></dd>
         <dt>apps.backfill</dt><dd>作业、CLI、结果 JSON <em>O1</em></dd>
         <dt>core.index</dt><dd>BruteForceSearch 管理原生查询缓冲、排除位图和每段 TopK；Spark 只适配类型 <em>V5</em></dd>
-        <dt>apps.search</dt><dd>向量查询的 Spark SQL 表达式与扩展入口 <em>V5 V7</em></dd>
+        <dt>apps.search</dt><dd>向量查询的 Spark SQL 表达式与扩展入口 <em>V5</em></dd>
       </dl>
     </div>
   </div>
@@ -716,13 +717,13 @@
   </figure>
 
   <div class="note">
-    <b>Arrow 由 Spark 线提供，core 的 Milvus 表达式解析器手写。</b>核心层是四条线共用的单一产物；Spark 3.5 带 antlr 4.9.3，4.x 带 4.13.1，生成码不能成为 core 的公共实现。只有 SQL 扩展文法放在共享源码目录并按线生成，运行时使用本线 Spark 自带的 antlr。R7 的标量 PlanParser 已用于索引查询过滤；表读取的 <code>milvus.filter</code> 与 JSON/Array 语义仍待扩展。
+    <b>Arrow 由 Spark 线提供，core 的 Milvus 表达式解析器手写。</b>核心层是四条线共用的单一产物；Spark 3.5 带 antlr 4.9.3，4.x 带 4.13.1，生成码不能成为 core 的公共实现。只有 SQL 扩展文法放在共享源码目录并按线生成，运行时使用本线 Spark 自带的 antlr。R7 的标量 PlanParser 同时用于普通表 <code>milvus.filter</code> 与索引查询过滤；JSON/Array 语义受开放决策 23 阻塞。
   </div>
 </section>
 
 <section id="caps">
   <h2><span class="n">06</span>功能地图</h2>
-  <p class="claim">51 条功能分八组，每条都写清用户怎么用、哪个包实现、依赖什么。读的 19 条全程不经 Milvus 服务；写的 7 条止于作业清单。</p>
+  <p class="claim">45 条功能分八组，每条都写清用户怎么用、哪个包实现、依赖什么。读的 19 条全程不经 Milvus 服务；写的 4 条止于作业清单。</p>
 
   <div class="key">
     <span><i class="sw ours"></i>P0 · 骨架，不做后面都在旧结构上打补丁</span>
@@ -746,7 +747,7 @@
         <span class="chip p1"><span class="id">R1</span>三段名</span>
         <span class="chip p1"><span class="id">R6</span>Spark 谓词下推</span>
         <span class="chip p1"><span class="id">R7</span>Milvus 表达式</span>
-        <span class="chip wait"><span class="id">R9</span>段级剪枝</span>
+        <span class="chip p1"><span class="id">R9</span>段级剪枝</span>
         <span class="chip wait"><span class="id">R10</span>row group 剪枝</span>
         <span class="chip p1"><span class="id">R11</span>Limit 下推</span>
         <span class="chip p1"><span class="id">R18</span>运行时过滤</span>
@@ -759,14 +760,13 @@
     </div>
 
     <div class="grp">
-      <h4>表写 · 7 条</h4>
+      <h4>表写 · 4 条</h4>
       <p>写止于作业清单，登记归 Milvus。</p>
       <div class="chips">
         <span class="chip wait"><span class="id">W1</span>append 写新段</span>
         <span class="chip p2"><span class="id">W2</span>backfill 写新列组</span>
         <span class="chip p1"><span class="id">W3</span>原子提交</span>
         <span class="chip p2"><span class="id">W6</span>索引随段写出</span>
-        <span class="chip p3"><span class="id">W7</span>gRPC 小批量兜底</span>
       </div>
     </div>
 
@@ -782,7 +782,7 @@
 
     <div class="grp">
       <h4>CALL · 6 条</h4>
-      <p>Table 接口表达不了的动作；四条线走同一个 SQL 扩展。A1–A5 已实现，A7 仍待安全清理契约。</p>
+      <p>Table 接口表达不了的动作；四条线走同一个 SQL 扩展。A1–A5 已实现；A7 已完成 fail-closed 审计和文件对象清理，递归删除目录项仍等待 milvus-storage 接口。</p>
       <div class="chips">
         <span class="chip p1"><span class="id">A1</span>快照</span>
         <span class="chip p1"><span class="id">A2</span>索引</span>
@@ -806,22 +806,19 @@
     </div>
 
     <div class="grp">
-      <h4>兼容入口 · 4 条</h4>
+      <h4>兼容入口 · 2 条</h4>
       <p>不进主路径，产出核心层的 Snapshot 或 SegmentReader 后合流。</p>
       <div class="chips">
         <span class="chip p0"><span class="id">K1</span>Storage V2 段</span>
-        <span class="chip p0"><span class="id">K2</span>离线段列表</span>
         <span class="chip p1"><span class="id">K3</span>backup 目录</span>
-        <span class="chip p1"><span class="id">K4</span>1.x option 名</span>
       </div>
     </div>
 
     <div class="grp">
-      <h4>场景与工具 · 2 条</h4>
-      <p>在 apps 模块，各自独立入口，删掉任何一个不影响其他。</p>
+      <h4>用户场景 · 1 条</h4>
+      <p>在 apps 模块，是连接器语义之外的独立入口。</p>
       <div class="chips">
         <span class="chip p2"><span class="id">O1</span>backfill 作业</span>
-        <span class="chip p3"><span class="id">O2</span>调试工具</span>
       </div>
     </div>
 
@@ -851,7 +848,7 @@
     <li><b>核心层对象模型<span class="tag">P0</span></b><span>SnapshotCatalog 与 Snapshot、Segment、Manifest；四份类型映射合并成一份；路径归一。</span></li>
     <li><b>列式读<span class="tag">P0</span></b><span>自有 storage JNI、ColumnVector、DeleteBitset。拷贝从 6 次降到 2 次，下游算子拿得到地址。</span></li>
     <li><b>接口层<span class="tag">P1</span></b><span>Catalog、元数据列、统计、V2 谓词、Limit。三段名和回表在这一步到位。</span></li>
-    <li><b>谓词求值<span class="tag">P1</span></b><span>R6 的 V2 Predicate 翻译、PredicateExpr 与列批位图已接通；R7 的既有 Expr / PlanParser / Evaluator 用于索引搜索前过滤，表读取 option 与 JSON/Array 语义后续实现。</span></li>
+    <li><b>谓词求值<span class="tag">P1</span></b><span>R6 的 V2 Predicate 翻译、PredicateExpr 与列批位图已接通；R7 的 Expr / PlanParser / Evaluator 已同时接入普通表 <code>milvus.filter</code> 与索引搜索前过滤，只有 JSON/Array 与 <code>json_contains</code> 语义等待决策 23。</span></li>
     <li><b>写路径<span class="tag">P1</span></b><span>SegmentWriter、Committer、register。backfill 分支可先做，append 等 Milvus 的 RPC，两件事可以并行谈。</span></li>
     <li><b>向量层<span class="tag">P2</span></b><span>上游 Knowhere Java/JNI、持久化索引加载、搜索与暴力搜索已接通；索引写出和跨任务缓存后续实现。</span></li>
     <li><b>产物与基准<span class="tag">P3</span></b><span>native jar 打包、四条 Spark 线的 CI 矩阵、读吞吐与拷贝次数与写端到端的基准；macOS 与 GPU 产物。</span></li>
@@ -860,8 +857,8 @@
 </section>
 
 <section id="open">
-  <h2><span class="n">08</span>还没定的 5 条</h2>
-  <p class="claim">谓词接口选择已定为 DataSource V2，共享实现覆盖四条 Spark 线。当前五条未决项以总体设计第 4 节为准。</p>
+  <h2><span class="n">08</span>还没定的 6 条</h2>
+  <p class="claim">谓词接口选择已定为 DataSource V2，共享实现覆盖四条 Spark 线。当前六条未决项以总体设计第 4 节为准。</p>
 
   <div class="tw">
   <table>
@@ -872,6 +869,7 @@
       <tr><td class="mono">16</td><td>其余旧向量入口迁移</td><td>集合级 MilvusSearch.search 已确定，旧逐段入口保留；是否统一 SQL 入口及何时退役旧入口仍待定</td><td>不阻塞 V7</td></tr>
       <tr><td class="mono">21</td><td>扩大索引兼容范围与跨任务缓存</td><td>首个非 nullable FloatVector/HNSW 范围已落地；nullable ID 映射、加密文件与跨任务缓存仍待实现</td><td>后续 V2、V4 扩展</td></tr>
       <tr><td class="mono">22</td><td>写段的系统字段来源</td><td>写时分配、登记时补齐或写入占位值</td><td>append 登记</td></tr>
+      <tr><td class="mono">23</td><td>R7 的 JSON、Array 与 <code>json_contains</code> 语义基线</td><td>实现 Milvus 2.6+ 的稳定共同子集，或钉住版本并按服务版本分派；还需明确 null、缺失路径、异构数组、数值转换与错误语义</td><td>不阻塞标量子集；阻塞 JSON/Array 扩展</td></tr>
     </tbody>
   </table>
   </div>

@@ -15,7 +15,7 @@ import org.apache.spark.sql.connector.read.{
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.milvus.storage.expr.{And, PredicateExpr}
+import com.zilliz.milvus.storage.expr.{And, Evaluator, Expr, PredicateExpr}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.expr.SparkPredicateTranslator
@@ -44,8 +44,34 @@ class MilvusScanBuilder(
 
   override def isPartiallyPushed: Boolean = true
   private var currentOptions = options
-  private val extraColumns = MilvusOption.extraColumns(options)
-  private val vectorSearch = MilvusOption(options).vectorSearch
+  private val milvusOption = MilvusOption(options)
+  private val extraColumns = milvusOption.extraColumns
+  private val vectorSearch = milvusOption.vectorSearch
+  private val milvusFilter: Option[Expr] = milvusOption.milvusFilter
+  private val milvusFilterFieldIds: Set[Long] = milvusFilter
+    .map { expression =>
+      try Evaluator.validate(expression, snapshot.schema.fields)
+      catch {
+        case error: IllegalArgumentException =>
+          throw new IllegalArgumentException(
+            s"Option '${MilvusOption.MilvusFilter}' is invalid: ${error.getMessage}",
+            error
+          )
+      }
+      val fieldsByName = snapshot.schema.fields
+        .map(field => field.name -> field)
+        .toMap
+      expression.fields.map(name => fieldsByName(name).fieldID)
+    }
+    .getOrElse(Set.empty)
+  private val configuredReaderFieldIds =
+    MilvusOption.readerFieldIds(options)
+  private val scanFieldIds = schema.fields.iterator
+    .filter(_.metadata.contains(FieldMetadata.MilvusFieldIdMetadataKey))
+    .map(_.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey))
+    .toSeq
+  private val filterNeedsHiddenFields =
+    !milvusFilterFieldIds.subsetOf(scanFieldIds.toSet)
 
   private var pushedPredicateArray: Array[Predicate] = Array.empty[Predicate]
   private var pushedExpression: Option[PredicateExpr] = None
@@ -184,16 +210,28 @@ class MilvusScanBuilder(
     * callbacks. Spark normally pushes predicates before pruning columns, but
     * the DataSource contract does not make correctness depend on that order.
     */
-  private def refreshReaderFieldIds(): Unit =
-    projectedFieldIds.foreach { projected =>
-      val selected = (projected ++ predicateFieldIds.toSeq.sorted).distinct
+  private def refreshReaderFieldIds(): Unit = {
+    val baseFieldIds = projectedFieldIds
+      .orElse(
+        if (configuredReaderFieldIds.nonEmpty) Some(configuredReaderFieldIds)
+        else None
+      )
+      .orElse(
+        if (filterNeedsHiddenFields) Some(scanFieldIds)
+        else None
+      )
+    baseFieldIds.foreach { projected =>
+      val selected = (projected ++ predicateFieldIds.toSeq.sorted ++
+        milvusFilterFieldIds.toSeq.sorted).distinct
       val neededFieldIds =
         if (selected.nonEmpty) selected
         else emptyProjectionFallbackId.toSeq
       logInfo(s"Milvus field ids required by the scan: $neededFieldIds")
       val tmpMap = new ju.HashMap[String, String]()
       options.asScala.foreach { case (key, value) =>
-        tmpMap.put(key, value)
+        if (!key.equalsIgnoreCase(MilvusOption.ReaderFieldIDs)) {
+          tmpMap.put(key, value)
+        }
       }
       tmpMap.put(
         MilvusOption.ReaderFieldIDs,
@@ -201,6 +239,7 @@ class MilvusScanBuilder(
       )
       currentOptions = new CaseInsensitiveStringMap(tmpMap)
     }
+  }
 
   override def build(): Scan = {
     refreshReaderFieldIds()

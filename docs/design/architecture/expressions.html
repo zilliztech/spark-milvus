@@ -74,18 +74,20 @@
   footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .88rem; }
 </style>
 
-<h1>Spark 谓词下推</h1>
+<h1>Spark 与 Milvus 谓词求值</h1>
 
-<p class="meta">能力 R6 · <code>spark.expr</code> 翻译 · <code>core.expr</code> 求值</p>
+<p class="meta">能力 R6、R7 · <code>spark.expr</code> 翻译 · <code>core.expr</code> 求值</p>
 
 <p class="lede"><strong>连接器只接受能够完整保持 Spark SQL 语义的 DataSource V2
-<code>Predicate</code>，在 executor 的 Arrow 列批上求值，并把不支持的整个谓词留给 Spark。</strong></p>
+<code>Predicate</code>；普通表也可通过 <code>milvus.filter</code> 使用已交付的 Milvus 标量表达式子集。
+两种表达式在 executor 的同一 Arrow 列批上独立求值，最终共同决定存活行。</strong></p>
 
-<p>本设计覆盖<a href="../capabilities.md">能力索引</a>中的 R6。R7 已有的手写
+<p>本设计覆盖<a href="../capabilities.md">能力索引</a>中的 R6，以及 R7 已交付的标量子集。R7 的手写
 <code>PlanParser</code> 与 <code>MilvusSearch.filter</code> / <code>vector.search.filter</code> 标量子集
-保留既有 <code>Expr</code> / <code>Evaluator</code> 合同，不由本设计重写。R6 使用按字段 id 和类型绑定的
-<code>PredicateExpr</code> / <code>PredicateEvaluator</code>；普通表读取的 <code>milvus.filter</code> option 以及 JSON、Array、
-<code>json_contains</code> 语义仍未接入。读任务、删除和列式出口见
+保留既有 <code>Expr</code> / <code>Evaluator</code> 合同，普通表的 <code>milvus.filter</code> 复用它。
+R6 使用按字段 id 和类型绑定的 <code>PredicateExpr</code> / <code>PredicateEvaluator</code>；两套中间表示不能互转，
+因为 Spark 与 Milvus 的字面量和浮点比较合同不同。JSON、Array、<code>json_contains</code> 仍由开放决策 23 阻塞。
+读任务、删除和列式出口见
 <a href="read.html">读路径</a>，模块边界见<a href="modules.md">模块设计</a>。</p>
 
 <h2 id="surface">一、公开语义</h2>
@@ -141,6 +143,12 @@
 Spark 可能传入的其他 V2 表达式节点、嵌套 <code>NamedReference</code> 和未知操作符均保留。
 2.0 不实现 DataSource V1 <code>Filter</code>，ScanBuilder 也不同时实现 V1 与 V2 接口。</p>
 
+<p><code>milvus.filter</code> 接受比较、<code>IN</code> / <code>NOT IN</code>、<code>IS NULL</code> /
+<code>IS NOT NULL</code> 与 <code>AND</code> / <code>OR</code> / <code>NOT</code> 的标量子集，字段限 Bool、
+整数、Float、Double、String、VarChar 与 Text。option 缺失表示不启用；显式空值、语法错误、未知字段、
+不支持的字段类型和不匹配的字面量都在 driver 规划时失败。普通表上的 Spark predicate 与
+<code>milvus.filter</code> 按 AND 合并；任一入口都不能静默忽略另一个入口。</p>
+
 <h2 id="driver">二、driver 只翻译和绑定</h2>
 
 <p><strong>driver 把 Spark 对象变成按 Milvus 字段 id 引用的可序列化 <code>PredicateExpr</code>，executor
@@ -192,9 +200,12 @@ Spark 可能传入的其他 V2 表达式节点、嵌套 <code>NamedReference</co
 
 <h2 id="projection">三、输出列与求值列分开</h2>
 
-<p><strong>谓词引用的列即使没有被 <code>select</code> 输出，也必须从段中读取；读取它不改变 Spark
+<p><strong>任一谓词引用的列即使没有被 <code>select</code> 输出，也必须从段中读取；读取它不改变 Spark
 看到的 schema。</strong>ScanBuilder 分别维护输出 schema 与内部所需字段 id。内部集合是投影字段、
-谓词字段、删除与其他 reader 内部字段的并集；输出仍严格等于 Spark 的 required schema。</p>
+Spark predicate 字段、<code>milvus.filter</code> 字段、删除与其他 reader 内部字段的并集；输出仍严格等于
+Spark 的 required schema。完整推导的 schema 没有发生 Spark 列裁剪，且已包含全部 filter 字段时，继续用
+空字段列表表示读取全部字段，不能把它误收窄为只读取 filter 字段。外部 schema 隐藏了 filter 字段时则显式
+读取输出字段与隐藏 filter 字段的并集。</p>
 
 <p>例如 <code>df.select("title").where($"price" &gt; 10)</code> 会读取 <code>title</code> 与
 <code>price</code>，求值后只交付 <code>title</code>。Spark 可以先调用 <code>pushPredicates</code>，也可以先调用
@@ -229,16 +240,20 @@ Spark 可能传入的其他 V2 表达式节点、嵌套 <code>NamedReference</co
   <li>String、VarChar 与 Text 使用默认二进制 collation 的 UTF-8 等值、顺序与前后缀语义。</li>
 </ul>
 
+<p>以上表格与列表是 R6 的 Spark SQL 合同。R7 的 <code>Expr</code> 保留 Milvus 标量合同：浮点字面量按目标
+字段精度转换，字符串按 UTF-8 字节比较，最终同样只有 TRUE 行通过。reader 分别取得两个排除位图后做 OR；
+这等价于用户条件做 AND，但不把其中一种语义改写成另一种。</p>
+
 <h2 id="executor">五、executor 先确定存活行，再交付或计数</h2>
 
-<p><strong>同一个 <code>PredicateEvaluator</code> 对行式和列式出口求整批位图，过滤发生在 Limit 之前。</strong>
-每个 Arrow 批先完成表达式求值，reader 再逐行合并谓词排除与删除判定。行式 reader 只迭代存活位置；
+<p><strong><code>PredicateEvaluator</code> 与 <code>Evaluator</code> 都对行式和列式出口求整批位图，过滤发生在 Limit 之前。</strong>
+每个 Arrow 批先完成两种表达式求值，reader 再逐行合并两个排除位图与删除判定。行式 reader 只迭代存活位置；
 列式 reader 用存活位置数组构造 <code>SelectedRowsColumn</code>，继续保持列式默认路径，不复制整列 buffer。</p>
 
 <ol>
   <li><code>SegmentReader</code> 读取包含输出列和内部求值列的 Arrow 批。</li>
-  <li><code>PredicateEvaluator</code> 按 field id 找列，生成表达式排除位图。</li>
-  <li>reader 逐行计算 <code>deleted(root, row) || predicateBitmap.isExcluded(row)</code>。</li>
+  <li><code>PredicateEvaluator</code> 按 field id、<code>Evaluator</code> 按字段名经 <code>ColumnBinding</code> 找列，各自生成排除位图。</li>
+  <li>reader 逐行计算删除、Spark predicate 与 Milvus filter 三个排除条件的逻辑 OR。</li>
   <li>reader 交付存活行；分区 Limit 只对已交付的存活行计数。</li>
   <li>批与 reader 按原有所有权规则关闭，谓词求值不延长 Arrow buffer 生命周期。</li>
 </ol>
@@ -258,14 +273,15 @@ EOF 校验统计 native reader 交付的物理行数，不用过滤后的行数�
     <tr><td>翻译器找不到字段 id metadata，或 metadata 与 Spark 类型冲突</td><td>整个顶层 Predicate 作为 residual 返回</td></tr>
     <tr><td>Spark 要求物理读取的 required schema 字段缺少 field id</td><td>既有列裁剪校验使规划失败</td></tr>
     <tr><td>executor 找不到已绑定字段、Arrow vector 类型不符、批长度不一致</td><td>task 失败；不返回空结果或全 false</td></tr>
-    <tr><td>带 <code>vector.search.*</code> 的读</td><td>不接受任何 Spark predicate，全部作为 residual 留给 Spark，在 TopK 后求值；索引搜索前只执行显式的 <code>MilvusSearch.filter</code> / <code>vector.search.filter</code></td></tr>
-    <tr><td>Milvus 表达式字符串</td><td>R7 的手写 <code>PlanParser</code> 已支持索引查询的标量子集；普通表读取的 <code>milvus.filter</code> option、JSON 和 Array 语义不在本设计范围</td></tr>
+    <tr><td>带 <code>vector.search.*</code> 的读</td><td>不接受 <code>milvus.filter</code>，明确报错并提示使用 <code>vector.search.filter</code>；Spark predicate 全部作为 residual 留给 Spark，在 TopK 后求值</td></tr>
+    <tr><td><code>milvus.filter</code> 显式空值、语法错误、未知字段、类型或字面量不匹配</td><td>driver 规划失败，错误包含 option 键和具体原因</td></tr>
+    <tr><td>executor 找不到 <code>milvus.filter</code> 已验证的物理列，或列长度不足</td><td>task 失败；不返回空结果或全 false</td></tr>
   </tbody>
 </table>
 
-<div class="warning"><strong>R7 与 R6 保持独立入口。</strong>现有手写 <code>PlanParser</code> 已交付
-索引查询所需的标量子集；普通表读取 option、JSON path、JSON null 与缺失值、Array 和
-<code>json_contains</code> 的 Milvus 语义仍需扩展。核心模块不会引入 antlr。</div>
+<div class="warning"><strong>R7 与 R6 保持独立入口。</strong>同一个 R7 标量实现服务普通表
+<code>milvus.filter</code> 与向量查询的 <code>vector.search.filter</code>，但两个 option 不能在一次读取中混用。
+JSON path、JSON null 与缺失值、Array 和 <code>json_contains</code> 必须先解决开放决策 23；核心模块不会引入 antlr。</div>
 
 <h2 id="invariants">七、实现必须保持的合同</h2>
 
@@ -274,6 +290,7 @@ EOF 校验统计 native reader 交付的物理行数，不用过滤后的行数�
   <li>同一输入在行式与列式出口得到相同行集合，在 V2 与 V3 段得到相同结果。</li>
   <li>投影掉谓词列、删除与谓词同时生效、NULL 组合、空批和全过滤批都不改变输出 schema。</li>
   <li>所有 accepted predicates 都由连接器完整执行；所有 residual predicates 都由 Spark 完整执行。</li>
+  <li><code>milvus.filter</code> 只在普通扫描执行，并与已接受的 Spark predicate、删除位图及 Limit 正确组合。</li>
   <li><code>core.expr</code> 源码不依赖 Spark，表达式描述不持有 Arrow vector、native handle 或打开的资源。</li>
 </ul>
 

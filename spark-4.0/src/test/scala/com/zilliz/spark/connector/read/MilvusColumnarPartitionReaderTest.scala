@@ -18,6 +18,7 @@ import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.expr.{
   Comparison,
   ComparisonOperator,
+  Expr,
   FieldRef,
   PredicateExpr
 }
@@ -212,6 +213,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       rawVectors: Boolean = false,
       requestedExtraColumns: Set[String] = Set.empty,
       pushedExpression: Option[PredicateExpr] = None,
+      milvusFilter: Option[Expr] = None,
       columnNameFor: Long => Option[String] = (_: Long) => None
   ) = new MilvusColumnarPartitionReader(
     schema,
@@ -224,6 +226,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     segmentId = 30L,
     requestedExtraColumns = requestedExtraColumns,
     pushedExpression = pushedExpression,
+    milvusFilter = milvusFilter,
     columnNameFor = columnNameFor
   )
 
@@ -446,36 +449,43 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     } finally allocator.close()
   }
 
-  test(
-    "predicate and delete exclusions combine without exposing filter fields"
-  ) {
+  test("Milvus filter, Spark predicate and deletes combine before projection") {
     val allocator = new RootAllocator(Long.MaxValue)
     try {
       val root = namedRoot(
         allocator,
-        Seq(1L, 2L, 3L, 4L),
-        Seq(Seq(1f, 1f), Seq(2f, 2f), Seq(3f, 3f), Seq(4f, 4f))
+        Seq(1L, 2L, 3L, 4L, 5L),
+        Seq(
+          Seq(1f, 1f),
+          Seq(2f, 2f),
+          Seq(3f, 3f),
+          Seq(4f, 4f),
+          Seq(5f, 5f)
+        )
       )
       val expression = Comparison(
         FieldRef(100L, DataType.Int64),
-        ComparisonOperator.GreaterThan,
-        IntegerValue(2L)
+        ComparisonOperator.LessThanOrEqual,
+        IntegerValue(4L)
       )
       val outputSchema = StructType(Seq(sparkSchema("vec")))
       val r = reader(
         Seq(root),
-        deleted = (_, row) => row == 3,
+        deleted = (_, row) => row == 2,
         schema = outputSchema,
         pushedExpression = Some(expression),
+        milvusFilter = Some(Expr.Compare("id", ">=", 2L)),
         columnNameFor = id => if (id == 100L) Some("id") else None
       )
       try {
         r.next() shouldBe true
         val batch = r.get()
         batch.numCols() shouldBe 1
-        batch.numRows() shouldBe 1
+        batch.numRows() shouldBe 2
         (0 until 2).map(batch.column(0).getArray(0).getFloat) shouldBe
-          Seq(3f, 3f)
+          Seq(2f, 2f)
+        (0 until 2).map(batch.column(0).getArray(1).getFloat) shouldBe
+          Seq(4f, 4f)
       } finally r.close()
     } finally allocator.close()
   }
@@ -501,13 +511,31 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         Seq(root),
         arrowColumnFor = byFieldId(milvusSchema),
         pushedExpression = Some(expression),
+        milvusFilter = Some(Expr.Compare("id", "<=", 2L)),
         columnNameFor = id => Some(id.toString)
       )
       try {
         r.next() shouldBe true
         val batch = r.get()
-        batch.numRows() shouldBe 2
-        (0 until 2).map(batch.column(0).getLong) shouldBe Seq(2L, 3L)
+        batch.numRows() shouldBe 1
+        batch.column(0).getLong(0) shouldBe 2L
+      } finally r.close()
+    } finally allocator.close()
+  }
+
+  test("a Milvus filter whose physical column was not read fails") {
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val root = namedRoot(allocator, Seq(1L), Seq(Seq(1f, 1f)))
+      val r = reader(
+        Seq(root),
+        arrowColumnFor = name => if (name == "id") "missing-id" else name,
+        milvusFilter = Some(Expr.Compare("id", ">=", 1L))
+      )
+      try {
+        val error = intercept[IllegalStateException](r.next())
+        error.getMessage should include("id")
+        error.getMessage should include("missing-id")
       } finally r.close()
     } finally allocator.close()
   }

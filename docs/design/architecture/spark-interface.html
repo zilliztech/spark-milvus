@@ -109,5 +109,7 @@ read task 序列化后保留全部限制；原生属性使用类型化值；关�
 
 <h2 id="outside">六、不在本设计内的项</h2>
 
-<p>本页不增加 <code>milvus.filter</code>，不改变 W6 索引构建参数，不建立索引/GPU/cache 预算，也不以 connector 本地开关绕过
-milvus-storage 尚未提供的 native 内存与预取接口。这些能力必须先有各自设计和上游可调用接口，才能加入跨层合同。</p>
+<p><code>milvus.filter</code> 的标量合同见<a href="expressions.html">表达式设计</a>：第 3 层负责严格解析、
+按固定快照校验并补齐内部读取列，第 2 层在 Arrow 批上求值。本页仍不改变 W6 索引构建参数，不建立索引/GPU/cache
+预算，也不以 connector 本地开关绕过 milvus-storage 尚未提供的 native 内存与预取接口。这些能力必须先有各自设计
+和上游可调用接口，才能加入跨层合同。</p>
