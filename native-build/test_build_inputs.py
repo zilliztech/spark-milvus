@@ -20,7 +20,11 @@ class BundlePromotionTest(unittest.TestCase):
         path = self.work / "bundle-candidates" / name
         path.mkdir(parents=True)
         record = {"audit": "passed", "knowhereCApiTestsExit": 0,
-                  "knowhereCApiTests": KNOWHERE_C_API_TESTS}
+                  "knowhereCApiTests": KNOWHERE_C_API_TESTS, "auditPolicy": "jvm-load",
+                  "jvmLoadTests": [
+                      {"entries": ["libmilvus-storage-jni.so", "libknowhere_jni.so"], "exit": 0},
+                      {"entries": ["libknowhere_jni.so", "libmilvus-storage-jni.so"], "exit": 0},
+                  ]}
         record.update(changes)
         (path / "provenance.json").write_text(json.dumps(record))
         (path / "library.so").write_text(name)
@@ -36,6 +40,12 @@ class BundlePromotionTest(unittest.TestCase):
         promote_bundle(self.candidate("good"), self.work)
         for name, changes in (("failed-tests", {"knowhereCApiTestsExit": 1}),
                               ("failed-audit", {"audit": "pending"}),
+                              ("old-audit-policy", {"auditPolicy": "standalone"}),
+                              ("missing-jvm-loads", {"jvmLoadTests": []}),
+                              ("failed-jvm-load", {"jvmLoadTests": [
+                                  {"entries": ["libmilvus-storage-jni.so", "libknowhere_jni.so"], "exit": 1},
+                                  {"entries": ["libknowhere_jni.so", "libmilvus-storage-jni.so"], "exit": 0},
+                              ]}),
                               ("missing-test", {"knowhereCApiTests": ["knowhere_c_api"]})):
             with self.subTest(name=name):
                 candidate = self.candidate(name, **changes)

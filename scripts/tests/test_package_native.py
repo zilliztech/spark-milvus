@@ -30,7 +30,7 @@ SPEC.loader.exec_module(PACKAGE_NATIVE)
 @unittest.skipUnless(sys.platform.startswith("linux"), "Native packaging validates Linux ELF files")
 class PackageNativeTest(unittest.TestCase):
     def setUp(self):
-        for executable in ("gcc", "readelf", "ldd", "nm"):
+        for executable in ("gcc", "readelf", "ldd"):
             self.assertIsNotNone(shutil.which(executable), f"Required test tool: {executable}")
         self.temporary = tempfile.TemporaryDirectory(prefix="package-native-test-")
         self.addCleanup(self.temporary.cleanup)
@@ -52,7 +52,9 @@ class PackageNativeTest(unittest.TestCase):
             "platform": "linux-x86_64" if os.uname().machine == "x86_64" else "linux-aarch64",
             "with_cardinal": False,
             "dependency.mode": "shared",
+            "auditPolicy": "jvm-load",
             "audit": "passed",
+            "jvmLoadTests": PACKAGE_NATIVE.expected_jvm_load_tests(),
             "knowhereCApiTestsExit": 0,
             "knowhereCApiTests": [
                 "knowhere_c_api",
@@ -65,6 +67,17 @@ class PackageNativeTest(unittest.TestCase):
         self.record_provenance()
         self.prefix = f"native/milvus/1/{self.metadata['platform']}/"
         self.output = self.root / "bundle.jar"
+        self.jvm_load_patch = mock.patch.object(
+            PACKAGE_NATIVE, "check_jvm_loads", return_value=PACKAGE_NATIVE.expected_jvm_load_tests(),
+        )
+        self.jvm_load_mock = self.jvm_load_patch.start()
+        self.jvm_load_patch_active = True
+        self.addCleanup(self.stop_jvm_load_mock)
+
+    def stop_jvm_load_mock(self):
+        if self.jvm_load_patch_active:
+            self.jvm_load_patch.stop()
+            self.jvm_load_patch_active = False
 
     def compile(self, name, source, dependencies=(), soname=None, rpath="$ORIGIN"):
         self.source_count += 1
@@ -88,6 +101,9 @@ class PackageNativeTest(unittest.TestCase):
 
     def record_provenance(self):
         libraries, aliases = PACKAGE_NATIVE.inventory(self.libraries, self.metadata["platform"])
+        self.metadata["auditPolicy"] = "jvm-load"
+        self.metadata["audit"] = "passed"
+        self.metadata["jvmLoadTests"] = PACKAGE_NATIVE.expected_jvm_load_tests()
         self.metadata["relocationRoots"] = sorted(libraries)
         self.metadata["dlopenEntries"] = list(PACKAGE_NATIVE.AUDIT_DLOPEN_ENTRIES)
         self.metadata["libraries"] = {
@@ -101,7 +117,7 @@ class PackageNativeTest(unittest.TestCase):
         self.provenance.write_text(json.dumps(self.metadata, sort_keys=True), encoding="utf-8")
 
     def package(self, output=None, evidence=None):
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             PACKAGE_NATIVE.package(self.libraries, self.provenance, output or self.output, evidence=evidence)
 
     def manifest(self, archive):
@@ -135,6 +151,11 @@ class PackageNativeTest(unittest.TestCase):
         with zipfile.ZipFile(self.output) as archive:
             self.assertEqual(",".join(PACKAGE_NATIVE.LOAD_ENTRIES),
                              self.manifest(archive)["load.entries"])
+
+    def test_packaging_reruns_both_jvm_load_orders_on_the_source_directory(self):
+        self.package()
+
+        self.jvm_load_mock.assert_called_once_with(self.libraries.resolve(), output=None)
 
     def test_entry_library_may_be_a_real_soname_alias(self):
         self.compile(
@@ -212,19 +233,21 @@ class PackageNativeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing non-system dependency libdependency.so.1"):
             self.package()
 
-    def test_unresolved_symbol_is_rejected_even_when_ldd_exits_successfully(self):
+    def test_jvm_load_failure_blocks_packaging_even_when_ldd_exits_successfully(self):
         self.compile(
             "libknowhere_jni.so",
-            "extern int missing_native_symbol(void); int known(void) { return missing_native_symbol(); }",
+            "extern int missing_native_symbol; int *known = &missing_native_symbol;",
         )
         # GNU ldd -r normally exits zero for undefined symbols; checking only
         # its exit code would publish a JAR that fails at native initialization.
         diagnostic = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libknowhere_jni.so"))
         self.assertIn("undefined symbol: missing_native_symbol", diagnostic)
         self.record_provenance()
+        self.stop_jvm_load_mock()
 
-        with self.assertRaisesRegex(ValueError, "Unresolved native relocations.*libknowhere_jni.so"):
+        with self.assertRaisesRegex(ValueError, "Current JVM load record .*exit 0"):
             self.package()
+        self.assertFalse(self.output.exists())
 
     def test_missing_soname_file_is_rejected_before_relocation(self):
         self.compile("libunaliased.so.1.0", "int unaliased(void) { return 3; }", soname="libunaliased.so.1")
@@ -250,32 +273,28 @@ class PackageNativeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "System ABI library must not be bundled: libz.so.1"):
             self.package()
 
-    def test_cardinal_missing_callback_is_not_hidden_by_its_parent(self):
+    def test_standalone_cardinal_relocation_does_not_replace_jvm_load_policy(self):
         self.compile("libcardinalv1.so", "extern int missing_callback(void); int plugin(void) { return missing_callback(); }")
         self.compile("libcardinalv2.so", "int second_plugin(void) { return 5; }")
         self.compile("libknowhere.so", "int unrelated(void) { return 9; }")
         self.metadata["with_cardinal"] = True
         self.record_provenance()
 
-        with self.assertRaisesRegex(ValueError, "symbols outside.*libknowhere.so"):
-            self.package()
+        standalone = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libcardinalv1.so"))
+        self.assertIn("undefined symbol: missing_callback", standalone)
+        self.package()
+        self.assertTrue(self.output.is_file())
 
-    def test_ordinary_library_cannot_depend_on_symbols_from_its_consumer(self):
+    def test_underlinked_standalone_library_can_package_when_both_jvm_orders_load(self):
         self.compile("libother-plugin.so", "extern int host_callback(void); int plugin(void) { return host_callback(); }")
         self.compile("libknowhere.so", "int host_callback(void) { return 9; }")
-        self.compile(
-            "libknowhere_jni.so",
-            "extern int plugin(void); extern int host_callback(void); "
-            "int entry_2(void) { return plugin() + host_callback(); }",
-            dependencies=("libother-plugin.so", "libknowhere.so"),
-        )
         self.record_provenance()
 
         standalone = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libother-plugin.so"))
         self.assertIn("undefined symbol: host_callback", standalone)
-        with self.assertRaisesRegex(ValueError, "Unresolved native relocations in libother-plugin.so"):
-            self.package()
-        self.assertFalse(self.output.exists())
+        self.stop_jvm_load_mock()
+        self.package()
+        self.assertTrue(self.output.is_file())
 
     def test_absolute_dependency_search_path_is_rejected(self):
         self.compile(
@@ -375,7 +394,15 @@ class PackageNativeTest(unittest.TestCase):
     def test_provenance_requires_complete_successful_validation(self):
         valid = dict(self.metadata)
         cases = (
+            ("auditPolicy", None), ("auditPolicy", "per-library"),
             ("audit", None), ("audit", "pending"), ("audit", "failed"),
+            ("jvmLoadTests", None),
+            ("jvmLoadTests", valid["jvmLoadTests"][:-1]),
+            ("jvmLoadTests", list(reversed(valid["jvmLoadTests"]))),
+            ("jvmLoadTests", [dict(valid["jvmLoadTests"][0], exit=1), valid["jvmLoadTests"][1]]),
+            ("jvmLoadTests", [dict(valid["jvmLoadTests"][0], exit=False), valid["jvmLoadTests"][1]]),
+            ("jvmLoadTests", [dict(valid["jvmLoadTests"][0], diagnostic="unexpected"),
+                              valid["jvmLoadTests"][1]]),
             ("knowhereCApiTestsExit", None), ("knowhereCApiTestsExit", 1),
             ("knowhereCApiTestsExit", False),
             ("knowhereCApiTests", None),
@@ -511,7 +538,10 @@ class PackageNativeTest(unittest.TestCase):
 
     def test_build_locks_profiles_dependency_pins_and_source_patches_are_embedded_verbatim(self):
         evidence = self.root / "evidence"
+        helper_directory = SCRIPT.parents[1] / "native-build"
         records = {
+            "NativeLoadCheck.java": (helper_directory / "NativeLoadCheck.java").read_bytes(),
+            "jvm_load.py": (helper_directory / "jvm_load.py").read_bytes(),
             "build/conan.lock": b'{"version":"0.5","requires":[]}\n',
             "build/host-profile": b"[settings]\nos=Linux\narch=x86_64\n",
             "build/storage-source-files.json": b'{"cpp/source.cc":"sample-digest"}\n',

@@ -19,10 +19,12 @@ Rust bridge do not expose a shared-library option.
 
 The current build target is Linux x86_64. It requires Conan 2, CMake 3.27.5,
 GCC/G++/gfortran 12, Ninja, Python 3.9+, Git, a JDK selected by `JAVA_HOME`,
-Rust/Cargo, ccache, patchelf, binutils and the normal development packages
+Rust/Cargo, libclang, ccache, patchelf, binutils and the normal development packages
 required by the upstream engines. Folly's Linux async I/O dependency requires
-the libaio development package. Conan remotes must provide each pinned upstream
-recipe that is absent from the local cache.
+the libaio development package. Rust bindgen loads libclang while building the
+storage bridge's `custom-labels` dependency; Ubuntu provides it in `libclang-dev`.
+Conan remotes must provide each pinned upstream recipe that is absent from the
+local cache.
 The build records tool versions and never reads a native library from an older
 connector JAR.
 
@@ -144,21 +146,22 @@ path, package version and SHA; target machines must satisfy that ABI.
 Only staged copies receive
 `$ORIGIN` RPATH; inputs and cached Conan packages remain unchanged.
 
-Every staged library must have a non-executable GNU stack and pass relocation
-checks without unresolved symbols or IFUNC relink warnings. The two Cardinal
-plugins call their parent Knowhere engine: their standalone missing symbols
-must all be exported by the selected `libknowhere.so`, and relocation is repeated
-with that parent loaded. No other library receives this exception. Both JNI
-entries, the storage engine and the Knowhere engine/C entry also undergo fresh
-`RTLD_NOW` loading. Failure preserves the
-candidate and logs for diagnosis. Passing these checks is not a claim that JNI
-functional tests, Spark queries, DiskANN tests or license publication review
-passed; those are separate acceptance steps.
+Native acceptance uses two fresh JVMs that call `System.load` on both JNI
+entries, in storage-first and Knowhere-first order. Staging, packaging and sbt
+share `jvm_load.py` and `NativeLoadCheck.java`. The checker uses the selected
+JRE's `libjsig`, clears additional library paths and JVM injection options, and
+rejects either failed load order. Provenance records `auditPolicy: jvm-load` and
+both `jvmLoadTests`; an older standalone audit is not JVM loading evidence.
+
+Per-library GNU stack, relocation, private-symbol and `RTLD_NOW` results remain
+diagnostics. Their failures are recorded unchanged and do not block packaging.
+JNI loading does not establish that JNI calls or Spark queries work; functional
+storage and vector tests and real UAT queries remain separate acceptance steps.
 Every run stages in a fresh candidate directory. Only a candidate whose C API
-tests and native audit passed replaces `bundle/`; the old bundle is retained in
+tests and JVM loading passed replaces `bundle/`; the old bundle is retained in
 `bundle-history/`. A failed retry preserves the last successful bundle. A
 build-directory lock prevents two builders from changing the same work tree.
-The engine and storage JNI audit also reject exported private LZ4, XXHash,
+The engine and storage JNI diagnostics also record exported private LZ4, XXHash,
 Zstandard, OpenSSL and AWS-LC symbols from the Rust archive.
 
 Package the validated directory with `scripts/package-native.py`. Packaging

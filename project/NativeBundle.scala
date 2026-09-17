@@ -42,7 +42,7 @@ object NativeBundle {
     "Unified native platform JAR selected by -Dmilvus.native.bundle"
   )
   val verifyNativeBundle = taskKey[File](
-    "Verify the unified native platform JAR, source pins and ELF relocations"
+    "Verify the unified native platform JAR, source pins and JVM loading"
   )
   val validatedNativeBundle = taskKey[Option[File]](
     "Validate the selected native bundle once for dependent build tasks"
@@ -246,14 +246,6 @@ object NativeBundle {
         !allNames("libz.so.1"),
         "System zlib must not be included in the native bundle"
       )
-      Seq(
-        "libmilvus-storage-jni.so",
-        "libmilvus-storage.so",
-        "libknowhere_jni.so"
-      )
-        .foreach(name =>
-          require(allNames(name), s"Missing native entry: $name")
-        )
       aliases.foreach { alias =>
         require(
           libraries.contains(manifest.getProperty(s"alias.$alias")),
@@ -280,10 +272,16 @@ object NativeBundle {
       )
       val directory = target / "native-bundle" / jarHash
       val stamp = directory / "validated"
+      val checker = root / "native-build" / "jvm_load.py"
+      val javaChecker = root / "native-build" / "NativeLoadCheck.java"
+      val stampValue =
+        s"jvm-load-v1\n$jarHash\n${auditDlopenEntries.mkString(",")}\n" +
+          s"${digest(checker)}\n${digest(javaChecker)}\n" +
+          s"${System.getProperty("java.home")}\n${System.getProperty("java.version")}\n"
       // The source checks above run on every invocation; immutable archive bytes
-      // determine the extracted libraries and relocation result below.
+      // together with the checker and JRE determine the cached JVM load result.
       withValidationLock(directory) {
-        if (!stamp.isFile) {
+        if (!stamp.isFile || IO.read(stamp) != stampValue) {
           IO.delete(directory)
           IO.createDirectory(directory)
           val lib = directory / "lib"
@@ -317,9 +315,10 @@ object NativeBundle {
           }
           NativeLibraries.validateUnifiedLinux(
             lib,
+            root,
             message => log.info(message)
           )
-          IO.write(stamp, jarHash + "\n")
+          IO.write(stamp, stampValue)
         }
       }
       log.info(s"Verified unified native bundle: $jar")
@@ -392,6 +391,26 @@ object NativeBundle {
 
     require(string("audit") == "passed", "Native provenance audit did not pass")
     require(
+      string("auditPolicy") == "jvm-load",
+      "Native provenance must record JVM load validation"
+    )
+    val jvmLoadTests = value("jvmLoadTests") match {
+      case records: List[_] if records.size == 2 =>
+        records.map {
+          case record: Map[_, _] => stringKeys(record, "jvmLoadTests")
+          case _                 => sys.error("Invalid JVM load test record")
+        }
+      case _ => sys.error("Native provenance must record both JVM load orders")
+    }
+    jvmLoadTests.zip(List(jvmLoadEntries, jvmLoadEntries.reverse)).foreach {
+      case (record, order) =>
+        require(
+          record.get("entries").contains(order.toList) &&
+            record.get("exit").contains(0.0),
+          "Native provenance JVM load order did not pass"
+        )
+    }
+    require(
       value("knowhereCApiTestsExit") == 0.0,
       "Native provenance Knowhere C API tests did not pass"
     )
@@ -409,9 +428,14 @@ object NativeBundle {
         relocationRoots.toSet == libraries.toSet,
       "Native provenance relocation roots differ from the manifest libraries"
     )
+    val dlopenEntries = strings("dlopenEntries")
     require(
-      strings("dlopenEntries") == auditDlopenEntries,
+      dlopenEntries == auditDlopenEntries,
       "Native provenance has invalid dlopen entries"
+    )
+    val bundleEntries = libraries.toSet ++ aliases
+    dlopenEntries.foreach(name =>
+      require(bundleEntries(name), s"Missing native audit entry: $name")
     )
     require(
       string("storage.revision") == storageRevision &&

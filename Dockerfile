@@ -28,11 +28,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
 # The unified native source profile pins GCC 12, including OpenBLAS's Fortran compiler.
+# Rust bindgen also loads libclang to generate the storage bridge's C bindings.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget curl git g++ gcc gcc-12 g++-12 gfortran-12 make ccache gdb \
     python3 python3-pip \
     zip unzip pkg-config ninja-build \
-    automake autoconf libtool patchelf libaio-dev \
+    automake autoconf libtool patchelf libaio-dev libclang-dev \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/aclocal-1.16 /usr/bin/aclocal-1.15 \
     && ln -sf /usr/bin/automake-1.16 /usr/bin/automake-1.15
@@ -58,11 +59,6 @@ RUN wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-$(uname -m).tar.
 # The pinned milvus-storage submodule requires Conan 2.
 ENV CONAN_HOME=/root/.conan2
 RUN pip3 install --no-cache-dir conan==2.25.1
-
-# Setup the Conan 2 profile and artifact remote used by milvus-storage.
-RUN conan profile detect --force \
-    && conan remote add --force default-conan-local2 \
-        https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2
 
 # The current milvus-storage format bridge is built from Rust sources.
 ENV RUSTUP_HOME=/root/.rustup
@@ -100,7 +96,16 @@ RUN git config --global --add safe.directory /workspace && \
 
 # Linux x86_64 builds both engines; arm64 retains the existing storage build
 # unless a matching prebuilt unified bundle is explicitly supplied.
-RUN make native-resources "NATIVE_JOBS=${NATIVE_JOBS}" \
+# Cache dependencies across failed build steps. Initialize Conan after mounting
+# its cache so an empty cache has the required profile and artifact remote.
+RUN --mount=type=cache,id=spark-milvus-conan-2-${TARGETARCH},target=/root/.conan2,sharing=locked \
+    --mount=type=cache,id=spark-milvus-cargo-registry,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=spark-milvus-cargo-git,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,id=spark-milvus-ccache,target=/root/.ccache,sharing=locked \
+    conan profile detect --force \
+    && conan remote add --force default-conan-local2 \
+        https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 \
+    && make native-resources "NATIVE_JOBS=${NATIVE_JOBS}" \
     "NATIVE_BUILD_OPTIONS=${NATIVE_BUILD_OPTIONS}" "NATIVE_BUNDLE=${NATIVE_BUNDLE}"
 
 # Build and optionally publish the runnable assembly as the primary Maven JAR.
@@ -118,7 +123,7 @@ RUN set -eux; \
         *) echo "Unsupported build architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
     set --; \
-    if [ -n "${NATIVE_BUNDLE}" ] || [ "${native_platform}" = linux-x86_64 ]; then \
+    if [ -n "${NATIVE_BUNDLE:-}" ] || [ "${native_platform}" = linux-x86_64 ]; then \
         native_bundle="${NATIVE_BUNDLE:-/workspace/target/native-build/${native_platform}/milvus-native-${native_platform}.jar}"; \
         native_bundle="$(readlink -f "${native_bundle}")"; \
         test -s "${native_bundle}"; \

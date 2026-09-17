@@ -9,7 +9,7 @@ import scala.util.control.NonFatal
 
 import sbt.IO
 
-/** Exercises source-pin and provenance checks in the compiled sbt build. */
+/** Exercises native bundle checks in the compiled sbt build. */
 object NativeBundleValidationProbe {
   private val storageRevision = "a" * 40
   private val knowhereRevision = "b" * 40
@@ -29,6 +29,10 @@ object NativeBundleValidationProbe {
     "knowhere_c_api",
     "knowhere_c_api_concurrency",
     "knowhere_c_api_diskann_acceptance"
+  )
+  private val loadOrders = Vector(
+    Vector("libmilvus-storage-jni.so", "libknowhere_jni.so"),
+    Vector("libknowhere_jni.so", "libmilvus-storage-jni.so")
   )
 
   private def quote(value: String): String =
@@ -52,6 +56,9 @@ object NativeBundleValidationProbe {
       aliasRecords: Map[String, String] = aliases,
       withCardinal: Boolean = false,
       audit: String = "passed",
+      auditPolicy: String = "jvm-load",
+      jvmOrders: Vector[Vector[String]] = loadOrders,
+      jvmExit: Int = 0,
       testExit: Int = 0,
       testNames: Vector[String] = tests,
       dependencyMode: String = "shared",
@@ -70,9 +77,12 @@ object NativeBundleValidationProbe {
       .sortBy(_._1)
       .map { case (name, target) => s"${quote(name)}:${quote(target)}" }
       .mkString("{", ",", "}")
+    val jvmRecords = jvmOrders
+      .map(order => s"""{"entries":${array(order)},"exit":$jvmExit}""")
+      .mkString("[", ",", "]")
     s"""{"audit":${quote(
         audit
-      )},"knowhereCApiTestsExit":$testExit,"knowhereCApiTests":${array(
+      )},"auditPolicy":${quote(auditPolicy)},"jvmLoadTests":$jvmRecords,"knowhereCApiTestsExit":$testExit,"knowhereCApiTests":${array(
         testNames
       )},"dependency.mode":${quote(dependencyMode)},"relocationRoots":${array(
         relocationRoots
@@ -200,6 +210,18 @@ object NativeBundleValidationProbe {
     reject("audit") {
       validate(provenance(audit = "pending"))
     }
+    reject("standalone audit cannot replace JVM validation") {
+      validate(provenance(auditPolicy = "standalone"))
+    }
+    reject("JVM load failure") {
+      validate(provenance(jvmExit = 1))
+    }
+    reject("missing JVM load order") {
+      validate(provenance(jvmOrders = loadOrders.take(1)))
+    }
+    reject("repeated JVM load order") {
+      validate(provenance(jvmOrders = Vector.fill(2)(loadOrders.head)))
+    }
     reject("Knowhere C API exit") {
       validate(provenance(testExit = 1))
     }
@@ -218,6 +240,29 @@ object NativeBundleValidationProbe {
     reject("dlopen entries") {
       validate(provenance(dlopenEntries = auditEntries.reverse))
     }
+    val incompleteLibraries = auditEntries.dropRight(2)
+    reject("missing audited bundle entries") {
+      validate(
+        provenance(
+          libraries = incompleteLibraries,
+          relocationRoots = incompleteLibraries
+        ),
+        manifestLibraries = incompleteLibraries
+      )
+    }
+
+    val engineLibrary = "libknowhere.so.1"
+    val aliasedLibraries = auditEntries.dropRight(1) :+ engineLibrary
+    val aliasedEntries = aliases + (auditEntries.last -> engineLibrary)
+    validate(
+      provenance(
+        libraries = aliasedLibraries,
+        aliasRecords = aliasedEntries,
+        relocationRoots = aliasedLibraries
+      ),
+      manifestLibraries = aliasedLibraries,
+      manifestAliases = aliasedEntries
+    )
     reject("storage revision") {
       validate(provenance(storagePin = "c" * 40))
     }
@@ -296,11 +341,53 @@ object NativeBundleValidationProbe {
     } finally IO.delete(root)
   }
 
+  private def unifiedJvmLoadChecks(): Unit = {
+    val repository = new File(".").getCanonicalFile
+    val directory = Files
+      .createTempDirectory("native-bundle-jvm-load-")
+      .toFile
+    try {
+      val source = new File(directory, "fixture.c")
+      def compile(name: String, body: String): Unit = {
+        IO.write(source, body)
+        val exit = Process(
+          Seq(
+            "gcc", "-shared", "-fPIC", source.getAbsolutePath,
+            "-o", new File(directory, name).getAbsolutePath
+          )
+        ).!
+        assert(exit == 0, s"Cannot compile native fixture: $name")
+      }
+      auditEntries.foreach(name => compile(name, "int fixture(void) { return 1; }\n"))
+      var messages = Vector.empty[String]
+      NativeLibraries.validateUnifiedLinux(
+        directory,
+        repository,
+        message => messages :+= message
+      )
+      assert(
+        messages.exists(_.startsWith("Verified both JVM native load orders:")),
+        s"Expected both JVM load orders to pass, got: $messages"
+      )
+
+      Files.delete(new File(directory, auditEntries.last).toPath)
+      reject("missing fifth native entry") {
+        NativeLibraries.validateUnifiedLinux(directory, repository, _ => ())
+      }
+      compile(auditEntries.last, "int fixture(void) { return 1; }\n")
+      compile(loadOrders.head.head, "int JNI_OnLoad(void *vm, void *reserved) { return 0; }\n")
+      reject("JVM rejects invalid JNI_OnLoad even when ELF relocation succeeds") {
+        NativeLibraries.validateUnifiedLinux(directory, repository, _ => ())
+      }
+    } finally IO.delete(directory)
+  }
+
   def main(arguments: Array[String]): Unit = {
     provenanceChecks()
     storageGitlinkChecks()
+    unifiedJvmLoadChecks()
     println(
-      "PASS: native bundle provenance and milvus-storage gitlink validation reject unverified inputs"
+      "PASS: native bundle provenance, JVM loading, and source-pin validation reject unverified inputs"
     )
   }
 }

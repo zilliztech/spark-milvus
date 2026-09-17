@@ -10,12 +10,13 @@ import shutil
 import subprocess
 import sys
 
+from jvm_load import JVM_LOAD_ENTRIES, check_jvm_loads
+
 
 SYSTEM = re.compile(r"^(?:ld-linux[^/]*|lib(?:c|m|mvec|pthread|dl|rt|resolv|util|gcc_s|stdc\+\+)\.so(?:\..*)?|libz\.so\.1)$")
 COMPILER_RUNTIME = {"libatomic.so.1", "libgomp.so.1", "libgfortran.so.5", "libquadmath.so.0"}
 SYSTEM_PACKAGES = {"libaio.so.1"}
 PARENT_PROVIDERS = {"libcardinalv1.so": "libknowhere.so", "libcardinalv2.so": "libknowhere.so"}
-JVM_LOAD_ENTRIES = ("libmilvus-storage-jni.so", "libknowhere_jni.so")
 AUDIT_DLOPEN_ENTRIES = (
     "libmilvus-storage-jni.so",
     "libmilvus-storage.so",
@@ -46,6 +47,14 @@ DELIVERY_EVIDENCE = (
     "storage-source-identity.json",
     "storage-working-tree.patch",
 )
+
+
+class JvmLoadAuditError(ValueError):
+    def __init__(self, records):
+        self.records = records
+        failed = [" -> ".join(record["entries"]) + " (exit " + str(record["exit"]) + ")"
+                  for record in records if record["exit"] != 0]
+        super().__init__("JVM native load audit failed: " + ", ".join(failed))
 
 
 def library_name(name):
@@ -234,7 +243,7 @@ def system_zlib_requirements(directory, names):
 
 def copy_delivery_evidence(source, destination):
     """Copy only path-independent records needed to audit a delivered bundle."""
-    destination.mkdir()
+    destination.mkdir(parents=True)
     for name in DELIVERY_EVIDENCE:
         path = source / name
         if not path.exists():
@@ -300,15 +309,8 @@ def copy_source_licenses(metadata, destination):
             shutil.copy2(document, target)
 
 
-def audit(directory, names, jvm_entries, dlopen_entries, output):
-    output.mkdir()
-    jvm_sequence = tuple(jvm_entries)
+def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output):
     jvm_entries = set(jvm_sequence)
-    dlopen_sequence = tuple(dlopen_entries)
-    required_entries = jvm_entries.union(dlopen_sequence)
-    if not required_entries.issubset(names):
-        raise ValueError("Native audit is missing load entries: "
-                         + ", ".join(sorted(required_entries - set(names))))
     results = {}
     failed = []
     for name in names:
@@ -394,8 +396,32 @@ def audit(directory, names, jvm_entries, dlopen_entries, output):
                 failed.append(name)
     (output / "load-orders.json").write_text(json.dumps(load_orders, indent=2) + "\n")
     (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-    if failed:
-        raise ValueError("Strict native audit failed: " + ", ".join(sorted(set(failed))))
+    (output / "diagnostic-failures.json").write_text(
+        json.dumps(sorted(set(failed)), indent=2) + "\n")
+
+
+def audit(directory, names, jvm_entries, dlopen_entries, output):
+    output.mkdir()
+    names = tuple(names)
+    jvm_sequence = tuple(jvm_entries)
+    dlopen_sequence = tuple(dlopen_entries)
+    required_entries = set(jvm_sequence).union(dlopen_sequence)
+    if not required_entries.issubset(names):
+        raise ValueError("Native audit is missing load entries: "
+                         + ", ".join(sorted(required_entries - set(names))))
+    missing_files = [name for name in names if not (directory / name).is_file()]
+    if missing_files:
+        raise ValueError("Native audit lists missing libraries: " + ", ".join(sorted(missing_files)))
+    try:
+        _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output)
+    except Exception as error:
+        (output / "diagnostic-error.txt").write_text(
+            type(error).__name__ + ": " + str(error) + "\n")
+    jvm_load_tests = check_jvm_loads(directory, output)
+    (output / "jvm-load-tests.json").write_text(json.dumps(jvm_load_tests, indent=2) + "\n")
+    if any(record["exit"] != 0 for record in jvm_load_tests):
+        raise JvmLoadAuditError(jvm_load_tests)
+    return jvm_load_tests
 
 
 def main():
@@ -437,9 +463,16 @@ def main():
     # in the external work directory. The delivered records contain stable
     # identities and hashes, never build-machine paths.
     copy_delivery_evidence(args.metadata.parent, provenance / "build")
-    shutil.copy2(Path(__file__).resolve(), provenance / "stage.py")
+    staging_implementation = Path(__file__).resolve()
+    jvm_load_implementation = staging_implementation.with_name("jvm_load.py").resolve(strict=True)
+    jvm_load_check_source = staging_implementation.with_name("NativeLoadCheck.java").resolve(strict=True)
+    shutil.copy2(staging_implementation, provenance / "stage.py")
+    shutil.copy2(jvm_load_implementation, provenance / "jvm_load.py")
+    shutil.copy2(jvm_load_check_source, provenance / "NativeLoadCheck.java")
     metadata = public_metadata(metadata)
-    metadata["stagingImplementationSha256"] = digest(Path(__file__).resolve())
+    metadata["stagingImplementationSha256"] = digest(staging_implementation)
+    metadata["jvmLoadImplementationSha256"] = digest(jvm_load_implementation)
+    metadata["jvmLoadCheckSourceSha256"] = digest(jvm_load_check_source)
     for name, record in selected.items():
         copyright_file = record.get("origin", {}).get("copyrightFile")
         if copyright_file:
@@ -458,14 +491,21 @@ def main():
         records[name]["sha256"] = digest(args.output / "lib" / name)
     metadata.update(libraries=records, aliases=aliases,
                     resolvedPackages=[public_package(package) for package in packages],
-                    dependencyGraphSha256=digest(args.graph), audit="pending",
+                    dependencyGraphSha256=digest(args.graph), auditPolicy="jvm-load", audit="pending",
+                    jvmLoadTests=[],
                     relocationRoots=sorted(selected), dlopenEntries=list(AUDIT_DLOPEN_ENTRIES),
                     systemDependencies={"libz.so.1": system_zlib_requirements(args.output / "lib", selected)})
     shutil.copy2(args.graph, args.output / "conan-graph.json")
     metadata_path = args.output / "provenance.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
-    audit(args.output / "lib", sorted(selected), JVM_LOAD_ENTRIES,
-          AUDIT_DLOPEN_ENTRIES, args.output / "audit")
+    try:
+        metadata["jvmLoadTests"] = audit(args.output / "lib", sorted(selected), JVM_LOAD_ENTRIES,
+                                         AUDIT_DLOPEN_ENTRIES, args.output / "audit")
+    except JvmLoadAuditError as error:
+        metadata["audit"] = "failed"
+        metadata["jvmLoadTests"] = error.records
+        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
+        raise
     metadata["audit"] = "passed"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 

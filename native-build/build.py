@@ -213,8 +213,15 @@ def snapshot_corrosion(specification, local_source, destination):
 def promote_bundle(candidate, work):
     """Keep both failed candidates and previous successful output for diagnosis."""
     metadata = json.loads((candidate / "provenance.json").read_text())
+    entries = ["libmilvus-storage-jni.so", "libknowhere_jni.so"]
+    orders = metadata.get("jvmLoadTests")
+    jvm_passed = (isinstance(orders, list) and len(orders) == 2
+                  and all(isinstance(record, dict) and record.get("entries") == expected
+                          and type(record.get("exit")) is int and record["exit"] == 0
+                          for record, expected in zip(orders, (entries, entries[::-1]))))
     if (metadata.get("audit") != "passed" or metadata.get("knowhereCApiTestsExit") != 0
-            or sorted(metadata.get("knowhereCApiTests", [])) != KNOWHERE_C_API_TESTS):
+            or sorted(metadata.get("knowhereCApiTests", [])) != KNOWHERE_C_API_TESTS
+            or metadata.get("auditPolicy") != "jvm-load" or not jvm_passed):
         raise ValueError("Native candidate has not passed all required validation: " + str(candidate))
     bundle = work / "bundle"
     previous = None

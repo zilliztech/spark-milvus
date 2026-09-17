@@ -20,7 +20,7 @@
 <nav><a class="home" href="/">返回站点目录</a><a href="../README.md">设计索引</a><a href="sbt.html">sbt 约定</a></nav>
 <h1>独立 CMake 构建，统一 JAR 交付</h1>
 <p>目标是让读取文件的 milvus-storage 和执行向量搜索的 Knowhere 在同一个 JVM 中使用兼容的原生依赖，并把两者的链接、打包规则集中到 Spark-Milvus 自己的 CMake 工程中。所有 Conan 依赖使用固定的上游 recipe revision，集成所需的直接链接关系由本项目的 CMake 目标声明，最终随一个 JAR 交付。</p>
-<p class="status"><strong>2026-09-17：源码已统一由两个根目录子模块固定，milvus-storage 为上游 <code>main</code> 的 <code>7eb13578</code>，Knowhere 为 PR #1829 分支的 <code>1fff20db</code>；当前组合尚未重建。</strong><code>native-build/dependencies.json</code> 固定当前统一图的全部上游 Conan recipe revision，并在两边上游要求冲突时选择较新版本；独立 CMake 显式声明 storage、Knowhere、DiskANN 与 Cardinal 的链接关系。仓库不维护自有依赖 recipe 或 recipe 准备脚本。storage <code>5689301</code> 与 Knowhere <code>9dc2b8ad</code> 曾用自有 recipe 的旧构建实现完成 Cardinal 构建、Connector assembly、三种 JVM 加载顺序和真实十万行持久化索引查询；这些结果只作为旧源码与旧构建实现的历史证据。当前源码必须重新构建 native JAR、生成 provenance 并重复 Connector 与真实数据验收。具体规则见<a href="#dependencies">依赖选择</a>。</p>
+<p class="status"><strong>2026-09-17：milvus-storage <code>7eb13578</code> 与上一 Knowhere pin <code>1fff20db</code> 的统一原生包已完成 Docker 构建、两个 JNI 加载顺序、实际 JNI 功能和只读真实数据验收。</strong>该 native JAR 的 SHA-256 为 <code>838d8adef6bb660cc7f3d8024967214c67c105eee01b8f77ad4c189071de5bdf</code>。当前 Knowhere gitlink 已前进到 <code>29210a33</code>，本次推送没有为该 pin 重建统一原生包，上述结果不能登记为当前 gitlink 的验收。负责人要求以实际 JVM 加载成功为准；五个依赖库的逐库重定位失败保留作诊断，不登记为通过。<code>native-build/dependencies.json</code> 继续固定上游 Conan recipe revision，独立 CMake 声明两个引擎的链接关系，仓库不维护自有依赖 recipe。旧源码与旧 recipe 的结果只作为历史证据。验收结果与限制见<a href="#validation">第 10 节</a>。</p>
 <nav aria-label="本页目录"><a href="#why">为什么改</a><a href="#benefits">收益与代价</a><a href="#build">构建范围</a><a href="#targets">CMake 目标</a><a href="#dependencies">依赖与符号</a><a href="#package">JAR</a><a href="#load">加载</a><a href="#migration">现有改动</a><a href="#implementation">实施顺序</a><a href="#validation">验收</a></nav>
 
 <h2 id="why">1 为什么要改</h2>
@@ -42,7 +42,7 @@
 <h2 id="build">3 构建范围由我们自己的 CMake 决定</h2>
 <p><code>native-build/CMakeLists.txt</code> 是唯一原生工程入口。它用 <code>add_library</code>、<code>target_link_libraries</code> 和 <code>install</code> 定义目标；不通过 <code>add_subdirectory</code> 或另一次 <code>cmake -S</code> 执行 storage、Knowhere、Cardinal 及其内嵌算法工程的 CMake。第三方依赖包由 Conan 构建，Rust crate 由 Cargo 构建，它们继续使用各自的构建系统。</p>
 <p>范围是现有 R4、V1、V5 的原生运行时。复用上游 C/C++、C API、JNI 和 Java/Scala API，保持现有方法签名与库文件名；不另写 JNI，不改变查询、过滤、回表或读写语义。源码构建目标为 Linux x86_64，与当前真实实例测试环境一致。</p>
-<p>构建每次在新的候选目录收集和验证动态库。原生测试与审计全部通过后，才把候选目录移为 <code>bundle/</code>；旧成功目录移入历史目录，失败候选保留诊断信息。相同输入可以重试，失败不能覆盖上次可用的包。输入变化继续要求新工作目录。</p>
+<p>构建每次在新的候选目录收集和验证动态库。原生 C API 测试与两种顺序的实际 JVM 加载通过后，才把候选目录移为 <code>bundle/</code>；逐库 ELF、重定位和 ctypes 检查保留原始诊断结果，不阻断。旧成功目录移入历史目录，失败候选保留诊断信息。相同输入可以重试，失败不能覆盖上次可用的包。输入变化继续要求新工作目录。</p>
 <p>Linux x86_64 默认使用统一构建。其他平台在没有显式指定统一包时保留已有 storage 构建入口，不声明向量库共同加载已经验收；Linux aarch64 可以显式提供匹配平台的统一包。Make 与 Docker 按同一规则选择，源码构建的平台限制不废弃其他平台已有的 storage 使用方式。</p>
 <div class="diagram">
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 930 206" role="img" aria-labelledby="build-title build-description">
@@ -65,14 +65,15 @@
 <tr><td><code>native-build/cmake/Cardinal.cmake</code></td><td>按同一 Knowhere 提交指定的版本编译 <code>libcardinalv1.so</code>、<code>libcardinalv2.so</code>，声明插件与父引擎的接口和公共依赖。真实 UAT 索引验收使用启用 Cardinal 的产物。</td></tr>
 <tr><td><code>native-build/cmake/Install.cmake</code> 与符号清单</td><td>安装引擎、JNI、插件及非系统依赖，设置相对库搜索路径，保留动态库版本名别名；控制内部静态依赖的符号导出。</td></tr>
 </table></div>
-<p>源码由 superproject gitlink 固定：storage 子模块当前为上游 <code>main</code> 的 <code>7eb13578</code>，Knowhere 子模块跟随 <code>LawrenceTL92/knowhere-contrib</code> 的 <code>codex/knowhere-jni-pr</code> 分支并固定在 <code>1fff20db</code>；Cardinal 使用该 Knowhere 提交声明的 v2.5.112 / v3.0.8。旧验收产物记录的是 storage <code>5689301</code> 和 Knowhere <code>9dc2b8ad</code>，不能在未重建时改写为当前提交。任一子模块更新时，Java API、原生构建来源和 provenance 必须一同更新。外部构建不往上游源码目录写补丁或生成文件。</p>
+<p>源码由 superproject gitlink 固定：storage 子模块当前为上游 <code>main</code> 的 <code>7eb13578</code>，Knowhere 子模块跟随 <code>LawrenceTL92/knowhere-contrib</code> 的 <code>codex/knowhere-jni-pr</code> 分支并固定在 <code>29210a33</code>；Cardinal 使用该 Knowhere 提交声明的 v2.5.112 / v3.0.8。最近一次验收产物记录的是 storage <code>7eb13578</code> 和 Knowhere <code>1fff20db</code>，更早的历史产物记录的是 storage <code>5689301</code> 和 Knowhere <code>9dc2b8ad</code>；二者都不能在未重建时改写为当前提交。任一子模块更新时，Java API、原生构建来源和 provenance 必须一同更新。外部构建不往上游源码目录写补丁或生成文件。</p>
 <p>构建保持当前特性集合：storage 的 S3、Azure、GCP、Vortex、Lance，Knowhere 的 DiskANN 与可选 Cardinal；FIU、CRT、Talon 关闭，Arrow 的 jemalloc 关闭。编译原生格式依赖不等于新增 Connector 对应能力。这组配置用于验证构建方式，不扩大 Connector 能力。</p>
 
 <h2 id="dependencies">5 Conan recipe 与版本选择</h2>
+<p>Docker 使用 BuildKit 的 cache mount 保存 Conan 包、Cargo 下载的 registry/git 源码和 ccache；挂载使用 <code>sharing=locked</code>，避免并行构建写同一份缓存。Conan profile 与 remote 在挂载后初始化，空缓存也能完整构建。失败的 <code>RUN</code> 不会形成可复用镜像层，因此不能仅靠镜像层保存这些已完成的依赖；缓存复用仍由 Conan 的 revision/package ID、Cargo 和 ccache 的校验决定。引擎源码快照、CMake 输出和 Cargo 编译产物留在本次工作目录，不共用同一份原生构建状态。</p>
 <p><strong><code>native-build/dependencies.json</code> 固定统一图中每个直接依赖的完整上游 Conan reference，包括 recipe revision。</strong>recipe 是 Conan 描述一个包如何获取、编译和被使用的配置。<code>native-build/conanfile.py</code> 把这些 reference 以 <code>force=True</code> 放进一张 host 依赖图；构建不从缓存导出、打补丁或改写 recipe，也没有仓库自有 recipe 目录。Conan 只在 recipe revision、配置和 package ID 都匹配时复用缓存二进制。</p>
 <p><code>build.py</code> 从两个 gitlink 固定的上游 <code>conanfile.py</code> 读取依赖声明，<code>dependency_versions.py</code> 将它们与 <code>dependencies.json</code> 比较。任何未登记的上游依赖、无法判断顺序的冲突版本，或没有选择两边较新要求的版本都会在 Conan 解析前失败。同一 profile 固定编译器和共享库选项；完整 lockfile 再固定直接与传递 recipe revision，解析后的 host 与 build graph 必须全部出现在 lock 中。</p>
 <p>按用户要求，冲突版本在固定的上游输入中选择较新者，不自动追随远程最新版本。版本号按版本规则比较；以 Git 提交命名的版本按提交历史和接口要求确认先后，不按哈希字符串排序。当前已核对的选择为：</p>
-<div class="table-scroll"><table><tr><th>依赖</th><th>storage 7eb13578 的原始声明</th><th>Knowhere 1fff20db 的声明</th><th>统一选择</th></tr>
+<div class="table-scroll"><table><tr><th>依赖</th><th>storage 7eb13578 的原始声明</th><th>Knowhere 29210a33 的声明</th><th>统一选择</th></tr>
 <tr><td>fmt</td><td>11.2.0</td><td>12.1.0</td><td>12.1.0</td></tr>
 <tr><td>milvus-common</td><td>1.0.0-60a563c</td><td>1.0.0-b589c5a</td><td>b589c5a，满足 Cardinal 所需接口</td></tr>
 <tr><td>lz4</td><td>1.9.4</td><td>1.10.0</td><td>1.10.0</td></tr>
@@ -82,7 +83,7 @@
 <ul>
 <li>统一编译器、C++ 标准库 ABI（二进制调用约定）、构建类型及共享库选项。Arrow、Folly、OpenBLAS、gRPC、Protobuf 等公共依赖使用同一份动态实现；CMake 控制消费方的直接链接，依赖包自身的构建缺陷由固定的上游 recipe revision 修正。</li>
 <li><code>prsbridge</code> 只私有链接进入 storage 引擎，JNI 不再重复链接它。Rust 的 OpenSSL 使用公共动态库；内部 LZ4、XXHash、Zstandard、AWS-LC 的定义通过我们维护的链接符号清单限制导出，保留 <code>loon_*</code>、JNI 及公开 C++/CXX 接口。</li>
-<li>每个动态库声明直接依赖，安装副本用 <code>$ORIGIN</code> 查找自身目录内的库；不依赖全局预加载顺序或修改 Conan 缓存中的文件。SONAME 是动态加载器使用的库标识，同一 SONAME 对应不同内容时打包失败，不能按文件名覆盖。</li>
+<li>本项目的动态库目标声明直接依赖，安装副本用 <code>$ORIGIN</code> 查找自身目录内的库；不修改 Conan 缓存中的文件。部分上游依赖需要由 JNI 入口的完整依赖集合提供符号，当前以两个真实 JVM 加载顺序验证这一运行环境，不要求每个依赖独立加载。SONAME 是动态加载器使用的库标识，同一 SONAME 对应不同内容时打包失败，不能按文件名覆盖。</li>
 <li>glibc、动态加载器、libstdc++、libgcc_s 和 <code>libz.so.1</code> 使用目标系统版本。现有 JVM 已加载系统 zlib，包内不再放第二份。其他非系统依赖按完整依赖关系收集，包括实际需要的编译器运行库；记录系统库最低符号版本要求。</li>
 </ul>
 <p>统一动态依赖解决两个引擎之间的重复实现；符号隐藏处理无法移出的内部静态实现。该设计不承诺与同一 JVM 内任意其他 JNI 库兼容：进程已加载不兼容依赖时，仍需定位实际符号提供者。Cardinal 的 CPU 编译选项必须记录；第一轮沿用已验证主机环境，不把 <code>linux-x86_64</code> 宣称为任意 x86 CPU 的兼容保证。</p>
@@ -91,7 +92,7 @@
 <p>CMake 把库安装到构建输出的 <code>install/lib/</code>，现有打包脚本校验后生成一个平台资源 JAR。该 JAR 包含两个引擎及其依赖，sbt 再把其资源合入现有 Connector assembly；用户通过 <code>spark-submit --jars</code> 使用最终 Connector JAR，不需要分别提供 storage 和 Knowhere 的原生 JAR。</p>
 <p>保留资源路径 <code>native/milvus/1/linux-x86_64/</code>，其中放两个 JNI 库、引擎、Cardinal 插件、公共依赖和 <code>manifest.properties</code>。清单记录平台、源码提交、依赖配置摘要、CPU 要求、功能开关、库摘要与版本名别名；许可证随包交付。JAR 中的 provenance 只保留规范化的源码与 package 标识，以及 Conan lock、依赖 graph、构建输入和外部证据的摘要，不包含构建机绝对路径。完整 Conan graph、<code>compile_commands.json</code>、原生构建命令、CMake trace、构建日志和源码证据留在外部 <code>NATIVE_WORK_DIR</code>。</p>
 <p>sbt 继续使用 <code>-Dmilvus.native.bundle=/absolute/path/bundle.jar</code> 选择和验证资源，不隐式启动 CMake 或 Conan。两个模块各自的旧原生资源在统一包模式下不参与 assembly；Java/Scala API 的编译仍由 sbt 负责。原生资源包保持无 Java 类，已有 <code>native-runtime</code> 随 Connector 的类一起交付。</p>
-<p>打包前必须逐项核对实际库文件、别名、摘要与 <code>provenance.json</code>，并确认所需原生测试和库审计通过；Cardinal 特性必须与实际插件一致。混用另一次构建的库或来源记录时拒绝生成 JAR。sbt 的类路径与显式验证命令共用 <code>native-runtime</code> 的一次验证任务和缓存，运行时仍独立校验资源摘要。</p>
+<p>打包前必须逐项核对实际库文件、别名、摘要与 <code>provenance.json</code>，并确认原生 C API 测试和两种 JVM 加载顺序通过；Cardinal 特性必须与实际插件一致。provenance 显式记录 <code>auditPolicy=jvm-load</code> 和两次 <code>jvmLoadTests</code>，不能把历史逐库审计当作 JVM 测试。混用另一次构建的库或来源记录时拒绝生成 JAR。打包与 sbt 解压后的验证都重新调用同一个 JVM 检查实现；sbt 缓存绑定 JAR、检查实现和 JRE 身份，运行时仍独立校验资源摘要。</p>
 <p>assembly 合并原生资源时使用固定大小的缓冲区。单一来源直接交付原始输入流；同路径的多个来源逐个计算 SHA-256 和字节数，一致才保留一份，否则报错并列明来源。sbt-assembly 2.1.1 的通用 <code>deduplicate</code> 即使只有一个来源也会把整个文件装入内存；本地 storage 库约 478 MB，已实测在 4 GB 堆内触发内存耗尽。原生资源改用流式比较，保留冲突检查，最终打包已在相同堆上通过。受限堆回归用 64 MB 堆比较两份超过 512 MB 的输入，也验证内容冲突与异常关闭输入流。</p>
 <p>这个插件版本遇到 <code>CustomMergeStrategy</code> 会关闭 assembly 产物缓存，因此重复执行 assembly 会重新合并打包。Scala/Java 增量编译、原生包验证缓存以及 Conan、ccache、Cargo 缓存不受影响；不绕过插件的缓存规则。</p>
 <p>Make 与 Docker 共用 <code>native-resources</code>。Linux x86_64 默认构建统一包；其他平台没有显式统一包时保留 storage 构建。旧入口始终先运行增量构建再复制，即使库文件已经存在；Make 并行执行也遵守这个依赖顺序，避免修改源码后仍打包旧库。ARM 与 macOS 只验证了入口选择，没有执行统一原生构建或运行验收。</p>
@@ -103,7 +104,7 @@
 <li>storage 适配器 <code>NativeStorageLibrary</code> 从 <code>native-runtime</code> 取得共享目录内 <code>libmilvus-storage-jni.so</code> 的绝对路径，在 JVM 共享属性锁内临时设置 <code>milvus.storage.native.path</code>，再调用上游 <code>NativeLibraryLoader</code>；上游加载器校验该绝对路径并执行 <code>System.load</code>，调用成功或失败都恢复原属性。</li>
 <li>向量适配器在 JVM 共享锁内临时设置 <code>knowhere.native.path</code>，由 Knowhere 初始化并加载同目录的 <code>libknowhere_jni.so</code>，成功或失败都恢复原属性。显式路径若指向另一文件则报错，不能覆盖用户配置。临时路径不能作为后续调用或另一个类加载器的用户配置遗留。</li>
 </ol>
-<p><strong>milvus-storage 的 Java 加载入口已经进入上游。</strong><code>NativeLibraryLoader</code> 增加 <code>milvus.storage.native.path</code>：属性存在时必须指向已有的绝对文件，并在平台资源和系统库路径之前加载该文件；属性不存在时保留原有资源提取和 <code>System.loadLibrary</code> 路径。上游不依赖 Connector，也不改 JNI 方法、原生实现或现有版权头。Connector 的适配器负责在 storage API 首次使用前完成交接；统一包存在时，用户配置若指向另一文件，或上游加载器已在交接前完成加载，均直接报错，不能静默使用另一份库。该 Java 扩展及测试已通过 <a href="https://github.com/milvus-io/milvus-storage/pull/690">milvus-storage PR #690</a> squash 合入上游 <code>main</code>，合入提交为 <code>7eb1357899a98c4875d51a55b135b7f8d79461ff</code>；它与原 PR 提交 <code>2ed8d933</code> 的 patch-id 相同。根目录子模块和 superproject gitlink 均指向该 <code>main</code> 提交。现有统一平台 JAR 记录的是更早的 storage revision，必须重建并重新生成 provenance 后才能完成当前 Connector 原生验收。</p>
+<p><strong>milvus-storage 的 Java 加载入口已经进入上游。</strong><code>NativeLibraryLoader</code> 增加 <code>milvus.storage.native.path</code>：属性存在时必须指向已有的绝对文件，并在平台资源和系统库路径之前加载该文件；属性不存在时保留原有资源提取和 <code>System.loadLibrary</code> 路径。上游不依赖 Connector，也不改 JNI 方法、原生实现或现有版权头。Connector 的适配器负责在 storage API 首次使用前完成交接；统一包存在时，用户配置若指向另一文件，或上游加载器已在交接前完成加载，均直接报错，不能静默使用另一份库。该 Java 扩展及测试已通过 <a href="https://github.com/milvus-io/milvus-storage/pull/690">milvus-storage PR #690</a> squash 合入上游 <code>main</code>，合入提交为 <code>7eb1357899a98c4875d51a55b135b7f8d79461ff</code>；它与原 PR 提交 <code>2ed8d933</code> 的 patch-id 相同。根目录子模块和 superproject gitlink 均指向该 <code>main</code> 提交。上一统一平台 JAR 已按该 storage 提交与 Knowhere <code>1fff20db</code> 重建，provenance 与第 10 节所列 JVM 和真实数据结果均来自这份产物；当前 Knowhere <code>29210a33</code> 尚无对应的统一包。</p>
 <p>解压锁只覆盖资源校验和文件操作，锁内不加载 JNI。动态加载器通过各库的依赖与 <code>$ORIGIN</code> 查找相邻文件，不逐个预加载依赖。解压缓存属于定义 <code>NativeLibraries</code> 的类加载器，多份隔离 Connector 类加载器不在支持范围；Knowhere 所需的 JRE <code>libjsig</code> 仍在 JVM 启动前配置。统一包存在但加载失败时不回到旧产物；迁移期间只有完全未选择统一包的构建才保留既有独立产物行为。</p>
 
 <h2 id="migration">8 现有改动如何调整</h2>
@@ -111,7 +112,7 @@
 <div class="table-scroll"><table><tr><th>现有内容</th><th>拟处理及理由</th><th>切换前要确认</th></tr>
 <tr><td>storage 曾有的 <code>cpp/CMakeLists.txt</code> 修改及 <code>cpp/jni_private_symbols.map</code></td><td>链接关系和符号规则已移入 <code>native-build</code>；上游构建改动已恢复，新增 map 已迁出。独立目标直接编译上游源码。</td><td>比较导出接口、Rust/CXX 头文件与 JNI 实际调用；错误撤回会影响仍使用上游构建的调用方。新增 map 的迁出已获确认。</td></tr>
 <tr><td>storage 的 <code>cpp/conanfile.py</code> common 版本修改</td><td>由父级唯一依赖配置固定 common，撤回子模块中的重复版本修改。</td><td>确认两个引擎和 Cardinal 的编译命令都使用同一 common 头文件和动态库。</td></tr>
-<tr><td>storage Java 显式路径入口与测试</td><td>已通过上游 PR #690 合入 <code>main</code>。它校验 <code>milvus.storage.native.path</code> 并在资源和系统路径之前加载指定 JNI；独立 CMake 无法替代 Java 初始化行为。</td><td>以合入提交 <code>7eb13578</code> 重建后，直接使用 storage API、路径冲突、交接前提前加载、两种加载顺序及并发初始化均须重新通过。</td></tr>
+<tr><td>storage Java 显式路径入口与测试</td><td>已通过上游 PR #690 合入 <code>main</code>。它校验 <code>milvus.storage.native.path</code> 并在资源和系统路径之前加载指定 JNI；独立 CMake 无法替代 Java 初始化行为。</td><td>storage <code>7eb13578</code> 与上一 Knowhere pin <code>1fff20db</code> 的产物已通过两个加载顺序、实际 JNI 功能和打包后并发初始化；Knowhere <code>29210a33</code> 重建后须重复这些检查。</td></tr>
 <tr><td><code>native-build/build.py</code>、<code>dependencies.json</code>、安装与打包脚本</td><td>构建驱动只准备源码与依赖、调用一次自有 CMake，再打包；引擎规则移入 CMake。全部依赖固定上游 recipe revision，冲突版本取两边上游要求中的较新者，集成链接关系写在 CMake。</td><td>构建不导出或改写 recipe；直接 reference、两份上游声明、版本选择、Conan lock、解析 graph 与 CMake trace 能相互核对。</td></tr>
 <tr><td><code>native-runtime</code>、两个加载适配器、sbt 验证及 assembly 接入</td><td>复用现有实现与测试，只适配新的构建来源记录，避免重做已独立于编译方式的逻辑。</td><td>JAR 内没有旧原生资源；缓存按新产物摘要验证，旧成功记录不能复用为新产物验收。</td></tr>
 <tr><td>Make、Docker 和旧独立构建入口</td><td>入口名称保持；Linux x86_64 默认调用统一构建和资源打包，其他平台没有显式统一包时保留 storage 入口。旧公开选项、文件和测试的退役另行列清单确认。</td><td>确认外部作业和文档使用情况。仓库内无引用不能证明外部无人使用。</td></tr>
@@ -137,15 +138,27 @@ cmake --install target/native-build/cmake</code></pre>
 <p>依赖阶段和引擎阶段顺序执行。CMake/Ninja 与 Cargo 共用受控并发预算，内嵌 Cargo 构建安排在独占阶段或明确预留额度，避免各自启动 50 个任务。保留 Conan 二进制缓存、ccache 和 Cargo 缓存；源码、编译选项或依赖身份变化时重新计算，不把旧引擎二进制复制进新目录。</p>
 
 <h2 id="validation">10 验收以新构建的最终 JAR 为准</h2>
+<p><strong>当前验收条件：</strong>负责人要求以实际 JVM 加载成功为准，先不以逐库审计阻断。<code>native-build/jvm_load.py</code> 和 <code>NativeLoadCheck.java</code> 是 staging、打包和 sbt 共用的检查：两个全新 JVM 分别按 storage-first、Knowhere-first 执行 <code>System.load</code>，任一次失败即阻断。进程使用该 JRE 的 <code>libjsig</code>，不继承额外库路径、任意 preload 或 JVM 注入参数。逐库诊断中的失败仍原样记录；两个 JNI 加载成功后继续验证实际读写、向量搜索及真实 UAT 查询。</p>
+<p><strong>2026-09-17 上一 gitlink 组合通过了约定的 JVM 与真实数据验收：</strong>以 Connector <code>ba6458f</code> 为基准，应用本次 JVM 验收改动；子模块为 milvus-proto <code>5c102446</code>、storage <code>7eb13578</code> 与 Knowhere <code>1fff20db</code>。Linux x86_64、Java 21 下生成的 native JAR SHA-256 为 <code>838d8adef6bb660cc7f3d8024967214c67c105eee01b8f77ad4c189071de5bdf</code>，Connector assembly SHA-256 为 <code>4d4d6eb5fb3cdb41c2eeef36e9d725131b0c2e85f4af5ee7e9759bf145392736</code>。两个全新 JVM 按 storage-first 与 Knowhere-first 加载均退出 0；两个顺序的 storage 文件读写删除与 Knowhere 暴力搜索、打包后的 Knowhere 构建搜索和并发初始化均通过。Docker 原生构建、staging、打包和最终 assembly 均成功。这些结果绑定 Knowhere <code>1fff20db</code>，不能覆盖当前 <code>29210a33</code> gitlink。</p>
+<p>Spark 4.0.1 按分发版默认依赖顺序完成只读 UAT：快照套件读取并核对 100,000 行，列式比较和两条向量查询路径通过；Cardinal HNSW v10 持久化索引套件的三组查询均各执行一次反序列化和搜索，行号与分数和 JNI 直调一致，metric 不匹配被拒绝。两个套件均为 1 项成功、0 失败、0 跳过，远端对象没有写入。根测试的 sbt 进程退出 0，实际结果为 1,132 项成功、0 项失败、105 项取消；额外严格取消检查因旧 <code>HadoopEndpointSnapshotTest</code> 直接调用上游 loader 而退出 1，因此不能记为全部单元测试通过。其余取消为 103 项缺少真实 UAT fixture 或环境、1 项 root 权限条件。</p>
+<p>本轮没有修复 assembly 优先于 Spark 分发依赖时的 Jackson 混合版本：该顺序会同时得到 assembly 中的 Databind 2.18.0 与 Scala module 2.17.3；最终 UAT 使用 Spark 4.0.1 默认依赖顺序，两者均来自 <code>/opt/spark/jars</code> 的 2.18.2。运行时仍打印 <code>libmilvus-common.so</code> 应链接 <code>libatomic.so.1</code> 的 IFUNC 提示；它未阻止上述加载、JNI 功能或真实查询。逐库检查的未解析符号继续作为诊断，未改写为通过。</p>
+<p><strong>2026-09-17 本轮早期逐库诊断阶段未通过：</strong>输入为 Connector <code>ba6458f</code>、storage <code>7eb13578</code>、Knowhere <code>1fff20db</code>，Cardinal 从本地源码取得固定的两个 revision。该阶段补齐 Docker 的 <code>libclang-dev</code> 和依赖缓存，并修复交付证据目录缺少父目录的问题；Rust、两套引擎与 JNI 编译链接以及 Knowhere C API 测试阶段完成，但统一目录的逐库重定位审计失败。</p>
+<table><thead><tr><th>失败库</th><th>未解析符号</th><th>缺失的动态依赖关系</th></tr></thead><tbody>
+<tr><td><code>libfolly.so.0.58.0-dev</code></td><td><code>io_submit</code>、<code>io_getevents</code>、<code>io_queue_release</code>、<code>io_queue_init</code></td><td>Folly 直接链接 <code>libaio.so.1</code></td></tr>
+<tr><td><code>libmilvus-common.so</code></td><td>三个 <code>__atomic_*_16</code> 符号</td><td>milvus-common 直接链接 <code>libatomic.so.1</code></td></tr>
+<tr><td><code>libopentelemetry_proto_grpc.so</code></td><td>gRPC C++、gRPC 和 gpr 符号</td><td>proto_grpc 直接链接 <code>libgrpc++.so.1.67</code>，由它传递引入 gRPC 和 gpr</td></tr>
+<tr><td><code>libupb_json_lib.so.44</code>、<code>libupb_textformat_lib.so.44</code></td><td>各 12 个 <code>google__protobuf__*msg_init</code> 符号</td><td>修正两个 upb 目标与描述符提供者的关系；当前这些符号由 <code>libgrpc.so.44</code> 导出</td></tr>
+</tbody></table>
+<p>上述库的 GNU 栈标志均为 <code>RW</code>，失败来自实际未解析符号。以这五个真实 Conan 库为起点重建的诊断依赖目录，在补齐依赖关系和 libatomic 后，123 个库的严格审计通过；该目录没有项目引擎或 JNI，因此只能证明依赖问题的原因，不能登记为最终原生包验收。查询上游远程仓库后，未找到这四个包当前版本的已修复 recipe revision。按负责人随后确定的 JVM 验收标准，本轮不修改这些 recipe 或二进制，保留上述诊断并继续实际 JVM 测试。在该次逐库检查结束时，Connector assembly、JNI 功能测试、完整根单测和真实 UAT 查询均未执行；UAT 的只读快照 HEAD 已返回 200。</p>
 <p><strong>2026-09-17 旧 gitlink、旧自有 recipe 实现的完整验收：</strong>以下结果属于 storage <code>5689301</code> 与 Knowhere <code>9dc2b8ad</code>，不能证明当前上游 recipe 方案或当前 gitlink。该 Cardinal 构建以 <code>phase=complete</code>、退出码 0 完成。Folly、gRPC、milvus-common、OpenTelemetry 的旧导出 recipe revision 依次为 <code>f7176a1c2054469eeded4721ebe0a1e2</code>、<code>74cdd5d8cb864e5ff3fa1fe203c261b1</code>、<code>a4e6285bda6453a9eae862df86944e84</code>、<code>44723315499eb4caf5a87164960e46f4</code>；完整 Conan lock 的 SHA-256 为 <code>26f8477d6a2010806e430f8794ddfbdb14eeee0f8d8936603f08419c87616b5f</code>。该旧实现还曾在没有复用 lock 的新目录从源码重建四个自有 recipe 包，再用生成的 lock 复验最终目录。</p>
 <p>原生构建辅助测试 63/63 通过，Knowhere C API 3/3 通过；动态库审计核对 164/164 个库记录，并对 5 个入口执行立即加载，最终目录含 164 个库和 173 个版本名别名。平台 JAR 为 279,399,197 字节，SHA-256 <code>4bc2488e9f38f590f9346b27a34725f4d63bddd1b518740784ad0d32c8c54c5e</code>；<code>verifyNativeBundle</code> 与 <code>knowhereSmoke</code> 通过。根测试 1,025 项通过、66 项因缺少对应环境或数据取消，失败和套件中止均为 0。Connector assembly 为 355,027,414 字节，SHA-256 <code>be37535bcd3ffecec1c4c9bdb74336bc10cf50b08be18e8080a2928a50f7064c</code>。</p>
 <p>storage-first、Knowhere-first 和并发初始化三种独立 JVM 启动顺序都从同一个解压目录加载统一包。真实 UAT 的持久化索引套件 1/1 通过：读取 100,000 行，三个 Cardinal HNSW version 10 查询各执行一次 deserialize 和一次 search，分别排除 0、80,000、90,000 行；精确 ID 召回率均为 1，行号和分数与上游 JNI 直调一致，metric 不匹配被明确拒绝，没有 Connector 暴力回退。既有 Spark SQL UI 自定义指标构造器告警仍出现，但不影响查询和上述断言。</p>
 <p>该旧批次只重建并复验 Cardinal 变体，没有重新运行开源 Knowhere 变体。更早使用依赖补丁的 Cardinal/开源结果以及切换到旧自有 recipe 实现前的两变体复验也只作为迁移历史。当前两个 gitlink 与依赖构建机制都已变化，因此这些结果不能登记为当前 Cardinal 或开源变体的验收；验证范围限于当时的 Linux x86_64、Java 21 与 Spark 运行时。</p>
-<p>检查必须覆盖从编译输入到实际运行的同一份产物。此前调用上游 CMake 或使用自有 recipe 的结果只作为历史对照；下面各项须按当前独立 CMake、固定上游 recipe revision 的新产物重新验证。</p>
+<p>检查必须覆盖从编译输入到实际运行的同一份产物。此前调用上游 CMake 或使用自有 recipe 的结果只作为历史对照；每次重新构建产物时，下面各项都须按当前独立 CMake 和固定上游 recipe revision 重新验证。</p>
 <ul>
 <li><strong>依赖选择：</strong>逐项列出上游要求、最终版本、recipe revision 和配置；确认版本冲突采用较新者、公共依赖只选一份，新增适配通过两个引擎的编译与测试。</li>
 <li><strong>构建独立性：</strong>源码目录构建前后无写入；CMake trace 确认未执行 storage、Knowhere、Cardinal 及其内嵌算法工程的构建文件；干净输出目录构建、缓存重建及总并发限制均核验。</li>
-<li><strong>链接：</strong>检查 Linux ELF（二进制文件格式）的动态依赖、SONAME、相对搜索路径和导出符号。每个普通库执行 <code>ldd -r</code>，JNI 和引擎执行 <code>RTLD_NOW</code> 立即绑定。Cardinal 插件的父引擎回调单独核对：所有这类引用必须由同目录 Knowhere 导出，并在父引擎加载后没有剩余缺项；该例外不用于其他库。</li>
+<li><strong>链接与 JVM 加载：</strong>ELF、逐库 <code>ldd -r</code>、ctypes 和 Cardinal 父引擎上下文结果留作诊断。构建是否通过由两个全新 JVM 的双向 <code>System.load</code> 结果决定；实际 JNI 功能和 Spark 查询仍须分别测试。</li>
 <li><strong>JAR：</strong>两套 JNI 与公共依赖各只有一份，来源和摘要匹配，没有旧资源混入。重复 SONAME、缺库、损坏、错误平台、路径越界及显式路径冲突都必须报错。</li>
 <li><strong>实际 JVM：</strong>在最终 assembly 上分别执行 storage-first、Knowhere-first、并发初始化及直接 storage API 首次使用，完成文件读写和索引构建、序列化、恢复、搜索。清空额外依赖搜索路径，检查实际映射库都来自同一解压目录，系统 zlib 只有一个提供者。</li>
 <li><strong>Connector：</strong>Java 21 下运行格式检查和完整根单测，报告成功、失败和取消数量；Scala 2.12/2.13 与受影响的 Spark 线按现有构建约定编译核验。</li>

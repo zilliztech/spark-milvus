@@ -88,10 +88,11 @@ class DeliveryProvenanceTest(unittest.TestCase):
         (source / "conan-graph.json").write_text('{"package_folder":"/root/.conan2"}\n')
         (source / "compile_commands.json").write_text('[{"directory":"/work/build"}]\n')
 
-        output = self.root / "output"
+        output = self.root / "bundle" / "provenance" / "build"
         stage.copy_delivery_evidence(source, output)
 
         self.assertEqual(["conan.lock"], sorted(path.name for path in output.iterdir()))
+        self.assertEqual("reviewed lock\n", (output / "conan.lock").read_text())
 
     def test_public_library_and_package_origins_drop_cache_directories(self):
         origin = stage.public_origin({

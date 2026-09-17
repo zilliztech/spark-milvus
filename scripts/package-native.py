@@ -3,12 +3,12 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
-import sys
 import tempfile
 from urllib.parse import urlsplit
 import zipfile
@@ -30,6 +30,8 @@ C_API_TESTS = [
     "knowhere_c_api_diskann_acceptance",
 ]
 EVIDENCE_ENTRIES = {
+    "NativeLoadCheck.java",
+    "jvm_load.py",
     "stage.py",
     *("build/" + name for name in (
         "build-source-files.json",
@@ -68,14 +70,11 @@ def digest(path):
     return value.hexdigest()
 
 
-def command(*arguments, preload=None):
+def command(*arguments):
     environment = os.environ.copy()
     for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG", "LD_BIND_NOW"):
         environment.pop(name, None)
     environment["LC_ALL"] = "C"
-    if preload is not None:
-        environment["LD_PRELOAD"] = str(preload)
-        environment["LD_BIND_NOW"] = "1"
     result = subprocess.run(arguments, env=environment, text=True, capture_output=True, check=False)
     if result.returncode:
         raise ValueError(f"Command failed ({result.returncode}): {arguments}\n{result.stdout}{result.stderr}")
@@ -149,8 +148,11 @@ def inventory(directory, platform=None):
 
 def validate_provenance(provenance, libraries, aliases):
     """Bind the packaged bytes and feature flags to the directory that passed testing."""
+    if provenance.get("auditPolicy") != "jvm-load":
+        raise ValueError("Provenance must identify the jvm-load audit policy")
     if provenance.get("audit") != "passed":
         raise ValueError("Provenance must record a passed native audit")
+    validate_jvm_load_tests(provenance.get("jvmLoadTests"), "Provenance", exact_fields=True)
     test_exit = provenance.get("knowhereCApiTestsExit")
     if type(test_exit) is not int or test_exit != 0:
         raise ValueError("Provenance must record successful Knowhere C API tests")
@@ -180,47 +182,37 @@ def validate_provenance(provenance, libraries, aliases):
         raise ValueError("Cardinal libraries do not match the provenance with_cardinal flag")
 
 
-def validate_relocations(libraries, aliases):
-    def canonical(name):
-        return aliases.get(name, name)
+def expected_jvm_load_tests():
+    return [
+        {"entries": list(LOAD_ENTRIES), "exit": 0},
+        {"entries": list(reversed(LOAD_ENTRIES)), "exit": 0},
+    ]
 
-    for name, parent_name in PLUGIN_PARENTS.items():
-        if name not in libraries:
-            continue
-        record = libraries[name]
-        output = command("ldd", "-r", str(record["path"]))
-        if "undefined symbol:" in output:
-            # Cardinal implements callbacks into its loading Knowhere engine.
-            # No other library may inherit this plugin loading contract.
-            if parent_name not in libraries or any(marker in output for marker in ("not found", "Relink `")):
-                raise ValueError(f"Invalid plugin loading context for {name}:\n{output}")
-            parent = libraries[parent_name]["path"]
-            symbols = command("nm", "-D", "--defined-only", "--format=posix", str(parent))
-            defined = {line.split()[0].split("@", 1)[0] for line in symbols.splitlines()}
-            missing = set(re.findall(r"undefined symbol: ([^\s]+)", output))
-            if not missing or not missing.issubset(defined):
-                raise ValueError(f"Plugin {name} has symbols outside its {parent_name} parent: {sorted(missing - defined)}")
-            output = command("ldd", "-r", str(record["path"]), preload=parent)
-        if any(marker in output for marker in ("undefined symbol:", "not found", "Relink `")):
-            raise ValueError(f"Unresolved native relocations in {name}:\n{output}")
-    for name, record in libraries.items():
-        if name in PLUGIN_PARENTS:
-            continue
-        output = command("ldd", "-r", str(record["path"]))
-        if any(marker in output for marker in ("undefined symbol:", "not found", "Relink `")):
-            raise ValueError(f"Unresolved native relocations in {name}:\n{output}")
-    for entry in AUDIT_DLOPEN_ENTRIES:
-        name = canonical(entry)
-        if name not in libraries:
-            raise ValueError(f"Missing native load entry: {entry}")
-        command(
-            sys.executable,
-            "-c",
-            "import ctypes,os,resource,sys; "
-            "resource.setrlimit(resource.RLIMIT_CORE,(0,0)); "
-            "ctypes.CDLL(sys.argv[1],mode=os.RTLD_NOW|os.RTLD_LOCAL)",
-            str(libraries[name]["path"]),
-        )
+
+def validate_jvm_load_tests(tests, source, exact_fields=False):
+    expected = expected_jvm_load_tests()
+    if not isinstance(tests, list) or len(tests) != len(expected):
+        raise ValueError(f"{source} must record both JVM load orders")
+    for index, (record, expected_record) in enumerate(zip(tests, expected)):
+        if not isinstance(record, dict):
+            raise ValueError(f"{source} JVM load record {index} must be an object")
+        if exact_fields and set(record) != set(expected_record):
+            raise ValueError(f"{source} JVM load record {index} has unexpected fields")
+        if record.get("entries") != expected_record["entries"]:
+            raise ValueError(f"{source} must record the expected JVM load order at index {index}")
+        if type(record.get("exit")) is not int or record["exit"] != 0:
+            raise ValueError(f"{source} JVM load record {index} must record exit 0: {record}")
+
+
+def check_jvm_loads(directory, output=None):
+    """Load the shared JVM probe lazily so this script remains directly executable."""
+    helper_path = Path(__file__).resolve().parents[1] / "native-build" / "jvm_load.py"
+    spec = importlib.util.spec_from_file_location("milvus_native_jvm_load", helper_path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"Cannot load JVM native validation helper: {helper_path}")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper.check_jvm_loads(directory, output=output)
 
 
 def put(archive, name, data):
@@ -262,6 +254,7 @@ def reject_absolute_paths(value, location="provenance"):
 
 
 def package(directory, provenance_path, output, licenses=None, evidence=None):
+    directory = directory.resolve(strict=True)
     provenance_bytes = provenance_path.read_bytes()
     provenance = json.loads(provenance_bytes)
     reject_absolute_paths(provenance)
@@ -277,7 +270,8 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
         raise ValueError("Provenance must identify the unified shared dependency build")
     libraries, aliases = inventory(directory, platform)
     validate_provenance(provenance, libraries, aliases)
-    validate_relocations(libraries, aliases)
+    current_jvm_loads = check_jvm_loads(directory, output=None)
+    validate_jvm_load_tests(current_jvm_loads, "Current", exact_fields=False)
     manifest = {"format.version": "1", "platform": platform,
                 "storage.revision": provenance["storage.revision"],
                 "knowhere.revision": provenance["knowhere.revision"],

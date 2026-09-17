@@ -11,9 +11,12 @@ object NativeLibraries {
     "libmilvus-storage.so",
     "libmilvus-storage-jni.so"
   )
-  private val unifiedLoadEntries = Vector(
+  private val unifiedAuditEntries = Vector(
     "libmilvus-storage-jni.so",
-    "libknowhere_jni.so"
+    "libmilvus-storage.so",
+    "libknowhere_jni.so",
+    "libknowhere_c.so.1",
+    "libknowhere.so"
   )
 
   private def resources(directory: File): Vector[(String, File)] = {
@@ -65,8 +68,33 @@ object NativeLibraries {
     validateEntries(directory, entryLibraries, log)
   }
 
-  def validateUnifiedLinux(directory: File, log: String => Unit): Unit =
-    validateEntries(directory, unifiedLoadEntries, log)
+  def validateUnifiedLinux(
+      directory: File,
+      repository: File,
+      log: String => Unit
+  ): Unit = {
+    unifiedAuditEntries.foreach { name =>
+      val library = new File(directory, name)
+      require(library.isFile, s"Missing native entry library: $library")
+    }
+    val checker = new File(repository, "native-build/jvm_load.py")
+    require(checker.isFile, s"Missing JVM native load checker: $checker")
+    val (exit, output) = nativeCheck(
+      Seq(
+        "python3",
+        checker.getAbsolutePath,
+        "--lib-dir",
+        directory.getAbsolutePath
+      ),
+      Map("JAVA_HOME" -> System.getProperty("java.home"))
+    )
+    require(
+      exit == 0,
+      s"JVM native load check failed for $directory (exit $exit):\n$output"
+    )
+    if (output.trim.nonEmpty) log(output.trim)
+    log(s"Verified both JVM native load orders: $directory")
+  }
 
   def validateEntries(
       directory: File,
@@ -91,7 +119,8 @@ object NativeLibraries {
   }
 
   private def nativeCheck(
-      arguments: Seq[String]
+      arguments: Seq[String],
+      extraEnvironment: Map[String, String] = Map.empty
   ): (Int, String) = {
     val builder = new ProcessBuilder(arguments: _*)
     builder.redirectErrorStream(true)
@@ -106,6 +135,9 @@ object NativeLibraries {
       environment.remove
     )
     environment.put("LC_ALL", "C")
+    extraEnvironment.foreach { case (key, value) =>
+      environment.put(key, value)
+    }
     val process = builder.start()
     val source = Source.fromInputStream(process.getInputStream, "UTF-8")
     val output =

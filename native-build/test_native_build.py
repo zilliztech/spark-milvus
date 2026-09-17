@@ -1,11 +1,14 @@
 """Regression tests for source identity and native dependency staging."""
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 def module(name):
@@ -123,8 +126,8 @@ class NativeStageTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    all(shutil.which(tool) for tool in ("gcc", "readelf", "ldd", "nm")),
-    "native compiler and ELF inspection tools required",
+    all(shutil.which(tool) for tool in ("gcc", "readelf", "ldd", "nm", "java")),
+    "native compiler, ELF inspection tools, and Java required",
 )
 class NativeAuditTest(unittest.TestCase):
     def setUp(self):
@@ -198,6 +201,14 @@ class NativeAuditTest(unittest.TestCase):
         orders = json.loads((output / "load-orders.json").read_text())
         self.assertEqual(2, len(orders))
         self.assertTrue(all(record["exit"] == 0 for record in orders))
+        jvm_loads = json.loads((output / "jvm-load-tests.json").read_text())
+        self.assertEqual([
+            {"entries": ["libmilvus-storage-jni.so", "libknowhere_jni.so"], "exit": 0},
+            {"entries": ["libknowhere_jni.so", "libmilvus-storage-jni.so"], "exit": 0},
+        ], jvm_loads)
+        self.assertEqual([], json.loads((output / "diagnostic-failures.json").read_text()))
+        self.assertIn("LOADED libmilvus-storage-jni.so",
+                      (output / "jvm-load-milvus-storage-jni--then--knowhere_jni.log").read_text())
 
     def test_missing_load_entry_is_rejected(self):
         self.library("libmilvus-storage-jni.so", "int storage_entry(void) { return 7; }")
@@ -205,38 +216,81 @@ class NativeAuditTest(unittest.TestCase):
             stage.audit(self.libraries, ["libmilvus-storage-jni.so"],
                         stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, self.root / "audit")
 
-    def test_dlopen_failure_is_recorded_as_failed(self):
+    def test_jvm_load_failure_is_recorded_and_blocks_the_audit(self):
         self.complete_roots()
         self.library(
             "libknowhere_jni.so",
-            "#include <stdlib.h>\n"
-            "__attribute__((constructor)) static void fail_load(void) { exit(17); }\n"
+            "int JNI_OnLoad(void *vm, void *reserved) { return 0; }\n"
             "int vector_entry(void) { return 1; }",
         )
         output = self.root / "audit"
 
-        with self.assertRaisesRegex(ValueError, "Strict native audit failed: libknowhere_jni.so"):
+        with self.assertRaisesRegex(stage.JvmLoadAuditError, "JVM native load audit failed"):
             stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
                         stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output)
 
         result = json.loads((output / "results.json").read_text())["libknowhere_jni.so"]
         self.assertTrue(result["relocationsPassed"])
-        self.assertEqual(17, result["dlopenExit"])
-        self.assertFalse(result["passed"])
+        self.assertEqual(0, result["dlopenExit"])
+        self.assertTrue(result["passed"])
+        loads = json.loads((output / "jvm-load-tests.json").read_text())
+        self.assertTrue(all(record["exit"] != 0 for record in loads))
 
-    def test_unresolved_ordinary_dependency_fails_the_audit(self):
+    def test_jvm_exit_zero_without_completion_markers_is_rejected(self):
+        self.complete_roots()
+        self.library(
+            "libknowhere_jni.so",
+            "#include <stdlib.h>\n"
+            "__attribute__((constructor)) static void stop_load(void) { exit(0); }\n"
+            "int vector_entry(void) { return 1; }",
+        )
+        output = self.root / "audit"
+
+        with self.assertRaises(stage.JvmLoadAuditError):
+            stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                        stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output)
+
+        loads = json.loads((output / "jvm-load-tests.json").read_text())
+        self.assertEqual([125, 125], [record["exit"] for record in loads])
+        self.assertIn("without the required load markers", (
+            output / "jvm-load-knowhere_jni--then--milvus-storage-jni.log").read_text())
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            direct_loads = stage.check_jvm_loads(self.libraries)
+        self.assertEqual([125, 125], [record["exit"] for record in direct_loads])
+        self.assertIn("without the required load markers", stderr.getvalue())
+
+    def test_diagnostic_tool_error_does_not_replace_jvm_acceptance(self):
+        self.complete_roots()
+        output = self.root / "audit"
+
+        with mock.patch.object(stage, "command", side_effect=RuntimeError("diagnostic failed")):
+            loads = stage.audit(
+                self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output,
+            )
+
+        self.assertTrue(all(record["exit"] == 0 for record in loads))
+        self.assertEqual("RuntimeError: diagnostic failed\n",
+                         (output / "diagnostic-error.txt").read_text())
+
+    def test_unresolved_unloaded_dependency_is_diagnostic_when_both_jvm_orders_pass(self):
         self.complete_roots()
         self.library(
             "libbroken.so",
             "extern int missing(void); int broken(void) { return missing(); }",
         )
 
-        with self.assertRaisesRegex(ValueError, "Strict native audit failed: libbroken.so"):
-            stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
-                        stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, self.root / "audit")
+        loads = stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                            stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, self.root / "audit")
 
         result = json.loads((self.root / "audit/results.json").read_text())["libbroken.so"]
         self.assertFalse(result["relocationsPassed"])
+        self.assertFalse(result["passed"])
+        self.assertIn("libbroken.so", json.loads(
+            (self.root / "audit/diagnostic-failures.json").read_text()))
+        self.assertTrue(all(record["exit"] == 0 for record in loads))
 
 
 if __name__ == "__main__":

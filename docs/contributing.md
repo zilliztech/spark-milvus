@@ -186,8 +186,10 @@ make package NATIVE_BUNDLE="$PWD/target/native-build/linux-x86_64/milvus-native-
 
 The source build currently uses the Linux x86_64 GCC 12 profile in
 `native-build/profiles/`. It needs Conan 2, CMake 3.27.5, Ninja, the profile's
-compilers, Rust, a JDK, `patchelf` and access to the pinned source repositories
-and Conan recipes. `--with-cardinal` also needs access to both pinned Cardinal
+compilers, Rust, libclang, a JDK, `patchelf` and access to the pinned source
+repositories and Conan recipes. Rust bindgen loads libclang when building the
+storage bridge's `custom-labels` dependency; install `libclang-dev` on Ubuntu.
+`--with-cardinal` also needs access to both pinned Cardinal
 revisions. `dependencies.json` selects the newer version when the two source
 recipes conflict. Every dependency uses the exact upstream recipe revision in
 `native-build/dependencies.json`; the repository does not export replacement
@@ -202,6 +204,13 @@ with up to `NATIVE_JOBS` Ninja jobs and limits any Cargo recheck to one job.
 This sequencing prevents the Rust and C++ schedulers from each starting a full
 parallel build at once. Engine and JNI targets are installed under
 `NATIVE_WORK_DIR/install/lib/` before their dependency closure is staged.
+
+Native acceptance requires both JNI libraries to load in two fresh JVMs, using
+storage-first and Knowhere-first order. Staging, packaging and sbt use the same
+checker in `native-build/jvm_load.py`; a matching JDK with `libjsig` is required.
+Per-library ELF and relocation checks remain diagnostic and do not block this
+acceptance. JNI functional tests and real Spark queries must still run against
+the resulting assembly; successful `System.load` alone does not prove them.
 
 The build records source changes, recipe identities, dependency locks, the
 resolved graph, compiler commands and library hashes under `NATIVE_WORK_DIR`.
@@ -229,6 +238,11 @@ Docker uses the same `native-resources` target as Make. Both native build paths
 limit concurrency to `NATIVE_JOBS` (1..50) and preserve initialized submodule
 checkouts. The storage-only resource target always invokes the incremental
 build before copying, including when previous libraries already exist.
+Docker keeps Conan packages, Cargo registry/Git downloads and ccache in locked
+BuildKit cache mounts, so a later build failure does not discard completed
+dependencies. Conan configuration is initialized inside the mount, including
+when the cache is empty. Native work directories and Cargo compilation outputs
+remain local to each build; cache reuse does not skip source or provenance checks.
 This does not establish joint Storage/Knowhere support on platforms
 without a validated unified bundle.
 
@@ -246,16 +260,20 @@ one class loader extracts and verifies them in one private directory; both
 upstream JNI loaders use that directory. The external `.properties` checksum
 sidecar is a build input and is not needed next to the deployed assembly.
 
-Bundle-selected test JVMs use immediate native symbol binding and an empty
-external library path. No external library directory or runtime mutation of
+Bundle-selected functional test JVMs set `LD_BIND_NOW=1` and an empty external
+library path. A JVM may still request lazy binding when loading a native
+library; this setting does not prove every function symbol has been resolved.
+The shared loading checker clears `LD_BIND_NOW` and verifies completed
+`System.load` calls. No external library directory or runtime mutation of
 `java.library.path` is needed.
 
 The system provides glibc, libstdc++, libgcc_s and `libz.so.1`. Zulu JDKs load
 system zlib before connector initialization; a second bundled copy cannot
 override those existing symbol bindings. Native checks verify the required
 zlib symbol versions against the system provider. Other non-system dependencies
-are packaged together. Cardinal's two plugins are checked with their declared
-Knowhere parent callbacks; other libraries must resolve independently.
+are packaged together. Per-library diagnostics check Cardinal's two plugins
+with their declared Knowhere parent callbacks and other libraries individually.
+Those diagnostic results do not replace the JVM loading and functional tests.
 
 `milvus.native.bundle` and `knowhere.native.jar` are mutually exclusive. When a
 unified bundle is selected, the old storage resources do not enter the build
