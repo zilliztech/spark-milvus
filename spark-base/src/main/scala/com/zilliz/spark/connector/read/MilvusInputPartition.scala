@@ -7,7 +7,8 @@ import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** The two segment layouts a read can produce, so a caller can dispatch on
-  * which line a partition belongs to without matching on Spark's own type.
+  * which line a partition belongs to without matching on Spark's own type. A
+  * `vector.search.*` request travels in `milvusOption` for both lines.
   */
 sealed trait MilvusInputPartition extends InputPartition {
   def task: SegmentReadTask
@@ -24,11 +25,7 @@ sealed trait MilvusInputPartition extends InputPartition {
 case class MilvusV3InputPartition(
     task: SegmentReadTask, // What to read: layout, schema, fs.* map, deletes
     partitionName: String, // Snapshot reads store the partition ID string here.
-    milvusOption: MilvusOption,
-    topK: Option[Int] = None,
-    queryVector: Option[Array[Float]] = None,
-    metricType: Option[String] = None,
-    vectorColumn: Option[String] = None
+    milvusOption: MilvusOption
 ) extends MilvusInputPartition
 
 /** InputPartition for milvus-segment-info `storage_version = 2` — the

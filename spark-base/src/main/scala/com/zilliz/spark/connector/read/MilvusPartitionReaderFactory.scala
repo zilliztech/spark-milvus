@@ -72,14 +72,16 @@ class MilvusPartitionReaderFactory(
     */
   override def supportColumnarReads(partition: InputPartition): Boolean =
     MilvusOption.readColumnar(optionsMap) && (partition match {
-      case p: MilvusInputPartition
-          if p.milvusOption.vectorSearch.exists(_.mode == "index") =>
-        false
-      case p: MilvusV3InputPartition =>
-        p.topK.isEmpty && p.queryVector.isEmpty
-      case _: MilvusInputPartition => true
+      case p: MilvusInputPartition => searchFor(p).isEmpty
       case _                       => false
     })
+
+  /** The `vector.search.*` request a partition's row reader runs, for either
+    * storage line and either mode.
+    */
+  private[read] def searchFor(
+      partition: MilvusInputPartition
+  ): Option[VectorSearch] = partition.milvusOption.vectorSearch
 
   override def createColumnarReader(
       partition: InputPartition
@@ -170,21 +172,7 @@ class MilvusPartitionReaderFactory(
           _.mode == "index"
         ) && field.name == MilvusOption.VectorSearchScore)
       })
-      val search = p.milvusOption.vectorSearch
-        .filter(_.mode == "index")
-        .orElse(p match {
-          case v3: MilvusV3InputPartition =>
-            for {
-              k <- v3.topK
-              q <- v3.queryVector
-            } yield VectorSearch(
-              queryVector = q,
-              topK = k,
-              metricType = v3.metricType.getOrElse("L2"),
-              vectorColumn = v3.vectorColumn.getOrElse("vector")
-            )
-          case _ => None
-        })
+      val search = searchFor(p)
       val setup = ColumnBinding(p, dataSchema)
       val includeSearchScore =
         schema.fieldNames.contains(MilvusOption.VectorSearchScore)

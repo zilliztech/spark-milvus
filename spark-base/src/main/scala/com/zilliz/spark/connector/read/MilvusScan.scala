@@ -315,18 +315,13 @@ class MilvusScan(
       neededFieldIds = MilvusOption.readerFieldIds(options),
       limits = milvusOption.readLimits
     )
-    val vectorSearch = milvusOption.vectorSearch
     plan.specs.map { task =>
       task.layout match {
         case SegmentLayout.Manifest(_, _) =>
           MilvusV3InputPartition(
             task,
             task.partitionId.toString,
-            canonicalMilvusOption,
-            vectorSearch.map(_.topK),
-            vectorSearch.map(_.queryVector),
-            vectorSearch.map(_.metricType),
-            vectorSearch.map(_.vectorColumn)
+            canonicalMilvusOption
           ): InputPartition
         case SegmentLayout.ColumnGroups(_) =>
           MilvusV2InputPartition(task, canonicalMilvusOption): InputPartition

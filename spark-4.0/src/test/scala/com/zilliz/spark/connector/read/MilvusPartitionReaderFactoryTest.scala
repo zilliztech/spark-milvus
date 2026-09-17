@@ -76,24 +76,31 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     properties = Map("fs.storage_type" -> "local")
   )
 
-  private def v3(
-      topK: Option[Int] = None,
-      queryVector: Option[Array[Float]] = None
-  ) = MilvusV3InputPartition(
-    task(SegmentLayout.Manifest("files/seg")),
-    "20",
-    options,
-    topK = topK,
-    queryVector = queryVector
-  )
+  private def v3(milvusOption: MilvusOption = options) =
+    MilvusV3InputPartition(
+      task(SegmentLayout.Manifest("files/seg")),
+      "20",
+      milvusOption
+    )
 
-  private def v2() = MilvusV2InputPartition(
+  private def v2(milvusOption: MilvusOption = options) = MilvusV2InputPartition(
     task(
       SegmentLayout.ColumnGroups(
         Seq(V2ColumnGroup(Seq(100L), Seq("a.parquet"), Seq(10L)))
       )
     ),
-    options
+    milvusOption
+  )
+
+  private val bruteForce = options.copy(
+    vectorSearch = Some(
+      VectorSearch(
+        Array(1f, 2f),
+        topK = 10,
+        metricType = "L2",
+        vectorColumn = "vector"
+      )
+    )
   )
 
   private def factory(
@@ -124,14 +131,16 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     assert(withPredicate.supportColumnarReads(v2()))
   }
 
-  // topK and queryVector make the row reader run a brute-force search. The
-  // columnar reader would ignore them and return the whole segment.
-  test("vector search parameters send the partition back to the row reader") {
+  // The search runs in the row reader whatever the segment's storage line.
+  // Only V3 partitions used to carry it, so a V2 segment of a brute-force read
+  // was scanned whole and every row came back as if it were a hit.
+  test("a brute-force search sends both storage lines to the row reader") {
     val f = factory(columnar = true)
-    assert(!f.supportColumnarReads(v3(topK = Some(10))))
-    assert(
-      !f.supportColumnarReads(v3(queryVector = Some(Array(1f, 2f))))
-    )
+    assert(!f.supportColumnarReads(v2(bruteForce)))
+    assert(!f.supportColumnarReads(v3(bruteForce)))
+    assert(f.searchFor(v2(bruteForce)).map(_.topK) == Some(10))
+    assert(f.searchFor(v3(bruteForce)).map(_.topK) == Some(10))
+    assert(f.searchFor(v2()).isEmpty && f.searchFor(v3()).isEmpty)
   }
 
   test("row-reader construction failure closes its task allocator") {

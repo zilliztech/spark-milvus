@@ -182,11 +182,7 @@ class SegmentIndexSearchPlanningTest extends AnyFunSuite {
         MilvusV3InputPartition(
           task.copy(layout = SegmentLayout.Manifest("absent", 1)),
           "2",
-          configuration,
-          Some(2),
-          Some(Array(1f, 0f)),
-          Some("COSINE"),
-          Some("vector")
+          configuration
         )
       )
     )

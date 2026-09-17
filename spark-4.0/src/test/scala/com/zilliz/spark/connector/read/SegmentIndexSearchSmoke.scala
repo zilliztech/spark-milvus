@@ -231,15 +231,7 @@ object SegmentIndexSearchSmoke {
     val parsed = MilvusOption(options)
     val partition: MilvusInputPartition = task.layout match {
       case _: SegmentLayout.Manifest =>
-        MilvusV3InputPartition(
-          task,
-          "20",
-          parsed,
-          Some(2),
-          Some(Array(0f, 0f)),
-          Some("L2"),
-          Some("vector")
-        )
+        MilvusV3InputPartition(task, "20", parsed)
       case _: SegmentLayout.ColumnGroups => MilvusV2InputPartition(task, parsed)
     }
     val id = StructField("id", LongType, nullable = false)
