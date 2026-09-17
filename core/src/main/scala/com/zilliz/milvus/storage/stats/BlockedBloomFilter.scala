@@ -118,6 +118,11 @@ object BlockedBloomFilter {
 
   /** A filter from its JSON form. */
   def fromJson(k: Int, blocksBase64: Seq[String]): BlockedBloomFilter = {
+    require(
+      k >= 2,
+      s"blocked bloom filter hash count must be at least 2, got $k"
+    )
+    require(blocksBase64.nonEmpty, "blocked bloom filter must contain a block")
     val words = new Array[Int](blocksBase64.size * WordsPerBlock)
     blocksBase64.zipWithIndex.foreach { case (encoded, b) =>
       val bytes = Base64.getUrlDecoder.decode(encoded)

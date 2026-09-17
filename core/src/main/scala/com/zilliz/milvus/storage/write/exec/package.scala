@@ -33,7 +33,8 @@ package com.zilliz.milvus.storage.write
   * Main types: SegmentWriter, V3SegmentWriter, V2SegmentWriter,
   * WrittenColumnGroups, ManifestTransaction, StagingLayout, ColumnGroupSplit.
   * `SegmentWriter.metrics` is what the write cost on the crossing, as
-  * `WriteMetrics` (G5). Capabilities: W1, W2, G5 (see
+  * `WriteMetrics` (G5). The caller supplies G2's validated
+  * `writer.file_rolling.size` property. Capabilities: W1, W2, G2, G5 (see
   * docs/design/capabilities.md). Design: docs/design/README.md section 2.4.
   */
 package object exec

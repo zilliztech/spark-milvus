@@ -7,7 +7,7 @@ import java.util.Comparator
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.io.LocalObjectStore
+import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
 
 class CommitterTest extends AnyFunSuite with Matchers {
@@ -77,6 +77,66 @@ class CommitterTest extends AnyFunSuite with Matchers {
       ) shouldBe CommitOutcome.AlreadyCommitted
 
       text(dir, "files/staging/job-1/manifest.json") shouldBe first
+    }
+  }
+
+  test("owned jobs publish immutable ownership, heartbeat and manifest v2") {
+    withStore { (store, layout, _) =>
+      val descriptor =
+        JobDescriptor(JobOwner("analytics", "events"), JobWriteMode.Append)
+      val committer = new Committer(store, layout)
+
+      committer.start(descriptor, nowMillis = 100L)
+      committer.heartbeat(nowMillis = 150L)
+      committer.commit(
+        segments,
+        nowMillis = 200L,
+        descriptor = Some(descriptor)
+      ) shouldBe CommitOutcome.Committed
+
+      committer.ownerManifest() shouldBe JobOwnerManifest(
+        JobOwnerManifest.CurrentVersion,
+        "job-1",
+        100L,
+        descriptor.owner,
+        JobWriteMode.Append.name
+      )
+      JobHeartbeat
+        .fromJson(text(storeRoot = store, path = layout.heartbeat))
+        .fold(e => throw e, identity) shouldBe JobHeartbeat(
+        JobHeartbeat.CurrentVersion,
+        "job-1",
+        200L
+      )
+      committer.manifest() shouldBe JobManifest(
+        "job-1",
+        100L,
+        segments,
+        formatVersion = Some(JobManifest.CurrentVersion),
+        owner = Some(descriptor.owner),
+        writeMode = Some(JobWriteMode.Append.name)
+      )
+
+      val changed =
+        JobDescriptor(JobOwner("analytics", "other"), JobWriteMode.Append)
+      val error = intercept[IllegalStateException](
+        committer.start(changed, nowMillis = 250L)
+      )
+      error.getMessage should include("does not describe")
+    }
+  }
+
+  test("start creates the staging directory before writing ownership") {
+    withStore { (store, layout, _) =>
+      val strict = new ParentCheckingStore(store)
+      new Committer(strict, layout).start(
+        JobDescriptor(JobOwner("default", "events"), JobWriteMode.Append),
+        nowMillis = 10L
+      )
+
+      strict.created should contain(layout.prefix)
+      store.exists(layout.owner) shouldBe true
+      store.exists(layout.heartbeat) shouldBe true
     }
   }
 
@@ -164,5 +224,38 @@ class CommitterTest extends AnyFunSuite with Matchers {
     val manifest = JobManifest("j", 42L, segments)
     JobManifest.fromJson(manifest.toJson) shouldBe Right(manifest)
     JobManifest.fromJson("{") should matchPattern { case Left(_) => }
+  }
+
+  private def text(storeRoot: LocalObjectStore, path: String): String =
+    new String(storeRoot.readAll(path), StandardCharsets.UTF_8)
+
+  private final class ParentCheckingStore(delegate: ObjectStore)
+      extends ObjectStore {
+    var created = Set.empty[String]
+
+    override def readAll(key: String): Array[Byte] = delegate.readAll(key)
+    override def size(key: String): Long = delegate.size(key)
+    override def list(key: String, recursive: Boolean): Seq[FileInfo] =
+      delegate.list(key, recursive)
+    override def exists(key: String): Boolean = delegate.exists(key)
+    override def readAt(
+        key: String,
+        offset: Long,
+        length: Long,
+        fileSize: Long
+    ): Array[Byte] = delegate.readAt(key, offset, length, fileSize)
+    override def write(key: String, data: Array[Byte]): Unit = {
+      val parent = key.split("/").dropRight(1).mkString("/")
+      if (!delegate.exists(parent)) {
+        throw new IllegalStateException(s"parent $parent was not created")
+      }
+      delegate.write(key, data)
+    }
+    override def createDir(key: String, recursive: Boolean): Unit = {
+      created += key
+      delegate.createDir(key, recursive)
+    }
+    override def delete(key: String): Unit = delegate.delete(key)
+    override def close(): Unit = ()
   }
 }

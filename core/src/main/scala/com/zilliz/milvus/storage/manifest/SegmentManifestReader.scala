@@ -9,7 +9,12 @@ import org.apache.avro.io.DecoderFactory
 import org.apache.avro.util.Utf8
 import org.apache.avro.Schema
 
-import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment, V2ColumnGroup}
+import com.zilliz.milvus.storage.snapshot.{
+  DeltaLogFile,
+  Segment,
+  SegmentStatistics,
+  V2ColumnGroup
+}
 
 /** Low-level mirror of one AVRO binlog group (`AvroFieldBinlog`):
   *   - `slotFieldId`: the value milvus writes for `AvroFieldBinlog.field_id`.
@@ -61,6 +66,7 @@ case class AvroManifestEntry(
     storageVersion: Long,
     binlogFiles: Seq[AvroFieldBinlogEntry],
     deltaLogFiles: Seq[AvroFieldBinlogEntry],
+    statsLogFiles: Seq[AvroFieldBinlogEntry] = Seq.empty,
     indexFiles: Option[Vector[AvroIndexFileEntry]] = None
 )
 
@@ -219,7 +225,8 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
                 logPath = log.logPath,
                 entriesNum = log.entriesNum
               )
-            )
+            ),
+          statistics = statistics(entry)
         )
       )
     } else if (entry.binlogFiles.size != groupFieldIdList.size) {
@@ -263,7 +270,8 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
           partitionId = entry.partitionId,
           rows = entry.numOfRows,
           columnGroups = cgs,
-          deltaLogs = deltaLogs
+          deltaLogs = deltaLogs,
+          statistics = statistics(entry)
         )
       )
     }
@@ -313,8 +321,18 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
       storageVersion = asLong(rec.get("storage_version")),
       binlogFiles = projectFieldBinlogs(rec.get("binlog_files")),
       deltaLogFiles = projectFieldBinlogs(rec.get("deltalog_files")),
+      statsLogFiles = projectFieldBinlogs(rec.get("statslog_files")),
       indexFiles = Some(projectIndexes(rec.get("index_files")))
     )
+  }
+
+  private def statistics(entry: AvroManifestEntry): SegmentStatistics = {
+    val byField = entry.statsLogFiles
+      .groupBy(_.slotFieldId)
+      .map { case (fieldId, groups) =>
+        fieldId -> groups.flatMap(_.binlogs).sortBy(_.logId).map(_.logPath)
+      }
+    SegmentStatistics.Listed(byField)
   }
 
   private def projectIndexes(value: Any): Vector[AvroIndexFileEntry] = {

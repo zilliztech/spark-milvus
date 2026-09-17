@@ -5,7 +5,12 @@ import java.nio.file.{Files, Paths}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment, V2ColumnGroup}
+import com.zilliz.milvus.storage.snapshot.{
+  DeltaLogFile,
+  Segment,
+  SegmentStatistics,
+  V2ColumnGroup
+}
 import com.zilliz.milvus.storage.snapshot.json.SegmentListJson
 
 /** Tests for [[SegmentManifestReader]] against a real milvus-produced
@@ -42,6 +47,35 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
         if (version == 1) index.copy(indexStorePathVersion = None) else index
       entry.indexFiles shouldBe Some(Vector(expected))
       entry.numOfRows shouldBe 2L
+    }
+  }
+
+  test("all manifest versions expose StorageV2 statslog files") {
+    val logs = Seq(
+      AvroFieldBinlogEntry(
+        100L,
+        Seq(
+          AvroBinlogEntry(9L, "files/stats_log/100/9", 20L),
+          AvroBinlogEntry(7L, "files/stats_log/100/7", 10L)
+        )
+      )
+    )
+    SegmentManifestReader.supportedSchemaVersions.foreach { version =>
+      val entry = SegmentManifestReader
+        .parse(
+          SegmentManifestFixture.encode(version = version, statsLogs = logs),
+          version
+        )
+        .toOption
+        .get
+      entry.statsLogFiles shouldBe logs
+      val segment = SegmentManifestReader
+        .toSegment(entry.copy(storageVersion = 2L), Seq.empty)
+        .toOption
+        .get
+      segment.statistics shouldBe SegmentStatistics.Listed(
+        Map(100L -> Seq("files/stats_log/100/7", "files/stats_log/100/9"))
+      )
     }
   }
 

@@ -3,8 +3,11 @@ package com.zilliz.spark.connector.write
 import java.{util => ju}
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.{Executors, ScheduledExecutorService, ThreadFactory}
+import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
+import scala.util.control.NonFatal
 
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector._
@@ -37,7 +40,10 @@ import com.zilliz.milvus.storage.stats.PrimaryKeyStats
 import com.zilliz.milvus.storage.write.commit.{
   CommitOutcome,
   CommittedSegment,
-  Committer
+  Committer,
+  JobDescriptor,
+  JobOwner,
+  JobWriteMode
 }
 import com.zilliz.milvus.storage.write.exec.{
   ColumnGroupSplit,
@@ -50,6 +56,7 @@ import com.zilliz.spark.connector.metrics.WriteMetricsReport
 import com.zilliz.spark.connector.options.{
   HadoopStorageKeys,
   MilvusOption,
+  OptionParsing,
   StorageOptions
 }
 import com.zilliz.spark.connector.types.{SparkSchemaMapper, SparkTypes}
@@ -128,13 +135,43 @@ class MilvusV3BatchWrite(
     jobId
   )
 
+  private val writeMode: JobWriteMode =
+    if (
+      OptionParsing
+        .value(milvusOption.options, MilvusOption.WriterCustomPath)
+        .flatMap(Option(_))
+        .exists(_.trim.nonEmpty) ||
+      OptionParsing
+        .value(milvusOption.options, MilvusOption.WriterCommitType)
+        .flatMap(Option(_))
+        .exists(_.trim.equalsIgnoreCase("addfield"))
+    ) JobWriteMode.Backfill
+    else JobWriteMode.Append
+
+  private val descriptor: Option[JobDescriptor] =
+    Option(milvusOption.collectionName)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map { collection =>
+        val database = Option(milvusOption.databaseName)
+          .map(_.trim)
+          .filter(_.nonEmpty)
+          .getOrElse("default")
+        JobDescriptor(JobOwner(database, collection), writeMode)
+      }
+
+  @transient private var heartbeatExecutor: ScheduledExecutorService = null
+  @transient private var ownershipStarted = false
+
   override def createBatchWriterFactory(
       info: PhysicalWriteInfo
   ): DataWriterFactory = {
+    startHeartbeat()
     new MilvusV3WriterFactory(schema, milvusOption, jobId, storage)
   }
 
   override def commit(messages: Array[WriterCommitMessage]): Unit = {
+    stopHeartbeat()
     val segments = messages.toSeq.map {
       case msg: MilvusV3CommitMessage =>
         CommittedSegment(
@@ -148,7 +185,7 @@ class MilvusV3BatchWrite(
           s"unexpected commit message ${other.getClass.getName} in job $jobId"
         )
     }
-    withCommitter(_.commit(segments)) match {
+    withCommitter(_.commit(segments, descriptor = descriptor)) match {
       case CommitOutcome.Committed =>
         logInfo(
           s"Job $jobId committed: ${segments.size} segments, ${segments.map(_.rowCount).sum} rows, manifest ${layout.manifest}"
@@ -159,6 +196,7 @@ class MilvusV3BatchWrite(
   }
 
   override def abort(messages: Array[WriterCommitMessage]): Unit = {
+    stopHeartbeat()
     val deleted = withCommitter(_.abort())
     logWarning(
       s"Job $jobId aborted: ${messages.length} task messages, $deleted files deleted under ${layout.prefix}"
@@ -170,6 +208,80 @@ class MilvusV3BatchWrite(
     try f(new Committer(store, layout))
     finally store.close()
   }
+
+  /** Every named job publishes ownership before task writers start. Append jobs
+    * refresh driver liveness until Spark calls commit or abort. Backfill writes
+    * into existing segments and is never an automatic cleanup candidate.
+    */
+  private def startHeartbeat(): Unit = synchronized {
+    if (descriptor.isEmpty || ownershipStarted) return
+    withCommitter(_.start(descriptor.get))
+    ownershipStarted = true
+    if (writeMode != JobWriteMode.Append) return
+    val executor = Executors.newSingleThreadScheduledExecutor(
+      new ThreadFactory {
+        override def newThread(runnable: Runnable): Thread = {
+          val thread = new Thread(runnable, s"milvus-staging-heartbeat-$jobId")
+          thread.setDaemon(true)
+          thread
+        }
+      }
+    )
+    heartbeatExecutor = executor
+    try
+      executor.scheduleWithFixedDelay(
+        new Runnable {
+          override def run(): Unit =
+            try withCommitter(_.heartbeat())
+            catch {
+              case NonFatal(failure) =>
+                logError(
+                  s"Failed to refresh staging heartbeat for job $jobId",
+                  failure
+                )
+            }
+        },
+        MilvusV3BatchWrite.HeartbeatSeconds,
+        MilvusV3BatchWrite.HeartbeatSeconds,
+        TimeUnit.SECONDS
+      )
+    catch {
+      case NonFatal(failure) =>
+        heartbeatExecutor = null
+        ownershipStarted = false
+        executor.shutdownNow()
+        throw failure
+    }
+  }
+
+  private def stopHeartbeat(): Unit = {
+    val executor = synchronized {
+      val current = heartbeatExecutor
+      heartbeatExecutor = null
+      current
+    }
+    if (executor != null) {
+      executor.shutdownNow()
+      try {
+        if (!executor.awaitTermination(10L, TimeUnit.SECONDS)) {
+          logWarning(
+            s"Staging heartbeat for job $jobId did not stop within 10 seconds; a late heartbeat can only postpone cleanup"
+          )
+        }
+      } catch {
+        case interrupted: InterruptedException =>
+          Thread.currentThread().interrupt()
+          logWarning(
+            s"Interrupted while waiting for staging heartbeat of job $jobId to stop; continuing commit or abort",
+            interrupted
+          )
+      }
+    }
+  }
+}
+
+object MilvusV3BatchWrite {
+  private val HeartbeatSeconds = 60L
 }
 
 /** Writer factory for creating partition writers
@@ -245,7 +357,9 @@ class MilvusV3PartitionWriter(
       MilvusOption.WriterVariableWidthBytesPerValue,
       defaultValue = 32.0
     )
-  private val writerProperties: Map[String, String] = storage
+  private val storageProperties: Map[String, String] = storage
+  private val writerProperties: Map[String, String] =
+    MilvusOption.writerProperties(milvusOption, storage)
 
   private val allocator = new RootAllocator(Long.MaxValue)
 
@@ -269,7 +383,11 @@ class MilvusV3PartitionWriter(
   // (backfill writes into an existing segment's base path); otherwise the job
   // writes under its staging prefix. Both are keys relative to the bucket.
   private val basePath: String =
-    milvusOption.options.get(MilvusOption.WriterCustomPath.toLowerCase) match {
+    OptionParsing
+      .value(milvusOption.options, MilvusOption.WriterCustomPath)
+      .flatMap(Option(_))
+      .map(_.trim)
+      .filter(_.nonEmpty) match {
       case Some(customPath) =>
         logInfo(s"Using custom write path: $customPath")
         customPath
@@ -341,7 +459,7 @@ class MilvusV3PartitionWriter(
       val bytes = stats.toBytes
       val path =
         s"$basePath/_stats/bloom_filter.${stats.fieldId}/${System.currentTimeMillis()}"
-      val store = NativeObjectStore.Factory(writerProperties).open()
+      val store = NativeObjectStore.Factory(storageProperties).open()
       try store.write(path, bytes)
       finally store.close()
       logInfo(
@@ -419,10 +537,11 @@ class MilvusV3PartitionWriter(
       val groups = segmentWriter.finish()
       val committedVersion =
         try {
-          val change = milvusOption.options.get(
-            MilvusOption.WriterCommitType.toLowerCase
-          ) match {
-            case Some("addfield") =>
+          val change = OptionParsing
+            .value(milvusOption.options, MilvusOption.WriterCommitType)
+            .flatMap(Option(_))
+            .map(_.trim) match {
+            case Some(value) if value.equalsIgnoreCase("addfield") =>
               // Backfill replaces the target columns. Manifest columns are
               // keyed by Milvus field id (the Arrow column names are the ids),
               // so the drop names the id, not the Spark field name.
@@ -440,7 +559,7 @@ class MilvusV3PartitionWriter(
           }
           ManifestTransaction.commit(
             basePath,
-            writerProperties,
+            storageProperties,
             groups,
             change,
             writePrimaryKeyStats()
@@ -568,9 +687,10 @@ object MilvusV3Writer extends Logging {
       val milvusOption = MilvusOption(optionsMap)
       val mode =
         if (
-          milvusOption.options
-            .get(MilvusOption.WriterCommitType.toLowerCase)
-            .contains("addfield")
+          OptionParsing
+            .value(milvusOption.options, MilvusOption.WriterCommitType)
+            .flatMap(Option(_))
+            .exists(_.trim.equalsIgnoreCase("addfield"))
         ) WriteSchema.Mode.Columns
         else WriteSchema.Mode.Append
       val schema = WriteSchema.resolve(df.schema, collection, mode)

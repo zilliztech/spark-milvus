@@ -65,6 +65,17 @@ class SnapshotTest extends AnyFunSuite with Matchers {
     selected.segments shouldBe Seq(data20b, data21, l0For20, globalL0)
   }
 
+  test("optimizer segment retention keeps only applicable L0 sources") {
+    val selected = snapshot.retainDataSegments(Set(31L))
+
+    selected.partitionIds shouldBe Seq(20L)
+    selected.segments shouldBe Seq(data20b, l0For20, globalL0)
+
+    val none = snapshot.retainDataSegments(Set.empty)
+    none.partitionIds shouldBe empty
+    none.segments shouldBe empty
+  }
+
   test("partition and segment selectors intersect") {
     val selected = snapshot.narrow(Seq(20L), Seq(31L))
 

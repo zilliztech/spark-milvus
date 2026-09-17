@@ -34,6 +34,7 @@ class RegisterProcedureTest extends AnyFunSuite {
     assert(
       Procedures.all.map(_.name) == Seq(
         "register",
+        "cleanup_staging",
         "create_snapshot",
         "drop_snapshot",
         "list_snapshots",
@@ -50,10 +51,19 @@ class RegisterProcedureTest extends AnyFunSuite {
     assert(Procedures.all.map(_.name).distinct.size == Procedures.all.size)
     assert(Procedures.byName("register").contains(RegisterProcedure))
     assert(Procedures.byName("REGISTER").contains(RegisterProcedure))
+    assert(
+      Procedures
+        .byName("CLEANUP_STAGING")
+        .contains(CleanupStagingProcedure)
+    )
     assert(Procedures.byName("CREATE_INDEX").contains(CreateIndexProcedure))
     assert(Procedures.byName("nope").isEmpty)
     assert(
       RegisterProcedure.parameters.map(_.name) == Seq("collection", "staging")
+    )
+    assert(
+      CleanupStagingProcedure.parameters.map(_.name) ==
+        Seq("collection", "retention_seconds", "dry_run")
     )
   }
 

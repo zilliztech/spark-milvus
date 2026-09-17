@@ -2,9 +2,12 @@ package com.zilliz.spark.connector.read
 
 import java.util.OptionalLong
 import scala.jdk.CollectionConverters._
+import scala.util.control.NonFatal
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.connector.expressions.{Expressions, NamedReference}
+import org.apache.spark.sql.connector.expressions.filter.Predicate
 import org.apache.spark.sql.connector.metric.CustomMetric
 import org.apache.spark.sql.connector.read.{
   Batch,
@@ -12,7 +15,8 @@ import org.apache.spark.sql.connector.read.{
   PartitionReaderFactory,
   Scan,
   Statistics,
-  SupportsReportStatistics
+  SupportsReportStatistics,
+  SupportsRuntimeV2Filtering
 }
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -27,6 +31,8 @@ import com.zilliz.milvus.storage.snapshot.{
   Snapshot,
   SnapshotOrigin
 }
+import com.zilliz.milvus.storage.stats.{PrimaryKeyBloomPruner, PrimaryKeyFilter}
+import com.zilliz.spark.connector.expr.SparkPredicateTranslator
 import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.options.{
   MilvusOption,
@@ -36,23 +42,46 @@ import com.zilliz.spark.connector.options.{
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** One read of one [[Snapshot]]: the table resolved it once, this plans one
-  * partition per data segment and builds the reader factory from it. No storage
-  * is opened here except to read delete files.
+  * partition per data segment and builds the reader factory from it. Driver
+  * storage is opened only for manifest metadata, delete-file listings and
+  * primary-key Bloom statistics.
   */
 class MilvusScan(
     schema: StructType,
     options: CaseInsensitiveStringMap,
     private[read] val snapshot: Snapshot,
     pushedExpression: Option[PredicateExpr] = None,
-    private[read] val pushedLimit: Option[Int] = None
+    private[read] val pushedLimit: Option[Int] = None,
+    private[read] val planningSchema: StructType = null
 ) extends Scan
     with Batch
     with SupportsReportStatistics
+    with SupportsRuntimeV2Filtering
     with Logging {
   private val milvusOption = MilvusOption(options)
+  private val predicateSchema = Option(planningSchema).getOrElse(schema)
   milvusOption.vectorSearch.filter(_.mode == "index").foreach { search =>
     SegmentIndexSearch.validate(search, snapshot.schema)
   }
+  private val runtimePrimaryKey =
+    if (milvusOption.vectorSearch.isEmpty)
+      snapshot.primaryKeyField.filter(field =>
+        field.dataType == MilvusDataType.Int64 ||
+          field.dataType == MilvusDataType.VarChar
+      )
+    else None
+  private val pushedPrimaryKeyFilter =
+    for {
+      primaryKey <- runtimePrimaryKey
+      expression <- pushedExpression
+      filter <- PrimaryKeyFilter.fromPredicate(expression, primaryKey)
+    } yield filter
+
+  @transient private var runtimePrimaryKeyFilter: Option[PrimaryKeyFilter] =
+    None
+  @transient private var cachedDeleteListing: DeleteFileListing = null
+  @transient private var cachedBloomPruner: PrimaryKeyBloomPruner = null
+  @transient private var plannedPartitions: Array[InputPartition] = null
 
   /** Row count is the sum over planned partitions; the byte size is that count
     * times an estimated row width. Both come from the plan already built, so
@@ -77,13 +106,68 @@ class MilvusScan(
       Scan.ColumnarSupportMode.SUPPORTED
     else Scan.ColumnarSupportMode.UNSUPPORTED
 
-  private lazy val plannedPartitions: Array[InputPartition] = plan()
+  override def filterAttributes(): Array[NamedReference] =
+    runtimePrimaryKey
+      .map(field => Array(Expressions.column(field.name)))
+      .getOrElse(Array.empty[NamedReference])
 
-  /** Every read is of one fixed snapshot, so the plan is computed once. */
-  override def planInputPartitions(): Array[InputPartition] = plannedPartitions
+  /** Spark can call this more than once as more join-side values become
+    * available. Each accepted finite primary-key set narrows the prior set;
+    * unsupported shapes leave the current plan unchanged.
+    */
+  override def filter(predicates: Array[Predicate]): Unit = {
+    if (runtimePrimaryKey.isEmpty || predicates == null) return
+    val primaryKey = runtimePrimaryKey.get
+    val incoming = predicates.iterator
+      .flatMap(predicate =>
+        SparkPredicateTranslator
+          .translate(predicate, predicateSchema)
+          .flatMap(translated =>
+            PrimaryKeyFilter.fromPredicate(translated.expr, primaryKey)
+          )
+      )
+      .reduceLeftOption(_.intersect(_))
+    incoming.foreach { accepted =>
+      synchronized {
+        val next = runtimePrimaryKeyFilter
+          .map(_.intersect(accepted))
+          .orElse(Some(accepted))
+        if (next != runtimePrimaryKeyFilter) {
+          runtimePrimaryKeyFilter = next
+          plannedPartitions = null
+        }
+      }
+    }
+  }
+
+  private[read] def currentPrimaryKeyFilter: Option[PrimaryKeyFilter] =
+    effectivePrimaryKeyFilter
+
+  private def effectivePrimaryKeyFilter: Option[PrimaryKeyFilter] =
+    (pushedPrimaryKeyFilter, runtimePrimaryKeyFilter) match {
+      case (Some(pushed), Some(runtime)) => Some(pushed.intersect(runtime))
+      case (some @ Some(_), None)        => some
+      case (None, some @ Some(_))        => some
+      case _                             => None
+    }
+
+  /** Every plan uses one fixed snapshot. Runtime filters may replace the
+    * partition array, while delete listing and Bloom inputs remain cached.
+    */
+  override def planInputPartitions(): Array[InputPartition] = synchronized {
+    if (plannedPartitions == null) plannedPartitions = plan()
+    plannedPartitions
+  }
 
   private def bucket: Option[String] =
     Option(snapshot.bucket).map(_.trim).filter(_.nonEmpty)
+
+  private[read] def openPlanningStore(): ObjectStore =
+    StorageOptions.storeFor(
+      hadoopConf,
+      bucket.getOrElse(""),
+      milvusOption.options
+    )
 
   /** Hadoop configuration for objects under `path`, from the connector's `fs.*`
     * options plus per-bucket S3A settings.
@@ -130,19 +214,63 @@ class MilvusScan(
             ),
           identity
         )
-    val deletes =
-      if (!DeleteFileListing.requiresStore(snapshot, applyDeletes)) {
-        listDeletes(null)
-      } else {
-        SnapshotSources.withStore(
-          StorageOptions.storeFor(
-            hadoopConf,
-            bucket.getOrElse(""),
-            milvusOption.options
-          )
-        )(listDeletes)
+    val primaryKeyFilter = effectivePrimaryKeyFilter
+    val needsBloomStore =
+      primaryKeyFilter.exists(_.values.nonEmpty) && cachedBloomPruner == null
+    val needsDeleteStore =
+      cachedDeleteListing == null &&
+        DeleteFileListing.requiresStore(snapshot, applyDeletes)
+
+    // V2 delete metadata is already in the snapshot. Resolve and validate it
+    // before opening a store only for Bloom statistics, so a delete-contract
+    // failure cannot be mistaken for an optional pruning failure.
+    if (cachedDeleteListing == null && !needsDeleteStore) {
+      cachedDeleteListing = listDeletes(null)
+    }
+
+    def loadBloom(store: ObjectStore): Unit =
+      if (needsBloomStore) {
+        cachedBloomPruner = PrimaryKeyBloomPruner.load(
+          snapshot,
+          runtimePrimaryKey.get,
+          Option(cachedDeleteListing)
+            .map(_.v3ReadVersions)
+            .getOrElse(Map.empty),
+          bucket.getOrElse(""),
+          StorageOptions.effectiveEndpoint(milvusOption.options).getOrElse(""),
+          store
+        )
       }
-    inputPartitions(snapshot, deletes)
+
+    if (needsDeleteStore || needsBloomStore) {
+      try {
+        SnapshotSources.withStore(
+          openPlanningStore()
+        ) { store =>
+          if (needsDeleteStore)
+            cachedDeleteListing = listDeletes(store)
+          loadBloom(store)
+        }
+      } catch {
+        case NonFatal(e) if !needsDeleteStore && needsBloomStore =>
+          logWarning(
+            s"Retaining all segments of $errorContext because its primary-key " +
+              s"Bloom statistics cannot be loaded: ${e.getMessage}"
+          )
+          cachedBloomPruner = PrimaryKeyBloomPruner.unavailable(
+            snapshot,
+            runtimePrimaryKey.get
+          )
+      }
+    }
+
+    val plannedSnapshot = primaryKeyFilter match {
+      case Some(filter) if filter.values.isEmpty =>
+        snapshot.retainDataSegments(Set.empty)
+      case Some(filter) => cachedBloomPruner.prune(filter)
+      case None         => snapshot
+    }
+    inputPartitions(plannedSnapshot, cachedDeleteListing)
   }
 
   /** The plan, `core.read.plan.ReadPlan.of`, wrapped into Spark's input
@@ -178,7 +306,8 @@ class MilvusScan(
       properties = _ => planProperties,
       applyDeletes = MilvusOption.readApplyDeletes(options),
       deletes = deletes,
-      neededFieldIds = MilvusOption.readerFieldIds(options)
+      neededFieldIds = MilvusOption.readerFieldIds(options),
+      limits = milvusOption.readLimits
     )
     val vectorSearch = milvusOption.vectorSearch
     plan.specs.map { task =>

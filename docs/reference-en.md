@@ -360,18 +360,27 @@ Every read and write reports what it cost on the C/JVM boundary as task metrics 
 | `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | No | true | Apply all segment-local, partition-level L0, and collection-level L0 deletes visible in the fixed snapshot. Setting this to `false` is explicit opt-out; any provided value besides `true` or `false`, including a blank value, is rejected. |
 | `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
 | `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. A read with `vector.search.*` options takes the row path regardless, because that stage scores rows. Row and columnar readers use the same expected-row guard. |
+| `milvus.read.batch.max.rows` | Int | No | 8192 | Positive maximum rows requested from milvus-storage for one record batch; delivered as `reader.record_batch_max_rows`. |
+| `milvus.read.batch.max.bytes` | Long | No | 33554432 | Positive target byte limit for one native record batch; delivered as `reader.record_batch_max_size`. The current upstream maximum is 4294967296 (4 GiB). |
+| `milvus.read.arrow.max.bytes` | Long | No | 9223372036854775807 | Positive hard limit of the Arrow child allocator owned by one Spark read task. It covers imported/read Arrow buffers on row, columnar and vector paths, but not milvus-storage's separate native memory pool. |
 
 Provided selector lists reject blank values, empty entries, and non-numeric
 values. Boolean read options
 (`milvus.snapshot.mode`, `milvus.read.apply.deletes`,
 `milvus.read.vector.raw`, and `milvus.read.columnar`) accept only `true` or
 `false`, case-insensitively; a blank value or misspelling is an error rather
-than a default. A provided `milvus.snapshot.max.json.bytes` must be a positive
-integer. Vector search is
+than a default. Positive integer/long options reject blanks, zero, negative,
+non-decimal and overflowing values and report both the key and supplied value.
+A provided `milvus.snapshot.max.json.bytes` must be a positive integer. Vector search is
 enabled only when `vector.search.query` and `vector.search.topK` are both set:
 the query must be a non-empty JSON-style array of finite numbers and `topK`
 must be a positive integer. Any provided vector-search option must be non-blank;
 a partial or malformed configuration fails during planning.
+The same strict rules apply to existing connector values:
+`milvus.insertMaxBatchSize` (default 5000), `milvus.retry.count` (3),
+`milvus.retry.interval` (1000), `s3.maxConnections` (32), and
+`s3.preloadPoolSize` (4) are positive integers; `s3.useSSL` and
+`s3.pathStyleAccess` are strict Booleans.
 
 #### Spark predicate pushdown
 
@@ -406,9 +415,10 @@ at all). Field ids and vector dimensions come from that schema.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `fs.root_path` | String | No | `files` | The job writes under `{root}/staging/{job-id}/`: one segment directory per Spark partition, then `manifest.json` (every segment's path, manifest version and row count) and the marker `_committed`. |
-| `MilvusOption.MilvusInsertMaxBatchSize` | Int | No | 1000 | Rows per Arrow batch handed to the native writer. |
+| `fs.root_path` | String | No | `files` | The job writes under `{root}/staging/{job-id}/`. Before tasks start it writes collection ownership to `owner.json` and refreshes `_heartbeat` every 60 seconds; commit adds the owned `manifest.json` and `_committed`. |
+| `MilvusOption.MilvusInsertMaxBatchSize` | Int | No | 5000 | Positive rows per Arrow batch handed to the native writer. |
 | `milvus.writer.variableWidthBytesPerValue` | Double | No | 32.0 | Initial bytes reserved per value of a variable-width column (strings, JSON, binary). |
+| `milvus.write.file.rolling.bytes` | Long | No | 2147483648 | Positive uncompressed-byte threshold passed to both V2 and V3 native writers as `writer.file_rolling.size`. It controls column-group file rolling; it is not an object-store upload size or an exact final Parquet file size. |
 
 What the write checks before any task starts: every DataFrame column is a
 field of the collection with the same Spark type as a read gives it (vector
@@ -579,8 +589,9 @@ on for every session. The extension works the same on Spark 3.5 and 4.x.
 ### 3.4 Managing Milvus with `CALL`
 
 The management procedures use the same SQL extension and argument rules shown
-above. Each statement must include `milvus.uri` and any required authentication
-options. Write the target as `db.collection`. For an unqualified `collection`,
+above. Procedures that call Milvus must include `milvus.uri` and any required
+authentication options; `cleanup_staging` opens only the supplied `fs.*`
+storage and does not connect to Milvus. Write the target as `db.collection`. For an unqualified `collection`,
 the procedure uses `milvus.database.name` when supplied and uses `default` only
 when that option is absent.
 
@@ -597,6 +608,7 @@ when that option is absent.
 | `flush` | `collection` | — | One row with `status = submitted`; this means Milvus accepted the request, not that persistence has completed |
 | `compact` | `collection` | `wait`, `timeout_seconds` | The compaction ID, plan count, state, and plan-state counts; counts are NULL when the call only submits the work |
 | `describe` | `collection` | — | Collection ID, persistent segment count, load state, and one row for each schema field/index pair; index columns are NULL for a field without an index |
+| `cleanup_staging` | `collection` | `retention_seconds` (default `604800`, minimum `300`), `dry_run` (default `true`) | One row per child of `{fs.root_path}/staging`: owner, write mode, action/reason, last heartbeat, candidate/deleted file counts, remaining directory count, and `prefix_deleted` |
 
 `create_index`, `load`, and `compact` submit work and return immediately by
 default. Set `wait => true` to poll for completion. While waiting,
@@ -608,8 +620,30 @@ statement instead of returning a successful-looking row.
 
 `register` remains limited to a committed backfill that updates manifests for
 existing segments. It does not register segments created by `df.write`.
-`cleanup_staging` is not exposed in this release, and none of the management
-procedures discovers or deletes staging prefixes.
+
+`cleanup_staging` only selects a job whose versioned owner exactly matches the
+requested collection, whose mode is `append`, whose `_registered` marker is
+absent, and whose heartbeat and every file modification time are older than the
+retention cutoff. It validates any manifest and commit marker that exist and
+reads the complete state twice before deletion. Missing, legacy, corrupt,
+changing, foreign, fresh, registered, and all backfill jobs are reported as
+`preserved`, independently, so one bad job does not hide or authorize another.
+For example:
+
+```sql
+CALL milvus.system.cleanup_staging('your_db.your_collection',
+  retention_seconds => 604800,
+  dry_run            => true,
+  `fs.bucket_name`   => 'milvus-bucket',
+  `fs.address`       => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`       => 'true')
+```
+
+Run the dry run first and set `dry_run => false` only after reviewing its rows.
+The pinned native filesystem currently exposes file deletion but not recursive
+directory deletion. An actual run therefore deletes eligible file objects but
+reports remaining object-store directory markers or local empty directories;
+`prefix_deleted` is always `false` until milvus-storage exposes that API.
 
 
 ## 4. Data Schema

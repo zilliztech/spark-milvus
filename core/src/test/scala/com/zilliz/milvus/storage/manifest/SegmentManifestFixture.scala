@@ -43,6 +43,7 @@ object SegmentManifestFixture {
       rows: Long = 2L,
       storageVersion: Long = 3L,
       indexes: Vector[AvroIndexFileEntry] = Vector.empty,
+      statsLogs: Seq[AvroFieldBinlogEntry] = Seq.empty,
       segmentLevel: Long = 2L
   ): Array[Byte] = {
     val in =
@@ -56,6 +57,28 @@ object SegmentManifestFixture {
     record.put("segment_level", segmentLevel)
     record.put("num_of_rows", rows)
     record.put("storage_version", storageVersion)
+    val fieldBinlogSchema =
+      schema.getField("statslog_files").schema.getElementType
+    val binlogSchema =
+      fieldBinlogSchema.getField("binlogs").schema.getElementType
+    record.put(
+      "statslog_files",
+      statsLogs.map { fieldLog =>
+        val value = empty(fieldBinlogSchema).asInstanceOf[GenericRecord]
+        value.put("field_id", fieldLog.slotFieldId)
+        value.put(
+          "binlogs",
+          fieldLog.binlogs.map { log =>
+            val binlog = empty(binlogSchema).asInstanceOf[GenericRecord]
+            binlog.put("log_id", log.logId)
+            binlog.put("log_path", log.logPath)
+            binlog.put("entries_num", log.entriesNum)
+            binlog
+          }.asJava
+        )
+        value
+      }.asJava
+    )
     val indexSchema = schema.getField("index_files").schema.getElementType
     record.put(
       "index_files",

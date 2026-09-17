@@ -202,6 +202,18 @@ class ReadPlanTest extends AnyFunSuite with Matchers {
     )
   }
 
+  test("resource limits are carried by every storage-line task") {
+    val limits = ReadLimits(1024, 8388608L, 67108864L)
+    val plan = ReadPlan.of(
+      snapshotOf(v3 = Seq(v3Item), v2 = Seq(v2Segment(31L, Seq(group)))),
+      properties,
+      applyDeletes = false,
+      limits = limits
+    )
+
+    plan.specs.map(_.limits) shouldBe Seq(limits, limits)
+  }
+
   test("a delete-only V2 segment is no task, and V3 tasks come first") {
     val l0 = Segment.v2(
       id = 32L,

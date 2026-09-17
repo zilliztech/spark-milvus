@@ -14,7 +14,8 @@ final case class Segment(
     rows: Option[Long],
     layout: SegmentLayout,
     deletes: DeleteFiles,
-    indexes: SegmentIndexes = SegmentIndexes.Unknown
+    indexes: SegmentIndexes = SegmentIndexes.Unknown,
+    statistics: SegmentStatistics = SegmentStatistics.Unknown
 ) {
 
   /** False for a delete-only (L0) segment, which has no column groups. */
@@ -85,7 +86,8 @@ object Segment {
       partitionId: Long,
       rows: Long,
       columnGroups: Seq[V2ColumnGroup],
-      deltaLogs: Seq[DeltaLogFile] = Seq.empty
+      deltaLogs: Seq[DeltaLogFile] = Seq.empty,
+      statistics: SegmentStatistics = SegmentStatistics.Unknown
   ): Segment =
     Segment(
       id = id,
@@ -95,8 +97,29 @@ object Segment {
       layout = SegmentLayout.ColumnGroups(columnGroups),
       deletes =
         if (deltaLogs.isEmpty) DeleteFiles.Empty
-        else DeleteFiles.Listed(deltaLogs)
+        else DeleteFiles.Listed(deltaLogs),
+      statistics = statistics
     )
+}
+
+/** Where a segment's auxiliary statistics are described. Unlike
+  * [[DeleteFiles]], missing statistics are an optimization gap, not a
+  * correctness error: a pruner must retain the segment when this is
+  * [[SegmentStatistics.Unknown]] or when a listed statistic cannot be read.
+  */
+sealed trait SegmentStatistics extends Serializable
+
+object SegmentStatistics {
+
+  /** The source cannot describe statistics for this segment. */
+  case object Unknown extends SegmentStatistics
+
+  /** StorageV2: the segment Avro lists statistics by field id. */
+  final case class Listed(filesByField: Map[Long, Seq[String]])
+      extends SegmentStatistics
+
+  /** StorageV3: the pinned segment manifest contains the statistics map. */
+  case object InManifest extends SegmentStatistics
 }
 
 /** Where a segment's column groups come from.
