@@ -36,18 +36,24 @@ loads the already trusted default-branch implementation.
 
 The bot updates one marked summary, stamps the reviewed head and base SHAs, and
 deduplicates confirmed inline findings. Both reviewers must confirm an issue
-after cross-checking before it is published inline. Disagreements remain visible
-in the summary and artifact. Old inline threads are not automatically resolved;
-the summary is the result for the explicitly stamped revision.
+after cross-checking before it is published inline. Two reviewers describing the
+same changed line describe one finding: the more severe description is kept, the
+evidence is merged and both reporters are named. Disagreements remain visible in
+the summary and artifact. Old inline threads are not automatically resolved; the
+summary is the result for the explicitly stamped revision.
 
 Every text diff chunk is submitted to both reviewers. This is an accounting of
 the supplied review inputs, not a guarantee that an AI can identify every bug.
+Completeness is what the program observed: missing coverage, truncated output,
+model/API failures, Git tool failures and unsupported content fail the run.
 Binary files, submodule objects and Git LFS payloads receive metadata inspection
-and an explicit human-inspection limitation. They cannot produce an unqualified
-LGTM. Missing coverage, exhausted tool budgets, truncated output, model/API
-failures and unsupported content fail the run. Confirmed findings alone do not
-fail the job or submit REQUEST_CHANGES; branch protection is configured
-separately by maintainers.
+and an explicit human-inspection limitation; they cannot produce an unqualified
+LGTM. When a reviewer has used its whole tool budget, its last request forbids
+tools, the answer it gives is published, and the exhaustion is recorded as a
+limitation: the run is incomplete but not empty. What a reviewer itself says it
+could not verify is published as a caveat; caveats do not make a run
+incomplete. Confirmed findings alone do not fail the job or submit
+REQUEST_CHANGES; branch protection is configured separately by maintainers.
 
 The `ai-review-<PR>-<attempt>` artifact contains the complete diff inventory,
 structured findings, reviewer disagreements, limitations, per-chunk coverage and

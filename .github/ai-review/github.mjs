@@ -2,8 +2,10 @@ const marker = '<!-- ai-review -->';
 const isReviewer = comment => comment.user?.type === 'Bot' && comment.user?.login === 'github-actions[bot]';
 const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('@', '&#64;');
 
+const reporters = finding => finding.reportedBy?.length === 2 ? ' · reported by both reviewers' : '';
+
 function findingBody(finding) {
-  return `**[${finding.priority}] ${escape(finding.title)}**\n\n${escape(finding.scenario)}\n\n${(finding.evidence || []).map(e => `- ${escape(e.path)}:${e.line} (${e.ref}): ${escape(e.detail)}`).join('\n')}\n\n<!-- ai-review-finding:${finding.id} -->`;
+  return `**[${finding.priority}] ${escape(finding.title)}**${reporters(finding)}\n\n${escape(finding.scenario)}\n\n${(finding.evidence || []).map(e => `- ${escape(e.path)}:${e.line} (${e.ref}): ${escape(e.detail)}`).join('\n')}\n\n<!-- ai-review-finding:${finding.id} -->`;
 }
 
 export function renderSummary(pr, result, runUrl) {
@@ -11,14 +13,17 @@ export function renderSummary(pr, result, runUrl) {
   const checked = result.coverage.filter(c => c.reviewedBy.length === 2).length;
   const verdict = !result.complete ? 'INCOMPLETE — human inspection or another run is required'
     : result.findings.length ? `${result.findings.length} confirmed finding(s)`
-    : result.disputed.length ? `${result.disputed.length} disagreement(s) require human review` : 'LGTM';
+    : result.disputed.length ? `${result.disputed.length} disagreement(s) require human review`
+    : result.caveats?.length ? `No confirmed findings; ${result.caveats.length} reviewer caveat(s)` : 'LGTM';
   let body = `${marker}\n<!-- reviewed-sha: ${pr.head.sha} -->\n**AI Review** | ${verdict}\n\nCommit: \`${pr.head.sha}\` · Base: \`${pr.base.sha}\`\nCoverage: ${checked}/${result.coverage.length} chunks across ${paths.size} changed files.\n[Full findings and coverage artifact](${runUrl})\n`;
   // Keep the complete report in the artifact; never present omitted text as reviewed/clean.
   let omitted = 0;
   const append = section => { if (body.length + section.length < 58000) body += section; else omitted++; };
-  for (const finding of result.findings) append(`\n- **${finding.priority}** ${escape(finding.path)}${finding.line ? `:${finding.line}` : ''}: ${escape(finding.title)} — ${escape(finding.scenario)}\n`);
+  for (const finding of result.findings) append(`\n- **${finding.priority}** ${escape(finding.path)}${finding.line ? `:${finding.line}` : ''}: ${escape(finding.title)}${reporters(finding)} — ${escape(finding.scenario)}\n`);
   if (result.disputed.length) append('\n**Reviewer disagreements — human decision required**\n');
   for (const finding of result.disputed) append(`\n- ${escape(finding.path)}: ${escape(finding.title)} — ${escape(finding.scenario)}\n${(finding.rejections || []).map(r => `  ${escape(r.reviewer)}: ${escape(r.reason)}`).join('\n')}\n`);
+  if (result.caveats?.length) append('\n**Reviewer caveats**\n');
+  for (const caveat of result.caveats || []) append(`\n- ${escape(caveat)}\n`);
   if (result.limitations.length) append('\n**Incomplete inspection**\n');
   for (const limitation of result.limitations) append(`\n- ${escape(limitation)}\n`);
   if (omitted) body += `\n${omitted} report section(s) exceed the comment limit; see the complete artifact above.\n`;
