@@ -7,11 +7,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.types.StructType
 
-import com.zilliz.milvus.storage.expr.{
-  Bitmap,
-  PredicateEvaluator,
-  PredicateExpr
-}
+import com.zilliz.milvus.storage.expr.{Bitmap, Expr, PredicateExpr}
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.options.VectorSearch
@@ -22,11 +18,10 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
   * columns are named and which the query needs, and that is the
   * `ColumnBinding`'s; the loop here does not know which line it reads.
   *
-  * The loop pulls a batch, hands out its rows one by one, skips a deleted row,
-  * evaluates the pushed expression once per Arrow batch, closes the batch and
-  * pulls the next. The `SegmentReader` opened by the binding owns the EOF
-  * row-count contract, so row and columnar consumers cannot disagree about a
-  * short read.
+  * The loop pulls a batch, evaluates table filters once, hands out its rows one
+  * by one, skips excluded rows, closes the batch and pulls the next. The
+  * `SegmentReader` opened by the binding owns the EOF row-count contract, so
+  * row and columnar consumers cannot disagree about a short read.
   *
   * A vector search replaces the scan: on the first `next()` the whole segment
   * is scored by `SegmentVectorSearch` and the top-k come out, each row with its
@@ -40,13 +35,15 @@ class MilvusRowPartitionReader(
     includeSearchScore: Boolean = true,
     searchScorePosition: Option[Int] = None,
     allocator: BufferAllocator = ArrowAllocator.get,
-    taskAllocatorOwner: Option[AutoCloseable] = None
+    taskAllocatorOwner: Option[AutoCloseable] = None,
+    private[read] val preopenedSegmentReader: Option[SegmentReader] = None,
+    milvusFilter: Option[Expr] = None
 ) extends RowOffsetReader
     with Logging {
 
   require(
-    pushedExpression.isEmpty || vectorSearch.isEmpty,
-    "predicate pushdown is not defined for vector search"
+    (pushedExpression.isEmpty && milvusFilter.isEmpty) || vectorSearch.isEmpty,
+    "table filters are not defined for vector search"
   )
 
   private val applyDeletes: Boolean = setup.appliesDeletes
@@ -57,7 +54,7 @@ class MilvusRowPartitionReader(
   private var segmentReader: SegmentReader = null
   private var allocatorOwner: AutoCloseable = taskAllocatorOwner.orNull
   private var currentBatch: VectorSchemaRoot = null
-  private var currentPredicateBitmap: Bitmap = null
+  private var currentFilterBitmap: Bitmap = null
   private var currentRowIndex: Int = 0
   private var currentBatchStartRowOffset: Long = 0L
   private var _lastReturnedRowOffset: Long = -1L
@@ -76,7 +73,7 @@ class MilvusRowPartitionReader(
 
   try {
     if (!vectorSearch.exists(_.mode == "index")) {
-      segmentReader = setup.open(allocator)
+      segmentReader = preopenedSegmentReader.getOrElse(setup.open(allocator))
       loadNextBatch()
     }
   } catch {
@@ -108,23 +105,23 @@ class MilvusRowPartitionReader(
         if (!hasNext) throw new NoSuchElementException("No remaining batch")
         val batch = currentBatch
         currentBatch = null
-        currentPredicateBitmap = null
+        currentFilterBitmap = null
         batch
       }
     }
 
   private def loadNextBatch(): Unit = {
     currentBatch = pullNextBatch()
-    currentPredicateBitmap =
+    currentFilterBitmap =
       if (currentBatch == null) null
       else
-        pushedExpression
-          .map(
-            PredicateEvaluator.evaluate(
-              _,
-              currentBatch,
-              setup.columnNameFor
-            )
+        BatchFilterEvaluator
+          .exclusions(
+            currentBatch,
+            milvusFilter,
+            pushedExpression,
+            setup.arrowColumnFor,
+            setup.columnNameFor
           )
           .orNull
   }
@@ -137,8 +134,8 @@ class MilvusRowPartitionReader(
 
   private def isExcluded(batch: VectorSchemaRoot, rowIndex: Int): Boolean =
     isDeleted(batch, rowIndex) ||
-      (currentPredicateBitmap != null &&
-        currentPredicateBitmap.isExcluded(rowIndex))
+      (currentFilterBitmap != null &&
+        currentFilterBitmap.isExcluded(rowIndex))
 
   override def next(): Boolean = vectorSearch match {
     case Some(search) =>
@@ -175,7 +172,7 @@ class MilvusRowPartitionReader(
       ) {
         val exhausted = currentBatch
         currentBatch = null
-        currentPredicateBitmap = null
+        currentFilterBitmap = null
         currentBatchStartRowOffset += exhausted.getRowCount.toLong
         exhausted.close()
         loadNextBatch()
@@ -238,7 +235,7 @@ class MilvusRowPartitionReader(
       try currentBatch.close()
       catch { case e: Throwable => logWarning("close currentBatch failed", e) }
       currentBatch = null
-      currentPredicateBitmap = null
+      currentFilterBitmap = null
     }
     if (segmentReader != null) {
       val owned = segmentReader

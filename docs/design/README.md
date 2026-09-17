@@ -81,9 +81,9 @@ flowchart TB
 | Manifest | 一个段的列组文件、删除文件、统计文件 | milvus-storage 的清单文件 |
 | ColumnGroup | 一个列组文件及其字段 id 集合 | Manifest |
 | DeleteBitset | 快照时间戳之前生效的删除，按行号置位 | 段目录的 `_delta/` 文件 |
-| StoragePath | 桶内相对 key、标准 S3、Milvus 格式（`s3://<endpoint>/<bucket>/<key>`）三种形态到 (bucket, key) 的归一 | issue #118 的设计稿，未实现；1.x 现有逻辑是几处前缀替换 |
+| StoragePath | 桶内相对 key、标准 S3、Milvus 格式（`s3://<endpoint>/<bucket>/<key>`）三种形态到 (bucket, key) 的归一 | `core.path.StoragePath`，对象存储入口共用 |
 | SchemaMapper | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；Spark 类型的映射在 spark 层 | 快照 schema |
-| 谓词表示 | R6 使用按字段 id 和类型绑定的 PredicateExpr；R7 保留按字段名求值的 Expr 与手写 PlanParser | R6 来自 spark.expr 的 SparkPredicateTranslator；R7 已用于 MilvusSearch.filter |
+| 谓词表示 | R6 使用按字段 id 和类型绑定的 PredicateExpr；R7 保留按字段名求值的 Expr 与手写 PlanParser | R6 来自 spark.expr 的 SparkPredicateTranslator；R7 用于普通表的 `milvus.filter` 与 `MilvusSearch.filter` |
 
 ### 2.3 读路径
 
@@ -188,6 +188,7 @@ flowchart LR
 | 16 | 其余旧向量入口迁移 | 集合级 MilvusSearch.search 已按 2026-09-16 用户要求确定，旧逐段入口保留；未来是否统一 SQL 入口以及旧入口的退役仍待定 | 不阻塞 V7 |
 | 21 | 扩大索引兼容范围与跨任务缓存 | 当前实现非 nullable FloatVector、内存 HNSW、严格加载、无索引显式回退及任务独占资源；Faiss 与 Cardinal 格式已有分派，真实 Cardinal version 10 HNSW/COSINE 已通过专项验证。nullable ID 映射、加密文件与跨任务缓存尚未实现 | 后续 V2、V4 扩展；不阻塞当前已定契约 |
 | 22 | 连接器写的段，系统字段 RowID（0）和 Timestamp（1）从哪来 | a. 写时向 Milvus 要 AllocID / AllocTimestamp（要活的 Milvus，纯连接器模式做不到）；b. 登记时由 Milvus 补（RegisterSegments 未定，能否改写文件要和 Milvus 侧一起定）；c. 写占位值（段内行号、作业时间），登记时只作排序。见 [write.html](architecture/write.html) 第六节 | W1 登记前提；core.write.exec 的列组切分 |
+| 23 | R7 的 JSON、Array 与 `json_contains` 以哪一版 Milvus 语义为准 | a. 只实现 Milvus 2.6+ 稳定共同子集；b. 以明确版本为基线并按服务版本分派。还需钉死 JSON null 与缺失路径、异构/嵌套数组、数值转换、类型不匹配和畸形值的结果 | 不阻塞已交付的标量子集；阻塞 R7 的 JSON/Array 扩展 |
 
 ## 5 需要 Milvus 侧提供的 `[草稿]`
 
@@ -360,3 +361,4 @@ flowchart LR
 | 2026-09-16 | UAT Spark 作业查出的另三处：指标类要无参构造，快照位置按存储实际用的端点识别，binlog 事件的 next position 可以是 -1 | (1) G5 的 `SumMetric`、`MaxBytesMetric` 带构造参数，driver 的 SQL 监听器按类名新建实例聚合任务值时报错，SQL 页没有这些数；改为每个指标一个无参类。(2) 快照目录、选项清单、删除文件清单识别 Milvus 形式的 `https://<endpoint>/<bucket>/<key>` 时只看用户选项里的端点，端点只来自 Hadoop 键时（#09 的场景）把 host 当桶名报错；改为取打开存储的同一个属性包里的 `fs.address`，与 #10 同一个原因：同一份存储配置在两处各自解析。(3) 变基到 2f93c9e 后，3cf533c 新写的 `BinlogCodec` 要求事件头的 next position 为 0 或事件末尾；Milvus 的 serde 写入（`internal/storage/serde_delta.go`、`serde_events.go`）从不设这个字段，留着 `newEventHeader` 的 -1，Milvus 的读取也不看它，于是 UAT 上新集合的 L0 删除 binlog 一律被判为坏文件（#06 的作业）；改为 -1 也接受，设了值仍须等于事件末尾。另：场景套件 S10 假定暂存前缀下只有自己的作业，backfill 套件也往那里提交，改为找本次写入新增的作业。 |
 | 2026-09-16 | A7 先交付可证明安全的文件清理，完整前缀删除等 milvus-storage | 新 append 作业在 executor 启动前写不可变 `owner.json`（版本、job id、database、collection、write mode、创建时间），driver 每 60 秒刷新 `_heartbeat`，commit/abort 停止；第二版 JobManifest 重复所有权，旧清单仍可登记但清理不猜。`cleanup_staging` 默认 dry-run、保留 7 天且下限 5 分钟，只处理 collection 精确匹配、明确 append、未登记、心跳过期的 job；未 commit 的 kill 残留同样是候选，存在 manifest/marker 时逐项校验，backfill 永远保留。删除前再检查所有文件的 `modifiedNanos` 与完整 fingerprint，任一未知、越界或变化按 job 报 `preserved`，不阻断其它 job。job id 是单一白名单 key 组件，列出的待删路径必须仍在初次枚举的精确 job 目录。固定的 milvus-storage Java/JNI 只有 `deleteFile`；Arrow filesystem 的 `DeleteDir`/`DeleteDirContents` 未出 C FFI/JNI，所以当前逐文件删除并返回残留目录、`prefix_deleted=false`，不经 Hadoop、`java.io` 或本地特例绕过。拒绝的做法：用目录 mtime 或创建时间猜作业死亡；自动删 backfill；把留下空目录/目录标记说成完整 A7。 |
 | 2026-09-16 | R9 与 R18 只在固定快照的普通扫描做段级主键 Bloom 剪枝 | V2 从 segment Avro 的 `statslog_files` 取路径，V3 从钉住版本 Manifest 的 `stats["bloom_filter.<field id>"]` 取路径；Milvus 的单 object 和 compound array 两种 JSON 都解析，basename `1` 按 StatsResolver 规则优先。剪段的证明条件是所有相关文件都可读、每个统计的字段和类型都匹配、所有候选值在全部 Bloom 中都不存在；任一缺失、损坏、不支持或跨 bucket 都保留段。`SupportsRuntimeV2Filtering` 只公布主键，多次调用在已有候选集上继续取交集，统计文件每段只读一次；剪后保留命中分区和全 collection 的 L0 删除源。向量 TopK 不公布 runtime filter，避免把 join 条件提前到 TopK 候选集之前。R10 没有借此落地：row-group min/max 仍缺 milvus-storage 统计与 reader 入口，能力索引明确列为尚未实现。 |
+| 2026-09-17 | #151：普通表的 `milvus.filter` 复用 R7 标量表达式链路 | option 在 driver 严格解析并按固定 Snapshot schema 校验，字段引用并入 native 读取投影但不进入输出 schema；可序列化 `Expr` 到 executor 后由同一个 `Evaluator` 同时服务行式和列式 reader。R6 的 `PredicateExpr` 与 R7 的 `Expr` 保持独立，两个排除位图和删除位图取 OR，Limit 只统计最终存活行。普通表 option 与任何 `vector.search.*` 组合直接失败，向量查询使用 `vector.search.filter`，避免在 TopK 前后产生两个含义。拒绝调用已知忽略谓词的 native filtered stream，也不把 Milvus 表达式转成 Spark 表达式。JSON、Array 与 `json_contains` 未伪装成完成：仓库公开支持 Milvus 2.6+，但多个 Milvus 版本的语法和求值实现不同，精确兼容基线及 null/missing/coercion/error 合同进入开放决策 23。设计见 [expressions.html](architecture/expressions.html)。 |

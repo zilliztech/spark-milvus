@@ -12,7 +12,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.client.api.MilvusConnectionParams
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.expr.PlanParser
+import com.zilliz.milvus.storage.expr.{Expr, PlanParser}
 import com.zilliz.milvus.storage.read.plan.ReadLimits
 
 /** Vector search configuration for Milvus Storage V2
@@ -51,7 +51,8 @@ case class MilvusOption(
     options: Map[String, String] = Map.empty,
     vectorSearch: Option[VectorSearch] = None,
     readLimits: ReadLimits = ReadLimits.Default,
-    writeFileRollingBytes: Long = MilvusOption.DefaultWriteFileRollingBytes
+    writeFileRollingBytes: Long = MilvusOption.DefaultWriteFileRollingBytes,
+    milvusFilter: Option[Expr] = None
 ) {
 
   /** Just the fields needed to connect to Milvus. The client does not know
@@ -95,6 +96,7 @@ object MilvusOption {
   val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
   val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
   val WriteFileRollingBytes = "milvus.write.file.rolling.bytes"
+  val MilvusFilter = "milvus.filter"
 
   val DefaultWriteFileRollingBytes: Long = 2L * 1024L * 1024L * 1024L
   private[connector] val NativeWriterFileRollingSize =
@@ -592,6 +594,8 @@ object MilvusOption {
     import scala.collection.JavaConverters._
     val optionsMap = options.asScala.toMap
 
+    val milvusFilter = parseMilvusFilter(options)
+
     // Parse vector search configuration
     val vectorSearch = parseVectorSearch(options)
 
@@ -618,8 +622,43 @@ object MilvusOption {
       options = optionsMap,
       vectorSearch = vectorSearch,
       readLimits = readLimits,
-      writeFileRollingBytes = writeFileRollingBytes
+      writeFileRollingBytes = writeFileRollingBytes,
+      milvusFilter = milvusFilter
     )
+  }
+
+  private def parseMilvusFilter(
+      options: CaseInsensitiveStringMap
+  ): Option[Expr] = {
+    if (!options.containsKey(MilvusFilter)) return None
+
+    import scala.collection.JavaConverters._
+    val vectorSearchOption = options
+      .keySet()
+      .asScala
+      .find(_.toLowerCase(Locale.ROOT).startsWith("vector.search."))
+    vectorSearchOption.foreach { key =>
+      throw new IllegalArgumentException(
+        s"Options '$MilvusFilter' and '$key' cannot be combined; use " +
+          s"'$VectorSearchFilter' for vector search"
+      )
+    }
+
+    val text = Option(options.get(MilvusFilter)).map(_.trim).getOrElse("")
+    if (text.isEmpty) {
+      throw new IllegalArgumentException(
+        s"Option '$MilvusFilter' must not be empty"
+      )
+    }
+
+    try Some(PlanParser.parse(text))
+    catch {
+      case e: IllegalArgumentException =>
+        throw new IllegalArgumentException(
+          s"Option '$MilvusFilter' is invalid: ${e.getMessage}",
+          e
+        )
+    }
   }
 
   /** Parse vector search configuration from options

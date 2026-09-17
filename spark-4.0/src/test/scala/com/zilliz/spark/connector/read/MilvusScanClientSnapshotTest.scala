@@ -1788,6 +1788,272 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     }
   }
 
+  test("milvus filter fields are read without entering the output schema") {
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = io.milvus.grpc.schema.DataType.Int64,
+          isPrimaryKey = true
+        ),
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 101L,
+          name = "score",
+          dataType = io.milvus.grpc.schema.DataType.Int64
+        )
+      )
+    )
+    val snapshot = snapshotOf(
+      v3 = Seq(
+        ManifestItemJson(
+          31L,
+          "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/31\"}"
+        )
+      ),
+      v2 = Seq(
+        Segment.v2(
+          id = 30L,
+          partitionId = 20L,
+          rows = 1L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              Seq(100L, 101L),
+              Seq("files/segment.parquet"),
+              Seq(1L)
+            )
+          )
+        )
+      ),
+      schemaBytes = collection.toByteArray
+    )
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(
+      StorageProperties.StorageType,
+      StorageProperties.StorageTypeLocal
+    )
+    rawOptions.put(MilvusOption.MilvusFilter, "score > 5")
+    val options = new CaseInsensitiveStringMap(rawOptions)
+    val fullSchema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+    val builder = new MilvusScanBuilder(fullSchema, options, snapshot)
+
+    builder.pruneColumns(StructType(Seq(fullSchema("id"))))
+
+    val scan = builder.build().asInstanceOf[MilvusScan]
+    assert(scan.readSchema().fieldNames.toSeq == Seq("id"))
+    val partitions = scan
+      .inputPartitions(snapshot)
+      .map(_.asInstanceOf[MilvusInputPartition])
+    assert(partitions.length == 2)
+    assert(partitions.forall(_.task.neededFieldIds == Seq(100L, 101L)))
+    assert(partitions.forall(_.milvusOption.milvusFilter.nonEmpty))
+  }
+
+  test("milvus filter preserves an unpruned all-fields native read") {
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = io.milvus.grpc.schema.DataType.Int64
+        ),
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 101L,
+          name = "score",
+          dataType = io.milvus.grpc.schema.DataType.Int64
+        )
+      )
+    )
+    val snapshot = snapshotOf(
+      v2 = Seq(
+        Segment.v2(
+          id = 30L,
+          partitionId = 20L,
+          rows = 1L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              Seq(100L, 101L),
+              Seq("files/segment.parquet"),
+              Seq(1L)
+            )
+          )
+        )
+      ),
+      schemaBytes = collection.toByteArray
+    )
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(
+      StorageProperties.StorageType,
+      StorageProperties.StorageTypeLocal
+    )
+    rawOptions.put(MilvusOption.MilvusFilter, "score > 5")
+    val options = new CaseInsensitiveStringMap(rawOptions)
+    val fullSchema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+    val task = new MilvusScanBuilder(fullSchema, options, snapshot)
+      .build()
+      .asInstanceOf[MilvusScan]
+      .inputPartitions(snapshot)
+      .head
+      .asInstanceOf[MilvusInputPartition]
+      .task
+
+    assert(task.neededFieldIds.isEmpty)
+  }
+
+  test("milvus filter widens an unpruned external schema") {
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = io.milvus.grpc.schema.DataType.Int64
+        ),
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 101L,
+          name = "score",
+          dataType = io.milvus.grpc.schema.DataType.Int64
+        )
+      )
+    )
+    val snapshot = snapshotOf(
+      v3 = Seq(
+        ManifestItemJson(
+          31L,
+          "{\"ver\":7,\"base_path\":\"files/insert_log/10/20/31\"}"
+        )
+      ),
+      v2 = Seq(
+        Segment.v2(
+          id = 30L,
+          partitionId = 20L,
+          rows = 1L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              Seq(100L, 101L),
+              Seq("files/segment.parquet"),
+              Seq(1L)
+            )
+          )
+        )
+      ),
+      schemaBytes = collection.toByteArray
+    )
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(
+      StorageProperties.StorageType,
+      StorageProperties.StorageTypeLocal
+    )
+    rawOptions.put(
+      MilvusOption.SnapshotSchemaBytes,
+      java.util.Base64.getEncoder.encodeToString(collection.toByteArray)
+    )
+    rawOptions.put(MilvusOption.SnapshotMode, "true")
+    rawOptions.put(MilvusOption.MilvusFilter, "score > 5")
+    val options = new CaseInsensitiveStringMap(rawOptions)
+    val externalSchema = MilvusTable(
+      snapshot,
+      MilvusOption(options),
+      Some(StructType(Seq(StructField("id", LongType, nullable = true))))
+    ).schema()
+    val scan = new MilvusScanBuilder(externalSchema, options, snapshot)
+      .build()
+      .asInstanceOf[MilvusScan]
+    val tasks = scan
+      .inputPartitions(snapshot)
+      .map(_.asInstanceOf[MilvusInputPartition].task)
+
+    assert(scan.readSchema().fieldNames.toSeq == Seq("id"))
+    assert(tasks.length == 2)
+    assert(tasks.forall(_.neededFieldIds == Seq(100L, 101L)))
+  }
+
+  test("milvus filter extends explicitly configured reader fields") {
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = io.milvus.grpc.schema.DataType.Int64
+        ),
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 101L,
+          name = "score",
+          dataType = io.milvus.grpc.schema.DataType.Int64
+        )
+      )
+    )
+    val snapshot = snapshotOf(
+      v2 = Seq(
+        Segment.v2(
+          id = 30L,
+          partitionId = 20L,
+          rows = 1L,
+          columnGroups = Seq(
+            V2ColumnGroup(
+              Seq(100L, 101L),
+              Seq("files/segment.parquet"),
+              Seq(1L)
+            )
+          )
+        )
+      ),
+      schemaBytes = collection.toByteArray
+    )
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(
+      StorageProperties.StorageType,
+      StorageProperties.StorageTypeLocal
+    )
+    rawOptions.put(MilvusOption.ReaderFieldIDs, "100")
+    rawOptions.put(MilvusOption.MilvusFilter, "score > 5")
+    val options = new CaseInsensitiveStringMap(rawOptions)
+    val fullSchema = MilvusTable(snapshot, MilvusOption(options), None).schema()
+    val task = new MilvusScanBuilder(fullSchema, options, snapshot)
+      .build()
+      .asInstanceOf[MilvusScan]
+      .inputPartitions(snapshot)
+      .head
+      .asInstanceOf[MilvusInputPartition]
+      .task
+
+    assert(task.neededFieldIds == Seq(100L, 101L))
+  }
+
+  test("milvus filter is validated against the fixed snapshot schema") {
+    val collection = io.milvus.grpc.schema.CollectionSchema(
+      name = "t",
+      fields = Seq(
+        io.milvus.grpc.schema.FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = io.milvus.grpc.schema.DataType.Int64
+        )
+      )
+    )
+    val snapshot = snapshotOf(schemaBytes = collection.toByteArray)
+    val rawOptions = new ju.HashMap[String, String]()
+    rawOptions.put(MilvusOption.MilvusFilter, "missing == 1")
+
+    val error = intercept[IllegalArgumentException] {
+      new MilvusScanBuilder(
+        MilvusTable(
+          snapshot,
+          MilvusOption(new CaseInsensitiveStringMap(rawOptions)),
+          None
+        ).schema(),
+        new CaseInsensitiveStringMap(rawOptions),
+        snapshot
+      )
+    }
+
+    assert(error.getMessage.contains(MilvusOption.MilvusFilter))
+    assert(error.getMessage.contains("Unknown filter field missing"))
+  }
+
   test("snapshot option keys use dotted lowercase suffixes") {
     assert(
       MilvusOption.SnapshotMaxJsonBytes == "milvus.snapshot.max.json.bytes"

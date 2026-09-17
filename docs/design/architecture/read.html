@@ -246,11 +246,12 @@ factory 关闭已打开的 reader 和 child，重复关闭是空操作，任何�
 
 <p><strong>列式出口已有,且是默认</strong>:<code>MilvusColumnarPartitionReader</code>,<code>milvus.read.columnar=false</code> 才走行式;
 带向量检索的读回落行式,因为那一步(<code>SegmentVectorSearch</code>)逐行算距离,归属是决策 16。
-普通扫描接受的 DataSource V2 谓词由 <code>core.expr</code> 对 Arrow 批求值,不引起行式回落;
-完整语义见<a href="expressions.html">谓词下推设计</a>。</p>
+普通扫描接受的 DataSource V2 谓词由 <code>core.expr.PredicateEvaluator</code> 对 Arrow 批求值，
+<code>milvus.filter</code> 由 <code>core.expr.Evaluator</code> 对同一批求值；两者各自产生排除位图，
+都不引起行式回落。完整语义见<a href="expressions.html">谓词下推设计</a>。</p>
 
-<p>没有删除和谓词排除的批直接包装成 <code>ColumnarBatch</code>；需要排除行时,reader 逐行计算
-<code>isDeleted || predicateBitmap.isExcluded</code>。列式出口通过 <code>SelectedRowsColumn</code>
+<p>没有删除和两个谓词位图排除的批直接包装成 <code>ColumnarBatch</code>；需要排除行时，reader 逐行计算
+<code>isDeleted || sparkPredicateBitmap.isExcluded || milvusFilterBitmap.isExcluded</code>。列式出口通过 <code>SelectedRowsColumn</code>
 按存活行下标重映射,不复制整列 buffer；行式出口在物化 <code>InternalRow</code> 前直接跳过该行。
 两种出口都在底层 reader 读到 EOF 时执行同一个物理行数校验，
 因此不会一条报短读、另一条静默返回。理由与代价见
@@ -302,11 +303,11 @@ id、Milvus 类型、nullable、主键/分区键/聚类键标记和向量维度�
 <li><strong>向量搜索这条分支怎么放。</strong><code>spark.read.SegmentVectorSearch</code>
 是行式 reader 的可选阶段(#06 从 V3 reader 里拆出),和普通扫描是两条并行路径。它属于 V*,本页不设计,
 但 <code>SegmentReader</code> 接口要留得下它,不能设计成只能顺序扫。</li>
-<li><strong>两种谓词入口。</strong>R7 的手写 <code>PlanParser</code> 已用于
-<code>MilvusSearch.filter</code> / <code>vector.search.filter</code>，在持久化索引搜索前求值；普通表读取的
-<code>milvus.filter</code> option 仍未接入。R6 的 Spark V2 谓词按<a href="expressions.html">独立设计</a>
-只在普通扫描的 JVM Arrow 批上求值；带 <code>vector.search.*</code> 的读取全部作为 residual 留给 Spark，
-因此 Spark 条件在 TopK 后执行。C 的
+<li><strong>两种谓词入口。</strong>R7 的手写 <code>PlanParser</code> 同时服务普通扫描的
+<code>milvus.filter</code> 与向量查询的 <code>MilvusSearch.filter</code> / <code>vector.search.filter</code>；
+前者在普通扫描的 JVM Arrow 批上求值，后者在持久化索引搜索前求值，两种 option 不能混用。
+R6 的 Spark V2 谓词按<a href="expressions.html">独立设计</a>只在普通扫描的 JVM Arrow 批上求值；
+带 <code>vector.search.*</code> 的读取全部作为 residual 留给 Spark，因此 Spark 条件在 TopK 后执行。C 的
 <code>loon_segment_reader_get_filtered_stream</code> 会忽略传入谓词,连接器不调用它,见
 <a href="storage-access.html#bridge-gap">storage-access 4.4</a>。</li>
 <li><strong>回表与 row group 剪枝。</strong><code>take</code>（R14）和统计驱动的 row group 剪枝

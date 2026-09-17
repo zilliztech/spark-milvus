@@ -122,17 +122,18 @@ class MilvusPartitionReaderFactory(
       try {
         segmentReader = setup.open(taskAllocator.allocator)
         new MilvusColumnarPartitionReader(
-          schema,
-          segmentReader,
-          milvusSchema,
-          setup.isDeleted,
-          setup.arrowColumnFor,
-          MilvusOption.readVectorRaw(optionsMap),
-          partitionNameOf(p),
-          p.task.segmentId,
-          requestedExtraColumns,
-          pushedExpression,
-          setup.columnNameFor,
+          schema = schema,
+          segmentReader = segmentReader,
+          milvusSchema = milvusSchema,
+          deleted = setup.isDeleted,
+          arrowColumnFor = setup.arrowColumnFor,
+          rawVectors = MilvusOption.readVectorRaw(optionsMap),
+          partitionName = partitionNameOf(p),
+          segmentId = p.task.segmentId,
+          requestedExtraColumns = requestedExtraColumns,
+          pushedExpression = pushedExpression,
+          milvusFilter = p.milvusOption.milvusFilter,
+          columnNameFor = setup.columnNameFor,
           taskAllocatorOwner = Some(taskAllocator)
         )
       } catch {
@@ -199,10 +200,11 @@ class MilvusPartitionReaderFactory(
       var rowReader: MilvusRowPartitionReader = null
       try {
         rowReader = new MilvusRowPartitionReader(
-          dataSchema,
-          setup,
-          pushedExpression,
-          search,
+          schema = dataSchema,
+          setup = setup,
+          pushedExpression = pushedExpression,
+          milvusFilter = p.milvusOption.milvusFilter,
+          vectorSearch = search,
           includeSearchScore = includeSearchScore,
           searchScorePosition = searchScorePosition,
           allocator = taskAllocator.allocator,

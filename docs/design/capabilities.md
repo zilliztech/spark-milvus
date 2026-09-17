@@ -1,6 +1,6 @@
 # 2.0 功能规划 `[草稿]`
 
-51 条功能按用户入口分八组。读的 19 条全程不经 Milvus 服务；写的 7 条止于作业清单，登记归 Milvus（README 2.4）。优先级取值和顺序见 README 第 3 节，实现位置用 [modules.md](architecture/modules.md) 的包名。名词（段、列组、Manifest、快照、backfill）沿用 README 第 0 节。
+45 条功能按用户入口分八组。读的 19 条全程不经 Milvus 服务；写的 4 条止于作业清单，登记归 Milvus（README 2.4）。优先级取值和顺序见 README 第 3 节，实现位置用 [modules.md](architecture/modules.md) 的包名。名词（段、列组、Manifest、快照、backfill）沿用 README 第 0 节。
 
 ## 1 表读
 
@@ -14,7 +14,7 @@
 | R4 | 列式扫描，向量可零拷贝 | 默认 `milvus.read.columnar=true`，设为 false 使用行式；向量原始字节再设 `milvus.read.vector.raw=true`；向量搜索仍走行式 | core.read.exec、spark.read、native-storage | 行式与列式消费同一个 `SegmentReader`，JNI 与逐批 Arrow 导出由 milvus-storage 上游提供；已知行数的段在读到 EOF 时统一核对物理输出行数，短读直接失败；列组文件只认 Parquet，Vortex 列组见第 10 节 | P0 |
 | R5 | 列裁剪 | `select`，可再用 `fieldIDs` 限定数值字段 id | spark.read → core.manifest 选列组 → core.read.plan | 字段 id 只取自快照 schema 的 `milvus.field_id` metadata；`fieldIDs` 在 inferSchema 和 Table 都生效，外部 schema 必须选同一组 id 且名称、类型不冲突；缺失、未知或非数值 id 报错，不按列序号猜 | P0 |
 | R6 | 谓词下推：Spark 谓词 | `where` 里的比较、IN、IS NULL、字符串前后缀、AND、OR、NOT；设计见 [expressions.html](architecture/expressions.html) | spark.expr 翻成 IR → core.expr 求值 | 只实现 DataSource V2 谓词，不实现 V1 Filter（第 10 节）；每个顶层谓词完整翻译才接受，否则整棵留给 Spark；向量搜索读取全部 residual | P1 |
-| R7 | 谓词下推：Milvus 表达式 | 已实现 MilvusSearch 的 filter 标量子集；表 option `milvus.filter` 仍待接入 | core.expr 用 Milvus 的表达式文法（Plan.g4）解析并求值 | 当前比较、IN、IS NULL、逻辑运算；JSON、Array、json_contains 待按 Milvus 源码逐条复刻 | P1 |
+| R7 | 谓词下推：Milvus 表达式 | 普通表 option `milvus.filter`；MilvusSearch 的 `filter` / `vector.search.filter` | spark.options 严格解析 → spark.read 绑定隐藏列 → core.expr 按 Milvus 标量语义求值 | 已实现比较、IN、IS NULL 与逻辑运算，行式/列式及 V2/V3 共用；普通表 filter 与 Spark predicate、删除、Limit 组合；JSON、Array、json_contains 等开放决策 23 | P1 |
 | R8 | 删除生效 | 默认自动；`milvus.read.apply.deletes=false` 可显式关闭 | core.delete、core.read.plan、core.read.exec | driver 只把段内、本分区 L0 与全 collection L0 的删除文件描述装进任务；executor 读取、合并并关闭这些文件，读不到就让 task 失败，不返回空删除计划。`_delta/` 两种编码都认（决策 13 撤销）。backfill 按物理行对齐列组时不应用删除，那是 W2 内部读法 | P0 |
 | R9 | 段级剪枝 | 自动；主键等值和 IN 用段统计文件里的布隆过滤器剪段 | core.stats 出剪枝结果，core.snapshot 过滤段列表 | V2 读 <code>statslog_files</code>，V3 读钉住 Manifest 的 <code>stats</code>；单 object 与 compound array 都认，任一统计缺失、损坏或不匹配则保留段 | P1 |
 | R10 | row group 级剪枝 | 自动；标量列 min/max | core.stats 出剪枝结果，core.read.plan 执行 | 仍需 milvus-storage 写 row-group 统计并提供可指定 row group 的 reader 入口；本仓库不用段级 Bloom 模拟 | P1 |
@@ -78,7 +78,7 @@ issue #125 的[索引查询设计](architecture/vector-search.html)已经落地�
 
 ## 6 兼容入口
 
-四条兼容入口不进主路径，产出核心层的 Snapshot 或 SegmentReader 后与主路径合流。
+两条兼容入口不进主路径，产出核心层的 Snapshot 或 SegmentReader 后与主路径合流。
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
@@ -87,7 +87,7 @@ issue #125 的[索引查询设计](architecture/vector-search.html)已经落地�
 
 ## 7 场景与工具
 
-场景和工具在 apps 模块，各自是独立入口，删掉任何一个不影响其他。
+用户场景在 apps 模块，是连接器语义之外的独立入口。
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
@@ -99,7 +99,7 @@ issue #125 的[索引查询设计](architecture/vector-search.html)已经落地�
 
 | 编号 | 功能 | 用户入口 | 实现位置 | 依赖或前提 | 优先级 |
 |---|---|---|---|---|---|
-| G1 | 表 option | 快照名或时间点、`milvus.filter`、分区和段选择 | spark.options | R2、R7、R16；布尔值只认 true/false，正数与数值 id 严格解析，`vector.search.query` / `topK` 必须成对且格式有效 | P1 |
+| G1 | 表 option | 快照名或时间点、`milvus.filter`、分区和段选择 | spark.options | R2、R7、R16；布尔值只认 true/false，正数与数值 id 严格解析；`milvus.filter` 在规划期完成语法与 schema 校验，不能和 `vector.search.*` 混用；`vector.search.query` / `topK` 必须成对且格式有效 | P1 |
 | G2 | 写 option | `milvus.write.file.rolling.bytes` 严格解析为正 Long，默认 2 GiB，V2/V3 writer 均映射为上游 `writer.file_rolling.size`；写模式与列、写完自动建快照及索引参数仍随对应能力落地 | spark.options → core.write.exec | W2、W6；rolling 按上游未压缩写入字节累计，不等于最终 Parquet 大小；替代 1.x 的 `milvus.writer.commitType`（`milvus.writer.fieldIds` 与 `vector.<f>.dim` 已于 2026-09-15 删除，字段 id 和维度从 collection schema 取） | P1 |
 | G3 | 会话配置：内存与批 | `milvus.read.batch.max.rows` / `.bytes` 经 `ReadLimits` 随 task 交付原生 reader；`milvus.read.arrow.max.bytes` 限制每个 Spark read task 的 Arrow child allocator，覆盖行式、列式与向量回表 | spark.options → core.read.plan → core.read.exec；spark.read / spark.types 持有 child allocator | Arrow 上限不包含 milvus-storage native 内存池；上游尚无 per-reader 预取上限接口，prefetch limit 未交付；替代 1.x 的 `s3.preloadPoolSize` | P1 |
 | G5 | 指标 | 自动，Spark SQL 页的 scan / write 节点：JNI 调用次数与耗时、过界的 Arrow 批数与字节数、C 侧拷贝次数与字节数、物化成 InternalRow 的行数、allocator 峰值；不设开关（决策日志 2026-09-16） | native-storage 编译的上游批读取 holder 计数，core.read.exec 的 ReadMetrics、core.write.exec 的 WriteMetrics，spark.metrics 翻成 CustomMetric | 设计见 [storage-io.html 第五节](architecture/storage-io.html#metrics)；量不到的两处（对象存储读取字节、native 内存总量）写在那里；allocator 峰值就是 G3 预算要卡的数 | P1 |
@@ -124,3 +124,5 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 | R10 | milvus-storage 尚未写可用的 row-group min/max 统计，FFI 也没有传入 row group 选择的 reader 入口；现有 Parquet predicate 实现为空，见 storage-access 4.5 |
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
 | V4 | 持久化索引来源已跟随快照传递；跨任务缓存、其他来源仍未实现，当前每个查询任务持有并关闭自己的索引 |
+| W6 | 仍缺索引构建/序列化设计、固定 milvus-storage Java/JNI 的索引登记入口，以及目标 Milvus 能登记并加载 Connector 写回索引的验证；当前没有写 option 或 IndexWriter |
+| G4 | 当前只有通用对象存储凭证；索引缓存预算、GPU 开关、GPU 产物及索引服务配置均受 V4 与决策 21 阻塞，没有对应 option 实现 |

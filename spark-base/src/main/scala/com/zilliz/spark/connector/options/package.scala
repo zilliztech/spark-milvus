@@ -16,8 +16,10 @@ package com.zilliz.spark.connector
   * Numeric and Boolean user values go through one strict parser. Read batch and
   * task Arrow limits become a typed `ReadLimits` carried in every
   * `SegmentReadTask`; the write rolling limit is mapped once to the upstream
-  * `writer.file_rolling.size` property.
+  * `writer.file_rolling.size` property. `milvus.filter` is parsed into a typed
+  * core `Expr` on the driver; schema binding and execution belong to
+  * `spark.read` and `core.expr`.
   *
-  * Capabilities: R16, W6, G1, G2, G3, G4 (see docs/design/capabilities.md).
+  * Capabilities: R16, G1, G2, G3 (see docs/design/capabilities.md).
   */
 package object options

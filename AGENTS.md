@@ -41,8 +41,9 @@ tasks. [README.md](README.md) has the full module table.
 
 ## Where the work stands
 
-The design documents describe the finished 2.0. Most of layer 2's computation is
-not written yet. Read them as a target, not as a description of the code.
+The design documents contain both implemented contracts and the remaining 2.0
+target. Capability rows, package documentation and the explicit gap lists below
+state which side of that boundary each feature is on.
 
 Done: the 1.x sources are all in their modules and `src/` no longer exists.
 `core` has schema, codec, snapshot, manifest, delete, path,
@@ -55,9 +56,10 @@ in `core` or `compat` mentions `org.apache.hadoop`.
 `core.index` loads persisted index files and executes vector queries through
 Knowhere; `BruteForceSearch` retains the per-segment brute-force path.
 `core.expr` holds two explicit scalar contracts: `Expr` / `PlanParser` /
-`Evaluator` for Milvus syntax used by persisted-index filters, and the
-schema-bound `PredicateExpr` / `PredicateEvaluator` / `Bitmap` for Spark V2
-predicate pushdown. Index caching and writing remain unwritten. `stats` writes
+`Evaluator` for Milvus syntax used by ordinary table and persisted-index
+filters, and the schema-bound `PredicateExpr` / `PredicateEvaluator` / `Bitmap`
+for Spark V2 predicate pushdown. JSON/Array Milvus expressions wait on decision
+23; index caching and writing remain unwritten. `stats` writes
 primary-key bloom filters and reads V2/V3 segment statistics for conservative
 R9/R18 segment pruning; R10 row-group pruning remains blocked on
 milvus-storage. `write.commit` holds job manifests and registration.
@@ -104,7 +106,7 @@ native resource loader. Persisted HNSW loading uses upstream BinarySet and index
 search APIs; Cardinal stream files require a Cardinal-enabled build. Real-file
 compatibility and validation results are recorded in the vector search design.
 
-Five design questions are still open: 10, 16, 19, 21 and 22 in
+Six design questions are still open: 10, 16, 19, 21, 22 and 23 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
 block specific packages, so check that list before starting on one.
 
