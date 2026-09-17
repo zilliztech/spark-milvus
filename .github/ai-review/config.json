@@ -1,0 +1,15 @@
+{
+  "model": "deepseek-v4-pro",
+  "batchChars": 16000,
+  "maxToolRounds": 16,
+  "reviewers": [
+    {
+      "id": "architecture-and-correctness",
+      "focus": "Trace data correctness, package responsibilities, dependency direction, public contracts, cross-version compatibility, and documentation consistency. Verify each claimed failure against actual callers and the target branch's design."
+    },
+    {
+      "id": "storage-and-resources",
+      "focus": "Trace storage formats, delete handling, credentials, Arrow/native resource ownership, concurrency and error propagation. Also verify documentation, build and release instructions, dependency changes and externally consumed interfaces."
+    }
+  ]
+}
