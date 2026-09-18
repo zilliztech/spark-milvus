@@ -78,10 +78,13 @@ with those suites reported as canceled rather than failed:
 - `MilvusV3PartitionWriterLifecycleTest` and `HadoopEndpointSnapshotTest` in spark-4.0
 
 The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
-`StorageFullChainUatTest`, `SnapshotReadUatTest`, `ConnectorWriteReadUatTest`
-and the scenario suite `uat.DataFrameScenariosUatTest` in spark-4.0 — cancel
-on their own environment variables as well, so they stay canceled even with
-the library present. The scenario suite is also compiled into the 3.5, 4.1 and
+`StorageFullChainUatTest`, `SnapshotReadUatTest`, `ConnectorWriteReadUatTest`,
+the scenario suite `uat.DataFrameScenariosUatTest` and the vector search suite
+`uat.VectorSearchUatTest` in spark-4.0 — cancel on their own environment
+variables as well, so they stay canceled even with the library present.
+`VectorSearchUatTest` additionally needs Knowhere's native package, which
+exists for Linux only, and its index cases need a snapshot whose vector field
+carries a persisted index (`MILVUS_UAT_INDEXED_SNAPSHOT`). The scenario suite is also compiled into the 3.5, 4.1 and
 4.2 lines, so `spark35/testOnly ...DataFrameScenariosUatTest` runs the same
 scenarios there. The 3.5 line needs a JDK 17 for that run: Arrow 12, which
 Spark 3.5 ships, cannot allocate on JDK 21. Name it in
