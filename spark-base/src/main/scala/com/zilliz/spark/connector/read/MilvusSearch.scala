@@ -257,10 +257,7 @@ object MilvusSearch {
         )
       }
     } else {
-      // One partition of groups, so a task pairs its segment set with every
-      // group and reads its segments once; a group-per-partition cartesian
-      // would open the same segments again for each group.
-      val delivered = packedGroups(selected, plan, spec, layout).coalesce(1)
+      val delivered = packedGroups(selected, plan, spec, layout)
       setsRdd.cartesian(delivered).mapPartitions { pairs =>
         if (pairs.isEmpty) Iterator.empty
         else {
