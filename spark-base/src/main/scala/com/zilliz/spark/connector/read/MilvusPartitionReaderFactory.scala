@@ -12,7 +12,7 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.zilliz.milvus.storage.expr.PredicateExpr
 import com.zilliz.milvus.storage.read.exec.SegmentReader
-import com.zilliz.spark.connector.options.{MilvusOption, VectorSearch}
+import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -67,21 +67,13 @@ class MilvusPartitionReaderFactory(
     * default; callers may explicitly select the row path.
     *
     * A connector-owned predicate stays columnar: both readers evaluate the same
-    * core expression directly against each Arrow batch. Brute-force and
-    * persisted-index searches still require the row reader.
+    * core expression directly against each Arrow batch.
     */
   override def supportColumnarReads(partition: InputPartition): Boolean =
     MilvusOption.readColumnar(optionsMap) && (partition match {
-      case p: MilvusInputPartition => searchFor(p).isEmpty
+      case _: MilvusInputPartition => true
       case _                       => false
     })
-
-  /** The `vector.search.*` request a partition's row reader runs, for either
-    * storage line and either mode.
-    */
-  private[read] def searchFor(
-      partition: MilvusInputPartition
-  ): Option[VectorSearch] = partition.milvusOption.vectorSearch
 
   override def createColumnarReader(
       partition: InputPartition
@@ -167,20 +159,9 @@ class MilvusPartitionReaderFactory(
     case p: MilvusInputPartition =>
       logInfo(s"Creating row reader for segment ${p.task.segmentId}")
       val dataSchema = StructType(schema.fields.filterNot { field =>
-        isMetadataExtraField(field.name) ||
-        (p.milvusOption.vectorSearch.exists(
-          _.mode == "index"
-        ) && field.name == MilvusOption.VectorSearchScore)
+        isMetadataExtraField(field.name)
       })
-      val search = searchFor(p)
       val setup = ColumnBinding(p, dataSchema)
-      val includeSearchScore =
-        schema.fieldNames.contains(MilvusOption.VectorSearchScore)
-      val searchScorePosition = Option(
-        schema.fields
-          .filterNot(f => isMetadataExtraField(f.name))
-          .indexWhere(_.name == MilvusOption.VectorSearchScore)
-      ).filter(_ >= 0)
       val taskAllocator = ArrowAllocator.forReadTask(
         p.task.segmentId,
         p.task.limits.arrowMaxBytes
@@ -192,9 +173,6 @@ class MilvusPartitionReaderFactory(
           setup = setup,
           pushedExpression = pushedExpression,
           milvusFilter = p.milvusOption.milvusFilter,
-          vectorSearch = search,
-          includeSearchScore = includeSearchScore,
-          searchScorePosition = searchScorePosition,
           allocator = taskAllocator.allocator,
           taskAllocatorOwner = Some(taskAllocator)
         )

@@ -46,7 +46,6 @@ class MilvusScanBuilder(
   private var currentOptions = options
   private val milvusOption = MilvusOption(options)
   private val extraColumns = milvusOption.extraColumns
-  private val vectorSearch = milvusOption.vectorSearch
   private val milvusFilter: Option[Expr] = milvusOption.milvusFilter
   private val milvusFilterFieldIds: Set[Long] = milvusFilter
     .map { expression =>
@@ -96,11 +95,6 @@ class MilvusScanBuilder(
       )
     }
 
-    if (vectorSearch.exists(_.mode == "index")) {
-      currentSchema = StructType(requestedFields)
-      return
-    }
-
     def fieldId(field: StructField): Long = {
       val metadata = field.metadata
       if (
@@ -120,29 +114,8 @@ class MilvusScanBuilder(
       extraColumns.contains(field.name) &&
         MetadataColumns.isSyntheticColumn(field.name)
     )
-    var scanFields = requestedFields.toSeq
-    var neededFieldIds = requestedDataFields.map(fieldId).toSeq
-
-    // Add vector column if vector search is enabled
-    val vectorColumn = Option(
-      options.get(MilvusOption.VectorSearchVectorColumn)
-    ).map(_.trim).filter(_.nonEmpty).getOrElse("vector")
-    val hasVectorSearch = vectorSearch.nonEmpty
-    if (hasVectorSearch) {
-      val vectorField = fieldsByName.getOrElse(
-        vectorColumn,
-        throw new IllegalArgumentException(
-          s"Vector search column '$vectorColumn' is not present in the read schema"
-        )
-      )
-      neededFieldIds = neededFieldIds :+ fieldId(vectorField)
-      if (!scanFields.exists(_.name == vectorField.name)) {
-        // The row reader performs vector search before Spark's projection
-        // above the scan. It therefore needs the vector in its own schema even
-        // when the final select does not expose it.
-        scanFields = scanFields :+ vectorField
-      }
-    }
+    val scanFields = requestedFields.toSeq
+    val neededFieldIds = requestedDataFields.map(fieldId).toSeq
 
     // A metadata-only or empty projection still needs one physical column so
     // the native reader can produce batches and their row counts. This field
@@ -173,17 +146,6 @@ class MilvusScanBuilder(
   override def pushPredicates(
       predicates: Array[Predicate]
   ): Array[Predicate] = {
-    // The current vector-search stage has not defined whether filtering occurs
-    // before or after its per-segment top-k. Preserve its existing behavior by
-    // leaving every predicate in Spark until that contract is settled.
-    if (vectorSearch.nonEmpty) {
-      pushedPredicateArray = Array.empty
-      pushedExpression = None
-      predicateFieldIds = Set.empty
-      refreshReaderFieldIds()
-      return predicates
-    }
-
     val accepted =
       Array.newBuilder[(Predicate, SparkPredicateTranslator.Translated)]
     val residual = Array.newBuilder[Predicate]

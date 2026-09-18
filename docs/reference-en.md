@@ -78,9 +78,6 @@ Each search registers its own accumulators, which the stage page shows:
 `milvus.search.take.nanos`. Knowhere computes in its own thread pool, so its
 time is in `milvus.search.knowhere.nanos` rather than in the task's CPU time.
 
-The older per-segment `vector.search.*` scan options still exist and return
-per-segment candidates rather than a global top-k.
-
 ## Version Compatibility
 
 **This connector requires Milvus 2.6 or later** (Storage V2).
@@ -389,10 +386,10 @@ Every read and write reports what it cost on the C/JVM boundary as task metrics 
 | `MilvusOption.MilvusSegments` (`milvus.segments`) | String | No | unset | Comma-separated numeric segment IDs. It may be combined with `milvus.partitions`, in which case the scan reads their intersection. Every requested ID must exist. |
 | `MilvusOption.ReaderFieldIDs` (`fieldIDs`) | String | No | unset | Comma-separated numeric field IDs, applied during both schema inference and table creation. Each requested ID must exist in the snapshot schema; Spark projection can further prune this set. With an external `.schema()`, its non-metadata fields must select exactly these IDs and their names and Spark types must match the snapshot. |
 | `MilvusOption.MilvusExtraColumns` (`milvus.extra.columns`) | String | No | "" | Comma-separated metadata columns. The supported names are `_segment_id`, `_row_offset`, and `_timestamp`; see section 4. |
-| `MilvusOption.MilvusFilter` (`milvus.filter`) | String | No | unset | Milvus scalar expression for an ordinary table read. It is parsed and validated against the fixed snapshot during planning, evaluated in both row and columnar readers, and combined with Spark predicates and deletes before Limit. It cannot be combined with `vector.search.*`; use `vector.search.filter` for vector search. |
+| `MilvusOption.MilvusFilter` (`milvus.filter`) | String | No | unset | Milvus scalar expression for an ordinary table read. It is parsed and validated against the fixed snapshot during planning, evaluated in both row and columnar readers, and combined with Spark predicates and deletes before Limit. A vector search takes its filter from the `filter` argument of `MilvusSearch.search`. |
 | `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | No | true | Apply all segment-local, partition-level L0, and collection-level L0 deletes visible in the fixed snapshot. Setting this to `false` is explicit opt-out; any provided value besides `true` or `false`, including a blank value, is rejected. |
 | `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
-| `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. A read with `vector.search.*` options takes the row path regardless, because that stage scores rows. Row and columnar readers use the same expected-row guard. |
+| `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. Row and columnar readers use the same expected-row guard. |
 | `milvus.read.batch.max.rows` | Int | No | 8192 | Positive maximum rows requested from milvus-storage for one record batch; delivered as `reader.record_batch_max_rows`. |
 | `milvus.read.batch.max.bytes` | Long | No | 33554432 | Positive target byte limit for one native record batch; delivered as `reader.record_batch_max_size`. The current upstream maximum is 4294967296 (4 GiB). |
 | `milvus.read.arrow.max.bytes` | Long | No | 9223372036854775807 | Positive hard limit of the Arrow child allocator owned by one Spark read task. It covers imported/read Arrow buffers on row, columnar and vector paths, but not milvus-storage's separate native memory pool. |
@@ -404,11 +401,7 @@ values. Boolean read options
 `false`, case-insensitively; a blank value or misspelling is an error rather
 than a default. Positive integer/long options reject blanks, zero, negative,
 non-decimal and overflowing values and report both the key and supplied value.
-A provided `milvus.snapshot.max.json.bytes` must be a positive integer. Vector search is
-enabled only when `vector.search.query` and `vector.search.topK` are both set:
-the query must be a non-empty JSON-style array of finite numbers and `topK`
-must be a positive integer. Any provided vector-search option must be non-blank;
-a partial or malformed configuration fails during planning.
+A provided `milvus.snapshot.max.json.bytes` must be a positive integer.
 The same strict rules apply to existing connector values:
 `milvus.insertMaxBatchSize` (default 5000), `milvus.retry.count` (3),
 `milvus.retry.interval` (1000), `s3.maxConnections` (32), and
@@ -428,11 +421,9 @@ Each predicate tree is pushed only when the connector supports the whole tree.
 Unsupported operators, casts, nested references, JSON, Array, Geometry, vector,
 and synthetic metadata predicates remain in Spark's plan and are evaluated by
 Spark. A predicate-only column is read internally without being added to the
-result schema. Reads using `vector.search.*` do not push Spark predicates:
-each tree remains residual and Spark evaluates it after vector TopK. To filter
-before persisted-index search, use `MilvusSearch.search(..., filter = ...)` or
-the corresponding `vector.search.filter` option. The DataSource V1 Filter API
-is not supported.
+result schema. To filter before a vector search, use
+`MilvusSearch.search(..., filter = ...)`. The DataSource V1 Filter API is not
+supported.
 
 #### Milvus scalar filter
 
@@ -455,10 +446,9 @@ is also pushed, both conditions must pass; deletes are then applied and Limit
 counts only surviving rows. A blank or malformed expression, an unknown field,
 or an incompatible literal fails planning instead of being ignored.
 
-`milvus.filter` is for ordinary scans only and cannot be combined with any
-`vector.search.*` option. Vector search uses `vector.search.filter` before
-TopK. JSON paths, Array predicates, and `json_contains` are not in the current
-scalar subset.
+`milvus.filter` is for ordinary scans only; a vector search filters before its
+top-k through the `filter` argument of `MilvusSearch.search`. JSON paths, Array
+predicates, and `json_contains` are not in the current scalar subset.
 
 
 ### 2.4 Write Parameters
@@ -758,32 +748,6 @@ segment selection uses `milvus.partitions` and `milvus.segments`.
 5. **Parameter Constants**: It's recommended to use constants defined in the `MilvusOption` class to avoid string spelling errors
 
 ## 6. Supported Data Types
-
-### Per-segment vector search in refactor/v2
-
-The existing reader search options call Knowhere BruteForce once per vector
-batch, then merge the batch results into each segment's TopK. This scans the
-data files; persisted Milvus index files and collection-wide TopK merging are
-not implemented by this entry point.
-
-| Option | Meaning |
-|---|---|
-| `vector.search.query` | Query float array, for example `[0.1,0.2]` |
-| `vector.search.topK` | Positive number of results per segment |
-| `vector.search.metric` | `L2` (default), `IP`, or `COSINE` |
-| `vector.search.column` | Vector field name; default `vector` |
-
-L2 results remain Euclidean distances (square root of Knowhere's squared L2).
-IP and COSINE return similarity, ordered largest first. Native float32 scores
-can differ slightly from the former JVM double-precision calculation. Deleted
-rows and null vectors are excluded before TopK; invalid dimensions, null array
-elements, malformed binary values and non-finite elements fail the search.
-
-Build with the validated Knowhere native JAR and start every JVM that uses it
-with its own JRE's `libjsig` preloaded; see [native setup](contributing.md#knowhere-library-loading).
-Missing libraries or native failures are reported to the caller; this reader
-does not fall back to JVM vector distance calculations. The separate legacy
-DataFrame/UDF utilities retain their existing implementation.
 
 ### 6.1 Scalar Types
 - Bool (`BooleanType`)

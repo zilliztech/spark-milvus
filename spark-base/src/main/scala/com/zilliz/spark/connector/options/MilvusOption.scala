@@ -15,19 +15,6 @@ import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.expr.{Expr, PlanParser}
 import com.zilliz.milvus.storage.read.plan.ReadLimits
 
-/** Vector search configuration for Milvus Storage V2
-  */
-case class VectorSearch(
-    queryVector: Array[Float],
-    topK: Int,
-    metricType: String,
-    vectorColumn: String,
-    mode: String = "brute_force",
-    searchParameters: Map[String, String] = Map.empty,
-    filter: Option[String] = None,
-    allowUnindexed: Boolean = false
-)
-
 case class MilvusOption(
     uri: String,
     token: String = "",
@@ -49,7 +36,6 @@ case class MilvusOption(
     fieldIDs: String = "",
     extraColumns: Seq[String] = Seq.empty,
     options: Map[String, String] = Map.empty,
-    vectorSearch: Option[VectorSearch] = None,
     readLimits: ReadLimits = ReadLimits.Default,
     writeFileRollingBytes: Long = MilvusOption.DefaultWriteFileRollingBytes,
     milvusFilter: Option[Expr] = None
@@ -140,16 +126,6 @@ object MilvusOption {
   val ReaderFieldIDs = "fieldIDs"
 
   // vector search config
-  val VectorSearchQueryVector = "vector.search.query"
-  val VectorSearchTopK = "vector.search.topK"
-  val VectorSearchMetric = "vector.search.metric"
-  val VectorSearchVectorColumn = "vector.search.column"
-  val VectorSearchIdColumn = "vector.search.idColumn"
-  val VectorSearchMode = "vector.search.mode"
-  val VectorSearchParameters = "vector.search.parameters"
-  val VectorSearchFilter = "vector.search.filter"
-  val VectorSearchAllowUnindexed = "vector.search.allowUnindexed"
-  val VectorSearchScore = "_score"
 
   // s3 config
   val S3FileSystemTypeName = "s3.fs"
@@ -599,7 +575,6 @@ object MilvusOption {
     val milvusFilter = parseMilvusFilter(options)
 
     // Parse vector search configuration
-    val vectorSearch = parseVectorSearch(options)
 
     MilvusOption(
       uri = uri,
@@ -622,7 +597,6 @@ object MilvusOption {
       fieldIDs = fieldIDs,
       extraColumns = extraColumns,
       options = optionsMap,
-      vectorSearch = vectorSearch,
       readLimits = readLimits,
       writeFileRollingBytes = writeFileRollingBytes,
       milvusFilter = milvusFilter
@@ -633,18 +607,6 @@ object MilvusOption {
       options: CaseInsensitiveStringMap
   ): Option[Expr] = {
     if (!options.containsKey(MilvusFilter)) return None
-
-    import scala.collection.JavaConverters._
-    val vectorSearchOption = options
-      .keySet()
-      .asScala
-      .find(_.toLowerCase(Locale.ROOT).startsWith("vector.search."))
-    vectorSearchOption.foreach { key =>
-      throw new IllegalArgumentException(
-        s"Options '$MilvusFilter' and '$key' cannot be combined; use " +
-          s"'$VectorSearchFilter' for vector search"
-      )
-    }
 
     val text = Option(options.get(MilvusFilter)).map(_.trim).getOrElse("")
     if (text.isEmpty) {
@@ -660,144 +622,6 @@ object MilvusOption {
           s"Option '$MilvusFilter' is invalid: ${e.getMessage}",
           e
         )
-    }
-  }
-
-  /** Parse vector search configuration from options
-    */
-  private def parseVectorSearch(
-      options: CaseInsensitiveStringMap
-  ): Option[VectorSearch] = {
-    def value(key: String): Option[String] =
-      Option(options.get(key)).map { value =>
-        val trimmed = value.trim
-        if (trimmed.isEmpty) {
-          throw new IllegalArgumentException(
-            s"Option '$key' must not be empty"
-          )
-        }
-        trimmed
-      }
-
-    val searchKeys = Seq(
-      VectorSearchQueryVector,
-      VectorSearchTopK,
-      VectorSearchMetric,
-      VectorSearchVectorColumn,
-      VectorSearchMode,
-      VectorSearchParameters,
-      VectorSearchFilter,
-      VectorSearchAllowUnindexed
-    )
-    if (!searchKeys.exists(options.containsKey)) return None
-    val queryVectorStr = value(VectorSearchQueryVector)
-    val topKStr = value(VectorSearchTopK)
-    if (queryVectorStr.isEmpty || topKStr.isEmpty) {
-      throw new IllegalArgumentException(
-        s"Options '$VectorSearchQueryVector' and '$VectorSearchTopK' must be set together"
-      )
-    }
-    val queryVector = parseQueryVector(queryVectorStr.get)
-    val topK = OptionParsing.positiveInt(
-      key => if (key == VectorSearchTopK) topKStr else None,
-      VectorSearchTopK,
-      1
-    )
-    val metricType = value(VectorSearchMetric)
-      .getOrElse("L2")
-      .toUpperCase(Locale.ROOT)
-    val vectorColumn = value(VectorSearchVectorColumn).getOrElse("vector")
-    require(
-      Set("L2", "IP", "COSINE").contains(metricType),
-      s"Option '$VectorSearchMetric' must be one of L2, IP or COSINE, got '$metricType'"
-    )
-    val mode = value(VectorSearchMode).getOrElse("brute_force")
-    require(
-      Set("index", "brute_force").contains(mode),
-      s"Unknown '$VectorSearchMode': '$mode'"
-    )
-    val filter =
-      Option(options.get(VectorSearchFilter)).map(_.trim).filter(_.nonEmpty)
-    filter.foreach(PlanParser.parse)
-    val parameters = value(VectorSearchParameters)
-      .map { json =>
-        import scala.jdk.CollectionConverters._
-        val node =
-          try new ObjectMapper().enable(FAIL_ON_TRAILING_TOKENS).readTree(json)
-          catch {
-            case e: Exception =>
-              throw new IllegalArgumentException(
-                s"Option '$VectorSearchParameters' must be a JSON object",
-                e
-              )
-          }
-        require(
-          node != null && node.isObject,
-          s"Option '$VectorSearchParameters' must be a JSON object"
-        )
-        node
-          .fields()
-          .asScala
-          .map { e =>
-            require(
-              e.getValue.isValueNode && !e.getValue.isNull,
-              s"Option '$VectorSearchParameters' must contain scalar values"
-            )
-            e.getKey -> e.getValue.asText()
-          }
-          .toMap
-      }
-      .getOrElse(Map.empty[String, String])
-    val allowUnindexed = OptionParsing.boolean(
-      key => Option(options.get(key)),
-      VectorSearchAllowUnindexed,
-      defaultValue = false
-    )
-    require(
-      mode == "index" || (filter.isEmpty && parameters.isEmpty && !allowUnindexed),
-      "Filter, search parameters and unindexed fallback require vector.search.mode=index"
-    )
-    Some(
-      VectorSearch(
-        queryVector,
-        topK,
-        metricType,
-        vectorColumn,
-        mode,
-        parameters,
-        filter,
-        allowUnindexed
-      )
-    )
-  }
-
-  /** Parse the nonempty JSON numeric array used as the search vector. */
-  private def parseQueryVector(jsonStr: String): Array[Float] = {
-    val node =
-      try new ObjectMapper().enable(FAIL_ON_TRAILING_TOKENS).readTree(jsonStr)
-      catch {
-        case e: Exception =>
-          throw new IllegalArgumentException(
-            s"Option '$VectorSearchQueryVector' must be a JSON numeric array",
-            e
-          )
-      }
-    require(
-      node != null && node.isArray && node.size() > 0,
-      s"Option '$VectorSearchQueryVector' must be a nonempty JSON array"
-    )
-    Array.tabulate(node.size()) { index =>
-      val value = node.get(index)
-      require(
-        value.isNumber,
-        s"Option '$VectorSearchQueryVector' elements must be numbers"
-      )
-      val parsed = value.floatValue()
-      require(
-        JavaFloat.isFinite(parsed),
-        s"Option '$VectorSearchQueryVector' contains a non-finite value"
-      )
-      parsed
     }
   }
 

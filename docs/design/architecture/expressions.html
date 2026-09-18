@@ -83,7 +83,7 @@
 两种表达式在 executor 的同一 Arrow 列批上独立求值，最终共同决定存活行。</strong></p>
 
 <p>本设计覆盖<a href="../capabilities.md">能力索引</a>中的 R6，以及 R7 已交付的标量子集。R7 的手写
-<code>PlanParser</code> 与 <code>MilvusSearch.filter</code> / <code>vector.search.filter</code> 标量子集
+<code>PlanParser</code> 与 <code>MilvusSearch.filter</code> 标量子集
 保留既有 <code>Expr</code> / <code>Evaluator</code> 合同，普通表的 <code>milvus.filter</code> 复用它。
 R6 使用按字段 id 和类型绑定的 <code>PredicateExpr</code> / <code>PredicateEvaluator</code>；两套中间表示不能互转，
 因为 Spark 与 Milvus 的字面量和浮点比较合同不同。JSON、Array、<code>json_contains</code> 仍由开放决策 23 阻塞。
@@ -273,14 +273,13 @@ EOF 校验统计 native reader 交付的物理行数，不用过滤后的行数�
     <tr><td>翻译器找不到字段 id metadata，或 metadata 与 Spark 类型冲突</td><td>整个顶层 Predicate 作为 residual 返回</td></tr>
     <tr><td>Spark 要求物理读取的 required schema 字段缺少 field id</td><td>既有列裁剪校验使规划失败</td></tr>
     <tr><td>executor 找不到已绑定字段、Arrow vector 类型不符、批长度不一致</td><td>task 失败；不返回空结果或全 false</td></tr>
-    <tr><td>带 <code>vector.search.*</code> 的读</td><td>不接受 <code>milvus.filter</code>，明确报错并提示使用 <code>vector.search.filter</code>；Spark predicate 全部作为 residual 留给 Spark，在 TopK 后求值</td></tr>
     <tr><td><code>milvus.filter</code> 显式空值、语法错误、未知字段、类型或字面量不匹配</td><td>driver 规划失败，错误包含 option 键和具体原因</td></tr>
     <tr><td>executor 找不到 <code>milvus.filter</code> 已验证的物理列，或列长度不足</td><td>task 失败；不返回空结果或全 false</td></tr>
   </tbody>
 </table>
 
 <div class="warning"><strong>R7 与 R6 保持独立入口。</strong>同一个 R7 标量实现服务普通表
-<code>milvus.filter</code> 与向量查询的 <code>vector.search.filter</code>，但两个 option 不能在一次读取中混用。
+<code>milvus.filter</code> 与向量搜索入口的 <code>filter</code> 参数。
 JSON path、JSON null 与缺失值、Array 和 <code>json_contains</code> 必须先解决开放决策 23；核心模块不会引入 antlr。</div>
 
 <h2 id="invariants">七、实现必须保持的合同</h2>

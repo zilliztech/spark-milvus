@@ -64,8 +64,6 @@ nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用
 `milvus.search.take.rows` 与 `milvus.search.take.nanos`。Knowhere 在自己的线程池里
 计算，这部分耗时看 `milvus.search.knowhere.nanos`，不计入任务的 CPU 时间。
 
-旧的逐段 `vector.search.*` 读取选项仍在，返回的是每段候选，不是全局 TopK。
-
 ## 版本兼容性
 
 **此连接器需要 Milvus 2.6 或更高版本**（Storage V2）。
@@ -335,10 +333,10 @@ Map；executor 读取并关闭适用于本段的删除文件，再按主键和�
 | `MilvusOption.MilvusSegments` (`milvus.segments`) | String | 否 | 未设置 | 逗号分隔的数值段 ID。可与 `milvus.partitions` 同时使用，此时读取二者交集；每个 ID 都必须存在。 |
 | `MilvusOption.ReaderFieldIDs` (`fieldIDs`) | String | 否 | 未设置 | 逗号分隔的数值字段 ID，在 schema 推导和 Table 构建时都生效。每个 ID 都必须存在于快照 schema，Spark 投影还可在此基础上继续裁剪。外部 `.schema()` 的非元数据字段必须恰好选中这些 ID，字段名和 Spark 类型也必须与快照一致。 |
 | `MilvusOption.MilvusExtraColumns` (`milvus.extra.columns`) | String | 否 | "" | 逗号分隔的元数据列，只支持 `_segment_id`、`_row_offset`、`_timestamp`，见第 4 节。 |
-| `MilvusOption.MilvusFilter` (`milvus.filter`) | String | 否 | 未设置 | 普通表读取使用的 Milvus 标量表达式。规划期按固定快照完成解析与校验，行式和列式 reader 都执行，并在 Limit 前与 Spark 谓词、删除共同生效。不能与 `vector.search.*` 混用；向量搜索使用 `vector.search.filter`。 |
+| `MilvusOption.MilvusFilter` (`milvus.filter`) | String | 否 | 未设置 | 普通表读取使用的 Milvus 标量表达式。规划期按固定快照完成解析与校验，行式和列式 reader 都执行，并在 Limit 前与 Spark 谓词、删除共同生效。向量搜索的过滤条件由 `MilvusSearch.search` 的 `filter` 参数给出。 |
 | `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | 否 | true | 应用固定快照可见的段内删除、本分区 L0 删除与全 collection L0 删除。设为 `false` 是显式关闭；只要显式提供，除 `true`、`false` 外的值（包括空白值）都会报错。 |
 | `milvus.read.vector.raw` | Boolean | 否 | false | 向量列的输出类型。默认 false，向量转成 Spark 原生类型（`FloatVector`/`Float16Vector`/`BFloat16Vector` → `ArrayType(FloatType)`，`Int8Vector` → `ArrayType(ShortType)`，`SparseFloatVector` → `MapType(LongType, FloatType)`）。设为 true 时向量列输出 `BinaryType`，字节按存储原样给出，由调用方自己按 `dim` 与元素类型解析；这条路径不做逐元素转换，适合把字节直接交给下游原生库的批量作业 |
-| `milvus.read.columnar` | Boolean | 否 | true | 读出口形态。默认 true，整批交付（`ColumnarBatch`），直接包住原生 buffer 不拷贝，向量列按 `milvus.read.vector.raw` 决定的类型呈现；有删除的批按存活行下标映射交付，同样不拷贝。设为 false 逐行交给 Spark。带 `vector.search.*` 的读一律走行式，因为那一步要逐行算距离。行式和列式 reader 共用同一套预期行数校验。 |
+| `milvus.read.columnar` | Boolean | 否 | true | 读出口形态。默认 true，整批交付（`ColumnarBatch`），直接包住原生 buffer 不拷贝，向量列按 `milvus.read.vector.raw` 决定的类型呈现；有删除的批按存活行下标映射交付，同样不拷贝。设为 false 逐行交给 Spark。行式和列式 reader 共用同一套预期行数校验。 |
 | `milvus.read.batch.max.rows` | Int | 否 | 8192 | 每个 milvus-storage record batch 请求的最大正行数，映射为 `reader.record_batch_max_rows`。 |
 | `milvus.read.batch.max.bytes` | Long | 否 | 33554432 | 每个原生 record batch 的正目标字节上限，映射为 `reader.record_batch_max_size`；当前上游最大值为 4294967296（4 GiB）。 |
 | `milvus.read.arrow.max.bytes` | Long | 否 | 9223372036854775807 | 每个 Spark read task 独占的 Arrow child allocator 正硬上限。覆盖行式、列式与向量路径导入/读取的 Arrow buffer，不包含 milvus-storage 独立的 native 内存池。 |
@@ -347,8 +345,7 @@ Map；executor 读取并关闭适用于本段的删除文件，再按主键和�
 `milvus.read.apply.deletes`、`milvus.read.vector.raw`、`milvus.read.columnar`）只接受
 不区分大小写的 `true` 或 `false`；空白值和拼写错误都会直接报错，不会回退到默认值。
 正整数/正 Long option 不接受空白、零、负数、非十进制和溢出值，错误同时给出键与原始值。
-显式提供的 `milvus.snapshot.max.json.bytes` 必须是正整数。只有 `vector.search.query` 与
-`vector.search.topK` 同时给出时才启用向量搜索：query 必须是非空 JSON 风格的有限数字数组，
+显式提供的 `milvus.snapshot.max.json.bytes` 必须是正整数。
 `topK` 必须是正整数；任一显式提供的向量搜索选项都不能是空白值，缺项或格式错误都在规划期失败。
 既有 connector 值遵循同一规则：`milvus.insertMaxBatchSize`（默认 5000）、
 `milvus.retry.count`（3）、`milvus.retry.interval`（1000）、`s3.maxConnections`（32）和
@@ -362,10 +359,8 @@ VarChar、Text 还支持前缀与后缀条件。行式与列式读取都保持 S
 
 连接器只在整棵谓词树都受支持时接受它。未支持的操作符、cast、嵌套引用，以及 JSON、Array、
 Geometry、向量和合成元数据列上的谓词留在 Spark 计划中，由 Spark 求值。只被谓词引用的列会在
-内部读取，不会出现在结果 schema。带 `vector.search.*` 的读取不下推 Spark 谓词：整棵条件作为
-residual 留给 Spark，在向量 TopK 之后求值。要在持久化索引搜索前过滤，使用
-`MilvusSearch.search(..., filter = ...)` 或对应的 `vector.search.filter` option。DataSource V1 Filter
-接口不支持。
+内部读取，不会出现在结果 schema。要在向量搜索前过滤，使用
+`MilvusSearch.search(..., filter = ...)`。DataSource V1 Filter 接口不支持。
 
 #### Milvus 标量过滤
 
@@ -385,8 +380,8 @@ spark.read
 内部读取，但不会进入结果 schema。若同时下推 Spark `where`，两者都必须通过；随后应用删除，Limit 只统计
 最终存活行。空白或错误表达式、未知字段、不兼容字面量都在规划期报错，不会被忽略。
 
-`milvus.filter` 只用于普通扫描，不能与任何 `vector.search.*` option 混用；向量搜索在 TopK 前使用
-`vector.search.filter`。当前标量子集不含 JSON path、Array 谓词和 `json_contains`。
+`milvus.filter` 只用于普通扫描；向量搜索在 TopK 前用 `MilvusSearch.search` 的 `filter` 参数。
+当前标量子集不含 JSON path、Array 谓词和 `json_contains`。
 
 
 ### 2.4 写入参数
@@ -615,26 +610,6 @@ CALL milvus.system.cleanup_staging('your_db.your_collection',
 5. **参数常量**：建议使用 `MilvusOption` 类中定义的常量，避免字符串拼写错误
 
 ## 6. 支持的数据类型
-
-### refactor/v2 的逐段向量查询
-
-现有 reader 搜索选项对每批向量调用 Knowhere BruteForce，再合并为每个 segment 的 TopK。
-它扫描数据文件；此入口尚未加载 Milvus 持久化索引文件，也不合并集合级 TopK。
-
-| 选项 | 含义 |
-|---|---|
-| `vector.search.query` | 查询浮点数组，例如 `[0.1,0.2]` |
-| `vector.search.topK` | 每段返回条数，必须为正数 |
-| `vector.search.metric` | `L2`（默认）、`IP` 或 `COSINE` |
-| `vector.search.column` | 向量字段名，默认 `vector` |
-
-L2 仍返回欧氏距离，即 Knowhere 平方距离的平方根；IP 与 COSINE 返回相似度，按降序排列。
-原生分数为 float32，与原先 JVM 双精度计算可能有少量误差。删除行和 null 向量在 TopK 前排除；
-维度错误、数组内 null 元素、损坏的二进制值和非有限元素导致查询失败。
-
-构建时选择已验证的 Knowhere 原生 JAR；每个使用它的 JVM 启动前须预加载自身 JRE 的 libjsig，见
-[原生库配置](contributing.md#knowhere-library-loading)。缺库或原生调用失败直接报错，reader 不回退 JVM 距离计算。
-独立的遗留 DataFrame/UDF 工具保持原实现。
 
 ### 6.1 标量类型
 - Bool（`BooleanType`）

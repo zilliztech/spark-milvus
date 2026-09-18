@@ -60,16 +60,11 @@ class MilvusScan(
     with Logging {
   private val milvusOption = MilvusOption(options)
   private val predicateSchema = Option(planningSchema).getOrElse(schema)
-  milvusOption.vectorSearch.filter(_.mode == "index").foreach { search =>
-    SegmentIndexSearch.validate(search, snapshot.schema)
-  }
   private val runtimePrimaryKey =
-    if (milvusOption.vectorSearch.isEmpty)
-      snapshot.primaryKeyField.filter(field =>
-        field.dataType == MilvusDataType.Int64 ||
-          field.dataType == MilvusDataType.VarChar
-      )
-    else None
+    snapshot.primaryKeyField.filter(field =>
+      field.dataType == MilvusDataType.Int64 ||
+        field.dataType == MilvusDataType.VarChar
+    )
   private val pushedPrimaryKeyFilter =
     for {
       primaryKey <- runtimePrimaryKey
@@ -102,8 +97,7 @@ class MilvusScan(
     // SUPPORTED makes Spark skip the reader factory's per-partition check.
     // The core evaluator consumes Arrow batches before either reader exposes
     // them, so an accepted predicate does not force row materialization.
-    if (MilvusOption.readColumnar(options) && milvusOption.vectorSearch.isEmpty)
-      Scan.ColumnarSupportMode.SUPPORTED
+    if (MilvusOption.readColumnar(options)) Scan.ColumnarSupportMode.SUPPORTED
     else Scan.ColumnarSupportMode.UNSUPPORTED
 
   /** The primary key, when the scan reads it. Spark resolves these references
@@ -315,9 +309,6 @@ class MilvusScan(
       neededFieldIds = MilvusOption.readerFieldIds(options),
       limits = milvusOption.readLimits
     )
-    milvusOption.vectorSearch.filter(_.mode == "index").foreach { search =>
-      SegmentIndexSearch.checkPlan(search, snapshot.schema, plan.specs)
-    }
     plan.specs.map { task =>
       task.layout match {
         case SegmentLayout.Manifest(_, _) =>

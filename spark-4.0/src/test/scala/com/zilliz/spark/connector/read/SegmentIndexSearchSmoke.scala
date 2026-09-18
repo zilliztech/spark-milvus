@@ -145,12 +145,9 @@ object SegmentIndexSearchSmoke {
       println(
         "PASS: scalar-only query succeeds after removing every raw vector column-group file"
       )
-      verifyProjection(fixtures.head.task, properties)
-      val v2 = writeSegment(directory, allocator, properties, 32L, v2 = true)
-      v2.vectorFiles.foreach(path => Files.delete(directory.resolve(path)))
-      verifyProjection(v2.task, properties)
+      verifyProjection(spark, directory, properties, fixtures.head)
       println(
-        "PASS: V2 and V3 native take preserve projected score position, metadata positions and score pruning without opening raw vectors"
+        "PASS: output columns come back in the order asked for, or not at all, without opening raw vectors"
       )
       verifyMixedL2Tie(spark, directory, allocator, properties)
       assert(
@@ -223,126 +220,90 @@ object SegmentIndexSearchSmoke {
     )
   }
 
+  /** The entry's output columns: any subset in any order, and none at all. The
+    * raw vector files of this segment are gone, so anything the index path
+    * reads beyond the index and the filter columns fails here.
+    */
   private def verifyProjection(
-      task: SegmentReadTask,
-      properties: Map[String, String]
+      spark: SparkSession,
+      directory: Path,
+      properties: Map[String, String],
+      fixture: Fixture
   ): Unit = {
-    val options = properties ++ Map(
-      MilvusOption.VectorSearchMode -> "index",
-      MilvusOption.VectorSearchQueryVector -> "[0,0]",
-      MilvusOption.VectorSearchTopK -> "2",
-      MilvusOption.VectorSearchMetric -> "L2",
-      MilvusOption.VectorSearchFilter -> "category >= 1",
-      MilvusOption.MilvusExtraColumns -> "$segment_id,$row_offset"
+    Files.write(
+      directory.resolve("projection.json"),
+      snapshotJson(Seq(fixture)).getBytes(UTF_8)
     )
-    val parsed = MilvusOption(options)
-    val partition: MilvusInputPartition = task.layout match {
-      case _: SegmentLayout.Manifest =>
-        MilvusV3InputPartition(task, "20", parsed)
-      case _: SegmentLayout.ColumnGroups => MilvusV2InputPartition(task, parsed)
-    }
-    val id = StructField("id", LongType, nullable = false)
-    val score = StructField("_score", DoubleType, nullable = false)
-    val segment = StructField(
-      MilvusOption.MilvusExtraColumnSegmentID,
-      LongType,
-      nullable = false
-    )
-    val offset = StructField(
-      MilvusOption.MilvusExtraColumnRowOffset,
-      LongType,
-      nullable = false
-    )
-    Seq(
-      StructType(Seq(score, offset, id, segment)),
-      StructType(Seq(id, score)),
-      StructType(Seq(id)),
-      StructType(Seq(score)),
-      StructType(Seq.empty)
-    ).foreach { projection =>
-      val reader = new MilvusPartitionReaderFactory(projection, options)
-        .createReader(partition)
-      try {
-        var count = 0
-        while (reader.next()) {
-          val row = reader.get()
-          assert(row.numFields == projection.length)
-          projection.fields.zipWithIndex.foreach { case (field, position) =>
-            field.name match {
-              case "_score" =>
-                assert(
-                  row.getDouble(position) == math.pow(
-                    3 + count + (task.segmentId - 30) * 0.5,
-                    2
-                  )
-                )
-              case "id" =>
-                assert(
-                  row.getLong(position) == task.segmentId * 100 + 3 + count
-                )
-              case MilvusOption.MilvusExtraColumnSegmentID =>
-                assert(row.getLong(position) == task.segmentId)
-              case MilvusOption.MilvusExtraColumnRowOffset =>
-                assert(row.getLong(position) == 3 + count)
-            }
-          }
-          count += 1
+    val options =
+      properties ++ Map(MilvusOption.SnapshotPath -> "projection.json")
+    val segment = fixture.task.segmentId
+    Seq(Seq("id", "category"), Seq("id"), Seq.empty[String]).foreach {
+      outputColumns =>
+        val frame = MilvusSearch.search(
+          spark,
+          options,
+          "vector",
+          Array(0f, 0f),
+          2,
+          "L2",
+          "index",
+          Map.empty,
+          Some("category >= 1"),
+          outputColumns,
+          false
+        )
+        assert(
+          frame.schema.fieldNames.toSeq ==
+            Seq(
+              "query_id",
+              "rank",
+              "_score",
+              "_segment_id",
+              "_row_offset"
+            ) ++ outputColumns,
+          frame.schema.fieldNames.mkString(",")
+        )
+        val rows = frame.orderBy("rank").collect().toVector
+        assert(rows.size == 2, rows.mkString(","))
+        assert(rows.map(_.getAs[Int]("rank")) == Vector(1, 2))
+        assert(rows.forall(_.getAs[Long]("_segment_id") == segment))
+        assert(rows.map(_.getAs[Long]("_row_offset")) == Vector(3L, 4L))
+        if (outputColumns.contains("id")) {
+          assert(
+            rows.map(_.getAs[Long]("id")) ==
+              rows.map(row => segment * 100 + row.getAs[Long]("_row_offset"))
+          )
         }
-        assert(count == 2)
-        val metrics =
-          reader.currentMetricsValues().map(m => m.name() -> m.value()).toMap
-        assert(metrics(ScanMetrics.JniCalls) > 0L)
-        assert(
-          metrics(ScanMetrics.ArrowBatches) >= 2L,
-          "Filter and take batches must both be reported"
-        )
-        assert(metrics(ScanMetrics.ArrowBytes) > 0L)
-        assert(metrics(ScanMetrics.ArrowAllocatedMax) > 0L)
-        assert(metrics(ScanMetrics.RowsMaterialized) == count.toLong)
-        reader.close()
-        assert(
-          reader
-            .currentMetricsValues()
-            .map(m => m.name() -> m.value())
-            .toMap == metrics
-        )
-      } finally reader.close()
     }
 
-    // Filtering reads succeed before the missing index makes this query fail.
-    // Its work must remain visible after both the failure and reader closure.
-    val indexes = task.indexes.asInstanceOf[SegmentIndexes.Available].indexes
-    val brokenTask = task.copy(indexes =
-      SegmentIndexes.Available(
-        indexes.map(_.copy(filePaths = Vector("missing-index.bin")))
-      )
+    // The index object the snapshot names is gone: the query must fail rather
+    // than answer from whatever else it can read.
+    val broken = fixture.copy(descriptor =
+      fixture.descriptor.copy(filePaths = Vector("missing-index.bin"))
     )
-    val brokenPartition = partition match {
-      case value: MilvusV3InputPartition => value.copy(task = brokenTask)
-      case value: MilvusV2InputPartition => value.copy(task = brokenTask)
-    }
-    val failed =
-      new MilvusPartitionReaderFactory(StructType(Seq(id, score)), options)
-        .createReader(brokenPartition)
-    try {
-      var rejected = false
-      try failed.next()
-      catch { case NonFatal(_) => rejected = true }
-      assert(rejected, "The missing index must fail the query")
-      val metrics =
-        failed.currentMetricsValues().map(m => m.name() -> m.value()).toMap
-      assert(metrics(ScanMetrics.JniCalls) > 0L)
-      assert(metrics(ScanMetrics.ArrowBatches) > 0L)
-      assert(metrics(ScanMetrics.ArrowBytes) > 0L)
-      assert(metrics(ScanMetrics.RowsMaterialized) == 0L)
-      failed.close()
-      assert(
-        failed
-          .currentMetricsValues()
-          .map(m => m.name() -> m.value())
-          .toMap == metrics
-      )
-    } finally failed.close()
+    Files.write(
+      directory.resolve("broken-index.json"),
+      snapshotJson(Seq(broken)).getBytes(UTF_8)
+    )
+    var rejected = false
+    try
+      MilvusSearch
+        .search(
+          spark,
+          properties ++ Map(MilvusOption.SnapshotPath -> "broken-index.json"),
+          "vector",
+          Array(0f, 0f),
+          2,
+          "L2",
+          "index",
+          Map.empty,
+          None,
+          Seq("id"),
+          false
+        )
+        .collect()
+    catch { case NonFatal(_) => rejected = true }
+    assert(rejected, "A missing index object must fail the search")
   }
 
   private def writeSegment(

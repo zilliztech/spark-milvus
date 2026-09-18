@@ -55,7 +55,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；native-storage、core、
 | `read.exec` | 批读取、行号取列、出口；碰 native。向量搜索里是 Milvus TableFormat 的执行一侧：逐批交出向量缓冲、排除位图与起始行号，交出段的索引句柄 | SegmentReader、SegmentReaderRegistry、TakeResult、RowExclusions、SegmentVectors、SegmentIndexHandle；take 包装 loon_take，接收有序唯一行号。列式出口的 Spark 类型归第 3 层，进 core 的仍是 VectorSchemaRoot |
 | `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter（V3SegmentWriter、V2SegmentWriter）、WrittenColumnGroups、ManifestTransaction、StagingLayout |
 | `write.commit` | 作业清单、所有权、心跳、提交、幂等，以及 A7 的 fail-closed 候选审计与文件删除；完整目录删除等待原生 API；写快照 JSON 与段 Avro 清单供 Milvus 外部恢复（W8 待实现），索引记录随清单（W6） | JobManifest、Committer、StagingCleaner |
-| `index` | 持久化索引选择、加载、排除位图、向量执行与段内 TopK；目标形态只含计算：搜索规划（段组与查询组）、一个段内执行器接口（精确扫描在向量批上、索引探查在索引句柄上，输入一组查询，按查询有界 TopK）、Arrow 数据缓冲到 Knowhere 缓冲的适配、段索引构建 | SegmentSearch（ExactScan、IndexProbe）、SearchPlan、TopKMerger、QueryMatrix、KnowhereBuffers、PersistedIndexSearch、SegmentIndexQuery、BruteForceSearch；索引来源随 Snapshot 固定，任务独占并关闭。SearchPlan、多查询执行器、IndexWriter 待实现；打开段、排除位图和索引文件的读取与解码归 Milvus 的 TableFormat 一侧（read.exec、delete、expr、codec），计算不打开存储，见 [vector-search.html 第一、二节](vector-search.html#overall) |
+| `index` | 只含计算：搜索规划（段组与查询组）、段内执行器（精确扫描在向量批上、索引探查在索引句柄上，输入一组查询，按查询有界 TopK）、Arrow 数据缓冲到 Knowhere 缓冲的适配、段索引构建 | SegmentSearch（ExactScan、IndexProbe、hold）、SearchPlan、TopKMerger、QueryMatrix、KnowhereBuffers；索引来源随 Snapshot 固定，任务独占并关闭。IndexWriter 待实现；打开段、排除位图和索引文件的读取与解码归 Milvus 的 TableFormat 一侧（read.exec、delete、expr、codec），计算不打开存储，见 [vector-search.html 第一、二节](vector-search.html#overall) |
 
 ### 2.2 compat `com.zilliz.milvus.storage.compat`
 
@@ -99,7 +99,7 @@ Arrow 过界的三条约定：
 C 接口、JNI native 方法、`io.knowhere` Java API 和原生资源加载器均由固定的上游提交提供。
 本模块以 Java 11 编译，不依赖 Spark 或 Arrow，不重复定义 native 方法、提取器或 C++ shim。
 `src/main/cpp/README.md` 记录原生代码的上游归属，Connector 中不保留第二份实现。
-现有 vector.search.* 经 core.index.BruteForceSearch 调用上游 BruteForce，按批计算、合并段内 TopK；这个逐段入口随统一入口的 exact 模式删除（决策日志 2026-09-17）。建索引（W6）调用同一上游的 build 与 serialize；搜索和建索引线程池的大小等上游接口开放后在本模块设置。索引入口经 NativeVectorIndex 调用同一上游的 BinarySet、deserialize、search；不新增 Knowhere JNI。文件格式在 core 解释，Cardinal stream 要求经过特性校验的 WITH_CARDINAL 构建。
+exact 模式经 core.index.ExactScan 调用上游 BruteForce，一次调用算一批向量对整组查询。建索引（W6）调用同一上游的 build 与 serialize；搜索和建索引线程池的大小等上游接口开放后在本模块设置。索引入口经 NativeVectorIndex 调用同一上游的 BinarySet、deserialize、search；不新增 Knowhere JNI。文件格式在 core 解释，Cardinal stream 要求经过特性校验的 WITH_CARDINAL 构建。
 Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 BinarySet key 分开。统一平台包的 provenance 生成 `META-INF/milvus/knowhere-runtime.properties`，并由 native-runtime 校验两个 JNI、全部依赖、别名和摘要后一次解压；`storage-compatibility*.properties` 只属于迁移前的独立产物组合，统一包不再据它复制或覆盖库。旧 gitlink、旧自有 Conan recipe 实现的 Cardinal 组合曾通过真实 HNSW/COSINE 查询；当前构建使用固定上游 recipe revision 与 CMake 显式链接，子模块 revision 尚待重建，结果及验收边界见 [原生构建验收](../engineering/native-libraries.html#validation) 以及 [向量搜索第 2.9 节](vector-search.html#interop)。
 绑定本身的接口、内存所有权、与核心和 Connector 的能力对照以及线程模型见 [Knowhere JNI 实现方案](knowhere-jni.html)。
 
@@ -124,7 +124,6 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 | `options` | option 名、别名、校验；ReadMode；按 ReadMode 构造这次读的 SnapshotSource（SnapshotSources，含 ClientSnapshotSource、OptionStringsSnapshotSource，把 compat 的 backup 实现和 V2 footer 解析器接进 core）；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageKeys） | 否 |
 | `sources` | 只有 MilvusDataSource，`format("milvus")` 的 TableProvider。留在这个包名下是因为 apps 和用户作业按字符串引用它的全名 | 否 |
 | `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、静态注册表、共用的 collection/client/有界等待规则；已实现快照、索引、load/release/flush/compact、describe、backfill `Register`，以及 A7 的 `CleanupStagingProcedure`；节点和策略在 `extensions`，append 登记与完整目录删除尚未实现；`build_index`（W6，另起 Spark 作业建索引）与 `restore_snapshot`（W8）待实现 | 否 |
-| `filter` | 过渡状态：1.x 的 JVM 暴力搜索 `VectorBruteForceSearch`，随统一入口的 exact 模式删除（决策日志 2026-09-17，第 5 节） | 否 |
 | `extensions` | SparkSessionExtensions、`CALL milvus.system.<name>(...)` 的解析器扩展、CallProcedure 节点与策略；文法 `spark-base/src/main/antlr4/MilvusCall.g4` 一份，设计见 procedure.html | antlr 生成的解析器按线（本线 antlr 版本），`MilvusSqlParser` 适配器按线（4.0 起多 `parseRoutineParam`）；其余共享 |
 
 按线的还有 `META-INF/services` 资源。
@@ -140,7 +139,7 @@ CALL 走语法扩展，不走 `ProcedureCatalog`：后者是 Spark 4.0 才有的
 | 包 | 内容 |
 |---|---|
 | `backfill` | BackfillApp、配置、join 键、列映射、merge 模式、结果 JSON |
-| `search` | SQL 向量函数及其 SessionExtensions（V8）；精确 KNN 基准与召回评测作业（O3，待实现）。`VectorBruteForceSearch` 的实现在 spark-base 的 `filter` 包，这里只有它的测试，二者随 exact 模式一起删除 |
+| `search` | SQL 向量函数及其 SessionExtensions（V8）；精确 KNN 基准与召回评测作业（O3，待实现） |
 
 两个包互不依赖，各自是独立入口。`format("milvus")` 的短名归 apps 之后，只有加载 apps jar 才能用旧写法；三段名 `milvus.db.coll` 不需要 apps。
 
@@ -215,7 +214,7 @@ spark-milvus/
 |---|---|---|
 | read/MilvusSnapshotReader.scala | core.snapshot.json | 已迁。92 行 Spark 类型转换切成 spark-base 的 SnapshotSparkSchema；JSON 形状类进 core.snapshot.json 并改名（SnapshotJson、CollectionSchemaJson、FieldJson…），V2SegmentInfo 并入 Segment（`Segment.v2` 构造，`columnGroups`/`deltaLogs`/`dedupColumnGroupsBySlot` 是 Segment 的方法），文件不再存在 |
 | read/SegmentManifestReader.scala、V3ManifestReader.scala | core.manifest | 已迁 |
-| read/DeltaLogReader.scala、DeletePlan.scala | core.delete、core.codec | 已迁。issue #125 将 DeltaLogReader 中共同的 Milvus envelope 与 Parquet payload 解析提取为 BinlogCodec；删除和 MilvusIndexFileDecoder 共用，ObjectStore 仍是唯一文件入口。SegmentIndexQuery 按段物理行号生成此次搜索的删除/过滤位图 |
+| read/DeltaLogReader.scala、DeletePlan.scala | core.delete、core.codec | 已迁。issue #125 将 DeltaLogReader 中共同的 Milvus envelope 与 Parquet payload 解析提取为 BinlogCodec；删除和 MilvusIndexFileDecoder 共用，ObjectStore 仍是唯一文件入口。RowExclusions 按段物理行号生成此次搜索的删除/过滤位图 |
 | src/main/resources/milvus-segment-manifest*.avsc | core 的 resources | 已迁。资源必须跟代码走，留在原处解码器会报 not found on classpath，而失败形式是返回 Left 不是抛异常 |
 | serde/SparkTypes.scala、SchemaUtil.scala | core.schema、spark.types | 已迁。core.schema 得到 MilvusTypes、ArrowTypes、SchemaMapper、FieldMetadata；Spark 那一半是 spark.types 的 SparkTypes 与 SparkSchemaMapper（文件名已改成对象名） |
 | MilvusUtil.scala 的 FloatConverter、SparseFloatVectorConverter | core.codec | 已迁。文档原来写「MilvusUtil 整个进 apps.legacy」，不成立：627 行里只有 307 行是 FieldData 打包，两个转换器是纯 JVM 的列值编解码，被 ArrowConverter 和读路径用着 |
@@ -227,10 +226,10 @@ spark-milvus/
 | MilvusClient.scala | client.api、client.grpc | 已迁。重试拦截器拆进 client.grpc，2026-09-17 删除（它在失败后重启已关闭的调用，从未真正重发），读 RPC 的重试改为 client.api 的调用封装经 client.grpc.RpcRetry；收 MilvusOption 的工厂删掉，改由 MilvusOption.connectionParams 产出连接参数；Catalog 的 ListDatabases、ShowCollections、collection create/drop 与 vector index create 均经 client.api 接入并校验响应状态 |
 | sources/MilvusDataSource.scala（2880 行） | spark.sources、spark.table、spark.read、spark.options | 已拆成 14 个文件，最大 550 行。`sources` 只留 TableProvider（FQN 被 apps 和用户作业按字符串引用，不能动）；MilvusTable→spark.table；ScanBuilder、Scan、四个规划入口（ClientSnapshotPlanner、LegacyClientPlanner、OptionSnapshotPlanner、BackupPlanner）、SnapshotPartitions、DeletePlanning、ClientReadSnapshot→spark.read（四个规划入口后来在 #04 全部变成 SnapshotSource，见 snapshot.html 第二节）；桶判定与 Hadoop 配置翻译（StorageOptions）、备份集合选取（BackupSelection）、ReadMode→spark.options。任务构造与删除文件规划已下沉 `core.read.plan`，Spark 侧只把 `ReadPlan` 包成 `InputPartition` |
 | MilvusOption.scala、loon/Properties.scala | spark.options | 已搬。MilvusOption 在 spark.options；MilvusOption 是混的，存储配置下沉 core.credential 是重构，未做。`loon/Properties.FsConfig` 的每个常量都是 core.credential.StorageProperties 的别名，调用方已全部改为直接用 StorageProperties，2026-09-14 连同 PropertiesTest 一起删除，`loon` 包不再存在；`loon/HadoopStorageKeys` 已搬到 spark.options，和 StorageOptions 是同一件事的两半 |
-| read/MilvusV3PartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusV2PartitionReader.scala | spark.read | 已搬。开段下沉 core.read.exec 的注册表；#06 两个行式 reader 合成 `MilvusRowPartitionReader`，两条线的列名规则归 `ColumnBinding`，向量检索拆成 `SegmentVectorSearch`；列式出口是 `MilvusColumnarPartitionReader` |
+| read/MilvusV3PartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusV2PartitionReader.scala | spark.read | 已搬。开段下沉 core.read.exec 的注册表；#06 两个行式 reader 合成 `MilvusRowPartitionReader`，两条线的列名规则归 `ColumnBinding`，列式出口是 `MilvusColumnarPartitionReader` |
 | serde/ArrowConverter.scala、ArrowAllocator.scala | spark.types | 已搬到 spark.types：它做的是 Arrow 值与 Spark InternalRow 的双向转换，就是 types 的职责。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
-| filter/VectorBruteForceSearch.scala | 删除 | 2026-09-17 定删除（决策 16 已定）：在 `MilvusSearch.search` 的 exact 模式落地的同一变更里删掉它和 apps-4.0 的 `VectorBruteForceSearchTest`，同时删除 `vector.search.*` 逐段入口（`SegmentVectorSearch`、选项与中英文 reference 条目）；删除前核对云上作业是否引用。SegmentVectorSearch 已改调 core.index.BruteForceSearch，不再调用此处的 JVM 距离计算 |
-| issue #125 持久化向量查询 | core.index、core.expr、core.read.exec、spark.read、native-vector | SegmentIndexQuery 负责共同执行与过滤，IndexFileCodec 支持 Milvus envelope/切片及 CARD 流，PersistedIndexSearch 使用上游索引；SegmentReader.take 回表，SegmentIndexSearch 适配 Spark 行，MilvusSearch 构造全局 TopK。索引任务独占，无跨任务缓存；旧 gitlink 组合曾通过真实 Cardinal HNSW 查询，验收边界见 [存储 I/O 状态](storage-io.html#state)。当前两个原生子模块已更新，须重建后复验；旧 Knowhere DiskANN 结果仅描述 `9dc2b8ad` |
+| filter/VectorBruteForceSearch.scala | 已删除 | 2026-09-18 随查询集入口删除，连同 apps-4.0 的 `VectorBruteForceSearchTest`、`vector.search.*` 逐段入口（`SegmentVectorSearch`、`SegmentIndexSearch`、选项与中英文 reference 条目）和 core 的 `SegmentIndexQuery`、`PersistedIndexSearch`、`BruteForceSearch`；删除前核对过云上作业没有引用 |
+| issue #125 持久化向量查询 | core.index、core.expr、core.read.exec、spark.read、native-vector | RowExclusions 出排除位图，IndexFileCodec 支持 Milvus envelope/切片及 CARD 流，SegmentIndexHandle 交出索引句柄，IndexProbe 在句柄上搜索；SegmentReader.take 回表，MilvusSearch 构造全局 TopK。索引任务独占，无跨任务缓存；旧 gitlink 组合曾通过真实 Cardinal HNSW 查询，验收边界见 [存储 I/O 状态](storage-io.html#state)。当前两个原生子模块已更新，须重建后复验；旧 Knowhere DiskANN 结果仅描述 `9dc2b8ad` |
 | write/MilvusV3Writer.scala、MilvusV2Writer.scala | spark.write → core.write.exec | 已搬；#07 把 native 调用剥进 core.write.exec（V3SegmentWriter、V2SegmentWriter、ManifestTransaction），spark.write 的两个类只剩行到 Arrow 批和 Spark 接口；暂存路径由 StagingLayout 定；#08 起 MilvusV3BatchWrite 的 commit/abort 调 core.write.commit 的 Committer |
 | write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusFieldData.scala（原 MilvusUtil.scala） | 删除 | 2026-09-14 删除：gRPC Insert 是 1.x 的写路径（W7），2.0 不支持；MilvusFieldData 只剩集成测试造数据用，搬到 integration-4.0 的 testkit |
 | write/MilvusSparkNativeImportWriter.scala | 删除 | 已删，全仓零引用 |

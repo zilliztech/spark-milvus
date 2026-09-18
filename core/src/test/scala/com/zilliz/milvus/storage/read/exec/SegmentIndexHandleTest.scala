@@ -5,15 +5,21 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Files
 
 import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.codec.{DecodedIndexFile, IndexFileDecoder}
 import com.zilliz.milvus.storage.io.{FailingObjectStore, LocalObjectStore}
-import com.zilliz.milvus.storage.snapshot.SegmentIndex
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
+import com.zilliz.milvus.storage.snapshot.{
+  SegmentIndex,
+  SegmentIndexes,
+  SegmentLayout
+}
 
 /** What the Milvus format side accepts before it opens an index
   * (docs/design/architecture/vector-search.html sections 2.4 and 2.5).
   */
-class SegmentIndexHandleTest extends AnyFunSuite {
+class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
   private val descriptor = SegmentIndex(
     1,
     2,
@@ -43,6 +49,102 @@ class SegmentIndexHandleTest extends AnyFunSuite {
     override def readPayload(offset: Long, destination: ByteBuffer): Unit =
       destination.put(bytes, offset.toInt, destination.remaining())
     override def close(): Unit = { closed = true }
+  }
+
+  private val task = SegmentReadTask(
+    3L,
+    2L,
+    SegmentLayout.Manifest("must-not-open", 1L),
+    Array.emptyByteArray,
+    Map.empty,
+    indexes = SegmentIndexes.Unindexed,
+    snapshotRows = Some(10L)
+  )
+
+  private val available = descriptor.copy(segmentId = 3L, partitionId = 2L)
+
+  test("a segment the snapshot says has no index needs allowUnindexed") {
+    val failure = the[IllegalArgumentException] thrownBy SegmentIndexHandle
+      .select(task, 4L, "COSINE", allowUnindexed = false)
+
+    failure.getMessage should include("No persisted index for segment 3")
+    SegmentIndexHandle.select(
+      task,
+      4L,
+      "COSINE",
+      allowUnindexed = true
+    ) shouldBe None
+  }
+
+  test("a segment whose index the snapshot cannot describe is refused") {
+    the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
+      task.copy(indexes = SegmentIndexes.Unknown),
+      4L,
+      "COSINE",
+      allowUnindexed = true
+    )
+  }
+
+  test("index search needs a pinned manifest version") {
+    the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
+      task.copy(layout = SegmentLayout.Manifest("absent", -1L)),
+      4L,
+      "COSINE",
+      allowUnindexed = true
+    )
+  }
+
+  test("an index that differs from the pinned segment is refused") {
+    Seq(
+      Vector(available, available.copy(buildId = 7L)),
+      Vector(available.copy(rowCount = 9L)),
+      Vector(available.copy(segmentId = 9L)),
+      Vector(available.copy(partitionId = 9L)),
+      Vector(
+        available.copy(parameters =
+          available.parameters.updated("metric_type", "IP")
+        )
+      )
+    ).foreach { indexes =>
+      the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
+        task.copy(indexes = SegmentIndexes.Available(indexes)),
+        4L,
+        "COSINE",
+        allowUnindexed = true
+      )
+    }
+  }
+
+  test("the index of the pinned segment is the one selected") {
+    SegmentIndexHandle.select(
+      task.copy(indexes = SegmentIndexes.Available(Vector(available))),
+      4L,
+      "COSINE",
+      allowUnindexed = false
+    ) shouldBe Some(available)
+  }
+
+  test("planning names every segment that cannot serve the search") {
+    val failure = the[IllegalArgumentException] thrownBy SegmentIndexHandle
+      .check(
+        Seq(
+          task.copy(segmentId = 3L),
+          task.copy(segmentId = 4L),
+          task.copy(
+            segmentId = 5L,
+            indexes =
+              SegmentIndexes.Available(Vector(available.copy(segmentId = 5L)))
+          )
+        ),
+        4L,
+        "COSINE",
+        allowUnindexed = false
+      )
+
+    failure.getMessage should include("2 of 3 segments")
+    failure.getMessage should include("segment 3")
+    failure.getMessage should include("segment 4")
+    SegmentIndexHandle.check(Seq.empty, 4L, "COSINE", allowUnindexed = false)
   }
 
   test(

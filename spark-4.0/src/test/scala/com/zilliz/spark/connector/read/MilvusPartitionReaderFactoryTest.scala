@@ -10,7 +10,7 @@ import com.zilliz.milvus.storage.expr.{FieldRef, IsNotNull, PredicateExpr}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
-import com.zilliz.spark.connector.options.{MilvusOption, VectorSearch}
+import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
@@ -92,17 +92,6 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     milvusOption
   )
 
-  private val bruteForce = options.copy(
-    vectorSearch = Some(
-      VectorSearch(
-        Array(1f, 2f),
-        topK = 10,
-        metricType = "L2",
-        vectorColumn = "vector"
-      )
-    )
-  )
-
   private def factory(
       columnar: Boolean,
       pushedExpression: Option[PredicateExpr] = None
@@ -131,43 +120,25 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
     assert(withPredicate.supportColumnarReads(v2()))
   }
 
-  // The search runs in the row reader whatever the segment's storage line.
-  // Only V3 partitions used to carry it, so a V2 segment of a brute-force read
-  // was scanned whole and every row came back as if it were a hit.
-  test("a brute-force search sends both storage lines to the row reader") {
-    val f = factory(columnar = true)
-    assert(!f.supportColumnarReads(v2(bruteForce)))
-    assert(!f.supportColumnarReads(v3(bruteForce)))
-    assert(f.searchFor(v2(bruteForce)).map(_.topK) == Some(10))
-    assert(f.searchFor(v3(bruteForce)).map(_.topK) == Some(10))
-    assert(f.searchFor(v2()).isEmpty && f.searchFor(v3()).isEmpty)
+  test("a reader that fails to open releases what it already took") {
+    val allocator = ArrowAllocator.forReadTask(7L, 1024L)
+    val failure = new IllegalStateException("open failed")
+
+    MilvusPartitionReaderFactory.closeAfterFailure(allocator, failure)
+
+    assert(allocator.isClosed)
+    assert(failure.getSuppressed.isEmpty)
   }
 
-  test("row-reader construction failure closes its task allocator") {
-    val expression = IsNotNull(FieldRef(100L, DataType.Int64))
-    val searchOptions = options.copy(
-      vectorSearch = Some(
-        VectorSearch(
-          Array(1f),
-          topK = 1,
-          metricType = "L2",
-          vectorColumn = "vector",
-          mode = "index"
-        )
-      )
-    )
-    val partition = MilvusV3InputPartition(
-      task(SegmentLayout.Manifest("files/seg")),
-      "20",
-      searchOptions
-    )
-    val root = ArrowAllocator.get
-    val childrenBefore = root.getChildAllocators.asScala.size
-
-    intercept[IllegalArgumentException] {
-      factory(columnar = false, Some(expression)).createReader(partition)
+  test("a resource that fails to close reports it on the original failure") {
+    val failure = new IllegalStateException("open failed")
+    val stubborn = new AutoCloseable {
+      override def close(): Unit = throw new IllegalStateException("close")
     }
 
-    assert(root.getChildAllocators.asScala.size == childrenBefore)
+    MilvusPartitionReaderFactory.closeAfterFailure(stubborn, failure)
+    MilvusPartitionReaderFactory.closeAfterFailure(null, failure)
+
+    assert(failure.getSuppressed.map(_.getMessage).toSeq == Seq("close"))
   }
 }

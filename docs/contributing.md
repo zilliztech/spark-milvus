@@ -413,8 +413,7 @@ the upstream Knowhere JAR remain unchanged. An unverified pair fails the combine
 build; validate both search/load orders and the full storage suite before
 registering another pair. Without Knowhere, ordinary storage resources are used.
 
-`MilvusSearch.search` takes a query set and returns each query's global TopK,
-running `core.index.SegmentSearch` over the segment sets `SearchPlan` cut. The loader reads
+The loader reads
 Milvus binlog/Parquet payloads and optional `SLICE_META`, or a Cardinal raw
 `_mem.index.bin` stream. Payload markers select the matching Faiss or Cardinal
 engine; a shared HNSW name alone does not establish format compatibility.
@@ -429,19 +428,17 @@ validation record, remaining third-party JNI diagnostics and packaging limitatio
 Local OSS fixtures do not replace real-instance-data validation. Tests live in
 the external `milvus-spark-demo` validation project.
 
-The existing `vector.search.*` reader calls `core.index.BruteForceSearch` and
-`Knowhere.bruteForce`. It scans vectors and merges batch hits into per-segment
-TopK; it does not load persisted index files. Missing native libraries fail the
-query. Request validation and merge tests run in the ordinary suite. Explicit
-real-native checks require the selected platform JAR and the JRE's `libjsig`:
+`MilvusSearch.search` takes a query set and returns each query's global TopK,
+running `core.index.SegmentSearch` over the segment sets `SearchPlan` cut.
+Missing native libraries fail the query. Planning, packing and merge tests run
+in the ordinary suite. The explicit real-native check needs the selected
+platform JAR and the JRE's `libjsig`:
 
 ```bash
 sbt -java-home "$JAVA_HOME" -Dknowhere.native.jar=/absolute/path/to/platform.jar \
   "set core / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
   "set spark40 / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
-  'core/Test/runMain com.zilliz.milvus.storage.index.BruteForceSearchSmoke storage-first' \
-  'core/Test/runMain com.zilliz.milvus.storage.index.BruteForceSearchSmoke knowhere-first' \
-  'spark40/Test/runMain com.zilliz.spark.connector.read.SegmentVectorSearchSmoke'
+  'spark40/Test/runMain com.zilliz.spark.connector.read.SegmentIndexSearchSmoke'
 ```
 
 `NativeVectorLibrary.load()` explicitly initializes the upstream binding and

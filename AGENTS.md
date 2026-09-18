@@ -58,8 +58,9 @@ implemented paths, including Catalog discovery and collection/index DDL.
 Every driver-side read opens storage through that one store, and no source file
 in `core` or `compat` mentions `org.apache.hadoop`.
 
-`core.index` loads persisted index files and executes vector queries through
-Knowhere; `BruteForceSearch` retains the per-segment brute-force path.
+`core.index` executes vector queries through Knowhere: `SearchPlan` cuts a
+search into tasks, `SegmentSearch` runs a query group over a segment set by
+exact scan or index probe, and `TopKMerger` keeps each query's best k.
 `core.expr` holds two explicit scalar contracts: `Expr` / `PlanParser` /
 `Evaluator` for Milvus syntax used by ordinary table and persisted-index
 filters, and the schema-bound `PredicateExpr` / `PredicateEvaluator` / `Bitmap`

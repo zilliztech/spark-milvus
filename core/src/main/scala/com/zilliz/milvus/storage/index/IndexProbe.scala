@@ -3,6 +3,7 @@ package com.zilliz.milvus.storage.index
 import java.lang.{Float => JavaFloat}
 import java.nio.ByteOrder
 import java.util.BitSet
+import scala.util.Try
 
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
@@ -17,6 +18,37 @@ import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 object IndexProbe {
 
   private val MaxAttempts = 8
+
+  /** How wide the HNSW search is: `ef` if the caller named it, otherwise
+    * `max(64, k)`. It is the only search parameter this connector accepts, and
+    * it cannot be smaller than k (docs/design/architecture/vector-search.html
+    * section 2.4).
+    */
+  def searchEf(topK: Int, parameters: Map[String, String]): Int = {
+    require(
+      parameters != null && parameters.keySet.subsetOf(Set("ef")),
+      "HNSW search supports only the ef parameter"
+    )
+    val ef = parameters
+      .get("ef")
+      .map { value =>
+        require(
+          value != null && value.matches("[0-9]+"),
+          "HNSW ef must be a positive integer"
+        )
+        val parsed = Try(value.toInt)
+          .getOrElse(
+            throw new IllegalArgumentException(
+              "HNSW ef exceeds the supported integer range"
+            )
+          )
+        require(parsed > 0, "HNSW ef must be positive")
+        parsed
+      }
+      .getOrElse(math.max(64, topK))
+    require(ef >= topK, "HNSW ef must be at least topK")
+    ef
+  }
 
   /** Adds this segment's candidates to `merger`, counted the way the group
     * counts its queries. `excluded` covers the segment's rows; a set bit is a
@@ -45,7 +77,7 @@ object IndexProbe {
     val visible = rows - excluded.cardinality()
     if (visible <= 0) return
     val count = math.min(k.toLong, visible).toInt
-    val requestedEf = PersistedIndexSearch.searchEf(count, parameters)
+    val requestedEf = searchEf(count, parameters)
     val maskBytes = (rows + 7L) / 8L
     val mask = allocator.buffer(maskBytes)
     val ids = allocator.buffer(queries.queries.toLong * count * 8L)

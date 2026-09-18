@@ -1419,45 +1419,6 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     }
   }
 
-  test("vector search leaves every V2 predicate in Spark") {
-    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
-    import org.apache.spark.sql.connector.expressions.filter.Predicate
-    val schema = StructType(
-      Seq(
-        StructField(
-          "score",
-          LongType,
-          nullable = true,
-          metadata(
-            FieldMetadata.MilvusFieldIdMetadataKey -> 100L,
-            FieldMetadata.MilvusDataTypeMetadataKey ->
-              io.milvus.grpc.schema.DataType.Int64.value.toLong
-          )
-        )
-      )
-    )
-    val options = new ju.HashMap[String, String]()
-    options.put(MilvusOption.VectorSearchQueryVector, "[1.0]")
-    options.put(MilvusOption.VectorSearchTopK, "1")
-    val builder = new MilvusScanBuilder(
-      schema,
-      new CaseInsensitiveStringMap(options),
-      snapshotOf()
-    )
-    val predicate = new Predicate(
-      ">",
-      Array[Expression](
-        Expressions.column("score"),
-        Expressions.literal(5L)
-      )
-    )
-
-    assert(
-      builder.pushPredicates(Array(predicate)).sameElements(Array(predicate))
-    )
-    assert(builder.pushedPredicates().isEmpty)
-  }
-
   test(
     "runtime primary-key filters accumulate by intersection and are idempotent"
   ) {
@@ -1714,46 +1675,6 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
 
     val error = intercept[IllegalStateException](scan.planInputPartitions())
     assert(error.getMessage.contains("delete-file state is unknown"))
-  }
-
-  test("vector TopK scans do not advertise or accept runtime filtering") {
-    import org.apache.spark.sql.connector.expressions.{Expression, Expressions}
-    import org.apache.spark.sql.connector.expressions.filter.Predicate
-
-    val collection = io.milvus.grpc.schema.CollectionSchema(
-      name = "t",
-      fields = Seq(
-        io.milvus.grpc.schema.FieldSchema(
-          fieldID = 100L,
-          name = "id",
-          dataType = io.milvus.grpc.schema.DataType.Int64,
-          isPrimaryKey = true
-        ),
-        io.milvus.grpc.schema.FieldSchema(
-          fieldID = 101L,
-          name = "vector",
-          dataType = io.milvus.grpc.schema.DataType.FloatVector,
-          typeParams = Seq(io.milvus.grpc.common.KeyValuePair("dim", "1"))
-        )
-      )
-    )
-    val snapshot = snapshotOf(schemaBytes = collection.toByteArray)
-    val raw = new ju.HashMap[String, String]()
-    raw.put(MilvusOption.VectorSearchQueryVector, "[1.0]")
-    raw.put(MilvusOption.VectorSearchTopK, "1")
-    val options = new CaseInsensitiveStringMap(raw)
-    val fullSchema = MilvusTable(snapshot, MilvusOption(options), None).schema()
-    val scan = new MilvusScanBuilder(fullSchema, options, snapshot)
-      .build()
-      .asInstanceOf[MilvusScan]
-    val runtime = new Predicate(
-      "=",
-      Array[Expression](Expressions.column("id"), Expressions.literal(1L))
-    )
-
-    assert(scan.filterAttributes().isEmpty)
-    scan.filter(Array(runtime))
-    assert(scan.currentPrimaryKeyFilter.isEmpty)
   }
 
   test("filter-only fields are read for either push and prune callback order") {

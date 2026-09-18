@@ -158,8 +158,7 @@ Spark 出口和向量计算都读它；连接器读出的列、行号与 Milvus 
 
 <p>读取配置在 driver 规划期严格解析：布尔选项只接受 <code>true</code> / <code>false</code>，
 字段、分区与段列表不接受空项、负数或非数值，<code>milvus.snapshot.max.json.bytes</code>
-必须为正整数。<code>vector.search.query</code> 与 <code>vector.search.topK</code> 必须成对给出，
-前者是非空的有限数字数组，后者是正整数；显式提供的空白值同样非法，不能通过默认值关闭功能。</p>
+必须为正整数；显式提供的空白值同样非法，不能通过默认值关闭功能。</p>
 
 <p>动态字段同样遵循真实字段 ID 绑定：<code>enable_dynamic_field=true</code> 时，快照 schema 必须包含唯一的
 <code>$meta</code> JSON 字段、动态标记和非系统字段 ID。缺失或不一致会在规划期失败；连接器不会用
@@ -228,7 +227,7 @@ Manifest <code>stats["bloom_filter.&lt;field id&gt;"]</code> 取路径。路径�
 <p>只有所有相关文件都成功读取、JSON 中每个统计都与主键字段及类型匹配，并且每个候选值在每个统计中都确定不存在时，才移除段。任意路径缺失、空文件、损坏 JSON、不支持的 Bloom 类型、字段或主键类型不匹配、以及跨 bucket 路径都保留该段。Bloom 的假阳性也只会多读一个段，不会丢行。</p>
 <p>R18 在固定 Snapshot 的普通扫描上实现
 <code>SupportsRuntimeV2Filtering</code>，只向 Spark 公布主键属性，且只在主键在读取列里时公布：Spark 按 Scan 的输出列解析这些属性，Spark 4.2 在规划每个 Scan 时都解析（SPARK-56467），主键被列裁剪去掉时公布它会让查询在规划阶段报错；按主键 join 时主键总在输出列里。每次 <code>filter</code> 调用提取一个主键集合，与该 Scan 先前收到的集合继续取交集；相同输入幂等。变化后废弃已生成的 partition 数组，但复用 driver 上按段和路径缓存的统计输入，只在内存中重新判定。剪后 Snapshot 保留每个剩余数据段所在分区的 L0 和 collection 级 L0，不把删除来源当成数据段剪掉。</p>
-<p>带 <code>vector.search.*</code> 的 TopK 读取不公布运行时过滤属性，也不接受该剪枝；Spark 的运行时条件仍在 TopK 之后执行，不改变 TopK 候选集语义。R18 只做段级剪枝，不声称 row group 剪枝；后者仍是 R10 的仓库外依赖。</p>
+<p>R18 只做段级剪枝，不声称 row group 剪枝；后者仍是 R10 的仓库外依赖。</p>
 
 <h3>5.3 core.read.exec</h3>
 <pre><code>trait SegmentReader extends AutoCloseable {
@@ -267,8 +266,8 @@ factory 关闭已打开的 reader 和 child，重复关闭是空操作，任何�
 
 <h2 id="columnar">六、行式与列式出口</h2>
 
-<p><strong>列式出口已有,且是默认</strong>:<code>MilvusColumnarPartitionReader</code>,<code>milvus.read.columnar=false</code> 才走行式;
-带向量检索的读回落行式,因为那一步(<code>SegmentVectorSearch</code>)逐行算距离;这个逐段入口随统一搜索入口的 exact 模式删除(决策 16,见 <a href="vector-search.html#overall">vector-search.html 第一节</a>)。
+<p><strong>列式出口已有,且是默认</strong>:<code>MilvusColumnarPartitionReader</code>,<code>milvus.read.columnar=false</code> 才走行式。
+向量搜索不走扫描出口,它是 <code>MilvusSearch.search</code> 的两阶段作业(见 <a href="vector-search.html#overall">vector-search.html 第一节</a>)。
 普通扫描接受的 DataSource V2 谓词由 <code>core.expr.PredicateEvaluator</code> 对 Arrow 批求值，
 <code>milvus.filter</code> 由 <code>core.expr.Evaluator</code> 对同一批求值；两者各自产生排除位图，
 都不引起行式回落。完整语义见<a href="expressions.html">谓词下推设计</a>。</p>
@@ -344,14 +343,12 @@ id、Milvus 类型、nullable、主键/分区键/聚类键标记和向量维度�
 
 <h2 id="rest">七、不在本链路内的能力</h2>
 <ol>
-<li><strong>向量搜索这条分支怎么放。</strong><code>spark.read.SegmentVectorSearch</code>
-是行式 reader 的可选阶段(#06 从 V3 reader 里拆出),和普通扫描是两条并行路径。它属于 V*,本页不设计,
-但 <code>SegmentReader</code> 接口要留得下它,不能设计成只能顺序扫。</li>
+<li><strong>向量搜索。</strong><code>MilvusSearch.search</code> 是一条独立的两阶段作业,不经扫描出口。它属于 V*,本页不设计,
+但 <code>SegmentReader</code> 接口要留得下它:逐批交出向量列,以及按地址取行。</li>
 <li><strong>两种谓词入口。</strong>R7 的手写 <code>PlanParser</code> 同时服务普通扫描的
-<code>milvus.filter</code> 与向量查询的 <code>MilvusSearch.filter</code> / <code>vector.search.filter</code>；
-前者在普通扫描的 JVM Arrow 批上求值，后者在持久化索引搜索前求值，两种 option 不能混用。
-R6 的 Spark V2 谓词按<a href="expressions.html">独立设计</a>只在普通扫描的 JVM Arrow 批上求值；
-带 <code>vector.search.*</code> 的读取全部作为 residual 留给 Spark，因此 Spark 条件在 TopK 后执行。C 的
+<code>milvus.filter</code> 与向量搜索的 <code>MilvusSearch.filter</code>；
+前者在普通扫描的 JVM Arrow 批上求值，后者在搜索前生成排除位图。
+R6 的 Spark V2 谓词按<a href="expressions.html">独立设计</a>只在普通扫描的 JVM Arrow 批上求值。C 的
 <code>loon_segment_reader_get_filtered_stream</code> 会忽略传入谓词,连接器不调用它,见
 <a href="storage-access.html#bridge-gap">storage-access 4.4</a>。</li>
 <li><strong>回表与 row group 剪枝。</strong><code>take</code>（R14）和统计驱动的 row group 剪枝
@@ -405,7 +402,7 @@ R10 仍列在 capabilities 第 11 节，没有 row-group 实现或代理。</li>
 各写一遍的主循环变成一个 <code>MilvusRowPartitionReader</code>:拉批、逐行交付、跳过已删行、有谓词时逐行求值、读完按
 <code>SegmentReadTask.expectedRows</code> 核对总行数(原来只有 V2 有这道自查,现在 manifest 布局给出行数时同样受益)。
 两条线的列名规则和从 schema 推需要哪些列,原来是两个 reader 的伴生对象,现在归各自的 <code>ColumnBinding</code>;
-向量检索拆成 <code>SegmentVectorSearch</code>;当时拆出的 V1 <code>RowFilters</code> 是过渡实现,
+当时拆出的 V1 <code>RowFilters</code> 是过渡实现,
 R6 由 <code>spark.expr</code> 翻译 V2 Predicate,再由 <code>core.expr</code> 对列批统一求值。
 行为不变:UAT 的 V3 折进清单、V2 加 L0、全类型三个快照读回的行数与列值与合并前一致。</li>
 

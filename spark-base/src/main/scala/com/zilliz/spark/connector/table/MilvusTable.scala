@@ -210,17 +210,6 @@ case class MilvusTable(
       rejectLegacyAliases: Boolean
   ): StructType = {
     var fields = baseSchema.fields.toSeq
-    if (milvusOption.vectorSearch.exists(_.mode == "index")) {
-      require(
-        !fields.exists(_.name == MilvusOption.VectorSearchScore),
-        "Collection field conflicts with vector search _score"
-      )
-      fields = fields :+ StructField(
-        MilvusOption.VectorSearchScore,
-        DoubleType,
-        nullable = false
-      )
-    }
 
     def failIfPresent(alias: String, canonical: String): Unit = {
       if (rejectLegacyAliases && fields.exists(_.name == alias)) {

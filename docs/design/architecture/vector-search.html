@@ -97,14 +97,13 @@
 </tbody></table></div>
 <p>搜索与建索引作业以 <code>spark.task.cpus</code> 等于 executor 核数提交，每个 executor 同时只跑一个这类任务，Knowhere 的线程池用满该 executor 的核。
 Knowhere 的 C/Java 接口开放线程池大小后，连接器增加对应选项（README 第 5 节）。</p>
-<p>统一入口落地的同一变更删除两条旧路径：<code>vector.search.*</code> 读选项连同 <code>SegmentVectorSearch</code>、扫描里的搜索分支和中英文 reference 条目；
-spark-base <code>filter</code> 包的 <code>VectorBruteForceSearch</code> 连同 apps-4.0 的测试。删除前核对云上作业的引用。SQL 距离函数保留（V8）；<code>vector_knn</code> 已删除（决策 24）。</p>
+<p>两条旧路径已随本入口删除：<code>vector.search.*</code> 读选项连同 <code>SegmentVectorSearch</code>、<code>SegmentIndexSearch</code>、扫描里的搜索分支，以及它们在 core 的 <code>SegmentIndexQuery</code>、<code>PersistedIndexSearch</code>、<code>BruteForceSearch</code>；spark-base <code>filter</code> 包的 <code>VectorBruteForceSearch</code> 连同 apps-4.0 的测试。SQL 距离函数保留（V8）；<code>vector_knn</code> 已删除（决策 24）。</p>
 
 <h3 id="layers">1.2 分层</h3>
 <div class="table"><table>
 <thead><tr><th>层</th><th>包</th><th>职责</th></tr></thead><tbody>
 <tr><td>1</td><td><code>native-vector</code></td><td><code>NativeVectorLibrary</code> 加载上游库并报告构建特性；<code>NativeVectorSearch</code> 做暴力搜索，按向量类型和查询条数调用；<code>NativeVectorIndex</code> 做构建、序列化、反序列化与搜索。只接收 ByteBuffer</td></tr>
-<tr><td>2</td><td><code>core.index</code></td><td>计算。<code>SearchPlan</code> 把段任务分成段组、把查询集分成查询组，生成第一阶段任务；<code>SegmentSearch</code>（由 <code>SegmentIndexQuery</code> 的计算一侧演进）对一组段逐个执行一组查询并在任务内合并，策略是 <code>ExactScan</code>（在向量批上暴力搜索）与 <code>IndexProbe</code>（在索引句柄上探查）；<code>TopKMerger</code> 按查询保留 K 条；<code>KnowhereBuffers</code> 把 Arrow 缓冲交给第 1 层；<code>PersistedIndexSearch</code> 在索引句柄上搜索；<code>IndexWriter</code> 构建索引并交出 BinarySet</td></tr>
+<tr><td>2</td><td><code>core.index</code></td><td>计算。<code>SearchPlan</code> 把段任务分成段组、把查询集分成查询组，生成第一阶段任务；<code>SegmentSearch</code> 对一组段逐个执行一组查询并在任务内合并，策略是 <code>ExactScan</code>（在向量批上暴力搜索）与 <code>IndexProbe</code>（在索引句柄上探查）；<code>TopKMerger</code> 按查询保留 K 条；<code>KnowhereBuffers</code> 把 Arrow 缓冲交给第 1 层；<code>IndexWriter</code> 构建索引并交出 BinarySet</td></tr>
 <tr><td>2</td><td><code>core.read.exec</code>、<code>core.delete</code>、<code>core.expr</code>、<code>core.codec</code></td><td>Milvus 的 <code>TableFormat</code> 一侧：打开段，逐批交出向量缓冲、排除位图与段内行号；读取并解码索引文件（<code>IndexFileCodec</code>、<code>MilvusIndexFileDecoder</code> 从 <code>core.index</code> 移出），在描述时声明引擎与索引版本，在任务里交出索引句柄；按地址 <code>take</code>；索引文件的编码与写出</td></tr>
 <tr><td>2</td><td><code>core.schema</code></td><td>向量布局描述：元素类型、维度、数据缓冲位置（<a href="read.html#types">read.html 6.4</a>）</td></tr>
 <tr><td>2</td><td><code>core.read.plan</code></td><td>段任务（<code>UnitReadTask</code> 中属于 Milvus 的一种）</td></tr>
