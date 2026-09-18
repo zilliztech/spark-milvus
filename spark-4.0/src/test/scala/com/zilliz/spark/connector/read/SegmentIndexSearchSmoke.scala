@@ -18,12 +18,19 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
-import com.zilliz.milvus.storage.codec.BinlogFixture
+import com.zilliz.milvus.storage.codec.{
+  BinlogFixture,
+  IndexObjectTarget,
+  SegmentIndexObjects
+}
+import com.zilliz.milvus.storage.index.IndexWriter
+import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.manifest.{
   AvroIndexFileEntry,
   SegmentManifestFixture
 }
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
+import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.{
   DeltaLogFile,
@@ -401,7 +408,7 @@ object SegmentIndexSearchSmoke {
         try if (transaction != null) transaction.destroy()
         finally nativeProperties.free()
       }
-    val index = writeIndex(directory, vectors, segment)
+    val index = writeIndex(directory, vectors, segment, properties)
     val descriptor = SegmentIndex(
       10L,
       20L,
@@ -477,55 +484,56 @@ object SegmentIndexSearchSmoke {
     } finally writer.close()
   }
 
+  /** Builds a segment's index the way `build_index` does, and writes it with
+    * the writer a build uses, so the loader reads back what this connector
+    * produces rather than a fixture (section 2.7).
+    */
   private def writeIndex(
       directory: Path,
       vectors: Seq[Array[Float]],
-      segment: Long
+      segment: Long,
+      properties: Map[String, String]
   ): AvroIndexFileEntry = {
-    val engine =
-      if (NativeVectorLibrary.load().cardinalSupported()) "HNSW_DEPRECATED"
-      else "HNSW"
-    val index = Knowhere.createIndex(engine, DType.FLOAT32, 8)
+    val layout = VectorLayout(VectorElementType.Float32, 2)
     val allocator = new RootAllocator()
     val buffer = allocator.buffer(vectors.size.toLong * 8L)
+    val build = 1000L + segment
     try {
       vectors.indices.foreach(i =>
         vectors(i).indices.foreach(d =>
           buffer.setFloat(i.toLong * 8 + d * 4L, vectors(i)(d))
         )
       )
-      index.build(
+      val built = IndexWriter.build(
         buffer.nioBuffer(0, vectors.size * 8).order(ByteOrder.nativeOrder()),
-        vectors.size,
-        2,
-        """{"metric_type":"L2","dim":2,"M":4,"efConstruction":32} """
+        vectors.size.toLong,
+        layout,
+        "HNSW",
+        "L2",
+        indexVersion = 8,
+        parameters = Map("M" -> "4", "efConstruction" -> "32")
       )
-      val binary = index.serialize()
-      val build = 1000L + segment
       try {
-        val paths = binary.names().toVector.map { name =>
-          val bytes = allocator.buffer(binary.length(name))
-          try {
-            val view = bytes.nioBuffer(0, Math.toIntExact(binary.length(name)))
-            binary.read(name, 0, view)
-            val payload = new Array[Byte](view.capacity())
-            bytes.getBytes(0, payload)
-            val encoded = BinlogFixture.encode(
-              payload,
-              extras = s"""{"indexBuildID":"$build","nullable":false}"""
+        val store = NativeObjectStore.Factory(properties).open()
+        val objects =
+          try
+            SegmentIndexObjects.write(
+              built.names.map(name => name -> built.length(name)),
+              built.read,
+              IndexObjectTarget(
+                collectionId = 10L,
+                partitionId = 20L,
+                segmentId = segment,
+                fieldId = 101L,
+                buildId = build,
+                indexVersion = 1L,
+                storePathVersion = 0,
+                nullable = false,
+                rootPath = "files"
+              ),
+              store
             )
-            val header = ByteBuffer.wrap(encoded).order(ByteOrder.LITTLE_ENDIAN)
-            header
-              .putLong(21, 10L)
-              .putLong(29, 20L)
-              .putLong(37, segment)
-              .putLong(45, 101L)
-            val path = s"files/index_files/$build/1/20/$segment/$name"
-            Files.createDirectories(directory.resolve(path).getParent)
-            Files.write(directory.resolve(path), encoded)
-            path
-          } finally bytes.close()
-        }
+          finally store.close()
         AvroIndexFileEntry(
           segment,
           101L,
@@ -533,17 +541,17 @@ object SegmentIndexSearchSmoke {
           build,
           "vector_hnsw",
           Map("index_type" -> "HNSW", "metric_type" -> "L2", "dim" -> "2"),
-          paths,
+          objects.map(_.key).toVector,
           vectors.size,
-          paths.map(p => Files.size(directory.resolve(p))).sum,
+          objects.map(_.bytes).sum,
           1L,
           Some(8),
           Some(0)
         )
-      } finally binary.close()
+      } finally built.close()
     } finally {
-      try index.close()
-      finally { buffer.close(); allocator.close() }
+      buffer.close()
+      allocator.close()
     }
   }
 
