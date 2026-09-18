@@ -112,6 +112,9 @@ private[storage] object IndexFileCodec extends Logging {
     )
     require(sliceBytes > 0, s"The slice size must be positive: $sliceBytes")
     val prefix = prefixOf(target)
+    // A local filesystem needs the directory before the first object; on object
+    // storage this is a marker and costs nothing.
+    store.createDir(prefix, recursive = true)
     // Milvus writes originSize and indexBuildID as strings and nullable as a
     // boolean (internal/core/src/storage/Event.cpp).
     def extrasOf(originSize: Long) = {
