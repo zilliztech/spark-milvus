@@ -118,6 +118,33 @@ class VectorSearchUatTest
   private def idsOf(rows: Seq[Row], query: Long): Seq[Long] =
     rows.filter(_.getAs[Long]("query_id") == query).map(_.getAs[Long]("id"))
 
+  /** The `milvus.search.*` accumulator values one search produced, as the stage
+    * page shows them.
+    */
+  private def metricsOf(body: => Unit): Map[String, Long] = {
+    val counted = mutable.Map.empty[String, Long]
+    val listener = new SparkListener {
+      override def onTaskEnd(end: SparkListenerTaskEnd): Unit =
+        end.taskInfo.accumulables
+          .filter(_.name.exists(_.startsWith("milvus.search.")))
+          .foreach { value =>
+            val name = value.name.get
+            val update = value.update.map(_.toString.toLong).getOrElse(0L)
+            counted(name) = counted.getOrElse(name, 0L) + update
+          }
+    }
+    spark.sparkContext.addSparkListener(listener)
+    try {
+      body
+      val deadline = System.nanoTime() + 30L * 1000L * 1000L * 1000L
+      while (
+        System.nanoTime() < deadline &&
+        !counted.contains(SearchMetrics.Candidates)
+      ) Thread.sleep(50L)
+    } finally spark.sparkContext.removeSparkListener(listener)
+    counted.toMap
+  }
+
   // -------------------------------------------------------------- prepare
 
   /** Builds the collection the index cases need: rows like `spark_uat_v3`'s, an
@@ -334,20 +361,26 @@ class VectorSearchUatTest
       )
     )
 
-    val broadcast = search()
+    var broadcast: Seq[Row] = Seq.empty
+    val single = metricsOf { broadcast = search() }
     // One query is 16 bytes of vector, so 8 bytes sends the set with the
     // shuffle instead, and a group limit of one query's worth cuts it into
-    // three groups; a small retained limit cuts the segments into more sets.
-    val delivered = search(MilvusOption.SearchQueriesMaxBytes -> "8")
-    val grouped = search(
-      MilvusOption.SearchGroupMaxBytes -> "72",
-      MilvusOption.SearchVectorsMaxBytes -> "16384"
-    )
-    val both = search(
-      MilvusOption.SearchQueriesMaxBytes -> "8",
-      MilvusOption.SearchGroupMaxBytes -> "72",
-      MilvusOption.SearchVectorsMaxBytes -> "16384"
-    )
+    // three groups.
+    var delivered: Seq[Row] = Seq.empty
+    metricsOf {
+      delivered = search(MilvusOption.SearchQueriesMaxBytes -> "8")
+    }
+    var grouped: Seq[Row] = Seq.empty
+    val many = metricsOf {
+      grouped = search(MilvusOption.SearchGroupMaxBytes -> "72")
+    }
+    var both: Seq[Row] = Seq.empty
+    metricsOf {
+      both = search(
+        MilvusOption.SearchQueriesMaxBytes -> "8",
+        MilvusOption.SearchGroupMaxBytes -> "72"
+      )
+    }
 
     broadcast.map(_.getAs[Long]("id")) should have size 6
     delivered.map(_.getAs[Long]("id")) shouldBe broadcast.map(
@@ -355,6 +388,13 @@ class VectorSearchUatTest
     )
     grouped.map(_.getAs[Long]("id")) shouldBe broadcast.map(_.getAs[Long]("id"))
     both.map(_.getAs[Long]("id")) shouldBe broadcast.map(_.getAs[Long]("id"))
+
+    // Three query groups run on the segments a task already read, so the
+    // segments are opened as many times as with one group, and Knowhere is
+    // called once per group instead.
+    many(SearchMetrics.Segments) shouldBe single(SearchMetrics.Segments)
+    many(SearchMetrics.KnowhereCalls) should be >
+      single(SearchMetrics.KnowhereCalls)
   }
 
   test("deleted rows and filtered rows never come back") {
