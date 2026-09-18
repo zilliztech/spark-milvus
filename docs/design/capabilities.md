@@ -127,6 +127,6 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 | R10 | milvus-storage 尚未写可用的 row-group min/max 统计，FFI 也没有传入 row group 选择的 reader 入口；现有 Parquet predicate 实现为空，见 storage-access 4.5 |
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
 | R20 | 读 external collection 的设计已写（snapshot.html 3.1、read.html 1.1 与 6.4、storage-auth.html 3.4），代码未开始；打开外表段依赖 milvus-storage 的 `loon_reader_new` 接受空 schema |
-| W6 | 建索引的设计已写（architecture/vector-search.html 第 2.7 节），代码未开始；`build_index` 过程、IndexWriter 与索引文件编码都还没有 |
+| W6 | `CALL milvus.system.build_index(...)` 已实现：按快照规划、每段一个任务构建、按 Milvus 的命名与信封写出索引对象、记录进作业清单。交付仍待 W8（快照恢复）或 Milvus 按段 Manifest 的 indexes 加载 |
 | W8 | 写快照的设计已写（同上），代码未开始；还依赖决策 22 与 Milvus 外部快照恢复在目标版本上可用 |
 | O3 | 基准与召回评测作业等 V5 的查询集入口落地后再写 |

@@ -7,8 +7,9 @@ package com.zilliz.milvus.storage
   * task per segment set and TopKMerger keeps each query's best k, in a task and
   * again in the Spark aggregation. KnowhereBuffers hands one Arrow batch of a
   * dense vector column to Knowhere, as it lies when the layout allows and
-  * copied once otherwise. IndexWriter remains planned. A task loads its
-  * segment's index once and closes it; there is no cross-task index cache.
+  * copied once otherwise. IndexWriter gathers a segment's vectors into one
+  * buffer, builds over it and hands over what Knowhere serialized. A task loads
+  * its segment's index once and closes it; there is no cross-task index cache.
   *
   * This package keeps the computation only (docs/design/architecture/
   * vector-search.html sections 1-2). SearchPlan splits the segment tasks into

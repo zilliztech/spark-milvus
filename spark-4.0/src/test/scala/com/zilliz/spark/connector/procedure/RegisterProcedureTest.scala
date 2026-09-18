@@ -33,6 +33,7 @@ class RegisterProcedureTest extends AnyFunSuite {
   test("the registry contains every public procedure exactly once") {
     assert(
       Procedures.all.map(_.name) == Seq(
+        "build_index",
         "register",
         "cleanup_staging",
         "create_snapshot",

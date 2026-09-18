@@ -95,7 +95,7 @@ object MilvusSearch {
     val limits = SearchLimits.from(options)
     val outputSchema = outputSchemaOf(table.schema(), outputColumns)
 
-    val partitions = plannedPartitions(table, caseInsensitive)
+    val partitions = SnapshotPartitions.of(table, caseInsensitive)
     val tasks = partitions.map(_.task)
     if (searchMode == "index") {
       SegmentIndexHandle.check(
@@ -359,18 +359,6 @@ object MilvusSearch {
     import spark.implicits._
     spark.emptyDataset[SearchResult].toDF()
   }
-
-  private def plannedPartitions(
-      table: com.zilliz.spark.connector.table.MilvusTable,
-      options: CaseInsensitiveStringMap
-  ): Seq[MilvusInputPartition] =
-    table
-      .newScanBuilder(options)
-      .build()
-      .toBatch
-      .planInputPartitions()
-      .toSeq
-      .map(_.asInstanceOf[MilvusInputPartition])
 
   private def dimensionOf(field: FieldSchema): Int = field.typeParams
     .find(_.key == "dim")
