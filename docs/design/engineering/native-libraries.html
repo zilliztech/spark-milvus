@@ -5,6 +5,7 @@
   :root { color-scheme: light dark; }
   body { max-width: 960px; margin: 40px auto; padding: 0 24px 48px; font: 16px/1.8 system-ui, sans-serif; }
   h1, h2 { line-height: 1.4; } h2 { margin-top: 36px; }
+  h3 { font-size: 1rem; margin-top: 1.6rem; }
   table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #888; padding: 10px; text-align: left; }
   code { overflow-wrap: anywhere; } a { color: #25876c; }
   nav { display: flex; flex-wrap: wrap; gap: 10px 20px; }
@@ -41,9 +42,25 @@
 
 <h2 id="build">3 构建范围由我们自己的 CMake 决定</h2>
 <p><code>native-build/CMakeLists.txt</code> 是唯一原生工程入口。它用 <code>add_library</code>、<code>target_link_libraries</code> 和 <code>install</code> 定义目标；不通过 <code>add_subdirectory</code> 或另一次 <code>cmake -S</code> 执行 storage、Knowhere、Cardinal 及其内嵌算法工程的 CMake。第三方依赖包由 Conan 构建，Rust crate 由 Cargo 构建，它们继续使用各自的构建系统。</p>
-<p>范围是现有 R4、V1、V5 的原生运行时。复用上游 C/C++、C API、JNI 和 Java/Scala API，保持现有方法签名与库文件名；不另写 JNI，不改变查询、过滤、回表或读写语义。源码构建目标为 Linux x86_64，与当前真实实例测试环境一致。</p>
+<p>范围是现有 R4、V1、V5 的原生运行时。复用上游 C/C++、C API、JNI 和 Java/Scala API，保持现有方法签名与库文件名；不另写 JNI，不改变查询、过滤、回表或读写语义。源码构建覆盖 <code>linux-x86_64</code>、<code>darwin-aarch64</code> 和 <code>linux-aarch64</code>；<code>windows-x86_64</code> 只保证加载器不拒绝，不承诺构建。</p>
 <p>构建每次在新的候选目录收集和验证动态库。原生 C API 测试与两种顺序的实际 JVM 加载通过后，才把候选目录移为 <code>bundle/</code>；逐库 ELF、重定位和 ctypes 检查保留原始诊断结果，不阻断。旧成功目录移入历史目录，失败候选保留诊断信息。相同输入可以重试，失败不能覆盖上次可用的包。输入变化继续要求新工作目录。</p>
-<p>Linux x86_64 默认使用统一构建。其他平台在没有显式指定统一包时保留已有 storage 构建入口，不声明向量库共同加载已经验收；Linux aarch64 可以显式提供匹配平台的统一包。Make 与 Docker 按同一规则选择，源码构建的平台限制不废弃其他平台已有的 storage 使用方式。</p>
+<p>每个覆盖平台都用统一构建，选择规则只看主机平台是否有适配实现和 Conan profile。Make 与 Docker 按同一规则选择。没有适配实现的平台仍可显式指定匹配平台的统一包，或保留已有 storage 构建入口。</p>
+
+<h3 id="adapter">3.1 平台无关的内核，加一层窄的适配</h3>
+<p><strong>加一个平台等于加一个 Conan profile、一份适配实现和一份验收记录，内核不动。</strong>内核是源码选取与固定、Conan 依赖锁定、provenance 记录、资源布局 <code>native/&lt;引擎&gt;/1/&lt;平台&gt;/</code>、解压与摘要校验，以及结构性校验（条目唯一、路径不越界、清单与 provenance 交叉核对）。这些只处理文件与文本，不解释可执行格式，本来就与平台无关：<code>NativeLibraries.platform()</code> 已经返回 <code>darwin-aarch64</code> 与 <code>windows-x86_64</code>，<code>extract()</code> 全程按清单和摘要工作，上游 <code>io.milvus.storage.NativeLibraryLoader</code> 三个操作系统族都解析。</p>
+<p>适配层只有六项职责，每个平台一份实现：</p>
+<div class="table-scroll"><table>
+<tr><th>职责</th><th>Linux（ELF）</th><th>macOS（Mach-O）</th></tr>
+<tr><td>二进制格式检视：依赖列表与自身名字</td><td><code>readelf --wide --file-header --dynamic</code>，读 NEEDED 与 SONAME</td><td><code>otool -l</code> 读 LC_LOAD_DYLIB 与 LC_RPATH，<code>otool -D</code> 读 install name</td></tr>
+<tr><td>运行时查找路径改写</td><td><code>patchelf --set-rpath $ORIGIN</code></td><td><code>install_name_tool -add_rpath @loader_path</code> 与 <code>-change</code>，改写后重新签名</td></tr>
+<tr><td>库文件名与版本位置</td><td><code>libfoo.so.1</code>，版本在后缀之后</td><td><code>libfoo.1.dylib</code>，版本在后缀之前</td></tr>
+<tr><td>系统库集合，不进包</td><td>glibc 一组：libc、libm、libpthread、ld-linux-*、linux-vdso</td><td>libSystem 一组</td></tr>
+<tr><td>JVM 信号链接管</td><td><code>LD_PRELOAD=$JAVA_HOME/lib/libjsig.so</code></td><td><code>DYLD_INSERT_LIBRARIES=$JAVA_HOME/lib/libjsig.dylib</code></td></tr>
+<tr><td>工具链</td><td>GCC/G++/gfortran 12</td><td>Apple Clang 与单独的 OpenMP 运行时、gfortran</td></tr>
+</table></div>
+<p>库文件名是适配层的职责而不是常量：JVM 侧不写 <code>.so</code> 字面量，入口库名由清单声明，其余由 <code>System.mapLibraryName</code> 推出。版本位置的差异使这里换的是匹配规则的形状，不是多一个分支。</p>
+<p><strong>三条规则是格式专属的，声明为平台专属而不翻译。</strong>排除系统 zlib 的前提是 glibc 的 <code>libz.so.1</code> 带 <code>ZLIB_*</code> 版本化符号、捆一份进包会遮蔽实际提供者；Mach-O 没有符号版本化，这条规则在那里没有前提。GNU_STACK 与 IFUNC 重定位检查同样只在 ELF 上有定义。<code>ldd -r</code> 报告未解析符号，macOS 没有等价物：<code>otool -L</code> 与 <code>dyld_info</code> 只给依赖图。这三条留在 Linux 适配实现里，不进跨平台标准。</p>
+<p>平台之间的功能差异写在 <code>manifest.properties</code> 的功能开关里。<code>capabilities.md</code> 保持单一表述，差异由本文的平台矩阵承载。DiskANN 是现成的例子：它唯一的对齐读实现基于 libaio 与 io_uring，macOS 构建只能关掉它；当前声明的 R4、V1、V5 都不依赖它，V5 精确搜索走 <code>Knowhere.bruteForce</code>，所以今天没有缺口。</p>
 <div class="diagram">
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 930 206" role="img" aria-labelledby="build-title build-description">
 <title id="build-title">独立原生构建和 JAR 交付流程</title>
@@ -95,7 +112,7 @@
 <p>打包前必须逐项核对实际库文件、别名、摘要与 <code>provenance.json</code>，并确认原生 C API 测试和两种 JVM 加载顺序通过；Cardinal 特性必须与实际插件一致。provenance 显式记录 <code>auditPolicy=jvm-load</code> 和两次 <code>jvmLoadTests</code>，不能把历史逐库审计当作 JVM 测试。混用另一次构建的库或来源记录时拒绝生成 JAR。打包与 sbt 解压后的验证都重新调用同一个 JVM 检查实现；sbt 缓存绑定 JAR、检查实现和 JRE 身份，运行时仍独立校验资源摘要。</p>
 <p>assembly 合并原生资源时使用固定大小的缓冲区。单一来源直接交付原始输入流；同路径的多个来源逐个计算 SHA-256 和字节数，一致才保留一份，否则报错并列明来源。sbt-assembly 2.1.1 的通用 <code>deduplicate</code> 即使只有一个来源也会把整个文件装入内存；本地 storage 库约 478 MB，已实测在 4 GB 堆内触发内存耗尽。原生资源改用流式比较，保留冲突检查，最终打包已在相同堆上通过。受限堆回归用 64 MB 堆比较两份超过 512 MB 的输入，也验证内容冲突与异常关闭输入流。</p>
 <p>这个插件版本遇到 <code>CustomMergeStrategy</code> 会关闭 assembly 产物缓存，因此重复执行 assembly 会重新合并打包。Scala/Java 增量编译、原生包验证缓存以及 Conan、ccache、Cargo 缓存不受影响；不绕过插件的缓存规则。</p>
-<p>Make 与 Docker 共用 <code>native-resources</code>。Linux x86_64 默认构建统一包；其他平台没有显式统一包时保留 storage 构建。旧入口始终先运行增量构建再复制，即使库文件已经存在；Make 并行执行也遵守这个依赖顺序，避免修改源码后仍打包旧库。ARM 与 macOS 只验证了入口选择，没有执行统一原生构建或运行验收。</p>
+<p>Make 与 Docker 共用 <code>native-resources</code>。主机平台有适配实现时构建统一包，否则保留 storage 构建。旧入口始终先运行增量构建再复制，即使库文件已经存在；Make 并行执行也遵守这个依赖顺序，避免修改源码后仍打包旧库。</p>
 
 <h2 id="load">7 保留一个解压器，加载仍由上游 JNI 绑定发起</h2>
 <p>复用现有 <code>native-runtime</code> 模块中的 <code>NativeLibraries</code>，不新增模块。它是第 1 层的纯 Java 11 代码，不依赖 Spark、Arrow 或 JNI API；两个原生模块都依赖它，彼此不依赖。每个 driver 或 executor JVM 在首次使用时按平台解压一次。</p>
@@ -158,11 +175,11 @@ cmake --install target/native-build/cmake</code></pre>
 <ul>
 <li><strong>依赖选择：</strong>逐项列出上游要求、最终版本、recipe revision 和配置；确认版本冲突采用较新者、公共依赖只选一份，新增适配通过两个引擎的编译与测试。</li>
 <li><strong>构建独立性：</strong>源码目录构建前后无写入；CMake trace 确认未执行 storage、Knowhere、Cardinal 及其内嵌算法工程的构建文件；干净输出目录构建、缓存重建及总并发限制均核验。</li>
-<li><strong>链接与 JVM 加载：</strong>ELF、逐库 <code>ldd -r</code>、ctypes 和 Cardinal 父引擎上下文结果留作诊断。构建是否通过由两个全新 JVM 的双向 <code>System.load</code> 结果决定；实际 JNI 功能和 Spark 查询仍须分别测试。</li>
+<li><strong>链接与 JVM 加载：</strong>构建是否通过由两个全新 JVM 的双向 <code>System.load</code> 结果决定，这是所有平台共同的判据。逐库的格式检查结果留作诊断：Linux 上是 ELF 检视、<code>ldd -r</code>、GNU_STACK 与 IFUNC，macOS 上是 <code>otool</code> 与签名核对；两者都不阻断，也都不是跨平台标准的一部分。实际 JNI 功能和 Spark 查询仍须分别测试。</li>
 <li><strong>JAR：</strong>两套 JNI 与公共依赖各只有一份，来源和摘要匹配，没有旧资源混入。重复 SONAME、缺库、损坏、错误平台、路径越界及显式路径冲突都必须报错。</li>
 <li><strong>实际 JVM：</strong>在最终 assembly 上分别执行 storage-first、Knowhere-first、并发初始化及直接 storage API 首次使用，完成文件读写和索引构建、序列化、恢复、搜索。清空额外依赖搜索路径，检查实际映射库都来自同一解压目录，系统 zlib 只有一个提供者。</li>
 <li><strong>Connector：</strong>Java 21 下运行格式检查和完整根单测，报告成功、失败和取消数量；Scala 2.12/2.13 与受影响的 Spark 线按现有构建约定编译核验。</li>
 <li><strong>真实数据：</strong>在既有 UAT Global 实例 <code>in01-5589f90cf7ca72c</code> 上只读复测真实十万行数据及持久化 Cardinal 索引。对照原始 JNI 的行号与分数，日志必须包含索引文件读取、反序列化、搜索和无暴力回退的证据；合成索引测试不能替代此项。</li>
 </ul>
-<p>通过条件限于实际测试的平台、CPU 与功能；不能由 Linux x86_64 的结果推断 ARM、macOS 或 GPU 已兼容。提交前命令仍以<a href="../../contributing.md#formatting">格式化</a>和<a href="../../contributing.md#unit-tests">完整单测规范</a>为准。</p>
+<p>每个平台各自记录验收结论，一个平台的结果不能推断另一个平台，也不能推断未测试的 CPU 与功能。跨平台共同的判据是上面那条「两个全新 JVM 双向加载，再在真实数据上读写与搜索」；各平台附加的格式检查写在自己的验收记录里。提交前命令仍以<a href="../../contributing.md#formatting">格式化</a>和<a href="../../contributing.md#unit-tests">完整单测规范</a>为准。</p>
 </main>
