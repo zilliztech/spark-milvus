@@ -111,10 +111,7 @@ object SegmentIndexSearchSmoke {
       spark.sparkContext.setLogLevel("WARN")
       val options = properties ++ Map(
         MilvusOption.SnapshotPath -> "snapshot.json",
-        MilvusOption.ReadColumnar -> "true",
-        "VECTOR.SEARCH.MODE" -> "brute_force",
-        "VECTOR.SEARCH.QUERY" -> "[100,100]",
-        "MILVUS.EXTRA.COLUMNS" -> "partition"
+        MilvusOption.ReadColumnar -> "true"
       )
       val frame = MilvusSearch.search(
         spark,
