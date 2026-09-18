@@ -26,21 +26,37 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     sets.map(_.map(_.segmentId))
 
   test("a group holds as many queries as the byte limit allows") {
-    SearchPlan.queriesPerGroup(k = 10, groupMaxBytes = 2800L) shouldBe 10
-    SearchPlan.queriesPerGroup(k = 100, groupMaxBytes = 2800L) shouldBe 1
-    SearchPlan.queriesPerGroup(k = 3, groupMaxBytes = 536870912L) shouldBe
-      536870912L / (3 * SearchPlan.CandidateBytes)
+    // 16 bytes of vector and 280 of candidates make 296 bytes a query.
+    SearchPlan.bytesPerQuery(layout, k = 10) shouldBe 296L
+    SearchPlan.queriesPerGroup(
+      layout,
+      k = 10,
+      groupMaxBytes = 2960L
+    ) shouldBe 10
+    SearchPlan.queriesPerGroup(layout, k = 10, groupMaxBytes = 296L) shouldBe 1
   }
 
-  test("a query whose own candidates exceed the limit is refused") {
+  test("the query matrix counts, not only the candidates") {
+    val wide = VectorLayout(VectorElementType.Float32, 768)
+
+    SearchPlan.bytesPerQuery(wide, k = 10) shouldBe 3072L + 280L
+    SearchPlan.queriesPerGroup(
+      wide,
+      k = 10,
+      groupMaxBytes = 536870912L
+    ) shouldBe 536870912L / 3352L
+  }
+
+  test("a query that does not fit a group on its own is refused") {
     val failure = the[IllegalArgumentException] thrownBy SearchPlan
-      .queriesPerGroup(k = 101, groupMaxBytes = 2800L)
+      .queriesPerGroup(layout, k = 101, groupMaxBytes = 2800L)
 
     failure.getMessage should include("over the group limit")
   }
 
   test("queries are cut into groups in query order, the last one shorter") {
-    val groups = SearchPlan.groups(queries = 25, k = 10, groupMaxBytes = 2800L)
+    val groups =
+      SearchPlan.groups(queries = 25, layout, k = 10, groupMaxBytes = 2960L)
 
     groups.map(group => (group.firstQuery, group.queries)) shouldBe Seq(
       (0, 10),
@@ -51,9 +67,22 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
   }
 
   test("one group covers a query set that fits") {
-    SearchPlan.groups(queries = 4, k = 10, groupMaxBytes = 2800L) shouldBe Seq(
-      SearchPlan.QueryGroup(0, 4)
-    )
+    SearchPlan.groups(
+      queries = 4,
+      layout,
+      k = 10,
+      groupMaxBytes = 2960L
+    ) shouldBe Seq(SearchPlan.QueryGroup(0, 4))
+  }
+
+  test(
+    "a task keeps a whole segment when it fits, and a part when it does not"
+  ) {
+    val tasks = Seq(task(1L, 100L), task(2L, 250L))
+
+    SearchPlan.retainedBytes(tasks, layout, 1L << 31) shouldBe 250L * 16L
+    SearchPlan.retainedBytes(tasks, layout, 1000L) shouldBe 1000L
+    SearchPlan.retainedBytes(Seq.empty, layout, 1000L) shouldBe 16L
   }
 
   test("segments are balanced over the sets by the bytes they hold") {
@@ -125,7 +154,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       executors = 2,
       queries = 3,
       k = 10,
-      groupMaxBytes = 560L
+      groupMaxBytes = 592L
     )
 
     plan should have size 4

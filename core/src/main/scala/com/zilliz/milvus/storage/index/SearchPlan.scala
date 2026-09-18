@@ -7,9 +7,9 @@ import com.zilliz.milvus.storage.schema.VectorLayout
 
 /** Splits one search into the tasks of its first stage.
   *
-  * A task takes one segment set and one query group, so its memory is one batch
-  * or one segment's index plus that group's top-k, and what it sends on is
-  * bounded by "segment sets × queries × k" candidates
+  * A task takes one segment set and one query group, so its memory is the
+  * vectors it keeps, that group's query matrix and that group's top-k, and what
+  * it sends on is bounded by "segment sets × queries × k" candidates
   * (docs/design/architecture/vector-search.html sections 1.1 and 2.1).
   */
 object SearchPlan {
@@ -29,26 +29,42 @@ object SearchPlan {
   /** One first-stage task: the segments it reads and the queries it answers. */
   final case class Task(segments: Seq[SegmentReadTask], group: QueryGroup)
 
-  /** How many queries fit one group: enough for their bounded top-k to stay
-    * inside `groupMaxBytes`.
+  /** What one query costs a task: its row in the query matrix and its bounded
+    * top-k.
     */
-  def queriesPerGroup(k: Int, groupMaxBytes: Long): Int = {
+  def bytesPerQuery(layout: VectorLayout, k: Int): Long = {
     require(k > 0, s"topK must be positive: $k")
+    layout.rowBytes.toLong + k.toLong * CandidateBytes
+  }
+
+  /** How many queries fit one group: enough for their query matrix and their
+    * bounded top-k to stay inside `groupMaxBytes`.
+    */
+  def queriesPerGroup(
+      layout: VectorLayout,
+      k: Int,
+      groupMaxBytes: Long
+  ): Int = {
     require(
       groupMaxBytes > 0,
       s"The group limit must be positive: $groupMaxBytes"
     )
-    val perQuery = k.toLong * CandidateBytes
+    val perQuery = bytesPerQuery(layout, k)
     require(
       perQuery <= groupMaxBytes,
-      s"A single query's $k candidates need $perQuery bytes, over the group limit of $groupMaxBytes"
+      s"One query needs $perQuery bytes for its ${layout.dimension} dimensions and $k candidates, over the group limit of $groupMaxBytes"
     )
     math.min(groupMaxBytes / perQuery, Int.MaxValue.toLong).toInt
   }
 
-  def groups(queries: Int, k: Int, groupMaxBytes: Long): Seq[QueryGroup] = {
+  def groups(
+      queries: Int,
+      layout: VectorLayout,
+      k: Int,
+      groupMaxBytes: Long
+  ): Seq[QueryGroup] = {
     require(queries > 0, s"A search needs at least one query: $queries")
-    val size = queriesPerGroup(k, groupMaxBytes)
+    val size = queriesPerGroup(layout, k, groupMaxBytes)
     (0 until queries by size).map(first =>
       QueryGroup(first, math.min(size, queries - first))
     )
@@ -108,10 +124,31 @@ object SearchPlan {
       groupMaxBytes: Long
   ): Seq[Task] = {
     val sets = segmentSets(tasks, layout, executors)
-    val slices = groups(queries, k, groupMaxBytes)
+    val slices = groups(queries, layout, k, groupMaxBytes)
     for {
       set <- sets
       group <- slices
     } yield Task(set, group)
+  }
+
+  /** How many bytes of vectors a task keeps at once: a whole segment when it
+    * fits `vectorsMaxBytes`, and as much of one as fits when it does not. A
+    * segment is read once either way; what a task keeps is what the query
+    * groups after the first one run on
+    * (docs/design/architecture/vector-search.html section 2.3).
+    */
+  def retainedBytes(
+      tasks: Seq[SegmentReadTask],
+      layout: VectorLayout,
+      vectorsMaxBytes: Long
+  ): Long = {
+    require(
+      vectorsMaxBytes > 0,
+      s"The retained vector limit must be positive: $vectorsMaxBytes"
+    )
+    val largest = tasks
+      .map(_.snapshotRows.getOrElse(0L) * layout.rowBytes.toLong)
+      .foldLeft(0L)(math.max)
+    math.min(math.max(largest, layout.rowBytes.toLong), vectorsMaxBytes)
   }
 }

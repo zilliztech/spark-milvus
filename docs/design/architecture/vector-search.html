@@ -44,7 +44,7 @@
 <ol>
 <li><code>spark.read.MilvusSearch.search</code> 是唯一的向量搜索入口，输入查询集，输出每条查询的全局 TopK（决策 16）。</li>
 <li><code>mode = exact</code> 对每个段做精确扫描；<code>mode = index</code> 用快照钉住的持久化索引，快照确认未建索引的段在 <code>allowUnindexed</code> 打开时改用精确扫描。</li>
-<li>执行分两个 Spark 阶段：第一阶段每个任务处理一个段组和一个查询组，任务内先合并，再按查询合并出全局 TopK；第二阶段只为最终命中的行回表取输出列。段组是按向量列字节均衡划分的一组段，组数等于 executor 数；查询组是查询集按 <code>milvus.search.group.max.bytes</code> 切出的一部分。</li>
+<li>执行分两个 Spark 阶段：第一阶段每个任务处理一个段组，按查询组算候选，任务内先合并，再按查询合并出全局 TopK；第二阶段只为最终命中的行回表取输出列。段组是按向量列字节均衡划分的一组段，组数等于 executor 数；查询组是查询集按 <code>milvus.search.group.max.bytes</code> 切出的一部分，通常只有一组。段里的数据无论几组查询都只读一遍。</li>
 <li>计算与格式分开：Milvus 的 <code>TableFormat</code> 打开段、生成排除位图、读出索引并按地址取行；计算只在它交出的向量缓冲或索引句柄上求 TopK，不打开存储、不执行删除规则（<a href="table-version.html">table-version.html</a> 第三节）。能力在 driver 规划时核对。</li>
 <li>Knowhere 只在 <code>native-vector</code> 与 <code>core.index</code> 里调用；每批向量或每个索引，一次调用算完一组查询。</li>
 <li>建索引由 <code>CALL milvus.system.build_index(...)</code> 另起作业完成，结果经 Milvus 的外部快照恢复交付（W6、W8）。</li>
@@ -77,7 +77,7 @@
 <thead><tr><th>对象</th><th>约定</th></tr></thead><tbody>
 <tr><td>查询集</td><td><code>query_id</code> 为非空且唯一的 BIGINT。<code>vector</code> 的类型随字段：FloatVector、Float16Vector、BFloat16Vector 用 <code>ARRAY&lt;FLOAT&gt;</code>，Int8Vector 用取值在 −128 到 127 的 <code>ARRAY&lt;SMALLINT&gt;</code>，BinaryVector 用 <code>BINARY</code>；长度等于字段维度，元素为有限值；COSINE 的查询向量范数大于零</td></tr>
 <tr><td>结果</td><td>列依次是 <code>query_id</code> BIGINT、<code>rank</code> INT（从 1 开始）、<code>_score</code> DOUBLE、<code>_segment_id</code> BIGINT、<code>_row_offset</code> BIGINT，后接 <code>outputColumns</code>；每条查询最多 K 行，行之间的先后以 <code>rank</code> 为准</td></tr>
-<tr><td>K</td><td>正整数。单条查询的候选要放得进一组，即 K × 28 字节不超过 <code>milvus.search.group.max.bytes</code>，默认值下 K 不超过 19,173,961；不受 Milvus 在线服务 topK 上限 16384 的约束</td></tr>
+<tr><td>K</td><td>正整数。单条查询要放得进一组，即「维度 × 元素宽度 + K × 28 字节」不超过 <code>milvus.search.group.max.bytes</code>；不受 Milvus 在线服务 topK 上限 16384 的约束</td></tr>
 <tr><td>过滤</td><td><code>filter</code> 按 R7 的 Milvus 表达式在搜索前排除行；对结果 DataFrame 再调用 <code>filter</code> 只作用于已选出的行</td></tr>
 <tr><td>外表</td><td><code>__virtual_pk__</code> 作为普通输出列，按 <a href="read.html#rules">read.html 1.1</a> 的系统字段规则读时合成</td></tr>
 </tbody></table></div>
@@ -91,8 +91,9 @@
 </tbody></table></div>
 <div class="table"><table>
 <thead><tr><th>选项</th><th>默认值</th><th>作用</th></tr></thead><tbody>
-<tr><td><code>milvus.search.queries.max.bytes</code></td><td>1073741824</td><td>driver 收集的查询矩阵的字节上限，超过即报错</td></tr>
-<tr><td><code>milvus.search.group.max.bytes</code></td><td>536870912</td><td>一组查询在一个任务里的内存上限，按「组内查询数 × K × 28 字节」计；查询集按它分组，每组各成一批任务</td></tr>
+<tr><td><code>milvus.search.queries.max.bytes</code></td><td>1073741824</td><td>查询集走广播的字节上限：不超过就在 driver 上收集并广播，超过就按查询组打包成数据下发，不经 driver（2.1）</td></tr>
+<tr><td><code>milvus.search.group.max.bytes</code></td><td>536870912</td><td>一组查询在一个任务里的内存上限，按「组内查询数 ×（维度 × 元素宽度 + K × 28 字节）」计，前一项是查询矩阵，后一项是这组的 TopK；查询集按它分组</td></tr>
+<tr><td><code>milvus.search.vectors.max.bytes</code></td><td>2147483648</td><td>一个任务同时留在内存里的向量字节上限。Milvus 的段默认不超过 1 GB，用 DiskANN 的 collection 不超过 2 GB，所以通常一个段就是一次保留的量；任务的 Arrow 分配仍受 <code>milvus.read.arrow.max.bytes</code> 约束</td></tr>
 </tbody></table></div>
 <p>搜索与建索引作业以 <code>spark.task.cpus</code> 等于 executor 核数提交，每个 executor 同时只跑一个这类任务，Knowhere 的线程池用满该 executor 的核。
 Knowhere 的 C/Java 接口开放线程池大小后，连接器增加对应选项（README 第 5 节）。</p>
@@ -122,7 +123,8 @@ spark-base <code>filter</code> 包的 <code>VectorBruteForceSearch</code> 连同
 <tr><td>索引覆盖、文件格式、引擎不受支持</td><td>规划时在 driver 上报错，写明段、字段和所缺内容；引擎与索引版本在描述快照时声明，见 2.5</td></tr>
 <tr><td>executor 解码出的引擎或版本与声明不一致</td><td>报错，写明段与两边的值</td></tr>
 <tr><td>文件丢失或损坏、鉴权失败、版本不符、内存不足</td><td>原样传播；对象存储的瞬时错误按标准重试</td></tr>
-<tr><td>查询集超过上限、<code>query_id</code> 重复、向量非法</td><td>在 driver 上报错</td></tr>
+<tr><td><code>query_id</code> 重复、向量非法、维度不符</td><td>规划时报错：走广播时在 driver 上查，按数据下发时在打包作业里按 <code>query_id</code> 聚合后查</td></tr>
+<tr><td>单条查询放不进一组，或一批向量放不进 <code>milvus.search.vectors.max.bytes</code></td><td>规划时报错，写明是哪一项超了多少</td></tr>
 <tr><td>过滤后有效行少于 K</td><td>该查询返回全部有效行</td></tr>
 <tr><td>有效行足够，<code>ef</code> 翻倍 8 次后候选仍不足</td><td>报错</td></tr>
 </tbody></table></div>
@@ -144,9 +146,9 @@ spark-base <code>filter</code> 包的 <code>VectorBruteForceSearch</code> 连同
 <p><strong>查询少时，两种模式的主要成本都是读对象存储；查询多时，exact 的计算随查询数线性增长，index 每条查询只计算搜索路径上节点的距离。</strong></p>
 <div class="table"><table>
 <thead><tr><th>成本</th><th>exact</th><th>index</th></tr></thead><tbody>
-<tr><td>每段读取</td><td>向量列 N × d × 4 字节（float32），加删除与过滤列</td><td>索引文件，与向量列同一量级：Cardinal 的量化索引更小，Faiss HNSW Flat 含原始向量和图；有删除或过滤时加这些列</td></tr>
+<tr><td>每段读取</td><td>向量列 N × d × 4 字节（float32），加删除与过滤列；查询分几组都只读一遍</td><td>索引文件，与向量列同一量级：Cardinal 的量化索引更小，Faiss HNSW Flat 含原始向量和图；有删除或过滤时加这些列</td></tr>
 <tr><td>每段计算</td><td>Q × N × d 次乘加</td><td>每条查询的距离计算次数与 <code>ef</code> 和图的出度同量级</td></tr>
-<tr><td>合并</td><td colspan="2">段组数 × Q × K × 24 字节的 shuffle</td></tr>
+<tr><td>合并</td><td colspan="2">一组查询时，段组数 × Q × K × 24 字节的 shuffle；多组时按保留窗口发候选，窗口数 × Q × K × 24 字节</td></tr>
 <tr><td>回表</td><td colspan="2">命中行所在的行组；每个输出列组的行组约 1 MB</td></tr>
 </tbody></table></div>
 <p>N 是段行数，d 是维度，Q 是查询数。召回基准与少量查询用 exact；查询集大且接受近似结果时用 index，它读取的字节与 exact 相当，省掉的是 Q × N × d 的计算。</p>
@@ -194,12 +196,76 @@ spark-base <code>filter</code> 包的 <code>VectorBruteForceSearch</code> 连同
 <figcaption>实线是任务内的数据流，虚线是跨任务的 shuffle。蓝框是 Knowhere 调用，橙框是 Spark 的合并与回表。</figcaption>
 </figure>
 <ol>
-<li><strong>driver。</strong><code>SnapshotSources</code> 解析快照并应用分区与段选择，<code>ReadPlan.of</code> 生成段任务；查询集收集成一个查询矩阵（查询 id 数组，加一块按行连续、类型与字段一致的数值），以广播变量下发；段任务表同样广播给第二阶段。<code>core.index.SearchPlan</code> 按 Spark 层传入的 executor 数把段分成段组、把查询集分成查询组；每个（段组，查询组）是一个第一阶段任务。能力在这一步核对（1.1）。</li>
-<li><strong>第一阶段。</strong><code>parallelize</code> 这些任务，一个任务一个分区。任务调用 <code>SegmentSearch.run</code>，逐段执行本组查询，候选在任务内合并，每条查询最多交出 K 条；每条候选是查询序号、段 id、行号和分数，共 24 字节。shuffle 量是「段组数 × 查询数 × K × 24 字节」。</li>
+<li><strong>driver。</strong><code>SnapshotSources</code> 解析快照并应用分区与段选择，<code>ReadPlan.of</code> 生成段任务；<code>core.index.SearchPlan</code> 按 Spark 层传入的 executor 数把段分成段组，按 <code>milvus.search.group.max.bytes</code> 把查询集分成查询组。能力在这一步核对（1.1），段任务表广播给第二阶段。</li>
+<li><strong>查询集下发，两条路，结果相同。</strong>查询集的字节数不超过 <code>milvus.search.queries.max.bytes</code> 时，driver 收集它、查 <code>query_id</code> 唯一、拼成查询矩阵（查询 id 数组，加一块按行连续、类型与字段一致的数值），用广播变量下发，每个 executor 收一份。
+超过时不经 driver：查询集按查询组重分区，每组在 executor 上聚合成一行（组号、查询 id 数组、打包好的向量），<code>query_id</code> 的唯一性在这次聚合里查；这一行再与段组做交叉连接，Spark 把它随 shuffle 送到用得着它的任务。选哪条路只影响传输方式，不影响任务形态和结果。</li>
+<li><strong>第一阶段。</strong>一个任务一个分区，任务调用 <code>SegmentSearch.run</code>，逐段处理自己的段组。每个段只读一遍：读出的向量批留在内存里，直到留够 <code>milvus.search.vectors.max.bytes</code> 或这个段读完，本任务的每个查询组依次在这批数据上算，算完释放，再读下一批。
+只有一个查询组时，候选在任务内跨批跨段合并，每条查询最多交出 K 条，shuffle 量是「段组数 × 查询数 × K × 24 字节」；有多个查询组时，候选按「保留窗口 × 查询组」发出，shuffle 量是「窗口数 × 查询数 × K × 24 字节」，底库仍然只读一遍。每条候选是查询序号、段 id、行号和分数，共 24 字节。</li>
 <li><strong>合并。</strong>候选按查询序号 <code>groupBy</code>，用 <code>functions.udaf</code> 包装的 <code>TopKAggregator</code> 聚合；聚合缓冲是有界堆，每步只留 K 条，排序规则见 2.6。聚合结果展开成带 <code>rank</code> 的命中行。</li>
 <li><strong>第二阶段。</strong><code>outputColumns</code> 非空时，命中行按段 id 重新分区，分区内按段 id 与行号排序；每段经 Milvus 的 <code>TableFormat</code> 对去重后的行号调用 <code>SegmentReader.take</code>，Arrow 行经 <code>ArrowConverter</code> 和 <code>CatalystTypeConverters</code> 转成 <code>Row</code>，由 <code>createDataFrame</code> 组成结果。<code>outputColumns</code> 为空时，命中行就是结果。</li>
 <li><strong>指标。</strong>两个阶段的计数与耗时累加到 1.3 列出的 <code>milvus.search.*</code> 累加器。</li>
 </ol>
+
+<figure>
+<svg viewBox="0 0 950 330" role="img" aria-label="上半是查询集下发的两条路：不超过上限时 driver 收集、查重并广播；超过时按查询组重分区打包，与段组交叉连接随 shuffle 下发。下半是任务里的顺序：一个段逐批读一遍，读到的批留在保留窗口里，每个查询组依次在窗口上调用 Knowhere，窗口算完交出候选并释放，再读下一批">
+<defs><marker id="arrow-deliver" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<g fill="currentColor" font-size="12">
+<text x="16" y="20">查询集怎么到任务：两条路，任务形态与结果相同</text>
+<text x="16" y="176">任务里怎么算：每批只读一遍，各查询组轮流在保留的批上算</text>
+</g>
+<g fill="none" stroke="currentColor" stroke-width="1.2">
+<rect x="16" y="32" width="300" height="46" rx="5"/>
+<rect x="16" y="90" width="300" height="58" rx="5"/>
+<rect x="392" y="52" width="170" height="74" rx="5"/>
+<rect x="16" y="196" width="170" height="64" rx="5"/>
+<rect x="232" y="188" width="180" height="86" rx="5"/>
+<rect x="770" y="196" width="170" height="64" rx="5"/>
+</g>
+<g fill="none" stroke="#237c83" stroke-width="1.8">
+<rect x="458" y="186" width="150" height="44" rx="5"/>
+<rect x="458" y="238" width="150" height="44" rx="5"/>
+</g>
+<g fill="none" stroke="#b0661f" stroke-width="1.8"><rect x="646" y="196" width="96" height="64" rx="5"/></g>
+<g fill="currentColor" font-size="12">
+<text x="28" y="52">查询集 ≤ queries.max.bytes</text>
+<text x="28" y="70" font-size="10.5">driver 收集、查 query_id 唯一、广播；每个 executor 一份</text>
+<text x="28" y="110">查询集超过上限</text>
+<text x="28" y="128" font-size="11">按查询组重分区，每组聚成一行并在聚合里查唯一；</text>
+<text x="28" y="143" font-size="11">与段组交叉连接，随 shuffle 送到任务，不经 driver</text>
+<text x="404" y="76">第一阶段任务</text>
+<text x="404" y="96" font-size="11">一个段组</text>
+<text x="404" y="113" font-size="11">本作业的各查询组</text>
+<text x="28" y="220">段 A：逐批读</text>
+<text x="28" y="238" font-size="11">向量列加删除与</text>
+<text x="28" y="253" font-size="11">过滤所需列，只读一遍</text>
+<text x="244" y="210">保留窗口</text>
+<text x="244" y="228" font-size="11">≤ vectors.max.bytes</text>
+<text x="244" y="248" font-size="11">批 1　批 2　批 3</text>
+<text x="244" y="266" font-size="11">每批带段内起始行号</text>
+<text x="470" y="204" fill="#237c83">查询组 1</text>
+<text x="470" y="222" font-size="11" fill="#237c83">Knowhere 每批一次</text>
+<text x="470" y="256" fill="#237c83">查询组 2</text>
+<text x="470" y="274" font-size="11" fill="#237c83">Knowhere 每批一次</text>
+<text x="658" y="220" fill="#b0661f">候选</text>
+<text x="658" y="238" font-size="11" fill="#b0661f">段 id + 段内行号</text>
+<text x="658" y="253" font-size="11" fill="#b0661f">24 字节一条</text>
+<text x="782" y="220">窗口算完即释放</text>
+<text x="782" y="240" font-size="11">继续读下一批；</text>
+<text x="782" y="255" font-size="11">段读完换下一个段</text>
+</g>
+<g fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow-deliver)">
+<path d="M316,55 L390,78"/>
+<path d="M316,119 L390,104" stroke-dasharray="5 4"/>
+<path d="M186,228 H230"/>
+<path d="M412,206 H456"/>
+<path d="M412,258 H456"/>
+<path d="M608,206 L644,218"/>
+<path d="M608,258 L644,242"/>
+<path d="M742,228 H768"/>
+</g>
+</svg>
+<figcaption>虚线是随 shuffle 下发，实线是任务内的数据流；蓝框是 Knowhere 调用，橙框是交给合并阶段的候选。只有一个查询组时，候选跨批跨段在任务内合并后再交出；有多个组时按窗口交出。</figcaption>
+</figure>
 
 <figure>
 <svg viewBox="0 0 950 250" role="img" aria-label="两个段、两条查询、K 为 2 的例子：段 101 与段 102 各给出每条查询的两条候选；合并后查询 0 的两条同为 0.10，段 101 排前；段 101 的行 5 同时命中两条查询，回表时只取一次；结果是四行">
@@ -387,9 +453,9 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 </figure>
 <ol>
 <li>任务逐段处理。Milvus 的 <code>TableFormat</code> 为每个段打开一个 <code>SegmentReader</code>，逐批读向量列，以及删除与过滤要用的主键、时间戳和标量列，段只读一遍；每批交出向量缓冲、由 <code>core.delete</code> 与 <code>core.expr</code> 生成的排除位图和这一批的起始行号。</li>
-<li><code>ExactScan</code> 把向量缓冲、本组查询和位图交给 Knowhere 暴力搜索，一批一次调用，算完即释放。</li>
-<li>Knowhere 返回的行号从这一批第 0 行算起，加上这一批的起始行号就是段内行号；结果并入本组的 <code>TopKMerger</code>。</li>
-<li>段组里的段都算完，每条查询的有界堆就是这个任务的候选。任务内存是一批向量加本组的 TopK，与段组大小无关。</li>
+<li><code>ExactScan</code> 把向量缓冲、一组查询和位图交给 Knowhere 暴力搜索，一批一次调用。只有一个查询组时算完即释放；有多个查询组时，批留在内存里，等每个组都在它上面算过再释放，保留的字节不超过 <code>milvus.search.vectors.max.bytes</code>。</li>
+<li>Knowhere 返回的行号从这一批第 0 行算起，加上这一批的起始行号就是段内行号；结果并入该组的 <code>TopKMerger</code>。段内行号不受保留策略影响，候选不需要再拼回段上。</li>
+<li>一个查询组算完它能看到的全部数据后，这组每条查询的有界堆就是要交出的候选：一组时是整个任务的候选，多组时是这个保留窗口的候选。任务内存是保留的向量、一组查询的矩阵和这组的 TopK。</li>
 </ol>
 
 <h3 id="metadata">2.4 索引探查</h3>
