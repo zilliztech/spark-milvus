@@ -135,7 +135,17 @@ private[storage] object IndexFileCodec extends Logging {
           s"Index object $objectName of $size bytes exceeds the supported size"
         )
         val bytes = new Array[Byte](size.toInt)
-        read(name, offset, ByteBuffer.wrap(bytes))
+        // The upstream payloads copy into direct memory only, so the bytes come
+        // back one chunk at a time.
+        var copied = 0
+        while (copied < bytes.length) {
+          val count = math.min(ChunkBytes, bytes.length - copied)
+          val chunk = ByteBuffer.allocateDirect(count)
+          read(name, offset + copied, chunk)
+          chunk.flip()
+          chunk.get(bytes, copied, count)
+          copied += count
+        }
         val envelope = BinlogCodec.envelope(
           7,
           target.collectionId,
