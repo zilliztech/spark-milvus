@@ -19,6 +19,7 @@ def module(name):
 
 
 build = module("build")
+platforms = module("platforms")
 stage = module("stage")
 
 
@@ -63,66 +64,75 @@ class SourceIdentityTest(unittest.TestCase):
                 build.check_cmake_trace(trace, [])
 
 
-@unittest.skipUnless(shutil.which("gcc") and shutil.which("patchelf"), "native compiler and patchelf required")
+FORMAT = platforms.host()
+COMPILER = "gcc" if isinstance(FORMAT, platforms.Elf) else "clang"
+
+
+@unittest.skipUnless(FORMAT.available() and shutil.which(COMPILER),
+                     "a native compiler and this platform's binary tools are required")
 class NativeStageTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
-    def library(self, directory, filename, soname, body, dependencies=()):
+    def library(self, directory, base, install_base, body, dependencies=(), version=None,
+                install_version=None):
+        """One shared library, named the way this platform names it."""
         directory.mkdir(parents=True, exist_ok=True)
+        filename = FORMAT.library_name(base, version)
         source = directory / (filename + ".c")
         source.write_text(body)
-        path = directory / filename
-        subprocess.run(["gcc", "-shared", "-fPIC", str(source), "-o", str(path),
-                        "-Wl,-soname," + soname, "-Wl,-rpath,/unusable/conan/cache", *dependencies], check=True)
-        return path
+        return FORMAT.compile_library(
+            source, directory / filename,
+            FORMAT.library_name(install_base, install_version), dependencies)
 
     def test_aliases_preserved_and_only_staged_rpath_changed(self):
-        library = self.library(self.root / "source", "libfixture.so.1.2", "libfixture.so.1",
-                               "int fixture(void) { return 7; }")
-        alias = library.parent / "libfixture.so"
+        versioned = FORMAT.library_name("fixture", "1")
+        library = self.library(self.root / "source", "fixture", "fixture",
+                               "int fixture(void) { return 7; }",
+                               version="1.2", install_version="1")
+        alias = library.parent / FORMAT.library_name("fixture")
         alias.symlink_to(library.name)
         original = stage.digest(library)
         providers, _ = stage.inventory({"graph": {"nodes": {}}}, [library, alias])
-        selected, aliases = stage.stage(providers, ["libfixture.so.1"], self.root / "lib")
+        selected, aliases = stage.stage(providers, [versioned], self.root / "lib")
         self.assertEqual(original, stage.digest(library))
-        self.assertEqual("libfixture.so.1", aliases["libfixture.so"])
-        self.assertEqual("$ORIGIN", subprocess.check_output(
-            ["patchelf", "--print-rpath", str(self.root / "lib/libfixture.so.1")], text=True).strip())
-        self.assertEqual({"libfixture.so.1"}, set(selected))
+        self.assertEqual(versioned, aliases[FORMAT.library_name("fixture")])
+        self.assertIn(FORMAT.read_runtime_path(self.root / "lib" / versioned),
+                      ("$ORIGIN", "@loader_path"))
+        self.assertEqual({versioned}, set(selected))
 
     def test_same_soname_with_different_binaries_rejected(self):
-        first = self.library(self.root / "first", "libfixture.so", "libfixture.so.1",
-                             "int fixture(void) { return 1; }")
-        second = self.library(self.root / "second", "libfixture.so", "libfixture.so.1",
-                              "int fixture(void) { return 2; }")
+        first = self.library(self.root / "first", "fixture", "fixture",
+                             "int fixture(void) { return 1; }", install_version="1")
+        second = self.library(self.root / "second", "fixture", "fixture",
+                              "int fixture(void) { return 2; }", install_version="1")
         with self.assertRaisesRegex(ValueError, "Conflicting implementations"):
             stage.inventory({"graph": {"nodes": {}}}, [first, second])
 
     def test_entry_filename_alias_to_versioned_soname_is_preserved(self):
-        entry = self.library(
-            self.root / "source", "libentry.so", "libentry.so.1",
-            "int entry(void) { return 7; }",
-        )
+        plain = FORMAT.library_name("entry")
+        versioned = FORMAT.library_name("entry", "1")
+        entry = self.library(self.root / "source", "entry", "entry",
+                             "int entry(void) { return 7; }", install_version="1")
         providers, _ = stage.inventory({"graph": {"nodes": {}}}, [entry])
 
-        selected, aliases = stage.stage(providers, ["libentry.so"], self.root / "lib")
+        selected, aliases = stage.stage(providers, [plain], self.root / "lib")
 
-        self.assertEqual({"libentry.so"}, set(selected))
-        self.assertEqual("libentry.so", aliases["libentry.so.1"])
-        self.assertEqual("libentry.so", (self.root / "lib/libentry.so.1").readlink().as_posix())
+        self.assertEqual({plain}, set(selected))
+        self.assertEqual(plain, aliases[versioned])
+        self.assertEqual(plain, (self.root / "lib" / versioned).readlink().as_posix())
 
     def test_unselected_dependency_rejected(self):
-        dependency = self.library(self.root / "source", "libdependency.so", "libdependency.so.1",
-                                  "int dependency(void) { return 7; }")
-        entry = self.library(self.root / "source", "libentry.so", "libentry.so",
+        dependency = self.library(self.root / "source", "dependency", "dependency",
+                                  "int dependency(void) { return 7; }", install_version="1")
+        entry = self.library(self.root / "source", "entry", "entry",
                              "extern int dependency(void); int entry(void) { return dependency(); }",
                              [str(dependency)])
         providers, _ = stage.inventory({"graph": {"nodes": {}}}, [entry])
         with self.assertRaisesRegex(ValueError, "outside the unified Conan graph"):
-            stage.stage(providers, ["libentry.so"], self.root / "lib")
+            stage.stage(providers, [FORMAT.library_name("entry")], self.root / "lib")
 
 
 @unittest.skipUnless(
