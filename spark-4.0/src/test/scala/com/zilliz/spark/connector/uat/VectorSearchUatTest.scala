@@ -289,6 +289,15 @@ class VectorSearchUatTest
 
   // ---------------------------------------------------------------- exact
 
+  /** The squared L2 between two rows of the collection, which is what an exact
+    * L2 search returns.
+    */
+  private def distance(left: Long, right: Long): Double =
+    (0 until dim)
+      .map(d => (left * 10 + d).toDouble - (right * 10 + d).toDouble)
+      .map(value => value * value)
+      .sum
+
   test("exact search answers every query with its own nearest rows") {
     val targets = Seq(11L, 100L, 2999L)
     val found = hits(
@@ -306,20 +315,22 @@ class VectorSearchUatTest
 
     found.map(_.getAs[Long]("query_id")).distinct shouldBe targets
     targets.foreach { target =>
-      val rows = found.filter(_.getAs[Long]("query_id") == target)
-      rows.map(_.getAs[Int]("rank")) shouldBe Seq(1, 2, 3)
-      rows.head.getAs[Long]("id") shouldBe target
-      rows.head.getAs[Double]("_score") shouldBe 0.0
-      rows.head.getAs[String]("name") shouldBe s"row-$target"
-      // The second and third are target ± 1, both at squared L2 400; which of
-      // them ranks second is decided by segment id and row offset.
-      rows.tail
-        .map(_.getAs[Long]("id"))
-        .toSet
-        .subsetOf(
-          Set(target - 1, target + 1)
-        ) shouldBe true
-      rows.tail.foreach(_.getAs[Double]("_score") shouldBe 400.0)
+      val answer = found.filter(_.getAs[Long]("query_id") == target)
+      answer.map(_.getAs[Int]("rank")) shouldBe Seq(1, 2, 3)
+      answer.head.getAs[Long]("id") shouldBe target
+      answer.head.getAs[String]("name") shouldBe s"row-$target"
+
+      // The three smallest distances in the collection, and each hit's score
+      // is the distance of the row it names.
+      val nearest =
+        (0L until rows).map(distance(target, _)).sorted.take(3)
+      answer.map(_.getAs[Double]("_score")) shouldBe nearest
+      answer.foreach { hit =>
+        hit.getAs[Double]("_score") shouldBe distance(
+          target,
+          hit.getAs[Long]("id")
+        )
+      }
     }
   }
 
