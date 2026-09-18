@@ -139,7 +139,7 @@ CALL 走语法扩展，不走 `ProcedureCatalog`：后者是 Spark 4.0 才有的
 | 包 | 内容 |
 |---|---|
 | `backfill` | BackfillApp、配置、join 键、列映射、merge 模式、结果 JSON |
-| `search` | SQL 向量函数及其 SessionExtensions（V8）；精确 KNN 基准与召回评测作业（O3，待实现） |
+| `search` | SQL 向量函数及其 SessionExtensions（V8） |
 
 两个包互不依赖，各自是独立入口。`format("milvus")` 的短名归 apps 之后，只有加载 apps jar 才能用旧写法；三段名 `milvus.db.coll` 不需要 apps。
 

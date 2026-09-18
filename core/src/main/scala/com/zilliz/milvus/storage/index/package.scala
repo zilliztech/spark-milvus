@@ -27,6 +27,6 @@ package com.zilliz.milvus.storage
   * its BinarySet to the Milvus TableFormat side, which encodes and writes the
   * files (W6).
   *
-  * Capabilities: V2, V5, V7 (see docs/design/capabilities.md).
+  * Capabilities: V2, V5, V7, W6 (see docs/design/capabilities.md).
   */
 package object index

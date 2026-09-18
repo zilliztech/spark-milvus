@@ -110,7 +110,7 @@ Knowhere 的 C/Java 接口开放线程池大小后，连接器增加对应选项
 <tr><td>2</td><td><code>core.write.commit</code>、<code>client.api</code></td><td>索引记录与快照写出；外部快照恢复</td></tr>
 <tr><td>3</td><td><code>spark.read</code></td><td><code>MilvusSearch</code>：解析快照与查询集、把并行度交给 <code>SearchPlan</code>、广播、把任务包成分区、两个 Spark 阶段；<code>TopKAggregator</code> 包装 <code>TopKMerger</code>；<code>spark.metrics</code> 的 <code>SearchMetrics</code> 注册本次搜索的累加器</td></tr>
 <tr><td>3</td><td><code>spark.options</code>、<code>spark.procedure</code></td><td>搜索选项；<code>build_index</code> 与 <code>restore_snapshot</code> 过程</td></tr>
-<tr><td>4</td><td><code>apps.search</code></td><td>SQL 向量函数；精确 KNN 基准与召回评测作业</td></tr>
+<tr><td>4</td><td><code>apps.search</code></td><td>SQL 向量函数</td></tr>
 </tbody></table></div>
 
 <h3 id="failures">1.3 失败与资源</h3>
@@ -593,7 +593,7 @@ Knowhere 在部分 K 与过滤比例下会在索引内部改用暴力搜索（<a
 <li><strong>一次扫描服务整组查询。</strong>每批向量一次调用算完整组查询，读取和解码的成本与查询条数无关。</li>
 <li><strong>跨任务只传最小候选。</strong>第一阶段每条候选 24 字节，任务内先合并，shuffle 量随段组数增长，与段数无关；输出列只为最终每条查询的 K 行回表，回表量是「查询数 × K」行。</li>
 <li><strong>结果与 Milvus 口径一致。</strong>距离计算与索引搜索都由 Knowhere 完成，分数与 Milvus 相同；行号与索引 label 相同，外表的虚拟主键可以直接对账。</li>
-<li><strong>精确结果直接做基准。</strong>同一查询集分别跑 exact 与 index，按段 id 与行号比较，得到召回率。</li>
+<li><strong>精确结果直接做基准。</strong>同一查询集分别跑 exact 与 index，结果里的 <code>_segment_id</code> 与 <code>_row_offset</code> 就是行身份，调用方 join 一次得到召回率，连接器不为此另出作业。</li>
 <li><strong>向量不逐行拷贝。</strong>满足布局条件的批，数据缓冲原样交给 Knowhere，JVM 不物化向量。</li>
 <li><strong>失败直接可见。</strong>缺索引、格式不受支持、文件出错都报错，结果行数只在有效行不足时少于 K。</li>
 <li><strong>建索引、索引搜索、精确扫描互相验证。</strong>建好的索引由同一个加载器读回，再与精确扫描比较。</li>
