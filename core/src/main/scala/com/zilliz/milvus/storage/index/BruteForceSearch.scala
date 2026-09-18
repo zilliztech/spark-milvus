@@ -8,6 +8,8 @@ import org.apache.arrow.memory.{ArrowBuf, RootAllocator}
 
 import com.zilliz.milvus.jni.vector.NativeVectorSearch
 
+import io.knowhere.DType
+
 /** A single-query segment search. The caller supplies vectors and copies only
   * retained row values; no caller-specific row type enters the computation.
   * Results preserve native metric scores, including squared distances for L2.
@@ -94,9 +96,11 @@ final class BruteForceSearch[A](
         def bytes(value: ArrowBuf, length: Long) =
           value.nioBuffer(0, length.toInt).order(ByteOrder.nativeOrder())
         NativeVectorSearch.bruteForce(
+          DType.FLOAT32,
           bytes(base, baseBytes),
           rows,
           bytes(queryBuffer, dimension.toLong * 4L),
+          1,
           dimension,
           count,
           bytes(mask, (rows.toLong + 7L) / 8L),

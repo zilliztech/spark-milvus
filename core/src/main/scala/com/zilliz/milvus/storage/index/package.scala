@@ -2,9 +2,11 @@ package com.zilliz.milvus.storage
 
 /** Vector execution and its buffers, exclusions and per-segment top-k.
   *
-  * Main types: BruteForceSearch, PersistedIndexSearch, MilvusIndexFileDecoder,
-  * SegmentIndexQuery. IndexWriter remains planned. A task loads its segment's
-  * index once and closes it; there is no cross-task index cache.
+  * Main types: BruteForceSearch, KnowhereBuffers, PersistedIndexSearch,
+  * MilvusIndexFileDecoder, SegmentIndexQuery. KnowhereBuffers hands one Arrow
+  * batch of a dense vector column to Knowhere, as it lies when the layout
+  * allows and copied once otherwise. IndexWriter remains planned. A task loads
+  * its segment's index once and closes it; there is no cross-task index cache.
   *
   * The planned shape (docs/design/architecture/vector-search.html sections
   * 1-2): this package keeps the computation only. SearchPlan splits the segment

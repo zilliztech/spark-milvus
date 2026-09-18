@@ -43,7 +43,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；native-storage、core、
 | `snapshot` | 列快照目录，选快照，把 JSON 和 Avro 变成实体；SnapshotSource 接口；`Snapshot` 是 Milvus 快照，将演进为所有输入共用的 `TableVersion`，Milvus 字段成为它的 Milvus 私有部分（决策 25，见 [table-version.html](table-version.html)） | SnapshotCatalog、Snapshot、Segment、CollectionIndex、SegmentIndex、SegmentIndexes、V2ColumnGroup、DeltaLogFile、SnapshotSource |
 | `snapshot.json` | 快照 JSON 文件的形状，一个 JSON 对象一个类型，名字带 `Json` 后缀；只描述不计算 | SnapshotJson、CollectionSchemaJson、FieldJson、SegmentJson、ManifestItemJson、SegmentListJson（option 串里的段列表，随 1.x option 读法一起删） |
 | `manifest` | 一个段的 Manifest：列组、删除文件、统计、索引登记 | Manifest、ColumnGroup、ManifestReader |
-| `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型；外表源类型的合法性规则与向量布局描述（R20 待实现，spark.types 与 index 共用） | SchemaMapper、MilvusTypes、ArrowTypes、FieldMetadata |
+| `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型；向量布局（元素类型与维度）由 spark.types 与 index 共用；外表源类型的合法性规则待 R20 | SchemaMapper、MilvusTypes、ArrowTypes、FieldMetadata、VectorLayout |
 | `path` | 三种路径形态到 (bucket, key) | StoragePath、Located |
 | `io` | 对象存储读写的最小接口和它唯一的实现（走 C 的 `loon_filesystem_*`） | ObjectStore、ObjectStoreFactory、NativeObjectStore、FileInfo |
 | `codec` | 列值与 Milvus binlog 共同封装的字节编解码，文件访问归 io；索引文件的编码与解码共用一份格式定义（IndexFileCodec、MilvusIndexFileDecoder 从 index 移入；编码随 W6 待实现） | FloatConverter、SparseFloatVectorConverter、BinlogCodec（从 DeltaLogReader 提取，删除及索引复用） |
@@ -55,7 +55,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；native-storage、core、
 | `read.exec` | 批读取、行号取列、出口；碰 native。向量搜索里是 Milvus TableFormat 的执行一侧：逐批交出向量缓冲、排除位图与起始行号，交出段的索引句柄 | SegmentReader、SegmentReaderRegistry、TakeResult；take 包装 loon_take，接收有序唯一行号。列式出口的 Spark 类型归第 3 层，进 core 的仍是 VectorSchemaRoot |
 | `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter（V3SegmentWriter、V2SegmentWriter）、WrittenColumnGroups、ManifestTransaction、StagingLayout |
 | `write.commit` | 作业清单、所有权、心跳、提交、幂等，以及 A7 的 fail-closed 候选审计与文件删除；完整目录删除等待原生 API；写快照 JSON 与段 Avro 清单供 Milvus 外部恢复（W8 待实现），索引记录随清单（W6） | JobManifest、Committer、StagingCleaner |
-| `index` | 持久化索引选择、加载、排除位图、向量执行与段内 TopK；目标形态只含计算：搜索规划（段组与查询组）、一个段内执行器接口（精确扫描在向量批上、索引探查在索引句柄上，输入一组查询，按查询有界 TopK）、Arrow 数据缓冲到 Knowhere 缓冲的适配、段索引构建 | SegmentIndexQuery、IndexFileCodec、MilvusIndexFileDecoder、PersistedIndexSearch、BruteForceSearch；索引来源随 Snapshot 固定，任务独占并关闭。SearchPlan、多查询执行器、IndexWriter 待实现；打开段、排除位图和索引文件的读取与解码归 Milvus 的 TableFormat 一侧（read.exec、delete、expr、codec），计算不打开存储，见 [vector-search.html 第一、二节](vector-search.html#overall) |
+| `index` | 持久化索引选择、加载、排除位图、向量执行与段内 TopK；目标形态只含计算：搜索规划（段组与查询组）、一个段内执行器接口（精确扫描在向量批上、索引探查在索引句柄上，输入一组查询，按查询有界 TopK）、Arrow 数据缓冲到 Knowhere 缓冲的适配、段索引构建 | SegmentIndexQuery、KnowhereBuffers、IndexFileCodec、MilvusIndexFileDecoder、PersistedIndexSearch、BruteForceSearch；索引来源随 Snapshot 固定，任务独占并关闭。SearchPlan、多查询执行器、IndexWriter 待实现；打开段、排除位图和索引文件的读取与解码归 Milvus 的 TableFormat 一侧（read.exec、delete、expr、codec），计算不打开存储，见 [vector-search.html 第一、二节](vector-search.html#overall) |
 
 ### 2.2 compat `com.zilliz.milvus.storage.compat`
 
