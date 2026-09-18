@@ -76,7 +76,7 @@ issue #125 的[索引查询设计](architecture/vector-search.html)已经落地�
 | V2 | 加载 Milvus 建的索引 | 自动；按快照或 Manifest 里的索引文件 | core.index | 保留快照段记录的 index_files；使用 Manifest 索引登记时须核验目标版本（README 第 5 节）。加载契约见[方案](architecture/vector-search.html#metadata) | P2 |
 | V5 | 精确搜索 | `MilvusSearch.search(..., mode = exact)`，输入查询集，每条查询返回全局 TopK | spark.read、core.index、native-vector | 上游 Knowhere.bruteForce，一次调用算一批向量对整组查询；按查询有界合并，合并后再回表；外表依赖 R20。现有 `vector.search.*` 逐段入口和 spark-base `filter` 包的 JVM 暴力搜索在本行落地的同一变更里删除（决策日志 2026-09-17）。设计见 [vector-search.html 第一、二节](architecture/vector-search.html#overall) | P2 |
 | V7 | 持久化索引向量查询 | `MilvusSearch.search(..., mode = index)`；已实现单查询，查询集输入待扩展 | spark.read、core.index | V2、R7、SegmentReader.take；与 V5 共用段内执行器接口、合并与回表；[查询契约](architecture/vector-search.html#api) | P2 |
-| V8 | SQL 向量函数 | `cosine_similarity`、`l2_distance`、`inner_product`、`hamming_distance`、`jaccard_distance`、`vector_knn`，经 apps 的 SessionExtensions 注册 | apps.search | 已实现；JVM 逐行计算 DataFrame 里已有的值，不读 collection；`vector_knn` 在 JVM 里对数组排 TopK，去留见决策 24 | P2 |
+| V8 | SQL 向量函数 | `cosine_similarity`、`l2_distance`、`inner_product`、`hamming_distance`、`jaccard_distance`，经 apps 的 SessionExtensions 注册 | apps.search | 已实现；JVM 逐行计算 DataFrame 里已有的值，不读 collection；`vector_knn` 已删除（决策 24，2026-09-18） | P2 |
 
 ## 6 兼容入口
 

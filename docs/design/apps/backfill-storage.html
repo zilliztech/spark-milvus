@@ -90,8 +90,14 @@ backfill 目前是单线程驱动这些操作，所以没有暴露，但这个�
 细节见 <a href="../architecture/storage-access.html#cred-multi">storage-access.html 3.5</a>。</p>
 
 <h2 id="open">五、这段代码的归宿</h2>
-<p>两处副本一起换成 <code>extfs.*</code>：本页讲的这处，和 <code>ListV2SegmentsApp</code> 里的
-另一份。时间点是 <code>core.credential</code> 落地，见
+<div class="warn"><strong>这是有记录的过渡状态。</strong>改写会话共享的 Hadoop 配置不能把身份绑定到输入
+（AGENTS.md 的组合原则）：DataFrame 惰性执行，任务序列化时带走哪一刻的配置不受这段代码控制。
+<strong>退出条件：</strong>源数据经源格式的 <code>TableFormat</code> 读取，读取器按源输入的 <code>StorageBinding</code>
+取属性包（<a href="../architecture/table-version.html">table-version.html</a>，读取实现见决策 26），
+Milvus 桶的读写按目标输出的绑定取属性包；两边都不再经过会话的 Hadoop 配置。
+在此之前，backfill 的 driver 单线程执行这些操作，同一个 SparkSession 里不并发读 OSS。</div>
+<p>源数据换成 <code>TableFormat</code> 读取之后，本页这处改写随之删除（<code>ListV2SegmentsApp</code> 里的另一份已随该工具删除）。
+Milvus 桶一侧用 <code>extfs.*</code> 与 <code>fs.*</code> 表达，时间点是 <code>core.credential</code> 落地，见
 <a href="../architecture/storage-access.html#next">storage-access.html 第七节</a>。</p>
 <p>换完之后两件事一起消失：第三节那个没人测的单线程前提，
 以及平台之外那条 provider 链对 classpath 上有 STS 模块的依赖

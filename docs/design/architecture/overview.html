@@ -669,8 +669,8 @@
           <rect x="204" y="44" width="188" height="78" fill="var(--surface)" stroke="var(--ours)"/>
           <text x="216" y="64" font-size="11.5" font-weight="600" fill="currentColor">SegmentSearch</text>
           <text x="216" y="80" font-size="10" fill="currentColor" opacity=".55">executor，一组段一组查询</text>
-          <text x="216" y="96" font-size="10.5" fill="currentColor" opacity=".78">exact：逐批读向量</text>
-          <text x="216" y="111" font-size="10.5" fill="currentColor" opacity=".78">index：每段索引加载一次</text>
+          <text x="216" y="96" font-size="10.5" fill="currentColor" opacity=".78">exact：在向量批上暴力搜索</text>
+          <text x="216" y="111" font-size="10.5" fill="currentColor" opacity=".78">index：在索引句柄上探查</text>
           <rect x="412" y="44" width="136" height="78" fill="var(--up-soft)" stroke="var(--up)"/>
           <text x="424" y="64" font-size="11.5" font-weight="600" fill="currentColor">Knowhere</text>
           <text x="424" y="80" font-size="10" fill="currentColor" opacity=".55">上游库</text>
@@ -964,7 +964,6 @@
       <tr><td class="mono">21</td><td>扩大索引兼容范围</td><td>首个非 nullable FloatVector/HNSW 范围已落地；开源 Milvus 默认的 HNSW_SQ、nullable 映射、DiskANN 与加密文件待定</td><td>后续 V2 扩展</td></tr>
       <tr><td class="mono">22</td><td>写段的系统字段来源</td><td>写时分配、登记时补齐或写入占位值</td><td>append 登记</td></tr>
       <tr><td class="mono">23</td><td>R7 的 JSON、Array 与 <code>json_contains</code> 语义基线</td><td>实现 Milvus 2.6+ 的稳定共同子集，或钉住版本并按服务版本分派；还需明确 null、缺失路径、异构数组、数值转换与错误语义</td><td>不阻塞标量子集；阻塞 JSON/Array 扩展</td></tr>
-      <tr><td class="mono">24</td><td>SQL 函数 vector_knn 的去留</td><td>删除：它在 JVM 里对数组排 TopK，是又一条暴力搜索路径；保留：它作用于任意 DataFrame，不读 collection</td><td>统一入口落地时</td></tr>
       <tr><td class="mono">26</td><td>各开放格式的 TableFormat 用哪种读取实现</td><td>milvus-storage 的格式读取器；该格式的 Java 库；该格式的 Spark 数据源（只提供扫描）</td><td>按格式逐个定，看能力与存储后端</td></tr>
     </tbody>
   </table>

@@ -25,7 +25,6 @@ class VectorSearchExtensions extends (SparkSessionExtensions => Unit) {
     extensions.injectFunction(CosineSimilarityFunction.description)
     extensions.injectFunction(L2DistanceFunction.description)
     extensions.injectFunction(InnerProductFunction.description)
-    extensions.injectFunction(VectorKNNFunction.description)
     extensions.injectFunction(HammingDistanceFunction.description)
     extensions.injectFunction(JaccardDistanceFunction.description)
   }
@@ -114,35 +113,6 @@ object InnerProductFunction extends VectorFunctionDescription {
     case Seq(vector1, vector2) => new InnerProductExpression(vector1, vector2)
     case _ =>
       throw new IllegalArgumentException(s"$name requires exactly 2 arguments")
-  }
-}
-
-/** Vector KNN Function - returns top K similar vectors
-  */
-object VectorKNNFunction extends VectorFunctionDescription {
-  override def name: String = "vector_knn"
-
-  override def usage: String =
-    "_FUNC_(vectors, query_vector, k, distance_type) - Returns top K nearest neighbors from a vector array"
-
-  override def examples: String = """
-    |Examples:
-    |  > SELECT vector_knn(collect_list(embedding), array(0.1, 0.2, 0.3), 5, 'cosine');
-    |   [{"id": 1, "score": 0.99}, {"id": 5, "score": 0.95}, ...]
-  """.stripMargin
-
-  override def builder: Seq[Expression] => Expression = {
-    case Seq(vectors, queryVector, k, distanceType) =>
-      new VectorKNNExpression(vectors, queryVector, k, distanceType)
-    case Seq(vectors, queryVector, k) =>
-      new VectorKNNExpression(
-        vectors,
-        queryVector,
-        k,
-        org.apache.spark.sql.catalyst.expressions.Literal("cosine")
-      )
-    case _ =>
-      throw new IllegalArgumentException(s"$name requires 3 or 4 arguments")
   }
 }
 
