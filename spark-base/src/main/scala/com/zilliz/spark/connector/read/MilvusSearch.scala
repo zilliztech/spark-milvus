@@ -282,13 +282,24 @@ object MilvusSearch {
     }
   }
 
-  /** The query set packed one group per row, on the executors.
+  /** The query set packed one group per row, on the executors, in a single
+    * partition.
     *
     * `zipWithIndex` gives every query the position that decides its group, so
     * the groups are the same ones the driver planned, and a group's rows are
     * packed in query order.
+    *
+    * The `coalesce` is what makes the cartesian with the segment sets produce
+    * one task per set instead of one per (set, group) pair, so a task receives
+    * every group and reads its segments once — which is what
+    * `SegmentSetSearch.run` holds the set in memory for. Its cost is that the
+    * shuffle read and the packing run in one task rather than `plan.groups`
+    * tasks, and the cartesian repeats them once per segment set. Both are
+    * sequential passes over the query bytes, which cross the network once per
+    * segment set either way; what the partition count decides is how often the
+    * segments are read.
     */
-  private def packedGroups(
+  private[read] def packedGroups(
       selected: DataFrame,
       plan: SearchPlan.Plan,
       spec: SegmentSetSearch.Spec,
@@ -327,6 +338,7 @@ object MilvusSearch {
         }
         SearchQueries.Group(ordered.map(_._2).toArray, vectors, 0)
       }
+      .coalesce(1)
   }
 
   /** Every query's candidates become its global top-k, best first. */
