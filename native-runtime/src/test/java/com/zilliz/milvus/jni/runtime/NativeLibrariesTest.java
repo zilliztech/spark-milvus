@@ -35,9 +35,9 @@ import static org.junit.Assert.assertTrue;
 
 /** Uses inert fixture bytes to test extraction without requiring native libraries. */
 public class NativeLibrariesTest {
-    private static final String STORAGE = "libmilvus-storage-jni.so";
-    private static final String KNOWHERE = "libknowhere_jni.so";
     private static final String PLATFORM = platform();
+    private static final String STORAGE = libraryName("milvus-storage-jni");
+    private static final String KNOWHERE = libraryName("knowhere_jni");
     private static final String PREFIX = "native/milvus/1/" + PLATFORM + "/";
 
     @Rule
@@ -225,12 +225,24 @@ public class NativeLibrariesTest {
 
     @Test
     public void bundledSystemZlibIsRejectedBeforeExtraction() throws Exception {
+        String zlib = systemZlib();
         Map<String, byte[]> libraries = libraries();
-        libraries.put("libz.so.1", bytes("a second zlib"));
+        libraries.put(zlib, bytes("a second zlib"));
         assertRejected(manifest(libraries), libraries, "System zlib must not be included");
-        libraries.remove("libz.so.1");
-        assertRejected(manifest(libraries) + "aliases=libz.so.1\nalias.libz.so.1=libcommon.so.1\n",
+        libraries.remove(zlib);
+        assertRejected(manifest(libraries) + "aliases=" + zlib + "\nalias." + zlib + "=libcommon.so.1\n",
                 libraries, "System zlib must not be included");
+    }
+
+    @Test
+    public void entryLibraryNamesFollowThePlatform() throws Exception {
+        String foreign = PLATFORM.startsWith("darwin-") ? "libmilvus-storage-jni.so" : "libmilvus-storage-jni.dylib";
+        Map<String, byte[]> libraries = new LinkedHashMap<>();
+        libraries.put(foreign, bytes("storage"));
+        libraries.put(KNOWHERE, bytes("knowhere"));
+        libraries.put("libcommon.so.1", bytes("common"));
+        String manifest = manifest(libraries).replace("load.entries=" + STORAGE, "load.entries=" + foreign);
+        assertRejected(manifest, libraries, "both JNI entry libraries");
     }
 
     @Test
@@ -363,5 +375,19 @@ public class NativeLibrariesTest {
         if (arch.equals("amd64")) arch = "x86_64";
         else if (arch.equals("arm64")) arch = "aarch64";
         return os + "-" + arch;
+    }
+
+    /** The file name a shared library carries on the platform under test. */
+    private static String libraryName(String base) {
+        if (PLATFORM.startsWith("windows-")) return base + ".dll";
+        if (PLATFORM.startsWith("darwin-")) return "lib" + base + ".dylib";
+        return "lib" + base + ".so";
+    }
+
+    /** The system zlib name on the platform under test. */
+    private static String systemZlib() {
+        if (PLATFORM.startsWith("windows-")) return "zlib1.dll";
+        if (PLATFORM.startsWith("darwin-")) return "libz.1.dylib";
+        return "libz.so.1";
     }
 }

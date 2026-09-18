@@ -59,7 +59,8 @@
 <tr><td>工具链</td><td>GCC/G++/gfortran 12</td><td>Apple Clang 与单独的 OpenMP 运行时、gfortran</td></tr>
 </table></div>
 <p>库文件名是适配层的职责而不是常量：JVM 侧不写 <code>.so</code> 字面量，入口库名由清单声明，其余由 <code>System.mapLibraryName</code> 推出。版本位置的差异使这里换的是匹配规则的形状，不是多一个分支。</p>
-<p><strong>三条规则是格式专属的，声明为平台专属而不翻译。</strong>排除系统 zlib 的前提是 glibc 的 <code>libz.so.1</code> 带 <code>ZLIB_*</code> 版本化符号、捆一份进包会遮蔽实际提供者；Mach-O 没有符号版本化，这条规则在那里没有前提。GNU_STACK 与 IFUNC 重定位检查同样只在 ELF 上有定义。<code>ldd -r</code> 报告未解析符号，macOS 没有等价物：<code>otool -L</code> 与 <code>dyld_info</code> 只给依赖图。这三条留在 Linux 适配实现里，不进跨平台标准。</p>
+<p><strong>三条规则是格式专属的，声明为平台专属而不翻译。</strong>记录系统库的最低符号版本要求依赖 ELF 的符号版本化，Mach-O 没有这个机制。GNU_STACK 与 IFUNC 重定位检查同样只在 ELF 上有定义。<code>ldd -r</code> 报告未解析符号，macOS 没有等价物：<code>otool -L</code> 与 <code>dyld_info</code> 只给依赖图。这三条留在 Linux 适配实现里，不进跨平台标准。</p>
+<p>不在这三条里的是排除系统 zlib：理由是 JVM 在 JNI 初始化前就已经加载了系统 zlib，包内再放第二份就无法确定进程实际使用哪一份符号（第 6 节）。这个理由与可执行格式无关，规则在所有平台都成立，适配层提供的只是系统 zlib 在本平台的文件名。</p>
 <p>平台之间的功能差异写在 <code>manifest.properties</code> 的功能开关里。<code>capabilities.md</code> 保持单一表述，差异由本文的平台矩阵承载。DiskANN 是现成的例子：它唯一的对齐读实现基于 libaio 与 io_uring，macOS 构建只能关掉它；当前声明的 R4、V1、V5 都不依赖它，V5 精确搜索走 <code>Knowhere.bruteForce</code>，所以今天没有缺口。</p>
 <div class="diagram">
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 930 206" role="img" aria-labelledby="build-title build-description">

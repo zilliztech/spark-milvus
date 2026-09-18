@@ -147,6 +147,20 @@ public final class NativeLibraries {
         return os + "-" + arch;
     }
 
+    /** The file name a shared library carries on the named platform. */
+    private static String libraryName(String platform, String base) {
+        if (platform.startsWith("windows-")) return base + ".dll";
+        if (platform.startsWith("darwin-")) return "lib" + base + ".dylib";
+        return "lib" + base + ".so";
+    }
+
+    /** The system zlib the JVM has already loaded, which the bundle must not carry. */
+    private static String systemZlib(String platform) {
+        if (platform.startsWith("windows-")) return "zlib1.dll";
+        if (platform.startsWith("darwin-")) return "libz.1.dylib";
+        return "libz.so.1";
+    }
+
     private static Bundle extract(URL resource, String platform, Path temporaryRoot) throws IOException {
         validateResource(resource);
         Properties manifest = new UniqueProperties();
@@ -179,11 +193,13 @@ public final class NativeLibraries {
         }
         Set<String> allNames = new LinkedHashSet<>(libraries);
         allNames.addAll(aliases.keySet());
-        require(!allNames.contains("libz.so.1"), "System zlib must not be included in the native bundle");
-        require(allNames.contains("libmilvus-storage-jni.so") && allNames.contains("libknowhere_jni.so"),
+        require(!allNames.contains(systemZlib(platform)), "System zlib must not be included in the native bundle");
+        String storageEntry = libraryName(platform, "milvus-storage-jni");
+        String knowhereEntry = libraryName(platform, "knowhere_jni");
+        require(allNames.contains(storageEntry) && allNames.contains(knowhereEntry),
                 "Native bundle must declare both JNI entry libraries");
-        require(loadEntries.size() == 2 && loadEntries.contains("libmilvus-storage-jni.so")
-                        && loadEntries.contains("libknowhere_jni.so"),
+        require(loadEntries.size() == 2 && loadEntries.contains(storageEntry)
+                        && loadEntries.contains(knowhereEntry),
                 "Native bundle must declare the two JVM load entries");
         for (String name : allNames) {
             int slash = name.indexOf('/');
