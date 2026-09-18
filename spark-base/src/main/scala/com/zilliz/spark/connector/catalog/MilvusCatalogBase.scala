@@ -427,10 +427,18 @@ private[catalog] object MilvusCatalogDiscovery {
   * the same physical millisecond. Saturating the two ends avoids shift overflow
   * while preserving as-of ordering for every Long Spark can pass.
   */
-private[catalog] object MilvusHybridTimestamp {
+private[connector] object MilvusHybridTimestamp {
   private val LogicalBits = 18
   private val LogicalMask = (1L << LogicalBits) - 1L
   private val MaxPhysicalMillis = Long.MaxValue >>> LogicalBits
+
+  /** The first HybridTS of a physical millisecond, which is what a write stamps
+    * its rows with (decision 22).
+    */
+  def ofMillis(millis: Long): Long =
+    if (millis < 0L) 0L
+    else if (millis > MaxPhysicalMillis) Long.MaxValue
+    else millis << LogicalBits
 
   def upperBound(epochMicros: Long): Long = {
     val millis = Math.floorDiv(epochMicros, 1000L)

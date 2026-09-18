@@ -52,6 +52,7 @@ import com.zilliz.milvus.storage.write.exec.{
   V3SegmentWriter,
   WriteMetrics
 }
+import com.zilliz.spark.connector.catalog.MilvusHybridTimestamp
 import com.zilliz.spark.connector.metrics.WriteMetricsReport
 import com.zilliz.spark.connector.options.{
   HadoopStorageKeys,
@@ -374,10 +375,19 @@ class MilvusV3PartitionWriter(
     }
     f.name -> f.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
   }.toMap
-  private val arrowSchema = SparkSchemaMapper.convertSparkSchemaToArrow(
-    sparkSchema,
-    fieldIds = fieldIds
+  // A write that carries the primary key is writing a new segment, so it also
+  // writes the system columns; a backfill adds columns to a segment Milvus
+  // already wrote and leaves them alone (decision 22).
+  private val writesSystemFields: Boolean = sparkSchema.fields.exists(f =>
+    f.metadata.contains(FieldMetadata.MilvusPrimaryKeyMetadataKey) &&
+      f.metadata.getBoolean(FieldMetadata.MilvusPrimaryKeyMetadataKey)
   )
+  private val jobTimestamp: Long =
+    MilvusHybridTimestamp.ofMillis(System.currentTimeMillis())
+  private var writtenRows: Long = 0L
+
+  private val arrowSchema =
+    MilvusV3Writer.arrowSchemaFor(sparkSchema, fieldIds, writesSystemFields)
 
   // The segment directory: `milvus.writer.customPath` names it outright
   // (backfill writes into an existing segment's base path); otherwise the job
@@ -524,6 +534,20 @@ class MilvusV3PartitionWriter(
       record,
       sparkSchema
     )
+    // Decision 22: a segment this connector writes carries the two system
+    // columns Milvus's QueryNode looks for, with placeholder values — the row's
+    // place in the segment and the job's time as a HybridTS. Milvus discards
+    // RowID on load, and the timestamp only has to be older than any delete.
+    if (writesSystemFields) {
+      root
+        .getVector(MilvusV3Writer.RowIdFieldId.toString)
+        .asInstanceOf[BigIntVector]
+        .setSafe(currentBatchSize, writtenRows + currentBatchSize)
+      root
+        .getVector(MilvusV3Writer.TimestampFieldId.toString)
+        .asInstanceOf[BigIntVector]
+        .setSafe(currentBatchSize, jobTimestamp)
+    }
     currentBatchSize += 1
     root.setRowCount(currentBatchSize)
     if (currentBatchSize >= batchSize) flushBatch()
@@ -590,6 +614,7 @@ class MilvusV3PartitionWriter(
     if (segmentWriter == null) openSegmentWriter(Some(root))
     collectPrimaryKeys(root)
     segmentWriter.write(root)
+    writtenRows += currentBatchSize.toLong
     // Build and allocate the replacement before swapping, so an allocation
     // failure leaves `root` pointing at the old one for cleanup to release.
     val newRoot = VectorSchemaRoot.create(arrowSchema, allocator)
@@ -662,6 +687,46 @@ case class MilvusV3CommitMessage(
   * `MilvusTable.newWriteBuilder` and ends in the same `MilvusV3BatchWrite`.
   */
 object MilvusV3Writer extends Logging {
+
+  /** The two columns Milvus's QueryNode looks for by field id in every segment
+    * it loads (docs/design/architecture/write.html section 6).
+    */
+  val RowIdFieldId: Long = 0L
+  val TimestampFieldId: Long = 1L
+
+  /** The Arrow schema a segment is written with: the declared columns, and the
+    * two system columns when this write makes a new segment (decision 22). A
+    * column is named by its Milvus field id, which is how the manifest line
+    * matches them up.
+    */
+  private[connector] def arrowSchemaFor(
+      sparkSchema: StructType,
+      fieldIds: Map[String, Long],
+      withSystemFields: Boolean
+  ): Schema = {
+    val declared = SparkSchemaMapper.convertSparkSchemaToArrow(
+      sparkSchema,
+      fieldIds = fieldIds
+    )
+    if (!withSystemFields) declared
+    else {
+      require(
+        !declared.getFields.asScala.exists(field =>
+          field.getName == RowIdFieldId.toString ||
+            field.getName == TimestampFieldId.toString
+        ),
+        "A write that carries RowID or Timestamp itself cannot also be given placeholders"
+      )
+      val system = Seq(RowIdFieldId, TimestampFieldId).map(id =>
+        new Field(
+          id.toString,
+          FieldType.notNullable(new ArrowType.Int(64, true)),
+          null
+        )
+      )
+      new Schema((declared.getFields.asScala ++ system).asJava)
+    }
+  }
 
   /** Writes a DataFrame as V3 segments, one per Spark partition, and commits
     * the job through `core.write.commit`.

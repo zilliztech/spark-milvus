@@ -246,11 +246,11 @@ factory、启动 executor task 之前先写 <code>owner.json</code> 和 <code>_h
 三样各自是 W1 行"前提"列里的三条；3、2 已做，1 等决策 22。</p>
 
 <div class="open">
-<p><strong>决策 22（README 第 4 节）：连接器写的段，RowID 和 Timestamp 从哪来。</strong>
-a. 写时向 Milvus 要（AllocID、AllocTimestamp），要活的 Milvus，纯连接器模式做不到；
-b. 登记时由 Milvus 补——RegisterSegments 还没有，能不能改写文件要和 Milvus 侧一起定；
-c. 写占位（RowID 用段内行号、Timestamp 用作业时间），登记时 Milvus 只用作排序不用作真值。
-选项取决于 RegisterSegments 的设计，那条在 Milvus 侧（README 第 5 节）。在定之前，client 模式可以先走 a。</p>
+<p><strong>决策 22 已定（2026-09-18）：连接器写的段用占位值。</strong>
+RowID 写段内行号，Timestamp 写作业时间，一个作业一个值；两列只加在连接器新写的段上，backfill 往已有段补列不加。
+Milvus 加载段时丢弃 RowID，Timestamp 参与删除与 MVCC 的可见性判断，所以占位的 Timestamp 要早于任何后续删除，作业时间满足这一点；
+先例是 Milvus 自己的 import 段用段级 commit timestamp，External Collection 加载的文件两列都没有。
+<code>RegisterSegments</code> 出来后按「登记时由 Milvus 补」收敛（README 第 5 节）。</p>
 </div>
 
 <h2 id="modes">七、W2 在这条链上的位置</h2>
