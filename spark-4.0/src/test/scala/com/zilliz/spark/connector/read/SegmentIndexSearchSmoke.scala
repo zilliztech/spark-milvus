@@ -122,11 +122,14 @@ object SegmentIndexSearchSmoke {
         "vector",
         Array(0f, 0f),
         3,
-        metric = "L2",
-        filter = Some("category >= 1"),
-        outputColumns = Seq("id")
+        "L2",
+        "index",
+        Map.empty,
+        Some("category >= 1"),
+        Seq("id"),
+        false
       )
-      val rows = frame.collect().toVector
+      val rows = frame.orderBy("rank").collect().toVector
       assert(
         rows.map(_.getAs[Long]("id")) == Vector(3101L, 3003L, 3103L),
         rows.mkString(",")
@@ -200,17 +203,21 @@ object SegmentIndexSearchSmoke {
       "vector",
       Array(0f, 0f),
       2,
-      metric = "L2",
-      filter = Some("id in [4003,4103]"),
-      outputColumns = Seq("id"),
-      allowUnindexed = true
+      "L2",
+      "index",
+      Map.empty,
+      Some("id in [4003,4103]"),
+      Seq("id"),
+      true
     )
-    val rows = frame.collect().toVector
+    val rows = frame.orderBy("rank").collect().toVector
     assert(rows.map(_.getAs[Double]("_score")) == Vector(2d, 2d))
     assert(rows.map(_.getAs[Long]("id")) == Vector(4003L, 4103L))
     assert(rows.map(_.getAs[Long]("_segment_id")) == Vector(40L, 41L))
     assert(rows.map(_.getAs[Long]("_row_offset")) == Vector(3L, 3L))
-    assert(frame.limit(1).collect().head.getAs[Long]("id") == 4003L)
+    assert(
+      frame.orderBy("rank").limit(1).collect().head.getAs[Long]("id") == 4003L
+    )
     println(
       "PASS: mixed indexed/unindexed L2 scores preserve native 2.0 exactly and global ties select the smaller segment id"
     )

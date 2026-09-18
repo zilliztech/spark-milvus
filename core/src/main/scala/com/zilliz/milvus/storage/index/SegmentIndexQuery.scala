@@ -2,7 +2,6 @@ package com.zilliz.milvus.storage.index
 
 import java.lang.{Float => JavaFloat}
 import java.util.BitSet
-import scala.util.Try
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.types.pojo.Schema
@@ -16,11 +15,7 @@ import com.zilliz.milvus.storage.read.exec.{
   SegmentReaderRegistry
 }
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.snapshot.{
-  SegmentIndex,
-  SegmentIndexes,
-  SegmentLayout
-}
+import com.zilliz.milvus.storage.snapshot.SegmentIndex
 import com.zilliz.milvus.storage.Logging
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
@@ -94,62 +89,19 @@ object SegmentIndexQuery extends Logging {
     Validated(field, dimension, expression)
   }
 
-  /** The persisted index that serves `fieldId` in `task`'s segment, checked
-    * against what the snapshot pinned: `None` only when the snapshot says the
-    * segment has no index and the request allows that. Planning checks every
-    * task with this before any runs; `run` checks again on the executor.
+  /** The index that serves this segment, as the Milvus format side selects it.
     */
   def selectIndex(
       request: Request,
       fieldId: Long,
       task: SegmentReadTask
-  ): Option[SegmentIndex] = {
-    task.layout match {
-      case SegmentLayout.Manifest(_, version) =>
-        require(
-          version >= 0,
-          "Persisted index search requires a pinned data manifest version"
-        )
-      case _ =>
-    }
-    val selected = task.indexes match {
-      case SegmentIndexes.Available(indexes) =>
-        val matches = indexes.filter(_.fieldId == fieldId)
-        require(
-          matches.size <= 1,
-          s"Ambiguous index for segment ${task.segmentId}, field $fieldId"
-        )
-        matches.headOption
-      case SegmentIndexes.Unindexed => None
-      case SegmentIndexes.Unknown =>
-        throw new IllegalArgumentException(
-          s"Snapshot has no index metadata for segment ${task.segmentId}"
-        )
-    }
-    require(
-      selected.nonEmpty || request.allowUnindexed,
-      s"No persisted index for segment ${task.segmentId}, field $fieldId"
+  ): Option[SegmentIndex] =
+    SegmentIndexHandle.select(
+      task,
+      fieldId,
+      request.metric,
+      request.allowUnindexed
     )
-    selected.foreach { descriptor =>
-      require(
-        descriptor.segmentId == task.segmentId && descriptor.partitionId == task.partitionId,
-        s"Index identity differs from the pinned segment ${task.segmentId}"
-      )
-      require(
-        descriptor.metricType.exists(_.equalsIgnoreCase(request.metric)),
-        s"Query metric differs from the persisted index metric of segment ${task.segmentId}"
-      )
-      require(
-        task.expectedRows.contains(descriptor.rowCount),
-        s"Index row count differs from the pinned segment ${task.segmentId}"
-      )
-      require(
-        descriptor.rowCount > 0 && descriptor.rowCount <= Int.MaxValue,
-        s"Segment ${task.segmentId} bitmap exceeds supported row count"
-      )
-    }
-    selected
-  }
 
   /** Checks a whole plan before any task runs and names every segment that
     * cannot serve the request.
@@ -158,20 +110,12 @@ object SegmentIndexQuery extends Logging {
       request: Request,
       schema: CollectionSchema,
       tasks: Seq[SegmentReadTask]
-  ): Unit = {
-    val fieldId = validated(request, schema).field.fieldID
-    val failures = tasks.flatMap { task =>
-      Try(selectIndex(request, fieldId, task)).failed.toOption.map(_.getMessage)
-    }
-    if (failures.nonEmpty) {
-      val shown = failures.take(20).mkString("; ")
-      val rest =
-        if (failures.size > 20) s"; ${failures.size - 20} more" else ""
-      throw new IllegalArgumentException(
-        s"Index search cannot run on ${failures.size} of ${tasks.size} segments: $shown$rest"
-      )
-    }
-  }
+  ): Unit = SegmentIndexHandle.check(
+    tasks,
+    validated(request, schema).field.fieldID,
+    request.metric,
+    request.allowUnindexed
+  )
 
   def run(
       request: Request,

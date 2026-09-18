@@ -413,8 +413,8 @@ the upstream Knowhere JAR remain unchanged. An unverified pair fails the combine
 build; validate both search/load orders and the full storage suite before
 registering another pair. Without Knowhere, ordinary storage resources are used.
 
-`MilvusSearch.search` now constructs a global TopK DataFrame using
-`core.index.SegmentIndexQuery` and `PersistedIndexSearch`. The loader reads
+`MilvusSearch.search` takes a query set and returns each query's global TopK,
+running `core.index.SegmentSearch` over the segment sets `SearchPlan` cut. The loader reads
 Milvus binlog/Parquet payloads and optional `SLICE_META`, or a Cardinal raw
 `_mem.index.bin` stream. Payload markers select the matching Faiss or Cardinal
 engine; a shared HNSW name alone does not establish format compatibility.

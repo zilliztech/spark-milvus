@@ -75,13 +75,11 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     ) shouldBe Seq(SearchPlan.QueryGroup(0, 4))
   }
 
-  test(
-    "a task keeps a whole segment when it fits, and a part when it does not"
-  ) {
-    val tasks = Seq(task(1L, 100L), task(2L, 250L))
+  test("a task keeps the segment set the planner sized for it") {
+    val set = Seq(task(1L, 100L), task(2L, 250L))
 
-    SearchPlan.retainedBytes(tasks, layout, 1L << 31) shouldBe 250L * 16L
-    SearchPlan.retainedBytes(tasks, layout, 1000L) shouldBe 1000L
+    SearchPlan.retainedBytes(set, layout, 1L << 31) shouldBe 350L * 16L
+    SearchPlan.retainedBytes(set, layout, 1000L) shouldBe 1000L
     SearchPlan.retainedBytes(Seq.empty, layout, 1000L) shouldBe 16L
   }
 
@@ -93,9 +91,53 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       task(4L, 30L)
     )
 
-    val sets = SearchPlan.segmentSets(tasks, layout, sets = 2)
+    val sets =
+      SearchPlan.segmentSets(
+        tasks,
+        layout,
+        executors = 2,
+        vectorsMaxBytes = 1L << 31
+      )
 
     segments(sets) shouldBe Seq(Seq(1L), Seq(2L, 3L, 4L))
+  }
+
+  test("a set holds no more vectors than a task keeps") {
+    val tasks = Seq(
+      task(1L, 100L),
+      task(2L, 100L),
+      task(3L, 100L),
+      task(4L, 100L)
+    )
+
+    // 100 rows of 16 bytes make 1600 bytes a segment, so 6400 bytes of vectors
+    // need two sets of 4000 bytes, and equal segments alternate between them.
+    val sets =
+      SearchPlan.segmentSets(
+        tasks,
+        layout,
+        executors = 1,
+        vectorsMaxBytes = 4000L
+      )
+
+    segments(sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
+    sets.foreach(set =>
+      SearchPlan.retainedBytes(set, layout, 4000L) should be <= 4000L
+    )
+  }
+
+  test("a segment larger than the retained limit is a set of its own") {
+    val tasks = Seq(task(1L, 500L), task(2L, 10L))
+
+    val sets =
+      SearchPlan.segmentSets(
+        tasks,
+        layout,
+        executors = 1,
+        vectorsMaxBytes = 4000L
+      )
+
+    segments(sets) shouldBe Seq(Seq(1L), Seq(2L))
   }
 
   test(
@@ -103,10 +145,14 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
   ) {
     val tasks = Seq(task(1L, 10L), task(2L, 10L))
 
-    segments(SearchPlan.segmentSets(tasks, layout, sets = 8)) shouldBe Seq(
-      Seq(1L),
-      Seq(2L)
-    )
+    segments(
+      SearchPlan.segmentSets(
+        tasks,
+        layout,
+        executors = 8,
+        vectorsMaxBytes = 1L << 31
+      )
+    ) shouldBe Seq(Seq(1L), Seq(2L))
   }
 
   test("segments without a row count still spread over the sets") {
@@ -127,22 +173,34 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       )
     )
 
-    segments(SearchPlan.segmentSets(tasks, layout, sets = 2)) shouldBe Seq(
-      Seq(1L),
-      Seq(2L)
-    )
+    segments(
+      SearchPlan.segmentSets(
+        tasks,
+        layout,
+        executors = 2,
+        vectorsMaxBytes = 1L << 31
+      )
+    ) shouldBe Seq(Seq(1L), Seq(2L))
   }
 
   test("a search over no segments plans no tasks") {
-    SearchPlan.segmentSets(Seq.empty, layout, sets = 4) shouldBe empty
-    SearchPlan.of(
+    SearchPlan.segmentSets(
       Seq.empty,
       layout,
       executors = 4,
-      queries = 2,
-      k = 5,
-      groupMaxBytes = 2800L
+      vectorsMaxBytes = 1L << 31
     ) shouldBe empty
+    SearchPlan
+      .of(
+        Seq.empty,
+        layout,
+        executors = 4,
+        queries = 2,
+        k = 5,
+        groupMaxBytes = 2800L,
+        vectorsMaxBytes = 1L << 31
+      )
+      .isEmpty shouldBe true
   }
 
   test("every segment set answers every query group") {
@@ -154,16 +212,12 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       executors = 2,
       queries = 3,
       k = 10,
-      groupMaxBytes = 592L
+      groupMaxBytes = 592L,
+      vectorsMaxBytes = 1L << 31
     )
 
-    plan should have size 4
-    plan.map(_.group.firstQuery) shouldBe Seq(0, 2, 0, 2)
-    plan.map(_.segments.map(_.segmentId)).distinct should have size 2
-    plan.flatMap(_.segments.map(_.segmentId)).distinct.sorted shouldBe Seq(
-      1L,
-      2L,
-      3L
-    )
+    plan.tasks shouldBe 2
+    plan.groups.map(_.firstQuery) shouldBe Seq(0, 2)
+    plan.sets.flatMap(_.map(_.segmentId)).sorted shouldBe Seq(1L, 2L, 3L)
   }
 }

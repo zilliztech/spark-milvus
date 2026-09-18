@@ -131,6 +131,76 @@ class QueryMatrixTest
     )
   }
 
+  test("a packed query set is what a group reads back") {
+    val layout = VectorLayout(VectorElementType.Float32, 2)
+    val packed = QueryMatrix.packFloats(
+      Seq(Array(1f, 2f), Array(3f, 4f), Array(5f, 6f)),
+      layout
+    )
+
+    packed.length shouldBe 24
+    val group = QueryMatrix.ofPacked(packed, 1, 2, layout, allocator)
+    try {
+      group.queries shouldBe 2
+      val buffer = read(group)
+      (0 until 4).map(index => buffer.getFloat(index * 4)) shouldBe Seq(
+        3f,
+        4f,
+        5f,
+        6f
+      )
+    } finally group.close()
+  }
+
+  test("a packed byte query set keeps the field's element type") {
+    val layout = VectorLayout(VectorElementType.Int8, 3)
+    val packed =
+      QueryMatrix.packBytes(
+        Seq(Array[Byte](1, -2, 3), Array[Byte](4, 5, 6)),
+        layout
+      )
+
+    packed shouldBe Array[Byte](1, -2, 3, 4, 5, 6)
+    val group = QueryMatrix.ofPacked(packed, 1, 1, layout, allocator)
+    try {
+      val buffer = read(group)
+      (0 until 3).map(buffer.get) shouldBe Seq[Byte](4, 5, 6)
+    } finally group.close()
+  }
+
+  test("float16 packing and building agree byte for byte") {
+    Seq(
+      VectorElementType.Float16,
+      VectorElementType.BFloat16,
+      VectorElementType.Float32
+    ).foreach { elementType =>
+      val layout = VectorLayout(elementType, 3)
+      val queries = Seq(Array(1.5f, -2.25f, 0.5f), Array(3f, 4f, -5f))
+      val packed = QueryMatrix.packFloats(queries, layout)
+      val built = QueryMatrix.ofFloats(queries, layout, allocator)
+      try {
+        val buffer = read(built)
+        (0 until packed.length).map(buffer.get) shouldBe packed.toSeq
+      } finally built.close()
+    }
+  }
+
+  test("a group outside the packed query set is refused") {
+    val layout = VectorLayout(VectorElementType.Float32, 2)
+    val packed = QueryMatrix.packFloats(Seq(Array(1f, 2f)), layout)
+
+    val failure = the[IllegalArgumentException] thrownBy QueryMatrix.ofPacked(
+      packed,
+      1,
+      1,
+      layout,
+      allocator
+    )
+
+    failure.getMessage should include("packed query set holds 8 bytes")
+    allocator.getAllocatedMemory shouldBe 0L
+  }
+
   test("a failed pack leaves no allocation behind") {
     val layout = VectorLayout(VectorElementType.Float32, 2)
 

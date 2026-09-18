@@ -2,54 +2,75 @@
 
 This document provides a comprehensive guide to all parameter configurations for the Milvus Spark Connector.
 
-## Persisted index search (refactor/v2)
+## Vector search (refactor/v2)
 
-`com.zilliz.spark.connector.read.MilvusSearch.search` returns a lazy DataFrame
-with global TopK across the snapshot's segments:
+`com.zilliz.spark.connector.read.MilvusSearch.search` takes a query set and
+returns a lazy DataFrame holding each query's top-k across the snapshot's
+segments:
 
 ```scala
+val queries = Seq((1L, Array(0.1f, 0.2f)), (2L, Array(0.3f, 0.4f)))
+  .toDF("query_id", "vector")
 val hits = MilvusSearch.search(
-  spark, options, "embedding", queryVector, 10, "COSINE",
+  spark, options, queries, "embedding", 10, "COSINE",
+  mode = "index",
   searchParameters = Map("ef" -> "256"),
   filter = Some("category == \"documents\" and rating >= 2.0"),
   outputColumns = Seq("id", "title")
 )
-hits.show(false)
+hits.orderBy("query_id", "rank").show(false)
 ```
 
-`options` uses the same snapshot/storage settings as `spark.read.format("milvus")`.
-The result adds `_segment_id`, `_row_offset`, and `_score`. COSINE/IP sort
-descending; L2 uses squared Euclidean distance and sorts ascending. Ties sort by
-segment and physical row offset. The query must match a non-nullable FloatVector
-field and the stored HNSW metric. A COSINE query must have nonzero norm.
-`_score` preserves the value returned by Knowhere. Indexes containing vector
-quantization, such as Cardinal RBQ, can return approximate scores; the connector
-does not read the original vectors to recompute them.
+`options` uses the same snapshot and storage settings as
+`spark.read.format("milvus")`. The query set carries `query_id`, a non-null
+unique BIGINT, and `vector`: `ARRAY<FLOAT>` for FloatVector, Float16Vector and
+BFloat16Vector, `ARRAY<SMALLINT>` with values in −128..127 for Int8Vector, and
+`BINARY` for BinaryVector. An overload takes a single `queryVector:
+Array[Float]` and searches a set of one row with `query_id = 0`.
 
-The filter runs before index search. Supported scalar syntax is comparison
+The result columns are `query_id`, `rank` (from 1), `_score`, `_segment_id`,
+`_row_offset`, followed by `outputColumns`. Each query returns at most K rows
+and `rank` is what orders them; the DataFrame itself is unordered, so sort by
+`query_id` and `rank` to read it. COSINE and IP rank a larger score first, L2 a
+smaller one, and equal scores rank by segment id and then by physical row
+offset. `_score` preserves the value Knowhere returned. Indexes containing
+vector quantization, such as Cardinal RBQ, can return approximate scores; the
+connector does not read the original vectors to recompute them.
+
+`mode = "index"` searches the persisted index the snapshot pinned, over a
+non-nullable FloatVector with L2, IP or COSINE, and the query metric must match
+the index. `mode = "exact"` computes every distance instead: it takes every
+dense vector type, and binary vectors take HAMMING or JACCARD.
+
+The filter runs before search. Supported scalar syntax is comparison
 (`==`, `!=`, `<`, `<=`, `>`, `>=`), `in`, `not in`, `is null`, `is not null`,
 `and`, `or`, `not`, and parentheses. Unknown fields, incompatible literals and
 unsupported syntax fail before execution. Filtering the returned DataFrame
 instead filters the already selected hits. JSON, arrays and functions are not
 yet supported in this expression subset.
 
-Missing index metadata, and an index whose metric or row count differs from
-its segment, fail while the query is planned, naming every such segment;
-corrupt files and incompatible formats fail when a task loads the index.
-`allowUnindexed = true` enables native brute-force only for segments whose
-metadata confirms the requested field has no index. Default is `false`.
-Each task owns and closes its loaded index; cross-query caching is not yet implemented.
-HNSW `ef` is the only supported search parameter and must be an integer at least K.
-Encrypted indexes and nullable-vector ID mappings are unsupported.
-Cardinal `_mem.index.bin` requires the pinned Cardinal-enabled native build;
-see [native build instructions](contributing.md#knowhere-library-loading).
+Missing index metadata, and an index whose metric or row count differs from its
+segment, fail while the query is planned, naming every such segment; corrupt
+files and incompatible formats fail when a task loads the index.
+`allowUnindexed = true` scans a segment exactly when the snapshot confirms the
+field has no index there. Default is `false`. Each task owns and closes the
+indexes it loaded; they are not cached across tasks. HNSW `ef` is the only
+supported search parameter and must be an integer at least K. Encrypted indexes
+and nullable-vector ID mappings are unsupported. Cardinal `_mem.index.bin`
+requires the pinned Cardinal-enabled native build; see
+[native build instructions](contributing.md#knowhere-library-loading).
 
-The underlying scan options are `vector.search.mode=index`,
-`vector.search.parameters` (JSON object), `vector.search.filter`, and
-`vector.search.allowUnindexed`, in addition to query/topK/metric/column.
-Use `MilvusSearch.search` to obtain global TopK; scan options alone return
-per-segment candidates. The existing `brute_force` mode remains the default
-for legacy `vector.search.*` reads.
+Three options size the job. `milvus.search.queries.max.bytes` (default 1 GiB)
+is how large the query set may be before it stops being broadcast from the
+driver and travels with the shuffle instead; both paths give the same result.
+`milvus.search.group.max.bytes` (default 512 MiB) is what one task answers at a
+time, counted as queries × (dimension × element width + K × 28 bytes).
+`milvus.search.vectors.max.bytes` (default 2 GiB) is how many bytes of vectors
+one task keeps while it answers them, and it also bounds how many segments one
+task reads.
+
+The older per-segment `vector.search.*` scan options still exist and return
+per-segment candidates rather than a global top-k.
 
 ## Version Compatibility
 

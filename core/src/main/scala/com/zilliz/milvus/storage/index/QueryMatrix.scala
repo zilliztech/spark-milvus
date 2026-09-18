@@ -40,15 +40,7 @@ object QueryMatrix {
     val target = allocate(queries.size, layout, allocator)
     try {
       queries.zipWithIndex.foreach { case (query, index) =>
-        require(
-          query != null && query.length == layout.dimension,
-          s"Query $index has ${if (query == null) 0
-            else query.length} values; the field needs ${layout.dimension}"
-        )
-        require(
-          query.forall(JavaFloat.isFinite),
-          s"Query $index holds a value that is not finite"
-        )
+        checkFloats(query, index, layout)
         write(target, index.toLong * layout.rowBytes, query, layout)
       }
       finished(target, queries.size, layout)
@@ -68,22 +60,86 @@ object QueryMatrix {
       allocator: BufferAllocator
   ): QueryMatrix = {
     require(queries != null && queries.nonEmpty, "A group holds no queries")
-    require(
-      layout.elementType == VectorElementType.Int8 ||
-        layout.elementType == VectorElementType.Bit,
-      s"${layout.elementType} queries arrive as floats, not as bytes"
-    )
+    requireByteQueries(layout)
     val target = allocate(queries.size, layout, allocator)
     try {
       queries.zipWithIndex.foreach { case (query, index) =>
-        require(
-          query != null && query.length == layout.rowBytes,
-          s"Query $index has ${if (query == null) 0
-            else query.length} bytes; the field needs ${layout.rowBytes}"
-        )
+        checkBytes(query, index, layout)
         target.setBytes(index.toLong * layout.rowBytes, query)
       }
       finished(target, queries.size, layout)
+    } catch {
+      case failure: Throwable =>
+        target.close()
+        throw failure
+    }
+  }
+
+  /** The whole query set as one byte array, in the field's element type: what
+    * the driver packs once and ships, by broadcast or with the shuffle
+    * (docs/design/architecture/vector-search.html section 2.1).
+    */
+  def packFloats(
+      queries: Seq[Array[Float]],
+      layout: VectorLayout
+  ): Array[Byte] = {
+    require(queries != null, "A query set must not be null")
+    val packed = new Array[Byte](
+      Math.multiplyExact(queries.size.toLong, layout.rowBytes.toLong).toInt
+    )
+    val buffer = ByteBuffer.wrap(packed).order(ByteOrder.nativeOrder())
+    queries.zipWithIndex.foreach { case (query, index) =>
+      checkFloats(query, index, layout)
+      buffer.position(index * layout.rowBytes)
+      writeFloats(buffer, query, layout)
+    }
+    packed
+  }
+
+  /** Byte queries, as int8 and binary fields take them. */
+  def packBytes(
+      queries: Seq[Array[Byte]],
+      layout: VectorLayout
+  ): Array[Byte] = {
+    require(queries != null, "A query set must not be null")
+    requireByteQueries(layout)
+    val packed = new Array[Byte](
+      Math.multiplyExact(queries.size.toLong, layout.rowBytes.toLong).toInt
+    )
+    queries.zipWithIndex.foreach { case (query, index) =>
+      checkBytes(query, index, layout)
+      System.arraycopy(
+        query,
+        0,
+        packed,
+        index * layout.rowBytes,
+        layout.rowBytes
+      )
+    }
+    packed
+  }
+
+  /** One group of a packed query set, copied into the memory Knowhere reads. */
+  def ofPacked(
+      packed: Array[Byte],
+      firstQuery: Int,
+      queries: Int,
+      layout: VectorLayout,
+      allocator: BufferAllocator
+  ): QueryMatrix = {
+    require(queries > 0, s"A group holds $queries queries")
+    require(firstQuery >= 0, s"A group starts at query $firstQuery")
+    val from = firstQuery.toLong * layout.rowBytes
+    val bytes = queries.toLong * layout.rowBytes
+    require(
+      packed != null && from + bytes <= packed.length,
+      s"The packed query set holds ${if (packed == null) 0
+        else packed.length} bytes; this group needs ${from + bytes}"
+    )
+    val target = allocate(queries, layout, allocator)
+    try {
+      target.setBytes(0L, packed, from.toInt, bytes.toInt)
+      finished(target, queries, layout)
     } catch {
       case failure: Throwable =>
         target.close()
@@ -116,6 +172,59 @@ object QueryMatrix {
     val buffer =
       target.nioBuffer(0, bytes.toInt).order(ByteOrder.nativeOrder())
     new QueryMatrix(buffer, queries, layout, target)
+  }
+
+  private def requireByteQueries(layout: VectorLayout): Unit = require(
+    layout.elementType == VectorElementType.Int8 ||
+      layout.elementType == VectorElementType.Bit,
+    s"${layout.elementType} queries arrive as floats, not as bytes"
+  )
+
+  private def checkFloats(
+      query: Array[Float],
+      index: Int,
+      layout: VectorLayout
+  ): Unit = {
+    require(
+      query != null && query.length == layout.dimension,
+      s"Query $index has ${if (query == null) 0
+        else query.length} values; the field needs ${layout.dimension}"
+    )
+    require(
+      query.forall(JavaFloat.isFinite),
+      s"Query $index holds a value that is not finite"
+    )
+  }
+
+  private def checkBytes(
+      query: Array[Byte],
+      index: Int,
+      layout: VectorLayout
+  ): Unit = require(
+    query != null && query.length == layout.rowBytes,
+    s"Query $index has ${if (query == null) 0
+      else query.length} bytes; the field needs ${layout.rowBytes}"
+  )
+
+  private def writeFloats(
+      buffer: ByteBuffer,
+      query: Array[Float],
+      layout: VectorLayout
+  ): Unit = layout.elementType match {
+    case VectorElementType.Float32 =>
+      query.foreach(buffer.putFloat)
+    case VectorElementType.Float16 =>
+      query.foreach(value =>
+        FloatConverter.toFloat16Bytes(value).foreach(buffer.put)
+      )
+    case VectorElementType.BFloat16 =>
+      query.foreach(value =>
+        FloatConverter.toBFloat16Bytes(value).foreach(buffer.put)
+      )
+    case other =>
+      throw new IllegalArgumentException(
+        s"$other queries arrive as bytes, not as floats"
+      )
   }
 
   private def write(

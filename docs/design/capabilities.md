@@ -66,7 +66,7 @@ Table 接口表达不了的动作走 CALL：四条线走同一个 SQL 语法扩�
 
 ## 5 向量与索引
 
-向量搜索只有一个入口 `MilvusSearch.search`：输入一组查询，输出每条查询的全局 TopK；段内按精确扫描（V5）或索引探查（V7）算候选，快照、删除与过滤位图、候选合并、回表两者共用（决策日志 2026-09-17，设计见 [vector-search.html](architecture/vector-search.html#overall)）。向量能力整组排 P2。原生接口采用 Knowhere PR #1829 分支，精确提交由根目录子模块 gitlink 固定。V1 已交付库加载、C ABI 校验、版本查询和持久化索引封装；V2、V7 已接通首个非 nullable FloatVector/HNSW 范围的单查询索引加载、搜索、回表和全局 TopK；多查询、建索引、更多格式与跨任务缓存仍待实现。
+向量搜索只有一个入口 `MilvusSearch.search`：输入一组查询，输出每条查询的全局 TopK；段内按精确扫描（V5）或索引探查（V7）算候选，快照、删除与过滤位图、候选合并、回表两者共用（决策日志 2026-09-17，设计见 [vector-search.html](architecture/vector-search.html#overall)）。向量能力整组排 P2。原生接口采用 Knowhere PR #1829 分支，精确提交由根目录子模块 gitlink 固定。V1 已交付库加载、C ABI 校验、版本查询和持久化索引封装；V5、V7 已接通查询集入口的两阶段执行——段组与查询组规划、两条下发路、段内精确扫描与索引探查、按查询合并、按段回表；建索引与更多索引格式仍待实现。
 
 issue #125 的[索引查询设计](architecture/vector-search.html)已经落地首个互操作范围。每个任务只加载一次本段的索引，任务结束时关闭，不做跨任务缓存（决策日志 2026-09-17）。
 
@@ -74,8 +74,8 @@ issue #125 的[索引查询设计](architecture/vector-search.html)已经落地�
 |---|---|---|---|---|---|
 | V1 | Knowhere 接入 | NativeVectorLibrary 加载及版本查询；NativeVectorIndex 包装持久化加载和搜索 | native-vector、native-runtime | [统一动态依赖与解压](engineering/native-libraries.html)；根目录子模块固定 Knowhere PR #1829 的 Java/JNI/原生源码，C ABI=1；Cardinal 文件要求对应构建特性 | P2 |
 | V2 | 加载 Milvus 建的索引 | 自动；按快照或 Manifest 里的索引文件 | core.index | 保留快照段记录的 index_files；使用 Manifest 索引登记时须核验目标版本（README 第 5 节）。加载契约见[方案](architecture/vector-search.html#metadata) | P2 |
-| V5 | 精确搜索 | `MilvusSearch.search(..., mode = exact)`，输入查询集，每条查询返回全局 TopK | spark.read、core.index、native-vector | 上游 Knowhere.bruteForce，一次调用算一批向量对整组查询；按查询有界合并，合并后再回表；外表依赖 R20。现有 `vector.search.*` 逐段入口和 spark-base `filter` 包的 JVM 暴力搜索在本行落地的同一变更里删除（决策日志 2026-09-17）。设计见 [vector-search.html 第一、二节](architecture/vector-search.html#overall) | P2 |
-| V7 | 持久化索引向量查询 | `MilvusSearch.search(..., mode = index)`；已实现单查询，查询集输入待扩展 | spark.read、core.index | V2、R7、SegmentReader.take；与 V5 共用段内执行器接口、合并与回表；[查询契约](architecture/vector-search.html#api) | P2 |
+| V5 | 精确搜索 | `MilvusSearch.search(..., mode = exact)`，输入查询集，每条查询返回全局 TopK | spark.read、core.index、native-vector | 上游 Knowhere.bruteForce，一次调用算一批向量对整组查询；按查询有界合并，合并后再回表；外表依赖 R20。查询集下发、两阶段执行、合并与回表已实现，端到端验证待 UAT（本地无 Knowhere 原生包）。现有 `vector.search.*` 逐段入口和 spark-base `filter` 包的 JVM 暴力搜索待删除（决策日志 2026-09-17）。设计见 [vector-search.html 第一、二节](architecture/vector-search.html#overall) | P2 |
+| V7 | 持久化索引向量查询 | `MilvusSearch.search(..., mode = index)`，输入查询集 | spark.read、core.index | V2、R7、SegmentReader.take；与 V5 共用段内执行器接口、合并与回表；端到端验证待 UAT；[查询契约](architecture/vector-search.html#api) | P2 |
 | V8 | SQL 向量函数 | `cosine_similarity`、`l2_distance`、`inner_product`、`hamming_distance`、`jaccard_distance`，经 apps 的 SessionExtensions 注册 | apps.search | 已实现；JVM 逐行计算 DataFrame 里已有的值，不读 collection；`vector_knn` 已删除（决策 24，2026-09-18） | P2 |
 
 ## 6 兼容入口

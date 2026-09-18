@@ -39,6 +39,19 @@ object ArrowAllocator {
 
   def get: RootAllocator = root
 
+  /** A vector search task's scope: it holds the query group, what it keeps of
+    * its segment set, and the buffers Knowhere writes into.
+    */
+  private[connector] def forSearchTask(
+      partition: Int,
+      maxBytes: Long
+  ): TaskArrowAllocator = {
+    require(maxBytes > 0L, s"maxBytes must be positive, got $maxBytes")
+    new TaskArrowAllocator(
+      root.newChildAllocator(s"milvus-search-task-$partition", 0L, maxBytes)
+    )
+  }
+
   private[connector] def forReadTask(
       segmentId: Long,
       maxBytes: Long

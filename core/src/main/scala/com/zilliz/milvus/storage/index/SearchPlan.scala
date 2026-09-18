@@ -7,10 +7,14 @@ import com.zilliz.milvus.storage.schema.VectorLayout
 
 /** Splits one search into the tasks of its first stage.
   *
-  * A task takes one segment set and one query group, so its memory is the
-  * vectors it keeps, that group's query matrix and that group's top-k, and what
-  * it sends on is bounded by "segment sets × queries × k" candidates
-  * (docs/design/architecture/vector-search.html sections 1.1 and 2.1).
+  * A task takes one segment set and answers every query group on it. The set is
+  * sized so that its vectors fit `milvus.search.vectors.max.bytes`, which is
+  * what lets a task read its segments once and run group after group on what it
+  * keeps; a group is sized so that its query matrix and its top-k fit
+  * `milvus.search.group.max.bytes`. Task memory is therefore one set of vectors
+  * and one group, and what a task sends on is bounded by "query groups ×
+  * queries × k" candidates (docs/design/architecture/vector-search.html
+  * sections 1.1 and 2.1).
   */
 object SearchPlan {
 
@@ -26,8 +30,18 @@ object SearchPlan {
     def untilQuery: Int = firstQuery + queries
   }
 
-  /** One first-stage task: the segments it reads and the queries it answers. */
-  final case class Task(segments: Seq[SegmentReadTask], group: QueryGroup)
+  /** The first stage: one task per segment set, every group answered on every
+    * set. The two sides stay apart because the query groups reach a task two
+    * ways — inside a broadcast variable, or with the shuffle — while a task is
+    * built from its segment set alone (section 2.1).
+    */
+  final case class Plan(
+      sets: Seq[Seq[SegmentReadTask]],
+      groups: Seq[QueryGroup]
+  ) {
+    def tasks: Int = sets.size
+    def isEmpty: Boolean = sets.isEmpty
+  }
 
   /** What one query costs a task: its row in the query matrix and its bounded
     * top-k.
@@ -70,38 +84,59 @@ object SearchPlan {
     )
   }
 
-  /** Balances the segments over `sets` by the bytes their vector column holds,
-    * largest first, so that every set reads about as much as the others.
-    * Segments of equal size, which includes segments whose row count the
-    * snapshot did not give, spread one per set. Segments keep their order
-    * inside a set.
+  /** Splits the segments into the sets one task each reads.
+    *
+    * A set holds at most `vectorsMaxBytes` of vectors, so a task can keep what
+    * it read and answer one query group after another on it; there are at least
+    * as many sets as executors, so every executor has work. Segments go in
+    * largest first and each one joins the lightest set that still has room,
+    * which spreads equal segments — including the ones whose row count the
+    * snapshot did not give — one per set. Segments keep their order inside a
+    * set.
     */
   def segmentSets(
       tasks: Seq[SegmentReadTask],
       layout: VectorLayout,
-      sets: Int
+      executors: Int,
+      vectorsMaxBytes: Long
   ): Seq[Seq[SegmentReadTask]] = {
-    require(sets > 0, s"A search needs at least one segment set: $sets")
-    if (tasks.isEmpty) return Seq.empty
-    val count = math.min(sets, tasks.size)
-    val bytes = tasks.map(task =>
-      task -> task.snapshotRows.getOrElse(0L) * layout.rowBytes.toLong
+    require(executors > 0, s"A search needs at least one executor: $executors")
+    require(
+      vectorsMaxBytes > 0,
+      s"The retained vector limit must be positive: $vectorsMaxBytes"
     )
-    val filled = Array.fill(count)(0L)
-    val members = Array.fill(count)(mutable.ArrayBuffer.empty[SegmentReadTask])
-    bytes.sortBy { case (task, size) => (-size, task.segmentId) }.foreach {
-      case (task, size) =>
+    if (tasks.isEmpty) return Seq.empty
+    val sizes =
+      tasks.map(task => task.segmentId -> segmentBytes(task, layout)).toMap
+    val total = sizes.values.sum
+    val needed = math.max(1L, (total + vectorsMaxBytes - 1L) / vectorsMaxBytes)
+    val start =
+      math.min(tasks.size.toLong, math.max(executors.toLong, needed)).toInt
+    val filled = mutable.ArrayBuffer.fill(start)(0L)
+    val members = mutable.ArrayBuffer.fill(start)(
+      mutable.ArrayBuffer.empty[SegmentReadTask]
+    )
+    tasks.sortBy(task => (-sizes(task.segmentId), task.segmentId)).foreach {
+      task =>
+        val size = sizes(task.segmentId)
         var lightest = 0
         var index = 1
-        while (index < count) {
+        while (index < filled.size) {
           val lighter = filled(index) < filled(lightest)
           val sameAndShorter = filled(index) == filled(lightest) &&
             members(index).size < members(lightest).size
           if (lighter || sameAndShorter) lightest = index
           index += 1
         }
-        members(lightest) += task
-        filled(lightest) += size
+        val full = members(lightest).nonEmpty &&
+          filled(lightest) + size > vectorsMaxBytes
+        if (full) {
+          filled += size
+          members += mutable.ArrayBuffer(task)
+        } else {
+          members(lightest) += task
+          filled(lightest) += size
+        }
     }
     val order = tasks.zipWithIndex.map { case (task, index) =>
       task.segmentId -> index
@@ -112,8 +147,13 @@ object SearchPlan {
       .toSeq
   }
 
-  /** Every (segment set, query group) pair, segment sets in their planned order
-    * and groups in query order.
+  private def segmentBytes(
+      task: SegmentReadTask,
+      layout: VectorLayout
+  ): Long = task.snapshotRows.getOrElse(0L) * layout.rowBytes.toLong
+
+  /** The first-stage tasks of one search: the segment sets and the query groups
+    * they each answer.
     */
   def of(
       tasks: Seq[SegmentReadTask],
@@ -121,24 +161,21 @@ object SearchPlan {
       executors: Int,
       queries: Int,
       k: Int,
-      groupMaxBytes: Long
-  ): Seq[Task] = {
-    val sets = segmentSets(tasks, layout, executors)
-    val slices = groups(queries, layout, k, groupMaxBytes)
-    for {
-      set <- sets
-      group <- slices
-    } yield Task(set, group)
-  }
+      groupMaxBytes: Long,
+      vectorsMaxBytes: Long
+  ): Plan = Plan(
+    segmentSets(tasks, layout, executors, vectorsMaxBytes),
+    groups(queries, layout, k, groupMaxBytes)
+  )
 
-  /** How many bytes of vectors a task keeps at once: a whole segment when it
-    * fits `vectorsMaxBytes`, and as much of one as fits when it does not. A
-    * segment is read once either way; what a task keeps is what the query
-    * groups after the first one run on
+  /** How many bytes of vectors one task keeps at once: its whole segment set,
+    * which the planner sized to fit, or `vectorsMaxBytes` when one segment is
+    * larger than that on its own. A segment is read once either way; what a
+    * task keeps is what the query groups after the first one run on
     * (docs/design/architecture/vector-search.html section 2.3).
     */
   def retainedBytes(
-      tasks: Seq[SegmentReadTask],
+      set: Seq[SegmentReadTask],
       layout: VectorLayout,
       vectorsMaxBytes: Long
   ): Long = {
@@ -146,9 +183,7 @@ object SearchPlan {
       vectorsMaxBytes > 0,
       s"The retained vector limit must be positive: $vectorsMaxBytes"
     )
-    val largest = tasks
-      .map(_.snapshotRows.getOrElse(0L) * layout.rowBytes.toLong)
-      .foldLeft(0L)(math.max)
-    math.min(math.max(largest, layout.rowBytes.toLong), vectorsMaxBytes)
+    val bytes = set.map(segmentBytes(_, layout)).sum
+    math.min(math.max(bytes, layout.rowBytes.toLong), vectorsMaxBytes)
   }
 }

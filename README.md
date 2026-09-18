@@ -13,10 +13,11 @@ Two lines exist right now. The 1.x line is frozen at tag `v1.6.0` and only takes
 fixes. The 2.0 line is a rewrite on branch `refactor/v2`, versioned
 `2.0.0-{branch}-{arch}-SNAPSHOT`.
 
-Persisted vector-index queries use `MilvusSearch.search`, which loads the
-snapshot's HNSW index files, applies deletions and scalar predicates before
-search, retrieves projected hit rows, and returns global TopK. See the
-[query contract](docs/reference-en.md#persisted-index-search-refactorv2).
+Vector search uses `MilvusSearch.search`, which takes a query set and returns
+each query's global TopK. It searches the snapshot's HNSW index files or scans
+the vectors exactly, applies deletions and scalar predicates before search, and
+retrieves the output columns of the rows it selected. See the
+[query contract](docs/reference-en.md#vector-search-refactorv2).
 Cardinal index files require a Cardinal-enabled build of the pinned Knowhere
 revision; the plain upstream CI artifact does not contain that engine.
 

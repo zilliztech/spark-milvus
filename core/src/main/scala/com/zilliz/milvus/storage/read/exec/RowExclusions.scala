@@ -1,5 +1,9 @@
 package com.zilliz.milvus.storage.read.exec
 
+import java.util.BitSet
+
+import org.apache.arrow.memory.BufferAllocator
+import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.storage.delete.DeletePlan
@@ -34,6 +38,64 @@ final class RowExclusions private (
     (expressionFields.toSeq.sorted.map(arrowColumn) ++
       (if (deletePlan.isEmpty) Seq.empty
        else Seq(pkColumn.get, timestampColumn))).distinct
+
+  /** The rows of a whole segment a search must not see, one bit per row.
+    *
+    * An index holds every row of its segment, so probing it needs the whole
+    * segment's bitmap before the first query runs. Building it reads the
+    * primary key, the timestamp and the filter's columns and nothing else: the
+    * vector column is never opened on this path
+    * (docs/design/architecture/vector-search.html section 2.4).
+    */
+  def bitmap(
+      task: SegmentReadTask,
+      arrowSchema: Schema,
+      rows: Long,
+      allocator: BufferAllocator,
+      reportMetrics: ReadMetrics => Unit = _ => ()
+  ): BitSet = {
+    require(
+      rows > 0 && rows <= Int.MaxValue,
+      s"Segment ${task.segmentId} has $rows rows, outside what a bitmap covers"
+    )
+    val excluded = new BitSet(rows.toInt)
+    if (neededColumns.isEmpty) return excluded
+    val reader = SegmentReaderRegistry.open(
+      task,
+      arrowSchema,
+      neededColumns,
+      columnNameFor,
+      allocator
+    )
+    var offset = 0L
+    try {
+      var next = reader.next()
+      while (next.nonEmpty) {
+        val batch = next.get
+        try {
+          require(
+            offset + batch.getRowCount <= rows,
+            s"Segment ${task.segmentId} holds more rows than the $rows it declared"
+          )
+          var row = 0
+          while (row < batch.getRowCount) {
+            if (excludes(batch, row)) excluded.set((offset + row).toInt)
+            row += 1
+          }
+          offset += batch.getRowCount
+        } finally batch.close()
+        next = reader.next()
+      }
+      require(
+        offset == rows,
+        s"Segment ${task.segmentId} gave $offset of the $rows rows it declared"
+      )
+    } finally {
+      try reader.close()
+      finally reportMetrics(reader.metrics)
+    }
+    excluded
+  }
 
   def excludes(batch: VectorSchemaRoot, row: Int): Boolean = {
     val deleted = !deletePlan.isEmpty && DeletePlans.rowDeleted(

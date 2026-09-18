@@ -1,6 +1,7 @@
 package com.zilliz.milvus.storage.read.exec
 
 import java.util.Locale
+import scala.util.Try
 
 import com.zilliz.milvus.jni.vector.NativeVectorIndex
 import com.zilliz.milvus.storage.codec.{
@@ -8,8 +9,13 @@ import com.zilliz.milvus.storage.codec.{
   IndexFileDecoder,
   MilvusIndexFileDecoder
 }
-import com.zilliz.milvus.storage.io.ObjectStore
-import com.zilliz.milvus.storage.snapshot.SegmentIndex
+import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
+import com.zilliz.milvus.storage.snapshot.{
+  SegmentIndex,
+  SegmentIndexes,
+  SegmentLayout
+}
 
 /** One segment's vector index, open and ready to be searched.
   *
@@ -39,6 +45,101 @@ final class SegmentIndexHandle private (
 }
 
 object SegmentIndexHandle {
+
+  /** The persisted index that serves `fieldId` in `task`'s segment, checked
+    * against what the snapshot pinned: `None` only when the snapshot says the
+    * segment has no index and the search allows that. Planning checks every
+    * task with this before any of them runs; the task checks again on the
+    * executor.
+    */
+  def select(
+      task: SegmentReadTask,
+      fieldId: Long,
+      metric: String,
+      allowUnindexed: Boolean
+  ): Option[SegmentIndex] = {
+    task.layout match {
+      case SegmentLayout.Manifest(_, version) =>
+        require(
+          version >= 0,
+          "Persisted index search requires a pinned data manifest version"
+        )
+      case _ =>
+    }
+    val selected = task.indexes match {
+      case SegmentIndexes.Available(indexes) =>
+        val matches = indexes.filter(_.fieldId == fieldId)
+        require(
+          matches.size <= 1,
+          s"Ambiguous index for segment ${task.segmentId}, field $fieldId"
+        )
+        matches.headOption
+      case SegmentIndexes.Unindexed => None
+      case SegmentIndexes.Unknown =>
+        throw new IllegalArgumentException(
+          s"Snapshot has no index metadata for segment ${task.segmentId}"
+        )
+    }
+    require(
+      selected.nonEmpty || allowUnindexed,
+      s"No persisted index for segment ${task.segmentId}, field $fieldId"
+    )
+    selected.foreach { descriptor =>
+      require(
+        descriptor.segmentId == task.segmentId && descriptor.partitionId == task.partitionId,
+        s"Index identity differs from the pinned segment ${task.segmentId}"
+      )
+      require(
+        descriptor.metricType.exists(_.equalsIgnoreCase(metric)),
+        s"Query metric differs from the persisted index metric of segment ${task.segmentId}"
+      )
+      require(
+        task.expectedRows.contains(descriptor.rowCount),
+        s"Index row count differs from the pinned segment ${task.segmentId}"
+      )
+      require(
+        descriptor.rowCount > 0 && descriptor.rowCount <= Int.MaxValue,
+        s"Segment ${task.segmentId} bitmap exceeds supported row count"
+      )
+    }
+    selected
+  }
+
+  /** Checks a whole plan before any task runs and names every segment that
+    * cannot serve the search.
+    */
+  def check(
+      tasks: Seq[SegmentReadTask],
+      fieldId: Long,
+      metric: String,
+      allowUnindexed: Boolean
+  ): Unit = {
+    val failures = tasks.flatMap { task =>
+      Try(select(task, fieldId, metric, allowUnindexed)).failed.toOption
+        .map(_.getMessage)
+    }
+    if (failures.nonEmpty) {
+      val shown = failures.take(20).mkString("; ")
+      val rest =
+        if (failures.size > 20) s"; ${failures.size - 20} more" else ""
+      throw new IllegalArgumentException(
+        s"Index search cannot run on ${failures.size} of ${tasks.size} segments: $shown$rest"
+      )
+    }
+  }
+
+  /** The index of this task's segment, read through the store the task names.
+    */
+  def open(
+      task: SegmentReadTask,
+      index: SegmentIndex,
+      dimension: Int,
+      nullable: Boolean
+  ): SegmentIndexHandle = {
+    val store = NativeObjectStore.Factory(task.properties).open()
+    try open(index, dimension, nullable, store)
+    finally store.close()
+  }
 
   /** The range a persisted index has to be in for this connector to load it: an
     * HNSW index over a non-nullable float vector, with a metric and a format

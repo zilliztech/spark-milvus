@@ -30,53 +30,70 @@ object ExactScan {
       merger: TopKMerger,
       onNativeCall: Long => Unit = _ => ()
   ): Unit = {
+    var next = vectors.next()
+    while (next.nonEmpty) {
+      val current = next.get
+      try
+        batch(
+          current,
+          queries,
+          segmentId,
+          k,
+          metric,
+          allocator,
+          merger,
+          onNativeCall
+        )
+      finally current.close()
+      next = vectors.next()
+    }
+  }
+
+  /** One batch, one native call. The batch stays open: a task that answers more
+    * than one query group keeps its batches and calls this once per group
+    * (section 2.3).
+    */
+  def batch(
+      current: SegmentVectors.Batch,
+      queries: QueryMatrix,
+      segmentId: Long,
+      k: Int,
+      metric: String,
+      allocator: BufferAllocator,
+      merger: TopKMerger,
+      onNativeCall: Long => Unit = _ => ()
+  ): Unit = {
     require(k > 0, s"topK must be positive: $k")
     require(Candidate.metricRanks(metric), s"Unsupported metric: $metric")
+    if (current.visibleRows <= 0) return
     val parameters = s"""{"metric_type":"$metric"}"""
     val dtype = KnowhereBuffers.dtypeOf(queries.layout)
-    var batch = vectors.next()
-    while (batch.nonEmpty) {
-      val current = batch.get
-      try
-        if (current.visibleRows > 0) {
-          val count = math.min(k, current.visibleRows)
-          val ids = allocator.buffer(queries.queries.toLong * count * 8L)
-          val scores = allocator.buffer(queries.queries.toLong * count * 4L)
-          val mask = allocator.buffer((current.rows.toLong + 7L) / 8L)
-          try {
-            writeMask(current, mask)
-            val started = System.nanoTime()
-            NativeVectorSearch.bruteForce(
-              dtype,
-              current.base.buffer,
-              current.rows.toLong,
-              queries.buffer,
-              queries.queries.toLong,
-              queries.dimension,
-              count,
-              bytes(mask, mask.capacity()),
-              bytes(ids, queries.queries.toLong * count * 8L),
-              bytes(scores, queries.queries.toLong * count * 4L),
-              parameters
-            )
-            onNativeCall(System.nanoTime() - started)
-            collect(
-              current,
-              queries.queries,
-              count,
-              ids,
-              scores,
-              segmentId,
-              merger
-            )
-          } finally {
-            mask.close()
-            scores.close()
-            ids.close()
-          }
-        }
-      finally current.close()
-      batch = vectors.next()
+    val count = math.min(k, current.visibleRows)
+    val ids = allocator.buffer(queries.queries.toLong * count * 8L)
+    val scores = allocator.buffer(queries.queries.toLong * count * 4L)
+    val mask = allocator.buffer((current.rows.toLong + 7L) / 8L)
+    try {
+      writeMask(current, mask)
+      val started = System.nanoTime()
+      NativeVectorSearch.bruteForce(
+        dtype,
+        current.base.buffer,
+        current.rows.toLong,
+        queries.buffer,
+        queries.queries.toLong,
+        queries.dimension,
+        count,
+        bytes(mask, mask.capacity()),
+        bytes(ids, queries.queries.toLong * count * 8L),
+        bytes(scores, queries.queries.toLong * count * 4L),
+        parameters
+      )
+      onNativeCall(System.nanoTime() - started)
+      collect(current, queries.queries, count, ids, scores, segmentId, merger)
+    } finally {
+      mask.close()
+      scores.close()
+      ids.close()
     }
   }
 

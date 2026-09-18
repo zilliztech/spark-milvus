@@ -95,6 +95,9 @@ object MilvusOption {
   val ReadBatchMaxRows = "milvus.read.batch.max.rows"
   val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
   val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
+  val SearchQueriesMaxBytes = "milvus.search.queries.max.bytes"
+  val SearchGroupMaxBytes = "milvus.search.group.max.bytes"
+  val SearchVectorsMaxBytes = "milvus.search.vectors.max.bytes"
   val WriteFileRollingBytes = "milvus.write.file.rolling.bytes"
   val MilvusFilter = "milvus.filter"
 
