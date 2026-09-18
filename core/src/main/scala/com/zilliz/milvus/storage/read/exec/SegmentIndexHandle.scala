@@ -29,7 +29,9 @@ final class SegmentIndexHandle private (
     private[storage] val index: NativeVectorIndex,
     val metric: String,
     val segmentId: Long,
-    val buildId: Long
+    val buildId: Long,
+    val bytes: Long,
+    val loadNanos: Long
 ) extends AutoCloseable {
   private var closed = false
 
@@ -180,11 +182,14 @@ object SegmentIndexHandle {
       index.currentIndexVersion.exists(_ >= 0),
       "Snapshot must declare the persisted vector index format version"
     )
+    val loaded = IndexFileCodec.load(index, dimension, store, decoder)
     new SegmentIndexHandle(
-      IndexFileCodec.load(index, dimension, store, decoder),
+      loaded.index,
       metric,
       index.segmentId,
-      index.buildId
+      index.buildId,
+      loaded.bytes,
+      loaded.nanos
     )
   }
 }

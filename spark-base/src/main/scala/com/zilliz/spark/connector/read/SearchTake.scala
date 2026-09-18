@@ -10,6 +10,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.TaskContext
 
 import com.zilliz.milvus.storage.read.exec.SegmentReaderRegistry
+import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 
 /** The second stage: the output columns of the rows a search selected.
@@ -25,7 +26,8 @@ private[read] object SearchTake {
       hits: DataFrame,
       output: StructType,
       partitions: Map[Long, MilvusInputPartition],
-      arrowMaxBytes: Long
+      arrowMaxBytes: Long,
+      metrics: SearchMetrics
   ): RDD[Row] = {
     val hitSchema = hits.schema
     val segmentColumn = hitSchema.fieldIndex("_segment_id")
@@ -54,7 +56,8 @@ private[read] object SearchTake {
             output,
             hitRows,
             offsetColumn,
-            allocator.allocator
+            allocator.allocator,
+            metrics
           )
         }
       }
@@ -84,7 +87,8 @@ private[read] object SearchTake {
       output: StructType,
       hits: Seq[Row],
       offsetColumn: Int,
-      allocator: org.apache.arrow.memory.BufferAllocator
+      allocator: org.apache.arrow.memory.BufferAllocator,
+      metrics: SearchMetrics
   ): Iterator[Row] = {
     val binding = ColumnBinding(partition, output)
     val offsets = hits.map(_.getLong(offsetColumn)).distinct.sorted.toArray
@@ -93,6 +97,7 @@ private[read] object SearchTake {
     val projected = if (columns.nonEmpty) columns else Seq(binding.pkColumnName)
     val toScala = CatalystTypeConverters.createToScalaConverter(output)
     val byOffset = mutable.Map.empty[Long, Row]
+    val started = System.nanoTime()
     val reader = SegmentReaderRegistry.open(
       partition.task,
       binding.arrowSchema,
@@ -135,7 +140,15 @@ private[read] object SearchTake {
           s"Segment ${partition.task.segmentId} returned $index of the ${offsets.length} rows asked for"
         )
       } finally taken.close()
-    } finally reader.close()
+    } finally {
+      try reader.close()
+      finally {
+        metrics.takeRows.add(offsets.length.toLong)
+        metrics.takeNanos.add(System.nanoTime() - started)
+        metrics.readBytes.add(reader.metrics.arrowBytes)
+        metrics.readNanos.add(reader.metrics.jniNanos)
+      }
+    }
     hits.iterator.map(hit =>
       Row.merge(hit, byOffset(hit.getLong(offsetColumn)))
     )

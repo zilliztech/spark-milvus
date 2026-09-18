@@ -56,6 +56,14 @@ nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用
 `milvus.search.vectors.max.bytes`（默认 2 GiB）是一个任务同时留在内存里的向量字节
 上限，也决定一个任务读多少个段。
 
+每次搜索注册一组累加器，在 Spark 的 stage 页面可见：`milvus.search.segments`、
+`milvus.search.read.bytes` 与 `milvus.search.read.nanos`、
+`milvus.search.index.bytes` 与 `milvus.search.index.load.nanos`、
+`milvus.search.bitmap.nanos`、`milvus.search.knowhere.calls` 与
+`milvus.search.knowhere.nanos`、`milvus.search.candidates`、
+`milvus.search.take.rows` 与 `milvus.search.take.nanos`。Knowhere 在自己的线程池里
+计算，这部分耗时看 `milvus.search.knowhere.nanos`，不计入任务的 CPU 时间。
+
 旧的逐段 `vector.search.*` 读取选项仍在，返回的是每段候选，不是全局 TopK。
 
 ## 版本兼容性

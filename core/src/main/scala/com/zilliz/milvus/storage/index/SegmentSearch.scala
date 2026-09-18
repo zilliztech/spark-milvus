@@ -4,7 +4,11 @@ import java.util.BitSet
 
 import org.apache.arrow.memory.BufferAllocator
 
-import com.zilliz.milvus.storage.read.exec.{SegmentIndexHandle, SegmentVectors}
+import com.zilliz.milvus.storage.read.exec.{
+  ReadMetrics,
+  SegmentIndexHandle,
+  SegmentVectors
+}
 import com.zilliz.milvus.storage.schema.VectorLayout
 import com.zilliz.milvus.storage.Logging
 
@@ -50,7 +54,8 @@ object SegmentSearch extends Logging {
     */
   final class Held private[index] (
       private val sources: Seq[Source],
-      private val batches: Map[Long, Seq[SegmentVectors.Batch]]
+      private val batches: Map[Long, Seq[SegmentVectors.Batch]],
+      val read: ReadMetrics = ReadMetrics.Zero
   ) extends AutoCloseable {
 
     def segments: Int = sources.size
@@ -122,6 +127,7 @@ object SegmentSearch extends Logging {
     val sources = Seq.newBuilder[Source]
     val batches = Map.newBuilder[Long, Seq[SegmentVectors.Batch]]
     var retained = 0L
+    var read = ReadMetrics.Zero
     try {
       segments.foreach { segmentId =>
         val source = open(segmentId)
@@ -142,10 +148,11 @@ object SegmentSearch extends Logging {
               next = vectors.next()
             }
             batches += id -> held.result()
+            read = read + vectors.metrics
           case Index(_, _, _) =>
         }
       }
-      val result = new Held(sources.result(), batches.result().toMap)
+      val result = new Held(sources.result(), batches.result().toMap, read)
       logInfo(
         s"Segment set held: segments=${segments.size}, retainedBytes=${result.retainedBytes}, " +
           s"rowBytes=${layout.rowBytes}"
@@ -153,18 +160,23 @@ object SegmentSearch extends Logging {
       result
     } catch {
       case failure: Throwable =>
-        val opened = new Held(sources.result(), batches.result().toMap)
+        val opened = new Held(sources.result(), batches.result().toMap, read)
         try opened.close()
         catch { case closing: Throwable => failure.addSuppressed(closing) }
         throw failure
     }
   }
 
-  /** Counts what one task did, for the accumulators section 1.3 lists. */
+  /** Counts what one task did, for the accumulators section 1.3 lists.
+    *
+    * `read` is what the exact scan pulled through the reader; an index probe
+    * reads its files when the handle opens, which the handle itself reports.
+    */
   final case class Counters(
       segments: Int,
       nativeCalls: Int,
-      nativeNanos: Long
+      nativeNanos: Long,
+      read: ReadMetrics = ReadMetrics.Zero
   )
 
   /** Searches every segment of the set in turn. Sources are opened one at a
@@ -188,6 +200,7 @@ object SegmentSearch extends Logging {
       nativeCalls += 1
       nativeNanos += nanos
     }
+    var read = ReadMetrics.Zero
     segments.foreach { segmentId =>
       val source = open(segmentId)
       try
@@ -203,6 +216,7 @@ object SegmentSearch extends Logging {
               merger,
               counted
             )
+            read = read + vectors.metrics
           case Index(id, handle, excluded) =>
             require(
               handle.metric == metric,
@@ -226,6 +240,6 @@ object SegmentSearch extends Logging {
         s"topK=$k, metric=$metric, candidates=${merger.size}, " +
         s"nativeSearchCalls=$nativeCalls, nativeMillis=${nativeNanos / 1000000L}"
     )
-    (merger, Counters(segments.size, nativeCalls, nativeNanos))
+    (merger, Counters(segments.size, nativeCalls, nativeNanos, read))
   }
 }

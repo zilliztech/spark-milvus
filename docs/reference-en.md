@@ -69,6 +69,15 @@ time, counted as queries × (dimension × element width + K × 28 bytes).
 one task keeps while it answers them, and it also bounds how many segments one
 task reads.
 
+Each search registers its own accumulators, which the stage page shows:
+`milvus.search.segments`, `milvus.search.read.bytes` and
+`milvus.search.read.nanos`, `milvus.search.index.bytes` and
+`milvus.search.index.load.nanos`, `milvus.search.bitmap.nanos`,
+`milvus.search.knowhere.calls` and `milvus.search.knowhere.nanos`,
+`milvus.search.candidates`, and `milvus.search.take.rows` and
+`milvus.search.take.nanos`. Knowhere computes in its own thread pool, so its
+time is in `milvus.search.knowhere.nanos` rather than in the task's CPU time.
+
 The older per-segment `vector.search.*` scan options still exist and return
 per-segment candidates rather than a global top-k.
 

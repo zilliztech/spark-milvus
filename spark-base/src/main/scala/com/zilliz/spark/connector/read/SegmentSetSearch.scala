@@ -18,7 +18,9 @@ import com.zilliz.milvus.storage.read.exec.{
   SegmentIndexHandle,
   SegmentVectors
 }
+import com.zilliz.milvus.storage.read.exec.ReadMetrics
 import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -64,7 +66,8 @@ private[read] object SegmentSetSearch extends Logging {
       set: Seq[MilvusInputPartition],
       spec: Spec,
       groups: Iterator[SearchQueries.Group],
-      groupCount: Int
+      groupCount: Int,
+      metrics: SearchMetrics
   ): Iterator[Row] = {
     require(set.nonEmpty, "A first-stage task has no segments")
     require(groupCount > 0, s"A task answers $groupCount query groups")
@@ -75,8 +78,9 @@ private[read] object SegmentSetSearch extends Logging {
       TaskContext.get().partitionId(),
       spec.arrowMaxBytes
     )
+    metrics.segments.add(set.size.toLong)
     def open(segmentId: Long): SegmentSearch.Source =
-      source(partitions(segmentId), spec, allocator.allocator)
+      source(partitions(segmentId), spec, allocator.allocator, metrics)
     if (groupCount == 1) {
       try {
         val group = groups.next()
@@ -92,6 +96,7 @@ private[read] object SegmentSetSearch extends Logging {
               allocator.allocator
             )
         }
+        report(metrics, counters, merger.size)
         logInfo(
           s"Search task: segments=${counters.segments}, groups=1, " +
             s"queries=${group.queries}, candidates=${merger.size}"
@@ -105,6 +110,7 @@ private[read] object SegmentSetSearch extends Logging {
         spec.vectorsMaxBytes,
         spec.layout
       )
+      read(metrics, held.read)
       Option(TaskContext.get()).foreach(
         _.addTaskCompletionListener[Unit] { _ =>
           try held.close()
@@ -122,6 +128,7 @@ private[read] object SegmentSetSearch extends Logging {
               allocator.allocator
             )
         }
+        report(metrics, counters, merger.size)
         logInfo(
           s"Search task: segments=${counters.segments}, groups=$groupCount, " +
             s"queries=${group.queries}, candidates=${merger.size}"
@@ -129,6 +136,22 @@ private[read] object SegmentSetSearch extends Logging {
         candidates(merger, group)
       }
     }
+  }
+
+  private def report(
+      metrics: SearchMetrics,
+      counters: SegmentSearch.Counters,
+      candidates: Int
+  ): Unit = {
+    metrics.knowhereCalls.add(counters.nativeCalls.toLong)
+    metrics.knowhereNanos.add(counters.nativeNanos)
+    metrics.candidates.add(candidates.toLong)
+    read(metrics, counters.read)
+  }
+
+  private def read(metrics: SearchMetrics, of: ReadMetrics): Unit = {
+    metrics.readBytes.add(of.arrowBytes)
+    metrics.readNanos.add(of.jniNanos)
   }
 
   private def searching[A](
@@ -166,7 +189,8 @@ private[read] object SegmentSetSearch extends Logging {
   private def source(
       partition: MilvusInputPartition,
       spec: Spec,
-      allocator: BufferAllocator
+      allocator: BufferAllocator,
+      metrics: SearchMetrics
   ): SegmentSearch.Source = {
     val task = partition.task
     val binding = ColumnBinding(partition, StructType(Seq.empty))
@@ -188,22 +212,24 @@ private[read] object SegmentSetSearch extends Logging {
         )
     selected match {
       case Some(descriptor) =>
+        val started = System.nanoTime()
         val excluded = exclusions.bitmap(
           task,
           binding.arrowSchema,
           descriptor.rowCount,
-          allocator
+          allocator,
+          read(metrics, _)
         )
-        SegmentSearch.Index(
-          task.segmentId,
-          SegmentIndexHandle.open(
-            task,
-            descriptor,
-            spec.layout.dimension,
-            spec.nullable
-          ),
-          excluded
+        metrics.bitmapNanos.add(System.nanoTime() - started)
+        val handle = SegmentIndexHandle.open(
+          task,
+          descriptor,
+          spec.layout.dimension,
+          spec.nullable
         )
+        metrics.indexBytes.add(handle.bytes)
+        metrics.indexLoadNanos.add(handle.loadNanos)
+        SegmentSearch.Index(task.segmentId, handle, excluded)
       case None =>
         SegmentSearch.Exact(
           task.segmentId,

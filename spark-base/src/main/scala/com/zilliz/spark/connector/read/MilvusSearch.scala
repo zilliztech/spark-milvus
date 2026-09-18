@@ -13,6 +13,7 @@ import com.zilliz.milvus.storage.expr.PlanParser
 import com.zilliz.milvus.storage.index.SearchPlan
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{
   MilvusOption,
   SearchLimits,
@@ -141,12 +142,22 @@ object MilvusSearch {
       MilvusOption(caseInsensitive).readLimits.arrowMaxBytes
     )
 
+    val metrics = SearchMetrics.create(spark.sparkContext)
     val hits =
       if (plan.isEmpty) empty(spark)
       else
         merged(
           spark.createDataFrame(
-            candidates(spark, selected, partitions, plan, spec, layout, limits),
+            candidates(
+              spark,
+              selected,
+              partitions,
+              plan,
+              spec,
+              layout,
+              limits,
+              metrics
+            ),
             SegmentSetSearch.CandidateSchema
           ),
           k,
@@ -161,7 +172,8 @@ object MilvusSearch {
           partitions
             .map(partition => partition.task.segmentId -> partition)
             .toMap,
-          spec.arrowMaxBytes
+          spec.arrowMaxBytes,
+          metrics
         ),
         StructType(hits.schema.fields ++ outputSchema.fields)
       )
@@ -216,7 +228,8 @@ object MilvusSearch {
       plan: SearchPlan.Plan,
       spec: SegmentSetSearch.Spec,
       layout: VectorLayout,
-      limits: SearchLimits
+      limits: SearchLimits,
+      metrics: SearchMetrics
   ): RDD[Row] = {
     val byId =
       partitions.map(partition => partition.task.segmentId -> partition).toMap
@@ -244,7 +257,8 @@ object MilvusSearch {
               group.firstQuery
             )
           ),
-          groups.size
+          groups.size,
+          metrics
         )
       }
     } else {
@@ -257,7 +271,8 @@ object MilvusSearch {
             paired.head._1,
             spec,
             paired.map(_._2),
-            groups.size
+            groups.size,
+            metrics
           )
         }
       }

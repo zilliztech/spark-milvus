@@ -7,6 +7,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
+import com.zilliz.spark.connector.metrics.SearchMetrics
+
 /** The merge stage inside Spark: candidates from several tasks become one top-k
   * per query, with the ranks the result contract promises.
   */
@@ -105,6 +107,44 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
     rows.map(_.getAs[Long]("query_id")).toSeq shouldBe Seq(7L)
     rows.map(_.getAs[Int]("rank")).toSeq shouldBe Seq(1)
+  }
+
+  test("a search registers the accumulators the design names") {
+    val metrics = SearchMetrics.create(spark.sparkContext)
+
+    metrics.all.map(_._1) shouldBe Seq(
+      "milvus.search.segments",
+      "milvus.search.read.bytes",
+      "milvus.search.read.nanos",
+      "milvus.search.index.bytes",
+      "milvus.search.index.load.nanos",
+      "milvus.search.bitmap.nanos",
+      "milvus.search.knowhere.calls",
+      "milvus.search.knowhere.nanos",
+      "milvus.search.candidates",
+      "milvus.search.take.rows",
+      "milvus.search.take.nanos"
+    )
+    metrics.all.foreach { case (name, accumulator) =>
+      accumulator.name shouldBe Some(name)
+      accumulator.value shouldBe 0L
+    }
+
+    spark.sparkContext
+      .parallelize(Seq(3L, 4L), 2)
+      .foreach(metrics.candidates.add)
+
+    metrics.candidates.value shouldBe 7L
+    metrics.summary should include("milvus.search.candidates=7")
+  }
+
+  test("a second search counts on its own accumulators") {
+    val first = SearchMetrics.create(spark.sparkContext)
+    val second = SearchMetrics.create(spark.sparkContext)
+
+    first.segments.add(2L)
+
+    second.segments.value shouldBe 0L
   }
 
   test("no candidates give no rows") {

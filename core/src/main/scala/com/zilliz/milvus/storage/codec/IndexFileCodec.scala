@@ -23,6 +23,17 @@ private[storage] object IndexFileCodec extends Logging {
   private val mapper = new ObjectMapper()
     .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
 
+  /** An index that has been read, decoded and handed to Knowhere, with what
+    * that cost: the object bytes read and the wall time of the whole load. The
+    * search reports both as `milvus.search.index.*`
+    * (docs/design/architecture/vector-search.html section 1.3).
+    */
+  private[storage] final case class Loaded(
+      index: NativeVectorIndex,
+      bytes: Long,
+      nanos: Long
+  )
+
   private[codec] final case class Slice(name: String, count: Int, length: Long)
 
   private[codec] def parseSlices(bytes: Array[Byte]): Vector[Slice] = {
@@ -225,7 +236,7 @@ private[storage] object IndexFileCodec extends Logging {
       dimension: Int,
       store: ObjectStore,
       decoder: IndexFileDecoder
-  ): NativeVectorIndex = {
+  ): Loaded = {
     val started = System.nanoTime()
     var objectsRead = 0
     var bytesRead = 0L
@@ -235,13 +246,14 @@ private[storage] object IndexFileCodec extends Logging {
       bytesRead = Math.addExact(bytesRead, bytes.length.toLong)
       bytes
     }
-    def finished(loaded: NativeVectorIndex): NativeVectorIndex = {
+    def finished(loaded: NativeVectorIndex): Loaded = {
+      val elapsed = System.nanoTime() - started
       logInfo(
         s"Persisted index loaded: segment=${index.segmentId}, build=${index.buildId}, " +
           s"objectsRead=$objectsRead, bytesRead=$bytesRead, nativeDeserializeCalls=1, " +
-          s"elapsedMillis=${(System.nanoTime() - started) / 1000000L}"
+          s"elapsedMillis=${elapsed / 1000000L}"
       )
-      loaded
+      Loaded(loaded, bytesRead, elapsed)
     }
     val names = index.filePaths.map { key =>
       require(
