@@ -236,21 +236,11 @@ class KnowhereBuffersTest
   }
 
   test("every dense element type maps onto the Knowhere type") {
-    KnowhereBuffers.dtypeOf(
-      VectorLayout(VectorElementType.Float32, 2)
-    ) shouldBe DType.FLOAT32
-    KnowhereBuffers.dtypeOf(
-      VectorLayout(VectorElementType.Float16, 2)
-    ) shouldBe DType.FLOAT16
-    KnowhereBuffers.dtypeOf(
-      VectorLayout(VectorElementType.BFloat16, 2)
-    ) shouldBe DType.BFLOAT16
-    KnowhereBuffers.dtypeOf(
-      VectorLayout(VectorElementType.Int8, 2)
-    ) shouldBe DType.INT8
-    KnowhereBuffers.dtypeOf(
-      VectorLayout(VectorElementType.Bit, 8)
-    ) shouldBe DType.BINARY
+    VectorLayout(VectorElementType.Float32, 2).dtype shouldBe DType.FLOAT32
+    VectorLayout(VectorElementType.Float16, 2).dtype shouldBe DType.FLOAT16
+    VectorLayout(VectorElementType.BFloat16, 2).dtype shouldBe DType.BFLOAT16
+    VectorLayout(VectorElementType.Int8, 2).dtype shouldBe DType.INT8
+    VectorLayout(VectorElementType.Bit, 8).dtype shouldBe DType.BINARY
   }
 
   test("a binary vector takes one byte per eight dimensions") {

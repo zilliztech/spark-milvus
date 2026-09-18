@@ -104,12 +104,24 @@ class IndexFileCodecTest extends AnyFunSuite {
       }
       result
     }
+    // The HNSW family writes several markers for one index type: flat L2 is
+    // IHNf, flat cosine IHN9, and scalar quantization IHNs or IHNa.
     Seq("IHNf", "IHN9").foreach { magic =>
       val bytes = magic.getBytes(UTF_8) ++ new Array[Byte](60)
-      assert(probe(bytes).engineType(8, false) == "HNSW")
-      assert(probe(bytes).engineType(8, true) == "HNSW_DEPRECATED")
-      intercept[IllegalArgumentException](probe(bytes).engineType(5, true))
+      assert(probe(bytes).engine("HNSW", 8, false) == "HNSW")
+      assert(probe(bytes).engine("HNSW", 8, true) == "HNSW_DEPRECATED")
+      intercept[IllegalArgumentException](probe(bytes).engine("HNSW", 5, true))
     }
+    Seq("IHNs", "IHNa").foreach { magic =>
+      val bytes = magic.getBytes(UTF_8) ++ new Array[Byte](60)
+      assert(probe(bytes).engine("HNSW_SQ", 8, false) == "HNSW_SQ")
+      assert(probe(bytes).engine("HNSW_SQ", 8, true) == "HNSW_SQ")
+    }
+    Seq("IwFl" -> "IVF_FLAT", "IwSq" -> "IVF_SQ8", "IBxF" -> "BIN_FLAT")
+      .foreach { case (magic, indexType) =>
+        val bytes = magic.getBytes(UTF_8) ++ new Array[Byte](60)
+        assert(probe(bytes).engine(indexType, 8, false) == indexType)
+      }
     val cardinal = new Array[Byte](64)
     ByteBuffer
       .wrap(cardinal, 40, 24)
@@ -118,14 +130,21 @@ class IndexFileCodecTest extends AnyFunSuite {
       .putInt(1)
       .putLong(32)
       .putLong(16)
-    assert(probe(cardinal).engineType(10, true) == "HNSW")
-    intercept[IllegalArgumentException](probe(cardinal).engineType(10, false))
-    intercept[IllegalArgumentException](probe(cardinal).engineType(8, true))
-    Seq("IHNp", "IHMV", "????").foreach { unsupported =>
-      intercept[IllegalArgumentException] {
-        probe(unsupported.getBytes(UTF_8) ++ new Array[Byte](60))
-          .engineType(10, true)
-      }
+    assert(probe(cardinal).engine("HNSW", 10, true) == "HNSW")
+    intercept[IllegalArgumentException](
+      probe(cardinal).engine("HNSW", 10, false)
+    )
+    intercept[IllegalArgumentException](probe(cardinal).engine("HNSW", 8, true))
+    intercept[IllegalArgumentException](
+      probe(cardinal).engine("HNSW_SQ", 10, true)
+    )
+    // A stream of the other family, or of no family, is refused.
+    Seq("IwFl" -> "HNSW", "IHNf" -> "IVF_FLAT", "????" -> "HNSW").foreach {
+      case (magic, indexType) =>
+        intercept[IllegalArgumentException] {
+          probe(magic.getBytes(UTF_8) ++ new Array[Byte](60))
+            .engine(indexType, 10, true)
+        }
     }
   }
 

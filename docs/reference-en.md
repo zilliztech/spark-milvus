@@ -37,10 +37,16 @@ offset. `_score` preserves the value Knowhere returned. Indexes containing
 vector quantization, such as Cardinal RBQ, can return approximate scores; the
 connector does not read the original vectors to recompute them.
 
-`mode = "index"` searches the persisted index the snapshot pinned, over a
-non-nullable FloatVector with L2, IP or COSINE, and the query metric must match
-the index. `mode = "exact"` computes every distance instead: it takes every
-dense vector type, and binary vectors take HAMMING or JACCARD.
+`mode = "index"` searches the persisted index the snapshot pinned. It loads the
+HNSW family (`HNSW`, `HNSW_SQ`, `HNSW_PQ`, `HNSW_PRQ`, including the HNSW a
+Cardinal build writes), the IVF family (`IVF_FLAT`, `IVF_SQ8`, `IVF_PQ`,
+`BIN_IVF_FLAT`) and `FLAT` and `BIN_FLAT`, over the element type the column
+carries, and the query metric must match the index. A nullable column is indexed
+over the rows that have a value, which its index files record in a `valid_data`
+bitmap; without that bitmap the search fails. DiskANN, sparse, GPU and encrypted
+indexes fail while the query is planned. `mode = "exact"` computes every distance
+instead: it takes every dense vector type, and binary vectors take HAMMING or
+JACCARD.
 
 The filter runs before search. Supported scalar syntax is comparison
 (`==`, `!=`, `<`, `<=`, `>`, `>=`), `in`, `not in`, `is null`, `is not null`,
@@ -54,8 +60,9 @@ segment, fail while the query is planned, naming every such segment; corrupt
 files and incompatible formats fail when a task loads the index.
 `allowUnindexed = true` scans a segment exactly when the snapshot confirms the
 field has no index there. Default is `false`. Each task owns and closes the
-indexes it loaded; they are not cached across tasks. HNSW `ef` is the only
-supported search parameter and must be an integer at least K. Encrypted indexes
+indexes it loaded; they are not cached across tasks. Search parameters follow the index family: the HNSW family takes `ef`, an
+integer at least K, defaulting to `max(64, K)`; the IVF family takes `nprobe`, a
+positive integer defaulting to 16; a flat index takes none. Encrypted indexes
 and nullable-vector ID mappings are unsupported. Cardinal `_mem.index.bin`
 requires the pinned Cardinal-enabled native build; see
 [native build instructions](contributing.md#knowhere-library-loading).

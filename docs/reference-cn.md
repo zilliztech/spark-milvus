@@ -33,9 +33,13 @@ BinaryVector 用 `BINARY`。另有一个以 `queryVector: Array[Float]` 代替�
 返回值；包含向量量化的索引（如 Cardinal 的 RBQ）可能返回近似分数，Connector 不读
 原始向量重算。
 
-`mode = "index"` 用快照钉住的持久化索引，范围是非 nullable FloatVector 加
-L2、IP、COSINE，查询 metric 要与索引一致；`mode = "exact"` 逐条算距离，支持全部稠密
-向量类型，二值向量用 HAMMING 或 JACCARD。
+`mode = "index"` 用快照钉住的持久化索引，能加载 HNSW 家族（`HNSW`、`HNSW_SQ`、
+`HNSW_PQ`、`HNSW_PRQ`，含 Cardinal 构建写出的 HNSW）、IVF 家族（`IVF_FLAT`、
+`IVF_SQ8`、`IVF_PQ`、`BIN_IVF_FLAT`）以及 `FLAT`、`BIN_FLAT`，元素类型随列，查询
+metric 要与索引一致。nullable 列只对有值的行建索引，索引文件里的 `valid_data` 位图
+给出行号对应关系，没有这份位图时报错。DiskANN、稀疏索引、GPU 索引和加密索引在规划时
+报错。`mode = "exact"` 逐条算距离，支持全部稠密向量类型，二值向量用 HAMMING 或
+JACCARD。
 
 `filter` 在搜索前应用。支持标量比较（`==`、`!=`、`<`、`<=`、`>`、`>=`）、
 `in`、`not in`、`is null`、`is not null`、`and`、`or`、`not` 和括号。
@@ -45,7 +49,8 @@ L2、IP、COSINE，查询 metric 要与索引一致；`mode = "exact"` 逐条算
 缺失索引元数据、索引的 metric 或行数与段不符，在规划时报错并列出所有这样的段；
 损坏文件、格式不兼容在任务加载索引时报错。只有快照明确表示该字段在这个段上没有索引
 时，`allowUnindexed = true` 才让这个段改用精确扫描，默认 `false`。索引由每个任务
-独占并关闭，不跨任务缓存。搜索参数只支持整数 `ef`，且不得小于 K。加密索引和
+独占并关闭，不跨任务缓存。搜索参数按索引家族给：HNSW 家族用整数 `ef`，不得小于 K，默认 `max(64, K)`；IVF 家族
+用正整数 `nprobe`，默认 16；FLAT 不接受参数。加密索引和
 nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用 Cardinal 的固定
 版本原生产物，见[构建说明](contributing.md#knowhere-library-loading)。
 

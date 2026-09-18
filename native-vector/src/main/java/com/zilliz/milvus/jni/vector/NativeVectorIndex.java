@@ -99,18 +99,27 @@ public final class NativeVectorIndex implements AutoCloseable {
             data.write(name, offset, bytes);
         }
 
-        public NativeVectorIndex load(String engineType) {
+        /**
+         * Deserializes the payloads into the index the caller names.
+         *
+         * <p>The engine name is the index type Knowhere registers, which is also the name its
+         * Serialize gives the payload; an IVF index additionally answers to the names Knowhere 1.x
+         * wrote. Which engines and element types this connector accepts is decided above this
+         * layer.
+         */
+        public NativeVectorIndex load(String engineType, DType dataType) {
             active();
             attempted = true;
             KnowhereIndex loaded = null;
             try {
-                if (!"HNSW".equals(engineType) && !"HNSW_DEPRECATED".equals(engineType)) {
-                    throw new IllegalArgumentException("Persisted vector engine is unsupported: " + engineType);
+                Objects.requireNonNull(engineType, "engineType");
+                Objects.requireNonNull(dataType, "dataType");
+                String payload = "HNSW_DEPRECATED".equals(engineType) ? "HNSW" : engineType;
+                if (!names.contains(payload) && !names.contains("IVF") && !names.contains("BinaryIVF")) {
+                    throw new IllegalArgumentException(
+                            "Persisted index is missing its " + payload + " payload; it carries " + names);
                 }
-                if (!names.contains("HNSW")) {
-                    throw new IllegalArgumentException("Persisted index is missing its HNSW payload");
-                }
-                loaded = Knowhere.createIndex(engineType, DType.FLOAT32, version);
+                loaded = Knowhere.createIndex(engineType, dataType, version);
                 loaded.deserialize(data, parameters);
                 if (loaded.dimensions() != dimension || loaded.rows() != rows) {
                     throw new IllegalArgumentException("Persisted index shape differs from segment metadata: "

@@ -119,7 +119,7 @@ Persisted HNSW loading uses upstream BinarySet and index search APIs; Cardinal
 stream files require a Cardinal-enabled build. Real-file compatibility and
 validation results are recorded in the vector search design.
 
-Six design questions are still open: 10, 19, 21, 22, 23 and 26 in
+Five design questions are still open: 10, 19, 22, 23 and 26 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
 block specific packages, so check that list before starting on one.
 

@@ -83,10 +83,10 @@
 </tbody></table></div>
 <div class="table"><table>
 <thead><tr><th>范围</th><th>exact</th><th>index</th></tr></thead><tbody>
-<tr><td>向量类型</td><td>FloatVector、Float16Vector、BFloat16Vector、Int8Vector、BinaryVector；nullable 字段的空向量行被排除</td><td>非 nullable FloatVector</td></tr>
-<tr><td>距离</td><td>浮点与 int8 向量：L2、IP、COSINE；二值向量：HAMMING、JACCARD</td><td>L2、IP、COSINE，与索引记录的距离一致</td></tr>
-<tr><td>索引</td><td>不读索引</td><td>Faiss HNSW 与 Cardinal HNSW，见 2.5</td></tr>
-<tr><td>搜索参数</td><td>无</td><td><code>ef</code></td></tr>
+<tr><td>向量类型</td><td>FloatVector、Float16Vector、BFloat16Vector、Int8Vector、BinaryVector；nullable 字段的空向量行被排除</td><td>同 exact；nullable 字段要求索引文件带 <code>valid_data</code> 位图（2.4）</td></tr>
+<tr><td>距离</td><td>浮点与 int8 向量：L2、IP、COSINE；二值向量：HAMMING、JACCARD</td><td>同 exact，且与索引记录的距离一致</td></tr>
+<tr><td>索引</td><td>不读索引</td><td>HNSW 家族（HNSW、HNSW_SQ、HNSW_PQ、HNSW_PRQ，含 Cardinal 写的 HNSW）、IVF 家族（IVF_FLAT、IVF_SQ8、IVF_PQ、BIN_IVF_FLAT）与 FLAT、BIN_FLAT，见 2.5；DiskANN、稀疏索引、GPU 索引和加密索引在规划时报错</td></tr>
+<tr><td>搜索参数</td><td>无</td><td>HNSW 家族 <code>ef</code>；IVF 家族 <code>nprobe</code>；FLAT 无参数</td></tr>
 <tr><td>段</td><td colspan="2">Storage V2、V3 与 external collection 的段</td></tr>
 </tbody></table></div>
 <div class="table"><table>
@@ -467,11 +467,12 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <li>每个字段在一个段上只选一个索引；它的段 id、分区 id、距离与行数都要与钉住的段一致；位图行数上限是 2<sup>31</sup>。</li>
 <li>有删除或过滤时，Milvus 的 <code>TableFormat</code> 只读主键、时间戳和过滤列，生成整段的排除位图；位图对本组查询共用。</li>
 <li><code>TableFormat</code> 读出并解码本段的索引文件，交出索引句柄；<code>IndexProbe</code> 在句柄上搜索本组查询一次，搜完即关闭。每个段的索引在任务里只加载一次。</li>
-<li>HNSW 只接受 <code>ef</code>：正整数，不小于 K，默认 <code>max(64, K)</code>。某条查询的有效候选不足 K 而段内有效行足够时，<code>ef</code> 翻倍重试，最多 8 次，上限是段的行数。</li>
-<li>非 nullable FloatVector 的索引 label 就是段内行号；越界 label 与非有限分数报错，−1 填充位丢弃。</li>
+<li>搜索参数按索引家族给：HNSW 家族只接受 <code>ef</code>（正整数，不小于 K，默认 <code>max(64, K)</code>），IVF 家族只接受 <code>nprobe</code>（正整数，默认 16），FLAT 与 BIN_FLAT 不接受参数。某条查询的有效候选不足 K 而段内有效行足够时，该参数翻倍重试，最多 8 次，上限是段的行数。</li>
+<li>label 换段内行号看这一列有没有空值。非 nullable 列的 label 就是段内行号；nullable 列只对有值的行建索引，label 是「第几个有值的行」，索引文件里的 <code>valid_data</code> 位图（最低位优先，1 表示该行有值）给出对应关系。<code>IndexRowMapping</code> 按它把 label 换成段内行号，也把要排除的段内行号换成要屏蔽的 label；没有值的行不在索引里，不必屏蔽。nullable 列的索引文件没有这份位图，或位图的置位数与索引行数不符，都在打开索引时报错。越界 label 与非有限分数报错，−1 填充位丢弃。</li>
 </ol>
 
 <h3 id="native-boundary">2.5 索引文件解码与引擎选择</h3>
+<p><strong>载荷名就是索引类型，格式标记核对到家族为止。</strong>Knowhere 的 <code>Serialize</code> 把索引写成一块以索引类型命名的载荷（<code>HNSW</code>、<code>HNSW_SQ</code>、<code>IVF_FLAT</code>…），Milvus 按同名写成索引文件，所以取哪块载荷由快照声明的 <code>index_type</code> 决定。载荷开头四个字节是写入方记下的索引类标记，同一个索引类型有多个：HNSW_SQ 在 COSINE 加 SQ4U 量化下写 <code>IHNa</code>，在 L2 下写 <code>IHNs</code>。逐个钉死会把当前 Knowhere 读得了的文件拒掉，所以核对到家族为止——HNSW 家族 <code>IH*</code>，IVF 与二值家族 <code>Iw*</code>、<code>IB*</code>，Cardinal 流看末尾 24 字节的 <code>CARD</code>——这仍然挡得住把 IVF 流当 HNSW 加载，读不了的组合由 Knowhere 自己拒绝。</p>
 <p><strong>引擎与索引版本在规划时声明，执行时核对。</strong>BinarySet 是按名字组织的二进制块集合；下面的解码归 Milvus 的 <code>TableFormat</code>。</p>
 <ol>
 <li>描述快照时，<code>TableFormat</code> 对每个段的索引对象只读头尾若干字节：Milvus 封装取 descriptor 与载荷开头的标识，Cardinal 流取末尾 24 字节；由此得出引擎与索引版本，写进该段的索引能力。各段并发读取。</li>

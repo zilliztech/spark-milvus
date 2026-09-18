@@ -90,12 +90,7 @@ object MilvusSearch {
       )
     val layout = VectorLayout.of(field.dataType, dimensionOf(field))
     checkMetric(searchMetric, layout, searchMode)
-    if (searchMode == "index") {
-      require(
-        field.dataType == DataType.FloatVector && !field.nullable,
-        s"Index search currently reads a non-nullable FloatVector; '$vectorColumn' is ${field.dataType}"
-      )
-    }
+
     SearchQueries.check(queries.schema, layout)
     val limits = SearchLimits.from(options)
     val outputSchema = outputSchemaOf(table.schema(), outputColumns)
@@ -402,10 +397,7 @@ object MilvusSearch {
       s"A ${layout.elementType} field takes ${supported.toSeq.sorted
           .mkString(" or ")}, not $metric"
     )
-    require(
-      mode != "index" || Set("L2", "IP", "COSINE").contains(metric),
-      s"Index search takes L2, IP or COSINE, not $metric"
-    )
+
   }
 
   private def outputSchemaOf(

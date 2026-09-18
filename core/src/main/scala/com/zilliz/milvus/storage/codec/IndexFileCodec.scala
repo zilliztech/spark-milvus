@@ -10,13 +10,19 @@ import org.apache.arrow.memory.RootAllocator
 
 import com.zilliz.milvus.jni.vector.{NativeVectorIndex, NativeVectorLibrary}
 import com.zilliz.milvus.storage.io.ObjectStore
+import com.zilliz.milvus.storage.schema.VectorLayout
 import com.zilliz.milvus.storage.snapshot.SegmentIndex
 import com.zilliz.milvus.storage.Logging
+
+import io.knowhere.DType
 
 /** Loads the exact snapshot object set and restores named Knowhere payloads. */
 private[storage] object IndexFileCodec extends Logging {
   private val SliceMeta = "SLICE_META"
   private val CardinalFile = "_mem.index.bin"
+  private val ValidData = "valid_data"
+  private val ValidDataNames = Set(ValidData, "valid_data_count")
+  private val MaxValidDataBytes = 256L * 1024 * 1024
   private val MaxObjectBytes = 256L * 1024 * 1024
   private val MaxPayloadBytes = 1024L * 1024 * 1024
   private val ChunkBytes = 1024 * 1024
@@ -31,7 +37,8 @@ private[storage] object IndexFileCodec extends Logging {
   private[storage] final case class Loaded(
       index: NativeVectorIndex,
       bytes: Long,
-      nanos: Long
+      nanos: Long,
+      validRows: Option[Array[Byte]] = None
   )
 
   private[codec] final case class Slice(name: String, count: Int, length: Long)
@@ -172,13 +179,33 @@ private[storage] object IndexFileCodec extends Logging {
       copy(tail, length - 24)
     }
 
-    def engineType(version: Int, cardinalSupported: Boolean): String = {
+    /** The engine to deserialize with, and the check that the stream belongs to
+      * the family the snapshot declared.
+      *
+      * A stream's first four bytes name the exact index class Faiss or Knowhere
+      * wrote, and one index type has several of them: an HNSW_SQ over COSINE
+      * with SQ4U uniform quantization writes `IHNa`, the same type over L2
+      * writes `IHNs`. Pinning every marker would refuse a file the loaded
+      * Knowhere can read, so the check is the family — `IH*` for the HNSW
+      * types, `Iw*` and `IB*` for the IVF types — which still catches an IVF
+      * stream under a declared HNSW index, and Knowhere refuses a stream it
+      * cannot read for the type it was asked for.
+      */
+    def engine(
+        indexType: String,
+        version: Int,
+        cardinalSupported: Boolean
+    ): String = {
       if (
         ByteBuffer
           .wrap(tail)
           .order(ByteOrder.LITTLE_ENDIAN)
           .getInt() == 0x43415244
       ) {
+        require(
+          indexType == "HNSW",
+          s"A Cardinal CARD stream carries an HNSW index, not $indexType"
+        )
         validateCardinalFooter(tail, length)
         require(
           version >= 9,
@@ -194,15 +221,21 @@ private[storage] object IndexFileCodec extends Logging {
         "HNSW"
       } else {
         val magic = new String(head, StandardCharsets.US_ASCII)
+        val family = magic.take(2)
+        val expected =
+          if (indexType.startsWith("HNSW")) Set("IH") else Set("Iw", "IB")
         require(
-          Set("IHNf", "IHN9").contains(magic),
-          "Unsupported HNSW payload format: expected Faiss float32 HNSW or Cardinal CARD"
+          expected.contains(family),
+          s"Persisted $indexType payload starts with $magic; a $indexType index writes ${expected
+              .mkString(" or ")}* or a Cardinal CARD stream"
         )
         require(
           version >= 6,
-          "A Faiss HNSW stream requires vector index format version 6 or later"
+          "A Faiss index stream requires vector index format version 6 or later"
         )
-        val engine = if (cardinalSupported) "HNSW_DEPRECATED" else "HNSW"
+        val engine =
+          if (indexType == "HNSW" && cardinalSupported) "HNSW_DEPRECATED"
+          else indexType
         logInfo(
           s"Persisted index format selected: format=Faiss/$magic, engine=$engine, version=$version"
         )
@@ -233,10 +266,12 @@ private[storage] object IndexFileCodec extends Logging {
 
   def load(
       index: SegmentIndex,
-      dimension: Int,
+      layout: VectorLayout,
       store: ObjectStore,
       decoder: IndexFileDecoder
   ): Loaded = {
+    val dimension = layout.dimension
+    val dataType = layout.dtype
     val started = System.nanoTime()
     var objectsRead = 0
     var bytesRead = 0L
@@ -246,6 +281,14 @@ private[storage] object IndexFileCodec extends Logging {
       bytesRead = Math.addExact(bytesRead, bytes.length.toLong)
       bytes
     }
+    val indexType = index.indexType
+      .map(_.toUpperCase(Locale.ROOT))
+      .getOrElse(
+        throw new IllegalArgumentException(
+          "Index metadata is missing index_type"
+        )
+      )
+    var validRows: Option[Array[Byte]] = None
     def finished(loaded: NativeVectorIndex): Loaded = {
       val elapsed = System.nanoTime() - started
       logInfo(
@@ -253,7 +296,7 @@ private[storage] object IndexFileCodec extends Logging {
           s"objectsRead=$objectsRead, bytesRead=$bytesRead, nativeDeserializeCalls=1, " +
           s"elapsedMillis=${elapsed / 1000000L}"
       )
-      Loaded(loaded, bytesRead, elapsed)
+      Loaded(loaded, bytesRead, elapsed, validRows)
     }
     val names = index.filePaths.map { key =>
       require(
@@ -270,6 +313,10 @@ private[storage] object IndexFileCodec extends Logging {
     )
     val files = names.toMap
     if (files.contains(CardinalFile)) {
+      require(
+        indexType == "HNSW",
+        s"A Cardinal memory index carries an HNSW index, not $indexType"
+      )
       require(
         files.size == 1,
         "A Cardinal memory index must name exactly one _mem.index.bin file"
@@ -288,7 +335,7 @@ private[storage] object IndexFileCodec extends Logging {
         s"Persisted index format selected: format=Cardinal, engine=HNSW, " +
           s"version=${index.currentIndexVersion.get}"
       )
-      return finished(loadCardinal(index, dimension, bytes))
+      return finished(loadCardinal(index, dimension, dataType, bytes))
     }
 
     def decoded(name: String): DecodedIndexFile = {
@@ -348,16 +395,25 @@ private[storage] object IndexFileCodec extends Logging {
       "Duplicate assembled index payload"
     )
     require(
-      !logicalNames.exists(name =>
-        name == "valid_data" || name == "valid_data_count"
-      ),
-      "Nullable index row mappings are unsupported"
-    )
-    require(
-      logicalNames.contains("HNSW"),
-      s"Unsupported persisted HNSW payload layout: ${logicalNames.mkString(", ")}; expected HNSW. " +
+      logicalNames.contains(indexType),
+      s"Unsupported persisted index payload layout: ${logicalNames
+          .mkString(", ")}; expected $indexType. " +
         "The selected Knowhere build cannot load a different engine's format"
     )
+    // A nullable vector field is indexed over its non-null rows only, and the
+    // segment's own row numbers come back through this bitmap (section 2.4).
+    if (logicalNames.contains(ValidData)) {
+      val payload = decoded(ValidData)
+      try {
+        require(
+          payload.payloadLength > 0 && payload.payloadLength <= MaxValidDataBytes,
+          s"The valid_data bitmap of ${payload.payloadLength} bytes is outside the supported size"
+        )
+        val bytes = new Array[Byte](payload.payloadLength.toInt)
+        payload.readPayload(0, ByteBuffer.wrap(bytes))
+        validRows = Some(bytes)
+      } finally payload.close()
+    }
 
     val metric = index.metricType.get.toUpperCase(Locale.ROOT)
     val loader = new NativeVectorIndex.Loader(
@@ -370,9 +426,11 @@ private[storage] object IndexFileCodec extends Logging {
       finished(
         loadPayloads(
           loader,
+          indexType,
+          dataType,
           index.currentIndexVersion.get,
-          slices,
-          remaining,
+          slices.filterNot(slice => ValidDataNames(slice.name)),
+          remaining.filterNot(ValidDataNames),
           decoded
         )
       )
@@ -382,6 +440,7 @@ private[storage] object IndexFileCodec extends Logging {
   private def loadCardinal(
       index: SegmentIndex,
       dimension: Int,
+      dataType: DType,
       bytes: Array[Byte]
   ): NativeVectorIndex = {
     val metric = index.metricType.get.toUpperCase(Locale.ROOT)
@@ -408,7 +467,7 @@ private[storage] object IndexFileCodec extends Logging {
             loader.write("HNSW", offset.toLong, buffer)
             offset += count
           }
-          loader.load("HNSW")
+          loader.load("HNSW", dataType)
         } finally chunk.close()
       } finally allocator.close()
     } finally loader.close()
@@ -416,6 +475,8 @@ private[storage] object IndexFileCodec extends Logging {
 
   private def loadPayloads(
       loader: NativeVectorIndex.Loader,
+      indexType: String,
+      dataType: DType,
       version: Int,
       slices: Vector[Slice],
       remaining: Vector[String],
@@ -433,7 +494,7 @@ private[storage] object IndexFileCodec extends Logging {
             total <= MaxPayloadBytes,
             "Index payloads exceed the supported one GiB loading size"
           )
-          if (name == "HNSW") format = new PayloadFormatProbe(size)
+          if (name == indexType) format = new PayloadFormatProbe(size)
           loader.allocate(name, size)
         }
         def transfer(
@@ -452,7 +513,7 @@ private[storage] object IndexFileCodec extends Logging {
               "Index decoder did not copy the requested payload bytes"
             )
             buffer.flip()
-            if (name == "HNSW")
+            if (name == indexType)
               format.capture(buffer, destinationOffset + offset)
             loader.write(name, destinationOffset + offset, buffer)
             offset += size
@@ -485,10 +546,12 @@ private[storage] object IndexFileCodec extends Logging {
           } finally payload.close()
         }
         loader.load(
-          format.engineType(
+          format.engine(
+            indexType,
             version,
             NativeVectorLibrary.load().cardinalSupported()
-          )
+          ),
+          dataType
         )
       } finally chunk.close()
     } finally allocator.close()

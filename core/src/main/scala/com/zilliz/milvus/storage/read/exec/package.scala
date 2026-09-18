@@ -34,19 +34,22 @@ package com.zilliz.milvus.storage.read
   * format side of it: `RowExclusions` decides which rows the deletes and the
   * filter take out, `SegmentVectors` hands out one batch at a time with that
   * bitmap and the batch's first row offset, and `SegmentIndexHandle` opens the
-  * index a snapshot pinned. `core.index` computes on what these hand over and
-  * opens nothing itself (docs/design/architecture/vector-search.html sections
-  * 2.3 and 2.4).
+  * index a snapshot pinned, over the index families the connector loads and the
+  * element type the column carries. `IndexRowMapping` says what an index label
+  * means in the segment, which differs from the row number when the column has
+  * nulls. `core.index` computes on what these hand over and opens nothing
+  * itself (docs/design/architecture/vector-search.html sections 2.3 and 2.4).
   *
   * `SegmentReader.metrics` is what the read cost on the crossing, as
   * `ReadMetrics`: calls and time, batches and bytes, the C side's copies, the
   * allocator's peak (G5; docs/design/architecture/storage-io.html section 5).
   *
   * Main types: SegmentReader, SegmentReaderRegistry, DeletePlans, ReadMetrics,
-  * RowExclusions, SegmentVectors, SegmentIndexHandle. Capabilities: R3, R4, R8,
-  * R14, R17, G3, G5 (see docs/design/capabilities.md). R4 and R17 name the
-  * columnar outlet. G3 maps typed row/byte batch limits to the upstream reader;
-  * the Spark reader owns a bounded child allocator that outlives every imported
-  * batch. Design: docs/design/architecture/read.html section 5.2.
+  * RowExclusions, SegmentVectors, SegmentIndexHandle, IndexRowMapping.
+  * Capabilities: R3, R4, R8, R14, R17, G3, G5 (see
+  * docs/design/capabilities.md). R4 and R17 name the columnar outlet. G3 maps
+  * typed row/byte batch limits to the upstream reader; the Spark reader owns a
+  * bounded child allocator that outlives every imported batch. Design:
+  * docs/design/architecture/read.html section 5.2.
   */
 package object exec
