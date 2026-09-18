@@ -219,12 +219,15 @@ object SegmentIndexSearchSmoke {
           properties ++ Map(MilvusOption.SnapshotPath -> "to-build.json")
       )
     )
+    // The procedure answers with the rows of its result table, in the order its
+    // output schema declares: segment, partition, rows, objects, bytes, build,
+    // job.
     assert(rows.size == 2, rows.mkString(","))
-    assert(rows.forall(_.getAs[Long]("build_id") == 7000L))
-    assert(rows.forall(_.getAs[Long]("row_count") == 8L))
-    assert(rows.forall(_.getAs[Int]("objects") > 0))
+    assert(rows.forall(_.getLong(5) == 7000L), rows.mkString(","))
+    assert(rows.forall(_.getLong(2) == 8L), rows.mkString(","))
+    assert(rows.forall(_.getInt(3) > 0), rows.mkString(","))
 
-    val jobId = rows.head.getAs[String]("job_id")
+    val jobId = rows.head.getString(6)
     val manifest = JobManifest
       .fromJson(
         new String(
