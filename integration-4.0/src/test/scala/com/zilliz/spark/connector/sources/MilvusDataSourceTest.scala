@@ -9,6 +9,7 @@ import org.scalatest.BeforeAndAfterAll
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.read.MilvusSearch
 import com.zilliz.spark.connector.testkit.MilvusFieldData
 import io.milvus.grpc.schema.DataType
 
@@ -225,7 +226,6 @@ class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
   test("Vector similarity search with different metrics") {
     val random = new Random(123)
     val queryVector = Array.fill(dim)(random.nextFloat())
-    val queryVectorJson = queryVector.mkString("[", ",", "]")
 
     info(
       s"Query vector (first 5 elements): [${queryVector.take(5).mkString(", ")}, ...]"
@@ -241,25 +241,30 @@ class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
       info(s"TopK: $topK, Metric: $metric")
 
       // Execute vector search
-      val results = spark.read
-        .format("milvus")
-        .option(MilvusOption.MilvusUri, "http://localhost:19530")
-        .option(MilvusOption.MilvusToken, "root:Milvus")
-        .option(MilvusOption.MilvusCollectionName, collectionName)
-        .option(MilvusOption.MilvusDatabaseName, "default")
-        // Vector search configuration
-        .option(MilvusOption.VectorSearchQueryVector, queryVectorJson)
-        .option(MilvusOption.VectorSearchTopK, topK.toString)
-        .option(MilvusOption.VectorSearchMetric, metric)
-        .option(MilvusOption.VectorSearchVectorColumn, "vector")
-        // S3/Minio configuration
-        .option(StorageProperties.Address, "localhost:9000")
-        .option(StorageProperties.BucketName, "a-bucket")
-        .option(StorageProperties.RootPath, "files")
-        .option(StorageProperties.AccessKeyId, "minioadmin")
-        .option(StorageProperties.AccessKeyValue, "minioadmin")
-        .option(StorageProperties.UseSSL, "false")
-        .load()
+      val results = MilvusSearch.search(
+        spark = spark,
+        options = Map(
+          MilvusOption.MilvusUri -> "http://localhost:19530",
+          MilvusOption.MilvusToken -> "root:Milvus",
+          MilvusOption.MilvusCollectionName -> collectionName,
+          MilvusOption.MilvusDatabaseName -> "default",
+          StorageProperties.Address -> "localhost:9000",
+          StorageProperties.BucketName -> "a-bucket",
+          StorageProperties.RootPath -> "files",
+          StorageProperties.AccessKeyId -> "minioadmin",
+          StorageProperties.AccessKeyValue -> "minioadmin",
+          StorageProperties.UseSSL -> "false"
+        ),
+        vectorColumn = "vector",
+        queryVector = queryVector,
+        k = topK,
+        metric = metric,
+        mode = "exact",
+        searchParameters = Map.empty,
+        filter = None,
+        outputColumns = Seq.empty,
+        allowUnindexed = false
+      )
 
       results.show()
       assert(
@@ -273,28 +278,33 @@ class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
     // Generate a random query vector
     val random = new Random(999)
     val queryVector = Array.fill(dim)(random.nextFloat())
-    val queryVectorJson = queryVector.mkString("[", ",", "]")
 
     val topK = 5
 
-    // Load data with vector search
-    val df = spark.read
-      .format("milvus")
-      .option(MilvusOption.MilvusUri, "http://localhost:19530")
-      .option(MilvusOption.MilvusToken, "root:Milvus")
-      .option(MilvusOption.MilvusCollectionName, collectionName)
-      .option(MilvusOption.MilvusDatabaseName, "default")
-      .option(MilvusOption.VectorSearchQueryVector, queryVectorJson)
-      .option(MilvusOption.VectorSearchTopK, topK.toString)
-      .option(MilvusOption.VectorSearchMetric, "L2")
-      .option(MilvusOption.VectorSearchVectorColumn, "vector")
-      .option(StorageProperties.Address, "localhost:9000")
-      .option(StorageProperties.BucketName, "a-bucket")
-      .option(StorageProperties.RootPath, "files")
-      .option(StorageProperties.AccessKeyId, "minioadmin")
-      .option(StorageProperties.AccessKeyValue, "minioadmin")
-      .option(StorageProperties.UseSSL, "false")
-      .load()
+    val df = MilvusSearch.search(
+      spark = spark,
+      options = Map(
+        MilvusOption.MilvusUri -> "http://localhost:19530",
+        MilvusOption.MilvusToken -> "root:Milvus",
+        MilvusOption.MilvusCollectionName -> collectionName,
+        MilvusOption.MilvusDatabaseName -> "default",
+        StorageProperties.Address -> "localhost:9000",
+        StorageProperties.BucketName -> "a-bucket",
+        StorageProperties.RootPath -> "files",
+        StorageProperties.AccessKeyId -> "minioadmin",
+        StorageProperties.AccessKeyValue -> "minioadmin",
+        StorageProperties.UseSSL -> "false"
+      ),
+      vectorColumn = "vector",
+      queryVector = queryVector,
+      k = topK,
+      metric = "L2",
+      mode = "exact",
+      searchParameters = Map.empty,
+      filter = None,
+      outputColumns = Seq("id", "int64", "varchar"),
+      allowUnindexed = false
+    )
 
     // Register as temp view
     df.createOrReplaceTempView("vector_search_results")

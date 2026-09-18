@@ -78,7 +78,7 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: String)
     }
   }
 
-  def addAll(candidates: IterableOnce[Candidate]): this.type = {
+  def addAll(candidates: Iterable[Candidate]): this.type = {
     candidates.iterator.foreach(add)
     this
   }

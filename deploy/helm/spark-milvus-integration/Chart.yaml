@@ -1,0 +1,6 @@
+apiVersion: v2
+name: spark-milvus-integration
+description: Run the Spark-Milvus integration suite as one Kubernetes Job
+type: application
+version: 0.1.0
+appVersion: "2.0.0"

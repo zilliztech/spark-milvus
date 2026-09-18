@@ -1,0 +1,8 @@
+The integration Job is {{ include "spark-milvus-integration.fullname" . }}.
+
+Follow its logs with:
+
+  kubectl logs --namespace {{ .Release.Namespace }} --follow job/{{ include "spark-milvus-integration.fullname" . }}
+
+The Job does not create Milvus, object storage, or credentials. It references
+the endpoints and existing Secrets selected in the values file.

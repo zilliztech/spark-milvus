@@ -99,6 +99,13 @@ canceled tests did not pass and provide no coverage for that run.
 `integration-4.0` needs a real Milvus on 19530 and MinIO on 9000. It is outside
 the root aggregate, compiles in CI and is not run there.
 
+The Helm execution contract for moving that suite into CI is documented in
+[integration-tests.html](design/engineering/integration-tests.html). The chart
+is under `deploy/helm/spark-milvus-integration`; it runs one Spark local-mode
+Job against external services and references existing Secrets. The release
+image and the currently hard-coded integration suites do not yet satisfy the
+runner contract, so chart linting is not evidence that the live suite ran.
+
 ## Building the native library
 
 For a bundle containing both storage and Knowhere, use the

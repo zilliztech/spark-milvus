@@ -1,0 +1,25 @@
+runId: ci-example-123
+
+image:
+  repository: registry.example.invalid/zilliztech/spark-milvus-integration
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+milvus:
+  uri: http://milvus-proxy.milvus.svc:19530
+  database: default
+  credentials:
+    existingSecret: spark-milvus-milvus
+    tokenKey: token
+
+objectStorage:
+  endpoint: s3.us-west-2.amazonaws.com
+  bucket: replace-with-milvus-storage-bucket
+  rootPath: files
+  region: us-west-2
+  useSSL: true
+  useVirtualHost: true
+  writePrefix: spark-milvus-ci
+  credentials:
+    existingSecret: spark-milvus-object-storage
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key
