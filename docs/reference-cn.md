@@ -539,6 +539,27 @@ CALL milvus.system.register('your_db.your_collection',
 作业此前已登记过则是 `already_registered`）。过程名不存在、缺参数、多参数、类型不对，都在解析时拒绝并列出参数表。
 不以 `CALL milvus.` 开头的语句不受影响，扩展可以常开。Spark 3.5 和 4.x 行为一样。
 
+建向量索引也走同一个前端：
+
+```sql
+CALL milvus.system.build_index('your_db.your_collection',
+  field            => 'embedding',
+  output           => 'files/built-index',
+  index_type       => 'HNSW',
+  metric           => 'COSINE',
+  params           => 'M=16,efConstruction=200',
+  `milvus.snapshot.path` => 'https://.../metadata/4691.json',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+它按 option 选中的固定快照规划，每段一个 Spark 任务读回向量列建索引，按 Milvus 的命名把索引对象写到
+`output` 前缀下，并在 `output/staging/<job>/manifest.json` 记录每段的索引。`index_type` 默认 `HNSW`、
+`metric` 默认 `COSINE`，`params` 是 `name=value` 列表；`build_id`、`index_version`、`store_path_version`
+可选，默认分别是当前毫秒、1、0。结果每段一行：`segment_id`、`partition_id`、`row_count`、`objects`、
+`bytes`、`build_id`、`job_id`。把这批索引交付给 Milvus（新 collection 的快照恢复）尚未实现。
+
 ### 3.4 用 `CALL` 管理 Milvus
 
 管理过程沿用上面的 SQL 扩展和参数规则。会调用 Milvus 的过程要显式提供 `milvus.uri` 和所需认证选项；

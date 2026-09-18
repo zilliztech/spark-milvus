@@ -664,6 +664,32 @@ is refused when the statement is parsed, with the parameters named. Statements
 that do not start with `CALL milvus.` are untouched, so the extension can stay
 on for every session. The extension works the same on Spark 3.5 and 4.x.
 
+Building vector indexes uses the same front:
+
+```sql
+CALL milvus.system.build_index('your_db.your_collection',
+  field            => 'embedding',
+  output           => 'files/built-index',
+  index_type       => 'HNSW',
+  metric           => 'COSINE',
+  params           => 'M=16,efConstruction=200',
+  `milvus.snapshot.path` => 'https://.../metadata/4691.json',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+It plans the fixed snapshot the options select, reads each segment's vector
+column back in its own Spark task, builds the index and writes the objects
+under `output` with Milvus's naming, and records every segment's index in
+`output/staging/<job>/manifest.json`. `index_type` defaults to `HNSW` and
+`metric` to `COSINE`; `params` is a list of `name=value` pairs; `build_id`,
+`index_version` and `store_path_version` default to the current millisecond, 1
+and 0. The result has one row per segment: `segment_id`, `partition_id`,
+`row_count`, `objects`, `bytes`, `build_id` and `job_id`. Delivering those
+indexes to Milvus, by restoring the snapshot into a new collection, is not
+implemented yet.
+
 ### 3.4 Managing Milvus with `CALL`
 
 The management procedures use the same SQL extension and argument rules shown
