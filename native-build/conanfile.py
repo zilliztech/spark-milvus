@@ -43,8 +43,15 @@ class MilvusNativeDependencies(ConanFile):
 
     def requirements(self):
         with open(os.path.join(self.recipe_folder, "dependencies.json")) as source:
-            references = json.load(source)["references"]
-        for reference in references.values():
+            pinned = json.load(source)
+        # Some upstream recipes exist for one operating system only; the
+        # engines' own conanfiles gate the same names, and dependencies.json
+        # records which.
+        scope = pinned.get("platform_scope", {})
+        for name, reference in pinned["references"].items():
+            allowed = scope.get(name)
+            if allowed and str(self.settings.os) not in allowed:
+                continue
             self.requires(reference, force=True)
 
     def generate(self):

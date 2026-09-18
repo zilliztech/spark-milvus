@@ -72,6 +72,18 @@ class Format:
         """Build one shared library, used by fixtures rather than by the build."""
         raise NotImplementedError
 
+    def toolchain(self):
+        """``{"CC", "CXX", "FC"}`` for the compilers the engines are built with."""
+        raise NotImplementedError
+
+    def toolchain_versions(self):
+        """``(name, command)`` pairs recorded in the build's provenance."""
+        raise NotImplementedError
+
+    def cpu_report(self):
+        """The command whose output records the build host's CPU."""
+        raise NotImplementedError
+
     def available(self):
         return all(shutil.which(tool) for tool in self.tools)
 
@@ -135,6 +147,16 @@ class Elf(Format):
             check=True,
         )
         return Path(output)
+
+    def toolchain(self):
+        return {"CC": "gcc-12", "CXX": "g++-12", "FC": "gfortran-12"}
+
+    def toolchain_versions(self):
+        return (("compiler", ["gcc-12", "--version"]),
+                ("compiler-native-target", ["gcc-12", "-march=native", "-Q", "--help=target"]))
+
+    def cpu_report(self):
+        return ["lscpu"]
 
 
 class MachO(Format):
@@ -208,6 +230,18 @@ class MachO(Format):
             check=True,
         )
         return Path(output)
+
+    def toolchain(self):
+        # Apple Clang has no Fortran; OpenBLAS is not built here, and the
+        # engines that would need one are not selected on this platform.
+        return {"CC": "clang", "CXX": "clang++"}
+
+    def toolchain_versions(self):
+        return (("compiler", ["clang", "--version"]),
+                ("compiler-native-target", ["clang", "-E", "-mcpu=native", "-###", "-x", "c", "/dev/null"]))
+
+    def cpu_report(self):
+        return ["sysctl", "-a", "machdep.cpu", "hw"]
 
 
 FORMATS = {"linux": Elf, "darwin": MachO}

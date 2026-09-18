@@ -38,6 +38,18 @@
     "zlib": "zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea",
     "zstd": "zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e"
   },
+  "platform_scope": {
+    "_comment": "References upstream declares for one operating system only; the engines' own conanfiles gate these the same way.",
+    "liburing": [
+      "Linux"
+    ],
+    "libunwind": [
+      "Linux"
+    ],
+    "openblas": [
+      "Linux"
+    ]
+  },
   "cardinal": {
     "v1": {
       "tag": "v2.5.112",

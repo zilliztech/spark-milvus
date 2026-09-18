@@ -12,6 +12,8 @@ import sys
 import time
 import uuid
 
+import platforms
+
 
 KNOWHERE_C_API_TESTS = [
     "knowhere_c_api",
@@ -258,8 +260,16 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.jobs <= 50:
         parser.error("--jobs must be between 1 and 50")
-    if sys.platform != "linux" or os.uname().machine != "x86_64":
-        parser.error("The currently validated build profile targets Linux x86_64")
+    try:
+        target = platforms.host_platform()
+    except ValueError as error:
+        parser.error(str(error))
+    profile = repository / "native-build/profiles" / target
+    if not profile.is_file():
+        parser.error("No build profile for " + target + "; add native-build/profiles/" + target)
+    if not platforms.host().available():
+        parser.error("This platform's binary tools are missing: "
+                     + ", ".join(platforms.host().tools))
     java_home = Path(os.environ.get("JAVA_HOME", ""))
     if not (java_home / "bin/javac").is_file():
         parser.error("Set JAVA_HOME to the selected JDK")
@@ -270,16 +280,16 @@ def main():
             fcntl.flock(build_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             parser.error("Another native build is already using this work directory")
-        build(args, repository, java_home, work)
+        build(args, repository, java_home, work, target, profile)
 
 
-def build(args, repository, java_home, work):
+def build(args, repository, java_home, work, target, profile):
     provenance = work / "provenance"
     provenance.mkdir(exist_ok=True)
     sources = work / "sources"
     sources.mkdir(exist_ok=True)
     env = os.environ.copy()
-    env.update(CC="gcc-12", CXX="g++-12", FC="gfortran-12",
+    env.update(**platforms.host().toolchain(),
                CMAKE_BUILD_PARALLEL_LEVEL=str(args.jobs), MAKEFLAGS="-j" + str(args.jobs),
                CARGO_BUILD_JOBS=str(args.jobs), OMP_NUM_THREADS=str(args.jobs),
                OPENBLAS_NUM_THREADS=str(args.jobs))
@@ -336,7 +346,7 @@ def build(args, repository, java_home, work):
                 and json.loads(knowhere_source_identity.read_text()) != knowhere_identity_record):
             raise RuntimeError("Knowhere source changed or the snapshot is unverified; use a new work directory")
         knowhere_source_identity.write_text(json.dumps(knowhere_identity_record, indent=2) + "\n")
-        metadata = {"format.version": "1", "platform": "linux-x86_64", "dependency.mode": "shared",
+        metadata = {"format.version": "1", "platform": target, "dependency.mode": "shared",
                     "build.system": "independent-cmake",
                     "storage.revision": storage_pin, "knowhere.revision": knowhere_pin,
                     "with_cardinal": args.with_cardinal, "with_diskann": True,
@@ -350,14 +360,15 @@ def build(args, repository, java_home, work):
                     "featureOptions": {"storage.jemalloc": False, "storage.fiu": False,
                                        "storage.crt": False, "storage.talon": False,
                                        "storage.rust.openssl.shared": True}, "jobs": args.jobs}
-        for name, command in (("compiler", ["gcc-12", "--version"]), ("cmake", ["cmake", "--version"]),
+        adapter = platforms.host()
+        for name, command in (*adapter.toolchain_versions(), ("cmake", ["cmake", "--version"]),
                               ("conan", ["conan", "--version"]), ("java", [str(java_home / "bin/java"), "-version"]),
                               ("rustc", ["rustc", "--version", "--verbose"]), ("cargo", ["cargo", "--version"]),
-                              ("cpu", ["lscpu"]),
-                              ("compiler-native-target", ["gcc-12", "-march=native", "-Q", "--help=target"])):
+                              ("cpu", adapter.cpu_report())):
             with (provenance / (name + ".txt")).open("w") as log:
                 subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, env=env)
-        metadata["cpu.portability"] = "Host-native upstream compiler flags; linux-x86_64 is not an ISA baseline"
+        metadata["cpu.portability"] = ("Host-native upstream compiler flags; "
+                                      + target + " is not an ISA baseline")
         phase("validate-upstream-dependencies")
         build_source_files = tree_hashes(repository / "native-build")
         build_source_manifest = provenance / "build-source-files.json"
@@ -387,7 +398,6 @@ def build(args, repository, java_home, work):
         shutil.copy2(repository / "native-build/conanfile.py", consumer / "conanfile.py")
         shutil.copy2(repository / "native-build/dependencies.json", consumer / "dependencies.json")
         (provenance / "direct-references.json").write_text(json.dumps(references, indent=2) + "\n")
-        profile = repository / "native-build/profiles/linux-x86_64"
         platform_tools = platform_tool_requirements(profile)
         shutil.copy2(profile, provenance / "host-profile")
         # Host options must not turn build-only protoc/tool packages into runtime libraries.
@@ -452,7 +462,8 @@ def build(args, repository, java_home, work):
         metadata["corrosion"] = {**constraints["corrosion"], "sourceManifestSha256": digest(corrosion_manifest)}
         install = work / "install"
         common = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_TOOLCHAIN_FILE=" + str(toolchain),
-                  "-DCMAKE_C_COMPILER=gcc-12", "-DCMAKE_CXX_COMPILER=g++-12",
+                  "-DCMAKE_C_COMPILER=" + platforms.host().toolchain()["CC"],
+                  "-DCMAKE_CXX_COMPILER=" + platforms.host().toolchain()["CXX"],
                   "-DCMAKE_INSTALL_PREFIX=" + str(install),
                   "-DMILVUS_STORAGE_SOURCE_DIR=" + str(storage), "-DKNOWHERE_SOURCE_DIR=" + str(knowhere),
                   "-DWITH_CARDINAL=" + ("ON" if args.with_cardinal else "OFF")]
