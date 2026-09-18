@@ -10,10 +10,15 @@ package com.zilliz.milvus.storage
   *
   * BinlogCodec owns the common event envelope and flat Parquet payload used by
   * deletion files and persisted index files. It opens no storage itself.
+  * MilvusIndexFileDecoder takes one index object apart and IndexFileCodec
+  * assembles the slices of a persisted index and hands the payload to the
+  * vector library; both belong to the Milvus format side rather than to the
+  * computation (docs/design/architecture/vector-search.html section 2.5).
   * Encoding index files for W6 is planned here, beside the decoder, so both
   * directions share one format definition.
   *
   * Main types: FloatConverter, SparseFloatVectorConverter, ArrayCodec,
-  * BinlogCodec. Capabilities: R15, W3, V2 (see docs/design/capabilities.md).
+  * BinlogCodec, MilvusIndexFileDecoder, IndexFileCodec. Capabilities: R15, W3,
+  * V2 (see docs/design/capabilities.md).
   */
 package object codec

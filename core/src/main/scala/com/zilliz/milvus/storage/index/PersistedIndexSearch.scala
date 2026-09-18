@@ -9,6 +9,11 @@ import scala.util.Try
 import org.apache.arrow.memory.{ArrowBuf, RootAllocator}
 
 import com.zilliz.milvus.jni.vector.NativeVectorIndex
+import com.zilliz.milvus.storage.codec.{
+  IndexFileCodec,
+  IndexFileDecoder,
+  MilvusIndexFileDecoder
+}
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.snapshot.SegmentIndex
 import com.zilliz.milvus.storage.Logging

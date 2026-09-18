@@ -1,4 +1,4 @@
-package com.zilliz.milvus.storage.index
+package com.zilliz.milvus.storage.codec
 
 import java.nio.ByteBuffer
 

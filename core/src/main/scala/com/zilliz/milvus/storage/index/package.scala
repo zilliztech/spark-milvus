@@ -3,10 +3,10 @@ package com.zilliz.milvus.storage
 /** Vector execution and its buffers, exclusions and per-segment top-k.
   *
   * Main types: BruteForceSearch, KnowhereBuffers, SearchPlan, TopKMerger,
-  * PersistedIndexSearch, MilvusIndexFileDecoder, SegmentIndexQuery. SearchPlan
-  * cuts a search into (segment set, query group) tasks and TopKMerger keeps
-  * each query's best k, in a task and again in the Spark aggregation. KnowhereBuffers hands one Arrow
-  * batch of a dense vector column to Knowhere, as it lies when the layout
+  * PersistedIndexSearch, SegmentIndexQuery. SearchPlan cuts a search into
+  * (segment set, query group) tasks and TopKMerger keeps each query's best k,
+  * in a task and again in the Spark aggregation. KnowhereBuffers hands one
+  * Arrow batch of a dense vector column to Knowhere, as it lies when the layout
   * allows and copied once otherwise. IndexWriter remains planned. A task loads
   * its segment's index once and closes it; there is no cross-task index cache.
   *
@@ -20,8 +20,8 @@ package com.zilliz.milvus.storage
   * offset, score). Opening segments, building exclusion bitmaps and reading and
   * decoding index files belong to the Milvus TableFormat side
   * (docs/design/architecture/table-version.html section 3); IndexFileCodec and
-  * MilvusIndexFileDecoder move to core.codec. TopKMerger keeps k per query for
-  * batches and segments alike, KnowhereBuffers hands Arrow data buffers to
+  * MilvusIndexFileDecoder now live in core.codec. TopKMerger keeps k per query
+  * for batches and segments alike, KnowhereBuffers hands Arrow data buffers to
   * Knowhere as ByteBuffers, and IndexWriter builds a segment's index and hands
   * its BinarySet to the Milvus TableFormat side, which encodes and writes the
   * files (W6).

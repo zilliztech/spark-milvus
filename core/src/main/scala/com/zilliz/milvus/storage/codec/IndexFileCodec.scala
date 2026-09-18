@@ -1,4 +1,4 @@
-package com.zilliz.milvus.storage.index
+package com.zilliz.milvus.storage.codec
 
 import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.charset.StandardCharsets
@@ -14,7 +14,7 @@ import com.zilliz.milvus.storage.snapshot.SegmentIndex
 import com.zilliz.milvus.storage.Logging
 
 /** Loads the exact snapshot object set and restores named Knowhere payloads. */
-private[index] object IndexFileCodec extends Logging {
+private[storage] object IndexFileCodec extends Logging {
   private val SliceMeta = "SLICE_META"
   private val CardinalFile = "_mem.index.bin"
   private val MaxObjectBytes = 256L * 1024 * 1024
@@ -23,9 +23,9 @@ private[index] object IndexFileCodec extends Logging {
   private val mapper = new ObjectMapper()
     .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
 
-  private[index] final case class Slice(name: String, count: Int, length: Long)
+  private[codec] final case class Slice(name: String, count: Int, length: Long)
 
-  private[index] def parseSlices(bytes: Array[Byte]): Vector[Slice] = {
+  private[codec] def parseSlices(bytes: Array[Byte]): Vector[Slice] = {
     require(
       bytes.nonEmpty && bytes.length <= ChunkBytes,
       "SLICE_META must contain at most one MiB of JSON"
@@ -88,7 +88,7 @@ private[index] object IndexFileCodec extends Logging {
   private def validName(name: String): Boolean =
     name.matches("[A-Za-z0-9_+.-]+") && name != "." && name != ".."
 
-  private[index] def validateIdentity(
+  private[codec] def validateIdentity(
       index: SegmentIndex,
       payload: DecodedIndexFile
   ): Unit = {
@@ -106,7 +106,7 @@ private[index] object IndexFileCodec extends Logging {
 
   /** Cardinal's native serializer ends in a 24-byte Footer, not a Milvus event.
     */
-  private[index] def validateCardinalFooter(bytes: Array[Byte]): Unit =
+  private[codec] def validateCardinalFooter(bytes: Array[Byte]): Unit =
     validateCardinalFooter(bytes, bytes.length.toLong)
 
   private def validateCardinalFooter(
@@ -140,7 +140,7 @@ private[index] object IndexFileCodec extends Logging {
   /** Captures format markers while slices are copied, without rereading
     * objects.
     */
-  private[index] final class PayloadFormatProbe(length: Long) {
+  private[codec] final class PayloadFormatProbe(length: Long) {
     require(
       length >= 24,
       "HNSW payload is too short to identify its persisted format"

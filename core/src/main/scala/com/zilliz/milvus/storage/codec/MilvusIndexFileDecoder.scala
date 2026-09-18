@@ -1,11 +1,9 @@
-package com.zilliz.milvus.storage.index
+package com.zilliz.milvus.storage.codec
 
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
-
-import com.zilliz.milvus.storage.codec.BinlogCodec
 
 /** Decodes the Milvus envelope; the result is still a named Knowhere payload,
   * not an index. File names and slice assembly belong to the index loader.
