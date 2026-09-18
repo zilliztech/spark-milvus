@@ -12,8 +12,12 @@ import subprocess
 import sys
 import tempfile
 
+import platforms
 
-JVM_LOAD_ENTRIES = ("libmilvus-storage-jni.so", "libknowhere_jni.so")
+
+_FORMAT = platforms.host()
+JVM_LOAD_ENTRIES = (_FORMAT.library_name("milvus-storage-jni"),
+                    _FORMAT.library_name("knowhere_jni"))
 JAVA_TIMEOUT_SECONDS = 120
 JAVA_ENVIRONMENT_OVERRIDES = (
     "CLASSPATH",
@@ -74,9 +78,9 @@ def _java_runtime():
     if not java_home.is_absolute():
         raise RuntimeError("Selected java reported a non-absolute java.home")
     java_home = java_home.resolve()
-    libjsig = java_home / "lib/libjsig.so"
+    libjsig = java_home / _FORMAT.jsig_library()
     if not libjsig.is_file():
-        raise RuntimeError("Selected JRE does not provide lib/libjsig.so")
+        raise RuntimeError("Selected JRE does not provide " + _FORMAT.jsig_library())
     return java, java_home, libjsig.resolve()
 
 
@@ -146,7 +150,7 @@ def check_jvm_loads(directory, output=None):
             for crash_log in crash_logs:
                 log += ("" if log.endswith("\n") else "\n") + crash_log.read_text(errors="replace")
             exit_code, log = _validated_exit(exit_code, log, order)
-            label = "--then--".join(name.removeprefix("lib").removesuffix(".so") for name in order)
+            label = "--then--".join(_FORMAT.library_stem(name) for name in order)
             if log_directory is not None:
                 (log_directory / ("jvm-load-" + label + ".log")).write_text(log)
             elif exit_code != 0:

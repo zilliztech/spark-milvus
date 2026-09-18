@@ -122,36 +122,50 @@ function(milvus_add_storage)
       CURL::libcurl
       prometheus-cpp::core
       opentelemetry-cpp::opentelemetry_proto
-      aio
+      ${storage_platform_libraries}
     PRIVATE prsbridge
   )
-  # The upstream Folly recipe publishes aio to consumers but does not put it
-  # in libfolly's DT_NEEDED list. Keep the provider in this runtime root even
-  # though --as-needed sees no unresolved aio reference in storage's objects.
-  target_link_libraries(milvus-storage PRIVATE
-    "-Wl,--no-as-needed" aio "-Wl,--as-needed")
+  if(NOT APPLE)
+    # The upstream Folly recipe publishes aio to consumers but does not put it
+    # in libfolly's DT_NEEDED list. Keep the provider in this runtime root even
+    # though --as-needed sees no unresolved aio reference in storage's objects.
+    # Folly's async I/O is Linux-only, so macOS has no aio to keep.
+    target_link_libraries(milvus-storage PRIVATE
+      "-Wl,--no-as-needed" aio "-Wl,--as-needed")
+  endif()
 
   # Rust vendors these C implementations. Keep their symbols private while
-  # retaining the public storage C, C++, and CXX bridge interfaces.
-  set(storage_symbol_map "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/storage-private-symbols.map")
-  target_link_options(milvus-storage PRIVATE
-    "LINKER:--version-script=${storage_symbol_map}"
-    "LINKER:-z,noexecstack"
-  )
+  # retaining the public storage C, C++, and CXX bridge interfaces. Mach-O has
+  # no version script; ld64 expresses the same list as unexported symbols, and
+  # its stack is non-executable without a link option.
+  if(APPLE)
+    set(storage_symbol_map "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/storage-private-symbols.txt")
+    target_link_options(milvus-storage PRIVATE
+      "LINKER:-unexported_symbols_list,${storage_symbol_map}"
+    )
+  else()
+    set(storage_symbol_map "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/storage-private-symbols.map")
+    target_link_options(milvus-storage PRIVATE
+      "LINKER:--version-script=${storage_symbol_map}"
+      "LINKER:-z,noexecstack"
+    )
+  endif()
   set_property(TARGET milvus-storage APPEND PROPERTY LINK_DEPENDS "${storage_symbol_map}")
 
   file(GLOB storage_jni_sources CONFIGURE_DEPENDS "${storage_cpp}/src/jni/*.cpp")
   add_library(milvus-storage-jni SHARED ${storage_jni_sources})
   target_include_directories(milvus-storage-jni PRIVATE ${JNI_INCLUDE_DIRS})
   target_link_libraries(milvus-storage-jni PRIVATE milvus-storage arrow::arrow)
-  target_link_options(milvus-storage-jni PRIVATE "LINKER:-z,noexecstack")
+  if(NOT APPLE)
+    target_link_options(milvus-storage-jni PRIVATE "LINKER:-z,noexecstack")
+  endif()
 
   set_target_properties(prsbridge rust-bridge milvus-storage milvus-storage-jni PROPERTIES
     POSITION_INDEPENDENT_CODE ON
   )
   set_target_properties(milvus-storage milvus-storage-jni PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    BUILD_RPATH "$ORIGIN"
-    INSTALL_RPATH "$ORIGIN"
+    BUILD_RPATH "${milvus_loader_path}"
+    INSTALL_RPATH "${milvus_loader_path}"
   )
 endfunction()

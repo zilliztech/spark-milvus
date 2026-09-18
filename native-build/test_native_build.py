@@ -88,20 +88,26 @@ class NativeStageTest(unittest.TestCase):
             FORMAT.library_name(install_base, install_version), dependencies)
 
     def test_aliases_preserved_and_only_staged_rpath_changed(self):
+        """The staged copy looks for its dependency beside itself; the source
+        it was copied from is not touched, and its alias still points at it.
+        """
         versioned = FORMAT.library_name("fixture", "1")
-        library = self.library(self.root / "source", "fixture", "fixture",
-                               "int fixture(void) { return 7; }",
-                               version="1.2", install_version="1")
+        dependency = self.library(self.root / "source", "dependency", "dependency",
+                                  "int dependency(void) { return 1; }", install_version="1")
+        library = self.library(
+            self.root / "source", "fixture", "fixture",
+            "extern int dependency(void); int fixture(void) { return dependency(); }",
+            [str(dependency)], version="1.2", install_version="1")
         alias = library.parent / FORMAT.library_name("fixture")
         alias.symlink_to(library.name)
         original = stage.digest(library)
-        providers, _ = stage.inventory({"graph": {"nodes": {}}}, [library, alias])
+        providers, _ = stage.inventory({"graph": {"nodes": {}}}, [library, alias, dependency])
         selected, aliases = stage.stage(providers, [versioned], self.root / "lib")
         self.assertEqual(original, stage.digest(library))
         self.assertEqual(versioned, aliases[FORMAT.library_name("fixture")])
         self.assertIn(FORMAT.read_runtime_path(self.root / "lib" / versioned),
                       ("$ORIGIN", "@loader_path"))
-        self.assertEqual({versioned}, set(selected))
+        self.assertIn(versioned, set(selected))
 
     def test_same_soname_with_different_binaries_rejected(self):
         first = self.library(self.root / "first", "fixture", "fixture",

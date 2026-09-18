@@ -50,6 +50,12 @@
       "Linux"
     ]
   },
+  "static_on": {
+    "_comment": "References whose recipe cannot build a shared library on the named systems. milvus-storage's conanfile sets the same option: 'macOS cannot build opentelemetry-cpp with shared=True'.",
+    "opentelemetry-cpp": [
+      "Macos"
+    ]
+  },
   "cardinal": {
     "v1": {
       "tag": "v2.5.112",

@@ -17,11 +17,13 @@ import sbtassembly.Assembly.JarEntry
 /** A platform JAR containing one dependency graph for both upstream JNI APIs.
   */
 object NativeBundle {
-  private val knowhereCApiTests = Vector(
+  // DiskANN's only aligned reader is built on libaio, so its acceptance fixture
+  // exists where DiskANN does.
+  private def knowhereCApiTests = Vector(
     "knowhere_c_api",
-    "knowhere_c_api_concurrency",
-    "knowhere_c_api_diskann_acceptance"
-  )
+    "knowhere_c_api_concurrency"
+  ) ++ (if (NativePlatform.isDarwin(platform)) Vector.empty
+        else Vector("knowhere_c_api_diskann_acceptance"))
   private def jvmLoadEntries = NativePlatform.jvmLoadEntries(platform)
   private def auditDlopenEntries = NativePlatform.auditDlopenEntries(platform)
   private def cardinalPlugins = NativePlatform.cardinalPlugins(platform)

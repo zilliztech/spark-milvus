@@ -9,9 +9,15 @@ build_type=Release
 
 [conf]
 tools.build:compiler_executables={"c": "clang", "cpp": "clang++"}
+# aws-sdk-cpp's RequestCompression calls zlib but the recipe declares no zlib
+# dependency. ELF resolves the symbols through another shared library on the
+# link line; Mach-O's two-level namespace requires a declared provider, so the
+# system zlib -- which the bundle never carries -- is named here. Remove this
+# when the recipe declares and links zlib itself.
+aws-sdk-cpp/*:tools.build:sharedlinkflags+=["-lz"]
 
 [platform_tool_requires]
-cmake/3.27.5
+cmake/3.31.10
 
 [options]
 abseil/*:shared=True

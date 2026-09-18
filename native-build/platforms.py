@@ -27,6 +27,12 @@ class Format:
     operating_system = None
     #: Executables the adapter shells out to, checked before a build starts.
     tools = ()
+    #: The value Conan settings and upstream recipes use for this system.
+    conan_os = None
+    #: The environment variable that names extra directories for the dynamic
+    #: loader, consulted only after a recorded path fails, so it adds providers
+    #: without shadowing the ones the system supplies.
+    library_fallback_variable = None
 
     def library_name(self, base, version=None):
         raise NotImplementedError
@@ -42,6 +48,14 @@ class Format:
     def compiler_runtime(self):
         """Compiler runtimes that are bundled with their source recorded."""
         return frozenset()
+
+    def locate_compiler_runtime(self, name):
+        """The absolute path of one compiler runtime on this host."""
+        raise NotImplementedError
+
+    def compiler_runtime_origin(self, path):
+        """What supplied that runtime, for the bundle's provenance."""
+        raise NotImplementedError
 
     def system_packages(self):
         """Distribution libraries that are bundled with their source recorded."""
@@ -64,6 +78,16 @@ class Format:
         """The runtime search path recorded in ``path``, for checks and tests."""
         raise NotImplementedError
 
+    #: How a binary names the directory it was loaded from.
+    loader_origin = None
+
+    def point_at_system_libraries(self, path):
+        """Make the dependencies the system supplies resolve to the system copy
+        rather than to the bundle directory. A no-op where the recorded name
+        already reaches the system loader.
+        """
+        return
+
     def clean_environment(self, environment=None):
         """A copy of the environment with the loader's overrides removed."""
         raise NotImplementedError
@@ -75,6 +99,24 @@ class Format:
     def toolchain(self):
         """``{"CC", "CXX", "FC"}`` for the compilers the engines are built with."""
         raise NotImplementedError
+
+    def library_glob(self, stem="*"):
+        """A glob matching this platform's shared libraries, versions included."""
+        raise NotImplementedError
+
+    def jsig_library(self):
+        """The JDK's signal-chaining library, relative to JAVA_HOME."""
+        raise NotImplementedError
+
+    def library_stem(self, name):
+        """A library file name without its lib prefix, version and suffix."""
+        raise NotImplementedError
+
+    def needs_tool_launcher(self):
+        """Whether a packaged build tool must be invoked through a launcher that
+        restores its library search path.
+        """
+        return False
 
     def toolchain_versions(self):
         """``(name, command)`` pairs recorded in the build's provenance."""
@@ -90,6 +132,9 @@ class Format:
 
 class Elf(Format):
     operating_system = "linux"
+    conan_os = "Linux"
+    library_fallback_variable = "LD_LIBRARY_PATH"
+    loader_origin = "$ORIGIN"
     tools = ("readelf", "patchelf", "ldd")
 
     def library_name(self, base, version=None):
@@ -97,6 +142,15 @@ class Elf(Format):
 
     def system_zlib(self):
         return "libz.so.1"
+
+    def library_glob(self, stem="*"):
+        return stem + ".so*"
+
+    def jsig_library(self):
+        return "lib/libjsig.so"
+
+    def library_stem(self, name):
+        return re.sub(r"\.so(?:\..*)?$", "", name.removeprefix("lib"))
 
     def system_libraries(self):
         return re.compile(
@@ -107,6 +161,12 @@ class Elf(Format):
 
     def compiler_runtime(self):
         return frozenset({"libatomic.so.1", "libgomp.so.1", "libgfortran.so.5", "libquadmath.so.0"})
+
+    def locate_compiler_runtime(self, name):
+        return Path(_command(self, "gcc-12", "-print-file-name=" + name).strip())
+
+    def compiler_runtime_origin(self, path):
+        return "compiler runtime: " + _command(self, "gcc-12", "-dumpfullversion").strip()
 
     def system_packages(self):
         return frozenset({"libaio.so.1", "libaio.so.1t64"})
@@ -160,7 +220,13 @@ class Elf(Format):
 
 
 class MachO(Format):
+    #: Where macOS keeps what it supplies; nothing under these is bundled.
+    SYSTEM_PREFIXES = ("/System/", "/usr/lib/")
+
     operating_system = "darwin"
+    conan_os = "Macos"
+    library_fallback_variable = "DYLD_FALLBACK_LIBRARY_PATH"
+    loader_origin = "@loader_path"
     tools = ("otool", "install_name_tool", "codesign")
 
     def library_name(self, base, version=None):
@@ -169,11 +235,47 @@ class MachO(Format):
     def system_zlib(self):
         return "libz.1.dylib"
 
+    def library_glob(self, stem="*"):
+        return stem + "*.dylib"
+
+    def jsig_library(self):
+        return "lib/libjsig.dylib"
+
+    def library_stem(self, name):
+        return re.sub(r"(?:\.[0-9][^.]*)*\.dylib$", "", name.removeprefix("lib"))
+
+    def compiler_runtime(self):
+        # Apple Clang has no OpenMP runtime of its own; libomp is the macOS
+        # counterpart of libgomp, which the Linux bundle already carries.
+        return frozenset({"libomp.dylib"})
+
+    def locate_compiler_runtime(self, name):
+        prefix = None
+        try:
+            prefix = _command(self, "brew", "--prefix", "libomp").strip()
+        except Exception:
+            prefix = None
+        for candidate in (prefix, "/opt/homebrew/opt/libomp", "/usr/local/opt/libomp"):
+            if candidate and (Path(candidate) / "lib" / name).is_file():
+                return Path(candidate) / "lib" / name
+        raise ValueError("Missing OpenMP runtime " + name + "; install libomp")
+
+    def compiler_runtime_origin(self, path):
+        version = "unknown"
+        receipt = path.resolve().parents[1] / "INSTALL_RECEIPT.json"
+        if receipt.is_file():
+            version = path.resolve().parents[1].name
+        return "homebrew libomp " + version
+
     def system_libraries(self):
-        # macOS supplies these from the shared cache; nothing else is assumed.
+        # Names a binary can record without a path; anything with a system path
+        # is dropped by inspect before it reaches this rule.
+        # The ELF list's counterpart: what the operating system supplies and
+        # the dependency graph does not. libiconv and libcharset are Conan
+        # packages here, so they are bundled like any other dependency.
         return re.compile(
-            r"^(?:libSystem\.B|libc\+\+(?:abi)?\.1|libobjc\.A|libz\.1|libiconv\.2"
-            r"|libcharset\.1|libresolv\.9|libbsm\.0)\.dylib$"
+            r"^(?:libSystem\.B|libc\+\+(?:abi)?\.1|libobjc\.A|libresolv\.9"
+            r"|libz\.1)\.dylib$"
         )
 
     def inspect(self, path):
@@ -185,14 +287,26 @@ class MachO(Format):
             return None
         install_name = _command(self, "otool", "-D", path).splitlines()
         recorded = install_name[-1].strip() if len(install_name) > 1 else path.name
+        # What the operating system supplies is recognised by where it lives,
+        # not by its name: a framework has no suffix at all. Those are neither
+        # bundled nor resolved here, so they are not dependencies to carry.
         needed = [
             Path(name).name
-            for name in re.findall(r"^\s+(\S+) \(compatibility version", _command(self, "otool", "-L", path), re.M)
+            for name in re.findall(r"^\s+(\S+) \(compatibility version",
+                                   _command(self, "otool", "-L", path), re.M)
+            if not name.startswith(self.SYSTEM_PREFIXES)
         ]
         own = Path(recorded).name
         return {"soname": own, "needed": [name for name in needed if name != own]}
 
     def set_runtime_path(self, path, entries):
+        # A library whose only @rpath entry is its own install name has no
+        # dependency to find, and ld64 reserves no room to add a load command
+        # unless the link asked for it. Leave such a file untouched.
+        record = self.inspect(path)
+        if record is not None and not any(
+                name.startswith("@rpath/") for name in self.needed_paths(path)):
+            return
         for existing in self.read_runtime_path(path).split(":"):
             if existing:
                 subprocess.run(
@@ -214,6 +328,43 @@ class MachO(Format):
         output = _command(self, "otool", "-l", path)
         return ":".join(re.findall(r"path (\S+) \(offset \d+\)", output))
 
+    def point_at_system_libraries(self, path):
+        # ELF resolves a dependency by its SONAME: the system copy and the
+        # bundled copy are both found without rewriting anything. Mach-O
+        # records a path, so each kind is pointed at explicitly -- a system
+        # library at its absolute path, which the dyld shared cache resolves,
+        # and a bundled one at @rpath, which the loader-relative search finds.
+        system = self.system_libraries()
+        changed = False
+        for recorded in self.needed_paths(path):
+            name = Path(recorded).name
+            if recorded.startswith(self.SYSTEM_PREFIXES):
+                # Already an absolute path into what the system supplies,
+                # frameworks included; the loader resolves it as recorded.
+                continue
+            if system.fullmatch(name):
+                target = "/usr/lib/" + name
+            elif recorded.startswith("/"):
+                target = "@rpath/" + name
+            else:
+                continue
+            if target != recorded:
+                subprocess.run(["install_name_tool", "-change", recorded,
+                                target, str(path)], check=True)
+                changed = True
+        if changed:
+            subprocess.run(["codesign", "--force", "--sign", "-", str(path)],
+                           check=True, capture_output=True)
+
+    def needed_paths(self, path):
+        """Every dependency as the file records it, its own install name apart."""
+        own = _command(self, "otool", "-D", path).splitlines()
+        recorded = own[-1].strip() if len(own) > 1 else Path(path).name
+        return [name for name in
+                re.findall(r"^\s+(\S+) \(compatibility version",
+                           _command(self, "otool", "-L", path), re.M)
+                if name != recorded]
+
     def clean_environment(self, environment=None):
         result = dict(os.environ if environment is None else environment)
         for name in ("DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_FRAMEWORK_PATH",
@@ -225,7 +376,10 @@ class MachO(Format):
     def compile_library(self, source, output, install_name, dependencies=()):
         subprocess.run(
             ["clang", "-shared", "-fPIC", str(source), "-o", str(output),
-             "-install_name", install_name, "-Wl,-rpath,/unusable/conan/cache",
+             # Packaged libraries record their install name against @rpath, so
+             # a fixture that stands in for one records it the same way.
+             "-install_name", "@rpath/" + install_name,
+             "-Wl,-rpath,/unusable/conan/cache", "-Wl,-headerpad_max_install_names",
              *map(str, dependencies)],
             check=True,
         )
@@ -235,6 +389,13 @@ class MachO(Format):
         # Apple Clang has no Fortran; OpenBLAS is not built here, and the
         # engines that would need one are not selected on this platform.
         return {"CC": "clang", "CXX": "clang++"}
+
+    def needs_tool_launcher(self):
+        # System Integrity Protection removes every DYLD_* variable when a
+        # protected binary is executed, and Ninja runs each command through
+        # /bin/sh. A launcher sets the variable inside that shell instead, where
+        # it survives into the tool it execs.
+        return True
 
     def toolchain_versions(self):
         return (("compiler", ["clang", "--version"]),

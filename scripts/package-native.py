@@ -9,26 +9,35 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 from urllib.parse import urlsplit
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "native-build"))
+import platforms  # noqa: E402  -- the path above makes this importable
+
+FORMAT = platforms.host()
+
 
 REQUIRED_ENTRIES = (
-    "libmilvus-storage-jni.so",
-    "libmilvus-storage.so",
-    "libknowhere_jni.so",
-    "libknowhere_c.so.1",
-    "libknowhere.so",
+    FORMAT.library_name("milvus-storage-jni"),
+    FORMAT.library_name("milvus-storage"),
+    FORMAT.library_name("knowhere_jni"),
+    FORMAT.library_name("knowhere_c", "1"),
+    FORMAT.library_name("knowhere"),
 )
-LOAD_ENTRIES = ("libmilvus-storage-jni.so", "libknowhere_jni.so")
+LOAD_ENTRIES = (FORMAT.library_name("milvus-storage-jni"),
+                FORMAT.library_name("knowhere_jni"))
 AUDIT_DLOPEN_ENTRIES = REQUIRED_ENTRIES
-PLUGIN_PARENTS = {"libcardinalv1.so": "libknowhere.so", "libcardinalv2.so": "libknowhere.so"}
-C_API_TESTS = [
-    "knowhere_c_api",
-    "knowhere_c_api_concurrency",
-    "knowhere_c_api_diskann_acceptance",
-]
+PLUGIN_PARENTS = {FORMAT.library_name("cardinalv1"): FORMAT.library_name("knowhere"),
+                  FORMAT.library_name("cardinalv2"): FORMAT.library_name("knowhere")}
+# DiskANN's only aligned reader is built on libaio, so its acceptance fixture
+# exists where DiskANN does.
+C_API_TESTS = sorted(
+    ["knowhere_c_api", "knowhere_c_api_concurrency"]
+    + ([] if isinstance(FORMAT, platforms.MachO) else ["knowhere_c_api_diskann_acceptance"])
+)
 EVIDENCE_ENTRIES = {
     "NativeLoadCheck.java",
     "jvm_load.py",
@@ -57,9 +66,7 @@ EVIDENCE_ENTRIES = {
         "storage-working-tree.patch",
     )),
 }
-SYSTEM_LIBRARIES = re.compile(
-    r"^(?:ld-linux[^/]*|lib(?:c|m|mvec|pthread|dl|rt|resolv|util|gcc_s|stdc\+\+)\.so(?:\..*)?|libz\.so\.1)$"
-)
+SYSTEM_LIBRARIES = FORMAT.system_libraries()
 
 
 def digest(path):
@@ -99,17 +106,11 @@ def inventory(directory, platform=None):
         name = path.relative_to(directory).as_posix()
         if not safe_name(name) or not path.resolve().is_relative_to(directory):
             raise ValueError(f"Invalid native path: {name}")
-        with path.open("rb") as stream:
-            header = stream.read(20)
-            if header[:4] != b"\x7fELF":
-                raise ValueError(f"Non-ELF file in native library directory: {name}")
-            if platform is not None:
-                machine = {"linux-x86_64": 62, "linux-aarch64": 183}[platform]
-                if len(header) < 20 or header[4:6] != b"\x02\x01" or int.from_bytes(header[18:20], "little") != machine:
-                    raise ValueError(f"ELF architecture does not match {platform}: {name}")
-        dynamic = command("readelf", "-dW", str(path))
-        sonames = re.findall(r"\(SONAME\).*\[(.*?)\]", dynamic)
-        soname = sonames[0] if sonames else path.name
+        inspected = FORMAT.inspect(path)
+        if inspected is None:
+            raise ValueError(f"Not a shared library of this platform: {name}")
+        sonames = [inspected["soname"]] if inspected["soname"] != path.name else []
+        soname = inspected["soname"]
         # Modules without DT_SONAME are opened by path. Keep distinct module
         # paths while using the same filename fallback as the staging record.
         identity = sonames[0] if sonames else name
@@ -117,14 +118,16 @@ def inventory(directory, platform=None):
             raise ValueError(f"System ABI library must not be bundled: {soname}")
         sha = digest(path)
         record = {"path": path, "sha256": sha, "soname": soname,
-                  "needed": re.findall(r"\(NEEDED\).*\[(.*?)\]", dynamic)}
+                  "needed": inspected["needed"]}
         records[name] = record
         if identity in groups and groups[identity][0][1]["sha256"] != sha:
             raise ValueError(f"Different binaries share SONAME {soname}")
         groups.setdefault(identity, []).append((name, record))
-        paths = re.findall(r"\((?:RUNPATH|RPATH)\).*\[(.*?)\]", dynamic)
+        recorded = FORMAT.read_runtime_path(path)
+        paths = [recorded] if recorded else []
         depth = len(Path(name).parts) - 1
-        permitted = {"$ORIGIN", "$ORIGIN" + "/.." * depth}
+        origin = FORMAT.loader_origin
+        permitted = {origin, origin + "/.." * depth}
         if record["needed"] and (not paths or any(item not in permitted for item in paths[0].split(":"))):
             raise ValueError(f"Library must resolve its dependencies from the bundle: {name}: {paths}")
     for entry in REQUIRED_ENTRIES:
@@ -262,8 +265,11 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
         if not re.fullmatch(r"[a-f0-9]{40}", provenance.get(key, "")):
             raise ValueError(f"Missing exact source pin: {key}")
     platform = provenance.get("platform")
-    if platform not in ("linux-x86_64", "linux-aarch64"):
-        raise ValueError("Unsupported native bundle platform")
+    # A platform is packaged when the build covers it, which is what having a
+    # Conan profile means; the driver checks the same thing.
+    profiles = Path(__file__).resolve().parents[1] / "native-build" / "profiles"
+    if not platform or not (profiles / platform).is_file():
+        raise ValueError("Unsupported native bundle platform: " + str(platform))
     if not isinstance(provenance.get("with_cardinal"), bool):
         raise ValueError("Provenance must record the actual with_cardinal boolean")
     if provenance.get("dependency.mode") != "shared":
@@ -296,7 +302,7 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
                     raise ValueError(f"Native library changed while packaging: {name}")
                 put(archive, prefix + name, contents)
             put(archive, "META-INF/milvus-native/provenance.json", provenance_bytes)
-            put(archive, "META-INF/milvus-native/elf.json", json.dumps(
+            put(archive, "META-INF/milvus-native/binaries.json", json.dumps(
                 {name: {key: value for key, value in record.items() if key != "path"}
                  for name, record in sorted(libraries.items())}, indent=2).encode())
             if licenses is not None:

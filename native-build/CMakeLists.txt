@@ -1,8 +1,12 @@
 cmake_minimum_required(VERSION 3.27)
 project(spark_milvus_native LANGUAGES C CXX)
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
-  message(FATAL_ERROR "This native source build supports Linux x86_64")
+# The covered platforms; each also needs a Conan profile and a platforms.py
+# adapter, which the build driver checks before it reaches CMake.
+if(NOT ((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|aarch64|arm64)$")
+        OR (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")))
+  message(FATAL_ERROR "This native source build covers Linux x86_64, Linux aarch64 and macOS arm64, not "
+                      "${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 set(MILVUS_STORAGE_SOURCE_DIR "" CACHE PATH "Pinned milvus-storage source checkout")
@@ -24,7 +28,15 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
-set(CMAKE_INSTALL_RPATH "$ORIGIN")
+if(APPLE)
+  set(milvus_loader_path "@loader_path")
+  # Folly's async I/O, and therefore libaio, is Linux-only.
+  set(storage_platform_libraries "")
+else()
+  set(milvus_loader_path "$ORIGIN")
+  set(storage_platform_libraries aio)
+endif()
+set(CMAKE_INSTALL_RPATH "${milvus_loader_path}")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH OFF)
 
 find_program(CCACHE_PROGRAM ccache)
