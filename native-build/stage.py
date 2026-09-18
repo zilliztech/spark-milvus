@@ -15,7 +15,9 @@ from jvm_load import JVM_LOAD_ENTRIES, check_jvm_loads
 
 SYSTEM = re.compile(r"^(?:ld-linux[^/]*|lib(?:c|m|mvec|pthread|dl|rt|resolv|util|gcc_s|stdc\+\+)\.so(?:\..*)?|libz\.so\.1)$")
 COMPILER_RUNTIME = {"libatomic.so.1", "libgomp.so.1", "libgfortran.so.5", "libquadmath.so.0"}
-SYSTEM_PACKAGES = {"libaio.so.1"}
+# Ubuntu 24.04 renamed libaio's soname in the 64-bit time_t transition, so a
+# build there links against libaio.so.1t64 and an older one against libaio.so.1.
+SYSTEM_PACKAGES = {"libaio.so.1", "libaio.so.1t64"}
 PARENT_PROVIDERS = {"libcardinalv1.so": "libknowhere.so", "libcardinalv2.so": "libknowhere.so"}
 AUDIT_DLOPEN_ENTRIES = (
     "libmilvus-storage-jni.so",
