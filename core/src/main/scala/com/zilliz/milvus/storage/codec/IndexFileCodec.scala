@@ -142,8 +142,11 @@ private[storage] object IndexFileCodec extends Logging {
           val count = math.min(ChunkBytes, bytes.length - copied)
           val chunk = ByteBuffer.allocateDirect(count)
           read(name, offset + copied, chunk)
-          chunk.flip()
-          chunk.get(bytes, copied, count)
+          // Whether the copy left the position at the end or at the start is
+          // the caller's business; the bytes are read from the start either way.
+          val view = chunk.duplicate()
+          view.clear()
+          view.get(bytes, copied, count)
           copied += count
         }
         val envelope = BinlogCodec.envelope(
