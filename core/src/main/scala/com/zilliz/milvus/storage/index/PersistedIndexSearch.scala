@@ -8,30 +8,25 @@ import scala.util.Try
 
 import org.apache.arrow.memory.{ArrowBuf, RootAllocator}
 
-import com.zilliz.milvus.jni.vector.NativeVectorIndex
-import com.zilliz.milvus.storage.codec.{
-  IndexFileCodec,
-  IndexFileDecoder,
-  MilvusIndexFileDecoder
-}
-import com.zilliz.milvus.storage.io.ObjectStore
-import com.zilliz.milvus.storage.snapshot.SegmentIndex
+import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.Logging
 
-/** Query-scoped owner of an existing segment index. It never builds an index.
+/** Searches one open segment index. It opens nothing and builds nothing: the
+  * Milvus format side hands it the handle
+  * (docs/design/architecture/vector-search.html section 2.4).
   */
-final class PersistedIndexSearch private (
-    index: NativeVectorIndex,
-    metric: String,
-    segmentId: Long,
-    buildId: Long
-) extends AutoCloseable
+final class PersistedIndexSearch(handle: SegmentIndexHandle)
+    extends AutoCloseable
     with Logging {
   import PersistedIndexSearch._
 
+  private val index = handle.index
+  private val metric = handle.metric
+  private val segmentId = handle.segmentId
+  private val buildId = handle.buildId
   private var closed = false
-  def rows: Long = index.rows()
-  def dimension: Int = index.dimension()
+  def rows: Long = handle.rows
+  def dimension: Int = handle.dimension
 
   /** Exclusions use physical segment row offsets; 1 means excluded. */
   def search(
@@ -112,6 +107,7 @@ final class PersistedIndexSearch private (
         nativeCalls += 1
         index.search(
           bytes(queryBuffer, dimension.toLong * 4L),
+          1L,
           count,
           bytes(mask, maskBytes),
           bytes(ids, count.toLong * 8L),
@@ -167,10 +163,11 @@ final class PersistedIndexSearch private (
     }
   }
 
+  /** Closes the handle it was given, and with it the native index. */
   override def close(): Unit = synchronized {
     if (!closed) {
       closed = true
-      index.close()
+      handle.close()
     }
   }
 }
@@ -205,47 +202,5 @@ object PersistedIndexSearch {
       .getOrElse(math.max(64, topK))
     require(ef >= topK, "HNSW ef must be at least topK")
     ef
-  }
-
-  def load(
-      index: SegmentIndex,
-      dimension: Int,
-      nullable: Boolean,
-      store: ObjectStore,
-      decoder: IndexFileDecoder = MilvusIndexFileDecoder
-  ): PersistedIndexSearch = {
-    require(
-      !nullable,
-      "Persisted index search currently requires a non-nullable FloatVector"
-    )
-    require(
-      dimension > 0 && index.rowCount > 0,
-      "Index dimensions and row count must be positive"
-    )
-    require(
-      index.indexType.exists(_.equalsIgnoreCase("HNSW")),
-      "Persisted index search currently supports HNSW FloatVector indexes"
-    )
-    val metric = index.metricType
-      .getOrElse(
-        throw new IllegalArgumentException(
-          "Index metadata is missing metric_type"
-        )
-      )
-      .toUpperCase(Locale.ROOT)
-    require(
-      Set("L2", "IP", "COSINE").contains(metric),
-      s"Unsupported index metric: $metric"
-    )
-    require(
-      index.currentIndexVersion.exists(_ >= 0),
-      "Snapshot must declare the persisted vector index format version"
-    )
-    new PersistedIndexSearch(
-      IndexFileCodec.load(index, dimension, store, decoder),
-      metric,
-      index.segmentId,
-      index.buildId
-    )
   }
 }

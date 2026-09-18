@@ -6,14 +6,13 @@ import scala.util.Try
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.types.pojo.Schema
-import org.apache.arrow.vector.VectorSchemaRoot
 
-import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.expr.{Evaluator, Expr, PlanParser}
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.read.exec.{
-  DeletePlans,
   ReadMetrics,
+  RowExclusions,
+  SegmentIndexHandle,
   SegmentReaderRegistry
 }
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
@@ -42,43 +41,7 @@ object SegmentIndexQuery extends Logging {
   sealed trait Result
   final case class Indexed(hits: Vector[PersistedIndexSearch.Hit])
       extends Result
-  final case class Unindexed(selection: RowSelection) extends Result
-
-  /** The same visibility predicate is used by indexed and explicitly allowed
-    * unindexed execution. Both evaluate it before selecting the top-k rows.
-    */
-  final class RowSelection private[index] (
-      expression: Option[Expr],
-      deletePlan: DeletePlan,
-      pkField: Option[FieldSchema],
-      columnNameFor: Long => Option[String],
-      fieldNameToColumn: Map[String, String]
-  ) {
-    val expressionFields: Set[String] =
-      expression.map(_.fields).getOrElse(Set.empty)
-    private val pkColumn =
-      pkField.map(f => columnNameFor(f.fieldID).getOrElse(f.name))
-    private val timestampColumn = columnNameFor(1L).getOrElse("Timestamp")
-    private def arrowColumn(name: String): String =
-      fieldNameToColumn.getOrElse(name, name)
-    val neededColumns: Seq[String] =
-      (expressionFields.toSeq.sorted.map(arrowColumn) ++
-        (if (deletePlan.isEmpty) Seq.empty
-         else Seq(pkColumn.get, timestampColumn))).distinct
-
-    def excludes(batch: VectorSchemaRoot, row: Int): Boolean = {
-      val deleted = !deletePlan.isEmpty && DeletePlans.rowDeleted(
-        deletePlan,
-        pkField.get,
-        batch.getVector(pkColumn.get),
-        batch.getVector(timestampColumn),
-        row
-      )
-      deleted || expression.exists(e =>
-        !Evaluator.matches(e, batch, row, arrowColumn)
-      )
-    }
-  }
+  final case class Unindexed(selection: RowExclusions) extends Result
 
   private final case class Validated(
       field: FieldSchema,
@@ -221,22 +184,8 @@ object SegmentIndexQuery extends Logging {
     val collection = CollectionSchema.parseFrom(task.schemaBytes)
     val prepared = validated(request, collection)
     val selected = selectIndex(request, prepared.field.fieldID, task)
-    val pkField = collection.fields.find(_.isPrimaryKey)
-    val deletes = DeletePlans.of(task, pkField)
-    require(
-      deletes.isEmpty || pkField.nonEmpty,
-      "Applying deletes requires a primary key field"
-    )
-    val names = collection.fields
-      .map(f => f.name -> columnNameFor(f.fieldID).getOrElse(f.name))
-      .toMap
-    val selection = new RowSelection(
-      prepared.expression,
-      deletes,
-      pkField,
-      columnNameFor,
-      names
-    )
+    val selection =
+      RowExclusions.of(task, collection, prepared.expression, columnNameFor)
     if (selected.isEmpty) {
       logWarning(
         s"Explicit unindexed brute-force fallback: segment=${task.segmentId}, field=${prepared.field.fieldID}"
@@ -283,15 +232,16 @@ object SegmentIndexQuery extends Logging {
       }
     }
     val store = NativeObjectStore.Factory(task.properties).open()
-    val loaded =
+    val handle =
       try
-        PersistedIndexSearch.load(
+        SegmentIndexHandle.open(
           descriptor,
           prepared.dimension,
           prepared.field.nullable,
           store
         )
       finally store.close()
+    val loaded = new PersistedIndexSearch(handle)
     val hits =
       try
         loaded.search(

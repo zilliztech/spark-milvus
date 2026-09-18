@@ -10,6 +10,7 @@ import org.apache.spark.sql.types.StructType
 
 import com.zilliz.milvus.storage.index.SegmentIndexQuery
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReaderRegistry}
+import com.zilliz.milvus.storage.read.exec.RowExclusions
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.spark.connector.options.VectorSearch
 import com.zilliz.spark.connector.types.{ArrowConverter, SparkTypes}
@@ -124,7 +125,7 @@ private[read] object SegmentIndexSearch extends Logging {
       output: StructType,
       setup: ColumnBinding,
       allocator: BufferAllocator,
-      selection: SegmentIndexQuery.RowSelection,
+      selection: RowExclusions,
       reportMetrics: ReadMetrics => Unit
   ): SegmentVectorSearch.Search = {
     val collection = CollectionSchema.parseFrom(setup.task.schemaBytes)

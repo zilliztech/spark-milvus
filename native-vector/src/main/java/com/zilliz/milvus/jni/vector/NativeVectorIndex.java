@@ -29,10 +29,14 @@ public final class NativeVectorIndex implements AutoCloseable {
         return rows;
     }
 
-    /** Buffers are borrowed until this synchronous call returns. */
-    public void search(ByteBuffer query, int topK, ByteBuffer excluded,
+    /**
+     * Buffers are borrowed until this synchronous call returns. One call
+     * answers every query in {@code queries}; output holds
+     * {@code queryRows * topK} ids and distances.
+     */
+    public void search(ByteBuffer queries, long queryRows, int topK, ByteBuffer excluded,
             ByteBuffer ids, ByteBuffer distances, String parameters) {
-        index.search(query, 1, dimension, topK, excluded, excluded == null ? 0 : rows,
+        index.search(queries, queryRows, dimension, topK, excluded, excluded == null ? 0 : rows,
                 ids, distances, parameters);
     }
 

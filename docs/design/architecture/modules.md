@@ -52,10 +52,10 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；native-storage、core、
 | `delete` | 删除文件解码，按行号置位 | DeleteBitset、DeltaLogDecoder |
 | `stats` | 段统计：写侧的主键 bloom filter，读侧的保守剪枝 | PrimaryKeyStats、BlockedBloomFilter（blobloom 的逐位移植，#15）、PrimaryKeyFilter、PrimaryKeyBloomPruner（R9/R18 段级）；R10 row-group min/max 仍等仓库外依赖 |
 | `read.plan` | 分区规划，纯 JVM，可序列化 | SegmentReadTask、SegmentLayout、DeleteSource、ReadPlan、DeleteFileListing：`DeleteFileListing.of` 在 driver 上列删除文件（V3 段要开 manifest），`ReadPlan.of` 把 Snapshot 变成任务列表，任务带 `DeleteSource.Files`（#12、#13）。分区规划已下沉；一段一分区之外的第二种切法只等待 R19（决策 19） |
-| `read.exec` | 批读取、行号取列、出口；碰 native。向量搜索里是 Milvus TableFormat 的执行一侧：逐批交出向量缓冲、排除位图与起始行号，交出段的索引句柄 | SegmentReader、SegmentReaderRegistry、TakeResult；take 包装 loon_take，接收有序唯一行号。列式出口的 Spark 类型归第 3 层，进 core 的仍是 VectorSchemaRoot |
+| `read.exec` | 批读取、行号取列、出口；碰 native。向量搜索里是 Milvus TableFormat 的执行一侧：逐批交出向量缓冲、排除位图与起始行号，交出段的索引句柄 | SegmentReader、SegmentReaderRegistry、TakeResult、RowExclusions、SegmentVectors、SegmentIndexHandle；take 包装 loon_take，接收有序唯一行号。列式出口的 Spark 类型归第 3 层，进 core 的仍是 VectorSchemaRoot |
 | `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter（V3SegmentWriter、V2SegmentWriter）、WrittenColumnGroups、ManifestTransaction、StagingLayout |
 | `write.commit` | 作业清单、所有权、心跳、提交、幂等，以及 A7 的 fail-closed 候选审计与文件删除；完整目录删除等待原生 API；写快照 JSON 与段 Avro 清单供 Milvus 外部恢复（W8 待实现），索引记录随清单（W6） | JobManifest、Committer、StagingCleaner |
-| `index` | 持久化索引选择、加载、排除位图、向量执行与段内 TopK；目标形态只含计算：搜索规划（段组与查询组）、一个段内执行器接口（精确扫描在向量批上、索引探查在索引句柄上，输入一组查询，按查询有界 TopK）、Arrow 数据缓冲到 Knowhere 缓冲的适配、段索引构建 | SegmentIndexQuery、KnowhereBuffers、SearchPlan、TopKMerger、PersistedIndexSearch、BruteForceSearch；索引来源随 Snapshot 固定，任务独占并关闭。SearchPlan、多查询执行器、IndexWriter 待实现；打开段、排除位图和索引文件的读取与解码归 Milvus 的 TableFormat 一侧（read.exec、delete、expr、codec），计算不打开存储，见 [vector-search.html 第一、二节](vector-search.html#overall) |
+| `index` | 持久化索引选择、加载、排除位图、向量执行与段内 TopK；目标形态只含计算：搜索规划（段组与查询组）、一个段内执行器接口（精确扫描在向量批上、索引探查在索引句柄上，输入一组查询，按查询有界 TopK）、Arrow 数据缓冲到 Knowhere 缓冲的适配、段索引构建 | SegmentSearch（ExactScan、IndexProbe）、SearchPlan、TopKMerger、QueryMatrix、KnowhereBuffers、PersistedIndexSearch、SegmentIndexQuery、BruteForceSearch；索引来源随 Snapshot 固定，任务独占并关闭。SearchPlan、多查询执行器、IndexWriter 待实现；打开段、排除位图和索引文件的读取与解码归 Milvus 的 TableFormat 一侧（read.exec、delete、expr、codec），计算不打开存储，见 [vector-search.html 第一、二节](vector-search.html#overall) |
 
 ### 2.2 compat `com.zilliz.milvus.storage.compat`
 

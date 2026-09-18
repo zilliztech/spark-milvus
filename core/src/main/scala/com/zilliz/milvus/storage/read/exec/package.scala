@@ -30,15 +30,23 @@ package com.zilliz.milvus.storage.read
   * Spark output modes in the same expected-row check: reaching EOF with a
   * different physical count fails instead of returning a short DataFrame.
   *
+  * A vector search reads through this package too, and that is the Milvus
+  * format side of it: `RowExclusions` decides which rows the deletes and the
+  * filter take out, `SegmentVectors` hands out one batch at a time with that
+  * bitmap and the batch's first row offset, and `SegmentIndexHandle` opens the
+  * index a snapshot pinned. `core.index` computes on what these hand over and
+  * opens nothing itself (docs/design/architecture/vector-search.html sections
+  * 2.3 and 2.4).
+  *
   * `SegmentReader.metrics` is what the read cost on the crossing, as
   * `ReadMetrics`: calls and time, batches and bytes, the C side's copies, the
   * allocator's peak (G5; docs/design/architecture/storage-io.html section 5).
   *
-  * Main types: SegmentReader, SegmentReaderRegistry, DeletePlans, ReadMetrics.
-  * Capabilities: R3, R4, R8, R14, R17, G3, G5 (see
-  * docs/design/capabilities.md). R4 and R17 name the columnar outlet. G3 maps
-  * typed row/byte batch limits to the upstream reader; the Spark reader owns a
-  * bounded child allocator that outlives every imported batch. Design:
-  * docs/design/architecture/read.html section 5.2.
+  * Main types: SegmentReader, SegmentReaderRegistry, DeletePlans, ReadMetrics,
+  * RowExclusions, SegmentVectors, SegmentIndexHandle. Capabilities: R3, R4, R8,
+  * R14, R17, G3, G5 (see docs/design/capabilities.md). R4 and R17 name the
+  * columnar outlet. G3 maps typed row/byte batch limits to the upstream reader;
+  * the Spark reader owns a bounded child allocator that outlives every imported
+  * batch. Design: docs/design/architecture/read.html section 5.2.
   */
 package object exec
