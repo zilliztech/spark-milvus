@@ -39,12 +39,14 @@ import com.zilliz.milvus.storage.snapshot.{
   SegmentLayout,
   V2ColumnGroup
 }
+import com.zilliz.milvus.storage.write.commit.JobManifest
 import com.zilliz.milvus.storage.write.exec.{
   ManifestTransaction,
   V3SegmentWriter
 }
 import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.procedure.{BuildIndexProcedure, ProcedureArgs}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 import io.milvus.storage.{MilvusStorageProperties, MilvusStorageTransaction}
@@ -154,6 +156,7 @@ object SegmentIndexSearchSmoke {
         "PASS: output columns come back in the order asked for, or not at all, without opening raw vectors"
       )
       verifyMixedL2Tie(spark, directory, allocator, properties)
+      verifyBuildIndexProcedure(spark, directory, allocator, properties)
       assert(
         allocator.getAllocatedMemory == 0,
         "Fixture construction leaked Arrow buffers"
@@ -170,6 +173,131 @@ object SegmentIndexSearchSmoke {
         finally paths.close()
       }
     }
+  }
+
+  /** `build_index` builds what a search then reads: the snapshot names no
+    * index, the procedure writes them, and a search through those files answers
+    * exactly what the exact scan does (section 2.7).
+    */
+  private def verifyBuildIndexProcedure(
+      spark: SparkSession,
+      directory: Path,
+      allocator: RootAllocator,
+      properties: Map[String, String]
+  ): Unit = {
+    val values = (0 until 8).map(row => Array(row.toFloat, 0f))
+    val fixtures = Seq(50L, 51L).map { segment =>
+      writeSegment(
+        directory,
+        allocator,
+        properties,
+        segment,
+        v2 = false,
+        vectorValues = Some(values)
+      )
+    }
+    Files.write(
+      directory.resolve("to-build.json"),
+      snapshotJson(fixtures, unindexedSegments = Set(50L, 51L))
+        .getBytes(UTF_8)
+    )
+
+    val rows = BuildIndexProcedure.run(
+      ProcedureArgs(
+        values = Map(
+          "collection" -> "persisted-index-smoke",
+          "field" -> "vector",
+          "output" -> "built",
+          "index_type" -> "HNSW",
+          "metric" -> "L2",
+          "params" -> "M=4,efConstruction=32",
+          "build_id" -> 7000L,
+          "index_version" -> 1L,
+          "store_path_version" -> 0L
+        ),
+        options =
+          properties ++ Map(MilvusOption.SnapshotPath -> "to-build.json")
+      )
+    )
+    assert(rows.size == 2, rows.mkString(","))
+    assert(rows.forall(_.getAs[Long]("build_id") == 7000L))
+    assert(rows.forall(_.getAs[Long]("row_count") == 8L))
+    assert(rows.forall(_.getAs[Int]("objects") > 0))
+
+    val jobId = rows.head.getAs[String]("job_id")
+    val manifest = JobManifest
+      .fromJson(
+        new String(
+          Files.readAllBytes(
+            directory.resolve(s"built/staging/$jobId/manifest.json")
+          ),
+          UTF_8
+        )
+      )
+      .toOption
+      .get
+    assert(manifest.indexes.size == 2, manifest.toJson)
+
+    val indexed = fixtures.map { fixture =>
+      val record =
+        manifest.indexes.find(_.segmentId == fixture.task.segmentId).get
+      record.filePaths.foreach(path =>
+        assert(Files.exists(directory.resolve(path)), path)
+      )
+      fixture.copy(descriptor =
+        fixture.descriptor.copy(
+          buildId = record.buildId,
+          filePaths = record.filePaths.toVector,
+          rowCount = record.rowCount,
+          serializedSize = record.serializedSize,
+          indexVersion = record.indexVersion,
+          currentIndexVersion = Some(record.vectorIndexVersion),
+          indexStorePathVersion = Some(record.storePathVersion),
+          parameters = Map(
+            "index_type" -> record.indexType,
+            "metric_type" -> record.metricType,
+            "dim" -> "2"
+          )
+        )
+      )
+    }
+    Files.write(
+      directory.resolve("built.json"),
+      snapshotJson(indexed).getBytes(UTF_8)
+    )
+
+    def search(mode: String) = MilvusSearch
+      .search(
+        spark,
+        properties ++ Map(MilvusOption.SnapshotPath -> "built.json"),
+        "vector",
+        Array(2.5f, 0f),
+        4,
+        "L2",
+        mode,
+        Map.empty,
+        None,
+        Seq("id"),
+        false
+      )
+      .orderBy("rank")
+      .collect()
+      .toVector
+      .map(row =>
+        (
+          row.getAs[Long]("id"),
+          row.getAs[Double]("_score"),
+          row.getAs[Long]("_segment_id")
+        )
+      )
+
+    val built = search("index")
+    val exact = search("exact")
+    assert(built.size == 4, built.mkString(","))
+    assert(built == exact, s"index=$built exact=$exact")
+    println(
+      "PASS: build_index writes indexes through the Spark job and a search reads them back, matching the exact scan"
+    )
   }
 
   private def verifyMixedL2Tie(
