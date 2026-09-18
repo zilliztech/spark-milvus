@@ -118,6 +118,148 @@ class VectorSearchUatTest
   private def idsOf(rows: Seq[Row], query: Long): Seq[Long] =
     rows.filter(_.getAs[Long]("query_id") == query).map(_.getAs[Long]("id"))
 
+  // -------------------------------------------------------------- prepare
+
+  /** Builds the collection the index cases need: rows like `spark_uat_v3`'s, an
+    * HNSW index on the vector field, and a snapshot taken after the index is
+    * built. Prints the snapshot location for `MILVUS_UAT_INDEXED_SNAPSHOT`.
+    * Needs `MILVUS_UAT_URI` and `MILVUS_UAT_TOKEN`.
+    */
+  test("prepare: a collection whose vector field carries an HNSW index") {
+    import io.milvus.grpc.schema._
+    val uri = need("MILVUS_UAT_URI")
+    val collection =
+      env("MILVUS_UAT_VECTOR_COLLECTION").getOrElse("spark_uat_vector")
+    val count = env("MILVUS_UAT_VECTOR_ROWS").map(_.toInt).getOrElse(3000)
+    val client = com.zilliz.milvus.client.api.MilvusClient(
+      MilvusOption(
+        Map(MilvusOption.MilvusUri -> uri) ++
+          env("MILVUS_UAT_TOKEN").map(MilvusOption.MilvusToken -> _)
+      ).connectionParams
+    )
+    try {
+      if (client.getCollectionInfo("", collection).isFailure) {
+        val schema = client.createCollectionSchema(
+          name = collection,
+          fields = Seq(
+            client.createCollectionField(
+              "id",
+              isPrimary = true,
+              dataType = DataType.Int64
+            ),
+            client.createCollectionField(
+              "name",
+              dataType = DataType.VarChar,
+              typeParams = Map("max_length" -> "64")
+            ),
+            client.createCollectionField(
+              "v",
+              dataType = DataType.FloatVector,
+              typeParams = Map("dim" -> dim.toString)
+            )
+          )
+        )
+        client
+          .createCollection(collectionName = collection, schema = schema)
+          .get
+        info(s"created collection $collection")
+        val batch = 1000
+        (0 until count by batch).foreach { start =>
+          val ids = (start until math.min(start + batch, count)).map(_.toLong)
+          client
+            .insert(
+              collectionName = collection,
+              fieldsData = Seq(
+                FieldData(
+                  `type` = DataType.Int64,
+                  fieldName = "id",
+                  field = FieldData.Field.Scalars(
+                    ScalarField(data =
+                      ScalarField.Data.LongData(LongArray(data = ids))
+                    )
+                  )
+                ),
+                FieldData(
+                  `type` = DataType.VarChar,
+                  fieldName = "name",
+                  field = FieldData.Field.Scalars(
+                    ScalarField(data =
+                      ScalarField.Data.StringData(
+                        StringArray(data = ids.map(i => s"row-$i"))
+                      )
+                    )
+                  )
+                ),
+                FieldData(
+                  `type` = DataType.FloatVector,
+                  fieldName = "v",
+                  field = FieldData.Field.Vectors(
+                    VectorField(
+                      dim = dim,
+                      data = VectorField.Data.FloatVector(
+                        FloatArray(data = ids.flatMap(i => vectorOf(i).toSeq))
+                      )
+                    )
+                  )
+                )
+              ),
+              numRows = ids.size
+            )
+            .get
+        }
+        client.flush(collectionNames = Seq(collection)).get
+        info(s"inserted $count rows and flushed")
+      }
+      Thread.sleep(
+        env("MILVUS_UAT_FLUSH_WAIT_MS").map(_.toLong).getOrElse(20000L)
+      )
+      val parameters = Map(
+        "index_type" -> env("MILVUS_UAT_INDEX_TYPE").getOrElse("HNSW"),
+        "metric_type" -> "L2",
+        "M" -> "16",
+        "efConstruction" -> "200"
+      )
+      client.createIndex("", collection, "v", parameters) match {
+        case scala.util.Success(_) => info(s"index requested: $parameters")
+        case scala.util.Failure(failure) =>
+          info(s"createIndex refused: ${failure.getMessage}")
+      }
+      // The build is asynchronous; the snapshot must be taken after it, or it
+      // records no index files for the segment.
+      val deadline = System.currentTimeMillis() + 300000L
+      var built = false
+      while (!built && System.currentTimeMillis() < deadline) {
+        val described = client.describeIndexes("", collection, "v")
+        described.foreach { indexes =>
+          indexes.foreach(index =>
+            info(
+              s"index ${index.indexName}: state=${index.state}, indexed=${index.indexedRows}/${index.totalRows}, params=${index.params}"
+            )
+          )
+          built = indexes.nonEmpty && indexes.forall(index =>
+            index.indexedRows >= count.toLong && index.state.isFinished
+          )
+        }
+        if (!built) Thread.sleep(5000L)
+      }
+      built shouldBe true
+      val name = "spark_uat_vector_" + System.currentTimeMillis()
+      val snapshot = client
+        .createSnapshotForRead(
+          "",
+          collection,
+          name,
+          "spark-milvus UAT vector search",
+          86400L
+        )
+        .get
+      info(s"created snapshot ${snapshot.name} at ${snapshot.s3Location}")
+      info(
+        s"export MILVUS_UAT_VECTOR_COLLECTION=$collection MILVUS_UAT_INDEXED_SNAPSHOT=${snapshot.s3Location}"
+      )
+    } finally client.close()
+  }
+
   // ---------------------------------------------------------------- exact
 
   test("exact search answers every query with its own nearest rows") {
@@ -286,7 +428,7 @@ class VectorSearchUatTest
         queries(targets),
         "v",
         5,
-        "COSINE",
+        "L2",
         mode = mode,
         outputColumns = Seq("id")
       )
