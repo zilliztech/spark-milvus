@@ -26,6 +26,8 @@ private[storage] object IndexFileCodec extends Logging {
   private val MaxObjectBytes = 256L * 1024 * 1024
   private val MaxPayloadBytes = 1024L * 1024 * 1024
   private val ChunkBytes = 1024 * 1024
+  // Milvus slices an index payload at common.indexSliceSize, 16 MiB by default.
+  private val DefaultSliceBytes = 16L * 1024 * 1024
   private val mapper = new ObjectMapper()
     .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
 
@@ -42,6 +44,159 @@ private[storage] object IndexFileCodec extends Logging {
   )
 
   private[codec] final case class Slice(name: String, count: Int, length: Long)
+
+  /** Where a built index's objects go, and what the segment record will say
+    * about them.
+    */
+  private[storage] final case class IndexTarget(
+      collectionId: Long,
+      partitionId: Long,
+      segmentId: Long,
+      fieldId: Long,
+      buildId: Long,
+      indexVersion: Long,
+      storePathVersion: Int,
+      nullable: Boolean,
+      rootPath: String = ""
+  )
+
+  private[storage] final case class IndexObject(key: String, bytes: Long)
+
+  /** The prefix Milvus reads an index from, which its store path version
+    * decides (internal/core/src/storage/FileManager.h
+    * `GetRemoteIndexObjectPrefix`).
+    */
+  private[storage] def prefixOf(target: IndexTarget): String = {
+    val root = target.rootPath.stripSuffix("/")
+    val parts =
+      if (target.storePathVersion >= 1)
+        Seq(
+          "index_v1",
+          target.collectionId,
+          target.partitionId,
+          target.segmentId,
+          target.buildId,
+          target.indexVersion
+        )
+      else
+        Seq(
+          "index_files",
+          target.buildId,
+          target.indexVersion,
+          target.partitionId,
+          target.segmentId
+        )
+    (if (root.isEmpty) parts.mkString("/")
+     else root + "/" + parts.mkString("/"))
+  }
+
+  /** Writes a built index as the objects Milvus reads back.
+    *
+    * Each payload becomes one object under the index prefix, in the same
+    * envelope Milvus writes: a descriptor naming the segment and field, then
+    * one `IndexFileEvent` carrying the bytes. A payload longer than
+    * `sliceBytes` is split into `name_0`, `name_1`… and a `SLICE_META` object
+    * says how to put it back, which is what the loader in section 2.5 reads.
+    */
+  private[storage] def write(
+      payloads: Seq[(String, Long)],
+      read: (String, Long, ByteBuffer) => Unit,
+      target: IndexTarget,
+      store: ObjectStore,
+      sliceBytes: Long = DefaultSliceBytes
+  ): Seq[IndexObject] = {
+    require(payloads.nonEmpty, "A built index has no payloads")
+    require(
+      payloads.map(_._1).distinct.size == payloads.size,
+      "A built index repeats a payload name"
+    )
+    require(sliceBytes > 0, s"The slice size must be positive: $sliceBytes")
+    val prefix = prefixOf(target)
+    // Milvus writes originSize and indexBuildID as strings and nullable as a
+    // boolean (internal/core/src/storage/Event.cpp).
+    def extrasOf(originSize: Long) = {
+      val node = mapper.createObjectNode()
+      node.put("originSize", originSize.toString)
+      node.put("indexBuildID", target.buildId.toString)
+      node.put("nullable", target.nullable)
+      node
+    }
+    val written = Seq.newBuilder[IndexObject]
+    val slices = Vector.newBuilder[(String, Int, Long)]
+    payloads.foreach { case (name, length) =>
+      require(
+        validName(name),
+        s"A payload name has to be a plain object name: $name"
+      )
+      require(length > 0, s"Payload $name is empty")
+      def objectOf(objectName: String, offset: Long, size: Long): Unit = {
+        require(
+          size <= MaxObjectBytes,
+          s"Index object $objectName of $size bytes exceeds the supported size"
+        )
+        val bytes = new Array[Byte](size.toInt)
+        read(name, offset, ByteBuffer.wrap(bytes))
+        val envelope = BinlogCodec.envelope(
+          7,
+          target.collectionId,
+          target.partitionId,
+          target.segmentId,
+          target.fieldId,
+          0,
+          extrasOf(size),
+          bytes
+        )
+        val key = s"$prefix/$objectName"
+        store.write(key, envelope)
+        written += IndexObject(key, envelope.length.toLong)
+      }
+      if (length <= sliceBytes) objectOf(name, 0L, length)
+      else {
+        val count = ((length + sliceBytes - 1L) / sliceBytes).toInt
+        (0 until count).foreach { number =>
+          val offset = number.toLong * sliceBytes
+          objectOf(
+            s"${name}_$number",
+            offset,
+            math.min(sliceBytes, length - offset)
+          )
+        }
+        slices += ((name, count, length))
+      }
+    }
+    val sliced = slices.result()
+    if (sliced.nonEmpty) {
+      val root = mapper.createObjectNode()
+      val meta = root.putArray("meta")
+      sliced.foreach { case (name, count, length) =>
+        meta
+          .addObject()
+          .put("name", name)
+          .put("slice_num", count)
+          .put("total_len", length)
+      }
+      val bytes = mapper.writeValueAsBytes(root)
+      val envelope = BinlogCodec.envelope(
+        7,
+        target.collectionId,
+        target.partitionId,
+        target.segmentId,
+        target.fieldId,
+        0,
+        extrasOf(bytes.length.toLong),
+        bytes
+      )
+      val key = s"$prefix/$SliceMeta"
+      store.write(key, envelope)
+      written += IndexObject(key, envelope.length.toLong)
+    }
+    val objects = written.result()
+    logInfo(
+      s"Index written: segment=${target.segmentId}, build=${target.buildId}, " +
+        s"objects=${objects.size}, bytes=${objects.map(_.bytes).sum}, prefix=$prefix"
+    )
+    objects
+  }
 
   private[codec] def parseSlices(bytes: Array[Byte]): Vector[Slice] = {
     require(
