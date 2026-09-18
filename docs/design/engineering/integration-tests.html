@@ -25,9 +25,9 @@
 <main lang="zh-CN">
 <h1>集成测试的 Helm 执行</h1>
 
-<p class="lead"><code>spark-milvus-integration</code> Chart 只创建一个 Kubernetes Job；Job 在单个 Pod 内以 Spark <code>local[*]</code> 运行 <code>integration40/test</code>，访问已有的 Milvus 和对象存储。</p>
+<p class="lead"><code>spark-milvus-integration</code> Chart 只创建一个 Kubernetes Job；Job 执行测试镜像自带的入口，访问已有的 Milvus 和对象存储。</p>
 
-<div class="state"><strong>当前状态：</strong>Chart 的部署合同已经确定。现有发布镜像没有测试运行器，三个 integration suite 仍写死本机 Milvus/MinIO 配置，因此本次只能验收 Chart 的 lint 与渲染；镜像和测试配置完成前，不能声称端到端测试可运行。</div>
+<div class="state"><strong>当前状态：</strong>Chart 的部署合同已经确定。公开发布镜像只有 Connector assembly，没有测试运行器，不能直接用于该 Chart；具体部署可以使用在其他代码库维护的测试镜像和测试集合。</div>
 
 <nav aria-label="目录">
   <a href="#boundary">边界</a>
@@ -45,7 +45,7 @@
   <tbody><tr><td>一个 <code>batch/v1 Job</code></td><td>Milvus、MinIO/S3、Secret、Service、RBAC、PVC、Spark Operator</td></tr></tbody>
 </table>
 
-<p>现有测试显式使用 <code>local[*]</code>，所以第一版不使用 <code>SparkApplication</code>。若后续要验证 Kubernetes driver/executor 分布式执行，需要单独改造测试入口、镜像和权限，不能通过修改这个 Job 的 master 参数获得。</p>
+<p>第一版测试入口在 Pod 内以 Spark <code>local[*]</code> 运行，所以不使用 <code>SparkApplication</code>。若后续要验证 Kubernetes driver/executor 分布式执行，需要单独改造测试入口、镜像和权限，不能通过修改这个 Job 的 master 参数获得。</p>
 
 <h2 id="inputs">2. 普通配置与凭据分开交付</h2>
 
@@ -65,7 +65,7 @@
 <ol>
   <li>CI 生成唯一的 Helm release 和 <code>runId</code>。</li>
   <li>命名空间及其 Secret 由集群既有流程预先创建；运行脚本拒绝创建命名空间或覆盖同名 release。</li>
-  <li>运行脚本先执行 <code>helm lint --strict</code>，再安装 Job，并分别监控 Complete、Failed 与 <code>CreateContainerConfigError</code>；脚本不主动读取凭据 Secret 的 data。Helm 默认以 Secret 保存 release metadata，CI 身份仍需具备 Helm 自身要求的 Secret 权限。</li>
+  <li>运行脚本先执行 <code>helm lint --strict</code>，再安装 Job；脚本监控 Complete、Failed，以及 <code>ErrImagePull</code>、<code>ErrImageNeverPull</code>、<code>ImagePullBackOff</code>、<code>InvalidImageName</code>、<code>CreateContainerConfigError</code>、<code>RunContainerError</code> 和 Unschedulable，并在无法启动时立即失败。脚本不主动读取凭据 Secret 的 data。Helm 默认以 Secret 保存 release metadata，CI 身份仍需具备 Helm 自身要求的 Secret 权限。</li>
   <li>Job 失败不由 Kubernetes 重试：<code>backoffLimit</code> 固定为 0，避免重复写入。</li>
   <li>成功或失败都先收集 Helm 状态、Job 日志、资源描述和相关 Events。</li>
   <li>收集完成后卸载 release；成功测试若卸载失败，CI 仍判失败。TTL 只负责 CI 被强制中断后的 Job 兜底回收。</li>
@@ -75,17 +75,15 @@
 
 <h2 id="image">4. 测试镜像提供固定入口</h2>
 
-<p>Chart 固定调用 <code>/opt/spark-milvus/bin/run-integration-tests</code>。测试镜像必须：</p>
+<p>Chart 默认调用 <code>/opt/spark-milvus/bin/run-integration-tests</code>；镜像拥有该入口的实现。测试镜像必须：</p>
 
 <ul>
-  <li>使用 Java 21，并包含 Spark 4.0、已编译的 integration 测试和运行测试所需的依赖；</li>
-  <li>包含同一份已验证的 storage/Knowhere 原生 bundle；当前默认调度到 amd64；</li>
-  <li>包含 backfill 测试需要的 Python 与 pymilvus；</li>
-  <li>以明确的数字 UID 非 root 用户运行，保证工作目录、sbt 缓存与临时目录可写；</li>
-  <li>执行完整 <code>integration40/test</code>，并原样返回测试退出码。</li>
+  <li>包含 Spark 4.0、待验证的 Connector assembly、对应的原生 bundle 和测试入口所需的依赖；</li>
+  <li>以明确的数字 UID 非 root 用户运行，保证工作目录与临时目录可写；</li>
+  <li>读取 Chart 注入的环境变量，执行有界测试，并原样返回测试退出码。</li>
 </ul>
 
-<p>发布用 Dockerfile 的 final stage 只有 Connector assembly，不能用作这个测试镜像。</p>
+<p>测试入口不必在公开仓库维护；部署方可以在自己的镜像中实现业务测试。公开发布镜像的 final stage 只有 Connector assembly，没有该入口，不能直接用作测试镜像。</p>
 
 <h2 id="isolation">5. runId 必须进入所有可变资源</h2>
 
@@ -96,7 +94,7 @@
 <table>
   <thead><tr><th>当前可验</th><th>镜像与测试改造后再验</th></tr></thead>
   <tbody>
-    <tr><td>values schema、<code>helm lint</code>、模板渲染、Secret 只以引用出现、运行脚本语法</td><td>全部 integration suite 确实执行；无失败、中止或意外取消；并发运行互不覆盖；失败现场可取；资源按 runId 清理</td></tr>
+    <tr><td>values schema、<code>helm lint</code>、模板渲染、Secret 只以引用出现、运行脚本语法与状态监控</td><td>配置的测试集合确实执行；无失败、中止或意外取消；并发运行互不覆盖；失败现场可取；资源按 runId 清理</td></tr>
   </tbody>
 </table>
 

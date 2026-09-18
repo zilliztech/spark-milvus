@@ -118,6 +118,8 @@
 
 <p>版本中的分支名优先取 <code>GIT_BRANCH</code>，否则执行 <code>git rev-parse --abbrev-ref HEAD</code>。这个 Git 子进程单独清空 <code>LD_PRELOAD</code>，防止为 JVM 预加载的 <code>libjsig</code> 在 Git 的标准输出中打印警告并混入版本号；sbt JVM 及测试 JVM 的预加载环境保留。修复发生在子进程环境，不过滤 Git 输出，也不要求手工设置分支名。</p>
 
+<p>Docker 交付使用 BuildKit 执行原生构建与 sbt 构建，因为 Dockerfile 的依赖缓存和发布凭据都是 BuildKit mount。Conan、Cargo、ccache、Coursier、Ivy 和 sbt 缓存只保存依赖与工具状态，不保存工作区产物。Maven 发布凭据只通过名为 <code>maven_credentials</code> 的 secret mount 进入发布步骤；非发布构建不挂载该 Secret。发布构建禁用 Docker 层缓存，确保具有副作用的 <code>publish</code> 每次执行；BuildKit cache mount 仍可复用依赖。</p>
+
 <h2 id="validation">6 如何检查一次整改</h2>
 
 <p>先固定当前提交和工作区差异，再比较修改前后的项目 ID、目录、<code>dependsOn</code>、聚合成员、依赖版本与 scope、测试输入以及交付坐标。多人同时工作时以固定基线核对，保留期间出现的新提交和无关改动。</p>

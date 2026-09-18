@@ -253,6 +253,11 @@ BuildKit cache mounts, so a later build failure does not discard completed
 dependencies. Conan configuration is initialized inside the mount, including
 when the cache is empty. Native work directories and Cargo compilation outputs
 remain local to each build; cache reuse does not skip source or provenance checks.
+Maven publication credentials enter the final build step through the optional
+BuildKit secret named `maven_credentials`; they are not build arguments, copied
+files, image layers or cache-mount contents. A publishing build must set
+`MAVEN_CREDENTIALS_FILE=/run/secrets/maven_credentials` (the Docker default)
+and provide that secret. A non-publishing build provides no secret.
 This does not establish joint Storage/Knowhere support on platforms
 without a validated unified bundle.
 
