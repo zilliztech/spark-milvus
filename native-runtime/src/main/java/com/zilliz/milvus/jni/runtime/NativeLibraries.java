@@ -49,10 +49,12 @@ public final class NativeLibraries {
         private final boolean cardinal;
         private final String storageRevision;
         private final String knowhereRevision;
+        private final Set<String> loadEntries;
 
-        private Bundle(Path directory, Set<String> names, Properties manifest) {
+        private Bundle(Path directory, Set<String> names, Set<String> loadEntries, Properties manifest) {
             this.directory = directory;
             this.names = Collections.unmodifiableSet(new HashSet<>(names));
+            this.loadEntries = Collections.unmodifiableSet(new LinkedHashSet<>(loadEntries));
             this.cardinal = Boolean.parseBoolean(manifest.getProperty("with_cardinal"));
             this.storageRevision = manifest.getProperty("storage.revision");
             this.knowhereRevision = manifest.getProperty("knowhere.revision");
@@ -60,6 +62,27 @@ public final class NativeLibraries {
 
         public Path directory() {
             return directory;
+        }
+
+        /** The JNI entry this bundle declares for `base`, by the name the
+         * bundle itself gives it. A caller names the library it wants; how the
+         * platform decorates that name is the bundle's to state, not the
+         * caller's to guess.
+         */
+        public Path entry(String base) {
+            for (String declared : loadEntries) {
+                if (stem(declared).equals(base)) {
+                    return library(declared);
+                }
+            }
+            throw new UnsatisfiedLinkError("Native bundle declares no entry for " + base);
+        }
+
+        /** A library file name without its lib prefix, version and suffix. */
+        private static String stem(String name) {
+            String value = name.startsWith("lib") ? name.substring(3) : name;
+            int dot = value.indexOf('.');
+            return dot < 0 ? value : value.substring(0, dot);
         }
 
         /** Returns only a library or alias declared in this verified bundle. */
@@ -239,7 +262,7 @@ public final class NativeLibraries {
             try (Stream<Path> paths = Files.walk(directory)) {
                 paths.forEach(path -> path.toFile().deleteOnExit());
             }
-            return new Bundle(directory, allNames, manifest);
+            return new Bundle(directory, allNames, loadEntries, manifest);
         } catch (IOException | RuntimeException error) {
             try {
                 remove(directory);
