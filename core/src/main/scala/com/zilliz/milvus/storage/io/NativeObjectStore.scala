@@ -99,8 +99,9 @@ object NativeObjectStore {
   final case class Factory(properties: Map[String, String])
       extends ObjectStoreFactory {
 
-    /** The segment the local backend roots at and a key therefore repeats;
-      * empty for every backend the C layer roots at the bucket.
+    /** What the local backend roots at, and what a key built from
+      * `fs.root_path` therefore repeats; empty for every backend the C layer
+      * roots at the bucket.
       */
     private def localRootPath: String =
       if (
@@ -112,7 +113,6 @@ object NativeObjectStore {
         properties
           .get(StorageProperties.RootPath)
           .map(_.trim.stripSuffix("/"))
-          .map(value => value.substring(value.lastIndexOf('/') + 1))
           .filter(_.nonEmpty)
           .getOrElse("")
       else ""

@@ -115,13 +115,12 @@ class StorageNativeTest
     // carries fs.root_path. The C layer roots a remote backend at the bucket
     // and a local one at fs.root_path, one level deeper, and the store hides
     // that difference rather than letting callers carry two conventions.
-    val rootPath = "files"
+    // The key is built the way a writer builds it: fs.root_path, then the
+    // job's own path under it.
+    val rootPath = root.resolve("files").toAbsolutePath.toString
     val store = NativeObjectStore
       .Factory(
-        Map(
-          "fs.storage_type" -> "local",
-          "fs.root_path" -> root.resolve(rootPath).toAbsolutePath.toString
-        )
+        Map("fs.storage_type" -> "local", "fs.root_path" -> rootPath)
       )
       .open()
     try {
@@ -137,11 +136,17 @@ class StorageNativeTest
       store.size(key) shouldBe payload.length.toLong
       store.list(s"$rootPath/staging", recursive = true).map(_.path) should
         contain(key)
-      // Written once, under the root, not twice.
+      // Written once, at the key's own place: a root counted twice would put
+      // a second copy somewhere below it.
       Files.exists(
-        root.resolve(rootPath).resolve("staging/job-1/segment/data.bin")
+        root.resolve("files").resolve("staging/job-1/segment/data.bin")
       ) shouldBe true
-      Files.exists(root.resolve(rootPath).resolve(rootPath)) shouldBe false
+      val written = Files.walk(root)
+      try
+        written
+          .filter(path => path.getFileName.toString == "data.bin")
+          .count() shouldBe 1L
+      finally written.close()
     } finally store.close()
   }
 
