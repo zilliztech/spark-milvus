@@ -338,7 +338,13 @@ object KnowhereBuild {
       log: Logger
   ): Seq[File] = {
     val nativeRoot = sourceDirectory / "native"
-    val linuxDirectories = (nativeRoot * "linux-*").get.filter(_.isDirectory)
+    // Only a directory that holds files counts as Linux resources: the
+    // Makefile's directory rule (and its tests) can leave empty platform
+    // directories behind, and the storage-only macOS build must not trip the
+    // Linux-host requirement over one of those.
+    val linuxDirectories = (nativeRoot * "linux-*").get.filter(directory =>
+      directory.isDirectory && (directory ** "*").get.exists(_.isFile)
+    )
     if (selected.isEmpty && linuxDirectories.isEmpty) return Seq.empty
     val platform = currentPlatform()
     require(

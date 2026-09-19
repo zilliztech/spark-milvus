@@ -1,3 +1,5 @@
+import java.util.Locale
+
 import sbt._
 import sbt.Keys._
 
@@ -5,6 +7,13 @@ import sbt.Keys._
   * docs/design/architecture/modules.md.
   */
 object Modules {
+
+  /** Native libraries are `.dylib` under `native/darwin-<arch>/` on macOS and
+    * `.so` under `native/linux-<arch>/` on Linux; the loaders pick the
+    * directory, the build only has to name the right environment variable.
+    */
+  val isMacOS: Boolean =
+    System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("mac")
 
   val checkNoSpark = taskKey[Unit](
     "The core layer must not depend on Spark: org.apache.spark in a source file fails the build"
@@ -70,13 +79,22 @@ object Modules {
     javacOptions ++= Seq("--release", l.javaRelease)
   )
 
-  /** Keep layer 2's Jackson artifacts aligned. Spark modules use Spark's set.
+  /** Keep the Jackson artifacts aligned on one version. Layer 2 applies it so
+    * its own classpath is consistent; the Spark line modules use Spark's set.
+    * Root applies it too, because its assembly ships jackson-module-scala with
+    * Spark and Arrow excluded: Arrow 18 otherwise drags jackson-databind to
+    * 2.18 while module-scala stays on `Versions.jackson`, and the module then
+    * refuses to register under `spark.driver.userClassPathFirst=true` ("Scala
+    * module 2.17.3 requires Jackson Databind version >= 2.17.0 and < 2.18.0"),
+    * which fails every snapshot read.
     */
   val jacksonPin: Seq[Setting[_]] = Seq(
     dependencyOverrides ++= Seq(
       Dependencies.jacksonDatabind,
+      Dependencies.jacksonScala,
       "com.fasterxml.jackson.core" % "jackson-core" % Versions.jackson,
-      "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson
+      "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson,
+      "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310" % Versions.jackson
     )
   )
 
@@ -116,12 +134,17 @@ object Modules {
         "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED"
       )
     },
+    // LD_LIBRARY_PATH is read by the Linux loader, DYLD_LIBRARY_PATH by dyld;
+    // setting both is harmless on either platform.
     envVars := (if (NativeBundle.selected.nonEmpty)
                   Map("LD_LIBRARY_PATH" -> "", "LD_BIND_NOW" -> "1")
-                else
+                else {
+                  val nativeDir =
+                    ((ThisBuild / baseDirectory).value / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
                   Map(
-                    "LD_LIBRARY_PATH" ->
-                      ((ThisBuild / baseDirectory).value / "native-storage" / "src" / "main" / "resources" / "native").getAbsolutePath
-                  ))
+                    "LD_LIBRARY_PATH" -> nativeDir,
+                    "DYLD_LIBRARY_PATH" -> nativeDir
+                  )
+                })
   )
 }

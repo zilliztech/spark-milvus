@@ -163,6 +163,13 @@ sbt test                                 # unit tests, all modules
 sbt integration40/test                   # integration tests, needs Milvus and MinIO
 ```
 
+The fat jar only loads Milvus segments when it carries the native
+`milvus-storage` libraries for the platform it runs on. `make package` builds
+and bundles them; on Linux x86_64 that is the unified Storage/Knowhere bundle,
+on Linux aarch64 and macOS (Apple Silicon) the storage-only build. The macOS
+toolchain and the Conan fix-ups it needs are in
+[contributing.md](docs/contributing.md#macos-apple-silicon).
+
 `sbt compile` builds all twelve modules. To work on one, prefix the command with
 its project id: `core/test`, `spark40/compile`, `apps40/test`. The ids drop the
 dot, so the project for `spark-4.0` is `spark40`.

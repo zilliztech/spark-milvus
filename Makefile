@@ -5,8 +5,21 @@
 # Configuration
 SCALA_VERSION := 2.13
 SBT := sbt
-JAVA_HOME ?= $(shell dirname $(shell dirname $(shell readlink -f $(shell which java))))
+# On macOS `which java` is often the /usr/bin stub, so prefer a JDK 21 that
+# java_home or Homebrew knows about before deriving it from the java binary.
+ifeq ($(shell uname -s),Darwin)
+  JAVA_HOME ?= $(shell { test -d /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home && echo /opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home; } \
+    || /usr/libexec/java_home -v 21 2>/dev/null \
+    || /usr/libexec/java_home 2>/dev/null)
+else
+  JAVA_HOME ?= $(shell dirname $(shell dirname $(shell readlink -f $(shell which java))))
+endif
 export JAVA_HOME
+
+# The milvus-storage Rust bridge fetches crates from git (lance, vortex). Let
+# cargo use the git CLI so ~/.gitconfig URL rewrites, SSH keys, proxies and
+# credential helpers work the same way they do for `git clone`.
+export CARGO_NET_GIT_FETCH_WITH_CLI ?= true
 
 # Directories
 RESOURCES_DIR := native-storage/src/main/resources
@@ -52,7 +65,12 @@ else
   NATIVE_PREREQUISITE := copy-native-libs
 endif
 NATIVE_SBT = $(SBT) $(if $(filter native-bundle,$(NATIVE_PREREQUISITE)),"-Dmilvus.native.bundle=$(NATIVE_BUNDLE_JAR)")
-NATIVE_TEST_ENV = $(if $(filter Linux,$(UNAME_S)),LD_PRELOAD="$(JAVA_HOME)/lib/libjsig.so")
+# The JVM's signal-chaining library, by the platform's preload mechanism.
+ifeq ($(UNAME_S),Darwin)
+  NATIVE_TEST_ENV = DYLD_INSERT_LIBRARIES="$(JAVA_HOME)/lib/libjsig.dylib"
+else
+  NATIVE_TEST_ENV = LD_PRELOAD="$(JAVA_HOME)/lib/libjsig.so"
+endif
 
 # Colors for output
 RED := \033[0;31m
@@ -85,6 +103,7 @@ help:
 	@echo "  $(GREEN)run-demo$(NC)               - Run demo"
 	@echo "  $(GREEN)init-submodules$(NC)        - Initialize Git submodules"
 	@echo "  $(GREEN)check-deps$(NC)             - Check system dependencies"
+	@echo "  $(GREEN)status$(NC)                 - Show build status"
 	@echo ""
 	@echo "$(YELLOW)Environment variables:$(NC)"
 	@echo "  JAVA_HOME=$(JAVA_HOME)"
@@ -96,6 +115,8 @@ help:
 	@echo "  NATIVE_BUNDLE_OUTPUT=$(NATIVE_BUNDLE_OUTPUT)"
 	@echo "  Without NATIVE_BUNDLE, Linux x86_64 builds both engines; other platforms retain storage-only builds."
 	@echo "  Unified bundles require Linux; their source profile currently supports x86_64."
+	@echo "  NATIVE_PLATFORM=$(NATIVE_PLATFORM) -> $(NATIVE_DIR)"
+	@echo "  macOS: run scripts/macos_conan_fixups.sh once before build-milvus-storage (see docs/contributing.md)."
 
 # Check system dependencies
 check-deps:
@@ -106,6 +127,15 @@ check-deps:
 	@command -v make >/dev/null 2>&1 || { echo "$(RED)Error: make not found$(NC)"; exit 1; }
 	@command -v conan >/dev/null 2>&1 || { echo "$(RED)Error: conan not found$(NC)"; exit 1; }
 	@command -v cmake >/dev/null 2>&1 || { echo "$(RED)Error: cmake not found$(NC)"; exit 1; }
+	@command -v cargo >/dev/null 2>&1 || { echo "$(RED)Error: cargo not found (https://rustup.rs)$(NC)"; exit 1; }
+	@test -f "$(JAVA_HOME)/include/jni.h" || { echo "$(RED)Error: JAVA_HOME=$(JAVA_HOME) has no include/jni.h (need a JDK)$(NC)"; exit 1; }
+ifeq ($(UNAME_S),Darwin)
+	@command -v install_name_tool >/dev/null 2>&1 || { echo "$(RED)Error: install_name_tool not found (xcode-select --install)$(NC)"; exit 1; }
+	@command -v codesign >/dev/null 2>&1 || { echo "$(RED)Error: codesign not found$(NC)"; exit 1; }
+	@test -f /opt/homebrew/opt/libomp/lib/libomp.dylib -o -f /usr/local/opt/libomp/lib/libomp.dylib || echo "$(YELLOW)Warning: libomp not found (brew install libomp); the milvus-common recipe needs it$(NC)"
+else
+	@command -v patchelf >/dev/null 2>&1 || { echo "$(RED)Error: patchelf not found$(NC)"; exit 1; }
+endif
 	@echo "$(GREEN)All dependencies found$(NC)"
 
 # Initialize Git submodules
@@ -168,8 +198,11 @@ build-milvus-storage: check-deps init-missing-submodules
 	fi
 
 # Incrementally rebuild before copying so existing libraries cannot become stale.
-copy-native-libs: build-milvus-storage $(NATIVE_DIR)
+# The platform directory is created here, not as a prerequisite, so a dry run
+# or a test that overrides this target leaves no empty directory behind.
+copy-native-libs: build-milvus-storage
 	@echo "$(BLUE)Copying native libraries to $(NATIVE_DIR)...$(NC)"
+	@mkdir -p "$(NATIVE_DIR)"
 	@rm -f "$(NATIVE_DIR)/libnative-storage-jni.$(LIB_SUFFIX)"
 	@cp -L "$(STORAGE_LIB)" "$(STORAGE_JNI_LIB)" "$(NATIVE_DIR)/"
 	@set -e; \
@@ -184,7 +217,9 @@ copy-native-libs: build-milvus-storage $(NATIVE_DIR)
 			cp -RL "$(MILVUS_STORAGE_DEPS)/$$subdir/." "$(NATIVE_DIR)/$$subdir/"; \
 		fi; \
 	done
-	@if [ "$(UNAME_S)" != Darwin ]; then \
+	@if [ "$(UNAME_S)" = Darwin ]; then \
+		bash scripts/patch_native_macos.sh "$(NATIVE_DIR)"; \
+	else \
 		bash "$(MILVUS_STORAGE_CPP)/../java/patch_native_runpath.sh" "$(NATIVE_DIR)"; \
 	fi
 	@if [ ! -f "$(NATIVE_DIR)/libmilvus-storage-jni.$(LIB_SUFFIX)" ]; then \
@@ -194,10 +229,6 @@ copy-native-libs: build-milvus-storage $(NATIVE_DIR)
 	@echo "$(GREEN)✓ Copied native libraries to resources$(NC)"
 	@ls -lh $(NATIVE_DIR)/ | head -20
 
-# Create necessary directories
-$(NATIVE_DIR):
-	@mkdir -p $(NATIVE_DIR)
-
 # Clean build artifacts
 clean:
 	@echo "$(BLUE)Cleaning build artifacts...$(NC)"
@@ -205,8 +236,7 @@ clean:
 	@rm -rf project/target
 	@rm -rf project/project
 	@echo "$(YELLOW)Cleaning native libraries from resources...$(NC)"
-	@rm -f $(RESOURCES_DIR)/native/libmilvus-storage-jni.so
-	@rm -f $(RESOURCES_DIR)/native/libmilvus-storage.so
+	@rm -rf "$(NATIVE_DIR)"
 	@$(SBT) clean
 	@echo "$(GREEN)Clean complete$(NC)"
 
@@ -254,13 +284,13 @@ quick-build: package
 status:
 	@echo "$(BLUE)Build Status:$(NC)"
 	@echo "Platform: $(NATIVE_PLATFORM) (.$(LIB_SUFFIX))"
-	@echo -n "Unified native bundle: "
+	@printf "Unified native bundle: "
 	@if [ -s "$(NATIVE_BUNDLE_JAR)" ] && [ -s "$(NATIVE_BUNDLE_JAR).properties" ]; then echo "$(GREEN)$(NATIVE_BUNDLE_JAR)$(NC)"; else echo "$(YELLOW)not built$(NC)"; fi
-	@echo -n "Milvus Storage lib: "
+	@printf "Milvus Storage lib: "
 	@if [ -f "$(STORAGE_LIB)" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
-	@echo -n "Milvus Storage JNI lib: "
+	@printf "Milvus Storage JNI lib: "
 	@if [ -f "$(STORAGE_JNI_LIB)" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
-	@echo -n "Native libs in resources: "
+	@printf "Native libs in resources: "
 	@if [ -f "$(NATIVE_DIR)/libmilvus-storage.$(LIB_SUFFIX)" ] && [ -f "$(NATIVE_DIR)/libmilvus-storage-jni.$(LIB_SUFFIX)" ]; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
-	@echo -n "JAR package: "
+	@printf "JAR package: "
 	@if ls $(TARGET_DIR)/scala-$(SCALA_VERSION)/*.jar 1> /dev/null 2>&1; then echo "$(GREEN)✓$(NC)"; else echo "$(RED)✗$(NC)"; fi
