@@ -32,7 +32,7 @@
 <h1>向量搜索与建索引</h1>
 <p><strong>向量搜索只有一个入口：输入一组查询，Spark 按段并行、按查询合并，Knowhere 在每个任务里一次算完整组查询；精确扫描和索引探查是同一个段内执行器的两种策略；建索引是写之后单独的一步。</strong></p>
 <p>TopK 是按距离或相似度排序的前 K 条结果。精确搜索把每个向量都算一次距离；近似最近邻搜索（ANN）借助索引只算一部分向量。Knowhere 是 Milvus 的向量检索引擎库，负责距离计算、建索引和索引搜索。</p>
-<p class="status">查询集入口、exact 与 index 两种模式、<code>build_index</code> 与 <code>write_snapshot</code> 已实现，各自验证过的范围与仍按假设填的字段记录在能力行 V5、V7、W6、W8；<code>restore_snapshot</code> 未实现，Milvus 能否恢复连接器写出的快照未核对。统一构建已改为固定上游 Conan recipe revision，并在独立 CMake 中显式声明集成链接；当前 Knowhere gitlink 为 <code>29210a33</code>，旧 <code>9dc2b8ad</code> 产物的验收只作为历史，当前组合须重新构建和复验。</p>
+<p class="status">入口改为 DataFrame 与 SQL 计划里的算子（决策 16 于 2026-09-20 修订，见 1.1），代码未开始；现有 <code>MilvusSearch.search</code> 是过渡入口，两个前门落地后按「移除是设计工作」提删除清单。exact 与 index 两种模式、<code>build_index</code> 与 <code>write_snapshot</code> 已实现，各自验证过的范围记录在能力行 V5、V7、W6、W8；<code>restore_snapshot</code> 过程未实现，Milvus v3.0.2 已实测能恢复连接器写出的快照。统一构建已改为固定上游 Conan recipe revision，并在独立 CMake 中显式声明集成链接；当前 Knowhere gitlink 为 <code>29210a33</code>，旧 <code>9dc2b8ad</code> 产物的验收只作为历史，当前组合须重新构建和复验。</p>
 <nav aria-label="本页目录">
   <a href="#overall">结论</a><a href="#api">入口</a><a href="#layers">分层</a><a href="#failures">失败与资源</a><a href="#cost">成本与模式</a>
   <a href="#execution">执行链</a><a href="#native">Knowhere 对接</a><a href="#exact">精确扫描</a><a href="#metadata">索引探查</a>
@@ -42,7 +42,7 @@
 
 <h2 id="overall">一、结论</h2>
 <ol>
-<li><code>spark.read.MilvusSearch.search</code> 是唯一的向量搜索入口，输入查询集，输出每条查询的全局 TopK（决策 16）。</li>
+<li>向量搜索写在 DataFrame 或 SQL 计划里：单条查询是压在 Milvus 表上的「按距离函数排序取前 K」，查询集是查询 DataFrame 与 Milvus 表以 <code>knn</code> 为条件的 join。连接器在 Spark 规划时接管这两种形状，用同一个执行体算出每条查询的全局 TopK（决策 16，2026-09-20 修订）。</li>
 <li><code>mode = exact</code> 对每个段做精确扫描；<code>mode = index</code> 用快照钉住的持久化索引，快照确认未建索引的段在 <code>allowUnindexed</code> 打开时改用精确扫描。</li>
 <li>执行分两个 Spark 阶段：第一阶段每个任务处理一个段组，按查询组算候选，任务内先合并，再按查询合并出全局 TopK；第二阶段只为最终命中的行回表取输出列。段组是按向量列字节划分的一组段，一组的向量不超过 <code>milvus.search.vectors.max.bytes</code>，组数不少于 Spark 的默认并行度；查询组是查询集按 <code>milvus.search.group.max.bytes</code> 切出的一部分，通常只有一组。一个任务在自己的段组上把每个查询组都算一遍，段里的数据只读一遍。</li>
 <li>计算与格式分开：Milvus 的 <code>TableFormat</code> 打开段、生成排除位图、读出索引并按地址取行；计算只在它交出的向量缓冲或索引句柄上求 TopK，不打开存储、不执行删除规则（<a href="table-version.html">table-version.html</a> 第三节）。能力在 driver 规划时核对。</li>
@@ -51,34 +51,55 @@
 </ol>
 
 <h3 id="api">1.1 入口</h3>
-<pre><code>MilvusSearch.search(
-  spark: SparkSession,
-  options: Map[String, String],          // 快照定位与存储选项，与 format("milvus") 相同
-  queries: DataFrame,                    // query_id BIGINT，vector
-  vectorColumn: String,
-  k: Int,
-  metric: String,
-  mode: String = "index",                // "index" 或 "exact"
-  searchParameters: Map[String, String] = Map.empty,
-  filter: Option[String] = None,         // Milvus 表达式，搜索前生效
-  outputColumns: Seq[String] = Seq.empty,
-  allowUnindexed: Boolean = false
-): DataFrame</code></pre>
-<p>另有一个以 <code>queryVector: Array[Float]</code> 代替 <code>queries</code> 的重载，它构造只有一行、<code>query_id = 0</code> 的查询集，返回同样的列。</p>
-<p>底库是一份表输入：<code>options</code> 给出 Milvus 快照的版本选择和它的 <code>StorageBinding</code>，今天实现的是 Milvus 这一种 <code>TableFormat</code>。其他格式的表输入和只能扫描的 DataFrame 输入以后接入同一个入口，不另开入口；DataFrame 输入在规划时只接受 <code>mode = exact</code> 且 <code>outputColumns</code> 为空。</p>
-<p><strong>规划时核对的能力：</strong></p>
+<p>用户不调用连接器的方法。两种形状，DataFrame、SQL 与 PySpark 写法一致：</p>
+<pre><code>// 单条查询：按距离排序取前 K
+spark.table("milvus.db.coll")
+  .where("category = 'a'")
+  .orderBy(call_function("milvus.system.l2_distance", col("vec"), lit(q)))
+  .limit(10)
+
+// 查询集：queries 有 query_id 与 q 两列，每行查询各取前 K
+queries.join(spark.table("milvus.db.coll"),
+  expr("milvus.system.knn(vec, q, 10, 'L2')"))</code></pre>
+<pre><code>SELECT * FROM milvus.db.coll WHERE category = 'a'
+ORDER BY milvus.system.l2_distance(vec, array(...)) LIMIT 10;
+
+SELECT * FROM queries JOIN milvus.db.coll ON milvus.system.knn(vec, q, 10, 'L2');</code></pre>
+<p><strong>函数。</strong>六个函数是 Milvus catalog <code>system</code> 命名空间下的 <code>ScalarFunction</code>。没有配置 catalog、只用 <code>format("milvus")</code> 的会话，由 <code>MilvusSparkSessionExtensions</code> 以同名注册同一批函数，构造出的表达式是 <code>ApplyFunctionExpression</code>，Spark 的翻译规则对两种来源一视同仁。五个距离函数的 JVM 实现就是今天 V8 的实现，Spark 用它对各分区交回的候选重排序；<code>knn</code> 只能作 join 条件，直接求值报错。</p>
+<div class="table"><table>
+<thead><tr><th>函数</th><th>返回</th><th>metric</th><th>排序方向</th></tr></thead><tbody>
+<tr><td><code>l2_distance(vec, q)</code></td><td>DOUBLE，平方欧氏距离</td><td>L2</td><td>升序</td></tr>
+<tr><td><code>inner_product(vec, q)</code></td><td>DOUBLE</td><td>IP</td><td>降序</td></tr>
+<tr><td><code>cosine_similarity(vec, q)</code></td><td>DOUBLE</td><td>COSINE</td><td>降序</td></tr>
+<tr><td><code>hamming_distance(vec, q)</code></td><td>DOUBLE</td><td>HAMMING</td><td>升序</td></tr>
+<tr><td><code>jaccard_distance(vec, q)</code></td><td>DOUBLE</td><td>JACCARD</td><td>升序</td></tr>
+<tr><td><code>knn(vec, q, k, metric)</code></td><td>BOOLEAN，只在 join 条件里合法</td><td>第四个参数，字符串字面量</td><td>由 metric 决定</td></tr>
+</tbody></table></div>
+<p><strong>单条查询的机制。</strong>Spark 的 <code>V2ScanRelationPushDown</code> 规则看到 <code>Sort</code> 加 <code>Limit</code> 直接压在扫描上、且 <code>where</code> 里的谓词全部下推时，把排序键经 <code>V2ExpressionBuilder</code> 翻成 V2 表达式后调 <code>MilvusScanBuilder.pushTopN(orders, limit)</code>。目录函数调用翻成 <code>UserDefinedScalarFunc</code>，Spark UDF 翻不过去。<code>pushTopN</code> 只接受一种形状：一个排序键，是上表的距离函数，第一个参数引用本表的向量列，第二个参数是数组或二进制字面量，方向与该函数的 metric 一致。满足则记下 <code>PushedSearch</code>（布局、字段 id、查询向量、K、metric、mode、参数），<code>isPartiallyPushed</code> 返回 true；其他形状返回 false，Spark 自己排序。有 <code>PushedSearch</code> 的 <code>MilvusScan</code> 不再一段一分区，而是按 <code>SearchPlan.segmentSets</code> 分段组，每个分区在自己的段组上跑 <code>SegmentSetSearch</code>（一个查询组，一条查询），再经 <code>SearchTake</code> 取本分区那最多 K 行的输出列。Spark 收到各分区的候选后用函数的 JVM 实现重算距离、排序、取 limit，这一步就是全局合并；量化索引在段内按近似分数选候选，最终顺序按精确距离。要看分数，把函数值 select 出来即可。</p>
+<p><strong>查询集的机制。</strong><code>MilvusSparkSessionExtensions</code> 注入的策略匹配「一侧是查询计划、另一侧是 <code>DataSourceV2ScanRelation(MilvusScan)</code>、条件含 <code>knn</code> 的 inner join」，替换成物理算子 <code>VectorSearchExec</code>。它执行今天的两个阶段：<code>SearchQueries</code> 校验查询集并按 <code>SearchLimits</code> 决定广播还是 shuffle，<code>SearchPlan.of</code> 分段组与查询组，第一阶段每任务 <code>SegmentSetSearch.run</code>，<code>TopKMerger</code> 按 <code>query_id</code> 合并，第二阶段 <code>SearchTake</code> 回表。输出列是查询侧的全部列、Milvus 侧已投影的列，加 <code>_score</code>、<code>_segment_id</code>、<code>_row_offset</code>；每条查询最多 K 行，同一查询内的先后按 2.6 的排序规则。<code>CALL</code> 语法已经用同一种「逻辑节点加策略」接进 Spark。</p>
+<p><strong>读 option。</strong>mode、搜索参数和未建索引段的处理描述的是这次扫描怎么执行，与 <code>milvus.filter</code> 同级，作为读 option 给出；三个规模选项不变。</p>
+<div class="table"><table>
+<thead><tr><th>选项</th><th>默认值</th><th>作用</th></tr></thead><tbody>
+<tr><td><code>milvus.search.mode</code></td><td><code>index</code></td><td><code>index</code> 用快照钉住的持久化索引；<code>exact</code> 对每个段精确扫描</td></tr>
+<tr><td><code>milvus.search.params</code></td><td>空</td><td><code>name=value</code> 逗号分隔的搜索参数：HNSW 家族 <code>ef</code>，IVF 家族 <code>nprobe</code>，FLAT 无参数；多余的参数报错</td></tr>
+<tr><td><code>milvus.search.allow.unindexed</code></td><td><code>false</code></td><td>index 模式下，快照确认未建索引的段改用精确扫描；默认这些段让规划失败</td></tr>
+<tr><td><code>milvus.search.queries.max.bytes</code></td><td>1073741824</td><td>查询集走广播的字节上限：不超过就在 driver 上收集并广播，超过就按查询组打包成数据下发，不经 driver（2.1）</td></tr>
+<tr><td><code>milvus.search.group.max.bytes</code></td><td>536870912</td><td>一组查询在一个任务里的内存上限，按「组内查询数 ×（维度 × 元素宽度 + K × 28 字节）」计，前一项是查询矩阵，后一项是这组的 TopK；查询集按它分组</td></tr>
+<tr><td><code>milvus.search.vectors.max.bytes</code></td><td>2147483648</td><td>一个段组的向量字节上限，也就是一个任务同时留在内存里的量：查询集分成多组时，任务把段组读进内存一次，每个查询组在上面各算一遍。Milvus 的段默认不超过 1 GB，用 DiskANN 的 collection 不超过 2 GB；任务的 Arrow 分配仍受 <code>milvus.read.arrow.max.bytes</code> 约束</td></tr>
+</tbody></table></div>
+<p><strong>规划时核对的能力</strong>，两种形状相同：</p>
 <ol>
 <li>exact：每个单元能扫描，向量列的 <code>VectorLayout</code> 在支持范围内。</li>
-<li>index：向量列在每个段上声明了可用的索引，声明的引擎与索引版本能被当前 Knowhere 构建加载，label 对应段内物理行号；<code>allowUnindexed = true</code> 时，快照确认未建索引的段改按 exact 核对。</li>
-<li><code>outputColumns</code> 非空：每个单元支持按地址取行。</li>
+<li>index：向量列在每个段上声明了可用的索引，声明的引擎与索引版本能被当前 Knowhere 构建加载，label 对应段内物理行号；<code>milvus.search.allow.unindexed=true</code> 时，快照确认未建索引的段改按 exact 核对。</li>
+<li>有输出列：每个单元支持按地址取行。</li>
 </ol>
-<p>任一项不满足，driver 报错并列出不满足的段。</p>
+<p>任一项不满足，规划时报错并列出不满足的段。单条查询的核对发生在 <code>pushTopN</code> 里，它抛错而不是返回 false：返回 false 会让 Spark 退成全表扫描加 JVM 排序，把一次索引查询变成全量读而不告诉用户。</p>
 <div class="table"><table>
 <thead><tr><th>对象</th><th>约定</th></tr></thead><tbody>
-<tr><td>查询集</td><td><code>query_id</code> 为非空且唯一的 BIGINT。<code>vector</code> 的类型随字段：FloatVector、Float16Vector、BFloat16Vector 用 <code>ARRAY&lt;FLOAT&gt;</code>，Int8Vector 用取值在 −128 到 127 的 <code>ARRAY&lt;SMALLINT&gt;</code>，BinaryVector 用 <code>BINARY</code>；长度等于字段维度，元素为有限值；COSINE 的查询向量范数大于零</td></tr>
-<tr><td>结果</td><td>列依次是 <code>query_id</code> BIGINT、<code>rank</code> INT（从 1 开始）、<code>_score</code> DOUBLE、<code>_segment_id</code> BIGINT、<code>_row_offset</code> BIGINT，后接 <code>outputColumns</code>；每条查询最多 K 行，行之间的先后以 <code>rank</code> 为准</td></tr>
-<tr><td>K</td><td>正整数。单条查询要放得进一组，即「维度 × 元素宽度 + K × 28 字节」不超过 <code>milvus.search.group.max.bytes</code>；不受 Milvus 在线服务 topK 上限 16384 的约束</td></tr>
-<tr><td>过滤</td><td><code>filter</code> 按 R7 的 Milvus 表达式在搜索前排除行；对结果 DataFrame 再调用 <code>filter</code> 只作用于已选出的行</td></tr>
+<tr><td>查询向量</td><td>类型随字段：FloatVector、Float16Vector、BFloat16Vector 用 <code>ARRAY&lt;FLOAT&gt;</code>，Int8Vector 用取值在 −128 到 127 的 <code>ARRAY&lt;SMALLINT&gt;</code>，BinaryVector 用 <code>BINARY</code>；长度等于字段维度，元素为有限值；COSINE 的查询向量范数大于零。查询集的 <code>query_id</code> 为非空且唯一的 BIGINT</td></tr>
+<tr><td>结果</td><td>单条查询：Milvus 表的投影列，行序由 Spark 的排序决定，最多 K 行。查询集：查询侧的列、Milvus 侧的投影列、<code>_score</code> DOUBLE、<code>_segment_id</code> BIGINT、<code>_row_offset</code> BIGINT；每条查询最多 K 行</td></tr>
+<tr><td>K</td><td>正整数。单条查询是 <code>limit</code> 的值，查询集是 <code>knn</code> 的第三个参数，须是字面量。单条查询要放得进一组，即「维度 × 元素宽度 + K × 28 字节」不超过 <code>milvus.search.group.max.bytes</code>；不受 Milvus 在线服务 topK 上限 16384 的约束</td></tr>
+<tr><td>过滤</td><td>已下推的 Spark 谓词（R6）与 <code>milvus.filter</code>（R7）在搜索前排除行。没有下推的谓词见 1.3：它会让 Spark 不调 <code>pushTopN</code>，连接器把这种情况报成错误，不改成搜索后过滤</td></tr>
 <tr><td>外表</td><td><code>__virtual_pk__</code> 作为普通输出列，按 <a href="read.html#rules">read.html 1.1</a> 的系统字段规则读时合成</td></tr>
 </tbody></table></div>
 <div class="table"><table>
@@ -89,12 +110,7 @@
 <tr><td>搜索参数</td><td>无</td><td>HNSW 家族 <code>ef</code>；IVF 家族 <code>nprobe</code>；FLAT 无参数</td></tr>
 <tr><td>段</td><td colspan="2">Storage V2、V3 与 external collection 的段</td></tr>
 </tbody></table></div>
-<div class="table"><table>
-<thead><tr><th>选项</th><th>默认值</th><th>作用</th></tr></thead><tbody>
-<tr><td><code>milvus.search.queries.max.bytes</code></td><td>1073741824</td><td>查询集走广播的字节上限：不超过就在 driver 上收集并广播，超过就按查询组打包成数据下发，不经 driver（2.1）</td></tr>
-<tr><td><code>milvus.search.group.max.bytes</code></td><td>536870912</td><td>一组查询在一个任务里的内存上限，按「组内查询数 ×（维度 × 元素宽度 + K × 28 字节）」计，前一项是查询矩阵，后一项是这组的 TopK；查询集按它分组</td></tr>
-<tr><td><code>milvus.search.vectors.max.bytes</code></td><td>2147483648</td><td>一个段组的向量字节上限，也就是一个任务同时留在内存里的量：查询集分成多组时，任务把段组读进内存一次，每个查询组在上面各算一遍。Milvus 的段默认不超过 1 GB，用 DiskANN 的 collection 不超过 2 GB；任务的 Arrow 分配仍受 <code>milvus.read.arrow.max.bytes</code> 约束</td></tr>
-</tbody></table></div>
+<p><strong>过渡。</strong>今天的 <code>MilvusSearch.search(spark, options, queries, vectorColumn, k, metric, mode, searchParameters, filter, outputColumns, allowUnindexed)</code> 是一个不在计划里的静态方法，只能从 Scala 调。它保留到两个前门都落地，然后连同 apps 的 V8 表达式一起提删除清单；它的主体搬进 <code>VectorSearchExec</code>，不复制。</p>
 <p>搜索与建索引作业以 <code>spark.task.cpus</code> 等于 executor 核数提交，每个 executor 同时只跑一个这类任务，Knowhere 的线程池用满该 executor 的核。
 钉住的 Knowhere 子模块 Java API 已提供 <code>resizeSearchThreadPool</code> 与 <code>resizeBuildThreadPool</code>，连接器尚未调用；对应选项随 G4 落地（capabilities.md 第 11 节），GPU 开关上游未提供（README 第 5 节）。</p>
 <p>两条旧路径已随本入口删除：<code>vector.search.*</code> 读选项连同 <code>SegmentVectorSearch</code>、<code>SegmentIndexSearch</code>、扫描里的搜索分支，以及它们在 core 的 <code>SegmentIndexQuery</code>、<code>PersistedIndexSearch</code>、<code>BruteForceSearch</code>；spark-base <code>filter</code> 包的 <code>VectorBruteForceSearch</code> 连同 apps-4.0 的测试。SQL 距离函数保留（V8）；<code>vector_knn</code> 已删除（决策 24）。</p>
@@ -108,9 +124,10 @@
 <tr><td>2</td><td><code>core.schema</code></td><td>向量布局描述：元素类型、维度、数据缓冲位置（<a href="read.html#types">read.html 6.4</a>）</td></tr>
 <tr><td>2</td><td><code>core.read.plan</code></td><td>段任务（<code>UnitReadTask</code> 中属于 Milvus 的一种）</td></tr>
 <tr><td>2</td><td><code>core.write.commit</code>、<code>client.api</code></td><td>索引记录与快照写出；外部快照恢复</td></tr>
-<tr><td>3</td><td><code>spark.read</code></td><td><code>MilvusSearch</code>：解析快照与查询集、把并行度交给 <code>SearchPlan</code>、广播、把任务包成分区、两个 Spark 阶段；<code>TopKAggregator</code> 包装 <code>TopKMerger</code>；<code>spark.metrics</code> 的 <code>SearchMetrics</code> 注册本次搜索的累加器</td></tr>
+<tr><td>3</td><td><code>spark.read</code></td><td><code>MilvusScanBuilder.pushTopN</code> 识别排序形状、核对能力并记下 <code>PushedSearch</code>；有它的 <code>MilvusScan</code> 按 <code>SearchPlan.segmentSets</code> 规划分区，<code>MilvusSearchPartitionReader</code> 在分区上跑 <code>SegmentSetSearch</code> 与 <code>SearchTake</code>；<code>VectorSearchExec</code> 接管 <code>knn</code> join，执行两个 Spark 阶段；<code>TopKAggregator</code> 包装 <code>TopKMerger</code>；<code>spark.metrics</code> 的 <code>SearchMetrics</code> 注册本次搜索的累加器。过渡期的 <code>MilvusSearch</code> 也在这里</td></tr>
+<tr><td>3</td><td><code>spark.functions</code>、<code>spark.catalog</code>、<code>spark.extensions</code></td><td><code>spark.functions</code>（新包）放六个 <code>ScalarFunction</code> 及五个距离函数的 JVM 求值；<code>MilvusCatalogBase</code> 实现 <code>FunctionCatalog</code>，在 <code>system</code> 命名空间提供它们；<code>MilvusSparkSessionExtensions</code> 以 <code>injectFunction</code> 注册同一批函数、注入 <code>knn</code> join 的策略，以及优化后运行的检查规则（1.3）</td></tr>
 <tr><td>3</td><td><code>spark.options</code>、<code>spark.procedure</code></td><td>搜索选项；<code>build_index</code> 与 <code>restore_snapshot</code> 过程</td></tr>
-<tr><td>4</td><td><code>apps.search</code></td><td>SQL 向量函数</td></tr>
+<tr><td>4</td><td><code>apps.search</code></td><td>今天的 SQL 向量函数（V8）。函数归入 <code>spark.functions</code> 后此包删除</td></tr>
 </tbody></table></div>
 
 <h3 id="failures">1.3 失败与资源</h3>
@@ -122,6 +139,8 @@
 <tr><td>索引覆盖、文件格式、引擎不受支持</td><td>规划时在 driver 上报错，写明段、字段和所缺内容；引擎与索引版本在描述快照时声明，见 2.5</td></tr>
 <tr><td>executor 解码出的引擎或版本与声明不一致</td><td>报错，写明段与两边的值</td></tr>
 <tr><td>文件丢失或损坏、鉴权失败、版本不符、内存不足</td><td>原样传播；对象存储的瞬时错误按标准重试</td></tr>
+<tr><td>单条查询：排序键不是距离函数、排序键多于一个、<code>where</code> 里有未下推的谓词、排序与 limit 之间夹着别的算子</td><td>Spark 不调 <code>pushTopN</code>。优化后运行的检查规则（<code>injectPreCBORule</code>）发现距离函数排序压在没有 <code>PushedSearch</code> 的 Milvus 扫描上时报错，写明哪一项不满足，例如哪条谓词没有下推；不让它退成全表扫描加 JVM 排序</td></tr>
+<tr><td>查询集：join 不是 inner、<code>k</code> 或 metric 不是字面量、Milvus 一侧与 join 之间有未下推的 <code>Filter</code></td><td>策略报错，写明不满足的项；不把搜索前过滤改成搜索后过滤</td></tr>
 <tr><td><code>query_id</code> 重复、向量非法、维度不符</td><td>规划时报错：走广播时在 driver 上查，按数据下发时在打包作业里按 <code>query_id</code> 聚合后查</td></tr>
 <tr><td>单条查询放不进一组，或单个段的向量超过 <code>milvus.search.vectors.max.bytes</code>（此时段组装不下，多组查询无法在一次读取上算完）</td><td>规划时报错，写明是哪一项超了多少</td></tr>
 <tr><td>过滤后有效行少于 K</td><td>该查询返回全部有效行</td></tr>
@@ -602,7 +621,7 @@ Knowhere 在部分 K 与过滤比例下会在索引内部改用暴力搜索（<a
 
 <h2 id="simplicity">三、简洁性带来的好处</h2>
 <ol>
-<li><strong>一个入口。</strong>单条查询是一行的查询集，exact 与 index 共用快照解析、合并、回表和结果列。</li>
+<li><strong>一个执行体，两个前门。</strong>单条查询与查询集都由 Spark 的规划器交给同一组类（<code>SearchPlan</code>、<code>SegmentSetSearch</code>、<code>TopKMerger</code>、<code>SearchTake</code>），exact 与 index 共用快照解析、合并、回表和结果列；用户只写 DataFrame 或 SQL。</li>
 <li><strong>一个段内执行器。</strong>精确扫描与索引探查输入输出相同，未建索引的段直接换策略，结果照常合并。</li>
 <li><strong>只用 Spark 公开接口。</strong>两个阶段由 RDD、广播变量、类型化聚合和 <code>createDataFrame</code> 组成，四条 Spark 线共用一份代码。</li>
 <li><strong>读取沿用 Milvus 的 <code>TableFormat</code>。</strong>扫描向量、生成位图、加载索引和回表，与表读取用同一个 reader 和同一套读取规则；计算不认识存储和格式，换一种表输入不改计算。</li>
