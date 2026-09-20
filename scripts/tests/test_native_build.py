@@ -22,10 +22,19 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "native-build" / "build.py"
+# build.py imports its siblings, so its own directory has to be importable.
+sys.path.insert(0, str(SCRIPT.parent))
+import platforms
+
 SPEC = importlib.util.spec_from_file_location("native_build", SCRIPT)
 NATIVE_BUILD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(NATIVE_BUILD)
 SUBPROCESS_RUN = subprocess.run
+#: The driver builds the host platform, so these tests run where its profile is.
+HOST_PROFILE = SCRIPT.parent / "profiles" / platforms.host_platform()
+#: The first tool the driver runs after recording sources, and where the
+#: snapshot tests stop: no dependency resolution and no compilation.
+HOST_COMPILER = platforms.host().toolchain()["CC"]
 
 
 class SnapshotComplete(Exception):
@@ -38,11 +47,13 @@ from pathlib import Path
 import sys
 
 driver, directory, mode = sys.argv[1:]
+# The driver imports its siblings, so its own directory has to be importable.
+sys.path.insert(0, str(Path(driver).parent))
 spec = importlib.util.spec_from_file_location("native_build_lock_worker", driver)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-def controlled_build(args, repository, java_home, work):
+def controlled_build(args, repository, java_home, work, *selection):
     if mode == "contend":
         (work / "status.json").write_text("unexpected second build")
         (work / "provenance" / "source.json").write_text("unexpected provenance")
@@ -59,8 +70,8 @@ module.main()
 
 
 @unittest.skipUnless(
-    sys.platform == "linux" and os.uname().machine == "x86_64",
-    "The native build script currently supports Linux x86_64",
+    HOST_PROFILE.is_file(),
+    "This host has no build profile: " + str(HOST_PROFILE),
 )
 class NativeBuildLockTest(unittest.TestCase):
     def setUp(self):
@@ -147,8 +158,8 @@ class NativeBuildLockTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    sys.platform == "linux" and os.uname().machine == "x86_64",
-    "The native build script currently supports Linux x86_64",
+    HOST_PROFILE.is_file(),
+    "This host has no build profile: " + str(HOST_PROFILE),
 )
 class NativeBuildSourceTest(unittest.TestCase):
     def setUp(self):
@@ -159,7 +170,8 @@ class NativeBuildSourceTest(unittest.TestCase):
         self.repository = self.root / "connector"
         self.repository.mkdir()
         self.git(self.repository, "init", "--quiet")
-        (self.repository / "native-build").mkdir()
+        (self.repository / "native-build" / "profiles").mkdir(parents=True)
+        shutil.copy2(HOST_PROFILE, self.repository / "native-build" / "profiles" / HOST_PROFILE.name)
         self.storage = self.repository / "milvus-storage"
         self.knowhere = self.repository / "knowhere"
         self.storage_revision = self.create_repository(self.storage, "cpp/source.cc", "int storage = 1;\n")
@@ -203,7 +215,7 @@ class NativeBuildSourceTest(unittest.TestCase):
 
         def guard(command, *args, **kwargs):
             executable = str(command[0])
-            if executable == "gcc-12":
+            if executable == HOST_COMPILER:
                 raise SnapshotComplete()
             if executable == "conan" or executable == "cmake":
                 raise AssertionError("Snapshot tests must never resolve or compile dependencies")

@@ -32,11 +32,10 @@ LOAD_ENTRIES = (FORMAT.library_name("milvus-storage-jni"),
 AUDIT_DLOPEN_ENTRIES = REQUIRED_ENTRIES
 PLUGIN_PARENTS = {FORMAT.library_name("cardinalv1"): FORMAT.library_name("knowhere"),
                   FORMAT.library_name("cardinalv2"): FORMAT.library_name("knowhere")}
-# DiskANN's only aligned reader is built on libaio, so its acceptance fixture
-# exists where DiskANN does.
+# The DiskANN acceptance fixture exists where DiskANN does.
 C_API_TESTS = sorted(
     ["knowhere_c_api", "knowhere_c_api_concurrency"]
-    + ([] if isinstance(FORMAT, platforms.MachO) else ["knowhere_c_api_diskann_acceptance"])
+    + (["knowhere_c_api_diskann_acceptance"] if FORMAT.builds_diskann() else [])
 )
 EVIDENCE_ENTRIES = {
     "NativeLoadCheck.java",
@@ -270,8 +269,11 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
     profiles = Path(__file__).resolve().parents[1] / "native-build" / "profiles"
     if not platform or not (profiles / platform).is_file():
         raise ValueError("Unsupported native bundle platform: " + str(platform))
-    if not isinstance(provenance.get("with_cardinal"), bool):
-        raise ValueError("Provenance must record the actual with_cardinal boolean")
+    for feature in ("with_cardinal", "with_diskann"):
+        if not isinstance(provenance.get(feature), bool):
+            raise ValueError("Provenance must record the actual " + feature + " boolean")
+    if provenance["with_diskann"] != FORMAT.builds_diskann():
+        raise ValueError("Provenance with_diskann does not match this platform's Knowhere build")
     if provenance.get("dependency.mode") != "shared":
         raise ValueError("Provenance must identify the unified shared dependency build")
     libraries, aliases = inventory(directory, platform)
@@ -282,6 +284,9 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
                 "storage.revision": provenance["storage.revision"],
                 "knowhere.revision": provenance["knowhere.revision"],
                 "with_cardinal": str(provenance["with_cardinal"]).lower(),
+                # The platforms differ in what Knowhere carries, and the bundle
+                # says so rather than a consumer inferring it from the platform.
+                "with_diskann": str(provenance["with_diskann"]).lower(),
                 "provenance.sha256": hashlib.sha256(provenance_bytes).hexdigest(),
                 "load.entries": ",".join(LOAD_ENTRIES),
                 "libraries": ",".join(sorted(libraries)),

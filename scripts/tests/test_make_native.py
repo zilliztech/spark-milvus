@@ -34,17 +34,30 @@ class NativePlatformMakeTest(unittest.TestCase):
                 cwd=ROOT, text=True, capture_output=True, check=True,
             ).stdout
 
-    def test_linux_x86_builds_unified_resources_and_passes_bundle_to_sbt(self):
-        output = self.run_make("Linux", "x86_64")
-        self.assertIn("selected:native-build", output)
-        self.assertIn("selected:native-bundle", output)
-        self.assertNotIn("selected:copy-native-libs", output)
-        self.assertIn("sbt-arg:-Dmilvus.native.bundle=", output)
-        self.assertIn("sbt-arg:package", output)
+    #: A platform builds both engines when native-build carries its profile.
+    PROFILED = sorted(path.name for path in (ROOT / "native-build" / "profiles").iterdir())
 
-    def test_other_platforms_keep_storage_build_without_unified_option(self):
-        for system, architecture in (("Linux", "aarch64"), ("Darwin", "arm64"), ("Darwin", "x86_64")):
+    def test_a_profiled_platform_builds_unified_resources_and_passes_the_bundle_to_sbt(self):
+        for platform in self.PROFILED:
+            system, architecture = platform.split("-", 1)
+            with self.subTest(platform=platform):
+                output = self.run_make(system.capitalize(), architecture)
+                self.assertIn("selected:native-build", output)
+                self.assertIn("selected:native-bundle", output)
+                self.assertNotIn("selected:copy-native-libs", output)
+                self.assertIn("sbt-arg:-Dmilvus.native.bundle=", output)
+                self.assertIn("sbt-arg:package", output)
+
+    def test_both_operating_systems_have_a_profiled_platform(self):
+        # The selection rule is the profile directory, so a platform is added by
+        # adding its profile and its platforms.py adapter, not by editing Make.
+        self.assertIn("linux-x86_64", self.PROFILED)
+        self.assertIn("darwin-aarch64", self.PROFILED)
+
+    def test_a_platform_without_a_profile_keeps_the_storage_build(self):
+        for system, architecture in (("Linux", "aarch64"), ("Darwin", "x86_64")):
             with self.subTest(system=system, architecture=architecture):
+                self.assertNotIn(system.lower() + "-" + architecture, self.PROFILED)
                 output = self.run_make(system, architecture)
                 self.assertLess(output.index("selected:build-milvus-storage"),
                                 output.index("selected:copy-native-libs"))
@@ -54,10 +67,11 @@ class NativePlatformMakeTest(unittest.TestCase):
                 self.assertNotIn("-Dmilvus.native.bundle=", output)
                 self.assertIn("sbt-arg:package", output)
 
-    def test_explicit_linux_bundle_skips_source_build_on_both_architectures(self):
-        for architecture in ("x86_64", "aarch64"):
-            with self.subTest(architecture=architecture):
-                output = self.run_make("Linux", architecture, "/chosen/bundle.jar")
+    def test_an_explicit_bundle_skips_the_source_build_on_every_platform(self):
+        for system, architecture in (("Linux", "x86_64"), ("Linux", "aarch64"),
+                                     ("Darwin", "arm64"), ("Darwin", "x86_64")):
+            with self.subTest(system=system, architecture=architecture):
+                output = self.run_make(system, architecture, "/chosen/bundle.jar")
                 self.assertIn("selected:native-bundle", output)
                 self.assertNotIn("selected:native-build", output)
                 self.assertNotIn("selected:copy-native-libs", output)
@@ -80,6 +94,8 @@ class NativePlatformMakeTest(unittest.TestCase):
                 self.assertEqual(["sbt-arg:-Dmilvus.native.bundle=" + expected, "sbt-arg:package"], arguments)
 
     def test_legacy_resources_rebuild_existing_libraries_before_copying(self):
+        # Mach-O without a build profile: the dylib names and the Darwin branch
+        # of the resource copy, on the platform that still takes that path.
         with tempfile.TemporaryDirectory(prefix="native-make-freshness-") as temporary:
             directory = Path(temporary)
             engine = directory / "libmilvus-storage.dylib"
@@ -98,7 +114,7 @@ class NativePlatformMakeTest(unittest.TestCase):
             )
             subprocess.run(
                 ["make", "--no-print-directory", "-j4", "-f", str(ROOT / "Makefile"),
-                 "-f", str(override), "native-resources", "UNAME_S=Darwin", "UNAME_M=arm64",
+                 "-f", str(override), "native-resources", "UNAME_S=Darwin", "UNAME_M=x86_64",
                  "NATIVE_BUNDLE=", "STORAGE_LIB=" + str(engine), "STORAGE_JNI_LIB=" + str(jni),
                  "MILVUS_STORAGE_DEPS=" + str(dependencies), "NATIVE_DIR=" + str(resources)],
                 cwd=ROOT, text=True, capture_output=True, check=True,

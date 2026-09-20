@@ -108,8 +108,9 @@ The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
 the scenario suite `uat.DataFrameScenariosUatTest` and the vector search suite
 `uat.VectorSearchUatTest` in spark-4.0 — cancel on their own environment
 variables as well, so they stay canceled even with the library present.
-`VectorSearchUatTest` additionally needs Knowhere's native package, which
-exists for Linux only, and its index cases need a snapshot whose vector field
+`VectorSearchUatTest` additionally needs Knowhere's native libraries, which the
+unified bundle carries on every platform whose profile exists — `linux-x86_64`
+and `darwin-aarch64` — and its index cases need a snapshot whose vector field
 carries a persisted index (`MILVUS_UAT_INDEXED_SNAPSHOT`). The scenario suite is also compiled into the 3.5, 4.1 and
 4.2 lines, so `spark35/testOnly ...DataFrameScenariosUatTest` runs the same
 scenarios there. The 3.5 line needs a JDK 17 for that run: Arrow 12, which
@@ -167,22 +168,53 @@ on `macos-26` with conan 2.25.1, CMake 3.31.10 and LLVM 18 from brew. The
 storage-only path below was built and run on an Apple Silicon Mac (macOS 26,
 Apple clang 21, JDK 21) on 2026-09-19: the native suites pass, and a Spark
 4.0.1 job read a 1M-row Storage V3 snapshot from a Zilliz Cloud bucket through
-the packaged `native/darwin-aarch64/` libraries. Knowhere (vector search) still
-has no macOS build, so `VectorSearchUatTest` cancels there.
+the packaged `native/darwin-aarch64/` libraries.
+
+That path carries storage alone. Knowhere is built on macOS by the
+[unified native bundle](#unified-native-bundle), which `darwin-aarch64` selects
+by default, so the storage-only targets below are for a platform whose profile
+does not exist yet or a host that cannot run the source build.
 
 ### macOS (Apple Silicon)
 
+One toolchain serves both native paths. The pinned CMake 3 lives in a virtual
+environment of its own because a current CMake 4 rejects the
+`cmake_minimum_required` of several pinned recipes, and because
+`[platform_tool_requires]` in each profile names the version that must be on
+`PATH`:
+
 ```bash
 xcode-select --install                       # clang, otool, install_name_tool, codesign
-brew install cmake libomp openjdk@21 sbt     # libomp: the milvus-common recipe needs it
-pip install conan==2.25.1                    # Conan 2
+brew install libomp ninja ccache openjdk@21 sbt   # libomp: Apple Clang ships no OpenMP runtime
 curl https://sh.rustup.rs -sSf | sh          # cargo, for the storage Rust bridge
+python3 -m venv ~/toolchain/cmake3venv       # not under /tmp, which the system empties
+~/toolchain/cmake3venv/bin/pip install cmake==3.31.10 ninja conan==2.25.1
+export PATH=~/toolchain/cmake3venv/bin:$PATH
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 export LIBCLANG_PATH=/Library/Developer/CommandLineTools/usr/lib   # bindgen
 conan profile detect --force
 conan remote add default-conan-local2 \
   https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2
-scripts/macos_conan_fixups.sh
+printf 'compiler:\n    apple-clang:\n        version: ["18", "19", "20", "21"]\n' \
+  > ~/.conan2/settings_user.yml        # conan 2.25.1's own list stops at 17.0
+make native-bundle NATIVE_JOBS=6 && make package   # storage and Knowhere
+```
+
+`NATIVE_JOBS` is the parallel compile width; the whole dependency graph is
+built from source here, because the Conan remote has no macOS binary packages.
+`settings_user.yml` is the only Conan change the unified build needs: the
+profile names the Apple clang version it was validated with, and Conan's stock
+`settings.yml` stops a few releases behind Xcode. The other two edits
+`scripts/macos_conan_fixups.sh` makes belong to the storage-only path below and
+must not be applied to a bundle build, whose provenance records upstream recipes
+it has not modified: the pinned boost and avro recipes each list a working
+mirror after their dead first URL, and thrift 0.17 and arrow compiled unpatched
+against the macOS 26 SDK's libc++.
+
+The storage-only targets remain available for a host that cannot run the source
+build:
+
+```bash
 make build-milvus-storage && make copy-native-libs && make package
 ```
 
@@ -255,7 +287,7 @@ platform directory and cannot satisfy the packaged-library load.
 
 ## Unified native bundle
 
-The unified Linux platform JAR contains both upstream JNI entry libraries and
+The unified platform JAR contains both upstream JNI entry libraries and
 one dynamically linked dependency set. The implementation and acceptance status
 are documented in [native-build/README.md](../native-build/README.md); the library layers and the ways to obtain a bundle are in [build.html](design/engineering/build.html).
 The native build is explicit; ordinary sbt compilation does not start Conan or
@@ -268,14 +300,20 @@ Build both engines, package their shared dependencies, and select the result:
 
 ```bash
 make native-bundle NATIVE_JOBS=50 NATIVE_BUILD_OPTIONS=--with-cardinal
-make package NATIVE_BUNDLE="$PWD/target/native-build/linux-x86_64/milvus-native-linux-x86_64.jar"
+make package NATIVE_BUNDLE="$PWD/target/native-build/$platform/milvus-native-$platform.jar"
 ```
 
-The source build currently uses the Linux x86_64 GCC 12 profile in
-`native-build/profiles/`. It needs Conan 2, CMake 3.27.5, Ninja, the profile's
-compilers, Rust, libclang, a JDK, `patchelf` and access to the pinned source
-repositories and Conan recipes. Rust bindgen loads libclang when building the
-storage bridge's `custom-labels` dependency; install `libclang-dev` on Ubuntu.
+A platform is built from source when `native-build/profiles/` holds its Conan
+profile and `native-build/platforms.py` holds its adapter; `linux-x86_64` and
+`darwin-aarch64` have both. The build needs Conan 2, the CMake version the
+profile's `[platform_tool_requires]` names, Ninja, ccache, the profile's
+compilers, Rust, libclang, a JDK, and access to the pinned source repositories
+and Conan recipes. Rust bindgen loads libclang when building the storage
+bridge's `custom-labels` dependency; install `libclang-dev` on Ubuntu, and on
+macOS point `LIBCLANG_PATH` at the Command Line Tools copy. Linux adds
+`patchelf` and the libaio development package; macOS adds `otool`,
+`install_name_tool`, `codesign` and Homebrew's `libomp`, since Apple Clang
+ships no OpenMP runtime.
 `--with-cardinal` also needs access to both pinned Cardinal
 revisions. `dependencies.json` selects the newer version when the two source
 recipes conflict. Every dependency uses the exact upstream recipe revision in
@@ -315,12 +353,16 @@ reviewed complete dependency lock in another build directory. See
 [native-build/README.md](../native-build/README.md) for the directory layout and
 cache options.
 
-On Linux x86_64, `make all`, `package` and `quick-build` use the unified bundle.
-`NATIVE_BUNDLE` selects an existing Linux platform JAR and skips native
+On a platform whose profile exists, `make all`, `package` and `quick-build` use
+the unified bundle; the Makefile reads the profile directory rather than naming
+platforms, so adding a platform is adding its profile and its adapter.
+`NATIVE_BUNDLE` selects an existing platform JAR and skips native
 compilation; otherwise `NATIVE_WORK_DIR` holds the build and Conan reuses
-compatible cached packages. Linux aarch64 and macOS retain the existing
-storage-only build when no bundle is selected. Linux aarch64 can consume a
-matching prebuilt unified bundle; the source profile does not cross-compile it.
+compatible cached packages. Linux aarch64 has no profile yet and retains the
+storage-only build when no bundle is selected; it can consume a matching
+prebuilt unified bundle, which no profile cross-compiles. A prebuilt bundle must
+match the host, and `verifyNativeBundle` rejects one whose manifest names
+another platform.
 Docker uses the same `native-resources` target as Make. Both native build paths
 limit concurrency to `NATIVE_JOBS` (1..50) and preserve initialized submodule
 checkouts. The storage-only resource target always invokes the incremental
@@ -341,19 +383,22 @@ without a validated unified bundle.
 Select the resulting resource-only JAR and its `.properties` checksum sidecar:
 
 ```bash
-sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-linux-x86_64.jar \
+sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-$platform.jar \
   native-runtime/verifyNativeBundle native-vector/knowhereSmoke
-sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-linux-x86_64.jar test assembly
+sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-$platform.jar test assembly
 ```
 
-Before native tests, preload the selected JRE's `lib/libjsig.so` as described
+Before native tests, preload the selected JRE's `lib/libjsig.so`
+(`lib/libjsig.dylib` through `DYLD_INSERT_LIBRARIES` on macOS) as described
 below. The resulting root assembly contains the bundle resources. At runtime,
 one class loader extracts and verifies them in one private directory; both
 upstream JNI loaders use that directory. The external `.properties` checksum
 sidecar is a build input and is not needed next to the deployed assembly.
 
 Bundle-selected functional test JVMs set `LD_BIND_NOW=1` and an empty external
-library path. A JVM may still request lazy binding when loading a native
+library path (`LD_LIBRARY_PATH`, and `DYLD_LIBRARY_PATH` with
+`DYLD_FALLBACK_LIBRARY_PATH` on macOS, where dyld has no equivalent of
+`LD_BIND_NOW`). A JVM may still request lazy binding when loading a native
 library; this setting does not prove every function symbol has been resolved.
 The shared loading checker clears `LD_BIND_NOW` and verifies completed
 `System.load` calls. No external library directory or runtime mutation of
@@ -540,7 +585,9 @@ extraction and `System.load`, including the optional development override
 not verify build provenance or package checksums and requires its dependencies
 to be available. A library load does not validate persisted Milvus index files.
 
-For HotSpot, preload the **running JRE's** `lib/libjsig.so` before JVM startup.
+For HotSpot, preload the **running JRE's** `lib/libjsig.so` before JVM startup,
+through `LD_PRELOAD` on Linux and `DYLD_INSERT_LIBRARIES` with `lib/libjsig.dylib`
+on macOS.
 Apply this to each driver or executor JVM that will load Knowhere; Java code
 cannot establish signal chaining after startup. Do not package another JDK's
 `libjsig` into the connector. The explicit smoke task supplies it automatically,
