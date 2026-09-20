@@ -95,8 +95,10 @@ private[storage] object IndexFileCodec extends Logging {
     * Each payload becomes one object under the index prefix, in the same
     * envelope Milvus writes: a descriptor naming the segment and field, then
     * one `IndexFileEvent` carrying the bytes. A payload longer than
-    * `sliceBytes` is split into `name_0`, `name_1`… and a `SLICE_META` object
-    * says how to put it back, which is what the loader in section 2.5 reads.
+    * `sliceBytes` is split into `name_0`, `name_1`…; a payload that fits is
+    * still written as `name_0`, because that is what Milvus writes and what its
+    * loader parses. Every payload is declared in the `SLICE_META` object says
+    * how to put it back, which is what the loader in section 2.5 reads.
     */
   private[storage] def write(
       payloads: Seq[(String, Long)],
@@ -166,19 +168,20 @@ private[storage] object IndexFileCodec extends Logging {
         store.write(key, envelope)
         written += IndexObject(key, envelope.length.toLong)
       }
-      if (length <= sliceBytes) objectOf(name, 0L, length)
-      else {
-        val count = ((length + sliceBytes - 1L) / sliceBytes).toInt
-        (0 until count).foreach { number =>
-          val offset = number.toLong * sliceBytes
-          objectOf(
-            s"${name}_$number",
-            offset,
-            math.min(sliceBytes, length - offset)
-          )
-        }
-        slices += ((name, count, length))
+      // Always the sliced names, even for a payload that fits in one object:
+      // Milvus writes `name_0` whatever the size, and its segment loader takes
+      // the number after the last underscore as the slice index, so a file
+      // called `HNSW` fails there with `invalided index file path`.
+      val count = math.max(1, ((length + sliceBytes - 1L) / sliceBytes).toInt)
+      (0 until count).foreach { number =>
+        val offset = number.toLong * sliceBytes
+        objectOf(
+          s"${name}_$number",
+          offset,
+          math.min(sliceBytes, length - offset)
+        )
       }
+      slices += ((name, count, length))
     }
     val sliced = slices.result()
     if (sliced.nonEmpty) {

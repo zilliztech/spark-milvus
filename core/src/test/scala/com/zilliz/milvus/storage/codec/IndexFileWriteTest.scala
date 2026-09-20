@@ -61,7 +61,13 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
         store
       )
 
-      written.map(_.key) shouldBe Seq("files/index_files/900/1/20/30/HNSW")
+      // One slice is still a slice: Milvus names every index object
+      // `<payload>_<n>` and its loader reads the number after the last
+      // underscore, so a single object is `HNSW_0` with a SLICE_META beside it.
+      written.map(_.key) shouldBe Seq(
+        "files/index_files/900/1/20/30/HNSW_0",
+        "files/index_files/900/1/20/30/SLICE_META"
+      )
       written.head.bytes should be > 1000L
 
       val decoded =
@@ -142,9 +148,13 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
         store
       )
 
-      written.map(_.key.split("/").last) shouldBe Seq("HNSW", "valid_data")
+      written.map(_.key.split("/").last) shouldBe Seq(
+        "HNSW_0",
+        "valid_data_0",
+        "SLICE_META"
+      )
       val decoded = MilvusIndexFileDecoder.decode(
-        store.readAll("files/index_files/900/1/20/30/valid_data")
+        store.readAll("files/index_files/900/1/20/30/valid_data_0")
       )
       try {
         val back = new Array[Byte](2)
