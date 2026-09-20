@@ -64,9 +64,12 @@ private[read] final class SearchProgress(
     "Search progress is written here while the search runs, because Spark's " +
       "stage page carries a task's own counters only once that task ends. " +
       "A line is one reading of every task's counters, taken from the " +
-      "executor heartbeat: distance pairs are query vector against base " +
-      "vector, a segment search is one query group over one segment, and an " +
-      "engine call is one call into Knowhere over one batch of one segment."
+      "executor heartbeat: a distance pair is one query vector against one " +
+      "base vector, a segment search is one query group over one whole " +
+      "segment, and a knowhere call is one call into the engine over one " +
+      "batch of one segment. A segment search finishes only after every " +
+      "batch of that segment, so in an exact scan it stays at zero while the " +
+      "pairs rise."
   )
 
   private val segmentSearchesTotal = queryGroups.toLong * segments.toLong
@@ -151,8 +154,8 @@ private[read] final class SearchProgress(
            s" of $queryGroups x $segments"
          else "") +
         " segment searches, " +
-        s"${of(calls)} engine calls$perCall, " +
-        s"engine time ${of(counted.getOrElse(SearchMetrics.KnowhereNanos, 0L) / 1000000000L)}s " +
+        s"${of(calls)} knowhere calls$perCall, " +
+        s"knowhere time ${of(counted.getOrElse(SearchMetrics.KnowhereNanos, 0L) / 1000000000L)}s " +
         s"across ${running.size + ended.size} tasks " +
         s"(${running.size} running, ${ended.size} done)"
     )
