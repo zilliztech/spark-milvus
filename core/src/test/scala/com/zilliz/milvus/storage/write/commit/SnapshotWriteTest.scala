@@ -114,6 +114,18 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
       )
       written.bytes should be > 0L
 
+      // Milvus reads the segment id from `segmentID`; a document that names it
+      // only in this connector's own `segmentIDLong` is rejected as referring
+      // to segment 0.
+      val document = new String(
+        java.nio.file.Files.readAllBytes(
+          directory.resolve(written.metadataKey)
+        ),
+        java.nio.charset.StandardCharsets.UTF_8
+      )
+      document should include(""""segmentID":30""")
+      document should include(""""segmentID":31""")
+
       val catalog = new SnapshotCatalog(
         new LocalObjectStore(directory.toString),
         bucket = "",

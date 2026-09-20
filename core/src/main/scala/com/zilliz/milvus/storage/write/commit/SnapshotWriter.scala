@@ -271,9 +271,13 @@ object SnapshotWriter extends Logging {
     declared.foreach(partitionIds.add)
     val dataManifests = segments.map { segment =>
       val SegmentLayout.Manifest(basePath, version) = segment.layout
+      // `segmentID` is the field Milvus reads; `segmentIDLong` is this
+      // connector's own addition for its option-string form, and a snapshot
+      // that carries only that one is read as segment 0.
       ManifestItemJson(
-        segment.id,
-        s"""{"ver":$version,"base_path":"$basePath"}"""
+        rawSegmentID = Some(LongNode.valueOf(segment.id)),
+        manifest = s"""{"ver":$version,"base_path":"$basePath"}""",
+        rawSegmentIDLong = Some(LongNode.valueOf(segment.id))
       )
     }
     val buildIds = nodes.arrayNode()
