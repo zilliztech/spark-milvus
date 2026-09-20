@@ -32,7 +32,7 @@
 <h1>向量搜索与建索引</h1>
 <p><strong>向量搜索只有一个入口：输入一组查询，Spark 按段并行、按查询合并，Knowhere 在每个任务里一次算完整组查询；精确扫描和索引探查是同一个段内执行器的两种策略；建索引是写之后单独的一步。</strong></p>
 <p>TopK 是按距离或相似度排序的前 K 条结果。精确搜索把每个向量都算一次距离；近似最近邻搜索（ANN）借助索引只算一部分向量。Knowhere 是 Milvus 的向量检索引擎库，负责距离计算、建索引和索引搜索。</p>
-<p class="status"><code>MilvusSearch.search</code> 的查询集入口、exact 与 index 两种模式、<code>build_index</code> 与 <code>write_snapshot</code> 已实现，各自验证过的范围记录在能力行 V5、V7、W6、W8；<code>restore_snapshot</code> 过程未实现，Milvus v3.0.2 已实测能恢复连接器写出的快照。DataFrame 与 SQL 计划里的入口是长期优化项（2.10），未开始。统一构建已改为固定上游 Conan recipe revision，并在独立 CMake 中显式声明集成链接；当前 Knowhere gitlink 为 <code>29210a33</code>，旧 <code>9dc2b8ad</code> 产物的验收只作为历史，当前组合须重新构建和复验。</p>
+<p class="status"><code>MilvusSearch.search</code> 的查询集入口、exact 与 index 两种模式、<code>build_index</code>、<code>write_snapshot</code> 与 <code>restore_snapshot</code> 已实现，各自验证过的范围记录在能力行 V5、V7、W6、W8；Milvus v3.0.2 已实测能恢复连接器写出的快照，从连接器发起的 <code>restore_snapshot</code> 只经单元测试与假客户端验证，尚未对真实实例跑过。DataFrame 与 SQL 计划里的入口是长期优化项（2.10），未开始。统一构建已改为固定上游 Conan recipe revision，并在独立 CMake 中显式声明集成链接；当前 Knowhere gitlink 为 <code>29210a33</code>，旧 <code>9dc2b8ad</code> 产物的验收只作为历史，当前组合须重新构建和复验。</p>
 <nav aria-label="本页目录">
   <a href="#overall">结论</a><a href="#api">入口</a><a href="#layers">分层</a><a href="#failures">失败与资源</a><a href="#cost">成本与模式</a>
   <a href="#execution">执行链</a><a href="#native">Knowhere 对接</a><a href="#exact">精确扫描</a><a href="#metadata">索引探查</a>
@@ -544,7 +544,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <li>规划与构建钉在同一个快照版本上；分片按段 id 的连续区间划分；调优参数由 Spark 层解析后传给 Knowhere 的构建参数。</li>
 <li>任务把整段向量读成一块缓冲，一次交给 Knowhere 构建；任务内存按两份原始向量加图结构估算。</li>
 <li><code>IndexWriter</code> 交出 BinarySet；Milvus 的 <code>TableFormat</code> 一侧分块读出，由 <code>core.codec</code> 按目标 Milvus 的封装与切片规则编码，按 Milvus 的命名、经输出的 <code>StorageBinding</code> 写到对象存储；任务返回文件列表、大小、索引版本、向量格式版本和参数。</li>
-<li>driver 把索引记录写进作业清单，<code>core.write.commit</code> 写出快照 JSON 与段 Avro 清单；<code>restore_snapshot</code> 调 Milvus 的外部快照恢复，Milvus 复制段文件与索引文件、分配新的 build id，生成新 collection（W8）。给已有 collection 的段补索引，是把索引写进段 Manifest 的 <code>indexes</code>，需要 Milvus 按它加载（README 第 5 节）。</li>
+<li>driver 把索引记录写进作业清单，<code>core.write.commit</code> 写出快照 JSON 与段 Avro 清单；<code>restore_snapshot</code> 先按 <code>SnapshotBundle</code> 的根规则核对快照，再调 Milvus 的外部快照恢复（<code>RestoreExternalSnapshot</code>），可选轮询 <code>GetRestoreSnapshotState</code> 到作业结束；Milvus 复制段文件与索引文件、分配新的 build id，生成新 collection（W8）。给已有 collection 的段补索引，是把索引写进段 Manifest 的 <code>indexes</code>，需要 Milvus 按它加载（README 第 5 节）。</li>
 <li>索引的引擎与参数取目标 Milvus 能加载的组合：面向云上用含 Cardinal 的 Knowhere 构建，参数与云上的自动索引一致，该产物在云上作业运行时提供。第一版建向量索引，范围与 2.4、2.5 的加载器一致。</li>
 <li>建好的索引由 2.4 的加载器读回搜索，与精确扫描比较召回率。</li>
 <li>已实现：<code>NativeVectorIndex.build</code> 与 <code>core.index.IndexWriter</code>（整段向量装配成一块缓冲、构建、交出载荷，nullable 列同时产出 <code>valid_data</code> 位图）、<code>core.codec</code> 的信封与 <code>SegmentIndexObjects.write</code>（按 store path version 选前缀、超过 16 MiB 切片并写 <code>SLICE_META</code>）、<code>CommittedIndex</code> 记录与 <code>build_index</code> 过程；快照文件也已写出：<code>SegmentManifestWriter</code> 编码段 Avro 清单（读侧只取到 <code>index_files</code> 为止，写侧要把整条记录填满，Avro 二进制按位置解码），<code>core.write.commit.SnapshotWriter</code> 出快照 JSON 与每段一份清单，入口是 <code>write_snapshot</code> 过程。索引记录里的行数是段行数，空值由索引文件里的 <code>valid_data</code> 位图表达。段必须是 storage version 3 且带行数，V2 段报错不猜。</p>
@@ -562,7 +562,8 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <tr><td><code>state</code>、<code>num_shards</code>、<code>consistency_level</code></td><td>不写</td><td>读侧不需要；Milvus 恢复是否需要未核对</td></tr>
 </tbody>
 </table>
-<p>验收只说明连接器写的连接器读得回来，不说明 Milvus 认这份快照；而读侧恰好不读上表里的多数字段。恢复那一步落地时，这些值要对着目标 Milvus 逐项核对再定。</li>
+<p>上表是最初合成文档时的取值；现在文档与清单整体复制自源快照，这些字段都是 Milvus 自己写的值，Milvus v3.0.2 的恢复已经认下（见下方 2026-09-20 记录）。</p>
+<p><strong>bundle 根是两端共用的一条规则。</strong><code>core.write.commit.SnapshotBundle</code> 从快照文档的 key 推出根（<code>snapshots/&lt;collection&gt;/metadata/&lt;id&gt;.json</code> 之上的前缀），收集 <code>storagev2_manifest_list</code> 的段 base path、每段清单里的 binlog、delta、统计与索引文件路径，报出不在根下的那些。<code>write_snapshot</code> 默认 <code>restorable => true</code>，在写任何字节之前用它拒绝一个 Milvus 恢复不了的 <code>output</code>，把本来要等到恢复时才暴露的「data path … is outside source root」提前到规划期；<code>restorable => false</code> 声明快照仅连接器自读，可以写在任何前缀下。<code>restore_snapshot</code> 调 Milvus 之前对同一个文档跑同一个检查，越界就报出路径而不开作业。</li>
 </ol>
 <h3 id="library-loading">2.8 原生库加载与打包</h3>
 <p><strong>milvus-storage 与 Knowhere 的固定源码在同一张 Conan 依赖图中构建，所有原生库进入一个平台 JAR，并由 <code>native-runtime</code> 校验后解压到同一目录。</strong>
@@ -598,6 +599,7 @@ Knowhere 在部分 K 与过滤比例下会在索引内部改用暴力搜索（<a
 <p><strong>小索引一度装不进 Milvus：</strong>HNSW 这一族恢复完成、索引也被登记，但加载报 <code>invalided index file path: …/HNSW, error: stoi</code>。Milvus 的段加载器按最后一个下划线切文件名并把后缀当作切片序号，它自己的写入方无论大小都写 <code>name_0</code>；连接器此前只在载荷超过 16 MiB 时才加后缀，于是 6.5 MB 的索引落成一个叫 <code>HNSW</code> 的对象。第一次成功的恢复没暴露它，是因为那份索引每段 16.4 MB，本来就被切成了 <code>HNSW_0</code>、<code>HNSW_1</code>。现在一律按切片命名。</p>
 <p><strong>这轮端到端找出的缺陷：</strong>FLAT 索引建出来读不回去。Knowhere 写的 faiss 平表索引以 <code>IxF2</code> 开头，而格式核对里非 HNSW 的类型一律只认 <code>Iw</code> 与 <code>IB</code>。成因是家族清单与字节标记分在两处，写标记表时看不到清单；修法是把两者并进 <code>core.codec.VectorIndexFamilies</code>，加载、构建校验与格式核对都读它，并在 codec 测试里钉住 Knowhere 真正写出的标记。在此之前 FLAT 与 IVF 都只验过读侧的合成字节，没有一个真的被建出来过。</p>
 
+<p><strong>2026-09-20 恢复从连接器发起，根规则前移到规划期：</strong>新增 <code>restore_snapshot</code> 过程与 <code>MilvusClient.restoreExternalSnapshot</code>、<code>getRestoreSnapshotState</code>；bundle 根的规则收进 <code>core.write.commit.SnapshotBundle</code>，<code>write_snapshot</code> 默认 <code>restorable => true</code>，对 <code>SnapshotWriteTest</code> 的夹具（数据在 <code>files/</code>、输出到 <code>built/</code>）在写出前拒绝并列出两条越界的段路径，同一份夹具输出到 <code>files/</code> 时写出且 <code>outsideRootOf</code> 为空。过程对真实 Milvus 的恢复尚未跑过：URI 取 <code>s3://&lt;bucket&gt;/&lt;key&gt;</code> 是按 Milvus 自己写快照位置的形式推的，<code>external_spec</code> 的 JSON 形状未核对，两者都留了显式参数覆盖。</p>
 <p><strong>2026-09-17 旧 gitlink、旧自有 recipe 实现的历史结果：</strong>以下产物使用 Knowhere <code>9dc2b8ad</code>，不能代表当前 <code>1fff20db</code> gitlink 或固定上游 recipe 方案。Cardinal 构建完成，C API 3/3、164/164 个库审计和 5 个立即加载入口通过。统一平台 JAR SHA-256 为 <code>4bc2488e9f38f590f9346b27a34725f4d63bddd1b518740784ad0d32c8c54c5e</code>，大小 279,399,197 字节；三种 JVM 加载顺序均使用一个解压目录，最终 assembly SHA-256 为 <code>be37535bcd3ffecec1c4c9bdb74336bc10cf50b08be18e8080a2928a50f7064c</code>。</p>
 <p>真实 UAT 持久化索引套件 1/1 通过，读取 100,000 行。无过滤、标量组合过滤和空值过滤分别排除 0、80,000、90,000 行；三个 Cardinal HNSW version 10 查询都恰好调用一次 deserialize 和一次 search，严格 Top10 ID 召回率均为 1，物理行号和 Float32 分数与上游 JNI 直调一致，metric 不匹配被明确拒绝，没有 Connector 暴力回退。既有 Spark SQL UI 指标构造器告警不影响查询断言。</p>
 <p><strong>2026-09-16 04:48 UTC 的历史结果：</strong>Spark 4.0 / Java 21 / local[2]，读取真实快照的 100,000 行、128 维向量作为独立参考；查询向量取其中一行，topK=10、ef=256。无过滤、标量组合过滤和空值过滤三种查询分别排除 0、80,000、90,000 行；投影值、物理行号、排序、与原始 JNI 的命中集合及 Float32 分数全部通过。三个查询的严格 Top10 ID 召回率均为 100%，最大分数绝对误差分别为 5.4300e-5、6.6219e-5、5.9342e-5；该结果只描述当时依赖补丁批次的样本和三个查询，不构成其他查询或当前开源变体的验收。</p>

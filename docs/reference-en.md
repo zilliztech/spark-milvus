@@ -714,9 +714,12 @@ planned against — and the index records from that job's manifest under
 `input`. It writes one Avro segment manifest and the snapshot JSON under
 `output/snapshots/<collection>/`, where `output` defaults to `input`;
 `snapshot_id` defaults to the current millisecond and `snapshot_name` to
-`<collection>-<snapshot_id>`. The result is one row: `snapshot` (the key of the
-snapshot JSON), `snapshot_id`, `snapshot_name`, `segments`, `indexes` and
-`bytes`. The snapshot is the source snapshot with the job's indexes in it: the
+`<collection>-<snapshot_id>`. `restorable` defaults to true: then any data,
+delete, statistics or index file the snapshot names outside `output` fails the
+call before anything is written, with the paths listed; `restorable => false`
+declares a snapshot only this connector reads, which may sit under any prefix.
+The result is one row: `snapshot` (the key of the snapshot JSON),
+`snapshot_id`, `snapshot_name`, `segments`, `indexes` and `bytes`. The snapshot is the source snapshot with the job's indexes in it: the
 document and each segment manifest are the source's own bytes, with the index
 registrations replaced, so nothing about the segments or the collection is
 restated.
@@ -728,10 +731,37 @@ collection reports them as built, loads and searches without building
 anything. That restore requires every path the snapshot names to sit under the
 root its metadata URI derives, so `output` has to be a prefix the data files
 are already under: for indexes built over an existing collection, that is the
-instance's own root, and `build_index` has to write there too. Calling the
-restore from this connector is not implemented; the call is made against
-Milvus directly. Segments must be storage version 3 and must carry a row
-count; a V2 segment is refused rather than written from a guess.
+instance's own root, and `build_index` has to write there too; `write_snapshot`
+applies that rule at planning by default. Segments must be storage version 3
+and must carry a row count; a V2 segment is refused rather than written from a
+guess.
+
+A third call has Milvus restore it into a new collection:
+
+```sql
+CALL milvus.system.restore_snapshot('your_db.restored_collection',
+  snapshot         => 'files/snapshots/4691/metadata/1789478390101.json',
+  wait             => true,
+  `milvus.uri`     => 'https://your-milvus:19530',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+`collection` is the target and must not exist; `snapshot` is the key
+`write_snapshot` returned. The procedure first reads the snapshot document and
+every segment manifest through the same `fs.*` options and checks each path
+against the root the key derives; one outside fails the call with the paths
+named, before Milvus is asked. Then it calls `RestoreExternalSnapshot`. The URI
+handed to Milvus defaults to `s3://<fs.bucket_name>/<snapshot>` and can be
+replaced with `snapshot_uri` (required on local storage); `external_spec` is
+passed through as it is, for a snapshot that is not on the instance's own
+storage. Without `wait` the row is the job Milvus opened: `database`,
+`collection`, `snapshot_uri`, `job_id`, `state` = `submitted`. With
+`wait => true` the job is polled through `GetRestoreSnapshotState` within
+`timeout_seconds` (default 600); the row then reports
+`RestoreSnapshotCompleted` with `progress`, `reason` and `time_cost_ms`, and a
+failed job raises with the reason Milvus gave.
 
 ### 3.4 Managing Milvus with `CALL`
 

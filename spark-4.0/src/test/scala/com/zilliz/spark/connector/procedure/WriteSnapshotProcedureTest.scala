@@ -15,7 +15,12 @@ class WriteSnapshotProcedureTest extends AnyFunSuite with Matchers {
       .map(_.name) shouldBe Seq("collection", "job", "input")
     WriteSnapshotProcedure.parameters
       .filterNot(_.required)
-      .map(_.name) shouldBe Seq("output", "snapshot_id", "snapshot_name")
+      .map(_.name) shouldBe Seq(
+      "output",
+      "snapshot_id",
+      "snapshot_name",
+      "restorable"
+    )
     WriteSnapshotProcedure.parameters
       .find(_.name == "snapshot_id")
       .map(_.dataType) shouldBe Some(LongType)

@@ -35,6 +35,7 @@ class RegisterProcedureTest extends AnyFunSuite {
       Procedures.all.map(_.name) == Seq(
         "build_index",
         "write_snapshot",
+        "restore_snapshot",
         "register",
         "cleanup_staging",
         "create_snapshot",

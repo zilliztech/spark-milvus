@@ -128,7 +128,8 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
         Seq(index(30L, 8L), index(31L, 8L)),
         target,
         store,
-        sourceKey
+        sourceKey,
+        restorable = false
       )
 
       written.metadataKey shouldBe "built/snapshots/10/metadata/5.json"
@@ -190,7 +191,8 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
         Seq(index(30L, 8L)),
         target,
         store,
-        sourceKey
+        sourceKey,
+        restorable = false
       )
       val back = catalog(directory).read(written.metadataKey)
 
@@ -227,7 +229,8 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
         Seq(index(99L, 8L)),
         target,
         store,
-        sourceKey
+        sourceKey,
+        restorable = false
       ) should have message
         "requirement failed: Index records name segment(s) the snapshot does not hold: 99"
 
@@ -236,11 +239,79 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
         Seq.empty,
         target,
         store,
-        ""
+        "",
+        restorable = false
       ) should have message
         "requirement failed: A snapshot write copies a snapshot document, which this call has to name"
 
       SnapshotWriter.sourceKeyOf(snapshot) shouldBe Some(sourceKey)
+    }
+  }
+
+  test("a restorable snapshot is refused when its data sits outside the root") {
+    withStore { (directory, store) =>
+      val snapshot = catalog(directory).read(sourceKey)
+
+      val error = the[IllegalArgumentException] thrownBy SnapshotWriter.write(
+        snapshot,
+        Seq(index(30L, 8L), index(31L, 8L)),
+        target,
+        store,
+        sourceKey,
+        restorable = true
+      )
+      error.getMessage should include("outside the root 'built'")
+      error.getMessage should include("files/insert_log/10/20/30")
+      error.getMessage should include("files/insert_log/10/20/31")
+      error.getMessage should include("restorable => false")
+      store.exists(SnapshotWriter.metadataKeyOf(target)) shouldBe false
+    }
+  }
+
+  test(
+    "a restorable snapshot under the data's own root passes the restore check"
+  ) {
+    withStore { (directory, store) =>
+      val snapshot = catalog(directory).read(sourceKey)
+      val underFiles =
+        target.copy(rootPath = "files", snapshotId = 6L, name = "files-6")
+      val indexes = Seq(30L, 31L).map { id =>
+        index(id, 8L).copy(
+          filePaths = Seq(s"files/index_files/7000/1/20/$id/HNSW_0")
+        )
+      }
+
+      val written = SnapshotWriter.write(
+        snapshot,
+        indexes,
+        underFiles,
+        store,
+        sourceKey,
+        restorable = true
+      )
+      written.metadataKey shouldBe "files/snapshots/10/metadata/6.json"
+      SnapshotBundle.rootOf(written.metadataKey) shouldBe Some("files")
+      SnapshotBundle.outsideRootOf(
+        store,
+        written.metadataKey,
+        ""
+      ) shouldBe empty
+
+      // The connector-only snapshot under `built` is exactly what a restore
+      // would refuse: its data files are Milvus's, under `files`.
+      val connectorOnly = SnapshotWriter.write(
+        snapshot,
+        Seq(index(30L, 8L), index(31L, 8L)),
+        target,
+        store,
+        sourceKey,
+        restorable = false
+      )
+      SnapshotBundle.outsideRootOf(
+        store,
+        connectorOnly.metadataKey,
+        ""
+      ) should contain allOf ("files/insert_log/10/20/30", "files/insert_log/10/20/31")
     }
   }
 }
