@@ -115,7 +115,7 @@ Dockerfile                  builder 阶段拆为 toolchain（工具）、dev（�
 <tr><td>UAT 场景套件</td><td><code>scripts/devcontainer.sh run --env-file ~/.spark-milvus-uat.env sbt spark40/test</code></td><td><code>MILVUS_UAT_*</code> 与 <code>AWS_*</code> 变量从容器外的文件传入，不检入、不写进 compose</td></tr>
 <tr><td>验证 Dockerfile 全量构建</td><td>宿主机 <code>docker build --build-arg PUBLISH_MAVEN=false .</code></td><td>这一步在容器外，与 Jenkins 相同；开发容器不替代它</td></tr>
 </table></div>
-<p><strong>平台。</strong>容器的架构跟随宿主：x86_64 机器得到 linux-x86_64，Apple Silicon 得到 linux-aarch64。今天只有 linux-x86_64 有统一构建 profile，所以 Apple Silicon 上的容器能做 JVM 侧全部工作和消费别处编好的 linux-aarch64 bundle，不能从源码编统一包；<code>platform: linux/amd64</code> 走 Rosetta 或 QEMU 模拟编原生库，耗时以天计，不作为方案。这是 <a href="build.html">build.html</a> 里 linux-aarch64 profile 缺失的另一面。</p>
+<p><strong>平台。</strong>容器的架构跟随宿主：x86_64 机器得到 linux-x86_64，Apple Silicon 得到 linux-aarch64。有 Conan profile 的是 linux-x86_64 与 darwin-aarch64，linux-aarch64 还没有，所以 Apple Silicon 上的容器能做 JVM 侧全部工作和消费别处编好的 linux-aarch64 bundle，不能从源码编统一包（在 macOS 宿主上直接跑 <code>scripts/build-native.sh</code> 编 darwin-aarch64 包不经容器）；<code>platform: linux/amd64</code> 走 Rosetta 或 QEMU 模拟编原生库，耗时以天计，不作为方案。这是 <a href="build.html">build.html</a> 里 linux-aarch64 profile 缺失的另一面。</p>
 <p><strong>资源。</strong>Docker 给容器的内存至少 8 GB：sbt 4 GB 堆加原生构建的编译进程；原生全量构建时给足 CPU。命名卷大小以 Conan 缓存为主，第一次全量构建后用 <code>docker system df -v</code> 查看，本页不估。</p>
 
 <h2 id="rollout">5 落地与验证</h2>

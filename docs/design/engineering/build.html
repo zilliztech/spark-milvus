@@ -35,7 +35,7 @@
 
 <p class="lead">Connector 在 executor 里加载两个原生引擎：读写 Milvus 段文件的 milvus-storage 和做向量搜索的 Knowhere。它们共用十几个 C++ 库，所以每个平台只能由一张 Conan 依赖图编成一个原生 JAR <code>milvus-native-&lt;平台&gt;.jar</code>；平台是 Linux 与 macOS 乘 x86_64 与 aarch64 四种，编译它有两种方案：Docker 里编，或本机编。构建阶段、打包与发布的执行细节见 <a href="../../../native-build/README.md">native-build/README.md</a> 和 <a href="../../contributing.md">contributing.md</a>。</p>
 
-<div class="state"><strong>2026-09-20 状态。</strong>当前 gitlink 为 milvus-storage <code>7eb13578</code>、Knowhere <code>29210a33</code>。四个平台中 linux-x86_64 与 darwin-aarch64 有源码构建 profile（darwin-aarch64 随 native/multi-platform 合入，构建、加载、打包已在本机验证）；验收记录只有 linux-x86_64 的：本机已为它完成三次统一构建，两道门都通过，<code>make test</code> 为 1,160 项成功、0 项失败、149 项取消。其余三个平台的 profile 未写。尚未做：空 Conan 缓存的 Docker 重建，真实 UAT 实例上的查询复测。</div>
+<div class="state"><strong>2026-09-20 状态。</strong>当前 gitlink 为 milvus-storage <code>7eb13578</code>、Knowhere <code>29210a33</code>。四个平台中 linux-x86_64 与 darwin-aarch64 有源码构建 profile（darwin-aarch64 随 native/multi-platform 合入，构建、加载、打包已在本机验证）；验收记录只有 linux-x86_64 的：本机已为它完成三次统一构建，两道门都通过，<code>make test</code> 为 1,160 项成功、0 项失败、149 项取消。darwin-aarch64 的实测（upstream 提交 <code>f077561</code>，在 macOS 本机）：221 个库、203 个别名，两个 JNI 入口双向加载通过，C API 测试通过，149 MB 平台 JAR 经 <code>verifyNativeBundle</code> 校验，根测试 1,101 成功、0 失败、165 取消。linux-aarch64 与 darwin-x86_64 的 profile 未写。尚未做：空 Conan 缓存的 Docker 重建，真实 UAT 实例上的查询复测。</div>
 
 <nav aria-label="目录">
   <a href="#libraries">1 依赖库</a>
@@ -89,8 +89,8 @@
 <div class="table-scroll"><table>
 <tr><th>依赖</th><th>Linux（x86_64、aarch64）</th><th>macOS（x86_64、aarch64）</th></tr>
 <tr><td>Conan</td><td colspan="2">2.25.1</td></tr>
-<tr><td>CMake</td><td colspan="2">3.27.5</td></tr>
-<tr><td>Ninja</td><td colspan="2">随发行版 / Homebrew</td></tr>
+<tr><td>CMake、Ninja</td><td>3.27.5</td><td>3.31.10</td></tr>
+<tr><td colspan="3" class="muted">CMake 版本由各平台 profile 的 <code>[platform_tool_requires]</code> 声明，PATH 上必须是这个版本；CMake 4 会拒绝多个上游 recipe 的 <code>cmake_minimum_required</code>。系统包管理器不会把它装在当前版本旁边，<code>native-build/README.md</code> 给出用私有 venv 安装的做法</td></tr>
 <tr><td>C/C++ 编译器</td><td>GCC、G++ 12</td><td>Apple Clang，另加 Homebrew <code>libomp</code> 提供 OpenMP</td></tr>
 <tr><td>Fortran 编译器（OpenBLAS）</td><td>gfortran 12</td><td>Homebrew gfortran</td></tr>
 <tr><td>Rust、Cargo</td><td colspan="2">rustup stable</td></tr>
@@ -104,7 +104,7 @@
 </table></div>
 
 <h2 id="options">3 两种构建方案</h2>
-<p><strong>Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 <code>build.py</code>，产物相同。</strong>构建不做交叉编译，每个平台的 JAR 在同平台机器上编。</p>
+<p><strong>Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 <code>build.py</code>，产物相同。</strong>构建不做交叉编译，每个平台的 JAR 在同平台机器上编。<code>build.py</code> 由 <code>platforms.host_platform()</code> 判断主机平台，缺 profile 或适配器时报出缺哪一个；Makefile 的选择规则今天仍只在 linux-x86_64 默认走统一包，macOS 上要直接调 <code>scripts/build-native.sh</code>，或用 <code>NATIVE_BUNDLE</code> 指向编好的包。</p>
 <div class="table-scroll"><table>
 <tr><th>方案</th><th>命令</th><th>前置条件</th><th>产物与限制</th><th>用在哪</th></tr>
 <tr><td>Docker 构建</td><td><code>docker build --build-arg PUBLISH_MAVEN=false -t spark-milvus .</code></td><td>Docker 与 BuildKit；网络能到 JFrog、GitHub、crates.io。工具链由 Dockerfile 安装，本机无需准备</td><td>统一包 + assembly。Conan、Cargo、ccache、Coursier、Ivy、sbt 缓存各在一个 <code>sharing=locked</code> 的 cache mount 里，失败的 RUN 不丢已完成的依赖。worker 是哪个架构就出哪个架构的包；只有 Linux</td><td>Jenkins 发布流水线；验证"空缓存能否完整构建"</td></tr>
@@ -124,11 +124,13 @@
 │   ├── Knowhere.cmake          knowhere、knowhere_c、knowhere_jni 与 C API 测试程序
 │   ├── knowhere/Sources.cmake  Knowhere、faiss、DiskANN 的源码清单与指令集分组
 │   ├── Install.cmake           安装到 lib/，RPATH 设为相对自身目录
-│   └── storage-private-symbols.map   隐藏 Rust 桥内部 LZ4/XXH/ZSTD/aws_lc 符号的链接脚本（ELF）
+│   ├── storage-private-symbols.map   隐藏 Rust 桥内部 LZ4/XXH/ZSTD/aws_lc 符号的链接脚本（ELF）
+│   └── storage-private-symbols.txt   同一份符号规则的 Mach-O 写法（ld64 的符号清单）
 ├── profiles/
 │   └── &lt;平台&gt;                  Conan profile，每平台一份；今天有 linux-x86_64 与 darwin-aarch64
 ├── dependencies.json           32 个直接依赖的 recipe revision、版本冲突策略、排除项
 ├── conanfile.py                消费者：把 references 以 force=True 放进一张 host 图
+├── platforms.py                平台适配器：Elf 与 MachO 两个类，库名、依赖表读取、查找路径改写、系统库集合、工具链；加平台即加一个类
 ├── build.py                    驱动 11 个阶段，平台无关
 ├── dependency_versions.py      两份上游 conanfile 与 dependencies.json 的对照
 ├── stage.py                    收集依赖闭包、别名、查找路径改写、系统库排除
@@ -136,7 +138,7 @@
 └── tests/                      Python 单元测试与 DiskANN 验收 fixture
 scripts/build-native.sh         入口，exec build.py
 scripts/package-native.py       核对 provenance 后打 JAR</code></pre>
-<p>CMake 文件按引擎分而不按平台分，平台差异用 <code>CMAKE_SYSTEM_NAME</code> 条件表达在同一目标内，避免同一个目标有两份定义；今天 <code>CMakeLists.txt</code> 开头仍拒绝 Linux x86_64 以外的平台。</p>
+<p>CMake 文件按引擎分而不按平台分，平台差异用 <code>CMAKE_SYSTEM_NAME</code> 条件表达在同一目标内，避免同一个目标有两份定义；<code>CMakeLists.txt</code> 开头接受 Linux x86_64、Linux aarch64 与 macOS arm64；<code>build.py</code> 到 CMake 之前先检查该平台的 profile 与 <code>platforms.py</code> 适配器是否存在。</p>
 
 <h3>构建工作目录：<code>NATIVE_WORK_DIR</code>，默认 <code>target/native-build/&lt;平台&gt;/</code></h3>
 <pre><code>target/native-build/&lt;平台&gt;/
