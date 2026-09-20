@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import shutil
@@ -44,6 +45,40 @@ def run(command, cwd=None, output=None, env=None):
 
 def git_value(source, *args):
     return subprocess.check_output(["git", "-C", str(source), *args], text=True).strip()
+
+
+CARDINAL_VERSION_FILES = {"1": "cmake/libs/cardinal/v1/CMakeLists.txt", "2": "cmake/libs/cardinal/v2/CMakeLists.txt"}
+
+
+def cardinal_versions(knowhere_source):
+    """Read the Cardinal tag each generation of the pinned Knowhere checkout builds against.
+
+    Knowhere pins Cardinal in its own CMake files as `set(CARDINAL_VERSION <tag>)`.
+    The independent CMake build never executes those files, so the tags are read
+    here and the Knowhere gitlink stays the only place that selects Cardinal.
+    """
+    versions = {}
+    for generation, relative in CARDINAL_VERSION_FILES.items():
+        path = Path(knowhere_source) / relative
+        if not path.is_file():
+            raise RuntimeError("Pinned Knowhere source has no Cardinal version file: " + str(path))
+        found = re.findall(r"^\s*set\(CARDINAL_VERSION\s+([^\s)]+)\)", path.read_text(), re.MULTILINE)
+        if len(found) != 1:
+            raise RuntimeError("Expected exactly one set(CARDINAL_VERSION ...) in " + str(path))
+        versions[generation] = found[0]
+    return versions
+
+
+def clone_ref(source, ref, destination):
+    """Check out a tag or branch and return the commit it resolved to."""
+    if destination.exists():
+        if git_value(destination, "status", "--porcelain", "--untracked-files=no"):
+            raise RuntimeError("Pinned source has tracked modifications: " + str(destination))
+        return git_value(destination, "rev-parse", "HEAD")
+    run(["git", "init", "-q", destination])
+    run(["git", "-C", destination, "fetch", "--depth=1", str(source), ref])
+    run(["git", "-C", destination, "checkout", "-q", "--detach", "FETCH_HEAD"])
+    return git_value(destination, "rev-parse", "HEAD")
 
 
 def clone(source, revision, destination, recorded_files=None):
@@ -350,12 +385,20 @@ def build(args, repository, java_home, work, target, profile):
         knowhere_identity = provenance / "knowhere-source-files.json"
         recorded_knowhere = json.loads(knowhere_identity.read_text()) if knowhere_identity.exists() else None
         clone(knowhere_object_source, knowhere_pin, knowhere, recorded_knowhere)
+        cardinal = {}
         if args.with_cardinal:
-            for generation, cardinal in constraints["cardinal"].items():
+            # The tags come from the Knowhere snapshot just cloned; the resolved
+            # commits go into the provenance so a resumed build can be checked.
+            cardinal_identity = provenance / "cardinal-source-identity.json"
+            for generation, tag in cardinal_versions(knowhere).items():
                 local_source = knowhere_object_source / "thirdparty" / ("cardinal" + generation)
                 origin = args.cardinal_repository or (
                     str(local_source) if (local_source / ".git").exists() else "https://github.com/zilliztech/cardinal.git")
-                clone(origin, cardinal["revision"], knowhere / "thirdparty" / ("cardinal" + generation))
+                revision = clone_ref(origin, tag, knowhere / "thirdparty" / ("cardinal" + generation))
+                cardinal[generation] = {"tag": tag, "revision": revision}
+            if cardinal_identity.exists() and json.loads(cardinal_identity.read_text()) != cardinal:
+                raise RuntimeError("Cardinal source changed; use a new work directory")
+            cardinal_identity.write_text(json.dumps(cardinal, indent=2) + "\n")
         knowhere_files = tree_hashes(knowhere)
         if knowhere_identity.exists() and json.loads(knowhere_identity.read_text()) != knowhere_files:
             raise RuntimeError("Knowhere/Cardinal source snapshot changed; use a new work directory")
@@ -376,7 +419,7 @@ def build(args, repository, java_home, work, target, profile):
                     "sourceDirectories": {"storage": str(storage), "knowhere": str(knowhere)},
                     "sourceObjectDirectories": {"storage": str(args.storage_source.resolve()),
                                                 "knowhere": str(knowhere_object_source)},
-                    "cardinal": constraints["cardinal"] if args.with_cardinal else {},
+                    "cardinal": cardinal,
                     "featureOptions": {"storage.jemalloc": False, "storage.fiu": False,
                                        "storage.crt": False, "storage.talon": False,
                                        "storage.rust.openssl.shared": True}, "jobs": args.jobs}
