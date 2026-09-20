@@ -109,6 +109,47 @@ class StorageNativeTest
     }
   }
 
+  test("a store key means the same thing on every backend") {
+    assume(available, "libmilvus-storage-jni is not on this machine")
+    // JobManifest states the contract: a key is relative to the bucket, so it
+    // carries fs.root_path. The C layer roots a remote backend at the bucket
+    // and a local one at fs.root_path, one level deeper, and the store hides
+    // that difference rather than letting callers carry two conventions.
+    // The key is built the way a writer builds it: fs.root_path, then the
+    // job's own path under it.
+    val rootPath = root.resolve("files").toAbsolutePath.toString
+    val store = NativeObjectStore
+      .Factory(
+        Map("fs.storage_type" -> "local", "fs.root_path" -> rootPath)
+      )
+      .open()
+    try {
+      val key = s"$rootPath/staging/job-1/segment/data.bin"
+      val payload = "loon".getBytes(StandardCharsets.UTF_8)
+
+      // The parents do not exist: object storage has none, a filesystem does,
+      // and which of the two is behind the store is not the caller's business.
+      store.write(key, payload)
+
+      store.exists(key) shouldBe true
+      store.readAll(key) shouldBe payload
+      store.size(key) shouldBe payload.length.toLong
+      store.list(s"$rootPath/staging", recursive = true).map(_.path) should
+        contain(key)
+      // Written once, at the key's own place: a root counted twice would put
+      // a second copy somewhere below it.
+      Files.exists(
+        root.resolve("files").resolve("staging/job-1/segment/data.bin")
+      ) shouldBe true
+      val written = Files.walk(root)
+      try
+        written
+          .filter(path => path.getFileName.toString == "data.bin")
+          .count() shouldBe 1L
+      finally written.close()
+    } finally store.close()
+  }
+
   test("a failed C call arrives as an exception, not a return code") {
     withFs { fs =>
       an[MilvusStorageException] should be thrownBy

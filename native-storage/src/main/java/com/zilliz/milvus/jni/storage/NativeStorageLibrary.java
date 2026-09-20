@@ -39,7 +39,7 @@ public final class NativeStorageLibrary {
     }
 
     private static void loadBundle(Bundle bundle) {
-        Path entry = bundle.library("libmilvus-storage-jni.so");
+        Path entry = bundle.entry("milvus-storage-jni");
         synchronized (System.getProperties()) {
             String explicit = System.getProperty(NATIVE_PATH);
             if (explicit != null) verifySameEntry(entry, explicit);

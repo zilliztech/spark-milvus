@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from build import (KNOWHERE_C_API_TESTS, digest, platform_tool_requirements, prepare_conan_lock, promote_bundle,
+import jvm_load
+import platforms
+from build import (knowhere_c_api_tests, digest, platform_tool_requirements, prepare_conan_lock, promote_bundle,
                    replace_requires_section, snapshot_corrosion, validate_conan_lock, validate_locked_graph)
 
 
@@ -21,6 +23,9 @@ class BuildContextPinTest(unittest.TestCase):
         self.assertIn("openssl/*: openssl/3.3.2#9f9f", section)
         self.assertNotIn("openssl/*: openssl/3.3.2\n", section)
 
+#: The JNI entries this platform names, so fixtures match what promotion checks.
+ENTRIES = jvm_load.JVM_LOAD_ENTRIES
+
 
 class BundlePromotionTest(unittest.TestCase):
     def setUp(self):
@@ -32,10 +37,10 @@ class BundlePromotionTest(unittest.TestCase):
         path = self.work / "bundle-candidates" / name
         path.mkdir(parents=True)
         record = {"audit": "passed", "knowhereCApiTestsExit": 0,
-                  "knowhereCApiTests": KNOWHERE_C_API_TESTS, "auditPolicy": "jvm-load",
+                  "knowhereCApiTests": knowhere_c_api_tests(platforms.host()), "auditPolicy": "jvm-load",
                   "jvmLoadTests": [
-                      {"entries": ["libmilvus-storage-jni.so", "libknowhere_jni.so"], "exit": 0},
-                      {"entries": ["libknowhere_jni.so", "libmilvus-storage-jni.so"], "exit": 0},
+                      {"entries": list(ENTRIES), "exit": 0},
+                      {"entries": list(ENTRIES[::-1]), "exit": 0},
                   ]}
         record.update(changes)
         (path / "provenance.json").write_text(json.dumps(record))
@@ -55,8 +60,8 @@ class BundlePromotionTest(unittest.TestCase):
                               ("old-audit-policy", {"auditPolicy": "standalone"}),
                               ("missing-jvm-loads", {"jvmLoadTests": []}),
                               ("failed-jvm-load", {"jvmLoadTests": [
-                                  {"entries": ["libmilvus-storage-jni.so", "libknowhere_jni.so"], "exit": 1},
-                                  {"entries": ["libknowhere_jni.so", "libmilvus-storage-jni.so"], "exit": 0},
+                                  {"entries": list(ENTRIES), "exit": 1},
+                                  {"entries": list(ENTRIES[::-1]), "exit": 0},
                               ]}),
                               ("missing-test", {"knowhereCApiTests": ["knowhere_c_api"]})):
             with self.subTest(name=name):

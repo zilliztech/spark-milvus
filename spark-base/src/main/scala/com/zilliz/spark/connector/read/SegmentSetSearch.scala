@@ -78,7 +78,17 @@ private[read] object SegmentSetSearch extends Logging {
       TaskContext.get().partitionId(),
       spec.arrowMaxBytes
     )
-    metrics.segments.add(set.size.toLong)
+    // Every step goes to the accumulators as it finishes. A task of this
+    // stage runs for as long as its vectors take, and Spark carries a running
+    // task's accumulators on the executor heartbeat, so a total added at the
+    // end is a total nobody can see while it matters.
+    def stepped(step: SegmentSearch.Progress): Unit = {
+      if (step.nativeCalls != 0)
+        metrics.knowhereCalls.add(step.nativeCalls.toLong)
+      if (step.nativeNanos != 0L) metrics.knowhereNanos.add(step.nativeNanos)
+      if (step.compared != 0L) metrics.comparedPairs.add(step.compared)
+      if (step.segments != 0) metrics.segmentSearches.add(step.segments.toLong)
+    }
     def open(segmentId: Long): SegmentSearch.Source =
       source(partitions(segmentId), spec, allocator.allocator, metrics)
     if (groupCount == 1) {
@@ -93,7 +103,8 @@ private[read] object SegmentSetSearch extends Logging {
               spec.k,
               spec.metric,
               spec.parameters,
-              allocator.allocator
+              allocator.allocator,
+              stepped
             )
         }
         report(metrics, counters, merger.size)
@@ -125,7 +136,8 @@ private[read] object SegmentSetSearch extends Logging {
               spec.k,
               spec.metric,
               spec.parameters,
-              allocator.allocator
+              allocator.allocator,
+              stepped
             )
         }
         report(metrics, counters, merger.size)
@@ -143,8 +155,6 @@ private[read] object SegmentSetSearch extends Logging {
       counters: SegmentSearch.Counters,
       candidates: Int
   ): Unit = {
-    metrics.knowhereCalls.add(counters.nativeCalls.toLong)
-    metrics.knowhereNanos.add(counters.nativeNanos)
     metrics.candidates.add(candidates.toLong)
     read(metrics, counters.read)
   }

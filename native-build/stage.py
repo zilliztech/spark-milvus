@@ -10,22 +10,17 @@ import shutil
 import subprocess
 import sys
 
+import platforms
 from jvm_load import JVM_LOAD_ENTRIES, check_jvm_loads
 
 
-SYSTEM = re.compile(r"^(?:ld-linux[^/]*|lib(?:c|m|mvec|pthread|dl|rt|resolv|util|gcc_s|stdc\+\+)\.so(?:\..*)?|libz\.so\.1)$")
-COMPILER_RUNTIME = {"libatomic.so.1", "libgomp.so.1", "libgfortran.so.5", "libquadmath.so.0"}
+SYSTEM = None  # set from the platform adapter below
+COMPILER_RUNTIME = None
 # Ubuntu 24.04 renamed libaio's soname in the 64-bit time_t transition, so a
 # build there links against libaio.so.1t64 and an older one against libaio.so.1.
-SYSTEM_PACKAGES = {"libaio.so.1", "libaio.so.1t64"}
-PARENT_PROVIDERS = {"libcardinalv1.so": "libknowhere.so", "libcardinalv2.so": "libknowhere.so"}
-AUDIT_DLOPEN_ENTRIES = (
-    "libmilvus-storage-jni.so",
-    "libmilvus-storage.so",
-    "libknowhere_jni.so",
-    "libknowhere_c.so.1",
-    "libknowhere.so",
-)
+SYSTEM_PACKAGES = None
+PARENT_PROVIDERS = None  # set from the platform adapter below
+AUDIT_DLOPEN_ENTRIES = None  # set from the platform adapter below
 DELIVERY_EVIDENCE = (
     "build-source-files.json",
     "cargo.txt",
@@ -73,26 +68,38 @@ def digest(path):
     return result.hexdigest()
 
 
+FORMAT = platforms.host()
+# Cardinal registers with and calls its parent engine; it is not a standalone entry.
+PARENT_PROVIDERS = {FORMAT.library_name("cardinalv1"): FORMAT.library_name("knowhere"),
+                    FORMAT.library_name("cardinalv2"): FORMAT.library_name("knowhere")}
+AUDIT_DLOPEN_ENTRIES = (
+    FORMAT.library_name("milvus-storage-jni"),
+    FORMAT.library_name("milvus-storage"),
+    FORMAT.library_name("knowhere_jni"),
+    FORMAT.library_name("knowhere_c", "1"),
+    FORMAT.library_name("knowhere"),
+)
+SYSTEM = FORMAT.system_libraries()
+COMPILER_RUNTIME = FORMAT.compiler_runtime()
+SYSTEM_PACKAGES = FORMAT.system_packages()
+
+
 def clean_environment():
-    environment = os.environ.copy()
-    for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG", "LD_BIND_NOW"):
-        environment.pop(name, None)
-    environment["LC_ALL"] = "C"
-    return environment
+    return FORMAT.clean_environment()
 
 
 def command(*arguments):
     return subprocess.check_output(list(map(str, arguments)), text=True, env=clean_environment())
 
 
-def elf(path):
-    with path.open("rb") as source:
-        if source.read(4) != b"\x7fELF":
-            return None
-    output = command("readelf", "-dW", path)
-    soname = re.findall(r"\(SONAME\).*\[(.*?)\]", output)
-    return {"soname": library_name(soname[0] if soname else path.name),
-            "needed": re.findall(r"\(NEEDED\).*\[(.*?)\]", output), "sourceSha256": digest(path)}
+def shared_library(path):
+    """The staged record of one shared library, or None for any other file."""
+    record = FORMAT.inspect(path)
+    if record is None:
+        return None
+    record["soname"] = library_name(record["soname"])
+    record["sourceSha256"] = digest(path)
+    return record
 
 
 def inventory(graph, roots):
@@ -103,7 +110,7 @@ def inventory(graph, roots):
     def add(path, origin):
         if not path.is_file():
             return
-        record = elf(path)
+        record = shared_library(path)
         if record is None:
             return
         record.update(source=str(path.resolve()), origin=origin)
@@ -135,7 +142,7 @@ def inventory(graph, roots):
             if directory.is_dir():
                 if not directory.resolve().is_relative_to(package.resolve()):
                     raise ValueError("Conan library directory escapes its package: " + str(directory))
-                for path in sorted(directory.glob("*.so*")):
+                for path in sorted(directory.glob(FORMAT.library_glob())):
                     if not path.resolve().is_relative_to(package.resolve()):
                         raise ValueError("Conan library symlink escapes its package: " + str(path))
                     add(path, {"type": "conan", "reference": node.get("ref"), "packageId": node.get("package_id")})
@@ -147,7 +154,7 @@ def inventory(graph, roots):
 def system_provider(name):
     """Collect explicitly approved compiler/system runtime dependencies with provenance."""
     if name in COMPILER_RUNTIME:
-        path = Path(command("gcc-12", "-print-file-name=" + name).strip())
+        path = FORMAT.locate_compiler_runtime(name)
     elif name in SYSTEM_PACKAGES:
         matches = [line.split(" => ", 1)[1] for line in command("ldconfig", "-p").splitlines()
                    if line.strip().startswith(name + " ") and "x86-64" in line and " => " in line]
@@ -158,14 +165,16 @@ def system_provider(name):
         raise ValueError("Dependency is outside the unified Conan graph: " + name)
     if not path.is_absolute() or not path.is_file():
         raise ValueError("Missing approved compiler/system runtime " + name)
-    record = elf(path)
+    record = shared_library(path)
     try:
+        if not isinstance(FORMAT, platforms.Elf):
+            raise subprocess.CalledProcessError(1, "dpkg-query")
         package = command("dpkg-query", "-S", path.resolve()).strip()
         package_name = package.splitlines()[0].rsplit(": ", 1)[0]
         package_version = command("dpkg-query", "-W", "-f=${binary:Package} ${Version}", package_name).strip()
         copyright_file = Path("/usr/share/doc") / package_name.split(":", 1)[0] / "copyright"
     except subprocess.CalledProcessError:
-        package = "compiler runtime: " + command("gcc-12", "-dumpfullversion").strip()
+        package = FORMAT.compiler_runtime_origin(path)
         package_version = package
         copyright_file = None
     record.update(source=str(path.resolve()), aliases={name, record["soname"]},
@@ -197,7 +206,14 @@ def stage(providers, entries, directory):
     for name, record in sorted(selected.items()):
         destination = directory / name
         shutil.copy2(record["source"], destination)
-        subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", str(destination)], check=True)
+        FORMAT.point_at_system_libraries(destination)
+        FORMAT.set_runtime_path(destination, [""])
+        # The record describes what is delivered, so it is taken from the
+        # staged copy: pointing a dependency at the system moves it out of the
+        # list, and the packaging step reads the same file.
+        staged = FORMAT.inspect(destination)
+        if staged is not None:
+            record["needed"] = staged["needed"]
     alias_targets = {}
     for name, record in selected.items():
         for alias in sorted(record["aliases"] - {name}):
@@ -227,7 +243,7 @@ def system_zlib_requirements(directory, names):
         imported = {line.split()[0].split("@", 1)[0] for line in
                     command("nm", "-D", "--undefined-only", "--format=posix", path).splitlines()}
         symbols = sorted(imported.intersection(exported))
-        if not symbols and "libz.so.1" not in elf(path)["needed"]:
+        if not symbols and FORMAT.system_zlib() not in shared_library(path)["needed"]:
             continue
         requirements = set(re.findall(r"Name: (ZLIB_\S+)", command("readelf", "-VW", path)))
         if not requirements.issubset(available):
@@ -317,6 +333,12 @@ def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, out
     failed = []
     for name in names:
         path = directory / name
+        if not isinstance(FORMAT, platforms.Elf):
+            # GNU_STACK, ldd -r and versioned-symbol checks are ELF concepts.
+            # Acceptance is the JVM and ctypes loads below, on every platform.
+            results[name] = {"context": "dependency", "passed": True,
+                             "format": FORMAT.__class__.__name__}
+            continue
         stack = [line.strip() for line in command("readelf", "-lW", path).splitlines() if "GNU_STACK" in line]
         passed = len(stack) == 1 and "RWE" not in stack[0]
         results[name] = {"context": "dependency", "gnuStack": stack, "passed": passed}
@@ -357,7 +379,8 @@ def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, out
                        "runtime-module" if name.startswith("ossl-modules/") else "dependency")
             results[name].update(context=context, lddExit=result.returncode,
                                  relocationsPassed=relocation_passed, passed=passed)
-        if name in ("libmilvus-storage.so", "libmilvus-storage-jni.so"):
+        if name in (FORMAT.library_name("milvus-storage"),
+                    FORMAT.library_name("milvus-storage-jni")):
             symbols = command("nm", "-D", "--defined-only", "--format=posix", path)
             private = [line.split()[0] for line in symbols.splitlines()
                        if re.match(r"^(?:LZ4|XXH|ZSTD|ZDICT|SSL_|OPENSSL_|EVP_|aws_lc_)", line)]
@@ -389,7 +412,7 @@ def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, out
              *(str(directory / name) for name in order)],
             env=clean_environment(), text=True, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, timeout=120)
-        label = "--then--".join(name.removeprefix("lib").removesuffix(".so") for name in order)
+        label = "--then--".join(FORMAT.library_stem(name) for name in order)
         (output / ("load-order-" + label + ".dlopen.txt")).write_text(result.stdout)
         load_orders.append({"entries": list(order), "exit": result.returncode})
         if result.returncode:
@@ -435,11 +458,11 @@ def main():
         raise ValueError("Output exists; preserve it and select a fresh staging directory")
     graph = json.loads(args.graph.read_text())
     metadata = json.loads(args.metadata.read_text())
-    roots = list(args.storage_build.glob("libmilvus-storage*.so*"))
-    roots.extend(args.knowhere_build.rglob("libknowhere*.so*"))
-    roots.extend(args.knowhere_build.rglob("libcardinal*.so*"))
+    roots = list(args.storage_build.glob(FORMAT.library_glob("libmilvus-storage")))
+    roots.extend(args.knowhere_build.rglob(FORMAT.library_glob("libknowhere")))
+    roots.extend(args.knowhere_build.rglob(FORMAT.library_glob("libcardinal")))
     providers, packages = inventory(graph, roots)
-    available = {elf(path)["soname"] for path in roots if path.is_file()}
+    available = {shared_library(path)["soname"] for path in roots if path.is_file()}
     required = set(AUDIT_DLOPEN_ENTRIES)
     if not required.issubset(available):
         raise ValueError("Native build did not produce all required JNI/engine libraries")
@@ -449,12 +472,16 @@ def main():
     for package in packages:
         if not package["reference"].startswith("openssl/"):
             continue
-        for module in Path(package["directory"]).rglob("ossl-modules/*.so"):
+        for module in Path(package["directory"]).rglob("ossl-modules/" + FORMAT.library_glob()):
             target = args.output / "lib/ossl-modules" / module.name
             target.parent.mkdir(exist_ok=True)
             shutil.copy2(module, target)
-            subprocess.run(["patchelf", "--set-rpath", "$ORIGIN:$ORIGIN/..", str(target)], check=True)
-            record = elf(module)
+            FORMAT.point_at_system_libraries(target)
+            # A provider module's dependencies are the engines' own, one level
+            # up; it needs no path to its own directory, and Mach-O reserves
+            # room for what the link asked for, not for a spare entry.
+            FORMAT.set_runtime_path(target, [".."])
+            record = shared_library(module)
             record.update(source=str(module), origin={"type": "conan-provider", "reference": package["reference"]})
             selected["ossl-modules/" + module.name] = record
     licenses = args.output / "licenses"
@@ -496,7 +523,8 @@ def main():
                     dependencyGraphSha256=digest(args.graph), auditPolicy="jvm-load", audit="pending",
                     jvmLoadTests=[],
                     relocationRoots=sorted(selected), dlopenEntries=list(AUDIT_DLOPEN_ENTRIES),
-                    systemDependencies={"libz.so.1": system_zlib_requirements(args.output / "lib", selected)})
+                    systemDependencies=({FORMAT.system_zlib(): system_zlib_requirements(args.output / "lib", selected)}
+                                        if isinstance(FORMAT, platforms.Elf) else {}))
     shutil.copy2(args.graph, args.output / "conan-graph.json")
     metadata_path = args.output / "provenance.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")

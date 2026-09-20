@@ -55,7 +55,7 @@ public final class NativeVectorLibrary {
     }
 
     private static RuntimeInfo loadBundle(Bundle bundle) {
-        Path entry = bundle.library("libknowhere_jni.so");
+        Path entry = bundle.entry("knowhere_jni");
         // Knowhere reads a process property during class initialization. Scope
         // that handoff to this call, including failures, instead of retaining
         // our temporary path as an application override. The monitor is shared

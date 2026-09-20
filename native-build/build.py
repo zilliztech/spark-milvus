@@ -12,12 +12,17 @@ import sys
 import time
 import uuid
 
+import jvm_load
+import platforms
 
-KNOWHERE_C_API_TESTS = [
-    "knowhere_c_api",
-    "knowhere_c_api_concurrency",
-    "knowhere_c_api_diskann_acceptance",
-]
+
+# DiskANN's only aligned reader is built on libaio, so its acceptance fixture
+# exists where DiskANN does.
+def knowhere_c_api_tests(adapter):
+    names = ["knowhere_c_api", "knowhere_c_api_concurrency"]
+    if not isinstance(adapter, platforms.MachO):
+        names.append("knowhere_c_api_diskann_acceptance")
+    return sorted(names)
 
 
 def digest(path):
@@ -230,14 +235,14 @@ def snapshot_corrosion(specification, local_source, destination):
 def promote_bundle(candidate, work):
     """Keep both failed candidates and previous successful output for diagnosis."""
     metadata = json.loads((candidate / "provenance.json").read_text())
-    entries = ["libmilvus-storage-jni.so", "libknowhere_jni.so"]
+    entries = list(jvm_load.JVM_LOAD_ENTRIES)
     orders = metadata.get("jvmLoadTests")
     jvm_passed = (isinstance(orders, list) and len(orders) == 2
                   and all(isinstance(record, dict) and record.get("entries") == expected
                           and type(record.get("exit")) is int and record["exit"] == 0
                           for record, expected in zip(orders, (entries, entries[::-1]))))
     if (metadata.get("audit") != "passed" or metadata.get("knowhereCApiTestsExit") != 0
-            or sorted(metadata.get("knowhereCApiTests", [])) != KNOWHERE_C_API_TESTS
+            or sorted(metadata.get("knowhereCApiTests", [])) != knowhere_c_api_tests(platforms.host())
             or metadata.get("auditPolicy") != "jvm-load" or not jvm_passed):
         raise ValueError("Native candidate has not passed all required validation: " + str(candidate))
     bundle = work / "bundle"
@@ -275,8 +280,16 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.jobs <= 50:
         parser.error("--jobs must be between 1 and 50")
-    if sys.platform != "linux" or os.uname().machine != "x86_64":
-        parser.error("The currently validated build profile targets Linux x86_64")
+    try:
+        target = platforms.host_platform()
+    except ValueError as error:
+        parser.error(str(error))
+    profile = repository / "native-build/profiles" / target
+    if not profile.is_file():
+        parser.error("No build profile for " + target + "; add native-build/profiles/" + target)
+    if not platforms.host().available():
+        parser.error("This platform's binary tools are missing: "
+                     + ", ".join(platforms.host().tools))
     java_home = Path(os.environ.get("JAVA_HOME", ""))
     if not (java_home / "bin/javac").is_file():
         parser.error("Set JAVA_HOME to the selected JDK")
@@ -287,16 +300,16 @@ def main():
             fcntl.flock(build_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             parser.error("Another native build is already using this work directory")
-        build(args, repository, java_home, work)
+        build(args, repository, java_home, work, target, profile)
 
 
-def build(args, repository, java_home, work):
+def build(args, repository, java_home, work, target, profile):
     provenance = work / "provenance"
     provenance.mkdir(exist_ok=True)
     sources = work / "sources"
     sources.mkdir(exist_ok=True)
     env = os.environ.copy()
-    env.update(CC="gcc-12", CXX="g++-12", FC="gfortran-12",
+    env.update(**platforms.host().toolchain(),
                CMAKE_BUILD_PARALLEL_LEVEL=str(args.jobs), MAKEFLAGS="-j" + str(args.jobs),
                CARGO_BUILD_JOBS=str(args.jobs), OMP_NUM_THREADS=str(args.jobs),
                OPENBLAS_NUM_THREADS=str(args.jobs))
@@ -353,7 +366,7 @@ def build(args, repository, java_home, work):
                 and json.loads(knowhere_source_identity.read_text()) != knowhere_identity_record):
             raise RuntimeError("Knowhere source changed or the snapshot is unverified; use a new work directory")
         knowhere_source_identity.write_text(json.dumps(knowhere_identity_record, indent=2) + "\n")
-        metadata = {"format.version": "1", "platform": "linux-x86_64", "dependency.mode": "shared",
+        metadata = {"format.version": "1", "platform": target, "dependency.mode": "shared",
                     "build.system": "independent-cmake",
                     "storage.revision": storage_pin, "knowhere.revision": knowhere_pin,
                     "with_cardinal": args.with_cardinal, "with_diskann": True,
@@ -367,14 +380,15 @@ def build(args, repository, java_home, work):
                     "featureOptions": {"storage.jemalloc": False, "storage.fiu": False,
                                        "storage.crt": False, "storage.talon": False,
                                        "storage.rust.openssl.shared": True}, "jobs": args.jobs}
-        for name, command in (("compiler", ["gcc-12", "--version"]), ("cmake", ["cmake", "--version"]),
+        adapter = platforms.host()
+        for name, command in (*adapter.toolchain_versions(), ("cmake", ["cmake", "--version"]),
                               ("conan", ["conan", "--version"]), ("java", [str(java_home / "bin/java"), "-version"]),
                               ("rustc", ["rustc", "--version", "--verbose"]), ("cargo", ["cargo", "--version"]),
-                              ("cpu", ["lscpu"]),
-                              ("compiler-native-target", ["gcc-12", "-march=native", "-Q", "--help=target"])):
+                              ("cpu", adapter.cpu_report())):
             with (provenance / (name + ".txt")).open("w") as log:
                 subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, env=env)
-        metadata["cpu.portability"] = "Host-native upstream compiler flags; linux-x86_64 is not an ISA baseline"
+        metadata["cpu.portability"] = ("Host-native upstream compiler flags; "
+                                      + target + " is not an ISA baseline")
         phase("validate-upstream-dependencies")
         build_source_files = tree_hashes(repository / "native-build")
         build_source_manifest = provenance / "build-source-files.json"
@@ -398,13 +412,17 @@ def build(args, repository, java_home, work):
             for name, source in (("storage", storage_recipe), ("knowhere", knowhere_recipe))}
         (provenance / "dependency-version-selection.json").write_text(
             json.dumps(version_selection, indent=2) + "\n")
-        references = dict(constraints["references"])
+        # The unified conanfile skips references upstream declares for another
+        # operating system, so the lock is checked against the same selection.
+        scope = constraints.get("platform_scope", {})
+        conan_os = platforms.host().conan_os
+        references = {name: reference for name, reference in constraints["references"].items()
+                      if not scope.get(name) or conan_os in scope[name]}
         consumer = work / "dependency-input"
         consumer.mkdir(exist_ok=True)
         shutil.copy2(repository / "native-build/conanfile.py", consumer / "conanfile.py")
         shutil.copy2(repository / "native-build/dependencies.json", consumer / "dependencies.json")
         (provenance / "direct-references.json").write_text(json.dumps(references, indent=2) + "\n")
-        profile = repository / "native-build/profiles/linux-x86_64"
         platform_tools = platform_tool_requirements(profile)
         replacements = replace_requires_section(references)
         host_profile = work / "host-profile"
@@ -440,11 +458,21 @@ def build(args, repository, java_home, work):
             output=provenance / "conan-graph.json", env=env)
         graph = json.loads((provenance / "conan-graph.json").read_text())["graph"]["nodes"]
         validate_locked_graph(graph, validate_conan_lock(lockfile, references, platform_tools))
+        # A recipe that cannot build a shared library on this system is static
+        # here too; the engines' own conanfiles select the same option, and
+        # dependencies.json records which references those are.
+        static_on = constraints.get("static_on", {})
+        static_allowed = {name for name, systems in static_on.items()
+                          if name != "_comment" and conan_os in systems}
         non_shared = [node.get("ref") for node in graph.values()
                       if node.get("context") == "host" and "shared" in node.get("options", {})
-                      and str(node["options"]["shared"]).lower() != "true"]
+                      and str(node["options"]["shared"]).lower() != "true"
+                      and str(node.get("ref", "")).split("/", 1)[0] not in static_allowed]
         if non_shared:
             raise RuntimeError("Host dependencies are not shared: " + ", ".join(non_shared))
+        metadata["dependency.static"] = sorted(
+            ref for ref in (node.get("ref") for node in graph.values())
+            if ref and str(ref).split("/", 1)[0] in static_allowed)
         metadata["dependencyGraphSha256"] = digest(provenance / "conan-graph.json")
         (provenance / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
         if args.dependencies_only:
@@ -455,12 +483,49 @@ def build(args, repository, java_home, work):
                                            'source "$1/conanbuild.sh" && source "$1/conanrun.sh" && env -0',
                                            "native-build", str(dependencies)], env=env)
         build_env = dict(part.decode().split("=", 1) for part in capture.split(b"\0") if b"=" in part)
+        # Conan's build environment carries PATH but no library search path, so
+        # a packaged build tool finds its own dependencies only through the
+        # runtime path recorded in it. That holds for ELF and not for Mach-O,
+        # where the recorded @rpath points at the package's build location. The
+        # fallback variable is used rather than the primary one: it is consulted
+        # only after the recorded path fails, so a packaged OpenSSL or zlib
+        # cannot shadow the copy cargo, git and the compiler already link.
+        loader_variable = platforms.host().library_fallback_variable
+        package_library_dirs = []
+        for node in graph.values():
+            folder = node.get("package_folder")
+            if folder and (Path(folder) / "lib").is_dir():
+                package_library_dirs.append(str(Path(folder) / "lib"))
+        if package_library_dirs:
+            existing = build_env.get(loader_variable)
+            build_env[loader_variable] = os.pathsep.join(
+                dict.fromkeys(package_library_dirs + (existing.split(os.pathsep) if existing else [])))
         openssl_packages = [node["package_folder"] for node in graph.values()
                             if node.get("context") == "host" and str(node.get("ref", "")).startswith("openssl/")]
         if len(openssl_packages) != 1:
             raise RuntimeError("The unified graph must select exactly one OpenSSL package")
         # openssl-sys otherwise probes system headers or compiles another vendored copy.
         build_env.update(OPENSSL_DIR=openssl_packages[0], OPENSSL_STATIC="0", OPENSSL_NO_VENDOR="1")
+        # prost's build script runs the packaged protoc; on a platform whose
+        # loader variables are stripped from the environment it is reached
+        # through a launcher that sets the search path itself.
+        protoc = next((Path(node["package_folder"]) / "bin" / "protoc"
+                       for node in graph.values()
+                       if str(node.get("ref", "")).startswith("protobuf/")
+                       and node.get("package_folder")
+                       and (Path(node["package_folder"]) / "bin" / "protoc").is_file()), None)
+        if protoc and platforms.host().needs_tool_launcher():
+            launcher = work / "protoc"
+            launcher.write_text(
+                "#!/bin/sh\n"
+                + loader_variable + "=\"" + build_env[loader_variable] + "\" export "
+                + loader_variable + "\n"
+                + 'exec "' + str(protoc) + '" "$@"\n')
+            launcher.chmod(0o755)
+            build_env["PROTOC"] = str(launcher)
+        elif protoc:
+            build_env["PROTOC"] = str(protoc)
+
         toolchain = dependencies / "conan_toolchain.cmake"
         native_build = work / "cmake-build"
         corrosion = sources / "corrosion"
@@ -472,7 +537,8 @@ def build(args, repository, java_home, work):
         metadata["corrosion"] = {**constraints["corrosion"], "sourceManifestSha256": digest(corrosion_manifest)}
         install = work / "install"
         common = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_TOOLCHAIN_FILE=" + str(toolchain),
-                  "-DCMAKE_C_COMPILER=gcc-12", "-DCMAKE_CXX_COMPILER=g++-12",
+                  "-DCMAKE_C_COMPILER=" + platforms.host().toolchain()["CC"],
+                  "-DCMAKE_CXX_COMPILER=" + platforms.host().toolchain()["CXX"],
                   "-DCMAKE_INSTALL_PREFIX=" + str(install),
                   "-DMILVUS_STORAGE_SOURCE_DIR=" + str(storage), "-DKNOWHERE_SOURCE_DIR=" + str(knowhere),
                   "-DWITH_CARDINAL=" + ("ON" if args.with_cardinal else "OFF")]
@@ -501,7 +567,7 @@ def build(args, repository, java_home, work):
             env=build_env, text=True)
         (provenance / "knowhere-c-api-discovery.json").write_text(discovery)
         test_names = sorted(test["name"] for test in json.loads(discovery)["tests"])
-        if test_names != KNOWHERE_C_API_TESTS:
+        if test_names != knowhere_c_api_tests(platforms.host()):
             raise RuntimeError("Unexpected Knowhere C API test set: " + repr(test_names))
         with (provenance / "knowhere-c-api-tests.log").open("w") as log:
             test_result = subprocess.run(

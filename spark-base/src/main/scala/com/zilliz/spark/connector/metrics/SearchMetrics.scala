@@ -13,7 +13,7 @@ import org.apache.spark.SparkContext
   * section 1.3).
   */
 final class SearchMetrics private (
-    val segments: LongAccumulator,
+    val segmentSearches: LongAccumulator,
     val readBytes: LongAccumulator,
     val readNanos: LongAccumulator,
     val indexBytes: LongAccumulator,
@@ -21,6 +21,7 @@ final class SearchMetrics private (
     val bitmapNanos: LongAccumulator,
     val knowhereCalls: LongAccumulator,
     val knowhereNanos: LongAccumulator,
+    val comparedPairs: LongAccumulator,
     val candidates: LongAccumulator,
     val takeRows: LongAccumulator,
     val takeNanos: LongAccumulator
@@ -28,7 +29,7 @@ final class SearchMetrics private (
 
   /** Every accumulator with the name it carries, for logging and for tests. */
   def all: Seq[(String, LongAccumulator)] = Seq(
-    SearchMetrics.Segments -> segments,
+    SearchMetrics.SegmentSearches -> segmentSearches,
     SearchMetrics.ReadBytes -> readBytes,
     SearchMetrics.ReadNanos -> readNanos,
     SearchMetrics.IndexBytes -> indexBytes,
@@ -36,6 +37,7 @@ final class SearchMetrics private (
     SearchMetrics.BitmapNanos -> bitmapNanos,
     SearchMetrics.KnowhereCalls -> knowhereCalls,
     SearchMetrics.KnowhereNanos -> knowhereNanos,
+    SearchMetrics.ComparedPairs -> comparedPairs,
     SearchMetrics.Candidates -> candidates,
     SearchMetrics.TakeRows -> takeRows,
     SearchMetrics.TakeNanos -> takeNanos
@@ -47,7 +49,10 @@ final class SearchMetrics private (
 
 object SearchMetrics {
 
-  val Segments = "milvus.search.segments"
+  /** Not the segments a search covers: a segment is searched once per query
+    * group, so this is the pairs of the two, and the total is their product.
+    */
+  val SegmentSearches = "milvus.search.segment.searches"
   val ReadBytes = "milvus.search.read.bytes"
   val ReadNanos = "milvus.search.read.nanos"
   val IndexBytes = "milvus.search.index.bytes"
@@ -55,6 +60,12 @@ object SearchMetrics {
   val BitmapNanos = "milvus.search.bitmap.nanos"
   val KnowhereCalls = "milvus.search.knowhere.calls"
   val KnowhereNanos = "milvus.search.knowhere.nanos"
+
+  /** Query and base-vector pairs an exact scan measured a distance for. The
+    * planner knows the total, so this one has a denominator: an index probe
+    * cannot count them and leaves it at zero.
+    */
+  val ComparedPairs = "milvus.search.compared.pairs"
   val Candidates = "milvus.search.candidates"
   val TakeRows = "milvus.search.take.rows"
   val TakeNanos = "milvus.search.take.nanos"
@@ -63,7 +74,7 @@ object SearchMetrics {
     * belong to one job rather than to the session.
     */
   def create(context: SparkContext): SearchMetrics = new SearchMetrics(
-    context.longAccumulator(Segments),
+    context.longAccumulator(SegmentSearches),
     context.longAccumulator(ReadBytes),
     context.longAccumulator(ReadNanos),
     context.longAccumulator(IndexBytes),
@@ -71,6 +82,7 @@ object SearchMetrics {
     context.longAccumulator(BitmapNanos),
     context.longAccumulator(KnowhereCalls),
     context.longAccumulator(KnowhereNanos),
+    context.longAccumulator(ComparedPairs),
     context.longAccumulator(Candidates),
     context.longAccumulator(TakeRows),
     context.longAccumulator(TakeNanos)

@@ -106,6 +106,27 @@ class SearchDeliveryTest
       .toSeq shouldBe Seq(4, 4, 4)
   }
 
+  test("every task of one executor reads the same packed bytes, not its own") {
+    val delivered =
+      MilvusSearch.packedGroups(
+        selected,
+        SearchPlan.Plan(Seq.empty, groups),
+        spec,
+        layout
+      )
+    val sets = spark.sparkContext.parallelize(Seq(10, 20, 30), 3)
+    // Identity, not equality: a recomputed right side is equal to the first
+    // one and costs a second copy of every byte. These tasks share a JVM, so
+    // the same array is the same array.
+    val seen = sets
+      .cartesian(delivered)
+      .map { case (_, group) => System.identityHashCode(group.vectors) }
+      .collect()
+      .toSeq
+    seen.size shouldBe sets.getNumPartitions * groups.size
+    seen.distinct.size shouldBe groups.size
+  }
+
   test("packing by group keeps every query, in the planner's order") {
     val delivered =
       MilvusSearch.packedGroups(

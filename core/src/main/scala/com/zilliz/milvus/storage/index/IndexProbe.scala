@@ -64,7 +64,7 @@ object IndexProbe {
       parameters: Map[String, String],
       allocator: BufferAllocator,
       merger: TopKMerger,
-      onNativeCall: Long => Unit = _ => ()
+      onProgress: SegmentSearch.Progress => Unit = _ => ()
   ): Unit = {
     require(k > 0, s"topK must be positive: $k")
     require(
@@ -101,7 +101,11 @@ object IndexProbe {
           bytes(scores, queries.queries.toLong * count * 4L),
           searchParameters(handle, width)
         )
-        onNativeCall(System.nanoTime() - started)
+        // Knowhere does not report how many rows a probe visited, so a probe
+        // counts its progress in calls rather than in compared pairs.
+        onProgress(
+          SegmentSearch.Progress(1, System.nanoTime() - started, 0L, 0)
+        )
         found = collect(
           queries.queries,
           count,

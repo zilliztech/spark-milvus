@@ -70,38 +70,45 @@ object SegmentSearch extends Logging {
         k: Int,
         metric: String,
         parameters: Map[String, String],
-        allocator: BufferAllocator
+        allocator: BufferAllocator,
+        onProgress: Progress => Unit = _ => ()
     ): (TopKMerger, Counters) = {
       val merger = new TopKMerger(queries.queries, k, metric)
       var nativeCalls = 0
       var nativeNanos = 0L
-      def counted(nanos: Long): Unit = {
-        nativeCalls += 1
-        nativeNanos += nanos
+      var compared = 0L
+      def counted(step: Progress): Unit = {
+        nativeCalls += step.nativeCalls
+        nativeNanos += step.nativeNanos
+        compared += step.compared
+        onProgress(step)
       }
-      sources.foreach {
-        case Exact(id, _) =>
-          batches(id).foreach(
-            ExactScan
-              .batch(_, queries, id, k, metric, allocator, merger, counted)
-          )
-        case Index(id, handle, excluded) =>
-          require(
-            handle.metric == metric,
-            s"Segment $id has a $metric query on a ${handle.metric} index"
-          )
-          IndexProbe.run(
-            handle,
-            queries,
-            excluded,
-            k,
-            parameters,
-            allocator,
-            merger,
-            counted
-          )
+      sources.foreach { source =>
+        source match {
+          case Exact(id, _) =>
+            batches(id).foreach(
+              ExactScan
+                .batch(_, queries, id, k, metric, allocator, merger, counted)
+            )
+          case Index(id, handle, excluded) =>
+            require(
+              handle.metric == metric,
+              s"Segment $id has a $metric query on a ${handle.metric} index"
+            )
+            IndexProbe.run(
+              handle,
+              queries,
+              excluded,
+              k,
+              parameters,
+              allocator,
+              merger,
+              counted
+            )
+        }
+        onProgress(Progress(0, 0L, 0L, 1))
       }
-      (merger, Counters(sources.size, nativeCalls, nativeNanos))
+      (merger, Counters(sources.size, nativeCalls, nativeNanos, compared))
     }
 
     override def close(): Unit = {
@@ -176,7 +183,28 @@ object SegmentSearch extends Logging {
       segments: Int,
       nativeCalls: Int,
       nativeNanos: Long,
+      compared: Long = 0L,
       read: ReadMetrics = ReadMetrics.Zero
+  )
+
+  /** One finished step of a search, handed to the caller as it happens.
+    *
+    * `Counters` is the same quantities summed, and a caller that only wants the
+    * total can ignore this. A caller that has somewhere to publish them needs
+    * them before the task ends: a search of one query group against one segment
+    * set runs for as long as the vectors take, and a total reported at the end
+    * says nothing while it runs.
+    *
+    * `compared` is the pairs a step measured distances for, queries times the
+    * rows that survived the exclusion mask. An index probe does not compare
+    * every row and Knowhere does not say how many it did, so a probe reports
+    * zero and counts its progress in `nativeCalls`.
+    */
+  final case class Progress(
+      nativeCalls: Int,
+      nativeNanos: Long,
+      compared: Long,
+      segments: Int
   )
 
   /** Searches every segment of the set in turn. Sources are opened one at a
@@ -190,15 +218,19 @@ object SegmentSearch extends Logging {
       k: Int,
       metric: String,
       parameters: Map[String, String],
-      allocator: BufferAllocator
+      allocator: BufferAllocator,
+      onProgress: Progress => Unit = _ => ()
   ): (TopKMerger, Counters) = {
     require(segments != null, "A task must name its segments")
     val merger = new TopKMerger(queries.queries, k, metric)
     var nativeCalls = 0
     var nativeNanos = 0L
-    def counted(nanos: Long): Unit = {
-      nativeCalls += 1
-      nativeNanos += nanos
+    var compared = 0L
+    def counted(step: Progress): Unit = {
+      nativeCalls += step.nativeCalls
+      nativeNanos += step.nativeNanos
+      compared += step.compared
+      onProgress(step)
     }
     var read = ReadMetrics.Zero
     segments.foreach { segmentId =>
@@ -234,12 +266,13 @@ object SegmentSearch extends Logging {
             )
         }
       finally source.close()
+      onProgress(Progress(0, 0L, 0L, 1))
     }
     logInfo(
       s"Segment set searched: segments=${segments.size}, queries=${queries.queries}, " +
         s"topK=$k, metric=$metric, candidates=${merger.size}, " +
         s"nativeSearchCalls=$nativeCalls, nativeMillis=${nativeNanos / 1000000L}"
     )
-    (merger, Counters(segments.size, nativeCalls, nativeNanos, read))
+    (merger, Counters(segments.size, nativeCalls, nativeNanos, compared, read))
   }
 }

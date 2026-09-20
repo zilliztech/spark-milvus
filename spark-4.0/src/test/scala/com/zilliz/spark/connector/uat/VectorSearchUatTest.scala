@@ -400,10 +400,13 @@ class VectorSearchUatTest
     grouped.map(_.getAs[Long]("id")) shouldBe broadcast.map(_.getAs[Long]("id"))
     both.map(_.getAs[Long]("id")) shouldBe broadcast.map(_.getAs[Long]("id"))
 
-    // Three query groups run on the segments a task already read, so the
-    // segments are opened as many times as with one group, and Knowhere is
-    // called once per group instead.
-    many(SearchMetrics.Segments) shouldBe single(SearchMetrics.Segments)
+    // Three query groups run on the segments a task already read. What the
+    // groups cost is one search of each segment per group, and one Knowhere
+    // call per group; what they do not cost is reading the segments again,
+    // which is the point of holding them, and the bytes read say so.
+    many(SearchMetrics.ReadBytes) shouldBe single(SearchMetrics.ReadBytes)
+    many(SearchMetrics.SegmentSearches) should be >
+      single(SearchMetrics.SegmentSearches)
     many(SearchMetrics.KnowhereCalls) should be >
       single(SearchMetrics.KnowhereCalls)
   }
@@ -537,7 +540,7 @@ class VectorSearchUatTest
       ) Thread.sleep(50L)
     } finally spark.sparkContext.removeSparkListener(listener)
 
-    counted.getOrElse(SearchMetrics.Segments, 0L) should be > 0L
+    counted.getOrElse(SearchMetrics.SegmentSearches, 0L) should be > 0L
     counted.getOrElse(SearchMetrics.KnowhereCalls, 0L) should be > 0L
     counted.getOrElse(SearchMetrics.KnowhereNanos, 0L) should be > 0L
     counted.getOrElse(SearchMetrics.ReadBytes, 0L) should be > 0L

@@ -3,8 +3,8 @@ import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, StandardCopyOption, StandardOpenOption}
 import java.security.MessageDigest
-import java.util.{Locale, Properties}
 import java.util.jar.JarFile
+import java.util.Properties
 import scala.collection.JavaConverters._
 import scala.sys.process.Process
 import scala.util.parsing.json.JSON
@@ -17,26 +17,16 @@ import sbtassembly.Assembly.JarEntry
 /** A platform JAR containing one dependency graph for both upstream JNI APIs.
   */
 object NativeBundle {
-  private val knowhereCApiTests = Vector(
+  // DiskANN's only aligned reader is built on libaio, so its acceptance fixture
+  // exists where DiskANN does.
+  private def knowhereCApiTests = Vector(
     "knowhere_c_api",
-    "knowhere_c_api_concurrency",
-    "knowhere_c_api_diskann_acceptance"
-  )
-  private val jvmLoadEntries = Vector(
-    "libmilvus-storage-jni.so",
-    "libknowhere_jni.so"
-  )
-  private val auditDlopenEntries = Vector(
-    "libmilvus-storage-jni.so",
-    "libmilvus-storage.so",
-    "libknowhere_jni.so",
-    "libknowhere_c.so.1",
-    "libknowhere.so"
-  )
-  private val cardinalPlugins = Set(
-    "libcardinalv1.so",
-    "libcardinalv2.so"
-  )
+    "knowhere_c_api_concurrency"
+  ) ++ (if (NativePlatform.isDarwin(platform)) Vector.empty
+        else Vector("knowhere_c_api_diskann_acceptance"))
+  private def jvmLoadEntries = NativePlatform.jvmLoadEntries(platform)
+  private def auditDlopenEntries = NativePlatform.auditDlopenEntries(platform)
+  private def cardinalPlugins = NativePlatform.cardinalPlugins(platform)
 
   val nativeBundleJar = settingKey[Option[File]](
     "Unified native platform JAR selected by -Dmilvus.native.bundle"
@@ -95,18 +85,7 @@ object NativeBundle {
     )
   )
 
-  def platform: String = {
-    require(
-      System.getProperty("os.name").toLowerCase(Locale.ROOT) == "linux",
-      "Unified native bundles currently require Linux"
-    )
-    val arch = System.getProperty("os.arch").toLowerCase(Locale.ROOT) match {
-      case "amd64" | "x86_64"  => "x86_64"
-      case "aarch64" | "arm64" => "aarch64"
-      case value => sys.error(s"Unsupported native architecture: $value")
-    }
-    s"linux-$arch"
-  }
+  def platform: String = NativePlatform.current
 
   private def properties(input: InputStream): Properties = {
     val result = new Properties() {
@@ -243,7 +222,7 @@ object NativeBundle {
       )
       val allNames = libraries.toSet ++ aliases
       require(
-        !allNames("libz.so.1"),
+        !allNames(NativePlatform.systemZlib(platform)),
         "System zlib must not be included in the native bundle"
       )
       aliases.foreach { alias =>

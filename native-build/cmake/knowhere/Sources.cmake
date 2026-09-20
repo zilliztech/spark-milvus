@@ -1,4 +1,4 @@
-# Linux x86_64 sources for Knowhere 1fff20db5aa172ce8a9890fef9f9590920ac8f30.
+# Sources for Knowhere 1fff20db5aa172ce8a9890fef9f9590920ac8f30, by architecture.
 # Keep these lists explicit: an upstream source upgrade requires reviewing its build rules.
 
 set(MILVUS_UTILS_SSE_SOURCES
@@ -21,17 +21,44 @@ set(MILVUS_SPARSE_SIMD_AVX512_SOURCES
     "${KNOWHERE_SOURCE_DIR}/src/simd/sparse_simd_avx512.cc"
 )
 
+# aarch64 counterparts of the x86 SIMD groups above. NEON is the aarch64
+# baseline, so these compile with no per-file -march; the SVE translation unit
+# is empty unless the build selects an SVE -march (upstream libfaiss.cmake
+# 262-329, 500-554).
+set(MILVUS_UTILS_NEON_SOURCES
+    "${KNOWHERE_SOURCE_DIR}/src/simd/distances_neon.cc"
+    "${KNOWHERE_SOURCE_DIR}/src/simd/distances_sve.cc"
+)
+
+set(MILVUS_FAISS_NEON_SOURCES
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/impl/sq-neon-fastpath.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/impl/approx_topk/neon.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/impl/binary_hamming/neon.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/impl/fast_scan/impl-neon.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/impl/pq_code_distance/neon.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/distances_fused/simdlib_based_neon.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/hamming_distance/hamming_neon.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/simd_impl/distances_aarch64.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/simd_impl/partitioning_neon.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/utils/simd_impl/rabitq_neon.cpp"
+)
+
 set(MILVUS_KNOWHERE_UTILS_SOURCES
     "${KNOWHERE_SOURCE_DIR}/src/simd/distances_ref.cc"
     "${KNOWHERE_SOURCE_DIR}/src/simd/hook.cc"
 )
 
-set(MILVUS_FAISS_AVX2_SOURCES
+# FastScan carries no SIMD flag of its own; upstream compiles it with the AVX2
+# objects on x86 and into faiss itself on aarch64 (libfaiss.cmake 375, 501).
+set(MILVUS_FAISS_FASTSCAN_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/IndexIVFFastScan.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/IndexIVFPQFastScan.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/IndexPQFastScan.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IVFFastScanIteratorWorkspace.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/IndexIVFPQFastScan.cpp"
+)
+
+set(MILVUS_FAISS_AVX2_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/cppcontrib/knowhere/impl/sq-avx2-fastpath.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/impl/approx_topk/avx2.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/faiss/faiss/impl/binary_hamming/avx2.cpp"

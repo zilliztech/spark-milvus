@@ -109,11 +109,25 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     rows.map(_.getAs[Int]("rank")).toSeq shouldBe Seq(1)
   }
 
+  test("a local master's tasks all share one JVM's memory") {
+    // local[2] in beforeAll: two tasks at once, so an executor budget is
+    // halved before a task plans against it.
+    MilvusSearch.taskSlotsPerExecutor(spark) shouldBe 2
+  }
+
+  test("a progress count reads at a glance") {
+    SearchProgress.grouped(0L) shouldBe "0"
+    SearchProgress.grouped(999L) shouldBe "999"
+    SearchProgress.grouped(10000L) shouldBe "10,000"
+    SearchProgress.grouped(12060426240L) shouldBe "12,060,426,240"
+    SearchProgress.grouped(53687091200L) shouldBe "53,687,091,200"
+  }
+
   test("a search registers the accumulators the design names") {
     val metrics = SearchMetrics.create(spark.sparkContext)
 
     metrics.all.map(_._1) shouldBe Seq(
-      "milvus.search.segments",
+      "milvus.search.segment.searches",
       "milvus.search.read.bytes",
       "milvus.search.read.nanos",
       "milvus.search.index.bytes",
@@ -121,6 +135,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       "milvus.search.bitmap.nanos",
       "milvus.search.knowhere.calls",
       "milvus.search.knowhere.nanos",
+      "milvus.search.compared.pairs",
       "milvus.search.candidates",
       "milvus.search.take.rows",
       "milvus.search.take.nanos"
@@ -142,9 +157,9 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val first = SearchMetrics.create(spark.sparkContext)
     val second = SearchMetrics.create(spark.sparkContext)
 
-    first.segments.add(2L)
+    first.segmentSearches.add(2L)
 
-    second.segments.value shouldBe 0L
+    second.segmentSearches.value shouldBe 0L
   }
 
   test("no candidates give no rows") {

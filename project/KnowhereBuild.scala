@@ -3,9 +3,9 @@ import java.lang.{ProcessBuilder => JavaProcessBuilder}
 import java.net.URI
 import java.nio.file.{Files, StandardCopyOption}
 import java.security.MessageDigest
-import java.util.{Locale, Properties}
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarFile
+import java.util.Properties
 import scala.collection.JavaConverters._
 import scala.sys.process.{Process, ProcessLogger}
 
@@ -397,7 +397,9 @@ object KnowhereBuild {
         .toVector
       require(
         values.nonEmpty && values.distinct.size == values.size &&
-          values.forall(_.matches("[A-Za-z0-9_+.-]+\\.so(?:\\..*)?")),
+          values.forall(
+            _.matches(NativePlatform.libraryPattern(currentPlatform()))
+          ),
         s"Invalid $key in $compatibilityFile"
       )
       values
@@ -672,7 +674,10 @@ object KnowhereBuild {
       val librarySet = libraries.toSet
       entries.filterNot(_.isDirectory).foreach { entry =>
         val name = entry.getName.stripPrefix(root)
-        if (name.matches("[^/]+\\.so(?:\\..*)?")) {
+        if (
+          name
+            .matches(NativePlatform.libraryPattern(currentPlatform(), "[^/]+"))
+        ) {
           require(
             librarySet(name),
             s"Unlisted shared library in Knowhere platform JAR: $name"
@@ -682,17 +687,7 @@ object KnowhereBuild {
     } finally jar.close()
   }
 
-  private def currentPlatform(): String = {
-    require(
-      sys.props("os.name").equalsIgnoreCase("Linux"),
-      "Knowhere platform JARs currently support Linux only"
-    )
-    sys.props("os.arch").toLowerCase(Locale.ROOT) match {
-      case "amd64" | "x86_64"  => "linux-x86_64"
-      case "aarch64" | "arm64" => "linux-aarch64"
-      case other => sys.error(s"Unsupported Knowhere architecture: $other")
-    }
-  }
+  private def currentPlatform(): String = NativePlatform.current
 
   private def properties(path: File): Properties = {
     require(path.isFile, s"Missing Knowhere metadata: $path")

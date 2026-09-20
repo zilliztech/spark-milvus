@@ -7,17 +7,13 @@ import scala.io.Source
 
 /** Validates the complete storage resource directory before it is packaged. */
 object NativeLibraries {
-  private val entryLibraries = Vector(
-    "libmilvus-storage.so",
-    "libmilvus-storage-jni.so"
-  )
-  private val unifiedAuditEntries = Vector(
-    "libmilvus-storage-jni.so",
-    "libmilvus-storage.so",
-    "libknowhere_jni.so",
-    "libknowhere_c.so.1",
-    "libknowhere.so"
-  )
+  // Both checks below are the Linux adapter: ldd -r and the obsolete-JNI probe
+  // are ELF work. They still take their names from the platform so the rule
+  // lives in one place.
+  private def entryLibraries =
+    NativePlatform.storageEntries(NativePlatform.current)
+  private def unifiedAuditEntries =
+    NativePlatform.auditDlopenEntries(NativePlatform.current)
 
   private def resources(directory: File): Vector[(String, File)] = {
     val root = directory.toPath.toAbsolutePath.normalize()
@@ -62,7 +58,10 @@ object NativeLibraries {
       "Linux native relocation checks require a Linux host"
     )
     require(
-      !new File(directory, "libnative-storage-jni.so").exists(),
+      !new File(
+        directory,
+        NativePlatform.libraryName(NativePlatform.current, "native-storage-jni")
+      ).exists(),
       s"Obsolete connector JNI found in $directory; package only the upstream milvus-storage JNI"
     )
     validateEntries(directory, entryLibraries, log)

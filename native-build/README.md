@@ -17,14 +17,34 @@ select an unpinned latest release.
 OpenBLAS uses `dynamic_arch=True`. Header-only dependencies and the internal
 Rust bridge do not expose a shared-library option.
 
-The current build target is Linux x86_64. It requires Conan 2, CMake 3.27.5,
-GCC/G++/gfortran 12, Ninja, Python 3.9+, Git, a JDK selected by `JAVA_HOME`,
-Rust/Cargo, libclang, ccache, patchelf, binutils and the normal development packages
-required by the upstream engines. Folly's Linux async I/O dependency requires
-the libaio development package. Rust bindgen loads libclang while building the
-storage bridge's `custom-labels` dependency; Ubuntu provides it in `libclang-dev`.
-Conan remotes must provide each pinned upstream recipe that is absent from the
-local cache.
+A platform is built when `native-build/profiles/` holds its Conan profile and
+`platforms.py` holds its adapter. `build.py` names the missing one rather than
+refusing an operating system.
+
+Every platform requires Conan 2, a CMake 3 whose version the profile's
+`[platform_tool_requires]` declares, Ninja, Python 3.9+, Git, a JDK selected by
+`JAVA_HOME`, Rust/Cargo, libclang and ccache. Rust bindgen loads libclang while
+building the storage bridge's `custom-labels` dependency. Conan remotes must
+provide each pinned upstream recipe that is absent from the local cache. A
+CMake 4 rejects the `cmake_minimum_required` of several pinned upstream
+recipes, so the declared version is the one that must be on `PATH`.
+
+No package manager ships that CMake next to a current one, so put it in a
+virtual environment of its own and prepend that to `PATH` for the build. It is
+the machine's, not the checkout's: a directory under `/tmp` is emptied by the
+system and takes the toolchain with it.
+
+```bash
+python3 -m venv ~/toolchain/cmake3venv
+~/toolchain/cmake3venv/bin/pip install cmake==3.31.10 ninja
+PATH=~/toolchain/cmake3venv/bin:$PATH scripts/build-native.sh --work-dir ...
+```
+
+| Platform | Compilers | Binary tools | Also |
+| --- | --- | --- | --- |
+| `linux-x86_64`, `linux-aarch64` | GCC/G++/gfortran 12 | patchelf, readelf, ldd, binutils | the libaio development package, which Folly's async I/O needs; Ubuntu supplies libclang in `libclang-dev` |
+| `darwin-aarch64` | Apple Clang, a separate OpenMP runtime, gfortran | otool, install_name_tool, codesign | no libaio, liburing or OpenBLAS: `dependencies.json` scopes those to Linux, as the engines' own conanfiles do |
+
 The build records tool versions and never reads a native library from an older
 connector JAR.
 
