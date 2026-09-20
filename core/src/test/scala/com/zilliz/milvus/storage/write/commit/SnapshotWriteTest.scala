@@ -163,9 +163,14 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
       document.get("segment_ids").get(0).asText() shouldBe "30"
       document.get("manifest_list").get(0).asText() shouldBe
         "built/snapshots/10/manifests/5/30.avro"
+      // The spellings Milvus's own snapshots use; its parser discards the
+      // others, which is an index on field 0 in the restored collection.
       val declared = document.get("indexes").get(0)
-      declared.get("field_id").asText() shouldBe "101"
+      declared.get("fieldID").asText() shouldBe "101"
+      declared.get("collectionID").asText() shouldBe "10"
+      declared.get("indexID").asText() shouldBe "7000"
       declared.get("index_name").asText() shouldBe "v_hnsw"
+      declared.get("index_params").toString should include(""""index_type"""")
 
       // Milvus reads a storage manifest mapping's segment id from `segmentID`,
       // and the mapping is the source's.

@@ -217,10 +217,14 @@ object SnapshotWriter extends Logging {
     )
     val declared = document.putArray("indexes")
     definitions.values.toSeq.sortBy(_.fieldId).foreach { index =>
+      // The names Milvus's own documents use. It parses this with protojson
+      // and discards what it does not know, so `field_id` here means field 0
+      // there, and the restored collection gets an index on a field that does
+      // not exist.
       val node = declared.addObject()
-      node.put("collection_id", index.collectionId.toString)
-      node.put("field_id", index.fieldId.toString)
-      node.put("index_id", index.indexId.toString)
+      node.put("collectionID", index.collectionId.toString)
+      node.put("fieldID", index.fieldId.toString)
+      node.put("indexID", index.indexId.toString)
       node.put("index_name", index.name)
       pairs(node.putArray("type_params"), index.typeParameters)
       pairs(node.putArray("index_params"), index.indexParameters)
