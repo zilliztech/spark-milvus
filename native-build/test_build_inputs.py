@@ -8,8 +8,33 @@ from unittest.mock import patch
 
 import jvm_load
 import platforms
-from build import (knowhere_c_api_tests, digest, platform_tool_requirements, prepare_conan_lock, promote_bundle,
-                   replace_requires_section, snapshot_corrosion, validate_conan_lock, validate_locked_graph)
+from build import (knowhere_c_api_tests, cardinal_versions, digest, platform_tool_requirements, prepare_conan_lock,
+                   promote_bundle, replace_requires_section, snapshot_corrosion, validate_conan_lock,
+                   validate_locked_graph)
+
+
+class CardinalVersionTest(unittest.TestCase):
+    def write(self, root, generation, body):
+        path = root / "cmake" / "libs" / "cardinal" / ("v" + generation) / "CMakeLists.txt"
+        path.parent.mkdir(parents=True)
+        path.write_text(body)
+
+    def test_tags_come_from_the_knowhere_cmake_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, "1", "# comment\nset(CARDINAL_VERSION v2.5.112)\nset(CARDINAL_REPO_URL \"x\")\n")
+            self.write(root, "2", "set(CARDINAL_VERSION v3.0.8)\n")
+            self.assertEqual(cardinal_versions(root), {"1": "v2.5.112", "2": "v3.0.8"})
+
+    def test_a_missing_or_ambiguous_version_file_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, "1", "set(CARDINAL_VERSION v2.5.112)\n")
+            with self.assertRaisesRegex(RuntimeError, "no Cardinal version file"):
+                cardinal_versions(root)
+            self.write(root, "2", "set(CARDINAL_VERSION a)\nset(CARDINAL_VERSION b)\n")
+            with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                cardinal_versions(root)
 
 
 class BuildContextPinTest(unittest.TestCase):

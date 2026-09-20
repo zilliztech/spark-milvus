@@ -66,6 +66,8 @@ import io.milvus.grpc.milvus.{
   GetLoadStateResponse,
   GetPersistentSegmentInfoRequest,
   GetPersistentSegmentInfoResponse,
+  GetRestoreSnapshotStateRequest,
+  GetRestoreSnapshotStateResponse,
   ImportRequest,
   InsertRequest,
   ListDatabasesRequest,
@@ -79,6 +81,9 @@ import io.milvus.grpc.milvus.{
   MutationResult,
   QueryRequest,
   ReleaseCollectionRequest,
+  RestoreExternalSnapshotRequest,
+  RestoreExternalSnapshotResponse,
+  RestoreSnapshotState,
   ShowCollectionsRequest,
   ShowCollectionsResponse,
   ShowPartitionsRequest,
@@ -1201,6 +1206,87 @@ class MilvusClient(params: MilvusConnectionParams)
   ): DescribeSnapshotResponse =
     read(DefaultRpcTimeoutMillis)(_.describeSnapshot(request))(_.status)
 
+  /** Asks Milvus to restore a snapshot that lives on object storage — one this
+    * connector wrote, or one Milvus exported — into a collection that does not
+    * exist yet, and returns the restore job Milvus opened for it. The
+    * `metadataUri` names the snapshot document; `externalSpec` is the storage
+    * spec JSON Milvus reads the snapshot's files with, empty for its own
+    * storage.
+    */
+  def restoreExternalSnapshot(
+      dbName: String,
+      targetCollectionName: String,
+      metadataUri: String,
+      externalSpec: String
+  ): Try[Long] = {
+    val request = RestoreExternalSnapshotRequest(
+      dbName = dbName,
+      targetCollectionName = targetCollectionName,
+      snapshotMetadataUri = metadataUri,
+      externalSpec = externalSpec
+    )
+    rpcCall(
+      s"restore external snapshot '$metadataUri' into '$targetCollectionName'"
+    )(restoreExternalSnapshotRPC(request)).flatMap { response =>
+      checkResponseStatus("restoreExternalSnapshot", response.status)
+        .map(_ => response.jobId)
+    }
+  }
+
+  private[api] def restoreExternalSnapshotRPC(
+      request: RestoreExternalSnapshotRequest
+  ): RestoreExternalSnapshotResponse =
+    rpcStub.restoreExternalSnapshot(request)
+
+  def getRestoreSnapshotState(jobId: Long): Try[MilvusRestoreSnapshotJob] =
+    getRestoreSnapshotState(jobId, DefaultRpcTimeoutMillis)
+
+  /** The state of one restore job, with the time left of `timeoutMillis` as the
+    * call's deadline, so a procedure polling with its remaining time never
+    * waits past it.
+    */
+  def getRestoreSnapshotState(
+      jobId: Long,
+      timeoutMillis: Long
+  ): Try[MilvusRestoreSnapshotJob] = {
+    val request = GetRestoreSnapshotStateRequest(jobId = jobId)
+    rpcCall(s"get state for restore job '$jobId'")(
+      getRestoreSnapshotStateRPC(request, timeoutMillis)
+    ).flatMap { response =>
+      checkResponseStatus("getRestoreSnapshotState", response.status)
+        .flatMap { _ =>
+          response.info match {
+            case Some(info) =>
+              Success(
+                MilvusRestoreSnapshotJob(
+                  jobId = info.jobId,
+                  snapshotName = info.snapshotName,
+                  dbName = info.dbName,
+                  collectionName = info.collectionName,
+                  state = info.state,
+                  progress = info.progress,
+                  reason = info.reason,
+                  startTimeMillis = info.startTime,
+                  timeCostMillis = info.timeCost
+                )
+              )
+            case None =>
+              Failure(
+                new MilvusRpcException(
+                  s"Failed to getRestoreSnapshotState: no job info for '$jobId'"
+                )
+              )
+          }
+        }
+    }
+  }
+
+  private[api] def getRestoreSnapshotStateRPC(
+      request: GetRestoreSnapshotStateRequest,
+      timeoutMillis: Long
+  ): GetRestoreSnapshotStateResponse =
+    read(timeoutMillis)(_.getRestoreSnapshotState(request))(_.status)
+
   def createSnapshotForRead(
       dbName: String,
       collectionName: String,
@@ -1542,7 +1628,9 @@ object MilvusClient {
   private val SnapshotRpcNames: Set[String] = Set(
     "createsnapshot",
     "describesnapshot",
-    "dropsnapshot"
+    "dropsnapshot",
+    "restoreexternalsnapshot",
+    "getrestoresnapshotstate"
   )
 
   private val ServiceUnavailableMarkers: Set[String] = Set(
@@ -1658,6 +1746,22 @@ case class MilvusSnapshotInfo(
     partitionNames: Seq[String],
     createTs: Long,
     s3Location: String
+)
+
+/** One restore job as `GetRestoreSnapshotState` reports it. `state` is Milvus's
+  * own enum; `progress` is a percentage; `reason` is set when it failed. Times
+  * are milliseconds.
+  */
+case class MilvusRestoreSnapshotJob(
+    jobId: Long,
+    snapshotName: String,
+    dbName: String,
+    collectionName: String,
+    state: RestoreSnapshotState,
+    progress: Int,
+    reason: String,
+    startTimeMillis: Long,
+    timeCostMillis: Long
 )
 
 case class MilvusIndexInfo(

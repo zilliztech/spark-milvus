@@ -11,16 +11,12 @@ ARG NATIVE_BUILD_OPTIONS
 # Optional prebuilt JAR and .properties sidecar inside the build context.
 ARG NATIVE_BUNDLE
 
-# Stage 1: Build the unified native bundle and the connector
-FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS builder
+# Stage 1: the toolchain. Everything the native and JVM builds need, and no
+# sources. The builder stage and the development container (.devcontainer/)
+# both start from here, so the toolchain has one definition.
+FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS toolchain
 
-ARG GIT_BRANCH
 ARG TARGETARCH
-ARG MAVEN_SNAPSHOT_REPOSITORY_URL
-ARG MAVEN_CREDENTIALS_FILE
-ARG NATIVE_JOBS
-ARG NATIVE_BUILD_OPTIONS
-ARG NATIVE_BUNDLE
 
 USER root
 
@@ -82,6 +78,49 @@ RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && \
 ENV SCALA_HOME=/root/.sdkman/candidates/scala/current
 ENV SBT_HOME=/root/.sdkman/candidates/sbt/current
 ENV PATH=$SCALA_HOME/bin:$SBT_HOME/bin:$PATH
+
+# Stage 2: the development container. Same toolchain, plus a user whose uid
+# and gid the compose file maps to the host user, HOME-relative cache
+# directories that compose mounts as named volumes, and NATIVE_JOBS defaulting
+# to the CPUs the container can see. Not used by the release build.
+FROM toolchain AS dev
+
+ARG DEV_UID=1000
+ARG DEV_GID=1000
+ENV HOME=/home/dev
+ENV CONAN_HOME=/home/dev/.conan2
+ENV CCACHE_DIR=/home/dev/.ccache
+ENV CARGO_HOME=/home/dev/.cargo
+ENV SBT_OPTS="-Xmx4g -Xms2g"
+# Docker copies the ownership of a mount point from the image into a fresh
+# named volume, so the cache directories must exist here and belong to dev.
+# Java reads user.home from /etc/passwd, not from HOME, so when the host user
+# is root the root entry itself must point at /home/dev for sbt, Coursier and
+# Ivy to use the mounted caches.
+# The Rust and SDKMAN installations stay under /root and become readable;
+# rustup proxies read RUSTUP_HOME and never write it during a build.
+RUN groupadd --non-unique --gid "${DEV_GID}" dev \
+    && useradd --non-unique --uid "${DEV_UID}" --gid "${DEV_GID}" --create-home --shell /bin/bash dev \
+    && mkdir -p /home/dev/.conan2 /home/dev/.ccache /home/dev/.cargo/registry /home/dev/.cargo/git \
+        /home/dev/.cache/coursier /home/dev/.ivy2 /home/dev/.sbt \
+    && chown -R dev:dev /home/dev && chmod -R a+rwX /home/dev \
+    && chmod 755 /root && chmod -R a+rX /root/.rustup /root/.cargo /root/.sdkman \
+    && chmod 666 /etc/passwd /etc/group \
+    && if [ "${DEV_UID}" = 0 ]; then sed -i 's#^root:x:0:0:root:/root:#root:x:0:0:root:/home/dev:#' /etc/passwd; fi \
+    && printf '%s\n' 'if [ -z "${NATIVE_JOBS:-}" ]; then NATIVE_JOBS="$(nproc)"; [ "${NATIVE_JOBS}" -gt 50 ] && NATIVE_JOBS=50; export NATIVE_JOBS; fi' > /etc/profile.d/spark-milvus-dev.sh \
+    && printf '%s\n' '. /etc/profile.d/spark-milvus-dev.sh' >> /etc/bash.bashrc
+WORKDIR /workspace
+
+# Stage 3: build the unified native bundle and the connector.
+FROM toolchain AS builder
+
+ARG GIT_BRANCH
+ARG TARGETARCH
+ARG MAVEN_SNAPSHOT_REPOSITORY_URL
+ARG MAVEN_CREDENTIALS_FILE
+ARG NATIVE_JOBS
+ARG NATIVE_BUILD_OPTIONS
+ARG NATIVE_BUNDLE
 
 WORKDIR /workspace
 
@@ -170,7 +209,7 @@ RUN --mount=type=cache,id=spark-milvus-coursier,target=/root/.cache/coursier,sha
         sbt "$@" publish; \
     fi
 
-# Stage 2: retain only the built package for local inspection. The release
+# Stage 4: retain only the built package for local inspection. The release
 # pipeline publishes the Maven artifact and does not push this image.
 FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS final
 

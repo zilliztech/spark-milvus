@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets.UTF_8
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.types.{
+  BooleanType,
   IntegerType,
   LongType,
   StringType,
@@ -34,8 +35,13 @@ import com.zilliz.spark.connector.table.MilvusTables
   * snapshot JSON that names them, in the layout a snapshot read expects
   * (docs/design/architecture/vector-search.html section 2.7).
   *
-  * Restoring the result into a Milvus collection is a separate step and is not
-  * implemented; this procedure writes the files and returns where they are.
+  * Restoring the result into a Milvus collection is the separate
+  * `restore_snapshot` call; this procedure writes the files and returns where
+  * they are. A restore refuses a snapshot whose files are not under the root
+  * its document's key derives, so by default (`restorable => true`) a write
+  * that would name a file outside `output` is refused before anything is
+  * written, with the paths named. `restorable => false` declares a snapshot
+  * only this connector reads, which may sit anywhere.
   */
 object WriteSnapshotProcedure extends Procedure {
 
@@ -47,7 +53,8 @@ object WriteSnapshotProcedure extends Procedure {
     Parameter("input", StringType),
     Parameter("output", StringType, required = false),
     Parameter("snapshot_id", LongType, required = false),
-    Parameter("snapshot_name", StringType, required = false)
+    Parameter("snapshot_name", StringType, required = false),
+    Parameter("restorable", BooleanType, required = false)
   )
 
   override val outputSchema: StructType = StructType(
@@ -122,7 +129,8 @@ object WriteSnapshotProcedure extends Procedure {
         manifest.indexes,
         target,
         store,
-        sourceKey
+        sourceKey,
+        restorable = args.booleanOpt("restorable").getOrElse(true)
       )
       Seq(
         Row(

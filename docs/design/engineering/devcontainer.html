@@ -1,0 +1,137 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>开发容器 · Spark-Milvus</title>
+<style>
+  :root { color-scheme: light dark; --paper: #fafaf8; --ink: #202824; --muted: #53615a; --line: #d7dfd9; --link: #16654b; --code: #eef2ee; --note: #edf7f1; }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #171c19; --ink: #e5ebe6; --muted: #a5b2a9; --line: #39473e; --link: #83d3ae; --code: #242d27; --note: #1d3026; }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-padding-top: 24px; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.8 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 940px; margin: 0 auto; padding: 48px 28px 88px; }
+  h1 { margin: 0 0 18px; font-size: 32px; line-height: 1.4; }
+  h2 { margin: 44px 0 16px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 22px; }
+  h3 { margin: 26px 0 10px; font-size: 17px; }
+  p, li { margin: 12px 0; }
+  a { color: var(--link); text-underline-offset: 3px; overflow-wrap: anywhere; }
+  code { font: .9em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code); padding: 2px 5px; border-radius: 3px; overflow-wrap: anywhere; }
+  pre { overflow-x: auto; padding: 14px 18px; background: var(--code); border: 1px solid var(--line); border-radius: 5px; line-height: 1.55; font-size: 13.5px; }
+  pre code { padding: 0; background: none; overflow-wrap: normal; }
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14px; }
+  th, td { padding: 8px 11px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { background: var(--code); }
+  .lead { font-size: 19px; }
+  .state { margin: 22px 0; padding: 14px 18px; border-left: 4px solid var(--link); background: var(--note); }
+  .muted { color: var(--muted); }
+  nav { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 20px 0; font-size: 14px; }
+  .table-scroll, .diagram { overflow-x: auto; margin: 20px 0; }
+  .diagram svg { display: block; width: 100%; min-width: 720px; font-family: system-ui, "PingFang SC", sans-serif; }
+  .diagram + p.muted { margin-top: -8px; font-size: 14px; }
+</style>
+<main lang="zh-CN">
+<nav><a href="../README.md">设计索引</a><a href="build.html">依赖库与构建方案</a><a href="integration-tests.html">集成测试</a><a href="../../contributing.md">contributing.md</a></nav>
+<h1>开发容器：一条命令配齐编译、打包、测试环境</h1>
+
+<p class="lead">开发容器用的镜像就是根目录 <code>Dockerfile</code> 里装工具链的那一段：把它拆成独立的 <code>toolchain</code> 阶段，Jenkins 构建和开发容器都从这一个阶段出发，开发机用 <code>docker build --target toolchain</code> 在本地构建它，不发布镜像。开发者打开仓库选"在容器中重新打开"，或运行 <code>scripts/devcontainer.sh up</code>，就得到 Conan 2.25.1、CMake 3.27.5、GCC 12、Rust、JDK 21、Scala 2.13.16、sbt 1.11.1 齐备的 shell，加上持久化的依赖缓存和一套本地 Milvus 与 MinIO。</p>
+
+<div class="state"><strong>状态：2026-09-20 已实现，验证见第 5 节。</strong>参考对象是 Milvus 仓库的 <code>docker-compose.yml</code> builder 服务、<code>.env</code>、<code>scripts/devcontainer.sh</code> 与 <code>build/builder.sh</code>。镜像不推远端、产物随源码目录 bind mount 留在宿主机，这两点记在设计索引第 6 节决策日志。</div>
+
+<nav aria-label="目录">
+  <a href="#milvus">1 Milvus 的做法</a>
+  <a href="#shape">2 方案</a>
+  <a href="#files">3 文件</a>
+  <a href="#workflows">4 开发者怎么用</a>
+  <a href="#rollout">5 落地顺序</a>
+</nav>
+
+<h2 id="milvus">1 Milvus 的做法，取什么、不取什么</h2>
+<p><strong>先说两个项目交付物的差别。</strong>Milvus 是一个服务，交付物是镜像，所以它既发布运行镜像也发布环境镜像，镜像仓库本来就在它的发布路径上。Spark-Milvus 交付的是一个 JAR：<code>spark-connector-assembly-*.jar</code> 经 <code>sbt publish</code> 进 Maven 快照仓库，用户用 <code>spark-submit --jars</code> 引用它。Docker 在这里只是构建环境，根目录 Dockerfile 的 final 阶段只为了能把 JAR <code>docker cp</code> 出来，发布流水线不推它。开发容器沿用同一判断：镜像是工具，不是产物，不进任何仓库。</p>
+<p>Milvus 没有 <code>.devcontainer/</code> 目录。它的开发容器是 <code>docker-compose.yml</code> 里的 <code>builder</code> 服务：镜像 <code>milvusdb/milvus-env:&lt;os&gt;-&lt;日期-提交&gt;</code> 由 <code>build/docker/builder/cpu/&lt;os&gt;/Dockerfile</code> 构建并发布，版本号写在检入的 <code>.env</code> 里；源码 bind mount 到容器里的仓库路径；ccache、Go module、Conan 2、VS Code 扩展四个缓存挂在宿主机 <code>.docker/&lt;arch&gt;-&lt;os&gt;-*</code> 目录；<code>depends_on</code> 拉起 etcd、MinIO、Pulsar、Azurite、假 GCS。<code>scripts/devcontainer.sh up</code> 用 awk 把 compose 文件里的 <code>build</code> 和 <code>command</code> 段注释掉、把 <code>user</code> 换成宿主 uid:gid 后 <code>up -d</code>，VS Code 再 attach 到运行中的容器；<code>build/builder.sh</code> 在同一镜像里跑一次性命令，是 CI 的入口。入口脚本按当前 uid 往 <code>/etc/passwd</code> 补一行，任意 uid 都能有 HOME。</p>
+<div class="table-scroll"><table>
+<tr><th>Milvus 的做法</th><th>本方案</th><th>原因</th></tr>
+<tr><td>环境镜像单独一个 Dockerfile，日期版本写在 <code>.env</code></td><td>不发布环境镜像。镜像是根目录 Dockerfile 的 <code>toolchain</code> 阶段，每台开发机本地构建一次，之后靠 Docker 层缓存</td><td>工具链只能有一份定义。今天 Jenkins 用根目录 Dockerfile 构建发布，开发容器若另写一份，两份会各自漂移；<a href="build.html#prerequisites">build.html</a> 第 2 节的版本表以 Dockerfile 为准。我们交付 JAR 不交付镜像，没有现成的镜像发布路径可搭，发布环境镜像要新增仓库、凭据和标签簿记；工具链改动少，本地重建是一次性成本</td></tr>
+<tr><td>compose 里的 builder 服务 + awk 改写 + VS Code attach</td><td>compose 里的 <code>dev</code> 服务 + <code>.devcontainer/devcontainer.json</code> 引用它；CLI 用户走 <code>scripts/devcontainer.sh</code></td><td>devcontainer.json 是 VS Code、JetBrains Gateway 和 GitHub Codespaces 共同读的规范，uid 映射、扩展安装、attach 都有原生字段，不需要 awk 生成第二份 compose 文件</td></tr>
+<tr><td>缓存挂宿主机目录 <code>.docker/</code></td><td>缓存用 Docker 命名卷，名字带架构；<code>target/</code> 随源码 bind mount 留在宿主机</td><td>Conan、sbt 缓存是海量小文件且宿主机不需要看，放命名卷在 macOS 上快。产物要挂回代码目录：assembly、原生 bundle 和测试报告在宿主机 <code>target/</code> 下直接可用，与不用容器时一样</td></tr>
+<tr><td>依赖服务 etcd、MinIO、Pulsar、Azurite、假 GCS</td><td>只有 Milvus standalone 与它自带的 etcd、MinIO，放在 compose profile <code>services</code> 里按需拉起</td><td>Connector 的集成测试只需要 Milvus 19530 与 MinIO 9000；Azure 与 GCS 路径由 UAT 实例验证，不在本地模拟</td></tr>
+<tr><td>多个 OS 的 builder Dockerfile、GPU 变体</td><td>不做</td><td>发布只有一个基础镜像 <code>spark:4.0.1-scala2.13-java21-python3-ubuntu</code>，没有 GPU 路径</td></tr>
+<tr><td>入口脚本补 <code>/etc/passwd</code></td><td>取。<code>dev</code> 阶段建用户 <code>dev</code>，uid、gid 由构建参数 <code>DEV_UID</code>、<code>DEV_GID</code> 决定；<code>scripts/devcontainer.sh</code> 从 <code>id</code> 取值，IDE 直接启动 compose 时用 <code>.env</code> 里的默认 1000 或 shell 导出的值；入口脚本只在 uid 不在 passwd 里时补一行</td><td>bind mount 的源码目录必须以宿主 uid 写，否则 <code>target/</code> 产物和容器里改写的源码在宿主机上归 root</td></tr>
+</table></div>
+
+<h2 id="shape">2 方案：一个工具链阶段，两个使用者</h2>
+
+<div class="diagram">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 340" role="img" aria-labelledby="fig1-title">
+<title id="fig1-title">工具链阶段的两个使用者</title>
+<defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#5c6b63"/></marker></defs>
+<rect x="330" y="20" width="300" height="70" rx="6" fill="#f4efe3" stroke="#a5894d"/>
+<g font-size="13" text-anchor="middle" fill="#202824"><text x="480" y="46">Dockerfile 的 toolchain 阶段</text><text x="480" y="66" font-size="11">Conan 2.25.1 · CMake 3.27.5 · GCC 12 · Rust · JDK 21 · Scala/sbt · Python</text><text x="480" y="82" font-size="11">不发布；每台机器 docker build --target toolchain，Docker 层缓存复用</text></g>
+<g fill="#e8eef6" stroke="#4d6e99"><rect x="20" y="150" width="260" height="70" rx="6"/></g>
+<g fill="#e6f1eb" stroke="#4f8a70"><rect x="330" y="150" width="300" height="170" rx="6"/></g>
+<g font-size="13" text-anchor="middle" fill="#202824">
+<text x="150" y="176">Dockerfile 的 builder 阶段</text><text x="150" y="194" font-size="11">FROM toolchain；COPY . .；make native-resources</text><text x="150" y="210" font-size="11">sbt assembly；publish。Jenkins 与 docker build 用</text>
+<text x="480" y="176">开发容器 dev 服务</text><text x="480" y="194" font-size="11">FROM toolchain；源码 bind mount 到 /workspace</text><text x="480" y="212" font-size="11">命名卷：conan2 · ccache · cargo · coursier · ivy2 · sbt；target 随源码留宿主机</text><text x="480" y="230" font-size="11">宿主 uid:gid；SBT_OPTS、CONAN_HOME 等与 builder 阶段相同</text>
+<text x="480" y="262" font-size="12">compose profile services（按需）</text><text x="480" y="280" font-size="11">milvus standalone :19530 · minio :9000 · etcd</text><text x="480" y="298" font-size="11">network_mode: service:dev，测试里的 localhost 直接可达</text>
+</g>
+<g fill="none" stroke="#5c6b63" stroke-width="1.6" marker-end="url(#a1)">
+<path d="M400 90 L400 120 L150 120 L150 150"/><path d="M480 90 L480 150"/>
+</g>
+</svg>
+</div>
+<p class="muted">两个使用者都 <code>FROM</code> 同一个阶段；绿色是本方案新增的部分，蓝色是今天已有的发布路径，只改基础来源。GitHub Actions 的 <code>ci.yml</code> 不在此方案内，保持现状。</p>
+
+<p><strong>拆阶段不改行为。</strong>今天 Dockerfile 的 builder 阶段先装工具（apt、CMake、Conan、Rust、SDKMAN），再 <code>COPY . .</code> 并构建。把 <code>COPY . .</code> 之前的部分命名为 <code>toolchain</code> 阶段，builder 改为 <code>FROM toolchain AS builder</code>，镜像层内容不变，Jenkins 的构建命令与产物不变。开发容器用 <code>docker build --target toolchain</code> 在本地构建它。</p>
+<p><strong>镜像不发布。</strong>compose 的 <code>dev</code> 服务只有 <code>build</code>（context 为仓库根，target 为 <code>toolchain</code>），没有 <code>image</code> 来源。第一次 <code>up</code> 在本机构建，Dockerfile 的工具链部分不变就命中 Docker 层缓存；Dockerfile 变了，下一次 <code>up</code> 重建，与 Jenkins 用同一份定义。没有镜像仓库、发布凭据和标签簿记要维护。<code>.devcontainer/.env</code> 只放 Milvus、etcd、MinIO 三个服务镜像的标签。</p>
+<p><strong>容器里的目录与环境变量和 builder 阶段一致。</strong>源码在 <code>/workspace</code>，<code>CONAN_HOME</code>、<code>CCACHE_DIR</code>、<code>CARGO_HOME</code>、<code>RUSTUP_HOME</code>、<code>SBT_OPTS=-Xmx4g -Xms2g</code> 与 Dockerfile 相同；PATH 上第一个 <code>java</code> 是 JDK 21，所以 Makefile 由 <code>which java</code> 反推的 <code>JAVA_HOME</code> 正确，Conan 只有 2.25.1 一个。Conan 的 profile 与 remote 在容器首次启动、缓存卷为空时初始化，命令与 Dockerfile 的 <code>conan profile detect</code> 和 <code>conan remote add default-conan-local2</code> 相同。<code>NATIVE_JOBS</code> 默认按容器可见的 CPU 数取，不再是 50，因为开发机通常给 Docker 的 CPU 少于 CI 节点。</p>
+<p><strong>缓存是命名卷，产物留在源码目录。</strong>compose 项目 <code>spark-milvus-dev</code> 下的 <code>conan2</code>、<code>ccache</code>、<code>cargo-registry</code>、<code>cargo-git</code>、<code>coursier</code>、<code>ivy2</code>、<code>sbt</code> 七个卷与 Jenkins 缓存目录（<code>build-image.groovy</code> 里 <code>cache-init</code> 建的七个目录）一一对应，分别挂在 <code>/home/dev</code> 下对应位置；<code>dev</code> 阶段预先建好这些目录并归 <code>dev</code> 用户，Docker 初始化空卷时复制这份归属，非 root 用户才写得进去。一台机器上只有一种架构的容器，卷名不带架构。<code>target/</code> 不单独挂卷，它就在 bind mount 的源码目录里：<code>target/scala-2.13/spark-connector-assembly-*.jar</code>、<code>target/native-build/&lt;平台&gt;/</code> 和测试报告在宿主机上直接可见。代价是 macOS 上 <code>target/</code> 的读写经过文件共享，sbt 增量编译比 Linux 宿主慢；接受这一点换取产物位置与不用容器时一致。缓存卷不随容器删除而消失，<code>scripts/devcontainer.sh clean</code> 才删。</p>
+<p><strong>本地服务与测试共享网络命名空间。</strong><code>integration-4.0</code> 里的 Milvus 地址写死为 <code>http://localhost:19530</code>，MinIO 为 9000。compose 里 <code>milvus</code>、<code>etcd</code>、<code>minio</code> 三个服务设 <code>network_mode: "service:dev"</code>，它们的端口就出现在开发容器的 localhost 上，测试代码一行不改。三个服务放在 profile <code>services</code> 里，只跑单测和原生构建时不拉起。</p>
+
+<h2 id="files">3 文件</h2>
+<pre><code>.devcontainer/
+├── devcontainer.json       dockerComposeFile 指向下面的 compose；service: dev；runServices: [dev]；workspaceFolder: /workspace
+│                           remoteUser: dev；overrideCommand: false；shutdownAction: stopCompose
+│                           customizations.vscode.extensions: scalameta.metals、ms-vscode.cmake-tools、
+│                             rust-lang.rust-analyzer、ms-python.python
+│                           postCreateCommand: scripts/devcontainer.sh init --inside（子模块、Conan profile/remote）
+├── docker-compose.yml      dev（build: context=..，target=dev，args DEV_UID/DEV_GID；user 同值；entrypoint 指向下面的脚本；
+│                             volumes: ..:/workspace（含 target/）与七个缓存卷；command: sleep infinity）
+│                           etcd、minio、milvus（profiles: [services]，network_mode: service:dev，各一个数据卷）
+├── entrypoint.sh           uid 不在 /etc/passwd 时补一行、保证 HOME 存在，然后 exec 命令
+└── .env                    MILVUS_IMAGE、ETCD_IMAGE、MINIO_IMAGE 三个服务镜像的标签，DEV_UID、DEV_GID 默认 1000
+scripts/devcontainer.sh     up [--services] | init | shell | run [--env-file F] &lt;cmd…&gt; | down | clean
+                            从 id 取 DEV_UID、DEV_GID 传给 compose；run 用登录 shell，NATIVE_JOBS 默认为容器可见 CPU 数，上限 50（build.py 的 --jobs 范围）
+Dockerfile                  builder 阶段拆为 toolchain（工具）、dev（用户、HOME 下的缓存目录、NATIVE_JOBS 默认值）、builder（COPY 与构建）三段
+.dockerignore               排除 **/target，本地 docker build 不再把构建产物送进上下文</code></pre>
+<p>改动都在这几处；Makefile、build.py、sbt 构建不变。<code>docs/contributing.md</code> 的环境一节改为先指向开发容器，本机私有工具链前缀降为备选。</p>
+
+<h2 id="workflows">4 开发者怎么用</h2>
+<div class="table-scroll"><table>
+<tr><th>要做的事</th><th>命令</th><th>说明</th></tr>
+<tr><td>进入环境</td><td>VS Code：Reopen in Container<br>CLI：<code>scripts/devcontainer.sh up &amp;&amp; scripts/devcontainer.sh shell</code></td><td>首次在本机构建 toolchain 阶段；<code>init</code> 初始化子模块与 Conan 配置</td></tr>
+<tr><td>编原生库并打包</td><td><code>make native-bundle</code>、<code>make package</code></td><td>与 <a href="build.html#options">build.html</a> 方案 B 相同，缓存在命名卷里；首次全量约 1 小时 35 分（50 任务的实测），容器 CPU 少时更长</td></tr>
+<tr><td>不编原生库，只做 JVM 侧</td><td><code>make package NATIVE_BUNDLE=/workspace/downloads/milvus-native-linux-x86_64.jar</code></td><td>从 CI 产物取同 gitlink 的 bundle 与 <code>.properties</code>；这是大多数改 Scala 代码的开发者的路径</td></tr>
+<tr><td>单元测试与格式检查</td><td><code>sbt test</code>；<code>sbt 'set Global / concurrentRestrictions += Tags.limitAll(1)' scalafmtAll scalafmtCheckAll</code></td><td>与 <a href="../../contributing.md#formatting">contributing.md</a> 一致；JDK 21 是容器里唯一的 Java</td></tr>
+<tr><td>集成测试</td><td><code>scripts/devcontainer.sh up --services</code>，然后 <code>sbt integration40/test</code></td><td>Milvus standalone 与 MinIO 在 localhost 的 19530、9000</td></tr>
+<tr><td>UAT 场景套件</td><td><code>scripts/devcontainer.sh run --env-file ~/.spark-milvus-uat.env sbt spark40/test</code></td><td><code>MILVUS_UAT_*</code> 与 <code>AWS_*</code> 变量从容器外的文件传入，不检入、不写进 compose</td></tr>
+<tr><td>验证 Dockerfile 全量构建</td><td>宿主机 <code>docker build --build-arg PUBLISH_MAVEN=false .</code></td><td>这一步在容器外，与 Jenkins 相同；开发容器不替代它</td></tr>
+</table></div>
+<p><strong>平台。</strong>容器的架构跟随宿主：x86_64 机器得到 linux-x86_64，Apple Silicon 得到 linux-aarch64。有 Conan profile 的是 linux-x86_64 与 darwin-aarch64，linux-aarch64 还没有，所以 Apple Silicon 上的容器能做 JVM 侧全部工作和消费别处编好的 linux-aarch64 bundle，不能从源码编统一包（在 macOS 宿主上直接跑 <code>scripts/build-native.sh</code> 编 darwin-aarch64 包不经容器）；<code>platform: linux/amd64</code> 走 Rosetta 或 QEMU 模拟编原生库，耗时以天计，不作为方案。这是 <a href="build.html">build.html</a> 里 linux-aarch64 profile 缺失的另一面。</p>
+<p><strong>资源。</strong>Docker 给容器的内存至少 8 GB：sbt 4 GB 堆加原生构建的编译进程；原生全量构建时给足 CPU。命名卷大小以 Conan 缓存为主，第一次全量构建后用 <code>docker system df -v</code> 查看，本页不估。</p>
+
+<h2 id="rollout">5 落地与验证</h2>
+<p>2026-09-20 落地：Dockerfile 拆为 <code>toolchain</code>、<code>dev</code>、<code>builder</code>、<code>final</code> 四段，<code>.devcontainer/</code> 四个文件、<code>scripts/devcontainer.sh</code> 与 <code>.dockerignore</code> 加入仓库，<code>README.md</code> 与 <code>contributing.md</code> 的环境一节改为以开发容器为入口。验证在 x86_64 Linux 宿主（128 核）上进行；本会话自身在一个容器里，宿主 Docker 看不到它的 checkout，所以 <code>/workspace</code> 用一个由 <code>docker cp</code> 填充的命名卷代替 bind mount，其余与 compose 文件一致。</p>
+<div class="table-scroll"><table>
+<tr><th>检查</th><th>结果</th></tr>
+<tr><td><code>up</code>：从零构建 dev 镜像</td><td>通过，镜像 4.07 GB；容器内 Conan 2.25.1、CMake 3.27.5、GCC 12.3.0、cargo 1.98.1、sbt 1.11.1、JDK 21.0.10，glibc 2.35；<code>NATIVE_JOBS</code> 默认 50（宿主 128 核，取 build.py 上限）</td></tr>
+<tr><td><code>init</code></td><td>通过：三个子模块就位，Conan profile 与 remote 写入空卷</td></tr>
+<tr><td>非 root uid</td><td><code>--user 1000:1000</code> 启动：入口脚本补 passwd，<code>whoami</code> 为 dev，cargo、conan 可用，缓存卷可写</td></tr>
+<tr><td>uid 为 0 的宿主</td><td>Java 的 <code>user.home</code> 取自 passwd 而非 <code>HOME</code>，第一版把 Coursier、Ivy、sbt 缓存写进了容器层；<code>dev</code> 阶段在 <code>DEV_UID</code> 为 0 时把 root 的 home 改到 <code>/home/dev</code> 后修正，缓存落卷</td></tr>
+<tr><td><code>sbt test</code>（不带原生包）</td><td>通过：ScalaTest 1,136 成功、0 失败、177 取消，JUnit 全部通过，与宿主机一致；含首次依赖下载 669 秒</td></tr>
+<tr><td><code>up --services</code></td><td>Milvus standalone v3.0.1 的 <code>/healthz</code>、MinIO 的 <code>/minio/health/live</code> 从容器 localhost 返回 200，19530 可达</td></tr>
+<tr><td><code>make package NATIVE_BUNDLE=</code>宿主机编的包</td><td>被 sbt 的 JVM 加载检查拒绝：该包要求 <code>GLIBC_2.38</code>，容器与 Spark 镜像是 glibc 2.35。这是正确的拒绝，也说明给 Spark 镜像用的包必须在容器或方案 A 里编</td></tr>
+<tr><td><code>make native-bundle</code>（容器内从源码编）</td><td>通过：空 Conan 卷起步，64 个 Conan 包从源码编，11 个阶段与两道门全过，10:12 到 11:38 共 1 小时 26 分（50 任务）；产物 162 个库、173 个别名、263 MB，SHA-256 <code>8cf703c7…8a81</code>，glibc 2.35，storage <code>7eb13578</code>、Knowhere <code>29210a33</code></td></tr>
+<tr><td><code>make package NATIVE_BUNDLE=</code>容器内编的包</td><td>通过：sbt 校验与 JVM 加载检查通过，产出 <code>spark-connector-assembly-2.0.0-refactor-v2-amd64-SNAPSHOT.jar</code></td></tr>
+<tr><td><code>integration40/test</code>（带容器内编的包，对本地 Milvus）</td><td>环境可用，套件未过：3 个套件 15 项，2 项成功、13 项失败。12 项失败于 <code>SnapshotCatalog</code> 在 MinIO 里找不到 <code>files/snapshots/&lt;collection id&gt;/metadata/</code>，即本地 Milvus v3.0.1 standalone 没有为测试写入的 collection 生成快照，套件对 Milvus 侧快照生成方式的假设与该版本不符；1 项 backfill 失败于容器没有 <code>pymilvus</code>。这两点属于现有套件与 Milvus 配置的问题（<a href="../../contributing.md">contributing.md</a> 已写明这些套件尚未在 CI 运行），不属于开发容器；不带原生包时则因缺 <code>libmilvus-storage-jni</code> 失败，属预期</td></tr>
+</table></div>
+<p>未做：Jenkins 用拆分后的 Dockerfile 跑一次并对比 assembly SHA-256（需在 Jenkins 上执行）；真正的 bind mount 路径（本会话环境不允许）；Apple Silicon 宿主。待决定：是否在 <code>dev</code> 阶段装 <code>pymilvus</code> 供 backfill 集成测试使用，以及与 Milvus v3.0.1 匹配的版本。</p>
+</main>

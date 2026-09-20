@@ -56,16 +56,6 @@
       "Macos"
     ]
   },
-  "cardinal": {
-    "v1": {
-      "tag": "v2.5.112",
-      "revision": "1b38fec866d5faa9d4d999923a6b0ef8741c9124"
-    },
-    "v2": {
-      "tag": "v3.0.8",
-      "revision": "be4bf251b13e8722869fdda64db45050e614c037"
-    }
-  },
   "version_policy": {
     "conflicts": "newer-upstream-version",
     "ordered_versions": {

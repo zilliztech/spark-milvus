@@ -56,8 +56,12 @@ scripts/build-native.sh \
 ```
 
 Omit `--with-cardinal` for the open-source variant. The Knowhere revision comes
-from the root `knowhere` submodule gitlink; Cardinal revisions come from
-`dependencies.json`. Cardinal sources require authorization. The build uses the
+from the root `knowhere` submodule gitlink, and the Cardinal tag of each
+generation is read from that checkout's `cmake/libs/cardinal/v1/CMakeLists.txt`
+and `v2/CMakeLists.txt` (`set(CARDINAL_VERSION ...)`), the same place Knowhere's
+own build reads it; the commit each tag resolved to is recorded in
+`provenance/cardinal-source-identity.json` and the bundle provenance. Cardinal
+sources require authorization. The build uses the
 initialized Knowhere submodule as a Git object source and creates an isolated
 checkout at the gitlink revision. `--knowhere-source` may name another Git
 object source only when its HEAD is the same revision. Storage is copied from

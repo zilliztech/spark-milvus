@@ -88,6 +88,7 @@ you need to answer: architecture or engineering conventions.
 | [docs/design/architecture/modules.md](docs/design/architecture/modules.md) | Modules, packages, directories, the twelve build constraints, and the 1.x to 2.0 migration table |
 | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) | The illustrated version of the design |
 | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) | Catalog discovery, three-part tables, CREATE/DROP properties, and fixed-snapshot loading |
+| [docs/design/engineering/devcontainer.html](docs/design/engineering/devcontainer.html) | Design for a dev container built locally from the Dockerfile toolchain stage: one command for the compile, package and test environment, caches in named volumes, target/ in the bind-mounted source tree, local Milvus + MinIO; `scripts/devcontainer.sh` drives it |
 | [docs/design/engineering/build.html](docs/design/engineering/build.html), [build.md](docs/design/engineering/build.md) | The native libraries in three layers, the toolchain versions for Linux and macOS, the two ways to build the per-platform native bundle (Docker or local), and the directory design of the build definition, work directory and bundle JAR |
 
 `docs/reference-en.md` is the user-facing API reference for the connector
@@ -97,6 +98,22 @@ the design depends on outside this repository, and
 [docs/writing.md](docs/writing.md) the standard for documents here.
 
 ## Environment
+
+The quickest way to a complete build, package and test environment is the
+development container: it is the toolchain stage of the root `Dockerfile`,
+built locally, with the dependency caches in named volumes and an optional
+local Milvus and MinIO for the integration suite.
+
+```bash
+scripts/devcontainer.sh up        # build the dev image once, start the container
+scripts/devcontainer.sh init      # submodules, Conan profile and remote
+scripts/devcontainer.sh shell     # make, sbt and the native build run in here
+```
+
+VS Code and other IDEs that read `.devcontainer/devcontainer.json` offer the
+same container as "Reopen in Container". The design is in
+[docs/design/engineering/devcontainer.html](docs/design/engineering/devcontainer.html).
+The rest of this section is for a toolchain installed directly on the host.
 
 Minimum 2 CPU cores and 8 GB of RAM. Version mismatches between the tools below
 cause build failures that are hard to read, so pin them.

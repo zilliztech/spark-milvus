@@ -56,8 +56,11 @@ final case class WrittenSnapshot(
   * list, and the snapshot's own name, id and timestamp
   * (docs/design/architecture/vector-search.html section 2.7).
   *
-  * Restoring the result into a collection is Milvus's side, and asking it to is
-  * not implemented here.
+  * Restoring the result into a collection is Milvus's side; `restore_snapshot`
+  * asks it to. A restore refuses a snapshot whose files are not under the root
+  * its document's key derives ([[SnapshotBundle]]), so a restorable write is
+  * refused here, before anything is written, when a path would be outside
+  * `rootPath`.
   */
 object SnapshotWriter extends Logging {
 
@@ -88,13 +91,19 @@ object SnapshotWriter extends Logging {
 
   /** @param sourceKey
     *   the snapshot document this one is written from, as a key in `store`.
+    * @param restorable
+    *   whether Milvus has to be able to restore the result: then every file the
+    *   snapshot names must sit under `target.rootPath`, and a write that would
+    *   name one outside is refused. `false` declares a snapshot only this
+    *   connector reads, which may point anywhere.
     */
   def write(
       snapshot: Snapshot,
       indexes: Seq[CommittedIndex],
       target: SnapshotTarget,
       store: ObjectStore,
-      sourceKey: String
+      sourceKey: String,
+      restorable: Boolean
   ): WrittenSnapshot = {
     require(
       target.snapshotId > 0,
@@ -138,15 +147,7 @@ object SnapshotWriter extends Logging {
         .flatMap(segment => segment.rows.map(segment.id -> _))
         .toMap
 
-    store.createDir(
-      s"${prefixOf(target)}/manifests/${target.snapshotId}",
-      recursive = true
-    )
-    store.createDir(s"${prefixOf(target)}/metadata", recursive = true)
-
-    var written = 0L
-    val segmentIds = Seq.newBuilder[Long]
-    val manifestKeys = sourceManifests.map { sourceManifest =>
+    val parsed = sourceManifests.map { sourceManifest =>
       val bytes = store.readAll(sourceManifest)
       val entry = SegmentManifestReader.parse(bytes, schemaVersion) match {
         case Right(value) => value
@@ -156,6 +157,37 @@ object SnapshotWriter extends Logging {
             failure
           )
       }
+      (bytes, entry)
+    }
+
+    // What a restore would refuse is refused here, before a byte is written:
+    // every data, delete, statistics and index file has to sit under the root.
+    if (restorable) {
+      val root = Option(target.rootPath).map(_.trim).getOrElse("")
+      val outside = SnapshotBundle.outsideRoot(
+        root,
+        SnapshotBundle.pathsOf(document, parsed.map(_._2)) ++
+          indexes.flatMap(_.filePaths),
+        snapshot.bucket
+      )
+      require(
+        outside.isEmpty,
+        "A restorable snapshot keeps every file under its root; " +
+          SnapshotBundle.describeOutside(root, outside) +
+          ". Write it under a prefix the data already sits below, or pass " +
+          "restorable => false for a snapshot only this connector reads"
+      )
+    }
+
+    store.createDir(
+      s"${prefixOf(target)}/manifests/${target.snapshotId}",
+      recursive = true
+    )
+    store.createDir(s"${prefixOf(target)}/metadata", recursive = true)
+
+    var written = 0L
+    val segmentIds = Seq.newBuilder[Long]
+    val manifestKeys = parsed.map { case (bytes, entry) =>
       val rows = rowsById.getOrElse(entry.segmentId, entry.numOfRows)
       val records = bySegment
         .getOrElse(entry.segmentId, Seq.empty)

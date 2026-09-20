@@ -4,6 +4,32 @@
 jar and running the example. This file covers what a contributor needs beyond
 that.
 
+## Development container
+
+`scripts/devcontainer.sh` runs the toolchain of the root `Dockerfile` as a
+container with the checkout bind-mounted at `/workspace` and the Conan, ccache,
+Cargo, Coursier, Ivy and sbt caches in named volumes. Build outputs stay in the
+checkout's `target/`. The container runs as your uid, so files it writes belong
+to you; `DEV_UID` and `DEV_GID` override the value taken from `id`.
+
+```bash
+scripts/devcontainer.sh up                 # build the dev image if needed, start the container
+scripts/devcontainer.sh init               # submodules, Conan profile and remote (idempotent)
+scripts/devcontainer.sh shell              # login shell; NATIVE_JOBS defaults to the container's CPUs
+scripts/devcontainer.sh run make package   # one command, then return
+scripts/devcontainer.sh up --services      # also start Milvus, etcd and MinIO for integration40/test
+scripts/devcontainer.sh run --env-file ~/.spark-milvus-uat.env sbt spark40/test   # UAT variables from a file
+scripts/devcontainer.sh down               # stop everything; caches survive
+scripts/devcontainer.sh clean              # stop and delete the cache and service volumes
+```
+
+Milvus, etcd and MinIO share the dev container's network namespace, so the
+`localhost:19530` and `localhost:9000` addresses in `integration-4.0` work
+unchanged. The container's architecture is the host's: on Apple Silicon it is
+linux-aarch64, which has no unified native build profile yet, so there the
+container serves the JVM side and consumes a bundle built elsewhere. Rationale
+and file layout: [devcontainer.html](design/engineering/devcontainer.html).
+
 ## Project ids
 
 sbt project ids cannot contain a dot, so the id and the directory differ for the

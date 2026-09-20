@@ -4,7 +4,7 @@
 
 Connector 在 executor 里加载两个原生引擎：读写 Milvus 段文件的 milvus-storage 和做向量搜索的 Knowhere。它们共用十几个 C++ 库，所以每个平台只能由一张 Conan 依赖图编成一个原生 JAR `milvus-native-<平台>.jar`；平台是 Linux 与 macOS 乘 x86_64 与 aarch64 四种，编译它有两种方案：Docker 里编，或本机编。构建阶段、打包与发布的执行细节见 [native-build/README.md](../../../native-build/README.md) 和 [contributing.md](../../contributing.md)。
 
-> **2026-09-20 状态。** 当前 gitlink 为 milvus-storage `7eb13578`、Knowhere `29210a33`。四个平台中 linux-x86_64 与 darwin-aarch64 有源码构建 profile 和验收记录。linux-x86_64 完成三次统一构建，Knowhere C API 测试与两种顺序的 JVM 加载都通过，`make test` 为 1,160 项成功、0 项失败、149 项取消；这批结果早于第 5 节的平台适配改造，ELF 的取值原样搬进了 `Elf` 类，之后没有在 Linux 上重跑。darwin-aarch64 收集 221 个库和 203 个别名，两个 JNI 入口在两种加载顺序下都由全新 JVM 加载，Knowhere C API 测试通过，149 MB 平台 JAR 经 `verifyNativeBundle` 校验，带该包的根测试为 1,101 项成功、0 项失败、165 项因缺 UAT 环境取消。linux-aarch64 与 darwin-x86_64 的 profile 未写。尚未做：空 Conan 缓存的 Docker 重建，真实 UAT 实例上的查询复测。
+> **2026-09-20 状态。** 当前 gitlink 为 milvus-storage `7eb13578`、Knowhere `29210a33`。四个平台中 linux-x86_64 与 darwin-aarch64 有源码构建 profile 和验收记录。linux-x86_64 完成三次统一构建，Knowhere C API 测试与两种顺序的 JVM 加载都通过，`make test` 为 1,160 项成功、0 项失败、149 项取消；这批结果早于第 5 节的平台适配改造，ELF 的取值原样搬进了 `Elf` 类，之后没有在 Linux 上重跑。darwin-aarch64 在 macOS 本机收集 221 个库和 203 个别名，两个 JNI 入口在两种加载顺序下都由全新 JVM 加载，Knowhere C API 测试通过，149 MB 平台 JAR 经 `verifyNativeBundle` 校验，带该包的根测试为 1,101 项成功、0 项失败、165 项因缺 UAT 环境取消。linux-aarch64 与 darwin-x86_64 的 profile 未写。尚未做：空 Conan 缓存的 Docker 重建，真实 UAT 实例上的查询复测。
 
 ## 1 依赖库有哪些，各自做什么
 
@@ -22,7 +22,7 @@ flowchart TB
         k["knowhere<br/>向量索引；内含 faiss、DiskANN"]
     end
     deps["两个引擎共用的 Conan 依赖<br/>Arrow/Parquet、Protobuf/gRPC、AWS/Azure/GCP SDK、OpenSSL、OpenBLAS、<br/>milvus-common、Folly、fmt、glog、prometheus-cpp、opentelemetry-cpp 等，一张 Conan 图只解析一份"]
-    sys["系统提供，不进包：Linux 为 glibc、libstdc++、libgcc_s、libz.so.1；macOS 为 libSystem 一组"]
+    sys["系统提供，不进包：Linux 为 glibc、libstdc++、libgcc_s、libz.so.1；macOS 为 libSystem 一组与 libz.1.dylib"]
     sj --> s
     kj --> kc --> k
     s --> deps
@@ -41,7 +41,7 @@ flowchart TB
 | `knowhere_c` | 稳定的 C ABI（SOVERSION 1，隐藏其余符号），JNI 只经它调用引擎 | 同上，`src/c_api` |
 | `knowhere_jni` | PR #1829 Java API `io.knowhere` 的 JNI 实现；JNI 头由 `javac -h` 在构建时生成 | 同上，`java/src/main/cpp` |
 
-**两个引擎共用 milvus-common、Folly、gRPC、OpenSSL 等十几个库，这是每个平台只能用一张 Conan 图的原因。** 操作系统的动态加载器按库名和符号解析依赖，Java 包名和 JAR 目录隔离不了它们。分别构建时出现过两种失败：先加载 storage，Knowhere 一侧复用了缺 `gotoblas` 符号的 milvus-common；先加载 Knowhere，storage 的 gRPC 初始化绑定到 Knowhere 静态嵌入的 gRPC 全局对象，进程退出。两个引擎的上游对 fmt、milvus-common、lz4 要求的版本不同，统一取较新者；不追随远程最新版本，不在仓库维护自有 recipe。系统 C 运行库由目标系统提供，不进包；Linux 上 `libz.so.1` 也不进包，因为 JVM 在 Connector 初始化前已加载系统 zlib，包内第二份不能覆盖已绑定的符号。
+**两个引擎共用 milvus-common、Folly、gRPC、OpenSSL 等十几个库，这是每个平台只能用一张 Conan 图的原因。** 操作系统的动态加载器按库名和符号解析依赖，Java 包名和 JAR 目录隔离不了它们。分别构建时出现过两种失败：先加载 storage，Knowhere 一侧复用了缺 `gotoblas` 符号的 milvus-common；先加载 Knowhere，storage 的 gRPC 初始化绑定到 Knowhere 静态嵌入的 gRPC 全局对象，进程退出。两个引擎的上游对 fmt、milvus-common、lz4 要求的版本不同，统一取较新者；不追随远程最新版本，不在仓库维护自有 recipe。系统 C 运行库由目标系统提供，不进包；系统 zlib 也不进包（Linux 的 `libz.so.1`、macOS 的 `libz.1.dylib`），因为 JVM 在 JNI 初始化前已加载系统 zlib，包内第二份会让进程实际使用哪一份符号无法确定；这条规则与可执行格式无关，在所有平台成立，平台适配层（`native-build/platforms.py` 的 `system_zlib()`、`NativeLibraries.systemZlib`）只提供它在本平台的文件名。
 
 ## 2 编译前置条件
 
@@ -73,12 +73,12 @@ PATH=~/toolchain/cmake3venv/bin:$PATH make native-bundle
 
 ## 3 两种构建方案
 
-**Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 `build.py`，产物相同。** 构建不做交叉编译，每个平台的 JAR 在同平台机器上编。
+**Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 `build.py`，产物相同。** 构建不做交叉编译，每个平台的 JAR 在同平台机器上编。`build.py` 由 `platforms.host_platform()` 判断主机平台，缺 profile 或适配器时报出缺哪一个；Makefile 的选择规则今天仍只在 linux-x86_64 默认走统一包，macOS 上要直接调 `scripts/build-native.sh`，或用 `NATIVE_BUNDLE` 指向编好的包。
 
 | 方案 | 命令 | 前置条件 | 产物与限制 | 用在哪 |
 |---|---|---|---|---|
 | Docker 构建 | `docker build --build-arg PUBLISH_MAVEN=false -t spark-milvus .` | Docker 与 BuildKit；网络能到 JFrog、GitHub、crates.io。工具链由 Dockerfile 安装，本机无需准备 | 统一包 + assembly。Conan、Cargo、ccache、Coursier、Ivy、sbt 缓存各在一个 `sharing=locked` 的 cache mount 里，失败的 RUN 不丢已完成的依赖。worker 是哪个架构就出哪个架构的包；只有 Linux | Jenkins 发布流水线；验证"空缓存能否完整构建" |
-| 本机构建 | `make native-bundle NATIVE_JOBS=50`，然后 `make package` | 第 2 节本平台一列；PATH 上先出现上表的版本 | 同上，产物在 `target/native-build/<平台>/`；`--conan-lock` 复用审核过的 lock，`--no-remote` 只用缓存。输入变化要换新工作目录，缓存仍复用 | 改 storage、Knowhere、依赖版本或 CMake 规则的开发 |
+| 本机构建 | `make native-bundle NATIVE_JOBS=50`，然后 `make package` | 第 2 节本平台一列；PATH 上先出现上表的版本 | 同上，产物在 `target/native-build/<平台>/`；`--conan-lock` 复用审核过的 lock，`--no-remote` 只用缓存。输入变化要换新工作目录，缓存仍复用。产物依赖构建机的 glibc：在比 Spark 镜像（Ubuntu 22.04，glibc 2.35）更新的系统上编出的包在该镜像里加载失败（2026-09-20 实测：本机包要求 `GLIBC_2.38`，sbt 校验拒绝），要给 Spark 镜像用的包应在[开发容器](devcontainer.html)或 Docker 构建里编 | 改 storage、Knowhere、依赖版本或 CMake 规则的开发；工具链也可由[开发容器](devcontainer.html)提供（设计稿） |
 
 `make package` 今天只在 linux-x86_64 上把统一包接进 assembly：Makefile 的平台选择写死了这个名字，显式传 `NATIVE_BUNDLE` 的分支还要求主机是 Linux。macOS 上先 `make native-bundle` 得到 JAR，再用 `sbt -Dmilvus.native.bundle=<jar>` 打包和跑测试；sbt 一侧按 `NativePlatform.current` 选平台，不限操作系统。
 
@@ -98,7 +98,8 @@ native-build/
 │   ├── Knowhere.cmake          knowhere、knowhere_c、knowhere_jni 与 C API 测试程序
 │   ├── knowhere/Sources.cmake  Knowhere、faiss、DiskANN 的源码清单与指令集分组
 │   ├── Install.cmake           安装到 lib/，RPATH 设为相对自身目录
-│   └── storage-private-symbols.map   隐藏 Rust 桥内部 LZ4/XXH/ZSTD/aws_lc 符号的链接脚本（ELF）
+│   ├── storage-private-symbols.map   隐藏 Rust 桥内部 LZ4/XXH/ZSTD/aws_lc 符号的链接脚本（ELF）
+│   └── storage-private-symbols.txt   同一份符号规则的 Mach-O 写法（ld64 的符号清单）
 ├── profiles/
 │   └── <平台>                  Conan profile，每平台一份；今天有 linux-x86_64 与 darwin-aarch64
 ├── dependencies.json           32 个直接依赖的 recipe revision、版本冲突策略、排除项
@@ -113,7 +114,7 @@ scripts/build-native.sh         入口，exec build.py
 scripts/package-native.py       核对 provenance 后打 JAR
 ```
 
-CMake 文件按引擎分而不按平台分，平台差异用 `CMAKE_SYSTEM_NAME` 条件表达在同一目标内，避免同一个目标有两份定义。`CMakeLists.txt` 开头接受 Linux x86_64、Linux aarch64 和 macOS arm64，其余组合直接报错；Conan profile 和适配实现缺哪一份，由 `build.py` 在到达 CMake 之前报出。
+CMake 文件按引擎分而不按平台分，平台差异用 `CMAKE_SYSTEM_NAME` 条件表达在同一目标内，避免同一个目标有两份定义；`CMakeLists.txt` 开头接受 Linux x86_64、Linux aarch64 与 macOS arm64，其余组合直接报错；`build.py` 到 CMake 之前先检查该平台的 profile 与 `platforms.py` 适配器是否存在。
 
 ### 构建工作目录：`NATIVE_WORK_DIR`，默认 `target/native-build/<平台>/`
 

@@ -582,15 +582,37 @@ CALL milvus.system.write_snapshot('your_db.your_collection',
 
 段来自 option 选中的快照，也就是 `build_index` 规划的那一份；索引记录来自 `input` 下那个作业的清单。
 它在 `output/snapshots/<collection>/` 下写出每段一个 Avro 清单和一份快照 JSON，`output` 不给时用 `input`；
-`snapshot_id` 默认当前毫秒，`snapshot_name` 默认 `<collection>-<snapshot_id>`。结果一行：`snapshot`（快照 JSON 的 key）、
+`snapshot_id` 默认当前毫秒，`snapshot_name` 默认 `<collection>-<snapshot_id>`；`restorable` 默认 true，
+此时快照里任何一条数据、删除、统计或索引文件路径不在 `output` 之下就在写出前报错并列出这些路径，
+`restorable => false` 声明这份快照只供本连接器读取，可以写在任何前缀下。结果一行：`snapshot`（快照 JSON 的 key）、
 `snapshot_id`、`snapshot_name`、`segments`、`indexes`、`bytes`。写出的快照就是源快照加上这次作业的索引：文档和每段的 Avro 清单都取源快照的字节，只替换索引登记，
 段和 collection 的其余部分不由连接器重述。
 
 两个读者都验过。本连接器用 `milvus.snapshot.path` 读得回来；Milvus v3.0.2 的 `RestoreExternalSnapshot`
 能恢复它，索引随之而来——恢复出的 collection 报告索引已建好，加载和搜索都不再重建。
 该恢复要求快照里的所有路径都在元数据 URI 推出的根之下，所以 `output` 必须是数据文件已经所在的前缀：
-为已有 collection 建索引时就是实例自己的根，`build_index` 也要写在那里。
-从连接器这一侧发起恢复尚未实现，上面的恢复是直接对 Milvus 调的。段必须是 storage version 3 且带行数，V2 段直接报错，不按猜测写出。
+为已有 collection 建索引时就是实例自己的根，`build_index` 也要写在那里；`write_snapshot` 默认按这条规则在规划期拒绝。
+段必须是 storage version 3 且带行数，V2 段直接报错，不按猜测写出。
+
+第三步让 Milvus 把它恢复成一个新 collection：
+
+```sql
+CALL milvus.system.restore_snapshot('your_db.restored_collection',
+  snapshot         => 'files/snapshots/4691/metadata/1789478390101.json',
+  wait             => true,
+  `milvus.uri`     => 'https://your-milvus:19530',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+`collection` 是目标，必须不存在；`snapshot` 是 `write_snapshot` 返回的那个 key。过程先用同一套 `fs.*`
+读快照文档和每段清单，按 key 推出的根核对每条路径，越界就报错并列出路径，不去打扰 Milvus；然后调
+`RestoreExternalSnapshot`。交给 Milvus 的 URI 默认是 `s3://<fs.bucket_name>/<snapshot>`，可用 `snapshot_uri`
+覆盖（本地存储必须给）；`external_spec` 原样透传，快照不在实例自己的存储上时用。不带 `wait` 时结果一行是
+Milvus 开出的作业：`database`、`collection`、`snapshot_uri`、`job_id`、`state` = `submitted`；`wait => true`
+时按 `timeout_seconds`（默认 600）轮询 `GetRestoreSnapshotState`，完成后 `state` 是 `RestoreSnapshotCompleted`
+并带 `progress`、`reason`、`time_cost_ms`，失败则以 Milvus 给的原因报错。
 
 ### 3.4 用 `CALL` 管理 Milvus
 

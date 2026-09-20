@@ -108,7 +108,7 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 | 包 | 职责 |
 |---|---|
 | `grpc` | RpcRetry：读 RPC 在一次调用的总期限内遇到 UNAVAILABLE 或 Milvus 限流时重发，每次重发是新的调用；写 RPC 只发一次。ScalaPB 生成的 stub 在 `io.milvus.grpc` |
-| `api` | MilvusClient：ListDatabases、ShowCollections、DDL、describe、Delete、快照、索引、load、release、flush、compact、BatchUpdateManifest、RegisterSegments（待 Milvus 提供）、外部快照 RestoreSnapshot（W8 待实现）；proto 的 DataType 与 core 的 MilvusType 互转 |
+| `api` | MilvusClient：ListDatabases、ShowCollections、DDL、describe、Delete、快照、索引、load、release、flush、compact、BatchUpdateManifest、RegisterSegments（待 Milvus 提供）、外部快照 RestoreExternalSnapshot 与 GetRestoreSnapshotState（W8）；proto 的 DataType 与 core 的 MilvusType 互转 |
 
 ### 2.6 spark `com.zilliz.spark.connector`
 
@@ -123,7 +123,7 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 | `metrics` | core 的 ReadMetrics / WriteMetrics 翻成 DataSource V2 的 CustomMetric / CustomTaskMetric，读写各一张清单；G5 | 否 |
 | `options` | option 名、别名、校验；ReadMode；按 ReadMode 构造这次读的 SnapshotSource（SnapshotSources，含 ClientSnapshotSource、OptionStringsSnapshotSource，把 compat 的 backup 实现和 V2 footer 解析器接进 core）；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageKeys） | 否 |
 | `sources` | 只有 MilvusDataSource，`format("milvus")` 的 TableProvider。留在这个包名下是因为 apps 和用户作业按字符串引用它的全名 | 否 |
-| `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、静态注册表、共用的 collection/client/有界等待规则；已实现快照、索引、load/release/flush/compact、describe、backfill `Register`，以及 A7 的 `CleanupStagingProcedure`；节点和策略在 `extensions`，append 登记与完整目录删除尚未实现；`build_index`（W6）另起 Spark 作业建索引，`write_snapshot`（W8 的写文件一半）写出快照，`restore_snapshot`（恢复）待实现 | 否 |
+| `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、静态注册表、共用的 collection/client/有界等待规则；已实现快照、索引、load/release/flush/compact、describe、backfill `Register`，以及 A7 的 `CleanupStagingProcedure`；节点和策略在 `extensions`，append 登记与完整目录删除尚未实现；`build_index`（W6）另起 Spark 作业建索引，`write_snapshot`（W8 的写文件一半）写出快照并在规划期拒绝无法恢复的输出前缀，`restore_snapshot` 经同一条根规则核对后调 Milvus 的外部快照恢复、可选等待作业 | 否 |
 | `extensions` | SparkSessionExtensions、`CALL milvus.system.<name>(...)` 的解析器扩展、CallProcedure 节点与策略；文法 `spark-base/src/main/antlr4/MilvusCall.g4` 一份，设计见 procedure.html | antlr 生成的解析器按线（本线 antlr 版本），`MilvusSqlParser` 适配器按线（4.0 起多 `parseRoutineParam`）；其余共享 |
 
 按线的还有 `META-INF/services` 资源。
