@@ -120,6 +120,14 @@ object MilvusSearch extends Logging {
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
     )
+    // `milvus.search.vectors.max.bytes` is what one executor may hold, and an
+    // executor runs several tasks at once in one JVM, so the budget a task
+    // plans against is the executor's divided by the slots that share it. The
+    // planner and the task's own check take the same value, or a set sized to
+    // fit would be rejected while it ran.
+    val slots = MilvusSearch.taskSlotsPerExecutor(spark)
+    val vectorsPerTask =
+      math.max(layout.rowBytes.toLong, limits.vectorsMaxBytes / slots)
     val plan = SearchPlan.of(
       tasks,
       layout,
@@ -127,7 +135,7 @@ object MilvusSearch extends Logging {
       queryCount.toInt,
       k,
       limits.groupMaxBytes,
-      limits.vectorsMaxBytes
+      vectorsPerTask
     )
     val spec = SegmentSetSearch.Spec(
       vectorColumn,
@@ -140,7 +148,7 @@ object MilvusSearch extends Logging {
       filter,
       searchParameters,
       allowUnindexed,
-      limits.vectorsMaxBytes,
+      vectorsPerTask,
       MilvusOption(caseInsensitive).readLimits.arrowMaxBytes
     )
 
@@ -391,6 +399,27 @@ object MilvusSearch extends Logging {
       // the broadcast. Memory only: a level that spills would hand each task
       // its own deserialized copy and put the six back.
       .persist(StorageLevel.MEMORY_ONLY)
+  }
+
+  /** How many tasks of this job share one executor's memory at once.
+    *
+    * `spark.executor.cores` says it wherever executors are separate processes.
+    * A local master has no executors: the driver runs the whole job, and
+    * `local[n]` means those n tasks share this one JVM, which is what
+    * `defaultParallelism` reports. Anything else with the setting absent is
+    * taken as one slot, which is Spark's own default and errs towards a larger
+    * per-task budget rather than a smaller one.
+    */
+  private[read] def taskSlotsPerExecutor(spark: SparkSession): Int = {
+    val configured = spark.conf
+      .getOption("spark.executor.cores")
+      .flatMap(value => scala.util.Try(value.trim.toInt).toOption)
+      .filter(_ > 0)
+    val local = spark.sparkContext.master.startsWith("local[") ||
+      spark.sparkContext.master == "local"
+    configured.getOrElse(
+      if (local) math.max(1, spark.sparkContext.defaultParallelism) else 1
+    )
   }
 
   /** Every query's candidates become its global top-k, best first. */

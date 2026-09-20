@@ -53,10 +53,18 @@ nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用
 广播的字节上限，超过就随 shuffle 下发，两条路结果相同；
 `milvus.search.group.max.bytes`（默认 512 MiB）是一个任务一次回答多少查询，按
 「查询数 ×（维度 × 元素宽度 + K × 28 字节）」计；
-`milvus.search.vectors.max.bytes`（默认 2 GiB）是一个任务同时留在内存里的向量字节
-上限，也决定一个任务读多少个段。
+`milvus.search.vectors.max.bytes`（默认 2 GiB）是**一个 executor** 同时留在内存里的
+底库向量字节上限。一个 executor 上并发的任务共享它：规划时按
+`spark.executor.cores` 除开，得到每个任务的额度，这个额度同时决定一个任务读多少个
+段。local 模式下没有 executor，`local[n]` 的 n 个任务共享同一个 JVM，除数就是 n。
+这些向量在 Arrow 堆外，`-Xmx` 管不到它们。
 
-每次搜索注册一组累加器，在 Spark 的 stage 页面可见：`milvus.search.segments`、
+`milvus.search.group.max.bytes` 仍然是**每个任务**的：它同时决定查询组的个数，那是
+规划的形状，不只是内存。所以一个任务的峰值是「executor 额度 ÷ 并发数 + 一个查询
+组」。
+
+每次搜索注册一组累加器，任务结束后在 Spark 的 stage 页面可见；运行中的进度由 driver
+日志每个心跳周期报一行。累加器有：`milvus.search.segment.searches`、
 `milvus.search.read.bytes` 与 `milvus.search.read.nanos`、
 `milvus.search.index.bytes` 与 `milvus.search.index.load.nanos`、
 `milvus.search.bitmap.nanos`、`milvus.search.knowhere.calls` 与

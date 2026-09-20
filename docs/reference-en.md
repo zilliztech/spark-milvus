@@ -65,12 +65,21 @@ is how large the query set may be before it stops being broadcast from the
 driver and travels with the shuffle instead; both paths give the same result.
 `milvus.search.group.max.bytes` (default 512 MiB) is what one task answers at a
 time, counted as queries × (dimension × element width + K × 28 bytes).
-`milvus.search.vectors.max.bytes` (default 2 GiB) is how many bytes of vectors
-one task keeps while it answers them, and it also bounds how many segments one
-task reads.
+`milvus.search.vectors.max.bytes` (default 2 GiB) is how many bytes of base
+vectors **one executor** keeps at once. The tasks running there share it: the
+plan divides it by `spark.executor.cores` to get a task's share, which also
+bounds how many segments that task reads. A local master has no executors, so
+the n tasks of `local[n]` share the one JVM and n is the divisor. These vectors
+live in Arrow's off-heap memory, which `-Xmx` does not bound.
 
-Each search registers its own accumulators, which the stage page shows:
-`milvus.search.segments`, `milvus.search.read.bytes` and
+`milvus.search.group.max.bytes` stays **per task**: it also decides how many
+query groups there are, which is the shape of the plan and not only memory. One
+task's peak is therefore its share of the executor budget plus one query
+group.
+
+Each search registers its own accumulators, which the stage page shows once a
+task ends; while it runs, the driver log reports them once a heartbeat. They are
+`milvus.search.segment.searches`, `milvus.search.read.bytes` and
 `milvus.search.read.nanos`, `milvus.search.index.bytes` and
 `milvus.search.index.load.nanos`, `milvus.search.bitmap.nanos`,
 `milvus.search.knowhere.calls` and `milvus.search.knowhere.nanos`,

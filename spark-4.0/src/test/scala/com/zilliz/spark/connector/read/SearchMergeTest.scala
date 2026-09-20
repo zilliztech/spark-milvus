@@ -109,6 +109,12 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     rows.map(_.getAs[Int]("rank")).toSeq shouldBe Seq(1)
   }
 
+  test("a local master's tasks all share one JVM's memory") {
+    // local[2] in beforeAll: two tasks at once, so an executor budget is
+    // halved before a task plans against it.
+    MilvusSearch.taskSlotsPerExecutor(spark) shouldBe 2
+  }
+
   test("a progress count reads at a glance") {
     SearchProgress.grouped(0L) shouldBe "0"
     SearchProgress.grouped(999L) shouldBe "999"
