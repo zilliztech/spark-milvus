@@ -108,6 +108,16 @@ class Format:
         """The JDK's signal-chaining library, relative to JAVA_HOME."""
         raise NotImplementedError
 
+    def jvm_load_timeout_seconds(self):
+        """How long one JNI load order may take before it counts as hung.
+
+        It bounds a deadlock, so it is far above what a load costs. What a
+        load costs is the platform's business: the first ``dlopen`` of a
+        freshly written library is the operating system's chance to inspect
+        it, and the bundle holds 221 of them.
+        """
+        return 120
+
     def library_stem(self, name):
         """A library file name without its lib prefix, version and suffix."""
         raise NotImplementedError
@@ -240,6 +250,14 @@ class MachO(Format):
 
     def jsig_library(self):
         return "lib/libjsig.dylib"
+
+    def jvm_load_timeout_seconds(self):
+        # Gatekeeper inspects each library the first time it is mapped, and a
+        # staged bundle is 221 libraries nothing has mapped before: measured at
+        # 197 seconds on an Apple M-series laptop, against 120 for every later
+        # load of the same files. Linux has no such step, so its number does
+        # not carry over.
+        return 600
 
     def library_stem(self, name):
         return re.sub(r"(?:\.[0-9][^.]*)*\.dylib$", "", name.removeprefix("lib"))

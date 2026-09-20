@@ -18,7 +18,7 @@ import platforms
 _FORMAT = platforms.host()
 JVM_LOAD_ENTRIES = (_FORMAT.library_name("milvus-storage-jni"),
                     _FORMAT.library_name("knowhere_jni"))
-JAVA_TIMEOUT_SECONDS = 120
+JAVA_TIMEOUT_SECONDS = _FORMAT.jvm_load_timeout_seconds()
 JAVA_ENVIRONMENT_OVERRIDES = (
     "CLASSPATH",
     "JAVA_TOOL_OPTIONS",
