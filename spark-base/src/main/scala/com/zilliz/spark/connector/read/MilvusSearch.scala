@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.read
 import java.util.Locale
 import scala.jdk.CollectionConverters._
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, explode, udaf}
@@ -32,7 +33,7 @@ import io.milvus.grpc.schema.{DataType, FieldSchema}
   * `_row_offset` and the output columns asked for
   * (docs/design/architecture/vector-search.html section 1.1).
   */
-object MilvusSearch {
+object MilvusSearch extends Logging {
 
   private val Reserved =
     Set("query_id", "rank", "_score", "_segment_id", "_row_offset")
@@ -144,6 +145,20 @@ object MilvusSearch {
     )
 
     val metrics = SearchMetrics.create(spark.sparkContext)
+    // The pairs an exact search has to measure. Index mode probes instead of
+    // comparing every row, so it has no total and reports none.
+    val comparedTotal =
+      if (searchMode != "exact") 0L
+      else queryCount * tasks.flatMap(_.snapshotRows).sum
+    val queryBytes = SearchQueries.bytes(queryCount, layout)
+    logInfo(
+      s"Search plan: mode=$searchMode, metric=$searchMetric, topK=$k, " +
+        s"queries=$queryCount (${queryBytes} bytes, delivered by " +
+        s"${if (queryBytes <= limits.queriesMaxBytes) "broadcast" else "shuffle"}), " +
+        s"queryGroups=${plan.groups.size}, segmentSets=${plan.tasks}, " +
+        s"segments=${tasks.size}, comparedTotal=$comparedTotal"
+    )
+    spark.sparkContext.addSparkListener(new SearchProgress(comparedTotal))
     val hits =
       if (plan.isEmpty) empty(spark)
       else

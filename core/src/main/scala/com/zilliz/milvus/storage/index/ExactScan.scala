@@ -28,7 +28,7 @@ object ExactScan {
       metric: String,
       allocator: BufferAllocator,
       merger: TopKMerger,
-      onNativeCall: Long => Unit = _ => ()
+      onProgress: SegmentSearch.Progress => Unit = _ => ()
   ): Unit = {
     var next = vectors.next()
     while (next.nonEmpty) {
@@ -42,7 +42,7 @@ object ExactScan {
           metric,
           allocator,
           merger,
-          onNativeCall
+          onProgress
         )
       finally current.close()
       next = vectors.next()
@@ -61,7 +61,7 @@ object ExactScan {
       metric: String,
       allocator: BufferAllocator,
       merger: TopKMerger,
-      onNativeCall: Long => Unit = _ => ()
+      onProgress: SegmentSearch.Progress => Unit = _ => ()
   ): Unit = {
     require(k > 0, s"topK must be positive: $k")
     require(Candidate.metricRanks(metric), s"Unsupported metric: $metric")
@@ -88,7 +88,17 @@ object ExactScan {
         bytes(scores, queries.queries.toLong * count * 4L),
         parameters
       )
-      onNativeCall(System.nanoTime() - started)
+      // The queries and the rows that survived the mask are both in scope
+      // here and nowhere above: this is the only point that can say how many
+      // pairs a step measured.
+      onProgress(
+        SegmentSearch.Progress(
+          1,
+          System.nanoTime() - started,
+          queries.queries.toLong * current.visibleRows.toLong,
+          0
+        )
+      )
       collect(current, queries.queries, count, ids, scores, segmentId, merger)
     } finally {
       mask.close()

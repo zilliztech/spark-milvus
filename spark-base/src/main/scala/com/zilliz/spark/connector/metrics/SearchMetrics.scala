@@ -21,6 +21,7 @@ final class SearchMetrics private (
     val bitmapNanos: LongAccumulator,
     val knowhereCalls: LongAccumulator,
     val knowhereNanos: LongAccumulator,
+    val compared: LongAccumulator,
     val candidates: LongAccumulator,
     val takeRows: LongAccumulator,
     val takeNanos: LongAccumulator
@@ -36,6 +37,7 @@ final class SearchMetrics private (
     SearchMetrics.BitmapNanos -> bitmapNanos,
     SearchMetrics.KnowhereCalls -> knowhereCalls,
     SearchMetrics.KnowhereNanos -> knowhereNanos,
+    SearchMetrics.Compared -> compared,
     SearchMetrics.Candidates -> candidates,
     SearchMetrics.TakeRows -> takeRows,
     SearchMetrics.TakeNanos -> takeNanos
@@ -55,6 +57,12 @@ object SearchMetrics {
   val BitmapNanos = "milvus.search.bitmap.nanos"
   val KnowhereCalls = "milvus.search.knowhere.calls"
   val KnowhereNanos = "milvus.search.knowhere.nanos"
+
+  /** Query and base-vector pairs an exact scan measured a distance for. The
+    * planner knows the total, so this one has a denominator: an index probe
+    * cannot count them and leaves it at zero.
+    */
+  val Compared = "milvus.search.compared"
   val Candidates = "milvus.search.candidates"
   val TakeRows = "milvus.search.take.rows"
   val TakeNanos = "milvus.search.take.nanos"
@@ -71,6 +79,7 @@ object SearchMetrics {
     context.longAccumulator(BitmapNanos),
     context.longAccumulator(KnowhereCalls),
     context.longAccumulator(KnowhereNanos),
+    context.longAccumulator(Compared),
     context.longAccumulator(Candidates),
     context.longAccumulator(TakeRows),
     context.longAccumulator(TakeNanos)
