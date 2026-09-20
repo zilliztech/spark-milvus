@@ -24,42 +24,15 @@ final class SegmentVectors private (
     vectorColumn: String,
     layout: VectorLayout,
     exclusions: RowExclusions,
-    allocator: BufferAllocator,
-    batchMaxBytes: Long
+    allocator: BufferAllocator
 ) extends AutoCloseable {
   private var nextRow = 0L
   private var closed = false
 
   /** The next batch, or None at the end of the segment. The caller closes each
     * batch before asking for the next one.
-    *
-    * What the storage layer returns is not what a search wants to work on: it
-    * closes a Parquet row group at a megabyte, so a 1024-dimension float vector
-    * arrives 256 rows at a time whatever `milvus.read.batch.max.rows` says, and
-    * every one of those becomes its own call into the engine over its own
-    * reload of the query matrix. Batches are joined here until they fill
-    * `milvus.read.batch.max.bytes`, which is what that option was for.
     */
   def next(): Option[SegmentVectors.Batch] = {
-    val first = readBatch()
-    if (first.isEmpty) return first
-    val rowBytes = layout.rowBytes.toLong
-    var parts = List(first.get)
-    var bytes = first.get.rows.toLong * rowBytes
-    var reading = true
-    while (reading && bytes < batchMaxBytes) {
-      readBatch() match {
-        case Some(batch) =>
-          parts = batch :: parts
-          bytes += batch.rows.toLong * rowBytes
-        case None => reading = false
-      }
-    }
-    if (parts.size == 1) first
-    else Some(SegmentVectors.join(parts.reverse, layout, allocator))
-  }
-
-  private def readBatch(): Option[SegmentVectors.Batch] = {
     require(!closed, "Segment vectors are closed")
     reader.next().map { root =>
       var base: KnowhereBuffers.Base = null
@@ -77,7 +50,7 @@ final class SegmentVectors private (
           allocator
         )(excluded.set)
         val batch =
-          new SegmentVectors.Batch(base, excluded, nextRow, rows, Seq(root))
+          new SegmentVectors.Batch(base, excluded, nextRow, rows, root)
         nextRow += rows
         batch
       } catch {
@@ -111,7 +84,7 @@ object SegmentVectors {
       val excluded: BitSet,
       val firstRow: Long,
       val rows: Int,
-      private[exec] val backing: Seq[AutoCloseable]
+      private val root: VectorSchemaRoot
   ) extends AutoCloseable {
 
     /** The rows this batch offers a search, after deletes, the filter and null
@@ -121,59 +94,8 @@ object SegmentVectors {
 
     override def close(): Unit = {
       try base.close()
-      finally {
-        val failures = backing.flatMap(closeable =>
-          scala.util.Try(closeable.close()).failed.toOption
-        )
-        failures.headOption.foreach(throw _)
-      }
+      finally root.close()
     }
-  }
-
-  /** Several read batches as one, contiguous in rows and in bytes.
-    *
-    * The exclusion bitmaps move with the rows: a row excluded at position `i`
-    * of the third part is excluded at `rowsBefore + i` of the result. The parts
-    * are closed by [[KnowhereBuffers.joined]] once their bytes are copied, so
-    * the peak is one part above the result.
-    */
-  private[exec] def join(
-      parts: Seq[Batch],
-      layout: VectorLayout,
-      allocator: BufferAllocator
-  ): Batch = {
-    require(parts.nonEmpty, "A joined batch needs at least one part")
-    val rows = parts.map(_.rows.toLong).sum
-    require(
-      rows <= Int.MaxValue.toLong,
-      s"A joined batch of $rows rows exceeds what one batch addresses"
-    )
-    val excluded = new BitSet(math.max(rows.toInt, 1))
-    var before = 0
-    parts.foreach { part =>
-      var row = part.excluded.nextSetBit(0)
-      while (row >= 0) {
-        excluded.set(before + row)
-        row = part.excluded.nextSetBit(row + 1)
-      }
-      before += part.rows
-    }
-    val base =
-      KnowhereBuffers.joined(parts.map(_.base), layout.rowBytes, allocator)
-    // The bytes are the result's now, so what the parts were reading out of
-    // goes. Keeping it would hold the reader's Arrow data beside the copy for
-    // as long as the batch lives, which in a held segment set is every byte of
-    // the set twice over, and `hold` would count one of them.
-    val failures = parts.flatMap(part =>
-      part.backing.flatMap(closeable =>
-        scala.util.Try(closeable.close()).failed.toOption
-      )
-    )
-    failures.headOption.foreach { failure =>
-      base.close()
-      throw failure
-    }
-    new Batch(base, excluded, parts.head.firstRow, rows.toInt, Seq.empty)
   }
 
   /** Over a reader that is already open, which is how a test supplies batches
@@ -184,17 +106,9 @@ object SegmentVectors {
       vectorColumn: String,
       layout: VectorLayout,
       exclusions: RowExclusions,
-      allocator: BufferAllocator,
-      batchMaxBytes: Long
+      allocator: BufferAllocator
   ): SegmentVectors =
-    new SegmentVectors(
-      reader,
-      vectorColumn,
-      layout,
-      exclusions,
-      allocator,
-      batchMaxBytes
-    )
+    new SegmentVectors(reader, vectorColumn, layout, exclusions, allocator)
 
   def open(
       task: SegmentReadTask,
@@ -213,13 +127,6 @@ object SegmentVectors {
       columnNameFor,
       allocator
     )
-    over(
-      reader,
-      vectorColumn,
-      layout,
-      exclusions,
-      allocator,
-      task.limits.batchMaxBytes
-    )
+    over(reader, vectorColumn, layout, exclusions, allocator)
   }
 }
