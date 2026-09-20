@@ -26,25 +26,25 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     sets.map(_.map(_.segmentId))
 
   test("a group holds as many queries as the byte limit allows") {
-    // 16 bytes of vector and 280 of candidates make 296 bytes a query.
-    SearchPlan.bytesPerQuery(layout, k = 10) shouldBe 296L
+    // 16 bytes of vector and 480 of candidates make 496 bytes a query.
+    SearchPlan.bytesPerQuery(layout, k = 10) shouldBe 496L
     SearchPlan.queriesPerGroup(
       layout,
       k = 10,
-      groupMaxBytes = 2960L
+      groupMaxBytes = 4960L
     ) shouldBe 10
-    SearchPlan.queriesPerGroup(layout, k = 10, groupMaxBytes = 296L) shouldBe 1
+    SearchPlan.queriesPerGroup(layout, k = 10, groupMaxBytes = 496L) shouldBe 1
   }
 
   test("the query matrix counts, not only the candidates") {
     val wide = VectorLayout(VectorElementType.Float32, 768)
 
-    SearchPlan.bytesPerQuery(wide, k = 10) shouldBe 3072L + 280L
+    SearchPlan.bytesPerQuery(wide, k = 10) shouldBe 3072L + 480L
     SearchPlan.queriesPerGroup(
       wide,
       k = 10,
       groupMaxBytes = 536870912L
-    ) shouldBe 536870912L / 3352L
+    ) shouldBe 536870912L / 3552L
   }
 
   test("a query that does not fit a group on its own is refused") {
@@ -56,7 +56,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
 
   test("queries are cut into groups in query order, the last one shorter") {
     val groups =
-      SearchPlan.groups(queries = 25, layout, k = 10, groupMaxBytes = 2960L)
+      SearchPlan.groups(queries = 25, layout, k = 10, groupMaxBytes = 4960L)
 
     groups.map(group => (group.firstQuery, group.queries)) shouldBe Seq(
       (0, 10),
@@ -212,7 +212,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       executors = 2,
       queries = 3,
       k = 10,
-      groupMaxBytes = 592L,
+      groupMaxBytes = 992L,
       vectorsMaxBytes = 1L << 31
     )
 

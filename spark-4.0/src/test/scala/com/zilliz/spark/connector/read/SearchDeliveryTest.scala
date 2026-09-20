@@ -127,6 +127,35 @@ class SearchDeliveryTest
     seen.distinct.size shouldBe groups.size
   }
 
+  test("a task learns its segment set without holding a query group") {
+    // Through the cartesian, a task reads its first pair to learn which set
+    // it has, and a buffered iterator keeps that pair -- and the group in it
+    // -- for as long as the task runs. Beside it, nothing of the pair
+    // survives the group it carried.
+    val delivered =
+      MilvusSearch.packedGroups(
+        selected,
+        SearchPlan.Plan(Seq.empty, groups),
+        spec,
+        layout
+      )
+    val slots = spark.sparkContext.parallelize(0 until 3, 3)
+    val seen = slots
+      .cartesian(delivered)
+      .mapPartitionsWithIndex { (index, pairs) =>
+        // The index is the left partition's, which is the segment set's, and
+        // it is known before a pair is read.
+        Iterator((index, pairs.map(_._2.queries).sum))
+      }
+      .collect()
+      .toSeq
+      .sortBy(_._1)
+
+    seen.map(_._1) shouldBe Seq(0, 1, 2)
+    // Every task sees every group: four groups of two queries each.
+    seen.map(_._2) shouldBe Seq(queries, queries, queries)
+  }
+
   test("packing by group keeps every query, in the planner's order") {
     val delivered =
       MilvusSearch.packedGroups(

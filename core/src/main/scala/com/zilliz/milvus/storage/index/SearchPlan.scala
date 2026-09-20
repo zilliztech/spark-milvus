@@ -18,10 +18,20 @@ import com.zilliz.milvus.storage.schema.VectorLayout
   */
 object SearchPlan {
 
-  /** What one candidate costs in the aggregation buffer: the query, the
-    * segment, the row offset and the score.
+  /** What one candidate costs a task while the search runs.
+    *
+    * A candidate is a `Candidate` object in the query's own priority queue, not
+    * four fields packed side by side: on a 64-bit JVM with compressed ordinary
+    * object pointers that is a 12-byte header over an `Int`, two `Long`s and a
+    * `Double`, 40 bytes once aligned, and the queue's backing array holds a
+    * reference to it. Counting the fields alone said 28 and a task planned
+    * against a budget it then overran.
+    *
+    * The second stage costs more again -- a candidate crosses it as a
+    * `GenericRow` over an `Object[4]` of boxed values -- but that is the
+    * shuffle's cost, not a bound on what one task keeps.
     */
-  val CandidateBytes: Int = 4 + 8 + 8 + 8
+  val CandidateBytes: Int = 40 + 8
 
   /** A slice of the query set, by position in the query matrix. */
   final case class QueryGroup(firstQuery: Int, queries: Int) {

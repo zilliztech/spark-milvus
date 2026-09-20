@@ -10,6 +10,7 @@ import org.apache.spark.sql.functions.{col, explode, udaf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.Partitioner
 
 import com.zilliz.milvus.storage.expr.PlanParser
 import com.zilliz.milvus.storage.index.SearchPlan
@@ -306,18 +307,30 @@ object MilvusSearch extends Logging {
       }
     } else {
       val delivered = packedGroups(selected, plan, spec, layout)
-      setsRdd.cartesian(delivered).mapPartitions { pairs =>
+      require(
+        delivered.getNumPartitions == 1,
+        s"The packed query set travels as one partition, not ${delivered.getNumPartitions}"
+      )
+      // The segment set reaches the task beside the cartesian rather than
+      // through it. Through it, a task has to look at its first pair to learn
+      // which set it holds, and a buffered iterator keeps that pair for as
+      // long as the task runs: the first query group's bytes, 502 MB of an
+      // 800 MiB set, held while every later group is searched. Beside it, the
+      // left side carries an index, `CartesianRDD` numbers its partitions by
+      // the left partition when the right side is one, and the sets are
+      // broadcast once for the executor rather than once for each task.
+      val held = spark.sparkContext.broadcast(sets.toVector)
+      val slots = spark.sparkContext.parallelize(sets.indices, plan.tasks)
+      slots.cartesian(delivered).mapPartitionsWithIndex { (index, pairs) =>
         if (pairs.isEmpty) Iterator.empty
-        else {
-          val paired = pairs.buffered
+        else
           SegmentSetSearch.run(
-            paired.head._1,
+            held.value(index),
             spec,
-            paired.map(_._2),
+            pairs.map(_._2),
             groups.size,
             metrics
           )
-        }
       }
     }
   }
@@ -359,26 +372,46 @@ object MilvusSearch extends Logging {
     )
     val size = plan.groups.head.queries
     val metric = spec.metric
+    val rowBytes = layout.rowBytes
+    val sizes = plan.groups.map(_.queries).toVector
+    // A group's row arrives, is written where it belongs and is done with.
+    // `groupByKey` would hold the whole group as one query's bytes at a time
+    // and then build the group's bytes beside it, which is the group twice
+    // over: a heap dump of a failed 1 GiB query set found 2.03 GB in
+    // `byte[4096]` beside the arrays they were being copied into. Partitioning
+    // by group and sorting by position inside it puts the rows in the order
+    // they are wanted, so the peak is the group plus the row in hand.
+    val byGroup = new Partitioner {
+      override def numPartitions: Int = sizes.size
+      override def getPartition(key: Any): Int =
+        key.asInstanceOf[(Long, Long)]._1.toInt
+    }
     selected.rdd
       .map(row => SearchQueries.pack(Seq(row), layout, metric))
       .zipWithIndex()
       .map { case ((ids, vectors), position) =>
-        (position / size, (position, ids.head, vectors))
+        ((position / size, position), (ids.head, vectors))
       }
-      .groupByKey(plan.groups.size)
-      .map { case (_, queries) =>
-        val ordered = queries.toSeq.sortBy(_._1)
-        val vectors = new Array[Byte](ordered.size * layout.rowBytes)
-        ordered.zipWithIndex.foreach { case ((_, _, packed), index) =>
-          System.arraycopy(
-            packed,
-            0,
-            vectors,
-            index * layout.rowBytes,
-            layout.rowBytes
+      .repartitionAndSortWithinPartitions(byGroup)
+      .mapPartitionsWithIndex { (index, entries) =>
+        val queries = sizes(index)
+        val ids = new Array[Long](queries)
+        val vectors = new Array[Byte](queries * rowBytes)
+        var at = 0
+        entries.foreach { case (_, (id, packed)) =>
+          require(
+            at < queries,
+            s"Query group $index takes $queries queries and was given more"
           )
+          ids(at) = id
+          System.arraycopy(packed, 0, vectors, at * rowBytes, rowBytes)
+          at += 1
         }
-        SearchQueries.Group(ordered.map(_._2).toArray, vectors, 0)
+        require(
+          at == queries,
+          s"Query group $index takes $queries queries and was given $at"
+        )
+        Iterator(SearchQueries.Group(ids, vectors, 0))
       }
       .coalesce(1)
       // Stored, because `CartesianRDD` takes the right side's iterator once
