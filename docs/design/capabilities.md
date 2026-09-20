@@ -39,7 +39,7 @@
 | W2 | backfill 只写新列组 | `.option("milvus.write.mode","backfill").option("milvus.write.columns","f")` | spark.write、core.write | AddCollectionField 先于登记；目标段必须 Flushed；段的 base_path 和 Manifest 版本只能从快照 metadata 取（README 第 5 节缺 API）；无段级冻结，与 compaction、索引、schema 变更竞争；写侧分布与排序见决策 10；登记见 A4 | P2 |
 | W3 | 原子提交 | 自动；暂存前缀、作业清单、幂等 commit、abort 清理 | core.write.commit | 暂存前缀避开 `insert_log`，否则 86400 秒后被 GC 回收 | P1 |
 | W6 | 建索引 | `CALL milvus.system.build_index(...)`：driver 另起 Spark 作业，回读已写出的段建向量索引；不设写 option（决策日志 2026-09-17） | spark.procedure → core.index 构建，core.codec 编码索引文件，core.write.commit 记录索引，native-vector 调 Knowhere | 交付途径二选一：W8 的快照恢复（只能是新 collection），或 Milvus 认 Manifest 里的索引登记（README 第 5 节）。云上的索引要用含 Cardinal 的 Knowhere 构建，该产物只在云上作业运行时提供，不进公开产物。三条约束：分片按段 id 的连续区间切，不交错；规划与构建钉同一个快照版本，提交时才碰活的元数据；调优参数只在 Spark 层消费，不透传给 knowhere。设计见 [vector-search.html 第 2.7 节](architecture/vector-search.html#build) | P2 |
-| W8 | 写快照，恢复成新 collection | 写作业与 W6 结束后 `CALL milvus.system.restore_snapshot(...)`（A1） | core.write.commit 写快照 JSON 与段 Avro 清单（复用 core.snapshot.json 的形状），client.api 调外部快照恢复，spark.procedure | Milvus master 的 RestoreSnapshot 带 external 标志：目标 collection 必须不存在，恢复时复制段文件与向量、标量、文本、JSON 索引文件并重新分配 build id；3.0.x 是否包含未核对。段必须是 Milvus 能加载的完整段，受决策 22 约束 | P2 |
+| W8 | 写快照，恢复成新 collection | `CALL milvus.system.write_snapshot(...)` 写出快照文件；恢复成新 collection 待 `restore_snapshot` | core.write.commit 写快照 JSON 与段 Avro 清单（复用 core.snapshot.json 的形状），client.api 调外部快照恢复，spark.procedure | Milvus master 的 RestoreSnapshot 带 external 标志：目标 collection 必须不存在，恢复时复制段文件与向量、标量、文本、JSON 索引文件并重新分配 build id；3.0.x 是否包含未核对。段必须是 Milvus 能加载的完整段，受决策 22 约束。已实现写文件一半：`SnapshotWriter` 出快照 JSON 与每段一份 Avro 清单，连接器按 `milvus.snapshot.path` 自己读得回来；段必须是 storage version 3 且带行数，V2 段报错。恢复未实现 | P2 |
 
 ## 3 目录与 DDL
 
@@ -126,4 +126,3 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 | R10 | milvus-storage 尚未写可用的 row-group min/max 统计，FFI 也没有传入 row group 选择的 reader 入口；现有 Parquet predicate 实现为空，见 storage-access 4.5 |
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
 | R20 | 读 external collection 的设计已写（snapshot.html 3.1、read.html 1.1 与 6.4、storage-auth.html 3.4），代码未开始；打开外表段依赖 milvus-storage 的 `loon_reader_new` 接受空 schema |
-| W8 | 写快照的设计已写（同上），代码未开始；还依赖 Milvus 外部快照恢复在目标版本上可用 |

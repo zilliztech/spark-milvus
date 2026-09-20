@@ -46,7 +46,11 @@ import com.zilliz.milvus.storage.write.exec.{
 }
 import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.procedure.{BuildIndexProcedure, ProcedureArgs}
+import com.zilliz.spark.connector.procedure.{
+  BuildIndexProcedure,
+  ProcedureArgs,
+  WriteSnapshotProcedure
+}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 import io.milvus.storage.{MilvusStorageProperties, MilvusStorageTransaction}
@@ -300,6 +304,73 @@ object SegmentIndexSearchSmoke {
     assert(built == exact, s"index=$built exact=$exact")
     println(
       "PASS: build_index writes indexes through the Spark job and a search reads them back, matching the exact scan"
+    )
+
+    // The snapshot the connector writes, rather than the one this test builds
+    // by hand: the same segments, the same index records, read back through
+    // the ordinary snapshot path.
+    val snapshotRows = WriteSnapshotProcedure.run(
+      ProcedureArgs(
+        values = Map(
+          "collection" -> "persisted-index-smoke",
+          "job" -> jobId,
+          "input" -> "built",
+          "snapshot_id" -> 5000L,
+          "snapshot_name" -> "built-5000"
+        ),
+        options =
+          properties ++ Map(MilvusOption.SnapshotPath -> "to-build.json")
+      )
+    )
+    assert(snapshotRows.size == 1, snapshotRows.mkString(","))
+    val snapshotKey = snapshotRows.head.getString(0)
+    assert(
+      snapshotKey == "built/snapshots/10/metadata/5000.json",
+      snapshotKey
+    )
+    assert(snapshotRows.head.getInt(3) == 2, snapshotRows.mkString(","))
+    assert(snapshotRows.head.getInt(4) == 2, snapshotRows.mkString(","))
+    fixtures.foreach { fixture =>
+      val key =
+        s"built/snapshots/10/manifests/5000/${fixture.task.segmentId}.avro"
+      assert(Files.exists(directory.resolve(key)), key)
+    }
+
+    def written(mode: String) = MilvusSearch
+      .search(
+        spark,
+        properties ++ Map(MilvusOption.SnapshotPath -> snapshotKey),
+        "vector",
+        Array(2.5f, 0f),
+        4,
+        "L2",
+        mode,
+        Map.empty,
+        None,
+        Seq("id"),
+        false
+      )
+      .orderBy("rank")
+      .collect()
+      .toVector
+      .map(row =>
+        (
+          row.getAs[Long]("id"),
+          row.getAs[Double]("_score"),
+          row.getAs[Long]("_segment_id")
+        )
+      )
+
+    assert(
+      written("index") == built,
+      s"written=${written("index")} built=$built"
+    )
+    assert(
+      written("exact") == exact,
+      s"written=${written("exact")} exact=$exact"
+    )
+    println(
+      "PASS: write_snapshot writes a snapshot of the built indexes, and searching it matches the exact scan"
     )
   }
 

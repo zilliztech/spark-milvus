@@ -1,5 +1,6 @@
 package com.zilliz.milvus.storage.snapshot.json
 
+import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.databind.{
   DeserializationFeature,
   JsonNode,
@@ -70,6 +71,10 @@ object JsonValues {
 
 /** The one Jackson mapper for every document in this package: unknown
   * properties are ignored and numbers written as strings are accepted.
+  *
+  * Writing uses a second mapper, because a field a shape type left absent means
+  * "the source did not say" and must stay out of the document rather than
+  * appear as null.
   */
 private[json] object Mapper {
   val mapper: ObjectMapper with ScalaObjectMapper = {
@@ -88,7 +93,16 @@ private[json] object Mapper {
     m
   }
 
+  val writer: ObjectMapper with ScalaObjectMapper = {
+    val m = new ObjectMapper() with ScalaObjectMapper
+    m.registerModule(DefaultScalaModule)
+    m.setSerializationInclusion(JsonInclude.Include.NON_ABSENT)
+    m
+  }
+
   def read[A: Manifest](json: String): Either[Throwable, A] =
     try Right(mapper.readValue[A](json))
     catch { case e: Exception => Left(e) }
+
+  def write(value: Any): String = writer.writeValueAsString(value)
 }

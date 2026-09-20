@@ -146,7 +146,7 @@ class MilvusSqlParserTest extends AnyFunSuite with BeforeAndAfterAll {
       intercept[IllegalArgumentException](parse(sql)).getMessage
     assert(
       refused("CALL milvus.system.nope('c')").contains(
-        "known: build_index, register"
+        "known: build_index, write_snapshot, register"
       )
     )
     assert(

@@ -172,6 +172,11 @@ object SnapshotJson {
   def parse(json: String): Either[Throwable, SnapshotJson] =
     Mapper.read[SnapshotJson](json)
 
+  /** The document a snapshot write puts on storage. Absent fields stay out of
+    * it, so a reader still tells "not said" from "empty".
+    */
+  def toJson(snapshot: SnapshotJson): String = Mapper.write(snapshot)
+
   /** Reads a stream as UTF-8 and fails once it passes `maxBytes`, so a misnamed
     * multi-gigabyte object never reaches the parser.
     */

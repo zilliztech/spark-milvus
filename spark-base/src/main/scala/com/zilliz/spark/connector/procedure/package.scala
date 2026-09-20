@@ -18,10 +18,13 @@ package com.zilliz.spark.connector
   * does, builds one vector index per segment in a Spark job through
   * `core.index.IndexWriter`, writes the objects through `core.codec` under the
   * prefix the call names, and records them in the job manifest;
-  * `SegmentIndexBuild` is the task body. Planned: `restore_snapshot` (W8) asks
-  * Milvus to restore a connector-written snapshot into a new collection.
-  * Design: docs/design/architecture/vector-search.html section 2.7.
+  * `SegmentIndexBuild` is the task body. `WriteSnapshotProcedure` (W8) writes
+  * the snapshot that describes a build job's output, through
+  * `core.write.commit.SnapshotWriter`. Planned: `restore_snapshot` asks Milvus
+  * to restore such a snapshot into a new collection. Design:
+  * docs/design/architecture/vector-search.html section 2.7.
   *
-  * Capabilities: A1, A2, A3, A4, A5, A7, W6 (see docs/design/capabilities.md).
+  * Capabilities: A1, A2, A3, A4, A5, A7, W6, W8 (see
+  * docs/design/capabilities.md).
   */
 package object procedure

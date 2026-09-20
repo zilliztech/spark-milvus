@@ -686,9 +686,31 @@ under `output` with Milvus's naming, and records every segment's index in
 `metric` to `COSINE`; `params` is a list of `name=value` pairs; `build_id`,
 `index_version` and `store_path_version` default to the current millisecond, 1
 and 0. The result has one row per segment: `segment_id`, `partition_id`,
-`row_count`, `objects`, `bytes`, `build_id` and `job_id`. Delivering those
-indexes to Milvus, by restoring the snapshot into a new collection, is not
-implemented yet.
+`row_count`, `objects`, `bytes`, `build_id` and `job_id`.
+
+A second call writes the snapshot that describes what the build produced:
+
+```sql
+CALL milvus.system.write_snapshot('your_db.your_collection',
+  job              => 'index-1789478390101',
+  input            => 'files/built-index',
+  `milvus.snapshot.path` => 'https://.../metadata/4691.json',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+The segments come from the snapshot the options select — the one `build_index`
+planned against — and the index records from that job's manifest under
+`input`. It writes one Avro segment manifest and the snapshot JSON under
+`output/snapshots/<collection>/`, where `output` defaults to `input`;
+`snapshot_id` defaults to the current millisecond and `snapshot_name` to
+`<collection>-<snapshot_id>`. The result is one row: `snapshot` (the key of the
+snapshot JSON), `snapshot_id`, `snapshot_name`, `segments`, `indexes` and
+`bytes`. That snapshot can be read back by this connector with
+`milvus.snapshot.path`. Restoring it into a Milvus collection is not
+implemented yet. Segments must be storage version 3 and must carry a row
+count; a V2 segment is refused rather than written from a guess.
 
 ### 3.4 Managing Milvus with `CALL`
 
