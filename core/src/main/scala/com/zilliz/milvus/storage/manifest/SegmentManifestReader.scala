@@ -67,7 +67,8 @@ case class AvroManifestEntry(
     binlogFiles: Seq[AvroFieldBinlogEntry],
     deltaLogFiles: Seq[AvroFieldBinlogEntry],
     statsLogFiles: Seq[AvroFieldBinlogEntry] = Seq.empty,
-    indexFiles: Option[Vector[AvroIndexFileEntry]] = None
+    indexFiles: Option[Vector[AvroIndexFileEntry]] = None,
+    manifestHasIndex: Option[Boolean] = None
 )
 
 /** Decoder for per-segment manifest AVRO files written by milvus-datacoord.
@@ -95,7 +96,8 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
     1 -> "/milvus-segment-manifest-v1.avsc",
     2 -> "/milvus-segment-manifest-v2.avsc",
     3 -> "/milvus-segment-manifest-v3.avsc",
-    4 -> "/milvus-segment-manifest-v4.avsc"
+    4 -> "/milvus-segment-manifest-v4.avsc",
+    5 -> "/milvus-segment-manifest-v5.avsc"
   )
 
   private lazy val schemas: Map[Int, Schema] = SchemaResources.map {
@@ -322,8 +324,22 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
       binlogFiles = projectFieldBinlogs(rec.get("binlog_files")),
       deltaLogFiles = projectFieldBinlogs(rec.get("deltalog_files")),
       statsLogFiles = projectFieldBinlogs(rec.get("statslog_files")),
-      indexFiles = Some(projectIndexes(rec.get("index_files")))
+      indexFiles = Some(projectIndexes(rec.get("index_files"))),
+      // Version 5 and later say whether the segment's own manifest registers
+      // the index; an older record leaves it absent, which is not the same as
+      // an explicit false.
+      manifestHasIndex = Option(rec.getSchema.getField("manifest_has_index"))
+        .map(_ => asBoolean(rec.get("manifest_has_index")))
     )
+  }
+
+  private def asBoolean(value: AnyRef): Boolean = value match {
+    case flag: java.lang.Boolean => flag.booleanValue()
+    case null                    => false
+    case other =>
+      throw new IllegalStateException(
+        s"expected boolean, got ${other.getClass.getName}: $other"
+      )
   }
 
   private def statistics(entry: AvroManifestEntry): SegmentStatistics = {

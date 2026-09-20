@@ -483,8 +483,13 @@ object SnapshotCatalog extends Logging {
                   indexStorePathVersion = index.indexStorePathVersion
                 )
               }
-              if (available.isEmpty) SegmentIndexes.Unindexed
-              else SegmentIndexes.Available(available)
+              if (available.nonEmpty) SegmentIndexes.Available(available)
+              // A version 5 record whose segment manifest registers the index
+              // names no files here; that is metadata this connector has not
+              // read, not a segment without an index.
+              else if (entry.manifestHasIndex.contains(true))
+                SegmentIndexes.Unknown
+              else SegmentIndexes.Unindexed
           }
           segment.copy(rows = Some(entry.numOfRows), indexes = indexes)
       }
