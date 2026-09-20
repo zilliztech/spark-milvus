@@ -601,6 +601,8 @@ Knowhere 在部分 K 与过滤比例下会在索引内部改用暴力搜索（<a
 <p><strong>2026-09-16 04:48 UTC 的历史结果：</strong>Spark 4.0 / Java 21 / local[2]，读取真实快照的 100,000 行、128 维向量作为独立参考；查询向量取其中一行，topK=10、ef=256。无过滤、标量组合过滤和空值过滤三种查询分别排除 0、80,000、90,000 行；投影值、物理行号、排序、与原始 JNI 的命中集合及 Float32 分数全部通过。三个查询的严格 Top10 ID 召回率均为 100%，最大分数绝对误差分别为 5.4300e-5、6.6219e-5、5.9342e-5；该结果只描述当时依赖补丁批次的样本和三个查询，不构成其他查询或当前开源变体的验收。</p>
 <p>每次查询读取同一个 41,606,363 字节的已有索引，一次 deserialize、一次 search，没有回退。端到端耗时约 18.9、19.8、21.5 秒，主要耗在约 15–16 秒的索引读取；search 调用约 13、8、4 毫秒。没有跨查询缓存，不能把原生调用时间写成完整查询延迟。测试未调用在线 Search 服务，未创建或修改远端对象。</p>
 <p>历史 Cardinal 平台 JAR SHA-256 为 <code>e57bcca5a96e5cb0a249d79d8f0d6e758c994b80f4b3b4dab40e39b5b6ced726</code>，当时对应 <code>native-vector/storage-compatibility-cardinal.properties</code> 和 Knowhere <code>9dc2b8ad</code>。原始上游 CTest 为 2/3、Java/JNI 为 10/11、Python 为 13/13；C 和 Java 的 DiskANN v1 精确距离断言失败，量化结果为 1.0306964 而期望值为 1.0，诊断产物保留 <code>build.validated=false</code>。当前 PR 分支已经修改 DiskANN 测试合同；新 gitlink 必须按新测试重建，不能把旧失败或项目自有 acceptance fixture 的结果写成当前上游测试结果。</p>
+<p>Cardinal 的配置含 <code>-march=native</code>，验证主机为 Intel Xeon Gold 6338、GLIBC 2.35，未验证其他 CPU、旧 GLIBC、ARM 或 macOS。该旧批次只重新构建 Cardinal 变体，没有重新运行开源 Knowhere 变体。中文报告和日志属于外部 <code>milvus-spark-demo</code> 验证材料。</p>
+
 <h3 id="rollout">2.10 长期优化：DataFrame 与 SQL 计划里的入口</h3>
 <p><code>MilvusSearch.search</code> 是一个不在 Spark 计划里的静态 Scala 方法：PySpark 与 SQL 没有入口，它不能与 <code>where</code>、<code>select</code>、<code>join</code> 组成一个计划，快照解析与过滤也是扫描之外的第二条路。长期目标是让用户只写 DataFrame 或 SQL，由 Spark 的规划器把搜索交给现有的执行体（<code>SearchPlan</code>、<code>SegmentSetSearch</code>、<code>TopKMerger</code>、<code>SearchTake</code>），core 不改。本节是这项优化的设计与开发提纲；落地时更新决策 16，并按「移除是设计工作」处理 <code>MilvusSearch.search</code> 与 apps 的 V8 表达式。</p>
 <p><strong>两种形状</strong>，DataFrame、SQL 与 PySpark 写法一致：</p>
@@ -701,8 +703,6 @@ SELECT * FROM queries JOIN milvus.db.coll ON milvus.system.knn(vec, q, 10, 'L2')
 <li>会话注册的函数与 apps V8 同名；两个扩展同时配置时后注册者生效，还是第一步就删 apps 的注册。</li>
 <li>第一步落地后 <code>MilvusSearch.search</code> 是否立刻标记 deprecated 并在 reference 里指向新写法。</li>
 </ol>
-
-<p>Cardinal 的配置含 <code>-march=native</code>，验证主机为 Intel Xeon Gold 6338、GLIBC 2.35，未验证其他 CPU、旧 GLIBC、ARM 或 macOS。该旧批次只重新构建 Cardinal 变体，没有重新运行开源 Knowhere 变体。中文报告和日志属于外部 <code>milvus-spark-demo</code> 验证材料。</p>
 
 <h2 id="simplicity">三、简洁性带来的好处</h2>
 <ol>
