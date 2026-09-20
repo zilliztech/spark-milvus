@@ -290,6 +290,18 @@ a design decision. Exactly three reasons justify deferring: a decision has not
 been made, a dependency does not exist yet, or a fact is not yet known. "It is a
 lot of work" and "that is refactoring, not this task" are not among them.
 
+**Cost is what a change costs at run time.** When an option is called cheap or
+expensive, the subject is the resources and the computation a running job
+spends: bytes held, bytes shuffled, rows read, calls made, time taken. Effort is
+not cost — the principle above already says effort is not an input to a design
+decision, and calling a small change cheap smuggles it back in. A fallback that
+takes ten lines and a sentence of reasoning, and multiplies a stage's shuffle by
+sixteen because every segment becomes its own set, is the expensive option; the
+change that reads a row count the driver already has in its hands and lets the
+planner cut the fewest sets memory allows is the cheap one, whatever it costs to
+write. State the run-time quantity that moves, and in which direction, before
+comparing two designs.
+
 **Removing is design work, and it is never silent.** Subtraction is what keeps
 an architecture simple: the count of concepts, packages and options should hold
 steady or fall as capabilities land, not climb. But never delete on your own

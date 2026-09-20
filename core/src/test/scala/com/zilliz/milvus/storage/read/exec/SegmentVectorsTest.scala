@@ -130,12 +130,15 @@ class SegmentVectorsTest
         batch(Seq(3L), Seq(Some(Seq(5f, 6f))))
       )
     )
+    // One reader batch per call: these check what the reader hands out, not
+    // what a search is given.
     val vectors = SegmentVectors.over(
       reader,
       "101",
       layout,
       exclusions(None),
-      allocator
+      allocator,
+      SegmentVectorsTest.NoJoin
     )
     try {
       val first = vectors.next().get
@@ -160,6 +163,45 @@ class SegmentVectorsTest
     reader.closed shouldBe true
   }
 
+  test("reader batches are joined until they fill the configured batch") {
+    // milvus-storage closes a row group at a megabyte, so a search would
+    // otherwise call the engine once per handful of rows.
+    val reader = new FakeReader(
+      Seq(
+        batch(Seq(1L, 2L), Seq(Some(Seq(1f, 2f)), None)),
+        batch(Seq(3L), Seq(Some(Seq(5f, 6f)))),
+        batch(Seq(4L), Seq(Some(Seq(7f, 8f))))
+      )
+    )
+    val vectors = SegmentVectors.over(
+      reader,
+      "101",
+      layout,
+      exclusions(None),
+      allocator,
+      1L << 20
+    )
+    try {
+      val only = vectors.next().get
+      try {
+        only.firstRow shouldBe 0L
+        only.rows shouldBe 4
+        // The excluded row of the first part keeps its place in the whole.
+        only.excluded.get(1) shouldBe true
+        only.excluded.cardinality() shouldBe 1
+        only.visibleRows shouldBe 3
+        only.base.rows shouldBe 4
+        // Copied, so the joined batch owns its bytes.
+        only.base.borrowed shouldBe false
+        floats(only, 8) shouldBe Seq(1f, 2f, 0f, 0f, 5f, 6f, 7f, 8f)
+      } finally only.close()
+
+      vectors.next() shouldBe empty
+      vectors.rows shouldBe 4L
+    } finally vectors.close()
+    reader.closed shouldBe true
+  }
+
   test("a null vector is excluded and keeps its row offset") {
     val reader = new FakeReader(
       Seq(
@@ -167,7 +209,14 @@ class SegmentVectorsTest
       )
     )
     val vectors =
-      SegmentVectors.over(reader, "101", layout, exclusions(None), allocator)
+      SegmentVectors.over(
+        reader,
+        "101",
+        layout,
+        exclusions(None),
+        allocator,
+        SegmentVectorsTest.NoJoin
+      )
     try {
       val only = vectors.next().get
       try {
@@ -192,7 +241,14 @@ class SegmentVectorsTest
     val filtered = exclusions(Some("id > 2"))
     filtered.neededColumns should contain("100")
     val vectors =
-      SegmentVectors.over(reader, "101", layout, filtered, allocator)
+      SegmentVectors.over(
+        reader,
+        "101",
+        layout,
+        filtered,
+        allocator,
+        SegmentVectorsTest.NoJoin
+      )
     try {
       val only = vectors.next().get
       try {
@@ -207,7 +263,14 @@ class SegmentVectorsTest
   test("closing a batch releases what it held") {
     val reader = new FakeReader(Seq(batch(Seq(1L), Seq(Some(Seq(1f, 2f))))))
     val vectors =
-      SegmentVectors.over(reader, "101", layout, exclusions(None), allocator)
+      SegmentVectors.over(
+        reader,
+        "101",
+        layout,
+        exclusions(None),
+        allocator,
+        SegmentVectorsTest.NoJoin
+      )
     try {
       val only = vectors.next().get
       only.close()
@@ -215,4 +278,12 @@ class SegmentVectorsTest
 
     allocator.getAllocatedMemory shouldBe 0L
   }
+}
+
+object SegmentVectorsTest {
+
+  /** A batch limit no batch can be under, so every call returns one reader
+    * batch and the joining is out of the way.
+    */
+  private val NoJoin: Long = 1L
 }

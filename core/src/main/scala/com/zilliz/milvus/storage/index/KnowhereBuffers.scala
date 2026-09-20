@@ -39,6 +39,55 @@ object KnowhereBuffers {
     override def close(): Unit = owned.foreach(_.close())
   }
 
+  /** Several bases as one, so a search calls the engine over a working set
+    * rather than over whatever the storage layer handed out.
+    *
+    * milvus-storage closes a Parquet row group at a megabyte
+    * (`DEFAULT_MAX_ROW_GROUP_SIZE`, a constant), and its reader returns the
+    * smallest batch any column group offers, so a 1024-dimension float vector
+    * arrives 256 rows at a time however many rows the reader was asked for. A
+    * distance computation over 256 base vectors reloads the whole query matrix
+    * for those 256 columns; joined, one load serves them all.
+    *
+    * The parts are copied and then closed: what this returns owns its bytes,
+    * and the peak is one part above the result rather than twice it.
+    */
+  def joined(
+      parts: Seq[Base],
+      rowBytes: Int,
+      allocator: BufferAllocator
+  ): Base = {
+    require(parts.nonEmpty, "A joined base needs at least one part")
+    require(rowBytes > 0, s"rowBytes must be positive: $rowBytes")
+    if (parts.size == 1) return parts.head
+    val rows = parts.map(_.rows.toLong).sum
+    require(
+      rows * rowBytes <= Int.MaxValue.toLong,
+      s"A joined base of $rows rows exceeds what one buffer addresses"
+    )
+    val bytes = rows * rowBytes.toLong
+    val target = allocator.buffer(math.max(bytes, 1L))
+    try {
+      var offset = 0L
+      parts.foreach { part =>
+        val length = part.rows.toLong * rowBytes.toLong
+        val source = part.buffer.duplicate()
+        source.position(0)
+        source.limit(length.toInt)
+        target.setBytes(offset, source)
+        offset += length
+      }
+      val joinedBase =
+        new Base(region(target, 0L, bytes), rows.toInt, false, Some(target))
+      parts.foreach(_.close())
+      joinedBase
+    } catch {
+      case failure: Throwable =>
+        target.close()
+        throw failure
+    }
+  }
+
   def dtypeOf(layout: VectorLayout): DType = layout.elementType match {
     case VectorElementType.Float32  => DType.FLOAT32
     case VectorElementType.Float16  => DType.FLOAT16
