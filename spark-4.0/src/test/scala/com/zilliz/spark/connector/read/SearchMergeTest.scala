@@ -109,6 +109,15 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     rows.map(_.getAs[Int]("rank")).toSeq shouldBe Seq(1)
   }
 
+  test("a progress count reads at a glance") {
+    // Small counts are read as they are; a count of pairs is not.
+    SearchProgress.brief(0L) shouldBe "0"
+    SearchProgress.brief(9999L) shouldBe "9999"
+    SearchProgress.brief(10000L) shouldBe "1.00e+04"
+    SearchProgress.brief(12060426240L) shouldBe "1.21e+10"
+    SearchProgress.brief(53687091200L) shouldBe "5.37e+10"
+  }
+
   test("a search registers the accumulators the design names") {
     val metrics = SearchMetrics.create(spark.sparkContext)
 
