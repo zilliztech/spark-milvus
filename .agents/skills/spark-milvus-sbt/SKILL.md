@@ -6,8 +6,10 @@ description: Use when preparing any Spark-Milvus commit, or reviewing or changin
 # Maintain the Spark-Milvus build
 
 Read the repository [AGENTS.md](../../../AGENTS.md), then
-[sbt principles and practices](../../../docs/design/engineering/sbt.html). The document owns
-the build conventions; this skill applies them. Consult
+section 4 of [modules.md](../../../docs/design/architecture/modules.md) and the
+comments in `build.sbt` and `project/*.scala`. The former sbt conventions page
+(`docs/design/engineering/sbt.html`) was removed on 2026-09-20; the constraints
+that remain written down live in those two places, and this skill applies them. Consult
 [modules.md](../../../docs/design/architecture/modules.md) when a change affects module
 boundaries or compatibility, and [contributing.md](../../../docs/contributing.md)
 for build commands and environment constraints.
@@ -47,8 +49,8 @@ temporary root artifact and upstream JNI binding described in the document.
 Follow AGENTS.md's removal rule; a grep result alone does not authorize removing
 a user-facing contract.
 
-Update the canonical sbt document when a convention changes and record the
-decision in [the design log](../../../docs/design/README.md#6-决策日志). Link to
+Record a changed convention in section 4 of modules.md when it is a build
+constraint, and record the decision in [the design log](../../../docs/design/README.md#6-决策日志). Link to
 existing policy instead of copying it into AGENTS.md or this skill. Keep code
 and build comments in English, and the design document in Chinese.
 

@@ -53,7 +53,7 @@ configuration still use the complete package name.
 
 ## Build files
 
-Follow [sbt principles and practices](design/engineering/sbt.html) when reviewing
+Follow the build constraints in [section 4 of modules.md](design/architecture/modules.md) when reviewing
 or changing the build, using the repository's
 [sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md). `build.sbt` holds module
 wiring and publication decisions; root run, assembly and publication details
@@ -231,7 +231,7 @@ platform directory and cannot satisfy the packaged-library load.
 
 The unified Linux platform JAR contains both upstream JNI entry libraries and
 one dynamically linked dependency set. The implementation and acceptance status
-are documented in [the native build design](design/engineering/native-libraries.html).
+are documented in [native-build/README.md](../native-build/README.md); the library layers and the ways to obtain a bundle are in [build.html](design/engineering/build.html).
 The native build is explicit; ordinary sbt compilation does not start Conan or
 CMake. The independent project in `native-build/` defines both engines, their
 upstream JNI implementations and the optional Cardinal plugins without executing

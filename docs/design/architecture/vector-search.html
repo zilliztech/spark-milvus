@@ -572,7 +572,7 @@ milvus-storage 与 Knowhere 的精确 revision 分别由 superproject gitlink �
 <li><code>META-INF/milvus/knowhere-runtime.properties</code> 从统一包的 provenance 生成，报告实际构建是否包含 Cardinal。JVM 启动前仍须预加载自身 JRE 的 <code>libjsig</code>。</li>
 <li>旧的独立 storage/Knowhere 平台 JAR、<code>storage-compatibility*.properties</code> 合并和 <code>native/knowhere/1/</code> 布局只属于迁移前产物，统一包不能同时携带这些资源。</li>
 </ol>
-<p>旧 gitlink 组合曾完成真实 Cardinal HNSW/COSINE 查询验收；当前 storage <code>7eb1357</code> 与 Knowhere <code>1fff20d</code> 必须由统一构建重新产出并完成加载顺序、assembly 与真实文件复验。构建机制和验收项见<a href="../engineering/native-libraries.html">原生构建设计</a>。</p>
+<p>旧 gitlink 组合曾完成真实 Cardinal HNSW/COSINE 查询验收；当前 storage <code>7eb1357</code> 与 Knowhere <code>1fff20d</code> 必须由统一构建重新产出并完成加载顺序、assembly 与真实文件复验。构建机制和验收项见<a href="../engineering/build.html">依赖库与构建方案</a>。</p>
 
 <h3 id="interop">2.9 真实文件兼容</h3>
 <p><strong>能否加载一份索引文件，由它的引擎和格式版本决定，按目标 Milvus 写出的真实文件验证。</strong>

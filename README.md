@@ -88,7 +88,7 @@ you need to answer: architecture or engineering conventions.
 | [docs/design/architecture/modules.md](docs/design/architecture/modules.md) | Modules, packages, directories, the twelve build constraints, and the 1.x to 2.0 migration table |
 | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) | The illustrated version of the design |
 | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) | Catalog discovery, three-part tables, CREATE/DROP properties, and fixed-snapshot loading |
-| [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html) | Principles and practices for maintaining the sbt build |
+| [docs/design/engineering/build.html](docs/design/engineering/build.html), [build.md](docs/design/engineering/build.md) | The native libraries in three layers, the toolchain versions for Linux and macOS, the two ways to build the per-platform native bundle (Docker or local), and the directory design of the build definition, work directory and bundle JAR |
 
 `docs/reference-en.md` is the user-facing API reference for the connector
 options and entry points. [docs/contributing.md](docs/contributing.md) covers
@@ -150,6 +150,11 @@ alias spark-submit-wrapper="/xxx/spark-submit-wrapper.sh"
 ```
 
 ## Building
+
+The native libraries, the toolchain versions and the two ways to build the
+native bundle are described in
+[docs/design/engineering/build.md](docs/design/engineering/build.md)
+(same content as [build.html](docs/design/engineering/build.html)).
 
 Knowhere library loading uses the Java API and JNI from pinned PR #1829.
 The API builds automatically; the native platform JAR is selected explicitly.

@@ -1,0 +1,171 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>依赖库、编译前置条件与构建方案 · Spark-Milvus</title>
+<style>
+  :root { color-scheme: light dark; --paper: #fafaf8; --ink: #202824; --muted: #53615a; --line: #d7dfd9; --link: #16654b; --code: #eef2ee; --note: #edf7f1; }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #171c19; --ink: #e5ebe6; --muted: #a5b2a9; --line: #39473e; --link: #83d3ae; --code: #242d27; --note: #1d3026; }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-padding-top: 24px; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.8 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 940px; margin: 0 auto; padding: 48px 28px 88px; }
+  h1 { margin: 0 0 18px; font-size: 32px; line-height: 1.4; }
+  h2 { margin: 44px 0 16px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 22px; }
+  h3 { margin: 26px 0 10px; font-size: 17px; }
+  p, li { margin: 12px 0; }
+  a { color: var(--link); text-underline-offset: 3px; overflow-wrap: anywhere; }
+  code { font: .9em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code); padding: 2px 5px; border-radius: 3px; overflow-wrap: anywhere; }
+  pre { overflow-x: auto; padding: 14px 18px; background: var(--code); border: 1px solid var(--line); border-radius: 5px; line-height: 1.55; font-size: 13.5px; }
+  pre code { padding: 0; background: none; overflow-wrap: normal; }
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14px; }
+  th, td { padding: 8px 11px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { background: var(--code); }
+  .lead { font-size: 19px; }
+  .state { margin: 22px 0; padding: 14px 18px; border-left: 4px solid var(--link); background: var(--note); }
+  .muted { color: var(--muted); }
+  nav { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 20px 0; font-size: 14px; }
+  .table-scroll, .diagram { overflow-x: auto; margin: 20px 0; }
+  .diagram svg { display: block; width: 100%; min-width: 720px; font-family: system-ui, "PingFang SC", sans-serif; }
+  .diagram + p.muted { margin-top: -8px; font-size: 14px; }
+</style>
+<main lang="zh-CN">
+<nav><a href="../README.md">设计索引</a><a href="build.md">Markdown 版</a><a href="../../../AGENTS.md">AGENTS.md</a><a href="../../../native-build/README.md">native-build/README.md</a><a href="../../contributing.md">contributing.md</a></nav>
+<h1>依赖库、编译前置条件与构建方案</h1>
+
+<p class="lead">Connector 在 executor 里加载两个原生引擎：读写 Milvus 段文件的 milvus-storage 和做向量搜索的 Knowhere。它们共用十几个 C++ 库，所以每个平台只能由一张 Conan 依赖图编成一个原生 JAR <code>milvus-native-&lt;平台&gt;.jar</code>；平台是 Linux 与 macOS 乘 x86_64 与 aarch64 四种，编译它有两种方案：Docker 里编，或本机编。构建阶段、打包与发布的执行细节见 <a href="../../../native-build/README.md">native-build/README.md</a> 和 <a href="../../contributing.md">contributing.md</a>。</p>
+
+<div class="state"><strong>2026-09-20 状态。</strong>当前 gitlink 为 milvus-storage <code>7eb13578</code>、Knowhere <code>29210a33</code>。四个平台中只有 linux-x86_64 有源码构建 profile 和验收记录：本机已为它完成三次统一构建，两道门都通过，<code>make test</code> 为 1,160 项成功、0 项失败、149 项取消。其余三个平台的 profile 未写。尚未做：空 Conan 缓存的 Docker 重建，真实 UAT 实例上的查询复测。</div>
+
+<nav aria-label="目录">
+  <a href="#libraries">1 依赖库</a>
+  <a href="#prerequisites">2 编译前置条件</a>
+  <a href="#options">3 两种构建方案</a>
+  <a href="#layout">4 目录设计</a>
+</nav>
+
+<h2 id="libraries">1 依赖库有哪些，各自做什么</h2>
+<p><strong>每个平台的原生 JAR 分三层：两个 JNI 入口，两个引擎（milvus-storage 一个库，Knowhere 两个），其余是两个引擎共用的 Conan 依赖（linux-x86_64 上 157 个，合计 162 个动态库）。</strong>依赖由 <code>native-build/dependencies.json</code> 固定的 32 个直接 Conan 包和它们的传递依赖组成，完整清单以该文件和包内 <code>manifest.properties</code> 为准，本页不展开。库名在 Linux 是 <code>libfoo.so.1</code>，在 macOS 是 <code>libfoo.1.dylib</code>；JVM 侧不写后缀，入口库名由清单声明，其余由 <code>System.mapLibraryName</code> 推出。</p>
+
+<div class="diagram">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" role="img" aria-labelledby="fig1-title">
+<title id="fig1-title">原生库的三层</title>
+<defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#5c6b63"/></marker></defs>
+<g font-size="12" fill="#53615a"><text x="8" y="18">JVM 加载的入口</text><text x="8" y="112">引擎</text><text x="8" y="222">两个引擎共用的 Conan 依赖</text></g>
+<g fill="#e6f1eb" stroke="#4f8a70"><rect x="40" y="26" width="240" height="44" rx="6"/><rect x="40" y="120" width="240" height="60" rx="6"/></g>
+<g fill="#e8eef6" stroke="#4d6e99"><rect x="520" y="26" width="240" height="44" rx="6"/><rect x="520" y="120" width="150" height="60" rx="6"/><rect x="700" y="120" width="220" height="60" rx="6"/></g>
+<rect x="40" y="232" width="880" height="56" rx="6" fill="#f4efe3" stroke="#a5894d"/>
+<rect x="40" y="300" width="880" height="24" rx="4" fill="none" stroke="#999" stroke-dasharray="3 3"/>
+<g font-size="13" text-anchor="middle" fill="#202824">
+<text x="160" y="53">milvus-storage-jni</text>
+<text x="640" y="53">knowhere_jni</text>
+<text x="160" y="145">milvus-storage</text><text x="160" y="165" font-size="11">读写 Milvus 段文件；内含 Rust 桥</text>
+<text x="595" y="154">knowhere_c</text>
+<text x="810" y="145">knowhere</text><text x="810" y="165" font-size="11">向量索引；内含 faiss、DiskANN</text>
+<text x="480" y="256">Arrow/Parquet、Protobuf/gRPC、AWS/Azure/GCP SDK、OpenSSL、OpenBLAS、</text><text x="480" y="276">milvus-common、Folly、fmt、glog、prometheus-cpp、opentelemetry-cpp 等，一张 Conan 图只解析一份</text>
+<text x="480" y="317" font-size="11.5" fill="#53615a">系统提供，不进包：Linux 为 glibc、libstdc++、libgcc_s、libz.so.1；macOS 为 libSystem 一组</text>
+</g>
+<g fill="none" stroke="#5c6b63" stroke-width="1.6" marker-end="url(#a1)">
+<path d="M160 70 L160 120"/><path d="M640 70 L640 120"/><path d="M670 150 L700 150"/>
+<path d="M160 180 L160 232"/><path d="M810 180 L810 232"/>
+</g>
+</svg>
+</div>
+<p class="muted">箭头是动态库的依赖关系（Linux 的 DT_NEEDED，macOS 的 LC_LOAD_DYLIB）。绿色 storage 一侧，蓝色 Knowhere 一侧，黄色两方共用。</p>
+
+<div class="table-scroll"><table>
+<tr><th>库</th><th>做什么</th><th>源码来自</th></tr>
+<tr><td><code>milvus-storage</code></td><td>Milvus 段文件格式（V2 packed、V3 loon）的读写：manifest、列组 Parquet、delete 文件、统计，以及对象存储文件系统。Rust 桥 prsbridge（Lance、Vortex 格式）静态编进它</td><td>gitlink 子模块 <code>milvus-storage</code>，上游 main <code>7eb13578</code></td></tr>
+<tr><td><code>milvus-storage-jni</code></td><td>上游 Java API <code>io.milvus.storage</code> 的 JNI 实现；Arrow C Data Interface 在这里跨越 C 与 JVM</td><td>同上，<code>cpp/src/jni</code></td></tr>
+<tr><td><code>knowhere</code></td><td>向量索引的构建、加载和搜索；faiss（HNSW、IVF、暴力搜索）和 DiskANN 以静态库编进它。DiskANN 的对齐读只有 libaio 与 io_uring 实现，macOS 构建关闭它</td><td>gitlink 子模块 <code>knowhere</code>，PR #1829 分支 <code>29210a33</code></td></tr>
+<tr><td><code>knowhere_c</code></td><td>稳定的 C ABI（SOVERSION 1，隐藏其余符号），JNI 只经它调用引擎</td><td>同上，<code>src/c_api</code></td></tr>
+<tr><td><code>knowhere_jni</code></td><td>PR #1829 Java API <code>io.knowhere</code> 的 JNI 实现；JNI 头由 <code>javac -h</code> 在构建时生成</td><td>同上，<code>java/src/main/cpp</code></td></tr>
+</table></div>
+
+<p><strong>两个引擎共用 milvus-common、Folly、gRPC、OpenSSL 等十几个库，这是每个平台只能用一张 Conan 图的原因。</strong>操作系统的动态加载器按库名和符号解析依赖，Java 包名和 JAR 目录隔离不了它们。分别构建时出现过两种失败：先加载 storage，Knowhere 一侧复用了缺 <code>gotoblas</code> 符号的 milvus-common；先加载 Knowhere，storage 的 gRPC 初始化绑定到 Knowhere 静态嵌入的 gRPC 全局对象，进程退出。两个引擎的上游对 fmt、milvus-common、lz4 要求的版本不同，统一取较新者；不追随远程最新版本，不在仓库维护自有 recipe。系统 C 运行库由目标系统提供，不进包；Linux 上 <code>libz.so.1</code> 也不进包，因为 JVM 在 Connector 初始化前已加载系统 zlib，包内第二份不能覆盖已绑定的符号。</p>
+
+<h2 id="prerequisites">2 编译前置条件</h2>
+<p>四个平台共用的部分与根目录 <code>Dockerfile</code> 的 builder 阶段一致；编译器与二进制工具按操作系统不同。</p>
+<div class="table-scroll"><table>
+<tr><th>依赖</th><th>Linux（x86_64、aarch64）</th><th>macOS（x86_64、aarch64）</th></tr>
+<tr><td>Conan</td><td colspan="2">2.25.1</td></tr>
+<tr><td>CMake</td><td colspan="2">3.27.5</td></tr>
+<tr><td>Ninja</td><td colspan="2">随发行版 / Homebrew</td></tr>
+<tr><td>C/C++ 编译器</td><td>GCC、G++ 12</td><td>Apple Clang，另加 Homebrew <code>libomp</code> 提供 OpenMP</td></tr>
+<tr><td>Fortran 编译器（OpenBLAS）</td><td>gfortran 12</td><td>Homebrew gfortran</td></tr>
+<tr><td>Rust、Cargo</td><td colspan="2">rustup stable</td></tr>
+<tr><td>libclang</td><td>随发行版（Ubuntu <code>libclang-dev</code>）</td><td>Xcode Command Line Tools 自带</td></tr>
+<tr><td>JDK</td><td colspan="2">21</td></tr>
+<tr><td>Scala、sbt</td><td colspan="2">2.13.16、1.11.1</td></tr>
+<tr><td>Python</td><td colspan="2">3.9 以上</td></tr>
+<tr><td>二进制检视与改写工具</td><td>binutils（<code>readelf</code>）、<code>patchelf</code></td><td><code>otool</code>、<code>install_name_tool</code>、<code>codesign</code>（Xcode 自带）</td></tr>
+<tr><td>异步 I/O 头文件</td><td><code>libaio-dev</code></td><td>不需要，DiskANN 关闭</td></tr>
+<tr><td>ccache、Git</td><td colspan="2">随发行版 / Homebrew</td></tr>
+</table></div>
+
+<h2 id="options">3 两种构建方案</h2>
+<p><strong>Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 <code>build.py</code>，产物相同。</strong>构建不做交叉编译，每个平台的 JAR 在同平台机器上编。</p>
+<div class="table-scroll"><table>
+<tr><th>方案</th><th>命令</th><th>前置条件</th><th>产物与限制</th><th>用在哪</th></tr>
+<tr><td>Docker 构建</td><td><code>docker build --build-arg PUBLISH_MAVEN=false -t spark-milvus .</code></td><td>Docker 与 BuildKit；网络能到 JFrog、GitHub、crates.io。工具链由 Dockerfile 安装，本机无需准备</td><td>统一包 + assembly。Conan、Cargo、ccache、Coursier、Ivy、sbt 缓存各在一个 <code>sharing=locked</code> 的 cache mount 里，失败的 RUN 不丢已完成的依赖。worker 是哪个架构就出哪个架构的包；只有 Linux</td><td>Jenkins 发布流水线；验证"空缓存能否完整构建"</td></tr>
+<tr><td>本机构建</td><td><code>make native-bundle NATIVE_JOBS=50</code><br><code>make package</code></td><td>第 2 节本平台一列；PATH 上先出现上表的版本</td><td>同 A，产物在 <code>target/native-build/&lt;平台&gt;/</code>；<code>--conan-lock</code> 复用审核过的 lock，<code>--no-remote</code> 只用缓存。输入变化要换新工作目录，缓存仍复用</td><td>改 storage、Knowhere、依赖版本或 CMake 规则的开发</td></tr>
+</table></div>
+
+<p>两种方案都有 lock 这个开关：第一次运行解析依赖并写 <code>provenance/conan.lock</code>，之后用 <code>--conan-lock</code> 传入，传递依赖的 revision 才不随远程变化。<code>build.py</code> 会把 <code>dependencies.json</code> 生成的 <code>[replace_requires]</code> 段写进 host 与 build 两份 profile：消费者的 <code>force=True</code> 只固定 host 图，不加这一段时 build 图里的 protoc、grpc 插件会把 zlib、openssl 解析到远程最新 revision，lock 套用后又改写成 <code>build_requires</code> 里不存在的 host revision，空缓存的 <code>conan install --lockfile</code> 失败（2026-09-20 首次本机全量构建暴露并修复）。</p>
+
+<h2 id="layout">4 目录设计</h2>
+<p><strong>三处目录，平台名只出现在叶子上：仓库里的构建定义按引擎分文件、按平台分 profile；构建工作目录每平台一棵；JAR 内资源路径带平台段，解压器按运行平台选目录。</strong>平台名统一为 <code>&lt;os&gt;-&lt;arch&gt;</code>：<code>linux-x86_64</code>、<code>linux-aarch64</code>、<code>darwin-x86_64</code>、<code>darwin-aarch64</code>，Makefile、build.py、<code>NativeLibraries.platform()</code> 三处算法一致。</p>
+
+<h3>仓库内：<code>native-build/</code> 与两个脚本</h3>
+<pre><code>native-build/
+├── CMakeLists.txt              唯一原生工程入口：平台、工具链、依赖查找，include 下面两份引擎文件
+├── cmake/
+│   ├── Storage.cmake           milvus-storage、Rust 桥、milvus-storage-jni 三个目标及链接关系
+│   ├── Knowhere.cmake          knowhere、knowhere_c、knowhere_jni 与 C API 测试程序
+│   ├── knowhere/Sources.cmake  Knowhere、faiss、DiskANN 的源码清单与指令集分组
+│   ├── Install.cmake           安装到 lib/，RPATH 设为相对自身目录
+│   └── storage-private-symbols.map   隐藏 Rust 桥内部 LZ4/XXH/ZSTD/aws_lc 符号的链接脚本（ELF）
+├── profiles/
+│   └── &lt;平台&gt;                  Conan profile，每平台一份；今天只有 linux-x86_64
+├── dependencies.json           32 个直接依赖的 recipe revision、版本冲突策略、排除项
+├── conanfile.py                消费者：把 references 以 force=True 放进一张 host 图
+├── build.py                    驱动 11 个阶段，平台无关
+├── dependency_versions.py      两份上游 conanfile 与 dependencies.json 的对照
+├── stage.py                    收集依赖闭包、别名、查找路径改写、系统库排除
+├── jvm_load.py + NativeLoadCheck.java   双向 JVM 加载检查，staging、打包、sbt 共用一份
+└── tests/                      Python 单元测试与 DiskANN 验收 fixture
+scripts/build-native.sh         入口，exec build.py
+scripts/package-native.py       核对 provenance 后打 JAR</code></pre>
+<p>CMake 文件按引擎分而不按平台分，平台差异用 <code>CMAKE_SYSTEM_NAME</code> 条件表达在同一目标内，避免同一个目标有两份定义；今天 <code>CMakeLists.txt</code> 开头仍拒绝 Linux x86_64 以外的平台。</p>
+
+<h3>构建工作目录：<code>NATIVE_WORK_DIR</code>，默认 <code>target/native-build/&lt;平台&gt;/</code></h3>
+<pre><code>target/native-build/&lt;平台&gt;/
+├── status.json                 当前阶段与失败详情；.build.lock 防止两个构建写同一目录
+├── sources/                    引擎源码快照（storage 复制工作树，Knowhere 隔离 checkout）
+├── dependency-input/           conanfile.py 与 dependencies.json 的副本
+├── host-profile, build-profile 加了 [replace_requires] 段的两份 profile
+├── dependencies/               Conan 生成的 toolchain 与 CMake 依赖文件
+├── provenance/                 conan.lock、依赖 graph、工具版本、源码清单、compile_commands、CMake trace
+├── cmake-build/                一棵 Ninja 树：Rust 桥、两个引擎、JNI、测试程序
+├── install/lib/                引擎与 JNI 的安装副本，staging 的起点
+├── bundle-candidates/&lt;时间戳-哈希&gt;/   每次 staging 的候选目录，失败的带诊断留在这里
+├── bundle/                     通过两道门的当前包：lib/、provenance.json、provenance/、licenses/、audit/
+├── bundle-history/             被新候选替换下来的旧成功包
+├── milvus-native-&lt;平台&gt;.jar   最终产物
+└── milvus-native-&lt;平台&gt;.jar.properties   JAR 的 SHA-256，sbt 校验的输入</code></pre>
+<p>输入（源码、依赖、profile）变了就换新工作目录，Conan 缓存在 <code>CONAN_HOME</code> 里不随目录走。每个平台一棵目录，同一台机器不会出现两个平台的产物混在一起。</p>
+
+<h3>JAR 内部与解压目录</h3>
+<pre><code>milvus-native-&lt;平台&gt;.jar
+├── native/milvus/1/&lt;平台&gt;/
+│   ├── manifest.properties     平台、两个源码 revision、库列表、别名表、每库 SHA-256、入口库名、功能开关
+│   └── lib*                    全部动态库；别名不进 JAR，解压时按清单建硬链接
+└── META-INF/milvus-native/
+    ├── provenance.json         规范化的源码与 package 标识、各类摘要，无构建机绝对路径
+    ├── provenance/             源码清单、直接 reference、lock 与 graph 的摘要等证据
+    └── licenses/               收集的上游许可证
+
+sbt 校验时的解压目录     target/native-bundle/&lt;jar 哈希&gt;/lib/
+运行时的解压目录         每个 JVM 一个进程私有目录，由 native-runtime 的 NativeLibraries 创建</code></pre>
+<p>资源路径是 <code>native/&lt;引擎组&gt;/&lt;格式版本&gt;/&lt;平台&gt;/</code>，<code>milvus</code> 表示两个引擎合成一组，<code>1</code> 是 <code>manifest.properties</code> 的 <code>format.version</code>。平台段在路径里，几个平台的 JAR 可以合进同一个 assembly 而不冲突，运行时 <code>NativeLibraries.platform()</code> 按当前操作系统和架构选目录；今天 sbt 只接受与构建机同平台的那一个包。旧的仅 storage 路径用 <code>native/&lt;平台&gt;/</code>，与统一包路径不重叠，两者不会在一个 assembly 里混用。</p>
+</main>

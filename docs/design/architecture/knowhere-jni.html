@@ -18,7 +18,7 @@
 <main lang="zh-CN">
 <h1>Knowhere JNI 实现方案</h1>
 <p class="lead">为 spark-milvus 提供 Knowhere 的索引构建、加载、搜索、序列化与暴力搜索 C ABI / Java JNI 绑定。Cardinal Aquila 的 11 项扩展首期暂缓。</p>
-<p>Java 11 API 经 JNI 调用 C ABI，再由 C++ 调用 Knowhere 与计算后端。索引文件编码、对象存储、缓存和登记由 Connector 第二层处理；本页定义绑定实现，<a href="../engineering/native-libraries.html">独立 CMake 构建方案</a>定义原生产物的统一构建与打包。</p>
+<p>Java 11 API 经 JNI 调用 C ABI，再由 C++ 调用 Knowhere 与计算后端。索引文件编码、对象存储、缓存和登记由 Connector 第二层处理；本页定义绑定实现，<a href="../engineering/build.html">依赖库与构建方案</a>定义原生产物的统一构建与打包。</p>
 <p class="meta">2026-09-15 · 首期实现与双架构运行验证完成 · 发布材料仍待补齐，流水线后续推进。2026-09-17 补充能力对照（1.1 节）与线程模型（3.1 节）。</p>
 <nav aria-label="目录"><a href="#scope">完整能力清单</a><a href="#implementation">实现路径</a><a href="#api">接口与内存</a><a href="#build">构建产物</a><a href="#tasks">开发与贡献</a><a href="#acceptance">验收</a></nav>
 
@@ -123,8 +123,8 @@ public void close();</code></pre>
 </tbody></table>
 <p>加载器读取 <code>native/knowhere/&lt;version&gt;/&lt;platform&gt;/</code> 中的资源，按版本、平台与内容摘要提取到缓存目录，原子完成提取并核对全部摘要，再按 manifest 的 <code>entryLibrary</code> 一次加载 JNI 根库，由系统动态链接器建立整个依赖加载组。逐个 System.load 依赖库会破坏 <code>milvus-common</code> 引用 <code>libknowhere</code> 导出符号的解析，Linux 独立包已复现该问题。平台包必须包含所需动态依赖；在干净 JRE 容器检查 RPATH/RUNPATH 与 <code>DT_NEEDED</code>，不能依赖构建机的库路径。JNI PR 在本地生成的包上完成这些测试，不需要先上传 Nexus。</p>
 <p id="signal-chaining">当前固定版本的 Folly 共享库在加载时将 SIGPIPE 设为忽略，会覆盖 HotSpot 的处理器。运行契约采用 <a href="https://docs.oracle.com/en/java/javase/15/vm/signal-chaining.html">HotSpot 官方信号链机制</a>：Linux 在 JVM 启动前预加载同一 JRE 的 <code>$JAVA_HOME/lib/libjsig.so</code>；macOS 开发环境使用其 <code>libjsig.dylib</code>。加载器在 JVM 启动后才执行，不能由 Java 层事后加载替代。平台 JAR 不携带另一套 JDK 的 libjsig，干净 JRE 验收使用容器内 JRE 自带的库；不能仅以测试断言通过忽略信号处理器冲突。</p>
-<p>首批目标是 Linux x86_64 与 Linux aarch64 的 CPU 构建；能力列表只记录通过测试的组合。工具链、CPU 最低指令集和运行库要求随产物输出。面向云上 executor 的最终镜像选择，以及 Storage 与 Knowhere 在同一 JVM 的共存验收，归<a href="../engineering/native-libraries.html#load">独立 CMake 构建方案</a>。</p>
-<p>向流水线交付的是私仓（满足首期范围后可切上游）的仓库地址、受审查的完整源码 SHA 和上游基线、可重复调用的构建入口、上述产物布局和能力测试记录。内部 Maven 坐标、classifier、依赖组合版本、不可覆盖发布及“最新”解析规则仅在<a href="../engineering/native-libraries.html#package">独立 CMake 构建方案的产物一节</a>维护。流水线不在打包阶段修改 C ABI 或 Java API。</p>
+<p>首批目标是 Linux x86_64 与 Linux aarch64 的 CPU 构建；能力列表只记录通过测试的组合。工具链、CPU 最低指令集和运行库要求随产物输出。面向云上 executor 的最终镜像选择，以及 Storage 与 Knowhere 在同一 JVM 的共存验收，归<a href="../../../native-build/README.md">native-build/README.md</a>。</p>
+<p>向流水线交付的是私仓（满足首期范围后可切上游）的仓库地址、受审查的完整源码 SHA 和上游基线、可重复调用的构建入口、上述产物布局和能力测试记录。内部 Maven 坐标、classifier、依赖组合版本、不可覆盖发布及“最新”解析规则仅在<a href="../../../native-build/README.md">native-build/README.md</a>维护。流水线不在打包阶段修改 C ABI 或 Java API。</p>
 
 <h2 id="tasks">5. 开发与上游贡献</h2>
 <p>上游贡献草稿：<a href="https://github.com/zilliztech/knowhere/pull/1829">Knowhere PR #1829 — Add a C API and Java JNI bindings</a>；通过 <code>LawrenceTL92/knowhere-contrib</code> 的 <code>codex/knowhere-jni-pr</code> 分支提交。私仓继续作为合入前的开发来源。</p>
@@ -136,7 +136,7 @@ public void close();</code></pre>
 <li id="k3">接入 CMake/Conan、索引依赖和加载器，生成首期产物。</li>
 <li id="k4">通过下节验收，向上游提交 <code>Add a C API and Java JNI bindings</code> PR。</li>
 </ol>
-<p>开发和 PR 可独立于发布流水线推进。上游合入前，<a href="../engineering/native-libraries.html#build">统一构建</a>使用通过完整验收的私仓 SHA；上游具备首期能力并重新验收后再切换，暂缓的 11 项不阻塞切换。内部发布配置由 Spark-Milvus 维护。</p>
+<p>开发和 PR 可独立于发布流水线推进。上游合入前，<a href="../engineering/build.html#options">统一构建</a>使用通过完整验收的私仓 SHA；上游具备首期能力并重新验收后再切换，暂缓的 11 项不阻塞切换。内部发布配置由 Spark-Milvus 维护。</p>
 
 <h2 id="acceptance">6. 首期验收</h2>
 <p><strong>2026-09-16 更新：</strong>当前 PR 与私仓提交为 <code>c85fb76a</code>。已修复 CI 管道失败状态传递，并将 DiskANN 用例改为 BF 召回与逐项结果校验；x86_64 服务器 C 3/3、JNI 11/11、DiskANN 连续构建 20/20 通过，最新 GitHub CI 待完成。已删除额外添加的许可材料 CI 检查及通知，不列入本期 JNI 验收条件。</p>
@@ -155,7 +155,7 @@ public void close();</code></pre>
 <tr><td>能力声明</td><td>算法、dtype 与索引格式兼容范围有测试记录；DiskANN 只有通过本地文件往返测试才声明支持；不将未测试组合写入 features。</td></tr>
 <tr><td>上游 PR</td><td>源码、构建入口、使用说明、测试和已知支持范围齐全；公共上游 CI 不依赖内部 Nexus 或 Spark-Milvus。</td></tr>
 </tbody></table>
-<p>Nexus 发布、两库共存和 Connector 全矩阵验收见<a href="../engineering/native-libraries.html#validation">独立 CMake 构建方案的验收一节</a>；本页以独立构建的绑定产物完成验收。</p>
+<p>Nexus 发布、两库共存和 Connector 全矩阵验收见<a href="../../../native-build/README.md">native-build/README.md</a>；本页以独立构建的绑定产物完成验收。</p>
 
 
 <details id="cardinal-deferred"><summary>暂缓能力的实现研究（不进入首期任务与验收）</summary>
