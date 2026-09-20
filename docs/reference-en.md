@@ -707,12 +707,21 @@ planned against — and the index records from that job's manifest under
 `snapshot_id` defaults to the current millisecond and `snapshot_name` to
 `<collection>-<snapshot_id>`. The result is one row: `snapshot` (the key of the
 snapshot JSON), `snapshot_id`, `snapshot_name`, `segments`, `indexes` and
-`bytes`. That snapshot is verified for one thing: this connector reads it back with
-`milvus.snapshot.path`. Restoring it into a Milvus collection is not
-implemented, and whether Milvus accepts a connector-written snapshot has not
-been checked — several fields a read here does not use (`channel_name`, the
-two positions, `is_sorted`, `commit_timestamp`, `binlog_files`) are written
-from assumption. Segments must be storage version 3 and must carry a row
+`bytes`. The snapshot is the source snapshot with the job's indexes in it: the
+document and each segment manifest are the source's own bytes, with the index
+registrations replaced, so nothing about the segments or the collection is
+restated.
+
+Two readers are verified. This connector reads it back with
+`milvus.snapshot.path`. Milvus v3.0.2 restores it with
+`RestoreExternalSnapshot`, which brings the indexes with it — the restored
+collection reports them as built, loads and searches without building
+anything. That restore requires every path the snapshot names to sit under the
+root its metadata URI derives, so `output` has to be a prefix the data files
+are already under: for indexes built over an existing collection, that is the
+instance's own root, and `build_index` has to write there too. Calling the
+restore from this connector is not implemented; the call is made against
+Milvus directly. Segments must be storage version 3 and must carry a row
 count; a V2 segment is refused rather than written from a guess.
 
 ### 3.4 Managing Milvus with `CALL`
