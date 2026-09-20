@@ -223,6 +223,30 @@ class IndexBuildUatTest
 
   // ------------------------------------------------------------- prepare
 
+  /** Retries a call the service did not answer in time: a resumed instance is
+    * slow for its first requests and the client's deadline is ten seconds.
+    */
+  private def retried[A](what: String)(call: => scala.util.Try[A]): A = {
+    var attempt = 0
+    var result: Option[A] = None
+    while (result.isEmpty) {
+      val outcome =
+        try call
+        catch { case failure: Throwable => scala.util.Failure(failure) }
+      outcome match {
+        case scala.util.Success(value) => result = Some(value)
+        case scala.util.Failure(failure)
+            if attempt < 10 &&
+              failure.getMessage.contains("DEADLINE_EXCEEDED") =>
+          attempt += 1
+          info(s"$what timed out, retrying (attempt $attempt)")
+          Thread.sleep(5000L)
+        case scala.util.Failure(failure) => throw failure
+      }
+    }
+    result.get
+  }
+
   /** Flushes, waiting out the service's flush rate limit rather than failing on
     * it: the limit is one call every ten seconds.
     */
@@ -287,13 +311,15 @@ class IndexBuildUatTest
           .get
         info(s"created collection $collection")
 
-        val batch = 5000
+        // One insert has to answer inside the client's ten second write
+        // deadline, and a just-resumed instance is slower than a warm one.
+        val batch = env("MILVUS_UAT_BIG_BATCH").map(_.toInt).getOrElse(5000)
         val perFlush = 25000
         var written = 0L
         while (written < rows) {
           val ids = (written until math.min(written + batch, rows)).toSeq
-          client
-            .insert(
+          retried("insert") {
+            client.insert(
               collectionName = collection,
               fieldsData = Seq(
                 FieldData(
@@ -331,7 +357,7 @@ class IndexBuildUatTest
               ),
               numRows = ids.size
             )
-            .get
+          }
           written += ids.size.toLong
           if (written % perFlush == 0) {
             flushed(client)
