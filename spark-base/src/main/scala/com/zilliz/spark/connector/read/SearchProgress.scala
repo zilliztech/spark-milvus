@@ -1,6 +1,7 @@
 package com.zilliz.spark.connector.read
 
 import java.util.concurrent.ConcurrentHashMap
+import java.util.Locale
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.{Success => TaskSucceeded}
@@ -87,16 +88,16 @@ private[read] final class SearchProgress(comparedTotal: Long)
     val of =
       if (comparedTotal <= 0L) ""
       else
-        f" of ${SearchProgress.brief(comparedTotal)}%s" +
+        f" of ${SearchProgress.grouped(comparedTotal)}%s" +
           f" (${compared * 100.0 / comparedTotal}%.1f%%)"
     // Pairs per call is queries in the group times rows in the batch, which is
     // the shape of one distance computation and the only place the batch size
     // shows.
     val each =
       if (calls <= 0L) ""
-      else s", ${SearchProgress.brief(compared / calls)} per call over $calls"
+      else s", ${SearchProgress.grouped(compared / calls)} per call over $calls"
     logInfo(
-      s"Search progress: compared=${SearchProgress.brief(compared)}$of$each, " +
+      s"Search progress: compared=${SearchProgress.grouped(compared)}$of$each, " +
         s"segments=${counted.getOrElse(SearchMetrics.Segments, 0L)}, " +
         s"knowhereMillis=${counted.getOrElse(SearchMetrics.KnowhereNanos, 0L) / 1000000L}, " +
         s"tasks=${running.size} running, ${ended.size} done"
@@ -111,13 +112,13 @@ private[read] object SearchProgress {
     */
   private val ReportNanos = 10L * 1000L * 1000L * 1000L
 
-  /** A count at a glance. A search compares pairs in the billions, and a number
-    * that long is read digit by digit or not at all; two significant figures
-    * are what a reader watching progress needs. Anything under ten thousand is
-    * left alone, because there the digits are the answer.
+  /** A count at a glance. A search compares pairs in the billions, and eleven
+    * digits in a row are counted rather than read; grouped, the size is seen
+    * and the value is still exact. The grouping is the root locale's, so a log
+    * reads the same wherever it was written.
     */
-  private[read] def brief(value: Long): String =
-    if (value < 10000L) value.toString else f"${value.toDouble}%.2e"
+  private[read] def grouped(value: Long): String =
+    String.format(Locale.ROOT, "%,d", java.lang.Long.valueOf(value))
 
   /** The `milvus.search.*` values of one report, as longs.
     *
