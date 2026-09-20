@@ -182,14 +182,21 @@ retains the existing storage-only build, or accepts a matching prebuilt unified
 JAR and its `.properties` sidecar through `NATIVE_BUNDLE`.
 
 ```bash
-docker build -t spark-milvus .                                  # current architecture
-docker build --build-arg PUBLISH_TO_CENTRAL=false -t spark-milvus .
+docker build --build-arg PUBLISH_MAVEN=false -t spark-milvus .  # current architecture
+
+# Trusted publication: BuildKit exposes the credential only to the publish RUN.
+docker build \
+  --secret id=maven_credentials,src=/path/to/sbt-credentials \
+  --build-arg PUBLISH_MAVEN=true \
+  -t spark-milvus .
 ```
 
 | Build argument | Default | Meaning |
 |---|---|---|
 | `GIT_BRANCH` | `unknown` | Goes into the version string |
 | `PUBLISH_TO_CENTRAL` | `true` | Whether to publish to Maven Central Snapshots |
+| `PUBLISH_MAVEN` | unset | Repository-neutral publication override used by trusted CI |
+| `MAVEN_CREDENTIALS_FILE` | `/run/secrets/maven_credentials` | In-build path of the BuildKit `maven_credentials` secret |
 | `NATIVE_BUNDLE` | empty | Prebuilt unified Linux JAR inside the build context, with its checksum sidecar |
 | `NATIVE_JOBS` | `50` | Native build concurrency, from 1 to 50 |
 | `NATIVE_BUILD_OPTIONS` | empty | Unified source build options, including `--conan-lock` and `--with-cardinal` |

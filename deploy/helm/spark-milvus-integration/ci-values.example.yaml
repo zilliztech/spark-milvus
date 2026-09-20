@@ -3,6 +3,15 @@ runId: ci-example-123
 image:
   repository: registry.example.invalid/zilliztech/spark-milvus-integration
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  pullSecrets:
+    - name: spark-milvus-registry
+
+runner:
+  args:
+    - --collection
+    - replace-with-stable-snapshot-collection
+    - --expected-min-rows
+    - "1"
 
 milvus:
   uri: http://milvus-proxy.milvus.svc:19530

@@ -111,7 +111,7 @@ collect_diagnostics() {
 wait_for_job() {
   local job_name=$1
   local deadline=$((SECONDS + job_wait_timeout_seconds))
-  local conditions complete failed waiting_reasons
+  local conditions complete failed waiting_reasons fatal_waiting_reason scheduled_conditions
 
   while ((SECONDS < deadline)); do
     conditions=$(kube get job "$job_name" --namespace "$namespace" \
@@ -128,8 +128,26 @@ wait_for_job() {
 
     waiting_reasons=$(kube get pods --namespace "$namespace" --selector "$selector" \
       -o 'jsonpath={range .items[*].status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}')
-    if grep -Fqx CreateContainerConfigError <<<"$waiting_reasons"; then
-      echo "Integration Job ${job_name} has an invalid container configuration" >&2
+    fatal_waiting_reason=$(awk '
+      $0 == "ErrImagePull" ||
+      $0 == "ErrImageNeverPull" ||
+      $0 == "ImagePullBackOff" ||
+      $0 == "InvalidImageName" ||
+      $0 == "CreateContainerConfigError" ||
+      $0 == "RunContainerError" {
+        print
+        exit
+      }
+    ' <<<"$waiting_reasons")
+    if [[ -n "$fatal_waiting_reason" ]]; then
+      echo "Integration Job ${job_name} cannot start: Pod waiting reason ${fatal_waiting_reason}" >&2
+      return 1
+    fi
+
+    scheduled_conditions=$(kube get pods --namespace "$namespace" --selector "$selector" \
+      -o 'jsonpath={range .items[*].status.conditions[?(@.type=="PodScheduled")]}{.status}{"|"}{.reason}{"\n"}{end}')
+    if grep -Fqx 'False|Unschedulable' <<<"$scheduled_conditions"; then
+      echo "Integration Job ${job_name} cannot start: Pod is unschedulable" >&2
       return 1
     fi
 

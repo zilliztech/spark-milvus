@@ -5,7 +5,7 @@
 ARG GIT_BRANCH=unknown
 ARG TARGETARCH
 ARG MAVEN_SNAPSHOT_REPOSITORY_URL=https://central.sonatype.com/repository/maven-snapshots/
-ARG MAVEN_CREDENTIALS_FILE=/root/.sbt/sonatype_central_credentials
+ARG MAVEN_CREDENTIALS_FILE=/run/secrets/maven_credentials
 ARG NATIVE_JOBS=50
 ARG NATIVE_BUILD_OPTIONS
 # Optional prebuilt JAR and .properties sidecar inside the build context.
@@ -116,7 +116,11 @@ ENV SBT_OPTS="-Xmx4g -Xms2g"
 # PUBLISH_TO_CENTRAL is retained while Jenkins migrates to the repository-neutral flag.
 ARG PUBLISH_MAVEN
 ARG PUBLISH_TO_CENTRAL=true
-RUN set -eux; \
+RUN --mount=type=cache,id=spark-milvus-coursier,target=/root/.cache/coursier,sharing=locked \
+    --mount=type=cache,id=spark-milvus-ivy2,target=/root/.ivy2/cache,sharing=locked \
+    --mount=type=cache,id=spark-milvus-sbt,target=/root/.sbt,sharing=locked \
+    --mount=type=secret,id=maven_credentials,target=/run/secrets/maven_credentials,required=false \
+    set -eux; \
     case "$(uname -m)" in \
         x86_64|amd64) native_platform=linux-x86_64 ;; \
         aarch64|arm64) native_platform=linux-aarch64 ;; \
