@@ -8,6 +8,7 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, explode, udaf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.storage.StorageLevel
 
 import com.zilliz.milvus.storage.expr.PlanParser
 import com.zilliz.milvus.storage.index.SearchPlan
@@ -265,7 +266,7 @@ object MilvusSearch {
       // One partition of groups, so a task pairs its segment set with every
       // group and reads its segments once; a group-per-partition cartesian
       // would open the same segments again for each group.
-      val delivered = packedGroups(selected, plan, spec, layout).coalesce(1)
+      val delivered = packedGroups(selected, plan, spec, layout)
       setsRdd.cartesian(delivered).mapPartitions { pairs =>
         if (pairs.isEmpty) Iterator.empty
         else {
@@ -294,10 +295,12 @@ object MilvusSearch {
     * every group and reads its segments once — which is what
     * `SegmentSetSearch.run` holds the set in memory for. Its cost is that the
     * shuffle read and the packing run in one task rather than `plan.groups`
-    * tasks, and the cartesian repeats them once per segment set. Both are
-    * sequential passes over the query bytes, which cross the network once per
-    * segment set either way; what the partition count decides is how often the
-    * segments are read.
+    * tasks.
+    *
+    * The `persist` is what keeps that one task's work from happening once per
+    * segment set. Without it the cartesian recomputes this side for every left
+    * partition, and since an executor runs its tasks in one JVM, the query set
+    * is packed and held once per concurrent task rather than once.
     */
   private[read] def packedGroups(
       selected: DataFrame,
@@ -339,6 +342,16 @@ object MilvusSearch {
         SearchQueries.Group(ordered.map(_._2).toArray, vectors, 0)
       }
       .coalesce(1)
+      // Stored, because `CartesianRDD` takes the right side's iterator once
+      // per left partition and computes it again each time. The tasks of one
+      // executor run in one JVM, so without this every one of them packs and
+      // holds its own copy of the whole query set: an 800 MiB set at
+      // `local[6]` measured 7.06 GB of query bytes against an 8 GiB heap,
+      // where one copy is 1.17 GB. Stored once, the block's values are the
+      // objects every task reads, which is what the collected route gets from
+      // the broadcast. Memory only: a level that spills would hand each task
+      // its own deserialized copy and put the six back.
+      .persist(StorageLevel.MEMORY_ONLY)
   }
 
   /** Every query's candidates become its global top-k, best first. */
