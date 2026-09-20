@@ -226,9 +226,11 @@ convenient this week.
 **Fix causes. Never patch the edge.** Swallowing an exception, turning a failure
 into an empty result, adding a flag that routes around a defect, special-casing
 at one call site: each of these takes a visible problem and makes it invisible
-while the system keeps running wrong. The delete path is the live example —
-an unreadable delete file currently yields an empty delete plan, so deleted rows
-come back with no exception and no warning. That is not robustness.
+while the system keeps running wrong. The delete path was the live example —
+an unreadable delete file once yielded an empty delete plan, so deleted rows
+came back with no exception and no warning. That was not robustness.
+`core.read.exec.DeletePlans` now fails the task instead, and the driver-side
+listing in `MilvusScan` fails the plan; keep it that way.
 
 **No stovepipes.** One class of problem gets one solution. The three
 non-standard read entry points implement a single `SnapshotSource` and a single

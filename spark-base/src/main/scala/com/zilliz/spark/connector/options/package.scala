@@ -21,8 +21,9 @@ package com.zilliz.spark.connector
   * `spark.read` and `core.expr`.
   *
   * Index building (W6) takes no write option; its parameters belong to the
-  * `build_index` procedure.
+  * `build_index` procedure. No index or GPU session option exists yet (G4 is
+  * declared unplaced in section 11 of capabilities.md).
   *
-  * Capabilities: R16, G1, G2, G3, G4 (see docs/design/capabilities.md).
+  * Capabilities: R16, G1, G2, G3 (see docs/design/capabilities.md).
   */
 package object options

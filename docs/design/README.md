@@ -211,7 +211,7 @@ flowchart LR
 | 上游 JNI 切片批只重写偏移和位图 | `reader_jni.cpp` 的逐批读取对带 offset 的列整列 `arrow::Concatenate` | 定长列移动数据缓冲区起点并重建位图，变长列只重写 offsets，数据缓冲区共享 | R20 性能第 1 项；普通 collection 同样受益 |
 | 上游 JNI 绑定文件系统读取字节 | C 接口 `loon_filesystem_get_metrics` 自 #630 起已有，`filesystem_jni.cpp` 没有绑定 | Java 绑定可按文件系统取读取字节 | G5；R20 性能第 2 项 |
 | 外表分片切点对齐 row group | DataNode 按固定行数切大文件（`SplitFileToFragments`），`loon_exttable_get_file_info` 只返回行数，拿不到 row group 边界；切点所在的 row group 被相邻两段各读一次再切片 | `loon_exttable_get_file_info` 返回 row group 边界，切点落在边界上 | R20 读取性能；先用 G5 读取字节量出浪费比例 |
-| Knowhere 的 C/Java 接口开放线程池大小 | 暴力搜索、索引搜索、建索引都在 Knowhere 的进程级线程池里算；PR #1829 的接口不初始化也不开放这些池，默认大小定义在 Knowhere 依赖的外部库里，未核对 | 接口能设置搜索与建索引线程池的大小 | V5、V7、W6、G4；Spark 按 executor 核数配置，避免与任务线程争核 |
+| Knowhere 的 Java 接口开放 GPU 开关 | 暴力搜索、索引搜索、建索引都在 Knowhere 的进程级线程池里算。钉住的子模块 `knowhere/java/src/main/java/io/knowhere/Knowhere.java` 已提供 `resizeSearchThreadPool`、`searchThreadPoolSize`、`resizeBuildThreadPool`、`buildThreadPoolSize`（2026-09-20 核对，原「接口不开放这些池」的说法已过时）；连接器尚未调用，默认大小定义在 Knowhere 依赖的外部库里，未核对。Java API 没有 GPU 开关 | Java 接口开放 GPU 开关；线程池大小不再是上游缺口，接入归 G4 | V5、V7、W6、G4；Spark 按 executor 核数配置，避免与任务线程争核 |
 | milvus-storage 的 Java 绑定开放外表展开接口 | C 接口 `loon_exttable_explore` 与各格式的 `Format::explore` 已有；PR #681 与 main 的 JNI 都没有绑定 | Java 能按格式、位置和版本拿到列组文件条目 | 决策 26 选用 milvus-storage 读开放格式时 |
 
 ## 6 决策日志

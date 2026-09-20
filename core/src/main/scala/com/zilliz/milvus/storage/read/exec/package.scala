@@ -47,7 +47,10 @@ package com.zilliz.milvus.storage.read
   * Main types: SegmentReader, SegmentReaderRegistry, DeletePlans, ReadMetrics,
   * RowExclusions, SegmentVectors, SegmentIndexHandle, IndexRowMapping.
   * Capabilities: R3, R4, R8, R14, R17, G3, G5 (see
-  * docs/design/capabilities.md). R4 and R17 name the columnar outlet. G3 maps
+  * docs/design/capabilities.md). R4 and R17 name the columnar outlet; R17 is
+  * partial: batches leave as `VectorSchemaRoot` and become Spark
+  * `ColumnarBatch` in layer 3, while the raw-address signature for native
+  * consumers (vector buffer address plus bitmap) does not exist yet. G3 maps
   * typed row/byte batch limits to the upstream reader; the Spark reader owns a
   * bounded child allocator that outlives every imported batch. Design:
   * docs/design/architecture/read.html section 5.2.

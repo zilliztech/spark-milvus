@@ -26,7 +26,7 @@
 | R15 | 类型覆盖 | Bool、Int8/16/32/64、Float、Double、String、VarChar、Text、JSON、标量 Array、Float/Float16/BFloat16/Int8/Binary/Sparse 向量；nullable 与字段 metadata 保持快照定义 | core.schema 定 Milvus 与 Arrow 的映射，spark.types 定 Arrow 与 Spark 的映射 | 一份映射同时给快照 schema、Table 和 reader；Geometry、Timestamptz、ArrayOfVector/struct-array 与未知类型尚未实现，必须失败，不能退成 Binary 或 null；向量透传还是转换见决策 6 | P0 |
 | R16 | 分区和段选择 | option `milvus.partitions`、`milvus.segments`，逗号分隔数值 id | spark.options → core.snapshot 过滤段列表 | 两个选择器在所有 SnapshotSource 解析后统一应用，可组合取交集；每个请求 id 必须存在；收窄数据段时保留适用于所选分区的 L0 与全 collection L0 删除段 | P1 |
 | R19 | 按分区报分区 | 自动；同一分区的段落在同一个 Spark 分区，join 少一次 shuffle | spark.read 的 SupportsReportPartitioning → core.read.plan | 只能按 partition id 分组，段内主键无序，做不到列级；收益待实测 | 待评估 |
-| R17 | 交付下游列式算子 | 列批、向量 buffer 地址、位图 | core.read.exec 的出口 | 出口是否压掉被过滤的行见决策 12；交给原生消费者的签名用裸 long 地址，不用 Arrow 的 Java 类型，否则调用方被绑死在我们 classloader 里的 Arrow 版本 | P0 |
+| R17 | 交付下游列式算子 | 列批、向量 buffer 地址、位图 | core.read.exec 的出口 | 部分实现：出口目前是 Arrow `VectorSchemaRoot`，由 spark.read 包成 Spark `ColumnarBatch`；面向原生消费者的裸 long 地址加位图签名尚未写。出口是否压掉被过滤的行见决策 12；交给原生消费者的签名用裸 long 地址，不用 Arrow 的 Java 类型，否则调用方被绑死在我们 classloader 里的 Arrow 版本 | P0 |
 | R20 | 读 external collection | 与普通 collection 相同的入口：快照目录或 client 模式；不接 backup 与 option 串来源 | core.snapshot、core.credential、core.schema、core.read.exec、spark.read、spark.types | Milvus 3.0 起；五种格式 parquet、vortex、iceberg-table、lance-table、milvus-table；只经 milvus-storage 读；列名、读取 schema、类型、系统字段四条规则与普通 collection 统一，外表另需 `extfs.<collectionID>.*` 凭证；段一律用空 schema 打开，依赖 milvus-storage 的 `loon_reader_new` 接受空 schema（决策日志 2026-09-16）；外表只读，写路径不对它声明 BATCH_WRITE；外表段的索引 label 与段内行号的对应要用 Milvus 生成的文件单独验证。设计见 [snapshot.html 3.1](architecture/snapshot.html#external)、[read.html 1.1 与 6.4](architecture/read.html#rules)、[storage-auth.html 3.4](architecture/storage-auth.html#external) | P0 |
 
 ## 2 表写
@@ -105,7 +105,7 @@ issue #125 的[索引查询设计](architecture/vector-search.html)已经落地�
 | G2 | 写 option | `milvus.write.file.rolling.bytes` 严格解析为正 Long，默认 2 GiB，V2/V3 writer 均映射为上游 `writer.file_rolling.size`；写模式与列、写完自动建快照仍随对应能力落地；索引参数归 W6 的过程，不是写 option | spark.options → core.write.exec | W2；rolling 按上游未压缩写入字节累计，不等于最终 Parquet 大小；替代 1.x 的 `milvus.writer.commitType`（`milvus.writer.fieldIds` 与 `vector.<f>.dim` 已于 2026-09-15 删除，字段 id 和维度从 collection schema 取） | P1 |
 | G3 | 会话配置：内存与批 | `milvus.read.batch.max.rows` / `.bytes` 经 `ReadLimits` 随 task 交付原生 reader；`milvus.read.arrow.max.bytes` 限制每个 Spark read task 的 Arrow child allocator，覆盖行式、列式与向量回表 | spark.options → core.read.plan → core.read.exec；spark.read / spark.types 持有 child allocator | Arrow 上限不包含 milvus-storage native 内存池；上游尚无 per-reader 预取上限接口，prefetch limit 未交付；替代 1.x 的 `s3.preloadPoolSize` | P1 |
 | G5 | 指标 | 自动，Spark SQL 页的 scan / write 节点：JNI 调用次数与耗时、过界的 Arrow 批数与字节数、C 侧拷贝次数与字节数、物化成 InternalRow 的行数、allocator 峰值；不设开关（决策日志 2026-09-16） | native-storage 编译的上游批读取 holder 计数，core.read.exec 的 ReadMetrics、core.write.exec 的 WriteMetrics，spark.metrics 翻成 CustomMetric | 设计见 [storage-io.html 第五节](architecture/storage-io.html#metrics)；量不到的两处（对象存储读取字节、native 内存总量）写在那里；allocator 峰值就是 G3 预算要卡的数 | P1 |
-| G4 | 会话配置：索引与 GPU | Knowhere 搜索与建索引线程池大小、GPU 开关、两套服务的地址和凭证 | spark.options → core.index → native-vector、core.credential | 线程池设置等 Knowhere 的 C/Java 接口开放（README 第 5 节），搜索与建索引任务每个 executor 只跑一个、线程池用满该 executor 的核；GPU 产物见 README 2.7 | P2 |
+| G4 | 会话配置：索引与 GPU | Knowhere 搜索与建索引线程池大小、GPU 开关、两套服务的地址和凭证 | spark.options → core.index → native-vector、core.credential | 未开始：钉住的 Knowhere 子模块 Java API 已提供 `Knowhere.resizeSearchThreadPool` / `resizeBuildThreadPool` 及对应读取方法，连接器没有任何调用，也没有对应选项；GPU 开关上游 Java API 未提供（README 第 5 节）。搜索与建索引任务每个 executor 只跑一个、线程池用满该 executor 的核；GPU 产物见 README 2.7 | P2 |
 
 ## 9 已知缺口
 
@@ -126,3 +126,4 @@ TopN 和 Aggregates 下推；UPDATE 和 MERGE；text_match 一族（依赖 tanti
 | R10 | milvus-storage 尚未写可用的 row-group min/max 统计，FFI 也没有传入 row group 选择的 reader 入口；现有 Parquet predicate 实现为空，见 storage-access 4.5 |
 | R19 | 按分区报分区，优先级是「待评估」。收益要实测，见 README 第 4 节决策 19 |
 | R20 | 读 external collection 的设计已写（snapshot.html 3.1、read.html 1.1 与 6.4、storage-auth.html 3.4），代码未开始；打开外表段依赖 milvus-storage 的 `loon_reader_new` 接受空 schema |
+| G4 | 索引与 GPU 的会话配置没有任何选项或调用；spark.options 曾声明 G4 但目录里无对应代码，2026-09-20 移到此处。上游 Knowhere Java API 已开放线程池大小接口，接入不再阻塞于上游；GPU 开关上游未提供 |
