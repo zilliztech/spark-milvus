@@ -270,7 +270,7 @@ object SegmentIndexSearchSmoke {
     }
     Files.write(
       directory.resolve("built.json"),
-      snapshotJson(indexed).getBytes(UTF_8)
+      snapshotJson(indexed, snapshotId = 2L).getBytes(UTF_8)
     )
 
     def search(mode: String) = MilvusSearch
@@ -757,16 +757,20 @@ object SegmentIndexSearchSmoke {
     }
   }
 
+  /** `snapshotId` names the manifest directory as well as the snapshot, so two
+    * snapshots over the same segments do not overwrite each other's Avro.
+    */
   private def snapshotJson(
       fixtures: Seq[Fixture],
-      unindexedSegments: Set[Long] = Set.empty
+      unindexedSegments: Set[Long] = Set.empty,
+      snapshotId: Long = 1L
   ): String = {
     val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
     val root = mapper.createObjectNode()
     val info = root.putObject("snapshot_info")
     info
       .put("name", "persisted-index-smoke")
-      .put("id", 1L)
+      .put("id", snapshotId)
       .put("collection_id", 10L)
       .put("create_ts", 1L)
     info.putArray("partition_ids").add(20L)
@@ -805,7 +809,8 @@ object SegmentIndexSearchSmoke {
     val manifests = root.putArray("manifest_list")
     val dataManifests = root.putArray("storagev2_manifest_list")
     fixtures.foreach { fixture =>
-      val key = s"files/snapshots/10/manifests/1/${fixture.task.segmentId}.avro"
+      val key =
+        s"files/snapshots/10/manifests/$snapshotId/${fixture.task.segmentId}.avro"
       val directory =
         java.nio.file.Paths.get(fixture.task.properties("fs.root_path"))
       Files.createDirectories(directory.resolve(key).getParent)
