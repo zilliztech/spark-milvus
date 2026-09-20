@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
 import com.zilliz.milvus.jni.vector.NativeVectorIndex
+import com.zilliz.milvus.storage.codec.VectorIndexFamilies
 import com.zilliz.milvus.storage.read.exec.{SegmentIndexHandle, SegmentVectors}
 import com.zilliz.milvus.storage.schema.VectorLayout
 import com.zilliz.milvus.storage.Logging
@@ -176,9 +177,7 @@ object IndexWriter extends Logging {
     val name = indexType.toUpperCase(Locale.ROOT)
     val distance = metric.toUpperCase(Locale.ROOT)
     require(
-      SegmentIndexHandle.HnswFamily.contains(name) ||
-        SegmentIndexHandle.IvfFamily.contains(name) ||
-        SegmentIndexHandle.FlatFamily.contains(name),
+      VectorIndexFamilies.Supported.contains(name),
       s"This connector builds the index types it loads, not $name"
     )
     val metrics = SegmentIndexHandle.metricsOf(layout)

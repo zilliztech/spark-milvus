@@ -472,7 +472,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 </ol>
 
 <h3 id="native-boundary">2.5 索引文件解码与引擎选择</h3>
-<p><strong>载荷名就是索引类型，格式标记核对到家族为止。</strong>Knowhere 的 <code>Serialize</code> 把索引写成一块以索引类型命名的载荷（<code>HNSW</code>、<code>HNSW_SQ</code>、<code>IVF_FLAT</code>…），Milvus 按同名写成索引文件，所以取哪块载荷由快照声明的 <code>index_type</code> 决定。载荷开头四个字节是写入方记下的索引类标记，同一个索引类型有多个：HNSW_SQ 在 COSINE 加 SQ4U 量化下写 <code>IHNa</code>，在 L2 下写 <code>IHNs</code>。逐个钉死会把当前 Knowhere 读得了的文件拒掉，所以核对到家族为止——HNSW 家族 <code>IH*</code>，IVF 与二值家族 <code>Iw*</code>、<code>IB*</code>，Cardinal 流看末尾 24 字节的 <code>CARD</code>——这仍然挡得住把 IVF 流当 HNSW 加载，读不了的组合由 Knowhere 自己拒绝。</p>
+<p><strong>载荷名就是索引类型，格式标记核对到家族为止。</strong>Knowhere 的 <code>Serialize</code> 把索引写成一块以索引类型命名的载荷（<code>HNSW</code>、<code>HNSW_SQ</code>、<code>IVF_FLAT</code>…），Milvus 按同名写成索引文件，所以取哪块载荷由快照声明的 <code>index_type</code> 决定。载荷开头四个字节是写入方记下的索引类标记，同一个索引类型有多个：HNSW_SQ 在 COSINE 加 SQ4U 量化下写 <code>IHNa</code>，在 L2 下写 <code>IHNs</code>。逐个钉死会把当前 Knowhere 读得了的文件拒掉，所以核对到家族为止——HNSW 家族 <code>IH*</code>，IVF 家族 <code>Iw*</code>，浮点 FLAT 家族 <code>Ix*</code>（<code>IxF2</code> 是平方 L2，<code>IxFI</code> 是内积），二值索引不论结构都是 <code>IB*</code>，Cardinal 流看末尾 24 字节的 <code>CARD</code>——这仍然挡得住把 IVF 流当 HNSW 加载，读不了的组合由 Knowhere 自己拒绝。</p>
 <p><strong>引擎与索引版本在规划时声明，执行时核对。</strong>BinarySet 是按名字组织的二进制块集合；下面的解码归 Milvus 的 <code>TableFormat</code>。</p>
 <ol>
 <li>描述快照时，<code>TableFormat</code> 对每个段的索引对象只读头尾若干字节：Milvus 封装取 descriptor 与载荷开头的标识，Cardinal 流取末尾 24 字节；由此得出引擎与索引版本，写进该段的索引能力。各段并发读取。</li>
@@ -480,7 +480,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 依据是 Milvus 的 <a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/storage/DataCodec.cpp#L147">DataCodec</a>、<a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/storage/PayloadReader.cpp#L79">PayloadReader</a> 与 <a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/common/Slice.cpp#L105">Slice</a>。</li>
 <li>出现 <code>SLICE_META</code> 时，<code>IndexFileCodec</code> 按其中记录的块名、分片数和总长度拼回原块；<code>SLICE_META</code> 不超过 1 MiB。</li>
 <li>Cardinal 直接写出的 <code>_mem.index.bin</code> 没有 Milvus 封装：文件列表恰有这一个文件，末尾 24 字节是小端的 CARD 标识、序列化版本和两个元数据偏移，版本为 1 且偏移在文件内有序时，整个文件作为 <code>BinarySet["HNSW"]</code>。</li>
-<li>标识与引擎的对应：CARD 对应 Cardinal，要求向量格式版本不低于 9，并要求含 Cardinal 的 Knowhere 构建；<code>IHNf</code>（float32 HNSW Flat）与 <code>IHN9</code>（HNSW FlatCosine）对应 Faiss，要求版本不低于 6。
+<li>标识与引擎的对应：CARD 对应 Cardinal，要求向量格式版本不低于 9，并要求含 Cardinal 的 Knowhere 构建；<code>IHNf</code>（float32 HNSW Flat）、<code>IHN9</code>（HNSW FlatCosine）、<code>IxF2</code>（FLAT）与 <code>IwFl</code>（IVF_FLAT）对应 Faiss，要求版本不低于 6。家族清单与它们的字节标记同在 <code>core.codec.VectorIndexFamilies</code>：能加载的类型和能识别的标记是同一件事，分成两处就会出现「声明支持但读不了」。
 含 Cardinal 的构建把 Faiss 引擎注册为 <code>HNSW_DEPRECATED</code>，其余构建注册为 <code>HNSW</code>；两者的块名都是 <code>HNSW</code>，<code>NativeVectorIndex.Loader</code> 分开处理引擎名与块名。</li>
 <li>executor 解码出完整载荷后，再核对标识与声明一致。单个对象不超过 256 MiB，拼好的载荷不超过 1 GiB，以 1 MiB 为块复制进 BinarySet；复制完成即释放解码缓冲，反序列化完成即关闭输入 BinarySet，索引句柄由任务持有。</li>
 <li>Faiss 量化 HNSW、multi-view、加密文件、nullable 行号映射和没有已知标识的文件，在规划时即判为不可加载。</li>

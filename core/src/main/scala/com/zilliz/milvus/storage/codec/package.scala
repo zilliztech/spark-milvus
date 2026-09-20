@@ -17,8 +17,15 @@ package com.zilliz.milvus.storage
   * `SegmentIndexObjects` encodes what a build produced into the same files,
   * beside the decoder, so both directions share one format definition (W6).
   *
+  * `VectorIndexFamilies` is the one list of index types this connector reads
+  * and writes, with the byte markers each family's persisted stream starts
+  * with: the types that can be loaded and the markers that identify them are
+  * the same fact, and splitting them is how a family ends up declared but
+  * unreadable.
+  *
   * Main types: FloatConverter, SparseFloatVectorConverter, ArrayCodec,
-  * BinlogCodec, MilvusIndexFileDecoder, IndexFileCodec, SegmentIndexObjects.
+  * BinlogCodec, MilvusIndexFileDecoder, IndexFileCodec, SegmentIndexObjects,
+  * VectorIndexFamilies.
   * Capabilities: R15, W3, V2, W6 (see docs/design/capabilities.md).
   */
 package object codec

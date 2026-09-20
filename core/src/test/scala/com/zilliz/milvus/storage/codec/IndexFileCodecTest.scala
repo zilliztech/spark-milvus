@@ -117,7 +117,18 @@ class IndexFileCodecTest extends AnyFunSuite {
       assert(probe(bytes).engine("HNSW_SQ", 8, false) == "HNSW_SQ")
       assert(probe(bytes).engine("HNSW_SQ", 8, true) == "HNSW_SQ")
     }
-    Seq("IwFl" -> "IVF_FLAT", "IwSq" -> "IVF_SQ8", "IBxF" -> "BIN_FLAT")
+    // The markers Knowhere actually writes: an IVF index is `Iw*`, a binary
+    // index `IB*` whatever its structure, and a flat float index `IxF*` —
+    // `IxF2` over squared L2, `IxFI` over inner product. A real FLAT build over
+    // the UAT collection is what showed the last of these was missing.
+    Seq(
+      "IwFl" -> "IVF_FLAT",
+      "IwSq" -> "IVF_SQ8",
+      "IBwF" -> "BIN_IVF_FLAT",
+      "IBxF" -> "BIN_FLAT",
+      "IxF2" -> "FLAT",
+      "IxFI" -> "FLAT"
+    )
       .foreach { case (magic, indexType) =>
         val bytes = magic.getBytes(UTF_8) ++ new Array[Byte](60)
         assert(probe(bytes).engine(indexType, 8, false) == indexType)
@@ -139,12 +150,17 @@ class IndexFileCodecTest extends AnyFunSuite {
       probe(cardinal).engine("HNSW_SQ", 10, true)
     )
     // A stream of the other family, or of no family, is refused.
-    Seq("IwFl" -> "HNSW", "IHNf" -> "IVF_FLAT", "????" -> "HNSW").foreach {
-      case (magic, indexType) =>
-        intercept[IllegalArgumentException] {
-          probe(magic.getBytes(UTF_8) ++ new Array[Byte](60))
-            .engine(indexType, 10, true)
-        }
+    Seq(
+      "IwFl" -> "HNSW",
+      "IHNf" -> "IVF_FLAT",
+      "IxF2" -> "IVF_FLAT",
+      "IwFl" -> "FLAT",
+      "????" -> "HNSW"
+    ).foreach { case (magic, indexType) =>
+      intercept[IllegalArgumentException] {
+        probe(magic.getBytes(UTF_8) ++ new Array[Byte](60))
+          .engine(indexType, 10, true)
+      }
     }
   }
 

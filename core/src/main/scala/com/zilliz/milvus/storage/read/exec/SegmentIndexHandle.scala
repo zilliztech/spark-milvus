@@ -7,7 +7,8 @@ import com.zilliz.milvus.jni.vector.NativeVectorIndex
 import com.zilliz.milvus.storage.codec.{
   IndexFileCodec,
   IndexFileDecoder,
-  MilvusIndexFileDecoder
+  MilvusIndexFileDecoder,
+  VectorIndexFamilies
 }
 import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
@@ -168,23 +169,14 @@ object SegmentIndexHandle {
     finally store.close()
   }
 
-  /** The index families this connector loads: the graph indexes Knowhere
-    * registers under an HNSW name, the inverted-list indexes under an IVF name,
-    * and the two flat indexes, each over the element type the column carries.
+  /** The index families this connector loads, and the family one type belongs
+    * to, both from `core.codec.VectorIndexFamilies`: what can be loaded is what
+    * the persisted format check knows the byte markers for.
     */
-  val HnswFamily: Set[String] = Set("HNSW", "HNSW_SQ", "HNSW_PQ", "HNSW_PRQ")
-
-  val IvfFamily: Set[String] =
-    Set("IVF_FLAT", "IVF_SQ8", "IVF_PQ", "BIN_IVF_FLAT")
-
-  val FlatFamily: Set[String] = Set("FLAT", "BIN_FLAT")
-
-  private val Supported = HnswFamily ++ IvfFamily ++ FlatFamily
+  private val Supported = VectorIndexFamilies.Supported
 
   def familyOf(indexType: String): String =
-    if (HnswFamily.contains(indexType)) "HNSW"
-    else if (IvfFamily.contains(indexType)) "IVF"
-    else "FLAT"
+    VectorIndexFamilies.familyOf(indexType)
 
   /** The metrics each element type can be searched by. */
   def metricsOf(layout: VectorLayout): Set[String] =

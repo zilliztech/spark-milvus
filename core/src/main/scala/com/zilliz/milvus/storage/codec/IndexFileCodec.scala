@@ -393,11 +393,10 @@ private[storage] object IndexFileCodec extends Logging {
       } else {
         val magic = new String(head, StandardCharsets.US_ASCII)
         val family = magic.take(2)
-        val expected =
-          if (indexType.startsWith("HNSW")) Set("IH") else Set("Iw", "IB")
+        val expected = VectorIndexFamilies.magicsOf(indexType)
         require(
           expected.contains(family),
-          s"Persisted $indexType payload starts with $magic; a $indexType index writes ${expected
+          s"Persisted $indexType payload starts with $magic; a $indexType index writes ${expected.toSeq.sorted
               .mkString(" or ")}* or a Cardinal CARD stream"
         )
         require(
