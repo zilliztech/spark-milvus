@@ -29,6 +29,17 @@ provide each pinned upstream recipe that is absent from the local cache. A
 CMake 4 rejects the `cmake_minimum_required` of several pinned upstream
 recipes, so the declared version is the one that must be on `PATH`.
 
+No package manager ships that CMake next to a current one, so put it in a
+virtual environment of its own and prepend that to `PATH` for the build. It is
+the machine's, not the checkout's: a directory under `/tmp` is emptied by the
+system and takes the toolchain with it.
+
+```bash
+python3 -m venv ~/toolchain/cmake3venv
+~/toolchain/cmake3venv/bin/pip install cmake==3.31.10 ninja
+PATH=~/toolchain/cmake3venv/bin:$PATH scripts/build-native.sh --work-dir ...
+```
+
 | Platform | Compilers | Binary tools | Also |
 | --- | --- | --- | --- |
 | `linux-x86_64`, `linux-aarch64` | GCC/G++/gfortran 12 | patchelf, readelf, ldd, binutils | the libaio development package, which Folly's async I/O needs; Ubuntu supplies libclang in `libclang-dev` |
