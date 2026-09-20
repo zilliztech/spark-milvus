@@ -568,7 +568,8 @@ class IndexBuildUatTest
 
       info(
         f"${family.indexType}%-9s segments=${built.size}%-2d rows=$indexedRows%-7d " +
-          f"bytes=$indexBytes%-10d build=${buildMillis}ms"
+          f"bytes=$indexBytes%-10d build=${buildMillis}ms job=$jobId " +
+          f"snapshot=$builtSnapshot"
       )
       (
         family,
