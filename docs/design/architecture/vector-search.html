@@ -129,14 +129,16 @@ Knowhere 的 C/Java 接口开放线程池大小后，连接器增加对应选项
 </tbody></table></div>
 <p>每个任务从进程级 root allocator 建一个 child allocator，上限取 <code>milvus.read.arrow.max.bytes</code>，与表读取相同（<a href="read.html#resource-limits">read.html 5.4</a>）。索引对象、Knowhere 缓冲和结果缓冲都归当前任务所有，在 <code>finally</code> 中关闭；任务里每个段的索引只加载一次，不跨任务缓存。
 日志记录每个对象的读取字节、格式与引擎、反序列化与搜索次数、命中数、排除行数和耗时。</p>
-<p><strong>两个阶段的计数与耗时累加到下列累加器，在 Spark 的 stage 页面可见。</strong>Knowhere 在自己的线程池里计算，这部分 CPU 不计入 Spark 的任务 CPU 时间，看 <code>knowhere.nanos</code>。</p>
+<p><strong>两个阶段的计数与耗时累加到下列累加器，每完成一步就加一次，不等任务结束。</strong>Knowhere 在自己的线程池里计算，这部分 CPU 不计入 Spark 的任务 CPU 时间，看 <code>knowhere.nanos</code>。</p>
+<p>看这些数有两个地方，时机不同。Spark 的 stage 页面与 REST 只在任务结束后显示具名累加器：执行器的心跳把运行中任务的累加器全部送到 driver，而 <code>AppStatusListener</code> 只接受 <code>internal.metrics.</code> 开头的名字，其余丢弃。所以运行中的进度由 <code>SearchProgress</code> 监听同一批心跳写进 driver 日志，每个心跳周期一行；作业结束后的终值在 stage 页面上看。<code>milvus.search.compared</code> 是唯一有分母的量，分母是查询数乘以计划所取各段的行数，作业开始前就写在 driver 日志的计划行里。</p>
 <div class="table"><table>
 <thead><tr><th>累加器</th><th>含义</th></tr></thead><tbody>
-<tr><td><code>milvus.search.segments</code></td><td>第一阶段处理的段数</td></tr>
+<tr><td><code>milvus.search.segments</code></td><td>第一阶段已搜完的段数，按段递增</td></tr>
 <tr><td><code>milvus.search.read.bytes</code>、<code>milvus.search.read.nanos</code></td><td>读向量列与删除、过滤列得到的 Arrow 字节数与耗时</td></tr>
 <tr><td><code>milvus.search.index.bytes</code>、<code>milvus.search.index.load.nanos</code></td><td>读入的索引文件字节数；读取、解码与反序列化的耗时</td></tr>
 <tr><td><code>milvus.search.bitmap.nanos</code></td><td>生成排除位图的耗时</td></tr>
 <tr><td><code>milvus.search.knowhere.calls</code>、<code>milvus.search.knowhere.nanos</code></td><td>Knowhere 的调用次数与墙钟耗时</td></tr>
+<tr><td><code>milvus.search.compared</code></td><td>exact 已算过距离的「查询 × 底库行」对数；index 模式不逐行比较、Knowhere 也不报访问了多少行，恒为 0</td></tr>
 <tr><td><code>milvus.search.candidates</code></td><td>第一阶段交出的候选条数</td></tr>
 <tr><td><code>milvus.search.take.rows</code>、<code>milvus.search.take.nanos</code></td><td>第二阶段回表的行数与耗时</td></tr>
 </tbody></table></div>
