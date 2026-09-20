@@ -1,71 +1,85 @@
 package com.zilliz.milvus.storage.write.commit
 
+import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.Inside
 
 import com.zilliz.milvus.storage.io.LocalObjectStore
+import com.zilliz.milvus.storage.manifest.SegmentManifestFixture
 import com.zilliz.milvus.storage.snapshot.{
-  DeleteFiles,
-  Segment,
   SegmentIndexes,
-  SegmentLayout,
-  Snapshot,
   SnapshotCatalog,
-  SnapshotOrigin,
   V2SegmentResolver
 }
-import io.milvus.grpc.common.KeyValuePair
-import io.milvus.grpc.schema.{
-  CollectionSchema => ProtoSchema,
-  DataType,
-  FieldSchema
-}
 
-/** W8: a snapshot the connector writes is the one a snapshot read gets back
-  * (docs/design/architecture/vector-search.html section 2.7).
+/** W8: what a snapshot write produces is the snapshot it copied, carrying the
+  * indexes a build job made (docs/design/architecture/vector-search.html
+  * section 2.7).
   */
 class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
 
-  private val schema = ProtoSchema(
-    name = "built",
-    fields = Seq(
-      FieldSchema(
-        fieldID = 100L,
-        name = "id",
-        dataType = DataType.Int64,
-        isPrimaryKey = true
-      ),
-      FieldSchema(
-        fieldID = 101L,
-        name = "vector",
-        dataType = DataType.FloatVector,
-        typeParams = Seq(KeyValuePair("dim", "4"))
+  private val mapper = new ObjectMapper()
+
+  private val sourceKey = "files/snapshots/10/metadata/1.json"
+
+  /** A snapshot as Milvus writes one: the collection block carries the channels
+    * and partitions a restore needs, and each segment is an Avro manifest.
+    */
+  private def source(directory: Path, rows: Long = 8L): Unit = {
+    Seq(30L, 31L).foreach { segmentId =>
+      write(
+        directory,
+        s"files/snapshots/10/manifests/1/$segmentId.avro",
+        SegmentManifestFixture.encode(
+          version = 4,
+          segmentId = segmentId,
+          partitionId = 20L,
+          rows = rows,
+          storageVersion = 3L
+        )
       )
-    )
-  )
+    }
+    val document =
+      s"""{
+        "snapshot_info": {
+          "name": "source", "id": "1", "collection_id": "10",
+          "partition_ids": ["20"], "create_ts": "100",
+          "state": "SnapshotStatePending"
+        },
+        "collection": {
+          "schema": {"name": "c", "fields": [
+            {"fieldID": 100, "name": "id", "data_type": "Int64", "is_primary_key": true},
+            {"fieldID": 101, "name": "v", "data_type": "FloatVector",
+             "type_params": [{"key": "dim", "value": "4"}]}
+          ]},
+          "num_shards": "1", "num_partitions": "1",
+          "partitions": {"_default": "20"},
+          "virtual_channel_names": ["by-dev-rootcoord-dml_0_10v0"],
+          "properties": [{"key": "timezone", "value": "UTC"}]
+        },
+        "format_version": 4,
+        "segment_ids": ["30", "31"],
+        "manifest_list": [
+          "files/snapshots/10/manifests/1/30.avro",
+          "files/snapshots/10/manifests/1/31.avro"
+        ],
+        "storagev2_manifest_list": [
+          {"segmentID": 30, "manifest": "{\\"ver\\":7,\\"base_path\\":\\"files/insert_log/10/20/30\\"}"},
+          {"segmentID": 31, "manifest": "{\\"ver\\":7,\\"base_path\\":\\"files/insert_log/10/20/31\\"}"}
+        ]
+      }"""
+    write(directory, sourceKey, document.getBytes(UTF_8))
+  }
 
-  private def segment(id: Long, rows: Long) = Segment(
-    id = id,
-    partitionId = 20L,
-    storageVersion = 3,
-    rows = Some(rows),
-    layout = SegmentLayout.Manifest(s"files/insert_log/10/20/$id", 7L),
-    deletes = DeleteFiles.InManifest
-  )
-
-  private val snapshot = Snapshot(
-    name = "source",
-    collectionId = 10L,
-    createdAt = Some(100L),
-    schema = schema,
-    partitionIds = Seq(20L),
-    segments = Seq(segment(30L, 8L), segment(31L, 5L)),
-    origin = SnapshotOrigin.Options,
-    bucket = ""
-  )
+  private def write(directory: Path, key: String, bytes: Array[Byte]): Unit = {
+    val path = directory.resolve(key)
+    Files.createDirectories(path.getParent)
+    Files.write(path, bytes)
+  }
 
   private def index(segmentId: Long, rows: Long) = CommittedIndex(
     segmentId = segmentId,
@@ -91,20 +105,30 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
     createTs = 4200L
   )
 
+  private def catalog(directory: Path) = new SnapshotCatalog(
+    new LocalObjectStore(directory.toString),
+    bucket = "",
+    V2SegmentResolver.Unavailable
+  )
+
   private def withStore(f: (Path, LocalObjectStore) => Unit): Unit = {
     val directory = Files.createTempDirectory("snapshot-write-")
     val store = new LocalObjectStore(directory.toString)
-    try f(directory, store)
-    finally store.close()
+    try {
+      source(directory)
+      f(directory, store)
+    } finally store.close()
   }
 
-  test("a written snapshot reads back as the one that was written") {
+  test("a written snapshot keeps everything the source said") {
     withStore { (directory, store) =>
+      val snapshot = catalog(directory).read(sourceKey)
       val written = SnapshotWriter.write(
         snapshot,
-        Seq(index(30L, 8L), index(31L, 5L)),
+        Seq(index(30L, 8L), index(31L, 8L)),
         target,
-        store
+        store,
+        sourceKey
       )
 
       written.metadataKey shouldBe "built/snapshots/10/metadata/5.json"
@@ -112,176 +136,106 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
         "built/snapshots/10/manifests/5/30.avro",
         "built/snapshots/10/manifests/5/31.avro"
       )
-      written.bytes should be > 0L
 
-      // Milvus reads the segment id from `segmentID`; a document that names it
-      // only in this connector's own `segmentIDLong` is rejected as referring
-      // to segment 0.
-      val document = new String(
-        java.nio.file.Files.readAllBytes(
-          directory.resolve(written.metadataKey)
-        ),
-        java.nio.charset.StandardCharsets.UTF_8
+      val document = mapper.readTree(
+        Files.readAllBytes(directory.resolve(written.metadataKey))
       )
-      document should include(""""segmentID":30""")
-      document should include(""""segmentID":31""")
+      // The parts a restore needs and this connector does not model: they are
+      // the source's own values, not something the writer made up.
+      val collection = document.get("collection")
+      collection.get("virtual_channel_names").get(0).asText() shouldBe
+        "by-dev-rootcoord-dml_0_10v0"
+      collection.get("partitions").get("_default").asText() shouldBe "20"
+      collection.get("num_shards").asText() shouldBe "1"
+      collection
+        .get("properties")
+        .get(0)
+        .get("key")
+        .asText() shouldBe "timezone"
+      document.get("snapshot_info").get("state").asText() shouldBe
+        "SnapshotStatePending"
 
-      val catalog = new SnapshotCatalog(
-        new LocalObjectStore(directory.toString),
-        bucket = "",
-        V2SegmentResolver.Unavailable
+      // The parts the build job owns.
+      document.get("snapshot_info").get("name").asText() shouldBe "built-5"
+      document.get("snapshot_info").get("id").asText() shouldBe "5"
+      document.get("snapshot_info").get("create_ts").asText() shouldBe "4200"
+      document.get("build_ids").get(0).asText() shouldBe "7000"
+      document.get("segment_ids").get(0).asText() shouldBe "30"
+      document.get("manifest_list").get(0).asText() shouldBe
+        "built/snapshots/10/manifests/5/30.avro"
+      val declared = document.get("indexes").get(0)
+      declared.get("field_id").asText() shouldBe "101"
+      declared.get("index_name").asText() shouldBe "v_hnsw"
+
+      // Milvus reads a storage manifest mapping's segment id from `segmentID`,
+      // and the mapping is the source's.
+      document
+        .get("storagev2_manifest_list")
+        .get(0)
+        .get("segmentID")
+        .asLong() shouldBe 30L
+    }
+  }
+
+  test("the written snapshot reads back with the indexes it was given") {
+    withStore { (directory, store) =>
+      val snapshot = catalog(directory).read(sourceKey)
+      val written = SnapshotWriter.write(
+        snapshot,
+        Seq(index(30L, 8L)),
+        target,
+        store,
+        sourceKey
       )
-      val back = catalog.read(written.metadataKey)
+      val back = catalog(directory).read(written.metadataKey)
 
       back.name shouldBe "built-5"
-      back.collectionId shouldBe 10L
       back.createdAt shouldBe Some(4200L)
-      back.partitionIds shouldBe Seq(20L)
-      back.buildIds shouldBe Some(Vector(7000L))
       back.segments.map(_.id) should contain theSameElementsAs Seq(30L, 31L)
-      back.segments.map(_.rows) should contain theSameElementsAs Seq(
-        Some(8L),
-        Some(5L)
-      )
-      back.segments.foreach { segment =>
-        segment.storageVersion shouldBe 3
-        segment.layout shouldBe SegmentLayout.Manifest(
-          s"files/insert_log/10/20/${segment.id}",
-          7L
-        )
-      }
+      back.segments.map(_.rows).toSet shouldBe Set(Some(8L))
+      back.buildIds shouldBe Some(Vector(7000L))
 
-      // The schema survives: field ids, types, the primary key and the
-      // dimension a search binds the column by.
-      back.schema.fields.map(_.name) shouldBe Seq("id", "vector")
-      back.schema.fields.map(_.fieldID) shouldBe Seq(100L, 101L)
-      back.primaryKeyField.map(_.name) shouldBe Some("id")
-      val vector = back.schema.fields.last
-      vector.dataType shouldBe DataType.FloatVector
-      vector.typeParams.find(_.key == "dim").map(_.value) shouldBe Some("4")
-
-      val indexed = back.segments.find(_.id == 30L).get.indexes
-      inside(indexed) { case SegmentIndexes.Available(entries) =>
-        entries should have size 1
-        val entry = entries.head
-        entry.fieldId shouldBe 101L
-        entry.buildId shouldBe 7000L
-        entry.rowCount shouldBe 8L
-        entry.serializedSize shouldBe 4096L
-        entry.indexVersion shouldBe 1L
-        entry.currentIndexVersion shouldBe Some(10)
-        entry.indexStorePathVersion shouldBe Some(0)
-        entry.indexType shouldBe Some("HNSW")
-        entry.metricType shouldBe Some("L2")
-        entry.parameters.get("M") shouldBe Some("4")
-        entry.filePaths shouldBe Vector(
-          "built/index_files/7000/1/20/30/HNSW"
-        )
-      }
-
-      val definition = back.indexes.get.head
-      definition.fieldId shouldBe 101L
-      definition.indexId shouldBe entriesIndexId(back)
-      definition.name shouldBe "vector_hnsw"
-      definition.typeParameters.get("dim") shouldBe Some("4")
-      definition.indexParameters.get("index_type") shouldBe Some("HNSW")
-    }
-  }
-
-  test("a segment with no index of its own stays unindexed") {
-    withStore { (directory, store) =>
-      val written =
-        SnapshotWriter.write(snapshot, Seq(index(30L, 8L)), target, store)
-      val back = new SnapshotCatalog(
-        new LocalObjectStore(directory.toString),
-        bucket = "",
-        V2SegmentResolver.Unavailable
-      ).read(written.metadataKey)
-
-      back.segments.find(_.id == 31L).get.indexes shouldBe
-        SegmentIndexes.Unindexed
-      back.segments
-        .find(_.id == 30L)
-        .get
-        .indexes shouldBe a[SegmentIndexes.Available]
-    }
-  }
-
-  test("the collection's own index definition keeps its id and name") {
-    withStore { (directory, store) =>
-      val declared = com.zilliz.milvus.storage.snapshot.CollectionIndex(
-        collectionId = 10L,
-        fieldId = 101L,
-        indexId = 900L,
-        name = "vector_index",
-        typeParameters = Map("dim" -> "4"),
-        indexParameters = Map("index_type" -> "HNSW", "metric_type" -> "L2"),
-        userIndexParameters = Map("index_type" -> "AUTOINDEX")
-      )
-      val written = SnapshotWriter.write(
-        snapshot.copy(indexes = Some(Vector(declared))),
-        Seq(index(30L, 8L), index(31L, 5L)),
-        target,
-        store
-      )
-      val back = new SnapshotCatalog(
-        new LocalObjectStore(directory.toString),
-        bucket = "",
-        V2SegmentResolver.Unavailable
-      ).read(written.metadataKey)
-
-      back.indexes.get.map(_.indexId) shouldBe Vector(900L)
-      back.indexes.get.head.name shouldBe "vector_index"
-      back.indexes.get.head.userIndexParameters
-        .get("index_type") shouldBe Some("AUTOINDEX")
       inside(back.segments.find(_.id == 30L).get.indexes) {
         case SegmentIndexes.Available(entries) =>
-          entries.head.indexId shouldBe 900L
-          entries.head.name shouldBe "vector_index"
+          entries should have size 1
+          entries.head.buildId shouldBe 7000L
+          entries.head.rowCount shouldBe 8L
+          entries.head.indexType shouldBe Some("HNSW")
+          entries.head.metricType shouldBe Some("L2")
+          entries.head.parameters.get("M") shouldBe Some("4")
+          entries.head.filePaths shouldBe Vector(
+            "built/index_files/7000/1/20/30/HNSW"
+          )
       }
+      // A segment the job did not index keeps no index records of its own.
+      back.segments.find(_.id == 31L).get.indexes shouldBe
+        SegmentIndexes.Unindexed
     }
   }
 
-  test("a snapshot is not written from a segment it cannot describe") {
-    withStore { (_, store) =>
-      the[IllegalArgumentException] thrownBy SnapshotWriter.write(
-        snapshot.copy(segments = Seq(segment(30L, 8L).copy(rows = None))),
-        Seq.empty,
-        target,
-        store
-      ) should have message
-        "requirement failed: Segment 30 does not say how many rows it holds"
-
-      the[IllegalArgumentException] thrownBy SnapshotWriter.write(
-        snapshot.copy(segments =
-          Seq(
-            segment(30L, 8L).copy(
-              storageVersion = 2,
-              layout = SegmentLayout.ColumnGroups(Seq.empty)
-            )
-          )
-        ),
-        Seq.empty,
-        target,
-        store
-      )
+  test("a write needs the document it copies and the segments it names") {
+    withStore { (directory, store) =>
+      val snapshot = catalog(directory).read(sourceKey)
 
       the[IllegalArgumentException] thrownBy SnapshotWriter.write(
         snapshot,
         Seq(index(99L, 8L)),
         target,
-        store
+        store,
+        sourceKey
       ) should have message
         "requirement failed: Index records name segment(s) the snapshot does not hold: 99"
+
+      the[IllegalArgumentException] thrownBy SnapshotWriter.write(
+        snapshot,
+        Seq.empty,
+        target,
+        store,
+        ""
+      ) should have message
+        "requirement failed: A snapshot write copies a snapshot document, which this call has to name"
+
+      SnapshotWriter.sourceKeyOf(snapshot) shouldBe Some(sourceKey)
     }
   }
-
-  private def entriesIndexId(snapshot: Snapshot): Long =
-    snapshot.segments
-      .flatMap(_.indexes match {
-        case SegmentIndexes.Available(entries) => entries
-        case _                                 => Vector.empty
-      })
-      .head
-      .indexId
 }

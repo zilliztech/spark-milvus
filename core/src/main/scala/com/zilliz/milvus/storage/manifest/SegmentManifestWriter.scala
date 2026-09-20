@@ -1,13 +1,18 @@
 package com.zilliz.milvus.storage.manifest
 
-import java.io.ByteArrayOutputStream
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.lang.{Boolean => JavaBoolean, Integer, Long => JavaLong}
 import java.nio.ByteBuffer
 import java.util.{ArrayList, HashMap}
 import scala.jdk.CollectionConverters._
 
-import org.apache.avro.generic.{GenericData, GenericDatumWriter, GenericRecord}
-import org.apache.avro.io.EncoderFactory
+import org.apache.avro.generic.{
+  GenericData,
+  GenericDatumReader,
+  GenericDatumWriter,
+  GenericRecord
+}
+import org.apache.avro.io.{DecoderFactory, EncoderFactory}
 import org.apache.avro.Schema
 
 /** Writes one segment's manifest as the bytes [[SegmentManifestReader]] reads.
@@ -70,6 +75,34 @@ object SegmentManifestWriter {
 
   def supportedSchemaVersions: Seq[Int] =
     SegmentManifestReader.supportedSchemaVersions
+
+  /** One segment's manifest as Milvus wrote it, with its index registrations
+    * replaced.
+    *
+    * This is how a build job describes a segment it did not write: everything
+    * the record says about the segment — its channel, positions, commit
+    * timestamp, data and delete files — is the bytes Milvus put there, decoded
+    * and encoded again with the same schema, and only `index_files` is the
+    * job's own. Nothing about the segment is restated from a projection, so
+    * nothing about it can be lost or guessed.
+    */
+  def rewriteIndexes(
+      source: Array[Byte],
+      indexes: Vector[AvroIndexFileEntry],
+      schemaVersion: Int = CurrentSchemaVersion
+  ): Array[Byte] = {
+    val schema = schemaFor(schemaVersion)
+    val decoder =
+      DecoderFactory.get().binaryDecoder(new ByteArrayInputStream(source), null)
+    val record =
+      new GenericDatumReader[GenericRecord](schema).read(null, decoder)
+    putIndexes(record, schema, indexes)
+    val out = new ByteArrayOutputStream()
+    val encoder = EncoderFactory.get().directBinaryEncoder(out, null)
+    new GenericDatumWriter[GenericRecord](schema).write(record, encoder)
+    encoder.flush()
+    out.toByteArray
+  }
 
   private def putBinlogs(
       record: GenericRecord,

@@ -13,6 +13,7 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.Row
 
+import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.write.commit.{
   JobManifest,
@@ -100,17 +101,35 @@ object WriteSnapshotProcedure extends Procedure {
     // leave a snapshot write that fails on the same options.
     val properties =
       StorageOptions.writeStorageProperties(options, table.snapshot.bucket)
+    // What this writes is the source snapshot with the job's indexes in it, so
+    // the document it came from has to be readable from the same store.
+    val sourceKey = SnapshotWriter
+      .sourceKeyOf(
+        table.snapshot,
+        properties.getOrElse(StorageProperties.Address, "")
+      )
+      .getOrElse(
+        throw new IllegalArgumentException(
+          s"'$collection' was not read from a snapshot document, so there is nothing to copy: " +
+            s"${table.snapshot.origin}"
+        )
+      )
     val store = NativeObjectStore.Factory(properties).open()
     try {
       val manifest = jobManifest(store, StagingLayout(input, jobId).manifest)
-      val written =
-        SnapshotWriter.write(table.snapshot, manifest.indexes, target, store)
+      val written = SnapshotWriter.write(
+        table.snapshot,
+        manifest.indexes,
+        target,
+        store,
+        sourceKey
+      )
       Seq(
         Row(
           written.metadataKey,
           target.snapshotId,
           target.name,
-          table.snapshot.segments.size,
+          written.manifestKeys.size,
           manifest.indexes.size,
           written.bytes
         )
