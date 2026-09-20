@@ -25,7 +25,7 @@ package com.zilliz.milvus.storage
   *
   * Main types: FloatConverter, SparseFloatVectorConverter, ArrayCodec,
   * BinlogCodec, MilvusIndexFileDecoder, IndexFileCodec, SegmentIndexObjects,
-  * VectorIndexFamilies.
-  * Capabilities: R15, W3, V2, W6 (see docs/design/capabilities.md).
+  * VectorIndexFamilies. Capabilities: R15, W3, V2, W6 (see
+  * docs/design/capabilities.md).
   */
 package object codec
