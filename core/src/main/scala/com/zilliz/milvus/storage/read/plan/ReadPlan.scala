@@ -94,7 +94,9 @@ object ReadPlan extends Logging {
         neededFieldIds = neededFieldIds,
         deletes = deleteSourceFor(seg.id, seg.partitionId),
         indexes = seg.indexes,
-        snapshotRows = seg.rows,
+        // A snapshot that lists manifests alone states no row count; the
+        // manifest read for the delete files states one.
+        snapshotRows = seg.rows.orElse(deletes.v3Rows.get(seg.id)),
         limits = limits
       )
     }

@@ -3,7 +3,7 @@ package com.zilliz.milvus.storage.read.plan
 import scala.util.control.NonFatal
 
 import com.zilliz.milvus.storage.io.ObjectStore
-import com.zilliz.milvus.storage.manifest.V3ManifestReader
+import com.zilliz.milvus.storage.manifest.{ManifestFacts, V3ManifestReader}
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{
   DeleteFiles,
@@ -30,7 +30,12 @@ final case class DeleteFileListing(
     v3BySegment: Map[Long, Seq[DeltaLogFile]],
     v2BySegment: Map[Long, Seq[DeltaLogFile]],
     inheritedByPartition: Map[Long, Seq[DeltaLogFile]],
-    v3ReadVersions: Map[Long, Long]
+    v3ReadVersions: Map[Long, Long],
+    /** Rows of the V3 segments whose manifest was opened, by segment id. A
+      * snapshot that states its own row counts does not need these; a snapshot
+      * that lists manifests alone has no other source for them.
+      */
+    v3Rows: Map[Long, Long] = Map.empty
 ) {
 
   /** Every file a segment has to apply: the collection-wide L0 files, then its
@@ -135,11 +140,16 @@ object DeleteFileListing {
             s"latest manifest version must be positive, got $readVersion"
         )
       }
+      // The manifest is read for the delete files; the segment's rows come
+      // out of the same record, so a snapshot that did not carry a row count
+      // has one here at no further cost. A read that lists no delete files
+      // opens no manifest and learns nothing, which is why the row count is
+      // an Option all the way up.
       val files =
-        if (!listDeleteFiles) Seq.empty[DeltaLogFile]
+        if (!listDeleteFiles) ManifestFacts(Seq.empty, scala.None)
         else
           V3ManifestReader
-            .loadDeltaLogs(basePath, readVersion, bucket, store)
+            .load(basePath, readVersion, bucket, store)
             .fold(
               e =>
                 throw new IllegalStateException(
@@ -148,10 +158,10 @@ object DeleteFileListing {
                 ),
               identity
             )
-            .map(file =>
-              file.copy(logPath = deleteLogKey(file.logPath, bucket, endpoint))
-            )
-      (seg.id, readVersion, files)
+      val deltaLogs = files.deltaLogs.map(file =>
+        file.copy(logPath = deleteLogKey(file.logPath, bucket, endpoint))
+      )
+      (seg.id, readVersion, deltaLogs, files.rows)
     }
     val v2 =
       if (!listDeleteFiles) Seq.empty[(Long, Seq[DeltaLogFile])]
@@ -173,11 +183,14 @@ object DeleteFileListing {
           }
     DeleteFileListing(
       v3BySegment = v3.collect {
-        case (id, _, files) if files.nonEmpty => id -> files
+        case (id, _, files, _) if files.nonEmpty => id -> files
       }.toMap,
       v2BySegment = v2.filter(_._2.nonEmpty).toMap,
       inheritedByPartition = inherited.filter(_._2.nonEmpty),
-      v3ReadVersions = v3.map { case (id, version, _) => id -> version }.toMap
+      v3ReadVersions = v3.map { case (id, version, _, _) =>
+        id -> version
+      }.toMap,
+      v3Rows = v3.collect { case (id, _, _, Some(rows)) => id -> rows }.toMap
     )
   }
 

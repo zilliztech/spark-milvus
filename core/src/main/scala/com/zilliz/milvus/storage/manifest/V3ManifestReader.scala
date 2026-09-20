@@ -17,20 +17,30 @@ final case class ManifestStatistic(
     metadata: Map[String, String]
 )
 
+/** What one pinned StorageV3 manifest says, read in one pass.
+  *
+  * The delete files and the row count come out of the same Avro record, so a
+  * caller that wants both pays for one read.
+  */
+final case class ManifestFacts(
+    deltaLogs: Seq[DeltaLogFile],
+    rows: Option[Long]
+)
+
 object V3ManifestReader {
   private val PrimaryKeyDeltaLogType = 0
   private val ManifestFileName = """manifest-(\d+)\.avro""".r
 
-  def loadDeltaLogs(
+  def load(
       basePath: String,
       readVersion: Long,
       bucket: String,
       store: ObjectStore
-  ): Either[Throwable, Seq[DeltaLogFile]] = {
+  ): Either[Throwable, ManifestFacts] = {
     try {
       val at =
         StoragePath.parse(manifestFilePath(basePath, readVersion), bucket)
-      parseDeltaLogs(store.readAll(at), basePath)
+      parse(store.readAll(at), basePath)
     } catch {
       case NonFatal(e) => Left(e)
     }
@@ -92,10 +102,10 @@ object V3ManifestReader {
     }
   }
 
-  def parseDeltaLogs(
+  def parse(
       avroBytes: Array[Byte],
       basePath: String
-  ): Either[Throwable, Seq[DeltaLogFile]] = {
+  ): Either[Throwable, ManifestFacts] = {
     try {
       val reader = new DataFileStream[GenericRecord](
         new ByteArrayInputStream(avroBytes),
@@ -103,10 +113,12 @@ object V3ManifestReader {
       )
       try {
         if (!reader.hasNext) {
-          Right(Seq.empty)
+          Right(ManifestFacts(Seq.empty, scala.None))
         } else {
           val rec = reader.next()
-          Right(projectDeltaLogs(rec, basePath))
+          Right(
+            ManifestFacts(projectDeltaLogs(rec, basePath), projectRows(rec))
+          )
         }
       } finally {
         reader.close()
@@ -133,6 +145,39 @@ object V3ManifestReader {
       }
     } catch {
       case NonFatal(e) => Left(e)
+    }
+  }
+
+  /** The rows of the segment, from the row ranges of one column group.
+    *
+    * Every column group covers the same rows, so one group answers for the
+    * segment. A file states the half-open range it holds as `start_index` and
+    * `end_index`; the manifest carries no row count of its own.
+    */
+  private def projectRows(rec: GenericRecord): Option[Long] = {
+    // Avro throws on a field the writer's schema never had, and a manifest
+    // written before column groups carried row ranges has none. Absent is a
+    // manifest that states no rows, not a manifest that cannot be read.
+    if (rec.getSchema.getField("column_groups") == null) return scala.None
+    val groups = rec.get("column_groups")
+    if (groups == null) return scala.None
+    val first = groups
+      .asInstanceOf[java.util.List[GenericRecord]]
+      .asScala
+      .headOption
+    first.flatMap { group =>
+      val files = group.get("files")
+      if (files == null) scala.None
+      else
+        Some(
+          files
+            .asInstanceOf[java.util.List[GenericRecord]]
+            .asScala
+            .map(file =>
+              asLong(file.get("end_index")) - asLong(file.get("start_index"))
+            )
+            .sum
+        ).filter(_ > 0L)
     }
   }
 

@@ -117,7 +117,11 @@ object SearchPlan {
     )
     if (tasks.isEmpty) return Seq.empty
     val sizes =
-      tasks.map(task => task.segmentId -> segmentBytes(task, layout)).toMap
+      tasks
+        .map(task =>
+          task.segmentId -> segmentBytes(task, layout, vectorsMaxBytes)
+        )
+        .toMap
     val total = sizes.values.sum
     val needed = math.max(1L, (total + vectorsMaxBytes - 1L) / vectorsMaxBytes)
     val start =
@@ -157,10 +161,24 @@ object SearchPlan {
       .toSeq
   }
 
+  /** What a segment's vectors cost a task, or the whole budget when nothing
+    * says.
+    *
+    * Counting an unknown segment as nothing made the sizing say one set was
+    * enough however many segments there were, so the sets fell back to the
+    * executor count and a task was given more vectors than it may hold. The
+    * task then failed on its own limit, telling the reader to raise it, when
+    * what was wanted was another set. Unknown is treated as full: a set holds
+    * one such segment, which is the safe direction and the one the reader can
+    * act on.
+    */
   private def segmentBytes(
       task: SegmentReadTask,
-      layout: VectorLayout
-  ): Long = task.snapshotRows.getOrElse(0L) * layout.rowBytes.toLong
+      layout: VectorLayout,
+      vectorsMaxBytes: Long
+  ): Long = task.snapshotRows
+    .map(_ * layout.rowBytes.toLong)
+    .getOrElse(vectorsMaxBytes)
 
   /** The first-stage tasks of one search: the segment sets and the query groups
     * they each answer.
@@ -193,7 +211,7 @@ object SearchPlan {
       vectorsMaxBytes > 0,
       s"The retained vector limit must be positive: $vectorsMaxBytes"
     )
-    val bytes = set.map(segmentBytes(_, layout)).sum
+    val bytes = set.map(segmentBytes(_, layout, vectorsMaxBytes)).sum
     math.min(math.max(bytes, layout.rowBytes.toLong), vectorsMaxBytes)
   }
 }

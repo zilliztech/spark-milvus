@@ -36,6 +36,34 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
             }
           },
           {
+            "name": "column_groups",
+            "type": {
+              "type": "array",
+              "items": {
+                "type": "record",
+                "name": "ColumnGroup",
+                "fields": [
+                  {"name": "columns", "type": {"type": "array", "items": "string"}},
+                  {
+                    "name": "files",
+                    "type": {
+                      "type": "array",
+                      "items": {
+                        "type": "record",
+                        "name": "ColumnGroupFile",
+                        "fields": [
+                          {"name": "path", "type": "string"},
+                          {"name": "start_index", "type": "long"},
+                          {"name": "end_index", "type": "long"}
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
             "name": "stats",
             "type": {
               "type": "map",
@@ -53,7 +81,7 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
       }
     """)
 
-  test("parseDeltaLogs reads primary-key StorageV3 manifest deltalogs") {
+  test("parse reads the primary-key StorageV3 manifest deltalogs") {
     val bytes = writeManifest(
       Seq(
         ("9001", 0, 3L),
@@ -62,19 +90,101 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
       )
     )
 
-    val result = V3ManifestReader.parseDeltaLogs(
+    val result = V3ManifestReader.parse(
       bytes,
       "files/insert_log/10/20/30"
     )
 
     result shouldBe a[Right[_, _]]
-    result.toOption.get shouldBe Seq(
+    result.toOption.get.deltaLogs shouldBe Seq(
       DeltaLogFile(
         0L,
         "files/insert_log/10/20/30/_delta/9001",
         3L
       )
     )
+  }
+
+  test("a segment's rows come from one column group's row ranges") {
+    // Every column group covers the same rows, so the first answers for the
+    // segment; the manifest states ranges, not a count.
+    val bytes = writeManifest(
+      deltaLogs = Seq.empty,
+      groups = Seq(
+        Seq((0L, 8192L), (8192L, 12000L)),
+        Seq((0L, 12000L))
+      )
+    )
+
+    V3ManifestReader
+      .parse(bytes, "files/insert_log/10/20/30")
+      .toOption
+      .get
+      .rows shouldBe Some(12000L)
+  }
+
+  test("a manifest with no column groups states no rows") {
+    V3ManifestReader
+      .parse(writeManifest(Seq.empty), "files/insert_log/10/20/30")
+      .toOption
+      .get
+      .rows shouldBe scala.None
+  }
+
+  test("a manifest written without column groups still reads") {
+    // Avro throws on a field the writer's schema never had. A manifest older
+    // than column-group row ranges must still give up its delete files.
+    val older = new Schema.Parser().parse("""
+      {
+        "type": "record",
+        "name": "Manifest",
+        "namespace": "milvus_storage",
+        "fields": [
+          {
+            "name": "delta_logs",
+            "type": {
+              "type": "array",
+              "items": {
+                "type": "record",
+                "name": "DeltaLog",
+                "fields": [
+                  {"name": "path", "type": "string"},
+                  {"name": "type", "type": "int"},
+                  {"name": "num_entries", "type": "long"}
+                ]
+              }
+            }
+          }
+        ]
+      }
+    """)
+    val rec = new GenericData.Record(older)
+    val logs = new GenericData.Array[GenericRecord](
+      1,
+      older.getField("delta_logs").schema()
+    )
+    val log = new GenericData.Record(
+      older.getField("delta_logs").schema().getElementType
+    )
+    log.put("path", "9001")
+    log.put("type", 0)
+    log.put("num_entries", 3L)
+    logs.add(log)
+    rec.put("delta_logs", logs)
+    val out = new java.io.ByteArrayOutputStream()
+    val writer = new DataFileWriter[GenericRecord](
+      new GenericDatumWriter[GenericRecord](older)
+    )
+    writer.create(older, out)
+    writer.append(rec)
+    writer.close()
+
+    val facts = V3ManifestReader
+      .parse(out.toByteArray, "files/insert_log/10/20/30")
+      .toOption
+      .get
+    facts.rows shouldBe scala.None
+    facts.deltaLogs.map(_.entriesNum) shouldBe Seq(3L)
   }
 
   test("manifestFilePath builds the StorageV3 metadata avro path") {
@@ -145,7 +255,8 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
 
   private def writeManifest(
       deltaLogs: Seq[(String, Int, Long)],
-      stats: Map[String, (Seq[String], Map[String, String])] = Map.empty
+      stats: Map[String, (Seq[String], Map[String, String])] = Map.empty,
+      groups: Seq[Seq[(Long, Long)]] = Seq.empty
   ): Array[Byte] = {
     val deltaSchema = schema
       .getField("delta_logs")
@@ -164,6 +275,30 @@ class V3ManifestReaderTest extends AnyFunSuite with Matchers {
       arr.add(log)
     }
     rec.put("delta_logs", arr)
+    val groupSchema = schema.getField("column_groups").schema()
+    val groupArray =
+      new GenericData.Array[GenericRecord](groups.size, groupSchema)
+    groups.foreach { files =>
+      val group = new GenericData.Record(groupSchema.getElementType)
+      val columnsSchema =
+        groupSchema.getElementType.getField("columns").schema()
+      val columns = new GenericData.Array[String](1, columnsSchema)
+      columns.add("100")
+      group.put("columns", columns)
+      val filesSchema = groupSchema.getElementType.getField("files").schema()
+      val fileArray =
+        new GenericData.Array[GenericRecord](files.size, filesSchema)
+      files.foreach { case (start, end) =>
+        val file = new GenericData.Record(filesSchema.getElementType)
+        file.put("path", s"0_$start.parquet")
+        file.put("start_index", start)
+        file.put("end_index", end)
+        fileArray.add(file)
+      }
+      group.put("files", fileArray)
+      groupArray.add(group)
+    }
+    rec.put("column_groups", groupArray)
     val statsSchema = schema.getField("stats").schema().getValueType
     rec.put(
       "stats",
