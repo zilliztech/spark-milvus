@@ -165,7 +165,22 @@ object MilvusSearch extends Logging {
            s" over $comparedPairsTotal distance pairs"
          else "")
     )
-    val progress = new SearchProgress(comparedPairsTotal, segmentSearchesTotal)
+    // Which counter the percentage comes from, and when there is none.
+    // Compared pairs rise with every batch; in index mode segment searches
+    // rise with every call, because a probe searches a segment in one. An
+    // exact scan whose snapshot carries no row count has neither, and says so
+    // by reporting counts without a share.
+    val share =
+      if (comparedPairsTotal > 0L) Some(SearchMetrics.ComparedPairs)
+      else if (searchMode == "index") Some(SearchMetrics.SegmentSearches)
+      else None
+    val progress =
+      new SearchProgress(
+        comparedPairsTotal,
+        plan.groups.size,
+        plan.sets.map(_.size).sum,
+        share
+      )
     progress.announce()
     spark.sparkContext.addSparkListener(progress)
     val hits =

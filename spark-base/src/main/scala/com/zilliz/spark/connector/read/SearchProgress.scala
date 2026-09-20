@@ -30,14 +30,30 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
   * task-end event and kept. A task that failed contributes nothing, which is
   * what Spark does with its accumulators.
   *
-  * @param comparedTotal
-  *   the pairs the whole search has to measure, from the plan, or zero when the
-  *   mode does not count them. It is the denominator of
-  *   `milvus.search.compared`.
+  * @param comparedPairsTotal
+  *   the pairs the whole search has to measure, or zero when nothing knows
+  *   them: an index probe does not compare every row, and a snapshot that
+  *   carries no row count cannot be multiplied out.
+  * @param queryGroups
+  *   the groups the query set was cut into.
+  * @param segments
+  *   the segments the search covers. Times the groups, that is how many segment
+  *   searches there are; the line prints both factors, because a product on its
+  *   own reads as a count of segments.
+  * @param share
+  *   which of the two the percentage comes from, or none. Only a counter that
+  *   rises through the work can carry it: compared pairs rise with every batch,
+  *   and in index mode so do segment searches, because a probe searches one
+  *   segment in one call. An exact scan's segment searches rise once a whole
+  *   segment is done, which for most of a run reads as no progress at all, and
+  *   a percentage that says zero while the work is half done is worse than
+  *   none.
   */
 private[read] final class SearchProgress(
     comparedPairsTotal: Long,
-    segmentSearchesTotal: Long
+    queryGroups: Int,
+    segments: Int,
+    share: Option[String] = None
 ) extends SparkListener
     with Logging {
 
@@ -52,6 +68,8 @@ private[read] final class SearchProgress(
       "vector, a segment search is one query group over one segment, and an " +
       "engine call is one call into Knowhere over one batch of one segment."
   )
+
+  private val segmentSearchesTotal = queryGroups.toLong * segments.toLong
 
   private val running = new ConcurrentHashMap[Long, Map[String, Long]]()
   private val ended = new ConcurrentHashMap[Long, Map[String, Long]]()
@@ -100,15 +118,22 @@ private[read] final class SearchProgress(
     val pairs = counted.getOrElse(SearchMetrics.ComparedPairs, 0L)
     val searches = counted.getOrElse(SearchMetrics.SegmentSearches, 0L)
     val calls = counted.getOrElse(SearchMetrics.KnowhereCalls, 0L)
-    val done =
-      if (comparedPairsTotal > 0L) pairs
-      else if (segmentSearchesTotal > 0L) searches
-      else 0L
-    val total =
-      if (comparedPairsTotal > 0L) comparedPairsTotal else segmentSearchesTotal
-    val headline =
-      if (total <= 0L) "Search progress"
-      else f"Search progress ${done * 100.0 / total}%.1f%%"
+    val headline = share
+      .map(name =>
+        (
+          counted.getOrElse(name, 0L),
+          name match {
+            case SearchMetrics.ComparedPairs   => comparedPairsTotal
+            case SearchMetrics.SegmentSearches => segmentSearchesTotal
+            case _                             => 0L
+          }
+        )
+      )
+      .filter(_._2 > 0L)
+      .map { case (done, total) =>
+        f"Search progress ${done * 100.0 / total}%.1f%%"
+      }
+      .getOrElse("Search progress")
     val of = SearchProgress.grouped(_: Long)
     // Pairs per call is the queries of a group times the rows of a batch: the
     // shape of one distance computation, and the only place a batch size that
@@ -122,7 +147,8 @@ private[read] final class SearchProgress(
          else "") +
         " distance pairs, " +
         s"${of(searches)}" +
-        (if (segmentSearchesTotal > 0L) s" of ${of(segmentSearchesTotal)}"
+        (if (segmentSearchesTotal > 0L)
+           s" of $queryGroups x $segments"
          else "") +
         " segment searches, " +
         s"${of(calls)} engine calls$perCall, " +
