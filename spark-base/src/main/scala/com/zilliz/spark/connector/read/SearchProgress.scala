@@ -35,9 +35,23 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
   *   mode does not count them. It is the denominator of
   *   `milvus.search.compared`.
   */
-private[read] final class SearchProgress(comparedTotal: Long)
-    extends SparkListener
+private[read] final class SearchProgress(
+    comparedPairsTotal: Long,
+    segmentSearchesTotal: Long
+) extends SparkListener
     with Logging {
+
+  /** Said once, so a reader meeting these lines knows what wrote them and why
+    * they are here rather than on a Spark page.
+    */
+  def announce(): Unit = logInfo(
+    "Search progress is written here while the search runs, because Spark's " +
+      "stage page carries a task's own counters only once that task ends. " +
+      "A line is one reading of every task's counters, taken from the " +
+      "executor heartbeat: distance pairs are query vector against base " +
+      "vector, a segment search is one query group over one segment, and an " +
+      "engine call is one call into Knowhere over one batch of one segment."
+  )
 
   private val running = new ConcurrentHashMap[Long, Map[String, Long]]()
   private val ended = new ConcurrentHashMap[Long, Map[String, Long]]()
@@ -83,24 +97,38 @@ private[read] final class SearchProgress(comparedTotal: Long)
     lastReport = now
     val counted = totals
     if (counted.isEmpty) return
-    val compared = counted.getOrElse(SearchMetrics.Compared, 0L)
+    val pairs = counted.getOrElse(SearchMetrics.ComparedPairs, 0L)
+    val searches = counted.getOrElse(SearchMetrics.SegmentSearches, 0L)
     val calls = counted.getOrElse(SearchMetrics.KnowhereCalls, 0L)
-    val of =
-      if (comparedTotal <= 0L) ""
-      else
-        f" of ${SearchProgress.grouped(comparedTotal)}%s" +
-          f" (${compared * 100.0 / comparedTotal}%.1f%%)"
-    // Pairs per call is queries in the group times rows in the batch, which is
-    // the shape of one distance computation and the only place the batch size
-    // shows.
-    val each =
+    val done =
+      if (comparedPairsTotal > 0L) pairs
+      else if (segmentSearchesTotal > 0L) searches
+      else 0L
+    val total =
+      if (comparedPairsTotal > 0L) comparedPairsTotal else segmentSearchesTotal
+    val headline =
+      if (total <= 0L) "Search progress"
+      else f"Search progress ${done * 100.0 / total}%.1f%%"
+    val of = SearchProgress.grouped(_: Long)
+    // Pairs per call is the queries of a group times the rows of a batch: the
+    // shape of one distance computation, and the only place a batch size that
+    // is not the configured one shows.
+    val perCall =
       if (calls <= 0L) ""
-      else s", ${SearchProgress.grouped(compared / calls)} per call over $calls"
+      else s" at ${of(pairs / calls)} pairs each"
     logInfo(
-      s"Search progress: compared=${SearchProgress.grouped(compared)}$of$each, " +
-        s"segments=${counted.getOrElse(SearchMetrics.Segments, 0L)}, " +
-        s"knowhereMillis=${counted.getOrElse(SearchMetrics.KnowhereNanos, 0L) / 1000000L}, " +
-        s"tasks=${running.size} running, ${ended.size} done"
+      s"$headline: ${of(pairs)}" +
+        (if (comparedPairsTotal > 0L) s" of ${of(comparedPairsTotal)}"
+         else "") +
+        " distance pairs, " +
+        s"${of(searches)}" +
+        (if (segmentSearchesTotal > 0L) s" of ${of(segmentSearchesTotal)}"
+         else "") +
+        " segment searches, " +
+        s"${of(calls)} engine calls$perCall, " +
+        s"engine time ${of(counted.getOrElse(SearchMetrics.KnowhereNanos, 0L) / 1000000000L)}s " +
+        s"across ${running.size + ended.size} tasks " +
+        s"(${running.size} running, ${ended.size} done)"
     )
   }
 }

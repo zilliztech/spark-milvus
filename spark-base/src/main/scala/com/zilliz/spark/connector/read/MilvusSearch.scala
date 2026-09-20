@@ -145,20 +145,29 @@ object MilvusSearch extends Logging {
     )
 
     val metrics = SearchMetrics.create(spark.sparkContext)
-    // The pairs an exact search has to measure. Index mode probes instead of
-    // comparing every row, so it has no total and reports none.
-    val comparedTotal =
+    // What the first stage has to get through, so its progress has a
+    // denominator. An index probe visits part of a segment and Knowhere does
+    // not say how much, so index mode has no pair total and counts segment
+    // searches instead.
+    val comparedPairsTotal =
       if (searchMode != "exact") 0L
       else queryCount * tasks.flatMap(_.snapshotRows).sum
+    val segmentSearchesTotal =
+      plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum
     val queryBytes = SearchQueries.bytes(queryCount, layout)
     logInfo(
       s"Search plan: mode=$searchMode, metric=$searchMetric, topK=$k, " +
-        s"queries=$queryCount (${queryBytes} bytes, delivered by " +
-        s"${if (queryBytes <= limits.queriesMaxBytes) "broadcast" else "shuffle"}), " +
-        s"queryGroups=${plan.groups.size}, segmentSets=${plan.tasks}, " +
-        s"segments=${tasks.size}, comparedTotal=$comparedTotal"
+        s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
+        s"${if (queryBytes <= limits.queriesMaxBytes) "broadcast" else "shuffle"}, " +
+        s"queryGroups=${plan.groups.size}, segments=${tasks.size} in " +
+        s"${plan.tasks} sets, work=${segmentSearchesTotal} segment searches" +
+        (if (comparedPairsTotal > 0L)
+           s" over $comparedPairsTotal distance pairs"
+         else "")
     )
-    spark.sparkContext.addSparkListener(new SearchProgress(comparedTotal))
+    val progress = new SearchProgress(comparedPairsTotal, segmentSearchesTotal)
+    progress.announce()
+    spark.sparkContext.addSparkListener(progress)
     val hits =
       if (plan.isEmpty) empty(spark)
       else

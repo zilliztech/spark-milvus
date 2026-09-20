@@ -121,7 +121,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val metrics = SearchMetrics.create(spark.sparkContext)
 
     metrics.all.map(_._1) shouldBe Seq(
-      "milvus.search.segments",
+      "milvus.search.segment.searches",
       "milvus.search.read.bytes",
       "milvus.search.read.nanos",
       "milvus.search.index.bytes",
@@ -129,7 +129,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       "milvus.search.bitmap.nanos",
       "milvus.search.knowhere.calls",
       "milvus.search.knowhere.nanos",
-      "milvus.search.compared",
+      "milvus.search.compared.pairs",
       "milvus.search.candidates",
       "milvus.search.take.rows",
       "milvus.search.take.nanos"
@@ -151,9 +151,9 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val first = SearchMetrics.create(spark.sparkContext)
     val second = SearchMetrics.create(spark.sparkContext)
 
-    first.segments.add(2L)
+    first.segmentSearches.add(2L)
 
-    second.segments.value shouldBe 0L
+    second.segmentSearches.value shouldBe 0L
   }
 
   test("no candidates give no rows") {
