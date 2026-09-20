@@ -426,6 +426,39 @@ class IndexBuildUatTest
     Family("FLAT", "", "", Seq.empty, 1.0)
   )
 
+  /** Writes the snapshot for a build job that already ran, which is how the
+    * delivery half is exercised without building again — and how a snapshot can
+    * be placed where a particular reader needs it. Milvus's external restore,
+    * for one, requires every path in the snapshot to sit under the root its
+    * metadata URI derives, so the output prefix is the experiment.
+    *
+    * Needs `MILVUS_UAT_BIG_JOB` (the job id `build_index` returned),
+    * `MILVUS_UAT_BIG_INPUT` (the prefix it wrote under) and
+    * `MILVUS_UAT_BIG_OUTPUT`.
+    */
+  test("write_snapshot places a finished build's snapshot under a prefix") {
+    val snapshot = need("MILVUS_UAT_BIG_SNAPSHOT")
+    val job = need("MILVUS_UAT_BIG_JOB")
+    val input = need("MILVUS_UAT_BIG_INPUT")
+    val output = need("MILVUS_UAT_BIG_OUTPUT")
+    val rows = WriteSnapshotProcedure.run(
+      ProcedureArgs(
+        values = Map(
+          "collection" -> collection,
+          "job" -> job,
+          "input" -> input,
+          "output" -> output
+        ),
+        options = storageOptions() ++ Map(MilvusOption.SnapshotPath -> snapshot)
+      )
+    )
+    rows should have size 1
+    info(
+      s"snapshot=${rows.head.getString(0)} segments=${rows.head.getInt(3)} " +
+        s"indexes=${rows.head.getInt(4)} bytes=${rows.head.getLong(5)}"
+    )
+  }
+
   test("the connector builds an index over a real snapshot and searches it") {
     val snapshot = need("MILVUS_UAT_BIG_SNAPSHOT")
     val output = env("MILVUS_UAT_BIG_OUTPUT")
