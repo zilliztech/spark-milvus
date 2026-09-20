@@ -64,6 +64,12 @@ final case class WrittenSnapshot(
   * carry is not invented: a segment must be V3, must know its row count, and
   * its level follows from whether it holds data. A V2 segment is refused rather
   * than written from a guess.
+  *
+  * What this is verified for is one thing: `SnapshotCatalog` reads back what
+  * this writes. Whether Milvus accepts such a snapshot is unchecked, and the
+  * fields a read here does not use are assumptions — section 2.7 of the design
+  * lists them. Settle them against the target Milvus before the restore step
+  * relies on this.
   */
 object SnapshotWriter extends Logging {
 

@@ -575,8 +575,9 @@ CALL milvus.system.write_snapshot('your_db.your_collection',
 段来自 option 选中的快照，也就是 `build_index` 规划的那一份；索引记录来自 `input` 下那个作业的清单。
 它在 `output/snapshots/<collection>/` 下写出每段一个 Avro 清单和一份快照 JSON，`output` 不给时用 `input`；
 `snapshot_id` 默认当前毫秒，`snapshot_name` 默认 `<collection>-<snapshot_id>`。结果一行：`snapshot`（快照 JSON 的 key）、
-`snapshot_id`、`snapshot_name`、`segments`、`indexes`、`bytes`。这份快照可以用 `milvus.snapshot.path` 直接被本连接器读回；
-把它恢复成 Milvus 的 collection 尚未实现。段必须是 storage version 3 且带行数，V2 段直接报错，不按猜测写出。
+`snapshot_id`、`snapshot_name`、`segments`、`indexes`、`bytes`。这份快照只验到一件事：本连接器用 `milvus.snapshot.path` 读得回来。
+把它恢复成 Milvus 的 collection 尚未实现，Milvus 认不认连接器写的快照也没有核对过——
+读侧用不到的几个字段（`channel_name`、两个 position、`is_sorted`、`commit_timestamp`、`binlog_files`）是按假设填的。段必须是 storage version 3 且带行数，V2 段直接报错，不按猜测写出。
 
 ### 3.4 用 `CALL` 管理 Milvus
 

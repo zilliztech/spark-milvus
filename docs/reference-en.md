@@ -707,9 +707,12 @@ planned against — and the index records from that job's manifest under
 `snapshot_id` defaults to the current millisecond and `snapshot_name` to
 `<collection>-<snapshot_id>`. The result is one row: `snapshot` (the key of the
 snapshot JSON), `snapshot_id`, `snapshot_name`, `segments`, `indexes` and
-`bytes`. That snapshot can be read back by this connector with
+`bytes`. That snapshot is verified for one thing: this connector reads it back with
 `milvus.snapshot.path`. Restoring it into a Milvus collection is not
-implemented yet. Segments must be storage version 3 and must carry a row
+implemented, and whether Milvus accepts a connector-written snapshot has not
+been checked — several fields a read here does not use (`channel_name`, the
+two positions, `is_sorted`, `commit_timestamp`, `binlog_files`) are written
+from assumption. Segments must be storage version 3 and must carry a row
 count; a V2 segment is refused rather than written from a guess.
 
 ### 3.4 Managing Milvus with `CALL`

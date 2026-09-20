@@ -18,6 +18,13 @@ import org.apache.avro.Schema
   * writer cannot, because Avro binary is positional and Milvus reads the whole
   * record. Every field of the bundled schema is therefore written, with a zero
   * value where the connector has nothing to say.
+  *
+  * Those zero values are assumptions, not facts: `channel_name`, the two
+  * positions, `is_sorted` and, for a V3 segment, `binlog_files` have not been
+  * checked against what Milvus writes or requires, because the only verified
+  * reader of these objects is this connector, which does not use them. A
+  * Milvus-side consumer has to settle them first
+  * (docs/design/architecture/vector-search.html section 2.7).
   */
 object SegmentManifestWriter {
 

@@ -544,7 +544,22 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <li>driver 把索引记录写进作业清单，<code>core.write.commit</code> 写出快照 JSON 与段 Avro 清单；<code>restore_snapshot</code> 调 Milvus 的外部快照恢复，Milvus 复制段文件与索引文件、分配新的 build id，生成新 collection（W8）。给已有 collection 的段补索引，是把索引写进段 Manifest 的 <code>indexes</code>，需要 Milvus 按它加载（README 第 5 节）。</li>
 <li>索引的引擎与参数取目标 Milvus 能加载的组合：面向云上用含 Cardinal 的 Knowhere 构建，参数与云上的自动索引一致，该产物在云上作业运行时提供。第一版建向量索引，范围与 2.4、2.5 的加载器一致。</li>
 <li>建好的索引由 2.4 的加载器读回搜索，与精确扫描比较召回率。</li>
-<li>已实现：<code>NativeVectorIndex.build</code> 与 <code>core.index.IndexWriter</code>（整段向量装配成一块缓冲、构建、交出载荷，nullable 列同时产出 <code>valid_data</code> 位图）、<code>core.codec</code> 的信封与 <code>SegmentIndexObjects.write</code>（按 store path version 选前缀、超过 16 MiB 切片并写 <code>SLICE_META</code>）、<code>CommittedIndex</code> 记录与 <code>build_index</code> 过程；快照文件也已写出：<code>SegmentManifestWriter</code> 编码段 Avro 清单（读侧只取到 <code>index_files</code> 为止，写侧要把整条记录填满，Avro 二进制按位置解码），<code>core.write.commit.SnapshotWriter</code> 出快照 JSON 与每段一份清单，入口是 <code>write_snapshot</code> 过程。索引记录里的行数是段行数，空值由索引文件里的 <code>valid_data</code> 位图表达。段必须是 storage version 3 且带行数，V2 段报错不猜。剩下的是恢复：调 Milvus 的外部快照恢复生成新 collection，未实现。</li>
+<li>已实现：<code>NativeVectorIndex.build</code> 与 <code>core.index.IndexWriter</code>（整段向量装配成一块缓冲、构建、交出载荷，nullable 列同时产出 <code>valid_data</code> 位图）、<code>core.codec</code> 的信封与 <code>SegmentIndexObjects.write</code>（按 store path version 选前缀、超过 16 MiB 切片并写 <code>SLICE_META</code>）、<code>CommittedIndex</code> 记录与 <code>build_index</code> 过程；快照文件也已写出：<code>SegmentManifestWriter</code> 编码段 Avro 清单（读侧只取到 <code>index_files</code> 为止，写侧要把整条记录填满，Avro 二进制按位置解码），<code>core.write.commit.SnapshotWriter</code> 出快照 JSON 与每段一份清单，入口是 <code>write_snapshot</code> 过程。索引记录里的行数是段行数，空值由索引文件里的 <code>valid_data</code> 位图表达。段必须是 storage version 3 且带行数，V2 段报错不猜。</p>
+<p><strong>这份快照只验到「本连接器读得回来」。</strong>它是写给 Milvus 外部快照恢复的，而那一步还没实现，也没有用真实的 Milvus 核对过，所以下面这些字段是按假设填的，没有事实支撑：</p>
+<table>
+<thead><tr><th>字段</th><th>写入值</th><th>依据</th></tr></thead>
+<tbody>
+<tr><td><code>channel_name</code></td><td>空串</td><td>无</td></tr>
+<tr><td><code>start_position</code>、<code>dml_position</code></td><td>全零记录</td><td>无</td></tr>
+<tr><td><code>is_sorted</code></td><td>false</td><td>无</td></tr>
+<tr><td><code>commit_timestamp</code></td><td>作业的 HybridTS</td><td>类比决策 22 给新段的占位 Timestamp</td></tr>
+<tr><td><code>segment_level</code></td><td>有数据 2，否则 1</td><td>读侧对 L0 的判断（<code>SnapshotCatalog</code>）</td></tr>
+<tr><td><code>binlog_files</code></td><td>空</td><td>V3 段的数据文件在 milvus-storage 的 manifest 里；Milvus 真实 V3 段的 Avro 写不写这一项未核对</td></tr>
+<tr><td><code>index_id</code></td><td>快照没有索引定义时用 build id 顶替</td><td>无</td></tr>
+<tr><td><code>state</code>、<code>num_shards</code>、<code>consistency_level</code></td><td>不写</td><td>读侧不需要；Milvus 恢复是否需要未核对</td></tr>
+</tbody>
+</table>
+<p>验收只说明连接器写的连接器读得回来，不说明 Milvus 认这份快照；而读侧恰好不读上表里的多数字段。恢复那一步落地时，这些值要对着目标 Milvus 逐项核对再定。</li>
 </ol>
 <h3 id="library-loading">2.8 原生库加载与打包</h3>
 <p><strong>milvus-storage 与 Knowhere 的固定源码在同一张 Conan 依赖图中构建，所有原生库进入一个平台 JAR，并由 <code>native-runtime</code> 校验后解压到同一目录。</strong>
