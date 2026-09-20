@@ -77,11 +77,6 @@ class MilvusIndexFileDecoderTest extends AnyFunSuite with Matchers {
       BinlogFixture.encode(
         Array[Byte](1),
         extras =
-          s"""{"indexBuildID":"${BinlogFixture.BuildId}","nullable":true}"""
-      ),
-      BinlogFixture.encode(
-        Array[Byte](1),
-        extras =
           s"""{"indexBuildID":"${BinlogFixture.BuildId}","nullable":"bad"}"""
       ),
       BinlogFixture.encode(Array[Byte](1), eventType = 2),
@@ -89,6 +84,17 @@ class MilvusIndexFileDecoderTest extends AnyFunSuite with Matchers {
     ).foreach { bytes =>
       intercept[IllegalArgumentException](MilvusIndexFileDecoder.decode(bytes))
     }
+    // A nullable column's index says so and names the rows it holds in its
+    // valid_data payload, which the loader maps back to segment rows.
+    val nullable = MilvusIndexFileDecoder.decode(
+      BinlogFixture.encode(
+        Array[Byte](1),
+        extras =
+          s"""{"indexBuildID":"${BinlogFixture.BuildId}","nullable":true}"""
+      )
+    )
+    try assert(nullable.payloadLength == 1L)
+    finally nullable.close()
     intercept[UnsupportedOperationException] {
       MilvusIndexFileDecoder.decode(
         BinlogFixture.encode(Array[Byte](1), dataType = 101)

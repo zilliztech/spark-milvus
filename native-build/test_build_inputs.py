@@ -9,7 +9,19 @@ from unittest.mock import patch
 import jvm_load
 import platforms
 from build import (knowhere_c_api_tests, digest, platform_tool_requirements, prepare_conan_lock, promote_bundle,
-                   snapshot_corrosion, validate_conan_lock, validate_locked_graph)
+                   replace_requires_section, snapshot_corrosion, validate_conan_lock, validate_locked_graph)
+
+
+class BuildContextPinTest(unittest.TestCase):
+    def test_every_selected_reference_replaces_its_recipe_in_both_contexts(self):
+        references = {"zlib": "zlib/1.3.1#8045", "grpc": "grpc/1.67.1@milvus/dev#efea"}
+        section = replace_requires_section(references)
+        self.assertEqual(section, "[replace_requires]\ngrpc/*: grpc/1.67.1@milvus/dev#efea\nzlib/*: zlib/1.3.1#8045\n")
+
+    def test_replacements_keep_the_exact_recipe_revision(self):
+        section = replace_requires_section({"openssl": "openssl/3.3.2#9f9f"})
+        self.assertIn("openssl/*: openssl/3.3.2#9f9f", section)
+        self.assertNotIn("openssl/*: openssl/3.3.2\n", section)
 
 #: The JNI entries this platform names, so fixtures match what promotion checks.
 ENTRIES = jvm_load.JVM_LOAD_ENTRIES

@@ -65,9 +65,12 @@ exact scan or index probe, and `TopKMerger` keeps each query's best k.
 `Evaluator` for Milvus syntax used by ordinary table and persisted-index
 filters, and the schema-bound `PredicateExpr` / `PredicateEvaluator` / `Bitmap`
 for Spark V2 predicate pushdown. JSON/Array Milvus expressions wait on decision
-23. Index writing remains unwritten; the vector search design moves both modes
-behind one query-set entry and deletes the two older brute-force paths when that
-entry lands. `stats` writes
+23. `core.index` also builds indexes (`IndexWriter`, behind the `build_index`
+procedure); the two older brute-force search paths are deleted.
+`MilvusSearch.search` is the search entry; running the search inside the
+DataFrame plan (a pushed-down TopN over a distance function for one query, a
+`knn` join for a query set) is a long-term item designed in section 2.10 of
+the vector search document. `stats` writes
 primary-key bloom filters and reads V2/V3 segment statistics for conservative
 R9/R18 segment pruning; R10 row-group pruning remains blocked on
 milvus-storage. `write.commit` holds job manifests and registration.
@@ -119,7 +122,7 @@ Persisted HNSW loading uses upstream BinarySet and index search APIs; Cardinal
 stream files require a Cardinal-enabled build. Real-file compatibility and
 validation results are recorded in the vector search design.
 
-Six design questions are still open: 10, 19, 21, 22, 23 and 26 in
+Four design questions are still open: 10, 19, 23 and 26 in
 section 4 of [docs/design/README.md](docs/design/README.md). Several of them
 block specific packages, so check that list before starting on one.
 
@@ -160,7 +163,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment still lacks before registration, the development outline |
 | How does a `CALL milvus.system.<name>(...)` statement become a call? | [docs/design/architecture/procedure.html](docs/design/architecture/procedure.html) — the grammar, parser extension, logical node and strategy, per-line generated pieces, procedure contracts and bounded-wait semantics |
 | How is any input described at a fixed version, and how does it reach reads, search and index building? | [docs/design/architecture/table-version.html](docs/design/architecture/table-version.html) — decision 25 as revised on 2026-09-17: `TableVersion` (evolved from today's `Snapshot`) has a common part and a part only its format's `TableFormat` reads; its units are `DataUnit`s; identity stays in each input's `StorageBinding`; deletes run inside each format; row addresses and capabilities are declared; computations take neutral column batches from a table input or a scan-only DataFrame input. `Snapshot`, `Segment` and `SegmentReadTask` name Milvus objects only |
-| How do vector search and index building work? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — conclusion: one `MilvusSearch.search` entry taking a query set with `mode` exact or index, its result schema, scope, options, capabilities checked at planning and failure behaviour, layer duties with the computation kept apart from the Milvus `TableFormat` side, metrics and the cost of each mode; principle: the two Spark stages (candidates then take), the Knowhere buffer contract and zero-copy conditions, exact scan, index probe from snapshot metadata, index file decoding and engine choice, result semantics, index building through `build_index` and external snapshot restore, native library loading and real-file compatibility; then what the simplicity and the design buy |
+| How do vector search and index building work? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — conclusion: one `MilvusSearch.search` entry taking a query set with `mode` exact or index, its result schema, scope, options, capabilities checked at planning and failure behaviour, layer duties with the computation kept apart from the Milvus `TableFormat` side, metrics and the cost of each mode; principle: the two Spark stages (candidates then take), the Knowhere buffer contract and zero-copy conditions, exact scan, index probe from snapshot metadata, index file decoding and engine choice, result semantics, index building through `build_index` and external snapshot restore, native library loading and real-file compatibility, and the long-term DataFrame/SQL plan entry (section 2.10: pushed-down TopN over a distance function, `knn` join, verified Spark interfaces, gaps and steps); then what the simplicity and the design buy |
 | How is an external collection read? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html#external) section 3.1 — how Milvus stores one, the five source formats, synthesized primary key and timestamp; the four read rules every segment shares and the source type table are in [read.html](docs/design/architecture/read.html#rules) 1.1 and 6.4; customer-bucket `extfs.*` credentials in [storage-auth.html](docs/design/architecture/storage-auth.html#external) 3.4. Opening an external segment needs milvus-storage `loon_reader_new` to accept a null schema |
 | What is a Snapshot, and how do the four read entry points become one? | [docs/design/architecture/snapshot.html](docs/design/architecture/snapshot.html) — `Snapshot` and `Segment`, the three delete states, what each source cannot supply, `SnapshotCatalog`, the boundary to `SegmentReadTask`. Draft under review |
 | How does backfill reach more than one bucket? | [docs/design/apps/backfill-storage.html](docs/design/apps/backfill-storage.html) |
@@ -168,9 +171,8 @@ writing Vortex column groups. Check it before designing around a gap.
 | What options does a user pass? | [docs/reference-en.md](docs/reference-en.md), [docs/reference-cn.md](docs/reference-cn.md) |
 | What is a given package responsible for? | The `package.scala` or `package-info.java` in that package |
 | How do I build, test and run it? | [README.md](README.md), then [docs/contributing.md](docs/contributing.md) for the mechanics on top |
-| How do we review or change the sbt build? | [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html) for principles and practice; apply the repository skill [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md) for build work |
+| Which native libraries does the connector carry, what does compiling them need, and how is the bundle obtained? | [docs/design/engineering/build.html](docs/design/engineering/build.html) (Markdown twin: [build.md](docs/design/engineering/build.md), kept identical) — the three layers of the per-platform bundle (JNI entries, the two engines, their shared Conan dependencies) and why one Conan graph serves both engines; the toolchain versions for Linux and macOS; the two ways to build the bundle (Docker or local, same build.py) across Linux/macOS × x86_64/aarch64; the directory design of native-build/, the per-platform work directory and the bundle JAR; the platform adapter in native-build/platforms.py, the six duties that depend on the executable format and the three checks declared ELF-only; linux-x86_64 and darwin-aarch64 have a Conan profile and an acceptance record today, linux-aarch64 and darwin-x86_64 have neither. Build phases, packaging and publication mechanics are in [native-build/README.md](native-build/README.md) and [docs/contributing.md](docs/contributing.md) |
 | How does CI run the live-service integration suite through Helm? | [docs/design/engineering/integration-tests.html](docs/design/engineering/integration-tests.html) — one local-mode Spark Job, external Milvus and object storage, Secret references, lifecycle and acceptance gates |
-| Why and how should storage and Knowhere share native dependencies? | [docs/design/engineering/native-libraries.html](docs/design/engineering/native-libraries.html) — rationale, benefits and maintenance costs of an independent CMake build; pins every upstream Conan recipe revision in `native-build/dependencies.json`, selects the newer conflicting dependency versions, declares integration link relationships in CMake, and packages one native JAR with shared extraction; the historical Knowhere `9dc2b8ad` Cardinal bundle built with the superseded recipe implementation passed native and real-data validation, while the current `1fff20db` gitlink requires a rebuilt bundle and fresh validation |
 | What must run before every commit? | Apply [.agents/skills/spark-milvus-sbt/SKILL.md](.agents/skills/spark-milvus-sbt/SKILL.md); [formatting](docs/contributing.md#formatting) and [unit tests](docs/contributing.md#unit-tests) in the contributing guide hold the required commands and constraints |
 | How does the Knowhere C ABI and JNI binding work? | [docs/design/architecture/knowhere-jni.html](docs/design/architecture/knowhere-jni.html) — binding interfaces and memory ownership, the capability matrix against the Knowhere core and the connector, the thread model; the Cardinal Aquila items are deferred |
 | What sits outside this repository? | [docs/context.md](docs/context.md) |
@@ -226,9 +228,11 @@ convenient this week.
 **Fix causes. Never patch the edge.** Swallowing an exception, turning a failure
 into an empty result, adding a flag that routes around a defect, special-casing
 at one call site: each of these takes a visible problem and makes it invisible
-while the system keeps running wrong. The delete path is the live example —
-an unreadable delete file currently yields an empty delete plan, so deleted rows
-come back with no exception and no warning. That is not robustness.
+while the system keeps running wrong. The delete path was the live example —
+an unreadable delete file once yielded an empty delete plan, so deleted rows
+came back with no exception and no warning. That was not robustness.
+`core.read.exec.DeletePlans` now fails the task instead, and the driver-side
+listing in `MilvusScan` fails the plan; keep it that way.
 
 **No stovepipes.** One class of problem gets one solution. The three
 non-standard read entry points implement a single `SnapshotSource` and a single
@@ -412,5 +416,5 @@ Planning work: `docs/design/capabilities.md` for what is in scope, section 4 of
 Writing code: the `package.scala` of the package you are touching, then section
 4 of `docs/design/architecture/modules.md`, then [docs/contributing.md](docs/contributing.md).
 
-Working on sbt: [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html), then the
+Working on the native build: [docs/design/engineering/build.html](docs/design/engineering/build.html) or its Markdown twin [build.md](docs/design/engineering/build.md). Working on sbt: section 4 of [docs/design/architecture/modules.md](docs/design/architecture/modules.md), then the
 [spark-milvus-sbt skill](.agents/skills/spark-milvus-sbt/SKILL.md).

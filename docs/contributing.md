@@ -53,7 +53,7 @@ configuration still use the complete package name.
 
 ## Build files
 
-Follow [sbt principles and practices](design/engineering/sbt.html) when reviewing
+Follow the build constraints in [section 4 of modules.md](design/architecture/modules.md) when reviewing
 or changing the build, using the repository's
 [sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md). `build.sbt` holds module
 wiring and publication decisions; root run, assembly and publication details
@@ -137,9 +137,58 @@ and remaining JNI diagnostics and packaging limitations are recorded in
 [the storage I/O validation state](design/architecture/storage-io.html#state).
 
 Upstream milvus-storage supports local macOS builds: `cpp-mac-ci.yml` builds
-on `macos-26` with conan 2.25.1, CMake 3.31.10 and LLVM 18 from brew.
-This JNI migration has been tested on Linux x86_64 only; the upstream CI job
-does not establish that this modified dependency combination works on macOS.
+on `macos-26` with conan 2.25.1, CMake 3.31.10 and LLVM 18 from brew. The
+storage-only path below was built and run on an Apple Silicon Mac (macOS 26,
+Apple clang 21, JDK 21) on 2026-09-19: the native suites pass, and a Spark
+4.0.1 job read a 1M-row Storage V3 snapshot from a Zilliz Cloud bucket through
+the packaged `native/darwin-aarch64/` libraries. Knowhere (vector search) still
+has no macOS build, so `VectorSearchUatTest` cancels there.
+
+### macOS (Apple Silicon)
+
+```bash
+xcode-select --install                       # clang, otool, install_name_tool, codesign
+brew install cmake libomp openjdk@21 sbt     # libomp: the milvus-common recipe needs it
+pip install conan==2.25.1                    # Conan 2
+curl https://sh.rustup.rs -sSf | sh          # cargo, for the storage Rust bridge
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+export LIBCLANG_PATH=/Library/Developer/CommandLineTools/usr/lib   # bindgen
+conan profile detect --force
+conan remote add default-conan-local2 \
+  https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2
+scripts/macos_conan_fixups.sh
+make build-milvus-storage && make copy-native-libs && make package
+```
+
+`scripts/macos_conan_fixups.sh` edits the Conan cache once: it accepts the
+installed Apple clang version (Conan's `settings.yml` stops a few releases
+behind Xcode), points the avro and boost recipes at download locations that
+still exist (the same edits the Dockerfile makes), and adds
+`TEnumIterator::operator==` to thrift 0.17, without which arrow's generated
+`parquet_types.cpp` does not compile against the libc++ that ships with
+Xcode 16 and later.
+
+`make copy-native-libs` runs `scripts/patch_native_macos.sh` on macOS where
+Linux runs `patch_native_runpath.sh`: every bundled dylib gets an `@rpath/`
+install name, dependency references to shipped libraries are rewritten to
+`@rpath/`, the Conan cache rpaths are dropped for `@loader_path` (or
+`@loader_path/..` under `ossl-modules/` and `engines-3/`), and each library is
+re-signed, since `install_name_tool` invalidates the ad-hoc signature and dyld
+on Apple Silicon refuses an image whose signature no longer matches.
+`NativeLibraryLoader` extracts all of them into one temporary directory, so the
+sibling lookup through `@loader_path` is what makes the packaged JNI loadable.
+
+The JVM's signal-chaining library is preloaded with `DYLD_INSERT_LIBRARIES`
+(`libjsig.dylib`) where Linux uses `LD_PRELOAD` (`libjsig.so`); both the
+Makefile and the root `run` settings pick the right one.
+
+If Conan Center or crates.io are slow from your network, `[platform_tool_requires]
+cmake/3.31.12` in the Conan profile (with Homebrew's CMake on the PATH and
+`CMAKE_POLICY_VERSION_MINIMUM=3.5` in `[buildenv]`) skips the CMake tool
+packages, and a crates.io mirror in `~/.cargo/config.toml` speeds up the Rust
+bridge. The Makefile exports `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so cargo's
+git fetches of `lance` and `vortex` honor your `git` configuration (SSH keys,
+`insteadOf` rewrites, proxies).
 
 ### Two things that will bite
 
@@ -171,6 +220,8 @@ from `Release/libs`, preserving the `ossl-modules` and `engines-3` subdirectorie
 | Suffix | `.dylib` — `add_library(... SHARED)` sets no `SUFFIX` | `.so` |
 | Build output | `cpp/build/Release` and `cpp/build/Release/libs` | `cpp/build/Release` and `cpp/build/Release/libs` |
 | Resource path | `native/darwin-aarch64/` | `native/linux-<arch>/` |
+| Relocation | `scripts/patch_native_macos.sh`: `@rpath` names, `@loader_path` rpath, re-sign | `patch_native_runpath.sh`: `RUNPATH=$ORIGIN` |
+| Signal chaining | `DYLD_INSERT_LIBRARIES=$JAVA_HOME/lib/libjsig.dylib` | `LD_PRELOAD=$JAVA_HOME/lib/libjsig.so` |
 
 The upstream `NativeLibraryLoader` selects resources under
 `native/<platform>/`. A library copied directly into `native/` is outside that
@@ -180,7 +231,7 @@ platform directory and cannot satisfy the packaged-library load.
 
 The unified Linux platform JAR contains both upstream JNI entry libraries and
 one dynamically linked dependency set. The implementation and acceptance status
-are documented in [the native build design](design/engineering/native-libraries.html).
+are documented in [native-build/README.md](../native-build/README.md); the library layers and the ways to obtain a bundle are in [build.html](design/engineering/build.html).
 The native build is explicit; ordinary sbt compilation does not start Conan or
 CMake. The independent project in `native-build/` defines both engines, their
 upstream JNI implementations and the optional Cardinal plugins without executing
@@ -253,6 +304,11 @@ BuildKit cache mounts, so a later build failure does not discard completed
 dependencies. Conan configuration is initialized inside the mount, including
 when the cache is empty. Native work directories and Cargo compilation outputs
 remain local to each build; cache reuse does not skip source or provenance checks.
+Maven publication credentials enter the final build step through the optional
+BuildKit secret named `maven_credentials`; they are not build arguments, copied
+files, image layers or cache-mount contents. A publishing build must set
+`MAVEN_CREDENTIALS_FILE=/run/secrets/maven_credentials` (the Docker default)
+and provide that secret. A non-publishing build provides no secret.
 This does not establish joint Storage/Knowhere support on platforms
 without a validated unified bundle.
 

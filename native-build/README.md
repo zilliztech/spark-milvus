@@ -94,7 +94,15 @@ and package ID all match. `build.py` copies `conanfile.py` and
 from both pinned engine revisions, and rejects a selected conflict version unless
 it is the newer upstream requirement. Conan then resolves only the exact recipe
 references in `dependencies.json`; the full lock covers every host and build
-dependency.
+dependency. The driver writes the host and build profiles it passes to Conan
+into the work directory: the checked-in `profiles/linux-x86_64` plus a
+`[replace_requires]` section naming every reference in `dependencies.json`,
+without the `[options]` section for the build profile. The consumer's
+`force=True` requirements pin the host context only; without the replacements,
+build-context tools such as protoc resolve their zlib and openssl ranges to the
+newest remote revision, and the lock's context-free overrides then rewrite those
+ranges to host revisions that its `build_requires` does not contain, so
+`conan install --lockfile` fails on a fresh cache.
 
 The independent CMake targets state the additional integration link edges that
 the unified consumers need. For example, storage links its public dependency

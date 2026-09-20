@@ -18,12 +18,19 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
-import com.zilliz.milvus.storage.codec.BinlogFixture
+import com.zilliz.milvus.storage.codec.{
+  BinlogFixture,
+  IndexObjectTarget,
+  SegmentIndexObjects
+}
+import com.zilliz.milvus.storage.index.IndexWriter
+import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.manifest.{
   AvroIndexFileEntry,
   SegmentManifestFixture
 }
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
+import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.{
   DeltaLogFile,
@@ -32,12 +39,18 @@ import com.zilliz.milvus.storage.snapshot.{
   SegmentLayout,
   V2ColumnGroup
 }
+import com.zilliz.milvus.storage.write.commit.JobManifest
 import com.zilliz.milvus.storage.write.exec.{
   ManifestTransaction,
   V3SegmentWriter
 }
 import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.procedure.{
+  BuildIndexProcedure,
+  ProcedureArgs,
+  WriteSnapshotProcedure
+}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 import io.milvus.storage.{MilvusStorageProperties, MilvusStorageTransaction}
@@ -147,6 +160,7 @@ object SegmentIndexSearchSmoke {
         "PASS: output columns come back in the order asked for, or not at all, without opening raw vectors"
       )
       verifyMixedL2Tie(spark, directory, allocator, properties)
+      verifyBuildIndexProcedure(spark, directory, allocator, properties)
       assert(
         allocator.getAllocatedMemory == 0,
         "Fixture construction leaked Arrow buffers"
@@ -163,6 +177,201 @@ object SegmentIndexSearchSmoke {
         finally paths.close()
       }
     }
+  }
+
+  /** `build_index` builds what a search then reads: the snapshot names no
+    * index, the procedure writes them, and a search through those files answers
+    * exactly what the exact scan does (section 2.7).
+    */
+  private def verifyBuildIndexProcedure(
+      spark: SparkSession,
+      directory: Path,
+      allocator: RootAllocator,
+      properties: Map[String, String]
+  ): Unit = {
+    val values = (0 until 8).map(row => Array(row.toFloat, 0f))
+    val fixtures = Seq(50L, 51L).map { segment =>
+      writeSegment(
+        directory,
+        allocator,
+        properties,
+        segment,
+        v2 = false,
+        vectorValues = Some(values)
+      )
+    }
+    Files.write(
+      directory.resolve("to-build.json"),
+      snapshotJson(fixtures, unindexedSegments = Set(50L, 51L))
+        .getBytes(UTF_8)
+    )
+
+    val rows = BuildIndexProcedure.run(
+      ProcedureArgs(
+        values = Map(
+          "collection" -> "persisted-index-smoke",
+          "field" -> "vector",
+          "output" -> "built",
+          "index_type" -> "HNSW",
+          "metric" -> "L2",
+          "params" -> "M=4,efConstruction=32",
+          "build_id" -> 7000L,
+          "index_version" -> 1L,
+          "store_path_version" -> 0L
+        ),
+        options =
+          properties ++ Map(MilvusOption.SnapshotPath -> "to-build.json")
+      )
+    )
+    // The procedure answers with the rows of its result table, in the order its
+    // output schema declares: segment, partition, rows, objects, bytes, build,
+    // job.
+    assert(rows.size == 2, rows.mkString(","))
+    assert(rows.forall(_.getLong(5) == 7000L), rows.mkString(","))
+    assert(rows.forall(_.getLong(2) == 8L), rows.mkString(","))
+    assert(rows.forall(_.getInt(3) > 0), rows.mkString(","))
+
+    val jobId = rows.head.getString(6)
+    val manifest = JobManifest
+      .fromJson(
+        new String(
+          Files.readAllBytes(
+            directory.resolve(s"built/staging/$jobId/manifest.json")
+          ),
+          UTF_8
+        )
+      )
+      .toOption
+      .get
+    assert(manifest.indexes.size == 2, manifest.toJson)
+
+    val indexed = fixtures.map { fixture =>
+      val record =
+        manifest.indexes.find(_.segmentId == fixture.task.segmentId).get
+      record.filePaths.foreach(path =>
+        assert(Files.exists(directory.resolve(path)), path)
+      )
+      fixture.copy(descriptor =
+        fixture.descriptor.copy(
+          buildId = record.buildId,
+          filePaths = record.filePaths.toVector,
+          rowCount = record.rowCount,
+          serializedSize = record.serializedSize,
+          indexVersion = record.indexVersion,
+          currentIndexVersion = Some(record.vectorIndexVersion),
+          indexStorePathVersion = Some(record.storePathVersion),
+          parameters = Map(
+            "index_type" -> record.indexType,
+            "metric_type" -> record.metricType,
+            "dim" -> "2"
+          )
+        )
+      )
+    }
+    Files.write(
+      directory.resolve("built.json"),
+      snapshotJson(indexed, snapshotId = 2L).getBytes(UTF_8)
+    )
+
+    def search(mode: String) = MilvusSearch
+      .search(
+        spark,
+        properties ++ Map(MilvusOption.SnapshotPath -> "built.json"),
+        "vector",
+        Array(2.5f, 0f),
+        4,
+        "L2",
+        mode,
+        Map.empty,
+        None,
+        Seq("id"),
+        false
+      )
+      .orderBy("rank")
+      .collect()
+      .toVector
+      .map(row =>
+        (
+          row.getAs[Long]("id"),
+          row.getAs[Double]("_score"),
+          row.getAs[Long]("_segment_id")
+        )
+      )
+
+    val built = search("index")
+    val exact = search("exact")
+    assert(built.size == 4, built.mkString(","))
+    assert(built == exact, s"index=$built exact=$exact")
+    println(
+      "PASS: build_index writes indexes through the Spark job and a search reads them back, matching the exact scan"
+    )
+
+    // The snapshot the connector writes, rather than the one this test builds
+    // by hand: the same segments, the same index records, read back through
+    // the ordinary snapshot path.
+    val snapshotRows = WriteSnapshotProcedure.run(
+      ProcedureArgs(
+        values = Map(
+          "collection" -> "persisted-index-smoke",
+          "job" -> jobId,
+          "input" -> "built",
+          "snapshot_id" -> 5000L,
+          "snapshot_name" -> "built-5000"
+        ),
+        options =
+          properties ++ Map(MilvusOption.SnapshotPath -> "to-build.json")
+      )
+    )
+    assert(snapshotRows.size == 1, snapshotRows.mkString(","))
+    val snapshotKey = snapshotRows.head.getString(0)
+    assert(
+      snapshotKey == "built/snapshots/10/metadata/5000.json",
+      snapshotKey
+    )
+    assert(snapshotRows.head.getInt(3) == 2, snapshotRows.mkString(","))
+    assert(snapshotRows.head.getInt(4) == 2, snapshotRows.mkString(","))
+    fixtures.foreach { fixture =>
+      val key =
+        s"built/snapshots/10/manifests/5000/${fixture.task.segmentId}.avro"
+      assert(Files.exists(directory.resolve(key)), key)
+    }
+
+    def written(mode: String) = MilvusSearch
+      .search(
+        spark,
+        properties ++ Map(MilvusOption.SnapshotPath -> snapshotKey),
+        "vector",
+        Array(2.5f, 0f),
+        4,
+        "L2",
+        mode,
+        Map.empty,
+        None,
+        Seq("id"),
+        false
+      )
+      .orderBy("rank")
+      .collect()
+      .toVector
+      .map(row =>
+        (
+          row.getAs[Long]("id"),
+          row.getAs[Double]("_score"),
+          row.getAs[Long]("_segment_id")
+        )
+      )
+
+    assert(
+      written("index") == built,
+      s"written=${written("index")} built=$built"
+    )
+    assert(
+      written("exact") == exact,
+      s"written=${written("exact")} exact=$exact"
+    )
+    println(
+      "PASS: write_snapshot writes a snapshot of the built indexes, and searching it matches the exact scan"
+    )
   }
 
   private def verifyMixedL2Tie(
@@ -401,7 +610,7 @@ object SegmentIndexSearchSmoke {
         try if (transaction != null) transaction.destroy()
         finally nativeProperties.free()
       }
-    val index = writeIndex(directory, vectors, segment)
+    val index = writeIndex(directory, vectors, segment, properties)
     val descriptor = SegmentIndex(
       10L,
       20L,
@@ -477,55 +686,56 @@ object SegmentIndexSearchSmoke {
     } finally writer.close()
   }
 
+  /** Builds a segment's index the way `build_index` does, and writes it with
+    * the writer a build uses, so the loader reads back what this connector
+    * produces rather than a fixture (section 2.7).
+    */
   private def writeIndex(
       directory: Path,
       vectors: Seq[Array[Float]],
-      segment: Long
+      segment: Long,
+      properties: Map[String, String]
   ): AvroIndexFileEntry = {
-    val engine =
-      if (NativeVectorLibrary.load().cardinalSupported()) "HNSW_DEPRECATED"
-      else "HNSW"
-    val index = Knowhere.createIndex(engine, DType.FLOAT32, 8)
+    val layout = VectorLayout(VectorElementType.Float32, 2)
     val allocator = new RootAllocator()
     val buffer = allocator.buffer(vectors.size.toLong * 8L)
+    val build = 1000L + segment
     try {
       vectors.indices.foreach(i =>
         vectors(i).indices.foreach(d =>
           buffer.setFloat(i.toLong * 8 + d * 4L, vectors(i)(d))
         )
       )
-      index.build(
+      val built = IndexWriter.build(
         buffer.nioBuffer(0, vectors.size * 8).order(ByteOrder.nativeOrder()),
-        vectors.size,
-        2,
-        """{"metric_type":"L2","dim":2,"M":4,"efConstruction":32} """
+        vectors.size.toLong,
+        layout,
+        "HNSW",
+        "L2",
+        indexVersion = 8,
+        parameters = Map("M" -> "4", "efConstruction" -> "32")
       )
-      val binary = index.serialize()
-      val build = 1000L + segment
       try {
-        val paths = binary.names().toVector.map { name =>
-          val bytes = allocator.buffer(binary.length(name))
-          try {
-            val view = bytes.nioBuffer(0, Math.toIntExact(binary.length(name)))
-            binary.read(name, 0, view)
-            val payload = new Array[Byte](view.capacity())
-            bytes.getBytes(0, payload)
-            val encoded = BinlogFixture.encode(
-              payload,
-              extras = s"""{"indexBuildID":"$build","nullable":false}"""
+        val store = NativeObjectStore.Factory(properties).open()
+        val objects =
+          try
+            SegmentIndexObjects.write(
+              built.names.map(name => name -> built.length(name)),
+              built.read,
+              IndexObjectTarget(
+                collectionId = 10L,
+                partitionId = 20L,
+                segmentId = segment,
+                fieldId = 101L,
+                buildId = build,
+                indexVersion = 1L,
+                storePathVersion = 0,
+                nullable = false,
+                rootPath = "files"
+              ),
+              store
             )
-            val header = ByteBuffer.wrap(encoded).order(ByteOrder.LITTLE_ENDIAN)
-            header
-              .putLong(21, 10L)
-              .putLong(29, 20L)
-              .putLong(37, segment)
-              .putLong(45, 101L)
-            val path = s"files/index_files/$build/1/20/$segment/$name"
-            Files.createDirectories(directory.resolve(path).getParent)
-            Files.write(directory.resolve(path), encoded)
-            path
-          } finally bytes.close()
-        }
+          finally store.close()
         AvroIndexFileEntry(
           segment,
           101L,
@@ -533,30 +743,34 @@ object SegmentIndexSearchSmoke {
           build,
           "vector_hnsw",
           Map("index_type" -> "HNSW", "metric_type" -> "L2", "dim" -> "2"),
-          paths,
+          objects.map(_.key).toVector,
           vectors.size,
-          paths.map(p => Files.size(directory.resolve(p))).sum,
+          objects.map(_.bytes).sum,
           1L,
           Some(8),
           Some(0)
         )
-      } finally binary.close()
+      } finally built.close()
     } finally {
-      try index.close()
-      finally { buffer.close(); allocator.close() }
+      buffer.close()
+      allocator.close()
     }
   }
 
+  /** `snapshotId` names the manifest directory as well as the snapshot, so two
+    * snapshots over the same segments do not overwrite each other's Avro.
+    */
   private def snapshotJson(
       fixtures: Seq[Fixture],
-      unindexedSegments: Set[Long] = Set.empty
+      unindexedSegments: Set[Long] = Set.empty,
+      snapshotId: Long = 1L
   ): String = {
     val mapper = new com.fasterxml.jackson.databind.ObjectMapper()
     val root = mapper.createObjectNode()
     val info = root.putObject("snapshot_info")
     info
       .put("name", "persisted-index-smoke")
-      .put("id", 1L)
+      .put("id", snapshotId)
       .put("collection_id", 10L)
       .put("create_ts", 1L)
     info.putArray("partition_ids").add(20L)
@@ -595,7 +809,8 @@ object SegmentIndexSearchSmoke {
     val manifests = root.putArray("manifest_list")
     val dataManifests = root.putArray("storagev2_manifest_list")
     fixtures.foreach { fixture =>
-      val key = s"files/snapshots/10/manifests/1/${fixture.task.segmentId}.avro"
+      val key =
+        s"files/snapshots/10/manifests/$snapshotId/${fixture.task.segmentId}.avro"
       val directory =
         java.nio.file.Paths.get(fixture.task.properties("fs.root_path"))
       Files.createDirectories(directory.resolve(key).getParent)

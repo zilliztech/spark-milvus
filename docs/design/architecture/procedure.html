@@ -213,7 +213,7 @@ owner；中途失败返回 <code>delete_failed</code> 与已删数量，留下�
 
 <p>构建:sbt 插件 <code>sbt-antlr4</code> 0.8.3,每条线 <code>antlr4Version := l.antlr</code>、
 <code>antlr4PackageName := Some("com.zilliz.spark.connector.extensions.parser")</code>,
-文法目录指向 <code>spark-base</code>。这是 sbt.html 第 4 节「按线钉版本」的又一项,和 Arrow、Hadoop、Netty 一样。</p>
+文法目录指向 <code>spark-base</code>。这是「按线钉版本」的又一项，和 Arrow、Hadoop、Netty 一样（见 <code>project/Versions.scala</code> 的版本矩阵）。</p>
 
 <p>用户启用:<code>--conf spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusSparkSessionExtensions</code>。
 不设的会话里 <code>CALL milvus.system.*</code> 是 Spark 自己的语法错误,连接器不介入。</p>

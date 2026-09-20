@@ -10,16 +10,24 @@ import org.apache.arrow.memory.RootAllocator
 
 import com.zilliz.milvus.jni.vector.{NativeVectorIndex, NativeVectorLibrary}
 import com.zilliz.milvus.storage.io.ObjectStore
+import com.zilliz.milvus.storage.schema.VectorLayout
 import com.zilliz.milvus.storage.snapshot.SegmentIndex
 import com.zilliz.milvus.storage.Logging
+
+import io.knowhere.DType
 
 /** Loads the exact snapshot object set and restores named Knowhere payloads. */
 private[storage] object IndexFileCodec extends Logging {
   private val SliceMeta = "SLICE_META"
   private val CardinalFile = "_mem.index.bin"
+  private val ValidData = "valid_data"
+  private val ValidDataNames = Set(ValidData, "valid_data_count")
+  private val MaxValidDataBytes = 256L * 1024 * 1024
   private val MaxObjectBytes = 256L * 1024 * 1024
   private val MaxPayloadBytes = 1024L * 1024 * 1024
   private val ChunkBytes = 1024 * 1024
+  // Milvus slices an index payload at common.indexSliceSize, 16 MiB by default.
+  private val DefaultSliceBytes = 16L * 1024 * 1024
   private val mapper = new ObjectMapper()
     .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
 
@@ -31,10 +39,183 @@ private[storage] object IndexFileCodec extends Logging {
   private[storage] final case class Loaded(
       index: NativeVectorIndex,
       bytes: Long,
-      nanos: Long
+      nanos: Long,
+      validRows: Option[Array[Byte]] = None
   )
 
   private[codec] final case class Slice(name: String, count: Int, length: Long)
+
+  /** Where a built index's objects go, and what the segment record will say
+    * about them.
+    */
+  private[storage] final case class IndexTarget(
+      collectionId: Long,
+      partitionId: Long,
+      segmentId: Long,
+      fieldId: Long,
+      buildId: Long,
+      indexVersion: Long,
+      storePathVersion: Int,
+      nullable: Boolean,
+      rootPath: String = ""
+  )
+
+  private[storage] final case class IndexObject(key: String, bytes: Long)
+
+  /** The prefix Milvus reads an index from, which its store path version
+    * decides (internal/core/src/storage/FileManager.h
+    * `GetRemoteIndexObjectPrefix`).
+    */
+  private[storage] def prefixOf(target: IndexTarget): String = {
+    val root = target.rootPath.stripSuffix("/")
+    val parts =
+      if (target.storePathVersion >= 1)
+        Seq(
+          "index_v1",
+          target.collectionId,
+          target.partitionId,
+          target.segmentId,
+          target.buildId,
+          target.indexVersion
+        )
+      else
+        Seq(
+          "index_files",
+          target.buildId,
+          target.indexVersion,
+          target.partitionId,
+          target.segmentId
+        )
+    (if (root.isEmpty) parts.mkString("/")
+     else root + "/" + parts.mkString("/"))
+  }
+
+  /** Writes a built index as the objects Milvus reads back.
+    *
+    * Each payload becomes one object under the index prefix, in the same
+    * envelope Milvus writes: a descriptor naming the segment and field, then
+    * one `IndexFileEvent` carrying the bytes. A payload longer than
+    * `sliceBytes` is split into `name_0`, `name_1`…; a payload that fits is
+    * still written as `name_0`, because that is what Milvus writes and what its
+    * loader parses. Every payload is declared in the `SLICE_META` object says
+    * how to put it back, which is what the loader in section 2.5 reads.
+    */
+  private[storage] def write(
+      payloads: Seq[(String, Long)],
+      read: (String, Long, ByteBuffer) => Unit,
+      target: IndexTarget,
+      store: ObjectStore,
+      sliceBytes: Long = DefaultSliceBytes
+  ): Seq[IndexObject] = {
+    require(payloads.nonEmpty, "A built index has no payloads")
+    require(
+      payloads.map(_._1).distinct.size == payloads.size,
+      "A built index repeats a payload name"
+    )
+    require(sliceBytes > 0, s"The slice size must be positive: $sliceBytes")
+    val prefix = prefixOf(target)
+    // A local filesystem needs the directory before the first object; on object
+    // storage this is a marker and costs nothing.
+    store.createDir(prefix, recursive = true)
+    // Milvus writes originSize and indexBuildID as strings and nullable as a
+    // boolean (internal/core/src/storage/Event.cpp).
+    def extrasOf(originSize: Long) = {
+      val node = mapper.createObjectNode()
+      node.put("originSize", originSize.toString)
+      node.put("indexBuildID", target.buildId.toString)
+      node.put("nullable", target.nullable)
+      node
+    }
+    val written = Seq.newBuilder[IndexObject]
+    val slices = Vector.newBuilder[(String, Int, Long)]
+    payloads.foreach { case (name, length) =>
+      require(
+        validName(name),
+        s"A payload name has to be a plain object name: $name"
+      )
+      require(length > 0, s"Payload $name is empty")
+      def objectOf(objectName: String, offset: Long, size: Long): Unit = {
+        require(
+          size <= MaxObjectBytes,
+          s"Index object $objectName of $size bytes exceeds the supported size"
+        )
+        val bytes = new Array[Byte](size.toInt)
+        // The upstream payloads copy into direct memory only, so the bytes come
+        // back one chunk at a time.
+        var copied = 0
+        while (copied < bytes.length) {
+          val count = math.min(ChunkBytes, bytes.length - copied)
+          val chunk = ByteBuffer.allocateDirect(count)
+          read(name, offset + copied, chunk)
+          // Whether the copy left the position at the end or at the start is
+          // the caller's business; the bytes are read from the start either way.
+          val view = chunk.duplicate()
+          view.clear()
+          view.get(bytes, copied, count)
+          copied += count
+        }
+        val envelope = BinlogCodec.envelope(
+          7,
+          target.collectionId,
+          target.partitionId,
+          target.segmentId,
+          target.fieldId,
+          0,
+          extrasOf(size),
+          bytes
+        )
+        val key = s"$prefix/$objectName"
+        store.write(key, envelope)
+        written += IndexObject(key, envelope.length.toLong)
+      }
+      // Always the sliced names, even for a payload that fits in one object:
+      // Milvus writes `name_0` whatever the size, and its segment loader takes
+      // the number after the last underscore as the slice index, so a file
+      // called `HNSW` fails there with `invalided index file path`.
+      val count = math.max(1, ((length + sliceBytes - 1L) / sliceBytes).toInt)
+      (0 until count).foreach { number =>
+        val offset = number.toLong * sliceBytes
+        objectOf(
+          s"${name}_$number",
+          offset,
+          math.min(sliceBytes, length - offset)
+        )
+      }
+      slices += ((name, count, length))
+    }
+    val sliced = slices.result()
+    if (sliced.nonEmpty) {
+      val root = mapper.createObjectNode()
+      val meta = root.putArray("meta")
+      sliced.foreach { case (name, count, length) =>
+        meta
+          .addObject()
+          .put("name", name)
+          .put("slice_num", count)
+          .put("total_len", length)
+      }
+      val bytes = mapper.writeValueAsBytes(root)
+      val envelope = BinlogCodec.envelope(
+        7,
+        target.collectionId,
+        target.partitionId,
+        target.segmentId,
+        target.fieldId,
+        0,
+        extrasOf(bytes.length.toLong),
+        bytes
+      )
+      val key = s"$prefix/$SliceMeta"
+      store.write(key, envelope)
+      written += IndexObject(key, envelope.length.toLong)
+    }
+    val objects = written.result()
+    logInfo(
+      s"Index written: segment=${target.segmentId}, build=${target.buildId}, " +
+        s"objects=${objects.size}, bytes=${objects.map(_.bytes).sum}, prefix=$prefix"
+    )
+    objects
+  }
 
   private[codec] def parseSlices(bytes: Array[Byte]): Vector[Slice] = {
     require(
@@ -172,13 +353,33 @@ private[storage] object IndexFileCodec extends Logging {
       copy(tail, length - 24)
     }
 
-    def engineType(version: Int, cardinalSupported: Boolean): String = {
+    /** The engine to deserialize with, and the check that the stream belongs to
+      * the family the snapshot declared.
+      *
+      * A stream's first four bytes name the exact index class Faiss or Knowhere
+      * wrote, and one index type has several of them: an HNSW_SQ over COSINE
+      * with SQ4U uniform quantization writes `IHNa`, the same type over L2
+      * writes `IHNs`. Pinning every marker would refuse a file the loaded
+      * Knowhere can read, so the check is the family — `IH*` for the HNSW
+      * types, `Iw*` and `IB*` for the IVF types — which still catches an IVF
+      * stream under a declared HNSW index, and Knowhere refuses a stream it
+      * cannot read for the type it was asked for.
+      */
+    def engine(
+        indexType: String,
+        version: Int,
+        cardinalSupported: Boolean
+    ): String = {
       if (
         ByteBuffer
           .wrap(tail)
           .order(ByteOrder.LITTLE_ENDIAN)
           .getInt() == 0x43415244
       ) {
+        require(
+          indexType == "HNSW",
+          s"A Cardinal CARD stream carries an HNSW index, not $indexType"
+        )
         validateCardinalFooter(tail, length)
         require(
           version >= 9,
@@ -194,15 +395,20 @@ private[storage] object IndexFileCodec extends Logging {
         "HNSW"
       } else {
         val magic = new String(head, StandardCharsets.US_ASCII)
+        val family = magic.take(2)
+        val expected = VectorIndexFamilies.magicsOf(indexType)
         require(
-          Set("IHNf", "IHN9").contains(magic),
-          "Unsupported HNSW payload format: expected Faiss float32 HNSW or Cardinal CARD"
+          expected.contains(family),
+          s"Persisted $indexType payload starts with $magic; a $indexType index writes ${expected.toSeq.sorted
+              .mkString(" or ")}* or a Cardinal CARD stream"
         )
         require(
           version >= 6,
-          "A Faiss HNSW stream requires vector index format version 6 or later"
+          "A Faiss index stream requires vector index format version 6 or later"
         )
-        val engine = if (cardinalSupported) "HNSW_DEPRECATED" else "HNSW"
+        val engine =
+          if (indexType == "HNSW" && cardinalSupported) "HNSW_DEPRECATED"
+          else indexType
         logInfo(
           s"Persisted index format selected: format=Faiss/$magic, engine=$engine, version=$version"
         )
@@ -233,10 +439,12 @@ private[storage] object IndexFileCodec extends Logging {
 
   def load(
       index: SegmentIndex,
-      dimension: Int,
+      layout: VectorLayout,
       store: ObjectStore,
       decoder: IndexFileDecoder
   ): Loaded = {
+    val dimension = layout.dimension
+    val dataType = layout.dtype
     val started = System.nanoTime()
     var objectsRead = 0
     var bytesRead = 0L
@@ -246,6 +454,14 @@ private[storage] object IndexFileCodec extends Logging {
       bytesRead = Math.addExact(bytesRead, bytes.length.toLong)
       bytes
     }
+    val indexType = index.indexType
+      .map(_.toUpperCase(Locale.ROOT))
+      .getOrElse(
+        throw new IllegalArgumentException(
+          "Index metadata is missing index_type"
+        )
+      )
+    var validRows: Option[Array[Byte]] = None
     def finished(loaded: NativeVectorIndex): Loaded = {
       val elapsed = System.nanoTime() - started
       logInfo(
@@ -253,7 +469,7 @@ private[storage] object IndexFileCodec extends Logging {
           s"objectsRead=$objectsRead, bytesRead=$bytesRead, nativeDeserializeCalls=1, " +
           s"elapsedMillis=${elapsed / 1000000L}"
       )
-      Loaded(loaded, bytesRead, elapsed)
+      Loaded(loaded, bytesRead, elapsed, validRows)
     }
     val names = index.filePaths.map { key =>
       require(
@@ -270,6 +486,10 @@ private[storage] object IndexFileCodec extends Logging {
     )
     val files = names.toMap
     if (files.contains(CardinalFile)) {
+      require(
+        indexType == "HNSW",
+        s"A Cardinal memory index carries an HNSW index, not $indexType"
+      )
       require(
         files.size == 1,
         "A Cardinal memory index must name exactly one _mem.index.bin file"
@@ -288,7 +508,7 @@ private[storage] object IndexFileCodec extends Logging {
         s"Persisted index format selected: format=Cardinal, engine=HNSW, " +
           s"version=${index.currentIndexVersion.get}"
       )
-      return finished(loadCardinal(index, dimension, bytes))
+      return finished(loadCardinal(index, dimension, dataType, bytes))
     }
 
     def decoded(name: String): DecodedIndexFile = {
@@ -348,16 +568,25 @@ private[storage] object IndexFileCodec extends Logging {
       "Duplicate assembled index payload"
     )
     require(
-      !logicalNames.exists(name =>
-        name == "valid_data" || name == "valid_data_count"
-      ),
-      "Nullable index row mappings are unsupported"
-    )
-    require(
-      logicalNames.contains("HNSW"),
-      s"Unsupported persisted HNSW payload layout: ${logicalNames.mkString(", ")}; expected HNSW. " +
+      logicalNames.contains(indexType),
+      s"Unsupported persisted index payload layout: ${logicalNames
+          .mkString(", ")}; expected $indexType. " +
         "The selected Knowhere build cannot load a different engine's format"
     )
+    // A nullable vector field is indexed over its non-null rows only, and the
+    // segment's own row numbers come back through this bitmap (section 2.4).
+    if (logicalNames.contains(ValidData)) {
+      val payload = decoded(ValidData)
+      try {
+        require(
+          payload.payloadLength > 0 && payload.payloadLength <= MaxValidDataBytes,
+          s"The valid_data bitmap of ${payload.payloadLength} bytes is outside the supported size"
+        )
+        val bytes = new Array[Byte](payload.payloadLength.toInt)
+        payload.readPayload(0, ByteBuffer.wrap(bytes))
+        validRows = Some(bytes)
+      } finally payload.close()
+    }
 
     val metric = index.metricType.get.toUpperCase(Locale.ROOT)
     val loader = new NativeVectorIndex.Loader(
@@ -370,9 +599,11 @@ private[storage] object IndexFileCodec extends Logging {
       finished(
         loadPayloads(
           loader,
+          indexType,
+          dataType,
           index.currentIndexVersion.get,
-          slices,
-          remaining,
+          slices.filterNot(slice => ValidDataNames(slice.name)),
+          remaining.filterNot(ValidDataNames),
           decoded
         )
       )
@@ -382,6 +613,7 @@ private[storage] object IndexFileCodec extends Logging {
   private def loadCardinal(
       index: SegmentIndex,
       dimension: Int,
+      dataType: DType,
       bytes: Array[Byte]
   ): NativeVectorIndex = {
     val metric = index.metricType.get.toUpperCase(Locale.ROOT)
@@ -408,7 +640,7 @@ private[storage] object IndexFileCodec extends Logging {
             loader.write("HNSW", offset.toLong, buffer)
             offset += count
           }
-          loader.load("HNSW")
+          loader.load("HNSW", dataType)
         } finally chunk.close()
       } finally allocator.close()
     } finally loader.close()
@@ -416,6 +648,8 @@ private[storage] object IndexFileCodec extends Logging {
 
   private def loadPayloads(
       loader: NativeVectorIndex.Loader,
+      indexType: String,
+      dataType: DType,
       version: Int,
       slices: Vector[Slice],
       remaining: Vector[String],
@@ -433,7 +667,7 @@ private[storage] object IndexFileCodec extends Logging {
             total <= MaxPayloadBytes,
             "Index payloads exceed the supported one GiB loading size"
           )
-          if (name == "HNSW") format = new PayloadFormatProbe(size)
+          if (name == indexType) format = new PayloadFormatProbe(size)
           loader.allocate(name, size)
         }
         def transfer(
@@ -452,7 +686,7 @@ private[storage] object IndexFileCodec extends Logging {
               "Index decoder did not copy the requested payload bytes"
             )
             buffer.flip()
-            if (name == "HNSW")
+            if (name == indexType)
               format.capture(buffer, destinationOffset + offset)
             loader.write(name, destinationOffset + offset, buffer)
             offset += size
@@ -485,10 +719,12 @@ private[storage] object IndexFileCodec extends Logging {
           } finally payload.close()
         }
         loader.load(
-          format.engineType(
+          format.engine(
+            indexType,
             version,
             NativeVectorLibrary.load().cardinalSupported()
-          )
+          ),
+          dataType
         )
       } finally chunk.close()
     } finally allocator.close()

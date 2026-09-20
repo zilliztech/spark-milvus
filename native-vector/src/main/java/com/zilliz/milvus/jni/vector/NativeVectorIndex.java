@@ -45,6 +45,89 @@ public final class NativeVectorIndex implements AutoCloseable {
         index.close();
     }
 
+    /**
+     * Builds an index over vectors already in memory and serializes it.
+     *
+     * <p>The buffer is borrowed for the length of the call. Which index types and element
+     * types this connector builds is decided above this layer; Knowhere refuses a
+     * combination it does not register.
+     */
+    public static Built build(String indexType, DType dataType, int version, ByteBuffer vectors,
+            long rows, int dimension, String parameters) {
+        Objects.requireNonNull(indexType, "indexType");
+        Objects.requireNonNull(dataType, "dataType");
+        Objects.requireNonNull(vectors, "vectors");
+        Objects.requireNonNull(parameters, "parameters");
+        if (rows <= 0 || dimension <= 0) {
+            throw new IllegalArgumentException("An index is built over positive rows and dimensions");
+        }
+        NativeVectorLibrary.RuntimeInfo runtime = NativeVectorLibrary.load();
+        if (version < runtime.minimumIndexVersion() || version > runtime.maximumIndexVersion()) {
+            throw new IllegalArgumentException("Index format version " + version
+                    + " is outside the loaded Knowhere range " + runtime.minimumIndexVersion()
+                    + ".." + runtime.maximumIndexVersion());
+        }
+        KnowhereIndex index = Knowhere.createIndex(indexType, dataType, version);
+        try {
+            index.build(vectors, rows, dimension, parameters);
+            return new Built(index.serialize(), rows, dimension);
+        } finally {
+            index.close();
+        }
+    }
+
+    /** The payloads a built index serializes to, named the way Knowhere names them. */
+    public static final class Built implements AutoCloseable {
+        private final BinarySet data;
+        private final long rows;
+        private final int dimension;
+        private boolean closed;
+
+        private Built(BinarySet data, long rows, int dimension) {
+            this.data = data;
+            this.rows = rows;
+            this.dimension = dimension;
+        }
+
+        public long rows() {
+            return rows;
+        }
+
+        public int dimension() {
+            return dimension;
+        }
+
+        public String[] names() {
+            active();
+            return data.names();
+        }
+
+        public long length(String name) {
+            active();
+            return data.length(Objects.requireNonNull(name, "name"));
+        }
+
+        /** Copies part of a payload into {@code destination}, which the caller owns. */
+        public void read(String name, long offset, ByteBuffer destination) {
+            active();
+            data.read(Objects.requireNonNull(name, "name"), offset, destination);
+        }
+
+        private void active() {
+            if (closed) {
+                throw new IllegalStateException("The built index is closed");
+            }
+        }
+
+        @Override
+        public void close() {
+            if (!closed) {
+                closed = true;
+                data.close();
+            }
+        }
+    }
+
     /** Collects decoded named payloads, then deserializes them without training. */
     public static final class Loader implements AutoCloseable {
         private final int version;
@@ -99,18 +182,27 @@ public final class NativeVectorIndex implements AutoCloseable {
             data.write(name, offset, bytes);
         }
 
-        public NativeVectorIndex load(String engineType) {
+        /**
+         * Deserializes the payloads into the index the caller names.
+         *
+         * <p>The engine name is the index type Knowhere registers, which is also the name its
+         * Serialize gives the payload; an IVF index additionally answers to the names Knowhere 1.x
+         * wrote. Which engines and element types this connector accepts is decided above this
+         * layer.
+         */
+        public NativeVectorIndex load(String engineType, DType dataType) {
             active();
             attempted = true;
             KnowhereIndex loaded = null;
             try {
-                if (!"HNSW".equals(engineType) && !"HNSW_DEPRECATED".equals(engineType)) {
-                    throw new IllegalArgumentException("Persisted vector engine is unsupported: " + engineType);
+                Objects.requireNonNull(engineType, "engineType");
+                Objects.requireNonNull(dataType, "dataType");
+                String payload = "HNSW_DEPRECATED".equals(engineType) ? "HNSW" : engineType;
+                if (!names.contains(payload) && !names.contains("IVF") && !names.contains("BinaryIVF")) {
+                    throw new IllegalArgumentException(
+                            "Persisted index is missing its " + payload + " payload; it carries " + names);
                 }
-                if (!names.contains("HNSW")) {
-                    throw new IllegalArgumentException("Persisted index is missing its HNSW payload");
-                }
-                loaded = Knowhere.createIndex(engineType, DType.FLOAT32, version);
+                loaded = Knowhere.createIndex(engineType, dataType, version);
                 loaded.deserialize(data, parameters);
                 if (loaded.dimensions() != dimension || loaded.rows() != rows) {
                     throw new IllegalArgumentException("Persisted index shape differs from segment metadata: "

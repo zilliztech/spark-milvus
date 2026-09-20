@@ -32,11 +32,11 @@
 <h1>向量搜索与建索引</h1>
 <p><strong>向量搜索只有一个入口：输入一组查询，Spark 按段并行、按查询合并，Knowhere 在每个任务里一次算完整组查询；精确扫描和索引探查是同一个段内执行器的两种策略；建索引是写之后单独的一步。</strong></p>
 <p>TopK 是按距离或相似度排序的前 K 条结果。精确搜索把每个向量都算一次距离；近似最近邻搜索（ANN）借助索引只算一部分向量。Knowhere 是 Milvus 的向量检索引擎库，负责距离计算、建索引和索引搜索。</p>
-<p class="status">单条查询的索引搜索已实现，范围是非 nullable FloatVector 的 HNSW 索引。查询集入口、exact 模式、建索引与快照交付待实现，对应能力行 V5、V7、W6、W8。统一构建已改为固定上游 Conan recipe revision，并在独立 CMake 中显式声明集成链接；当前 Knowhere gitlink 为 <code>29210a33</code>，旧 <code>9dc2b8ad</code> 产物的验收只作为历史，当前组合须重新构建和复验。</p>
+<p class="status"><code>MilvusSearch.search</code> 的查询集入口、exact 与 index 两种模式、<code>build_index</code> 与 <code>write_snapshot</code> 已实现，各自验证过的范围记录在能力行 V5、V7、W6、W8；<code>restore_snapshot</code> 过程未实现，Milvus v3.0.2 已实测能恢复连接器写出的快照。DataFrame 与 SQL 计划里的入口是长期优化项（2.10），未开始。统一构建已改为固定上游 Conan recipe revision，并在独立 CMake 中显式声明集成链接；当前 Knowhere gitlink 为 <code>29210a33</code>，旧 <code>9dc2b8ad</code> 产物的验收只作为历史，当前组合须重新构建和复验。</p>
 <nav aria-label="本页目录">
   <a href="#overall">结论</a><a href="#api">入口</a><a href="#layers">分层</a><a href="#failures">失败与资源</a><a href="#cost">成本与模式</a>
   <a href="#execution">执行链</a><a href="#native">Knowhere 对接</a><a href="#exact">精确扫描</a><a href="#metadata">索引探查</a>
-  <a href="#semantics">结果语义</a><a href="#build">建索引</a><a href="#library-loading">原生库</a>
+  <a href="#semantics">结果语义</a><a href="#build">建索引</a><a href="#library-loading">原生库</a><a href="#rollout">DataFrame 入口</a>
   <a href="#simplicity">简洁性的好处</a><a href="#benefits">设计的好处</a>
 </nav>
 
@@ -48,6 +48,7 @@
 <li>计算与格式分开：Milvus 的 <code>TableFormat</code> 打开段、生成排除位图、读出索引并按地址取行；计算只在它交出的向量缓冲或索引句柄上求 TopK，不打开存储、不执行删除规则（<a href="table-version.html">table-version.html</a> 第三节）。能力在 driver 规划时核对。</li>
 <li>Knowhere 只在 <code>native-vector</code> 与 <code>core.index</code> 里调用；每批向量或每个索引，一次调用算完一组查询。</li>
 <li>建索引由 <code>CALL milvus.system.build_index(...)</code> 另起作业完成，结果经 Milvus 的外部快照恢复交付（W6、W8）。</li>
+<li>让搜索直接写在 DataFrame 或 SQL 计划里（单条查询是压在 Milvus 表上的「按距离函数排序取前 K」，查询集是与 Milvus 表以 <code>knn</code> 为条件的 join）是长期优化项，设计与开发提纲见 2.10。</li>
 </ol>
 
 <h3 id="api">1.1 入口</h3>
@@ -83,10 +84,10 @@
 </tbody></table></div>
 <div class="table"><table>
 <thead><tr><th>范围</th><th>exact</th><th>index</th></tr></thead><tbody>
-<tr><td>向量类型</td><td>FloatVector、Float16Vector、BFloat16Vector、Int8Vector、BinaryVector；nullable 字段的空向量行被排除</td><td>非 nullable FloatVector</td></tr>
-<tr><td>距离</td><td>浮点与 int8 向量：L2、IP、COSINE；二值向量：HAMMING、JACCARD</td><td>L2、IP、COSINE，与索引记录的距离一致</td></tr>
-<tr><td>索引</td><td>不读索引</td><td>Faiss HNSW 与 Cardinal HNSW，见 2.5</td></tr>
-<tr><td>搜索参数</td><td>无</td><td><code>ef</code></td></tr>
+<tr><td>向量类型</td><td>FloatVector、Float16Vector、BFloat16Vector、Int8Vector、BinaryVector；nullable 字段的空向量行被排除</td><td>同 exact；nullable 字段要求索引文件带 <code>valid_data</code> 位图（2.4）</td></tr>
+<tr><td>距离</td><td>浮点与 int8 向量：L2、IP、COSINE；二值向量：HAMMING、JACCARD</td><td>同 exact，且与索引记录的距离一致</td></tr>
+<tr><td>索引</td><td>不读索引</td><td>HNSW 家族（HNSW、HNSW_SQ、HNSW_PQ、HNSW_PRQ，含 Cardinal 写的 HNSW）、IVF 家族（IVF_FLAT、IVF_SQ8、IVF_PQ、BIN_IVF_FLAT）与 FLAT、BIN_FLAT，见 2.5；DiskANN、稀疏索引、GPU 索引和加密索引在规划时报错</td></tr>
+<tr><td>搜索参数</td><td>无</td><td>HNSW 家族 <code>ef</code>；IVF 家族 <code>nprobe</code>；FLAT 无参数</td></tr>
 <tr><td>段</td><td colspan="2">Storage V2、V3 与 external collection 的段</td></tr>
 </tbody></table></div>
 <div class="table"><table>
@@ -96,7 +97,7 @@
 <tr><td><code>milvus.search.vectors.max.bytes</code></td><td>2147483648</td><td>一个段组的向量字节上限，也就是一个任务同时留在内存里的量：查询集分成多组时，任务把段组读进内存一次，每个查询组在上面各算一遍。Milvus 的段默认不超过 1 GB，用 DiskANN 的 collection 不超过 2 GB；任务的 Arrow 分配仍受 <code>milvus.read.arrow.max.bytes</code> 约束</td></tr>
 </tbody></table></div>
 <p>搜索与建索引作业以 <code>spark.task.cpus</code> 等于 executor 核数提交，每个 executor 同时只跑一个这类任务，Knowhere 的线程池用满该 executor 的核。
-Knowhere 的 C/Java 接口开放线程池大小后，连接器增加对应选项（README 第 5 节）。</p>
+钉住的 Knowhere 子模块 Java API 已提供 <code>resizeSearchThreadPool</code> 与 <code>resizeBuildThreadPool</code>，连接器尚未调用；对应选项随 G4 落地（capabilities.md 第 11 节），GPU 开关上游未提供（README 第 5 节）。</p>
 <p>两条旧路径已随本入口删除：<code>vector.search.*</code> 读选项连同 <code>SegmentVectorSearch</code>、<code>SegmentIndexSearch</code>、扫描里的搜索分支，以及它们在 core 的 <code>SegmentIndexQuery</code>、<code>PersistedIndexSearch</code>、<code>BruteForceSearch</code>；spark-base <code>filter</code> 包的 <code>VectorBruteForceSearch</code> 连同 apps-4.0 的测试。SQL 距离函数保留（V8）；<code>vector_knn</code> 已删除（决策 24）。</p>
 
 <h3 id="layers">1.2 分层</h3>
@@ -110,7 +111,7 @@ Knowhere 的 C/Java 接口开放线程池大小后，连接器增加对应选项
 <tr><td>2</td><td><code>core.write.commit</code>、<code>client.api</code></td><td>索引记录与快照写出；外部快照恢复</td></tr>
 <tr><td>3</td><td><code>spark.read</code></td><td><code>MilvusSearch</code>：解析快照与查询集、把并行度交给 <code>SearchPlan</code>、广播、把任务包成分区、两个 Spark 阶段；<code>TopKAggregator</code> 包装 <code>TopKMerger</code>；<code>spark.metrics</code> 的 <code>SearchMetrics</code> 注册本次搜索的累加器</td></tr>
 <tr><td>3</td><td><code>spark.options</code>、<code>spark.procedure</code></td><td>搜索选项；<code>build_index</code> 与 <code>restore_snapshot</code> 过程</td></tr>
-<tr><td>4</td><td><code>apps.search</code></td><td>SQL 向量函数；精确 KNN 基准与召回评测作业</td></tr>
+<tr><td>4</td><td><code>apps.search</code></td><td>SQL 向量函数</td></tr>
 </tbody></table></div>
 
 <h3 id="failures">1.3 失败与资源</h3>
@@ -469,11 +470,12 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <li>每个字段在一个段上只选一个索引；它的段 id、分区 id、距离与行数都要与钉住的段一致；位图行数上限是 2<sup>31</sup>。</li>
 <li>有删除或过滤时，Milvus 的 <code>TableFormat</code> 只读主键、时间戳和过滤列，生成整段的排除位图；位图对本组查询共用。</li>
 <li><code>TableFormat</code> 读出并解码本段的索引文件，交出索引句柄；<code>IndexProbe</code> 在句柄上搜索本组查询一次，搜完即关闭。每个段的索引在任务里只加载一次。</li>
-<li>HNSW 只接受 <code>ef</code>：正整数，不小于 K，默认 <code>max(64, K)</code>。某条查询的有效候选不足 K 而段内有效行足够时，<code>ef</code> 翻倍重试，最多 8 次，上限是段的行数。</li>
-<li>非 nullable FloatVector 的索引 label 就是段内行号；越界 label 与非有限分数报错，−1 填充位丢弃。</li>
+<li>搜索参数按索引家族给：HNSW 家族只接受 <code>ef</code>（正整数，不小于 K，默认 <code>max(64, K)</code>），IVF 家族只接受 <code>nprobe</code>（正整数，默认 16），FLAT 与 BIN_FLAT 不接受参数。某条查询的有效候选不足 K 而段内有效行足够时，该参数翻倍重试，最多 8 次，上限是段的行数。</li>
+<li>label 换段内行号看这一列有没有空值。非 nullable 列的 label 就是段内行号；nullable 列只对有值的行建索引，label 是「第几个有值的行」，索引文件里的 <code>valid_data</code> 位图（最低位优先，1 表示该行有值）给出对应关系。<code>IndexRowMapping</code> 按它把 label 换成段内行号，也把要排除的段内行号换成要屏蔽的 label；没有值的行不在索引里，不必屏蔽。nullable 列的索引文件没有这份位图，或位图的置位数与索引行数不符，都在打开索引时报错。越界 label 与非有限分数报错，−1 填充位丢弃。</li>
 </ol>
 
 <h3 id="native-boundary">2.5 索引文件解码与引擎选择</h3>
+<p><strong>载荷名就是索引类型，格式标记核对到家族为止。</strong>Knowhere 的 <code>Serialize</code> 把索引写成一块以索引类型命名的载荷（<code>HNSW</code>、<code>HNSW_SQ</code>、<code>IVF_FLAT</code>…），Milvus 按同名写成索引文件，所以取哪块载荷由快照声明的 <code>index_type</code> 决定。载荷开头四个字节是写入方记下的索引类标记，同一个索引类型有多个：HNSW_SQ 在 COSINE 加 SQ4U 量化下写 <code>IHNa</code>，在 L2 下写 <code>IHNs</code>。逐个钉死会把当前 Knowhere 读得了的文件拒掉，所以核对到家族为止——HNSW 家族 <code>IH*</code>，IVF 家族 <code>Iw*</code>，浮点 FLAT 家族 <code>Ix*</code>（<code>IxF2</code> 是平方 L2，<code>IxFI</code> 是内积），二值索引不论结构都是 <code>IB*</code>，Cardinal 流看末尾 24 字节的 <code>CARD</code>——这仍然挡得住把 IVF 流当 HNSW 加载，读不了的组合由 Knowhere 自己拒绝。</p>
 <p><strong>引擎与索引版本在规划时声明，执行时核对。</strong>BinarySet 是按名字组织的二进制块集合；下面的解码归 Milvus 的 <code>TableFormat</code>。</p>
 <ol>
 <li>描述快照时，<code>TableFormat</code> 对每个段的索引对象只读头尾若干字节：Milvus 封装取 descriptor 与载荷开头的标识，Cardinal 流取末尾 24 字节；由此得出引擎与索引版本，写进该段的索引能力。各段并发读取。</li>
@@ -481,7 +483,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 依据是 Milvus 的 <a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/storage/DataCodec.cpp#L147">DataCodec</a>、<a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/storage/PayloadReader.cpp#L79">PayloadReader</a> 与 <a href="https://github.com/milvus-io/milvus/blob/56c674f/internal/core/src/common/Slice.cpp#L105">Slice</a>。</li>
 <li>出现 <code>SLICE_META</code> 时，<code>IndexFileCodec</code> 按其中记录的块名、分片数和总长度拼回原块；<code>SLICE_META</code> 不超过 1 MiB。</li>
 <li>Cardinal 直接写出的 <code>_mem.index.bin</code> 没有 Milvus 封装：文件列表恰有这一个文件，末尾 24 字节是小端的 CARD 标识、序列化版本和两个元数据偏移，版本为 1 且偏移在文件内有序时，整个文件作为 <code>BinarySet["HNSW"]</code>。</li>
-<li>标识与引擎的对应：CARD 对应 Cardinal，要求向量格式版本不低于 9，并要求含 Cardinal 的 Knowhere 构建；<code>IHNf</code>（float32 HNSW Flat）与 <code>IHN9</code>（HNSW FlatCosine）对应 Faiss，要求版本不低于 6。
+<li>标识与引擎的对应：CARD 对应 Cardinal，要求向量格式版本不低于 9，并要求含 Cardinal 的 Knowhere 构建；<code>IHNf</code>（float32 HNSW Flat）、<code>IHN9</code>（HNSW FlatCosine）、<code>IxF2</code>（FLAT）与 <code>IwFl</code>（IVF_FLAT）对应 Faiss，要求版本不低于 6。家族清单与它们的字节标记同在 <code>core.codec.VectorIndexFamilies</code>：能加载的类型和能识别的标记是同一件事，分成两处就会出现「声明支持但读不了」。
 含 Cardinal 的构建把 Faiss 引擎注册为 <code>HNSW_DEPRECATED</code>，其余构建注册为 <code>HNSW</code>；两者的块名都是 <code>HNSW</code>，<code>NativeVectorIndex.Loader</code> 分开处理引擎名与块名。</li>
 <li>executor 解码出完整载荷后，再核对标识与声明一致。单个对象不超过 256 MiB，拼好的载荷不超过 1 GiB，以 1 MiB 为块复制进 BinarySet；复制完成即释放解码缓冲，反序列化完成即关闭输入 BinarySet，索引句柄由任务持有。</li>
 <li>Faiss 量化 HNSW、multi-view、加密文件、nullable 行号映射和没有已知标识的文件，在规划时即判为不可加载。</li>
@@ -545,6 +547,22 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <li>driver 把索引记录写进作业清单，<code>core.write.commit</code> 写出快照 JSON 与段 Avro 清单；<code>restore_snapshot</code> 调 Milvus 的外部快照恢复，Milvus 复制段文件与索引文件、分配新的 build id，生成新 collection（W8）。给已有 collection 的段补索引，是把索引写进段 Manifest 的 <code>indexes</code>，需要 Milvus 按它加载（README 第 5 节）。</li>
 <li>索引的引擎与参数取目标 Milvus 能加载的组合：面向云上用含 Cardinal 的 Knowhere 构建，参数与云上的自动索引一致，该产物在云上作业运行时提供。第一版建向量索引，范围与 2.4、2.5 的加载器一致。</li>
 <li>建好的索引由 2.4 的加载器读回搜索，与精确扫描比较召回率。</li>
+<li>已实现：<code>NativeVectorIndex.build</code> 与 <code>core.index.IndexWriter</code>（整段向量装配成一块缓冲、构建、交出载荷，nullable 列同时产出 <code>valid_data</code> 位图）、<code>core.codec</code> 的信封与 <code>SegmentIndexObjects.write</code>（按 store path version 选前缀、超过 16 MiB 切片并写 <code>SLICE_META</code>）、<code>CommittedIndex</code> 记录与 <code>build_index</code> 过程；快照文件也已写出：<code>SegmentManifestWriter</code> 编码段 Avro 清单（读侧只取到 <code>index_files</code> 为止，写侧要把整条记录填满，Avro 二进制按位置解码），<code>core.write.commit.SnapshotWriter</code> 出快照 JSON 与每段一份清单，入口是 <code>write_snapshot</code> 过程。索引记录里的行数是段行数，空值由索引文件里的 <code>valid_data</code> 位图表达。段必须是 storage version 3 且带行数，V2 段报错不猜。</p>
+<p><strong>写快照就是复制源快照。</strong>文档与每段的 Avro 清单都取源快照的字节，只替换这份作业真正拥有的东西：段清单里的索引登记、快照的索引定义、<code>build_ids</code>、<code>segment_ids</code>，以及快照自己的 name、id 与 create_ts。段的通道名、两个位置、<code>is_sorted</code>、提交时间戳、数据与删除文件都不再由连接器重述，collection 那一块（虚拟通道、分区、分片数、properties）也原样带过——恢复要用的这些字段连接器并不建模，复制才不会丢。V2 段与 V3 段因此一视同仁。</p>
+<table>
+<thead><tr><th>字段</th><th>写入值</th><th>依据</th></tr></thead>
+<tbody>
+<tr><td><code>channel_name</code></td><td>空串</td><td>无</td></tr>
+<tr><td><code>start_position</code>、<code>dml_position</code></td><td>全零记录</td><td>无</td></tr>
+<tr><td><code>is_sorted</code></td><td>false</td><td>无</td></tr>
+<tr><td><code>commit_timestamp</code></td><td>作业的 HybridTS</td><td>类比决策 22 给新段的占位 Timestamp</td></tr>
+<tr><td><code>segment_level</code></td><td>有数据 2，否则 1</td><td>读侧对 L0 的判断（<code>SnapshotCatalog</code>）</td></tr>
+<tr><td><code>binlog_files</code></td><td>空</td><td>V3 段的数据文件在 milvus-storage 的 manifest 里；Milvus 真实 V3 段的 Avro 写不写这一项未核对</td></tr>
+<tr><td><code>index_id</code></td><td>快照没有索引定义时用 build id 顶替</td><td>无</td></tr>
+<tr><td><code>state</code>、<code>num_shards</code>、<code>consistency_level</code></td><td>不写</td><td>读侧不需要；Milvus 恢复是否需要未核对</td></tr>
+</tbody>
+</table>
+<p>验收只说明连接器写的连接器读得回来，不说明 Milvus 认这份快照；而读侧恰好不读上表里的多数字段。恢复那一步落地时，这些值要对着目标 Milvus 逐项核对再定。</li>
 </ol>
 <h3 id="library-loading">2.8 原生库加载与打包</h3>
 <p><strong>milvus-storage 与 Knowhere 的固定源码在同一张 Conan 依赖图中构建，所有原生库进入一个平台 JAR，并由 <code>native-runtime</code> 校验后解压到同一目录。</strong>
@@ -556,7 +574,7 @@ milvus-storage 与 Knowhere 的精确 revision 分别由 superproject gitlink �
 <li><code>META-INF/milvus/knowhere-runtime.properties</code> 从统一包的 provenance 生成，报告实际构建是否包含 Cardinal。JVM 启动前仍须预加载自身 JRE 的 <code>libjsig</code>。</li>
 <li>旧的独立 storage/Knowhere 平台 JAR、<code>storage-compatibility*.properties</code> 合并和 <code>native/knowhere/1/</code> 布局只属于迁移前产物，统一包不能同时携带这些资源。</li>
 </ol>
-<p>旧 gitlink 组合曾完成真实 Cardinal HNSW/COSINE 查询验收；当前 storage <code>7eb1357</code> 与 Knowhere <code>1fff20d</code> 必须由统一构建重新产出并完成加载顺序、assembly 与真实文件复验。构建机制和验收项见<a href="../engineering/native-libraries.html">原生构建设计</a>。</p>
+<p>旧 gitlink 组合曾完成真实 Cardinal HNSW/COSINE 查询验收；当前 storage <code>7eb1357</code> 与 Knowhere <code>1fff20d</code> 必须由统一构建重新产出并完成加载顺序、assembly 与真实文件复验。构建机制和验收项见<a href="../engineering/build.html">依赖库与构建方案</a>。</p>
 
 <h3 id="interop">2.9 真实文件兼容</h3>
 <p><strong>能否加载一份索引文件，由它的引擎和格式版本决定，按目标 Milvus 写出的真实文件验证。</strong>
@@ -570,12 +588,123 @@ Knowhere 在部分 K 与过滤比例下会在索引内部改用暴力搜索（<a
 <p>index 模式同日在同一台机器上按真实索引文件验过（<code>SegmentIndexSearchSmoke</code>，Knowhere 建出 Faiss HNSW、写成 Milvus 的索引文件再读回）：两个持久化 HNSW 段的候选合并成全局 TopK，标量过滤、空值和带时间戳的删除都在 ANN 之前生效，平方 L2 分数与段内物理行号一致；删掉全部原始向量列组文件后查询仍然成立，说明索引路径不读向量列；<code>outputColumns</code> 按任意顺序或完全不给都正确；<code>allowUnindexed</code> 打开时索引段与未建索引段混合，分数保持原生 2.0，同分按较小段 id 决胜；索引对象缺失时报明确错误。</p>
 <p>尚未复验的是云上写出的 Cardinal 流 <code>_mem.index.bin</code>：这次的统一包不含 Cardinal，加载时按约定报错「This persisted index requires a verified Knowhere build with WITH_CARDINAL enabled」，在此之前的快照 <code>indexes</code>、<code>build_ids</code>、段清单索引文件、metric 与行数核对、规划期逐段检查都通过。该格式在 2026-09-17 以旧入口验过一次，用新入口复验需要含 Cardinal 的统一构建。</p>
 
+<p><strong>2026-09-18 建索引的闭环：</strong>同一台 Linux 上，索引由 <code>IndexWriter</code> 构建、<code>SegmentIndexObjects</code> 按 Milvus 的命名与信封写出，再由 2.4 的加载器读回搜索：两个段的候选合并成全局 TopK，分数与段内行号与预期一致，删掉原始向量列组文件后仍成立，混合未建索引段也正确。<code>build_index</code> 过程本身也跑通：快照里没有任何索引记录，过程按段起 Spark 任务建索引、写出对象、把记录写进作业清单，再按清单里的文件路径出一份带索引的快照，<code>mode = index</code> 的搜索结果与同一批查询的 <code>mode = exact</code> 逐行相同（<code>SegmentIndexSearchSmoke</code> 五项）。三处修正来自这次闭环：上游载荷只写 direct 内存、复制后不依赖缓冲位置、本地文件系统要先建目录。</p>
+<p><strong>2026-09-20 快照写出：</strong>同一台 Linux 上，<code>build_index</code> 之后调 <code>write_snapshot</code>：过程按 option 选中的快照描述两个段，从作业清单取索引记录，写出 <code>built/snapshots/10/metadata/5000.json</code> 和每段一份 Avro 清单；把这个 key 当作 <code>milvus.snapshot.path</code> 再搜一次，<code>mode = index</code> 与 <code>mode = exact</code> 的结果同前一步逐行相同（<code>SegmentIndexSearchSmoke</code> 六项，退出码 0）。另有 <code>SnapshotWriteTest</code> 在 core 里做往返：写出后用 <code>SnapshotCatalog</code> 读回，段、行数、索引记录、索引定义与 schema 逐项相等。恢复成 Milvus 的 collection 仍未实现。</p>
+<p><strong>2026-09-20 真实数据上的建索引端到端：</strong>UAT collection <code>spark_uat_index_big</code>，10 万行 × 128 维，分四次 flush 落成四个 V3 段，删掉 id 0–99 并等 Milvus 把删除折进段清单，由 Milvus 自己出快照。判据不取自任何一侧：每行的向量由 id 决定（<code>java.util.Random</code> 的取值是规范定死的），所以 TopK 在测试里按 id 暴力算出来。结果（<code>IndexBuildUatTest</code>，Linux，local[4]）：精确扫描与暴力基准在 10 条查询上逐条相同（命中 id 与分数）；<code>build_index</code> 分别建出 HNSW、IVF_FLAT、FLAT 三族，经 <code>write_snapshot</code> 出快照后按 <code>milvus.snapshot.path</code> 搜索，召回随搜索宽度变化：HNSW 的 <code>ef</code> 取 64/128/256/512 得 0.74/0.86/0.96/0.99；IVF_FLAT 的 <code>nprobe</code> 取 8/32/128 得 0.33/0.71/1.00（nlist=128，nprobe 等于 nlist 即全扫）；FLAT 召回 1.0000 且命中 id 与基准逐条相同。带标量过滤（<code>label == 3</code>）的搜索与同样过滤下的暴力基准一致，即过滤发生在探索之前。删除的 id 没有出现在任何一条结果里。索引体积：HNSW 65.6 MB、IVF_FLAT 52.3 MB、FLAT 51.2 MB（四段合计，10 万行 × 128 维）；每族构建 66–77 秒。这份数据是 128 维均匀随机，是图索引与倒排索引最不利的分布——最近邻并不比其他点近多少，所以上面的召回是下界而不是典型值。</p>
+<p><strong>2026-09-20 Milvus 认了连接器写的快照。</strong>把 <code>write_snapshot</code> 出的快照交给 UAT 实例的 <code>RestoreExternalSnapshot</code>（Milvus v3.0.2）：恢复完成，耗时 5.9 秒，没有重建索引；新 collection 的 <code>DescribeIndex</code> 报告 <code>v_hnsw</code>、HNSW、L2、M=16、efConstruction=200，<code>indexed_rows</code> 100000、<code>state</code> Finished——这些正是 <code>build_index</code> 建的那一份。加载后用同一批查询搜索，命中与按 id 独立算出的暴力基准平均召回 0.77，与 Milvus 自己建的索引在同一份数据上的 0.74 同量级。至此「连接器建索引 → 写快照 → Milvus 恢复 → Milvus 搜索」整条链跑通。</p>
+<p><strong>外部恢复对路径的硬要求：</strong>Milvus 从快照元数据的 URI 推出一个 bundle 根，要求段清单和所有数据文件都在这个根之下（<code>ValidateExternalSnapshotPaths</code>，防止一份被篡改的元数据把恢复引向别处的文件）。所以 <code>write_snapshot</code> 的 <code>output</code> 必须是数据路径的祖先前缀——为已有 collection 建索引时就是实例自己的根，索引对象也要写在同一个根下。写到别的前缀，文件都对，恢复也会以「data path ... is outside source root」拒绝。</p>
+<p><strong>这一轮暴露并修掉的三处：</strong>段清单映射只写了连接器自用的 <code>segmentIDLong</code>，Milvus 读 <code>segmentID</code>，于是「references unknown segment 0」；快照文档是合成的最小集合，缺 <code>collection.virtual_channel_names</code> 等恢复要用的字段，改成从源快照复制、只替换本作业拥有的部分；索引定义写成 <code>field_id</code> 等下划线名，Milvus 用 protojson 解析并丢弃未知字段，恢复出来的 collection 于是有一个建在字段 0 上的索引，改成它自己文档里的 <code>collectionID</code>/<code>fieldID</code>/<code>indexID</code>。</p>
+<p><strong>2026-09-20 三个索引族的恢复验证（1 万行 × 128 维，V2 段）：</strong>另建一个 v3.0.2 实例，同一条链跑三族。IVF_FLAT：恢复完成，Milvus 报 <code>v_ivf_flat</code>、IVF_FLAT、L2、nlist=128，10000 行 Finished，2 秒加载；用它自己的默认参数搜索对独立基准召回 0.34，显式 <code>nprobe=128</code> 时召回 1.0000——与连接器在同一批索引文件上量到的 8/32/128 → 0.34/0.67/1.00 完全一致，即同一份索引在两个引擎里表现相同。FLAT：恢复完成，<code>v_flat</code>、FLAT、L2，10000 行 Finished，搜索召回 1.0000，与基准逐条相同。两者恢复后删除的行都不可见。这一轮的段是 V2（packed 之前的按字段布局），所以「读、建索引、写快照、恢复」在 V2 段上也成立。</p>
+<p><strong>小索引一度装不进 Milvus：</strong>HNSW 这一族恢复完成、索引也被登记，但加载报 <code>invalided index file path: …/HNSW, error: stoi</code>。Milvus 的段加载器按最后一个下划线切文件名并把后缀当作切片序号，它自己的写入方无论大小都写 <code>name_0</code>；连接器此前只在载荷超过 16 MiB 时才加后缀，于是 6.5 MB 的索引落成一个叫 <code>HNSW</code> 的对象。第一次成功的恢复没暴露它，是因为那份索引每段 16.4 MB，本来就被切成了 <code>HNSW_0</code>、<code>HNSW_1</code>。现在一律按切片命名。</p>
+<p><strong>这轮端到端找出的缺陷：</strong>FLAT 索引建出来读不回去。Knowhere 写的 faiss 平表索引以 <code>IxF2</code> 开头，而格式核对里非 HNSW 的类型一律只认 <code>Iw</code> 与 <code>IB</code>。成因是家族清单与字节标记分在两处，写标记表时看不到清单；修法是把两者并进 <code>core.codec.VectorIndexFamilies</code>，加载、构建校验与格式核对都读它，并在 codec 测试里钉住 Knowhere 真正写出的标记。在此之前 FLAT 与 IVF 都只验过读侧的合成字节，没有一个真的被建出来过。</p>
+
 <p><strong>2026-09-17 旧 gitlink、旧自有 recipe 实现的历史结果：</strong>以下产物使用 Knowhere <code>9dc2b8ad</code>，不能代表当前 <code>1fff20db</code> gitlink 或固定上游 recipe 方案。Cardinal 构建完成，C API 3/3、164/164 个库审计和 5 个立即加载入口通过。统一平台 JAR SHA-256 为 <code>4bc2488e9f38f590f9346b27a34725f4d63bddd1b518740784ad0d32c8c54c5e</code>，大小 279,399,197 字节；三种 JVM 加载顺序均使用一个解压目录，最终 assembly SHA-256 为 <code>be37535bcd3ffecec1c4c9bdb74336bc10cf50b08be18e8080a2928a50f7064c</code>。</p>
 <p>真实 UAT 持久化索引套件 1/1 通过，读取 100,000 行。无过滤、标量组合过滤和空值过滤分别排除 0、80,000、90,000 行；三个 Cardinal HNSW version 10 查询都恰好调用一次 deserialize 和一次 search，严格 Top10 ID 召回率均为 1，物理行号和 Float32 分数与上游 JNI 直调一致，metric 不匹配被明确拒绝，没有 Connector 暴力回退。既有 Spark SQL UI 指标构造器告警不影响查询断言。</p>
 <p><strong>2026-09-16 04:48 UTC 的历史结果：</strong>Spark 4.0 / Java 21 / local[2]，读取真实快照的 100,000 行、128 维向量作为独立参考；查询向量取其中一行，topK=10、ef=256。无过滤、标量组合过滤和空值过滤三种查询分别排除 0、80,000、90,000 行；投影值、物理行号、排序、与原始 JNI 的命中集合及 Float32 分数全部通过。三个查询的严格 Top10 ID 召回率均为 100%，最大分数绝对误差分别为 5.4300e-5、6.6219e-5、5.9342e-5；该结果只描述当时依赖补丁批次的样本和三个查询，不构成其他查询或当前开源变体的验收。</p>
 <p>每次查询读取同一个 41,606,363 字节的已有索引，一次 deserialize、一次 search，没有回退。端到端耗时约 18.9、19.8、21.5 秒，主要耗在约 15–16 秒的索引读取；search 调用约 13、8、4 毫秒。没有跨查询缓存，不能把原生调用时间写成完整查询延迟。测试未调用在线 Search 服务，未创建或修改远端对象。</p>
 <p>历史 Cardinal 平台 JAR SHA-256 为 <code>e57bcca5a96e5cb0a249d79d8f0d6e758c994b80f4b3b4dab40e39b5b6ced726</code>，当时对应 <code>native-vector/storage-compatibility-cardinal.properties</code> 和 Knowhere <code>9dc2b8ad</code>。原始上游 CTest 为 2/3、Java/JNI 为 10/11、Python 为 13/13；C 和 Java 的 DiskANN v1 精确距离断言失败，量化结果为 1.0306964 而期望值为 1.0，诊断产物保留 <code>build.validated=false</code>。当前 PR 分支已经修改 DiskANN 测试合同；新 gitlink 必须按新测试重建，不能把旧失败或项目自有 acceptance fixture 的结果写成当前上游测试结果。</p>
 <p>Cardinal 的配置含 <code>-march=native</code>，验证主机为 Intel Xeon Gold 6338、GLIBC 2.35，未验证其他 CPU、旧 GLIBC、ARM 或 macOS。该旧批次只重新构建 Cardinal 变体，没有重新运行开源 Knowhere 变体。中文报告和日志属于外部 <code>milvus-spark-demo</code> 验证材料。</p>
+
+<h3 id="rollout">2.10 长期优化：DataFrame 与 SQL 计划里的入口</h3>
+<p><code>MilvusSearch.search</code> 是一个不在 Spark 计划里的静态 Scala 方法：PySpark 与 SQL 没有入口，它不能与 <code>where</code>、<code>select</code>、<code>join</code> 组成一个计划，快照解析与过滤也是扫描之外的第二条路。长期目标是让用户只写 DataFrame 或 SQL，由 Spark 的规划器把搜索交给现有的执行体（<code>SearchPlan</code>、<code>SegmentSetSearch</code>、<code>TopKMerger</code>、<code>SearchTake</code>），core 不改。本节是这项优化的设计与开发提纲；落地时更新决策 16，并按「移除是设计工作」处理 <code>MilvusSearch.search</code> 与 apps 的 V8 表达式。</p>
+<p><strong>两种形状</strong>，DataFrame、SQL 与 PySpark 写法一致：</p>
+<pre><code>// 单条查询：按距离排序取前 K。call_function 是 Spark 3.5 起按名字调用函数的公开方法，
+// 也可写 expr("l2_distance(vec, array(...))")；装了会话扩展后函数按裸名可用
+spark.table("milvus.db.coll")
+  .where("category = 'a'")
+  .orderBy(call_function("milvus.system.l2_distance", col("vec"), lit(q)))
+  .limit(10)
+
+// 查询集：queries 有 q 一列（查询向量），每行各取前 K
+queries.join(spark.table("milvus.db.coll"),
+  expr("milvus.system.knn(vec, q, 10, 'L2')"))</code></pre>
+<pre><code>SELECT * FROM milvus.db.coll WHERE category = 'a'
+ORDER BY milvus.system.l2_distance(vec, array(...)) LIMIT 10;
+
+SELECT * FROM queries JOIN milvus.db.coll ON milvus.system.knn(vec, q, 10, 'L2');</code></pre>
+<p>单条查询取的是 SQL 数据库里最通行的写法（pgvector、ClickHouse、DuckDB、Snowflake、Oracle 23ai 都是 <code>ORDER BY distance LIMIT k</code>）；查询集用 join 而不是 BigQuery <code>VECTOR_SEARCH</code>、Databricks <code>vector_search</code> 那样的表值函数，因为 Spark 给 Scala 注册的表值函数在四条线上都接不到 <code>TABLE(...)</code> 参数，而 join 条件能同时引用两侧的列。</p>
+<p><strong>函数。</strong>六个函数是 Milvus catalog <code>system</code> 命名空间下的 <code>ScalarFunction</code>。没有配置 catalog、只用 <code>format("milvus")</code> 的会话，由 <code>MilvusSparkSessionExtensions</code> 以同名注册同一批函数，构造出的表达式是 <code>ApplyFunctionExpression</code>，Spark 的翻译规则对两种来源一视同仁。五个距离函数有 JVM 实现（V8 的算法），Spark 用它对各分区交回的候选重排序；<code>knn</code> 只能作 join 条件，直接求值报错。</p>
+<div class="table"><table>
+<thead><tr><th>函数</th><th>返回</th><th>metric</th><th>排序方向</th></tr></thead><tbody>
+<tr><td><code>l2_distance(vec, q)</code></td><td>DOUBLE，欧氏距离（Knowhere 的 L2 分数是它的平方，排序等价）</td><td>L2</td><td>升序</td></tr>
+<tr><td><code>inner_product(vec, q)</code></td><td>DOUBLE</td><td>IP</td><td>降序</td></tr>
+<tr><td><code>cosine_similarity(vec, q)</code></td><td>DOUBLE</td><td>COSINE</td><td>降序</td></tr>
+<tr><td><code>hamming_distance(vec, q)</code></td><td>DOUBLE</td><td>HAMMING</td><td>升序</td></tr>
+<tr><td><code>jaccard_distance(vec, q)</code></td><td>DOUBLE</td><td>JACCARD</td><td>升序</td></tr>
+<tr><td><code>knn(vec, q, k, metric)</code></td><td>BOOLEAN，只在 join 条件里合法</td><td>第四个参数，字符串字面量</td><td>由 metric 决定</td></tr>
+</tbody></table></div>
+<p><strong>单条查询的机制。</strong>Spark 的 <code>V2ScanRelationPushDown</code> 规则看到 <code>Sort</code> 加 <code>Limit</code> 直接压在扫描上、且 <code>where</code> 里的谓词全部下推时，把排序键经 <code>V2ExpressionBuilder</code> 翻成 V2 表达式后调 <code>MilvusScanBuilder.pushTopN(orders, limit)</code>。目录函数调用翻成 <code>UserDefinedScalarFunc</code>，Spark UDF 翻不过去。<code>pushTopN</code> 只接受一种形状：一个排序键，是上表的距离函数，第一个参数引用本表的向量列，第二个参数是数组或二进制字面量，方向与该函数的 metric 一致。满足则记下 <code>PushedSearch</code>（布局、字段 id、查询向量、K、metric、mode、参数），<code>isPartiallyPushed</code> 返回 true；其他形状返回 false 并记下理由。有 <code>PushedSearch</code> 的 <code>MilvusScan</code> 不再一段一分区，而是按 <code>SearchPlan.segmentSets</code> 分段组，每个分区在自己的段组上跑 <code>SegmentSetSearch</code>（一个查询组，一条查询），再经 <code>SearchTake</code> 取本分区那最多 K 行的输出列。Spark 收到各分区的候选后用函数的 JVM 实现重算距离、排序、取 limit，这一步就是全局合并；量化索引在段内按近似分数选候选，最终顺序按精确距离。分数由用户 select 函数值得到，不另出 <code>_score</code> 列。</p>
+<p><strong>查询集的机制。</strong><code>MilvusSparkSessionExtensions</code> 注入的策略匹配「一侧是查询计划、另一侧是 <code>DataSourceV2ScanRelation(MilvusScan)</code>、条件仅为 <code>knn</code> 的 inner join」，替换成物理算子 <code>VectorSearchExec</code>，与 <code>CALL</code> 语法同一种「逻辑节点加策略」接法。它执行两个阶段：查询侧执行成 RDD 后按 <code>SearchLimits.queriesMaxBytes</code> 决定 collect 加广播还是 <code>packedGroups</code> 的 shuffle 下发，<code>SearchPlan.of</code> 分段组与查询组，第一阶段每任务 <code>SegmentSetSearch.run</code>，<code>TopKMerger</code> 按查询合并，第二阶段 <code>SearchTake</code> 回表；查询侧的行由算子编号（<code>zipWithIndex</code>）作为 <code>query_id</code>，用户不再提供。输出列是查询侧的全部列、Milvus 侧已投影的列，加 <code>_score</code>、<code>_segment_id</code>、<code>_row_offset</code>；每条查询最多 K 行，同一查询内的先后按 2.6 的排序规则。</p>
+<p><strong>读 option。</strong>mode、搜索参数和未建索引段的处理描述的是这次扫描怎么执行，与 <code>milvus.filter</code> 同级，作为读 option 给出；三个规模选项不变。</p>
+<div class="table"><table>
+<thead><tr><th>选项</th><th>默认值</th><th>作用</th></tr></thead><tbody>
+<tr><td><code>milvus.search.mode</code></td><td><code>index</code></td><td><code>index</code> 用快照钉住的持久化索引；<code>exact</code> 对每个段精确扫描</td></tr>
+<tr><td><code>milvus.search.params</code></td><td>空</td><td><code>name=value</code> 逗号分隔的搜索参数：HNSW 家族 <code>ef</code>，IVF 家族 <code>nprobe</code>，FLAT 无参数；多余的参数报错</td></tr>
+<tr><td><code>milvus.search.allow.unindexed</code></td><td><code>false</code></td><td>index 模式下，快照确认未建索引的段改用精确扫描；默认这些段让规划失败</td></tr>
+</tbody></table></div>
+<p><strong>失败语义</strong>，在 1.3 之外增加两行：</p>
+<div class="table"><table>
+<thead><tr><th>情况</th><th>行为</th></tr></thead><tbody>
+<tr><td>index 模式下某段没有可加载的索引</td><td><code>pushTopN</code> 抛错而不是返回 false：返回 false 会让 Spark 退成全表扫描加 JVM 排序，把一次索引查询变成全量读而不告诉用户</td></tr>
+<tr><td>单条查询：排序键不是距离函数、排序键多于一个、<code>where</code> 里有未下推的谓词、排序与 limit 之间夹着别的算子</td><td>Spark 不调 <code>pushTopN</code>。注入的规划器策略在优化后的计划上运行，发现「<code>Limit</code> 之下的 <code>Sort</code> 以距离函数为键、压在没有 <code>PushedSearch</code> 的 Milvus 扫描上」时报错，理由取 <code>MilvusScan.declinedSearch</code>（<code>pushTopN</code> 拒绝时记下的原因）或计划形状（夹在中间的 <code>Filter</code> 及其条件）。没有 <code>Limit</code> 的距离排序是全排序，不是 TopK 查询，不报错。优化器扩展点不能用：<code>Pre CBO Rules</code> 批次在 <code>Early Filter and Projection Push-Down</code> 之前运行，看不到下推结果</td></tr>
+<tr><td>查询集：join 不是 inner、<code>k</code> 或 metric 不是字面量、Milvus 一侧与 join 之间有未下推的 <code>Filter</code>、条件里还有别的谓词</td><td>策略报错，写明不满足的项；不把搜索前过滤改成搜索后过滤</td></tr>
+</tbody></table></div>
+<p><strong>已在 Spark 3.5.0 与 4.2.0 的 jar 上核对的事实。</strong></p>
+<ul>
+<li><code>SupportsPushDownTopN</code>、<code>FunctionCatalog</code>、<code>UnboundFunction</code>、<code>ScalarFunction</code>、<code>UserDefinedScalarFunc</code>、<code>ApplyFunctionExpression(ScalarFunction, Seq[Expression])</code>、<code>Expressions.sort/column</code>、<code>functions.call_function</code>、<code>NoSuchFunctionException(Identifier)</code> 两条线都有；共享源码可以直接用（modules.md 第 4 节第 10 条）。</li>
+<li><code>V2ExpressionBuilder</code> 在两条线上都把 <code>ApplyFunctionExpression</code> 翻成 <code>UserDefinedScalarFunc</code>；Spark 自己的 UDF 不翻。</li>
+<li><code>ResolveFunctions</code> 在参数解析完成后才调用函数的 builder（Analyzer：<code>case u if !u.childrenResolved =&gt; u</code>），所以会话注册的 builder 可以按参数类型 <code>bind</code> 后再构造 <code>ApplyFunctionExpression</code>。</li>
+<li><code>V2ScanRelationPushDown</code> 只在 <code>Sort</code> 加 <code>Limit</code> 直接压在扫描上、且残余过滤为空时调 <code>pushTopN</code>；排序键经 <code>translateSortOrders</code>，翻不过去就整个不推。</li>
+<li>规划器策略（<code>injectPlannerStrategy</code>）在优化后的计划上运行，能看到 <code>MilvusScan</code> 的下推状态，返回 <code>Nil</code> 不影响其他策略，抛错即中止规划。</li>
+<li><code>DataSourceV2ScanRelation</code> 的构造器参数个数在 3.5 与 4.2 不同，匹配它只能用类型模式加 <code>.scan</code>，不能用 <code>unapply</code>。</li>
+</ul>
+<p><strong>现有代码与本节之间要补的差距。</strong></p>
+<div class="table"><table>
+<thead><tr><th>差距</th><th>改法</th></tr></thead><tbody>
+<tr><td><code>core.read.exec.RowExclusions</code> 只接受 <code>milvus.filter</code> 的 <code>Expr</code>，不接受 Spark 下推的 <code>PredicateExpr</code>；表读取的两个 reader 用 <code>BatchFilterEvaluator</code> 把两者 OR 起来，搜索路径没有这一步。不补的话 <code>where</code> 里已下推的谓词在搜索前不生效，结果错而无错误</td><td><code>RowExclusions.of</code> 加 <code>predicate: Option[PredicateExpr]</code>；<code>neededColumns</code> 加谓词列（<code>core.expr</code> 加 <code>PredicateExpr.fieldIds</code>）；<code>excludes</code> 按批用 <code>PredicateEvaluator.evaluate</code> 算一次位图并缓存。<code>SegmentSetSearch.Spec</code> 加 <code>predicate</code></td></tr>
+<tr><td><code>SegmentIndexHandle.check</code> 只接受 <code>SegmentReadTask</code>，而 <code>pushTopN</code> 时只有 <code>Snapshot</code>，任务要到 <code>MilvusScan.plan</code> 列删除文件后才有</td><td><code>pushTopN</code> 用有数据的段构造最小任务（id、分区、布局、schema、<code>indexes</code>、<code>rows</code>）做规划期核对；executor 上 <code>SegmentSetSearch.source</code> 里的 <code>select</code> 仍是权威。V3 段的 Manifest 版本来自快照目录时已钉住；client 与 option 串来源的段 <code>indexes</code> 是 <code>Unknown</code>，index 模式下本来就报错</td></tr>
+<tr><td><code>SegmentSetSearch.run</code> 要 <code>SearchMetrics</code>（累加器），累加器只能在 driver 创建</td><td><code>MilvusScan.createReaderFactory</code> 在 driver 上运行，在那里 <code>SearchMetrics.create</code> 并随工厂序列化到 executor</td></tr>
+<tr><td><code>SearchTake.take</code> 是 <code>private</code>，分区 reader 要按段回表</td><td>改 <code>private[read]</code>；返回的 <code>Row</code> 用 <code>CatalystTypeConverters.createToCatalystConverter</code> 转回 <code>InternalRow</code>，每分区至多 K 行</td></tr>
+<tr><td><code>MilvusScan.inputPartitions</code> 的任务 <code>neededFieldIds</code> 来自投影，搜索要另读向量列、排除列和回表列</td><td>有 <code>PushedSearch</code> 时任务的 <code>neededFieldIds</code> 置空，与 <code>SnapshotPartitions.of</code> 给 <code>MilvusSearch</code> 的一致；各 reader 自己按 <code>ColumnBinding</code> 选列</td></tr>
+</tbody></table></div>
+<p><strong>第一步：单条查询。</strong>改动按文件：</p>
+<div class="table"><table>
+<thead><tr><th>文件</th><th>改动</th></tr></thead><tbody>
+<tr><td><code>core/…/expr/PredicateExpr.scala</code>、<code>core/…/read/exec/RowExclusions.scala</code></td><td>上表第一行</td></tr>
+<tr><td><code>spark-base/…/options/MilvusOption.scala</code>、新 <code>options/SearchOptions.scala</code></td><td>三个常量；<code>SearchOptions(mode, parameters, allowUnindexed, limits)</code> 严格解析：mode 只认 <code>index</code>/<code>exact</code>，<code>params</code> 是 <code>name=value</code> 逗号分隔、不重名，布尔只认 true/false</td></tr>
+<tr><td>新包 <code>spark-base/…/functions/</code>：<code>package.scala</code>、<code>VectorDistances.scala</code>、<code>MilvusFunctions.scala</code></td><td><code>DistanceFunction(name, metric, ascending)</code> 实现 <code>UnboundFunction</code>，<code>bind</code> 校验两个参数都是数值数组（二值距离：BINARY 或 <code>ARRAY&lt;TINYINT&gt;</code>）后返回 <code>BoundDistance</code>（<code>ScalarFunction[Double]</code>，<code>canonicalName = milvus.system.&lt;name&gt;</code>，null 或长度不等返回 null）；<code>KnnFunction</code> 四参数，<code>produceResult</code> 抛错；<code>MilvusFunctions.sessionRegistrations</code> 给 <code>injectFunction</code>，builder 按参数类型 bind 后包成 <code>ApplyFunctionExpression</code>；V8 的算法从 apps 搬来</td></tr>
+<tr><td>新 <code>spark-base/…/read/PushedSearch.scala</code></td><td><code>recognize(orders, limit, schema, snapshot, options, predicate): Either[String, PushedSearch]</code>，判定顺序见下表；<code>PushedSearch</code> 携带列名、字段 id、<code>VectorLayout</code>、nullable、打包后的查询字节、K、metric、mode、参数、allowUnindexed、<code>SearchLimits</code> 与 <code>predicate</code>，可序列化</td></tr>
+<tr><td><code>read/MilvusInputPartition.scala</code></td><td>加 <code>MilvusSearchInputPartition(set: Seq[MilvusInputPartition], search: PushedSearch)</code>；不继承 <code>MilvusInputPartition</code>，工厂按类型分派</td></tr>
+<tr><td><code>read/MilvusScanBuilder.scala</code></td><td>混入 <code>SupportsPushDownTopN</code>；<code>pushTopN</code> 调 <code>recognize</code>：<code>Right</code> 记 <code>pushedSearch</code> 与 <code>pushedLimit</code> 返回 true，<code>Left</code> 记 <code>declinedSearch</code> 返回 false；<code>isPartiallyPushed</code> 保持 true；<code>build()</code> 把两者交给 <code>MilvusScan</code></td></tr>
+<tr><td><code>read/MilvusScan.scala</code></td><td>新参数 <code>pushedSearch</code>、<code>declinedSearch</code>；有搜索时 <code>inputPartitions</code> 用 <code>SearchPlan.segmentSets(tasks, layout, defaultParallelism, vectorsMaxBytes)</code> 分组包成搜索分区，<code>statisticsFor</code> 报每组 min(K, 组行数) 之和，<code>columnarSupportMode</code> 为 UNSUPPORTED，<code>createReaderFactory</code> 带上搜索与累加器</td></tr>
+<tr><td><code>read/MilvusPartitionReaderFactory.scala</code>、新 <code>read/MilvusSearchPartitionReader.scala</code></td><td>工厂对搜索分区只给行 reader。reader 在第一次 <code>next()</code> 时：<code>SegmentSetSearch.run(set, spec, Iterator(单查询组), 1, metrics)</code> 得到至多 K 个候选，按段 <code>SearchTake.take</code> 取数据列，<code>_segment_id</code>、<code>_row_offset</code> 从候选取，<code>_timestamp</code> 是存储字段随数据列读；候选按合并器给出的顺序输出</td></tr>
+<tr><td><code>read/SegmentSetSearch.scala</code>、<code>read/SearchTake.scala</code>、<code>read/package.scala</code></td><td><code>Spec.predicate</code> 传给 <code>RowExclusions.of</code>；<code>take</code> 可见性；包说明加 <code>PushedSearch</code> 与新 reader</td></tr>
+<tr><td><code>catalog/MilvusCatalogBase.scala</code> 及四条线的 <code>catalog/package.scala</code></td><td>混入 <code>FunctionCatalog</code>：<code>listFunctions(Array("system"))</code> 列六个，其他命名空间按 database 存在与否返回空或 <code>NoSuchNamespaceException</code>；<code>loadFunction</code> 只认 <code>system</code> 下的六个名字，否则 <code>NoSuchFunctionException(ident)</code>；包说明加 V8</td></tr>
+<tr><td><code>extensions/MilvusSparkSessionExtensions.scala</code>、新 <code>extensions/VectorSearchStrategy.scala</code></td><td>注册六个函数；策略对 <code>GlobalLimit/LocalLimit</code> 之下、排序键含 <code>ApplyFunctionExpression(BoundDistance, …)</code> 的 <code>Sort</code>，穿过 <code>Project</code> 找到 <code>DataSourceV2ScanRelation</code> 且 <code>scan</code> 是没有 <code>pushedSearch</code> 的 <code>MilvusScan</code> 时抛错，理由取 <code>declinedSearch</code>，否则报中间的 <code>Filter</code> 条件；其他形状返回 <code>Nil</code></td></tr>
+<tr><td><code>docs/reference-en.md</code>、<code>docs/reference-cn.md</code>、<code>modules.md</code> 包表、<code>capabilities.md</code></td><td>三个 option 与六个函数的条目，两种写法各一例；包表加 <code>functions</code> 行；V5、V7、V8 的用户入口与实现位置随之改写，第 10 节的 TopN 例外</td></tr>
+</tbody></table></div>
+<p><code>pushTopN</code> 的判定顺序。前四项不满足时返回 false 并记下理由，交给策略在有 <code>Limit</code> 时报出；后四项是用户写错了查询，直接抛错：</p>
+<div class="table"><table>
+<thead><tr><th>判定</th><th>不满足时</th></tr></thead><tbody>
+<tr><td>恰有一个排序键</td><td>false：「N 个排序键」</td></tr>
+<tr><td>排序键是 <code>UserDefinedScalarFunc</code> 且 <code>canonicalName</code> 在 <code>MilvusFunctions.distanceByCanonicalName</code> 里</td><td>false：「排序键不是 Milvus 距离函数」</td></tr>
+<tr><td>两个参数一个是本表向量列的 <code>FieldReference</code>、一个是 <code>LiteralValue</code>（顺序不限）</td><td>false：「参数不是向量列加字面量」</td></tr>
+<tr><td>方向与函数一致：L2、HAMMING、JACCARD 升序，IP、COSINE 降序</td><td>false：「方向与 metric 不符」</td></tr>
+<tr><td>该列是向量字段，<code>VectorLayout.of</code> 能给出布局</td><td>抛错</td></tr>
+<tr><td>metric 在 <code>SegmentIndexHandle.metricsOf(layout)</code> 里（二值向量只有 HAMMING、JACCARD）</td><td>抛错</td></tr>
+<tr><td>字面量按布局转成查询行：浮点布局接受 <code>ARRAY&lt;FLOAT&gt;</code> 与 <code>ARRAY&lt;DOUBLE&gt;</code>，Int8 接受整数数组且值在 −128 到 127，二值接受 BINARY；经 <code>SearchQueries.pack</code> 校验维度、有限值与 COSINE 非零范数</td><td>抛错（<code>pack</code> 的信息）</td></tr>
+<tr><td>mode 为 index 时 <code>SegmentIndexHandle.check</code> 全部通过</td><td>抛错（列出所有不满足的段）</td></tr>
+</tbody></table></div>
+<p>第一步的测试：<code>MilvusFunctionsTest</code>（bind 的类型校验、五个函数的值、null 与长度不等、<code>knn</code> 求值抛错、catalog 的 <code>listFunctions</code>/<code>loadFunction</code>）；<code>PushedSearchTest</code>（用 <code>MilvusScanClientSnapshotTest</code> 的向量快照 fixture 构造 <code>MilvusScanBuilder</code>，逐条覆盖上表，含 V2 段 <code>indexes</code> 为 <code>Available</code>、<code>Unindexed</code>、<code>Unknown</code> 三种，以及先 <code>pushPredicates</code> 再 <code>pushTopN</code> 时 <code>predicate</code> 随搜索携带）；<code>VectorSearchPlanTest</code>（本地 <code>SparkSession</code> 装上扩展，<code>format("milvus")</code> 读 option 串快照，<code>orderBy(call_function(...)).limit(3)</code> 的 <code>optimizedPlan</code> 里 <code>MilvusScan.pushedSearch</code> 非空；带 UDF 过滤时策略抛错并点出谓词；<code>spark.sql</code> 用 <code>l2_distance(array(...), array(...))</code> 直接求值）。执行期用例在 UAT 跑：在 <code>VectorSearchUatTest</code> 里加一个用例，同一查询分别走 <code>orderBy.limit</code> 与 <code>MilvusSearch.search</code>，比较 <code>_segment_id</code> 与 <code>_row_offset</code> 集合相等。</p>
+<p><strong>第二步：查询集 join。</strong>策略匹配 <code>Join(left, right, Inner, Some(cond), _)</code>，其中一侧（穿过 <code>Project</code>）是 <code>DataSourceV2ScanRelation</code> 且 <code>scan</code> 是 <code>MilvusScan</code>，<code>cond</code> 是且仅是 <code>ApplyFunctionExpression(BoundKnn, Seq(向量列, 查询列, k 字面量, metric 字面量))</code>，向量列属于 Milvus 侧、查询列属于另一侧。物理算子 <code>VectorSearchExec(queries: SparkPlan, scan: MilvusScan, knn, output)</code> 的 <code>doExecute</code> 是 <code>MilvusSearch.search</code> 的主体搬过来，第二阶段回表后按 <code>query_id</code> 与查询侧原行 join 一次把查询列带回结果。这一步结束后 <code>MilvusSearch.search</code> 不再有独有的功能。</p>
+<p><strong>第三步：删除。</strong>按「移除是设计工作」提清单等确认：<code>spark.read.MilvusSearch</code> 与其测试、apps 的 V8 表达式与 <code>VectorSearchExtensions</code>、中英文 reference 里 <code>MilvusSearch.search</code> 的章节，以及本页状态行与 1.1。删除前核对 zilliz-cloud 的 spark-data-service 与 milvus-spark-demo 是否引用。</p>
+<p><strong>动手前要负责人定的几点。</strong></p>
+<ol>
+<li>单条查询的形状不另出 <code>_score</code> 列，分数由用户 select 函数值得到；查询集的形状输出 <code>_score</code>。</li>
+<li>没有 <code>Limit</code> 的距离排序不报错、由 Spark 全排序。</li>
+<li>会话注册的函数与 apps V8 同名；两个扩展同时配置时后注册者生效，还是第一步就删 apps 的注册。</li>
+<li>第一步落地后 <code>MilvusSearch.search</code> 是否立刻标记 deprecated 并在 reference 里指向新写法。</li>
+</ol>
 
 <h2 id="simplicity">三、简洁性带来的好处</h2>
 <ol>
@@ -591,7 +720,7 @@ Knowhere 在部分 K 与过滤比例下会在索引内部改用暴力搜索（<a
 <li><strong>一次扫描服务整组查询。</strong>每批向量一次调用算完整组查询，读取和解码的成本与查询条数无关。</li>
 <li><strong>跨任务只传最小候选。</strong>第一阶段每条候选 24 字节，任务内先合并，shuffle 量随段组数增长，与段数无关；输出列只为最终每条查询的 K 行回表，回表量是「查询数 × K」行。</li>
 <li><strong>结果与 Milvus 口径一致。</strong>距离计算与索引搜索都由 Knowhere 完成，分数与 Milvus 相同；行号与索引 label 相同，外表的虚拟主键可以直接对账。</li>
-<li><strong>精确结果直接做基准。</strong>同一查询集分别跑 exact 与 index，按段 id 与行号比较，得到召回率。</li>
+<li><strong>精确结果直接做基准。</strong>同一查询集分别跑 exact 与 index，结果里的 <code>_segment_id</code> 与 <code>_row_offset</code> 就是行身份，调用方 join 一次得到召回率，连接器不为此另出作业。</li>
 <li><strong>向量不逐行拷贝。</strong>满足布局条件的批，数据缓冲原样交给 Knowhere，JVM 不物化向量。</li>
 <li><strong>失败直接可见。</strong>缺索引、格式不受支持、文件出错都报错，结果行数只在有效行不足时少于 K。</li>
 <li><strong>建索引、索引搜索、精确扫描互相验证。</strong>建好的索引由同一个加载器读回，再与精确扫描比较。</li>

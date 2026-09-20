@@ -234,7 +234,7 @@ private[read] object SegmentSetSearch extends Logging {
         val handle = SegmentIndexHandle.open(
           task,
           descriptor,
-          spec.layout.dimension,
+          spec.layout,
           spec.nullable
         )
         metrics.indexBytes.add(handle.bytes)

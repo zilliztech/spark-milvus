@@ -33,9 +33,13 @@ BinaryVector 用 `BINARY`。另有一个以 `queryVector: Array[Float]` 代替�
 返回值；包含向量量化的索引（如 Cardinal 的 RBQ）可能返回近似分数，Connector 不读
 原始向量重算。
 
-`mode = "index"` 用快照钉住的持久化索引，范围是非 nullable FloatVector 加
-L2、IP、COSINE，查询 metric 要与索引一致；`mode = "exact"` 逐条算距离，支持全部稠密
-向量类型，二值向量用 HAMMING 或 JACCARD。
+`mode = "index"` 用快照钉住的持久化索引，能加载 HNSW 家族（`HNSW`、`HNSW_SQ`、
+`HNSW_PQ`、`HNSW_PRQ`，含 Cardinal 构建写出的 HNSW）、IVF 家族（`IVF_FLAT`、
+`IVF_SQ8`、`IVF_PQ`、`BIN_IVF_FLAT`）以及 `FLAT`、`BIN_FLAT`，元素类型随列，查询
+metric 要与索引一致。nullable 列只对有值的行建索引，索引文件里的 `valid_data` 位图
+给出行号对应关系，没有这份位图时报错。DiskANN、稀疏索引、GPU 索引和加密索引在规划时
+报错。`mode = "exact"` 逐条算距离，支持全部稠密向量类型，二值向量用 HAMMING 或
+JACCARD。
 
 `filter` 在搜索前应用。支持标量比较（`==`、`!=`、`<`、`<=`、`>`、`>=`）、
 `in`、`not in`、`is null`、`is not null`、`and`、`or`、`not` 和括号。
@@ -45,7 +49,8 @@ L2、IP、COSINE，查询 metric 要与索引一致；`mode = "exact"` 逐条算
 缺失索引元数据、索引的 metric 或行数与段不符，在规划时报错并列出所有这样的段；
 损坏文件、格式不兼容在任务加载索引时报错。只有快照明确表示该字段在这个段上没有索引
 时，`allowUnindexed = true` 才让这个段改用精确扫描，默认 `false`。索引由每个任务
-独占并关闭，不跨任务缓存。搜索参数只支持整数 `ef`，且不得小于 K。加密索引和
+独占并关闭，不跨任务缓存。搜索参数按索引家族给：HNSW 家族用整数 `ef`，不得小于 K，默认 `max(64, K)`；IVF 家族
+用正整数 `nprobe`，默认 16；FLAT 不接受参数。加密索引和
 nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用 Cardinal 的固定
 版本原生产物，见[构建说明](contributing.md#knowhere-library-loading)。
 
@@ -541,6 +546,51 @@ CALL milvus.system.register('your_db.your_collection',
 值只能是常量。结果是一张表，每段一行：`job_id`、`segment_id`、`manifest_version`、`status`（`registered`，
 作业此前已登记过则是 `already_registered`）。过程名不存在、缺参数、多参数、类型不对，都在解析时拒绝并列出参数表。
 不以 `CALL milvus.` 开头的语句不受影响，扩展可以常开。Spark 3.5 和 4.x 行为一样。
+
+建向量索引也走同一个前端：
+
+```sql
+CALL milvus.system.build_index('your_db.your_collection',
+  field            => 'embedding',
+  output           => 'files/built-index',
+  index_type       => 'HNSW',
+  metric           => 'COSINE',
+  params           => 'M=16,efConstruction=200',
+  `milvus.snapshot.path` => 'https://.../metadata/4691.json',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+它按 option 选中的固定快照规划，每段一个 Spark 任务读回向量列建索引，按 Milvus 的命名把索引对象写到
+`output` 前缀下，并在 `output/staging/<job>/manifest.json` 记录每段的索引。`index_type` 默认 `HNSW`、
+`metric` 默认 `COSINE`，`params` 是 `name=value` 列表；`build_id`、`index_version`、`store_path_version`
+可选，默认分别是当前毫秒、1、0。结果每段一行：`segment_id`、`partition_id`、`row_count`、`objects`、
+`bytes`、`build_id`、`job_id`。
+
+再调一次写出描述这批索引的快照：
+
+```sql
+CALL milvus.system.write_snapshot('your_db.your_collection',
+  job              => 'index-1789478390101',
+  input            => 'files/built-index',
+  `milvus.snapshot.path` => 'https://.../metadata/4691.json',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+段来自 option 选中的快照，也就是 `build_index` 规划的那一份；索引记录来自 `input` 下那个作业的清单。
+它在 `output/snapshots/<collection>/` 下写出每段一个 Avro 清单和一份快照 JSON，`output` 不给时用 `input`；
+`snapshot_id` 默认当前毫秒，`snapshot_name` 默认 `<collection>-<snapshot_id>`。结果一行：`snapshot`（快照 JSON 的 key）、
+`snapshot_id`、`snapshot_name`、`segments`、`indexes`、`bytes`。写出的快照就是源快照加上这次作业的索引：文档和每段的 Avro 清单都取源快照的字节，只替换索引登记，
+段和 collection 的其余部分不由连接器重述。
+
+两个读者都验过。本连接器用 `milvus.snapshot.path` 读得回来；Milvus v3.0.2 的 `RestoreExternalSnapshot`
+能恢复它，索引随之而来——恢复出的 collection 报告索引已建好，加载和搜索都不再重建。
+该恢复要求快照里的所有路径都在元数据 URI 推出的根之下，所以 `output` 必须是数据文件已经所在的前缀：
+为已有 collection 建索引时就是实例自己的根，`build_index` 也要写在那里。
+从连接器这一侧发起恢复尚未实现，上面的恢复是直接对 Milvus 调的。段必须是 storage version 3 且带行数，V2 段直接报错，不按猜测写出。
 
 ### 3.4 用 `CALL` 管理 Milvus
 

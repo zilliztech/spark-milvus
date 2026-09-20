@@ -284,6 +284,69 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     deltaStrings shouldBe Seq("7", "9")
   }
 
+  /** Milvus v3.0.2 writes format version 5: one boolean more, `is_sorted` and
+    * `commit_timestamp` then `manifest_has_index`, before the binlog arrays.
+    * Avro is positional, so a version read with the wrong schema is not a
+    * slightly wrong record, it is a parse error — which is how a real UAT
+    * snapshot from that version showed this version was missing.
+    */
+  test("a version 5 record decodes, and says where its index is registered") {
+    val withFiles = SegmentManifestReader
+      .parse(
+        SegmentManifestFixture.encode(
+          version = 5,
+          segmentId = 77L,
+          rows = 4L,
+          indexes = Vector(SegmentManifestFixture.index(77L, 4L))
+        ),
+        manifestSchemaVersion = 5
+      )
+      .toOption
+      .get
+    withFiles.segmentId shouldBe 77L
+    withFiles.numOfRows shouldBe 4L
+    withFiles.indexFiles.map(_.size) shouldBe Some(1)
+    withFiles.manifestHasIndex shouldBe Some(false)
+
+    val inManifest = SegmentManifestReader
+      .parse(
+        SegmentManifestFixture.encode(
+          version = 5,
+          segmentId = 78L,
+          rows = 4L,
+          manifestHasIndex = true
+        ),
+        manifestSchemaVersion = 5
+      )
+      .toOption
+      .get
+    inManifest.manifestHasIndex shouldBe Some(true)
+    inManifest.indexFiles shouldBe Some(Vector.empty)
+
+    // A version 4 record says nothing about it, which is not an explicit false.
+    SegmentManifestReader
+      .parse(
+        SegmentManifestFixture.encode(version = 4, segmentId = 79L),
+        manifestSchemaVersion = 4
+      )
+      .toOption
+      .get
+      .manifestHasIndex shouldBe None
+
+    // Read with the wrong schema, everything after the new field lands in the
+    // wrong place: the boolean is taken for the first array's block count.
+    val mismatched = SegmentManifestReader.parse(
+      SegmentManifestFixture.encode(
+        version = 5,
+        segmentId = 80L,
+        rows = 4L,
+        indexes = Vector(SegmentManifestFixture.index(80L, 4L))
+      ),
+      manifestSchemaVersion = 4
+    )
+    mismatched.toOption.flatMap(_.indexFiles).map(_.size) should not be Some(1)
+  }
+
   test("toSegment fails when group count disagrees with AVRO") {
     val entry = SegmentManifestReader.parse(avroBytes).toOption.get
     // AVRO has 3 binlog groups; feed a 2-group list.

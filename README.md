@@ -88,7 +88,7 @@ you need to answer: architecture or engineering conventions.
 | [docs/design/architecture/modules.md](docs/design/architecture/modules.md) | Modules, packages, directories, the twelve build constraints, and the 1.x to 2.0 migration table |
 | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) | The illustrated version of the design |
 | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) | Catalog discovery, three-part tables, CREATE/DROP properties, and fixed-snapshot loading |
-| [docs/design/engineering/sbt.html](docs/design/engineering/sbt.html) | Principles and practices for maintaining the sbt build |
+| [docs/design/engineering/build.html](docs/design/engineering/build.html), [build.md](docs/design/engineering/build.md) | The native libraries in three layers, the toolchain versions for Linux and macOS, the two ways to build the per-platform native bundle (Docker or local), and the directory design of the build definition, work directory and bundle JAR |
 
 `docs/reference-en.md` is the user-facing API reference for the connector
 options and entry points. [docs/contributing.md](docs/contributing.md) covers
@@ -151,6 +151,11 @@ alias spark-submit-wrapper="/xxx/spark-submit-wrapper.sh"
 
 ## Building
 
+The native libraries, the toolchain versions and the two ways to build the
+native bundle are described in
+[docs/design/engineering/build.md](docs/design/engineering/build.md)
+(same content as [build.html](docs/design/engineering/build.html)).
+
 Knowhere library loading uses the Java API and JNI from pinned PR #1829.
 The API builds automatically; the native platform JAR is selected explicitly.
 See [Knowhere library loading](docs/contributing.md#knowhere-library-loading)
@@ -162,6 +167,13 @@ sbt assembly                             # fat jar with every dependency
 sbt test                                 # unit tests, all modules
 sbt integration40/test                   # integration tests, needs Milvus and MinIO
 ```
+
+The fat jar only loads Milvus segments when it carries the native
+`milvus-storage` libraries for the platform it runs on. `make package` builds
+and bundles them; on Linux x86_64 that is the unified Storage/Knowhere bundle,
+on Linux aarch64 and macOS (Apple Silicon) the storage-only build. The macOS
+toolchain and the Conan fix-ups it needs are in
+[contributing.md](docs/contributing.md#macos-apple-silicon).
 
 `sbt compile` builds all twelve modules. To work on one, prefix the command with
 its project id: `core/test`, `spark40/compile`, `apps40/test`. The ids drop the
@@ -175,14 +187,21 @@ retains the existing storage-only build, or accepts a matching prebuilt unified
 JAR and its `.properties` sidecar through `NATIVE_BUNDLE`.
 
 ```bash
-docker build -t spark-milvus .                                  # current architecture
-docker build --build-arg PUBLISH_TO_CENTRAL=false -t spark-milvus .
+docker build --build-arg PUBLISH_MAVEN=false -t spark-milvus .  # current architecture
+
+# Trusted publication: BuildKit exposes the credential only to the publish RUN.
+docker build \
+  --secret id=maven_credentials,src=/path/to/sbt-credentials \
+  --build-arg PUBLISH_MAVEN=true \
+  -t spark-milvus .
 ```
 
 | Build argument | Default | Meaning |
 |---|---|---|
 | `GIT_BRANCH` | `unknown` | Goes into the version string |
 | `PUBLISH_TO_CENTRAL` | `true` | Whether to publish to Maven Central Snapshots |
+| `PUBLISH_MAVEN` | unset | Repository-neutral publication override used by trusted CI |
+| `MAVEN_CREDENTIALS_FILE` | `/run/secrets/maven_credentials` | In-build path of the BuildKit `maven_credentials` secret |
 | `NATIVE_BUNDLE` | empty | Prebuilt unified Linux JAR inside the build context, with its checksum sidecar |
 | `NATIVE_JOBS` | `50` | Native build concurrency, from 1 to 50 |
 | `NATIVE_BUILD_OPTIONS` | empty | Unified source build options, including `--conan-lock` and `--with-cardinal` |

@@ -1,8 +1,9 @@
 # Spark-Milvus integration test chart
 
-This chart runs the `integration-4.0` test project in one Kubernetes `Job`.
-Spark stays in `local[*]` mode inside the Pod. The chart does not install
-Milvus, object storage, credentials, RBAC, or a Spark operator.
+This chart runs an integration-test executable supplied by the selected image
+in one Kubernetes `Job`. The chart does not prescribe the test framework or
+where the suite is maintained, and it does not install Milvus, object storage,
+credentials, RBAC, or a Spark operator.
 
 ## Required inputs
 
@@ -14,12 +15,12 @@ Milvus, object storage, credentials, RBAC, or a Spark operator.
 - One existing Secret containing the Milvus token and one existing Secret
   containing the object-storage access key and secret key.
 
-The runner executable must execute the full `integration40/test` task, return
-its exit code, and consume the environment variables rendered by
-`templates/job.yaml`. The current release image does not satisfy this contract:
-it contains only the Connector assembly. The existing integration suites also
-need to be changed to read these environment variables instead of their local
-MinIO defaults before this chart can run end to end.
+The image owns the runner executable. It must consume the environment variables
+rendered by `templates/job.yaml`, run bounded integration checks, and return a
+nonzero exit code when a check fails. A deployment-specific image may implement
+the executable with a suite maintained outside this public repository. The
+current public release image contains only the Connector assembly and does not
+provide the executable, so it cannot be used with this chart as-is.
 
 `objectStorage.rootPath` is the target Milvus deployment's storage root. It is
 not scoped to one CI run. Test-owned output uses
@@ -53,6 +54,13 @@ helm template spark-milvus-it deploy/helm/spark-milvus-integration \
   --values /path/to/ci-values.yaml
 ```
 
+Run the lifecycle shell tests separately; they use local `helm` and `kubectl`
+fakes and do not contact a cluster:
+
+```bash
+deploy/helm/spark-milvus-integration/tests/run-test.sh
+```
+
 Empty image, endpoint, bucket, or Secret references fail schema validation.
 
 ## Run in CI
@@ -71,9 +79,12 @@ CI_RUN_ID="${CI_RUN_ID}" \
 ```
 
 The script lints the chart, verifies the namespace and release name, installs
-without `--atomic`, and watches both successful and failed Job conditions,
-collects Helm status, logs, descriptions, and events under
-`target/integration-helm/<release>/`, and then uninstalls the release. Set
+without `--atomic`, and watches both successful and failed Job conditions. It
+also fails immediately when a Pod reports `ErrImagePull`, `ImagePullBackOff`,
+`ErrImageNeverPull`, `InvalidImageName`, `CreateContainerConfigError`,
+`RunContainerError`, or an `Unschedulable` scheduling condition. It collects
+Helm status, logs, descriptions, and events
+under `target/integration-helm/<release>/`, and then uninstalls the release. Set
 `KEEP_RESOURCES=true` only when a failed run must remain for investigation.
 `JOB_WAIT_TIMEOUT_SECONDS` defaults to `3900`, slightly longer than the Job's
 one-hour deadline. Kubernetes API calls use a bounded request timeout, and Helm

@@ -73,7 +73,7 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；native-storage、core、
 | `com.zilliz.milvus.jni.runtime` | NativeLibraries 校验唯一平台资源清单、全库摘要并解压一次，返回入口路径；不调用 System.load；V1 |
 | `com.zilliz.milvus.jni.storage` | NativeStorageLibrary 从 native-runtime 取得 storage JNI 绝对路径，通过 `milvus.storage.native.path` 交给上游加载器；R4 |
 
-两个绑定都依赖 native-runtime，互相不依赖。统一包选择与旧资源排除见[原生构建与加载](../engineering/native-libraries.html)。storage 的 API 仍来自上游 `io.milvus.storage`。
+两个绑定都依赖 native-runtime，互相不依赖。统一包选择与旧资源排除见 [native-build/README.md](../../../native-build/README.md)。storage 的 API 仍来自上游 `io.milvus.storage`。
 
 | 来源 | 职责 |
 |---|---|
@@ -100,7 +100,7 @@ C 接口、JNI native 方法、`io.knowhere` Java API 和原生资源加载器�
 本模块以 Java 11 编译，不依赖 Spark 或 Arrow，不重复定义 native 方法、提取器或 C++ shim。
 `src/main/cpp/README.md` 记录原生代码的上游归属，Connector 中不保留第二份实现。
 exact 模式经 core.index.ExactScan 调用上游 BruteForce，一次调用算一批向量对整组查询。建索引（W6）调用同一上游的 build 与 serialize；搜索和建索引线程池的大小等上游接口开放后在本模块设置。索引入口经 NativeVectorIndex 调用同一上游的 BinarySet、deserialize、search；不新增 Knowhere JNI。文件格式在 core 解释，Cardinal stream 要求经过特性校验的 WITH_CARDINAL 构建。
-Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 BinarySet key 分开。统一平台包的 provenance 生成 `META-INF/milvus/knowhere-runtime.properties`，并由 native-runtime 校验两个 JNI、全部依赖、别名和摘要后一次解压；`storage-compatibility*.properties` 只属于迁移前的独立产物组合，统一包不再据它复制或覆盖库。旧 gitlink、旧自有 Conan recipe 实现的 Cardinal 组合曾通过真实 HNSW/COSINE 查询；当前构建使用固定上游 recipe revision 与 CMake 显式链接，子模块 revision 尚待重建，结果及验收边界见 [原生构建验收](../engineering/native-libraries.html#validation) 以及 [向量搜索第 2.9 节](vector-search.html#interop)。
+Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 BinarySet key 分开。统一平台包的 provenance 生成 `META-INF/milvus/knowhere-runtime.properties`，并由 native-runtime 校验两个 JNI、全部依赖、别名和摘要后一次解压；`storage-compatibility*.properties` 只属于迁移前的独立产物组合，统一包不再据它复制或覆盖库。旧 gitlink、旧自有 Conan recipe 实现的 Cardinal 组合曾通过真实 HNSW/COSINE 查询；当前构建使用固定上游 recipe revision 与 CMake 显式链接，子模块 revision 尚待重建，结果及验收边界见 [native-build/README.md](../../../native-build/README.md) 以及 [向量搜索第 2.9 节](vector-search.html#interop)。
 绑定本身的接口、内存所有权、与核心和 Connector 的能力对照以及线程模型见 [Knowhere JNI 实现方案](knowhere-jni.html)。
 
 ### 2.5 client `com.zilliz.milvus.client`
@@ -123,7 +123,7 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 | `metrics` | core 的 ReadMetrics / WriteMetrics 翻成 DataSource V2 的 CustomMetric / CustomTaskMetric，读写各一张清单；G5 | 否 |
 | `options` | option 名、别名、校验；ReadMode；按 ReadMode 构造这次读的 SnapshotSource（SnapshotSources，含 ClientSnapshotSource、OptionStringsSnapshotSource，把 compat 的 backup 实现和 V2 footer 解析器接进 core）；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageKeys） | 否 |
 | `sources` | 只有 MilvusDataSource，`format("milvus")` 的 TableProvider。留在这个包名下是因为 apps 和用户作业按字符串引用它的全名 | 否 |
-| `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、静态注册表、共用的 collection/client/有界等待规则；已实现快照、索引、load/release/flush/compact、describe、backfill `Register`，以及 A7 的 `CleanupStagingProcedure`；节点和策略在 `extensions`，append 登记与完整目录删除尚未实现；`build_index`（W6，另起 Spark 作业建索引）与 `restore_snapshot`（W8）待实现 | 否 |
+| `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、静态注册表、共用的 collection/client/有界等待规则；已实现快照、索引、load/release/flush/compact、describe、backfill `Register`，以及 A7 的 `CleanupStagingProcedure`；节点和策略在 `extensions`，append 登记与完整目录删除尚未实现；`build_index`（W6）另起 Spark 作业建索引，`write_snapshot`（W8 的写文件一半）写出快照，`restore_snapshot`（恢复）待实现 | 否 |
 | `extensions` | SparkSessionExtensions、`CALL milvus.system.<name>(...)` 的解析器扩展、CallProcedure 节点与策略；文法 `spark-base/src/main/antlr4/MilvusCall.g4` 一份，设计见 procedure.html | antlr 生成的解析器按线（本线 antlr 版本），`MilvusSqlParser` 适配器按线（4.0 起多 `parseRoutineParam`）；其余共享 |
 
 按线的还有 `META-INF/services` 资源。
@@ -139,7 +139,7 @@ CALL 走语法扩展，不走 `ProcedureCatalog`：后者是 Spark 4.0 才有的
 | 包 | 内容 |
 |---|---|
 | `backfill` | BackfillApp、配置、join 键、列映射、merge 模式、结果 JSON |
-| `search` | SQL 向量函数及其 SessionExtensions（V8）；精确 KNN 基准与召回评测作业（O3，待实现） |
+| `search` | SQL 向量函数及其 SessionExtensions（V8） |
 
 两个包互不依赖，各自是独立入口。`format("milvus")` 的短名归 apps 之后，只有加载 apps jar 才能用旧写法；三段名 `milvus.db.coll` 不需要 apps。
 
@@ -198,13 +198,13 @@ spark-milvus/
 13. 第 2 层不用 Spark 的 Logging，用 core 的 `com.zilliz.milvus.storage.Logging`（slf4j，provided）。约束 1 的扫描会先去掉注释，注释里提 org.apache.spark 是合法的。
 14. core 读写存储只经 `io.ObjectStore`，源码里不出现 `org.apache.hadoop`。唯一实现是 `io.NativeObjectStore`，走 C 的 `loon_filesystem_*`；`io.hadoop` 已删除。`hadoop-common` 仍在 core 的编译依赖里，但不是给我们的代码用的——parquet-mr 的 `ParquetReader.Builder` 签名里有 `org.apache.hadoop.fs.Path`，类得在编译类路径上。测试复用 core 测试源码里的 `LocalObjectStore` 和 `FailingObjectStore`，不需要原生库；compat 与 spark40 通过 `test->test` 依赖取得这些测试实现，其他 Spark 线及生产依赖不受影响。executor 上拿到的是可序列化的 `ObjectStoreFactory`（一组配置字符串），不是活的 `Configuration`。
 15. milvus-proto 的生成分两处：不带 service 的 `common.proto`、`schema.proto` 在 core 生成（`grpc = false`），带 service 的五个在 client 生成（`grpc = true`），靠 include 路径引用 core 的产物，同一份 .proto 不生成两遍。core 用得上它们，是因为 Milvus 的存储格式本身由 protobuf 定义：快照里嵌着 CollectionSchema，Manifest 的字段描述来自 schema.proto，core 不另建一套 schema 模型。
-16. 统一原生包的平台、源码 pin 和每个库摘要必须匹配，两个 JNI 及其依赖按[原生构建设计](../engineering/native-libraries.html#validation)通过重定位检查；由 `NativeBundle.validate` 执行。选择统一包时不允许混入旧 storage/Knowhere 原生资源；包内禁止重复携带系统 zlib。assembly 对原生资源使用流式摘要与长度比较，拒绝同路径的不同内容，不把整个动态库读入堆。
+16. 统一原生包的平台、源码 pin 和每个库摘要必须匹配，两个 JNI 及其依赖按 [native-build/README.md](../../../native-build/README.md) 通过 JVM 加载检查；由 `NativeBundle.validate` 执行。选择统一包时不允许混入旧 storage/Knowhere 原生资源；包内禁止重复携带系统 zlib。assembly 对原生资源使用流式摘要与长度比较，拒绝同路径的不同内容，不把整个动态库读入堆。
 
 补充（2026-09-14）：`checkCapabilityIndex` 只从 `package.scala` 的 `Capabilities: …（see docs/design/capabilities.md）` 这一句里读编号，正文里的「Storage V2」「DataSource V2」不再算认领；一个只有 `package.scala` 的目录不能认领任何编号，编号必须写进 capabilities.md 第 11 节直到代码落地。
 
 ## 5 1.x 到 2.0 的迁移对照
 
-2026-09-17 原生依赖迁移的构建与验证曾以 storage `5689301`、Knowhere `9dc2b8ad` 完成：native-runtime 供两个绑定共享解压；选择统一平台包时旧 storage/Knowhere 原生资源不参与 classpath。该旧构建实现使用固定上游 Conan recipe 和四份自有 recipe，Cardinal 包通过原生测试、完整动态库审计、三种 JVM 加载顺序、根测试、assembly 及真实十万行持久化索引查询。当前 gitlink 为 storage `7eb13578`、Knowhere `1fff20db`，构建改用 `native-build/dependencies.json` 固定全部上游 recipe revision，并在独立 CMake 中显式声明集成链接关系；旧结果只作为历史，新组合尚未重建。构建约束见第 4 节第 16 条及[独立 CMake 构建方案](../engineering/native-libraries.html)。
+2026-09-17 原生依赖迁移的构建与验证曾以 storage `5689301`、Knowhere `9dc2b8ad` 完成：native-runtime 供两个绑定共享解压；选择统一平台包时旧 storage/Knowhere 原生资源不参与 classpath。该旧构建实现使用固定上游 Conan recipe 和四份自有 recipe，Cardinal 包通过原生测试、完整动态库审计、三种 JVM 加载顺序、根测试、assembly 及真实十万行持久化索引查询。当前 gitlink 为 storage `7eb13578`、Knowhere `1fff20db`，构建改用 `native-build/dependencies.json` 固定全部上游 recipe revision，并在独立 CMake 中显式声明集成链接关系；旧结果只作为历史，新组合尚未重建。构建约束见第 4 节第 16 条及[独立 CMake 构建方案](../engineering/build.html)。
 
 41 个 1.x 源文件已经全部离开 `src/`，该目录不再存在。该迁移步骤只做归属，不改语义：
 文件搬到它该在的模块，包名跟目录对齐，调用点直接改指新位置，不留转发壳子。

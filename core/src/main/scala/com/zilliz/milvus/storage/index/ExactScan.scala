@@ -67,7 +67,7 @@ object ExactScan {
     require(Candidate.metricRanks(metric), s"Unsupported metric: $metric")
     if (current.visibleRows <= 0) return
     val parameters = s"""{"metric_type":"$metric"}"""
-    val dtype = KnowhereBuffers.dtypeOf(queries.layout)
+    val dtype = queries.layout.dtype
     val count = math.min(k, current.visibleRows)
     val ids = allocator.buffer(queries.queries.toLong * count * 8L)
     val scores = allocator.buffer(queries.queries.toLong * count * 4L)

@@ -52,6 +52,8 @@ object Procedures {
   val Namespace: Seq[String] = Seq("milvus", "system")
 
   val all: Seq[Procedure] = Seq(
+    BuildIndexProcedure,
+    WriteSnapshotProcedure,
     RegisterProcedure,
     CleanupStagingProcedure,
     CreateSnapshotProcedure,

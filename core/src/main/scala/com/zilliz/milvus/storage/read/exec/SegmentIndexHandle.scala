@@ -7,10 +7,12 @@ import com.zilliz.milvus.jni.vector.NativeVectorIndex
 import com.zilliz.milvus.storage.codec.{
   IndexFileCodec,
   IndexFileDecoder,
-  MilvusIndexFileDecoder
+  MilvusIndexFileDecoder,
+  VectorIndexFamilies
 }
 import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
+import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.milvus.storage.snapshot.{
   SegmentIndex,
   SegmentIndexes,
@@ -28,15 +30,25 @@ import com.zilliz.milvus.storage.snapshot.{
 final class SegmentIndexHandle private (
     private[storage] val index: NativeVectorIndex,
     val metric: String,
+    val indexType: String,
     val segmentId: Long,
     val buildId: Long,
     val bytes: Long,
-    val loadNanos: Long
+    val loadNanos: Long,
+    val mapping: IndexRowMapping
 ) extends AutoCloseable {
   private var closed = false
 
   def rows: Long = index.rows()
   def dimension: Int = index.dimension()
+
+  /** The rows of the segment this index was built from, which is more than the
+    * index holds when the column has nulls.
+    */
+  def segmentRows: Long = mapping.segmentRows
+
+  /** Which family the search parameters belong to (section 2.4). */
+  def family: String = SegmentIndexHandle.familyOf(indexType)
 
   override def close(): Unit = synchronized {
     if (!closed) {
@@ -91,6 +103,13 @@ object SegmentIndexHandle {
         descriptor.segmentId == task.segmentId && descriptor.partitionId == task.partitionId,
         s"Index identity differs from the pinned segment ${task.segmentId}"
       )
+      val indexType =
+        descriptor.indexType.map(_.toUpperCase(Locale.ROOT)).getOrElse("")
+      require(
+        Supported.contains(indexType),
+        s"Segment ${task.segmentId} carries a $indexType index; this connector loads ${Supported.toSeq.sorted
+            .mkString(", ")}"
+      )
       require(
         descriptor.metricType.exists(_.equalsIgnoreCase(metric)),
         s"Query metric differs from the persisted index metric of segment ${task.segmentId}"
@@ -135,37 +154,60 @@ object SegmentIndexHandle {
   def open(
       task: SegmentReadTask,
       index: SegmentIndex,
-      dimension: Int,
+      layout: VectorLayout,
       nullable: Boolean
   ): SegmentIndexHandle = {
     val store = NativeObjectStore.Factory(task.properties).open()
-    try open(index, dimension, nullable, store)
+    try
+      open(
+        index,
+        layout,
+        nullable,
+        task.expectedRows.getOrElse(index.rowCount),
+        store
+      )
     finally store.close()
   }
 
-  /** The range a persisted index has to be in for this connector to load it: an
-    * HNSW index over a non-nullable float vector, with a metric and a format
-    * version the snapshot states. Anything else fails here, before a file is
-    * read.
+  /** The index families this connector loads, and the family one type belongs
+    * to, both from `core.codec.VectorIndexFamilies`: what can be loaded is what
+    * the persisted format check knows the byte markers for.
+    */
+  private val Supported = VectorIndexFamilies.Supported
+
+  def familyOf(indexType: String): String =
+    VectorIndexFamilies.familyOf(indexType)
+
+  /** The metrics each element type can be searched by. */
+  def metricsOf(layout: VectorLayout): Set[String] =
+    if (layout.elementType == VectorElementType.Bit) Set("HAMMING", "JACCARD")
+    else Set("L2", "IP", "COSINE")
+
+  /** The range a persisted index has to be in for this connector to load it: a
+    * supported index type over the column's own element type, with a metric and
+    * a format version the snapshot states. A nullable column is indexed over
+    * the rows that have a value, and the index files say which those are.
+    * Anything else fails here, before a file is read.
     */
   def open(
       index: SegmentIndex,
-      dimension: Int,
+      layout: VectorLayout,
       nullable: Boolean,
+      segmentRows: Long,
       store: ObjectStore,
       decoder: IndexFileDecoder = MilvusIndexFileDecoder
   ): SegmentIndexHandle = {
+    require(index.rowCount > 0, "Index row count must be positive")
+    val indexType = index.indexType
+      .getOrElse(
+        throw new IllegalArgumentException(
+          "Index metadata is missing index_type"
+        )
+      )
+      .toUpperCase(Locale.ROOT)
     require(
-      !nullable,
-      "Persisted index search currently requires a non-nullable FloatVector"
-    )
-    require(
-      dimension > 0 && index.rowCount > 0,
-      "Index dimensions and row count must be positive"
-    )
-    require(
-      index.indexType.exists(_.equalsIgnoreCase("HNSW")),
-      "Persisted index search currently supports HNSW FloatVector indexes"
+      Supported.contains(indexType),
+      s"Persisted index search does not support $indexType; it loads ${Supported.toSeq.sorted.mkString(", ")}"
     )
     val metric = index.metricType
       .getOrElse(
@@ -174,22 +216,56 @@ object SegmentIndexHandle {
         )
       )
       .toUpperCase(Locale.ROOT)
+    val metrics = metricsOf(layout)
     require(
-      Set("L2", "IP", "COSINE").contains(metric),
-      s"Unsupported index metric: $metric"
+      metrics.contains(metric),
+      s"A ${layout.elementType} index takes ${metrics.toSeq.sorted
+          .mkString(" or ")}, not $metric"
     )
     require(
       index.currentIndexVersion.exists(_ >= 0),
       "Snapshot must declare the persisted vector index format version"
     )
-    val loaded = IndexFileCodec.load(index, dimension, store, decoder)
-    new SegmentIndexHandle(
-      loaded.index,
-      metric,
-      index.segmentId,
-      index.buildId,
-      loaded.bytes,
-      loaded.nanos
+    require(
+      segmentRows > 0,
+      s"Segment ${index.segmentId} declares $segmentRows rows"
     )
+    // A nullable column's index names its valid_data bitmap among its files, so
+    // an index that cannot say which rows it holds fails before anything is
+    // read.
+    require(
+      !nullable || index.filePaths.exists(_.endsWith("/valid_data")),
+      s"Segment ${index.segmentId} has a nullable vector column and its index files carry no valid_data bitmap"
+    )
+    val loaded = IndexFileCodec.load(index, layout, store, decoder)
+    try {
+      val mapping = loaded.validRows match {
+        case Some(bitmap) => IndexRowMapping.of(bitmap, segmentRows)
+        case None         => IndexRowMapping.identity(segmentRows)
+      }
+      require(
+        !nullable || !mapping.isIdentity,
+        s"Segment ${index.segmentId} declares a nullable vector column and no valid_data bitmap was read"
+      )
+      require(
+        mapping.rows == loaded.index.rows(),
+        s"The index holds ${loaded.index.rows()} rows and valid_data marks ${mapping.rows}"
+      )
+      new SegmentIndexHandle(
+        loaded.index,
+        metric,
+        indexType,
+        index.segmentId,
+        index.buildId,
+        loaded.bytes,
+        loaded.nanos,
+        mapping
+      )
+    } catch {
+      case failure: Throwable =>
+        loaded.index.close()
+        throw failure
+    }
   }
+
 }

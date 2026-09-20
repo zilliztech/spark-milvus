@@ -16,12 +16,10 @@ object MilvusIndexFileDecoder extends IndexFileDecoder {
       file.events.size == 1 && file.events.head.kind == 7,
       "A Milvus index object must contain exactly one IndexFileEvent"
     )
+    // A nullable column's index names the rows it holds in its valid_data
+    // payload, which `IndexRowMapping` turns into segment row numbers.
     Option(file.extras.get("nullable")).foreach { value =>
       require(value.isBoolean, "Index descriptor nullable must be a boolean")
-      require(
-        !value.booleanValue(),
-        "Nullable index payloads require an ID mapping and are unsupported"
-      )
     }
     val build = Option(file.extras.get("indexBuildID"))
       .getOrElse {

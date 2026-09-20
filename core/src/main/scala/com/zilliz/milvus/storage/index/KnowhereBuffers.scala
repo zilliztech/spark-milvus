@@ -39,14 +39,6 @@ object KnowhereBuffers {
     override def close(): Unit = owned.foreach(_.close())
   }
 
-  def dtypeOf(layout: VectorLayout): DType = layout.elementType match {
-    case VectorElementType.Float32  => DType.FLOAT32
-    case VectorElementType.Float16  => DType.FLOAT16
-    case VectorElementType.BFloat16 => DType.BFLOAT16
-    case VectorElementType.Int8     => DType.INT8
-    case VectorElementType.Bit      => DType.BINARY
-  }
-
   /** Every null row is reported through `excludeRow` before the buffer is
     * built; its bytes are zero and Knowhere never sees it as a candidate.
     */

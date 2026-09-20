@@ -23,15 +23,19 @@ package com.zilliz.milvus.storage.write
   * registered jobs, legacy manifests and inconsistent metadata are always
   * preserved.
   *
-  * Planned for W8: writing a snapshot, that is the snapshot JSON (the shapes in
-  * `core.snapshot.json`) and the segment Avro manifests, including the index
-  * records W6 produces, so that Milvus can restore it into a new collection.
+  * A build job records what it wrote as `CommittedIndex` entries in the same
+  * job manifest, one per segment index (W6). `SnapshotWriter` turns a snapshot
+  * and those records into the files that describe them: the snapshot JSON (the
+  * shapes in `core.snapshot.json`) and one Avro segment manifest each, which
+  * this connector reads back through `SnapshotCatalog` (W8). Asking Milvus to
+  * restore such a snapshot into a new collection is not written yet.
   * `core.snapshot` stays read-only.
   *
-  * Main types: JobManifest, CommittedSegment, Committer, CommitOutcome,
-  * Registration, StagingCleaner. Capabilities: W3, A4, A7 (see
-  * docs/design/capabilities.md). A7 remains partial until native recursive
-  * directory deletion is available. Design: docs/design/README.md section 2.4
-  * and docs/design/architecture/procedure.html section 3.3.
+  * Main types: JobManifest, CommittedSegment, CommittedIndex, Committer,
+  * CommitOutcome, Registration, StagingCleaner, SnapshotWriter, SnapshotTarget.
+  * Capabilities: W3, A4, A7, W6, W8 (see docs/design/capabilities.md). A7
+  * remains partial until native recursive directory deletion is available.
+  * Design: docs/design/README.md section 2.4 and
+  * docs/design/architecture/procedure.html section 3.3.
   */
 package object commit

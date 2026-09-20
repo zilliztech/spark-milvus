@@ -52,6 +52,19 @@ object ArrowAllocator {
     )
   }
 
+  /** One index build's scope: the segment's vectors gathered into one buffer
+    * and what Knowhere serializes from them.
+    */
+  private[connector] def forIndexBuild(
+      segmentId: Long,
+      maxBytes: Long
+  ): TaskArrowAllocator = {
+    require(maxBytes > 0L, s"maxBytes must be positive, got $maxBytes")
+    new TaskArrowAllocator(
+      root.newChildAllocator(s"milvus-index-build-$segmentId", 0L, maxBytes)
+    )
+  }
+
   private[connector] def forReadTask(
       segmentId: Long,
       maxBytes: Long

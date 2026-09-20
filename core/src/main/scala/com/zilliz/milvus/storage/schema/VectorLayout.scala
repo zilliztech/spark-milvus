@@ -2,6 +2,8 @@ package com.zilliz.milvus.storage.schema
 
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
+import io.knowhere.DType
+
 /** The element type of a dense vector column. */
 sealed trait VectorElementType
 
@@ -42,6 +44,17 @@ final case class VectorLayout(
   def rowBytes: Int = elementType match {
     case Bit   => dimension / 8
     case other => Math.multiplyExact(dimension, elementBytes)
+  }
+
+  /** The element type as the vector library names it, for the buffers handed to
+    * a search and for the index deserialized for one.
+    */
+  def dtype: DType = elementType match {
+    case Float32  => DType.FLOAT32
+    case Float16  => DType.FLOAT16
+    case BFloat16 => DType.BFLOAT16
+    case Int8     => DType.INT8
+    case Bit      => DType.BINARY
   }
 }
 

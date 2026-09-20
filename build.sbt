@@ -32,6 +32,8 @@ lazy val root = project
     CapabilityIndex.settings,
     Compile / compile / parallelExecution := true,
     libraryDependencies ++= Dependencies.legacyRootDeps,
+    // One Jackson version set in the fat jar (see Modules.jacksonPin).
+    Modules.jacksonPin,
     publish / skip := false,
     publish / aggregate := false,
     publishLocal / aggregate := false,
@@ -349,9 +351,14 @@ lazy val rootRunSettings: Seq[Setting[_]] = Seq(
     "-Djava.library.path=.",
     "--add-opens=java.base/java.nio=ALL-UNNAMED"
   ),
+  // The JVM's signal-chaining library, by the platform's preload mechanism.
   run / envVars := {
     val jdk = javaHome.value.getOrElse(file(sys.props("java.home")))
-    Map("LD_PRELOAD" -> (jdk / "lib" / "libjsig.so").getAbsolutePath)
+    if (Modules.isMacOS)
+      Map(
+        "DYLD_INSERT_LIBRARIES" -> (jdk / "lib" / "libjsig.dylib").getAbsolutePath
+      )
+    else Map("LD_PRELOAD" -> (jdk / "lib" / "libjsig.so").getAbsolutePath)
   },
   Compile / run / fullClasspath :=
     (Compile / run / fullClasspath).value ++ (Test / fullClasspath).value

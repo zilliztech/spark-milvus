@@ -13,7 +13,9 @@ package com.zilliz.milvus.storage.snapshot
   * form of a snapshot read, and goes with it.
   *
   * Everything here is a description of bytes on disk. Nothing is computed:
-  * `SnapshotCatalog` turns a `SnapshotJson` into a `Snapshot`.
+  * `SnapshotCatalog` turns a `SnapshotJson` into a `Snapshot`, and
+  * `core.write.commit.SnapshotWriter` goes the other way, serializing these
+  * same shapes through `SnapshotJson.toJson`.
   *
   * Main types: SnapshotJson, CollectionSchemaJson, FieldJson, SegmentJson,
   * ManifestItemJson, SegmentListJson, JsonValues.

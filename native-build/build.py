@@ -143,6 +143,23 @@ def platform_tool_requirements(profile):
     return references
 
 
+def replace_requires_section(references):
+    """Pin the build context to the recipe revisions selected for the host context.
+
+    The consumer's force=True requirements shape the host graph only. Tools such as
+    protoc and grpc_cpp_plugin are built in the build context, where their zlib or
+    openssl version ranges would resolve to the newest remote revision. Conan records
+    the consumer overrides in the lock without a context, so applying that lock would
+    rewrite the build-context ranges to the host revisions and then fail because those
+    revisions are absent from build_requires. Declaring the same revisions in both
+    profiles makes one graph resolve identically with and without the lock.
+    """
+    lines = ["[replace_requires]"]
+    for reference in sorted(references.values()):
+        lines.append(f"{reference.split('/', 1)[0]}/*: {reference}")
+    return "\n".join(lines) + "\n"
+
+
 def validate_conan_lock(path, references, platform_tools=()):
     """Require concrete recipe revisions; Conan checks the complete graph next."""
     lock = json.loads(path.read_text())
@@ -407,14 +424,17 @@ def build(args, repository, java_home, work, target, profile):
         shutil.copy2(repository / "native-build/dependencies.json", consumer / "dependencies.json")
         (provenance / "direct-references.json").write_text(json.dumps(references, indent=2) + "\n")
         platform_tools = platform_tool_requirements(profile)
-        shutil.copy2(profile, provenance / "host-profile")
+        replacements = replace_requires_section(references)
+        host_profile = work / "host-profile"
+        host_profile.write_text(profile.read_text().rstrip("\n") + "\n\n" + replacements)
+        shutil.copy2(host_profile, provenance / "host-profile")
         # Host options must not turn build-only protoc/tool packages into runtime libraries.
         build_profile = work / "build-profile"
-        build_profile.write_text(profile.read_text().split("[options]")[0])
+        build_profile.write_text(profile.read_text().split("[options]")[0].rstrip("\n") + "\n\n" + replacements)
         dependencies = work / "dependencies"
-        options = ["-pr:h", profile, "-pr:b", build_profile,
+        options = ["-pr:h", host_profile, "-pr:b", build_profile,
                    "-c:h", "tools.build:jobs=" + str(args.jobs), "-c:b", "tools.build:jobs=" + str(args.jobs)]
-        inputs = {"references": references, "hostProfile": profile.read_text(),
+        inputs = {"references": references, "hostProfile": host_profile.read_text(),
                   "consumerSha256": digest(consumer / "conanfile.py"),
                   "dependencySelectionSha256": digest(consumer / "dependencies.json"),
                   "jobs": args.jobs}

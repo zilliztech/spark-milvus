@@ -144,7 +144,11 @@ class MilvusSqlParserTest extends AnyFunSuite with BeforeAndAfterAll {
   test("every mistake is refused at parse time with the parameters named") {
     def refused(sql: String): String =
       intercept[IllegalArgumentException](parse(sql)).getMessage
-    assert(refused("CALL milvus.system.nope('c')").contains("known: register"))
+    assert(
+      refused("CALL milvus.system.nope('c')").contains(
+        "known: build_index, write_snapshot, register"
+      )
+    )
     assert(
       refused("CALL milvus.other.register('c')").contains("milvus.system")
     )

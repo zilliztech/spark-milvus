@@ -92,17 +92,12 @@ object MilvusSearch extends Logging {
       )
     val layout = VectorLayout.of(field.dataType, dimensionOf(field))
     checkMetric(searchMetric, layout, searchMode)
-    if (searchMode == "index") {
-      require(
-        field.dataType == DataType.FloatVector && !field.nullable,
-        s"Index search currently reads a non-nullable FloatVector; '$vectorColumn' is ${field.dataType}"
-      )
-    }
+
     SearchQueries.check(queries.schema, layout)
     val limits = SearchLimits.from(options)
     val outputSchema = outputSchemaOf(table.schema(), outputColumns)
 
-    val partitions = plannedPartitions(table, caseInsensitive)
+    val partitions = SnapshotPartitions.of(table, caseInsensitive)
     val tasks = partitions.map(_.task)
     if (searchMode == "index") {
       SegmentIndexHandle.check(
@@ -310,9 +305,6 @@ object MilvusSearch extends Logging {
         )
       }
     } else {
-      // One partition of groups, so a task pairs its segment set with every
-      // group and reads its segments once; a group-per-partition cartesian
-      // would open the same segments again for each group.
       val delivered = packedGroups(selected, plan, spec, layout)
       setsRdd.cartesian(delivered).mapPartitions { pairs =>
         if (pairs.isEmpty) Iterator.empty
@@ -449,18 +441,6 @@ object MilvusSearch extends Logging {
     spark.emptyDataset[SearchResult].toDF()
   }
 
-  private def plannedPartitions(
-      table: com.zilliz.spark.connector.table.MilvusTable,
-      options: CaseInsensitiveStringMap
-  ): Seq[MilvusInputPartition] =
-    table
-      .newScanBuilder(options)
-      .build()
-      .toBatch
-      .planInputPartitions()
-      .toSeq
-      .map(_.asInstanceOf[MilvusInputPartition])
-
   private def dimensionOf(field: FieldSchema): Int = field.typeParams
     .find(_.key == "dim")
     .map(_.value.toInt)
@@ -483,10 +463,7 @@ object MilvusSearch extends Logging {
       s"A ${layout.elementType} field takes ${supported.toSeq.sorted
           .mkString(" or ")}, not $metric"
     )
-    require(
-      mode != "index" || Set("L2", "IP", "COSINE").contains(metric),
-      s"Index search takes L2, IP or COSINE, not $metric"
-    )
+
   }
 
   private def outputSchemaOf(

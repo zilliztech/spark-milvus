@@ -37,10 +37,16 @@ offset. `_score` preserves the value Knowhere returned. Indexes containing
 vector quantization, such as Cardinal RBQ, can return approximate scores; the
 connector does not read the original vectors to recompute them.
 
-`mode = "index"` searches the persisted index the snapshot pinned, over a
-non-nullable FloatVector with L2, IP or COSINE, and the query metric must match
-the index. `mode = "exact"` computes every distance instead: it takes every
-dense vector type, and binary vectors take HAMMING or JACCARD.
+`mode = "index"` searches the persisted index the snapshot pinned. It loads the
+HNSW family (`HNSW`, `HNSW_SQ`, `HNSW_PQ`, `HNSW_PRQ`, including the HNSW a
+Cardinal build writes), the IVF family (`IVF_FLAT`, `IVF_SQ8`, `IVF_PQ`,
+`BIN_IVF_FLAT`) and `FLAT` and `BIN_FLAT`, over the element type the column
+carries, and the query metric must match the index. A nullable column is indexed
+over the rows that have a value, which its index files record in a `valid_data`
+bitmap; without that bitmap the search fails. DiskANN, sparse, GPU and encrypted
+indexes fail while the query is planned. `mode = "exact"` computes every distance
+instead: it takes every dense vector type, and binary vectors take HAMMING or
+JACCARD.
 
 The filter runs before search. Supported scalar syntax is comparison
 (`==`, `!=`, `<`, `<=`, `>`, `>=`), `in`, `not in`, `is null`, `is not null`,
@@ -54,8 +60,9 @@ segment, fail while the query is planned, naming every such segment; corrupt
 files and incompatible formats fail when a task loads the index.
 `allowUnindexed = true` scans a segment exactly when the snapshot confirms the
 field has no index there. Default is `false`. Each task owns and closes the
-indexes it loaded; they are not cached across tasks. HNSW `ef` is the only
-supported search parameter and must be an integer at least K. Encrypted indexes
+indexes it loaded; they are not cached across tasks. Search parameters follow the index family: the HNSW family takes `ef`, an
+integer at least K, defaulting to `max(64, K)`; the IVF family takes `nprobe`, a
+positive integer defaulting to 16; a flat index takes none. Encrypted indexes
 and nullable-vector ID mappings are unsupported. Cardinal `_mem.index.bin`
 requires the pinned Cardinal-enabled native build; see
 [native build instructions](contributing.md#knowhere-library-loading).
@@ -665,6 +672,66 @@ before). A wrong procedure name, a missing or unknown argument or a wrong type
 is refused when the statement is parsed, with the parameters named. Statements
 that do not start with `CALL milvus.` are untouched, so the extension can stay
 on for every session. The extension works the same on Spark 3.5 and 4.x.
+
+Building vector indexes uses the same front:
+
+```sql
+CALL milvus.system.build_index('your_db.your_collection',
+  field            => 'embedding',
+  output           => 'files/built-index',
+  index_type       => 'HNSW',
+  metric           => 'COSINE',
+  params           => 'M=16,efConstruction=200',
+  `milvus.snapshot.path` => 'https://.../metadata/4691.json',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+It plans the fixed snapshot the options select, reads each segment's vector
+column back in its own Spark task, builds the index and writes the objects
+under `output` with Milvus's naming, and records every segment's index in
+`output/staging/<job>/manifest.json`. `index_type` defaults to `HNSW` and
+`metric` to `COSINE`; `params` is a list of `name=value` pairs; `build_id`,
+`index_version` and `store_path_version` default to the current millisecond, 1
+and 0. The result has one row per segment: `segment_id`, `partition_id`,
+`row_count`, `objects`, `bytes`, `build_id` and `job_id`.
+
+A second call writes the snapshot that describes what the build produced:
+
+```sql
+CALL milvus.system.write_snapshot('your_db.your_collection',
+  job              => 'index-1789478390101',
+  input            => 'files/built-index',
+  `milvus.snapshot.path` => 'https://.../metadata/4691.json',
+  `fs.bucket_name` => 'milvus-bucket',
+  `fs.address`     => 's3.us-west-2.amazonaws.com',
+  `fs.use_iam`     => 'true')
+```
+
+The segments come from the snapshot the options select — the one `build_index`
+planned against — and the index records from that job's manifest under
+`input`. It writes one Avro segment manifest and the snapshot JSON under
+`output/snapshots/<collection>/`, where `output` defaults to `input`;
+`snapshot_id` defaults to the current millisecond and `snapshot_name` to
+`<collection>-<snapshot_id>`. The result is one row: `snapshot` (the key of the
+snapshot JSON), `snapshot_id`, `snapshot_name`, `segments`, `indexes` and
+`bytes`. The snapshot is the source snapshot with the job's indexes in it: the
+document and each segment manifest are the source's own bytes, with the index
+registrations replaced, so nothing about the segments or the collection is
+restated.
+
+Two readers are verified. This connector reads it back with
+`milvus.snapshot.path`. Milvus v3.0.2 restores it with
+`RestoreExternalSnapshot`, which brings the indexes with it — the restored
+collection reports them as built, loads and searches without building
+anything. That restore requires every path the snapshot names to sit under the
+root its metadata URI derives, so `output` has to be a prefix the data files
+are already under: for indexes built over an existing collection, that is the
+instance's own root, and `build_index` has to write there too. Calling the
+restore from this connector is not implemented; the call is made against
+Milvus directly. Segments must be storage version 3 and must carry a row
+count; a V2 segment is refused rather than written from a guess.
 
 ### 3.4 Managing Milvus with `CALL`
 

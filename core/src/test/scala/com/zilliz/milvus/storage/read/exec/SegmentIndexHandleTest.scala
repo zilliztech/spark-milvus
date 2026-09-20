@@ -10,6 +10,7 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.codec.{DecodedIndexFile, IndexFileDecoder}
 import com.zilliz.milvus.storage.io.{FailingObjectStore, LocalObjectStore}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
+import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.milvus.storage.snapshot.{
   SegmentIndex,
   SegmentIndexes,
@@ -20,6 +21,8 @@ import com.zilliz.milvus.storage.snapshot.{
   * (docs/design/architecture/vector-search.html sections 2.4 and 2.5).
   */
 class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
+  private val layout = VectorLayout(VectorElementType.Float32, 4)
+
   private val descriptor = SegmentIndex(
     1,
     2,
@@ -155,7 +158,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
     val unsupported = Seq(
       descriptor.copy(currentIndexVersion = None),
       descriptor.copy(parameters =
-        descriptor.parameters.updated("index_type", "IVF_FLAT")
+        descriptor.parameters.updated("index_type", "DISKANN")
       ),
       descriptor.copy(parameters =
         descriptor.parameters.updated("metric_type", "HAMMING")
@@ -165,14 +168,67 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
     )
     unsupported.foreach { index =>
       intercept[IllegalArgumentException](
-        SegmentIndexHandle.open(index, 4, false, store)
+        SegmentIndexHandle.open(index, layout, false, 10L, store)
       )
     }
     intercept[IllegalArgumentException](
-      SegmentIndexHandle.open(descriptor, 4, true, store)
+      SegmentIndexHandle.open(descriptor, layout, true, 10L, store)
     )
     intercept[IllegalArgumentException](
-      SegmentIndexHandle.open(descriptor, 0, false, store)
+      SegmentIndexHandle.open(descriptor, layout, false, 0L, store)
+    )
+  }
+
+  test("the supported index types are the HNSW, IVF and flat families") {
+    SegmentIndexHandle.familyOf("HNSW_SQ") shouldBe "HNSW"
+    SegmentIndexHandle.familyOf("IVF_SQ8") shouldBe "IVF"
+    SegmentIndexHandle.familyOf("BIN_FLAT") shouldBe "FLAT"
+
+    val store =
+      new FailingObjectStore(
+        new AssertionError("Unsupported index must not be read")
+      )
+    Seq("DISKANN", "SCANN", "SPARSE_INVERTED_INDEX", "GPU_CAGRA").foreach {
+      unsupported =>
+        val failure = the[IllegalArgumentException] thrownBy SegmentIndexHandle
+          .open(
+            descriptor.copy(parameters =
+              descriptor.parameters.updated("index_type", unsupported)
+            ),
+            layout,
+            false,
+            10L,
+            store
+          )
+        failure.getMessage should include(s"does not support $unsupported")
+    }
+  }
+
+  test("a metric has to belong to the element type the column carries") {
+    val store =
+      new FailingObjectStore(
+        new AssertionError("A bad metric must not be read")
+      )
+    val binary = VectorLayout(VectorElementType.Bit, 32)
+
+    // A float index takes L2, IP or COSINE; a binary one HAMMING or JACCARD.
+    the[IllegalArgumentException] thrownBy SegmentIndexHandle.open(
+      descriptor,
+      binary,
+      false,
+      10L,
+      store
+    )
+    the[IllegalArgumentException] thrownBy SegmentIndexHandle.open(
+      descriptor.copy(parameters =
+        descriptor.parameters
+          .updated("metric_type", "HAMMING")
+          .updated("index_type", "BIN_IVF_FLAT")
+      ),
+      layout,
+      false,
+      10L,
+      store
     )
   }
 
@@ -183,13 +239,14 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
     val error = intercept[IllegalArgumentException] {
       SegmentIndexHandle.open(
         descriptor.copy(filePaths = Vector("build/unknown.index.bin")),
-        4,
+        layout,
         false,
+        10L,
         store
       )
     }
     assert(
-      error.getMessage.contains("Unsupported persisted HNSW payload layout")
+      error.getMessage.contains("Unsupported persisted index payload layout")
     )
   }
 
@@ -200,8 +257,9 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
     val error = intercept[IllegalArgumentException] {
       SegmentIndexHandle.open(
         descriptor.copy(filePaths = Vector("build/_mem.index.bin")),
-        4,
+        layout,
         false,
+        10L,
         store
       )
     }
@@ -228,7 +286,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
       }
       val missing = descriptor.copy(filePaths = Vector("SLICE_META", "HNSW_0"))
       val error = intercept[IllegalArgumentException] {
-        SegmentIndexHandle.open(missing, 4, false, store, decoder)
+        SegmentIndexHandle.open(missing, layout, false, 10L, store, decoder)
       }
       assert(error.getMessage.contains("missing or overlap"))
       assert(payload.closed)
@@ -237,7 +295,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
           .getBytes(UTF_8)
       store.write("SLICE_META", excessive)
       val tooMany = intercept[IllegalArgumentException] {
-        SegmentIndexHandle.open(missing, 4, false, store, decoder)
+        SegmentIndexHandle.open(missing, layout, false, 10L, store, decoder)
       }
       assert(tooMany.getMessage.contains("more slices than the snapshot"))
       assert(payload.closed)
@@ -248,7 +306,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
         }
       }
       intercept[IllegalArgumentException] {
-        SegmentIndexHandle.open(missing, 4, false, store, mismatch)
+        SegmentIndexHandle.open(missing, layout, false, 10L, store, mismatch)
       }
       assert(payload.closed)
     } finally {
