@@ -9,6 +9,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.{
   SparkListener,
   SparkListenerExecutorMetricsUpdate,
+  SparkListenerStageCompleted,
   SparkListenerTaskEnd
 }
 
@@ -104,17 +105,29 @@ private[read] final class SearchProgress(
     }
   }
 
+  /** The last word on a stage, which no heartbeat can give.
+    *
+    * A line is written when a heartbeat arrives, and the heartbeat carries only
+    * running tasks: when the last of them end between two heartbeats, the run's
+    * own totals are never reported and the reader is left with whatever the
+    * second to last reading said. A completed stage is that reading, so it is
+    * written whether or not a line is due.
+    */
+  override def onStageCompleted(event: SparkListenerStageCompleted): Unit = {
+    if (running.isEmpty && !ended.isEmpty) report(force = true)
+  }
+
   /** What every task has counted, the ones still running included. */
   def totals: Map[String, Long] =
     (running.values.asScala.toSeq ++ ended.values.asScala.toSeq).flatten
       .groupBy(_._1)
       .map { case (name, values) => name -> values.map(_._2).sum }
 
-  private def report(): Unit = {
+  private def report(force: Boolean = false): Unit = {
     // The listener runs on the listener bus, so it does no work beyond adding
     // up a few numbers; a slow listener holds up every other one.
     val now = System.nanoTime()
-    if (now - lastReport < SearchProgress.ReportNanos) return
+    if (!force && now - lastReport < SearchProgress.ReportNanos) return
     lastReport = now
     val counted = totals
     if (counted.isEmpty) return
