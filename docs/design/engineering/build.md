@@ -70,7 +70,7 @@ flowchart TB
 | 方案 | 命令 | 前置条件 | 产物与限制 | 用在哪 |
 |---|---|---|---|---|
 | Docker 构建 | `docker build --build-arg PUBLISH_MAVEN=false -t spark-milvus .` | Docker 与 BuildKit；网络能到 JFrog、GitHub、crates.io。工具链由 Dockerfile 安装，本机无需准备 | 统一包 + assembly。Conan、Cargo、ccache、Coursier、Ivy、sbt 缓存各在一个 `sharing=locked` 的 cache mount 里，失败的 RUN 不丢已完成的依赖。worker 是哪个架构就出哪个架构的包；只有 Linux | Jenkins 发布流水线；验证"空缓存能否完整构建" |
-| 本机构建 | `make native-bundle NATIVE_JOBS=50`，然后 `make package` | 第 2 节本平台一列；PATH 上先出现上表的版本 | 同上，产物在 `target/native-build/<平台>/`；`--conan-lock` 复用审核过的 lock，`--no-remote` 只用缓存。输入变化要换新工作目录，缓存仍复用 | 改 storage、Knowhere、依赖版本或 CMake 规则的开发 |
+| 本机构建 | `make native-bundle NATIVE_JOBS=50`，然后 `make package` | 第 2 节本平台一列；PATH 上先出现上表的版本 | 同上，产物在 `target/native-build/<平台>/`；`--conan-lock` 复用审核过的 lock，`--no-remote` 只用缓存。输入变化要换新工作目录，缓存仍复用。产物依赖构建机的 glibc：在比 Spark 镜像（Ubuntu 22.04，glibc 2.35）更新的系统上编出的包在该镜像里加载失败（2026-09-20 实测：本机包要求 `GLIBC_2.38`，sbt 校验拒绝），要给 Spark 镜像用的包应在[开发容器](devcontainer.html)或方案 A 里编 | 改 storage、Knowhere、依赖版本或 CMake 规则的开发；工具链也可由[开发容器](devcontainer.html)提供（设计稿） |
 
 两种方案都有 lock 这个开关：第一次运行解析依赖并写 `provenance/conan.lock`，之后用 `--conan-lock` 传入，传递依赖的 revision 才不随远程变化。`build.py` 会把 `dependencies.json` 生成的 `[replace_requires]` 段写进 host 与 build 两份 profile：消费者的 `force=True` 只固定 host 图，不加这一段时 build 图里的 protoc、grpc 插件会把 zlib、openssl 解析到远程最新 revision，lock 套用后又改写成 `build_requires` 里不存在的 host revision，空缓存的 `conan install --lockfile` 失败（2026-09-20 首次本机全量构建暴露并修复）。
 
