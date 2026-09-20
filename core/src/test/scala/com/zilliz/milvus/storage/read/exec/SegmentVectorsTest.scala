@@ -260,6 +260,38 @@ class SegmentVectorsTest
     } finally vectors.close()
   }
 
+  test("a joined batch holds its own bytes and nothing the parts read from") {
+    // The copy is the whole point of the join; keeping what was copied from
+    // would hold every byte of a segment set twice, and the retention limit
+    // counts only one of them.
+    val reader = new FakeReader(
+      Seq(
+        batch(Seq(1L, 2L), Seq(Some(Seq(1f, 2f)), Some(Seq(3f, 4f)))),
+        batch(Seq(3L), Seq(Some(Seq(5f, 6f))))
+      )
+    )
+    val vectors = SegmentVectors.over(
+      reader,
+      "101",
+      layout,
+      exclusions(None),
+      allocator,
+      1L << 20
+    )
+    val joined =
+      try vectors.next().get
+      finally vectors.close()
+    try {
+      joined.rows shouldBe 3
+      // Only the joined buffer is outstanding: three rows of two floats,
+      // which Arrow rounds up to the next power of two. What the parts read
+      // out of would show here as well if the join had kept it.
+      allocator.getAllocatedMemory shouldBe 32L
+    } finally joined.close()
+
+    allocator.getAllocatedMemory shouldBe 0L
+  }
+
   test("closing a batch releases what it held") {
     val reader = new FakeReader(Seq(batch(Seq(1L), Seq(Some(Seq(1f, 2f))))))
     val vectors =

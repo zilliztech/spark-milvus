@@ -158,10 +158,22 @@ object SegmentVectors {
       }
       before += part.rows
     }
-    val backing = parts.flatMap(_.backing)
     val base =
       KnowhereBuffers.joined(parts.map(_.base), layout.rowBytes, allocator)
-    new Batch(base, excluded, parts.head.firstRow, rows.toInt, backing)
+    // The bytes are the result's now, so what the parts were reading out of
+    // goes. Keeping it would hold the reader's Arrow data beside the copy for
+    // as long as the batch lives, which in a held segment set is every byte of
+    // the set twice over, and `hold` would count one of them.
+    val failures = parts.flatMap(part =>
+      part.backing.flatMap(closeable =>
+        scala.util.Try(closeable.close()).failed.toOption
+      )
+    )
+    failures.headOption.foreach { failure =>
+      base.close()
+      throw failure
+    }
+    new Batch(base, excluded, parts.head.firstRow, rows.toInt, Seq.empty)
   }
 
   /** Over a reader that is already open, which is how a test supplies batches
