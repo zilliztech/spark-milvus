@@ -58,10 +58,14 @@ nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用
 广播的字节上限，超过就随 shuffle 下发，两条路结果相同；
 `milvus.search.group.max.bytes`（默认 512 MiB）是一个任务一次回答多少查询，按
 「查询数 ×（维度 × 元素宽度 + K × 28 字节）」计；
-`milvus.search.vectors.max.bytes`（默认 2 GiB）是**一个 executor** 同时留在内存里的
-底库向量字节上限。一个 executor 上并发的任务共享它：规划时按
-`spark.executor.cores` 除开，得到每个任务的额度，这个额度同时决定一个任务读多少个
-段。local 模式下没有 executor，`local[n]` 的 n 个任务共享同一个 JVM，除数就是 n。
+`milvus.search.vectors.max.bytes`（默认自动）是**一个 executor** 同时留在内存里的
+底库向量字节上限。不设时按 executor 的内存算：`（内存上限 − 堆 − 1 GiB）× 0.5`，
+local 模式的内存上限取 cgroup 或整机，集群模式取 Spark 为 executor 申请的容器
+（`spark.executor.memory` + memoryOverhead + offHeap），每任务不低于 64 MiB。一个
+executor 上并发的任务共享它：规划时按 `spark.executor.cores` 除开，得到每个任务的额度，
+这个额度同时决定一个任务读多少个段。local 模式下没有 executor，`local[n]` 的 n 个任务
+共享同一个 JVM，除数就是 n。段组真实大小超过额度时任务不再失败，改为每个查询组重读一遍
+段（I/O × 查询组数），driver 日志 `Search budget` 一行写明预算、段组字节与是否重读。
 这些向量在 Arrow 堆外，`-Xmx` 管不到它们。
 
 `milvus.search.group.max.bytes` 仍然是**每个任务**的：它同时决定查询组的个数，那是

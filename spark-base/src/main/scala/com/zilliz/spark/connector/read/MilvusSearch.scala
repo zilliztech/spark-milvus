@@ -4,6 +4,7 @@ import java.util.Locale
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, explode, udaf}
@@ -13,13 +14,14 @@ import org.apache.spark.storage.StorageLevel
 import org.apache.spark.Partitioner
 
 import com.zilliz.milvus.storage.expr.PlanParser
-import com.zilliz.milvus.storage.index.SearchPlan
+import com.zilliz.milvus.storage.index.{MachineResources, SearchPlan}
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{
   MilvusOption,
   SearchLimits,
+  SearchResources,
   SnapshotReference
 }
 import com.zilliz.spark.connector.table.MilvusTables
@@ -116,14 +118,21 @@ object MilvusSearch extends Logging {
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
     )
-    // `milvus.search.vectors.max.bytes` is what one executor may hold, and an
-    // executor runs several tasks at once in one JVM, so the budget a task
-    // plans against is the executor's divided by the slots that share it. The
-    // planner and the task's own check take the same value, or a set sized to
-    // fit would be rejected while it ran.
+    // The vectors a task keeps resident come out of the executor's off-heap
+    // room, which its tasks share, so the budget a task plans against is the
+    // executor's divided by the slots. `milvus.search.vectors.max.bytes` names
+    // the executor's total when the call sets it; otherwise it is derived from
+    // the executor's memory limit and heap. The planner and the task take the
+    // same value; a set that turns out larger streams instead of holding.
     val slots = MilvusSearch.taskSlotsPerExecutor(spark)
-    val vectorsPerTask =
-      math.max(layout.rowBytes.toLong, limits.vectorsMaxBytes / slots)
+    val (memoryLimit, heap) = MilvusSearch.executorMemory(spark)
+    val budget = SearchResources.vectorsBudget(
+      memoryLimit,
+      heap,
+      slots,
+      limits.vectorsMaxBytes
+    )
+    val vectorsPerTask = math.max(layout.rowBytes.toLong, budget.bytes)
     val plan = SearchPlan.of(
       tasks,
       layout,
@@ -165,6 +174,22 @@ object MilvusSearch extends Logging {
     val segmentSearchesTotal =
       plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum
     val queryBytes = SearchQueries.bytes(queryCount, layout)
+    // The budget and how the sets stand against it: a set known to be over
+    // it streams once per query group; a set with an estimated segment is
+    // decided when the task reads it. One group holds nothing either way.
+    val known = plan.sets.flatMap(SearchPlan.knownBytes(_, layout))
+    val over = known.count(_ > vectorsPerTask)
+    logInfo(
+      s"Search budget: vectorsPerTask=$vectorsPerTask (${budget.reason}), " +
+        s"sets=${plan.tasks}, setBytes=" +
+        (if (known.isEmpty) "unknown"
+         else s"${known.min}..${known.max}") +
+        s" known for ${known.size} sets, ${plan.estimated.size} segments " +
+        s"estimated at half the budget, " +
+        (if (plan.groups.size == 1) "one query group so nothing is held"
+         else if (over == 0) "no set known to stream"
+         else s"$over sets stream once per query group")
+    )
     logInfo(
       s"Search plan: mode=$searchMode, metric=$searchMetric, topK=$k, " +
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
@@ -441,6 +466,46 @@ object MilvusSearch extends Logging {
     * taken as one slot, which is Spark's own default and errs towards a larger
     * per-task budget rather than a smaller one.
     */
+  /** The executor's memory: its limit, when it can be known, and its heap.
+    *
+    * In local mode the executor is this JVM, so the limit is the cgroup's or
+    * the machine's and the heap is this runtime's. On a cluster the driver
+    * cannot read the executor's cgroup, but the container Spark asked for is
+    * its limit: `spark.executor.memory` plus the overhead and, when enabled,
+    * the off-heap size (docs/design/architecture/search-resources.html section
+    * 3.3).
+    */
+  private[read] def executorMemory(
+      spark: SparkSession
+  ): (Option[Long], Long) = {
+    val master = spark.sparkContext.master
+    if (master.startsWith("local[") || master == "local") {
+      (
+        MachineResources.probe().memoryLimitBytes,
+        Runtime.getRuntime.maxMemory()
+      )
+    } else {
+      def bytes(key: String, default: String): Long =
+        JavaUtils.byteStringAsBytes(spark.conf.get(key, default))
+      val heap = bytes("spark.executor.memory", "1g")
+      val overhead =
+        spark.conf.getOption("spark.executor.memoryOverhead") match {
+          case Some(set) => JavaUtils.byteStringAsBytes(set)
+          case None =>
+            val factor = spark.conf
+              .getOption("spark.executor.memoryOverheadFactor")
+              .flatMap(value => scala.util.Try(value.trim.toDouble).toOption)
+              .getOrElse(0.10)
+            math.max(384L << 20, (heap * factor).toLong)
+        }
+      val offHeap =
+        if (spark.conf.get("spark.memory.offHeap.enabled", "false") == "true")
+          bytes("spark.memory.offHeap.size", "0")
+        else 0L
+      (Some(heap + overhead + offHeap), heap)
+    }
+  }
+
   private[read] def taskSlotsPerExecutor(spark: SparkSession): Int = {
     val configured = spark.conf
       .getOption("spark.executor.cores")

@@ -38,7 +38,7 @@
 
 <p class="lead">搜索路径上有三个与机器规格绑定的数：一次引擎调用的 base 块（32 MiB）、每个 executor 常驻的向量预算（2 GiB）、能加载的索引载荷上限（1 GiB）。三个都是常量，三个都在 2026-09-21 的测试里出了问题：32 MiB 只在单任务时合适，16 任务慢 4 到 6 倍、64 任务半小时零产出；2 GiB 按槽位一除，local[64] 下装不下一个 160 MiB 的段；1 GiB 挡掉了 Milvus 默认 1 GiB 段建出的每一个 HNSW 索引。本文把前两个改成从机器缓存、CPU 配额、内存上限和 executor 并发算出，把第三个去掉：连接器不再持有任何与机器规格相关的常量，内存归 executor 配置，连接器只算给用户看。</p>
 
-<div class="state"><strong>2026-09-21 <code>[草稿]</code>。</strong>数据在 128 核、L3 96 MiB、503 GB 的机器上测得（Spark 4.0 local 模式，Knowhere <code>29210a33</code>），拐点位置未在其他机器复现。代码里已改：索引载荷上限 1 GiB → 8 GiB（过渡）；3.2 的块大小自适应已实现（<code>core.index.MachineResources</code> 探测，<code>spark.options.SearchResources</code> 决策，<code>SegmentSetSearch</code> 在 executor 上按段应用）。3.3 与 3.4 未改。</div>
+<div class="state"><strong>2026-09-21 <code>[草稿]</code>。</strong>数据在 128 核、L3 96 MiB、503 GB 的机器上测得（Spark 4.0 local 模式，Knowhere <code>29210a33</code>），拐点位置未在其他机器复现。代码里已改：索引载荷上限 1 GiB → 8 GiB（过渡）；3.2 的块大小自适应已实现（<code>core.index.MachineResources</code> 探测，<code>spark.options.SearchResources</code> 决策，<code>SegmentSetSearch</code> 在 executor 上按段应用）；3.3 已实现（<code>SearchResources.vectorsBudget</code> 在 driver 上算预算，<code>SearchPlan</code> 按预算一半估行数未知的段，<code>SegmentSearch.hold</code> 超预算返回 <code>Overflow</code> 后逐组重读）。3.4 未改。</div>
 
 <nav aria-label="目录">
   <a href="#mechanism">1 机制</a>
@@ -177,11 +177,12 @@
 预算     = 堆外可用 × 0.5 / N                  0.5 留给索引加载、shuffle 和 Arrow 的其他缓冲</code></pre>
 <table>
 <tr><th>改动</th><th>内容</th></tr>
-<tr><td>默认值</td><td>由上式算出；<code>milvus.search.vectors.max.bytes</code> 保留为覆盖，语义仍是每 executor</td></tr>
-<tr><td>规划期</td><td><code>SearchPlan.segmentBytes</code> 对行数未知的段不再按 0 计：V3 段从 manifest 读行数（<code>SnapshotCatalog</code> 已能取到），仍未知的按预算的一半估并记入日志</td></tr>
+<tr><td>默认值</td><td>由上式算出；<code>milvus.search.vectors.max.bytes</code> 保留为覆盖，语义仍是每 executor。内存上限：local 模式读 cgroup 或整机（driver 即 executor）；集群模式 driver 读不到 executor 的 cgroup，取 Spark 为它申请的容器 <code>spark.executor.memory</code> + memoryOverhead + offHeap。算出的每任务预算不低于 64 MiB</td></tr>
+<tr><td>规划期</td><td><code>SearchPlan.segmentBytes</code> 对行数未知的段不再按 0 计：先取快照行数，再取列组文件行数，再取该段索引记录的 <code>num_rows</code>；仍未知的（只由 manifest 列出的 V3 段，milvus-storage 的 manifest 不记段行数）按预算的一半估并记入日志</td></tr>
 <tr><td>运行期</td><td><code>SegmentSetSearch</code> 多组时若集合超过预算，不再 <code>require</code> 失败，退回单组的逐 batch 扫描，对每个 query 组重读一遍段。代价是 I/O × 组数，换来任何段大小都能跑</td></tr>
-<tr><td>日志</td><td>规划期一行：预算、集合数、每集合字节、是否降级</td></tr>
+<tr><td>日志</td><td>规划期一行 <code>Search budget</code>：预算及其来源、集合数、已知的每集合字节、估算的段数、会重读的集合数；executor 上 <code>Segment set not held</code> 一行写明哪个段在多少字节处越过预算</td></tr>
 </table>
+<p>实现后实测（2 GiB × 256 MiB，local[16]，行数未知的 64 段）：预算压到每任务 16 MiB、3 个查询组时，32 个段组在读到第二个段的 18 MiB 处全部越过预算并转为逐组重读，96 个任务全部完成，212 s，命中 655,360 与单组持有路径（204 s）一致；改动前同一配置在第一个段组处以 <code>fills more than … bytes</code> 失败。</p>
 
 <h3 id="cap">3.4 索引载荷：去掉上限，校验元数据，算内存</h3>
 <table>

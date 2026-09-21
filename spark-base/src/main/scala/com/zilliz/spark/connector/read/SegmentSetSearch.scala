@@ -15,6 +15,7 @@ import com.zilliz.milvus.storage.expr.PlanParser
 import com.zilliz.milvus.storage.index.{
   MachineResources,
   QueryMatrix,
+  SearchPlan,
   SegmentSearch,
   TopKMerger
 }
@@ -38,7 +39,9 @@ import io.milvus.grpc.schema.CollectionSchema
   * and the computation in `core.index` searches it. A task that answers more
   * than one query group keeps its segment set in memory and runs the groups on
   * it one after another, so the segments are read once whichever way the query
-  * set was delivered (docs/design/architecture/vector-search.html section 2.1).
+  * set was delivered (docs/design/architecture/vector-search.html section 2.1);
+  * a set larger than the task's budget is read again for every group instead
+  * (search-resources.html section 3.3).
   */
 private[read] object SegmentSetSearch extends Logging {
 
@@ -121,64 +124,104 @@ private[read] object SegmentSetSearch extends Logging {
     }
     def open(segmentId: Long): SegmentSearch.Source =
       source(partitions(segmentId), spec, allocator.allocator, metrics)
-    if (groupCount == 1) {
-      try {
-        val group = groups.next()
-        val (merger, counters) = searching(group, spec, allocator.allocator) {
-          queries =>
-            SegmentSearch.run(
-              segments,
-              open,
-              queries,
-              spec.k,
-              spec.metric,
-              spec.parameters,
-              allocator.allocator,
-              stepped
-            )
-        }
-        report(metrics, counters, merger.size)
-        logInfo(
-          s"Search task: segments=${counters.segments}, groups=1, " +
-            s"queries=${group.queries}, candidates=${merger.size}"
-        )
-        candidates(merger, group).iterator
-      } finally allocator.close()
-    } else {
-      val held = SegmentSearch.hold(
-        segments,
-        open,
-        spec.vectorsMaxBytes,
-        spec.layout
+    // One group over the set, reading every segment as it goes: what a single
+    // group always does, and what a set too large to hold does for each group.
+    def streamed(group: SearchQueries.Group): Seq[Row] = {
+      val (merger, counters) = searching(group, spec, allocator.allocator) {
+        queries =>
+          SegmentSearch.run(
+            segments,
+            open,
+            queries,
+            spec.k,
+            spec.metric,
+            spec.parameters,
+            allocator.allocator,
+            stepped
+          )
+      }
+      report(metrics, counters, merger.size)
+      logInfo(
+        s"Search task: segments=${counters.segments}, groups=$groupCount, " +
+          s"queries=${group.queries}, candidates=${merger.size}, streamed"
       )
-      read(metrics, held.read)
+      candidates(merger, group)
+    }
+    if (groupCount == 1) {
+      try streamed(groups.next()).iterator
+      finally allocator.close()
+    } else {
+      val held = holdOrStream(set, spec, segments, open, metrics)
       Option(TaskContext.get()).foreach(
         _.addTaskCompletionListener[Unit] { _ =>
-          try held.close()
+          try held.foreach(_.close())
           finally allocator.close()
         }
       )
-      groups.flatMap { group =>
-        val (merger, counters) = searching(group, spec, allocator.allocator) {
-          queries =>
-            held.search(
-              queries,
-              spec.k,
-              spec.metric,
-              spec.parameters,
-              allocator.allocator,
-              stepped
+      held match {
+        case None => groups.flatMap(streamed)
+        case Some(kept) =>
+          groups.flatMap { group =>
+            val (merger, counters) =
+              searching(group, spec, allocator.allocator) { queries =>
+                kept.search(
+                  queries,
+                  spec.k,
+                  spec.metric,
+                  spec.parameters,
+                  allocator.allocator,
+                  stepped
+                )
+              }
+            report(metrics, counters, merger.size)
+            logInfo(
+              s"Search task: segments=${counters.segments}, groups=$groupCount, " +
+                s"queries=${group.queries}, candidates=${merger.size}, held"
             )
-        }
-        report(metrics, counters, merger.size)
-        logInfo(
-          s"Search task: segments=${counters.segments}, groups=$groupCount, " +
-            s"queries=${group.queries}, candidates=${merger.size}"
-        )
-        candidates(merger, group)
+            candidates(merger, group)
+          }
       }
     }
   }
+
+  /** The segment set read into memory for the groups to share, or None when it
+    * does not fit the task's budget and each group reads it again instead.
+    *
+    * A set whose segments all have a row count is decided before anything is
+    * read. A set with an estimated segment is read until it either fits or goes
+    * over; what was read by then is released and read again per group, which is
+    * the cost of an unrecorded row count, not a failure
+    * (docs/design/architecture/search-resources.html section 3.3).
+    */
+  private def holdOrStream(
+      set: Seq[MilvusInputPartition],
+      spec: Spec,
+      segments: Seq[Long],
+      open: Long => SegmentSearch.Source,
+      metrics: SearchMetrics
+  ): Option[SegmentSearch.Held] =
+    SearchPlan.knownBytes(set.map(_.task), spec.layout) match {
+      case Some(bytes) if bytes > spec.vectorsMaxBytes =>
+        logInfo(
+          s"Segment set streamed: $bytes bytes of vectors over the ${spec.vectorsMaxBytes} " +
+            s"a task keeps; every query group reads the ${segments.size} segments again"
+        )
+        None
+      case _ =>
+        SegmentSearch.hold(
+          segments,
+          open,
+          spec.vectorsMaxBytes,
+          spec.layout
+        ) match {
+          case Right(held) =>
+            read(metrics, held.read)
+            Some(held)
+          case Left(overflow) =>
+            read(metrics, overflow.read)
+            None
+        }
+    }
 
   private def report(
       metrics: SearchMetrics,

@@ -119,22 +119,36 @@ object SegmentSearch extends Logging {
     }
   }
 
+  /** A set that did not fit: the segment whose batch went over, the bytes
+    * retained by then, and the budget. Everything read so far is closed; the
+    * caller streams the set instead, one batch at a time for every query group
+    * (docs/design/architecture/search-resources.html section 3.3).
+    */
+  final case class Overflow(
+      segmentId: Long,
+      retainedBytes: Long,
+      budgetBytes: Long,
+      read: ReadMetrics
+  )
+
   /** Reads the segment set into memory: every batch of an exact scan, every
-    * index handle of an index probe. The vectors of one set fit
-    * `vectorsMaxBytes` by construction, and this checks what it actually read
-    * against that.
+    * index handle of an index probe. The planner sized the set to fit
+    * `vectorsMaxBytes` from the row counts it had; this measures what was
+    * actually read, and a set that goes over comes back as an [[Overflow]] with
+    * nothing left open, rather than a failure.
     */
   def hold(
       segments: Seq[Long],
       open: Long => Source,
       vectorsMaxBytes: Long,
       layout: VectorLayout
-  ): Held = {
+  ): Either[Overflow, Held] = {
     require(segments != null, "A task must name its segments")
     val sources = Seq.newBuilder[Source]
     val batches = Map.newBuilder[Long, Seq[SegmentVectors.Batch]]
     var retained = 0L
     var read = ReadMetrics.Zero
+    def opened = new Held(sources.result(), batches.result().toMap, read)
     try {
       segments.foreach { segmentId =>
         val source = open(segmentId)
@@ -146,12 +160,17 @@ object SegmentSearch extends Logging {
             while (next.nonEmpty) {
               val batch = next.get
               retained += batch.base.buffer.capacity().toLong
-              require(
-                retained <= vectorsMaxBytes,
-                s"Segment $id fills more than the $vectorsMaxBytes bytes of vectors a task keeps; " +
-                  s"raise milvus.search.vectors.max.bytes or search fewer queries at a time"
-              )
               held += batch
+              if (retained > vectorsMaxBytes) {
+                batches += id -> held.result()
+                read = read + vectors.metrics
+                opened.close()
+                logInfo(
+                  s"Segment set not held: segment $id brings the vectors read to $retained bytes, " +
+                    s"over the $vectorsMaxBytes a task keeps; the set streams instead, once per query group"
+                )
+                return Left(Overflow(id, retained, vectorsMaxBytes, read))
+              }
               next = vectors.next()
             }
             batches += id -> held.result()
@@ -159,15 +178,14 @@ object SegmentSearch extends Logging {
           case Index(_, _, _) =>
         }
       }
-      val result = new Held(sources.result(), batches.result().toMap, read)
+      val result = opened
       logInfo(
         s"Segment set held: segments=${segments.size}, retainedBytes=${result.retainedBytes}, " +
           s"rowBytes=${layout.rowBytes}"
       )
-      result
+      Right(result)
     } catch {
       case failure: Throwable =>
-        val opened = new Held(sources.result(), batches.result().toMap, read)
         try opened.close()
         catch { case closing: Throwable => failure.addSuppressed(closing) }
         throw failure

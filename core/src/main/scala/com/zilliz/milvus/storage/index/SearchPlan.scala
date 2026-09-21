@@ -4,6 +4,7 @@ import scala.collection.mutable
 
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.milvus.storage.snapshot.SegmentIndexes
 
 /** Splits one search into the tasks of its first stage.
   *
@@ -47,11 +48,20 @@ object SearchPlan {
     */
   final case class Plan(
       sets: Seq[Seq[SegmentReadTask]],
-      groups: Seq[QueryGroup]
+      groups: Seq[QueryGroup],
+      estimated: Seq[Long] = Seq.empty
   ) {
     def tasks: Int = sets.size
     def isEmpty: Boolean = sets.isEmpty
   }
+
+  /** The share of a task's budget an unknown-sized segment is planned at. Half:
+    * two such segments fill a set, one is never alone in a set for nothing, and
+    * the task that reads the set streams instead of holding when the segments
+    * turn out larger (docs/design/architecture/search-resources.html section
+    * 3.3).
+    */
+  val UnknownSegmentShare: Double = 0.5
 
   /** What one query costs a task: its row in the query matrix and its bounded
     * top-k.
@@ -100,9 +110,10 @@ object SearchPlan {
     * it read and answer one query group after another on it; there are at least
     * as many sets as executors, so every executor has work. Segments go in
     * largest first and each one joins the lightest set that still has room,
-    * which spreads equal segments — including the ones whose row count the
-    * snapshot did not give — one per set. Segments keep their order inside a
-    * set.
+    * which spreads equal segments one per set. A segment whose row count
+    * nothing recorded is planned at half the limit, so it is never packed with
+    * more than one other; [[Plan.estimated]] names them. Segments keep their
+    * order inside a set.
     */
   def segmentSets(
       tasks: Seq[SegmentReadTask],
@@ -116,12 +127,10 @@ object SearchPlan {
       s"The retained vector limit must be positive: $vectorsMaxBytes"
     )
     if (tasks.isEmpty) return Seq.empty
-    val sizes =
-      tasks
-        .map(task =>
-          task.segmentId -> segmentBytes(task, layout, vectorsMaxBytes)
-        )
-        .toMap
+    val unknown = unknownSegmentBytes(layout, vectorsMaxBytes)
+    val sizes = tasks
+      .map(task => task.segmentId -> segmentBytes(task, layout, unknown))
+      .toMap
     val total = sizes.values.sum
     val needed = math.max(1L, (total + vectorsMaxBytes - 1L) / vectorsMaxBytes)
     val start =
@@ -161,24 +170,44 @@ object SearchPlan {
       .toSeq
   }
 
-  /** What a segment's vectors cost a task, or the whole budget when nothing
-    * says.
-    *
-    * Counting an unknown segment as nothing made the sizing say one set was
-    * enough however many segments there were, so the sets fell back to the
-    * executor count and a task was given more vectors than it may hold. The
-    * task then failed on its own limit, telling the reader to raise it, when
-    * what was wanted was another set. Unknown is treated as full: a set holds
-    * one such segment, which is the safe direction and the one the reader can
-    * act on.
+  /** The rows a segment is known to hold: from the snapshot, from its column
+    * groups, or from the row count its persisted index was built over. None
+    * when nothing recorded it, which is a V3 segment listed by manifest alone.
     */
+  def knownRows(task: SegmentReadTask): Option[Long] =
+    task.expectedRows.orElse(task.indexes match {
+      case SegmentIndexes.Available(indexes) =>
+        indexes.map(_.rowCount).filter(_ > 0L).maxOption
+      case _ => None
+    })
+
+  /** The bytes of vectors a set is known to hold, or None when any of its
+    * segments has no row count. What a task compares to its budget before it
+    * reads: a set known to be larger streams from the start.
+    */
+  def knownBytes(
+      set: Seq[SegmentReadTask],
+      layout: VectorLayout
+  ): Option[Long] = {
+    val rows = set.map(knownRows)
+    if (rows.forall(_.isDefined)) Some(rows.flatten.sum * layout.rowBytes)
+    else None
+  }
+
+  private def unknownSegmentBytes(
+      layout: VectorLayout,
+      vectorsMaxBytes: Long
+  ): Long =
+    math.max(
+      layout.rowBytes.toLong,
+      (vectorsMaxBytes * UnknownSegmentShare).toLong
+    )
+
   private def segmentBytes(
       task: SegmentReadTask,
       layout: VectorLayout,
-      vectorsMaxBytes: Long
-  ): Long = task.snapshotRows
-    .map(_ * layout.rowBytes.toLong)
-    .getOrElse(vectorsMaxBytes)
+      unknown: Long
+  ): Long = knownRows(task).map(_ * layout.rowBytes.toLong).getOrElse(unknown)
 
   /** The first-stage tasks of one search: the segment sets and the query groups
     * they each answer.
@@ -193,7 +222,8 @@ object SearchPlan {
       vectorsMaxBytes: Long
   ): Plan = Plan(
     segmentSets(tasks, layout, executors, vectorsMaxBytes),
-    groups(queries, layout, k, groupMaxBytes)
+    groups(queries, layout, k, groupMaxBytes),
+    tasks.filter(knownRows(_).isEmpty).map(_.segmentId)
   )
 
   /** How many bytes of vectors one task keeps at once: its whole segment set,
@@ -211,7 +241,8 @@ object SearchPlan {
       vectorsMaxBytes > 0,
       s"The retained vector limit must be positive: $vectorsMaxBytes"
     )
-    val bytes = set.map(segmentBytes(_, layout, vectorsMaxBytes)).sum
+    val unknown = unknownSegmentBytes(layout, vectorsMaxBytes)
+    val bytes = set.map(segmentBytes(_, layout, unknown)).sum
     math.min(math.max(bytes, layout.rowBytes.toLong), vectorsMaxBytes)
   }
 }

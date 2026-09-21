@@ -94,7 +94,7 @@
 <thead><tr><th>选项</th><th>默认值</th><th>作用</th></tr></thead><tbody>
 <tr><td><code>milvus.search.queries.max.bytes</code></td><td>1073741824</td><td>查询集走广播的字节上限：不超过就在 driver 上收集并广播，超过就按查询组打包成数据下发，不经 driver（2.1）</td></tr>
 <tr><td><code>milvus.search.group.max.bytes</code></td><td>536870912</td><td>一组查询在一个任务里的内存上限，按「组内查询数 ×（维度 × 元素宽度 + K × 28 字节）」计，前一项是查询矩阵，后一项是这组的 TopK；查询集按它分组</td></tr>
-<tr><td><code>milvus.search.vectors.max.bytes</code></td><td>2147483648</td><td>一个段组的向量字节上限，也就是一个任务同时留在内存里的量：查询集分成多组时，任务把段组读进内存一次，每个查询组在上面各算一遍。Milvus 的段默认不超过 1 GB，用 DiskANN 的 collection 不超过 2 GB；任务的 Arrow 分配仍受 <code>milvus.read.arrow.max.bytes</code> 约束</td></tr>
+<tr><td><code>milvus.search.vectors.max.bytes</code></td><td>自动</td><td>一个 executor 同时留在内存里的向量字节上限，除以槽位数是一个段组的上限：查询集分成多组时，任务把段组读进内存一次，每个查询组在上面各算一遍。不设时按 executor 内存推出（<a href="search-resources.html#budget">搜索路径的资源自适应</a> 3.3）；段组实际超过时改为每组重读。任务的 Arrow 分配仍受 <code>milvus.read.arrow.max.bytes</code> 约束</td></tr>
 </tbody></table></div>
 <p>搜索与建索引作业以 <code>spark.task.cpus</code> 等于 executor 核数提交，每个 executor 同时只跑一个这类任务，Knowhere 的线程池用满该 executor 的核。
 钉住的 Knowhere 子模块 Java API 已提供 <code>resizeSearchThreadPool</code> 与 <code>resizeBuildThreadPool</code>，连接器尚未调用；对应选项随 G4 落地（capabilities.md 第 11 节），GPU 开关上游未提供（README 第 5 节）。</p>
@@ -124,7 +124,8 @@
 <tr><td>executor 解码出的引擎或版本与声明不一致</td><td>报错，写明段与两边的值</td></tr>
 <tr><td>文件丢失或损坏、鉴权失败、版本不符、内存不足</td><td>原样传播；对象存储的瞬时错误按标准重试</td></tr>
 <tr><td><code>query_id</code> 重复、向量非法、维度不符</td><td>规划时报错：走广播时在 driver 上查，按数据下发时在打包作业里按 <code>query_id</code> 聚合后查</td></tr>
-<tr><td>单条查询放不进一组，或单个段的向量超过 <code>milvus.search.vectors.max.bytes</code>（此时段组装不下，多组查询无法在一次读取上算完）</td><td>规划时报错，写明是哪一项超了多少</td></tr>
+<tr><td>单条查询放不进一组</td><td>规划时报错，写明超了多少</td></tr>
+<tr><td>单个段组的向量超过任务的常驻额度（多组查询无法在一次读取上算完）</td><td>不报错：该任务对每个查询组重读一遍段组，driver 日志 <code>Search budget</code> 写明哪些段组会重读</td></tr>
 <tr><td>过滤后有效行少于 K</td><td>该查询返回全部有效行</td></tr>
 <tr><td>有效行足够，<code>ef</code> 翻倍 8 次后候选仍不足</td><td>报错</td></tr>
 </tbody></table></div>
@@ -203,7 +204,7 @@
 超过时不经 driver：查询集按查询组重分区，每组在 executor 上聚合成一行（组号、查询 id 数组、打包好的向量），<code>query_id</code> 的唯一性在这次聚合里查；这一行再与段组做交叉连接，Spark 把它随 shuffle 送到用得着它的任务。选哪条路只影响传输方式，不影响任务形态和结果。</li>
 <li><strong>第一阶段。</strong>一个任务一个段组，答完本作业的每个查询组。
 只有一个查询组时，任务逐段逐批调用 <code>SegmentSearch.run</code>，一批算完即释放，内存里只有一批向量；候选跨批跨段在任务内合并，每条查询最多交出 K 条。
-有多个查询组时，任务先把段组的向量读进内存（<code>SegmentSearch.hold</code>，段组在规划时按 <code>milvus.search.vectors.max.bytes</code> 划分，保证装得下），查询组一个接一个在这份数据上算，每组算完交出自己的候选并释放这组的堆。查询组是流过来的，只过一遍；留在内存里的是段组，所以两条下发路都只读一遍底库。
+有多个查询组时，任务先把段组的向量读进内存（<code>SegmentSearch.hold</code>，段组在规划时按任务的常驻额度划分），查询组一个接一个在这份数据上算，每组算完交出自己的候选并释放这组的堆。查询组是流过来的，只过一遍；留在内存里的是段组，所以两条下发路都只读一遍底库。段组实际读出来超过额度（行数未知的段按额度一半估）时，<code>hold</code> 释放已读的返回 <code>Overflow</code>，任务退回逐组重读，代价是 I/O × 组数。
 两种情况的 shuffle 量都是「段组数 × 查询数 × K × 24 字节」。每条候选是查询 id、段 id、行号和分数。</li>
 <li><strong>合并。</strong>候选按查询序号 <code>groupBy</code>，用 <code>functions.udaf</code> 包装的 <code>TopKAggregator</code> 聚合；聚合缓冲是有界堆，每步只留 K 条，排序规则见 2.6。聚合结果展开成带 <code>rank</code> 的命中行。</li>
 <li><strong>第二阶段。</strong><code>outputColumns</code> 非空时，命中行按段 id 重新分区，分区内按段 id 与行号排序；每段经 Milvus 的 <code>TableFormat</code> 对去重后的行号调用 <code>SegmentReader.take</code>，Arrow 行经 <code>ArrowConverter</code> 和 <code>CatalystTypeConverters</code> 转成 <code>Row</code>，由 <code>createDataFrame</code> 组成结果。<code>outputColumns</code> 为空时，命中行就是结果。</li>
@@ -457,7 +458,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 </figure>
 <ol>
 <li>任务逐段处理。Milvus 的 <code>TableFormat</code> 为每个段打开一个 <code>SegmentReader</code>，逐批读向量列，以及删除与过滤要用的主键、时间戳和标量列，段只读一遍；每批交出向量缓冲、由 <code>core.delete</code> 与 <code>core.expr</code> 生成的排除位图和这一批的起始行号。</li>
-<li><code>ExactScan</code> 把向量缓冲、一组查询和位图交给 Knowhere 暴力搜索，一批一次调用；一批的大小决定吞吐（并发任务数 × 批 ≤ L3），怎么选见 <a href="search-resources.html#block">搜索路径的资源自适应</a>。只有一个查询组时算完即释放；有多个查询组时，整个段组的批留在内存里，每个查询组都在它们上面算过之后一起释放，保留的字节不超过 <code>milvus.search.vectors.max.bytes</code>。</li>
+<li><code>ExactScan</code> 把向量缓冲、一组查询和位图交给 Knowhere 暴力搜索，一批一次调用；一批的大小决定吞吐（并发任务数 × 批 ≤ L3），怎么选见 <a href="search-resources.html#block">搜索路径的资源自适应</a>。只有一个查询组时算完即释放；有多个查询组时，整个段组的批留在内存里，每个查询组都在它们上面算过之后一起释放，保留的字节不超过任务的常驻额度，超过则改为逐组重读。</li>
 <li>Knowhere 返回的行号从这一批第 0 行算起，加上这一批的起始行号就是段内行号；结果并入该组的 <code>TopKMerger</code>。段内行号不受保留策略影响，候选不需要再拼回段上。</li>
 <li>一个查询组算完它能看到的全部数据后，这组每条查询的有界堆就是要交出的候选。任务内存是这个段组的向量、一组查询的矩阵和这组的 TopK。</li>
 </ol>

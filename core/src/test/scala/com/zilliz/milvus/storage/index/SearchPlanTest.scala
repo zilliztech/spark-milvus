@@ -5,7 +5,11 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
-import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.milvus.storage.snapshot.{
+  SegmentIndex,
+  SegmentIndexes,
+  SegmentLayout
+}
 
 /** How one search becomes first-stage tasks: vector-search.html section 2.1. */
 class SearchPlanTest extends AnyFunSuite with Matchers {
@@ -155,23 +159,17 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     ) shouldBe Seq(Seq(1L), Seq(2L))
   }
 
-  test("segments without a row count still spread over the sets") {
-    val tasks = Seq(
-      SegmentReadTask(
-        1L,
-        1L,
-        SegmentLayout.Manifest("segments/1", 3L),
-        Array.emptyByteArray,
-        Map.empty
-      ),
-      SegmentReadTask(
-        2L,
-        1L,
-        SegmentLayout.Manifest("segments/2", 3L),
-        Array.emptyByteArray,
-        Map.empty
-      )
+  private def unsized(segmentId: Long): SegmentReadTask =
+    SegmentReadTask(
+      segmentId,
+      1L,
+      SegmentLayout.Manifest("segments/" + segmentId, 3L),
+      Array.emptyByteArray,
+      Map.empty
     )
+
+  test("segments without a row count still spread over the sets") {
+    val tasks = Seq(unsized(1L), unsized(2L))
 
     segments(
       SearchPlan.segmentSets(
@@ -181,6 +179,80 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
         vectorsMaxBytes = 1L << 31
       )
     ) shouldBe Seq(Seq(1L), Seq(2L))
+  }
+
+  test("a segment without a row count is planned at half the budget") {
+    // Four unsized segments at 2000 bytes each fill two sets of 4000; before,
+    // they counted as nothing and all four went into one set.
+    val tasks = Seq(unsized(1L), unsized(2L), unsized(3L), unsized(4L))
+
+    val sets =
+      SearchPlan.segmentSets(
+        tasks,
+        layout,
+        executors = 1,
+        vectorsMaxBytes = 4000L
+      )
+
+    segments(sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
+    SearchPlan.retainedBytes(sets.head, layout, 4000L) shouldBe 4000L
+    // An unsized segment beside sized ones takes 2000 bytes of room: 2400,
+    // 2000 and 1600 bytes need two sets, and the 1600 join the lighter one.
+    segments(
+      SearchPlan.segmentSets(
+        Seq(task(1L, 150L), unsized(2L), task(3L, 100L)),
+        layout,
+        executors = 1,
+        vectorsMaxBytes = 4000L
+      )
+    ) shouldBe Seq(Seq(1L), Seq(2L, 3L))
+  }
+
+  test("the plan names the segments it estimated, and a set's known bytes") {
+    val plan = SearchPlan.of(
+      Seq(task(1L, 10L), unsized(2L), task(3L, 10L)),
+      layout,
+      executors = 1,
+      queries = 1,
+      k = 1,
+      groupMaxBytes = 4000L,
+      vectorsMaxBytes = 1L << 31
+    )
+
+    plan.estimated shouldBe Seq(2L)
+    SearchPlan.knownBytes(Seq(task(1L, 10L), task(3L, 10L)), layout) shouldBe
+      Some(320L)
+    SearchPlan.knownBytes(Seq(task(1L, 10L), unsized(2L)), layout) shouldBe None
+    SearchPlan.knownBytes(Seq.empty, layout) shouldBe Some(0L)
+  }
+
+  test("a persisted index's row count sizes a segment the snapshot did not") {
+    val indexed = unsized(7L).copy(indexes =
+      SegmentIndexes.Available(
+        Vector(
+          SegmentIndex(
+            collectionId = 1L,
+            partitionId = 1L,
+            segmentId = 7L,
+            fieldId = 100L,
+            indexId = 1L,
+            buildId = 1L,
+            name = "v",
+            parameters = Map("index_type" -> "HNSW"),
+            filePaths = Vector("index/7"),
+            rowCount = 25L,
+            serializedSize = 1L,
+            indexVersion = 1L,
+            currentIndexVersion = None,
+            indexStorePathVersion = None
+          )
+        )
+      )
+    )
+
+    SearchPlan.knownRows(indexed) shouldBe Some(25L)
+    SearchPlan.knownRows(unsized(8L)) shouldBe None
+    SearchPlan.knownBytes(Seq(indexed), layout) shouldBe Some(400L)
   }
 
   test("a search over no segments plans no tasks") {
