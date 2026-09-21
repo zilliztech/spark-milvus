@@ -63,7 +63,7 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     )
     local.bytes shouldBe (470L * GiB / 2 / 16)
     local.reason shouldBe
-      "limit=503GiB heap=32GiB offheap=470GiB x0.5 / 16 slots -> 15040MiB (auto)"
+      "limit=503GiB heap=32GiB offheap=470GiB x0.5 / 16 slots -> 14.7GiB (auto)"
     // A pod of 8 GiB with a 4 GiB heap and 4 slots: (8 - 4 - 1) x 0.5 / 4.
     SearchResources
       .vectorsBudget(Some(8L * GiB), 4L * GiB, 4, None)

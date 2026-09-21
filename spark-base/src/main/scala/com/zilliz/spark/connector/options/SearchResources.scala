@@ -156,6 +156,8 @@ object SearchResources {
 
   private def mib(bytes: Long): String =
     if (bytes >= (1L << 30) && bytes % (1L << 30) == 0) s"${bytes >> 30}GiB"
+    else if (bytes >= (1L << 30))
+      f"${bytes / (1024.0 * 1024.0 * 1024.0)}%.1fGiB"
     else if (bytes % (1L << 20) == 0) s"${bytes >> 20}MiB"
     else if (bytes >= (1L << 20)) f"${bytes / (1024.0 * 1024.0)}%.1fMiB"
     else s"${bytes}B"
