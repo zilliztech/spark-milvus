@@ -51,16 +51,13 @@ class PackageNativeTest(unittest.TestCase):
             "knowhere.revision": "b" * 40,
             "platform": "linux-x86_64" if os.uname().machine == "x86_64" else "linux-aarch64",
             "with_cardinal": False,
+            "with_diskann": PACKAGE_NATIVE.FORMAT.builds_diskann(),
             "dependency.mode": "shared",
             "auditPolicy": "jvm-load",
             "audit": "passed",
             "jvmLoadTests": PACKAGE_NATIVE.expected_jvm_load_tests(),
             "knowhereCApiTestsExit": 0,
-            "knowhereCApiTests": [
-                "knowhere_c_api",
-                "knowhere_c_api_concurrency",
-                "knowhere_c_api_diskann_acceptance",
-            ],
+            "knowhereCApiTests": list(PACKAGE_NATIVE.C_API_TESTS),
             "relocationRoots": [],
             "dlopenEntries": list(PACKAGE_NATIVE.AUDIT_DLOPEN_ENTRIES),
         }
@@ -331,6 +328,7 @@ class PackageNativeTest(unittest.TestCase):
             ("knowhere.revision", "b" * 39),
             ("platform", "unknown"),
             ("with_cardinal", "false"),
+            ("with_diskann", "true"),
             ("dependency.mode", "static"),
         ):
             with self.subTest(key=key):
@@ -515,6 +513,9 @@ class PackageNativeTest(unittest.TestCase):
                 self.assertEqual(zipfile.ZIP_DEFLATED, entry.compress_type)
             manifest = self.manifest(archive)
             self.assertEqual(self.metadata["storage.revision"], manifest["storage.revision"])
+            # The features a platform's build differs in are declared, not inferred.
+            self.assertEqual("false", manifest["with_cardinal"])
+            self.assertEqual(str(self.metadata["with_diskann"]).lower(), manifest["with_diskann"])
             self.assertEqual(
                 hashlib.sha256(self.provenance.read_bytes()).hexdigest(), manifest["provenance.sha256"],
             )

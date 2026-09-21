@@ -29,6 +29,22 @@ provide each pinned upstream recipe that is absent from the local cache. A
 CMake 4 rejects the `cmake_minimum_required` of several pinned upstream
 recipes, so the declared version is the one that must be on `PATH`.
 
+Conan's own settings must accept the compiler version its profile names. The
+`darwin-aarch64` profile names the Apple clang it was validated with, and
+Conan's `settings.yml` stops a few releases behind Xcode, so a
+`settings_user.yml` in the Conan home extends the list:
+
+```yaml
+compiler:
+    apple-clang:
+        version: ["18", "19", "20", "21"]
+```
+
+That is a Conan configuration, not a recipe change. The pinned recipes are used
+as published: boost's and avro's first source URL is dead and Conan falls back
+to the mirror each recipe already lists, and thrift and arrow compile unpatched
+against the macOS 26 SDK.
+
 No package manager ships that CMake next to a current one, so put it in a
 virtual environment of its own and prepend that to `PATH` for the build. It is
 the machine's, not the checkout's: a directory under `/tmp` is emptied by the
@@ -43,7 +59,12 @@ PATH=~/toolchain/cmake3venv/bin:$PATH scripts/build-native.sh --work-dir ...
 | Platform | Compilers | Binary tools | Also |
 | --- | --- | --- | --- |
 | `linux-x86_64`, `linux-aarch64` | GCC/G++/gfortran 12 | patchelf, readelf, ldd, binutils | the libaio development package, which Folly's async I/O needs; Ubuntu supplies libclang in `libclang-dev` |
-| `darwin-aarch64` | Apple Clang, a separate OpenMP runtime, gfortran | otool, install_name_tool, codesign | no libaio, liburing or OpenBLAS: `dependencies.json` scopes those to Linux, as the engines' own conanfiles do |
+| `darwin-aarch64` | Apple Clang and Homebrew's OpenMP runtime; no Fortran | otool, install_name_tool, codesign | no libaio, liburing or OpenBLAS: `dependencies.json` scopes those to Linux, as the engines' own conanfiles do, and faiss takes Accelerate for BLAS |
+
+Where the platforms differ in what an engine carries, the bundle declares it:
+`with_diskann` is false on a platform whose adapter reports no DiskANN, because
+its only aligned reader is built on libaio and io_uring. The required C API test
+set follows the same flag rather than the platform name.
 
 The build records tool versions and never reads a native library from an older
 connector JAR.

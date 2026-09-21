@@ -33,6 +33,11 @@ class Format:
     #: loader, consulted only after a recorded path fails, so it adds providers
     #: without shadowing the ones the system supplies.
     library_fallback_variable = None
+    #: The environment variable that loads a library into a process before its
+    #: own dependencies, which is how HotSpot's signal chaining reaches a JVM:
+    #: the loader has to map libjsig before the VM installs its handlers, so no
+    #: Java-level call can replace it.
+    preload_variable = None
 
     def library_name(self, base, version=None):
         raise NotImplementedError
@@ -118,6 +123,16 @@ class Format:
         """
         return 120
 
+    def builds_diskann(self):
+        """Whether the Knowhere build includes DiskANN here.
+
+        Its only aligned reader is built on libaio and io_uring, so a platform
+        that has neither cannot carry the index or its acceptance fixture. The
+        bundle declares the answer, rather than a consumer inferring it from the
+        platform name.
+        """
+        return True
+
     def library_stem(self, name):
         """A library file name without its lib prefix, version and suffix."""
         raise NotImplementedError
@@ -144,6 +159,7 @@ class Elf(Format):
     operating_system = "linux"
     conan_os = "Linux"
     library_fallback_variable = "LD_LIBRARY_PATH"
+    preload_variable = "LD_PRELOAD"
     loader_origin = "$ORIGIN"
     tools = ("readelf", "patchelf", "ldd")
 
@@ -236,6 +252,7 @@ class MachO(Format):
     operating_system = "darwin"
     conan_os = "Macos"
     library_fallback_variable = "DYLD_FALLBACK_LIBRARY_PATH"
+    preload_variable = "DYLD_INSERT_LIBRARIES"
     loader_origin = "@loader_path"
     tools = ("otool", "install_name_tool", "codesign")
 
@@ -261,6 +278,12 @@ class MachO(Format):
 
     def library_stem(self, name):
         return re.sub(r"(?:\.[0-9][^.]*)*\.dylib$", "", name.removeprefix("lib"))
+
+    def builds_diskann(self):
+        # macOS has neither libaio nor io_uring, and DiskANN's aligned reader is
+        # built on them; cmake/Knowhere.cmake drops the index sources here the
+        # way upstream does when the option is off.
+        return False
 
     def compiler_runtime(self):
         # Apple Clang has no OpenMP runtime of its own; libomp is the macOS

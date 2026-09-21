@@ -19,25 +19,21 @@ _FORMAT = platforms.host()
 JVM_LOAD_ENTRIES = (_FORMAT.library_name("milvus-storage-jni"),
                     _FORMAT.library_name("knowhere_jni"))
 JAVA_TIMEOUT_SECONDS = _FORMAT.jvm_load_timeout_seconds()
+# Options a JVM reads from the environment. The loader's own variables are the
+# platform's business and the adapter removes them.
 JAVA_ENVIRONMENT_OVERRIDES = (
     "CLASSPATH",
     "JAVA_TOOL_OPTIONS",
     "JDK_JAVA_OPTIONS",
     "_JAVA_OPTIONS",
-    "LD_AUDIT",
-    "LD_BIND_NOW",
-    "LD_DEBUG",
-    "LD_LIBRARY_PATH",
-    "LD_PRELOAD",
 )
 MARKER_FAILURE_EXIT = 125
 
 
 def _clean_environment():
-    environment = os.environ.copy()
+    environment = _FORMAT.clean_environment()
     for name in JAVA_ENVIRONMENT_OVERRIDES:
         environment.pop(name, None)
-    environment["LC_ALL"] = "C"
     return environment
 
 
@@ -119,7 +115,7 @@ def check_jvm_loads(directory, output=None):
     java, java_home, libjsig = _java_runtime()
     environment = _clean_environment()
     environment["JAVA_HOME"] = str(java_home)
-    environment["LD_PRELOAD"] = str(libjsig)
+    environment[_FORMAT.preload_variable] = str(libjsig)
     orders = (JVM_LOAD_ENTRIES, tuple(reversed(JVM_LOAD_ENTRIES)))
     records = []
     with tempfile.TemporaryDirectory(prefix="milvus-native-load-check-") as temporary:

@@ -1,5 +1,6 @@
 """Check repeated staging and reusable dependency/tool source inputs."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -15,26 +16,30 @@ from build import (knowhere_c_api_tests, cardinal_versions, digest, platform_too
 
 class CardinalVersionTest(unittest.TestCase):
     def write(self, root, generation, body):
-        path = root / "cmake" / "libs" / "cardinal" / ("v" + generation) / "CMakeLists.txt"
+        path = root / "cmake" / "libs" / "cardinal" / generation / "CMakeLists.txt"
         path.parent.mkdir(parents=True)
         path.write_text(body)
 
     def test_tags_come_from_the_knowhere_cmake_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.write(root, "1", "# comment\nset(CARDINAL_VERSION v2.5.112)\nset(CARDINAL_REPO_URL \"x\")\n")
-            self.write(root, "2", "set(CARDINAL_VERSION v3.0.8)\n")
-            self.assertEqual(cardinal_versions(root), {"1": "v2.5.112", "2": "v3.0.8"})
+            self.write(root, "v1", "# comment\nset(CARDINAL_VERSION v2.5.112)\nset(CARDINAL_REPO_URL \"x\")\n")
+            self.write(root, "v2", "set(CARDINAL_VERSION v3.0.8)\n")
+            self.assertEqual(cardinal_versions(root), {"v1": "v2.5.112", "v2": "v3.0.8"})
 
     def test_a_missing_or_ambiguous_version_file_fails(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.write(root, "1", "set(CARDINAL_VERSION v2.5.112)\n")
+            self.write(root, "v1", "set(CARDINAL_VERSION v2.5.112)\n")
             with self.assertRaisesRegex(RuntimeError, "no Cardinal version file"):
                 cardinal_versions(root)
-            self.write(root, "2", "set(CARDINAL_VERSION a)\nset(CARDINAL_VERSION b)\n")
+            self.write(root, "v2", "set(CARDINAL_VERSION a)\nset(CARDINAL_VERSION b)\n")
             with self.assertRaisesRegex(RuntimeError, "exactly one"):
                 cardinal_versions(root)
+
+
+#: The JNI entries this platform names, so fixtures match what promotion checks.
+ENTRIES = jvm_load.JVM_LOAD_ENTRIES
 
 
 class BuildContextPinTest(unittest.TestCase):
@@ -47,9 +52,6 @@ class BuildContextPinTest(unittest.TestCase):
         section = replace_requires_section({"openssl": "openssl/3.3.2#9f9f"})
         self.assertIn("openssl/*: openssl/3.3.2#9f9f", section)
         self.assertNotIn("openssl/*: openssl/3.3.2\n", section)
-
-#: The JNI entries this platform names, so fixtures match what promotion checks.
-ENTRIES = jvm_load.JVM_LOAD_ENTRIES
 
 
 class BundlePromotionTest(unittest.TestCase):
@@ -226,6 +228,31 @@ class CorrosionSourceTest(unittest.TestCase):
         (self.source / "untracked.cmake").write_text("unreviewed")
         with self.assertRaisesRegex(ValueError, "clean pinned checkout"):
             snapshot_corrosion(self.specification, self.source, self.root / "dirty")
+
+
+class JvmLoadEnvironmentTest(unittest.TestCase):
+    """The load check decides what the JVM starts with, on every platform."""
+
+    def test_each_format_names_the_preload_variable_its_loader_reads(self):
+        variables = {name: binary_format().preload_variable
+                     for name, binary_format in platforms.FORMATS.items()}
+        self.assertTrue(all(variables.values()), variables)
+        # HotSpot signal chaining is requested through the loader's own
+        # variable, so no two formats can share one.
+        self.assertEqual(len(variables), len(set(variables.values())), variables)
+
+    def test_the_check_starts_from_an_environment_without_loader_or_jvm_overrides(self):
+        adapter = platforms.host()
+        injected = {
+            adapter.preload_variable: "/unusable/preload",
+            adapter.library_fallback_variable: "/unusable/lib",
+            "JAVA_TOOL_OPTIONS": "-Dinjected=1",
+            "CLASSPATH": "/unusable/classes",
+        }
+        with patch.dict(os.environ, injected):
+            environment = jvm_load._clean_environment()
+        for name in injected:
+            self.assertNotIn(name, environment)
 
 
 if __name__ == "__main__":

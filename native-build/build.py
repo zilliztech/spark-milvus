@@ -17,11 +17,10 @@ import jvm_load
 import platforms
 
 
-# DiskANN's only aligned reader is built on libaio, so its acceptance fixture
-# exists where DiskANN does.
+# The DiskANN acceptance fixture exists where DiskANN does.
 def knowhere_c_api_tests(adapter):
     names = ["knowhere_c_api", "knowhere_c_api_concurrency"]
-    if not isinstance(adapter, platforms.MachO):
+    if adapter.builds_diskann():
         names.append("knowhere_c_api_diskann_acceptance")
     return sorted(names)
 
@@ -47,7 +46,10 @@ def git_value(source, *args):
     return subprocess.check_output(["git", "-C", str(source), *args], text=True).strip()
 
 
-CARDINAL_VERSION_FILES = {"1": "cmake/libs/cardinal/v1/CMakeLists.txt", "2": "cmake/libs/cardinal/v2/CMakeLists.txt"}
+# Keyed the way Knowhere names each checkout under thirdparty/ (cardinalv1,
+# cardinalv2), which Cardinal.cmake, Sources.cmake and the license
+# collection in stage.py address by the same name.
+CARDINAL_VERSION_FILES = {"v1": "cmake/libs/cardinal/v1/CMakeLists.txt", "v2": "cmake/libs/cardinal/v2/CMakeLists.txt"}
 
 
 def cardinal_versions(knowhere_source):
@@ -409,10 +411,12 @@ def build(args, repository, java_home, work, target, profile):
                 and json.loads(knowhere_source_identity.read_text()) != knowhere_identity_record):
             raise RuntimeError("Knowhere source changed or the snapshot is unverified; use a new work directory")
         knowhere_source_identity.write_text(json.dumps(knowhere_identity_record, indent=2) + "\n")
+        adapter = platforms.host()
         metadata = {"format.version": "1", "platform": target, "dependency.mode": "shared",
                     "build.system": "independent-cmake",
                     "storage.revision": storage_pin, "knowhere.revision": knowhere_pin,
-                    "with_cardinal": args.with_cardinal, "with_diskann": True,
+                    "with_cardinal": args.with_cardinal,
+                    "with_diskann": adapter.builds_diskann(),
                     "storageSourceManifestSha256": digest(provenance / "storage-source-files.json"),
                     "knowhereSourceManifestSha256": digest(knowhere_identity),
                     "knowhereSourceIdentitySha256": digest(knowhere_source_identity),
@@ -423,7 +427,6 @@ def build(args, repository, java_home, work, target, profile):
                     "featureOptions": {"storage.jemalloc": False, "storage.fiu": False,
                                        "storage.crt": False, "storage.talon": False,
                                        "storage.rust.openssl.shared": True}, "jobs": args.jobs}
-        adapter = platforms.host()
         for name, command in (*adapter.toolchain_versions(), ("cmake", ["cmake", "--version"]),
                               ("conan", ["conan", "--version"]), ("java", [str(java_home / "bin/java"), "-version"]),
                               ("rustc", ["rustc", "--version", "--verbose"]), ("cargo", ["cargo", "--version"]),
@@ -588,7 +591,10 @@ def build(args, repository, java_home, work, target, profile):
         if args.cargo_cache and not (native_build / "cargo/build").exists():
             phase("seed-cargo-cache")
             (native_build / "cargo").mkdir(parents=True, exist_ok=True)
-            run(["cp", "-a", "--reflink=auto", args.cargo_cache, native_build / "cargo/build"])
+            # Copied in-process: the cheap clone flag is spelled --reflink=auto
+            # by GNU cp and -c by the BSD cp macOS ships, so neither command
+            # line runs everywhere.
+            shutil.copytree(args.cargo_cache, native_build / "cargo/build", symlinks=True)
         phase("configure-independent-cmake")
         common.append("-DFETCHCONTENT_SOURCE_DIR_CORROSION=" + str(corrosion))
         trace = provenance / "cmake-trace.jsonl"

@@ -17,13 +17,13 @@ import sbtassembly.Assembly.JarEntry
 /** A platform JAR containing one dependency graph for both upstream JNI APIs.
   */
 object NativeBundle {
-  // DiskANN's only aligned reader is built on libaio, so its acceptance fixture
-  // exists where DiskANN does.
-  private def knowhereCApiTests = Vector(
+  // The DiskANN acceptance fixture exists where DiskANN does, which the bundle
+  // declares in `with_diskann` rather than the platform name implying it.
+  private def knowhereCApiTests(withDiskann: Boolean) = Vector(
     "knowhere_c_api",
     "knowhere_c_api_concurrency"
-  ) ++ (if (NativePlatform.isDarwin(platform)) Vector.empty
-        else Vector("knowhere_c_api_diskann_acceptance"))
+  ) ++ (if (withDiskann) Vector("knowhere_c_api_diskann_acceptance")
+        else Vector.empty)
   private def jvmLoadEntries = NativePlatform.jvmLoadEntries(platform)
   private def auditDlopenEntries = NativePlatform.auditDlopenEntries(platform)
   private def cardinalPlugins = NativePlatform.cardinalPlugins(platform)
@@ -198,6 +198,10 @@ object NativeBundle {
       require(
         Set("true", "false")(manifest.getProperty("with_cardinal", "")),
         "Invalid Cardinal build feature"
+      )
+      require(
+        Set("true", "false")(manifest.getProperty("with_diskann", "")),
+        "Invalid DiskANN build feature"
       )
       def names(key: String): Vector[String] = {
         val value = manifest.getProperty(key, "")
@@ -394,7 +398,9 @@ object NativeBundle {
       "Native provenance Knowhere C API tests did not pass"
     )
     require(
-      strings("knowhereCApiTests") == knowhereCApiTests,
+      strings("knowhereCApiTests") == knowhereCApiTests(
+        boolean("with_diskann")
+      ),
       "Native provenance has an incomplete Knowhere C API test set"
     )
     require(
@@ -437,6 +443,10 @@ object NativeBundle {
     require(
       withCardinal.toString == manifest.getProperty("with_cardinal"),
       "Native provenance Cardinal flag differs from the manifest"
+    )
+    require(
+      boolean("with_diskann").toString == manifest.getProperty("with_diskann"),
+      "Native provenance DiskANN flag differs from the manifest"
     )
 
     val provenanceLibraries = objectValue("libraries")

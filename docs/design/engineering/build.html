@@ -35,18 +35,17 @@
 
 <p class="lead">Connector 在 executor 里加载两个原生引擎：读写 Milvus 段文件的 milvus-storage 和做向量搜索的 Knowhere。它们共用十几个 C++ 库，所以每个平台只能由一张 Conan 依赖图编成一个原生 JAR <code>milvus-native-&lt;平台&gt;.jar</code>；平台是 Linux 与 macOS 乘 x86_64 与 aarch64 四种，编译它有两种方案：Docker 里编，或本机编。构建阶段、打包与发布的执行细节见 <a href="../../../native-build/README.md">native-build/README.md</a> 和 <a href="../../contributing.md">contributing.md</a>。</p>
 
-<div class="state"><strong>2026-09-20 状态。</strong>当前 gitlink 为 milvus-storage <code>7eb13578</code>、Knowhere <code>29210a33</code>。四个平台中 linux-x86_64 与 darwin-aarch64 有源码构建 profile 和验收记录。linux-x86_64 完成三次统一构建，Knowhere C API 测试与两种顺序的 JVM 加载都通过，<code>make test</code> 为 1,160 项成功、0 项失败、149 项取消；这批结果早于第 5 节的平台适配改造，ELF 的取值原样搬进了 <code>Elf</code> 类，之后没有在 Linux 上重跑。darwin-aarch64 在 macOS 本机收集 221 个库和 203 个别名，两个 JNI 入口在两种加载顺序下都由全新 JVM 加载，Knowhere C API 测试通过，149 MB 平台 JAR 经 <code>verifyNativeBundle</code> 校验，带该包的根测试为 1,101 项成功、0 项失败、165 项因缺 UAT 环境取消。linux-aarch64 与 darwin-x86_64 的 profile 未写。尚未做：空 Conan 缓存的 Docker 重建，真实 UAT 实例上的查询复测。</div>
+<div class="state"><strong>2026-09-20 状态。</strong>当前 gitlink 为 milvus-storage <code>7eb13578</code>、Knowhere <code>29210a33</code>。四个平台中有两个有源码构建 profile 和验收记录。linux-x86_64：本机已完成三次统一构建，两道门都通过，<code>make test</code> 为 1,160 项成功、0 项失败、149 项取消。darwin-aarch64：本机从空 Conan 缓存完整构建一次，没有改动任何 recipe，Knowhere C API 测试 2/2，221 个动态库与 203 个别名入包，逐库 Mach-O 诊断 221/221 通过，两个全新 JVM 的双向 <code>System.load</code> 均退出 0，平台 JAR 148,924,666 字节、SHA-256 <code>97c2b5f7</code>…，<code>make package</code> 与显式 <code>NATIVE_BUNDLE</code> 两条路径的 <code>verifyNativeBundle</code> 都通过；DiskANN 按平台关闭并写进 <code>with_diskann=false</code>。该平台只有开源变体：Knowhere 钉的 Cardinal <code>v2.5.112</code> 与 <code>v3.0.8</code> 在 darwin-aarch64 上编不过（Darwin 的 <code>uint64_t</code>/<code>size_t</code> 类型不同、Linux 专有的 <code>MADV_HUGEPAGE</code> 与 <code>O_DIRECT</code>、直接 <code>#include &lt;cblas.h&gt;</code>、SVE intrinsic），Knowhere 自己的 macOS CI 也不编 Cardinal，Cardinal 的验证留在 Linux。linux-aarch64 与 darwin-x86_64 的 profile 未写。darwin-aarch64 的 <code>make test</code>（带该包）为 1,167 项成功、0 项失败、152 项取消，取消的全部是缺少 <code>MILVUS_UAT_*</code>/<code>MILVUS_JNI_S3_BUCKET</code> 环境的 UAT 用例，原生用例（StorageNativeTest、WriterRoundTripTest、KnowhereBuffersTest、NativeVectorSearchTest）实际运行。尚未做：darwin-aarch64 的真实 UAT 查询，空 Conan 缓存的 Docker 重建，linux 侧的真实 UAT 查询复测。</div>
 
 <nav aria-label="目录">
   <a href="#libraries">1 依赖库</a>
   <a href="#prerequisites">2 编译前置条件</a>
   <a href="#options">3 两种构建方案</a>
   <a href="#layout">4 目录设计</a>
-  <a href="#platforms">5 平台适配层</a>
 </nav>
 
 <h2 id="libraries">1 依赖库有哪些，各自做什么</h2>
-<p><strong>每个平台的原生 JAR 分三层：两个 JNI 入口，两个引擎（milvus-storage 一个库，Knowhere 两个），其余是两个引擎共用的 Conan 依赖（linux-x86_64 上 157 个，合计 162 个动态库；darwin-aarch64 上 216 个，合计 221 个）。</strong>依赖由 <code>native-build/dependencies.json</code> 固定的 32 个直接 Conan 包和它们的传递依赖组成，完整清单以该文件和包内 <code>manifest.properties</code> 为准，本页不展开。库名在 Linux 是 <code>libfoo.so.1</code>，在 macOS 是 <code>libfoo.1.dylib</code>；JVM 侧不写后缀，入口库名由清单声明，其余由 <code>System.mapLibraryName</code> 推出。</p>
+<p><strong>每个平台的原生 JAR 分三层：两个 JNI 入口，两个引擎（milvus-storage 一个库，Knowhere 两个），其余是两个引擎共用的 Conan 依赖（linux-x86_64 上 157 个、合计 162 个动态库；darwin-aarch64 上 216 个、合计 221 个）。</strong>依赖由 <code>native-build/dependencies.json</code> 固定的 32 个直接 Conan 包和它们的传递依赖组成，完整清单以该文件和包内 <code>manifest.properties</code> 为准，本页不展开。库名在 Linux 是 <code>libfoo.so.1</code>，在 macOS 是 <code>libfoo.1.dylib</code>；JVM 侧不写后缀，入口库名由清单声明，其余由 <code>System.mapLibraryName</code> 推出。</p>
 
 <div class="diagram">
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" role="img" aria-labelledby="fig1-title">
@@ -91,9 +90,10 @@
 <tr><th>依赖</th><th>Linux（x86_64、aarch64）</th><th>macOS（x86_64、aarch64）</th></tr>
 <tr><td>Conan</td><td colspan="2">2.25.1</td></tr>
 <tr><td>CMake</td><td>3.27.5</td><td>3.31.10</td></tr>
-<tr><td>Ninja</td><td colspan="2">随发行版 / Homebrew</td></tr>
-<tr><td>C/C++ 编译器</td><td>GCC、G++ 12</td><td>Apple Clang 21，另加 Homebrew <code>libomp</code> 提供 OpenMP</td></tr>
-<tr><td>Fortran 编译器（OpenBLAS）</td><td>gfortran 12</td><td>Homebrew gfortran</td></tr>
+<tr><td>Ninja</td><td>随发行版</td><td>Homebrew</td></tr>
+<tr><td colspan="3" class="muted">CMake 版本由各平台 profile 的 <code>[platform_tool_requires]</code> 声明，PATH 上必须是这个版本；CMake 4 会拒绝多个上游 recipe 的 <code>cmake_minimum_required</code>。系统包管理器不会把它装在当前版本旁边，<code>native-build/README.md</code> 给出用私有 venv 安装的做法</td></tr>
+<tr><td>C/C++ 编译器</td><td>GCC、G++ 12</td><td>Apple Clang，另加 Homebrew <code>libomp</code> 提供 OpenMP</td></tr>
+<tr><td>Fortran 编译器（OpenBLAS）</td><td>gfortran 12</td><td>不需要：<code>dependencies.json</code> 把 OpenBLAS 限定在 Linux，faiss 在 macOS 上用 Accelerate</td></tr>
 <tr><td>Rust、Cargo</td><td colspan="2">rustup stable</td></tr>
 <tr><td>libclang</td><td>随发行版（Ubuntu <code>libclang-dev</code>）</td><td>Xcode Command Line Tools 自带</td></tr>
 <tr><td>JDK</td><td colspan="2">21</td></tr>
@@ -103,20 +103,16 @@
 <tr><td>异步 I/O 头文件</td><td><code>libaio-dev</code></td><td>不需要，DiskANN 关闭</td></tr>
 <tr><td>ccache、Git</td><td colspan="2">随发行版 / Homebrew</td></tr>
 </table></div>
-<p>CMake 的版本由平台 profile 的 <code>[platform_tool_requires]</code> 声明，<code>PATH</code> 上必须先出现这个版本：几个固定的上游 recipe 的 <code>cmake_minimum_required</code> 被 CMake 4 拒绝。没有包管理器会在当前版本旁边再装一个 3.x，所以把它装进一份单独的 Python 虚拟环境，构建时把该目录前置到 <code>PATH</code>。这份环境属于机器，不放在 <code>/tmp</code> 下——系统清空 <code>/tmp</code> 时会把工具链一起带走。</p>
-<pre><code>python3 -m venv ~/toolchain/cmake3venv
-~/toolchain/cmake3venv/bin/pip install cmake==3.31.10 ninja
-PATH=~/toolchain/cmake3venv/bin:$PATH make native-bundle</code></pre>
+<p>Conan 自己的 settings 必须接受 profile 声明的编译器版本。<code>profiles/darwin-aarch64</code> 写的是验收时的 Apple clang 版本，而 Conan 2.25.1 的 <code>settings.yml</code> 落后 Xcode 几个版本，所以 Conan home 里要有一份 <code>settings_user.yml</code> 把 <code>apple-clang</code> 的版本列表补齐。这是 Conan 配置，不是改 recipe：固定的 recipe 按发布原样使用，boost 与 avro 的首个源地址已失效，Conan 回退到 recipe 自带的镜像，thrift 与 arrow 在 macOS 26 SDK 的 libc++ 下原样编译通过。</p>
+<p>表里的 CMake 版本是 profile 的 <code>[platform_tool_requires]</code> 声明的那个，必须先出现在 <code>PATH</code> 上：依赖链里若干包拒绝 CMake 4，而没有包管理器会把一个 CMake 3 装在当前版本旁边，所以它放在自己的虚拟环境里，并且不放在 <code>/tmp</code>——那里会被系统清空，构建在编译任何东西之前就失败。</p>
 
 <h2 id="options">3 两种构建方案</h2>
 <p><strong>Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 <code>build.py</code>，产物相同。</strong>构建不做交叉编译，每个平台的 JAR 在同平台机器上编。<code>build.py</code> 由 <code>platforms.host_platform()</code> 判断主机平台，缺 profile 或适配器时报出缺哪一个；Makefile 的选择规则今天仍只在 linux-x86_64 默认走统一包，macOS 上要直接调 <code>scripts/build-native.sh</code>，或用 <code>NATIVE_BUNDLE</code> 指向编好的包。</p>
 <div class="table-scroll"><table>
 <tr><th>方案</th><th>命令</th><th>前置条件</th><th>产物与限制</th><th>用在哪</th></tr>
 <tr><td>Docker 构建</td><td><code>docker build --build-arg PUBLISH_MAVEN=false -t spark-milvus .</code></td><td>Docker 与 BuildKit；网络能到 JFrog、GitHub、crates.io。工具链由 Dockerfile 安装，本机无需准备</td><td>统一包 + assembly。Conan、Cargo、ccache、Coursier、Ivy、sbt 缓存各在一个 <code>sharing=locked</code> 的 cache mount 里，失败的 RUN 不丢已完成的依赖。worker 是哪个架构就出哪个架构的包；只有 Linux</td><td>Jenkins 发布流水线；验证"空缓存能否完整构建"</td></tr>
-<tr><td>本机构建</td><td><code>make native-bundle NATIVE_JOBS=50</code><br><code>make package</code></td><td>第 2 节本平台一列；PATH 上先出现上表的版本</td><td>同上，产物在 <code>target/native-build/&lt;平台&gt;/</code>；<code>--conan-lock</code> 复用审核过的 lock，<code>--no-remote</code> 只用缓存。输入变化要换新工作目录，缓存仍复用。产物依赖构建机的 glibc：在比 Spark 镜像（Ubuntu 22.04，glibc 2.35）更新的系统上编出的包在该镜像里加载失败（2026-09-20 实测：本机包要求 <code>GLIBC_2.38</code>，sbt 校验拒绝），要给 Spark 镜像用的包应在<a href="devcontainer.html">开发容器</a>或 Docker 构建里编</td><td>改 storage、Knowhere、依赖版本或 CMake 规则的开发；工具链也可由<a href="devcontainer.html">开发容器</a>提供（设计稿）</td></tr>
+<tr><td>本机构建</td><td><code>make native-bundle NATIVE_JOBS=50</code><br><code>make package</code></td><td>第 2 节本平台一列；PATH 上先出现上表的版本</td><td>同 A，产物在 <code>target/native-build/&lt;平台&gt;/</code>；<code>--conan-lock</code> 复用审核过的 lock，<code>--no-remote</code> 只用缓存。输入变化要换新工作目录，缓存仍复用。产物依赖构建机的 glibc：在比 Spark 镜像（Ubuntu 22.04，glibc 2.35）更新的系统上编出的包在该镜像里加载失败（2026-09-20 实测：本机包要求 <code>GLIBC_2.38</code>，sbt 校验拒绝），要给 Spark 镜像用的包应在<a href="devcontainer.html">开发容器</a>或方案 A 里编</td><td>改 storage、Knowhere、依赖版本或 CMake 规则的开发；工具链也可由<a href="devcontainer.html">开发容器</a>提供（设计稿）</td></tr>
 </table></div>
-
-<p><code>make package</code> 今天只在 linux-x86_64 上把统一包接进 assembly：Makefile 的平台选择写死了这个名字，显式传 <code>NATIVE_BUNDLE</code> 的分支还要求主机是 Linux。macOS 上先 <code>make native-bundle</code> 得到 JAR，再用 <code>sbt -Dmilvus.native.bundle=&lt;jar&gt;</code> 打包和跑测试；sbt 一侧按 <code>NativePlatform.current</code> 选平台，不限操作系统。</p>
 
 <p>两种方案都有 lock 这个开关：第一次运行解析依赖并写 <code>provenance/conan.lock</code>，之后用 <code>--conan-lock</code> 传入，传递依赖的 revision 才不随远程变化。<code>build.py</code> 会把 <code>dependencies.json</code> 生成的 <code>[replace_requires]</code> 段写进 host 与 build 两份 profile：消费者的 <code>force=True</code> 只固定 host 图，不加这一段时 build 图里的 protoc、grpc 插件会把 zlib、openssl 解析到远程最新 revision，lock 套用后又改写成 <code>build_requires</code> 里不存在的 host revision，空缓存的 <code>conan install --lockfile</code> 失败（2026-09-20 首次本机全量构建暴露并修复）。</p>
 
@@ -137,15 +133,16 @@ PATH=~/toolchain/cmake3venv/bin:$PATH make native-bundle</code></pre>
 │   └── &lt;平台&gt;                  Conan profile，每平台一份；今天有 linux-x86_64 与 darwin-aarch64
 ├── dependencies.json           32 个直接依赖的 recipe revision、版本冲突策略、排除项
 ├── conanfile.py                消费者：把 references 以 force=True 放进一张 host 图
-├── build.py                    驱动 11 个阶段，平台取自 platforms.host_platform()
-├── platforms.py                平台适配层，见第 5 节
+├── platforms.py                平台适配器：Elf 与 MachO 两个类，库名、依赖表读取、查找路径改写、系统库集合、工具链；加平台即加一个类
+├── build.py                    驱动 11 个阶段，平台无关
 ├── dependency_versions.py      两份上游 conanfile 与 dependencies.json 的对照
-├── stage.py                    收集依赖闭包、别名、查找路径改写、系统库排除，都经适配层
+├── stage.py                    收集依赖闭包、别名、查找路径改写、系统库排除
 ├── jvm_load.py + NativeLoadCheck.java   双向 JVM 加载检查，staging、打包、sbt 共用一份
 └── tests/                      Python 单元测试与 DiskANN 验收 fixture
 scripts/build-native.sh         入口，exec build.py
 scripts/package-native.py       核对 provenance 后打 JAR</code></pre>
-<p>CMake 文件按引擎分而不按平台分，平台差异用 <code>CMAKE_SYSTEM_NAME</code> 条件表达在同一目标内，避免同一个目标有两份定义；<code>CMakeLists.txt</code> 开头接受 Linux x86_64、Linux aarch64 与 macOS arm64，其余组合直接报错；<code>build.py</code> 到 CMake 之前先检查该平台的 profile 与 <code>platforms.py</code> 适配器是否存在。</p>
+<p>CMake 文件按引擎分而不按平台分，平台差异用 <code>CMAKE_SYSTEM_NAME</code> 与 <code>APPLE</code> 条件表达在同一目标内，避免同一个目标有两份定义。可执行格式的差异集中在 <code>platforms.py</code> 的适配类里：二进制检视与运行时查找路径改写（<code>readelf</code>/<code>patchelf</code> 对 <code>otool</code>/<code>install_name_tool</code> 加重新签名）、库文件名与版本位置、系统库集合、JVM 信号链的 preload 变量（<code>LD_PRELOAD</code> 对 <code>DYLD_INSERT_LIBRARIES</code>）、工具链，以及这个平台是否构建 DiskANN。三条规则声明为 ELF 专属而不翻译：系统库最低符号版本要求依赖 ELF 的符号版本化，GNU_STACK 只在 ELF 上有定义，<code>ldd -r</code> 在 macOS 上没有等价物。跨平台共同的判据是两个全新 JVM 的双向加载，逐库格式检查降为各平台自己的诊断。<code>CMakeLists.txt</code> 开头接受 Linux x86_64、Linux aarch64 与 macOS arm64；<code>build.py</code> 到 CMake 之前先检查该平台的 profile 与 <code>platforms.py</code> 适配器是否存在。</p>
+<p><strong>哪些平台走统一构建，由 <code>native-build/profiles/</code> 里有没有它的 profile 决定，Makefile 与 Docker 读同一处。</strong>加一个平台等于加一份 profile 和一份适配实现，不改构建入口。没有 profile 的平台仍走只有 storage 的旧入口（<code>make build-milvus-storage &amp;&amp; make copy-native-libs</code>），或显式用 <code>NATIVE_BUNDLE</code> 指定一个同平台的预置包，由 sbt <code>verifyNativeBundle</code> 按清单核对平台。平台之间的功能差异写在 <code>manifest.properties</code> 的功能开关里，今天只有 <code>with_diskann</code>：DiskANN 唯一的对齐读实现基于 libaio 与 io_uring，macOS 构建关掉它，而当前声明的 R4、V1、V5 都不依赖它。</p>
 
 <h3>构建工作目录：<code>NATIVE_WORK_DIR</code>，默认 <code>target/native-build/&lt;平台&gt;/</code></h3>
 <pre><code>target/native-build/&lt;平台&gt;/
@@ -158,7 +155,7 @@ scripts/package-native.py       核对 provenance 后打 JAR</code></pre>
 ├── cmake-build/                一棵 Ninja 树：Rust 桥、两个引擎、JNI、测试程序
 ├── install/lib/                引擎与 JNI 的安装副本，staging 的起点
 ├── bundle-candidates/&lt;时间戳-哈希&gt;/   每次 staging 的候选目录，失败的带诊断留在这里
-├── bundle/                     通过 C API 测试与双向 JVM 加载的当前包：lib/、provenance.json、provenance/、licenses/、audit/
+├── bundle/                     通过两道门的当前包：lib/、provenance.json、provenance/、licenses/、audit/
 ├── bundle-history/             被新候选替换下来的旧成功包
 ├── milvus-native-&lt;平台&gt;.jar   最终产物
 └── milvus-native-&lt;平台&gt;.jar.properties   JAR 的 SHA-256，sbt 校验的输入</code></pre>
@@ -177,20 +174,4 @@ scripts/package-native.py       核对 provenance 后打 JAR</code></pre>
 sbt 校验时的解压目录     target/native-bundle/&lt;jar 哈希&gt;/lib/
 运行时的解压目录         每个 JVM 一个进程私有目录，由 native-runtime 的 NativeLibraries 创建</code></pre>
 <p>资源路径是 <code>native/&lt;引擎组&gt;/&lt;格式版本&gt;/&lt;平台&gt;/</code>，<code>milvus</code> 表示两个引擎合成一组，<code>1</code> 是 <code>manifest.properties</code> 的 <code>format.version</code>。平台段在路径里，几个平台的 JAR 可以合进同一个 assembly 而不冲突，运行时 <code>NativeLibraries.platform()</code> 按当前操作系统和架构选目录；今天 sbt 只接受与构建机同平台的那一个包。旧的仅 storage 路径用 <code>native/&lt;平台&gt;/</code>，与统一包路径不重叠，两者不会在一个 assembly 里混用。</p>
-<h2 id="platforms">5 平台适配层</h2>
-<p><strong>加一个平台等于加一个 Conan profile、一份 <code>platforms.py</code> 适配实现和一份验收记录，其余构建代码不动。</strong>不动的是源码固定、Conan 依赖锁定、provenance 记录、第 4 节的资源布局、解压与摘要校验，以及结构性校验（条目唯一、路径不越界、清单与 provenance 交叉核对）：它们只处理文件名、摘要和文本，不解释可执行格式。<code>NativeLibraries.platform()</code> 本来就返回 <code>darwin-aarch64</code>，上游 <code>io.milvus.storage.NativeLibraryLoader</code> 三个操作系统族都解析。</p>
-<p>解释可执行格式的部分集中在 <code>native-build/platforms.py</code> 的一个类里，<code>Elf</code> 与 <code>MachO</code> 各一份：</p>
-<div class="table-scroll"><table>
-<tr><th>职责</th><th>Linux（ELF）</th><th>macOS（Mach-O）</th></tr>
-<tr><td>二进制检视：自身名字与依赖列表</td><td><code>readelf -dW</code> 读 SONAME 与 NEEDED</td><td><code>otool -D</code> 读 install name，<code>otool -L</code> 读依赖；路径落在 <code>/System/</code>、<code>/usr/lib/</code> 下的按系统提供处理</td></tr>
-<tr><td>运行时查找路径改写</td><td><code>patchelf --set-rpath $ORIGIN</code></td><td><code>install_name_tool -add_rpath @loader_path</code> 与 <code>-change</code>，改写后重新 <code>codesign</code></td></tr>
-<tr><td>库文件名与版本位置</td><td><code>libfoo.so.1</code>，版本在后缀之后</td><td><code>libfoo.1.dylib</code>，版本在后缀之前；<code>library_name</code>、<code>library_stem</code>、<code>library_glob</code> 三个方法给出匹配规则</td></tr>
-<tr><td>系统库集合，不进包</td><td>一条正则匹配 glibc 一组、<code>ld-linux-*</code>、libstdc++、libgcc_s，加 <code>libz.so.1</code></td><td>一条正则匹配 libSystem.B、libc++、libc++abi、libobjc.A、libresolv.9，加 <code>libz.1.dylib</code></td></tr>
-<tr><td>JVM 信号链接管</td><td><code>$JAVA_HOME/lib/libjsig.so</code>，由 <code>LD_PRELOAD</code> 注入</td><td><code>$JAVA_HOME/lib/libjsig.dylib</code>，由 <code>DYLD_INSERT_LIBRARIES</code> 注入</td></tr>
-<tr><td>工具链</td><td>GCC、G++、gfortran 12</td><td>Apple Clang、gfortran，OpenMP 由 Homebrew <code>libomp</code> 提供</td></tr>
-</table></div>
-<p>darwin-aarch64 第一次端到端构建后，适配层按同样的形式又接了四项：加载器的回退环境变量和它命名的原点（Linux 是 <code>LD_LIBRARY_PATH</code> 与 <code>$ORIGIN</code>，macOS 是 <code>DYLD_FALLBACK_LIBRARY_PATH</code> 与 <code>@loader_path</code>）、Conan 的 <code>os</code> 取值、编译器运行库在本机的位置和来源、一次 JNI 加载的等待上限。等待上限是平台的量：221 个库第一次被映射时，macOS 的 Gatekeeper 逐个验证签名，实测 197 秒，同一批文件之后每次加载都在 120 秒以内，所以 Mach-O 取 600 秒、ELF 仍取 120 秒。共用 120 秒时，首次加载在第一种顺序上超时，超时不留标记，下一次重新解压再超时一次。</p>
-<p><strong>三条检查是 ELF 专属的，声明为平台专属，不翻译成 Mach-O 的等价物。</strong>记录系统 zlib 的最低符号版本要求依赖 ELF 的符号版本化（<code>readelf -VW</code> 读出的 <code>ZLIB_*</code> 版本名），Mach-O 没有这个机制；GNU_STACK 段和 IFUNC 重定位只在 ELF 上有定义；<code>ldd -r</code> 报告未解析符号，macOS 的 <code>otool -L</code> 与 <code>dyld_info</code> 只给依赖图。<code>stage.py</code> 用 <code>isinstance(FORMAT, platforms.Elf)</code> 在三处跳过它们。所有平台共同的判据是两个全新 JVM 的双向 <code>System.load</code>，加上入口库与 OpenSSL provider 模块的 ctypes 加载；格式检查在 Linux 上也只作诊断，不阻断打包。</p>
-<p>排除系统 zlib 不属于这三条。JVM 在 JNI 初始化前已经加载系统 zlib，包内再放一份就无法确定进程用的是哪一份符号（第 1 节）；这条理由与可执行格式无关，规则在所有平台成立，适配层提供的只是这个文件在本平台叫什么。</p>
-<p>平台之间的功能差异写在 <code>manifest.properties</code> 的功能开关里，<code>capabilities.md</code> 保持单一表述。DiskANN 是现成的例子：macOS 关掉它之后，R4、V1、V5 都不依赖它，V5 的精确搜索走 <code>Knowhere.bruteForce</code>，所以今天没有能力缺口。<code>dependencies.json</code> 的 <code>platform_scope</code> 记录 openblas、liburing、libunwind 三个只在 Linux 存在的引用，两个引擎自己的 conanfile 也是这么写的；macOS 上 faiss 的 BLAS 由 Accelerate 提供。<code>static_on</code> 记录 opentelemetry-cpp 在 macOS 上只能静态构建，同样来自 storage 的 conanfile。</p>
 </main>

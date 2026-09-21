@@ -44,8 +44,10 @@ NATIVE_DIR := $(RESOURCES_DIR)/native/$(NATIVE_PLATFORM)
 STORAGE_LIB := $(MILVUS_STORAGE_BUILD)/libmilvus-storage.$(LIB_SUFFIX)
 STORAGE_JNI_LIB := $(MILVUS_STORAGE_BUILD)/libmilvus-storage-jni.$(LIB_SUFFIX)
 
-# Unified source builds currently use the validated Linux x86_64 GCC 12 profile.
-# Linux aarch64 can consume a separately built, matching platform JAR and sidecar.
+# A unified source build needs this platform's Conan profile under
+# native-build/profiles/ and its adapter in native-build/platforms.py.
+# A platform without a profile can still consume a separately built, matching
+# platform JAR and sidecar.
 # NATIVE_BUNDLE selects a prebuilt input; NATIVE_BUNDLE_OUTPUT names local output.
 NATIVE_WORK_DIR ?= $(CURDIR)/$(TARGET_DIR)/native-build/$(NATIVE_PLATFORM)
 NATIVE_JOBS ?= 50
@@ -56,10 +58,14 @@ NATIVE_BUNDLE_OUTPUT ?= $(NATIVE_WORK_DIR)/milvus-native-$(NATIVE_PLATFORM).jar
 absolute_path = $(if $(filter /%,$(firstword $(1))),$(1),$(CURDIR)/$(1))
 NATIVE_BUNDLE_JAR := $(call absolute_path,$(if $(strip $(NATIVE_BUNDLE)),$(NATIVE_BUNDLE),$(NATIVE_BUNDLE_OUTPUT)))
 # Keep the existing storage build on platforms without a unified source profile.
-# A prebuilt unified bundle is always explicit and must match the target platform.
+# The profile directory is the one place that says which platforms build both
+# engines, so adding a platform means adding its profile and its adapter, not
+# editing a list here. A prebuilt unified bundle is always explicit and must
+# match the target platform, which sbt's verifyNativeBundle checks.
+NATIVE_PROFILE := native-build/profiles/$(NATIVE_PLATFORM)
 ifneq ($(strip $(NATIVE_BUNDLE)),)
   NATIVE_PREREQUISITE := native-bundle
-else ifeq ($(NATIVE_PLATFORM),linux-x86_64)
+else ifneq ($(wildcard $(NATIVE_PROFILE)),)
   NATIVE_PREREQUISITE := native-bundle
 else
   NATIVE_PREREQUISITE := copy-native-libs
@@ -92,7 +98,7 @@ help:
 	@echo "$(YELLOW)Available targets:$(NC)"
 	@echo "  $(GREEN)all$(NC)                    - Complete build process"
 	@echo "  $(GREEN)clean$(NC)                  - Clean all build artifacts"
-	@echo "  $(GREEN)native-build$(NC)           - Build unified native dependencies (Linux x86_64)"
+	@echo "  $(GREEN)native-build$(NC)           - Build unified native dependencies (storage and Knowhere)"
 	@echo "  $(GREEN)native-bundle$(NC)          - Build and package, or select NATIVE_BUNDLE"
 	@echo "  $(GREEN)native-resources$(NC)       - Prepare unified or existing platform storage resources"
 	@echo "  $(GREEN)build-milvus-storage$(NC)   - Legacy standalone storage JNI build"
@@ -111,12 +117,14 @@ help:
 	@echo "  NATIVE_WORK_DIR=$(NATIVE_WORK_DIR)"
 	@echo "  NATIVE_JOBS=$(NATIVE_JOBS) (1..50)"
 	@echo "  NATIVE_BUILD_OPTIONS=$(NATIVE_BUILD_OPTIONS) (for example --with-cardinal)"
-	@echo "  NATIVE_BUNDLE=$(NATIVE_BUNDLE) (prebuilt Linux platform JAR plus .properties)"
+	@echo "  NATIVE_BUNDLE=$(NATIVE_BUNDLE) (prebuilt platform JAR plus .properties)"
 	@echo "  NATIVE_BUNDLE_OUTPUT=$(NATIVE_BUNDLE_OUTPUT)"
-	@echo "  Without NATIVE_BUNDLE, Linux x86_64 builds both engines; other platforms retain storage-only builds."
-	@echo "  Unified bundles require Linux; their source profile currently supports x86_64."
-	@echo "  NATIVE_PLATFORM=$(NATIVE_PLATFORM) -> $(NATIVE_DIR)"
-	@echo "  macOS: run scripts/macos_conan_fixups.sh once before build-milvus-storage (see docs/contributing.md)."
+	@echo "  Without NATIVE_BUNDLE, a platform whose profile exists under native-build/profiles/"
+	@echo "  builds both engines; one without it keeps the storage-only build."
+	@echo "  Profiles present: $(notdir $(wildcard native-build/profiles/*))"
+	@echo "  NATIVE_PLATFORM=$(NATIVE_PLATFORM) -> $(NATIVE_PREREQUISITE), resources in $(NATIVE_DIR)"
+	@echo "  macOS: Conan needs a settings_user.yml that accepts the installed Apple clang;"
+	@echo "  the rest of scripts/macos_conan_fixups.sh is for build-milvus-storage only (docs/contributing.md)."
 
 # Check system dependencies
 check-deps:
@@ -132,7 +140,7 @@ check-deps:
 ifeq ($(UNAME_S),Darwin)
 	@command -v install_name_tool >/dev/null 2>&1 || { echo "$(RED)Error: install_name_tool not found (xcode-select --install)$(NC)"; exit 1; }
 	@command -v codesign >/dev/null 2>&1 || { echo "$(RED)Error: codesign not found$(NC)"; exit 1; }
-	@test -f /opt/homebrew/opt/libomp/lib/libomp.dylib -o -f /usr/local/opt/libomp/lib/libomp.dylib || echo "$(YELLOW)Warning: libomp not found (brew install libomp); the milvus-common recipe needs it$(NC)"
+	@test -f /opt/homebrew/opt/libomp/lib/libomp.dylib -o -f /usr/local/opt/libomp/lib/libomp.dylib || echo "$(YELLOW)Warning: libomp not found (brew install libomp); Apple Clang ships no OpenMP runtime, and Knowhere and the milvus-common recipe both need one$(NC)"
 else
 	@command -v patchelf >/dev/null 2>&1 || { echo "$(RED)Error: patchelf not found$(NC)"; exit 1; }
 endif
@@ -158,7 +166,6 @@ native-build: init-missing-submodules
 
 ifneq ($(strip $(NATIVE_BUNDLE)),)
 native-bundle: init-missing-submodules
-	@test "$(UNAME_S)" = Linux || { echo "Unified native bundles require Linux; use the explicit legacy storage targets on macOS."; exit 1; }
 	@test -s "$(NATIVE_BUNDLE_JAR)" || { echo "Missing prebuilt NATIVE_BUNDLE: $(NATIVE_BUNDLE_JAR)"; exit 1; }
 	@test -s "$(NATIVE_BUNDLE_JAR).properties" || { echo "Missing native bundle checksum sidecar: $(NATIVE_BUNDLE_JAR).properties"; exit 1; }
 	@echo "$(GREEN)Selected prebuilt bundle: $(NATIVE_BUNDLE_JAR) (sbt verifies platform, provenance and libraries)$(NC)"
