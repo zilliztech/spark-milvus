@@ -2,9 +2,12 @@ package com.zilliz.milvus.storage.codec
 
 import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.charset.StandardCharsets.UTF_8
+import scala.collection.mutable.ArrayBuffer
 
 import org.scalatest.funsuite.AnyFunSuite
 
+import com.zilliz.milvus.storage.io.{FileInfo, ObjectStore}
+import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.milvus.storage.snapshot.SegmentIndex
 
 /** The Milvus index file format: slices, identity and payload markers
@@ -40,6 +43,128 @@ class IndexFileCodecTest extends AnyFunSuite {
     override def readPayload(offset: Long, destination: ByteBuffer): Unit =
       destination.put(bytes, offset.toInt, destination.remaining())
     override def close(): Unit = { closed = true }
+  }
+
+  private final class CardinalStore(val length: Long) extends ObjectStore {
+    val reads = ArrayBuffer.empty[(Long, Long)]
+    var shortRead = false
+    var validFooter = true
+    override def size(key: String): Long = length
+    override def readAt(
+        key: String,
+        offset: Long,
+        count: Long,
+        fileSize: Long
+    ): Array[Byte] = {
+      assert(fileSize == length)
+      assert(offset >= 0 && count <= 8 * 1024 * 1024)
+      reads += ((offset, count))
+      val bytes = new Array[Byte](count.toInt - (if (shortRead) 1 else 0))
+      if (validFooter && offset + bytes.length == length) {
+        ByteBuffer
+          .wrap(bytes, bytes.length - 24, 24)
+          .order(ByteOrder.LITTLE_ENDIAN)
+          .putInt(0x43415244)
+          .putInt(1)
+          .putLong(length - 32)
+          .putLong(16)
+      }
+      bytes
+    }
+    override def readAll(key: String): Array[Byte] =
+      throw new UnsupportedOperationException
+    override def list(key: String, recursive: Boolean): Seq[FileInfo] =
+      throw new UnsupportedOperationException
+    override def exists(key: String): Boolean =
+      throw new UnsupportedOperationException
+    override def write(key: String, data: Array[Byte]): Unit =
+      throw new UnsupportedOperationException
+    override def createDir(key: String, recursive: Boolean): Unit =
+      throw new UnsupportedOperationException
+    override def delete(key: String): Unit =
+      throw new UnsupportedOperationException
+    override def close(): Unit = ()
+  }
+
+  test("large raw Cardinal objects validate the footer before loading JNI") {
+    val store = new CardinalStore(256L * 1024 * 1024 + 37)
+    store.validFooter = false
+    val index = descriptor.copy(
+      filePaths = Vector("build/_mem.index.bin"),
+      currentIndexVersion = Some(10)
+    )
+    val failure = intercept[IllegalArgumentException] {
+      IndexFileCodec.load(
+        index,
+        VectorLayout(VectorElementType.Float32, 128),
+        store,
+        null
+      )
+    }
+    assert(failure.getMessage.contains("missing Cardinal CARD footer"))
+    assert(store.reads.toSeq == Seq((store.length - 24, 24L)))
+  }
+
+  test(
+    "raw Cardinal payloads above 256 MiB transfer bounded contiguous ranges"
+  ) {
+    val store = new CardinalStore(256L * 1024 * 1024 + 37)
+    val payload =
+      new IndexFileCodec.CardinalPayload(store, "build/_mem.index.bin")
+    var copied = 0L
+    val footer = new Array[Byte](24)
+    payload.copyTo { (offset, buffer) =>
+      assert(offset == copied)
+      assert(buffer.isDirect && buffer.remaining() <= 1024 * 1024)
+      copied += buffer.remaining()
+      if (copied == payload.length) {
+        buffer.position(buffer.limit() - 24)
+        buffer.get(footer)
+      }
+    }
+    assert(copied == store.length)
+    assert(payload.bytesRead == store.length + 24)
+    assert(store.reads.size == 34)
+    val parsed = ByteBuffer.wrap(footer).order(ByteOrder.LITTLE_ENDIAN)
+    assert(parsed.getInt() == 0x43415244)
+    assert(parsed.getInt() == 1)
+    assert(parsed.getLong() == store.length - 32)
+    assert(parsed.getLong() == 16)
+  }
+
+  test("raw Cardinal rejects out of bounds sizes and short reads") {
+    Seq(0L, 23L, 1024L * 1024 * 1024 + 1).foreach { length =>
+      val store = new CardinalStore(length)
+      intercept[IllegalArgumentException] {
+        new IndexFileCodec.CardinalPayload(store, "build/_mem.index.bin")
+      }
+      assert(store.reads.isEmpty)
+    }
+    val store = new CardinalStore(4096)
+    val payload =
+      new IndexFileCodec.CardinalPayload(store, "build/_mem.index.bin")
+    store.shortRead = true
+    val failure = intercept[IllegalArgumentException] {
+      payload.copyTo { (_, _) => fail("Short reads must not reach BinarySet") }
+    }
+    assert(failure.getMessage.contains("size changed"))
+    intercept[IllegalArgumentException] {
+      new IndexFileCodec.CardinalPayload(store, "build/_mem.index.bin")
+    }
+  }
+
+  test("Milvus envelope objects retain the 256 MiB limit") {
+    val store = new CardinalStore(256L * 1024 * 1024 + 1)
+    val failure = intercept[IllegalArgumentException] {
+      IndexFileCodec.load(
+        descriptor.copy(filePaths = Vector("build/SLICE_META")),
+        VectorLayout(VectorElementType.Float32, 128),
+        store,
+        null
+      )
+    }
+    assert(failure.getMessage.contains("256 MiB"))
+    assert(store.reads.isEmpty)
   }
 
   test(

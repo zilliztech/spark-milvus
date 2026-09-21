@@ -485,7 +485,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <li>Cardinal 直接写出的 <code>_mem.index.bin</code> 没有 Milvus 封装：文件列表恰有这一个文件，末尾 24 字节是小端的 CARD 标识、序列化版本和两个元数据偏移，版本为 1 且偏移在文件内有序时，整个文件作为 <code>BinarySet["HNSW"]</code>。</li>
 <li>标识与引擎的对应：CARD 对应 Cardinal，要求向量格式版本不低于 9，并要求含 Cardinal 的 Knowhere 构建；<code>IHNf</code>（float32 HNSW Flat）、<code>IHN9</code>（HNSW FlatCosine）、<code>IxF2</code>（FLAT）与 <code>IwFl</code>（IVF_FLAT）对应 Faiss，要求版本不低于 6。家族清单与它们的字节标记同在 <code>core.codec.VectorIndexFamilies</code>：能加载的类型和能识别的标记是同一件事，分成两处就会出现「声明支持但读不了」。
 含 Cardinal 的构建把 Faiss 引擎注册为 <code>HNSW_DEPRECATED</code>，其余构建注册为 <code>HNSW</code>；两者的块名都是 <code>HNSW</code>，<code>NativeVectorIndex.Loader</code> 分开处理引擎名与块名。</li>
-<li>executor 解码出完整载荷后，再核对标识与声明一致。单个对象不超过 256 MiB，拼好的载荷不超过 1 GiB，以 1 MiB 为块复制进 BinarySet；复制完成即释放解码缓冲，反序列化完成即关闭输入 BinarySet，索引句柄由任务持有。</li>
+<li>executor 解码出完整载荷后，再核对标识与声明一致。Milvus 封装的单个对象不超过 256 MiB，拼好的载荷不超过 1 GiB。未切片的 Cardinal 原始流直接按 1 GiB 载荷上限检查：先读末尾 24 字节校验 footer，再通过 <code>ObjectStore.readAt</code> 每次读取至多 8 MiB，逐块传入 BinarySet，不创建整文件 JVM 数组。两种格式均以 1 MiB 为块复制进 BinarySet，短读立即失败；复制完成即释放解码缓冲，反序列化完成即关闭输入 BinarySet，索引句柄由任务持有。</li>
 <li>Faiss 量化 HNSW、multi-view、加密文件、nullable 行号映射和没有已知标识的文件，在规划时即判为不可加载。</li>
 </ol>
 

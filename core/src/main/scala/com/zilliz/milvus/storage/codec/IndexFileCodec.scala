@@ -437,6 +437,74 @@ private[storage] object IndexFileCodec extends Logging {
     bytes
   }
 
+  /** A raw Cardinal object is one unsliced payload. Only the footer and one
+    * range at a time enter the JVM heap; the complete payload lives in
+    * BinarySet.
+    */
+  private[codec] final class CardinalPayload(store: ObjectStore, key: String) {
+    val length: Long = store.size(key)
+    require(
+      length >= 24 && length <= MaxPayloadBytes,
+      s"Cardinal index payload must contain a footer and fit within one GiB: $key ($length bytes)"
+    )
+    private var transferred = 0L
+    def bytesRead: Long = transferred
+
+    private def read(offset: Long, count: Int): Array[Byte] = {
+      val bytes = store.readAt(key, offset, count.toLong, length)
+      require(
+        bytes.length == count,
+        s"Index object size changed while reading $key at offset $offset"
+      )
+      transferred = Math.addExact(transferred, count.toLong)
+      bytes
+    }
+    validateCardinalFooter(read(length - 24, 24), length)
+
+    /** The consumer must finish with each direct buffer before returning. */
+    def copyTo(write: (Long, ByteBuffer) => Unit): Unit = {
+      val started = System.nanoTime()
+      val footer = new Array[Byte](24)
+      val allocator = new RootAllocator(ChunkBytes.toLong)
+      try {
+        val chunk = allocator.buffer(ChunkBytes)
+        try {
+          var offset = 0L
+          while (offset < length) {
+            // Amortize remote requests while retaining bounded heap allocation.
+            val count = math.min(8L * 1024 * 1024, length - offset).toInt
+            val bytes = read(offset, count)
+            val footerStart = math.max(0L, length - 24 - offset).toInt
+            if (footerStart < count) {
+              System.arraycopy(
+                bytes,
+                footerStart,
+                footer,
+                (offset + footerStart - (length - 24)).toInt,
+                count - footerStart
+              )
+            }
+            var copied = 0
+            while (copied < count) {
+              val size = math.min(ChunkBytes, count - copied)
+              val buffer = chunk.nioBuffer(0, size)
+              buffer.put(bytes, copied, size)
+              buffer.flip()
+              write(offset + copied, buffer)
+              copied += size
+            }
+            offset += count
+          }
+          validateCardinalFooter(footer, length)
+          logInfo(
+            s"Persisted index object read: key=$key, statBytes=$length, bytesRead=$bytesRead, " +
+              s"elapsedMillis=${(System.nanoTime() - started) / 1000000L}"
+          )
+        } finally chunk.close()
+      } finally allocator.close()
+    }
+  }
+
   def load(
       index: SegmentIndex,
       layout: VectorLayout,
@@ -498,8 +566,7 @@ private[storage] object IndexFileCodec extends Logging {
         index.currentIndexVersion.exists(_ >= 9),
         "A Cardinal CARD stream requires vector index format version 9 or later"
       )
-      val bytes = read(files(CardinalFile))
-      validateCardinalFooter(bytes)
+      val payload = new CardinalPayload(store, files(CardinalFile))
       require(
         NativeVectorLibrary.load().cardinalSupported(),
         "This persisted index requires a verified Knowhere build with WITH_CARDINAL enabled"
@@ -508,7 +575,10 @@ private[storage] object IndexFileCodec extends Logging {
         s"Persisted index format selected: format=Cardinal, engine=HNSW, " +
           s"version=${index.currentIndexVersion.get}"
       )
-      return finished(loadCardinal(index, dimension, dataType, bytes))
+      val loaded = loadCardinal(index, dimension, dataType, payload)
+      objectsRead += 1
+      bytesRead = Math.addExact(bytesRead, payload.bytesRead)
+      return finished(loaded)
     }
 
     def decoded(name: String): DecodedIndexFile = {
@@ -614,7 +684,7 @@ private[storage] object IndexFileCodec extends Logging {
       index: SegmentIndex,
       dimension: Int,
       dataType: DType,
-      bytes: Array[Byte]
+      payload: CardinalPayload
   ): NativeVectorIndex = {
     val metric = index.metricType.get.toUpperCase(Locale.ROOT)
     val loader = new NativeVectorIndex.Loader(
@@ -626,23 +696,9 @@ private[storage] object IndexFileCodec extends Logging {
     try {
       // Cardinal Serialize uses the same stream for FileManager output and
       // BinarySet[Type()]. This restores that documented in-memory interface.
-      loader.allocate("HNSW", bytes.length.toLong)
-      val allocator = new RootAllocator(ChunkBytes.toLong)
-      try {
-        val chunk = allocator.buffer(ChunkBytes)
-        try {
-          var offset = 0
-          while (offset < bytes.length) {
-            val count = math.min(ChunkBytes, bytes.length - offset)
-            val buffer = chunk.nioBuffer(0, count)
-            buffer.put(bytes, offset, count)
-            buffer.flip()
-            loader.write("HNSW", offset.toLong, buffer)
-            offset += count
-          }
-          loader.load("HNSW", dataType)
-        } finally chunk.close()
-      } finally allocator.close()
+      loader.allocate("HNSW", payload.length)
+      payload.copyTo((offset, buffer) => loader.write("HNSW", offset, buffer))
+      loader.load("HNSW", dataType)
     } finally loader.close()
   }
 
