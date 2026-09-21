@@ -145,7 +145,13 @@ object MilvusSearch extends Logging {
       searchParameters,
       allowUnindexed,
       vectorsPerTask,
-      MilvusOption(caseInsensitive).readLimits.arrowMaxBytes
+      MilvusOption(caseInsensitive).readLimits.arrowMaxBytes,
+      slots,
+      // A block the call named is used as it is; otherwise each executor
+      // chooses one for its own machine when it opens a segment.
+      if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
+        Some(MilvusOption(caseInsensitive).readLimits.batchMaxBytes)
+      else None
     )
 
     val metrics = SearchMetrics.create(spark.sparkContext)

@@ -12,7 +12,12 @@ import org.apache.spark.sql.Row
 import org.apache.spark.TaskContext
 
 import com.zilliz.milvus.storage.expr.PlanParser
-import com.zilliz.milvus.storage.index.{QueryMatrix, SegmentSearch, TopKMerger}
+import com.zilliz.milvus.storage.index.{
+  MachineResources,
+  QueryMatrix,
+  SegmentSearch,
+  TopKMerger
+}
 import com.zilliz.milvus.storage.read.exec.{
   RowExclusions,
   SegmentIndexHandle,
@@ -21,6 +26,7 @@ import com.zilliz.milvus.storage.read.exec.{
 import com.zilliz.milvus.storage.read.exec.ReadMetrics
 import com.zilliz.milvus.storage.schema.VectorLayout
 import com.zilliz.spark.connector.metrics.SearchMetrics
+import com.zilliz.spark.connector.options.SearchResources
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -36,6 +42,28 @@ import io.milvus.grpc.schema.CollectionSchema
   */
 private[read] object SegmentSetSearch extends Logging {
 
+  private val chosenBatches =
+    new java.util.concurrent.ConcurrentHashMap[(Int, Option[Long]), Long]()
+
+  /** The exact scan's base block for this JVM: the option when the call set it,
+    * otherwise from the machine's L3, CPU quota and this executor's slots
+    * (docs/design/architecture/search-resources.html section 3.2). Probed and
+    * logged once per JVM for each distinct request.
+    */
+  private[read] def exactScanBatch(spec: Spec): Long =
+    chosenBatches.computeIfAbsent(
+      (spec.slots, spec.batchMaxBytes),
+      _ => {
+        val choice = SearchResources.exactScanBatch(
+          MachineResources.probe(),
+          spec.slots,
+          spec.batchMaxBytes
+        )
+        logInfo(s"exact scan batch: ${choice.reason}")
+        choice.bytes
+      }
+    )
+
   /** What every task of one search needs and the driver already knows. */
   final case class Spec(
       vectorColumn: String,
@@ -49,7 +77,9 @@ private[read] object SegmentSetSearch extends Logging {
       parameters: Map[String, String],
       allowUnindexed: Boolean,
       vectorsMaxBytes: Long,
-      arrowMaxBytes: Long
+      arrowMaxBytes: Long,
+      slots: Int,
+      batchMaxBytes: Option[Long]
   ) extends Serializable
 
   /** What one task sends on: at most k candidates for each of its queries. */
@@ -241,10 +271,13 @@ private[read] object SegmentSetSearch extends Logging {
         metrics.indexLoadNanos.add(handle.loadNanos)
         SegmentSearch.Index(task.segmentId, handle, excluded)
       case None =>
+        // The block one brute-force call scans is chosen on this executor,
+        // for this machine's caches and this executor's concurrency.
+        val batch = exactScanBatch(spec)
         SegmentSearch.Exact(
           task.segmentId,
           SegmentVectors.open(
-            task,
+            task.copy(limits = task.limits.copy(batchMaxBytes = batch)),
             binding.arrowSchema,
             binding.columnNameFor,
             binding.arrowColumnFor(spec.vectorColumn),

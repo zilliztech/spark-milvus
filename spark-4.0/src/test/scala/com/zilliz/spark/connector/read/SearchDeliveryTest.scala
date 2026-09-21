@@ -58,7 +58,9 @@ class SearchDeliveryTest
     parameters = Map.empty,
     allowUnindexed = false,
     vectorsMaxBytes = 1L << 20,
-    arrowMaxBytes = 1L << 20
+    arrowMaxBytes = 1L << 20,
+    slots = 2,
+    batchMaxBytes = None
   )
 
   /** Eight queries the planner splits into four groups of two. */

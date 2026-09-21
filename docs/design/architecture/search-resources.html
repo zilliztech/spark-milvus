@@ -38,7 +38,7 @@
 
 <p class="lead">搜索路径上有三个与机器规格绑定的数：一次引擎调用的 base 块（32 MiB）、每个 executor 常驻的向量预算（2 GiB）、能加载的索引载荷上限（1 GiB）。三个都是常量，三个都在 2026-09-21 的测试里出了问题：32 MiB 只在单任务时合适，16 任务慢 4 到 6 倍、64 任务半小时零产出；2 GiB 按槽位一除，local[64] 下装不下一个 160 MiB 的段；1 GiB 挡掉了 Milvus 默认 1 GiB 段建出的每一个 HNSW 索引。本文把前两个改成从机器缓存、CPU 配额、内存上限和 executor 并发算出，把第三个去掉：连接器不再持有任何与机器规格相关的常量，内存归 executor 配置，连接器只算给用户看。</p>
 
-<div class="state"><strong>2026-09-21 <code>[草稿]</code>。</strong>数据在 128 核、L3 96 MiB、503 GB 的机器上测得（Spark 4.0 local 模式，Knowhere <code>29210a33</code>），拐点位置未在其他机器复现。代码里已改的只有索引载荷上限 1 GiB → 8 GiB 这一步，其余未改。</div>
+<div class="state"><strong>2026-09-21 <code>[草稿]</code>。</strong>数据在 128 核、L3 96 MiB、503 GB 的机器上测得（Spark 4.0 local 模式，Knowhere <code>29210a33</code>），拐点位置未在其他机器复现。代码里已改：索引载荷上限 1 GiB → 8 GiB（过渡）；3.2 的块大小自适应已实现（<code>core.index.MachineResources</code> 探测，<code>spark.options.SearchResources</code> 决策，<code>SegmentSetSearch</code> 在 executor 上按段应用）。3.3 与 3.4 未改。</div>
 
 <nav aria-label="目录">
   <a href="#mechanism">1 机制</a>
@@ -164,7 +164,7 @@
 块 B    = clamp( 可用 L3 / N , 1 MiB , 32 MiB )，向下取 2 的幂</code></pre>
 <table>
 <tr><th>场景</th><th>计算</th><th>B</th><th>与 2.1 实测的关系</th></tr>
-<tr><td>本机 local[16]</td><td>96 × 1 × 0.6 / 16 = 3.6 MiB</td><td>2 MiB</td><td>落在 512 KiB 到 4 MiB 的平台区，233 到 259 s</td></tr>
+<tr><td>本机 local[16]</td><td>96 × 1 × 0.6 / 16 = 3.6 MiB</td><td>2 MiB</td><td>实现后实测 <strong>204 s</strong>，优于手选的 512 KiB / 1 MiB / 4 MiB（235 / 259 / 233 s）</td></tr>
 <tr><td>本机 local[4]</td><td>96 × 1 × 0.6 / 4 = 14.4 MiB</td><td>8 MiB</td><td>在 4 MiB（182 s）与 32 MiB 之间，8 MiB 这一格未实测</td></tr>
 <tr><td>本机 local[64]</td><td>96 × 0.6 / 64 = 0.9 MiB</td><td>1 MiB</td><td>274 s，该并发下最好的块</td></tr>
 <tr><td>pod 8 核配额，4 槽位</td><td>96 × (8/128) × 0.6 / 4 = 0.9 MiB</td><td>1 MiB</td><td>未实测</td></tr>
