@@ -24,7 +24,11 @@ private[storage] object IndexFileCodec extends Logging {
   private val ValidDataNames = Set(ValidData, "valid_data_count")
   private val MaxValidDataBytes = 256L * 1024 * 1024
   private val MaxObjectBytes = 256L * 1024 * 1024
-  private val MaxPayloadBytes = 1024L * 1024 * 1024
+  // A 1 GiB segment (Milvus's default `segment.maxSize`) carries an HNSW payload
+  // of 1.035 GiB, so the cap sits well above one segment. Payloads stream into
+  // the native BinarySet in 1 MiB chunks; only SLICE_META and valid_data are
+  // materialized as Java arrays and have their own, smaller caps.
+  private[codec] val MaxPayloadBytes = 8L * 1024 * 1024 * 1024
   private val ChunkBytes = 1024 * 1024
   // Milvus slices an index payload at common.indexSliceSize, 16 MiB by default.
   private val DefaultSliceBytes = 16L * 1024 * 1024
@@ -265,7 +269,7 @@ private[storage] object IndexFileCodec extends Logging {
         )
         require(
           result.length <= MaxPayloadBytes,
-          s"Index payload $name exceeds the supported loading size"
+          s"Index payload $name of ${result.length} bytes exceeds the supported loading size of $MaxPayloadBytes bytes"
         )
         result
       }
@@ -721,7 +725,7 @@ private[storage] object IndexFileCodec extends Logging {
           total = Math.addExact(total, size)
           require(
             total <= MaxPayloadBytes,
-            "Index payloads exceed the supported one GiB loading size"
+            s"Index payloads exceed the supported loading size of $MaxPayloadBytes bytes"
           )
           if (name == indexType) format = new PayloadFormatProbe(size)
           loader.allocate(name, size)

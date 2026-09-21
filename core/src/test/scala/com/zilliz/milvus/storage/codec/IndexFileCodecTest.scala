@@ -178,11 +178,19 @@ class IndexFileCodecTest extends AnyFunSuite {
       IndexFileCodec.parseSlices(bytes :+ 0.toByte) ==
         Vector(IndexFileCodec.Slice("HNSW", 3, 19L))
     )
+    // The HNSW payload of a 1 GiB segment (Milvus's default segment.maxSize) is
+    // 1.035 GiB: 1,111,588,231 bytes measured on 262,144 x 1024-d vectors.
+    assert(
+      IndexFileCodec.parseSlices(
+        """{"meta":[{"name":"HNSW","slice_num":67,"total_len":1111588231}]}"""
+          .getBytes(UTF_8)
+      ) == Vector(IndexFileCodec.Slice("HNSW", 67, 1111588231L))
+    )
     val invalid = Seq(
       """{"meta":[{"name":"../HNSW","slice_num":1,"total_len":19}]}""",
       """{"meta":[{"name":"HNSW","slice_num":0,"total_len":19}]}""",
       """{"meta":[{"name":"HNSW","slice_num":1,"total_len":0}]}""",
-      """{"meta":[{"name":"HNSW","slice_num":1,"total_len":1073741825}]}""",
+      """{"meta":[{"name":"HNSW","slice_num":1,"total_len":8589934593}]}""",
       """{"meta":[{"name":"HNSW","slice_num":1,"total_len":1},{"name":"HNSW","slice_num":2,"total_len":2}]}"""
     )
     invalid.foreach { json =>
