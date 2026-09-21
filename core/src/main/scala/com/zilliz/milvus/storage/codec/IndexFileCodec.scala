@@ -24,11 +24,11 @@ private[storage] object IndexFileCodec extends Logging {
   private val ValidDataNames = Set(ValidData, "valid_data_count")
   private val MaxValidDataBytes = 256L * 1024 * 1024
   private val MaxObjectBytes = 256L * 1024 * 1024
-  // A 1 GiB segment (Milvus's default `segment.maxSize`) carries an HNSW payload
-  // of 1.035 GiB, so the cap sits well above one segment. Payloads stream into
-  // the native BinarySet in 1 MiB chunks; only SLICE_META and valid_data are
-  // materialized as Java arrays and have their own, smaller caps.
-  private[codec] val MaxPayloadBytes = 8L * 1024 * 1024 * 1024
+  // A payload has no size cap of its own: it streams into the native BinarySet
+  // in 1 MiB chunks, and what is allocated for it is held against the bytes its
+  // slice objects have on the store before anything is allocated. Only
+  // SLICE_META and valid_data are materialized as Java arrays and have caps
+  // (docs/design/architecture/search-resources.html section 3.4).
   private val ChunkBytes = 1024 * 1024
   // Milvus slices an index payload at common.indexSliceSize, 16 MiB by default.
   private val DefaultSliceBytes = 16L * 1024 * 1024
@@ -262,16 +262,11 @@ private[storage] object IndexFileCodec extends Logging {
               .canConvertToLong && item.get("total_len").asLong() > 0,
           s"Invalid slice payload length for $name"
         )
-        val result = Slice(
+        Slice(
           name,
           item.get("slice_num").asInt(),
           item.get("total_len").asLong()
         )
-        require(
-          result.length <= MaxPayloadBytes,
-          s"Index payload $name of ${result.length} bytes exceeds the supported loading size of $MaxPayloadBytes bytes"
-        )
-        result
       }
       .toVector
     require(
@@ -294,10 +289,7 @@ private[storage] object IndexFileCodec extends Logging {
         payload.fieldId == index.fieldId && payload.buildId == index.buildId,
       s"Index object identity differs from snapshot for segment ${index.segmentId}, build ${index.buildId}"
     )
-    require(
-      payload.payloadLength > 0 && payload.payloadLength <= MaxPayloadBytes,
-      "Decoded index payload length is outside the supported loading size"
-    )
+    require(payload.payloadLength > 0, "Decoded index payload is empty")
   }
 
   /** Cardinal's native serializer ends in a 24-byte Footer, not a Milvus event.
@@ -421,9 +413,13 @@ private[storage] object IndexFileCodec extends Logging {
     }
   }
 
-  private def readObject(store: ObjectStore, key: String): Array[Byte] = {
+  private def readObject(
+      store: ObjectStore,
+      key: String,
+      knownSize: Option[Long] = None
+  ): Array[Byte] = {
     val started = System.nanoTime()
-    val size = store.size(key)
+    val size = knownSize.getOrElse(store.size(key))
     require(
       size > 0 && size <= MaxObjectBytes,
       s"Index object exceeds the supported 256 MiB object size: $key"
@@ -446,10 +442,14 @@ private[storage] object IndexFileCodec extends Logging {
     * BinarySet.
     */
   private[codec] final class CardinalPayload(store: ObjectStore, key: String) {
+    // The object's size on the store is what is allocated for it, so the
+    // allocation can never exceed the bytes that exist; the only bound is
+    // that a footer fits (docs/design/architecture/search-resources.html
+    // section 3.4).
     val length: Long = store.size(key)
     require(
-      length >= 24 && length <= MaxPayloadBytes,
-      s"Cardinal index payload must contain a footer and fit within one GiB: $key ($length bytes)"
+      length >= 24,
+      s"Cardinal index payload must contain a footer: $key ($length bytes)"
     )
     private var transferred = 0L
     def bytesRead: Long = transferred
@@ -520,8 +520,11 @@ private[storage] object IndexFileCodec extends Logging {
     val started = System.nanoTime()
     var objectsRead = 0
     var bytesRead = 0L
+    // The slice objects' sizes, taken once for the check below and reused by
+    // the reads, so a 67-slice index is not stat'ed twice.
+    var objectSizes = Map.empty[String, Long]
     def read(key: String): Array[Byte] = {
-      val bytes = readObject(store, key)
+      val bytes = readObject(store, key, objectSizes.get(key))
       objectsRead += 1
       bytesRead = Math.addExact(bytesRead, bytes.length.toLong)
       bytes
@@ -633,6 +636,23 @@ private[storage] object IndexFileCodec extends Logging {
       ),
       "Index slice files are missing or overlap"
     )
+    // What SLICE_META declares is what the native BinarySet is allocated at,
+    // so before anything is allocated it is held against the bytes the store
+    // actually has: a payload cannot be longer than its slice objects together,
+    // and after the copy it has to be exactly their payloads' sum. Forged
+    // metadata cannot make the allocation larger than the files are.
+    objectSizes =
+      slicedNames.map(name => files(name) -> store.size(files(name))).toMap
+    slices.foreach { slice =>
+      val onStore =
+        (0 until slice.count)
+          .map(i => objectSizes(files(s"${slice.name}_$i")))
+          .sum
+      require(
+        slice.length <= onStore,
+        s"SLICE_META declares ${slice.length} bytes for ${slice.name} but its ${slice.count} slice objects hold $onStore bytes on the store"
+      )
+    }
     val remaining = names
       .map(_._1)
       .filterNot(name => name == SliceMeta || slicedNames.contains(name))
@@ -672,6 +692,7 @@ private[storage] object IndexFileCodec extends Logging {
     try
       finished(
         loadPayloads(
+          index.segmentId,
           loader,
           indexType,
           dataType,
@@ -700,6 +721,10 @@ private[storage] object IndexFileCodec extends Logging {
     try {
       // Cardinal Serialize uses the same stream for FileManager output and
       // BinarySet[Type()]. This restores that documented in-memory interface.
+      logInfo(
+        s"Persisted index allocating: segment=${index.segmentId}, payload=HNSW, " +
+          s"bytes=${payload.length}, totalBytes=${payload.length}"
+      )
       loader.allocate("HNSW", payload.length)
       payload.copyTo((offset, buffer) => loader.write("HNSW", offset, buffer))
       loader.load("HNSW", dataType)
@@ -707,6 +732,7 @@ private[storage] object IndexFileCodec extends Logging {
   }
 
   private def loadPayloads(
+      segmentId: Long,
       loader: NativeVectorIndex.Loader,
       indexType: String,
       dataType: DType,
@@ -721,11 +747,14 @@ private[storage] object IndexFileCodec extends Logging {
       try {
         var total = 0L
         var format: PayloadFormatProbe = null
+        // The native allocation is logged before it is made: a failed native
+        // allocation does not come back as a Java exception, so this line is
+        // what says how much was asked for.
         def reserve(name: String, size: Long): Unit = {
           total = Math.addExact(total, size)
-          require(
-            total <= MaxPayloadBytes,
-            s"Index payloads exceed the supported loading size of $MaxPayloadBytes bytes"
+          logInfo(
+            s"Persisted index allocating: segment=$segmentId, payload=$name, " +
+              s"bytes=$size, totalBytes=$total"
           )
           if (name == indexType) format = new PayloadFormatProbe(size)
           loader.allocate(name, size)

@@ -190,6 +190,43 @@ object MilvusSearch extends Logging {
          else if (over == 0) "no set known to stream"
          else s"$over sets stream once per query group")
     )
+    // What an index search asks of the executor's off-heap memory, from the
+    // sizes the snapshot recorded: an index is copied into a BinarySet and then
+    // deserialized, so loading peaks at twice its bytes, and the slots load at
+    // once. Nothing is refused on this; a native allocation that fails does
+    // not surface as a Java exception, so this line is what there is to read
+    // afterwards (docs/design/architecture/search-resources.html section 3.4).
+    if (searchMode == "index") {
+      val perSet = plan.sets.map(set =>
+        set
+          .flatMap(task =>
+            SegmentIndexHandle
+              .select(task, field.fieldID, searchMetric, allowUnindexed)
+          )
+          .map(_.serializedSize)
+          .filter(_ > 0L)
+          .sum
+      )
+      val perTask = if (perSet.isEmpty) 0L else perSet.max
+      val perExecutor = perTask * 2L * slots
+      val offHeap = memoryLimit.map(limit =>
+        math.max(0L, limit - heap - SearchResources.JvmReserveBytes)
+      )
+      val line =
+        if (perTask == 0L)
+          "Search index memory: the snapshot records no index sizes, nothing to forecast"
+        else
+          s"Search index memory: indexBytesPerTask=$perTask (largest set), " +
+            s"loadPeak=${perTask * 2L} (BinarySet and the deserialized index), " +
+            s"perExecutor=$perExecutor over $slots slots, " +
+            s"offHeapAvailable=${offHeap.map(_.toString).getOrElse("unknown")}"
+      if (offHeap.exists(_ < perExecutor))
+        logWarning(
+          s"$line; the executor's off-heap room is smaller than the peak, and a native " +
+            "allocation that fails does not raise a Java exception"
+        )
+      else logInfo(line)
+    }
     logInfo(
       s"Search plan: mode=$searchMode, metric=$searchMetric, topK=$k, " +
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +

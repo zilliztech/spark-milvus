@@ -2,11 +2,12 @@ package com.zilliz.milvus.storage.codec
 
 import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.charset.StandardCharsets.UTF_8
+import java.nio.file.Files
 import scala.collection.mutable.ArrayBuffer
 
 import org.scalatest.funsuite.AnyFunSuite
 
-import com.zilliz.milvus.storage.io.{FileInfo, ObjectStore}
+import com.zilliz.milvus.storage.io.{FileInfo, LocalObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.milvus.storage.snapshot.SegmentIndex
 
@@ -132,13 +133,23 @@ class IndexFileCodecTest extends AnyFunSuite {
     assert(parsed.getLong() == 16)
   }
 
-  test("raw Cardinal rejects out of bounds sizes and short reads") {
-    Seq(0L, 23L, 1024L * 1024 * 1024 + 1).foreach { length =>
+  test("raw Cardinal rejects objects without a footer, and short reads") {
+    Seq(0L, 23L).foreach { length =>
       val store = new CardinalStore(length)
       intercept[IllegalArgumentException] {
         new IndexFileCodec.CardinalPayload(store, "build/_mem.index.bin")
       }
       assert(store.reads.isEmpty)
+    }
+    // No size cap: what is allocated is the object's size on the store, so a
+    // payload past 1 GiB or 8 GiB is accepted on its footer alone.
+    Seq(1024L * 1024 * 1024 + 1, 8L * 1024 * 1024 * 1024 + 1).foreach {
+      length =>
+        val store = new CardinalStore(length)
+        val payload =
+          new IndexFileCodec.CardinalPayload(store, "build/_mem.index.bin")
+        assert(payload.length == length)
+        assert(store.reads.toSeq == Seq((length - 24, 24L)))
     }
     val store = new CardinalStore(4096)
     val payload =
@@ -179,24 +190,75 @@ class IndexFileCodecTest extends AnyFunSuite {
         Vector(IndexFileCodec.Slice("HNSW", 3, 19L))
     )
     // The HNSW payload of a 1 GiB segment (Milvus's default segment.maxSize) is
-    // 1.035 GiB: 1,111,588,231 bytes measured on 262,144 x 1024-d vectors.
+    // 1.035 GiB: 1,111,588,231 bytes measured on 262,144 x 1024-d vectors. A
+    // payload has no cap of its own; its length is held against the slice
+    // objects on the store when it is loaded.
     assert(
       IndexFileCodec.parseSlices(
         """{"meta":[{"name":"HNSW","slice_num":67,"total_len":1111588231}]}"""
           .getBytes(UTF_8)
       ) == Vector(IndexFileCodec.Slice("HNSW", 67, 1111588231L))
     )
+    assert(
+      IndexFileCodec.parseSlices(
+        """{"meta":[{"name":"HNSW","slice_num":600,"total_len":9663676416}]}"""
+          .getBytes(UTF_8)
+      ) == Vector(IndexFileCodec.Slice("HNSW", 600, 9663676416L))
+    )
     val invalid = Seq(
       """{"meta":[{"name":"../HNSW","slice_num":1,"total_len":19}]}""",
       """{"meta":[{"name":"HNSW","slice_num":0,"total_len":19}]}""",
       """{"meta":[{"name":"HNSW","slice_num":1,"total_len":0}]}""",
-      """{"meta":[{"name":"HNSW","slice_num":1,"total_len":8589934593}]}""",
       """{"meta":[{"name":"HNSW","slice_num":1,"total_len":1},{"name":"HNSW","slice_num":2,"total_len":2}]}"""
     )
     invalid.foreach { json =>
       intercept[IllegalArgumentException](
         IndexFileCodec.parseSlices(json.getBytes(UTF_8))
       )
+    }
+  }
+
+  test(
+    "a payload declared longer than its slice objects is refused before anything is allocated"
+  ) {
+    val root = Files.createTempDirectory("index-files-")
+    def write(name: String, bytes: Array[Byte]): String = {
+      val file = root.resolve("build").resolve(name)
+      Files.createDirectories(file.getParent)
+      Files.write(file, bytes)
+      file.toString
+    }
+    val decoder = new IndexFileDecoder {
+      override def decode(bytes: Array[Byte]): DecodedIndexFile =
+        new Payload(bytes)
+    }
+    val layout = VectorLayout(VectorElementType.Float32, 4)
+    val store = new LocalObjectStore()
+    def load(totalLen: Long): Unit =
+      IndexFileCodec.load(
+        descriptor.copy(filePaths =
+          Vector(
+            write(
+              "SLICE_META",
+              s"""{"meta":[{"name":"HNSW","slice_num":2,"total_len":$totalLen}]}"""
+                .getBytes(UTF_8)
+            ),
+            write("HNSW_0", new Array[Byte](16)),
+            write("HNSW_1", new Array[Byte](8))
+          )
+        ),
+        layout,
+        store,
+        decoder
+      )
+
+    // 24 bytes on the store cannot hold a payload that says it is 25, or a
+    // forged 8 GiB: the refusal names both numbers and no native memory is
+    // touched, which is why this runs without the native library.
+    Seq(25L, 8L * 1024 * 1024 * 1024).foreach { declared =>
+      val failure = intercept[IllegalArgumentException](load(declared))
+      assert(failure.getMessage.contains(s"declares $declared bytes for HNSW"))
+      assert(failure.getMessage.contains("2 slice objects hold 24 bytes"))
     }
   }
 
