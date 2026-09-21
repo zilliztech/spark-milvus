@@ -33,13 +33,27 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
   *   EXACT_QUERY_MAX_BYTES=67108864  milvus.search.queries.max.bytes; below
   *                                   the query set's size this takes the
   *                                   shuffle route instead of the driver
+  *   EXACT_VECTORS_MAX_BYTES=...     milvus.search.vectors.max.bytes, the
+  *                                   vectors one executor keeps; it is
+  *                                   divided by the task slots, so under
+  *                                   local[64] the default 2 GiB leaves 32
+  *                                   MiB per task and a 160 MiB segment does
+  *                                   not fit
   *   EXACT_TOPK=10
   *   EXACT_EXECUTORS=3               task slots, times the cores below
   *   EXACT_EXECUTOR_CORES=2
   *   EXACT_EXECUTOR_MEMORY=2048      megabytes each
+  *   EXACT_GROUP_MAX_BYTES=...       milvus.search.group.max.bytes, the query
+  *                                   bytes one engine call sees
+  *   EXACT_BATCH_MAX_BYTES=...       milvus.read.batch.max.bytes, the base
+  *                                   bytes joined before one engine call on
+  *                                   the streaming path
   *   EXACT_MASTER=local[6]           local-cluster needs a Spark distribution
   *   EXACT_UI_PORT=4062
   *   EXACT_WRITE=true                write the base; false reuses what is there
+  *   EXACT_SEARCH=true               false stops after the write
+  *   EXACT_HOLD=true                 hold the process at the end for the UI;
+  *                                   false exits once the hits are counted
   * }}}
   */
 object ExactSearchScale {
@@ -131,6 +145,11 @@ object ExactSearchScale {
     if (env("EXACT_WRITE", "true").toBoolean) writeBase(spark, storage)
     val manifests = readManifests(storage)
     println(s"segments: ${manifests.size}")
+    if (!env("EXACT_SEARCH", "true").toBoolean) {
+      println("--- EXACT_SEARCH=false: base written, no search ---")
+      spark.stop()
+      return
+    }
 
     val queries = spark
       .range(queryRows)
@@ -154,9 +173,16 @@ object ExactSearchScale {
       MilvusOption.ReadColumnar -> "true"
     ) ++ sys.env
       .get("EXACT_QUERY_MAX_BYTES")
-      .map(MilvusOption.SearchQueriesMaxBytes -> _)
+      .map(MilvusOption.SearchQueriesMaxBytes -> _) ++ sys.env
+      .get("EXACT_VECTORS_MAX_BYTES")
+      .map(MilvusOption.SearchVectorsMaxBytes -> _) ++ sys.env
+      .get("EXACT_GROUP_MAX_BYTES")
+      .map(MilvusOption.SearchGroupMaxBytes -> _) ++ sys.env
+      .get("EXACT_BATCH_MAX_BYTES")
+      .map(MilvusOption.ReadBatchMaxBytes -> _)
 
     println("--- first stage starts; watch the UI, then kill this process ---")
+    val searchStarted = System.currentTimeMillis()
     val hits = MilvusSearch.search(
       spark,
       options,
@@ -171,7 +197,12 @@ object ExactSearchScale {
       true
     )
     println(s"hits: ${hits.count()}")
-    while (true) Thread.sleep(60000L)
+    println(
+      s"search done in ${(System.currentTimeMillis() - searchStarted) / 1000}s"
+    )
+    if (env("EXACT_HOLD", "true").toBoolean) {
+      while (true) Thread.sleep(60000L)
+    } else spark.stop()
   }
 
   /** The base, written by the connector as V3 segments, one per task. */
