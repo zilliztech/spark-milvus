@@ -22,6 +22,32 @@ class MilvusV3WriterTest extends AnyFunSuite with Matchers {
     }
   }
 
+  test(
+    "the staging prefix is fs.root_path on object storage and empty locally"
+  ) {
+    // The local backend is rooted at fs.root_path and appends every key to
+    // it; repeating the root would put the segments under {root}/{root}/.
+    MilvusV3Writer.stagingRoot(
+      Map(StorageProperties.RootPath -> "files")
+    ) shouldBe "files"
+    MilvusV3Writer.stagingRoot(Map.empty) shouldBe "files"
+    MilvusV3Writer.stagingRoot(
+      Map(
+        StorageProperties.StorageType -> "local",
+        StorageProperties.RootPath -> "/tmp/run"
+      )
+    ) shouldBe ""
+    MilvusV3Writer.stagingRoot(
+      Map(StorageProperties.StorageType -> "LOCAL")
+    ) shouldBe ""
+    MilvusV3Writer.stagingRoot(
+      Map(
+        StorageProperties.StorageType -> "remote",
+        StorageProperties.RootPath -> "milvus"
+      )
+    ) shouldBe "milvus"
+  }
+
   test("parsePositiveDoubleOption accepts finite positive values") {
     MilvusV3PartitionWriter.parsePositiveDoubleOption(
       Map(MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> "64.5"),

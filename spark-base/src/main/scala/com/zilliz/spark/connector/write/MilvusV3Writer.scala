@@ -131,10 +131,7 @@ class MilvusV3BatchWrite(
     */
   val jobId: String = java.util.UUID.randomUUID().toString
 
-  private val layout = StagingLayout(
-    storage.getOrElse(StorageProperties.RootPath, "files"),
-    jobId
-  )
+  private val layout = StagingLayout(MilvusV3Writer.stagingRoot(storage), jobId)
 
   private val writeMode: JobWriteMode =
     if (
@@ -402,10 +399,8 @@ class MilvusV3PartitionWriter(
         logInfo(s"Using custom write path: $customPath")
         customPath
       case None =>
-        val path = StagingLayout(
-          storage.getOrElse(StorageProperties.RootPath, "files"),
-          jobId
-        ).segment(partitionId, taskId)
+        val path = StagingLayout(MilvusV3Writer.stagingRoot(storage), jobId)
+          .segment(partitionId, taskId)
         logInfo(s"Writing to staging path: $path")
         path
     }
@@ -467,11 +462,15 @@ class MilvusV3PartitionWriter(
     primaryKeyStats.filter(_.size > 0).toSeq.map { builder =>
       val stats = builder.build()
       val bytes = stats.toBytes
-      val path =
-        s"$basePath/_stats/bloom_filter.${stats.fieldId}/${System.currentTimeMillis()}"
+      val directory = s"$basePath/_stats/bloom_filter.${stats.fieldId}"
+      val path = s"$directory/${System.currentTimeMillis()}"
       val store = NativeObjectStore.Factory(storageProperties).open()
-      try store.write(path, bytes)
-      finally store.close()
+      try {
+        // The store does not create parent directories: object storage has
+        // none, the local backend needs them (io.ObjectStore).
+        store.createDir(directory, recursive = true)
+        store.write(path, bytes)
+      } finally store.close()
       logInfo(
         s"Primary-key stats of $basePath: ${builder.size} keys, ${bytes.length} bytes at $path"
       )
@@ -693,6 +692,20 @@ object MilvusV3Writer extends Logging {
     */
   val RowIdFieldId: Long = 0L
   val TimestampFieldId: Long = 1L
+
+  /** The key prefix the staging directory goes under. On object storage that is
+    * `fs.root_path`, the prefix Milvus keeps its files under in the bucket. The
+    * local backend is rooted at `fs.root_path` itself and appends every key to
+    * it, so there the prefix is empty; repeating the root would put the
+    * segments under `{root}/{root}/staging/`.
+    */
+  private[connector] def stagingRoot(storage: Map[String, String]): String =
+    if (
+      storage
+        .get(StorageProperties.StorageType)
+        .exists(_.equalsIgnoreCase(StorageProperties.StorageTypeLocal))
+    ) ""
+    else storage.getOrElse(StorageProperties.RootPath, "files")
 
   /** The Arrow schema a segment is written with: the declared columns, and the
     * two system columns when this write makes a new segment (decision 22). A
