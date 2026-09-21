@@ -52,7 +52,7 @@
 
 <table>
 <tr><th>数</th><th>绑定的资源</th><th>今天</th><th>在链上的位置</th></tr>
-<tr><td>base 块 B：<code>milvus.read.batch.max.bytes</code></td><td>L3 缓存。一次调用内线程池的所有线程扫同一块；N 个并发任务各带一块，工作集 N × B</td><td>常量 32 MiB</td><td><code>SegmentSearch.hold</code> 把 1 MiB 的 row group 拼成 batch，<code>ExactScan.batch</code> 一个 batch 一次调用</td></tr>
+<tr><td>base 块 B：<code>milvus.read.batch.max.bytes</code></td><td>L3 缓存。一次调用内线程池的所有线程扫同一块；N 个并发任务各带一块，工作集 N × B</td><td>曾是常量 32 MiB；2026-09-20 因 local[6] × 32 MiB 实测过慢整个合并被撤回，2026-09-21 以自适应窗口恢复</td><td><code>SegmentSearch.hold</code> 把 1 MiB 的 row group 拼成 batch，<code>ExactScan.batch</code> 一个 batch 一次调用</td></tr>
 <tr><td>常驻预算：<code>milvus.search.vectors.max.bytes</code></td><td>executor 的堆外内存。多 query 组时段集整个留在内存里给每组算</td><td>常量 2 GiB 每 executor，规划期除以槽位</td><td><code>SearchPlan.segmentSets</code> 按它切集合；<code>SegmentSearch.hold</code> 超过就 <code>require</code> 失败</td></tr>
 <tr><td>索引载荷上限：<code>IndexFileCodec.MaxPayloadBytes</code></td><td>同一块堆外内存。加载时 BinarySet 一份、Knowhere 反序列化后一份</td><td>曾是常量 1 GiB；2026-09-21 起无上限，<code>total_len</code> 在分配前与切片对象在存储上的字节数核对</td><td><code>IndexFileCodec.load</code> 在 <code>parseSlices</code> 之后、创建 Loader 之前</td></tr>
 </table>

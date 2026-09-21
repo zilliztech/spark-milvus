@@ -39,6 +39,57 @@ object KnowhereBuffers {
     override def close(): Unit = owned.foreach(_.close())
   }
 
+  /** Several bases as one, so a search calls the engine over a block sized for
+    * the machine rather than over whatever the storage layer handed out.
+    *
+    * milvus-storage closes a Parquet row group at a megabyte
+    * (`DEFAULT_MAX_ROW_GROUP_SIZE`, a constant), and its reader returns the
+    * smallest batch any column group offers, so a 1024-dimension float vector
+    * arrives 256 rows at a time however many rows the reader was asked for. How
+    * large the joined block should be is the executor's choice, from its L3 and
+    * its concurrency (docs/design/architecture/search-resources.html section
+    * 3.2); 32 MiB for every task was measured slower than no join at all, 2 to
+    * 8 MiB faster.
+    *
+    * The parts are copied and then closed: what this returns owns its bytes,
+    * and the peak is one part above the result rather than twice it.
+    */
+  def joined(
+      parts: Seq[Base],
+      rowBytes: Int,
+      allocator: BufferAllocator
+  ): Base = {
+    require(parts.nonEmpty, "A joined base needs at least one part")
+    require(rowBytes > 0, s"rowBytes must be positive: $rowBytes")
+    if (parts.size == 1) return parts.head
+    val rows = parts.map(_.rows.toLong).sum
+    require(
+      rows * rowBytes <= Int.MaxValue.toLong,
+      s"A joined base of $rows rows exceeds what one buffer addresses"
+    )
+    val bytes = rows * rowBytes.toLong
+    val target = allocator.buffer(math.max(bytes, 1L))
+    try {
+      var offset = 0L
+      parts.foreach { part =>
+        val length = part.rows.toLong * rowBytes.toLong
+        val source = part.buffer.duplicate()
+        source.position(0)
+        source.limit(length.toInt)
+        target.setBytes(offset, source)
+        offset += length
+      }
+      val joinedBase =
+        new Base(region(target, 0L, bytes), rows.toInt, false, Some(target))
+      parts.foreach(_.close())
+      joinedBase
+    } catch {
+      case failure: Throwable =>
+        target.close()
+        throw failure
+    }
+  }
+
   /** Every null row is reported through `excludeRow` before the buffer is
     * built; its bytes are zero and Knowhere never sees it as a candidate.
     */
