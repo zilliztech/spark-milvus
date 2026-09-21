@@ -9,6 +9,7 @@
 | 开发目录发现、三段表名、表 DDL 与快照时间旅行入口 | architecture/ | [Catalog](architecture/catalog.html) |
 | 理解表版本：各种输入怎样描述成同一种表模型，又怎样交给读、搜索和建索引 | architecture/ | [表版本](architecture/table-version.html)（决策 25） |
 | 开发向量搜索与建索引 | architecture/ | [向量搜索与建索引](architecture/vector-search.html)（单查询索引搜索已实现；查询集、exact 模式、建索引待实现） |
+| 搜索路径怎样按机器和并发选块大小、常驻预算，索引载荷为何不设上限 | architecture/ | [搜索路径的资源自适应](architecture/search-resources.html) `[草稿]`（2026-09-21 实测：并发 × 块 ≤ L3 时 1.5 到 2.1 亿对/秒，越过掉到 1/5；2 GiB 常驻预算在 local[64] 下装不下一段；1 GiB 索引上限挡掉 Milvus 默认段的每一个 HNSW。提案：块与预算由机器算出，上限去掉改为元数据校验，内存归 executor） |
 | core 怎么访问对象存储、凭证怎么下发 | architecture/ | [存储访问层](architecture/storage-access.html)（未完待续） |
 | 改动对象存储凭证、provider 链、按桶配置 | architecture/ | [对象存储认证](architecture/storage-auth.html) |
 | backfill 怎么访问多个桶 | apps/ | [backfill 的多桶存储访问](apps/backfill-storage.html) |

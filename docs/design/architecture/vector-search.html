@@ -457,7 +457,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 </figure>
 <ol>
 <li>任务逐段处理。Milvus 的 <code>TableFormat</code> 为每个段打开一个 <code>SegmentReader</code>，逐批读向量列，以及删除与过滤要用的主键、时间戳和标量列，段只读一遍；每批交出向量缓冲、由 <code>core.delete</code> 与 <code>core.expr</code> 生成的排除位图和这一批的起始行号。</li>
-<li><code>ExactScan</code> 把向量缓冲、一组查询和位图交给 Knowhere 暴力搜索，一批一次调用。只有一个查询组时算完即释放；有多个查询组时，整个段组的批留在内存里，每个查询组都在它们上面算过之后一起释放，保留的字节不超过 <code>milvus.search.vectors.max.bytes</code>。</li>
+<li><code>ExactScan</code> 把向量缓冲、一组查询和位图交给 Knowhere 暴力搜索，一批一次调用；一批的大小决定吞吐（并发任务数 × 批 ≤ L3），怎么选见 <a href="search-resources.html#block">搜索路径的资源自适应</a>。只有一个查询组时算完即释放；有多个查询组时，整个段组的批留在内存里，每个查询组都在它们上面算过之后一起释放，保留的字节不超过 <code>milvus.search.vectors.max.bytes</code>。</li>
 <li>Knowhere 返回的行号从这一批第 0 行算起，加上这一批的起始行号就是段内行号；结果并入该组的 <code>TopKMerger</code>。段内行号不受保留策略影响，候选不需要再拼回段上。</li>
 <li>一个查询组算完它能看到的全部数据后，这组每条查询的有界堆就是要交出的候选。任务内存是这个段组的向量、一组查询的矩阵和这组的 TopK。</li>
 </ol>
@@ -485,7 +485,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <li>Cardinal 直接写出的 <code>_mem.index.bin</code> 没有 Milvus 封装：文件列表恰有这一个文件，末尾 24 字节是小端的 CARD 标识、序列化版本和两个元数据偏移，版本为 1 且偏移在文件内有序时，整个文件作为 <code>BinarySet["HNSW"]</code>。</li>
 <li>标识与引擎的对应：CARD 对应 Cardinal，要求向量格式版本不低于 9，并要求含 Cardinal 的 Knowhere 构建；<code>IHNf</code>（float32 HNSW Flat）、<code>IHN9</code>（HNSW FlatCosine）、<code>IxF2</code>（FLAT）与 <code>IwFl</code>（IVF_FLAT）对应 Faiss，要求版本不低于 6。家族清单与它们的字节标记同在 <code>core.codec.VectorIndexFamilies</code>：能加载的类型和能识别的标记是同一件事，分成两处就会出现「声明支持但读不了」。
 含 Cardinal 的构建把 Faiss 引擎注册为 <code>HNSW_DEPRECATED</code>，其余构建注册为 <code>HNSW</code>；两者的块名都是 <code>HNSW</code>，<code>NativeVectorIndex.Loader</code> 分开处理引擎名与块名。</li>
-<li>executor 解码出完整载荷后，再核对标识与声明一致。Milvus 封装的单个对象不超过 256 MiB，拼好的载荷不超过 1 GiB。未切片的 Cardinal 原始流直接按 1 GiB 载荷上限检查：先读末尾 24 字节校验 footer，再通过 <code>ObjectStore.readAt</code> 每次读取至多 8 MiB，逐块传入 BinarySet，不创建整文件 JVM 数组。两种格式均以 1 MiB 为块复制进 BinarySet，短读立即失败；复制完成即释放解码缓冲，反序列化完成即关闭输入 BinarySet，索引句柄由任务持有。</li>
+<li>executor 解码出完整载荷后，再核对标识与声明一致。Milvus 封装的单个对象不超过 256 MiB，拼好的载荷暂以 8 GiB 为上限（Milvus 默认 1 GiB 段的 HNSW 载荷是 1.035 GiB，2026-09-21 把原来的 1 GiB 提高；上限去掉、改为切片长度校验的方案见 <a href="search-resources.html#cap">搜索路径的资源自适应</a>）。未切片的 Cardinal 原始流按同一载荷上限检查：先读末尾 24 字节校验 footer，再通过 <code>ObjectStore.readAt</code> 每次读取至多 8 MiB，逐块传入 BinarySet，不创建整文件 JVM 数组。两种格式均以 1 MiB 为块复制进 BinarySet，短读立即失败；复制完成即释放解码缓冲，反序列化完成即关闭输入 BinarySet，索引句柄由任务持有。</li>
 <li>Faiss 量化 HNSW、multi-view、加密文件、nullable 行号映射和没有已知标识的文件，在规划时即判为不可加载。</li>
 </ol>
 
