@@ -207,7 +207,7 @@
 <ol>
 <li>查询组：查询集按 <code>milvus.search.group.max.bytes</code> 切成查询组。</li>
 <li>并发数 = executor 数 × 每个 executor 同时运行的搜索任务数：index 模式在集群上是 1（1.1 的 stage 级任务资源），其余情况是 executor 核数 ÷ <code>spark.task.cpus</code>。</li>
-<li>每个任务两块额度：查询额度在堆上，是 Spark 不管理的那部分堆除以同时运行的任务数；段额度在堆外，公式见 <a href="search-resources.html#budget">search-resources.html 3.3</a>。段的常驻字节 index 模式取快照记录的索引字节，exact 模式取行数 × 向量宽度。</li>
+<li>每个任务两块额度：查询额度在堆上，是 Spark 不管理的那部分堆除以同时运行的任务数；段额度在堆外，公式见 <a href="search-resources.html#budget">search-resources.html 3.3</a>。段的常驻字节 index 模式取快照记录的索引字节的 2 倍，加载时再加 1 倍（search-resources.html 3.3），exact 模式取行数 × 向量宽度。</li>
 <li>先试查询留在内存：段组数取 min(段数, 并发数)，exact 模式再按下一条切查询范围；本任务的查询（id 与 TopK 状态，走 shuffle 时加上正在读入的一组）放得进查询额度，本任务查询矩阵的堆外拷贝加最大一段及其加载峰值放得进段额度，就选这种。段按常驻字节从大到小放进当前最轻的段组。</li>
 <li>否则段组留在内存：一组的常驻字节加最大一段的加载峰值和一个查询组的矩阵，不超过段额度；段组数取 max(并发数, 装下所有段所需的组数)，不超过段数；行数未知的段按段额度的一半估。</li>
 <li>exact 模式段组数少于并发数时，查询组按顺序切成 R 个连续范围，R = min(查询组数, ⌈并发数 ÷ 段组数⌉)（决策 28）。</li>

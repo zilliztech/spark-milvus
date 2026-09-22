@@ -148,7 +148,8 @@ object MilvusSearch extends Logging {
       )
       .bytes
     // What a segment costs the task that searches it: the index the snapshot
-    // recorded, or the vectors an exact scan reads a block at a time.
+    // recorded, as Knowhere holds it once loaded, or the vectors an exact scan
+    // reads a block at a time.
     val footprint: SegmentReadTask => SearchPlan.Footprint = task =>
       (if (searchMode == "index")
          SegmentIndexHandle.select(
@@ -160,7 +161,7 @@ object MilvusSearch extends Logging {
        else None) match {
         case Some(index) if index.serializedSize > 0L =>
           SearchPlan.Footprint.index(index.serializedSize)
-        case Some(_) => SearchPlan.Footprint(None, whole = true, 0L)
+        case Some(_) => SearchPlan.Footprint.unsizedIndex
         case None    => SearchPlan.Footprint.vectors(task, layout, blockBytes)
       }
     val queryBytes = SearchQueries.bytes(queryCount, layout)

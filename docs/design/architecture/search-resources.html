@@ -186,12 +186,12 @@
            index：(堆外可用 − 1 GiB) ÷ N              1 GiB 留给 shuffle 读取缓冲与 Knowhere 的工作内存
 查询额度 = (堆上限 − 300 MiB) × (1 − spark.memory.fraction) ÷ N
                                                       Spark 不管理的那部分堆；spark.memory.fraction 默认 0.6</code></pre>
-<p>两种顺序各自的需求：查询留在内存时，堆上是本任务查询的 id 与 TopK 状态（每条查询 8 + K × 48 + 128 字节，后两项是候选对象与优先队列本身），走 shuffle 时加上正在读入的一组；堆外是本任务查询矩阵的拷贝，加最大一段的常驻字节及其加载峰值。段组留在内存时，堆外是段组的常驻字节，加最大一段的加载峰值与一个查询组的矩阵。index 模式一个段的常驻字节取快照记录的 <code>serialized_size</code>，加载峰值再计一份（BinarySet 与反序列化后的索引同时在）；exact 模式取行数 × 向量宽度，没有加载峰值。</p>
+<p>两种顺序各自的需求：查询留在内存时，堆上是本任务查询的 id 与 TopK 状态（每条查询 8 + K × 48 + 128 字节，后两项是候选对象与优先队列本身），走 shuffle 时加上正在读入的一组；堆外是本任务查询矩阵的拷贝，加最大一段的常驻字节及其加载峰值。段组留在内存时，堆外是段组的常驻字节，加最大一段的加载峰值与一个查询组的矩阵。index 模式一个已加载的索引常驻快照记录的 <code>serialized_size</code> 的 2 倍：Knowhere 的 C API 为索引保留一份 BinarySet 的拷贝，与索引同寿命（<code>src/c_api/c_api.cc</code> 的 <code>IndexResource.deserialized_data</code>），再加从它反序列化出的索引；加载时连接器读入的 BinarySet 再占 1 倍，Knowhere 反序列化完即释放。perf_laion_31m 的 Cardinal 索引实测 1.99 与 2.04 倍。exact 模式取行数 × 向量宽度，没有加载峰值。</p>
 <p>perf_laion_31m（16 段，Cardinal 索引每段 1.85–2.67 GB、共 40.0 GB），2 个 executor，每个 4 GiB 堆加 28 GiB memoryOverhead：N = 1，段额度 26 GiB，查询额度 1.5 GiB。</p>
 <table>
-<tr><th>查询集</th><th>查询留在内存</th><th>段组留在内存（每组 8 段）</th><th>选中</th></tr>
-<tr><td>1 GiB，349,525 条</td><td>堆 0.45 GB（id 与 TopK 0.22 GB，读入中的一组 0.23 GB）；堆外 6.4 GB（查询矩阵 1.07 GB，最大一段 2.67 GB 及加载峰值）</td><td>堆外 22.9 GB</td><td>查询留在内存，2 个任务</td></tr>
-<tr><td>8.59 GB，2,796,200 条</td><td>堆 1.95 GB，超过查询额度</td><td>堆外 22.9 GB</td><td>段组留在内存，2 个任务</td></tr>
+<tr><th>查询集</th><th>查询留在内存</th><th>段组留在内存</th><th>选中</th></tr>
+<tr><td>1 GiB，349,525 条</td><td>堆 0.45 GB（id 与 TopK 0.22 GB，读入中的一组 0.23 GB）；堆外 9.1 GB（查询矩阵 1.07 GB，最大一段 2.67 GB 的 3 倍）</td><td>每组 8 段 42.9 GB，超过段额度；每组 4 段 22.9 GB</td><td>查询留在内存，2 个任务</td></tr>
+<tr><td>8.59 GB，2,796,200 条</td><td>堆 1.95 GB，超过查询额度</td><td>每组 8 段 42.9 GB，超过段额度；改为每组 4 段，22.9 GB</td><td>段组留在内存，4 个任务，每个 executor 2 个</td></tr>
 </table>
 <table>
 <tr><th>项</th><th>内容</th></tr>

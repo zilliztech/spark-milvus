@@ -75,32 +75,56 @@ object SearchPlan {
   /** What one segment costs, off the heap, the task that searches it.
     *
     * @param kept
-    *   the bytes the segment takes while a task keeps it -- its persisted
-    *   index, or its vectors -- or None when nothing recorded them and the plan
-    *   estimates
+    *   the bytes the segment holds while a task keeps it -- its loaded index,
+    *   or its vector batches -- or None when nothing recorded its size and the
+    *   plan estimates
+    * @param loading
+    *   the bytes held beside `kept` while a segment loaded whole is loading, or
+    *   None when unknown, and the plan then counts `kept` again
     * @param whole
     *   true when the segment is searched only once it is loaded whole, as an
-    *   index is: searching it costs its kept bytes and, while it loads, the
-    *   bytes read beside the index it is being turned into. False when it is
-    *   scanned a block at a time, as vectors are
+    *   index is: searching it costs `kept` and, while it loads, `loading` too.
+    *   False when it is scanned a block at a time, as vectors are
     * @param blockBytes
     *   what a scan holds at once, when `whole` is false
     */
   final case class Footprint(
       kept: Option[Long],
+      loading: Option[Long],
       whole: Boolean,
       blockBytes: Long
   ) {
     require(
-      kept.forall(_ >= 0L) && blockBytes >= 0L,
+      kept.forall(_ >= 0L) && loading.forall(_ >= 0L) && blockBytes >= 0L,
       s"A footprint is never negative: $this"
     )
   }
 
   object Footprint {
 
+    /** Copies of a persisted index's bytes that a loaded index holds: the copy
+      * Knowhere's C API keeps of the BinarySet for as long as the index lives
+      * (knowhere `src/c_api/c_api.cc`, `IndexResource.deserialized_data`), and
+      * the index deserialized from it. Measured 1.99 and 2.04 on
+      * perf_laion_31m's Cardinal indexes (search-resources.html section 3.3).
+      */
+    val IndexKeptCopies: Int = 2
+
+    /** Copies held beside those while an index loads: the BinarySet the
+      * connector read the files into, released once Knowhere has deserialized.
+      */
+    val IndexLoadingCopies: Int = 1
+
     /** A persisted index of `bytes`, as the snapshot recorded it. */
-    def index(bytes: Long): Footprint = Footprint(Some(bytes), true, 0L)
+    def index(bytes: Long): Footprint = Footprint(
+      Some(IndexKeptCopies.toLong * bytes),
+      Some(IndexLoadingCopies.toLong * bytes),
+      true,
+      0L
+    )
+
+    /** A persisted index whose size nothing recorded. */
+    val unsizedIndex: Footprint = Footprint(None, None, true, 0L)
 
     /** Vectors scanned `blockBytes` at a time, kept as the batches they arrive
       * in.
@@ -111,6 +135,7 @@ object SearchPlan {
         blockBytes: Long
     ): Footprint = Footprint(
       knownRows(task).map(_ * layout.rowBytes.toLong),
+      Some(0L),
       false,
       blockBytes
     )
@@ -388,11 +413,13 @@ object SearchPlan {
     val unknown = unknownSegmentBytes(layout, budget.segmentBytes)
     def kept(task: SegmentReadTask): Long =
       prints(task.segmentId).kept.getOrElse(unknown)
-    def loading(task: SegmentReadTask): Long =
-      if (prints(task.segmentId).whole) kept(task) else 0L
+    def loading(task: SegmentReadTask): Long = {
+      val print = prints(task.segmentId)
+      if (print.whole) print.loading.getOrElse(kept(task)) else 0L
+    }
     def searching(task: SegmentReadTask): Long = {
       val print = prints(task.segmentId)
-      if (print.whole) 2L * kept(task) else print.blockBytes
+      if (print.whole) kept(task) + loading(task) else print.blockBytes
     }
     def knownKept(set: Seq[SegmentReadTask]): Option[Long] = {
       val bytes = set.map(task => prints(task.segmentId).kept)

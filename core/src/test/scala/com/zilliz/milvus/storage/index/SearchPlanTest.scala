@@ -417,7 +417,9 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     plan.kept shouldBe Seq(Some(3200L), Some(3200L))
   }
 
-  test("an index is kept whole and loads beside a second copy") {
+  test(
+    "a loaded index holds two copies of its bytes and loads beside a third"
+  ) {
     val indexes: SegmentReadTask => SearchPlan.Footprint =
       _ => SearchPlan.Footprint.index(1000L)
     def keeping(segmentBytes: Long) = SearchPlan.of(
@@ -431,18 +433,36 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       footprint = indexes,
       shuffled = false
     )
-    // Two indexes of 1000 bytes, one more loading beside them and the one
-    // group's 32-byte matrix: 3032 bytes keep two segments a set.
-    val two = keeping(3032L)
+    // Two loaded indexes of 1000 recorded bytes hold 2000 each; one more
+    // loading beside them holds its 1000 read bytes, and the one group's
+    // matrix 32: 5032 bytes keep two segments a set.
+    val two = keeping(5032L)
     two.resident shouldBe SearchPlan.Resident.Segments
-    two.capacity shouldBe 2000L
+    two.capacity shouldBe 4000L
     segments(two.sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
-    two.needs.map(_.segmentsOffHeap) shouldBe Some(3032L)
+    two.needs.map(_.segmentsOffHeap) shouldBe Some(5032L)
     // A byte less and a set keeps one.
-    keeping(3031L).sets.size shouldBe 4
+    keeping(5031L).sets.size shouldBe 4
     // Searching an index without keeping it still loads it whole: the query
-    // matrix and twice the largest index.
-    two.needs.map(_.queriesOffHeap) shouldBe Some(32L + 2000L)
+    // matrix and three copies of the largest index while it loads.
+    two.needs.map(_.queriesOffHeap) shouldBe Some(32L + 3000L)
+  }
+
+  test("an index whose size nothing recorded is planned at the budget share") {
+    val plan = SearchPlan.of(
+      Seq(task(1L, 10L), task(2L, 10L)),
+      layout,
+      concurrency = 2,
+      queries = 2,
+      k = 1,
+      groupMaxBytes = 128L,
+      budget = SearchPlan.Budget(4000L, 0L),
+      footprint = _ => SearchPlan.Footprint.unsizedIndex,
+      shuffled = false
+    )
+    // Half the budget kept, and the same again while it loads.
+    plan.estimated shouldBe Seq(1L, 2L)
+    plan.needs.map(_.queriesOffHeap) shouldBe Some(32L + 4000L)
   }
 
   test("queries arriving from the shuffle count one group on the heap") {
