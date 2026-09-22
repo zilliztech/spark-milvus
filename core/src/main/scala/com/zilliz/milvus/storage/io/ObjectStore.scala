@@ -40,6 +40,10 @@ trait ObjectStore extends AutoCloseable {
   /** Reads one range. `fileSize` is passed in because the backend needs it to
     * open a reader, and a caller that already knows it should not pay for a
     * second round trip.
+    *
+    * Several threads may read through one store at once: each call opens its
+    * own reader. [[ConcurrentRangeReads]] relies on this to keep several range
+    * requests in flight against object storage.
     */
   def readAt(
       key: String,

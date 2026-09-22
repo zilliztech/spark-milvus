@@ -24,8 +24,15 @@ package com.zilliz.milvus.storage
   * filesystem's exists operation distinguishes missing files from access or I/O
   * failures; those failures propagate to the caller.
   *
-  * Main types: ObjectStore, ObjectStoreFactory, NativeObjectStore, FileInfo.
-  * Capabilities: R2, R3, W1 (see docs/design/capabilities.md). Design:
+  * ConcurrentRangeReads reads a list of object ranges several at a time and
+  * hands them back in list order to the calling thread, within one byte budget
+  * per JVM; a single range request to object storage is bounded by one round
+  * trip and one connection's rate. `ObjectStore.readAt` is safe to call from
+  * several threads at once.
+  *
+  * Main types: ObjectStore, ObjectStoreFactory, NativeObjectStore, FileInfo,
+  * ConcurrentRangeReads. Capabilities: R2, R3, W1 (see
+  * docs/design/capabilities.md). Design:
   * docs/design/architecture/storage-access.html section 4.
   */
 package object io

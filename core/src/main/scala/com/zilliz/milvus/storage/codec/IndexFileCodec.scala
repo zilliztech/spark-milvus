@@ -9,7 +9,7 @@ import com.fasterxml.jackson.databind.{DeserializationFeature, ObjectMapper}
 import org.apache.arrow.memory.RootAllocator
 
 import com.zilliz.milvus.jni.vector.{NativeVectorIndex, NativeVectorLibrary}
-import com.zilliz.milvus.storage.io.ObjectStore
+import com.zilliz.milvus.storage.io.{ConcurrentRangeReads, ObjectStore}
 import com.zilliz.milvus.storage.schema.VectorLayout
 import com.zilliz.milvus.storage.snapshot.SegmentIndex
 import com.zilliz.milvus.storage.Logging
@@ -30,6 +30,9 @@ private[storage] object IndexFileCodec extends Logging {
   // SLICE_META and valid_data are materialized as Java arrays and have caps
   // (docs/design/architecture/search-resources.html section 3.4).
   private val ChunkBytes = 1024 * 1024
+  // One request for an unsliced object reads this much; several are in flight
+  // at once (ConcurrentRangeReads).
+  private val RangeBytes = 8 * 1024 * 1024
   // Milvus slices an index payload at common.indexSliceSize, 16 MiB by default.
   private val DefaultSliceBytes = 16L * 1024 * 1024
   private val mapper = new ObjectMapper()
@@ -465,19 +468,31 @@ private[storage] object IndexFileCodec extends Logging {
     }
     validateCardinalFooter(read(length - 24, 24), length)
 
-    /** The consumer must finish with each direct buffer before returning. */
+    /** The consumer must finish with each direct buffer before returning. It is
+      * called on this thread, in offset order.
+      */
     def copyTo(write: (Long, ByteBuffer) => Unit): Unit = {
       val started = System.nanoTime()
       val footer = new Array[Byte](24)
+      // Several ranges are requested at once and each is copied out as it
+      // arrives: one 8 MiB request after another reads 47 MB/s from object
+      // storage, 32 in flight 1.1 GB/s (vector-search.html section 2.5).
+      val ranges = (0L until length by RangeBytes.toLong).map(offset =>
+        ConcurrentRangeReads.Range(
+          key,
+          offset,
+          math.min(RangeBytes.toLong, length - offset).toInt,
+          length
+        )
+      )
       val allocator = new RootAllocator(ChunkBytes.toLong)
       try {
         val chunk = allocator.buffer(ChunkBytes)
         try {
-          var offset = 0L
-          while (offset < length) {
-            // Amortize remote requests while retaining bounded heap allocation.
-            val count = math.min(8L * 1024 * 1024, length - offset).toInt
-            val bytes = read(offset, count)
+          ConcurrentRangeReads.foreach(store, ranges) { (range, bytes) =>
+            val offset = range.offset
+            val count = range.length
+            transferred = Math.addExact(transferred, count.toLong)
             // Where the footer starts, counted from this range. On an object
             // past 2 GiB that distance exceeds an Int until the last ranges,
             // so it stays a Long until it is known to fall inside the range.
@@ -501,12 +516,13 @@ private[storage] object IndexFileCodec extends Logging {
               write(offset + copied, buffer)
               copied += size
             }
-            offset += count
           }
           validateCardinalFooter(footer, length)
+          val elapsed = System.nanoTime() - started
           logInfo(
             s"Persisted index object read: key=$key, statBytes=$length, bytesRead=$bytesRead, " +
-              s"elapsedMillis=${(System.nanoTime() - started) / 1000000L}"
+              s"ranges=${ranges.size}, elapsedMillis=${elapsed / 1000000L}, " +
+              f"MBps=${length / 1e6 / math.max(elapsed, 1L) * 1e9}%.1f"
           )
         } finally chunk.close()
       } finally allocator.close()
@@ -611,6 +627,45 @@ private[storage] object IndexFileCodec extends Logging {
       }
     }
 
+    // One payload's slice objects, requested several at a time and decoded one
+    // by one, in slice order, on this thread (ConcurrentRangeReads): a 16 MiB
+    // object after another reads at one connection's rate.
+    def decodedEach(
+        names: Seq[String],
+        consume: DecodedIndexFile => Unit
+    ): Unit = {
+      val started = System.nanoTime()
+      val ranges = names.toIndexedSeq.map { name =>
+        val key = files.getOrElse(
+          name,
+          throw new IllegalArgumentException(
+            s"Snapshot is missing index slice $name"
+          )
+        )
+        val size = objectSizes.getOrElse(key, store.size(key))
+        require(
+          size > 0 && size <= MaxObjectBytes,
+          s"Index object exceeds the supported 256 MiB object size: $key"
+        )
+        ConcurrentRangeReads.Range(key, 0L, size.toInt, size)
+      }
+      var bytes = 0L
+      ConcurrentRangeReads.foreach(store, ranges) { (_, read) =>
+        objectsRead += 1
+        bytesRead = Math.addExact(bytesRead, read.length.toLong)
+        bytes += read.length
+        val result = decoder.decode(read)
+        try {
+          validateIdentity(index, result)
+          consume(result)
+        } finally result.close()
+      }
+      logInfo(
+        s"Persisted index objects read: segment=${index.segmentId}, objects=${ranges.size}, " +
+          s"bytesRead=$bytes, elapsedMillis=${(System.nanoTime() - started) / 1000000L}"
+      )
+    }
+
     val slices = if (files.contains(SliceMeta)) {
       val metadata = decoded(SliceMeta)
       try {
@@ -703,7 +758,8 @@ private[storage] object IndexFileCodec extends Logging {
           index.currentIndexVersion.get,
           slices.filterNot(slice => ValidDataNames(slice.name)),
           remaining.filterNot(ValidDataNames),
-          decoded
+          decoded,
+          decodedEach
         )
       )
     finally loader.close()
@@ -743,7 +799,8 @@ private[storage] object IndexFileCodec extends Logging {
       version: Int,
       slices: Vector[Slice],
       remaining: Vector[String],
-      decoded: String => DecodedIndexFile
+      decoded: String => DecodedIndexFile,
+      decodedEach: (Seq[String], DecodedIndexFile => Unit) => Unit
   ): NativeVectorIndex = {
     val allocator = new RootAllocator(ChunkBytes.toLong)
     try {
@@ -788,17 +845,17 @@ private[storage] object IndexFileCodec extends Logging {
         slices.foreach { slice =>
           reserve(slice.name, slice.length)
           var offset = 0L
-          (0 until slice.count).foreach { number =>
-            val payload = decoded(s"${slice.name}_$number")
-            try {
+          decodedEach(
+            (0 until slice.count).map(number => s"${slice.name}_$number"),
+            payload => {
               require(
                 payload.payloadLength <= slice.length - offset,
                 s"Index slices exceed declared length for ${slice.name}"
               )
               transfer(slice.name, payload, offset)
               offset += payload.payloadLength
-            } finally payload.close()
-          }
+            }
+          )
           require(
             offset == slice.length,
             s"Index slice total length differs for ${slice.name}"

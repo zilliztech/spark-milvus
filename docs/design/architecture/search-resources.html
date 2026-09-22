@@ -189,6 +189,7 @@
 <tr><th>改动</th><th>内容</th></tr>
 <tr><td>去掉 <code>MaxPayloadBytes</code></td><td>SLICE_META 的 <code>total_len</code> 改为与切片实际长度之和核对，不一致即拒绝。申请的原生内存永远等于对象存储上真实存在的字节数，伪造的元数据撑不大它。SLICE_META 1 MiB 与 <code>valid_data</code> 256 MiB 保留，它们走 Java 数组</td></tr>
 <tr><td>不按内存拒绝</td><td>索引多大是用户建段时决定的；内存够不够与 Spark 读一个超大分区同类，由用户按 <code>并发 × 索引大小 × 2</code> 配 executor，配少了按 Spark 常规方式失败重试</td></tr>
+<tr><td>读取并发</td><td>索引对象按 8 MiB 区间或切片对象并发请求，同时在途最多 32 个；本 JVM 已请求、未消费的字节共用一个预算：最大堆的 1/16，钳在 64 到 256 MiB。这部分在堆上，不计入堆外的加载峰值；预算按 JVM 而不按任务算，不随槽位数增长。实测 2.58 GB 的 Cardinal 对象：顺序读 47 MB/s，32 个在途 1.1 GB/s（<a href="vector-search.html#native-boundary">vector-search.html 2.5</a>）</td></tr>
 <tr><td>算给用户看</td><td>规划期一行 INFO：每任务索引字节、加载峰值（× 2）、本 executor 合计（× N）、堆外可用；加载前一行实际申请字节数。原生 <code>bad_alloc</code> 不产生 Java 异常，日志是事后唯一的依据</td></tr>
 <tr><td>段大于内存时</td><td>HNSW 一个图必须整体可寻址，不能部分加载；出路是 mmap（Knowhere 有 <code>enable_mmap</code>，Java 绑定缺从文件加载的入口，需补 JNI），慢但不失败。把段切成多个小图不取：2026-09-21 实测 64 小图比暴力搜索还慢，且 Milvus 认一段一索引，快照恢复不进 Milvus</td></tr>
 </table>

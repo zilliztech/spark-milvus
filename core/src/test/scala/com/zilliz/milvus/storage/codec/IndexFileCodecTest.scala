@@ -59,7 +59,8 @@ class IndexFileCodecTest extends AnyFunSuite {
     ): Array[Byte] = {
       assert(fileSize == length)
       assert(offset >= 0 && count <= 8 * 1024 * 1024)
-      reads += ((offset, count))
+      // Ranges are read on several threads at once (ConcurrentRangeReads).
+      reads.synchronized { reads += ((offset, count)) }
       val bytes = new Array[Byte](count.toInt - (if (shortRead) 1 else 0))
       if (validFooter && offset + bytes.length == length) {
         ByteBuffer
