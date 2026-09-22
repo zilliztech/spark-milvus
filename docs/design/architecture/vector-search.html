@@ -150,7 +150,7 @@
 <div class="table"><table>
 <thead><tr><th>成本</th><th>exact</th><th>index</th></tr></thead><tbody>
 <tr><td>每段读取</td><td>向量列 N × d × 4 字节（float32），加删除与过滤列；查询分几组都只读一遍</td><td>索引文件，与向量列同一量级：Cardinal 的量化索引更小，Faiss HNSW Flat 含原始向量和图；有删除或过滤时加这些列</td></tr>
-<tr><td>每段计算</td><td>Q × N × d 次乘加</td><td>每条查询的距离计算次数与 <code>ef</code> 和图的出度同量级</td></tr>
+<tr><td>每段计算</td><td>Q × N × d 次乘加；批量距离入口实测每核 8.1e7 对/秒（768 维，124.7 GFLOP/s），按查询逐行的 <code>bruteForce</code> 每核 8.1e6</td><td>每条查询的距离计算次数与 <code>ef</code> 和图的出度同量级</td></tr>
 <tr><td>合并</td><td colspan="2">段组数 × Q × K × 24 字节的 shuffle；查询分几组都是这个量，多组时按查询组分批交出</td></tr>
 <tr><td>回表</td><td colspan="2">命中行所在的行组；每个输出列组的行组约 1 MB</td></tr>
 </tbody></table></div>
@@ -348,8 +348,9 @@
 <tr><td>参数</td><td>JSON，含距离与 <code>ef</code>；K 以函数参数为准</td></tr>
 <tr><td>输出</td><td>查询数 × K 的 int64 行号与 float32 分数，未填满处行号为 −1</td></tr>
 <tr><td>内存</td><td>缓冲由 JVM 的 Arrow allocator 分配，同步调用期间借给 Knowhere；构建与反序列化时 Knowhere 另存一份</td></tr>
-<tr><td>线程</td><td>任务线程发起同步调用，计算在 Knowhere 的进程级线程池里执行</td></tr>
+<tr><td>线程</td><td><code>bruteForce</code> 与索引搜索：任务线程发起同步调用，计算在 Knowhere 的进程级线程池里执行。批量距离入口：在任务线程上单线程执行（OpenMP 与 OpenBLAS 线程数 1），不进线程池，并行由 Spark 任务之间承担</td></tr>
 </tbody></table></div>
+<p><strong>float32 的精确扫描不走 <code>bruteForce</code>，走 Knowhere C ABI 新增的批量距离入口 <code>knowhere_bruteforce_batched</code>（决策 27，2026-09-22）。</strong>它把整组查询一次交给 Knowhere 自带的 faiss（<code>faiss::cppcontrib::knowhere::knn_L2sqr</code> / <code>knn_inner_product</code> / <code>knn_cosine</code>），faiss 按 4,096 条查询 × 1,024 行分块走 SGEMM（OpenBLAS）。<code>bruteForce</code> 按单条查询切任务，faiss 每次只见到 1 条查询于是逐行扫描，一行 3 KB 向量只服务一条查询：8375C 上单核 8.1e6 对/秒；批量入口同一函数、同一数据 8.1e7 对/秒（124.7 GFLOP/s，物理核峰值的 67%），结果逐条一致。分层实测见<a href="search-resources.html#batched">资源自适应 2.5</a>。批量入口不接受位图，有排除行的批先压紧（2.3）；元素类型不是 float32 的字段仍走 <code>bruteForce</code>。faiss 的分流阈值与 OpenBLAS 的线程数在这个进程里各只有一个值，批量调用在途期间分别是 20 与 1，最后一个在途调用结束时恢复。</p>
 <figure>
 <svg viewBox="0 0 950 250" role="img" aria-label="一批 3 行、4 维的 FloatVector：数据缓冲、排除位图和 2 条查询原样交给 Knowhere 暴力搜索，K 为 3；行 1 被排除；Knowhere 写出 2 乘 3 的批内行号和分数，未填满处为负一；批内行号加上批起点 8192 得到段内行号">
 <defs><marker id="arrow-kb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
@@ -422,7 +423,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 
 <h3 id="exact">2.3 精确扫描</h3>
 <figure>
-<svg viewBox="0 0 950 300" role="img" aria-label="任务里的一个段与本组查询进入两种策略：精确扫描逐批读向量列和删除、过滤所需的列，每批生成位图并调用一次 Knowhere 暴力搜索；索引探查只读删除、过滤所需的列，生成整段位图，索引文件每段反序列化一次，本组查询调用一次 Knowhere 索引搜索；两者都交给 TopKMerger">
+<svg viewBox="0 0 950 300" role="img" aria-label="任务里的一个段与本组查询进入两种策略：精确扫描逐批读向量列和删除、过滤所需的列，每批生成位图、有排除行时压紧，调用一次 Knowhere 批量距离入口；索引探查只读删除、过滤所需的列，生成整段位图，索引文件每段反序列化一次，本组查询调用一次 Knowhere 索引搜索；两者都交给 TopKMerger">
 <defs><marker id="arrow-st" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
 <g fill="currentColor" font-size="12">
 <text x="190" y="22">精确扫描（exact）</text><text x="190" y="170">索引探查（index）</text>
@@ -440,8 +441,8 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <text x="80" y="134">一个段</text><text x="80" y="156">本组查询</text>
 <text x="870" y="134">TopKMerger</text><text x="870" y="156" font-size="12">每条查询 ≤ K 条</text>
 <text x="280" y="56">TableFormat 逐批读</text><text x="280" y="78" font-size="12">向量列 + 删除与过滤所需列</text>
-<text x="480" y="56">每批一个位图</text><text x="480" y="78" font-size="12">向量缓冲原样传入</text>
-<text x="675" y="56" fill="#237c83">Knowhere 暴力搜索</text><text x="675" y="78" font-size="12">每批一次</text>
+<text x="480" y="56">每批一个位图</text><text x="480" y="78" font-size="12">有排除行时先压紧</text>
+<text x="675" y="56" fill="#237c83">Knowhere 批量距离</text><text x="675" y="78" font-size="12">每批一次，任务线程单线程</text>
 <text x="280" y="204">TableFormat 逐批读</text><text x="280" y="226" font-size="12">删除与过滤所需列</text>
 <text x="480" y="204">整段一个位图</text><text x="480" y="226" font-size="12">本组查询共用</text>
 <text x="480" y="270" font-size="12">TableFormat：索引句柄</text><text x="480" y="287" font-size="11">每段加载一次</text>
@@ -458,7 +459,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 </figure>
 <ol>
 <li>任务逐段处理。Milvus 的 <code>TableFormat</code> 为每个段打开一个 <code>SegmentReader</code>，逐批读向量列，以及删除与过滤要用的主键、时间戳和标量列，段只读一遍；每批交出向量缓冲、由 <code>core.delete</code> 与 <code>core.expr</code> 生成的排除位图和这一批的起始行号。</li>
-<li><code>ExactScan</code> 把向量缓冲、一组查询和位图交给 Knowhere 暴力搜索，一批一次调用；一批的大小决定吞吐（并发任务数 × 批 ≤ L3），怎么选见 <a href="search-resources.html#block">搜索路径的资源自适应</a>。只有一个查询组时算完即释放；有多个查询组时，整个段组的批留在内存里，每个查询组都在它们上面算过之后一起释放，保留的字节不超过任务的常驻额度，超过则改为逐组重读。</li>
+<li><code>ExactScan</code> 把向量缓冲和一组查询交给批量距离入口，一批一次调用。位图里有排除行时，先把可见行按原顺序拷进一块连续缓冲、记下压紧行号到批内行号的映射，调用后按映射换回；拷贝量是可见行的字节数，每批每组一次；没有排除行时缓冲原样借出。元素类型不是 float32 的字段走 <code>bruteForce</code>，位图原样传入。批量入口内部按 4,096 条查询 × 1,024 行分块，一批的大小不再受 L3 约束，只决定每次调用的固定开销与任务内存，默认 32 MiB，见 <a href="search-resources.html#block">搜索路径的资源自适应</a>。只有一个查询组时算完即释放；有多个查询组时，整个段组的批留在内存里，每个查询组都在它们上面算过之后一起释放，保留的字节不超过任务的常驻额度，超过则改为逐组重读。</li>
 <li>Knowhere 返回的行号从这一批第 0 行算起，加上这一批的起始行号就是段内行号；结果并入该组的 <code>TopKMerger</code>。段内行号不受保留策略影响，候选不需要再拼回段上。</li>
 <li>一个查询组算完它能看到的全部数据后，这组每条查询的有界堆就是要交出的候选。任务内存是这个段组的向量、一组查询的矩阵和这组的 TopK。</li>
 </ol>

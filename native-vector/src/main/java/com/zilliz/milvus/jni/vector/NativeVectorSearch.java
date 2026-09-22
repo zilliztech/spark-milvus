@@ -21,4 +21,18 @@ public final class NativeVectorSearch {
         Knowhere.bruteForce(dtype, vectors, rows, queries, queryRows, dimension, topK,
                 excluded, excluded == null ? 0L : rows, ids, distances, parameters);
     }
+
+    /**
+     * The batched entry for FLOAT32 vectors without an exclusion bitmap: every query goes
+     * to the bundled faiss in one call, which takes its BLAS path, and the call runs
+     * single-threaded on the calling thread (decision 27). The caller excludes rows by
+     * leaving them out of {@code vectors}. Buffers and output follow {@link #bruteForce}.
+     */
+    public static void bruteForceBatched(DType dtype, ByteBuffer vectors, long rows,
+            ByteBuffer queries, long queryRows, int dimension, int topK, ByteBuffer ids,
+            ByteBuffer distances, String parameters) {
+        NativeVectorLibrary.load();
+        Knowhere.bruteForceBatched(dtype, vectors, rows, queries, queryRows, dimension, topK,
+                ids, distances, parameters);
+    }
 }

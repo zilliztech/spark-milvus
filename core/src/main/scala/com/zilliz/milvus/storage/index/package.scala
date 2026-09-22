@@ -16,16 +16,18 @@ package com.zilliz.milvus.storage
   * segment sets, each sized to what a task can keep, and the query set into
   * query groups. SegmentSearch runs one query group over a segment set with one
   * of two strategies, ExactScan over vector batches or IndexProbe over an index
-  * handle, and returns each query's merged candidates as (query, segment, row
-  * offset, score); a task that answers more than one group holds its set
-  * through SegmentSearch.hold. Opening segments, building exclusion bitmaps and
-  * reading and decoding index files belong to the Milvus TableFormat side
-  * (docs/design/architecture/table-version.html section 3); IndexFileCodec and
-  * MilvusIndexFileDecoder now live in core.codec. TopKMerger keeps k per query
-  * for batches and segments alike, KnowhereBuffers hands Arrow data buffers to
-  * Knowhere as ByteBuffers, and IndexWriter builds a segment's index and hands
-  * its BinarySet to the Milvus TableFormat side, which encodes and writes the
-  * files (W6).
+  * handle (ExactScan calls the batched distance entry for float32 fields,
+  * compacting excluded rows out of a batch first, and Knowhere.bruteForce for
+  * the other element types), and returns each query's merged candidates as
+  * (query, segment, row offset, score); a task that answers more than one group
+  * holds its set through SegmentSearch.hold. Opening segments, building
+  * exclusion bitmaps and reading and decoding index files belong to the Milvus
+  * TableFormat side (docs/design/architecture/table-version.html section 3);
+  * IndexFileCodec and MilvusIndexFileDecoder now live in core.codec. TopKMerger
+  * keeps k per query for batches and segments alike, KnowhereBuffers hands
+  * Arrow data buffers to Knowhere as ByteBuffers, and IndexWriter builds a
+  * segment's index and hands its BinarySet to the Milvus TableFormat side,
+  * which encodes and writes the files (W6).
   *
   * Capabilities: V2, V5, V7, W6 (see docs/design/capabilities.md).
   */

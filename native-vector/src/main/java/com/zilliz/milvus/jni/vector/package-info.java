@@ -4,7 +4,10 @@
  * format versions; io.knowhere owns JNI loading; native-runtime owns unified
  * resource extraction.
  *
- * NativeVectorSearch delegates synchronous brute-force search on borrowed buffers.
+ * NativeVectorSearch delegates synchronous brute-force search on borrowed
+ * buffers: the per-query bruteForce, and for float32 without an exclusion
+ * bitmap the batched bruteForceBatched entry that runs single-threaded on the
+ * calling thread (decision 27).
  *
  * NativeVectorIndex delegates BinarySet loading and persisted index search, and
  * NativeVectorIndex.build delegates index building and serialization (W6) to
