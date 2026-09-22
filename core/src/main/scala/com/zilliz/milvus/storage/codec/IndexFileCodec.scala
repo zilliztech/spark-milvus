@@ -478,14 +478,18 @@ private[storage] object IndexFileCodec extends Logging {
             // Amortize remote requests while retaining bounded heap allocation.
             val count = math.min(8L * 1024 * 1024, length - offset).toInt
             val bytes = read(offset, count)
-            val footerStart = math.max(0L, length - 24 - offset).toInt
+            // Where the footer starts, counted from this range. On an object
+            // past 2 GiB that distance exceeds an Int until the last ranges,
+            // so it stays a Long until it is known to fall inside the range.
+            val footerStart = length - 24 - offset
             if (footerStart < count) {
+              val from = math.max(0L, footerStart).toInt
               System.arraycopy(
                 bytes,
-                footerStart,
+                from,
                 footer,
-                (offset + footerStart - (length - 24)).toInt,
-                count - footerStart
+                (offset + from - (length - 24)).toInt,
+                count - from
               )
             }
             var copied = 0
