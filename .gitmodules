@@ -6,5 +6,5 @@
 	url = https://github.com/milvus-io/milvus-storage.git
 [submodule "knowhere"]
 	path = knowhere
-	url = https://github.com/LawrenceTL92/knowhere-contrib.git
-	branch = codex/knowhere-jni-pr
+	url = https://github.com/Thor-ChenBiao/knowhere-contrib.git
+	branch = spark-milvus/knowhere-jni-pr
