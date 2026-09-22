@@ -464,8 +464,12 @@ the probe does not validate the final artifact or its runtime classpath.
 
 ## Knowhere library loading
 
-The root `knowhere` submodule follows the Knowhere PR #1829 branch; the
-superproject gitlink fixes the exact commit used by every build. `native-vector`
+The root `knowhere` submodule follows the Knowhere PR #1829 branch plus two
+binding additions, from `Thor-ChenBiao/knowhere-contrib` branch
+`spark-milvus/knowhere-jni-pr` until the PR branch takes them
+(LawrenceTL92/knowhere-contrib#1); the superproject gitlink fixes the exact
+commit used by every build. After pulling a change of the submodule URL, run
+`git submodule sync knowhere` before `git submodule update`. `native-vector`
 compiles `knowhere/java/src/main/java` with `javac --release 11`; it does not
 implement another C API or JNI bridge. The API JAR is cached under
 `native-vector/target/knowhere`. An ordinary compile or unit-test run needs a

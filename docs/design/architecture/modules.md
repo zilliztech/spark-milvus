@@ -5,7 +5,7 @@
 核心层不依赖 Spark 换来三件事：它在四条 Spark 线上只编一次、只出一个产物；它的测试不用拉起 SparkSession；边界由编译期检查守着。换不来的是跨语言复用 —— Ray 是 Python，依赖不了 JVM 的 jar。
 
 跨语言调用使用上游提供的原生接口与绑定。milvus-storage 自带 Python 绑定（`python/` 目录）；Knowhere 也有 Python 绑定，不能据 JVM 的模块划分推断它没有非 JVM 入口。
-向量库的 C 接口、JNI、Java API 与加载器采用 Knowhere PR #1829 分支的固定子模块，Connector 的 `native-vector` 负责调用上游加载入口并核验 ABI；精确 revision 由 superproject gitlink 固定。
+向量库的 C 接口、JNI、Java API 与加载器采用 Knowhere PR #1829 分支（加两个附加入口，见决策日志 2026-09-22）的固定子模块，Connector 的 `native-vector` 负责调用上游加载入口并核验 ABI；精确 revision 由 superproject gitlink 固定。
 本仓库原先自行编写 `mv_*` C shim 的计划已替换；非 JVM 调用方消费 Knowhere 的上游接口。固定来源和加载契约见[向量搜索第 2.8 节](vector-search.html#library-loading)。
 功能编号见 [capabilities.md](../capabilities.md)，名词沿用 [总体设计](../README.md) 第 0 节。
 
