@@ -151,13 +151,13 @@
 <tr><th>输入</th><th>来源</th><th>测试机上的值</th></tr>
 <tr><td>L3 总量</td><td><code>/sys/devices/system/cpu/cpuN/cache/index*/</code> 中 <code>level == 3</code> 的条目，按 <code>shared_cpu_list</code> 去重后求 <code>size</code> 之和</td><td>2 × 48 MiB = 96 MiB</td></tr>
 <tr><td>宿主机核数</td><td><code>/sys/devices/system/cpu/online</code>，容器内也是宿主机视图</td><td>128</td></tr>
-<tr><td>本进程可用核数</td><td><code>Runtime.availableProcessors()</code>，Java 21 按 cgroup v1/v2 配额折算</td><td>128（<code>cpu.max</code> 为 <code>max</code>）</td></tr>
+<tr><td>本进程可用核数</td><td><code>Runtime.availableProcessors()</code>，Java 21 按 cgroup v1/v2 配额折算；集群上的 executor 再与槽位 N 取较小值，没有 CPU limit 的 pod 里它返回宿主机核数</td><td>128（<code>cpu.max</code> 为 <code>max</code>）</td></tr>
 <tr><td>本进程内存上限</td><td>cgroup v2 <code>memory.max</code> / v1 <code>memory.limit_in_bytes</code>，无限制时取 <code>/proc/meminfo</code> 的 MemTotal 乘 CPU 配额比例</td><td>无限制，MemTotal 503 GB</td></tr>
 <tr><td>堆上限</td><td><code>Runtime.maxMemory()</code></td><td>按 <code>-Xmx</code></td></tr>
 <tr><td>每 executor 槽位 N</td><td>现有 <code>MilvusSearch.taskSlotsPerExecutor</code>：<code>spark.executor.cores</code>，local 取 <code>defaultParallelism</code></td><td>16</td></tr>
 </table>
 </div>
-<p>CPU 配额比例 = <code>min(1, 可用核数 / 宿主机核数)</code>；K8s <code>limits.cpu: 8</code> 的 pod 在这台机器上是 8/128。</p>
+<p>CPU 配额比例 = <code>min(1, 可用核数 / 宿主机核数)</code>；K8s <code>limits.cpu: 8</code> 的 pod 在这台机器上是 8/128；没有 CPU limit、<code>spark.executor.cores=4</code> 的 executor 在 16 vCPU 节点上是 4/16。local 模式的 driver 就是 executor，独占整机，保留探测值。</p>
 
 <h3 id="block">3.2 base 块</h3>
 <pre><code>可用 L3 = L3 总量 × CPU 配额比例 × 0.6        0.6 留给 query 组、输出缓冲和同机其他进程

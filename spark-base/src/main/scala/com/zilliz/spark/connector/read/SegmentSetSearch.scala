@@ -9,6 +9,7 @@ import org.apache.spark.sql.types.{
   StructType
 }
 import org.apache.spark.sql.Row
+import org.apache.spark.SparkEnv
 import org.apache.spark.TaskContext
 
 import com.zilliz.milvus.storage.expr.PlanParser
@@ -48,6 +49,11 @@ private[read] object SegmentSetSearch extends Logging {
   private val chosenBatches =
     new java.util.concurrent.ConcurrentHashMap[(Int, Option[Long]), Long]()
 
+  private def isLocalMaster: Boolean =
+    Option(SparkEnv.get)
+      .map(_.conf.get("spark.master", ""))
+      .exists(_.startsWith("local"))
+
   /** The exact scan's base block for this JVM: the option when the call set it,
     * otherwise from the machine's L3, CPU quota and this executor's slots
     * (docs/design/architecture/search-resources.html section 3.2). Probed and
@@ -57,8 +63,16 @@ private[read] object SegmentSetSearch extends Logging {
     chosenBatches.computeIfAbsent(
       (spec.slots, spec.batchMaxBytes),
       _ => {
+        // A cluster executor without a cgroup CPU limit reads the host's CPU
+        // count as its own, so its share of the L3 would come out as the whole
+        // machine's; the executor's slots are the cores it was given. A local
+        // master owns the machine and keeps what the probe read.
+        val probed = MachineResources.probe()
+        val machine =
+          if (isLocalMaster || probed.availableCpus <= spec.slots) probed
+          else probed.copy(availableCpus = spec.slots)
         val choice = SearchResources.exactScanBatch(
-          MachineResources.probe(),
+          machine,
           spec.slots,
           spec.batchMaxBytes
         )
