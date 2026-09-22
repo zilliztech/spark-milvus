@@ -98,6 +98,31 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
     )
   }
 
+  test("a build from an address needs the address and enough bytes") {
+    val noAddress = the[IllegalArgumentException] thrownBy IndexWriter
+      .buildFromAddress(
+        0L,
+        4L * layout.rowBytes,
+        4L,
+        layout,
+        "HNSW",
+        "L2",
+        indexVersion = 8
+      )
+    noAddress.getMessage should include("native address")
+    val tooSmall = the[IllegalArgumentException] thrownBy IndexWriter
+      .buildFromAddress(
+        1L,
+        2L * layout.rowBytes,
+        4L,
+        layout,
+        "HNSW",
+        "L2",
+        indexVersion = 8
+      )
+    tooSmall.getMessage should include("need")
+  }
+
   test("a build parameter without a name or a value is refused") {
     the[IllegalArgumentException] thrownBy IndexWriter.build(
       buffer(4),

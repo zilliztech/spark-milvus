@@ -76,6 +76,39 @@ public final class NativeVectorIndex implements AutoCloseable {
         }
     }
 
+    /**
+     * Builds an index over vectors at a native address and serializes it.
+     *
+     * <p>The memory is borrowed for the length of the call. A ByteBuffer addresses at most
+     * Integer.MAX_VALUE bytes; a segment's vectors can be larger, and Knowhere's C ABI takes
+     * 64-bit sizes, so a segment build passes the address and the byte length instead.
+     */
+    public static Built build(String indexType, DType dataType, int version, long address, long bytes,
+            long rows, int dimension, String parameters) {
+        Objects.requireNonNull(indexType, "indexType");
+        Objects.requireNonNull(dataType, "dataType");
+        Objects.requireNonNull(parameters, "parameters");
+        if (address == 0L) {
+            throw new IllegalArgumentException("A native address is required");
+        }
+        if (rows <= 0 || dimension <= 0) {
+            throw new IllegalArgumentException("An index is built over positive rows and dimensions");
+        }
+        NativeVectorLibrary.RuntimeInfo runtime = NativeVectorLibrary.load();
+        if (version < runtime.minimumIndexVersion() || version > runtime.maximumIndexVersion()) {
+            throw new IllegalArgumentException("Index format version " + version
+                    + " is outside the loaded Knowhere range " + runtime.minimumIndexVersion()
+                    + ".." + runtime.maximumIndexVersion());
+        }
+        KnowhereIndex index = Knowhere.createIndex(indexType, dataType, version);
+        try {
+            index.build(address, bytes, rows, dimension, parameters);
+            return new Built(index.serialize(), rows, dimension);
+        } finally {
+            index.close();
+        }
+    }
+
     /** The payloads a built index serializes to, named the way Knowhere names them. */
     public static final class Built implements AutoCloseable {
         private final BinarySet data;

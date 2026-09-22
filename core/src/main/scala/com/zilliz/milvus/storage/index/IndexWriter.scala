@@ -66,10 +66,28 @@ object IndexWriter extends Logging {
       val segmentRows: Long,
       val validData: Option[Array[Byte]]
   ) extends AutoCloseable {
-    def bytes: ByteBuffer =
+
+    /** The native address of the vectors; with `byteLength` it is what a build
+      * takes, whatever the size. A `ByteBuffer` addresses at most
+      * `Int.MaxValue` bytes, and a segment of two million 768-dimension vectors
+      * is three times that.
+      */
+    def address: Long = buffer.memoryAddress()
+
+    def byteLength: Long = buffer.capacity()
+
+    /** The vectors as a `ByteBuffer`, for the callers that take one; only a
+      * segment under 2 GiB fits.
+      */
+    def bytes: ByteBuffer = {
+      require(
+        buffer.capacity() <= Int.MaxValue,
+        s"${buffer.capacity()} vector bytes do not fit one ByteBuffer; build from the address"
+      )
       buffer
         .nioBuffer(0, buffer.capacity().toInt)
         .order(ByteOrder.nativeOrder())
+    }
 
     override def close(): Unit = buffer.close()
   }
@@ -93,10 +111,6 @@ object IndexWriter extends Logging {
       s"A segment of $segmentRows rows is outside what one build takes"
     )
     val bytes = Math.multiplyExact(segmentRows, layout.rowBytes.toLong)
-    require(
-      bytes <= Int.MaxValue,
-      s"A segment of $bytes vector bytes exceeds one build buffer"
-    )
     val target = allocator.buffer(bytes)
     var present = new java.util.BitSet(segmentRows.toInt)
     var rows = 0L
@@ -174,6 +188,85 @@ object IndexWriter extends Logging {
       parameters: Map[String, String] = Map.empty,
       validData: Option[Array[Byte]] = None
   ): Built = {
+    val (name, distance) =
+      checkBuild(rows, layout, indexType, metric, parameters)
+    require(
+      vectors != null && vectors.capacity().toLong >= rows * layout.rowBytes,
+      s"The buffer holds ${if (vectors == null) 0
+        else vectors.capacity()} bytes; $rows rows of ${layout.dimension} dimensions need ${rows * layout.rowBytes}"
+    )
+    finish(
+      NativeVectorIndex.build(
+        name,
+        layout.dtype,
+        indexVersion,
+        vectors,
+        rows,
+        layout.dimension,
+        buildParameters(distance, layout, parameters)
+      ),
+      name,
+      distance,
+      indexVersion,
+      rows,
+      layout,
+      validData
+    )
+  }
+
+  /** Builds from vectors at a native address, which is what a segment gives
+    * (`Assembled.address`): its vectors can exceed the `Int.MaxValue` bytes one
+    * `ByteBuffer` addresses, while Knowhere's C ABI takes 64-bit sizes.
+    */
+  def buildFromAddress(
+      address: Long,
+      bytes: Long,
+      rows: Long,
+      layout: VectorLayout,
+      indexType: String,
+      metric: String,
+      indexVersion: Int,
+      parameters: Map[String, String] = Map.empty,
+      validData: Option[Array[Byte]] = None
+  ): Built = {
+    val (name, distance) =
+      checkBuild(rows, layout, indexType, metric, parameters)
+    require(address != 0L, "The vectors need a native address")
+    require(
+      bytes >= rows * layout.rowBytes,
+      s"The buffer holds $bytes bytes; $rows rows of ${layout.dimension} dimensions need ${rows * layout.rowBytes}"
+    )
+    finish(
+      NativeVectorIndex.build(
+        name,
+        layout.dtype,
+        indexVersion,
+        address,
+        bytes,
+        rows,
+        layout.dimension,
+        buildParameters(distance, layout, parameters)
+      ),
+      name,
+      distance,
+      indexVersion,
+      rows,
+      layout,
+      validData
+    )
+  }
+
+  /** The checks every build makes before it touches the native library: the
+    * index type is one this connector loads again, the metric belongs to the
+    * element type, and the parameters are named.
+    */
+  private def checkBuild(
+      rows: Long,
+      layout: VectorLayout,
+      indexType: String,
+      metric: String,
+      parameters: Map[String, String]
+  ): (String, String) = {
     val name = indexType.toUpperCase(Locale.ROOT)
     val distance = metric.toUpperCase(Locale.ROOT)
     require(
@@ -188,25 +281,23 @@ object IndexWriter extends Logging {
     )
     require(rows > 0, s"An index is built over $rows rows")
     require(
-      vectors != null && vectors.capacity().toLong >= rows * layout.rowBytes,
-      s"The buffer holds ${if (vectors == null) 0
-        else vectors.capacity()} bytes; $rows rows of ${layout.dimension} dimensions need ${rows * layout.rowBytes}"
-    )
-    require(
       parameters.forall { case (key, value) =>
         key != null && key.nonEmpty && value != null && value.nonEmpty
       },
       "Index build parameters must be named and nonempty"
     )
-    val built = NativeVectorIndex.build(
-      name,
-      layout.dtype,
-      indexVersion,
-      vectors,
-      rows,
-      layout.dimension,
-      buildParameters(distance, layout, parameters)
-    )
+    (name, distance)
+  }
+
+  private def finish(
+      built: NativeVectorIndex.Built,
+      name: String,
+      distance: String,
+      indexVersion: Int,
+      rows: Long,
+      layout: VectorLayout,
+      validData: Option[Array[Byte]]
+  ): Built =
     try {
       val result = new Built(
         built,
@@ -228,7 +319,6 @@ object IndexWriter extends Logging {
         built.close()
         throw failure
     }
-  }
 
   /** The JSON Knowhere takes: the metric and the dimension it always needs,
     * plus whatever the caller tuned.

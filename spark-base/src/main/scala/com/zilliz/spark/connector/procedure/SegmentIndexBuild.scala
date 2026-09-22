@@ -84,8 +84,9 @@ private[procedure] object SegmentIndexBuild extends Logging {
           )
         finally vectors.close()
       try {
-        val built = IndexWriter.build(
-          assembled.bytes,
+        val built = IndexWriter.buildFromAddress(
+          assembled.address,
+          assembled.byteLength,
           assembled.rows,
           spec.layout,
           spec.indexType,
