@@ -441,10 +441,10 @@ object MilvusSearch extends Logging {
   /** The query set packed on the executors, one partition per query group, each
     * the output of a shuffle.
     *
-    * `zipWithIndex` gives every query the position that decides its group, so
-    * the groups are the same ones the driver planned, and a group's rows are
-    * packed in query order. One task packs one group, and the groups are packed
-    * in parallel.
+    * `zipWithIndex` gives every query the position that decides its group and
+    * its place in the group, so the groups are the same ones the driver planned
+    * and a group's rows are packed in query order without sorting. One task
+    * packs one group, and the groups are packed in parallel.
     *
     * The packed group then goes through a second shuffle, keyed by its group,
     * so that it is written once to the local disk of the executor that packed
@@ -474,17 +474,18 @@ object MilvusSearch extends Logging {
     val metric = spec.metric
     val rowBytes = layout.rowBytes
     val sizes = plan.groups.map(_.queries).toVector
-    // A group's row arrives, is written where it belongs and is done with.
-    // `groupByKey` would hold the whole group as one query's bytes at a time
-    // and then build the group's bytes beside it, which is the group twice
-    // over: a heap dump of a failed 1 GiB query set found 2.03 GB in
-    // `byte[4096]` beside the arrays they were being copied into. Partitioning
-    // by group and sorting by position inside it puts the rows in the order
-    // they are wanted, so the peak is the group plus the row in hand.
+    // A row arrives, is written where it belongs and is done with: its
+    // position says both its group and its place in the group, so the task
+    // holds the group's arrays and the row in hand. Holding the group's rows
+    // before copying them holds the group twice. `groupByKey` did that (a heap
+    // dump of a failed 1 GiB query set found 2.03 GB in `byte[4096]` beside
+    // the arrays they were being copied into), and so did sorting each group
+    // by position first: four packing tasks of 232 MB groups ran a 4 GiB
+    // executor heap out (UAT chenbiao-qs2c-31m-8g-ef151-0).
     val byGroup = new Partitioner {
       override def numPartitions: Int = sizes.size
       override def getPartition(key: Any): Int =
-        key.asInstanceOf[(Long, Long)]._1.toInt
+        (key.asInstanceOf[Long] / size).toInt
     }
     // The packed group keeps its group's partition through the second shuffle.
     val byIndex = new Partitioner {
@@ -495,26 +496,28 @@ object MilvusSearch extends Logging {
       .map(row => SearchQueries.pack(Seq(row), layout, metric))
       .zipWithIndex()
       .map { case ((ids, vectors), position) =>
-        ((position / size, position), (ids.head, vectors))
+        (position, (ids.head, vectors))
       }
-      .repartitionAndSortWithinPartitions(byGroup)
+      .partitionBy(byGroup)
       .mapPartitionsWithIndex { (index, entries) =>
         val queries = sizes(index)
+        val first = index.toLong * size
         val ids = new Array[Long](queries)
         val vectors = new Array[Byte](queries * rowBytes)
-        var at = 0
-        entries.foreach { case (_, (id, packed)) =>
+        var placed = 0
+        entries.foreach { case (position, (id, packed)) =>
+          val at = position - first
           require(
-            at < queries,
-            s"Query group $index takes $queries queries and was given more"
+            at >= 0L && at < queries,
+            s"Query at position $position does not belong to group $index"
           )
-          ids(at) = id
-          System.arraycopy(packed, 0, vectors, at * rowBytes, rowBytes)
-          at += 1
+          ids(at.toInt) = id
+          System.arraycopy(packed, 0, vectors, at.toInt * rowBytes, rowBytes)
+          placed += 1
         }
         require(
-          at == queries,
-          s"Query group $index takes $queries queries and was given $at"
+          placed == queries,
+          s"Query group $index takes $queries queries and was given $placed"
         )
         Iterator((index, SearchQueries.Group(ids, vectors, 0)))
       }
