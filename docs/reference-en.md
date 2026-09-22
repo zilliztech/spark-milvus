@@ -76,25 +76,43 @@ the same result. Read by group, a job reads the query set once per segment set
 in total, and the executors' local disks need room for about two copies of it.
 `milvus.search.group.max.bytes` (default 512 MiB) is what one task answers at a
 time, counted as queries × (dimension × element width + K × 48 bytes).
-`milvus.search.vectors.max.bytes` (default automatic) is how many bytes of
-base vectors **one executor** keeps at once. Unset, it follows the executor's
-memory: `(memory limit − heap − 1 GiB) × 0.5`, where the limit is the cgroup's
-or the machine's in local mode and the container Spark asks for on a cluster
-(`spark.executor.memory` + memoryOverhead + offHeap), never below 64 MiB a
-task. The tasks running there share it: the plan divides it by
-`spark.executor.cores` to get a task's share, which also bounds how many
-segments that task reads. A local master has no executors, so the n tasks of
-`local[n]` share the one JVM and n is the divisor. A segment set that turns out
-larger than the share no longer fails the task: every query group reads the set
-again (I/O × groups), and the driver's `Search budget` log line states the
-budget, each set's bytes and whether any set streams. These vectors live in
-Arrow's off-heap memory, which `-Xmx` does not bound.
+`milvus.search.segments.max.bytes` (default automatic) is how many bytes of
+segment data **one executor** keeps off the heap for a search: base vectors in
+exact mode, indexes in index mode. Unset, it follows the executor's memory:
+`(memory limit − heap − 1 GiB) × 0.5` in exact mode and
+`memory limit − heap − 2 GiB` in index mode. The limit is the cgroup's or the
+machine's in local mode, and on a cluster it is the container Spark asks for
+(`spark.executor.memory` + memoryOverhead + offHeap). It is never below 64 MiB a
+task. The search tasks running on one executor share it. On a cluster, index
+mode runs one search task per executor at a time; exact mode divides the
+budget by `spark.executor.cores` ÷ `spark.task.cpus`; a local master divides the
+n of `local[n]` by `spark.task.cpus`. Queries have a budget of their own on the
+heap: the part Spark does not manage, `(heap − 300 MiB) × (1 −
+spark.memory.fraction)`, divided the same way. When a task's queries fit that
+budget, the task keeps its queries and reads each segment once. Otherwise it
+keeps its segment set off the heap and the query groups pass through it one
+by one; when the set does not fit either, the plan cuts more sets. A segment
+set that turns out larger than the budget no longer fails the task: every query
+group reads the set again (I/O × groups). The driver's `Search budget` log
+line states both budgets, the order chosen, the number of sets and whether any
+set streams. Segment data lives in Arrow's or Knowhere's off-heap memory, which
+`-Xmx` does not bound.
+
+On a cluster, index mode needs no `spark.task.cpus` setting. The connector
+declares that each task of the search and index-build stages takes every core of
+its executor, and that each task of the stage packing the query groups takes
+as many cores as keeps the groups packed at once inside the heap. The other
+stages run one task per core, as by default. This needs dynamic allocation off;
+in local mode or with dynamic allocation on, set `spark.task.cpus` to the
+executor's cores as before.
 
 `milvus.search.group.max.bytes` stays **per task**: it also decides how many
 query groups there are, which is the shape of the plan and not only memory. One
-task's peak is therefore its share of the executor budget plus one query
-group, plus the next group being read when the query set is read by group; a
-broadcast query set is also kept whole on every executor.
+task that keeps its segment set peaks at its segment budget plus one query
+group, plus the next group being read when the query set is read by group. A
+task that keeps its queries peaks at the matrices and top-k state of all its
+queries plus one segment and its load peak. A broadcast query set is also kept
+whole on every executor.
 
 Each search registers its own accumulators, which the stage page shows once a
 task ends; while it runs, the driver log reports them once a heartbeat. They are

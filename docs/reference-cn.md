@@ -61,19 +61,29 @@ driver，两条路结果相同。按组读取时，一次作业读查询集的�
 executor 本地盘上要有约两份查询集的空间；
 `milvus.search.group.max.bytes`（默认 512 MiB）是一个任务一次回答多少查询，按
 「查询数 ×（维度 × 元素宽度 + K × 48 字节）」计；
-`milvus.search.vectors.max.bytes`（默认自动）是**一个 executor** 同时留在内存里的
-底库向量字节上限。不设时按 executor 的内存算：`（内存上限 − 堆 − 1 GiB）× 0.5`，
+`milvus.search.segments.max.bytes`（默认自动）是**一个 executor** 为搜索留在堆外的
+段数据字节上限：exact 模式是底库向量，index 模式是索引。不设时按 executor 的内存算：
+exact 模式 `（内存上限 − 堆 − 1 GiB）× 0.5`，index 模式 `内存上限 − 堆 − 2 GiB`；
 local 模式的内存上限取 cgroup 或整机，集群模式取 Spark 为 executor 申请的容器
 （`spark.executor.memory` + memoryOverhead + offHeap），每任务不低于 64 MiB。一个
-executor 上并发的任务共享它：规划时按 `spark.executor.cores` 除开，得到每个任务的额度，
-这个额度同时决定一个任务读多少个段。local 模式下没有 executor，`local[n]` 的 n 个任务
-共享同一个 JVM，除数就是 n。段组真实大小超过额度时任务不再失败，改为每个查询组重读一遍
-段（I/O × 查询组数），driver 日志 `Search budget` 一行写明预算、段组字节与是否重读。
-这些向量在 Arrow 堆外，`-Xmx` 管不到它们。
+executor 上同时运行的搜索任务共享它：index 模式在集群上每个 executor 同时只跑一个搜索
+任务，exact 模式按 `spark.executor.cores` ÷ `spark.task.cpus` 除开，local 模式把
+`local[n]` 的 n 按 `spark.task.cpus` 除开。查询在堆上另有一块额度：Spark 不管理的那
+部分堆 `（堆 − 300 MiB）×（1 − spark.memory.fraction）`，同样按同时运行的任务数除开。
+本任务的查询放得进查询额度时，任务把查询留在内存、段逐个读一遍；放不下时把段组留在堆外、
+查询组逐组流过，段组也放不下就增加段组数。段组真实大小超过额度时任务不再失败，改为每个
+查询组重读一遍段（I/O × 查询组数）。driver 日志 `Search budget` 一行写明两块额度、选中
+的顺序、段组数与是否重读。段数据在 Arrow 或 Knowhere 的堆外内存里，`-Xmx` 管不到它们。
+
+index 模式在集群上不必设置 `spark.task.cpus`：搜索与建索引的 stage 由连接器声明每任务
+占满 executor 的核，打包查询组的 stage 按堆声明每任务核数，其余 stage 按默认的每任务
+一核并行。这要求关闭动态分配；local 模式与开启动态分配时，仍要把 `spark.task.cpus` 设为
+executor 核数。
 
 `milvus.search.group.max.bytes` 仍然是**每个任务**的：它同时决定查询组的个数，那是
-规划的形状，不只是内存。所以一个任务的峰值是「executor 额度 ÷ 并发数 + 一个查询
-组」，查询集按组读取时再加正在读取的下一组；广播时每个 executor 另常驻一份查询集。
+规划的形状，不只是内存。段组留在内存时，一个任务的峰值是「段额度 + 一个查询组」，查询
+集按组读取时再加正在读取的下一组；查询留在内存时，是「本任务全部查询的矩阵与 TopK 状态 +
+一个段及其加载峰值」。广播时每个 executor 另常驻一份查询集。
 
 每次搜索注册一组累加器，任务结束后在 Spark 的 stage 页面可见；运行中的进度由 driver
 日志每个心跳周期报一行。累加器有：`milvus.search.segment.searches`、

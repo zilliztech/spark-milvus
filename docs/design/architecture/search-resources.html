@@ -176,15 +176,29 @@
 <h3 id="block">3.2 base 块</h3>
 <p>B = 配置值，否则 32 MiB。批量距离入口内部按 4,096 条查询 × 1,024 行分块，B 只影响每次调用的固定开销（JNI 结果回传、每组查询的 top-k 归并）和任务内存（N 个并发任务各带一块）；实测 32 MiB 与 128 MiB 每核速率相同（8.0e7 与 8.1e7 对/秒），1 MiB 以下装不下一个 1,024 行的分块。原来的 L3 公式（可用 L3 = L3 × CPU 配额 × 0.6，B = 可用 L3 / N）针对按查询逐行的内核，随决策 27 撤销，它的实测保留在 2.1 和 2.2。仅 exact 模式；index 模式不扫 base。<code>group.max.bytes</code> 实测影响在 ±20% 内，不动。</p>
 
-<h3 id="budget">3.3 常驻预算与降级</h3>
-<pre><code>堆外可用 = 内存上限 − 堆上限 − 1 GiB（JVM 与 Spark 自身）
-预算     = 堆外可用 × 0.5 / N                  0.5 留给索引加载、shuffle 和 Arrow 的其他缓冲</code></pre>
+<h3 id="budget">3.3 并发数、两块额度与降级</h3>
+<p><strong>一个任务能留在内存里多少，取决于它所在的 executor 同时跑几个搜索任务，以及堆与堆外各剩多少；两块分开核算，因为查询在 JVM 堆上，段的向量与索引在堆外。</strong></p>
+<pre><code>N        = 每个 executor 同时运行的搜索任务数
+           index 模式，集群且关闭动态分配：1        stage 声明每任务占 spark.executor.cores 个核
+           其余：executor 核数 ÷ spark.task.cpus     local 模式的核数是 local[n] 的 n
+堆外可用 = 内存上限 − 堆上限 − 1 GiB                  1 GiB 是 JVM 与 Spark 自身
+段额度   = exact：堆外可用 × 0.5 ÷ N                  0.5 留给读向量的缓冲、shuffle 和 Arrow 的其他缓冲
+           index：(堆外可用 − 1 GiB) ÷ N              1 GiB 留给 shuffle 读取缓冲与 Knowhere 的工作内存
+查询额度 = (堆上限 − 300 MiB) × (1 − spark.memory.fraction) ÷ N
+                                                      Spark 不管理的那部分堆；spark.memory.fraction 默认 0.6</code></pre>
+<p>两种顺序各自的需求：查询留在内存时，堆上是本任务查询的 id 与 TopK 状态（每条查询 8 + K × 48 + 128 字节，后两项是候选对象与优先队列本身），走 shuffle 时加上正在读入的一组；堆外是本任务查询矩阵的拷贝，加最大一段的常驻字节及其加载峰值。段组留在内存时，堆外是段组的常驻字节，加最大一段的加载峰值与一个查询组的矩阵。index 模式一个段的常驻字节取快照记录的 <code>serialized_size</code>，加载峰值再计一份（BinarySet 与反序列化后的索引同时在）；exact 模式取行数 × 向量宽度，没有加载峰值。</p>
+<p>perf_laion_31m（16 段，Cardinal 索引每段 1.85–2.67 GB、共 40.0 GB），2 个 executor，每个 4 GiB 堆加 28 GiB memoryOverhead：N = 1，段额度 26 GiB，查询额度 1.5 GiB。</p>
 <table>
-<tr><th>改动</th><th>内容</th></tr>
-<tr><td>默认值</td><td>由上式算出；<code>milvus.search.vectors.max.bytes</code> 保留为覆盖，语义仍是每 executor。内存上限：local 模式读 cgroup 或整机（driver 即 executor）；集群模式 driver 读不到 executor 的 cgroup，取 Spark 为它申请的容器 <code>spark.executor.memory</code> + memoryOverhead + offHeap。算出的每任务预算不低于 64 MiB</td></tr>
-<tr><td>规划期</td><td><code>SearchPlan.segmentBytes</code> 对行数未知的段不再按 0 计：先取快照行数，再取列组文件行数，再取该段索引记录的 <code>num_rows</code>；仍未知的（只由 manifest 列出的 V3 段，milvus-storage 的 manifest 不记段行数）按预算的一半估并记入日志</td></tr>
-<tr><td>运行期</td><td><code>SegmentSetSearch</code> 多组时若集合超过预算，不再 <code>require</code> 失败，退回单组的逐 batch 扫描，对每个 query 组重读一遍段。代价是 I/O × 组数，换来任何段大小都能跑</td></tr>
-<tr><td>日志</td><td>规划期一行 <code>Search budget</code>：预算及其来源、集合数、已知的每集合字节、估算的段数、会重读的集合数；executor 上 <code>Segment set not held</code> 一行写明哪个段在多少字节处越过预算</td></tr>
+<tr><th>查询集</th><th>查询留在内存</th><th>段组留在内存（每组 8 段）</th><th>选中</th></tr>
+<tr><td>1 GiB，349,525 条</td><td>堆 0.45 GB（id 与 TopK 0.22 GB，读入中的一组 0.23 GB）；堆外 6.4 GB（查询矩阵 1.07 GB，最大一段 2.67 GB 及加载峰值）</td><td>堆外 22.9 GB</td><td>查询留在内存，2 个任务</td></tr>
+<tr><td>8.59 GB，2,796,200 条</td><td>堆 1.95 GB，超过查询额度</td><td>堆外 22.9 GB</td><td>段组留在内存，2 个任务</td></tr>
+</table>
+<table>
+<tr><th>项</th><th>内容</th></tr>
+<tr><td>默认值</td><td>由上式算出；<code>milvus.search.segments.max.bytes</code> 设置时，它是每个 executor 的段数据上限，段额度取它 ÷ N。内存上限：local 模式读 cgroup 或整机（driver 即 executor）；集群模式 driver 读不到 executor 的 cgroup，取 Spark 为它申请的容器 <code>spark.executor.memory</code> + memoryOverhead + offHeap。每任务段额度不低于 64 MiB</td></tr>
+<tr><td>规划期</td><td>先试查询留在内存，放不下再让段组留在内存，段组仍放不下就增加段组数（<a href="vector-search.html#execution">vector-search.html 2.1</a> driver 一条）。行数未知的段不按 0 计：先取快照行数，再取列组文件行数，再取该段索引记录的 <code>num_rows</code>；仍未知的（只由 manifest 列出的 V3 段，milvus-storage 的 manifest 不记段行数）按段额度的一半估并记入日志</td></tr>
+<tr><td>运行期</td><td>段组留在内存时，<code>SegmentSearch.hold</code> 对 exact 的向量批与 index 的索引字节都计数，超过段额度就释放已读的，退回逐组重读，代价是 I/O × 组数，换来任何段大小都能跑</td></tr>
+<tr><td>日志</td><td>规划期一行 <code>Search budget</code>：N 及其来源（stage 级任务资源或 <code>spark.task.cpus</code>）、两块额度及其来源、选中的顺序、段组数、每任务两块内存的需求、会重读的段组数；executor 上 <code>Segment set not held</code> 一行写明哪个段在多少字节处越过额度</td></tr>
 </table>
 <p>实现后实测（2 GiB × 256 MiB，local[16]，行数未知的 64 段）：预算压到每任务 16 MiB、3 个查询组时，32 个段组在读到第二个段的 18 MiB 处全部越过预算并转为逐组重读，96 个任务全部完成，212 s，命中 655,360 与单组持有路径（204 s）一致；改动前同一配置在第一个段组处以 <code>fills more than … bytes</code> 失败。</p>
 
@@ -194,10 +208,10 @@
 <tr><td>去掉 <code>MaxPayloadBytes</code></td><td>SLICE_META 的 <code>total_len</code> 改为与切片实际长度之和核对，不一致即拒绝。申请的原生内存永远等于对象存储上真实存在的字节数，伪造的元数据撑不大它。SLICE_META 1 MiB 与 <code>valid_data</code> 256 MiB 保留，它们走 Java 数组</td></tr>
 <tr><td>不按内存拒绝</td><td>索引多大是用户建段时决定的；内存够不够与 Spark 读一个超大分区同类，由用户按 <code>并发 × 索引大小 × 2</code> 配 executor，配少了按 Spark 常规方式失败重试</td></tr>
 <tr><td>读取并发</td><td>索引对象按 8 MiB 区间或切片对象并发请求，同时在途最多 32 个；本 JVM 已请求、未消费的字节共用一个预算：最大堆的 1/16，钳在 64 到 256 MiB。这部分在堆上，不计入堆外的加载峰值；预算按 JVM 而不按任务算，不随槽位数增长。实测 2.58 GB 的 Cardinal 对象：顺序读 47 MB/s，32 个在途 1.1 GB/s（<a href="vector-search.html#native-boundary">vector-search.html 2.5</a>）</td></tr>
-<tr><td>算给用户看</td><td>规划期一行 INFO：每任务索引字节、加载峰值（× 2）、本 executor 合计（× N）、堆外可用；加载前一行实际申请字节数。原生 <code>bad_alloc</code> 不产生 Java 异常，日志是事后唯一的依据</td></tr>
+<tr><td>算给用户看</td><td>规划期 <code>Search budget</code> 一行：每任务的索引字节、最大一段的加载峰值、段额度与 N（3.3）；加载前一行实际申请字节数。原生 <code>bad_alloc</code> 不产生 Java 异常，日志是事后唯一的依据</td></tr>
 <tr><td>段大于内存时</td><td>HNSW 一个图必须整体可寻址，不能部分加载；出路是 mmap（Knowhere 有 <code>enable_mmap</code>，Java 绑定缺从文件加载的入口，需补 JNI），慢但不失败。把段切成多个小图不取：2026-09-21 实测 64 小图比暴力搜索还慢，且 Milvus 认一段一索引，快照恢复不进 Milvus</td></tr>
 </table>
-<p>已实现：常量删除；<code>IndexFileCodec.load</code> 解析 SLICE_META 后、创建原生 Loader 前，对每个逻辑载荷取其切片对象的 <code>store.size</code> 之和（这些大小随后复用给读取，不重复 stat），<code>total_len</code> 大于该和即拒绝，复制完仍要求恰好等于各切片载荷之和；每次原生分配前一行 <code>Persisted index allocating</code>；index 模式规划期一行 <code>Search index memory</code>（每任务索引字节取最大段组的 <code>serialized_size</code> 之和、× 2 加载峰值、× 槽位、堆外可用），峰值超过堆外可用时以 WARN 输出。1 GiB → 8 GiB 的过渡（296f3f9）随之退役。</p>
+<p>已实现：常量删除；<code>IndexFileCodec.load</code> 解析 SLICE_META 后、创建原生 Loader 前，对每个逻辑载荷取其切片对象的 <code>store.size</code> 之和（这些大小随后复用给读取，不重复 stat），<code>total_len</code> 大于该和即拒绝，复制完仍要求恰好等于各切片载荷之和；每次原生分配前一行 <code>Persisted index allocating</code>；index 模式的规划按 3.3 核算每任务的索引字节与加载峰值，写进 <code>Search budget</code> 一行。1 GiB → 8 GiB 的过渡（296f3f9）随之退役。</p>
 
 <h3 id="where">3.5 落点</h3>
 <div class="table-scroll">
