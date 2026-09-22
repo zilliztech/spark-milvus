@@ -156,11 +156,7 @@ def system_provider(name):
     if name in COMPILER_RUNTIME:
         path = FORMAT.locate_compiler_runtime(name)
     elif name in SYSTEM_PACKAGES:
-        matches = [line.split(" => ", 1)[1] for line in command("ldconfig", "-p").splitlines()
-                   if line.strip().startswith(name + " ") and "x86-64" in line and " => " in line]
-        if len(matches) != 1:
-            raise ValueError("Ambiguous or absent system runtime " + name)
-        path = Path(matches[0])
+        path = FORMAT.system_library_path(name)
     else:
         raise ValueError("Dependency is outside the unified Conan graph: " + name)
     if not path.is_absolute() or not path.is_file():
@@ -228,11 +224,7 @@ def stage(providers, entries, directory):
 
 def system_zlib_requirements(directory, names):
     """Record the system ABI used by the JDK before any JNI bundle is extracted."""
-    matches = [line.split(" => ", 1)[1] for line in command("ldconfig", "-p").splitlines()
-               if line.strip().startswith("libz.so.1 ") and "x86-64" in line and " => " in line]
-    if len(matches) != 1:
-        raise ValueError("The system must supply exactly one x86-64 libz.so.1")
-    provider = Path(matches[0]).resolve()
+    provider = FORMAT.system_library_path(FORMAT.system_zlib()).resolve()
     available = set(re.findall(r"Name: (ZLIB_\S+)", command("readelf", "-VW", provider)))
     exported = {line.split()[0].split("@", 1)[0] for line in
                 command("nm", "-D", "--defined-only", "--format=posix", provider).splitlines()}

@@ -64,6 +64,48 @@ class SourceIdentityTest(unittest.TestCase):
                 build.check_cmake_trace(trace, [])
 
 
+class SystemLibraryPathTest(unittest.TestCase):
+    """The ELF adapter reads the loader cache for the machine it runs on: a
+    multiarch host lists another architecture's copy under the same name.
+    """
+
+    CACHE = ("3 libs found in cache `/etc/ld.so.cache'\n"
+             "\tlibz.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libz.so.1\n"
+             "\tlibz.so.1 (libc6,AArch64) => /lib/aarch64-linux-gnu/libz.so.1\n"
+             "\tlibz.so (libc6,AArch64) => /lib/aarch64-linux-gnu/libz.so\n")
+
+    def resolve(self, machine, name):
+        with mock.patch.object(platforms, "_command", return_value=self.CACHE), \
+                mock.patch.object(platforms.platform, "machine", return_value=machine):
+            return platforms.Elf().system_library_path(name)
+
+    def test_entry_tagged_for_this_machine_is_selected(self):
+        self.assertEqual(Path("/lib/aarch64-linux-gnu/libz.so.1"), self.resolve("aarch64", "libz.so.1"))
+        self.assertEqual(Path("/lib/x86_64-linux-gnu/libz.so.1"), self.resolve("x86_64", "libz.so.1"))
+
+    def test_absent_entry_and_unknown_machine_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly one x86-64 libaio.so.1"):
+            self.resolve("x86_64", "libaio.so.1")
+        with self.assertRaisesRegex(ValueError, "No ldconfig architecture tag"):
+            self.resolve("riscv64", "libz.so.1")
+
+
+class LibraryGlobTest(unittest.TestCase):
+    def test_elf_stem_matches_every_library_of_the_family(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            names = ["libknowhere.so", "libknowhere_c.so.1", "libknowhere_c.so.1.0.0",
+                     "libknowhere_jni.so", "libmilvus-storage.so", "libmilvus-storage-jni.so",
+                     "libcardinalv1.so", "libz.so.1", "notes.txt"]
+            for name in names:
+                (root / name).write_bytes(b"")
+            elf = platforms.Elf()
+            self.assertEqual(sorted(names[:4]), sorted(p.name for p in root.glob(elf.library_glob("libknowhere"))))
+            self.assertEqual(sorted(names[4:6]), sorted(p.name for p in root.glob(elf.library_glob("libmilvus-storage"))))
+            self.assertEqual(["libcardinalv1.so"], [p.name for p in root.glob(elf.library_glob("libcardinal"))])
+            self.assertEqual(sorted(names[:8]), sorted(p.name for p in root.glob(elf.library_glob())))
+
+
 FORMAT = platforms.host()
 COMPILER = "gcc" if isinstance(FORMAT, platforms.Elf) else "clang"
 

@@ -26,8 +26,9 @@ scripts/devcontainer.sh clean              # stop and delete the cache and servi
 Milvus, etcd and MinIO share the dev container's network namespace, so the
 `localhost:19530` and `localhost:9000` addresses in `integration-4.0` work
 unchanged. The container's architecture is the host's: on Apple Silicon it is
-linux-aarch64, which has no unified native build profile yet, so there the
-container serves the JVM side and consumes a bundle built elsewhere. Rationale
+linux-aarch64, whose unified native build profile exists since 2026-09-21 and
+was validated on a Graviton pod; a build inside the container itself has not
+been run yet, so there the container may also consume a bundle built elsewhere. Rationale
 and file layout: [devcontainer.html](design/engineering/devcontainer.html).
 
 ## Project ids
@@ -109,8 +110,8 @@ the scenario suite `uat.DataFrameScenariosUatTest` and the vector search suite
 `uat.VectorSearchUatTest` in spark-4.0 — cancel on their own environment
 variables as well, so they stay canceled even with the library present.
 `VectorSearchUatTest` additionally needs Knowhere's native libraries, which the
-unified bundle carries on every platform whose profile exists — `linux-x86_64`
-and `darwin-aarch64` — and its index cases need a snapshot whose vector field
+unified bundle carries on every platform whose profile exists — `linux-x86_64`,
+`linux-aarch64` and `darwin-aarch64` — and its index cases need a snapshot whose vector field
 carries a persisted index (`MILVUS_UAT_INDEXED_SNAPSHOT`). The scenario suite is also compiled into the 3.5, 4.1 and
 4.2 lines, so `spark35/testOnly ...DataFrameScenariosUatTest` runs the same
 scenarios there. The 3.5 line needs a JDK 17 for that run: Arrow 12, which
@@ -304,8 +305,8 @@ make package NATIVE_BUNDLE="$PWD/target/native-build/$platform/milvus-native-$pl
 ```
 
 A platform is built from source when `native-build/profiles/` holds its Conan
-profile and `native-build/platforms.py` holds its adapter; `linux-x86_64` and
-`darwin-aarch64` have both. The build needs Conan 2, the CMake version the
+profile and `native-build/platforms.py` holds its adapter; `linux-x86_64`,
+`linux-aarch64` and `darwin-aarch64` have both. The build needs Conan 2, the CMake version the
 profile's `[platform_tool_requires]` names, Ninja, ccache, the profile's
 compilers, Rust, libclang, a JDK, and access to the pinned source repositories
 and Conan recipes. Rust bindgen loads libclang when building the storage
@@ -358,11 +359,11 @@ the unified bundle; the Makefile reads the profile directory rather than naming
 platforms, so adding a platform is adding its profile and its adapter.
 `NATIVE_BUNDLE` selects an existing platform JAR and skips native
 compilation; otherwise `NATIVE_WORK_DIR` holds the build and Conan reuses
-compatible cached packages. Linux aarch64 has no profile yet and retains the
-storage-only build when no bundle is selected; it can consume a matching
-prebuilt unified bundle, which no profile cross-compiles. A prebuilt bundle must
-match the host, and `verifyNativeBundle` rejects one whose manifest names
-another platform.
+compatible cached packages. Of the four platforms only `darwin-x86_64` has no
+profile; it retains the storage-only build when no bundle is selected. Any
+platform can consume a matching prebuilt unified bundle, which no profile
+cross-compiles. A prebuilt bundle must match the host, and `verifyNativeBundle`
+rejects one whose manifest names another platform.
 Docker uses the same `native-resources` target as Make. Both native build paths
 limit concurrency to `NATIVE_JOBS` (1..50) and preserve initialized submodule
 checkouts. The storage-only resource target always invokes the incremental

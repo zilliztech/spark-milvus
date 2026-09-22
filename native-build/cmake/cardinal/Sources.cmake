@@ -1,5 +1,9 @@
-# Linux x86_64 sources for the root Knowhere submodule at 1fff20db5aa172ce8a9890fef9f9590920ac8f30.
-# Cardinal v1: 1b38fec866d5faa9d4d999923a6b0ef8741c9124; v2: be4bf251b13e8722869fdda64db45050e614c037.
+# Cardinal sources for the two generations the root Knowhere submodule pins,
+# by architecture. Cardinal v1 (v2.5.112): 1b38fec866d5faa9d4d999923a6b0ef8741c9124;
+# v2 (v3.0.8): be4bf251b13e8722869fdda64db45050e614c037. The lists follow each
+# tag's CMakeLists.txt: the common list is what it compiles on every
+# architecture (the rabitq AVX-512 and SVE files select themselves through
+# platform.h), the x86_64 and aarch64 lists are its per-architecture blocks.
 # Keep these lists explicit: an upstream source upgrade requires reviewing its build rules.
 
 set(MILVUS_CARDINALV1_SOURCES
@@ -50,6 +54,9 @@ set(MILVUS_CARDINALV1_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/utils/env.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/utils/norms.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/utils/transpose.cpp"
+)
+
+set(MILVUS_CARDINALV1_X86_64_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/x86/amx_init_dummy.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/x86/avx512_getmink_fp32.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/x86/avx512_getmink_fp32hack.cpp"
@@ -59,6 +66,16 @@ set(MILVUS_CARDINALV1_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/x86/avx512_sorting_fp32hack_amx_dummy.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/x86/avx512_sorting_fp32hack_approx.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/x86/x86_instruction_set.cpp"
+)
+
+set(MILVUS_CARDINALV1_AARCH64_SOURCES
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/arm/arm_instruction_set.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/arm/sve_getmink_fp32.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/arm/sve_getmink_fp32hack.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/arm/sve_sorting_fp16_dummy.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/arm/sve_sorting_fp32_dummy.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/arm/sve_sorting_fp32hack.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv1/third_party/smalltopk/smalltopk/arm/sve_sorting_fp32hack_approx.cpp"
 )
 
 set(MILVUS_CARDINALV2_SOURCES
@@ -124,7 +141,6 @@ set(MILVUS_CARDINALV2_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/icmprs/turbopfor_vint.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/bitwriter.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/blas_fp32.cpp"
-    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/blas_sq8_avx512.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/blas_sq8_ref.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/fwht_kw.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/kmeans_baseline.cpp"
@@ -135,7 +151,6 @@ set(MILVUS_CARDINALV2_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/pipnn/quantization.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/pipnn/sq8_ads_dataset.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/pipnn/sq8_ads_dp_dataset.cpp"
-    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/pipnn/sq8_avx512_dataset.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/pipnn/sq8_dataset.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/pipnn/sq8_dp_dataset.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/rabitq/rabitq_search.cpp"
@@ -149,6 +164,11 @@ set(MILVUS_CARDINALV2_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/utils/env.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/utils/norms.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/utils/transpose.cpp"
+)
+
+set(MILVUS_CARDINALV2_X86_64_SOURCES
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/blas_sq8_avx512.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/pipnn/sq8_avx512_dataset.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/x86/amx_init_dummy.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/x86/avx512_getmink_fp32.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/x86/avx512_getmink_fp32hack.cpp"
@@ -158,4 +178,16 @@ set(MILVUS_CARDINALV2_SOURCES
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/x86/avx512_sorting_fp32hack_amx_dummy.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/x86/avx512_sorting_fp32hack_approx.cpp"
     "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/x86/x86_instruction_set.cpp"
+)
+
+set(MILVUS_CARDINALV2_AARCH64_SOURCES
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/blas_sq8_mmla_sve.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/kmeans_fast/blas_sq8_sve.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/pipnn/sq8_mmla_dataset.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/arm/arm_instruction_set.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/arm/sve_getmink_fp32_dummy.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/arm/sve_sorting_fp16_dummy.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/arm/sve_sorting_fp32_dummy.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/arm/sve_sorting_fp32hack.cpp"
+    "${KNOWHERE_SOURCE_DIR}/thirdparty/cardinalv2/third_party/smalltopk/smalltopk/arm/sve_sorting_fp32hack_approx_dummy.cpp"
 )

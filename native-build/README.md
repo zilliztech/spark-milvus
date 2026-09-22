@@ -13,7 +13,8 @@ revision. The build consumes those recipes without patching or exporting a
 project-owned replacement. Integration-specific link relationships are declared
 on the consuming targets in this project's CMake files. The build does not
 select an unpinned latest release.
-`profiles/linux-x86_64` selects GCC 12, C++20 and shared host dependencies.
+`profiles/linux-x86_64` and `profiles/linux-aarch64` select GCC 12, C++20 and
+shared host dependencies; the two differ only in `arch`.
 OpenBLAS uses `dynamic_arch=True`. Header-only dependencies and the internal
 Rust bridge do not expose a shared-library option.
 
@@ -120,7 +121,7 @@ from both pinned engine revisions, and rejects a selected conflict version unles
 it is the newer upstream requirement. Conan then resolves only the exact recipe
 references in `dependencies.json`; the full lock covers every host and build
 dependency. The driver writes the host and build profiles it passes to Conan
-into the work directory: the checked-in `profiles/linux-x86_64` plus a
+into the work directory: the checked-in profile of the host platform plus a
 `[replace_requires]` section naming every reference in `dependencies.json`,
 without the `[options]` section for the build profile. The consumer's
 `force=True` requirements pin the host context only; without the replacements,
@@ -155,9 +156,15 @@ through `OPENSSL_DIR`, `OPENSSL_STATIC=0` and `OPENSSL_NO_VENDOR=1`. Cargo's pin
 internal compression implementations are not replaced with a different version.
 
 Upstream Cardinal uses host-native CPU compiler flags. This local validation
-build can require the builder's instruction set; the `linux-x86_64` classifier
-does not promise compatibility with every x86 CPU. The provenance records the
+build can require the builder's instruction set; a `linux-<arch>` classifier
+does not promise compatibility with every CPU of that architecture (an aarch64
+bundle built on a Graviton4 host requires SVE2). The provenance records the
 host CPU, the compiler's native target and actual compile/link flags.
+`cmake/cardinal/Sources.cmake` lists Cardinal's sources as a common part plus
+one list per architecture, following the `x86_64` and `arm` blocks of each
+pinned tag's `CMakeLists.txt`; `cmake/Cardinal.cmake` selects the list by
+`CMAKE_SYSTEM_PROCESSOR` and gives the AVX-512 or SVE kernels the per-file
+flags upstream gives them.
 
 The resulting files are:
 

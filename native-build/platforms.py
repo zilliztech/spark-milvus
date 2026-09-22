@@ -50,6 +50,12 @@ class Format:
         """Matches a library the target system supplies, which is not bundled."""
         raise NotImplementedError
 
+    def system_library_path(self, name):
+        """Where this host's dynamic loader resolves a library the system
+        supplies, for the checks that read its symbols.
+        """
+        raise NotImplementedError
+
     def compiler_runtime(self):
         """Compiler runtimes that are bundled with their source recorded."""
         return frozenset()
@@ -170,7 +176,10 @@ class Elf(Format):
         return "libz.so.1"
 
     def library_glob(self, stem="*"):
-        return stem + ".so*"
+        # The stem is a family, not one file: "libknowhere" has to reach
+        # libknowhere_c.so.1 and libknowhere_jni.so as well, the way the
+        # Mach-O pattern does.
+        return ("" if stem == "*" else stem) + "*.so*"
 
     def jsig_library(self):
         return "lib/libjsig.so"
@@ -196,6 +205,28 @@ class Elf(Format):
 
     def system_packages(self):
         return frozenset({"libaio.so.1", "libaio.so.1t64"})
+
+    #: How ``ldconfig -p`` tags an entry built for this machine, by
+    #: ``platform.machine()``. A multiarch host caches other architectures'
+    #: copies under the same name, so the tag is what tells them apart.
+    LDCONFIG_TAGS = {"x86_64": "x86-64", "aarch64": "AArch64"}
+
+    def system_library_path(self, name):
+        machine = platform.machine().lower()
+        if machine not in self.LDCONFIG_TAGS:
+            raise ValueError("No ldconfig architecture tag for " + platform.machine())
+        tag = self.LDCONFIG_TAGS[machine]
+        matches = []
+        for line in _command(self, "ldconfig", "-p").splitlines():
+            entry = line.strip()
+            if not entry.startswith(name + " ") or " => " not in entry:
+                continue
+            tags = entry.split("(", 1)[1].split(")", 1)[0].split(",") if "(" in entry else []
+            if tag in tags:
+                matches.append(entry.split(" => ", 1)[1])
+        if len(matches) != 1:
+            raise ValueError("The system must supply exactly one " + tag + " " + name)
+        return Path(matches[0])
 
     def inspect(self, path):
         path = Path(path)

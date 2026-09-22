@@ -4,7 +4,7 @@
 
 Connector 在 executor 里加载两个原生引擎：读写 Milvus 段文件的 milvus-storage 和做向量搜索的 Knowhere。它们共用十几个 C++ 库，所以每个平台只能由一张 Conan 依赖图编成一个原生 JAR `milvus-native-<平台>.jar`；平台是 Linux 与 macOS 乘 x86_64 与 aarch64 四种，编译它有两种方案：Docker 里编，或本机编。构建阶段、打包与发布的执行细节见 [native-build/README.md](../../../native-build/README.md) 和 [contributing.md](../../contributing.md)。
 
-> **2026-09-20 状态。** 当前 gitlink 为 milvus-storage `7eb13578`、Knowhere `29210a33`。四个平台中有两个有源码构建 profile 和验收记录。linux-x86_64：本机已完成三次统一构建，两道门都通过，`make test` 为 1,160 项成功、0 项失败、149 项取消。darwin-aarch64：本机从空 Conan 缓存完整构建一次，没有改动任何 recipe，Knowhere C API 测试 2/2，221 个动态库与 203 个别名入包，逐库 Mach-O 诊断 221/221 通过，两个全新 JVM 的双向 `System.load` 均退出 0，平台 JAR 148,924,666 字节、SHA-256 `97c2b5f7`…，`make package` 与显式 `NATIVE_BUNDLE` 两条路径的 `verifyNativeBundle` 都通过；DiskANN 按平台关闭并写进 `with_diskann=false`。该平台只有开源变体：Knowhere 钉的 Cardinal `v2.5.112` 与 `v3.0.8` 在 darwin-aarch64 上编不过（Darwin 的 `uint64_t`/`size_t` 类型不同、Linux 专有的 `MADV_HUGEPAGE` 与 `O_DIRECT`、直接 `#include <cblas.h>`、SVE intrinsic），Knowhere 自己的 macOS CI 也不编 Cardinal，Cardinal 的验证留在 Linux。linux-aarch64 与 darwin-x86_64 的 profile 未写。darwin-aarch64 的 `make test`（带该包）为 1,167 项成功、0 项失败、152 项取消，取消的全部是缺少 `MILVUS_UAT_*`/`MILVUS_JNI_S3_BUCKET` 环境的 UAT 用例，原生用例（StorageNativeTest、WriterRoundTripTest、KnowhereBuffersTest、NativeVectorSearchTest）实际运行。尚未做：darwin-aarch64 的真实 UAT 查询，空 Conan 缓存的 Docker 重建，linux 侧的真实 UAT 查询复测。
+> **2026-09-21 状态。** 当前 gitlink 为 milvus-storage `7eb13578`、Knowhere `29210a33`。四个平台中有三个有源码构建 profile 和验收记录。linux-x86_64：本机已完成三次统一构建，两道门都通过，`make test` 为 1,160 项成功、0 项失败、149 项取消。darwin-aarch64：本机从空 Conan 缓存完整构建一次，没有改动任何 recipe，Knowhere C API 测试 2/2，221 个动态库与 203 个别名入包，逐库 Mach-O 诊断 221/221 通过，两个全新 JVM 的双向 `System.load` 均退出 0，平台 JAR 148,924,666 字节、SHA-256 `97c2b5f7`…，`make package` 与显式 `NATIVE_BUNDLE` 两条路径的 `verifyNativeBundle` 都通过；DiskANN 按平台关闭并写进 `with_diskann=false`。该平台只有开源变体：Knowhere 钉的 Cardinal `v2.5.112` 与 `v3.0.8` 在 darwin-aarch64 上编不过（Darwin 的 `uint64_t`/`size_t` 类型不同、Linux 专有的 `MADV_HUGEPAGE` 与 `O_DIRECT`、直接 `#include <cblas.h>`、SVE intrinsic），Knowhere 自己的 macOS CI 也不编 Cardinal，Cardinal 的验证留在 Linux。darwin-x86_64 的 profile 未写。darwin-aarch64 的 `make test`（带该包）为 1,167 项成功、0 项失败、152 项取消，取消的全部是缺少 `MILVUS_UAT_*`/`MILVUS_JNI_S3_BUCKET` 环境的 UAT 用例，原生用例（StorageNativeTest、WriterRoundTripTest、KnowhereBuffersTest、NativeVectorSearchTest）实际运行。linux-aarch64（2026-09-21）：在 UAT `aws-milvus` 集群的一个 Graviton4 pod（i8g.4xlarge，Neoverse-V2，16 vCPU，有 SVE2）里按 Dockerfile 的 toolchain 阶段装好工具链后从空 Conan 缓存构建：Conan 图 68 个包全部从源码编译、没有改动任何 recipe，`--jobs 14` 用时 40 分钟；带 Cardinal 的正式构建复用该缓存与 `conan.lock`，从快照到入包 18.6 分钟；Knowhere C API 测试 3/3（含 DiskANN 验收，65.9 秒）；164 个动态库与 173 个别名入包（linux-x86_64 的 162 个加 Cardinal 两个，数量相同）；两个全新 JVM 的双向 `System.load` 均退出 0；逐库 `ldd -r` 诊断有 4 个库未通过（folly、opentelemetry_proto_grpc、两个 upb），是 linux-x86_64 那 5 个的子集；平台 JAR 261,989,676 字节、SHA-256 `222fe618`…；`verifyNativeBundle` 与 `knowhereSmoke` 通过；`sbt test`（带该包）1,206 项成功、0 项失败、153 项取消，取消的全是缺 `MILVUS_UAT_*` 环境的 UAT 用例，原生用例实际运行。为此补的四处：`profiles/linux-aarch64`（与 x86_64 只差 `arch`）；`Cardinal.cmake` 与 `cardinal/Sources.cmake` 按架构选源文件与 flag，此前只有 x86_64 写法，`-mprefer-vector-width=512` 在 aarch64 的 GCC 上是未知选项；`stage.py` 用 `ldconfig -p` 找系统 libaio 与 libz 时写死的 `x86-64` 标签移进 ELF 适配器按机器选（aarch64 的标签是 `AArch64`）；ELF 适配器的 `library_glob` 在 f077561 里丢了族通配，`libknowhere.so*` 匹配不到 `libknowhere_c.so.1` 与 `libknowhere_jni.so`，staging 在 Linux 上必然失败——上面 linux-x86_64 的三次构建用的是适配层重构之前的 `stage.py`，当前代码还没有在 linux-x86_64 上重新跑过。该包按 Cardinal 的 `-march=native` 要求 SVE2 主机；Knowhere 自身在 linux-aarch64 上只编 NEON（`KNOWHERE_USE_SVE` 未定义，与 darwin 分支相同），SVE 是待办。尚未做：darwin-aarch64 的真实 UAT 查询，空 Conan 缓存的 Docker 重建，linux-x86_64 用当前适配层代码重跑并复测真实 UAT 查询，linux-aarch64 的真实数据验证已做：UAT 实例当时已停机，aarch64 包直接读 S3 上 `spark_perf_1m_1024`（100 万行 × 1024 维）的快照，exact 与 Milvus 建的 HNSW 两种模式各跑 1/10/100 条查询，HNSW 相对 exact 的召回 0.8000、0.8400、0.8390，与本机 x86_64 在同一快照上的结果逐项相同；记录在工作区报告 `docs/reports/spark-milvus-linux-aarch64-native-build-2026-09-21/`。
 
 ## 1 依赖库有哪些，各自做什么
 
@@ -69,7 +69,7 @@ Conan 自己的 settings 必须接受 profile 声明的编译器版本。`profil
 
 ## 3 两种构建方案
 
-**Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 `build.py`，产物相同。** 构建不做交叉编译，每个平台的 JAR 在同平台机器上编。`build.py` 由 `platforms.host_platform()` 判断主机平台，缺 profile 或适配器时报出缺哪一个；Makefile 的选择规则今天仍只在 linux-x86_64 默认走统一包，macOS 上要直接调 `scripts/build-native.sh`，或用 `NATIVE_BUNDLE` 指向编好的包。
+**Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 `build.py`，产物相同。** 构建不做交叉编译，每个平台的 JAR 在同平台机器上编。`build.py` 由 `platforms.host_platform()` 判断主机平台，缺 profile 或适配器时报出缺哪一个；Makefile 按 `native-build/profiles/` 里有没有该平台的 profile 决定走统一包还是只有 storage 的旧入口，`NATIVE_BUNDLE` 指向编好的包时跳过原生编译。
 
 | 方案 | 命令 | 前置条件 | 产物与限制 | 用在哪 |
 |---|---|---|---|---|
@@ -95,10 +95,10 @@ native-build/
 │   ├── storage-private-symbols.map   隐藏 Rust 桥内部 LZ4/XXH/ZSTD/aws_lc 符号的链接脚本（ELF）
 │   └── storage-private-symbols.txt   同一份符号规则的 Mach-O 写法（ld64 的符号清单）
 ├── profiles/
-│   └── <平台>                  Conan profile，每平台一份；今天有 linux-x86_64 与 darwin-aarch64
+│   └── <平台>                  Conan profile，每平台一份；今天有 linux-x86_64、linux-aarch64 与 darwin-aarch64
 ├── dependencies.json           32 个直接依赖的 recipe revision、版本冲突策略、排除项
 ├── conanfile.py                消费者：把 references 以 force=True 放进一张 host 图
-├── platforms.py                平台适配器：Elf 与 MachO 两个类，库名、依赖表读取、查找路径改写、系统库集合、工具链；加平台即加一个类
+├── platforms.py                平台适配器：Elf 与 MachO 两个类，库名、依赖表读取、查找路径改写、系统库集合与 `ldconfig -p` 的架构标签、工具链；加平台即加一个类
 ├── build.py                    驱动 11 个阶段，平台无关
 ├── dependency_versions.py      两份上游 conanfile 与 dependencies.json 的对照
 ├── stage.py                    收集依赖闭包、别名、查找路径改写、系统库排除
@@ -108,7 +108,7 @@ scripts/build-native.sh         入口，exec build.py
 scripts/package-native.py       核对 provenance 后打 JAR
 ```
 
-CMake 文件按引擎分而不按平台分，平台差异用 `CMAKE_SYSTEM_NAME` 与 `APPLE` 条件表达在同一目标内，避免同一个目标有两份定义。可执行格式的差异集中在 `platforms.py` 的适配类里：二进制检视与运行时查找路径改写（`readelf`/`patchelf` 对 `otool`/`install_name_tool` 加重新签名）、库文件名与版本位置、系统库集合、JVM 信号链的 preload 变量（`LD_PRELOAD` 对 `DYLD_INSERT_LIBRARIES`）、工具链，以及这个平台是否构建 DiskANN。三条规则声明为 ELF 专属而不翻译：系统库最低符号版本要求依赖 ELF 的符号版本化，GNU_STACK 只在 ELF 上有定义，`ldd -r` 在 macOS 上没有等价物。跨平台共同的判据是两个全新 JVM 的双向加载，逐库格式检查降为各平台自己的诊断。`CMakeLists.txt` 开头接受 Linux x86_64、Linux aarch64 与 macOS arm64；`build.py` 到 CMake 之前先检查该平台的 profile 与 `platforms.py` 适配器是否存在。
+CMake 文件按引擎分而不按平台分，平台差异用 `CMAKE_SYSTEM_NAME` 与 `APPLE` 条件表达在同一目标内，避免同一个目标有两份定义。Cardinal 的源码清单按架构分：`cardinal/Sources.cmake` 是公共列表加 x86_64、aarch64 各一份，照各 tag 自己 `CMakeLists.txt` 里的 x86_64 与 arm 分支写，`Cardinal.cmake` 按 `CMAKE_SYSTEM_PROCESSOR` 选，并给 AVX-512 或 SVE 内核加上游给它们的逐文件 flag。可执行格式的差异集中在 `platforms.py` 的适配类里：二进制检视与运行时查找路径改写（`readelf`/`patchelf` 对 `otool`/`install_name_tool` 加重新签名）、库文件名与版本位置、系统库集合、JVM 信号链的 preload 变量（`LD_PRELOAD` 对 `DYLD_INSERT_LIBRARIES`）、工具链，以及这个平台是否构建 DiskANN。三条规则声明为 ELF 专属而不翻译：系统库最低符号版本要求依赖 ELF 的符号版本化，GNU_STACK 只在 ELF 上有定义，`ldd -r` 在 macOS 上没有等价物。跨平台共同的判据是两个全新 JVM 的双向加载，逐库格式检查降为各平台自己的诊断。`CMakeLists.txt` 开头接受 Linux x86_64、Linux aarch64 与 macOS arm64；`build.py` 到 CMake 之前先检查该平台的 profile 与 `platforms.py` 适配器是否存在。
 
 **哪些平台走统一构建，由 `native-build/profiles/` 里有没有它的 profile 决定，Makefile 与 Docker 读同一处。** 加一个平台等于加一份 profile 和一份适配实现，不改构建入口。没有 profile 的平台仍走只有 storage 的旧入口（`make build-milvus-storage && make copy-native-libs`），或显式用 `NATIVE_BUNDLE` 指定一个同平台的预置包，由 sbt `verifyNativeBundle` 按清单核对平台。平台之间的功能差异写在 `manifest.properties` 的功能开关里，今天只有 `with_diskann`：DiskANN 唯一的对齐读实现基于 libaio 与 io_uring，macOS 构建关掉它，而当前声明的 R4、V1、V5 都不依赖它。
 
