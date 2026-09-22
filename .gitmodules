@@ -3,7 +3,8 @@
 	url = https://github.com/milvus-io/milvus-proto.git
 [submodule "milvus-storage"]
 	path = milvus-storage
-	url = https://github.com/milvus-io/milvus-storage.git
+	url = https://github.com/Thor-ChenBiao/milvus-storage.git
+	branch = parquet-eager-prebuffer
 [submodule "knowhere"]
 	path = knowhere
 	url = https://github.com/LawrenceTL92/knowhere-contrib.git

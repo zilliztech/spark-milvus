@@ -151,6 +151,11 @@ Initialize the pinned native source submodules before compiling:
 git submodule update --init milvus-storage knowhere
 ```
 
+While the milvus-storage gitlink points at a commit that only the fork
+`Thor-ChenBiao/milvus-storage` carries (decision 31, until upstream takes it),
+an existing checkout needs `git submodule sync milvus-storage` after pulling a
+change to `.gitmodules`.
+
 The `native-storage` sbt module compiles `milvus-storage/java/src/main` for
 Scala 2.12 and 2.13 instead of importing upstream's sbt project or a Scala 2.13
 binary JAR. `Compile / sourceGenerators` copies the upstream Java/Scala sources

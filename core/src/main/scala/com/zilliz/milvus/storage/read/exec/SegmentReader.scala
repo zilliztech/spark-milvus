@@ -14,7 +14,8 @@ import io.milvus.storage.{
   MilvusStorageManifest,
   MilvusStorageManifestHandle,
   MilvusStorageProperties,
-  MilvusStorageReader
+  MilvusStorageReader,
+  MilvusStorageRuntime
 }
 
 /** Pulls Arrow batches out of one segment.
@@ -207,17 +208,57 @@ private[exec] final class NativeTakeResult(
 object SegmentReaderRegistry {
   private[exec] val RecordBatchMaxRows = "reader.record_batch_max_rows"
   private[exec] val RecordBatchMaxSize = "reader.record_batch_max_size"
+  private[exec] val PrebufferLazy = "reader.parquet.prebuffer.lazy"
+  private[exec] val PrebufferRangeSizeLimit =
+    "reader.parquet.prebuffer.range_size_limit"
+
+  /** Object storage requests one batch read makes at once.
+    *
+    * A batch is one Parquet read call over the row groups it covers. Arrow
+    * coalesces their column chunks into ranges of at most the range size, and
+    * each range is one GET on one connection, which moves 40 to 60 MB/s from
+    * S3. Arrow's default cache requests the ranges one at a time as decoding
+    * reaches them, so a task read at one connection's speed whatever the range
+    * size; requested together, eight ranges use eight connections
+    * (docs/design/architecture/search-resources.html section 3.6).
+    */
+  private[exec] val RangesPerBatch = 8
+
+  /** The smallest range: below it the first-byte wait of each GET outweighs its
+    * transfer.
+    */
+  private[exec] val MinRangeBytes: Long = 4L << 20
+
+  /** The range size that cuts a batch of `batchMaxBytes` into
+    * [[RangesPerBatch]] requests, never below [[MinRangeBytes]].
+    */
+  private[exec] def rangeBytes(batchMaxBytes: Long): Long =
+    math.max(
+      MinRangeBytes,
+      (batchMaxBytes + RangesPerBatch - 1) / RangesPerBatch
+    )
 
   /** Native properties for one validated task. Typed limits deliberately win
-    * over any raw key in the filesystem property bag.
+    * over any raw key in the filesystem property bag, and so do the range
+    * settings: every range of a batch is requested when the read call starts.
     */
   private[exec] def nativeProperties(
       task: SegmentReadTask
   ): Map[String, String] =
     task.properties ++ Map(
       RecordBatchMaxRows -> task.limits.batchMaxRows.toString,
-      RecordBatchMaxSize -> task.limits.batchMaxBytes.toString
+      RecordBatchMaxSize -> task.limits.batchMaxBytes.toString,
+      PrebufferLazy -> "false",
+      PrebufferRangeSizeLimit -> rangeBytes(task.limits.batchMaxBytes).toString
     )
+
+  /** Threads Arrow's IO pool needs so that every task of this executor has all
+    * ranges of its batch in flight. The pool runs each requested range as a
+    * blocking GET on one of its threads, is shared by the whole process and
+    * starts with 8; an executor runs at most one task per processor.
+    */
+  private[exec] def ioThreads(processors: Int): Int =
+    math.multiplyExact(processors, RangesPerBatch)
 
   def open(
       task: SegmentReadTask,
@@ -227,6 +268,11 @@ object SegmentReaderRegistry {
       allocator: BufferAllocator
   ): SegmentReader = {
     NativeStorageLibrary.load()
+    // Grow-only and cheap; a failure fails this read rather than leaving it at
+    // one request at a time.
+    MilvusStorageRuntime.ensureIoThreadPoolCapacity(
+      ioThreads(Runtime.getRuntime.availableProcessors())
+    )
     val reader = new NativeSegmentReader(
       task,
       arrowSchema,

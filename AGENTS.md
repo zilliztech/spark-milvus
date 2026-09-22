@@ -114,6 +114,10 @@ platform JAR that supplies `libmilvus-storage-jni` and its dependencies. Without
 a unified bundle, the upstream loader retains its packaged-resource and system
 library fallback. Upstream additions, ownership rules and current validation
 results are in [storage-io.html](docs/design/architecture/storage-io.html#state).
+Until milvus-io/milvus-storage takes decision 31's commit (eager Parquet
+pre-buffering and the IO pool call), `.gitmodules` fetches milvus-storage from
+the fork `Thor-ChenBiao/milvus-storage`; the decision log in
+[docs/design/README.md](docs/design/README.md) names the end condition.
 `native-vector` compiles the pinned `knowhere` submodule's Java API and
 integrates its loader and BruteForce implementation; Knowhere owns the C
 interface, JNI, Java API and native resource loader. The submodule follows the
