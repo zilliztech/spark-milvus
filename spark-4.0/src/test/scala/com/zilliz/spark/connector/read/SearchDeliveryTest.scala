@@ -18,9 +18,9 @@ import com.zilliz.milvus.storage.index.SearchPlan
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 
 /** How a query set too large to broadcast reaches the first stage: packed by
-  * group on the executors, then delivered whole to every segment set, so a task
-  * reads its segments once and answers every group on them (section 2.1 of
-  * docs/design/architecture/vector-search.html).
+  * group on the executors, then delivered range by range to every segment set,
+  * so a task reads its segments once and answers every group of its range on
+  * them (section 2.1 of docs/design/architecture/vector-search.html).
   */
 class SearchDeliveryTest
     extends AnyFunSuite
@@ -170,5 +170,48 @@ class SearchDeliveryTest
     packed.size shouldBe groups.size
     packed.foreach(_.queries shouldBe 2)
     packed.flatMap(_.ids).sorted shouldBe (0L until queries.toLong)
+  }
+
+  test("a plan cut into query ranges travels as one partition per range") {
+    val ranges = Seq(0 until 2, 2 until 4)
+    val delivered =
+      MilvusSearch.packedGroups(
+        selected,
+        SearchPlan.Plan(Seq.empty, groups, Seq.empty, ranges),
+        spec,
+        layout
+      )
+    delivered.getNumPartitions shouldBe 2
+    // Partition r holds the groups of range r, in order; a group is known by
+    // its first query id, since a delivered group starts at zero in its bytes.
+    delivered
+      .mapPartitions(packed => Iterator(packed.map(_.ids.head).toSeq))
+      .collect()
+      .toSeq shouldBe Seq(Seq(0L, 2L), Seq(4L, 6L))
+
+    val sets = spark.sparkContext.parallelize(Seq(10, 20, 30), 3)
+    val paired = sets.cartesian(delivered)
+    paired.getNumPartitions shouldBe 6
+    // Task `set × ranges + range` pairs that set with that range's groups.
+    paired
+      .mapPartitionsWithIndex { (index, pairs) =>
+        val seen = pairs.toSeq
+        Iterator(
+          (
+            index,
+            seen.map(_._1).distinct,
+            seen.map(_._2.ids.head)
+          )
+        )
+      }
+      .collect()
+      .toSeq shouldBe Seq(
+      (0, Seq(10), Seq(0L, 2L)),
+      (1, Seq(10), Seq(4L, 6L)),
+      (2, Seq(20), Seq(0L, 2L)),
+      (3, Seq(20), Seq(4L, 6L)),
+      (4, Seq(30), Seq(0L, 2L)),
+      (5, Seq(30), Seq(4L, 6L))
+    )
   }
 }

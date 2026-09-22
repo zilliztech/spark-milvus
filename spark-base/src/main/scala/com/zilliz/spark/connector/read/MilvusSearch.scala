@@ -140,7 +140,10 @@ object MilvusSearch extends Logging {
       queryCount.toInt,
       k,
       limits.groupMaxBytes,
-      vectorsPerTask
+      vectorsPerTask,
+      // The batched distance entry is single-threaded on its task, so an
+      // exact search is as parallel as its tasks (decision 28).
+      splitQueries = searchMode == "exact"
     )
     val spec = SegmentSetSearch.Spec(
       vectorColumn,
@@ -181,7 +184,7 @@ object MilvusSearch extends Logging {
     val over = known.count(_ > vectorsPerTask)
     logInfo(
       s"Search budget: vectorsPerTask=$vectorsPerTask (${budget.reason}), " +
-        s"sets=${plan.tasks}, setBytes=" +
+        s"sets=${plan.sets.size}, setBytes=" +
         (if (known.isEmpty) "unknown"
          else s"${known.min}..${known.max}") +
         s" known for ${known.size} sets, ${plan.estimated.size} segments " +
@@ -232,7 +235,8 @@ object MilvusSearch extends Logging {
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
         s"${if (queryBytes <= limits.queriesMaxBytes) "broadcast" else "shuffle"}, " +
         s"queryGroups=${plan.groups.size}, segments=${tasks.size} in " +
-        s"${plan.tasks} sets, work=${segmentSearchesTotal} segment searches" +
+        s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
+        s"${plan.tasks} tasks, work=${segmentSearchesTotal} segment searches" +
         (if (comparedPairsTotal > 0L)
            s" over $comparedPairsTotal distance pairs"
          else "")
@@ -346,8 +350,8 @@ object MilvusSearch extends Logging {
     val byId =
       partitions.map(partition => partition.task.segmentId -> partition).toMap
     val sets = plan.sets.map(_.map(task => byId(task.segmentId)))
-    val setsRdd = spark.sparkContext.parallelize(sets, plan.tasks)
     val groups = plan.groups
+    val ranges = plan.queryRanges
     val queryBytes = SearchQueries.bytes(
       groups.map(_.queries.toLong).sum,
       layout
@@ -357,65 +361,76 @@ object MilvusSearch extends Logging {
       val (ids, vectors) = SearchQueries.pack(rows, layout, spec.metric)
       SearchQueries.checkUnique(ids)
       val delivered = spark.sparkContext.broadcast((ids, vectors))
-      setsRdd.flatMap { set =>
-        val (allIds, allVectors) = delivered.value
-        SegmentSetSearch.run(
-          set,
-          spec,
-          groups.iterator.map(group =>
-            SearchQueries.Group(
-              allIds.slice(group.firstQuery, group.untilQuery),
-              allVectors,
-              group.firstQuery
-            )
-          ),
-          groups.size,
-          metrics
-        )
+      val work = for {
+        set <- sets
+        range <- ranges
+      } yield (set, range)
+      spark.sparkContext.parallelize(work, plan.tasks).flatMap {
+        case (set, range) =>
+          val (allIds, allVectors) = delivered.value
+          SegmentSetSearch.run(
+            set,
+            spec,
+            range.iterator.map { index =>
+              val group = groups(index)
+              SearchQueries.Group(
+                allIds.slice(group.firstQuery, group.untilQuery),
+                allVectors,
+                group.firstQuery
+              )
+            },
+            range.size,
+            metrics
+          )
       }
     } else {
       val delivered = packedGroups(selected, plan, spec, layout)
       require(
-        delivered.getNumPartitions == 1,
-        s"The packed query set travels as one partition, not ${delivered.getNumPartitions}"
+        delivered.getNumPartitions == ranges.size,
+        s"The packed query set travels as ${ranges.size} query ranges, not " +
+          s"${delivered.getNumPartitions} partitions"
       )
       // The segment set reaches the task beside the cartesian rather than
       // through it. Through it, a task has to look at its first pair to learn
       // which set it holds, and a buffered iterator keeps that pair for as
       // long as the task runs: the first query group's bytes, 502 MB of an
       // 800 MiB set, held while every later group is searched. Beside it, the
-      // left side carries an index, `CartesianRDD` numbers its partitions by
-      // the left partition when the right side is one, and the sets are
+      // left side carries an index, `CartesianRDD` numbers its partitions
+      // left index × right partitions + right index, so a task is set
+      // `index / ranges` and range `index % ranges`, and the sets are
       // broadcast once for the executor rather than once for each task.
       val held = spark.sparkContext.broadcast(sets.toVector)
-      val slots = spark.sparkContext.parallelize(sets.indices, plan.tasks)
-      slots.cartesian(delivered).mapPartitionsWithIndex { (index, pairs) =>
+      val setIndices = spark.sparkContext.parallelize(sets.indices, sets.size)
+      val rangeCount = ranges.size
+      val rangeSizes = ranges.map(_.size).toVector
+      setIndices.cartesian(delivered).mapPartitionsWithIndex { (index, pairs) =>
         if (pairs.isEmpty) Iterator.empty
         else
           SegmentSetSearch.run(
-            held.value(index),
+            held.value(index / rangeCount),
             spec,
             pairs.map(_._2),
-            groups.size,
+            rangeSizes(index % rangeCount),
             metrics
           )
       }
     }
   }
 
-  /** The query set packed one group per row, on the executors, in a single
-    * partition.
+  /** The query set packed one group per row, on the executors, one partition
+    * per query range.
     *
     * `zipWithIndex` gives every query the position that decides its group, so
     * the groups are the same ones the driver planned, and a group's rows are
     * packed in query order.
     *
     * The `coalesce` is what makes the cartesian with the segment sets produce
-    * one task per set instead of one per (set, group) pair, so a task receives
-    * every group and reads its segments once — which is what
-    * `SegmentSetSearch.run` holds the set in memory for. Its cost is that the
-    * shuffle read and the packing run in one task rather than `plan.groups`
-    * tasks.
+    * one task per (set, range) instead of one per (set, group) pair, so a task
+    * receives every group of its range in order and reads its segments once —
+    * which is what `SegmentSetSearch.run` holds the set in memory for. It joins
+    * neighbouring groups only ([[SearchQueryRanges]]); its cost is that the
+    * shuffle read and the packing of a range run in one task rather than one
+    * per group.
     *
     * The `persist` is what keeps that one task's work from happening once per
     * segment set. Without it the cartesian recomputes this side for every left
@@ -481,7 +496,11 @@ object MilvusSearch extends Logging {
         )
         Iterator(SearchQueries.Group(ids, vectors, 0))
       }
-      .coalesce(1)
+      .coalesce(
+        plan.queryRanges.size,
+        shuffle = false,
+        Some(SearchQueryRanges(plan.queryRanges))
+      )
       // Stored, because `CartesianRDD` takes the right side's iterator once
       // per left partition and computes it again each time. The tasks of one
       // executor run in one JVM, so without this every one of them packs and

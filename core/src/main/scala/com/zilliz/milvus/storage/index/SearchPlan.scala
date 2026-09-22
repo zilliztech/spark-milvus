@@ -8,14 +8,21 @@ import com.zilliz.milvus.storage.snapshot.SegmentIndexes
 
 /** Splits one search into the tasks of its first stage.
   *
-  * A task takes one segment set and answers every query group on it. The set is
-  * sized so that its vectors fit `milvus.search.vectors.max.bytes`, which is
-  * what lets a task read its segments once and run group after group on what it
-  * keeps; a group is sized so that its query matrix and its top-k fit
-  * `milvus.search.group.max.bytes`. Task memory is therefore one set of vectors
-  * and one group, and what a task sends on is bounded by "query groups ×
-  * queries × k" candidates (docs/design/architecture/vector-search.html
-  * sections 1.1 and 2.1).
+  * A task takes one segment set and a range of query groups and answers every
+  * group of the range on it. The set is sized so that its vectors fit
+  * `milvus.search.vectors.max.bytes`, which is what lets a task read its
+  * segments once and run group after group on what it keeps; a group is sized
+  * so that its query matrix and its top-k fit `milvus.search.group.max.bytes`.
+  * Task memory is therefore one set of vectors and one group, and what a task
+  * sends on is bounded by "query groups × queries × k" candidates.
+  *
+  * An exact search with fewer sets than task slots cuts its groups into
+  * contiguous ranges, one task per (set, range): the batched distance entry
+  * runs single-threaded on its task, so the tasks are the search's parallelism.
+  * Each range reads its set again; an index search keeps one range, since a
+  * range would load the set's indexes again
+  * (docs/design/architecture/vector-search.html sections 1.1 and 2.1, decision
+  * 28).
   */
 object SearchPlan {
 
@@ -41,17 +48,29 @@ object SearchPlan {
     def untilQuery: Int = firstQuery + queries
   }
 
-  /** The first stage: one task per segment set, every group answered on every
-    * set. The two sides stay apart because the query groups reach a task two
-    * ways — inside a broadcast variable, or with the shuffle — while a task is
-    * built from its segment set alone (section 2.1).
+  /** The first stage: one task per (segment set, query range), every group of a
+    * range answered on every set. The two sides stay apart because the query
+    * groups reach a task two ways — inside a broadcast variable, or with the
+    * shuffle — while a task is built from its segment set and its range's index
+    * (section 2.1). `ranges` holds group indices, contiguous and in order, and
+    * covers every group once.
     */
   final case class Plan(
       sets: Seq[Seq[SegmentReadTask]],
       groups: Seq[QueryGroup],
-      estimated: Seq[Long] = Seq.empty
+      estimated: Seq[Long] = Seq.empty,
+      ranges: Seq[Range] = Seq.empty
   ) {
-    def tasks: Int = sets.size
+    require(
+      ranges.isEmpty || ranges.flatten == groups.indices,
+      s"Query ranges ${ranges.mkString(", ")} do not cover ${groups.size} groups in order"
+    )
+
+    /** The ranges the tasks take: all groups in one when none were cut. */
+    def queryRanges: Seq[Range] =
+      if (ranges.isEmpty) Seq(groups.indices) else ranges
+
+    def tasks: Int = sets.size * queryRanges.size
     def isEmpty: Boolean = sets.isEmpty
   }
 
@@ -108,20 +127,20 @@ object SearchPlan {
     *
     * A set holds at most `vectorsMaxBytes` of vectors, so a task can keep what
     * it read and answer one query group after another on it; there are at least
-    * as many sets as executors, so every executor has work. Segments go in
-    * largest first and each one joins the lightest set that still has room,
-    * which spreads equal segments one per set. A segment whose row count
-    * nothing recorded is planned at half the limit, so it is never packed with
-    * more than one other; [[Plan.estimated]] names them. Segments keep their
-    * order inside a set.
+    * as many sets as task slots, so every slot has work, unless the search has
+    * fewer segments than that. Segments go in largest first and each one joins
+    * the lightest set that still has room, which spreads equal segments one per
+    * set. A segment whose row count nothing recorded is planned at half the
+    * limit, so it is never packed with more than one other; [[Plan.estimated]]
+    * names them. Segments keep their order inside a set.
     */
   def segmentSets(
       tasks: Seq[SegmentReadTask],
       layout: VectorLayout,
-      executors: Int,
+      slots: Int,
       vectorsMaxBytes: Long
   ): Seq[Seq[SegmentReadTask]] = {
-    require(executors > 0, s"A search needs at least one executor: $executors")
+    require(slots > 0, s"A search needs at least one task slot: $slots")
     require(
       vectorsMaxBytes > 0,
       s"The retained vector limit must be positive: $vectorsMaxBytes"
@@ -134,7 +153,7 @@ object SearchPlan {
     val total = sizes.values.sum
     val needed = math.max(1L, (total + vectorsMaxBytes - 1L) / vectorsMaxBytes)
     val start =
-      math.min(tasks.size.toLong, math.max(executors.toLong, needed)).toInt
+      math.min(tasks.size.toLong, math.max(slots.toLong, needed)).toInt
     val filled = mutable.ArrayBuffer.fill(start)(0L)
     val members = mutable.ArrayBuffer.fill(start)(
       mutable.ArrayBuffer.empty[SegmentReadTask]
@@ -209,22 +228,58 @@ object SearchPlan {
       unknown: Long
   ): Long = knownRows(task).map(_ * layout.rowBytes.toLong).getOrElse(unknown)
 
-  /** The first-stage tasks of one search: the segment sets and the query groups
-    * they each answer.
+  /** Cuts `groups` query groups into the contiguous ranges one task each
+    * answers on a set: as many as it takes for `sets` sets to fill `slots`
+    * slots, never more than there are groups, as even as the counts allow with
+    * the longer ranges first. One range when `split` is false.
+    */
+  def queryRanges(
+      groups: Int,
+      sets: Int,
+      slots: Int,
+      split: Boolean
+  ): Seq[Range] = {
+    require(groups > 0, s"A search needs at least one query group: $groups")
+    require(sets > 0, s"A search needs at least one segment set: $sets")
+    require(slots > 0, s"A search needs at least one task slot: $slots")
+    val count =
+      if (!split) 1
+      else math.min(groups, math.max(1, (slots + sets - 1) / sets))
+    val base = groups / count
+    val longer = groups % count
+    (0 until count)
+      .scanLeft(0) { (start, index) =>
+        start + base + (if (index < longer) 1 else 0)
+      }
+      .sliding(2)
+      .map { case Seq(start, end) => start until end }
+      .toSeq
+  }
+
+  /** The first-stage tasks of one search: the segment sets, the query groups
+    * and the ranges of groups each task answers on its set. `splitQueries` is
+    * true for an exact search, whose tasks are its parallelism.
     */
   def of(
       tasks: Seq[SegmentReadTask],
       layout: VectorLayout,
-      executors: Int,
+      slots: Int,
       queries: Int,
       k: Int,
       groupMaxBytes: Long,
-      vectorsMaxBytes: Long
-  ): Plan = Plan(
-    segmentSets(tasks, layout, executors, vectorsMaxBytes),
-    groups(queries, layout, k, groupMaxBytes),
-    tasks.filter(knownRows(_).isEmpty).map(_.segmentId)
-  )
+      vectorsMaxBytes: Long,
+      splitQueries: Boolean = false
+  ): Plan = {
+    val sets = segmentSets(tasks, layout, slots, vectorsMaxBytes)
+    val queryGroups = groups(queries, layout, k, groupMaxBytes)
+    Plan(
+      sets,
+      queryGroups,
+      tasks.filter(knownRows(_).isEmpty).map(_.segmentId),
+      if (sets.isEmpty) Seq.empty
+      else queryRanges(queryGroups.size, sets.size, slots, splitQueries)
+    )
+  }
 
   /** How many bytes of vectors one task keeps at once: its whole segment set,
     * which the planner sized to fit, or `vectorsMaxBytes` when one segment is

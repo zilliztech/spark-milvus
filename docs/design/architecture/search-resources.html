@@ -48,7 +48,7 @@
 
 <h2 id="mechanism">1 机制：三个数各绑一种资源</h2>
 
-<p><code>MilvusSearch.search</code> 的执行链里，<code>SearchPlan</code> 把段切成段集（每任务一个）、把 query 切成组；一个任务在 <code>SegmentSetSearch</code> 里对本集合的段逐个处理。exact 模式读向量列，<code>ExactScan.batch</code> 对每个 batch 调一次 <code>Knowhere.bruteForce</code>；index 模式读索引文件，<code>IndexFileCodec</code> 解码后交给 Knowhere 反序列化再搜。</p>
+<p><code>MilvusSearch.search</code> 的执行链里，<code>SearchPlan</code> 把段切成段集、把 query 切成组，exact 模式段集少于任务槽时再把组切成连续的查询范围，一个任务是（段集，范围）（决策 28）；一个任务在 <code>SegmentSetSearch</code> 里对本集合的段逐个处理。exact 模式读向量列，<code>ExactScan.batch</code> 对每个 batch 调一次 <code>Knowhere.bruteForce</code>；index 模式读索引文件，<code>IndexFileCodec</code> 解码后交给 Knowhere 反序列化再搜。</p>
 
 <table>
 <tr><th>数</th><th>绑定的资源</th><th>今天</th><th>在链上的位置</th></tr>

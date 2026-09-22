@@ -99,7 +99,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       SearchPlan.segmentSets(
         tasks,
         layout,
-        executors = 2,
+        slots = 2,
         vectorsMaxBytes = 1L << 31
       )
 
@@ -120,7 +120,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       SearchPlan.segmentSets(
         tasks,
         layout,
-        executors = 1,
+        slots = 1,
         vectorsMaxBytes = 4000L
       )
 
@@ -137,7 +137,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       SearchPlan.segmentSets(
         tasks,
         layout,
-        executors = 1,
+        slots = 1,
         vectorsMaxBytes = 4000L
       )
 
@@ -153,7 +153,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       SearchPlan.segmentSets(
         tasks,
         layout,
-        executors = 8,
+        slots = 8,
         vectorsMaxBytes = 1L << 31
       )
     ) shouldBe Seq(Seq(1L), Seq(2L))
@@ -175,7 +175,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       SearchPlan.segmentSets(
         tasks,
         layout,
-        executors = 2,
+        slots = 2,
         vectorsMaxBytes = 1L << 31
       )
     ) shouldBe Seq(Seq(1L), Seq(2L))
@@ -190,7 +190,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       SearchPlan.segmentSets(
         tasks,
         layout,
-        executors = 1,
+        slots = 1,
         vectorsMaxBytes = 4000L
       )
 
@@ -202,7 +202,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       SearchPlan.segmentSets(
         Seq(task(1L, 150L), unsized(2L), task(3L, 100L)),
         layout,
-        executors = 1,
+        slots = 1,
         vectorsMaxBytes = 4000L
       )
     ) shouldBe Seq(Seq(1L), Seq(2L, 3L))
@@ -212,7 +212,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     val plan = SearchPlan.of(
       Seq(task(1L, 10L), unsized(2L), task(3L, 10L)),
       layout,
-      executors = 1,
+      slots = 1,
       queries = 1,
       k = 1,
       groupMaxBytes = 4000L,
@@ -259,14 +259,14 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     SearchPlan.segmentSets(
       Seq.empty,
       layout,
-      executors = 4,
+      slots = 4,
       vectorsMaxBytes = 1L << 31
     ) shouldBe empty
     SearchPlan
       .of(
         Seq.empty,
         layout,
-        executors = 4,
+        slots = 4,
         queries = 2,
         k = 5,
         groupMaxBytes = 2800L,
@@ -281,7 +281,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     val plan = SearchPlan.of(
       tasks,
       layout,
-      executors = 2,
+      slots = 2,
       queries = 3,
       k = 10,
       groupMaxBytes = 992L,
@@ -291,5 +291,74 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     plan.tasks shouldBe 2
     plan.groups.map(_.firstQuery) shouldBe Seq(0, 2)
     plan.sets.flatMap(_.map(_.segmentId)).sorted shouldBe Seq(1L, 2L, 3L)
+  }
+
+  test(
+    "an exact search with fewer sets than slots cuts its groups into ranges"
+  ) {
+    // 2 sets on 16 slots: 8 ranges of 2 groups each, 16 tasks.
+    SearchPlan.queryRanges(
+      groups = 16,
+      sets = 2,
+      slots = 16,
+      split = true
+    ) shouldBe
+      (0 until 8).map(range => (range * 2) until (range * 2 + 2))
+    // Never more ranges than groups.
+    SearchPlan.queryRanges(
+      groups = 3,
+      sets = 2,
+      slots = 16,
+      split = true
+    ) shouldBe
+      Seq(0 until 1, 1 until 2, 2 until 3)
+    // Enough sets already: one range.
+    SearchPlan.queryRanges(
+      groups = 16,
+      sets = 16,
+      slots = 16,
+      split = true
+    ) shouldBe
+      Seq(0 until 16)
+    // Uneven counts put the longer ranges first.
+    SearchPlan.queryRanges(
+      groups = 5,
+      sets = 1,
+      slots = 3,
+      split = true
+    ) shouldBe
+      Seq(0 until 2, 2 until 4, 4 until 5)
+  }
+
+  test("an index search keeps every group in one range") {
+    SearchPlan.queryRanges(
+      groups = 16,
+      sets = 2,
+      slots = 16,
+      split = false
+    ) shouldBe
+      Seq(0 until 16)
+  }
+
+  test(
+    "the tasks are the sets times the ranges, and the ranges cover the groups"
+  ) {
+    val tasks = Seq(task(1L, 10L), task(2L, 10L))
+    val plan = SearchPlan.of(
+      tasks,
+      layout,
+      slots = 8,
+      queries = 8,
+      k = 10,
+      groupMaxBytes = 992L,
+      vectorsMaxBytes = 1L << 31,
+      splitQueries = true
+    )
+    plan.sets.size shouldBe 2
+    plan.groups.size shouldBe 4
+    plan.queryRanges shouldBe Seq(0 until 1, 1 until 2, 2 until 3, 3 until 4)
+    plan.tasks shouldBe 8
+    an[IllegalArgumentException] should be thrownBy
+      plan.copy(ranges = Seq(0 until 2, 3 until 4))
   }
 }
