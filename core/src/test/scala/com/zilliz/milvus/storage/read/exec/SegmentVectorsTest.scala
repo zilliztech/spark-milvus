@@ -1,6 +1,7 @@
 package com.zilliz.milvus.storage.read.exec
 
 import java.nio.{ByteBuffer, ByteOrder}
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import scala.collection.mutable
 import scala.collection.JavaConverters._
 
@@ -116,6 +117,43 @@ class SegmentVectorsTest
     new VectorSchemaRoot(
       Seq[FieldVector](idVector, vectorColumn).asJava
     )
+  }
+
+  /** Batches handed out like [[FakeReader]], recording which thread asked for
+    * each and running `onRead` with the read's number, from 1.
+    */
+  private final class ObservedReader(
+      batches: Seq[VectorSchemaRoot],
+      onRead: Int => Unit
+  ) extends SegmentReader {
+    private val remaining = mutable.Queue(batches: _*)
+    val events = new ConcurrentLinkedQueue[String]()
+    @volatile var reads = 0
+    @volatile var closed = false
+    override def next(): Option[VectorSchemaRoot] = {
+      reads += 1
+      events.add(s"read $reads on ${Thread.currentThread().getName}")
+      onRead(reads)
+      val batch = if (remaining.isEmpty) None else Some(remaining.dequeue())
+      events.add(s"read $reads done")
+      batch
+    }
+    override def take(
+        rowIndices: Array[Long],
+        columns: Seq[String],
+        parallelism: Int
+    ): SegmentReader.TakeResult =
+      throw new UnsupportedOperationException("take")
+    override def deliveredRows: Long = 0L
+    override def metrics: ReadMetrics = ReadMetrics.Zero
+
+    /** A closed reader releases the batches it never handed out. */
+    override def close(): Unit = {
+      events.add("close")
+      remaining.foreach(_.close())
+      remaining.clear()
+      closed = true
+    }
   }
 
   private def floats(batch: SegmentVectors.Batch, count: Int): Seq[Float] = {
@@ -310,6 +348,95 @@ class SegmentVectorsTest
 
     allocator.getAllocatedMemory shouldBe 0L
   }
+  test("the next block is read on another thread while the caller holds one") {
+    val secondRead = new CountDownLatch(1)
+    val reader = new ObservedReader(
+      Seq(
+        batch(Seq(1L), Seq(Some(Seq(1f, 2f)))),
+        batch(Seq(2L), Seq(Some(Seq(3f, 4f))))
+      ),
+      read => if (read == 2) secondRead.countDown()
+    )
+    val vectors = SegmentVectors.over(
+      reader,
+      "101",
+      layout,
+      exclusions(None),
+      allocator,
+      SegmentVectorsTest.NoJoin
+    )
+    try {
+      val first = vectors.next().get
+      try {
+        // Nothing asks for the second block, yet it is read.
+        secondRead.await(10, TimeUnit.SECONDS) shouldBe true
+        reader.events.asScala.toSeq should contain(
+          "read 2 on segment-vectors-read-ahead"
+        )
+        floats(first, 2) shouldBe Seq(1f, 2f)
+      } finally first.close()
+      val second = vectors.next().get
+      try {
+        second.firstRow shouldBe 1L
+        floats(second, 2) shouldBe Seq(3f, 4f)
+      } finally second.close()
+      vectors.next() shouldBe empty
+      vectors.rows shouldBe 2L
+    } finally vectors.close()
+    reader.closed shouldBe true
+  }
+
+  test("a failed read ahead surfaces on the next call as its own exception") {
+    val reader = new ObservedReader(
+      Seq(
+        batch(Seq(1L), Seq(Some(Seq(1f, 2f)))),
+        batch(Seq(2L), Seq(Some(Seq(3f, 4f))))
+      ),
+      read =>
+        if (read == 2) throw new IllegalStateException("row group 2 is broken")
+    )
+    val vectors = SegmentVectors.over(
+      reader,
+      "101",
+      layout,
+      exclusions(None),
+      allocator,
+      SegmentVectorsTest.NoJoin
+    )
+    try {
+      vectors.next().get.close()
+      val failure = the[IllegalStateException] thrownBy vectors.next()
+      failure.getMessage shouldBe "row group 2 is broken"
+    } finally vectors.close()
+    reader.closed shouldBe true
+  }
+
+  test("closing with a read in flight waits for it and releases its block") {
+    val reader = new ObservedReader(
+      Seq(
+        batch(Seq(1L), Seq(Some(Seq(1f, 2f)))),
+        batch(Seq(2L), Seq(Some(Seq(3f, 4f))))
+      ),
+      read => if (read == 2) Thread.sleep(200)
+    )
+    val vectors = SegmentVectors.over(
+      reader,
+      "101",
+      layout,
+      exclusions(None),
+      allocator,
+      SegmentVectorsTest.NoJoin
+    )
+    vectors.next().get.close()
+    vectors.close()
+    // The reader closes only after the read it was serving has finished, and
+    // the block that read produced is released: afterEach closes the
+    // allocator, which fails on any buffer left open.
+    val events = reader.events.asScala.toSeq
+    events.indexOf("close") should be > events.indexOf("read 2 done")
+    allocator.getAllocatedMemory shouldBe 0L
+  }
+
 }
 
 object SegmentVectorsTest {
@@ -318,4 +445,5 @@ object SegmentVectorsTest {
     * batch and the joining is out of the way.
     */
   private val NoJoin: Long = 1L
+
 }

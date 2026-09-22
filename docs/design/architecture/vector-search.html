@@ -479,7 +479,7 @@ Milvus 在 V2、V3 段里写出的非 nullable 向量都是 fixed_size_binary �
 <figcaption>蓝框是 Knowhere 调用。两条路径输入输出相同，索引探查不读向量列。</figcaption>
 </figure>
 <ol>
-<li>任务逐段处理。Milvus 的 <code>TableFormat</code> 为每个段打开一个 <code>SegmentReader</code>，逐批读向量列，以及删除与过滤要用的主键、时间戳和标量列，段只读一遍；每批交出向量缓冲、由 <code>core.delete</code> 与 <code>core.expr</code> 生成的排除位图和这一批的起始行号。</li>
+<li>任务逐段处理。Milvus 的 <code>TableFormat</code> 为每个段打开一个 <code>SegmentReader</code>，逐批读向量列，以及删除与过滤要用的主键、时间戳和标量列，段只读一遍；每批交出向量缓冲、由 <code>core.delete</code> 与 <code>core.expr</code> 生成的排除位图和这一批的起始行号。读取在每个段自己的线程上提前一块进行，与计算重叠，见<a href="search-resources.html#base-read">资源自适应 3.5</a>。</li>
 <li><code>ExactScan</code> 把向量缓冲和一组查询交给批量距离入口，一批一次调用。位图里有排除行时，先把可见行按原顺序拷进一块连续缓冲、记下压紧行号到批内行号的映射，调用后按映射换回；拷贝量是可见行的字节数，每批每组一次；没有排除行时缓冲原样借出。元素类型不是 float32 的字段走 <code>bruteForce</code>，位图原样传入。批量入口内部按 4,096 条查询 × 1,024 行分块，一批的大小不再受 L3 约束，只决定每次调用的固定开销与任务内存，默认 32 MiB，见 <a href="search-resources.html#block">搜索路径的资源自适应</a>。只有一个查询组时算完即释放；有多个查询组时，整个段组的批留在内存里，每个查询组都在它们上面算过之后一起释放，保留的字节不超过任务的常驻额度，超过则改为逐组重读。</li>
 <li>Knowhere 返回的行号从这一批第 0 行算起，加上这一批的起始行号就是段内行号；结果并入该组的 <code>TopKMerger</code>。段内行号不受保留策略影响，候选不需要再拼回段上。</li>
 <li>一个查询组算完它能看到的全部数据后，这组每条查询的有界堆就是要交出的候选。任务内存是这个段组的向量、一组查询的矩阵和这组的 TopK。</li>

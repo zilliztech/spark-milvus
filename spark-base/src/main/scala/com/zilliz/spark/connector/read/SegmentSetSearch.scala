@@ -397,8 +397,8 @@ private[read] object SegmentSetSearch extends Logging {
         metrics.indexLoadNanos.add(handle.loadNanos)
         SegmentSearch.Index(task.segmentId, handle, excluded)
       case None =>
-        // The block one brute-force call scans is chosen on this executor,
-        // for this machine's caches and this executor's concurrency.
+        // The block one exact-scan call takes: the option when the call set
+        // it, otherwise 32 MiB (search-resources.html section 3.2).
         val batch = exactScanBatch(spec)
         SegmentSearch.Exact(
           task.segmentId,

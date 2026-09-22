@@ -1,5 +1,13 @@
 package com.zilliz.milvus.storage.read.exec
 
+import java.util.concurrent.{
+  Callable,
+  ExecutionException,
+  ExecutorService,
+  Executors,
+  Future,
+  ThreadFactory
+}
 import java.util.BitSet
 
 import org.apache.arrow.memory.BufferAllocator
@@ -18,6 +26,11 @@ import com.zilliz.milvus.storage.schema.VectorLayout
   * where the batch starts in the segment. The computation never sees the
   * reader, the columns or the delete rules
   * (docs/design/architecture/vector-search.html section 2.3).
+  *
+  * The block after the one handed out is read on this segment's own thread
+  * while the caller computes, so reading and the engine overlap; a segment
+  * holds at most two blocks at once
+  * (docs/design/architecture/search-resources.html section 3.5).
   */
 final class SegmentVectors private (
     reader: SegmentReader,
@@ -27,8 +40,28 @@ final class SegmentVectors private (
     allocator: BufferAllocator,
     batchMaxBytes: Long
 ) extends AutoCloseable {
-  private var nextRow = 0L
+
+  /** Where the next batch read starts; the read-ahead thread advances it. */
+  @volatile private var nextRow = 0L
+  private var handedOut = 0L
   private var closed = false
+
+  /** The read of the block after the last one handed out, in flight on
+    * `readAhead`, or None before the first block and after the last.
+    */
+  private var pending: Option[Future[Option[SegmentVectors.Batch]]] = None
+
+  /** Created with the first read ahead and stopped when the segment closes. */
+  private var readAhead: ExecutorService = null
+
+  private def readNextAhead(): Future[Option[SegmentVectors.Batch]] = {
+    if (readAhead == null)
+      readAhead =
+        Executors.newSingleThreadExecutor(SegmentVectors.ReadAheadThreads)
+    readAhead.submit(new Callable[Option[SegmentVectors.Batch]] {
+      override def call(): Option[SegmentVectors.Batch] = readBlock()
+    })
+  }
 
   /** The next batch, or None at the end of the segment. The caller closes each
     * batch before asking for the next one.
@@ -41,6 +74,22 @@ final class SegmentVectors private (
     * `milvus.read.batch.max.bytes`, which is what that option was for.
     */
   def next(): Option[SegmentVectors.Batch] = {
+    require(!closed, "Segment vectors are closed")
+    val current = pending match {
+      case Some(read) =>
+        pending = None
+        await(read)
+      case None => readBlock()
+    }
+    current.foreach { block =>
+      handedOut += block.rows.toLong
+      pending = Some(readNextAhead())
+    }
+    current
+  }
+
+  /** The next block: batches joined until they fill `batchMaxBytes`. */
+  private def readBlock(): Option[SegmentVectors.Batch] = {
     val first = readBatch()
     if (first.isEmpty) return first
     val rowBytes = layout.rowBytes.toLong
@@ -90,17 +139,45 @@ final class SegmentVectors private (
   }
 
   /** How many rows of this segment have been handed out. */
-  def rows: Long = nextRow
+  def rows: Long = handedOut
 
   def metrics: ReadMetrics = reader.metrics
 
+  /** A failed read surfaces here, on the thread that asked for the block. */
+  private def await(
+      read: Future[Option[SegmentVectors.Batch]]
+  ): Option[SegmentVectors.Batch] =
+    try read.get()
+    catch {
+      case failure: ExecutionException if failure.getCause != null =>
+        throw failure.getCause
+    }
+
+  /** A read in flight owns native and Arrow resources, so it finishes and what
+    * it read is released before the reader closes; its failure is not dropped.
+    */
   override def close(): Unit = if (!closed) {
-    closed = true
-    reader.close()
+    val inFlight = pending
+    pending = None
+    try inFlight.foreach(read => await(read).foreach(_.close()))
+    finally {
+      closed = true
+      if (readAhead != null) readAhead.shutdown()
+      reader.close()
+    }
   }
 }
 
 object SegmentVectors {
+
+  /** Read-ahead threads never keep an executor JVM alive. */
+  private val ReadAheadThreads: ThreadFactory = new ThreadFactory {
+    override def newThread(task: Runnable): Thread = {
+      val thread = new Thread(task, "segment-vectors-read-ahead")
+      thread.setDaemon(true)
+      thread
+    }
+  }
 
   /** One batch: the vectors as Knowhere reads them, the rows to skip, and where
     * the batch sits in the segment. Row `firstRow + i` of the segment is row
