@@ -30,6 +30,10 @@ import com.zilliz.spark.connector.options.MilvusOption
   *   --mode exact|index           default exact
   *   --master local[8]            optional; unset on a cluster
   *   --queries <path>             required: parquet with an id and a vector column
+  *   --repeat 1                   the query set this many times over; copy c's
+  *                                ids are shifted by c × (largest id + 1), so
+  *                                every copy of a query has to return the
+  *                                same hits as the query itself
   *   --query-id-column id         --query-vector-column emb
   *   --vector-field emb           --pk-field id
   *   --k 10                       --metric COSINE
@@ -213,7 +217,7 @@ object QuerySetSearchJob {
     ) ++ rootPath.map(StorageProperties.RootPath -> _) ++
       arguments.pairs("option")
 
-    val queries = spark.read
+    val loaded = spark.read
       .parquet(queriesPath)
       .select(
         col(arguments("query-id-column", "id")).cast(LongType).as("query_id"),
@@ -221,10 +225,23 @@ object QuerySetSearchJob {
           .cast(ArrayType(FloatType))
           .as("vector")
       )
+    val repeat = arguments("repeat", "1").toInt
+    require(repeat > 0, s"--repeat is $repeat; it takes a positive count")
+    val queries =
+      if (repeat == 1) loaded
+      else {
+        val span = loaded.agg(max(col("query_id"))).head().getLong(0) + 1L
+        require(span > 0L, s"--repeat needs non-negative query ids")
+        (0 until repeat)
+          .map(copy =>
+            loaded.withColumn("query_id", col("query_id") + lit(copy * span))
+          )
+          .reduce(_ union _)
+      }
     val queryCount = queries.count()
     report(
       s"plan mode=$mode k=$k metric=$metric queries=$queryCount from " +
-        s"$queriesPath; snapshot=$snapshot bucket=$bucket " +
+        s"$queriesPath x $repeat; snapshot=$snapshot bucket=$bucket " +
         s"root=${rootPath.getOrElse("")} output=$output"
     )
 
