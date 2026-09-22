@@ -104,7 +104,12 @@ its executor, and that each task of the stage packing the query groups takes
 as many cores as keeps the groups packed at once inside the heap. The other
 stages run one task per core, as by default. This needs dynamic allocation off;
 in local mode or with dynamic allocation on, set `spark.task.cpus` to the
-executor's cores as before.
+executor's cores as before. The stages that read the query set therefore run as
+many tasks at once as an executor has cores, and a Parquet reader holds at least
+one row group per task, so the executor heap needs room for its cores times the
+largest row group. A file whose one row group holds the whole query set (pyarrow
+writes one row group for tables of up to 1,048,576 rows by default) should be
+rewritten in smaller row groups, or the heap made larger.
 
 `milvus.search.group.max.bytes` stays **per task**: it also decides how many
 query groups there are, which is the shape of the plan and not only memory. One

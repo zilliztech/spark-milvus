@@ -78,7 +78,10 @@ executor 上同时运行的搜索任务共享它：index 模式在集群上每�
 index 模式在集群上不必设置 `spark.task.cpus`：搜索与建索引的 stage 由连接器声明每任务
 占满 executor 的核，打包查询组的 stage 按堆声明每任务核数，其余 stage 按默认的每任务
 一核并行。这要求关闭动态分配；local 模式与开启动态分配时，仍要把 `spark.task.cpus` 设为
-executor 核数。
+executor 核数。读查询集的 stage 因此每个 executor 同时跑「executor 核数」个任务，读 Parquet
+时每个任务至少持有输入的一个行组，executor 的堆要放得下「executor 核数 × 最大行组」：
+一个行组装下整个查询集的文件（pyarrow 对 1,048,576 行以内的表默认只写一个行组）要改写成小行组，
+或者加大堆。
 
 `milvus.search.group.max.bytes` 仍然是**每个任务**的：它同时决定查询组的个数，那是
 规划的形状，不只是内存。段组留在内存时，一个任务的峰值是「段额度 + 一个查询组」，查询
