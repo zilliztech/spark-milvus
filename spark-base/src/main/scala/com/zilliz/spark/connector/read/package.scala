@@ -20,10 +20,11 @@ package com.zilliz.spark.connector
   *
   * `MilvusSearch` is the vector search entry: it resolves the snapshot, plans
   * the segment sets and query groups through `core.index.SearchPlan`, delivers
-  * the query set (`SearchQueries`, broadcast or with the shuffle), runs the
-  * first stage (`SegmentSetSearch`), merges every query's top-k
-  * (`TopKAggregator`) and reads the output columns of the rows that survived
-  * (`SearchTake`). Capabilities: R4, R5, R7, R11, R12, R13, R16, R18, V5, V7,
-  * G3 (see docs/design/capabilities.md).
+  * the query set (`SearchQueries`: broadcast whole, or packed by group into a
+  * shuffle that `SearchQueryRanges` reads one group at a time), runs the first
+  * stage (`SegmentSetSearch`), merges every query's top-k (`TopKAggregator`)
+  * and reads the output columns of the rows that survived (`SearchTake`).
+  * Capabilities: R4, R5, R7, R11, R12, R13, R16, R18, V5, V7, G3 (see
+  * docs/design/capabilities.md).
   */
 package object read

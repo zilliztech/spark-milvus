@@ -10,7 +10,6 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, explode, udaf}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
-import org.apache.spark.storage.StorageLevel
 import org.apache.spark.Partitioner
 
 import com.zilliz.milvus.storage.expr.PlanParser
@@ -334,8 +333,9 @@ object MilvusSearch extends Logging {
   /** The candidates of the first stage, whichever way the query set travels.
     *
     * A set that fits `milvus.search.queries.max.bytes` is collected on the
-    * driver and broadcast; a larger one is packed by group on the executors and
-    * travels with the shuffle, never through the driver (section 2.1).
+    * driver and broadcast, and every executor keeps it whole. A larger one is
+    * packed by group on the executors, never through the driver, and each task
+    * reads the groups of its range one at a time (section 2.1).
     */
   private def candidates(
       spark: SparkSession,
@@ -386,56 +386,44 @@ object MilvusSearch extends Logging {
     } else {
       val delivered = packedGroups(selected, plan, spec, layout)
       require(
-        delivered.getNumPartitions == ranges.size,
-        s"The packed query set travels as ${ranges.size} query ranges, not " +
+        delivered.getNumPartitions == groups.size,
+        s"The packed query set is ${groups.size} groups, not " +
           s"${delivered.getNumPartitions} partitions"
       )
-      // The segment set reaches the task beside the cartesian rather than
-      // through it. Through it, a task has to look at its first pair to learn
-      // which set it holds, and a buffered iterator keeps that pair for as
-      // long as the task runs: the first query group's bytes, 502 MB of an
-      // 800 MiB set, held while every later group is searched. Beside it, the
-      // left side carries an index, `CartesianRDD` numbers its partitions
-      // left index × right partitions + right index, so a task is set
-      // `index / ranges` and range `index % ranges`, and the sets are
+      // Task `index` is set `index / ranges` and range `index % ranges`, which
+      // is how `SearchQueryRanges` numbers its partitions. The task learns its
+      // set from that index before it reads a group, and the sets are
       // broadcast once for the executor rather than once for each task.
       val held = spark.sparkContext.broadcast(sets.toVector)
-      val setIndices = spark.sparkContext.parallelize(sets.indices, sets.size)
       val rangeCount = ranges.size
       val rangeSizes = ranges.map(_.size).toVector
-      setIndices.cartesian(delivered).mapPartitionsWithIndex { (index, pairs) =>
-        if (pairs.isEmpty) Iterator.empty
-        else
+      new SearchQueryRanges(delivered, sets.size, ranges)
+        .mapPartitionsWithIndex { (index, streamed) =>
           SegmentSetSearch.run(
             held.value(index / rangeCount),
             spec,
-            pairs.map(_._2),
+            streamed,
             rangeSizes(index % rangeCount),
             metrics
           )
-      }
+        }
     }
   }
 
-  /** The query set packed one group per row, on the executors, one partition
-    * per query range.
+  /** The query set packed on the executors, one partition per query group, each
+    * the output of a shuffle.
     *
     * `zipWithIndex` gives every query the position that decides its group, so
     * the groups are the same ones the driver planned, and a group's rows are
-    * packed in query order.
+    * packed in query order. One task packs one group, and the groups are packed
+    * in parallel.
     *
-    * The `coalesce` is what makes the cartesian with the segment sets produce
-    * one task per (set, range) instead of one per (set, group) pair, so a task
-    * receives every group of its range in order and reads its segments once —
-    * which is what `SegmentSetSearch.run` holds the set in memory for. It joins
-    * neighbouring groups only ([[SearchQueryRanges]]); its cost is that the
-    * shuffle read and the packing of a range run in one task rather than one
-    * per group.
-    *
-    * The `persist` is what keeps that one task's work from happening once per
-    * segment set. Without it the cartesian recomputes this side for every left
-    * partition, and since an executor runs its tasks in one JVM, the query set
-    * is packed and held once per concurrent task rather than once.
+    * The packed group then goes through a second shuffle, keyed by its group,
+    * so that it is written once to the local disk of the executor that packed
+    * it and every first-stage task that needs it reads it from there. Nothing
+    * is stored in memory: [[SearchQueryRanges]] reads a task's groups one at a
+    * time, and reading a group again is a shuffle read, not a second packing of
+    * the query set.
     */
   private[read] def packedGroups(
       selected: DataFrame,
@@ -469,6 +457,11 @@ object MilvusSearch extends Logging {
       override def getPartition(key: Any): Int =
         key.asInstanceOf[(Long, Long)]._1.toInt
     }
+    // The packed group keeps its group's partition through the second shuffle.
+    val byIndex = new Partitioner {
+      override def numPartitions: Int = sizes.size
+      override def getPartition(key: Any): Int = key.asInstanceOf[Int]
+    }
     selected.rdd
       .map(row => SearchQueries.pack(Seq(row), layout, metric))
       .zipWithIndex()
@@ -494,23 +487,10 @@ object MilvusSearch extends Logging {
           at == queries,
           s"Query group $index takes $queries queries and was given $at"
         )
-        Iterator(SearchQueries.Group(ids, vectors, 0))
+        Iterator((index, SearchQueries.Group(ids, vectors, 0)))
       }
-      .coalesce(
-        plan.queryRanges.size,
-        shuffle = false,
-        Some(SearchQueryRanges(plan.queryRanges))
-      )
-      // Stored, because `CartesianRDD` takes the right side's iterator once
-      // per left partition and computes it again each time. The tasks of one
-      // executor run in one JVM, so without this every one of them packs and
-      // holds its own copy of the whole query set: an 800 MiB set at
-      // `local[6]` measured 7.06 GB of query bytes against an 8 GiB heap,
-      // where one copy is 1.17 GB. Stored once, the block's values are the
-      // objects every task reads, which is what the collected route gets from
-      // the broadcast. Memory only: a level that spills would hand each task
-      // its own deserialized copy and put the six back.
-      .persist(StorageLevel.MEMORY_ONLY)
+      .partitionBy(byIndex)
+      .values
   }
 
   /** How many tasks of this job share one executor's memory at once.
