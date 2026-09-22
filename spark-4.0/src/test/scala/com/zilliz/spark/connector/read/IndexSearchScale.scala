@@ -174,7 +174,7 @@ object IndexSearchScale {
     val builtOptions = storage ++ Map(
       MilvusOption.SnapshotPath -> builtSnapshot,
       MilvusOption.ReadColumnar -> "true",
-      MilvusOption.SearchVectorsMaxBytes -> (slots.toLong * env(
+      MilvusOption.SearchSegmentsMaxBytes -> (slots.toLong * env(
         "INDEX_VECTORS_PER_TASK_MIB",
         "64"
       ).toLong * 1048576L).toString,

@@ -6,6 +6,7 @@ import scala.jdk.CollectionConverters._
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rdd.RDD
+import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, explode, udaf}
 import org.apache.spark.sql.types.StructType
@@ -15,13 +16,15 @@ import org.apache.spark.Partitioner
 import com.zilliz.milvus.storage.expr.PlanParser
 import com.zilliz.milvus.storage.index.{MachineResources, SearchPlan}
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{
   MilvusOption,
   SearchLimits,
   SearchResources,
-  SnapshotReference
+  SnapshotReference,
+  TaskResources
 }
 import com.zilliz.spark.connector.table.MilvusTables
 import io.milvus.grpc.schema.{DataType, FieldSchema}
@@ -117,29 +120,60 @@ object MilvusSearch extends Logging {
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
     )
-    // The vectors a task keeps resident come out of the executor's off-heap
-    // room, which its tasks share, so the budget a task plans against is the
-    // executor's divided by the slots. `milvus.search.vectors.max.bytes` names
-    // the executor's total when the call sets it; otherwise it is derived from
-    // the executor's memory limit and heap. The planner and the task take the
-    // same value; a set that turns out larger streams instead of holding.
-    val slots = MilvusSearch.taskSlotsPerExecutor(spark)
+    // How many first-stage tasks run at once, and what one of them may keep
+    // (docs/design/architecture/vector-search.html section 2.1,
+    // search-resources.html section 3.3). An index search declares that its
+    // tasks take every core of their executor, so one runs per executor;
+    // otherwise a task takes `spark.task.cpus`.
+    val resources = TaskResources.of(spark)
+    val searchProfile =
+      if (searchMode == "index") resources.wholeExecutor else None
+    val slots = if (searchProfile.nonEmpty) 1 else resources.tasksPerExecutor
+    val concurrency = resources.executors * slots
     val (memoryLimit, heap) = MilvusSearch.executorMemory(spark)
-    val budget = SearchResources.vectorsBudget(
+    val segmentBudget = SearchResources.segmentBudget(
       memoryLimit,
       heap,
       slots,
-      limits.vectorsMaxBytes
+      limits.segmentsMaxBytes,
+      index = searchMode == "index"
     )
-    val vectorsPerTask = math.max(layout.rowBytes.toLong, budget.bytes)
+    val queryBudget =
+      SearchResources.queryBudget(heap, memoryFraction(spark), slots)
+    val blockBytes = SearchResources
+      .exactScanBatch(
+        if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
+          Some(MilvusOption(caseInsensitive).readLimits.batchMaxBytes)
+        else None
+      )
+      .bytes
+    // What a segment costs the task that searches it: the index the snapshot
+    // recorded, or the vectors an exact scan reads a block at a time.
+    val footprint: SegmentReadTask => SearchPlan.Footprint = task =>
+      (if (searchMode == "index")
+         SegmentIndexHandle.select(
+           task,
+           field.fieldID,
+           searchMetric,
+           allowUnindexed
+         )
+       else None) match {
+        case Some(index) if index.serializedSize > 0L =>
+          SearchPlan.Footprint.index(index.serializedSize)
+        case Some(_) => SearchPlan.Footprint(None, whole = true, 0L)
+        case None    => SearchPlan.Footprint.vectors(task, layout, blockBytes)
+      }
+    val queryBytes = SearchQueries.bytes(queryCount, layout)
     val plan = SearchPlan.of(
       tasks,
       layout,
-      math.max(1, spark.sparkContext.defaultParallelism),
+      concurrency,
       queryCount.toInt,
       k,
       limits.groupMaxBytes,
-      vectorsPerTask,
+      SearchPlan.Budget(segmentBudget.bytes, queryBudget.bytes),
+      footprint,
+      shuffled = queryBytes > limits.queriesMaxBytes,
       // The batched distance entry is single-threaded on its task, so an
       // exact search is as parallel as its tasks (decision 28).
       splitQueries = searchMode == "exact"
@@ -155,14 +189,15 @@ object MilvusSearch extends Logging {
       filter,
       searchParameters,
       allowUnindexed,
-      vectorsPerTask,
+      plan.capacity,
       MilvusOption(caseInsensitive).readLimits.arrowMaxBytes,
       slots,
       // A block the call named is used as it is; otherwise each executor
       // chooses one for its own machine when it opens a segment.
       if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
         Some(MilvusOption(caseInsensitive).readLimits.batchMaxBytes)
-      else None
+      else None,
+      plan.resident
     )
 
     val metrics = SearchMetrics.create(spark.sparkContext)
@@ -175,60 +210,43 @@ object MilvusSearch extends Logging {
       else queryCount * tasks.flatMap(_.snapshotRows).sum
     val segmentSearchesTotal =
       plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum
-    val queryBytes = SearchQueries.bytes(queryCount, layout)
-    // The budget and how the sets stand against it: a set known to be over
-    // it streams once per query group; a set with an estimated segment is
-    // decided when the task reads it. One group holds nothing either way.
-    val known = plan.sets.flatMap(SearchPlan.knownBytes(_, layout))
-    val over = known.count(_ > vectorsPerTask)
+    // The budgets and how the plan stands against them. A native allocation
+    // that fails does not surface as a Java exception, so this line is what
+    // there is to read afterwards (search-resources.html sections 3.3, 3.4).
+    val needs = plan.needs
+      .map(need =>
+        s"queries kept needs heap=${need.queriesHeap} offheap=${need.queriesOffHeap}, " +
+          s"segments kept needs offheap=${need.segmentsOffHeap}"
+      )
+      .getOrElse("no segments")
+    val over = plan.kept.count(_.exists(_ > plan.capacity))
     logInfo(
-      s"Search budget: vectorsPerTask=$vectorsPerTask (${budget.reason}), " +
-        s"sets=${plan.sets.size}, setBytes=" +
-        (if (known.isEmpty) "unknown"
-         else s"${known.min}..${known.max}") +
-        s" known for ${known.size} sets, ${plan.estimated.size} segments " +
-        s"estimated at half the budget, " +
-        (if (plan.groups.size == 1) "one query group so nothing is held"
-         else if (over == 0) "no set known to stream"
-         else s"$over sets stream once per query group")
+      s"Search budget: ${resources.describe}; $concurrency tasks at once " +
+        s"($slots per executor${if (searchProfile.nonEmpty) ", each taking every core"
+          else ""}); " +
+        s"segments ${segmentBudget.reason}; queries ${queryBudget.reason}; $needs; " +
+        s"kept=${plan.resident}, sets=${plan.sets.size}" +
+        (if (plan.resident == SearchPlan.Resident.Segments)
+           s", capacity=${plan.capacity}, " +
+             (if (over == 0) "no set known to stream"
+              else s"$over sets stream once per query group")
+         else "") +
+        s", ${plan.estimated.size} segments estimated at half the budget"
     )
-    // What an index search asks of the executor's off-heap memory, from the
-    // sizes the snapshot recorded: an index is copied into a BinarySet and then
-    // deserialized, so loading peaks at twice its bytes, and the slots load at
-    // once. Nothing is refused on this; a native allocation that fails does
-    // not surface as a Java exception, so this line is what there is to read
-    // afterwards (docs/design/architecture/search-resources.html section 3.4).
-    if (searchMode == "index") {
-      val perSet = plan.sets.map(set =>
-        set
-          .flatMap(task =>
-            SegmentIndexHandle
-              .select(task, field.fieldID, searchMetric, allowUnindexed)
-          )
-          .map(_.serializedSize)
-          .filter(_ > 0L)
-          .sum
-      )
-      val perTask = if (perSet.isEmpty) 0L else perSet.max
-      val perExecutor = perTask * 2L * slots
-      val offHeap = memoryLimit.map(limit =>
-        math.max(0L, limit - heap - SearchResources.JvmReserveBytes)
-      )
-      val line =
-        if (perTask == 0L)
-          "Search index memory: the snapshot records no index sizes, nothing to forecast"
-        else
-          s"Search index memory: indexBytesPerTask=$perTask (largest set), " +
-            s"loadPeak=${perTask * 2L} (BinarySet and the deserialized index), " +
-            s"perExecutor=$perExecutor over $slots slots, " +
-            s"offHeapAvailable=${offHeap.map(_.toString).getOrElse("unknown")}"
-      if (offHeap.exists(_ < perExecutor))
-        logWarning(
-          s"$line; the executor's off-heap room is smaller than the peak, and a native " +
-            "allocation that fails does not raise a Java exception"
-        )
-      else logInfo(line)
-    }
+    // The stage that packs the query groups holds one group's ids and vectors
+    // per task on the heap, outside what Spark manages, so no more of them run
+    // at once on an executor than that heap holds with room to spare.
+    val packProfile =
+      if (queryBytes <= limits.queriesMaxBytes || plan.groups.isEmpty) None
+      else {
+        val perGroup = plan.groups.map(_.queries.toLong).max *
+          (SearchPlan.QueryIdBytes + layout.rowBytes.toLong)
+        val heapRoom = SearchResources
+          .queryBudget(heap, memoryFraction(spark), 1)
+          .bytes
+        val fits = math.max(1L, heapRoom / (perGroup + perGroup / 2))
+        resources.atMost(math.min(fits, Int.MaxValue.toLong).toInt)
+      }
     logInfo(
       s"Search plan: mode=$searchMode, metric=$searchMetric, topK=$k, " +
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
@@ -271,7 +289,9 @@ object MilvusSearch extends Logging {
               spec,
               layout,
               limits,
-              metrics
+              metrics,
+              searchProfile,
+              packProfile
             ),
             SegmentSetSearch.CandidateSchema
           ),
@@ -345,8 +365,11 @@ object MilvusSearch extends Logging {
       spec: SegmentSetSearch.Spec,
       layout: VectorLayout,
       limits: SearchLimits,
-      metrics: SearchMetrics
+      metrics: SearchMetrics,
+      searchProfile: Option[ResourceProfile],
+      packProfile: Option[ResourceProfile]
   ): RDD[Row] = {
+    val kept = plan.kept.toVector
     val byId =
       partitions.map(partition => partition.task.segmentId -> partition).toMap
     val sets = plan.sets.map(_.map(task => byId(task.segmentId)))
@@ -362,11 +385,11 @@ object MilvusSearch extends Logging {
       SearchQueries.checkUnique(ids)
       val delivered = spark.sparkContext.broadcast((ids, vectors))
       val work = for {
-        set <- sets
+        (set, index) <- sets.zipWithIndex
         range <- ranges
-      } yield (set, range)
-      spark.sparkContext.parallelize(work, plan.tasks).flatMap {
-        case (set, range) =>
+      } yield (set, kept.lift(index).flatten, range)
+      val searched = spark.sparkContext.parallelize(work, plan.tasks).flatMap {
+        case (set, planned, range) =>
           val (allIds, allVectors) = delivered.value
           SegmentSetSearch.run(
             set,
@@ -380,11 +403,13 @@ object MilvusSearch extends Logging {
               )
             },
             range.size,
+            planned,
             metrics
           )
       }
+      searchProfile.fold(searched)(searched.withResources)
     } else {
-      val delivered = packedGroups(selected, plan, spec, layout)
+      val delivered = packedGroups(selected, plan, spec, layout, packProfile)
       require(
         delivered.getNumPartitions == groups.size,
         s"The packed query set is ${groups.size} groups, not " +
@@ -397,16 +422,18 @@ object MilvusSearch extends Logging {
       val held = spark.sparkContext.broadcast(sets.toVector)
       val rangeCount = ranges.size
       val rangeSizes = ranges.map(_.size).toVector
-      new SearchQueryRanges(delivered, sets.size, ranges)
+      val searched = new SearchQueryRanges(delivered, sets.size, ranges)
         .mapPartitionsWithIndex { (index, streamed) =>
           SegmentSetSearch.run(
             held.value(index / rangeCount),
             spec,
             streamed,
             rangeSizes(index % rangeCount),
+            kept.lift(index / rangeCount).flatten,
             metrics
           )
         }
+      searchProfile.fold(searched)(searched.withResources)
     }
   }
 
@@ -429,7 +456,8 @@ object MilvusSearch extends Logging {
       selected: DataFrame,
       plan: SearchPlan.Plan,
       spec: SegmentSetSearch.Spec,
-      layout: VectorLayout
+      layout: VectorLayout,
+      profile: Option[ResourceProfile] = None
   ): RDD[SearchQueries.Group] = {
     val repeated = selected
       .groupBy(col(SearchQueries.IdColumn))
@@ -462,7 +490,7 @@ object MilvusSearch extends Logging {
       override def numPartitions: Int = sizes.size
       override def getPartition(key: Any): Int = key.asInstanceOf[Int]
     }
-    selected.rdd
+    val packed = selected.rdd
       .map(row => SearchQueries.pack(Seq(row), layout, metric))
       .zipWithIndex()
       .map { case ((ids, vectors), position) =>
@@ -489,19 +517,12 @@ object MilvusSearch extends Logging {
         )
         Iterator((index, SearchQueries.Group(ids, vectors, 0)))
       }
+    profile
+      .fold(packed)(packed.withResources)
       .partitionBy(byIndex)
       .values
   }
 
-  /** How many tasks of this job share one executor's memory at once.
-    *
-    * `spark.executor.cores` says it wherever executors are separate processes.
-    * A local master has no executors: the driver runs the whole job, and
-    * `local[n]` means those n tasks share this one JVM, which is what
-    * `defaultParallelism` reports. Anything else with the setting absent is
-    * taken as one slot, which is Spark's own default and errs towards a larger
-    * per-task budget rather than a smaller one.
-    */
   /** The executor's memory: its limit, when it can be known, and its heap.
     *
     * In local mode the executor is this JVM, so the limit is the cgroup's or
@@ -542,17 +563,13 @@ object MilvusSearch extends Logging {
     }
   }
 
-  private[read] def taskSlotsPerExecutor(spark: SparkSession): Int = {
-    val configured = spark.conf
-      .getOption("spark.executor.cores")
-      .flatMap(value => scala.util.Try(value.trim.toInt).toOption)
-      .filter(_ > 0)
-    val local = spark.sparkContext.master.startsWith("local[") ||
-      spark.sparkContext.master == "local"
-    configured.getOrElse(
-      if (local) math.max(1, spark.sparkContext.defaultParallelism) else 1
-    )
-  }
+  /** `spark.memory.fraction`: the share of the heap Spark manages, the rest
+    * being where a task's own objects live.
+    */
+  private def memoryFraction(spark: SparkSession): Double = spark.conf
+    .getOption("spark.memory.fraction")
+    .flatMap(value => scala.util.Try(value.trim.toDouble).toOption)
+    .getOrElse(0.6)
 
   /** Every query's candidates become its global top-k, best first. */
   private[read] def merged(

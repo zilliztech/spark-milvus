@@ -8,6 +8,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.spark.connector.metrics.SearchMetrics
+import com.zilliz.spark.connector.options.TaskResources
 
 /** The merge stage inside Spark: candidates from several tasks become one top-k
   * per query, with the ranks the result contract promises.
@@ -110,9 +111,14 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   }
 
   test("a local master's tasks all share one JVM's memory") {
-    // local[2] in beforeAll: two tasks at once, so an executor budget is
-    // halved before a task plans against it.
-    MilvusSearch.taskSlotsPerExecutor(spark) shouldBe 2
+    // local[2] in beforeAll: one executor, this JVM, running two tasks at
+    // once, so an executor budget is halved before a task plans against it;
+    // and a local master cannot declare a stage's task cores.
+    val resources = TaskResources.of(spark)
+    resources.executors shouldBe 1
+    resources.tasksPerExecutor shouldBe 2
+    resources.declarable shouldBe false
+    resources.wholeExecutor shouldBe None
   }
 
   test("a progress count reads at a glance") {

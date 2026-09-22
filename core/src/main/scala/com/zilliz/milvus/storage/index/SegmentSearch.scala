@@ -12,7 +12,7 @@ import com.zilliz.milvus.storage.read.exec.{
 import com.zilliz.milvus.storage.schema.VectorLayout
 import com.zilliz.milvus.storage.Logging
 
-/** Runs one query group over one segment set and merges what the segments find.
+/** Runs query groups over one segment set and merges what the segments find.
   *
   * The two strategies take the same input and give the same output: exact
   * scanning works on the vector batches a segment hands out, index probing on
@@ -46,10 +46,10 @@ object SegmentSearch extends Logging {
   /** One segment set, read into memory and kept there while query group after
     * query group runs on it.
     *
-    * This is how a task answers a query set too large to fit one group: the
-    * groups arrive one at a time, and what stays is the segment set, which the
-    * planner sized against `milvus.search.vectors.max.bytes`. A search with one
-    * query group uses [[run]] instead and holds one batch at a time
+    * This is how a task answers query groups it cannot keep: the groups arrive
+    * one at a time, and what stays is the segment set, which the planner sized
+    * against the task's segment budget. A task that can keep its queries uses
+    * [[runGroups]] instead and holds one segment at a time
     * (docs/design/architecture/vector-search.html sections 2.1 and 2.3).
     */
   final class Held private[index] (
@@ -60,9 +60,12 @@ object SegmentSearch extends Logging {
 
     def segments: Int = sources.size
 
-    /** The bytes of vectors this task keeps. */
+    /** The bytes this task keeps: the vector batches of an exact scan and the
+      * persisted indexes of an index probe.
+      */
     def retainedBytes: Long =
-      batches.values.flatten.map(_.base.buffer.capacity().toLong).sum
+      batches.values.flatten.map(_.base.buffer.capacity().toLong).sum +
+        sources.collect { case Index(_, handle, _) => handle.bytes }.sum
 
     /** One query group over the whole set. */
     def search(
@@ -133,14 +136,15 @@ object SegmentSearch extends Logging {
 
   /** Reads the segment set into memory: every batch of an exact scan, every
     * index handle of an index probe. The planner sized the set to fit
-    * `vectorsMaxBytes` from the row counts it had; this measures what was
-    * actually read, and a set that goes over comes back as an [[Overflow]] with
-    * nothing left open, rather than a failure.
+    * `keptMaxBytes` from the sizes it had; this measures what was actually kept
+    * -- the batches' buffers, the indexes' bytes -- and a set that goes over
+    * comes back as an [[Overflow]] with nothing left open, rather than a
+    * failure.
     */
   def hold(
       segments: Seq[Long],
       open: Long => Source,
-      vectorsMaxBytes: Long,
+      keptMaxBytes: Long,
       layout: VectorLayout
   ): Either[Overflow, Held] = {
     require(segments != null, "A task must name its segments")
@@ -161,21 +165,30 @@ object SegmentSearch extends Logging {
               val batch = next.get
               retained += batch.base.buffer.capacity().toLong
               held += batch
-              if (retained > vectorsMaxBytes) {
+              if (retained > keptMaxBytes) {
                 batches += id -> held.result()
                 read = read + vectors.metrics
                 opened.close()
                 logInfo(
                   s"Segment set not held: segment $id brings the vectors read to $retained bytes, " +
-                    s"over the $vectorsMaxBytes a task keeps; the set streams instead, once per query group"
+                    s"over the $keptMaxBytes a task keeps; the set streams instead, once per query group"
                 )
-                return Left(Overflow(id, retained, vectorsMaxBytes, read))
+                return Left(Overflow(id, retained, keptMaxBytes, read))
               }
               next = vectors.next()
             }
             batches += id -> held.result()
             read = read + vectors.metrics
-          case Index(_, _, _) =>
+          case Index(id, handle, _) =>
+            retained += handle.bytes
+            if (retained > keptMaxBytes) {
+              opened.close()
+              logInfo(
+                s"Segment set not held: segment $id brings the indexes loaded to $retained bytes, " +
+                  s"over the $keptMaxBytes a task keeps; the set streams instead, once per query group"
+              )
+              return Left(Overflow(id, retained, keptMaxBytes, read))
+            }
         }
       }
       val result = opened
@@ -225,9 +238,8 @@ object SegmentSearch extends Logging {
       segments: Int
   )
 
-  /** Searches every segment of the set in turn. Sources are opened one at a
-    * time by `open`, so a task holds one segment's data at once, and each is
-    * closed before the next one opens.
+  /** Searches every segment of the set in turn for one query group: what
+    * [[runGroups]] does for a single group.
     */
   def run(
       segments: Seq[Long],
@@ -239,8 +251,42 @@ object SegmentSearch extends Logging {
       allocator: BufferAllocator,
       onProgress: Progress => Unit = _ => ()
   ): (TopKMerger, Counters) = {
+    val (mergers, counters) = runGroups(
+      segments,
+      open,
+      Seq(queries),
+      k,
+      metric,
+      parameters,
+      allocator,
+      onProgress
+    )
+    (mergers.head, counters)
+  }
+
+  /** Searches every segment of the set once for every query group.
+    *
+    * Sources are opened one at a time by `open`, and each is closed before the
+    * next one opens, so a task holds one segment's data at once while its query
+    * groups stay: an exact scan hands every batch to every group before it
+    * reads the next batch, an index probe searches every group on the index it
+    * loaded. Each group has its own merger, returned in the order the groups
+    * were given (docs/design/architecture/vector-search.html section 2.1).
+    */
+  def runGroups(
+      segments: Seq[Long],
+      open: Long => Source,
+      groups: Seq[QueryMatrix],
+      k: Int,
+      metric: String,
+      parameters: Map[String, String],
+      allocator: BufferAllocator,
+      onProgress: Progress => Unit = _ => ()
+  ): (Seq[TopKMerger], Counters) = {
     require(segments != null, "A task must name its segments")
-    val merger = new TopKMerger(queries.queries, k, metric)
+    require(groups.nonEmpty, "A task searches at least one query group")
+    val mergers =
+      groups.map(queries => new TopKMerger(queries.queries, k, metric))
     var nativeCalls = 0
     var nativeNanos = 0L
     var compared = 0L
@@ -256,41 +302,53 @@ object SegmentSearch extends Logging {
       try
         source match {
           case Exact(id, vectors) =>
-            ExactScan.run(
-              vectors,
-              queries,
-              id,
-              k,
-              metric,
-              allocator,
-              merger,
-              counted
-            )
+            var next = vectors.next()
+            while (next.nonEmpty) {
+              val batch = next.get
+              try
+                groups.indices.foreach { group =>
+                  ExactScan.batch(
+                    batch,
+                    groups(group),
+                    id,
+                    k,
+                    metric,
+                    allocator,
+                    mergers(group),
+                    counted
+                  )
+                }
+              finally batch.close()
+              next = vectors.next()
+            }
             read = read + vectors.metrics
           case Index(id, handle, excluded) =>
             require(
               handle.metric == metric,
               s"Segment $id has a $metric query on a ${handle.metric} index"
             )
-            IndexProbe.run(
-              handle,
-              queries,
-              excluded,
-              k,
-              parameters,
-              allocator,
-              merger,
-              counted
-            )
+            groups.indices.foreach { group =>
+              IndexProbe.run(
+                handle,
+                groups(group),
+                excluded,
+                k,
+                parameters,
+                allocator,
+                mergers(group),
+                counted
+              )
+            }
         }
       finally source.close()
-      onProgress(Progress(0, 0L, 0L, 1))
+      onProgress(Progress(0, 0L, 0L, groups.size))
     }
     logInfo(
-      s"Segment set searched: segments=${segments.size}, queries=${queries.queries}, " +
-        s"topK=$k, metric=$metric, candidates=${merger.size}, " +
-        s"nativeSearchCalls=$nativeCalls, nativeMillis=${nativeNanos / 1000000L}"
+      s"Segment set searched: segments=${segments.size}, groups=${groups.size}, " +
+        s"queries=${groups.map(_.queries).sum}, topK=$k, metric=$metric, " +
+        s"candidates=${mergers.map(_.size).sum}, nativeSearchCalls=$nativeCalls, " +
+        s"nativeMillis=${nativeNanos / 1000000L}"
     )
-    (merger, Counters(segments.size, nativeCalls, nativeNanos, compared, read))
+    (mergers, Counters(segments.size, nativeCalls, nativeNanos, compared, read))
   }
 }

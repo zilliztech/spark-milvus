@@ -33,7 +33,7 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
   *   EXACT_QUERY_MAX_BYTES=67108864  milvus.search.queries.max.bytes; below
   *                                   the query set's size this takes the
   *                                   shuffle route instead of the driver
-  *   EXACT_VECTORS_MAX_BYTES=...     milvus.search.vectors.max.bytes, the
+  *   EXACT_VECTORS_MAX_BYTES=...     milvus.search.segments.max.bytes, the
   *                                   vectors one executor keeps; it is
   *                                   divided by the task slots, so under
   *                                   local[64] the default 2 GiB leaves 32
@@ -175,7 +175,7 @@ object ExactSearchScale {
       .get("EXACT_QUERY_MAX_BYTES")
       .map(MilvusOption.SearchQueriesMaxBytes -> _) ++ sys.env
       .get("EXACT_VECTORS_MAX_BYTES")
-      .map(MilvusOption.SearchVectorsMaxBytes -> _) ++ sys.env
+      .map(MilvusOption.SearchSegmentsMaxBytes -> _) ++ sys.env
       .get("EXACT_GROUP_MAX_BYTES")
       .map(MilvusOption.SearchGroupMaxBytes -> _) ++ sys.env
       .get("EXACT_BATCH_MAX_BYTES")

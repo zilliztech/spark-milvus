@@ -62,7 +62,7 @@ class SearchDeliveryTest
     filter = None,
     parameters = Map.empty,
     allowUnindexed = false,
-    vectorsMaxBytes = 1L << 20,
+    keptMaxBytes = 1L << 20,
     arrowMaxBytes = 1L << 20,
     slots = 2,
     batchMaxBytes = None

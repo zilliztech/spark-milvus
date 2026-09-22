@@ -31,16 +31,19 @@ import com.zilliz.spark.connector.options.SearchResources
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
 
-/** One first-stage task: one segment set, every query group, the candidates
-  * they produce.
+/** One first-stage task: one segment set, every query group of its range, the
+  * candidates they produce.
   *
   * The task opens what the Milvus format side offers for each of its segments —
   * the vector batches of an exact scan, or the index handle of an index probe —
-  * and the computation in `core.index` searches it. A task that answers more
-  * than one query group keeps its segment set in memory and runs the groups on
-  * it one after another, so the segments are read once whichever way the query
-  * set was delivered (docs/design/architecture/vector-search.html section 2.1);
-  * a set larger than the task's budget is read again for every group instead
+  * and the computation in `core.index` searches it. The plan chose which side
+  * the task keeps (docs/design/architecture/vector-search.html section 2.1).
+  * Keeping its queries, the task takes every group of its range first and reads
+  * each segment once, one at a time, searching every group on it; that is also
+  * what a task with one group does. Keeping its segments, it reads the set into
+  * memory and the groups arrive one after another. Either way the segments are
+  * read once, whichever way the query set was delivered; a kept set larger than
+  * the task's budget is read again for every group instead
   * (search-resources.html section 3.3).
   */
 private[read] object SegmentSetSearch extends Logging {
@@ -62,7 +65,10 @@ private[read] object SegmentSetSearch extends Logging {
       }
     )
 
-  /** What every task of one search needs and the driver already knows. */
+  /** What every task of one search needs and the driver already knows.
+    * `keptMaxBytes` is the most a task that keeps its segment set may keep, and
+    * `slots` the search tasks that run at once on one executor.
+    */
   final case class Spec(
       vectorColumn: String,
       layout: VectorLayout,
@@ -74,10 +80,11 @@ private[read] object SegmentSetSearch extends Logging {
       filter: Option[String],
       parameters: Map[String, String],
       allowUnindexed: Boolean,
-      vectorsMaxBytes: Long,
+      keptMaxBytes: Long,
       arrowMaxBytes: Long,
       slots: Int,
-      batchMaxBytes: Option[Long]
+      batchMaxBytes: Option[Long],
+      resident: SearchPlan.Resident = SearchPlan.Resident.Segments
   ) extends Serializable
 
   /** What one task sends on: at most k candidates for each of its queries. */
@@ -90,11 +97,17 @@ private[read] object SegmentSetSearch extends Logging {
     )
   )
 
+  /** @param plannedBytes
+    *   what the plan knows the set keeps, when it knows every segment's size; a
+    *   task keeping its segments streams from the start when this is over its
+    *   budget
+    */
   def run(
       set: Seq[MilvusInputPartition],
       spec: Spec,
       groups: Iterator[SearchQueries.Group],
       groupCount: Int,
+      plannedBytes: Option[Long],
       metrics: SearchMetrics
   ): Iterator[Row] = {
     require(set.nonEmpty, "A first-stage task has no segments")
@@ -119,8 +132,8 @@ private[read] object SegmentSetSearch extends Logging {
     }
     def open(segmentId: Long): SegmentSearch.Source =
       source(partitions(segmentId), spec, allocator.allocator, metrics)
-    // One group over the set, reading every segment as it goes: what a single
-    // group always does, and what a set too large to hold does for each group.
+    // One group over the set, reading every segment as it goes: what a task
+    // keeping a set too large to hold does for each group.
     def streamed(group: SearchQueries.Group): Seq[Row] = {
       val (merger, counters) = searching(group, spec, allocator.allocator) {
         queries =>
@@ -140,13 +153,23 @@ private[read] object SegmentSetSearch extends Logging {
         s"Search task: segments=${counters.segments}, groups=$groupCount, " +
           s"queries=${group.queries}, candidates=${merger.size}, streamed"
       )
-      candidates(merger, group)
+      candidates(merger, group.ids)
     }
-    if (groupCount == 1) {
-      try streamed(groups.next()).iterator
+    if (groupCount == 1 || spec.resident == SearchPlan.Resident.Queries) {
+      try
+        keepingQueries(
+          segments,
+          open,
+          groups,
+          groupCount,
+          spec,
+          allocator.allocator,
+          metrics,
+          stepped
+        )
       finally allocator.close()
     } else {
-      val held = holdOrStream(set, spec, segments, open, metrics)
+      val held = holdOrStream(plannedBytes, spec, segments, open, metrics)
       Option(TaskContext.get()).foreach(
         _.addTaskCompletionListener[Unit] { _ =>
           try held.foreach(_.close())
@@ -173,32 +196,99 @@ private[read] object SegmentSetSearch extends Logging {
               s"Search task: segments=${counters.segments}, groups=$groupCount, " +
                 s"queries=${group.queries}, candidates=${merger.size}, held"
             )
-            candidates(merger, group)
+            candidates(merger, group.ids)
           }
       }
     }
   }
 
+  /** The task's queries stay and each segment is read once.
+    *
+    * Every group of the range is taken before the first segment opens: its
+    * vectors are copied into a query matrix as it arrives and its heap bytes
+    * are let go, so what the task keeps on the heap is ids and top-k. The
+    * candidates go out group by group, each group's merger released once its
+    * rows are out (docs/design/architecture/vector-search.html section 2.1).
+    */
+  private def keepingQueries(
+      segments: Seq[Long],
+      open: Long => SegmentSearch.Source,
+      groups: Iterator[SearchQueries.Group],
+      groupCount: Int,
+      spec: Spec,
+      allocator: BufferAllocator,
+      metrics: SearchMetrics,
+      stepped: SegmentSearch.Progress => Unit
+  ): Iterator[Row] = {
+    val ids = new Array[Array[Long]](groupCount)
+    val matrices = new Array[QueryMatrix](groupCount)
+    var taken = 0
+    try {
+      groups.foreach { group =>
+        require(
+          taken < groupCount,
+          s"A task answering $groupCount query groups was given more"
+        )
+        ids(taken) = group.ids
+        matrices(taken) = QueryMatrix.ofPacked(
+          group.vectors,
+          group.firstQuery,
+          group.queries,
+          spec.layout,
+          allocator
+        )
+        taken += 1
+      }
+      require(
+        taken == groupCount,
+        s"A task answering $groupCount query groups was given $taken"
+      )
+      val (mergers, counters) = SegmentSearch.runGroups(
+        segments,
+        open,
+        matrices.toSeq,
+        spec.k,
+        spec.metric,
+        spec.parameters,
+        allocator,
+        stepped
+      )
+      val kept = mergers.toArray
+      report(metrics, counters, kept.iterator.map(_.size).sum)
+      logInfo(
+        s"Search task: segments=${counters.segments}, groups=$groupCount, " +
+          s"queries=${ids.iterator.map(_.length).sum}, " +
+          s"candidates=${kept.iterator.map(_.size).sum}, queries kept"
+      )
+      Iterator.range(0, groupCount).flatMap { index =>
+        val rows = candidates(kept(index), ids(index))
+        kept(index) = null
+        ids(index) = null
+        rows
+      }
+    } finally matrices.iterator.filter(_ != null).foreach(_.close())
+  }
+
   /** The segment set read into memory for the groups to share, or None when it
     * does not fit the task's budget and each group reads it again instead.
     *
-    * A set whose segments all have a row count is decided before anything is
-    * read. A set with an estimated segment is read until it either fits or goes
-    * over; what was read by then is released and read again per group, which is
-    * the cost of an unrecorded row count, not a failure
+    * A set whose every size the plan knew is decided before anything is read. A
+    * set with an estimated segment is read until it either fits or goes over;
+    * what was read by then is released and read again per group, which is the
+    * cost of an unrecorded size, not a failure
     * (docs/design/architecture/search-resources.html section 3.3).
     */
   private def holdOrStream(
-      set: Seq[MilvusInputPartition],
+      plannedBytes: Option[Long],
       spec: Spec,
       segments: Seq[Long],
       open: Long => SegmentSearch.Source,
       metrics: SearchMetrics
   ): Option[SegmentSearch.Held] =
-    SearchPlan.knownBytes(set.map(_.task), spec.layout) match {
-      case Some(bytes) if bytes > spec.vectorsMaxBytes =>
+    plannedBytes match {
+      case Some(bytes) if bytes > spec.keptMaxBytes =>
         logInfo(
-          s"Segment set streamed: $bytes bytes of vectors over the ${spec.vectorsMaxBytes} " +
+          s"Segment set streamed: $bytes bytes over the ${spec.keptMaxBytes} " +
             s"a task keeps; every query group reads the ${segments.size} segments again"
         )
         None
@@ -206,7 +296,7 @@ private[read] object SegmentSetSearch extends Logging {
         SegmentSearch.hold(
           segments,
           open,
-          spec.vectorsMaxBytes,
+          spec.keptMaxBytes,
           spec.layout
         ) match {
           case Right(held) =>
@@ -251,17 +341,15 @@ private[read] object SegmentSetSearch extends Logging {
   /** The candidates of one group, named by query id rather than by position in
     * the group.
     */
-  private def candidates(
-      merger: TopKMerger,
-      group: SearchQueries.Group
-  ): Seq[Row] = merger.candidates.map(candidate =>
-    Row(
-      group.ids(candidate.query),
-      candidate.segmentId,
-      candidate.rowOffset,
-      candidate.score
+  private def candidates(merger: TopKMerger, ids: Array[Long]): Seq[Row] =
+    merger.candidates.map(candidate =>
+      Row(
+        ids(candidate.query),
+        candidate.segmentId,
+        candidate.rowOffset,
+        candidate.score
+      )
     )
-  )
 
   /** What this segment offers the search: its vectors, or its index. */
   private def source(

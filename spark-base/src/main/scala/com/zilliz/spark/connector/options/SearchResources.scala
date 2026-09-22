@@ -1,7 +1,7 @@
 package com.zilliz.spark.connector.options
 
-/** The two sizes of a search that are not the user's to know: the exact scan's
-  * base block and the vectors a task keeps resident.
+/** The sizes of a search that are not the user's to know: the exact scan's base
+  * block and what one task may keep, off the heap and on it.
   *
   * One exact-scan call hands the batched distance entry one block of base
   * vectors, and the entry tiles the block itself (4,096 queries by 1,024 rows,
@@ -10,11 +10,12 @@ package com.zilliz.spark.connector.options
   * (docs/design/architecture/search-resources.html section 3.2). The L3-derived
   * rule that preceded it served the per-query kernel and went with it.
   *
-  * A task that answers several query groups keeps its segment set in Arrow's
-  * off-heap memory between groups. That memory is what the executor's limit
-  * leaves after the heap and the JVM's own share, and half of that is for
-  * vectors, the rest for index loads, shuffle and Arrow's other buffers; the
-  * tasks of one executor divide it (section 3.3).
+  * A task keeps either its segment set or its queries (section 3.3). Segment
+  * data -- vector batches in Arrow, persisted indexes in Knowhere -- is off the
+  * heap, in what the executor's limit leaves after the heap and the JVM's own
+  * share; queries, their ids and their top-k are on the heap, in the part of it
+  * Spark does not manage. The search tasks that run at once on one executor
+  * divide both.
   */
 object SearchResources {
 
@@ -30,61 +31,105 @@ object SearchResources {
     * plan would cut segments into more sets than there are row groups to read,
     * and a task that overruns it streams anyway.
     */
-  val MinVectorsBudgetBytes: Long = 64L << 20
+  val MinSegmentBudgetBytes: Long = 64L << 20
 
   /** What an executor whose memory limit cannot be read plans against, per
     * executor, as the option's fixed default used to be.
     */
-  val FallbackVectorsBytes: Long = 2L << 30
+  val FallbackSegmentBytes: Long = 2L << 30
 
-  /** The bytes of vectors one task keeps resident.
+  /** What an index search leaves off the heap besides the indexes it keeps and
+    * the one it loads: shuffle fetch buffers and Knowhere's working memory.
+    */
+  val IndexWorkingBytes: Long = 1L << 30
+
+  /** The heap Spark reserves for itself before it divides the rest, as
+    * `UnifiedMemoryManager` does.
+    */
+  val ReservedHeapBytes: Long = 300L << 20
+
+  /** The segment data one task keeps off the heap: vector batches in exact
+    * mode, persisted indexes in index mode.
     *
     * @param memoryLimitBytes
     *   what the executor may use in all: its cgroup limit or the machine's
     *   total in local mode, the container Spark asked for otherwise
     * @param heapBytes
     *   the executor JVM's maximum heap
-    * @param slots
-    *   the tasks that run at once on the executor
+    * @param tasks
+    *   the search tasks that run at once on the executor
     * @param configured
-    *   `milvus.search.vectors.max.bytes` when the call set it, which is per
-    *   executor and is divided by the slots as it is
+    *   `milvus.search.segments.max.bytes` when the call set it, which is per
+    *   executor and is divided by the tasks as it is
+    * @param index
+    *   true for an index search, which accounts its loads itself and keeps the
+    *   off-heap room less [[IndexWorkingBytes]]; an exact scan keeps half the
+    *   room for its read buffers
     */
-  def vectorsBudget(
+  def segmentBudget(
       memoryLimitBytes: Option[Long],
       heapBytes: Long,
-      slots: Int,
-      configured: Option[Long]
+      tasks: Int,
+      configured: Option[Long],
+      index: Boolean
   ): Choice = {
-    val tasks = math.max(1, slots)
+    val running = math.max(1, tasks)
     configured match {
       case Some(bytes) =>
-        val perTask = math.max(1L, bytes / tasks)
+        val perTask = math.max(1L, bytes / running)
         Choice(
           perTask,
-          s"$bytes / $tasks slots -> ${mib(perTask)} (option ${MilvusOption.SearchVectorsMaxBytes})"
+          s"$bytes / $running tasks -> ${mib(perTask)} (option ${MilvusOption.SearchSegmentsMaxBytes})"
         )
       case None =>
         memoryLimitBytes match {
           case None =>
-            val perTask = math.max(1L, FallbackVectorsBytes / tasks)
+            val perTask = math.max(1L, FallbackSegmentBytes / running)
             Choice(
               perTask,
-              s"memory limit unknown -> ${mib(FallbackVectorsBytes)} / $tasks slots = ${mib(perTask)} (default)"
+              s"memory limit unknown -> ${mib(FallbackSegmentBytes)} / $running tasks = ${mib(perTask)} (default)"
             )
           case Some(limit) =>
             val offHeap = math.max(0L, limit - heapBytes - JvmReserveBytes)
-            val raw = (offHeap * OffHeapShare / tasks).toLong
-            val perTask = math.max(MinVectorsBudgetBytes, raw)
-            val how = if (raw < MinVectorsBudgetBytes) "floor" else "auto"
+            val (room, how) =
+              if (index)
+                (
+                  math.max(0L, offHeap - IndexWorkingBytes),
+                  s"-${mib(IndexWorkingBytes)}"
+                )
+              else ((offHeap * OffHeapShare).toLong, s"x$OffHeapShare")
+            val raw = room / running
+            val perTask = math.max(MinSegmentBudgetBytes, raw)
+            val floor = if (raw < MinSegmentBudgetBytes) "floor" else "auto"
             Choice(
               perTask,
-              s"limit=${mib(limit)} heap=${mib(heapBytes)} offheap=${mib(
-                  offHeap
-                )} x$OffHeapShare / $tasks slots -> ${mib(perTask)} ($how)"
+              s"limit=${mib(limit)} heap=${mib(heapBytes)} offheap=${mib(offHeap)} " +
+                s"$how / $running tasks -> ${mib(perTask)} ($floor)"
             )
         }
     }
+  }
+
+  /** The queries one task keeps on the heap: the part of the heap Spark does
+    * not manage, `(heap - 300 MiB) x (1 - spark.memory.fraction)`, divided by
+    * the search tasks that run at once on the executor.
+    */
+  def queryBudget(
+      heapBytes: Long,
+      memoryFraction: Double,
+      tasks: Int
+  ): Choice = {
+    val running = math.max(1, tasks)
+    val user =
+      (math.max(
+        0L,
+        heapBytes - ReservedHeapBytes
+      ) * (1.0 - memoryFraction)).toLong
+    val perTask = math.max(0L, user / running)
+    Choice(
+      perTask,
+      s"heap=${mib(heapBytes)} x (1 - $memoryFraction) / $running tasks -> ${mib(perTask)}"
+    )
   }
 
   /** The base block one exact-scan call takes: the batched distance entry tiles

@@ -9,20 +9,25 @@ import com.zilliz.milvus.storage.snapshot.SegmentIndexes
 /** Splits one search into the tasks of its first stage.
   *
   * A task takes one segment set and a range of query groups and answers every
-  * group of the range on it. The set is sized so that its vectors fit
-  * `milvus.search.vectors.max.bytes`, which is what lets a task read its
-  * segments once and run group after group on what it keeps; a group is sized
-  * so that its query matrix and its top-k fit `milvus.search.group.max.bytes`.
-  * Task memory is therefore one set of vectors and one group, and what a task
-  * sends on is bounded by "query groups × queries × k" candidates.
+  * group of the range on every segment of the set. A group is sized so that its
+  * query matrix and its top-k fit `milvus.search.group.max.bytes`.
   *
-  * An exact search with fewer sets than task slots cuts its groups into
+  * How many sets there are, and which side a task keeps in memory, follow from
+  * how many tasks the search runs at once and the two budgets of one task: its
+  * queries' budget on the heap and its segments' budget off it
+  * (docs/design/architecture/vector-search.html section 2.1, search-resources
+  * .html section 3.3). A task that can keep its queries reads every segment of
+  * its set once, one at a time, so there are as many sets as tasks run at once:
+  * each set is then read once and the query set is taken once per set, which is
+  * the least either costs. A task that cannot keeps its segment set and the
+  * query groups pass through it, so a set holds no more than the segment budget
+  * and there are more sets when the segments need them.
+  *
+  * An exact search with fewer sets than tasks run at once cuts its groups into
   * contiguous ranges, one task per (set, range): the batched distance entry
   * runs single-threaded on its task, so the tasks are the search's parallelism.
   * Each range reads its set again; an index search keeps one range, since a
-  * range would load the set's indexes again
-  * (docs/design/architecture/vector-search.html sections 1.1 and 2.1, decision
-  * 28).
+  * range would load the set's indexes again (decision 28).
   */
 object SearchPlan {
 
@@ -41,6 +46,93 @@ object SearchPlan {
     */
   val CandidateBytes: Int = 40 + 8
 
+  /** What a query's top-k keeps besides its candidates: the priority queue and
+    * the backing array of sixteen references it starts with, which holds a
+    * top-10 without growing.
+    */
+  val TopKQueueBytes: Int = 128
+
+  /** A query's id, which a task keeps to name its candidates. */
+  val QueryIdBytes: Int = 8
+
+  /** The side of the search a task keeps in memory while the other side passes
+    * through it once.
+    */
+  sealed trait Resident
+  object Resident {
+
+    /** The task's queries stay: each segment of its set is opened once,
+      * searched for every query group and closed before the next one opens.
+      */
+    case object Queries extends Resident
+
+    /** The task's segment set stays: the query groups arrive one at a time and
+      * each is searched on the whole set.
+      */
+    case object Segments extends Resident
+  }
+
+  /** What one segment costs, off the heap, the task that searches it.
+    *
+    * @param kept
+    *   the bytes the segment takes while a task keeps it -- its persisted
+    *   index, or its vectors -- or None when nothing recorded them and the plan
+    *   estimates
+    * @param whole
+    *   true when the segment is searched only once it is loaded whole, as an
+    *   index is: searching it costs its kept bytes and, while it loads, the
+    *   bytes read beside the index it is being turned into. False when it is
+    *   scanned a block at a time, as vectors are
+    * @param blockBytes
+    *   what a scan holds at once, when `whole` is false
+    */
+  final case class Footprint(
+      kept: Option[Long],
+      whole: Boolean,
+      blockBytes: Long
+  ) {
+    require(
+      kept.forall(_ >= 0L) && blockBytes >= 0L,
+      s"A footprint is never negative: $this"
+    )
+  }
+
+  object Footprint {
+
+    /** A persisted index of `bytes`, as the snapshot recorded it. */
+    def index(bytes: Long): Footprint = Footprint(Some(bytes), true, 0L)
+
+    /** Vectors scanned `blockBytes` at a time, kept as the batches they arrive
+      * in.
+      */
+    def vectors(
+        task: SegmentReadTask,
+        layout: VectorLayout,
+        blockBytes: Long
+    ): Footprint = Footprint(
+      knownRows(task).map(_ * layout.rowBytes.toLong),
+      false,
+      blockBytes
+    )
+  }
+
+  /** What one task may keep: segment data off the heap and queries on it. */
+  final case class Budget(segmentBytes: Long, queryBytes: Long) {
+    require(
+      segmentBytes > 0L && queryBytes >= 0L,
+      s"A task's budget must be positive: $this"
+    )
+  }
+
+  /** What one task of the plan needs under either order, which the driver logs
+    * beside the budget each was compared to.
+    */
+  final case class Needs(
+      queriesHeap: Long,
+      queriesOffHeap: Long,
+      segmentsOffHeap: Long
+  )
+
   /** A slice of the query set, by position in the query matrix. */
   final case class QueryGroup(firstQuery: Int, queries: Int) {
     require(firstQuery >= 0, s"A group starts at $firstQuery")
@@ -54,12 +146,21 @@ object SearchPlan {
     * shuffle — while a task is built from its segment set and its range's index
     * (section 2.1). `ranges` holds group indices, contiguous and in order, and
     * covers every group once.
+    *
+    * `resident` is the side a task keeps. When it keeps its segments,
+    * `capacity` is the most a set may keep and `kept` says, set by set, what
+    * the plan knows the set keeps, so a task whose set is known to be over
+    * streams from the start.
     */
   final case class Plan(
       sets: Seq[Seq[SegmentReadTask]],
       groups: Seq[QueryGroup],
       estimated: Seq[Long] = Seq.empty,
-      ranges: Seq[Range] = Seq.empty
+      ranges: Seq[Range] = Seq.empty,
+      resident: Resident = Resident.Segments,
+      capacity: Long = Long.MaxValue,
+      kept: Seq[Option[Long]] = Seq.empty,
+      needs: Option[Needs] = None
   ) {
     require(
       ranges.isEmpty || ranges.flatten == groups.indices,
@@ -125,33 +226,26 @@ object SearchPlan {
 
   /** Splits the segments into the sets one task each reads.
     *
-    * A set holds at most `vectorsMaxBytes` of vectors, so a task can keep what
-    * it read and answer one query group after another on it; there are at least
-    * as many sets as task slots, so every slot has work, unless the search has
-    * fewer segments than that. Segments go in largest first and each one joins
-    * the lightest set that still has room, which spreads equal segments one per
-    * set. A segment whose row count nothing recorded is planned at half the
-    * limit, so it is never packed with more than one other; [[Plan.estimated]]
-    * names them. Segments keep their order inside a set.
+    * A set keeps at most `capacity` bytes, as `size` counts them; there are at
+    * least as many sets as `slots`, so every task that runs at once has work,
+    * unless the search has fewer segments than that. Segments go in largest
+    * first and each one joins the lightest set that still has room, which
+    * spreads equal segments one per set, and a segment that fits no set opens
+    * one of its own. Segments keep their order inside a set.
     */
   def segmentSets(
       tasks: Seq[SegmentReadTask],
-      layout: VectorLayout,
       slots: Int,
-      vectorsMaxBytes: Long
+      capacity: Long,
+      size: SegmentReadTask => Long
   ): Seq[Seq[SegmentReadTask]] = {
     require(slots > 0, s"A search needs at least one task slot: $slots")
-    require(
-      vectorsMaxBytes > 0,
-      s"The retained vector limit must be positive: $vectorsMaxBytes"
-    )
+    require(capacity > 0, s"A set's capacity must be positive: $capacity")
     if (tasks.isEmpty) return Seq.empty
-    val unknown = unknownSegmentBytes(layout, vectorsMaxBytes)
-    val sizes = tasks
-      .map(task => task.segmentId -> segmentBytes(task, layout, unknown))
-      .toMap
+    val sizes = tasks.map(task => task.segmentId -> size(task)).toMap
     val total = sizes.values.sum
-    val needed = math.max(1L, (total + vectorsMaxBytes - 1L) / vectorsMaxBytes)
+    val needed =
+      math.max(1L, total / capacity + (if (total % capacity == 0L) 0L else 1L))
     val start =
       math.min(tasks.size.toLong, math.max(slots.toLong, needed)).toInt
     val filled = mutable.ArrayBuffer.fill(start)(0L)
@@ -160,7 +254,7 @@ object SearchPlan {
     )
     tasks.sortBy(task => (-sizes(task.segmentId), task.segmentId)).foreach {
       task =>
-        val size = sizes(task.segmentId)
+        val bytes = sizes(task.segmentId)
         var lightest = 0
         var index = 1
         while (index < filled.size) {
@@ -171,13 +265,13 @@ object SearchPlan {
           index += 1
         }
         val full = members(lightest).nonEmpty &&
-          filled(lightest) + size > vectorsMaxBytes
+          filled(lightest) + bytes > capacity
         if (full) {
-          filled += size
+          filled += bytes
           members += mutable.ArrayBuffer(task)
         } else {
           members(lightest) += task
-          filled(lightest) += size
+          filled(lightest) += bytes
         }
     }
     val order = tasks.zipWithIndex.map { case (task, index) =>
@@ -187,6 +281,17 @@ object SearchPlan {
       .filter(_.nonEmpty)
       .map(_.sortBy(task => order(task.segmentId)).toSeq)
       .toSeq
+  }
+
+  /** A segment's vectors in bytes, or `budget × UnknownSegmentShare` when its
+    * row count is unknown: the size exact search plans a set by.
+    */
+  def vectorBytes(
+      layout: VectorLayout,
+      budget: Long
+  ): SegmentReadTask => Long = {
+    val unknown = unknownSegmentBytes(layout, budget)
+    task => knownRows(task).map(_ * layout.rowBytes.toLong).getOrElse(unknown)
   }
 
   /** The rows a segment is known to hold: from the snapshot, from its column
@@ -215,18 +320,9 @@ object SearchPlan {
 
   private def unknownSegmentBytes(
       layout: VectorLayout,
-      vectorsMaxBytes: Long
+      budget: Long
   ): Long =
-    math.max(
-      layout.rowBytes.toLong,
-      (vectorsMaxBytes * UnknownSegmentShare).toLong
-    )
-
-  private def segmentBytes(
-      task: SegmentReadTask,
-      layout: VectorLayout,
-      unknown: Long
-  ): Long = knownRows(task).map(_ * layout.rowBytes.toLong).getOrElse(unknown)
+    math.max(layout.rowBytes.toLong, (budget * UnknownSegmentShare).toLong)
 
   /** Cuts `groups` query groups into the contiguous ranges one task each
     * answers on a set: as many as it takes for `sets` sets to fill `slots`
@@ -256,29 +352,105 @@ object SearchPlan {
       .toSeq
   }
 
-  /** The first-stage tasks of one search: the segment sets, the query groups
-    * and the ranges of groups each task answers on its set. `splitQueries` is
-    * true for an exact search, whose tasks are its parallelism.
+  /** The first-stage tasks of one search: the segment sets, the query groups,
+    * the ranges of groups each task answers on its set, and the side a task
+    * keeps (docs/design/architecture/vector-search.html section 2.1).
+    *
+    * @param concurrency
+    *   how many first-stage tasks run at once in the whole search
+    * @param budget
+    *   what one of those tasks may keep
+    * @param footprint
+    *   what one segment costs the task that searches it
+    * @param shuffled
+    *   true when the query groups reach a task from the shuffle, so a task that
+    *   keeps its queries has one group's bytes on its heap as it arrives; a
+    *   broadcast set is on the heap once for the executor
+    * @param splitQueries
+    *   true for an exact search, whose tasks are its parallelism
     */
   def of(
       tasks: Seq[SegmentReadTask],
       layout: VectorLayout,
-      slots: Int,
+      concurrency: Int,
       queries: Int,
       k: Int,
       groupMaxBytes: Long,
-      vectorsMaxBytes: Long,
+      budget: Budget,
+      footprint: SegmentReadTask => Footprint,
+      shuffled: Boolean,
       splitQueries: Boolean = false
   ): Plan = {
-    val sets = segmentSets(tasks, layout, slots, vectorsMaxBytes)
+    require(concurrency > 0, s"A search runs at least one task: $concurrency")
     val queryGroups = groups(queries, layout, k, groupMaxBytes)
-    Plan(
-      sets,
-      queryGroups,
-      tasks.filter(knownRows(_).isEmpty).map(_.segmentId),
-      if (sets.isEmpty) Seq.empty
-      else queryRanges(queryGroups.size, sets.size, slots, splitQueries)
+    if (tasks.isEmpty) return Plan(Seq.empty, queryGroups)
+    val prints = tasks.map(task => task.segmentId -> footprint(task)).toMap
+    val unknown = unknownSegmentBytes(layout, budget.segmentBytes)
+    def kept(task: SegmentReadTask): Long =
+      prints(task.segmentId).kept.getOrElse(unknown)
+    def loading(task: SegmentReadTask): Long =
+      if (prints(task.segmentId).whole) kept(task) else 0L
+    def searching(task: SegmentReadTask): Long = {
+      val print = prints(task.segmentId)
+      if (print.whole) 2L * kept(task) else print.blockBytes
+    }
+    def knownKept(set: Seq[SegmentReadTask]): Option[Long] = {
+      val bytes = set.map(task => prints(task.segmentId).kept)
+      if (bytes.forall(_.isDefined)) Some(bytes.flatten.sum) else None
+    }
+    def rangesFor(sets: Int): Seq[Range] =
+      queryRanges(queryGroups.size, sets, concurrency, splitQueries)
+    val rowBytes = layout.rowBytes.toLong
+    val largestGroup = queryGroups.map(_.queries.toLong).max
+    val estimated =
+      tasks.filter(task => prints(task.segmentId).kept.isEmpty).map(_.segmentId)
+
+    // Keeping the queries reads each segment once, so a set for every task
+    // that runs at once is the fewest sets the search can have.
+    val streamedSets = segmentSets(tasks, concurrency, Long.MaxValue, kept)
+    val streamedRanges = rangesFor(streamedSets.size)
+    val rangeQueries = streamedRanges
+      .map(_.map(index => queryGroups(index).queries.toLong).sum)
+      .max
+    val perQuery =
+      QueryIdBytes.toLong + k.toLong * CandidateBytes + TopKQueueBytes
+    val arriving =
+      if (shuffled) largestGroup * (QueryIdBytes.toLong + rowBytes) else 0L
+    val queriesHeap = rangeQueries * perQuery + arriving
+    val queriesOffHeap = rangeQueries * rowBytes + tasks.map(searching).max
+
+    // Keeping the segments holds a set, the largest load beside it and the
+    // matrix of the group being searched.
+    val extra = tasks.map(loading).max + largestGroup * rowBytes
+    val capacity = math.max(rowBytes, budget.segmentBytes - extra)
+    val keptSets = segmentSets(tasks, concurrency, capacity, kept)
+    val segmentsOffHeap = keptSets.map(_.map(kept).sum).max + extra
+
+    val needs = Needs(queriesHeap, queriesOffHeap, segmentsOffHeap)
+    if (
+      queriesHeap <= budget.queryBytes && queriesOffHeap <= budget.segmentBytes
     )
+      Plan(
+        streamedSets,
+        queryGroups,
+        estimated,
+        streamedRanges,
+        Resident.Queries,
+        Long.MaxValue,
+        streamedSets.map(knownKept),
+        Some(needs)
+      )
+    else
+      Plan(
+        keptSets,
+        queryGroups,
+        estimated,
+        rangesFor(keptSets.size),
+        Resident.Segments,
+        capacity,
+        keptSets.map(knownKept),
+        Some(needs)
+      )
   }
 
   /** How many bytes of vectors one task keeps at once: its whole segment set,
@@ -296,8 +468,7 @@ object SearchPlan {
       vectorsMaxBytes > 0,
       s"The retained vector limit must be positive: $vectorsMaxBytes"
     )
-    val unknown = unknownSegmentBytes(layout, vectorsMaxBytes)
-    val bytes = set.map(segmentBytes(_, layout, unknown)).sum
+    val bytes = set.map(vectorBytes(layout, vectorsMaxBytes)).sum
     math.min(math.max(bytes, layout.rowBytes.toLong), vectorsMaxBytes)
   }
 }

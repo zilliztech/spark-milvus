@@ -29,6 +29,11 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
   private def segments(sets: Seq[Seq[SegmentReadTask]]): Seq[Seq[Long]] =
     sets.map(_.map(_.segmentId))
 
+  /** Vectors scanned in 64-byte blocks: what an exact search's segments cost.
+    */
+  private val vectors: SegmentReadTask => SearchPlan.Footprint =
+    SearchPlan.Footprint.vectors(_, layout, 64L)
+
   test("a group holds as many queries as the byte limit allows") {
     // 16 bytes of vector and 480 of candidates make 496 bytes a query.
     SearchPlan.bytesPerQuery(layout, k = 10) shouldBe 496L
@@ -98,9 +103,9 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     val sets =
       SearchPlan.segmentSets(
         tasks,
-        layout,
         slots = 2,
-        vectorsMaxBytes = 1L << 31
+        capacity = 1L << 31,
+        size = SearchPlan.vectorBytes(layout, 1L << 31)
       )
 
     segments(sets) shouldBe Seq(Seq(1L), Seq(2L, 3L, 4L))
@@ -119,9 +124,9 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     val sets =
       SearchPlan.segmentSets(
         tasks,
-        layout,
         slots = 1,
-        vectorsMaxBytes = 4000L
+        capacity = 4000L,
+        size = SearchPlan.vectorBytes(layout, 4000L)
       )
 
     segments(sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
@@ -136,9 +141,9 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     val sets =
       SearchPlan.segmentSets(
         tasks,
-        layout,
         slots = 1,
-        vectorsMaxBytes = 4000L
+        capacity = 4000L,
+        size = SearchPlan.vectorBytes(layout, 4000L)
       )
 
     segments(sets) shouldBe Seq(Seq(1L), Seq(2L))
@@ -152,9 +157,9 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     segments(
       SearchPlan.segmentSets(
         tasks,
-        layout,
         slots = 8,
-        vectorsMaxBytes = 1L << 31
+        capacity = 1L << 31,
+        size = SearchPlan.vectorBytes(layout, 1L << 31)
       )
     ) shouldBe Seq(Seq(1L), Seq(2L))
   }
@@ -174,9 +179,9 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     segments(
       SearchPlan.segmentSets(
         tasks,
-        layout,
         slots = 2,
-        vectorsMaxBytes = 1L << 31
+        capacity = 1L << 31,
+        size = SearchPlan.vectorBytes(layout, 1L << 31)
       )
     ) shouldBe Seq(Seq(1L), Seq(2L))
   }
@@ -189,9 +194,9 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     val sets =
       SearchPlan.segmentSets(
         tasks,
-        layout,
         slots = 1,
-        vectorsMaxBytes = 4000L
+        capacity = 4000L,
+        size = SearchPlan.vectorBytes(layout, 4000L)
       )
 
     segments(sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
@@ -201,9 +206,9 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     segments(
       SearchPlan.segmentSets(
         Seq(task(1L, 150L), unsized(2L), task(3L, 100L)),
-        layout,
         slots = 1,
-        vectorsMaxBytes = 4000L
+        capacity = 4000L,
+        size = SearchPlan.vectorBytes(layout, 4000L)
       )
     ) shouldBe Seq(Seq(1L), Seq(2L, 3L))
   }
@@ -212,11 +217,13 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     val plan = SearchPlan.of(
       Seq(task(1L, 10L), unsized(2L), task(3L, 10L)),
       layout,
-      slots = 1,
+      concurrency = 1,
       queries = 1,
       k = 1,
       groupMaxBytes = 4000L,
-      vectorsMaxBytes = 1L << 31
+      budget = SearchPlan.Budget(1L << 31, 0L),
+      footprint = vectors,
+      shuffled = false
     )
 
     plan.estimated shouldBe Seq(2L)
@@ -258,19 +265,21 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
   test("a search over no segments plans no tasks") {
     SearchPlan.segmentSets(
       Seq.empty,
-      layout,
       slots = 4,
-      vectorsMaxBytes = 1L << 31
+      capacity = 1L << 31,
+      size = SearchPlan.vectorBytes(layout, 1L << 31)
     ) shouldBe empty
     SearchPlan
       .of(
         Seq.empty,
         layout,
-        slots = 4,
+        concurrency = 4,
         queries = 2,
         k = 5,
         groupMaxBytes = 2800L,
-        vectorsMaxBytes = 1L << 31
+        budget = SearchPlan.Budget(1L << 31, 0L),
+        footprint = vectors,
+        shuffled = false
       )
       .isEmpty shouldBe true
   }
@@ -281,11 +290,13 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     val plan = SearchPlan.of(
       tasks,
       layout,
-      slots = 2,
+      concurrency = 2,
       queries = 3,
       k = 10,
       groupMaxBytes = 992L,
-      vectorsMaxBytes = 1L << 31
+      budget = SearchPlan.Budget(1L << 31, 0L),
+      footprint = vectors,
+      shuffled = false
     )
 
     plan.tasks shouldBe 2
@@ -347,11 +358,13 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     val plan = SearchPlan.of(
       tasks,
       layout,
-      slots = 8,
+      concurrency = 8,
       queries = 8,
       k = 10,
       groupMaxBytes = 992L,
-      vectorsMaxBytes = 1L << 31,
+      budget = SearchPlan.Budget(1L << 31, 0L),
+      footprint = vectors,
+      shuffled = false,
       splitQueries = true
     )
     plan.sets.size shouldBe 2
@@ -360,5 +373,114 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     plan.tasks shouldBe 8
     an[IllegalArgumentException] should be thrownBy
       plan.copy(ranges = Seq(0 until 2, 3 until 4))
+  }
+
+  test("a task that can keep its queries reads each segment once") {
+    // Four segments, two tasks at once, and room for the queries: two sets,
+    // each read once, and every group of the one range answered in one pass.
+    val plan = SearchPlan.of(
+      Seq(task(1L, 100L), task(2L, 100L), task(3L, 100L), task(4L, 100L)),
+      layout,
+      concurrency = 2,
+      queries = 8,
+      k = 1,
+      groupMaxBytes = 128L,
+      budget = SearchPlan.Budget(1L << 20, 1L << 20),
+      footprint = vectors,
+      shuffled = false
+    )
+    plan.resident shouldBe SearchPlan.Resident.Queries
+    segments(plan.sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
+    plan.groups.size shouldBe 4
+    plan.queryRanges shouldBe Seq(0 until 4)
+    plan.tasks shouldBe 2
+    // 8 queries of 8 + 48 + 128 bytes on the heap; off it, their 16-byte rows
+    // and one 64-byte block.
+    plan.needs.map(_.queriesHeap) shouldBe Some(8L * 184L)
+    plan.needs.map(_.queriesOffHeap) shouldBe Some(8L * 16L + 64L)
+  }
+
+  test("a task whose queries do not fit keeps its segment set") {
+    val plan = SearchPlan.of(
+      Seq(task(1L, 100L), task(2L, 100L), task(3L, 100L), task(4L, 100L)),
+      layout,
+      concurrency = 2,
+      queries = 8,
+      k = 1,
+      groupMaxBytes = 128L,
+      budget = SearchPlan.Budget(1L << 20, 100L),
+      footprint = vectors,
+      shuffled = false
+    )
+    plan.resident shouldBe SearchPlan.Resident.Segments
+    segments(plan.sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
+    plan.kept shouldBe Seq(Some(3200L), Some(3200L))
+  }
+
+  test("an index is kept whole and loads beside a second copy") {
+    val indexes: SegmentReadTask => SearchPlan.Footprint =
+      _ => SearchPlan.Footprint.index(1000L)
+    def keeping(segmentBytes: Long) = SearchPlan.of(
+      Seq(task(1L, 10L), task(2L, 10L), task(3L, 10L), task(4L, 10L)),
+      layout,
+      concurrency = 2,
+      queries = 2,
+      k = 1,
+      groupMaxBytes = 128L,
+      budget = SearchPlan.Budget(segmentBytes, 0L),
+      footprint = indexes,
+      shuffled = false
+    )
+    // Two indexes of 1000 bytes, one more loading beside them and the one
+    // group's 32-byte matrix: 3032 bytes keep two segments a set.
+    val two = keeping(3032L)
+    two.resident shouldBe SearchPlan.Resident.Segments
+    two.capacity shouldBe 2000L
+    segments(two.sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
+    two.needs.map(_.segmentsOffHeap) shouldBe Some(3032L)
+    // A byte less and a set keeps one.
+    keeping(3031L).sets.size shouldBe 4
+    // Searching an index without keeping it still loads it whole: the query
+    // matrix and twice the largest index.
+    two.needs.map(_.queriesOffHeap) shouldBe Some(32L + 2000L)
+  }
+
+  test("queries arriving from the shuffle count one group on the heap") {
+    def resident(shuffled: Boolean) = SearchPlan
+      .of(
+        Seq(task(1L, 10L), task(2L, 10L)),
+        layout,
+        concurrency = 2,
+        queries = 2,
+        k = 1,
+        groupMaxBytes = 128L,
+        budget = SearchPlan.Budget(1L << 20, 400L),
+        footprint = vectors,
+        shuffled = shuffled
+      )
+      .resident
+    // 2 x 184 = 368 bytes fit 400; the arriving group's ids and rows, 2 x 24
+    // bytes more, do not.
+    resident(shuffled = false) shouldBe SearchPlan.Resident.Queries
+    resident(shuffled = true) shouldBe SearchPlan.Resident.Segments
+  }
+
+  test("an exact search keeping its queries still cuts ranges for its tasks") {
+    val plan = SearchPlan.of(
+      Seq(task(1L, 10L), task(2L, 10L)),
+      layout,
+      concurrency = 8,
+      queries = 8,
+      k = 10,
+      groupMaxBytes = 992L,
+      budget = SearchPlan.Budget(1L << 20, 1L << 20),
+      footprint = vectors,
+      shuffled = false,
+      splitQueries = true
+    )
+    plan.resident shouldBe SearchPlan.Resident.Queries
+    plan.sets.size shouldBe 2
+    plan.queryRanges.size shouldBe 4
+    plan.tasks shouldBe 8
   }
 }

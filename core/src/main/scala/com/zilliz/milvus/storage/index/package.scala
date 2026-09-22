@@ -13,15 +13,18 @@ package com.zilliz.milvus.storage
   * index cache.
   *
   * This package keeps the computation only (docs/design/architecture/
-  * vector-search.html sections 1-2). SearchPlan splits the segment tasks into
-  * segment sets, each sized to what a task can keep, and the query set into
-  * query groups. SegmentSearch runs one query group over a segment set with one
-  * of two strategies, ExactScan over vector batches or IndexProbe over an index
-  * handle (ExactScan calls the batched distance entry for float32 fields,
-  * compacting excluded rows out of a batch first, and Knowhere.bruteForce for
-  * the other element types), and returns each query's merged candidates as
-  * (query, segment, row offset, score); a task that answers more than one group
-  * holds its set through SegmentSearch.hold. Opening segments, building
+  * vector-search.html sections 1-2). SearchPlan splits the query set into query
+  * groups and the segment tasks into segment sets, as many as the search runs
+  * tasks at once, and chooses which side a task keeps: its queries, when they
+  * fit the task's heap budget, or its segment set, sized to the task's off-heap
+  * budget. SegmentSearch searches a segment set with one of two strategies,
+  * ExactScan over vector batches or IndexProbe over an index handle (ExactScan
+  * calls the batched distance entry for float32 fields, compacting excluded
+  * rows out of a batch first, and Knowhere.bruteForce for the other element
+  * types), and returns each query's merged candidates as (query, segment, row
+  * offset, score): SegmentSearch.runGroups reads each segment once for all the
+  * groups a task keeps, and a task keeping its segment set holds it through
+  * SegmentSearch.hold while the groups pass. Opening segments, building
   * exclusion bitmaps and reading and decoding index files belong to the Milvus
   * TableFormat side (docs/design/architecture/table-version.html section 3);
   * IndexFileCodec and MilvusIndexFileDecoder now live in core.codec. TopKMerger

@@ -17,7 +17,11 @@ import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.schema.VectorLayout
 import com.zilliz.milvus.storage.write.commit.{CommittedIndex, Committer}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
-import com.zilliz.spark.connector.options.{MilvusOption, SnapshotReference}
+import com.zilliz.spark.connector.options.{
+  MilvusOption,
+  SnapshotReference,
+  TaskResources
+}
 import com.zilliz.spark.connector.read.SnapshotPartitions
 import com.zilliz.spark.connector.table.MilvusTables
 import io.milvus.grpc.schema.FieldSchema
@@ -122,10 +126,17 @@ object BuildIndexProcedure extends Procedure {
 
     val spark = SparkSession.active
     // Segments go to tasks in the order they were planned, so a task's segments
-    // are a contiguous range of the plan and no two tasks share one.
-    val indexes = spark.sparkContext
+    // are a contiguous range of the plan and no two tasks share one. Knowhere
+    // builds on a thread pool the size of the machine, so a build task takes
+    // every core of its executor (docs/design/architecture/vector-search.html
+    // section 1.1).
+    val built = spark.sparkContext
       .parallelize(partitions, partitions.size)
       .map(partition => SegmentIndexBuild.run(partition, spec))
+    val indexes = TaskResources
+      .of(spark)
+      .wholeExecutor
+      .fold(built)(built.withResources)
       .collect()
       .toSeq
 

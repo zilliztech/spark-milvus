@@ -20,6 +20,14 @@ package com.zilliz.spark.connector
   * core `Expr` on the driver; schema binding and execution belong to
   * `spark.read` and `core.expr`.
   *
+  * A vector search's sizes that are not the user's to know come from here:
+  * `SearchLimits` parses the three `milvus.search.*` byte limits,
+  * `SearchResources` turns an executor's memory into what one task may keep --
+  * segment data off the heap, queries on it -- and `TaskResources` reads the
+  * executors a job has and declares, for a stage of Knowhere calls, that its
+  * tasks take every core of their executor (docs/design/architecture/
+  * vector-search.html section 1.1, search-resources.html section 3.3).
+  *
   * Index building (W6) takes no write option; its parameters belong to the
   * `build_index` procedure. No index or GPU session option exists yet (G4 is
   * declared unplaced in section 11 of capabilities.md).
