@@ -55,9 +55,12 @@ nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用
 版本原生产物，见[构建说明](contributing.md#knowhere-library-loading)。
 
 三个选项决定作业规模。`milvus.search.queries.max.bytes`（默认 1 GiB）是查询集走
-广播的字节上限，超过就随 shuffle 下发，两条路结果相同；
+广播的字节上限：不超过时 driver 广播，每个 executor 常驻一份；超过时在 executor 上
+按查询组打包成 shuffle 输出，任务逐组读取，一个任务同一时刻至多持有两组，查询集不经
+driver，两条路结果相同。按组读取时，一次作业读查询集的总量是「段组数 × 查询集字节」，
+executor 本地盘上要有约两份查询集的空间；
 `milvus.search.group.max.bytes`（默认 512 MiB）是一个任务一次回答多少查询，按
-「查询数 ×（维度 × 元素宽度 + K × 28 字节）」计；
+「查询数 ×（维度 × 元素宽度 + K × 48 字节）」计；
 `milvus.search.vectors.max.bytes`（默认自动）是**一个 executor** 同时留在内存里的
 底库向量字节上限。不设时按 executor 的内存算：`（内存上限 − 堆 − 1 GiB）× 0.5`，
 local 模式的内存上限取 cgroup 或整机，集群模式取 Spark 为 executor 申请的容器
@@ -70,7 +73,7 @@ executor 上并发的任务共享它：规划时按 `spark.executor.cores` 除�
 
 `milvus.search.group.max.bytes` 仍然是**每个任务**的：它同时决定查询组的个数，那是
 规划的形状，不只是内存。所以一个任务的峰值是「executor 额度 ÷ 并发数 + 一个查询
-组」。
+组」，查询集按组读取时再加正在读取的下一组；广播时每个 executor 另常驻一份查询集。
 
 每次搜索注册一组累加器，任务结束后在 Spark 的 stage 页面可见；运行中的进度由 driver
 日志每个心跳周期报一行。累加器有：`milvus.search.segment.searches`、

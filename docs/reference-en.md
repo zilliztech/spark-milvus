@@ -69,9 +69,13 @@ requires the pinned Cardinal-enabled native build; see
 
 Three options size the job. `milvus.search.queries.max.bytes` (default 1 GiB)
 is how large the query set may be before it stops being broadcast from the
-driver and travels with the shuffle instead; both paths give the same result.
+driver. A broadcast set is kept whole on every executor. A larger set never
+reaches the driver: the executors pack it by query group into a shuffle output,
+and a task reads its groups one at a time, holding at most two. Both paths give
+the same result. Read by group, a job reads the query set once per segment set
+in total, and the executors' local disks need room for about two copies of it.
 `milvus.search.group.max.bytes` (default 512 MiB) is what one task answers at a
-time, counted as queries × (dimension × element width + K × 28 bytes).
+time, counted as queries × (dimension × element width + K × 48 bytes).
 `milvus.search.vectors.max.bytes` (default automatic) is how many bytes of
 base vectors **one executor** keeps at once. Unset, it follows the executor's
 memory: `(memory limit − heap − 1 GiB) × 0.5`, where the limit is the cgroup's
@@ -89,7 +93,8 @@ Arrow's off-heap memory, which `-Xmx` does not bound.
 `milvus.search.group.max.bytes` stays **per task**: it also decides how many
 query groups there are, which is the shape of the plan and not only memory. One
 task's peak is therefore its share of the executor budget plus one query
-group.
+group, plus the next group being read when the query set is read by group; a
+broadcast query set is also kept whole on every executor.
 
 Each search registers its own accumulators, which the stage page shows once a
 task ends; while it runs, the driver log reports them once a heartbeat. They are
