@@ -117,11 +117,7 @@ results are in [storage-io.html](docs/design/architecture/storage-io.html#state)
 `native-vector` compiles the pinned `knowhere` submodule's Java API and
 integrates its loader and BruteForce implementation; Knowhere owns the C
 interface, JNI, Java API and native resource loader. The submodule follows the
-PR #1829 branch plus two binding additions (the batched distance entry and
-the index build by native address), fetched from
-`Thor-ChenBiao/knowhere-contrib` `spark-milvus/knowhere-jni-pr` until the PR
-branch takes them (LawrenceTL92/knowhere-contrib#1); the superproject gitlink
-fixes the exact source revision.
+PR #1829 branch while the superproject gitlink fixes the exact source revision.
 Persisted HNSW loading uses upstream BinarySet and index search APIs; Cardinal
 stream files require a Cardinal-enabled build. Real-file compatibility and
 validation results are recorded in the vector search design.

@@ -37,7 +37,7 @@ flowchart TB
 |---|---|---|
 | `milvus-storage` | Milvus 段文件格式（V2 packed、V3 loon）的读写：manifest、列组 Parquet、delete 文件、统计，以及对象存储文件系统。Rust 桥 prsbridge（Lance、Vortex 格式）静态编进它 | gitlink 子模块 `milvus-storage`，上游 main `7eb13578` |
 | `milvus-storage-jni` | 上游 Java API `io.milvus.storage` 的 JNI 实现；Arrow C Data Interface 在这里跨越 C 与 JVM | 同上，`cpp/src/jni` |
-| `knowhere` | 向量索引的构建、加载和搜索；faiss（HNSW、IVF、暴力搜索）和 DiskANN 以静态库编进它。DiskANN 的对齐读只有 libaio 与 io_uring 实现，macOS 构建关闭它 | gitlink 子模块 `knowhere`，`b9497f4f`：PR #1829 分支 `29210a33` 加两个附加提交，暂取自 `Thor-ChenBiao/knowhere-contrib` 的 `spark-milvus/knowhere-jni-pr`（决策日志 2026-09-22） |
+| `knowhere` | 向量索引的构建、加载和搜索；faiss（HNSW、IVF、暴力搜索）和 DiskANN 以静态库编进它。DiskANN 的对齐读只有 libaio 与 io_uring 实现，macOS 构建关闭它 | gitlink 子模块 `knowhere`，PR #1829 分支 `b9497f4f` |
 | `knowhere_c` | 稳定的 C ABI（SOVERSION 1，隐藏其余符号），JNI 只经它调用引擎 | 同上，`src/c_api` |
 | `knowhere_jni` | PR #1829 Java API `io.knowhere` 的 JNI 实现；JNI 头由 `javac -h` 在构建时生成 | 同上，`java/src/main/cpp` |
 
