@@ -14,6 +14,22 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
   private def places(candidates: Vector[Candidate]): Vector[(Long, Long)] =
     candidates.map(candidate => (candidate.segmentId, candidate.rowOffset))
 
+  /** Every query's packed candidates, queries in order: what a task sends on.
+    */
+  private def packedPlaces(merged: TopKMerger): Vector[(Long, Long)] = {
+    val read = Vector.newBuilder[(Long, Long)]
+    (0 until merged.queries).foreach(query =>
+      CandidateBytes.foreach(merged.takePacked(query))((segment, offset, _) =>
+        read += ((segment, offset))
+      )
+    )
+    read.result()
+  }
+
+  /** Packing a query empties its heap, so what it held is read once. */
+  private def packedTwice(merged: TopKMerger): (Int, Int) =
+    (merged.takePacked(0).length, merged.takePacked(0).length)
+
   test("L2 keeps the smallest scores, other metrics the largest") {
     val l2 = merger("L2")
     val cosine = merger("COSINE")
@@ -53,7 +69,7 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     merged.size shouldBe 2
     places(merged.results(0)) shouldBe Vector((101L, 2L))
     places(merged.results(1)) shouldBe Vector((102L, 3L))
-    places(merged.candidates) shouldBe Vector((101L, 2L), (102L, 3L))
+    packedPlaces(merged) shouldBe Vector((101L, 2L), (102L, 3L))
   }
 
   test("a query with fewer candidates than k returns all of them") {
@@ -74,9 +90,11 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
         random.nextInt(10) / 10.0
       )
     )
-    val straight = new TopKMerger(3, 5, "L2").addAll(candidates).candidates
+    val straight = packedPlaces(new TopKMerger(3, 5, "L2").addAll(candidates))
     val shuffled =
-      new TopKMerger(3, 5, "L2").addAll(random.shuffle(candidates)).candidates
+      packedPlaces(
+        new TopKMerger(3, 5, "L2").addAll(random.shuffle(candidates))
+      )
 
     shuffled shouldBe straight
   }
@@ -86,13 +104,23 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
       Candidate(index % 2, (index % 3).toLong, index.toLong, index % 7 / 7.0)
     )
     val (left, right) = candidates.splitAt(17)
-    val together = new TopKMerger(2, 3, "COSINE").addAll(candidates).candidates
-    val apart = new TopKMerger(2, 3, "COSINE")
-      .addAll(left)
-      .merge(new TopKMerger(2, 3, "COSINE").addAll(right))
-      .candidates
+    val together =
+      packedPlaces(new TopKMerger(2, 3, "COSINE").addAll(candidates))
+    val apart = packedPlaces(
+      new TopKMerger(2, 3, "COSINE")
+        .addAll(left)
+        .merge(new TopKMerger(2, 3, "COSINE").addAll(right))
+    )
 
     apart shouldBe together
+  }
+
+  test("packing a query releases it, so the second read is empty") {
+    val merged = merger("L2", queries = 1, k = 2)
+    merged.add(Candidate(0, 101L, 5L, 0.1))
+    merged.size shouldBe 1
+    packedTwice(merged) shouldBe ((CandidateBytes.Width, 0))
+    merged.size shouldBe 0
   }
 
   test("mergers that rank differently do not merge") {

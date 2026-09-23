@@ -43,9 +43,10 @@ object SearchPlan {
     * reference to it. Counting the fields alone said 28 and a task planned
     * against a budget it then overran.
     *
-    * The second stage costs more again -- a candidate crosses it as a
-    * `GenericRow` over an `Object[4]` of boxed values -- but that is the
-    * shuffle's cost, not a bound on what one task keeps.
+    * Packing a query's answer for the shuffle costs `k * CandidateBytes.Width`
+    * on top, and [[TopKMerger.takePacked]] releases each query's heap as it
+    * packs it, so a task's peak stays at what this counts rather than holding
+    * both forms of every candidate at once.
     */
   val CandidateBytes: Int = 40 + 8
 

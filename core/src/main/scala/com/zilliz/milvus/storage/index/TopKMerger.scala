@@ -1,6 +1,7 @@
 package com.zilliz.milvus.storage.index
 
 import java.lang.{Double => JavaDouble, Long => JavaLong}
+import java.util.Arrays
 import scala.collection.mutable
 
 /** One candidate row for one query: where it is and what it scored.
@@ -24,6 +25,15 @@ object Candidate {
   private val Metrics = SmallerIsBetter ++ Set("IP", "COSINE")
 
   def metricRanks(metric: String): Boolean = Metrics.contains(metric)
+
+  /** Whether this metric's better score is its smaller one. What
+    * [[CandidateBytes]] needs to rank packed candidates without unpacking them
+    * into objects first.
+    */
+  def smallerIsBetter(metric: String): Boolean = {
+    require(metricRanks(metric), s"Unsupported vector search metric: $metric")
+    SmallerIsBetter.contains(metric)
+  }
 
   /** Best first: by score, then by segment id, then by row offset. The two
     * tie-breakers make the result of a search independent of the order its
@@ -102,11 +112,34 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: String)
     heaps(query).toVector.sorted(ranking)
   }
 
-  /** Every query's results, queries in order and each query's best first. This
-    * is what a stage-one task gives Spark.
+  /** One query's results packed into bytes, best first, releasing the query's
+    * heap as it reads it. This is what a stage-one task gives Spark.
+    *
+    * A task packs query after query, so what it holds is the queries it has not
+    * reached yet as `Candidate` objects and the ones behind it as bytes.
+    * Releasing each heap keeps that sum at what it was when packing started,
+    * which is the `queries * k * CandidateBytes` a task planned against
+    * (docs/design/architecture/vector-search.html section 2.1). Reading the
+    * same query twice gives nothing the second time.
     */
-  def candidates: Vector[Candidate] =
-    (0 until queries).iterator.flatMap(results).toVector
+  def takePacked(query: Int): Array[Byte] = {
+    require(
+      query >= 0 && query < queries,
+      s"Query $query is outside the $queries queries"
+    )
+    val heap = heaps(query)
+    val size = heap.size
+    if (size == 0) return CandidateBytes.Empty
+    val sorted = new Array[Candidate](size)
+    var at = 0
+    heap.foreach { candidate =>
+      sorted(at) = candidate
+      at += 1
+    }
+    heap.clear()
+    Arrays.sort(sorted, ranking)
+    CandidateBytes.write(sorted, size)
+  }
 
   def size: Int = heaps.iterator.map(_.size).sum
 }

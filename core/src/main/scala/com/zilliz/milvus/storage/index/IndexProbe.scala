@@ -2,7 +2,7 @@ package com.zilliz.milvus.storage.index
 
 import java.lang.{Float => JavaFloat}
 import java.nio.ByteOrder
-import java.util.BitSet
+import java.util.{Arrays, BitSet}
 import scala.util.Try
 
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
@@ -89,7 +89,10 @@ object IndexProbe {
       var width = searchWidth(handle.family, count, parameters)
       var attempt = 0
       var complete = false
-      var found = Vector.empty[Candidate]
+      // One query's ids, sorted to find a duplicate. Reused by every query of
+      // every attempt: what the check needs is a scratch array, not a set of
+      // boxed longs for each of the group's candidates.
+      val scratch = new Array[Long](count)
       while (!complete) {
         val started = System.nanoTime()
         handle.index.search(
@@ -106,7 +109,7 @@ object IndexProbe {
         onProgress(
           SegmentSearch.Progress(1, System.nanoTime() - started, 0L, 0)
         )
-        found = collect(
+        val short = checked(
           queries.queries,
           count,
           ids,
@@ -114,11 +117,10 @@ object IndexProbe {
           labels,
           rows,
           handle,
-          handle.metric
+          handle.metric,
+          scratch
         )
         attempt += 1
-        val short = found.groupBy(_.query).exists(_._2.size < count) ||
-          found.size < queries.queries.toLong * count
         if (!short) complete = true
         else if (width.exists(_.toLong < rows) && attempt < MaxAttempts)
           width = width.map(value =>
@@ -131,7 +133,7 @@ object IndexProbe {
             s"Segment ${handle.segmentId}: ${handle.indexType} returned fewer than $count of $visible visible rows for a query after $attempt attempts"
           )
       }
-      found.foreach(merger.add)
+      collect(queries.queries, count, ids, scores, handle, merger)
     } finally {
       scores.close()
       ids.close()
@@ -206,7 +208,14 @@ object IndexProbe {
     }
   }
 
-  private def collect(
+  /** Checks what the index returned and says whether any query came back with
+    * fewer than `count` hits, without building a candidate: an answer that is
+    * short is searched again with a wider `ef`, and anything this pass built
+    * would be thrown away. Reading the buffers twice costs two passes over
+    * native memory; building the candidates first cost one object per hit and a
+    * regrouping of all of them (section 2.4).
+    */
+  private def checked(
       queries: Int,
       count: Int,
       ids: ArrowBuf,
@@ -214,20 +223,21 @@ object IndexProbe {
       excluded: BitSet,
       rows: Long,
       handle: SegmentIndexHandle,
-      metric: String
-  ): Vector[Candidate] = {
-    val found = Vector.newBuilder[Candidate]
+      metric: String,
+      scratch: Array[Long]
+  ): Boolean = {
+    var short = false
     var query = 0
     while (query < queries) {
-      val seen = scala.collection.mutable.HashSet.empty[Long]
       var slot = 0
+      var hits = 0
       while (slot < count) {
         val position = query.toLong * count + slot
         val id = ids.getLong(position * 8L)
         if (id != -1L) {
           require(
-            id >= 0 && id < rows && seen.add(id),
-            s"Segment ${handle.segmentId}: the index returned row $id twice or outside its $rows rows"
+            id >= 0 && id < rows,
+            s"Segment ${handle.segmentId}: the index returned row $id outside its $rows rows"
           )
           require(
             !excluded.get(id.toInt),
@@ -238,18 +248,58 @@ object IndexProbe {
             JavaFloat.isFinite(score) && (metric != "L2" || score >= 0),
             s"Segment ${handle.segmentId}: the index returned an invalid score for row $id"
           )
-          found += Candidate(
-            query,
-            handle.segmentId,
-            handle.mapping.rowOf(id),
-            score.toDouble
-          )
+          scratch(hits) = id
+          hits += 1
         }
+        slot += 1
+      }
+      // A row the index returned twice for one query ends up beside itself.
+      Arrays.sort(scratch, 0, hits)
+      var at = 1
+      while (at < hits) {
+        require(
+          scratch(at) != scratch(at - 1),
+          s"Segment ${handle.segmentId}: the index returned row ${scratch(at)} twice"
+        )
+        at += 1
+      }
+      if (hits < count) short = true
+      query += 1
+    }
+    short
+  }
+
+  /** The hits of an answer [[checked]] accepted, added to the merger. The
+    * labels the index returned go through the handle's row mapping, which is
+    * what a nullable column's index needs (section 2.4).
+    */
+  private def collect(
+      queries: Int,
+      count: Int,
+      ids: ArrowBuf,
+      scores: ArrowBuf,
+      handle: SegmentIndexHandle,
+      merger: TopKMerger
+  ): Unit = {
+    var query = 0
+    while (query < queries) {
+      var slot = 0
+      while (slot < count) {
+        val position = query.toLong * count + slot
+        val id = ids.getLong(position * 8L)
+        if (id != -1L)
+          merger.add(
+            Candidate(
+              query,
+              handle.segmentId,
+              handle.mapping.rowOf(id),
+              scores.getFloat(position * 4L).toDouble
+            )
+          )
         slot += 1
       }
       query += 1
     }
-    found.result()
   }
 
   private def bytes(buffer: ArrowBuf, length: Long) =

@@ -1,12 +1,11 @@
 package com.zilliz.spark.connector.read
 
-import scala.jdk.CollectionConverters._
-
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
+import com.zilliz.milvus.storage.index.{Candidate, CandidateBytes}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.TaskResources
 
@@ -32,24 +31,55 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
   override def afterAll(): Unit = if (spark != null) spark.stop()
 
-  private def candidates(rows: Seq[(Long, Long, Long, Double)]) =
-    spark.createDataFrame(
-      rows.map { case (query, segment, offset, score) =>
-        Row(query, segment, offset, score)
-      }.asJava,
-      SegmentSetSearch.CandidateSchema
+  /** What the first stage sends on: one packed answer per (query, task). The
+    * candidates of one query that came from one task travel together, already
+    * merged and sorted there, which is what the merge stage takes apart.
+    */
+  private def candidates(
+      rows: Seq[(Long, Long, Long, Double)],
+      metric: String = "L2"
+  ) =
+    spark.sparkContext
+      .parallelize(
+        rows
+          .groupBy { case (query, segment, _, _) => (query, segment) }
+          .toSeq
+          .map { case ((query, _), grouped) =>
+            query -> CandidateBytes.of(
+              grouped.map { case (_, segment, offset, score) =>
+                Candidate(0, segment, offset, score)
+              },
+              metric
+            )
+          },
+        2
+      )
+
+  private def merged(
+      rows: Seq[(Long, Long, Long, Double)],
+      k: Int,
+      metric: String
+  ) =
+    MilvusSearch.merged(
+      spark,
+      candidates(rows, metric),
+      k,
+      metric,
+      MilvusSearch.mergePartitions(
+        spark,
+        math.max(1, rows.map(_._1).distinct.size.toLong),
+        2
+      )
     )
 
   test("each query keeps its own best k, ranked from one") {
-    val merged = MilvusSearch.merged(
-      candidates(
-        Seq(
-          (1L, 10L, 0L, 5.0),
-          (1L, 11L, 3L, 1.0),
-          (1L, 11L, 4L, 3.0),
-          (2L, 10L, 7L, 9.0),
-          (2L, 11L, 8L, 2.0)
-        )
+    val merged = this.merged(
+      Seq(
+        (1L, 10L, 0L, 5.0),
+        (1L, 11L, 3L, 1.0),
+        (1L, 11L, 4L, 3.0),
+        (2L, 10L, 7L, 9.0),
+        (2L, 11L, 8L, 2.0)
       ),
       2,
       "L2"
@@ -85,15 +115,11 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   }
 
   test("a larger score wins under COSINE") {
-    val rows = MilvusSearch
-      .merged(
-        candidates(
-          Seq((1L, 10L, 0L, 0.2), (1L, 10L, 1L, 0.9), (1L, 11L, 2L, 0.5))
-        ),
-        2,
-        "COSINE"
-      )
-      .orderBy("rank")
+    val rows = merged(
+      Seq((1L, 10L, 0L, 0.2), (1L, 10L, 1L, 0.9), (1L, 11L, 2L, 0.5)),
+      2,
+      "COSINE"
+    ).orderBy("rank")
       .collect()
       .map(row => (row.getAs[Int]("rank"), row.getAs[Double]("_score")))
       .toSeq
@@ -102,9 +128,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   }
 
   test("a query with fewer candidates than k keeps them all") {
-    val rows = MilvusSearch
-      .merged(candidates(Seq((7L, 10L, 0L, 1.5))), 10, "L2")
-      .collect()
+    val rows = merged(Seq((7L, 10L, 0L, 1.5)), 10, "L2").collect()
 
     rows.map(_.getAs[Long]("query_id")).toSeq shouldBe Seq(7L)
     rows.map(_.getAs[Int]("rank")).toSeq shouldBe Seq(1)
@@ -170,7 +194,30 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
   test("no candidates give no rows") {
     MilvusSearch
-      .merged(candidates(Seq.empty), 3, "L2")
+      .merged(spark, candidates(Seq.empty), 3, "L2", 2)
       .collect() shouldBe empty
+  }
+
+  test("an empty result has the schema a merged one has") {
+    MilvusSearch.HitSchema shouldBe MilvusSearch
+      .merged(spark, candidates(Seq((1L, 10L, 0L, 1.0))), 1, "L2", 2)
+      .schema
+  }
+
+  test(
+    "the merge has a partition for every slot, task and few thousand queries"
+  ) {
+    // local[2]: two slots. A partition cannot hold part of a query, so one
+    // query is one partition however wide the cluster is.
+    MilvusSearch.mergePartitions(spark, 1L, 1) shouldBe 1
+    MilvusSearch.mergePartitions(spark, 100L, 1) shouldBe 2
+    // More first-stage tasks than slots: every task's output still lands in a
+    // partition of its own, which is what a cluster of many executors needs.
+    MilvusSearch.mergePartitions(spark, 100L, 16) shouldBe 16
+    // A query count far above the parallelism: partitions grow with it so a
+    // reduce-side map holds a few thousand queries, not all of them.
+    MilvusSearch.mergePartitions(spark, 1000000L, 6) shouldBe 245
+    the[IllegalArgumentException] thrownBy MilvusSearch
+      .mergePartitions(spark, 0L, 1)
   }
 }

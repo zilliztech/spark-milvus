@@ -2,18 +2,13 @@ package com.zilliz.spark.connector.read
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.types.{
-  DoubleType,
-  LongType,
-  StructField,
-  StructType
-}
-import org.apache.spark.sql.Row
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.SparkEnv
 import org.apache.spark.TaskContext
 
 import com.zilliz.milvus.storage.expr.PlanParser
 import com.zilliz.milvus.storage.index.{
+  CandidateBytes,
   QueryMatrix,
   SearchPlan,
   SegmentSearch,
@@ -87,16 +82,6 @@ private[read] object SegmentSetSearch extends Logging {
       resident: SearchPlan.Resident = SearchPlan.Resident.Segments
   ) extends Serializable
 
-  /** What one task sends on: at most k candidates for each of its queries. */
-  val CandidateSchema: StructType = StructType(
-    Seq(
-      StructField("query_id", LongType, nullable = false),
-      StructField("segment_id", LongType, nullable = false),
-      StructField("row_offset", LongType, nullable = false),
-      StructField("score", DoubleType, nullable = false)
-    )
-  )
-
   /** @param plannedBytes
     *   what the plan knows the set keeps, when it knows every segment's size; a
     *   task keeping its segments streams from the start when this is over its
@@ -109,7 +94,7 @@ private[read] object SegmentSetSearch extends Logging {
       groupCount: Int,
       plannedBytes: Option[Long],
       metrics: SearchMetrics
-  ): Iterator[Row] = {
+  ): Iterator[(Long, Array[Byte])] = {
     require(set.nonEmpty, "A first-stage task has no segments")
     require(groupCount > 0, s"A task answers $groupCount query groups")
     val segments = set.map(_.task.segmentId)
@@ -134,7 +119,7 @@ private[read] object SegmentSetSearch extends Logging {
       source(partitions(segmentId), spec, allocator.allocator, metrics)
     // One group over the set, reading every segment as it goes: what a task
     // keeping a set too large to hold does for each group.
-    def streamed(group: SearchQueries.Group): Seq[Row] = {
+    def streamed(group: SearchQueries.Group): Seq[(Long, Array[Byte])] = {
       val (merger, counters) = searching(group, spec, allocator.allocator) {
         queries =>
           SegmentSearch.run(
@@ -219,7 +204,7 @@ private[read] object SegmentSetSearch extends Logging {
       allocator: BufferAllocator,
       metrics: SearchMetrics,
       stepped: SegmentSearch.Progress => Unit
-  ): Iterator[Row] = {
+  ): Iterator[(Long, Array[Byte])] = {
     val ids = new Array[Array[Long]](groupCount)
     val matrices = new Array[QueryMatrix](groupCount)
     var taken = 0
@@ -341,15 +326,31 @@ private[read] object SegmentSetSearch extends Logging {
   /** The candidates of one group, named by query id rather than by position in
     * the group.
     */
-  private def candidates(merger: TopKMerger, ids: Array[Long]): Seq[Row] =
-    merger.candidates.map(candidate =>
-      Row(
-        ids(candidate.query),
-        candidate.segmentId,
-        candidate.rowOffset,
-        candidate.score
-      )
-    )
+  /** The candidates of one group: one record for each query that found
+    * anything, named by query id rather than by its position in the group, and
+    * holding that query's best k packed into bytes.
+    *
+    * One record per query rather than one per candidate is what keeps this
+    * stage's output at the `queries * k * CandidateBytes.Width` the plan counts
+    * on, and what lets the merge stage walk two answers instead of aggregating
+    * candidate by candidate (docs/design/architecture/vector-search.html
+    * section 2.1). Each query's heap is released as it is packed, so a task
+    * holds the queries behind it as bytes and the ones ahead as objects, never
+    * both forms of the same query.
+    */
+  private def candidates(
+      merger: TopKMerger,
+      ids: Array[Long]
+  ): Seq[(Long, Array[Byte])] = {
+    val packed = Vector.newBuilder[(Long, Array[Byte])]
+    var query = 0
+    while (query < ids.length) {
+      val bytes = merger.takePacked(query)
+      if (bytes.length > 0) packed += ids(query) -> bytes
+      query += 1
+    }
+    packed.result()
+  }
 
   /** What this segment offers the search: its vectors, or its index. */
   private def source(
