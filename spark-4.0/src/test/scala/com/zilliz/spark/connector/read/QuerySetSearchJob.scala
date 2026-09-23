@@ -19,10 +19,11 @@ import com.zilliz.spark.connector.options.MilvusOption
   *
   * The connector reads the base straight from the segment files the snapshot
   * lists; no Milvus service takes part. Each output row is one hit: `query_id`,
-  * `rank`, the collection's primary key as `id`, `score`, `_segment_id` and
-  * `_row_offset`. With a neighbors file the job also reports recall@k: for each
-  * query, the share of the first k ground-truth ids found in its k hits,
-  * averaged over the queries of the ground truth.
+  * `rank`, the output columns (by default the collection's primary key, written
+  * as `id`), `score`, `_segment_id` and `_row_offset`. With a neighbors file
+  * the job also reports recall@k: for each query, the share of the first k
+  * ground-truth ids found in its k hits, averaged over the queries of the
+  * ground truth.
   *
   * {{{
   *   --snapshot <location>        required: the snapshot JSON, e.g. the
@@ -37,6 +38,11 @@ import com.zilliz.spark.connector.options.MilvusOption
   *   --query-id-column id         --query-vector-column emb
   *   --vector-field emb           --pk-field id
   *   --k 10                       --metric COSINE
+  *   --filter <expression>        optional: a Milvus boolean expression over
+  *                                scalar fields; a row it rejects is never a hit
+  *   --output-columns id,labels   the collection columns each hit carries,
+  *                                comma-separated; default the primary key, an
+  *                                empty value none. Recall needs the primary key
   *   --output <prefix>            required: results go to <prefix>/<application id>-<mode>
   *   --neighbors <path>|none      default none: ground truth for recall@k
   *   --neighbors-column neighbors_id
@@ -158,6 +164,24 @@ object QuerySetSearchJob {
     if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
     else path
 
+  /** The collection columns each hit carries: the names `--output-columns`
+    * lists, none when its value is empty, and the primary key alone when it is
+    * not given. The primary key keeps the output name `id`, so no other column
+    * may take that name.
+    */
+  def outputColumns(arguments: Arguments, pkField: String): Seq[String] = {
+    val names = arguments.get("output-columns") match {
+      case None => Seq(pkField)
+      case Some(listed) =>
+        listed.split(',').map(_.trim).filter(_.nonEmpty).toSeq
+    }
+    require(
+      pkField == "id" || !names.contains("id"),
+      s"The primary key $pkField is written as id; --output-columns cannot also name a column id"
+    )
+    names
+  }
+
   def main(args: Array[String]): Unit = {
     val arguments = parse(args)
     val snapshot = arguments
@@ -178,6 +202,12 @@ object QuerySetSearchJob {
         .getOrElse(throw new IllegalArgumentException("--queries is required"))
     )
     val neighborsPath = arguments("neighbors", "none")
+    val filter = arguments.get("filter").map(_.trim).filter(_.nonEmpty)
+    val outputs = outputColumns(arguments, pkField)
+    require(
+      neighborsPath.equalsIgnoreCase("none") || outputs.contains(pkField),
+      s"--neighbors scores hits by their primary key; --output-columns has to name $pkField"
+    )
     val location = locate(snapshot)
     val region = arguments("region", location.region.getOrElse("us-west-2"))
     val bucket = arguments
@@ -242,7 +272,8 @@ object QuerySetSearchJob {
     report(
       s"plan mode=$mode k=$k metric=$metric queries=$queryCount from " +
         s"$queriesPath x $repeat; snapshot=$snapshot bucket=$bucket " +
-        s"root=${rootPath.getOrElse("")} output=$output"
+        s"root=${rootPath.getOrElse("")} filter=${filter.getOrElse("none")} " +
+        s"output_columns=${outputs.mkString(",")} output=$output"
     )
 
     val started = System.nanoTime()
@@ -255,17 +286,16 @@ object QuerySetSearchJob {
       metric,
       mode = mode,
       searchParameters = arguments.pairs("search-param"),
-      outputColumns = Seq(pkField)
+      filter = filter,
+      outputColumns = outputs
     )
+    val columns = Seq(col("query_id"), col("rank")) ++
+      outputs.map(name =>
+        if (name == pkField) col(name).cast(LongType).as("id") else col(name)
+      ) ++
+      Seq(col("_score").as("score"), col("_segment_id"), col("_row_offset"))
     hits
-      .select(
-        col("query_id"),
-        col("rank"),
-        col(pkField).cast(LongType).as("id"),
-        col("_score").as("score"),
-        col("_segment_id"),
-        col("_row_offset")
-      )
+      .select(columns: _*)
       .write
       .mode("errorifexists")
       .parquet(output)
@@ -298,6 +328,8 @@ object QuerySetSearchJob {
       "search_seconds" -> f"$searchSeconds%.3f",
       "queries_per_second" -> f"${queryCount / searchSeconds}%.1f",
       s"recall_at_$k" -> recall.map(r => f"$r%.4f").getOrElse("not computed"),
+      "filter" -> filter.getOrElse("none"),
+      "output_columns" -> outputs.mkString(","),
       "snapshot" -> snapshot,
       "queries_path" -> queriesPath,
       "output" -> output
