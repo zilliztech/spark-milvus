@@ -1,6 +1,6 @@
 package com.zilliz.spark.connector.read
 
-import java.util.Locale
+import java.util.{Arrays, Locale}
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.internal.Logging
@@ -470,7 +470,10 @@ object MilvusSearch extends Logging {
       repeated.isEmpty,
       s"Query ids repeat in the query set: ${repeated.map(_.getLong(0)).mkString(", ")}"
     )
-    val size = plan.groups.head.queries
+    // Where each planned group starts. The byte limit cuts equal groups and a
+    // shorter last one, an even cut puts the longer groups first (decision
+    // 32), so a position finds its group among the starts, not by dividing.
+    val starts = plan.groups.map(_.firstQuery.toLong).toArray
     val metric = spec.metric
     val rowBytes = layout.rowBytes
     val sizes = plan.groups.map(_.queries).toVector
@@ -484,8 +487,10 @@ object MilvusSearch extends Logging {
     // executor heap out (UAT chenbiao-qs2c-31m-8g-ef151-0).
     val byGroup = new Partitioner {
       override def numPartitions: Int = sizes.size
-      override def getPartition(key: Any): Int =
-        (key.asInstanceOf[Long] / size).toInt
+      override def getPartition(key: Any): Int = {
+        val found = Arrays.binarySearch(starts, key.asInstanceOf[Long])
+        if (found >= 0) found else -found - 2
+      }
     }
     // The packed group keeps its group's partition through the second shuffle.
     val byIndex = new Partitioner {
@@ -501,7 +506,7 @@ object MilvusSearch extends Logging {
       .partitionBy(byGroup)
       .mapPartitionsWithIndex { (index, entries) =>
         val queries = sizes(index)
-        val first = index.toLong * size
+        val first = starts(index)
         val ids = new Array[Long](queries)
         val vectors = new Array[Byte](queries * rowBytes)
         var placed = 0

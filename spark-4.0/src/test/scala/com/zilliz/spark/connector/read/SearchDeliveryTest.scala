@@ -77,13 +77,14 @@ class SearchDeliveryTest
     SearchPlan.bytesPerQuery(layout, spec.k) * 2
   )
 
-  private def rows: Seq[Row] = (0 until queries).map(index =>
-    Row(index.toLong, Seq(index.toFloat, index.toFloat + 0.5f))
-  )
+  private def rows(count: Int = queries): Seq[Row] =
+    (0 until count).map(index =>
+      Row(index.toLong, Seq(index.toFloat, index.toFloat + 0.5f))
+    )
 
-  private def selected: DataFrame =
+  private def selected(count: Int = queries): DataFrame =
     spark.createDataFrame(
-      rows.asJava,
+      rows(count).asJava,
       StructType(
         Seq(
           StructField(SearchQueries.IdColumn, LongType),
@@ -94,17 +95,21 @@ class SearchDeliveryTest
 
   private def packed(ranges: Seq[Range] = Seq.empty): RDD[SearchQueries.Group] =
     MilvusSearch.packedGroups(
-      selected,
+      selected(),
       SearchPlan.Plan(Seq.empty, groups, Seq.empty, ranges),
       spec,
       layout
     )
 
-  test("packing gives one partition per group, each its queries in order") {
-    groups.size shouldBe 4
-    val delivered = packed()
-    delivered.getNumPartitions shouldBe groups.size
-
+  /** Checks that `delivered` holds one partition per group of `planned`, each
+    * with its queries in order, starting at zero in its bytes.
+    */
+  private def deliversGroups(
+      delivered: RDD[SearchQueries.Group],
+      planned: Seq[SearchPlan.QueryGroup],
+      count: Int
+  ): Unit = {
+    delivered.getNumPartitions shouldBe planned.size
     val seen = delivered
       .mapPartitionsWithIndex { (index, packed) =>
         packed.map(group =>
@@ -113,15 +118,35 @@ class SearchDeliveryTest
       }
       .collect()
       .toSeq
-    seen.map(_._1) shouldBe groups.indices
-    groups.zip(seen).foreach { case (group, (_, ids, vectors, first)) =>
-      val expected = rows.slice(group.firstQuery, group.untilQuery)
+    seen.map(_._1) shouldBe planned.indices
+    planned.zip(seen).foreach { case (group, (_, ids, vectors, first)) =>
+      val expected = rows(count).slice(group.firstQuery, group.untilQuery)
       val (expectedIds, expectedVectors) =
         SearchQueries.pack(expected, layout, spec.metric)
       ids shouldBe expectedIds.toSeq
       vectors shouldBe expectedVectors.toSeq
       first shouldBe 0
     }
+  }
+
+  test("packing gives one partition per group, each its queries in order") {
+    groups.size shouldBe 4
+    deliversGroups(packed(), groups, queries)
+  }
+
+  test("packing follows the planned groups when the longer ones come first") {
+    // An even cut of ten queries into four groups (decision 32): a group's
+    // start says which queries it takes, not its index times the size of the
+    // first group, which puts query 8 in the third group.
+    val even = SearchPlan.evenGroups(10, 4)
+    even.map(_.queries) shouldBe Seq(3, 3, 2, 2)
+    val delivered = MilvusSearch.packedGroups(
+      selected(10),
+      SearchPlan.Plan(Seq.empty, even, Seq.empty, Seq.empty),
+      spec,
+      layout
+    )
+    deliversGroups(delivered, even, 10)
   }
 
   test("the packed groups are a shuffle's output, and nothing is stored") {
