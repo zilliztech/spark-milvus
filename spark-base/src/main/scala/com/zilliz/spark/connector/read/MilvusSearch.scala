@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.read
 import java.util.{Arrays, Locale}
 import scala.jdk.CollectionConverters._
 
+import org.apache.spark.{HashPartitioner, Partitioner}
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rdd.RDD
@@ -353,10 +354,11 @@ object MilvusSearch extends Logging {
 
   /** The candidates of the first stage, whichever way the query set travels.
     *
-    * A set that fits `milvus.search.queries.max.bytes` is collected on the
-    * driver and broadcast, and every executor keeps it whole. A larger one is
-    * packed by group on the executors, never through the driver, and each task
-    * reads the groups of its range one at a time (section 2.1).
+    * A set that fits `milvus.search.queries.max.bytes` is packed on the
+    * executors, concatenated on the driver and broadcast, and every executor
+    * keeps it whole. A larger one is packed by group on the executors, never
+    * through the driver, and each task reads the groups of its range one at a
+    * time (section 2.1).
     */
   private def candidates(
       spark: SparkSession,
@@ -381,8 +383,14 @@ object MilvusSearch extends Logging {
       layout
     )
     if (queryBytes <= limits.queriesMaxBytes) {
-      val rows = selected.collect().toSeq
-      val (ids, vectors) = SearchQueries.pack(rows, layout, spec.metric)
+      // Packed where the rows are read: the driver gets bytes, not boxed
+      // vectors, and eight executors pack in parallel instead of one thread.
+      val (ids, vectors) =
+        SearchQueries.packOnExecutors(selected, layout, spec.metric)
+      require(
+        ids.length.toLong == groups.map(_.queries.toLong).sum,
+        s"The query set packed to ${ids.length} queries, but the plan counted ${groups.map(_.queries.toLong).sum}"
+      )
       SearchQueries.checkUnique(ids)
       val delivered = spark.sparkContext.broadcast((ids, vectors))
       val work = for {

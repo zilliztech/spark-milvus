@@ -1,8 +1,10 @@
 package com.zilliz.spark.connector.read
 
 import java.lang.{Float => JavaFloat}
+import scala.collection.mutable
 
 import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.types.{
   ArrayType,
@@ -15,13 +17,16 @@ import org.apache.spark.sql.types.{
 
 import com.zilliz.milvus.storage.index.QueryMatrix
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.spark.connector.options.MilvusOption
 
 /** The query set a search takes: `query_id` and `vector`, checked against the
   * field being searched and packed into the bytes Knowhere reads.
   *
-  * The same packing serves both delivery paths of section 2.1: the driver packs
-  * the whole set when it fits `milvus.search.queries.max.bytes` and broadcasts
-  * it, and the packing job packs one group per task when it does not.
+  * The same packing serves both delivery paths of section 2.1: when the set
+  * fits `milvus.search.queries.max.bytes` the executors pack their partitions
+  * and the driver only concatenates the bytes before broadcasting them
+  * ([[packOnExecutors]]); when it does not, the packing job packs one group per
+  * task and the groups travel with the shuffle.
   */
 private[read] object SearchQueries {
 
@@ -122,6 +127,120 @@ private[read] object SearchQueries {
     (ids, vectors)
   }
 
+  /** Rows an executor packs at a time: 2,048 queries of 768 dimensions are 6
+    * MiB, small enough to hold as float arrays beside the packed bytes.
+    */
+  private val PackChunkRows = 2048
+
+  /** The whole query set packed on the executors, one block per partition, and
+    * brought to the driver as bytes: what the broadcast path ships.
+    *
+    * `collect()` would bring the rows themselves: every vector boxed to a
+    * `Seq[Float]` and unpacked again on the driver, one thread doing it all.
+    * That work falls between the collect job and the next stage, where no job
+    * timing shows it: 10 s of a 250,000-query chunk on eight executors, of
+    * which 2 s was the broadcast and 8 s the driver repacking. Here each
+    * partition reads its rows as `InternalRow`, takes the vector out as a
+    * primitive array, and packs it in place; the driver receives `rowBytes` per
+    * query and no objects. Partitions keep their order, so row `i` of the
+    * result is query `ids(i)` exactly as [[pack]] would have placed it.
+    */
+  def packOnExecutors(
+      selected: DataFrame,
+      layout: VectorLayout,
+      metric: String
+  ): (Array[Long], Array[Byte]) = {
+    val blocks = selected.queryExecution.toRdd
+      .mapPartitionsWithIndex { (partition, rows) =>
+        Iterator.single((partition, packPartition(rows, layout, metric)))
+      }
+      .collect()
+      .sortBy(_._1)
+    val queries = blocks.iterator.map(_._2._1.length.toLong).sum
+    val total = blocks.iterator.map(_._2._2.length.toLong).sum
+    require(
+      total <= Int.MaxValue,
+      s"The packed query set is $total bytes, over what one array holds; lower ${MilvusOption.SearchQueriesMaxBytes} so the set travels with the shuffle"
+    )
+    val ids = new Array[Long](queries.toInt)
+    val vectors = new Array[Byte](total.toInt)
+    var idAt = 0
+    var byteAt = 0
+    blocks.foreach { case (_, (blockIds, blockBytes)) =>
+      System.arraycopy(blockIds, 0, ids, idAt, blockIds.length)
+      System.arraycopy(blockBytes, 0, vectors, byteAt, blockBytes.length)
+      idAt += blockIds.length
+      byteAt += blockBytes.length
+    }
+    (ids, vectors)
+  }
+
+  /** One partition's rows packed on the executor that read them. Rows are taken
+    * as they come and never retained: a chunk of primitive arrays is packed and
+    * dropped before the next is read.
+    */
+  private[read] def packPartition(
+      rows: Iterator[InternalRow],
+      layout: VectorLayout,
+      metric: String
+  ): (Array[Long], Array[Byte]) = {
+    val ids = mutable.ArrayBuilder.make[Long]
+    val chunks = mutable.ArrayBuffer.empty[Array[Byte]]
+    var total = 0L
+    val floats = mutable.ArrayBuffer.empty[Array[Float]]
+    val bytes = mutable.ArrayBuffer.empty[Array[Byte]]
+    def flush(): Unit = {
+      val packed = layout.elementType match {
+        case VectorElementType.Int8 | VectorElementType.Bit =>
+          val out = QueryMatrix.packBytes(bytes.toSeq, layout)
+          bytes.clear()
+          out
+        case _ =>
+          val out = QueryMatrix.packFloats(floats.toSeq, layout)
+          floats.clear()
+          out
+      }
+      if (packed.nonEmpty) {
+        chunks += packed
+        total += packed.length
+      }
+    }
+    var index = 0
+    while (rows.hasNext) {
+      val row = rows.next()
+      require(
+        !row.isNullAt(0),
+        s"Query ${index + 1} of the set has no $IdColumn"
+      )
+      val id = row.getLong(0)
+      require(!row.isNullAt(1), s"Query $id has no $VectorColumn")
+      layout.elementType match {
+        case VectorElementType.Int8 =>
+          bytes += int8Values(id, row.getArray(1).toShortArray(), layout)
+        case VectorElementType.Bit =>
+          bytes += row.getBinary(1)
+        case _ =>
+          floats += finiteValues(
+            id,
+            row.getArray(1).toFloatArray(),
+            layout,
+            metric
+          )
+      }
+      ids += id
+      index += 1
+      if (index % PackChunkRows == 0) flush()
+    }
+    flush()
+    val packed = new Array[Byte](Math.toIntExact(total))
+    var at = 0
+    chunks.foreach { chunk =>
+      System.arraycopy(chunk, 0, packed, at, chunk.length)
+      at += chunk.length
+    }
+    (ids.result(), packed)
+  }
+
   /** Every query id appears once. A repeated id would make two different
     * answers carry the same name.
     */
@@ -139,35 +258,48 @@ private[read] object SearchQueries {
       row: Row,
       layout: VectorLayout,
       metric: String
+  ): Array[Float] =
+    finiteValues(row.getLong(0), row.getSeq[Float](1).toArray, layout, metric)
+
+  private def finiteValues(
+      id: Long,
+      values: Array[Float],
+      layout: VectorLayout,
+      metric: String
   ): Array[Float] = {
-    val values = row.getSeq[Float](1).toArray
     require(
       values.length == layout.dimension,
-      s"Query ${row.getLong(0)} has ${values.length} values; the field has ${layout.dimension} dimensions"
+      s"Query $id has ${values.length} values; the field has ${layout.dimension} dimensions"
     )
     require(
       values.forall(JavaFloat.isFinite),
-      s"Query ${row.getLong(0)} holds a value that is not finite"
+      s"Query $id holds a value that is not finite"
     )
     require(
       metric != "COSINE" || values.exists(_ != 0.0f),
-      s"Query ${row.getLong(0)} has a zero norm, which COSINE has no answer for"
+      s"Query $id has a zero norm, which COSINE has no answer for"
     )
     values
   }
 
-  private def int8(row: Row, layout: VectorLayout): Array[Byte] = {
-    val values = row.getSeq[Short](1)
+  private def int8(row: Row, layout: VectorLayout): Array[Byte] =
+    int8Values(row.getLong(0), row.getSeq[Short](1).toArray, layout)
+
+  private def int8Values(
+      id: Long,
+      values: Array[Short],
+      layout: VectorLayout
+  ): Array[Byte] = {
     require(
       values.length == layout.dimension,
-      s"Query ${row.getLong(0)} has ${values.length} values; the field has ${layout.dimension} dimensions"
+      s"Query $id has ${values.length} values; the field has ${layout.dimension} dimensions"
     )
     values.map { value =>
       require(
         value >= -128 && value <= 127,
-        s"Query ${row.getLong(0)} holds $value, outside what an int8 vector takes"
+        s"Query $id holds $value, outside what an int8 vector takes"
       )
       value.toByte
-    }.toArray
+    }
   }
 }

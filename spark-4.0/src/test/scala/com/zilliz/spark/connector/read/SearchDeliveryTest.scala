@@ -217,13 +217,69 @@ class SearchDeliveryTest
     an[IllegalArgumentException] should be thrownBy
       new SearchQueryRanges(parent, 1, Seq(1 until 3, 0 until 1))
   }
+
+  private def packedById(
+      ids: Array[Long],
+      vectors: Array[Byte]
+  ): Map[Long, Seq[Byte]] =
+    ids.zipWithIndex.map { case (id, index) =>
+      id -> vectors
+        .slice(index * layout.rowBytes, (index + 1) * layout.rowBytes)
+        .toSeq
+    }.toMap
+
+  test("the broadcast path packs on the executors what the driver would have") {
+    val spread = selected().repartition(3)
+
+    val (ids, vectors) = SearchQueries.packOnExecutors(spread, layout, "L2")
+    val (driverIds, driverVectors) =
+      SearchQueries.pack(rows(), layout, "L2")
+
+    ids.length shouldBe queries
+    ids.toSet shouldBe (0L until queries.toLong).toSet
+    vectors.length shouldBe queries * layout.rowBytes
+    packedById(ids, vectors) shouldBe packedById(driverIds, driverVectors)
+  }
+
+  test("executor packing keeps partition order and crosses chunk boundaries") {
+    val many = 5000
+    val frame = spark
+      .createDataFrame(
+        (0 until many)
+          .map(index => Row(index.toLong, Seq(index.toFloat, -index.toFloat)))
+          .asJava,
+        selected().schema
+      )
+      .coalesce(1)
+
+    val (ids, vectors) = SearchQueries.packOnExecutors(frame, layout, "L2")
+    val (driverIds, driverVectors) =
+      SearchQueries.pack(frame.collect().toSeq, layout, "L2")
+
+    ids.toSeq shouldBe driverIds.toSeq
+    vectors.toSeq shouldBe driverVectors.toSeq
+  }
+
+  test("executor packing refuses what driver packing refuses") {
+    val bad = spark.createDataFrame(
+      Seq(
+        Row(1L, Seq(1.0f, 2.0f)),
+        Row(2L, Seq(Float.NaN, 0.0f))
+      ).asJava,
+      selected().schema
+    )
+
+    val failure = the[org.apache.spark.SparkException] thrownBy
+      SearchQueries.packOnExecutors(bad, layout, "L2")
+
+    failure.getMessage should include("not finite")
+  }
 }
 
 object SearchDeliveryTest {
 
   /** The group partitions opened so far, in order. */
   val opened = new ConcurrentLinkedQueue[Integer]()
-
   final case class Slot(index: Int) extends Partition
 
   /** Query groups of one query each that record when they are opened. */
@@ -231,7 +287,6 @@ object SearchDeliveryTest {
       extends RDD[SearchQueries.Group](sc, Nil) {
     override protected def getPartitions: Array[Partition] =
       Array.tabulate[Partition](groups)(Slot)
-
     override def compute(
         split: Partition,
         context: TaskContext
