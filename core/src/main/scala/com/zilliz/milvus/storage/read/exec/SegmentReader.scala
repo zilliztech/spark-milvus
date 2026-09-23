@@ -260,6 +260,15 @@ object SegmentReaderRegistry {
   private[exec] def ioThreads(processors: Int): Int =
     math.multiplyExact(processors, RangesPerBatch)
 
+  /** Raise Arrow's IO pool to what this executor's tasks need, and never lower
+    * it: the pool is process-wide, so another reader in this JVM may already
+    * have asked for more. Upstream leaves that policy to the caller.
+    */
+  private def raiseIoThreads(wanted: Int): Unit = synchronized {
+    if (MilvusStorageRuntime.ioThreadPoolCapacity < wanted)
+      MilvusStorageRuntime.setArrowIoThreadPoolCapacity(wanted)
+  }
+
   def open(
       task: SegmentReadTask,
       arrowSchema: Schema,
@@ -268,11 +277,9 @@ object SegmentReaderRegistry {
       allocator: BufferAllocator
   ): SegmentReader = {
     NativeStorageLibrary.load()
-    // Grow-only and cheap; a failure fails this read rather than leaving it at
-    // one request at a time.
-    MilvusStorageRuntime.ensureIoThreadPoolCapacity(
-      ioThreads(Runtime.getRuntime.availableProcessors())
-    )
+    // Cheap, and a failure fails this read rather than leaving it at one
+    // request at a time.
+    raiseIoThreads(ioThreads(Runtime.getRuntime.availableProcessors()))
     val reader = new NativeSegmentReader(
       task,
       arrowSchema,

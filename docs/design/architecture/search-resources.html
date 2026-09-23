@@ -230,8 +230,8 @@
 </ol>
 <p>做法分两层：</p>
 <ol>
-<li>milvus-storage 新增读取器属性 <code>reader.parquet.prebuffer.lazy</code>（默认 true，即 Arrow 原行为）；false 时一次读调用开始就请求它的全部区间，区间在 Arrow 的 IO 线程池上并发下载。该读取器的每次预缓冲只覆盖这次调用要解码的行组，同时请求不多占字节。另加 <code>MilvusStorageRuntime.ensureIoThreadPoolCapacity</code>：把进程级的 Arrow IO 线程池扩到给定大小，只增不减，任何时候可调。每个在途区间占池里一个线程阻塞等 GET，池默认 8 个线程，一个 executor 的全部任务共用。</li>
-<li>连接器的 <code>SegmentReaderRegistry</code> 对每个读任务设 <code>lazy</code> = false、区间 = 块大小 ÷ 8 且不小于 4 MiB，32 MiB 的块切成 8 个 4 MiB 区间；每次打开段读取器时把 IO 池扩到处理器数 × 8。一个 executor 同时跑的任务不超过处理器数，每个任务的八个区间都能同时在途。表扫描、搜索和按行号取数走同一个读取器，都受益。</li>
+<li>milvus-storage 新增读取器属性 <code>reader.parquet.prebuffer.lazy</code>（默认 true，即 Arrow 原行为）；false 时一次读调用开始就请求它的全部区间，区间在 Arrow 的 IO 线程池上并发下载。该读取器的每次预缓冲只覆盖这次调用要解码的行组，同时请求不多占字节。另加 <code>MilvusStorageRuntime.setArrowIoThreadPoolCapacity</code>：任何时候设定进程级 Arrow IO 线程池的大小，Arrow 自己安全地增减，要不要降由调用方定。每个在途区间占池里一个线程阻塞等 GET，池默认 8 个线程，一个 executor 的全部任务共用。</li>
+<li>连接器的 <code>SegmentReaderRegistry</code> 对每个读任务设 <code>lazy</code> = false、区间 = 块大小 ÷ 8 且不小于 4 MiB，32 MiB 的块切成 8 个 4 MiB 区间；每次打开段读取器时，池子小于处理器数 × 8 就抬上去，不往下调——池子是进程级的，同一个 JVM 里别的读取器可能已经要了更多。一个 executor 同时跑的任务不超过处理器数，每个任务的八个区间都能同时在途。表扫描、搜索和按行号取数走同一个读取器，都受益。</li>
 </ol>
 <div class="table-scroll">
 <table>

@@ -308,7 +308,7 @@ SQL 页上看到这七个数。</p>
 
 <p>文件系统访问、批读取复制统计、写出列组信息、manifest 的完整释放和 transaction 的统计登记已在 milvus-storage 子模块补齐。实现归 <code>cpp/src/jni</code> 与 <code>java/src/main</code>；Connector 的 <code>core.io</code>、<code>core.read.exec</code>、<code>core.write.exec</code> 调用这些上游对象，不引入 Hadoop 或另一套 C 桥接。上游已经存在的 reader、writer、transaction 接口直接复用。</p>
 
-<p>读取的并发也归上游（决策 31）。读取器属性 <code>reader.parquet.prebuffer.lazy</code> 决定一次 Parquet 读调用的区间是按解码顺序逐个请求（true，Arrow 默认），还是调用开始时一起请求（false）；<code>core.read.exec.SegmentReaderRegistry</code> 对每个读任务设 false 并给出区间大小。每个在途区间在进程级的 Arrow IO 线程池上占一个线程阻塞等 GET，上游 <code>MilvusStorageRuntime.ensureIoThreadPoolCapacity</code> 把该池只增不减地扩到给定大小，Connector 在打开段读取器时按处理器数 × 8 调用它。原生包不带 CRT，S3 客户端是基于 libcurl 的 <code>S3Client</code>，一个区间就是一条连接上的一个 GET。</p>
+<p>读取的并发也归上游（决策 31）。读取器属性 <code>reader.parquet.prebuffer.lazy</code> 决定一次 Parquet 读调用的区间是按解码顺序逐个请求（true，Arrow 默认），还是调用开始时一起请求（false）；<code>core.read.exec.SegmentReaderRegistry</code> 对每个读任务设 false 并给出区间大小。每个在途区间在进程级的 Arrow IO 线程池上占一个线程阻塞等 GET，上游 <code>MilvusStorageRuntime.setArrowIoThreadPoolCapacity</code> 设定该池的大小，Connector 在打开段读取器时按处理器数 × 8 只往上抬。原生包不带 CRT，S3 客户端是基于 libcurl 的 <code>S3Client</code>，一个区间就是一条连接上的一个 GET。</p>
 
 <p><code>take</code> 必须由上游拥有整个 <code>loon_take</code> 返回数组，并暴露可逐批读取、提前关闭的结果句柄，统一调用 <code>loon_free_chunk_arrays</code>；调用方不计算连续数组的释放地址。每批继续导出独立 ArrowArray/ArrowSchema，保留切片归零及复制计数。manifest 与其借用的 column groups 分开管理，reader 关闭后释放完整 manifest。Java 方法抛出的异常立即返回，UTF 字符串及局部引用在失败路径释放，不转换成空值。</p>
 
@@ -338,7 +338,7 @@ SQL 页上看到这七个数。</p>
 <tr><th>路径</th><th>迁移状态</th></tr>
 <tr><td>文件字节</td><td><code>NativeObjectStore</code> 已改用上游 <code>MilvusStorageFileSystem</code>；对象存储仍统一经 C filesystem，properties 与 filesystem 分别持有并释放。</td></tr>
 <tr><td>Arrow 地址</td><td><code>SegmentReader</code>、两个 writer 和 manifest transaction 已改用上游 API；逐批读取、take、统计和完整 manifest 所有权由上游实现。</td></tr>
-<tr><td>当前 gitlink 组合</td><td>2026-09-23 起 storage <code>4e295d79</code>（上游 main <code>1ff1682</code> 加决策 31 的一个提交，过渡期取自 fork，见设计索引决策日志）、Knowhere <code>b9497f4f</code>；linux-x86_64 统一包按此重建，UAT 结果见 <a href="search-resources.html#range-read">search-resources.html 3.6</a>。</td></tr>
+<tr><td>当前 gitlink 组合</td><td>2026-09-23 起 storage <code>d287d05</code>（上游 main <code>1ff1682</code> 加决策 31 的一个提交，过渡期取自 fork，见设计索引决策日志）、Knowhere <code>b9497f4f</code>；linux-x86_64 统一包按此重建，UAT 结果见 <a href="search-resources.html#range-read">search-resources.html 3.6</a>。</td></tr>
 <tr><td>旧统一包</td><td>storage <code>5689301</code>、Knowhere <code>9dc2b8ad</code> 的旧自有 recipe 实现通过 63/63 原生辅助测试、C API 3/3、164/164 动态库审计、5 个立即加载入口、统一 JAR 验证、最终 assembly 与三种 JVM 加载顺序；当前实现已改为固定上游 recipe revision 与 CMake 显式链接。</td></tr>
 <tr><td>旧 Connector 与 UAT</td><td>相同旧组合的 root 完整测试 1,025 通过、0 失败、0 中止，66 项因对应环境或数据缺失取消；真实实例十万行的三个持久化索引查询通过。这些结果不覆盖当前 gitlink。</td></tr>
 <tr><td>v4 历史编译与单元测试</td><td>root 完整测试 912 通过、0 失败，66 项取消；上游 API 4 个套件 19/19 通过。Scala 2.12.20 交叉编译通过；这些数量不再是当前测试基线。</td></tr>
