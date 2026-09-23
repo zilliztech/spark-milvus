@@ -89,6 +89,10 @@
 
 <p>Helm 已把 <code>runId</code> 传入 <code>CI_RUN_ID</code>，并用于测试写入前缀。测试代码还必须用它派生 collection、snapshot 和 writer 路径，并在结束时只删除本次运行拥有的资源。仅给每次运行换一个时间戳不能证明重试安全。</p>
 
+<p><code>ConnectorWriteReadUatTest</code> 和 <code>DataFrameScenariosUatTest</code> 的 S10/S13 在配置的写入前缀下，按 case、<code>CI_RUN_ID</code>（本地未配置时使用 local）和随机 UUID 分配独立目录；S10 的两种读取模式也分别分配目录。提交记录只从该目录发现，成功和异常退出均清理自己的文件，并关闭存储句柄；显式保留写入产物的选项仍有效。清理失败必须使测试失败，不能覆盖原始断言错误。进程被强制终止时无法执行 finally，后续重试使用新目录避免读到残留；旧目录的回收是独立任务，不允许测试通过扫描公共前缀删除其他运行的数据。</p>
+
+<p><code>CorrectnessJob</code> 创建 collection 时同样携带运行标识和 UUID，只按确切名称清理和检查删除结果，不批量删除固定名称前缀下的 collection。用例选择必须非空，且显式请求的每个 case 都存在；未知 group 或 case 直接失败。最终结果必须与选中的 case 一一对应且全部为 PASS，SKIP 仍记录原因但退出码非零。这些修改不表示公开测试已经接入私有 smoke 镜像，也不替代真实 Milvus/S3 的重复与并发验收。</p>
+
 <h2 id="acceptance">6. 验收分两步</h2>
 
 <table>

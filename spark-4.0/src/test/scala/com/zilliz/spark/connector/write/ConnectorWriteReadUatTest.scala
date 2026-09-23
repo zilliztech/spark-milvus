@@ -20,6 +20,7 @@ import com.zilliz.spark.connector.options.{
   MilvusOption,
   StorageOptions
 }
+import com.zilliz.spark.connector.uat.UatWriteScope
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
@@ -97,7 +98,12 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
   test(
     "a DataFrame written by the connector reads back through the connector"
   ) {
-    val storage = storageOptions()
+    val configuredStorage = storageOptions()
+    val scope = new UatWriteScope(
+      configuredStorage(StorageProperties.RootPath),
+      "connector-write-read"
+    )
+    val storage = configuredStorage + (StorageProperties.RootPath -> scope.root)
     val spark = SparkSession
       .builder()
       .master("local[2]")
@@ -105,51 +111,57 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
       .config("spark.ui.enabled", "false")
       .getOrCreate()
     try {
-      val df = spark
-        .range(rows)
-        .select(
-          col("id"),
-          concat(lit("row-"), col("id")).as("name"),
-          array((0 until dim).map(d => (col("id") * 10 + d).cast("float")): _*)
-            .as("v")
-        )
-        .repartition(2)
-
-      // --- the table: snapshot mode with only a schema, no segments ---
-      val tableOptions = storage ++ Map(
-        MilvusOption.SnapshotMode -> "true",
-        MilvusOption.SnapshotSchemaBytes -> schemaBytes,
-        MilvusOption.SnapshotCollectionId -> "1",
-        MilvusOption.SnapshotPartitionIds -> "0",
-        MilvusOption.MilvusCollectionName -> "connector_rt",
-        MilvusOption.MilvusInsertMaxBatchSize -> "1000"
-      )
-
-      // --- what the write protocol refuses before any task starts ---
-      val overwrite = intercept[AnalysisException](
-        df.write.format("milvus").mode("overwrite").options(tableOptions).save()
-      )
-      info(
-        s"overwrite refused by Spark: ${overwrite.getMessage.linesIterator.next()}"
-      )
-      val incomplete = intercept[Exception](
-        df.drop("v")
-          .write
-          .format("milvus")
-          .mode("append")
-          .options(tableOptions)
-          .save()
-      )
-      incomplete.getMessage should include("missing from the DataFrame")
-
-      // --- write: two tasks, two V3 segments under {root}/staging/{job}/ ---
-      df.write.format("milvus").mode("append").options(tableOptions).save()
-
-      // --- commit: the job is the one staging prefix with a marker ---
-      val root = storage(StorageProperties.RootPath)
       val store = HadoopStorageKeys.storeFrom(storage)
-      val (layout, manifest) =
-        try {
+      scope.run(store, keep = env("MILVUS_UAT_KEEP_WRITE").isDefined) {
+        val df = spark
+          .range(rows)
+          .select(
+            col("id"),
+            concat(lit("row-"), col("id")).as("name"),
+            array(
+              (0 until dim).map(d => (col("id") * 10 + d).cast("float")): _*
+            )
+              .as("v")
+          )
+          .repartition(2)
+
+        // --- the table: snapshot mode with only a schema, no segments ---
+        val tableOptions = storage ++ Map(
+          MilvusOption.SnapshotMode -> "true",
+          MilvusOption.SnapshotSchemaBytes -> schemaBytes,
+          MilvusOption.SnapshotCollectionId -> "1",
+          MilvusOption.SnapshotPartitionIds -> "0",
+          MilvusOption.MilvusCollectionName -> "connector_rt",
+          MilvusOption.MilvusInsertMaxBatchSize -> "1000"
+        )
+
+        // --- what the write protocol refuses before any task starts ---
+        val overwrite = intercept[AnalysisException](
+          df.write
+            .format("milvus")
+            .mode("overwrite")
+            .options(tableOptions)
+            .save()
+        )
+        info(
+          s"overwrite refused by Spark: ${overwrite.getMessage.linesIterator.next()}"
+        )
+        val incomplete = intercept[Exception](
+          df.drop("v")
+            .write
+            .format("milvus")
+            .mode("append")
+            .options(tableOptions)
+            .save()
+        )
+        incomplete.getMessage should include("missing from the DataFrame")
+
+        // --- write: two tasks, two V3 segments under {root}/staging/{job}/ ---
+        df.write.format("milvus").mode("append").options(tableOptions).save()
+
+        // --- commit: the job is the one staging prefix with a marker ---
+        val root = storage(StorageProperties.RootPath)
+        val (layout, manifest) = {
           val committed = store
             .list(s"$root/staging", recursive = false)
             .filter(_.isDirectory)
@@ -158,7 +170,7 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
             )
             .filter(l => store.exists(l.marker))
           withClue(
-            s"one committed job expected under $root/staging; clean the prefix if earlier runs left markers: "
+            s"one committed job expected under the owned directory $root/staging: "
           )(committed.size shouldBe 1)
           val layout = committed.head
           val manifest = JobManifest
@@ -167,62 +179,62 @@ class ConnectorWriteReadUatTest extends AnyFunSuite with Matchers {
             )
             .fold(e => throw e, identity)
           (layout, manifest)
-        } finally store.close()
-      info(
-        s"job manifest: ${manifest.jobId}, ${manifest.segments.size} segments, ${manifest.rowCount} rows"
-      )
-      manifest.jobId shouldBe layout.jobId
-      manifest.segments.size shouldBe 2
-      manifest.rowCount shouldBe rows.toLong
-      manifest.segments.foreach { seg =>
-        seg.manifestVersion shouldBe 1L
-        seg.basePath should startWith(layout.prefix + "/")
-      }
-      val basePaths = manifest.segments.map(_.basePath)
-      info(s"wrote ${basePaths.size} segment(s): ${basePaths.mkString(", ")}")
-
-      // --- read: the manifests the write produced, no service in between ---
-      val manifests = SegmentListJson.encodeManifestItems(
-        basePaths.zipWithIndex.map { case (path, i) =>
-          ManifestItemJson(i + 1L, s"""{"ver":-1,"base_path":"$path"}""")
         }
-      )
-      val readOptions =
-        tableOptions + (MilvusOption.SnapshotManifests -> manifests)
-      val back = spark.read.format("milvus").options(readOptions).load()
-      info(s"schema: ${back.schema.treeString}")
-      val got = back.collect().map(r => r.getLong(0) -> r).toMap
-      got.size shouldBe rows
-      (0L until rows.toLong).foreach { i =>
-        val r = got(i)
-        r.getString(1) shouldBe s"row-$i"
-        r.getSeq[Float](2) shouldBe (0 until dim).map(d => (i * 10 + d).toFloat)
-      }
-      val columnar = spark.read
-        .format("milvus")
-        .options(readOptions + (MilvusOption.ReadColumnar -> "true"))
-        .load()
-        .count()
-      columnar shouldBe rows.toLong
-
-      // --- abort: the same committer deletes the job's files. The zero-byte
-      // directory markers milvus-storage created stay: the loon C API has no
-      // directory delete and refuses them as "not a file" ---
-      if (env("MILVUS_UAT_KEEP_WRITE").isDefined) {
         info(
-          s"MILVUS_UAT_KEEP_WRITE set: leaving ${layout.prefix} for inspection"
+          s"job manifest: ${manifest.jobId}, ${manifest.segments.size} segments, ${manifest.rowCount} rows"
         )
-      } else {
-        val cleanup = HadoopStorageKeys.storeFrom(storage)
-        try {
-          val deleted = new Committer(cleanup, layout).abort()
+        manifest.jobId shouldBe layout.jobId
+        manifest.segments.size shouldBe 2
+        manifest.rowCount shouldBe rows.toLong
+        manifest.segments.foreach { seg =>
+          seg.manifestVersion shouldBe 1L
+          seg.basePath should startWith(layout.prefix + "/")
+        }
+        val basePaths = manifest.segments.map(_.basePath)
+        info(s"wrote ${basePaths.size} segment(s): ${basePaths.mkString(", ")}")
+
+        // --- read: the manifests the write produced, no service in between ---
+        val manifests = SegmentListJson.encodeManifestItems(
+          basePaths.zipWithIndex.map { case (path, i) =>
+            ManifestItemJson(i + 1L, s"""{"ver":-1,"base_path":"$path"}""")
+          }
+        )
+        val readOptions =
+          tableOptions + (MilvusOption.SnapshotManifests -> manifests)
+        val back = spark.read.format("milvus").options(readOptions).load()
+        info(s"schema: ${back.schema.treeString}")
+        val got = back.collect().map(r => r.getLong(0) -> r).toMap
+        got.size shouldBe rows
+        (0L until rows.toLong).foreach { i =>
+          val r = got(i)
+          r.getString(1) shouldBe s"row-$i"
+          r.getSeq[Float](2) shouldBe (0 until dim).map(d =>
+            (i * 10 + d).toFloat
+          )
+        }
+        val columnar = spark.read
+          .format("milvus")
+          .options(readOptions + (MilvusOption.ReadColumnar -> "true"))
+          .load()
+          .count()
+        columnar shouldBe rows.toLong
+
+        // --- abort: the same committer deletes the job's files. The zero-byte
+        // directory markers milvus-storage created stay: the loon C API has no
+        // directory delete and refuses them as "not a file" ---
+        if (env("MILVUS_UAT_KEEP_WRITE").isDefined) {
+          info(
+            s"MILVUS_UAT_KEEP_WRITE set: leaving ${layout.prefix} for inspection"
+          )
+        } else {
+          val deleted = new Committer(store, layout).abort()
           info(s"abort deleted $deleted files under ${layout.prefix}")
           deleted should be >= 6 // two parquet, two manifests, manifest.json, _committed
-          cleanup
+          store
             .list(layout.prefix, recursive = true)
             .filterNot(_.isDirectory) shouldBe empty
-          cleanup.exists(layout.marker) shouldBe false
-        } finally cleanup.close()
+          store.exists(layout.marker) shouldBe false
+        }
       }
     } finally spark.stop()
   }
