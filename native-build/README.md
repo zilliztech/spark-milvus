@@ -14,7 +14,13 @@ project-owned replacement. Integration-specific link relationships are declared
 on the consuming targets in this project's CMake files. The build does not
 select an unpinned latest release.
 `profiles/linux-x86_64` and `profiles/linux-aarch64` select GCC 12, C++20 and
-shared host dependencies; the two differ only in `arch`.
+shared host dependencies; the two differ only in `arch`. `profiles/darwin-aarch64`
+and `profiles/darwin-x86_64` select Apple clang and differ in `arch`, the Apple
+clang each was validated with, and one line of `darwin-x86_64`: folly builds
+against the macOS 14.5 SDK, because its CMake compiles
+`crypto/detail/MathOperation_Simple.cpp` with `-mno-sse2` on x86_64 and clang
+then rejects the `_Float16` functions the macOS 15 SDK's `math.h` declares. The
+Command Line Tools install that SDK; Xcode alone does not.
 OpenBLAS uses `dynamic_arch=True`. Header-only dependencies and the internal
 Rust bridge do not expose a shared-library option.
 
@@ -60,7 +66,7 @@ PATH=~/toolchain/cmake3venv/bin:$PATH scripts/build-native.sh --work-dir ...
 | Platform | Compilers | Binary tools | Also |
 | --- | --- | --- | --- |
 | `linux-x86_64`, `linux-aarch64` | GCC/G++/gfortran 12 | patchelf, readelf, ldd, binutils | the libaio development package, which Folly's async I/O needs; Ubuntu supplies libclang in `libclang-dev` |
-| `darwin-aarch64` | Apple Clang and Homebrew's OpenMP runtime; no Fortran | otool, install_name_tool, codesign | no libaio, liburing or OpenBLAS: `dependencies.json` scopes those to Linux, as the engines' own conanfiles do, and faiss takes Accelerate for BLAS |
+| `darwin-x86_64`, `darwin-aarch64` | Apple Clang 17 or later, since Knowhere uses `std::atomic_ref`, which libc++ provides from LLVM 19; Homebrew's OpenMP runtime; no Fortran | otool, install_name_tool, codesign | no libaio, liburing or OpenBLAS: `dependencies.json` scopes those to Linux, as the engines' own conanfiles do, and faiss takes Accelerate for BLAS |
 
 Where the platforms differ in what an engine carries, the bundle declares it:
 `with_diskann` is false on a platform whose adapter reports no DiskANN, because

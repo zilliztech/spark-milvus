@@ -110,8 +110,7 @@ the scenario suite `uat.DataFrameScenariosUatTest` and the vector search suite
 `uat.VectorSearchUatTest` in spark-4.0 — cancel on their own environment
 variables as well, so they stay canceled even with the library present.
 `VectorSearchUatTest` additionally needs Knowhere's native libraries, which the
-unified bundle carries on every platform whose profile exists — `linux-x86_64`,
-`linux-aarch64` and `darwin-aarch64` — and its index cases need a snapshot whose vector field
+unified bundle carries on all four platforms, and its index cases need a snapshot whose vector field
 carries a persisted index (`MILVUS_UAT_INDEXED_SNAPSHOT`). The scenario suite is also compiled into the 3.5, 4.1 and
 4.2 lines, so `spark35/testOnly ...DataFrameScenariosUatTest` runs the same
 scenarios there. The 3.5 line needs a JDK 17 for that run: Arrow 12, which
@@ -177,11 +176,17 @@ Apple clang 21, JDK 21) on 2026-09-19: the native suites pass, and a Spark
 the packaged `native/darwin-aarch64/` libraries.
 
 That path carries storage alone. Knowhere is built on macOS by the
-[unified native bundle](#unified-native-bundle), which `darwin-aarch64` selects
-by default, so the storage-only targets below are for a platform whose profile
-does not exist yet or a host that cannot run the source build.
+[unified native bundle](#unified-native-bundle), which both macOS platforms
+select by default, so the storage-only targets below are for a platform whose
+profile does not exist yet or a host that cannot run the source build.
 
-### macOS (Apple Silicon)
+### macOS
+
+Apple silicon and Intel Macs take the same steps. The compiler has to be Apple
+clang 17 or later, from Xcode or the Command Line Tools 16.3 onward: Knowhere
+uses `std::atomic_ref`, which libc++ provides from LLVM 19. On an Intel Mac,
+`darwin-x86_64` builds folly against the macOS 14.5 SDK that the Command Line
+Tools install, so the Command Line Tools must be present even next to Xcode.
 
 One toolchain serves both native paths. The pinned CMake 3 lives in a virtual
 environment of its own because a current CMake 4 rejects the
@@ -196,7 +201,7 @@ curl https://sh.rustup.rs -sSf | sh          # cargo, for the storage Rust bridg
 python3 -m venv ~/toolchain/cmake3venv       # not under /tmp, which the system empties
 ~/toolchain/cmake3venv/bin/pip install cmake==3.31.10 ninja conan==2.25.1
 export PATH=~/toolchain/cmake3venv/bin:$PATH
-export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+export JAVA_HOME=$(/usr/libexec/java_home -v 21)
 export LIBCLANG_PATH=/Library/Developer/CommandLineTools/usr/lib   # bindgen
 conan profile detect --force
 conan remote add default-conan-local2 \
@@ -283,7 +288,7 @@ from `Release/libs`, preserving the `ossl-modules` and `engines-3` subdirectorie
 |---|---|---|
 | Suffix | `.dylib` — `add_library(... SHARED)` sets no `SUFFIX` | `.so` |
 | Build output | `cpp/build/Release` and `cpp/build/Release/libs` | `cpp/build/Release` and `cpp/build/Release/libs` |
-| Resource path | `native/darwin-aarch64/` | `native/linux-<arch>/` |
+| Resource path | `native/darwin-<arch>/` | `native/linux-<arch>/` |
 | Relocation | `scripts/patch_native_macos.sh`: `@rpath` names, `@loader_path` rpath, re-sign | `patch_native_runpath.sh`: `RUNPATH=$ORIGIN` |
 | Signal chaining | `DYLD_INSERT_LIBRARIES=$JAVA_HOME/lib/libjsig.dylib` | `LD_PRELOAD=$JAVA_HOME/lib/libjsig.so` |
 
@@ -310,8 +315,8 @@ make package NATIVE_BUNDLE="$PWD/target/native-build/$platform/milvus-native-$pl
 ```
 
 A platform is built from source when `native-build/profiles/` holds its Conan
-profile and `native-build/platforms.py` holds its adapter; `linux-x86_64`,
-`linux-aarch64` and `darwin-aarch64` have both. The build needs Conan 2, the CMake version the
+profile and `native-build/platforms.py` holds its adapter; all four platforms
+have both. The build needs Conan 2, the CMake version the
 profile's `[platform_tool_requires]` names, Ninja, ccache, the profile's
 compilers, Rust, libclang, a JDK, and access to the pinned source repositories
 and Conan recipes. Rust bindgen loads libclang when building the storage
@@ -364,8 +369,8 @@ the unified bundle; the Makefile reads the profile directory rather than naming
 platforms, so adding a platform is adding its profile and its adapter.
 `NATIVE_BUNDLE` selects an existing platform JAR and skips native
 compilation; otherwise `NATIVE_WORK_DIR` holds the build and Conan reuses
-compatible cached packages. Of the four platforms only `darwin-x86_64` has no
-profile; it retains the storage-only build when no bundle is selected. Any
+compatible cached packages. All four platforms have a profile; one without a
+profile would keep the storage-only build when no bundle is selected. Any
 platform can consume a matching prebuilt unified bundle, which no profile
 cross-compiles. A prebuilt bundle must match the host, and `verifyNativeBundle`
 rejects one whose manifest names another platform.

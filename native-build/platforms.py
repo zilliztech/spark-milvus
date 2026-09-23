@@ -33,6 +33,11 @@ class Format:
     #: loader, consulted only after a recorded path fails, so it adds providers
     #: without shadowing the ones the system supplies.
     library_fallback_variable = None
+    #: The environment variables that name directories the dynamic loader
+    #: searches before a library's recorded location, where the fallback
+    #: variable is a separate one. Conan's run environment exports them, and a
+    #: packaged library found there replaces the system one of the same name.
+    library_override_variables = ()
     #: The environment variable that loads a library into a process before its
     #: own dependencies, which is how HotSpot's signal chaining reaches a JVM:
     #: the loader has to map libjsig before the VM installs its handlers, so no
@@ -283,6 +288,7 @@ class MachO(Format):
     operating_system = "darwin"
     conan_os = "Macos"
     library_fallback_variable = "DYLD_FALLBACK_LIBRARY_PATH"
+    library_override_variables = ("DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH")
     preload_variable = "DYLD_INSERT_LIBRARIES"
     loader_origin = "@loader_path"
     tools = ("otool", "install_name_tool", "codesign")
@@ -470,8 +476,11 @@ class MachO(Format):
         return True
 
     def toolchain_versions(self):
+        # Clang names the host CPU with -mcpu on arm64 and -march on x86_64,
+        # and rejects the other spelling for that target.
+        native = "-mcpu=native" if platform.machine().lower() in ("arm64", "aarch64") else "-march=native"
         return (("compiler", ["clang", "--version"]),
-                ("compiler-native-target", ["clang", "-E", "-mcpu=native", "-###", "-x", "c", "/dev/null"]))
+                ("compiler-native-target", ["clang", "-E", native, "-###", "-x", "c", "/dev/null"]))
 
     def cpu_report(self):
         return ["sysctl", "-a", "machdep.cpu", "hw"]

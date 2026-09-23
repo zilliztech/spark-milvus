@@ -529,6 +529,13 @@ def build(args, repository, java_home, work, target, profile):
                                            'source "$1/conanbuild.sh" && source "$1/conanrun.sh" && env -0',
                                            "native-build", str(dependencies)], env=env)
         build_env = dict(part.decode().split("=", 1) for part in capture.split(b"\0") if b"=" in part)
+        # conanrun.sh also exports the loader's primary search path, which comes
+        # before a library's recorded location: cargo, started by CMake with it,
+        # took Conan's libiconv.2.dylib for the system one and aborted on its
+        # first git dependency. Only the fallback variable below may name
+        # package directories.
+        for variable in platforms.host().library_override_variables:
+            build_env.pop(variable, None)
         # Conan's build environment carries PATH but no library search path, so
         # a packaged build tool finds its own dependencies only through the
         # runtime path recorded in it. That holds for ELF and not for Mach-O,

@@ -3,9 +3,9 @@ project(spark_milvus_native LANGUAGES C CXX)
 
 # The covered platforms; each also needs a Conan profile and a platforms.py
 # adapter, which the build driver checks before it reaches CMake.
-if(NOT ((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|aarch64|arm64)$")
-        OR (APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")))
-  message(FATAL_ERROR "This native source build covers Linux x86_64, Linux aarch64 and macOS arm64, not "
+if(NOT ((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
+        AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|aarch64|arm64)$"))
+  message(FATAL_ERROR "This native source build covers Linux and macOS on x86_64 and aarch64, not "
                       "${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
