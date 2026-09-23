@@ -391,7 +391,10 @@ class IndexFileCodecTest extends AnyFunSuite {
       buffer.putLong(2349807957L)
       // The tail of the stream is vector data, here the float 0.015625.
       (bytes.length - 24 until bytes.length by 4).foreach(i =>
-        ByteBuffer.wrap(bytes, i, 4).order(ByteOrder.LITTLE_ENDIAN).putFloat(0.015625f)
+        ByteBuffer
+          .wrap(bytes, i, 4)
+          .order(ByteOrder.LITTLE_ENDIAN)
+          .putFloat(0.015625f)
       )
       bytes
     }
