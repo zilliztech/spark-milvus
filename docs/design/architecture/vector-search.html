@@ -205,12 +205,12 @@
 <ol>
 <li><strong>driver。</strong><code>SnapshotSources</code> 解析快照并应用分区与段选择，<code>ReadPlan.of</code> 生成段任务；能力在这一步核对（1.1），段任务表广播给第二阶段。<code>core.index.SearchPlan</code> 按下面的顺序定出第一阶段的任务，所用的量 driver 上都已知：
 <ol>
-<li>查询组：查询集按 <code>milvus.search.group.max.bytes</code> 切成查询组。</li>
+<li>查询组：查询集按 <code>milvus.search.group.max.bytes</code> 切成查询组；exact 模式按字节切出的组少于下面第 6 条的范围数 R 时，查询集按顺序均分成 R 组，每组都小于上限（决策 32）。</li>
 <li>并发数 = executor 数 × 每个 executor 同时运行的搜索任务数：index 模式在集群上是 1（1.1 的 stage 级任务资源），其余情况是 executor 核数 ÷ <code>spark.task.cpus</code>。</li>
 <li>每个任务两块额度：查询额度在堆上，是 Spark 不管理的那部分堆除以同时运行的任务数；段额度在堆外，公式见 <a href="search-resources.html#budget">search-resources.html 3.3</a>。段的常驻字节 index 模式取快照记录的索引字节的 2 倍，加载时再加 1 倍（search-resources.html 3.3），exact 模式取行数 × 向量宽度。</li>
 <li>先试查询留在内存：段组数取 min(段数, 并发数)，exact 模式再按下一条切查询范围；本任务的查询（id 与 TopK 状态，走 shuffle 时加上正在读入的一组）放得进查询额度，本任务查询矩阵的堆外拷贝加最大一段及其加载峰值放得进段额度，就选这种。段按常驻字节从大到小放进当前最轻的段组。</li>
 <li>否则段组留在内存：一组的常驻字节加最大一段的加载峰值和一个查询组的矩阵，不超过段额度；段组数取 max(并发数, 装下所有段所需的组数)，不超过段数；行数未知的段按段额度的一半估。</li>
-<li>exact 模式段组数少于并发数时，查询组按顺序切成 R 个连续范围，R = min(查询组数, ⌈并发数 ÷ 段组数⌉)（决策 28）。</li>
+<li>exact 模式段组数少于并发数时，查询按顺序切成 R 个连续范围，R = min(⌈并发数 ÷ 段组数⌉, ⌊查询数 ÷ 2,048⌋)，至少为 1（决策 28、32）。</li>
 </ol>
 driver 日志 <code>Search budget</code> 一行写明选中的顺序、并发数、段组数、每任务两块内存的需求与额度。</li>
 <li><strong>查询集下发，两条路，任务形态与结果相同，传输量与内存不同。</strong>查询集的字节数不超过 <code>milvus.search.queries.max.bytes</code> 时，driver 收集它、查 <code>query_id</code> 唯一、拼成查询矩阵（查询 id 数组，加一块按行连续、类型与字段一致的数值），用广播变量下发：每个 executor 取一份，常驻到作业结束，查询组是这份矩阵里的区间。
@@ -224,7 +224,7 @@ driver 日志 <code>Search budget</code> 一行写明选中的顺序、并发数
 <ol>
 <li>查询留在内存：任务先拿到本任务的全部查询组（广播时是广播变量里的区间，走 shuffle 时逐组读完），每组拷成一块查询矩阵，配一个 TopK 合并器；然后逐个打开段（<code>SegmentSearch.runGroups</code>）：exact 逐批读向量，每批对各查询组各调一次批量距离入口，index 加载索引后对各查询组各探查一次；一个段用完即关，下一个段再打开。所有段处理完，按查询组交出候选。每个段只读一遍，查询集每个任务只拿一次；只有一个查询组时就是这种顺序。</li>
 <li>段组留在内存：任务先把段组读进内存（<code>SegmentSearch.hold</code>），exact 留下向量批，index 留下索引句柄；查询组一个接一个在这份数据上算，每组算完交出自己的候选并释放这组的堆。查询组是流过来的，只过一遍，所以两条下发路都只读一遍底库。段组实际读出来超过段额度时，<code>hold</code> 释放已读的返回 <code>Overflow</code>，任务退回逐组重读，代价是 I/O × 组数。</li>
-<li>exact 模式的查询范围：批量距离入口在任务线程上单线程执行，一次搜索的并行度就是同时运行的任务数；段组数不少于并发数时 R = 1。每个范围各读一遍自己的段组：底库读取量乘 R，距离计算量不变，耗时在核数允许的范围内除以 R。范围以整个查询组为单位，一组按 <code>group.max.bytes</code> 定大小（768 维 float32、64 MiB 为 21,845 条查询），实测读 1 字节底库对应的计算时间是读取时间的数倍，重读的代价在计算之内。index 模式不切：每个任务要加载段的索引（8 CU 的段，Cardinal 索引约 2.5 GB），切分等于重复加载；Knowhere 的索引搜索本身在进程线程池里按查询并行。</li>
+<li>exact 模式的查询范围：批量距离入口在任务线程上单线程执行，一次搜索的并行度就是同时运行的任务数；段组数不少于并发数时 R = 1。每个范围各读一遍自己的段组：底库读取量乘 R，距离计算量不变，耗时在核数允许的范围内除以 R。范围以整个查询组为单位，一组按 <code>group.max.bytes</code> 定大小（768 维 float32、top-10 时每条查询 3,552 字节，64 MiB 为 18,893 条，默认 512 MiB 为 151,146 条）；按字节切出的组少于范围数时，查询集均分成一个范围一组。一个范围至少 2,048 条查询：float32 下一个任务读一行 4d 字节按 110 MB/s，一条查询算这一行 2d 次浮点按每核 125 GFLOP/s，约 2,300 条查询时读与算相等，与维度无关；范围更小时任务在等读取，多切只把段组多读一遍。范围够大时重读的代价在计算之内，被预读盖住。index 模式不切：每个任务要加载段的索引（8 CU 的段，Cardinal 索引约 2.5 GB），切分等于重复加载；Knowhere 的索引搜索本身在进程线程池里按查询并行。</li>
 </ol>
 两种顺序的 shuffle 量都是「段组数 × 查询数 × K × 24 字节」，切成查询范围也不变：每条查询在每个段组上仍只算一次。每条候选是查询 id、段 id、行号和分数。</li>
 <li><strong>合并。</strong>候选按查询序号 <code>groupBy</code>，用 <code>functions.udaf</code> 包装的 <code>TopKAggregator</code> 聚合；聚合缓冲是有界堆，每步只留 K 条，排序规则见 2.6。聚合结果展开成带 <code>rank</code> 的命中行。</li>

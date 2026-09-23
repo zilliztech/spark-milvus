@@ -305,63 +305,80 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "an exact search with fewer sets than slots cuts its groups into ranges"
+    "an exact search with fewer sets than slots cuts ranges down to a floor"
   ) {
-    // 2 sets on 16 slots: 8 ranges of 2 groups each, 16 tasks.
-    SearchPlan.queryRanges(
-      groups = 16,
+    // 2 sets on 16 slots: 8 ranges when the queries allow.
+    SearchPlan.rangeCount(
+      queries = 349525,
       sets = 2,
       slots = 16,
       split = true
-    ) shouldBe
-      (0 until 8).map(range => (range * 2) until (range * 2 + 2))
-    // Never more ranges than groups.
-    SearchPlan.queryRanges(
-      groups = 3,
+    ) shouldBe 8
+    // No range under MinRangeQueries queries: 10,000 queries make 4.
+    SearchPlan.rangeCount(
+      queries = 10000,
       sets = 2,
       slots = 16,
       split = true
-    ) shouldBe
-      Seq(0 until 1, 1 until 2, 2 until 3)
+    ) shouldBe 4
+    // Too few queries for a second range.
+    SearchPlan.rangeCount(
+      queries = 1000,
+      sets = 2,
+      slots = 16,
+      split = true
+    ) shouldBe 1
     // Enough sets already: one range.
-    SearchPlan.queryRanges(
-      groups = 16,
+    SearchPlan.rangeCount(
+      queries = 349525,
       sets = 16,
       slots = 16,
       split = true
-    ) shouldBe
-      Seq(0 until 16)
-    // Uneven counts put the longer ranges first.
-    SearchPlan.queryRanges(
-      groups = 5,
-      sets = 1,
-      slots = 3,
-      split = true
-    ) shouldBe
+    ) shouldBe 1
+  }
+
+  test("ranges take whole groups, the longer ranges first") {
+    SearchPlan.queryRanges(groups = 16, ranges = 8) shouldBe
+      (0 until 8).map(range => (range * 2) until (range * 2 + 2))
+    SearchPlan.queryRanges(groups = 5, ranges = 3) shouldBe
       Seq(0 until 2, 2 until 4, 4 until 5)
+    an[IllegalArgumentException] should be thrownBy
+      SearchPlan.queryRanges(groups = 3, ranges = 4)
   }
 
   test("an index search keeps every group in one range") {
-    SearchPlan.queryRanges(
-      groups = 16,
+    SearchPlan.rangeCount(
+      queries = 349525,
       sets = 2,
       slots = 16,
       split = false
-    ) shouldBe
-      Seq(0 until 16)
+    ) shouldBe 1
+    SearchPlan.queryRanges(groups = 16, ranges = 1) shouldBe Seq(0 until 16)
+  }
+
+  test("an even cut puts the longer groups first and covers every query") {
+    val groups = SearchPlan.evenGroups(queries = 349525, count = 8)
+
+    groups.map(_.queries) shouldBe Seq.fill(5)(43691) ++ Seq.fill(3)(43690)
+    groups.head.firstQuery shouldBe 0
+    groups.last.untilQuery shouldBe 349525
+    groups.sliding(2).forall { case Seq(a, b) =>
+      a.untilQuery == b.firstQuery
+    } shouldBe true
   }
 
   test(
     "the tasks are the sets times the ranges, and the ranges cover the groups"
   ) {
     val tasks = Seq(task(1L, 10L), task(2L, 10L))
+    // Four groups of 2,048 queries, 496 bytes each.
     val plan = SearchPlan.of(
       tasks,
       layout,
       concurrency = 8,
-      queries = 8,
+      queries = 4 * SearchPlan.MinRangeQueries,
       k = 10,
-      groupMaxBytes = 992L,
+      groupMaxBytes = SearchPlan.MinRangeQueries * 496L,
       budget = SearchPlan.Budget(1L << 31, 0L),
       footprint = vectors,
       shuffled = false,
@@ -490,10 +507,10 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       Seq(task(1L, 10L), task(2L, 10L)),
       layout,
       concurrency = 8,
-      queries = 8,
+      queries = 4 * SearchPlan.MinRangeQueries,
       k = 10,
-      groupMaxBytes = 992L,
-      budget = SearchPlan.Budget(1L << 20, 1L << 20),
+      groupMaxBytes = SearchPlan.MinRangeQueries * 496L,
+      budget = SearchPlan.Budget(1L << 30, 1L << 30),
       footprint = vectors,
       shuffled = false,
       splitQueries = true
@@ -502,5 +519,70 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     plan.sets.size shouldBe 2
     plan.queryRanges.size shouldBe 4
     plan.tasks shouldBe 8
+  }
+
+  private val wide = VectorLayout(VectorElementType.Float32, 768)
+
+  /** 1 GiB of 768-dimension queries on two segments of 1.94 million rows and 16
+    * slots: the 1g x 10g exact search (decision 32).
+    */
+  private def tenGiB(groupMaxBytes: Long): SearchPlan.Plan = SearchPlan.of(
+    Seq(task(1L, 1940000L), task(2L, 1940000L)),
+    wide,
+    concurrency = 16,
+    queries = 349525,
+    k = 10,
+    groupMaxBytes = groupMaxBytes,
+    budget = SearchPlan.Budget(1L << 31, 1L << 31),
+    footprint = SearchPlan.Footprint.vectors(_, wide, 32L << 20),
+    shuffled = true,
+    splitQueries = true
+  )
+
+  test(
+    "groups fewer than the ranges are cut again, one group per range under the limit"
+  ) {
+    // 512 MiB groups hold 151,146 queries: the byte limit cuts 3, and the two
+    // sets need 8 ranges to fill 16 slots.
+    val plan = tenGiB(512L << 20)
+
+    plan.resident shouldBe SearchPlan.Resident.Queries
+    plan.sets.size shouldBe 2
+    plan.groups.size shouldBe 8
+    plan.queryRanges shouldBe (0 until 8).map(group => group until group + 1)
+    plan.tasks shouldBe 16
+    plan.groups.map(_.queries).max should be <=
+      SearchPlan.queriesPerGroup(wide, k = 10, groupMaxBytes = 512L << 20)
+    plan.groups.map(_.queries).sum shouldBe 349525
+  }
+
+  test(
+    "groups the byte limit cuts plentifully are kept and shared by the ranges"
+  ) {
+    // 64 MiB groups hold 18,893 queries: 19 groups in 8 ranges, as before.
+    val plan = tenGiB(64L << 20)
+
+    plan.groups.size shouldBe 19
+    plan.queryRanges.size shouldBe 8
+    plan.tasks shouldBe 16
+  }
+
+  test("a query set too small for a second range keeps one range per set") {
+    val plan = SearchPlan.of(
+      Seq(task(1L, 1940000L), task(2L, 1940000L)),
+      wide,
+      concurrency = 16,
+      queries = 1000,
+      k = 10,
+      groupMaxBytes = 512L << 20,
+      budget = SearchPlan.Budget(1L << 31, 1L << 31),
+      footprint = SearchPlan.Footprint.vectors(_, wide, 32L << 20),
+      shuffled = false,
+      splitQueries = true
+    )
+
+    plan.groups.size shouldBe 1
+    plan.queryRanges shouldBe Seq(0 until 1)
+    plan.tasks shouldBe 2
   }
 }

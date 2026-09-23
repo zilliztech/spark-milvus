@@ -23,11 +23,14 @@ import com.zilliz.milvus.storage.snapshot.SegmentIndexes
   * query groups pass through it, so a set holds no more than the segment budget
   * and there are more sets when the segments need them.
   *
-  * An exact search with fewer sets than tasks run at once cuts its groups into
+  * An exact search with fewer sets than tasks run at once cuts its queries into
   * contiguous ranges, one task per (set, range): the batched distance entry
   * runs single-threaded on its task, so the tasks are the search's parallelism.
-  * Each range reads its set again; an index search keeps one range, since a
-  * range would load the set's indexes again (decision 28).
+  * Each range reads its set again, so no range holds fewer than
+  * [[MinRangeQueries]] queries; when the groups the byte limit cuts are fewer
+  * than the ranges, the query set is cut into one group per range instead. An
+  * index search keeps one range, since a range would load the set's indexes
+  * again (decisions 28 and 32).
   */
 object SearchPlan {
 
@@ -349,31 +352,74 @@ object SearchPlan {
   ): Long =
     math.max(layout.rowBytes.toLong, (budget * UnknownSegmentShare).toLong)
 
-  /** Cuts `groups` query groups into the contiguous ranges one task each
-    * answers on a set: as many as it takes for `sets` sets to fill `slots`
-    * slots, never more than there are groups, as even as the counts allow with
-    * the longer ranges first. One range when `split` is false.
+  /** The fewest queries a range of an exact search holds.
+    *
+    * A range reads its whole segment set, and computing a block takes the time
+    * reading it does once a range holds about 2,300 queries: a float32 row is
+    * 4d bytes read at the 110 MB/s one task reads (decision 31) against 2d
+    * floating-point operations a query at the 125 GFLOP/s of one core in the
+    * batched entry (decision 27), whatever the dimension d. A range under that
+    * waits on its reads, so another range only reads the set once more; rounded
+    * down to a power of two (decision 32).
     */
-  def queryRanges(
-      groups: Int,
-      sets: Int,
-      slots: Int,
-      split: Boolean
-  ): Seq[Range] = {
-    require(groups > 0, s"A search needs at least one query group: $groups")
+  val MinRangeQueries: Int = 2048
+
+  /** How many ranges an exact search cuts `queries` queries into on `sets`
+    * sets: as many as it takes for the sets to fill `slots` slots, but no range
+    * under [[MinRangeQueries]] queries, and at least one. One when `split` is
+    * false.
+    */
+  def rangeCount(queries: Int, sets: Int, slots: Int, split: Boolean): Int = {
+    require(queries > 0, s"A search needs at least one query: $queries")
     require(sets > 0, s"A search needs at least one segment set: $sets")
     require(slots > 0, s"A search needs at least one task slot: $slots")
-    val count =
-      if (!split) 1
-      else math.min(groups, math.max(1, (slots + sets - 1) / sets))
-    val base = groups / count
-    val longer = groups % count
-    (0 until count)
+    if (!split) 1
+    else
+      math.max(
+        1,
+        math.min((slots + sets - 1) / sets, queries / MinRangeQueries)
+      )
+  }
+
+  /** Cuts `groups` query groups into `ranges` contiguous ranges, as even as the
+    * counts allow with the longer ranges first.
+    */
+  def queryRanges(groups: Int, ranges: Int): Seq[Range] = {
+    require(groups > 0, s"A search needs at least one query group: $groups")
+    require(
+      ranges > 0 && ranges <= groups,
+      s"$ranges ranges cannot each take a group of $groups"
+    )
+    val base = groups / ranges
+    val longer = groups % ranges
+    (0 until ranges)
       .scanLeft(0) { (start, index) =>
         start + base + (if (index < longer) 1 else 0)
       }
       .sliding(2)
       .map { case Seq(start, end) => start until end }
+      .toSeq
+  }
+
+  /** The query set cut into `count` contiguous groups, as even as the counts
+    * allow with the longer groups first: how an exact search gets a group for
+    * each of its ranges when the byte limit cuts fewer. Each group is smaller
+    * than the limit's, because the limit's groups were fewer.
+    */
+  def evenGroups(queries: Int, count: Int): Seq[QueryGroup] = {
+    require(queries > 0, s"A search needs at least one query: $queries")
+    require(
+      count > 0 && count <= queries,
+      s"$queries queries cannot fill $count groups"
+    )
+    val base = queries / count
+    val longer = queries % count
+    (0 until count)
+      .scanLeft(0) { (start, index) =>
+        start + base + (if (index < longer) 1 else 0)
+      }
+      .sliding(2)
+      .map { case Seq(start, end) => QueryGroup(start, end - start) }
       .toSeq
   }
 
@@ -407,8 +453,8 @@ object SearchPlan {
       splitQueries: Boolean = false
   ): Plan = {
     require(concurrency > 0, s"A search runs at least one task: $concurrency")
-    val queryGroups = groups(queries, layout, k, groupMaxBytes)
-    if (tasks.isEmpty) return Plan(Seq.empty, queryGroups)
+    val limited = groups(queries, layout, k, groupMaxBytes)
+    if (tasks.isEmpty) return Plan(Seq.empty, limited)
     val prints = tasks.map(task => task.segmentId -> footprint(task)).toMap
     val unknown = unknownSegmentBytes(layout, budget.segmentBytes)
     def kept(task: SegmentReadTask): Long =
@@ -425,30 +471,41 @@ object SearchPlan {
       val bytes = set.map(task => prints(task.segmentId).kept)
       if (bytes.forall(_.isDefined)) Some(bytes.flatten.sum) else None
     }
-    def rangesFor(sets: Int): Seq[Range] =
-      queryRanges(queryGroups.size, sets, concurrency, splitQueries)
+    // The groups and ranges for `sets` sets. When the byte limit cuts fewer
+    // groups than the ranges, the query set is cut into one group per range,
+    // each smaller than the limit's (decision 32).
+    def cut(sets: Int): (Seq[QueryGroup], Seq[Range]) = {
+      val count = rangeCount(queries, sets, concurrency, splitQueries)
+      val cutGroups =
+        if (limited.size >= count) limited else evenGroups(queries, count)
+      (cutGroups, queryRanges(cutGroups.size, count))
+    }
     val rowBytes = layout.rowBytes.toLong
-    val largestGroup = queryGroups.map(_.queries.toLong).max
     val estimated =
       tasks.filter(task => prints(task.segmentId).kept.isEmpty).map(_.segmentId)
 
     // Keeping the queries reads each segment once, so a set for every task
     // that runs at once is the fewest sets the search can have.
     val streamedSets = segmentSets(tasks, concurrency, Long.MaxValue, kept)
-    val streamedRanges = rangesFor(streamedSets.size)
+    val (streamedGroups, streamedRanges) = cut(streamedSets.size)
     val rangeQueries = streamedRanges
-      .map(_.map(index => queryGroups(index).queries.toLong).sum)
+      .map(_.map(index => streamedGroups(index).queries.toLong).sum)
       .max
     val perQuery =
       QueryIdBytes.toLong + k.toLong * CandidateBytes + TopKQueueBytes
     val arriving =
-      if (shuffled) largestGroup * (QueryIdBytes.toLong + rowBytes) else 0L
+      if (shuffled)
+        streamedGroups.map(_.queries.toLong).max *
+          (QueryIdBytes.toLong + rowBytes)
+      else 0L
     val queriesHeap = rangeQueries * perQuery + arriving
     val queriesOffHeap = rangeQueries * rowBytes + tasks.map(searching).max
 
     // Keeping the segments holds a set, the largest load beside it and the
-    // matrix of the group being searched.
-    val extra = tasks.map(loading).max + largestGroup * rowBytes
+    // matrix of the group being searched. The byte limit's largest group
+    // bounds any group a cut for more ranges makes.
+    val extra =
+      tasks.map(loading).max + limited.map(_.queries.toLong).max * rowBytes
     val capacity = math.max(rowBytes, budget.segmentBytes - extra)
     val keptSets = segmentSets(tasks, concurrency, capacity, kept)
     val segmentsOffHeap = keptSets.map(_.map(kept).sum).max + extra
@@ -459,7 +516,7 @@ object SearchPlan {
     )
       Plan(
         streamedSets,
-        queryGroups,
+        streamedGroups,
         estimated,
         streamedRanges,
         Resident.Queries,
@@ -467,17 +524,19 @@ object SearchPlan {
         streamedSets.map(knownKept),
         Some(needs)
       )
-    else
+    else {
+      val (keptGroups, keptRanges) = cut(keptSets.size)
       Plan(
         keptSets,
-        queryGroups,
+        keptGroups,
         estimated,
-        rangesFor(keptSets.size),
+        keptRanges,
         Resident.Segments,
         capacity,
         keptSets.map(knownKept),
         Some(needs)
       )
+    }
   }
 
   /** How many bytes of vectors one task keeps at once: its whole segment set,
