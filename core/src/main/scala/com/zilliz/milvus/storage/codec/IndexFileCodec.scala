@@ -336,7 +336,9 @@ private[storage] object IndexFileCodec extends Logging {
       length >= 24,
       "HNSW payload is too short to identify its persisted format"
     )
-    private val head = new Array[Byte](4)
+    // 32 bytes: a Faiss marker is the first four, a Cardinal stream header
+    // names its index type in the eight bytes at offset 16.
+    private val head = new Array[Byte](32)
     private val tail = new Array[Byte](24)
 
     def capture(buffer: ByteBuffer, offset: Long): Unit = {
@@ -363,6 +365,15 @@ private[storage] object IndexFileCodec extends Logging {
       * types, `Iw*` and `IB*` for the IVF types — which still catches an IVF
       * stream under a declared HNSW index, and Knowhere refuses a stream it
       * cannot read for the type it was asked for.
+      *
+      * A Cardinal build of Knowhere registers `HNSW` as Cardinal's index, so
+      * `build_index` on such a build hands over Cardinal's own stream: it opens
+      * with Cardinal's header — a version, then 8-byte name fields holding the
+      * index name, the index type and the data type, then the dimension, the
+      * row count, the metric and the length — and it ends in vector data, not
+      * in the 24-byte footer Milvus's `_mem.index.bin` carries. That stream is
+      * recognised by the index type at offset 16 and goes to the Cardinal
+      * engine, which validates the rest.
       */
     def engine(
         indexType: String,
@@ -393,25 +404,38 @@ private[storage] object IndexFileCodec extends Logging {
         )
         "HNSW"
       } else {
-        val magic = new String(head, StandardCharsets.US_ASCII)
+        val magic = new String(head, 0, 4, StandardCharsets.US_ASCII)
         val family = magic.take(2)
         val expected = VectorIndexFamilies.magicsOf(indexType)
-        require(
-          expected.contains(family),
-          s"Persisted $indexType payload starts with $magic; a $indexType index writes ${expected.toSeq.sorted
-              .mkString(" or ")}* or a Cardinal CARD stream"
-        )
-        require(
-          version >= 6,
-          "A Faiss index stream requires vector index format version 6 or later"
-        )
-        val engine =
-          if (indexType == "HNSW" && cardinalSupported) "HNSW_DEPRECATED"
-          else indexType
-        logInfo(
-          s"Persisted index format selected: format=Faiss/$magic, engine=$engine, version=$version"
-        )
-        engine
+        if (expected.contains(family)) {
+          require(
+            version >= 6,
+            "A Faiss index stream requires vector index format version 6 or later"
+          )
+          val engine =
+            if (indexType == "HNSW" && cardinalSupported) "HNSW_DEPRECATED"
+            else indexType
+          logInfo(
+            s"Persisted index format selected: format=Faiss/$magic, engine=$engine, version=$version"
+          )
+          engine
+        } else {
+          val named = new String(head, 16, 8, StandardCharsets.US_ASCII)
+          require(
+            indexType == "HNSW" && named.startsWith("HNSW") && !named
+              .startsWith("HNSW_"),
+            s"Persisted $indexType payload starts with $magic; a $indexType index writes ${expected.toSeq.sorted
+                .mkString(" or ")}*, a Cardinal CARD stream, or a Cardinal stream header naming HNSW"
+          )
+          require(
+            cardinalSupported,
+            "This persisted index was built by Cardinal and requires a verified Knowhere build with WITH_CARDINAL enabled"
+          )
+          logInfo(
+            s"Persisted index format selected: format=Cardinal/stream, engine=HNSW, version=$version"
+          )
+          "HNSW"
+        }
       }
     }
   }
@@ -779,8 +803,11 @@ private[storage] object IndexFileCodec extends Logging {
       s"""{"metric_type":"$metric","dim":$dimension}"""
     )
     try {
-      // Cardinal Serialize uses the same stream for FileManager output and
-      // BinarySet[Type()]. This restores that documented in-memory interface.
+      // Milvus's _mem.index.bin is Cardinal's serialized stream with the
+      // 24-byte footer its FileManager path appends; Cardinal deserializes it
+      // through BinarySet[Type()] as one payload. A stream that build_index
+      // obtained from BinarySet has the header but no footer and takes the
+      // sliced-payload path instead (PayloadFormatProbe).
       logInfo(
         s"Persisted index allocating: segment=${index.segmentId}, payload=HNSW, " +
           s"bytes=${payload.length}, totalBytes=${payload.length}"
