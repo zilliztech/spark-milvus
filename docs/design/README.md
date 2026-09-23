@@ -10,6 +10,7 @@
 | 理解表版本：各种输入怎样描述成同一种表模型，又怎样交给读、搜索和建索引 | architecture/ | [表版本](architecture/table-version.html)（决策 25） |
 | 开发向量搜索与建索引 | architecture/ | [向量搜索与建索引](architecture/vector-search.html)（单查询索引搜索已实现；查询集、exact 模式、建索引待实现） |
 | 搜索路径怎样按机器和并发选块大小、常驻预算，索引载荷为何不设上限 | architecture/ | [搜索路径的资源自适应](architecture/search-resources.html) `[草稿]`（2026-09-21 实测：并发 × 块 ≤ L3 时 1.5 到 2.1 亿对/秒，越过掉到 1/5；2 GiB 常驻预算在 local[64] 下装不下一段；1 GiB 索引上限挡掉 Milvus 默认段的每一个 HNSW。提案：块与预算由机器算出，上限去掉改为元数据校验，内存归 executor） |
+| 精确搜索为什么每核慢十倍、6.2 GB 的段为什么建不了索引，两条链路在代码里怎么走 | architecture/ | [精确搜索与大段建索引的代码级原理](architecture/exact-search-and-index-build-internals.html)（2026-09-23：按条拆任务与 faiss 的逐行路径、批量入口与单线程规则、建索引链路上的两处 int 与地址入口、内存的账、Cardinal 构建下 HNSW 的读回；数字来自 UAT 实测） |
 | core 怎么访问对象存储、凭证怎么下发 | architecture/ | [存储访问层](architecture/storage-access.html)（未完待续） |
 | 改动对象存储凭证、provider 链、按桶配置 | architecture/ | [对象存储认证](architecture/storage-auth.html) |
 | backfill 怎么访问多个桶 | apps/ | [backfill 的多桶存储访问](apps/backfill-storage.html) |
