@@ -374,6 +374,43 @@ class IndexFileCodecTest extends AnyFunSuite {
           .engine(indexType, 10, true)
       }
     }
+    // The stream a Cardinal build of Knowhere hands build_index for HNSW: no
+    // Faiss marker and no CARD footer, but Cardinal's header, which names the
+    // index type at offset 16. Seen on a UAT build of 2026-09-22: version 8,
+    // name "unknown", type "HNSW", data type "BF16", dim 768, rows, "L2",
+    // length; the 8-byte name fields keep whatever followed a shorter value.
+    def cardinalStream(indexType: String): Array[Byte] = {
+      val bytes = new Array[Byte](96)
+      val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+      buffer.putLong(8L)
+      buffer.put("unknown\u0000".getBytes(UTF_8))
+      buffer.put((indexType + "own\u0000").take(8).getBytes(UTF_8))
+      buffer.put("BF16own\u0000".getBytes(UTF_8))
+      buffer.putInt(768).putInt(2069576)
+      buffer.put("L216\u0000\u0000\u0000\u0000".getBytes(UTF_8))
+      buffer.putLong(2349807957L)
+      // The tail of the stream is vector data, here the float 0.015625.
+      (bytes.length - 24 until bytes.length by 4).foreach(i =>
+        ByteBuffer.wrap(bytes, i, 4).order(ByteOrder.LITTLE_ENDIAN).putFloat(0.015625f)
+      )
+      bytes
+    }
+    assert(probe(cardinalStream("HNSW")).engine("HNSW", 8, true) == "HNSW")
+    // Without Cardinal in the library the stream cannot be read, and the
+    // message says which build it needs.
+    val missing = intercept[IllegalArgumentException](
+      probe(cardinalStream("HNSW")).engine("HNSW", 8, false)
+    )
+    assert(missing.getMessage.contains("WITH_CARDINAL"))
+    // The header has to name the declared type: an HNSW_SQ stream under a
+    // declared HNSW, or a Cardinal HNSW stream under a declared HNSW_SQ, is
+    // still a mismatch.
+    intercept[IllegalArgumentException](
+      probe(cardinalStream("HNSW_SQ")).engine("HNSW", 8, true)
+    )
+    intercept[IllegalArgumentException](
+      probe(cardinalStream("HNSW")).engine("HNSW_SQ", 8, true)
+    )
   }
 
   test(

@@ -316,7 +316,11 @@ object SegmentIndexSearchSmoke {
           "job" -> jobId,
           "input" -> "built",
           "snapshot_id" -> 5000L,
-          "snapshot_name" -> "built-5000"
+          "snapshot_name" -> "built-5000",
+          // The fixture's data sits under files/, outside the built prefix, so
+          // this is a snapshot only the connector reads; restorable has
+          // defaulted to true since restore_snapshot arrived.
+          "restorable" -> false
         ),
         options =
           properties ++ Map(MilvusOption.SnapshotPath -> "to-build.json")
