@@ -1,0 +1,289 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>精确搜索与大段建索引的代码级原理</title>
+<style>
+  :root{color-scheme:light dark;--paper:#fafaf8;--ink:#202824;--muted:#53615a;--line:#d7dfd9;--link:#16654b;--code:#eef2ee;--accent:#e6f1e9}
+  @media(prefers-color-scheme:dark){:root{--paper:#171c19;--ink:#e5ebe6;--muted:#a5b2a9;--line:#39473e;--link:#83d3ae;--code:#242d27;--accent:#253b2c}}
+  *{box-sizing:border-box}html{scroll-padding-top:24px}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.85 system-ui,"PingFang SC","Microsoft YaHei",sans-serif}
+  main{max-width:1040px;margin:auto;padding:48px 30px 88px}h1{font-size:32px;line-height:1.35;margin:0 0 24px}h2{font-size:23px;line-height:1.5;margin:44px 0 18px;padding-top:20px;border-top:1px solid var(--line)}h3{font-size:18px;margin:28px 0 12px}p{margin:14px 0}.lead{font-size:20px}.meta{color:var(--muted);font-size:14px}
+  a{color:var(--link);text-underline-offset:3px;overflow-wrap:anywhere}a:focus-visible{outline:2px solid var(--link);outline-offset:4px}nav{display:flex;flex-wrap:wrap;gap:6px 20px;padding:18px 0;font-size:14px}
+  code{font:.88em/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:2px 4px;overflow-wrap:anywhere}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:14px}th,td{text-align:left;vertical-align:top;border:1px solid var(--line);padding:10px 12px;overflow-wrap:anywhere}th{background:var(--code)}ul,ol{padding-left:25px}li{margin:8px 0}
+  figure{margin:22px 0}.figure{overflow-x:auto}figcaption{color:var(--muted);font-size:14px;margin-top:6px}
+  svg{display:block;min-width:720px;width:100%;height:auto}svg text{fill:var(--ink);font:13px system-ui,"PingFang SC",sans-serif}svg .title{font-weight:600;font-size:14px}svg .label{fill:var(--muted);font-size:13px}svg rect{fill:var(--code);stroke:var(--line);stroke-width:1.2}svg rect.connector{fill:var(--accent)}svg rect.data{fill:var(--paper)}svg path{stroke:var(--link);fill:none;stroke-width:1.8}svg path.result{stroke-dasharray:6 5}svg marker path{fill:var(--link);stroke:none}
+  table.facts th{width:10em;white-space:nowrap;font-weight:600}table.facts{margin:10px 0 22px}
+  td.better{background:var(--accent)}
+  @media(max-width:600px){main{padding:28px 18px 56px}h1{font-size:27px}table{font-size:13px}th,td{padding:8px}h2{font-size:21px}}
+  @media print{main{max-width:none;padding:0}nav{display:none}h2,h3{break-after:avoid}tr{break-inside:avoid}}
+  pre{font:.85em/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere;margin:10px 0}pre code{background:none;padding:0}
+  table.facts th{width:9em}
+</style>
+
+<main lang="zh-CN">
+<h1>精确搜索与大段建索引的代码级原理</h1>
+<p class="lead"><strong>精确搜索每核慢十倍，出在「谁来切工作」切错了层；6.2 GB 的段建不了索引，出在 64 位的链路中间夹了两处 32 位整数。算法本身没有问题。</strong></p>
+<ol>
+<li><strong>问题一：精确搜索每核慢十倍。</strong>现象：Spark 任务拿几百到几千条查询对一段底库算全部距离，CPU 时间是应有的 10 倍。原因：Knowhere 把一次调用拆成每条查询一个任务，faiss 收到的永远是单条查询，只能走逐行内核，底库每个数搬进来只做一次乘加，瓶颈是内存带宽。修法：新入口把整批查询一次交给 faiss 走矩阵乘（SGEMM），一个数搬进来服务整批查询；并行改由 Spark 的任务数承担，调用内部单线程。</li>
+<li><strong>问题二：6.2 GB 的段建不了索引。</strong>现象：一个 segment 的向量超过 2 GiB，<code>build_index</code> 直接报错。原因：从连接器到 Knowhere C 层是一条 64 位的链路，中间却夹着两处 int：Java 的 ByteBuffer 容量是 int，连接器交出 ByteBuffer 时又自己写死了 2 GiB 上限。修法：加一个按地址和 64 位长度建索引的入口，跳过这两步，向量从 Arrow 的缓冲直接进 C 层。</li>
+<li><strong>问题三，测试时发现：Cardinal 构建下建出的 HNSW 读不回。</strong>现象：index 模式读回 <code>build_index</code> 写出的 HNSW 时整段拒绝。原因：带 Cardinal 的 Knowhere 里 HNSW 是 Cardinal 的索引，文件格式与 faiss 的不同，连接器读文件时只认 faiss 的头。修法：格式探测也认 Cardinal 的头（PR #164）。</li>
+</ol>
+<nav aria-label="目录"><a href="#p1">一、精确搜索</a><a href="#p2">二、大段建索引</a><a href="#p3">三、Cardinal 构建下的 HNSW</a><a href="#ref">代码坐标</a></nav>
+
+<h2 id="p1">一、精确搜索：为什么每核慢十倍，批量入口怎么快回来</h2>
+
+<h3>1.1 老入口怎么拆：nq 条查询拆成 nq 个单条任务</h3>
+<p><strong>Knowhere 收到 nq 条查询后，按条拆成 nq 个任务丢进自己的进程级线程池，每个任务只拿一条查询去调 faiss，所以 faiss 永远只看到 nx = 1。</strong>代码在 <code>src/common/comp/brute_force.cc</code>：</p>
+<pre><code>auto pool = ThreadPool::GetGlobalSearchThreadPool();
+for (int i = 0; i &lt; nq; ++i) {
+    futs.emplace_back(pool-&gt;push([&amp;, index = i] {
+        ThreadPool::ScopedSearchOmpSetter setter(1);
+        RETURN_IF_ERROR(brute_force_dense_impl&lt;DataType&gt;(xq, index, xb, inv_norms.get(),
+                                                         cur_labels, cur_distances, dim, nb, topk, ...));
+    }));
+}
+// brute_force_dense_impl：cur_query 指向第 query_idx 条，nx 恒为 1
+faiss::cppcontrib::knowhere::knn_L2sqr(cur_query, xb, dim, /*nx=*/1, nb, topk, cur_distances, cur_labels, nullptr, id_selector);</code></pre>
+<ol>
+<li><strong>怎么拆。</strong><code>BruteForce::SearchWithBuf</code> 对每条查询向全局搜索池 push 一个任务；任务内先把 OpenMP 线程数设成 1，再以 <code>query_idx</code> 取出这一条查询调 faiss，nx 恒为 1。</li>
+<li><strong>拆到哪个池。</strong>这个池属于 Knowhere，连接器没有自己的池。<code>knowhere::ThreadPool</code> 来自 Knowhere 依赖的 milvus-common，包着一个 folly 的 <code>CPUThreadPoolExecutor</code>，随 libknowhere.so 加载进每个 executor 的 JVM，一个进程一个，该 executor 上所有任务共用。</li>
+<li><strong>池有多大。</strong>第一次用到时按整机硬件线程数创建，除非先调过 <code>knowhere_search_thread_pool_resize</code>；连接器目前没有调，这就是 G4 要补的选项。</li>
+<li><strong>为什么 Milvus 这么设计。</strong>在线服务一次请求只带几条查询，拆开才能用满多核、延迟最低。</li>
+<li><strong>为什么在连接器里不对。</strong>exact 模式里一个任务拿着几百到几千条查询，对着几十 MiB 的底库反复调；多核已经由 Spark 的任务用上了，每个核却在用最慢的取数方式（1.3）。</li>
+</ol>
+
+<h3>1.2 faiss 的分流：为什么永远走逐行</h3>
+<p><strong>faiss 有逐行和 SGEMM 两条路，按查询数和有没有选择器分流；Knowhere 传进来的 nx 永远是 1，阈值又是 16384，SGEMM 那条路一次都到不了。</strong>代码在 <code>cppcontrib/knowhere/utils/distances.cpp</code>：</p>
+<pre><code>if (res.sel || nx &lt; distance_compute_blas_threshold) {
+    exhaustive_L2sqr_seq&lt;BlockResultHandler&gt;(x, y, d, nx, ny, res);      // 逐行
+} else {
+    exhaustive_L2sqr_blas&lt;BlockResultHandler&gt;(x, y, d, nx, ny, res, y_norm2);  // SGEMM
+}
+int distance_compute_blas_threshold = 16384;   // Knowhere 的 faiss 分支；标准 faiss 里是 128000，上游默认 20</code></pre>
+<ol>
+<li><strong>分流条件。</strong>带选择器（位图）或查询数小于阈值，走逐行的 <code>exhaustive_L2sqr_seq</code>；否则走 SGEMM 的 <code>exhaustive_L2sqr_blas</code>。</li>
+<li><strong>阈值。</strong>Knowhere 的 faiss 分支设成 16384；标准 faiss 里是 128000，faiss 上游默认 20。</li>
+<li><strong>结果。</strong>nx 恒为 1，永远小于阈值，进逐行；带位图时 <code>res.sel</code> 非空，同样进逐行。所以 <code>exhaustive_L2sqr_blas</code> 在 Knowhere 里一次都没跑过。</li>
+</ol>
+
+<h3>1.3 逐行与分块的差别：每搬进一个数能用几次</h3>
+<p><strong>乘加次数定死是 nq × N × d，快慢只看每从内存搬进一个数能用几次。逐行用 1 次就丢，分块用几百到几千次。</strong></p>
+<ol>
+<li><strong>算得远比搬得快。</strong>8375C 一个 vCPU 每秒约 930 亿次乘加，从 L3 往一个核搬数每秒只有约 70 亿个 float（27 GB/s）。一个数搬进来至少要用十几次，乘加单元才不空转。</li>
+<li><strong>逐行：一个数用 1 次。</strong>老入口的内核 <code>fvec_L2sqr_batch_4_avx512</code> 把一条查询留在寄存器，扫一遍底库，底库每个数取进来做一次乘加就丢；nq 条查询把底库扫 nq 遍。瓶颈在带宽，所以加线程没用：8 个线程抢同一条 L3，每行反而从 125 ns 涨到 168 ns。</li>
+<li><strong>分块：一个数用几百到几千次。</strong>SGEMM 把底库切成 1024 行一块、查询切成 4096 条一块（<code>distance_compute_blas_database_bs</code>、<code>distance_compute_blas_query_bs</code>），一块底库取进缓存后对整块查询一次算完 Q·Bᵀ，每个数取进来服务整块查询。瓶颈换成乘加单元。</li>
+<li><strong>实测（8375C，单线程）。</strong>逐行每行 125 ns：内核 23.7，搬数 89，过滤加堆 12。同一个 <code>knn_L2sqr</code>、同一份数据整批传走 SGEMM，8.0e7 对/秒对 8.1e6 对/秒，9.9 倍。</li>
+</ol>
+<p><strong>名词</strong></p>
+<ul>
+<li><strong>SGEMM</strong>：BLAS 单精度矩阵乘的标准例程名，S 单精度、GE 一般矩阵、MM 矩阵乘。OpenBLAS、MKL 都实现它。</li>
+<li><strong>Q·Bᵀ</strong>：Q 是 nq × d 的查询矩阵，B 是 N × d 的底库矩阵。乘积是 nq × N 的表，第 (i, j) 格是查询 i 与底库 j 的内积，一次矩阵乘算完所有对。</li>
+<li><strong>从内积到距离</strong>：IP 直接用内积。L2 按 ‖x‖² + ‖y‖² − 2x·y 还原，两个范数事先算好，负数截成 0。</li>
+</ul>
+<figure><div class="figure">
+<svg viewBox="0 0 1040 250" role="img" aria-label="逐行与分块两种取数方式">
+<defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker></defs>
+<text class="label" x="20" y="24">逐行：Knowhere 老入口</text>
+<rect x="20" y="36" width="120" height="44" rx="6"/><text class="title" x="32" y="63">查询 q₁</text>
+<rect x="20" y="92" width="120" height="44" rx="6"/><text class="title" x="32" y="119">查询 q₂</text>
+<rect x="20" y="148" width="120" height="44" rx="6"/><text class="title" x="32" y="175">查询 q₃ …</text>
+<rect class="data" x="200" y="36" width="300" height="156" rx="6"/>
+<text class="title" x="212" y="60">底库 N 行</text><text x="212" y="84">每条查询从头到尾扫一遍</text><text x="212" y="104">取一个数，做一次乘加</text><text x="212" y="124">nq 条查询，扫 nq 遍</text><text x="212" y="152">每条查询一个池任务</text><text x="212" y="172">faiss 收到的 nx 永远是 1</text>
+<path d="M140 58H196" marker-end="url(#a1)"/><path d="M140 114H196" marker-end="url(#a1)"/><path d="M140 170H196" marker-end="url(#a1)"/>
+<text class="label" x="560" y="24">分块：SGEMM，批量入口</text>
+<rect x="560" y="36" width="150" height="156" rx="6"/><text class="title" x="572" y="60">查询块</text><text x="572" y="84">最多 4096 条</text><text x="572" y="104">留在缓存里</text>
+<rect class="data" x="760" y="36" width="260" height="156" rx="6"/>
+<text class="title" x="772" y="60">底库块 1024 行</text><text x="772" y="84">取进来一次</text><text x="772" y="104">对整个查询块做完内积</text><text x="772" y="124">取一个数，用几百到几千次</text><text x="772" y="152">距离 = ‖x‖² + ‖y‖² − 2x·y</text><text x="772" y="172">负数截成 0</text>
+<path d="M710 114H756" marker-end="url(#a1)"/>
+</svg></div>
+<figcaption>左边每条查询各扫一遍底库；右边一块底库进缓存后服务整个查询块。</figcaption></figure>
+<p>实测把这个差别量了出来（Xeon 8375C，单线程）：逐行路径每行 125 纳秒，其中内核本身 23.7 纳秒，从 L3 把这一行搬进来 89 纳秒，逐行过滤加堆 12 纳秒；同一个 <code>knn_L2sqr</code>、同一份数据整批传走 SGEMM，8.0e7 对/秒对 8.1e6 对/秒，9.9 倍。瓶颈从内存带宽换成了乘加单元。</p>
+<h3>1.4 新入口 <code>knowhere_bruteforce_batched</code> 做了什么</h3>
+<p><strong>把整批查询一次传给 faiss 换来 SGEMM，同时把调用内部压成单线程，并行交给 Spark 的任务数。</strong>不改 faiss，不改老入口，在 C 接口层直接调 faiss 导出的三个函数（<code>src/c_api/c_api.cc</code>，b9497f4f）：</p>
+<pre><code>Require(FP32 底库与查询; metric 是 L2、IP 或 COSINE);
+SingleThreaded single;   // RAII 对象：构造时改设置，作用域结束时恢复
+knn_L2sqr(xq, xb, d, nq, nb, k, distances, ids, nullptr, nullptr);   // 整批 nq；老入口这里是 1
+// IP 调 knn_inner_product；COSINE 先归一化查询、按底库范数倒数调 knn_cosine，与老入口相同</code></pre>
+<ol>
+<li><strong>整批传。</strong>
+<ul>
+<li><strong>改调用</strong>：nx 从 1 变成 nq，faiss 才会走 <code>exhaustive_L2sqr_blas</code>。</li>
+<li><strong>改阈值</strong>：<code>distance_compute_blas_threshold</code> 从 Knowhere 分支的 16384 临时改成 faiss 上游默认的 20，否则几百到几千条的查询组仍不够数。</li>
+</ul>
+</li>
+<li><strong>调用内部单线程。</strong>并行交给 Spark 的任务数，调用内部两个库都压成 1。
+<ul>
+<li><strong>多出来的两层并行</strong>：走上 BLAS 路径后，OpenBLAS 算 sgemm 自带线程池；faiss 把 Q·Bᵀ 换算成距离那段循环是 <code>omp parallel</code>。两者默认都起满整机线程。</li>
+<li><strong>为什么不能留</strong>：Spark 已经在这台机器上跑着 N 个任务，各自都调这个入口。再让两个库各开一套线程就是几十倍的超卖，两套线程池的空闲线程还互相自旋抢核；实测 7 加 7 个线程，吞吐只有单线程的一半。</li>
+<li><strong>为什么不值得留</strong>：一次调用内多线程本身不划算，4 个 OpenBLAS 线程只有 2.3 倍；N 个单线程任务是 N 倍。</li>
+<li><strong>怎么压</strong>：OpenMP 的线程数是每个调用线程各一份，在任务线程上设 1 即可。OpenBLAS 的是全进程一份（pthreads 版；local 版本的设置函数改的也是它），只能在有批量调用在跑时全进程保持 1。</li>
+</ul>
+</li>
+<li><strong>改完恢复。</strong>阈值与 OpenBLAS 线程数都是全进程共享，同一进程里的老入口和建索引也在用，所以由 RAII 对象管。
+<ul>
+<li><strong>谁改谁恢复</strong>：第一个进入的调用保存旧值、写新值，最后一个退出的恢复；用互斥锁和在途计数配合，抛异常也会恢复。</li>
+<li><strong>老入口不受影响</strong>：它以 nx = 1 调 faiss，够不到任何阈值，行为不变。</li>
+</ul>
+</li>
+</ol>
+
+<h3>1.5 连接器怎么接</h3>
+<p><strong>连接器按元素类型和度量选入口；新入口只收一块连续、没有洞的底库矩阵，所以批里有不该参与的行时，先把要参与的行拷成一块，搜完再把行号换回去；并行度交给 Spark 任务。</strong>代码在 <code>core/…/index/ExactScan.scala</code>：</p>
+<pre><code>private val BatchedMetrics = Set("L2", "IP", "COSINE")
+if (dtype == DType.FLOAT32 &amp;&amp; BatchedMetrics(metric)) batched(...) else perQuery(...)
+
+// compact：把没被排除的行按原顺序拷进新缓冲，连续的一段一次拷；batchRows(k) 记下新缓冲第 k 行原来是批内第几行
+var start = excluded.nextClearBit(0)
+while (start &lt; rows) {
+  val end = ... excluded.nextSetBit(start) ...            // [start, end) 是连续的一段保留行
+  target.setBytes(written.toLong * rowBytes, run)          // 这一段整体拷进新缓冲
+  var row = start
+  while (row &lt; end) { batchRows(written) = row; written += 1; row += 1 }
+  start = excluded.nextClearBit(end)
+}
+// collect：引擎返回的行号先查 batchRows 换回批内行号，再加批首行得到段内行号</code></pre>
+<ol>
+<li><strong>分派。</strong><code>ExactScan.batch</code> 看元素类型和度量：float32 且 L2、IP、COSINE 走 <code>batched</code>；其余元素类型走原来的 <code>perQuery</code>，位图原样交给老入口。</li>
+<li><strong>批里有不该参与的行时：先把参与的行拷成一块，再把行号换回去。</strong>
+<ul>
+<li><strong>为什么有这件事</strong>：一批底库里有些行不该参与，就是被删除的、被过滤条件排掉的、向量为空的行（<code>SegmentVectors.Batch.excluded</code>）。老入口用一张位图告诉 faiss 跳过它们；新入口不收位图，因为 faiss 一看到选择器就走回逐行路径（1.2），而 SGEMM 要的是一块连续的矩阵，中间不能有洞。</li>
+<li><strong>做了什么</strong>：把要参与的行按原顺序拷进一块新缓冲，被排除的行不拷，得到一个没有洞的小矩阵。连续的保留行算一段，一段一次拷，删得少的批就是几次大拷贝。同时记一张表 <code>batchRows</code>：新缓冲第 k 行原来是批内第几行。</li>
+<li><strong>怎么换回来</strong>：faiss 返回的行号是新缓冲里的。<code>collect</code> 先查 <code>batchRows</code> 换回批内行号，再加这一批在段里的起始行，得到段内行号；顺手检查换回来的行确实没被排除。</li>
+<li><strong>代价</strong>：多一次内存拷贝，拷的量是保留行的字节数，每批每个查询组一次，与查询条数无关。没有排除行的批不拷，直接把 Arrow 的缓冲借给 faiss。</li>
+</ul>
+</li>
+<li><strong>块大小。</strong>base 块改成常量 32 MiB（<code>SearchResources.DefaultBatchBytes</code>）：入口内部自己按 4096 × 1024 分块，32 与 128 MiB 实测同速；之前按 L3 推块大小的公式是给逐行内核的。</li>
+<li><strong>并行度来自任务。</strong><code>spark.task.cpus</code> 取 1。段组少于任务槽时，<code>SearchPlan</code> 把查询组切成 R = min(组数, ⌈槽数 ÷ 段组数⌉) 个连续范围，任务数 = 段组数 × R，代价是底库读取乘 R（决策 28）。</li>
+</ol>
+
+<h3>1.6 老入口有、新入口没有的四样东西，各自怎么处理</h3>
+<p><strong>新入口比老入口少四样东西。两样由连接器补回，一样不做仍走老入口，一样靠实测确认精度够。</strong></p>
+<table><thead><tr><th>老入口有、新入口没有</th><th>落地</th><th>代码</th></tr></thead><tbody>
+<tr><td>一次调用内部多核并行</td><td>任务级并行，入口单线程</td><td><code>SingleThreaded</code>；<code>SearchPlan.segmentSets</code> 的查询范围</td></tr>
+<tr><td>排除位图</td><td>调用前把参与的行拷成一块，算完把行号换回去</td><td><code>ExactScan.compact</code> / <code>Compacted.batchRows</code></td></tr>
+<tr><td>fp16、bf16、int8、二值内核</td><td>不做，仍走老入口</td><td><code>ExactScan.batch</code> 的分派条件</td></tr>
+<tr><td>逐对直算 Σ(x−y)²</td><td>接受 ‖x‖² + ‖y‖² − 2x·y，靠实测：256 条查询 top-10 集合 0 条不同，分数最大差 3.7e-4，相对 2.9e-7</td><td><code>knn_L2sqr</code> 的 BLAS 分支；测试 <code>NativeVectorSearchBatchedTest</code></td></tr>
+</tbody></table>
+
+<h3>1.7 UAT 实测：CPU 时间降 10 倍，总时长为什么只降三成</h3>
+<p><strong>2026-09-21 到 23 的 UAT 实测：CPU 时间降了 10 倍，总时长只降三成，因为剩下的时间花在读底库上。</strong></p>
+<ol>
+<li><strong>工作量相同。</strong>1k 查询 × 31M 行 = 3.1e10 对距离，两条路径算的对数一样。</li>
+<li><strong>CPU 时间。</strong>老路径 executor CPU 6,308 秒，新路径 581 到 634 秒。每 CPU 秒算的对数从 4.9e6 到 4.9e7 至 5.3e7，正是 1.3 那个 9.9 倍在集群上的体现。</li>
+<li><strong>总时长。</strong>只从 320 秒到 231 秒。读 95 GB 底库串行在任务里，每任务 44 到 62 MB/s，CPU 只占运行时间的 13% 到 22%，其余时间在等 S3。</li>
+<li><strong>剩下的问题。</strong>算术这一半解决了，下一半在读取与计算的重叠。</li>
+</ol>
+
+<h2 id="p2">二、大段建索引：6.2 GB 为什么建不了，地址入口怎么绕过</h2>
+
+<h3>2.1 改造前的五步链路：两处 int 卡住 2 GiB</h3>
+<p><strong>建索引是这条链路上唯一一次把整个 segment 装进一块缓冲的地方，五步里有两步用 int 计长度，6.2 GB 在第一处就停下。</strong></p>
+<figure><div class="figure">
+<svg viewBox="0 0 1040 250" role="img" aria-label="落地前建索引输入链路上各处的容量类型">
+<defs><marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker></defs>
+<text class="label" x="20" y="24">连接器</text>
+<rect class="connector" x="20" y="36" width="180" height="84" rx="6"/><text class="title" x="30" y="60">IndexWriter.assemble</text><text x="30" y="80">整段向量装进一块</text><text x="30" y="98">ArrowBuf，容量 long</text>
+<rect class="connector" x="230" y="36" width="180" height="84" rx="6"/><text class="title" x="240" y="60">nioBuffer(0, int)</text><text x="240" y="80">ArrowBuf 转 ByteBuffer</text><text x="240" y="98">长度是 int：2 GiB 上限</text>
+<text class="label" x="440" y="24">Knowhere 绑定</text>
+<rect x="440" y="36" width="180" height="84" rx="6"/><text class="title" x="450" y="60">KnowhereIndex.build</text><text x="450" y="80">只收 ByteBuffer</text><text x="450" y="98">容量 int：2 GiB 上限</text>
+<rect x="650" y="36" width="180" height="84" rx="6"/><text class="title" x="660" y="60">knowhere_vectors</text><text x="660" y="80">地址与 bytes，uint64</text><text x="660" y="98">rows int64：没有上限</text>
+<rect x="860" y="36" width="160" height="84" rx="6"/><text class="title" x="870" y="60">Index::Build</text><text x="870" y="80">自己复制一份向量</text><text x="870" y="98">再建图</text>
+<path d="M200 78H226" marker-end="url(#b1)"/><path d="M410 78H436" marker-end="url(#b1)"/><path d="M620 78H646" marker-end="url(#b1)"/><path d="M830 78H856" marker-end="url(#b1)"/>
+<text class="label" x="240" y="160">上限一：连接器写死</text><text class="label" x="240" y="180">bytes ≤ Int.MaxValue</text>
+<text class="label" x="450" y="160">上限二：Java 类型决定</text><text class="label" x="450" y="180">ByteBuffer 容量是 int</text>
+<text class="label" x="660" y="160">从这里往右全是 64 位</text>
+</svg></div>
+<figcaption>改造前的链路：五步里只有中间两步以 int 计长度。改造后这两步被跳过，地址和 long 长度从第一步直接进第四步。</figcaption></figure>
+<ol>
+<li><strong>第一处 int：连接器自己写死。</strong><code>IndexWriter.assemble</code> 把整段向量装进一块 ArrowBuf（容量是 long），随后交出 ByteBuffer 时写死了上限（<code>core/…/index/IndexWriter.scala</code>）。UAT 上的报错就出在这一步：<code>A segment of 6233038848 vector bytes exceeds one build buffer</code>。
+<pre><code>require(buffer.capacity() &lt;= Int.MaxValue,
+        s"$&#123;buffer.capacity()&#125; vector bytes do not fit one ByteBuffer; build from the address")
+buffer.nioBuffer(0, buffer.capacity().toInt).order(ByteOrder.nativeOrder())</code></pre>
+</li>
+<li><strong>第二处 int：Java 类型决定。</strong><code>KnowhereIndex.build(ByteBuffer …)</code> 经 <code>NativeBuffers.region</code> 只查 direct、可写、字节序，JNI 用 <code>GetDirectBufferAddress</code> 与 <code>GetDirectBufferCapacity</code> 取地址和长度。容量虽以 jlong 返回，ByteBuffer 的 capacity、position、limit 在语言里都是 int，任何 direct buffer 都不能超过 2<sup>31</sup> − 1 字节；Arrow 的 <code>nioBuffer(long, int)</code> 因此只能切出 2 GiB 以内的窗口。</li>
+<li><strong>其余三步没有上限。</strong>Arrow 的缓冲用 long 计容量，分配器对超过 Integer.MAX_VALUE 的请求直接走 Unsafe 分配，所以 6.2 GB 的 ArrowBuf 分得出来；<code>knowhere_vectors</code> 的 bytes 是 uint64、rows 是 int64；<code>Index::Build</code> 自己复制一份向量再建图。</li>
+</ol>
+
+<h3>2.2 C 层本来就是 64 位</h3>
+<p><strong>C 接口从一开始就用 64 位长度和行数，并自己做溢出、容量、对齐检查，没有 2 GiB 的概念。</strong></p>
+<pre><code>typedef struct { const void* data; uint64_t bytes; int64_t rows; int32_t dimensions; int32_t dtype; } knowhere_vectors;
+
+uint64_t CheckVectors(const knowhere_vectors* vectors) {
+    Require(vectors-&gt;rows &gt;= 0 &amp;&amp; vectors-&gt;dimensions &gt; 0, ...);
+    const uint64_t row_bytes = ... CheckedBytes(vectors-&gt;dimensions, element);   // 乘法溢出检查
+    const uint64_t bytes = CheckedBytes(vectors-&gt;rows, row_bytes);
+    CheckBuffer(vectors-&gt;data, vectors-&gt;bytes, bytes, element);   // 容量够、非空、按元素宽度对齐
+    return bytes;
+}</code></pre>
+<ol>
+<li><strong>类型。</strong><code>knowhere_vectors</code> 的 bytes 是 uint64，rows 是 int64。</li>
+<li><strong>检查。</strong><code>CheckVectors</code> 先算 rows × 每行字节，两次乘法都带溢出检查；<code>CheckBuffer</code> 查缓冲容量装得下、指针非空、地址按元素宽度对齐。</li>
+<li><strong>所有权。</strong><code>knowhere_index_build</code> 校验后先把整份向量 memcpy 进 <code>IndexResource.build_data</code>（<code>c_api.cc</code> 412 到 414 行），再把这份拷贝交给 <code>Index::Build</code>，调用返回后调用方的缓冲可以释放。这份拷贝是索引资源的成员，Build 返回后不释放，索引关闭才走。</li>
+</ol>
+
+<h3>2.3 地址入口：跳过用 int 的两步</h3>
+<p><strong>Java 加一个重载，JNI 加一个 native 方法，用地址和 64 位长度直接填同一个 <code>knowhere_vectors</code>、调同一个 <code>knowhere_index_build</code>（42019082）。</strong></p>
+<pre><code>// Java
+public synchronized void build(long address, long bytes, long rows, int dimension, String parameters) {
+    if (address == 0L) throw new IllegalArgumentException("A native address is required");
+    if (bytes &lt; 0L)    throw new IllegalArgumentException("The byte length is negative");
+    NativeBindings.indexBuildAddress(requireHandle(), address, bytes, rows, dimension, dtype.code, parameters);
+}
+// JNI
+knowhere_vectors vectors{reinterpret_cast&lt;const void*&gt;(static_cast&lt;uintptr_t&gt;(address)),
+                         static_cast&lt;uint64_t&gt;(bytes), rows, dimension, dtype};
+CheckStatus(env, knowhere_index_build(handle, &amp;vectors, config.get()));</code></pre>
+<ol>
+<li><strong>绑定层。</strong><code>KnowhereIndex.build(long address, long bytes, long rows, int dimension, String parameters)</code> 查零地址、负长度后转 <code>NativeBindings.indexBuildAddress</code>；JNI 把地址和长度原样填进 <code>knowhere_vectors</code>。ByteBuffer 版入口保留给小数据与单测。</li>
+<li><strong>连接器：装配。</strong><code>Assembled</code> 暴露 <code>address = buffer.memoryAddress()</code> 与 <code>byteLength = buffer.capacity()</code>，不再转 ByteBuffer。</li>
+<li><strong>连接器：构建。</strong><code>IndexWriter.buildFromAddress</code> 要求地址非零、bytes ≥ rows × 每行字节数；<code>SegmentIndexBuild</code> 改走它，并在构建期间持有 <code>Assembled</code> 不关闭；<code>NativeVectorIndex.build(indexType, dataType, version, address, bytes, rows, dimension, parameters)</code> 校验索引版本区间后转调。</li>
+</ol>
+
+<h3>2.4 谁保证那块内存合法：以前是 JVM，现在是调用方</h3>
+<p><strong>以前 ByteBuffer 由 JVM 担保地址和长度都对；现在调用方自报地址和长度，代码只能查零地址、负长度、容量和对齐，查不了那块内存是否真的存在。</strong></p>
+<table class="facts">
+<tr><th>以前谁保证</th><td>ByteBuffer 的容量由 JVM 保证：地址合法、区间可读、长度不会报大</td></tr>
+<tr><th>现在谁保证</th><td>调用方自报地址与长度，并保证那块内存是活的、按行主序本机字节序放着向量、调用返回前不释放不改写。连接器传的是分配器给出的 <code>capacity()</code>，且 <code>Assembled</code> 在构建期间不关闭</td></tr>
+<tr><th>仍然查什么</th><td>Java 与 JNI 查零地址、负长度；C 层 <code>CheckBuffer</code> 查容量装得下 rows × 每行字节、地址按元素宽度对齐；两侧都查不了那块内存是否真的存在</td></tr>
+<tr><th>没放开什么</th><td>行数仍限 2<sup>31</sup>：null 行位图按 Int 索引；6.2 GB 的 768 维 float32 是 200 万行，远在其下</td></tr>
+</table>
+
+<h3>2.5 内存占多少：构建时三份东西，加载时从 3 倍降到 2 倍</h3>
+<p><strong>构建期间同时有三份东西在内存里，其中一份是 C API 自己拷的；Cardinal 引擎的索引虽小，构建峰值却是向量的 4.6 倍，executor 的预留要按这个倍数算。加载侧原来也多拷一份，523518f7 已去掉。</strong></p>
+<ol>
+<li><strong>三份东西。</strong>Arrow 装配的整段向量（6.2 GB，算在任务的 Arrow 上限里；Netty 分配器对超过 Integer.MAX_VALUE 的请求直接走 Unsafe，不进池）、C API 在 <code>build_data</code> 里拷的一份（索引关闭前一直在）、索引自己存的一份（faiss HNSW 存原始向量，Cardinal 存 BF16 加量化结构）。</li>
+<li><strong>faiss HNSW。</strong>索引保存原始向量，每段索引 6.2 到 6.7 GB，executor 峰值 15 到 18 GB。</li>
+<li><strong>Cardinal 引擎。</strong>向量以 BF16 存、带 RBQ8 精化与 SQ4 图量化（Cardinal 的量化格式名），索引只有 2.2 GB；构建峰值却到 21 到 28.5 GiB，是向量的 4.6 倍。executor 的 memoryOverhead 要按最大段乘这个倍数留，30 GiB 只差 1.5 GiB。</li>
+<li><strong>线程。</strong>Knowhere 的构建池按整机起线程，8 核的任务实测用 14 到 15.7 核，这是线程池选项 G4 的现场。</li>
+<li><strong>加载侧的同一模式，523518f7 已改。</strong>
+<ul>
+<li><strong>原来</strong>：读回索引搜索时，<code>knowhere_index_deserialize</code> 也先把 BinarySet 的字节拷一份（<code>IndexResource.deserialized_data</code>），加载峰值是文件的 3 倍，常驻 2 倍。</li>
+<li><strong>现在</strong>：调用方 BinarySet 的条目按 shared_ptr 追加进一个局部 BinarySet 交给引擎，拷贝去掉，峰值降到 2 倍，常驻不变。常驻的 2 倍是 Cardinal 适配器持有的原始字节加加载出的结构：它在 Deserialize 里把 <code>GetByName</code> 拿到的 shared_ptr 存成成员，字节随索引存活，调用方关掉 BinarySet 也不悬空；faiss 系经 MemoryIOReader 读进自己的结构，不留引用。</li>
+<li><strong>契约</strong>：BinarySet 一经交给 deserialize 就冻结，之后 <code>knowhere_binary_set_write</code> 返回 KNOWHERE_INVALID_ARGUMENT，allocate 换新缓冲和 close 仍允许。既堵住往被索引引用的字节里写，也堵住另一线程在 Deserialize 进行中写同一缓冲。</li>
+<li><strong>建索引侧未动</strong>：<code>build_data</code> 那一份仍在，是下一条候选。连接器侧的跟进：gitlink 指到 523518f7，规划器里「加载时多一份」的常量 1 改 0，重编 Cardinal 原生包，UAT 复验加载峰值。</li>
+</ul>
+</li>
+</ol>
+
+<h2 id="p3">三、Cardinal 构建下的 HNSW 是另一种索引：建出来的文件为什么读不回</h2>
+<p><strong>带 Cardinal 的 Knowhere 里，HNSW 这个名字指的是 Cardinal 的索引，写出的文件格式与 faiss 的不同；连接器读文件时只认 faiss 的头，所以整段拒绝。修法是让它也认 Cardinal 的头。</strong></p>
+<ol>
+<li><strong>名字换了主人。</strong>编进 Cardinal 后，Knowhere 把 faiss 的 HNSW 注册为 <code>HNSW_DEPRECATED</code>，<code>HNSW</code> 这个名字归 Cardinal（<code>src/index/hnsw/faiss_hnsw.cc</code> 的 <code>KNOWHERE_WITH_CARDINAL</code> 分支）。含 Cardinal 的 bundle 上 <code>build_index</code> 建出来的就是 Cardinal 索引。</li>
+<li><strong>文件长什么样。</strong>Cardinal 经 BinarySet 序列化的流：开头是 Cardinal 的头，依次 8 字节版本、8 字节索引名 <code>unknown</code>、8 字节索引类型 <code>HNSW</code>、8 字节数据类型 <code>BF16</code>、维度、行数、8 字节度量、8 字节总长度，头之后是索引数据。没有 Milvus 写 <code>_mem.index.bin</code> 时那 24 字节的 CARD footer。</li>
+<li><strong>连接器为什么拒绝。</strong><code>PayloadFormatProbe</code> 读文件开头判断用哪个引擎加载，原来只认两种：faiss 的 <code>IH*</code> 魔数，和 Milvus 文件末尾的 CARD footer。Cardinal 的流两样都没有，读回时整段拒绝：<code>Persisted HNSW payload starts with …</code>。</li>
+<li><strong>修法。</strong>捕获的头从 4 字节扩到 32 字节；声明的索引类型是 HNSW 且偏移 16 处写着 HNSW 时，选 Cardinal 引擎加载，流本身的校验交给 Knowhere（PR #164，issue #163）。</li>
+</ol>
+
+<h2 id="ref">代码坐标</h2>
+<p>行号以 Knowhere PR #1829 头 523518f7（b9497f4f 含两个新入口，523518f7 去掉加载侧的拷贝）和 spark-milvus refactor/v2 3b0e9b1 为准；faiss 指 Knowhere 自带的 <code>thirdparty/faiss</code>。设计层面的对应文档：<a href="vector-search.html">向量搜索与建索引</a>（决策 27、28）、<a href="search-resources.html">搜索路径的资源自适应</a>、<a href="knowhere-jni.html">Knowhere JNI 实现方案</a>。</p>
+<table><thead><tr><th>看什么</th><th>在哪里</th></tr></thead><tbody>
+<tr><td>每条查询一个任务、nx = 1</td><td>knowhere <code>src/common/comp/brute_force.cc</code> 690–706、306–316</td></tr>
+<tr><td>faiss 分流与阈值</td><td>knowhere <code>thirdparty/faiss/faiss/cppcontrib/knowhere/utils/distances.cpp</code> 752–768、803；块大小 464–465</td></tr>
+<tr><td>批量入口</td><td>knowhere <code>include/knowhere/c_api.h</code>、<code>src/c_api/c_api.cc</code>（<code>SingleThreaded</code>、<code>knowhere_bruteforce_batched</code>）；<code>java/src/main/java/io/knowhere/Knowhere.java</code> <code>bruteForceBatched</code></td></tr>
+<tr><td>连接器分派、保留行拷贝、行号换回</td><td>spark-milvus <code>core/src/main/scala/com/zilliz/milvus/storage/index/ExactScan.scala</code>；块常量 <code>spark-base/…/options/SearchResources.scala</code>；查询范围 <code>core/…/index/SearchPlan.scala</code></td></tr>
+<tr><td>两处 int</td><td>spark-milvus <code>core/…/index/IndexWriter.scala</code>（<code>Assembled.bytes</code>）；knowhere <code>java/src/main/cpp/knowhere_jni.cc</code>（<code>Vectors</code>：<code>GetDirectBufferCapacity</code>）</td></tr>
+<tr><td>地址入口</td><td>knowhere <code>KnowhereIndex.build(long address, …)</code>、<code>NativeBindings.indexBuildAddress</code>、<code>knowhere_jni.cc</code>；spark-milvus <code>IndexWriter.buildFromAddress</code>、<code>Assembled.address</code>、<code>SegmentIndexBuild</code>、<code>native-vector/…/NativeVectorIndex.java</code></td></tr>
+<tr><td>C 层校验</td><td>knowhere <code>src/c_api/c_api.cc</code> <code>CheckVectors</code>、<code>CheckBuffer</code>、<code>CheckedBytes</code></td></tr>
+<tr><td>C API 的两份拷贝：建索引侧仍在，加载侧已去掉</td><td>knowhere <code>src/c_api/c_api.cc</code>：<code>build_data</code> 412 到 414；<code>knowhere_index_deserialize</code>，frozen 置位 506、写入检查 746</td></tr>
+<tr><td>Cardinal 下的 HNSW 与格式探测</td><td>knowhere <code>src/index/hnsw/faiss_hnsw.cc</code> 3323 起；spark-milvus <code>core/…/codec/IndexFileCodec.scala</code> <code>PayloadFormatProbe</code></td></tr>
+</tbody></table>
+</main>
