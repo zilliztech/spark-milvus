@@ -32,7 +32,8 @@ import com.zilliz.spark.connector.read.MilvusSearch
   *   [CorrectnessJob] CASE R-01 PASS
   * }}}
   * The application writes `results.json` beside its results prefix and exits
-  * non-zero when a case failed.
+  * non-zero unless every selected case passed. Empty or unknown selections are
+  * rejected before Spark starts.
   *
   * Every expected value is recomputed from the row id with the generator the
   * datasets were loaded with (gen.py in the configmap
@@ -1560,7 +1561,7 @@ object CorrectnessJob {
       "CREATE, SHOW, DESCRIBE and DROP TABLE through the catalog",
       () => {
         configureCatalog()
-        withOwnCollection { collection =>
+        val dropped = withOwnCollection { collection =>
           val tables = spark
             .sql("SHOW TABLES IN milvus.default")
             .collect()
@@ -1591,6 +1592,7 @@ object CorrectnessJob {
               .sql("DROP TABLE milvus.default.no_such_table_spark_milvus_ct")
               .collect()
           )
+          collection
         }
         // The collection is gone once withOwnCollection drops it.
         val left = spark
@@ -1598,8 +1600,8 @@ object CorrectnessJob {
           .collect()
           .map(_.getAs[String]("tableName"))
         check(
-          !left.exists(_.startsWith("spark_milvus_ct_")),
-          s"a spark_milvus_ct_ collection was left behind: ${left.filter(_.startsWith("spark_milvus_ct_")).mkString(",")}"
+          !left.contains(dropped),
+          s"the owned collection was left behind: $dropped"
         )
       }
     )
@@ -1610,25 +1612,19 @@ object CorrectnessJob {
     */
   private def withOwnCollection[A](body: String => A): A = {
     configureCatalog()
-    // A collection an earlier attempt left behind is dropped first.
-    spark
-      .sql("SHOW TABLES IN milvus.default")
-      .collect()
-      .map(_.getAs[String]("tableName"))
-      .filter(_.startsWith("spark_milvus_ct_"))
-      .foreach(left =>
-        spark.sql(s"DROP TABLE IF EXISTS milvus.default.$left").collect()
-      )
-    val name = s"spark_milvus_ct_${System.currentTimeMillis()}"
-    spark.sql(s"""CREATE TABLE milvus.default.$name (id BIGINT NOT NULL, label INT, v ARRAY<FLOAT>)
+    UatResources.withCollection(
+      name =>
+        spark
+          .sql(s"""CREATE TABLE milvus.default.$name (id BIGINT NOT NULL, label INT, v ARRAY<FLOAT>)
          |TBLPROPERTIES (
          |  'milvus.primary.key' = 'id',
          |  'milvus.field.v.data_type' = 'float_vector',
          |  'milvus.field.v.dim' = '8',
          |  'milvus.index.v' = '{"index_type":"HNSW","metric_type":"COSINE","index_name":"v_auto","M":8,"efConstruction":64}'
          |)""".stripMargin)
-    try body(name)
-    finally spark.sql(s"DROP TABLE milvus.default.$name")
+          .collect(),
+      name => spark.sql(s"DROP TABLE IF EXISTS milvus.default.$name").collect()
+    )(body)
   }
 
   /** The catalog the Catalog-side cases go through. Its connection comes from
@@ -2031,23 +2027,63 @@ object CorrectnessJob {
   private def allCases: Seq[Case] =
     readCases ++ searchCases ++ procedureCases ++ writeCases ++ indexCases
 
-  def main(args: Array[String]): Unit = {
-    val arguments = args
-      .sliding(2, 2)
-      .collect { case Array(k, v) => k.stripPrefix("--") -> v }
-      .toMap
-    session = SparkSession.builder().getOrCreate()
-    val applicationId = spark.sparkContext.applicationId
+  private[uat] def parseArguments(args: Array[String]): Map[String, String] = {
+    require(args.length % 2 == 0, "each argument requires a value")
+    val pairs = args
+      .grouped(2)
+      .map { pair =>
+        require(
+          Set("--group", "--cases", "--results").contains(pair(0)),
+          s"unknown argument: ${pair(0)}"
+        )
+        pair(0).stripPrefix("--") -> pair(1)
+      }
+      .toSeq
+    require(pairs.map(_._1).distinct.size == pairs.size, "duplicate arguments")
+    pairs.toMap
+  }
+
+  private[uat] def selectCases(arguments: Map[String, String]): Seq[Case] = {
+    val available = allCases
     val selected = arguments.get("cases") match {
       case Some(list) =>
-        val wanted = list.split(',').map(_.trim).filter(_.nonEmpty).toSet
-        allCases.filter(c => wanted(c.id))
+        val ids = list.split(",", -1).map(_.trim).toSeq
+        require(
+          ids.forall(_.nonEmpty),
+          "case selection must not contain empty IDs"
+        )
+        require(ids.distinct.size == ids.size, "duplicate case IDs")
+        val unknown = ids.toSet -- available.map(_.id).toSet
+        require(
+          unknown.isEmpty,
+          s"unknown case IDs: ${unknown.toSeq.sorted.mkString(",")}"
+        )
+        available.filter(c => ids.contains(c.id))
       case None =>
         arguments.getOrElse("group", "all") match {
-          case "all" => allCases
-          case group => allCases.filter(_.group == group)
+          case "all" => available
+          case group => available.filter(_.group == group)
         }
     }
+    require(
+      selected.nonEmpty,
+      "case selection must not be empty; check --group/--cases"
+    )
+    selected
+  }
+
+  private[uat] def exitCode(selected: Seq[Case], results: Seq[Result]): Int =
+    if (
+      selected.nonEmpty && results.map(_.id) == selected.map(_.id) &&
+      results.forall(_.status == "PASS")
+    ) 0
+    else 1
+
+  def main(args: Array[String]): Unit = {
+    val arguments = parseArguments(args)
+    val selected = selectCases(arguments)
+    session = SparkSession.builder().getOrCreate()
+    val applicationId = spark.sparkContext.applicationId
     println(
       s"[CorrectnessJob] application $applicationId runs ${selected.size} case(s): ${selected.map(_.id).mkString(",")}"
     )
@@ -2118,6 +2154,6 @@ object CorrectnessJob {
     spark.stop()
     // The driver JVM does not exit on its own after a native search (issue 22),
     // so the harness ends the process with its verdict.
-    System.exit(if (results.exists(_.status == "FAIL")) 1 else 0)
+    System.exit(exitCode(selected, results))
   }
 }

@@ -544,14 +544,18 @@ class DataFrameScenariosUatTest
       root: String
   ): Set[StagingLayout] = {
     val store = HadoopStorageKeys.storeFrom(storage)
-    try
-      store
-        .list(s"$root/staging", recursive = false)
-        .filter(_.isDirectory)
-        .map(d => StagingLayout(root, d.path.stripSuffix("/").split("/").last))
-        .filter(l => store.exists(l.marker))
-        .toSet
-    finally store.close()
+    try {
+      if (!store.exists(s"$root/staging")) Set.empty
+      else
+        store
+          .list(s"$root/staging", recursive = false)
+          .filter(_.isDirectory)
+          .map(d =>
+            StagingLayout(root, d.path.stripSuffix("/").split("/").last)
+          )
+          .filter(l => store.exists(l.marker))
+          .toSet
+    } finally store.close()
   }
 
   private def messages(error: Throwable): String =
@@ -562,35 +566,31 @@ class DataFrameScenariosUatTest
       .mkString(" <- ")
 
   test("S10 read, transform, write back to staging, read the segments, abort") {
-    val storage = storageOptions() + (StorageProperties.RootPath -> env(
-      "MILVUS_UAT_WRITE_PREFIX"
-    ).getOrElse("spark-uat-write"))
-    val tableOptions = storage ++ Map(
-      MilvusOption.SnapshotMode -> "true",
-      MilvusOption.SnapshotSchemaBytes -> writeSchemaBytes,
-      MilvusOption.SnapshotCollectionId -> "1",
-      MilvusOption.SnapshotPartitionIds -> "0",
-      MilvusOption.MilvusCollectionName -> "uat_scenarios_rt",
-      MilvusOption.MilvusInsertMaxBatchSize -> "1000"
-    )
-    val root = storage(StorageProperties.RootPath)
-
-    // Other suites (the backfill) commit jobs under the same prefix, so the
-    // scenario looks for the job its own write added.
-    def committedJobs(): Set[StagingLayout] = committedUnder(storage, root)
-
     bothOutlets { columnar =>
-      val written = 500L
-      val df = v3(columnar)
-        .filter(col("id") < written)
-        .withColumn("name", concat(col("name"), lit("-x")))
-        .repartition(2)
-      val before = committedJobs()
-      df.write.format("milvus").mode("append").options(tableOptions).save()
-
+      val scope = new UatWriteScope(
+        env("MILVUS_UAT_WRITE_PREFIX").getOrElse("spark-uat-write"),
+        s"scenarios-s10-$columnar"
+      )
+      val root = scope.root
+      val storage = storageOptions() + (StorageProperties.RootPath -> root)
+      val tableOptions = storage ++ Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotSchemaBytes -> writeSchemaBytes,
+        MilvusOption.SnapshotCollectionId -> "1",
+        MilvusOption.SnapshotPartitionIds -> "0",
+        MilvusOption.MilvusCollectionName -> "uat_scenarios_rt",
+        MilvusOption.MilvusInsertMaxBatchSize -> "1000"
+      )
       val store = HadoopStorageKeys.storeFrom(storage)
-      try {
-        val committed = (committedJobs() -- before).toSeq
+      scope.run(store) {
+        val written = 500L
+        val df = v3(columnar)
+          .filter(col("id") < written)
+          .withColumn("name", concat(col("name"), lit("-x")))
+          .repartition(2)
+        df.write.format("milvus").mode("append").options(tableOptions).save()
+
+        val committed = committedUnder(storage, root).toSeq
         withClue(s"one new committed job expected under $root/staging: ")(
           committed.size shouldBe 1
         )
@@ -629,7 +629,7 @@ class DataFrameScenariosUatTest
         store
           .list(layout.prefix, recursive = true)
           .filterNot(_.isDirectory) shouldBe empty
-      } finally store.close()
+      }
     }
   }
 
@@ -737,51 +737,61 @@ class DataFrameScenariosUatTest
     * Int16 array's. A value that fails stops the job, and nothing is committed.
     */
   test("S13 an Int8 array element out of range stops the write") {
-    val root = env("MILVUS_UAT_WRITE_PREFIX").getOrElse("spark-uat-write")
+    val scope = new UatWriteScope(
+      env("MILVUS_UAT_WRITE_PREFIX").getOrElse("spark-uat-write"),
+      "scenarios-s13"
+    )
+    val root = scope.root
     val storage = storageOptions() + (StorageProperties.RootPath -> root)
-    val schema = CollectionSchema(
-      name = "uat_scenarios_int8_array",
-      fields = Seq(
-        FieldSchema(
-          fieldID = 100,
-          name = "id",
-          dataType = DataType.Int64,
-          isPrimaryKey = true
-        ),
-        FieldSchema(
-          fieldID = 101,
-          name = "a8",
-          dataType = DataType.Array,
-          elementType = DataType.Int8,
-          nullable = true,
-          typeParams = Seq(KeyValuePair("max_capacity", "4"))
+    val store = HadoopStorageKeys.storeFrom(storage)
+    scope.run(store) {
+      val schema = CollectionSchema(
+        name = "uat_scenarios_int8_array",
+        fields = Seq(
+          FieldSchema(
+            fieldID = 100,
+            name = "id",
+            dataType = DataType.Int64,
+            isPrimaryKey = true
+          ),
+          FieldSchema(
+            fieldID = 101,
+            name = "a8",
+            dataType = DataType.Array,
+            elementType = DataType.Int8,
+            nullable = true,
+            typeParams = Seq(KeyValuePair("max_capacity", "4"))
+          )
         )
       )
-    )
-    val options = storage ++ Map(
-      MilvusOption.SnapshotMode -> "true",
-      MilvusOption.SnapshotSchemaBytes -> Base64.getEncoder
-        .encodeToString(schema.toByteArray),
-      MilvusOption.SnapshotCollectionId -> "1",
-      MilvusOption.SnapshotPartitionIds -> "0",
-      MilvusOption.MilvusCollectionName -> schema.name
-    )
-    val sparkSchema = StructType(
-      Seq(StructField("id", LongType), StructField("a8", ArrayType(ShortType)))
-    )
-    val before = committedUnder(storage, root)
-    val df = spark.createDataFrame(
-      spark.sparkContext.parallelize(
-        Seq(Row(1L, Seq[Short](-128, 127)), Row(2L, Seq[Short](128))),
-        1
-      ),
-      sparkSchema
-    )
-    val error = intercept[Exception](
-      df.write.format("milvus").mode("append").options(options).save()
-    )
-    messages(error) should include("outside [-128, 127]")
-    committedUnder(storage, root) shouldBe before
+      val options = storage ++ Map(
+        MilvusOption.SnapshotMode -> "true",
+        MilvusOption.SnapshotSchemaBytes -> Base64.getEncoder
+          .encodeToString(schema.toByteArray),
+        MilvusOption.SnapshotCollectionId -> "1",
+        MilvusOption.SnapshotPartitionIds -> "0",
+        MilvusOption.MilvusCollectionName -> schema.name
+      )
+      val sparkSchema = StructType(
+        Seq(
+          StructField("id", LongType),
+          StructField("a8", ArrayType(ShortType))
+        )
+      )
+      val before = committedUnder(storage, root)
+      val df = spark.createDataFrame(
+        spark.sparkContext.parallelize(
+          Seq(Row(1L, Seq[Short](-128, 127)), Row(2L, Seq[Short](128))),
+          1
+        ),
+        sparkSchema
+      )
+      val error = intercept[Exception](
+        df.write.format("milvus").mode("append").options(options).save()
+      )
+      messages(error) should include("outside [-128, 127]")
+      committedUnder(storage, root) shouldBe before
+    }
   }
 
   // ---------------------------------------------------------------- S14
