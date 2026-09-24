@@ -25,7 +25,8 @@ run_id=${CI_RUN_ID:-$release}
 ownership_token="$(date +%s)-$$-${RANDOM}-${RANDOM}"
 installed=false
 install_started=false
-selector="app.kubernetes.io/instance=${release},app.kubernetes.io/component=integration-test"
+release_selector="app.kubernetes.io/instance=${release}"
+selector="${release_selector},app.kubernetes.io/component=integration-test"
 
 case "$keep_resources" in
   true | false) ;;
@@ -76,8 +77,8 @@ kube() {
 collect_diagnostics() {
   helm status "$release" --namespace "$namespace" \
     >"${artifact_dir}/helm-status.txt" 2>&1 || true
-  kube get jobs,pods --namespace "$namespace" \
-    --selector "$selector" \
+  kube get jobs,deployments,services,configmaps,pods --namespace "$namespace" \
+    --selector "$release_selector" \
     -o wide >"${artifact_dir}/resources.txt" 2>&1 || true
 
   local resource resource_name
@@ -96,9 +97,13 @@ collect_diagnostics() {
   done
 
   for resource in $(kube get pods --namespace "$namespace" \
-    --selector "$selector" \
+    --selector "$release_selector" \
     -o name 2>/dev/null); do
     resource_name=${resource#*/}
+    kube logs --namespace "$namespace" "$resource" --all-containers=true \
+      >"${artifact_dir}/${resource_name}.log" 2>&1 || true
+    kube logs --namespace "$namespace" "$resource" --all-containers=true --previous \
+      >"${artifact_dir}/${resource_name}.previous.log" 2>&1 || true
     kube describe --namespace "$namespace" "$resource" \
       >"${artifact_dir}/${resource_name}.describe.txt" 2>&1 || true
     kube get events --namespace "$namespace" \
@@ -126,28 +131,29 @@ wait_for_job() {
       return 1
     fi
 
-    waiting_reasons=$(kube get pods --namespace "$namespace" --selector "$selector" \
-      -o 'jsonpath={range .items[*].status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}')
+    waiting_reasons=$(kube get pods --namespace "$namespace" --selector "$release_selector" \
+      -o 'jsonpath={range .items[*].status.initContainerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{range .items[*].status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}')
     fatal_waiting_reason=$(awk '
       $0 == "ErrImagePull" ||
       $0 == "ErrImageNeverPull" ||
       $0 == "ImagePullBackOff" ||
       $0 == "InvalidImageName" ||
       $0 == "CreateContainerConfigError" ||
-      $0 == "RunContainerError" {
+      $0 == "RunContainerError" ||
+      $0 == "CrashLoopBackOff" {
         print
         exit
       }
     ' <<<"$waiting_reasons")
     if [[ -n "$fatal_waiting_reason" ]]; then
-      echo "Integration Job ${job_name} cannot start: Pod waiting reason ${fatal_waiting_reason}" >&2
+      echo "Integration Job ${job_name} cannot start: release Pod waiting reason ${fatal_waiting_reason}" >&2
       return 1
     fi
 
-    scheduled_conditions=$(kube get pods --namespace "$namespace" --selector "$selector" \
+    scheduled_conditions=$(kube get pods --namespace "$namespace" --selector "$release_selector" \
       -o 'jsonpath={range .items[*].status.conditions[?(@.type=="PodScheduled")]}{.status}{"|"}{.reason}{"\n"}{end}')
     if grep -Fqx 'False|Unschedulable' <<<"$scheduled_conditions"; then
-      echo "Integration Job ${job_name} cannot start: Pod is unschedulable" >&2
+      echo "Integration Job ${job_name} cannot start: release Pod is unschedulable" >&2
       return 1
     fi
 

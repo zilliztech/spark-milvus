@@ -4,5 +4,16 @@ Follow its logs with:
 
   kubectl logs --namespace {{ .Release.Namespace }} --follow job/{{ include "spark-milvus-integration.fullname" . }}
 
-The Job does not create Milvus, object storage, or credentials. It references
-the endpoints and existing Secrets selected in the values file.
+{{ if .Values.milvus.deployment.enabled -}}
+This release also deploys Milvus standalone and etcd at:
+  {{ include "spark-milvus-integration.milvusUri" . }}
+Their isolated S3 root (also supplied to the test) is:
+  {{ include "spark-milvus-integration.storageRoot" . }}
+
+The new instance is empty. Your private runner or runner.setup.command must
+prepare its collection, data, and snapshot before a read-only test can pass.
+{{ else -}}
+The Job connects to the existing Milvus selected in the values file.
+{{ end }}
+Object storage and credential Secrets must already exist. Uninstalling the
+release does not delete S3 objects. See README.md for fixture and cleanup duties.

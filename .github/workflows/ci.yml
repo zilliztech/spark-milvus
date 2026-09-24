@@ -15,6 +15,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  integration-helm:
+    name: Integration Helm tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.1.1
+
+      - name: Install template test dependency
+        run: python3 -m pip install PyYAML==6.0.3
+
+      - name: Lint both deployment modes
+        run: |
+          helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.example.yaml
+          helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.managed.example.yaml
+
+      - name: Test templates and release lifecycle
+        run: |
+          python3 -m unittest discover -s deploy/helm/spark-milvus-integration/tests -p 'test_*.py'
+          bash -n deploy/helm/spark-milvus-integration/run.sh
+          deploy/helm/spark-milvus-integration/tests/run-test.sh
+
   build-and-test:
     name: Build & unit tests
     runs-on: ubuntu-latest

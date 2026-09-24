@@ -1,0 +1,203 @@
+{{- if .Values.milvus.deployment.enabled -}}
+{{- $name := include "spark-milvus-integration.milvusName" . -}}
+{{- $endpoint := splitList ":" .Values.objectStorage.endpoint -}}
+{{- $port := ternary 443 80 .Values.objectStorage.useSSL -}}
+{{- if eq (len $endpoint) 2 -}}
+{{- $port = int (index $endpoint 1) -}}
+{{- end -}}
+{{- if or (lt $port 1) (gt $port 65535) -}}
+{{- fail "objectStorage.endpoint port must be between 1 and 65535" -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "spark-milvus-integration.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: milvus
+data:
+  user.yaml: |
+    etcd:
+      endpoints: localhost:2379
+    mq:
+      type: rocksmq
+    rocksmq:
+      path: /var/lib/milvus/rdb_data
+    localStorage:
+      path: /var/lib/milvus/data
+    common:
+      storageType: remote
+      security:
+        authorizationEnabled: true
+    minio:
+      address: {{ index $endpoint 0 | quote }}
+      port: {{ $port }}
+      bucketName: {{ .Values.objectStorage.bucket | quote }}
+      rootPath: {{ include "spark-milvus-integration.storageRoot" . | quote }}
+      region: {{ .Values.objectStorage.region | quote }}
+      useSSL: {{ .Values.objectStorage.useSSL }}
+      useVirtualHost: {{ .Values.objectStorage.useVirtualHost }}
+      cloudProvider: aws
+      useIAM: false
+    log:
+      file:
+        rootPath: ""
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "spark-milvus-integration.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: milvus
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+    app.kubernetes.io/component: milvus
+  ports:
+    - name: grpc
+      port: 19530
+      targetPort: grpc
+    - name: health
+      port: 9091
+      targetPort: health
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "spark-milvus-integration.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: milvus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/component: milvus
+  template:
+    metadata:
+      labels:
+        {{- include "spark-milvus-integration.commonLabels" . | nindent 8 }}
+        app.kubernetes.io/component: milvus
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.milvus.deployment.runAsUser }}
+        runAsGroup: {{ .Values.milvus.deployment.runAsGroup }}
+        fsGroup: {{ .Values.milvus.deployment.runAsGroup }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: milvus
+          image: {{ .Values.milvus.deployment.image | quote }}
+          imagePullPolicy: {{ .Values.milvus.deployment.imagePullPolicy }}
+          command: ["milvus", "run", "standalone"]
+          ports:
+            - name: grpc
+              containerPort: 19530
+            - name: health
+              containerPort: 9091
+          env:
+            - name: MINIO_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objectStorage.credentials.existingSecret | quote }}
+                  key: {{ .Values.objectStorage.credentials.accessKeyIdKey | quote }}
+            - name: MINIO_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.objectStorage.credentials.existingSecret | quote }}
+                  key: {{ .Values.objectStorage.credentials.secretAccessKeyKey | quote }}
+            - name: COMMON_SECURITY_DEFAULTROOTPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.milvus.credentials.existingSecret | quote }}
+                  key: {{ .Values.milvus.credentials.rootPasswordKey | quote }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: {{ div (add .Values.milvus.deployment.readinessTimeoutSeconds 4) 5 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.milvus.deployment.resources | nindent 12 }}
+          volumeMounts:
+            - name: milvus-config
+              mountPath: /milvus/configs/user.yaml
+              subPath: user.yaml
+              readOnly: true
+            - name: milvus-data
+              mountPath: /var/lib/milvus
+        - name: etcd
+          image: {{ .Values.milvus.deployment.etcdImage | quote }}
+          imagePullPolicy: {{ .Values.milvus.deployment.imagePullPolicy }}
+          command: ["etcd"]
+          args:
+            - --advertise-client-urls=http://127.0.0.1:2379
+            - --listen-client-urls=http://127.0.0.1:2379
+            - --listen-peer-urls=http://127.0.0.1:2380
+            - --initial-advertise-peer-urls=http://127.0.0.1:2380
+            - --initial-cluster=default=http://127.0.0.1:2380
+            - --data-dir=/etcd/data
+            - --auto-compaction-mode=revision
+            - --auto-compaction-retention=1000
+            - --quota-backend-bytes=1073741824
+          readinessProbe:
+            exec:
+              command: ["etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.milvus.deployment.etcdResources | nindent 12 }}
+          volumeMounts:
+            - name: etcd-data
+              mountPath: /etcd
+      volumes:
+        - name: milvus-config
+          configMap:
+            name: {{ $name }}
+        - name: milvus-data
+          emptyDir:
+            sizeLimit: {{ .Values.milvus.deployment.dataSizeLimit }}
+        - name: etcd-data
+          emptyDir:
+            sizeLimit: {{ .Values.milvus.deployment.etcdSizeLimit }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
