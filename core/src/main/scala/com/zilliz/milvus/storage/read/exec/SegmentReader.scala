@@ -258,7 +258,7 @@ object SegmentReaderRegistry {
     * starts with 8; an executor runs at most one task per processor.
     */
   private[exec] def ioThreads(processors: Int): Int =
-    math.multiplyExact(processors, RangesPerBatch)
+    Math.multiplyExact(processors, RangesPerBatch)
 
   /** Raise Arrow's IO pool to what this executor's tasks need, and never lower
     * it: the pool is process-wide, so another reader in this JVM may already

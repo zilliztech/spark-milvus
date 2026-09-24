@@ -330,7 +330,7 @@ object SearchPlan {
   def knownRows(task: SegmentReadTask): Option[Long] =
     task.expectedRows.orElse(task.indexes match {
       case SegmentIndexes.Available(indexes) =>
-        indexes.map(_.rowCount).filter(_ > 0L).maxOption
+        indexes.map(_.rowCount).filter(_ > 0L).reduceOption(_ max _)
       case _ => None
     })
 
