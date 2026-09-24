@@ -150,7 +150,8 @@ private[read] object SegmentSetSearch extends Logging {
           spec,
           allocator.allocator,
           metrics,
-          stepped
+          stepped,
+          prefetchIndexes(set, spec)
         )
       finally allocator.close()
     } else {
@@ -203,7 +204,8 @@ private[read] object SegmentSetSearch extends Logging {
       spec: Spec,
       allocator: BufferAllocator,
       metrics: SearchMetrics,
-      stepped: SegmentSearch.Progress => Unit
+      stepped: SegmentSearch.Progress => Unit,
+      prefetch: Boolean
   ): Iterator[(Long, Array[Byte])] = {
     val ids = new Array[Array[Long]](groupCount)
     val matrices = new Array[QueryMatrix](groupCount)
@@ -236,7 +238,8 @@ private[read] object SegmentSetSearch extends Logging {
         spec.metric,
         spec.parameters,
         allocator,
-        stepped
+        stepped,
+        prefetch
       )
       val kept = mergers.toArray
       report(metrics, counters, kept.iterator.map(_.size).sum)
@@ -353,6 +356,34 @@ private[read] object SegmentSetSearch extends Logging {
   }
 
   /** What this segment offers the search: its vectors, or its index. */
+  /** Whether the task may open the next segment's index while it searches the
+    * current one: index mode, more than one segment, and room in the task's
+    * budget for two loaded indexes plus one loading (2 + 2 + 1 copies of the
+    * largest index, by the planner's own footprint rule). An index whose size
+    * the snapshot did not record is not prefetched.
+    */
+  private[read] def prefetchIndexes(
+      set: Seq[MilvusInputPartition],
+      spec: Spec
+  ): Boolean =
+    spec.mode == "index" && set.size > 1 && {
+      val sizes = set.flatMap(partition =>
+        SegmentIndexHandle
+          .select(
+            partition.task,
+            spec.fieldId,
+            spec.metric,
+            spec.allowUnindexed
+          )
+          .map(_.serializedSize)
+      )
+      sizes.size == set.size && sizes.forall(_ > 0L) && {
+        val copies =
+          2L * SearchPlan.Footprint.IndexKeptCopies + SearchPlan.Footprint.IndexLoadingCopies
+        copies * sizes.max <= spec.keptMaxBytes
+      }
+    }
+
   private def source(
       partition: MilvusInputPartition,
       spec: Spec,

@@ -54,6 +54,10 @@ JACCARD。
 nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用 Cardinal 的固定
 版本原生产物，见[构建说明](contributing.md#knowhere-library-loading)。
 
+设置 `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin`，每个
+executor 启动时就加载连接器的原生库，而不是等第一个任务碰到 Knowhere 时才加载：
+8 核 executor 上解包并校验原生包约 3 s，否则落在第一个搜索任务上。不配置只多这 3 s。
+
 查询集如果就是 Parquet 文件——`spark.read.parquet` 之上至多选列、改名——由搜索任务
 自己读：driver 只读 footer 取行数，每个任务自己打开文件，不 collect 也不广播。
 `milvus.search.queries.direct`（默认 `true`）可以关掉；带过滤、join 或内存里构造的

@@ -1,6 +1,13 @@
 package com.zilliz.milvus.storage.index
 
+import java.util.concurrent.{
+  ExecutionException,
+  Executors,
+  Future,
+  ThreadFactory
+}
 import java.util.BitSet
+import scala.util.Try
 
 import org.apache.arrow.memory.BufferAllocator
 
@@ -281,12 +288,14 @@ object SegmentSearch extends Logging {
       metric: String,
       parameters: Map[String, String],
       allocator: BufferAllocator,
-      onProgress: Progress => Unit = _ => ()
+      onProgress: Progress => Unit = _ => (),
+      prefetch: Boolean = false
   ): (Seq[TopKMerger], Counters) = {
     require(segments != null, "A task must name its segments")
     require(groups.nonEmpty, "A task searches at least one query group")
     val mergers =
       groups.map(queries => new TopKMerger(queries.queries, k, metric))
+    val largestGroup = groups.iterator.map(_.queries).max
     var nativeCalls = 0
     var nativeNanos = 0L
     var compared = 0L
@@ -297,52 +306,58 @@ object SegmentSearch extends Logging {
       onProgress(step)
     }
     var read = ReadMetrics.Zero
-    segments.foreach { segmentId =>
-      val source = open(segmentId)
-      try
-        source match {
-          case Exact(id, vectors) =>
-            var next = vectors.next()
-            while (next.nonEmpty) {
-              val batch = next.get
-              try
-                groups.indices.foreach { group =>
-                  ExactScan.batch(
-                    batch,
-                    groups(group),
-                    id,
-                    k,
-                    metric,
-                    allocator,
-                    mergers(group),
-                    counted
-                  )
-                }
-              finally batch.close()
-              next = vectors.next()
-            }
-            read = read + vectors.metrics
-          case Index(id, handle, excluded) =>
-            require(
-              handle.metric == metric,
-              s"Segment $id has a $metric query on a ${handle.metric} index"
-            )
-            groups.indices.foreach { group =>
-              IndexProbe.run(
-                handle,
-                groups(group),
+    val sources = new Prefetcher[Source](segments, open, prefetch)
+    try
+      sources.foreach { source =>
+        try
+          source match {
+            case Exact(id, vectors) =>
+              var next = vectors.next()
+              while (next.nonEmpty) {
+                val batch = next.get
+                try
+                  groups.indices.foreach { group =>
+                    ExactScan.batch(
+                      batch,
+                      groups(group),
+                      id,
+                      k,
+                      metric,
+                      allocator,
+                      mergers(group),
+                      counted
+                    )
+                  }
+                finally batch.close()
+                next = vectors.next()
+              }
+              read = read + vectors.metrics
+            case Index(id, handle, excluded) =>
+              require(
+                handle.metric == metric,
+                s"Segment $id has a $metric query on a ${handle.metric} index"
+              )
+              // Every group through one pipeline: the index searches group g+1
+              // while a worker checks and collects group g.
+              val pipeline = new IndexProbe.Pipeline(
+                IndexProbe.target(handle),
                 excluded,
                 k,
                 parameters,
                 allocator,
-                mergers(group),
-                counted
+                largestGroup
               )
-            }
-        }
-      finally source.close()
-      onProgress(Progress(0, 0L, 0L, groups.size))
-    }
+              try {
+                groups.indices.foreach { group =>
+                  pipeline.run(groups(group), mergers(group), counted)
+                }
+                pipeline.finish(counted)
+              } finally pipeline.close()
+          }
+        finally source.close()
+        onProgress(Progress(0, 0L, 0L, groups.size))
+      }
+    finally sources.close()
     logInfo(
       s"Segment set searched: segments=${segments.size}, groups=${groups.size}, " +
         s"queries=${groups.map(_.queries).sum}, topK=$k, metric=$metric, " +
@@ -350,5 +365,68 @@ object SegmentSearch extends Logging {
         s"nativeMillis=${nativeNanos / 1000000L}"
     )
     (mergers, Counters(segments.size, nativeCalls, nativeNanos, compared, read))
+  }
+
+  /** The sources of a task's segments, opened one ahead when asked.
+    *
+    * With `prefetch`, the source after the one being searched is opened on a
+    * thread of its own while the search runs: for an index that is the read of
+    * its files and Knowhere's deserialization, 0.6 s a segment on P3 that used
+    * to sit between one segment's last group and the next segment's first. The
+    * task holds at most two sources at once, which is what the caller checks
+    * against its budget before asking for it. A failure to open surfaces where
+    * the source would have been used; a source opened ahead but never used is
+    * closed by [[close]].
+    */
+  private[index] final class Prefetcher[A <: AutoCloseable](
+      ids: Seq[Long],
+      open: Long => A,
+      prefetch: Boolean
+  ) extends AutoCloseable {
+    private val opener =
+      if (prefetch && ids.size > 1)
+        Some(Executors.newSingleThreadExecutor(new ThreadFactory {
+          def newThread(runnable: Runnable): Thread = {
+            val thread = new Thread(runnable, "segment-source-prefetch")
+            thread.setDaemon(true)
+            thread
+          }
+        }))
+      else None
+    private var ahead: Option[Future[A]] = None
+
+    private def take(future: Future[A]): A =
+      try future.get()
+      catch {
+        case wrapped: ExecutionException =>
+          throw Option(wrapped.getCause).getOrElse(wrapped)
+      }
+
+    /** Runs `body` on every source in order; each is closed by the caller. */
+    def foreach(body: A => Unit): Unit = {
+      var index = 0
+      while (index < ids.size) {
+        val source = ahead match {
+          case Some(future) =>
+            ahead = None
+            take(future)
+          case None => open(ids(index))
+        }
+        if (index + 1 < ids.size) {
+          val nextId = ids(index + 1)
+          ahead = opener.map(_.submit[A](() => open(nextId)))
+        }
+        body(source)
+        index += 1
+      }
+    }
+
+    override def close(): Unit = {
+      try ahead.foreach(future => Try(take(future)).foreach(_.close()))
+      finally {
+        ahead = None
+        opener.foreach(_.shutdownNow())
+      }
+    }
   }
 }

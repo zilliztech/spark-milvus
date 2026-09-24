@@ -67,6 +67,12 @@ and nullable-vector ID mappings are unsupported. Cardinal `_mem.index.bin`
 requires the pinned Cardinal-enabled native build; see
 [native build instructions](contributing.md#knowhere-library-loading).
 
+Set `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin` and
+every executor loads the connector's native libraries as it starts, instead of
+when its first task touches Knowhere: on an 8-core executor the bundle takes
+about 3 s to extract and verify, which otherwise lands on the first search
+task. Without the plugin nothing changes but that.
+
 A query set that is nothing but Parquet files -- a plain `spark.read.parquet`
 with at most a selection or renaming of its columns on top -- is read by the
 search tasks themselves: the driver reads the footers for the counts and each
