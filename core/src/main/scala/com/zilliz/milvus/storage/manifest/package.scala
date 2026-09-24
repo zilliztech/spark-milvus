@@ -1,11 +1,19 @@
 package com.zilliz.milvus.storage
 
-/** One segment's manifest: column groups, delete files, statistics and index
-  * registrations.
+/** What one segment holds: column groups, delete files, statistics and index
+  * registrations, read from the two files that describe a segment.
   *
-  * Main types: SegmentManifestReader (the snapshot's Avro segment manifest),
-  * SegmentManifestWriter (the same record, encoded), AvroManifestEntry and
-  * AvroIndexFileEntry (data files, index files, exact build ids, row counts and
+  * A Milvus snapshot lists one Avro record per segment (Milvus's
+  * `ManifestEntry` in `internal/snapshotio/snapshot.go`, reached from the
+  * snapshot JSON's `manifest_list`); it is Milvus metadata and only the
+  * snapshot-directory read path has it. milvus-storage writes its own
+  * `_metadata/manifest-{n}.avro` inside every V3 segment directory. The word
+  * "manifest" in this package names the milvus-storage file only; the
+  * snapshot's record is a snapshot segment record.
+  *
+  * Main types: SnapshotSegmentReader (the snapshot's Avro segment record),
+  * SnapshotSegmentWriter (the same record, encoded), SnapshotSegmentEntry and
+  * IndexFileEntry (data files, index files, exact build ids, row counts and
   * separate index format/path versions), V3ManifestReader (milvus-storage's
   * `_metadata/manifest-{n}.avro`); the designed Manifest, ColumnGroup and
   * ManifestReader are not written yet. The reader takes the prefix of the

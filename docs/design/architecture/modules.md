@@ -213,7 +213,7 @@ spark-milvus/
 | 1.x 文件 | 2.0 位置 | 状态 |
 |---|---|---|
 | read/MilvusSnapshotReader.scala | core.snapshot.json | 已迁。92 行 Spark 类型转换切成 spark-base 的 SnapshotSparkSchema；JSON 形状类进 core.snapshot.json 并改名（SnapshotJson、CollectionSchemaJson、FieldJson…），V2SegmentInfo 并入 Segment（`Segment.v2` 构造，`columnGroups`/`deltaLogs`/`dedupColumnGroupsBySlot` 是 Segment 的方法），文件不再存在 |
-| read/SegmentManifestReader.scala、V3ManifestReader.scala | core.manifest | 已迁 |
+| read/SegmentManifestReader.scala、V3ManifestReader.scala | core.manifest | 已迁；2026-09-24 前者改名 SnapshotSegmentReader（读的是快照列出的段记录，不是 milvus-storage 的 manifest） |
 | read/DeltaLogReader.scala、DeletePlan.scala | core.delete、core.codec | 已迁。issue #125 将 DeltaLogReader 中共同的 Milvus envelope 与 Parquet payload 解析提取为 BinlogCodec；删除和 MilvusIndexFileDecoder 共用，ObjectStore 仍是唯一文件入口。RowExclusions 按段物理行号生成此次搜索的删除/过滤位图 |
 | src/main/resources/milvus-segment-manifest*.avsc | core 的 resources | 已迁。资源必须跟代码走，留在原处解码器会报 not found on classpath，而失败形式是返回 Left 不是抛异常 |
 | serde/SparkTypes.scala、SchemaUtil.scala | core.schema、spark.types | 已迁。core.schema 得到 MilvusTypes、ArrowTypes、SchemaMapper、FieldMetadata；Spark 那一半是 spark.types 的 SparkTypes 与 SparkSchemaMapper（文件名已改成对象名） |

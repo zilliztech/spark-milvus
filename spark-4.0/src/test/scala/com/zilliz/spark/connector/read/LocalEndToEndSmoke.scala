@@ -13,7 +13,7 @@ import org.apache.spark.sql.types.Metadata
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
-import com.zilliz.milvus.storage.manifest.SegmentManifestFixture
+import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
 import com.zilliz.milvus.storage.snapshot.json.{
   ManifestItemJson,
   SegmentListJson
@@ -656,7 +656,7 @@ object LocalEndToEndSmoke {
       Files.createDirectories(target.getParent)
       Files.write(
         target,
-        SegmentManifestFixture.encode(
+        SnapshotSegmentFixture.encode(
           segmentId = segmentId,
           partitionId = PartitionId,
           rows = segment.rowCount

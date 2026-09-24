@@ -8,7 +8,7 @@ import org.apache.spark.sql.functions._
 
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.manifest.SegmentManifestFixture
+import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
 import com.zilliz.milvus.storage.write.commit.JobManifest
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.procedure.{
@@ -360,7 +360,7 @@ object IndexSearchScale {
       Files.createDirectories(target.getParent)
       Files.write(
         target,
-        SegmentManifestFixture.encode(
+        SnapshotSegmentFixture.encode(
           segmentId = segmentId,
           partitionId = partitionId,
           rows = segment.rowCount

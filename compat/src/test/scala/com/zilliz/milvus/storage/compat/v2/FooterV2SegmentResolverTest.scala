@@ -22,10 +22,10 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.manifest.{
-  AvroFieldBinlogEntry,
-  AvroManifestEntry
+  FieldBinlogEntry,
+  SnapshotSegmentEntry
 }
-import com.zilliz.milvus.storage.manifest.AvroBinlogEntry
+import com.zilliz.milvus.storage.manifest.BinlogEntry
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.DeltaLogFile
 
@@ -311,13 +311,13 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
 
   private def entry(
       segmentId: Long,
-      binlogs: Seq[AvroFieldBinlogEntry],
+      binlogs: Seq[FieldBinlogEntry],
       storageVersion: Long = 2L,
       segmentLevel: Long = 2L,
       partitionId: Long = 10L,
-      deltaLogFiles: Seq[AvroFieldBinlogEntry] = Seq.empty
-  ): AvroManifestEntry =
-    AvroManifestEntry(
+      deltaLogFiles: Seq[FieldBinlogEntry] = Seq.empty
+  ): SnapshotSegmentEntry =
+    SnapshotSegmentEntry(
       segmentId = segmentId,
       partitionId = partitionId,
       segmentLevel = segmentLevel,
@@ -332,9 +332,9 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
     val manifest = entry(
       segmentId = 1001L,
       binlogs = Seq(
-        AvroFieldBinlogEntry(
+        FieldBinlogEntry(
           slotFieldId = 100L,
-          binlogs = Seq(AvroBinlogEntry(1L, rawPath, 10L))
+          binlogs = Seq(BinlogEntry(1L, rawPath, 10L))
         )
       )
     )
@@ -363,9 +363,9 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       segmentLevel = 1L,
       partitionId = -1L,
       deltaLogFiles = Seq(
-        AvroFieldBinlogEntry(
+        FieldBinlogEntry(
           slotFieldId = 0L,
-          binlogs = Seq(AvroBinlogEntry(1L, rawPath, 10L))
+          binlogs = Seq(BinlogEntry(1L, rawPath, 10L))
         )
       )
     )
@@ -403,13 +403,13 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       val manifest = entry(
         segmentId = 1001L,
         binlogs = Seq(
-          AvroFieldBinlogEntry(
+          FieldBinlogEntry(
             slotFieldId = 100L,
-            binlogs = Seq(AvroBinlogEntry(0L, pq0.toUri.toString, 10L))
+            binlogs = Seq(BinlogEntry(0L, pq0.toUri.toString, 10L))
           ),
-          AvroFieldBinlogEntry(
+          FieldBinlogEntry(
             slotFieldId = 105L,
-            binlogs = Seq(AvroBinlogEntry(0L, pq1.toUri.toString, 10L))
+            binlogs = Seq(BinlogEntry(0L, pq1.toUri.toString, 10L))
           )
         )
       )
@@ -445,13 +445,13 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       val manifest = entry(
         segmentId = 2002L,
         binlogs = Seq(
-          AvroFieldBinlogEntry(
+          FieldBinlogEntry(
             slotFieldId = 100L,
-            binlogs = Seq(AvroBinlogEntry(0L, pq0.toUri.toString, 10L))
+            binlogs = Seq(BinlogEntry(0L, pq0.toUri.toString, 10L))
           ),
           // One entry populated, one empty — the corrupt-manifest case the
           // top-level all-empty guard does NOT cover.
-          AvroFieldBinlogEntry(slotFieldId = 77L, binlogs = Seq.empty)
+          FieldBinlogEntry(slotFieldId = 77L, binlogs = Seq.empty)
         )
       )
 
@@ -482,9 +482,9 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       val manifest = entry(
         segmentId = 3003L,
         binlogs = Seq(
-          AvroFieldBinlogEntry(
+          FieldBinlogEntry(
             slotFieldId = 42L,
-            binlogs = Seq(AvroBinlogEntry(0L, pq0.toUri.toString, 10L))
+            binlogs = Seq(BinlogEntry(0L, pq0.toUri.toString, 10L))
           )
         )
       )
@@ -512,8 +512,8 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
     val manifest = entry(
       segmentId = 4004L,
       binlogs = Seq(
-        AvroFieldBinlogEntry(slotFieldId = 100L, binlogs = Seq.empty),
-        AvroFieldBinlogEntry(slotFieldId = 101L, binlogs = Seq.empty)
+        FieldBinlogEntry(slotFieldId = 100L, binlogs = Seq.empty),
+        FieldBinlogEntry(slotFieldId = 101L, binlogs = Seq.empty)
       )
     )
 
@@ -538,15 +538,15 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       val manifest = entry(
         segmentId = 5005L,
         binlogs = Seq(
-          AvroFieldBinlogEntry(
+          FieldBinlogEntry(
             slotFieldId = 100L,
-            binlogs = Seq(AvroBinlogEntry(0L, pq0.toUri.toString, 10L))
+            binlogs = Seq(BinlogEntry(0L, pq0.toUri.toString, 10L))
           )
         ),
         deltaLogFiles = Seq(
-          AvroFieldBinlogEntry(
+          FieldBinlogEntry(
             slotFieldId = 100L,
-            binlogs = Seq(AvroBinlogEntry(9L, "s3a://bucket/delete-1", 1L))
+            binlogs = Seq(BinlogEntry(9L, "s3a://bucket/delete-1", 1L))
           )
         )
       )
@@ -584,10 +584,9 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       segmentLevel = 1L,
       partitionId = -1L,
       deltaLogFiles = Seq(
-        AvroFieldBinlogEntry(
+        FieldBinlogEntry(
           slotFieldId = 0L,
-          binlogs =
-            Seq(AvroBinlogEntry(13L, "files/delta_log/1/-1/5008/13", 10L))
+          binlogs = Seq(BinlogEntry(13L, "files/delta_log/1/-1/5008/13", 10L))
         )
       )
     )
@@ -621,17 +620,16 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
     val manifest = entry(
       segmentId = 5009L,
       binlogs = Seq(
-        AvroFieldBinlogEntry(
+        FieldBinlogEntry(
           slotFieldId = 0L,
-          binlogs =
-            Seq(AvroBinlogEntry(1L, "files/insert_log/1/2/5009/0/1", 3000L))
+          binlogs = Seq(BinlogEntry(1L, "files/insert_log/1/2/5009/0/1", 3000L))
         )
       ),
       storageVersion = 3L,
       deltaLogFiles = Seq(
-        AvroFieldBinlogEntry(
+        FieldBinlogEntry(
           slotFieldId = 0L,
-          binlogs = Seq(AvroBinlogEntry(42L, "", 10L))
+          binlogs = Seq(BinlogEntry(42L, "", 10L))
         )
       )
     )
@@ -645,7 +643,7 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
     val manifest = entry(
       segmentId = 5006L,
       binlogs = Seq(
-        AvroFieldBinlogEntry(slotFieldId = 100L, binlogs = Seq.empty)
+        FieldBinlogEntry(slotFieldId = 100L, binlogs = Seq.empty)
       ),
       segmentLevel = 1L
     )
@@ -668,15 +666,15 @@ class FooterV2SegmentResolverTest extends AnyFunSuite with Matchers {
       val manifest = entry(
         segmentId = 5007L,
         binlogs = Seq(
-          AvroFieldBinlogEntry(
+          FieldBinlogEntry(
             slotFieldId = 100L,
-            binlogs = Seq(AvroBinlogEntry(0L, pq0.toUri.toString, 10L))
+            binlogs = Seq(BinlogEntry(0L, pq0.toUri.toString, 10L))
           )
         ),
         deltaLogFiles = Seq(
-          AvroFieldBinlogEntry(
+          FieldBinlogEntry(
             slotFieldId = 100L,
-            binlogs = Seq(AvroBinlogEntry(9L, "s3a://bucket/delete-1", 1L))
+            binlogs = Seq(BinlogEntry(9L, "s3a://bucket/delete-1", 1L))
           )
         )
       )

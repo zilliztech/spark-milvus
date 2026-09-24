@@ -13,9 +13,9 @@ import org.apache.avro.Schema
 /** Full writer-schema records for exercising snapshot metadata, including
   * fields after the subset consumed by the connector.
   */
-object SegmentManifestFixture {
-  def index(segmentId: Long = 30L, rowCount: Long = 2L): AvroIndexFileEntry =
-    AvroIndexFileEntry(
+object SnapshotSegmentFixture {
+  def index(segmentId: Long = 30L, rowCount: Long = 2L): IndexFileEntry =
+    IndexFileEntry(
       segmentId = segmentId,
       fieldId = 101L,
       indexId = 469076449917763071L,
@@ -42,8 +42,8 @@ object SegmentManifestFixture {
       partitionId: Long = 20L,
       rows: Long = 2L,
       storageVersion: Long = 3L,
-      indexes: Vector[AvroIndexFileEntry] = Vector.empty,
-      statsLogs: Seq[AvroFieldBinlogEntry] = Seq.empty,
+      indexes: Vector[IndexFileEntry] = Vector.empty,
+      statsLogs: Seq[FieldBinlogEntry] = Seq.empty,
       segmentLevel: Long = 2L,
       manifestHasIndex: Boolean = false
   ): Array[Byte] = {

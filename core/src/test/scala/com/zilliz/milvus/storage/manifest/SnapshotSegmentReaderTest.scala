@@ -13,7 +13,7 @@ import com.zilliz.milvus.storage.snapshot.{
 }
 import com.zilliz.milvus.storage.snapshot.json.SegmentListJson
 
-/** Tests for [[SegmentManifestReader]] against a real milvus-produced
+/** Tests for [[SnapshotSegmentReader]] against a real milvus-produced
   * per-segment AVRO.
   *
   * The fixture `core/src/test/data/seg_manifest.avro` was captured from local
@@ -30,19 +30,19 @@ import com.zilliz.milvus.storage.snapshot.json.SegmentListJson
   * Its segment-level `group_field_id_list` (pulled from any one of the 3
   * parquet files in /files/insert_log/.../{0,1,102}/) is `"100,0,1;101;102"`.
   */
-class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
+class SnapshotSegmentReaderTest extends AnyFunSuite with Matchers {
 
   test(
     "all manifest versions decode exact index ids, parameters and distinct versions"
   ) {
-    val index = SegmentManifestFixture.index()
-    SegmentManifestReader.supportedSchemaVersions.foreach { version =>
-      val bytes = SegmentManifestFixture.encode(
+    val index = SnapshotSegmentFixture.index()
+    SnapshotSegmentReader.supportedSchemaVersions.foreach { version =>
+      val bytes = SnapshotSegmentFixture.encode(
         version = version,
         indexes = Vector(index)
       )
       val entry =
-        SegmentManifestReader.parse(bytes, version).fold(throw _, identity)
+        SnapshotSegmentReader.parse(bytes, version).fold(throw _, identity)
       val expected =
         if (version == 1) index.copy(indexStorePathVersion = None) else index
       entry.indexFiles shouldBe Some(Vector(expected))
@@ -52,24 +52,24 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
 
   test("all manifest versions expose StorageV2 statslog files") {
     val logs = Seq(
-      AvroFieldBinlogEntry(
+      FieldBinlogEntry(
         100L,
         Seq(
-          AvroBinlogEntry(9L, "files/stats_log/100/9", 20L),
-          AvroBinlogEntry(7L, "files/stats_log/100/7", 10L)
+          BinlogEntry(9L, "files/stats_log/100/9", 20L),
+          BinlogEntry(7L, "files/stats_log/100/7", 10L)
         )
       )
     )
-    SegmentManifestReader.supportedSchemaVersions.foreach { version =>
-      val entry = SegmentManifestReader
+    SnapshotSegmentReader.supportedSchemaVersions.foreach { version =>
+      val entry = SnapshotSegmentReader
         .parse(
-          SegmentManifestFixture.encode(version = version, statsLogs = logs),
+          SnapshotSegmentFixture.encode(version = version, statsLogs = logs),
           version
         )
         .toOption
         .get
       entry.statsLogFiles shouldBe logs
-      val segment = SegmentManifestReader
+      val segment = SnapshotSegmentReader
         .toSegment(entry.copy(storageVersion = 2L), Seq.empty)
         .toOption
         .get
@@ -82,14 +82,14 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
   test(
     "an explicitly empty index array is known, and truncated index bytes fail"
   ) {
-    val bytes = SegmentManifestFixture.encode()
-    SegmentManifestReader.parse(bytes, 4).toOption.get.indexFiles shouldBe Some(
+    val bytes = SnapshotSegmentFixture.encode()
+    SnapshotSegmentReader.parse(bytes, 4).toOption.get.indexFiles shouldBe Some(
       Vector.empty
     )
-    val indexed = SegmentManifestFixture.encode(indexes =
-      Vector(SegmentManifestFixture.index())
+    val indexed = SnapshotSegmentFixture.encode(indexes =
+      Vector(SnapshotSegmentFixture.index())
     )
-    SegmentManifestReader
+    SnapshotSegmentReader
       .parse(indexed.take(indexed.length / 2), 4)
       .isLeft shouldBe true
   }
@@ -102,7 +102,7 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     Seq(Seq(100L, 0L, 1L), Seq(101L), Seq(102L))
 
   test("parse decodes one ManifestEntry with expected top-level fields") {
-    val result = SegmentManifestReader.parse(avroBytes)
+    val result = SnapshotSegmentReader.parse(avroBytes)
     result shouldBe a[Right[_, _]]
 
     val entry = result.toOption.get
@@ -113,7 +113,7 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("parse exposes binlog entries as (slotFieldId, binlogs)") {
-    val entry = SegmentManifestReader.parse(avroBytes).toOption.get
+    val entry = SnapshotSegmentReader.parse(avroBytes).toOption.get
     entry.binlogFiles should have size 3
 
     val slots = entry.binlogFiles.map(_.slotFieldId)
@@ -134,9 +134,9 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
   test(
     "toSegment joins AVRO binlog order with group_field_id_list positionally"
   ) {
-    val entry = SegmentManifestReader.parse(avroBytes).toOption.get
+    val entry = SnapshotSegmentReader.parse(avroBytes).toOption.get
     val result =
-      SegmentManifestReader.toSegment(
+      SnapshotSegmentReader.toSegment(
         entry,
         expectedGroupFieldIdList
       )
@@ -176,35 +176,35 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("toSegment flattens and sorts delta logs by logId") {
-    val entry = AvroManifestEntry(
+    val entry = SnapshotSegmentEntry(
       segmentId = 123L,
       partitionId = 456L,
       segmentLevel = 1L,
       numOfRows = 789L,
       storageVersion = 2L,
       binlogFiles = Seq(
-        AvroFieldBinlogEntry(
+        FieldBinlogEntry(
           slotFieldId = 100L,
-          binlogs = Seq(AvroBinlogEntry(1L, "files/insert_log/.../1", 10L))
+          binlogs = Seq(BinlogEntry(1L, "files/insert_log/.../1", 10L))
         )
       ),
       deltaLogFiles = Seq(
-        AvroFieldBinlogEntry(
+        FieldBinlogEntry(
           slotFieldId = 100L,
           binlogs = Seq(
-            AvroBinlogEntry(9L, "files/delete_log/.../9", 1L),
-            AvroBinlogEntry(7L, "files/delete_log/.../7", 3L)
+            BinlogEntry(9L, "files/delete_log/.../9", 1L),
+            BinlogEntry(7L, "files/delete_log/.../7", 3L)
           )
         ),
-        AvroFieldBinlogEntry(
+        FieldBinlogEntry(
           slotFieldId = 101L,
-          binlogs = Seq(AvroBinlogEntry(8L, "files/delete_log/.../8", 2L))
+          binlogs = Seq(BinlogEntry(8L, "files/delete_log/.../8", 2L))
         )
       )
     )
 
     val result =
-      SegmentManifestReader.toSegment(entry, Seq(Seq(100L)))
+      SnapshotSegmentReader.toSegment(entry, Seq(Seq(100L)))
 
     result shouldBe a[Right[_, _]]
     val seg = result.toOption.get
@@ -216,9 +216,9 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("toSegment rejects non-StorageV2 entries") {
-    val entry = SegmentManifestReader.parse(avroBytes).toOption.get
+    val entry = SnapshotSegmentReader.parse(avroBytes).toOption.get
     val bogus = entry.copy(storageVersion = 0L) // StorageV1
-    val result = SegmentManifestReader.toSegment(bogus, Seq.empty)
+    val result = SnapshotSegmentReader.toSegment(bogus, Seq.empty)
     result shouldBe a[Left[_, _]]
     result.left.toOption.get.getMessage should include("storageVersion=2")
   }
@@ -291,13 +291,13 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     * snapshot from that version showed this version was missing.
     */
   test("a version 5 record decodes, and says where its index is registered") {
-    val withFiles = SegmentManifestReader
+    val withFiles = SnapshotSegmentReader
       .parse(
-        SegmentManifestFixture.encode(
+        SnapshotSegmentFixture.encode(
           version = 5,
           segmentId = 77L,
           rows = 4L,
-          indexes = Vector(SegmentManifestFixture.index(77L, 4L))
+          indexes = Vector(SnapshotSegmentFixture.index(77L, 4L))
         ),
         manifestSchemaVersion = 5
       )
@@ -308,9 +308,9 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     withFiles.indexFiles.map(_.size) shouldBe Some(1)
     withFiles.manifestHasIndex shouldBe Some(false)
 
-    val inManifest = SegmentManifestReader
+    val inManifest = SnapshotSegmentReader
       .parse(
-        SegmentManifestFixture.encode(
+        SnapshotSegmentFixture.encode(
           version = 5,
           segmentId = 78L,
           rows = 4L,
@@ -324,9 +324,9 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
     inManifest.indexFiles shouldBe Some(Vector.empty)
 
     // A version 4 record says nothing about it, which is not an explicit false.
-    SegmentManifestReader
+    SnapshotSegmentReader
       .parse(
-        SegmentManifestFixture.encode(version = 4, segmentId = 79L),
+        SnapshotSegmentFixture.encode(version = 4, segmentId = 79L),
         manifestSchemaVersion = 4
       )
       .toOption
@@ -335,12 +335,12 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
 
     // Read with the wrong schema, everything after the new field lands in the
     // wrong place: the boolean is taken for the first array's block count.
-    val mismatched = SegmentManifestReader.parse(
-      SegmentManifestFixture.encode(
+    val mismatched = SnapshotSegmentReader.parse(
+      SnapshotSegmentFixture.encode(
         version = 5,
         segmentId = 80L,
         rows = 4L,
-        indexes = Vector(SegmentManifestFixture.index(80L, 4L))
+        indexes = Vector(SnapshotSegmentFixture.index(80L, 4L))
       ),
       manifestSchemaVersion = 4
     )
@@ -348,9 +348,9 @@ class SegmentManifestReaderTest extends AnyFunSuite with Matchers {
   }
 
   test("toSegment fails when group count disagrees with AVRO") {
-    val entry = SegmentManifestReader.parse(avroBytes).toOption.get
+    val entry = SnapshotSegmentReader.parse(avroBytes).toOption.get
     // AVRO has 3 binlog groups; feed a 2-group list.
-    val result = SegmentManifestReader.toSegment(
+    val result = SnapshotSegmentReader.toSegment(
       entry,
       Seq(Seq(100L, 0L, 1L), Seq(101L))
     )

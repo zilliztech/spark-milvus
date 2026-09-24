@@ -7,9 +7,9 @@ import com.fasterxml.jackson.databind.node.{ArrayNode, ObjectNode}
 
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.manifest.{
-  AvroIndexFileEntry,
-  SegmentManifestReader,
-  SegmentManifestWriter
+  IndexFileEntry,
+  SnapshotSegmentReader,
+  SnapshotSegmentWriter
 }
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{
@@ -149,7 +149,7 @@ object SnapshotWriter extends Logging {
 
     val parsed = sourceManifests.map { sourceManifest =>
       val bytes = store.readAll(sourceManifest)
-      val entry = SegmentManifestReader.parse(bytes, schemaVersion) match {
+      val entry = SnapshotSegmentReader.parse(bytes, schemaVersion) match {
         case Right(value) => value
         case Left(failure) =>
           throw new IllegalArgumentException(
@@ -194,7 +194,7 @@ object SnapshotWriter extends Logging {
         .map(index => indexEntry(index, definitions(index.fieldId), rows))
         .toVector
       val rewritten =
-        SegmentManifestWriter.rewriteIndexes(bytes, records, schemaVersion)
+        SnapshotSegmentWriter.rewriteIndexes(bytes, records, schemaVersion)
       val key = manifestKeyOf(target, entry.segmentId)
       store.write(key, rewritten)
       segmentIds += entry.segmentId
@@ -337,7 +337,7 @@ object SnapshotWriter extends Logging {
       record: CommittedIndex,
       definition: CollectionIndex,
       segmentRows: Long
-  ): AvroIndexFileEntry = AvroIndexFileEntry(
+  ): IndexFileEntry = IndexFileEntry(
     segmentId = record.segmentId,
     fieldId = record.fieldId,
     indexId = definition.indexId,

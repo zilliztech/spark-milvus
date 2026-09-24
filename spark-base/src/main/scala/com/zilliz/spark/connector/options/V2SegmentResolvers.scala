@@ -2,7 +2,7 @@ package com.zilliz.spark.connector.options
 
 import com.zilliz.milvus.storage.compat.v2.FooterV2SegmentResolver
 import com.zilliz.milvus.storage.io.ObjectStore
-import com.zilliz.milvus.storage.manifest.AvroManifestEntry
+import com.zilliz.milvus.storage.manifest.SnapshotSegmentEntry
 import com.zilliz.milvus.storage.snapshot.{Segment, V2SegmentResolver}
 
 /** The compat implementation of [[V2SegmentResolver]], handed to
@@ -20,7 +20,7 @@ object V2SegmentResolvers {
       endpoint: String = ""
   ): V2SegmentResolver = new V2SegmentResolver {
     def resolve(
-        entries: Seq[AvroManifestEntry],
+        entries: Seq[SnapshotSegmentEntry],
         bucket: String,
         store: ObjectStore
     ): Either[Throwable, Seq[Segment]] =

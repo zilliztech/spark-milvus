@@ -5,8 +5,8 @@ import scala.util.control.NonFatal
 
 import com.zilliz.milvus.storage.io.{FileInfo, ObjectStore}
 import com.zilliz.milvus.storage.manifest.{
-  AvroManifestEntry,
-  SegmentManifestReader
+  SnapshotSegmentEntry,
+  SnapshotSegmentReader
 }
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.json.{
@@ -28,7 +28,7 @@ import io.milvus.grpc.schema.{
   */
 trait V2SegmentResolver {
   def resolve(
-      entries: Seq[AvroManifestEntry],
+      entries: Seq[SnapshotSegmentEntry],
       bucket: String,
       store: ObjectStore
   ): Either[Throwable, Seq[Segment]]
@@ -42,7 +42,7 @@ object V2SegmentResolver {
     */
   val Skipped: V2SegmentResolver = new V2SegmentResolver {
     def resolve(
-        entries: Seq[AvroManifestEntry],
+        entries: Seq[SnapshotSegmentEntry],
         bucket: String,
         store: ObjectStore
     ): Either[Throwable, Seq[Segment]] = Right(Seq.empty)
@@ -51,7 +51,7 @@ object V2SegmentResolver {
   /** For a caller that knows the snapshot holds no V2 segments. */
   val Unavailable: V2SegmentResolver = new V2SegmentResolver {
     def resolve(
-        entries: Seq[AvroManifestEntry],
+        entries: Seq[SnapshotSegmentEntry],
         bucket: String,
         store: ObjectStore
     ): Either[Throwable, Seq[Segment]] =
@@ -347,7 +347,7 @@ object SnapshotCatalog extends Logging {
       try {
         metadata.manifestList.map { path =>
           val key = keyIn(bucket, path, "segment snapshot Avro", endpoint)
-          SegmentManifestReader.parse(
+          SnapshotSegmentReader.parse(
             store.readAll(key),
             metadata.manifestSchemaVersion
           ) match {
@@ -389,7 +389,7 @@ object SnapshotCatalog extends Logging {
   private def attachIndexes(
       snapshot: Snapshot,
       metadata: SnapshotJson,
-      entries: Seq[AvroManifestEntry],
+      entries: Seq[SnapshotSegmentEntry],
       endpoint: String
   ): Snapshot = {
     val definitions = metadata.indexes.map(_.map(_.toIndex).toVector)

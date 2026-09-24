@@ -21,15 +21,15 @@ import com.zilliz.milvus.storage.snapshot.{
   *     This is NOT the real field ID(s) inside the parquet file — it is the
   *     column-group slot (also used as the directory name). To learn the real
   *     fields, read the parquet's `group_field_id_list` kv-metadata.
-  *   - `binlogs`: one [[AvroBinlogEntry]] per physical parquet file belonging
-  *     to this group, in writer-assigned order (sort by `logId` for rows).
+  *   - `binlogs`: one [[BinlogEntry]] per physical parquet file belonging to
+  *     this group, in writer-assigned order (sort by `logId` for rows).
   */
-case class AvroFieldBinlogEntry(
+case class FieldBinlogEntry(
     slotFieldId: Long,
-    binlogs: Seq[AvroBinlogEntry]
+    binlogs: Seq[BinlogEntry]
 )
 
-case class AvroBinlogEntry(
+case class BinlogEntry(
     logId: Long,
     logPath: String,
     entriesNum: Long
@@ -38,7 +38,7 @@ case class AvroBinlogEntry(
 /** The index descriptor carried by a segment Avro record. Collection and
   * partition identity are supplied by the enclosing snapshot and segment.
   */
-case class AvroIndexFileEntry(
+case class IndexFileEntry(
     segmentId: Long,
     fieldId: Long,
     indexId: Long,
@@ -53,25 +53,27 @@ case class AvroIndexFileEntry(
     indexStorePathVersion: Option[Int]
 )
 
-/** The AVRO `ManifestEntry` fields used by snapshot and segment planning.
+/** The fields of one snapshot segment record (Milvus's AVRO `ManifestEntry`)
+  * used by snapshot and segment planning.
   *
   * `storageVersion` uses the authoritative constants from
   * `milvus/internal/storage/rw.go`: StorageV1=0, StorageV2=2, StorageV3=3.
   */
-case class AvroManifestEntry(
+case class SnapshotSegmentEntry(
     segmentId: Long,
     partitionId: Long,
     segmentLevel: Long,
     numOfRows: Long,
     storageVersion: Long,
-    binlogFiles: Seq[AvroFieldBinlogEntry],
-    deltaLogFiles: Seq[AvroFieldBinlogEntry],
-    statsLogFiles: Seq[AvroFieldBinlogEntry] = Seq.empty,
-    indexFiles: Option[Vector[AvroIndexFileEntry]] = None,
+    binlogFiles: Seq[FieldBinlogEntry],
+    deltaLogFiles: Seq[FieldBinlogEntry],
+    statsLogFiles: Seq[FieldBinlogEntry] = Seq.empty,
+    indexFiles: Option[Vector[IndexFileEntry]] = None,
     manifestHasIndex: Option[Boolean] = None
 )
 
-/** Decoder for per-segment manifest AVRO files written by milvus-datacoord.
+/** Decoder for the per-segment AVRO records a Milvus snapshot lists in its
+  * `manifest_list`, written by milvus-datacoord.
   *
   * The binary is schemaless (milvus uses `hamba/avro avro.Marshal` — no OCF
   * container header), so the decoder must be given the exact writer schema. We
@@ -81,14 +83,14 @@ case class AvroManifestEntry(
   * Usage:
   * {{{
   *   val bytes: Array[Byte] = readBytesFromS3(path)
-  *   SegmentManifestReader.parse(bytes) match {
+  *   SnapshotSegmentReader.parse(bytes) match {
   *     case Right(entry) if entry.storageVersion == 2L => ...
   *     case Right(entry) => // skip — v0/v1/v3 handled elsewhere
   *     case Left(err) => throw err
   *   }
   * }}}
   */
-object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
+object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
 
   private val LastNeededField = "index_files"
 
@@ -160,8 +162,8 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
     truncated
   }
 
-  /** Decode the raw bytes of one per-segment `*.avro` file into the subset of
-    * fields needed by snapshot and segment planning.
+  /** Decode the raw bytes of one snapshot segment record (`*.avro`) into the
+    * subset of fields needed by snapshot and segment planning.
     *
     * @return
     *   `Right(entry)` on success, or `Left(throwable)` on any parse error.
@@ -169,7 +171,7 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
   def parse(
       avroBytes: Array[Byte],
       manifestSchemaVersion: Int = 1
-  ): Either[Throwable, AvroManifestEntry] = {
+  ): Either[Throwable, SnapshotSegmentEntry] = {
     try {
       val reader =
         new GenericDatumReader[GenericRecord](
@@ -188,19 +190,19 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
 
   def supportedSchemaVersions: Seq[Int] = SchemaResources.keys.toSeq.sorted
 
-  /** Join an AVRO entry with the segment's `group_field_id_list` kv-metadata
-    * (read from any one of the segment's parquet files) to produce the
-    * `Segment` with real field IDs per column group.
+  /** Join a snapshot segment record with the segment's `group_field_id_list`
+    * kv-metadata (read from any one of the segment's parquet files) to produce
+    * the `Segment` with real field IDs per column group.
     *
     * @param entry
-    *   Parsed AVRO manifest (must have `storageVersion == 2L`).
+    *   Parsed snapshot segment record (must have `storageVersion == 2L`).
     * @param groupFieldIdList
     *   Positional list of groups, each element being the real field IDs carried
     *   by that group. Obtained from `ParquetFooterReader` by splitting the kv
     *   string `"100,0,1;101;102"` on `;` and then `,`.
     */
   def toSegment(
-      entry: AvroManifestEntry,
+      entry: SnapshotSegmentEntry,
       groupFieldIdList: Seq[Seq[Long]]
   ): Either[Throwable, Segment] = {
     if (entry.storageVersion != 2L) {
@@ -314,8 +316,8 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
       )
   }
 
-  private def projectEntry(rec: GenericRecord): AvroManifestEntry = {
-    AvroManifestEntry(
+  private def projectEntry(rec: GenericRecord): SnapshotSegmentEntry = {
+    SnapshotSegmentEntry(
       segmentId = asLong(rec.get("segment_id")),
       partitionId = asLong(rec.get("partition_id")),
       segmentLevel = asLong(rec.get("segment_level")),
@@ -342,7 +344,7 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
       )
   }
 
-  private def statistics(entry: AvroManifestEntry): SegmentStatistics = {
+  private def statistics(entry: SnapshotSegmentEntry): SegmentStatistics = {
     val byField = entry.statsLogFiles
       .groupBy(_.slotFieldId)
       .map { case (fieldId, groups) =>
@@ -351,7 +353,7 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
     SegmentStatistics.Listed(byField)
   }
 
-  private def projectIndexes(value: Any): Vector[AvroIndexFileEntry] = {
+  private def projectIndexes(value: Any): Vector[IndexFileEntry] = {
     value.asInstanceOf[JavaList[GenericRecord]].asScala.toVector.map { rec =>
       def optionalInt(name: String): Option[Int] =
         Option(rec.getSchema.getField(name))
@@ -364,7 +366,7 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
           asString(pair.get("key")) -> asString(pair.get("value"))
         }
         .toMap
-      AvroIndexFileEntry(
+      IndexFileEntry(
         segmentId = asLong(rec.get("segment_id")),
         fieldId = asLong(rec.get("field_id")),
         indexId = asLong(rec.get("index_id")),
@@ -386,11 +388,11 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
     }
   }
 
-  private def projectFieldBinlogs(v: Any): Seq[AvroFieldBinlogEntry] = {
+  private def projectFieldBinlogs(v: Any): Seq[FieldBinlogEntry] = {
     // Avro arrays deserialize to java.util.List (actually GenericData.Array).
     val list = v.asInstanceOf[JavaList[GenericRecord]]
     list.asScala.toSeq.map { afb =>
-      AvroFieldBinlogEntry(
+      FieldBinlogEntry(
         slotFieldId = asLong(afb.get("field_id")),
         binlogs = afb
           .get("binlogs")
@@ -398,7 +400,7 @@ object SegmentManifestReader extends com.zilliz.milvus.storage.Logging {
           .asScala
           .toSeq
           .map(bl =>
-            AvroBinlogEntry(
+            BinlogEntry(
               logId = asLong(bl.get("log_id")),
               logPath = asString(bl.get("log_path")),
               entriesNum = asLong(bl.get("entries_num"))

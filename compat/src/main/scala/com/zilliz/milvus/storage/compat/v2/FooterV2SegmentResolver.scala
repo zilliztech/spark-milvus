@@ -5,10 +5,10 @@ import scala.util.control.NonFatal
 import com.zilliz.milvus.storage.compat.ParquetFooterReader
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.manifest.{
-  AvroFieldBinlogEntry,
-  AvroManifestEntry
+  FieldBinlogEntry,
+  SnapshotSegmentEntry
 }
-import com.zilliz.milvus.storage.manifest.SegmentManifestReader
+import com.zilliz.milvus.storage.manifest.SnapshotSegmentReader
 import com.zilliz.milvus.storage.path.{Located, StoragePath}
 import com.zilliz.milvus.storage.snapshot.{
   DeltaLogFile,
@@ -22,11 +22,11 @@ import com.zilliz.milvus.storage.snapshot.{
   * and the S3 bucket where those files live, this object:
   *
   *   1. Fetches each AVRO via [[ObjectStore]]. 2. Decodes with
-  *      [[SegmentManifestReader]]. 3. Skips entries whose `storage_version !=
+  *      [[SnapshotSegmentReader]]. 3. Skips entries whose `storage_version !=
   *      2` (V1/V3 are handled elsewhere). 4. For each V2 entry, reads exactly
   *      one parquet footer's `group_field_id_list` kv-metadata to recover the
   *      segment's column-group layout ([[ParquetFooterReader]]). 5. Calls
-  *      `SegmentManifestReader.toSegment` to join the two.
+  *      `SnapshotSegmentReader.toSegment` to join the two.
   *
   * The resulting `Seq[Segment]` is the runtime view consumed by
   * `MilvusV2InputPartition` / `MilvusRowPartitionReader`.
@@ -68,7 +68,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
         val avroPath =
           metadataPath(rawPath, bucket, endpoint, "AVRO manifest").key
         val avroBytes = store.readAll(avroPath)
-        SegmentManifestReader
+        SnapshotSegmentReader
           .parse(avroBytes, manifestSchemaVersion) match {
           case Right(e) => e
           case Left(err) =>
@@ -95,7 +95,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
     * planning and V2 footer recovery use the same snapshot bytes.
     */
   def resolveEntries(
-      entries: Seq[AvroManifestEntry],
+      entries: Seq[SnapshotSegmentEntry],
       bucket: String,
       store: ObjectStore,
       applyDeletes: Boolean = true,
@@ -127,7 +127,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
   /** A segment with no column groups and the delete files the manifest lists:
     * an L0 segment, or a data segment whose binlog list is empty.
     */
-  private def deleteOnlySegment(entry: AvroManifestEntry): Segment =
+  private def deleteOnlySegment(entry: SnapshotSegmentEntry): Segment =
     Segment.v2(
       id = entry.segmentId,
       partitionId = entry.partitionId,
@@ -154,7 +154,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
 
   /** Convert one parsed AVRO entry into a `Segment`. Extracted for
     * unit-testability — it needs only Hadoop FS, so local parquet files + a
-    * hand-built `AvroManifestEntry` cover the full behavior matrix without
+    * hand-built `SnapshotSegmentEntry` cover the full behavior matrix without
     * minio/S3.
     *
     * @return
@@ -164,7 +164,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
     *   context on any unrecoverable failure.
     */
   def segmentFromEntry(
-      entry: AvroManifestEntry,
+      entry: SnapshotSegmentEntry,
       bucket: String,
       store: ObjectStore,
       applyDeletes: Boolean = true,
@@ -255,7 +255,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
                 )
             }
           }
-        SegmentManifestReader.toSegment(
+        SnapshotSegmentReader.toSegment(
           resolvedEntry,
           groupFieldIdListPerEntry
         ) match {
@@ -276,15 +276,15 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
   }
 
   private def resolveEntryPaths(
-      entry: AvroManifestEntry,
+      entry: SnapshotSegmentEntry,
       bucket: String,
       storageScheme: String,
       endpoint: String
-  ): AvroManifestEntry = {
+  ): SnapshotSegmentEntry = {
     def resolveFieldBinlogs(
-        fieldBinlogs: Seq[AvroFieldBinlogEntry],
+        fieldBinlogs: Seq[FieldBinlogEntry],
         pathKind: String
-    ): Seq[AvroFieldBinlogEntry] =
+    ): Seq[FieldBinlogEntry] =
       fieldBinlogs.map(fieldBinlog =>
         fieldBinlog.copy(binlogs =
           fieldBinlog.binlogs.map(log =>

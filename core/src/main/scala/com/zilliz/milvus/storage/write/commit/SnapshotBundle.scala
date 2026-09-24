@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper
 
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.manifest.{
-  AvroManifestEntry,
-  SegmentManifestReader
+  SnapshotSegmentEntry,
+  SnapshotSegmentReader
 }
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.json.ManifestContentJson
@@ -47,7 +47,7 @@ object SnapshotBundle {
     */
   def pathsOf(
       document: ObjectNode,
-      entries: Seq[AvroManifestEntry]
+      entries: Seq[SnapshotSegmentEntry]
   ): Seq[String] = {
     val basePaths = Seq.newBuilder[String]
     Option(document.get("storagev2_manifest_list"))
@@ -123,7 +123,7 @@ object SnapshotBundle {
       Option(document.get("format_version")).map(_.asInt(1)).getOrElse(1)
     val manifestKeys = texts(document, "manifest_list")
     val entries = manifestKeys.map { key =>
-      SegmentManifestReader.parse(store.readAll(key), schemaVersion) match {
+      SnapshotSegmentReader.parse(store.readAll(key), schemaVersion) match {
         case Right(entry) => entry
         case Left(failure) =>
           throw new IllegalArgumentException(

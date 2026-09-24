@@ -7,8 +7,8 @@ import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.storage.io.{LocalObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.manifest.{
-  AvroManifestEntry,
-  SegmentManifestFixture
+  SnapshotSegmentEntry,
+  SnapshotSegmentFixture
 }
 import com.zilliz.milvus.storage.read.plan.ReadPlan
 import com.zilliz.milvus.storage.snapshot.json.{
@@ -99,11 +99,11 @@ class SnapshotCatalogTest extends AnyFunSuite {
 
   test("snapshot index definitions and exact segment builds reach read tasks") {
     withDir { dir =>
-      val index = SegmentManifestFixture.index()
+      val index = SnapshotSegmentFixture.index()
       writeAvro(
         dir,
         avroKey,
-        SegmentManifestFixture.encode(indexes =
+        SnapshotSegmentFixture.encode(indexes =
           Vector(
             index.copy(filePaths = index.filePaths.map("s3a://bucket/" + _))
           )
@@ -151,11 +151,11 @@ class SnapshotCatalogTest extends AnyFunSuite {
     withDir { dir =>
       val endpoint = "minio:9000"
       val prefix = s"s3://$endpoint/bucket/"
-      val index = SegmentManifestFixture.index()
+      val index = SnapshotSegmentFixture.index()
       writeAvro(
         dir,
         avroKey,
-        SegmentManifestFixture.encode(indexes =
+        SnapshotSegmentFixture.encode(indexes =
           Vector(index.copy(filePaths = index.filePaths.map(prefix + _)))
         )
       )
@@ -186,7 +186,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       writeAvro(
         dir,
         key,
-        SegmentManifestFixture.encode(
+        SnapshotSegmentFixture.encode(
           version = 1,
           segmentId = 41L,
           partitionId = -1L,
@@ -208,7 +208,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       assert(missing.getMessage.contains("no V2 resolver"))
       val resolver = new V2SegmentResolver {
         override def resolve(
-            entries: Seq[AvroManifestEntry],
+            entries: Seq[SnapshotSegmentEntry],
             bucket: String,
             store: ObjectStore
         ): Either[Throwable, Seq[Segment]] = {
@@ -252,7 +252,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
           .head
           .indexes == SegmentIndexes.Unknown
       )
-      writeAvro(dir, avroKey, SegmentManifestFixture.encode())
+      writeAvro(dir, avroKey, SnapshotSegmentFixture.encode())
       write(dir, "snapshot.json", indexedSnapshotJson)
       val snapshot = catalog(dir).read("snapshot.json")
       assert(snapshot.segments.head.indexes == SegmentIndexes.Unindexed)
@@ -266,7 +266,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
     "inconsistent index identity, row counts, builds and buckets fail snapshot resolution"
   ) {
     withDir { dir =>
-      val index = SegmentManifestFixture.index()
+      val index = SnapshotSegmentFixture.index()
       val invalid = Seq(
         index.copy(segmentId = 31L) -> "expected 30",
         index.copy(rowCount = 3L) -> "has 3 rows",
@@ -281,7 +281,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
         writeAvro(
           dir,
           avroKey,
-          SegmentManifestFixture.encode(indexes = Vector(badIndex))
+          SnapshotSegmentFixture.encode(indexes = Vector(badIndex))
         )
         val error = intercept[IllegalArgumentException] {
           new SnapshotCatalog(
@@ -410,7 +410,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
         writeAvro(
           dir,
           s"files/snapshots/10/manifests/$file",
-          SegmentManifestFixture.encode(
+          SnapshotSegmentFixture.encode(
             version = 1,
             segmentId = id,
             rows = 1L,
@@ -421,7 +421,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       val calls = scala.collection.mutable.ListBuffer.empty[Seq[Long]]
       val resolver = new V2SegmentResolver {
         override def resolve(
-            entries: Seq[AvroManifestEntry],
+            entries: Seq[SnapshotSegmentEntry],
             bucket: String,
             store: ObjectStore
         ): Either[Throwable, Seq[Segment]] = {
@@ -534,7 +534,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       write(dir, "files/snapshots/10/metadata/2.json", json)
       val resolver = new V2SegmentResolver {
         def resolve(
-            entries: Seq[AvroManifestEntry],
+            entries: Seq[SnapshotSegmentEntry],
             bucket: String,
             store: ObjectStore
         ) = Right(
@@ -559,7 +559,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       writeAvro(
         dir,
         "files/snapshots/10/manifests/2/30.avro",
-        SegmentManifestFixture.encode(version = 1, storageVersion = 2L)
+        SnapshotSegmentFixture.encode(version = 1, storageVersion = 2L)
       )
       val duplicate = intercept[IllegalArgumentException](
         new SnapshotCatalog(new LocalObjectStore(dir.toString), "", resolver)
@@ -814,7 +814,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       )
       val resolver = new V2SegmentResolver {
         def resolve(
-            entries: Seq[AvroManifestEntry],
+            entries: Seq[SnapshotSegmentEntry],
             bucket: String,
             store: ObjectStore
         ) = {
@@ -856,7 +856,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       writeAvro(
         dir,
         "files/snapshots/10/manifests/1/40.avro",
-        SegmentManifestFixture.encode(
+        SnapshotSegmentFixture.encode(
           version = 1,
           segmentId = 40L,
           storageVersion = 2L
@@ -901,7 +901,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
 
       val resolver = new V2SegmentResolver {
         def resolve(
-            entries: Seq[AvroManifestEntry],
+            entries: Seq[SnapshotSegmentEntry],
             bucket: String,
             store: ObjectStore
         ) = {
@@ -937,7 +937,7 @@ class SnapshotCatalogTest extends AnyFunSuite {
       writeAvro(
         dir,
         "files/snapshots/10/manifests/1/40.avro",
-        SegmentManifestFixture.encode(
+        SnapshotSegmentFixture.encode(
           version = 1,
           segmentId = 40L,
           rows = 1L,

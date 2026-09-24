@@ -15,7 +15,8 @@ import org.apache.avro.generic.{
 import org.apache.avro.io.{DecoderFactory, EncoderFactory}
 import org.apache.avro.Schema
 
-/** Writes one segment's manifest as the bytes [[SegmentManifestReader]] reads.
+/** Writes one snapshot segment record as the bytes [[SnapshotSegmentReader]]
+  * reads.
   *
   * Milvus marshals these records with `hamba/avro`, so the object carries no
   * container header and the field order is the writer schema's. The reader
@@ -31,7 +32,7 @@ import org.apache.avro.Schema
   * Milvus-side consumer has to settle them first
   * (docs/design/architecture/vector-search.html section 2.7).
   */
-object SegmentManifestWriter {
+object SnapshotSegmentWriter {
 
   /** The schema version written, and the `format_version` of a snapshot that
     * names these objects.
@@ -48,7 +49,7 @@ object SegmentManifestWriter {
   )
 
   def encode(
-      entry: AvroManifestEntry,
+      entry: SnapshotSegmentEntry,
       facts: SegmentFacts = SegmentFacts(),
       schemaVersion: Int = CurrentSchemaVersion
   ): Array[Byte] = {
@@ -74,7 +75,7 @@ object SegmentManifestWriter {
   }
 
   def supportedSchemaVersions: Seq[Int] =
-    SegmentManifestReader.supportedSchemaVersions
+    SnapshotSegmentReader.supportedSchemaVersions
 
   /** One segment's manifest as Milvus wrote it, with its index registrations
     * replaced.
@@ -88,7 +89,7 @@ object SegmentManifestWriter {
     */
   def rewriteIndexes(
       source: Array[Byte],
-      indexes: Vector[AvroIndexFileEntry],
+      indexes: Vector[IndexFileEntry],
       schemaVersion: Int = CurrentSchemaVersion
   ): Array[Byte] = {
     val schema = schemaFor(schemaVersion)
@@ -108,7 +109,7 @@ object SegmentManifestWriter {
       record: GenericRecord,
       schema: Schema,
       field: String,
-      groups: Seq[AvroFieldBinlogEntry]
+      groups: Seq[FieldBinlogEntry]
   ): Unit = {
     val groupSchema = schema.getField(field).schema.getElementType
     val binlogSchema = groupSchema.getField("binlogs").schema.getElementType
@@ -135,7 +136,7 @@ object SegmentManifestWriter {
   private def putIndexes(
       record: GenericRecord,
       schema: Schema,
-      indexes: Vector[AvroIndexFileEntry]
+      indexes: Vector[IndexFileEntry]
   ): Unit = {
     val indexSchema = schema.getField("index_files").schema.getElementType
     val paramSchema = indexSchema.getField("index_params").schema.getElementType

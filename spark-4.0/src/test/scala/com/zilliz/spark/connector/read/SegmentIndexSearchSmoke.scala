@@ -26,8 +26,8 @@ import com.zilliz.milvus.storage.codec.{
 import com.zilliz.milvus.storage.index.IndexWriter
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.manifest.{
-  AvroIndexFileEntry,
-  SegmentManifestFixture
+  IndexFileEntry,
+  SnapshotSegmentFixture
 }
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
@@ -88,7 +88,7 @@ object SegmentIndexSearchSmoke {
   private case class Fixture(
       task: SegmentReadTask,
       version: Long,
-      descriptor: AvroIndexFileEntry,
+      descriptor: IndexFileEntry,
       vectorFiles: Seq[String]
   )
 
@@ -699,7 +699,7 @@ object SegmentIndexSearchSmoke {
       vectors: Seq[Array[Float]],
       segment: Long,
       properties: Map[String, String]
-  ): AvroIndexFileEntry = {
+  ): IndexFileEntry = {
     val layout = VectorLayout(VectorElementType.Float32, 2)
     val allocator = new RootAllocator()
     val buffer = allocator.buffer(vectors.size.toLong * 8L)
@@ -740,7 +740,7 @@ object SegmentIndexSearchSmoke {
               store
             )
           finally store.close()
-        AvroIndexFileEntry(
+        IndexFileEntry(
           segment,
           101L,
           900L,
@@ -820,7 +820,7 @@ object SegmentIndexSearchSmoke {
       Files.createDirectories(directory.resolve(key).getParent)
       Files.write(
         directory.resolve(key),
-        SegmentManifestFixture.encode(
+        SnapshotSegmentFixture.encode(
           segmentId = fixture.task.segmentId,
           rows = 8L,
           indexes =

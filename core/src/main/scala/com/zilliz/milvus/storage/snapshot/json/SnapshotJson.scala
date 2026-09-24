@@ -4,7 +4,7 @@ import com.fasterxml.jackson.annotation.{JsonAlias, JsonProperty}
 import com.fasterxml.jackson.databind.node.LongNode
 import com.fasterxml.jackson.databind.JsonNode
 
-import com.zilliz.milvus.storage.manifest.AvroManifestEntry
+import com.zilliz.milvus.storage.manifest.SnapshotSegmentEntry
 import com.zilliz.milvus.storage.snapshot.CollectionIndex
 
 /** `snapshot_info`. */
@@ -215,7 +215,7 @@ object SnapshotJson {
       collection: CollectionJson,
       manifestList: Seq[String],
       storageV2ManifestList: Option[Seq[ManifestItemJson]],
-      entries: Seq[AvroManifestEntry]
+      entries: Seq[SnapshotSegmentEntry]
   ): SnapshotJson = {
     def long(v: Long): Option[JsonNode] = Some(LongNode.valueOf(v))
     SnapshotJson(

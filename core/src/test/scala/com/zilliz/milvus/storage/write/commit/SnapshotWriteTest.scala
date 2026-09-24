@@ -9,7 +9,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.Inside
 
 import com.zilliz.milvus.storage.io.LocalObjectStore
-import com.zilliz.milvus.storage.manifest.SegmentManifestFixture
+import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
 import com.zilliz.milvus.storage.snapshot.{
   SegmentIndexes,
   SnapshotCatalog,
@@ -34,7 +34,7 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
       write(
         directory,
         s"files/snapshots/10/manifests/1/$segmentId.avro",
-        SegmentManifestFixture.encode(
+        SnapshotSegmentFixture.encode(
           version = 4,
           segmentId = segmentId,
           partitionId = 20L,
