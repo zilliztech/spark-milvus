@@ -62,13 +62,20 @@ case "${verb}:${resource}" in
   get:pods)
     if [[ "$arguments" == *'containerStatuses'* ]]; then
       printf '%s\n' "${MOCK_WAITING_REASON:-}"
+      if [[ "$arguments" == *'initContainerStatuses'* ]]; then
+        printf '%s\n' "${MOCK_INIT_WAITING_REASON:-}"
+      fi
+      if [[ "$arguments" != *'component=integration-test'* ]]; then
+        printf '%s\n' "${MOCK_MILVUS_WAITING_REASON:-}"
+      fi
     elif [[ "$arguments" == *'PodScheduled'* ]]; then
       printf '%s\n' "${MOCK_SCHEDULED_CONDITIONS:-}"
     elif [[ "$arguments" == *'-o name'* ]]; then
+      printf 'pod/milvus-pod\n'
       printf 'pod/%s-pod\n' "${MOCK_JOB_NAME:-integration-job}"
     fi
     ;;
-  get:jobs,pods | get:events | logs:* | describe:*)
+  get:jobs,deployments,services,configmaps,pods | get:events | logs:* | describe:*)
     exit 0
     ;;
   *)
@@ -109,6 +116,8 @@ run_case() {
     MOCK_KUBECTL_CALLS="${case_dir}/kubectl-calls" \
     MOCK_JOB_CONDITIONS="$job_conditions" \
     MOCK_WAITING_REASON="$waiting_reason" \
+    MOCK_INIT_WAITING_REASON="${7:-}" \
+    MOCK_MILVUS_WAITING_REASON="${8:-}" \
     MOCK_SCHEDULED_CONDITIONS="$scheduled_conditions" \
     "$runner" "$release" integration-tests "$values_file" \
     >"${case_dir}/output" 2>&1
@@ -127,6 +136,10 @@ run_case() {
   if ! grep -q '^uninstall ' "${case_dir}/helm-calls"; then
     fail "${name}: release was not uninstalled"
   fi
+  if [[ ! -f "${case_dir}/artifacts/milvus-pod.log" ||
+        ! -f "${case_dir}/artifacts/milvus-pod.previous.log" ]]; then
+    fail "${name}: Milvus pod logs were not collected"
+  fi
   if [[ ! -f "${case_dir}/artifacts/helm-status.txt" ]]; then
     fail "${name}: diagnostics were not collected"
   fi
@@ -138,12 +151,13 @@ for reason in \
   ImagePullBackOff \
   InvalidImageName \
   CreateContainerConfigError \
-  RunContainerError; do
+  RunContainerError \
+  CrashLoopBackOff; do
   case_name=$(tr '[:upper:]' '[:lower:]' <<<"$reason")
   run_case \
     "$case_name" \
     1 \
-    "cannot start: Pod waiting reason ${reason}" \
+    "cannot start: release Pod waiting reason ${reason}" \
     '|' \
     "$reason" \
     ''
@@ -152,10 +166,13 @@ done
 run_case \
   unschedulable \
   1 \
-  'cannot start: Pod is unschedulable' \
+  'cannot start: release Pod is unschedulable' \
   '|' \
   '' \
   'False|Unschedulable'
+
+run_case init-imagepull 1 'release Pod waiting reason ImagePullBackOff' '|' '' '' ImagePullBackOff
+run_case milvus-crashloop 1 'release Pod waiting reason CrashLoopBackOff' '|' '' '' '' CrashLoopBackOff
 
 run_case complete 0 '' 'True|' '' ''
 run_case failed 1 'Integration Job integration-job failed' '|True' '' ''

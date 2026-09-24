@@ -129,7 +129,8 @@ the root aggregate, compiles in CI and is not run there.
 The Helm execution contract for moving that suite into CI is documented in
 [integration-tests.html](design/engineering/integration-tests.html). The chart
 is under `deploy/helm/spark-milvus-integration`; it runs one Spark local-mode
-Job against external services and references existing Secrets. The release
+Job, can deploy a temporary Milvus standalone, and references existing S3
+storage and Secrets. The release
 image and the currently hard-coded integration suites do not yet satisfy the
 runner contract, so chart linting is not evidence that the live suite ran.
 

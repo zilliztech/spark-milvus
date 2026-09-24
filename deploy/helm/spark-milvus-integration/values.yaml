@@ -19,16 +19,53 @@ runner:
   command:
     - /opt/spark-milvus/bin/run-integration-tests
   args: []
+  # Optional command supplied by the private test image. Runs after Milvus is
+  # ready and before the test; use it to create collections/data/snapshots.
+  setup:
+    command: []
+    args: []
 
 milvus:
+  # Required for an existing instance; leave empty when deployment.enabled=true.
   uri: ""
   database: default
   credentials:
     existingSecret: ""
     tokenKey: milvus-token
+    # Deployment mode requires this extra key in the same Secret. tokenKey must
+    # contain root:<this-password>. Neither value belongs in Helm values.
+    rootPasswordKey: root-password
+  deployment:
+    enabled: false
+    image: milvusdb/milvus:v3.0.1@sha256:2b2fc2cf499ad897c93d4b90ee251646f718522845261a342d74d7c0c66bb274
+    # Numeric identity of milvus in the pinned image; adjust for image overrides.
+    runAsUser: 999
+    runAsGroup: 999
+    etcdImage: quay.io/coreos/etcd:v3.5.25
+    imagePullPolicy: IfNotPresent
+    readinessTimeoutSeconds: 600
+    dataSizeLimit: 20Gi
+    etcdSizeLimit: 2Gi
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+    etcdResources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
 
 objectStorage:
-  # These values must describe the object storage used by the target Milvus.
+  # Existing mode: the exact storage root of the target Milvus.
+  # Deployment mode: rootPath is a base; the chart appends
+  # ci/<namespace>/<release>/<runId> for both Milvus and the runner.
+  # endpoint is a hostname with optional port, without a URL scheme or path.
   endpoint: ""
   bucket: ""
   rootPath: files
