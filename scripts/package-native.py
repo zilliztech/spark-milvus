@@ -108,6 +108,8 @@ def inventory(directory, platform=None):
         inspected = FORMAT.inspect(path)
         if inspected is None:
             raise ValueError(f"Not a shared library of this platform: {name}")
+        if platform is not None and FORMAT.architecture(path) != platform.split("-", 1)[1]:
+            raise ValueError(f"Binary architecture does not match {platform}: {name}")
         sonames = [inspected["soname"]] if inspected["soname"] != path.name else []
         soname = inspected["soname"]
         # Modules without DT_SONAME are opened by path. Keep distinct module

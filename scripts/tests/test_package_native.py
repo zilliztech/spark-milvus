@@ -138,9 +138,9 @@ class PackageNativeTest(unittest.TestCase):
             self.assertNotIn(self.prefix + "libdependency.so", archive.namelist())
             self.assertNotIn(self.prefix + "libdependency.so.1.0", archive.namelist())
             self.assertEqual(dependency.read_bytes(), archive.read(self.prefix + dependency.name))
-            elf = json.loads(archive.read("META-INF/milvus-native/elf.json"))
-            self.assertEqual(len(PACKAGE_NATIVE.REQUIRED_ENTRIES) + 1, len(elf))
-            self.assertEqual("libdependency.so.1", elf[dependency.name]["soname"])
+            binaries = json.loads(archive.read("META-INF/milvus-native/binaries.json"))
+            self.assertEqual(len(PACKAGE_NATIVE.REQUIRED_ENTRIES) + 1, len(binaries))
+            self.assertEqual("libdependency.so.1", binaries[dependency.name]["soname"])
 
     def test_manifest_declares_exact_jvm_load_entries(self):
         self.package()
@@ -343,7 +343,7 @@ class PackageNativeTest(unittest.TestCase):
         self.metadata["platform"] = wrong_platform
         self.provenance.write_text(json.dumps(self.metadata), encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, f"ELF architecture does not match {wrong_platform}"):
+        with self.assertRaisesRegex(ValueError, f"architecture does not match {wrong_platform}"):
             self.package()
         self.assertFalse(self.output.exists())
 

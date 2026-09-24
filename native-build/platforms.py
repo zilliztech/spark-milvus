@@ -84,6 +84,13 @@ class Format:
         """
         raise NotImplementedError
 
+    def architecture(self, path):
+        """The architecture ``path`` was built for, spelled as platform names
+        spell it (``x86_64``, ``aarch64``) and read from its file header, or
+        ``None`` when the header names another one or several.
+        """
+        raise NotImplementedError
+
     def set_runtime_path(self, path, entries):
         """Make ``path`` look for its dependencies in ``entries``, each relative
         to the loaded file's own directory.
@@ -245,6 +252,16 @@ class Elf(Format):
             "needed": re.findall(r"\(NEEDED\).*\[(.*?)\]", output),
         }
 
+    #: ``e_machine`` of a 64-bit little-endian ELF file, by architecture.
+    MACHINES = {62: "x86_64", 183: "aarch64"}
+
+    def architecture(self, path):
+        with Path(path).open("rb") as source:
+            header = source.read(20)
+        if len(header) < 20 or header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01":
+            return None
+        return self.MACHINES.get(int.from_bytes(header[18:20], "little"))
+
     def set_runtime_path(self, path, entries):
         joined = ":".join("$ORIGIN" + ("/" + entry if entry else "") for entry in entries)
         subprocess.run(["patchelf", "--set-rpath", joined, str(path)], check=True)
@@ -376,6 +393,17 @@ class MachO(Format):
         ]
         own = Path(recorded).name
         return {"soname": own, "needed": [name for name in needed if name != own]}
+
+    #: ``cputype`` of a single-architecture 64-bit Mach-O file, by architecture.
+    CPU_TYPES = {0x01000007: "x86_64", 0x0100000C: "aarch64"}
+
+    def architecture(self, path):
+        with Path(path).open("rb") as source:
+            header = source.read(8)
+        # A universal binary carries several architectures and names none.
+        if len(header) < 8 or header[:4] != b"\xcf\xfa\xed\xfe":
+            return None
+        return self.CPU_TYPES.get(int.from_bytes(header[4:8], "little"))
 
     def set_runtime_path(self, path, entries):
         # A library whose only @rpath entry is its own install name has no

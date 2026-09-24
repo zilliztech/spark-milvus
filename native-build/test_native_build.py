@@ -106,6 +106,31 @@ class LibraryGlobTest(unittest.TestCase):
             self.assertEqual(sorted(names[:8]), sorted(p.name for p in root.glob(elf.library_glob())))
 
 
+class BinaryArchitectureTest(unittest.TestCase):
+    """The architecture comes from the file header, with no platform tool."""
+
+    def library(self, header):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "library"
+        path.write_bytes(header + bytes(64))
+        return path
+
+    def test_elf_machine_names_the_architecture(self):
+        for machine, expected in ((62, "x86_64"), (183, "aarch64"), (3, None)):
+            with self.subTest(machine=machine):
+                header = b"\x7fELF\x02\x01" + bytes(12) + machine.to_bytes(2, "little")
+                self.assertEqual(expected, platforms.Elf().architecture(self.library(header)))
+
+    def test_mach_o_cputype_names_the_architecture(self):
+        for cputype, expected in ((0x01000007, "x86_64"), (0x0100000C, "aarch64"), (7, None)):
+            with self.subTest(cputype=cputype):
+                header = b"\xcf\xfa\xed\xfe" + cputype.to_bytes(4, "little")
+                self.assertEqual(expected, platforms.MachO().architecture(self.library(header)))
+        universal = self.library(b"\xca\xfe\xba\xbe" + bytes(4))
+        self.assertIsNone(platforms.MachO().architecture(universal))
+
+
 FORMAT = platforms.host()
 COMPILER = "gcc" if isinstance(FORMAT, platforms.Elf) else "clang"
 
