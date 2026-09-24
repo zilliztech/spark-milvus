@@ -261,7 +261,7 @@ private[read] object SearchQueries {
   ): Array[Float] =
     finiteValues(row.getLong(0), row.getSeq[Float](1).toArray, layout, metric)
 
-  private def finiteValues(
+  private[read] def finiteValues(
       id: Long,
       values: Array[Float],
       layout: VectorLayout,
@@ -285,7 +285,7 @@ private[read] object SearchQueries {
   private def int8(row: Row, layout: VectorLayout): Array[Byte] =
     int8Values(row.getLong(0), row.getSeq[Short](1).toArray, layout)
 
-  private def int8Values(
+  private[read] def int8Values(
       id: Long,
       values: Array[Short],
       layout: VectorLayout

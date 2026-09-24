@@ -3,6 +3,7 @@ package com.zilliz.spark.connector.read
 import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters._
 
+import org.apache.arrow.memory.RootAllocator
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.types._
@@ -24,6 +25,7 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
   private val layout = VectorLayout(VectorElementType.Float32, 2)
   private val total = 10
+  private val many = 5000
 
   override def beforeAll(): Unit = {
     spark = SparkSession
@@ -38,6 +40,13 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     dir = Files.createTempDirectory("query-files")
     // Two files, so that the sequence crosses a file boundary.
     frame(total).repartition(2).write.parquet(dir.resolve("set").toString)
+    // One file of many small row groups, so that decoding runs on several
+    // threads and groups straddle row groups.
+    spark.sparkContext.hadoopConfiguration.setInt("parquet.block.size", 4096)
+    spark.sparkContext.hadoopConfiguration.setInt("parquet.page.size", 1024)
+    frame(many).coalesce(1).write.parquet(dir.resolve("many").toString)
+    spark.sparkContext.hadoopConfiguration.unset("parquet.block.size")
+    spark.sparkContext.hadoopConfiguration.unset("parquet.page.size")
   }
 
   override def afterAll(): Unit = if (spark != null) spark.stop()
@@ -135,6 +144,98 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       .parquet(ints)
     QueryFiles.of(spark, selected(spark.read.parquet(ints))) shouldBe None
     QueryFiles.of(spark, selected(set).limit(3)) shouldBe None
+  }
+
+  private def matrixRows(
+      matrix: com.zilliz.milvus.storage.index.QueryMatrix
+  ): Seq[Seq[Float]] =
+    (0 until matrix.queries).map { row =>
+      val buffer = matrix.buffer
+      (0 until layout.dimension).map(d =>
+        buffer.getFloat(row * layout.rowBytes + d * 4)
+      )
+    }
+
+  test(
+    "a file of many row groups decodes on several threads into the same groups as the packer"
+  ) {
+    val files = QueryFiles
+      .of(spark, selected(spark.read.parquet(dir.resolve("many").toString)))
+      .get
+    files.rowGroups.size should be > 2
+    files.rowGroups.map(_.rows).sum shouldBe many.toLong
+    files.rowGroups.map(_.firstRow) shouldBe files.rowGroups
+      .map(_.rows)
+      .scanLeft(0L)(_ + _)
+      .init
+    val planned = Seq(
+      SearchPlan.QueryGroup(0, 1200),
+      SearchPlan.QueryGroup(1200, 1300),
+      SearchPlan.QueryGroup(2500, 2500)
+    )
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val decoded =
+        files.decode(0 until 3, planned, layout, "L2", allocator, threads = 4)
+      val packed = files.groups(0 until 3, planned, layout, "L2").toSeq
+      try {
+        decoded.size shouldBe 3
+        decoded.zip(packed).foreach { case ((ids, matrix), group) =>
+          ids.toSeq shouldBe group.ids.toSeq
+          matrix.queries shouldBe group.queries
+          val expected = (0 until group.queries).map(q =>
+            (0 until layout.dimension).map(d =>
+              java.nio.ByteBuffer
+                .wrap(group.vectors)
+                .order(java.nio.ByteOrder.nativeOrder())
+                .getFloat(q * layout.rowBytes + d * 4)
+            )
+          )
+          matrixRows(matrix) shouldBe expected
+        }
+      } finally decoded.foreach(_._2.close())
+    } finally allocator.close()
+  }
+
+  test("a range in the middle decodes only its rows") {
+    val files = QueryFiles
+      .of(spark, selected(spark.read.parquet(dir.resolve("many").toString)))
+      .get
+    val planned = Seq(
+      SearchPlan.QueryGroup(0, 2000),
+      SearchPlan.QueryGroup(2000, 1500),
+      SearchPlan.QueryGroup(3500, 1500)
+    )
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val decoded =
+        files.decode(1 until 2, planned, layout, "L2", allocator, threads = 3)
+      try {
+        decoded.size shouldBe 1
+        decoded.head._1.toSeq shouldBe (2000L until 3500L)
+        matrixRows(decoded.head._2).head shouldBe Seq(2000f, -2000f)
+      } finally decoded.foreach(_._2.close())
+    } finally allocator.close()
+  }
+
+  test(
+    "a decode that disagrees with the plan releases its matrices and fails"
+  ) {
+    val files = QueryFiles.of(spark, selected(set)).get
+    val allocator = new RootAllocator(Long.MaxValue)
+    try {
+      val failure = the[IllegalArgumentException] thrownBy
+        files.decode(
+          0 until 1,
+          Seq(SearchPlan.QueryGroup(0, total + 3)),
+          layout,
+          "L2",
+          allocator,
+          threads = 2
+        )
+      failure.getMessage should include("planned as")
+      allocator.getAllocatedMemory shouldBe 0L
+    } finally allocator.close()
   }
 
   test("the direct read is on by default and switched by its option") {

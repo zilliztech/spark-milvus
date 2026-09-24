@@ -230,6 +230,103 @@ private[read] object SegmentSetSearch extends Logging {
         taken == groupCount,
         s"A task answering $groupCount query groups was given $taken"
       )
+      searchKept(
+        segments,
+        open,
+        ids,
+        matrices,
+        spec,
+        allocator,
+        metrics,
+        stepped,
+        prefetch
+      )
+    } catch {
+      case failure: Throwable =>
+        matrices.iterator.filter(_ != null).foreach(_.close())
+        throw failure
+    }
+  }
+
+  /** A task whose query groups are decoded by the task itself, as matrices: the
+    * direct-read path (docs/design/architecture/vector-search.html section
+    * 2.1). `decode` gets the task's allocator and returns every group's ids and
+    * matrix in group order; the search then runs as [[keepingQueries]] would.
+    */
+  def runDecoded(
+      set: Seq[MilvusInputPartition],
+      spec: Spec,
+      decode: BufferAllocator => Seq[(Array[Long], QueryMatrix)],
+      groupCount: Int,
+      metrics: SearchMetrics
+  ): Iterator[(Long, Array[Byte])] = {
+    require(set.nonEmpty, "A first-stage task has no segments")
+    require(groupCount > 0, s"A task answers $groupCount query groups")
+    val segments = set.map(_.task.segmentId)
+    val partitions =
+      set.map(partition => partition.task.segmentId -> partition).toMap
+    val allocator = ArrowAllocator.forSearchTask(
+      TaskContext.get().partitionId(),
+      spec.arrowMaxBytes
+    )
+    def stepped(step: SegmentSearch.Progress): Unit = {
+      if (step.nativeCalls != 0)
+        metrics.knowhereCalls.add(step.nativeCalls.toLong)
+      if (step.nativeNanos != 0L) metrics.knowhereNanos.add(step.nativeNanos)
+      if (step.compared != 0L) metrics.comparedPairs.add(step.compared)
+      if (step.segments != 0) metrics.segmentSearches.add(step.segments.toLong)
+    }
+    def open(segmentId: Long): SegmentSearch.Source =
+      source(partitions(segmentId), spec, allocator.allocator, metrics)
+    try {
+      val started = System.nanoTime()
+      val decoded = decode(allocator.allocator)
+      require(
+        decoded.size == groupCount,
+        s"A task answering $groupCount query groups decoded ${decoded.size}"
+      )
+      logInfo(
+        s"Search task: ${decoded.iterator.map(_._1.length).sum} queries in " +
+          s"$groupCount groups decoded from files in ${(System.nanoTime() - started) / 1000000L} ms"
+      )
+      val matrices = decoded.map(_._2).toArray
+      try
+        searchKept(
+          segments,
+          open,
+          decoded.map(_._1).toArray,
+          matrices,
+          spec,
+          allocator.allocator,
+          metrics,
+          stepped,
+          prefetchIndexes(set, spec)
+        )
+      catch {
+        case failure: Throwable =>
+          matrices.foreach(_.close())
+          throw failure
+      }
+    } finally allocator.close()
+  }
+
+  /** The search of a task that keeps its queries, once every group is a matrix:
+    * every segment once, then the candidates group by group. Owns the matrices
+    * from here on and closes them.
+    */
+  private def searchKept(
+      segments: Seq[Long],
+      open: Long => SegmentSearch.Source,
+      ids: Array[Array[Long]],
+      matrices: Array[QueryMatrix],
+      spec: Spec,
+      allocator: BufferAllocator,
+      metrics: SearchMetrics,
+      stepped: SegmentSearch.Progress => Unit,
+      prefetch: Boolean
+  ): Iterator[(Long, Array[Byte])] = {
+    val groupCount = matrices.length
+    try {
       val (mergers, counters) = SegmentSearch.runGroups(
         segments,
         open,

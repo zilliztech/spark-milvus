@@ -431,16 +431,37 @@ object MilvusSearch extends Logging {
         (set, index) <- sets.zipWithIndex
         range <- ranges
       } yield (set, kept.lift(index).flatten, range)
+      val keeps = plan.resident == SearchPlan.Resident.Queries
       val searched = spark.sparkContext.parallelize(work, plan.tasks).flatMap {
         case (set, planned, range) =>
-          SegmentSetSearch.run(
-            set,
-            spec,
-            direct.groups(range, groups, layout, spec.metric),
-            range.size,
-            planned,
-            metrics
-          )
+          // A task that keeps its queries decodes them by row group on
+          // several threads, straight into the group matrices; one that
+          // streams its groups reads them in order as it goes.
+          if (keeps || range.size == 1)
+            SegmentSetSearch.runDecoded(
+              set,
+              spec,
+              allocator =>
+                direct.decode(
+                  range,
+                  groups,
+                  layout,
+                  spec.metric,
+                  allocator,
+                  QueryFiles.decodeThreads(direct.rowGroups.size)
+                ),
+              range.size,
+              metrics
+            )
+          else
+            SegmentSetSearch.run(
+              set,
+              spec,
+              direct.groups(range, groups, layout, spec.metric),
+              range.size,
+              planned,
+              metrics
+            )
       }
       searchProfile.fold(searched)(searched.withResources)
     } else if (queryBytes <= limits.queriesMaxBytes) {

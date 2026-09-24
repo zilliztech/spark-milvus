@@ -1,7 +1,10 @@
 package com.zilliz.spark.connector.read
 
+import java.util.concurrent.{ExecutionException, Executors, ThreadFactory}
 import scala.jdk.CollectionConverters._
+import scala.util.Try
 
+import org.apache.arrow.memory.BufferAllocator
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.hadoop.util.HadoopInputFile
 import org.apache.parquet.hadoop.ParquetFileReader
@@ -24,23 +27,22 @@ import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-import com.zilliz.milvus.storage.index.SearchPlan
-import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.milvus.storage.index.{QueryMatrix, SearchPlan}
+import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 
 /** A query set that is nothing but Parquet files, read by the search tasks
   * themselves (docs/design/architecture/vector-search.html section 2.1).
   *
   * The broadcast path evaluates the query frame on the executors, brings the
   * packed bytes to the driver because `SparkContext.broadcast` takes a driver
-  * value, and ships them back; the driver is the one receiver of that collect,
-  * and on P3 a 738 MiB set spent 8.6 s there. When the frame is a plain scan of
-  * Parquet files -- a `LogicalRelation` over `HadoopFsRelation` under nothing
-  * but column selection -- none of that is needed: the driver reads the footers
-  * for the row counts that planning wants, and every first-stage task opens the
-  * files with the reader Spark itself would have used and packs its query
-  * groups as the rows arrive. The bytes read are the same, eight tasks reading
-  * a file each instead of one driver receiving eight blocks; what goes is the
-  * serial hop.
+  * value, and ships them back; the driver is the one receiver of that collect.
+  * When the frame is a plain scan of Parquet files -- a `LogicalRelation` over
+  * `HadoopFsRelation` under nothing but column selection -- none of that is
+  * needed: the driver reads the footers for the row counts that planning wants,
+  * and every first-stage task opens the files with the reader Spark itself
+  * would have used. The bytes read are the same, eight tasks reading a file
+  * each instead of one driver receiving eight blocks; what goes is the serial
+  * hop.
   *
   * `readFile` is the function `FileFormat.buildReaderWithPartitionValues`
   * returns: it captures the Hadoop configuration and the reader settings on the
@@ -48,6 +50,13 @@ import com.zilliz.milvus.storage.schema.VectorLayout
   * file too. Its output is rows, or columnar batches typed as rows when the
   * vectorized reader applies; both are taken one row at a time and nothing is
   * retained.
+  *
+  * A task that keeps its queries decodes them by row group, on several threads,
+  * straight into each group's matrix ([[decode]]): a row group is independently
+  * decodable, and the reader given one row group's byte range reads that row
+  * group alone. Single-threaded, the decode of 250,000 queries of 768 floats
+  * took 3.5 s at the start of every P3 task while the executor's other cores
+  * waited (2026-09-24 decision).
   */
 private[read] final case class QueryFiles(
     files: Seq[QueryFiles.File],
@@ -55,6 +64,9 @@ private[read] final case class QueryFiles(
 ) extends Serializable {
 
   def queries: Long = files.iterator.map(_.rows).sum
+
+  /** Every row group of every file, in the order of the query sequence. */
+  def rowGroups: Seq[QueryFiles.RowGroup] = files.flatMap(_.rowGroups)
 
   /** The task's groups of the range, packed from the files as they are read.
     *
@@ -70,7 +82,11 @@ private[read] final case class QueryFiles(
       metric: String
   ): Iterator[SearchQueries.Group] = {
     if (range.isEmpty) return Iterator.empty
-    val rows = this.rows()
+    val rows = this.rows(
+      files.map(file =>
+        QueryFiles.RowGroup(file.path, 0L, file.length, file.rows, 0L)
+      )
+    )
     var skip = planned(range.head).firstQuery
     while (skip > 0 && rows.hasNext) {
       rows.next()
@@ -99,17 +115,166 @@ private[read] final case class QueryFiles(
     }
   }
 
-  private def rows(): Iterator[InternalRow] =
-    files.iterator.flatMap { file =>
+  /** The task's groups of the range as matrices, decoded row group by row group
+    * on `threads` threads at once.
+    *
+    * Each group's matrix and id array are allocated first; every thread takes a
+    * row group, reads it with the same reader as [[groups]], and writes each
+    * row into the group and position its global row number puts it at. The
+    * planner's groups are contiguous ranges of the sequence, so a row group
+    * fills at most a few groups and a thread's cursor over them only moves
+    * forward. Rows outside the range are skipped. A row group that fails fails
+    * the task; the matrices of a failed decode are released.
+    */
+  def decode(
+      range: Range,
+      planned: Seq[SearchPlan.QueryGroup],
+      layout: VectorLayout,
+      metric: String,
+      allocator: BufferAllocator,
+      threads: Int
+  ): Seq[(Array[Long], QueryMatrix)] = {
+    require(threads > 0, s"Decoding takes at least one thread: $threads")
+    if (range.isEmpty) return Seq.empty
+    val first = planned(range.head).firstQuery.toLong
+    val until = planned(range.last).untilQuery.toLong
+    val wanted = rowGroups.filter(rowGroup =>
+      rowGroup.firstRow < until && rowGroup.firstRow + rowGroup.rows > first
+    )
+    val ids = range.map(index => new Array[Long](planned(index).queries))
+    val builders =
+      range.map(index =>
+        QueryMatrix.builder(planned(index).queries, layout, allocator)
+      )
+    val written = range.map(_ => new java.util.concurrent.atomic.AtomicInteger)
+    val pool = Executors.newFixedThreadPool(
+      math.min(threads, math.max(1, wanted.size)),
+      new ThreadFactory {
+        def newThread(runnable: Runnable): Thread = {
+          val thread = new Thread(runnable, "query-file-decode")
+          thread.setDaemon(true)
+          thread
+        }
+      }
+    )
+    try {
+      val futures = wanted.map { rowGroup =>
+        pool.submit[Unit] { () =>
+          decodeRowGroup(
+            rowGroup,
+            range,
+            planned,
+            first,
+            until,
+            layout,
+            metric,
+            ids,
+            builders,
+            written
+          )
+        }
+      }
+      futures.foreach { future =>
+        try future.get()
+        catch {
+          case wrapped: ExecutionException =>
+            throw Option(wrapped.getCause).getOrElse(wrapped)
+        }
+      }
+      range.zipWithIndex.foreach { case (index, at) =>
+        require(
+          written(at).get() == planned(index).queries,
+          s"Query group $index was planned as ${planned(index).queries} queries from the files' footers, but the files gave ${written(at).get()}"
+        )
+      }
+      ids.zip(builders.map(_.finish()))
+    } catch {
+      case failure: Throwable =>
+        builders.foreach(builder => Try(builder.close()))
+        throw failure
+    } finally pool.shutdownNow()
+  }
+
+  private def decodeRowGroup(
+      rowGroup: QueryFiles.RowGroup,
+      range: Range,
+      planned: Seq[SearchPlan.QueryGroup],
+      first: Long,
+      until: Long,
+      layout: VectorLayout,
+      metric: String,
+      ids: Seq[Array[Long]],
+      builders: Seq[QueryMatrix.Builder],
+      written: Seq[java.util.concurrent.atomic.AtomicInteger]
+  ): Unit = {
+    val rows = this.rows(Seq(rowGroup))
+    var row = rowGroup.firstRow
+    // The group the cursor is in: planned groups are contiguous, so it only
+    // ever moves forward.
+    var at = 0
+    while (at < range.size && planned(range(at)).untilQuery <= row) at += 1
+    var seen = 0L
+    while (rows.hasNext) {
+      val record = rows.next()
+      if (row >= first && row < until) {
+        while (planned(range(at)).untilQuery <= row) at += 1
+        val group = planned(range(at))
+        val position = (row - group.firstQuery).toInt
+        require(
+          !record.isNullAt(0),
+          s"Query at row $row of the set has no ${SearchQueries.IdColumn}"
+        )
+        val id = record.getLong(0)
+        require(
+          !record.isNullAt(1),
+          s"Query $id has no ${SearchQueries.VectorColumn}"
+        )
+        layout.elementType match {
+          case VectorElementType.Int8 =>
+            builders(at).writeBytes(
+              position,
+              SearchQueries.int8Values(
+                id,
+                record.getArray(1).toShortArray(),
+                layout
+              )
+            )
+          case VectorElementType.Bit =>
+            builders(at).writeBytes(position, record.getBinary(1))
+          case _ =>
+            builders(at).writeFloats(
+              position,
+              SearchQueries.finiteValues(
+                id,
+                record.getArray(1).toFloatArray(),
+                layout,
+                metric
+              )
+            )
+        }
+        ids(at)(position) = id
+        written(at).incrementAndGet()
+      }
+      row += 1
+      seen += 1
+    }
+    require(
+      seen == rowGroup.rows,
+      s"Row group at ${rowGroup.path}:${rowGroup.start} has $seen rows; its footer says ${rowGroup.rows}"
+    )
+  }
+
+  private def rows(parts: Seq[QueryFiles.RowGroup]): Iterator[InternalRow] =
+    parts.iterator.flatMap { part =>
       readFile(
         PartitionedFile(
           InternalRow.empty,
-          SparkPath.fromPathString(file.path),
-          0L,
-          file.length,
+          SparkPath.fromPathString(part.path),
+          part.start,
+          part.length,
           Array.empty[String],
           0L,
-          file.length,
+          files.find(_.path == part.path).map(_.length).getOrElse(part.length),
           Map.empty[String, Any]
         )
       ).flatMap { produced =>
@@ -126,8 +291,36 @@ private[read] final case class QueryFiles(
 
 private[read] object QueryFiles {
 
-  /** One Parquet file of the set: where it is, how long, how many rows. */
-  final case class File(path: String, length: Long, rows: Long)
+  /** One Parquet file of the set: where it is, how long, how many rows, and its
+    * row groups.
+    */
+  final case class File(
+      path: String,
+      length: Long,
+      rows: Long,
+      rowGroups: Seq[RowGroup]
+  )
+
+  /** One row group: its byte range in the file (the reader given exactly this
+    * range reads this row group alone), its rows, and the number of its first
+    * row in the whole query sequence.
+    */
+  final case class RowGroup(
+      path: String,
+      start: Long,
+      length: Long,
+      rows: Long,
+      firstRow: Long
+  )
+
+  /** Threads a task decodes with: one per row group up to the executor's cores
+    * less one, which stays with the task thread.
+    */
+  def decodeThreads(rowGroups: Int): Int =
+    math.max(
+      1,
+      math.min(rowGroups, Runtime.getRuntime.availableProcessors() - 1)
+    )
 
   /** The query frame's files, when the frame is a plain scan of Parquet files
     * with at most a selection or renaming of its columns on top; None sends the
@@ -152,14 +345,26 @@ private[read] object QueryFiles {
           else {
             val required = StructType(fields)
             val conf = spark.sessionState.newHadoopConfWithOptions(fs.options)
+            var firstRow = 0L
             val files = listed.map { case (path, length) =>
               val reader = ParquetFileReader.open(
                 HadoopInputFile.fromPath(new Path(path), conf)
               )
-              val rows =
-                try reader.getFooter.getBlocks.asScala.map(_.getRowCount).sum
+              val blocks =
+                try reader.getFooter.getBlocks.asScala.toSeq
                 finally reader.close()
-              File(path, length, rows)
+              val rowGroups = blocks.map { block =>
+                val rowGroup = RowGroup(
+                  path,
+                  block.getStartingPos,
+                  block.getCompressedSize,
+                  block.getRowCount,
+                  firstRow
+                )
+                firstRow += block.getRowCount
+                rowGroup
+              }
+              File(path, length, rowGroups.map(_.rows).sum, rowGroups)
             }
             // Rows, not columnar batches: the Parquet reader insists on being
             // told which, as FileSourceScanExec tells it. The vectorized reader
