@@ -8,8 +8,8 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.credential.StorageProperties
-import io.milvus.storage.NativeLibraryLoader
 
 /** The endpoint a snapshot URI is recognized against is the one the driver's
   * store uses, including an endpoint only the session's Hadoop keys supply.
@@ -31,7 +31,7 @@ class HadoopEndpointSnapshotTest
   override protected def afterAll(): Unit = spark.stop()
 
   private def skipWithoutLibrary(): Unit =
-    try NativeLibraryLoader.loadLibrary()
+    try NativeStorageLibrary.load()
     catch {
       case _: UnsatisfiedLinkError | _: NoClassDefFoundError =>
         cancel("libmilvus-storage-jni is not on this machine")
