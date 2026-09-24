@@ -48,10 +48,10 @@ object IndexProbe {
     def mapping: IndexRowMapping
 
     /** Knowhere's search: `queryRows` queries of `dimension` values in
-      * `queries`, the top `topK` of the rows not set in `excluded`, into `ids`
-      * (int64, -1 pads a short answer) and `scores` (float32). Safe to call
-      * from one thread at a time per buffer pair; two threads may search the
-      * same index at once.
+      * `queries`, the top `topK` of the rows not set in `excluded` (null when
+      * no row is excluded), into `ids` (int64, -1 pads a short answer) and
+      * `scores` (float32). Safe to call from one thread at a time per buffer
+      * pair; two threads may search the same index at once.
       */
     def search(
         queries: ByteBuffer,
@@ -223,7 +223,7 @@ object IndexProbe {
     private val touched = new Array[Int](math.max(count, 1))
     private var retriedCalls = 0
     private var retriedNanos = 0L
-    if (count > 0) writeMask(labels, rows, mask)
+    if (count > 0 && !labels.isEmpty) writeMask(labels, rows, mask)
 
     private def bytes(buffer: ArrowBuf, length: Long): ByteBuffer =
       buffer.nioBuffer(0, length.toInt).order(ByteOrder.nativeOrder())
@@ -234,11 +234,14 @@ object IndexProbe {
         width: Option[Int]
     ): Long = {
       val started = System.nanoTime()
+      // No excluded row, no bitmap: Knowhere then searches unfiltered
+      // (IDSelectorAll), as Milvus's VectorSearchNode does with an empty
+      // BitsetView, instead of testing an all-zero bit at every visited node.
       target.search(
         queries.buffer,
         queries.queries.toLong,
         count,
-        bytes(mask, maskBytes),
+        if (labels.isEmpty) null else bytes(mask, maskBytes),
         bytes(slot.ids, queries.queries.toLong * count * 8L),
         bytes(slot.scores, queries.queries.toLong * count * 4L),
         searchParameters(target, width)

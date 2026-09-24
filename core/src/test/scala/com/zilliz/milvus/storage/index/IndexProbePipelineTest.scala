@@ -53,6 +53,7 @@ class IndexProbePipelineTest
   ) extends IndexProbe.Target {
     val calls = new AtomicInteger
     var lastParameters = ""
+    var lastExcluded: Option[ByteBuffer] = None
     def rows: Long = IndexProbePipelineTest.this.rows
     def dimension: Int = 2
     def metric: String = "L2"
@@ -74,6 +75,7 @@ class IndexProbePipelineTest
     ): Unit = {
       calls.incrementAndGet()
       lastParameters = parameters
+      lastExcluded = Option(excluded).map(_.duplicate())
       val ef = "\"ef\":(\\d+)".r
         .findFirstMatchIn(parameters)
         .map(_.group(1).toInt)
@@ -195,6 +197,40 @@ class IndexProbePipelineTest
           the[IllegalArgumentException] thrownBy pipeline.finish(_ => ())
         failure.getMessage should include("outside its 1000 rows")
       } finally pipeline.close()
+    } finally m.close()
+  }
+
+  test("no excluded row passes no bitmap; an excluded row passes one") {
+    val m = matrix(2, 0)
+    try {
+      val fake = new Fake(1L)
+      val merger = new TopKMerger(2, k, "L2")
+      val pipeline =
+        new IndexProbe.Pipeline(fake, new BitSet(), k, Map.empty, allocator, 2)
+      try {
+        pipeline.run(m, merger, _ => ())
+        pipeline.finish(_ => ())
+      } finally pipeline.close()
+      fake.calls.get() shouldBe 1
+      // as Milvus does without a filter: the index searches unfiltered
+      fake.lastExcluded shouldBe None
+
+      // row 999 is never a hit of these queries; excluding it must reach the
+      // index as a bitmap with that bit alone set
+      val excluded = new BitSet()
+      excluded.set(999)
+      val filtered = new TopKMerger(2, k, "L2")
+      val withMask =
+        new IndexProbe.Pipeline(fake, excluded, k, Map.empty, allocator, 2)
+      try {
+        withMask.run(m, filtered, _ => ())
+        withMask.finish(_ => ())
+      } finally withMask.close()
+      val mask = fake.lastExcluded.getOrElse(fail("no bitmap was passed"))
+      mask.remaining() shouldBe ((rows + 7) / 8).toInt
+      (0 until mask.remaining()).count(mask.get(_) != 0) shouldBe 1
+      (mask.get(999 / 8) & 0xff) shouldBe (1 << (999 % 8))
+      filtered.size shouldBe 2 * k
     } finally m.close()
   }
 
