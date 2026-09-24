@@ -120,7 +120,7 @@ driver 再收齐 commit message 写作业清单。登记是之后的另一个动
 <p>W1 那一行写的入口是 <code>df.writeTo("milvus.db.coll").append()</code>。
 <code>MilvusCatalog</code> 已实现 R1 的已知三段名加载；<code>writeTo</code> 走
 <code>catalog.loadTable</code> 拿到与 <code>format("milvus")</code> 相同的 <code>MilvusTable</code>，
-下面的链一样。SHOW/LIST 的 C1 与建删表的 C2 仍未实现，不影响已知名字加载。</p>
+下面的链一样。SHOW/LIST 的 C1 与建删表的 C2 已在 <code>MilvusCatalogBase</code> 实现（<code>listNamespaces</code>、<code>listTables</code>、<code>createTable</code>、<code>dropTable</code>，见 <a href="catalog.html">catalog.html</a>）。</p>
 
 <h2 id="schema">二、写的表和读的表是同一个 Snapshot</h2>
 
@@ -130,7 +130,7 @@ driver 再收齐 commit message 写作业清单。登记是之后的另一个动
 但表加载分不出后面是读还是写（Spark 两条路都传 schema 进来），而
 <code>withSegments = false</code> 只是跳过 V2 段的 footer 解析、段列表照旧，所以 <code>getTable</code>
 因此保持解析带段的 Snapshot；写会多付一次段列表的代价（快照 Avro 一次读，V2 段各一次 footer）。
-把段列表推迟到 Scan 是 <code>read.plan</code> 下沉时的事。</p>
+<code>read.plan</code> 已下沉为 <code>core.read.plan.ReadPlan.of</code>，但 <code>getTable</code> 仍经 <code>MilvusTables.load</code> 解析带段的 Snapshot；把段列表推迟到 Scan 仍未做，是独立事项。</p>
 
 <table>
 <tr><th>模式</th><th>schema 从哪来</th><th>写在什么场景</th></tr>
@@ -259,7 +259,7 @@ Milvus 加载段时丢弃 RowID，Timestamp 参与删除与 MVCC 的可见性判
 全量刷新在 Milvus 侧 drop/recreate 或全表 delete 之后再 append。</p>
 
 <ul>
-  <li><strong>W2 backfill</strong>：<code>milvus.write.mode=backfill</code> 加 <code>milvus.write.columns</code>，
+  <li><strong>W2 backfill</strong>：<code>milvus.write.mode=backfill</code> 加 <code>milvus.write.columns</code>（未来项；今天只有 apps 的 <code>milvus.backfill.mode=replace/coalesce/overwrite</code> 与 <code>WriteSchema.Mode.Columns</code>，落地时选项名须与 reference 对齐），
       WriteBuilder 校验目标列是 collection 里已有且 Flushed 段里还没有的字段，task 往已有段的 base_path
       写列组、以 ReplaceColumns 提交；分布与排序（每个 task 恰好对应一个已有段、行序与段内行号一致）见决策 10。
       今天 apps 里的 backfill 通过 <code>customPath</code> 和 <code>commitType</code> 绕过 WriteBuilder，

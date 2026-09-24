@@ -14,9 +14,12 @@ under Hadoop are in
 ## The decision
 
 Every file is opened through milvus-storage's C filesystem, reached from the JVM
-by JNI in `native-storage`. There is no second path. Do not add a Hadoop
+by the upstream JNI that `native-storage` compiles; `core.io.ObjectStore` is the
+only JVM entry. There is no second path. Do not reintroduce a Hadoop
 `FileSystem.get`, a `java.io.FileInputStream`, or a parquet `InputFile` adapter
-to reach storage — four such paths exist today and removing them is the work.
+to reach storage — the four such paths that existed in 1.x were removed during
+the 2.0 migration. The residue outside the connector is the backfill app's
+source reads and the search query-file reads, which still use Hadoop.
 
 The route was chosen because the C layer already carries a complete filesystem
 API, manifest parsing, transactions, and credential providers for six clouds
@@ -25,12 +28,15 @@ that in Scala is the stovepipe AGENTS.md forbids.
 
 ## Three packages, three jobs
 
-- `core.path` turns any of the six path spellings into `(bucket, key)`. Format
+- `core.path` turns any of the seven path spellings into `(bucket, key)`. Format
   knowledge — `_delta/`, `_metadata/manifest-N.avro` — does not live here.
-- `core.credential` turns user options and `spark.hadoop.fs.*` into the property
-  map. It is the only place that parses credentials. The key-name table is
+- `core.credential` validates the `fs.*` / `extfs.*` map and hands it to the C
+  layer unchanged. It is the only place that parses credentials. Translating
+  `spark.hadoop.fs.s3a.*` and `fs.oss.*` into `fs.*` is the layer-3 shim
+  `HadoopStorageKeys` in `spark.options`, not core. The key-name table is
   section 3.3 of the design.
-- `core.io` holds the JNI handle and offers open, read, list, stat, create.
+- `core.io` owns the upstream `MilvusStorageFileSystem` and offers `readAll`,
+  `readAt`, `size`, `list`, `exists`, `write`, `createDir` and `delete`.
 
 A format package asks for bytes at a path and gets bytes. If the words
 credential, endpoint, or FileSystem appear in a format package's signature, the
@@ -96,7 +102,8 @@ Each boundary carries one kind of thing, and nothing else:
 - Spark ↔ layer 3: a serializable `InputPartition`, and `ColumnarBatch`.
 - layer 3 ↔ core: `(bucket, key)`, the `fs.*` map, Arrow batches.
 - core ↔ JNI: `Map[String, String]`, a path, `ArrowArray` / `ArrowSchema`.
-- JNI ↔ C: `const char*` arrays, a process-local handle, `ArrowArrayStream`.
+- JNI ↔ C: `const char*` arrays, a process-local handle, one `ArrowArray` +
+  `ArrowSchema` per batch (never `ArrowArrayStream`).
 
 A handle is a pointer inside this process. It must never reach an
 `InputPartition`, which Spark serializes and ships. Put the description there —

@@ -69,7 +69,7 @@ jobs:
       - name: Check the capability index
         run: sbt checkCapabilityIndex
 
-      # `compile` aggregates over the ten unit-tested modules, which covers all
+      # `compile` aggregates over the eleven unit-tested modules, which covers all
       # four Spark lines against the shared spark-base sources. integration-4.0
       # is outside the aggregate because its suites need a live Milvus, so it is
       # compiled explicitly here and never run.

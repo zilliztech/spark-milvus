@@ -140,6 +140,8 @@ object Procedures { def byName(name: String): Option[Procedure] }   // 注册表
 <tr><td><code>compact</code></td><td><code>collection</code>；可选 <code>wait</code>、<code>timeout_seconds</code></td><td>一行 compaction_id、plan_count、state 与 executing/completed/failed/timeout 计划数；不等待的 state 是 <code>submitted</code></td></tr>
 <tr><td><code>describe</code></td><td><code>collection</code></td><td>每个 schema 字段至少一行，同时带 collection id、segment count、load state；字段有索引时每个索引一行，附 index id、名称、状态与进度</td></tr>
 <tr><td><code>register</code></td><td><code>collection</code>,<code>staging</code>（作业暂存前缀,相对桶的 key）</td><td>每段一行：job_id、segment_id、manifest_version、status；status 是 <code>registered</code> 或 <code>already_registered</code></td></tr>
+<tr><td><code>build_index</code>（W6）</td><td><code>collection</code>,<code>field</code>,<code>output</code>；可选 <code>index_type</code>、<code>metric</code>、<code>params</code>、<code>build_id</code>、<code>index_version</code>、<code>store_path_version</code></td><td>每段一行：segment_id、partition_id、row_count、objects、bytes、build_id、job_id</td></tr>
+<tr><td><code>write_snapshot</code>（W8）</td><td><code>collection</code>,<code>job</code>,<code>input</code>；可选 <code>output</code>（默认同 <code>input</code>）、<code>snapshot_id</code>、<code>snapshot_name</code>、<code>restorable</code>（默认 true）</td><td>一行 snapshot、snapshot_id、snapshot_name、segments、indexes、bytes</td></tr>
 <tr><td><code>cleanup_staging</code></td><td><code>collection</code>；可选 <code>retention_seconds</code>（默认 604800，最小 300）、<code>dry_run</code>（默认 true）</td><td>每个暂存子目录一行：所有权、写模式、动作与原因、最后心跳、候选/已删文件数、仍有的目录数及 <code>prefix_deleted</code>。当前只删文件，<code>prefix_deleted</code> 恒为 false</td></tr>
 </table>
 
@@ -208,7 +210,7 @@ owner；中途失败返回 <code>delete_failed</code> 与已删数量，留下�
 <tr><th>东西</th><th>放哪</th><th>为什么</th></tr>
 <tr><td>文法 <code>MilvusCall.g4</code></td><td><code>spark-base/src/main/antlr4/</code>,一份</td><td>决策 17:语法放共享目录</td></tr>
 <tr><td>antlr 生成的 <code>MilvusCallLexer</code> / <code>MilvusCallParser</code> / <code>MilvusCallBaseVisitor</code>（包 <code>extensions.parser</code>）</td><td>每条线的 <code>target</code>,构建时生成</td><td>3.5 线 antlr 4.9.3,4.x 4.13.1,生成码不通用;运行时用 Spark 自带的 antlr,依赖标 provided</td></tr>
-<tr><td><code>ParserInterface</code> 适配器 <code>MilvusSqlParser</code></td><td>每条线的 <code>extensions</code> 目录,3.5 一份、4.x 三份相同</td><td>4.0 起接口多了 <code>parseRoutineParam</code>,3.5 没有;这个类只做转发,几十行</td></tr>
+<tr><td><code>ParserInterface</code> 适配器 <code>MilvusSqlParser</code></td><td>主体是 <code>spark-base</code> 的 <code>MilvusSqlParserBase</code>;每条线的 <code>extensions</code> 目录只有一个薄子类,3.5 一份、4.x 三份相同</td><td>4.0 起接口多了 <code>parseRoutineParam</code>,3.5 没有;子类只做转发,几十行</td></tr>
 <tr><td>访问器、<code>CallProcedure</code>、策略、<code>CallProcedureExec</code>、<code>Procedure</code>、注册表、<code>MilvusSparkSessionExtensions</code></td><td><code>spark-base</code> 的 <code>extensions</code> 与 <code>procedure</code> 包</td><td>生成类在每条线里同名同包,共享源码对着各线的生成物各编一次</td></tr>
 </table>
 
@@ -233,7 +235,7 @@ owner；中途失败返回 <code>delete_failed</code> 与已删数量，留下�
 <h2 id="index">六、对能力表和模块表的改动</h2>
 
 <ul>
-<li><code>spark.extensions</code> 提供四条线共用的 SQL 前端；<code>spark.procedure</code> 认领 A1–A5 与 A7，并实现全部过程体。</li>
+<li><code>spark.extensions</code> 提供四条线共用的 SQL 前端；<code>spark.procedure</code> 认领 A1–A5、A7、W6、W8，并实现全部过程体。</li>
 <li><code>client.api</code> 提供快照、索引、生命周期、描述与登记所需的 RPC 封装，并校验响应状态。</li>
 <li>中英文 reference 的 CALL 章节公开列出命令、参数、结果和等待规则，不使用内部工作项缩写。</li>
 <li>A7 不再列在「尚未落地」：owner、心跳、保留期、dry-run 和逐文件删除已落地；能力行与结果表明确保留 milvus-storage 递归目录删除这一上游缺口。</li>

@@ -14,8 +14,9 @@ fixes. The 2.0 line is a rewrite on branch `refactor/v2`, versioned
 `2.0.0-{branch}-{arch}-SNAPSHOT`.
 
 Vector search uses `MilvusSearch.search`, which takes a query set and returns
-each query's global TopK. It searches the snapshot's HNSW index files or scans
-the vectors exactly, applies deletions and scalar predicates before search, and
+each query's global TopK. It searches the index files the snapshot pinned (the
+HNSW and IVF families and FLAT) or scans the vectors exactly, applies deletions
+and scalar predicates before search, and
 retrieves the output columns of the rows it selected. See the
 [query contract](docs/reference-en.md#vector-search-refactorv2).
 Cardinal index files require a Cardinal-enabled build of the pinned Knowhere
@@ -41,11 +42,11 @@ time: a source file in `core`, `compat` or `client` that mentions
 | 1 | `native-storage` | Compiles and packages the pinned milvus-storage JNI and Java/Scala API |
 | 1 | `native-vector` | Compiles the pinned Knowhere PR #1829 Java API and delegates vector operations through its upstream JNI |
 | 2 | `core` | The storage format itself: snapshots, manifests, delete files, schema, codecs, statistics, planning, segment read and write, indexes, object-storage access. No Spark. |
-| 2 | `compat` | Adapters for three non-standard read entry points: Storage V2 packed segments, an offline segment list passed through options, and a milvus-backup export directory |
+| 2 | `compat` | Adapters for the two non-standard read entry points that need format code: Storage V2 packed segments and a milvus-backup export directory. The option-string segment list is resolved in `spark-base`'s `options` package. |
 | 2 | `client` | The gRPC client for the online Milvus service |
 | 3 | `spark-base` | Connector sources shared by every Spark line. Not an sbt project, just a source directory. |
 | 3 | `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | One project per maintained Spark line. Each pins its own Spark, Arrow, antlr and Java version and compiles the shared sources. |
-| 4 | `apps-4.0` | The jobs users run: backfill and vector search |
+| 4 | `apps-4.0` | The backfill job users run, and the SQL vector distance functions (V8); vector search enters through `MilvusSearch` in `spark-base` |
 | — | `integration-4.0` | Integration tests. Needs a real Milvus and MinIO; never published. |
 
 Why the core layer carries no Spark dependency: one artifact serves all four
@@ -56,15 +57,19 @@ cannot depend on a JVM jar. What it can share is the C ABI in layer 1.
 Only the Spark layer has to be split per line, because the `TableCatalog` and
 `ParserInterface` method sets differ, and Arrow, antlr and the Java target
 version are pinned per line. The fat jar is an `assembly` task on
-`spark-<line>`, not a module of its own.
+`spark-<line>`, not a module of its own. During the migration the usable fat
+jar is still root's `sbt assembly` (`spark-connector-assembly-*.jar`); the
+per-line tasks have no merge or shading rules yet.
 
 Three git submodules sit at the repository root. `milvus-proto` supplies the
 protobuf definitions: `common.proto` and `schema.proto` are generated into
 `core` because the storage format itself is defined in protobuf, and the five
 files carrying gRPC services are generated into `client`. `milvus-storage`
-supplies the native storage library. `knowhere` tracks the PR #1829 branch and
-supplies the C API, JNI and Java sources used by `native-vector` and the unified
-native build.
+supplies the native storage library; until upstream takes decision 31's commit,
+`.gitmodules` fetches it from the fork `Thor-ChenBiao/milvus-storage`.
+`knowhere` tracks the PR #1829 branch (`LawrenceTL92/knowhere-contrib`, branch
+`codex/knowhere-jni-pr`) and supplies the C API, JNI and Java sources used by
+`native-vector` and the unified native build.
 
 Initialize all three at their recorded gitlinks before compiling:
 
@@ -84,11 +89,11 @@ you need to answer: architecture or engineering conventions.
 | Document | What it answers |
 |---|---|
 | [docs/design/README.md](docs/design/README.md) | The layering, the read and write paths, priorities, open decisions, and the decision log |
-| [docs/design/capabilities.md](docs/design/capabilities.md) | The 51 capabilities the connector commits to, by id |
-| [docs/design/architecture/modules.md](docs/design/architecture/modules.md) | Modules, packages, directories, the twelve build constraints, and the 1.x to 2.0 migration table |
+| [docs/design/capabilities.md](docs/design/capabilities.md) | The 47 capabilities the connector commits to, by id, plus the four declared in its section 11 that have no package yet |
+| [docs/design/architecture/modules.md](docs/design/architecture/modules.md) | Modules, packages, directories, the sixteen build constraints, and the 1.x to 2.0 migration table |
 | [docs/design/architecture/overview.html](docs/design/architecture/overview.html) | The illustrated version of the design |
 | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) | Catalog discovery, three-part tables, CREATE/DROP properties, and fixed-snapshot loading |
-| [docs/design/engineering/devcontainer.html](docs/design/engineering/devcontainer.html) | Design for a dev container built locally from the Dockerfile toolchain stage: one command for the compile, package and test environment, caches in named volumes, target/ in the bind-mounted source tree, local Milvus + MinIO; `scripts/devcontainer.sh` drives it |
+| [docs/design/engineering/devcontainer.html](docs/design/engineering/devcontainer.html) | Design for a dev container built locally from the Dockerfile `dev` stage, which sits on the toolchain stage: one command for the compile, package and test environment, caches in named volumes, target/ in the bind-mounted source tree, local Milvus + MinIO; `scripts/devcontainer.sh` drives it |
 | [docs/design/engineering/build.html](docs/design/engineering/build.html), [build.md](docs/design/engineering/build.md) | The native libraries in three layers, the toolchain versions for Linux and macOS, the two ways to build the per-platform native bundle (Docker or local), and the directory design of the build definition, work directory and bundle JAR |
 
 `docs/reference-en.md` is the user-facing API reference for the connector
@@ -100,8 +105,9 @@ the design depends on outside this repository, and
 ## Environment
 
 The quickest way to a complete build, package and test environment is the
-development container: it is the toolchain stage of the root `Dockerfile`,
-built locally, with the dependency caches in named volumes and an optional
+development container: it is the `dev` stage of the root `Dockerfile`, built
+locally on top of its toolchain stage, with the dependency caches in named
+volumes and an optional
 local Milvus and MinIO for the integration suite.
 
 ```bash
@@ -176,7 +182,7 @@ native bundle are described in
 Knowhere library loading uses the Java API and JNI from pinned PR #1829.
 The API builds automatically; the native platform JAR is selected explicitly.
 See [Knowhere library loading](docs/contributing.md#knowhere-library-loading)
-for the native build/import script, packaging and real JNI smoke command.
+for the real JNI smoke command and the `libjsig` preload requirement.
 
 ```bash
 sbt clean compile package publishLocal   # compile and publish to the local repository
@@ -192,7 +198,8 @@ them into the unified Storage/Knowhere bundle from the platform's profile under
 toolchain and its Conan configuration are in
 [contributing.md](docs/contributing.md#macos).
 
-`sbt compile` builds all twelve modules. To work on one, prefix the command with
+`sbt compile` builds every module except `integration-4.0`, which sits outside
+root's aggregate. To work on one, prefix the command with
 its project id: `core/test`, `spark40/compile`, `apps40/test`. The ids drop the
 dot, so the project for `spark-4.0` is `spark40`.
 
@@ -230,7 +237,7 @@ Pull the jar back out of the image:
 
 ```bash
 docker create --name temp spark-milvus
-docker cp temp:/workspace/target/scala-2.13/spark-connector-assembly-*.jar ./
+docker cp temp:/opt/spark-milvus/. ./
 docker rm temp
 ```
 
@@ -262,8 +269,11 @@ and make sure the local Milvus is reachable. Pre-built assembly jars are also
 attached to the
 [GitHub releases](https://github.com/SimFG/milvus-spark-connector/releases).
 
-For the option names and entry points, see the
-[API reference](docs/reference-en.md).
+Search jobs set
+`spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin` so that
+every executor loads the native bundle at start; the
+[API reference](docs/reference-en.md) explains the setting. For the option
+names and entry points, see the same reference.
 
 ## License
 

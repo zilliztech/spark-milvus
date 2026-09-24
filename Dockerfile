@@ -133,8 +133,8 @@ RUN git config --global --add safe.directory /workspace && \
     git config --global --add safe.directory /workspace/knowhere && \
     make init-missing-submodules
 
-# Linux x86_64 builds both engines; arm64 retains the existing storage build
-# unless a matching prebuilt unified bundle is explicitly supplied.
+# Both Linux architectures build the unified bundle, or take a matching
+# prebuilt one through NATIVE_BUNDLE.
 # Cache dependencies across failed build steps. Initialize Conan after mounting
 # its cache so an empty cache has the required profile and artifact remote.
 RUN --mount=type=cache,id=spark-milvus-conan-2-${TARGETARCH},target=/root/.conan2,sharing=locked \

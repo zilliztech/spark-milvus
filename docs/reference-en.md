@@ -63,7 +63,7 @@ field has no index there. Default is `false`. Each task owns and closes the
 indexes it loaded; they are not cached across tasks. Search parameters follow the index family: the HNSW family takes `ef`, an
 integer at least K, defaulting to `max(64, K)`; the IVF family takes `nprobe`, a
 positive integer defaulting to 16; a flat index takes none. Encrypted indexes
-and nullable-vector ID mappings are unsupported. Cardinal `_mem.index.bin`
+are unsupported. Cardinal `_mem.index.bin`
 requires the pinned Cardinal-enabled native build; see
 [native build instructions](contributing.md#knowhere-library-loading).
 
@@ -112,8 +112,9 @@ set streams. Segment data lives in Arrow's or Knowhere's off-heap memory, which
 `-Xmx` does not bound.
 
 On a cluster, index mode needs no `spark.task.cpus` setting. The connector
-declares that each task of the search and index-build stages takes every core of
-its executor, and that each task of the stage packing the query groups takes
+declares that each task of the index-mode search stage and of the index-build
+stage takes every core of its executor (an exact search runs its tasks on
+`spark.task.cpus` cores each), and that each task of the stage packing the query groups takes
 as many cores as keeps the groups packed at once inside the heap. The other
 stages run one task per core, as by default. This needs dynamic allocation off;
 in local mode or with dynamic allocation on, set `spark.task.cpus` to the
@@ -138,9 +139,12 @@ task ends; while it runs, the driver log reports them once a heartbeat. They are
 `milvus.search.read.nanos`, `milvus.search.index.bytes` and
 `milvus.search.index.load.nanos`, `milvus.search.bitmap.nanos`,
 `milvus.search.knowhere.calls` and `milvus.search.knowhere.nanos`,
-`milvus.search.candidates`, and `milvus.search.take.rows` and
-`milvus.search.take.nanos`. Knowhere computes in its own thread pool, so its
-time is in `milvus.search.knowhere.nanos` rather than in the task's CPU time.
+`milvus.search.compared.pairs` (exact mode: the query × visible-row pairs scored
+so far; 0 in index mode), `milvus.search.candidates`, and
+`milvus.search.take.rows` and `milvus.search.take.nanos`. `bruteForce` and index
+searches run in Knowhere's own thread pool, so their time is in
+`milvus.search.knowhere.nanos` rather than in the task's CPU time; the batched
+float32 exact entry runs on the task thread, so its time is in both.
 
 ## Version Compatibility
 

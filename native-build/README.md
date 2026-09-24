@@ -59,7 +59,7 @@ system and takes the toolchain with it.
 
 ```bash
 python3 -m venv ~/toolchain/cmake3venv
-~/toolchain/cmake3venv/bin/pip install cmake==3.31.10 ninja
+~/toolchain/cmake3venv/bin/pip install cmake==3.31.10 ninja   # 3.31.10 for the darwin profiles, 3.27.5 for the linux profiles; use the version your host profile names
 PATH=~/toolchain/cmake3venv/bin:$PATH scripts/build-native.sh --work-dir ...
 ```
 
@@ -204,7 +204,8 @@ associate that external evidence with the delivered libraries.
 Staging rejects conflicting SONAMEs and any dependency outside the selected
 graph, apart from an explicit list of compiler runtimes and libaio. The latter
 are copied with their source hashes and package origin recorded. glibc, the
-platform C++ runtime and `libz.so.1` stay system dependencies. Some JDKs load
+platform C++ runtime and the system zlib (`libz.so.1` / `libz.1.dylib`) stay
+system dependencies. Some JDKs load
 system zlib before JNI initialization, so packaging another implementation
 cannot determine which zlib symbols the process uses. The bundle records its
 consumers' required ZLIB symbol versions and the validation host's provider
@@ -232,7 +233,9 @@ Zstandard, OpenSSL and AWS-LC symbols from the Rust archive.
 
 Package the validated directory with `scripts/package-native.py`. Packaging
 requires exact agreement with the audited provenance's files, hashes, aliases,
-ELF dependencies and Cardinal features, and successful required C API tests.
+recorded dependencies (ELF or Mach-O), each library's architecture against the
+declared platform, and Cardinal features, and successful required C API tests;
+the result is recorded in `META-INF/milvus-native/binaries.json`.
 This build
 does not install resources into the connector or modify compatibility records.
 Run its focused regression tests with:

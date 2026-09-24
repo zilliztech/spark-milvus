@@ -120,7 +120,7 @@ bucket/files/...                                  → 带桶名不带 scheme</co
 <h3>2.1 每个包变成什么</h3>
 <table>
 <tr><th>包</th><th>职责</th><th>规模</th></tr>
-<tr><td><code>core.io</code></td><td>拥有上游 filesystem 与 properties 对象，提供 open、read、list、stat、create</td><td>格式包只依赖 ObjectStore</td></tr>
+<tr><td><code>core.io</code></td><td>拥有上游 filesystem 与 properties 对象，提供 <code>readAll</code>、<code>readAt</code>、<code>size</code>、<code>list</code>、<code>exists</code>、<code>write</code>、<code>createDir</code>、<code>delete</code></td><td>格式包只依赖 ObjectStore</td></tr>
 <tr><td><code>core.credential</code></td><td><code>fs.*</code> 与 <code>extfs.*</code> 转属性包，一次解析一次校验</td><td>把原先散在五个文件里的逻辑合成一处</td></tr>
 <tr><td><code>core.path</code></td><td>七种路径写法转 <code>(bucket, key)</code></td><td>把原先散在十二处的逻辑合成一处</td></tr>
 <tr><td><code>native-storage</code></td><td>编译固定上游绑定，打包 <code>libmilvus-storage-jni</code> 与依赖</td><td>filesystem、manifest、reader、writer 的 JNI 实现在 milvus-storage 子模块</td></tr>
@@ -154,7 +154,7 @@ bucket/files/...                                  → 带桶名不带 scheme</co
 parseMilvus(raw: String, defaultBucket: String,
             endpoint: String): Located              // 只用于 Milvus 产生的元数据
 resolve(base: Located, child: String): Located       // 路径拼接
-uri(l: Located, scheme: String): String              // 渲染回 URI，给迁移期的 Hadoop 调用方</code></pre>
+Located.uri(scheme: String): String                  // 渲染回 URI，给迁移期的 Hadoop 调用方；parse 的 defaultBucket 默认为 ""</code></pre>
 <p><code>_delta/</code>、<code>_metadata/manifest-N.avro</code> 这些拼接留在
 <code>core.delete</code> 与 <code>core.manifest</code>，它们调 <code>resolve</code>。</p>
 
@@ -407,7 +407,7 @@ executor 启动多久，而此前的设计里一个字都没提。</strong></p>
 <tr><th>能力</th><th>Spark 侧的接口</th><th>C 给什么</th><th>对得上吗</th></tr>
 <tr><td>R1 collection 是一张表</td><td><code>TableCatalog</code>、<code>Table</code></td><td>不给。这是 Milvus 元数据</td><td>JVM：快照 JSON + gRPC</td></tr>
 <tr><td>R16 分区和段选择</td><td><code>Batch.planInputPartitions</code></td><td><code>loon_exttable_read_manifest</code> 列出列组与文件</td><td>对得上</td></tr>
-<tr><td>R4 列式扫描，向量零拷贝</td><td><code>PartitionReader</code> + <code>ColumnarBatch</code></td><td><code>loon_segment_reader_get_stream</code> → <code>ArrowArrayStream</code></td><td>对得上</td></tr>
+<tr><td>R4 列式扫描，向量零拷贝</td><td><code>PartitionReader</code> + <code>ColumnarBatch</code></td><td><code>loon_segment_reader_get_stream</code> → <code>ArrowArrayStream</code></td><td>对得上；连接器有意不用 stream，走 <code>openRecordBatchReaderScala</code> / <code>readNextBatchScala</code> 的逐批 reader（<a href="storage-io.html#arrow">storage-io 2.5</a>）</td></tr>
 <tr><td>R5 列裁剪</td><td><code>SupportsPushDownRequiredColumns</code></td><td><code>loon_segment_reader_open(needed_columns, …)</code></td><td>对得上</td></tr>
 <tr><td>R14 回表</td><td>按行号取</td><td><code>loon_segment_reader_take(row_indices, …)</code></td><td>对得上</td></tr>
 <tr><td>R17 交付下游列式算子</td><td><code>supportColumnarReads</code></td><td>Arrow 批</td><td>对得上</td></tr>
@@ -471,12 +471,12 @@ Milvus 元数据，由 JVM 适配；V3 Manifest 与列组由 milvus-storage 的 
 <table>
 <tr><th>文件</th><th>格式是谁的</th><th>谁解析</th></tr>
 <tr><td>快照 JSON</td><td>Milvus 的元数据：collection schema、字段与类型、段列表、<code>base_path</code></td><td>JVM。这是 Meta 信息适配，connector 的本职</td></tr>
-<tr><td>段 manifest（快照 JSON 的 <code>manifest_list</code>）</td><td>Milvus 的元数据。Milvus 用 Go 的 avro 库自己解，内嵌 V1–V4 四个 schema，<code>SnapshotFormatVersion = 4</code>，milvus-storage 不认识它</td><td>JVM</td></tr>
+<tr><td>段 manifest（快照 JSON 的 <code>manifest_list</code>）</td><td>Milvus 的元数据。Milvus 用 Go 的 avro 库自己解，连接器内嵌 V1–V5 五个 schema，版本 5（Milvus v3.0.2）起段记录带 <code>manifest_has_index</code>，milvus-storage 不认识它</td><td>JVM</td></tr>
 <tr><td>V3 段的 <code>_metadata/manifest-N.avro</code></td><td>milvus-storage</td><td>C，<code>loon_exttable_read_manifest</code></td></tr>
 <tr><td>删除文件</td><td>Milvus 的 V2 binlog 容器或 V3 两列 parquet</td><td>executor 的 JVM <code>DeltaLogReader</code> 解析；字节由任务属性打开的 C filesystem 读取</td></tr>
 <tr><td>parquet footer 的字段 id</td><td>milvus-storage（V2 packed）</td><td><code>compat.v2.FooterV2SegmentResolver</code> 在 driver 通过 <code>ObjectStore</code> 的范围读取恢复</td></tr>
 <tr><td>列组数据</td><td>milvus-storage</td><td>C</td></tr>
-<tr><td>索引文件</td><td>milvus-storage</td><td>C（未建）</td></tr>
+<tr><td>索引文件</td><td>Milvus 的 binlog 封装</td><td>JVM，<code>core.codec.IndexFileCodec</code> 解码；字节经 <code>ObjectStore.readAt</code> / <code>ConcurrentRangeReads</code> 并发区间读取</td></tr>
 </table>
 <p>删除文件在 JVM 解析是当前唯一实现，并且只发生在 executor；driver 发送的是路径与条数。
 V2 footer 恢复属于 compat 边界，V3 不走这一步。两者打开对象都复用 <code>core.io.ObjectStore</code>，

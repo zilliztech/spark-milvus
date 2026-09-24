@@ -34,14 +34,17 @@ import com.zilliz.milvus.storage.snapshot.SegmentIndexes
   */
 object SearchPlan {
 
-  /** What one candidate costs a task while the search runs.
+  /** What one candidate is planned to cost a task while the search runs.
     *
-    * A candidate is a `Candidate` object in the query's own priority queue, not
-    * four fields packed side by side: on a 64-bit JVM with compressed ordinary
-    * object pointers that is a 12-byte header over an `Int`, two `Long`s and a
-    * `Double`, 40 bytes once aligned, and the queue's backing array holds a
-    * reference to it. Counting the fields alone said 28 and a task planned
-    * against a budget it then overran.
+    * A planning constant. The figure dates from when a candidate was a
+    * `Candidate` object in the query's own priority queue: on a 64-bit JVM with
+    * compressed ordinary object pointers a 12-byte header over an `Int`, two
+    * `Long`s and a `Double`, 40 bytes once aligned, plus the queue's reference
+    * to it. [[TopKMerger]] now lays each query's k slots out in three primitive
+    * arrays (score, segment, row offset), 24 bytes per candidate and no object;
+    * the constant keeps the old figure as headroom, so a task planned against a
+    * budget stays under it. Counting the fields alone once said 28 and a task
+    * planned against a budget it then overran.
     *
     * Packing a query's answer for the shuffle costs `k * CandidateBytes.Width`
     * on top, and [[TopKMerger.takePacked]] releases each query's heap as it
@@ -50,9 +53,10 @@ object SearchPlan {
     */
   val CandidateBytes: Int = 40 + 8
 
-  /** What a query's top-k keeps besides its candidates: the priority queue and
-    * the backing array of sixteen references it starts with, which holds a
-    * top-10 without growing.
+  /** What a query's top-k is planned to keep besides its candidates. The figure
+    * dates from the priority queue and the backing array of sixteen references
+    * it started with; [[TopKMerger]] now keeps only a per-query size in a
+    * shared `Int` array, and the constant stays as headroom.
     */
   val TopKQueueBytes: Int = 128
 

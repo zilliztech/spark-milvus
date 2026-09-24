@@ -36,9 +36,9 @@
 <nav><a href="../README.md">设计索引</a><a href="vector-search.html#exact">向量搜索 2.3 精确扫描</a><a href="vector-search.html#native-boundary">向量搜索 2.5 索引文件解码</a><a href="../../reference-cn.md">选项参考</a></nav>
 <h1>搜索路径的资源自适应</h1>
 
-<p class="lead">搜索路径上有三个与机器规格绑定的数：一次引擎调用的 base 块（32 MiB）、每个 executor 常驻的向量预算（2 GiB）、能加载的索引载荷上限（1 GiB）。三个都是常量，三个都在 2026-09-21 的测试里出了问题：32 MiB 只在单任务时合适，16 任务慢 4 到 6 倍、64 任务半小时零产出；2 GiB 按槽位一除，local[64] 下装不下一个 160 MiB 的段；1 GiB 挡掉了 Milvus 默认 1 GiB 段建出的每一个 HNSW 索引。本文把前两个改成从机器缓存、CPU 配额、内存上限和 executor 并发算出，把第三个去掉：连接器不再持有任何与机器规格相关的常量，内存归 executor 配置，连接器只算给用户看。</p>
+<p class="lead">搜索路径上有三个与机器规格绑定的数：一次引擎调用的 base 块（32 MiB）、每个 executor 常驻的向量预算（2 GiB）、能加载的索引载荷上限（1 GiB）。三个都是常量，三个都在 2026-09-21 的测试里出了问题：32 MiB 只在单任务时合适，16 任务慢 4 到 6 倍、64 任务半小时零产出；2 GiB 按槽位一除，local[64] 下装不下一个 160 MiB 的段；1 GiB 挡掉了 Milvus 默认 1 GiB 段建出的每一个 HNSW 索引。本文最终把块定为常量 32 MiB（决策 27：批量距离入口内部分块，块不再绑 L3），把预算改成从 executor 的内存上限、堆与并发算出，把第三个去掉：连接器不再持有与机器规格绑定的预算常量，内存归 executor 配置，连接器只算给用户看。</p>
 
-<div class="state"><strong>2026-09-21 <code>[草稿]</code>。</strong>数据在 128 核、L3 96 MiB、503 GB 的机器上测得（Spark 4.0 local 模式，Knowhere <code>29210a33</code>），拐点位置未在其他机器复现。代码里已改：索引载荷上限 1 GiB → 8 GiB（过渡）；3.2 的块大小自适应已实现（<code>core.index.MachineResources</code> 探测，<code>spark.options.SearchResources</code> 决策，<code>SegmentSetSearch</code> 在 executor 上按段应用）；3.3 已实现（<code>TaskResources</code> 给出 executor 与每个搜索任务的核数，<code>SearchResources.segmentBudget</code> 与 <code>queryBudget</code> 在 driver 上算两块额度，<code>SearchPlan</code> 选任务留在内存的一边并按预算一半估大小未知的段，<code>SegmentSearch.hold</code> 超额度返回 <code>Overflow</code> 后逐组重读）；3.4 已实现（<code>MaxPayloadBytes</code> 删除，<code>IndexFileCodec.load</code> 分配前以切片对象大小之和校验 <code>total_len</code>，分配与规划期内存预估进日志）。三节全部落地。</div>
+<div class="state"><strong>2026-09-21 <code>[草稿]</code>。</strong>数据在 128 核、L3 96 MiB、503 GB 的机器上测得（Spark 4.0 local 模式，Knowhere <code>29210a33</code>），拐点位置未在其他机器复现。代码里已改：索引载荷上限 1 GiB → 8 GiB（过渡）；3.2 的块取常量 32 MiB（<code>SearchResources.exactScanBatch</code>，决策 27；<code>core.index.MachineResources</code> 的 L3 与 CPU 配额探测保留但无调用方，只有内存上限被 local 模式的 <code>MilvusSearch.executorMemory</code> 使用）；3.3 已实现（<code>TaskResources</code> 给出 executor 与每个搜索任务的核数，<code>SearchResources.segmentBudget</code> 与 <code>queryBudget</code> 在 driver 上算两块额度，<code>SearchPlan</code> 选任务留在内存的一边并按预算一半估大小未知的段，<code>SegmentSearch.hold</code> 超额度返回 <code>Overflow</code> 后逐组重读）；3.4 已实现（<code>MaxPayloadBytes</code> 删除，<code>IndexFileCodec.load</code> 分配前以切片对象大小之和校验 <code>total_len</code>，分配与规划期内存预估进日志）。三节全部落地。</div>
 
 <nav aria-label="目录">
   <a href="#mechanism">1 机制</a>
@@ -47,13 +47,14 @@
 </nav>
 
 <h2 id="mechanism">1 机制：三个数各绑一种资源</h2>
+<div class="state"><strong>2026-09-24 说明。</strong>本节写的是决策 27 与 31 之前（2026-09-21）的状态，表中「今天」一列指当时的代码；现状见 3.2（块）、3.3（并发数、两块额度与降级）与 3.6（底库读取）。</div>
 
-<p><code>MilvusSearch.search</code> 的执行链里，<code>SearchPlan</code> 把段切成段集、把 query 切成组，exact 模式段集少于任务槽时再把查询切成连续的查询范围，每个范围至少 2,048 条查询，组不够时重切（决策 28、32），一个任务是（段集，范围）；一个任务在 <code>SegmentSetSearch</code> 里对本集合的段逐个处理。exact 模式读向量列，<code>ExactScan.batch</code> 对每个 batch 调一次 <code>Knowhere.bruteForce</code>；index 模式读索引文件，<code>IndexFileCodec</code> 解码后交给 Knowhere 反序列化再搜。</p>
+<p><code>MilvusSearch.search</code> 的执行链里，<code>SearchPlan</code> 把段切成段集、把 query 切成组，exact 模式段集少于任务槽时再把查询切成连续的查询范围，每个范围至少 2,048 条查询，组不够时重切（决策 28、32），一个任务是（段集，范围）；一个任务在 <code>SegmentSetSearch</code> 里对本集合的段逐个处理。exact 模式读向量列，float32 字段由 <code>ExactScan</code> 对每个 batch 调一次批量距离入口 <code>NativeVectorSearch.bruteForceBatched</code>，其余元素类型调 <code>Knowhere.bruteForce</code>；index 模式读索引文件，<code>IndexFileCodec</code> 解码后交给 Knowhere 反序列化再搜。</p>
 
 <table>
 <tr><th>数</th><th>绑定的资源</th><th>今天</th><th>在链上的位置</th></tr>
-<tr><td>base 块 B：<code>milvus.read.batch.max.bytes</code></td><td>任务内存与每次调用的固定开销。2026-09-22 起 exact 走批量距离入口，入口内部按 4,096 条查询 × 1,024 行分块，B 不再绑 L3；此前绑 L3 是因为按查询逐行的内核每次调用把块读 nq 遍（2.1、2.2 的数据）</td><td>常量 32 MiB（决策 27）；2026-09-21 到 22 之间曾按 L3 自适应，更早是常量 32 MiB</td><td><code>SegmentSearch.hold</code> 把 1 MiB 的 row group 拼成 batch，<code>ExactScan.batch</code> 一个 batch 一次调用</td></tr>
-<tr><td>常驻预算：<code>milvus.search.vectors.max.bytes</code></td><td>executor 的堆外内存。多 query 组时段集整个留在内存里给每组算</td><td>常量 2 GiB 每 executor，规划期除以槽位</td><td><code>SearchPlan.segmentSets</code> 按它切集合；<code>SegmentSearch.hold</code> 超过就 <code>require</code> 失败</td></tr>
+<tr><td>base 块 B：<code>milvus.read.batch.max.bytes</code></td><td>任务内存与每次调用的固定开销。2026-09-22 起 exact 走批量距离入口，入口内部按 4,096 条查询 × 1,024 行分块，B 不再绑 L3；此前绑 L3 是因为按查询逐行的内核每次调用把块读 nq 遍（2.1、2.2 的数据）</td><td>常量 32 MiB（决策 27）；2026-09-21 到 22 之间曾按 L3 自适应，更早是常量 32 MiB</td><td><code>core.read.exec.SegmentVectors.next</code> 把 1 MiB 的 row group 拼成 batch，<code>ExactScan</code> 一个 batch 一次调用</td></tr>
+<tr><td>常驻预算：<code>milvus.search.segments.max.bytes</code>（当时名为 <code>milvus.search.vectors.max.bytes</code>）</td><td>executor 的堆外内存。多 query 组时段集整个留在内存里给每组算</td><td>常量 2 GiB 每 executor，规划期除以槽位</td><td><code>SearchPlan.segmentSets</code> 按它切集合；<code>SegmentSearch.hold</code> 超过返回 <code>Overflow</code>，任务改为逐组重读</td></tr>
 <tr><td>索引载荷上限：<code>IndexFileCodec.MaxPayloadBytes</code></td><td>同一块堆外内存。加载时 BinarySet 一份、Knowhere 反序列化后一份</td><td>曾是常量 1 GiB；2026-09-21 起无上限，<code>total_len</code> 在分配前与切片对象在存储上的字节数核对</td><td><code>IndexFileCodec.load</code> 在 <code>parseSlices</code> 之后、创建 Loader 之前</td></tr>
 </table>
 
@@ -86,7 +87,7 @@
 </svg>
 </div>
 
-<p>常驻预算只在多 query 组时起作用：<code>SegmentSetSearch</code> 单组直接逐 batch 扫（内存只有一个 batch），多组才 <code>hold</code> 整个段集给每组复用，省下段的重读。上限来的路径是规划期：<code>SearchPlan.segmentSets</code> 用 <code>snapshotRows × rowBytes</code> 估段大小、按预算切集合，而行数未知的段按 0 字节计（<code>SearchPlan.scala:153</code>），于是预算形同虚设，集合按并发数切，运行期 <code>hold</code> 再按真实字节拒绝。</p>
+<p>2026-09-21 时常驻预算只在多 query 组时起作用：<code>SegmentSetSearch</code> 单组直接逐 batch 扫（内存只有一个 batch），多组才 <code>hold</code> 整个段集给每组复用，省下段的重读。上限来的路径是规划期：<code>SearchPlan.segmentSets</code> 用 <code>snapshotRows × rowBytes</code> 估段大小、按预算切集合，而行数未知的段当时按 0 字节计，于是预算形同虚设，集合按并发数切，运行期 <code>hold</code> 再按真实字节拒绝。现状（3.3）：多组时先试查询留在内存，每批对各组算完即释放；放不下才让段组留在内存；行数未知的段按段额度的一半估（<code>SearchPlan.UnknownSegmentShare</code>）；<code>hold</code> 超额返回 <code>Overflow</code> 后逐组重读。</p>
 
 <p>索引载荷不经 Java 数组：<code>IndexFileCodec</code> 以 1 MiB 为块把切片流式写进原生 <code>BinarySet</code>（<code>binarySetAllocate(name, long length)</code>），Knowhere 反序列化后持有自己的一份。走 Java 数组的只有 SLICE_META（≤ 1 MiB）和 nullable 的 <code>valid_data</code> 位图（≤ 256 MiB），各有独立上限。1 GiB 的 <code>MaxPayloadBytes</code> 随 a9dbb56 导入，没有记录理由；它同时充当了对不可信 <code>total_len</code> 的健全性校验和内存上限。前者现在由 <code>store.size</code> 之和承担，后者取消（3.4）。</p>
 
@@ -166,9 +167,9 @@
 <tr><td>L3 总量</td><td><code>/sys/devices/system/cpu/cpuN/cache/index*/</code> 中 <code>level == 3</code> 的条目，按 <code>shared_cpu_list</code> 去重后求 <code>size</code> 之和</td><td>2 × 48 MiB = 96 MiB</td></tr>
 <tr><td>宿主机核数</td><td><code>/sys/devices/system/cpu/online</code>，容器内也是宿主机视图</td><td>128</td></tr>
 <tr><td>本进程可用核数</td><td><code>Runtime.availableProcessors()</code>，Java 21 按 cgroup v1/v2 配额折算；集群上的 executor 再与槽位 N 取较小值，没有 CPU limit 的 pod 里它返回宿主机核数</td><td>128（<code>cpu.max</code> 为 <code>max</code>）</td></tr>
-<tr><td>本进程内存上限</td><td>cgroup v2 <code>memory.max</code> / v1 <code>memory.limit_in_bytes</code>，无限制时取 <code>/proc/meminfo</code> 的 MemTotal 乘 CPU 配额比例</td><td>无限制，MemTotal 503 GB</td></tr>
+<tr><td>本进程内存上限</td><td>cgroup v2 <code>memory.max</code> / v1 <code>memory.limit_in_bytes</code> 与 <code>/proc/meminfo</code> 的 MemTotal 取较小者，无限制时就是 MemTotal，不乘 CPU 配额（<code>MachineResources.memoryLimitBytes</code>）</td><td>无限制，MemTotal 503 GB</td></tr>
 <tr><td>堆上限</td><td><code>Runtime.maxMemory()</code></td><td>按 <code>-Xmx</code></td></tr>
-<tr><td>每 executor 槽位 N</td><td>现有 <code>MilvusSearch.taskSlotsPerExecutor</code>：<code>spark.executor.cores</code>，local 取 <code>defaultParallelism</code></td><td>16</td></tr>
+<tr><td>每 executor 槽位 N</td><td><code>TaskResources.tasksPerExecutor</code>：executor 核数（<code>spark.executor.cores</code>，local 取 <code>defaultParallelism</code>）÷ <code>spark.task.cpus</code>；index 模式用 <code>wholeExecutor</code> 声明每任务占满核，N = 1</td><td>16</td></tr>
 </table>
 </div>
 <p>CPU 配额比例 = <code>min(1, 可用核数 / 宿主机核数)</code>；K8s <code>limits.cpu: 8</code> 的 pod 在这台机器上是 8/128；没有 CPU limit、<code>spark.executor.cores=4</code> 的 executor 在 16 vCPU 节点上是 4/16。local 模式的 driver 就是 executor，独占整机，保留探测值。</p>
@@ -186,7 +187,7 @@
            index：(堆外可用 − 1 GiB) ÷ N              1 GiB 留给 shuffle 读取缓冲与 Knowhere 的工作内存
 查询额度 = (堆上限 − 300 MiB) × (1 − spark.memory.fraction) ÷ N
                                                       Spark 不管理的那部分堆；spark.memory.fraction 默认 0.6</code></pre>
-<p>两种顺序各自的需求：查询留在内存时，堆上是本任务查询的 id 与 TopK 状态（每条查询 8 + K × 48 + 128 字节，后两项是候选对象与优先队列本身），走 shuffle 时加上正在读入的一组；堆外是本任务查询矩阵的拷贝，加最大一段的常驻字节及其加载峰值。段组留在内存时，堆外是段组的常驻字节，加最大一段的加载峰值与一个查询组的矩阵。index 模式一个已加载的索引常驻快照记录的 <code>serialized_size</code> 的 2 倍：Knowhere 的 C API 为索引保留一份 BinarySet 的拷贝，与索引同寿命（<code>src/c_api/c_api.cc</code> 的 <code>IndexResource.deserialized_data</code>），再加从它反序列化出的索引；加载时连接器读入的 BinarySet 再占 1 倍，Knowhere 反序列化完即释放。perf_laion_31m 的 Cardinal 索引实测 1.99 与 2.04 倍。exact 模式取行数 × 向量宽度，没有加载峰值。</p>
+<p>两种顺序各自的需求：查询留在内存时，堆上是本任务查询的 id 与 TopK 状态（每条查询 8 + K × 48 + 128 字节，按规划常量 <code>SearchPlan.CandidateBytes</code> 与 <code>TopKQueueBytes</code> 计；<code>TopKMerger</code> 实际以原始类型数组存每条候选 24 字节，常量保留余量），走 shuffle 时加上正在读入的一组；堆外是本任务查询矩阵的拷贝，加最大一段的常驻字节及其加载峰值。段组留在内存时，堆外是段组的常驻字节，加最大一段的加载峰值与一个查询组的矩阵。index 模式一个已加载的索引常驻快照记录的 <code>serialized_size</code> 的 2 倍：Knowhere 的 C API 为索引保留一份 BinarySet 的拷贝，与索引同寿命（<code>src/c_api/c_api.cc</code> 的 <code>IndexResource.deserialized_data</code>），再加从它反序列化出的索引；加载时连接器读入的 BinarySet 再占 1 倍，Knowhere 反序列化完即释放。perf_laion_31m 的 Cardinal 索引实测 1.99 与 2.04 倍。exact 模式取行数 × 向量宽度，没有加载峰值。</p>
 <p>perf_laion_31m（16 段，Cardinal 索引每段 1.85–2.67 GB、共 40.0 GB），2 个 executor，每个 4 GiB 堆加 28 GiB memoryOverhead：N = 1，段额度 26 GiB，查询额度 1.5 GiB。</p>
 <table>
 <tr><th>查询集</th><th>查询留在内存</th><th>段组留在内存</th><th>选中</th></tr>
@@ -256,15 +257,15 @@
 <div class="table-scroll">
 <table>
 <tr><th>改动</th><th>位置</th></tr>
-<tr><td>探测：读 sysfs 与 cgroup，返回 L3 字节数、CPU 配额比例、内存上限，路径可注入</td><td>新 <code>core.index.MachineResources</code></td></tr>
-<tr><td>决策：块与预算的公式与兜底，纯函数</td><td><code>spark.options.SearchLimits</code> 旁新 <code>SearchResources.choose(machine, slots, heap, userOptions)</code></td></tr>
-<tr><td>接入：算出后传给 <code>ReadLimits.batchMaxBytes</code> 与 <code>SearchLimits.vectorsMaxBytes</code></td><td><code>MilvusSearch</code>，与 <code>taskSlotsPerExecutor</code> 同处</td></tr>
-<tr><td>规划：段行数未知的估值；运行：多组超预算降级为逐 batch</td><td><code>core.index.SearchPlan.segmentBytes</code>、<code>spark.read.SegmentSetSearch.run</code></td></tr>
+<tr><td>探测：读 sysfs 与 cgroup，返回 L3 字节数、CPU 配额比例、内存上限，路径可注入</td><td><code>core.index.MachineResources</code>；只有内存上限有调用方（local 模式的 <code>MilvusSearch.executorMemory</code>）</td></tr>
+<tr><td>决策：块与预算的公式与兜底，纯函数</td><td><code>spark.options.SearchLimits</code> 旁的 <code>SearchResources.segmentBudget</code>、<code>queryBudget</code>、<code>exactScanBatch</code></td></tr>
+<tr><td>接入：算出后传给 <code>ReadLimits.batchMaxBytes</code> 与 <code>SearchPlan.Budget</code>；用户设了 <code>SearchLimits.segmentsMaxBytes</code> 时以其值为段额度</td><td><code>MilvusSearch</code>，与 <code>TaskResources</code> 同处</td></tr>
+<tr><td>规划：段行数未知的估值；运行：多组超预算降级为逐 batch</td><td><code>core.index.SearchPlan.Footprint</code>、<code>vectorBytes</code>、<code>knownRows</code>；<code>spark.read.SegmentSetSearch.run</code></td></tr>
 <tr><td>索引：删常量，<code>total_len</code> 与切片和核对，加载前后日志</td><td><code>core.codec.IndexFileCodec.parseSlices</code> 与 <code>load</code></td></tr>
 <tr><td>测试：伪造 sysfs / cgroup 目录测解析；两个决策函数按上表场景做表驱动；SLICE_META 与切片和不一致的拒绝；多组超预算的降级路径</td><td>core 与 spark-4.0 的单元测试</td></tr>
 <tr><td>底库读取：每个读任务设 <code>reader.parquet.prebuffer.lazy</code> = false 与区间大小；打开段读取器时扩 Arrow IO 池（3.6）</td><td><code>core.read.exec.SegmentReaderRegistry</code>；读取器属性与 <code>MilvusStorageRuntime</code> 在 milvus-storage 子模块</td></tr>
 <tr><td>文档：三个选项条目改为"默认自动，公式如上"；本页登记到设计索引；vector-search.html 2.3、2.5 指向本页</td><td><code>reference-cn/en.md</code>、<code>docs/design/README.md</code>、<code>vector-search.html</code></td></tr>
 </table>
 </div>
-<p>ARM 与 AMD 的 L3 是多块 16 到 32 MiB 的 CCX，去重求和成立，算出的块更小；多机集群里每个 executor 探测自己那台机器，N 取 <code>spark.executor.cores</code>；同机两个各 8 核的 executor 经配额比例各得整机资源的 1/16；建索引路径 <code>IndexWriter</code> 按段一次装配，另有 <code>arrowMaxBytes</code> 配额，不在本文范围。</p>
+<p>ARM 与 AMD 的 L3 是多块 16 到 32 MiB 的 CCX，去重求和成立，算出的块更小；多机集群里额度在 driver 上按 <code>spark.executor.memory</code>、overhead 与堆外配置算（<code>MilvusSearch.executorMemory</code>），只有 local 模式才 <code>MachineResources.probe()</code> 探测本机；N 取 <code>TaskResources.tasksPerExecutor</code>；同机两个各 8 核的 executor 经配额比例各得整机资源的 1/16；建索引路径 <code>IndexWriter</code> 按段一次装配，另有 <code>arrowMaxBytes</code> 配额，不在本文范围。</p>
 </main>

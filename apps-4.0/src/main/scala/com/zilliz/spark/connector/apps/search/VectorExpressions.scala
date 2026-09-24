@@ -313,7 +313,7 @@ case class InnerProductExpression(_left: Expression, _right: Expression)
   private def computeInnerProduct(v1: Vector, v2: Vector): Double = {
     if (v1.size != v2.size) return 0.0
 
-    // Use optimized Vector dot product like VectorBruteForceSearch
+    // Spark's Vector.dot runs the BLAS kernel instead of a Scala loop.
     v1.dot(v2)
   }
 

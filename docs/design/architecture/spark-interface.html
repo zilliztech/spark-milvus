@@ -33,7 +33,7 @@ driver 把 option、schema 和固定 Snapshot 变成类型化配置与任务描�
 
 <table>
 <tr><th>入口</th><th>第 3 层职责</th><th>交给第 2 层</th></tr>
-<tr><td><code>format("milvus")</code> 读</td><td><code>MilvusDataSource</code> 解析一次 Snapshot；<code>MilvusScanBuilder</code> 处理投影、谓词与 Limit；<code>MilvusScan</code> 生成 Spark 分区</td><td><code>Snapshot</code>、<code>ReadPlan</code>、<code>SegmentReadTask</code></td></tr>
+<tr><td><code>format("milvus")</code> 读</td><td>DataSource <code>getTable</code> 与 Catalog <code>loadTable</code> 共用的 <code>MilvusTables.load</code> 解析一次 Snapshot；<code>MilvusScanBuilder</code> 处理投影、谓词与 Limit；<code>MilvusScan</code> 生成 Spark 分区</td><td><code>Snapshot</code>、<code>ReadPlan</code>、<code>SegmentReadTask</code></td></tr>
 <tr><td><code>format("milvus")</code> 写</td><td><code>MilvusTable</code> 与 WriteBuilder 校验 DataFrame schema；每个 Spark task 持有一个 segment writer；driver 汇总 commit message</td><td><code>V2SegmentWriter</code> / <code>V3SegmentWriter</code>、<code>Committer</code></td></tr>
 <tr><td>Catalog 与 CALL</td><td>按 Spark 线适配公开接口、SQL parser 与输出 Row；主体仍放共享目录</td><td><code>client.api</code> 与已有 snapshot、write commit 类型</td></tr>
 </table>
@@ -82,8 +82,8 @@ ObjectStore、统计文件与 manifest 提交继续使用纯存储属性。</p>
 <pre><code>进程级 Arrow root（connector 生命周期）
   └─ task child（PartitionReader 生命周期，有 maxBytes）
        ├─ SegmentReader 的 Arrow C Data struct 与导入批
-       ├─ 行式/列式当前批
-       └─ vector search 的回表批</code></pre>
+       └─ 行式/列式当前批
+  └─ search task child（<code>ArrowAllocator.forSearchTask</code>，<code>SearchTake</code> 的回表批，不经 PartitionReader）</code></pre>
 
 <p><code>MilvusPartitionReaderFactory</code> 创建 task child，然后用它打开 <code>SegmentReader</code>。
 行式与列式基础 reader 都明确持有 child；metadata 与 Limit 包装器把 <code>close</code> 委托到底层。

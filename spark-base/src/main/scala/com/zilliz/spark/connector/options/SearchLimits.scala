@@ -1,15 +1,19 @@
 package com.zilliz.spark.connector.options
 
-/** The three byte limits a vector search is planned against.
+/** The limits a vector search is planned against: three byte limits and one
+  * switch.
   *
-  * They bound three different things: how large a query set may be before it
-  * stops travelling in a broadcast variable and travels with the shuffle
-  * instead, how much of it one task answers at a time, and how many bytes of
-  * segment data -- vectors in exact mode, indexes in index mode -- one executor
-  * keeps off the heap while its tasks answer them
+  * The byte limits bound three different things: how large a query set may be
+  * before it stops travelling in a broadcast variable and travels with the
+  * shuffle instead, how much of it one task answers at a time, and how many
+  * bytes of segment data -- vectors in exact mode, indexes in index mode -- one
+  * executor keeps off the heap while its tasks answer them
   * (docs/design/architecture/vector-search.html section 1.1). The last is None
   * unless the call set it: the default is derived from the executor's memory
-  * where the search is planned (`SearchResources.segmentBudget`).
+  * where the search is planned (`SearchResources.segmentBudget`). The switch,
+  * `queriesDirect`, lets a query set that is a plain Parquet scan be read by
+  * the search tasks themselves instead of collected and broadcast
+  * (`milvus.search.queries.direct`, default true).
   */
 final case class SearchLimits(
     queriesMaxBytes: Long,

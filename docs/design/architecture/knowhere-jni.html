@@ -53,17 +53,18 @@
 <p>通用能力依据<a href="../README.md#25-原生层">总体设计原生层</a>、<a href="../capabilities.md#5-向量与索引">V1/V2/V4/V5</a>和 <a href="../capabilities.md#2-表写">W6</a>。Cardinal 核对基线为 <a href="https://github.com/zilliztech/cardinal/commit/19f2a027cb12dd5cf3d7c493940df15120a64c66">19f2a027cb12dd5cf3d7c493940df15120a64c66</a>：11 个 JNI 入口调用 9 个 C 入口，Isolation Forest 的数组/地址版本共享计算函数。暂缓项恢复开发时，再评审功能、参数、输出语义、格式和接口命名。</p>
 
 <h3 id="capability-matrix">1.1 核心、绑定与 Connector 的能力对照</h3>
-<p><strong>绑定开放的是核心能力的一个子集，Connector 又只用了其中两项；每层缺口归属不同的仓库。</strong>绑定列以 PR #1829 的 8c6017b 为准，其 <code>c_api.h</code> 与全部 <code>io.knowhere</code> 源码与 Connector 钉住的 9dc2b8ad 逐字节相同。Connector 列以 refactor/v2 @ 2d1b825 为准。</p>
+<p><strong>绑定开放的是核心能力的一个子集，Connector 用了其中的多查询、位图、五种 dense 类型、五种距离、BinarySet 加载、一次性 Build 与批量暴力搜索；每层缺口归属不同的仓库。</strong>绑定列原以 PR #1829 的 8c6017b 为准（当时与 Connector 钉住的 9dc2b8ad 逐字节相同）；Connector 列于 2026-09-24 按 refactor/v2 @ 00f6bf3 更新，当前 gitlink 为 b9497f4f。</p>
 <div class="table-scroll"><table><thead><tr><th>能力</th><th>Knowhere 核心</th><th>C API / JNI</th><th>Connector 现状</th><th>缺口归属</th></tr></thead><tbody>
-<tr><td>多查询（一次传 nq 条）</td><td>有，每条查询一个任务</td><td>有，<code>queries.rows</code> 不设上限</td><td>nq 写死为 1</td><td>Connector，见<a href="vector-search.html#exact">向量搜索与建索引 2.3</a></td></tr>
+<tr><td>多查询（一次传 nq 条）</td><td>有，每条查询一个任务</td><td>有，<code>queries.rows</code> 不设上限</td><td>整组查询一次传入（<code>QueryMatrix</code>）</td><td>无</td></tr>
 <tr><td>过滤位图</td><td>有</td><td>有，1 表示排除</td><td>用于删除与 null</td><td>无</td></tr>
-<tr><td>向量类型</td><td>fp32、fp16、bf16、int8、bin1、稀疏、EmbList</td><td>fp32、fp16、bf16、int8、bin1</td><td>只传 fp32，fp16/bf16 在 JVM 放宽</td><td>Connector</td></tr>
-<tr><td>距离</td><td>L2、IP、COSINE、HAMMING、JACCARD、BM25 等</td><td>JSON 透传，不校验</td><td>L2、IP、COSINE</td><td>Connector</td></tr>
+<tr><td>向量类型</td><td>fp32、fp16、bf16、int8、bin1、稀疏、EmbList</td><td>fp32、fp16、bf16、int8、bin1</td><td>按字段 dtype 传 fp32、fp16、bf16、int8、bin1（<code>QueryMatrix</code>、<code>KnowhereBuffers</code>、<code>ExactScan</code>）</td><td>无</td></tr>
+<tr><td>距离</td><td>L2、IP、COSINE、HAMMING、JACCARD、BM25 等</td><td>JSON 透传，不校验</td><td>L2、IP、COSINE；二值向量为 HAMMING、JACCARD（<code>MilvusSearch.checkMetric</code>、<code>TopKMerger</code>）</td><td>无</td></tr>
 <tr><td>索引加载</td><td>BinarySet、文件加载、mmap</td><td>仅 BinarySet</td><td>BinarySet 分块写入</td><td>绑定，mmap 未开放</td></tr>
-<tr><td>索引构建</td><td>Build、Train、Add、BuildAsync</td><td>一次性 Build；DiskANN 走文件</td><td>未使用</td><td>暂不需要</td></tr>
+<tr><td>索引构建</td><td>Build、Train、Add、BuildAsync</td><td>一次性 Build；DiskANN 走文件</td><td><code>IndexWriter.build</code> / <code>buildFromAddress</code> 经 <code>NativeVectorIndex.build</code> 一次性 Build（W6，<code>build_index</code> 过程）</td><td>无</td></tr>
+<tr><td>批量暴力搜索（<code>knowhere_bruteforce_batched</code>）</td><td>有，Knowhere 自带 faiss 的 SGEMM 路径，调用线程单线程</td><td>有，b9497f4f 起；fp32、L2/IP/COSINE，不接受位图</td><td>float32 精确扫描默认走它（<code>ExactScan</code>），有排除行的批先压紧</td><td>无</td></tr>
 <tr><td>范围搜索、迭代器</td><td>索引与暴力搜索都有</td><td>无</td><td>无</td><td>绑定，有场景再开</td></tr>
 <tr><td>按 id 取原始向量</td><td>有</td><td>无</td><td>用存储层 take 回表</td><td>暂不需要</td></tr>
-<tr><td>线程池、SIMD、BLAS 配置</td><td>有，搜索池可运行中调整</td><td>线程池大小：PR #1829 自 1fff20db 起提供 resize/size 四个 C 函数与 Java 方法；SIMD、BLAS 仍无</td><td>无</td><td>Connector 升级 pin 后接入，见 3.1 节</td></tr>
+<tr><td>线程池、SIMD、BLAS 配置</td><td>有，搜索池可运行中调整</td><td>线程池大小：PR #1829 自 1fff20db 起提供 resize/size 四个 C 函数与 Java 方法；SIMD、BLAS 仍无</td><td>无调用；当前 gitlink b9497f4f 已含该 API</td><td>Connector，接入归能力 G4（capabilities 第 11 节），见 3.1 节</td></tr>
 <tr><td>内存估算、Size()</td><td>有</td><td>无</td><td>无</td><td>绑定，资源规划用</td></tr>
 <tr><td>取消（OpContext）</td><td>有</td><td>无</td><td>无</td><td>绑定，任务取消用</td></tr>
 <tr><td>稀疏向量</td><td>有</td><td>无，需先定 CSR 布局</td><td>无</td><td>绑定</td></tr>
@@ -94,7 +95,7 @@
 </tbody></table>
 <p>内存契约必须写入 C 头文件和 Java API：direct buffer 的位置、有效长度和 native 字节序明确；检查 rows × dim 和 nq × k 的溢出、空指针及容量。输入 DataSet 为借用；若特定索引需要在 build 后保留输入，由 native 对象持有受控副本。BinarySet 在 deserialize 后是否仍被索引引用，要由实现明确保留或复制，并以调用方提前关闭 BinarySet 的测试验证。</p>
 <p>DiskANN 的构建入口为 <code>buildFromFile(parameters)</code>：C ABI 传入空 vectors，底库从 <code>data_path</code> 读取训练文件，并在 <code>index_prefix</code> 生成索引文件。该版本的 DiskANN Serialize 不把这些文件放入 BinarySet；Deserialize 仍通过本地路径加载，不能把其 BinarySet 当作可独立搬迁的完整索引。生成的索引文件须保留到所有使用它们的索引关闭。</p>
-<p>过滤位图按低位优先、<strong>1 表示排除</strong>、连续 public row ID 定义；首版单批 BF 使用从 0 开始的 row ID，跨批 offset 由更高层显式处理。首版每个 index handle 串行使用；close 幂等，close 后操作失败。C++ 异常在 C ABI 内转换为 code/message，JNI 转成 Java 异常；不把失败变成空结果。</p>
+<p>过滤位图按低位优先、<strong>1 表示排除</strong>、连续 public row ID 定义；首版单批 BF 使用从 0 开始的 row ID，跨批 offset 由更高层显式处理。首版契约是每个 index handle 串行使用；close 幂等，close 后操作失败。连接器现用法与这条契约不符：<code>IndexProbe.Pipeline</code> 让任务线程对同一句柄搜索组 g+1 时，工作线程对该句柄发起组 g 的加宽重搜（<code>IndexProbe.scala</code> 的 <code>Target</code> 注释明写两个线程可同时搜索同一索引），依赖 Knowhere 的搜索为只读（README 决策日志 2026-09-24）。改契约还是改代码，待负责人确认。C++ 异常在 C ABI 内转换为 code/message，JNI 转成 Java 异常；不把失败变成空结果。</p>
 <p>Java 的搜索入口采用以下签名。index 对象保存创建时的 dtype；该搜索接口的所有 ByteBuffer 必须为 direct buffer，以当前 position 到 limit 为有效区域，数值采用 native 字节序。JNI 传递有效起点和剩余字节数，避免 C 层误读 buffer 容量以外或 position 之前的数据。</p>
 <pre><code>public void search(
     ByteBuffer queries, long queryRows, int dimension, int topK,
@@ -112,7 +113,7 @@ public void close();</code></pre>
 <h3 id="threads">3.1 线程模型：每条查询一个任务，任务内单线程</h3>
 <p><strong>Knowhere 的搜索并行度等于一次调用的查询数。</strong><a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/src/common/comp/brute_force.cc">brute_force.cc</a> 的 <code>SearchWithBuf</code> 与 <a href="https://github.com/zilliztech/knowhere/blob/3e15e837f4235e09a61e3420eecff160ba8bf619/src/index/hnsw/faiss_hnsw.cc">faiss_hnsw.cc</a> 的搜索都对每条查询向全局搜索池 <code>push</code> 一个任务，任务内 <code>ScopedSearchOmpSetter(1)</code> 把 OpenMP 与 OpenBLAS 线程数设为 1。nq = 1 的调用只占一个线程。批量距离入口是例外：不进搜索池，在调用线程上单线程执行，并行由调用方（Spark 任务）承担。</p>
 <p>全局搜索池在首次使用时按 <code>std::thread::hardware_concurrency()</code> 懒创建，进程内所有调用共享；核心的 <code>KnowhereConfig::SetSearchThreadPoolSize</code> 与 <code>SetBuildThreadPoolSize</code> 可在运行中调整大小。首期绑定没有开放配置入口；PR #1829 自 1fff20db（2026-09-17）起增加 <code>knowhere_search_thread_pool_resize</code>、<code>knowhere_search_thread_pool_size</code> 与 build 池的对应函数，Java 为 <code>Knowhere.resizeSearchThreadPool</code>、<code>searchThreadPoolSize</code>、<code>resizeBuildThreadPool</code>、<code>buildThreadPoolSize</code>；大小限定 1 到 INT32_MAX，读取在池创建前返回 0。Linux x86-64 上 C 测试 3/3、JNI 测试 11/11 通过，macOS arm64 同样通过。SIMD、BLAS 阈值与日志仍无入口。</p>
-<p>对 Connector 的含义：现状每个 Spark 任务一条查询，并行度来自任务数，池大小无关紧要；改为多查询后每次调用把 nq 个任务推进池，c 个并发任务的 CPU 需求为 c × 池大小。pin 升级后，Connector 在 executor 首次搜索前调用 <code>Knowhere.resizeSearchThreadPool(spark.executor.cores)</code>；Spark 侧的处理见<a href="vector-search.html#api">向量搜索与建索引 1.1</a>。</p>
+<p>对 Connector 的含义：现状每次调用把整组查询（nq 条）交给 Knowhere，索引搜索与非 float32 的 <code>bruteForce</code> 把 nq 个任务推进池，c 个并发任务的 CPU 需求为 c × 池大小；index 模式因此让每个 executor 同时只跑一个搜索任务（<code>TaskResources.wholeExecutor</code>），float32 精确扫描走批量入口，不进池。当前 gitlink b9497f4f 已含 <code>Knowhere.resizeSearchThreadPool</code>，Connector 尚未调用；接入归能力 G4（capabilities 第 11 节）。Spark 侧的处理见<a href="vector-search.html#api">向量搜索与建索引 1.1</a>。</p>
 
 <h2 id="build">4. 上游构建提供 Java JAR、native 库与加载器</h2>
 <p>现有工程使用 C++20、Conan 2。实现增加默认关闭的 <code>WITH_C_API</code>、<code>WITH_JNI</code> 选项；开启 JNI 时同时开启 C API。根 CMake 与 Conan 显式接入新增源码，保持现有 C++ 和 Python 构建入口。具体命令与工具版本写入 <code>java/README.md</code>；通用绑定在公共 CI 验证。按索引类型启用 Cardinal 后端时，在有对应权限的环境补充索引验证；首期不接入 Aquila 计算/JNI，也不为 parquetToFbin 新增 Arrow C++/Parquet 依赖。</p>

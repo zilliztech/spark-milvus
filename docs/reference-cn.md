@@ -50,8 +50,7 @@ JACCARD。
 损坏文件、格式不兼容在任务加载索引时报错。只有快照明确表示该字段在这个段上没有索引
 时，`allowUnindexed = true` 才让这个段改用精确扫描，默认 `false`。索引由每个任务
 独占并关闭，不跨任务缓存。搜索参数按索引家族给：HNSW 家族用整数 `ef`，不得小于 K，默认 `max(64, K)`；IVF 家族
-用正整数 `nprobe`，默认 16；FLAT 不接受参数。加密索引和
-nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用 Cardinal 的固定
+用正整数 `nprobe`，默认 16；FLAT 不接受参数。加密索引暂不支持。Cardinal `_mem.index.bin` 要求启用 Cardinal 的固定
 版本原生产物，见[构建说明](contributing.md#knowhere-library-loading)。
 
 设置 `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin`，每个
@@ -84,8 +83,8 @@ executor 上同时运行的搜索任务共享它：index 模式在集群上每�
 查询组重读一遍段（I/O × 查询组数）。driver 日志 `Search budget` 一行写明两块额度、选中
 的顺序、段组数与是否重读。段数据在 Arrow 或 Knowhere 的堆外内存里，`-Xmx` 管不到它们。
 
-index 模式在集群上不必设置 `spark.task.cpus`：搜索与建索引的 stage 由连接器声明每任务
-占满 executor 的核，打包查询组的 stage 按堆声明每任务核数，其余 stage 按默认的每任务
+index 模式在集群上不必设置 `spark.task.cpus`：index 模式的搜索 stage 与建索引 stage 由连接器
+声明每任务占满 executor 的核（exact 模式的搜索 stage 每任务占 `spark.task.cpus` 个核），打包查询组的 stage 按堆声明每任务核数，其余 stage 按默认的每任务
 一核并行。这要求关闭动态分配；local 模式与开启动态分配时，仍要把 `spark.task.cpus` 设为
 executor 核数。读查询集的 stage 因此每个 executor 同时跑「executor 核数」个任务，读 Parquet
 时每个任务至少持有输入的一个行组，executor 的堆要放得下「executor 核数 × 最大行组」：
@@ -102,9 +101,11 @@ executor 核数。读查询集的 stage 因此每个 executor 同时跑「execut
 `milvus.search.read.bytes` 与 `milvus.search.read.nanos`、
 `milvus.search.index.bytes` 与 `milvus.search.index.load.nanos`、
 `milvus.search.bitmap.nanos`、`milvus.search.knowhere.calls` 与
-`milvus.search.knowhere.nanos`、`milvus.search.candidates`、
-`milvus.search.take.rows` 与 `milvus.search.take.nanos`。Knowhere 在自己的线程池里
-计算，这部分耗时看 `milvus.search.knowhere.nanos`，不计入任务的 CPU 时间。
+`milvus.search.knowhere.nanos`、`milvus.search.compared.pairs`（exact 模式：已算过距离的
+「查询 × 可见行」对数，index 模式为 0）、`milvus.search.candidates`、
+`milvus.search.take.rows` 与 `milvus.search.take.nanos`。`bruteForce` 与索引搜索在 Knowhere
+自己的线程池里计算，这部分耗时看 `milvus.search.knowhere.nanos`，不计入任务的 CPU 时间；
+float32 的批量精确扫描入口在任务线程上执行，其耗时同时计入任务的 CPU 时间。
 
 ## 版本兼容性
 

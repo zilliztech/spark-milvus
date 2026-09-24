@@ -1,5 +1,11 @@
 # Configurable Join Keys for Backfill Implementation Plan
 
+> **Historical implementation plan (status added 2026-09-24).** Paths below are
+> the 1.x layout (`src/main/scala/operations/backfill/*`, `V2SegmentInfo`). The
+> code now lives in `apps-4.0/src/main/scala/com/zilliz/spark/connector/apps/backfill/`
+> and `V2SegmentInfo` was merged into `core.snapshot.Segment`; see section 5 of
+> `docs/design/architecture/modules.md`.
+
 **Goal:** Generalize the backfill job so callers can explicitly select a persisted physical field as the row join key, while preserving the current primary-key join as the default and leaving a clean extension point for future logical keys such as `(file path, row number)`.
 
 **Architecture:** Introduce a public join-key specification and a separately resolved runtime model. Phase 1 exposes only the existing primary-key strategy and a single persisted physical-field strategy. The resolved model is component-based and uses internal canonical join-column aliases, so the read, validation, and join pipeline can later accept multi-component logical keys without another rewrite. The per-segment writer path remains unchanged because it already depends only on `$segment_id`, `$row_offset`, and the fields being written.

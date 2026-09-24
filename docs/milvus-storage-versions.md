@@ -1,5 +1,10 @@
 # Milvus Storage Versions — Reference
 
+> **Status (2026-09-24):** the `storage_version` definitions below are current.
+> The class names and paths date from the 1.x source layout (`src/main/scala/read/…`);
+> the 2.0 locations are given in the class table and in section 5 of
+> `docs/design/architecture/modules.md`.
+
 Authoritative definitions of `storage_version` as used by Milvus
 segment-info, plus the naming conventions used in this connector. If anything
 below disagrees with `milvus/internal/storage/rw.go`, `rw.go` wins.
@@ -65,8 +70,8 @@ A snapshot JSON produced by milvus-datacoord has two separate arrays:
 
 | Source                          | InputPartition                      | Reader                            |
 |---------------------------------|-------------------------------------|-----------------------------------|
-| `storagev2_manifest_list` items | `MilvusV3InputPartition`     | `MilvusRowPartitionReader` with `V3ColumnBinding` |
-| `SnapshotV2Segments` option     | `MilvusV2InputPartition`      | `MilvusRowPartitionReader` with `V2ColumnBinding` |
+| `storagev2_manifest_list` items | `MilvusInputPartition` (one class for both lines) | `MilvusRowPartitionReader` with `V3ColumnBinding` |
+| `SnapshotV2Segments` option     | `MilvusInputPartition`        | `MilvusRowPartitionReader` with `V2ColumnBinding` |
 
 Both sources can coexist (mixed-version snapshot).
 
@@ -82,17 +87,22 @@ mode. See the "Client-mode V2 dispatch" task tracked separately.
 
 ---
 
-## Connector class / option map (post-rename, 2026-04-24)
+## Connector class / option map (2026-04-24 names; 2.0 locations added 2026-09-24)
+
+Paths are the 1.x layout. In 2.0, `read/…` is `spark-base`'s `spark.read`
+(`com.zilliz.spark.connector.read`), `manifest/…` is `core.manifest`,
+`ParquetFooterReader` and `FooterV2SegmentResolver` are in `compat`,
+`write/…` is `spark.write` over `core.write.exec`, and `operations/backfill/…` is
+`apps.backfill` in `apps-4.0`.
 
 | Symbol                                 | Handles            |
 |----------------------------------------|--------------------|
-| `read/MilvusV3InputPartition`   | V3 (loon manifest) |
-| `read/MilvusV2InputPartition`    | V2 (non-manifest)  |
+| `read/MilvusInputPartition` (1.x had `MilvusV3InputPartition` and `MilvusV2InputPartition`) | V3 and V2; one partition class carries a `ReadPlan` task |
 | `read/MilvusRowPartitionReader`  | V3 and V2; `V3ColumnBinding` / `V2ColumnBinding` supply the column names |
 | `manifest/SnapshotSegmentReader` | Decodes the snapshot's per-segment AVRO records; produces `SnapshotSegmentEntry` with inner `storageVersion` field (can be 0/2/3 — 2 is then fed into `FooterV2SegmentResolver`; 3 is exposed via `storagev2_manifest_list`; 0 is V1 and not supported for backfill) |
-| `read/ParquetFooterReader`       | Reads `storage_version`/`group_field_id_list`/`row_group_metadata` from parquet footer KV (used only for V2 — V3 learns the same info from the loon manifest) |
-| `read/FooterV2SegmentResolver`                 | Turns `SnapshotSegmentEntry` + parquet footer into a `V2SegmentInfo` |
-| `read/V2SegmentInfo` / `V2ColumnGroup` | V2 runtime view    |
+| `compat/ParquetFooterReader` (1.x `read/`) | Reads `storage_version`/`group_field_id_list`/`row_group_metadata` from parquet footer KV (used only for V2 — V3 learns the same info from the loon manifest) |
+| `compat.v2/FooterV2SegmentResolver` (1.x `read/`) | Turns `SnapshotSegmentEntry` + parquet footer into a V2 `Segment` |
+| `core.snapshot/Segment.v2` / `V2ColumnGroup` (1.x `read/V2SegmentInfo`, merged into `Segment`) | V2 runtime view    |
 | `write/MilvusV3Writer`               | V3 writer (FFI transaction) |
 | `write/MilvusV2Writer`           | V2 writer (direct `AvroParquetWriter` per field) |
 | `operations/backfill/V2SegmentArtifact` | V2 backfill output, consumed to patch snapshot AVRO |
@@ -100,7 +110,7 @@ mode. See the "Client-mode V2 dispatch" task tracked separately.
 | JSON wire key `storagev2_manifest_list` | V3 manifest list — wire name is historical, frozen |
 | JSON wire key `manifest_list`            | Per-segment AVRO paths (V1 or V2) |
 | Spark option `milvus.snapshot.manifests` | Serialized `Seq[ManifestItemJson]` — i.e. V3 |
-| Spark option `milvus.snapshot.v2.segments` | Serialized `Seq[V2SegmentInfo]` — i.e. V2 |
+| Spark option `milvus.snapshot.v2.segments` | Serialized V2 segment list (`SegmentListJson`; 1.x `Seq[V2SegmentInfo]`) — i.e. V2 |
 
 ---
 

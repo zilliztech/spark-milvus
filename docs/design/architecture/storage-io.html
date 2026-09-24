@@ -137,7 +137,7 @@ JVM 有现成解析器,文件又小,拷进来最省事。列数据量大,拷一�
 
 <p>删除日志走交字节这一面,但读出来的是真实的主键和时间戳值,不是元数据。
 它在这一侧的原因是格式是 parquet 而解析在 JVM(<code>core.delete.DeltaLogReader</code>),
-并且它在 driver 上读,一个段一份,量可控。</p>
+并且它在 executor 上由 <code>core.read.exec.DeletePlans</code> 按任务读取,driver 上的 <code>DeleteFileListing</code> 只列出路径与条数。</p>
 
 <h2 id="arrow">二、地址这一面怎么交接</h2>
 
@@ -237,7 +237,7 @@ Spark 的 <code>ColumnarBatch</code> 没有表达行有效性的成员(3.5.5 与
 
 <h2 id="metrics">五、指标:这条通路上量什么(G5)</h2>
 
-<p class="thesis"><strong>一条 Spark 任务读一个段,报七个数;写一个段,报四个数。全部由句柄自己记,任务结束时经
+<p class="thesis"><strong>一条 Spark 任务读一个段,报八个数(七个 sum、一个 max);写一个段,报五个数。指标名带 <code>milvus.</code> 前缀。全部由句柄自己记,任务结束时经
 DataSource V2 的 <code>CustomTaskMetric</code> 交给 Spark,在 SQL 页的算子节点上可见。</strong>
 没有这些数,README 第 1 节「6 次拷贝降到 2 次」和 2.4 的批大小、off-heap 预算(G3)都量不出来。</p>
 
@@ -252,14 +252,15 @@ DataSource V2 的 <code>CustomTaskMetric</code> 交给 Spark,在 SQL 页的算�
 <tr><th>数</th><th>读 / 写</th><th>在哪取</th><th>回答什么问题</th></tr>
 <tr><td><code>jni.calls</code>、<code>jni.nanos</code></td><td>读、写</td><td>JVM 侧,包装类在每次 上游 JNI 调用前后取 <code>System.nanoTime</code></td><td>跨界多少次、花了多久;按批跨界所以次数应等于批数加常数</td></tr>
 <tr><td><code>arrow.batches</code>、<code>arrow.bytes</code></td><td>读、写</td><td>JVM 侧,导入(读)或导出(写)时对 <code>VectorSchemaRoot</code> 每个向量的 <code>getBufferSize</code> 求和</td><td>吞吐:交接过界的 Arrow 字节数,除以 <code>jni.nanos</code> 就是通路带宽</td></tr>
-<tr><td><code>copies</code>、<code>copied.bytes</code></td><td>读</td><td>C 侧,<code>recordBatchReaderReadNext</code> 里每次 <code>arrow::Concatenate</code> 记一次和它的字节数;JVM 经 <code>recordBatchReaderStats(handle)</code> 取回</td><td>2.5 那个过渡实现今天到底拷了多少;上游导出 <code>loon_record_batch_reader_*</code> 后这两个数应归零</td></tr>
+<tr><td><code>copies</code>、<code>copied.bytes</code></td><td>读</td><td>C 侧,<code>recordBatchReaderReadNext</code> 里每次 <code>arrow::Concatenate</code> 记一次和它的字节数;JVM 经 <code>recordBatchReaderStatsScala(handle)</code> 取回</td><td>2.5 那个过渡实现今天到底拷了多少;上游导出 <code>loon_record_batch_reader_*</code> 后这两个数应归零</td></tr>
 <tr><td><code>rows.materialized</code></td><td>读</td><td>JVM 侧,行式 reader 每批结束时加上这批转成 <code>InternalRow</code> 的行数(触到的行减去按删除跳过的行);列式 reader 报 0,有删除的批经 <code>SelectedRowsColumn</code> 按下标映射,不转行</td><td>「6 次到 2 次」的 JVM 那一半:列式路径这个数为 0</td></tr>
 <tr><td><code>arrow.allocated.max</code></td><td>读、写</td><td>JVM 侧,<code>ArrowAllocator.get.getAllocatedMemory</code> 在每批之后取一次,记最大值;跨任务按 max 汇总,不按 sum</td><td>native 内存占用的可见部分,也是 G3 预算要卡的同一个数</td></tr>
 </table>
 
-<p><strong>切片批只重写偏移和位图。</strong>上游 JNI 逐批读取时,对带 offset 的列只调整缓冲区起点:定长列（数值、fixed_size_binary、fixed_size_list 的子数组）移动数据缓冲区起点并重建位图,
+<p><strong>切片批只重写偏移和位图(上游需求,未实现)。</strong>目标是上游 JNI 逐批读取时,对带 offset 的列只调整缓冲区起点:定长列（数值、fixed_size_binary、fixed_size_list 的子数组）移动数据缓冲区起点并重建位图,
 变长列（string、binary、list）只重写 offsets 缓冲区,数据缓冲区共享。这样 <code>copies</code> 与 <code>copied.bytes</code> 在切片批上只剩位图与偏移的大小,
-普通 collection 与 external collection 同样受益。这一项在上游 JNI 实现,见 README 第 5 节。</p>
+普通 collection 与 external collection 同样受益。当前 gitlink(storage <code>d287d05</code>)的 <code>cpp/src/jni/reader_jni.cpp</code>
+<code>loon_record_batch_reader_read_next</code> 对每个 offset 非 0 的列仍整列 <code>arrow::Concatenate</code> 一次并计入 <code>copies</code>;这一项列在 README 第 5 节的上游需求里,尚未落地。</p>
 
 <h3>5.2 两处量不到,写在前面</h3>
 
@@ -283,13 +284,13 @@ C 侧是 holder 里的一个整数自增。开关本身反而是一个 option、
 
 <h3>5.4 怎么到 Spark UI</h3>
 
-<p>读:<code>MilvusScan.supportedCustomMetrics</code> 声明七个 <code>CustomMetric</code>(六个 sum、一个 max),
+<p>读:<code>MilvusScan.supportedCustomMetrics</code> 声明八个 <code>CustomMetric</code>(七个 sum、一个 max),
 <code>MilvusRowPartitionReader</code> 与 <code>MilvusColumnarPartitionReader</code> 的 <code>currentMetricsValues</code>
 从 <code>SegmentReader.metrics</code> 取当前值;Spark 在任务结束时收走。写:<code>Write.supportedCustomMetrics</code> 加
-<code>DataWriter.currentMetricsValues</code>,从 <code>SegmentWriter.metrics</code> 取。四条 Spark 线(3.5 到 4.2)接口一致。
+<code>DataWriter.currentMetricsValues</code>,从 <code>SegmentWriter.metrics</code> 取,共五个。四条 Spark 线(3.5 到 4.2)接口一致。
 不做 Prometheus 之类的外部导出:Spark 已经把任务级指标聚到 SQL 页和事件日志里,再导一遍是第二条路。</p>
 
-<p>统一搜索入口落地后，搜索的两个阶段不经过扫描，读取与 Knowhere 的计数累加到 <code>milvus.search.*</code> 累加器（<a href="vector-search.html#execution">vector-search.html 2.1</a>）。在那之前，索引查询在过滤扫描和命中行回表时分别打开 <code>SegmentReader</code>。这两个 reader 的最终指标必须传回同一个 <code>MilvusRowPartitionReader</code>，不能因为其普通扫描 reader 未打开就上报零。计数、耗时和字节数相加，allocator 高水位取最大值；显式无索引回退按同一规则汇总。这里统计 storage JNI 与 Arrow 交接，Knowhere 搜索耗时仍由索引执行记录。</p>
+<p>统一搜索入口落地后，搜索的两个阶段不经过扫描，读取与 Knowhere 的计数累加到 <code>milvus.search.*</code> 累加器（<a href="vector-search.html#execution">vector-search.html 2.1</a>）。命中行回表在 <code>SearchTake</code> 里用独立的 <code>ArrowAllocator.forSearchTask</code>，不经过 <code>MilvusRowPartitionReader</code>，后者已没有索引查询路径。这里统计 storage JNI 与 Arrow 交接，Knowhere 搜索耗时仍由索引执行记录。</p>
 
 <h3>5.5 类型放哪</h3>
 
@@ -299,8 +300,8 @@ C 侧是 holder 里的一个整数自增。开关本身反而是一个 option、
 <li><code>spark.metrics</code>:把它们翻成 <code>CustomMetric</code> / <code>CustomTaskMetric</code>,读写两张清单,只此一处;<code>spark.read</code> 的两个 reader 和 <code>spark.write</code> 的 DataWriter 只是取值上报。每个指标一个无参构造的类:driver 的 SQL 监听器按计划里记下的类名新建实例来聚合任务值,带参构造的类在这一步报错,SQL 页上就没有数(2026-09-16 UAT 发现)。</li>
 </ul>
 
-<p>验收在工作单 #01:core 里用本地后端读一个已知段,断言七个数落在预期范围;UAT 读 3000 行的段,
-SQL 页上看到这七个数。</p>
+<p>验收在工作单 #01:core 里用本地后端读一个已知段,断言八个数落在预期范围;UAT 读 3000 行的段,
+SQL 页上看到这八个数(<code>MetricsTest</code> 断言声明数与 <code>ScanMetrics.supported</code> 一致)。</p>
 
 <h2 id="upstream-jni">六、JNI 统一由 milvus-storage 提供</h2>
 
@@ -318,7 +319,7 @@ SQL 页上看到这七个数。</p>
 
 <h2 id="state">七、现在到哪一步</h2>
 
-<p><strong>2026-09-17 当前源码状态：</strong>milvus-storage 子模块已更新到上游 <code>main</code> 的 <code>7eb13578</code>，Knowhere 已作为根目录子模块固定到 PR #1829 分支的 <code>1fff20db</code>。当前组合尚未重建。下面的统一包、Connector 和真实 UAT 结果来自 storage <code>5689301</code> 与 Knowhere <code>9dc2b8ad</code>，只作为历史证据。</p>
+<p><strong>2026-09-17 历史状态：</strong>当时 milvus-storage 子模块更新到上游 <code>main</code> 的 <code>7eb13578</code>，Knowhere 作为根目录子模块固定到 PR #1829 分支的 <code>1fff20db</code>，该组合未重建。当前 gitlink 为 storage <code>d287d05</code>、Knowhere <code>b9497f4f</code>，见下表「当前 gitlink 组合」行。下面的统一包、Connector 和真实 UAT 结果来自 storage <code>5689301</code> 与 Knowhere <code>9dc2b8ad</code>，只作为历史证据。</p>
 
 <p><strong>旧 gitlink、旧构建实现的完整结果：</strong>storage <code>5689301</code> 与 Knowhere <code>9dc2b8ad</code> 由独立 CMake 和一张 Conan 依赖图构建；该实现用仓库内完整自有 recipe 处理 Folly、gRPC、milvus-common、OpenTelemetry，现已由固定上游 recipe revision 与 CMake 显式链接关系取代。旧 Cardinal 构建以 <code>phase=complete</code>、退出码 0 完成；原生辅助测试 63/63、Knowhere C API 3/3、164/164 个库审计和 5 个立即加载入口通过，bundle 含 164 个库与 173 个版本名别名。该旧实现还曾在没有复用 lock 的目录从源码重建四个自有 recipe 包，再复用生成的完整 lock。</p>
 

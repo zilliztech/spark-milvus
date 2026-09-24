@@ -14,19 +14,19 @@
 | 模块 | 层 | 包名 | 依赖 | 产物 |
 |---|---|---|---|---|
 | native-runtime | 第 1 层 | `com.zilliz.milvus.jni.runtime` | Java 11，无 Spark、Arrow、JNI API 依赖 | `com.zilliz:spark-milvus-native-runtime`，共享原生清单校验和解压；统一平台 JAR 作为资源依赖传递 |
-| native-storage | 第 1 层 | 上游 `io.milvus.storage`、`com.zilliz.milvus.jni.storage` | native-runtime、固定 milvus-storage 子模块的 Java/Scala 绑定、Arrow（provided）及统一平台包内的 C/JNI 库 | `com.zilliz:spark-milvus-native-storage_<scala>`，编译上游 API，并把共享目录中的 JNI 绝对路径显式交给上游加载器；没有显式统一包的平台才保留旧 `native/{os}-{arch}/` 资源入口 |
-| native-vector | 第 1 层 | `com.zilliz.milvus.jni.vector` | native-runtime、固定 Knowhere 子模块的 Java API，以及统一平台包内的 JNI 产物 | `com.zilliz:spark-milvus-native-vector`；统一包使用共享目录，上游加载器执行原生加载；没有显式统一包时旧独立产物仍沿用上游 `native/knowhere/1/<platform>/` 布局 |
+| native-storage | 第 1 层 | 上游 `io.milvus.storage`、`com.zilliz.milvus.jni.storage` | native-runtime、固定 milvus-storage 子模块的 Java/Scala 绑定、Arrow（provided）及统一平台包内的 C/JNI 库 | `com.zilliz:spark-milvus-native-storage_<scala>`，编译上游 API，并把共享目录中的 JNI 绝对路径显式交给上游加载器；不携带任何 `native/` 资源目录（build.sbt 在该目录存在时直接让构建失败），未选统一包时依赖上游加载器自身的打包资源与系统库回退 |
+| native-vector | 第 1 层 | `com.zilliz.milvus.jni.vector` | native-runtime、固定 Knowhere 子模块的 Java API，以及统一平台包内的 JNI 产物 | `com.zilliz:spark-milvus-native-vector`；统一包使用共享目录，上游加载器执行原生加载；独立 Knowhere 产物及其 `native/knowhere/1/<platform>/` 布局已随 d5b0897 从构建中删除，未选统一包时同样依赖上游加载器自身的回退 |
 | core | 第 2 层 | `com.zilliz.milvus.storage` | native-storage、native-vector、Arrow（provided）、milvus-proto 的消息类；`hadoop-common` 只为 parquet-mr 的签名在编译类路径上，代码里不用 | `com.zilliz:spark-milvus-core_<scala>` |
 | compat | 第 2 层 | `com.zilliz.milvus.storage.compat` | core | `com.zilliz:spark-milvus-compat_<scala>` |
 | client | 第 2 层 | `com.zilliz.milvus.client` | core、ScalaPB、gRPC；带 service 的 proto 在这里生成 | `com.zilliz:spark-milvus-client_<scala>` |
 | spark-base | 第 3 层 | `com.zilliz.spark.connector` | 不是 sbt project，是四条线引用的源码目录 | 无 |
 | spark-3.5 / 4.0 / 4.1 / 4.2 | 第 3 层 | 同上 | spark-base 的源码 + 本线专属目录；core、compat、client；本线 Spark 为 provided | `com.zilliz:spark-milvus-<line>_<scala>` |
-| apps | 第 4 层 | `com.zilliz.spark.connector.apps` | 一条线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`：fat jar。只在云上跑的那条线上建；只有一个消费者，源码直接放在这条线的目录里，不设共享 base |
+| apps | 第 4 层 | `com.zilliz.spark.connector.apps` | 一条线的 spark 模块 | `com.zilliz:spark-milvus-apps-<line>_<scala>`，随根项目的 assembly 打进 fat jar（apps40 自身无 assembly 设置）。只在云上跑的那条线上建；只有一个消费者，源码直接放在这条线的目录里，不设共享 base |
 | integration | 测试 | | 一条线的 spark 与 apps 模块；需 MinIO 和 Milvus | 不发布。Spark 线跑一条，存储后端做成参数化的 fixture 整体重跑（本地、MinIO、S3、OSS、COS、OBS） |
 
 展开后 12 个 sbt project：native 三个、core、compat、client、spark 四条线、apps 一个、integration 一个。交叉编译由 `crossScalaVersions` 控制，不增加 project 数。
 
-只有 spark 必须按线拆：`TableCatalog` 与 `ParserInterface` 的方法集有差异，Arrow、antlr、Java 目标版本也按线定。fat jar 不单独成模块，assembly 是 spark-`<line>` 上的一个任务；apps 和 integration 各只建一个，加线是加一行配置。
+只有 spark 必须按线拆：`TableCatalog` 与 `ParserInterface` 的方法集有差异，Arrow、antlr、Java 目标版本也按线定。fat jar 不单独成模块，assembly 是 spark-`<line>` 上的一个任务；过渡期可用的 fat jar 仍是根项目的 assembly（`spark-connector-assembly-*.jar`），按线任务只设了 jar 名，尚无合并与 shading 规则；apps 和 integration 各只建一个，加线是加一行配置。
 
 Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；native-storage、core、compat、client、spark-base 交叉编译两个版本；apps 和 integration 跟随所在线。
 
@@ -42,24 +42,24 @@ Scala：3.5 线出 2.12 和 2.13，4.x 线只出 2.13；native-storage、core、
 |---|---|---|
 | `snapshot` | 列快照目录，选快照，把 JSON 和 Avro 变成实体；SnapshotSource 接口；`Snapshot` 是 Milvus 快照，将演进为所有输入共用的 `TableVersion`，Milvus 字段成为它的 Milvus 私有部分（决策 25，见 [table-version.html](table-version.html)） | SnapshotCatalog、Snapshot、Segment、CollectionIndex、SegmentIndex、SegmentIndexes、V2ColumnGroup、DeltaLogFile、SnapshotSource |
 | `snapshot.json` | 快照 JSON 文件的形状，一个 JSON 对象一个类型，名字带 `Json` 后缀；只描述不计算 | SnapshotJson、CollectionSchemaJson、FieldJson、SegmentJson、ManifestItemJson、SegmentListJson（option 串里的段列表，随 1.x option 读法一起删） |
-| `manifest` | 一个段的 Manifest：列组、删除文件、统计、索引登记 | Manifest、ColumnGroup、ManifestReader |
+| `manifest` | 一个段的 Manifest：列组、删除文件、统计、索引登记 | SnapshotSegmentReader、SnapshotSegmentWriter（快照的 Avro 段记录）、SnapshotSegmentEntry、IndexFileEntry、V3ManifestReader（milvus-storage 的 `_metadata/manifest-N.avro`）；Manifest、ColumnGroup、ManifestReader 为设计名，未写 |
 | `schema` | 字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；不含 Spark 类型；向量布局（元素类型与维度）由 spark.types 与 index 共用；外表源类型的合法性规则待 R20 | SchemaMapper、MilvusTypes、ArrowTypes、FieldMetadata、VectorLayout |
 | `path` | 三种路径形态到 (bucket, key) | StoragePath、Located |
-| `io` | 对象存储读写的最小接口和它唯一的实现（走 C 的 `loon_filesystem_*`） | ObjectStore、ObjectStoreFactory、NativeObjectStore、FileInfo |
-| `codec` | 列值与 Milvus binlog 共同封装的字节编解码，文件访问归 io；索引文件的编码与解码共用一份格式定义（IndexFileCodec、MilvusIndexFileDecoder 已从 index 移入；编码随 W6 待实现） | FloatConverter、SparseFloatVectorConverter、BinlogCodec、IndexFileCodec、MilvusIndexFileDecoder（从 DeltaLogReader 提取，删除及索引复用） |
-| `credential` | 对象存储凭证的取用和下发 | Credentials、CredentialSource |
+| `io` | 对象存储读写的最小接口和它唯一的实现（走 C 的 `loon_filesystem_*`） | ObjectStore、ObjectStoreFactory、NativeObjectStore、FileInfo、ConcurrentRangeReads（决策 31） |
+| `codec` | 列值与 Milvus binlog 共同封装的字节编解码，文件访问归 io；索引文件的编码与解码共用一份格式定义（IndexFileCodec、MilvusIndexFileDecoder 已从 index 移入；W6 的编码在 SegmentIndexObjects） | FloatConverter、SparseFloatVectorConverter、ArrayCodec、BinlogCodec、IndexFileCodec、IndexFileDecoder、MilvusIndexFileDecoder（从 DeltaLogReader 提取，删除及索引复用）、SegmentIndexObjects（W6 索引对象编码）、VectorIndexFamilies |
+| `credential` | 对象存储凭证的取用和下发 | StorageProperties（`fs.*` / `extfs.<name>.*` 属性表校验）；Credentials、CredentialSource 为设计名，未写 |
 | `expr` | R7 的手写 Milvus 标量文法与名称绑定求值；R6 的字段 id / 类型绑定表示、三值逻辑与 Arrow 列批位图 | R7：Expr、PlanParser、Evaluator，普通表 `milvus.filter` 与向量查询共用；R6：PredicateExpr、PredicateEvaluator、Bitmap。Spark V2 Predicate 翻译和固定快照字段绑定归第 3 层；JSON/Array 语义受开放决策 23 阻塞 |
-| `delete` | 删除文件解码，按行号置位 | DeleteBitset、DeltaLogDecoder |
+| `delete` | 删除文件解码，按行号置位 | DeletePlan、DeltaLogReader；DeleteBitset、DeltaLogDecoder 为设计名，未写 |
 | `stats` | 段统计：写侧的主键 bloom filter，读侧的保守剪枝 | PrimaryKeyStats、BlockedBloomFilter（blobloom 的逐位移植，#15）、PrimaryKeyFilter、PrimaryKeyBloomPruner（R9/R18 段级）；R10 row-group min/max 仍等仓库外依赖 |
-| `read.plan` | 分区规划，纯 JVM，可序列化 | SegmentReadTask、SegmentLayout、DeleteSource、ReadPlan、DeleteFileListing：`DeleteFileListing.of` 在 driver 上列删除文件（V3 段要开 manifest），`ReadPlan.of` 把 Snapshot 变成任务列表，任务带 `DeleteSource.Files`（#12、#13）。分区规划已下沉；一段一分区之外的第二种切法只等待 R19（决策 19） |
-| `read.exec` | 批读取、行号取列、出口；碰 native。向量搜索里是 Milvus TableFormat 的执行一侧：逐批交出向量缓冲、排除位图与起始行号，交出段的索引句柄 | SegmentReader、SegmentReaderRegistry、TakeResult、RowExclusions、SegmentVectors、SegmentIndexHandle；take 包装 loon_take，接收有序唯一行号。列式出口的 Spark 类型归第 3 层，进 core 的仍是 VectorSchemaRoot |
-| `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter（V3SegmentWriter、V2SegmentWriter）、WrittenColumnGroups、ManifestTransaction、StagingLayout |
-| `write.commit` | 作业清单、所有权、心跳、提交、幂等，以及 A7 的 fail-closed 候选审计与文件删除；完整目录删除等待原生 API；写快照 JSON 与段 Avro 清单供 Milvus 外部恢复（W8 待实现），索引记录随清单（W6） | JobManifest、Committer、StagingCleaner |
-| `index` | 只含计算：搜索规划（段组与查询组）、段内执行器（精确扫描在向量批上、索引探查在索引句柄上，输入一组查询，按查询有界 TopK）、Arrow 数据缓冲到 Knowhere 缓冲的适配、段索引构建 | SegmentSearch（ExactScan、IndexProbe、hold）、SearchPlan、TopKMerger、QueryMatrix、KnowhereBuffers；索引来源随 Snapshot 固定，任务独占并关闭。IndexWriter 待实现；打开段、排除位图和索引文件的读取与解码归 Milvus 的 TableFormat 一侧（read.exec、delete、expr、codec），计算不打开存储，见 [vector-search.html 第一、二节](vector-search.html#overall) |
+| `read.plan` | 分区规划，纯 JVM，可序列化 | SegmentReadTask、ReadLimits、SegmentLayout、DeleteSource、ReadPlan、DeleteFileListing：`DeleteFileListing.of` 在 driver 上列删除文件（V3 段要开 manifest），`ReadPlan.of` 把 Snapshot 变成任务列表，任务带 `DeleteSource.Files`（#12、#13）。分区规划已下沉；一段一分区之外的第二种切法只等待 R19（决策 19） |
+| `read.exec` | 批读取、行号取列、出口；碰 native。向量搜索里是 Milvus TableFormat 的执行一侧：逐批交出向量缓冲、排除位图与起始行号，交出段的索引句柄 | SegmentReader、SegmentReaderRegistry、DeletePlans、ReadMetrics、TakeResult、RowExclusions、SegmentVectors、SegmentIndexHandle、IndexRowMapping；take 包装 loon_take，接收有序唯一行号。列式出口的 Spark 类型归第 3 层，进 core 的仍是 VectorSchemaRoot |
+| `write.exec` | 段写出、暂存布局；碰 native | SegmentWriter（V3SegmentWriter、V2SegmentWriter）、ColumnGroupSplit、WrittenColumnGroups、ManifestTransaction、StagingLayout、WriteMetrics |
+| `write.commit` | 作业清单、所有权、心跳、提交、幂等，以及 A7 的 fail-closed 候选审计与文件删除；完整目录删除等待原生 API；写快照 JSON 与段 Avro 清单供 Milvus 外部恢复（W8，已实现，`write_snapshot` / `restore_snapshot` 2026-09-20 落地；SnapshotBundle 按根规则核对路径），索引记录随清单（W6） | JobManifest、CommittedSegment、CommittedIndex、Committer、Registration、StagingCleaner、SnapshotWriter、SnapshotBundle |
+| `index` | 只含计算：搜索规划（段组与查询组）、段内执行器（精确扫描在向量批上、索引探查在索引句柄上，输入一组查询，按查询有界 TopK）、Arrow 数据缓冲到 Knowhere 缓冲的适配、段索引构建 | SegmentSearch（ExactScan、IndexProbe 及其 Pipeline、Prefetcher、hold）、SearchPlan、TopKMerger、CandidateBytes、QueryMatrix、KnowhereBuffers、MachineResources、IndexWriter（W6，经 `build_index` 过程调用）；索引来源随 Snapshot 固定，任务独占并关闭。打开段、排除位图和索引文件的读取与解码归 Milvus 的 TableFormat 一侧（read.exec、delete、expr、codec），计算不打开存储，见 [vector-search.html 第一、二节](vector-search.html#overall) |
 
 ### 2.2 compat `com.zilliz.milvus.storage.compat`
 
-三个适配器实现 core 的接口，由 spark 层在启动时注册进 core 的注册表；core 源码不出现 compat 的包名。
+两个适配器实现 core 的接口，由 spark 层在启动时注册进 core 的注册表；core 源码不出现 compat 的包名。根包的 ParquetFooterReader、ObjectStoreInputFile 为两者共用；option 串里的段列表由 spark.options 的 OptionStringsSnapshotSource 解析，不在 compat。
 
 | 包 | 职责 |
 |---|---|
@@ -100,7 +100,7 @@ C 接口、JNI native 方法、`io.knowhere` Java API 和原生资源加载器�
 本模块以 Java 11 编译，不依赖 Spark 或 Arrow，不重复定义 native 方法、提取器或 C++ shim。
 `src/main/cpp/README.md` 记录原生代码的上游归属，Connector 中不保留第二份实现。
 exact 模式经 core.index.ExactScan 调用上游 BruteForce，一次调用算一批向量对整组查询。建索引（W6）调用同一上游的 build 与 serialize；搜索和建索引线程池的大小等上游接口开放后在本模块设置。索引入口经 NativeVectorIndex 调用同一上游的 BinarySet、deserialize、search；不新增 Knowhere JNI。文件格式在 core 解释，Cardinal stream 要求经过特性校验的 WITH_CARDINAL 构建。
-Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 BinarySet key 分开。统一平台包的 provenance 生成 `META-INF/milvus/knowhere-runtime.properties`，并由 native-runtime 校验两个 JNI、全部依赖、别名和摘要后一次解压；迁移前的独立产物组合及其 `storage-compatibility*.properties` 已从构建中删除。旧 gitlink、旧自有 Conan recipe 实现的 Cardinal 组合曾通过真实 HNSW/COSINE 查询；当前构建使用固定上游 recipe revision 与 CMake 显式链接，子模块 revision 尚待重建，结果及验收边界见 [native-build/README.md](../../../native-build/README.md) 以及 [向量搜索第 2.9 节](vector-search.html#interop)。
+Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 BinarySet key 分开。统一平台包的 provenance 生成 `META-INF/milvus/knowhere-runtime.properties`，并由 native-runtime 校验两个 JNI、全部依赖、别名和摘要后一次解压；迁移前的独立产物组合及其 `storage-compatibility*.properties` 已从构建中删除。旧 gitlink、旧自有 Conan recipe 实现的 Cardinal 组合曾通过真实 HNSW/COSINE 查询；当前构建使用固定上游 recipe revision 与 CMake 显式链接，linux-x86_64 统一包已按当前 gitlink（storage `d287d05`、Knowhere `b9497f4f`）于 2026-09-23 重建并复测 UAT 查询，结果及验收边界见 [native-build/README.md](../../../native-build/README.md) 以及 [向量搜索第 2.9 节](vector-search.html#interop)。
 绑定本身的接口、内存所有权、与核心和 Connector 的能力对照以及线程模型见 [Knowhere JNI 实现方案](knowhere-jni.html)。
 
 ### 2.5 client `com.zilliz.milvus.client`
@@ -116,15 +116,15 @@ Faiss 与 Cardinal 的选择依据 payload 标识，实际引擎注册名与 Bin
 |---|---|---|
 | `catalog` | MilvusCatalog：TableCatalog 与 SupportsNamespaces；database 是唯一一层 namespace，collection 是 table；目录发现、三段名与 loadTable 快照重载属 C1/R1/R2，schema/属性校验后创建 collection 与向量索引、确认存在后删除 collection 属 C2；namespace 变更及 table alter/rename 不支持 | 主体在 base，按线只留公开类与 createTable 输入适配 |
 | `table` | MilvusTables 统一校验并解析固定 Snapshot，供 DataSource 与 Catalog 构造 MilvusTable；MilvusTable 算 schema、能力集、元数据列并把 Snapshot 交给 scan | 否 |
-| `read` | ScanBuilder、Scan、Batch、InputPartition、ColumnarPartitionReader、ColumnVector 实现；向量搜索的统一入口 MilvusSearch（任务划分由 core.index 的 SearchPlan 完成，这里只传入 executor 数并包装分区）：查询集广播或分块、按 query_id 有界聚合、全局合并后按 (段 id, 行号) 回表。包名与 `write` 和 `core.read` 对称，类名沿用 Spark 的 Scan | 否 |
+| `read` | ScanBuilder、Scan、Batch、InputPartition、ColumnarPartitionReader、ColumnVector 实现；向量搜索的统一入口 MilvusSearch（任务划分由 core.index 的 SearchPlan 完成，这里只传入 executor 数并包装分区）：查询集三种下发——Parquet 查询文件由搜索任务直接按行组解码（QueryFiles，`milvus.search.queries.direct` 默认开，2026-09-24）、整体广播、或按组打包进 shuffle（SearchQueries、SearchQueryRanges）；SegmentSetSearch 跑一个段组，候选按 query_id 有界聚合，全局合并后 SearchTake 按 (段 id, 行号) 回表；SearchProgress、LimitedReaders、BatchFilterEvaluator、MetadataColumns、SnapshotPartitions 为读路径共用。包名与 `write` 和 `core.read` 对称，类名沿用 Spark 的 Scan | 否 |
 | `expr` | DataSource V2 Predicate 到 `PredicateExpr` 的翻译；每个不完整支持的谓词树作为 residual 交还 Spark | 否 |
 | `types` | Arrow 类型到 Spark 类型的映射，向量列的 Spark 表示 | 否 |
 | `write` | WriteBuilder、BatchWrite、DataWriterFactory、DataWriter；append 与 backfill 模式（truncate、overwrite 不做，能力表第 10 节） | 否 |
 | `metrics` | core 的 ReadMetrics / WriteMetrics 翻成 DataSource V2 的 CustomMetric / CustomTaskMetric，读写各一张清单；G5 | 否 |
-| `options` | option 名、别名、校验；ReadMode；按 ReadMode 构造这次读的 SnapshotSource（SnapshotSources，含 ClientSnapshotSource、OptionStringsSnapshotSource，把 compat 的 backup 实现和 V2 footer 解析器接进 core）；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageKeys） | 否 |
+| `options` | option 名、别名、校验；ReadMode；按 ReadMode 构造这次读的 SnapshotSource（SnapshotSources，含 ClientSnapshotSource、OptionStringsSnapshotSource，把 compat 的 backup 实现和 V2 footer 解析器接进 core）；`fs.*` 到桶、Hadoop 配置和 driver 侧 ObjectStore 的翻译（StorageOptions、HadoopStorageKeys）；OptionParsing、V2SegmentResolvers，以及搜索的资源与上限选项（SearchLimits、SearchResources、TaskResources） | 否 |
 | `sources` | 只有 MilvusDataSource，`format("milvus")` 的 TableProvider。留在这个包名下是因为 apps 和用户作业按字符串引用它的全名 | 否 |
 | `procedure` | 过程体：`Procedure` 接口（参数表、结果表、driver 上的 `run`）、静态注册表、共用的 collection/client/有界等待规则；已实现快照、索引、load/release/flush/compact、describe、backfill `Register`，以及 A7 的 `CleanupStagingProcedure`；节点和策略在 `extensions`，append 登记与完整目录删除尚未实现；`build_index`（W6）另起 Spark 作业建索引，`write_snapshot`（W8 的写文件一半）写出快照并在规划期拒绝无法恢复的输出前缀，`restore_snapshot` 经同一条根规则核对后调 Milvus 的外部快照恢复、可选等待作业 | 否 |
-| `extensions` | SparkSessionExtensions、`CALL milvus.system.<name>(...)` 的解析器扩展、CallProcedure 节点与策略；文法 `spark-base/src/main/antlr4/MilvusCall.g4` 一份，设计见 procedure.html | antlr 生成的解析器按线（本线 antlr 版本），`MilvusSqlParser` 适配器按线（4.0 起多 `parseRoutineParam`）；其余共享 |
+| `extensions` | SparkSessionExtensions、`CALL milvus.system.<name>(...)` 的解析器扩展、CallBuilder、CallProcedure 节点与策略；MilvusSparkPlugin：`spark.plugins` 执行器插件，启动即加载原生包（2026-09-24）；文法 `spark-base/src/main/antlr4/MilvusCall.g4` 一份，设计见 procedure.html | antlr 生成的解析器按线（本线 antlr 版本），`MilvusSqlParser` 适配器按线（4.0 起多 `parseRoutineParam`）；其余共享 |
 
 按线的还有 `META-INF/services` 资源。
 
@@ -154,25 +154,28 @@ spark-milvus/
   native-runtime/                  共享原生清单校验和解压
   native-storage/
     src/main/java/                 NativeStorageLibrary 显式路径交接
-    src/main/resources/native/     未选择统一包时保留的旧平台资源入口；统一包模式从 classpath 排除
+    src/main/cpp/                  上游 JNI 归属说明，代码由 milvus-storage 提供
+    src/main/resources/            为空；出现 native/ 子目录时 build.sbt 让构建失败（2026-09-24 决策）
     target/scala-*/src_managed/     上游 Java/Scala 源码的生成副本
   native-vector/
     src/main/java/                 com.zilliz.milvus.jni.vector
     src/main/cpp/                  上游 C/JNI 归属说明，代码由 Knowhere 提供
   core/
-    src/main/scala/com/zilliz/milvus/storage/{snapshot,manifest,schema,path,credential,expr,delete,stats,read,write,index}
-    src/main/antlr4/               空目录说明；R7 解析器按第 4 节第 8 条手写
+    src/main/scala/com/zilliz/milvus/storage/{snapshot,snapshot/json,manifest,schema,path,credential,io,codec,expr,delete,stats,read/plan,read/exec,write/exec,write/commit,index}
+    src/main/antlr4/               只有 README；R7 解析器按第 4 节第 8 条手写，不放文法
     src/main/resources/            段清单的 Avro schema
-  compat/src/main/scala/com/zilliz/milvus/storage/compat/{v2,backup}
+  compat/src/main/scala/com/zilliz/milvus/storage/compat/{v2,backup}，根包放 ParquetFooterReader、ObjectStoreInputFile
   client/
     src/main/scala/com/zilliz/milvus/client/{grpc,api}
-    src/main/protobuf/             milvus-proto 子模块的引用
-  spark-base/src/main/scala/com/zilliz/spark/connector/{catalog,sources,table,read,expr,types,write,options,procedure,extensions}
+    src/main/protobuf/             .gitkeep 占位；proto 源目录由 build.sbt 的 milvusProtoDir 直接指向 milvus-proto/proto
+  spark-base/
+    src/main/scala/com/zilliz/spark/connector/{catalog,sources,table,read,expr,types,write,options,metrics,procedure,extensions}
+    src/main/antlr4/MilvusCall.g4  CALL 文法一份，按线生成
+    src/main/resources/META-INF/services/  DataSourceRegister
   spark-3.5/src/main/{scala,resources}/  catalog、ParserInterface 适配、antlr 生成物、META-INF/services
   spark-4.0/  spark-4.1/  spark-4.2/     catalog、ParserInterface 适配、antlr 生成物、META-INF/services
   apps-4.0/src/main/{scala,resources}/   com.zilliz.spark.connector.apps.{backfill,search}
   integration-4.0/src/test/scala/  需要 MinIO 与 Milvus
-  src/                             1.x 的代码，按模块逐个迁走
   docs/design/                     设计文档
   docs/                            用户文档
 ```
@@ -188,7 +191,7 @@ spark-milvus/
 3. Arrow 版本由 spark-`<line>` 钉，与本线 Spark 自带的对齐（3.5 用 12.0.1，4.0 用 18.1.0，4.1 用 18.3.0，4.2 用 19.0.0）；core 与 native-storage 只按接口编译，`arrow-vector`、`arrow-memory-core`、`arrow-c-data`、`arrow-format` 全标 provided，实现由运行时的 Spark 提供，版本按 4.0 线取。Spark 的 patch 版取每条线最低的维护版，编译版本就是兼容下限。
 4. Java 目标版本按线：core、compat、client、native-* 钉 `-release 11`；spark-`<line>`、apps 按本线（3.5 用 11，4.x 用 17）。
 5. 交叉编译的模块统一 `import scala.jdk.CollectionConverters._`，加 `scala-collection-compat` 为 2.12 补齐，禁止 `scala.collection.JavaConverters`。
-6. fat jar 只 relocate protobuf 和 guava；`io.milvus.storage.**`、`com.zilliz.milvus.jni.**`、`io.knowhere.**` 和 `org.apache.arrow.**` 不 relocate，JNI 的导出符号已按包名编进 .so；`META-INF/services` 用 merge 策略。统一包由 native-runtime 校验并解压，上游加载器执行原生加载；旧独立 Knowhere 产物仍使用上游资源布局和提取逻辑。所需 JRE `libjsig` 在 JVM 启动前预加载，不能靠运行中的 Java 调用补齐。
+6. fat jar 只 relocate protobuf 和 guava；`io.milvus.storage.**`、`com.zilliz.milvus.jni.**`、`io.knowhere.**` 和 `org.apache.arrow.**` 不 relocate，JNI 的导出符号已按包名编进 .so；`META-INF/services` 用 merge 策略。统一包由 native-runtime 校验并解压，上游加载器执行原生加载；独立 Knowhere 产物及其资源布局已随 2026-09-24 决策从构建中删除。所需 JRE `libjsig` 在 JVM 启动前预加载，不能靠运行中的 Java 调用补齐。
 7. apps 的每个包能单独删除而不影响编译。
 8. SQL 扩展的语法文件放共享源码目录，每条线用本线的 antlr 版本各生成一份，antlr 运行时标 provided 用 Spark 自带的。core 里的 Milvus 表达式解析器不用 antlr：core 是跨线单产物，生成的解析器在 3.5 的 4.9.3 和 4.x 的 4.13.1 之间不通用。
 9. 打开段只有一个入口，凭证刷新在那里做；`core.read.exec` 与 `core.write.exec` 不得绕过它直接开文件。
@@ -204,7 +207,7 @@ spark-milvus/
 
 ## 5 1.x 到 2.0 的迁移对照
 
-2026-09-17 原生依赖迁移的构建与验证曾以 storage `5689301`、Knowhere `9dc2b8ad` 完成：native-runtime 供两个绑定共享解压；选择统一平台包时旧 storage/Knowhere 原生资源不参与 classpath。该旧构建实现使用固定上游 Conan recipe 和四份自有 recipe，Cardinal 包通过原生测试、完整动态库审计、三种 JVM 加载顺序、根测试、assembly 及真实十万行持久化索引查询。当前 gitlink 为 storage `7eb13578`、Knowhere `1fff20db`，构建改用 `native-build/dependencies.json` 固定全部上游 recipe revision，并在独立 CMake 中显式声明集成链接关系；旧结果只作为历史，新组合尚未重建。构建约束见第 4 节第 16 条及[独立 CMake 构建方案](../engineering/build.html)。
+2026-09-17 原生依赖迁移的构建与验证曾以 storage `5689301`、Knowhere `9dc2b8ad` 完成：native-runtime 供两个绑定共享解压；选择统一平台包时旧 storage/Knowhere 原生资源不参与 classpath。该旧构建实现使用固定上游 Conan recipe 和四份自有 recipe，Cardinal 包通过原生测试、完整动态库审计、三种 JVM 加载顺序、根测试、assembly 及真实十万行持久化索引查询。当前 gitlink 为 storage `d287d05`（Thor-ChenBiao fork，决策 31）、Knowhere `b9497f4f`，构建改用 `native-build/dependencies.json` 固定全部上游 recipe revision，并在独立 CMake 中显式声明集成链接关系；旧结果只作为历史，linux-x86_64 统一包已按当前 gitlink 重建（见 [build.html](../engineering/build.html) 状态块）。构建约束见第 4 节第 16 条及[独立 CMake 构建方案](../engineering/build.html)。
 
 41 个 1.x 源文件已经全部离开 `src/`，该目录不再存在。该迁移步骤只做归属，不改语义：
 文件搬到它该在的模块，包名跟目录对齐，调用点直接改指新位置，不留转发壳子。
@@ -229,14 +232,14 @@ spark-milvus/
 | read/MilvusV3PartitionReader.scala、MilvusPartitionReaderFactory.scala、MilvusInputPartition.scala、MilvusV2PartitionReader.scala | spark.read | 已搬。开段下沉 core.read.exec 的注册表；#06 两个行式 reader 合成 `MilvusRowPartitionReader`，两条线的列名规则归 `ColumnBinding`，列式出口是 `MilvusColumnarPartitionReader` |
 | serde/ArrowConverter.scala、ArrowAllocator.scala | spark.types | 已搬到 spark.types：它做的是 Arrow 值与 Spark InternalRow 的双向转换，就是 types 的职责。读路径由 ColumnVector 取代、写路径重写进 core.write.exec 是重构，未做 |
 | filter/VectorBruteForceSearch.scala | 已删除 | 2026-09-18 随查询集入口删除，连同 apps-4.0 的 `VectorBruteForceSearchTest`、`vector.search.*` 逐段入口（`SegmentVectorSearch`、`SegmentIndexSearch`、选项与中英文 reference 条目）和 core 的 `SegmentIndexQuery`、`PersistedIndexSearch`、`BruteForceSearch`；删除前核对过云上作业没有引用 |
-| issue #125 持久化向量查询 | core.index、core.expr、core.read.exec、spark.read、native-vector | RowExclusions 出排除位图，IndexFileCodec 支持 Milvus envelope/切片及 CARD 流，SegmentIndexHandle 交出索引句柄，IndexProbe 在句柄上搜索；SegmentReader.take 回表，MilvusSearch 构造全局 TopK。索引任务独占，无跨任务缓存；旧 gitlink 组合曾通过真实 Cardinal HNSW 查询，验收边界见 [存储 I/O 状态](storage-io.html#state)。当前两个原生子模块已更新，须重建后复验；旧 Knowhere DiskANN 结果仅描述 `9dc2b8ad` |
+| issue #125 持久化向量查询 | core.index、core.expr、core.read.exec、spark.read、native-vector | RowExclusions 出排除位图，IndexFileCodec 支持 Milvus envelope/切片及 CARD 流，SegmentIndexHandle 交出索引句柄，IndexProbe 在句柄上搜索；SegmentReader.take 回表，MilvusSearch 构造全局 TopK。索引任务独占，无跨任务缓存；旧 gitlink 组合曾通过真实 Cardinal HNSW 查询，验收边界见 [存储 I/O 状态](storage-io.html#state)。当前 gitlink 组合已于 2026-09-23 在 linux-x86_64 重建并复测 UAT 查询；旧 Knowhere DiskANN 结果仅描述 `9dc2b8ad` |
 | write/MilvusV3Writer.scala、MilvusV2Writer.scala | spark.write → core.write.exec | 已搬；#07 把 native 调用剥进 core.write.exec（V3SegmentWriter、V2SegmentWriter、ManifestTransaction），spark.write 的两个类只剩行到 Arrow 批和 Spark 接口；暂存路径由 StagingLayout 定；#08 起 MilvusV3BatchWrite 的 commit/abort 调 core.write.commit 的 Committer |
 | write/MilvusWriteBuilder.scala、MilvusBatchWriter.scala、MilvusDataWriterFactory.scala、MilvusInsertDataWriter.scala、MilvusFieldData.scala（原 MilvusUtil.scala） | 删除 | 2026-09-14 删除：gRPC Insert 是 1.x 的写路径（W7），2.0 不支持；MilvusFieldData 只剩集成测试造数据用，搬到 integration-4.0 的 testkit |
 | write/MilvusSparkNativeImportWriter.scala | 删除 | 已删，全仓零引用 |
 | operations/backfill/* | apps.backfill | 已迁，包名从 operations.backfill 改成 apps.backfill |
 | expressions/、extensions/ | apps.search | 已迁 |
-| tools/* | apps.tools | 已迁 |
-| src/test/**、src/it/** | 各模块的 src/test | 已迁。core 32、compat 43、client 20、spark-4.0 261、apps-4.0 212 个用例；integration-4.0 收 3 个集成用例 |
+| tools/* | 删除 | 68f64916（2026-09-14）随 1.x 接口一并删除（ListV2SegmentsApp、ReadSourceOnlyApp） |
+| src/test/**、src/it/** | 各模块的 src/test | 已迁。用例数随代码变动，以 CI 的 `sbt test` 为准；2026-09-24 测试源文件数为 core 64、compat 3、client 5、spark-4.0 72、apps-4.0 10，integration-4.0 4 个套件 |
 | milvus-storage/java 的 Java/Scala 绑定 | native-storage | 2026-09-16 改为编译固定子模块源码，支持 Scala 2.12/2.13；自有 StorageNative、C++ JNI 和加载器移除。filesystem、逐批读取/take、计数、manifest 释放及 transaction 扩展归上游。本次源码交叉编译、单元测试及真实运行结果见 [存储 I/O 验收状态](storage-io.html#state)。storage-access 原需求 7 已被此决策取代 |
 
 ### 5.1 搬运中暴露的事实

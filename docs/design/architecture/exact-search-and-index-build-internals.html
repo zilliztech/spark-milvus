@@ -152,13 +152,13 @@ while (start &lt; rows) {
 </ul>
 </li>
 <li><strong>块大小。</strong>base 块改成常量 32 MiB（<code>SearchResources.DefaultBatchBytes</code>）：入口内部自己按 4096 × 1024 分块，32 与 128 MiB 实测同速；之前按 L3 推块大小的公式是给逐行内核的。</li>
-<li><strong>并行度来自任务。</strong><code>spark.task.cpus</code> 取 1。段组少于任务槽时，<code>SearchPlan</code> 把查询组切成 R = min(组数, ⌈槽数 ÷ 段组数⌉) 个连续范围，任务数 = 段组数 × R，代价是底库读取乘 R（决策 28）。</li>
+<li><strong>并行度来自任务。</strong><code>spark.task.cpus</code> 取 1。段组少于并发数时，<code>SearchPlan.rangeCount</code> 把查询切成 R = max(1, min(⌈并发数 ÷ 段组数⌉, ⌊查询数 ÷ 2,048⌋)) 个连续范围；按字节切出的查询组少于 R 时，<code>evenGroups</code> 把查询集均分成一个范围一组（决策 28、32）。任务数 = 段组数 × R，代价是底库读取乘 R。</li>
 </ol>
 
 <h3>1.6 老入口有、新入口没有的四样东西，各自怎么处理</h3>
 <p><strong>新入口比老入口少四样东西。两样由连接器补回，一样不做仍走老入口，一样靠实测确认精度够。</strong></p>
 <table><thead><tr><th>老入口有、新入口没有</th><th>落地</th><th>代码</th></tr></thead><tbody>
-<tr><td>一次调用内部多核并行</td><td>任务级并行，入口单线程</td><td><code>SingleThreaded</code>；<code>SearchPlan.segmentSets</code> 的查询范围</td></tr>
+<tr><td>一次调用内部多核并行</td><td>任务级并行，入口单线程</td><td><code>SingleThreaded</code>；<code>SearchPlan.rangeCount</code>、<code>queryRanges</code> 与 <code>of</code> 切出的查询范围（<code>segmentSets</code> 只切段组）</td></tr>
 <tr><td>排除位图</td><td>调用前把参与的行拷成一块，算完把行号换回去</td><td><code>ExactScan.compact</code> / <code>Compacted.batchRows</code></td></tr>
 <tr><td>fp16、bf16、int8、二值内核</td><td>不做，仍走老入口</td><td><code>ExactScan.batch</code> 的分派条件</td></tr>
 <tr><td>逐对直算 Σ(x−y)²</td><td>接受 ‖x‖² + ‖y‖² − 2x·y，靠实测：256 条查询 top-10 集合 0 条不同，分数最大差 3.7e-4，相对 2.9e-7</td><td><code>knn_L2sqr</code> 的 BLAS 分支；测试 <code>NativeVectorSearchBatchedTest</code></td></tr>
@@ -254,12 +254,12 @@ CheckStatus(env, knowhere_index_build(handle, &amp;vectors, config.get()));</cod
 <li><strong>faiss HNSW。</strong>索引保存原始向量，每段索引 6.2 到 6.7 GB，executor 峰值 15 到 18 GB。</li>
 <li><strong>Cardinal 引擎。</strong>向量以 BF16 存、带 RBQ8 精化与 SQ4 图量化（Cardinal 的量化格式名），索引只有 2.2 GB；构建峰值却到 21 到 28.5 GiB，是向量的 4.6 倍。executor 的 memoryOverhead 要按最大段乘这个倍数留，30 GiB 只差 1.5 GiB。</li>
 <li><strong>线程。</strong>Knowhere 的构建池按整机起线程，8 核的任务实测用 14 到 15.7 核，这是线程池选项 G4 的现场。</li>
-<li><strong>加载侧的同一模式，523518f7 已改。</strong>
+<li><strong>加载侧的同一模式，Knowhere 523518f7 已改；连接器当前运行的 gitlink b9497f4f 不含这一改动。</strong>
 <ul>
 <li><strong>原来</strong>：读回索引搜索时，<code>knowhere_index_deserialize</code> 也先把 BinarySet 的字节拷一份（<code>IndexResource.deserialized_data</code>），加载峰值是文件的 3 倍，常驻 2 倍。</li>
 <li><strong>现在</strong>：调用方 BinarySet 的条目按 shared_ptr 追加进一个局部 BinarySet 交给引擎，拷贝去掉，峰值降到 2 倍，常驻不变。常驻的 2 倍是 Cardinal 适配器持有的原始字节加加载出的结构：它在 Deserialize 里把 <code>GetByName</code> 拿到的 shared_ptr 存成成员，字节随索引存活，调用方关掉 BinarySet 也不悬空；faiss 系经 MemoryIOReader 读进自己的结构，不留引用。</li>
 <li><strong>契约</strong>：BinarySet 一经交给 deserialize 就冻结，之后 <code>knowhere_binary_set_write</code> 返回 KNOWHERE_INVALID_ARGUMENT，allocate 换新缓冲和 close 仍允许。既堵住往被索引引用的字节里写，也堵住另一线程在 Deserialize 进行中写同一缓冲。</li>
-<li><strong>建索引侧未动</strong>：<code>build_data</code> 那一份仍在，是下一条候选。连接器侧的跟进：gitlink 指到 523518f7，规划器里「加载时多一份」的常量 1 改 0，重编 Cardinal 原生包，UAT 复验加载峰值。</li>
+<li><strong>建索引侧未动</strong>：<code>build_data</code> 那一份仍在，是下一条候选。连接器侧的现状：gitlink 是 b9497f4f，规划器里「加载时多一份」的常量 <code>SearchPlan.Footprint.IndexLoadingCopies</code> 仍为 1，加载峰值仍按 3 倍规划。跟进：gitlink 指到 523518f7，常量 1 改 0，重编 Cardinal 原生包，UAT 复验加载峰值。</li>
 </ul>
 </li>
 </ol>
@@ -274,7 +274,7 @@ CheckStatus(env, knowhere_index_build(handle, &amp;vectors, config.get()));</cod
 </ol>
 
 <h2 id="ref">代码坐标</h2>
-<p>行号以 Knowhere PR #1829 头 523518f7（b9497f4f 含两个新入口，523518f7 去掉加载侧的拷贝）和 spark-milvus refactor/v2 3b0e9b1 为准；faiss 指 Knowhere 自带的 <code>thirdparty/faiss</code>。设计层面的对应文档：<a href="vector-search.html">向量搜索与建索引</a>（决策 27、28）、<a href="search-resources.html">搜索路径的资源自适应</a>、<a href="knowhere-jni.html">Knowhere JNI 实现方案</a>。</p>
+<p>行号以 Knowhere PR #1829 头 523518f7（连接器当前 gitlink 为 b9497f4f，含两个新入口；523518f7 在其之后去掉加载侧的拷贝，尚未钉住）和 spark-milvus refactor/v2 3b0e9b1 为准；faiss 指 Knowhere 自带的 <code>thirdparty/faiss</code>。设计层面的对应文档：<a href="vector-search.html">向量搜索与建索引</a>（决策 27、28）、<a href="search-resources.html">搜索路径的资源自适应</a>、<a href="knowhere-jni.html">Knowhere JNI 实现方案</a>。</p>
 <table><thead><tr><th>看什么</th><th>在哪里</th></tr></thead><tbody>
 <tr><td>每条查询一个任务、nx = 1</td><td>knowhere <code>src/common/comp/brute_force.cc</code> 690–706、306–316</td></tr>
 <tr><td>faiss 分流与阈值</td><td>knowhere <code>thirdparty/faiss/faiss/cppcontrib/knowhere/utils/distances.cpp</code> 752–768、803；块大小 464–465</td></tr>

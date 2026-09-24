@@ -110,7 +110,8 @@ resources:
     cpu: "4"
     memory: 8Gi
 
-# The current unified storage and Knowhere native bundle is validated on amd64.
+# The unified storage and Knowhere native bundle is validated on amd64 and
+# arm64; the selector follows the image you built.
 nodeSelector:
   kubernetes.io/arch: amd64
 

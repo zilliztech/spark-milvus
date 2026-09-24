@@ -136,7 +136,7 @@
 <ol>
 <li><strong>表输入。</strong><code>UnitReader</code> 在 executor 上交出批；能力按表版本的声明。Spark 层按单元分发任务，再全局合并结果。</li>
 <li><strong>DataFrame 输入。</strong>任意 Spark 数据源或 join 的结果，只声明「扫描」。K-means、精确 TopK 可以直接使用；要求索引或按地址取行的计算在规划时拒绝。只需要扫描的开放格式场景，先用该格式的 Spark 数据源交 DataFrame 即可，需要固定版本、回表或索引时再为它写 <code>TableFormat</code>。</li>
-<li><strong>索引。</strong><code>TableFormat</code> 为单元提供索引句柄和 label 对应的地址种类；计算在句柄上探查，回表经同一单元的 <code>UnitReader</code> 按地址取行。今天的 <code>SegmentIndexQuery</code> 按此拆成两半：打开段、算排除位图、加载索引文件归 Milvus 的 <code>TableFormat</code>；在向量缓冲或索引句柄上求 TopK 归计算。</li>
+<li><strong>索引。</strong><code>TableFormat</code> 为单元提供索引句柄和 label 对应的地址种类；计算在句柄上探查，回表经同一单元的 <code>UnitReader</code> 按地址取行。原先的 <code>SegmentIndexQuery</code> 已按此拆成两半：打开段、算排除位图、加载索引文件在 <code>core.read.exec</code>（<code>SegmentIndexHandle</code>、<code>RowExclusions</code>、<code>SegmentVectors</code>），归 Milvus 的 <code>TableFormat</code>；在向量缓冲或索引句柄上求 TopK 在 <code>core.index</code>（<code>ExactScan</code>、<code>IndexProbe</code>、<code>SegmentSearch</code>），归计算。</li>
 <li><strong>写。</strong>写接收数据和输出的 <code>StorageBinding</code> 与格式，不接收输入的表版本。写 Milvus 段时，目标 collection 的 schema 由目标的 Milvus <code>TableFormat</code> 给出。</li>
 </ol>
 <p>例：客户桶里的 Parquet 查询集（输入 A）查我们桶里的 Milvus 快照（输入 B），结果写到另一个桶的 Parquet（输出 D）。三份绑定各自独立；精确模式只要求 B 能扫描，索引模式还要求 B 的向量列声明了可用的索引，并且支持按地址取行。</p>
@@ -163,7 +163,7 @@
 <tr><td><code>SnapshotSource</code> 与四个入口</td><td>Milvus <code>TableFormat</code> 的「描述」</td><td>入口仍是四个</td></tr>
 <tr><td><code>SchemaMapper</code>、<code>MilvusTypes</code></td><td>Milvus <code>TableFormat</code> 内部：Milvus 类型 → Arrow 类型与 <code>VectorLayout</code></td><td><code>SparkTypes</code>、谓词绑定、列裁剪改按 <code>ColumnId</code> 与 Arrow 类型</td></tr>
 <tr><td><code>core.delete</code></td><td>Milvus <code>TableFormat</code> 专用</td><td>开放格式的删除不经它</td></tr>
-<tr><td><code>SegmentIndexQuery</code></td><td>拆成 Milvus <code>TableFormat</code> 的一侧与计算的一侧</td><td>见第三节第 3 条</td></tr>
+<tr><td>原 <code>SegmentIndexQuery</code>（已删除）</td><td>已拆成 <code>core.read.exec</code> 的 <code>SegmentIndexHandle</code> / <code>RowExclusions</code> / <code>SegmentVectors</code>（Milvus <code>TableFormat</code> 一侧）与 <code>core.index</code> 的 <code>SegmentSearch</code>（计算一侧）</td><td>见第三节第 3 条</td></tr>
 <tr><td><code>ReadPlan.of</code></td><td>对表版本的单元生成 <code>UnitReadTask</code></td><td>属性包按单元的位置从 <code>StorageBinding</code> 取，不按 storage_version 取</td></tr>
 <tr><td><code>MilvusTable</code>、<code>MilvusScan</code></td><td>暂不改名</td><td>实现拆分时再定</td></tr>
 </tbody></table></div>

@@ -420,8 +420,9 @@ object MilvusOption {
     * path exists for (P0 in the design README), and the two outlets were shown
     * to agree on UAT (V2 and V3 segments, the three delete states, the
     * all-types collection value by value). Arrays of every element type were
-    * compared in unit tests and on UAT. `false` takes the row path; a read with
-    * vector search takes it regardless, because that stage scores rows.
+    * compared in unit tests and on UAT. `false` takes the row path. Vector
+    * search does not go through the scan outlets: `MilvusSearch.search` reads
+    * segments itself, so this option does not affect it.
     */
   private def readColumnarFrom(
       getOption: String => Option[String]

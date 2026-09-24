@@ -108,7 +108,7 @@
 <tr><td><code>schema</code></td><td><code>CollectionSchema</code>（protobuf）</td><td>C3：schema 来自快照，不经服务</td><td>JSON <code>collection.schema</code></td></tr>
 <tr><td><code>partitionIds</code></td><td><code>Seq[Long]</code></td><td>快照覆盖的分区；R16 的分区选择在这上面过滤</td><td><code>snapshot_info.partition_ids</code></td></tr>
 <tr><td><code>segments</code></td><td><code>Seq[Segment]</code></td><td>段列表，见 1.2</td><td><code>storagev2_manifest_list</code>（V3 段）加 <code>manifest_list</code> 指向的 Avro（V2 段）</td></tr>
-<tr><td><code>indexes</code></td><td><code>Seq[IndexRef]</code>（设计字段，实体尚未实现）</td><td>索引定义，V2 加载索引用</td><td>JSON <code>indexes</code>；今天解析成 <code>Seq[Any]</code>。定义与段文件的对应关系见 <a href="vector-search.html#metadata">索引查询方案</a></td></tr>
+<tr><td><code>indexes</code></td><td><code>Option[Vector[CollectionIndex]]</code>，<code>None</code> 表示来源未提供；另有 <code>buildIds: Option[Vector[Long]]</code></td><td>索引定义，V2 加载索引用</td><td>JSON <code>indexes</code>。定义与段文件的对应关系见 <a href="vector-search.html#metadata">索引查询方案</a></td></tr>
 <tr><td><code>origin</code></td><td><code>SnapshotOrigin</code></td><td>这份 <code>Snapshot</code> 是哪个来源产出的，报错和日志用</td><td>适配器填</td></tr>
 <tr><td><code>bucket</code></td><td><code>String</code></td><td><code>segments</code> 里每条路径都是相对它的 key，原生 reader 以它为根；本地文件系统时为空</td><td>快照目录读：连接器的 <code>fs.bucket_name</code>；backup：<code>milvus.backup.dir</code> 的桶</td></tr>
 </table>
@@ -119,10 +119,10 @@
 <tr><th>字段</th><th>类型</th><th>含义</th></tr>
 <tr><td><code>id</code>、<code>partitionId</code></td><td><code>Long</code></td><td></td></tr>
 <tr><td><code>storageVersion</code></td><td><code>Int</code></td><td>数据段是 2 或 3；storage version 0 的 L0 段只提供删除文件，不进入数据 reader；其他数据布局在解析期拒绝</td></tr>
-<tr><td><code>rows</code></td><td><code>Option[Long]</code></td><td>行数。V2 段从 Avro 的 <code>entries_num</code> 得到；V3 段只有打开 Manifest 才知道，规划期是 <code>None</code>，R13 的统计因此可能是未知</td></tr>
+<tr><td><code>rows</code></td><td><code>Option[Long]</code></td><td>行数。V2 段从 Avro 的 <code>entries_num</code> 得到；V3 段的快照 JSON 里没有行数，规划期由 <code>DeleteFileListing</code> 读钉住版本的 manifest 得到（<code>ManifestFacts</code>）并写进任务的 <code>snapshotRows</code>；只在不读 manifest 时为 <code>None</code>，R13 的统计因此可能是未知</td></tr>
 <tr><td><code>layout</code></td><td><code>SegmentLayout</code></td><td>V3：<code>Manifest(basePath, version)</code>，executor 按钉住版本读列组清单；V2：<code>ColumnGroups(groups)</code>，列组已在 driver 上从 Avro 加 parquet footer 物化。路径都在来源边界归一成相对 <code>Snapshot.bucket</code> 的 key；用户 URI 按标准 S3 规则解析，Milvus 元数据中的 endpoint 形式只在 authority 带端口或 authority host 与已配置 endpoint host 精确匹配时识别，跨桶报错</td></tr>
 <tr><td><code>deletes</code></td><td><code>DeleteFiles</code></td><td>删除文件在哪，见 1.3</td></tr>
-<tr><td><code>indexFiles</code></td><td>设计字段，实体尚未实现</td><td>V2 的段级索引描述；需要区分已提供、确认未建、来源未知。快照 Avro 已定义 <code>index_files</code>，现解析器未保留；具体模型见 <a href="vector-search.html#metadata">索引查询方案</a></td></tr>
+<tr><td><code>indexes</code></td><td><code>SegmentIndexes</code>（已做）</td><td>段级索引描述，三个 case 区分已提供（<code>Available</code>）、确认未建（<code>Unindexed</code>）、来源未知（<code>Unknown</code>）。<code>SnapshotSegmentReader</code> 把快照 Avro 的 <code>index_files</code> 解析成 <code>IndexFileEntry</code>；具体模型见 <a href="vector-search.html#metadata">索引查询方案</a></td></tr>
 </table>
 
 <h3 id="deletes">1.3 删除文件：三种状态，不能合并</h3>
@@ -149,7 +149,7 @@ object DeleteFiles {
 
 <table>
 <tr><th>来源</th><th><code>createdAt</code></th><th>V3 段</th><th>V2 段</th><th><code>deletes</code></th><th><code>rows</code></th><th><code>indexes</code></th></tr>
-<tr><td>快照目录</td><td>有</td><td>有</td><td>有</td><td>V3 <code>InManifest</code>，V2 <code>Listed</code></td><td>V2 有，V3 无</td><td>有，结构待定</td></tr>
+<tr><td>快照目录</td><td>有</td><td>有</td><td>有</td><td>V3 <code>InManifest</code>，V2 <code>Listed</code></td><td>V2 有，V3 由规划期读 manifest 得到</td><td>有，<code>CollectionIndex</code> 加段级 <code>SegmentIndexes</code></td></tr>
 <tr><td>backup</td><td><code>None</code></td><td>无</td><td>有</td><td><code>Listed</code></td><td>有</td><td>无</td></tr>
 </table>
 
@@ -281,7 +281,7 @@ Milvus v3.0.0 起支持 external collection，schema 的 <code>external_source</
 <p><strong>好处。</strong>外表不新增来源，也不新增段布局，读取链路与普通 collection 相同；源格式的细节交给 milvus-storage 的读取器，
 连接器读出的行号和虚拟主键与 Milvus 一致，搜索结果能直接与在线查询对账。</p>
 
-<p class="open">状态：R20 待实现。今天的解析器认格式 1 到 4，不识别 <code>external_source</code>。</p>
+<p class="open">状态：R20 待实现。今天的解析器认格式 1 到 5，不识别 <code>external_source</code>。</p>
 
 <h2 id="boundary">四、边界：Snapshot 留在 driver，SegmentReadTask 去 executor</h2>
 
@@ -296,7 +296,7 @@ Milvus v3.0.0 起支持 external collection，schema 的 <code>external_source</
 <tr><td><code>deletes</code></td><td><code>DeleteSource</code>：<code>Listed</code> 和 <code>InManifest</code> 变 <code>Files</code>；V3 Manifest 里的 delete path 先经 <code>parseMilvus</code> 归一成同一 <code>Snapshot.bucket</code> 下的 key，再由 executor 读；
 <code>Empty</code> 变 <code>None</code>；<code>Unknown</code> 在规划期已经报错，到不了这里。已做（#13）：<code>Materialized</code>（driver 读完删除日志把主键表塞进分区）不再由 planner 产出</td></tr>
 <tr><td><code>rows</code> / V2 列组行数</td><td>已知值可由任务布局得到 <code>expectedRows</code>；registry 在读到 EOF 时与实际物理输出行数比较。<code>ReadPlan.totalRows</code> 仅在每个任务都有已知值时提供给 R13</td></tr>
-<tr><td><code>indexFiles</code></td><td>R7 落地时加字段</td></tr>
+<tr><td><code>indexes</code></td><td>原样，<code>SegmentReadTask.indexes: SegmentIndexes</code>（已做）</td></tr>
 </table>
 
 <p>R16 的分区和段选择、R9 的段级剪枝都在投影之前对 <code>Snapshot.segments</code> 过滤，是
@@ -356,9 +356,9 @@ Milvus v3.0.0 起支持 external collection，schema 的 <code>external_source</
 <tr><td><code>Segment</code>（V3）</td><td><code>datapb.SegmentDescription</code></td><td><code>storagev2_manifest_list[i]</code>：<code>{ver, base_path}</code></td><td>R3、R13、R16</td></tr>
 <tr><td><code>Segment</code>（V2）</td><td>同上，经 <code>manifests/{snapshot_id}/{segment_id}.avro</code></td><td>Avro 的 binlog 列表 + parquet footer 的 <code>group_field_id_list</code></td><td>K1</td></tr>
 <tr><td><code>Segment.layout = Manifest</code></td><td>milvus-storage <code>manifest.h</code></td><td><code>_metadata/manifest-{version}.avro</code></td><td>core.read.exec</td></tr>
-<tr><td><code>DeleteFiles.InManifest</code></td><td>同上</td><td><code>delta_logs</code>：路径、类型、条数</td><td>决策 13 后的 DeleteBitset</td></tr>
+<tr><td><code>DeleteFiles.InManifest</code></td><td>同上</td><td><code>delta_logs</code>：路径、类型、条数</td><td><code>DeletePlan</code>（设计名 <code>DeleteBitset</code>）</td></tr>
 <tr><td><code>DeleteFiles.Listed</code></td><td><code>SegmentDescription</code></td><td><code>deltalog_files</code></td><td>同上</td></tr>
-<tr><td><code>Segment.indexFiles</code></td><td>milvus-storage <code>manifest.h</code></td><td><code>indexes</code>：字段 id、类型、路径、文件名</td><td>R7、W6</td></tr>
+<tr><td><code>Segment.indexes</code></td><td>milvus-storage <code>manifest.h</code></td><td><code>indexes</code>：字段 id、类型、路径、文件名</td><td>R7、W6</td></tr>
 <tr><td>（未建模）</td><td>同上</td><td><code>stats</code>、<code>lob_files</code></td><td>R9、R10 落地时加 stats；LOB 无消费者</td></tr>
 </table>
 
@@ -367,6 +367,6 @@ Milvus v3.0.0 起支持 external collection，schema 的 <code>external_source</
 <ol>
 <li><strong>决策 11 关闭：快照由在线侧建，离线侧只读已有快照。</strong>连接器的起点是格式，有格式就有快照；建快照、建前是否 Flush 是 Milvus 的事。legacy gRPC 入口退役，A1 的 CALL 只是转发给服务的便利，不在读路径上。</li>
 <li><strong><code>_delta/</code> 删除文件的两种编码（两列 Parquet、旧 binlog 容器）都认，按文件头识别。</strong>这是实现事实，不是决策；原决策 13 撤销。</li>
-<li><strong><code>Snapshot.indexes</code> 是 <code>Seq[IndexRef]</code>，字段按 R7 定。</strong></li>
+<li><strong><code>Snapshot.indexes</code> 是 <code>Option[Vector[CollectionIndex]]</code>，段级为 <code>Segment.indexes: SegmentIndexes</code>；字段已按 R7 定。</strong></li>
 <li>快照目录的 catalog 文件与保留策略留在 README 第五节，到时与 Milvus 沟通，本页不等它。</li>
 </ol>

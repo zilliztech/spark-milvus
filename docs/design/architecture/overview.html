@@ -194,7 +194,7 @@
   <div class="fact"><b>6 → 2</b><span>一个向量值的拷贝次数</span></div>
   <div class="fact"><b>48</b><span>条功能，分八组</span></div>
   <div class="fact"><b>4</b><span>条 Spark 线各出产物</span></div>
-  <div class="fact"><b>6</b><span>条决策还没定</span></div>
+  <div class="fact"><b>4</b><span>条决策还没定</span></div>
 </div>
 
 <section id="layers">
@@ -307,8 +307,10 @@
 ├── <span class="d">project/</span>                      <span class="c">Versions.scala 版本矩阵，Modules.scala 构建约束</span>
 ├── <span class="u">milvus-storage/</span> <span class="u">milvus-proto/</span>  <span class="c">上游子模块：存储库与 JNI、Milvus 的 proto</span>
 │
+├── <span class="m">native-runtime/</span><span class="lay">第 1 层</span>
+│   └── src/main/java/                <span class="c">com.zilliz.milvus.jni.runtime：校验并解压统一平台包</span>
 ├── <span class="m">native-storage/</span><span class="lay">第 1 层</span>
-│   └── src/main/resources/native/    <span class="c">libmilvus-storage-jni 与依赖库，按平台存放</span>
+│   └── src/main/java/                <span class="c">NativeStorageLibrary：把统一包解出的路径交给上游加载器；resources/native 为空</span>
 ├── <span class="m">native-vector/</span><span class="lay">第 1 层</span>
 │   ├── src/main/java/                <span class="c">com.zilliz.milvus.jni.vector</span>
 │   └── knowhere.properties           <span class="c">钉住的 Knowhere 提交、摘要与 ABI</span>
@@ -329,9 +331,10 @@
 ├── <span class="u">spark-base/</span><span class="lay">第 3 层</span>                  <span class="c">四条线共享的源码，不是 project</span>
 │   ├── .../spark/connector/          <span class="c">sources · catalog · table · read · expr · types · write</span>
 │   │                                 <span class="c">metrics · options · procedure · extensions</span>
-│   └── src/main/antlr4/              <span class="c">CALL 文法，按线生成</span>
-├── <span class="m">spark-3.5/</span>                    <span class="c">catalog · extensions parser 适配 · services</span>
-├── <span class="m">spark-4.0/</span> <span class="m">spark-4.1/</span> <span class="m">spark-4.2/</span>  <span class="c">catalog · extensions parser 适配 · services</span>
+│   ├── src/main/antlr4/              <span class="c">CALL 文法，按线生成</span>
+│   └── src/main/resources/META-INF/services/  <span class="c">DataSourceRegister，四条线共用；各线的 services 目录只有 .gitkeep</span>
+├── <span class="m">spark-3.5/</span>                    <span class="c">catalog · extensions parser 适配</span>
+├── <span class="m">spark-4.0/</span> <span class="m">spark-4.1/</span> <span class="m">spark-4.2/</span>  <span class="c">catalog · extensions parser 适配</span>
 │                                     <span class="c">fat jar 是各线上的 assembly 任务，不单独成模块</span>
 │
 ├── <span class="m">apps-4.0/</span><span class="lay">第 4 层</span>                    <span class="c">backfill · search</span>
@@ -353,18 +356,18 @@
         <dt>snapshot</dt><dd>列快照目录，选快照，解析成 Snapshot（Milvus 快照，将演进为 TableVersion 的 Milvus 私有部分） <em>R2 R3 R9 R13 R16 C3</em></dd>
         <dt>manifest</dt><dd>一个段的列组、删除文件、统计、索引登记 <em>R5</em></dd>
         <dt>schema</dt><dd>字段 id、名字、Milvus 类型、Arrow 类型的唯一映射；外表源类型规则与向量布局 <em>R15 C3</em></dd>
-        <dt>path</dt><dd>三种路径形态归一成 (bucket, key) <em>R3</em></dd>
+        <dt>path</dt><dd>七种路径写法归一成 (bucket, key) <em>R3</em></dd>
         <dt>io</dt><dd>对象存储读写，唯一实现走 C 的 loon_filesystem_* <em>R2 R3 W1</em></dd>
         <dt>codec</dt><dd>列值与 Milvus binlog 封装的编解码，删除文件与索引文件共用 <em>R15 W3 V2</em></dd>
-        <dt>credential</dt><dd>对象存储凭证的取用和下发 <em>R3 G4</em></dd>
+        <dt>credential</dt><dd>对象存储凭证的取用和下发；G4 未落位，列在能力表第 11 节 <em>R3</em></dd>
         <dt>expr</dt><dd>R7 的 Expr / PlanParser / Evaluator；R6 的 PredicateExpr / PredicateEvaluator / Bitmap <em>R6 R7</em></dd>
         <dt>delete</dt><dd>删除文件解码，按行号置位 <em>R8</em></dd>
         <dt>stats</dt><dd>写侧主键 bloom filter，读侧段级保守剪枝 <em>R9 R18</em></dd>
         <dt>read.plan</dt><dd>段任务规划，纯 JVM，可序列化 <em>R3 R5 R8 R13</em></dd>
         <dt>read.exec</dt><dd>批读取、按行号取列、出口；碰 native <em>R3 R4 R8 R14 R17 G3 G5</em></dd>
         <dt>write.exec</dt><dd>段写出、暂存布局；碰 native <em>W1 W2 G2 G5</em></dd>
-        <dt>write.commit</dt><dd>作业清单、提交、幂等、暂存清理；快照写出待实现 <em>W3 A4 A7</em></dd>
-        <dt>index</dt><dd>索引加载、排除位图、段内 TopK；段内执行器与建索引待实现 <em>V2 V5 V7</em></dd>
+        <dt>write.commit</dt><dd>作业清单、提交、幂等、暂存清理；SnapshotWriter 写出快照，SnapshotBundle 回读核对 <em>W3 A4 A7 W6 W8</em></dd>
+        <dt>index</dt><dd>索引加载、段内 TopK（SegmentSearch：ExactScan 与 IndexProbe）、TopKMerger、IndexWriter 建索引 <em>V2 V5 V7 W6</em></dd>
       </dl>
     </div>
 
@@ -381,20 +384,19 @@
         <dt>metrics</dt><dd>core 的读写计数翻成 Spark 的自定义指标 <em>G5</em></dd>
         <dt>options</dt><dd>option 名、别名、校验；选这次读的 SnapshotSource；fs.* 的翻译 <em>R16 G1–G4</em></dd>
         <dt>catalog</dt><dd>database 的单层 namespace、collection 列表、三段名、快照重载，以及校验后建删 collection <em>R1 R2 C1 C2</em></dd>
-        <dt>procedure</dt><dd>CALL 过程体：快照、索引、生命周期、登记、描述、暂存清理；build_index 与 restore_snapshot 待实现 <em>A1–A5 A7</em></dd>
+        <dt>procedure</dt><dd>CALL 过程体：快照、索引、生命周期、登记、描述、暂存清理、build_index、write_snapshot、restore_snapshot；append 登记等 Milvus 的 RegisterSegments <em>A1–A5 A7 W6 W8</em></dd>
         <dt>extensions</dt><dd>CALL 的节点与 planner 策略；parser 适配和 antlr 生成物按线 <em>A1–A5</em></dd>
-        <dt>filter</dt><dd>1.x 的 JVM 暴力搜索，随精确搜索模式落地删除</dd>
       </dl>
     </div>
 
     <div class="pkg">
       <h4>compat 与 client</h4>
-      <p class="role">第 2 层的另外两个模块。compat 的两个适配器产出 core 的 Snapshot 或 SegmentReader，由 spark 层在启动时注册进 core 的注册表，core 源码不出现 compat 的包名。</p>
+      <p class="role">第 2 层的另外两个模块。compat 的两个适配器产出 core 的 Snapshot：v2 是 <code>FooterV2SegmentResolver</code>（实现 core 的 <code>V2SegmentResolver</code>），以构造参数交给 <code>SnapshotCatalog</code>，没有注册表；段数据由同一个 <code>NativeSegmentReader</code> 读。core 源码不出现 compat 的包名。</p>
       <dl>
-        <dt>v2</dt><dd>Storage V2 packed 段的 SegmentReader <em>K1</em></dd>
+        <dt>v2</dt><dd>Storage V2 packed 段的段解析：从快照 Avro 加 parquet footer 恢复列组（FooterV2SegmentResolver） <em>K1</em></dd>
         <dt>backup</dt><dd>milvus-backup 导出目录转 Snapshot <em>K3</em></dd>
         <dt>client.grpc</dt><dd>读 RPC 在一次调用的总期限内重发，写 RPC 只发一次</dd>
-        <dt>client.api</dt><dd>目录、DDL、快照、索引、生命周期、BatchUpdateManifest；RegisterSegments 与 RestoreSnapshot 待接 <em>C1 C2 A1–A5</em></dd>
+        <dt>client.api</dt><dd>目录、DDL、快照、索引、生命周期、BatchUpdateManifest、RestoreExternalSnapshot 与 GetRestoreSnapshotState；只剩 RegisterSegments 待 Milvus 提供 <em>C1 C2 A1–A5 W8</em></dd>
       </dl>
     </div>
 
@@ -665,7 +667,7 @@
           <rect x="16" y="44" width="160" height="78" fill="var(--surface)" stroke="var(--ours)"/>
           <text x="28" y="64" font-size="11.5" font-weight="600" fill="currentColor">MilvusSearch.search</text>
           <text x="28" y="80" font-size="10" fill="currentColor" opacity=".55">driver</text>
-          <text x="28" y="96" font-size="10.5" fill="currentColor" opacity=".78">解析快照，广播查询集</text>
+          <text x="28" y="96" font-size="10.5" fill="currentColor" opacity=".78">解析快照，分发查询集</text>
           <rect x="204" y="44" width="188" height="78" fill="var(--surface)" stroke="var(--ours)"/>
           <text x="216" y="64" font-size="11.5" font-weight="600" fill="currentColor">SegmentSearch</text>
           <text x="216" y="80" font-size="10" fill="currentColor" opacity=".55">executor，一组段一组查询</text>
@@ -730,7 +732,7 @@
         <path d="M480,292 V312 H828 V296" fill="none" stroke="var(--wait)" stroke-dasharray="5 3" marker-end="url(#ar6w)"/>
       </svg>
     </div>
-    <figcaption>绿色是我们写的，灰色是上游已有的，琥珀色要等 Milvus 支持。黑色虚线是跨任务的 shuffle：候选按 query_id 汇总，命中行按段重新分区。设计见 <a href="vector-search.html">vector-search.html</a>。</figcaption>
+    <figcaption>绿色是我们写的，灰色是上游已有的，琥珀色要等 Milvus 支持。黑色虚线是跨任务的 shuffle：候选按 query_id 汇总，命中行按段重新分区。查询集是 Parquet 文件时由搜索任务按行组直接读取（<code>QueryFiles</code>），否则整体广播或按组打包进 shuffle（<code>SearchQueries</code>）。设计见 <a href="vector-search.html">vector-search.html</a>。</figcaption>
   </figure>
 </section>
 
@@ -803,7 +805,7 @@
         </g>
       </svg>
     </div>
-    <figcaption>展开后 11 个 sbt project。Spark 的 patch 取每条线最低的维护版，编译版本就是兼容下限；Arrow 与本线 Spark 自带的对齐。3.4 已停止发版，不做；3.5 的发行版默认 Scala 2.12，所以只有这条线出两个 Scala 版本。</figcaption>
+    <figcaption>展开后 13 个 sbt project：root 加 12 个模块（native-runtime、native-storage、native-vector、core、compat、client、四条 Spark 线、apps-4.0，以及 root 聚合之外的 integration-4.0）。Spark 的 patch 取每条线最低的维护版，编译版本就是兼容下限；Arrow 与本线 Spark 自带的对齐。3.4 已停止发版，不做；3.5 的发行版默认 Scala 2.12，所以只有这条线出两个 Scala 版本。</figcaption>
   </figure>
 
   <div class="note">
@@ -888,7 +890,7 @@
 
     <div class="grp">
       <h4>向量与索引 · 5 条</h4>
-      <p>整组排 P2。统一入口输入查询集，精确与索引是段内两种策略；单条查询的索引搜索已接通，查询集入口与精确模式待实现。</p>
+      <p>整组排 P2。统一入口输入查询集，精确与索引是段内两种策略；<code>MilvusSearch.search</code> 接查询集，<code>mode</code> 为 exact 或 index 均已实现。</p>
       <div class="chips">
         <span class="chip p2"><span class="id">V1</span>Knowhere 接入</span>
         <span class="chip p2"><span class="id">V2</span>加载 Milvus 建的索引</span>
@@ -900,7 +902,7 @@
 
     <div class="grp">
       <h4>兼容入口 · 2 条</h4>
-      <p>不进主路径，产出核心层的 Snapshot 或 SegmentReader 后合流。</p>
+      <p>不进主路径，产出核心层的 Snapshot 后合流；段读取与主路径共用 NativeSegmentReader。</p>
       <div class="chips">
         <span class="chip p0"><span class="id">K1</span>Storage V2 段</span>
         <span class="chip p1"><span class="id">K3</span>backup 目录</span>
@@ -944,15 +946,15 @@
     <li><b>接口层<span class="tag">P1</span></b><span>Catalog 目录、三段名与表 DDL，元数据列、统计、V2 谓词、Limit。回表在这一步到位。</span></li>
     <li><b>谓词求值<span class="tag">P1</span></b><span>R6 的 V2 Predicate 翻译、PredicateExpr 与列批位图已接通；R7 的 Expr / PlanParser / Evaluator 已同时接入普通表 <code>milvus.filter</code> 与索引搜索前过滤，只有 JSON/Array 与 <code>json_contains</code> 语义等待决策 23。</span></li>
     <li><b>写路径<span class="tag">P1</span></b><span>SegmentWriter、Committer、register。backfill 分支可先做，append 等 Milvus 的 RPC，两件事可以并行谈。</span></li>
-    <li><b>向量层<span class="tag">P2</span></b><span>上游 Knowhere Java/JNI 与单条查询的索引搜索已接通；查询集入口（V5、V7）、建索引（W6）与快照交付（W8）待实现；backfill 写模式。</span></li>
+    <li><b>向量层<span class="tag">P2</span></b><span>上游 Knowhere Java/JNI、查询集入口（V5、V7）、建索引（W6，BuildIndexProcedure）与快照交付（W8，WriteSnapshotProcedure / RestoreSnapshotProcedure）已实现；待做的是 backfill 写模式。</span></li>
     <li><b>产物与基准<span class="tag">P3</span></b><span>native jar 打包、四条 Spark 线的 CI 矩阵、读吞吐与拷贝次数与写端到端的基准；macOS 与 GPU 产物。</span></li>
     <li><b>2.0.0 发布<span class="tag">P3</span></b><span>云上作业切换坐标与 SHA。</span></li>
   </ol>
 </section>
 
 <section id="open">
-  <h2><span class="n">09</span>还没定的 6 条</h2>
-  <p class="claim">以总体设计第 4 节为准。</p>
+  <h2><span class="n">09</span>还没定的 4 条</h2>
+  <p class="claim">以总体设计第 4 节为准。原列的 21（索引兼容范围）与 22（写段的系统字段来源）已于 2026-09-18 定，结论在总体设计第 6 节。</p>
 
   <div class="tw">
   <table>
@@ -960,8 +962,6 @@
     <tbody>
       <tr><td class="mono">10</td><td>backfill 写模式的分布与排序</td><td>实现 Spark 的分布要求，或场景代码自己 shuffle</td><td>写路径</td></tr>
       <tr><td class="mono">19</td><td>按分区报告 Spark 分区</td><td>实测 join 收益后决定是否实现</td><td>读优化</td></tr>
-      <tr><td class="mono">21</td><td>扩大索引兼容范围</td><td>首个非 nullable FloatVector/HNSW 范围已落地；开源 Milvus 默认的 HNSW_SQ、nullable 映射、DiskANN 与加密文件待定</td><td>后续 V2 扩展</td></tr>
-      <tr><td class="mono">22</td><td>写段的系统字段来源</td><td>写时分配、登记时补齐或写入占位值</td><td>append 登记</td></tr>
       <tr><td class="mono">23</td><td>R7 的 JSON、Array 与 <code>json_contains</code> 语义基线</td><td>实现 Milvus 2.6+ 的稳定共同子集，或钉住版本并按服务版本分派；还需明确 null、缺失路径、异构数组、数值转换与错误语义</td><td>不阻塞标量子集；阻塞 JSON/Array 扩展</td></tr>
       <tr><td class="mono">26</td><td>各开放格式的 TableFormat 用哪种读取实现</td><td>milvus-storage 的格式读取器；该格式的 Java 库；该格式的 Spark 数据源（只提供扫描）</td><td>按格式逐个定，看能力与存储后端</td></tr>
     </tbody>
@@ -983,7 +983,7 @@
       <tr><td>milvus-storage</td><td><code>loon_reader_new</code> 接受空 schema</td><td>R20，合入前外表段打不开</td></tr>
       <tr><td>milvus-storage</td><td>按 external_spec 拼外部文件系统属性的 C 接口</td><td>R20 的客户桶凭证</td></tr>
       <tr><td>milvus-storage</td><td>JNI 对切片批只重写偏移和位图</td><td>R4 零拷贝</td></tr>
-      <tr><td>milvus-storage</td><td>JNI 绑定文件系统读取字节与外表展开接口</td><td>G5；决策 26 选用 milvus-storage 读开放格式时</td></tr>
+      <tr><td>milvus-storage</td><td>JNI 绑定 <code>loon_filesystem_get_metrics</code>（文件系统读取字节的绑定已完成，NativeObjectStore 在用）与外表展开接口</td><td>G5；决策 26 选用 milvus-storage 读开放格式时</td></tr>
       <tr><td>Knowhere</td><td>C/Java 接口开放线程池大小</td><td>V5、V7、W6、G4</td></tr>
     </tbody>
   </table>

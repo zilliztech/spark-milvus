@@ -92,7 +92,7 @@ are named settings in the same file.
 | `project/Dependencies.scala` | Dependency coordinates, scopes and dependency groups |
 | `project/Modules.scala` | Shared compile/test settings, checks and Scala cross-version settings |
 | `project/KnowhereBuild.scala` | Pinned upstream API compilation, the Cardinal flag taken from the bundle, and the packaged JNI smoke |
-| `project/NativeBundle.scala` | Unified native resource selection, source pins, manifest and ELF validation |
+| `project/NativeBundle.scala` | Unified native resource selection, source pins, manifest, provenance and JVM load validation |
 | `project/plugins.sbt` | Build plugins and their meta-build dependencies |
 
 ## Tests that need the native library
@@ -103,6 +103,10 @@ with those suites reported as canceled rather than failed:
 
 - `StorageNativeTest`, `WriterRoundTripTest`, `SegmentWriterTest` and `SegmentReaderTakeTest` in core
 - `MilvusV3PartitionWriterLifecycleTest` and `HadoopEndpointSnapshotTest` in spark-4.0
+- `BackfillSegmentWriteTest` in apps-4.0
+
+`NativeVectorSearchTest` and `NativeVectorSearchBatchedTest` in core cancel on
+the Knowhere library instead.
 
 The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
 `StorageFullChainUatTest`, `SnapshotReadUatTest`, `ConnectorWriteReadUatTest`,
@@ -335,6 +339,9 @@ below. The resulting root assembly contains the bundle resources. At runtime,
 one class loader extracts and verifies them in one private directory; both
 upstream JNI loaders use that directory. The external `.properties` checksum
 sidecar is a build input and is not needed next to the deployed assembly.
+Setting `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin`
+moves that extraction (about 3 s per executor) to executor start; a failed
+preload is logged and the first task loads as before.
 
 Bundle-selected functional test JVMs set `LD_BIND_NOW=1` and an empty external
 library path (`LD_LIBRARY_PATH`, and `DYLD_LIBRARY_PATH` with
@@ -378,7 +385,7 @@ Assembly passes through a single native resource without buffering it. When
 multiple JARs supply the same path, `NativeBundle.nativeMergeStrategy` compares
 SHA-256 and byte length using a fixed-size buffer and rejects differing content.
 The plugin's general `deduplicate` strategy buffers whole entries and exhausted
-a 4 GB heap with the current 478 MB storage library. The streaming strategy
+a 4 GB heap with a 478 MB storage library measured at the time. The streaming strategy
 passes the same assembly command at 4 GB. With sbt-assembly 2.1.1, a custom merge
 strategy disables assembly output caching, so repeated assembly commands repack
 the JAR; compilation, native validation and native build caches remain enabled.
@@ -469,9 +476,9 @@ build-library paths, and checks `-Xcheck:jni` diagnostics. Missing libraries or
 failed native calls fail the smoke; it never cancels itself. Its log is
 `native-vector/target/knowhere-smoke/jni.log`.
 
-The pinned upstream native package reports missing `milvus-common` license
-material. Preserve `missing-licenses.txt` and the bundled license records;
-complete the upstream material before distributing native artifacts.
+`stage.py` fails staging when a required source license document is missing;
+collected licenses land in `bundle/licenses/` and
+`META-INF/milvus-native/licenses/`.
 
 ## JVM version
 
@@ -517,7 +524,9 @@ sbt integration40/scalafmtAll integration40/scalafmtCheckAll
 ```
 
 When changing `build.sbt` or Scala/sbt files under `project/`, also run
-`sbt scalafmtSbt scalafmtSbtCheck`. Use the pinned `.scalafmt.conf`; do not
+`sbt scalafmtSbt scalafmtSbtCheck`. CI runs only the root `scalafmtCheckAll`;
+`integration40/scalafmtCheckAll` and `scalafmtSbtCheck` are local-only checks
+today. Use the pinned `.scalafmt.conf`; do not
 change its rules to make a check pass. Repeat the relevant check after further
 source edits and resolve failures before committing. Keep unrelated formatting
 repairs in a separate commit from functional changes, preserving other
@@ -548,6 +557,11 @@ setup; report them and the actual counts as described in
 The root run does not include `integration40/test`, which requires live Milvus
 and MinIO. Additional Scala cross-version checks, integration tests, native
 builds and publication follow the task's scope and authorization.
+
+CI also runs `sbt checkCapabilityIndex` and
+`python3 -m unittest discover -s native-build -p 'test_*.py'` plus the same
+discovery over `scripts/tests`; run them when touching `capabilities.md`, a
+`package.scala` or `native-build/`.
 
 ## The protobuf split
 

@@ -32,7 +32,8 @@ OSS 没有，只能备份改写还原全局键，那是绕过 hadoop-aliyun 的�
 <p>backfill 读一份源数据，算出新的列值，写回 Milvus 的段。源桶是客户的，Milvus 桶是
 托管方的，两者可能属于不同账号，端点、密钥、区域各不相同。代码里的
 <code>isSource</code> 参数就是在区分这两个桶：</p>
-<pre><code>configureHadoopS3ForPath(hadoopConf, path, config, isSource)
+<pre><code>configureHadoopStorageForPath(hadoopConf, path, config, isSource)
+//   oss:// 路径 → configureHadoopOssForPath，其余 → configureHadoopS3ForPath
 // isSource = true  → 源桶，取 config.sourceS3* 系列，缺省回落到主配置
 // isSource = false → Milvus 桶，取 config.s3*</code></pre>
 <p>Spark 的会话级配置只能表达一套身份，所以这件事必须由作业自己处理。</p>
@@ -70,9 +71,10 @@ AssumeRole。判断走 <code>BackfillConfig.resolveAwsS3AssumeRole</code>，它�
 }</code></pre>
 <p>第 3 步不可省：FileSystem 有实例缓存，不禁用的话第二次访问会拿到缓存里那个还揣着
 旧凭证的实例。</p>
-<p>另一处（<code>MilvusBackfill.scala:1947</code> 附近）走的是另一种隔离：克隆一份
-<code>Configuration</code> 给 FooterV2SegmentResolver 读 AVRO 与 parquet footer，
-不动会话里共享的那份。注释写明了目的是不污染共享的 OSS 凭证。</p>
+<p>另一处（<code>MilvusBackfill.loadV2Segments</code>）已不经 Hadoop：读快照 Avro 与 parquet footer 的
+<code>FooterV2SegmentResolver</code> 通过一个由 <code>StorageProperties.from(config.getMilvusReadOptions)</code>
+打开的 <code>NativeObjectStore</code> 读取，属性包只描述 Milvus 桶，用完即关，不碰会话里共享的 Hadoop 配置。
+（此前这里克隆一份 <code>Configuration</code> 以免污染共享的 OSS 凭证；那条 Hadoop 读取路径已随 driver 侧统一走 C 通路而删除。）</p>
 
 <div class="warn">
 <p><strong>这是绕过，不是设计。</strong>改全局状态再还原，在并发下不安全：
@@ -101,5 +103,5 @@ Milvus 桶一侧用 <code>extfs.*</code> 与 <code>fs.*</code> 表达，时间�
 <a href="../architecture/storage-access.html#next">storage-access.html 第七节</a>。</p>
 <p>换完之后两件事一起消失：第三节那个没人测的单线程前提，
 以及平台之外那条 provider 链对 classpath 上有 STS 模块的依赖
-（<a href="../architecture/storage-auth.html#sts">storage-auth.html 5.6</a>）——
+（<a href="../architecture/storage-auth.html#sts">storage-auth.html 5.1</a>）——
 C 层自带 STS 客户端。</p>

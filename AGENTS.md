@@ -16,7 +16,10 @@ format and registers them back with Milvus.
 Since 2026-09-17 the project also covers reading open formats directly
 (Parquet, Lance, Iceberg, Hudi, each read by its own rules) and computations
 such as K-means over any input, combined as the composition principles below
-describe. Neither part is designed or written yet.
+describe. The table model for it is designed in
+[table-version.html](docs/design/architecture/table-version.html) (decision
+25); no open-format reader and no computation beyond vector search is written
+yet.
 
 Two lines exist. The 1.x line is frozen at tag `v1.6.0` and takes fixes only.
 The 2.0 line is a rewrite on branch `refactor/v2`, versioned
@@ -32,7 +35,7 @@ every rule below refers to.
 | 1 | `native-runtime`, `native-storage`, `native-vector` | Storage uses milvus-storage's upstream JNI and Java/Scala API; vector library loading through Knowhere's upstream C/JNI and Java API. `native-runtime` verifies and extracts the unified platform bundle for both bindings. Nothing above this layer loads a `.so`. |
 | 2 | `core`, `compat`, `client` | The Milvus storage format and the client for the online service. All computation happens here. No Spark: a source file mentioning `org.apache.spark` fails the build. |
 | 3 | `spark-base`, `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | The DataSource V2 surface. `spark-base` is a shared source directory, not a project; each line project compiles it against its own Spark, Arrow, antlr and Java version. |
-| 4 | `apps-4.0` | The jobs users run: backfill and vector search. |
+| 4 | `apps-4.0` | The backfill job users run, and the SQL vector distance functions (V8). Vector search itself enters through `MilvusSearch` in layer 3. |
 
 `integration-4.0` sits outside the layering and outside root's aggregate: its
 suites need a live Milvus and MinIO.
@@ -56,7 +59,7 @@ credential and `io.ObjectStore` over the native filesystem; `compat` has the V2
 packed and backup entry points; `client` has the RPCs required by the currently
 implemented paths, including Catalog discovery and collection/index DDL.
 Every driver-side read opens storage through that one store, and no source file
-in `core` or `compat` mentions `org.apache.hadoop`.
+in `core` or `compat` references `org.apache.hadoop` outside comments.
 
 `core.index` executes vector queries through Knowhere: `SearchPlan` cuts a
 search into tasks, `SegmentSearch` runs a query group over a segment set by
@@ -82,7 +85,11 @@ entry point, `table` the table, `read` the scan builder, the scan and the
 executor-side readers,
 `write` the two writers, `options` the option parsing, the driver's storage
 access and the choice of `SnapshotSource` for a read, `types` the type
-mapping. DataSource `getTable` and Catalog `loadTable` share `MilvusTables`,
+mapping. `metrics` turns core's read, write and search counters into
+DataSource V2 `CustomMetric`s and search accumulators (G5). `extensions` holds
+the session extension, the `CALL` parser pieces and `MilvusSparkPlugin`, which
+`spark.plugins` names so every executor loads the native bundle at start.
+DataSource `getTable` and Catalog `loadTable` share `MilvusTables`,
 which resolves the `Snapshot` once before the table carries it to the scan;
 partition planning is in `core.read.plan`. `catalog`
 implements three-part table loading and latest/name/timestamp
@@ -99,7 +106,8 @@ and `V3` everywhere, after the snapshot's `storage_version`.
 
 `procedure` owns the driver-side bodies behind the shared
 `CALL milvus.system.<name>(...)` SQL extension. Snapshot, index,
-load/release/flush/compact, collection describe, and backfill register are
+load/release/flush/compact, collection describe, backfill register,
+`build_index`, `write_snapshot`, `restore_snapshot` and `cleanup_staging` are
 implemented across all four Spark lines. Append registration still waits for a
 Milvus `RegisterSegments` API. Staging cleanup now records collection ownership
 and driver heartbeats, audits stale unregistered append jobs fail-closed, and
@@ -120,8 +128,10 @@ the fork `Thor-ChenBiao/milvus-storage`; the decision log in
 [docs/design/README.md](docs/design/README.md) names the end condition.
 `native-vector` compiles the pinned `knowhere` submodule's Java API and
 integrates its loader and BruteForce implementation; Knowhere owns the C
-interface, JNI, Java API and native resource loader. The submodule follows the
-PR #1829 branch while the superproject gitlink fixes the exact source revision.
+interface, JNI, Java API and native resource loader. `.gitmodules` fetches
+`knowhere` from `LawrenceTL92/knowhere-contrib`, branch `codex/knowhere-jni-pr`
+(the PR #1829 branch), while the superproject gitlink fixes the exact source
+revision.
 Persisted HNSW loading uses upstream BinarySet and index search APIs; Cardinal
 stream files require a Cardinal-enabled build. Real-file compatibility and
 validation results are recorded in the vector search design.
@@ -164,7 +174,7 @@ writing Vortex column groups. Check it before designing around a gap.
 | How does layer 3 turn Spark calls and options into cross-layer contracts? | [docs/design/architecture/spark-interface.html](docs/design/architecture/spark-interface.html) — shared package responsibilities, typed option delivery, task resource ownership, delivery order and acceptance gates |
 | How does Spark predicate pushdown preserve semantics? | [docs/design/architecture/expressions.html](docs/design/architecture/expressions.html) — the DataSource V2 support matrix, residual contract, three-valued logic, field-id binding, hidden predicate columns and row/columnar execution |
 | How do Catalog discovery, table DDL and fixed-snapshot loading work? | [docs/design/architecture/catalog.html](docs/design/architecture/catalog.html) — one-level namespaces, table listing, identifier and property rules, CREATE/DROP sequencing and failure semantics, latest/version/timestamp selection and HybridTS conversion |
-| How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment still lacks before registration, the development outline |
+| How does a write run, and what is still missing at the entry point? | [docs/design/architecture/write.html](docs/design/architecture/write.html) — the DataSource V2 write chain, where the write table gets the collection schema, the WriteBuilder checks, the three things a segment lacked before registration (its section 6 still lists them as missing; W1 in capabilities.md records that all three are now written and only Milvus's `RegisterSegments` is outstanding), the development outline |
 | How does a `CALL milvus.system.<name>(...)` statement become a call? | [docs/design/architecture/procedure.html](docs/design/architecture/procedure.html) — the grammar, parser extension, logical node and strategy, per-line generated pieces, procedure contracts and bounded-wait semantics |
 | How is any input described at a fixed version, and how does it reach reads, search and index building? | [docs/design/architecture/table-version.html](docs/design/architecture/table-version.html) — decision 25 as revised on 2026-09-17: `TableVersion` (evolved from today's `Snapshot`) has a common part and a part only its format's `TableFormat` reads; its units are `DataUnit`s; identity stays in each input's `StorageBinding`; deletes run inside each format; row addresses and capabilities are declared; computations take neutral column batches from a table input or a scan-only DataFrame input. `Snapshot`, `Segment` and `SegmentReadTask` name Milvus objects only |
 | How do vector search and index building work? | [docs/design/architecture/vector-search.html](docs/design/architecture/vector-search.html) — conclusion: one `MilvusSearch.search` entry taking a query set with `mode` exact or index, its result schema, scope, options, capabilities checked at planning and failure behaviour, layer duties with the computation kept apart from the Milvus `TableFormat` side, metrics and the cost of each mode; principle: the two Spark stages (candidates then take), the Knowhere buffer contract and zero-copy conditions, exact scan, index probe from snapshot metadata, index file decoding and engine choice, result semantics, index building through `build_index` and external snapshot restore, native library loading and real-file compatibility, and the long-term DataFrame/SQL plan entry (section 2.10: pushed-down TopN over a distance function, `knn` join, verified Spark interfaces, gaps and steps); then what the simplicity and the design buy |
@@ -345,8 +355,9 @@ code comments and naming, not only to documents.
 A documented interim state is not a patch. During a migration parts of the tree
 will sit in the wrong module on purpose. That is legitimate when it is written
 down, has a named end condition and someone is holding it; a patch is the one
-you intend to leave there. `spark.read.plan` is the live example, and section
-5 of modules.md says so.
+you intend to leave there. The live example is `.gitmodules` pointing
+`milvus-storage` at the `Thor-ChenBiao/milvus-storage` fork; the decision log
+entry of 2026-09-23 in `docs/design/README.md` names the end condition.
 
 ## Rules any change has to satisfy
 

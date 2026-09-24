@@ -94,7 +94,7 @@
 <figcaption>两条分区路线在 <code>ColumnBinding</code> 之后就没有分别。橙色是两条线唯一不同的地方。</figcaption>
 </figure>
 
-<p>分发在 <code>MilvusPartitionReaderFactory</code>,只按出口选:默认列式,<code>milvus.read.columnar=false</code> 或带向量检索时走行式;不再按分区类型分支。落到不是 <code>MilvusInputPartition</code> 的分区就抛
+<p>分发在 <code>MilvusPartitionReaderFactory</code>,只按出口选:默认列式,<code>milvus.read.columnar=false</code> 走行式;不再按分区类型分支。向量检索不经扫描出口(见<a href="#rest">第七节</a>)。落到不是 <code>MilvusInputPartition</code> 的分区就抛
 <code>IllegalArgumentException</code>。</p>
 
 <table>
@@ -179,8 +179,8 @@ L0 是删除段而不是数据段，按删除描述保留，不进入数据 read
 快照元数据提供 segment id、partition id 和 base path，规划不从目录层级反推这些 id。
 看到 <code>insert_log</code> 不能判断存储版本；V2 列组与 V3 段目录都可以位于该前缀下。</p>
 
-<p>全仓唯一解析 Milvus event 格式的地方是 <code>core.delete.DeltaLogReader</code>,
-它在 executor 上读取任务描述的删除文件，两条存储线共用。</p>
+<p>Milvus event 封装只由 <code>core.codec.BinlogCodec</code> 解析,<code>core.delete.DeltaLogReader</code>
+与持久化索引解码(<code>core.codec.IndexFileCodec</code>)共用它;<code>DeltaLogReader</code> 在 executor 上读取任务描述的删除文件，两条存储线共用。</p>
 
 <h2 id="gap">四、当前边界</h2>
 
@@ -249,7 +249,9 @@ SegmentReaderRegistry.open(task, schema, neededColumns, columnNameFor, allocator
 <code>SegmentReadTask</code>，随 Spark 分区序列化到 executor。<code>SegmentReaderRegistry</code> 在打开
 原生 reader 时把 <code>batchMaxRows</code> 映射为
 <code>reader.record_batch_max_rows</code>，把 <code>batchMaxBytes</code> 映射为
-<code>reader.record_batch_max_size</code>；类型化值覆盖原始属性包中同名键，避免绕过 driver 校验。</p>
+<code>reader.record_batch_max_size</code>；类型化值覆盖原始属性包中同名键，避免绕过 driver 校验。同一处还固定写入
+<code>reader.parquet.prebuffer.lazy=false</code> 与按 <code>batchMaxBytes</code> 切成 8 个区间的
+<code>reader.parquet.prebuffer.range_size_limit</code>（决策 31，见 <a href="storage-io.html#upstream-jni">storage-io 第六节</a>）。</p>
 <table>
 <tr><th>用户 option</th><th>默认值</th><th>生效点</th></tr>
 <tr><td><code>milvus.read.batch.max.rows</code></td><td>8192</td><td>原生 reader 每批最大行数</td></tr>
@@ -370,9 +372,9 @@ R6 的 Spark V2 谓词按<a href="expressions.html">独立设计</a>只在普通
 <code>Materialized</code> 装一份现成的 plan,driver 不再产出(它曾把主键 map 序列化进每个分区,README 第 1 节列的 1.x 代价之一)。
 两个 case 都在,迁移就是换了 planner 产出哪一种,没改这个类型。
 spark 层的两个 <code>InputPartition</code> 已经改成携带它:
-<code>MilvusV3InputPartition</code> 从 12 个字段降到 7 个,
-<code>MilvusV2InputPartition</code> 从 9 个降到 3 个,
-留在分区上的只有 spark 侧与向量检索特有的那些。
+<code>MilvusV3InputPartition</code> 从 12 个字段降到今天的 3 个(<code>task</code>、<code>partitionName</code>、<code>milvusOption</code>),
+<code>MilvusV2InputPartition</code> 从 9 个降到 2 个(<code>task</code>、<code>milvusOption</code>),
+分区上不再有向量检索字段。
 <strong>随之有一个产品可见的行为变化</strong>:
 <code>StorageProperties.from</code> 从每个 task 的 reader 构造里移到规划期跑一次,
 所以存储配置不全的读现在在规划期就失败,不再是每个 task 各失败一次。</li>
@@ -380,7 +382,7 @@ spark 层的两个 <code>InputPartition</code> 已经改成携带它:
 <li><s>规划本身进 <code>core.read.plan</code>。</s>已完成(#12)。
 段列表怎么变成任务这段计算原来是 spark 层的 <code>SnapshotPartitions.build</code>,
 现在是 <code>ReadPlan.of</code>,输入输出全是 core 类型;<code>MilvusScan.inputPartitions</code>
-只把任务包成两种 <code>InputPartition</code>,加上向量检索、分区名、选项。
+只把任务包成两种 <code>InputPartition</code>,加上分区名与规范化选项。
 纯搬,行为不变:规划的 50 个用例一个断言没改。</li>
 
 <li><s>删除读取下沉 executor。</s>已完成(#13)。driver 上只剩 <code>DeleteFileListing.of</code>:
@@ -429,11 +431,11 @@ backfill 分支走已有的 <code>BatchUpdateManifest</code>,可以做;append �
 
 <h2 id="debt">九、欠的两笔</h2>
 <ol>
-<li><strong>per-batch reader 是过渡实现。</strong>结束条件是上游从
-<code>libmilvus-storage</code> 导出 <code>loon_record_batch_reader_*</code>,见
-<a href="storage-access.html#reqs">storage-access 需求 7</a>。在那之前
-<code>native-storage</code> 依赖 Arrow C++,而 Arrow C++ 没有稳定 ABI——头文件必须与
-<code>libmilvus-storage</code> 静态链进去的那份一致,不一致编译不报错、运行时崩。</li>
+<li><s><strong>per-batch reader 是过渡实现。</strong></s>已结清。结束条件是上游从
+<code>libmilvus-storage</code> 导出 <code>loon_record_batch_reader_*</code>(<a href="storage-access.html#reqs">storage-access 需求 7</a>),
+上游 <code>ffi_jni.h</code> 已导出 <code>loon_record_batch_reader_new / read_next / destroy</code>,2026-09-16 起连接器直接用上游
+<code>libmilvus-storage-jni</code> 的逐批 reader;<code>native-storage</code> 不再含 C++ 源码,也不再依赖 Arrow C++
+(<a href="storage-io.html#upstream-jni">storage-io 第六节</a>)。</li>
 <li><strong>CI 不构建原生库。</strong>所以每一个真正调 C 的套件在 CI 上都会 cancel:
 读 UAT 段、写回读、多文件列组、切片回归,全部只在开发机上跑过。
 这是目前最大的覆盖缺口。</li>

@@ -8,9 +8,10 @@ import sbt.Keys._
   */
 object Modules {
 
-  /** Native libraries are `.dylib` under `native/darwin-<arch>/` on macOS and
-    * `.so` under `native/linux-<arch>/` on Linux; the loaders pick the
-    * directory, the build only has to name the right environment variable.
+  /** The JVM's signal-chaining library is preloaded through
+    * `DYLD_INSERT_LIBRARIES` (`libjsig.dylib`) on macOS and `LD_PRELOAD`
+    * (`libjsig.so`) elsewhere; the build only has to name the right environment
+    * variable.
     */
   val isMacOS: Boolean =
     System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("mac")

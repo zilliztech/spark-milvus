@@ -3,14 +3,20 @@ package com.zilliz.milvus.storage
 /** Vector execution and its buffers, exclusions and per-segment top-k.
   *
   * Main types: SegmentSearch with ExactScan and IndexProbe, SearchPlan,
-  * TopKMerger, CandidateBytes, QueryMatrix, KnowhereBuffers. SearchPlan cuts a
-  * search into one task per segment set and query range and TopKMerger keeps
-  * each query's best k, in a task and again in the Spark aggregation.
-  * KnowhereBuffers hands one Arrow batch of a dense vector column to Knowhere,
-  * as it lies when the layout allows and copied once otherwise. IndexWriter
-  * gathers a segment's vectors into one buffer, builds over it and hands over
-  * what Knowhere serialized. A task loads its segment's index once and closes
-  * it; there is no cross-task index cache.
+  * TopKMerger, CandidateBytes, QueryMatrix, KnowhereBuffers, MachineResources,
+  * IndexWriter. SearchPlan cuts a search into one task per segment set and
+  * query range; TopKMerger keeps each query's best k in a task, and
+  * CandidateBytes.merge joins the tasks' packed answers in the Spark merge
+  * stage. MachineResources reads this machine's memory limit from cgroup and
+  * /proc/meminfo, which local mode plans against. KnowhereBuffers hands one
+  * Arrow batch of a dense vector column to Knowhere, as it lies when the layout
+  * allows and copied once otherwise. IndexWriter gathers a segment's vectors
+  * into one buffer, builds over it and hands over what Knowhere serialized. A
+  * task loads its segment's index once and closes it; there is no cross-task
+  * index cache. IndexProbe.Pipeline overlaps collecting one group's answer with
+  * the next group's search, and SegmentSearch.Prefetcher opens the next
+  * segment's source on one background thread inside the task; neither survives
+  * the task.
   *
   * This package keeps the computation only (docs/design/architecture/
   * vector-search.html sections 1-2). SearchPlan splits the query set into query

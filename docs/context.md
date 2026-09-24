@@ -9,7 +9,8 @@ follow the pointer when you need it.
 | Path | What it is | Why it matters here |
 |---|---|---|
 | `milvus-proto` | The Milvus protobuf definitions | `common.proto` and `schema.proto` are generated into `core`, the five service files into `client`. Milvus data's schema *is* `schema.proto`: the Milvus `TableFormat` uses it directly and maps it to the format-neutral schema of `TableVersion` (column ids, Arrow types, vector layouts) instead of copying it. |
-| `milvus-storage` | The native storage library, also known as Loon | Supplies the `loon_*` C interface that `native-storage` wraps, and ships its own Python bindings, which is why Ray does not need anything from us for the storage half. |
+| `milvus-storage` | The native storage library, also known as Loon | Supplies the `loon_*` C interface that `native-storage` wraps, and ships its own Python bindings, which is why Ray does not need anything from us for the storage half. Until upstream takes decision 31's commit, `.gitmodules` fetches it from the fork `Thor-ChenBiao/milvus-storage`. |
+| `knowhere` | The vector index library, with the C ABI, JNI and Java API of PR #1829 | `native-vector` compiles its Java API and the unified native bundle builds its engines; `.gitmodules` fetches it from `LawrenceTL92/knowhere-contrib`, branch `codex/knowhere-jni-pr`, and the gitlink fixes the revision. |
 
 ## Repositories expected alongside this one
 
@@ -30,7 +31,7 @@ publication scope. The initial JNI delivery covers generic index operations,
 brute-force search and resource management. Knowhere's Cardinal adapter does not automatically build
 these JNI sources. The [JNI design](design/architecture/knowhere-jni.html#cardinal-reference)
 records the reference commit, deferred operation mapping and proposed tests;
-the [dependency build design](design/engineering/native-dependencies.html)
+the [native build design](design/engineering/build.html)
 records how actual backend revisions and artifacts are locked. Source access
 does not imply that the implementation is already part of the public Knowhere
 build or that an existing Java artifact has been verified.

@@ -2,7 +2,7 @@
 
 **Status:** Implemented
 **Audience:** Milvus / Spark connector / storage-v2 engineers
-**Last updated:** 2026-08-27
+**Last updated:** 2026-09-24 (paths follow the 2.0 module layout)
 
 ## 1. Background & Goals
 
@@ -127,7 +127,7 @@ only when `partition_id != -1`. Two path forms are produced:
 
 ## 4. Changes
 
-### 4.1 `src/main/scala/MilvusOption.scala`
+### 4.1 `spark-base/src/main/scala/com/zilliz/spark/connector/options/MilvusOption.scala`
 
 - New option `MilvusOption.BackupDir = "milvus.backup.dir"`.
 - New helpers `backupDir(options)`, `isBackupMode(options)`, and

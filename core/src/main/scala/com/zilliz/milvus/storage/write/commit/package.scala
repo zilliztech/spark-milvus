@@ -27,15 +27,16 @@ package com.zilliz.milvus.storage.write
   * job manifest, one per segment index (W6). `SnapshotWriter` turns a snapshot
   * and those records into the files that describe them: the snapshot JSON (the
   * shapes in `core.snapshot.json`) and one Avro segment manifest each, which
-  * this connector reads back through `SnapshotCatalog` (W8). Asking Milvus to
-  * restore such a snapshot into a new collection is not written yet.
-  * `core.snapshot` stays read-only.
+  * this connector reads back through `SnapshotCatalog` (W8). `SnapshotBundle`
+  * re-reads a written snapshot and checks every path against the root its
+  * metadata key implies; `spark.procedure.RestoreSnapshotProcedure` then asks
+  * Milvus to restore it into a new collection. `core.snapshot` stays read-only.
   *
   * Main types: JobManifest, CommittedSegment, CommittedIndex, Committer,
-  * CommitOutcome, Registration, StagingCleaner, SnapshotWriter, SnapshotTarget.
-  * Capabilities: W3, A4, A7, W6, W8 (see docs/design/capabilities.md). A7
-  * remains partial until native recursive directory deletion is available.
-  * Design: docs/design/README.md section 2.4 and
-  * docs/design/architecture/procedure.html section 3.3.
+  * CommitOutcome, Registration, StagingCleaner, SnapshotWriter, SnapshotTarget,
+  * SnapshotBundle. Capabilities: W3, A4, A7, W6, W8 (see
+  * docs/design/capabilities.md). A7 remains partial until native recursive
+  * directory deletion is available. Design: docs/design/README.md section 2.4
+  * and docs/design/architecture/procedure.html section 3.3.
   */
 package object commit

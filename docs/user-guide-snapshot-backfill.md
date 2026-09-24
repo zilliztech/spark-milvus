@@ -36,7 +36,7 @@ Use snapshot backfill when you need to:
 | Milvus server              | Milvus 3.0.0+ with snapshot support and the backfill commit management endpoint.                |
 | Object storage             | S3 / MinIO / GCS with S3-compatible endpoint. Must be accessible from both Milvus and Spark.    |
 | Spark / Java               | Spark 4.0.x built for Scala 2.13, with Java 21. Cluster mode on YARN, Kubernetes, or standalone. |
-| Connector JARs             | `spark-connector-assembly-*.jar`. It bundles the native `milvus-storage` resources copied into `native-storage/src/main/resources/native/`. |
+| Connector JARs             | `spark-connector-assembly-*.jar`. It carries the unified native bundle (milvus-storage and Knowhere libraries) selected at build time; see `native-build/README.md`. |
 | Parquet of new-field data  | Must contain the resolved join-key column, plus one column per new field.                      |
 | Network                    | Spark executors must reach the object store. Schema setup and snapshot creation use the Milvus SDK; result commit must reach the Proxy management HTTP endpoint. |
 
@@ -187,7 +187,7 @@ spark-submit \
   --class com.zilliz.spark.connector.apps.backfill.BackfillApp \
   --conf spark.executor.memory=8g \
   --conf spark.executor.memoryOverhead=8g \
-  spark-connector-assembly-<branch>-amd64-SNAPSHOT.jar \
+  spark-connector-assembly-2.0.0-<branch>-<arch>-SNAPSHOT.jar \
   --snapshot   s3a://bucket/snapshots/123/metadata/456.json \
   --parquet    s3a://bucket/input/new_fields.parquet \
   --s3-endpoint s3.us-west-2.amazonaws.com \
@@ -411,10 +411,11 @@ primary S3 config is reused for the input read.
 
 Common Spark Operator gotchas:
 
-- **Native libraries.** The connector's assembly JAR bundles native `.so`s,
-  but Spark Operator templates may strip `LD_LIBRARY_PATH`. Make sure it
-  includes `native-storage/src/main/resources/native/linux-x86_64` (or the extracted
-  location inside the container).
+- **Native libraries.** The connector's assembly JAR carries the unified
+  native bundle, which `native-runtime` verifies and extracts once per JVM;
+  no `LD_LIBRARY_PATH` entry is needed for it. Set
+  `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin` so
+  every executor extracts it at start (see `docs/reference-en.md`).
 - **IRSA.** Pass `--use-iam` and drop `--s3-access-key` / `--s3-secret-key`
   to use the service-account role.
 - **`mainClass`.** Always
