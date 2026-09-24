@@ -209,10 +209,8 @@ JVM 进程里，不需要集群。</li>
 <li><strong>JDK 21。</strong>Java 26 上每个起 <code>SparkSession</code> 的测试都会以
 <code>UnsupportedOperationException: getSubject is not supported</code> 中止——
 <code>Subject.getSubject</code> 被移除而 Spark 还在调。看起来像代码问题，不是。</li>
-<li><strong>原生库。</strong><code>make build-milvus-storage</code> 后
-<code>make copy-native-libs</code>，需要 conan。不建就只有两个用例失败
-（<code>MilvusStorageFFITest</code>、<code>MilvusStorageMultiFileGroupTest</code>），其余照跑。
-在 macOS 上已验证可用，产物 <code>libmilvus-storage-jni.dylib</code>；
+<li><strong>原生库。</strong><code>make native-bundle</code> 编出统一原生包，需要 Conan、CMake 与 Rust；
+<code>make package</code> 与 <code>make test</code> 自动选中它。不编的话，需要原生库的用例自行取消，其余照跑。
 构建前提与产物尺寸见 <a href="../../contributing.md">contributing.md</a>。</li>
 <li><strong>组合 B 还要一个 MinIO</strong>，监听 9000，建好桶。
 <code>integration-4.0</code> 的用例假定端点 <code>localhost:9000</code>、凭证

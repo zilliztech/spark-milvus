@@ -69,7 +69,7 @@ Conan 自己的 settings 必须接受 profile 声明的编译器版本。`profil
 
 ## 3 两种构建方案
 
-**Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 `build.py`，产物相同。** 构建不做交叉编译，每个平台的 JAR 在同平台机器上编。`build.py` 由 `platforms.host_platform()` 判断主机平台，缺 profile 或适配器时报出缺哪一个；Makefile 按 `native-build/profiles/` 里有没有该平台的 profile 决定走统一包还是只有 storage 的旧入口，`NATIVE_BUNDLE` 指向编好的包时跳过原生编译。
+**Docker 构建是参考实现，本机构建是它的复制品；两者跑同一份 `build.py`，产物相同。** 构建不做交叉编译，每个平台的 JAR 在同平台机器上编。`build.py` 由 `platforms.host_platform()` 判断主机平台，缺 profile 或适配器时报出缺哪一个；Makefile 只有统一包一条路径，`NATIVE_BUNDLE` 指向编好的包时跳过原生编译。
 
 | 方案 | 命令 | 前置条件 | 产物与限制 | 用在哪 |
 |---|---|---|---|---|
@@ -110,7 +110,7 @@ scripts/package-native.py       核对 provenance 后打 JAR
 
 CMake 文件按引擎分而不按平台分，平台差异用 `CMAKE_SYSTEM_NAME` 与 `APPLE` 条件表达在同一目标内，避免同一个目标有两份定义。Cardinal 的源码清单按架构分：`cardinal/Sources.cmake` 是公共列表加 x86_64、aarch64 各一份，照各 tag 自己 `CMakeLists.txt` 里的 x86_64 与 arm 分支写，`Cardinal.cmake` 按 `CMAKE_SYSTEM_PROCESSOR` 选，并给 AVX-512 或 SVE 内核加上游给它们的逐文件 flag。可执行格式的差异集中在 `platforms.py` 的适配类里：二进制检视与运行时查找路径改写（`readelf`/`patchelf` 对 `otool`/`install_name_tool` 加重新签名）、库文件名与版本位置、系统库集合、JVM 信号链的 preload 变量（`LD_PRELOAD` 对 `DYLD_INSERT_LIBRARIES`）、工具链、构建环境里要去掉的加载器变量（Mach-O 的 `DYLD_LIBRARY_PATH`：它排在库记录的位置之前，Conan 的同名库会顶替系统库），以及这个平台是否构建 DiskANN。三条规则声明为 ELF 专属而不翻译：系统库最低符号版本要求依赖 ELF 的符号版本化，GNU_STACK 只在 ELF 上有定义，`ldd -r` 在 macOS 上没有等价物。跨平台共同的判据是两个全新 JVM 的双向加载，逐库格式检查降为各平台自己的诊断。`CMakeLists.txt` 开头接受 Linux 与 macOS 上的 x86_64 与 aarch64；`build.py` 到 CMake 之前先检查该平台的 profile 与 `platforms.py` 适配器是否存在。
 
-**哪些平台走统一构建，由 `native-build/profiles/` 里有没有它的 profile 决定，Makefile 与 Docker 读同一处。** 加一个平台等于加一份 profile 和一份适配实现，不改构建入口。没有 profile 的平台仍走只有 storage 的旧入口（`make build-milvus-storage && make copy-native-libs`），或显式用 `NATIVE_BUNDLE` 指定一个同平台的预置包，由 sbt `verifyNativeBundle` 按清单核对平台。平台之间的功能差异写在 `manifest.properties` 的功能开关里，今天只有 `with_diskann`：DiskANN 唯一的对齐读实现基于 libaio 与 io_uring，macOS 构建关掉它，而当前声明的 R4、V1、V5 都不依赖它。
+**哪些平台能从源码构建，由 `native-build/profiles/` 里有没有它的 profile 决定，`build.py` 读这一处。** 加一个平台等于加一份 profile 和一份适配实现，不改构建入口。没有 profile 的平台不能从源码构建（`build.py` 报出缺的 profile），只能显式用 `NATIVE_BUNDLE` 指定一个同平台的预置包，由 sbt `verifyNativeBundle` 按清单核对平台。平台之间的功能差异写在 `manifest.properties` 的功能开关里，今天只有 `with_diskann`：DiskANN 唯一的对齐读实现基于 libaio 与 io_uring，macOS 构建关掉它，而当前声明的 R4、V1、V5 都不依赖它。
 
 ### 构建工作目录：`NATIVE_WORK_DIR`，默认 `target/native-build/<平台>/`
 

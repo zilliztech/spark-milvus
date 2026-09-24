@@ -597,7 +597,7 @@ milvus-storage 与 Knowhere 的精确 revision 分别由 superproject gitlink �
 <li>平台 JAR 使用 <code>native/milvus/1/&lt;platform&gt;/</code>，包含两个 JNI、两个引擎、Cardinal 插件、公共依赖、版本名别名、许可证、manifest 与规范化 provenance。打包前检查 RPATH、DT_NEEDED、未解析符号、五个立即加载入口和 C API acceptance。</li>
 <li><code>native-runtime</code> 校验平台、源码 revision、构建特性、文件集合、别名与 SHA-256，再把整套资源一次解压到同一个私有目录。<code>NativeStorageLibrary</code> 与 <code>NativeVectorLibrary</code> 把该目录中的 JNI 绝对路径交给各自上游加载器；上层不单独解压或覆盖同名依赖。</li>
 <li><code>META-INF/milvus/knowhere-runtime.properties</code> 从统一包的 provenance 生成，报告实际构建是否包含 Cardinal。JVM 启动前仍须预加载自身 JRE 的 <code>libjsig</code>。</li>
-<li>旧的独立 storage/Knowhere 平台 JAR、<code>storage-compatibility*.properties</code> 合并和 <code>native/knowhere/1/</code> 布局只属于迁移前产物，统一包不能同时携带这些资源。</li>
+<li>旧的独立 storage/Knowhere 平台 JAR、<code>storage-compatibility*.properties</code> 合并和 <code>native/knowhere/1/</code> 布局已从构建中删除，统一包是原生库的唯一来源。</li>
 </ol>
 <p>旧 gitlink 组合曾完成真实 Cardinal HNSW/COSINE 查询验收；当前 storage <code>7eb1357</code> 与 Knowhere <code>1fff20d</code> 必须由统一构建重新产出并完成加载顺序、assembly 与真实文件复验。构建机制和验收项见<a href="../engineering/build.html">依赖库与构建方案</a>。</p>
 

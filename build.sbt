@@ -62,11 +62,22 @@ lazy val nativeRuntime = Project("native-runtime", file("native-runtime"))
 
 lazy val nativeStorage = Project("native-storage", file("native-storage"))
   .dependsOn(nativeRuntime)
-  .settings(KnowhereBuild.storageSettings)
   .settings(
     name := "native-storage",
     moduleName := "spark-milvus-native-storage",
     Modules.sparkFreeModuleSettings,
+    // Native libraries reach the build only through the unified bundle. A
+    // native/ directory here is left by the storage-only build that copied
+    // libraries into the sources; packaging it would put a second, older copy
+    // of the storage libraries on the classpath.
+    Compile / unmanagedResources := {
+      val stale = (Compile / resourceDirectory).value / "native"
+      require(
+        !stale.exists,
+        s"Delete $stale: it holds libraries from the removed storage-only native build"
+      )
+      (Compile / unmanagedResources).value
+    },
     // Compile the pinned upstream API against this build's Scala version.
     // Importing upstream's sbt project would also import its Spark/Arrow pins.
     Compile / sourceGenerators += Def.task {

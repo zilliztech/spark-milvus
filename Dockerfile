@@ -165,14 +165,11 @@ RUN --mount=type=cache,id=spark-milvus-coursier,target=/root/.cache/coursier,sha
         aarch64|arm64) native_platform=linux-aarch64 ;; \
         *) echo "Unsupported build architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
-    set --; \
-    if [ -n "${NATIVE_BUNDLE:-}" ] || [ "${native_platform}" = linux-x86_64 ]; then \
-        native_bundle="${NATIVE_BUNDLE:-/workspace/target/native-build/${native_platform}/milvus-native-${native_platform}.jar}"; \
-        native_bundle="$(readlink -f "${native_bundle}")"; \
-        test -s "${native_bundle}"; \
-        test -s "${native_bundle}.properties"; \
-        set -- "-Dmilvus.native.bundle=${native_bundle}"; \
-    fi; \
+    native_bundle="${NATIVE_BUNDLE:-/workspace/target/native-build/${native_platform}/milvus-native-${native_platform}.jar}"; \
+    native_bundle="$(readlink -f "${native_bundle}")"; \
+    test -s "${native_bundle}"; \
+    test -s "${native_bundle}.properties"; \
+    set -- "-Dmilvus.native.bundle=${native_bundle}"; \
     sbt "$@" "compile; Test/compile; integration40/Test/compile; assembly"; \
     assembly_jar="$(find target/scala-2.13 -maxdepth 1 -type f -name 'spark-connector-assembly-*.jar' -print -quit)"; \
     test -n "${assembly_jar}"; \
@@ -180,25 +177,19 @@ RUN --mount=type=cache,id=spark-milvus-coursier,target=/root/.cache/coursier,sha
     entries_file="$(mktemp)"; \
     manifest_file="$(mktemp)"; \
     jar tf "${assembly_jar}" > "${entries_file}"; \
-    if [ "$#" -gt 0 ]; then \
-        resource_prefix="native/milvus/1/${native_platform}/"; \
-        grep -Fqx "${resource_prefix}manifest.properties" "${entries_file}"; \
-        unzip -p "${assembly_jar}" "${resource_prefix}manifest.properties" > "${manifest_file}"; \
-        for entry in libmilvus-storage-jni.so libknowhere_jni.so; do \
-            if ! grep -Fqx "${resource_prefix}${entry}" "${entries_file}"; then \
-                canonical="$(awk -F= -v key="alias.${entry}" '$1 == key { print $2 }' "${manifest_file}")"; \
-                test -n "${canonical}"; \
-                grep -Fqx "${resource_prefix}${canonical}" "${entries_file}"; \
-            fi; \
-        done; \
-        if grep -Eq '^native/(knowhere/|linux-[^/]+/)' "${entries_file}"; then \
-            echo "Assembly unexpectedly contains legacy native resources" >&2; \
-            exit 1; \
+    resource_prefix="native/milvus/1/${native_platform}/"; \
+    grep -Fqx "${resource_prefix}manifest.properties" "${entries_file}"; \
+    unzip -p "${assembly_jar}" "${resource_prefix}manifest.properties" > "${manifest_file}"; \
+    for entry in libmilvus-storage-jni.so libknowhere_jni.so; do \
+        if ! grep -Fqx "${resource_prefix}${entry}" "${entries_file}"; then \
+            canonical="$(awk -F= -v key="alias.${entry}" '$1 == key { print $2 }' "${manifest_file}")"; \
+            test -n "${canonical}"; \
+            grep -Fqx "${resource_prefix}${canonical}" "${entries_file}"; \
         fi; \
-    else \
-        for entry in libmilvus-storage.so libmilvus-storage-jni.so; do \
-            grep -Fqx "native/${native_platform}/${entry}" "${entries_file}"; \
-        done; \
+    done; \
+    if grep -Eq '^native/(knowhere/|linux-[^/]+/)' "${entries_file}"; then \
+        echo "Assembly contains native resources outside the unified bundle" >&2; \
+        exit 1; \
     fi; \
     rm -f "${entries_file}" "${manifest_file}"; \
     sha256sum "${assembly_jar}"; \

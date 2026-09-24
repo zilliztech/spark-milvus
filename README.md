@@ -187,10 +187,9 @@ sbt integration40/test                   # integration tests, needs Milvus and M
 
 The fat jar only loads Milvus segments when it carries the native
 `milvus-storage` libraries for the platform it runs on. `make package` builds
-and bundles them; on Linux and macOS, x86_64 and aarch64 alike, that is the
-unified Storage/Knowhere bundle, selected by the presence of the platform's
-profile under `native-build/profiles/`. The macOS
-toolchain and the Conan fix-ups it needs are in
+them into the unified Storage/Knowhere bundle from the platform's profile under
+`native-build/profiles/`, on Linux and macOS, x86_64 and aarch64 alike. The macOS
+toolchain and its Conan configuration are in
 [contributing.md](docs/contributing.md#macos).
 
 `sbt compile` builds all twelve modules. To work on one, prefix the command with

@@ -46,16 +46,6 @@ object NativePlatform {
       "lib" + base + version.map("." + _).getOrElse("") + ".dylib"
     else "lib" + base + ".so" + version.map("." + _).getOrElse("")
 
-  /** Matches one shared library file name on this platform, versioned or not.
-    */
-  def libraryPattern(
-      platform: String,
-      stem: String = "[A-Za-z0-9_+.-]+"
-  ): String =
-    if (isWindows(platform)) stem + "\\.dll"
-    else if (isDarwin(platform)) stem + "(?:\\.[0-9][^.]*)*\\.dylib"
-    else stem + "\\.so(?:\\..*)?"
-
   /** The system zlib the JVM has already loaded before JNI initialization; a
     * second copy in the bundle would leave the process's provider undecided.
     */
@@ -77,12 +67,6 @@ object NativePlatform {
     libraryName(platform, "knowhere_jni"),
     libraryName(platform, "knowhere_c", Some("1")),
     libraryName(platform, "knowhere")
-  )
-
-  /** The storage engine and its JNI library, which every bundle carries. */
-  def storageEntries(platform: String): Vector[String] = Vector(
-    libraryName(platform, "milvus-storage"),
-    libraryName(platform, "milvus-storage-jni")
   )
 
   /** The Cardinal plugins, present only in a Cardinal-enabled build. */

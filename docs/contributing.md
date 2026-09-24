@@ -91,7 +91,7 @@ are named settings in the same file.
 | `project/Versions.scala` | Library versions and the Spark line matrix |
 | `project/Dependencies.scala` | Dependency coordinates, scopes and dependency groups |
 | `project/Modules.scala` | Shared compile/test settings, checks and Scala cross-version settings |
-| `project/KnowhereBuild.scala` | Pinned upstream API compilation, native artifact verification and packaged JNI smoke |
+| `project/KnowhereBuild.scala` | Pinned upstream API compilation, the Cardinal flag taken from the bundle, and the packaged JNI smoke |
 | `project/NativeBundle.scala` | Unified native resource selection, source pins, manifest and ELF validation |
 | `project/plugins.sbt` | Build plugins and their meta-build dependencies |
 
@@ -135,14 +135,12 @@ runner contract, so chart linting is not evidence that the live suite ran.
 
 ## Building the native library
 
-For a bundle containing both storage and Knowhere, use the
-[unified native build](#unified-native-bundle) below. The standalone migration
-targets `make build-milvus-storage && make copy-native-libs` build and copy
-upstream `libmilvus-storage`, `libmilvus-storage-jni` and their dependencies
-under `native-storage/src/main/resources/native/<platform>/`. The JNI methods
-and `NativeLibraryLoader` belong to milvus-storage. The former Connector
-`libnative-storage-jni`, its C++ sources and `build-native-jni` target have been
-removed. Building requires Conan, CMake and a Rust toolchain.
+The native libraries come from one build: the
+[unified native bundle](#unified-native-bundle) below compiles milvus-storage
+and Knowhere, their upstream JNI libraries and one shared dependency set into a
+platform JAR. The JNI methods and `NativeLibraryLoader` belong to milvus-storage
+and Knowhere; this repository compiles their Java APIs and packages their
+libraries. Building requires Conan, CMake and a Rust toolchain.
 
 Initialize the pinned native source submodules before compiling:
 
@@ -168,18 +166,6 @@ unit, native load-order and real UAT snapshot/index results. Current results
 and remaining JNI diagnostics and packaging limitations are recorded in
 [the storage I/O validation state](design/architecture/storage-io.html#state).
 
-Upstream milvus-storage supports local macOS builds: `cpp-mac-ci.yml` builds
-on `macos-26` with conan 2.25.1, CMake 3.31.10 and LLVM 18 from brew. The
-storage-only path below was built and run on an Apple Silicon Mac (macOS 26,
-Apple clang 21, JDK 21) on 2026-09-19: the native suites pass, and a Spark
-4.0.1 job read a 1M-row Storage V3 snapshot from a Zilliz Cloud bucket through
-the packaged `native/darwin-aarch64/` libraries.
-
-That path carries storage alone. Knowhere is built on macOS by the
-[unified native bundle](#unified-native-bundle), which both macOS platforms
-select by default, so the storage-only targets below are for a platform whose
-profile does not exist yet or a host that cannot run the source build.
-
 ### macOS
 
 Apple silicon and Intel Macs take the same steps. The compiler has to be Apple
@@ -188,8 +174,7 @@ uses `std::atomic_ref`, which libc++ provides from LLVM 19. On an Intel Mac,
 `darwin-x86_64` builds folly against the macOS 14.5 SDK that the Command Line
 Tools install, so the Command Line Tools must be present even next to Xcode.
 
-One toolchain serves both native paths. The pinned CMake 3 lives in a virtual
-environment of its own because a current CMake 4 rejects the
+The pinned CMake 3 lives in a virtual environment of its own because a current CMake 4 rejects the
 `cmake_minimum_required` of several pinned recipes, and because
 `[platform_tool_requires]` in each profile names the version that must be on
 `PATH`:
@@ -213,39 +198,12 @@ make native-bundle NATIVE_JOBS=6 && make package   # storage and Knowhere
 
 `NATIVE_JOBS` is the parallel compile width; the whole dependency graph is
 built from source here, because the Conan remote has no macOS binary packages.
-`settings_user.yml` is the only Conan change the unified build needs: the
+`settings_user.yml` is the only Conan configuration the build needs: the
 profile names the Apple clang version it was validated with, and Conan's stock
-`settings.yml` stops a few releases behind Xcode. The other two edits
-`scripts/macos_conan_fixups.sh` makes belong to the storage-only path below and
-must not be applied to a bundle build, whose provenance records upstream recipes
-it has not modified: the pinned boost and avro recipes each list a working
-mirror after their dead first URL, and thrift 0.17 and arrow compiled unpatched
-against the macOS 26 SDK's libc++.
-
-The storage-only targets remain available for a host that cannot run the source
-build:
-
-```bash
-make build-milvus-storage && make copy-native-libs && make package
-```
-
-`scripts/macos_conan_fixups.sh` edits the Conan cache once: it accepts the
-installed Apple clang version (Conan's `settings.yml` stops a few releases
-behind Xcode), points the avro and boost recipes at download locations that
-still exist (the same edits the Dockerfile makes), and adds
-`TEnumIterator::operator==` to thrift 0.17, without which arrow's generated
-`parquet_types.cpp` does not compile against the libc++ that ships with
-Xcode 16 and later.
-
-`make copy-native-libs` runs `scripts/patch_native_macos.sh` on macOS where
-Linux runs `patch_native_runpath.sh`: every bundled dylib gets an `@rpath/`
-install name, dependency references to shipped libraries are rewritten to
-`@rpath/`, the Conan cache rpaths are dropped for `@loader_path` (or
-`@loader_path/..` under `ossl-modules/` and `engines-3/`), and each library is
-re-signed, since `install_name_tool` invalidates the ad-hoc signature and dyld
-on Apple Silicon refuses an image whose signature no longer matches.
-`NativeLibraryLoader` extracts all of them into one temporary directory, so the
-sibling lookup through `@loader_path` is what makes the packaged JNI loadable.
+`settings.yml` stops a few releases behind Xcode. The pinned recipes are used
+unmodified, and the build's provenance records that: the boost and avro recipes
+each list a working mirror after their dead first URL, and thrift 0.17 and arrow
+compile unpatched against the macOS SDK's libc++.
 
 The JVM's signal-chaining library is preloaded with `DYLD_INSERT_LIBRARIES`
 (`libjsig.dylib`) where Linux uses `LD_PRELOAD` (`libjsig.so`); both the
@@ -259,42 +217,16 @@ bridge. The Makefile exports `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so cargo's
 git fetches of `lance` and `vortex` honor your `git` configuration (SSH keys,
 `insteadOf` rewrites, proxies).
 
-### Two things that will bite
+### The artifact is large
 
-**Pin a CMake 3.x somewhere durable.** Several packages in the dependency chain
-cap their CMake policy range below 4, so the conan profile has to set
-`tools.cmake:cmake_program`. A path under `/tmp` disappears on cleanup and the
-build then fails with `cmake: No such file or directory` before compiling
-anything — the error names the missing binary, not the real problem.
-
-**The artifact is large.** An earlier macOS build measured
-`libmilvus-storage.dylib` at 481 MB, including 162 MB of symbols, and its
-upstream JNI bridge at 177 KB. Those measurements are not the size of the
-current candidate. Native builds include Arrow, Parquet, cloud SDKs and the
-Rust bridge; the dependency closure also contains shared libraries. Validate
-the complete packaged dependency set rather than assuming fully static linkage.
-`native-storage/src/main/resources/native/` is gitignored, so none of this is
-committed. Section 4.2 of
+An earlier macOS build measured `libmilvus-storage.dylib` at 481 MB, including
+162 MB of symbols, and its upstream JNI bridge at 177 KB. Those measurements are
+not the size of the current candidate. Native builds include Arrow, Parquet,
+cloud SDKs and the Rust bridge; the dependency closure also contains shared
+libraries. Validate the complete packaged dependency set rather than assuming
+fully static linkage. Section 4.2 of
 [storage-access.html](design/architecture/storage-access.html) covers what the
 size costs.
-
-### What the Makefile does per platform
-
-The Makefile derives the library suffix and resource platform from `uname`.
-Both platforms copy the upstream engines from `Release` and Conan dependencies
-from `Release/libs`, preserving the `ossl-modules` and `engines-3` subdirectories.
-
-| | macOS | Linux |
-|---|---|---|
-| Suffix | `.dylib` — `add_library(... SHARED)` sets no `SUFFIX` | `.so` |
-| Build output | `cpp/build/Release` and `cpp/build/Release/libs` | `cpp/build/Release` and `cpp/build/Release/libs` |
-| Resource path | `native/darwin-<arch>/` | `native/linux-<arch>/` |
-| Relocation | `scripts/patch_native_macos.sh`: `@rpath` names, `@loader_path` rpath, re-sign | `patch_native_runpath.sh`: `RUNPATH=$ORIGIN` |
-| Signal chaining | `DYLD_INSERT_LIBRARIES=$JAVA_HOME/lib/libjsig.dylib` | `LD_PRELOAD=$JAVA_HOME/lib/libjsig.so` |
-
-The upstream `NativeLibraryLoader` selects resources under
-`native/<platform>/`. A library copied directly into `native/` is outside that
-platform directory and cannot satisfy the packaged-library load.
 
 ## Unified native bundle
 
@@ -364,20 +296,17 @@ reviewed complete dependency lock in another build directory. See
 [native-build/README.md](../native-build/README.md) for the directory layout and
 cache options.
 
-On a platform whose profile exists, `make all`, `package` and `quick-build` use
-the unified bundle; the Makefile reads the profile directory rather than naming
-platforms, so adding a platform is adding its profile and its adapter.
-`NATIVE_BUNDLE` selects an existing platform JAR and skips native
-compilation; otherwise `NATIVE_WORK_DIR` holds the build and Conan reuses
-compatible cached packages. All four platforms have a profile; one without a
-profile would keep the storage-only build when no bundle is selected. Any
-platform can consume a matching prebuilt unified bundle, which no profile
-cross-compiles. A prebuilt bundle must match the host, and `verifyNativeBundle`
-rejects one whose manifest names another platform.
-Docker uses the same `native-resources` target as Make. Both native build paths
-limit concurrency to `NATIVE_JOBS` (1..50) and preserve initialized submodule
-checkouts. The storage-only resource target always invokes the incremental
-build before copying, including when previous libraries already exist.
+`make all`, `package` and `quick-build` build the unified bundle and select it;
+adding a platform is adding its profile and its adapter, since `build.py` names
+whichever of the two is missing. `NATIVE_BUNDLE` selects an existing platform
+JAR and skips native compilation; otherwise `NATIVE_WORK_DIR` holds the build
+and Conan reuses compatible cached packages. Any platform can consume a matching
+prebuilt unified bundle, which no profile cross-compiles. A prebuilt bundle must
+match the host, and `verifyNativeBundle` rejects one whose manifest names
+another platform.
+Docker calls the `native-resources` target, which is `native-bundle`. The build
+limits concurrency to `NATIVE_JOBS` (1..50) and preserves initialized submodule
+checkouts.
 Docker keeps Conan packages, Cargo registry/Git downloads and ccache in locked
 BuildKit cache mounts, so a later build failure does not discard completed
 dependencies. Conan configuration is initialized inside the mount, including
@@ -423,15 +352,15 @@ are packaged together. Per-library diagnostics check Cardinal's two plugins
 with their declared Knowhere parent callbacks and other libraries individually.
 Those diagnostic results do not replace the JVM loading and functional tests.
 
-`milvus.native.bundle` and `knowhere.native.jar` are mutually exclusive. When a
-unified bundle is selected, the old storage resources do not enter the build
-classpath. A malformed bundle fails; it never falls back to those old resources.
-An explicit `knowhere.native.path` pointing elsewhere is rejected at runtime.
-The connector sets this property only during Knowhere initialization under a
-JVM-shared lock, then restores its prior value on success or failure. Multiple
-isolated copies of the Connector's JNI bindings in one JVM remain unsupported.
-Legacy input options and records below remain available during migration; their
-previous validation results do not validate a newly built bundle.
+The unified bundle is the only source of native libraries in the build. A
+malformed bundle fails the build. A `native/` directory under
+`native-storage/src/main/resources`, left by the storage-only build this
+repository no longer has, fails the build until it is deleted, so no second copy
+of the storage libraries reaches the classpath. An explicit
+`knowhere.native.path` pointing elsewhere is rejected at runtime. The connector
+sets this property only during Knowhere initialization under a JVM-shared lock,
+then restores its prior value on success or failure. Multiple isolated copies of
+the Connector's JNI bindings in one JVM remain unsupported.
 
 Storage uses the same explicit-path handoff. `NativeStorageLibrary` obtains the
 verified `libmilvus-storage-jni.so` path from `native-runtime`, temporarily sets
@@ -484,84 +413,15 @@ implement another C API or JNI bridge. The API JAR is cached under
 JDK and an initialized submodule, but does not download source or compile or
 load the native engine.
 
-Build the pinned upstream native engine explicitly on the target Linux
-architecture, using the prerequisites listed by the script:
-
-```bash
-JAVA_HOME=/path/to/jdk21 scripts/build-knowhere.sh build --jobs 2
-```
-
-For persisted Cardinal indexes, build that engine from the same pinned Knowhere
-revision and its pinned Cardinal tags:
-
-```bash
-JAVA_HOME=/path/to/jdk21 scripts/build-knowhere.sh build --jobs 16 \
-  --with-cardinal --cardinal-repository /path/to/authorized/cardinal-clone
-```
-
-On success this writes a separate `target/knowhere-native/<revision>/cardinal/<platform>`
-artifact and records `build.with_cardinal=true`, the Cardinal revisions and the
-actual CMake configuration. It does not replace the existing OSS artifact.
-The upstream Cardinal recipe uses `-march=native`; treat this build as a local
-verification artifact until CPU portability has been separately established.
-The connector derives `META-INF/milvus/knowhere-runtime.properties` from the
-selected, checksum-verified artifact's `build.with_cardinal` provenance field.
-`NativeVectorLibrary.RuntimeInfo.cardinalSupported()` exposes that feature;
-an arbitrary `knowhere.native.path` override does not establish Cardinal support.
-Validate the storage/Knowhere dependency combination before registering its hashes.
-
-The earlier `9dc2b8ad` checkout stopped at an upstream DiskANN exact-distance
-assertion when Cardinal used quantized refinement. That result remains
-historical: the current PR branch has changed the DiskANN tests and must be
-rebuilt and validated from its new gitlink before any native or real-data result
-is claimed. See the measured results and limitations in the
-[vector design](design/architecture/vector-search.html#interop).
-
-The gitlink now points at 29210a33, where the upstream DiskANN tests keep the
-exact check for OSS DiskANN and, in Cardinal builds, check ordering, recall and
-a 0.05 + 0.02 x distance tolerance instead (the C test through
-`KNOWHERE_WITH_CARDINAL`; `DiskAnnIT` through
-`-Dknowhere.test.approximateDistances=true`, which `scripts/build-knowhere.sh`
-passes only with `--with-cardinal`). Both `build-knowhere.sh` variants at that
-revision passed ctest, the JNI suite and `native-vector/knowhereSmoke` on Linux
-x86-64; the unified `native-build` bundle has not been rebuilt at this gitlink
-yet, so its validation is still due.
-
-`scripts/build-knowhere.sh import-ci` only accepts a CI artifact explicitly
-registered for the current gitlink. No artifact is registered for the current
-PR branch head, so use `build`. A successful path leaves the platform JAR and a
-`.jar.properties` provenance sidecar under
-`target/knowhere-native/<revision>/<platform>/`. The sidecar binds the JAR
-checksum to the submodule revision. Keep these files together.
-
-Select that absolute JAR path for a native smoke or an assembly:
-
-```bash
-sbt -Dknowhere.native.jar=/absolute/path/to/knowhere-jni-1.0.0-SNAPSHOT-linux-x86_64.jar \
-  native-vector/knowhereSmoke
-sbt -Dknowhere.native.jar=/absolute/path/to/knowhere-jni-1.0.0-SNAPSHOT-linux-x86_64.jar \
-  assembly
-```
-
-The selection is validated against the source pin, JAR checksum, platform,
-C ABI, manifest and library checksums. It is optional for ordinary reads;
-without it an assembly carries the Java API only, and requesting vector loading
-fails with a missing-platform-JAR error. Assembly preserves `io.knowhere` class
-names, upstream licenses and `native/knowhere/1/<platform>/` resources, and
-rejects conflicting Knowhere resources.
-
-When storage and Knowhere are packaged together, the build scans
-`native-vector/storage-compatibility*.properties`. Exactly one record must match
-the platform, storage engine SHA-256, full storage-native resource fingerprint
-and Knowhere platform JAR SHA-256; zero or
-multiple matches fail the build. Each record lists dependency hashes and audited
-SONAME aliases. The build generates storage's
-shared dependency resources from the original Knowhere dependency bytes, including
-their aliases and license records. This prevents the loaders from selecting
-different Folly binaries depending on load order. Original storage resources and
-the upstream Knowhere JAR remain unchanged. An unverified pair fails the combined
-build; validate both search/load orders and the full storage suite before
-registering another pair. Without Knowhere, ordinary storage resources are used.
+Cardinal comes from the same build: `make native-bundle
+NATIVE_BUILD_OPTIONS=--with-cardinal` compiles both pinned Cardinal revisions
+into the bundle, which records `with_cardinal=true`. The Cardinal sources use
+`-march=native`, so a Cardinal bundle needs a host with the build machine's
+instruction set. The connector derives
+`META-INF/milvus/knowhere-runtime.properties` from the selected bundle's
+`with_cardinal`; `NativeVectorLibrary.RuntimeInfo.cardinalSupported()` exposes
+that feature, and an arbitrary `knowhere.native.path` override does not
+establish Cardinal support.
 
 The loader reads
 Milvus binlog/Parquet payloads and optional `SLICE_META`, or a Cardinal raw
@@ -571,8 +431,7 @@ Each task owns and closes its index. There is no cross-task index cache.
 The historical Knowhere `9dc2b8ad` JNI migration and corrected native dependency
 build passed real UAT Cardinal HNSW queries against direct JNI results and an
 independent 100,000-row reference. Actual storage entry-library relocation and
-both native load orders also passed for that artifact. The current `1fff20db`
-gitlink requires a rebuilt native bundle and a fresh validation run. The complete
+both native load orders also passed for that artifact. The complete
 validation record, remaining third-party JNI diagnostics and packaging limitations are in
 [the storage I/O validation state](design/architecture/storage-io.html#state).
 Local OSS fixtures do not replace real-instance-data validation. Tests live in
@@ -582,10 +441,10 @@ the external `milvus-spark-demo` validation project.
 running `core.index.SegmentSearch` over the segment sets `SearchPlan` cut.
 Missing native libraries fail the query. Planning, packing and merge tests run
 in the ordinary suite. The explicit real-native check needs the selected
-platform JAR and the JRE's `libjsig`:
+unified bundle and the JRE's `libjsig`:
 
 ```bash
-sbt -java-home "$JAVA_HOME" -Dknowhere.native.jar=/absolute/path/to/platform.jar \
+sbt -java-home "$JAVA_HOME" -Dmilvus.native.bundle=/absolute/path/to/milvus-native-$platform.jar \
   "set core / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
   "set spark40 / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
   'spark40/Test/runMain com.zilliz.spark.connector.read.SegmentIndexSearchSmoke'

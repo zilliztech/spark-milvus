@@ -1,9 +1,9 @@
 name: CI
 
-# Builds every module and runs the unit tests. The native milvus-storage
-# libraries are not built here: that needs Conan 2 and Rust and takes far longer
-# than this job should (see the Dockerfile). The JNI Scala wrapper compiles
-# without them, so only the two suites that load the .so are excluded.
+# Builds every module, runs the unit tests and tests the native build's driver.
+# The native libraries themselves are not built here: that needs Conan 2 and
+# Rust and takes far longer than this job should (see the Dockerfile). Suites
+# that load them cancel themselves when they are absent.
 on:
   pull_request:
     branches: [main, refactor/v2]
@@ -31,6 +31,16 @@ jobs:
           cache: sbt
 
       - uses: sbt/setup-sbt@v1
+
+      # build.py, platforms.py, stage.py, the packaging script and the Makefile
+      # are tested without building anything native, in seconds. patchelf lets
+      # the ELF staging tests run instead of skipping.
+      - name: Test the native build driver and the Makefile
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq patchelf
+          python3 -m unittest discover -s native-build -p 'test_*.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
       - name: Check formatting
         run: sbt scalafmtCheckAll

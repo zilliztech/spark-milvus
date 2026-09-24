@@ -4,9 +4,7 @@ import java.net.URI
 import java.nio.file.{Files, StandardCopyOption}
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
-import java.util.jar.JarFile
 import java.util.Properties
-import scala.collection.JavaConverters._
 import scala.sys.process.{Process, ProcessLogger}
 
 import sbt._
@@ -18,75 +16,19 @@ object KnowhereBuild {
   val knowhereApiJar = taskKey[File](
     "Build the pinned upstream Knowhere Java 11 API JAR"
   )
-  val knowhereNativeJar = settingKey[Option[File]](
-    "Optional upstream platform JAR selected by -Dknowhere.native.jar"
-  )
-  val verifyKnowhereNative = taskKey[File](
-    "Require and validate the selected Knowhere platform JAR and source provenance"
-  )
   val knowhereSmoke = taskKey[Unit](
     "Run the real Knowhere JNI smoke with packaged JARs in a fresh JVM"
   )
   val knowhereRuntimeJar = taskKey[File](
     "Packaged shared native runtime used by the isolated JNI smoke"
   )
-  val knowhereStorageResources = taskKey[Seq[File]](
-    "Package the tested common native dependency binaries for storage and Knowhere"
-  )
-
-  val storageSettings: Seq[Setting[_]] = Seq(
-    knowhereNativeJar := sys.props.get("knowhere.native.jar").map(file),
-    knowhereStorageResources := (if (NativeBundle.selected.nonEmpty) Seq.empty
-                                 else
-                                   storageResources(
-                                     knowhereNativeJar.value,
-                                     (ThisBuild / baseDirectory).value,
-                                     (ThisBuild / baseDirectory).value / "native-vector",
-                                     (Compile / resourceDirectory).value,
-                                     (Compile / resourceManaged).value,
-                                     streams.value.log
-                                   )),
-    Compile / resourceGenerators += knowhereStorageResources.taskValue,
-    Compile / unmanagedResources := {
-      val managedRoot = (Compile / resourceManaged).value
-      val replacements = knowhereStorageResources.value
-        .flatMap(
-          IO.relativize(managedRoot, _)
-        )
-        .toSet
-      val sourceRoots = (Compile / unmanagedResourceDirectories).value
-      (Compile / unmanagedResources).value.filterNot { resource =>
-        sourceRoots.exists { root =>
-          IO.relativize(root, resource).exists { relative =>
-            replacements(
-              relative
-            ) || (NativeBundle.selected.nonEmpty && relative
-              .startsWith("native/"))
-          }
-        }
-      }
-    }
-  )
 
   val settings: Seq[Setting[_]] = Seq(
-    knowhereNativeJar := sys.props.get("knowhere.native.jar").map(file),
+    // Knowhere's native libraries come only from the unified bundle, which
+    // records whether it was built with Cardinal.
     Compile / resourceGenerators += Def.task {
-      val selected = knowhereNativeJar.value
-      val enabled = NativeBundle.validatedNativeBundle.value match {
-        case Some(bundle) =>
-          NativeBundle.metadata(bundle).getProperty("with_cardinal") == "true"
-        case None =>
-          selected.exists { jar =>
-            validateNative(
-              jar,
-              readPin(
-                (ThisBuild / baseDirectory).value,
-                baseDirectory.value / "knowhere.properties"
-              )
-            )
-            properties(file(jar.getAbsolutePath + ".properties"))
-              .getProperty("build.with_cardinal", "false") == "true"
-          }
+      val enabled = NativeBundle.validatedNativeBundle.value.exists { bundle =>
+        NativeBundle.metadata(bundle).getProperty("with_cardinal") == "true"
       }
       val content = s"with_cardinal=$enabled\n"
       val output =
@@ -105,52 +47,18 @@ object KnowhereBuild {
       streams.value.log
     ),
     Compile / unmanagedJars += Attributed.blank(knowhereApiJar.value),
-    // Inter-project dependencies export Compile's unmanaged JARs. A Runtime-only
-    // JAR would disappear from core, the Spark projects and root's assembly.
-    // This resource-only JAR adds no Java classes to the compile API.
-    Compile / unmanagedJars ++= (if (
-                                   NativeBundle.validatedNativeBundle.value.nonEmpty
-                                 ) {
-                                   require(
-                                     knowhereNativeJar.value.isEmpty,
-                                     "Do not combine milvus.native.bundle and knowhere.native.jar"
-                                   )
-                                   Seq.empty
-                                 } else
-                                   selectedNative(
-                                     knowhereNativeJar.value,
-                                     readPin(
-                                       (ThisBuild / baseDirectory).value,
-                                       baseDirectory.value / "knowhere.properties"
-                                     )
-                                   )),
-    verifyKnowhereNative := {
-      val bundle = NativeBundle.validatedNativeBundle.value
-      val jar = bundle
-        .orElse(knowhereNativeJar.value)
-        .getOrElse(
-          sys.error(
-            "Select a built Knowhere platform JAR with -Dknowhere.native.jar=/absolute/path/to/platform.jar"
-          )
-        )
-      if (bundle.isEmpty)
-        validateNative(
-          jar,
-          readPin(
-            (ThisBuild / baseDirectory).value,
-            baseDirectory.value / "knowhere.properties"
-          )
-        )
-      streams.value.log.info(s"Verified Knowhere platform JAR: $jar")
-      jar
-    },
     knowhereSmoke := {
       (Test / compile).value
+      val bundle = NativeBundle.validatedNativeBundle.value.getOrElse(
+        sys.error(
+          "Select the unified native bundle with -Dmilvus.native.bundle=/absolute/path/to/milvus-native-<platform>.jar"
+        )
+      )
       smoke(
         (Compile / packageBin).value,
         knowhereApiJar.value,
         knowhereRuntimeJar.value,
-        verifyKnowhereNative.value,
+        bundle,
         (Test / classDirectory).value,
         javaHome.value.getOrElse(file(sys.props("java.home"))),
         target.value,
@@ -320,202 +228,6 @@ object KnowhereBuild {
     output
   }
 
-  private def selectedNative(
-      selected: Option[File],
-      pin: Pin
-  ): Seq[Attributed[File]] =
-    selected.toSeq.map { jar =>
-      validateNative(jar, pin)
-      Attributed.blank(jar)
-    }
-
-  private def storageResources(
-      selected: Option[File],
-      repositoryRoot: File,
-      vectorDirectory: File,
-      sourceDirectory: File,
-      outputDirectory: File,
-      log: Logger
-  ): Seq[File] = {
-    val nativeRoot = sourceDirectory / "native"
-    // Only a directory that holds files counts as Linux resources: the
-    // Makefile's directory rule (and its tests) can leave empty platform
-    // directories behind, and the storage-only macOS build must not trip the
-    // Linux-host requirement over one of those.
-    val linuxDirectories = (nativeRoot * "linux-*").get.filter(directory =>
-      directory.isDirectory && (directory ** "*").get.exists(_.isFile)
-    )
-    if (selected.isEmpty && linuxDirectories.isEmpty) return Seq.empty
-    val platform = currentPlatform()
-    require(
-      linuxDirectories.forall(_.getName == platform),
-      s"Linux native resources require validation on their target host: " +
-        s"host=$platform, resources=${linuxDirectories.map(_.getName).sorted.mkString(",")}."
-    )
-    val resourcePrefix = s"native/$platform/"
-    val originalNative = sourceDirectory / resourcePrefix
-    if (!originalNative.isDirectory) return Seq.empty
-    NativeLibraries.validateLinux(originalNative, message => log.info(message))
-    if (selected.isEmpty) return Seq.empty
-    val engine = originalNative / "libmilvus-storage.so"
-
-    val native = selected.get
-    validateNative(
-      native,
-      readPin(
-        repositoryRoot,
-        vectorDirectory / "knowhere.properties"
-      )
-    )
-    val storageDigest = digest(engine)
-    val storageResourcesDigest = NativeLibraries.fingerprint(originalNative)
-    val nativeDigest = digest(native)
-    val records = (vectorDirectory * "storage-compatibility*.properties").get
-    val matching = records.filter { record =>
-      val p = properties(record)
-      p.getProperty("platform") == platform &&
-      p.getProperty("storage.sha256") == storageDigest &&
-      p.getProperty("storage.resources.sha256") == storageResourcesDigest &&
-      p.getProperty("knowhere.jar.sha256") == nativeDigest
-    }
-    require(
-      matching.size == 1,
-      s"Untested storage/Knowhere native combination for $platform: " +
-        s"storage SHA-256=$storageDigest, " +
-        s"storage resources SHA-256=$storageResourcesDigest, " +
-        s"Knowhere JAR SHA-256=$nativeDigest. " +
-        s"Validate both library load orders, native storage I/O and Knowhere search " +
-        s"before recording the pair under $vectorDirectory/storage-compatibility*.properties."
-    )
-    val compatibilityFile = matching.head
-    val compatibility = properties(compatibilityFile)
-
-    def names(key: String): Vector[String] = {
-      val values = Option(compatibility.getProperty(key))
-        .getOrElse("")
-        .split(",", -1)
-        .toVector
-      require(
-        values.nonEmpty && values.distinct.size == values.size &&
-          values.forall(
-            _.matches(NativePlatform.libraryPattern(currentPlatform()))
-          ),
-        s"Invalid $key in $compatibilityFile"
-      )
-      values
-    }
-    val libraries = names("libraries")
-    val aliases = names("aliases").map { alias =>
-      val canonical = compatibility.getProperty(s"alias.$alias")
-      require(
-        libraries.contains(canonical) && !libraries.contains(alias),
-        s"Invalid shared library alias $alias in $compatibilityFile"
-      )
-      alias -> canonical
-    }
-    val upstreamPrefix = s"native/knowhere/1/$platform/"
-    val jar = new JarFile(native)
-    try {
-      val manifest = new Properties()
-      val manifestInput = jar.getInputStream(
-        jar.getJarEntry(upstreamPrefix + "manifest.properties")
-      )
-      try manifest.load(manifestInput)
-      finally manifestInput.close()
-      val knowhereLibraries = Set(
-        "libknowhere.so",
-        "libknowhere_c.so.1",
-        "libknowhere_jni.so"
-      )
-      val upstreamDependencies = manifest
-        .getProperty("libraries")
-        .split(",")
-        .toSet -- knowhereLibraries
-      require(
-        libraries.toSet == upstreamDependencies,
-        s"The tested common dependency list does not match $native"
-      )
-
-      def copyEntry(
-          name: String,
-          relative: String,
-          expected: Option[String]
-      ): File = {
-        val entry = Option(jar.getJarEntry(upstreamPrefix + name)).getOrElse(
-          sys.error(s"Missing Knowhere resource $upstreamPrefix$name")
-        )
-        val output = outputDirectory / relative
-        require(
-          output.toPath
-            .normalize()
-            .startsWith(outputDirectory.toPath.normalize()),
-          s"Invalid Knowhere resource path: $relative"
-        )
-        val checksum = expected.getOrElse {
-          val input = jar.getInputStream(entry)
-          try digest(input)
-          finally input.close()
-        }
-        if (!output.isFile || digest(output) != checksum) {
-          IO.createDirectory(output.getParentFile)
-          val input = jar.getInputStream(entry)
-          try
-            Files.copy(
-              input,
-              output.toPath,
-              StandardCopyOption.REPLACE_EXISTING
-            )
-          finally input.close()
-        }
-        requireDigest(output, checksum)
-        output
-      }
-
-      val binaries = (libraries.map(name => name -> name) ++ aliases).map {
-        case (name, canonical) =>
-          copyEntry(
-            canonical,
-            resourcePrefix + name,
-            Some(manifest.getProperty(s"sha256.$canonical"))
-          )
-      }
-      val metadataPrefix = "META-INF/knowhere-storage-dependencies/"
-      val licenseResources = jar
-        .entries()
-        .asScala
-        .filterNot(_.isDirectory)
-        .map(_.getName)
-        .filter(_.startsWith(upstreamPrefix + "licenses/"))
-        .map(_.stripPrefix(upstreamPrefix))
-        .filter { name =>
-          libraries.exists(library => name.startsWith(s"licenses/$library/"))
-        }
-        .toVector
-        .sorted
-      val metadata = (licenseResources ++ Vector(
-        "manifest.properties",
-        "missing-licenses.txt"
-      )).map(name => copyEntry(name, metadataPrefix + name, None))
-      val compatibilityOutput = outputDirectory / metadataPrefix /
-        "storage-compatibility.properties"
-      if (
-        !compatibilityOutput.isFile ||
-        digest(compatibilityOutput) != digest(compatibilityFile)
-      ) IO.copyFile(compatibilityFile, compatibilityOutput)
-      NativeLibraries.validateMergedLinux(
-        originalNative,
-        outputDirectory / resourcePrefix,
-        binaries,
-        message => log.info(message)
-      )
-      log.info(s"Packaging verified common native dependencies for $platform")
-      // sbt tracks only the resource generator's returned files. When the option
-      // is removed, stale generated files are not returned and the original
-      // unmanaged storage resources are copied back into the class directory.
-      binaries ++ metadata :+ compatibilityOutput
-    } finally jar.close()
-  }
-
   private def smoke(
       adapter: File,
       api: File,
@@ -586,109 +298,6 @@ object KnowhereBuild {
     IO.delete(workingDirectory)
   }
 
-  private def validateNative(path: File, pin: Pin): Unit = {
-    require(
-      path.isAbsolute && path.isFile,
-      "knowhere.native.jar must name an existing absolute JAR path"
-    )
-    val provenance = properties(file(path.getAbsolutePath + ".properties"))
-    require(
-      provenance.getProperty("git.revision") == pin.revision,
-      s"Knowhere platform JAR must be built from ${pin.revision}: $path"
-    )
-    requireDigest(path, provenance.getProperty("jar.sha256"))
-
-    val platform = currentPlatform()
-    val root = s"native/knowhere/1/$platform/"
-    val jar = new JarFile(path)
-    try {
-      val entries = jar.entries().asScala.toVector
-      require(
-        entries.map(_.getName).distinct.size == entries.size,
-        s"Duplicate entries in Knowhere platform JAR: $path"
-      )
-      entries.filterNot(_.isDirectory).foreach { entry =>
-        val name = entry.getName
-        require(
-          !name.endsWith(".class"),
-          s"Knowhere platform JAR must contain native resources only: $name"
-        )
-        require(
-          !name.startsWith("native/") || name.startsWith(root),
-          s"Knowhere platform JAR contains resources outside $root: $name"
-        )
-      }
-      def input(name: String): InputStream = {
-        val entry = Option(jar.getJarEntry(root + name)).getOrElse(
-          sys.error(s"Missing $root$name in $path")
-        )
-        jar.getInputStream(entry)
-      }
-      val manifest = new Properties()
-      val manifestInput = input("manifest.properties")
-      try manifest.load(manifestInput)
-      finally manifestInput.close()
-      require(
-        manifest.getProperty("cAbiVersion") == "1",
-        "Knowhere platform JAR must provide C ABI version 1"
-      )
-      require(
-        manifest.getProperty("platform") == platform,
-        s"Knowhere platform JAR must match $platform"
-      )
-      require(
-        manifest.getProperty("entryLibrary") == "libknowhere_jni.so",
-        "Invalid Knowhere JNI entry library"
-      )
-      val libraries = Option(manifest.getProperty("libraries"))
-        .getOrElse("")
-        .split(",", -1)
-        .toVector
-      require(
-        libraries.nonEmpty && libraries.distinct.size == libraries.size,
-        "Invalid Knowhere library list"
-      )
-      require(
-        libraries.contains("libknowhere_jni.so"),
-        "Knowhere manifest omits the JNI entry library"
-      )
-      libraries.foreach { name =>
-        require(
-          name.matches("[A-Za-z0-9_+.-]+") && name != "." && name != "..",
-          s"Invalid Knowhere library name: $name"
-        )
-        val expected = manifest.getProperty(s"sha256.$name")
-        require(
-          expected != null && expected.matches("[a-f0-9]{64}"),
-          s"Missing checksum for Knowhere library $name"
-        )
-        val library = input(name)
-        val actual =
-          try digest(library)
-          finally library.close()
-        require(
-          actual == expected,
-          s"Knowhere library checksum mismatch: $name"
-        )
-      }
-      val librarySet = libraries.toSet
-      entries.filterNot(_.isDirectory).foreach { entry =>
-        val name = entry.getName.stripPrefix(root)
-        if (
-          name
-            .matches(NativePlatform.libraryPattern(currentPlatform(), "[^/]+"))
-        ) {
-          require(
-            librarySet(name),
-            s"Unlisted shared library in Knowhere platform JAR: $name"
-          )
-        }
-      }
-    } finally jar.close()
-  }
-
-  private def currentPlatform(): String = NativePlatform.current
-
   private def properties(path: File): Properties = {
     require(path.isFile, s"Missing Knowhere metadata: $path")
     val result = new Properties()
@@ -696,14 +305,6 @@ object KnowhereBuild {
     try result.load(input)
     finally input.close()
     result
-  }
-
-  private def requireDigest(path: File, expected: String): Unit = {
-    require(
-      expected != null && expected.matches("[a-f0-9]{64}"),
-      s"Missing SHA-256 for $path"
-    )
-    require(digest(path) == expected, s"Knowhere SHA-256 mismatch: $path")
   }
 
   private def digest(path: File): String = {

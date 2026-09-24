@@ -146,10 +146,6 @@ object NativeBundle {
       jar.isAbsolute && jar.isFile,
       "milvus.native.bundle must name an existing absolute JAR path"
     )
-    require(
-      !sys.props.contains("knowhere.native.jar"),
-      "Select either milvus.native.bundle or knowhere.native.jar; combining native dependency sets is unsupported"
-    )
     val sidecar = properties(
       new FileInputStream(jar.getAbsolutePath + ".properties")
     )
