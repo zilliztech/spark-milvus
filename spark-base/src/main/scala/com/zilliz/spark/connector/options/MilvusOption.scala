@@ -82,6 +82,7 @@ object MilvusOption {
   val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
   val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
   val SearchQueriesMaxBytes = "milvus.search.queries.max.bytes"
+  val SearchQueriesDirect = "milvus.search.queries.direct"
   val SearchGroupMaxBytes = "milvus.search.group.max.bytes"
   val SearchSegmentsMaxBytes = "milvus.search.segments.max.bytes"
   val WriteFileRollingBytes = "milvus.write.file.rolling.bytes"

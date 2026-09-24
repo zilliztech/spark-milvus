@@ -67,6 +67,13 @@ and nullable-vector ID mappings are unsupported. Cardinal `_mem.index.bin`
 requires the pinned Cardinal-enabled native build; see
 [native build instructions](contributing.md#knowhere-library-loading).
 
+A query set that is nothing but Parquet files -- a plain `spark.read.parquet`
+with at most a selection or renaming of its columns on top -- is read by the
+search tasks themselves: the driver reads the footers for the counts and each
+task opens the files, so nothing is collected or broadcast.
+`milvus.search.queries.direct` (default `true`) turns this off, and any other
+frame (a filter, a join, rows built in memory) takes the paths below.
+
 Three options size the job. `milvus.search.queries.max.bytes` (default 1 GiB)
 is how large the query set may be before it stops being broadcast from the
 driver. A broadcast set is kept whole on every executor. A larger set never

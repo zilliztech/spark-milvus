@@ -54,6 +54,11 @@ JACCARD。
 nullable 向量行号映射暂不支持。Cardinal `_mem.index.bin` 要求启用 Cardinal 的固定
 版本原生产物，见[构建说明](contributing.md#knowhere-library-loading)。
 
+查询集如果就是 Parquet 文件——`spark.read.parquet` 之上至多选列、改名——由搜索任务
+自己读：driver 只读 footer 取行数，每个任务自己打开文件，不 collect 也不广播。
+`milvus.search.queries.direct`（默认 `true`）可以关掉；带过滤、join 或内存里构造的
+查询集走下面两条路。
+
 三个选项决定作业规模。`milvus.search.queries.max.bytes`（默认 1 GiB）是查询集走
 广播的字节上限：不超过时 driver 广播，每个 executor 常驻一份；超过时在 executor 上
 按查询组打包成 shuffle 输出，任务逐组读取，一个任务同一时刻至多持有两组，查询集不经

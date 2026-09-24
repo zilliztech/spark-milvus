@@ -14,7 +14,8 @@ package com.zilliz.spark.connector.options
 final case class SearchLimits(
     queriesMaxBytes: Long,
     groupMaxBytes: Long,
-    segmentsMaxBytes: Option[Long]
+    segmentsMaxBytes: Option[Long],
+    queriesDirect: Boolean = SearchLimits.DefaultQueriesDirect
 ) {
   require(queriesMaxBytes > 0, "queriesMaxBytes must be positive")
   require(groupMaxBytes > 0, "groupMaxBytes must be positive")
@@ -25,6 +26,11 @@ object SearchLimits {
 
   val DefaultQueriesMaxBytes: Long = 1024L * 1024L * 1024L
   val DefaultGroupMaxBytes: Long = 512L * 1024L * 1024L
+
+  /** A query frame that is a plain scan of Parquet files is read by the search
+    * tasks themselves rather than collected and broadcast.
+    */
+  val DefaultQueriesDirect: Boolean = true
 
   val Default: SearchLimits = SearchLimits(
     DefaultQueriesMaxBytes,
@@ -56,6 +62,11 @@ object SearchLimits {
       ),
       get(MilvusOption.SearchSegmentsMaxBytes).map(_ =>
         OptionParsing.positiveLong(get, MilvusOption.SearchSegmentsMaxBytes, 1L)
+      ),
+      OptionParsing.boolean(
+        get,
+        MilvusOption.SearchQueriesDirect,
+        DefaultQueriesDirect
       )
     )
   }

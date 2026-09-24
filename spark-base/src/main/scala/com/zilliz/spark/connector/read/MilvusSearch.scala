@@ -133,7 +133,12 @@ object MilvusSearch extends Logging {
     }
 
     val selected = SearchQueries.selected(queries)
-    val queryCount = selected.count()
+    // A frame that is plain Parquet files is read by the tasks themselves: the
+    // footers give the count, and the one job left is the id uniqueness
+    // check, over the id column alone (candidates below).
+    val files =
+      if (limits.queriesDirect) QueryFiles.of(spark, selected) else None
+    val queryCount = files.map(_.queries).getOrElse(selected.count())
     require(queryCount > 0, "A search needs at least one query")
     require(
       queryCount <= Int.MaxValue,
@@ -193,7 +198,7 @@ object MilvusSearch extends Logging {
       limits.groupMaxBytes,
       SearchPlan.Budget(segmentBudget.bytes, queryBudget.bytes),
       footprint,
-      shuffled = queryBytes > limits.queriesMaxBytes,
+      shuffled = files.isEmpty && queryBytes > limits.queriesMaxBytes,
       // The batched distance entry is single-threaded on its task, so an
       // exact search is as parallel as its tasks (decision 28).
       splitQueries = searchMode == "exact"
@@ -257,7 +262,10 @@ object MilvusSearch extends Logging {
     // per task on the heap, outside what Spark manages, so no more of them run
     // at once on an executor than that heap holds with room to spare.
     val packProfile =
-      if (queryBytes <= limits.queriesMaxBytes || plan.groups.isEmpty) None
+      if (
+        files.nonEmpty || queryBytes <= limits.queriesMaxBytes ||
+        plan.groups.isEmpty
+      ) None
       else {
         val perGroup = plan.groups.map(_.queries.toLong).max *
           (SearchPlan.QueryIdBytes + layout.rowBytes.toLong)
@@ -270,7 +278,12 @@ object MilvusSearch extends Logging {
     logInfo(
       s"Search plan: mode=$searchMode, metric=$searchMetric, topK=$k, " +
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
-        s"${if (queryBytes <= limits.queriesMaxBytes) "broadcast" else "shuffle"}, " +
+        s"${files match {
+            case Some(direct) =>
+              s"tasks reading ${direct.files.size} parquet files"
+            case None if queryBytes <= limits.queriesMaxBytes => "broadcast"
+            case None                                         => "shuffle"
+          }}, " +
         s"queryGroups=${plan.groups.size}, segments=${tasks.size} in " +
         s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
         s"${plan.tasks} tasks, work=${segmentSearchesTotal} segment searches" +
@@ -304,6 +317,7 @@ object MilvusSearch extends Logging {
           candidates(
             spark,
             selected,
+            files,
             partitions,
             plan,
             spec,
@@ -380,6 +394,7 @@ object MilvusSearch extends Logging {
   private def candidates(
       spark: SparkSession,
       selected: DataFrame,
+      files: Option[QueryFiles],
       partitions: Seq[MilvusInputPartition],
       plan: SearchPlan.Plan,
       spec: SegmentSetSearch.Spec,
@@ -399,7 +414,36 @@ object MilvusSearch extends Logging {
       groups.map(_.queries.toLong).sum,
       layout
     )
-    if (queryBytes <= limits.queriesMaxBytes) {
+    if (files.nonEmpty) {
+      // The files are read by the tasks and the driver never holds the set.
+      // The id uniqueness check is the one pass over the frame that remains,
+      // and it reads the id column alone: 2 MB for 250,000 queries.
+      SearchQueries.checkUnique(
+        selected
+          .select(selected.col(SearchQueries.IdColumn))
+          .queryExecution
+          .toRdd
+          .map(_.getLong(0))
+          .collect()
+      )
+      val direct = files.get
+      val work = for {
+        (set, index) <- sets.zipWithIndex
+        range <- ranges
+      } yield (set, kept.lift(index).flatten, range)
+      val searched = spark.sparkContext.parallelize(work, plan.tasks).flatMap {
+        case (set, planned, range) =>
+          SegmentSetSearch.run(
+            set,
+            spec,
+            direct.groups(range, groups, layout, spec.metric),
+            range.size,
+            planned,
+            metrics
+          )
+      }
+      searchProfile.fold(searched)(searched.withResources)
+    } else if (queryBytes <= limits.queriesMaxBytes) {
       // Packed where the rows are read: the driver gets bytes, not boxed
       // vectors, and eight executors pack in parallel instead of one thread.
       val (ids, vectors) =
