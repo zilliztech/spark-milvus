@@ -349,14 +349,7 @@ object ExactScan {
             JavaFloat.isFinite(score),
             s"The engine returned a score that is not finite for row $row"
           )
-          merger.add(
-            Candidate(
-              query,
-              segmentId,
-              batch.firstRow + row,
-              score.toDouble
-            )
-          )
+          merger.add(query, segmentId, batch.firstRow + row, score.toDouble)
         }
         slot += 1
       }

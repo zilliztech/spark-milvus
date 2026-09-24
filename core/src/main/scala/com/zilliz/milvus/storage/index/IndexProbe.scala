@@ -2,7 +2,7 @@ package com.zilliz.milvus.storage.index
 
 import java.lang.{Float => JavaFloat}
 import java.nio.ByteOrder
-import java.util.{Arrays, BitSet}
+import java.util.BitSet
 import scala.util.Try
 
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
@@ -89,10 +89,17 @@ object IndexProbe {
       var width = searchWidth(handle.family, count, parameters)
       var attempt = 0
       var complete = false
-      // One query's ids, sorted to find a duplicate. Reused by every query of
-      // every attempt: what the check needs is a scratch array, not a set of
-      // boxed longs for each of the group's candidates.
-      val scratch = new Array[Long](count)
+      // Where one query's ids land, to find a duplicate. Reused by every
+      // query of every attempt, and cleared by unsetting only the bits that
+      // query set: sorting each query's ids instead cost 14% of the executor's
+      // Java samples on the P3 chunk that was profiled, and a bitmap over the
+      // segment's rows is 170 KB for the 1.35M-row segments there.
+      // `java.util.BitSet.clear` rescans for its highest set word on every
+      // call, which over a 1.35M-row segment is a walk of 21,000 words for
+      // each of a query's 100 ids; on the profiled P3 chunk that was 60% of
+      // the executor's Java samples. A plain word array clears in one store.
+      val seen = new Array[Long](((rows + 63L) >>> 6).toInt)
+      val touched = new Array[Int](count)
       while (!complete) {
         val started = System.nanoTime()
         handle.index.search(
@@ -118,7 +125,8 @@ object IndexProbe {
           rows,
           handle,
           handle.metric,
-          scratch
+          seen,
+          touched
         )
         attempt += 1
         if (!short) complete = true
@@ -224,7 +232,8 @@ object IndexProbe {
       rows: Long,
       handle: SegmentIndexHandle,
       metric: String,
-      scratch: Array[Long]
+      seen: Array[Long],
+      touched: Array[Int]
   ): Boolean = {
     var short = false
     var query = 0
@@ -248,20 +257,27 @@ object IndexProbe {
             JavaFloat.isFinite(score) && (metric != "L2" || score >= 0),
             s"Segment ${handle.segmentId}: the index returned an invalid score for row $id"
           )
-          scratch(hits) = id
+          // A row the index returned twice for one query has its bit set
+          // already; the bits this query set are cleared below, so the next
+          // query starts from an empty bitmap without clearing all the rows.
+          val at = id.toInt
+          val word = at >>> 6
+          val bit = 1L << (at & 63)
+          require(
+            (seen(word) & bit) == 0L,
+            s"Segment ${handle.segmentId}: the index returned row $id twice"
+          )
+          seen(word) |= bit
+          touched(hits) = at
           hits += 1
         }
         slot += 1
       }
-      // A row the index returned twice for one query ends up beside itself.
-      Arrays.sort(scratch, 0, hits)
-      var at = 1
-      while (at < hits) {
-        require(
-          scratch(at) != scratch(at - 1),
-          s"Segment ${handle.segmentId}: the index returned row ${scratch(at)} twice"
-        )
-        at += 1
+      var cleared = 0
+      while (cleared < hits) {
+        val at = touched(cleared)
+        seen(at >>> 6) &= ~(1L << (at & 63))
+        cleared += 1
       }
       if (hits < count) short = true
       query += 1
@@ -273,6 +289,14 @@ object IndexProbe {
     * labels the index returned go through the handle's row mapping, which is
     * what a nullable column's index needs (section 2.4).
     */
+  /** Offers this segment's answer to the merger, three primitives at a time.
+    *
+    * Nothing here builds a `Candidate`: the merger keeps its runs in primitive
+    * columns, so a candidate that cannot be kept costs one comparison and no
+    * allocation. That is what most candidates of most segments are once a query
+    * has seen one segment, and on the profiled P3 chunk the object-and-heap
+    * version of this loop was 46% of the executor's Java samples.
+    */
   private def collect(
       queries: Int,
       count: Int,
@@ -281,21 +305,19 @@ object IndexProbe {
       handle: SegmentIndexHandle,
       merger: TopKMerger
   ): Unit = {
+    val segmentId = handle.segmentId
+    val mapping = handle.mapping
     var query = 0
     while (query < queries) {
       var slot = 0
       while (slot < count) {
         val position = query.toLong * count + slot
         val id = ids.getLong(position * 8L)
-        if (id != -1L)
-          merger.add(
-            Candidate(
-              query,
-              handle.segmentId,
-              handle.mapping.rowOf(id),
-              scores.getFloat(position * 4L).toDouble
-            )
-          )
+        if (id != -1L) {
+          val score = scores.getFloat(position * 4L).toDouble
+          if (!merger.rejectsScore(query, score))
+            merger.add(query, segmentId, mapping.rowOf(id), score)
+        }
         slot += 1
       }
       query += 1

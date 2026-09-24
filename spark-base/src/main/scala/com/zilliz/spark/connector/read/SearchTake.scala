@@ -1,10 +1,12 @@
 package com.zilliz.spark.connector.read
 
+import java.util.Arrays
 import scala.collection.mutable
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.catalyst.CatalystTypeConverters
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.TaskContext
@@ -22,6 +24,19 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
   */
 private[read] object SearchTake {
 
+  /** The hits of one search, with their output columns.
+    *
+    * The hits are shuffled by segment so that a task holds every hit of the
+    * segments it reads, and then grouped by segment in the task rather than
+    * sorted into groups. Sorting them was the expensive half of this stage: a
+    * JFR profile of one P3 chunk put 10% of the executor's Java samples in
+    * `UnsafeExternalRowSorter` for 25 million hit rows whose order this stage
+    * then threw away, since `take` asks the reader for the distinct offsets in
+    * ascending order and derives that order itself. What the sort did buy was a
+    * bound on memory -- a task held one segment's hits at a time -- so the hits
+    * are buffered as `InternalRow` instead of `Row`, which is the same 25
+    * million rows in about half the bytes.
+    */
   def rows(
       hits: DataFrame,
       output: StructType,
@@ -35,8 +50,8 @@ private[read] object SearchTake {
     val known = hits.sparkSession.sparkContext.broadcast(partitions)
     hits
       .repartition(col("_segment_id"))
-      .sortWithinPartitions(col("_segment_id"), col("_row_offset"))
-      .rdd
+      .queryExecution
+      .toRdd
       .mapPartitions { rows =>
         val allocator = ArrowAllocator.forSearchTask(
           TaskContext.get().partitionId(),
@@ -44,59 +59,94 @@ private[read] object SearchTake {
         )
         Option(TaskContext.get())
           .foreach(_.addTaskCompletionListener[Unit](_ => allocator.close()))
-        bySegment(rows, segmentColumn).flatMap { case (segmentId, hitRows) =>
-          val partition = known.value.getOrElse(
-            segmentId,
-            throw new IllegalStateException(
-              s"Segment $segmentId is not in the plan this search was built from"
+        val toHit = CatalystTypeConverters.createToScalaConverter(hitSchema)
+        bySegment(rows, segmentColumn).iterator.flatMap {
+          case (segmentId, hitRows) =>
+            val partition = known.value.getOrElse(
+              segmentId,
+              throw new IllegalStateException(
+                s"Segment $segmentId is not in the plan this search was built from"
+              )
             )
-          )
-          take(
-            partition,
-            output,
-            hitRows,
-            offsetColumn,
-            allocator.allocator,
-            metrics
-          )
+            take(
+              partition,
+              output,
+              hitRows,
+              offsetColumn,
+              toHit,
+              allocator.allocator,
+              metrics
+            )
         }
       }
   }
 
-  /** The rows of one segment, which sorting has already put together. */
+  /** The task's hits in one bucket per segment.
+    *
+    * Every row is copied, because the shuffle reader hands the same `UnsafeRow`
+    * back with new bytes on each step.
+    */
   private def bySegment(
-      rows: Iterator[Row],
+      rows: Iterator[InternalRow],
       segmentColumn: Int
-  ): Iterator[(Long, Seq[Row])] = new Iterator[(Long, Seq[Row])] {
-    private val pending: BufferedIterator[Row] = rows.buffered
-
-    override def hasNext: Boolean = pending.hasNext
-
-    override def next(): (Long, Seq[Row]) = {
-      val segmentId = pending.head.getLong(segmentColumn)
-      val group = mutable.ArrayBuffer.empty[Row]
-      while (
-        pending.hasNext && pending.head.getLong(segmentColumn) == segmentId
-      ) group += pending.next()
-      (segmentId, group.toSeq)
+  ): mutable.LongMap[mutable.ArrayBuffer[InternalRow]] = {
+    val groups = mutable.LongMap.empty[mutable.ArrayBuffer[InternalRow]]
+    while (rows.hasNext) {
+      val row = rows.next()
+      groups
+        .getOrElseUpdate(
+          row.getLong(segmentColumn),
+          mutable.ArrayBuffer.empty[InternalRow]
+        )
+        .addOne(row.copy())
     }
+    groups
+  }
+
+  /** The distinct row offsets of these hits, ascending: what the reader takes.
+    */
+  private def offsetsOf(
+      hits: mutable.ArrayBuffer[InternalRow],
+      offsetColumn: Int
+  ): Array[Long] = {
+    val all = new Array[Long](hits.size)
+    var at = 0
+    while (at < hits.size) {
+      all(at) = hits(at).getLong(offsetColumn)
+      at += 1
+    }
+    Arrays.sort(all)
+    var kept = 0
+    at = 0
+    while (at < all.length) {
+      if (at == 0 || all(at) != all(at - 1)) {
+        all(kept) = all(at)
+        kept += 1
+      }
+      at += 1
+    }
+    if (kept == all.length) all else Arrays.copyOf(all, kept)
   }
 
   private def take(
       partition: MilvusInputPartition,
       output: StructType,
-      hits: Seq[Row],
+      hits: mutable.ArrayBuffer[InternalRow],
       offsetColumn: Int,
+      toHit: Any => Any,
       allocator: org.apache.arrow.memory.BufferAllocator,
       metrics: SearchMetrics
   ): Iterator[Row] = {
     val binding = ColumnBinding(partition, output)
-    val offsets = hits.map(_.getLong(offsetColumn)).distinct.sorted.toArray
+    val offsets = offsetsOf(hits, offsetColumn)
     val columns = output.fieldNames.toSeq.map(binding.arrowColumnFor)
     // A zero-column projection still needs row cardinality from one column.
     val projected = if (columns.nonEmpty) columns else Seq(binding.pkColumnName)
     val toScala = CatalystTypeConverters.createToScalaConverter(output)
-    val byOffset = mutable.Map.empty[Long, Row]
+    // Row i of this array is the row at offsets(i), which is the order the
+    // reader returns them in, so a hit finds its row by a search over offsets
+    // rather than through a map keyed by a boxed Long.
+    val taken = new Array[Row](offsets.length)
     val started = System.nanoTime()
     val reader = SegmentReaderRegistry.open(
       partition.task,
@@ -106,10 +156,10 @@ private[read] object SearchTake {
       allocator
     )
     try {
-      val taken = reader.take(offsets, projected)
+      val batches = reader.take(offsets, projected)
       var index = 0
       try {
-        var next = taken.next()
+        var next = batches.next()
         while (next.nonEmpty) {
           val batch = next.get
           try {
@@ -119,7 +169,7 @@ private[read] object SearchTake {
                 index < offsets.length,
                 s"Segment ${partition.task.segmentId} returned more rows than the ${offsets.length} asked for"
               )
-              byOffset(offsets(index)) = toScala(
+              taken(index) = toScala(
                 ArrowConverter
                   .arrowToInternalRow(
                     batch,
@@ -133,13 +183,13 @@ private[read] object SearchTake {
               row += 1
             }
           } finally batch.close()
-          next = taken.next()
+          next = batches.next()
         }
         require(
           index == offsets.length,
           s"Segment ${partition.task.segmentId} returned $index of the ${offsets.length} rows asked for"
         )
-      } finally taken.close()
+      } finally batches.close()
     } finally {
       try reader.close()
       finally {
@@ -149,8 +199,13 @@ private[read] object SearchTake {
         metrics.readNanos.add(reader.metrics.jniNanos)
       }
     }
-    hits.iterator.map(hit =>
-      Row.merge(hit, byOffset(hit.getLong(offsetColumn)))
-    )
+    hits.iterator.map { hit =>
+      val at = Arrays.binarySearch(offsets, hit.getLong(offsetColumn))
+      require(
+        at >= 0,
+        s"Segment ${partition.task.segmentId} has no row for offset ${hit.getLong(offsetColumn)}"
+      )
+      Row.merge(toHit(hit).asInstanceOf[Row], taken(at))
+    }
   }
 }

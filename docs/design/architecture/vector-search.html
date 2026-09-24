@@ -228,7 +228,7 @@ driver 日志 <code>Search budget</code> 一行写明选中的顺序、并发数
 </ol>
 两种顺序的 shuffle 量都是「段组数 × 查询数 × K × 24 字节」，切成查询范围也不变：每条查询在每个段组上仍只算一次。任务交出的是<strong>每查询一条记录</strong>：查询 id，加上这条查询在本段组的前 K 条候选打包成的字节（一条候选是段 id、行号、分数，共 <code>CandidateBytes.Width</code> = 24 字节，按 2.6 的排序规则从好到差）。候选不做成对象也不做成行：一条候选的事实是 24 字节，JVM 对象要为它付对象头、装箱与集合引用，实测一条候选在任务里会涨到 200 字节以上（<a href="../../../docs/reports/spark-milvus-candidate-materialization-2026-09-22/README.md">2026-09-22 的实测</a>）。</li>
 <li><strong>合并。</strong>候选按 <code>query_id</code> 做一次 RDD shuffle（<code>combineByKeyWithClassTag</code>，<code>mapSideCombine = false</code>：一个任务对每条查询只交一条记录，map 端没有可合的东西，开着只会把整个任务的输出攒到任务结束），reduce 端用 <code>CandidateBytes.merge</code> 走两份有序列表取前 K，排序规则见 2.6。分区数是「作业的任务槽数、第一阶段任务数、查询数 ÷ 4096」三者取大，再以查询数为上限——一条查询是一个 key，不能拆开。合并结果直接就是带 <code>rank</code> 的命中行，不再经过 SQL 聚合与 <code>explode</code>。</li>
-<li><strong>第二阶段。</strong><code>outputColumns</code> 非空时，命中行按段 id 重新分区，分区内按段 id 与行号排序；每段经 Milvus 的 <code>TableFormat</code> 对去重后的行号调用 <code>SegmentReader.take</code>，Arrow 行经 <code>ArrowConverter</code> 和 <code>CatalystTypeConverters</code> 转成 <code>Row</code>，由 <code>createDataFrame</code> 组成结果。<code>outputColumns</code> 为空时，命中行就是结果。</li>
+<li><strong>第二阶段。</strong><code>outputColumns</code> 非空时，命中行按段 id 重新分区，任务内按段 id 分桶（不再 <code>sortWithinPartitions</code>：排序只为分组，而 <code>take</code> 自己就要求去重升序的行号，2026-09-24 决策）；每段把行号排序去重后经 Milvus 的 <code>TableFormat</code> 调用 <code>SegmentReader.take</code>，读回的第 i 行就是第 i 个行号的行，命中行按行号二分找到它，Arrow 行经 <code>ArrowConverter</code> 和 <code>CatalystTypeConverters</code> 转成 <code>Row</code> 与命中列拼接，由 <code>createDataFrame</code> 组成结果。<code>outputColumns</code> 为空时，命中行就是结果。</li>
 <li><strong>指标。</strong>两个阶段的计数与耗时累加到 1.3 列出的 <code>milvus.search.*</code> 累加器。</li>
 </ol>
 

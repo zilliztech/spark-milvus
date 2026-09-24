@@ -69,6 +69,33 @@ object CandidateBytes {
   }
 
   /** `sorted` holds `size` candidates, best first already. */
+  /** One query's run straight out of [[TopKMerger]]'s columns, which already
+    * hold it best first, so this writes `size` candidates from `base` without
+    * building a `Candidate` for any of them.
+    */
+  private[index] def writeColumns(
+      segments: Array[Long],
+      offsets: Array[Long],
+      scores: Array[Double],
+      base: Int,
+      size: Int
+  ): Array[Byte] = {
+    require(size >= 0, s"$size candidates")
+    if (size == 0) return Empty
+    val packed = new Array[Byte](size * Width)
+    val buffer = ByteBuffer.wrap(packed)
+    var at = 0
+    while (at < size) {
+      val from = base + at
+      val offset = at * Width
+      buffer.putLong(offset, segments(from))
+      buffer.putLong(offset + 8, offsets(from))
+      buffer.putDouble(offset + 16, scores(from))
+      at += 1
+    }
+    packed
+  }
+
   private[index] def write(sorted: Array[Candidate], size: Int): Array[Byte] = {
     require(
       size >= 0 && size <= sorted.length,
