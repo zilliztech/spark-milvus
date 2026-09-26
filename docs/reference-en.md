@@ -73,6 +73,19 @@ when its first task touches Knowhere: on an 8-core executor the bundle takes
 about 3 s to extract and verify, which otherwise lands on the first search
 task. Without the plugin nothing changes but that.
 
+Executors that read persisted indexes from object storage should run with
+glibc's malloc tuned, through the executor environment:
+`spark.executorEnv.MALLOC_ARENA_MAX=2`,
+`spark.executorEnv.MALLOC_MMAP_THRESHOLD_=1048576` and
+`spark.executorEnv.MALLOC_TRIM_THRESHOLD_=134217728`. An index is read as a
+few hundred 8 MiB range requests, each allocated and freed on one of several
+dozen native threads; glibc's dynamic mmap threshold then moves such blocks
+into the per-thread arenas, where freed memory is not returned to the system,
+and an executor searching chunk after chunk grows by 0.8-1 GB per chunk until
+the container limit kills it. A fixed threshold switches that off; measured
+on the same run, resident memory stayed level from the second chunk on at a
+cost of about 7% per chunk. Indexes read from local disk do not need it.
+
 A query set that is nothing but Parquet files -- a plain `spark.read.parquet`
 with at most a selection or renaming of its columns on top -- is read by the
 search tasks themselves: the driver reads the footers for the counts and each

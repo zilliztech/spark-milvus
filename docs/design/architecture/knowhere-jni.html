@@ -53,7 +53,7 @@
 <p>通用能力依据<a href="../README.md#25-原生层">总体设计原生层</a>、<a href="../capabilities.md#5-向量与索引">V1/V2/V4/V5</a>和 <a href="../capabilities.md#2-表写">W6</a>。Cardinal 核对基线为 <a href="https://github.com/zilliztech/cardinal/commit/19f2a027cb12dd5cf3d7c493940df15120a64c66">19f2a027cb12dd5cf3d7c493940df15120a64c66</a>：11 个 JNI 入口调用 9 个 C 入口，Isolation Forest 的数组/地址版本共享计算函数。暂缓项恢复开发时，再评审功能、参数、输出语义、格式和接口命名。</p>
 
 <h3 id="capability-matrix">1.1 核心、绑定与 Connector 的能力对照</h3>
-<p><strong>绑定开放的是核心能力的一个子集，Connector 用了其中的多查询、位图、五种 dense 类型、五种距离、BinarySet 加载、一次性 Build 与批量暴力搜索；每层缺口归属不同的仓库。</strong>绑定列原以 PR #1829 的 8c6017b 为准（当时与 Connector 钉住的 9dc2b8ad 逐字节相同）；Connector 列于 2026-09-24 按 refactor/v2 @ 00f6bf3 更新，当前 gitlink 为 b9497f4f。</p>
+<p><strong>绑定开放的是核心能力的一个子集，Connector 用了其中的多查询、位图、五种 dense 类型、五种距离、BinarySet 加载、一次性 Build 与批量暴力搜索；每层缺口归属不同的仓库。</strong>绑定列原以 PR #1829 的 8c6017b 为准（当时与 Connector 钉住的 9dc2b8ad 逐字节相同）；Connector 列于 2026-09-24 按 refactor/v2 @ 00f6bf3 更新，2026-09-25 起 gitlink 为 523518f7（反序列化共享 BinarySet 条目，不再拷贝）。</p>
 <div class="table-scroll"><table><thead><tr><th>能力</th><th>Knowhere 核心</th><th>C API / JNI</th><th>Connector 现状</th><th>缺口归属</th></tr></thead><tbody>
 <tr><td>多查询（一次传 nq 条）</td><td>有，每条查询一个任务</td><td>有，<code>queries.rows</code> 不设上限</td><td>整组查询一次传入（<code>QueryMatrix</code>）</td><td>无</td></tr>
 <tr><td>过滤位图</td><td>有</td><td>有，1 表示排除</td><td>用于删除与 null</td><td>无</td></tr>

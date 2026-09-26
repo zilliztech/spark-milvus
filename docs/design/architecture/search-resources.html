@@ -191,7 +191,7 @@
 <p>perf_laion_31m（16 段，Cardinal 索引每段 1.85–2.67 GB、共 40.0 GB），2 个 executor，每个 4 GiB 堆加 28 GiB memoryOverhead：N = 1，段额度 26 GiB，查询额度 1.5 GiB。</p>
 <table>
 <tr><th>查询集</th><th>查询留在内存</th><th>段组留在内存</th><th>选中</th></tr>
-<tr><td>1 GiB，349,525 条</td><td>堆 0.45 GB（id 与 TopK 0.22 GB，读入中的一组 0.23 GB）；堆外 9.1 GB（查询矩阵 1.07 GB，最大一段 2.67 GB 的 3 倍）</td><td>每组 8 段 42.9 GB，超过段额度；每组 4 段 22.9 GB</td><td>查询留在内存，2 个任务</td></tr>
+<tr><td>1 GiB，349,525 条</td><td>堆 0.45 GB（id 与 TopK 0.22 GB，读入中的一组 0.23 GB）；堆外 6.4 GB（查询矩阵 1.07 GB，最大一段 2.67 GB 的 2 倍；Knowhere 523518f7 之前加载时多一份拷贝，是 3 倍、9.1 GB）</td><td>每组 8 段 42.9 GB，超过段额度；每组 4 段 22.9 GB</td><td>查询留在内存，2 个任务</td></tr>
 <tr><td>8.59 GB，2,796,200 条</td><td>堆 1.95 GB，超过查询额度</td><td>每组 8 段 42.9 GB，超过段额度；改为每组 4 段，22.9 GB</td><td>段组留在内存，4 个任务，每个 executor 2 个</td></tr>
 </table>
 <table>

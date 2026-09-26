@@ -259,7 +259,7 @@ CheckStatus(env, knowhere_index_build(handle, &amp;vectors, config.get()));</cod
 <li><strong>原来</strong>：读回索引搜索时，<code>knowhere_index_deserialize</code> 也先把 BinarySet 的字节拷一份（<code>IndexResource.deserialized_data</code>），加载峰值是文件的 3 倍，常驻 2 倍。</li>
 <li><strong>现在</strong>：调用方 BinarySet 的条目按 shared_ptr 追加进一个局部 BinarySet 交给引擎，拷贝去掉，峰值降到 2 倍，常驻不变。常驻的 2 倍是 Cardinal 适配器持有的原始字节加加载出的结构：它在 Deserialize 里把 <code>GetByName</code> 拿到的 shared_ptr 存成成员，字节随索引存活，调用方关掉 BinarySet 也不悬空；faiss 系经 MemoryIOReader 读进自己的结构，不留引用。</li>
 <li><strong>契约</strong>：BinarySet 一经交给 deserialize 就冻结，之后 <code>knowhere_binary_set_write</code> 返回 KNOWHERE_INVALID_ARGUMENT，allocate 换新缓冲和 close 仍允许。既堵住往被索引引用的字节里写，也堵住另一线程在 Deserialize 进行中写同一缓冲。</li>
-<li><strong>建索引侧未动</strong>：<code>build_data</code> 那一份仍在，是下一条候选。连接器侧的现状：gitlink 是 b9497f4f，规划器里「加载时多一份」的常量 <code>SearchPlan.Footprint.IndexLoadingCopies</code> 仍为 1，加载峰值仍按 3 倍规划。跟进：gitlink 指到 523518f7，常量 1 改 0，重编 Cardinal 原生包，UAT 复验加载峰值。</li>
+<li><strong>建索引侧未动</strong>：<code>build_data</code> 那一份仍在，是下一条候选。连接器侧的现状：gitlink 是 b9497f4f，规划器里「加载时多一份」的常量 <code>SearchPlan.Footprint.IndexLoadingCopies</code> 仍为 1，加载峰值仍按 3 倍规划。跟进（2026-09-25）：gitlink 已指到 523518f7，<code>IndexLoadingCopies</code> 已改 0（规划的加载峰值从 3 倍降到 2 倍）；Cardinal 原生包按新 gitlink 重编与 UAT 复验加载峰值待做。</li>
 </ul>
 </li>
 </ol>

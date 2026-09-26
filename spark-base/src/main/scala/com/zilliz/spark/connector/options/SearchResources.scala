@@ -21,8 +21,28 @@ object SearchResources {
 
   final case class Choice(bytes: Long, reason: String)
 
-  /** What the JVM and Spark themselves take off the heap. */
-  val JvmReserveBytes: Long = 1L << 30
+  /** What the JVM and Spark themselves take off the heap, at least: metaspace,
+    * thread stacks, GC and JIT data, Netty's direct buffers, the shuffle
+    * client's. Measured 1.3-1.4 GB by native memory tracking on the P3
+    * executors (6 GiB heap), where the fixed 1 GiB this used to be left the
+    * plan running at 27.5 of 30 GiB.
+    */
+  val MinJvmReserveBytes: Long = 2L << 30
+
+  /** The reserve's share of the memory limit above the minimum, and its cap:
+    * a bigger executor runs more threads and buffers, but not without end.
+    */
+  val JvmReserveShare: Double = 0.08
+  val MaxJvmReserveBytes: Long = 8L << 30
+
+  /** The reserve taken off `memoryLimitBytes` before the off-heap room is
+    * divided: `max(2 GiB, min(8% of the limit, 8 GiB))`.
+    */
+  def jvmReserveBytes(memoryLimitBytes: Long): Long =
+    math.max(
+      MinJvmReserveBytes,
+      math.min((memoryLimitBytes * JvmReserveShare).toLong, MaxJvmReserveBytes)
+    )
 
   /** The share of the off-heap room the resident vectors may take. */
   val OffHeapShare: Double = 0.5
@@ -90,7 +110,8 @@ object SearchResources {
               s"memory limit unknown -> ${mib(FallbackSegmentBytes)} / $running tasks = ${mib(perTask)} (default)"
             )
           case Some(limit) =>
-            val offHeap = math.max(0L, limit - heapBytes - JvmReserveBytes)
+            val reserve = jvmReserveBytes(limit)
+            val offHeap = math.max(0L, limit - heapBytes - reserve)
             val (room, how) =
               if (index)
                 (
@@ -103,8 +124,8 @@ object SearchResources {
             val floor = if (raw < MinSegmentBudgetBytes) "floor" else "auto"
             Choice(
               perTask,
-              s"limit=${mib(limit)} heap=${mib(heapBytes)} offheap=${mib(offHeap)} " +
-                s"$how / $running tasks -> ${mib(perTask)} ($floor)"
+              s"limit=${mib(limit)} heap=${mib(heapBytes)} reserve=${mib(reserve)} " +
+                s"offheap=${mib(offHeap)} $how / $running tasks -> ${mib(perTask)} ($floor)"
             )
         }
     }

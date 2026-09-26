@@ -110,18 +110,22 @@ object SearchPlan {
 
   object Footprint {
 
-    /** Copies of a persisted index's bytes that a loaded index holds: the copy
-      * Knowhere's C API keeps of the BinarySet for as long as the index lives
-      * (knowhere `src/c_api/c_api.cc`, `IndexResource.deserialized_data`), and
-      * the index deserialized from it. Measured 1.99 and 2.04 on
-      * perf_laion_31m's Cardinal indexes (search-resources.html section 3.3).
+    /** Copies of a persisted index's bytes that a loaded index holds: the
+      * serialized bytes, which Cardinal's adapter keeps a reference to for as
+      * long as the index lives, and the structures it deserialized from them.
+      * Measured 1.99 and 2.04 on perf_laion_31m's Cardinal indexes
+      * (search-resources.html section 3.3).
       */
     val IndexKeptCopies: Int = 2
 
-    /** Copies held beside those while an index loads: the BinarySet the
-      * connector read the files into, released once Knowhere has deserialized.
+    /** Copies held beside those while an index loads. None since Knowhere
+      * 523518f7: `knowhere_index_deserialize` hands the engine the caller's
+      * BinarySet entries by reference instead of copying them, so the bytes the
+      * connector read are the ones the loaded index keeps, and the load's peak
+      * is the kept footprint itself. Before that the C API copied the whole
+      * BinarySet first and the peak was one more copy (2026-09-22 decision).
       */
-    val IndexLoadingCopies: Int = 1
+    val IndexLoadingCopies: Int = 0
 
     /** A persisted index of `bytes`, as the snapshot recorded it. */
     def index(bytes: Long): Footprint = Footprint(

@@ -57,6 +57,14 @@ JACCARD。
 executor 启动时就加载连接器的原生库，而不是等第一个任务碰到 Knowhere 时才加载：
 8 核 executor 上解包并校验原生包约 3 s，否则落在第一个搜索任务上。不配置只多这 3 s。
 
+从对象存储读持久化索引的 executor 要给 glibc 的 malloc 调参，走 executor 环境：
+`spark.executorEnv.MALLOC_ARENA_MAX=2`、`spark.executorEnv.MALLOC_MMAP_THRESHOLD_=1048576`、
+`spark.executorEnv.MALLOC_TRIM_THRESHOLD_=134217728`。一段索引按几百个 8 MiB 的 range
+请求读入，每个在几十个原生线程之一上分配再释放；glibc 的动态 mmap 阈值会把这种大小的块
+改到每线程 arena 里分配，释放的内存回不了系统，一块接一块搜索的 executor 每块涨 0.8–1 GB，
+直到被容器限额杀掉。固定阈值关掉这个机制；同一运行实测常驻内存从第 2 块起持平，每块慢约 7%。
+索引在本地盘上不需要。
+
 查询集如果就是 Parquet 文件——`spark.read.parquet` 之上至多选列、改名——由搜索任务
 自己读：driver 只读 footer 取行数，每个任务自己打开文件，不 collect 也不广播。
 `milvus.search.queries.direct`（默认 `true`）可以关掉；带过滤、join 或内存里构造的

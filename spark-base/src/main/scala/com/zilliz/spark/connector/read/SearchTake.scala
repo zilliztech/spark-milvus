@@ -7,7 +7,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.catalyst.CatalystTypeConverters
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.{col, hash, lit, pmod}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.TaskContext
 
@@ -24,6 +24,45 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
   */
 private[read] object SearchTake {
 
+  /** What one buffered hit costs on the heap in `bySegment`: the copied
+    * `UnsafeRow` of the five hit columns (48 bytes of row data, its object and
+    * byte array headers) and its slot in the buffer. 100k queries at k=10,000
+    * buffered 62.5 million hits per task in 16 tasks and ran an 8-core
+    * executor's 6 GiB heap out of memory (2026-09-25 decision).
+    */
+  private[read] val HitRowBytes: Long = 128L
+
+  /** How the hits are spread over the take tasks: `partitions` tasks, a
+    * segment's hits cut into `buckets` slices by row offset so that a segment
+    * with more hits than one task should buffer spans several tasks. Every
+    * slice still reads its segment once and each row once.
+    */
+  final case class Partitioning(partitions: Int, buckets: Int) {
+    require(partitions > 0 && buckets > 0, s"A take stage needs tasks: $this")
+  }
+
+  /** The partitioning that keeps a task's buffered hits inside
+    * `heapBytesPerTask`, at half that to leave room for hash skew: never fewer
+    * partitions than `minimum` (the session's shuffle partitions, so a small
+    * search keeps its shape), never more than a bucket per hit.
+    */
+  def partitioning(
+      hits: Long,
+      segments: Int,
+      heapBytesPerTask: Long,
+      minimum: Int
+  ): Partitioning = {
+    require(hits >= 0L && segments > 0 && minimum > 0, s"$hits hits, $segments segments, $minimum minimum")
+    val rowsPerTask =
+      math.max(1L, math.max(0L, heapBytesPerTask) / HitRowBytes / 2L)
+    val needed = (hits + rowsPerTask - 1L) / rowsPerTask
+    val partitions =
+      math.max(minimum.toLong, math.min(needed, Int.MaxValue.toLong)).toInt
+    val buckets =
+      math.max(1L, (partitions.toLong + segments - 1L) / segments).toInt
+    Partitioning(partitions, buckets)
+  }
+
   /** The hits of one search, with their output columns.
     *
     * The hits are shuffled by segment so that a task holds every hit of the
@@ -35,21 +74,34 @@ private[read] object SearchTake {
     * ascending order and derives that order itself. What the sort did buy was a
     * bound on memory -- a task held one segment's hits at a time -- so the hits
     * are buffered as `InternalRow` instead of `Row`, which is the same 25
-    * million rows in about half the bytes.
+    * million rows in about half the bytes, and the number of tasks and the
+    * buckets a segment is cut into come from [[partitioning]], sized so that
+    * what one task buffers fits the heap it has.
     */
   def rows(
       hits: DataFrame,
       output: StructType,
       partitions: Map[Long, MilvusInputPartition],
       arrowMaxBytes: Long,
-      metrics: SearchMetrics
+      metrics: SearchMetrics,
+      partitioning: Partitioning
   ): RDD[Row] = {
     val hitSchema = hits.schema
     val segmentColumn = hitSchema.fieldIndex("_segment_id")
     val offsetColumn = hitSchema.fieldIndex("_row_offset")
     val known = hits.sparkSession.sparkContext.broadcast(partitions)
+    // Hits of one segment land in one task unless the plan cut the segment
+    // into buckets, in which case a bucket of its row offsets does; the
+    // bucket is a repartitioning expression, not a column the result carries.
+    val keys =
+      if (partitioning.buckets == 1) Seq(col("_segment_id"))
+      else
+        Seq(
+          col("_segment_id"),
+          pmod(hash(col("_row_offset")), lit(partitioning.buckets))
+        )
     hits
-      .repartition(col("_segment_id"))
+      .repartition(partitioning.partitions, keys: _*)
       .queryExecution
       .toRdd
       .mapPartitions { rows =>

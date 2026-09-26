@@ -68,7 +68,9 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       MilvusSearch.mergePartitions(
         spark,
         math.max(1, rows.map(_._1).distinct.size.toLong),
-        2
+        2,
+        k,
+        1L << 30
       )
     )
 
@@ -209,15 +211,29 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   ) {
     // local[2]: two slots. A partition cannot hold part of a query, so one
     // query is one partition however wide the cluster is.
-    MilvusSearch.mergePartitions(spark, 1L, 1) shouldBe 1
-    MilvusSearch.mergePartitions(spark, 100L, 1) shouldBe 2
+    val heap = 1L << 30
+    MilvusSearch.mergePartitions(spark, 1L, 1, 10, heap) shouldBe 1
+    MilvusSearch.mergePartitions(spark, 100L, 1, 10, heap) shouldBe 2
     // More first-stage tasks than slots: every task's output still lands in a
     // partition of its own, which is what a cluster of many executors needs.
-    MilvusSearch.mergePartitions(spark, 100L, 16) shouldBe 16
+    MilvusSearch.mergePartitions(spark, 100L, 16, 10, heap) shouldBe 16
     // A query count far above the parallelism: partitions grow with it so a
     // reduce-side map holds a few thousand queries, not all of them.
-    MilvusSearch.mergePartitions(spark, 1000000L, 6) shouldBe 245
+    MilvusSearch.mergePartitions(spark, 1000000L, 6, 10, heap) shouldBe 245
     the[IllegalArgumentException] thrownBy MilvusSearch
-      .mergePartitions(spark, 0L, 1)
+      .mergePartitions(spark, 0L, 1, 10, heap)
+  }
+
+  test("a large k cuts the merge into partitions whose queries fit the heap") {
+    // 100k queries, 15 first-stage tasks, k=16,384: 15 x 16,384 x 24 = 5.9 MB
+    // a query; half of a 306 MB heap share holds 26 of them -> 3,847 partitions.
+    // The run that died had 64.
+    val heap = 306393907L
+    val perQuery = 15L * 16384L * 24L
+    val expected = (100000L + heap / 2 / perQuery - 1) / (heap / 2 / perQuery)
+    MilvusSearch.mergePartitions(spark, 100000L, 15, 16384, heap) shouldBe expected.toInt
+    expected should be > 64L
+    // k=100 stays at the fixed few thousand queries a partition: 100k / 4096 = 25.
+    MilvusSearch.mergePartitions(spark, 100000L, 15, 100, heap) shouldBe 25
   }
 }

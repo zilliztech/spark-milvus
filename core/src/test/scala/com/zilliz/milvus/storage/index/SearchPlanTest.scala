@@ -435,7 +435,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "a loaded index holds two copies of its bytes and loads beside a third"
+    "a loaded index holds two copies of its bytes and loads at that footprint"
   ) {
     val indexes: SegmentReadTask => SearchPlan.Footprint =
       _ => SearchPlan.Footprint.index(1000L)
@@ -450,19 +450,19 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       footprint = indexes,
       shuffled = false
     )
-    // Two loaded indexes of 1000 recorded bytes hold 2000 each; one more
-    // loading beside them holds its 1000 read bytes, and the one group's
-    // matrix 32: 5032 bytes keep two segments a set.
-    val two = keeping(5032L)
+    // Two loaded indexes of 1000 recorded bytes hold 2000 each; loading adds
+    // nothing beside them since Knowhere shares the read bytes with the index,
+    // and the one group's matrix is 32: 4032 bytes keep two segments a set.
+    val two = keeping(4032L)
     two.resident shouldBe SearchPlan.Resident.Segments
     two.capacity shouldBe 4000L
     segments(two.sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
-    two.needs.map(_.segmentsOffHeap) shouldBe Some(5032L)
+    two.needs.map(_.segmentsOffHeap) shouldBe Some(4032L)
     // A byte less and a set keeps one.
-    keeping(5031L).sets.size shouldBe 4
+    keeping(4031L).sets.size shouldBe 4
     // Searching an index without keeping it still loads it whole: the query
-    // matrix and three copies of the largest index while it loads.
-    two.needs.map(_.queriesOffHeap) shouldBe Some(32L + 3000L)
+    // matrix and the two copies of the largest index.
+    two.needs.map(_.queriesOffHeap) shouldBe Some(32L + 2000L)
   }
 
   test("an index whose size nothing recorded is planned at the budget share") {

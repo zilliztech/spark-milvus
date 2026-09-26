@@ -309,9 +309,20 @@ object MilvusSearch extends Logging {
       )
     progress.announce()
     spark.sparkContext.addSparkListener(progress)
+    // The merge and take stages run under Spark's own task slots, so a task's
+    // share of the unmanaged heap is the queries' budget at that concurrency.
+    val stageHeap = SearchResources
+      .queryBudget(heap, memoryFraction(spark), resources.tasksPerExecutor)
     val hits =
       if (plan.isEmpty) empty(spark)
-      else
+      else {
+        val mergeParts =
+          mergePartitions(spark, queryCount, plan.tasks, k, stageHeap.bytes)
+        logInfo(
+          s"Merge stage: $queryCount queries x ${plan.tasks} answers of $k over $mergeParts partitions, " +
+            s"about ${queryCount / mergeParts} queries a partition at ${plan.tasks.toLong * k * CandidateBytes.Width} bytes each " +
+            s"against ${stageHeap.bytes} bytes of heap a task"
+        )
         merged(
           spark,
           candidates(
@@ -329,10 +340,25 @@ object MilvusSearch extends Logging {
           ),
           k,
           searchMetric,
-          mergePartitions(spark, queryCount, plan.tasks)
+          mergeParts
         )
+      }
     if (outputColumns.isEmpty) hits
-    else
+    else {
+      // What a take task buffers is every hit of its partition (queries x k
+      // over the tasks), against the same heap share as the merge.
+      val takePartitioning = SearchTake.partitioning(
+        queryCount * k,
+        math.max(1, partitions.size),
+        stageHeap.bytes,
+        spark.sessionState.conf.numShufflePartitions
+      )
+      logInfo(
+        s"Take stage: ${queryCount * k} hits over ${takePartitioning.partitions} tasks" +
+          s" (${takePartitioning.buckets} bucket(s) per segment), " +
+          s"about ${queryCount * k / takePartitioning.partitions} hits a task at " +
+          s"${SearchTake.HitRowBytes} bytes each against ${stageHeap.bytes} bytes of heap a task"
+      )
       spark.createDataFrame(
         SearchTake.rows(
           hits,
@@ -341,10 +367,12 @@ object MilvusSearch extends Logging {
             .map(partition => partition.task.segmentId -> partition)
             .toMap,
           spec.arrowMaxBytes,
-          metrics
+          metrics,
+          takePartitioning
         ),
         StructType(hits.schema.fields ++ outputSchema.fields)
       )
+    }
   }
 
   /** One query, which is the same search over a query set of one row. */
@@ -678,17 +706,30 @@ object MilvusSearch extends Logging {
   private[read] def mergePartitions(
       spark: SparkSession,
       queries: Long,
-      tasks: Int
+      tasks: Int,
+      k: Int,
+      heapBytesPerTask: Long
   ): Int = {
     require(queries > 0, s"A search needs at least one query: $queries")
     require(tasks > 0, s"A search needs at least one task: $tasks")
+    require(k > 0, s"A search needs a positive k: $k")
     // At least one partition for every task slot the job has and for every
     // first-stage task, so no executor sits out the merge; more when the
     // queries would otherwise pile up in one partition; never more than there
     // are queries, since a query is one key and cannot be split.
+    //
+    // How many queries a partition may hold is the smaller of a fixed few
+    // thousand and what the task's heap fits: every query arrives as one
+    // packed answer per first-stage task, `tasks x k x Width` bytes, and the
+    // reduce-side map holds them until they are merged. 100k queries at
+    // k=16,384 over 15 tasks were 5.9 MB a query; 64 partitions of 1,563
+    // queries each ran the 6 GiB heap out (2026-09-26 decision). Half the
+    // heap share is left for the merged answers and the rows they become.
     val slots = math.max(1, spark.sparkContext.defaultParallelism)
-    val byQueries =
-      (queries + QueriesPerMergePartition - 1L) / QueriesPerMergePartition
+    val bytesPerQuery = tasks.toLong * k.toLong * CandidateBytes.Width
+    val byHeap = math.max(1L, math.max(0L, heapBytesPerTask) / 2L / bytesPerQuery)
+    val perPartition = math.min(QueriesPerMergePartition.toLong, byHeap)
+    val byQueries = (queries + perPartition - 1L) / perPartition
     val wanted = math.max(math.max(slots.toLong, tasks.toLong), byQueries)
     math.max(1L, math.min(queries, wanted)).toInt
   }
@@ -727,14 +768,20 @@ object MilvusSearch extends Logging {
   /** One query's answer as the rows the result contract promises: rank from
     * one, best first.
     */
-  private[read] def rows(query: Long, packed: Array[Byte]): Seq[Row] = {
-    val hits = Vector.newBuilder[Row]
-    var rank = 1
-    CandidateBytes.foreach(packed) { (segmentId, rowOffset, score) =>
-      hits += Row(query, rank, score, segmentId, rowOffset)
-      rank += 1
-    }
-    hits.result()
+  private[read] def rows(query: Long, packed: Array[Byte]): Iterator[Row] = {
+    // One row at a time: at k=16,384 a query's answer is 16,384 rows, and a
+    // vector of them per query is what the reduce task would otherwise hold
+    // on top of the packed bytes.
+    val count = CandidateBytes.count(packed)
+    Iterator.tabulate(count)(at =>
+      Row(
+        query,
+        at + 1,
+        CandidateBytes.score(packed, at),
+        CandidateBytes.segmentId(packed, at),
+        CandidateBytes.rowOffset(packed, at)
+      )
+    )
   }
 
   private def empty(spark: SparkSession): DataFrame = {

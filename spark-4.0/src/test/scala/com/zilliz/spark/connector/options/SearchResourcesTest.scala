@@ -15,8 +15,8 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
   private val GiB = 1L << 30
 
   test("an exact scan keeps half the off-heap room, shared by the tasks") {
-    // The measured machine: 503 GiB, a 32 GiB heap, 16 tasks.
-    // (503 - 32 - 1) x 0.5 / 16 = 14.6875 GiB
+    // The measured machine: 503 GiB, a 32 GiB heap, 16 tasks; the reserve is
+    // capped at 8 GiB. (503 - 32 - 8) x 0.5 / 16 = 14.46875 GiB
     val local = SearchResources.segmentBudget(
       Some(503L * GiB),
       32L * GiB,
@@ -24,13 +24,14 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
       None,
       index = false
     )
-    local.bytes shouldBe (470L * GiB / 2 / 16)
+    local.bytes shouldBe (463L * GiB / 2 / 16)
     local.reason shouldBe
-      "limit=503GiB heap=32GiB offheap=470GiB x0.5 / 16 tasks -> 14.7GiB (auto)"
-    // A pod of 8 GiB with a 4 GiB heap and 4 tasks: (8 - 4 - 1) x 0.5 / 4.
+      "limit=503GiB heap=32GiB reserve=8GiB offheap=463GiB x0.5 / 16 tasks -> 14.5GiB (auto)"
+    // A pod of 8 GiB with a 4 GiB heap and 4 tasks, the reserve at its 2 GiB
+    // minimum: (8 - 4 - 2) x 0.5 / 4.
     SearchResources
       .segmentBudget(Some(8L * GiB), 4L * GiB, 4, None, index = false)
-      .bytes shouldBe 384L * MiB
+      .bytes shouldBe 256L * MiB
     // A container Spark sized with the default overhead: 4 GiB heap plus 410
     // MiB leaves nothing after the JVM's share, so the floor applies.
     val floored = SearchResources.segmentBudget(
@@ -45,8 +46,9 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
   }
 
   test("an index search keeps the off-heap room less its working memory") {
-    // 4 GiB heap and 28 GiB overhead, one search task per executor:
-    // 32 - 4 - 1 = 27 GiB off the heap, less 1 GiB, all for the one task.
+    // 4 GiB heap and 28 GiB overhead, one search task per executor: the
+    // reserve is 8% of 32 GiB = 2.56 GiB, 32 - 4 - 2.56 = 25.44 GiB off the
+    // heap, less 1 GiB of working memory, all for the one task.
     val budget = SearchResources.segmentBudget(
       Some(32L * GiB),
       4L * GiB,
@@ -54,9 +56,17 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
       None,
       index = true
     )
-    budget.bytes shouldBe 26L * GiB
+    val reserve = (32L * GiB * 0.08).toLong
+    reserve shouldBe SearchResources.jvmReserveBytes(32L * GiB)
+    budget.bytes shouldBe (32L * GiB - 4L * GiB - reserve - 1L * GiB)
     budget.reason shouldBe
-      "limit=32GiB heap=4GiB offheap=27GiB -1GiB / 1 tasks -> 26GiB (auto)"
+      "limit=32GiB heap=4GiB reserve=2.6GiB offheap=25.4GiB -1GiB / 1 tasks -> 24.4GiB (auto)"
+  }
+
+  test("the JVM reserve is 8% of the limit between 2 and 8 GiB") {
+    SearchResources.jvmReserveBytes(8L * GiB) shouldBe 2L * GiB
+    SearchResources.jvmReserveBytes(30L * GiB) shouldBe (30L * GiB * 0.08).toLong
+    SearchResources.jvmReserveBytes(503L * GiB) shouldBe 8L * GiB
   }
 
   test("the queries' budget is the heap Spark does not manage") {
