@@ -131,6 +131,9 @@ RUN git config --global --add safe.directory /workspace && \
     git config --global --add safe.directory /workspace/milvus-proto && \
     git config --global --add safe.directory /workspace/milvus-storage && \
     git config --global --add safe.directory /workspace/knowhere && \
+    git config --global --add safe.directory /workspace/.git/modules/milvus-proto && \
+    git config --global --add safe.directory /workspace/.git/modules/milvus-storage && \
+    git config --global --add safe.directory /workspace/.git/modules/knowhere && \
     make init-missing-submodules
 
 # Both Linux architectures build the unified bundle, or take a matching
