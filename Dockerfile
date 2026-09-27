@@ -127,13 +127,13 @@ WORKDIR /workspace
 COPY . .
 
 # Initialize missing submodules without resetting source revisions copied from the build context.
-RUN git config --global --add safe.directory /workspace && \
-    git config --global --add safe.directory /workspace/milvus-proto && \
-    git config --global --add safe.directory /workspace/milvus-storage && \
-    git config --global --add safe.directory /workspace/knowhere && \
-    git config --global --add safe.directory /workspace/.git/modules/milvus-proto && \
-    git config --global --add safe.directory /workspace/.git/modules/milvus-storage && \
-    git config --global --add safe.directory /workspace/.git/modules/knowhere && \
+RUN git config --system --add safe.directory /workspace && \
+    git config --system --add safe.directory /workspace/milvus-proto && \
+    git config --system --add safe.directory /workspace/milvus-storage && \
+    git config --system --add safe.directory /workspace/knowhere && \
+    git config --system --add safe.directory /workspace/.git/modules/milvus-proto && \
+    git config --system --add safe.directory /workspace/.git/modules/milvus-storage && \
+    git config --system --add safe.directory /workspace/.git/modules/knowhere && \
     make init-missing-submodules
 
 # Both Linux architectures build the unified bundle, or take a matching
