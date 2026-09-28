@@ -72,6 +72,7 @@ class GitSourceExportTest(unittest.TestCase):
 
     def test_export_contains_only_tracked_files_and_no_git_metadata(self):
         (self.source / "untracked.txt").write_text("untracked\n")
+        (self.source / "tracked.txt").write_text("working tree change\n")
         destination = self.root / "snapshot"
         export_git_tree(self.source, self.revision, destination)
         self.assertEqual("tracked\n", (destination / "tracked.txt").read_text())
