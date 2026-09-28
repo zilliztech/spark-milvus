@@ -98,6 +98,34 @@ def clone(source, revision, destination, recorded_files=None):
     run(["git", "-C", destination, "checkout", "-q", "--detach", "FETCH_HEAD"])
 
 
+def export_git_tree(source, revision, destination, recorded_files=None):
+    """Export one commit without copying Git metadata or untracked files."""
+    if destination.exists():
+        if recorded_files is not None:
+            if tree_hashes(destination) != recorded_files:
+                raise RuntimeError("Recorded source snapshot was modified: " + str(destination))
+            return
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+    archive_path = destination.parent / ("." + destination.name + "-" + uuid.uuid4().hex + ".tar")
+    try:
+        run(["git", "-C", source, "archive", "--format=tar", "--output=" + str(archive_path), revision])
+        environment = os.environ.copy()
+        environment["LC_ALL"] = "C"
+        run(["tar", "-xf", archive_path, "-C", destination], env=environment)
+    finally:
+        archive_path.unlink(missing_ok=True)
+
+
+def export_git_ref(source, ref, destination):
+    """Resolve and export a ref from an already checked-out local repository."""
+    revision = git_value(source, "rev-list", "-n", "1", ref)
+    if len(revision) != 40 or any(value not in "0123456789abcdef" for value in revision):
+        raise RuntimeError("Local Git ref did not resolve to a complete commit: " + ref)
+    export_git_tree(source, revision, destination)
+    return revision
+
+
 def tree_hashes(directory):
     ignored = {".git", "build", "target", "__pycache__"}
     result = {str(path.relative_to(directory)): digest(path) for path in sorted(directory.rglob("*"))
@@ -386,17 +414,20 @@ def build(args, repository, java_home, work, target, profile):
         knowhere = sources / "knowhere"
         knowhere_identity = provenance / "knowhere-source-files.json"
         recorded_knowhere = json.loads(knowhere_identity.read_text()) if knowhere_identity.exists() else None
-        clone(knowhere_object_source, knowhere_pin, knowhere, recorded_knowhere)
+        export_git_tree(knowhere_object_source, knowhere_pin, knowhere, recorded_knowhere)
         cardinal = {}
         if args.with_cardinal:
-            # The tags come from the Knowhere snapshot just cloned; the resolved
+            # The tags come from the Knowhere snapshot just exported; the resolved
             # commits go into the provenance so a resumed build can be checked.
             cardinal_identity = provenance / "cardinal-source-identity.json"
             for generation, tag in cardinal_versions(knowhere).items():
                 local_source = knowhere_object_source / "thirdparty" / ("cardinal" + generation)
-                origin = args.cardinal_repository or (
-                    str(local_source) if (local_source / ".git").exists() else "https://github.com/zilliztech/cardinal.git")
-                revision = clone_ref(origin, tag, knowhere / "thirdparty" / ("cardinal" + generation))
+                destination = knowhere / "thirdparty" / ("cardinal" + generation)
+                if not args.cardinal_repository and (local_source / ".git").exists():
+                    revision = export_git_ref(local_source, tag, destination)
+                else:
+                    origin = args.cardinal_repository or "https://github.com/zilliztech/cardinal.git"
+                    revision = clone_ref(origin, tag, destination)
                 cardinal[generation] = {"tag": tag, "revision": revision}
             if cardinal_identity.exists() and json.loads(cardinal_identity.read_text()) != cardinal:
                 raise RuntimeError("Cardinal source changed; use a new work directory")
