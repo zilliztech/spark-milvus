@@ -481,7 +481,7 @@ def build(args, repository, java_home, work, target, profile):
         storage_recipe = (git_value(args.storage_source, "show", storage_pin + ":cpp/conanfile.py")
                           if (args.storage_source / ".git").exists()
                           else (storage / "cpp/conanfile.py").read_text())
-        knowhere_recipe = git_value(knowhere, "show", knowhere_pin + ":conanfile.py")
+        knowhere_recipe = (knowhere / "conanfile.py").read_text()
         version_selection = validate_upstream_versions(constraints, storage_recipe, knowhere_recipe)
         version_selection["sourceRevisions"] = {"storage": storage_pin, "knowhere": knowhere_pin}
         version_selection["recipeSha256"] = {
