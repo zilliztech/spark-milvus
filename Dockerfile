@@ -67,12 +67,24 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 ENV CCACHE_DIR=/root/.ccache
 ENV PATH=/usr/lib/ccache:$PATH
 
-# Use Java 21 from base image, install Scala/sbt via SDKMAN
+# Use Java 21 from the base image and SDKMAN for sbt.
 ENV SDKMAN_DIR=/root/.sdkman
 RUN curl -s "https://get.sdkman.io" | bash
-RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && \
-    sdk install scala 2.13.16 && \
-    sdk install sbt 1.11.1"
+# SDKMAN's Scala 2.13.16 URL points to a retired Lightbend download.
+# Keep the same installation layout, using the official GitHub release ZIP.
+RUN set -eu; \
+    curl -fL --retry 3 --connect-timeout 15 --max-time 300 \
+        -o /tmp/scala-2.13.16.zip \
+        https://github.com/scala/scala/releases/download/v2.13.16/scala-2.13.16.zip; \
+    printf '%s  %s\n' \
+        '638b1c747c6933bf3e632c8677904eb84ff07c8cebec41b70d092d3f6d7fe67f' \
+        /tmp/scala-2.13.16.zip | sha256sum -c -; \
+    mkdir -p "${SDKMAN_DIR}/candidates/scala"; \
+    unzip -q /tmp/scala-2.13.16.zip -d "${SDKMAN_DIR}/candidates/scala"; \
+    mv "${SDKMAN_DIR}/candidates/scala/scala-2.13.16" "${SDKMAN_DIR}/candidates/scala/2.13.16"; \
+    ln -s 2.13.16 "${SDKMAN_DIR}/candidates/scala/current"; \
+    rm /tmp/scala-2.13.16.zip
+RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sdk install sbt 1.11.1"
 
 # JAVA_HOME is already set in base image (java21)
 ENV SCALA_HOME=/root/.sdkman/candidates/scala/current
