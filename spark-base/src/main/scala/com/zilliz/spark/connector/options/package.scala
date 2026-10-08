@@ -11,7 +11,8 @@ package com.zilliz.spark.connector
   * common `milvus.partitions` and `milvus.segments` selectors. `StorageOptions`
   * turns `fs.*` plus supported Hadoop and S3 aliases into a bucket, endpoint
   * and `ObjectStore`; Milvus-only endpoint-style paths are recognized only at
-  * metadata boundaries.
+  * metadata boundaries. HadoopStorageKeys preserves Tencent's explicit data
+  * role when translating its TKE OIDC provider to native storage properties.
   *
   * Numeric and Boolean user values go through one strict parser. Read batch and
   * task Arrow limits become a typed `ReadLimits` carried in every

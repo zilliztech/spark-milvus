@@ -580,4 +580,83 @@ class HadoopStorageKeysTest extends AnyFunSuite with Matchers {
       )
     )
   }
+  test(
+    "Tencent runtime role maps to Tencent STS and preserves the bucket identity"
+  ) {
+    val provider = HadoopStorageKeys.TencentAssumedRoleProvider
+    val c = conf(
+      "fs.s3a.aws.credentials.provider" -> provider,
+      "fs.s3a.endpoint" -> "cos.ap-shanghai.myqcloud.com",
+      "fs.s3a.endpoint.region" -> "ap-shanghai",
+      "fs.s3a.assumed.role.arn" -> "qcs::cam::uin/1:roleName/data",
+      "fs.s3a.assumed.role.session.name" -> "spark-job",
+      "fs.s3a.bucket.customer.assumed.role.arn" -> "qcs::cam::uin/2:roleName/reader",
+      "fs.s3a.bucket.customer.assumed.role.external.id" -> "tenant-2"
+    )
+    val out = HadoopStorageKeys.toFsProperties(c, "customer")
+    out(StorageProperties.CloudProvider) shouldBe "tencent"
+    out(StorageProperties.RoleArn) shouldBe "qcs::cam::uin/2:roleName/reader"
+    out(StorageProperties.ExternalId) shouldBe "tenant-2"
+    out(StorageProperties.SessionName) shouldBe "spark-job"
+    out(StorageProperties.Region) shouldBe "ap-shanghai"
+    HadoopStorageKeys.onlyAssumedRole(provider) shouldBe true
+    HadoopStorageKeys.s3aAssumesRole(c, "customer") shouldBe true
+    HadoopStorageKeys.toFsProperties(c, "other")(
+      StorageProperties.RoleArn
+    ) shouldBe
+      "qcs::cam::uin/1:roleName/data"
+  }
+
+  test("Tencent OIDC does not inherit AWS static credentials or signer") {
+    val c = conf(
+      "fs.s3a.aws.credentials.provider" -> HadoopStorageKeys.TencentAssumedRoleProvider,
+      "fs.s3a.assumed.role.arn" -> "qcs::cam::uin/1:roleName/data",
+      "fs.s3a.access.key" -> "unused",
+      "fs.s3a.secret.key" -> "unused-secret",
+      "fs.s3a.assumed.role.credentials.provider" -> "unsupported.aws.signer"
+    )
+    val out = HadoopStorageKeys.toFsProperties(c, "b")
+    out(StorageProperties.CloudProvider) shouldBe "tencent"
+    out should not contain key(StorageProperties.AccessKeyId)
+    out should not contain key(StorageProperties.AccessKeyValue)
+  }
+
+  test(
+    "Tencent runtime refuses an absent target role and ambiguous provider chain"
+  ) {
+    val provider = HadoopStorageKeys.TencentAssumedRoleProvider
+    intercept[IllegalArgumentException] {
+      HadoopStorageKeys.toFsProperties(
+        conf(
+          "fs.s3a.aws.credentials.provider" -> provider,
+          "fs.s3a.endpoint" -> "cos.ap-shanghai.myqcloud.com"
+        ),
+        "b"
+      )
+    }.getMessage should include("requires assumed.role.arn")
+    intercept[IllegalArgumentException] {
+      HadoopStorageKeys.toFsProperties(
+        conf(
+          "fs.s3a.aws.credentials.provider" -> s"$provider,${HadoopStorageKeys.S3AAssumedRoleProvider}",
+          "fs.s3a.assumed.role.arn" -> "qcs::cam::uin/1:roleName/data"
+        ),
+        "b"
+      )
+    }.getMessage should include("mixes the Tencent")
+    HadoopStorageKeys.onlyAssumedRole(
+      s"$provider,${HadoopStorageKeys.S3AAssumedRoleProvider}"
+    ) shouldBe false
+  }
+
+  test("a bucket AWS provider overrides the Tencent session provider") {
+    val c = conf(
+      "fs.s3a.aws.credentials.provider" -> HadoopStorageKeys.TencentAssumedRoleProvider,
+      "fs.s3a.bucket.aws.aws.credentials.provider" -> HadoopStorageKeys.S3AAssumedRoleProvider,
+      "fs.s3a.bucket.aws.assumed.role.arn" -> "arn:aws:iam::1:role/data"
+    )
+    HadoopStorageKeys.toFsProperties(c, "aws")(
+      StorageProperties.CloudProvider
+    ) shouldBe "aws"
+  }
+
 }

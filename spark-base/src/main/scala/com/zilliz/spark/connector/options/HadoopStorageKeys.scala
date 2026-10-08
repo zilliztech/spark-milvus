@@ -98,6 +98,8 @@ object HadoopStorageKeys extends Logging {
     */
   private[connector] val S3AAssumedRoleProvider =
     "org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider"
+  private[connector] val TencentAssumedRoleProvider =
+    "com.zilliz.cloud.hadoop.TencentS3RoleCredentialsProvider"
   private[connector] val OssAssumedRoleProviders = Set(
     "com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider",
     "org.apache.hadoop.fs.aliyun.oss.AssumedRoleCredentialProvider"
@@ -154,7 +156,8 @@ object HadoopStorageKeys extends Logging {
       S3ASimple -> Source.Keys,
       "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider" ->
         Source.KeysWithToken,
-      S3AAssumedRoleProvider -> Source.Role
+      S3AAssumedRoleProvider -> Source.Role,
+      TencentAssumedRoleProvider -> Source.Role
     ) ++ AwsPlatformProviders.map(_ -> Source.Platform),
     singleProvider = false,
     // AssumedRoleCredentialProvider signs STS with this chain; without the
@@ -220,10 +223,10 @@ object HadoopStorageKeys extends Logging {
     */
   private[connector] def onlyAssumedRole(chain: String): Boolean = {
     val listed = classes(chain)
-    listed.nonEmpty &&
-    listed.forall(
+    listed == Seq(TencentAssumedRoleProvider) ||
+    (listed.nonEmpty && listed.forall(
       (Set(S3AAssumedRoleProvider) ++ OssAssumedRoleProviders).contains
-    )
+    ))
   }
 
   /** Whether the S3A identity Hadoop uses for `bucket` is an assumed role.
@@ -346,9 +349,22 @@ object HadoopStorageKeys extends Logging {
             s"$providerKey lists ${chain.size} classes (${chain.mkString(",")}), and Hadoop takes one"
           )
         }
+        val tencentRole = chain == Seq(TencentAssumedRoleProvider)
+        if (chain.contains(TencentAssumedRoleProvider) && !tencentRole) {
+          scope.refuse(
+            s"$providerKey mixes the Tencent role provider with another identity"
+          )
+        }
+        if (tencentRole && scope.lookup("assumed.role.arn").isEmpty) {
+          scope.refuse(
+            s"$providerKey requires assumed.role.arn for the Tencent data role"
+          )
+        }
         walk(scope, chain, providerKey, roleAllowed = true) match {
           case Identity.AssumedRole =>
-            if (scope.hasKeys) {
+            // Tencent's provider always uses TKE OIDC, not the AWS signer
+            // configuration or Spark's copied AWS environment keys.
+            if (scope.hasKeys && !tencentRole) {
               ns.roleSigner match {
                 case None =>
                   scope.refuse(
@@ -467,7 +483,7 @@ object HadoopStorageKeys extends Logging {
     val s3a = translate(
       new Scope(conf, this.s3a, bucket, environment),
       declaredIdentity,
-      forBucket = declaredCloud.forall(_ == "aws")
+      forBucket = declaredCloud.forall(c => c == "aws" || c == "tencent")
     )
     val oss = translate(
       new Scope(conf, this.oss, bucket, environment),
@@ -479,9 +495,18 @@ object HadoopStorageKeys extends Logging {
     // the provider from whichever namespace supplied keys. Both present is a
     // misconfiguration, so leave cloud_provider unset and let the C layer's
     // validation speak.
+    val tencentRole = effectiveProvider(
+      conf,
+      S3A,
+      "aws.credentials.provider",
+      bucket
+    ).exists(chain => classes(chain) == Seq(TencentAssumedRoleProvider))
     val provider =
       if (s3a.nonEmpty && oss.isEmpty)
-        Some(StorageProperties.CloudProvider -> "aws")
+        Some(
+          StorageProperties.CloudProvider -> (if (tencentRole) "tencent"
+                                              else "aws")
+        )
       else if (oss.nonEmpty && s3a.isEmpty)
         Some(StorageProperties.CloudProvider -> "aliyun")
       else None

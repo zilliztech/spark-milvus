@@ -214,7 +214,7 @@ connector 两边都不认识云。</p>
 <tr><td><code>remote</code> + <code>gcp</code></td><td><code>GcpFileSystemProducer</code></td><td><code>gcp_credential_provider</code></td></tr>
 <tr><td rowspan="4"><code>remote</code> + <code>aws</code> / <code>aliyun</code> / <code>tencent</code> / <code>huawei</code></td><td rowspan="4"><code>S3FileSystemProducer</code>（四家都走 S3 协议）</td><td>aws：SDK 默认链；有 <code>fs.role_arn</code> 时 <code>STSAssumeRoleCredentialsProvider</code></td></tr>
 <tr><td>aliyun：<code>AliyunOIDCAssumeRoleChainProvider</code> 或 <code>AliyunRAMCredentialsProvider</code></td></tr>
-<tr><td>tencent：<code>TencentCloudCredentialsProvider</code>、<code>TencentCloudSTSClient</code></td></tr>
+<tr><td>tencent：<code>TencentCloudCredentialsProvider</code>；有 <code>fs.role_arn</code> 时 <code>TencentCloudOIDCAssumeRoleChainProvider</code>，两者共用 <code>TencentCloudSTSClient</code></td></tr>
 <tr><td>huawei：<code>HuaweiCloudCredentialsProvider</code>、<code>HuaweiCloudSTSClient</code></td></tr>
 </table>
 <p><code>fs.storage_type</code> 只有 <code>local</code> 和 <code>remote</code>，与 Milvus 的
@@ -257,7 +257,7 @@ connector 两边都不认识云。</p>
 临时凭证（密钥加 <code>session.token</code>，链会用到 token）翻不过去，因为属性包没有 token 的位置（3.7）：三个值正好是本进程的 <code>AWS_ACCESS_KEY_ID</code>、<code>AWS_SECRET_ACCESS_KEY</code>、<code>AWS_SESSION_TOKEN</code> 时（Spark 把 driver 的这三个环境变量抄进 s3a 键），密钥不下传、记一条 warning，由原生默认链读同一组变量；其他临时凭证报错，指向 <code>fs.use_iam</code> 或长期密钥（2026-09-16）；
 只提供了 Hadoop 自带默认值（core-default.xml 里的 ssl、path style、provider 链）的命名空间不参与翻译；
 TLS 开关没设时取 Hadoop 的值，也就是开，端点自带 scheme 时以 scheme 为准；path style 只翻部署显式设过的值。
-<code>cloud_provider</code> 从出现键的命名空间推（s3a→aws、oss→aliyun），
+<code>cloud_provider</code> 通常从出现键的命名空间推（s3a→aws、oss→aliyun）；明确的腾讯数据角色 provider 映射 tencent（3.4.1），
 两个命名空间都在则留空让 C 层校验报错。driver 解析快照、manifest 位置时认的端点取自打开存储的同一个属性包，只由 Hadoop 键给出的端点同样认得。退出条件是产出配置的一方直接产出 <code>fs.*</code>。</li>
 </ol>
 <p>两个落点都在 core 之外。下表是给它们用的，不是 core 的代码：</p>
@@ -294,6 +294,23 @@ C 层认同样的输入（3.4）。<strong>可复用说的是值，不是说 cor
 <code>InstanceProfileCredentialsProvider</code> 之前，所以在 EKS 上先拿到投影进来的
 service-account token，不会回落到节点实例角色；Java v1 SDK 上那个顺序问题
 （<a href="storage-auth.html#verified">storage-auth.html 第六节</a>）在这条路上不存在。</p>
+
+<h3 id="tencent-role">3.4.1 腾讯云目标角色</h3>
+<p>腾讯云复用已有 <code>fs.role_arn</code>、<code>fs.session_name</code> 和
+<code>fs.external_id</code>，不增加 core 或 JNI 接口。C 层先读取 TKE 注入的四个环境变量，
+通过 <code>AssumeRoleWithWebIdentity</code> 获取机器身份，再用这份临时凭证签名
+<code>AssumeRole</code>，换成显式指定的数据角色。ExternalId 只交给第二步。
+两步凭证按实际过期时间更新，第一步更新时重新读取投影 token 文件；缺少身份或 STS 失败时不回落到节点角色。
+Hadoop 的 <code>com.zilliz.cloud.hadoop.TencentS3RoleCredentialsProvider</code>
+映射为 <code>fs.cloud_provider=tencent</code> 和上述角色键；桶级配置仍优先，显式 fs.* 身份仍覆盖会话身份。
+已有 OpenSSL 提供 TC3 所需 HMAC/SHA256，不引入另一套 C++ SDK。协议依据为
+<a href="https://cloud.tencent.com/document/api/213/30654">腾讯云 TC3 签名规范</a>。
+此处不改变其他云的 provider，不支持以自定义静态密钥作为腾讯角色的第一跳。</p>
+<p>验收包含 mock 两跳请求、签名、刷新、失败关闭及桶级身份映射；发布前仍需新的 native bundle
+与 Java runtime 在真实 TKE/COS 上联合验证，单元测试不代表腾讯云授权已生效。平台当前仍有 legacy Connector 的 shaded classpath 与独立
+backfill JAR；本分支属于 refactor/v2，不能把 v2 native bundle 混入 legacy classpath 就宣称兼容。
+交付时必须固定本次 milvus-storage 提交、匹配的统一 native bundle 和 Connector JAR，
+在独立的 v2 作业 classpath 联调后再决定平台版本切换；本次不调整 legacy 业务入口或打包。</p>
 
 <h3 id="cred-multi">3.5 多个桶用不同身份</h3>
 <p><code>extfs.&lt;名字&gt;.&lt;属性&gt;</code> 注册多套文件系统配置，<code>&lt;属性&gt;</code> 就是
