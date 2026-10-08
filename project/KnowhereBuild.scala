@@ -4,7 +4,6 @@ import java.net.URI
 import java.nio.file.{Files, StandardCopyOption}
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
-import java.util.Properties
 import scala.sys.process.{Process, ProcessLogger}
 
 import sbt._
@@ -38,10 +37,7 @@ object KnowhereBuild {
       Seq(output)
     }.taskValue,
     knowhereApiJar := buildApi(
-      readPin(
-        (ThisBuild / baseDirectory).value,
-        baseDirectory.value / "knowhere.properties"
-      ),
+      readPin((ThisBuild / baseDirectory).value),
       target.value / "knowhere",
       javaHome.value.getOrElse(file(sys.props("java.home"))),
       streams.value.log
@@ -75,15 +71,19 @@ object KnowhereBuild {
       apiVersion: String
   )
 
-  private def readPin(repositoryRoot: File, path: File): Pin = {
-    val values = properties(path)
-    def required(key: String): String =
-      Option(values.getProperty(key))
-        .filter(_.nonEmpty)
-        .getOrElse(
-          sys.error(s"Missing $key in $path")
-        )
-    val repository = required("repository")
+  /** The pin is the `knowhere` submodule itself: `.gitmodules` names the
+    * repository and the superproject gitlink fixes the revision (decision of
+    * 2026-09-17). Both are read from Git; no second file repeats them.
+    */
+  private def readPin(repositoryRoot: File): Pin = {
+    val repository = gitOutput(
+      repositoryRoot,
+      Seq("config", "-f", ".gitmodules", "submodule.knowhere.url")
+    )
+    require(
+      repository.nonEmpty,
+      "Missing submodule.knowhere.url in .gitmodules"
+    )
     require(
       new URI(repository).getScheme == "https",
       "Knowhere repository requires HTTPS"
@@ -296,15 +296,6 @@ object KnowhereBuild {
       s"Knowhere JNI smoke failed ($exit); inspect $output and $workingDirectory"
     )
     IO.delete(workingDirectory)
-  }
-
-  private def properties(path: File): Properties = {
-    require(path.isFile, s"Missing Knowhere metadata: $path")
-    val result = new Properties()
-    val input = new FileInputStream(path)
-    try result.load(input)
-    finally input.close()
-    result
   }
 
   private def digest(path: File): String = {

@@ -312,8 +312,7 @@
 ├── <span class="m">native-storage/</span><span class="lay">第 1 层</span>
 │   └── src/main/java/                <span class="c">NativeStorageLibrary：把统一包解出的路径交给上游加载器；resources/native 为空</span>
 ├── <span class="m">native-vector/</span><span class="lay">第 1 层</span>
-│   ├── src/main/java/                <span class="c">com.zilliz.milvus.jni.vector</span>
-│   └── knowhere.properties           <span class="c">钉住的 Knowhere 提交、摘要与 ABI</span>
+│   └── src/main/java/                <span class="c">com.zilliz.milvus.jni.vector；Knowhere 的仓库与 revision 来自 .gitmodules 与 gitlink</span>
 │
 ├── <span class="m">core/</span><span class="lay">第 2 层</span>                        <span class="c">无 Spark 依赖，编译期强制</span>
 │   ├── src/main/scala/com/zilliz/milvus/storage/
