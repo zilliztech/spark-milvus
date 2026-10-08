@@ -29,8 +29,8 @@ object SearchResources {
     */
   val MinJvmReserveBytes: Long = 2L << 30
 
-  /** The reserve's share of the memory limit above the minimum, and its cap:
-    * a bigger executor runs more threads and buffers, but not without end.
+  /** The reserve's share of the memory limit above the minimum, and its cap: a
+    * bigger executor runs more threads and buffers, but not without end.
     */
   val JvmReserveShare: Double = 0.08
   val MaxJvmReserveBytes: Long = 8L << 30

@@ -231,7 +231,13 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val heap = 306393907L
     val perQuery = 15L * 16384L * 24L
     val expected = (100000L + heap / 2 / perQuery - 1) / (heap / 2 / perQuery)
-    MilvusSearch.mergePartitions(spark, 100000L, 15, 16384, heap) shouldBe expected.toInt
+    MilvusSearch.mergePartitions(
+      spark,
+      100000L,
+      15,
+      16384,
+      heap
+    ) shouldBe expected.toInt
     expected should be > 64L
     // k=100 stays at the fixed few thousand queries a partition: 100k / 4096 = 25.
     MilvusSearch.mergePartitions(spark, 100000L, 15, 100, heap) shouldBe 25

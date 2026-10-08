@@ -3,9 +3,9 @@ package com.zilliz.spark.connector.read
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-/** How the take stage spreads its hits over tasks so that what one task
-  * buffers fits its heap (docs/design/architecture/vector-search.html section
-  * 2.1, 2026-09-25 decision).
+/** How the take stage spreads its hits over tasks so that what one task buffers
+  * fits its heap (docs/design/architecture/vector-search.html section 2.1,
+  * 2026-09-25 decision).
   */
 class SearchTakeTest extends AnyFunSuite with Matchers {
   private val MiB = 1L << 20
@@ -27,14 +27,30 @@ class SearchTakeTest extends AnyFunSuite with Matchers {
     (1000000000L / p.partitions) should be < (292L * MiB / SearchTake.HitRowBytes)
   }
 
-  test("the partition count never drops below the minimum or the buckets below one") {
-    SearchTake.partitioning(0L, 74, 292L * MiB, 16) shouldBe SearchTake.Partitioning(16, 1)
+  test(
+    "the partition count never drops below the minimum or the buckets below one"
+  ) {
+    SearchTake.partitioning(0L, 74, 292L * MiB, 16) shouldBe SearchTake
+      .Partitioning(16, 1)
     SearchTake.partitioning(1L, 1, 0L, 3) shouldBe SearchTake.Partitioning(3, 3)
   }
 
   test("an empty plan or budget is refused before it reaches the shuffle") {
-    an[IllegalArgumentException] should be thrownBy SearchTake.partitioning(10L, 0, 1L, 1)
-    an[IllegalArgumentException] should be thrownBy SearchTake.partitioning(10L, 1, 1L, 0)
-    an[IllegalArgumentException] should be thrownBy SearchTake.Partitioning(0, 1)
+    an[IllegalArgumentException] should be thrownBy SearchTake.partitioning(
+      10L,
+      0,
+      1L,
+      1
+    )
+    an[IllegalArgumentException] should be thrownBy SearchTake.partitioning(
+      10L,
+      1,
+      1L,
+      0
+    )
+    an[IllegalArgumentException] should be thrownBy SearchTake.Partitioning(
+      0,
+      1
+    )
   }
 }

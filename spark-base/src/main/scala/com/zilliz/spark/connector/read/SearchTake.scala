@@ -52,7 +52,10 @@ private[read] object SearchTake {
       heapBytesPerTask: Long,
       minimum: Int
   ): Partitioning = {
-    require(hits >= 0L && segments > 0 && minimum > 0, s"$hits hits, $segments segments, $minimum minimum")
+    require(
+      hits >= 0L && segments > 0 && minimum > 0,
+      s"$hits hits, $segments segments, $minimum minimum"
+    )
     val rowsPerTask =
       math.max(1L, math.max(0L, heapBytesPerTask) / HitRowBytes / 2L)
     val needed = (hits + rowsPerTask - 1L) / rowsPerTask

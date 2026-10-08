@@ -65,7 +65,9 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
 
   test("the JVM reserve is 8% of the limit between 2 and 8 GiB") {
     SearchResources.jvmReserveBytes(8L * GiB) shouldBe 2L * GiB
-    SearchResources.jvmReserveBytes(30L * GiB) shouldBe (30L * GiB * 0.08).toLong
+    SearchResources.jvmReserveBytes(
+      30L * GiB
+    ) shouldBe (30L * GiB * 0.08).toLong
     SearchResources.jvmReserveBytes(503L * GiB) shouldBe 8L * GiB
   }
 
