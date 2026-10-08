@@ -29,6 +29,14 @@ import com.zilliz.milvus.storage.read.exec.{IndexRowMapping, SegmentIndexHandle}
   * thread while the other cores waited; pipelined, the Java time hides behind
   * the next search (docs/design/architecture/vector-search.html section 2.1,
   * 2026-09-24 decision).
+  *
+  * At k = 10,000 the same chunk's answer holds a hundred times the candidates
+  * of the profiled k = 100 and its checking and collecting take longer than the
+  * search: 100 ms against 224 ms of search on one thread, with the other seven
+  * cores idle. The pipeline therefore cuts an answer into `threads` shards of
+  * queries and checks and collects them at once on [[SearchThreads]]; a query's
+  * candidates go to that query's heap alone, so the shards never touch the same
+  * slot of the merger (2026-09-27 decision).
   */
 object IndexProbe {
 
@@ -136,7 +144,8 @@ object IndexProbe {
       parameters: Map[String, String],
       allocator: BufferAllocator,
       merger: TopKMerger,
-      onProgress: SegmentSearch.Progress => Unit = _ => ()
+      onProgress: SegmentSearch.Progress => Unit = _ => (),
+      threads: Int = 1
   ): Unit = {
     val pipeline = new Pipeline(
       target(handle),
@@ -144,7 +153,8 @@ object IndexProbe {
       k,
       parameters,
       allocator,
-      queries.queries
+      queries.queries,
+      threads
     )
     try {
       pipeline.run(queries, merger, onProgress)
@@ -166,7 +176,9 @@ object IndexProbe {
     * [[finish]] returns, after which the task thread owns them again.
     *
     * `maxQueries` sizes the buffers once for the largest group; the exclusion
-    * mask is written once for the segment rather than once per group.
+    * mask is written once for the segment rather than once per group. `threads`
+    * is how many shards of queries an answer is checked and collected in at
+    * once; one keeps everything on the worker thread.
     */
   final class Pipeline(
       target: Target,
@@ -174,12 +186,17 @@ object IndexProbe {
       k: Int,
       parameters: Map[String, String],
       allocator: BufferAllocator,
-      maxQueries: Int
+      val maxQueries: Int,
+      val threads: Int = 1
   ) extends AutoCloseable {
     require(k > 0, s"topK must be positive: $k")
     require(
       maxQueries > 0,
       s"A pipeline serves at least one query: $maxQueries"
+    )
+    require(
+      threads > 0,
+      s"A pipeline collects on at least one thread: $threads"
     )
     private val rows = target.rows
     require(
@@ -214,13 +231,16 @@ object IndexProbe {
         thread
       }
     })
-    // Scratch of the worker thread alone: where one query's ids land, to
-    // find a duplicate, cleared by unsetting only the bits that query set.
+    // Scratch of one collecting shard: where one query's ids land, to find a
+    // duplicate, cleared by unsetting only the bits that query set.
     // `java.util.BitSet.clear` rescans for its highest set word on every call,
     // which over a 1.35M-row segment is a walk of 21,000 words for each of a
-    // query's 100 ids; a plain word array clears in one store.
-    private val seen = new Array[Long](((rows + 63L) >>> 6).toInt)
-    private val touched = new Array[Int](math.max(count, 1))
+    // query's 100 ids; a plain word array clears in one store. One pair per
+    // shard, so the shards never share a word.
+    private val seen =
+      Array.fill(threads)(new Array[Long](((rows + 63L) >>> 6).toInt))
+    private val touched =
+      Array.fill(threads)(new Array[Int](math.max(count, 1)))
     private var retriedCalls = 0
     private var retriedNanos = 0L
     if (count > 0 && !labels.isEmpty) writeMask(labels, rows, mask)
@@ -290,7 +310,8 @@ object IndexProbe {
     }
 
     /** Worker side: checks the answer, widens and searches again while any
-      * query is short, then adds the hits to the merger.
+      * query is short, then adds the hits to the merger. Checking and
+      * collecting run over `threads` shards of the group's queries at once.
       */
     private def collectAnswer(
         queries: QueryMatrix,
@@ -302,17 +323,22 @@ object IndexProbe {
       var attempt = 0
       var complete = false
       while (!complete) {
-        val short = checked(
-          queries.queries,
-          count,
-          slot.ids,
-          slot.scores,
-          labels,
-          rows,
-          target,
-          seen,
-          touched
-        )
+        val short = SearchThreads
+          .shards(queries.queries, threads) { (shard, from, until) =>
+            checked(
+              from,
+              until,
+              count,
+              slot.ids,
+              slot.scores,
+              labels,
+              rows,
+              target,
+              seen(shard),
+              touched(shard)
+            )
+          }
+          .exists(identity)
         attempt += 1
         if (!short) complete = true
         else if (width.exists(_.toLong < rows) && attempt < MaxAttempts) {
@@ -331,7 +357,9 @@ object IndexProbe {
             s"Segment ${target.segmentId}: ${target.indexType} returned fewer than $count of $visible visible rows for a query after $attempt attempts"
           )
       }
-      collect(queries.queries, count, slot.ids, slot.scores, target, merger)
+      SearchThreads.shards(queries.queries, threads) { (_, from, until) =>
+        collect(from, until, count, slot.ids, slot.scores, target, merger)
+      }
     }
 
     /** Waits for every answer to be collected and reports the worker's own
@@ -430,7 +458,8 @@ object IndexProbe {
     * regrouping of all of them (section 2.4).
     */
   private def checked(
-      queries: Int,
+      fromQuery: Int,
+      untilQuery: Int,
       count: Int,
       ids: ArrowBuf,
       scores: ArrowBuf,
@@ -442,8 +471,8 @@ object IndexProbe {
   ): Boolean = {
     val metric = target.metric
     var short = false
-    var query = 0
-    while (query < queries) {
+    var query = fromQuery
+    while (query < untilQuery) {
       var slot = 0
       var hits = 0
       while (slot < count) {
@@ -499,10 +528,13 @@ object IndexProbe {
     * has seen one segment, and on the profiled P3 chunk the object-and-heap
     * version of this loop was 46% of the executor's Java samples. The labels
     * the index returned go through the target's row mapping, which is what a
-    * nullable column's index needs (section 2.4).
+    * nullable column's index needs (section 2.4). A shard collects the queries
+    * `fromQuery` until `untilQuery`; a query's candidates go to its own heap in
+    * the merger, so shards never write the same slot.
     */
   private def collect(
-      queries: Int,
+      fromQuery: Int,
+      untilQuery: Int,
       count: Int,
       ids: ArrowBuf,
       scores: ArrowBuf,
@@ -511,8 +543,8 @@ object IndexProbe {
   ): Unit = {
     val segmentId = target.segmentId
     val mapping = target.mapping
-    var query = 0
-    while (query < queries) {
+    var query = fromQuery
+    while (query < untilQuery) {
       var slot = 0
       while (slot < count) {
         val position = query.toLong * count + slot

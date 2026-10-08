@@ -77,6 +77,11 @@ driver，两条路结果相同。按组读取时，一次作业读查询集的�
 executor 本地盘上要有约两份查询集的空间；
 `milvus.search.group.max.bytes`（默认 512 MiB）是一个任务一次回答多少查询，按
 「查询数 ×（维度 × 元素宽度 + K × 48 字节）」计；
+`milvus.search.collect.threads`（默认 0，即任务持有的核数）是搜索任务在两次 Knowhere
+调用之间检查、收集、打包一组候选所用的线程数——K 大时这部分占任务时间的三分之一，
+单线程会让其他核空转；`milvus.search.query.ranges`（默认 0，由规划器决定）把第一
+阶段按每个段集合切成这么多个查询范围，让任务数填满整数个波次，每个范围任务各自再
+加载一次段集合，搜索本身远长于加载时才划算；
 `milvus.search.segments.max.bytes`（默认自动）是**一个 executor** 为搜索留在堆外的
 段数据字节上限：exact 模式是底库向量，index 模式是索引。不设时按 executor 的内存算：
 exact 模式 `（内存上限 − 堆 − 1 GiB）× 0.5`，index 模式 `内存上限 − 堆 − 2 GiB`；

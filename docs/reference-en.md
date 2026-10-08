@@ -102,6 +102,14 @@ the same result. Read by group, a job reads the query set once per segment set
 in total, and the executors' local disks need room for about two copies of it.
 `milvus.search.group.max.bytes` (default 512 MiB) is what one task answers at a
 time, counted as queries × (dimension × element width + K × 48 bytes).
+`milvus.search.collect.threads` (default 0, the cores the task holds) is how many
+threads a search task checks, collects and packs a group's candidates on between
+two Knowhere calls; at large K that work is a third of the task, and on one
+thread it left the other cores idle. `milvus.search.query.ranges` (default 0,
+the planner's choice) cuts the first stage into that many query ranges per
+segment set, so that the tasks fill the slots in whole waves; each range task
+loads its segment set again, which pays off when the search itself takes far
+longer than the load.
 `milvus.search.segments.max.bytes` (default automatic) is how many bytes of
 segment data **one executor** keeps off the heap for a search: base vectors in
 exact mode, indexes in index mode. Unset, it follows the executor's memory:

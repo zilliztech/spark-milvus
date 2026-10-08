@@ -7,6 +7,7 @@ import java.util.concurrent.{
   ThreadFactory
 }
 import java.util.BitSet
+import scala.collection.mutable
 import scala.util.Try
 
 import org.apache.arrow.memory.BufferAllocator
@@ -75,13 +76,47 @@ object SegmentSearch extends Logging {
         sources.collect { case Index(_, handle, _) => handle.bytes }.sum
 
     /** One query group over the whole set. */
+    // One probe pipeline per index, kept across the groups: its buffers, its
+    // exclusion mask and its collecting scratch are made once for the task
+    // rather than once per group and segment. Sized for the largest group seen
+    // so far and remade when a larger one arrives.
+    private val pipelines = mutable.HashMap.empty[Long, IndexProbe.Pipeline]
+
+    private def pipelineFor(
+        source: Index,
+        k: Int,
+        parameters: Map[String, String],
+        allocator: BufferAllocator,
+        queries: Int,
+        threads: Int
+    ): IndexProbe.Pipeline = pipelines.get(source.segmentId) match {
+      case Some(pipeline) if pipeline.maxQueries >= queries => pipeline
+      case other =>
+        other.foreach(_.close())
+        val pipeline = new IndexProbe.Pipeline(
+          IndexProbe.target(source.handle),
+          source.excluded,
+          k,
+          parameters,
+          allocator,
+          queries,
+          threads
+        )
+        pipelines(source.segmentId) = pipeline
+        pipeline
+    }
+
+    /** Runs one query group over the held set. `threads` is how many shards a
+      * segment's answer is checked and collected in at once.
+      */
     def search(
         queries: QueryMatrix,
         k: Int,
         metric: String,
         parameters: Map[String, String],
         allocator: BufferAllocator,
-        onProgress: Progress => Unit = _ => ()
+        onProgress: Progress => Unit = _ => (),
+        threads: Int = 1
     ): (TopKMerger, Counters) = {
       val merger = new TopKMerger(queries.queries, k, metric)
       var nativeCalls = 0
@@ -100,21 +135,21 @@ object SegmentSearch extends Logging {
               ExactScan
                 .batch(_, queries, id, k, metric, allocator, merger, counted)
             )
-          case Index(id, handle, excluded) =>
+          case index @ Index(id, handle, _) =>
             require(
               handle.metric == metric,
               s"Segment $id has a $metric query on a ${handle.metric} index"
             )
-            IndexProbe.run(
-              handle,
-              queries,
-              excluded,
+            val pipeline = pipelineFor(
+              index,
               k,
               parameters,
               allocator,
-              merger,
-              counted
+              queries.queries,
+              threads
             )
+            pipeline.run(queries, merger, counted)
+            pipeline.finish(counted)
         }
         onProgress(Progress(0, 0L, 0L, 1))
       }
@@ -122,9 +157,11 @@ object SegmentSearch extends Logging {
     }
 
     override def close(): Unit = {
-      val failures = (batches.values.flatten ++ sources).flatMap(closeable =>
-        scala.util.Try(closeable.close()).failed.toOption
-      )
+      val failures =
+        (pipelines.values ++ batches.values.flatten ++ sources).flatMap(
+          closeable => scala.util.Try(closeable.close()).failed.toOption
+        )
+      pipelines.clear()
       failures.headOption.foreach(throw _)
     }
   }
@@ -289,7 +326,8 @@ object SegmentSearch extends Logging {
       parameters: Map[String, String],
       allocator: BufferAllocator,
       onProgress: Progress => Unit = _ => (),
-      prefetch: Boolean = false
+      prefetch: Boolean = false,
+      threads: Int = 1
   ): (Seq[TopKMerger], Counters) = {
     require(segments != null, "A task must name its segments")
     require(groups.nonEmpty, "A task searches at least one query group")
@@ -345,7 +383,8 @@ object SegmentSearch extends Logging {
                 k,
                 parameters,
                 allocator,
-                largestGroup
+                largestGroup,
+                threads
               )
               try {
                 groups.indices.foreach { group =>

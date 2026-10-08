@@ -1,7 +1,7 @@
 package com.zilliz.spark.connector.options
 
-/** The limits a vector search is planned against: three byte limits and one
-  * switch.
+/** The limits a vector search is planned against: three byte limits, one switch
+  * and two counts.
   *
   * The byte limits bound three different things: how large a query set may be
   * before it stops travelling in a broadcast variable and travels with the
@@ -13,15 +13,24 @@ package com.zilliz.spark.connector.options
   * where the search is planned (`SearchResources.segmentBudget`). The switch,
   * `queriesDirect`, lets a query set that is a plain Parquet scan be read by
   * the search tasks themselves instead of collected and broadcast
-  * (`milvus.search.queries.direct`, default true).
+  * (`milvus.search.queries.direct`, default true). The two counts shape the
+  * first stage: `collectThreads` is how many threads a search task checks,
+  * collects and packs a group's candidates on between two Knowhere calls (0,
+  * the default, is every core the task holds), and `queryRanges` cuts the first
+  * stage into that many query ranges per segment set (0, the default, leaves
+  * the cut to the planner).
   */
 final case class SearchLimits(
     queriesMaxBytes: Long,
     groupMaxBytes: Long,
     segmentsMaxBytes: Option[Long],
-    queriesDirect: Boolean = SearchLimits.DefaultQueriesDirect
+    queriesDirect: Boolean = SearchLimits.DefaultQueriesDirect,
+    collectThreads: Int = SearchLimits.DefaultCollectThreads,
+    queryRanges: Int = SearchLimits.DefaultQueryRanges
 ) {
   require(queriesMaxBytes > 0, "queriesMaxBytes must be positive")
+  require(collectThreads >= 0, "collectThreads must not be negative")
+  require(queryRanges >= 0, "queryRanges must not be negative")
   require(groupMaxBytes > 0, "groupMaxBytes must be positive")
   require(segmentsMaxBytes.forall(_ > 0), "segmentsMaxBytes must be positive")
 }
@@ -35,6 +44,17 @@ object SearchLimits {
     * tasks themselves rather than collected and broadcast.
     */
   val DefaultQueriesDirect: Boolean = true
+
+  /** Threads a search task checks, collects and packs a group's candidates on
+    * between two Knowhere calls: 0 means the cores the task holds
+    * (`milvus.search.collect.threads`).
+    */
+  val DefaultCollectThreads: Int = 0
+
+  /** Query ranges the first stage is cut into: 0 lets the planner decide
+    * (`milvus.search.query.ranges`).
+    */
+  val DefaultQueryRanges: Int = 0
 
   val Default: SearchLimits = SearchLimits(
     DefaultQueriesMaxBytes,
@@ -71,7 +91,19 @@ object SearchLimits {
         get,
         MilvusOption.SearchQueriesDirect,
         DefaultQueriesDirect
-      )
+      ),
+      get(MilvusOption.SearchCollectThreads)
+        .map(raw =>
+          OptionParsing.nonNegativeLong(raw, MilvusOption.SearchCollectThreads)
+        )
+        .map(value => math.min(value, Int.MaxValue.toLong).toInt)
+        .getOrElse(DefaultCollectThreads),
+      get(MilvusOption.SearchQueryRanges)
+        .map(raw =>
+          OptionParsing.nonNegativeLong(raw, MilvusOption.SearchQueryRanges)
+        )
+        .map(value => math.min(value, Int.MaxValue.toLong).toInt)
+        .getOrElse(DefaultQueryRanges)
     )
   }
 }

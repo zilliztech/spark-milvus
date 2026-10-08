@@ -30,6 +30,43 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
   private def packedTwice(merged: TopKMerger): (Int, Int) =
     (merged.takePacked(0).length, merged.takePacked(0).length)
 
+  test("packing every query over shards gives what packing one by one gives") {
+    val random = new Random(7)
+    val queries = 37
+    val (sharded, oneByOne) =
+      (merger("L2", queries, 5), merger("L2", queries, 5))
+    (0 until 4000).foreach { _ =>
+      val candidate = Candidate(
+        random.nextInt(queries),
+        100L + random.nextInt(3),
+        random.nextInt(50000).toLong,
+        random.nextDouble()
+      )
+      sharded.add(candidate)
+      oneByOne.add(candidate)
+    }
+    val packed = sharded.packAll(4)
+    packed.length shouldBe queries
+    (0 until queries).foreach { query =>
+      packed(query).toSeq shouldBe oneByOne.takePacked(query).toSeq
+    }
+    sharded.size shouldBe 0
+    // A merger packed on one thread and one packed on more agree too.
+    val single = merger("COSINE", 3, 2)
+    val many = merger("COSINE", 3, 2)
+    Seq(
+      Candidate(0, 1L, 1L, 0.9),
+      Candidate(0, 1L, 2L, 0.8),
+      Candidate(2, 1L, 3L, 0.1),
+      Candidate(2, 2L, 3L, 0.2),
+      Candidate(2, 2L, 4L, 0.3)
+    ).foreach { c => single.add(c); many.add(c) }
+    single.packAll(1).map(_.toSeq).toSeq shouldBe many
+      .packAll(3)
+      .map(_.toSeq)
+      .toSeq
+  }
+
   test("L2 keeps the smallest scores, other metrics the largest") {
     val l2 = merger("L2")
     val cosine = merger("COSINE")

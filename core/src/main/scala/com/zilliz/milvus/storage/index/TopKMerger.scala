@@ -297,6 +297,25 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: String)
     packed
   }
 
+  /** Every query's packed candidates at once, by query position, cut into
+    * `threads` shards of queries on [[SearchThreads]]. A query's heap lives in
+    * its own slice of the three arrays and its own `sizes` entry, so the shards
+    * never touch the same query; each heap is released as it is packed, as
+    * [[takePacked]] releases it.
+    */
+  def packAll(threads: Int): Array[Array[Byte]] = {
+    require(threads > 0, s"Packing takes at least one thread: $threads")
+    val packed = new Array[Array[Byte]](queries)
+    SearchThreads.shards(queries, threads) { (_, from, until) =>
+      var query = from
+      while (query < until) {
+        packed(query) = takePacked(query)
+        query += 1
+      }
+    }
+    packed
+  }
+
   def size: Int = {
     var total = 0
     var query = 0

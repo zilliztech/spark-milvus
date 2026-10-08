@@ -164,6 +164,73 @@ class IndexProbePipelineTest
     } finally matrices.foreach(_.close())
   }
 
+  test(
+    "an answer collected over shards leaves the merger as one thread would"
+  ) {
+    val groups = Seq(9, 13, 1, 30)
+    val starts = groups.scanLeft(0)(_ + _)
+    val matrices =
+      groups.zip(starts).map { case (n, first) => matrix(n, first) }
+    try {
+      val segments = Seq(11L, 22L, 33L)
+      def collected(threads: Int): Seq[Seq[Seq[(Double, Long, Long)]]] = {
+        val (onProgress, _) = progress()
+        val mergers = groups.map(n => new TopKMerger(n, k, "L2"))
+        segments.foreach { segment =>
+          val pipeline = new IndexProbe.Pipeline(
+            new Fake(segment),
+            new BitSet(),
+            k,
+            Map.empty,
+            allocator,
+            groups.max,
+            threads
+          )
+          try {
+            matrices.zip(mergers).foreach { case (m, merger) =>
+              pipeline.run(m, merger, onProgress)
+            }
+            pipeline.finish(onProgress)
+          } finally pipeline.close()
+        }
+        mergers.zipWithIndex.map { case (merger, g) =>
+          (0 until groups(g)).map(query =>
+            merger.results(query).map(c => (c.score, c.segmentId, c.rowOffset))
+          )
+        }
+      }
+      val single = collected(1)
+      collected(4) shouldBe single
+      collected(64) shouldBe single
+    } finally matrices.foreach(_.close())
+  }
+
+  test("a short answer over shards is searched again wider once") {
+    val groups = Seq(6)
+    val matrices = Seq(matrix(6, 0))
+    try {
+      val fake = new Fake(11L, shortUntilEf = 128)
+      val (onProgress, seen) = progress()
+      val merger = new TopKMerger(6, k, "L2")
+      val pipeline =
+        new IndexProbe.Pipeline(
+          fake,
+          new BitSet(),
+          k,
+          Map.empty,
+          allocator,
+          6,
+          3
+        )
+      try {
+        pipeline.run(matrices.head, merger, onProgress)
+        pipeline.finish(onProgress)
+      } finally pipeline.close()
+      fake.calls.get() shouldBe 2
+      merger.size shouldBe 6 * k
+    } finally matrices.foreach(_.close())
+  }
+
   test("a short answer is searched again wider on the worker and reported") {
     val m = matrix(3, 0)
     try {

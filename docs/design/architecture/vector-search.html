@@ -370,7 +370,7 @@ driver 日志 <code>Search budget</code> 一行写明选中的顺序、并发数
 <tr><td>参数</td><td>JSON，含距离与 <code>ef</code>；K 以函数参数为准</td></tr>
 <tr><td>输出</td><td>查询数 × K 的 int64 行号与 float32 分数，未填满处行号为 −1</td></tr>
 <tr><td>内存</td><td>缓冲由 JVM 的 Arrow allocator 分配，同步调用期间借给 Knowhere；构建与反序列化时 Knowhere 另存一份</td></tr>
-<tr><td>线程</td><td><code>bruteForce</code> 与索引搜索：任务线程发起同步调用，计算在 Knowhere 的进程级线程池里执行；索引搜索走 <code>IndexProbe.Pipeline</code> 时，短答案的加宽重搜由工作线程发起，同一索引句柄可被任务线程与工作线程同时搜索（依赖 Knowhere 搜索只读，README 决策日志 2026-09-24）。批量距离入口：在任务线程上单线程执行（OpenMP 与 OpenBLAS 线程数 1），不进线程池，并行由 Spark 任务之间承担</td></tr>
+<tr><td>线程</td><td><code>bruteForce</code> 与索引搜索：任务线程发起同步调用，计算在 Knowhere 的进程级线程池里执行；索引搜索走 <code>IndexProbe.Pipeline</code> 时，短答案的加宽重搜由工作线程发起，同一索引句柄可被任务线程与工作线程同时搜索（依赖 Knowhere 搜索只读，README 决策日志 2026-09-24）；一个答案的检查、收集与一组的打包按查询切成 <code>milvus.search.collect.threads</code> 片（默认任务持有的核数）在 <code>SearchThreads</code> 的池上同时进行，每条查询的堆在 <code>TopKMerger</code> 里独占一段数组，分片之间不写同一格（决策日志 2026-09-27）。批量距离入口：在任务线程上单线程执行（OpenMP 与 OpenBLAS 线程数 1），不进线程池，并行由 Spark 任务之间承担</td></tr>
 </tbody></table></div>
 <p><strong>float32 的精确扫描不走 <code>bruteForce</code>，走 Knowhere C ABI 新增的批量距离入口 <code>knowhere_bruteforce_batched</code>（决策 27，2026-09-22）。</strong>它把整组查询一次交给 Knowhere 自带的 faiss（<code>faiss::cppcontrib::knowhere::knn_L2sqr</code> / <code>knn_inner_product</code> / <code>knn_cosine</code>），faiss 按 4,096 条查询 × 1,024 行分块走 SGEMM（OpenBLAS）。<code>bruteForce</code> 按单条查询切任务，faiss 每次只见到 1 条查询于是逐行扫描，一行 3 KB 向量只服务一条查询：8375C 上单核 8.1e6 对/秒；批量入口同一函数、同一数据 8.1e7 对/秒（124.7 GFLOP/s，物理核峰值的 67%），结果逐条一致。分层实测见<a href="search-resources.html#batched">资源自适应 2.5</a>。批量入口不接受位图，有排除行的批先压紧（2.3）；元素类型不是 float32 的字段仍走 <code>bruteForce</code>。faiss 的分流阈值与 OpenBLAS 的线程数在这个进程里各只有一个值，批量调用在途期间分别是 20 与 1，最后一个在途调用结束时恢复。</p>
 <figure>

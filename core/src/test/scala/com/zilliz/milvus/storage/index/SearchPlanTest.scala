@@ -164,6 +164,42 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     ) shouldBe Seq(Seq(1L), Seq(2L))
   }
 
+  test("the set count rounds up to whole waves of the slots") {
+    // 74 equal segments of 1600 bytes need 13 sets of 9600; on 8 slots that is
+    // a full wave and a second of 5, so the count goes to 16 and every set is
+    // still within capacity.
+    val tasks = (1L to 74L).map(id => task(id, 100L))
+    val sets = SearchPlan.segmentSets(
+      tasks,
+      slots = 8,
+      capacity = 9600L,
+      size = SearchPlan.vectorBytes(layout, 9600L)
+    )
+    sets.size shouldBe 16
+    sets.map(_.size).sum shouldBe 74
+    sets.foreach(set =>
+      SearchPlan.retainedBytes(set, layout, 9600L) should be <= 9600L
+    )
+    // Fewer segments than a wave stay one per set; a whole number of waves is
+    // left alone.
+    SearchPlan
+      .segmentSets(
+        tasks.take(5),
+        slots = 8,
+        capacity = 9600L,
+        size = SearchPlan.vectorBytes(layout, 9600L)
+      )
+      .size shouldBe 5
+    SearchPlan
+      .segmentSets(
+        tasks,
+        slots = 8,
+        capacity = 8000L,
+        size = SearchPlan.vectorBytes(layout, 8000L)
+      )
+      .size shouldBe 16
+  }
+
   private def unsized(segmentId: Long): SegmentReadTask =
     SegmentReadTask(
       segmentId,

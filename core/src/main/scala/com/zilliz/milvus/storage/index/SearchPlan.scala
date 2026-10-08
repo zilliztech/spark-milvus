@@ -265,10 +265,14 @@ object SearchPlan {
     *
     * A set keeps at most `capacity` bytes, as `size` counts them; there are at
     * least as many sets as `slots`, so every task that runs at once has work,
-    * unless the search has fewer segments than that. Segments go in largest
-    * first and each one joins the lightest set that still has room, which
-    * spreads equal segments one per set, and a segment that fits no set opens
-    * one of its own. Segments keep their order inside a set.
+    * unless the search has fewer segments than that. The count is rounded up to
+    * a multiple of `slots`: the sets are the first stage's tasks and the slots
+    * run them in waves, and 13 or 15 sets on 8 slots leave the second wave half
+    * empty for a whole task's time, while 16 fill both waves with sets that are
+    * each a little lighter (2026-09-27 decision). Segments go in largest first
+    * and each one joins the lightest set that still has room, which spreads
+    * equal segments one per set, and a segment that fits no set opens one of
+    * its own. Segments keep their order inside a set.
     */
   def segmentSets(
       tasks: Seq[SegmentReadTask],
@@ -283,8 +287,9 @@ object SearchPlan {
     val total = sizes.values.sum
     val needed =
       math.max(1L, total / capacity + (if (total % capacity == 0L) 0L else 1L))
-    val start =
-      math.min(tasks.size.toLong, math.max(slots.toLong, needed)).toInt
+    val wanted = math.max(slots.toLong, needed)
+    val waves = (wanted + slots - 1) / slots
+    val start = math.min(tasks.size.toLong, waves * slots).toInt
     val filled = mutable.ArrayBuffer.fill(start)(0L)
     val members = mutable.ArrayBuffer.fill(start)(
       mutable.ArrayBuffer.empty[SegmentReadTask]
@@ -448,6 +453,10 @@ object SearchPlan {
     *   broadcast set is on the heap once for the executor
     * @param splitQueries
     *   true for an exact search, whose tasks are its parallelism
+    * @param rangesWanted
+    *   the query ranges the caller asked for, or 0 to let the plan decide; a
+    *   range cut gives every set that many tasks, each answering a share of the
+    *   queries on the whole set, without changing what a query sees
     */
   def of(
       tasks: Seq[SegmentReadTask],
@@ -459,8 +468,13 @@ object SearchPlan {
       budget: Budget,
       footprint: SegmentReadTask => Footprint,
       shuffled: Boolean,
-      splitQueries: Boolean = false
+      splitQueries: Boolean = false,
+      rangesWanted: Int = 0
   ): Plan = {
+    require(
+      rangesWanted >= 0,
+      s"Query ranges are asked for or not: $rangesWanted"
+    )
     require(concurrency > 0, s"A search runs at least one task: $concurrency")
     val limited = groups(queries, layout, k, groupMaxBytes)
     if (tasks.isEmpty) return Plan(Seq.empty, limited)
@@ -484,7 +498,9 @@ object SearchPlan {
     // groups than the ranges, the query set is cut into one group per range,
     // each smaller than the limit's (decision 32).
     def cut(sets: Int): (Seq[QueryGroup], Seq[Range]) = {
-      val count = rangeCount(queries, sets, concurrency, splitQueries)
+      val count =
+        if (rangesWanted > 0) math.max(1, math.min(rangesWanted, queries))
+        else rangeCount(queries, sets, concurrency, splitQueries)
       val cutGroups =
         if (limited.size >= count) limited else evenGroups(queries, count)
       (cutGroups, queryRanges(cutGroups.size, count))

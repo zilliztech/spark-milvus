@@ -201,8 +201,15 @@ object MilvusSearch extends Logging {
       shuffled = files.isEmpty && queryBytes > limits.queriesMaxBytes,
       // The batched distance entry is single-threaded on its task, so an
       // exact search is as parallel as its tasks (decision 28).
-      splitQueries = searchMode == "exact"
+      splitQueries = searchMode == "exact",
+      rangesWanted = limits.queryRanges
     )
+    // Between two Knowhere calls a search task checks, collects and packs its
+    // candidates on as many threads as it holds cores, unless the call said.
+    val collectThreads =
+      if (limits.collectThreads > 0) limits.collectThreads
+      else if (searchProfile.nonEmpty) resources.executorCores
+      else math.max(1, resources.taskCpus)
     val spec = SegmentSetSearch.Spec(
       vectorColumn,
       layout,
@@ -222,7 +229,8 @@ object MilvusSearch extends Logging {
       if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
         Some(MilvusOption(caseInsensitive).readLimits.batchMaxBytes)
       else None,
-      plan.resident
+      plan.resident,
+      collectThreads
     )
 
     val metrics = SearchMetrics.create(spark.sparkContext)
@@ -286,7 +294,8 @@ object MilvusSearch extends Logging {
           }}, " +
         s"queryGroups=${plan.groups.size}, segments=${tasks.size} in " +
         s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
-        s"${plan.tasks} tasks, work=${segmentSearchesTotal} segment searches" +
+        s"${plan.tasks} tasks, collectThreads=$collectThreads, " +
+        s"work=${segmentSearchesTotal} segment searches" +
         (if (comparedPairsTotal > 0L)
            s" over $comparedPairsTotal distance pairs"
          else "")
@@ -727,7 +736,8 @@ object MilvusSearch extends Logging {
     // heap share is left for the merged answers and the rows they become.
     val slots = math.max(1, spark.sparkContext.defaultParallelism)
     val bytesPerQuery = tasks.toLong * k.toLong * CandidateBytes.Width
-    val byHeap = math.max(1L, math.max(0L, heapBytesPerTask) / 2L / bytesPerQuery)
+    val byHeap =
+      math.max(1L, math.max(0L, heapBytesPerTask) / 2L / bytesPerQuery)
     val perPartition = math.min(QueriesPerMergePartition.toLong, byHeap)
     val byQueries = (queries + perPartition - 1L) / perPartition
     val wanted = math.max(math.max(slots.toLong, tasks.toLong), byQueries)

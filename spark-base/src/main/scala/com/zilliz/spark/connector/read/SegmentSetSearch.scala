@@ -79,7 +79,8 @@ private[read] object SegmentSetSearch extends Logging {
       arrowMaxBytes: Long,
       slots: Int,
       batchMaxBytes: Option[Long],
-      resident: SearchPlan.Resident = SearchPlan.Resident.Segments
+      resident: SearchPlan.Resident = SearchPlan.Resident.Segments,
+      collectThreads: Int = 1
   ) extends Serializable
 
   /** @param plannedBytes
@@ -138,7 +139,7 @@ private[read] object SegmentSetSearch extends Logging {
         s"Search task: segments=${counters.segments}, groups=$groupCount, " +
           s"queries=${group.queries}, candidates=${merger.size}, streamed"
       )
-      candidates(merger, group.ids)
+      candidates(merger, group.ids, spec.collectThreads)
     }
     if (groupCount == 1 || spec.resident == SearchPlan.Resident.Queries) {
       try
@@ -174,7 +175,8 @@ private[read] object SegmentSetSearch extends Logging {
                   spec.metric,
                   spec.parameters,
                   allocator.allocator,
-                  stepped
+                  stepped,
+                  spec.collectThreads
                 )
               }
             report(metrics, counters, merger.size)
@@ -182,7 +184,7 @@ private[read] object SegmentSetSearch extends Logging {
               s"Search task: segments=${counters.segments}, groups=$groupCount, " +
                 s"queries=${group.queries}, candidates=${merger.size}, held"
             )
-            candidates(merger, group.ids)
+            candidates(merger, group.ids, spec.collectThreads)
           }
       }
     }
@@ -336,7 +338,8 @@ private[read] object SegmentSetSearch extends Logging {
         spec.parameters,
         allocator,
         stepped,
-        prefetch
+        prefetch,
+        spec.collectThreads
       )
       val kept = mergers.toArray
       report(metrics, counters, kept.iterator.map(_.size).sum)
@@ -346,7 +349,7 @@ private[read] object SegmentSetSearch extends Logging {
           s"candidates=${kept.iterator.map(_.size).sum}, queries kept"
       )
       Iterator.range(0, groupCount).flatMap { index =>
-        val rows = candidates(kept(index), ids(index))
+        val rows = candidates(kept(index), ids(index), spec.collectThreads)
         kept(index) = null
         ids(index) = null
         rows
@@ -440,13 +443,16 @@ private[read] object SegmentSetSearch extends Logging {
     */
   private def candidates(
       merger: TopKMerger,
-      ids: Array[Long]
+      ids: Array[Long],
+      threads: Int
   ): Seq[(Long, Array[Byte])] = {
+    // Packing sorts every query's heap: a group's worth of that runs over
+    // `threads` shards of queries, the way an answer is collected.
+    val bytes = merger.packAll(threads)
     val packed = Vector.newBuilder[(Long, Array[Byte])]
     var query = 0
     while (query < ids.length) {
-      val bytes = merger.takePacked(query)
-      if (bytes.length > 0) packed += ids(query) -> bytes
+      if (bytes(query).length > 0) packed += ids(query) -> bytes(query)
       query += 1
     }
     packed.result()
