@@ -21,7 +21,7 @@ import com.zilliz.milvus.storage.index.{
 }
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{
   MilvusOption,
@@ -69,7 +69,7 @@ object MilvusSearch extends Logging {
       vectorColumn: String,
       k: Int,
       metric: String,
-      mode: String = "index",
+      mode: String = SearchMode.Index.name,
       searchParameters: Map[String, String] = Map.empty,
       filter: Option[String] = None,
       outputColumns: Seq[String] = Seq.empty,
@@ -85,12 +85,13 @@ object MilvusSearch extends Logging {
       "A search names a vector field and a metric"
     )
     require(k > 0, s"k must be positive: $k")
-    val searchMode = mode.toLowerCase(Locale.ROOT)
-    require(
-      searchMode == "index" || searchMode == "exact",
-      s"mode is '$mode'; a search runs in 'index' or in 'exact' mode"
-    )
-    val searchMetric = metric.toUpperCase(Locale.ROOT)
+    val searchMode = SearchMode
+      .fromName(mode)
+      .getOrElse(
+        throw new IllegalArgumentException(
+          s"mode is '$mode'; a search runs in 'index' or in 'exact' mode"
+        )
+      )
     require(
       outputColumns.distinct.size == outputColumns.size,
       s"Output columns repeat: ${outputColumns.mkString(", ")}"
@@ -115,7 +116,7 @@ object MilvusSearch extends Logging {
         )
       )
     val layout = VectorLayout.of(field.dataType, dimensionOf(field))
-    checkMetric(searchMetric, layout, searchMode)
+    val searchMetric = metricOf(metric, layout)
 
     SearchQueries.check(queries.schema, layout)
     val limits = SearchLimits.from(options)
@@ -123,7 +124,7 @@ object MilvusSearch extends Logging {
 
     val partitions = SnapshotPartitions.of(table, caseInsensitive)
     val tasks = partitions.map(_.task)
-    if (searchMode == "index") {
+    if (searchMode == SearchMode.Index) {
       SegmentIndexHandle.check(
         tasks,
         field.fieldID,
@@ -151,7 +152,7 @@ object MilvusSearch extends Logging {
     // otherwise a task takes `spark.task.cpus`.
     val resources = TaskResources.of(spark)
     val searchProfile =
-      if (searchMode == "index") resources.wholeExecutor else None
+      if (searchMode == SearchMode.Index) resources.wholeExecutor else None
     val slots = if (searchProfile.nonEmpty) 1 else resources.tasksPerExecutor
     val concurrency = resources.executors * slots
     val (memoryLimit, heap) = MilvusSearch.executorMemory(spark)
@@ -160,7 +161,7 @@ object MilvusSearch extends Logging {
       heap,
       slots,
       limits.segmentsMaxBytes,
-      index = searchMode == "index"
+      index = searchMode == SearchMode.Index
     )
     val queryBudget =
       SearchResources.queryBudget(heap, memoryFraction(spark), slots)
@@ -175,7 +176,7 @@ object MilvusSearch extends Logging {
     // recorded, as Knowhere holds it once loaded, or the vectors an exact scan
     // reads a block at a time.
     val footprint: SegmentReadTask => SearchPlan.Footprint = task =>
-      (if (searchMode == "index")
+      (if (searchMode == SearchMode.Index)
          SegmentIndexHandle.select(
            task,
            field.fieldID,
@@ -201,7 +202,7 @@ object MilvusSearch extends Logging {
       shuffled = files.isEmpty && queryBytes > limits.queriesMaxBytes,
       // The batched distance entry is single-threaded on its task, so an
       // exact search is as parallel as its tasks (decision 28).
-      splitQueries = searchMode == "exact",
+      splitQueries = searchMode == SearchMode.Exact,
       rangesWanted = limits.queryRanges
     )
     // Between two Knowhere calls a search task checks, collects and packs its
@@ -239,7 +240,7 @@ object MilvusSearch extends Logging {
     // not say how much, so index mode has no pair total and counts segment
     // searches instead.
     val comparedPairsTotal =
-      if (searchMode != "exact") 0L
+      if (searchMode != SearchMode.Exact) 0L
       else queryCount * tasks.flatMap(_.snapshotRows).sum
     val segmentSearchesTotal =
       plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum
@@ -307,7 +308,8 @@ object MilvusSearch extends Logging {
     // by reporting counts without a share.
     val share =
       if (comparedPairsTotal > 0L) Some(SearchMetrics.ComparedPairs)
-      else if (searchMode == "index") Some(SearchMetrics.SegmentSearches)
+      else if (searchMode == SearchMode.Index)
+        Some(SearchMetrics.SegmentSearches)
       else None
     val progress =
       new SearchProgress(
@@ -757,7 +759,7 @@ object MilvusSearch extends Logging {
       spark: SparkSession,
       candidates: RDD[(Long, Array[Byte])],
       k: Int,
-      metric: String,
+      metric: MetricType,
       partitions: Int
   ): DataFrame = {
     require(partitions > 0, s"The merge needs a partition: $partitions")
@@ -808,20 +810,20 @@ object MilvusSearch extends Logging {
       )
     )
 
-  private def checkMetric(
-      metric: String,
-      layout: VectorLayout,
-      mode: String
-  ): Unit = {
-    val supported =
-      if (layout.elementType == VectorElementType.Bit) Set("HAMMING", "JACCARD")
-      else Set("L2", "IP", "COSINE")
-    require(
-      supported.contains(metric),
-      s"A ${layout.elementType} field takes ${supported.toSeq.sorted
-          .mkString(" or ")}, not $metric"
-    )
-
+  /** The metric a call names, which the field's element type has to take. */
+  private def metricOf(metric: String, layout: VectorLayout): MetricType = {
+    val supported = MetricType.forElementType(layout.elementType)
+    MetricType
+      .fromName(metric)
+      .filter(supported.contains)
+      .getOrElse(
+        throw new IllegalArgumentException(
+          s"A ${layout.elementType} field takes ${supported
+              .map(_.name)
+              .sorted
+              .mkString(" or ")}, not ${metric.toUpperCase(Locale.ROOT)}"
+        )
+      )
   }
 
   private def outputSchemaOf(

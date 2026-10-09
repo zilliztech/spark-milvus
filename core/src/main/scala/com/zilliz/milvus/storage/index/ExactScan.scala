@@ -8,6 +8,7 @@ import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
 import com.zilliz.milvus.jni.vector.NativeVectorSearch
 import com.zilliz.milvus.storage.read.exec.SegmentVectors
+import com.zilliz.milvus.storage.schema.MetricType
 
 import io.knowhere.DType
 
@@ -30,7 +31,8 @@ object ExactScan {
   /** The metrics the batched entry computes; the others belong to binary
     * vectors, which never reach it.
     */
-  private val BatchedMetrics = Set("L2", "IP", "COSINE")
+  private val BatchedMetrics: Set[MetricType] =
+    Set(MetricType.L2, MetricType.IP, MetricType.Cosine)
 
   /** Adds this segment's candidates to `merger`, which counts its queries the
     * way the group does: query 0 is the group's first query. The buffers of a
@@ -41,7 +43,7 @@ object ExactScan {
       queries: QueryMatrix,
       segmentId: Long,
       k: Int,
-      metric: String,
+      metric: MetricType,
       allocator: BufferAllocator,
       merger: TopKMerger,
       onProgress: SegmentSearch.Progress => Unit = _ => ()
@@ -74,13 +76,12 @@ object ExactScan {
       queries: QueryMatrix,
       segmentId: Long,
       k: Int,
-      metric: String,
+      metric: MetricType,
       allocator: BufferAllocator,
       merger: TopKMerger,
       onProgress: SegmentSearch.Progress => Unit = _ => ()
   ): Unit = {
     require(k > 0, s"topK must be positive: $k")
-    require(Candidate.metricRanks(metric), s"Unsupported metric: $metric")
     if (current.visibleRows <= 0) return
     val dtype = queries.layout.dtype
     if (dtype == DType.FLOAT32 && BatchedMetrics(metric))
@@ -172,12 +173,12 @@ object ExactScan {
       queries: QueryMatrix,
       segmentId: Long,
       k: Int,
-      metric: String,
+      metric: MetricType,
       allocator: BufferAllocator,
       merger: TopKMerger,
       onProgress: SegmentSearch.Progress => Unit
   ): Unit = {
-    val parameters = s"""{"metric_type":"$metric"}"""
+    val parameters = s"""{"metric_type":"${metric.name}"}"""
     val count = math.min(k, current.visibleRows)
     val compacted =
       if (current.excluded.isEmpty) None
@@ -242,12 +243,12 @@ object ExactScan {
       queries: QueryMatrix,
       segmentId: Long,
       k: Int,
-      metric: String,
+      metric: MetricType,
       allocator: BufferAllocator,
       merger: TopKMerger,
       onProgress: SegmentSearch.Progress => Unit
   ): Unit = {
-    val parameters = s"""{"metric_type":"$metric"}"""
+    val parameters = s"""{"metric_type":"${metric.name}"}"""
     val dtype = queries.layout.dtype
     val count = math.min(k, current.visibleRows)
     val ids = allocator.buffer(queries.queries.toLong * count * 8L)

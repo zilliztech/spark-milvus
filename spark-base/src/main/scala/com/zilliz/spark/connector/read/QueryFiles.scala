@@ -28,7 +28,11 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.zilliz.milvus.storage.index.{QueryMatrix, SearchPlan}
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 
 /** A query set that is nothing but Parquet files, read by the search tasks
   * themselves (docs/design/architecture/vector-search.html section 2.1).
@@ -79,7 +83,7 @@ private[read] final case class QueryFiles(
       range: Range,
       planned: Seq[SearchPlan.QueryGroup],
       layout: VectorLayout,
-      metric: String
+      metric: MetricType
   ): Iterator[SearchQueries.Group] = {
     if (range.isEmpty) return Iterator.empty
     val rows = this.rows(
@@ -130,7 +134,7 @@ private[read] final case class QueryFiles(
       range: Range,
       planned: Seq[SearchPlan.QueryGroup],
       layout: VectorLayout,
-      metric: String,
+      metric: MetricType,
       allocator: BufferAllocator,
       threads: Int
   ): Seq[(Array[Long], QueryMatrix)] = {
@@ -202,7 +206,7 @@ private[read] final case class QueryFiles(
       first: Long,
       until: Long,
       layout: VectorLayout,
-      metric: String,
+      metric: MetricType,
       ids: Seq[Array[Long]],
       builders: Seq[QueryMatrix.Builder],
       written: Seq[java.util.concurrent.atomic.AtomicInteger]

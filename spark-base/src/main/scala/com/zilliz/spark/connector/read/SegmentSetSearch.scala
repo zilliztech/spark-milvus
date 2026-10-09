@@ -20,7 +20,7 @@ import com.zilliz.milvus.storage.read.exec.{
   SegmentVectors
 }
 import com.zilliz.milvus.storage.read.exec.ReadMetrics
-import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.SearchResources
 import com.zilliz.spark.connector.types.ArrowAllocator
@@ -70,8 +70,8 @@ private[read] object SegmentSetSearch extends Logging {
       fieldId: Long,
       nullable: Boolean,
       k: Int,
-      metric: String,
-      mode: String,
+      metric: MetricType,
+      mode: SearchMode,
       filter: Option[String],
       parameters: Map[String, String],
       allowUnindexed: Boolean,
@@ -469,7 +469,7 @@ private[read] object SegmentSetSearch extends Logging {
       set: Seq[MilvusInputPartition],
       spec: Spec
   ): Boolean =
-    spec.mode == "index" && set.size > 1 && {
+    spec.mode == SearchMode.Index && set.size > 1 && {
       val sizes = set.flatMap(partition =>
         SegmentIndexHandle
           .select(
@@ -502,15 +502,16 @@ private[read] object SegmentSetSearch extends Logging {
       spec.filter.map(PlanParser.parse),
       binding.columnNameFor
     )
-    val selected =
-      if (spec.mode != "index") None
-      else
+    val selected = spec.mode match {
+      case SearchMode.Index =>
         SegmentIndexHandle.select(
           task,
           spec.fieldId,
           spec.metric,
           spec.allowUnindexed
         )
+      case SearchMode.Exact => None
+    }
     selected match {
       case Some(descriptor) =>
         val started = System.nanoTime()

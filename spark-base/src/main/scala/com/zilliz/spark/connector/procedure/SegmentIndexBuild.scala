@@ -11,7 +11,7 @@ import com.zilliz.milvus.storage.index.IndexWriter
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.read.exec.{RowExclusions, SegmentVectors}
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
-import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.write.commit.CommittedIndex
 import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
 import com.zilliz.spark.connector.types.ArrowAllocator
@@ -33,7 +33,7 @@ private[procedure] object SegmentIndexBuild extends Logging {
       fieldId: Long,
       collectionId: Long,
       indexType: String,
-      metric: String,
+      metric: MetricType,
       parameters: Map[String, String],
       buildId: Long,
       indexVersion: Long,
@@ -147,7 +147,7 @@ private[procedure] object SegmentIndexBuild extends Logging {
       vectorIndexVersion = vectorIndexVersion,
       storePathVersion = spec.storePathVersion,
       indexType = spec.indexType,
-      metricType = spec.metric,
+      metricType = spec.metric.name,
       rowCount = built.rows,
       serializedSize = objects.map(_.bytes).sum,
       filePaths = objects.map(_.key),

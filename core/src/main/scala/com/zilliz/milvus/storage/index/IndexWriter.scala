@@ -8,8 +8,8 @@ import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
 import com.zilliz.milvus.jni.vector.NativeVectorIndex
 import com.zilliz.milvus.storage.codec.VectorIndexFamilies
-import com.zilliz.milvus.storage.read.exec.{SegmentIndexHandle, SegmentVectors}
-import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.milvus.storage.read.exec.SegmentVectors
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.Logging
 
 /** Builds one segment's vector index and hands over the payloads Knowhere
@@ -34,7 +34,7 @@ object IndexWriter extends Logging {
   final class Built private[index] (
       private[storage] val payloads: NativeVectorIndex.Built,
       val indexType: String,
-      val metric: String,
+      val metric: MetricType,
       val indexVersion: Int,
       val rows: Long,
       val dimension: Int,
@@ -183,13 +183,12 @@ object IndexWriter extends Logging {
       rows: Long,
       layout: VectorLayout,
       indexType: String,
-      metric: String,
+      metric: MetricType,
       indexVersion: Int,
       parameters: Map[String, String] = Map.empty,
       validData: Option[Array[Byte]] = None
   ): Built = {
-    val (name, distance) =
-      checkBuild(rows, layout, indexType, metric, parameters)
+    val name = checkBuild(rows, layout, indexType, metric, parameters)
     require(
       vectors != null && vectors.capacity().toLong >= rows * layout.rowBytes,
       s"The buffer holds ${if (vectors == null) 0
@@ -203,10 +202,10 @@ object IndexWriter extends Logging {
         vectors,
         rows,
         layout.dimension,
-        buildParameters(distance, layout, parameters)
+        buildParameters(metric, layout, parameters)
       ),
       name,
-      distance,
+      metric,
       indexVersion,
       rows,
       layout,
@@ -224,13 +223,12 @@ object IndexWriter extends Logging {
       rows: Long,
       layout: VectorLayout,
       indexType: String,
-      metric: String,
+      metric: MetricType,
       indexVersion: Int,
       parameters: Map[String, String] = Map.empty,
       validData: Option[Array[Byte]] = None
   ): Built = {
-    val (name, distance) =
-      checkBuild(rows, layout, indexType, metric, parameters)
+    val name = checkBuild(rows, layout, indexType, metric, parameters)
     require(address != 0L, "The vectors need a native address")
     require(
       bytes >= rows * layout.rowBytes,
@@ -245,10 +243,10 @@ object IndexWriter extends Logging {
         bytes,
         rows,
         layout.dimension,
-        buildParameters(distance, layout, parameters)
+        buildParameters(metric, layout, parameters)
       ),
       name,
-      distance,
+      metric,
       indexVersion,
       rows,
       layout,
@@ -264,20 +262,21 @@ object IndexWriter extends Logging {
       rows: Long,
       layout: VectorLayout,
       indexType: String,
-      metric: String,
+      metric: MetricType,
       parameters: Map[String, String]
-  ): (String, String) = {
+  ): String = {
     val name = indexType.toUpperCase(Locale.ROOT)
-    val distance = metric.toUpperCase(Locale.ROOT)
     require(
       VectorIndexFamilies.Supported.contains(name),
       s"This connector builds the index types it loads, not $name"
     )
-    val metrics = SegmentIndexHandle.metricsOf(layout)
+    val metrics = MetricType.forElementType(layout.elementType)
     require(
-      metrics.contains(distance),
-      s"A ${layout.elementType} index takes ${metrics.toSeq.sorted
-          .mkString(" or ")}, not $distance"
+      metrics.contains(metric),
+      s"A ${layout.elementType} index takes ${metrics
+          .map(_.name)
+          .sorted
+          .mkString(" or ")}, not $metric"
     )
     require(rows > 0, s"An index is built over $rows rows")
     require(
@@ -286,13 +285,13 @@ object IndexWriter extends Logging {
       },
       "Index build parameters must be named and nonempty"
     )
-    (name, distance)
+    name
   }
 
   private def finish(
       built: NativeVectorIndex.Built,
       name: String,
-      distance: String,
+      metric: MetricType,
       indexVersion: Int,
       rows: Long,
       layout: VectorLayout,
@@ -302,14 +301,14 @@ object IndexWriter extends Logging {
       val result = new Built(
         built,
         name,
-        distance,
+        metric,
         indexVersion,
         rows,
         layout.dimension,
         validData
       )
       logInfo(
-        s"Index built: type=$name, metric=$distance, rows=$rows, dimension=${layout.dimension}, " +
+        s"Index built: type=$name, metric=$metric, rows=$rows, dimension=${layout.dimension}, " +
           s"version=$indexVersion, payloads=${result.names
               .mkString(",")}, bytes=${result.bytes}"
       )
@@ -324,12 +323,12 @@ object IndexWriter extends Logging {
     * plus whatever the caller tuned.
     */
   private[index] def buildParameters(
-      metric: String,
+      metric: MetricType,
       layout: VectorLayout,
       parameters: Map[String, String]
   ): String = {
     val node = mapper.createObjectNode()
-    node.put("metric_type", metric)
+    node.put("metric_type", metric.name)
     node.put("dim", layout.dimension)
     parameters.toSeq.sortBy(_._1).foreach { case (key, value) =>
       require(

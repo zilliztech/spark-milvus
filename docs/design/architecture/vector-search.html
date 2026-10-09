@@ -719,7 +719,7 @@ SELECT * FROM queries JOIN milvus.db.coll ON milvus.system.knn(vec, q, 10, 'L2')
 <tr><td>两个参数一个是本表向量列的 <code>FieldReference</code>、一个是 <code>LiteralValue</code>（顺序不限）</td><td>false：「参数不是向量列加字面量」</td></tr>
 <tr><td>方向与函数一致：L2、HAMMING、JACCARD 升序，IP、COSINE 降序</td><td>false：「方向与 metric 不符」</td></tr>
 <tr><td>该列是向量字段，<code>VectorLayout.of</code> 能给出布局</td><td>抛错</td></tr>
-<tr><td>metric 在 <code>SegmentIndexHandle.metricsOf(layout)</code> 里（二值向量只有 HAMMING、JACCARD）</td><td>抛错</td></tr>
+<tr><td>metric 在 <code>MetricType.forElementType(layout.elementType)</code> 里（二值向量只有 HAMMING、JACCARD）</td><td>抛错</td></tr>
 <tr><td>字面量按布局转成查询行：浮点布局接受 <code>ARRAY&lt;FLOAT&gt;</code> 与 <code>ARRAY&lt;DOUBLE&gt;</code>，Int8 接受整数数组且值在 −128 到 127，二值接受 BINARY；经 <code>SearchQueries.pack</code> 校验维度、有限值与 COSINE 非零范数</td><td>抛错（<code>pack</code> 的信息）</td></tr>
 <tr><td>mode 为 index 时 <code>SegmentIndexHandle.check</code> 全部通过</td><td>抛错（列出所有不满足的段）</td></tr>
 </tbody></table></div>

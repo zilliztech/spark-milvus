@@ -58,7 +58,7 @@
 <tr><td>多查询（一次传 nq 条）</td><td>有，每条查询一个任务</td><td>有，<code>queries.rows</code> 不设上限</td><td>整组查询一次传入（<code>QueryMatrix</code>）</td><td>无</td></tr>
 <tr><td>过滤位图</td><td>有</td><td>有，1 表示排除</td><td>用于删除与 null</td><td>无</td></tr>
 <tr><td>向量类型</td><td>fp32、fp16、bf16、int8、bin1、稀疏、EmbList</td><td>fp32、fp16、bf16、int8、bin1</td><td>按字段 dtype 传 fp32、fp16、bf16、int8、bin1（<code>QueryMatrix</code>、<code>KnowhereBuffers</code>、<code>ExactScan</code>）</td><td>无</td></tr>
-<tr><td>距离</td><td>L2、IP、COSINE、HAMMING、JACCARD、BM25 等</td><td>JSON 透传，不校验</td><td>L2、IP、COSINE；二值向量为 HAMMING、JACCARD（<code>MilvusSearch.checkMetric</code>、<code>TopKMerger</code>）</td><td>无</td></tr>
+<tr><td>距离</td><td>L2、IP、COSINE、HAMMING、JACCARD、BM25 等</td><td>JSON 透传，不校验</td><td>L2、IP、COSINE；二值向量为 HAMMING、JACCARD（<code>MetricType.forElementType</code> 定每种元素类型可用的距离，<code>MetricType.smallerIsBetter</code> 定 <code>TopKMerger</code> 的排序方向）</td><td>无</td></tr>
 <tr><td>索引加载</td><td>BinarySet、文件加载、mmap</td><td>仅 BinarySet</td><td>BinarySet 分块写入</td><td>绑定，mmap 未开放</td></tr>
 <tr><td>索引构建</td><td>Build、Train、Add、BuildAsync</td><td>一次性 Build；DiskANN 走文件</td><td><code>IndexWriter.build</code> / <code>buildFromAddress</code> 经 <code>NativeVectorIndex.build</code> 一次性 Build（W6，<code>build_index</code> 过程）</td><td>无</td></tr>
 <tr><td>批量暴力搜索（<code>knowhere_bruteforce_batched</code>）</td><td>有，Knowhere 自带 faiss 的 SGEMM 路径，调用线程单线程</td><td>有，b9497f4f 起；fp32、L2/IP/COSINE，不接受位图</td><td>float32 精确扫描默认走它（<code>ExactScan</code>），有排除行的批先压紧</td><td>无</td></tr>

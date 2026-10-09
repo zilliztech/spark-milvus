@@ -6,6 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.index.{Candidate, CandidateBytes}
+import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.TaskResources
 
@@ -37,7 +38,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     */
   private def candidates(
       rows: Seq[(Long, Long, Long, Double)],
-      metric: String = "L2"
+      metric: MetricType = MetricType.L2
   ) =
     spark.sparkContext
       .parallelize(
@@ -58,7 +59,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   private def merged(
       rows: Seq[(Long, Long, Long, Double)],
       k: Int,
-      metric: String
+      metric: MetricType
   ) =
     MilvusSearch.merged(
       spark,
@@ -84,7 +85,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         (2L, 11L, 8L, 2.0)
       ),
       2,
-      "L2"
+      MetricType.L2
     )
 
     merged.schema.fieldNames shouldBe Array(
@@ -120,7 +121,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val rows = merged(
       Seq((1L, 10L, 0L, 0.2), (1L, 10L, 1L, 0.9), (1L, 11L, 2L, 0.5)),
       2,
-      "COSINE"
+      MetricType.Cosine
     ).orderBy("rank")
       .collect()
       .map(row => (row.getAs[Int]("rank"), row.getAs[Double]("_score")))
@@ -130,7 +131,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   }
 
   test("a query with fewer candidates than k keeps them all") {
-    val rows = merged(Seq((7L, 10L, 0L, 1.5)), 10, "L2").collect()
+    val rows = merged(Seq((7L, 10L, 0L, 1.5)), 10, MetricType.L2).collect()
 
     rows.map(_.getAs[Long]("query_id")).toSeq shouldBe Seq(7L)
     rows.map(_.getAs[Int]("rank")).toSeq shouldBe Seq(1)
@@ -196,13 +197,13 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
   test("no candidates give no rows") {
     MilvusSearch
-      .merged(spark, candidates(Seq.empty), 3, "L2", 2)
+      .merged(spark, candidates(Seq.empty), 3, MetricType.L2, 2)
       .collect() shouldBe empty
   }
 
   test("an empty result has the schema a merged one has") {
     MilvusSearch.HitSchema shouldBe MilvusSearch
-      .merged(spark, candidates(Seq((1L, 10L, 0L, 1.0))), 1, "L2", 2)
+      .merged(spark, candidates(Seq((1L, 10L, 0L, 1.0))), 1, MetricType.L2, 2)
       .schema
   }
 

@@ -11,7 +11,11 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.read.exec.IndexRowMapping
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 
 /** A segment's groups through the probe pipeline: the answer of one group is
   * checked and collected while the index searches the next, and the mergers end
@@ -56,7 +60,7 @@ class IndexProbePipelineTest
     var lastExcluded: Option[ByteBuffer] = None
     def rows: Long = IndexProbePipelineTest.this.rows
     def dimension: Int = 2
-    def metric: String = "L2"
+    def metric: MetricType = MetricType.L2
     def indexType: String = "HNSW"
     def family: String = "HNSW"
     def mapping: IndexRowMapping = IndexRowMapping.identity(rows)
@@ -132,7 +136,7 @@ class IndexProbePipelineTest
             .take(k)
         }
       val (onProgress, seen) = progress()
-      val mergers = groups.map(n => new TopKMerger(n, k, "L2"))
+      val mergers = groups.map(n => new TopKMerger(n, k, MetricType.L2))
       segments.foreach { segment =>
         val fake = new Fake(segment)
         val pipeline =
@@ -175,7 +179,7 @@ class IndexProbePipelineTest
       val segments = Seq(11L, 22L, 33L)
       def collected(threads: Int): Seq[Seq[Seq[(Double, Long, Long)]]] = {
         val (onProgress, _) = progress()
-        val mergers = groups.map(n => new TopKMerger(n, k, "L2"))
+        val mergers = groups.map(n => new TopKMerger(n, k, MetricType.L2))
         segments.foreach { segment =>
           val pipeline = new IndexProbe.Pipeline(
             new Fake(segment),
@@ -211,7 +215,7 @@ class IndexProbePipelineTest
     try {
       val fake = new Fake(11L, shortUntilEf = 128)
       val (onProgress, seen) = progress()
-      val merger = new TopKMerger(6, k, "L2")
+      val merger = new TopKMerger(6, k, MetricType.L2)
       val pipeline =
         new IndexProbe.Pipeline(
           fake,
@@ -235,7 +239,7 @@ class IndexProbePipelineTest
     val m = matrix(3, 0)
     try {
       val fake = new Fake(5L, shortUntilEf = 200)
-      val merger = new TopKMerger(3, k, "L2")
+      val merger = new TopKMerger(3, k, MetricType.L2)
       val (onProgress, seen) = progress()
       val pipeline =
         new IndexProbe.Pipeline(fake, new BitSet(), k, Map.empty, allocator, 3)
@@ -255,7 +259,7 @@ class IndexProbePipelineTest
     val m = matrix(3, 0)
     try {
       val fake = new Fake(9L, badRow = true)
-      val merger = new TopKMerger(3, k, "L2")
+      val merger = new TopKMerger(3, k, MetricType.L2)
       val pipeline =
         new IndexProbe.Pipeline(fake, new BitSet(), k, Map.empty, allocator, 3)
       try {
@@ -271,7 +275,7 @@ class IndexProbePipelineTest
     val m = matrix(2, 0)
     try {
       val fake = new Fake(1L)
-      val merger = new TopKMerger(2, k, "L2")
+      val merger = new TopKMerger(2, k, MetricType.L2)
       val pipeline =
         new IndexProbe.Pipeline(fake, new BitSet(), k, Map.empty, allocator, 2)
       try {
@@ -286,7 +290,7 @@ class IndexProbePipelineTest
       // index as a bitmap with that bit alone set
       val excluded = new BitSet()
       excluded.set(999)
-      val filtered = new TopKMerger(2, k, "L2")
+      val filtered = new TopKMerger(2, k, MetricType.L2)
       val withMask =
         new IndexProbe.Pipeline(fake, excluded, k, Map.empty, allocator, 2)
       try {
@@ -311,7 +315,7 @@ class IndexProbePipelineTest
         new IndexProbe.Pipeline(fake, excluded, k, Map.empty, allocator, 2)
       try {
         pipeline.count shouldBe 0
-        val merger = new TopKMerger(2, k, "L2")
+        val merger = new TopKMerger(2, k, MetricType.L2)
         pipeline.run(m, merger, _ => ())
         pipeline.finish(_ => ())
         merger.size shouldBe 0

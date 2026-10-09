@@ -10,7 +10,11 @@ import org.scalatest.matchers.should.Matchers
 import com.zilliz.milvus.storage.codec.{DecodedIndexFile, IndexFileDecoder}
 import com.zilliz.milvus.storage.io.{FailingObjectStore, LocalObjectStore}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 import com.zilliz.milvus.storage.snapshot.{
   SegmentIndex,
   SegmentIndexes,
@@ -68,13 +72,13 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
 
   test("a segment the snapshot says has no index needs allowUnindexed") {
     val failure = the[IllegalArgumentException] thrownBy SegmentIndexHandle
-      .select(task, 4L, "COSINE", allowUnindexed = false)
+      .select(task, 4L, MetricType.Cosine, allowUnindexed = false)
 
     failure.getMessage should include("No persisted index for segment 3")
     SegmentIndexHandle.select(
       task,
       4L,
-      "COSINE",
+      MetricType.Cosine,
       allowUnindexed = true
     ) shouldBe None
   }
@@ -83,7 +87,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
     the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
       task.copy(indexes = SegmentIndexes.Unknown),
       4L,
-      "COSINE",
+      MetricType.Cosine,
       allowUnindexed = true
     )
   }
@@ -92,7 +96,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
     the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
       task.copy(layout = SegmentLayout.Manifest("absent", -1L)),
       4L,
-      "COSINE",
+      MetricType.Cosine,
       allowUnindexed = true
     )
   }
@@ -112,7 +116,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
       the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
         task.copy(indexes = SegmentIndexes.Available(indexes)),
         4L,
-        "COSINE",
+        MetricType.Cosine,
         allowUnindexed = true
       )
     }
@@ -122,7 +126,7 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
     SegmentIndexHandle.select(
       task.copy(indexes = SegmentIndexes.Available(Vector(available))),
       4L,
-      "COSINE",
+      MetricType.Cosine,
       allowUnindexed = false
     ) shouldBe Some(available)
   }
@@ -140,14 +144,19 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
           )
         ),
         4L,
-        "COSINE",
+        MetricType.Cosine,
         allowUnindexed = false
       )
 
     failure.getMessage should include("2 of 3 segments")
     failure.getMessage should include("segment 3")
     failure.getMessage should include("segment 4")
-    SegmentIndexHandle.check(Seq.empty, 4L, "COSINE", allowUnindexed = false)
+    SegmentIndexHandle.check(
+      Seq.empty,
+      4L,
+      MetricType.Cosine,
+      allowUnindexed = false
+    )
   }
 
   test(

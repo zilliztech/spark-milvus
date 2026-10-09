@@ -19,7 +19,11 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.index.SearchPlan
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 
 /** How a query set too large to broadcast reaches the first stage: packed by
   * group on the executors into a shuffle, one partition per group, and read by
@@ -57,8 +61,8 @@ class SearchDeliveryTest
     fieldId = 100L,
     nullable = false,
     k = 1,
-    metric = "L2",
-    mode = "exact",
+    metric = MetricType.L2,
+    mode = SearchMode.Exact,
     filter = None,
     parameters = Map.empty,
     allowUnindexed = false,
@@ -231,9 +235,10 @@ class SearchDeliveryTest
   test("the broadcast path packs on the executors what the driver would have") {
     val spread = selected().repartition(3)
 
-    val (ids, vectors) = SearchQueries.packOnExecutors(spread, layout, "L2")
+    val (ids, vectors) =
+      SearchQueries.packOnExecutors(spread, layout, MetricType.L2)
     val (driverIds, driverVectors) =
-      SearchQueries.pack(rows(), layout, "L2")
+      SearchQueries.pack(rows(), layout, MetricType.L2)
 
     ids.length shouldBe queries
     ids.toSet shouldBe (0L until queries.toLong).toSet
@@ -252,9 +257,10 @@ class SearchDeliveryTest
       )
       .coalesce(1)
 
-    val (ids, vectors) = SearchQueries.packOnExecutors(frame, layout, "L2")
+    val (ids, vectors) =
+      SearchQueries.packOnExecutors(frame, layout, MetricType.L2)
     val (driverIds, driverVectors) =
-      SearchQueries.pack(frame.collect().toSeq, layout, "L2")
+      SearchQueries.pack(frame.collect().toSeq, layout, MetricType.L2)
 
     ids.toSeq shouldBe driverIds.toSeq
     vectors.toSeq shouldBe driverVectors.toSeq
@@ -270,7 +276,7 @@ class SearchDeliveryTest
     )
 
     val failure = the[org.apache.spark.SparkException] thrownBy
-      SearchQueries.packOnExecutors(bad, layout, "L2")
+      SearchQueries.packOnExecutors(bad, layout, MetricType.L2)
 
     failure.getMessage should include("not finite")
   }

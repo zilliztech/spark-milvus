@@ -14,6 +14,7 @@ import scala.util.Try
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
 import com.zilliz.milvus.storage.read.exec.{IndexRowMapping, SegmentIndexHandle}
+import com.zilliz.milvus.storage.schema.MetricType
 
 /** Searches a segment through the index the Milvus format side opened.
   *
@@ -50,7 +51,7 @@ object IndexProbe {
     def segmentId: Long
     def rows: Long
     def dimension: Int
-    def metric: String
+    def metric: MetricType
     def indexType: String
     def family: String
     def mapping: IndexRowMapping
@@ -77,7 +78,7 @@ object IndexProbe {
     def segmentId: Long = handle.segmentId
     def rows: Long = handle.rows
     def dimension: Int = handle.dimension
-    def metric: String = handle.metric
+    def metric: MetricType = handle.metric
     def indexType: String = handle.indexType
     def family: String = handle.family
     def mapping: IndexRowMapping = handle.mapping
@@ -409,8 +410,8 @@ object IndexProbe {
     val name = if (target.family == "HNSW") "ef" else "nprobe"
     width match {
       case Some(value) =>
-        s"""{"metric_type":"${target.metric}","$name":$value}"""
-      case None => s"""{"metric_type":"${target.metric}"}"""
+        s"""{"metric_type":"${target.metric.name}","$name":$value}"""
+      case None => s"""{"metric_type":"${target.metric.name}"}"""
     }
   }
 
@@ -489,7 +490,8 @@ object IndexProbe {
           )
           val score = scores.getFloat(position * 4L)
           require(
-            JavaFloat.isFinite(score) && (metric != "L2" || score >= 0),
+            JavaFloat.isFinite(score) &&
+              (metric != MetricType.L2 || score >= 0),
             s"Segment ${target.segmentId}: the index returned an invalid score for row $id"
           )
           // A row the index returned twice for one query has its bit set

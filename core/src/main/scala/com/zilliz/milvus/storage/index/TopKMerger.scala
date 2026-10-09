@@ -2,6 +2,8 @@ package com.zilliz.milvus.storage.index
 
 import java.lang.{Double => JavaDouble, Long => JavaLong}
 
+import com.zilliz.milvus.storage.schema.MetricType
+
 /** One candidate row for one query: where it is and what it scored.
   *
   * `score` is the metric score Knowhere returned, widened to a Double and
@@ -18,30 +20,12 @@ final case class Candidate(
 
 object Candidate {
 
-  /** Metrics whose smaller score is the better one. */
-  private val SmallerIsBetter = Set("L2", "HAMMING", "JACCARD")
-
-  private val Metrics = SmallerIsBetter ++ Set("IP", "COSINE")
-
-  def metricRanks(metric: String): Boolean = Metrics.contains(metric)
-
-  /** Whether this metric's better score is its smaller one. What
-    * [[CandidateBytes]] needs to rank packed candidates without unpacking them
-    * into objects first, and what [[TopKMerger]] needs to rank three primitives
-    * without building one.
-    */
-  def smallerIsBetter(metric: String): Boolean = {
-    require(metricRanks(metric), s"Unsupported vector search metric: $metric")
-    SmallerIsBetter.contains(metric)
-  }
-
   /** Best first: by score, then by segment id, then by row offset. The two
     * tie-breakers make the result of a search independent of the order its
     * candidates arrived in.
     */
-  def ranking(metric: String): Ordering[Candidate] = {
-    require(metricRanks(metric), s"Unsupported vector search metric: $metric")
-    val better = if (SmallerIsBetter.contains(metric)) 1 else -1
+  def ranking(metric: MetricType): Ordering[Candidate] = {
+    val better = if (metric.smallerIsBetter) 1 else -1
     (left: Candidate, right: Candidate) => {
       val score = JavaDouble.compare(left.score, right.score) * better
       if (score != 0) score
@@ -74,7 +58,7 @@ object Candidate {
   * pays the sort once, in [[takePacked]], and only for the k it kept
   * (docs/design/architecture/vector-search.html section 2.6).
   */
-final class TopKMerger(val queries: Int, val k: Int, val metric: String)
+final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     extends Serializable {
   require(queries >= 0, s"Query count must not be negative: $queries")
   require(k > 0, s"topK must be positive: $k")
@@ -86,7 +70,7 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: String)
   /** +1 when the smaller score is the better one, so that a positive comparison
     * always means "left is worse than right".
     */
-  private val better: Int = if (Candidate.smallerIsBetter(metric)) 1 else -1
+  private val better: Int = if (metric.smallerIsBetter) 1 else -1
 
   // Query q owns slots [q * k, q * k + sizes(q)); slot q * k is its worst.
   private val scores = new Array[Double](queries * k)

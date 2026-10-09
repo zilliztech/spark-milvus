@@ -14,7 +14,7 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.io.NativeObjectStore
-import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.write.commit.{CommittedIndex, Committer}
 import com.zilliz.milvus.storage.write.exec.StagingLayout
 import com.zilliz.spark.connector.options.{
@@ -109,8 +109,16 @@ object BuildIndexProcedure extends Procedure {
         .getOrElse("HNSW"),
       metric = args
         .stringOpt("metric")
-        .map(_.toUpperCase(Locale.ROOT))
-        .getOrElse("COSINE"),
+        .map(name =>
+          MetricType
+            .fromName(name)
+            .getOrElse(
+              throw new IllegalArgumentException(
+                s"'metric' must be one of ${MetricType.values.mkString(", ")}: $name"
+              )
+            )
+        )
+        .getOrElse(MetricType.Cosine),
       parameters = parametersOf(args.stringOpt("params")),
       buildId = args.longOpt("build_id").getOrElse(System.currentTimeMillis()),
       indexVersion = args.longOpt("index_version").getOrElse(1L),

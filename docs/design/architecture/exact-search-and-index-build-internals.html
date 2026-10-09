@@ -128,7 +128,8 @@ knn_L2sqr(xq, xb, d, nq, nb, k, distances, ids, nullptr, nullptr);   // 整批 n
 
 <h3>1.5 连接器怎么接</h3>
 <p><strong>连接器按元素类型和度量选入口；新入口只收一块连续、没有洞的底库矩阵，所以批里有不该参与的行时，先把要参与的行拷成一块，搜完再把行号换回去；并行度交给 Spark 任务。</strong>代码在 <code>core/…/index/ExactScan.scala</code>：</p>
-<pre><code>private val BatchedMetrics = Set("L2", "IP", "COSINE")
+<pre><code>private val BatchedMetrics: Set[MetricType] =
+  Set(MetricType.L2, MetricType.IP, MetricType.Cosine)
 if (dtype == DType.FLOAT32 &amp;&amp; BatchedMetrics(metric)) batched(...) else perQuery(...)
 
 // compact：把没被排除的行按原顺序拷进新缓冲，连续的一段一次拷；batchRows(k) 记下新缓冲第 k 行原来是批内第几行

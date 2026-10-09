@@ -12,7 +12,7 @@ import com.zilliz.milvus.storage.codec.{
 }
 import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.snapshot.{
   SegmentIndex,
   SegmentIndexes,
@@ -29,7 +29,7 @@ import com.zilliz.milvus.storage.snapshot.{
   */
 final class SegmentIndexHandle private (
     private[storage] val index: NativeVectorIndex,
-    val metric: String,
+    val metric: MetricType,
     val indexType: String,
     val segmentId: Long,
     val buildId: Long,
@@ -69,7 +69,7 @@ object SegmentIndexHandle {
   def select(
       task: SegmentReadTask,
       fieldId: Long,
-      metric: String,
+      metric: MetricType,
       allowUnindexed: Boolean
   ): Option[SegmentIndex] = {
     task.layout match {
@@ -111,7 +111,7 @@ object SegmentIndexHandle {
             .mkString(", ")}"
       )
       require(
-        descriptor.metricType.exists(_.equalsIgnoreCase(metric)),
+        descriptor.metricType.flatMap(MetricType.fromName).contains(metric),
         s"Query metric differs from the persisted index metric of segment ${task.segmentId}"
       )
       require(
@@ -132,7 +132,7 @@ object SegmentIndexHandle {
   def check(
       tasks: Seq[SegmentReadTask],
       fieldId: Long,
-      metric: String,
+      metric: MetricType,
       allowUnindexed: Boolean
   ): Unit = {
     val failures = tasks.flatMap { task =>
@@ -178,11 +178,6 @@ object SegmentIndexHandle {
   def familyOf(indexType: String): String =
     VectorIndexFamilies.familyOf(indexType)
 
-  /** The metrics each element type can be searched by. */
-  def metricsOf(layout: VectorLayout): Set[String] =
-    if (layout.elementType == VectorElementType.Bit) Set("HAMMING", "JACCARD")
-    else Set("L2", "IP", "COSINE")
-
   /** The range a persisted index has to be in for this connector to load it: a
     * supported index type over the column's own element type, with a metric and
     * a format version the snapshot states. A nullable column is indexed over
@@ -209,19 +204,23 @@ object SegmentIndexHandle {
       Supported.contains(indexType),
       s"Persisted index search does not support $indexType; it loads ${Supported.toSeq.sorted.mkString(", ")}"
     )
-    val metric = index.metricType
+    val declared = index.metricType.getOrElse(
+      throw new IllegalArgumentException(
+        "Index metadata is missing metric_type"
+      )
+    )
+    val metrics = MetricType.forElementType(layout.elementType)
+    val metric = MetricType
+      .fromName(declared)
+      .filter(metrics.contains)
       .getOrElse(
         throw new IllegalArgumentException(
-          "Index metadata is missing metric_type"
+          s"A ${layout.elementType} index takes ${metrics
+              .map(_.name)
+              .sorted
+              .mkString(" or ")}, not ${declared.toUpperCase(Locale.ROOT)}"
         )
       )
-      .toUpperCase(Locale.ROOT)
-    val metrics = metricsOf(layout)
-    require(
-      metrics.contains(metric),
-      s"A ${layout.elementType} index takes ${metrics.toSeq.sorted
-          .mkString(" or ")}, not $metric"
-    )
     require(
       index.currentIndexVersion.exists(_ >= 0),
       "Snapshot must declare the persisted vector index format version"

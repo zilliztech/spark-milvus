@@ -16,7 +16,11 @@ import org.apache.spark.sql.types.{
 }
 
 import com.zilliz.milvus.storage.index.QueryMatrix
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** The query set a search takes: `query_id` and `vector`, checked against the
@@ -101,7 +105,7 @@ private[read] object SearchQueries {
   def pack(
       rows: Seq[Row],
       layout: VectorLayout,
-      metric: String
+      metric: MetricType
   ): (Array[Long], Array[Byte]) = {
     val ids = new Array[Long](rows.size)
     rows.iterator.zipWithIndex.foreach { case (row, index) =>
@@ -148,7 +152,7 @@ private[read] object SearchQueries {
   def packOnExecutors(
       selected: DataFrame,
       layout: VectorLayout,
-      metric: String
+      metric: MetricType
   ): (Array[Long], Array[Byte]) = {
     val blocks = selected.queryExecution.toRdd
       .mapPartitionsWithIndex { (partition, rows) =>
@@ -182,7 +186,7 @@ private[read] object SearchQueries {
   private[read] def packPartition(
       rows: Iterator[InternalRow],
       layout: VectorLayout,
-      metric: String
+      metric: MetricType
   ): (Array[Long], Array[Byte]) = {
     val ids = mutable.ArrayBuilder.make[Long]
     val chunks = mutable.ArrayBuffer.empty[Array[Byte]]
@@ -257,7 +261,7 @@ private[read] object SearchQueries {
   private def finite(
       row: Row,
       layout: VectorLayout,
-      metric: String
+      metric: MetricType
   ): Array[Float] =
     finiteValues(row.getLong(0), row.getSeq[Float](1).toArray, layout, metric)
 
@@ -265,7 +269,7 @@ private[read] object SearchQueries {
       id: Long,
       values: Array[Float],
       layout: VectorLayout,
-      metric: String
+      metric: MetricType
   ): Array[Float] = {
     require(
       values.length == layout.dimension,
@@ -276,7 +280,7 @@ private[read] object SearchQueries {
       s"Query $id holds a value that is not finite"
     )
     require(
-      metric != "COSINE" || values.exists(_ != 0.0f),
+      metric != MetricType.Cosine || values.exists(_ != 0.0f),
       s"Query $id has a zero norm, which COSINE has no answer for"
     )
     values

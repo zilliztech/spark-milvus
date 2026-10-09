@@ -17,7 +17,7 @@ import com.zilliz.milvus.storage.read.exec.{
   SegmentIndexHandle,
   SegmentVectors
 }
-import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.Logging
 
 /** Runs query groups over one segment set and merges what the segments find.
@@ -112,7 +112,7 @@ object SegmentSearch extends Logging {
     def search(
         queries: QueryMatrix,
         k: Int,
-        metric: String,
+        metric: MetricType,
         parameters: Map[String, String],
         allocator: BufferAllocator,
         onProgress: Progress => Unit = _ => (),
@@ -290,7 +290,7 @@ object SegmentSearch extends Logging {
       open: Long => Source,
       queries: QueryMatrix,
       k: Int,
-      metric: String,
+      metric: MetricType,
       parameters: Map[String, String],
       allocator: BufferAllocator,
       onProgress: Progress => Unit = _ => ()
@@ -322,7 +322,7 @@ object SegmentSearch extends Logging {
       open: Long => Source,
       groups: Seq[QueryMatrix],
       k: Int,
-      metric: String,
+      metric: MetricType,
       parameters: Map[String, String],
       allocator: BufferAllocator,
       onProgress: Progress => Unit = _ => (),

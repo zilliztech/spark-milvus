@@ -5,7 +5,11 @@ import java.nio.ByteBuffer
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 
 /** What a build accepts and what it hands Knowhere
   * (docs/design/architecture/vector-search.html section 2.7).
@@ -19,13 +23,13 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
 
   test("the build parameters carry the metric, the dimension and the tuning") {
     IndexWriter.buildParameters(
-      "COSINE",
+      MetricType.Cosine,
       layout,
       Map("M" -> "16", "efConstruction" -> "200")
     ) shouldBe """{"metric_type":"COSINE","dim":4,"M":16,"efConstruction":200}"""
 
     IndexWriter.buildParameters(
-      "L2",
+      MetricType.L2,
       layout,
       Map("sq_type" -> "SQ4U", "refine" -> "true", "refine_ratio" -> "1.5")
     ) shouldBe
@@ -34,12 +38,12 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
 
   test("the column and the search decide the metric and the dimension") {
     the[IllegalArgumentException] thrownBy IndexWriter.buildParameters(
-      "L2",
+      MetricType.L2,
       layout,
       Map("metric_type" -> "IP")
     )
     the[IllegalArgumentException] thrownBy IndexWriter.buildParameters(
-      "L2",
+      MetricType.L2,
       layout,
       Map("dim" -> "8")
     )
@@ -51,7 +55,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
       4L,
       layout,
       "DISKANN",
-      "L2",
+      MetricType.L2,
       indexVersion = 8
     )
 
@@ -64,7 +68,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
       4L,
       layout,
       "HNSW",
-      "HAMMING",
+      MetricType.Hamming,
       indexVersion = 8
     )
     the[IllegalArgumentException] thrownBy IndexWriter.build(
@@ -72,7 +76,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
       4L,
       VectorLayout(VectorElementType.Bit, 16),
       "BIN_IVF_FLAT",
-      "COSINE",
+      MetricType.Cosine,
       indexVersion = 8
     )
   }
@@ -83,7 +87,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
       4L,
       layout,
       "HNSW",
-      "L2",
+      MetricType.L2,
       indexVersion = 8
     )
 
@@ -93,7 +97,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
       0L,
       layout,
       "HNSW",
-      "L2",
+      MetricType.L2,
       indexVersion = 8
     )
   }
@@ -106,7 +110,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
         4L,
         layout,
         "HNSW",
-        "L2",
+        MetricType.L2,
         indexVersion = 8
       )
     noAddress.getMessage should include("native address")
@@ -117,7 +121,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
         4L,
         layout,
         "HNSW",
-        "L2",
+        MetricType.L2,
         indexVersion = 8
       )
     tooSmall.getMessage should include("need")
@@ -129,7 +133,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
       4L,
       layout,
       "HNSW",
-      "L2",
+      MetricType.L2,
       indexVersion = 8,
       parameters = Map("M" -> "")
     )

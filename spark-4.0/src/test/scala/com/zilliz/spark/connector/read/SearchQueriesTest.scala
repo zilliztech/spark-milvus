@@ -7,7 +7,11 @@ import org.apache.spark.sql.Row
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 
 /** The query set a search takes, checked and packed before anything is read. */
 class SearchQueriesTest extends AnyFunSuite with Matchers {
@@ -81,7 +85,7 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
     val (ids, vectors) = SearchQueries.pack(
       Seq(Row(7L, Seq(1f, 2f)), Row(3L, Seq(3f, 4f))),
       float32,
-      "L2"
+      MetricType.L2
     )
 
     ids shouldBe Array(7L, 3L)
@@ -94,7 +98,7 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
     val (ids, vectors) = SearchQueries.pack(
       Seq(Row(1L, Seq[Short](1, -2, 3))),
       layout,
-      "L2"
+      MetricType.L2
     )
 
     ids shouldBe Array(1L)
@@ -105,7 +109,7 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
     val failure = the[IllegalArgumentException] thrownBy SearchQueries.pack(
       Seq(Row(1L, Seq[Short](1, 300, 3))),
       VectorLayout(VectorElementType.Int8, 3),
-      "L2"
+      MetricType.L2
     )
 
     failure.getMessage should include("300")
@@ -115,7 +119,7 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
     val failure = the[IllegalArgumentException] thrownBy SearchQueries.pack(
       Seq(Row(11L, Seq(1f, 2f)), Row(12L, Seq(1f))),
       float32,
-      "L2"
+      MetricType.L2
     )
 
     failure.getMessage should include("Query 12 has 1 values")
@@ -125,7 +129,7 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
     val failure = the[IllegalArgumentException] thrownBy SearchQueries.pack(
       Seq(Row(5L, Seq(1f, Float.NaN))),
       float32,
-      "L2"
+      MetricType.L2
     )
 
     failure.getMessage should include("not finite")
@@ -135,11 +139,13 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
     val failure = the[IllegalArgumentException] thrownBy SearchQueries.pack(
       Seq(Row(5L, Seq(0f, 0f))),
       float32,
-      "COSINE"
+      MetricType.Cosine
     )
 
     failure.getMessage should include("zero norm")
-    SearchQueries.pack(Seq(Row(5L, Seq(0f, 0f))), float32, "L2")._1 shouldBe
+    SearchQueries
+      .pack(Seq(Row(5L, Seq(0f, 0f))), float32, MetricType.L2)
+      ._1 shouldBe
       Array(5L)
   }
 
@@ -147,12 +153,12 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
     the[IllegalArgumentException] thrownBy SearchQueries.pack(
       Seq(Row(null, Seq(1f, 2f))),
       float32,
-      "L2"
+      MetricType.L2
     )
     the[IllegalArgumentException] thrownBy SearchQueries.pack(
       Seq(Row(1L, null)),
       float32,
-      "L2"
+      MetricType.L2
     )
   }
 

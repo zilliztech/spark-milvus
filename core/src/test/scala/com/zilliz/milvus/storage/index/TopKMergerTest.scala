@@ -5,10 +5,12 @@ import scala.util.Random
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.schema.MetricType
+
 /** The result semantics of vector-search.html section 2.6. */
 class TopKMergerTest extends AnyFunSuite with Matchers {
 
-  private def merger(metric: String, queries: Int = 1, k: Int = 2) =
+  private def merger(metric: MetricType, queries: Int = 1, k: Int = 2) =
     new TopKMerger(queries, k, metric)
 
   private def places(candidates: Vector[Candidate]): Vector[(Long, Long)] =
@@ -34,7 +36,7 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     val random = new Random(7)
     val queries = 37
     val (sharded, oneByOne) =
-      (merger("L2", queries, 5), merger("L2", queries, 5))
+      (merger(MetricType.L2, queries, 5), merger(MetricType.L2, queries, 5))
     (0 until 4000).foreach { _ =>
       val candidate = Candidate(
         random.nextInt(queries),
@@ -52,8 +54,8 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     }
     sharded.size shouldBe 0
     // A merger packed on one thread and one packed on more agree too.
-    val single = merger("COSINE", 3, 2)
-    val many = merger("COSINE", 3, 2)
+    val single = merger(MetricType.Cosine, 3, 2)
+    val many = merger(MetricType.Cosine, 3, 2)
     Seq(
       Candidate(0, 1L, 1L, 0.9),
       Candidate(0, 1L, 2L, 0.8),
@@ -68,8 +70,8 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
   }
 
   test("L2 keeps the smallest scores, other metrics the largest") {
-    val l2 = merger("L2")
-    val cosine = merger("COSINE")
+    val l2 = merger(MetricType.L2)
+    val cosine = merger(MetricType.Cosine)
     val candidates = Seq(
       Candidate(0, 101L, 5L, 0.10),
       Candidate(0, 101L, 9L, 0.30),
@@ -83,7 +85,7 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
   }
 
   test("an equal score is broken by segment id, then by row offset") {
-    val merged = merger("L2", queries = 1, k = 3)
+    val merged = merger(MetricType.L2, queries = 1, k = 3)
     Seq(
       Candidate(0, 102L, 7L, 0.10),
       Candidate(0, 101L, 9L, 0.10),
@@ -98,7 +100,7 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
   }
 
   test("each query keeps its own k") {
-    val merged = merger("L2", queries = 2, k = 1)
+    val merged = merger(MetricType.L2, queries = 2, k = 1)
     merged.add(Candidate(0, 101L, 1L, 0.50))
     merged.add(Candidate(0, 101L, 2L, 0.40))
     merged.add(Candidate(1, 102L, 3L, 0.90))
@@ -110,7 +112,7 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
   }
 
   test("a query with fewer candidates than k returns all of them") {
-    val merged = merger("IP", queries = 2, k = 4)
+    val merged = merger(MetricType.IP, queries = 2, k = 4)
     merged.add(Candidate(1, 7L, 3L, 2.0))
 
     merged.results(0) shouldBe empty
@@ -127,10 +129,11 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
         random.nextInt(10) / 10.0
       )
     )
-    val straight = packedPlaces(new TopKMerger(3, 5, "L2").addAll(candidates))
+    val straight =
+      packedPlaces(new TopKMerger(3, 5, MetricType.L2).addAll(candidates))
     val shuffled =
       packedPlaces(
-        new TopKMerger(3, 5, "L2").addAll(random.shuffle(candidates))
+        new TopKMerger(3, 5, MetricType.L2).addAll(random.shuffle(candidates))
       )
 
     shuffled shouldBe straight
@@ -142,18 +145,18 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     )
     val (left, right) = candidates.splitAt(17)
     val together =
-      packedPlaces(new TopKMerger(2, 3, "COSINE").addAll(candidates))
+      packedPlaces(new TopKMerger(2, 3, MetricType.Cosine).addAll(candidates))
     val apart = packedPlaces(
-      new TopKMerger(2, 3, "COSINE")
+      new TopKMerger(2, 3, MetricType.Cosine)
         .addAll(left)
-        .merge(new TopKMerger(2, 3, "COSINE").addAll(right))
+        .merge(new TopKMerger(2, 3, MetricType.Cosine).addAll(right))
     )
 
     apart shouldBe together
   }
 
   test("packing a query releases it, so the second read is empty") {
-    val merged = merger("L2", queries = 1, k = 2)
+    val merged = merger(MetricType.L2, queries = 1, k = 2)
     merged.add(Candidate(0, 101L, 5L, 0.1))
     merged.size shouldBe 1
     packedTwice(merged) shouldBe ((CandidateBytes.Width, 0))
@@ -164,29 +167,27 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     val failure = the[IllegalArgumentException] thrownBy new TopKMerger(
       2,
       3,
-      "L2"
-    ).merge(new TopKMerger(2, 3, "IP"))
+      MetricType.L2
+    ).merge(new TopKMerger(2, 3, MetricType.IP))
 
     failure.getMessage should include("same query count")
   }
 
   test("a candidate outside the query set is refused") {
-    val failure = the[IllegalArgumentException] thrownBy merger("L2")
+    val failure = the[IllegalArgumentException] thrownBy merger(MetricType.L2)
       .add(Candidate(3, 1L, 1L, 0.1))
 
     failure.getMessage should include("query 3 of 1")
   }
 
-  test("an unsupported metric is refused when the merger is built") {
-    the[IllegalArgumentException] thrownBy new TopKMerger(
-      1,
-      1,
-      "EUCLIDEAN"
-    ) should have message "requirement failed: Unsupported vector search metric: EUCLIDEAN"
+  test("an unsupported metric is refused before a merger is built") {
+    // A metric the search does not rank by has no MetricType, so no merger
+    // can be built for it.
+    MetricType.fromName("EUCLIDEAN") shouldBe None
   }
 
   test("k must be positive and the query count must not be negative") {
-    the[IllegalArgumentException] thrownBy new TopKMerger(1, 0, "L2")
-    the[IllegalArgumentException] thrownBy new TopKMerger(-1, 1, "L2")
+    the[IllegalArgumentException] thrownBy new TopKMerger(1, 0, MetricType.L2)
+    the[IllegalArgumentException] thrownBy new TopKMerger(-1, 1, MetricType.L2)
   }
 }

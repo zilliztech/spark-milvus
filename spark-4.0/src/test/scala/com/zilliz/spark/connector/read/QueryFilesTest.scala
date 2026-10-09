@@ -12,7 +12,11 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.index.SearchPlan
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 
 /** A query set that is Parquet files, recognized on the driver and read by the
@@ -99,7 +103,7 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       SearchPlan.QueryGroup(3, 4),
       SearchPlan.QueryGroup(7, 3)
     )
-    val groups = files.groups(0 until 3, planned, layout, "L2").toSeq
+    val groups = files.groups(0 until 3, planned, layout, MetricType.L2).toSeq
     val rows = expectedRows(files)
     groups.map(_.queries) shouldBe Seq(3, 4, 3)
     groups.foreach(_.firstQuery shouldBe 0)
@@ -107,7 +111,7 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       val (ids, vectors) = SearchQueries.pack(
         rows.slice(plan.firstQuery, plan.untilQuery),
         layout,
-        "L2"
+        MetricType.L2
       )
       group.ids.toSeq shouldBe ids.toSeq
       group.vectors.toSeq shouldBe vectors.toSeq
@@ -118,7 +122,7 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   test("a range that starts later skips the rows before its first group") {
     val files = QueryFiles.of(spark, selected(set)).get
     val planned = Seq(SearchPlan.QueryGroup(0, 4), SearchPlan.QueryGroup(4, 6))
-    val groups = files.groups(1 until 2, planned, layout, "L2").toSeq
+    val groups = files.groups(1 until 2, planned, layout, MetricType.L2).toSeq
     groups.size shouldBe 1
     groups.head.ids.toSeq shouldBe expectedRows(files).drop(4).map(_.getLong(0))
   }
@@ -127,7 +131,7 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val files = QueryFiles.of(spark, selected(set)).get
     val planned = Seq(SearchPlan.QueryGroup(0, total + 1))
     val failure = the[IllegalArgumentException] thrownBy
-      files.groups(0 until 1, planned, layout, "L2").toSeq
+      files.groups(0 until 1, planned, layout, MetricType.L2).toSeq
     failure.getMessage should include(s"planned as ${total + 1}")
   }
 
@@ -176,8 +180,15 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val allocator = new RootAllocator(Long.MaxValue)
     try {
       val decoded =
-        files.decode(0 until 3, planned, layout, "L2", allocator, threads = 4)
-      val packed = files.groups(0 until 3, planned, layout, "L2").toSeq
+        files.decode(
+          0 until 3,
+          planned,
+          layout,
+          MetricType.L2,
+          allocator,
+          threads = 4
+        )
+      val packed = files.groups(0 until 3, planned, layout, MetricType.L2).toSeq
       try {
         decoded.size shouldBe 3
         decoded.zip(packed).foreach { case ((ids, matrix), group) =>
@@ -209,7 +220,14 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val allocator = new RootAllocator(Long.MaxValue)
     try {
       val decoded =
-        files.decode(1 until 2, planned, layout, "L2", allocator, threads = 3)
+        files.decode(
+          1 until 2,
+          planned,
+          layout,
+          MetricType.L2,
+          allocator,
+          threads = 3
+        )
       try {
         decoded.size shouldBe 1
         decoded.head._1.toSeq shouldBe (2000L until 3500L)
@@ -229,7 +247,7 @@ class QueryFilesTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
           0 until 1,
           Seq(SearchPlan.QueryGroup(0, total + 3)),
           layout,
-          "L2",
+          MetricType.L2,
           allocator,
           threads = 2
         )

@@ -30,7 +30,11 @@ import com.zilliz.milvus.storage.manifest.{
   SnapshotSegmentFixture
 }
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
-import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.{
   DeltaLogFile,
@@ -715,7 +719,7 @@ object SegmentIndexSearchSmoke {
         vectors.size.toLong,
         layout,
         "HNSW",
-        "L2",
+        MetricType.L2,
         indexVersion = 8,
         parameters = Map("M" -> "4", "efConstruction" -> "32")
       )

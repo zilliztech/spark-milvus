@@ -4,6 +4,8 @@ import java.lang.{Double => JavaDouble, Long => JavaLong}
 import java.nio.ByteBuffer
 import java.util.Arrays
 
+import com.zilliz.milvus.storage.schema.MetricType
+
 /** One query's candidates as bytes: what a first-stage task sends on.
   *
   * A candidate is a place and a score — segment id, row offset, the metric
@@ -62,7 +64,7 @@ object CandidateBytes {
     * candidates as objects — a test, or a caller that built them some other
     * way; the search path packs straight out of [[TopKMerger]].
     */
-  def of(candidates: Seq[Candidate], metric: String): Array[Byte] = {
+  def of(candidates: Seq[Candidate], metric: MetricType): Array[Byte] = {
     val sorted = candidates.toArray
     Arrays.sort(sorted, Candidate.ranking(metric))
     write(sorted, sorted.length)
@@ -127,10 +129,10 @@ object CandidateBytes {
       left: Array[Byte],
       right: Array[Byte],
       k: Int,
-      metric: String
+      metric: MetricType
   ): Array[Byte] = {
     require(k > 0, s"topK must be positive: $k")
-    val sign = if (Candidate.smallerIsBetter(metric)) 1 else -1
+    val sign = if (metric.smallerIsBetter) 1 else -1
     val leftSize = count(left)
     val rightSize = count(right)
     if (rightSize == 0) return if (leftSize <= k) left else left.take(k * Width)
