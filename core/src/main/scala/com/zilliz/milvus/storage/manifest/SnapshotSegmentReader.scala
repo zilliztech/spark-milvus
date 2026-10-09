@@ -1,0 +1,412 @@
+package com.zilliz.milvus.storage.manifest
+
+import java.io.ByteArrayInputStream
+import java.util.{List => JavaList}
+import scala.jdk.CollectionConverters._
+
+import org.apache.avro.generic.{GenericDatumReader, GenericRecord}
+import org.apache.avro.io.DecoderFactory
+import org.apache.avro.util.Utf8
+import org.apache.avro.Schema
+
+import com.zilliz.milvus.storage.snapshot.{
+  DeltaLogFile,
+  Segment,
+  SegmentStatistics,
+  V2ColumnGroup
+}
+
+/** Low-level mirror of one AVRO binlog group (`AvroFieldBinlog`):
+  *   - `slotFieldId`: the value milvus writes for `AvroFieldBinlog.field_id`.
+  *     This is NOT the real field ID(s) inside the parquet file — it is the
+  *     column-group slot (also used as the directory name). To learn the real
+  *     fields, read the parquet's `group_field_id_list` kv-metadata.
+  *   - `binlogs`: one [[BinlogEntry]] per physical parquet file belonging to
+  *     this group, in writer-assigned order (sort by `logId` for rows).
+  */
+case class FieldBinlogEntry(
+    slotFieldId: Long,
+    binlogs: Seq[BinlogEntry]
+)
+
+case class BinlogEntry(
+    logId: Long,
+    logPath: String,
+    entriesNum: Long
+)
+
+/** The index descriptor carried by a segment Avro record. Collection and
+  * partition identity are supplied by the enclosing snapshot and segment.
+  */
+case class IndexFileEntry(
+    segmentId: Long,
+    fieldId: Long,
+    indexId: Long,
+    buildId: Long,
+    name: String,
+    parameters: Map[String, String],
+    filePaths: Vector[String],
+    rowCount: Long,
+    serializedSize: Long,
+    indexVersion: Long,
+    currentIndexVersion: Option[Int],
+    indexStorePathVersion: Option[Int]
+)
+
+/** The fields of one snapshot segment record (Milvus's AVRO `ManifestEntry`)
+  * used by snapshot and segment planning.
+  *
+  * `storageVersion` uses the authoritative constants from
+  * `milvus/internal/storage/rw.go`: StorageV1=0, StorageV2=2, StorageV3=3.
+  */
+case class SnapshotSegmentEntry(
+    segmentId: Long,
+    partitionId: Long,
+    segmentLevel: Long,
+    numOfRows: Long,
+    storageVersion: Long,
+    binlogFiles: Seq[FieldBinlogEntry],
+    deltaLogFiles: Seq[FieldBinlogEntry],
+    statsLogFiles: Seq[FieldBinlogEntry] = Seq.empty,
+    indexFiles: Option[Vector[IndexFileEntry]] = None,
+    manifestHasIndex: Option[Boolean] = None
+)
+
+/** Decoder for the per-segment AVRO records a Milvus snapshot lists in its
+  * `manifest_list`, written by milvus-datacoord.
+  *
+  * The binary is schemaless (milvus uses `hamba/avro avro.Marshal` — no OCF
+  * container header), so the decoder must be given the exact writer schema. We
+  * bundle that schema as a classpath resource; its content is the verbatim
+  * `getProperAvroSchema()` string from milvus `internal/datacoord/snapshot.go`.
+  *
+  * Usage:
+  * {{{
+  *   val bytes: Array[Byte] = readBytesFromS3(path)
+  *   SnapshotSegmentReader.parse(bytes) match {
+  *     case Right(entry) if entry.storageVersion == 2L => ...
+  *     case Right(entry) => // skip — v0/v1/v3 handled elsewhere
+  *     case Left(err) => throw err
+  *   }
+  * }}}
+  */
+object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
+
+  private val LastNeededField = "index_files"
+
+  private val SchemaResources: Map[Int, String] = Map(
+    1 -> "/milvus-segment-manifest-v1.avsc",
+    2 -> "/milvus-segment-manifest-v2.avsc",
+    3 -> "/milvus-segment-manifest-v3.avsc",
+    4 -> "/milvus-segment-manifest-v4.avsc",
+    5 -> "/milvus-segment-manifest-v5.avsc"
+  )
+
+  private lazy val schemas: Map[Int, Schema] = SchemaResources.map {
+    case (version, resource) =>
+      version -> truncatedSchema(
+        loadSchema(resource),
+        LastNeededField,
+        resource
+      )
+  }
+
+  private def loadSchema(resource: String): Schema = {
+    val in = Option(getClass.getResourceAsStream(resource)).getOrElse {
+      throw new IllegalStateException(
+        s"bundled AVSC resource $resource not found on classpath"
+      )
+    }
+    try {
+      val schemaText =
+        scala.io.Source.fromInputStream(in, "UTF-8").mkString
+      new Schema.Parser().parse(schemaText)
+    } finally {
+      in.close()
+    }
+  }
+
+  private def schemaFor(version: Int): Schema =
+    schemas.getOrElse(
+      version,
+      throw new IllegalArgumentException(
+        s"Unsupported Milvus manifest schema version $version"
+      )
+    )
+
+  /** Build a record schema containing only the prefix of `full`'s fields up to
+    * and including `lastField`. Field objects are reconstructed so the new
+    * record owns them (avro forbids a field being attached to two records).
+    */
+  private def truncatedSchema(
+      full: Schema,
+      lastField: String,
+      resource: String
+  ): Schema = {
+    val idx = full.getFields.asScala.indexWhere(_.name == lastField)
+    if (idx < 0) {
+      throw new IllegalStateException(
+        s"bundled AVSC $resource is missing required field '$lastField'"
+      )
+    }
+    val truncated = Schema.createRecord(
+      full.getName,
+      full.getDoc,
+      full.getNamespace,
+      full.isError
+    )
+    val prefixFields = full.getFields.asScala.take(idx + 1).map { f =>
+      new Schema.Field(f.name, f.schema, f.doc, f.defaultVal)
+    }
+    truncated.setFields(prefixFields.toList.asJava)
+    truncated
+  }
+
+  /** Decode the raw bytes of one snapshot segment record (`*.avro`) into the
+    * subset of fields needed by snapshot and segment planning.
+    *
+    * @return
+    *   `Right(entry)` on success, or `Left(throwable)` on any parse error.
+    */
+  def parse(
+      avroBytes: Array[Byte],
+      manifestSchemaVersion: Int = 1
+  ): Either[Throwable, SnapshotSegmentEntry] = {
+    try {
+      val reader =
+        new GenericDatumReader[GenericRecord](
+          schemaFor(manifestSchemaVersion)
+        )
+      val decoder =
+        DecoderFactory
+          .get()
+          .binaryDecoder(new ByteArrayInputStream(avroBytes), null)
+      val rec = reader.read(null, decoder)
+      Right(projectEntry(rec))
+    } catch {
+      case e: Throwable => Left(e)
+    }
+  }
+
+  def supportedSchemaVersions: Seq[Int] = SchemaResources.keys.toSeq.sorted
+
+  /** Join a snapshot segment record with the segment's `group_field_id_list`
+    * kv-metadata (read from any one of the segment's parquet files) to produce
+    * the `Segment` with real field IDs per column group.
+    *
+    * @param entry
+    *   Parsed snapshot segment record (must have `storageVersion == 2L`).
+    * @param groupFieldIdList
+    *   Positional list of groups, each element being the real field IDs carried
+    *   by that group. Obtained from `ParquetFooterReader` by splitting the kv
+    *   string `"100,0,1;101;102"` on `;` and then `,`.
+    */
+  def toSegment(
+      entry: SnapshotSegmentEntry,
+      groupFieldIdList: Seq[Seq[Long]]
+  ): Either[Throwable, Segment] = {
+    if (entry.storageVersion != 2L) {
+      Left(
+        new IllegalArgumentException(
+          s"expected storageVersion=2 (StorageV2), got ${entry.storageVersion} " +
+            s"for segmentId=${entry.segmentId}"
+        )
+      )
+    } else if (entry.binlogFiles.isEmpty) {
+      // Empty segment — no column groups to build; downstream must handle.
+      Right(
+        Segment.v2(
+          id = entry.segmentId,
+          partitionId = entry.partitionId,
+          rows = entry.numOfRows,
+          columnGroups = Seq.empty,
+          deltaLogs = entry.deltaLogFiles
+            .flatMap(_.binlogs)
+            .sortBy(_.logId)
+            .map(log =>
+              DeltaLogFile(
+                logId = log.logId,
+                logPath = log.logPath,
+                entriesNum = log.entriesNum
+              )
+            ),
+          statistics = statistics(entry)
+        )
+      )
+    } else if (entry.binlogFiles.size != groupFieldIdList.size) {
+      Left(
+        new IllegalStateException(
+          s"AVRO/parquet column-group count mismatch for segment " +
+            s"${entry.segmentId}: avro has ${entry.binlogFiles.size} " +
+            s"binlog entries but group_field_id_list has ${groupFieldIdList.size} groups"
+        )
+      )
+    } else {
+      val cgs = entry.binlogFiles
+        .zip(groupFieldIdList)
+        .map { case (afb, realFieldIds) =>
+          // Sort binlogs by logId so reads stream in row order.
+          val sorted = afb.binlogs.sortBy(_.logId)
+          V2ColumnGroup(
+            fieldIds = realFieldIds,
+            filePaths = sorted.map(_.logPath),
+            fileRowCounts = sorted.map(_.entriesNum),
+            // Surface the AVRO slot id so downstream can dedup when the same
+            // fieldID is claimed by multiple groups (e.g. an old multi-field
+            // group at slot < 100 plus a backfill-written single-field group
+            // at slot == fieldID). See Segment.dedupColumnGroupsBySlot.
+            slotFieldId = afb.slotFieldId
+          )
+        }
+      val deltaLogs = entry.deltaLogFiles
+        .flatMap(_.binlogs)
+        .sortBy(_.logId)
+        .map(log =>
+          DeltaLogFile(
+            logId = log.logId,
+            logPath = log.logPath,
+            entriesNum = log.entriesNum
+          )
+        )
+      Right(
+        Segment.v2(
+          id = entry.segmentId,
+          partitionId = entry.partitionId,
+          rows = entry.numOfRows,
+          columnGroups = cgs,
+          deltaLogs = deltaLogs,
+          statistics = statistics(entry)
+        )
+      )
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Private helpers — project GenericRecord -> our case classes.
+  // -------------------------------------------------------------------------
+
+  /** Avro returns strings as `Utf8`, longs as boxed `java.lang.Long`, etc.
+    * These helpers do the narrowing once in one place so the projection code
+    * stays readable.
+    */
+  private def asLong(v: Any): Long = v match {
+    case l: java.lang.Long    => l.longValue()
+    case i: java.lang.Integer => i.longValue()
+    case other =>
+      throw new IllegalStateException(
+        s"expected long, got ${other.getClass.getName}: $other"
+      )
+  }
+
+  private def asString(v: Any): String = v match {
+    case u: Utf8   => u.toString
+    case s: String => s
+    case null      => null
+    case other =>
+      throw new IllegalStateException(
+        s"expected string, got ${other.getClass.getName}: $other"
+      )
+  }
+
+  private def asRecord(v: Any): GenericRecord = v match {
+    case r: GenericRecord => r
+    case other =>
+      throw new IllegalStateException(
+        s"expected GenericRecord, got ${other.getClass.getName}: $other"
+      )
+  }
+
+  private def projectEntry(rec: GenericRecord): SnapshotSegmentEntry = {
+    SnapshotSegmentEntry(
+      segmentId = asLong(rec.get("segment_id")),
+      partitionId = asLong(rec.get("partition_id")),
+      segmentLevel = asLong(rec.get("segment_level")),
+      numOfRows = asLong(rec.get("num_of_rows")),
+      storageVersion = asLong(rec.get("storage_version")),
+      binlogFiles = projectFieldBinlogs(rec.get("binlog_files")),
+      deltaLogFiles = projectFieldBinlogs(rec.get("deltalog_files")),
+      statsLogFiles = projectFieldBinlogs(rec.get("statslog_files")),
+      indexFiles = Some(projectIndexes(rec.get("index_files"))),
+      // Version 5 and later say whether the segment's own manifest registers
+      // the index; an older record leaves it absent, which is not the same as
+      // an explicit false.
+      manifestHasIndex = Option(rec.getSchema.getField("manifest_has_index"))
+        .map(_ => asBoolean(rec.get("manifest_has_index")))
+    )
+  }
+
+  private def asBoolean(value: AnyRef): Boolean = value match {
+    case flag: java.lang.Boolean => flag.booleanValue()
+    case null                    => false
+    case other =>
+      throw new IllegalStateException(
+        s"expected boolean, got ${other.getClass.getName}: $other"
+      )
+  }
+
+  private def statistics(entry: SnapshotSegmentEntry): SegmentStatistics = {
+    val byField = entry.statsLogFiles
+      .groupBy(_.slotFieldId)
+      .map { case (fieldId, groups) =>
+        fieldId -> groups.flatMap(_.binlogs).sortBy(_.logId).map(_.logPath)
+      }
+    SegmentStatistics.Listed(byField)
+  }
+
+  private def projectIndexes(value: Any): Vector[IndexFileEntry] = {
+    value.asInstanceOf[JavaList[GenericRecord]].asScala.toVector.map { rec =>
+      def optionalInt(name: String): Option[Int] =
+        Option(rec.getSchema.getField(name))
+          .map(_ => asLong(rec.get(name)).toInt)
+      val parameters = rec
+        .get("index_params")
+        .asInstanceOf[JavaList[GenericRecord]]
+        .asScala
+        .map { pair =>
+          asString(pair.get("key")) -> asString(pair.get("value"))
+        }
+        .toMap
+      IndexFileEntry(
+        segmentId = asLong(rec.get("segment_id")),
+        fieldId = asLong(rec.get("field_id")),
+        indexId = asLong(rec.get("index_id")),
+        buildId = asLong(rec.get("build_id")),
+        name = asString(rec.get("index_name")),
+        parameters = parameters,
+        filePaths = rec
+          .get("index_file_paths")
+          .asInstanceOf[JavaList[Any]]
+          .asScala
+          .map(asString)
+          .toVector,
+        rowCount = asLong(rec.get("num_rows")),
+        serializedSize = asLong(rec.get("serialized_size")),
+        indexVersion = asLong(rec.get("index_version")),
+        currentIndexVersion = optionalInt("current_index_version"),
+        indexStorePathVersion = optionalInt("index_store_path_version")
+      )
+    }
+  }
+
+  private def projectFieldBinlogs(v: Any): Seq[FieldBinlogEntry] = {
+    // Avro arrays deserialize to java.util.List (actually GenericData.Array).
+    val list = v.asInstanceOf[JavaList[GenericRecord]]
+    list.asScala.toSeq.map { afb =>
+      FieldBinlogEntry(
+        slotFieldId = asLong(afb.get("field_id")),
+        binlogs = afb
+          .get("binlogs")
+          .asInstanceOf[JavaList[GenericRecord]]
+          .asScala
+          .toSeq
+          .map(bl =>
+            BinlogEntry(
+              logId = asLong(bl.get("log_id")),
+              logPath = asString(bl.get("log_path")),
+              entriesNum = asLong(bl.get("entries_num"))
+            )
+          )
+      )
+    }
+  }
+}

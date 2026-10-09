@@ -1,0 +1,61 @@
+[settings]
+os=Macos
+arch=armv8
+compiler=apple-clang
+compiler.version=21
+compiler.libcxx=libc++
+compiler.cppstd=20
+build_type=Release
+
+[conf]
+tools.build:compiler_executables={"c": "clang", "cpp": "clang++"}
+# aws-sdk-cpp's RequestCompression calls zlib but the recipe declares no zlib
+# dependency. ELF resolves the symbols through another shared library on the
+# link line; Mach-O's two-level namespace requires a declared provider, so the
+# system zlib -- which the bundle never carries -- is named here. Remove this
+# when the recipe declares and links zlib itself.
+aws-sdk-cpp/*:tools.build:sharedlinkflags+=["-lz"]
+
+[platform_tool_requires]
+cmake/3.31.10
+
+[options]
+abseil/*:shared=True
+arrow/*:shared=True
+aws-sdk-cpp/*:shared=True
+aws-c-*/*:shared=True
+aws-crt-cpp/*:shared=True
+aws-checksums/*:shared=True
+azure-sdk-for-cpp/*:shared=True
+boost/*:shared=True
+bzip2/*:shared=True
+c-ares/*:shared=True
+crc32c/*:shared=True
+double-conversion/*:shared=True
+fmt/*:shared=True
+fmt/*:header_only=False
+folly/*:shared=True
+gflags/*:shared=True
+glog/*:shared=True
+google-cloud-cpp/*:shared=True
+grpc/*:shared=True
+libavrocpp/*:shared=True
+libcurl/*:shared=True
+libdwarf/*:shared=True
+libevent/*:shared=True
+libiconv/*:shared=True
+libxml2/*:shared=True
+lz4/*:shared=True
+libsodium/*:shared=True
+openssl/*:shared=True
+prometheus-cpp/*:shared=True
+protobuf/*:shared=True
+re2/*:shared=True
+s2n/*:shared=True
+snappy/*:shared=True
+thrift/*:shared=True
+utf8proc/*:shared=True
+xxhash/*:shared=True
+xz_utils/*:shared=True
+zlib/*:shared=True
+zstd/*:shared=True

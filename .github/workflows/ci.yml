@@ -1,28 +1,84 @@
 name: CI
 
-# Builds the connector and runs the unit tests on every PR. The native
-# milvus-storage libraries are not built here (that needs Conan 2 + Rust and
-# takes a long time, see Dockerfile); the JNI Scala wrapper compiles fine
-# without them, so only the two suites that load the .so are excluded.
+# Builds every module, runs the unit tests and tests the native build's driver.
+# The native libraries themselves are not built here: that needs Conan 2 and
+# Rust and takes far longer than this job should (see the Dockerfile). Suites
+# that load them cancel themselves when they are absent.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, refactor/v2]
   push:
-    branches: [main]
+    branches: [main, refactor/v2]
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
+  integration-helm:
+    name: Integration Helm tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.1.1
+
+      - name: Install template test dependency
+        run: python3 -m pip install PyYAML==6.0.3
+
+      - name: Lint both deployment modes
+        run: |
+          helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.example.yaml
+          helm lint --strict deploy/helm/spark-milvus-integration -f deploy/helm/spark-milvus-integration/ci-values.managed.example.yaml
+
+      - name: Test templates and release lifecycle
+        run: |
+          python3 -m unittest discover -s deploy/helm/spark-milvus-integration/tests -p 'test_*.py'
+          bash -n deploy/helm/spark-milvus-integration/run.sh
+          deploy/helm/spark-milvus-integration/tests/run-test.sh
+
+  # Match the image's Ubuntu Git package: newer upload-pack versions no longer
+  # perform the ownership check that can reject local submodule fetches.
+  docker-git-ownership:
+    name: Docker Git ownership regression
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    timeout-minutes: 10
+    steps:
+      - name: Install the image's Git version and Python
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git python3
+          dpkg-query -W git
+
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Test local submodule fetch ownership
+        run: python3 -m unittest discover -s native-build -p 'test_git_safe_directory.py' -v
+
   build-and-test:
     name: Build & unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      # docs/design is a private submodule the build does not need and the
+      # default token cannot read, so the native source submodules are
+      # initialized by name instead of recursively.
       - uses: actions/checkout@v5
         with:
-          submodules: recursive
+          submodules: false
+
+      - name: Initialize the native source submodules
+        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
 
       - uses: actions/setup-java@v5
         with:
@@ -32,15 +88,60 @@ jobs:
 
       - uses: sbt/setup-sbt@v1
 
-      - name: Build milvus-storage JNI wrapper (Scala only, no native libs)
-        working-directory: milvus-storage/java
-        run: sbt package
+      - name: Check formatting
+        run: sbt scalafmtCheckAll
 
-      - name: Compile main, test and integration-test sources
-        run: sbt 'compile; Test/compile; IntegrationTest/compile'
+      # `sbt checkCapabilityIndex` is not run here: it reads
+      # docs/design/capabilities.md from the private design submodule. It runs
+      # before every commit instead (docs/contributing.md, Unit tests).
 
-      - name: Unit tests (suites that need the native .so are excluded)
-        run: >-
-          sbt
-          'set Test / testOptions += Tests.Filter(n => !Set("com.zilliz.spark.connector.loon.MilvusStorageFFITest", "com.zilliz.spark.connector.loon.MilvusStorageMultiFileGroupTest").contains(n))'
-          test
+      # `compile` aggregates over the eleven unit-tested modules, which covers all
+      # four Spark lines against the shared spark-base sources. integration-4.0
+      # is outside the aggregate because its suites need a live Milvus, so it is
+      # compiled explicitly here and never run.
+      - name: Compile every module
+        run: sbt 'compile; Test/compile; integration40/Test/compile'
+
+      # core, compat and client publish for both Scala versions.
+      - name: Cross-compile the shared modules for Scala 2.12
+        run: sbt '++2.12.20 core/compile; ++2.12.20 compat/compile; ++2.12.20 client/compile'
+
+      # Suites that need the native library skip themselves, so no filter is
+      # needed any more: they call it once and cancel when it is absent.
+      - name: Unit tests
+        run: sbt test
+
+  # build.py, platforms.py, stage.py, the packaging script and the Makefile are
+  # tested without building anything native, in seconds. A job of its own, so a
+  # failure here does not skip the sbt checks. patchelf lets the ELF staging
+  # tests run instead of skipping; java serves the JVM load checker's tests.
+  native-build-driver:
+    name: Native build driver tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # docs/design is a private submodule the build does not need and the
+      # default token cannot read, so the native source submodules are
+      # initialized by name instead of recursively.
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - name: Initialize the native source submodules
+        run: git submodule update --init --recursive milvus-proto milvus-storage knowhere
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install patchelf
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq patchelf
+
+      - name: native-build tests
+        run: python3 -m unittest discover -s native-build -p 'test_*.py'
+
+      - name: Packaging and Makefile tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'

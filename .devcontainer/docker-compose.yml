@@ -1,0 +1,90 @@
+# The development container and its optional local services.
+# Design: docs/design/engineering/devcontainer.html. Driven by
+# scripts/devcontainer.sh on the command line or by devcontainer.json in an IDE.
+name: spark-milvus-dev
+
+services:
+  # The toolchain of the root Dockerfile plus a user mapped to the host user.
+  # Built locally from the `dev` stage; never published.
+  dev:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: dev
+      args:
+        DEV_UID: ${DEV_UID:-1000}
+        DEV_GID: ${DEV_GID:-1000}
+    user: "${DEV_UID:-1000}:${DEV_GID:-1000}"
+    init: true
+    entrypoint: ["/workspace/.devcontainer/entrypoint.sh"]
+    command: ["sleep", "infinity"]
+    working_dir: /workspace
+    volumes:
+      # The source tree, target/ included: build outputs stay in the checkout.
+      - ..:/workspace
+      # Dependency caches, one named volume each, matching the Jenkins cache
+      # directories in vdc-jenkins/spark-milvus/build-image.groovy.
+      - conan2:/home/dev/.conan2
+      - ccache:/home/dev/.ccache
+      - cargo-registry:/home/dev/.cargo/registry
+      - cargo-git:/home/dev/.cargo/git
+      - coursier:/home/dev/.cache/coursier
+      - ivy2:/home/dev/.ivy2
+      - sbt:/home/dev/.sbt
+
+  # Local Milvus for integration-4.0, which addresses localhost:19530 and
+  # localhost:9000. The three services join the dev container's network
+  # namespace, so those addresses resolve without any test change.
+  # Start them with `scripts/devcontainer.sh up --services`.
+  etcd:
+    image: ${ETCD_IMAGE}
+    profiles: [services]
+    network_mode: "service:dev"
+    depends_on: [dev]
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    command: etcd -advertise-client-urls=http://localhost:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - etcd:/etcd
+
+  minio:
+    image: ${MINIO_IMAGE}
+    profiles: [services]
+    network_mode: "service:dev"
+    depends_on: [dev]
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - minio:/minio_data
+
+  milvus:
+    image: ${MILVUS_IMAGE}
+    profiles: [services]
+    network_mode: "service:dev"
+    depends_on: [dev, etcd, minio]
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      MINIO_REGION: us-east-1
+      ETCD_ENDPOINTS: localhost:2379
+      MINIO_ADDRESS: localhost:9000
+    volumes:
+      - milvus:/var/lib/milvus
+
+volumes:
+  conan2:
+  ccache:
+  cargo-registry:
+  cargo-git:
+  coursier:
+  ivy2:
+  sbt:
+  etcd:
+  minio:
+  milvus:

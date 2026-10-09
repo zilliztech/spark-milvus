@@ -1,0 +1,4 @@
+# Build outputs never belong in the image context. Jenkins builds from a fresh
+# checkout; a local `docker build` would otherwise send gigabytes of target/.
+**/target
+.docker

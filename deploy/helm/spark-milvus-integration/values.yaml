@@ -1,0 +1,119 @@
+nameOverride: ""
+fullnameOverride: ""
+
+# Defaults to the Helm release name. CI may set a separate stable identifier.
+runId: ""
+
+# Internal marker set by run.sh so it only cleans up releases it created.
+ownershipToken: ""
+
+image:
+  # Both values are required. The digest makes the executed image immutable.
+  repository: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+runner:
+  # The integration-test image owns this executable. The release image does not.
+  command:
+    - /opt/spark-milvus/bin/run-integration-tests
+  args: []
+  # Optional command supplied by the private test image. Runs after Milvus is
+  # ready and before the test; use it to create collections/data/snapshots.
+  setup:
+    command: []
+    args: []
+
+milvus:
+  # Required for an existing instance; leave empty when deployment.enabled=true.
+  uri: ""
+  database: default
+  credentials:
+    existingSecret: ""
+    tokenKey: milvus-token
+    # Deployment mode requires this extra key in the same Secret. tokenKey must
+    # contain root:<this-password>. Neither value belongs in Helm values.
+    rootPasswordKey: root-password
+  deployment:
+    enabled: false
+    image: milvusdb/milvus:v3.0.1@sha256:2b2fc2cf499ad897c93d4b90ee251646f718522845261a342d74d7c0c66bb274
+    # Numeric identity of milvus in the pinned image; adjust for image overrides.
+    runAsUser: 999
+    runAsGroup: 999
+    etcdImage: quay.io/coreos/etcd:v3.5.25
+    imagePullPolicy: IfNotPresent
+    readinessTimeoutSeconds: 600
+    dataSizeLimit: 20Gi
+    etcdSizeLimit: 2Gi
+    resources:
+      requests:
+        cpu: "2"
+        memory: 4Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+    etcdResources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+objectStorage:
+  # Existing mode: the exact storage root of the target Milvus.
+  # Deployment mode: rootPath is a base; the chart appends
+  # ci/<namespace>/<release>/<runId> for both Milvus and the runner.
+  # endpoint is a hostname with optional port, without a URL scheme or path.
+  endpoint: ""
+  bucket: ""
+  rootPath: files
+  region: us-west-2
+  useSSL: true
+  useVirtualHost: true
+
+  # Test-owned writes use <writePrefix>/<runId>. rootPath stays the Milvus root.
+  writePrefix: spark-milvus-ci
+  credentials:
+    existingSecret: ""
+    accessKeyIdKey: access-key-id
+    secretAccessKeyKey: secret-access-key
+
+job:
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 3600
+  annotations: {}
+
+pod:
+  annotations: {}
+  serviceAccountName: ""
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 30
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 4Gi
+  limits:
+    cpu: "4"
+    memory: 8Gi
+
+# The unified storage and Knowhere native bundle is validated on amd64 and
+# arm64; the selector follows the image you built.
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+tolerations: []
+affinity: {}
