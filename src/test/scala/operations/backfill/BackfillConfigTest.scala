@@ -4,6 +4,8 @@ import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.spark.connector.TencentStorageAuth
+
 /** Unit tests for BackfillConfig validation and options generation
   */
 class BackfillConfigTest extends AnyFunSuite with Matchers {
@@ -75,7 +77,9 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       )
       config.validate() match {
         case Right(_) =>
-          fail(s"expected validation error for unimplemented inputFormat '$format'")
+          fail(
+            s"expected validation error for unimplemented inputFormat '$format'"
+          )
         case Left(message) =>
           message should include("recognized but not yet implemented")
       }
@@ -138,7 +142,9 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       case Right(_) =>
         fail("expected validation error for non-integer icebergSnapshotId")
       case Left(message) =>
-        message should include("icebergSnapshotId must be an integer snapshot id")
+        message should include(
+          "icebergSnapshotId must be an integer snapshot id"
+        )
     }
   }
 
@@ -155,7 +161,9 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       case Right(_) =>
         fail("expected validation error for icebergSnapshotId without iceberg")
       case Left(message) =>
-        message should include("icebergSnapshotId requires inputFormat='iceberg'")
+        message should include(
+          "icebergSnapshotId requires inputFormat='iceberg'"
+        )
     }
   }
 
@@ -344,9 +352,9 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "AssumeRole settings are accepted only for native AWS and Alibaba storage"
+    "AssumeRole settings are accepted for native AWS, Alibaba and Tencent storage"
   ) {
-    Seq("aws", "aliyun").foreach { provider =>
+    Seq("aws", "aliyun", "tencent").foreach { provider =>
       BackfillConfig(
         s3Endpoint = "storage.example.com",
         s3BucketName = "bucket",
@@ -358,7 +366,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       ).validate() shouldBe Right(())
     }
 
-    Seq("gcp", "azure", "tencent", "huawei").foreach { provider =>
+    Seq("gcp", "azure", "huawei").foreach { provider =>
       val error = BackfillConfig(
         s3Endpoint = "storage.example.com",
         s3BucketName = "bucket",
@@ -628,7 +636,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "withHadoopStorageAssumeRole does not apply AWS S3A roles to other providers"
+    "withHadoopStorageAssumeRole rejects an AWS identity for Tencent storage"
   ) {
     val hadoopConf = new Configuration(false)
     hadoopConf.set(
@@ -648,7 +656,45 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3UseIam = true
     )
 
-    config.withHadoopStorageAssumeRole(hadoopConf, "spark-job") shouldBe config
+    intercept[IllegalArgumentException] {
+      config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
+    }.getMessage should include("Tencent IAM mode requires")
+  }
+
+  test(
+    "Tencent backfill forwards the selected bucket role to native readers and writers"
+  ) {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      TencentStorageAuth.CredentialsProvider
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123:roleName/global")
+    conf.set(
+      "fs.s3a.bucket.bucket.assumed.role.arn",
+      "qcs::cam::uin/456:roleName/customer"
+    )
+    conf.set("fs.s3a.bucket.bucket.assumed.role.external.id", "external-id")
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+      .withHadoopStorageAssumeRole(conf, "spark-job")
+    config.validate() shouldBe Right(())
+    config.s3RoleArn shouldBe Some("qcs::cam::uin/456:roleName/customer")
+    config.s3RoleSessionName shouldBe Some("spark-job")
+    config.s3ExternalId shouldBe Some("external-id")
+    val reader = config.getMilvusReadOptions
+    reader("fs.role_arn") shouldBe "qcs::cam::uin/456:roleName/customer"
+    reader("fs.external_id") shouldBe "external-id"
+    reader.contains("fs.access_key_id") shouldBe false
+    val writer = config.getS3WriteOptionsForBasePath("files/backfill", 1L)
+    writer("fs.role_arn") shouldBe reader("fs.role_arn")
+    writer("fs.external_id") shouldBe reader("fs.external_id")
   }
 
   test("Zero batchSize fails validation") {
