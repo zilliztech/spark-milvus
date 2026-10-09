@@ -235,6 +235,13 @@ class NativeBuildSourceTest(unittest.TestCase):
         with self.assertRaises(SnapshotComplete):
             self.invoke_snapshot()
 
+    def recorded_knowhere_revision(self):
+        # The Knowhere snapshot is a `git archive` export of the pinned commit,
+        # not a checkout: it carries no .git directory, so the revision it was
+        # taken from is read back from the provenance record.
+        identity = json.loads((self.work / "provenance" / "knowhere-source-identity.json").read_text())
+        return identity["revision"]
+
     def test_manifest_includes_sources_beneath_work_directory_named_build(self):
         self.initial_snapshot()
 
@@ -258,7 +265,10 @@ class NativeBuildSourceTest(unittest.TestCase):
         with self.assertRaises(SnapshotComplete):
             self.invoke_snapshot(alternate)
 
-        self.assertEqual(self.knowhere_revision, self.git(self.work / "sources" / "knowhere", "rev-parse", "HEAD"))
+        snapshot = self.work / "sources" / "knowhere"
+        self.assertEqual(self.knowhere_revision, self.recorded_knowhere_revision())
+        self.assertFalse((snapshot / ".git").exists())
+        self.assertEqual("int knowhere = 2;\n", (snapshot / "source.cc").read_text())
 
     def test_alternate_knowhere_object_source_must_match_recorded_gitlink(self):
         alternate = self.root / "wrong-knowhere"
@@ -346,7 +356,7 @@ class NativeBuildSourceTest(unittest.TestCase):
         snapshot = self.work / "sources" / "knowhere"
         (snapshot / "source.cc").write_text("int modified_knowhere = 6;\n", encoding="ascii")
 
-        with self.assertRaisesRegex(RuntimeError, "Recorded source checkout was modified"):
+        with self.assertRaisesRegex(RuntimeError, "Recorded source snapshot was modified"):
             self.invoke_snapshot()
 
     def test_untracked_knowhere_modification_is_rejected_on_resume(self):
@@ -354,7 +364,7 @@ class NativeBuildSourceTest(unittest.TestCase):
         snapshot = self.work / "sources" / "knowhere"
         (snapshot / "injected.cc").write_text("int added_knowhere = 7;\n", encoding="ascii")
 
-        with self.assertRaisesRegex(RuntimeError, "Recorded source checkout was modified"):
+        with self.assertRaisesRegex(RuntimeError, "Recorded source snapshot was modified"):
             self.invoke_snapshot()
 
     def test_knowhere_snapshot_remains_pristine_across_resume(self):
@@ -364,8 +374,11 @@ class NativeBuildSourceTest(unittest.TestCase):
         manifest = self.work / "provenance" / "knowhere-source-files.json"
         recorded = manifest.read_bytes()
         self.assertEqual("int knowhere = 2;\n", source.read_text())
-        self.assertEqual(self.knowhere_revision, self.git(snapshot, "rev-parse", "HEAD"))
-        self.assertEqual("", self.git(snapshot, "status", "--porcelain"))
+        self.assertEqual(self.knowhere_revision, self.recorded_knowhere_revision())
+        self.assertFalse((snapshot / ".git").exists())
+        self.assertEqual(
+            ["source.cc"], sorted(str(path.relative_to(snapshot)) for path in snapshot.rglob("*") if path.is_file()),
+        )
         self.assertFalse((self.work / "provenance" / "knowhere-working-tree.patch").exists())
 
         self.initial_snapshot()
@@ -373,7 +386,7 @@ class NativeBuildSourceTest(unittest.TestCase):
         self.assertEqual(recorded, manifest.read_bytes())
         self.assertEqual("int knowhere = 2;\n", source.read_text())
         source.write_text("int unreviewed_knowhere = 10;\n", encoding="ascii")
-        with self.assertRaisesRegex(RuntimeError, "Recorded source checkout was modified"):
+        with self.assertRaisesRegex(RuntimeError, "Recorded source snapshot was modified"):
             self.invoke_snapshot()
 
     def test_hashes_ignore_only_relative_build_artifacts(self):
