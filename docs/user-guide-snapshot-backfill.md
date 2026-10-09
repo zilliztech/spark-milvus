@@ -6,7 +6,7 @@ row**, entirely offline against object storage. Online reads and writes are
 not interrupted.
 
 For implementation details and accepted vector encodings, see the
-[backfill README](../src/main/scala/operations/backfill/README.md).
+[backfill README](../apps-4.0/src/main/scala/com/zilliz/spark/connector/apps/backfill/README.md).
 
 ## 1. When to use it
 
@@ -36,7 +36,7 @@ Use snapshot backfill when you need to:
 | Milvus server              | Milvus 3.0.0+ with snapshot support and the backfill commit management endpoint.                |
 | Object storage             | S3 / MinIO / GCS with S3-compatible endpoint. Must be accessible from both Milvus and Spark.    |
 | Spark / Java               | Spark 4.0.x built for Scala 2.13, with Java 21. Cluster mode on YARN, Kubernetes, or standalone. |
-| Connector JARs             | `spark-connector-assembly-*.jar`. It bundles the native `milvus-storage` resources copied into `src/main/resources/native/`. |
+| Connector JARs             | `spark-connector-assembly-*.jar`. It carries the unified native bundle (milvus-storage and Knowhere libraries) selected at build time; see `native-build/README.md`. |
 | Parquet of new-field data  | Must contain the resolved join-key column, plus one column per new field.                      |
 | Network                    | Spark executors must reach the object store. Schema setup and snapshot creation use the Milvus SDK; result commit must reach the Proxy management HTTP endpoint. |
 
@@ -103,9 +103,10 @@ backfill it in the same operation. Supported physical-key Milvus types are
 Int8/16/32/64, String, and VarChar.
 Floating-point, JSON, Geometry, Text, Timestamptz, unknown, vector, array, map,
 and struct keys are rejected. Logical file/row keys are not supported.
-The names `segment_id`, `row_offset`, `$segment_id`, and `$row_offset` are
-reserved for backfill metadata and cannot be used as join keys.
-`$row_offset` only restores segment write order and is not a stable row identity.
+The canonical names `_segment_id` and `_row_offset`, together with the legacy
+aliases `segment_id`, `row_offset`, `$segment_id`, and `$row_offset`, are
+reserved for backfill metadata and cannot be used as join keys. `_row_offset`
+only restores segment write order and is not a stable row identity.
 
 **Type rules:**
 
@@ -183,10 +184,10 @@ Minimal `spark-submit` example (standalone / YARN):
 spark-submit \
   --master yarn \
   --deploy-mode cluster \
-  --class com.zilliz.spark.connector.operations.backfill.BackfillApp \
+  --class com.zilliz.spark.connector.apps.backfill.BackfillApp \
   --conf spark.executor.memory=8g \
   --conf spark.executor.memoryOverhead=8g \
-  spark-connector-assembly-<branch>-amd64-SNAPSHOT.jar \
+  spark-connector-assembly-2.0.0-<branch>-<arch>-SNAPSHOT.jar \
   --snapshot   s3a://bucket/snapshots/123/metadata/456.json \
   --parquet    s3a://bucket/input/new_fields.parquet \
   --s3-endpoint s3.us-west-2.amazonaws.com \
@@ -205,7 +206,7 @@ column-mapping target `external_row_id`.
 
 On Kubernetes with Spark Operator, use the same application arguments and set
 `mainClass` to
-`com.zilliz.spark.connector.operations.backfill.BackfillApp`.
+`com.zilliz.spark.connector.apps.backfill.BackfillApp`.
 
 ### 5.4 Read the result
 
@@ -400,7 +401,6 @@ primary S3 config is reused for the input read.
 | `--mode=... requires backfill parquet target-column types to match snapshot field types exactly` | Your Parquet column is e.g. `Int32` but the field is `Int64`. Cast it explicitly in your ETL before retrying. |
 | `OutOfMemoryError: Direct buffer memory`            | Increase `spark.executor.memoryOverhead` (start at 8g) and lower `--batch-size`.                              |
 | `NotSerializableException: java.util.Optional`      | You're on an old connector build — an Arrow exception is being masked. Update to a build that unwraps it.       |
-| All backfilled rows have the same value             | Missing `.copy()` after a shuffle in a custom fork. The mainline connector handles this; upstream fix only.    |
 | Commit endpoint returns HTTP 404                   | The server is older than Milvus 3.0.0, or the request was sent to the wrong Proxy management address.          |
 | Job succeeds, queries still show NULL for new field | The result JSON was not committed through step 5.5, `failed_segments` was non-zero, or QueryNode has not reopened yet. Check the commit response and `DataVersion`. |
 | `s3:// not registered`                              | Hadoop doesn't auto-register the `s3` scheme. Use `s3a://` throughout (the connector normalizes automatically, but some pre-flight tools do not).|
@@ -410,17 +410,18 @@ primary S3 config is reused for the input read.
 
 Common Spark Operator gotchas:
 
-- **Native libraries.** The connector's assembly JAR bundles native `.so`s,
-  but Spark Operator templates may strip `LD_LIBRARY_PATH`. Make sure it
-  includes `src/main/resources/native/linux-x86_64` (or the extracted
-  location inside the container).
+- **Native libraries.** The connector's assembly JAR carries the unified
+  native bundle, which `native-runtime` verifies and extracts once per JVM;
+  no `LD_LIBRARY_PATH` entry is needed for it. Set
+  `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin` so
+  every executor extracts it at start (see `docs/reference-en.md`).
 - **IRSA.** Pass `--use-iam` and drop `--s3-access-key` / `--s3-secret-key`
   to use the service-account role.
 - **`mainClass`.** Always
-  `com.zilliz.spark.connector.operations.backfill.BackfillApp`.
+  `com.zilliz.spark.connector.apps.backfill.BackfillApp`.
 
 ## 11. Implementation reference
 
 See the
-[backfill README](../src/main/scala/operations/backfill/README.md) for merge
+[backfill README](../apps-4.0/src/main/scala/com/zilliz/spark/connector/apps/backfill/README.md) for merge
 internals, vector encodings, validation rules, and result metrics.

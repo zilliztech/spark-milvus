@@ -86,8 +86,8 @@ echo "PYTHONPATH configured for Scala 2.13"
 echo ""
 
 # Native library paths - DO NOT set LD_PRELOAD in shell env, only pass to Spark
-NATIVE_LIB="$PROJECT_DIR/src/main/resources/native/libmilvus-storage.so"
-NATIVE_LIB_DIR="$PROJECT_DIR/src/main/resources/native"
+NATIVE_LIB="$PROJECT_DIR/native-storage/src/main/resources/native/libmilvus-storage.so"
+NATIVE_LIB_DIR="$PROJECT_DIR/native-storage/src/main/resources/native"
 
 # Set LD_LIBRARY_PATH for the driver (but NOT LD_PRELOAD which causes StackOverflow)
 export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:$NATIVE_LIB_DIR:$LD_LIBRARY_PATH"

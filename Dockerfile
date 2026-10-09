@@ -1,31 +1,35 @@
 # syntax=docker/dockerfile:1.4
-# Build spark-milvus connector with milvus-storage native libraries
+# Build spark-milvus with the native resources selected for the worker platform
 
 # Build arguments
 ARG GIT_BRANCH=unknown
 ARG TARGETARCH
 ARG MAVEN_SNAPSHOT_REPOSITORY_URL=https://central.sonatype.com/repository/maven-snapshots/
-ARG MAVEN_CREDENTIALS_FILE=/root/.sbt/sonatype_central_credentials
+ARG MAVEN_CREDENTIALS_FILE=/run/secrets/maven_credentials
+ARG NATIVE_JOBS=50
+ARG NATIVE_BUILD_OPTIONS
+# Optional prebuilt JAR and .properties sidecar inside the build context.
+ARG NATIVE_BUNDLE
 
-# Stage 1: Build milvus-storage native libraries and Java binding
-FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS builder
+# Stage 1: the toolchain. Everything the native and JVM builds need, and no
+# sources. The builder stage and the development container (.devcontainer/)
+# both start from here, so the toolchain has one definition.
+FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS toolchain
 
-ARG GIT_BRANCH
 ARG TARGETARCH
-ARG MAVEN_SNAPSHOT_REPOSITORY_URL
-ARG MAVEN_CREDENTIALS_FILE
 
 USER root
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# Install dependencies for building and packaging milvus-storage
+# The unified native source profile pins GCC 12, including OpenBLAS's Fortran compiler.
+# Rust bindgen also loads libclang to generate the storage bridge's C bindings.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates wget curl git g++ gcc make ccache gdb \
+    ca-certificates wget curl git g++ gcc gcc-12 g++-12 gfortran-12 make ccache gdb \
     python3 python3-pip \
-    zip unzip \
-    automake autoconf libtool patchelf libaio-dev \
+    zip unzip pkg-config ninja-build \
+    automake autoconf libtool patchelf libaio-dev libclang-dev \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/aclocal-1.16 /usr/bin/aclocal-1.15 \
     && ln -sf /usr/bin/automake-1.16 /usr/bin/automake-1.15
@@ -52,11 +56,6 @@ RUN wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-$(uname -m).tar.
 ENV CONAN_HOME=/root/.conan2
 RUN pip3 install --no-cache-dir conan==2.25.1
 
-# Setup the Conan 2 profile and artifact remote used by milvus-storage.
-RUN conan profile detect --force \
-    && conan remote add --force default-conan-local2 \
-        https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2
-
 # The current milvus-storage format bridge is built from Rust sources.
 ENV RUSTUP_HOME=/root/.rustup
 ENV CARGO_HOME=/root/.cargo
@@ -68,69 +67,101 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 ENV CCACHE_DIR=/root/.ccache
 ENV PATH=/usr/lib/ccache:$PATH
 
-# Use Java 21 from base image, install Scala/sbt via SDKMAN
+# Use Java 21 from the base image and SDKMAN for sbt.
 ENV SDKMAN_DIR=/root/.sdkman
 RUN curl -s "https://get.sdkman.io" | bash
-RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && \
-    sdk install scala 2.13.16 && \
-    sdk install sbt 1.11.1"
+# SDKMAN's Scala 2.13.16 URL points to a retired Lightbend download.
+# Keep the same installation layout, using the official GitHub release ZIP.
+RUN set -eu; \
+    curl -fL --retry 3 --connect-timeout 15 --max-time 300 \
+        -o /tmp/scala-2.13.16.zip \
+        https://github.com/scala/scala/releases/download/v2.13.16/scala-2.13.16.zip; \
+    printf '%s  %s\n' \
+        '638b1c747c6933bf3e632c8677904eb84ff07c8cebec41b70d092d3f6d7fe67f' \
+        /tmp/scala-2.13.16.zip | sha256sum -c -; \
+    mkdir -p "${SDKMAN_DIR}/candidates/scala"; \
+    unzip -q /tmp/scala-2.13.16.zip -d "${SDKMAN_DIR}/candidates/scala"; \
+    mv "${SDKMAN_DIR}/candidates/scala/scala-2.13.16" "${SDKMAN_DIR}/candidates/scala/2.13.16"; \
+    ln -s 2.13.16 "${SDKMAN_DIR}/candidates/scala/current"; \
+    rm /tmp/scala-2.13.16.zip
+RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sdk install sbt 1.11.1"
 
 # JAVA_HOME is already set in base image (java21)
 ENV SCALA_HOME=/root/.sdkman/candidates/scala/current
 ENV SBT_HOME=/root/.sdkman/candidates/sbt/current
 ENV PATH=$SCALA_HOME/bin:$SBT_HOME/bin:$PATH
 
+# Stage 2: the development container. Same toolchain, plus a user whose uid
+# and gid the compose file maps to the host user, HOME-relative cache
+# directories that compose mounts as named volumes, and NATIVE_JOBS defaulting
+# to the CPUs the container can see. Not used by the release build.
+FROM toolchain AS dev
+
+ARG DEV_UID=1000
+ARG DEV_GID=1000
+ENV HOME=/home/dev
+ENV CONAN_HOME=/home/dev/.conan2
+ENV CCACHE_DIR=/home/dev/.ccache
+ENV CARGO_HOME=/home/dev/.cargo
+ENV SBT_OPTS="-Xmx4g -Xms2g"
+# Docker copies the ownership of a mount point from the image into a fresh
+# named volume, so the cache directories must exist here and belong to dev.
+# Java reads user.home from /etc/passwd, not from HOME, so when the host user
+# is root the root entry itself must point at /home/dev for sbt, Coursier and
+# Ivy to use the mounted caches.
+# The Rust and SDKMAN installations stay under /root and become readable;
+# rustup proxies read RUSTUP_HOME and never write it during a build.
+RUN groupadd --non-unique --gid "${DEV_GID}" dev \
+    && useradd --non-unique --uid "${DEV_UID}" --gid "${DEV_GID}" --create-home --shell /bin/bash dev \
+    && mkdir -p /home/dev/.conan2 /home/dev/.ccache /home/dev/.cargo/registry /home/dev/.cargo/git \
+        /home/dev/.cache/coursier /home/dev/.ivy2 /home/dev/.sbt \
+    && chown -R dev:dev /home/dev && chmod -R a+rwX /home/dev \
+    && chmod 755 /root && chmod -R a+rX /root/.rustup /root/.cargo /root/.sdkman \
+    && chmod 666 /etc/passwd /etc/group \
+    && if [ "${DEV_UID}" = 0 ]; then sed -i 's#^root:x:0:0:root:/root:#root:x:0:0:root:/home/dev:#' /etc/passwd; fi \
+    && printf '%s\n' 'if [ -z "${NATIVE_JOBS:-}" ]; then NATIVE_JOBS="$(nproc)"; [ "${NATIVE_JOBS}" -gt 50 ] && NATIVE_JOBS=50; export NATIVE_JOBS; fi' > /etc/profile.d/spark-milvus-dev.sh \
+    && printf '%s\n' '. /etc/profile.d/spark-milvus-dev.sh' >> /etc/bash.bashrc
+WORKDIR /workspace
+
+# Stage 3: build the unified native bundle and the connector.
+FROM toolchain AS builder
+
+ARG GIT_BRANCH
+ARG TARGETARCH
+ARG MAVEN_SNAPSHOT_REPOSITORY_URL
+ARG MAVEN_CREDENTIALS_FILE
+ARG NATIVE_JOBS
+ARG NATIVE_BUILD_OPTIONS
+ARG NATIVE_BUNDLE
+
 WORKDIR /workspace
 
 COPY . .
 
-# Initialize git submodules
+# Initialize missing submodules without resetting source revisions copied from the build context.
+# Local fetches from Knowhere also check ownership of its separate Git directory.
+# Ubuntu 22.04's Git compares safe.directory against the .git file path.
 RUN git config --global --add safe.directory /workspace && \
     git config --global --add safe.directory /workspace/milvus-proto && \
     git config --global --add safe.directory /workspace/milvus-storage && \
-    git submodule update --init --recursive
+    git config --global --add safe.directory /workspace/knowhere && \
+    git config --global --add safe.directory /workspace/knowhere/.git && \
+    git config --global --add safe.directory /workspace/.git/modules/knowhere && \
+    make init-missing-submodules
 
-# Apache removes superseded releases from dlcdn; keep the pinned recipe and
-# checksum, but use the durable archive endpoint for its Avro source.
-RUN set -eux; \
-    avro_ref='libavrocpp/1.12.1.1@milvus/dev#cde7bb587a29f6f233bae7e18b71815d'; \
-    conan download "${avro_ref}" -r default-conan-local2 --only-recipe; \
-    avro_recipe="$(conan cache path "${avro_ref}")"; \
-    sed -i 's#https://dlcdn.apache.org/avro/#https://archive.apache.org/dist/avro/#' \
-        "${avro_recipe}/conandata.yml"; \
-    grep -Fq 'https://archive.apache.org/dist/avro/' "${avro_recipe}/conandata.yml"
-
-# Build milvus-storage native libraries using its Conan 2 Makefile.
-RUN cd milvus-storage/cpp && make java-lib
-
-# Package the JNI libraries and every transitive shared library under the
-# platform path expected by NativeLibraryLoader.
-RUN set -eux; \
-    case "$(uname -m)" in \
-        x86_64|amd64) native_platform=linux-x86_64 ;; \
-        aarch64|arm64) native_platform=linux-aarch64 ;; \
-        *) echo "Unsupported build architecture: $(uname -m)" >&2; exit 1 ;; \
-    esac; \
-    native_dir="src/main/resources/native/${native_platform}"; \
-    libs_dir="milvus-storage/cpp/build/Release/libs"; \
-    mkdir -p "${native_dir}"; \
-    cp milvus-storage/cpp/build/Release/libmilvus-storage.so "${native_dir}/"; \
-    cp milvus-storage/cpp/build/Release/libmilvus-storage-jni.so "${native_dir}/"; \
-    if [ -d "${libs_dir}" ]; then \
-        find -L "${libs_dir}" -maxdepth 1 -type f \
-            \( -name '*.so' -o -name '*.so.*' \) \
-            -exec cp -L {} "${native_dir}/" \;; \
-        for subdir in ossl-modules engines-3; do \
-            if [ -d "${libs_dir}/${subdir}" ]; then \
-                mkdir -p "${native_dir}/${subdir}"; \
-                cp -rL "${libs_dir}/${subdir}/." "${native_dir}/${subdir}/"; \
-            fi; \
-        done; \
-    fi; \
-    milvus-storage/java/patch_native_runpath.sh "${native_dir}"
-
-# Build the milvus-storage Java binding consumed as an unmanaged JAR below.
-RUN cd milvus-storage/java && bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt package"
+# Both Linux architectures build the unified bundle, or take a matching
+# prebuilt one through NATIVE_BUNDLE.
+# Cache dependencies across failed build steps. Initialize Conan after mounting
+# its cache so an empty cache has the required profile and artifact remote.
+RUN --mount=type=cache,id=spark-milvus-conan-2-${TARGETARCH},target=/root/.conan2,sharing=locked \
+    --mount=type=cache,id=spark-milvus-cargo-registry,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=spark-milvus-cargo-git,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,id=spark-milvus-ccache,target=/root/.ccache,sharing=locked \
+    conan profile detect --force \
+    && conan remote add --force default-conan-local2 \
+        https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 \
+    && make native-resources "NATIVE_JOBS=${NATIVE_JOBS}" \
+    "NATIVE_BUILD_OPTIONS=${NATIVE_BUILD_OPTIONS}" "NATIVE_BUNDLE=${NATIVE_BUNDLE}"
 
 # Build and optionally publish the runnable assembly as the primary Maven JAR.
 ENV GIT_BRANCH=${GIT_BRANCH}
@@ -140,27 +171,52 @@ ENV SBT_OPTS="-Xmx4g -Xms2g"
 # PUBLISH_TO_CENTRAL is retained while Jenkins migrates to the repository-neutral flag.
 ARG PUBLISH_MAVEN
 ARG PUBLISH_TO_CENTRAL=true
-RUN set -eux; \
+RUN --mount=type=cache,id=spark-milvus-coursier,target=/root/.cache/coursier,sharing=locked \
+    --mount=type=cache,id=spark-milvus-ivy2,target=/root/.ivy2/cache,sharing=locked \
+    --mount=type=cache,id=spark-milvus-sbt,target=/root/.sbt,sharing=locked \
+    --mount=type=secret,id=maven_credentials,target=/run/secrets/maven_credentials,required=false \
+    set -eux; \
     case "$(uname -m)" in \
         x86_64|amd64) native_platform=linux-x86_64 ;; \
         aarch64|arm64) native_platform=linux-aarch64 ;; \
         *) echo "Unsupported build architecture: $(uname -m)" >&2; exit 1 ;; \
     esac; \
-    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt 'compile; Test/compile; IntegrationTest/compile; assembly'"; \
+    native_bundle="${NATIVE_BUNDLE:-/workspace/target/native-build/${native_platform}/milvus-native-${native_platform}.jar}"; \
+    native_bundle="$(readlink -f "${native_bundle}")"; \
+    test -s "${native_bundle}"; \
+    test -s "${native_bundle}.properties"; \
+    set -- "-Dmilvus.native.bundle=${native_bundle}"; \
+    sbt "$@" "compile; Test/compile; integration40/Test/compile; assembly"; \
     assembly_jar="$(find target/scala-2.13 -maxdepth 1 -type f -name 'spark-connector-assembly-*.jar' -print -quit)"; \
     test -n "${assembly_jar}"; \
     test -s "${assembly_jar}"; \
-    jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libmilvus-storage.so"; \
-    jar tf "${assembly_jar}" | grep -Fqx "native/${native_platform}/libmilvus-storage-jni.so"; \
+    entries_file="$(mktemp)"; \
+    manifest_file="$(mktemp)"; \
+    jar tf "${assembly_jar}" > "${entries_file}"; \
+    resource_prefix="native/milvus/1/${native_platform}/"; \
+    grep -Fqx "${resource_prefix}manifest.properties" "${entries_file}"; \
+    unzip -p "${assembly_jar}" "${resource_prefix}manifest.properties" > "${manifest_file}"; \
+    for entry in libmilvus-storage-jni.so libknowhere_jni.so; do \
+        if ! grep -Fqx "${resource_prefix}${entry}" "${entries_file}"; then \
+            canonical="$(awk -F= -v key="alias.${entry}" '$1 == key { print $2 }' "${manifest_file}")"; \
+            test -n "${canonical}"; \
+            grep -Fqx "${resource_prefix}${canonical}" "${entries_file}"; \
+        fi; \
+    done; \
+    if grep -Eq '^native/(knowhere/|linux-[^/]+/)' "${entries_file}"; then \
+        echo "Assembly contains native resources outside the unified bundle" >&2; \
+        exit 1; \
+    fi; \
+    rm -f "${entries_file}" "${manifest_file}"; \
     sha256sum "${assembly_jar}"; \
     publish_maven="${PUBLISH_MAVEN:-${PUBLISH_TO_CENTRAL}}"; \
     case "${publish_maven}" in true|false) ;; *) echo "PUBLISH_MAVEN must be true or false" >&2; exit 1 ;; esac; \
     if [ "${publish_maven}" = "true" ]; then \
         test -s "${MAVEN_CREDENTIALS_FILE}"; \
-        bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publish"; \
+        sbt "$@" publish; \
     fi
 
-# Stage 2: retain only the built package for local inspection. The release
+# Stage 4: retain only the built package for local inspection. The release
 # pipeline publishes the Maven artifact and does not push this image.
 FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS final
 

@@ -1,0 +1,116 @@
+{{- if and .Values.milvus.deployment.enabled (le (int .Values.job.activeDeadlineSeconds) (int .Values.milvus.deployment.readinessTimeoutSeconds)) -}}
+{{- fail "job.activeDeadlineSeconds must exceed milvus.deployment.readinessTimeoutSeconds" -}}
+{{- end -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "spark-milvus-integration.fullname" . }}
+  labels:
+    {{- include "spark-milvus-integration.labels" . | nindent 4 }}
+  {{- with .Values.job.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "spark-milvus-integration.labels" . | nindent 8 }}
+      {{- with .Values.pod.annotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      automountServiceAccountToken: {{ .Values.pod.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.pod.terminationGracePeriodSeconds }}
+      {{- with .Values.pod.serviceAccountName }}
+      serviceAccountName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if or .Values.milvus.deployment.enabled .Values.runner.setup.command }}
+      initContainers:
+        {{- if .Values.milvus.deployment.enabled }}
+        - name: wait-for-milvus
+          image: {{ .Values.milvus.deployment.image | quote }}
+          imagePullPolicy: {{ .Values.milvus.deployment.imagePullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              deadline=$(( $(date +%s) + {{ .Values.milvus.deployment.readinessTimeoutSeconds }} ))
+              until curl --fail --silent --connect-timeout 3 --max-time 5 \
+                {{ printf "http://%s:9091/healthz" (include "spark-milvus-integration.milvusName" .) | quote }} >/dev/null; do
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "Milvus did not become healthy before the readiness deadline" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+          securityContext:
+            {{- toYaml (mergeOverwrite (deepCopy .Values.containerSecurityContext) (dict "runAsUser" .Values.milvus.deployment.runAsUser "runAsGroup" .Values.milvus.deployment.runAsGroup "runAsNonRoot" true)) | nindent 12 }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+        {{- end }}
+        {{- with .Values.runner.setup.command }}
+        - name: prepare-test-data
+          image: {{ printf "%s@%s" $.Values.image.repository $.Values.image.digest | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- with $.Values.runner.setup.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml $.Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- include "spark-milvus-integration.runnerEnv" $ | nindent 12 }}
+          resources:
+            {{- toYaml $.Values.resources | nindent 12 }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: integration-test
+          image: {{ printf "%s@%s" .Values.image.repository .Values.image.digest | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.runner.command | nindent 12 }}
+          {{- with .Values.runner.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          terminationMessagePolicy: FallbackToLogsOnError
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- include "spark-milvus-integration.runnerEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

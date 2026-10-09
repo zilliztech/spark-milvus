@@ -1,24 +1,129 @@
 # Milvus Spark Connector
 
-## Version Compatibility
+Read and write Milvus collections from Apache Spark by going straight at the
+Milvus storage format on object storage, rather than through the Milvus query
+path. A read lists a snapshot, plans one Spark partition per segment, and pulls
+Arrow column batches out of the segment files. A write produces segment files in
+the same format and registers them back with Milvus.
 
-**This connector requires Milvus 2.6 or later** (Storage V2).
+**Requires Milvus 2.6 or later** (Storage V2). For Milvus 2.5 and earlier use
+the `legacy` branch, which is no longer maintained.
 
-For Milvus 2.5 and earlier versions, please use the `legacy` branch which is no longer actively maintained.
+Two lines exist right now. The 1.x line is frozen at tag `v1.6.0` and only takes
+fixes. The 2.0 line is a rewrite on branch `refactor/v2`, versioned
+`2.0.0-{branch}-{arch}-SNAPSHOT`.
 
-## Environment Preparation
+Vector search uses `MilvusSearch.search`, which takes a query set and returns
+each query's global TopK. It searches the index files the snapshot pinned (the
+HNSW and IVF families and FLAT) or scans the vectors exactly, applies deletions
+and scalar predicates before search, and
+retrieves the output columns of the rows it selected. See the
+[query contract](docs/reference-en.md#vector-search).
+Cardinal index files require a Cardinal-enabled build of the pinned Knowhere
+revision; the plain upstream CI artifact does not contain that engine.
 
-**Machine Requirements:** Minimum 2 CPU cores and 8GB RAM.
+`MilvusCatalog` exposes databases and collections as Spark namespaces and
+tables, loads latest or time-travel snapshots, and implements collection
+`CREATE TABLE` / `DROP TABLE` with validated Milvus field and index properties.
+Creating a collection does not create a connector snapshot; it becomes readable
+after Milvus produces one. The options are in the
+[API reference](docs/reference-en.md).
 
-To ensure smooth operation, it is critical to use consistent versions of the required tools. Mismatched versions may lead to compatibility issues.
+## Project structure
 
-1. [**SDKMAN**](https://sdkman.io/) is recommended for managing Scala and Spark environments.
-2. **Java Version:** 21
-3. **Scala Version:** 2.13.16
-4. **Spark Version:** 4.0.1 (built with Scala 2.13)
-5. **SBT Version:** 1.11.1
+The build has twelve sbt modules in four layers. Dependencies only point
+downward, and the boundary between layer 2 and layer 3 is enforced at compile
+time: a source file in `core`, `compat` or `client` that mentions
+`org.apache.spark` fails the build.
 
-If you are using SDKMAN, you can quickly install Java, Scala, and SBT as follows:
+| Layer | Module | What it holds |
+|---|---|---|
+| 1 | `native-runtime` | Verifies and extracts one unified native dependency bundle shared by both upstream bindings |
+| 1 | `native-storage` | Compiles and packages the pinned milvus-storage JNI and Java/Scala API |
+| 1 | `native-vector` | Compiles the pinned Knowhere PR #1829 Java API and delegates vector operations through its upstream JNI |
+| 2 | `core` | The storage format itself: snapshots, manifests, delete files, schema, codecs, statistics, planning, segment read and write, indexes, object-storage access. No Spark. |
+| 2 | `compat` | Adapters for the two non-standard read entry points that need format code: Storage V2 packed segments and a milvus-backup export directory. The option-string segment list is resolved in `spark-base`'s `options` package. |
+| 2 | `client` | The gRPC client for the online Milvus service |
+| 3 | `spark-base` | Connector sources shared by every Spark line. Not an sbt project, just a source directory. |
+| 3 | `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | One project per maintained Spark line. Each pins its own Spark, Arrow, antlr and Java version and compiles the shared sources. |
+| 4 | `apps-4.0` | The backfill job users run, and the SQL vector distance functions (V8); vector search enters through `MilvusSearch` in `spark-base` |
+| — | `integration-4.0` | Integration tests. Needs a real Milvus and MinIO; never published. |
+
+Why the core layer carries no Spark dependency: one artifact serves all four
+Spark lines, its tests run without a SparkSession, and the boundary is checked
+by the compiler instead of by review.
+
+Only the Spark layer has to be split per line, because the `TableCatalog` and
+`ParserInterface` method sets differ, and Arrow, antlr and the Java target
+version are pinned per line. The fat jar is an `assembly` task on
+`spark-<line>`, not a module of its own. During the migration the usable fat
+jar is still root's `sbt assembly` (`spark-connector-assembly-*.jar`); the
+per-line tasks have no merge or shading rules yet.
+
+Four git submodules sit in the repository. `milvus-proto` supplies the
+protobuf definitions: `common.proto` and `schema.proto` are generated into
+`core` because the storage format itself is defined in protobuf, and the five
+files carrying gRPC services are generated into `client`. `milvus-storage`
+supplies the native storage library; until upstream merges the change it
+depends on, `.gitmodules` fetches it from the fork `Thor-ChenBiao/milvus-storage`.
+`knowhere` tracks the PR #1829 branch (`LawrenceTL92/knowhere-contrib`, branch
+`codex/knowhere-jni-pr`) and supplies the C API, JNI and Java sources used by
+`native-vector` and the unified native build. `docs/design` is the private
+design repository `zilliztech/spark-milvus-design`; the build and CI do not
+read it.
+
+Initialize the three native source submodules at their recorded gitlinks before
+compiling, and `docs/design` as well if you have access to it:
+
+```bash
+git submodule update --init milvus-proto milvus-storage knowhere
+git submodule update --init docs/design
+```
+
+## Documents
+
+| Document | What it answers |
+|---|---|
+| [docs/reference-en.md](docs/reference-en.md) | Every option and entry point: vector search, the catalog, reads, writes, backup directories, SQL procedures, data types |
+| [docs/user-guide-snapshot-backfill.md](docs/user-guide-snapshot-backfill.md) | How to add a field to a collection and fill it offline with the backfill job |
+| [docs/contributing.md](docs/contributing.md) | Building, formatting, testing and the native bundle, beyond this README |
+| [native-build/README.md](native-build/README.md) | How the per-platform native bundle is built and published |
+
+[AGENTS.md](AGENTS.md) is the entry point for agents and people working on the
+code: what the project is, how it is layered, and the rules any change has to
+satisfy. `CLAUDE.md` is a symlink to it. The design documents are kept in the
+private repository `zilliztech/spark-milvus-design`, mounted as the submodule
+`docs/design`; nothing in this repository's build needs it.
+
+## Environment
+
+The quickest way to a complete build, package and test environment is the
+development container: it is the `dev` stage of the root `Dockerfile`, built
+locally on top of its toolchain stage, with the dependency caches in named
+volumes and an optional
+local Milvus and MinIO for the integration suite.
+
+```bash
+scripts/devcontainer.sh up        # build the dev image once, start the container
+scripts/devcontainer.sh init      # submodules, Conan profile and remote
+scripts/devcontainer.sh shell     # make, sbt and the native build run in here
+```
+
+VS Code and other IDEs that read `.devcontainer/devcontainer.json` offer the
+same container as "Reopen in Container". The rest of this section is for a
+toolchain installed directly on the host.
+
+Minimum 2 CPU cores and 8 GB of RAM. Version mismatches between the tools below
+cause build failures that are hard to read, so pin them.
+
+| Tool | Version |
+|---|---|
+| Java | 21 |
+| Scala | 2.13.16 |
+| Spark | 4.0.1, built for Scala 2.13 |
+| sbt | 1.11.1 |
+
+[SDKMAN](https://sdkman.io/) is the easiest way to manage them:
 
 ```bash
 sdk install java 21.0.5-zulu
@@ -26,15 +131,18 @@ sdk install scala 2.13.16
 sdk install sbt 1.11.1
 ```
 
-The Spark version provided by SDKMAN only supports Scala 2.12. Therefore, you need to manually install the Spark version compatible with Scala 2.13. You can download it from the following link: [Spark Download](https://www.apache.org/dyn/closer.lua/spark/spark-4.0.1/spark-4.0.1-bin-hadoop3-scala2.13.tgz).
+SDKMAN's Spark is built for Scala 2.12, so install the 2.13 build by hand from
+the [Spark download page](https://www.apache.org/dyn/closer.lua/spark/spark-4.0.1/spark-4.0.1-bin-hadoop3-scala2.13.tgz).
 
-### Spark Submit Configuration
+Java 26 cannot run the test suites that start a SparkSession: `Subject.getSubject`
+was removed and Spark still calls it. Use Java 21.
 
-To simplify the `spark-submit` process, create a wrapper script named `spark-submit-wrapper.sh`. Replace the `SPARK_HOME` path with the actual installation directory on your machine.
+### spark-submit wrapper
+
+Point `SPARK_HOME` at the installation you just unpacked:
 
 ```bash
 #!/bin/bash
-
 export SPARK_HOME=/xxx/spark-4.0.1-bin-hadoop3-scala2.13
 
 if [ ! -d "$SPARK_HOME" ]; then
@@ -51,119 +159,112 @@ fi
 exec "$SPARK_SUBMIT" "$@"
 ```
 
-After saving the script, grant it execution permissions and set up an alias for convenience. Replace the script path with the actual location on your machine.
-
 ```bash
 chmod +x /xxx/spark-submit-wrapper.sh
 alias spark-submit-wrapper="/xxx/spark-submit-wrapper.sh"
 ```
 
-## Running the Connector
+## Building
 
-### Add Milvus Spark Connector Dependency
+The native libraries, the toolchain versions and the two ways to build the
+native bundle are described in [native-build/README.md](native-build/README.md).
 
-You can use the pre-built Milvus Spark Connector package directly, or compile it yourself by following the instructions in the next section.
-
-**Note:** The official release package is currently used primarily for testing the release process. Active development and updates are concentrated in the SNAPSHOT versions.
-
-- **Official Release:** Available at [Maven Repository](https://mvnrepository.com/artifact/com.zilliz/spark-connector_2.13)
-- **Latest SNAPSHOT:** Version 0.1.7-SNAPSHOT
-
-#### Using SNAPSHOT Dependencies
-
-To use the SNAPSHOT version, you need to add the snapshot repository to your build configuration:
-
-**For SBT (build.sbt):**
-
-```
-ThisBuild / resolvers += "Sonatype Snapshots" at "https://central.sonatype.com/repository/maven-snapshots/"
-```
-
-### Build and Package Milvus Spark Connector
-
-Use the following SBT commands to compile, package, and publish the connector locally:
+Knowhere library loading uses the Java API and JNI from pinned PR #1829.
+The API builds automatically; the native platform JAR is selected explicitly.
+See [Knowhere library loading](docs/contributing.md#knowhere-library-loading)
+for the real JNI smoke command and the `libjsig` preload requirement.
 
 ```bash
-sbt clean compile package publishLocal
+sbt clean compile package publishLocal   # compile and publish to the local repository
+sbt assembly                             # fat jar with every dependency
+sbt test                                 # unit tests, all modules
+sbt integration40/test                   # integration tests, needs Milvus and MinIO
 ```
 
-- **clean:** Clears previous build artifacts.
-- **compile:** Compiles the source code.
-- **package:** Packages the compiled code into a JAR file.
-- **publishLocal:** Publishes the package to the local repository (primarily for use in connector examples).
+The fat jar only loads Milvus segments when it carries the native
+`milvus-storage` libraries for the platform it runs on. `make package` builds
+them into the unified Storage/Knowhere bundle from the platform's profile under
+`native-build/profiles/`, on Linux and macOS, x86_64 and aarch64 alike. The macOS
+toolchain and its Conan configuration are in
+[contributing.md](docs/contributing.md#macos).
 
-To create a fat JAR containing all dependencies, run:
+`sbt compile` builds every module except `integration-4.0`, which sits outside
+root's aggregate. To work on one, prefix the command with
+its project id: `core/test`, `spark40/compile`, `apps40/test`. The ids drop the
+dot, so the project for `spark-4.0` is `spark40`.
+
+### Docker
+
+The Docker build handles the native dependencies on an architecture-native
+worker. Linux x86_64 and Linux aarch64 workers both build the unified
+Storage/Knowhere bundle; either accepts a matching prebuilt unified JAR and its
+`.properties` sidecar through `NATIVE_BUNDLE` instead.
 
 ```bash
-sbt assembly
+docker build --build-arg PUBLISH_MAVEN=false -t spark-milvus .  # current architecture
+
+# Trusted publication: BuildKit exposes the credential only to the publish RUN.
+docker build \
+  --secret id=maven_credentials,src=/path/to/sbt-credentials \
+  --build-arg PUBLISH_MAVEN=true \
+  -t spark-milvus .
 ```
 
-### Docker Build
-
-You can also build the connector using Docker, which handles all dependencies automatically including the native milvus-storage library.
-
-**Build the Docker image:**
-
-```bash
-# Build for current architecture (x86 or ARM64)
-docker build -t spark-milvus .
-
-# Build without publishing to Maven Central
-docker build --build-arg PUBLISH_TO_CENTRAL=false -t spark-milvus .
-```
-
-**Build arguments:**
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `GIT_BRANCH` | `unknown` | Branch name for version string |
+| Build argument | Default | Meaning |
+|---|---|---|
+| `GIT_BRANCH` | `unknown` | Goes into the version string |
 | `PUBLISH_TO_CENTRAL` | `true` | Whether to publish to Maven Central Snapshots |
+| `PUBLISH_MAVEN` | unset | Repository-neutral publication override used by trusted CI |
+| `MAVEN_CREDENTIALS_FILE` | `/run/secrets/maven_credentials` | In-build path of the BuildKit `maven_credentials` secret |
+| `NATIVE_BUNDLE` | empty | Prebuilt unified Linux JAR inside the build context, with its checksum sidecar |
+| `NATIVE_JOBS` | `50` | Native build concurrency, from 1 to 50 |
+| `NATIVE_BUILD_OPTIONS` | empty | Unified source build options, including `--conan-lock` and `--with-cardinal` |
 
-**Version naming:**
+The version is derived as `2.0.0-{branch}-{arch}-SNAPSHOT`, for example
+`2.0.0-refactor-v2-amd64-SNAPSHOT`.
 
-The Docker build uses dynamic versioning: `{branch}-{arch}-SNAPSHOT`
-
-For example:
-- `main-amd64-SNAPSHOT` (x86 build from main branch)
-- `feature-arm64-SNAPSHOT` (ARM64 build from feature branch)
-
-**Extract built JAR from container:**
+Pull the jar back out of the image:
 
 ```bash
 docker create --name temp spark-milvus
-docker cp temp:/workspace/target/scala-2.13/spark-connector_2.13-*.jar ./
+docker cp temp:/opt/spark-milvus/. ./
 docker rm temp
 ```
 
-### Build and Package Milvus Spark Connector Example
+## Using the connector
 
-Example Project Repository: [Milvus Spark Connector Example](https://github.com/SimFG/milvus-spark-connector-example)
+The published coordinate is `com.zilliz:spark-connector_2.13`
+([Maven](https://mvnrepository.com/artifact/com.zilliz/spark-connector_2.13)).
+Released versions currently exist to exercise the release process; active work
+lands in the snapshots, which need the snapshot repository:
 
-To compile and package the example project, use the following SBT command:
-
-```bash
-sbt clean compile package
+```scala
+ThisBuild / resolvers +=
+  "Sonatype Snapshots" at "https://central.sonatype.com/repository/maven-snapshots/"
 ```
 
-### Run the Test Demo
-
-To execute the test demo, specify the paths to the JAR files generated in the previous steps. Replace `/xxx/` with the actual paths on your machine.
-
-**Note:** If you prefer to use online dependencies instead of building locally, you can download the pre-built assembly JAR from the [GitHub Releases page](https://github.com/SimFG/milvus-spark-connector/releases).
+A runnable example lives in
+[milvus-spark-connector-example](https://github.com/SimFG/milvus-spark-connector-example).
+Build it with `sbt clean compile package`, then:
 
 ```bash
-spark-submit-wrapper --jars /xxx/spark-connector-assembly-x.x.x-SNAPSHOT.jar --class "example.HelloDemo" /xxx/milvus-spark-connector-example_2.13-0.1.0-SNAPSHOT.jar
+spark-submit-wrapper \
+  --jars /xxx/spark-connector-assembly-x.x.x-SNAPSHOT.jar \
+  --class "example.HelloDemo" \
+  /xxx/milvus-spark-connector-example_2.13-0.1.0-SNAPSHOT.jar
 ```
 
-This command executes the **HelloDemo** class, showcasing how to read collection data from Milvus using the Spark connector.
+`HelloDemo` reads a collection called `hello_spark_milvus`, so create it first
+and make sure the local Milvus is reachable. Pre-built assembly jars are also
+attached to the
+[GitHub releases](https://github.com/SimFG/milvus-spark-connector/releases).
 
-**Before running this command, please ensure the following:**
-
-* A collection named **hello_spark_milvus** already exists in your local Milvus instance.
-* Your local Milvus service is running and accessible.
-
-For more detailed information about how to use the connector, see the [ **API Reference**](docs/reference-en.md).
+Search jobs set
+`spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin` so that
+every executor loads the native bundle at start; the
+[API reference](docs/reference-en.md) explains the setting. For the option
+names and entry points, see the same reference.
 
 ## License
 
-This project is licensed under the Server Side Public License v1 (SSPLv1) and the GNU Affero General Public License v3 (AGPLv3).
+See [LICENSE](LICENSE).

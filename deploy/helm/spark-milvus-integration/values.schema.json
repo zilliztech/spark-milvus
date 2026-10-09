@@ -1,0 +1,450 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "image",
+    "runner",
+    "milvus",
+    "objectStorage",
+    "job",
+    "pod",
+    "podSecurityContext",
+    "containerSecurityContext",
+    "resources",
+    "nodeSelector",
+    "tolerations",
+    "affinity"
+  ],
+  "properties": {
+    "nameOverride": {
+      "$ref": "#/$defs/optionalKubernetesLabel"
+    },
+    "fullnameOverride": {
+      "$ref": "#/$defs/optionalKubernetesLabel"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^$|^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
+    },
+    "ownershipToken": {
+      "type": "string",
+      "pattern": "^$|^[0-9]+-[0-9]+-[0-9]+-[0-9]+$"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "pullPolicy", "pullSecrets"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "pullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/kubernetesName"
+              }
+            }
+          }
+        }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "args",
+        "setup"
+      ],
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "setup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command",
+            "args"
+          ],
+          "properties": {
+            "command": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "command": {
+                    "maxItems": 0
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "args": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "milvus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uri",
+        "database",
+        "credentials",
+        "deployment"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "pattern": "^$|^https?://.+"
+        },
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credentials": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "existingSecret",
+            "tokenKey",
+            "rootPasswordKey"
+          ],
+          "properties": {
+            "existingSecret": {
+              "$ref": "#/$defs/kubernetesName"
+            },
+            "tokenKey": {
+              "$ref": "#/$defs/secretKey"
+            },
+            "rootPasswordKey": {
+              "$ref": "#/$defs/secretKey"
+            }
+          }
+        },
+        "deployment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "image",
+            "etcdImage",
+            "imagePullPolicy",
+            "readinessTimeoutSeconds",
+            "dataSizeLimit",
+            "etcdSizeLimit",
+            "resources",
+            "etcdResources",
+            "runAsUser",
+            "runAsGroup"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": "string",
+              "minLength": 1
+            },
+            "etcdImage": {
+              "type": "string",
+              "minLength": 1
+            },
+            "imagePullPolicy": {
+              "type": "string",
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            },
+            "readinessTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 3600
+            },
+            "dataSizeLimit": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(Mi|Gi)$"
+            },
+            "etcdSizeLimit": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*(Mi|Gi)$"
+            },
+            "resources": {
+              "type": "object"
+            },
+            "etcdResources": {
+              "type": "object"
+            },
+            "runAsUser": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "runAsGroup": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "objectStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpoint",
+        "bucket",
+        "rootPath",
+        "region",
+        "useSSL",
+        "useVirtualHost",
+        "writePrefix",
+        "credentials"
+      ],
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bucket": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rootPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1
+        },
+        "useSSL": {
+          "type": "boolean"
+        },
+        "useVirtualHost": {
+          "type": "boolean"
+        },
+        "writePrefix": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+        },
+        "credentials": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "existingSecret",
+            "accessKeyIdKey",
+            "secretAccessKeyKey"
+          ],
+          "properties": {
+            "existingSecret": {
+              "$ref": "#/$defs/kubernetesName"
+            },
+            "accessKeyIdKey": {
+              "$ref": "#/$defs/secretKey"
+            },
+            "secretAccessKeyKey": {
+              "$ref": "#/$defs/secretKey"
+            }
+          }
+        }
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activeDeadlineSeconds",
+        "ttlSecondsAfterFinished",
+        "annotations"
+      ],
+      "properties": {
+        "activeDeadlineSeconds": {
+          "type": "integer",
+          "minimum": 60
+        },
+        "ttlSecondsAfterFinished": {
+          "type": "integer",
+          "minimum": 60
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "pod": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "annotations",
+        "serviceAccountName",
+        "automountServiceAccountToken",
+        "terminationGracePeriodSeconds"
+      ],
+      "properties": {
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "serviceAccountName": {
+          "$ref": "#/$defs/optionalKubernetesName"
+        },
+        "automountServiceAccountToken": {
+          "type": "boolean"
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "podSecurityContext": {
+      "type": "object"
+    },
+    "containerSecurityContext": {
+      "type": "object"
+    },
+    "resources": {
+      "type": "object"
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "tolerations": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "affinity": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "optionalKubernetesLabel": {
+      "type": "string",
+      "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+      "maxLength": 63
+    },
+    "optionalKubernetesName": {
+      "type": "string",
+      "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+      "maxLength": 253
+    },
+    "kubernetesName": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+      "maxLength": 253
+    },
+    "secretKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "maxLength": 253
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "milvus": {
+            "properties": {
+              "deployment": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "milvus": {
+            "properties": {
+              "uri": {
+                "const": ""
+              }
+            }
+          },
+          "objectStorage": {
+            "properties": {
+              "endpoint": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$"
+              },
+              "rootPath": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "milvus": {
+            "properties": {
+              "uri": {
+                "pattern": "^https?://.+"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

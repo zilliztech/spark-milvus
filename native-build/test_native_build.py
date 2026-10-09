@@ -1,0 +1,380 @@
+"""Regression tests for source identity and native dependency staging."""
+import contextlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+
+def module(name):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+    result = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(result)
+    return result
+
+
+build = module("build")
+platforms = module("platforms")
+stage = module("stage")
+
+
+class SourceIdentityTest(unittest.TestCase):
+    def test_parent_build_directory_does_not_empty_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "build/sources/project"
+            source.mkdir(parents=True)
+            (source / "source.cpp").write_text("source")
+            (source / "build").mkdir()
+            (source / "build/generated.o").write_text("generated")
+            self.assertEqual({"source.cpp": build.digest(source / "source.cpp")}, build.tree_hashes(source))
+
+    def test_empty_manifest_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(RuntimeError, "empty"):
+                build.tree_hashes(Path(temporary))
+
+    def test_cmake_trace_rejects_nested_upstream_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trace = root / "trace.jsonl"
+            trace.write_text(json.dumps({"file": str(root / "knowhere/thirdparty/faiss/CMakeLists.txt"),
+                                         "cmd": "add_library"}) + "\n")
+            with self.assertRaisesRegex(RuntimeError, "executed upstream CMake"):
+                build.check_cmake_trace(trace, [root / "knowhere"])
+
+    def test_cmake_trace_allows_external_dependency_toolkit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trace = root / "trace.jsonl"
+            trace.write_text(json.dumps({"version": {"major": 1, "minor": 2}}) + "\n" +
+                             json.dumps({"file": str(root / "cmake/Corrosion.cmake"),
+                                         "cmd": "add_custom_command"}) + "\n")
+            self.assertEqual(1, build.check_cmake_trace(trace, [root / "knowhere", root / "storage"]))
+
+    def test_empty_cmake_trace_does_not_prove_independence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary) / "trace.jsonl"
+            trace.write_text(json.dumps({"version": {"major": 1, "minor": 2}}) + "\n")
+            with self.assertRaisesRegex(RuntimeError, "no executed commands"):
+                build.check_cmake_trace(trace, [])
+
+
+class SystemLibraryPathTest(unittest.TestCase):
+    """The ELF adapter reads the loader cache for the machine it runs on: a
+    multiarch host lists another architecture's copy under the same name.
+    """
+
+    CACHE = ("3 libs found in cache `/etc/ld.so.cache'\n"
+             "\tlibz.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libz.so.1\n"
+             "\tlibz.so.1 (libc6,AArch64) => /lib/aarch64-linux-gnu/libz.so.1\n"
+             "\tlibz.so (libc6,AArch64) => /lib/aarch64-linux-gnu/libz.so\n")
+
+    def resolve(self, machine, name):
+        with mock.patch.object(platforms, "_command", return_value=self.CACHE), \
+                mock.patch.object(platforms.platform, "machine", return_value=machine):
+            return platforms.Elf().system_library_path(name)
+
+    def test_entry_tagged_for_this_machine_is_selected(self):
+        self.assertEqual(Path("/lib/aarch64-linux-gnu/libz.so.1"), self.resolve("aarch64", "libz.so.1"))
+        self.assertEqual(Path("/lib/x86_64-linux-gnu/libz.so.1"), self.resolve("x86_64", "libz.so.1"))
+
+    def test_absent_entry_and_unknown_machine_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "exactly one x86-64 libaio.so.1"):
+            self.resolve("x86_64", "libaio.so.1")
+        with self.assertRaisesRegex(ValueError, "No ldconfig architecture tag"):
+            self.resolve("riscv64", "libz.so.1")
+
+
+class LibraryGlobTest(unittest.TestCase):
+    def test_elf_stem_matches_every_library_of_the_family(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            names = ["libknowhere.so", "libknowhere_c.so.1", "libknowhere_c.so.1.0.0",
+                     "libknowhere_jni.so", "libmilvus-storage.so", "libmilvus-storage-jni.so",
+                     "libcardinalv1.so", "libz.so.1", "notes.txt"]
+            for name in names:
+                (root / name).write_bytes(b"")
+            elf = platforms.Elf()
+            self.assertEqual(sorted(names[:4]), sorted(p.name for p in root.glob(elf.library_glob("libknowhere"))))
+            self.assertEqual(sorted(names[4:6]), sorted(p.name for p in root.glob(elf.library_glob("libmilvus-storage"))))
+            self.assertEqual(["libcardinalv1.so"], [p.name for p in root.glob(elf.library_glob("libcardinal"))])
+            self.assertEqual(sorted(names[:8]), sorted(p.name for p in root.glob(elf.library_glob())))
+
+
+class BinaryArchitectureTest(unittest.TestCase):
+    """The architecture comes from the file header, with no platform tool."""
+
+    def library(self, header):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "library"
+        path.write_bytes(header + bytes(64))
+        return path
+
+    def test_elf_machine_names_the_architecture(self):
+        for machine, expected in ((62, "x86_64"), (183, "aarch64"), (3, None)):
+            with self.subTest(machine=machine):
+                header = b"\x7fELF\x02\x01" + bytes(12) + machine.to_bytes(2, "little")
+                self.assertEqual(expected, platforms.Elf().architecture(self.library(header)))
+
+    def test_mach_o_cputype_names_the_architecture(self):
+        for cputype, expected in ((0x01000007, "x86_64"), (0x0100000C, "aarch64"), (7, None)):
+            with self.subTest(cputype=cputype):
+                header = b"\xcf\xfa\xed\xfe" + cputype.to_bytes(4, "little")
+                self.assertEqual(expected, platforms.MachO().architecture(self.library(header)))
+        universal = self.library(b"\xca\xfe\xba\xbe" + bytes(4))
+        self.assertIsNone(platforms.MachO().architecture(universal))
+
+
+FORMAT = platforms.host()
+COMPILER = "gcc" if isinstance(FORMAT, platforms.Elf) else "clang"
+
+
+@unittest.skipUnless(FORMAT.available() and shutil.which(COMPILER),
+                     "a native compiler and this platform's binary tools are required")
+class NativeStageTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def library(self, directory, base, install_base, body, dependencies=(), version=None,
+                install_version=None):
+        """One shared library, named the way this platform names it."""
+        directory.mkdir(parents=True, exist_ok=True)
+        filename = FORMAT.library_name(base, version)
+        source = directory / (filename + ".c")
+        source.write_text(body)
+        return FORMAT.compile_library(
+            source, directory / filename,
+            FORMAT.library_name(install_base, install_version), dependencies)
+
+    def test_aliases_preserved_and_only_staged_rpath_changed(self):
+        """The staged copy looks for its dependency beside itself; the source
+        it was copied from is not touched, and its alias still points at it.
+        """
+        versioned = FORMAT.library_name("fixture", "1")
+        dependency = self.library(self.root / "source", "dependency", "dependency",
+                                  "int dependency(void) { return 1; }", install_version="1")
+        library = self.library(
+            self.root / "source", "fixture", "fixture",
+            "extern int dependency(void); int fixture(void) { return dependency(); }",
+            [str(dependency)], version="1.2", install_version="1")
+        alias = library.parent / FORMAT.library_name("fixture")
+        alias.symlink_to(library.name)
+        original = stage.digest(library)
+        providers, _ = stage.inventory({"graph": {"nodes": {}}}, [library, alias, dependency])
+        selected, aliases = stage.stage(providers, [versioned], self.root / "lib")
+        self.assertEqual(original, stage.digest(library))
+        self.assertEqual(versioned, aliases[FORMAT.library_name("fixture")])
+        self.assertIn(FORMAT.read_runtime_path(self.root / "lib" / versioned),
+                      ("$ORIGIN", "@loader_path"))
+        self.assertIn(versioned, set(selected))
+
+    def test_same_soname_with_different_binaries_rejected(self):
+        first = self.library(self.root / "first", "fixture", "fixture",
+                             "int fixture(void) { return 1; }", install_version="1")
+        second = self.library(self.root / "second", "fixture", "fixture",
+                              "int fixture(void) { return 2; }", install_version="1")
+        with self.assertRaisesRegex(ValueError, "Conflicting implementations"):
+            stage.inventory({"graph": {"nodes": {}}}, [first, second])
+
+    def test_entry_filename_alias_to_versioned_soname_is_preserved(self):
+        plain = FORMAT.library_name("entry")
+        versioned = FORMAT.library_name("entry", "1")
+        entry = self.library(self.root / "source", "entry", "entry",
+                             "int entry(void) { return 7; }", install_version="1")
+        providers, _ = stage.inventory({"graph": {"nodes": {}}}, [entry])
+
+        selected, aliases = stage.stage(providers, [plain], self.root / "lib")
+
+        self.assertEqual({plain}, set(selected))
+        self.assertEqual(plain, aliases[versioned])
+        self.assertEqual(plain, (self.root / "lib" / versioned).readlink().as_posix())
+
+    def test_unselected_dependency_rejected(self):
+        dependency = self.library(self.root / "source", "dependency", "dependency",
+                                  "int dependency(void) { return 7; }", install_version="1")
+        entry = self.library(self.root / "source", "entry", "entry",
+                             "extern int dependency(void); int entry(void) { return dependency(); }",
+                             [str(dependency)])
+        providers, _ = stage.inventory({"graph": {"nodes": {}}}, [entry])
+        with self.assertRaisesRegex(ValueError, "outside the unified Conan graph"):
+            stage.stage(providers, [FORMAT.library_name("entry")], self.root / "lib")
+
+
+@unittest.skipUnless(
+    all(shutil.which(tool) for tool in ("gcc", "readelf", "ldd", "nm", "java")),
+    "native compiler, ELF inspection tools, and Java required",
+)
+class NativeAuditTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.libraries = self.root / "lib"
+        self.libraries.mkdir()
+        self.source_count = 0
+
+    def library(self, filename, body, dependencies=()):
+        self.source_count += 1
+        source = self.root / ("source-" + str(self.source_count) + ".c")
+        source.write_text(body)
+        path = self.libraries / filename
+        subprocess.run(
+            ["gcc", "-shared", "-fPIC", str(source), f"-L{self.libraries}",
+             "-Wl,-rpath,$ORIGIN", "-Wl,-soname," + filename,
+             *("-l:" + dependency for dependency in dependencies), "-o", str(path)],
+            check=True,
+        )
+        return path
+
+    def complete_roots(self):
+        self.library("libhost.so", "int host_callback(void) { return 9; }")
+        plugin = self.library(
+            "libplugin.so",
+            "extern int host_callback(void); int plugin(void) { return host_callback(); }",
+            ("libhost.so",),
+        )
+        self.library("libknowhere.so", "int knowhere_engine(void) { return 3; }")
+        self.library(
+            "libknowhere_c.so.1",
+            "extern int knowhere_engine(void); int knowhere_c(void) { return knowhere_engine(); }",
+            ("libknowhere.so",),
+        )
+        self.library(
+            "libknowhere_jni.so",
+            "extern int plugin(void); extern int host_callback(void); "
+            "int vector_entry(void) { return plugin() + host_callback(); }",
+            ("libplugin.so", "libhost.so"),
+        )
+        self.library("libmilvus-storage.so", "int storage_engine(void) { return 7; }")
+        self.library(
+            "libmilvus-storage-jni.so",
+            "extern int storage_engine(void); int storage_entry(void) { return storage_engine(); }",
+            ("libmilvus-storage.so",),
+        )
+        return plugin
+
+    def test_every_library_is_relocated_and_all_native_entries_are_loaded(self):
+        plugin = self.complete_roots()
+        standalone = subprocess.run(
+            ["ldd", "-r", str(plugin)], text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, check=False,
+        )
+        self.assertNotIn("undefined symbol:", standalone.stdout)
+        output = self.root / "audit"
+
+        stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                    stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output)
+
+        results = json.loads((output / "results.json").read_text())
+        self.assertEqual(set(path.name for path in self.libraries.iterdir()), set(results))
+        for name in stage.AUDIT_DLOPEN_ENTRIES:
+            expected_context = "jvm-load-entry" if name in stage.JVM_LOAD_ENTRIES else "native-load-entry"
+            self.assertEqual(expected_context, results[name]["context"])
+            self.assertTrue(results[name]["relocationsPassed"])
+            self.assertEqual(0, results[name]["dlopenExit"])
+            self.assertTrue(results[name]["passed"])
+        orders = json.loads((output / "load-orders.json").read_text())
+        self.assertEqual(2, len(orders))
+        self.assertTrue(all(record["exit"] == 0 for record in orders))
+        jvm_loads = json.loads((output / "jvm-load-tests.json").read_text())
+        self.assertEqual([
+            {"entries": ["libmilvus-storage-jni.so", "libknowhere_jni.so"], "exit": 0},
+            {"entries": ["libknowhere_jni.so", "libmilvus-storage-jni.so"], "exit": 0},
+        ], jvm_loads)
+        self.assertEqual([], json.loads((output / "diagnostic-failures.json").read_text()))
+        self.assertIn("LOADED libmilvus-storage-jni.so",
+                      (output / "jvm-load-milvus-storage-jni--then--knowhere_jni.log").read_text())
+
+    def test_missing_load_entry_is_rejected(self):
+        self.library("libmilvus-storage-jni.so", "int storage_entry(void) { return 7; }")
+        with self.assertRaisesRegex(ValueError, "missing load entries: libknowhere"):
+            stage.audit(self.libraries, ["libmilvus-storage-jni.so"],
+                        stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, self.root / "audit")
+
+    def test_jvm_load_failure_is_recorded_and_blocks_the_audit(self):
+        self.complete_roots()
+        self.library(
+            "libknowhere_jni.so",
+            "int JNI_OnLoad(void *vm, void *reserved) { return 0; }\n"
+            "int vector_entry(void) { return 1; }",
+        )
+        output = self.root / "audit"
+
+        with self.assertRaisesRegex(stage.JvmLoadAuditError, "JVM native load audit failed"):
+            stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                        stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output)
+
+        result = json.loads((output / "results.json").read_text())["libknowhere_jni.so"]
+        self.assertTrue(result["relocationsPassed"])
+        self.assertEqual(0, result["dlopenExit"])
+        self.assertTrue(result["passed"])
+        loads = json.loads((output / "jvm-load-tests.json").read_text())
+        self.assertTrue(all(record["exit"] != 0 for record in loads))
+
+    def test_jvm_exit_zero_without_completion_markers_is_rejected(self):
+        self.complete_roots()
+        self.library(
+            "libknowhere_jni.so",
+            "#include <stdlib.h>\n"
+            "__attribute__((constructor)) static void stop_load(void) { exit(0); }\n"
+            "int vector_entry(void) { return 1; }",
+        )
+        output = self.root / "audit"
+
+        with self.assertRaises(stage.JvmLoadAuditError):
+            stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                        stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output)
+
+        loads = json.loads((output / "jvm-load-tests.json").read_text())
+        self.assertEqual([125, 125], [record["exit"] for record in loads])
+        self.assertIn("without the required load markers", (
+            output / "jvm-load-knowhere_jni--then--milvus-storage-jni.log").read_text())
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            direct_loads = stage.check_jvm_loads(self.libraries)
+        self.assertEqual([125, 125], [record["exit"] for record in direct_loads])
+        self.assertIn("without the required load markers", stderr.getvalue())
+
+    def test_diagnostic_tool_error_does_not_replace_jvm_acceptance(self):
+        self.complete_roots()
+        output = self.root / "audit"
+
+        with mock.patch.object(stage, "command", side_effect=RuntimeError("diagnostic failed")):
+            loads = stage.audit(
+                self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, output,
+            )
+
+        self.assertTrue(all(record["exit"] == 0 for record in loads))
+        self.assertEqual("RuntimeError: diagnostic failed\n",
+                         (output / "diagnostic-error.txt").read_text())
+
+    def test_unresolved_unloaded_dependency_is_diagnostic_when_both_jvm_orders_pass(self):
+        self.complete_roots()
+        self.library(
+            "libbroken.so",
+            "extern int missing(void); int broken(void) { return missing(); }",
+        )
+
+        loads = stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                            stage.JVM_LOAD_ENTRIES, stage.AUDIT_DLOPEN_ENTRIES, self.root / "audit")
+
+        result = json.loads((self.root / "audit/results.json").read_text())["libbroken.so"]
+        self.assertFalse(result["relocationsPassed"])
+        self.assertFalse(result["passed"])
+        self.assertIn("libbroken.so", json.loads(
+            (self.root / "audit/diagnostic-failures.json").read_text()))
+        self.assertTrue(all(record["exit"] == 0 for record in loads))
+
+
+if __name__ == "__main__":
+    unittest.main()
