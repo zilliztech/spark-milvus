@@ -55,6 +55,7 @@ import com.zilliz.spark.connector.{
   MilvusCollectionInfo,
   MilvusOption,
   MilvusSchemaUtil,
+  TencentStorageAuth,
   VectorSearchConfig
 }
 import com.zilliz.spark.connector.loon.Properties
@@ -1597,12 +1598,13 @@ object MilvusScan extends Logging {
     */
   private[sources] def buildHadoopConfForOptions(
       rawOptions: scala.collection.Map[String, String],
-      path: String
+      path: String,
+      initialConf: Configuration = SparkSession.getActiveSession
+        .orElse(SparkSession.getDefaultSession)
+        .map(_.sessionState.newHadoopConf())
+        .getOrElse(new Configuration())
   ): Configuration = {
-    val conf = SparkSession.getActiveSession
-      .orElse(SparkSession.getDefaultSession)
-      .map(_.sessionState.newHadoopConf())
-      .getOrElse(new Configuration())
+    val conf = new Configuration(initialConf)
     val endpoint = optionValue(rawOptions, Properties.FsConfig.FsAddress)
     val accessKey = optionValue(rawOptions, Properties.FsConfig.FsAccessKeyId)
     val secretKey =
@@ -1624,18 +1626,36 @@ object MilvusScan extends Logging {
     }
 
     def configureS3A(prefix: String): Unit = {
+      val bucket =
+        if (prefix == "fs.s3a") "" else prefix.stripPrefix("fs.s3a.bucket.")
+      val tencentRole =
+        if (useIam) TencentStorageAuth.resolve(conf, bucket) else None
+      val tencent = optionValue(rawOptions, Properties.FsConfig.FsCloudProvider)
+        .exists(_.trim == "tencent") || tencentRole.nonEmpty
+      if (tencent && useIam && bucket.nonEmpty && tencentRole.isEmpty) {
+        throw new IllegalArgumentException(
+          s"Tencent IAM mode requires the runtime Tencent S3A role provider for bucket '$bucket'"
+        )
+      }
       setIfDefined(s"$prefix.endpoint", endpoint)
       setIfDefined(s"$prefix.connection.ssl.enabled", useSsl)
       setIfDefined(s"$prefix.path.style.access", pathStyle)
       setIfDefined(s"$prefix.endpoint.region", region)
       setIfDefined(s"$prefix.region", region)
+      if (tencent) {
+        conf.set(s"$prefix.path.style.access", "false")
+        conf.set(s"$prefix.bucket.probe", "0")
+        conf.set(s"$prefix.multiobjectdelete.enable", "false")
+      }
       if (useIam) {
         conf.unset(s"$prefix.access.key")
         conf.unset(s"$prefix.secret.key")
-        conf.set(
-          s"$prefix.aws.credentials.provider",
-          DefaultAwsCredentialsProvider
-        )
+        if (!tencent) {
+          conf.set(
+            s"$prefix.aws.credentials.provider",
+            DefaultAwsCredentialsProvider
+          )
+        }
       } else {
         setIfDefined(s"$prefix.access.key", accessKey)
         setIfDefined(s"$prefix.secret.key", secretKey)

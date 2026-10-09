@@ -34,7 +34,11 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.BeforeAndAfterEach
 
-import com.zilliz.spark.connector.{MilvusCollectionInfo, MilvusOption}
+import com.zilliz.spark.connector.{
+  MilvusCollectionInfo,
+  MilvusOption,
+  TencentStorageAuth
+}
 import com.zilliz.spark.connector.loon.Properties
 import com.zilliz.spark.connector.read.{
   BackupMetaReader,
@@ -564,6 +568,67 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite with BeforeAndAfterEach {
       "s3a://connector-bucket/files/snapshots/1/metadata/2.json"
     )
     assert(conf.get("fs.s3a.impl.disable.cache") == "true")
+  }
+
+  test("Tencent snapshot and backup metadata keep each bucket's managed role") {
+    val initial = new Configuration(false)
+    initial.set(
+      "fs.s3a.aws.credentials.provider",
+      TencentStorageAuth.CredentialsProvider
+    )
+    initial.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123:roleName/data")
+    initial.set(
+      "fs.s3a.bucket.backup.assumed.role.arn",
+      "qcs::cam::uin/456:roleName/backup"
+    )
+    initial.set("fs.s3a.bucket.backup.assumed.role.external.id", "backup-id")
+    val conf = MilvusScan.buildHadoopConfForOptions(
+      Map(
+        Properties.FsConfig.FsBucketName -> "target",
+        Properties.FsConfig.FsCloudProvider -> "tencent",
+        Properties.FsConfig.FsUseIam -> "true"
+      ),
+      "s3a://backup/full_meta.json",
+      initial
+    )
+    assert(
+      TencentStorageAuth
+        .resolve(conf, "target")
+        .get
+        .arn == "qcs::cam::uin/123:roleName/data"
+    )
+    assert(
+      TencentStorageAuth
+        .resolve(conf, "backup")
+        .get
+        .arn == "qcs::cam::uin/456:roleName/backup"
+    )
+    assert(
+      TencentStorageAuth
+        .resolve(conf, "backup")
+        .get
+        .externalId
+        .contains("backup-id")
+    )
+    assert(conf.get("fs.s3a.bucket.backup.path.style.access") == "false")
+    assert(conf.get("fs.s3a.bucket.backup.multiobjectdelete.enable") == "false")
+    assert(initial.get("fs.s3a.bucket.backup.path.style.access") == null)
+  }
+
+  test(
+    "Tencent metadata rejects missing runtime identity instead of choosing AWS"
+  ) {
+    intercept[IllegalArgumentException] {
+      MilvusScan.buildHadoopConfForOptions(
+        Map(
+          Properties.FsConfig.FsBucketName -> "target",
+          Properties.FsConfig.FsCloudProvider -> "tencent",
+          Properties.FsConfig.FsUseIam -> "true"
+        ),
+        "s3a://target/full_meta.json",
+        new Configuration(false)
+      )
+    }
   }
 
   test("buildSnapshotHadoopConf maps connector S3 options to S3A") {

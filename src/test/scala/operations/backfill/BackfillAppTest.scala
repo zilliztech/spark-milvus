@@ -1,10 +1,13 @@
 package com.zilliz.spark.connector.operations.backfill
 
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.storage.StorageLevel
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
+
+import com.zilliz.spark.connector.TencentStorageAuth
 
 /** Unit tests for BackfillApp.parseArgs,
   * MilvusBackfill.configureHadoopS3ForPath, the MilvusDataSource FQCN used by
@@ -343,6 +346,77 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   }
 
   // ============ configureHadoopS3ForPath ============
+
+  test(
+    "Tencent source and target access preserve their managed roles and COS settings"
+  ) {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      TencentStorageAuth.CredentialsProvider
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123:roleName/data")
+    conf.set(
+      "fs.s3a.bucket.source.assumed.role.arn",
+      "qcs::cam::uin/456:roleName/customer"
+    )
+    conf.set("fs.s3a.bucket.source.assumed.role.external.id", "external-id")
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "target",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true,
+      s3UseSSL = true
+    )
+    Seq("source", "target").foreach { bucket =>
+      MilvusBackfill.configureHadoopS3ForPath(
+        conf,
+        s"s3a://$bucket/data",
+        config,
+        isSource = bucket == "source"
+      )
+      conf.get(s"fs.s3a.bucket.$bucket.path.style.access") shouldBe "false"
+      conf.get(s"fs.s3a.bucket.$bucket.bucket.probe") shouldBe "0"
+      conf.get(
+        s"fs.s3a.bucket.$bucket.multiobjectdelete.enable"
+      ) shouldBe "false"
+      conf.get(s"fs.s3a.bucket.$bucket.aws.credentials.provider") shouldBe null
+    }
+    TencentStorageAuth
+      .resolve(conf, "source")
+      .get
+      .arn shouldBe "qcs::cam::uin/456:roleName/customer"
+    TencentStorageAuth
+      .resolve(conf, "target")
+      .get
+      .arn shouldBe "qcs::cam::uin/123:roleName/data"
+    TencentStorageAuth.resolve(conf, "source").get.externalId shouldBe Some(
+      "external-id"
+    )
+  }
+
+  test("Tencent IAM access fails before installing an AWS fallback") {
+    val conf = new Configuration(false)
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "target",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+    intercept[IllegalArgumentException] {
+      MilvusBackfill.configureHadoopS3ForPath(
+        conf,
+        "s3a://target/data",
+        config,
+        isSource = false
+      )
+    }
+    conf.get("fs.s3a.bucket.target.aws.credentials.provider") shouldBe null
+  }
 
   test("configureHadoopS3ForPath is a no-op for non-s3 paths") {
     val cfg = BackfillConfig(
@@ -973,7 +1047,11 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     )
     // The rejection happens before any Spark/Iceberg I/O, so the shared local
     // SparkSession is sufficient; a raw path must not reach the reader.
-    MilvusBackfill.readIceberg(spark, "s3a://warehouse/db/backfill_table", cfg) match {
+    MilvusBackfill.readIceberg(
+      spark,
+      "s3a://warehouse/db/backfill_table",
+      cfg
+    ) match {
       case Left(error) =>
         error.message should include("catalog-qualified identifier")
         error.message should include("raw file/object-storage path")

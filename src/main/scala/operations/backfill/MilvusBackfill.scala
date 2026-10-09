@@ -15,7 +15,8 @@ import org.slf4j.LoggerFactory
 import com.zilliz.spark.connector.{
   MilvusClient,
   MilvusConnectionParams,
-  MilvusOption
+  MilvusOption,
+  TencentStorageAuth
 }
 import com.zilliz.spark.connector.read.{
   CollectionSchema,
@@ -2614,6 +2615,15 @@ object MilvusBackfill {
       else config.s3Region
 
     val prefix = s"fs.s3a.bucket.$bucket"
+    val tencentRole =
+      if (useIam) TencentStorageAuth.resolve(hadoopConf, bucket) else None
+    val tencent =
+      config.s3CloudProvider.trim == "tencent" || tencentRole.nonEmpty
+    if (tencent && useIam && tencentRole.isEmpty) {
+      throw new IllegalArgumentException(
+        s"Tencent IAM mode requires the runtime Tencent S3A role provider for bucket '$bucket'"
+      )
+    }
 
     // Endpoint + path style + SSL are safe to set in both IAM and static modes
     if (endpoint != null && endpoint.nonEmpty) {
@@ -2625,7 +2635,11 @@ object MilvusBackfill {
       hadoopConf.set(s"$prefix.endpoint.region", region)
       hadoopConf.set(s"$prefix.region", region)
     }
-    hadoopConf.set(s"$prefix.path.style.access", "true")
+    hadoopConf.set(s"$prefix.path.style.access", (!tencent).toString)
+    if (tencent) {
+      hadoopConf.set(s"$prefix.bucket.probe", "0")
+      hadoopConf.set(s"$prefix.multiobjectdelete.enable", "false")
+    }
     hadoopConf.set(
       s"$prefix.connection.ssl.enabled",
       if (useSSL) "true" else "false"
@@ -2649,7 +2663,7 @@ object MilvusBackfill {
       // A managed runtime may already have selected an AssumeRole provider
       // globally for its data role or per bucket for an external volume. Do
       // not replace that security boundary with the pod's ambient identity.
-      if (assumedRole.isEmpty) {
+      if (assumedRole.isEmpty && tencentRole.isEmpty) {
         hadoopConf.set(
           bucketProviderKey,
           Seq(

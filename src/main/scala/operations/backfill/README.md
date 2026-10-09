@@ -65,7 +65,8 @@ passing both is an error.
   auto-enables `useIam` when both keys are empty, so no flag is required
   under IRSA. In IAM mode the connector honors the platform-injected Hadoop
   AssumeRole configuration: `fs.s3a.assumed.role.*` on AWS and
-  `fs.oss.assumed.role.*` on Alibaba Cloud. A global main-storage role is also
+  `fs.oss.assumed.role.*` on Alibaba Cloud, and the Tencent S3A role provider
+  with `fs.s3a.assumed.role.*` on Tencent Cloud. A main-storage role is also
   forwarded to the Milvus storage FFI. Alibaba OSS IAM mode requires the
   managed runtime to inject `fs.oss.credentials.provider`; hadoop-aliyun has
   no generic ECS/env default provider chain for this path and fails fast when
@@ -76,6 +77,22 @@ passing both is an error.
   CLI paths are normalized to `oss://`; using explicit `oss://` is preferred.
   The Spark runtime image must provide `hadoop-aliyun` 3.4.1; it is declared
   as a provided dependency to avoid conflicting with Spark's Hadoop runtime.
+- **Tencent COS**: pass `--s3-cloud-provider tencent`, the full `bucket-APPID`
+  bucket name, the COS endpoint/region, `--s3-use-ssl`, and `--use-iam`.
+  The runtime must supply `com.zilliz.cloud.hadoop.TencentS3RoleCredentialsProvider`
+  and its target `fs.s3a.assumed.role.arn`; per-bucket settings select a
+  customer's role and optional `assumed.role.external.id`. The provider JAR
+  and TKE OIDC environment must be available on both driver and executors.
+  Backfill forwards the selected main-storage role to the native reader and
+  writer. The source bucket keeps its own Hadoop role. COS uses virtual-host
+  addressing, skips whole-bucket probing and uses individual object deletes.
+  Missing or mixed Tencent IAM configuration fails instead of selecting an
+  AWS or node identity. Explicit static credentials retain their existing path.
+  Direct DataSource callers continue to supply native `fs.cloud_provider=tencent`,
+  `fs.use_iam=true` and `fs.role_arn` (plus `fs.external_id` when required),
+  alongside the runtime's matching Hadoop role configuration.
+  Rebuild the native library from this branch's pinned milvus-storage commit;
+  an older binary cannot perform the Tencent OIDC-to-target-role chain.
 - **Different bucket for input parquet**: when the parquet file lives in a
   different bucket (or even region/account) from the Milvus storage bucket,
   use the `--source-s3-*` flags. AWS uses per-bucket S3A configuration. OSS
