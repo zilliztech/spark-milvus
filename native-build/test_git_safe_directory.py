@@ -60,7 +60,11 @@ class DockerGitTrustTest(unittest.TestCase):
                 # Apply exactly the Dockerfile's trust entries to the temporary build context.
                 git("config", "--global", "--add", "safe.directory", path.replace("/workspace", str(workspace), 1))
             git(*ownership_check)
-            git("-C", destination, "fetch", "--depth=1", workspace / "knowhere", revision)
+            # Ubuntu 22.04's upload-pack checks knowhere/.git but reports the
+            # resolved .git/modules/knowhere path when rejecting the fetch.
+            fetched = git("-C", destination, "fetch", "--depth=1", workspace / "knowhere", revision,
+                          check=False)
+            self.assertEqual(fetched.returncode, 0, fetched.stderr)
             self.assertEqual(git("-C", destination, "rev-parse", "FETCH_HEAD").stdout.strip(), revision)
 
             # The fix must not disable ownership checks for arbitrary repositories.

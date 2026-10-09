@@ -44,6 +44,27 @@ jobs:
           bash -n deploy/helm/spark-milvus-integration/run.sh
           deploy/helm/spark-milvus-integration/tests/run-test.sh
 
+  # Match the image's Ubuntu Git package: newer upload-pack versions no longer
+  # perform the ownership check that can reject local submodule fetches.
+  docker-git-ownership:
+    name: Docker Git ownership regression
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    timeout-minutes: 10
+    steps:
+      - name: Install the image's Git version and Python
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git python3
+          dpkg-query -W git
+
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Test local submodule fetch ownership
+        run: python3 -m unittest discover -s native-build -p 'test_git_safe_directory.py' -v
+
   build-and-test:
     name: Build & unit tests
     runs-on: ubuntu-latest

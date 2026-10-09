@@ -140,10 +140,12 @@ COPY . .
 
 # Initialize missing submodules without resetting source revisions copied from the build context.
 # Local fetches from Knowhere also check ownership of its separate Git directory.
+# Ubuntu 22.04's Git compares safe.directory against the .git file path.
 RUN git config --global --add safe.directory /workspace && \
     git config --global --add safe.directory /workspace/milvus-proto && \
     git config --global --add safe.directory /workspace/milvus-storage && \
     git config --global --add safe.directory /workspace/knowhere && \
+    git config --global --add safe.directory /workspace/knowhere/.git && \
     git config --global --add safe.directory /workspace/.git/modules/knowhere && \
     make init-missing-submodules
 
