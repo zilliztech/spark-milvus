@@ -2,8 +2,8 @@ package com.zilliz.spark.connector.operations.backfill
 
 import org.apache.hadoop.conf.Configuration
 
+import com.zilliz.spark.connector.{MilvusOption, TencentStorageAuth}
 import com.zilliz.spark.connector.loon.Properties
-import com.zilliz.spark.connector.MilvusOption
 
 /** Configuration for backfill operation
   *
@@ -346,6 +346,19 @@ case class BackfillConfig(
       withAwsS3AssumeRole(hadoopConf, defaultSessionName)
     } else if (provider == "aliyun") {
       withAlibabaOssAssumeRole(hadoopConf, defaultSessionName)
+    } else if (provider == "tencent") {
+      val role =
+        TencentStorageAuth.resolve(hadoopConf, s3BucketName).getOrElse {
+          throw new IllegalArgumentException(
+            "Tencent IAM mode requires the runtime Tencent S3A role provider and target role"
+          )
+        }
+      withNativeAssumeRole(
+        role.arn,
+        role.sessionName,
+        role.externalId,
+        defaultSessionName
+      )
     } else {
       this
     }
@@ -458,7 +471,8 @@ object BackfillConfig {
   private[backfill] val DefaultCloudProvider = "aws"
   private[backfill] val AllowedCloudProviders =
     Set("aws", "gcp", "aliyun", "azure", "tencent", "huawei")
-  private[backfill] val NativeAssumeRoleCloudProviders = Set("aws", "aliyun")
+  private[backfill] val NativeAssumeRoleCloudProviders =
+    Set("aws", "aliyun", "tencent")
 
   private[backfill] val DefaultInputFormat = "parquet"
   private[backfill] val AllowedInputFormats =
