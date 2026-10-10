@@ -70,34 +70,11 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
 
   private val available = descriptor.copy(segmentId = 3L, partitionId = 2L)
 
-  test("a segment the snapshot says has no index needs allowUnindexed") {
-    val failure = the[IllegalArgumentException] thrownBy SegmentIndexHandle
-      .select(task, 4L, MetricType.Cosine, allowUnindexed = false)
-
-    failure.getMessage should include("No persisted index for segment 3")
-    SegmentIndexHandle.select(
-      task,
-      4L,
-      MetricType.Cosine,
-      allowUnindexed = true
-    ) shouldBe None
-  }
-
-  test("a segment whose index the snapshot cannot describe is refused") {
-    the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
-      task.copy(indexes = SegmentIndexes.Unknown),
-      4L,
-      MetricType.Cosine,
-      allowUnindexed = true
-    )
-  }
-
   test("index search needs a pinned manifest version") {
     the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
       task.copy(layout = SegmentLayout.Manifest("absent", -1L)),
       4L,
-      MetricType.Cosine,
-      allowUnindexed = true
+      MetricType.Cosine
     )
   }
 
@@ -106,18 +83,49 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
       Vector(available, available.copy(buildId = 7L)),
       Vector(available.copy(rowCount = 9L)),
       Vector(available.copy(segmentId = 9L)),
-      Vector(available.copy(partitionId = 9L)),
-      Vector(
-        available.copy(parameters =
-          available.parameters.updated("metric_type", "IP")
-        )
-      )
+      Vector(available.copy(partitionId = 9L))
     ).foreach { indexes =>
       the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
         task.copy(indexes = SegmentIndexes.Available(indexes)),
         4L,
-        MetricType.Cosine,
-        allowUnindexed = true
+        MetricType.Cosine
+      )
+    }
+  }
+
+  test(
+    "a segment without a usable index is scanned, and its metadata says why"
+  ) {
+    import SegmentIndexHandle.Unusable
+    val otherMetric = available.copy(parameters =
+      available.parameters.updated("metric_type", "IP")
+    )
+    val unloaded = available.copy(parameters =
+      available.parameters.updated("index_type", "DISKANN")
+    )
+    Seq(
+      SegmentIndexes.Unindexed -> Unusable.NoIndex,
+      SegmentIndexes.Unknown -> Unusable.NoMetadata,
+      SegmentIndexes.Available(Vector(otherMetric)) -> Unusable.OtherMetric,
+      SegmentIndexes.Available(Vector(unloaded)) -> Unusable.UnloadedType
+    ).foreach { case (indexes, reason) =>
+      SegmentIndexHandle.usable(3L, indexes, 4L, MetricType.Cosine) shouldBe
+        Left(reason)
+      SegmentIndexHandle.select(
+        task.copy(indexes = indexes),
+        4L,
+        MetricType.Cosine
+      ) shouldBe None
+    }
+    // An index that contradicts the pinned segment is not a reason to scan.
+    Seq(
+      available.copy(rowCount = 9L),
+      available.copy(segmentId = 9L)
+    ).foreach { index =>
+      the[IllegalArgumentException] thrownBy SegmentIndexHandle.select(
+        task.copy(indexes = SegmentIndexes.Available(Vector(index))),
+        4L,
+        MetricType.Cosine
       )
     }
   }
@@ -126,37 +134,40 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
     SegmentIndexHandle.select(
       task.copy(indexes = SegmentIndexes.Available(Vector(available))),
       4L,
-      MetricType.Cosine,
-      allowUnindexed = false
+      MetricType.Cosine
     ) shouldBe Some(available)
   }
 
-  test("planning names every segment that cannot serve the search") {
+  test("planning names every segment whose index contradicts the snapshot") {
     val failure = the[IllegalArgumentException] thrownBy SegmentIndexHandle
       .check(
         Seq(
-          task.copy(segmentId = 3L),
-          task.copy(segmentId = 4L),
           task.copy(
-            segmentId = 5L,
+            segmentId = 3L,
             indexes =
-              SegmentIndexes.Available(Vector(available.copy(segmentId = 5L)))
-          )
+              SegmentIndexes.Available(Vector(available.copy(rowCount = 9L)))
+          ),
+          task.copy(
+            segmentId = 4L,
+            indexes = SegmentIndexes.Available(
+              Vector(available.copy(segmentId = 4L, partitionId = 9L))
+            )
+          ),
+          task.copy(segmentId = 5L)
         ),
         4L,
-        MetricType.Cosine,
-        allowUnindexed = false
+        MetricType.Cosine
       )
 
     failure.getMessage should include("2 of 3 segments")
     failure.getMessage should include("segment 3")
     failure.getMessage should include("segment 4")
     SegmentIndexHandle.check(
-      Seq.empty,
+      Seq(task.copy(segmentId = 5L)),
       4L,
-      MetricType.Cosine,
-      allowUnindexed = false
+      MetricType.Cosine
     )
+    SegmentIndexHandle.check(Seq.empty, 4L, MetricType.Cosine)
   }
 
   test(
@@ -218,16 +229,8 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
       new FailingObjectStore(
         new AssertionError("A bad metric must not be read")
       )
-    val binary = VectorLayout(VectorElementType.Bit, 32)
 
-    // A float index takes L2, IP or COSINE; a binary one HAMMING or JACCARD.
-    the[IllegalArgumentException] thrownBy SegmentIndexHandle.open(
-      descriptor,
-      binary,
-      false,
-      10L,
-      store
-    )
+    // A float index takes L2, IP or COSINE, not a binary metric.
     the[IllegalArgumentException] thrownBy SegmentIndexHandle.open(
       descriptor.copy(parameters =
         descriptor.parameters
@@ -239,6 +242,27 @@ class SegmentIndexHandleTest extends AnyFunSuite with Matchers {
       10L,
       store
     )
+  }
+
+  test("a binary vector index is not searched and nothing is read") {
+    val store =
+      new FailingObjectStore(
+        new AssertionError("A binary index must not be read")
+      )
+
+    val failure = the[IllegalArgumentException] thrownBy SegmentIndexHandle
+      .open(
+        descriptor.copy(parameters =
+          descriptor.parameters
+            .updated("metric_type", "HAMMING")
+            .updated("index_type", "BIN_IVF_FLAT")
+        ),
+        VectorLayout(VectorElementType.Bit, 32),
+        false,
+        10L,
+        store
+      )
+    failure.getMessage should include("binary vector index is not searched")
   }
 
   test("unknown payload names are rejected without being renamed to HNSW") {

@@ -13,6 +13,7 @@ import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
 import com.zilliz.milvus.storage.snapshot.{
   SegmentIndexes,
   SnapshotCatalog,
+  SnapshotOrigin,
   V2SegmentResolver
 }
 
@@ -245,6 +246,124 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
         "requirement failed: A snapshot write copies a snapshot document, which this call has to name"
 
       SnapshotWriter.sourceKeyOf(snapshot) shouldBe Some(sourceKey)
+      SnapshotWriter.sourceOf(snapshot) shouldBe Some(
+        SourceSnapshot(
+          sourceKey,
+          snapshot.bucket,
+          snapshot.collectionId,
+          snapshot.name,
+          snapshot.createdAt
+        )
+      )
+      // A snapshot assembled from option strings has no document to copy, so
+      // a build over it records nothing and is refused before it runs.
+      SnapshotWriter.sourceOf(
+        snapshot.copy(origin = SnapshotOrigin.Options)
+      ) shouldBe None
+    }
+  }
+
+  /** A snapshot Milvus took after the build: segment 32 joined. */
+  private def newer(directory: Path): Unit = {
+    write(
+      directory,
+      "files/snapshots/10/manifests/2/32.avro",
+      SnapshotSegmentFixture.encode(
+        version = 4,
+        segmentId = 32L,
+        partitionId = 20L,
+        rows = 8L,
+        storageVersion = 3L
+      )
+    )
+    val document = new String(
+      Files.readAllBytes(directory.resolve(sourceKey)),
+      UTF_8
+    )
+      .replace(
+        """"name": "source", "id": "1"""",
+        """"name": "newer", "id": "2""""
+      )
+      .replace(
+        """"segment_ids": ["30", "31"]""",
+        """"segment_ids": ["30", "31", "32"]"""
+      )
+      .replace(
+        """"files/snapshots/10/manifests/1/31.avro"""",
+        """"files/snapshots/10/manifests/1/31.avro",
+          "files/snapshots/10/manifests/2/32.avro""""
+      )
+    write(
+      directory,
+      "files/snapshots/10/metadata/2.json",
+      document.getBytes(UTF_8)
+    )
+  }
+
+  test("a job's snapshot write copies the recorded document, not a newer one") {
+    withStore { (directory, store) =>
+      newer(directory)
+      val manifest = JobManifest(
+        "index-1",
+        1L,
+        Seq.empty,
+        indexes = Seq(index(30L, 8L), index(31L, 8L)),
+        sourceSnapshot =
+          SnapshotWriter.sourceOf(catalog(directory).read(sourceKey))
+      )
+
+      val source = SnapshotWriter.recordedSource(
+        manifest,
+        "built/staging/index-1/manifest.json"
+      )
+      val snapshot = SnapshotWriter.recordedSnapshot(
+        source,
+        store,
+        key => catalog(directory).read(key)
+      )
+      val written = SnapshotWriter.write(
+        snapshot,
+        manifest.indexes,
+        target,
+        store,
+        source.key,
+        restorable = false
+      )
+
+      source.key shouldBe sourceKey
+      snapshot.segments.map(_.id) shouldBe Seq(30L, 31L)
+      written.manifestKeys shouldBe Seq(
+        "built/snapshots/10/manifests/5/30.avro",
+        "built/snapshots/10/manifests/5/31.avro"
+      )
+    }
+  }
+
+  test("no recorded source, a deleted one or another collection's is refused") {
+    withStore { (directory, store) =>
+      val source =
+        SnapshotWriter.sourceOf(catalog(directory).read(sourceKey)).get
+
+      the[IllegalArgumentException] thrownBy SnapshotWriter.recordedSource(
+        JobManifest("index-1", 1L, Seq.empty),
+        "built/staging/index-1/manifest.json"
+      ) should have message
+        "The job manifest at 'built/staging/index-1/manifest.json' records no source snapshot, " +
+        "so the snapshot its indexes were built over is unknown; run build_index again"
+      val other = the[IllegalArgumentException] thrownBy SnapshotWriter
+        .recordedSnapshot(
+          source.copy(collectionId = 11L),
+          store,
+          key => catalog(directory).read(key)
+        )
+      other.getMessage should include("the job was built over collection 11")
+
+      store.delete(sourceKey)
+      val gone = the[IllegalArgumentException] thrownBy SnapshotWriter
+        .recordedSnapshot(source, store, key => catalog(directory).read(key))
+      gone.getMessage should include(
+        s"source at '$sourceKey', no longer exists"
+      )
     }
   }
 

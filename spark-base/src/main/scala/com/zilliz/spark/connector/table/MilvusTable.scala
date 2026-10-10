@@ -62,22 +62,32 @@ case class MilvusTable(
 
   override def newScanBuilder(
       options: CaseInsensitiveStringMap
-  ): ScanBuilder = {
-    // Scan options take precedence over the table's.
-    val mergedOptions: ju.Map[String, String] = new ju.HashMap[String, String]()
-    mergedOptions.putAll(milvusOption.options.asJava)
-    mergedOptions.putAll(options)
-    if (mergedOptions.get(MilvusOption.MilvusCollectionID) == null) {
-      mergedOptions.put(
+  ): ScanBuilder =
+    new MilvusScanBuilder(schema(), readOptions(options), snapshot)
+
+  /** The options one read of this table runs with: the read's own over the
+    * table's, a key the read gives replacing the table's in any case, and the
+    * snapshot's collection id where neither names one.
+    */
+  def readOptions(
+      options: CaseInsensitiveStringMap
+  ): CaseInsensitiveStringMap = {
+    val merged: ju.Map[String, String] = new ju.HashMap[String, String]()
+    milvusOption.options.foreach { case (key, value) =>
+      if (!options.containsKey(key)) merged.put(key, value)
+    }
+    merged.putAll(options)
+    if (
+      !merged.asScala.keys.exists(
+        _.equalsIgnoreCase(MilvusOption.MilvusCollectionID)
+      )
+    ) {
+      merged.put(
         MilvusOption.MilvusCollectionID,
         snapshot.collectionId.toString
       )
     }
-    new MilvusScanBuilder(
-      schema(),
-      new CaseInsensitiveStringMap(mergedOptions),
-      snapshot
-    )
+    new CaseInsensitiveStringMap(merged)
   }
 
   override def name(): String = milvusOption.collectionName

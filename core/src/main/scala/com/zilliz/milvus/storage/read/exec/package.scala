@@ -35,10 +35,12 @@ package com.zilliz.milvus.storage.read
   * filter take out, `SegmentVectors` hands out one batch at a time with that
   * bitmap and the batch's first row offset, and `SegmentIndexHandle` opens the
   * index a snapshot pinned, over the index families the connector loads and the
-  * element type the column carries. `IndexRowMapping` says what an index label
-  * means in the segment, which differs from the row number when the column has
-  * nulls. `core.index` computes on what these hand over and opens nothing
-  * itself (docs/design/architecture/vector-search.html sections 2.3 and 2.4).
+  * element type the column carries. It also says, from the metadata alone, why
+  * a segment has no index a search can use; an index search scans such a
+  * segment exactly. `IndexRowMapping` says what an index label means in the
+  * segment, which differs from the row number when the column has nulls.
+  * `core.index` computes on what these hand over and opens nothing itself
+  * (docs/design/architecture/vector-search.html sections 2.3 and 2.4).
   *
   * `SegmentReader.metrics` is what the read cost on the crossing, as
   * `ReadMetrics`: calls and time, batches and bytes, the C side's copies, the

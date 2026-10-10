@@ -48,9 +48,9 @@ import io.milvus.grpc.schema.{DataType => MilvusDataType}
   */
 class MilvusScan(
     schema: StructType,
-    options: CaseInsensitiveStringMap,
+    private[read] val options: CaseInsensitiveStringMap,
     private[read] val snapshot: Snapshot,
-    pushedExpression: Option[PredicateExpr] = None,
+    private[read] val pushedExpression: Option[PredicateExpr] = None,
     private[read] val pushedLimit: Option[Int] = None,
     private[read] val planningSchema: StructType = null
 ) extends Scan

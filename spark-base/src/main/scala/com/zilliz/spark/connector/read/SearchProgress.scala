@@ -194,7 +194,9 @@ private[read] object SearchProgress {
     *
     * An accumulable arrives with the name it was registered under and the value
     * as `Any`; anything that is not one of ours, or not a number, is not this
-    * listener's business.
+    * listener's business. A negative value is a nearest-by join's SQL size or
+    * duration metric that the task never added to, which reports Spark's -1 for
+    * no value: it counts as nothing.
     */
   private[read] def searchValues(
       infos: Seq[(Option[String], Option[Any])]
@@ -202,9 +204,11 @@ private[read] object SearchProgress {
     infos.flatMap {
       case (Some(name), Some(value)) if name.startsWith("milvus.search.") =>
         value match {
-          case number: java.lang.Long    => Some(name -> number.longValue())
-          case number: java.lang.Integer => Some(name -> number.longValue())
-          case _                         => None
+          case number: java.lang.Long if number >= 0L =>
+            Some(name -> number.longValue())
+          case number: java.lang.Integer if number >= 0 =>
+            Some(name -> number.longValue())
+          case _ => None
         }
       case _ => None
     }.toMap

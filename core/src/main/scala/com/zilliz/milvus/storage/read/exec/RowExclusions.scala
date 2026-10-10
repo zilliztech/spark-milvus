@@ -7,12 +7,18 @@ import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.storage.delete.DeletePlan
-import com.zilliz.milvus.storage.expr.{Evaluator, Expr}
+import com.zilliz.milvus.storage.expr.{
+  Evaluator,
+  Expr,
+  PredicateEvaluator,
+  PredicateExpr
+}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
 
-/** Which rows of a segment a search must not see: the deleted ones and the ones
-  * a filter rejects.
+/** Which rows of a segment a search must not see: the deleted ones, the ones a
+  * Milvus expression rejects, and the ones a predicate Spark pushed into the
+  * scan does not keep (SQL three-valued logic: only TRUE survives).
   *
   * Deciding this is what the Milvus format does with its delete files and its
   * expression semantics; a computation only reads the bitmap that comes out
@@ -20,6 +26,7 @@ import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
   */
 final class RowExclusions private (
     expression: Option[Expr],
+    predicate: Option[PredicateExpr],
     deletePlan: DeletePlan,
     pkField: Option[FieldSchema],
     columnNameFor: Long => Option[String],
@@ -32,10 +39,18 @@ final class RowExclusions private (
   private val timestampColumn = columnNameFor(1L).getOrElse("Timestamp")
   private def arrowColumn(name: String): String =
     fieldNameToColumn.getOrElse(name, name)
+  private val predicateColumns: Seq[String] =
+    predicate.toSeq.flatMap(PredicateExpr.fieldIds).sorted.map { fieldId =>
+      columnNameFor(fieldId).getOrElse(
+        throw new IllegalArgumentException(
+          s"The pushed predicate reads field $fieldId, which this segment does not hold"
+        )
+      )
+    }
 
   /** The columns a reader has to deliver for this to be decided at all. */
   val neededColumns: Seq[String] =
-    (expressionFields.toSeq.sorted.map(arrowColumn) ++
+    (expressionFields.toSeq.sorted.map(arrowColumn) ++ predicateColumns ++
       (if (deletePlan.isEmpty) Seq.empty
        else Seq(pkColumn.get, timestampColumn))).distinct
 
@@ -77,10 +92,11 @@ final class RowExclusions private (
             offset + batch.getRowCount <= rows,
             s"Segment ${task.segmentId} holds more rows than the $rows it declared"
           )
-          var row = 0
-          while (row < batch.getRowCount) {
-            if (excludes(batch, row)) excluded.set((offset + row).toInt)
-            row += 1
+          val inBatch = this.excluded(batch)
+          var row = inBatch.nextSetBit(0)
+          while (row >= 0) {
+            excluded.set((offset + row).toInt)
+            row = inBatch.nextSetBit(row + 1)
           }
           offset += batch.getRowCount
         } finally batch.close()
@@ -97,7 +113,26 @@ final class RowExclusions private (
     excluded
   }
 
-  def excludes(batch: VectorSchemaRoot, row: Int): Boolean = {
+  /** The rows of one batch a search must not see, one bit per row. A pushed
+    * predicate is evaluated over the whole batch at once.
+    */
+  def excluded(batch: VectorSchemaRoot): BitSet = {
+    val rows = batch.getRowCount
+    val excluded = new BitSet(math.max(rows, 1))
+    val rejected =
+      predicate.map(PredicateEvaluator.evaluate(_, batch, columnNameFor))
+    var row = 0
+    while (row < rows) {
+      if (excludes(batch, row) || rejected.exists(_.isExcluded(row))) {
+        excluded.set(row)
+      }
+      row += 1
+    }
+    excluded
+  }
+
+  /** What is decided row by row: a delete, or a Milvus expression. */
+  private def excludes(batch: VectorSchemaRoot, row: Int): Boolean = {
     val deleted = !deletePlan.isEmpty && DeletePlans.rowDeleted(
       deletePlan,
       pkField.get,
@@ -117,7 +152,8 @@ object RowExclusions {
       task: SegmentReadTask,
       collection: CollectionSchema,
       expression: Option[Expr],
-      columnNameFor: Long => Option[String]
+      columnNameFor: Long => Option[String],
+      predicate: Option[PredicateExpr] = None
   ): RowExclusions = {
     val pkField = collection.fields.find(_.isPrimaryKey)
     val deletes = DeletePlans.of(task, pkField)
@@ -130,6 +166,13 @@ object RowExclusions {
         field.name -> columnNameFor(field.fieldID).getOrElse(field.name)
       )
       .toMap
-    new RowExclusions(expression, deletes, pkField, columnNameFor, names)
+    new RowExclusions(
+      expression,
+      predicate,
+      deletes,
+      pkField,
+      columnNameFor,
+      names
+    )
   }
 }

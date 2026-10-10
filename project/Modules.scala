@@ -16,6 +16,13 @@ object Modules {
   val isMacOS: Boolean =
     System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("mac")
 
+  /** The environment variable that preloads `jdk`'s signal-chaining library,
+    * and that library.
+    */
+  def signalChaining(jdk: File): (String, File) =
+    if (isMacOS) "DYLD_INSERT_LIBRARIES" -> jdk / "lib" / "libjsig.dylib"
+    else "LD_PRELOAD" -> jdk / "lib" / "libjsig.so"
+
   val checkNoSpark = taskKey[Unit](
     "The core layer must not depend on Spark: org.apache.spark in a source file fails the build"
   )

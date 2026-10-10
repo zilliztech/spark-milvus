@@ -300,6 +300,24 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     packed
   }
 
+  /** Where every kept candidate is, query by query, in no particular order:
+    * what a caller holding something for each kept place, such as a DataFrame
+    * input's rows, checks what it still needs against. Allocates nothing.
+    */
+  def foreachKept(each: (Long, Long) => Unit): Unit = {
+    var query = 0
+    while (query < queries) {
+      val base = query * k
+      val until = base + sizes(query)
+      var slot = base
+      while (slot < until) {
+        each(segments(slot), offsets(slot))
+        slot += 1
+      }
+      query += 1
+    }
+  }
+
   def size: Int = {
     var total = 0
     var query = 0

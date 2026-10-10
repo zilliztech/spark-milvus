@@ -179,7 +179,11 @@ object IndexProbe {
     * `maxQueries` sizes the buffers once for the largest group; the exclusion
     * mask is written once for the segment rather than once per group. `threads`
     * is how many shards of queries an answer is checked and collected in at
-    * once; one keeps everything on the worker thread.
+    * once; one keeps everything on the worker thread. With `rankNonFinite` a
+    * NaN or infinite score is a value like any other, ranked by
+    * `Double.compare`, as the ranking function of a nearest-by join ranks it
+    * (docs/design/architecture/dataframe-api.html section 2); without it such a
+    * score fails the search.
     */
   final class Pipeline(
       target: Target,
@@ -188,7 +192,8 @@ object IndexProbe {
       parameters: Map[String, String],
       allocator: BufferAllocator,
       val maxQueries: Int,
-      val threads: Int = 1
+      val threads: Int = 1,
+      rankNonFinite: Boolean = false
   ) extends AutoCloseable {
     require(k > 0, s"topK must be positive: $k")
     require(
@@ -335,6 +340,7 @@ object IndexProbe {
               labels,
               rows,
               target,
+              rankNonFinite,
               seen(shard),
               touched(shard)
             )
@@ -467,6 +473,7 @@ object IndexProbe {
       excluded: BitSet,
       rows: Long,
       target: Target,
+      rankNonFinite: Boolean,
       seen: Array[Long],
       touched: Array[Int]
   ): Boolean = {
@@ -489,9 +496,10 @@ object IndexProbe {
             s"Segment ${target.segmentId}: the index returned excluded row $id"
           )
           val score = scores.getFloat(position * 4L)
+          // A negative distance is the engine's fault whatever ranks it.
           require(
-            JavaFloat.isFinite(score) &&
-              (metric != MetricType.L2 || score >= 0),
+            (rankNonFinite || JavaFloat.isFinite(score)) &&
+              (metric != MetricType.L2 || !(score < 0)),
             s"Segment ${target.segmentId}: the index returned an invalid score for row $id"
           )
           // A row the index returned twice for one query has its bit set

@@ -12,11 +12,13 @@ import com.zilliz.milvus.storage.schema.MetricType
 
 import io.knowhere.DType
 
-/** Searches a segment by computing every distance, one native call per batch.
+/** Searches a unit by computing every distance, one native call per batch.
   *
   * The batches, their exclusion bitmaps and their row offsets come from the
-  * Milvus format side; this only calls the engine and turns what comes back
-  * into candidates (docs/design/architecture/vector-search.html section 2.3).
+  * input: a Milvus segment's from the format side, a DataFrame input's from its
+  * rows ([[VectorBatch]]). This only calls the engine and turns what comes back
+  * into candidates, a candidate's place being the unit's id and the row's
+  * position in it (docs/design/architecture/vector-search.html section 2.3).
   *
   * A float32 batch goes to the batched distance entry, which hands every query
   * of the group to the bundled faiss in one call so that it takes its SGEMM
@@ -25,14 +27,13 @@ import io.knowhere.DType
   * buffer and the row numbers the engine returns are mapped back. Every other
   * element type goes to Knowhere's per-query brute force with the bitmap as it
   * is.
+  *
+  * A search ranked by a [[RankingFunction]] hands Knowhere only the rows in
+  * [[EngineRange]]; the function scores the batch's other rows against every
+  * query of the group, and both kinds of score meet in the group's merger
+  * (docs/design/architecture/dataframe-api.html section 2).
   */
 object ExactScan {
-
-  /** The metrics the batched entry computes; the others belong to binary
-    * vectors, which never reach it.
-    */
-  private val BatchedMetrics: Set[MetricType] =
-    Set(MetricType.L2, MetricType.IP, MetricType.Cosine)
 
   /** Adds this segment's candidates to `merger`, which counts its queries the
     * way the group does: query 0 is the group's first query. The buffers of a
@@ -69,43 +70,94 @@ object ExactScan {
 
   /** One batch, one native call. The batch stays open: a task that answers more
     * than one query group keeps its batches and calls this once per group
-    * (section 2.3).
+    * (section 2.3). `ranked` is the batch as a ranking function sees it, worked
+    * out once for all the groups.
     */
   def batch(
-      current: SegmentVectors.Batch,
+      current: VectorBatch,
       queries: QueryMatrix,
       segmentId: Long,
       k: Int,
       metric: MetricType,
       allocator: BufferAllocator,
       merger: TopKMerger,
-      onProgress: SegmentSearch.Progress => Unit = _ => ()
+      onProgress: SegmentSearch.Progress => Unit = _ => (),
+      ranked: Option[EngineRange.Batch] = None
   ): Unit = {
     require(k > 0, s"topK must be positive: $k")
-    if (current.visibleRows <= 0) return
-    val dtype = queries.layout.dtype
-    if (dtype == DType.FLOAT32 && BatchedMetrics(metric))
-      batched(
-        current,
-        queries,
-        segmentId,
-        k,
-        metric,
-        allocator,
-        merger,
-        onProgress
+    val excluded = ranked.fold(current.excluded)(_.engineExcluded)
+    val visible = ranked.fold(current.visibleRows)(_.engineRows)
+    if (visible > 0) {
+      if (queries.layout.dtype == DType.FLOAT32)
+        batched(
+          current,
+          excluded,
+          visible,
+          queries,
+          segmentId,
+          k,
+          metric,
+          allocator,
+          merger,
+          onProgress
+        )
+      else
+        perQuery(
+          current,
+          excluded,
+          visible,
+          queries,
+          segmentId,
+          k,
+          metric,
+          allocator,
+          merger,
+          onProgress
+        )
+    }
+    ranked.foreach(
+      scoreByFunction(current, _, queries, segmentId, merger, onProgress)
+    )
+  }
+
+  /** The rows Knowhere was not given, scored by the function against every
+    * query of the group. A query is decoded from the matrix once, as the engine
+    * received it.
+    */
+  private def scoreByFunction(
+      current: VectorBatch,
+      ranked: EngineRange.Batch,
+      queries: QueryMatrix,
+      segmentId: Long,
+      merger: TopKMerger,
+      onProgress: SegmentSearch.Progress => Unit
+  ): Unit = if (ranked.rankedRows.nonEmpty) {
+    val query = new Array[Float](queries.dimension)
+    var at = 0
+    while (at < queries.queries) {
+      EngineRange.decode(queries.buffer, at, queries.layout, query)
+      var row = 0
+      while (row < ranked.rankedRows.length) {
+        val score = ranked.function.score(query, ranked.rankedValues(row))
+        if (score != null && !merger.rejectsScore(at, score.doubleValue()))
+          merger.add(
+            at,
+            segmentId,
+            current.firstRow + ranked.rankedRows(row),
+            score.doubleValue()
+          )
+        row += 1
+      }
+      at += 1
+    }
+    onProgress(
+      SegmentSearch.Progress(
+        0,
+        0L,
+        queries.queries.toLong * ranked.rankedRows.length,
+        0
       )
-    else
-      perQuery(
-        current,
-        queries,
-        segmentId,
-        k,
-        metric,
-        allocator,
-        merger,
-        onProgress
-      )
+    )
   }
 
   /** The visible rows of a batch as one contiguous buffer, and for each of its
@@ -169,7 +221,9 @@ object ExactScan {
   }
 
   private def batched(
-      current: SegmentVectors.Batch,
+      current: VectorBatch,
+      excluded: BitSet,
+      visible: Int,
       queries: QueryMatrix,
       segmentId: Long,
       k: Int,
@@ -179,15 +233,15 @@ object ExactScan {
       onProgress: SegmentSearch.Progress => Unit
   ): Unit = {
     val parameters = s"""{"metric_type":"${metric.name}"}"""
-    val count = math.min(k, current.visibleRows)
+    val count = math.min(k, visible)
     val compacted =
-      if (current.excluded.isEmpty) None
+      if (excluded.isEmpty) None
       else
         Some(
           compact(
             current.base.buffer,
             current.rows,
-            current.excluded,
+            excluded,
             queries.layout.rowBytes,
             allocator
           )
@@ -216,17 +270,18 @@ object ExactScan {
         SegmentSearch.Progress(
           1,
           System.nanoTime() - started,
-          queries.queries.toLong * current.visibleRows.toLong,
+          queries.queries.toLong * visible.toLong,
           0
         )
       )
       collect(
-        current,
+        excluded,
         queries.queries,
         count,
         ids,
         scores,
         segmentId,
+        current.firstRow,
         merger,
         rows,
         compacted.map(_.batchRows)
@@ -239,7 +294,9 @@ object ExactScan {
   }
 
   private def perQuery(
-      current: SegmentVectors.Batch,
+      current: VectorBatch,
+      excluded: BitSet,
+      visible: Int,
       queries: QueryMatrix,
       segmentId: Long,
       k: Int,
@@ -250,12 +307,12 @@ object ExactScan {
   ): Unit = {
     val parameters = s"""{"metric_type":"${metric.name}"}"""
     val dtype = queries.layout.dtype
-    val count = math.min(k, current.visibleRows)
+    val count = math.min(k, visible)
     val ids = allocator.buffer(queries.queries.toLong * count * 8L)
     val scores = allocator.buffer(queries.queries.toLong * count * 4L)
     val mask = allocator.buffer((current.rows.toLong + 7L) / 8L)
     try {
-      writeMask(current, mask)
+      writeMask(excluded, current.rows, mask)
       val started = System.nanoTime()
       NativeVectorSearch.bruteForce(
         dtype,
@@ -277,17 +334,18 @@ object ExactScan {
         SegmentSearch.Progress(
           1,
           System.nanoTime() - started,
-          queries.queries.toLong * current.visibleRows.toLong,
+          queries.queries.toLong * visible.toLong,
           0
         )
       )
       collect(
-        current,
+        excluded,
         queries.queries,
         count,
         ids,
         scores,
         segmentId,
+        current.firstRow,
         merger,
         current.rows,
         None
@@ -300,28 +358,31 @@ object ExactScan {
   }
 
   private def writeMask(
-      batch: SegmentVectors.Batch,
+      excluded: BitSet,
+      rows: Int,
       mask: ArrowBuf
   ): Unit = {
     mask.setZero(0, mask.capacity())
-    var row = batch.excluded.nextSetBit(0)
-    while (row >= 0 && row < batch.rows) {
+    var row = excluded.nextSetBit(0)
+    while (row >= 0 && row < rows) {
       val index = row.toLong / 8L
       mask.setByte(index, mask.getByte(index) | (1 << (row % 8)))
-      row = batch.excluded.nextSetBit(row + 1)
+      row = excluded.nextSetBit(row + 1)
     }
   }
 
   /** `rows` is what the engine saw and `batchRows` maps its row numbers back to
-    * the batch when the batch was compacted.
+    * the batch when the batch was compacted; `excluded` is what the engine was
+    * told to skip, and `firstRow` where the batch starts in the segment.
     */
   private def collect(
-      batch: SegmentVectors.Batch,
+      excluded: BitSet,
       queries: Int,
       count: Int,
       ids: ArrowBuf,
       scores: ArrowBuf,
       segmentId: Long,
+      firstRow: Long,
       merger: TopKMerger,
       rows: Int,
       batchRows: Option[Array[Int]]
@@ -342,7 +403,7 @@ object ExactScan {
             case None          => id.toInt
           }
           require(
-            !batch.excluded.get(row),
+            !excluded.get(row),
             s"The engine returned excluded row $row"
           )
           val score = scores.getFloat(position * 4L)
@@ -350,7 +411,7 @@ object ExactScan {
             JavaFloat.isFinite(score),
             s"The engine returned a score that is not finite for row $row"
           )
-          merger.add(query, segmentId, batch.firstRow + row, score.toDouble)
+          merger.add(query, segmentId, firstRow + row, score.toDouble)
         }
         slot += 1
       }

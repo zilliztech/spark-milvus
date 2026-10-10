@@ -82,11 +82,14 @@ object MilvusOption {
   val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
   val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
   val SearchQueriesMaxBytes = "milvus.search.queries.max.bytes"
-  val SearchQueriesDirect = "milvus.search.queries.direct"
   val SearchGroupMaxBytes = "milvus.search.group.max.bytes"
   val SearchSegmentsMaxBytes = "milvus.search.segments.max.bytes"
   val SearchCollectThreads = "milvus.search.collect.threads"
   val SearchQueryRanges = "milvus.search.query.ranges"
+  // An index's search tuning, given with the base input of a NEAREST BY:
+  // ef for the HNSW family, nprobe for the IVF family
+  // (docs/design/architecture/dataframe-api.html section 5).
+  val SearchParams = "milvus.search.params"
   val WriteFileRollingBytes = "milvus.write.file.rolling.bytes"
   val MilvusFilter = "milvus.filter"
 
@@ -334,6 +337,17 @@ object MilvusOption {
     backupDirFrom(key => Option(options.get(key)))
   }
 
+  /** The search tuning a read names in `milvus.search.params`; none when the
+    * option is absent or blank.
+    */
+  def searchParameters(
+      options: Map[String, String]
+  ): scala.collection.immutable.Map[String, String] =
+    OptionParsing
+      .value(options, SearchParams)
+      .map(OptionParsing.namedValues(_, s"'$SearchParams'"))
+      .getOrElse(scala.collection.immutable.Map.empty)
+
   def isBackupMode(options: Map[String, String]): Boolean =
     backupDir(options).isDefined
 
@@ -423,8 +437,9 @@ object MilvusOption {
     * to agree on UAT (V2 and V3 segments, the three delete states, the
     * all-types collection value by value). Arrays of every element type were
     * compared in unit tests and on UAT. `false` takes the row path. Vector
-    * search does not go through the scan outlets: `MilvusSearch.search` reads
-    * segments itself, so this option does not affect it.
+    * search does not go through the scan outlets: a nearest-by join the
+    * connector runs reads the segments itself (`MilvusSearch.execute`), so this
+    * option does not affect it.
     */
   private def readColumnarFrom(
       getOption: String => Option[String]

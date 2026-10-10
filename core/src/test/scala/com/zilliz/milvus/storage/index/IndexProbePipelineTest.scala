@@ -53,7 +53,9 @@ class IndexProbePipelineTest
   private final class Fake(
       val segmentId: Long,
       shortUntilEf: Int = 0,
-      badRow: Boolean = false
+      badRow: Boolean = false,
+      // A score in place of the deterministic one, by (query, slot).
+      scoreAt: (Int, Int) => Option[Float] = (_, _) => None
   ) extends IndexProbe.Target {
     val calls = new AtomicInteger
     var lastParameters = ""
@@ -95,7 +97,10 @@ class IndexProbePipelineTest
             else if (badRow && query == 1 && slot == 0) rows + 5
             else rowOf(query, slot, q0)
           ids.putLong((at * 8).toInt, id)
-          scores.putFloat((at * 4).toInt, scoreOf(query, slot, q0))
+          scores.putFloat(
+            (at * 4).toInt,
+            scoreAt(query, slot).getOrElse(scoreOf(query, slot, q0))
+          )
         }
       }
     }
@@ -267,6 +272,69 @@ class IndexProbePipelineTest
         val failure =
           the[IllegalArgumentException] thrownBy pipeline.finish(_ => ())
         failure.getMessage should include("outside its 1000 rows")
+      } finally pipeline.close()
+    } finally m.close()
+  }
+
+  test("a NaN score fails the search unless a ranking function ranks it") {
+    val m = matrix(2, 0)
+    try {
+      def nan(query: Int, slot: Int) =
+        if (query == 1 && slot == 0) Some(Float.NaN) else None
+      val failing = new IndexProbe.Pipeline(
+        new Fake(3L, scoreAt = nan),
+        new BitSet(),
+        k,
+        Map.empty,
+        allocator,
+        2
+      )
+      try {
+        failing.run(m, new TopKMerger(2, k, MetricType.L2), _ => ())
+        val failure =
+          the[IllegalArgumentException] thrownBy failing.finish(_ => ())
+        failure.getMessage should include("invalid score")
+      } finally failing.close()
+
+      val merger = new TopKMerger(2, k, MetricType.L2)
+      val ranking = new IndexProbe.Pipeline(
+        new Fake(3L, scoreAt = nan),
+        new BitSet(),
+        k,
+        Map.empty,
+        allocator,
+        2,
+        rankNonFinite = true
+      )
+      try {
+        ranking.run(m, merger, _ => ())
+        ranking.finish(_ => ())
+      } finally ranking.close()
+      // Double.compare puts NaN above every number: the worst L2 distance.
+      val ranked = merger.results(1).map(_.score)
+      ranked.size shouldBe k
+      ranked.last.isNaN shouldBe true
+      ranked.init.forall(score => !score.isNaN) shouldBe true
+    } finally m.close()
+  }
+
+  test("a negative L2 score fails even under a ranking function") {
+    val m = matrix(1, 0)
+    try {
+      val pipeline = new IndexProbe.Pipeline(
+        new Fake(4L, scoreAt = (_, slot) => if (slot == 0) Some(-1f) else None),
+        new BitSet(),
+        k,
+        Map.empty,
+        allocator,
+        1,
+        rankNonFinite = true
+      )
+      try {
+        pipeline.run(m, new TopKMerger(1, k, MetricType.L2), _ => ())
+        val failure =
+          the[IllegalArgumentException] thrownBy pipeline.finish(_ => ())
+        failure.getMessage should include("invalid score")
       } finally pipeline.close()
     } finally m.close()
   }

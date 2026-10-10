@@ -6,7 +6,8 @@ import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.{
   FieldVector,
   FixedSizeBinaryVector,
-  Float4Vector
+  Float4Vector,
+  VarBinaryVector
 }
 import org.apache.arrow.vector.complex.{FixedSizeListVector, ListVector}
 import org.apache.arrow.vector.types.pojo.FieldType
@@ -64,6 +65,20 @@ class KnowhereBuffersTest
     vector.allocateNew(values.size)
     values.zipWithIndex.foreach {
       case (Some(bytes), row) => vector.set(row, bytes)
+      case (None, row)        => vector.setNull(row)
+    }
+    vector.setValueCount(values.size)
+    vector
+  }
+
+  /** The layout of a nullable vector field: variable-width binary, every value
+    * one row's bytes.
+    */
+  private def varBinary(values: Seq[Option[Array[Byte]]]): VarBinaryVector = {
+    val vector = track(new VarBinaryVector("vector", allocator))
+    vector.allocateNew(values.size)
+    values.zipWithIndex.foreach {
+      case (Some(bytes), row) => vector.setSafe(row, bytes)
       case (None, row)        => vector.setNull(row)
     }
     vector.setValueCount(values.size)
@@ -198,6 +213,50 @@ class KnowhereBuffersTest
     base.borrowed shouldBe false
     rows shouldBe Seq(1)
     floats(base, 6) shouldBe Seq(1f, 2f, 0f, 0f, 5f, 6f)
+  }
+
+  test(
+    "a nullable vector column of variable-width binary is handed over as it lies"
+  ) {
+    val layout = VectorLayout(VectorElementType.Float32, 2)
+    val vector = varBinary(
+      Seq(Some(bytesOf(Seq(1f, 2f))), Some(bytesOf(Seq(3f, 4f))))
+    )
+
+    val (base, rows) = excluded(vector, layout)
+
+    base.borrowed shouldBe true
+    base.rows shouldBe 2
+    rows shouldBe empty
+    floats(base, 4) shouldBe Seq(1f, 2f, 3f, 4f)
+  }
+
+  test(
+    "a variable-width binary batch with a null row is copied and the row is excluded"
+  ) {
+    val layout = VectorLayout(VectorElementType.Float32, 2)
+    val vector = varBinary(
+      Seq(Some(bytesOf(Seq(1f, 2f))), None, Some(bytesOf(Seq(5f, 6f))))
+    )
+
+    val (base, rows) = excluded(vector, layout)
+
+    base.borrowed shouldBe false
+    base.rows shouldBe 3
+    rows shouldBe Seq(1)
+    floats(base, 6) shouldBe Seq(1f, 2f, 0f, 0f, 5f, 6f)
+  }
+
+  test("a variable-width binary row of another width fails") {
+    val layout = VectorLayout(VectorElementType.Float32, 2)
+    val vector = varBinary(Seq(None, Some(bytesOf(Seq(1f, 2f, 3f)))))
+
+    val failure = the[IllegalArgumentException] thrownBy excluded(
+      vector,
+      layout
+    )
+
+    failure.getMessage should include("has 12 bytes")
   }
 
   test("a row width other than the field's fails") {

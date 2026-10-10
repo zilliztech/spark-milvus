@@ -12,13 +12,18 @@ import com.zilliz.milvus.storage.snapshot.json.{
 }
 import com.zilliz.milvus.storage.write.commit.JobManifest
 import com.zilliz.milvus.storage.write.exec.StagingLayout
+import com.zilliz.spark.connector.extensions.{
+  MilvusSparkPlugin,
+  MilvusSparkSessionExtensions
+}
+import com.zilliz.spark.connector.implicits._
 import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 /** A brute-force search at a size that does not fit in memory, run the way a
   * job runs it: the connector writes the base as V3 segments on the local
-  * filesystem, reads them back through their manifests, and `MilvusSearch`
+  * filesystem, reads them back through their manifests, and an EXACT NEAREST BY
   * searches them with the upstream Knowhere kernel.
   *
   * It answers what a scalar stand-in cannot: how the first stage partitions,
@@ -55,6 +60,12 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
   *   EXACT_HOLD=true                 hold the process at the end for the UI;
   *                                   false exits once the hits are counted
   * }}}
+  *
+  * The search prints one `RESULT` line from [[SearchRunMeasure]]: its time, the
+  * bytes its shuffles wrote and what its take stage read. It sums the hits'
+  * scores, and NEAREST BY has no score column, so it computes the ranking again
+  * for every hit and reads the hit's vector to do it
+  * (docs/design/architecture/dataframe-api.html section 7).
   */
 object ExactSearchScale {
 
@@ -137,6 +148,11 @@ object ExactSearchScale {
         (executors * executorCores).toString
       )
       .config("spark.eventLog.enabled", "false")
+      .config(
+        "spark.sql.extensions",
+        classOf[MilvusSparkSessionExtensions].getName
+      )
+      .config("spark.plugins", classOf[MilvusSparkPlugin].getName)
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     println(s"Spark UI: ${spark.sparkContext.uiWebUrl.getOrElse("(none)")}")
@@ -151,13 +167,13 @@ object ExactSearchScale {
       return
     }
 
-    val queries = spark
+    val query = spark
       .range(queryRows)
       .select(
-        col("id").as(SearchQueries.IdColumn),
+        col("id").as("qid"),
         array(
           (0 until dim).map(d => (rand(d.toLong) * 2.0 - 1.0).cast("float")): _*
-        ).as(SearchQueries.VectorColumn)
+        ).as("qv")
       )
 
     val options = storage ++ Map(
@@ -182,24 +198,16 @@ object ExactSearchScale {
       .map(MilvusOption.ReadBatchMaxBytes -> _)
 
     println("--- first stage starts; watch the UI, then kill this process ---")
-    val searchStarted = System.currentTimeMillis()
-    val hits = MilvusSearch.search(
-      spark,
-      options,
-      queries,
-      "vector",
-      topK,
-      "L2",
-      "exact",
-      Map.empty,
-      None,
-      Seq.empty,
-      true
-    )
-    println(s"hits: ${hits.count()}")
-    println(
-      s"search done in ${(System.currentTimeMillis() - searchStarted) / 1000}s"
-    )
+    val base = spark.read.format("milvus").options(options).load()
+    val ranking =
+      call_function("vector_l2_distance", query("qv"), base("vector"))
+    val (answered, measured) = SearchRunMeasure(spark) {
+      query
+        .nearestByJoin(base, ranking, topK, "exact", "distance")
+        .agg(count(lit(1)), sum(ranking))
+        .head()
+    }
+    println(measured.line(s"nearest hits=${answered.getLong(0)}"))
     if (env("EXACT_HOLD", "true").toBoolean) {
       while (true) Thread.sleep(60000L)
     } else spark.stop()

@@ -8,7 +8,8 @@ import org.apache.arrow.vector.{
   FixedSizeBinaryVector,
   Float2Vector,
   Float4Vector,
-  TinyIntVector
+  TinyIntVector,
+  VarBinaryVector
 }
 import org.apache.arrow.vector.complex.{FixedSizeListVector, ListVector}
 
@@ -21,9 +22,13 @@ import io.knowhere.DType
   *
   * The batch is handed over as it lies when its layout already matches what
   * Knowhere expects (docs/design/architecture/vector-search.html section 2.2);
-  * otherwise its rows are copied once into a buffer this object owns. Values
-  * are not inspected: a non-finite value reaches Knowhere and shows up as a
-  * non-finite score, which the caller rejects.
+  * otherwise its rows are copied once into a buffer this object owns. A column
+  * Milvus wrote as a nullable vector field is variable-width binary, every
+  * value one row's bytes, and lies end to end when no row of the batch is null.
+  * Values are not inspected here. Without a ranking function a non-finite value
+  * reaches Knowhere and shows up as a non-finite score, which the caller
+  * rejects; with one, [[EngineRange]] reads the batch first and keeps such rows
+  * away from Knowhere.
   */
 object KnowhereBuffers {
 
@@ -83,6 +88,57 @@ object KnowhereBuffers {
         new Base(region(target, 0L, bytes), rows.toInt, false, Some(target))
       parts.foreach(_.close())
       joinedBase
+    } catch {
+      case failure: Throwable =>
+        target.close()
+        throw failure
+    }
+  }
+
+  /** Float vectors of `dimension` elements as a base this object owns: row `i`
+    * is `vectors(i)`, copied element by element, and a null vector is a row of
+    * zeros its caller excludes. What a DataFrame input's batch is, its vectors
+    * taken out of Spark's arrays (docs/design/architecture/dataframe-api.html
+    * section 4).
+    */
+  def ofFloats(
+      vectors: Array[Array[Float]],
+      rows: Int,
+      dimension: Int,
+      allocator: BufferAllocator
+  ): Base = {
+    require(
+      rows >= 0 && rows <= vectors.length,
+      s"$rows rows of ${vectors.length} vectors"
+    )
+    require(dimension > 0, s"Vector dimension must be positive: $dimension")
+    val rowBytes = dimension.toLong * 4L
+    val bytes = Math.multiplyExact(rows.toLong, rowBytes)
+    require(
+      bytes <= Int.MaxValue,
+      s"Vector batch of $bytes bytes exceeds one ByteBuffer"
+    )
+    val target = allocator.buffer(math.max(bytes, 1L))
+    try {
+      target.setZero(0L, target.capacity())
+      var row = 0
+      while (row < rows) {
+        val vector = vectors(row)
+        if (vector != null) {
+          require(
+            vector.length == dimension,
+            s"Row $row holds ${vector.length} elements; the batch takes $dimension"
+          )
+          val at = row * rowBytes
+          var element = 0
+          while (element < dimension) {
+            target.setFloat(at + element * 4L, vector(element))
+            element += 1
+          }
+        }
+        row += 1
+      }
+      new Base(region(target, 0L, bytes), rows, false, Some(target))
     } catch {
       case failure: Throwable =>
         target.close()
@@ -150,6 +206,10 @@ object KnowhereBuffers {
         if (regularOffsets(list, layout.dimension, rows))
           elements(list.getDataVector, layout, rows)
         else None
+      case binary: VarBinaryVector =>
+        if (regularBinaryOffsets(binary, layout.rowBytes, rows))
+          Some(binary.getDataBuffer)
+        else None
       case other =>
         throw new IllegalArgumentException(
           s"${other.getClass.getSimpleName} does not hold dense vectors"
@@ -199,6 +259,24 @@ object KnowhereBuffers {
     var regular = true
     while (regular && row <= rows) {
       regular = offsets.getInt(row.toLong * 4L) == row.toLong * dimension
+      row += 1
+    }
+    regular
+  }
+
+  /** Whether value `i` of a variable-width binary column starts at `i` rows of
+    * `rowBytes`, so that the values lie end to end in its data buffer.
+    */
+  private def regularBinaryOffsets(
+      binary: VarBinaryVector,
+      rowBytes: Int,
+      rows: Int
+  ): Boolean = {
+    val offsets = binary.getOffsetBuffer
+    var row = 0
+    var regular = true
+    while (regular && row <= rows) {
+      regular = offsets.getInt(row.toLong * 4L) == row.toLong * rowBytes
       row += 1
     }
     regular
@@ -271,6 +349,19 @@ object KnowhereBuffers {
           start.toLong,
           destination,
           target
+        )
+      case binary: VarBinaryVector =>
+        val start = binary.getStartOffset(row)
+        val length = binary.getEndOffset(row) - start
+        require(
+          length == layout.rowBytes,
+          s"Vector at row $row has $length bytes; the field needs ${layout.rowBytes}"
+        )
+        target.setBytes(
+          destination,
+          binary.getDataBuffer,
+          start.toLong,
+          layout.rowBytes
         )
       case other =>
         throw new IllegalArgumentException(

@@ -4,11 +4,15 @@ import java.util.Arrays
 import scala.collection.mutable
 
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{DataFrame, Row}
-import org.apache.spark.sql.catalyst.CatalystTypeConverters
+import org.apache.spark.sql.catalyst.expressions.{
+  GenericInternalRow,
+  JoinedRow,
+  UnsafeProjection
+}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.functions.{col, hash, lit, pmod}
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.TaskContext
 
 import com.zilliz.milvus.storage.read.exec.SegmentReaderRegistry
@@ -80,6 +84,12 @@ private[read] object SearchTake {
     * million rows in about half the bytes, and the number of tasks and the
     * buckets a segment is cut into come from [[partitioning]], sized so that
     * what one task buffers fits the heap it has.
+    *
+    * The rows come out as the hit columns and then `output`, never converted to
+    * Scala values on the way; an iterator hands the same row object back, so a
+    * consumer that keeps one copies it. A hit whose segment is NULL -- a query
+    * a LEFT OUTER nearest-by join keeps without a hit -- reads nothing and
+    * comes out with NULL output columns.
     */
   def rows(
       hits: DataFrame,
@@ -88,11 +98,12 @@ private[read] object SearchTake {
       arrowMaxBytes: Long,
       metrics: SearchMetrics,
       partitioning: Partitioning
-  ): RDD[Row] = {
+  ): RDD[InternalRow] = {
     val hitSchema = hits.schema
     val segmentColumn = hitSchema.fieldIndex("_segment_id")
     val offsetColumn = hitSchema.fieldIndex("_row_offset")
     val known = hits.sparkSession.sparkContext.broadcast(partitions)
+    val resultTypes = (hitSchema.fields ++ output.fields).map(_.dataType)
     // Hits of one segment land in one task unless the plan cut the segment
     // into buckets, in which case a bucket of its row offsets does; the
     // bucket is a repartitioning expression, not a column the result carries.
@@ -114,9 +125,12 @@ private[read] object SearchTake {
         )
         Option(TaskContext.get())
           .foreach(_.addTaskCompletionListener[Unit](_ => allocator.close()))
-        val toHit = CatalystTypeConverters.createToScalaConverter(hitSchema)
-        bySegment(rows, segmentColumn).iterator.flatMap {
-          case (segmentId, hitRows) =>
+        val project = UnsafeProjection.create(resultTypes)
+        val joined = new JoinedRow()
+        val (withoutHit, bySegment) = SearchTake.bySegment(rows, segmentColumn)
+        val nothing = new GenericInternalRow(output.size)
+        withoutHit.iterator.map(hit => project(joined(hit, nothing))) ++
+          bySegment.iterator.flatMap { case (segmentId, hitRows) =>
             val partition = known.value.getOrElse(
               segmentId,
               throw new IllegalStateException(
@@ -128,15 +142,15 @@ private[read] object SearchTake {
               output,
               hitRows,
               offsetColumn,
-              toHit,
               allocator.allocator,
               metrics
-            )
-        }
+            ).map { case (hit, taken) => project(joined(hit, taken)) }
+          }
       }
   }
 
-  /** The task's hits in one bucket per segment.
+  /** The task's hits in one bucket per segment, and apart from them the hits
+    * that have no segment.
     *
     * Every row is copied, because the shuffle reader hands the same `UnsafeRow`
     * back with new bytes on each step.
@@ -144,18 +158,24 @@ private[read] object SearchTake {
   private def bySegment(
       rows: Iterator[InternalRow],
       segmentColumn: Int
-  ): mutable.LongMap[mutable.ArrayBuffer[InternalRow]] = {
+  ): (
+      mutable.ArrayBuffer[InternalRow],
+      mutable.LongMap[mutable.ArrayBuffer[InternalRow]]
+  ) = {
+    val withoutHit = mutable.ArrayBuffer.empty[InternalRow]
     val groups = mutable.LongMap.empty[mutable.ArrayBuffer[InternalRow]]
     while (rows.hasNext) {
       val row = rows.next()
-      groups
-        .getOrElseUpdate(
-          row.getLong(segmentColumn),
-          mutable.ArrayBuffer.empty[InternalRow]
-        )
-        .addOne(row.copy())
+      if (row.isNullAt(segmentColumn)) withoutHit += row.copy()
+      else
+        groups
+          .getOrElseUpdate(
+            row.getLong(segmentColumn),
+            mutable.ArrayBuffer.empty[InternalRow]
+          )
+          .addOne(row.copy())
     }
-    groups
+    (withoutHit, groups)
   }
 
   /** The distinct row offsets of these hits, ascending: what the reader takes.
@@ -183,25 +203,24 @@ private[read] object SearchTake {
     if (kept == all.length) all else Arrays.copyOf(all, kept)
   }
 
+  /** Each hit of one segment with the output columns of its row. */
   private def take(
       partition: MilvusInputPartition,
       output: StructType,
       hits: mutable.ArrayBuffer[InternalRow],
       offsetColumn: Int,
-      toHit: Any => Any,
       allocator: org.apache.arrow.memory.BufferAllocator,
       metrics: SearchMetrics
-  ): Iterator[Row] = {
+  ): Iterator[(InternalRow, InternalRow)] = {
     val binding = ColumnBinding(partition, output)
     val offsets = offsetsOf(hits, offsetColumn)
     val columns = output.fieldNames.toSeq.map(binding.arrowColumnFor)
     // A zero-column projection still needs row cardinality from one column.
     val projected = if (columns.nonEmpty) columns else Seq(binding.pkColumnName)
-    val toScala = CatalystTypeConverters.createToScalaConverter(output)
     // Row i of this array is the row at offsets(i), which is the order the
     // reader returns them in, so a hit finds its row by a search over offsets
     // rather than through a map keyed by a boxed Long.
-    val taken = new Array[Row](offsets.length)
+    val taken = new Array[InternalRow](offsets.length)
     val started = System.nanoTime()
     val reader = SegmentReaderRegistry.open(
       partition.task,
@@ -224,16 +243,14 @@ private[read] object SearchTake {
                 index < offsets.length,
                 s"Segment ${partition.task.segmentId} returned more rows than the ${offsets.length} asked for"
               )
-              taken(index) = toScala(
-                ArrowConverter
-                  .arrowToInternalRow(
-                    batch,
-                    row,
-                    output,
-                    binding.arrowColumnNames
-                  )
-                  .copy()
-              ).asInstanceOf[Row]
+              taken(index) = ArrowConverter
+                .arrowToInternalRow(
+                  batch,
+                  row,
+                  output,
+                  binding.arrowColumnNames
+                )
+                .copy()
               index += 1
               row += 1
             }
@@ -260,7 +277,7 @@ private[read] object SearchTake {
         at >= 0,
         s"Segment ${partition.task.segmentId} has no row for offset ${hit.getLong(offsetColumn)}"
       )
-      Row.merge(toHit(hit).asInstanceOf[Row], taken(at))
+      hit -> taken(at)
     }
   }
 }

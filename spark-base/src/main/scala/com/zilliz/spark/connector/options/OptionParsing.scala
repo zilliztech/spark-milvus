@@ -28,6 +28,31 @@ private[connector] object OptionParsing {
       key: String
   ): Option[String] = Option(options.get(key))
 
+  /** `name=value` pairs separated by commas, as `M=16,efConstruction=200`: an
+    * index's build or search tuning. Blank text is no pairs; a pair without a
+    * name or a value, or with a second `=`, is refused with `what` named.
+    */
+  def namedValues(text: String, what: String): Map[String, String] =
+    Option(text)
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .map {
+        _.split(',')
+          .map(_.trim)
+          .filter(_.nonEmpty)
+          .map { pair =>
+            val parts = pair.split('=')
+            require(
+              parts.length == 2 && parts(0).trim.nonEmpty &&
+                parts(1).trim.nonEmpty,
+              s"$what takes name=value pairs separated by commas, not '$pair'"
+            )
+            parts(0).trim -> parts(1).trim
+          }
+          .toMap
+      }
+      .getOrElse(Map.empty)
+
   def boolean(
       getOption: String => Option[String],
       key: String,

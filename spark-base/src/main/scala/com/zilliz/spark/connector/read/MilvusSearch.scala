@@ -1,6 +1,6 @@
 package com.zilliz.spark.connector.read
 
-import java.util.{Arrays, Locale}
+import java.util.Arrays
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.{HashPartitioner, Partitioner}
@@ -9,43 +9,48 @@ import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.sql.{DataFrame, Encoders, Row, SparkSession}
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.milvus.storage.expr.PlanParser
+import com.zilliz.milvus.storage.expr.{Expr, PredicateExpr}
 import com.zilliz.milvus.storage.index.{
   CandidateBytes,
   MachineResources,
+  RankingFunction,
   SearchPlan
 }
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{
   MilvusOption,
   SearchLimits,
   SearchResources,
-  SnapshotReference,
   TaskResources
 }
-import com.zilliz.spark.connector.table.MilvusTables
-import io.milvus.grpc.schema.{DataType, FieldSchema}
+import io.milvus.grpc.schema.FieldSchema
 
-/** The vector search entry: a query set in, every query's global top-k out.
+/** The two-stage search over the segments of a Milvus table input: a query set
+  * in, every query's global top-k out, with the base columns the take stage
+  * reads (docs/design/architecture/vector-search.html section 2.1).
   *
-  * `mode = "exact"` computes every distance in every segment; `mode = "index"`
-  * searches the persisted index the snapshot pinned, and falls back to an exact
-  * scan on a segment the snapshot says has no index when `allowUnindexed` is
-  * on. The result carries `query_id`, `rank`, `_score`, `_segment_id`,
-  * `_row_offset` and the output columns asked for
-  * (docs/design/architecture/vector-search.html section 1.1).
+  * A nearest-by join over a Milvus table runs it (`NearestBySearch`); the join
+  * is how a search is written (docs/design/architecture/dataframe-api.html
+  * sections 2 and 4). The `exact` mode computes every distance in every
+  * segment; the `index` mode searches the persisted index the snapshot pinned.
+  * A hit carries `query_id`, `rank`, `_score`, `_segment_id` and `_row_offset`,
+  * then the base columns asked for. A DataFrame input's search (`FrameSearch`)
+  * shares the packed delivery of the query groups, the merge partitioning and
+  * the reading of the executors' memory kept here.
   */
 object MilvusSearch extends Logging {
-
-  private val Reserved =
-    Set("query_id", "rank", "_score", "_segment_id", "_row_offset")
 
   /** What a search returns before the output columns, and the one place that
     * shape is written down: [[SearchResult]] names the columns, so an empty
@@ -62,85 +67,81 @@ object MilvusSearch extends Logging {
     */
   private[read] val QueriesPerMergePartition: Int = 4096
 
-  def search(
+  /** What [[execute]] gives back: the hits of every query with the output
+    * columns asked for, as rows of `schema`. An iterator of these rows may hand
+    * the same object back with new values, so a consumer that keeps a row
+    * copies it.
+    */
+  private[connector] final case class Hits(
+      rows: RDD[InternalRow],
+      schema: StructType
+  )
+
+  /** The hit columns when some query is required to appear without a hit: the
+    * columns of the hit are NULL in its row.
+    */
+  private[read] val NullableHitSchema: StructType = StructType(
+    HitSchema.fields.map(field =>
+      if (field.name == SearchQueries.IdColumn) field
+      else field.copy(nullable = true)
+    )
+  )
+
+  /** The two Spark stages over segments already planned: candidates from every
+    * segment set, merged into each query's best k, then the output columns
+    * taken for the hits alone (docs/design/architecture/vector-search.html
+    * section 2.1).
+    *
+    * `queries` is the query set: a frame of `query_id` and `vector`, or a set
+    * the driver already packed. The ids are the positions the nearest-by join
+    * numbered its query rows by, so they cannot repeat and are not checked.
+    * `required` names the ids that must each have a row, one with NULL hit
+    * columns when nothing was found for it, which is what a LEFT OUTER
+    * nearest-by join whose query rows the driver holds needs. `filter` and
+    * `predicate` exclude rows before the top k: a Milvus expression, and what
+    * Spark pushed into the scan whose partitions these are
+    * (docs/design/architecture/dataframe-api.html section 4). An index search
+    * scans exactly a segment it has no usable index for, and `metrics` is where
+    * the tasks count. `function` is what the join ranks by where Knowhere does
+    * not score a pair as it does (section 2).
+    */
+  private[connector] def execute(
       spark: SparkSession,
       options: Map[String, String],
-      queries: DataFrame,
-      vectorColumn: String,
+      queries: SearchQueries.Input,
+      partitions: Seq[MilvusInputPartition],
+      field: FieldSchema,
+      layout: VectorLayout,
       k: Int,
-      metric: String,
-      mode: String = SearchMode.Index.name,
-      searchParameters: Map[String, String] = Map.empty,
-      filter: Option[String] = None,
-      outputColumns: Seq[String] = Seq.empty,
-      allowUnindexed: Boolean = false
-  ): DataFrame = {
-    require(
-      options != null && queries != null && outputColumns != null &&
-        searchParameters != null,
-      "Search arguments must not be null"
-    )
-    require(
-      vectorColumn != null && vectorColumn.nonEmpty && metric != null,
-      "A search names a vector field and a metric"
-    )
-    require(k > 0, s"k must be positive: $k")
-    val searchMode = SearchMode
-      .fromName(mode)
-      .getOrElse(
-        throw new IllegalArgumentException(
-          s"mode is '$mode'; a search runs in 'index' or in 'exact' mode"
-        )
-      )
-    require(
-      outputColumns.distinct.size == outputColumns.size,
-      s"Output columns repeat: ${outputColumns.mkString(", ")}"
-    )
-    require(
-      !outputColumns.exists(Reserved),
-      s"Output columns take the names the result already has: ${Reserved.toSeq.sorted.mkString(", ")}"
-    )
-    filter.foreach(PlanParser.parse)
-
+      searchMetric: MetricType,
+      searchMode: SearchMode,
+      searchParameters: Map[String, String],
+      filter: Option[Expr],
+      predicate: Option[PredicateExpr],
+      outputSchema: StructType,
+      metrics: SearchMetrics,
+      function: RankingFunction,
+      required: Option[Array[Long]]
+  ): Hits = {
     val caseInsensitive = new CaseInsensitiveStringMap(options.asJava)
-    val table = MilvusTables.load(
-      caseInsensitive,
-      None,
-      SnapshotReference.Configured
-    )
-    val field = table.snapshot.schema.fields
-      .find(_.name == vectorColumn)
-      .getOrElse(
-        throw new IllegalArgumentException(
-          s"The collection has no vector field '$vectorColumn'"
-        )
-      )
-    val layout = VectorLayout.of(field.dataType, dimensionOf(field))
-    val searchMetric = metricOf(metric, layout)
-
-    SearchQueries.check(queries.schema, layout)
     val limits = SearchLimits.from(options)
-    val outputSchema = outputSchemaOf(table.schema(), outputColumns)
-
-    val partitions = SnapshotPartitions.of(table, caseInsensitive)
     val tasks = partitions.map(_.task)
     if (searchMode == SearchMode.Index) {
-      SegmentIndexHandle.check(
-        tasks,
-        field.fieldID,
-        searchMetric,
-        allowUnindexed
-      )
+      SegmentIndexHandle.check(tasks, field.fieldID, searchMetric)
     }
 
-    val selected = SearchQueries.selected(queries)
-    // A frame that is plain Parquet files is read by the tasks themselves: the
-    // footers give the count, and the one job left is the id uniqueness
-    // check, over the id column alone (candidates below).
-    val files =
-      if (limits.queriesDirect) QueryFiles.of(spark, selected) else None
-    val queryCount = files.map(_.queries).getOrElse(selected.count())
-    require(queryCount > 0, "A search needs at least one query")
+    // A set the driver packed is counted already.
+    val packedOnDriver = queries.isInstanceOf[SearchQueries.Packed]
+    val queryCount = queries match {
+      case SearchQueries.Frame(selected) => selected.count()
+      case SearchQueries.Packed(ids, _)  => ids.length.toLong
+    }
+    val hitSchema = if (required.isEmpty) HitSchema else NullableHitSchema
+    val resultSchema = StructType(hitSchema.fields ++ outputSchema.fields)
+    // The set is what a nearest-by join kept of its query rows: rows whose
+    // ranking value is NULL search nothing, and all of them may be.
+    if (queryCount == 0)
+      return Hits(missing(spark, required, resultSchema), resultSchema)
     require(
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
@@ -177,12 +178,7 @@ object MilvusSearch extends Logging {
     // reads a block at a time.
     val footprint: SegmentReadTask => SearchPlan.Footprint = task =>
       (if (searchMode == SearchMode.Index)
-         SegmentIndexHandle.select(
-           task,
-           field.fieldID,
-           searchMetric,
-           allowUnindexed
-         )
+         SegmentIndexHandle.select(task, field.fieldID, searchMetric)
        else None) match {
         case Some(index) if index.serializedSize > 0L =>
           SearchPlan.Footprint.index(index.serializedSize)
@@ -199,7 +195,7 @@ object MilvusSearch extends Logging {
       limits.groupMaxBytes,
       SearchPlan.Budget(segmentBudget.bytes, queryBudget.bytes),
       footprint,
-      shuffled = files.isEmpty && queryBytes > limits.queriesMaxBytes,
+      shuffled = !packedOnDriver && queryBytes > limits.queriesMaxBytes,
       // The batched distance entry is single-threaded on its task, so an
       // exact search is as parallel as its tasks (decision 28).
       splitQueries = searchMode == SearchMode.Exact,
@@ -212,7 +208,7 @@ object MilvusSearch extends Logging {
       else if (searchProfile.nonEmpty) resources.executorCores
       else math.max(1, resources.taskCpus)
     val spec = SegmentSetSearch.Spec(
-      vectorColumn,
+      field.name,
       layout,
       field.fieldID,
       field.nullable,
@@ -221,7 +217,6 @@ object MilvusSearch extends Logging {
       searchMode,
       filter,
       searchParameters,
-      allowUnindexed,
       plan.capacity,
       MilvusOption(caseInsensitive).readLimits.arrowMaxBytes,
       slots,
@@ -231,10 +226,11 @@ object MilvusSearch extends Logging {
         Some(MilvusOption(caseInsensitive).readLimits.batchMaxBytes)
       else None,
       plan.resident,
-      collectThreads
+      collectThreads,
+      predicate,
+      Some(function)
     )
 
-    val metrics = SearchMetrics.create(spark.sparkContext)
     // What the first stage has to get through, so its progress has a
     // denominator. An index probe visits part of a segment and Knowhere does
     // not say how much, so index mode has no pair total and counts segment
@@ -272,7 +268,7 @@ object MilvusSearch extends Logging {
     // at once on an executor than that heap holds with room to spare.
     val packProfile =
       if (
-        files.nonEmpty || queryBytes <= limits.queriesMaxBytes ||
+        packedOnDriver || queryBytes <= limits.queriesMaxBytes ||
         plan.groups.isEmpty
       ) None
       else {
@@ -287,12 +283,9 @@ object MilvusSearch extends Logging {
     logInfo(
       s"Search plan: mode=$searchMode, metric=$searchMetric, topK=$k, " +
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
-        s"${files match {
-            case Some(direct) =>
-              s"tasks reading ${direct.files.size} parquet files"
-            case None if queryBytes <= limits.queriesMaxBytes => "broadcast"
-            case None                                         => "shuffle"
-          }}, " +
+        (if (packedOnDriver) "broadcast, packed on the driver"
+         else if (queryBytes <= limits.queriesMaxBytes) "broadcast"
+         else "shuffle") + ", " +
         s"queryGroups=${plan.groups.size}, segments=${tasks.size} in " +
         s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
         s"${plan.tasks} tasks, collectThreads=$collectThreads, " +
@@ -324,6 +317,8 @@ object MilvusSearch extends Logging {
     // share of the unmanaged heap is the queries' budget at that concurrency.
     val stageHeap = SearchResources
       .queryBudget(heap, memoryFraction(spark), resources.tasksPerExecutor)
+    if (plan.isEmpty && required.nonEmpty)
+      return Hits(missing(spark, required, resultSchema), resultSchema)
     val hits =
       if (plan.isEmpty) empty(spark)
       else {
@@ -338,8 +333,7 @@ object MilvusSearch extends Logging {
           spark,
           candidates(
             spark,
-            selected,
-            files,
+            queries,
             partitions,
             plan,
             spec,
@@ -351,10 +345,11 @@ object MilvusSearch extends Logging {
           ),
           k,
           searchMetric,
-          mergeParts
+          mergeParts,
+          required
         )
       }
-    if (outputColumns.isEmpty) hits
+    if (outputSchema.isEmpty) Hits(hits.queryExecution.toRdd, hits.schema)
     else {
       // What a take task buffers is every hit of its partition (queries x k
       // over the tasks), against the same heap share as the merge.
@@ -370,7 +365,7 @@ object MilvusSearch extends Logging {
           s"about ${queryCount * k / takePartitioning.partitions} hits a task at " +
           s"${SearchTake.HitRowBytes} bytes each against ${stageHeap.bytes} bytes of heap a task"
       )
-      spark.createDataFrame(
+      Hits(
         SearchTake.rows(
           hits,
           outputSchema,
@@ -386,54 +381,17 @@ object MilvusSearch extends Logging {
     }
   }
 
-  /** One query, which is the same search over a query set of one row. */
-  def search(
-      spark: SparkSession,
-      options: Map[String, String],
-      vectorColumn: String,
-      queryVector: Array[Float],
-      k: Int,
-      metric: String,
-      mode: String,
-      searchParameters: Map[String, String],
-      filter: Option[String],
-      outputColumns: Seq[String],
-      allowUnindexed: Boolean
-  ): DataFrame = {
-    require(
-      queryVector != null && queryVector.nonEmpty,
-      "A query vector must hold values"
-    )
-    import spark.implicits._
-    val queries = Seq((0L, queryVector))
-      .toDF(SearchQueries.IdColumn, SearchQueries.VectorColumn)
-    search(
-      spark,
-      options,
-      queries,
-      vectorColumn,
-      k,
-      metric,
-      mode,
-      searchParameters,
-      filter,
-      outputColumns,
-      allowUnindexed
-    )
-  }
-
   /** The candidates of the first stage, whichever way the query set travels.
     *
-    * A set that fits `milvus.search.queries.max.bytes` is packed on the
-    * executors, concatenated on the driver and broadcast, and every executor
-    * keeps it whole. A larger one is packed by group on the executors, never
-    * through the driver, and each task reads the groups of its range one at a
-    * time (section 2.1).
+    * A set the driver packed is broadcast as it is. A frame that fits
+    * `milvus.search.queries.max.bytes` is packed on the executors, concatenated
+    * on the driver and broadcast, and every executor keeps it whole. A larger
+    * one is packed by group on the executors, never through the driver, and
+    * each task reads the groups of its range one at a time (section 2.1).
     */
   private def candidates(
       spark: SparkSession,
-      selected: DataFrame,
-      files: Option[QueryFiles],
+      queries: SearchQueries.Input,
       partitions: Seq[MilvusInputPartition],
       plan: SearchPlan.Plan,
       spec: SegmentSetSearch.Spec,
@@ -453,66 +411,23 @@ object MilvusSearch extends Logging {
       groups.map(_.queries.toLong).sum,
       layout
     )
-    if (files.nonEmpty) {
-      // The files are read by the tasks and the driver never holds the set.
-      // The id uniqueness check is the one pass over the frame that remains,
-      // and it reads the id column alone: 2 MB for 250,000 queries.
-      SearchQueries.checkUnique(
-        selected
-          .select(selected.col(SearchQueries.IdColumn))
-          .queryExecution
-          .toRdd
-          .map(_.getLong(0))
-          .collect()
-      )
-      val direct = files.get
-      val work = for {
-        (set, index) <- sets.zipWithIndex
-        range <- ranges
-      } yield (set, kept.lift(index).flatten, range)
-      val keeps = plan.resident == SearchPlan.Resident.Queries
-      val searched = spark.sparkContext.parallelize(work, plan.tasks).flatMap {
-        case (set, planned, range) =>
-          // A task that keeps its queries decodes them by row group on
-          // several threads, straight into the group matrices; one that
-          // streams its groups reads them in order as it goes.
-          if (keeps || range.size == 1)
-            SegmentSetSearch.runDecoded(
-              set,
-              spec,
-              allocator =>
-                direct.decode(
-                  range,
-                  groups,
-                  layout,
-                  spec.metric,
-                  allocator,
-                  QueryFiles.decodeThreads(direct.rowGroups.size)
-                ),
-              range.size,
-              metrics
-            )
-          else
-            SegmentSetSearch.run(
-              set,
-              spec,
-              direct.groups(range, groups, layout, spec.metric),
-              range.size,
-              planned,
-              metrics
-            )
-      }
-      searchProfile.fold(searched)(searched.withResources)
-    } else if (queryBytes <= limits.queriesMaxBytes) {
+    if (
+      queries.isInstanceOf[SearchQueries.Packed] ||
+      queryBytes <= limits.queriesMaxBytes
+    ) {
       // Packed where the rows are read: the driver gets bytes, not boxed
       // vectors, and eight executors pack in parallel instead of one thread.
-      val (ids, vectors) =
-        SearchQueries.packOnExecutors(selected, layout, spec.metric)
+      // A set the driver packed is broadcast as it is.
+      val (ids, vectors) = queries match {
+        case SearchQueries.Packed(packedIds, packedVectors) =>
+          (packedIds, packedVectors)
+        case SearchQueries.Frame(frame) =>
+          SearchQueries.packOnExecutors(frame, layout, spec.metric)
+      }
       require(
         ids.length.toLong == groups.map(_.queries.toLong).sum,
         s"The query set packed to ${ids.length} queries, but the plan counted ${groups.map(_.queries.toLong).sum}"
       )
-      SearchQueries.checkUnique(ids)
       val delivered = spark.sparkContext.broadcast((ids, vectors))
       val work = for {
         (set, index) <- sets.zipWithIndex
@@ -539,7 +454,21 @@ object MilvusSearch extends Logging {
       }
       searchProfile.fold(searched)(searched.withResources)
     } else {
-      val delivered = packedGroups(selected, plan, spec, layout, packProfile)
+      // A set the driver packed went to the broadcast above.
+      val selected = queries match {
+        case SearchQueries.Frame(frame) => frame
+        case SearchQueries.Packed(_, _) =>
+          throw new IllegalStateException(
+            "A query set packed on the driver is broadcast, not read again"
+          )
+      }
+      val delivered = packedGroups(
+        selected,
+        plan.groups,
+        spec.metric,
+        layout,
+        packProfile
+      )
       require(
         delivered.getNumPartitions == groups.size,
         s"The packed query set is ${groups.size} groups, not " +
@@ -584,28 +513,17 @@ object MilvusSearch extends Logging {
     */
   private[read] def packedGroups(
       selected: DataFrame,
-      plan: SearchPlan.Plan,
-      spec: SegmentSetSearch.Spec,
+      groups: Seq[SearchPlan.QueryGroup],
+      metric: MetricType,
       layout: VectorLayout,
       profile: Option[ResourceProfile] = None
   ): RDD[SearchQueries.Group] = {
-    val repeated = selected
-      .groupBy(col(SearchQueries.IdColumn))
-      .count()
-      .filter(col("count") > 1)
-      .limit(5)
-      .collect()
-    require(
-      repeated.isEmpty,
-      s"Query ids repeat in the query set: ${repeated.map(_.getLong(0)).mkString(", ")}"
-    )
     // Where each planned group starts. The byte limit cuts equal groups and a
     // shorter last one, an even cut puts the longer groups first (decision
     // 32), so a position finds its group among the starts, not by dividing.
-    val starts = plan.groups.map(_.firstQuery.toLong).toArray
-    val metric = spec.metric
+    val starts = groups.map(_.firstQuery.toLong).toArray
     val rowBytes = layout.rowBytes
-    val sizes = plan.groups.map(_.queries).toVector
+    val sizes = groups.map(_.queries).toVector
     // A row arrives, is written where it belongs and is done with: its
     // position says both its group and its place in the group, so the task
     // holds the group's arrays and the row in hand. Holding the group's rows
@@ -704,7 +622,7 @@ object MilvusSearch extends Logging {
   /** `spark.memory.fraction`: the share of the heap Spark manages, the rest
     * being where a task's own objects live.
     */
-  private def memoryFraction(spark: SparkSession): Double = spark.conf
+  private[read] def memoryFraction(spark: SparkSession): Double = spark.conf
     .getOption("spark.memory.fraction")
     .flatMap(value => scala.util.Try(value.trim.toDouble).toOption)
     .getOrElse(0.6)
@@ -719,7 +637,8 @@ object MilvusSearch extends Logging {
       queries: Long,
       tasks: Int,
       k: Int,
-      heapBytesPerTask: Long
+      heapBytesPerTask: Long,
+      candidateBytes: Long = CandidateBytes.Width.toLong
   ): Int = {
     require(queries > 0, s"A search needs at least one query: $queries")
     require(tasks > 0, s"A search needs at least one task: $tasks")
@@ -737,7 +656,7 @@ object MilvusSearch extends Logging {
     // queries each ran the 6 GiB heap out (2026-09-26 decision). Half the
     // heap share is left for the merged answers and the rows they become.
     val slots = math.max(1, spark.sparkContext.defaultParallelism)
-    val bytesPerQuery = tasks.toLong * k.toLong * CandidateBytes.Width
+    val bytesPerQuery = tasks.toLong * k.toLong * candidateBytes
     val byHeap =
       math.max(1L, math.max(0L, heapBytesPerTask) / 2L / bytesPerQuery)
     val perPartition = math.min(QueriesPerMergePartition.toLong, byHeap)
@@ -760,21 +679,62 @@ object MilvusSearch extends Logging {
       candidates: RDD[(Long, Array[Byte])],
       k: Int,
       metric: MetricType,
-      partitions: Int
+      partitions: Int,
+      required: Option[Array[Long]] = None
   ): DataFrame = {
     require(partitions > 0, s"The merge needs a partition: $partitions")
-    val hits = candidates
+    val partitioner = new HashPartitioner(partitions)
+    val combined = candidates
       .combineByKeyWithClassTag[Array[Byte]](
         (packed: Array[Byte]) => packed,
         (merged: Array[Byte], packed: Array[Byte]) =>
           CandidateBytes.merge(merged, packed, k, metric),
         (left: Array[Byte], right: Array[Byte]) =>
           CandidateBytes.merge(left, right, k, metric),
-        new HashPartitioner(partitions),
+        partitioner,
         mapSideCombine = false
       )
-      .flatMap { case (query, packed) => rows(query, packed) }
-    spark.createDataFrame(hits, HitSchema)
+    required match {
+      case None =>
+        spark.createDataFrame(
+          combined.flatMap { case (query, packed) => rows(query, packed) },
+          HitSchema
+        )
+      case Some(ids) =>
+        // A required id that no task found anything for has no key here; the
+        // partition its key would hash to says so after its own answers.
+        val wanted = spark.sparkContext.broadcast(ids)
+        val hits = combined.mapPartitionsWithIndex { (index, answers) =>
+          val found = new java.util.HashSet[java.lang.Long]()
+          answers.flatMap { case (query, packed) =>
+            found.add(query)
+            rows(query, packed)
+          } ++ wanted.value.iterator
+            .filter(id =>
+              partitioner.getPartition(id) == index && !found.contains(id)
+            )
+            .map(id => Row(id, null, null, null, null))
+        }
+        spark.createDataFrame(hits, NullableHitSchema)
+    }
+  }
+
+  /** The rows of required ids when no search ran, every hit column NULL. */
+  private def missing(
+      spark: SparkSession,
+      required: Option[Array[Long]],
+      schema: StructType
+  ): RDD[InternalRow] = required match {
+    case None => spark.sparkContext.emptyRDD[InternalRow]
+    case Some(ids) =>
+      val width = schema.size
+      spark.sparkContext
+        .parallelize(ids.toSeq, math.max(1, math.min(ids.length, 64)))
+        .map { id =>
+          val row = new GenericInternalRow(width)
+          row.setLong(0, id)
+          row: InternalRow
+        }
   }
 
   /** One query's answer as the rows the result contract promises: rank from
@@ -801,7 +761,7 @@ object MilvusSearch extends Logging {
     spark.emptyDataset[SearchResult].toDF()
   }
 
-  private def dimensionOf(field: FieldSchema): Int = field.typeParams
+  private[read] def dimensionOf(field: FieldSchema): Int = field.typeParams
     .find(_.key == "dim")
     .map(_.value.toInt)
     .getOrElse(
@@ -810,36 +770,28 @@ object MilvusSearch extends Logging {
       )
     )
 
-  /** The metric a call names, which the field's element type has to take. */
-  private def metricOf(metric: String, layout: VectorLayout): MetricType = {
+  /** A search runs over a float, float16, bfloat16 or int8 field, by a metric
+    * that field's indexes take. Binary vector fields are not searched
+    * (docs/design/README.md, decision log 2026-10-09).
+    */
+  private[read] def checkSearchable(
+      metric: MetricType,
+      layout: VectorLayout
+  ): Unit = {
+    require(
+      layout.elementType != VectorElementType.Bit,
+      "A binary vector field is not searched; the connector searches FloatVector, Float16Vector, BFloat16Vector and Int8Vector fields"
+    )
     val supported = MetricType.forElementType(layout.elementType)
-    MetricType
-      .fromName(metric)
-      .filter(supported.contains)
-      .getOrElse(
-        throw new IllegalArgumentException(
-          s"A ${layout.elementType} field takes ${supported
-              .map(_.name)
-              .sorted
-              .mkString(" or ")}, not ${metric.toUpperCase(Locale.ROOT)}"
-        )
-      )
+    require(
+      supported.contains(metric),
+      s"A ${layout.elementType} field takes ${supported
+          .map(_.name)
+          .sorted
+          .mkString(" or ")}, not $metric"
+    )
   }
 
-  private def outputSchemaOf(
-      table: StructType,
-      outputColumns: Seq[String]
-  ): StructType = StructType(
-    outputColumns.map(name =>
-      table.fields
-        .find(_.name == name)
-        .getOrElse(
-          throw new IllegalArgumentException(
-            s"The collection has no column '$name'"
-          )
-        )
-    )
-  )
 }
 
 /** The columns every search returns, before the output columns. */

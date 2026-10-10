@@ -6,10 +6,11 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.SparkEnv
 import org.apache.spark.TaskContext
 
-import com.zilliz.milvus.storage.expr.PlanParser
+import com.zilliz.milvus.storage.expr.{Expr, PredicateExpr}
 import com.zilliz.milvus.storage.index.{
   CandidateBytes,
   QueryMatrix,
+  RankingFunction,
   SearchPlan,
   SegmentSearch,
   TopKMerger
@@ -72,15 +73,21 @@ private[read] object SegmentSetSearch extends Logging {
       k: Int,
       metric: MetricType,
       mode: SearchMode,
-      filter: Option[String],
+      filter: Option[Expr],
       parameters: Map[String, String],
-      allowUnindexed: Boolean,
       keptMaxBytes: Long,
       arrowMaxBytes: Long,
       slots: Int,
       batchMaxBytes: Option[Long],
       resident: SearchPlan.Resident = SearchPlan.Resident.Segments,
-      collectThreads: Int = 1
+      collectThreads: Int = 1,
+      // What Spark pushed into the scan the search reads; it excludes rows
+      // before the top k, with SQL three-valued logic.
+      predicate: Option[PredicateExpr] = None,
+      // The function a nearest-by join ranks by, for the pairs Knowhere does
+      // not score as it does (docs/design/architecture/dataframe-api.html
+      // section 2); without one Knowhere scores every pair.
+      function: Option[RankingFunction] = None
   ) extends Serializable
 
   /** @param plannedBytes
@@ -131,7 +138,8 @@ private[read] object SegmentSetSearch extends Logging {
             spec.metric,
             spec.parameters,
             allocator.allocator,
-            stepped
+            stepped,
+            spec.function
           )
       }
       report(metrics, counters, merger.size)
@@ -232,84 +240,23 @@ private[read] object SegmentSetSearch extends Logging {
         taken == groupCount,
         s"A task answering $groupCount query groups was given $taken"
       )
-      searchKept(
-        segments,
-        open,
-        ids,
-        matrices,
-        spec,
-        allocator,
-        metrics,
-        stepped,
-        prefetch
-      )
     } catch {
       case failure: Throwable =>
         matrices.iterator.filter(_ != null).foreach(_.close())
         throw failure
     }
-  }
-
-  /** A task whose query groups are decoded by the task itself, as matrices: the
-    * direct-read path (docs/design/architecture/vector-search.html section
-    * 2.1). `decode` gets the task's allocator and returns every group's ids and
-    * matrix in group order; the search then runs as [[keepingQueries]] would.
-    */
-  def runDecoded(
-      set: Seq[MilvusInputPartition],
-      spec: Spec,
-      decode: BufferAllocator => Seq[(Array[Long], QueryMatrix)],
-      groupCount: Int,
-      metrics: SearchMetrics
-  ): Iterator[(Long, Array[Byte])] = {
-    require(set.nonEmpty, "A first-stage task has no segments")
-    require(groupCount > 0, s"A task answers $groupCount query groups")
-    val segments = set.map(_.task.segmentId)
-    val partitions =
-      set.map(partition => partition.task.segmentId -> partition).toMap
-    val allocator = ArrowAllocator.forSearchTask(
-      TaskContext.get().partitionId(),
-      spec.arrowMaxBytes
+    // The matrices are searchKept's from here, failure included.
+    searchKept(
+      segments,
+      open,
+      ids,
+      matrices,
+      spec,
+      allocator,
+      metrics,
+      stepped,
+      prefetch
     )
-    def stepped(step: SegmentSearch.Progress): Unit = {
-      if (step.nativeCalls != 0)
-        metrics.knowhereCalls.add(step.nativeCalls.toLong)
-      if (step.nativeNanos != 0L) metrics.knowhereNanos.add(step.nativeNanos)
-      if (step.compared != 0L) metrics.comparedPairs.add(step.compared)
-      if (step.segments != 0) metrics.segmentSearches.add(step.segments.toLong)
-    }
-    def open(segmentId: Long): SegmentSearch.Source =
-      source(partitions(segmentId), spec, allocator.allocator, metrics)
-    try {
-      val started = System.nanoTime()
-      val decoded = decode(allocator.allocator)
-      require(
-        decoded.size == groupCount,
-        s"A task answering $groupCount query groups decoded ${decoded.size}"
-      )
-      logInfo(
-        s"Search task: ${decoded.iterator.map(_._1.length).sum} queries in " +
-          s"$groupCount groups decoded from files in ${(System.nanoTime() - started) / 1000000L} ms"
-      )
-      val matrices = decoded.map(_._2).toArray
-      try
-        searchKept(
-          segments,
-          open,
-          decoded.map(_._1).toArray,
-          matrices,
-          spec,
-          allocator.allocator,
-          metrics,
-          stepped,
-          prefetchIndexes(set, spec)
-        )
-      catch {
-        case failure: Throwable =>
-          matrices.foreach(_.close())
-          throw failure
-      }
-    } finally allocator.close()
   }
 
   /** The search of a task that keeps its queries, once every group is a matrix:
@@ -339,7 +286,8 @@ private[read] object SegmentSetSearch extends Logging {
         allocator,
         stepped,
         prefetch,
-        spec.collectThreads
+        spec.collectThreads,
+        spec.function
       )
       val kept = mergers.toArray
       report(metrics, counters, kept.iterator.map(_.size).sum)
@@ -385,7 +333,9 @@ private[read] object SegmentSetSearch extends Logging {
           segments,
           open,
           spec.keptMaxBytes,
-          spec.layout
+          spec.layout,
+          spec.metric,
+          spec.function
         ) match {
           case Right(held) =>
             read(metrics, held.read)
@@ -472,12 +422,7 @@ private[read] object SegmentSetSearch extends Logging {
     spec.mode == SearchMode.Index && set.size > 1 && {
       val sizes = set.flatMap(partition =>
         SegmentIndexHandle
-          .select(
-            partition.task,
-            spec.fieldId,
-            spec.metric,
-            spec.allowUnindexed
-          )
+          .select(partition.task, spec.fieldId, spec.metric)
           .map(_.serializedSize)
       )
       sizes.size == set.size && sizes.forall(_ > 0L) && {
@@ -499,17 +444,13 @@ private[read] object SegmentSetSearch extends Logging {
     val exclusions = RowExclusions.of(
       task,
       collection,
-      spec.filter.map(PlanParser.parse),
-      binding.columnNameFor
+      spec.filter,
+      binding.columnNameFor,
+      spec.predicate
     )
     val selected = spec.mode match {
       case SearchMode.Index =>
-        SegmentIndexHandle.select(
-          task,
-          spec.fieldId,
-          spec.metric,
-          spec.allowUnindexed
-        )
+        SegmentIndexHandle.select(task, spec.fieldId, spec.metric)
       case SearchMode.Exact => None
     }
     selected match {

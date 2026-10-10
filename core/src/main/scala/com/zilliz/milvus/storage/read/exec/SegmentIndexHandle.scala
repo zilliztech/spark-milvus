@@ -12,7 +12,11 @@ import com.zilliz.milvus.storage.codec.{
 }
 import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
-import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
 import com.zilliz.milvus.storage.snapshot.{
   SegmentIndex,
   SegmentIndexes,
@@ -60,17 +64,64 @@ final class SegmentIndexHandle private (
 
 object SegmentIndexHandle {
 
+  /** Why a segment's metadata offers no index a search can use. An index search
+    * scans such a segment exactly, whatever the reason: an APPROX nearest-by
+    * join, whose answer may be the exact one
+    * (docs/design/architecture/dataframe-api.html section 2).
+    */
+  sealed abstract class Unusable(val label: String) extends Serializable
+
+  object Unusable {
+    case object NoIndex extends Unusable("no index on the field")
+    case object NoMetadata extends Unusable("no index metadata in the snapshot")
+    case object OtherMetric extends Unusable("an index of another metric")
+    case object UnloadedType
+        extends Unusable("an index type this connector does not load")
+  }
+
+  /** The index the snapshot's metadata gives `fieldId` in a segment, when this
+    * connector can search it by `metric`, or why it cannot. Only the metadata
+    * is read; whether the index matches the pinned segment is [[select]]'s.
+    */
+  def usable(
+      segmentId: Long,
+      indexes: SegmentIndexes,
+      fieldId: Long,
+      metric: MetricType
+  ): Either[Unusable, SegmentIndex] = indexes match {
+    case SegmentIndexes.Unknown   => Left(Unusable.NoMetadata)
+    case SegmentIndexes.Unindexed => Left(Unusable.NoIndex)
+    case SegmentIndexes.Available(all) =>
+      val matches = all.filter(_.fieldId == fieldId)
+      require(
+        matches.size <= 1,
+        s"Ambiguous index for segment $segmentId, field $fieldId"
+      )
+      matches.headOption match {
+        case None => Left(Unusable.NoIndex)
+        case Some(index) =>
+          val indexType =
+            index.indexType.map(_.toUpperCase(Locale.ROOT)).getOrElse("")
+          if (!Supported.contains(indexType)) Left(Unusable.UnloadedType)
+          else if (
+            !index.metricType.flatMap(MetricType.fromName).contains(metric)
+          )
+            Left(Unusable.OtherMetric)
+          else Right(index)
+      }
+  }
+
   /** The persisted index that serves `fieldId` in `task`'s segment, checked
-    * against what the snapshot pinned: `None` only when the snapshot says the
-    * segment has no index and the search allows that. Planning checks every
-    * task with this before any of them runs; the task checks again on the
-    * executor.
+    * against what the snapshot pinned, or `None` when the segment has no index
+    * the search can use, which an index search scans exactly. An index that
+    * differs from the pinned segment fails: the metadata contradicts itself.
+    * Planning checks every task with this before any of them runs; the task
+    * checks again on the executor.
     */
   def select(
       task: SegmentReadTask,
       fieldId: Long,
-      metric: MetricType,
-      allowUnindexed: Boolean
+      metric: MetricType
   ): Option[SegmentIndex] = {
     task.layout match {
       case SegmentLayout.Manifest(_, version) =>
@@ -80,63 +131,35 @@ object SegmentIndexHandle {
         )
       case _ =>
     }
-    val selected = task.indexes match {
-      case SegmentIndexes.Available(indexes) =>
-        val matches = indexes.filter(_.fieldId == fieldId)
+    usable(task.segmentId, task.indexes, fieldId, metric) match {
+      case Right(descriptor) =>
         require(
-          matches.size <= 1,
-          s"Ambiguous index for segment ${task.segmentId}, field $fieldId"
+          descriptor.segmentId == task.segmentId && descriptor.partitionId == task.partitionId,
+          s"Index identity differs from the pinned segment ${task.segmentId}"
         )
-        matches.headOption
-      case SegmentIndexes.Unindexed => None
-      case SegmentIndexes.Unknown =>
-        throw new IllegalArgumentException(
-          s"Snapshot has no index metadata for segment ${task.segmentId}"
+        require(
+          task.expectedRows.contains(descriptor.rowCount),
+          s"Index row count differs from the pinned segment ${task.segmentId}"
         )
+        require(
+          descriptor.rowCount > 0 && descriptor.rowCount <= Int.MaxValue,
+          s"Segment ${task.segmentId} bitmap exceeds supported row count"
+        )
+        Some(descriptor)
+      case Left(_) => None
     }
-    require(
-      selected.nonEmpty || allowUnindexed,
-      s"No persisted index for segment ${task.segmentId}, field $fieldId"
-    )
-    selected.foreach { descriptor =>
-      require(
-        descriptor.segmentId == task.segmentId && descriptor.partitionId == task.partitionId,
-        s"Index identity differs from the pinned segment ${task.segmentId}"
-      )
-      val indexType =
-        descriptor.indexType.map(_.toUpperCase(Locale.ROOT)).getOrElse("")
-      require(
-        Supported.contains(indexType),
-        s"Segment ${task.segmentId} carries a $indexType index; this connector loads ${Supported.toSeq.sorted
-            .mkString(", ")}"
-      )
-      require(
-        descriptor.metricType.flatMap(MetricType.fromName).contains(metric),
-        s"Query metric differs from the persisted index metric of segment ${task.segmentId}"
-      )
-      require(
-        task.expectedRows.contains(descriptor.rowCount),
-        s"Index row count differs from the pinned segment ${task.segmentId}"
-      )
-      require(
-        descriptor.rowCount > 0 && descriptor.rowCount <= Int.MaxValue,
-        s"Segment ${task.segmentId} bitmap exceeds supported row count"
-      )
-    }
-    selected
   }
 
-  /** Checks a whole plan before any task runs and names every segment that
-    * cannot serve the search.
+  /** Checks a whole plan before any task runs and names every segment whose
+    * index metadata contradicts the segment the snapshot pinned.
     */
   def check(
       tasks: Seq[SegmentReadTask],
       fieldId: Long,
-      metric: MetricType,
-      allowUnindexed: Boolean
+      metric: MetricType
   ): Unit = {
     val failures = tasks.flatMap { task =>
-      Try(select(task, fieldId, metric, allowUnindexed)).failed.toOption
+      Try(select(task, fieldId, metric)).failed.toOption
         .map(_.getMessage)
     }
     if (failures.nonEmpty) {
@@ -181,8 +204,10 @@ object SegmentIndexHandle {
   /** The range a persisted index has to be in for this connector to load it: a
     * supported index type over the column's own element type, with a metric and
     * a format version the snapshot states. A nullable column is indexed over
-    * the rows that have a value, and the index files say which those are.
-    * Anything else fails here, before a file is read.
+    * the rows that have a value, and the index files say which those are. A
+    * binary vector column is not searched (docs/design/README.md, decision log
+    * 2026-10-09), so its indexes are not loaded. Anything else fails here,
+    * before a file is read.
     */
   def open(
       index: SegmentIndex,
@@ -192,6 +217,10 @@ object SegmentIndexHandle {
       store: ObjectStore,
       decoder: IndexFileDecoder = MilvusIndexFileDecoder
   ): SegmentIndexHandle = {
+    require(
+      layout.elementType != VectorElementType.Bit,
+      "A binary vector index is not searched"
+    )
     require(index.rowCount > 0, "Index row count must be positive")
     val indexType = index.indexType
       .getOrElse(

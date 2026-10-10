@@ -292,19 +292,61 @@ def sparkProject(l: Versions.SparkLine): Project =
     )
 
 lazy val spark35 = sparkProject(Versions.line("3.5"))
-  .settings(uatScenarios)
+  .settings(uatScenarios, localCollectionSuites)
+  // The local collection suites build collections with core's segment fixtures.
+  .dependsOn(core % "test->test")
   // Arrow 12, which Spark 3.5 ships, cannot allocate on JDK 21 (its MemoryUtil
-  // looks up DirectByteBuffer(long, int), gone in 21), so a UAT run of this
-  // line forks the test JVM from a JDK 17 when one is named. Unit tests do not
-  // allocate through the C Data Interface and stay on the build's JDK.
+  // looks up DirectByteBuffer(long, int), gone in 21), so the line's test JVM
+  // forks from a JDK 17 when one is named, for a UAT run and for the local
+  // collection suites, which cancel on JDK 21. The other unit tests do not
+  // allocate through the C Data Interface and also pass on the build's JDK.
   .settings(
     Test / javaHome := sys.env.get("SPARK35_TEST_JAVA_HOME").map(file)
   )
 lazy val spark40 = sparkProject(Versions.line("4.0"))
+  .settings(connectClient(Versions.line("4.0")))
   // Reuse core's ObjectStore fixtures for source tests without loading JNI.
   .dependsOn(core % "test->test")
-lazy val spark41 = sparkProject(Versions.line("4.1")).settings(uatScenarios)
-lazy val spark42 = sparkProject(Versions.line("4.2")).settings(uatScenarios)
+lazy val spark41 = sparkProject(Versions.line("4.1"))
+  .settings(uatScenarios, localCollectionSuites, connectSuite)
+  .settings(connectClient(Versions.line("4.1")))
+  .dependsOn(core % "test->test")
+lazy val spark42 = sparkProject(Versions.line("4.2"))
+  .settings(uatScenarios, localCollectionSuites, connectSuite)
+  .settings(connectClient(Versions.line("4.2")))
+  .dependsOn(core % "test->test")
+
+// Spark Connect on the 4.x lines (docs/design/architecture/dataframe-api.html
+// section 9). The suite runs the server in its own JVM, beside the classic
+// session, and starts the client as a JVM of its own: the client jar carries
+// the sql-api classes rebuilt against a relocated Arrow, which would replace
+// the classic ones. The client's classpath, the jar and this line's classes,
+// reaches the suite as a system property.
+lazy val ConnectClient = config("connect-client").hide
+
+def connectClient(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
+  ivyConfigurations += ConnectClient,
+  libraryDependencies ++= Seq(
+    "org.apache.spark" %% "spark-connect" % l.spark % Test,
+    "org.apache.spark" %% "spark-connect-client-jvm" % l.spark % ConnectClient
+  ),
+  Test / javaOptions += {
+    val client = Classpaths
+      .managedJars(ConnectClient, classpathTypes.value, update.value)
+      .files
+    val classes = Seq((Compile / classDirectory).value, (Test / classDirectory).value)
+    "-Dmilvus.test.connect.client.classpath=" +
+      (client ++ classes).map(_.getAbsolutePath).mkString(java.io.File.pathSeparator)
+  }
+)
+
+// The Connect suite lives in the 4.0 line's tests and is compiled into 4.1
+// and 4.2; 3.5's Scala client has its own Dataset class and cannot take the
+// connector's.
+lazy val connectSuite: Seq[Setting[_]] = Seq(
+  Test / unmanagedSourceDirectories +=
+    (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "connect"
+)
 
 // The UAT scenario suite (work item #18) lives in the 4.0 line's tests and is
 // compiled into every other line as a second consumer, so one suite runs on
@@ -312,6 +354,16 @@ lazy val spark42 = sparkProject(Versions.line("4.2")).settings(uatScenarios)
 lazy val uatScenarios: Seq[Setting[_]] = Seq(
   Test / unmanagedSourceDirectories +=
     (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / "uat"
+)
+
+// The suites over a local Milvus collection, and the fixtures that write one
+// through the native libraries, live in the 4.0 line's tests and are compiled
+// into every other line, so each runs on all four: NEAREST BY (Spark's own on
+// 4.2, the connector's nearestByJoin before it) and the DataFrame methods.
+lazy val localCollectionSuites: Seq[Setting[_]] = Seq(
+  Test / unmanagedSourceDirectories ++= Seq("testkit", "nearestby", "implicits").map(dir =>
+    (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / dir
+  )
 )
 
 // Layer 4: apps currently run on 4.0, so their sources need no shared directory.
@@ -364,12 +416,10 @@ lazy val rootRunSettings: Seq[Setting[_]] = Seq(
   ),
   // The JVM's signal-chaining library, by the platform's preload mechanism.
   run / envVars := {
-    val jdk = javaHome.value.getOrElse(file(sys.props("java.home")))
-    if (Modules.isMacOS)
-      Map(
-        "DYLD_INSERT_LIBRARIES" -> (jdk / "lib" / "libjsig.dylib").getAbsolutePath
-      )
-    else Map("LD_PRELOAD" -> (jdk / "lib" / "libjsig.so").getAbsolutePath)
+    val (variable, library) = Modules.signalChaining(
+      javaHome.value.getOrElse(file(sys.props("java.home")))
+    )
+    Map(variable -> library.getAbsolutePath)
   },
   Compile / run / fullClasspath :=
     (Compile / run / fullClasspath).value ++ (Test / fullClasspath).value

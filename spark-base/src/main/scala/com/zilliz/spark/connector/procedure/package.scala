@@ -21,10 +21,13 @@ package com.zilliz.spark.connector
   * `SegmentIndexBuild` is the task body. `WriteSnapshotProcedure` (W8) writes
   * the snapshot that describes a build job's output, through
   * `core.write.commit.SnapshotWriter`, and refuses at planning a snapshot
-  * Milvus could not restore because a file sits outside its root.
-  * `RestoreSnapshotProcedure` asks Milvus to restore such a snapshot into a new
-  * collection through `RestoreExternalSnapshot`, after the same root check, and
-  * can wait on the restore job. Design:
+  * Milvus could not restore because a file sits outside its root. Both take the
+  * table as `collection`, with the call's options, or as `table`, a name
+  * `MilvusTables.named` resolves to a whole Milvus table read with its own
+  * options; `MilvusDataFrame.buildIndex` and `writeSnapshot` call them that
+  * way. `RestoreSnapshotProcedure` asks Milvus to restore such a snapshot into
+  * a new collection through `RestoreExternalSnapshot`, after the same root
+  * check, and can wait on the restore job. Design:
   * docs/design/architecture/vector-search.html section 2.7.
   *
   * Capabilities: A1, A2, A3, A4, A5, A7, W6, W8 (see

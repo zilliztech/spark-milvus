@@ -40,7 +40,7 @@ class CorrectnessJobTest extends AnyFunSuite with Matchers {
 
   test("explicit cases override the group and execute the complete selection") {
     CorrectnessJob
-      .selectCases(Map("cases" -> "R-01,R-02", "group" -> "search"))
+      .selectCases(Map("cases" -> "R-01,R-02", "group" -> "index"))
       .map(_.id) shouldBe Seq("R-01", "R-02")
     val read = CorrectnessJob.selectCases(Map("group" -> "read"))
     read should not be empty

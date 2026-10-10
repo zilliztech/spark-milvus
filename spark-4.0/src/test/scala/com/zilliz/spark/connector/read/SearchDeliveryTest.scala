@@ -65,7 +65,6 @@ class SearchDeliveryTest
     mode = SearchMode.Exact,
     filter = None,
     parameters = Map.empty,
-    allowUnindexed = false,
     keptMaxBytes = 1L << 20,
     arrowMaxBytes = 1L << 20,
     slots = 2,
@@ -97,13 +96,8 @@ class SearchDeliveryTest
       )
     )
 
-  private def packed(ranges: Seq[Range] = Seq.empty): RDD[SearchQueries.Group] =
-    MilvusSearch.packedGroups(
-      selected(),
-      SearchPlan.Plan(Seq.empty, groups, Seq.empty, ranges),
-      spec,
-      layout
-    )
+  private def packed(): RDD[SearchQueries.Group] =
+    MilvusSearch.packedGroups(selected(), groups, spec.metric, layout)
 
   /** Checks that `delivered` holds one partition per group of `planned`, each
     * with its queries in order, starting at zero in its bytes.
@@ -144,12 +138,8 @@ class SearchDeliveryTest
     // first group, which puts query 8 in the third group.
     val even = SearchPlan.evenGroups(10, 4)
     even.map(_.queries) shouldBe Seq(3, 3, 2, 2)
-    val delivered = MilvusSearch.packedGroups(
-      selected(10),
-      SearchPlan.Plan(Seq.empty, even, Seq.empty, Seq.empty),
-      spec,
-      layout
-    )
+    val delivered =
+      MilvusSearch.packedGroups(selected(10), even, spec.metric, layout)
     deliversGroups(delivered, even, 10)
   }
 
@@ -165,7 +155,7 @@ class SearchDeliveryTest
 
   test("a first-stage task reads the groups of its range, in order") {
     val ranges = Seq(0 until 2, 2 until 4)
-    val streamed = new SearchQueryRanges(packed(ranges), 3, ranges)
+    val streamed = new SearchQueryRanges(packed(), 3, ranges)
     streamed.getNumPartitions shouldBe 6
     // Task `set × ranges + range` holds that range's groups; a group is known
     // by its first query id, since a packed group starts at zero in its bytes.

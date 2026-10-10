@@ -133,7 +133,8 @@ final class Committer(store: ObjectStore, layout: StagingLayout) {
       segments: Seq[CommittedSegment],
       nowMillis: Long = System.currentTimeMillis(),
       descriptor: Option[JobDescriptor] = None,
-      indexes: Seq[CommittedIndex] = Seq.empty
+      indexes: Seq[CommittedIndex] = Seq.empty,
+      sourceSnapshot: Option[SourceSnapshot] = None
   ): CommitOutcome = {
     if (store.exists(layout.marker)) {
       val marked =
@@ -158,13 +159,20 @@ final class Committer(store: ObjectStore, layout: StagingLayout) {
           formatVersion = Some(JobManifest.CurrentVersion),
           owner = Some(value.owner),
           writeMode = Some(value.writeMode),
-          indexes = indexes
+          indexes = indexes,
+          sourceSnapshot = sourceSnapshot
         )
       case None =>
         // Keep the legacy shape for callers that cannot name an owner. It is
         // still registrable, but cleanup deliberately refuses to infer its
         // collection or write mode.
-        JobManifest(layout.jobId, nowMillis, segments, indexes = indexes)
+        JobManifest(
+          layout.jobId,
+          nowMillis,
+          segments,
+          indexes = indexes,
+          sourceSnapshot = sourceSnapshot
+        )
     }
     store.createDir(layout.prefix, recursive = true)
     store.write(

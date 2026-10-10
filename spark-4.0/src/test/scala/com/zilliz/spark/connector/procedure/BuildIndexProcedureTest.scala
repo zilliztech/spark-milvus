@@ -9,26 +9,57 @@ import org.scalatest.matchers.should.Matchers
   */
 class BuildIndexProcedureTest extends AnyFunSuite with Matchers {
 
-  test("the call names its collection, field and where the objects go") {
+  test("the call names its table, field and where the objects go") {
     val required =
       BuildIndexProcedure.parameters.filter(_.required).map(_.name)
-    required shouldBe Seq("collection", "field", "output")
+    required shouldBe Seq("field", "output")
+    // `collection` stays first and `table` comes last, so a call that passes
+    // the collection by position still binds.
     BuildIndexProcedure.parameters
       .filterNot(_.required)
       .map(_.name) shouldBe Seq(
+      "collection",
       "index_type",
       "metric",
       "params",
       "build_id",
       "index_version",
-      "store_path_version"
+      "store_path_version",
+      "table"
     )
+    BuildIndexProcedure.parameters.head.name shouldBe "collection"
     BuildIndexProcedure.parameters
       .find(_.name == "build_id")
       .map(_.dataType) shouldBe Some(LongType)
     BuildIndexProcedure.parameters
       .find(_.name == "field")
       .map(_.dataType) shouldBe Some(StringType)
+  }
+
+  test(
+    "a call names the table or the collection, and options only with a collection"
+  ) {
+    def tableName(values: Map[String, Any], options: Map[String, String]) =
+      ProcedureSupport.tableName(ProcedureArgs(values, options), "build_index")
+
+    tableName(Map("collection" -> "c"), Map("milvus.uri" -> "u")) shouldBe None
+    tableName(Map("table" -> "milvus.db.docs"), Map.empty) shouldBe
+      Some("milvus.db.docs")
+    the[IllegalArgumentException] thrownBy tableName(
+      Map("collection" -> "c", "table" -> "t"),
+      Map.empty
+    ) should have message
+      "procedure build_index: give 'collection' or 'table', not both"
+    the[IllegalArgumentException] thrownBy tableName(
+      Map.empty,
+      Map.empty
+    ) should have message "procedure build_index: give 'collection' or 'table'"
+    the[IllegalArgumentException] thrownBy tableName(
+      Map("table" -> "t"),
+      Map("milvus.uri" -> "u", "fs.bucket_name" -> "b")
+    ) should have message
+      "procedure build_index: a table is reached through the options it was read with, " +
+      "so a call with 'table' takes none; got fs.bucket_name, milvus.uri"
   }
 
   test("a row says what one segment's index cost") {

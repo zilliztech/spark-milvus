@@ -14,7 +14,7 @@ import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.arrow.vector.VectorSchemaRoot
 
-import com.zilliz.milvus.storage.index.KnowhereBuffers
+import com.zilliz.milvus.storage.index.{KnowhereBuffers, VectorBatch}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.VectorLayout
 
@@ -114,12 +114,7 @@ final class SegmentVectors private (
       var base: KnowhereBuffers.Base = null
       try {
         val rows = root.getRowCount
-        val excluded = new BitSet(math.max(rows, 1))
-        var row = 0
-        while (row < rows) {
-          if (exclusions.excludes(root, row)) excluded.set(row)
-          row += 1
-        }
+        val excluded = exclusions.excluded(root)
         base = KnowhereBuffers.base(
           root.getVector(vectorColumn),
           layout,
@@ -189,12 +184,12 @@ object SegmentVectors {
       val firstRow: Long,
       val rows: Int,
       private[exec] val backing: Seq[AutoCloseable]
-  ) extends AutoCloseable {
+  ) extends VectorBatch {
 
     /** The rows this batch offers a search, after deletes, the filter and null
       * vectors.
       */
-    def visibleRows: Int = rows - excluded.cardinality()
+    override def visibleRows: Int = rows - excluded.cardinality()
 
     override def close(): Unit = {
       try base.close()

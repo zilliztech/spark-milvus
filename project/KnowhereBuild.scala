@@ -239,7 +239,7 @@ object KnowhereBuild {
       knowhereSource: File,
       log: Logger
   ): Unit = {
-    val signalLibrary = jdk / "lib" / "libjsig.so"
+    val (preload, signalLibrary) = Modules.signalChaining(jdk)
     require(
       signalLibrary.isFile,
       s"Knowhere smoke requires this JRE's signal-chaining library: $signalLibrary"
@@ -265,16 +265,22 @@ object KnowhereBuild {
     process.redirectErrorStream(true)
     process.redirectOutput(output)
     val environment = process.environment()
+    // The bundle alone supplies the libraries: neither loader's search path
+    // nor a preload from the calling shell reaches the smoke.
     Seq(
+      "LD_PRELOAD",
       "LD_LIBRARY_PATH",
       "LD_AUDIT",
+      "DYLD_INSERT_LIBRARIES",
+      "DYLD_LIBRARY_PATH",
+      "DYLD_FALLBACK_LIBRARY_PATH",
       "CLASSPATH",
       "JAVA_TOOL_OPTIONS",
       "JDK_JAVA_OPTIONS",
       "_JAVA_OPTIONS"
     )
       .foreach(environment.remove)
-    environment.put("LD_PRELOAD", signalLibrary.getAbsolutePath)
+    environment.put(preload, signalLibrary.getAbsolutePath)
     environment.put("LD_BIND_NOW", "1")
     log.info(s"Running packaged Knowhere JNI smoke; log: $output")
     val running = process.start()

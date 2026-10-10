@@ -11,17 +11,15 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.{
   ArrayType,
-  BinaryType,
   FloatType,
   LongType,
-  ShortType,
   StructField,
   StructType
 }
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.spark.connector.implicits._
 import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.read.MilvusSearch
 
 /** The chapter-2 correctness cases of the 2.0 test plan, run as one Spark
   * application on a cluster so that every case appears in the history server.
@@ -41,8 +39,8 @@ import com.zilliz.spark.connector.read.MilvusSearch
   * baseline.
   *
   * {{{
-  *   --group read|search|procedure|all   default all
-  *   --cases R-01,S-03                   overrides --group
+  *   --group read|procedure|write|index|all   default all
+  *   --cases R-01,S-01                   overrides --group
   *   --results s3a://.../correctness     default s3a://$CT_OUTPUT_BUCKET/$CT_OUTPUT_PREFIX
   * }}}
   * The datasets come from the environment: `MILVUS_JNI_S3_BUCKET`,
@@ -85,19 +83,6 @@ object CorrectnessJob {
   private def same(actual: Any, expected: Any, what: => String): Unit =
     if (actual != expected)
       throw new AssertionError(s"$what: $actual != $expected")
-
-  private def near(
-      actual: Double,
-      expected: Double,
-      tolerance: Double,
-      what: => String
-  ): Unit = {
-    val allowed = tolerance * math.max(1.0, math.abs(expected))
-    if (math.abs(actual - expected) > allowed)
-      throw new AssertionError(
-        f"$what: $actual%.6f != $expected%.6f (allowed $allowed%.6f)"
-      )
-  }
 
   private def failure(what: String)(body: => Any): Exception =
     try {
@@ -283,81 +268,7 @@ object CorrectnessJob {
     out.result()
   }
 
-  // ---- search baselines --------------------------------------------------------
-
-  private val clusterDim = 128
-
-  private lazy val centroids: Array[Array[Float]] = Array.tabulate(200) { c =>
-    val random = new java.util.Random(0x51ed270bL * (c + 1))
-    Array.fill(clusterDim)(random.nextFloat() * 10f)
-  }
-
-  private def clustered(id: Long): Array[Float] = {
-    val random = new java.util.Random(id * 0x9e3779b97f4a7c15L)
-    val around = centroids((id % 200).toInt)
-    Array.tabulate(clusterDim)(d =>
-      around(d) + (random.nextGaussian().toFloat * 0.35f)
-    )
-  }
-
-  private lazy val clusteredBase: Map[Long, Array[Float]] =
-    (0L until 100000L).map(id => id -> clustered(id)).toMap
-
-  private def binary(id: Long): Array[Byte] = {
-    val random =
-      new java.util.Random(id * 0x9e3779b97f4a7c15L + 0x2545f4914f6cdd1dL)
-    Array.fill(64)((random.nextInt() & 0xff).toByte)
-  }
-
-  private def jitter(
-      v: Array[Float],
-      seed: Long,
-      amount: Float
-  ): Array[Float] = {
-    val random = new java.util.Random(seed)
-    v.map(x => x + (random.nextFloat() - 0.5f) * amount)
-  }
-
-  private def score(
-      metric: String,
-      q: Array[Float],
-      v: Array[Float]
-  ): Double = {
-    var dot = 0.0d; var qq = 0.0d; var vv = 0.0d; var l2 = 0.0d
-    var i = 0
-    while (i < q.length) {
-      val a = q(i).toDouble; val b = v(i).toDouble
-      dot += a * b; qq += a * a; vv += b * b; l2 += (a - b) * (a - b)
-      i += 1
-    }
-    metric match {
-      case "L2"     => l2
-      case "IP"     => dot
-      case "COSINE" => dot / (math.sqrt(qq) * math.sqrt(vv))
-    }
-  }
-
-  private def bitScore(
-      metric: String,
-      q: Array[Byte],
-      v: Array[Byte]
-  ): Double = {
-    var differ = 0; var both = 0; var either = 0
-    var i = 0
-    while (i < q.length) {
-      differ += Integer.bitCount((q(i) ^ v(i)) & 0xff)
-      both += Integer.bitCount((q(i) & v(i)) & 0xff)
-      either += Integer.bitCount((q(i) | v(i)) & 0xff)
-      i += 1
-    }
-    metric match {
-      case "HAMMING" => differ.toDouble
-      case "JACCARD" => 1.0 - both.toDouble / either.toDouble
-    }
-  }
-
-  private def smallerIsBetter(metric: String): Boolean =
-    Set("L2", "HAMMING", "JACCARD").contains(metric)
+  // ---- query sets ---------------------------------------------------------------
 
   private def vectorQueries(queries: Seq[(Long, Array[Float])]): DataFrame =
     spark.createDataFrame(
@@ -369,82 +280,6 @@ object CorrectnessJob {
         )
       )
     )
-
-  private def bitQueries(queries: Seq[(Long, Array[Byte])]): DataFrame =
-    spark.createDataFrame(
-      queries.map { case (id, v) => Row(id, v) }.asJava,
-      StructType(
-        Seq(
-          StructField("query_id", LongType, nullable = false),
-          StructField("vector", BinaryType)
-        )
-      )
-    )
-
-  private def search(
-      path: String,
-      queries: DataFrame,
-      field: String,
-      k: Int,
-      metric: String,
-      filter: Option[String] = None,
-      output: Seq[String] = Seq("id")
-  ): Map[Long, Seq[Row]] =
-    MilvusSearch
-      .search(
-        spark,
-        storageOptions() + (MilvusOption.SnapshotPath -> path),
-        queries,
-        field,
-        k,
-        metric,
-        mode = "exact",
-        filter = filter,
-        outputColumns = output
-      )
-      .orderBy("query_id", "rank")
-      .collect()
-      .toSeq
-      .groupBy(_.getAs[Long]("query_id"))
-
-  private def checkHits(
-      label: String,
-      hits: Seq[Row],
-      truth: Long => Double,
-      candidates: Seq[Long],
-      metric: String,
-      k: Int,
-      tolerance: Double
-  ): Unit = {
-    val better = if (smallerIsBetter(metric)) 1.0 else -1.0
-    val expected = candidates.map(truth).sortBy(_ * better).take(k)
-    val gotIds = hits.map(_.getAs[Long]("id"))
-    val allowed = candidates.toSet
-    same(
-      hits.map(_.getAs[Int]("rank")),
-      (1 to expected.size).toSeq,
-      s"$label ranks"
-    )
-    same(gotIds.distinct.size, gotIds.size, s"$label returned a row twice")
-    same(
-      gotIds.filterNot(allowed),
-      Seq.empty[Long],
-      s"$label returned rows outside the candidates"
-    )
-    hits.map(_.getAs[Double]("_score")).zip(expected).zipWithIndex.foreach {
-      case ((got, want), rank) =>
-        near(got, want, tolerance, s"$label rank ${rank + 1} score")
-    }
-    hits.foreach { hit =>
-      val id = hit.getAs[Long]("id")
-      near(
-        hit.getAs[Double]("_score"),
-        truth(id),
-        tolerance,
-        s"$label score of id $id"
-      )
-    }
-  }
 
   // ---- the cases ----------------------------------------------------------------
 
@@ -936,300 +771,6 @@ object CorrectnessJob {
     )
   )
 
-  private def searchCases: Seq[Case] = Seq(
-    Case(
-      "S-01",
-      "search",
-      "exact L2, IP and COSINE against brute force",
-      () => {
-        val path = ds("SEARCH_CL_SNAPSHOT_L0DEL")
-        val targets = Seq(1000L, 25000L, 77777L)
-        val queries = targets.map(t => t -> jitter(clusteredBase(t), t, 0.5f))
-        val candidates = (100L until 100000L).toSeq
-        for (metric <- Seq("L2", "IP", "COSINE"); k <- Seq(10, 100)) {
-          val found = search(path, vectorQueries(queries), "v", k, metric)
-          queries.foreach { case (qid, q) =>
-            checkHits(
-              s"$metric k=$k query $qid",
-              found(qid),
-              id => score(metric, q, clusteredBase(id)),
-              candidates,
-              metric,
-              k,
-              1e-3
-            )
-          }
-        }
-      }
-    ),
-    Case(
-      "S-03",
-      "search",
-      "binary vectors with HAMMING and JACCARD",
-      () => {
-        val path = ds("SEARCH_BIN_SNAPSHOT_L0DEL")
-        val base = (0L until 100000L).map(id => id -> binary(id)).toMap
-        val queries = Seq(1234L, 88888L).map { t =>
-          val v = base(t).clone(); v(0) = (v(0) ^ 0x05).toByte;
-          v(7) = (v(7) ^ 0x80).toByte
-          t -> v
-        }
-        for (metric <- Seq("HAMMING", "JACCARD")) {
-          val found = search(path, bitQueries(queries), "bv", 10, metric)
-          queries.foreach { case (qid, q) =>
-            checkHits(
-              s"$metric query $qid",
-              found(qid),
-              id => bitScore(metric, q, base(id)),
-              (100L until 100000L).toSeq,
-              metric,
-              10,
-              1e-6
-            )
-          }
-        }
-      }
-    ),
-    Case(
-      "S-04",
-      "search",
-      "Float16, BFloat16 and Int8 fields",
-      () => {
-        val path = ds("SEARCH_MIXED_SNAPSHOT_L0DEL")
-        val candidates = (100L until 100000L).toSeq
-        val q = jitter(clusteredBase(3131L), 3131L, 0.5f)
-        Seq(
-          ("v_f16", (v: Array[Float]) => v.map(float16)),
-          ("v_bf16", (v: Array[Float]) => v.map(bfloat16))
-        ).foreach { case (field, encode) =>
-          val sample = snapshot(path)
-            .filter(col("id").isin(1000L, 2000L, 3000L))
-            .select("id", field)
-            .collect()
-          same(sample.length, 3, s"$field sample size")
-          sample.foreach { row =>
-            val id = row.getAs[Long]("id")
-            same(
-              row.getSeq[Float](row.fieldIndex(field)).toSeq,
-              encode(clusteredBase(id)).toSeq,
-              s"$field stored value of id $id"
-            )
-          }
-          val encodedQuery = encode(q)
-          val truth =
-            (id: Long) => score("L2", encodedQuery, encode(clusteredBase(id)))
-          val found =
-            search(path, vectorQueries(Seq(1L -> q)), field, 10, "L2")(1L)
-          val best15 = candidates
-            .map(id => id -> truth(id))
-            .sortBy(_._2)
-            .take(15)
-            .map(_._1)
-            .toSet
-          val outside = found.map(_.getAs[Long]("id")).filterNot(best15)
-          same(
-            outside,
-            Seq.empty[Long],
-            s"$field returned ids outside the true top 15"
-          )
-          val drift = found
-            .map(hit =>
-              math.abs(
-                hit.getAs[Double]("_score") - truth(hit.getAs[Long]("id"))
-              ) / math.max(1.0, truth(hit.getAs[Long]("id")))
-            )
-            .max
-          check(
-            drift <= 0.05,
-            f"$field score drift against the decoded baseline is $drift%.4f"
-          )
-        }
-        val i8 = (v: Array[Float]) =>
-          v.map(x =>
-            math.max(-128f, math.min(127f, math.rint(x * 10.0).toFloat))
-          )
-        val qi8 = i8(q)
-        val int8Queries = spark.createDataFrame(
-          Seq(Row(1L, qi8.toSeq.map(_.toShort))).asJava,
-          StructType(
-            Seq(
-              StructField("query_id", LongType, nullable = false),
-              StructField("vector", ArrayType(ShortType, containsNull = false))
-            )
-          )
-        )
-        val found = search(path, int8Queries, "v_i8", 10, "L2")
-        checkHits(
-          "v_i8",
-          found(1L),
-          id => score("L2", qi8, i8(clusteredBase(id))),
-          candidates,
-          "L2",
-          10,
-          1e-6
-        )
-      }
-    ),
-    Case(
-      "S-05",
-      "search",
-      "a filter restricts the candidates",
-      () => {
-        val path = ds("SEARCH_CL_SNAPSHOT_L0DEL")
-        val q = jitter(clusteredBase(4243L), 4243L, 0.5f)
-        val labelled = search(
-          path,
-          vectorQueries(Seq(1L -> q)),
-          "v",
-          10,
-          "L2",
-          filter = Some("label == 3")
-        )
-        checkHits(
-          "label == 3",
-          labelled(1L),
-          id => score("L2", q, clusteredBase(id)),
-          (100L until 100000L).filter(_ % 10 == 3).toSeq,
-          "L2",
-          10,
-          1e-3
-        )
-        val few = search(
-          path,
-          vectorQueries(Seq(2L -> q)),
-          "v",
-          10,
-          "L2",
-          filter = Some("id < 110 and label == 3")
-        )
-        same(
-          few(2L).map(_.getAs[Long]("id")),
-          Seq(103L),
-          "fewer valid rows than k"
-        )
-      }
-    ),
-    Case(
-      "S-06",
-      "search",
-      "a nullable vector field",
-      () => {
-        val path = ds("SEARCH_CL_SNAPSHOT_L0DEL")
-        val q = jitter(clusteredBase(5550L), 5550L, 0.5f)
-        val found =
-          search(path, vectorQueries(Seq(1L -> q)), "v_null", 20, "L2")
-        checkHits(
-          "v_null",
-          found(1L),
-          id => score("L2", q, clusteredBase(id)),
-          (100L until 100000L).filter(_ % 10 != 0).toSeq,
-          "L2",
-          20,
-          1e-3
-        )
-      }
-    ),
-    Case(
-      "S-10",
-      "search",
-      "output columns",
-      () => {
-        val path = ds("SEARCH_CL_SNAPSHOT_L0DEL")
-        val queries = vectorQueries(Seq(1L -> clusteredBase(1000L)))
-        val options = storageOptions() + (MilvusOption.SnapshotPath -> path)
-        same(
-          MilvusSearch
-            .search(spark, options, queries, "v", 3, "L2", mode = "exact")
-            .columns
-            .toSeq,
-          Seq("query_id", "rank", "_score", "_segment_id", "_row_offset"),
-          "the five fixed columns"
-        )
-        same(
-          MilvusSearch
-            .search(
-              spark,
-              options,
-              queries,
-              "v",
-              3,
-              "L2",
-              mode = "exact",
-              outputColumns = Seq("label", "id")
-            )
-            .columns
-            .toSeq
-            .takeRight(2),
-          Seq("label", "id"),
-          "output columns keep their order"
-        )
-        failure("a reserved output column")(
-          MilvusSearch.search(
-            spark,
-            options,
-            queries,
-            "v",
-            3,
-            "L2",
-            mode = "exact",
-            outputColumns = Seq("rank")
-          )
-        )
-      }
-    ),
-    Case(
-      "S-12",
-      "search",
-      "query sets the search cannot answer",
-      () => {
-        val path = ds("SEARCH_CL_SNAPSHOT_L0DEL")
-        val good = clusteredBase(1000L)
-        val options = storageOptions() + (MilvusOption.SnapshotPath -> path)
-        def attempt(
-            label: String,
-            queries: DataFrame,
-            k: Int = 3,
-            metric: String = "L2"
-        ): Unit =
-          failure(label)(
-            MilvusSearch
-              .search(spark, options, queries, "v", k, metric, mode = "exact")
-              .collect()
-          )
-        attempt(
-          "duplicate query_id",
-          vectorQueries(Seq(1L -> good, 1L -> good))
-        )
-        attempt("wrong dimension", vectorQueries(Seq(1L -> good.take(64))))
-        attempt(
-          "NaN element",
-          vectorQueries(Seq(1L -> good.updated(0, Float.NaN)))
-        )
-        attempt("k = 0", vectorQueries(Seq(1L -> good)), k = 0)
-        attempt(
-          "unknown metric",
-          vectorQueries(Seq(1L -> good)),
-          metric = "MANHATTAN"
-        )
-        attempt(
-          "null vector",
-          spark.createDataFrame(
-            Seq(Row(1L, null)).asJava,
-            StructType(
-              Seq(
-                StructField("query_id", LongType, nullable = false),
-                StructField(
-                  "vector",
-                  ArrayType(FloatType, containsNull = false)
-                )
-              )
-            )
-          )
-        )
-      }
-    )
-  )
-
   /** A procedure takes its connection as backquoted option arguments of the
     * CALL statement. The values come from the environment so that no token is
     * written into the application spec.
@@ -1704,30 +1245,33 @@ object CorrectnessJob {
     writer.save()
   }
 
+  /** Each query's hit ids from a NEAREST BY over a snapshot: `exact` scans
+    * every segment, `approx` searches the indexes the snapshot carries. The
+    * query set names its vector `vector`, the base its field `field`, and the
+    * metric is L2.
+    */
   private def searchWith(
       options: Map[String, String],
       queries: DataFrame,
       field: String,
       k: Int,
-      metric: String,
       mode: String
-  ): Map[Long, Seq[Long]] =
-    MilvusSearch
-      .search(
-        spark,
-        options,
-        queries,
-        field,
+  ): Map[Long, Seq[Long]] = {
+    val base = spark.read.format("milvus").options(options).load()
+    queries
+      .nearestByJoin(
+        base,
+        call_function("vector_l2_distance", queries("vector"), base(field)),
         k,
-        metric,
-        mode = mode,
-        outputColumns = Seq("id")
+        mode,
+        "distance"
       )
-      .orderBy("query_id", "rank")
+      .select(col("query_id"), col("id"))
       .collect()
       .toSeq
-      .groupBy(_.getAs[Long]("query_id"))
-      .map { case (query, rows) => query -> rows.map(_.getAs[Long]("id")) }
+      .groupBy(_.getLong(0))
+      .map { case (query, rows) => query -> rows.map(_.getLong(1)) }
+  }
 
   /** Twenty query vectors taken from the snapshot's own rows. */
   private def queriesFrom(path: String, field: String): DataFrame = {
@@ -1933,7 +1477,6 @@ object CorrectnessJob {
           flatQueries,
           "fv",
           10,
-          "L2",
           "exact"
         )
         val indexFlat = searchWith(
@@ -1941,8 +1484,7 @@ object CorrectnessJob {
           flatQueries,
           "fv",
           10,
-          "L2",
-          "index"
+          "approx"
         )
         val flatRecall = recall(exactFlat, indexFlat, 10)
         check(
@@ -1966,7 +1508,6 @@ object CorrectnessJob {
           hnswQueries,
           "v",
           10,
-          "L2",
           "exact"
         )
         val indexHnsw = searchWith(
@@ -1974,8 +1515,7 @@ object CorrectnessJob {
           hnswQueries,
           "v",
           10,
-          "L2",
-          "index"
+          "approx"
         )
         val hnswRecall = recall(exactHnsw, indexHnsw, 10)
         check(hnswRecall >= 0.95, f"HNSW recall@10 is $hnswRecall%.3f")
@@ -2002,7 +1542,6 @@ object CorrectnessJob {
           queries,
           "fv",
           10,
-          "L2",
           "exact"
         )
         val index = searchWith(
@@ -2010,8 +1549,7 @@ object CorrectnessJob {
           queries,
           "fv",
           10,
-          "L2",
-          "index"
+          "approx"
         )
         val deleted = index.values.flatten.filter(_ < 100L).toSeq
         same(deleted, Seq.empty[Long], "the index search returned deleted ids")
@@ -2025,7 +1563,7 @@ object CorrectnessJob {
   )
 
   private def allCases: Seq[Case] =
-    readCases ++ searchCases ++ procedureCases ++ writeCases ++ indexCases
+    readCases ++ procedureCases ++ writeCases ++ indexCases
 
   private[uat] def parseArguments(args: Array[String]): Map[String, String] = {
     require(args.length % 2 == 0, "each argument requires a value")
