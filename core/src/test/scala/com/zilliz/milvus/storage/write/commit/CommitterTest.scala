@@ -17,6 +17,14 @@ class CommitterTest extends AnyFunSuite with Matchers {
     CommittedSegment(1, "files/staging/job-1/1/task_1_2", 1L, 1490L)
   )
 
+  private val source = SourceSnapshot(
+    key = "files/snapshots/10/metadata/5000.json",
+    bucket = "milvus-bucket",
+    collectionId = 10L,
+    name = "s-5000",
+    createdAt = Some(449916217386418177L)
+  )
+
   private def withStore(
       f: (LocalObjectStore, StagingLayout, Path) => Unit
   ): Unit = {
@@ -223,7 +231,40 @@ class CommitterTest extends AnyFunSuite with Matchers {
   test("JobManifest round-trips through JSON") {
     val manifest = JobManifest("j", 42L, segments)
     JobManifest.fromJson(manifest.toJson) shouldBe Right(manifest)
+    val built = JobManifest("j", 42L, Seq.empty, sourceSnapshot = Some(source))
+    JobManifest.fromJson(built.toJson) shouldBe Right(built)
     JobManifest.fromJson("{") should matchPattern { case Left(_) => }
+  }
+
+  test("a build job's manifest names the snapshot it planned against") {
+    withStore { (store, layout, dir) =>
+      new Committer(store, layout).commit(
+        Seq.empty,
+        nowMillis = 1L,
+        sourceSnapshot = Some(source)
+      ) shouldBe CommitOutcome.Committed
+
+      val json = text(dir, "files/staging/job-1/manifest.json")
+      json should include("\"source_snapshot\"")
+      json should include(
+        "\"key\" : \"files/snapshots/10/metadata/5000.json\""
+      )
+      json should include("\"created_at\" : 449916217386418177")
+      JobManifest.fromJson(json).map(_.sourceSnapshot) shouldBe Right(
+        Some(source)
+      )
+    }
+  }
+
+  test("a manifest written before the source was recorded reads with none") {
+    val json = JobManifest("j", 42L, segments).toJson
+
+    json should not include "source_snapshot"
+    JobManifest.fromJson(json).map(_.sourceSnapshot) shouldBe Right(None)
+  }
+
+  test("a source snapshot names its document") {
+    the[IllegalArgumentException] thrownBy SourceSnapshot(" ", "b", 1L, "n")
   }
 
   private def text(storeRoot: LocalObjectStore, path: String): String =

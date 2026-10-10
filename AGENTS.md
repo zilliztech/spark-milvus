@@ -17,12 +17,14 @@ Spark reads and writes Milvus collections by going straight at the Milvus
 storage format on object storage, not through the Milvus query path. A read
 lists a snapshot, plans one Spark partition per segment, and pulls Arrow column
 batches out of the segment files. A write produces segment files in the same
-format and registers them back with Milvus. Vector search enters through
-`MilvusSearch.search`, which takes a query set and returns each query's top-k
-over the snapshot's persisted indexes or by exact scan.
+format and registers them back with Milvus. Vector search is written as a
+NEAREST BY join: Spark 4.2's own, and the connector's `nearestByJoin` and
+`nearest_by_join` on 3.5 to 4.1. Over a Milvus table the connector executes it
+and returns each query's top-k over the snapshot's persisted indexes or by
+exact scan.
 
-Two lines exist. The 1.x line is frozen at tag `v1.6.0` and takes fixes only.
-The 2.0 line is a rewrite on branch `refactor/v2`, versioned
+The 1.x line stopped at tag `v1.6.0` and is no longer maintained: it takes no
+fixes. The 2.0 line is a rewrite on branch `refactor/v2`, versioned
 `2.0.0-{branch}-{arch}-SNAPSHOT`. Everything below describes 2.0.
 
 ## The four layers
@@ -34,7 +36,7 @@ Twelve sbt modules, and dependencies only point downward.
 | 1 | `native-runtime`, `native-storage`, `native-vector` | Storage uses milvus-storage's upstream JNI and Java/Scala API; vector library loading through Knowhere's upstream C/JNI and Java API. `native-runtime` verifies and extracts the unified platform bundle for both bindings. Nothing above this layer loads a `.so`. |
 | 2 | `core`, `compat`, `client` | The Milvus storage format and the client for the online service. All computation happens here. No Spark: a source file mentioning `org.apache.spark` fails the build. |
 | 3 | `spark-base`, `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | The DataSource V2 surface. `spark-base` is a shared source directory, not a project; each line project compiles it against its own Spark, Arrow, antlr and Java version. |
-| 4 | `apps-4.0` | The backfill job users run, and the SQL vector distance functions. |
+| 4 | `apps-4.0` | The backfill job users run. Vector search is written as a NEAREST BY join, which layer 3 takes over. |
 
 `integration-4.0` sits outside the layering and outside root's aggregate: its
 suites need a live Milvus and MinIO.

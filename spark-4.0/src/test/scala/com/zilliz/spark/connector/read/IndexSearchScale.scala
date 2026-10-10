@@ -10,6 +10,11 @@ import com.zilliz.milvus.jni.vector.NativeVectorLibrary
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
 import com.zilliz.milvus.storage.write.commit.JobManifest
+import com.zilliz.spark.connector.extensions.{
+  MilvusSparkPlugin,
+  MilvusSparkSessionExtensions
+}
+import com.zilliz.spark.connector.implicits._
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.procedure.{
   BuildIndexProcedure,
@@ -19,8 +24,8 @@ import com.zilliz.spark.connector.procedure.{
 
 /** The index counterpart of [[ExactSearchScale]]: over the base that harness
   * wrote, run `build_index` (HNSW) on every segment, `write_snapshot`, and then
-  * search the snapshot in `index` mode, measuring build time, index size, and
-  * recall against an `exact` search over the same queries.
+  * an APPROX NEAREST BY over the snapshot, measuring build time, index size,
+  * and recall against an EXACT NEAREST BY over the same queries.
   *
   * No Milvus and no object store: the snapshot document the build plans against
   * is synthesized here from the committed job manifest, the way
@@ -40,7 +45,9 @@ import com.zilliz.spark.connector.procedure.{
   *   INDEX_EXACT_BATCH_MAX_BYTES=4194304
   *   INDEX_VECTORS_PER_TASK_MIB=64     exact-sample vector budget per task slot
   *   INDEX_SKIP_SAMPLE=false           true skips the exact/recall sample and only times the full search
-  *   INDEX_FULL_EF=128
+  *   INDEX_FULL_EF=128                 the width of the search over the whole
+  *                                     query set, measured by
+  *                                     [[SearchRunMeasure]]
   * }}}
   */
 object IndexSearchScale {
@@ -84,6 +91,11 @@ object IndexSearchScale {
       .config("spark.sql.shuffle.partitions", "16")
       .config("spark.eventLog.enabled", "false")
       .config("spark.driver.maxResultSize", "8g")
+      .config(
+        "spark.sql.extensions",
+        classOf[MilvusSparkSessionExtensions].getName
+      )
+      .config("spark.plugins", classOf[MilvusSparkPlugin].getName)
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
@@ -159,14 +171,14 @@ object IndexSearchScale {
     val queries = spark
       .range(queryRows)
       .select(
-        col("id").as(SearchQueries.IdColumn),
+        col("id").as("qid"),
         array(
           (0 until dim).map(d => (rand(d.toLong) * 2.0 - 1.0).cast("float")): _*
-        ).as(SearchQueries.VectorColumn)
+        ).as("qv")
       )
       .cache()
     queries.count()
-    val sampled = queries.filter(col(SearchQueries.IdColumn) < sample).cache()
+    val sampled = queries.filter(col("qid") < sample).cache()
     sampled.count()
     step(s"queries ready: $queryRows total, $sample sampled")
 
@@ -184,44 +196,45 @@ object IndexSearchScale {
       )
     )
 
+    // The base at a search width: the index's `ef`, a read option of the base.
+    def base(ef: Option[String]): DataFrame = spark.read
+      .format("milvus")
+      .options(
+        builtOptions ++ ef.map(width =>
+          MilvusOption.SearchParams -> s"ef=$width"
+        )
+      )
+      .load()
+
+    // Each query's hit ids from NEAREST BY over the built snapshot, and the
+    // seconds it took.
     def hits(
         mode: String,
         frame: DataFrame,
-        parameters: Map[String, String]
+        ef: Option[String]
     ): (Map[Long, Seq[Long]], Double) = {
       val t0 = System.nanoTime()
-      val rows = MilvusSearch
-        .search(
-          spark,
-          builtOptions,
-          frame,
-          "vector",
+      val searched = base(ef)
+      val rows = frame
+        .nearestByJoin(
+          searched,
+          call_function("vector_l2_distance", frame("qv"), searched("vector")),
           topK,
-          "L2",
           mode,
-          parameters,
-          None,
-          Seq("id"),
-          false
+          "distance"
         )
-        .select(
-          col(SearchQueries.IdColumn),
-          col("rank"),
-          col("id")
-        )
+        .select(col("qid"), col("id"))
         .collect()
       val seconds = (System.nanoTime() - t0) / 1e9
       val byQuery = rows
         .groupBy(_.getLong(0))
-        .map { case (q, rs) =>
-          q -> rs.sortBy(_.getInt(1)).map(_.getLong(2)).toSeq
-        }
+        .map { case (q, rs) => q -> rs.map(_.getLong(1)).toSeq }
       (byQuery, seconds)
     }
 
     // ---- exact baseline on the sample --------------------------------------
     if (!env("INDEX_SKIP_SAMPLE", "false").toBoolean) {
-      val (exact, exactSeconds) = hits("exact", sampled, Map.empty)
+      val (exact, exactSeconds) = hits("exact", sampled, None)
       println(
         f"RESULT exact queries=$sample topk=$topK seconds=$exactSeconds%.1f answered=${exact.size} " +
           f"pairs_per_s=${sample * job.segments.map(_.rowCount).sum / exactSeconds}%.0f"
@@ -234,7 +247,7 @@ object IndexSearchScale {
         .map(_.trim)
         .filter(_.nonEmpty)
         .foreach { ef =>
-          val (found, seconds) = hits("index", sampled, Map("ef" -> ef))
+          val (found, seconds) = hits("approx", sampled, Some(ef))
           val recall = exact.map { case (q, want) =>
             val got = found.getOrElse(q, Seq.empty).toSet
             want.count(got).toDouble / want.size
@@ -247,30 +260,27 @@ object IndexSearchScale {
         }
     }
 
-    // ---- index search: the whole query set at one width ----------------------
+    // ---- index search: the whole query set at one width, measured -----------
     val fullEf = env("INDEX_FULL_EF", "128")
-    val fullStarted = System.nanoTime()
-    val fullHits = MilvusSearch
-      .search(
-        spark,
-        builtOptions,
-        queries,
-        "vector",
-        topK,
-        "L2",
-        "index",
-        Map("ef" -> fullEf),
-        None,
-        Seq.empty,
-        false
-      )
-      .count()
-    val fullSeconds = (System.nanoTime() - fullStarted) / 1e9
+    val full = base(Some(fullEf))
+    val ranking =
+      call_function("vector_l2_distance", queries("qv"), full("vector"))
+    val (answered, measured) = SearchRunMeasure(spark) {
+      queries
+        .nearestByJoin(full, ranking, topK, "approx", "distance")
+        .agg(count(lit(1)), sum(ranking))
+        .head()
+    }
     println(
-      f"RESULT index_full ef=$fullEf queries=$queryRows topk=$topK seconds=$fullSeconds%.1f " +
-        f"hits=$fullHits queries_per_s=${queryRows / fullSeconds}%.0f"
+      f"RESULT index_full ef=$fullEf queries=$queryRows topk=$topK seconds=${measured.seconds}%.1f " +
+        f"hits=${answered.getLong(0)} queries_per_s=${queryRows / measured.seconds}%.0f"
     )
-    step(f"index ef=$fullEf on all $queryRows queries: $fullSeconds%.1fs")
+    println(
+      measured.line(s"nearest_full ef=$fullEf hits=${answered.getLong(0)}")
+    )
+    step(
+      f"index ef=$fullEf on all $queryRows queries: ${measured.seconds}%.1fs"
+    )
     spark.stop()
   }
 

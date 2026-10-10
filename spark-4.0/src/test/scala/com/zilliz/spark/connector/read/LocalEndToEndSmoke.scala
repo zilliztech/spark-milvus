@@ -8,9 +8,10 @@ import scala.collection.JavaConverters._
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.Metadata
-import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
 import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
@@ -20,6 +21,11 @@ import com.zilliz.milvus.storage.snapshot.json.{
 }
 import com.zilliz.milvus.storage.write.commit.{CommittedSegment, JobManifest}
 import com.zilliz.milvus.storage.write.exec.V3SegmentWriter
+import com.zilliz.spark.connector.extensions.{
+  MilvusSparkPlugin,
+  MilvusSparkSessionExtensions
+}
+import com.zilliz.spark.connector.implicits._
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.procedure.{
   BuildIndexProcedure,
@@ -38,12 +44,12 @@ import io.milvus.storage.{MilvusStorageProperties, MilvusStorageTransaction}
   *
   * Step 3 adds a delete file to every segment and writes a snapshot over them.
   *
-  * Step 4 checks an exact search over a query set against brute force.
+  * Step 4 checks an EXACT NEAREST BY of a query set against brute force.
   *
   * Step 5 runs `build_index` (HNSW) and `write_snapshot`, then measures an
-  * index search through that snapshot against the exact answer.
+  * APPROX NEAREST BY through that snapshot against the exact answer.
   *
-  * Step 6 writes the search result out as a second collection and reads it
+  * Step 6 writes the join's hits out as a second collection and reads them
   * back.
   *
   * Every vector is a function of its id, so every expected answer is computed
@@ -168,6 +174,11 @@ object LocalEndToEndSmoke {
         .builder()
         .master("local[4]")
         .appName("local-e2e-smoke")
+        .config(
+          "spark.sql.extensions",
+          classOf[MilvusSparkSessionExtensions].getName
+        )
+        .config("spark.plugins", classOf[MilvusSparkPlugin].getName)
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "4")
         .config("spark.driver.host", "127.0.0.1")
@@ -265,53 +276,96 @@ object LocalEndToEndSmoke {
         s"PASS snapshot: ${deletedIds.size} deletes applied, ${Rows - deletedIds.size} rows remain"
       )
 
-      // ---- 4. exact search versus brute force ----------------------------
+      // ---- 4. EXACT NEAREST BY versus brute force -------------------------
+      // The query vector is named apart from the base's `vector`: the join's
+      // output carries both.
       val queries = (0L until Queries.toLong)
         .map(q => q -> queryOf(q))
-        .toDF(SearchQueries.IdColumn, SearchQueries.VectorColumn)
-      val filter = "category in [1,3,5,7,9] and id < 15000"
+        .toDF("query_id", "query_vector")
+      // The base a search reads: the snapshot, at an index search width when
+      // one is named, with the scalar filter when asked for.
+      def base(
+          options: Map[String, String],
+          filtered: Boolean,
+          ef: Option[String] = None
+      ): DataFrame = {
+        val read = spark.read
+          .format("milvus")
+          .options(
+            options ++ ef.map(width =>
+              MilvusOption.SearchParams -> s"ef=$width"
+            )
+          )
+          .load()
+        if (filtered)
+          read.where(col("category").isin(1, 3, 5, 7, 9) && col("id") < 15000L)
+        else read
+      }
+      // Each query's K hits, nearest first, with the squared L2 brute force
+      // computes: Spark's `vector_l2_distance` is its square root.
+      def join(searched: DataFrame, mode: String): DataFrame =
+        queries
+          .nearestByJoin(
+            searched,
+            call_function(
+              "vector_l2_distance",
+              queries("query_vector"),
+              searched("vector")
+            ),
+            K,
+            mode,
+            "distance"
+          )
+          .select(
+            col("query_id"),
+            col("id"),
+            pow(
+              call_function(
+                "vector_l2_distance",
+                col("query_vector"),
+                col("vector")
+              ),
+              2
+            ).as("score"),
+            col("category")
+          )
       def search(
           options: Map[String, String],
           mode: String,
           filtered: Boolean,
-          parameters: Map[String, String] = Map.empty
+          ef: Option[String] = None
       ): Map[Long, Seq[(Long, Float)]] =
-        MilvusSearch
-          .search(
-            spark,
-            options,
-            queries,
-            "vector",
-            K,
-            "L2",
-            mode,
-            parameters,
-            if (filtered) Some(filter) else None,
-            Seq("id", "category"),
-            false
-          )
+        join(base(options, filtered, ef), mode)
           .collect()
           .toSeq
           .map(row =>
             (
               row.getAs[Long]("query_id"),
-              row.getAs[Int]("rank"),
               row.getAs[Long]("id"),
-              row.getAs[Double]("_score").toFloat,
+              row.getAs[Double]("score").toFloat,
               row.getAs[Long]("category")
             )
           )
           .groupBy(_._1)
           .map { case (q, hits) =>
-            hits.foreach { case (_, _, id, _, category) =>
+            hits.foreach { case (_, id, _, category) =>
               assert(!deleted(id), s"query $q returned deleted id $id")
               assert(category == categoryOf(id), s"category of $id")
               if (filtered)
                 assert(keep(id, filtered), s"query $q: $id violates the filter")
             }
-            q -> hits.sortBy(_._2).map(h => (h._3, h._4))
+            q -> hits
+              .map(h => (h._2, h._3))
+              .sortBy { case (id, score) => (score, id) }
           }
 
+      // The join gives each query its K nearest rows as a set; the scores
+      // are what Spark's function computes for each of them. Knowhere scores
+      // L2 as |x|^2 + |y|^2 - 2x.y in float32: here the two squared norms add
+      // up to about 2,100, where a float's last place is 2.4e-4, and the
+      // distances near the K-th are about 2. A row whose distance is within a
+      // few such places of the K-th may take its place
+      // (docs/design/architecture/dataframe-api.html section 2).
       def checkExact(
           got: Map[Long, Seq[(Long, Float)]],
           filtered: Boolean,
@@ -321,8 +375,14 @@ object LocalEndToEndSmoke {
         got.foreach { case (q, hits) =>
           val expected = bruteForce(q, filtered)
           assert(hits.size == K, s"$what query $q: ${hits.size} hits")
+          val kth = expected.last._2
+          val found = hits.map(_._1).toSet
+          val wanted = expected.map(_._1).toSet
           assert(
-            hits.map(_._1) == expected.map(_._1),
+            ((found -- wanted) ++ (wanted -- found)).forall(id =>
+              math.abs(l2(queryOf(q), vectorOf(id)) - kth) <=
+                1e-3f * math.max(1f, kth)
+            ),
             s"$what query $q: got ${hits.map(_._1)} expected ${expected.map(_._1)}"
           )
           hits.zip(expected).foreach { case ((_, score), (_, want)) =>
@@ -344,10 +404,10 @@ object LocalEndToEndSmoke {
         "exact+filter"
       )
       step(
-        s"PASS exact search: $Queries queries x top-$K, with and without a scalar filter, ids and squared L2 equal brute force"
+        s"PASS EXACT NEAREST BY: $Queries queries x top-$K, with and without a scalar filter, ids and squared L2 as brute force up to float32 rounding at the K-th"
       )
 
-      // ---- 5. build_index, write_snapshot, index search ------------------
+      // ---- 5. build_index, write_snapshot, APPROX NEAREST BY -------------
       val built = BuildIndexProcedure.run(
         ProcedureArgs(
           values = Map(
@@ -395,7 +455,7 @@ object LocalEndToEndSmoke {
         "exact@built"
       )
       Seq(false, true).foreach { filtered =>
-        val index = search(builtOptions, "index", filtered, Map("ef" -> "128"))
+        val index = search(builtOptions, "approx", filtered, Some("128"))
         assert(index.size == Queries, s"index: ${index.size} queries answered")
         val recall = index.map { case (q, hits) =>
           val expected = bruteForce(q, filtered).map(_._1).toSet
@@ -412,31 +472,23 @@ object LocalEndToEndSmoke {
         }
         assert(recall >= 0.95, f"index recall $recall%.3f (filtered=$filtered)")
         step(
-          f"PASS index search (filtered=$filtered): recall@$K = $recall%.3f against brute force, scores are true distances"
+          f"PASS APPROX NEAREST BY (filtered=$filtered): recall@$K = $recall%.3f against brute force, scores are true distances"
         )
       }
 
       // ---- 6. write the hits as a second collection and read them back ---
-      val hits = MilvusSearch
-        .search(
-          spark,
-          builtOptions,
-          queries,
-          "vector",
-          K,
-          "L2",
-          "index",
-          Map("ef" -> "128"),
-          None,
-          Seq("id"),
-          false
-        )
-        .select(
-          (col("query_id") * 100 + col("rank")).as("rid"),
-          col("query_id"),
-          col("id").as("hit"),
-          col("_score").as("score")
-        )
+      // The join gives no rank; a hit's place among its query's hits is
+      // counted here, nearest first, for the result's key.
+      val hits =
+        join(base(builtOptions, filtered = false, Some("128")), "approx")
+          .select(
+            (col("query_id") * 100 + row_number().over(
+              Window.partitionBy("query_id").orderBy(col("score"), col("id"))
+            )).as("rid"),
+            col("query_id"),
+            col("id").as("hit"),
+            col("score")
+          )
       // A column read from a Milvus table carries `milvus.field_id` metadata.
       // An alias keeps it (Spark 4.0 keeps it even through
       // `as(name, Metadata.empty)`), and the next write compares it with its

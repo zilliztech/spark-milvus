@@ -1,7 +1,18 @@
 package com.zilliz.spark.connector.table
 
+import scala.annotation.tailrec
+
+import org.apache.spark.sql.catalyst.plans.logical.{
+  LeafNode,
+  LogicalPlan,
+  Project,
+  SubqueryAlias,
+  View
+}
+import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.Snapshot
@@ -34,6 +45,49 @@ private[connector] object MilvusTables {
       milvusOption,
       sparkSchema
     )
+  }
+
+  /** A table as one read sees it: the table, and the options that read runs
+    * with.
+    */
+  final case class Read(table: MilvusTable, options: CaseInsensitiveStringMap)
+
+  /** The Milvus table a name stands for, resolved by Spark's own rules: a
+    * temporary view, a global temporary view or a catalog table. A procedure
+    * that works on every row of a table takes its table this way
+    * (docs/design/architecture/dataframe-api.html section 9), so the name has
+    * to stand for the whole table: below aliases, views and column projections
+    * there is one read of a Milvus table and nothing that drops or adds rows. A
+    * view made from a DataFrame holds the DataFrame's analyzed plan, so the
+    * table is the object that plan read, with the snapshot it pinned, and the
+    * options are that read's over the table's.
+    */
+  def named(spark: SparkSession, name: String): Read = {
+    @tailrec
+    def whole(plan: LogicalPlan): DataSourceV2Relation = plan match {
+      case SubqueryAlias(_, child)    => whole(child)
+      case view: View                 => whole(view.child)
+      case Project(_, child)          => whole(child)
+      case read: DataSourceV2Relation => read
+      case leaf: LeafNode =>
+        throw new IllegalArgumentException(
+          s"'$name' does not read a Milvus table: its plan reads ${leaf.nodeName}"
+        )
+      case other =>
+        throw new IllegalArgumentException(
+          s"'$name' is not a whole Milvus table: its plan holds ${other.nodeName}, " +
+            "which can drop or add rows; use the table, or the DataFrame a read of it " +
+            "returns, before any filter, join, limit or aggregation"
+        )
+    }
+    val read = whole(spark.table(name).queryExecution.analyzed)
+    read.table match {
+      case table: MilvusTable => Read(table, table.readOptions(read.options))
+      case other =>
+        throw new IllegalArgumentException(
+          s"'$name' reads ${other.name()}, not a Milvus table"
+        )
+    }
   }
 
   /** The Spark schema of the snapshot's collection schema, one column per

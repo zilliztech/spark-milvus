@@ -6,7 +6,15 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.delete.DeletePlan
-import com.zilliz.milvus.storage.expr.PlanParser
+import com.zilliz.milvus.storage.expr.{
+  Comparison,
+  ComparisonOperator,
+  FieldRef,
+  In,
+  Literal,
+  Or,
+  PlanParser
+}
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
@@ -87,8 +95,58 @@ class RowExclusionsTest extends AnyFunSuite with Matchers {
 
       // Row 0 fails the filter, row 1 is null, row 2 has primary key 12 and a
       // delete timestamped after it; rows 3 and 4 survive.
-      (0 until 5).map(exclusions.excludes(batch, _)) shouldBe Seq(
+      val excluded = exclusions.excluded(batch)
+      (0 until 5).map(excluded.get) shouldBe Seq(
         true, true, true, false, false
+      )
+    } finally {
+      batch.close()
+      allocator.close()
+    }
+  }
+
+  test(
+    "a predicate Spark pushed excludes what it does not keep, NULL included"
+  ) {
+    // category IN (1) OR id = 14: three-valued, so a NULL category with a
+    // non-matching id is UNKNOWN and excluded like FALSE.
+    val predicate = Or(
+      In(FieldRef(102L, DataType.Int64), Vector(Literal.IntegerValue(1L))),
+      Comparison(
+        FieldRef(100L, DataType.Int64),
+        ComparisonOperator.EqualTo,
+        Literal.IntegerValue(14L)
+      )
+    )
+    val exclusions = RowExclusions.of(
+      task.copy(deletes = DeleteSource.None),
+      collection,
+      None,
+      id => Some(id.toString),
+      Some(predicate)
+    )
+
+    exclusions.neededColumns.toSet shouldBe Set("100", "102")
+
+    val allocator = new RootAllocator()
+    val batch = VectorSchemaRoot.create(schema, allocator)
+    try {
+      batch.allocateNew()
+      (0 until 5).foreach { row =>
+        batch
+          .getVector("100")
+          .asInstanceOf[BigIntVector]
+          .setSafe(row, 10L + row)
+        val category = batch.getVector("102").asInstanceOf[BigIntVector]
+        if (row == 1) category.setNull(row)
+        else category.setSafe(row, if (row == 0) 0L else 1L)
+      }
+      batch.setRowCount(5)
+
+      // Row 0 has category 0, row 1 a NULL one; rows 2 to 4 have category 1.
+      val excluded = exclusions.excluded(batch)
+      (0 until 5).map(excluded.get) shouldBe Seq(
+        true, true, false, false, false
       )
     } finally {
       batch.close()

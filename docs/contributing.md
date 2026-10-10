@@ -101,6 +101,16 @@ with those suites reported as canceled rather than failed:
 
 - `StorageNativeTest`, `WriterRoundTripTest`, `SegmentWriterTest` and `SegmentReaderTakeTest` in core
 - `MilvusV3PartitionWriterLifecycleTest` and `HadoopEndpointSnapshotTest` in spark-4.0
+- `nearestby.NearestByJoinTest`, `nearestby.FrameSearchTest` and
+  `implicits.MilvusDataFrameTest`, which live in spark-4.0's tests and are
+  compiled into all four lines: NEAREST BY (Spark's own on 4.2, the
+  connector's `nearestByJoin` and `nearest_by_join` before it, over a Milvus
+  table input and a DataFrame input) and the DataFrame methods `buildIndex`
+  and `writeSnapshot`. They also need Knowhere's libraries
+- `connect.ConnectSessionTest`, compiled into the three 4.x lines: it starts a
+  Spark Connect server in the test JVM and runs the client in a JVM of its own,
+  whose classpath the build resolves from the line's Connect client jar and
+  passes in `milvus.test.connect.client.classpath`
 - `BackfillSegmentWriteTest` in apps-4.0
 
 `NativeVectorSearchTest` and `NativeVectorSearchBatchedTest` in core cancel on
@@ -108,17 +118,23 @@ the Knowhere library instead.
 
 The UAT suites — `StorageNativeUatTest` and `SegmentReaderUatTest` in core,
 `StorageFullChainUatTest`, `SnapshotReadUatTest`, `ConnectorWriteReadUatTest`,
-the scenario suite `uat.DataFrameScenariosUatTest` and the vector search suite
-`uat.VectorSearchUatTest` in spark-4.0 — cancel on their own environment
+the scenario suite `uat.DataFrameScenariosUatTest` and the NEAREST BY suite
+`uat.NearestByUatTest` in spark-4.0 — cancel on their own environment
 variables as well, so they stay canceled even with the library present.
-`VectorSearchUatTest` additionally needs Knowhere's native libraries, which the
-unified bundle carries on all four platforms, and its index cases need a snapshot whose vector field
-carries a persisted index (`MILVUS_UAT_INDEXED_SNAPSHOT`). The scenario suite is also compiled into the 3.5, 4.1 and
-4.2 lines, so `spark35/testOnly ...DataFrameScenariosUatTest` runs the same
-scenarios there. The 3.5 line needs a JDK 17 for that run: Arrow 12, which
+`NearestByUatTest` additionally needs Knowhere's native libraries, which the
+unified bundle carries on all four platforms, and its APPROX case needs a
+snapshot whose vector field carries a persisted index
+(`MILVUS_UAT_INDEXED_SNAPSHOT`, which its prepare case creates and prints).
+The UAT directory is also compiled into the 3.5, 4.1 and 4.2 lines, so
+`spark35/testOnly ...DataFrameScenariosUatTest` runs the same scenarios there,
+and `NearestByUatTest` judges the connector's `nearestByJoin` on the older
+lines and Spark's own NEAREST BY on 4.2 against the same answers. The 3.5 line needs a JDK 17 for that run: Arrow 12, which
 Spark 3.5 ships, cannot allocate on JDK 21. Name it in
-`SPARK35_TEST_JAVA_HOME` and the line's test JVM forks from it; unit tests do
-not allocate through the C Data Interface and run on the build's JDK 21.
+`SPARK35_TEST_JAVA_HOME` and the line's test JVM forks from it. The suites
+over a local collection read it through the same interface, so on 3.5 they
+cancel under JDK 21 and run when `SPARK35_TEST_JAVA_HOME` is set; the other
+unit tests do not allocate through the C Data Interface and run on the build's
+JDK 21.
 
 Use the current run's summary to report successful, failed, canceled, ignored
 and pending tests, and completed or aborted suites. Name the native or UAT
@@ -425,17 +441,19 @@ Milvus binlog/Parquet payloads and optional `SLICE_META`, or a Cardinal raw
 engine; a shared HNSW name alone does not establish format compatibility.
 Each task owns and closes its index. There is no cross-task index cache.
 
-`MilvusSearch.search` takes a query set and returns each query's global TopK,
-running `core.index.SegmentSearch` over the segment sets `SearchPlan` cut.
-Missing native libraries fail the query. Planning, packing and merge tests run
-in the ordinary suite. The explicit real-native check needs the selected
-unified bundle and the JRE's `libjsig`:
+A NEAREST BY over a Milvus table returns each query's global TopK, running
+`core.index.SegmentSearch` over the segment sets `SearchPlan` cut. Missing
+native libraries fail the query. Planning, packing and merge tests run in the
+ordinary suite. `LocalEndToEndSmoke` runs the whole chain over real native code
+on local files -- a write, reads, deletes, EXACT NEAREST BY, `build_index`,
+`write_snapshot`, APPROX NEAREST BY and a write of the hits -- and needs the
+selected unified bundle and the JRE's `libjsig`:
 
 ```bash
 sbt -java-home "$JAVA_HOME" -Dmilvus.native.bundle=/absolute/path/to/milvus-native-$platform.jar \
   "set core / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
   "set spark40 / Test / envVars += \"LD_PRELOAD\" -> \"$JAVA_HOME/lib/libjsig.so\"" \
-  'spark40/Test/runMain com.zilliz.spark.connector.read.SegmentIndexSearchSmoke'
+  'spark40/Test/runMain com.zilliz.spark.connector.read.LocalEndToEndSmoke'
 ```
 
 `NativeVectorLibrary.load()` explicitly initializes the upstream binding and

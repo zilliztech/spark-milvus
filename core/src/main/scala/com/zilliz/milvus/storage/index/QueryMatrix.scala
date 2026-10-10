@@ -51,8 +51,8 @@ object QueryMatrix {
     }
   }
 
-  /** Bytes, as the entry takes them for int8 and binary fields: one row of
-    * `rowBytes`, already in the field's element type.
+  /** Bytes, as the entry takes them for int8 fields: one row of `rowBytes`,
+    * already in the field's element type.
     */
   def ofBytes(
       queries: Seq[Array[Byte]],
@@ -96,7 +96,7 @@ object QueryMatrix {
     packed
   }
 
-  /** Byte queries, as int8 and binary fields take them. */
+  /** Byte queries, as int8 fields take them. */
   def packBytes(
       queries: Seq[Array[Byte]],
       layout: VectorLayout
@@ -147,65 +147,6 @@ object QueryMatrix {
     }
   }
 
-  /** A matrix filled row by row, by several threads at once if the rows they
-    * write are disjoint: what a task decoding a query file by row group needs
-    * (docs/design/architecture/vector-search.html section 2.1). Rows not
-    * written stay zero; `finish` hands the matrix over, `close` without it
-    * releases the buffer.
-    */
-  final class Builder private[index] (
-      target: ArrowBuf,
-      val queries: Int,
-      val layout: VectorLayout
-  ) extends AutoCloseable {
-    private var finished = false
-
-    private def checkRow(row: Int): Unit = require(
-      row >= 0 && row < queries,
-      s"Row $row is outside a matrix of $queries queries"
-    )
-
-    /** Float values for a float32, float16 or bfloat16 field. */
-    def writeFloats(row: Int, values: Array[Float]): Unit = {
-      checkRow(row)
-      checkFloats(values, row, layout)
-      write(target, row.toLong * layout.rowBytes, values, layout)
-    }
-
-    /** One row of `rowBytes` for an int8 or binary field. */
-    def writeBytes(row: Int, values: Array[Byte]): Unit = {
-      checkRow(row)
-      requireByteQueries(layout)
-      require(
-        values != null && values.length == layout.rowBytes,
-        s"Row $row has ${if (values == null) 0
-          else values.length} bytes; the field takes ${layout.rowBytes}"
-      )
-      target.setBytes(row.toLong * layout.rowBytes, values)
-    }
-
-    def finish(): QueryMatrix = {
-      require(!finished, "The matrix was already finished")
-      finished = true
-      QueryMatrix.finished(target, queries, layout)
-    }
-
-    override def close(): Unit = if (!finished) {
-      finished = true
-      target.close()
-    }
-  }
-
-  /** An empty matrix of `queries` rows to fill through a [[Builder]]. */
-  def builder(
-      queries: Int,
-      layout: VectorLayout,
-      allocator: BufferAllocator
-  ): Builder = {
-    require(queries > 0, s"A group holds $queries queries")
-    new Builder(allocate(queries, layout, allocator), queries, layout)
-  }
-
   private def allocate(
       queries: Int,
       layout: VectorLayout,
@@ -234,9 +175,8 @@ object QueryMatrix {
   }
 
   private def requireByteQueries(layout: VectorLayout): Unit = require(
-    layout.elementType == VectorElementType.Int8 ||
-      layout.elementType == VectorElementType.Bit,
-    s"${layout.elementType} queries arrive as floats, not as bytes"
+    layout.elementType == VectorElementType.Int8,
+    s"Byte queries are for int8 fields, not for ${layout.elementType}"
   )
 
   private def checkFloats(
@@ -282,7 +222,7 @@ object QueryMatrix {
       )
     case other =>
       throw new IllegalArgumentException(
-        s"$other queries arrive as bytes, not as floats"
+        s"Float queries are for float32, float16 and bfloat16 fields, not for $other"
       )
   }
 
@@ -316,7 +256,7 @@ object QueryMatrix {
       }
     case other =>
       throw new IllegalArgumentException(
-        s"$other queries arrive as bytes, not as floats"
+        s"Float queries are for float32, float16 and bfloat16 fields, not for $other"
       )
   }
 }

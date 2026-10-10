@@ -67,7 +67,7 @@ class QueryMatrixTest
     }
   }
 
-  test("int8 and binary queries arrive as the bytes they already are") {
+  test("int8 queries arrive as the bytes they already are") {
     val int8 = VectorLayout(VectorElementType.Int8, 3)
     val matrix = QueryMatrix.ofBytes(
       Seq(Array[Byte](1, -2, 3), Array[Byte](4, 5, 6)),
@@ -79,11 +79,20 @@ class QueryMatrixTest
       val buffer = read(matrix)
       (0 until 6).map(buffer.get) shouldBe Seq[Byte](1, -2, 3, 4, 5, 6)
     } finally matrix.close()
+  }
 
+  test("a binary field takes no queries") {
     val binary = VectorLayout(VectorElementType.Bit, 16)
-    val bits = QueryMatrix.ofBytes(Seq(Array[Byte](1, 2)), binary, allocator)
-    try bits.buffer.capacity() shouldBe 2
-    finally bits.close()
+
+    val bytes = the[IllegalArgumentException] thrownBy QueryMatrix.ofBytes(
+      Seq(Array[Byte](1, 2)),
+      binary,
+      allocator
+    )
+    bytes.getMessage should include("int8 fields, not for Bit")
+    val floats = the[IllegalArgumentException] thrownBy QueryMatrix
+      .packFloats(Seq(Array.fill(16)(0f)), binary)
+    floats.getMessage should include("bfloat16 fields, not for Bit")
   }
 
   test("a query of another dimension is refused") {

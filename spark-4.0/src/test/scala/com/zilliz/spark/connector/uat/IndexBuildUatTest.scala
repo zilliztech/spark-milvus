@@ -2,7 +2,8 @@ package com.zilliz.spark.connector.uat
 
 import scala.jdk.CollectionConverters._
 
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
+import org.apache.spark.sql.functions.{call_function, col}
 import org.apache.spark.sql.types.{
   ArrayType,
   FloatType,
@@ -15,20 +16,24 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.spark.connector.extensions.{
+  MilvusSparkPlugin,
+  MilvusSparkSessionExtensions
+}
+import com.zilliz.spark.connector.implicits._
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.procedure.{
   BuildIndexProcedure,
   ProcedureArgs,
   WriteSnapshotProcedure
 }
-import com.zilliz.spark.connector.read.MilvusSearch
 
 /** Building indexes over a real collection, and searching what was built.
   *
   * The chain under test is the one a user runs: a Milvus collection with real
   * data on real object storage, a snapshot Milvus itself wrote, `build_index`
-  * over that snapshot, `write_snapshot` over the job it produced, and a search
-  * through the snapshot that came out.
+  * over that snapshot, `write_snapshot` over the job it produced, and a NEAREST
+  * BY over the snapshot that came out.
   *
   * What the results are judged against is computed here, not read back from
   * either side: every row's vector is a function of its id, so the exact top-k
@@ -76,6 +81,11 @@ class IndexBuildUatTest
         .builder()
         .master("local[4]")
         .appName("index-build-uat")
+        .config(
+          "spark.sql.extensions",
+          classOf[MilvusSparkSessionExtensions].getName
+        )
+        .config("spark.plugins", classOf[MilvusSparkPlugin].getName)
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "8")
         .getOrCreate()
@@ -202,16 +212,43 @@ class IndexBuildUatTest
     )
   }
 
-  private def hits(result: DataFrame): Map[Long, Seq[(Long, Double)]] = result
-    .orderBy("query_id", "rank")
-    .collect()
-    .toSeq
-    .groupBy(_.getAs[Long]("query_id"))
-    .map { case (queryId, rows) =>
-      queryId -> rows
-        .map(row => row.getAs[Long]("id") -> row.getAs[Double]("_score"))
-        .toSeq
-    }
+  /** Each query's `topK` hits from NEAREST BY over a snapshot, nearest first,
+    * with the squared L2 the baseline computes: Spark's `vector_l2_distance` is
+    * its square root. `extra` are read options of the base, such as the index's
+    * search width in `milvus.search.params`.
+    */
+  private def nearest(
+      options: Map[String, String],
+      ids: Seq[Long],
+      mode: String,
+      extra: Map[String, String] = Map.empty,
+      filter: Option[Column] = None
+  ): Map[Long, Seq[(Long, Double)]] = {
+    val query = queries(ids)
+    val read = spark.read.format("milvus").options(options ++ extra).load()
+    val base = filter.fold(read)(condition => read.where(condition))
+    query
+      .nearestByJoin(
+        base,
+        call_function("vector_l2_distance", query("vector"), base("v")),
+        topK,
+        mode,
+        "distance"
+      )
+      .select(
+        col("query_id"),
+        col("id"),
+        call_function("vector_l2_distance", col("vector"), col("v"))
+      )
+      .collect()
+      .toSeq
+      .groupBy(_.getLong(0))
+      .map { case (queryId, rows) =>
+        queryId -> rows
+          .map(row => row.getLong(1) -> math.pow(row.getFloat(2).toDouble, 2))
+          .sortBy { case (id, score) => (score, id) }
+      }
+  }
 
   private def recall(
       found: Seq[(Long, Double)],
@@ -473,18 +510,7 @@ class IndexBuildUatTest
       best.map(_._1).foreach(hit => deleted should not contain hit)
     }
 
-    val exact = hits(
-      MilvusSearch.search(
-        spark,
-        source,
-        queries(queryIds),
-        "v",
-        topK,
-        "L2",
-        mode = "exact",
-        outputColumns = Seq("id")
-      )
-    )
+    val exact = nearest(source, queryIds, "exact")
     exact.keySet shouldBe queryIds.toSet
     queryIds.foreach { id =>
       exact(id).map(_._1) shouldBe truth(id).map(_._1)
@@ -536,21 +562,9 @@ class IndexBuildUatTest
       val curve = widths.map { width =>
         val parameters =
           if (family.widths.isEmpty) Map.empty[String, String]
-          else Map(family.widthName -> width.toString)
+          else Map(MilvusOption.SearchParams -> s"${family.widthName}=$width")
         val startSearch = System.nanoTime()
-        val found = hits(
-          MilvusSearch.search(
-            spark,
-            indexOptions,
-            queries(queryIds),
-            "v",
-            topK,
-            "L2",
-            mode = "index",
-            searchParameters = parameters,
-            outputColumns = Seq("id")
-          )
-        )
+        val found = nearest(indexOptions, queryIds, "approx", parameters)
         val searchMillis = (System.nanoTime() - startSearch) / 1000000L
         found.keySet shouldBe queryIds.toSet
         queryIds.foreach { id =>
@@ -607,19 +621,12 @@ class IndexBuildUatTest
     val filteredTruth =
       filtered.map(id => id -> baseline(queryOf(id), _ % 10L == 3L)).toMap
     val hnswSnapshot = measured.head._7
-    val filteredHits = hits(
-      MilvusSearch.search(
-        spark,
-        storageOptions() ++ Map(MilvusOption.SnapshotPath -> hnswSnapshot),
-        queries(filtered),
-        "v",
-        topK,
-        "L2",
-        mode = "index",
-        searchParameters = Map("ef" -> "512"),
-        filter = Some("label == 3"),
-        outputColumns = Seq("id")
-      )
+    val filteredHits = nearest(
+      storageOptions() ++ Map(MilvusOption.SnapshotPath -> hnswSnapshot),
+      filtered,
+      "approx",
+      Map(MilvusOption.SearchParams -> "ef=512"),
+      Some(col("label") === 3L)
     )
     filtered.foreach { id =>
       filteredHits(id).map(_._1).foreach(hit => (hit % 10L) shouldBe 3L)

@@ -9,7 +9,6 @@ import org.scalatest.BeforeAndAfterAll
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.spark.connector.options.MilvusOption
-import com.zilliz.spark.connector.read.MilvusSearch
 import com.zilliz.spark.connector.testkit.MilvusFieldData
 import io.milvus.grpc.schema.DataType
 
@@ -221,105 +220,6 @@ class MilvusDataSourceTest extends AnyFunSuite with BeforeAndAfterAll {
     val count = df.count()
     val expectedCount = batchSize * batchCount
     assert(count == expectedCount, s"Should return all $expectedCount rows")
-  }
-
-  test("Vector similarity search with different metrics") {
-    val random = new Random(123)
-    val queryVector = Array.fill(dim)(random.nextFloat())
-
-    info(
-      s"Query vector (first 5 elements): [${queryVector.take(5).mkString(", ")}, ...]"
-    )
-
-    val topK = 5
-
-    // similarity metrics to test
-    val metrics = Seq("L2", "COSINE", "IP")
-
-    for (metric <- metrics) {
-      info(s"\n=== Testing vector search with $metric similarity ===")
-      info(s"TopK: $topK, Metric: $metric")
-
-      // Execute vector search
-      val results = MilvusSearch.search(
-        spark = spark,
-        options = Map(
-          MilvusOption.MilvusUri -> "http://localhost:19530",
-          MilvusOption.MilvusToken -> "root:Milvus",
-          MilvusOption.MilvusCollectionName -> collectionName,
-          MilvusOption.MilvusDatabaseName -> "default",
-          StorageProperties.Address -> "localhost:9000",
-          StorageProperties.BucketName -> "a-bucket",
-          StorageProperties.RootPath -> "files",
-          StorageProperties.AccessKeyId -> "minioadmin",
-          StorageProperties.AccessKeyValue -> "minioadmin",
-          StorageProperties.UseSSL -> "false"
-        ),
-        vectorColumn = "vector",
-        queryVector = queryVector,
-        k = topK,
-        metric = metric,
-        mode = "exact",
-        searchParameters = Map.empty,
-        filter = None,
-        outputColumns = Seq.empty,
-        allowUnindexed = false
-      )
-
-      results.show()
-      assert(
-        results.count() == topK,
-        s"No results returned from vector search with $metric metric"
-      )
-    }
-  }
-
-  test("Vector search with SQL query filter by int64 < 5") {
-    // Generate a random query vector
-    val random = new Random(999)
-    val queryVector = Array.fill(dim)(random.nextFloat())
-
-    val topK = 5
-
-    val df = MilvusSearch.search(
-      spark = spark,
-      options = Map(
-        MilvusOption.MilvusUri -> "http://localhost:19530",
-        MilvusOption.MilvusToken -> "root:Milvus",
-        MilvusOption.MilvusCollectionName -> collectionName,
-        MilvusOption.MilvusDatabaseName -> "default",
-        StorageProperties.Address -> "localhost:9000",
-        StorageProperties.BucketName -> "a-bucket",
-        StorageProperties.RootPath -> "files",
-        StorageProperties.AccessKeyId -> "minioadmin",
-        StorageProperties.AccessKeyValue -> "minioadmin",
-        StorageProperties.UseSSL -> "false"
-      ),
-      vectorColumn = "vector",
-      queryVector = queryVector,
-      k = topK,
-      metric = "L2",
-      mode = "exact",
-      searchParameters = Map.empty,
-      filter = None,
-      outputColumns = Seq("id", "int64", "varchar"),
-      allowUnindexed = false
-    )
-
-    // Register as temp view
-    df.createOrReplaceTempView("vector_search_results")
-
-    val sqlResults = spark.sql(s"""
-      SELECT id, int64, varchar
-      FROM vector_search_results
-      WHERE int64 < 5
-      LIMIT $topK
-    """)
-
-    sqlResults.show(truncate = false)
-
-    val count = sqlResults.count()
-    assert(count >= 0, "SQL query should execute successfully")
   }
 
   // Filter pushdown tests are skipped for MilvusDataSource as filter pushdown

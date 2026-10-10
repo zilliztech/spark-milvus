@@ -156,8 +156,23 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     SearchProgress.grouped(53687091200L) shouldBe "53,687,091,200"
   }
 
-  test("a search registers the accumulators the design names") {
-    val metrics = SearchMetrics.create(spark.sparkContext)
+  test("progress reads only search counters, and an unset SQL metric as none") {
+    SearchProgress.searchValues(
+      Seq(
+        Some("milvus.search.compared.pairs") -> Some(
+          java.lang.Long.valueOf(7L)
+        ),
+        // A nearest-by node's size or duration metric no task added to.
+        Some("milvus.search.read.bytes") -> Some(java.lang.Long.valueOf(-1L)),
+        Some("internal.metrics.executorRunTime") ->
+          Some(java.lang.Long.valueOf(5L)),
+        Some("milvus.search.candidates") -> Some("not a number")
+      )
+    ) shouldBe Map("milvus.search.compared.pairs" -> 7L)
+  }
+
+  test("a search counts under the names the design gives its metrics") {
+    val metrics = SearchMetrics.of(SearchMetrics.sqlMetrics(spark.sparkContext))
 
     metrics.all.map(_._1) shouldBe Seq(
       "milvus.search.segment.searches",
@@ -173,9 +188,8 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       "milvus.search.take.rows",
       "milvus.search.take.nanos"
     )
-    metrics.all.foreach { case (name, accumulator) =>
-      accumulator.name shouldBe Some(name)
-      accumulator.value shouldBe 0L
+    metrics.all.foreach { case (name, counter) =>
+      counter.name shouldBe Some(name)
     }
 
     spark.sparkContext
@@ -186,9 +200,9 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     metrics.summary should include("milvus.search.candidates=7")
   }
 
-  test("a second search counts on its own accumulators") {
-    val first = SearchMetrics.create(spark.sparkContext)
-    val second = SearchMetrics.create(spark.sparkContext)
+  test("each node that runs a search counts on its own metrics") {
+    val first = SearchMetrics.of(SearchMetrics.sqlMetrics(spark.sparkContext))
+    val second = SearchMetrics.of(SearchMetrics.sqlMetrics(spark.sparkContext))
 
     first.segmentSearches.add(2L)
 

@@ -10,6 +10,24 @@ import io.milvus.grpc.schema.{DataType => MilvusDataType}
   */
 sealed trait PredicateExpr extends Product with Serializable
 
+object PredicateExpr {
+
+  /** The fields an expression reads, by id: the columns a reader has to deliver
+    * for it to be evaluated.
+    */
+  def fieldIds(expression: PredicateExpr): Set[Long] = expression match {
+    case Comparison(field, _, _) => Set(field.fieldId)
+    case In(field, _)            => Set(field.fieldId)
+    case IsNull(field)           => Set(field.fieldId)
+    case IsNotNull(field)        => Set(field.fieldId)
+    case StartsWith(field, _)    => Set(field.fieldId)
+    case EndsWith(field, _)      => Set(field.fieldId)
+    case And(left, right)        => fieldIds(left) ++ fieldIds(right)
+    case Or(left, right)         => fieldIds(left) ++ fieldIds(right)
+    case Not(child)              => fieldIds(child)
+  }
+}
+
 /** Identifies a field without depending on the physical column name used by a
   * particular segment layout.
   */

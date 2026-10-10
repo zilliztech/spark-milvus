@@ -3,6 +3,8 @@ package com.zilliz.spark.connector.procedure
 import java.util.concurrent.TimeUnit
 import java.util.Locale
 
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
+
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
 import com.zilliz.spark.connector.options.MilvusOption
 
@@ -212,6 +214,48 @@ private[procedure] object ProcedureSupport {
     }
     last
   }
+
+  /** The table a `build_index` or `write_snapshot` call works on is given one
+    * of two ways: `table`, a name Spark resolves, whose read already carries
+    * its connection and storage options, or `collection`, reached through the
+    * options the call gives (docs/design/architecture/dataframe-api.html
+    * section 9). Returns the table name, or None for a collection.
+    */
+  def tableName(args: ProcedureArgs, procedure: String): Option[String] =
+    (args.stringOpt("table"), args.stringOpt("collection")) match {
+      case (Some(_), Some(_)) =>
+        throw new IllegalArgumentException(
+          s"procedure $procedure: give 'collection' or 'table', not both"
+        )
+      case (None, None) =>
+        throw new IllegalArgumentException(
+          s"procedure $procedure: give 'collection' or 'table'"
+        )
+      case (Some(table), None) =>
+        if (args.options.nonEmpty) {
+          throw new IllegalArgumentException(
+            s"procedure $procedure: a table is reached through the options it was read with, " +
+              s"so a call with 'table' takes none; got ${args.options.keys.toSeq.sorted.mkString(", ")}"
+          )
+        }
+        Some(nonBlank(table, procedure, "table"))
+      case (None, Some(_)) => None
+    }
+
+  /** `milvus.filter` selects rows, and an index covers every row of its
+    * segment, so a procedure that builds or delivers indexes refuses the option
+    * rather than ignore it.
+    */
+  def rejectFilter(
+      options: CaseInsensitiveStringMap,
+      procedure: String
+  ): Unit =
+    if (options.containsKey(MilvusOption.MilvusFilter)) {
+      throw new IllegalArgumentException(
+        s"procedure $procedure: an index covers every row of its segment, so the " +
+          s"table cannot be read with '${MilvusOption.MilvusFilter}'"
+      )
+    }
 
   def parseCollection(
       value: String,

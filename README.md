@@ -9,16 +9,17 @@ the same format and registers them back with Milvus.
 **Requires Milvus 2.6 or later** (Storage V2). For Milvus 2.5 and earlier use
 the `legacy` branch, which is no longer maintained.
 
-Two lines exist right now. The 1.x line is frozen at tag `v1.6.0` and only takes
-fixes. The 2.0 line is a rewrite on branch `refactor/v2`, versioned
+The 1.x line stopped at tag `v1.6.0` and is no longer maintained. The 2.0 line
+is a rewrite on branch `refactor/v2`, versioned
 `2.0.0-{branch}-{arch}-SNAPSHOT`.
 
-Vector search uses `MilvusSearch.search`, which takes a query set and returns
-each query's global TopK. It searches the index files the snapshot pinned (the
-HNSW and IVF families and FLAT) or scans the vectors exactly, applies deletions
-and scalar predicates before search, and
-retrieves the output columns of the rows it selected. See the
-[query contract](docs/reference-en.md#vector-search).
+Vector search is written as a NEAREST BY join: Spark 4.2's own, and the
+connector's `nearestByJoin` and `nearest_by_join` on 3.5 to 4.1. Over a Milvus
+table the connector runs it and returns each query's global TopK, Spark's
+result. APPROX searches the index files the snapshot pinned (the HNSW and IVF
+families and FLAT) and EXACT scans the vectors; deletions and scalar
+predicates apply before the search, and only the rows selected are read for
+their columns. See [NEAREST BY](docs/reference-en.md#nearest-by-on-spark-42).
 Cardinal index files require a Cardinal-enabled build of the pinned Knowhere
 revision; the plain upstream CI artifact does not contain that engine.
 
@@ -46,7 +47,7 @@ time: a source file in `core`, `compat` or `client` that mentions
 | 2 | `client` | The gRPC client for the online Milvus service |
 | 3 | `spark-base` | Connector sources shared by every Spark line. Not an sbt project, just a source directory. |
 | 3 | `spark-3.5`, `spark-4.0`, `spark-4.1`, `spark-4.2` | One project per maintained Spark line. Each pins its own Spark, Arrow, antlr and Java version and compiles the shared sources. |
-| 4 | `apps-4.0` | The backfill job users run, and the SQL vector distance functions (V8); vector search enters through `MilvusSearch` in `spark-base` |
+| 4 | `apps-4.0` | The backfill job users run; vector search is a NEAREST BY join that `spark-base` takes over |
 | — | `integration-4.0` | Integration tests. Needs a real Milvus and MinIO; never published. |
 
 Why the core layer carries no Spark dependency: one artifact serves all four

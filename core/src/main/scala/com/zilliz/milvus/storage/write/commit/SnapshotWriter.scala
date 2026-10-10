@@ -89,6 +89,63 @@ object SnapshotWriter extends Logging {
       case _ => None
     }
 
+  /** What a build job records about the snapshot it planned against, so that a
+    * later write copies that document and no other. A snapshot that did not
+    * come from a snapshot document has nothing to record, and nothing to write
+    * from.
+    */
+  def sourceOf(
+      snapshot: Snapshot,
+      endpoint: String = ""
+  ): Option[SourceSnapshot] =
+    sourceKeyOf(snapshot, endpoint).map(key =>
+      SourceSnapshot(
+        key = key,
+        bucket = snapshot.bucket,
+        collectionId = snapshot.collectionId,
+        name = snapshot.name,
+        createdAt = snapshot.createdAt
+      )
+    )
+
+  /** The snapshot a build job recorded in its manifest. A manifest written
+    * before the record existed names none, and its indexes could belong to any
+    * snapshot of the collection, so it is refused rather than guessed.
+    */
+  def recordedSource(
+      manifest: JobManifest,
+      manifestKey: String
+  ): SourceSnapshot =
+    manifest.sourceSnapshot.getOrElse(
+      throw new IllegalArgumentException(
+        s"The job manifest at '$manifestKey' records no source snapshot, so the snapshot its " +
+          "indexes were built over is unknown; run build_index again"
+      )
+    )
+
+  /** The recorded document, read again through `read`, which parses it the way
+    * any snapshot read does. A snapshot taken since the build is never looked
+    * at. A document deleted since the build fails here, and so does one that
+    * now describes another collection.
+    */
+  def recordedSnapshot(
+      source: SourceSnapshot,
+      store: ObjectStore,
+      read: String => Snapshot
+  ): Snapshot = {
+    require(
+      store.exists(source.key),
+      s"The snapshot the job was built from, ${source.name} at '${source.key}', no longer exists"
+    )
+    val snapshot = read(source.key)
+    require(
+      snapshot.collectionId == source.collectionId,
+      s"The snapshot at '${source.key}' describes collection ${snapshot.collectionId}; " +
+        s"the job was built over collection ${source.collectionId}"
+    )
+    snapshot
+  }
+
   /** @param sourceKey
     *   the snapshot document this one is written from, as a key in `store`.
     * @param restorable

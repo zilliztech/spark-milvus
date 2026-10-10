@@ -121,10 +121,38 @@ final case class CommittedIndex(
     @JsonProperty("params") params: Map[String, String] = Map.empty
 )
 
+/** The snapshot a build job planned against, recorded so that the snapshot
+  * written from the job describes exactly the segments the job indexed.
+  *
+  * `key` is the snapshot document as a key of `bucket` (empty on the local
+  * backend): the object a snapshot write copies. The collection id checks the
+  * collection a write names; the name and the HybridTS `createdAt` name the
+  * snapshot in errors (docs/design/architecture/dataframe-api.html section 9).
+  */
+final case class SourceSnapshot(
+    @JsonProperty("key") key: String,
+    @JsonProperty("bucket") bucket: String,
+    @JsonProperty("collection_id") collectionId: Long,
+    @JsonProperty("name") name: String,
+    // As for CommittedSegment.segmentId, Jackson needs the content type to
+    // read a number into an Option[Long].
+    @JsonProperty("created_at") @JsonInclude(JsonInclude.Include.NON_ABSENT)
+    @JsonDeserialize(contentAs = classOf[java.lang.Long])
+    createdAt: Option[Long] = None
+) {
+  require(
+    Option(key).exists(_.trim.nonEmpty),
+    "a source snapshot names its document"
+  )
+  require(bucket != null, "a source snapshot names its bucket")
+}
+
 /** What one write job produced: every segment with its manifest version and row
-  * count, and every index a build job made. Written to
-  * `staging/{job}/manifest.json` by [[Committer]] and read back by the
-  * registration procedure (capability A4), which hands the segments to Milvus.
+  * count, and every index a build job made together with the snapshot that job
+  * planned against. Written to `staging/{job}/manifest.json` by [[Committer]]
+  * and read back by the registration procedure (capability A4), which hands the
+  * segments to Milvus, and by the snapshot write (capability W8), which copies
+  * the source snapshot with the indexes in it.
   */
 final case class JobManifest(
     @JsonProperty("job_id") jobId: String,
@@ -140,7 +168,12 @@ final case class JobManifest(
     writeMode: Option[String] = None,
     @JsonProperty("indexes")
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
-    indexes: Seq[CommittedIndex] = Seq.empty
+    indexes: Seq[CommittedIndex] = Seq.empty,
+    // Written by a build job. A manifest from before it was recorded has
+    // none, and a snapshot write refuses it rather than guess the snapshot.
+    @JsonProperty("source_snapshot")
+    @JsonInclude(JsonInclude.Include.NON_ABSENT)
+    sourceSnapshot: Option[SourceSnapshot] = None
 ) {
   def rowCount: Long = segments.map(_.rowCount).sum
 

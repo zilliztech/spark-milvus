@@ -63,7 +63,10 @@ object SegmentSearch extends Logging {
   final class Held private[index] (
       private val sources: Seq[Source],
       private val batches: Map[Long, Seq[SegmentVectors.Batch]],
-      val read: ReadMetrics = ReadMetrics.Zero
+      val read: ReadMetrics = ReadMetrics.Zero,
+      private val ranked: Map[SegmentVectors.Batch, EngineRange.Batch] =
+        Map.empty,
+      private val rankNonFinite: Boolean = false
   ) extends AutoCloseable {
 
     def segments: Int = sources.size
@@ -100,7 +103,8 @@ object SegmentSearch extends Logging {
           parameters,
           allocator,
           queries,
-          threads
+          threads,
+          rankNonFinite
         )
         pipelines(source.segmentId) = pipeline
         pipeline
@@ -131,9 +135,18 @@ object SegmentSearch extends Logging {
       sources.foreach { source =>
         source match {
           case Exact(id, _) =>
-            batches(id).foreach(
-              ExactScan
-                .batch(_, queries, id, k, metric, allocator, merger, counted)
+            batches(id).foreach(batch =>
+              ExactScan.batch(
+                batch,
+                queries,
+                id,
+                k,
+                metric,
+                allocator,
+                merger,
+                counted,
+                ranked.get(batch)
+              )
             )
           case index @ Index(id, handle, _) =>
             require(
@@ -183,20 +196,30 @@ object SegmentSearch extends Logging {
     * `keptMaxBytes` from the sizes it had; this measures what was actually kept
     * -- the batches' buffers, the indexes' bytes -- and a set that goes over
     * comes back as an [[Overflow]] with nothing left open, rather than a
-    * failure.
+    * failure. With a ranking function each batch is classified as it is read
+    * (see [[runGroups]]).
     */
   def hold(
       segments: Seq[Long],
       open: Long => Source,
       keptMaxBytes: Long,
-      layout: VectorLayout
+      layout: VectorLayout,
+      metric: MetricType,
+      function: Option[RankingFunction] = None
   ): Either[Overflow, Held] = {
     require(segments != null, "A task must name its segments")
     val sources = Seq.newBuilder[Source]
     val batches = Map.newBuilder[Long, Seq[SegmentVectors.Batch]]
+    val ranked = Map.newBuilder[SegmentVectors.Batch, EngineRange.Batch]
     var retained = 0L
     var read = ReadMetrics.Zero
-    def opened = new Held(sources.result(), batches.result().toMap, read)
+    def opened = new Held(
+      sources.result(),
+      batches.result().toMap,
+      read,
+      ranked.result(),
+      function.nonEmpty
+    )
     try {
       segments.foreach { segmentId =>
         val source = open(segmentId)
@@ -209,6 +232,10 @@ object SegmentSearch extends Logging {
               val batch = next.get
               retained += batch.base.buffer.capacity().toLong
               held += batch
+              function.foreach(f =>
+                ranked += batch -> EngineRange.Batch
+                  .of(batch, layout, metric, f)
+              )
               if (retained > keptMaxBytes) {
                 batches += id -> held.result()
                 read = read + vectors.metrics
@@ -293,7 +320,8 @@ object SegmentSearch extends Logging {
       metric: MetricType,
       parameters: Map[String, String],
       allocator: BufferAllocator,
-      onProgress: Progress => Unit = _ => ()
+      onProgress: Progress => Unit = _ => (),
+      function: Option[RankingFunction] = None
   ): (TopKMerger, Counters) = {
     val (mergers, counters) = runGroups(
       segments,
@@ -303,7 +331,8 @@ object SegmentSearch extends Logging {
       metric,
       parameters,
       allocator,
-      onProgress
+      onProgress,
+      function = function
     )
     (mergers.head, counters)
   }
@@ -316,6 +345,11 @@ object SegmentSearch extends Logging {
     * reads the next batch, an index probe searches every group on the index it
     * loaded. Each group has its own merger, returned in the order the groups
     * were given (docs/design/architecture/vector-search.html section 2.1).
+    *
+    * A search ranked by `function` classifies each exact-scan batch once, for
+    * all its groups ([[EngineRange.Batch]]), and ranks an index's NaN or
+    * infinite scores rather than failing on them
+    * (docs/design/architecture/dataframe-api.html section 2).
     */
   def runGroups(
       segments: Seq[Long],
@@ -327,7 +361,8 @@ object SegmentSearch extends Logging {
       allocator: BufferAllocator,
       onProgress: Progress => Unit = _ => (),
       prefetch: Boolean = false,
-      threads: Int = 1
+      threads: Int = 1,
+      function: Option[RankingFunction] = None
   ): (Seq[TopKMerger], Counters) = {
     require(segments != null, "A task must name its segments")
     require(groups.nonEmpty, "A task searches at least one query group")
@@ -353,7 +388,10 @@ object SegmentSearch extends Logging {
               var next = vectors.next()
               while (next.nonEmpty) {
                 val batch = next.get
-                try
+                try {
+                  val ranked = function.map(
+                    EngineRange.Batch.of(batch, groups.head.layout, metric, _)
+                  )
                   groups.indices.foreach { group =>
                     ExactScan.batch(
                       batch,
@@ -363,10 +401,11 @@ object SegmentSearch extends Logging {
                       metric,
                       allocator,
                       mergers(group),
-                      counted
+                      counted,
+                      ranked
                     )
                   }
-                finally batch.close()
+                } finally batch.close()
                 next = vectors.next()
               }
               read = read + vectors.metrics
@@ -384,7 +423,8 @@ object SegmentSearch extends Logging {
                 parameters,
                 allocator,
                 largestGroup,
-                threads
+                threads,
+                rankNonFinite = function.nonEmpty
               )
               try {
                 groups.indices.foreach { group =>

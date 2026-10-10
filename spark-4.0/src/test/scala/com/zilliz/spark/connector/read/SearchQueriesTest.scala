@@ -2,7 +2,6 @@ package com.zilliz.spark.connector.read
 
 import java.nio.{ByteBuffer, ByteOrder}
 
-import org.apache.spark.sql.types._
 import org.apache.spark.sql.Row
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -13,72 +12,14 @@ import com.zilliz.milvus.storage.schema.{
   VectorLayout
 }
 
-/** The query set a search takes, checked and packed before anything is read. */
+/** The query set a search takes, packed before anything is read. */
 class SearchQueriesTest extends AnyFunSuite with Matchers {
 
   private val float32 = VectorLayout(VectorElementType.Float32, 2)
 
-  private def schema(vector: DataType): StructType = StructType(
-    Seq(
-      StructField(SearchQueries.IdColumn, LongType),
-      StructField(SearchQueries.VectorColumn, vector)
-    )
-  )
-
   private def floats(packed: Array[Byte]): Seq[Float] = {
     val buffer = ByteBuffer.wrap(packed).order(ByteOrder.nativeOrder())
     (0 until packed.length / 4).map(index => buffer.getFloat(index * 4))
-  }
-
-  test("a query set carries query_id and vector in the field's type") {
-    SearchQueries.check(schema(ArrayType(FloatType)), float32)
-    SearchQueries.check(
-      schema(ArrayType(ShortType)),
-      VectorLayout(VectorElementType.Int8, 2)
-    )
-    SearchQueries.check(
-      schema(BinaryType),
-      VectorLayout(VectorElementType.Bit, 16)
-    )
-  }
-
-  test("a query set of the wrong element type is refused") {
-    the[IllegalArgumentException] thrownBy SearchQueries.check(
-      schema(ArrayType(DoubleType)),
-      float32
-    )
-    the[IllegalArgumentException] thrownBy SearchQueries.check(
-      schema(ArrayType(FloatType)),
-      VectorLayout(VectorElementType.Int8, 2)
-    )
-    the[IllegalArgumentException] thrownBy SearchQueries.check(
-      schema(BinaryType),
-      float32
-    )
-  }
-
-  test("a query set without the two columns names what it has") {
-    val failure = the[IllegalArgumentException] thrownBy SearchQueries.check(
-      StructType(Seq(StructField("id", LongType))),
-      float32
-    )
-
-    failure.getMessage should include("'query_id'")
-    failure.getMessage should include("id")
-  }
-
-  test("a query id column of another type is refused") {
-    val failure = the[IllegalArgumentException] thrownBy SearchQueries.check(
-      StructType(
-        Seq(
-          StructField(SearchQueries.IdColumn, IntegerType),
-          StructField(SearchQueries.VectorColumn, ArrayType(FloatType))
-        )
-      ),
-      float32
-    )
-
-    failure.getMessage should include("BIGINT")
   }
 
   test("queries are packed in the order they arrive, ids alongside") {
@@ -90,29 +31,6 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
 
     ids shouldBe Array(7L, 3L)
     floats(vectors) shouldBe Seq(1f, 2f, 3f, 4f)
-  }
-
-  test("int8 queries arrive as shorts and are packed as bytes") {
-    val layout = VectorLayout(VectorElementType.Int8, 3)
-
-    val (ids, vectors) = SearchQueries.pack(
-      Seq(Row(1L, Seq[Short](1, -2, 3))),
-      layout,
-      MetricType.L2
-    )
-
-    ids shouldBe Array(1L)
-    vectors shouldBe Array[Byte](1, -2, 3)
-  }
-
-  test("an int8 query outside the byte range is refused") {
-    val failure = the[IllegalArgumentException] thrownBy SearchQueries.pack(
-      Seq(Row(1L, Seq[Short](1, 300, 3))),
-      VectorLayout(VectorElementType.Int8, 3),
-      MetricType.L2
-    )
-
-    failure.getMessage should include("300")
   }
 
   test("a query of another dimension names its query id") {
@@ -162,20 +80,11 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
     )
   }
 
-  test("a repeated query id is refused") {
-    SearchQueries.checkUnique(Array(4L, 9L, 1L))
-
-    val failure = the[IllegalArgumentException] thrownBy SearchQueries
-      .checkUnique(Array(4L, 9L, 4L))
-
-    failure.getMessage should include("Query id 4")
-  }
-
   test("the bytes of a query set are its queries times its row") {
     SearchQueries.bytes(1000L, float32) shouldBe 8000L
     SearchQueries.bytes(
       1000L,
-      VectorLayout(VectorElementType.Bit, 128)
-    ) shouldBe 16000L
+      VectorLayout(VectorElementType.Float16, 16)
+    ) shouldBe 32000L
   }
 }
