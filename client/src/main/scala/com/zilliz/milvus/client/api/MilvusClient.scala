@@ -7,7 +7,6 @@ import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.Base64
-import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
 
@@ -22,7 +21,6 @@ import com.google.protobuf.ByteString
 import com.zilliz.milvus.client.{
   CollectionNotFoundException,
   DatabaseNotFoundException,
-  MilvusConnectionException,
   MilvusRateLimitException,
   MilvusRpcException
 }
@@ -78,7 +76,6 @@ import io.milvus.grpc.milvus.{
   ManualCompactionRequest,
   ManualCompactionResponse,
   MilvusServiceGrpc,
-  MutationResult,
   QueryRequest,
   ReleaseCollectionRequest,
   RestoreExternalSnapshotRequest,
@@ -108,7 +105,6 @@ import io.grpc.{
 }
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
 import io.grpc.stub.MetadataUtils
-import io.grpc.Status.Code
 
 /** A simplified client for interacting with Milvus
   */
@@ -1001,13 +997,13 @@ class MilvusClient(params: MilvusConnectionParams)
           expr = expr
         )
       )
-      Success(
-        Status(
-          errorCode = ErrorCode.Success,
-          reason =
-            s"Mock success for deleting from collection: $collectionName with expr: $expr${partitionName
-                .map(p => s" partition: $p")
-                .getOrElse("")}"
+      checkStatus(
+        "delete",
+        deleteResult.status.getOrElse(
+          Status(
+            errorCode = ErrorCode.UnexpectedError,
+            reason = "Delete Status is empty"
+          )
         )
       )
     } catch {
