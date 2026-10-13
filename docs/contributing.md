@@ -173,9 +173,9 @@ Initialize the pinned native source submodules before compiling:
 git submodule update --init milvus-storage knowhere
 ```
 
-The milvus-storage gitlink now points at the official PR #703 merge commit,
-whose source tree is identical to the former fork pin. After pulling the
-repository URL and pin change, update an existing checkout with:
+The milvus-storage gitlink points at official commit `5694520`, including
+PR #714's Tencent OIDC role chain. After pulling a repository URL or pin
+change, update an existing checkout with:
 
 ```bash
 git submodule sync milvus-storage
@@ -184,7 +184,9 @@ git submodule update --init milvus-storage
 
 Rebuild the unified native bundle for the new gitlink. Its manifest and
 provenance must record the new storage revision; a bundle from the former pin
-is rejected even though the source trees are identical.
+is rejected. The unified build includes Talon's C++ sources, Rust feature and
+CXX bridge as required by this upstream version. That does not enable Talon
+read routing at runtime: `fs.talon.mode` still defaults to `0` (disabled).
 
 The `native-storage` sbt module compiles `milvus-storage/java/src/main` for
 Scala 2.12 and 2.13 instead of importing upstream's sbt project or a Scala 2.13

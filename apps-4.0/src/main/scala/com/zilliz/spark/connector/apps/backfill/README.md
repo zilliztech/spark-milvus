@@ -83,8 +83,9 @@ passing both is an error.
   than inheriting a global role. The runtime must provide that credential provider.
   COS Hadoop access uses virtual-host addressing, disables bucket probing and
   disables multi-object deletes. Native AssumeRole also requires a milvus-storage
-  build containing PR #714; the current `refactor/v2` native pin does not yet
-  include it, so this configuration support alone is insufficient to run COS IAM jobs.
+  build containing PR #714, included in the official `5694520` native pin.
+  Rebuild the native bundle and validate the two-stage role flow against COS;
+  configuration unit tests alone do not establish runtime authentication.
 - **Different bucket for input parquet**: when the parquet file lives in a
   different bucket (or even region/account) from the Milvus storage bucket,
   use the `--source-s3-*` flags. AWS uses per-bucket S3A configuration. OSS

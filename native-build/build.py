@@ -425,7 +425,7 @@ def build(args, repository, java_home, work, target, profile):
                                                 "knowhere": str(knowhere_object_source)},
                     "cardinal": cardinal,
                     "featureOptions": {"storage.jemalloc": False, "storage.fiu": False,
-                                       "storage.crt": False, "storage.talon": False,
+                                       "storage.crt": False, "storage.talon": True,
                                        "storage.rust.openssl.shared": True}, "jobs": args.jobs}
         for name, command in (*adapter.toolchain_versions(), ("cmake", ["cmake", "--version"]),
                               ("conan", ["conan", "--version"]), ("java", [str(java_home / "bin/java"), "-version"]),

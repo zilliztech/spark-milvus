@@ -6,6 +6,15 @@ project. `cmake/Storage.cmake`, `cmake/Knowhere.cmake` and `cmake/Cardinal.cmake
 define the targets; the build does not execute the engines' or Cardinal's
 upstream CMake files. A configuration trace checks that boundary.
 
+The official storage pin includes Tencent's OIDC assume-role chain. Its source
+graph requires Talon's C++ filesystem, Rust feature and generated CXX bridge,
+so all three are compiled and provenance records `storage.talon=true`. Talon
+read routing remains disabled by the upstream default `fs.talon.mode=0`.
+Storage's C++ CRT transport remains disabled (`storage.crt=false`), so its
+optional `aws-c-s3` package is excluded from the unified dependency graph.
+Changing the storage gitlink requires a fresh native bundle; an older bundle
+does not provide the new authentication implementation.
+
 Both engines use one Conan host dependency graph. `dependencies.json` pins
 upstream provenance and selects the newer version when their requirements
 conflict. Every direct package reference includes its exact upstream recipe

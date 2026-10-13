@@ -56,6 +56,14 @@ class VersionSelectionTest(unittest.TestCase):
                                             'self.requires("catch2/3.7.1")')
         self.assertEqual(report["conflicts"], {})
 
+    def test_initialized_engine_recipes_fit_the_unified_graph(self):
+        repository = Path(__file__).resolve().parent.parent
+        storage = repository / "milvus-storage/cpp/conanfile.py"
+        knowhere = repository / "knowhere/conanfile.py"
+        if not storage.is_file() or not knowhere.is_file():
+            self.skipTest("Initialize milvus-storage and knowhere to validate their recipe pins")
+        validate_upstream_versions(self.constraints, storage.read_text(), knowhere.read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

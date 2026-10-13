@@ -52,6 +52,7 @@ function(milvus_add_storage)
   corrosion_import_crate(
     MANIFEST_PATH "${storage_rust}/Cargo.toml"
     CRATES rust-bridge
+    FEATURES talon
     LOCKED
   )
   corrosion_set_env_vars(rust_bridge
@@ -62,7 +63,7 @@ function(milvus_add_storage)
   if(DEFINED ENV{OPENSSL_DIR})
     corrosion_set_env_vars(rust_bridge "OPENSSL_DIR=$ENV{OPENSSL_DIR}")
   endif()
-  corrosion_add_cxxbridge(rust-bridge CRATE rust_bridge FILES lib.rs)
+  corrosion_add_cxxbridge(rust-bridge CRATE rust_bridge FILES lib.rs talon/talon_bridge.rs)
 
   # The generator may itself require cargo install. Finish that before the
   # bridge's Cargo build so two independent Cargo job pools cannot overlap.
@@ -83,7 +84,6 @@ function(milvus_add_storage)
   target_link_libraries(rust-bridge PRIVATE arrow::arrow)
 
   file(GLOB_RECURSE storage_bridge_sources CONFIGURE_DEPENDS "${storage_rust}/src/*.cpp")
-  list(FILTER storage_bridge_sources EXCLUDE REGEX "/talon_bridge\\.cpp$")
   add_library(prsbridge STATIC ${storage_bridge_sources})
   target_include_directories(prsbridge PUBLIC ${storage_bridge_includes})
   target_link_libraries(prsbridge PUBLIC rust-bridge PRIVATE arrow::arrow)
@@ -97,7 +97,6 @@ function(milvus_add_storage)
   )
   list(FILTER storage_sources EXCLUDE REGEX "/src/format/bridge/.*\\.(cpp|cc)$")
   list(FILTER storage_sources EXCLUDE REGEX "/src/jni/.*\\.cpp$")
-  list(FILTER storage_sources EXCLUDE REGEX "/src/filesystem/talon/.*\\.cpp$")
   add_library(milvus-storage SHARED ${storage_sources})
   target_compile_features(milvus-storage PUBLIC cxx_std_20)
   target_include_directories(milvus-storage PUBLIC
