@@ -35,4 +35,22 @@ public final class NativeVectorSearch {
         Knowhere.bruteForceBatched(dtype, vectors, rows, queries, queryRows, dimension, topK,
                 ids, distances, parameters);
     }
+
+    /**
+     * {@link #bruteForceBatched} for L2, followed by a direct pass over its candidates
+     * (decision 35): the ids and the estimated distances are written as there, and then,
+     * for each query, the candidates whose estimate is below the query's float32 cutoff,
+     * taken in order from the first, receive their squared distance computed pair by pair
+     * in the same slot of {@code direct}; {@code counts} receives one int32 per query with
+     * how many were computed. A null {@code cutoffs} computes every candidate. Buffers
+     * follow {@link #bruteForce}.
+     */
+    public static void bruteForceBatchedL2Rescored(DType dtype, ByteBuffer vectors, long rows,
+            ByteBuffer queries, long queryRows, int dimension, int topK, ByteBuffer cutoffs,
+            ByteBuffer ids, ByteBuffer distances, ByteBuffer direct, ByteBuffer counts,
+            String parameters) {
+        NativeVectorLibrary.load();
+        Knowhere.bruteForceBatchedL2Rescored(dtype, vectors, rows, queries, queryRows, dimension,
+                topK, cutoffs, ids, distances, direct, counts, parameters);
+    }
 }

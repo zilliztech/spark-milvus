@@ -73,6 +73,8 @@ class NearestByJoinTest
   private var options: Map[String, String] = Map.empty
   private var specialDirectory: Path = _
   private var specialOptions: Map[String, String] = Map.empty
+  private var farDirectory: Path = _
+  private var farOptions: Map[String, String] = Map.empty
   private var spark: SparkSession = _
 
   private val segments = Seq(
@@ -118,6 +120,31 @@ class NearestByJoinTest
     )
   )
 
+  /** Six rows near a point at 10^6 in each of 16 dimensions, at squared
+    * distances 25, 25, 0.25, 2500, 3600 and 4900 from it, which the engine's
+    * batched L2 cannot tell apart (decision 35).
+    */
+  private val farCenter = Array.fill(16)(1000000f)
+  private val far = Seq(
+    Segment(
+      50L,
+      Seq(
+        (0, 5f),
+        (1, 5f),
+        (2, 0.5f),
+        (3, 50f),
+        (4, 60f),
+        (5, 70f)
+      ).zipWithIndex
+        .map { case ((at, by), row) =>
+          val vector = farCenter.clone()
+          vector(at) += by
+          Entity(5000L + row, vector, Some(1L))
+        },
+      indexMetric = None
+    )
+  )
+
   override def beforeAll(): Unit = {
     try {
       NativeStorageLibrary.load()
@@ -132,6 +159,8 @@ class NearestByJoinTest
       options = LocalMilvusCollection.write(directory, 2, segments)
       specialDirectory = Files.createTempDirectory("nearest-by-special-")
       specialOptions = LocalMilvusCollection.write(specialDirectory, 2, special)
+      farDirectory = Files.createTempDirectory("nearest-by-far-")
+      farOptions = LocalMilvusCollection.write(farDirectory, 16, far)
       spark = SparkSession
         .builder()
         .master("local[2]")
@@ -152,10 +181,12 @@ class NearestByJoinTest
 
   override def afterAll(): Unit = {
     if (spark != null) spark.stop()
-    Seq(directory, specialDirectory).filter(_ != null).foreach { written =>
-      val paths = Files.walk(written)
-      try paths.sorted(Comparator.reverseOrder[Path]()).forEach(Files.delete(_))
-      finally paths.close()
+    Seq(directory, specialDirectory, farDirectory).filter(_ != null).foreach {
+      written =>
+        val paths = Files.walk(written)
+        try
+          paths.sorted(Comparator.reverseOrder[Path]()).forEach(Files.delete(_))
+        finally paths.close()
     }
   }
 
@@ -641,6 +672,53 @@ class NearestByJoinTest
     takenOver(expected) shouldBe false
     ids(taken) shouldBe ids(expected)
     taken.count() shouldBe expected.count()
+  }
+
+  test("EXACT L2 far from the origin finds the nearest rows, as Spark does") {
+    needsNative()
+    // From 20 queries on, the engine's batched entry computes L2 as |x|^2 +
+    // |y|^2 - 2x.y, which cannot tell these rows apart. Its candidates are
+    // computed again pair by pair, and over the Milvus table, where the segment
+    // is one batch of six rows and k is 2, every query is searched again pair
+    // by pair (decision 35).
+    val read = spark.read.format("milvus").options(farOptions).load()
+    val query = rawQueries(
+      (0 until 20).map(i =>
+        (f"q$i%02d", farCenter.toSeq.map(java.lang.Float.valueOf))
+      ): _*
+    )
+    def hits(frame: DataFrame): Map[String, Set[Long]] =
+      pairs(frame).groupBy(_._1).map { case (qid, found) =>
+        qid -> found.map(_._2).toSet
+      }
+    Seq("Milvus table" -> read, "DataFrame" -> copyOf(read)).foreach {
+      case (kind, base) =>
+        withClue(s"$kind: ") {
+          val taken = nearest(query, base, k = 2)
+          input(taken) shouldBe kind
+          // Rows 5000 and 5001 tie at 25, and either is Spark's answer.
+          val expected = hits(bySpark(query, base, k = 2))
+          val found = hits(taken)
+          found.keySet shouldBe expected.keySet
+          found.keySet should have size 20
+          (found.values ++ expected.values).foreach { ids =>
+            ids should contain(5002L)
+            ids should have size 2
+            Set(5000L, 5001L) should contain((ids - 5002L).head)
+          }
+          // The node counts what its own execution did.
+          if (kind == "Milvus table") {
+            taken.collect()
+            node(taken).get.metrics(SearchMetrics.ExactRescans).value shouldBe
+              20L
+          }
+        }
+    }
+    // Rows the batched entry ranks well need no second search.
+    val standard = nearest(queries(standardQueries: _*), docs())
+    pairs(standard) shouldBe bruteForce("L2", 3)
+    standard.collect()
+    node(standard).get.metrics(SearchMetrics.ExactRescans).value shouldBe 0L
   }
 
   test("base rows Knowhere is not given are ranked by Spark's function") {

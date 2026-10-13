@@ -300,13 +300,17 @@ object SegmentSearch extends Logging {
     * `compared` is the pairs a step measured distances for, queries times the
     * rows that survived the exclusion mask. An index probe does not compare
     * every row and Knowhere does not say how many it did, so a probe reports
-    * zero and counts its progress in `nativeCalls`.
+    * zero and counts its progress in `nativeCalls`. `rescans` is the queries an
+    * L2 exact scan searched a batch for again through the per-query entry,
+    * because the batched entry's error could hide a nearer row (decision 35);
+    * their pairs are not counted again in `compared`.
     */
   final case class Progress(
       nativeCalls: Int,
       nativeNanos: Long,
       compared: Long,
-      segments: Int
+      segments: Int,
+      rescans: Long = 0L
   )
 
   /** Searches every segment of the set in turn for one query group: what

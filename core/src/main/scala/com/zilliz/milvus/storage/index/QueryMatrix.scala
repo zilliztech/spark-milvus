@@ -22,6 +22,25 @@ final class QueryMatrix private (
 ) extends AutoCloseable {
   def dimension: Int = layout.dimension
 
+  /** Each query's squared norm, in double, worked out on first use and kept for
+    * every batch the group is searched against: what an L2 exact scan bounds
+    * the batched entry's error with ([[ExactScan]]). Float queries only.
+    */
+  lazy val squaredNorms: Array[Double] = {
+    val values = new Array[Float](dimension)
+    Array.tabulate(queries) { at =>
+      EngineRange.decode(buffer, at, layout, values)
+      var sum = 0.0
+      var element = 0
+      while (element < values.length) {
+        val value = values(element).toDouble
+        sum += value * value
+        element += 1
+      }
+      sum
+    }
+  }
+
   override def close(): Unit = owned.close()
 }
 

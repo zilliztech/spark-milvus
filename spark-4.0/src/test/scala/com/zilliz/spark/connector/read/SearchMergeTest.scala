@@ -184,6 +184,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       "milvus.search.knowhere.calls",
       "milvus.search.knowhere.nanos",
       "milvus.search.compared.pairs",
+      "milvus.search.exact.rescans",
       "milvus.search.candidates",
       "milvus.search.take.rows",
       "milvus.search.take.nanos"
