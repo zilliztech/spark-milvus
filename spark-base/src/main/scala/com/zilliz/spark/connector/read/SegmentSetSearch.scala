@@ -87,7 +87,10 @@ private[read] object SegmentSetSearch extends Logging {
       // The function a nearest-by join ranks by, for the pairs Knowhere does
       // not score as it does (docs/design/architecture/dataframe-api.html
       // section 2); without one Knowhere scores every pair.
-      function: Option[RankingFunction] = None
+      function: Option[RankingFunction] = None,
+      // Index segments searched at once within a group when the set is held
+      // (`milvus.search.calls.in.flight`).
+      callsInFlight: Int = 2
   ) extends Serializable
 
   /** @param plannedBytes
@@ -336,7 +339,8 @@ private[read] object SegmentSetSearch extends Logging {
           spec.keptMaxBytes,
           spec.layout,
           spec.metric,
-          spec.function
+          spec.function,
+          spec.callsInFlight
         ) match {
           case Right(held) =>
             read(metrics, held.read)

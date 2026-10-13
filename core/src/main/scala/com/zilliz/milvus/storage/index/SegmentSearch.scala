@@ -66,8 +66,33 @@ object SegmentSearch extends Logging {
       val read: ReadMetrics = ReadMetrics.Zero,
       private val ranked: Map[SegmentVectors.Batch, EngineRange.Batch] =
         Map.empty,
-      private val rankNonFinite: Boolean = false
+      private val rankNonFinite: Boolean = false,
+      // How many segments' index searches a group keeps in flight at once
+      // (section 4 of docs/design/enhance/2026-10-13-search-task-pipelining.html):
+      // 1 is the sequential search; 2 lets the next segment's call fill the
+      // tail of the current one and the collect of the current one run behind.
+      private val callsInFlight: Int = 1
   ) extends AutoCloseable {
+    require(
+      callsInFlight >= 1,
+      s"A held set searches at least one segment at a time: $callsInFlight"
+    )
+
+    private def daemon(name: String): ThreadFactory = new ThreadFactory {
+      def newThread(runnable: Runnable): Thread = {
+        val thread = new Thread(runnable, name)
+        thread.setDaemon(true)
+        thread
+      }
+    }
+    // One collector for every pipeline of the task: the collects of successive
+    // segments run one after another on it, into the group's one merger, while
+    // the searches of the following segments go on.
+    private val collector =
+      Executors.newSingleThreadExecutor(daemon("search-collect"))
+    // The native searches, callsInFlight at a time.
+    private val searchers =
+      Executors.newFixedThreadPool(callsInFlight, daemon("index-search"))
 
     def segments: Int = sources.size
 
@@ -104,7 +129,8 @@ object SegmentSearch extends Logging {
           allocator,
           queries,
           threads,
-          rankNonFinite
+          rankNonFinite,
+          Some(collector)
         )
         pipelines(source.segmentId) = pipeline
         pipeline
@@ -132,49 +158,80 @@ object SegmentSearch extends Logging {
         compared += step.compared
         onProgress(step)
       }
-      sources.foreach { source =>
-        source match {
-          case Exact(id, _) =>
-            batches(id).foreach(batch =>
-              ExactScan.batch(
-                batch,
-                queries,
-                id,
-                k,
-                metric,
-                allocator,
-                merger,
-                counted,
-                ranked.get(batch)
-              )
-            )
-          case index @ Index(id, handle, _) =>
-            require(
-              handle.metric == metric,
-              s"Segment $id has a $metric query on a ${handle.metric} index"
-            )
-            val pipeline = pipelineFor(
-              index,
-              k,
-              parameters,
-              allocator,
-              queries.queries,
-              threads
-            )
-            pipeline.run(queries, merger, counted)
-            pipeline.finish(counted)
+      // Index segments: up to callsInFlight native searches in flight, each
+      // collected (on the shared collector, in order) once its search returns,
+      // so the collect of segment s runs while segments s+1.. search and the
+      // tail of one call is filled by the next. Exact segments scan inline.
+      val inFlight =
+        mutable.Queue.empty[(IndexProbe.Pipeline, IndexProbe.Answer, Future[_])]
+      def settle(): Unit = {
+        val (pipeline, answer, searched) = inFlight.dequeue()
+        try searched.get()
+        catch {
+          case wrapped: ExecutionException =>
+            throw Option(wrapped.getCause).getOrElse(wrapped)
         }
+        pipeline.complete(answer, merger, counted)
         onProgress(Progress(0, 0L, 0L, 1))
       }
+      try {
+        sources.foreach { source =>
+          source match {
+            case Exact(id, _) =>
+              while (inFlight.nonEmpty) settle()
+              batches(id).foreach(batch =>
+                ExactScan.batch(
+                  batch,
+                  queries,
+                  id,
+                  k,
+                  metric,
+                  allocator,
+                  merger,
+                  counted,
+                  ranked.get(batch)
+                )
+              )
+              onProgress(Progress(0, 0L, 0L, 1))
+            case index @ Index(id, handle, _) =>
+              require(
+                handle.metric == metric,
+                s"Segment $id has a $metric query on a ${handle.metric} index"
+              )
+              val pipeline = pipelineFor(
+                index,
+                k,
+                parameters,
+                allocator,
+                queries.queries,
+                threads
+              )
+              val answer = pipeline.begin(queries)
+              val searched =
+                searchers.submit[Unit](() => pipeline.search(answer))
+              inFlight.enqueue((pipeline, answer, searched))
+              if (inFlight.size >= callsInFlight) settle()
+          }
+        }
+        while (inFlight.nonEmpty) settle()
+      } catch {
+        case failure: Throwable =>
+          inFlight.foreach { case (_, _, searched) => searched.cancel(true) }
+          throw failure
+      }
+      // Every collect of the group done before the merger goes back to the task.
+      pipelines.values.foreach(_.finish(counted))
       (merger, Counters(sources.size, nativeCalls, nativeNanos, compared))
     }
 
     override def close(): Unit = {
+      searchers.shutdownNow()
       val failures =
         (pipelines.values ++ batches.values.flatten ++ sources).flatMap(
           closeable => scala.util.Try(closeable.close()).failed.toOption
         )
       pipelines.clear()
+      collector.shutdownNow()
       failures.headOption.foreach(throw _)
     }
   }
@@ -205,7 +262,8 @@ object SegmentSearch extends Logging {
       keptMaxBytes: Long,
       layout: VectorLayout,
       metric: MetricType,
-      function: Option[RankingFunction] = None
+      function: Option[RankingFunction] = None,
+      callsInFlight: Int = 1
   ): Either[Overflow, Held] = {
     require(segments != null, "A task must name its segments")
     val sources = Seq.newBuilder[Source]
@@ -218,10 +276,12 @@ object SegmentSearch extends Logging {
       batches.result().toMap,
       read,
       ranked.result(),
-      function.nonEmpty
+      function.nonEmpty,
+      callsInFlight
     )
     try {
-      segments.foreach { segmentId =>
+      segments.indices.foreach { index =>
+        val segmentId = segments(index)
         val source = open(segmentId)
         sources += source
         source match {
@@ -265,7 +325,7 @@ object SegmentSearch extends Logging {
       val result = opened
       logInfo(
         s"Segment set held: segments=${segments.size}, retainedBytes=${result.retainedBytes}, " +
-          s"rowBytes=${layout.rowBytes}"
+          s"rowBytes=${layout.rowBytes}, callsInFlight=$callsInFlight"
       )
       Right(result)
     } catch {

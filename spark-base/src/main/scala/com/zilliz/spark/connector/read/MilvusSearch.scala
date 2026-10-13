@@ -242,7 +242,8 @@ object MilvusSearch extends Logging {
       plan.resident,
       collectThreads,
       predicate,
-      Some(function)
+      Some(function),
+      limits.callsInFlight
     )
 
     // What the first stage has to get through, so its progress has a
@@ -268,7 +269,8 @@ object MilvusSearch extends Logging {
       s"Search budget: ${resources.describe}; $concurrency tasks at once " +
         s"($slots per executor${if (searchProfile.nonEmpty) ", each taking every core"
           else ""}); " +
-        s"segments ${segmentBudget.reason}; queries ${queryBudget.reason}; group ${group.reason}; $needs; " +
+        s"segments ${segmentBudget.reason}; queries ${queryBudget.reason}; group ${group.reason}; " +
+        s"collectThreads=$collectThreads callsInFlight=${limits.callsInFlight}; $needs; " +
         s"kept=${plan.resident}, sets=${plan.sets.size}" +
         (if (plan.resident == SearchPlan.Resident.Segments)
            s", capacity=${plan.capacity}, " +

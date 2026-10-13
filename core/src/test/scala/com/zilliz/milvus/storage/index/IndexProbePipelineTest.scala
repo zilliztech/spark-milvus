@@ -116,6 +116,79 @@ class IndexProbePipelineTest
     )
   }
 
+  test(
+    "two segments searched in flight on one collector merge as a sequential probe would"
+  ) {
+    // Held's way: the pipelines of a task share one collector, begin/search/
+    // complete are split so the next segment's search starts while the current
+    // one's answer is still being collected, and finish waits for every collect.
+    val groups = Seq(7, 5, 6)
+    val starts = groups.scanLeft(0)(_ + _)
+    val matrices =
+      groups.zip(starts).map { case (n, first) => matrix(n, first) }
+    val collector = java.util.concurrent.Executors.newSingleThreadExecutor()
+    try {
+      val segments = Seq(11L, 22L, 33L)
+      def expected(group: Int): Seq[Seq[(Double, Long, Long)]] =
+        (0 until groups(group)).map { query =>
+          segments
+            .flatMap { segment =>
+              val fake = new Fake(segment)
+              (0 until k).map(slot =>
+                (
+                  fake.scoreOf(query, slot, starts(group)).toDouble,
+                  segment,
+                  fake.rowOf(query, slot, starts(group))
+                )
+              )
+            }
+            .sorted
+            .take(k)
+        }
+      val (onProgress, seen) = progress()
+      val fakes = segments.map(new Fake(_))
+      val pipelines = fakes.map(fake =>
+        new IndexProbe.Pipeline(
+          fake,
+          new BitSet(),
+          k,
+          Map.empty,
+          allocator,
+          groups.max,
+          2,
+          false,
+          Some(collector)
+        )
+      )
+      try {
+        matrices.zipWithIndex.foreach { case (m, g) =>
+          val merger = new TopKMerger(groups(g), k, MetricType.L2)
+          // two in flight: begin and search the next before completing the current
+          val begun = pipelines.map(_.begin(m))
+          pipelines.zip(begun).foreach { case (p, a) => p.search(a) }
+          pipelines.zip(begun).foreach { case (p, a) =>
+            p.complete(a, merger, onProgress)
+          }
+          pipelines.foreach(_.finish(onProgress))
+          (0 until groups(g)).foreach { query =>
+            merger
+              .results(query)
+              .map(c => (c.score, c.segmentId, c.rowOffset)) shouldBe expected(
+              g
+            )(query)
+          }
+        }
+        fakes.foreach(_.calls.get() shouldBe groups.size)
+        seen()._1 shouldBe segments.size * groups.size
+      } finally pipelines.foreach(_.close())
+      // the shared collector outlives the pipelines: closing them must not shut it down
+      collector.isShutdown shouldBe false
+    } finally {
+      collector.shutdownNow()
+      matrices.foreach(_.close())
+    }
+  }
+
   test("pipelined groups leave the mergers as a sequential probe would") {
     val groups = Seq(7, 5, 6, 8, 3)
     val starts = groups.scanLeft(0)(_ + _)
