@@ -186,13 +186,27 @@ object MilvusSearch extends Logging {
         case None    => SearchPlan.Footprint.vectors(task, layout, blockBytes)
       }
     val queryBytes = SearchQueries.bytes(queryCount, layout)
+    // What one Knowhere call answers: enough queries for the cores the task
+    // holds, within the heap the task has (search-resources.html 3.3; the
+    // explicit option is used as it is).
+    val taskCores =
+      if (searchProfile.nonEmpty) resources.executorCores
+      else math.max(1, resources.taskCpus)
+    val group = SearchResources.groupBytes(
+      if (caseInsensitive.containsKey(MilvusOption.SearchGroupMaxBytes))
+        Some(limits.groupMaxBytes)
+      else None,
+      queryBudget.bytes,
+      taskCores,
+      SearchPlan.bytesPerQuery(layout, k)
+    )
     val plan = SearchPlan.of(
       tasks,
       layout,
       concurrency,
       queryCount.toInt,
       k,
-      limits.groupMaxBytes,
+      group.bytes,
       SearchPlan.Budget(segmentBudget.bytes, queryBudget.bytes),
       footprint,
       shuffled = !packedOnDriver && queryBytes > limits.queriesMaxBytes,
@@ -254,7 +268,7 @@ object MilvusSearch extends Logging {
       s"Search budget: ${resources.describe}; $concurrency tasks at once " +
         s"($slots per executor${if (searchProfile.nonEmpty) ", each taking every core"
           else ""}); " +
-        s"segments ${segmentBudget.reason}; queries ${queryBudget.reason}; $needs; " +
+        s"segments ${segmentBudget.reason}; queries ${queryBudget.reason}; group ${group.reason}; $needs; " +
         s"kept=${plan.resident}, sets=${plan.sets.size}" +
         (if (plan.resident == SearchPlan.Resident.Segments)
            s", capacity=${plan.capacity}, " +

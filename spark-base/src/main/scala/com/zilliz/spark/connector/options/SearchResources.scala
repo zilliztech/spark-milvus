@@ -153,6 +153,81 @@ object SearchResources {
     )
   }
 
+  /** Queries one Knowhere call answers for every core the search task holds,
+    * when the heap allows: below a few queries a core the call's fixed cost
+    * (packing the matrix, the JNI round trip, collecting the candidates on the
+    * JVM side) is what the task spends its time on. The executor scaling test
+    * of 2026-10-08 measured 13 queries a call on 32 cores at k=100,000 (the 64
+    * MiB group of the harness): search-stage CPU 35% on L x 4, 77% on L x 16 at
+    * k=10,000 against 92% on 8-core executors
+    * (docs/design/enhance/2026-10-13-search-path-optimizations.html section 2).
+    */
+  val GroupQueriesPerCore: Int = 8
+
+  /** The share of a task's query heap budget one group may take: the rest holds
+    * the answers the task keeps across groups and the rows they become.
+    */
+  val GroupHeapShare: Double = 0.5
+
+  /** The most a derived group takes, whatever the heap: Knowhere writes a
+    * call's answers into Arrow buffers off the heap, queries x k x 12 bytes a
+    * segment, and a 4 GiB group of 8,800 queries at k=10,000 on a 24 GiB-heap
+    * executor exhausted the JVM's direct memory (2026-10-13, exit 52) where a 2
+    * GiB group ran. The explicit option is not capped.
+    */
+  val MaxDerivedGroupBytes: Long = 2L << 30
+
+  /** How many bytes of queries one Knowhere call takes: the explicit
+    * `milvus.search.group.max.bytes` as it is, otherwise the larger of the old
+    * 512 MiB default and [[GroupQueriesPerCore]] queries for every core the
+    * task holds, capped at [[GroupHeapShare]] of the task's query budget and
+    * never below one query.
+    *
+    * @param configured
+    *   the option when the call set it
+    * @param queryBudgetBytes
+    *   what the task may keep on the heap ([[queryBudget]])
+    * @param cores
+    *   the cores the search task holds
+    * @param perQueryBytes
+    *   what one query costs a group: its row and its bounded top-k
+    */
+  def groupBytes(
+      configured: Option[Long],
+      queryBudgetBytes: Long,
+      cores: Int,
+      perQueryBytes: Long
+  ): Choice = configured match {
+    case Some(bytes) =>
+      Choice(bytes, s"$bytes (option ${MilvusOption.SearchGroupMaxBytes})")
+    case None =>
+      val one = math.max(1L, perQueryBytes)
+      val wanted = GroupQueriesPerCore.toLong * math.max(1, cores) * one
+      val cap = math.max(
+        one,
+        math.min(
+          MaxDerivedGroupBytes,
+          (math.max(0L, queryBudgetBytes) * GroupHeapShare).toLong
+        )
+      )
+      val bytes =
+        math.min(cap, math.max(SearchLimits.DefaultGroupMaxBytes, wanted))
+      val how =
+        if (
+          bytes == cap && cap < math.max(
+            SearchLimits.DefaultGroupMaxBytes,
+            wanted
+          )
+        ) (if (cap == MaxDerivedGroupBytes) "2 GiB cap" else "heap cap")
+        else if (wanted > SearchLimits.DefaultGroupMaxBytes)
+          s"$GroupQueriesPerCore queries x $cores cores"
+        else "default"
+      Choice(
+        bytes,
+        s"${mib(bytes)} = ${bytes / one} queries of ${one}B ($how; budget ${mib(queryBudgetBytes)} x $GroupHeapShare)"
+      )
+  }
+
   /** The base block one exact-scan call takes: the batched distance entry tiles
     * it internally, so 32 MiB and 128 MiB measure the same per core and the
     * block only sets the fixed cost per call and a task's memory.
