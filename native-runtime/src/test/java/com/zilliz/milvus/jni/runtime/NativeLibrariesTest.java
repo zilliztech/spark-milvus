@@ -182,9 +182,13 @@ public class NativeLibrariesTest {
     public void identicalManifestsInTwoJarsAreRejected() throws Exception {
         Map<String, byte[]> libraries = libraries();
         Path extraction = temporary.newFolder().toPath();
-        NativeLibraries.Loader loader = loader(extraction,
-                jar(manifest(libraries), libraries), jar(manifest(libraries), libraries));
-        assertTrue(failure(loader).getMessage().contains("Multiple Milvus native manifests"));
+        Path first = jar(manifest(libraries), libraries);
+        Path second = jar(manifest(libraries), libraries);
+        String message = failure(loader(extraction, first, second)).getMessage();
+        assertTrue(message, message.contains("Multiple Milvus native manifests"));
+        assertTrue(message, message.contains(first.getFileName().toString()));
+        assertTrue(message, message.contains(second.getFileName().toString()));
+        assertTrue(message, message.contains("spark.executor.userClassPathFirst"));
         assertEquals(0, children(extraction));
     }
 

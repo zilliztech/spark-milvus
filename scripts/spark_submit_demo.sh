@@ -11,7 +11,5 @@ export LD_PRELOAD=$(pwd)/native-storage/src/main/resources/native/libmilvus-stor
     --conf "spark.driver.extraJavaOptions=-Xss2m
     -Djava.library.path=$(pwd)/native-storage/src/main/resources/native
     --add-opens=java.base/java.nio=ALL-UNNAMED" \
-    --conf "spark.driver.userClassPathFirst=true" \
-    --conf "spark.executor.userClassPathFirst=true" \
     --class example.MilvusStorageMain \
     target/scala-2.13/spark-connector-assembly-0.2.1-SNAPSHOT.jar
