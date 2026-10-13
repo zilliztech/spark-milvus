@@ -51,10 +51,15 @@ Only the root assembly is published during the migration. Its POM omits the
 embedded `spark40` and `apps40` module dependencies, which are not published
 separately yet; external dependencies remain in the POM.
 
-Use root's `assembly` for the runnable fat jar. Per-line assembly tasks do not
-yet share its merge and shading rules: `spark40/assembly` currently fails on
-module descriptors, Netty version metadata and FastDoubleParser notices. A
-successful source-classpath test does not validate those unfinished bundles.
+Use root's `assembly` for the runnable fat jar on Spark 4.0 and
+`spark42/assembly` on Spark 4.2. The two share one set of merge and shading
+rules (`fatJarRules` in `build.sbt`), and the 4.2 jar leaves out the Jackson
+and Arrow modules Spark 4.2 ships, so the connector uses Spark's under
+`spark.driver.userClassPathFirst` and `spark.executor.userClassPathFirst` too.
+The other per-line assembly tasks do not share the rules yet:
+`spark40/assembly` currently fails on module descriptors, Netty version
+metadata and FastDoubleParser notices. A successful source-classpath test does
+not validate those unfinished bundles.
 
 ## Imports
 
@@ -339,7 +344,8 @@ sbt -Dmilvus.native.bundle=/absolute/path/to/milvus-native-$platform.jar test as
 
 Before native tests, preload the selected JRE's `lib/libjsig.so`
 (`lib/libjsig.dylib` through `DYLD_INSERT_LIBRARIES` on macOS) as described
-below. The resulting root assembly contains the bundle resources. At runtime,
+below. The resulting root assembly contains the bundle resources, as does
+`spark42/assembly` built with the same property. At runtime,
 one class loader extracts and verifies them in one private directory; both
 upstream JNI loaders use that directory. The external `.properties` checksum
 sidecar is a build input and is not needed next to the deployed assembly.

@@ -285,7 +285,9 @@ def sparkProject(l: Versions.SparkLine): Project =
       },
       libraryDependencies += scalaTest % Test,
       inConfig(Test)(Modules.nativeTest),
-      // Per-line bundles are not published yet; add shading before enabling them.
+      // A line's assembly is its bundle, the fat jar spark-submit takes on that
+      // line. Only a line with lineBundle packs one that runs (4.2 so far), and
+      // none is published yet.
       assembly / assemblyJarName := s"spark-milvus-${l.id}-bundle.jar",
       assembly / artifact := (assembly / artifact).value
         .withClassifier(Some("bundle"))
@@ -314,6 +316,8 @@ lazy val spark41 = sparkProject(Versions.line("4.1"))
 lazy val spark42 = sparkProject(Versions.line("4.2"))
   .settings(uatScenarios, localCollectionSuites, connectSuite)
   .settings(connectClient(Versions.line("4.2")))
+  // The fat jar for Spark 4.2; on 4.0 it is root's.
+  .settings(lineBundle(Versions.line("4.2")))
   .dependsOn(core % "test->test")
 
 // Spark Connect on the 4.x lines (docs/design/architecture/dataframe-api.html
@@ -369,6 +373,44 @@ lazy val localCollectionSuites: Seq[Setting[_]] = Seq(
       (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / dir
     )
 )
+
+// A Spark line's bundle that runs: packed by root's rules and versioned as
+// root's artifact (docs/design/architecture/modules.md section 4, constraints
+// 6 and 17).
+def lineBundle(l: Versions.SparkLine): Seq[Setting[_]] =
+  fatJarRules ++ Seq(
+    organization := "com.zilliz",
+    version := connectorVersion,
+    // The Jackson and Arrow modules Spark ships stay out, so the connector
+    // uses Spark's whichever class loader goes first. Bundled, a family splits
+    // across the two loaders under userClassPathFirst=true. Arrow's jackson-bom
+    // raises jackson-databind past the jackson-module-scala the connector asks
+    // for, and the module refuses a databind of another minor version: every
+    // snapshot read fails. Spark 4.2's arrow-compression registers a codec
+    // factory that is not a subtype of the bundled CompressionCodec.Factory:
+    // every task that reads Arrow data fails. arrow-c-data stays, as Spark
+    // does not ship it.
+    assembly / assemblyExcludedJars ++= {
+      val spark = Set(
+        "com.fasterxml.jackson.core" -> "jackson-annotations",
+        "com.fasterxml.jackson.core" -> "jackson-core",
+        "com.fasterxml.jackson.core" -> "jackson-databind",
+        "com.fasterxml.jackson.datatype" -> "jackson-datatype-jsr310",
+        "com.fasterxml.jackson.module" ->
+          s"jackson-module-scala_${scalaBinaryVersion.value}",
+        "org.apache.arrow" -> "arrow-format",
+        "org.apache.arrow" -> "arrow-memory-core",
+        "org.apache.arrow" -> "arrow-memory-netty",
+        "org.apache.arrow" -> "arrow-memory-netty-buffer-patch",
+        "org.apache.arrow" -> "arrow-vector"
+      )
+      (assembly / fullClasspath).value.filter(
+        _.get(moduleID.key).exists(m => spark(m.organization -> m.name))
+      )
+    },
+    assembly / assemblyJarName :=
+      s"spark-milvus-${l.id}-bundle-${version.value}.jar"
+  )
 
 // Layer 4: apps currently run on 4.0, so their sources need no shared directory.
 lazy val apps40 = project
@@ -429,11 +471,9 @@ lazy val rootRunSettings: Seq[Setting[_]] = Seq(
     (Compile / run / fullClasspath).value ++ (Test / fullClasspath).value
 )
 
-lazy val rootAssemblySettings: Seq[Setting[_]] = Seq(
+lazy val rootAssemblySettings: Seq[Setting[_]] = fatJarRules ++ Seq(
   // Keep the filename and primary Maven artifact expected by Docker and cloud jobs.
   assembly / assemblyJarName := s"spark-connector-assembly-${version.value}.jar",
-  assembly / parallelExecution := true,
-  assembly / assemblyPackageScala / assembleArtifact := false,
 
   // Preserve the generated-source mappings used by the existing root package task.
   Compile / packageBin / mappings ++= {
@@ -448,13 +488,21 @@ lazy val rootAssemblySettings: Seq[Setting[_]] = Seq(
     }
   },
 
-  // Spark supplies the log binding and slf4j-api; bundled copies conflict with it.
+  // Spark supplies the log binding; bundled copies conflict with it.
   excludeDependencies ++= Seq(
     ExclusionRule("org.slf4j", "slf4j-log4j12"),
     ExclusionRule("org.slf4j", "slf4j-reload4j"),
     ExclusionRule("log4j", "log4j"),
     ExclusionRule("ch.qos.reload4j", "reload4j")
-  ),
+  )
+)
+
+// How a fat jar is packed: root's, and a Spark line's bundle
+// (docs/design/architecture/modules.md section 4, constraint 6).
+lazy val fatJarRules: Seq[Setting[_]] = Seq(
+  assembly / parallelExecution := true,
+  assembly / assemblyPackageScala / assembleArtifact := false,
+  // Spark supplies slf4j-api; a bundled copy conflicts with it.
   assembly / assemblyExcludedJars := {
     val cp = (assembly / fullClasspath).value
     cp.filter(_.data.getName.startsWith("slf4j-api-"))
@@ -574,6 +622,9 @@ lazy val gitBranch = {
   branch.replaceAll("[^a-zA-Z0-9._-]", "-")
 }
 
+// The 2.0 version, which root's artifact and a Spark line's bundle carry.
+lazy val connectorVersion = s"2.0.0-$gitBranch-$arch-SNAPSHOT"
+
 lazy val mavenCredentialsFile = file(
   sys.env.getOrElse(
     "MAVEN_CREDENTIALS_FILE",
@@ -583,7 +634,7 @@ lazy val mavenCredentialsFile = file(
 
 lazy val rootPublishingSettings: Seq[Setting[_]] = Seq(
   organization := "com.zilliz",
-  version := s"2.0.0-$gitBranch-$arch-SNAPSHOT",
+  version := connectorVersion,
   Compile / packageDoc / publishArtifact := false,
   Compile / packageSrc / publishArtifact := false,
 
