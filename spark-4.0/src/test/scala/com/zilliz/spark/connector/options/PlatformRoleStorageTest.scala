@@ -88,4 +88,96 @@ class PlatformRoleStorageTest
       intercept[IllegalArgumentException](native(base))
     } finally hadoop.set(providerKey, saved)
   }
+
+  test(
+    "fs.use_iam preserves Tencent global and bucket roles through native translation"
+  ) {
+    val hadoop = spark.sparkContext.hadoopConfiguration
+    val settings = Map(
+      "fs.s3a.aws.credentials.provider" -> HadoopStorageKeys.TencentS3RoleProvider,
+      "fs.s3a.assumed.role.arn" -> "qcs::cam::uin/123456:roleName/platform",
+      "fs.s3a.bucket.b.assumed.role.arn" -> "qcs::cam::uin/234567:roleName/data",
+      "fs.s3a.bucket.b.assumed.role.external.id" -> "tenant-id"
+    )
+    val saved = settings.keys.map(k => k -> Option(hadoop.get(k))).toMap
+    settings.foreach { case (k, v) => hadoop.set(k, v) }
+    try {
+      val options = Map(
+        StorageProperties.BucketName -> "b",
+        StorageProperties.Address -> "cos.ap-shanghai.myqcloud.com",
+        StorageProperties.CloudProvider -> "tencent",
+        StorageProperties.UseIam -> "true"
+      )
+      val configured =
+        StorageOptions.buildHadoopConfForOptions(options, "s3a://b/snapshot")
+      configured.get(
+        "fs.s3a.aws.credentials.provider"
+      ) shouldBe HadoopStorageKeys.TencentS3RoleProvider
+      val out = StorageOptions.storagePropertiesFor(configured, "b", options)
+      out(
+        StorageProperties.RoleArn
+      ) shouldBe "qcs::cam::uin/234567:roleName/data"
+      out(StorageProperties.ExternalId) shouldBe "tenant-id"
+      out(StorageProperties.CloudProvider) shouldBe "tencent"
+      out(StorageProperties.UseIam) shouldBe "true"
+      out should not contain key(StorageProperties.AccessKeyId)
+      val global =
+        StorageOptions.storagePropertiesFor(configured, "other", options)
+      global(
+        StorageProperties.RoleArn
+      ) shouldBe "qcs::cam::uin/123456:roleName/platform"
+    } finally
+      saved.foreach { case (k, value) =>
+        value match {
+          case Some(v) => hadoop.set(k, v); case None => hadoop.unset(k)
+        }
+      }
+  }
+
+  test(
+    "fs.use_iam refuses mixed Tencent providers instead of replacing them with AWS"
+  ) {
+    val hadoop = spark.sparkContext.hadoopConfiguration
+    val key = "fs.s3a.aws.credentials.provider"
+    val saved = hadoop.get(key)
+    hadoop.set(
+      key,
+      HadoopStorageKeys.TencentS3RoleProvider + "," + HadoopStorageKeys.S3AAssumedRoleProvider
+    )
+    try {
+      intercept[IllegalArgumentException](
+        native(Map(StorageProperties.UseIam -> "true"))
+      ).getMessage should include("cannot be mixed")
+    } finally hadoop.set(key, saved)
+  }
+
+  test("Tencent bucket provider overrides the session's AWS role in IAM mode") {
+    val hadoop = spark.sparkContext.hadoopConfiguration
+    val prefix = "fs.s3a.bucket.b"
+    hadoop.set(
+      s"$prefix.aws.credentials.provider",
+      HadoopStorageKeys.TencentS3RoleProvider
+    )
+    hadoop.set(
+      s"$prefix.assumed.role.arn",
+      "qcs::cam::uin/234567:roleName/data"
+    )
+    try {
+      val out = native(
+        Map(
+          StorageProperties.BucketName -> "b",
+          StorageProperties.Address -> "cos.ap-shanghai.myqcloud.com",
+          StorageProperties.UseIam -> "true"
+        )
+      )
+      out(StorageProperties.CloudProvider) shouldBe "tencent"
+      out(
+        StorageProperties.RoleArn
+      ) shouldBe "qcs::cam::uin/234567:roleName/data"
+    } finally {
+      hadoop.unset(s"$prefix.aws.credentials.provider")
+      hadoop.unset(s"$prefix.assumed.role.arn")
+    }
+  }
+
 }

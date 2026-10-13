@@ -64,7 +64,7 @@ passing both is an error.
 - **IAM / IRSA**: pass `--use-iam`, or simply omit both AK/SK. `BackfillApp`
   auto-enables `useIam` when both keys are empty, so no flag is required
   under IRSA. In IAM mode the connector honors the platform-injected Hadoop
-  AssumeRole configuration: `fs.s3a.assumed.role.*` on AWS and
+  AssumeRole configuration: `fs.s3a.assumed.role.*` on AWS/Tencent and
   `fs.oss.assumed.role.*` on Alibaba Cloud. A global main-storage role is also
   forwarded to the Milvus storage FFI. Alibaba OSS IAM mode requires the
   managed runtime to inject `fs.oss.credentials.provider`; hadoop-aliyun has
@@ -76,6 +76,15 @@ passing both is an error.
   CLI paths are normalized to `oss://`; using explicit `oss://` is preferred.
   The Spark runtime image must provide `hadoop-aliyun` 3.4.1; it is declared
   as a provided dependency to avoid conflicting with Spark's Hadoop runtime.
+- **Tencent COS**: pass `--s3-cloud-provider tencent`. IAM mode preserves the
+  platform's `com.zilliz.cloud.hadoop.TencentS3RoleCredentialsProvider` and maps
+  `fs.s3a.assumed.role.{arn,session.name,external.id}` to the native writer.
+  Bucket-specific settings take precedence; blank bucket role ARNs fail rather
+  than inheriting a global role. The runtime must provide that credential provider.
+  COS Hadoop access uses virtual-host addressing, disables bucket probing and
+  disables multi-object deletes. Native AssumeRole also requires a milvus-storage
+  build containing PR #714; the current `refactor/v2` native pin does not yet
+  include it, so this configuration support alone is insufficient to run COS IAM jobs.
 - **Different bucket for input parquet**: when the parquet file lives in a
   different bucket (or even region/account) from the Milvus storage bucket,
   use the `--source-s3-*` flags. AWS uses per-bucket S3A configuration. OSS

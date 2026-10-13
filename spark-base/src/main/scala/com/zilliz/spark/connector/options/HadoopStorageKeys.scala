@@ -98,6 +98,8 @@ object HadoopStorageKeys extends Logging {
     */
   private[connector] val S3AAssumedRoleProvider =
     "org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider"
+  private[connector] val TencentS3RoleProvider =
+    "com.zilliz.cloud.hadoop.TencentS3RoleCredentialsProvider"
   private[connector] val OssAssumedRoleProviders = Set(
     "com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider",
     "org.apache.hadoop.fs.aliyun.oss.AssumedRoleCredentialProvider"
@@ -220,9 +222,68 @@ object HadoopStorageKeys extends Logging {
     */
   private[connector] def onlyAssumedRole(chain: String): Boolean = {
     val listed = classes(chain)
+    if (listed.contains(TencentS3RoleProvider)) {
+      require(
+        listed == Seq(TencentS3RoleProvider),
+        "TencentS3RoleCredentialsProvider cannot be mixed with other providers"
+      )
+      return true
+    }
     listed.nonEmpty &&
     listed.forall(
       (Set(S3AAssumedRoleProvider) ++ OssAssumedRoleProviders).contains
+    )
+  }
+
+  private[connector] final case class TencentRole(
+      arn: String,
+      sessionName: Option[String],
+      externalId: Option[String]
+  ) {
+    def properties: Map[String, String] =
+      Map(StorageProperties.RoleArn -> arn) ++
+        sessionName.map(StorageProperties.SessionName -> _) ++
+        externalId.map(StorageProperties.ExternalId -> _)
+  }
+
+  /** Platform Tencent roles use TKE web identity as the STS source, not the AWS
+    * S3A signer chain. An explicit empty bucket setting must not inherit
+    * another bucket's global role or ExternalId.
+    */
+  private[connector] def resolveTencentRole(
+      conf: Configuration,
+      bucket: String = ""
+  ): Option[TencentRole] = {
+    val trimmed = Option(bucket).map(_.trim).getOrElse("")
+    def setting(suffix: String): Option[String] = {
+      val perBucket =
+        if (trimmed.isEmpty) None
+        else Option(conf.getTrimmed(s"${S3A}bucket.$trimmed.$suffix"))
+      perBucket.orElse(Option(conf.getTrimmed(S3A + suffix))).filter(_.nonEmpty)
+    }
+    val providers = setting("aws.credentials.provider").toSeq.flatMap(classes)
+    if (!providers.contains(TencentS3RoleProvider)) return None
+    require(
+      providers == Seq(TencentS3RoleProvider),
+      "TencentS3RoleCredentialsProvider cannot be mixed with other providers"
+    )
+    val arn = setting("assumed.role.arn").getOrElse {
+      throw new IllegalArgumentException(
+        s"fs.s3a.assumed.role.arn must be set for Tencent bucket '$trimmed'"
+      )
+    }
+    require(
+      arn.matches(
+        "qcs::cam::uin/[0-9]+:(roleName/[A-Za-z0-9_+=,.@-]+|role/[0-9]+)"
+      ),
+      s"fs.s3a.assumed.role.arn must be a Tencent CAM role ARN for bucket '$trimmed'"
+    )
+    Some(
+      TencentRole(
+        arn,
+        setting("assumed.role.session.name"),
+        setting("assumed.role.external.id")
+      )
     )
   }
 
@@ -341,6 +402,13 @@ object HadoopStorageKeys extends Logging {
         }
         Identity.Unconfigured
       case Some(chain) =>
+        if (ns.prefix == S3A && chain.contains(TencentS3RoleProvider)) {
+          require(
+            resolveTencentRole(scope.conf, scope.bucket).isDefined,
+            "Tencent bucket credentials provider must not be empty"
+          )
+          return Identity.AssumedRole
+        }
         if (ns.singleProvider && chain.size > 1) {
           scope.refuse(
             s"$providerKey lists ${chain.size} classes (${chain.mkString(",")}), and Hadoop takes one"
@@ -467,7 +535,7 @@ object HadoopStorageKeys extends Logging {
     val s3a = translate(
       new Scope(conf, this.s3a, bucket, environment),
       declaredIdentity,
-      forBucket = declaredCloud.forall(_ == "aws")
+      forBucket = declaredCloud.forall(c => c == "aws" || c == "tencent")
     )
     val oss = translate(
       new Scope(conf, this.oss, bucket, environment),
@@ -481,7 +549,14 @@ object HadoopStorageKeys extends Logging {
     // validation speak.
     val provider =
       if (s3a.nonEmpty && oss.isEmpty)
-        Some(StorageProperties.CloudProvider -> "aws")
+        Some(
+          StorageProperties.CloudProvider ->
+            (if (
+               effectiveProvider(conf, S3A, "aws.credentials.provider", bucket)
+                 .exists(names(_, Set(TencentS3RoleProvider)))
+             ) "tencent"
+             else "aws")
+        )
       else if (oss.nonEmpty && s3a.isEmpty)
         Some(StorageProperties.CloudProvider -> "aliyun")
       else None
@@ -615,6 +690,10 @@ object HadoopStorageKeys extends Logging {
     val chosen =
       if (declaredIdentity) Identity.Environment else identity(scope)
     val role = chosen match {
+      case Identity.AssumedRole if ns.prefix == S3A =>
+        resolveTencentRole(conf, trimmedBucket)
+          .map(_.properties)
+          .getOrElse(rows(ns.role))
       case Identity.Unconfigured | Identity.AssumedRole => rows(ns.role)
       case _ => Map.empty[String, String]
     }

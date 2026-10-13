@@ -4,6 +4,8 @@ import org.apache.hadoop.conf.Configuration
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.spark.connector.options.HadoopStorageKeys
+
 /** Unit tests for BackfillConfig validation and options generation
   */
 class BackfillConfigTest extends AnyFunSuite with Matchers {
@@ -350,9 +352,9 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "AssumeRole settings are accepted only for native AWS and Alibaba storage"
+    "AssumeRole settings are accepted only for native AWS, Alibaba and Tencent storage"
   ) {
-    Seq("aws", "aliyun").foreach { provider =>
+    Seq("aws", "aliyun", "tencent").foreach { provider =>
       BackfillConfig(
         s3Endpoint = "storage.example.com",
         s3BucketName = "bucket",
@@ -364,7 +366,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       ).validate() shouldBe Right(())
     }
 
-    Seq("gcp", "azure", "tencent", "huawei").foreach { provider =>
+    Seq("gcp", "azure", "huawei").foreach { provider =>
       val error = BackfillConfig(
         s3Endpoint = "storage.example.com",
         s3BucketName = "bucket",
@@ -654,7 +656,9 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3UseIam = true
     )
 
-    config.withHadoopStorageAssumeRole(hadoopConf, "spark-job") shouldBe config
+    intercept[IllegalArgumentException](
+      config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
+    ).getMessage should include("TencentS3RoleCredentialsProvider")
   }
 
   test("Zero batchSize fails validation") {
@@ -895,4 +899,105 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
     )
   }
+
+  test("Tencent main storage role reaches native read and write options") {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      HadoopStorageKeys.TencentS3RoleProvider
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123456:roleName/global")
+    conf.set(
+      "fs.s3a.bucket.bucket.assumed.role.arn",
+      "qcs::cam::uin/234567:roleName/data"
+    )
+    conf.set("fs.s3a.bucket.bucket.assumed.role.external.id", "tenant-id")
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+    val resolved = config.withHadoopStorageAssumeRole(conf, "spark-job")
+    resolved.validate() shouldBe Right(())
+    resolved.s3RoleArn shouldBe Some("qcs::cam::uin/234567:roleName/data")
+    resolved.s3RoleSessionName shouldBe Some("spark-job")
+    resolved.s3ExternalId shouldBe Some("tenant-id")
+    Seq(resolved.getMilvusReadOptions, resolved.getS3WriteOptions(1L, 2L, 3L))
+      .foreach { options =>
+        options("fs.cloud_provider") shouldBe "tencent"
+        options("fs.role_arn") shouldBe "qcs::cam::uin/234567:roleName/data"
+        options("fs.external_id") shouldBe "tenant-id"
+        options("fs.session_name") shouldBe "spark-job"
+        options should not contain key("fs.access_key_id")
+      }
+  }
+
+  test(
+    "Tencent explicit role and static credentials take precedence over platform role lookup"
+  ) {
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true,
+      s3RoleArn = Some("qcs::cam::uin/123456:roleName/explicit")
+    )
+    val conf = new Configuration(false)
+    config.withHadoopStorageAssumeRole(conf, "spark-job") shouldBe config
+    val static = config.copy(
+      s3RoleArn = None,
+      s3UseIam = false,
+      s3AccessKey = "ak",
+      s3SecretKey = "sk"
+    )
+    static.withHadoopStorageAssumeRole(conf, "spark-job") shouldBe static
+  }
+
+  test(
+    "Tencent Backfill rejects a blank bucket role without inheriting the global role"
+  ) {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      HadoopStorageKeys.TencentS3RoleProvider
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123456:roleName/global")
+    conf.set("fs.s3a.bucket.bucket.assumed.role.arn", " ")
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+    intercept[IllegalArgumentException](
+      config.withHadoopStorageAssumeRole(conf, "spark-job")
+    ).getMessage should include("assumed.role.arn")
+  }
+
+  test("Tencent platform role is not forwarded to the AWS native provider") {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      HadoopStorageKeys.TencentS3RoleProvider
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123456:roleName/data")
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    intercept[IllegalArgumentException](
+      config.withHadoopStorageAssumeRole(conf, "spark-job")
+    ).getMessage should include("s3CloudProvider=tencent")
+  }
+
 }

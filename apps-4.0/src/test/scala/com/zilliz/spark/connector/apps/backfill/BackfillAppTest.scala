@@ -1,5 +1,6 @@
 package com.zilliz.spark.connector.apps.backfill
 
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.storage.StorageLevel
 import org.scalatest.funsuite.AnyFunSuite
@@ -7,6 +8,7 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
+import com.zilliz.spark.connector.options.HadoopStorageKeys
 
 /** Unit tests for BackfillApp.parseArgs,
   * MilvusBackfill.configureHadoopS3ForPath, the MilvusDataSource FQCN used by
@@ -1109,4 +1111,165 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val fqcn = "com.zilliz.spark.connector.sources.MilvusDataSource"
     noException should be thrownBy Class.forName(fqcn)
   }
+  test(
+    "COS configuration preserves independent source and target role identities"
+  ) {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      HadoopStorageKeys.TencentS3RoleProvider
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123456:roleName/target")
+    conf.set(
+      "fs.s3a.bucket.source.aws.credentials.provider",
+      HadoopStorageKeys.TencentS3RoleProvider
+    )
+    conf.set(
+      "fs.s3a.bucket.source.assumed.role.arn",
+      "qcs::cam::uin/234567:roleName/source"
+    )
+    conf.set("fs.s3a.bucket.source.assumed.role.external.id", "source-tenant")
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "target",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+    MilvusBackfill.configureHadoopS3ForPath(
+      conf,
+      "s3a://source/input",
+      config,
+      isSource = true
+    )
+    MilvusBackfill.configureHadoopS3ForPath(
+      conf,
+      "s3a://target/snapshot",
+      config,
+      isSource = false
+    )
+    Seq("source", "target").foreach { bucket =>
+      conf.get(s"fs.s3a.bucket.$bucket.path.style.access") shouldBe "false"
+      conf.get(s"fs.s3a.bucket.$bucket.bucket.probe") shouldBe "0"
+      conf.get(
+        s"fs.s3a.bucket.$bucket.multiobjectdelete.enable"
+      ) shouldBe "false"
+    }
+    conf.get(
+      "fs.s3a.aws.credentials.provider"
+    ) shouldBe HadoopStorageKeys.TencentS3RoleProvider
+    conf.get(
+      "fs.s3a.bucket.source.aws.credentials.provider"
+    ) shouldBe HadoopStorageKeys.TencentS3RoleProvider
+    val source = HadoopStorageKeys.resolveTencentRole(conf, "source").get
+    source.arn shouldBe "qcs::cam::uin/234567:roleName/source"
+    source.externalId shouldBe Some("source-tenant")
+    HadoopStorageKeys
+      .resolveTencentRole(conf, "target")
+      .get
+      .arn shouldBe "qcs::cam::uin/123456:roleName/target"
+  }
+
+  test(
+    "COS IAM without its platform provider fails before changing Hadoop configuration"
+  ) {
+    val conf = new Configuration(false)
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "target",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+    intercept[IllegalArgumentException](
+      MilvusBackfill.configureHadoopS3ForPath(
+        conf,
+        "s3a://target/snapshot",
+        config,
+        isSource = false
+      )
+    ).getMessage should include("TencentS3RoleCredentialsProvider")
+    conf.get("fs.s3a.bucket.target.aws.credentials.provider") shouldBe null
+    conf.get("fs.s3a.bucket.target.endpoint") shouldBe null
+  }
+
+  test(
+    "COS static credentials override the platform role while retaining COS Hadoop settings"
+  ) {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      HadoopStorageKeys.TencentS3RoleProvider
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "target",
+      s3AccessKey = "ak",
+      s3SecretKey = "sk",
+      s3CloudProvider = "tencent"
+    )
+    MilvusBackfill.configureHadoopS3ForPath(
+      conf,
+      "s3a://target/snapshot",
+      config,
+      isSource = false
+    )
+    conf.get(
+      "fs.s3a.bucket.target.aws.credentials.provider"
+    ) shouldBe "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+    conf.get("fs.s3a.bucket.target.access.key") shouldBe "ak"
+    conf.get("fs.s3a.bucket.target.secret.key") shouldBe "sk"
+    conf.get("fs.s3a.bucket.target.path.style.access") shouldBe "false"
+    conf.get("fs.s3a.bucket.target.bucket.probe") shouldBe "0"
+  }
+
+  test(
+    "a Tencent target does not impose COS settings or credentials on an AWS source"
+  ) {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      HadoopStorageKeys.TencentS3RoleProvider
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123456:roleName/target")
+    conf.set(
+      "fs.s3a.bucket.source.aws.credentials.provider",
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    conf.set(
+      "fs.s3a.bucket.source.assumed.role.arn",
+      "arn:aws:iam::123456789012:role/source"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "target",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true,
+      sourceS3Endpoint = Some("s3.us-west-2.amazonaws.com"),
+      sourceS3Region = Some("us-west-2")
+    )
+    MilvusBackfill.configureHadoopS3ForPath(
+      conf,
+      "s3a://source/input",
+      config,
+      isSource = true
+    )
+    conf.get(
+      "fs.s3a.bucket.source.aws.credentials.provider"
+    ) shouldBe BackfillConfig.HadoopS3AssumedRoleProvider
+    conf.get("fs.s3a.bucket.source.path.style.access") shouldBe "true"
+    conf.get("fs.s3a.bucket.source.bucket.probe") shouldBe null
+    conf.get("fs.s3a.bucket.source.multiobjectdelete.enable") shouldBe null
+    conf.get(
+      "fs.s3a.bucket.source.assumed.role.arn"
+    ) shouldBe "arn:aws:iam::123456789012:role/source"
+    conf.get(
+      "fs.s3a.assumed.role.arn"
+    ) shouldBe "qcs::cam::uin/123456:roleName/target"
+  }
+
 }

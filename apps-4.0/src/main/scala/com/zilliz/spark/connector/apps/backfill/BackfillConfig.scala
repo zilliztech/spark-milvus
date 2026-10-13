@@ -343,6 +343,20 @@ case class BackfillConfig(
       withAwsS3AssumeRole(hadoopConf, defaultSessionName)
     } else if (provider == "aliyun") {
       withAlibabaOssAssumeRole(hadoopConf, defaultSessionName)
+    } else if (provider == "tencent") {
+      val role = HadoopStorageKeys
+        .resolveTencentRole(hadoopConf, s3BucketName)
+        .getOrElse(
+          throw new IllegalArgumentException(
+            "Tencent IAM storage requires TencentS3RoleCredentialsProvider in Hadoop configuration"
+          )
+        )
+      withNativeAssumeRole(
+        role.arn,
+        role.sessionName,
+        role.externalId,
+        defaultSessionName
+      )
     } else {
       this
     }
@@ -457,7 +471,8 @@ object BackfillConfig {
   private[backfill] val DefaultCloudProvider = "aws"
   private[backfill] val AllowedCloudProviders =
     Set("aws", "gcp", "aliyun", "azure", "tencent", "huawei")
-  private[backfill] val NativeAssumeRoleCloudProviders = Set("aws", "aliyun")
+  private[backfill] val NativeAssumeRoleCloudProviders =
+    Set("aws", "aliyun", "tencent")
 
   private[backfill] val DefaultInputFormat = "parquet"
   private[backfill] val AllowedInputFormats =
@@ -500,6 +515,10 @@ object BackfillConfig {
       hadoopConf: Configuration,
       bucketName: String
   ): Option[ResolvedAssumeRole] = {
+    require(
+      HadoopStorageKeys.resolveTencentRole(hadoopConf, bucketName).isEmpty,
+      "Tencent platform roles require s3CloudProvider=tencent for native storage"
+    )
     val bucketPrefix = s"fs.s3a.bucket.$bucketName"
 
     def getTrimmed(key: String): Option[String] =
