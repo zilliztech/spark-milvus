@@ -191,6 +191,36 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     JavaDouble.compare(scores(query * k), score) * better < 0
   }
 
+  private var scanned = 0L
+
+  /** The rows exact scans have offered this merger so far, every query alike:
+    * once the next batch is merged, about k times its rows over these and its
+    * own are among the best k ([[ExactScan.nominated]]).
+    */
+  def scannedRows: Long = scanned
+
+  def countScanned(rows: Int): Unit = {
+    require(rows >= 0, s"A batch of $rows rows")
+    scanned += rows
+  }
+
+  /** True once the query keeps k candidates: a candidate is then kept only when
+    * it beats [[worstScore]].
+    */
+  def isFull(query: Int): Boolean = {
+    require(
+      query >= 0 && query < queries,
+      s"Query $query is outside the $queries queries"
+    )
+    sizes(query) == k
+  }
+
+  /** The score of the worst candidate a full query keeps. */
+  def worstScore(query: Int): Double = {
+    require(isFull(query), s"Query $query keeps fewer than $k candidates")
+    scores(query * k)
+  }
+
   def addAll(candidates: Iterable[Candidate]): this.type = {
     candidates.iterator.foreach(add)
     this
@@ -219,6 +249,7 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
       }
       query += 1
     }
+    scanned += other.scanned
     this
   }
 

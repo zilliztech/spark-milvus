@@ -2,7 +2,7 @@ package com.zilliz.milvus.storage.index
 
 import java.lang.{Float => JavaFloat}
 import java.nio.{ByteBuffer, ByteOrder}
-import java.util.BitSet
+import java.util.{Arrays, BitSet}
 
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
@@ -32,8 +32,58 @@ import io.knowhere.DType
   * [[EngineRange]]; the function scores the batch's other rows against every
   * query of the group, and both kinds of score meet in the group's merger
   * (docs/design/architecture/dataframe-api.html section 2).
+  *
+  * Under L2 the batched entry computes |x|^2 + |y|^2 - 2x.y in float32, which
+  * errs by as much as the squared norms are large, whatever the distance, and
+  * picks the wrong rows when vectors lie far from the origin and near each
+  * other. With a function, its candidates are only nominations: its rescored
+  * variant computes again, pair by pair, those that can still be kept, a bound
+  * on the entry's error shows that the rows it did not name cannot beat them,
+  * and a query it cannot show that for is searched over the batch again pair by
+  * pair (decision 35,
+  * docs/design/architecture/exact-search-and-index-build-internals.html section
+  * 1.8).
   */
 object ExactScan {
+
+  /** How many candidates an L2 query asks the batched entry for when they are
+    * nominations: enough that the rows the entry leaves out can be shown not to
+    * beat the query's k. Once the batch is merged, about k times its rows over
+    * all the rows scanned are among the best k (all k on a first batch); the
+    * count is that many with three standard deviations and 8 to spare, never
+    * fewer than k and never more than k + min(k, 64), because a wider heap
+    * slows faiss on every batch that asks for one. A count that falls short
+    * costs a second search of the query, never a wrong answer. The entry's
+    * output, 16 bytes a candidate, lives for one call, as its 12 bytes a
+    * candidate did before.
+    */
+  def nominated(k: Int, batchRows: Int, scannedRows: Long): Int = {
+    require(k > 0, s"topK must be positive: $k")
+    require(batchRows > 0, s"A batch of $batchRows rows")
+    require(scannedRows >= 0L, s"$scannedRows rows scanned")
+    val most = k + math.min(k, 64)
+    val expected = k.toDouble * batchRows / (scannedRows + batchRows)
+    val wanted = math.ceil(expected + 3.0 * math.sqrt(expected)).toLong + 8L
+    math.min(most.toLong, math.max(k.toLong, wanted)).toInt
+  }
+
+  /** float32's unit roundoff, 2^-24. */
+  private final val UnitRoundoff = 1.0 / (1L << 24)
+
+  /** How far the batched entry's L2 for a query and any row of a batch can be
+    * from their squared distance: the query's squared norm, the row's and their
+    * dot product each err by at most `gamma` of the norms' product, whatever
+    * the order of the sums and with or without fused multiply-adds, and the sum
+    * and the difference by one rounding each; the factor of 2 is margin.
+    */
+  private def engineError(
+      querySquaredNorm: Double,
+      largestSquaredNorm: Double,
+      gamma: Double
+  ): Double = {
+    val reach = math.sqrt(querySquaredNorm) + math.sqrt(largestSquaredNorm)
+    2.0 * gamma * reach * reach
+  }
 
   /** Adds this segment's candidates to `merger`, which counts its queries the
     * way the group does: query 0 is the group's first query. The buffers of a
@@ -99,7 +149,8 @@ object ExactScan {
           metric,
           allocator,
           merger,
-          onProgress
+          onProgress,
+          ranked
         )
       else
         perQuery(
@@ -118,6 +169,7 @@ object ExactScan {
     ranked.foreach(
       scoreByFunction(current, _, queries, segmentId, merger, onProgress)
     )
+    merger.countScanned(current.visibleRows)
   }
 
   /** The rows Knowhere was not given, scored by the function against every
@@ -230,10 +282,16 @@ object ExactScan {
       metric: MetricType,
       allocator: BufferAllocator,
       merger: TopKMerger,
-      onProgress: SegmentSearch.Progress => Unit
+      onProgress: SegmentSearch.Progress => Unit,
+      ranked: Option[EngineRange.Batch]
   ): Unit = {
     val parameters = s"""{"metric_type":"${metric.name}"}"""
-    val count = math.min(k, visible)
+    // Under L2 the entry's candidates are only nominations (decision 35).
+    val nominating = ranked.filter(_ => metric == MetricType.L2)
+    val count = math.min(
+      nominating.fold(k)(_ => nominated(k, visible, merger.scannedRows)),
+      visible
+    )
     val compacted =
       if (excluded.isEmpty) None
       else
@@ -248,49 +306,364 @@ object ExactScan {
         )
     val ids = allocator.buffer(queries.queries.toLong * count * 8L)
     val scores = allocator.buffer(queries.queries.toLong * count * 4L)
+    // The queries a nomination could not answer for, and the rows each was
+    // given already: they are searched again once these buffers are released.
+    val (again, offered) =
+      try {
+        val (base, rows) = compacted match {
+          case Some(c) => (bytes(c.buffer, c.buffer.capacity()), c.rows)
+          case None    => (current.base.buffer, current.rows)
+        }
+        nominating match {
+          case Some(batch) =>
+            nominate(
+              current,
+              batch,
+              visible,
+              base,
+              rows,
+              queries,
+              count,
+              ids,
+              scores,
+              segmentId,
+              allocator,
+              merger,
+              compacted.map(_.batchRows),
+              parameters,
+              onProgress
+            )
+          case None =>
+            val started = System.nanoTime()
+            NativeVectorSearch.bruteForceBatched(
+              queries.layout.dtype,
+              base,
+              rows.toLong,
+              queries.buffer,
+              queries.queries.toLong,
+              queries.dimension,
+              count,
+              bytes(ids, queries.queries.toLong * count * 8L),
+              bytes(scores, queries.queries.toLong * count * 4L),
+              parameters
+            )
+            onProgress(
+              SegmentSearch.Progress(
+                1,
+                System.nanoTime() - started,
+                queries.queries.toLong * visible.toLong,
+                0
+              )
+            )
+            collect(
+              excluded,
+              queries.queries,
+              count,
+              ids,
+              scores,
+              segmentId,
+              current.firstRow,
+              merger,
+              rows,
+              compacted.map(_.batchRows)
+            )
+            (Array.emptyIntArray, Array.empty[Array[Int]])
+        }
+      } finally {
+        scores.close()
+        ids.close()
+        compacted.foreach(_.close())
+      }
+    nominating.foreach(batch =>
+      if (again.nonEmpty)
+        rescan(
+          current,
+          batch,
+          visible,
+          queries,
+          again,
+          offered,
+          segmentId,
+          k,
+          metric,
+          allocator,
+          merger,
+          onProgress
+        )
+    )
+  }
+
+  /** L2 over the batched entry, whose ||x||^2 + ||y||^2 - 2x.y errs by as much
+    * as the squared norms are large (decision 35). Its candidates are only
+    * nominations: the rescored entry computes again, pair by pair, every
+    * candidate of a query that keeps fewer than k, and of a full query those
+    * whose estimate less the entry's error could still beat its worst, and the
+    * merger takes those distances. When the entry named as many rows as it was
+    * asked for, the rest of the batch estimates no nearer than its last; if
+    * even that row's bound could still be kept, the query is to be searched
+    * over the batch again pair by pair. Returns those queries in ascending
+    * order, with the rows each was given here, sorted.
+    */
+  private def nominate(
+      current: VectorBatch,
+      ranked: EngineRange.Batch,
+      visible: Int,
+      base: ByteBuffer,
+      rows: Int,
+      queries: QueryMatrix,
+      count: Int,
+      ids: ArrowBuf,
+      scores: ArrowBuf,
+      segmentId: Long,
+      allocator: BufferAllocator,
+      merger: TopKMerger,
+      batchRows: Option[Array[Int]],
+      parameters: String,
+      onProgress: SegmentSearch.Progress => Unit
+  ): (Array[Int], Array[Array[Int]]) = {
+    val nq = queries.queries
+    val gamma = (queries.dimension + 4) * UnitRoundoff
+    // A distance computed pair by pair, or by the ranking function, is within
+    // its rounding of the squared distance: at least this share of it.
+    val shrink = 1.0 - 2.0 * gamma
+    val errors = Array.tabulate(nq)(at =>
+      engineError(queries.squaredNorms(at), ranked.largestSquaredNorm, gamma)
+    )
+    val cutoffs = allocator.buffer(nq.toLong * 4L)
+    val direct = allocator.buffer(nq.toLong * count * 4L)
+    val counts = allocator.buffer(nq.toLong * 4L)
     try {
-      val (base, rows) = compacted match {
-        case Some(c) => (bytes(c.buffer, c.buffer.capacity()), c.rows)
-        case None    => (current.base.buffer, current.rows)
+      var at = 0
+      while (at < nq) {
+        // A full query keeps a row only when (estimate - error) * shrink can
+        // beat its worst, that is when the estimate is at most this. A worst of
+        // NaN, a row the function scored, ranks after every number.
+        val cutoff =
+          if (!merger.isFull(at)) Float.PositiveInfinity
+          else {
+            val worst = merger.worstScore(at)
+            if (worst.isNaN) Float.PositiveInfinity
+            else floatAbove(worst / shrink + errors(at))
+          }
+        cutoffs.setFloat(at.toLong * 4L, cutoff)
+        at += 1
       }
       val started = System.nanoTime()
-      NativeVectorSearch.bruteForceBatched(
+      NativeVectorSearch.bruteForceBatchedL2Rescored(
         queries.layout.dtype,
         base,
         rows.toLong,
         queries.buffer,
-        queries.queries.toLong,
+        nq.toLong,
         queries.dimension,
         count,
-        bytes(ids, queries.queries.toLong * count * 8L),
-        bytes(scores, queries.queries.toLong * count * 4L),
+        bytes(cutoffs, nq.toLong * 4L),
+        bytes(ids, nq.toLong * count * 8L),
+        bytes(scores, nq.toLong * count * 4L),
+        bytes(direct, nq.toLong * count * 4L),
+        bytes(counts, nq.toLong * 4L),
         parameters
       )
       onProgress(
         SegmentSearch.Progress(
           1,
           System.nanoTime() - started,
-          queries.queries.toLong * visible.toLong,
+          nq.toLong * visible.toLong,
           0
         )
       )
-      collect(
-        excluded,
-        queries.queries,
-        count,
-        ids,
-        scores,
-        segmentId,
-        current.firstRow,
-        merger,
-        rows,
-        compacted.map(_.batchRows)
-      )
+      val offered = new Array[Int](count)
+      val again = Array.newBuilder[Int]
+      // The rows each query searched again was given already: the merger
+      // keeps a row once.
+      val alreadyOffered = Array.newBuilder[Array[Int]]
+      at = 0
+      while (at < nq) {
+        val computed = counts.getInt(at.toLong * 4L)
+        var slot = 0
+        while (slot < computed) {
+          val position = at.toLong * count + slot
+          val batchRow =
+            rowOf(
+              ids.getLong(position * 8L),
+              rows,
+              batchRows,
+              ranked.engineExcluded
+            )
+          val distance = finite(direct.getFloat(position * 4L), batchRow)
+          if (!merger.rejectsScore(at, distance))
+            merger.add(at, segmentId, current.firstRow + batchRow, distance)
+          offered(slot) = batchRow
+          slot += 1
+        }
+        if (count < visible) {
+          val position = at.toLong * count + count - 1
+          val last = finite(
+            scores.getFloat(position * 4L),
+            rowOf(
+              ids.getLong(position * 8L),
+              rows,
+              batchRows,
+              ranked.engineExcluded
+            )
+          )
+          if (!merger.rejectsScore(at, (last - errors(at)) * shrink)) {
+            again += at
+            val sorted = Arrays.copyOf(offered, computed)
+            Arrays.sort(sorted)
+            alreadyOffered += sorted
+          }
+        }
+        at += 1
+      }
+      (again.result(), alreadyOffered.result())
     } finally {
-      scores.close()
-      ids.close()
-      compacted.foreach(_.close())
+      counts.close()
+      direct.close()
+      cutoffs.close()
     }
+  }
+
+  /** The smallest float above `value`, which a float compared below it is not
+    * above.
+    */
+  private def floatAbove(value: Double): Float = {
+    val rounded = value.toFloat
+    if (rounded.toDouble > value) rounded else Math.nextUp(rounded)
+  }
+
+  /** Searches the batch again for the queries `again` names, in ascending
+    * order, through the per-query entry, which computes each distance pair by
+    * pair and errs only as much as the distance is large; the merger takes
+    * those distances, apart from the rows each query was given already, sorted
+    * in `offered`. Consecutive queries go in one call, read where they lie in
+    * the matrix: a search that has to look again copies no query.
+    */
+  private def rescan(
+      current: VectorBatch,
+      ranked: EngineRange.Batch,
+      visible: Int,
+      queries: QueryMatrix,
+      again: Array[Int],
+      offered: Array[Array[Int]],
+      segmentId: Long,
+      k: Int,
+      metric: MetricType,
+      allocator: BufferAllocator,
+      merger: TopKMerger,
+      onProgress: SegmentSearch.Progress => Unit
+  ): Unit = {
+    val layout = queries.layout
+    val parameters = s"""{"metric_type":"${metric.name}"}"""
+    val count = math.min(k, visible)
+    val mask = allocator.buffer((current.rows.toLong + 7L) / 8L)
+    try {
+      writeMask(ranked.engineExcluded, current.rows, mask)
+      var from = 0
+      while (from < again.length) {
+        var until = from + 1
+        while (until < again.length && again(until) == again(until - 1) + 1)
+          until += 1
+        val run = until - from
+        val ids = allocator.buffer(run.toLong * count * 8L)
+        val scores = allocator.buffer(run.toLong * count * 4L)
+        try {
+          val started = System.nanoTime()
+          NativeVectorSearch.bruteForce(
+            layout.dtype,
+            current.base.buffer,
+            current.rows.toLong,
+            rowsOf(queries, again(from), run),
+            run.toLong,
+            layout.dimension,
+            count,
+            bytes(mask, mask.capacity()),
+            bytes(ids, run.toLong * count * 8L),
+            bytes(scores, run.toLong * count * 4L),
+            parameters
+          )
+          onProgress(
+            SegmentSearch.Progress(
+              1,
+              System.nanoTime() - started,
+              0L,
+              0,
+              run.toLong
+            )
+          )
+          var query = from
+          while (query < until) {
+            // In ascending order: past the first the merger rejects, so is
+            // the rest.
+            val at = again(query)
+            var slot = 0
+            var open = true
+            while (open && slot < count) {
+              val position = (query - from).toLong * count + slot
+              val id = ids.getLong(position * 8L)
+              if (id == -1L) open = false
+              else {
+                val batchRow =
+                  rowOf(id, current.rows, None, ranked.engineExcluded)
+                val distance = finite(scores.getFloat(position * 4L), batchRow)
+                if (merger.rejectsScore(at, distance)) open = false
+                else if (Arrays.binarySearch(offered(query), batchRow) < 0)
+                  merger.add(
+                    at,
+                    segmentId,
+                    current.firstRow + batchRow,
+                    distance
+                  )
+              }
+              slot += 1
+            }
+            query += 1
+          }
+        } finally {
+          scores.close()
+          ids.close()
+        }
+        from = until
+      }
+    } finally mask.close()
+  }
+
+  /** `run` queries of the matrix from `first` on, where they lie. */
+  private def rowsOf(queries: QueryMatrix, first: Int, run: Int): ByteBuffer = {
+    val rowBytes = queries.layout.rowBytes
+    val view = queries.buffer.duplicate()
+    view.position(first * rowBytes)
+    view.limit((first + run) * rowBytes)
+    view.slice().order(ByteOrder.nativeOrder())
+  }
+
+  /** The batch row an engine row number names: through `batchRows` when the
+    * batch was compacted, and never one the engine was told to skip.
+    */
+  private def rowOf(
+      id: Long,
+      rows: Int,
+      batchRows: Option[Array[Int]],
+      excluded: BitSet
+  ): Int = {
+    require(
+      id >= 0 && id < rows,
+      s"The engine returned row $id of a batch with $rows rows"
+    )
+    val row = batchRows match {
+      case Some(mapping) => mapping(id.toInt)
+      case None          => id.toInt
+    }
+    require(!excluded.get(row), s"The engine returned excluded row $row")
+    row
+  }
+
+  private def finite(score: Float, row: Int): Double = {
+    require(
+      JavaFloat.isFinite(score),
+      s"The engine returned a score that is not finite for row $row"
+    )
+    score.toDouble
   }
 
   private def perQuery(
@@ -394,24 +767,9 @@ object ExactScan {
         val position = query.toLong * count + slot
         val id = ids.getLong(position * 8L)
         if (id != -1L) {
-          require(
-            id >= 0 && id < rows,
-            s"The engine returned row $id of a batch with $rows rows"
-          )
-          val row = batchRows match {
-            case Some(mapping) => mapping(id.toInt)
-            case None          => id.toInt
-          }
-          require(
-            !excluded.get(row),
-            s"The engine returned excluded row $row"
-          )
-          val score = scores.getFloat(position * 4L)
-          require(
-            JavaFloat.isFinite(score),
-            s"The engine returned a score that is not finite for row $row"
-          )
-          merger.add(query, segmentId, firstRow + row, score.toDouble)
+          val row = rowOf(id, rows, batchRows, excluded)
+          val score = finite(scores.getFloat(position * 4L), row)
+          merger.add(query, segmentId, firstRow + row, score)
         }
         slot += 1
       }

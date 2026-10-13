@@ -24,6 +24,7 @@ final class SearchMetrics private (
     val knowhereCalls: SearchMetrics.Counter,
     val knowhereNanos: SearchMetrics.Counter,
     val comparedPairs: SearchMetrics.Counter,
+    val exactRescans: SearchMetrics.Counter,
     val candidates: SearchMetrics.Counter,
     val takeRows: SearchMetrics.Counter,
     val takeNanos: SearchMetrics.Counter
@@ -40,6 +41,7 @@ final class SearchMetrics private (
     SearchMetrics.KnowhereCalls -> knowhereCalls,
     SearchMetrics.KnowhereNanos -> knowhereNanos,
     SearchMetrics.ComparedPairs -> comparedPairs,
+    SearchMetrics.ExactRescans -> exactRescans,
     SearchMetrics.Candidates -> candidates,
     SearchMetrics.TakeRows -> takeRows,
     SearchMetrics.TakeNanos -> takeNanos
@@ -68,6 +70,13 @@ object SearchMetrics {
     * cannot count them and leaves it at zero.
     */
   val ComparedPairs = "milvus.search.compared.pairs"
+
+  /** The batch and query pairs an L2 exact scan searched again pair by pair,
+    * because the batched entry's error could hide a nearer row (decision 35).
+    * Near zero for most data; a high count marks vectors far from the origin
+    * and near each other.
+    */
+  val ExactRescans = "milvus.search.exact.rescans"
   val Candidates = "milvus.search.candidates"
   val TakeRows = "milvus.search.take.rows"
   val TakeNanos = "milvus.search.take.nanos"
@@ -102,6 +111,7 @@ object SearchMetrics {
     KnowhereCalls -> SQLMetrics.createMetric(context, KnowhereCalls),
     KnowhereNanos -> SQLMetrics.createNanoTimingMetric(context, KnowhereNanos),
     ComparedPairs -> SQLMetrics.createMetric(context, ComparedPairs),
+    ExactRescans -> SQLMetrics.createMetric(context, ExactRescans),
     Candidates -> SQLMetrics.createMetric(context, Candidates),
     TakeRows -> SQLMetrics.createMetric(context, TakeRows),
     TakeNanos -> SQLMetrics.createNanoTimingMetric(context, TakeNanos)
@@ -125,6 +135,7 @@ object SearchMetrics {
       counter(KnowhereCalls),
       counter(KnowhereNanos),
       counter(ComparedPairs),
+      counter(ExactRescans),
       counter(Candidates),
       counter(TakeRows),
       counter(TakeNanos)

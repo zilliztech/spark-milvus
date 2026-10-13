@@ -126,8 +126,11 @@ the join runs, the driver log reports them once a heartbeat. They are
 `milvus.search.index.load.nanos`, `milvus.search.bitmap.nanos`,
 `milvus.search.knowhere.calls` and `milvus.search.knowhere.nanos`,
 `milvus.search.compared.pairs` (EXACT: the query × visible-row pairs scored
-so far; 0 for APPROX), `milvus.search.candidates`, and
-`milvus.search.take.rows` and `milvus.search.take.nanos`. `bruteForce` and index
+so far; 0 for APPROX), `milvus.search.exact.rescans` (EXACT L2 over float32:
+the batch × query pairs searched again pair by pair because the batched
+entry's error could hide a nearer row; near zero for most data, high for
+vectors far from the origin and near each other), `milvus.search.candidates`,
+and `milvus.search.take.rows` and `milvus.search.take.nanos`. `bruteForce` and index
 searches run in Knowhere's own thread pool, so their time is in
 `milvus.search.knowhere.nanos` rather than in the task's CPU time; the batched
 float32 exact entry runs on the task thread, so its time is in both.

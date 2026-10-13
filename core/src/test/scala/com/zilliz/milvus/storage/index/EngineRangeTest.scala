@@ -133,15 +133,20 @@ class EngineRangeTest extends AnyFunSuite with Matchers {
       // Excluded already, so never read.
       Seq(Float.NaN, Float.NaN)
     )
-    val (cosineExcluded, cosineRanked) =
+    val (cosineExcluded, cosineRanked, cosineNorm) =
       EngineRange.classify(buffer, 5, excluding(4), float32, MetricType.Cosine)
     cosineRanked.toSeq shouldBe Seq(2, 3)
     (0 until 5).filter(cosineExcluded.get) shouldBe Seq(1, 2, 3, 4)
+    // The norm bounds the batched entry's L2 only.
+    cosineNorm shouldBe 0.0
 
-    val (l2Excluded, l2Ranked) =
+    val (l2Excluded, l2Ranked, l2Norm) =
       EngineRange.classify(buffer, 5, excluding(4), float32, MetricType.L2)
     l2Ranked.toSeq shouldBe Seq(2, 3)
     (0 until 5).filter(l2Excluded.get) shouldBe Seq(2, 3, 4)
+    // Of the rows Knowhere scores under L2, (1, 2) is the longest; the NaN and
+    // the too large rows are the function's, and the excluded one is not read.
+    l2Norm shouldBe 5.0
   }
 
   test("float16 and bfloat16 rows are judged in their own bits") {
@@ -152,7 +157,7 @@ class EngineRangeTest extends AnyFunSuite with Matchers {
       Seq(0x7c00, 0x3c00),
       Seq(0x0001, 0)
     )
-    val (halfExcluded, halfRanked) =
+    val (halfExcluded, halfRanked, _) =
       EngineRange.classify(half, 4, new BitSet(), float16, MetricType.Cosine)
     halfRanked.toSeq shouldBe Seq(2)
     (0 until 4).filter(halfExcluded.get) shouldBe Seq(1, 2)
@@ -163,7 +168,7 @@ class EngineRangeTest extends AnyFunSuite with Matchers {
       Seq(bfloat(math.pow(2, 40).toFloat), 0),
       Seq(bfloat(Float.NaN), 0)
     )
-    val (brainExcluded, brainRanked) =
+    val (brainExcluded, brainRanked, _) =
       EngineRange.classify(brain, 3, new BitSet(), bfloat16, MetricType.IP)
     brainRanked.toSeq shouldBe Seq(1, 2)
     (0 until 3).filter(brainExcluded.get) shouldBe Seq(1, 2)

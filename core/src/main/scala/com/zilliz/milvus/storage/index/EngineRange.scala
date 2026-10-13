@@ -28,10 +28,13 @@ import com.zilliz.milvus.storage.schema.{
   *     makes Spark's cosine NULL. A float16 vector is in range when it is
   *     finite and not all zero: its elements lie in [2^-24, 65504].
   *
-  * Between two vectors in range the engine's score and the function's differ by
-  * rounding alone. Under COSINE a vector whose every element is zero has no
-  * value with a vector in range, the product of the squared norms being zero.
-  * Every other vector is ranked by the function. The test is one integer
+  * Between two vectors in range the engine's inner product and cosine and the
+  * function's differ by rounding alone. Its L2 does not: |x|^2 + |y|^2 - 2x.y
+  * errs by as much as the squared norms are large, whatever the distance, so
+  * [[ExactScan]] takes the engine's L2 candidates as nominations the function
+  * scores (decision 35). Under COSINE a vector whose every element is zero has
+  * no value with a vector in range, the product of the squared norms being
+  * zero. Every other vector is ranked by the function. The test is one integer
   * comparison per element.
   */
 object EngineRange {
@@ -199,13 +202,18 @@ object EngineRange {
     *   the batch rows the function scores, ascending
     * @param rankedValues
     *   their vectors as floats, in the same order
+    * @param largestSquaredNorm
+    *   under L2 over float32 rows, the largest squared norm among the rows
+    *   Knowhere scores, which bounds the error of its batched entry
+    *   ([[ExactScan]], decision 35); 0 otherwise
     */
   final class Batch private[index] (
       val function: RankingFunction,
       val engineExcluded: BitSet,
       val engineRows: Int,
       val rankedRows: Array[Int],
-      val rankedValues: Array[Array[Float]]
+      val rankedValues: Array[Array[Float]],
+      val largestSquaredNorm: Double
   )
 
   object Batch {
@@ -218,7 +226,7 @@ object EngineRange {
         function: RankingFunction
     ): Batch = {
       val buffer = batch.base.buffer
-      val (excluded, ranked) =
+      val (excluded, ranked, largestSquaredNorm) =
         classify(buffer, batch.rows, batch.excluded, layout, metric)
       val values = ranked.map { at =>
         val vector = new Array[Float](layout.dimension)
@@ -230,14 +238,17 @@ object EngineRange {
         excluded,
         batch.rows - excluded.get(0, batch.rows).cardinality(),
         ranked,
-        values
+        values,
+        largestSquaredNorm
       )
     }
   }
 
   /** The rows of `buffer` Knowhere does not score -- `excluded`, the zero rows
     * under COSINE, the rows outside the range -- and, of those, the rows the
-    * function scores. A row already excluded is not read.
+    * function scores; and under L2 over float32 rows, the largest squared norm
+    * of the rows Knowhere scores, read while each is in the cache. A row
+    * already excluded is not read.
     */
   private[index] def classify(
       buffer: ByteBuffer,
@@ -245,20 +256,45 @@ object EngineRange {
       excluded: BitSet,
       layout: VectorLayout,
       metric: MetricType
-  ): (BitSet, Array[Int]) = {
+  ): (BitSet, Array[Int], Double) = {
     val engineExcluded = excluded.clone().asInstanceOf[BitSet]
     val ranked = Array.newBuilder[Int]
+    val norms = metric == MetricType.L2 &&
+      layout.elementType == VectorElementType.Float32
+    var largestSquaredNorm = 0.0
     var current = excluded.nextClearBit(0)
     while (current < rows) {
       row(buffer, current * layout.rowBytes, layout, metric) match {
         case Engine =>
-        case Zero   => engineExcluded.set(current)
+          if (norms) {
+            val norm =
+              squaredNorm(buffer, current * layout.rowBytes, layout.dimension)
+            if (norm > largestSquaredNorm) largestSquaredNorm = norm
+          }
+        case Zero => engineExcluded.set(current)
         case _ =>
           engineExcluded.set(current)
           ranked += current
       }
       current = excluded.nextClearBit(current + 1)
     }
-    (engineExcluded, ranked.result())
+    (engineExcluded, ranked.result(), largestSquaredNorm)
+  }
+
+  /** The sum of the squares of a float32 row's elements, in double. */
+  private def squaredNorm(
+      buffer: ByteBuffer,
+      offset: Int,
+      dimension: Int
+  ): Double = {
+    val end = offset + 4 * dimension
+    var sum = 0.0
+    var at = offset
+    while (at < end) {
+      val value = buffer.getFloat(at).toDouble
+      sum += value * value
+      at += 4
+    }
+    sum
   }
 }

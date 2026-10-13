@@ -121,6 +121,7 @@ private[read] object SegmentSetSearch extends Logging {
         metrics.knowhereCalls.add(step.nativeCalls.toLong)
       if (step.nativeNanos != 0L) metrics.knowhereNanos.add(step.nativeNanos)
       if (step.compared != 0L) metrics.comparedPairs.add(step.compared)
+      if (step.rescans != 0L) metrics.exactRescans.add(step.rescans)
       if (step.segments != 0) metrics.segmentSearches.add(step.segments.toLong)
     }
     def open(segmentId: Long): SegmentSearch.Source =
