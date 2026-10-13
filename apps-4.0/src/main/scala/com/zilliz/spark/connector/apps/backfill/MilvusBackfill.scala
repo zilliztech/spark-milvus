@@ -2742,6 +2742,25 @@ object MilvusBackfill {
 
     val prefix = s"fs.s3a.bucket.$bucket"
 
+    val tencentRole =
+      if (useIam) HadoopStorageKeys.resolveTencentRole(hadoopConf, bucket)
+      else None
+    // Source overrides may point at another cloud. Its provider/endpoint,
+    // rather than the target bucket's cloud alone, determines COS behavior.
+    val endpointHost = Option(endpoint)
+      .getOrElse("")
+      .stripPrefix("https://")
+      .stripPrefix("http://")
+    val isTencent = tencentRole.nonEmpty ||
+      (config.s3CloudProvider.trim == "tencent" && (!isSource || config.sourceS3Endpoint.isEmpty)) ||
+      (endpointHost.startsWith("cos.") && endpointHost.endsWith(
+        ".myqcloud.com"
+      ))
+    require(
+      !useIam || !isTencent || tencentRole.nonEmpty,
+      "Tencent IAM storage requires TencentS3RoleCredentialsProvider in Hadoop configuration"
+    )
+
     // Endpoint + path style + SSL are safe to set in both IAM and static modes
     if (endpoint != null && endpoint.nonEmpty) {
       hadoopConf.set(s"$prefix.endpoint", endpoint)
@@ -2752,7 +2771,11 @@ object MilvusBackfill {
       hadoopConf.set(s"$prefix.endpoint.region", region)
       hadoopConf.set(s"$prefix.region", region)
     }
-    hadoopConf.set(s"$prefix.path.style.access", "true")
+    hadoopConf.set(s"$prefix.path.style.access", (!isTencent).toString)
+    if (isTencent) {
+      hadoopConf.set(s"$prefix.bucket.probe", "0")
+      hadoopConf.set(s"$prefix.multiobjectdelete.enable", "false")
+    }
     hadoopConf.set(
       s"$prefix.connection.ssl.enabled",
       if (useSSL) "true" else "false"
@@ -2761,7 +2784,8 @@ object MilvusBackfill {
     if (useIam) {
       val bucketProviderKey = s"$prefix.aws.credentials.provider"
       val assumedRole =
-        BackfillConfig.resolveAwsS3AssumeRole(hadoopConf, bucket)
+        if (tencentRole.nonEmpty) None
+        else BackfillConfig.resolveAwsS3AssumeRole(hadoopConf, bucket)
 
       // Build an explicit IRSA/EKS-friendly provider chain instead of the
       // v1 DefaultAWSCredentialsProviderChain, which has historically been
@@ -2776,7 +2800,7 @@ object MilvusBackfill {
       // A managed runtime may already have selected an AssumeRole provider
       // globally for its data role or per bucket for an external volume. Do
       // not replace that security boundary with the pod's ambient identity.
-      if (assumedRole.isEmpty) {
+      if (assumedRole.isEmpty && tencentRole.isEmpty) {
         hadoopConf.set(
           bucketProviderKey,
           Seq(

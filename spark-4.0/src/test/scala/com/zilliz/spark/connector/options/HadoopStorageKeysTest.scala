@@ -580,4 +580,111 @@ class HadoopStorageKeysTest extends AnyFunSuite with Matchers {
       )
     )
   }
+
+  test(
+    "Tencent platform role maps to native COS without forwarding stale static credentials"
+  ) {
+    val c = conf(
+      "fs.s3a.aws.credentials.provider" -> HadoopStorageKeys.TencentS3RoleProvider,
+      "fs.s3a.assumed.role.arn" -> "qcs::cam::uin/123456:roleName/data",
+      "fs.s3a.assumed.role.session.name" -> "spark-job",
+      "fs.s3a.assumed.role.external.id" -> "tenant-id",
+      "fs.s3a.endpoint" -> "cos.ap-shanghai.myqcloud.com",
+      "fs.s3a.endpoint.region" -> "ap-shanghai",
+      "fs.s3a.access.key" -> "stale-ak",
+      "fs.s3a.secret.key" -> "stale-sk",
+      "fs.s3a.session.token" -> "stale-token"
+    )
+    val out = HadoopStorageKeys.toFsProperties(c, "data")
+    out(StorageProperties.CloudProvider) shouldBe "tencent"
+    out(StorageProperties.RoleArn) shouldBe "qcs::cam::uin/123456:roleName/data"
+    out(StorageProperties.SessionName) shouldBe "spark-job"
+    out(StorageProperties.ExternalId) shouldBe "tenant-id"
+    out(StorageProperties.Address) shouldBe "cos.ap-shanghai.myqcloud.com"
+    out(StorageProperties.Region) shouldBe "ap-shanghai"
+    out should not contain key(StorageProperties.AccessKeyId)
+    out should not contain key(StorageProperties.AccessKeyValue)
+  }
+
+  test(
+    "Tencent bucket roles stay separate and blank optional values do not inherit"
+  ) {
+    val c = conf(
+      "fs.s3a.aws.credentials.provider" -> HadoopStorageKeys.TencentS3RoleProvider,
+      "fs.s3a.assumed.role.arn" -> "qcs::cam::uin/123456:roleName/main",
+      "fs.s3a.assumed.role.external.id" -> "main-external",
+      "fs.s3a.assumed.role.session.name" -> "main-session",
+      "fs.s3a.bucket.source.assumed.role.arn" -> "qcs::cam::uin/234567:role/123",
+      "fs.s3a.bucket.source.assumed.role.external.id" -> " ",
+      "fs.s3a.bucket.source.assumed.role.session.name" -> "source-session"
+    )
+    val source = HadoopStorageKeys.toFsProperties(c, "source")
+    source(StorageProperties.RoleArn) shouldBe "qcs::cam::uin/234567:role/123"
+    source(StorageProperties.SessionName) shouldBe "source-session"
+    source should not contain key(StorageProperties.ExternalId)
+    val target = HadoopStorageKeys.toFsProperties(c, "target")
+    target(
+      StorageProperties.RoleArn
+    ) shouldBe "qcs::cam::uin/123456:roleName/main"
+    target(StorageProperties.ExternalId) shouldBe "main-external"
+  }
+
+  test("Tencent rejects missing, malformed and explicitly blank bucket roles") {
+    val c = conf(
+      "fs.s3a.aws.credentials.provider" -> HadoopStorageKeys.TencentS3RoleProvider
+    )
+    intercept[IllegalArgumentException](
+      HadoopStorageKeys.toFsProperties(c)
+    ).getMessage should include("assumed.role.arn")
+    Seq("arn:aws:iam::1:role/data", "qcs::cam::uin/abc:roleName/data").foreach {
+      arn =>
+        c.set("fs.s3a.assumed.role.arn", arn)
+        intercept[IllegalArgumentException](
+          HadoopStorageKeys.toFsProperties(c)
+        ).getMessage should include("Tencent CAM")
+    }
+    c.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123456:roleName/main")
+    c.set("fs.s3a.bucket.source.assumed.role.arn", " ")
+    intercept[IllegalArgumentException](
+      HadoopStorageKeys.toFsProperties(c, "source")
+    ).getMessage should include("assumed.role.arn")
+  }
+
+  test("Tencent rejects mixed provider chains in either order") {
+    Seq(
+      HadoopStorageKeys.TencentS3RoleProvider + "," + HadoopStorageKeys.S3AAssumedRoleProvider,
+      HadoopStorageKeys.S3AAssumedRoleProvider + "," + HadoopStorageKeys.TencentS3RoleProvider
+    ).foreach { providers =>
+      val c = conf(
+        "fs.s3a.aws.credentials.provider" -> providers,
+        "fs.s3a.assumed.role.arn" -> "qcs::cam::uin/123456:roleName/main"
+      )
+      intercept[IllegalArgumentException](
+        HadoopStorageKeys.toFsProperties(c)
+      ).getMessage should include("cannot be mixed")
+      intercept[IllegalArgumentException](
+        HadoopStorageKeys.onlyAssumedRole(providers)
+      ).getMessage should include("cannot be mixed")
+    }
+  }
+
+  test(
+    "explicit native identity overrides invalid Tencent platform credentials"
+  ) {
+    val c = conf(
+      "fs.s3a.aws.credentials.provider" -> HadoopStorageKeys.TencentS3RoleProvider,
+      "fs.s3a.assumed.role.arn" -> "invalid",
+      "fs.s3a.endpoint" -> "cos.ap-shanghai.myqcloud.com"
+    )
+    val out = HadoopStorageKeys.toFsProperties(
+      c,
+      declared = Map(
+        StorageProperties.AccessKeyId -> "ak",
+        StorageProperties.AccessKeyValue -> "sk"
+      )
+    )
+    out should not contain key(StorageProperties.RoleArn)
+    out(StorageProperties.CloudProvider) shouldBe "tencent"
+  }
+
 }
