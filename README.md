@@ -67,8 +67,9 @@ Four git submodules sit in the repository. `milvus-proto` supplies the
 protobuf definitions: `common.proto` and `schema.proto` are generated into
 `core` because the storage format itself is defined in protobuf, and the five
 files carrying gRPC services are generated into `client`. `milvus-storage`
-supplies the native storage library; until upstream merges the change it
-depends on, `.gitmodules` fetches it from the fork `Thor-ChenBiao/milvus-storage`.
+supplies the native storage library from `milvus-io/milvus-storage`, pinned at
+the merged PR #703 commit `6c91ef5`. Its source tree is identical to the former
+fork pin `d287d05`, retaining eager Parquet pre-buffering and the IO pool API.
 `knowhere` tracks the PR #1829 branch (`LawrenceTL92/knowhere-contrib`, branch
 `codex/knowhere-jni-pr`) and supplies the C API, JNI and Java sources used by
 `native-vector` and the unified native build. `docs/design` is the private
