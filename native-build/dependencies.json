@@ -65,6 +65,7 @@
       ]
     },
     "excluded_requirements": {
+      "aws-c-s3": "Storage CRT transport is disabled in the unified build (storage.crt=false).",
       "benchmark": "Upstream benchmark targets are disabled.",
       "gtest": "Upstream unit/benchmark targets are disabled.",
       "catch2": "Upstream unit targets are disabled.",
