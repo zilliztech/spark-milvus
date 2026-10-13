@@ -82,6 +82,9 @@ object MilvusOption {
   val SearchSegmentsMaxBytes = "milvus.search.segments.max.bytes"
   val SearchCollectThreads = "milvus.search.collect.threads"
   val SearchQueryRanges = "milvus.search.query.ranges"
+  // Index segments a search task keeps searching at once within one query
+  // group (default 2): the next segment's call fills the tail of the current one
+  val SearchCallsInFlight = "milvus.search.calls.in.flight"
   // An index's search tuning, given with the base input of a NEAREST BY:
   // ef for the HNSW family, nprobe for the IVF family
   // (docs/design/architecture/dataframe-api.html section 5).

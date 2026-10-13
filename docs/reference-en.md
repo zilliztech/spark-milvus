@@ -74,7 +74,13 @@ size.
 `milvus.search.collect.threads` (default 0, the cores the task holds) is how many
 threads a search task checks, collects and packs a group's candidates on between
 two Knowhere calls; at large K that work is a third of the task, and on one
-thread it left the other cores idle. `milvus.search.query.ranges` (default 0,
+thread it left the other cores idle. `milvus.search.calls.in.flight` (default
+2, at most 8) is how many segments of a held set a task searches at once within
+one query group: the second call's queries fill the tail of the first and the
+collection of the first's answers, which took a 32-core executor from 89% to
+95-97% busy at K=10,000 and from 77% to 92-97% at K=100,000; the calls share
+Knowhere's threads, so each one takes longer and the gain is the idle time they
+fill, not twice the throughput. 1 is the sequential search. `milvus.search.query.ranges` (default 0,
 the planner's choice) cuts the first stage into that many query ranges per
 segment set, so that the tasks fill the slots in whole waves; each range task
 loads its segment set again, which pays off when the search itself takes far

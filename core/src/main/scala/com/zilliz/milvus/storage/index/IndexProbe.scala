@@ -4,6 +4,7 @@ import java.lang.{Float => JavaFloat}
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util.concurrent.{
   ExecutionException,
+  ExecutorService,
   Executors,
   Future,
   ThreadFactory
@@ -185,6 +186,12 @@ object IndexProbe {
     * (docs/design/architecture/dataframe-api.html section 2); without it such a
     * score fails the search.
     */
+  /** A group's search in progress on one pipeline: handed out by
+    * [[Pipeline.begin]], run by [[Pipeline.search]] on any thread, handed to
+    * the collector by [[Pipeline.complete]] on the thread that began it.
+    */
+  sealed trait Answer
+
   final class Pipeline(
       target: Target,
       excluded: BitSet,
@@ -193,7 +200,12 @@ object IndexProbe {
       allocator: BufferAllocator,
       val maxQueries: Int,
       val threads: Int = 1,
-      rankNonFinite: Boolean = false
+      rankNonFinite: Boolean = false,
+      // The thread the answers are checked and collected on. A task whose
+      // pipelines share one (SegmentSearch.Held) keeps its collects in order
+      // behind one another while its searches go on, so one merger is never
+      // written by two collects at once; a pipeline given none makes its own.
+      collector: Option[ExecutorService] = None
   ) extends AutoCloseable {
     require(k > 0, s"topK must be positive: $k")
     require(
@@ -229,14 +241,25 @@ object IndexProbe {
     }
     private val slots: Array[Slot] = Array(new Slot, new Slot)
     private var turn = 0
-    private val worker = Executors.newSingleThreadExecutor(new ThreadFactory {
-      def newThread(runnable: Runnable): Thread = {
-        val thread =
-          new Thread(runnable, s"index-probe-collect-${target.segmentId}")
-        thread.setDaemon(true)
-        thread
-      }
-    })
+    private val ownWorker = collector.isEmpty
+    private val worker = collector.getOrElse(
+      Executors.newSingleThreadExecutor(new ThreadFactory {
+        def newThread(runnable: Runnable): Thread = {
+          val thread =
+            new Thread(runnable, s"index-probe-collect-${target.segmentId}")
+          thread.setDaemon(true)
+          thread
+        }
+      })
+    )
+    private final class Begun(
+        val slot: Slot,
+        val queries: QueryMatrix,
+        val width: Option[Int]
+    ) extends Answer {
+      @volatile var nanos: Long = 0L
+    }
+    private object Nothing extends Answer
     // Scratch of one collecting shard: where one query's ids land, to find a
     // duplicate, cleared by unsetting only the bits that query set.
     // `java.util.BitSet.clear` rescans for its highest set word on every call,
@@ -295,6 +318,20 @@ object IndexProbe {
         merger: TopKMerger,
         onProgress: SegmentSearch.Progress => Unit
     ): Unit = {
+      val answer = begin(queries)
+      search(answer)
+      complete(answer, merger, onProgress)
+    }
+
+    /** Takes a buffer pair for `queries`, waiting for the collect that last
+      * used it. Called on the coordinating thread; the answer then goes to
+      * [[search]] on any thread and back to [[collect]] here. Splitting the
+      * three lets a task keep two segments' searches in flight: the tail of one
+      * call, when most of Knowhere's threads have run out of queries, is filled
+      * by the next call's queries already queued (2026-10-13, the search stage
+      * of L x 4 at k=100,000 ran 24 of 32 cores with one call at a time).
+      */
+    def begin(queries: QueryMatrix): Answer = {
       require(
         queries.dimension == target.dimension,
         s"Queries have ${queries.dimension} dimensions; the index has ${target.dimension}"
@@ -303,16 +340,36 @@ object IndexProbe {
         queries.queries <= maxQueries,
         s"A group of ${queries.queries} queries exceeds the ${maxQueries} this pipeline was sized for"
       )
-      if (count == 0) return
+      if (count == 0) return Nothing
       val slot = slots(turn)
       await(slot)
-      val width = searchWidth(target.family, count, parameters)
-      val nanos = search(queries, slot, width)
-      onProgress(SegmentSearch.Progress(1, nanos, 0L, 0))
-      slot.pending = Some(worker.submit[Unit] { () =>
-        collectAnswer(queries, slot, merger, width)
-      })
       turn ^= 1
+      new Begun(slot, queries, searchWidth(target.family, count, parameters))
+    }
+
+    /** The native search of a begun answer; any thread, one at a time per
+      * answer.
+      */
+    def search(answer: Answer): Unit = answer match {
+      case begun: Begun =>
+        begun.nanos = search(begun.queries, begun.slot, begun.width)
+      case _ => ()
+    }
+
+    /** Reports the search and hands the answer to the collector. Called on the
+      * thread that began it, after [[search]] returned.
+      */
+    def complete(
+        answer: Answer,
+        merger: TopKMerger,
+        onProgress: SegmentSearch.Progress => Unit
+    ): Unit = answer match {
+      case begun: Begun =>
+        onProgress(SegmentSearch.Progress(1, begun.nanos, 0L, 0))
+        begun.slot.pending = Some(worker.submit[Unit] { () =>
+          collectAnswer(begun.queries, begun.slot, merger, begun.width)
+        })
+      case _ => ()
     }
 
     /** Worker side: checks the answer, widens and searches again while any
@@ -384,7 +441,7 @@ object IndexProbe {
     }
 
     override def close(): Unit = {
-      worker.shutdownNow()
+      if (ownWorker) worker.shutdownNow()
       try slots.foreach(slot => Try(slot.pending.foreach(_.cancel(true))))
       finally {
         slots.foreach(_.close())

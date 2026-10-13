@@ -23,8 +23,10 @@ final case class SearchLimits(
     groupMaxBytes: Long,
     segmentsMaxBytes: Option[Long],
     collectThreads: Int = SearchLimits.DefaultCollectThreads,
-    queryRanges: Int = SearchLimits.DefaultQueryRanges
+    queryRanges: Int = SearchLimits.DefaultQueryRanges,
+    callsInFlight: Int = SearchLimits.DefaultCallsInFlight
 ) {
+  require(callsInFlight >= 1, "callsInFlight must be at least 1")
   require(queriesMaxBytes > 0, "queriesMaxBytes must be positive")
   require(collectThreads >= 0, "collectThreads must not be negative")
   require(queryRanges >= 0, "queryRanges must not be negative")
@@ -47,6 +49,14 @@ object SearchLimits {
     * (`milvus.search.query.ranges`).
     */
   val DefaultQueryRanges: Int = 0
+
+  /** Index segments one search task searches at once within a query group
+    * (`milvus.search.calls.in.flight`): with 2, the collect of one segment's
+    * answer and the tail of its call overlap the next segment's search
+    * (docs/design/enhance/2026-10-13-search-task-pipelining.html); 1 is the
+    * sequential search.
+    */
+  val DefaultCallsInFlight: Int = 2
 
   val Default: SearchLimits = SearchLimits(
     DefaultQueriesMaxBytes,
@@ -90,7 +100,17 @@ object SearchLimits {
           OptionParsing.nonNegativeLong(raw, MilvusOption.SearchQueryRanges)
         )
         .map(value => math.min(value, Int.MaxValue.toLong).toInt)
-        .getOrElse(DefaultQueryRanges)
+        .getOrElse(DefaultQueryRanges),
+      get(MilvusOption.SearchCallsInFlight)
+        .map(_ =>
+          OptionParsing.positiveLong(
+            get,
+            MilvusOption.SearchCallsInFlight,
+            DefaultCallsInFlight.toLong
+          )
+        )
+        .map(value => math.min(value, 8L).toInt)
+        .getOrElse(DefaultCallsInFlight)
     )
   }
 }
