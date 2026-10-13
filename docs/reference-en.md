@@ -1108,3 +1108,18 @@ Build with `-Dmilvus.native.bundle=/absolute/path/to/platform.jar` to include
 both JNI libraries and their unified dynamic dependencies in the connector JAR.
 The runtime extracts and verifies them once per class loader. An incompatible
 explicit `knowhere.native.path` is rejected. See [building and validation](contributing.md#unified-native-bundle).
+
+One JVM loads one copy of the connector. In local mode (`--master local[*]`)
+leave `spark.executor.userClassPathFirst` unset: the executor runs in the
+driver's JVM, and the setting loads a second copy of the connector beside the
+driver's, which fails when a task first needs the native libraries. On a
+cluster each executor is a JVM of its own, and the setting makes no second
+copy.
+
+Root's jar for Spark 4.0 (`spark-connector-assembly-*.jar`) carries its own
+Arrow. With `spark.driver.userClassPathFirst` or
+`spark.executor.userClassPathFirst` set, an Arrow vector that passes between the
+connector and Spark can fail with a `LinkageError`, so leave both unset with
+that jar. The Spark 4.2 jar (`spark-milvus-4.2-bundle-*.jar`) leaves Spark's
+Arrow and Jackson out and takes either setting, the executor's on a cluster
+only.

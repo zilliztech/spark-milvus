@@ -108,8 +108,6 @@ LOG4J2_CONFIG="$PROJECT_DIR/src/test/resources/log4j2.properties"
   --conf "spark.driver.extraLibraryPath=$NATIVE_LIB_DIR" \
   --conf "spark.executor.extraLibraryPath=$NATIVE_LIB_DIR" \
   --conf "spark.executorEnv.LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:$NATIVE_LIB_DIR" \
-  --conf "spark.driver.userClassPathFirst=true" \
-  --conf "spark.executor.userClassPathFirst=true" \
   "$SCRIPT_DIR/backfill_demo.py"
 
 exit_code=$?

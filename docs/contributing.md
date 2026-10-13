@@ -53,11 +53,13 @@ separately yet; external dependencies remain in the POM.
 
 Use root's `assembly` for the runnable fat jar on Spark 4.0 and
 `spark42/assembly` on Spark 4.2. The two share one set of merge and shading
-rules (`fatJarRules` in `build.sbt`), and the 4.2 jar leaves out the Jackson
-and Arrow modules Spark 4.2 ships, so the connector uses Spark's under
+rules (`fatJarRules` in `build.sbt`), and the 4.2 jar leaves out the Jackson and
+Arrow modules Spark 4.2 ships, so the connector uses Spark's under
 `spark.driver.userClassPathFirst` and `spark.executor.userClassPathFirst` too.
-The other per-line assembly tasks do not share the rules yet:
-`spark40/assembly` currently fails on module descriptors, Netty version
+Root's jar carries its own Arrow: under either setting an Arrow vector that
+passes between the connector and Spark can fail with a `LinkageError`, so leave
+both unset with it. The other per-line assembly tasks do not share the rules
+yet: `spark40/assembly` currently fails on module descriptors, Netty version
 metadata and FastDoubleParser notices. A successful source-classpath test does
 not validate those unfinished bundles.
 
@@ -378,7 +380,11 @@ of the storage libraries reaches the classpath. An explicit
 `knowhere.native.path` pointing elsewhere is rejected at runtime. The connector
 sets this property only during Knowhere initialization under a JVM-shared lock,
 then restores its prior value on success or failure. Multiple isolated copies of
-the Connector's JNI bindings in one JVM remain unsupported.
+the Connector in one JVM, its JNI bindings among them, remain unsupported. Local
+mode with `spark.executor.userClassPathFirst=true` makes a second one: the
+executor's class loader takes the jar again beside the driver's, the native
+loader finds two manifests and stops with an error that names them and the
+setting. Leave that setting unset in local mode.
 
 Storage uses the same explicit-path handoff. `NativeStorageLibrary` obtains the
 verified `libmilvus-storage-jni.so` path from `native-runtime`, temporarily sets

@@ -149,8 +149,16 @@ public final class NativeLibraries {
                 return Optional.empty();
             }
             URL manifest = manifests.nextElement();
+            // A second manifest is a second copy of the connector, identical or
+            // not, and one JVM takes one: two copies' classes meet in one task.
             if (manifests.hasMoreElements()) {
-                throw new IOException("Multiple Milvus native manifests for " + platform);
+                List<URL> found = new ArrayList<>();
+                found.add(manifest);
+                while (manifests.hasMoreElements()) found.add(manifests.nextElement());
+                throw new IOException("Multiple Milvus native manifests for " + platform + ": " + found
+                        + ". One JVM takes one copy of the connector. In local mode,"
+                        + " spark.executor.userClassPathFirst=true loads a second copy beside the driver's;"
+                        + " leave it unset. Otherwise keep one jar that carries the native bundle on the classpath.");
             }
             return Optional.of(extract(manifest, platform, temporaryRoot));
         }
