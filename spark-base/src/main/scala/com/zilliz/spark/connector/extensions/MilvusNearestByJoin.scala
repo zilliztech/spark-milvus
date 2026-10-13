@@ -49,6 +49,14 @@ import com.zilliz.spark.connector.read.{
   * wrote it, and `spark` Spark's own computation of the join for what the
   * connector leaves to it (section 2), which planning binds to the optimized
   * base.
+  *
+  * `prunedBase` is the base columns the plan above still reads, once
+  * [[PruneNearestByBase]] has seen it: the base vector stays in `right` for the
+  * ranking, but when nothing above the join selects it, it is not an output and
+  * the take stage does not read it. At k=100,000 over a 768-dimension table the
+  * take read 3 KB of vector for each of 10^10 hits, 31 TB against the 8 GB of
+  * primary keys the query asked for
+  * (docs/design/enhance/2026-10-13-search-take-stage.html).
   */
 final case class MilvusNearestByJoin(
     left: LogicalPlan,
@@ -60,12 +68,16 @@ final case class MilvusNearestByJoin(
     queryVector: Expression,
     baseVector: Expression,
     rankingExpression: Expression,
-    spark: SparkNearestBy
+    spark: SparkNearestBy,
+    prunedBase: Option[Seq[Attribute]] = None
 ) extends BinaryNode {
+
+  /** The base columns the join outputs: the base's, unless pruned. */
+  def baseOutput: Seq[Attribute] = prunedBase.getOrElse(right.output)
 
   override def output: Seq[Attribute] =
     left.output.map(_.withNullability(true)) ++
-      right.output.map(_.withNullability(true))
+      baseOutput.map(_.withNullability(true))
 
   override def simpleString(maxFields: Int): String =
     s"MilvusNearestByJoin ${if (approx) "APPROX" else "EXACT"} $metric k=$k " +
@@ -162,8 +174,8 @@ object MilvusNearestByJoinStrategy extends SparkStrategy {
           MilvusNearestByJoinExec(
             planLater(join.left),
             input.scan,
-            join.right.output,
-            join.right.output.map(input.columnOf),
+            join.baseOutput,
+            join.baseOutput.map(input.columnOf),
             join.joinType,
             join.approx,
             join.k,

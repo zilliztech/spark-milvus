@@ -4,15 +4,24 @@ import java.util.Arrays
 import scala.collection.mutable
 
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.catalyst.expressions.{
   GenericInternalRow,
   JoinedRow,
   UnsafeProjection
 }
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.functions.{col, hash, lit, pmod}
-import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.functions.{
+  coalesce,
+  col,
+  floor,
+  hash,
+  lit,
+  pmod,
+  try_element_at,
+  typedLit
+}
+import org.apache.spark.sql.types.{IntegerType, StructType}
 import org.apache.spark.TaskContext
 
 import com.zilliz.milvus.storage.read.exec.SegmentReaderRegistry
@@ -37,9 +46,10 @@ private[read] object SearchTake {
   private[read] val HitRowBytes: Long = 128L
 
   /** How the hits are spread over the take tasks: `partitions` tasks, a
-    * segment's hits cut into `buckets` slices by row offset so that a segment
-    * with more hits than one task should buffer spans several tasks. Every
-    * slice still reads its segment once and each row once.
+    * segment's hits cut into `buckets` slices of consecutive row offsets
+    * ([[rangeBucket]]) so that a segment with more hits than one task should
+    * buffer spans several tasks. The slices together read their segment once
+    * and each row once.
     */
   final case class Partitioning(partitions: Int, buckets: Int) {
     require(partitions > 0 && buckets > 0, s"A take stage needs tasks: $this")
@@ -68,6 +78,37 @@ private[read] object SearchTake {
     val buckets =
       math.max(1L, (partitions.toLong + segments - 1L) / segments).toInt
     Partitioning(partitions, buckets)
+  }
+
+  /** The bucket of a hit at `offset` in a segment of `rows` rows, cut into
+    * `buckets` slices of consecutive rows: slice i holds the rows from i × rows
+    * ÷ buckets on. A slice's hits sit in a run of the segment's row groups, so
+    * a task's take reads that run and the buckets together read the segment
+    * once. Hashing the offset instead spread every task over every row group of
+    * its segment: at k=100,000 each of 109 bucket tasks read the whole segment
+    * again, 31 TB in all against 8 GB of primary keys
+    * (docs/design/enhance/2026-10-13-search-take-stage.html section 5).
+    */
+  def rangeBucket(offset: Long, rows: Long, buckets: Int): Int = {
+    require(rows > 0 && buckets > 0, s"$rows rows, $buckets buckets")
+    math.min(buckets - 1, math.max(0L, offset * buckets / rows)).toInt
+  }
+
+  /** [[rangeBucket]] as a column of the hits, per segment by `rowsBySegment`; a
+    * hit of a segment whose row count the snapshot did not record falls back to
+    * the hash of its offset, which only costs that segment the repeated reads.
+    */
+  private[read] def bucketColumn(
+      buckets: Int,
+      rowsBySegment: Map[Long, Long]
+  ): Column = {
+    val hashed = pmod(hash(col("_row_offset")), lit(buckets))
+    if (rowsBySegment.isEmpty) hashed
+    else {
+      val rows = try_element_at(typedLit(rowsBySegment), col("_segment_id"))
+      val ranged = floor(col("_row_offset") * lit(buckets.toLong) / rows)
+      coalesce(ranged, hashed).cast(IntegerType)
+    }
   }
 
   /** The hits of one search, with their output columns.
@@ -105,14 +146,19 @@ private[read] object SearchTake {
     val known = hits.sparkSession.sparkContext.broadcast(partitions)
     val resultTypes = (hitSchema.fields ++ output.fields).map(_.dataType)
     // Hits of one segment land in one task unless the plan cut the segment
-    // into buckets, in which case a bucket of its row offsets does; the
+    // into buckets, in which case a slice of its row offsets does; the
     // bucket is a repartitioning expression, not a column the result carries.
     val keys =
       if (partitioning.buckets == 1) Seq(col("_segment_id"))
       else
         Seq(
           col("_segment_id"),
-          pmod(hash(col("_row_offset")), lit(partitioning.buckets))
+          bucketColumn(
+            partitioning.buckets,
+            partitions.flatMap { case (id, partition) =>
+              partition.task.expectedRows.filter(_ > 0L).map(id -> _)
+            }
+          )
         )
     hits
       .repartition(partitioning.partitions, keys: _*)

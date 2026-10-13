@@ -382,6 +382,49 @@ class NearestByJoinTest
       spark42.schema.fields.map(_.nullable).toSeq
   }
 
+  test("a base column nothing above the join selects is not taken") {
+    needsNative()
+    val query = queries(standardQueries: _*)
+    val base = docs()
+
+    val taken = nearest(query, base).select(col("qid"), col("id"))
+    val exec = node(taken) match {
+      case Some(exec: MilvusNearestByJoinExec) => exec
+      case other => fail(s"not taken over as a Milvus table: $other")
+    }
+
+    // the vector only ranks; the index answered that, so the take skips it
+    exec.baseColumns shouldBe Seq("id")
+    exec.output.map(_.name) shouldBe Seq("qid", "qv", "id")
+    pairs(taken) shouldBe pairs(bySpark(query, base))
+  }
+
+  test("a base column selected above the join stays in the output") {
+    needsNative()
+    val query = queries(standardQueries: _*)
+    val base = docs()
+
+    val taken =
+      nearest(query, base).select(col("qid"), col("id"), col("vector"))
+    val exec = node(taken) match {
+      case Some(exec: MilvusNearestByJoinExec) => exec
+      case other => fail(s"not taken over as a Milvus table: $other")
+    }
+
+    exec.baseColumns should contain allOf ("id", "vector")
+    exec.baseColumns should not contain "category"
+    val rows = taken
+      .collect()
+      .map(r => (r.getString(0), r.getLong(1), r.getSeq[Float](2).toList))
+      .sortBy(r => (r._1, r._2))
+    val expected = bySpark(query, base)
+      .select(col("qid"), col("id"), col("vector"))
+      .collect()
+      .map(r => (r.getString(0), r.getLong(1), r.getSeq[Float](2).toList))
+      .sortBy(r => (r._1, r._2))
+    rows shouldBe expected
+  }
+
   test("APPROX searches the indexes and, on this data, finds the exact rows") {
     needsNative()
     val query = queries(standardQueries: _*)
