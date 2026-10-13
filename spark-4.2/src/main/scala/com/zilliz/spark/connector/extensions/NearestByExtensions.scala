@@ -105,14 +105,20 @@ final class ReplaceNearestByJoin(session: SparkSession)
   *
   * `execute` puts the query rows it is given in place of the join's query side,
   * as a relation over the same column ids, and runs the join as Spark does:
-  * `RewriteNearestByJoin`'s cross join and top k, over the base as the analyzer
-  * left it. The table in that base is the one the connector searches, holding
-  * the same snapshot.
+  * `RewriteNearestByJoin`'s cross join and top k, over the base as the
+  * optimizer left it (`over`). The table in that base is the one the connector
+  * searches, holding the same snapshot.
   */
 final case class RewrittenNearestBy(
     join: NearestByJoin,
     function: SparkVectorFunction
 ) extends SparkNearestBy {
+
+  override def over(
+      base: LogicalPlan,
+      ranking: Expression
+  ): RewrittenNearestBy =
+    copy(join = join.copy(right = base, rankingExpression = ranking))
 
   override def execute(
       spark: SparkSession,

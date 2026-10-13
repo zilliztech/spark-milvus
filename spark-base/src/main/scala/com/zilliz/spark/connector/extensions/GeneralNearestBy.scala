@@ -167,12 +167,15 @@ private[connector] object GeneralNearestBy {
 
 /** Spark's own computation of one nearest-by join on the lines before 4.2: the
   * connector's vector function, and the general plan for the query rows the
-  * connector does not search.
+  * connector does not search, over the base as the optimizer left it (`over`).
   */
 private[connector] final case class GeneralNearestBy(
     request: NearestByJoinRequest,
     function: RankingFunction
 ) extends SparkNearestBy {
+
+  override def over(base: LogicalPlan, ranking: Expression): GeneralNearestBy =
+    copy(request = request.copy(right = base, rankingExpression = ranking))
 
   override def execute(
       spark: SparkSession,

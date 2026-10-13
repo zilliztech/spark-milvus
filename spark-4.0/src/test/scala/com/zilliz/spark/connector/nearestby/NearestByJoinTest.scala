@@ -581,6 +581,68 @@ class NearestByJoinTest
     }
   }
 
+  test(
+    "query rows joined by Spark meet the columns the optimizer gave new ids"
+  ) {
+    needsNative()
+    // A SQL view puts an alias over each column it selects, and an alias may
+    // name a column after itself; over a scan's column the optimizer removes it
+    // and gives the column above the id of the one below. A base with an
+    // exchange is planned again once its stage has run.
+    val query = rawQueries(
+      ("nan", boxed(Float.NaN, 0f)),
+      ("searched", boxed(4.1f, 0.6f))
+    )
+    docs().createOrReplaceTempView("renamed_docs_read")
+    spark.sql(
+      "CREATE OR REPLACE TEMPORARY VIEW renamed_docs AS SELECT * FROM renamed_docs_read"
+    )
+    val aliased = docs().select(docs().columns.map(c => col(c).as(c)): _*)
+    // k is above the base's 14 live rows, so every row with a value is in the
+    // answer, NaN's ties too, and Spark's choice among tied rows never decides
+    // a comparison.
+    Seq(
+      "a SQL view over the base" -> spark.table("renamed_docs"),
+      "an alias to the same name" -> aliased,
+      "a DataFrame base with an exchange" -> copyOf(docs()).repartition(2)
+    ).foreach { case (name, base) =>
+      withClue(s"$name: ") {
+        val taken = nearest(query, base, k = 20)
+        takenOver(taken) shouldBe true
+        val expected = bySpark(query, base, k = 20)
+        pairs(taken) shouldBe pairs(expected)
+        taken.count() shouldBe expected.count()
+      }
+    }
+
+    // The queries through a SQL view over a Milvus read, which the ranking
+    // names: the special collection's NaN, infinite and too large vectors are
+    // joined by Spark, its others searched.
+    specials().createOrReplaceTempView("renamed_queries_read")
+    spark.sql(
+      "CREATE OR REPLACE TEMPORARY VIEW renamed_queries AS SELECT * FROM renamed_queries_read"
+    )
+    val viewed = spark.table("renamed_queries")
+    val base = docs()
+    val ranking =
+      call_function("vector_l2_distance", viewed("vector"), base("vector"))
+    def joined(by: Column): DataFrame =
+      viewed.nearestByJoin(base, by, 20, "exact", "distance", "inner")
+    def ids(frame: DataFrame): Seq[(Long, Long)] =
+      frame
+        .select(viewed("id"), base("id"))
+        .collect()
+        .map(row => (row.getLong(0), row.getLong(1)))
+        .toSeq
+        .sorted
+    val taken = joined(ranking)
+    takenOver(taken) shouldBe true
+    val expected = joined(ranking + 0)
+    takenOver(expected) shouldBe false
+    ids(taken) shouldBe ids(expected)
+    taken.count() shouldBe expected.count()
+  }
+
   test("base rows Knowhere is not given are ranked by Spark's function") {
     needsNative()
     val query =

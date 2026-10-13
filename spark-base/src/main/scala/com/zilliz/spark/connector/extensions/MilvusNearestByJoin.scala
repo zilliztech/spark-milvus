@@ -22,6 +22,7 @@ import org.apache.spark.sql.execution.{
   SparkStrategy,
   UnaryExecNode
 }
+import org.apache.spark.sql.execution.adaptive.LogicalQueryStage
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2ScanRelation
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.SparkSession
@@ -45,7 +46,8 @@ import com.zilliz.spark.connector.read.{
   * such node; a filter above it stays above it. `queryVector` is a query column
   * or a constant, `baseVector` the base's vector column, `rankingExpression`
   * the ranking as the user wrote it, and `spark` Spark's own computation of the
-  * join for what the connector leaves to it (section 2).
+  * join for what the connector leaves to it (section 2), which planning binds
+  * to the optimized base.
   */
 final case class MilvusNearestByJoin(
     left: LogicalPlan,
@@ -135,11 +137,14 @@ private[extensions] object MilvusTableInput {
   * architecture/dataframe-api.html section 4): a Milvus table input when the
   * base is the Milvus scan with at most a projection of its columns above it
   * and the base vector is one of them, a DataFrame input otherwise, with the
-  * reason kept for explain.
+  * reason kept for explain. Either way Spark's own computation of the join runs
+  * over the same optimized base and ranking, whose columns are the node's.
   */
 object MilvusNearestByJoinStrategy extends SparkStrategy {
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
     case join: MilvusNearestByJoin =>
+      val spark =
+        join.spark.over(withoutStages(join.right), join.rankingExpression)
       val table = for {
         input <- MilvusTableInput.of(join.right)
         vector <- join.baseVector match {
@@ -161,7 +166,7 @@ object MilvusNearestByJoinStrategy extends SparkStrategy {
             join.metric,
             join.queryVector,
             vector,
-            join.spark
+            spark
           ) :: Nil
         case Left(reason) =>
           MilvusNearestByJoinFrameExec(
@@ -174,11 +179,22 @@ object MilvusNearestByJoinStrategy extends SparkStrategy {
             join.queryVector,
             join.baseVector,
             reason,
-            join.spark
+            spark
           ) :: Nil
       }
     case _ => Nil
   }
+
+  /** The base as Spark's own computation of the join takes it. Adaptive
+    * execution plans a query again each time a stage has run, and the base it
+    * passes then holds that stage as a `LogicalQueryStage`. The computation is
+    * a query of its own, whose adaptive plan would wait for the stage to run,
+    * forever; it gets the plan the stage was made from.
+    */
+  private def withoutStages(plan: LogicalPlan): LogicalPlan =
+    plan.transformUp { case stage: LogicalQueryStage =>
+      withoutStages(stage.logicalPlan)
+    }
 }
 
 /** Runs a [[MilvusNearestByJoin]] over a Milvus table input: the query rows are
