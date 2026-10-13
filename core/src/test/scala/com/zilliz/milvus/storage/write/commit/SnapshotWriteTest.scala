@@ -11,6 +11,7 @@ import org.scalatest.Inside
 import com.zilliz.milvus.storage.io.LocalObjectStore
 import com.zilliz.milvus.storage.manifest.SnapshotSegmentFixture
 import com.zilliz.milvus.storage.snapshot.{
+  CollectionIndex,
   SegmentIndexes,
   SnapshotCatalog,
   SnapshotOrigin,
@@ -218,6 +219,85 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
       // A segment the job did not index keeps no index records of its own.
       back.segments.find(_.id == 31L).get.indexes shouldBe
         SegmentIndexes.Unindexed
+    }
+  }
+
+  /** The source as Milvus writes one for a collection with an index on the
+    * vector field: an HNSW over L2, created through AUTOINDEX.
+    */
+  private def declared(directory: Path): Unit = {
+    val document = new String(
+      Files.readAllBytes(directory.resolve(sourceKey)),
+      UTF_8
+    ).replace(
+      """"format_version": 4,""",
+      """"indexes": [{
+          "collectionID": "10", "fieldID": "101", "indexID": "900",
+          "index_name": "v_index",
+          "type_params": [{"key": "dim", "value": "4"}],
+          "index_params": [
+            {"key": "index_type", "value": "HNSW"},
+            {"key": "metric_type", "value": "L2"},
+            {"key": "M", "value": "16"}
+          ],
+          "user_index_params": [
+            {"key": "index_type", "value": "AUTOINDEX"},
+            {"key": "metric_type", "value": "L2"}
+          ]
+        }],
+        "format_version": 4,"""
+    )
+    write(directory, sourceKey, document.getBytes(UTF_8))
+  }
+
+  test("a field indexed again declares the build's index under its own id") {
+    withStore { (directory, store) =>
+      declared(directory)
+      val snapshot = catalog(directory).read(sourceKey)
+      val rebuilt = Seq(30L, 31L).map(id =>
+        index(id, 8L).copy(
+          indexType = "IVF_FLAT",
+          metricType = "IP",
+          params = Map("nlist" -> "8")
+        )
+      )
+      val written = SnapshotWriter.write(
+        snapshot,
+        rebuilt,
+        target,
+        store,
+        sourceKey,
+        restorable = false
+      )
+
+      val built = Map(
+        "index_type" -> "IVF_FLAT",
+        "metric_type" -> "IP",
+        "nlist" -> "8"
+      )
+      val back = catalog(directory).read(written.metadataKey)
+      // The collection's ids, name and type parameters survive; the index
+      // parameters are the build's, as the segments' records say.
+      back.indexes shouldBe Some(
+        Seq(
+          CollectionIndex(
+            collectionId = 10L,
+            fieldId = 101L,
+            indexId = 900L,
+            name = "v_index",
+            typeParameters = Map("dim" -> "4"),
+            indexParameters = built,
+            userIndexParameters = built
+          )
+        )
+      )
+      back.segments.foreach { segment =>
+        inside(segment.indexes) { case SegmentIndexes.Available(entries) =>
+          entries.map(entry =>
+            (entry.indexId, entry.name, entry.parameters)
+          ) shouldBe Vector((900L, "v_index", built))
+        }
+      }
     }
   }
 

@@ -340,9 +340,13 @@ object SnapshotWriter extends Logging {
     values.result().filter(_.nonEmpty)
   }
 
-  /** One index definition per indexed field: the collection's own when the
-    * snapshot carries it, so that ids and names survive, and otherwise a
-    * definition made from what the build reported.
+  /** One index definition per indexed field, declaring the index the build
+    * made: its type, metric and parameters, the ones every segment record of
+    * the field carries. Where the snapshot holds the collection's own
+    * definition of the field, its ids, name and type parameters survive and
+    * only its index parameters are replaced, since left as they were they would
+    * declare the index the build replaced. Otherwise the definition is made
+    * from what the build reported.
     */
   private def definitionsOf(
       snapshot: Snapshot,
@@ -351,10 +355,11 @@ object SnapshotWriter extends Logging {
   ): Map[Long, CollectionIndex] = indexes
     .groupBy(_.fieldId)
     .map { case (fieldId, records) =>
+      val built = engineParameters(records.head)
       val existing = snapshot.indexes.flatMap(_.find(_.fieldId == fieldId))
-      fieldId -> existing.getOrElse(
+      fieldId -> existing.fold(
         synthesized(snapshot.schema, records.head, collectionId)
-      )
+      )(_.copy(indexParameters = built, userIndexParameters = built))
     }
 
   private def synthesized(

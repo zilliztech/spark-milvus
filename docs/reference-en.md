@@ -906,7 +906,9 @@ The result is one row: `snapshot` (the key of the snapshot JSON),
 `snapshot_id`, `snapshot_name`, `segments`, `indexes` and `bytes`. The snapshot is the source snapshot with the job's indexes in it: the
 document and each segment manifest are the source's own bytes, with the index
 registrations replaced, so nothing about the segments or the collection is
-restated.
+restated. Each field the job indexed is declared with the index the build made,
+its type, metric and parameters; where the source declared an index on that
+field already, the declaration keeps that index's id and name.
 
 Two readers are verified. This connector reads it back with
 `milvus.snapshot.path`. Milvus v3.0.2 restores it with
