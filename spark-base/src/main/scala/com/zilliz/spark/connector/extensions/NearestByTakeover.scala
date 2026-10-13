@@ -1,31 +1,15 @@
 package com.zilliz.spark.connector.extensions
 
-import org.apache.spark.sql.catalyst.expressions.{
-  Alias,
-  Attribute,
-  AttributeReference,
-  ExprId,
-  Expression,
-  PredicateHelper
-}
-import org.apache.spark.sql.catalyst.plans.logical.{
-  Filter,
-  LogicalPlan,
-  Project,
-  SubqueryAlias,
-  View
-}
+import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.plans.JoinType
-import org.apache.spark.sql.catalyst.util.V2ExpressionBuilder
-import org.apache.spark.sql.connector.expressions.filter.Predicate
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.SparkConf
 
 import com.zilliz.milvus.storage.schema.MetricType
-import com.zilliz.spark.connector.expr.SparkPredicateTranslator
 import com.zilliz.spark.connector.table.MilvusTable
-import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** Whether the connector executes a nearest-by join, and the node that does
   * (docs/design/architecture/dataframe-api.html section 3). Spark 4.2's rule
@@ -45,10 +29,9 @@ import io.milvus.grpc.schema.{DataType => MilvusDataType}
   * resolved, cross joins are enabled, neither side is a stream, and
   * `MilvusSparkPlugin` is in `spark.plugins`, so every executor has the native
   * library. Which input the join becomes is the planner's, from the optimized
-  * base; `milvusBase` says why a base is not certain to become a Milvus table
-  * input.
+  * base.
   */
-private[connector] object NearestByTakeover extends PredicateHelper {
+private[connector] object NearestByTakeover {
 
   /** A ranking the connector computes: the metric of the vector function, its
     * name, and its two arguments in the order they are written.
@@ -87,8 +70,10 @@ private[connector] object NearestByTakeover extends PredicateHelper {
       Left(s"${SQLConf.CROSS_JOINS_ENABLED.key} is false")
     else if (left.isStreaming || right.isStreaming)
       Left("a side of the join is a stream")
-    else if (!pluginLoaded(session))
-      Left(s"spark.plugins does not name $PluginClass")
+    else if (!pluginLoaded(session.sparkContext.getConf))
+      Left(
+        s"neither spark.plugins nor spark.plugins.defaultList names $PluginClass"
+      )
     else
       for {
         known <- ranking.toRight(
@@ -96,7 +81,7 @@ private[connector] object NearestByTakeover extends PredicateHelper {
         )
         _ <- ranks(known, direction)
         arguments <- sides(known.first, known.second, left, right)
-        _ <- reads(right, arguments._2, approx, approxEverywhere)
+        _ <- reads(right, approx, approxEverywhere)
       } yield MilvusNearestByJoin(
         left,
         right,
@@ -110,10 +95,12 @@ private[connector] object NearestByTakeover extends PredicateHelper {
         spark(known, arguments._3)
       )
 
-  private def pluginLoaded(session: SparkSession): Boolean =
-    session.sparkContext.getConf
-      .get("spark.plugins", "")
-      .split(',')
+  /** Spark loads the plugins `spark.plugins.defaultList` names as well as those
+    * `spark.plugins` names, so a cluster's default list counts too.
+    */
+  private[extensions] def pluginLoaded(conf: SparkConf): Boolean =
+    Seq("spark.plugins.defaultList", "spark.plugins")
+      .flatMap(key => conf.get(key, "").split(','))
       .map(_.trim)
       .contains(PluginClass)
 
@@ -158,33 +145,20 @@ private[connector] object NearestByTakeover extends PredicateHelper {
   }
 
   /** Whether the connector reads this base in this mode (the boundary table of
-    * section 3). A base that is certain to become a Milvus table input is read
-    * in both; so is any other base with a Milvus table in it, as a DataFrame
-    * input; a base without one is read for EXACT, and for APPROX only where
-    * nothing else could execute the join.
+    * section 3): a base with a Milvus table in it in both, whichever input the
+    * planner makes of it; a base without one for EXACT, and for APPROX only
+    * where nothing else could execute the join.
     */
   private def reads(
       base: LogicalPlan,
-      vector: Expression,
       approx: Boolean,
       approxEverywhere: Boolean
-  ): Either[String, Unit] = {
-    val table = vector match {
-      case attribute: AttributeReference => milvusBase(base, attribute)
-      case other =>
-        Left(s"the base vector ${other.sql} is computed, not a field")
-    }
-    table match {
-      case Right(()) => Right(())
-      case Left(_)
-          if containsMilvusTable(base) || !approx || approxEverywhere =>
-        Right(())
-      case Left(reason) =>
-        Left(
-          s"APPROX over a base without a Milvus table is left to Spark or to the base's data source ($reason)"
-        )
-    }
-  }
+  ): Either[String, Unit] =
+    if (!approx || approxEverywhere || containsMilvusTable(base)) Right(())
+    else
+      Left(
+        "APPROX over a base without a Milvus table is left to Spark or to the base's data source"
+      )
 
   /** A view's plan is its child, so the walk looks inside views too. */
   private def containsMilvusTable(plan: LogicalPlan): Boolean =
@@ -193,103 +167,4 @@ private[connector] object NearestByTakeover extends PredicateHelper {
         relation.table.isInstanceOf[MilvusTable]
       case _ => false
     }.nonEmpty
-
-  /** The base is the Milvus table, seen through aliases, views, column
-    * projections and filters the scan takes whole, and `vector` is one of its
-    * float vector fields.
-    */
-  private def milvusBase(
-      base: LogicalPlan,
-      vector: Attribute
-  ): Either[String, Unit] = {
-    def walk(
-        plan: LogicalPlan,
-        column: ExprId,
-        filters: Seq[Expression]
-    ): Either[String, Unit] = plan match {
-      case SubqueryAlias(_, child) => walk(child, column, filters)
-      case view: View              => walk(view.child, column, filters)
-      case Project(list, child) =>
-        val source = list.collectFirst {
-          case a: AttributeReference if a.exprId == column => a.exprId
-          case alias @ Alias(a: AttributeReference, _)
-              if alias.exprId == column =>
-            a.exprId
-        }
-        if (
-          list.exists(e => !e.isInstanceOf[AttributeReference] && !isRename(e))
-        )
-          Left("a projection in the base computes a column")
-        else
-          source match {
-            case Some(id) => walk(child, id, filters)
-            case None =>
-              Left("the base vector column is not projected from the table")
-          }
-      case Filter(condition, child) =>
-        walk(child, column, filters ++ splitConjunctivePredicates(condition))
-      case relation: DataSourceV2Relation =>
-        relation.table match {
-          case table: MilvusTable =>
-            milvusTable(
-              table,
-              relation,
-              relation.output.find(_.exprId == column),
-              filters
-            )
-          case other =>
-            Left(s"the base reads ${other.name()}, not a Milvus table")
-        }
-      case other =>
-        Left(
-          s"the base holds ${other.nodeName}, which the Milvus scan cannot take"
-        )
-    }
-    walk(base, vector.exprId, Seq.empty)
-  }
-
-  private def isRename(e: Expression): Boolean = e match {
-    case Alias(_: AttributeReference, _) => true
-    case _                               => false
-  }
-
-  /** The vector column is a float vector field of the table, and every filter
-    * reads only the table's columns and translates whole into a predicate the
-    * Milvus scan evaluates, the translation the scan itself applies.
-    */
-  private def milvusTable(
-      table: MilvusTable,
-      relation: DataSourceV2Relation,
-      column: Option[Attribute],
-      filters: Seq[Expression]
-  ): Either[String, Unit] = {
-    val schema = table.schema()
-    column.flatMap(c =>
-      table.snapshot.schema.fields.find(_.name == c.name)
-    ) match {
-      case None =>
-        Left("the base vector column is not a field of the Milvus table")
-      case Some(field)
-          if field.dataType != MilvusDataType.FloatVector &&
-            field.dataType != MilvusDataType.Float16Vector &&
-            field.dataType != MilvusDataType.BFloat16Vector =>
-        Left(
-          s"the base vector field '${field.name}' is ${field.dataType}, not a float vector"
-        )
-      case Some(_) =>
-        filters
-          .find(filter =>
-            !filter.references.subsetOf(relation.outputSet) ||
-              new V2ExpressionBuilder(filter, isPredicate = true)
-                .build()
-                .collect { case predicate: Predicate => predicate }
-                .flatMap(SparkPredicateTranslator.translate(_, schema))
-                .isEmpty
-          )
-          .map(filter =>
-            s"the filter ${filter.sql} is not one the Milvus scan takes whole"
-          )
-          .toLeft(())
-    }
-  }
 }
