@@ -334,9 +334,12 @@ def connectClient(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
     val client = Classpaths
       .managedJars(ConnectClient, classpathTypes.value, update.value)
       .files
-    val classes = Seq((Compile / classDirectory).value, (Test / classDirectory).value)
+    val classes =
+      Seq((Compile / classDirectory).value, (Test / classDirectory).value)
     "-Dmilvus.test.connect.client.classpath=" +
-      (client ++ classes).map(_.getAbsolutePath).mkString(java.io.File.pathSeparator)
+      (client ++ classes)
+        .map(_.getAbsolutePath)
+        .mkString(java.io.File.pathSeparator)
   }
 )
 
@@ -361,9 +364,10 @@ lazy val uatScenarios: Seq[Setting[_]] = Seq(
 // into every other line, so each runs on all four: NEAREST BY (Spark's own on
 // 4.2, the connector's nearestByJoin before it) and the DataFrame methods.
 lazy val localCollectionSuites: Seq[Setting[_]] = Seq(
-  Test / unmanagedSourceDirectories ++= Seq("testkit", "nearestby", "implicits").map(dir =>
-    (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / dir
-  )
+  Test / unmanagedSourceDirectories ++= Seq("testkit", "nearestby", "implicits")
+    .map(dir =>
+      (ThisBuild / baseDirectory).value / "spark-4.0" / "src" / "test" / "scala" / "com" / "zilliz" / "spark" / "connector" / dir
+    )
 )
 
 // Layer 4: apps currently run on 4.0, so their sources need no shared directory.
