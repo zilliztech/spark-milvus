@@ -222,7 +222,6 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
     deleted,
     arrowColumnFor,
     rawVectors = rawVectors,
-    partitionName = "20",
     segmentId = 30L,
     requestedExtraColumns = requestedExtraColumns,
     pushedExpression = pushedExpression,
@@ -646,7 +645,6 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         (_, _) => false,
         identity,
         rawVectors = false,
-        partitionName = "20",
         segmentId = 30L,
         taskAllocatorOwner = Some(owner)
       )

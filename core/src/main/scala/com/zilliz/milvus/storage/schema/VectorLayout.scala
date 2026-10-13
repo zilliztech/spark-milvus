@@ -42,8 +42,8 @@ final case class VectorLayout(
   }
 
   def rowBytes: Int = elementType match {
-    case Bit   => dimension / 8
-    case other => Math.multiplyExact(dimension, elementBytes)
+    case Bit => dimension / 8
+    case _   => Math.multiplyExact(dimension, elementBytes)
   }
 
   /** The element type as the vector library names it, for the buffers handed to

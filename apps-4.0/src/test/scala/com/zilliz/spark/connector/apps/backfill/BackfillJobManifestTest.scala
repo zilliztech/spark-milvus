@@ -58,9 +58,9 @@ class BackfillJobManifestTest
   }
 
   test("each run gets its own job id unless the caller names one") {
-    MilvusBackfill.jobIdFor(spark, config) should not be
-      MilvusBackfill.jobIdFor(spark, config)
-    MilvusBackfill.jobIdFor(spark, config.copy(jobId = Some("j"))) shouldBe "j"
+    MilvusBackfill.jobIdFor(config) should not be
+      MilvusBackfill.jobIdFor(config)
+    MilvusBackfill.jobIdFor(config.copy(jobId = Some("j"))) shouldBe "j"
   }
 
   test(

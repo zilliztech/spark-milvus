@@ -1043,7 +1043,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       s3SecretKey = "",
       s3UseIam = true
     )
-    val opts = cfg.getS3WriteOptionsForBasePath("base/path", 1L)
+    val opts = cfg.getS3WriteOptionsForBasePath("base/path")
     opts.get("fs.access_key_id") shouldBe None
     opts.get("fs.access_key_value") shouldBe None
     opts("fs.use_iam") shouldBe "true"
@@ -1064,7 +1064,7 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
     Seq(
       cfg.getMilvusReadOptions,
-      cfg.getS3WriteOptionsForBasePath("base/path", 1L)
+      cfg.getS3WriteOptionsForBasePath("base/path")
     ).foreach { opts =>
       opts("fs.role_arn") shouldBe
         "acs:ram::123456789012:role/data-role"

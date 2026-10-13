@@ -2,7 +2,6 @@ package com.zilliz.spark.connector.read
 
 import org.apache.spark.sql.connector.read.InputPartition
 
-import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.spark.connector.options.MilvusOption
 
@@ -24,7 +23,6 @@ sealed trait MilvusInputPartition extends InputPartition {
 // [[MilvusV2InputPartition]].
 case class MilvusV3InputPartition(
     task: SegmentReadTask, // What to read: layout, schema, fs.* map, deletes
-    partitionName: String, // Snapshot reads store the partition ID string here.
     milvusOption: MilvusOption
 ) extends MilvusInputPartition
 

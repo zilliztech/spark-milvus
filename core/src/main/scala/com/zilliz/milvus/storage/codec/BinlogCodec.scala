@@ -4,7 +4,6 @@ import java.io.{ByteArrayInputStream, ByteArrayOutputStream, EOFException}
 import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.charset.StandardCharsets
 import java.util.{Arrays, Collections}
-import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 

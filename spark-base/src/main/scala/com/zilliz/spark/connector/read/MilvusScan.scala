@@ -314,7 +314,6 @@ class MilvusScan(
         case SegmentLayout.Manifest(_, _) =>
           MilvusV3InputPartition(
             task,
-            task.partitionId.toString,
             canonicalMilvusOption
           ): InputPartition
         case SegmentLayout.ColumnGroups(_) =>

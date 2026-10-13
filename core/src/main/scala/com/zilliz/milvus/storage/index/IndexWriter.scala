@@ -112,7 +112,7 @@ object IndexWriter extends Logging {
     )
     val bytes = Math.multiplyExact(segmentRows, layout.rowBytes.toLong)
     val target = allocator.buffer(bytes)
-    var present = new java.util.BitSet(segmentRows.toInt)
+    val present = new java.util.BitSet(segmentRows.toInt)
     var rows = 0L
     var seen = 0L
     try {

@@ -10,6 +10,7 @@ import org.apache.spark.sql.types.{
 import org.scalatest.funsuite.AnyFunSuite
 
 import com.zilliz.milvus.storage.delete.DeletePlan
+import com.zilliz.milvus.storage.read.exec.DeletePlans
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
@@ -257,35 +258,32 @@ class V2ColumnBindingTest extends AnyFunSuite {
 
       val deletePlan = DeletePlan.fromLongPks(Map(1L -> 150L))
       assert(
-        !ColumnBinding.rowDeleted(
+        !DeletePlans.rowDeleted(
           deletePlan,
           pkField,
           pkVector,
           tsVector,
-          rowIndex = 0,
-          pkColumnName = "pk"
+          row = 0
         )
       )
 
       val laterDeletePlan = DeletePlan.fromLongPks(Map(1L -> 250L))
       assert(
-        !ColumnBinding.rowDeleted(
+        !DeletePlans.rowDeleted(
           DeletePlan.fromLongPks(Map(1L -> 200L)),
           pkField,
           pkVector,
           tsVector,
-          rowIndex = 0,
-          pkColumnName = "pk"
+          row = 0
         )
       )
       assert(
-        ColumnBinding.rowDeleted(
+        DeletePlans.rowDeleted(
           laterDeletePlan,
           pkField,
           pkVector,
           tsVector,
-          rowIndex = 0,
-          pkColumnName = "pk"
+          row = 0
         )
       )
     } finally {

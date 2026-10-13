@@ -130,7 +130,6 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
         schemaBytes = Array.emptyByteArray,
         properties = Map("fs.storage_type" -> "local")
       ),
-      "0",
       options
     )
     val stats = MilvusScan.statisticsFor(Array(v2(10L), v3), schema)

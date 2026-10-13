@@ -145,7 +145,7 @@ class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
       allocator: RootAllocator,
       pushedExpression: Option[PredicateExpr] = None
   ): Vector[Long] = {
-    val partition = MilvusV3InputPartition(task, "1", MilvusOption(""))
+    val partition = MilvusV3InputPartition(task, MilvusOption(""))
     val binding = V3ColumnBinding(partition, sparkSchema)
     val fake = new FakeSegmentReader(root)
     val reader = new MilvusRowPartitionReader(

@@ -308,14 +308,6 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
       )
   }
 
-  private def asRecord(v: Any): GenericRecord = v match {
-    case r: GenericRecord => r
-    case other =>
-      throw new IllegalStateException(
-        s"expected GenericRecord, got ${other.getClass.getName}: $other"
-      )
-  }
-
   private def projectEntry(rec: GenericRecord): SnapshotSegmentEntry = {
     SnapshotSegmentEntry(
       segmentId = asLong(rec.get("segment_id")),

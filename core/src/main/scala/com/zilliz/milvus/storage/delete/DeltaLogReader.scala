@@ -1,28 +1,17 @@
 package com.zilliz.milvus.storage.delete
 
-import java.io.{ByteArrayInputStream, ByteArrayOutputStream, EOFException}
 import java.nio.charset.StandardCharsets
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import scala.collection.mutable
-import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
-import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
-import org.apache.parquet.column.impl.ColumnReaderImpl
-import org.apache.parquet.format.{FileMetaData => ThriftFileMetaData, Util}
-import org.apache.parquet.hadoop.ParquetFileReader
-import org.apache.parquet.io.{InputFile, SeekableInputStream}
-import org.apache.parquet.io.api.PrimitiveConverter
-import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
-import org.apache.parquet.VersionParser
+import com.fasterxml.jackson.databind.ObjectMapper
 
 import com.zilliz.milvus.storage.codec.BinlogCodec
 import com.zilliz.milvus.storage.codec.BinlogCodec.{forEachRow, ParquetRow}
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
-import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, Segment}
-import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
+import com.zilliz.milvus.storage.snapshot.DeltaLogFile
+import io.milvus.grpc.schema.{DataType, FieldSchema}
 
 object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
   private val DeleteEventType: Byte = 2
@@ -273,16 +262,6 @@ object DeltaLogReader extends com.zilliz.milvus.storage.Logging {
           s"StorageV2 delete logs only support Int64/VarChar PKs, got $other"
         )
     }
-  }
-
-  private def asLong(value: Any, context: String): Long = value match {
-    case n: java.lang.Long    => n.longValue()
-    case n: java.lang.Integer => n.longValue()
-    case n: java.lang.Short   => n.longValue()
-    case n: java.lang.Byte    => n.longValue()
-    case n: java.lang.Number  => n.longValue()
-    case other =>
-      throw new IllegalStateException(s"expected numeric $context, got $other")
   }
 
   private def sequence[A](

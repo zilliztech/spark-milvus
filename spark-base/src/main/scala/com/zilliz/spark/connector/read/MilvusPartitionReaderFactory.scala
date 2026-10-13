@@ -122,7 +122,6 @@ class MilvusPartitionReaderFactory(
           deleted = setup.isDeleted,
           arrowColumnFor = setup.arrowColumnFor,
           rawVectors = MilvusOption.readVectorRaw(optionsMap),
-          partitionName = partitionNameOf(p),
           segmentId = p.task.segmentId,
           requestedExtraColumns = requestedExtraColumns,
           pushedExpression = pushedExpression,
@@ -146,11 +145,6 @@ class MilvusPartitionReaderFactory(
       throw new IllegalArgumentException(
         s"cannot read ${other.getClass.getName} a batch at a time"
       )
-  }
-
-  private def partitionNameOf(p: MilvusInputPartition): String = p match {
-    case v3: MilvusV3InputPartition => v3.partitionName
-    case other                      => other.task.partitionId.toString
   }
 
   private def rowReaderFor(
@@ -180,7 +174,6 @@ class MilvusPartitionReaderFactory(
           rowReader,
           schema,
           requestedExtraColumns,
-          partitionNameOf(p),
           p.task.segmentId
         )
       } catch {
