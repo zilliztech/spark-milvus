@@ -10,6 +10,22 @@ import org.scalatest.matchers.should.Matchers
 class SearchTakeTest extends AnyFunSuite with Matchers {
   private val MiB = 1L << 20
 
+  test(
+    "a range bucket is a run of consecutive rows, never past the last bucket"
+  ) {
+    SearchTake.rangeBucket(0L, 1000L, 4) shouldBe 0
+    SearchTake.rangeBucket(249L, 1000L, 4) shouldBe 0
+    SearchTake.rangeBucket(250L, 1000L, 4) shouldBe 1
+    SearchTake.rangeBucket(999L, 1000L, 4) shouldBe 3
+    // an offset at or past the recorded row count stays in the last bucket
+    SearchTake.rangeBucket(1000L, 1000L, 4) shouldBe 3
+    SearchTake.rangeBucket(5L, 1000L, 1) shouldBe 0
+    // 10^8 rows in 109 buckets, as the L x 4 k=100,000 plan cut them
+    SearchTake.rangeBucket(99999999L, 100000000L, 109) shouldBe 108
+    an[IllegalArgumentException] should be thrownBy
+      SearchTake.rangeBucket(1L, 0L, 4)
+  }
+
   test("a small search keeps the session's shuffle partitions and one bucket") {
     // 100k queries at k=100: 10 million hits, 292 MiB of heap a task holds
     // 1.19 million rows at half the budget, so 9 tasks would do; 16 stay.
