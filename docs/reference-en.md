@@ -893,10 +893,13 @@ index records come from the same manifest under `input`. The options only
 reach the bucket and check the collection: a `milvus.snapshot.path` they give
 has to name the recorded document; without one, the collection id Milvus
 reports for the name through `milvus.uri` has to match the recorded one. A
-manifest that records no source snapshot (written by an earlier version) or a
-source document that has since been deleted fails the call; run `build_index`
-again. It writes one Avro segment manifest and the snapshot JSON under
-`output/snapshots/<collection>/`, where `output` defaults to `input`;
+segment or partition selection among them (`milvus.segments`,
+`milvus.partitions`) does not narrow the snapshot either: the call writes the
+recorded one whole. A manifest that records no source snapshot (written by an
+earlier version) or a source document that has since been deleted fails the
+call; run `build_index` again. It writes one Avro segment manifest and the
+snapshot JSON under `output/snapshots/<collection>/`, where `output` defaults
+to `input`;
 `snapshot_id` defaults to the current millisecond and `snapshot_name` to
 `<collection>-<snapshot_id>`. `restorable` defaults to true: then any data,
 delete, statistics or index file the snapshot names outside `output` fails the

@@ -261,15 +261,23 @@ object WriteSnapshotProcedure extends Procedure {
       }
     }
 
-  /** The recorded document, read the way a `milvus.snapshot.path` read reads
-    * one, from the bucket the job recorded.
+  /** The recorded document, whole, read the way a `milvus.snapshot.path` read
+    * reads one, from the bucket the job recorded. The table the call names
+    * reaches the storage and nothing more: a segment or partition selection on
+    * its read would narrow the snapshot the job was built over, and the write
+    * would refuse the job's records of the segments it left out.
     */
   private def recorded(
       options: Map[String, String],
       source: SourceSnapshot
   ): Snapshot = {
+    val dropped = Seq(
+      MilvusOption.SnapshotPath,
+      MilvusOption.MilvusSegments,
+      MilvusOption.MilvusPartitions
+    )
     val withPath = options.filterNot { case (key, _) =>
-      key.equalsIgnoreCase(MilvusOption.SnapshotPath)
+      dropped.exists(key.equalsIgnoreCase)
     } + (MilvusOption.SnapshotPath -> source.key)
     val readOptions =
       if (source.bucket.isEmpty) withPath

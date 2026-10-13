@@ -305,6 +305,20 @@ class MilvusDataFrameTest
       Set(3107L, 3106L, 3105L)
   }
 
+  test(
+    "writeSnapshot writes the recorded snapshot whole from any frame of it"
+  ) {
+    needsNative()
+    // The build covers both segments; the write is called on a frame that
+    // reads one of them, which only reaches the storage.
+    val job = jobOf(docs().buildIndex("vector", "built/whole", metric = "IP"))
+    val written = docs(Map(MilvusOption.MilvusSegments -> "30"))
+      .writeSnapshot(job, "built/whole", snapshotId = 5002L, restorable = false)
+      .head()
+    (written.getAs[Int]("segments"), written.getAs[Int]("indexes")) shouldBe
+      ((2, 2))
+  }
+
   test("quotes and backslashes in an argument reach the procedure as written") {
     needsNative()
     val coll = docs()
