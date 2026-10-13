@@ -75,6 +75,8 @@ class NearestByJoinTest
   private var specialOptions: Map[String, String] = Map.empty
   private var farDirectory: Path = _
   private var farOptions: Map[String, String] = Map.empty
+  private var arrayDirectory: Path = _
+  private var arrayOptions: Map[String, String] = Map.empty
   private var spark: SparkSession = _
 
   private val segments = Seq(
@@ -145,6 +147,25 @@ class NearestByJoinTest
     )
   )
 
+  /** Six rows whose Array of Float `floats` lies along the second axis: a
+    * scalar field, which Spark reads as ARRAY<FLOAT> as it reads a vector, with
+    * neither a dimension nor an index.
+    */
+  private val arrays = Seq(
+    Segment(
+      60L,
+      (0 until 6).map(row =>
+        Entity(
+          6000L + row,
+          Array(row.toFloat, 0f),
+          Some(1L),
+          floats = Some(Array(0f, row.toFloat))
+        )
+      ),
+      indexMetric = None
+    )
+  )
+
   override def beforeAll(): Unit = {
     try {
       NativeStorageLibrary.load()
@@ -161,6 +182,8 @@ class NearestByJoinTest
       specialOptions = LocalMilvusCollection.write(specialDirectory, 2, special)
       farDirectory = Files.createTempDirectory("nearest-by-far-")
       farOptions = LocalMilvusCollection.write(farDirectory, 16, far)
+      arrayDirectory = Files.createTempDirectory("nearest-by-array-")
+      arrayOptions = LocalMilvusCollection.write(arrayDirectory, 2, arrays)
       spark = SparkSession
         .builder()
         .master("local[2]")
@@ -181,13 +204,14 @@ class NearestByJoinTest
 
   override def afterAll(): Unit = {
     if (spark != null) spark.stop()
-    Seq(directory, specialDirectory, farDirectory).filter(_ != null).foreach {
-      written =>
+    Seq(directory, specialDirectory, farDirectory, arrayDirectory)
+      .filter(_ != null)
+      .foreach { written =>
         val paths = Files.walk(written)
         try
           paths.sorted(Comparator.reverseOrder[Path]()).forEach(Files.delete(_))
         finally paths.close()
-    }
+      }
   }
 
   private def needsNative(): Unit = {
@@ -1088,19 +1112,91 @@ class NearestByJoinTest
     val query = queries(standardQueries: _*)
     val small = udf((id: Long) => id < 3104L)
     Seq(
-      "a filter the scan cannot take" -> docs().where(small(col("id"))),
-      "a computed column" -> docs().select(
-        col("id"),
-        col("vector"),
-        (col("category") + 1).as("category")
+      (
+        "a filter the scan cannot take",
+        docs().where(small(col("id"))),
+        "the base is Filter, not the Milvus scan"
       ),
-      "a limit" -> docs().limit(100)
-    ).foreach { case (shape, base) =>
+      (
+        "a computed column",
+        docs().select(
+          col("id"),
+          col("vector"),
+          (col("category") + 1).as("category")
+        ),
+        "the projection above the scan computes a column"
+      ),
+      (
+        "a limit",
+        docs().limit(100),
+        "the base is GlobalLimit, not the Milvus scan"
+      )
+    ).foreach { case (shape, base, reason) =>
       withClue(s"$shape: ") {
         val taken = nearest(query, base, mode = "approx")
         input(taken) shouldBe "DataFrame"
-        node(taken).get.simpleString(100) should include("computed exactly")
+        val explained = node(taken).get.simpleString(100)
+        explained should include(s"input=DataFrame ($reason)")
+        explained should include("computed exactly")
         pairs(taken) shouldBe pairs(bySpark(query, base))
+      }
+    }
+  }
+
+  test(
+    "a Milvus base that renames or reorders its columns is the Milvus table"
+  ) {
+    needsNative()
+    // The scan's columns come in the table's order, so Spark keeps this
+    // projection above the scan; the search reads each base column by the scan
+    // column it names.
+    val query = queries(standardQueries: _*)
+    val base = docs().select(col("vector").as("embedding"), col("id"))
+    val ranking =
+      call_function("vector_l2_distance", query("qv"), base("embedding"))
+    def joined(by: Column): DataFrame =
+      query.nearestByJoin(base, by, 3, "exact", "distance", "inner")
+
+    val taken = joined(ranking)
+    input(taken) shouldBe "Milvus table"
+    node(taken).get.simpleString(100) should include(
+      "vector=vector, base=[vector, id]"
+    )
+    val expected = joined(ranking + 0)
+    takenOver(expected) shouldBe false
+    pairs(taken) shouldBe pairs(expected)
+  }
+
+  test("a base vector that is not a vector field is read as a DataFrame") {
+    needsNative()
+    // A Milvus Array of Float reads as ARRAY<FLOAT>, as a vector does, but has
+    // neither a dimension nor an index. The second axis ranks each query's
+    // rows without a tie.
+    val query = queries("q1" -> Array(0.1f, 2.2f), "q2" -> Array(0f, 4.6f))
+    val base = spark.read.format("milvus").options(arrayOptions).load()
+    val ranking =
+      call_function("vector_l2_distance", query("qv"), base("floats"))
+    def joined(by: Column, mode: String): DataFrame =
+      query.nearestByJoin(base, by, 3, mode, "distance", "inner")
+
+    Seq("exact", "approx").foreach { mode =>
+      withClue(s"$mode: ") {
+        val taken = joined(ranking, mode)
+        input(taken) shouldBe "DataFrame"
+        node(taken).get.simpleString(100) should include(
+          "the base vector floats is a Milvus Array field, not a vector field"
+        )
+        val expected = joined(ranking + 0, mode)
+        takenOver(expected) shouldBe false
+        pairs(taken) shouldBe pairs(expected)
+        pairs(taken) shouldBe Seq(
+          "q1" -> 6001L,
+          "q1" -> 6002L,
+          "q1" -> 6003L,
+          "q2" -> 6003L,
+          "q2" -> 6004L,
+          "q2" -> 6005L
+        )
       }
     }
   }

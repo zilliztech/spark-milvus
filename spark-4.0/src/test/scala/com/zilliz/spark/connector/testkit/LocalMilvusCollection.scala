@@ -10,11 +10,16 @@ import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.{
   BigIntVector,
   FixedSizeBinaryVector,
+  VarBinaryVector,
   VectorSchemaRoot
 }
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 
-import com.zilliz.milvus.storage.codec.{IndexObjectTarget, SegmentIndexObjects}
+import com.zilliz.milvus.storage.codec.{
+  ArrayCodec,
+  IndexObjectTarget,
+  SegmentIndexObjects
+}
 import com.zilliz.milvus.storage.index.IndexWriter
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.manifest.{
@@ -44,15 +49,18 @@ import io.milvus.storage.{MilvusStorageProperties, MilvusStorageTransaction}
   * at timestamp 100 and every delete at 200, so a deleted id is gone.
   *
   * The collection is `id` (Int64 primary key, field 100), `vector`
-  * (FloatVector, field 101) and a nullable Int64 `category` (field 102). Needs
-  * the native libraries.
+  * (FloatVector, field 101) and a nullable Int64 `category` (field 102); when
+  * an entity carries `floats`, also a nullable Array of Float `floats` (field
+  * 103), which Spark reads as ARRAY<FLOAT>, as it reads the vector. Needs the
+  * native libraries.
   */
 object LocalMilvusCollection {
 
   final case class Entity(
       id: Long,
       vector: Array[Float],
-      category: Option[Long]
+      category: Option[Long],
+      floats: Option[Array[Float]] = None
   )
 
   final case class Segment(
@@ -65,29 +73,39 @@ object LocalMilvusCollection {
   private val CollectionId = 10L
   private val PartitionId = 20L
 
-  def schema(dimension: Int): CollectionSchema = CollectionSchema(
-    name = "local-collection",
-    fields = Seq(
-      FieldSchema(
-        fieldID = 100L,
-        name = "id",
-        dataType = DataType.Int64,
-        isPrimaryKey = true
-      ),
-      FieldSchema(
-        fieldID = 101L,
-        name = "vector",
-        dataType = DataType.FloatVector,
-        typeParams = Seq(KeyValuePair("dim", dimension.toString))
-      ),
-      FieldSchema(
-        fieldID = 102L,
-        name = "category",
-        dataType = DataType.Int64,
-        nullable = true
+  def schema(dimension: Int, floats: Boolean): CollectionSchema =
+    CollectionSchema(
+      name = "local-collection",
+      fields = Seq(
+        FieldSchema(
+          fieldID = 100L,
+          name = "id",
+          dataType = DataType.Int64,
+          isPrimaryKey = true
+        ),
+        FieldSchema(
+          fieldID = 101L,
+          name = "vector",
+          dataType = DataType.FloatVector,
+          typeParams = Seq(KeyValuePair("dim", dimension.toString))
+        ),
+        FieldSchema(
+          fieldID = 102L,
+          name = "category",
+          dataType = DataType.Int64,
+          nullable = true
+        )
+      ) ++ Option.when(floats)(
+        FieldSchema(
+          fieldID = 103L,
+          name = "floats",
+          dataType = DataType.Array,
+          elementType = DataType.Float,
+          typeParams = Seq(KeyValuePair("max_capacity", "16")),
+          nullable = true
+        )
       )
     )
-  )
 
   /** Writes the segments under `directory` and returns the options that read
     * the collection.
@@ -99,7 +117,8 @@ object LocalMilvusCollection {
   ): Map[String, String] = {
     val properties =
       Map("fs.storage_type" -> "local", "fs.root_path" -> directory.toString)
-    val collection = schema(dimension)
+    val collection =
+      schema(dimension, segments.exists(_.entities.exists(_.floats.nonEmpty)))
     val allocator = new RootAllocator()
     try {
       val written = segments.map(segment =>
@@ -114,7 +133,7 @@ object LocalMilvusCollection {
       )
       Files.write(
         directory.resolve("snapshot.json"),
-        snapshotJson(directory, collection, dimension, written).getBytes(UTF_8)
+        snapshotJson(directory, collection, written).getBytes(UTF_8)
       )
     } finally allocator.close()
     properties ++ Map(
@@ -140,6 +159,7 @@ object LocalMilvusCollection {
   ): Written = {
     val base = s"files/insert_log/$CollectionId/$PartitionId/${segment.id}"
     val arrow = SchemaMapper.convertToArrowSchemaWithFieldIdNames(collection)
+    val floats = collection.fields.exists(_.fieldID == 103L)
     val writer =
       new V3SegmentWriter(base, arrow, properties, allocator, Seq("^101$"))
     val appended =
@@ -173,6 +193,17 @@ object LocalMilvusCollection {
               .getVector("101")
               .asInstanceOf[FixedSizeBinaryVector]
               .setSafe(row, bytes.array())
+            if (floats) {
+              val values = batch.getVector("103").asInstanceOf[VarBinaryVector]
+              entity.floats match {
+                case Some(array) =>
+                  values.setSafe(
+                    row,
+                    ArrayCodec.encode(DataType.Float, array.toSeq)
+                  )
+                case None => values.setNull(row)
+              }
+            }
           }
           batch.setRowCount(segment.entities.size)
           writer.write(batch)
@@ -340,7 +371,6 @@ object LocalMilvusCollection {
   private def snapshotJson(
       directory: Path,
       collection: CollectionSchema,
-      dimension: Int,
       segments: Seq[Written]
   ): String = {
     val mapper = new ObjectMapper()
@@ -363,12 +393,14 @@ object LocalMilvusCollection {
         .put("data_type", field.dataType.toString)
         .put("nullable", field.nullable)
         .put("is_primary_key", field.isPrimaryKey)
-      if (field.fieldID == 101L)
-        node
-          .putArray("type_params")
-          .addObject()
-          .put("key", "dim")
-          .put("value", dimension.toString)
+      if (field.typeParams.nonEmpty) {
+        val params = node.putArray("type_params")
+        field.typeParams.foreach(param =>
+          params.addObject().put("key", param.key).put("value", param.value)
+        )
+      }
+      if (field.dataType == DataType.Array)
+        node.put("element_type", field.elementType.toString)
     }
     root.put("format_version", 4)
     val definitions = root

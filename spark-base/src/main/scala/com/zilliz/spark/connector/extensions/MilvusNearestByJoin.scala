@@ -43,11 +43,12 @@ import com.zilliz.spark.connector.read.{
   * the base columns, both nullable, with the column ids unchanged, and no score
   * column. Its output comes from its children, so Spark's optimizer prunes both
   * sides and pushes the base's filters into the Milvus scan as it does for any
-  * such node; a filter above it stays above it. `queryVector` is a query column
-  * or a constant, `baseVector` the base's vector column, `rankingExpression`
-  * the ranking as the user wrote it, and `spark` Spark's own computation of the
-  * join for what the connector leaves to it (section 2), which planning binds
-  * to the optimized base.
+  * such node; a filter above it stays above it. `queryVector` is the ranking's
+  * argument computed from query columns or constants, `baseVector` the one
+  * computed from base columns, `rankingExpression` the ranking as the user
+  * wrote it, and `spark` Spark's own computation of the join for what the
+  * connector leaves to it (section 2), which planning binds to the optimized
+  * base.
   */
 final case class MilvusNearestByJoin(
     left: LogicalPlan,
@@ -110,7 +111,7 @@ private[extensions] object MilvusTableInput {
         columns <- projected(list)
       } yield MilvusTableInput(scan, columns)
     case other =>
-      Left(s"the base is ${other.nodeName} above the scan, not the Milvus scan")
+      Left(s"the base is ${other.nodeName}, not the Milvus scan")
   }
 
   private def milvusScan(
@@ -136,9 +137,10 @@ private[extensions] object MilvusTableInput {
 /** Plans a [[MilvusNearestByJoin]] by its optimized base (docs/design/
   * architecture/dataframe-api.html section 4): a Milvus table input when the
   * base is the Milvus scan with at most a projection of its columns above it
-  * and the base vector is one of them, a DataFrame input otherwise, with the
-  * reason kept for explain. Either way Spark's own computation of the join runs
-  * over the same optimized base and ranking, whose columns are the node's.
+  * and the base vector is one of them, a vector field the search takes; a
+  * DataFrame input otherwise, with the reason kept for explain. Either way
+  * Spark's own computation of the join runs over the same optimized base and
+  * ranking, whose columns are the node's.
   */
 object MilvusNearestByJoinStrategy extends SparkStrategy {
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
@@ -148,7 +150,9 @@ object MilvusNearestByJoinStrategy extends SparkStrategy {
       val table = for {
         input <- MilvusTableInput.of(join.right)
         vector <- join.baseVector match {
-          case attribute: Attribute => Right(input.columnOf(attribute))
+          case attribute: Attribute =>
+            val column = input.columnOf(attribute)
+            NearestBySearch.vectorField(input.scan, column).map(_ => column)
           case other =>
             Left(s"the base vector ${other.sql} is computed, not a field")
         }

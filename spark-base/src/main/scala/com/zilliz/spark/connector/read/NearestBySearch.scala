@@ -42,6 +42,7 @@ import com.zilliz.milvus.storage.schema.{
 }
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
+import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 /** A nearest-by join run as the two-stage search, over a Milvus table input or
   * a DataFrame input (docs/design/architecture/dataframe-api.html sections 2
@@ -484,20 +485,14 @@ private[connector] object NearestBySearch {
       metrics: Map[String, SQLMetric]
   ) extends Searcher {
     private val scan = input.scan
-    private val field = scan.snapshot.schema.fields
-      .find(_.name == input.vectorColumn)
-      .getOrElse(
-        throw new IllegalArgumentException(
-          s"The collection has no vector field '${input.vectorColumn}'"
-        )
-      )
+    // Planning made this a Milvus table input for a field `vectorField` takes.
+    private val field = vectorField(scan, input.vectorColumn).fold(
+      reason => throw new IllegalStateException(reason),
+      identity
+    )
     private val layout: VectorLayout =
       VectorLayout.of(field.dataType, MilvusSearch.dimensionOf(field))
     MilvusSearch.checkSearchable(metric, layout)
-    require(
-      layout.elementType != VectorElementType.Int8,
-      s"An int8 field is not taken over yet: '${input.vectorColumn}'"
-    )
     private val options =
       Map(scan.options.asCaseSensitiveMap().asScala.toSeq: _*)
     override val limits: SearchLimits = SearchLimits.from(options)
@@ -647,6 +642,33 @@ private[connector] object NearestBySearch {
 
     override def segments(searched: Long): Map[String, Long] = Map.empty
   }
+
+  private val SearchedTypes: Set[MilvusDataType] = Set(
+    MilvusDataType.FloatVector,
+    MilvusDataType.Float16Vector,
+    MilvusDataType.BFloat16Vector
+  )
+
+  /** The vector field a Milvus table input searches, named by the scan column
+    * the base vector reads, or why that column is not one: the search takes a
+    * FloatVector, Float16Vector or BFloat16Vector field. An Array of Float
+    * reads as ARRAY<FLOAT> as those do, but has neither a dimension nor an
+    * index; an Int8Vector field reaches a ranking only cast to ARRAY<FLOAT>,
+    * which is not a column.
+    */
+  def vectorField(
+      scan: MilvusScan,
+      column: String
+  ): Either[String, FieldSchema] =
+    scan.snapshot.schema.fields.find(_.name == column) match {
+      case Some(field) if SearchedTypes(field.dataType) => Right(field)
+      case Some(field) =>
+        Left(
+          s"the base vector $column is a Milvus ${field.dataType} field, not a vector field"
+        )
+      case None =>
+        Left(s"the base vector $column is not a field of the collection")
+    }
 
   /** Which segments the search takes through an index and which it scans, from
     * the snapshot's metadata alone, for explain: no file is read. A row count
