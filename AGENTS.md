@@ -43,9 +43,9 @@ suites need a live Milvus and MinIO.
 
 Only layer 3 splits per Spark line, because the `TableCatalog` and
 `ParserInterface` method sets differ there, while Arrow, antlr and the Java
-target are also pinned per line. During migration, the usable fat jar is root's
-`assembly`. [README.md](README.md) has the full module table and the build
-commands.
+target are also pinned per line. During migration, the usable fat jars are
+root's `assembly` for Spark 4.0 and `spark42/assembly` for Spark 4.2.
+[README.md](README.md) has the full module table and the build commands.
 
 Four git submodules: `milvus-proto`, `milvus-storage` and `knowhere` supply
 the protobuf definitions and the two native engines and must be initialized to

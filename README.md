@@ -57,9 +57,11 @@ by the compiler instead of by review.
 Only the Spark layer has to be split per line, because the `TableCatalog` and
 `ParserInterface` method sets differ, and Arrow, antlr and the Java target
 version are pinned per line. The fat jar is an `assembly` task on
-`spark-<line>`, not a module of its own. During the migration the usable fat
-jar is still root's `sbt assembly` (`spark-connector-assembly-*.jar`); the
-per-line tasks have no merge or shading rules yet.
+`spark-<line>`, not a module of its own. During the migration two fat jars are
+usable, packed by the same rules: root's `sbt assembly`
+(`spark-connector-assembly-*.jar`) for Spark 4.0, and `sbt spark42/assembly`
+(`spark-milvus-4.2-bundle-*.jar`) for Spark 4.2. The 3.5, 4.0 and 4.1 tasks
+have no merge or shading rules yet.
 
 Four git submodules sit in the repository. `milvus-proto` supplies the
 protobuf definitions: `common.proto` and `schema.proto` are generated into
@@ -177,7 +179,8 @@ for the real JNI smoke command and the `libjsig` preload requirement.
 
 ```bash
 sbt clean compile package publishLocal   # compile and publish to the local repository
-sbt assembly                             # fat jar with every dependency
+sbt assembly                             # fat jar with every dependency, Spark 4.0
+sbt spark42/assembly                     # the same for Spark 4.2
 sbt test                                 # unit tests, all modules
 sbt integration40/test                   # integration tests, needs Milvus and MinIO
 ```
