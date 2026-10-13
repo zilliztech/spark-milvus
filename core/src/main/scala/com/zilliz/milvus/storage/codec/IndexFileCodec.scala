@@ -443,7 +443,7 @@ private[storage] object IndexFileCodec extends Logging {
   private def readObject(
       store: ObjectStore,
       key: String,
-      knownSize: Option[Long] = None
+      knownSize: Option[Long]
   ): Array[Byte] = {
     val started = System.nanoTime()
     val size = knownSize.getOrElse(store.size(key))

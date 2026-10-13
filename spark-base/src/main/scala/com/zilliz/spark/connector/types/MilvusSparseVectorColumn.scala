@@ -24,8 +24,6 @@ import org.apache.spark.unsafe.types.UTF8String
   */
 object MilvusSparseVectorColumn {
 
-  private val EntryWidth = 8
-
   val sparkType: MapType =
     MapType(LongType, FloatType, valueContainsNull = false)
 

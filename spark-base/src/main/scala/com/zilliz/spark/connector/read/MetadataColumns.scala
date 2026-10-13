@@ -38,7 +38,6 @@ object MetadataColumns {
     */
   def columnFor(
       name: String,
-      partitionName: String,
       segmentId: Long,
       startOffset: Long
   ): Option[ColumnVector] = name match {
@@ -63,7 +62,6 @@ object MetadataColumns {
       underlying: RowOffsetReader,
       schema: StructType,
       requested: Set[String],
-      partitionName: String,
       segmentId: Long
   ): PartitionReader[InternalRow] = {
     val anyRequested =

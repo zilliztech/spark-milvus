@@ -3,7 +3,6 @@ package com.zilliz.milvus.storage.compat
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
-import org.apache.parquet.hadoop.util.HadoopStreams
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.io.InputFile
 import org.apache.parquet.schema.Type

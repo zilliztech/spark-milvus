@@ -23,7 +23,6 @@ import com.zilliz.spark.connector.extensions.parser.{
   MilvusCallParser
 }
 import com.zilliz.spark.connector.procedure.{
-  Parameter,
   Procedure,
   ProcedureArgs,
   Procedures
@@ -43,7 +42,7 @@ object CallBuilder {
     val parser = new MilvusCallParser(new CommonTokenStream(lexer))
     parser.removeErrorListeners()
     parser.addErrorListener(ErrorListener)
-    new Visitor(sqlText).visitStatement(parser.statement())
+    new Visitor().visitStatement(parser.statement())
   }
 
   private object ErrorListener extends BaseErrorListener {
@@ -60,8 +59,7 @@ object CallBuilder {
       )
   }
 
-  private final class Visitor(sqlText: String)
-      extends MilvusCallBaseVisitor[AnyRef] {
+  private final class Visitor extends MilvusCallBaseVisitor[AnyRef] {
 
     override def visitStatement(
         ctx: MilvusCallParser.StatementContext

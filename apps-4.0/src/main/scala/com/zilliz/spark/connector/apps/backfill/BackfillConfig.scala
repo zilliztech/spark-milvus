@@ -287,15 +287,14 @@ case class BackfillConfig(
     val outputPath = customOutputPath.getOrElse(
       s"$s3RootPath/insert_log/$collectionId/$partitionId/$segmentId"
     )
-    getS3WriteOptionsForBasePath(outputPath, segmentId)
+    getS3WriteOptionsForBasePath(outputPath)
   }
 
   /** Get S3 write options using a specific segment base path (e.g., from
     * manifest)
     */
   def getS3WriteOptionsForBasePath(
-      segmentBasePath: String,
-      segmentId: Long
+      segmentBasePath: String
   ): Map[String, String] =
     withS3Authentication(
       Map(

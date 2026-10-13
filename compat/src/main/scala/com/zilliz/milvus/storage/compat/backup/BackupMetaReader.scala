@@ -24,7 +24,6 @@ import com.fasterxml.jackson.module.scala.{
   ScalaObjectMapper
 }
 
-import com.zilliz.milvus.storage.compat.v2.FooterV2SegmentResolver
 import com.zilliz.milvus.storage.compat.ParquetFooterReader
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.path.StoragePath

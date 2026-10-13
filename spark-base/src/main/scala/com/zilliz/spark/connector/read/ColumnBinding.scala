@@ -1,7 +1,7 @@
 package com.zilliz.spark.connector.read
 
 import org.apache.arrow.memory.BufferAllocator
-import org.apache.arrow.vector.{BigIntVector, ValueVector, VectorSchemaRoot}
+import org.apache.arrow.vector.{BigIntVector, VectorSchemaRoot}
 import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.spark.sql.types.StructType
 
@@ -15,7 +15,7 @@ import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
 import com.zilliz.spark.connector.options.MilvusOption
-import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
+import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
 
 /** Everything a reader has to work out before it can open a segment: which
   * columns to ask the native layer for, what to call them, and how to tell a
@@ -120,33 +120,17 @@ sealed trait ColumnBinding {
         s"applying deletes needs the timestamp column '$timestampColumnName' loaded"
       )
     }
-    ColumnBinding.rowDeleted(
+    DeletePlans.rowDeleted(
       deletePlan,
       field,
       pkVector,
       tsVector.asInstanceOf[BigIntVector],
-      rowIndex,
-      pkColumnName
+      rowIndex
     )
   }
 }
 
 object ColumnBinding {
-
-  /** Whether the row at `rowIndex` is deleted: its primary key is in the plan
-    * with a delete timestamp after the row's own. Both lines key deletes the
-    * same way, so this is line-independent.
-    */
-  private[read] def rowDeleted(
-      deletePlan: DeletePlan,
-      pkField: FieldSchema,
-      pkVector: ValueVector,
-      tsVector: BigIntVector,
-      rowIndex: Int,
-      pkColumnName: String
-  ): Boolean = {
-    DeletePlans.rowDeleted(deletePlan, pkField, pkVector, tsVector, rowIndex)
-  }
 
   /** Builds the setup for whichever line the partition belongs to.
     *

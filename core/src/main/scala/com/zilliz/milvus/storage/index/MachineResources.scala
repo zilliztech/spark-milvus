@@ -135,7 +135,7 @@ object MachineResources {
       .filter(_.nonEmpty)
       .map { part =>
         part.split("-") match {
-          case Array(single)   => 1
+          case Array(_)        => 1
           case Array(from, to) => to.trim.toInt - from.trim.toInt + 1
           case _               => throw new IllegalArgumentException(part)
         }

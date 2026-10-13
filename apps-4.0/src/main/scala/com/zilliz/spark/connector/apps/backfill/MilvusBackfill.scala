@@ -19,7 +19,6 @@ import com.zilliz.milvus.storage.snapshot.json.{
   CollectionSchemaJson,
   FieldJson,
   ManifestContentJson,
-  ManifestItemJson,
   SegmentListJson,
   SnapshotJson
 }
@@ -28,7 +27,6 @@ import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
 import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import com.zilliz.spark.connector.write.{
   MilvusV3CommitMessage,
-  MilvusV3Writer,
   MilvusV3WriterFactory,
   WriteSchema
 }
@@ -56,7 +54,6 @@ object MilvusBackfill {
     * returns the staging prefix, or "" when there was none to commit.
     */
   private def writeJobManifest(
-      spark: SparkSession,
       config: BackfillConfig,
       segmentResults: Map[Long, SegmentBackfillResult]
   ): String = {
@@ -105,10 +102,7 @@ object MilvusBackfill {
     * an id by default, even in one Spark application (decided 2026-09-16);
     * `run` resolves it once and keeps it.
     */
-  private[backfill] def jobIdFor(
-      spark: SparkSession,
-      config: BackfillConfig
-  ): String =
+  private[backfill] def jobIdFor(config: BackfillConfig): String =
     config.jobId.getOrElse(java.util.UUID.randomUUID().toString)
 
   private def stagingLayoutFor(
@@ -130,7 +124,7 @@ object MilvusBackfill {
     import com.zilliz.milvus.storage.io.NativeObjectStore
     NativeObjectStore
       .Factory(
-        StorageProperties.from(config.getS3WriteOptionsForBasePath("", 0L))
+        StorageProperties.from(config.getS3WriteOptionsForBasePath(""))
       )
       .open()
   }
@@ -481,7 +475,7 @@ object MilvusBackfill {
     }
 
     // One job id for the whole run.
-    val runConfig = config.copy(jobId = Some(jobIdFor(spark, config)))
+    val runConfig = config.copy(jobId = Some(jobIdFor(config)))
 
     // OSS source reads use a local-checkpointed RDD to sever the external
     // storage lineage while scoped credentials are installed. Keep the actual
@@ -494,7 +488,7 @@ object MilvusBackfill {
 
     // Step 1: Try to load snapshot metadata
     val snapshotMetadataOpt =
-      loadSnapshotMetadata(spark, snapshotPath, config) match {
+      loadSnapshotMetadata(snapshotPath, config) match {
         case Left(error) => return Left(error)
         case Right(opt)  => opt
       }
@@ -506,7 +500,7 @@ object MilvusBackfill {
     val v2Segments: Seq[Segment] =
       snapshotMetadataOpt match {
         case Some(meta) if meta.manifestList.nonEmpty =>
-          loadV2Segments(spark, meta, config) match {
+          loadV2Segments(meta, config) match {
             case Right(segs) => segs
             case Left(err)   => return Left(err)
           }
@@ -814,13 +808,12 @@ object MilvusBackfill {
       // The job manifest: every V3 segment this run wrote into, with its id
       // and new manifest version, committed under the staging prefix for
       // `register` to hand to Milvus.
-      val stagingPrefix = writeJobManifest(spark, runConfig, segmentResults)
+      val stagingPrefix = writeJobManifest(runConfig, segmentResults)
 
       Right(result.copy(stagingPrefix = stagingPrefix))
 
     } catch {
       case e: Exception =>
-        val executionTime = System.currentTimeMillis() - startTime
         logger.error("Backfill operation failed", e)
         Left(BackfillError.fromException(e))
     } finally {
@@ -1273,7 +1266,7 @@ object MilvusBackfill {
       v2Segments: Seq[Segment],
       extraReadFields: Seq[
         (String, Long, org.apache.spark.sql.types.StructField)
-      ] = Seq.empty
+      ]
   ): Either[BackfillError, DataFrame] = {
     try {
       var options = config.getMilvusReadOptions
@@ -1738,7 +1731,7 @@ object MilvusBackfill {
       targetFieldOverrides: Map[
         String,
         org.apache.spark.sql.types.StructField
-      ] = Map.empty
+      ]
   ): Either[BackfillError, Map[Long, SegmentBackfillResult]] = {
 
     try {
@@ -1968,7 +1961,7 @@ object MilvusBackfill {
     // Create writer — use manifest basePath if available, otherwise generate path
     val writeOptions = segmentBasePathMap.get(segmentID) match {
       case Some(basePath) =>
-        config.getS3WriteOptionsForBasePath(basePath, segmentID)
+        config.getS3WriteOptionsForBasePath(basePath)
       case None =>
         config.getS3WriteOptions(collectionID, partitionID, segmentID)
     }
@@ -2127,7 +2120,6 @@ object MilvusBackfill {
     * paths.
     */
   private def loadV2Segments(
-      spark: SparkSession,
       metadata: SnapshotJson,
       config: BackfillConfig
   ): Either[BackfillError, Seq[Segment]] = {
@@ -2193,13 +2185,12 @@ object MilvusBackfill {
     * fails.
     */
   private def loadSnapshotMetadata(
-      spark: SparkSession,
       snapshotPath: String,
       config: BackfillConfig
   ): Either[BackfillError, Option[SnapshotJson]] = {
     if (snapshotPath == null || snapshotPath.isEmpty) return Right(None)
 
-    readSnapshotJson(spark, snapshotPath, config) match {
+    readSnapshotJson(snapshotPath, config) match {
       case Right(json) if json.nonEmpty =>
         SnapshotJson.parse(json) match {
           case Right(metadata) => Right(Some(metadata))
@@ -2261,8 +2252,7 @@ object MilvusBackfill {
     // writer talks to S3 via Arrow's filesystem (inside milvus-storage), so
     // it needs the FS config, not Hadoop S3A config.
     val writeOptions = config.getS3WriteOptionsForBasePath(
-      s"${config.s3RootPath.stripSuffix("/")}/insert_log/$collectionID/$partitionID/$segmentID",
-      segmentID
+      s"${config.s3RootPath.stripSuffix("/")}/insert_log/$collectionID/$partitionID/$segmentID"
     )
     val milvusOption = MilvusOption(
       new CaseInsensitiveStringMap(writeOptions.asJava)
@@ -2843,7 +2833,6 @@ object MilvusBackfill {
     * string.
     */
   private def readSnapshotJson(
-      spark: SparkSession,
       snapshotPath: String,
       config: BackfillConfig
   ): Either[BackfillError, String] = {

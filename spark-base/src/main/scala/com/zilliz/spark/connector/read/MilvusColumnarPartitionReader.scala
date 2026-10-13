@@ -50,7 +50,6 @@ class MilvusColumnarPartitionReader(
     deleted: (VectorSchemaRoot, Int) => Boolean,
     arrowColumnFor: String => String,
     rawVectors: Boolean,
-    partitionName: String,
     segmentId: Long,
     requestedExtraColumns: Set[String] = Set.empty,
     pushedExpression: Option[PredicateExpr] = None,
@@ -199,7 +198,7 @@ class MilvusColumnarPartitionReader(
     val name = field.name
     val metadataColumn =
       if (requestedExtraColumns.contains(name))
-        MetadataColumns.columnFor(name, partitionName, segmentId, startOffset)
+        MetadataColumns.columnFor(name, segmentId, startOffset)
       else None
     metadataColumn
       .getOrElse {

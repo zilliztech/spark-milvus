@@ -90,7 +90,6 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     V3ColumnBinding(
       MilvusV3InputPartition(
         task(SegmentLayout.Manifest("files/seg"), deletes),
-        "20",
         options
       ),
       dataSchema
@@ -145,7 +144,6 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
       MilvusV3InputPartition(
         task(SegmentLayout.Manifest("files/seg"), deletes)
           .copy(schemaBytes = schema.toByteArray),
-        "20",
         options
       ),
       wanted
@@ -216,7 +214,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
       neededFieldIds = Seq(407L)
     )
     val v3Binding = V3ColumnBinding(
-      MilvusV3InputPartition(v3Task, "20", options),
+      MilvusV3InputPartition(v3Task, options),
       outputSchema
     )
 
@@ -249,7 +247,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
       neededFieldIds = Seq(101L)
     )
     val binding = V3ColumnBinding(
-      MilvusV3InputPartition(projectedTask, "20", options),
+      MilvusV3InputPartition(projectedTask, options),
       StructType(Seq(StructField("id", LongType)))
     )
 
@@ -292,7 +290,6 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     val binding = V3ColumnBinding(
       MilvusV3InputPartition(
         task(SegmentLayout.Manifest("files/seg")),
-        "20",
         options
       ),
       StructType(
@@ -321,7 +318,6 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
           SegmentLayout.Manifest("files/seg"),
           DeleteSource.Materialized(plan)
         ),
-        "20",
         options
       ),
       narrow
@@ -332,7 +328,6 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     val without = V3ColumnBinding(
       MilvusV3InputPartition(
         task(SegmentLayout.Manifest("files/seg")),
-        "20",
         options
       ),
       narrow
@@ -353,7 +348,6 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     ColumnBinding(
       MilvusV3InputPartition(
         task(SegmentLayout.Manifest("files/seg")),
-        "20",
         options
       ),
       dataSchema

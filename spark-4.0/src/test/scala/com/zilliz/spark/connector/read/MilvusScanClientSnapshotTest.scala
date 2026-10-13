@@ -2118,10 +2118,10 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(partitions.length == 2)
     val first = partitions(0).asInstanceOf[MilvusV3InputPartition]
     val second = partitions(1).asInstanceOf[MilvusV3InputPartition]
-    assert(first.partitionName == "20")
+    assert(first.task.partitionId == 20L)
     assert(first.task.segmentId == 30L)
     assert(first.task.readVersionOrLatest == 7L)
-    assert(second.partitionName == "21")
+    assert(second.task.partitionId == 21L)
     assert(second.task.segmentId == 31L)
     assert(second.task.readVersionOrLatest == 8L)
   }
@@ -2145,7 +2145,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     val partitions = scanFromOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 1)
     val partition = partitions.head.asInstanceOf[MilvusV3InputPartition]
-    assert(partition.partitionName == "20")
+    assert(partition.task.partitionId == 20L)
     assert(partition.task.segmentId == 30L)
     assert(partition.task.readVersionOrLatest == 7L)
   }

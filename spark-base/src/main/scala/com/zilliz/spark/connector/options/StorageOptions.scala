@@ -286,13 +286,6 @@ object StorageOptions extends Logging {
     snapshotBucket(snapshotPath).orElse(connectorS3BucketOption(options))
   }
 
-  private[connector] def isBucketRelativeSnapshotLocation(
-      location: String
-  ): Boolean = {
-    val trimmed = Option(location).map(_.trim).getOrElse("")
-    trimmed.nonEmpty && Option(new URI(trimmed).getScheme).isEmpty
-  }
-
   private[connector] def parsePositiveLongOption(
       options: CaseInsensitiveStringMap,
       key: String,

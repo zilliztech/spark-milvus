@@ -15,8 +15,6 @@ import org.apache.arrow.vector.complex.{FixedSizeListVector, ListVector}
 
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 
-import io.knowhere.DType
-
 /** Turns one Arrow batch of a dense vector column into the base buffer Knowhere
   * reads, and reports the rows it must exclude.
   *

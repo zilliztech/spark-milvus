@@ -146,7 +146,7 @@ object FloatConverter {
     val f16Frac = f16Bits & 0x3ff
 
     // Convert float16 components to float32 components
-    var float32Sign = f16Sign
+    val float32Sign = f16Sign
     var float32Exp = 0
     var float32Frac = 0
 
@@ -157,7 +157,7 @@ object FloatConverter {
       } else { // Denormalized
         // Find leading 1 and normalize
         var msbPos = 0
-        var tempFrac = f16Frac
+        val tempFrac = f16Frac
         while (((tempFrac >>> (10 - 1 - msbPos)) & 0x1) == 0 && msbPos < 10) {
           msbPos += 1
         }
@@ -181,16 +181,6 @@ object FloatConverter {
     val float32Bits = (float32Sign << 31) | (float32Exp << 23) | float32Frac
 
     java.lang.Float.intBitsToFloat(float32Bits)
-  }
-
-  def fromFloatBytes(bytes: Seq[Byte]): Float = {
-    if (bytes.length != 4) {
-      throw new DataParseException(
-        s"Float requires 4 bytes, but got ${bytes.length}"
-      )
-    }
-    val buffer = ByteBuffer.wrap(bytes.toArray).order(ByteOrder.LITTLE_ENDIAN)
-    buffer.getFloat()
   }
 
   def toFloatBytes(value: Float): Seq[Byte] = {

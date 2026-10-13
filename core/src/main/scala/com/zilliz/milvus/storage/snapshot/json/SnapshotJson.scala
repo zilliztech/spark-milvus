@@ -4,7 +4,6 @@ import com.fasterxml.jackson.annotation.{JsonAlias, JsonProperty}
 import com.fasterxml.jackson.databind.node.LongNode
 import com.fasterxml.jackson.databind.JsonNode
 
-import com.zilliz.milvus.storage.manifest.SnapshotSegmentEntry
 import com.zilliz.milvus.storage.snapshot.CollectionIndex
 
 /** `snapshot_info`. */
@@ -205,44 +204,5 @@ object SnapshotJson {
       n = in.read(buf)
     }
     out.toString(java.nio.charset.StandardCharsets.UTF_8.name())
-  }
-
-  /** The same document with its segment list taken from the Avro segment
-    * manifests instead of the JSON's own `segments`.
-    */
-  def fromAvroEntries(
-      snapshotInfo: SnapshotInfoJson,
-      collection: CollectionJson,
-      manifestList: Seq[String],
-      storageV2ManifestList: Option[Seq[ManifestItemJson]],
-      entries: Seq[SnapshotSegmentEntry]
-  ): SnapshotJson = {
-    def long(v: Long): Option[JsonNode] = Some(LongNode.valueOf(v))
-    SnapshotJson(
-      snapshotInfo = snapshotInfo,
-      collection = collection,
-      manifestList = manifestList,
-      storageV2ManifestList = storageV2ManifestList,
-      segments = entries.map(entry =>
-        SegmentJson(
-          rawSegmentId = long(entry.segmentId),
-          rawPartitionId = long(entry.partitionId),
-          rawSegmentLevel = long(entry.segmentLevel),
-          rawStorageVersion = long(entry.storageVersion),
-          deltaLogFiles = entry.deltaLogFiles.map(group =>
-            FieldBinlogJson(
-              rawFieldId = long(group.slotFieldId),
-              binlogs = group.binlogs.map(log =>
-                BinlogJson(
-                  rawEntriesNum = long(log.entriesNum),
-                  logPath = log.logPath,
-                  rawLogId = long(log.logId)
-                )
-              )
-            )
-          )
-        )
-      )
-    )
   }
 }

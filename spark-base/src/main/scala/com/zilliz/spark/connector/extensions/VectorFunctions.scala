@@ -13,7 +13,7 @@ import org.apache.spark.sql.catalyst.expressions.objects.StaticInvoke
 import org.apache.spark.sql.catalyst.trees.BinaryLike
 import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.sql.catalyst.FunctionIdentifier
-import org.apache.spark.sql.types.{ArrayType, DataType, FloatType, StringType}
+import org.apache.spark.sql.types.{ArrayType, FloatType, StringType}
 import org.apache.spark.unsafe.types.UTF8String
 
 import com.zilliz.milvus.storage.index.RankingFunction

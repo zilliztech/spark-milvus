@@ -12,7 +12,6 @@ import org.apache.spark.sql.connector.catalog.{
 import org.apache.spark.sql.connector.read.ScanBuilder
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.apache.spark.sql.types.{
-  DoubleType,
   LongType,
   MetadataBuilder,
   StructField,

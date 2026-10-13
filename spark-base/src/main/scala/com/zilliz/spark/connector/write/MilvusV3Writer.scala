@@ -1,8 +1,5 @@
 package com.zilliz.spark.connector.write
 
-import java.{util => ju}
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.{Executors, ScheduledExecutorService, ThreadFactory}
 import java.util.concurrent.TimeUnit
 import scala.collection.JavaConverters._
@@ -11,31 +8,26 @@ import scala.util.control.NonFatal
 
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector._
-import org.apache.arrow.vector.complex.{ListVector, MapVector, StructVector}
 import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.{DataFrame, SaveMode}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.write.{
   BatchWrite,
   DataWriter,
   DataWriterFactory,
-  LogicalWriteInfo,
   PhysicalWriteInfo,
   Write,
   WriteBuilder,
   WriterCommitMessage
 }
-import org.apache.spark.sql.sources.DataSourceRegister
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
-import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.sql.DataFrame
 
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.milvus.storage.schema.MilvusTypes
 import com.zilliz.milvus.storage.stats.PrimaryKeyStats
 import com.zilliz.milvus.storage.write.commit.{
   CommitOutcome,
@@ -60,8 +52,8 @@ import com.zilliz.spark.connector.options.{
   OptionParsing,
   StorageOptions
 }
-import com.zilliz.spark.connector.types.{SparkSchemaMapper, SparkTypes}
 import com.zilliz.spark.connector.types.ArrowConverter
+import com.zilliz.spark.connector.types.SparkSchemaMapper
 import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 
 /** The write builder `MilvusTable.newWriteBuilder` returns: `build()` checks

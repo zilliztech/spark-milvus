@@ -32,18 +32,14 @@ class MilvusSparkPlugin extends SparkPlugin {
   override def executorPlugin(): ExecutorPlugin = new MilvusExecutorPlugin
 }
 
-/** The executor side: load the native bundle once, at start. */
+/** The executor side: loads the storage and vector libraries once, at start, or
+  * logs why it could not.
+  */
 class MilvusExecutorPlugin extends ExecutorPlugin with Logging {
   override def init(
       context: PluginContext,
       extraConf: util.Map[String, String]
-  ): Unit = MilvusExecutorPlugin.preload()
-}
-
-object MilvusExecutorPlugin extends Logging {
-
-  /** Loads the storage and vector libraries, or logs why it could not. */
-  def preload(): Boolean = {
+  ): Unit = {
     val started = System.nanoTime()
     try {
       NativeStorageLibrary.load()
@@ -52,14 +48,12 @@ object MilvusExecutorPlugin extends Logging {
         s"Native libraries loaded at executor start in ${(System
             .nanoTime() - started) / 1000000L} ms: $runtime"
       )
-      true
     } catch {
       case error: Throwable =>
         logWarning(
           "Native libraries did not load at executor start; the first task that needs them will load them and report any failure",
           error
         )
-        false
     }
   }
 }

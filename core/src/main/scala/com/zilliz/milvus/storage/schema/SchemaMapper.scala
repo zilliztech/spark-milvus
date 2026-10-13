@@ -85,7 +85,7 @@ object SchemaMapper {
           field.name,
           new FieldType(
             field.nullable,
-            physicalTypeOf(field, dim, arrowType),
+            physicalTypeOf(field, arrowType),
             null,
             vectorMetadata(field, dim).asJava
           ),
@@ -113,7 +113,7 @@ object SchemaMapper {
         field.fieldID.toString,
         new FieldType(
           if (isVectorType(field.dataType)) field.nullable else true,
-          physicalTypeOf(field, dim, arrowType),
+          physicalTypeOf(field, arrowType),
           null,
           metadata.asJava
         ),
@@ -136,7 +136,6 @@ object SchemaMapper {
     */
   private def physicalTypeOf(
       field: FieldSchema,
-      dim: Int,
       arrowType: ArrowType
   ): ArrowType =
     if (MilvusTypes.isDenseVectorType(field.dataType) && field.nullable)

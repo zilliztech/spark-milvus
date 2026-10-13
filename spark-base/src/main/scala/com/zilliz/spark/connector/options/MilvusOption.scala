@@ -1,12 +1,8 @@
 package com.zilliz.spark.connector.options
 
-import java.lang.{Float => JavaFloat}
 import java.net.URI
-import java.util.Locale
 import scala.collection.Map
 
-import com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS
-import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 

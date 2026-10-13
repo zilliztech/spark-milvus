@@ -79,7 +79,6 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
   private def v3(milvusOption: MilvusOption = options) =
     MilvusV3InputPartition(
       task(SegmentLayout.Manifest("files/seg")),
-      "20",
       milvusOption
     )
 

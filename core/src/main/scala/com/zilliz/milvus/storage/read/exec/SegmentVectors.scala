@@ -12,7 +12,6 @@ import java.util.BitSet
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.types.pojo.Schema
-import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.storage.index.{KnowhereBuffers, VectorBatch}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask

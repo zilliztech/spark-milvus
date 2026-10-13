@@ -1,7 +1,5 @@
 package com.zilliz.spark.connector.write
 
-import scala.collection.mutable
-import scala.collection.JavaConverters._
 import scala.util.Try
 
 import org.apache.arrow.memory.RootAllocator

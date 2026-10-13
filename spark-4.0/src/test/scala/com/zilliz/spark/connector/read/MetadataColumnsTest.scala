@@ -45,7 +45,6 @@ class MetadataColumnsTest extends AnyFunSuite with Matchers {
       underlying,
       schema,
       requested = Set(MilvusOption.MilvusExtraColumnRowOffset),
-      partitionName = "20",
       segmentId = 30L
     )
 
