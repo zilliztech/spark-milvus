@@ -63,8 +63,14 @@ which a task reads one group at a time, holding at most two; the hits then
 meet their query rows in a join after the last stage. Every way gives the same
 result. Read by group, a job reads the query vectors once per segment set in
 total, and the executors' local disks need room for about two copies of them.
-`milvus.search.group.max.bytes` (default 512 MiB) is what one task answers at a
-time, counted as queries × (dimension × element width + K × 48 bytes).
+`milvus.search.group.max.bytes` is what one task answers at a time, counted as
+queries × (dimension × element width + K × 48 bytes). Left unset, the planner
+sizes the group for the task: the larger of 512 MiB and 8 queries for every
+core the task holds, capped at half the task's query heap budget (the `Search
+budget` log line says which applied). A 32-core executor at K=100,000 then
+answers 256 queries a Knowhere call instead of the 104 a fixed 512 MiB gives,
+and 13 at the 64 MiB a smaller executor would want; set the option to pin the
+size.
 `milvus.search.collect.threads` (default 0, the cores the task holds) is how many
 threads a search task checks, collects and packs a group's candidates on between
 two Knowhere calls; at large K that work is a third of the task, and on one

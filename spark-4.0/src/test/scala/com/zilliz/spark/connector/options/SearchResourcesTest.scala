@@ -81,6 +81,55 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
     SearchResources.queryBudget(200L * MiB, 0.6, 1).bytes shouldBe 0L
   }
 
+  test("a group feeds every core a few queries, within half the query budget") {
+    // L x 16 of the scaling test: a 24 GiB heap, one task holding 32 cores, so
+    // the budget is (24 GiB - 300 MiB) x 0.4 = 9.5 GiB and the cap 4.7 GiB.
+    val budget = SearchResources.queryBudget(24L * GiB, 0.6, 1).bytes
+    // k=100,000 at 768 dimensions: 3,072 + 100,000 x 48 = 4,803,072 bytes a
+    // query; 8 x 32 queries want 1.23 GB, more than the 512 MiB default.
+    val perQuery = 3072L + 100000L * 48L
+    val large = SearchResources.groupBytes(None, budget, 32, perQuery)
+    large.bytes shouldBe 8L * 32L * perQuery
+    large.reason should include("256 queries")
+    large.reason should include("8 queries x 32 cores")
+    // k=10,000: 483,072 bytes a query, 8 x 32 want 124 MB, so the default
+    // 512 MiB stands and holds 1,111 queries, 35 a core.
+    val small =
+      SearchResources.groupBytes(None, budget, 32, 3072L + 10000L * 48L)
+    small.bytes shouldBe SearchLimits.DefaultGroupMaxBytes
+    small.reason should include("(default;")
+    // S x 16 at k=100,000: a 6 GiB heap gives a 2.3 GiB budget and a 1.14 GiB
+    // cap; 8 x 8 queries want 307 MB, the default 512 MiB stands.
+    val sBudget = SearchResources.queryBudget(6L * GiB, 0.6, 1).bytes
+    SearchResources.groupBytes(None, sBudget, 8, perQuery).bytes shouldBe
+      SearchLimits.DefaultGroupMaxBytes
+    // A 1 GiB heap: the budget is 290 MB, the cap 145 MB wins over the default.
+    val tiny = SearchResources.groupBytes(
+      None,
+      SearchResources.queryBudget(1L * GiB, 0.6, 1).bytes,
+      8,
+      perQuery
+    )
+    tiny.bytes shouldBe (SearchResources
+      .queryBudget(1L * GiB, 0.6, 1)
+      .bytes * 0.5).toLong
+    tiny.reason should include("heap cap")
+    // A derived group never exceeds 2 GiB however large the heap: k=1,000,000 on
+    // 32 cores would want 12 GB.
+    val huge =
+      SearchResources.groupBytes(None, budget, 32, 3072L + 1000000L * 48L)
+    huge.bytes shouldBe SearchResources.MaxDerivedGroupBytes
+    huge.reason should include("2 GiB cap")
+    // Never below one query, even with no budget at all.
+    SearchResources.groupBytes(None, 0L, 8, perQuery).bytes shouldBe perQuery
+    // The option is used as it is.
+    SearchResources.groupBytes(Some(64L * MiB), budget, 32, perQuery) shouldBe
+      SearchResources.Choice(
+        64L * MiB,
+        s"${64L * MiB} (option milvus.search.group.max.bytes)"
+      )
+  }
+
   test("without a memory limit the budget is the old 2 GiB default per task") {
     SearchResources.segmentBudget(
       None,

@@ -130,8 +130,25 @@ private[connector] object FrameSearch extends Logging {
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
     )
     val rowBytes = rowWidth(types, dimension)
+    // One task per core here (the frame search runs under Spark's own slots),
+    // so a group is sized for one core within that task's share of the heap. A
+    // limit equal to the default is taken as not set: a frame input has no
+    // options of its own to say so.
+    val (_, taskHeap) = MilvusSearch.executorMemory(spark)
+    val group = SearchResources.groupBytes(
+      Some(limits.groupMaxBytes).filter(_ != SearchLimits.DefaultGroupMaxBytes),
+      SearchResources
+        .queryBudget(
+          taskHeap,
+          MilvusSearch.memoryFraction(spark),
+          TaskResources.of(spark).tasksPerExecutor
+        )
+        .bytes,
+      1,
+      SearchPlan.bytesPerQuery(layout, k) + k.toLong * rowBytes
+    )
     val groups =
-      cut(queryCount.toInt, layout, k, rowBytes, limits.groupMaxBytes)
+      cut(queryCount.toInt, layout, k, rowBytes, group.bytes)
     val blockRows = math
       .max(
         1L,
