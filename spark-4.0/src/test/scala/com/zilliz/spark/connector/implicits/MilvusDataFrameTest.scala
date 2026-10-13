@@ -20,6 +20,12 @@ import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
+import com.zilliz.milvus.storage.io.LocalObjectStore
+import com.zilliz.milvus.storage.snapshot.{
+  SegmentIndexes,
+  SnapshotCatalog,
+  V2SegmentResolver
+}
 import com.zilliz.spark.connector.extensions.{
   MilvusNearestByJoinExec,
   MilvusSparkPlugin,
@@ -234,6 +240,28 @@ class MilvusDataFrameTest
         row.getAs[Int]("indexes")
       )
     ) shouldBe Seq((5001L, "delivered", 2, 2))
+
+    // The document declares the index the build made, under the collection's
+    // own id and name, as each segment records it: a restore takes the
+    // declaration, a read the segments' records.
+    val back = new SnapshotCatalog(
+      new LocalObjectStore(directory.toString),
+      bucket = "",
+      V2SegmentResolver.Unavailable
+    ).read(written.head.getAs[String]("snapshot"))
+    val declared = back.indexes.toSeq.flatten.map(index =>
+      (index.indexId, index.name, index.indexParameters)
+    )
+    declared.map { case (id, name, parameters) =>
+      (id, name, parameters.get("metric_type"))
+    } shouldBe Seq((900L, "vector_hnsw", Some("IP")))
+    back.segments.map(_.indexes).foreach {
+      case SegmentIndexes.Available(entries) =>
+        entries.map(entry =>
+          (entry.indexId, entry.name, entry.parameters)
+        ) shouldBe declared
+      case other => fail(s"a delivered segment's indexes are $other")
+    }
 
     // The same write through CALL, to another prefix.
     coll.createOrReplaceTempView("docs_for_write")
