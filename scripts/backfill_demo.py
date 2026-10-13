@@ -1,396 +1,175 @@
 #!/usr/bin/env python3
+"""The Milvus side of scripts/run_backfill_demo.sh, which runs the steps of
+docs/user-guide-snapshot-backfill.md against a Milvus 3.0+.
+
+  prepare <dir>        Creates a collection of 20,000 rows, builds its vector
+                       index and loads it, adds the nullable fields new_field1
+                       (VARCHAR) and new_field2 (INT64), and takes a snapshot
+                       that pins its files for an hour. Writes
+                       <dir>/new_fields.parquet: the keys in the first and the
+                       last 30% get values, the 40% in the middle none. Prints
+                       the collection, the snapshot's s3a:// path and the
+                       parquet path as JSON.
+  verify <collection>  Queries the collection after the commit until the values
+                       show: with --mode replace a key the parquet holds gets
+                       its values, and every other key NULL.
+  drop <collection>    Drops the snapshot and the collection.
+
+Needs pymilvus 3.0+ (for the snapshot API), numpy and pyarrow. Reads
+MILVUS_URI, MILVUS_TOKEN and S3_BUCKET, as run_backfill_demo.sh sets them.
 """
-PySpark Backfill Demo Script
 
-This script demonstrates the Milvus backfill operation using PySpark.
-It creates a test collection, inserts data, and performs a backfill operation
-to add new fields with NULL value handling.
-
-Prerequisites:
-- Milvus 2.6+ running at localhost:19530
-- Minio running at localhost:9000
-- PySpark installed
-- pymilvus installed
-
-Usage:
-    python scripts/backfill_demo.py
-"""
-
+import json
 import os
 import sys
 import time
-import tempfile
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
-from pymilvus import (
-    connections,
-    Collection,
-    CollectionSchema,
-    FieldSchema,
-    DataType,
-    utility,
-    MilvusClient
-)
+import urllib.parse
+
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pymilvus import DataType, MilvusClient
+
+ROWS = 20000
+DIM = 16
+BATCH = 5000
+# The parquet holds keys below FIRST_END and from LAST_START on.
+FIRST_END = int(ROWS * 0.3)
+LAST_START = int(ROWS * 0.7)
 
 
-class MilvusBackfillDemo:
-    """Demo class for Milvus backfill operation"""
+def client():
+    return MilvusClient(
+        uri=os.environ.get("MILVUS_URI", "http://localhost:19530"),
+        token=os.environ.get("MILVUS_TOKEN", "root:Milvus"),
+    )
 
-    def __init__(self):
-        self.now = int(time.time() * 1000)
-        self.collection_name = f"backfilltestcollection_{self.now}"
-        self.snapshot_name = f"backfill_snapshot_{self.now}"
-        self.dim = 128
-        self.batch_size = 10000
-        self.batch_count = 5
-        self.total_records = self.batch_size * self.batch_count
 
-        # Milvus connection params
-        self.milvus_uri = "http://localhost:19530"
-        self.milvus_token = "root:Milvus"
+def snapshot_name(collection):
+    return f"{collection}_backfill"
 
-        # S3/Minio params
-        self.s3_endpoint = "localhost:9000"
-        self.s3_bucket = "a-bucket"
-        self.s3_access_key = "minioadmin"
-        self.s3_secret_key = "minioadmin"
 
-        self.spark = None
-        self.collection = None
-        self.client = None
+def object_key(location, bucket):
+    """The key of a snapshot location, which Milvus gives as a bucket-relative
+    key or as a URI such as minio://minio:9000/<bucket>/<key>."""
+    if "://" not in location:
+        return location.lstrip("/")
+    uri = urllib.parse.urlparse(location)
+    path = uri.path.lstrip("/")
+    if uri.netloc == bucket:
+        return path
+    head, _, key = path.partition("/")
+    if head != bucket:
+        raise ValueError(f"The snapshot {location} is not in the bucket {bucket}")
+    return key
 
-    def setup_spark(self):
-        """Initialize SparkSession"""
-        print("Initializing Spark session...")
-        self.spark = SparkSession.builder \
-            .appName("MilvusBackfillDemo") \
-            .master("local[*]") \
-            .config("spark.jars.packages", "io.milvus:spark-milvus_2.12:0.1.0") \
-            .getOrCreate()
 
-        self.spark.sparkContext.setLogLevel("WARN")
-        print(f"Spark version: {self.spark.version}")
-
-    def setup_milvus(self):
-        """Connect to Milvus and create test collection"""
-        print("\nConnecting to Milvus...")
-        connections.connect(
-            alias="default",
-            uri=self.milvus_uri,
-            token=self.milvus_token
+def prepare(directory):
+    milvus = client()
+    name = f"backfill_demo_{int(time.time() * 1000)}"
+    schema = milvus.create_schema(auto_id=False)
+    schema.add_field("id", DataType.INT64, is_primary=True)
+    schema.add_field("title", DataType.VARCHAR, max_length=64)
+    schema.add_field("vec", DataType.FLOAT_VECTOR, dim=DIM)
+    milvus.create_collection(name, schema=schema)
+    rng = np.random.default_rng(42)
+    for start in range(0, ROWS, BATCH):
+        milvus.insert(
+            name,
+            [
+                {"id": i, "title": f"doc {i}", "vec": rng.random(DIM, dtype=np.float32).tolist()}
+                for i in range(start, start + BATCH)
+            ],
         )
+    milvus.flush(name)
+    index = milvus.prepare_index_params()
+    index.add_index(field_name="vec", index_type="FLAT", metric_type="L2")
+    milvus.create_index(name, index)
+    milvus.load_collection(name)
 
-        # Initialize MilvusClient for snapshot operations
-        self.client = MilvusClient(
-            uri=self.milvus_uri,
-            token=self.milvus_token
+    # 5.1 of the guide: the snapshot's schema has to hold the target fields.
+    milvus.add_collection_field(name, "new_field1", DataType.VARCHAR, max_length=64, nullable=True)
+    milvus.add_collection_field(name, "new_field2", DataType.INT64, nullable=True)
+    milvus.create_snapshot(
+        snapshot_name=snapshot_name(name),
+        collection_name=name,
+        compaction_protection_seconds=3600,
+    )
+    location = milvus.describe_snapshot(snapshot_name=snapshot_name(name), collection_name=name).s3_location
+    bucket = os.environ.get("S3_BUCKET", "a-bucket")
+
+    keys = [*range(FIRST_END), *range(LAST_START, ROWS)]
+    parquet = os.path.join(directory, "new_fields.parquet")
+    pq.write_table(
+        pa.table(
+            {
+                "pk": pa.array(keys, pa.int64()),
+                "new_field1": pa.array([f"value {k}" for k in keys], pa.string()),
+                "new_field2": pa.array([k * 2 for k in keys], pa.int64()),
+            }
+        ),
+        parquet,
+    )
+    print(
+        f"Collection {name}: {ROWS} rows; new_field1 and new_field2 added; "
+        f"{len(keys)} keys in {parquet}",
+        file=sys.stderr,
+    )
+    print(
+        json.dumps(
+            {
+                "collection": name,
+                "snapshot": f"s3a://{bucket}/{object_key(location, bucket)}",
+                "parquet": parquet,
+            }
         )
+    )
 
-        # Drop collection if exists
-        if utility.has_collection(self.collection_name):
-            print(f"Dropping existing collection: {self.collection_name}")
-            utility.drop_collection(self.collection_name)
 
-        print(f"Creating collection: {self.collection_name}")
-        self._create_collection()
+def expected(key):
+    if key < FIRST_END or key >= LAST_START:
+        return f"value {key}", key * 2
+    return None, None
 
-    def _create_collection(self):
-        """Create test collection with schema"""
-        fields = [
-            FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=False),
-            FieldSchema(name="int64", dtype=DataType.INT64, is_clustering_key=True),
-            FieldSchema(name="float", dtype=DataType.FLOAT),
-            FieldSchema(name="varchar", dtype=DataType.VARCHAR, max_length=1024),
-            FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=self.dim)
-        ]
 
-        schema = CollectionSchema(
-            fields=fields,
-            description="Test collection for Milvus Backfill demo"
+def verify(name, timeout=300):
+    milvus = client()
+    sample = [0, FIRST_END - 1, FIRST_END, LAST_START - 1, LAST_START, ROWS - 1]
+    deadline = time.time() + timeout
+    while True:
+        rows = milvus.query(
+            name, filter=f"id in {sample}", output_fields=["id", "new_field1", "new_field2"]
         )
+        found = {row["id"]: (row.get("new_field1"), row.get("new_field2")) for row in rows}
+        if found.get(0) == expected(0) or time.time() > deadline:
+            break
+        # The query nodes reopen the committed segments on their own.
+        time.sleep(5)
+    filled = milvus.query(name, filter="new_field1 is not null", output_fields=["count(*)"])[0]["count(*)"]
+    wrong = [key for key in sample if found.get(key) != expected(key)]
+    for key in sample:
+        print(f"id {key}: {found.get(key)}, expected {expected(key)}")
+    print(f"{filled} of {ROWS} rows have new_field1; the parquet holds {FIRST_END + ROWS - LAST_START} keys")
+    if wrong or filled != FIRST_END + ROWS - LAST_START:
+        print("Backfill demo FAILED")
+        sys.exit(1)
+    print("Backfill demo passed")
 
-        self.collection = Collection(
-            name=self.collection_name,
-            schema=schema,
-            shards_num=1
-        )
 
-        print(f"Collection created: {self.collection_name}")
-
-    def insert_test_data(self):
-        """Insert test data into collection"""
-        print(f"\nInserting {self.total_records:,} test records...")
-        print(f"  Batches: {self.batch_count}")
-        print(f"  Batch size: {self.batch_size:,}")
-
-        np.random.seed(42)
-
-        for i in range(self.batch_count):
-            # Generate batch data
-            ids = list(range(i * self.batch_size, (i + 1) * self.batch_size))
-            int64s = list(range(self.batch_size))
-            floats = np.random.random(self.batch_size).tolist()
-            varchars = [f"test_string_{i * self.batch_size + j}" for j in range(self.batch_size)]
-            vectors = np.random.random((self.batch_size, self.dim)).tolist()
-
-            # Insert batch
-            self.collection.insert([ids, int64s, floats, varchars, vectors])
-
-            if (i + 1) % 10 == 0:
-                print(f"  Inserted {(i + 1) * self.batch_size:,} records...")
-
-        # Flush to ensure data is persisted
-        print("  Flushing data...")
-        self.collection.flush()
-        time.sleep(3)  # Wait for flush to complete
-
-        print(f"✓ Inserted {self.total_records:,} records successfully")
-
-    def create_backfill_data(self):
-        """Create backfill data with NULL gaps in the middle"""
-        print("\n=== Creating Backfill Data ===")
-
-        # Distribution:
-        # - First 30%: Has backfill data
-        # - Middle 40%: NULL (un-joined) ← Key test: NULL in the middle
-        # - Last 30%: Has backfill data
-        first_range_end = int(self.total_records * 0.3)
-        null_range_start = first_range_end
-        null_range_end = int(self.total_records * 0.7)
-        last_range_start = null_range_end
-
-        records_with_data = first_range_end + (self.total_records - last_range_start)
-        expected_null_records = null_range_end - null_range_start
-
-        print(f"Total records in collection: {self.total_records:,}")
-        print("Backfill data distribution:")
-        print(f"  Records 0-{first_range_end-1:,}: Has backfill data ({first_range_end:,} rows)")
-        print(f"  Records {null_range_start:,}-{null_range_end-1:,}: NO backfill data ({expected_null_records:,} rows)")
-        print(f"  Records {last_range_start:,}-{self.total_records-1:,}: Has backfill data ({self.total_records - last_range_start:,} rows)")
-        print(f"Total records with data: {records_with_data:,}")
-        print(f"Total records with NULL: {expected_null_records:,}")
-
-        # Create DataFrame with backfill data (skip middle range)
-        # Use pandas/pyarrow to write parquet directly (avoid Spark classloader issues)
-        import pandas as pd
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        data = {
-            "pk": [],
-            "new_field1": [],
-            "new_field2": []
-        }
-
-        # First 30%
-        for i in range(first_range_end):
-            data["pk"].append(i)
-            data["new_field1"].append(f"api_new_value_{i}")
-            data["new_field2"].append(i * 2)
-
-        # Last 30%
-        for i in range(last_range_start, self.total_records):
-            data["pk"].append(i)
-            data["new_field1"].append(f"api_new_value_{i}")
-            data["new_field2"].append(i * 2)
-
-        # Create pandas DataFrame and save to parquet using pyarrow
-        pdf = pd.DataFrame(data)
-        temp_dir = tempfile.gettempdir()
-        parquet_path = os.path.join(temp_dir, f"new_field_data_{int(time.time() * 1000)}.parquet")
-
-        # Convert to pyarrow Table and write as parquet (no compression to avoid snappy dependency)
-        table = pa.Table.from_pandas(pdf)
-        pq.write_table(table, parquet_path, compression='none')
-
-        print(f"\n✓ Backfill data saved to: {parquet_path}")
-        print(f"  Columns: pk, new_field1, new_field2")
-        print(f"  Rows: {len(pdf):,}")
-
-        # Show first 10 rows using pandas
-        print(pdf.head(10).to_string(index=False))
-
-        return parquet_path, records_with_data, expected_null_records
-
-    def create_snapshot(self):
-        """Create snapshot and return S3 location path"""
-        print("\n=== Creating Snapshot ===")
-
-        print(f"Creating snapshot: {self.snapshot_name}")
-        self.client.create_snapshot(
-            snapshot_name=self.snapshot_name,
-            collection_name=self.collection_name,
-            description="add field backfill snapshot",
-        )
-
-        # Get snapshot path from S3 location
-        snapshot_info = self.client.describe_snapshot(
-            snapshot_name=self.snapshot_name,
-            collection_name=self.collection_name,
-        )
-        snapshot_path = snapshot_info.s3_location
-
-        print(f"✓ Snapshot created at: {snapshot_path}")
-
-        # Format as s3a:// path for Spark/Hadoop
-        s3a_path = f"s3a://{self.s3_bucket}/{snapshot_path.lstrip('/')}"
-        print(f"  S3A path: {s3a_path}")
-
-        return s3a_path
-
-    def run_backfill(self, parquet_path, snapshot_path):
-        """Execute backfill operation via Scala API"""
-        print("\n=== Executing Backfill Operation ===")
-
-        # Get Scala MilvusBackfill object via Py4J
-        scala_package = "com.zilliz.spark.connector.operations.backfill"
-
-        try:
-            # Access Scala singleton object
-            MilvusBackfill = self.spark._jvm.com.zilliz.spark.connector.operations.backfill.MilvusBackfill
-            BackfillConfig = self.spark._jvm.com.zilliz.spark.connector.operations.backfill.BackfillConfig
-
-            # Get Scala None for optional parameters (instead of Python None which becomes Java null)
-            # Access Scala's None$ singleton object through Py4J
-            scala_none = self.spark._jvm.scala.Option.empty()
-
-            # Create BackfillConfig
-            config = BackfillConfig(
-                self.milvus_uri,
-                self.milvus_token,
-                "default",  # databaseName
-                self.collection_name,
-                scala_none,  # partitionName (Scala Option[String])
-                self.s3_endpoint,
-                self.s3_bucket,
-                self.s3_access_key,
-                self.s3_secret_key,
-                False,  # s3UseSSL
-                "files",  # s3RootPath
-                "us-east-1",  # s3Region
-                512,  # batchSize
-                scala_none  # customOutputPath (Scala Option[String])
-            )
-
-            print(f"Backfill configuration:")
-            print(f"  Collection: {self.collection_name}")
-            print(f"  Backfill data: {parquet_path}")
-            print(f"  Snapshot path: {snapshot_path}")
-            print(f"  S3 endpoint: {self.s3_endpoint}")
-            print(f"  Batch size: 512")
-
-            # Execute backfill
-            print("\nExecuting backfill...")
-            result = MilvusBackfill.run(
-                self.spark._jsparkSession,
-                parquet_path,
-                snapshot_path,
-                config
-            )
-
-            # Check result (Scala Either type)
-            if result.isRight():
-                success = result.right().get()
-                self._print_result(success)
-                return True
-            else:
-                error = result.left().get()
-                print(f"\n✗ Backfill failed: {error.message()}")
-                return False
-
-        except Exception as e:
-            print(f"\n✗ Error calling Scala API: {e}")
-            print("\nNote: Make sure the spark-milvus JAR is in the classpath")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    def _print_result(self, success):
-        """Print backfill result details"""
-        print("\n=== Backfill Result ===")
-        print(f"  Collection ID: {success.collectionId()}")
-        print(f"  Partition ID: {success.partitionId()}")
-        print(f"  Segments processed: {success.segmentResults().size()}")
-        print(f"  New fields: {', '.join(success.newFieldNames())}")
-        print(f"  Total execution time: {success.executionTimeMs()}ms")
-
-        print("\n  Per-Segment Results:")
-        total_rows = 0
-
-        # Iterate over segment results (Scala Map)
-        for entry in success.segmentResults().toSeq():
-            segment_id = entry._1()
-            seg_result = entry._2()
-
-            print(f"  Segment {segment_id}:")
-            print(f"    Rows: {seg_result.rowCount()}")
-            print(f"    Execution time: {seg_result.executionTimeMs()}ms")
-            print(f"    Output path: {seg_result.outputPath()}")
-
-            total_rows += seg_result.rowCount()
-
-        print(f"\n✓ Total rows processed: {total_rows:,}")
-
-    def cleanup(self):
-        """Cleanup resources"""
-        print("\n=== Cleanup ===")
-
-        if self.collection:
-            print(f"Dropping collection: {self.collection_name}")
-            utility.drop_collection(self.collection_name)
-
-        if self.spark:
-            print("Stopping Spark session...")
-            self.spark.stop()
-
-        connections.disconnect("default")
-        print("✓ Cleanup complete")
-
-    def run(self):
-        """Main execution flow"""
-        try:
-            print("=" * 70)
-            print("Milvus Backfill Demo - PySpark Edition")
-            print("=" * 70)
-
-            # Setup
-            self.setup_spark()
-            self.setup_milvus()
-
-            # Prepare data
-            self.insert_test_data()
-            parquet_path, records_with_data, expected_null = self.create_backfill_data()
-
-            # Create snapshot
-            snapshot_path = self.create_snapshot()
-
-            # Execute backfill
-            success = self.run_backfill(parquet_path, snapshot_path)
-
-            if success:
-                print("\n" + "=" * 70)
-                print("✓ Backfill demo completed successfully!")
-                print("=" * 70)
-            else:
-                print("\n" + "=" * 70)
-                print("✗ Backfill demo failed")
-                print("=" * 70)
-
-        except KeyboardInterrupt:
-            print("\n\nDemo interrupted by user")
-        except Exception as e:
-            print(f"\n\n✗ Error during demo: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            self.cleanup()
+def drop(name):
+    milvus = client()
+    if milvus.has_collection(name):
+        milvus.drop_snapshot(snapshot_name=snapshot_name(name), collection_name=name)
+        milvus.drop_collection(name)
+        print(f"Dropped {name} and its snapshot", file=sys.stderr)
 
 
 def main():
-    """Entry point"""
-    demo = MilvusBackfillDemo()
-    demo.run()
+    commands = {"prepare": prepare, "verify": verify, "drop": drop}
+    if len(sys.argv) != 3 or sys.argv[1] not in commands:
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)
+    commands[sys.argv[1]](sys.argv[2])
 
 
 if __name__ == "__main__":
