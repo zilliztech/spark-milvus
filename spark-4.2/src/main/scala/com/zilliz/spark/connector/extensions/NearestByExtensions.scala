@@ -35,8 +35,10 @@ import com.zilliz.milvus.storage.schema.MetricType
   * (docs/design/architecture/dataframe-api.html section 3).
   */
 object NearestByExtensions {
-  def apply(extensions: SparkSessionExtensions): Unit =
+  def apply(extensions: SparkSessionExtensions): Unit = {
     extensions.injectPostHocResolutionRule(new ReplaceNearestByJoin(_))
+    extensions.injectOptimizerRule(_ => PruneNearestByBase)
+  }
 }
 
 /** Replaces a `NearestByJoin` with [[MilvusNearestByJoin]] in the analyzer's
