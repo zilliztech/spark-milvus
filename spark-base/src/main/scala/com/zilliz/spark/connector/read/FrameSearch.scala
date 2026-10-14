@@ -303,18 +303,7 @@ private[connector] object FrameSearch extends Logging {
         var count = 0
         while (count < blockRows && rows.hasNext) {
           val row = rows.next()
-          vectors(count) = vector.eval(row) match {
-            case null => null
-            case array: ArrayData =>
-              val size = array.numElements()
-              if (size != dimension) {
-                function.score(first, new Array[Float](size))
-                throw new IllegalStateException(
-                  s"A base vector of $size elements met a query of $dimension, and the ranking function did not fail"
-                )
-              } else if ((0 until size).exists(array.isNullAt)) null
-              else array.toFloatArray()
-          }
+          vectors(count) = baseVector(vector.eval(row), first, function)
           copies(count) =
             if (vectors(count) == null) null else project(row).copy()
           count += 1
@@ -340,42 +329,90 @@ private[connector] object FrameSearch extends Logging {
             Some(EngineRange.Batch.of(batch, layout, metric, function))
           )
         finally batch.close()
-        merger.foreachKept { (_, offset) =>
-          if (offset >= firstRow)
-            kept.putIfAbsent(offset, copies((offset - firstRow).toInt))
-        }
-        java.util.Arrays.fill(copies.asInstanceOf[Array[AnyRef]], null)
-        java.util.Arrays.fill(vectors.asInstanceOf[Array[AnyRef]], null)
         // Rows pushed out of every heap are let go once they are as many as
         // the heaps hold.
-        if (kept.size > 2L * group.queries * k) {
-          val held = new java.util.HashMap[java.lang.Long, UnsafeRow]()
-          merger.foreachKept((_, offset) =>
-            held.putIfAbsent(offset, kept.get(offset))
-          )
-          kept.clear()
-          kept.putAll(held)
-        }
+        keepHeld(kept, merger, copies, firstRow, 2L * group.queries * k)
+        java.util.Arrays.fill(copies.asInstanceOf[Array[AnyRef]], null)
+        java.util.Arrays.fill(vectors.asInstanceOf[Array[AnyRef]], null)
       }
-      val answers = Vector.newBuilder[(Long, Array[Byte])]
-      var query = 0
-      while (query < group.queries) {
-        val results = merger.results(query)
-        if (results.nonEmpty)
-          answers += group.ids(query) -> CarriedCandidates.of(
-            results.map(candidate =>
-              candidate -> kept.get(candidate.rowOffset).getBytes
-            ),
-            metric
-          )
-        query += 1
-      }
+      val answers = carriedAnswers(merger, group, kept, metric)
       metrics.candidates.add(merger.size.toLong)
-      answers.result().iterator
+      answers
     } finally {
       matrix.close()
       allocator.close()
     }
+  }
+
+  /** A base row's vector as the scan takes it, or NULL for one that ranks
+    * nothing: a NULL vector, or one with a NULL element. A vector of another
+    * length than the queries' is scored against `first`, the first query as the
+    * engine received it, so that it fails as Spark's function fails on that
+    * pair.
+    */
+  private def baseVector(
+      value: Any,
+      first: Array[Float],
+      function: RankingFunction
+  ): Array[Float] = value match {
+    case null => null
+    case array: ArrayData =>
+      val size = array.numElements()
+      if (size != first.length) {
+        function.score(first, new Array[Float](size))
+        throw new IllegalStateException(
+          s"A base vector of $size elements met a query of ${first.length}, and the ranking function did not fail"
+        )
+      } else if ((0 until size).exists(array.isNullAt)) null
+      else array.toFloatArray()
+  }
+
+  /** Keeps, by position in the partition, the rows of the block starting at
+    * `firstRow` that some query's heap now holds; once `kept` holds more than
+    * `limit`, the rows no heap holds any more are let go.
+    */
+  private def keepHeld(
+      kept: java.util.HashMap[java.lang.Long, UnsafeRow],
+      merger: TopKMerger,
+      copies: Array[UnsafeRow],
+      firstRow: Long,
+      limit: Long
+  ): Unit = {
+    merger.foreachKept { (_, offset) =>
+      if (offset >= firstRow)
+        kept.putIfAbsent(offset, copies((offset - firstRow).toInt))
+    }
+    if (kept.size > limit) {
+      val held = new java.util.HashMap[java.lang.Long, UnsafeRow]()
+      merger.foreachKept((_, offset) =>
+        held.putIfAbsent(offset, kept.get(offset))
+      )
+      kept.clear()
+      kept.putAll(held)
+    }
+  }
+
+  /** Each query's best k, every candidate carrying its row. */
+  private def carriedAnswers(
+      merger: TopKMerger,
+      group: SearchQueries.Group,
+      kept: java.util.HashMap[java.lang.Long, UnsafeRow],
+      metric: MetricType
+  ): Iterator[(Long, Array[Byte])] = {
+    val answers = Vector.newBuilder[(Long, Array[Byte])]
+    var query = 0
+    while (query < group.queries) {
+      val results = merger.results(query)
+      if (results.nonEmpty)
+        answers += group.ids(query) -> CarriedCandidates.of(
+          results.map(candidate =>
+            candidate -> kept.get(candidate.rowOffset).getBytes
+          ),
+          metric
+        )
+      query += 1
+    }
+    answers.result().iterator
   }
 
   /** One query's merged answer as rows of the query id and the base row. */
