@@ -8,7 +8,6 @@ import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
 import com.zilliz.milvus.jni.vector.NativeVectorIndex
 import com.zilliz.milvus.storage.codec.VectorIndexFamilies
-import com.zilliz.milvus.storage.read.exec.SegmentVectors
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.Logging
 
@@ -101,7 +100,7 @@ object IndexBuilder extends Logging {
     * the `valid_data` bitmap the index files carry (section 2.7).
     */
   def assemble(
-      vectors: SegmentVectors,
+      vectors: VectorBatch.Stream,
       layout: VectorLayout,
       segmentRows: Long,
       allocator: BufferAllocator

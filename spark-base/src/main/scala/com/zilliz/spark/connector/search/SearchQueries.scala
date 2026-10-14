@@ -12,7 +12,7 @@ import org.apache.spark.Partitioner
 
 import com.zilliz.milvus.storage.index.{QueryMatrix, SearchPlan}
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
-import com.zilliz.spark.connector.options.{MilvusOption, TaskResources}
+import com.zilliz.spark.connector.options.MilvusOption
 
 /** The query set a search takes: `query_id` and `vector`, the query rows of a
   * nearest-by join numbered by their position, packed into the bytes Knowhere
@@ -80,8 +80,7 @@ private[search] object SearchQueries {
         planned: Seq[SearchPlan.QueryGroup],
         metric: MetricType,
         layout: VectorLayout,
-        resources: TaskResources,
-        executorQueryHeapBytes: Long
+        profile: Option[ResourceProfile]
     ): RDD[Group] = this match {
       case Packed(ids, vectors) =>
         broadcastGroups(spark, ids, vectors, planned)
@@ -96,7 +95,7 @@ private[search] object SearchQueries {
           planned,
           metric,
           layout,
-          packProfile(planned, layout, resources, executorQueryHeapBytes)
+          profile
         )
     }
   }
@@ -111,17 +110,6 @@ private[search] object SearchQueries {
     */
   final case class Shuffled(selected: DataFrame) extends Delivery {
     override def shuffled: Boolean = true
-  }
-
-  object Delivery {
-
-    def of(queries: Input, layout: VectorLayout, maxBytes: Long): Delivery =
-      queries match {
-        case packed: Packed => packed
-        case Frame(selected, count) =>
-          if (bytes(count, layout) > maxBytes) Shuffled(selected)
-          else Broadcast(selected)
-      }
   }
 
   /** One query group as it reaches a task: the ids of its queries, the bytes
@@ -178,24 +166,6 @@ private[search] object SearchQueries {
         val (allIds, allVectors) = held.value
         Group.of(allIds, allVectors, planned(index))
       }
-  }
-
-  /** The task resources of the stage that packs the query groups for the
-    * shuffle. A packing task holds one group's ids and vectors on the heap,
-    * outside what Spark manages, so no more of them run at once on an executor
-    * than that heap holds with room to spare.
-    */
-  private def packProfile(
-      groups: Seq[SearchPlan.QueryGroup],
-      layout: VectorLayout,
-      resources: TaskResources,
-      executorQueryHeapBytes: Long
-  ): Option[ResourceProfile] = {
-    val perGroup = groups.map(_.queries.toLong).max *
-      (SearchPlan.QueryIdBytes + layout.rowBytes.toLong)
-    val fits =
-      math.max(1L, executorQueryHeapBytes / (perGroup + perGroup / 2))
-    resources.atMost(math.min(fits, Int.MaxValue.toLong).toInt)
   }
 
   /** The query set packed on the executors, one partition per query group, each

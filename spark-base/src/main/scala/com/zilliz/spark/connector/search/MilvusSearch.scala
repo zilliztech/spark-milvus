@@ -4,7 +4,6 @@ import scala.jdk.CollectionConverters._
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
-import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -16,18 +15,13 @@ import com.zilliz.milvus.storage.index.{
   SearchPlan
 }
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
-import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{
   MetricType,
   VectorElementType,
   VectorLayout
 }
 import com.zilliz.spark.connector.metrics.SearchMetrics
-import com.zilliz.spark.connector.options.{
-  MilvusOption,
-  SearchLimits,
-  TaskResources
-}
+import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 import com.zilliz.spark.connector.read.MilvusInputPartition
 import io.milvus.grpc.schema.FieldSchema
 
@@ -105,67 +99,40 @@ object MilvusSearch extends Logging {
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
     )
 
-    val budget =
-      SearchBudget.of(
-        spark,
-        limits,
-        searchMode == SearchMode.PreferIndex,
-        layout,
-        k
-      )
-    val delivery =
-      SearchQueries.Delivery.of(queries, layout, limits.queriesMaxBytes)
     val caseInsensitive = new CaseInsensitiveStringMap(options.asJava)
     val read = MilvusOption(caseInsensitive).readLimits
-    // A block the call named is used as it is; otherwise each executor
-    // chooses one for its own machine when it opens a segment.
     val namedBatch =
       if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
         Some(read.batchMaxBytes)
       else None
-    val plan = SearchPlan.of(
+    val execution = SearchExecutionPlan.milvus(
+      spark,
+      limits,
+      queries,
       tasks,
-      layout,
-      budget.concurrency,
-      queryCount.toInt,
-      k,
-      budget.group.bytes,
-      SearchPlan.Budget(budget.segments.bytes, budget.queries.bytes),
-      footprint(
-        searchMode,
-        field,
-        searchMetric,
-        layout,
-        SearchResources.exactScanBatch(namedBatch).bytes
-      ),
-      delivery.shuffled,
-      // The batched distance entry is single-threaded on its task, so an
-      // exact search is as parallel as its tasks (decision 28).
-      splitQueries = searchMode == SearchMode.Exact,
-      rangesWanted = limits.queryRanges
-    )
-    val request = SegmentSetSearch.Request(
-      field.name,
-      layout,
       field.fieldID,
-      field.nullable,
+      layout,
       k,
       searchMetric,
       searchMode,
-      filter,
-      searchParameters,
-      plan.capacity,
-      read.arrowMaxBytes,
-      budget.slots,
       namedBatch,
-      plan.resident,
-      // Between two Knowhere calls a search task checks, collects and packs
-      // its candidates on as many threads as it holds cores, unless the call
-      // said.
-      if (limits.collectThreads > 0) limits.collectThreads else budget.cores,
-      predicate,
-      Some(function),
-      limits.callsInFlight
+      takeColumns = outputSchema.nonEmpty
+    )
+    val plan = execution.segments
+    val delivery = execution.delivery
+    val request = SegmentSetSearch.Request(
+      vectorColumn = field.name,
+      layout = layout,
+      fieldId = field.fieldID,
+      nullable = field.nullable,
+      k = k,
+      metric = searchMetric,
+      mode = searchMode,
+      filter = filter,
+      parameters = searchParameters,
+      arrowMaxBytes = read.arrowMaxBytes,
+      predicate = predicate,
+      function = Some(function)
     )
     // What the first stage has to get through, so its progress has a
     // denominator. An indexed search visits part of a segment and Knowhere does
@@ -175,9 +142,11 @@ object MilvusSearch extends Logging {
       if (searchMode != SearchMode.Exact) 0L
       else SearchProgress.comparedPairs(queryCount, tasks)
     logPlan(
-      budget,
+      execution.budget,
       plan,
       request,
+      execution.tasks.head,
+      execution.batch,
       queries,
       delivery,
       tasks.size,
@@ -186,9 +155,8 @@ object MilvusSearch extends Logging {
 
     // The merge and take stages run under Spark's own task slots, so a task's
     // share of the unmanaged heap is the queries' budget at that concurrency.
-    val stageHeap = budget.heapFor(budget.resources.tasksPerExecutor)
-    val mergeParts =
-      SearchMerge.partitions(spark, queryCount, plan.tasks, k, stageHeap.bytes)
+    val stageHeap = execution.stageHeap
+    val mergeParts = execution.mergePartitions
     logInfo(
       s"Merge stage: $queryCount queries x ${plan.tasks} answers of $k over $mergeParts partitions, " +
         s"about ${queryCount / mergeParts} queries a partition at ${plan.tasks.toLong * k * CandidateBytes.Width} bytes each " +
@@ -196,13 +164,11 @@ object MilvusSearch extends Logging {
     )
     val found = candidates(
       spark,
-      delivery,
       partitions,
-      plan,
+      execution,
       request,
       layout,
-      metrics,
-      budget
+      metrics
     )
     SearchProgress.watch(
       spark.sparkContext,
@@ -219,121 +185,16 @@ object MilvusSearch extends Logging {
       SearchMerge.Hits(hits.queryExecution.toRdd, hits.schema)
     else
       take(
-        spark,
         hits,
         outputSchema,
         partitions,
         request.arrowMaxBytes,
         metrics,
         queryCount * k,
-        stageHeap
+        stageHeap,
+        execution.takePartitioning.get
       )
   }
-
-  /** How many first-stage tasks run at once, and what one of them may keep
-    * (docs/design/architecture/vector-search.html section 2.1,
-    * search-resources.html section 3.3). An index search declares that its
-    * tasks take every core of their executor, so one runs per executor;
-    * otherwise a task takes `spark.task.cpus`.
-    *
-    * @param profile
-    *   the task resources the first stage declares, when it declares them
-    * @param slots
-    *   the first-stage tasks one executor runs at once
-    * @param cores
-    *   the cores one of them holds
-    * @param segments
-    *   what one of them may keep off the heap
-    * @param queries
-    *   what one of them may keep on the heap
-    * @param group
-    *   what one Knowhere call answers: enough queries for the cores the task
-    *   holds, within the heap the task has (search-resources.html 3.3; the
-    *   explicit option is used as it is)
-    */
-  private final case class SearchBudget(
-      resources: TaskResources,
-      profile: Option[ResourceProfile],
-      slots: Int,
-      cores: Int,
-      heap: Long,
-      fraction: Double,
-      segments: SearchResources.Choice,
-      queries: SearchResources.Choice,
-      group: SearchResources.Choice
-  ) {
-
-    /** The first-stage tasks the whole search runs at once. */
-    def concurrency: Int = resources.executors * slots
-
-    /** The unmanaged heap of one task when `tasks` run at once on an executor.
-      */
-    def heapFor(tasks: Int): SearchResources.Choice =
-      SearchResources.queryBudget(heap, fraction, tasks)
-  }
-
-  private object SearchBudget {
-
-    def of(
-        spark: SparkSession,
-        limits: SearchLimits,
-        index: Boolean,
-        layout: VectorLayout,
-        k: Int
-    ): SearchBudget = {
-      val resources = TaskResources.of(spark)
-      val profile = if (index) resources.wholeExecutor else None
-      val slots = if (profile.nonEmpty) 1 else resources.tasksPerExecutor
-      val cores =
-        if (profile.nonEmpty) resources.executorCores
-        else math.max(1, resources.taskCpus)
-      val (memoryLimit, heap) = SearchResources.executorMemory(spark)
-      val fraction = SearchResources.memoryFraction(spark)
-      val queries = SearchResources.queryBudget(heap, fraction, slots)
-      SearchBudget(
-        resources,
-        profile,
-        slots,
-        cores,
-        heap,
-        fraction,
-        SearchResources.segmentBudget(
-          memoryLimit,
-          heap,
-          slots,
-          limits.segmentsMaxBytes,
-          index = index
-        ),
-        queries,
-        SearchResources.groupBytes(
-          limits.groupMaxBytes,
-          queries.bytes,
-          cores,
-          SearchPlan.bytesPerQuery(layout, k)
-        )
-      )
-    }
-  }
-
-  /** What a segment costs the task that searches it: the index the snapshot
-    * recorded, as Knowhere holds it once loaded, or the vectors an exact scan
-    * reads `blockBytes` at a time.
-    */
-  private def footprint(
-      searchMode: SearchMode,
-      field: FieldSchema,
-      metric: MetricType,
-      layout: VectorLayout,
-      blockBytes: Long
-  ): SegmentReadTask => SearchPlan.Footprint = task =>
-    (if (searchMode == SearchMode.PreferIndex)
-       SegmentIndexHandle.select(task, field.fieldID, metric)
-     else None) match {
-      case Some(index) if index.serializedSize > 0L =>
-        SearchPlan.Footprint.index(index.serializedSize)
-      case Some(_) => SearchPlan.Footprint.unsizedIndex
-      case None    => SearchPlan.Footprint.vectors(task, layout, blockBytes)
-    }
 
   /** The two lines a planned search leaves in the driver log: the budgets and
     * how the plan stands against them, then the plan. A native allocation that
@@ -341,9 +202,11 @@ object MilvusSearch extends Logging {
     * is to read afterwards (search-resources.html sections 3.3, 3.4).
     */
   private def logPlan(
-      budget: SearchBudget,
+      budget: SearchExecutionPlan.Budget,
       plan: SearchPlan.Plan,
       request: SegmentSetSearch.Request,
+      policy: SearchExecutionPlan.Task,
+      batch: SearchResources.Choice,
       queries: SearchQueries.Input,
       delivery: SearchQueries.Delivery,
       segments: Int,
@@ -361,7 +224,7 @@ object MilvusSearch extends Logging {
         s"(${budget.slots} per executor${if (budget.profile.nonEmpty) ", each taking every core"
           else ""}); " +
         s"segments ${budget.segments.reason}; queries ${budget.queries.reason}; group ${budget.group.reason}; " +
-        s"collectThreads=${request.collectThreads} callsInFlight=${request.callsInFlight}; $needs; " +
+        s"collectThreads=${policy.collectThreads} callsInFlight=${policy.callsInFlight}; batch=${batch.reason}; $needs; " +
         s"kept=${plan.resident}, sets=${plan.sets.size}" +
         (if (plan.resident == SearchPlan.Resident.Segments)
            s", capacity=${plan.capacity}, " +
@@ -377,7 +240,7 @@ object MilvusSearch extends Logging {
         s"delivered by ${delivery.describe}, " +
         s"queryGroups=${plan.groups.size}, segments=$segments in " +
         s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
-        s"${plan.tasks} tasks, collectThreads=${request.collectThreads}, " +
+        s"${plan.tasks} tasks, collectThreads=${policy.collectThreads}, " +
         s"work=${plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum} segment searches" +
         (if (comparedPairsTotal > 0L)
            s" over $comparedPairsTotal distance pairs"
@@ -390,21 +253,15 @@ object MilvusSearch extends Logging {
     * the tasks, against the same heap share as the merge.
     */
   private def take(
-      spark: SparkSession,
       hits: DataFrame,
       outputSchema: StructType,
       partitions: Seq[MilvusInputPartition],
       arrowMaxBytes: Long,
       metrics: SearchMetrics,
       hitCount: Long,
-      stageHeap: SearchResources.Choice
+      stageHeap: SearchResources.Choice,
+      partitioning: SearchTake.Partitioning
   ): SearchMerge.Hits = {
-    val partitioning = SearchTake.partitioning(
-      hitCount,
-      math.max(1, partitions.size),
-      stageHeap.bytes,
-      spark.sessionState.conf.numShufflePartitions
-    )
     logInfo(
       s"Take stage: $hitCount hits over ${partitioning.partitions} tasks" +
         s" (${partitioning.buckets} bucket(s) per segment), " +
@@ -432,25 +289,23 @@ object MilvusSearch extends Logging {
     */
   private def candidates(
       spark: SparkSession,
-      delivery: SearchQueries.Delivery,
       partitions: Seq[MilvusInputPartition],
-      plan: SearchPlan.Plan,
+      execution: SearchExecutionPlan.Milvus,
       request: SegmentSetSearch.Request,
       layout: VectorLayout,
-      metrics: SearchMetrics,
-      budget: SearchBudget
+      metrics: SearchMetrics
   ): RDD[(Long, Array[Byte])] = {
+    val plan = execution.segments
     val byId =
       partitions.map(partition => partition.task.segmentId -> partition).toMap
     val sets = plan.sets.map(_.map(task => byId(task.segmentId)))
     val groups = plan.groups
-    val delivered = delivery.groups(
+    val delivered = execution.delivery.groups(
       spark,
       groups,
       request.metric,
       layout,
-      budget.resources,
-      budget.heapFor(1).bytes
+      execution.packingProfile
     )
     require(
       delivered.getNumPartitions == groups.size,
@@ -461,23 +316,23 @@ object MilvusSearch extends Logging {
     // is how `SearchQueryRanges` numbers its partitions. The task learns its
     // set from that index before it reads a group, and the sets are
     // broadcast once for the executor rather than once for each task.
-    val kept = plan.kept.toVector
-    val held = spark.sparkContext.broadcast(sets.toVector)
+    val held = spark.sparkContext.broadcast((sets.toVector, execution.tasks))
+    val profile = execution.budget.profile
     val ranges = plan.queryRanges
     val rangeCount = ranges.size
     val rangeSizes = ranges.map(_.size).toVector
     val searched = new SearchQueryRanges(delivered, sets.size, ranges)
       .mapPartitionsWithIndex { (index, streamed) =>
         SegmentSetSearch.run(
-          held.value(index / rangeCount),
+          held.value._1(index / rangeCount),
           request,
+          held.value._2(index),
           streamed,
           rangeSizes(index % rangeCount),
-          kept.lift(index / rangeCount).flatten,
           metrics
         )
       }
-    budget.profile.fold(searched)(searched.withResources)
+    profile.fold(searched)(searched.withResources)
   }
 
   private[search] def dimensionOf(field: FieldSchema): Int = field.typeParams

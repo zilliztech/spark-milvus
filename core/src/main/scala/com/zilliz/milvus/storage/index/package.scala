@@ -19,7 +19,11 @@ package com.zilliz.milvus.storage
   * thread inside the task; neither survives the task.
   *
   * This package keeps the computation only (docs/design/architecture/
-  * vector-search.html sections 1-2). SearchPlan splits the query set into query
+  * vector-search.html sections 1-2). The format supplies owned
+  * VectorBatch.Stream and IndexSearch.Target values; the computation borrows
+  * their batches and buffers until its work drains, then closes what it owns.
+  * SearchPlan takes resolved segment identities and row counts, never read
+  * tasks or snapshot metadata. SearchPlan splits the query set into query
   * groups and the segment tasks into segment sets, as many as the search runs
   * tasks at once, and chooses which side a task keeps: its queries, when they
   * fit the task's heap budget, or its segment set, sized to the task's off-heap
@@ -59,6 +63,6 @@ package com.zilliz.milvus.storage
   * table to take them from after the merge (docs/design/architecture/
   * dataframe-api.html section 4).
   *
-  * Capabilities: V2, V5, V7, V9, W6 (see docs/design/capabilities.md).
+  * Capabilities: V5, V7, V9, W6 (see docs/design/capabilities.md).
   */
 package object index

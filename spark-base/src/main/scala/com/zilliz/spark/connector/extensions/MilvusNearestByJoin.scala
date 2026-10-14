@@ -30,7 +30,12 @@ import org.apache.spark.sql.SparkSession
 import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.spark.connector.metrics.NearestByMetrics
 import com.zilliz.spark.connector.read.MilvusScan
-import com.zilliz.spark.connector.search.{FrameSearch, NearestBySearch}
+import com.zilliz.spark.connector.search.{
+  FrameSearch,
+  NearestByInput,
+  NearestByQueryRows,
+  NearestBySearch
+}
 
 /** A nearest-by join the connector executes: for each query row, the k base
   * rows nearest to it by one Milvus metric (docs/design/architecture/
@@ -161,7 +166,7 @@ object MilvusNearestByJoinStrategy extends SparkStrategy {
         vector <- join.baseVector match {
           case attribute: Attribute =>
             val column = input.columnOf(attribute)
-            NearestBySearch.vectorField(input.scan, column).map(_ => column)
+            NearestByInput.vectorField(input.scan, column).map(_ => column)
           case other =>
             Left(s"the base vector ${other.sql} is computed, not a field")
         }
@@ -249,7 +254,7 @@ final case class MilvusNearestByJoinExec(
 
   /** Read from the snapshot's metadata, so explain opens no file. */
   @transient private lazy val segments: String =
-    NearestBySearch.describeSegments(scan, vectorColumn, metric, approx)
+    NearestByInput.describeSegments(scan, vectorColumn, metric, approx)
 
   override def simpleString(maxFields: Int): String =
     s"MilvusNearestByJoin ${if (approx) "APPROX" else "EXACT"} $metric k=$k " +
@@ -260,10 +265,10 @@ final case class MilvusNearestByJoinExec(
     val active = SparkSession.active
     NearestBySearch.run(
       active,
-      NearestBySearch.Queries.of(left),
+      NearestByQueryRows.of(left),
       left.output.map(_.dataType),
       BindReferences.bindReference(queryVector, left.output),
-      NearestBySearch.MilvusTable(
+      NearestByInput.MilvusTable(
         scan,
         baseColumns.zip(baseOutput.map(_.dataType)),
         vectorColumn
@@ -325,10 +330,10 @@ final case class MilvusNearestByJoinFrameExec(
     val active = SparkSession.active
     NearestBySearch.run(
       active,
-      NearestBySearch.Queries.of(left),
+      NearestByQueryRows.of(left),
       left.output.map(_.dataType),
       BindReferences.bindReference(queryVector, left.output),
-      NearestBySearch.Frame(
+      NearestByInput.Frame(
         FrameSearch.Base(
           right.execute(),
           right.output.map(_.dataType),

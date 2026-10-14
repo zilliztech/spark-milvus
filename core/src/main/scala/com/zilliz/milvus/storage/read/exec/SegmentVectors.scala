@@ -38,7 +38,7 @@ final class SegmentVectors private (
     exclusions: RowExclusions,
     allocator: BufferAllocator,
     batchMaxBytes: Long
-) extends AutoCloseable {
+) extends VectorBatch.Stream {
 
   /** Where the next batch read starts; the read-ahead thread advances it. */
   @volatile private var nextRow = 0L
@@ -62,8 +62,8 @@ final class SegmentVectors private (
     })
   }
 
-  /** The next batch, or None at the end of the segment. The caller closes each
-    * batch before asking for the next one.
+  /** The next batch, or None at the end of the segment. The caller owns each
+    * returned batch and may retain it while reading the next one.
     *
     * What the storage layer returns is not what a search wants to work on: it
     * closes a Parquet row group at a megabyte, so a 1024-dimension float vector
@@ -136,6 +136,11 @@ final class SegmentVectors private (
   def rows: Long = handedOut
 
   def metrics: ReadMetrics = reader.metrics
+
+  override def readCost: VectorBatch.ReadCost = {
+    val current = metrics
+    VectorBatch.ReadCost(current.arrowBytes, current.jniNanos)
+  }
 
   /** A failed read surfaces here, on the thread that asked for the block. */
   private def await(

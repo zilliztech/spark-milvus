@@ -2,9 +2,7 @@ package com.zilliz.milvus.storage.index
 
 import scala.collection.mutable
 
-import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.VectorLayout
-import com.zilliz.milvus.storage.snapshot.SegmentIndexes
 
 /** Splits one search into the tasks of its first stage.
   *
@@ -33,6 +31,12 @@ import com.zilliz.milvus.storage.snapshot.SegmentIndexes
   * again (decisions 28 and 32).
   */
 object SearchPlan {
+
+  /** The planning facts a format resolved for one input unit. Its identity
+    * addresses the source the executor opens; no storage description or
+    * snapshot metadata crosses into the planner.
+    */
+  final case class Segment(segmentId: Long, rows: Option[Long])
 
   /** What one candidate is planned to cost a task while the search runs.
     *
@@ -142,11 +146,11 @@ object SearchPlan {
       * in.
       */
     def vectors(
-        task: SegmentReadTask,
+        task: Segment,
         layout: VectorLayout,
         blockBytes: Long
     ): Footprint = Footprint(
-      knownRows(task).map(_ * layout.rowBytes.toLong),
+      task.rows.map(_ * layout.rowBytes.toLong),
       Some(0L),
       false,
       blockBytes
@@ -190,7 +194,7 @@ object SearchPlan {
     * streams from the start.
     */
   final case class Plan(
-      sets: Seq[Seq[SegmentReadTask]],
+      sets: Seq[Seq[Segment]],
       groups: Seq[QueryGroup],
       estimated: Seq[Long] = Seq.empty,
       ranges: Seq[Range] = Seq.empty,
@@ -274,11 +278,11 @@ object SearchPlan {
     * its own. Segments keep their order inside a set.
     */
   def segmentSets(
-      tasks: Seq[SegmentReadTask],
+      tasks: Seq[Segment],
       slots: Int,
       capacity: Long,
-      size: SegmentReadTask => Long
-  ): Seq[Seq[SegmentReadTask]] = {
+      size: Segment => Long
+  ): Seq[Seq[Segment]] = {
     require(slots > 0, s"A search needs at least one task slot: $slots")
     require(capacity > 0, s"A set's capacity must be positive: $capacity")
     if (tasks.isEmpty) return Seq.empty
@@ -291,7 +295,7 @@ object SearchPlan {
     val start = math.min(tasks.size.toLong, waves * slots).toInt
     val filled = mutable.ArrayBuffer.fill(start)(0L)
     val members = mutable.ArrayBuffer.fill(start)(
-      mutable.ArrayBuffer.empty[SegmentReadTask]
+      mutable.ArrayBuffer.empty[Segment]
     )
     tasks.sortBy(task => (-sizes(task.segmentId), task.segmentId)).foreach {
       task =>
@@ -330,31 +334,20 @@ object SearchPlan {
   def vectorBytes(
       layout: VectorLayout,
       budget: Long
-  ): SegmentReadTask => Long = {
+  ): Segment => Long = {
     val unknown = unknownSegmentBytes(layout, budget)
-    task => knownRows(task).map(_ * layout.rowBytes.toLong).getOrElse(unknown)
+    task => task.rows.map(_ * layout.rowBytes.toLong).getOrElse(unknown)
   }
-
-  /** The rows a segment is known to hold: from the snapshot, from its column
-    * groups, or from the row count its persisted index was built over. None
-    * when nothing recorded it, which is a V3 segment listed by manifest alone.
-    */
-  def knownRows(task: SegmentReadTask): Option[Long] =
-    task.expectedRows.orElse(task.indexes match {
-      case SegmentIndexes.Available(indexes) =>
-        indexes.map(_.rowCount).filter(_ > 0L).reduceOption(_ max _)
-      case _ => None
-    })
 
   /** The bytes of vectors a set is known to hold, or None when any of its
     * segments has no row count. What a task compares to its budget before it
     * reads: a set known to be larger streams from the start.
     */
   def knownBytes(
-      set: Seq[SegmentReadTask],
+      set: Seq[Segment],
       layout: VectorLayout
   ): Option[Long] = {
-    val rows = set.map(knownRows)
+    val rows = set.map(_.rows)
     if (rows.forall(_.isDefined)) Some(rows.flatten.sum * layout.rowBytes)
     else None
   }
@@ -458,14 +451,14 @@ object SearchPlan {
     *   queries on the whole set, without changing what a query sees
     */
   def of(
-      tasks: Seq[SegmentReadTask],
+      tasks: Seq[Segment],
       layout: VectorLayout,
       concurrency: Int,
       queries: Int,
       k: Int,
       groupMaxBytes: Long,
       budget: Budget,
-      footprint: SegmentReadTask => Footprint,
+      footprint: Segment => Footprint,
       shuffled: Boolean,
       splitQueries: Boolean = false,
       rangesWanted: Int = 0
@@ -479,17 +472,17 @@ object SearchPlan {
     if (tasks.isEmpty) return Plan(Seq.empty, limited)
     val prints = tasks.map(task => task.segmentId -> footprint(task)).toMap
     val unknown = unknownSegmentBytes(layout, budget.segmentBytes)
-    def kept(task: SegmentReadTask): Long =
+    def kept(task: Segment): Long =
       prints(task.segmentId).kept.getOrElse(unknown)
-    def loading(task: SegmentReadTask): Long = {
+    def loading(task: Segment): Long = {
       val print = prints(task.segmentId)
       if (print.whole) print.loading.getOrElse(kept(task)) else 0L
     }
-    def searching(task: SegmentReadTask): Long = {
+    def searching(task: Segment): Long = {
       val print = prints(task.segmentId)
       if (print.whole) kept(task) + loading(task) else print.blockBytes
     }
-    def knownKept(set: Seq[SegmentReadTask]): Option[Long] = {
+    def knownKept(set: Seq[Segment]): Option[Long] = {
       val bytes = set.map(task => prints(task.segmentId).kept)
       if (bytes.forall(_.isDefined)) Some(bytes.flatten.sum) else None
     }
@@ -570,7 +563,7 @@ object SearchPlan {
     * (docs/design/architecture/vector-search.html section 2.3).
     */
   def retainedBytes(
-      set: Seq[SegmentReadTask],
+      set: Seq[Segment],
       layout: VectorLayout,
       vectorsMaxBytes: Long
   ): Long = {

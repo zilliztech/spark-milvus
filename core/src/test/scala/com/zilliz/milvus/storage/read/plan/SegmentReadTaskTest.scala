@@ -96,6 +96,41 @@ class SegmentReadTaskTest extends AnyFunSuite with Matchers {
     copy.readVersionOrLatest shouldBe 11L
   }
 
+  test("a persisted index's row count sizes a segment the snapshot did not") {
+    val indexed = v2Task
+      .copy(
+        segmentId = 7L,
+        layout = SegmentLayout.Manifest("segments/7", 3L)
+      )
+      .copy(indexes =
+        SegmentIndexes.Available(
+          Vector(
+            SegmentIndex(
+              collectionId = 1L,
+              partitionId = 1L,
+              segmentId = 7L,
+              fieldId = 100L,
+              indexId = 1L,
+              buildId = 1L,
+              name = "v",
+              parameters = Map("index_type" -> "HNSW"),
+              filePaths = Vector("index/7"),
+              rowCount = 25L,
+              serializedSize = 1L,
+              indexVersion = 1L,
+              currentIndexVersion = None,
+              indexStorePathVersion = None
+            )
+          )
+        )
+      )
+
+    indexed.knownRows shouldBe Some(25L)
+    indexed.copy(indexes = SegmentIndexes.Unknown).knownRows shouldBe None
+    indexed.expectedRows shouldBe None
+    indexed.copy(snapshotRows = Some(30L)).knownRows shouldBe Some(30L)
+  }
+
   test("a materialized delete plan survives serialization") {
     val task = v2Task.copy(
       deletes = DeleteSource.Materialized(

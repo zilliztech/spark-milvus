@@ -24,7 +24,13 @@ import com.zilliz.milvus.storage.schema.{
 import com.zilliz.spark.connector.extensions.ConnectorVectorRanking
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.SearchLimits
-import com.zilliz.spark.connector.search.{FrameSearch, NearestBySearch}
+import com.zilliz.spark.connector.search.{
+  FrameSearch,
+  NearestByInput,
+  NearestByQueryRows,
+  NearestBySearch,
+  SearchExecutionPlan
+}
 
 /** A DataFrame input's search with limits small enough to cut its queries into
   * several groups and to keep them off the driver: every base partition meets
@@ -104,17 +110,17 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     // Three queries a group, and nothing broadcast from a frame.
     val group = 3L * perQuery
     val limits = SearchLimits(1L, Some(group), None)
-    FrameSearch
-      .cut(12, layout, k, FrameSearch.rowWidth(types, 2), group)
+    SearchExecutionPlan
+      .frameGroups(12, layout, k, FrameSearch.rowWidth(types, 2), group)
       .map(_.queries) shouldBe Seq(3, 3, 3, 3)
     for {
       held <- Seq(true, false)
       outer <- Seq(false, true)
     } withClue(s"held=$held outer=$outer: ") {
       val queries =
-        if (held) NearestBySearch.Held(queryRows.toArray)
+        if (held) NearestByQueryRows.Held(queryRows.toArray)
         else
-          NearestBySearch.Computed(
+          NearestByQueryRows.Computed(
             spark.sparkContext.parallelize(queryRows, 3)
           )
       val metrics = NearestByMetrics.create(spark.sparkContext)
@@ -124,7 +130,7 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
           queries,
           Seq(StringType, vectorType),
           BoundReference(1, vectorType, nullable = true),
-          NearestBySearch.Frame(
+          NearestByInput.Frame(
             FrameSearch.Base(
               base,
               types,

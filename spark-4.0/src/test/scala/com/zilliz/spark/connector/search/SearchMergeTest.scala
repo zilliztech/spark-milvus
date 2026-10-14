@@ -76,7 +76,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       candidates(rows, metric),
       k,
       metric,
-      SearchMerge.partitions(
+      SearchExecutionPlan.mergePartitions(
         spark,
         math.max(1, rows.map(_._1).distinct.size.toLong),
         2,
@@ -309,16 +309,22 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     // local[2]: two slots. A partition cannot hold part of a query, so one
     // query is one partition however wide the cluster is.
     val heap = 1L << 30
-    SearchMerge.partitions(spark, 1L, 1, 10, heap) shouldBe 1
-    SearchMerge.partitions(spark, 100L, 1, 10, heap) shouldBe 2
+    SearchExecutionPlan.mergePartitions(spark, 1L, 1, 10, heap) shouldBe 1
+    SearchExecutionPlan.mergePartitions(spark, 100L, 1, 10, heap) shouldBe 2
     // More first-stage tasks than slots: every task's output still lands in a
     // partition of its own, which is what a cluster of many executors needs.
-    SearchMerge.partitions(spark, 100L, 16, 10, heap) shouldBe 16
+    SearchExecutionPlan.mergePartitions(spark, 100L, 16, 10, heap) shouldBe 16
     // A query count far above the parallelism: partitions grow with it so a
     // reduce-side map holds a few thousand queries, not all of them.
-    SearchMerge.partitions(spark, 1000000L, 6, 10, heap) shouldBe 245
-    the[IllegalArgumentException] thrownBy SearchMerge
-      .partitions(spark, 0L, 1, 10, heap)
+    SearchExecutionPlan.mergePartitions(
+      spark,
+      1000000L,
+      6,
+      10,
+      heap
+    ) shouldBe 245
+    the[IllegalArgumentException] thrownBy SearchExecutionPlan
+      .mergePartitions(spark, 0L, 1, 10, heap)
   }
 
   test("a large k cuts the merge into partitions whose queries fit the heap") {
@@ -328,7 +334,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val heap = 306393907L
     val perQuery = 15L * 16384L * 24L
     val expected = (100000L + heap / 2 / perQuery - 1) / (heap / 2 / perQuery)
-    SearchMerge.partitions(
+    SearchExecutionPlan.mergePartitions(
       spark,
       100000L,
       15,
@@ -337,6 +343,12 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     ) shouldBe expected.toInt
     expected should be > 64L
     // k=100 stays at the fixed few thousand queries a partition: 100k / 4096 = 25.
-    SearchMerge.partitions(spark, 100000L, 15, 100, heap) shouldBe 25
+    SearchExecutionPlan.mergePartitions(
+      spark,
+      100000L,
+      15,
+      100,
+      heap
+    ) shouldBe 25
   }
 }

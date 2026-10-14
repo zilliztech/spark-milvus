@@ -8,7 +8,6 @@ import scala.util.Try
 
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
-import com.zilliz.milvus.storage.read.exec.{IndexRowMapping, SegmentIndexHandle}
 import com.zilliz.milvus.storage.schema.MetricType
 
 /** Searches a segment through the index the Milvus format side opened.
@@ -38,18 +37,24 @@ object IndexSearch {
 
   private val MaxAttempts = 8
 
-  /** The searchable side of an index handle: what a search needs of it, and no
-    * more, so that a pipeline can be driven by something other than a loaded
-    * index in tests.
+  /** An owned index ready to search. The format adapter opens it and interprets
+    * its row mapping; a pipeline borrows it, and the source closes it only
+    * after every search and collect has drained.
     */
-  trait Target {
+  trait Target extends AutoCloseable {
     def segmentId: Long
     def rows: Long
     def dimension: Int
     def metric: MetricType
     def indexType: String
     def family: String
-    def mapping: IndexRowMapping
+    def bytes: Long
+
+    /** Convert an index label to its physical input row. */
+    def rowOf(label: Long): Long
+
+    /** Convert excluded input rows to the index labels the engine masks. */
+    def labelsOf(excluded: BitSet): BitSet
 
     /** Knowhere's search: `queryRows` queries of `dimension` values in
       * `queries`, the top `topK` of the rows not set in `excluded` (null when
@@ -66,35 +71,6 @@ object IndexSearch {
         scores: ByteBuffer,
         parameters: String
     ): Unit
-  }
-
-  /** A loaded index as a [[Target]]. */
-  def target(handle: SegmentIndexHandle): Target = new Target {
-    def segmentId: Long = handle.segmentId
-    def rows: Long = handle.rows
-    def dimension: Int = handle.dimension
-    def metric: MetricType = handle.metric
-    def indexType: String = handle.indexType
-    def family: String = handle.family
-    def mapping: IndexRowMapping = handle.mapping
-    def search(
-        queries: ByteBuffer,
-        queryRows: Long,
-        topK: Int,
-        excluded: ByteBuffer,
-        ids: ByteBuffer,
-        scores: ByteBuffer,
-        parameters: String
-    ): Unit =
-      handle.index.search(
-        queries,
-        queryRows,
-        topK,
-        excluded,
-        ids,
-        scores,
-        parameters
-      )
   }
 
   /** How wide the HNSW search is: `ef` if the caller named it, otherwise
@@ -133,7 +109,7 @@ object IndexSearch {
     * [[Pipeline]] of one group.
     */
   def run(
-      handle: SegmentIndexHandle,
+      target: Target,
       queries: QueryMatrix,
       excluded: BitSet,
       k: Int,
@@ -144,7 +120,7 @@ object IndexSearch {
       threads: Int = 1
   ): Unit = {
     val pipeline = new Pipeline(
-      target(handle),
+      target,
       excluded,
       k,
       parameters,
@@ -215,7 +191,7 @@ object IndexSearch {
       rows <= 256L * 1024 * 1024 * 8,
       "Segment exclusion bitmap exceeds the supported size"
     )
-    private val labels = target.mapping.labelsOf(excluded)
+    private val labels = target.labelsOf(excluded)
     private val visible = rows - labels.cardinality()
 
     /** Hits asked of the index per query: k, or every visible row when the
@@ -608,7 +584,6 @@ object IndexSearch {
       merger: TopKMerger
   ): Unit = {
     val segmentId = target.segmentId
-    val mapping = target.mapping
     var query = fromQuery
     while (query < untilQuery) {
       var slot = 0
@@ -618,7 +593,7 @@ object IndexSearch {
         if (id != -1L) {
           val score = scores.getFloat(position * 4L).toDouble
           if (!merger.rejectsScore(query, score))
-            merger.add(query, segmentId, mapping.rowOf(id), score)
+            merger.add(query, segmentId, target.rowOf(id), score)
         }
         slot += 1
       }

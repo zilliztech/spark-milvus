@@ -15,7 +15,6 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.milvus.storage.read.exec.IndexRowMapping
 import com.zilliz.milvus.storage.schema.{
   MetricType,
   VectorElementType,
@@ -71,7 +70,10 @@ class IndexSearchPipelineTest
     def metric: MetricType = MetricType.L2
     def indexType: String = "HNSW"
     def family: String = "HNSW"
-    def mapping: IndexRowMapping = IndexRowMapping.identity(rows)
+    def bytes: Long = 0L
+    def rowOf(label: Long): Long = label
+    def labelsOf(excluded: BitSet): BitSet = excluded
+    def close(): Unit = ()
     def rowOf(query: Int, slot: Int, first: Int): Long =
       ((first + query).toLong * 31L + slot * 7L + segmentId) % rows
     def scoreOf(query: Int, slot: Int, first: Int): Float =

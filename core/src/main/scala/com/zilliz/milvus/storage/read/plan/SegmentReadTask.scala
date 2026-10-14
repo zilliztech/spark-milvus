@@ -131,4 +131,14 @@ final case class SegmentReadTask(
     case SegmentLayout.ColumnGroups(gs) =>
       gs.headOption.map(_.fileRowCounts.sum)
   })
+
+  /** Rows available for search sizing, including a persisted index's count when
+    * the snapshot and column groups do not state one. This estimate does not
+    * replace `expectedRows`, the reader's independent short-read guard.
+    */
+  def knownRows: Option[Long] = expectedRows.orElse(indexes match {
+    case SegmentIndexes.Available(all) =>
+      all.map(_.rowCount).filter(_ > 0L).reduceOption(_ max _)
+    case _ => None
+  })
 }

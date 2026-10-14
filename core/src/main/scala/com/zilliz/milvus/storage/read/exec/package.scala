@@ -39,6 +39,9 @@ package com.zilliz.milvus.storage.read
   * a segment has no index a search can use; an index search scans such a
   * segment exactly. `IndexRowMapping` says what an index label means in the
   * segment, which differs from the row number when the column has nulls.
+  * SegmentVectors implements the computation's VectorBatch.Stream and reports
+  * its read bytes and time; SegmentIndexHandle implements IndexSearch.Target,
+  * keeping index decoding and the valid_data row mapping in this package.
   * `core.index` computes on what these hand over and opens nothing itself
   * (docs/design/architecture/vector-search.html sections 2.3 and 2.4).
   *
@@ -48,7 +51,7 @@ package com.zilliz.milvus.storage.read
   *
   * Main types: SegmentReader, SegmentReaderRegistry, DeletePlans, ReadMetrics,
   * RowExclusions, SegmentVectors, SegmentIndexHandle, IndexRowMapping.
-  * Capabilities: R3, R4, R8, R14, R17, G3, G5 (see
+  * Capabilities: R3, R4, R8, R14, R17, V2, G3, G5 (see
   * docs/design/capabilities.md). R4 and R17 name the columnar outlet; R17 is
   * partial: batches leave as `VectorSchemaRoot` and become Spark
   * `ColumnarBatch` in layer 3, while the raw-address signature for native
