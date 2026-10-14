@@ -252,7 +252,7 @@ object MilvusSearch extends Logging {
     // searches instead.
     val comparedPairsTotal =
       if (searchMode != SearchMode.Exact) 0L
-      else queryCount * tasks.flatMap(_.snapshotRows).sum
+      else SearchProgress.comparedPairs(queryCount, tasks)
     val segmentSearchesTotal =
       plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum
     // The budgets and how the plan stands against them. A native allocation
@@ -310,25 +310,6 @@ object MilvusSearch extends Logging {
            s" over $comparedPairsTotal distance pairs"
          else "")
     )
-    // Which counter the percentage comes from, and when there is none.
-    // Compared pairs rise with every batch; in index mode segment searches
-    // rise with every call, because a probe searches a segment in one. An
-    // exact scan whose snapshot carries no row count has neither, and says so
-    // by reporting counts without a share.
-    val share =
-      if (comparedPairsTotal > 0L) Some(SearchMetrics.ComparedPairs)
-      else if (searchMode == SearchMode.Index)
-        Some(SearchMetrics.SegmentSearches)
-      else None
-    val progress =
-      new SearchProgress(
-        comparedPairsTotal,
-        plan.groups.size,
-        plan.sets.map(_.size).sum,
-        share
-      )
-    progress.announce()
-    spark.sparkContext.addSparkListener(progress)
     // The merge and take stages run under Spark's own task slots, so a task's
     // share of the unmanaged heap is the queries' budget at that concurrency.
     val stageHeap = SearchResources
@@ -345,25 +326,28 @@ object MilvusSearch extends Logging {
             s"about ${queryCount / mergeParts} queries a partition at ${plan.tasks.toLong * k * CandidateBytes.Width} bytes each " +
             s"against ${stageHeap.bytes} bytes of heap a task"
         )
-        merged(
+        val found = candidates(
           spark,
-          candidates(
-            spark,
-            queries,
-            partitions,
-            plan,
-            spec,
-            layout,
-            limits,
-            metrics,
-            searchProfile,
-            packProfile
-          ),
-          k,
-          searchMetric,
-          mergeParts,
-          required
+          queries,
+          partitions,
+          plan,
+          spec,
+          layout,
+          limits,
+          metrics,
+          searchProfile,
+          packProfile
         )
+        SearchProgress.watch(
+          spark.sparkContext,
+          found,
+          metrics,
+          comparedPairsTotal,
+          index = searchMode == SearchMode.Index,
+          queryGroups = plan.groups.size,
+          segments = plan.sets.map(_.size).sum
+        )
+        merged(spark, found, k, searchMetric, mergeParts, required)
       }
     if (outputSchema.isEmpty) Hits(hits.queryExecution.toRdd, hits.schema)
     else {

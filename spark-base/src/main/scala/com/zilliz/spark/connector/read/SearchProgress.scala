@@ -4,15 +4,19 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.Locale
 import scala.jdk.CollectionConverters._
 
-import org.apache.spark.{Success => TaskSucceeded}
+import org.apache.spark.{SparkContext, Success => TaskSucceeded}
 import org.apache.spark.internal.Logging
+import org.apache.spark.rdd.RDD
 import org.apache.spark.scheduler.{
   SparkListener,
   SparkListenerExecutorMetricsUpdate,
+  SparkListenerJobEnd,
+  SparkListenerJobStart,
   SparkListenerStageCompleted,
   SparkListenerTaskEnd
 }
 
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.spark.connector.metrics.SearchMetrics
 
 /** Writes what a running search has counted to the driver log.
@@ -31,6 +35,19 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
   * task-end event and kept. A task that failed contributes nothing, which is
   * what Spark does with its accumulators.
   *
+  * One listener follows one search ([[SearchProgress.watch]]). It counts the
+  * accumulators of that search's counters by id, since every search in a
+  * session counts under the same names, and it leaves the listener bus when the
+  * job that runs the search's first stage ends, whether that job succeeded or
+  * not; a listener left behind would see every later event and count every
+  * later search (docs/design/architecture/vector-search.html section 1.3).
+  *
+  * @param context
+  *   the bus the listener is on
+  * @param firstStage
+  *   the id of the RDD whose tasks are the search's first stage
+  * @param counters
+  *   the search's counters, by accumulator id
   * @param comparedPairsTotal
   *   the pairs the whole search has to measure, or zero when nothing knows
   *   them: an index probe does not compare every row, and a snapshot that
@@ -50,18 +67,21 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
   *   a percentage that says zero while the work is half done is worse than
   *   none.
   */
-private[read] final class SearchProgress(
+private[read] final class SearchProgress private (
+    context: SparkContext,
+    firstStage: Int,
+    counters: Map[Long, String],
     comparedPairsTotal: Long,
     queryGroups: Int,
     segments: Int,
-    share: Option[String] = None
+    share: Option[String]
 ) extends SparkListener
     with Logging {
 
   /** Said once, so a reader meeting these lines knows what wrote them and why
     * they are here rather than on a Spark page.
     */
-  def announce(): Unit = logInfo(
+  private def announce(): Unit = logInfo(
     "Search progress is written here while the search runs, because Spark's " +
       "stage page carries a task's own counters only once that task ends. " +
       "A line is one reading of every task's counters, taken from the " +
@@ -79,13 +99,30 @@ private[read] final class SearchProgress(
   private val ended = new ConcurrentHashMap[Long, Map[String, Long]]()
   @volatile private var lastReport = 0L
 
+  /** The jobs running the first stage that have not ended. */
+  private val jobs = ConcurrentHashMap.newKeySet[Int]()
+
+  override def onJobStart(event: SparkListenerJobStart): Unit =
+    if (event.stageInfos.exists(_.rddInfos.exists(_.id == firstStage)))
+      jobs.add(event.jobId)
+
+  /** The search is over once the last job running its first stage has ended.
+    * Spark's queue does not wait for its own dispatch thread when the listener
+    * that leaves is its last one, so leaving here does not block the bus.
+    */
+  override def onJobEnd(event: SparkListenerJobEnd): Unit =
+    if (jobs.remove(event.jobId) && jobs.isEmpty)
+      context.removeSparkListener(this)
+
   override def onExecutorMetricsUpdate(
       update: SparkListenerExecutorMetricsUpdate
   ): Unit = {
     var sawSearch = false
     update.accumUpdates.foreach { case (taskId, _, _, infos) =>
-      val counted =
-        SearchProgress.searchValues(infos.map(info => (info.name, info.update)))
+      val counted = SearchProgress.searchValues(
+        infos.map(info => (info.id, info.update)),
+        counters
+      )
       if (counted.nonEmpty) {
         running.put(taskId, counted)
         sawSearch = true
@@ -99,7 +136,8 @@ private[read] final class SearchProgress(
     running.remove(taskId)
     if (event.reason == TaskSucceeded) {
       val counted = SearchProgress.searchValues(
-        event.taskInfo.accumulables.toSeq.map(info => (info.name, info.update))
+        event.taskInfo.accumulables.toSeq.map(info => (info.id, info.update)),
+        counters
       )
       if (counted.nonEmpty) ended.put(taskId, counted)
     }
@@ -182,6 +220,57 @@ private[read] object SearchProgress {
     */
   private val ReportNanos = 10L * 1000L * 1000L * 1000L
 
+  /** Follows one search from now until the job that runs `firstStage` ends,
+    * writing what `metrics` counted to the driver log. Called once the first
+    * stage's RDD is built, before any job runs it.
+    *
+    * @param comparedPairsTotal
+    *   the pairs an exact search measures ([[comparedPairs]]), zero for an
+    *   index search
+    * @param index
+    *   true for an index search, whose segment searches carry the percentage
+    */
+  def watch(
+      context: SparkContext,
+      firstStage: RDD[_],
+      metrics: SearchMetrics,
+      comparedPairsTotal: Long,
+      index: Boolean,
+      queryGroups: Int,
+      segments: Int
+  ): SearchProgress = {
+    // Which counter the percentage comes from, and when there is none.
+    // Compared pairs rise with every batch; in index mode segment searches
+    // rise with every call, because a probe searches a segment in one. An
+    // exact scan whose snapshot carries no row count has neither, and says so
+    // by reporting counts without a share.
+    val share =
+      if (comparedPairsTotal > 0L) Some(SearchMetrics.ComparedPairs)
+      else if (index) Some(SearchMetrics.SegmentSearches)
+      else None
+    val progress = new SearchProgress(
+      context,
+      firstStage.id,
+      metrics.all.map { case (name, counter) => counter.id -> name }.toMap,
+      comparedPairsTotal,
+      queryGroups,
+      segments,
+      share
+    )
+    progress.announce()
+    context.addSparkListener(progress)
+    progress
+  }
+
+  /** The distance pairs an exact search measures: every query against every row
+    * the snapshot holds. Zero when a segment's row count is unknown, since a
+    * sum over the others is too small and the share it gave could pass 100%.
+    */
+  def comparedPairs(queries: Long, tasks: Seq[SegmentReadTask]): Long = {
+    val rows = tasks.map(_.snapshotRows)
+    if (rows.exists(_.isEmpty)) 0L else queries * rows.flatten.sum
+  }
+
   /** A count at a glance. A search compares pairs in the billions, and eleven
     * digits in a row are counted rather than read; grouped, the size is seen
     * and the value is still exact. The grouping is the root locale's, so a log
@@ -190,26 +279,29 @@ private[read] object SearchProgress {
   private[read] def grouped(value: Long): String =
     String.format(Locale.ROOT, "%,d", java.lang.Long.valueOf(value))
 
-  /** The `milvus.search.*` values of one report, as longs.
+  /** This search's values in one report, by counter name, as longs.
     *
-    * An accumulable arrives with the name it was registered under and the value
-    * as `Any`; anything that is not one of ours, or not a number, is not this
-    * listener's business. A negative value is a nearest-by join's SQL size or
-    * duration metric that the task never added to, which reports Spark's -1 for
-    * no value: it counts as nothing.
+    * An accumulable arrives with its id and its value as `Any`. It is this
+    * search's when the id is one of `counters`: every search in a session
+    * counts under the same names, so a name does not say whose task it was. A
+    * value that is not a number is not a counter's. A negative value is a
+    * nearest-by join's SQL size or duration metric that the task never added
+    * to, which reports Spark's -1 for no value: it counts as nothing.
     */
   private[read] def searchValues(
-      infos: Seq[(Option[String], Option[Any])]
+      infos: Seq[(Long, Option[Any])],
+      counters: Map[Long, String]
   ): Map[String, Long] =
-    infos.flatMap {
-      case (Some(name), Some(value)) if name.startsWith("milvus.search.") =>
-        value match {
-          case number: java.lang.Long if number >= 0L =>
-            Some(name -> number.longValue())
-          case number: java.lang.Integer if number >= 0 =>
-            Some(name -> number.longValue())
-          case _ => None
-        }
-      case _ => None
+    infos.flatMap { case (id, update) =>
+      counters
+        .get(id)
+        .flatMap(name =>
+          update.collect {
+            case number: java.lang.Long if number >= 0L =>
+              name -> number.longValue()
+            case number: java.lang.Integer if number >= 0 =>
+              name -> number.longValue()
+          }
+        )
     }.toMap
 }
