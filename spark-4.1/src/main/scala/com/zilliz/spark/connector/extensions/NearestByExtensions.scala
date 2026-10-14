@@ -20,5 +20,6 @@ object NearestByExtensions {
       )
     )
     extensions.injectPostHocResolutionRule(new ReplaceNearestByJoinRequest(_))
+    extensions.injectOptimizerRule(_ => PruneNearestByBase)
   }
 }
