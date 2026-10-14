@@ -119,10 +119,7 @@ private[connector] object FrameSearch extends Logging {
           StructField(s"base_$at", dataType, nullable = true)
         }
     )
-    val queryCount = queries match {
-      case SearchQueries.Packed(ids, _)  => ids.length.toLong
-      case SearchQueries.Frame(selected) => selected.count()
-    }
+    val queryCount = queries.count
     if (queryCount == 0L)
       return MilvusSearch.Hits(missing(spark, required, types.size), schema)
     require(
@@ -158,13 +155,13 @@ private[connector] object FrameSearch extends Logging {
     val shuffled = queries.isInstanceOf[SearchQueries.Frame] &&
       queryBytes > limits.queriesMaxBytes
     val delivered: RDD[SearchQueries.Group] = queries match {
-      case SearchQueries.Frame(selected) if shuffled =>
+      case SearchQueries.Frame(selected, _) if shuffled =>
         MilvusSearch.packedGroups(selected, groups, metric, layout)
       case _ =>
         val (ids, vectors) = queries match {
           case SearchQueries.Packed(packedIds, packedVectors) =>
             (packedIds, packedVectors)
-          case SearchQueries.Frame(selected) =>
+          case SearchQueries.Frame(selected, _) =>
             SearchQueries.packOnExecutors(selected, layout, metric)
         }
         val held = spark.sparkContext.broadcast((ids, vectors))

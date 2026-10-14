@@ -209,7 +209,6 @@ object SearchPlan {
       if (ranges.isEmpty) Seq(groups.indices) else ranges
 
     def tasks: Int = sets.size * queryRanges.size
-    def isEmpty: Boolean = sets.isEmpty
   }
 
   /** The share of a task's budget an unknown-sized segment is planned at. Half:

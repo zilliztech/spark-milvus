@@ -225,6 +225,23 @@ class NearestByJoinTest
   private def docs(read: Map[String, String] = Map.empty): DataFrame =
     spark.read.format("milvus").options(options ++ read).load()
 
+  /** The collection's schema and no segment, as a snapshot a write resolves its
+    * table from: a Milvus table with nothing to search.
+    */
+  private def withoutSegments(): DataFrame =
+    spark.read
+      .format("milvus")
+      .options(
+        options - MilvusOption.SnapshotPath ++ Map(
+          MilvusOption.SnapshotMode -> "true",
+          MilvusOption.SnapshotSchemaBytes -> java.util.Base64.getEncoder
+            .encodeToString(
+              LocalMilvusCollection.schema(2, floats = false).toByteArray
+            )
+        )
+      )
+      .load()
+
   private def specials(read: Map[String, String] = Map.empty): DataFrame =
     spark.read.format("milvus").options(specialOptions ++ read).load()
 
@@ -367,6 +384,22 @@ class NearestByJoinTest
     takenOver(taken) shouldBe true
     pairs(taken) shouldBe pairs(bySpark(query, base))
     pairs(taken).map(_._2) should contain noneOf (3002L, 3105L)
+  }
+
+  test("a Milvus table without segments answers as Spark does") {
+    needsNative()
+    val query = queries(standardQueries: _*)
+    val base = withoutSegments()
+
+    val inner = nearest(query, base)
+    val outer = nearest(query, base, joinType = "leftouter")
+
+    input(inner) shouldBe "Milvus table"
+    input(outer) shouldBe "Milvus table"
+    pairs(inner) shouldBe empty
+    pairs(outer) shouldBe Seq("q1" -> -1L, "q2" -> -1L, "q3" -> -1L)
+    pairs(inner) shouldBe pairs(bySpark(query, base))
+    pairs(outer) shouldBe pairs(bySpark(query, base, joinType = "leftouter"))
   }
 
   test("the output is Spark's: query columns then base columns, all nullable") {

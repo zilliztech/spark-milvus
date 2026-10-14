@@ -28,16 +28,26 @@ private[read] object SearchQueries {
   val VectorColumn = "vector"
 
   /** A query set as a search takes it. */
-  sealed trait Input
+  sealed trait Input {
 
-  /** `query_id` and `vector` as a frame, counted and packed by Spark jobs. */
-  final case class Frame(selected: DataFrame) extends Input
+    /** How many queries the set holds. */
+    def count: Long
+  }
+
+  /** `query_id` and `vector` as a frame of `count` rows, packed by Spark jobs.
+    * The caller has counted the rows already; counting them here would run the
+    * frame once more.
+    */
+  final case class Frame(selected: DataFrame, count: Long) extends Input
 
   /** A set already packed on the driver, as [[pack]] packs one: row `i` of
     * `vectors` is the query of `ids(i)`. It is broadcast, and nothing about it
     * runs a job (docs/design/architecture/dataframe-api.html section 4).
     */
-  final case class Packed(ids: Array[Long], vectors: Array[Byte]) extends Input
+  final case class Packed(ids: Array[Long], vectors: Array[Byte])
+      extends Input {
+    override def count: Long = ids.length.toLong
+  }
 
   /** One query group as it reaches a task: the ids of its queries, the bytes
     * they were packed into, and where the group starts in those bytes. A
