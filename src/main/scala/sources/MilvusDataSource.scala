@@ -1596,7 +1596,7 @@ object MilvusScan extends Logging {
     * per-bucket S3A configuration. Extracted as a companion method so both the
     * scan planner and table-level schema rehydration (backup mode) share it.
     */
-  private[sources] def buildHadoopConfForOptions(
+  private[connector] def buildHadoopConfForOptions(
       rawOptions: scala.collection.Map[String, String],
       path: String,
       initialConf: Configuration = SparkSession.getActiveSession

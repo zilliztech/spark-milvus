@@ -53,7 +53,9 @@ case object EmptyDeletePlan extends MilvusDeletePlan {
 final case class LongPkDeletePlan(values: Map[Long, Long])
     extends MilvusDeletePlan {
   override def containsLongPk(value: Long, rowTs: Long): Boolean =
-    values.get(value).exists(_ >= rowTs)
+    // Upsert's delete and replacement insert share a timestamp. Only older
+    // rows are deleted, matching Milvus's entity filter.
+    values.get(value).exists(_ > rowTs)
   override def containsStringPk(value: String, rowTs: Long): Boolean = false
   override def isEmpty: Boolean = values.isEmpty
 }
@@ -62,6 +64,6 @@ final case class StringPkDeletePlan(values: Map[String, Long])
     extends MilvusDeletePlan {
   override def containsLongPk(value: Long, rowTs: Long): Boolean = false
   override def containsStringPk(value: String, rowTs: Long): Boolean =
-    values.get(value).exists(_ >= rowTs)
+    values.get(value).exists(_ > rowTs)
   override def isEmpty: Boolean = values.isEmpty
 }

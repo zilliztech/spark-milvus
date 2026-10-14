@@ -56,6 +56,25 @@ object V2SegmentLoader extends Logging {
       manifestSchemaVersion: Int = 1,
       applyDeletes: Boolean = true,
       storageScheme: String = "s3a"
+  ): Either[Throwable, Seq[V2SegmentInfo]] =
+    loadV2Segments(
+      manifestPaths,
+      bucket,
+      hadoopConf,
+      manifestSchemaVersion,
+      applyDeletes,
+      storageScheme,
+      requireV2Data = false
+    )
+
+  def loadV2Segments(
+      manifestPaths: Seq[String],
+      bucket: String,
+      hadoopConf: Configuration,
+      manifestSchemaVersion: Int,
+      applyDeletes: Boolean,
+      storageScheme: String,
+      requireV2Data: Boolean
   ): Either[Throwable, Seq[V2SegmentInfo]] = {
     try {
       val out = scala.collection.mutable.ArrayBuffer.empty[V2SegmentInfo]
@@ -77,7 +96,8 @@ object V2SegmentLoader extends Logging {
           bucket,
           hadoopConf,
           applyDeletes,
-          storageScheme
+          storageScheme,
+          requireV2Data
         ) match {
           case Right(Some(seg)) => out += seg
           case Right(None)      => // skipped (storage version != 2)
@@ -106,12 +126,21 @@ object V2SegmentLoader extends Logging {
       bucket: String,
       hadoopConf: Configuration,
       applyDeletes: Boolean = true,
-      storageScheme: String = "s3a"
+      storageScheme: String = "s3a",
+      requireV2Data: Boolean = false
   ): Either[Throwable, Option[V2SegmentInfo]] = {
     val resolvedEntry = resolveEntryPaths(entry, bucket, storageScheme)
     val isL0 = resolvedEntry.segmentLevel == 1L
 
-    if (resolvedEntry.storageVersion != 2L) {
+    // L0 contains only deletes and may have storage_version=0. It must not
+    // be discarded as a legacy data segment.
+    if (!isL0 && resolvedEntry.storageVersion != 2L && requireV2Data) {
+      Left(
+        new IllegalArgumentException(
+          s"segment ${resolvedEntry.segmentId} is not StorageV2; refusing a partial migration export"
+        )
+      )
+    } else if (!isL0 && resolvedEntry.storageVersion != 2L) {
       logInfo(
         s"skipping segment ${resolvedEntry.segmentId}: storage_version=${resolvedEntry.storageVersion} " +
           s"(!= 2); V2SegmentLoader only handles StorageV2"
@@ -126,6 +155,13 @@ object V2SegmentLoader extends Logging {
       resolvedEntry.binlogFiles.isEmpty ||
       resolvedEntry.binlogFiles.forall(_.binlogs.isEmpty)
     ) {
+      if (requireV2Data && !isL0 && resolvedEntry.numOfRows > 0L) {
+        return Left(
+          new IllegalArgumentException(
+            s"segment ${resolvedEntry.segmentId} has rows but no binlogs; refusing a partial migration export"
+          )
+        )
+      }
       logWarning(
         s"segment ${resolvedEntry.segmentId} has no binlog files with entries; " +
           s"emitting as empty column-group list"
