@@ -92,7 +92,7 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
           )
           (
             queries.indices.map(query =>
-              merger.results(query).map(c => (c.rowOffset, c.score))
+              merger.sort(query).results(query).map(c => (c.rowOffset, c.score))
             ),
             rescans
           )
@@ -316,7 +316,7 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
             )
           )
         }
-        merger.results(0).map(c => (c.rowOffset, c.score)) shouldBe
+        merger.sort(0).results(0).map(c => (c.rowOffset, c.score)) shouldBe
           Seq((2L, 0.25), (1L, 1.0))
       } finally {
         matrix.close()

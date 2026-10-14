@@ -10,6 +10,7 @@ import com.zilliz.milvus.storage.index.{
   QueryMatrix,
   RankingFunction,
   SearchPlan,
+  SearchThreads,
   SegmentSearch,
   TopKMerger
 }
@@ -370,9 +371,17 @@ private[search] object SegmentSetSearch extends Logging {
       ids: Array[Long],
       threads: Int
   ): Seq[(Long, Array[Byte])] = {
-    // Packing sorts every query's heap: a group's worth of that runs over
-    // `threads` shards of queries, the way an answer is collected.
-    val bytes = merger.packAll(threads)
+    require(threads > 0, s"Packing takes at least one thread: $threads")
+    val bytes = new Array[Array[Byte]](merger.queries)
+    // Sort and encode each query in the same shard, after collection ends.
+    SearchThreads.shards(merger.queries, threads) { (_, from, until) =>
+      var query = from
+      while (query < until) {
+        merger.sort(query)
+        bytes(query) = merger.takePacked(query)
+        query += 1
+      }
+    }
     val packed = Vector.newBuilder[(Long, Array[Byte])]
     var query = 0
     while (query < ids.length) {

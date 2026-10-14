@@ -132,6 +132,7 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
         pipeline.finish(_ => ())
         (0 until 8).foreach { query =>
           merger
+            .sort(query)
             .results(query)
             .map(c => (c.segmentId, c.rowOffset, c.score)) shouldBe
             Seq((2L, 20L, 1.0))
@@ -198,7 +199,10 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
                 .map { row => (math.abs(query.toDouble - row), 100L + row) }
                 .sorted
                 .take(10)
-          merger.results(at).map(c => (c.score, c.rowOffset)) shouldBe expected
+          merger
+            .sort(at)
+            .results(at)
+            .map(c => (c.score, c.rowOffset)) shouldBe expected
         }
         merger.scannedRows shouldBe batch.visibleRows.toLong
         compared shouldBe queries.size.toLong * ranked.rankedRows.length

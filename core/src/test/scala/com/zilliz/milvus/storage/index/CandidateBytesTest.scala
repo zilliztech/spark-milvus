@@ -108,7 +108,7 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
       val expected = {
         val merger = new TopKMerger(1, 6, metric)
         sides.flatten.foreach(merger.add)
-        places(merger.takePacked(0))
+        places(merger.sort(0).takePacked(0))
       }
       val packed = sides.map(CandidateBytes.of(_, metric))
       val straight =

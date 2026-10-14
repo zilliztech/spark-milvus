@@ -42,18 +42,34 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
   private def packedPlaces(merged: TopKMerger): Vector[(Long, Long)] = {
     val read = Vector.newBuilder[(Long, Long)]
     (0 until merged.queries).foreach(query =>
-      CandidateBytes.foreach(merged.takePacked(query))((segment, offset, _) =>
-        read += ((segment, offset))
+      CandidateBytes.foreach(merged.sort(query).takePacked(query))(
+        (segment, offset, _) => read += ((segment, offset))
       )
     )
     read.result()
   }
 
   /** Packing can read the same sorted query more than once. */
-  private def packedTwice(merged: TopKMerger): (Int, Int) =
+  private def packedTwice(merged: TopKMerger): (Int, Int) = {
+    merged.sort(0)
     (merged.takePacked(0).length, merged.takePacked(0).length)
+  }
 
-  test("packing every query over shards gives what packing one by one gives") {
+  test(
+    "sorting and packing query shards gives what doing them one by one gives"
+  ) {
+    def pack(merged: TopKMerger, threads: Int): Array[Array[Byte]] = {
+      val packed = new Array[Array[Byte]](merged.queries)
+      SearchThreads.shards(merged.queries, threads) { (_, from, until) =>
+        var query = from
+        while (query < until) {
+          packed(query) = merged.sort(query).takePacked(query)
+          query += 1
+        }
+      }
+      packed
+    }
+
     val random = new Random(7)
     val queries = 37
     val (sharded, oneByOne) =
@@ -68,13 +84,13 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
       sharded.add(candidate)
       oneByOne.add(candidate)
     }
-    val packed = sharded.packAll(4)
+    val packed = pack(sharded, 4)
     packed.length shouldBe queries
     (0 until queries).foreach { query =>
-      packed(query).toSeq shouldBe oneByOne.takePacked(query).toSeq
+      packed(query).toSeq shouldBe oneByOne.sort(query).takePacked(query).toSeq
     }
     sharded.size shouldBe queries * 5
-    sharded.packAll(3).map(_.toSeq).toSeq shouldBe packed.map(_.toSeq).toSeq
+    pack(sharded, 3).map(_.toSeq).toSeq shouldBe packed.map(_.toSeq).toSeq
     (0 until queries).foreach { query =>
       fields(sharded.results(query)) shouldBe fields(
         unpack(query, packed(query))
@@ -90,10 +106,88 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
       Candidate(2, 2L, 3L, 0.2),
       Candidate(2, 2L, 4L, 0.3)
     ).foreach { c => single.add(c); many.add(c) }
-    single.packAll(1).map(_.toSeq).toSeq shouldBe many
-      .packAll(3)
-      .map(_.toSeq)
-      .toSeq
+    pack(single, 1).map(_.toSeq).toSeq shouldBe pack(many, 3).map(_.toSeq).toSeq
+  }
+
+  test("ordinary reads preserve the heap and allow collection to continue") {
+    val merged = merger(MetricType.L2, k = 3)
+    val initial = Vector(
+      Candidate(0, 1L, 1L, 1.0),
+      Candidate(0, 1L, 3L, 3.0),
+      Candidate(0, 1L, 2L, 2.0)
+    )
+    merged.addAll(initial)
+    merged.countScanned(11)
+    val snapshot = merged.results(0)
+    snapshot.toSet shouldBe initial.toSet
+    snapshot.head.score shouldBe 3.0
+    merged.results(0) shouldBe snapshot
+    merged.worstScore(0) shouldBe 3.0
+    merged.rejectsScore(0, 4.0) shouldBe true
+
+    val best = Candidate(0, 2L, 4L, 0.0)
+    merged.add(best)
+    val collected = merged.results(0)
+    collected.toSet shouldBe Set(best, initial(0), initial(2))
+    collected.head.score shouldBe 2.0
+    merged.worstScore(0) shouldBe 2.0
+    merged.rejectsScore(0, 3.0) shouldBe true
+    merged.rejectsScore(0, 1.5) shouldBe false
+    snapshot.toSet shouldBe initial.toSet
+    snapshot.head.score shouldBe 3.0
+
+    merged.sort(0) should be theSameInstanceAs merged
+    val expected = Vector(best, initial(0), initial(2))
+    merged.results(0) shouldBe expected
+    merged.sort(0).results(0) shouldBe expected
+    collected.head.score shouldBe 2.0
+    collected.toSet shouldBe expected.toSet
+    snapshot.toSet shouldBe initial.toSet
+    merged.size shouldBe 3
+    merged.scannedRows shouldBe 11L
+    the[IllegalStateException] thrownBy merged.add(Candidate(0, 2L, 5L, -1.0))
+  }
+
+  test("empty and singleton reads do not finalize their query") {
+    val merged = merger(MetricType.L2)
+    val emptySnapshot = merged.results(0)
+    emptySnapshot shouldBe empty
+    val first = Candidate(0, 1L, 1L, 2.0)
+    merged.add(first)
+    val singleton = merged.results(0)
+    singleton shouldBe Vector(first)
+    val better = Candidate(0, 1L, 2L, 1.0)
+    merged.add(better)
+    merged.results(0).toSet shouldBe Set(first, better)
+    emptySnapshot shouldBe empty
+    singleton shouldBe Vector(first)
+    merged.sort(0).results(0) shouldBe Vector(better, first)
+    the[IllegalStateException] thrownBy merged.add(Candidate(0, 1L, 3L, 0.0))
+
+    val single = merger(MetricType.L2).addAll(Vector(first))
+    single.sort(0).results(0) shouldBe Vector(first)
+    single.sort(0).takePacked(0).length shouldBe CandidateBytes.Width
+    the[IllegalStateException] thrownBy single.add(better)
+  }
+
+  test(
+    "packing requires explicit sorting even for empty and singleton queries"
+  ) {
+    Seq(0, 1, 3).foreach { count =>
+      val merged = merger(MetricType.L2, k = 3)
+      val candidates = (0 until count).map(index =>
+        Candidate(0, 1L, index.toLong, index.toDouble + 1.0)
+      )
+      merged.addAll(candidates)
+      val before = merged.results(0)
+      the[IllegalStateException] thrownBy merged.takePacked(0)
+      merged.results(0) shouldBe before
+      val best = Candidate(0, 2L, 9L, 0.0)
+      merged.add(best)
+      val expected = (best +: candidates).take(3).toVector
+      unpack(0, merged.sort(0).takePacked(0)) shouldBe expected
+      merged.results(0) shouldBe expected
+    }
   }
 
   test("L2 keeps the smallest scores, other metrics the largest") {
@@ -107,8 +201,8 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     candidates.foreach(l2.add)
     candidates.foreach(cosine.add)
 
-    places(l2.results(0)) shouldBe Vector((101L, 5L), (102L, 7L))
-    places(cosine.results(0)) shouldBe Vector((101L, 9L), (102L, 7L))
+    places(l2.sort(0).results(0)) shouldBe Vector((101L, 5L), (102L, 7L))
+    places(cosine.sort(0).results(0)) shouldBe Vector((101L, 9L), (102L, 7L))
   }
 
   test("an equal score is broken by segment id, then by row offset") {
@@ -119,7 +213,7 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
       Candidate(0, 101L, 5L, 0.10)
     ).foreach(merged.add)
 
-    places(merged.results(0)) shouldBe Vector(
+    places(merged.sort(0).results(0)) shouldBe Vector(
       (101L, 5L),
       (101L, 9L),
       (102L, 7L)
@@ -133,9 +227,9 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     merged.add(Candidate(1, 102L, 3L, 0.90))
 
     merged.size shouldBe 2
-    places(merged.results(0)) shouldBe Vector((101L, 2L))
+    places(merged.sort(0).results(0)) shouldBe Vector((101L, 2L))
     merged.size shouldBe 2
-    places(merged.results(1)) shouldBe Vector((102L, 3L))
+    places(merged.sort(1).results(1)) shouldBe Vector((102L, 3L))
     merged.size shouldBe 2
     packedPlaces(merged) shouldBe Vector((101L, 2L), (102L, 3L))
   }
@@ -222,18 +316,20 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
       val expected =
         (if (metric == MetricType.L2) ascending else descending).take(k)
 
-      fields(objects.results(0)) shouldBe fields(expected)
-      fields(unpack(0, bytes.takePacked(0))) shouldBe fields(expected)
+      fields(objects.sort(0).results(0)) shouldBe fields(expected)
+      fields(unpack(0, bytes.sort(0).takePacked(0))) shouldBe fields(expected)
       fields(unpack(0, objects.takePacked(0))) shouldBe fields(expected)
       fields(bytes.results(0)) shouldBe fields(expected)
-      fields(objects.results(0)) shouldBe fields(expected)
-      fields(unpack(0, bytes.takePacked(0))) shouldBe fields(expected)
+      fields(objects.sort(0).results(0)) shouldBe fields(expected)
+      fields(unpack(0, bytes.sort(0).takePacked(0))) shouldBe fields(expected)
       objects.size shouldBe expected.size
       bytes.size shouldBe expected.size
     }
   }
 
-  test("output fixes one query's order while other queries can still collect") {
+  test(
+    "sorting fixes one query's order while other queries can still collect"
+  ) {
     val merged = merger(MetricType.L2, queries = 2, k = 3)
     merged.countScanned(17)
     val first = Vector(
@@ -249,7 +345,7 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     merged.rejectsScore(0, 100.0) shouldBe true
     merged.rejectsScore(0, 2.0) shouldBe false
 
-    val retained = merged.results(0)
+    val retained = merged.sort(0).results(0)
     retained shouldBe first
     merged.size shouldBe 4
     merged.isFull(0) shouldBe true
@@ -272,7 +368,7 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     merged.addAll(next.tail.reverse)
     merged.add(Candidate(1, 3L, 9L, 6.0))
     merged.worstScore(1) shouldBe 5.0
-    unpack(1, merged.takePacked(1)) shouldBe next
+    unpack(1, merged.sort(1).takePacked(1)) shouldBe next
     retained shouldBe first
     merged.results(0) shouldBe first
     merged.results(1) shouldBe next
@@ -288,7 +384,7 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
       Candidate(1, 1L, 3L, 6.0)
     )
     merged.addAll(first.reverse)
-    val packed = merged.takePacked(1)
+    val packed = merged.sort(1).takePacked(1)
     val retained = packed.clone()
     val another = merged.takePacked(1)
     val objects = merged.results(1)
@@ -306,10 +402,11 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "empty output is repeatable and also closes its query to new candidates"
+    "explicitly sorting an empty query closes it and permits repeated output"
   ) {
     Seq(false, true).foreach { packedFirst =>
       val merged = merger(MetricType.L2, queries = 2)
+      merged.sort(0)
       if (packedFirst) merged.takePacked(0) shouldBe empty
       else merged.results(0) shouldBe empty
       merged.results(0) shouldBe empty
@@ -324,11 +421,14 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     }
   }
 
-  test("both output methods reject a query outside the allocated range") {
+  test(
+    "sorting and both output methods reject queries outside the allocated range"
+  ) {
     val merged = merger(MetricType.L2, queries = 2)
     Seq(-1, 2).foreach { query =>
       the[IllegalArgumentException] thrownBy merged.results(query)
       the[IllegalArgumentException] thrownBy merged.takePacked(query)
+      the[IllegalArgumentException] thrownBy merged.sort(query)
     }
   }
 

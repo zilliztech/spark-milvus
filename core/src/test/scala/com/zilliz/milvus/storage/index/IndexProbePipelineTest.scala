@@ -178,6 +178,7 @@ class IndexProbePipelineTest
           pipelines.foreach(_.finish(onProgress))
           (0 until groups(g)).foreach { query =>
             merger
+              .sort(query)
               .results(query)
               .map(c => (c.score, c.segmentId, c.rowOffset)) shouldBe expected(
               g
@@ -243,6 +244,7 @@ class IndexProbePipelineTest
       mergers.zipWithIndex.foreach { case (merger, g) =>
         (0 until groups(g)).foreach { query =>
           val got = merger
+            .sort(query)
             .results(query)
             .map(c => (c.score, c.segmentId, c.rowOffset))
           got shouldBe expected(g)(query)
@@ -283,7 +285,10 @@ class IndexProbePipelineTest
         }
         mergers.zipWithIndex.map { case (merger, g) =>
           (0 until groups(g)).map(query =>
-            merger.results(query).map(c => (c.score, c.segmentId, c.rowOffset))
+            merger
+              .sort(query)
+              .results(query)
+              .map(c => (c.score, c.segmentId, c.rowOffset))
           )
         }
       }
@@ -518,7 +523,7 @@ class IndexProbePipelineTest
         ranking.finish(_ => ())
       } finally ranking.close()
       // Double.compare puts NaN above every number: the worst L2 distance.
-      val ranked = merger.results(1).map(_.score)
+      val ranked = merger.sort(1).results(1).map(_.score)
       ranked.size shouldBe k
       ranked.last.isNaN shouldBe true
       ranked.init.forall(score => !score.isNaN) shouldBe true
