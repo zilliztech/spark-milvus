@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import org.apache.spark.{NarrowDependency, Partition, TaskContext}
 import org.apache.spark.rdd.RDD
@@ -20,7 +20,7 @@ import org.apache.spark.rdd.RDD
   * whatever the size of the set; a broadcast set is held once on each executor,
   * as the broadcast holds it.
   */
-private[read] final class SearchQueryRanges(
+private[search] final class SearchQueryRanges(
     @transient private var groups: RDD[SearchQueries.Group],
     sets: Int,
     ranges: Seq[Range]
@@ -94,7 +94,7 @@ private[read] final class SearchQueryRanges(
 }
 
 /** One first-stage task's query range: the packed groups it reads, in order. */
-private[read] final class SearchQueryRange(
+private[search] final class SearchQueryRange(
     override val index: Int,
     val groups: Array[Partition]
 ) extends Partition

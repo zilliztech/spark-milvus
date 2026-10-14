@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
 import scala.collection.concurrent.TrieMap

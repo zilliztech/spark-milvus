@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.internal.Logging
@@ -22,6 +22,7 @@ import com.zilliz.milvus.storage.read.exec.ReadMetrics
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.SearchResources
+import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema
 
@@ -40,7 +41,7 @@ import io.milvus.grpc.schema.CollectionSchema
   * the task's budget is read again for every group instead
   * (search-resources.html section 3.3).
   */
-private[read] object SegmentSetSearch extends Logging {
+private[search] object SegmentSetSearch extends Logging {
 
   private val chosenBatches =
     new java.util.concurrent.ConcurrentHashMap[(Int, Option[Long]), Long]()
@@ -49,7 +50,7 @@ private[read] object SegmentSetSearch extends Logging {
     * otherwise the default (docs/design/architecture/search-resources.html
     * section 3.2). Logged once per JVM for each distinct request.
     */
-  private[read] def exactScanBatch(spec: Spec): Long =
+  private[search] def exactScanBatch(spec: Spec): Long =
     chosenBatches.computeIfAbsent(
       (spec.slots, spec.batchMaxBytes),
       _ => {
@@ -388,7 +389,7 @@ private[read] object SegmentSetSearch extends Logging {
     * largest index, by the planner's own footprint rule). An index whose size
     * the snapshot did not record is not prefetched.
     */
-  private[read] def prefetchIndexes(
+  private[search] def prefetchIndexes(
       set: Seq[MilvusInputPartition],
       spec: Spec
   ): Boolean =

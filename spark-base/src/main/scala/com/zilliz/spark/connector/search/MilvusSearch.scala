@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import scala.jdk.CollectionConverters._
 
@@ -29,6 +29,7 @@ import com.zilliz.spark.connector.options.{
   SearchResources,
   TaskResources
 }
+import com.zilliz.spark.connector.read.MilvusInputPartition
 import io.milvus.grpc.schema.FieldSchema
 
 /** The two-stage search over the segments of a Milvus table input: a query set
@@ -474,7 +475,7 @@ object MilvusSearch extends Logging {
     budget.profile.fold(searched)(searched.withResources)
   }
 
-  private[read] def dimensionOf(field: FieldSchema): Int = field.typeParams
+  private[search] def dimensionOf(field: FieldSchema): Int = field.typeParams
     .find(_.key == "dim")
     .map(_.value.toInt)
     .getOrElse(
@@ -487,7 +488,7 @@ object MilvusSearch extends Logging {
     * that field's indexes take. Binary vector fields are not searched
     * (docs/design/README.md, decision log 2026-10-09).
     */
-  private[read] def checkSearchable(
+  private[search] def checkSearchable(
       metric: MetricType,
       layout: VectorLayout
   ): Unit = {

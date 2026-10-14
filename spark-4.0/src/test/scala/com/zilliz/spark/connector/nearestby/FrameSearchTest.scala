@@ -24,7 +24,7 @@ import com.zilliz.milvus.storage.schema.{
 import com.zilliz.spark.connector.extensions.ConnectorVectorRanking
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.SearchLimits
-import com.zilliz.spark.connector.read.{FrameSearch, NearestBySearch}
+import com.zilliz.spark.connector.search.{FrameSearch, NearestBySearch}
 
 /** A DataFrame input's search with limits small enough to cut its queries into
   * several groups and to keep them off the driver: every base partition meets

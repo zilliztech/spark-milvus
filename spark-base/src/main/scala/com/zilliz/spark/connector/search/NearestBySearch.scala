@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import scala.jdk.CollectionConverters._
 
@@ -42,6 +42,7 @@ import com.zilliz.milvus.storage.schema.{
 }
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
+import com.zilliz.spark.connector.read.{MilvusInputPartition, MilvusScan}
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 /** A nearest-by join run as the two-stage search, over a Milvus table input or
@@ -792,7 +793,7 @@ private[connector] object NearestBySearch {
 /** What a query row's vector is to the search, under the ranking function's
   * rules.
   */
-private[read] sealed trait QueryVector {
+private[search] sealed trait QueryVector {
 
   /** The kind once the search's dimension is known: a searched vector of
     * another length goes to Spark.
@@ -804,7 +805,7 @@ private[read] sealed trait QueryVector {
   }
 }
 
-private[read] object QueryVector {
+private[search] object QueryVector {
 
   /** NULL against every base row: a NULL vector, or one of the field's
     * dimension with a NULL element. The base vectors all have that dimension,
