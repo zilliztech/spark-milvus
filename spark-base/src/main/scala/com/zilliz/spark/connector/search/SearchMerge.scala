@@ -24,7 +24,7 @@ import com.zilliz.milvus.storage.vector.CandidateBytes
   */
 private[search] object SearchMerge {
 
-  /** What a search gives back: the hits of every query with the output columns
+  /** What a Milvus search gives back: each query's hits with the output columns
     * asked for, as rows of `schema`. An iterator of these rows may hand the
     * same object back with new values, so a consumer that keeps a row copies
     * it.

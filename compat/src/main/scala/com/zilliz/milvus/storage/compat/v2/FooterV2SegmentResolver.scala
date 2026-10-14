@@ -29,7 +29,7 @@ import com.zilliz.milvus.storage.snapshot.{
   *      `SnapshotSegmentReader.toSegment` to join the two.
   *
   * The resulting `Seq[Segment]` is the runtime view consumed by
-  * `MilvusV2InputPartition` / `MilvusRowPartitionReader`.
+  * `MilvusInputPartition` / `MilvusRowPartitionReader`.
   *
   * Path resolution: AVRO and parquet paths that Milvus writes are
   * bucket-relative (`files/snapshots/...`). When `bucket` is non-empty we

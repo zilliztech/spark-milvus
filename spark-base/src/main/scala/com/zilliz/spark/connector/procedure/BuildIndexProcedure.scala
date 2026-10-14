@@ -28,7 +28,7 @@ import com.zilliz.spark.connector.options.{
   OptionParsing,
   TaskResources
 }
-import com.zilliz.spark.connector.read.SnapshotPartitions
+import com.zilliz.spark.connector.read.MilvusInputPartition
 import com.zilliz.spark.connector.table.{MilvusTables, SnapshotReference}
 import io.milvus.grpc.schema.FieldSchema
 
@@ -115,7 +115,13 @@ object BuildIndexProcedure extends Procedure {
           s"The collection has no vector field '$column'"
         )
       )
-    val partitions = SnapshotPartitions.of(table, caseInsensitive)
+    val partitions = table
+      .newScanBuilder(caseInsensitive)
+      .build()
+      .toBatch
+      .planInputPartitions()
+      .toSeq
+      .map(_.asInstanceOf[MilvusInputPartition])
     require(
       partitions.nonEmpty,
       s"The snapshot of '$collection' holds no segment to index"

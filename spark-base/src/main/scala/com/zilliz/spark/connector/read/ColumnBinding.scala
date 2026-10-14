@@ -128,7 +128,7 @@ sealed trait ColumnBinding {
 
 object ColumnBinding {
 
-  /** Builds the setup for whichever line the partition belongs to.
+  /** Binds the columns using the layout described by the task.
     *
     * `schema` is the data schema, metadata extra columns already removed: it
     * says which columns the query wants.
@@ -136,17 +136,17 @@ object ColumnBinding {
   def apply(
       partition: MilvusInputPartition,
       schema: StructType
-  ): ColumnBinding = partition match {
-    case p: MilvusV2InputPartition => V2ColumnBinding(p, schema)
-    case p: MilvusV3InputPartition => V3ColumnBinding(p, schema)
+  ): ColumnBinding = partition.task.layout match {
+    case SegmentLayout.ColumnGroups(_) =>
+      V2ColumnBinding(partition.task, schema)
+    case SegmentLayout.Manifest(_, _) => V3ColumnBinding(partition.task, schema)
   }
 }
 
 /** The column-group line: columns are named after the field. */
 final case class V2ColumnBinding(
-    partition: MilvusV2InputPartition,
-    schema: StructType,
-    override val task: SegmentReadTask
+    override val task: SegmentReadTask,
+    schema: StructType
 ) extends ColumnBinding {
 
   protected val milvusSchema: CollectionSchema =
@@ -200,12 +200,6 @@ final case class V2ColumnBinding(
 }
 
 object V2ColumnBinding {
-  def apply(
-      partition: MilvusV2InputPartition,
-      schema: StructType
-  ): V2ColumnBinding =
-    V2ColumnBinding(partition, schema, partition.task)
-
   private[read] case class FieldMappings(
       fieldIdToName: Map[Long, String],
       fieldNameToId: Map[String, Long],
@@ -328,9 +322,8 @@ object V2ColumnBinding {
   * manifest records and what the native reader matches on.
   */
 final case class V3ColumnBinding(
-    partition: MilvusV3InputPartition,
-    schema: StructType,
-    override val task: SegmentReadTask
+    override val task: SegmentReadTask,
+    schema: StructType
 ) extends ColumnBinding {
 
   protected val milvusSchema: CollectionSchema =
@@ -382,11 +375,6 @@ final case class V3ColumnBinding(
 }
 
 object V3ColumnBinding {
-  def apply(
-      partition: MilvusV3InputPartition,
-      schema: StructType
-  ): V3ColumnBinding = V3ColumnBinding(partition, schema, partition.task)
-
   private[read] val TimestampColumnName = "1"
 
   private[read] val SystemFieldAliases: Seq[(String, Long)] = Seq(

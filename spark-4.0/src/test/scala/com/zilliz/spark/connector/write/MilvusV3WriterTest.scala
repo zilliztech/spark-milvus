@@ -5,14 +5,14 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.write.exec.StagingLayout
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.options.{MilvusOption, OptionParsing}
 
 class MilvusV3WriterTest extends AnyFunSuite with Matchers {
 
-  test("parsePositiveDoubleOption rejects invalid values") {
+  test("positiveDouble rejects invalid values") {
     Seq("0", "-1", "NaN", "Infinity", "-Infinity", "abc").foreach { value =>
       an[IllegalArgumentException] should be thrownBy {
-        MilvusV3PartitionWriter.parsePositiveDoubleOption(
+        OptionParsing.positiveDouble(
           Map(
             MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> value
           ),
@@ -49,12 +49,20 @@ class MilvusV3WriterTest extends AnyFunSuite with Matchers {
     ) shouldBe "milvus"
   }
 
-  test("parsePositiveDoubleOption accepts finite positive values") {
-    MilvusV3PartitionWriter.parsePositiveDoubleOption(
+  test("positiveDouble accepts finite positive values") {
+    OptionParsing.positiveDouble(
       Map(MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> "64.5"),
       MilvusOption.WriterVariableWidthBytesPerValue,
       defaultValue = 32.0
     ) shouldBe 64.5
+  }
+
+  test("positiveDouble retains the writer default for blank density") {
+    OptionParsing.positiveDouble(
+      Map(MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> "   "),
+      MilvusOption.WriterVariableWidthBytesPerValue,
+      defaultValue = 32.0
+    ) shouldBe 32.0
   }
 
   test(

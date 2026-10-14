@@ -371,7 +371,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     assert(partitions.length == 1)
     val task = partitions.head
       .asInstanceOf[
-        com.zilliz.spark.connector.read.MilvusV2InputPartition
+        com.zilliz.spark.connector.read.MilvusInputPartition
       ]
       .task
     assert(task.properties("fs.bucket_name") == "backup-bucket")
@@ -410,7 +410,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
         )
       )
       .head
-      .asInstanceOf[MilvusV2InputPartition]
+      .asInstanceOf[MilvusInputPartition]
       .task
 
     assert(task.properties(StorageProperties.BucketName) == "snapshot-bucket")
@@ -445,7 +445,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     val task = scan
       .inputPartitions(scan.snapshot)
       .head
-      .asInstanceOf[MilvusV2InputPartition]
+      .asInstanceOf[MilvusInputPartition]
       .task
 
     assert(
@@ -479,7 +479,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       rowIdSchema,
       new CaseInsensitiveStringMap(rawOptions),
       snapshot
-    ).inputPartitions(snapshot).head.asInstanceOf[MilvusV2InputPartition].task
+    ).inputPartitions(snapshot).head.asInstanceOf[MilvusInputPartition].task
 
     assert(task.limits == ReadLimits(2048, 16777216L, 67108864L))
   }
@@ -1333,7 +1333,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       rowIdSchema,
       new CaseInsensitiveStringMap(options),
       snapshot
-    ).inputPartitions(snapshot).head.asInstanceOf[MilvusV3InputPartition].task
+    ).inputPartitions(snapshot).head.asInstanceOf[MilvusInputPartition].task
 
     assert(task.properties(StorageProperties.BucketName) == "snapshot-bucket")
   }
@@ -1814,7 +1814,9 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       .map(_.asInstanceOf[MilvusInputPartition])
     assert(partitions.length == 2)
     assert(partitions.forall(_.task.neededFieldIds == Seq(100L, 101L)))
-    assert(partitions.forall(_.milvusOption.milvusFilter.nonEmpty))
+    val parsedFilter = MilvusOption(options).milvusFilter
+    assert(parsedFilter.nonEmpty)
+    assert(partitions.forall(_.milvusFilter == parsedFilter))
   }
 
   test("milvus filter preserves an unpruned all-fields native read") {
@@ -2113,8 +2115,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val partitions = scanFromOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 2)
-    val first = partitions(0).asInstanceOf[MilvusV3InputPartition]
-    val second = partitions(1).asInstanceOf[MilvusV3InputPartition]
+    val first = partitions(0).asInstanceOf[MilvusInputPartition]
+    val second = partitions(1).asInstanceOf[MilvusInputPartition]
     assert(first.task.partitionId == 20L)
     assert(first.task.segmentId == 30L)
     assert(first.task.readVersionOrLatest == 7L)
@@ -2141,7 +2143,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val partitions = scanFromOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 1)
-    val partition = partitions.head.asInstanceOf[MilvusV3InputPartition]
+    val partition = partitions.head.asInstanceOf[MilvusInputPartition]
     assert(partition.task.partitionId == 20L)
     assert(partition.task.segmentId == 30L)
     assert(partition.task.readVersionOrLatest == 7L)
@@ -2164,7 +2166,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       DeleteFileListing.empty.copy(v3BySegment = Map(30L -> Seq(log(3))))
     )
 
-    val partition = partitions.head.asInstanceOf[MilvusV3InputPartition]
+    val partition = partitions.head.asInstanceOf[MilvusInputPartition]
     assert(partition.task.segmentId == 30L)
     assert(partition.task.deletes == DeleteSource.Files(Seq(log(3))))
     assert(partition.task.appliesDeletes)
@@ -2187,7 +2189,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       DeleteFileListing.empty.copy(v3ReadVersions = Map(30L -> 11L))
     )
 
-    val partition = partitions.head.asInstanceOf[MilvusV3InputPartition]
+    val partition = partitions.head.asInstanceOf[MilvusInputPartition]
     assert(partition.task.readVersionOrLatest == 11L)
   }
 
@@ -2217,8 +2219,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       )
     )
 
-    val first = partitions(0).asInstanceOf[MilvusV3InputPartition]
-    val second = partitions(1).asInstanceOf[MilvusV3InputPartition]
+    val first = partitions(0).asInstanceOf[MilvusInputPartition]
+    val second = partitions(1).asInstanceOf[MilvusInputPartition]
     assert(
       first.task.deletes == DeleteSource.Files(Seq(log(1), log(2), log(3)))
     )
@@ -2248,7 +2250,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
     rawOptions.put(MilvusOption.SnapshotSchemaBytes, emptySchemaBytes)
     val partitions = scanFromOptions(rawOptions).planInputPartitions()
     assert(partitions.length == 1)
-    val partition = partitions.head.asInstanceOf[MilvusV2InputPartition]
+    val partition = partitions.head.asInstanceOf[MilvusInputPartition]
     assert(partition.task.segmentId == 30L)
     assert(partition.task.partitionId == 20L)
   }
@@ -2297,8 +2299,8 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
 
     // Nothing is resolved on the executor from a marker any more: every
     // partition carries the files it applies, and reads them itself.
-    val first = partitions(0).asInstanceOf[MilvusV2InputPartition]
-    val second = partitions(1).asInstanceOf[MilvusV2InputPartition]
+    val first = partitions(0).asInstanceOf[MilvusInputPartition]
+    val second = partitions(1).asInstanceOf[MilvusInputPartition]
     assert(
       first.task.deletes == DeleteSource.Files(Seq(log(1), log(2), log(4)))
     )
@@ -2338,7 +2340,7 @@ class MilvusScanClientSnapshotTest extends AnyFunSuite {
       )
     )
 
-    val partition = partitions.head.asInstanceOf[MilvusV2InputPartition]
+    val partition = partitions.head.asInstanceOf[MilvusInputPartition]
     val groups = partition.task.layout match {
       case SegmentLayout.ColumnGroups(gs) => gs
       case other => fail(s"expected a column group layout, got $other")

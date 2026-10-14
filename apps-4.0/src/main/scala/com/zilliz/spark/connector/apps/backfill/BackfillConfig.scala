@@ -42,7 +42,7 @@ import com.zilliz.spark.connector.options.MilvusOption
   *   Row identity used to match snapshot rows with backfill input rows
   */
 case class BackfillConfig(
-    // Milvus connection (optional for snapshot-only mode)
+    // Milvus connection options retained for callers; backfill requires a snapshot
     milvusUri: String = "",
     milvusToken: String = "",
     databaseName: String = "default",
@@ -245,23 +245,6 @@ case class BackfillConfig(
       } else {
         Right(())
       }
-    }
-  }
-
-  /** Validate that Milvus client connection config is present (required when no
-    * snapshot)
-    */
-  def validateForClientMode(): Either[String, Unit] = {
-    validate().flatMap { _ =>
-      if (milvusUri.isEmpty)
-        Left(
-          "milvusUri cannot be empty (required when no snapshot is provided)"
-        )
-      else if (collectionName.isEmpty)
-        Left(
-          "collectionName cannot be empty (required when no snapshot is provided)"
-        )
-      else Right(())
     }
   }
 

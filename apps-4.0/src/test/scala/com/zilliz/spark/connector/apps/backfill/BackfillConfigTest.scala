@@ -170,8 +170,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
   test(
     "Empty milvusUri/collectionName is allowed by validate() in snapshot mode"
   ) {
-    // milvusUri and collectionName are only required in client mode (no snapshot).
-    // validate() must accept empty values; only validateForClientMode rejects them.
+    // The required snapshot supplies the collection schema and identity.
     val config = BackfillConfig(
       milvusUri = "",
       collectionName = "",
@@ -193,32 +192,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       s3UseIam = true
     )
     config.validate() shouldBe Right(())
-  }
-
-  test("validateForClientMode fails on empty milvusUri") {
-    val config = BackfillConfig(
-      milvusUri = "",
-      collectionName = "test_collection",
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin"
-    )
-
-    config.validateForClientMode().isLeft shouldBe true
-  }
-
-  test("validateForClientMode fails on empty collectionName") {
-    val config = BackfillConfig(
-      milvusUri = "http://localhost:19530",
-      collectionName = "",
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin"
-    )
-
-    config.validateForClientMode().isLeft shouldBe true
   }
 
   test("Empty s3Endpoint fails validation") {

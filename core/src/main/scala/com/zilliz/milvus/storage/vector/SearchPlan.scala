@@ -215,11 +215,10 @@ object SearchPlan {
     def tasks: Int = sets.size * queryRanges.size
   }
 
-  /** The share of a task's budget an unknown-sized segment is planned at. Half:
-    * two such segments fill a set, one is never alone in a set for nothing, and
-    * the task that reads the set streams instead of holding when the segments
-    * turn out larger (docs/design/architecture/search-resources.html section
-    * 3.3).
+  /** The share of a task's segment budget an unknown-sized segment is planned
+    * at. Half the budget, before reserving the query matrix and working
+    * buffers. A task streams instead of holding when the segments turn out
+    * larger (docs/design/architecture/search-resources.html section 3.3).
     */
   val UnknownSegmentShare: Double = 0.5
 
@@ -326,30 +325,6 @@ object SearchPlan {
       .filter(_.nonEmpty)
       .map(_.sortBy(task => order(task.segmentId)).toSeq)
       .toSeq
-  }
-
-  /** A segment's vectors in bytes, or `budget × UnknownSegmentShare` when its
-    * row count is unknown: the size exact search plans a set by.
-    */
-  def vectorBytes(
-      layout: VectorLayout,
-      budget: Long
-  ): Segment => Long = {
-    val unknown = unknownSegmentBytes(layout, budget)
-    task => task.rows.map(_ * layout.rowBytes.toLong).getOrElse(unknown)
-  }
-
-  /** The bytes of vectors a set is known to hold, or None when any of its
-    * segments has no row count. What a task compares to its budget before it
-    * reads: a set known to be larger streams from the start.
-    */
-  def knownBytes(
-      set: Seq[Segment],
-      layout: VectorLayout
-  ): Option[Long] = {
-    val rows = set.map(_.rows)
-    if (rows.forall(_.isDefined)) Some(rows.flatten.sum * layout.rowBytes)
-    else None
   }
 
   private def unknownSegmentBytes(
@@ -557,24 +532,5 @@ object SearchPlan {
         Some(needs)
       )
     }
-  }
-
-  /** How many bytes of vectors one task keeps at once: its whole segment set,
-    * which the planner sized to fit, or `vectorsMaxBytes` when one segment is
-    * larger than that on its own. A segment is read once either way; what a
-    * task keeps is what the query groups after the first one run on
-    * (docs/design/architecture/vector-search.html section 2.3).
-    */
-  def retainedBytes(
-      set: Seq[Segment],
-      layout: VectorLayout,
-      vectorsMaxBytes: Long
-  ): Long = {
-    require(
-      vectorsMaxBytes > 0,
-      s"The retained vector limit must be positive: $vectorsMaxBytes"
-    )
-    val bytes = set.map(vectorBytes(layout, vectorsMaxBytes)).sum
-    math.min(math.max(bytes, layout.rowBytes.toLong), vectorsMaxBytes)
   }
 }

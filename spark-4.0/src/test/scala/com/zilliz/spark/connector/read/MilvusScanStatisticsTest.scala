@@ -40,7 +40,7 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
   }
 
   private def v2(rows: Long): InputPartition =
-    MilvusV2InputPartition(
+    MilvusInputPartition(
       SegmentReadTask(
         segmentId = rows,
         partitionId = 0L,
@@ -50,7 +50,7 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
         schemaBytes = Array.emptyByteArray,
         properties = Map("fs.storage_type" -> "local")
       ),
-      options
+      options.milvusFilter
     )
 
   test(
@@ -122,7 +122,7 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
   // Spark would broadcast a table that is not small.
   test("one partition with an unknown count makes both statistics unknown") {
     val schema = StructType(Seq(StructField("id", LongType)))
-    val v3 = MilvusV3InputPartition(
+    val v3 = MilvusInputPartition(
       SegmentReadTask(
         segmentId = 1L,
         partitionId = 0L,
@@ -130,7 +130,7 @@ class MilvusScanStatisticsTest extends AnyFunSuite with Matchers {
         schemaBytes = Array.emptyByteArray,
         properties = Map("fs.storage_type" -> "local")
       ),
-      options
+      options.milvusFilter
     )
     val stats = MilvusScan.statisticsFor(Array(v2(10L), v3), schema)
     stats.numRows().isPresent shouldBe false

@@ -3,7 +3,9 @@ package com.zilliz.spark.connector
 /** ScanBuilder, Scan, Batch, serializable InputPartitions and the executor-side
   * readers: one row reader for both storage lines (`MilvusRowPartitionReader`),
   * one columnar reader (`MilvusColumnarPartitionReader`) and their
-  * `ColumnBinding`s.
+  * `ColumnBinding`s. One `MilvusInputPartition` carries the SegmentReadTask and
+  * parsed Milvus filter; the task layout selects the column binding, without
+  * repeating V2/V3 as partition subtypes or shipping the full option object.
   *
   * `core.read.plan` turns the fixed Snapshot into one task per data segment and
   * `core.read.exec` opens the native reader and verifies any declared physical

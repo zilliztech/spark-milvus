@@ -3,25 +3,18 @@
 The Backfill API adds new fields to existing Milvus collections by joining
 snapshot rows with new field values and writing per-segment binlog files
 directly into Milvus storage. The collection primary key remains the default
-join key; snapshot mode can instead use an explicitly selected persisted
-physical field. It can run as a programmatic API
+join key; callers can instead use an explicitly selected persisted physical
+field. It can run as a programmatic API
 from Scala/PySpark, or as a standalone `spark-submit` job (for example on
 Apache Spark Operator / Kubernetes).
 
-## Modes
+## Required snapshot
 
-The backfill operation has two read modes for the original collection:
-
-1. **Snapshot mode (recommended)** — `MilvusBackfill.run` is given a Milvus
-   snapshot manifest JSON. The selected join column and segment metadata are
-   read directly from S3 via the storage-v2 FFI reader. **No connection to a
-   running Milvus server is required.** Field IDs are derived from the
-   snapshot's collection schema.
-2. **Client mode** — when no snapshot path is provided, the connector falls
-   back to talking to a Milvus server (`milvus.uri` / `milvus.token`) to fetch
-   the schema and segment list. ADDFIELD writes still require field-ID
-   mapping, so client mode currently rejects ADDFIELD backfill — provide a
-   snapshot.
+`MilvusBackfill.run` requires a Milvus snapshot manifest JSON. The selected
+join column and segment metadata are read directly from object storage;
+field IDs come from the snapshot's collection schema. No connection to a
+running Milvus server is required. A missing snapshot path fails validation
+before the input parquet is opened.
 
 ## Spark-submit entry point: `BackfillApp`
 
@@ -310,8 +303,9 @@ result match {
 
 ### Optional
 
-- `milvusUri`, `milvusToken`, `databaseName`, `collectionName` — required
-  only in client mode (no snapshot).
+- `milvusUri`, `milvusToken`, `databaseName`, `collectionName` — retained
+  configuration fields; schema and collection identity come from the required
+  snapshot.
 - `partitionName` — backfill a specific partition.
 - `s3UseIam` — use the provider IAM chain instead of static AK/SK.
 - `s3UseSSL`, `s3RootPath`, `s3Region` — standard S3 options.
@@ -361,12 +355,11 @@ Override via `customOutputPath` if needed.
 
 ## How it works
 
-1. Validate S3/writer configuration. Empty AK/SK is allowed (IAM/IRSA).
+1. Validate S3/writer configuration and require a snapshot path. Empty AK/SK
+   is allowed (IAM/IRSA).
 2. Load the snapshot manifest JSON (per-bucket S3A credentials are
    configured automatically).
 3. Resolve the configured join field and field ID from the snapshot schema.
-   The default PK can also be resolved through the Milvus client in client mode;
-   explicit physical keys require a snapshot.
 4. Read the new-field parquet, configuring S3A credentials for the source
    bucket as needed.
 5. Read the selected join column + `_segment_id` / `_row_offset` via

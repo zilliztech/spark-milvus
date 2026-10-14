@@ -323,23 +323,6 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     cfg.validate() shouldBe Right(())
   }
 
-  test("validateForClientMode requires milvusUri and collectionName") {
-    val base = BackfillConfig(
-      s3Endpoint = "ep",
-      s3BucketName = "b",
-      s3AccessKey = "ak",
-      s3SecretKey = "sk"
-    )
-    base.validateForClientMode().isLeft shouldBe true
-    base
-      .copy(milvusUri = "http://x:19530")
-      .validateForClientMode()
-      .isLeft shouldBe true
-    base
-      .copy(milvusUri = "http://x:19530", collectionName = "c")
-      .validateForClientMode() shouldBe Right(())
-  }
-
   // ============ snapshot metadata and source lifecycle ============
 
   test("snapshot metadata base paths strip the configured Milvus endpoint") {
@@ -461,24 +444,39 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     }
   }
 
-  test("MilvusBackfill.run rejects a physical join key without a snapshot") {
-    val cfg = BackfillConfig(
-      s3Endpoint = "s3.us-west-2.amazonaws.com",
-      s3BucketName = "embedded-bucket",
-      s3AccessKey = "",
-      s3SecretKey = "",
-      s3UseIam = true,
-      joinKey = BackfillJoinKey.PhysicalField("external_id")
-    )
-
-    // An empty snapshot path selects the client-mode path; a physical key has
-    // no schema to resolve against there, so run() must fail before it tries
-    // to build a MilvusClient or read the input.
-    MilvusBackfill.run(spark, "file:///unused.parquet", "", cfg) match {
-      case Left(error) =>
-        error.message should include("external_id")
-        error.message should include("requires a snapshot schema")
-      case Right(_) => fail("expected physical join key to require a snapshot")
+  test("MilvusBackfill.run requires a snapshot before accessing either input") {
+    for {
+      joinKey <- Seq(
+        BackfillJoinKey.PrimaryKey,
+        BackfillJoinKey.PhysicalField("external_id")
+      )
+      snapshotPath <- Seq(null, "", " \t")
+    } {
+      val cfg = BackfillConfig(
+        milvusUri = "not-a-milvus-uri",
+        collectionName = "collection",
+        s3Endpoint = "s3.us-west-2.amazonaws.com",
+        s3BucketName = "embedded-bucket",
+        s3AccessKey = "",
+        s3SecretKey = "",
+        s3UseIam = true,
+        joinKey = joinKey
+      )
+      // Neither the configured online collection nor the unsupported source
+      // scheme may be accessed before the required snapshot has been supplied.
+      withClue(s"joinKey=$joinKey, snapshotPath=$snapshotPath: ") {
+        MilvusBackfill.run(
+          spark,
+          "unsupported-input://unused",
+          snapshotPath,
+          cfg
+        ) match {
+          case Left(error: SchemaValidationError) =>
+            error.message shouldBe "ADDFIELD backfill requires collection schema from a snapshot"
+          case other =>
+            fail(s"expected missing-snapshot validation, got $other")
+        }
+      }
     }
   }
 
@@ -495,9 +493,8 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
           s3SecretKey = "minioadmin",
           inputFormat = format
         )
-        // An empty snapshotPath would otherwise be read; failing at
-        // config.validate() proves the error short-circuits before any
-        // snapshot/S3 work.
+        // Invalid configuration still takes precedence over the missing
+        // snapshot and fails before either input is opened.
         MilvusBackfill.run(spark, "file:///unused.input", "", cfg) match {
           case Left(error) =>
             error.message should include("Invalid configuration")

@@ -415,10 +415,6 @@ object BackfillStorage {
       snapshotPath: String,
       config: BackfillConfig
   ): Either[BackfillError, String] = {
-    if (snapshotPath == null || snapshotPath.isEmpty) {
-      return Right("") // Empty path means use client fallback
-    }
-
     try {
       // A standard object-store URI lives in its named bucket. A path without
       // a scheme and file:// remain local CLI input.

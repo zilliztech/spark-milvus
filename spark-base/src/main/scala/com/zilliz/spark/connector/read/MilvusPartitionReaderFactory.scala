@@ -125,7 +125,7 @@ class MilvusPartitionReaderFactory(
           segmentId = p.task.segmentId,
           requestedExtraColumns = requestedExtraColumns,
           pushedExpression = pushedExpression,
-          milvusFilter = p.milvusOption.milvusFilter,
+          milvusFilter = p.milvusFilter,
           columnNameFor = setup.columnNameFor,
           taskAllocatorOwner = Some(taskAllocator)
         )
@@ -166,7 +166,7 @@ class MilvusPartitionReaderFactory(
           schema = dataSchema,
           setup = setup,
           pushedExpression = pushedExpression,
-          milvusFilter = p.milvusOption.milvusFilter,
+          milvusFilter = p.milvusFilter,
           allocator = taskAllocator.allocator,
           taskAllocatorOwner = Some(taskAllocator)
         )

@@ -26,11 +26,7 @@ import com.zilliz.milvus.storage.expr.PredicateExpr
 import com.zilliz.milvus.storage.io.ObjectStore
 import com.zilliz.milvus.storage.read.plan.{DeleteFileListing, ReadPlan}
 import com.zilliz.milvus.storage.schema.FieldMetadata
-import com.zilliz.milvus.storage.snapshot.{
-  SegmentLayout,
-  Snapshot,
-  SnapshotOrigin
-}
+import com.zilliz.milvus.storage.snapshot.{Snapshot, SnapshotOrigin}
 import com.zilliz.milvus.storage.stats.{PrimaryKeyBloomPruner, PrimaryKeyFilter}
 import com.zilliz.spark.connector.expr.SparkPredicateTranslator
 import com.zilliz.spark.connector.metrics.ScanMetrics
@@ -269,11 +265,8 @@ class MilvusScan(
     inputPartitions(plannedSnapshot, cachedDeleteListing)
   }
 
-  /** The plan, `core.read.plan.ReadPlan.of`, wrapped into Spark's input
-    * partitions: each task becomes the partition of its storage line, with what
-    * only this layer knows on it (the vector search, the partition name, the
-    * option map the reader factory reads, the L0 marker a V2 reader resolves on
-    * the executor).
+  /** The plan, `core.read.plan.ReadPlan.of`, wrapped into Spark input
+    * partitions with the Milvus filter already parsed on the driver.
     */
   private[read] def inputPartitions(
       snapshot: Snapshot,
@@ -282,18 +275,12 @@ class MilvusScan(
     // Every path in the snapshot is a key of `snapshot.bucket`, so that is the
     // bucket the native reader is rooted at, whatever the raw options say (a
     // backup read derives it from `milvus.backup.dir`).
-    val canonicalMilvusOption = bucket
-      .map(b =>
-        milvusOption.copy(
-          options = milvusOption.options ++
-            Map(StorageProperties.BucketName -> b)
-        )
-      )
-      .getOrElse(milvusOption)
+    val canonicalOptions = milvusOption.options ++
+      bucket.map(StorageProperties.BucketName -> _)
     val planProperties = StorageOptions.storagePropertiesFor(
       hadoopConf,
       bucket.getOrElse(""),
-      canonicalMilvusOption.options
+      canonicalOptions
     )
     // Parsed once for the whole plan rather than per partition: a bad storage
     // configuration should fail planning, not every task.
@@ -305,17 +292,11 @@ class MilvusScan(
       neededFieldIds = MilvusOption.readerFieldIds(options),
       limits = milvusOption.readLimits
     )
-    plan.specs.map { task =>
-      task.layout match {
-        case SegmentLayout.Manifest(_, _) =>
-          MilvusV3InputPartition(
-            task,
-            canonicalMilvusOption
-          ): InputPartition
-        case SegmentLayout.ColumnGroups(_) =>
-          MilvusV2InputPartition(task, canonicalMilvusOption): InputPartition
-      }
-    }.toArray
+    plan.specs
+      .map(task =>
+        MilvusInputPartition(task, milvusOption.milvusFilter): InputPartition
+      )
+      .toArray
   }
 
   override def createReaderFactory(): PartitionReaderFactory =

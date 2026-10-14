@@ -1,8 +1,6 @@
 package com.zilliz.spark.connector.write
 
-import java.lang.{Double => JavaDouble}
 import java.nio.charset.StandardCharsets
-import scala.collection.{Map => CollectionMap}
 import scala.collection.JavaConverters._
 import scala.util.Try
 
@@ -67,33 +65,6 @@ class MilvusV3WriterFactory(
   }
 }
 
-object MilvusV3PartitionWriter {
-
-  private[connector] def parsePositiveDoubleOption(
-      options: CollectionMap[String, String],
-      key: String,
-      defaultValue: Double
-  ): Double = {
-    options
-      .get(key.toLowerCase)
-      .filter(_.trim.nonEmpty)
-      .map { value =>
-        val parsed = Try(value.trim.toDouble).getOrElse {
-          throw new IllegalArgumentException(
-            s"$key must be a finite positive number, got '$value'"
-          )
-        }
-        if (!JavaDouble.isFinite(parsed) || parsed <= 0.0) {
-          throw new IllegalArgumentException(
-            s"$key must be a finite positive number, got '$value'"
-          )
-        }
-        parsed
-      }
-      .getOrElse(defaultValue)
-  }
-}
-
 /** One task's segment: rows become Arrow batches here, the batches go to
   * `core.write.exec.V3SegmentWriter`, and `commit` records the column groups in
   * the segment's manifest through `ManifestTransaction`.
@@ -110,7 +81,7 @@ class MilvusV3PartitionWriter(
 
   private val batchSize = milvusOption.insertMaxBatchSize
   private val variableWidthBytesPerValue =
-    MilvusV3PartitionWriter.parsePositiveDoubleOption(
+    OptionParsing.positiveDouble(
       milvusOption.options,
       MilvusOption.WriterVariableWidthBytesPerValue,
       defaultValue = 32.0
