@@ -21,6 +21,17 @@ class SearchLimitsTest extends AnyFunSuite with Matchers {
       SearchLimits.from(Map("milvus.search.calls.in.flight" -> "0"))
   }
 
+  test("the group limit is the planner's until the base sets one") {
+    SearchLimits.Default.groupMaxBytes shouldBe None
+    SearchLimits.from(Map.empty).groupMaxBytes shouldBe None
+    // The old default, set: a limit the base names is used as it is.
+    SearchLimits
+      .from(Map(MilvusOption.SearchGroupMaxBytes -> "536870912"))
+      .groupMaxBytes shouldBe Some(536870912L)
+    an[IllegalArgumentException] should be thrownBy
+      SearchLimits.from(Map(MilvusOption.SearchGroupMaxBytes -> "0"))
+  }
+
   test("the collect threads and query ranges default to the planner's choice") {
     val limits = SearchLimits.from(Map.empty)
     limits.collectThreads shouldBe 0

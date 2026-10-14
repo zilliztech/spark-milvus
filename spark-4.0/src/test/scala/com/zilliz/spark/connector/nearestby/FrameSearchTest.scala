@@ -102,9 +102,10 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val perQuery = SearchPlan.bytesPerQuery(layout, k) +
       k * FrameSearch.rowWidth(types, 2)
     // Three queries a group, and nothing broadcast from a frame.
-    val limits = SearchLimits(1L, 3L * perQuery, None)
+    val group = 3L * perQuery
+    val limits = SearchLimits(1L, Some(group), None)
     FrameSearch
-      .cut(12, layout, k, FrameSearch.rowWidth(types, 2), limits.groupMaxBytes)
+      .cut(12, layout, k, FrameSearch.rowWidth(types, 2), group)
       .map(_.queries) shouldBe Seq(3, 3, 3, 3)
     for {
       held <- Seq(true, false)

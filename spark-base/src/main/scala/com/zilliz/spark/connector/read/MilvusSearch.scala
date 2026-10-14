@@ -193,9 +193,7 @@ object MilvusSearch extends Logging {
       if (searchProfile.nonEmpty) resources.executorCores
       else math.max(1, resources.taskCpus)
     val group = SearchResources.groupBytes(
-      if (caseInsensitive.containsKey(MilvusOption.SearchGroupMaxBytes))
-        Some(limits.groupMaxBytes)
-      else None,
+      limits.groupMaxBytes,
       queryBudget.bytes,
       taskCores,
       SearchPlan.bytesPerQuery(layout, k)
