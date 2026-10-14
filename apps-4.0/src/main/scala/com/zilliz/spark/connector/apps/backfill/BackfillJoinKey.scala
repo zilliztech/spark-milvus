@@ -4,8 +4,8 @@ import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.DataFrame
 
 /** Public specification for the key used to match snapshot rows with backfill
-  * input rows. Source values may repeat; backfill input values must be unique
-  * so the left join preserves one output row per physical source row.
+  * input rows. Snapshot key values may repeat; backfill input values must be
+  * unique so the left join preserves one output row per physical snapshot row.
   */
 sealed trait BackfillJoinKey extends Product with Serializable
 
@@ -20,8 +20,8 @@ object BackfillJoinKey {
   final case class PhysicalField(name: String) extends BackfillJoinKey
 }
 
-/** One source-side component of the key used to match collection rows with
-  * backfill data.
+/** One resolved field of the key used to match snapshot rows with backfill
+  * data.
   *
   * Current public strategies resolve exactly one persisted field. Keeping the
   * runtime representation component-based lets the execution pipeline support a
@@ -29,9 +29,9 @@ object BackfillJoinKey {
   * join contracts again.
   */
 private[backfill] final case class ResolvedJoinComponent(
-    sourceColumn: String,
+    fieldName: String,
     fieldId: Long,
-    sourceField: Option[StructField],
+    sparkField: Option[StructField],
     internalColumn: String
 )
 
@@ -41,7 +41,7 @@ private[backfill] final case class ResolvedJoinKey(
 ) {
   require(components.nonEmpty, "resolved join key must not be empty")
 
-  val sourceColumns: Seq[String] = components.map(_.sourceColumn)
+  val fieldNames: Seq[String] = components.map(_.fieldName)
   val internalColumns: Seq[String] = components.map(_.internalColumn)
   val fieldIds: Seq[Long] = components.map(_.fieldId)
 
@@ -77,34 +77,34 @@ private[backfill] object ResolvedJoinKey {
     else s"$InternalColumnPrefix${index}_${collisionOrdinal}__"
 
   def primaryKey(
-      name: String,
+      fieldName: String,
       fieldId: Long,
-      sourceField: Option[StructField]
+      sparkField: Option[StructField]
   ): ResolvedJoinKey =
     ResolvedJoinKey(
       kind = "primary_key",
       components = Seq(
         ResolvedJoinComponent(
-          sourceColumn = name,
+          fieldName = fieldName,
           fieldId = fieldId,
-          sourceField = sourceField,
+          sparkField = sparkField,
           internalColumn = internalColumn(0)
         )
       )
     )
 
   def physicalField(
-      name: String,
+      fieldName: String,
       fieldId: Long,
-      sourceField: StructField
+      sparkField: StructField
   ): ResolvedJoinKey =
     ResolvedJoinKey(
       kind = "physical",
       components = Seq(
         ResolvedJoinComponent(
-          sourceColumn = name,
+          fieldName = fieldName,
           fieldId = fieldId,
-          sourceField = Some(sourceField),
+          sparkField = Some(sparkField),
           internalColumn = internalColumn(0)
         )
       )
@@ -128,7 +128,7 @@ private[backfill] final case class JoinKeyStats(
     distinctValidKeyCount: Long
 )
 
-private[backfill] final case class SourceReadProjection(
+private[backfill] final case class SnapshotReadProjection(
     fieldIds: Seq[Long],
     schema: StructType
 )

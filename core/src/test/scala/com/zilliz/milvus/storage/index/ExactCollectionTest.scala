@@ -50,7 +50,7 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
         20L,
         allocator
       )
-      val target = new IndexProbe.Target {
+      val target = new IndexSearch.Target {
         def segmentId: Long = 1L
         def rows: Long = 1L
         def dimension: Int = 2
@@ -77,7 +77,7 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
           scores.putFloat(query * 4, 2f)
         }
       }
-      val pipeline = new IndexProbe.Pipeline(
+      val pipeline = new IndexSearch.Pipeline(
         target,
         new BitSet(),
         1,

@@ -81,7 +81,7 @@ object SearchMetrics {
   val KnowhereNanos = "milvus.search.knowhere.nanos"
 
   /** Query and base-vector pairs an exact scan measured a distance for. The
-    * planner knows the total, so this one has a denominator: an index probe
+    * planner knows the total, so this one has a denominator: an indexed search
     * cannot count them and leaves it at zero.
     */
   val ComparedPairs = "milvus.search.compared.pairs"

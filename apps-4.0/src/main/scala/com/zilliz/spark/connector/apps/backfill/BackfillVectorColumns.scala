@@ -14,7 +14,7 @@ import com.zilliz.milvus.storage.snapshot.json.FieldJson
 import com.zilliz.milvus.storage.DataParseException
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
-/** Normalizes user-facing vector values to the byte layout Milvus stores in
+/** Encodes user-facing vector values to the byte layout Milvus stores in
   * Arrow/parquet column groups.
   *
   * Dense vectors are represented as one little-endian byte array per row:
@@ -49,8 +49,8 @@ private[backfill] object BackfillVectorColumns {
     VectorTypes.contains(MilvusDataType.fromValue(field.dataType))
 
   /** Spark schema used only inside backfill. BinaryType deliberately carries
-    * the already-normalized Milvus row bytes so joins never widen or
-    * reinterpret half/binary/int8/sparse vector values.
+    * the already-encoded Milvus row bytes so joins never widen or reinterpret
+    * half/binary/int8/sparse vector values.
     */
   def canonicalStructField(field: FieldJson): StructField = {
     val milvusType = MilvusDataType.fromValue(field.dataType)
@@ -80,7 +80,7 @@ private[backfill] object BackfillVectorColumns {
   /** Convert every vector column in `targetFieldsByName` to canonical Milvus
     * bytes while preserving non-vector columns unchanged.
     */
-  def normalize(
+  def encode(
       df: DataFrame,
       targetFieldsByName: Map[String, FieldJson]
   ): Either[BackfillError, DataFrame] = {
@@ -91,9 +91,9 @@ private[backfill] object BackfillVectorColumns {
     val projected = df.schema.fields.map { inputField =>
       targetFieldsByName.get(inputField.name) match {
         case Some(targetField) if isVectorField(targetField) =>
-          normalizeVectorColumn(inputField, targetField).map { normalized =>
+          encodeVectorColumn(inputField, targetField).map { encoded =>
             val canonical = canonicalStructField(targetField)
-            normalized.as(inputField.name, canonical.metadata)
+            encoded.as(inputField.name, canonical.metadata)
           }
         case _ => Right(col(inputField.name))
       }
@@ -106,7 +106,7 @@ private[backfill] object BackfillVectorColumns {
     }
   }
 
-  private def normalizeVectorColumn(
+  private def encodeVectorColumn(
       inputField: StructField,
       targetField: FieldJson
   ): Either[BackfillError, Column] = {

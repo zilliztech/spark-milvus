@@ -96,9 +96,9 @@ exact column name. With a differently named input column:
 
 The physical field must exist exactly (including case) in the snapshot schema
 and must be declared non-nullable. The parquet key must also be non-null and
-unique so one source row cannot fan out into multiple output rows. Source
+unique so one snapshot row cannot fan out into multiple output rows. Snapshot
 values may repeat; the same parquet record is applied to every matching
-physical source row. The join field is not a target field, so you cannot
+physical snapshot row. The join field is not a target field, so you cannot
 backfill it in the same operation. Supported physical-key Milvus types are
 Int8/16/32/64, String, and VarChar.
 Floating-point, JSON, Geometry, Text, Timestamptz, unknown, vector, array, map,
@@ -301,22 +301,22 @@ Milvus will index the new binlogs and re-reopen the segments when done.
 Pass `--mode coalesce` (default), `--mode overwrite`, or `--mode replace`.
 
 Matched rows do not behave identically: `coalesce` preserves each non-null
-source value, while `overwrite` and `replace` take the parquet value, including
-NULL. The modes also differ in how they handle source rows whose join key is
+snapshot value, while `overwrite` and `replace` take the parquet value, including
+NULL. The modes also differ in how they handle snapshot rows whose join key is
 absent from parquet.
 
-| Mode           | Matched row (join key in both)                   | Source row unmatched by parquet | Typical use                                                               |
+| Mode           | Matched row (join key in both)                   | Snapshot row unmatched by parquet | Typical use                                                               |
 | -------------- | ------------------------------------------------ | ------------------------------- | ------------------------------------------------------------------------- |
 | **replace**    | Parquet wins (null included)                     | Target columns set to NULL      | Fresh backfill of a brand-new field where parquet is the full source.     |
-| **coalesce**   | `coalesce(existing, new)` per field — src wins   | Source preserved                | Incremental / repair runs that only want to fill gaps.                    |
-| **overwrite**  | Parquet wins (null included)                     | Source preserved                | Corrective update for a subset of rows (parquet is authoritative only for the keys it covers). |
+| **coalesce**   | `coalesce(existing, new)` per field — snapshot wins   | Snapshot value preserved                | Incremental / repair runs that only want to fill gaps.                    |
+| **overwrite**  | Parquet wins (null included)                     | Snapshot value preserved                | Corrective update for a subset of rows (parquet is authoritative only for the keys it covers). |
 
 Parquet rows whose join key is not in the collection are always dropped (left-join
-from source side).
+from the snapshot side).
 
 All modes require exact Parquet-to-Milvus target types; cast input columns in
 your ETL before running backfill. Additional `coalesce` / `overwrite` caveats
-(both read source-side values):
+(both read snapshot-side values):
 
 - Reads the target field(s) from the base segments — slightly heavier I/O
   than `replace`.
@@ -325,8 +325,14 @@ your ETL before running backfill. Additional `coalesce` / `overwrite` caveats
   packed reader rejects `coalesce` and `overwrite`; use `replace` for the
   initial backfill.
 - For `overwrite`: an explicitly null value in the parquet **will** clobber
-  the existing source value on matched rows — the match flag drives the
+  the existing snapshot value on matched rows — the match flag drives the
   projection, not the file column's null-ness.
+
+Result JSON fields `sourceRowCount`, `totalSourceRows`, `usedSourceByField`,
+and `totalUsedSourceByField` keep their legacy names and describe the existing
+snapshot rows or values. The summary's `source` labels have the same meaning.
+`totalBackfillDataRows` counts rows in the external input. In contrast, the
+`--source-*` flags below configure that external input's bucket.
 
 ## 7. Full flag reference
 

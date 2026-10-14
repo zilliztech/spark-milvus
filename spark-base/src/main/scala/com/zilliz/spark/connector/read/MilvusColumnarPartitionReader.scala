@@ -16,7 +16,11 @@ import org.apache.spark.sql.vectorized.{
   ColumnarBatch
 }
 
-import com.zilliz.milvus.storage.expr.{Bitmap, FilterExpr, PredicateExpr}
+import com.zilliz.milvus.storage.expr.{
+  ExclusionBitmap,
+  FilterExpr,
+  PredicateExpr
+}
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.milvus.storage.schema.{FieldMetadata, MilvusTypes}
 import com.zilliz.spark.connector.metrics.ScanMetrics
@@ -161,7 +165,7 @@ class MilvusColumnarPartitionReader(
     */
   private def survivingRows(
       root: VectorSchemaRoot,
-      filterBitmap: Bitmap
+      filterBitmap: ExclusionBitmap
   ): Array[Int] = {
     val rows = root.getRowCount
     var anyExcluded = false
@@ -185,7 +189,7 @@ class MilvusColumnarPartitionReader(
   private def isExcluded(
       root: VectorSchemaRoot,
       row: Int,
-      filterBitmap: Bitmap
+      filterBitmap: ExclusionBitmap
   ): Boolean =
     deleted(root, row) ||
       (filterBitmap != null && filterBitmap.isExcluded(row))

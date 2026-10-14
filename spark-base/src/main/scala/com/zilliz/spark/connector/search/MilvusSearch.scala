@@ -84,7 +84,7 @@ object MilvusSearch extends Logging {
   ): SearchMerge.Hits = {
     val limits = SearchLimits.from(options)
     val tasks = partitions.map(_.task)
-    if (searchMode == SearchMode.Index) {
+    if (searchMode == SearchMode.PreferIndex) {
       SegmentIndexHandle.check(tasks, field.fieldID, searchMetric)
     }
     val queryCount = queries.count
@@ -106,7 +106,13 @@ object MilvusSearch extends Logging {
     )
 
     val budget =
-      SearchBudget.of(spark, limits, searchMode == SearchMode.Index, layout, k)
+      SearchBudget.of(
+        spark,
+        limits,
+        searchMode == SearchMode.PreferIndex,
+        layout,
+        k
+      )
     val delivery =
       SearchQueries.Delivery.of(queries, layout, limits.queriesMaxBytes)
     val caseInsensitive = new CaseInsensitiveStringMap(options.asJava)
@@ -162,7 +168,7 @@ object MilvusSearch extends Logging {
       limits.callsInFlight
     )
     // What the first stage has to get through, so its progress has a
-    // denominator. An index probe visits part of a segment and Knowhere does
+    // denominator. An indexed search visits part of a segment and Knowhere does
     // not say how much, so index mode has no pair total and counts segment
     // searches instead.
     val comparedPairsTotal =
@@ -203,7 +209,7 @@ object MilvusSearch extends Logging {
       found,
       metrics,
       comparedPairsTotal,
-      index = searchMode == SearchMode.Index,
+      index = searchMode == SearchMode.PreferIndex,
       queryGroups = plan.groups.size,
       segments = plan.sets.map(_.size).sum
     )
@@ -320,7 +326,7 @@ object MilvusSearch extends Logging {
       layout: VectorLayout,
       blockBytes: Long
   ): SegmentReadTask => SearchPlan.Footprint = task =>
-    (if (searchMode == SearchMode.Index)
+    (if (searchMode == SearchMode.PreferIndex)
        SegmentIndexHandle.select(task, field.fieldID, metric)
      else None) match {
       case Some(index) if index.serializedSize > 0L =>

@@ -138,7 +138,7 @@ class FilterEvaluatorTest extends AnyFunSuite with Matchers {
     }
   }
 
-  private def excluded(bitmap: Bitmap): Seq[Int] =
+  private def excluded(bitmap: ExclusionBitmap): Seq[Int] =
     (0 until bitmap.rowCount).filter(bitmap.isExcluded)
 
   private def withBatch(

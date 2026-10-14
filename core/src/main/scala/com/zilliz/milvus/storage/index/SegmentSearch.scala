@@ -23,7 +23,7 @@ import com.zilliz.milvus.storage.Logging
 /** Runs query groups over one segment set and merges what the segments find.
   *
   * The two strategies take the same input and give the same output: exact
-  * scanning works on the vector batches a segment hands out, index probing on
+  * scanning works on the vector batches a segment hands out, indexed search on
   * the index handle it opens. Whichever runs, the task keeps each query's best
   * k and nothing else (docs/design/architecture/vector-search.html sections
   * 2.1, 2.3 and 2.4).
@@ -97,18 +97,18 @@ object SegmentSearch extends Logging {
     def segments: Int = sources.size
 
     /** The bytes this task keeps: the vector batches of an exact scan and the
-      * persisted indexes of an index probe.
+      * persisted indexes of an indexed search.
       */
     def retainedBytes: Long =
       batches.values.flatten.map(_.base.buffer.capacity().toLong).sum +
         sources.collect { case Index(_, handle, _) => handle.bytes }.sum
 
     /** One query group over the whole set. */
-    // One probe pipeline per index, kept across the groups: its buffers, its
+    // One search pipeline per index, kept across the groups: its buffers, its
     // exclusion mask and its collecting scratch are made once for the task
     // rather than once per group and segment. Sized for the largest group seen
     // so far and remade when a larger one arrives.
-    private val pipelines = mutable.HashMap.empty[Long, IndexProbe.Pipeline]
+    private val pipelines = mutable.HashMap.empty[Long, IndexSearch.Pipeline]
 
     private def pipelineFor(
         source: Index,
@@ -117,12 +117,12 @@ object SegmentSearch extends Logging {
         allocator: BufferAllocator,
         queries: Int,
         threads: Int
-    ): IndexProbe.Pipeline = pipelines.get(source.segmentId) match {
+    ): IndexSearch.Pipeline = pipelines.get(source.segmentId) match {
       case Some(pipeline) if pipeline.maxQueries >= queries => pipeline
       case other =>
         other.foreach(_.close())
-        val pipeline = new IndexProbe.Pipeline(
-          IndexProbe.target(source.handle),
+        val pipeline = new IndexSearch.Pipeline(
+          IndexSearch.target(source.handle),
           source.excluded,
           k,
           parameters,
@@ -164,7 +164,8 @@ object SegmentSearch extends Logging {
       // tail of one call is filled by the next. Exact native calls stay on
       // this thread; their merger phases run on the same collector.
       val inFlight =
-        mutable.Queue.empty[(IndexProbe.Pipeline, IndexProbe.Answer, Future[_])]
+        mutable.Queue
+          .empty[(IndexSearch.Pipeline, IndexSearch.Answer, Future[_])]
       def settle(): Unit = {
         val (pipeline, answer, searched) = inFlight.dequeue()
         SearchThreads.await(searched)
@@ -273,7 +274,7 @@ object SegmentSearch extends Logging {
   )
 
   /** Reads the segment set into memory: every batch of an exact scan, every
-    * index handle of an index probe. The planner sized the set to fit
+    * index handle of an indexed search. The planner sized the set to fit
     * `keptMaxBytes` from the sizes it had; this measures what was actually kept
     * -- the batches' buffers, the indexes' bytes -- and a set that goes over
     * comes back as an [[Overflow]] with nothing left open, rather than a
@@ -362,7 +363,7 @@ object SegmentSearch extends Logging {
 
   /** Counts what one task did, for the accumulators section 1.3 lists.
     *
-    * `read` is what the exact scan pulled through the reader; an index probe
+    * `read` is what the exact scan pulled through the reader; an indexed search
     * reads its files when the handle opens, which the handle itself reports.
     */
   final case class Counters(
@@ -382,12 +383,12 @@ object SegmentSearch extends Logging {
     * says nothing while it runs.
     *
     * `compared` is the pairs a step measured distances for, queries times the
-    * rows that survived the exclusion mask. An index probe does not compare
-    * every row and Knowhere does not say how many it did, so a probe reports
-    * zero and counts its progress in `nativeCalls`. `rescans` is the queries an
-    * L2 exact scan searched a batch for again through the per-query entry,
-    * because the batched entry's error could hide a nearer row (decision 37);
-    * their pairs are not counted again in `compared`.
+    * rows that survived the exclusion mask. An indexed search does not compare
+    * every row and Knowhere does not say how many it did, so it reports zero
+    * and counts its progress in `nativeCalls`. `rescans` is the queries an L2
+    * exact scan searched a batch for again through the per-query entry, because
+    * the batched entry's error could hide a nearer row (decision 37); their
+    * pairs are not counted again in `compared`.
     */
   final case class Progress(
       nativeCalls: Int,
@@ -430,8 +431,8 @@ object SegmentSearch extends Logging {
     * Sources are opened one at a time by `open`, and each is closed before the
     * next one opens, so a task holds one segment's data at once while its query
     * groups stay: an exact scan hands every batch to every group before it
-    * reads the next batch, an index probe searches every group on the index it
-    * loaded. Each group has its own merger, returned in the order the groups
+    * reads the next batch; indexed search uses the loaded index for every
+    * group. Each group has its own merger, returned in the order the groups
     * were given (docs/design/architecture/vector-search.html section 2.1).
     *
     * A search ranked by `function` classifies each exact-scan batch once, for
@@ -505,8 +506,8 @@ object SegmentSearch extends Logging {
               )
               // Every group through one pipeline: the index searches group g+1
               // while a worker checks and collects group g.
-              val pipeline = new IndexProbe.Pipeline(
-                IndexProbe.target(handle),
+              val pipeline = new IndexSearch.Pipeline(
+                IndexSearch.target(handle),
                 excluded,
                 k,
                 parameters,

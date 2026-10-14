@@ -619,7 +619,7 @@ private[connector] object NearestBySearch {
         layout,
         k,
         metric,
-        if (approx) SearchMode.Index else SearchMode.Exact,
+        if (approx) SearchMode.PreferIndex else SearchMode.Exact,
         MilvusOption.searchParameters(options),
         MilvusOption(scan.options).milvusFilter,
         scan.pushedExpression,

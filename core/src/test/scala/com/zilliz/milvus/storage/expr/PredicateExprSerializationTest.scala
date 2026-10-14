@@ -27,7 +27,7 @@ class PredicateExprSerializationTest extends AnyFunSuite with Matchers {
   }
 
   test("a bitmap survives Java serialization") {
-    val bitmap = Bitmap.fromWords(65, Array(3L, 1L))
+    val bitmap = ExclusionBitmap.fromWords(65, Array(3L, 1L))
 
     roundTrip(bitmap) shouldBe bitmap
   }

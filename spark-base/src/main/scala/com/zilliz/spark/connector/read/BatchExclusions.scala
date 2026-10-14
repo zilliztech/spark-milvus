@@ -3,7 +3,7 @@ package com.zilliz.spark.connector.read
 import org.apache.arrow.vector.VectorSchemaRoot
 
 import com.zilliz.milvus.storage.expr.{
-  Bitmap,
+  ExclusionBitmap,
   FilterEvaluator,
   FilterExpr,
   PredicateEvaluator,
@@ -25,7 +25,7 @@ private[read] object BatchExclusions {
       pushedExpression: Option[PredicateExpr],
       arrowColumnFor: String => String,
       columnNameFor: Long => Option[String]
-  ): Option[Bitmap] = {
+  ): Option[ExclusionBitmap] = {
     val milvus = milvusFilter.map(
       FilterEvaluator.evaluate(_, batch, arrowColumnFor)
     )

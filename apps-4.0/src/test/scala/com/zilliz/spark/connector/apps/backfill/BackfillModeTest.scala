@@ -71,12 +71,14 @@ class BackfillModeTest
 
   test("internal column reservation rejects provenance flag names") {
     val result = MilvusBackfill.validateTargetNamesAgainstInternalColumns(
-      Seq("score", MilvusBackfill.usedSrcCol("score").toUpperCase),
+      Seq("score", MilvusBackfill.usedSnapshotCol("score").toUpperCase),
       reservationJoinKey,
       caseInsensitiveResolution
     )
     result.isLeft shouldBe true
-    result.left.get.message should include(MilvusBackfill.usedSrcCol("score"))
+    result.left.get.message should include(
+      MilvusBackfill.usedSnapshotCol("score")
+    )
 
     val bf = MilvusBackfill.validateTargetNamesAgainstInternalColumns(
       Seq("score", MilvusBackfill.usedBfCol("score")),
@@ -154,8 +156,8 @@ class BackfillModeTest
     err should include("bogus")
   }
 
-  test("backfill physical source reads never apply deletes") {
-    MilvusBackfill.ApplyDeletesToSourceRows shouldBe false
+  test("backfill physical snapshot reads never apply deletes") {
+    MilvusBackfill.ApplyDeletesToSnapshotRows shouldBe false
   }
 
   test("parseArgs accepts --mode coalesce") {
@@ -223,7 +225,7 @@ class BackfillModeTest
       .get
 
     resolved.kind shouldBe "primary_key"
-    resolved.sourceColumns shouldBe Seq("id")
+    resolved.fieldNames shouldBe Seq("id")
     resolved.fieldIds shouldBe Seq(100L)
   }
 
@@ -257,9 +259,9 @@ class BackfillModeTest
       .get
 
     resolved.kind shouldBe "physical"
-    resolved.sourceColumns shouldBe Seq("external_row_id")
+    resolved.fieldNames shouldBe Seq("external_row_id")
     resolved.fieldIds shouldBe Seq(101L)
-    resolved.components.head.sourceField.get.dataType shouldBe StringType
+    resolved.components.head.sparkField.get.dataType shouldBe StringType
   }
 
   test("resolveJoinKey requires an exact physical field name") {
@@ -295,7 +297,7 @@ class BackfillModeTest
       .toOption
       .get
 
-    resolved.sourceColumns shouldBe Seq("external_row_id")
+    resolved.fieldNames shouldBe Seq("external_row_id")
     resolved.fieldIds shouldBe Seq(101L)
   }
 
@@ -395,7 +397,7 @@ class BackfillModeTest
         .toOption
         .get
 
-      resolved.components.head.sourceField.get.dataType shouldBe sparkType
+      resolved.components.head.sparkField.get.dataType shouldBe sparkType
     }
   }
 
@@ -510,7 +512,7 @@ class BackfillModeTest
 
   // ============ performJoin semantics ============
 
-  private def buildOriginal(
+  private def buildSnapshot(
       rows: Seq[(Int, java.lang.Integer, java.lang.String, Long, Long)]
   ): DataFrame = {
     // columns: pk, f1 (nullable Int), f2 (nullable String), _segment_id, _row_offset
@@ -630,11 +632,11 @@ class BackfillModeTest
       .isLeft shouldBe true
   }
 
-  test("source read projection keeps field IDs aligned with schema order") {
+  test("snapshot read projection keeps field IDs aligned with schema order") {
     val pkField = StructField("pk", IntegerType, nullable = false)
     val joinKey = ResolvedJoinKey.primaryKey("pk", 100L, Some(pkField))
     val projection = MilvusBackfill
-      .buildSourceReadProjection(
+      .buildSnapshotReadProjection(
         joinKey,
         Seq(
           ("pk", 100L, pkField),
@@ -648,7 +650,7 @@ class BackfillModeTest
     projection.schema.fieldNames.toSeq shouldBe Seq("pk", "f1")
   }
 
-  test("source read projection starts with the selected physical field") {
+  test("snapshot read projection starts with the selected physical field") {
     val physicalField = StructField(
       "external_row_id",
       StringType,
@@ -660,7 +662,7 @@ class BackfillModeTest
       physicalField
     )
     val projection = MilvusBackfill
-      .buildSourceReadProjection(
+      .buildSnapshotReadProjection(
         joinKey,
         Seq(
           ("id", 100L, StructField("id", LongType, nullable = false)),
@@ -678,7 +680,7 @@ class BackfillModeTest
     )
   }
 
-  test("source join normalization preserves rename swaps in one projection") {
+  test("snapshot join normalization preserves rename swaps in one projection") {
     val joinKey = ResolvedJoinKey(
       kind = "test_swap",
       components = Seq(
@@ -686,7 +688,7 @@ class BackfillModeTest
         ResolvedJoinComponent("b", 101L, None, "a")
       )
     )
-    val source = spark.createDataFrame(
+    val snapshot = spark.createDataFrame(
       spark.sparkContext.parallelize(Seq(Row("A", "B", 10L))),
       StructType(
         Seq(
@@ -697,7 +699,8 @@ class BackfillModeTest
       )
     )
 
-    val normalized = MilvusBackfill.normalizeSourceJoinColumns(source, joinKey)
+    val normalized =
+      MilvusBackfill.normalizeSnapshotJoinColumns(snapshot, joinKey)
     val row = normalized.collect().head
 
     row.getAs[String]("b") shouldBe "A"
@@ -708,7 +711,7 @@ class BackfillModeTest
   test("join-key compatibility checks normalized component types") {
     val internal = ResolvedJoinKey.internalColumn(0)
     val joinKey = ResolvedJoinKey.primaryKey("pk", 100L, None)
-    val source = spark.createDataFrame(
+    val snapshot = spark.createDataFrame(
       spark.sparkContext.parallelize(Seq(Row(1))),
       StructType(Seq(StructField(internal, IntegerType, nullable = false)))
     )
@@ -722,13 +725,13 @@ class BackfillModeTest
     )
 
     MilvusBackfill.validateJoinKeyCompatibility(
-      source,
+      snapshot,
       matching,
       joinKey
     ) shouldBe Right(())
 
     val err = MilvusBackfill
-      .validateJoinKeyCompatibility(source, mismatched, joinKey)
+      .validateJoinKeyCompatibility(snapshot, mismatched, joinKey)
       .left
       .toOption
       .get
@@ -737,7 +740,7 @@ class BackfillModeTest
   }
 
   test("performJoin supports multiple resolved join components") {
-    val original = spark.createDataFrame(
+    val snapshot = spark.createDataFrame(
       spark.sparkContext.parallelize(
         Seq(Row(1, "a", 10L, 0L), Row(1, "b", 10L, 1L))
       ),
@@ -762,7 +765,7 @@ class BackfillModeTest
     )
 
     val joined = MilvusBackfill.performJoin(
-      original,
+      snapshot,
       backfill,
       Seq("k1", "k2"),
       Seq("value"),
@@ -776,9 +779,9 @@ class BackfillModeTest
       .toSeq shouldBe Seq(("a", Some("matched")), ("b", None))
   }
 
-  test("performJoin allows repeated source rows on a non-PK physical key") {
+  test("performJoin allows repeated snapshot rows on a non-PK physical key") {
     val physicalKey = ResolvedJoinKey.internalColumn(0)
-    val original = spark.createDataFrame(
+    val snapshot = spark.createDataFrame(
       spark.sparkContext.parallelize(
         Seq(
           Row(1L, "row-b", 10L, 0L),
@@ -806,14 +809,14 @@ class BackfillModeTest
     )
 
     val joined = MilvusBackfill.performJoin(
-      original,
+      snapshot,
       backfill,
       Seq(physicalKey),
       Seq("value"),
       MilvusOption.BackfillModeReplace
     )
 
-    joined.count() shouldBe original.count()
+    joined.count() shouldBe snapshot.count()
     joined
       .orderBy("id")
       .collect()
@@ -825,18 +828,18 @@ class BackfillModeTest
     )
   }
 
-  test("replace mode: source has only PK, backfill values win") {
-    val originalSchema = StructType(
+  test("replace mode: snapshot has only PK, backfill values win") {
+    val snapshotSchema = StructType(
       Seq(
         StructField("pk", IntegerType, nullable = false),
         StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false),
         StructField(MilvusBackfill.RowOffsetCol, LongType, nullable = false)
       )
     )
-    val originalRows = Seq(Row(1, 10L, 0L), Row(2, 10L, 1L), Row(3, 10L, 2L))
-    val original = spark.createDataFrame(
-      spark.sparkContext.parallelize(originalRows),
-      originalSchema
+    val snapshotRows = Seq(Row(1, 10L, 0L), Row(2, 10L, 1L), Row(3, 10L, 2L))
+    val snapshot = spark.createDataFrame(
+      spark.sparkContext.parallelize(snapshotRows),
+      snapshotSchema
     )
     val backfill = buildBackfill(
       Seq(
@@ -847,7 +850,7 @@ class BackfillModeTest
     )
 
     val joined = MilvusBackfill.performJoin(
-      original,
+      snapshot,
       backfill,
       Seq("pk"),
       Seq("f1", "f2"),
@@ -869,18 +872,18 @@ class BackfillModeTest
     byPk shouldBe Seq(
       (1, Some(100), Some("A")),
       (2, None, Some("B")),
-      (3, None, None) // unmatched source row: target columns become null
+      (3, None, None) // unmatched snapshot row: target columns become null
     )
   }
 
   test(
-    "coalesce mode: per-field independent, source-null filled from backfill"
+    "coalesce mode: per-field independent, snapshot-null filled from backfill"
   ) {
-    // pk=1 — both source fields non-null; keep source values, ignore backfill.
-    // pk=2 — f1 null in source, f2 non-null; fill f1 from backfill, keep f2.
-    // pk=3 — both source fields null; fill both from backfill.
-    // pk=4 — no backfill row; keep whatever source has.
-    val original = buildOriginal(
+    // pk=1 — both snapshot fields non-null; keep snapshot values, ignore backfill.
+    // pk=2 — f1 null in snapshot, f2 non-null; fill f1 from backfill, keep f2.
+    // pk=3 — both snapshot fields null; fill both from backfill.
+    // pk=4 — no backfill row; keep whatever snapshot has.
+    val snapshot = buildSnapshot(
       Seq(
         (1, Int.box(1), "src1", 10L, 0L),
         (2, null, "src2", 10L, 1L),
@@ -897,14 +900,14 @@ class BackfillModeTest
     )
 
     val joined = MilvusBackfill.performJoin(
-      original,
+      snapshot,
       backfill,
       Seq("pk"),
       Seq("f1", "f2"),
       MilvusOption.BackfillModeCoalesce
     )
 
-    // The join should have the same columns as the source side plus the
+    // The join should have the same columns as the snapshot side plus the
     // backfill-match marker and, in coalesce mode, per-field provenance
     // flags used downstream for the usedSource/usedDataFile counters.
     joined.columns.toSet shouldBe Set(
@@ -914,9 +917,9 @@ class BackfillModeTest
       MilvusBackfill.SegmentIdCol,
       MilvusBackfill.RowOffsetCol,
       MilvusBackfill.MatchFlagCol,
-      MilvusBackfill.usedSrcCol("f1"),
+      MilvusBackfill.usedSnapshotCol("f1"),
       MilvusBackfill.usedBfCol("f1"),
-      MilvusBackfill.usedSrcCol("f2"),
+      MilvusBackfill.usedSnapshotCol("f2"),
       MilvusBackfill.usedBfCol("f2")
     )
 
@@ -933,7 +936,7 @@ class BackfillModeTest
       .toSeq
 
     byPk shouldBe Seq(
-      (1, Some(1), Some("src1")), // source wins on both
+      (1, Some(1), Some("src1")), // snapshot wins on both
       (2, Some(200), Some("src2")), // f1 filled, f2 kept
       (3, Some(300), Some("BF3")), // both filled
       (4, Some(4), None) // no backfill row, f2 stays null
@@ -1037,12 +1040,12 @@ class BackfillModeTest
     ) shouldBe Right(())
   }
 
-  test("coalesce mode: per-field provenance flags mark source vs datafile") {
-    // pk=1 — f1 non-null src → usedSrc(f1); f2 null src + bf non-null → usedBf(f2)
-    // pk=2 — f1 null src + bf non-null → usedBf(f1); f2 non-null src → usedSrc(f2)
-    // pk=3 — no backfill row; f1 non-null src → usedSrc(f1); f2 null src + no
+  test("coalesce mode: per-field provenance flags mark snapshot vs datafile") {
+    // pk=1 — f1 non-null snapshot → usedSnapshot(f1); f2 null snapshot + bf non-null → usedBf(f2)
+    // pk=2 — f1 null snapshot + bf non-null → usedBf(f1); f2 non-null snapshot → usedSnapshot(f2)
+    // pk=3 — no backfill row; f1 non-null snapshot → usedSnapshot(f1); f2 null snapshot + no
     //        bf row → neither flag (output is null).
-    val original = buildOriginal(
+    val snapshot = buildSnapshot(
       Seq(
         (1, Int.box(1), null, 10L, 0L),
         (2, null, "src2", 10L, 1L),
@@ -1057,7 +1060,7 @@ class BackfillModeTest
     )
 
     val joined = MilvusBackfill.performJoin(
-      original,
+      snapshot,
       backfill,
       Seq("pk"),
       Seq("f1", "f2"),
@@ -1070,9 +1073,9 @@ class BackfillModeTest
       .map(r =>
         (
           r.getAs[Int]("pk"),
-          r.getAs[Boolean](MilvusBackfill.usedSrcCol("f1")),
+          r.getAs[Boolean](MilvusBackfill.usedSnapshotCol("f1")),
           r.getAs[Boolean](MilvusBackfill.usedBfCol("f1")),
-          r.getAs[Boolean](MilvusBackfill.usedSrcCol("f2")),
+          r.getAs[Boolean](MilvusBackfill.usedSnapshotCol("f2")),
           r.getAs[Boolean](MilvusBackfill.usedBfCol("f2"))
         )
       )
@@ -1085,10 +1088,10 @@ class BackfillModeTest
     )
   }
 
-  test("coalesce mode: empty source columns degrade to full overwrite") {
-    // Simulates a just-added field with no prior data: source returns null
+  test("coalesce mode: empty snapshot columns degrade to full overwrite") {
+    // Simulates a just-added field with no prior data: snapshot returns null
     // everywhere, so coalesce naturally falls back to the backfill value.
-    val original = buildOriginal(
+    val snapshot = buildSnapshot(
       Seq(
         (1, null, null, 10L, 0L),
         (2, null, null, 10L, 1L)
@@ -1102,7 +1105,7 @@ class BackfillModeTest
     )
 
     val joined = MilvusBackfill.performJoin(
-      original,
+      snapshot,
       backfill,
       Seq("pk"),
       Seq("f1", "f2"),
@@ -1118,19 +1121,19 @@ class BackfillModeTest
     byPk shouldBe Seq((1, 10, "A"), (2, 20, "B"))
   }
 
-  // ============ overwrite mode (matched rows take file, unmatched keep src) ============
+  // ============ overwrite mode (matched rows take file, unmatched keep snapshot) ============
 
   test(
-    "overwrite mode: matched rows take backfill, unmatched rows keep source"
+    "overwrite mode: matched rows take backfill, unmatched rows keep snapshot"
   ) {
     // pk=1 — matched, backfill has non-null values → take backfill for both
-    //        fields (differs from coalesce: even where src is non-null, file
+    //        fields (differs from coalesce: even where snapshot is non-null, file
     //        wins when matched).
     // pk=2 — matched, backfill has null f1 → write null (differs from
-    //        coalesce: coalesce would keep src; overwrite overrides).
-    // pk=3 — no backfill row → keep source values (differs from replace,
+    //        coalesce: coalesce would keep snapshot; overwrite overrides).
+    // pk=3 — no backfill row → keep snapshot values (differs from replace,
     //        which would null them out).
-    val original = buildOriginal(
+    val snapshot = buildSnapshot(
       Seq(
         (1, Int.box(1), "src1", 10L, 0L),
         (2, Int.box(2), "src2", 10L, 1L),
@@ -1146,14 +1149,14 @@ class BackfillModeTest
     )
 
     val joined = MilvusBackfill.performJoin(
-      original,
+      snapshot,
       backfill,
       Seq("pk"),
       Seq("f1", "f2"),
       MilvusOption.BackfillModeOverwrite
     )
 
-    // Output layout mirrors coalesce: source-side columns + match flag +
+    // Output layout mirrors coalesce: snapshot-side columns + match flag +
     // per-field provenance flags.
     joined.columns.toSet shouldBe Set(
       "pk",
@@ -1162,9 +1165,9 @@ class BackfillModeTest
       MilvusBackfill.SegmentIdCol,
       MilvusBackfill.RowOffsetCol,
       MilvusBackfill.MatchFlagCol,
-      MilvusBackfill.usedSrcCol("f1"),
+      MilvusBackfill.usedSnapshotCol("f1"),
       MilvusBackfill.usedBfCol("f1"),
-      MilvusBackfill.usedSrcCol("f2"),
+      MilvusBackfill.usedSnapshotCol("f2"),
       MilvusBackfill.usedBfCol("f2")
     )
 
@@ -1182,15 +1185,15 @@ class BackfillModeTest
 
     byPk shouldBe Seq(
       (1, Some(100), Some("BF1")), // matched: backfill wins on both
-      (2, None, Some("BF2")), // matched: backfill's null clobbers src
-      (3, Some(3), Some("src3")) // unmatched: source preserved
+      (2, None, Some("BF2")), // matched: backfill's null clobbers snapshot
+      (3, Some(3), Some("src3")) // unmatched: snapshot preserved
     )
   }
 
   test(
-    "overwrite mode: per-field provenance — matched → usedBf, unmatched → usedSrc"
+    "overwrite mode: per-field provenance — matched → usedBf, unmatched → usedSnapshot"
   ) {
-    val original = buildOriginal(
+    val snapshot = buildSnapshot(
       Seq(
         (1, Int.box(1), "src1", 10L, 0L),
         (2, Int.box(2), "src2", 10L, 1L)
@@ -1204,7 +1207,7 @@ class BackfillModeTest
     )
 
     val joined = MilvusBackfill.performJoin(
-      original,
+      snapshot,
       backfill,
       Seq("pk"),
       Seq("f1", "f2"),
@@ -1217,9 +1220,9 @@ class BackfillModeTest
       .map(r =>
         (
           r.getAs[Int]("pk"),
-          r.getAs[Boolean](MilvusBackfill.usedSrcCol("f1")),
+          r.getAs[Boolean](MilvusBackfill.usedSnapshotCol("f1")),
           r.getAs[Boolean](MilvusBackfill.usedBfCol("f1")),
-          r.getAs[Boolean](MilvusBackfill.usedSrcCol("f2")),
+          r.getAs[Boolean](MilvusBackfill.usedSnapshotCol("f2")),
           r.getAs[Boolean](MilvusBackfill.usedBfCol("f2"))
         )
       )
@@ -1230,7 +1233,7 @@ class BackfillModeTest
     // decides independently).
     flags shouldBe Seq(
       (1, false, true, false, true), // matched: backfill wins for both fields
-      (2, true, false, true, false) // unmatched: source kept for both fields
+      (2, true, false, true, false) // unmatched: snapshot kept for both fields
     )
   }
 

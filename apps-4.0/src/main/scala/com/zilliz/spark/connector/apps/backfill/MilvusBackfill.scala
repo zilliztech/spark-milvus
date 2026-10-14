@@ -35,8 +35,8 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 /** Backfill operation for Milvus collections
   *
   * This object provides functionality to backfill new fields into existing
-  * Milvus collections by reading the original data, joining with new field
-  * data, and writing per-segment binlog files.
+  * Milvus collections by reading snapshot rows, joining with new field data,
+  * and writing per-segment binlog files.
   */
 object MilvusBackfill {
 
@@ -191,14 +191,14 @@ object MilvusBackfill {
   )
 
   /** Marker column added to the backfill side before the left join so we can
-    * count how many source rows found a join-key match (non-null marker →
+    * count how many snapshot rows found a join-key match (non-null marker →
     * matched). Kept on the DataFrame all the way down to the per-segment
     * partition function, and stripped from the projection written to parquet.
     */
   private[backfill] val MatchFlagCol = "__bf_matched__"
   private[backfill] val SegmentIdCol = MilvusOption.MilvusExtraColumnSegmentID
   private[backfill] val RowOffsetCol = MilvusOption.MilvusExtraColumnRowOffset
-  private[backfill] val ApplyDeletesToSourceRows = false
+  private[backfill] val ApplyDeletesToSnapshotRows = false
 
   private val SupportedPhysicalJoinMilvusTypes: Set[Int] = Set(
     MilvusDataType.Int8.value,
@@ -289,7 +289,7 @@ object MilvusBackfill {
             )
           )
         case _ =>
-          val sourceFieldResult =
+          val sparkFieldResult =
             try {
               Right(SnapshotSparkSchema.fieldToStructField(field))
             } catch {
@@ -302,19 +302,19 @@ object MilvusBackfill {
                 )
             }
 
-          sourceFieldResult.map { sourceField =>
+          sparkFieldResult.map { sparkField =>
             normalizedSpec match {
               case BackfillJoinKey.PrimaryKey =>
                 ResolvedJoinKey.primaryKey(
                   field.name,
                   field.getFieldIDAsLong,
-                  Some(sourceField)
+                  Some(sparkField)
                 )
               case _: BackfillJoinKey.PhysicalField =>
                 ResolvedJoinKey.physicalField(
                   field.name,
                   field.getFieldIDAsLong,
-                  sourceField
+                  sparkField
                 )
             }
           }
@@ -369,16 +369,18 @@ object MilvusBackfill {
     }
   }
 
-  /** Per-field flag columns added in any mode that reads source-side target
+  /** Per-field flag columns added in any mode that reads snapshot-side target
     * values (coalesce + overwrite). For each new field, one boolean marker
-    * records whether the written value came from the source side and another
+    * records whether the written value came from the snapshot and another
     * whether it came from the backfill data file. Semantics differ per mode:
-    *   - coalesce: usedSrc = src non-null; usedBf = src null AND bf non-null
-    *   - overwrite: usedSrc = join key unmatched; usedBf = join key matched
+    *   - coalesce: usedSnapshot = snapshot non-null; usedBf = snapshot null AND
+    *     bf non-null
+    *   - overwrite: usedSnapshot = join key unmatched; usedBf = join key
+    *     matched
     * Used by the writer to tally the per-field `usedSourceByField` /
     * `usedDataFileByField` counts surfaced in `SegmentBackfillResult`.
     */
-  private[backfill] def usedSrcCol(field: String): String =
+  private[backfill] def usedSnapshotCol(field: String): String =
     s"__bf_used_src_${field}__"
   private[backfill] def usedBfCol(field: String): String =
     s"__bf_used_bf_${field}__"
@@ -397,7 +399,7 @@ object MilvusBackfill {
       joinKey: ResolvedJoinKey
   ): Seq[String] =
     (Seq(MatchFlagCol) ++ joinKey.internalColumns ++ newFieldNames.flatMap {
-      n => Seq(usedSrcCol(n), usedBfCol(n), n + BackfillSideSuffix)
+      n => Seq(usedSnapshotCol(n), usedBfCol(n), n + BackfillSideSuffix)
     }).distinct
 
   /** Reject target names that resolve (under Spark's configured resolver,
@@ -562,7 +564,7 @@ object MilvusBackfill {
       }
       logger.info(
         s"Backfill join key: kind=${baseJoinKey.kind}, " +
-          s"fields=${baseJoinKey.sourceColumns.mkString(",")}, " +
+          s"fields=${baseJoinKey.fieldNames.mkString(",")}, " +
           s"fieldIds=${baseJoinKey.fieldIds.mkString(",")}"
       )
 
@@ -630,10 +632,10 @@ object MilvusBackfill {
       )
 
       // User parquet uses normal ingestion-friendly vector shapes (numeric
-      // arrays, byte arrays, sparse maps/structs/JSON). Normalize vector
+      // arrays, byte arrays, sparse maps/structs/JSON). Encode vector
       // fields to Milvus's physical per-row bytes before caching or joining so
       // Spark never widens or rewrites half/int8/sparse representations.
-      val backfillDF = BackfillVectorColumns.normalize(
+      val backfillDF = BackfillVectorColumns.encode(
         mappedBackfillDF,
         targetFieldsByName
       ) match {
@@ -678,7 +680,7 @@ object MilvusBackfill {
       val joinKeyStats = validateJoinKeyCardinality(
         backfillDF,
         joinKey.internalColumns,
-        joinKey.sourceColumns,
+        joinKey.fieldNames,
         side = "Backfill parquet"
       ) match {
         case Left(error)  => return Left(error)
@@ -690,17 +692,17 @@ object MilvusBackfill {
           s"(distinct join keys: ${joinKeyStats.distinctValidKeyCount})"
       )
 
-      // In coalesce / overwrite modes, also read each target field from source
-      // so the merge step (coalesce(src,bf) or when(matched, bf).otherwise(src))
-      // can compare source and parquet values per row. Requires a snapshot —
+      // In coalesce / overwrite modes, also read each target field from the snapshot
+      // so the merge step (coalesce(snapshot,bf) or when(matched, bf).otherwise(snapshot))
+      // can compare snapshot and parquet values per row. Requires a snapshot —
       // we need the field's Spark type.
-      val readsSourceFields = config.readsSourceFields
+      val readsSnapshotFields = config.readsSnapshotFields
       val extraReadFields
           : Seq[(String, Long, org.apache.spark.sql.types.StructField)] =
-        if (readsSourceFields) targetWriteFields else Seq.empty
+        if (readsSnapshotFields) targetWriteFields else Seq.empty
 
-      // Read original collection data with segment metadata
-      val originalDF = readCollectionWithMetadata(
+      // Read snapshot rows with segment metadata
+      val snapshotDF = readCollectionWithMetadata(
         spark,
         config,
         joinKey,
@@ -712,10 +714,10 @@ object MilvusBackfill {
         case Right(df)   => df
       }
 
-      // This check only inspects schemas. Run it before any source-side action
+      // This check only inspects schemas. Run it before any snapshot-side action
       // so a mismatched parquet key fails without scanning the collection.
       validateJoinKeyCompatibility(
-        originalDF,
+        snapshotDF,
         backfillDF,
         joinKey
       ) match {
@@ -723,9 +725,9 @@ object MilvusBackfill {
         case Right(_)    => // Continue
       }
 
-      // Merge original and backfill DataFrames according to mode.
+      // Merge snapshot and backfill DataFrames according to mode.
       val joinedDF = performJoin(
-        originalDF,
+        snapshotDF,
         backfillDF,
         joinKey.internalColumns,
         newFieldNames,
@@ -1134,7 +1136,7 @@ object MilvusBackfill {
       userMapping: Option[Map[String, String]],
       collectionFieldNames: Seq[String]
   ): Either[BackfillError, PreparedBackfillData] = {
-    val keyColumn = joinKey.sourceColumns.head
+    val keyColumn = joinKey.fieldNames.head
     val mappedResult = joinSpec match {
       case BackfillJoinKey.PrimaryKey =>
         applyColumnMapping(df, keyColumn, userMapping)
@@ -1144,7 +1146,7 @@ object MilvusBackfill {
 
     mappedResult.flatMap { mapped =>
       val mappedColumns = mapped.columns.toSeq
-      val missingKeys = joinKey.sourceColumns.filterNot(mappedColumns.contains)
+      val missingKeys = joinKey.fieldNames.filterNot(mappedColumns.contains)
       if (missingKeys.nonEmpty) {
         Left(
           SchemaValidationError(
@@ -1164,7 +1166,7 @@ object MilvusBackfill {
           resolver
         )
         val keyAliases =
-          allocatedJoinKey.components.map(c => c.sourceColumn -> c).toMap
+          allocatedJoinKey.components.map(c => c.fieldName -> c).toMap
         val normalized = mapped.select(
           mappedColumns.map { name =>
             keyAliases.get(name) match {
@@ -1175,7 +1177,7 @@ object MilvusBackfill {
           }: _*
         )
         val targetFieldNames =
-          mappedColumns.filterNot(allocatedJoinKey.sourceColumns.contains)
+          mappedColumns.filterNot(allocatedJoinKey.fieldNames.contains)
         Right(
           PreparedBackfillData(
             dataFrame = normalized,
@@ -1191,23 +1193,23 @@ object MilvusBackfill {
     * Deduplication happens on the pair before either side is emitted so the
     * supplied Spark schema always stays aligned with `ReaderFieldIDs`.
     */
-  private[backfill] def buildSourceReadProjection(
+  private[backfill] def buildSnapshotReadProjection(
       joinKey: ResolvedJoinKey,
       extraReadFields: Seq[
         (String, Long, org.apache.spark.sql.types.StructField)
       ]
-  ): Either[BackfillError, SourceReadProjection] = {
-    val missingSchemas = joinKey.components.filter(_.sourceField.isEmpty)
+  ): Either[BackfillError, SnapshotReadProjection] = {
+    val missingSchemas = joinKey.components.filter(_.sparkField.isEmpty)
     if (missingSchemas.nonEmpty) {
       Left(
         SchemaValidationError(
           s"Missing snapshot schema for join-key fields: " +
-            missingSchemas.map(_.sourceColumn).mkString(", ")
+            missingSchemas.map(_.fieldName).mkString(", ")
         )
       )
     } else {
       val requested =
-        joinKey.components.map(c => (c.fieldId, c.sourceField.get)) ++
+        joinKey.components.map(c => (c.fieldId, c.sparkField.get)) ++
           extraReadFields.map { case (_, fieldId, field) => (fieldId, field) }
       val deduped = requested
         .foldLeft(
@@ -1222,7 +1224,7 @@ object MilvusBackfill {
         ._1
 
       Right(
-        SourceReadProjection(
+        SnapshotReadProjection(
           fieldIds = deduped.map(_._1),
           schema = org.apache.spark.sql.types.StructType(deduped.map(_._2))
         )
@@ -1230,19 +1232,19 @@ object MilvusBackfill {
     }
   }
 
-  /** Normalize source-side join columns in one projection. A sequential
-    * `withColumnRenamed` chain can corrupt swaps or rename chains when a source
-    * field happens to use another component's internal name.
+  /** Normalize snapshot-side join columns in one projection. A sequential
+    * `withColumnRenamed` chain can corrupt swaps or rename chains when a
+    * snapshot field happens to use another component's internal name.
     */
-  private[backfill] def normalizeSourceJoinColumns(
+  private[backfill] def normalizeSnapshotJoinColumns(
       df: DataFrame,
       joinKey: ResolvedJoinKey
   ): DataFrame = {
-    val sourceAliases =
-      joinKey.components.map(c => c.sourceColumn -> c.internalColumn).toMap
+    val snapshotAliases =
+      joinKey.components.map(c => c.fieldName -> c.internalColumn).toMap
     df.select(
       df.columns.toSeq.map { name =>
-        sourceAliases.get(name) match {
+        snapshotAliases.get(name) match {
           case Some(alias) => df.col(name).as(alias)
           case None        => df.col(name)
         }
@@ -1254,7 +1256,7 @@ object MilvusBackfill {
     * used to match with the original sequence of rows for each segment
     *
     * @param joinKey
-    *   Resolved source fields used to match backfill input rows
+    *   Resolved snapshot fields used to match backfill input rows
     * @param snapshotMetadata
     *   Optional snapshot metadata for offline reading (no client connection)
     */
@@ -1273,10 +1275,10 @@ object MilvusBackfill {
       val allFieldIds = (joinKey.fieldIds ++ extraReadFields.map(_._2)).distinct
       options =
         options + (MilvusOption.ReaderFieldIDs -> allFieldIds.mkString(","))
-      // Backfill writes one value per physical source row. Applying deletes
+      // Backfill writes one value per physical snapshot row. Applying deletes
       // would remove rows and invalidate _row_offset-based field alignment.
       options = options + (MilvusOption.ReadApplyDeletes ->
-        ApplyDeletesToSourceRows.toString)
+        ApplyDeletesToSnapshotRows.toString)
 
       // If snapshot metadata is available, use snapshot-based reading (no client calls)
       snapshotMetadata.foreach { metadata =>
@@ -1337,7 +1339,7 @@ object MilvusBackfill {
           // The component sequence also supports future logical/composite key
           // resolvers.
           val projection =
-            buildSourceReadProjection(joinKey, extraReadFields) match {
+            buildSnapshotReadProjection(joinKey, extraReadFields) match {
               case Left(error)  => return Left(error)
               case Right(value) => value
             }
@@ -1363,13 +1365,13 @@ object MilvusBackfill {
             .load()
       }
 
-      val missingSourceJoinColumns =
-        joinKey.sourceColumns.filterNot(df.columns.contains)
-      if (missingSourceJoinColumns.nonEmpty) {
+      val missingSnapshotJoinColumns =
+        joinKey.fieldNames.filterNot(df.columns.contains)
+      if (missingSnapshotJoinColumns.nonEmpty) {
         return Left(
           ConnectionError(
             message = s"Failed to read collection join-key columns: " +
-              missingSourceJoinColumns.mkString(", ")
+              missingSnapshotJoinColumns.mkString(", ")
           )
         )
       }
@@ -1386,7 +1388,7 @@ object MilvusBackfill {
         )
       }
 
-      Right(normalizeSourceJoinColumns(df, joinKey))
+      Right(normalizeSnapshotJoinColumns(df, joinKey))
     } catch {
       case e: Exception =>
         logger.error(
@@ -1406,7 +1408,7 @@ object MilvusBackfill {
   /** Every backfill mode requires parquet target-column types to match the
     * snapshot field types exactly. Replace writes parquet columns verbatim;
     * coalesce and overwrite additionally synthesize a per-row choice between
-    * source and parquet values. Allowing either an input mismatch or Spark
+    * snapshot and parquet values. Allowing either an input mismatch or Spark
     * widening would make the writer emit binlogs whose Arrow type no longer
     * matches the Milvus field.
     */
@@ -1420,11 +1422,11 @@ object MilvusBackfill {
     val backfillTypes =
       backfillSchema.fields.map(f => f.name -> f.dataType).toMap
     val mismatches = targetFields.collect {
-      case (name, _, srcField)
+      case (name, _, snapshotField)
           if backfillTypes
             .get(name)
-            .exists(_ != srcField.dataType) =>
-        s"$name (snapshot=${srcField.dataType.simpleString}, " +
+            .exists(_ != snapshotField.dataType) =>
+        s"$name (snapshot=${snapshotField.dataType.simpleString}, " +
           s"parquet=${backfillTypes(name).simpleString})"
     }
     if (mismatches.nonEmpty) {
@@ -1442,7 +1444,7 @@ object MilvusBackfill {
 
   /** Validate that backfill input contains a non-null, unique join key.
     *
-    * A duplicate on the backfill side would fan one source row out into
+    * A duplicate on the backfill side would fan one snapshot row out into
     * multiple joined rows and corrupt per-segment row counts. Nulls are
     * reported separately because Spark equi-joins never match null keys.
     */
@@ -1520,22 +1522,22 @@ object MilvusBackfill {
     }
   }
 
-  /** Validate join-key schema compatibility between source and backfill data.
+  /** Validate join-key schema compatibility between snapshot and backfill data.
     */
   private[backfill] def validateJoinKeyCompatibility(
-      originalDF: DataFrame,
+      snapshotDF: DataFrame,
       backfillDF: DataFrame,
       joinKey: ResolvedJoinKey
   ): Either[BackfillError, Unit] = {
     try {
       joinKey.components.foreach { component =>
-        val sourceField = originalDF.schema.fields
+        val snapshotField = snapshotDF.schema.fields
           .find(_.name == component.internalColumn)
           .getOrElse {
             return Left(
               SchemaValidationError(
                 s"Original collection data must have join-key field " +
-                  s"'${component.sourceColumn}'"
+                  s"'${component.fieldName}'"
               )
             )
           }
@@ -1546,16 +1548,16 @@ object MilvusBackfill {
             return Left(
               SchemaValidationError(
                 s"Backfill data must have join-key field " +
-                  s"'${component.sourceColumn}' after column mapping"
+                  s"'${component.fieldName}' after column mapping"
               )
             )
           }
 
-        if (sourceField.dataType != backfillField.dataType) {
+        if (snapshotField.dataType != backfillField.dataType) {
           return Left(
             SchemaValidationError(
-              s"Join-key type mismatch for '${component.sourceColumn}': " +
-                s"original=${sourceField.dataType}, new=${backfillField.dataType}"
+              s"Join-key type mismatch for '${component.fieldName}': " +
+                s"original=${snapshotField.dataType}, new=${backfillField.dataType}"
             )
           )
         }
@@ -1574,22 +1576,22 @@ object MilvusBackfill {
     }
   }
 
-  /** Merge original (source) rows with backfill rows per `mode`.
+  /** Merge snapshot rows with backfill rows per `mode`.
     *
-    *   - replace: left join on the resolved key; backfill value replaces source
-    *     (source only contributes join + segment tracking columns). Unmatched
-    *     source rows end up with null target columns.
-    *   - coalesce: source side carries the target fields; after the left join,
-    *     compute `coalesce(src, backfill)` per field (source wins when
-    *     non-null, otherwise use backfill). Unmatched source rows keep their
+    *   - replace: left join on the resolved key; backfill value replaces the
+    *     snapshot value (the snapshot only contributes join + segment tracking
+    *     columns). Unmatched snapshot rows end up with null target columns.
+    *   - coalesce: the snapshot carries the target fields; after the left join,
+    *     compute `coalesce(snapshot, backfill)` per field (snapshot wins when
+    *     non-null, otherwise use backfill). Unmatched snapshot rows keep their
     *     original target values.
-    *   - overwrite: source side carries the target fields; after the left join,
-    *     compute `when(matched, backfill).otherwise(src)` per field (file wins
-    *     when the join key matched, even if the file value is null). Unmatched
-    *     source rows keep their original target values.
+    *   - overwrite: the snapshot carries the target fields; after the left
+    *     join, compute `when(matched, backfill).otherwise(snapshot)` per field
+    *     (file wins when the join key matched, even if the file value is null).
+    *     Unmatched snapshot rows keep their existing target values.
     */
   private[backfill] def performJoin(
-      originalDF: DataFrame,
+      snapshotDF: DataFrame,
       backfillDF: DataFrame,
       joinColumns: Seq[String],
       newFieldNames: Seq[String],
@@ -1600,19 +1602,19 @@ object MilvusBackfill {
     mode match {
       case MilvusOption.BackfillModeCoalesce =>
         // Rename backfill-side target columns to avoid name collisions with
-        // source-side columns now present on originalDF.
+        // snapshot-side columns now present on snapshotDF.
         val suffix = BackfillSideSuffix
         val renamedBackfill = newFieldNames.foldLeft(backfillWithFlag) {
           (df, n) =>
             df.withColumnRenamed(n, n + suffix)
         }
-        val joined = originalDF.join(renamedBackfill, joinColumns, "left")
+        val joined = snapshotDF.join(renamedBackfill, joinColumns, "left")
         // Attach per-field provenance flags BEFORE the coalesce rewrites `n`,
-        // so the flags bind to the unresolved source-side `n` attribute. This
+        // so the flags bind to the unresolved snapshot-side `n` attribute. This
         // keeps the flags accurate even though the later coalesce shadows the
         // original `n` column in the output schema.
         val withFlags = newFieldNames.foldLeft(joined) { (df, n) =>
-          df.withColumn(usedSrcCol(n), df.col(n).isNotNull)
+          df.withColumn(usedSnapshotCol(n), df.col(n).isNotNull)
             .withColumn(
               usedBfCol(n),
               df.col(n).isNull && df.col(n + suffix).isNotNull
@@ -1631,13 +1633,13 @@ object MilvusBackfill {
           (df, n) =>
             df.withColumnRenamed(n, n + suffix)
         }
-        val joined = originalDF.join(renamedBackfill, joinColumns, "left")
+        val joined = snapshotDF.join(renamedBackfill, joinColumns, "left")
         // Match flag is null for unmatched left rows, non-null for matched.
         // Using it (rather than `bf.isNotNull`) preserves overwrite's "file
         // wins, null included" semantics when the file explicitly stores null.
         val matched = col(MatchFlagCol).isNotNull
         val withFlags = newFieldNames.foldLeft(joined) { (df, n) =>
-          df.withColumn(usedSrcCol(n), !matched)
+          df.withColumn(usedSnapshotCol(n), !matched)
             .withColumn(usedBfCol(n), matched)
         }
         newFieldNames.foldLeft(withFlags) { (df, n) =>
@@ -1651,7 +1653,7 @@ object MilvusBackfill {
         // Use the using-column join form: both sides share the internal join
         // columns, so Spark collapses them into one,
         // avoiding ambiguous-reference errors downstream.
-        originalDF.join(backfillWithFlag, joinColumns, "left")
+        snapshotDF.join(backfillWithFlag, joinColumns, "left")
 
       case other =>
         // Defensive: validate() rejects anything else, but keep a clear error
@@ -1738,15 +1740,15 @@ object MilvusBackfill {
       // Prepare data: select only needed columns and add _segment_id for
       // partitioning. Trailing column is the backfill match flag — retained
       // here so executors can count join-key-matched rows, stripped from the
-      // projection that reaches the writer. In any source-reading mode
+      // projection that reaches the writer. In any mode that reads snapshot fields
       // (coalesce / overwrite), two extra boolean flag columns per new field
-      // follow the match flag (usedSrc, usedBf interleaved, in
+      // follow the match flag (usedSnapshot, usedBf interleaved, in
       // `newFieldNames` order) so the writer can compute per-field
       // usedSourceByField / usedDataFileByField counts.
-      val readsSourceFields = config.readsSourceFields
+      val readsSnapshotFields = config.readsSnapshotFields
       val flagColNames: Seq[String] =
-        if (readsSourceFields)
-          newFieldNames.flatMap(n => Seq(usedSrcCol(n), usedBfCol(n)))
+        if (readsSnapshotFields)
+          newFieldNames.flatMap(n => Seq(usedSnapshotCol(n), usedBfCol(n)))
         else Seq.empty
       val preparedDF = joinedDF
         .select(
@@ -1855,31 +1857,34 @@ object MilvusBackfill {
       val totalTime = results.map(_._1.executionTimeMs).sum
       val avgTime = if (results.nonEmpty) totalTime / results.length else 0
       val totalRows = results.map(_._1.rowCount).sum
-      val totalSource = results.map(_._1.sourceRowCount).sum
+      val totalSnapshotRows = results.map(_._1.sourceRowCount).sum
       val totalMatched = results.map(_._1.matchedRowCount).sum
       val matchRateStr =
-        if (totalSource > 0)
-          f"${totalMatched.toDouble / totalSource * 100}%.2f%%"
+        if (totalSnapshotRows > 0)
+          f"${totalMatched.toDouble / totalSnapshotRows * 100}%.2f%%"
         else "n/a"
 
       logger.info("=== Backfill Summary ===")
       logger.info(s"Total segments: ${results.length}")
-      logger.info(s"Total source rows: $totalSource")
+      logger.info(s"Total source rows: $totalSnapshotRows")
       logger.info(
         s"Total matched rows: $totalMatched (match rate: $matchRateStr)"
       )
       logger.info(s"Total rows written: $totalRows")
       logger.info(s"Total time for all segments: ${totalTime}ms")
       logger.info(s"Average time per segment: ${avgTime}ms")
-      if (readsSourceFields) {
+      if (readsSnapshotFields) {
         logger.info(
           s"Per-field provenance (mode=${config.mode}, aggregated):"
         )
         newFieldNames.foreach { f =>
-          val src = results.map(_._1.usedSourceByField.getOrElse(f, 0L)).sum
+          val snapshotCount =
+            results.map(_._1.usedSourceByField.getOrElse(f, 0L)).sum
           val df = results.map(_._1.usedDataFileByField.getOrElse(f, 0L)).sum
-          val nullOut = totalSource - src - df
-          logger.info(s"  $f: source=$src, dataFile=$df, null=$nullOut")
+          val nullOut = totalSnapshotRows - snapshotCount - df
+          logger.info(
+            s"  $f: source=$snapshotCount, dataFile=$df, null=$nullOut"
+          )
         }
       }
       results.sortBy(_._1.segmentId).foreach { case (r, _) =>
@@ -1977,11 +1982,11 @@ object MilvusBackfill {
       )
     )
 
-    val readsSourceFields = config.readsSourceFields
+    val readsSnapshotFields = config.readsSnapshotFields
     val newFieldNames = targetSchema.fieldNames.toSeq
     val numNewFields = newFieldNames.size
     // Row layout (fixed prefix): [_segment_id, _row_offset, ...newFields,
-    // __bf_matched__, (usedSrc, usedBf)*numNewFields in source-reading modes
+    // __bf_matched__, (usedSnapshot, usedBf)*numNewFields in snapshot-reading modes
     // (coalesce / overwrite) only].
     val matchFlagIdx = 2 + numNewFields
     val firstFlagIdx = matchFlagIdx + 1
@@ -1990,7 +1995,7 @@ object MilvusBackfill {
       var rowCount = 0L
       var nullRowCount = 0L
       var matchedRowCount = 0L
-      val usedSrcCounts = Array.fill(numNewFields)(0L)
+      val usedSnapshotCounts = Array.fill(numNewFields)(0L)
       val usedBfCounts = Array.fill(numNewFields)(0L)
 
       def writeRow(row: InternalRow): Unit = {
@@ -2000,13 +2005,13 @@ object MilvusBackfill {
           .toArray
         if (targetFields.forall(_ == null)) nullRowCount += 1
         if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
-        if (readsSourceFields) {
+        if (readsSnapshotFields) {
           var i = 0
           while (i < numNewFields) {
-            val srcIdx = firstFlagIdx + 2 * i
-            val bfIdx = srcIdx + 1
-            if (!row.isNullAt(srcIdx) && row.getBoolean(srcIdx))
-              usedSrcCounts(i) += 1
+            val snapshotIdx = firstFlagIdx + 2 * i
+            val bfIdx = snapshotIdx + 1
+            if (!row.isNullAt(snapshotIdx) && row.getBoolean(snapshotIdx))
+              usedSnapshotCounts(i) += 1
             if (!row.isNullAt(bfIdx) && row.getBoolean(bfIdx))
               usedBfCounts(i) += 1
             i += 1
@@ -2032,10 +2037,10 @@ object MilvusBackfill {
 
       writer.close()
 
-      val (usedSrcByField, usedBfByField) =
-        if (readsSourceFields)
+      val (usedSnapshotByField, usedBfByField) =
+        if (readsSnapshotFields)
           (
-            newFieldNames.zip(usedSrcCounts).toMap,
+            newFieldNames.zip(usedSnapshotCounts).toMap,
             newFieldNames.zip(usedBfCounts).toMap
           )
         else (Map.empty[String, Long], Map.empty[String, Long])
@@ -2051,7 +2056,7 @@ object MilvusBackfill {
             committedVersion = committedVersion,
             sourceRowCount = rowCount,
             matchedRowCount = matchedRowCount,
-            usedSourceByField = usedSrcByField,
+            usedSourceByField = usedSnapshotByField,
             usedDataFileByField = usedBfByField
           ),
           None
@@ -2142,7 +2147,7 @@ object MilvusBackfill {
               config.s3BucketName,
               store,
               manifestSchemaVersion = metadata.manifestSchemaVersion,
-              applyDeletes = ApplyDeletesToSourceRows,
+              applyDeletes = ApplyDeletesToSnapshotRows,
               storageScheme = storageScheme(config),
               endpoint = config.s3Endpoint
             )
@@ -2269,21 +2274,21 @@ object MilvusBackfill {
       allocateLogId = allocator
     )
 
-    val readsSourceFields = config.readsSourceFields
+    val readsSnapshotFields = config.readsSnapshotFields
     val numNewFields = fieldNames.size
     // Row layout (fixed prefix): [_segment_id, _row_offset, ...newFields,
-    // __bf_matched__, (usedSrc, usedBf)*numNewFields in source-reading modes
+    // __bf_matched__, (usedSnapshot, usedBf)*numNewFields in snapshot-reading modes
     // (coalesce / overwrite) only].
     val matchFlagIdx = 2 + numNewFields
     val firstFlagIdx = matchFlagIdx + 1
 
     var rowCount = 0L
     var matchedRowCount = 0L
-    val usedSrcCounts = Array.fill(numNewFields)(0L)
+    val usedSnapshotCounts = Array.fill(numNewFields)(0L)
     val usedBfCounts = Array.fill(numNewFields)(0L)
     try {
       // The V2 writer only wants the newField columns; strip the tracking
-      // columns, the match flag, and any source-reading-mode provenance flags
+      // columns, the match flag, and any snapshot-reading-mode provenance flags
       // (the match flag + per-field flags are folded into the counters
       // instead).
       def projected(row: InternalRow): InternalRow = {
@@ -2295,13 +2300,13 @@ object MilvusBackfill {
       }
       def countMatch(row: InternalRow): Unit = {
         if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
-        if (readsSourceFields) {
+        if (readsSnapshotFields) {
           var i = 0
           while (i < numNewFields) {
-            val srcIdx = firstFlagIdx + 2 * i
-            val bfIdx = srcIdx + 1
-            if (!row.isNullAt(srcIdx) && row.getBoolean(srcIdx))
-              usedSrcCounts(i) += 1
+            val snapshotIdx = firstFlagIdx + 2 * i
+            val bfIdx = snapshotIdx + 1
+            if (!row.isNullAt(snapshotIdx) && row.getBoolean(snapshotIdx))
+              usedSnapshotCounts(i) += 1
             if (!row.isNullAt(bfIdx) && row.getBoolean(bfIdx))
               usedBfCounts(i) += 1
             i += 1
@@ -2329,10 +2334,10 @@ object MilvusBackfill {
           rowCount = pf.rowsWritten
         )
       }
-      val (usedSrcByField, usedBfByField) =
-        if (readsSourceFields)
+      val (usedSnapshotByField, usedBfByField) =
+        if (readsSnapshotFields)
           (
-            fieldNames.zip(usedSrcCounts).toMap,
+            fieldNames.zip(usedSnapshotCounts).toMap,
             fieldNames.zip(usedBfCounts).toMap
           )
         else (Map.empty[String, Long], Map.empty[String, Long])
@@ -2354,7 +2359,7 @@ object MilvusBackfill {
             ),
             sourceRowCount = rowCount,
             matchedRowCount = matchedRowCount,
-            usedSourceByField = usedSrcByField,
+            usedSourceByField = usedSnapshotByField,
             usedDataFileByField = usedBfByField
           ),
           None

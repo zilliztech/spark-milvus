@@ -74,7 +74,7 @@ class RowExclusionsTest extends AnyFunSuite with Matchers {
     )
 
     // The filter's column, the primary key and the timestamp, and nothing else:
-    // an index probe never opens the vector column to decide this.
+    // an indexed search never opens the vector column to decide this.
     exclusions.neededColumns.toSet shouldBe Set("102", "100", "1")
 
     val allocator = new RootAllocator()

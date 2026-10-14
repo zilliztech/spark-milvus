@@ -23,7 +23,10 @@ case class V2SegmentArtifact(
     columnGroups: Seq[V2ColumnGroupArtifact]
 )
 
-/** Result of backfilling a single segment
+/** Result of backfilling a single segment.
+  *
+  * Public `source*` / `usedSource*` names are retained for compatibility and
+  * refer to snapshot rows and values, not the external backfill input.
   */
 case class SegmentBackfillResult(
     segmentId: Long,
@@ -38,29 +41,32 @@ case class SegmentBackfillResult(
       * artifact to patch the snapshot.
       */
     v2Artifact: Option[V2SegmentArtifact] = None,
-    /** Source (snapshot) row count for this segment — equal to `rowCount` on
-      * the success path because the left join preserves every source row, but
-      * kept separate so consumers don't have to rely on that invariant.
+    /** Snapshot row count for this segment — equal to `rowCount` on the success
+      * path because the left join preserves every snapshot row, but kept
+      * separate so consumers don't have to rely on that invariant.
       */
     sourceRowCount: Long = 0L,
-    /** Source rows whose resolved join key was matched in the backfill parquet.
+    /** Snapshot rows whose resolved join key matched the backfill parquet.
       * Derived from a `__bf_matched__` marker column injected before the left
       * join.
       */
     matchedRowCount: Long = 0L,
-    /** Coalesce-mode only: per new-field count of rows whose written value came
-      * from the existing Milvus source (source value was non-null, so
-      * `coalesce(src, bf)` kept it). Empty in overwrite mode.
+    /** Per-field count of rows that kept the snapshot value: non-null values in
+      * coalesce mode, or unmatched rows in overwrite mode. Empty in replace
+      * mode. The legacy field name is retained in the result API and JSON.
       */
     usedSourceByField: Map[String, Long] = Map.empty,
-    /** Coalesce-mode only: per new-field count of rows whose written value came
-      * from the backfill data file (source was null and the join key matched a
-      * non-null backfill value). Empty in overwrite mode.
+    /** Per-field count of rows that took the backfill value: snapshot null and
+      * backfill non-null in coalesce mode, or any matched row in overwrite
+      * mode, including a null backfill value. Empty in replace mode.
       */
     usedDataFileByField: Map[String, Long] = Map.empty
 )
 
-/** Comprehensive result of backfill operation
+/** Comprehensive result of backfill operation.
+  *
+  * Public names and summary labels containing `source` retain their legacy
+  * spelling; they count snapshot rows or values, not external input rows.
   */
 case class BackfillResult(
     success: Boolean,
@@ -81,12 +87,12 @@ case class BackfillResult(
     totalSourceRows: Long = 0L,
     totalBackfillDataRows: Long = 0L,
     totalMatchedRows: Long = 0L,
-    /** Coalesce-mode only: aggregated per new-field count of rows that kept the
-      * existing Milvus source value. Empty in overwrite mode.
+    /** Aggregated per-field snapshot provenance counts from coalesce or
+      * overwrite mode. Empty in replace mode.
       */
     totalUsedSourceByField: Map[String, Long] = Map.empty,
-    /** Coalesce-mode only: aggregated per new-field count of rows that took the
-      * backfill data file value. Empty in overwrite mode.
+    /** Aggregated per-field backfill provenance counts from coalesce or
+      * overwrite mode. Empty in replace mode.
       */
     totalUsedDataFileByField: Map[String, Long] = Map.empty,
     /** `{root}/staging/{job}` where the job manifest and marker were written;
@@ -102,16 +108,16 @@ case class BackfillResult(
     */
   def summary: String = {
     val v2Count = segmentResults.count(_._2.v2Artifact.isDefined)
-    val sourceRate = matchRateStr(totalMatchedRows, totalSourceRows)
+    val snapshotRate = matchRateStr(totalMatchedRows, totalSourceRows)
     val coalesceBlock =
       if (totalUsedSourceByField.isEmpty && totalUsedDataFileByField.isEmpty)
         ""
       else {
         val fieldLines = newFieldNames.map { f =>
-          val src = totalUsedSourceByField.getOrElse(f, 0L)
+          val snapshotCount = totalUsedSourceByField.getOrElse(f, 0L)
           val df = totalUsedDataFileByField.getOrElse(f, 0L)
-          val nullOut = totalSourceRows - src - df
-          s"    $f: source=$src, dataFile=$df, null=$nullOut"
+          val nullOut = totalSourceRows - snapshotCount - df
+          s"    $f: source=$snapshotCount, dataFile=$df, null=$nullOut"
         }
         s"  Coalesce Provenance (per field):\n${fieldLines.mkString("\n")}\n"
       }
@@ -121,7 +127,7 @@ case class BackfillResult(
        |  Segments Processed: $segmentsProcessed
        |  Total Source Rows: $totalSourceRows
        |  Total Backfill Data File Rows: $totalBackfillDataRows
-       |  Total Matched Source Rows: $totalMatchedRows ($sourceRate of source rows)
+       |  Total Matched Source Rows: $totalMatchedRows ($snapshotRate of source rows)
        |  Total Rows Written: $totalRowsWritten
        |  Execution Time: ${executionTimeMs}ms
        |  Collection ID: $collectionId
@@ -232,7 +238,7 @@ object BackfillResult {
       totalBackfillDataRows: Long = 0L
   ): BackfillResult = {
     val totalRows = segmentResults.values.map(_.rowCount).sum
-    val totalSource = segmentResults.values.map(_.sourceRowCount).sum
+    val totalSnapshotRows = segmentResults.values.map(_.sourceRowCount).sum
     val totalMatched = segmentResults.values.map(_.matchedRowCount).sum
     val allManifests = segmentResults.values.flatMap(_.manifestPaths).toSeq
 
@@ -244,7 +250,7 @@ object BackfillResult {
           a.updated(k, a.getOrElse(k, 0L) + v)
         }
       }
-    val totalUsedSrc = sumByField(_.usedSourceByField)
+    val totalUsedSnapshot = sumByField(_.usedSourceByField)
     val totalUsedDf = sumByField(_.usedDataFileByField)
 
     BackfillResult(
@@ -258,10 +264,10 @@ object BackfillResult {
       partitionId = partitionId,
       schemaVersion = schemaVersion,
       newFieldNames = newFieldNames,
-      totalSourceRows = totalSource,
+      totalSourceRows = totalSnapshotRows,
       totalBackfillDataRows = totalBackfillDataRows,
       totalMatchedRows = totalMatched,
-      totalUsedSourceByField = totalUsedSrc,
+      totalUsedSourceByField = totalUsedSnapshot,
       totalUsedDataFileByField = totalUsedDf
     )
   }

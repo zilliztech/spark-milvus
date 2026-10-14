@@ -50,7 +50,7 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
   *   the search's counters, by accumulator id
   * @param comparedPairsTotal
   *   the pairs the whole search has to measure, or zero when nothing knows
-  *   them: an index probe does not compare every row, and a snapshot that
+  *   them: an indexed search does not compare every row, and a snapshot that
   *   carries no row count cannot be multiplied out.
   * @param queryGroups
   *   the groups the query set was cut into.
@@ -61,11 +61,11 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
   * @param share
   *   which of the two the percentage comes from, or none. Only a counter that
   *   rises through the work can carry it: compared pairs rise with every batch,
-  *   and in index mode so do segment searches, because a probe searches one
-  *   segment in one call. An exact scan's segment searches rise once a whole
-  *   segment is done, which for most of a run reads as no progress at all, and
-  *   a percentage that says zero while the work is half done is worse than
-  *   none.
+  *   and in index mode so do segment searches, because one indexed search
+  *   covers a segment in one call. An exact scan's segment searches rise once a
+  *   whole segment is done, which for most of a run reads as no progress at
+  *   all, and a percentage that says zero while the work is half done is worse
+  *   than none.
   */
 private[search] final class SearchProgress private (
     context: SparkContext,
@@ -241,7 +241,7 @@ private[search] object SearchProgress {
   ): SearchProgress = {
     // Which counter the percentage comes from, and when there is none.
     // Compared pairs rise with every batch; in index mode segment searches
-    // rise with every call, because a probe searches a segment in one. An
+    // rise with every call, because one indexed search covers a segment. An
     // exact scan whose snapshot carries no row count has neither, and says so
     // by reporting counts without a share.
     val share =
