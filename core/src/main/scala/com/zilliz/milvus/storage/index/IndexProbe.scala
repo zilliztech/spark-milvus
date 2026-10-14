@@ -2,13 +2,7 @@ package com.zilliz.milvus.storage.index
 
 import java.lang.{Float => JavaFloat}
 import java.nio.{ByteBuffer, ByteOrder}
-import java.util.concurrent.{
-  ExecutionException,
-  ExecutorService,
-  Executors,
-  Future,
-  ThreadFactory
-}
+import java.util.concurrent.{ExecutorService, Executors, Future, ThreadFactory}
 import java.util.BitSet
 import scala.util.Try
 
@@ -300,14 +294,8 @@ object IndexProbe {
 
     /** Fails with the worker's exception if the slot's last answer failed. */
     private def await(slot: Slot): Unit = {
-      slot.pending.foreach { future =>
-        try future.get()
-        catch {
-          case wrapped: ExecutionException =>
-            throw Option(wrapped.getCause).getOrElse(wrapped)
-        }
-      }
-      slot.pending = None
+      try slot.pending.foreach(SearchThreads.await(_))
+      finally slot.pending = None
     }
 
     /** Searches one group and hands its answer to the worker. Progress carries
@@ -430,7 +418,8 @@ object IndexProbe {
       * searches. After this the mergers hold every group's hits.
       */
     def finish(onProgress: SegmentSearch.Progress => Unit): Unit = {
-      slots.foreach(await)
+      try SearchThreads.awaitAll(slots.flatMap(_.pending).toSeq)
+      finally slots.foreach(_.pending = None)
       val (calls, nanos) = synchronized {
         val out = (retriedCalls, retriedNanos)
         retriedCalls = 0
@@ -441,12 +430,22 @@ object IndexProbe {
     }
 
     override def close(): Unit = {
-      if (ownWorker) worker.shutdownNow()
-      try slots.foreach(slot => Try(slot.pending.foreach(_.cancel(true))))
-      finally {
-        slots.foreach(_.close())
-        mask.close()
+      var failure: Throwable = null
+      def complete(body: => Unit): Unit = {
+        try body
+        catch {
+          case cause: Throwable =>
+            if (failure == null) failure = cause
+            else if (failure ne cause) failure.addSuppressed(cause)
+        }
       }
+      if (ownWorker) complete(SearchThreads.shutdown(worker))
+      // finish clears every pending future even when one failed, so a failure
+      // already reported to the task is not thrown again by its finally close.
+      complete(finish(_ => ()))
+      slots.foreach(slot => complete(slot.close()))
+      complete(mask.close())
+      if (failure != null) throw failure
     }
   }
 

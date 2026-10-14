@@ -2,6 +2,7 @@ package com.zilliz.milvus.storage.index
 
 import java.nio.ByteOrder
 import java.util.{BitSet, Random}
+import java.util.concurrent.{ExecutorService, Executors}
 
 import org.apache.arrow.memory.RootAllocator
 import org.scalatest.funsuite.AnyFunSuite
@@ -67,27 +68,42 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     try {
       val matrix = QueryMatrix.ofFloats(queries, layout, allocator)
       try {
-        val merger = new TopKMerger(queries.size, k, MetricType.L2)
-        var rescans = 0L
-        ExactScan.batch(
-          batch,
-          matrix,
-          7L,
-          k,
-          MetricType.L2,
-          allocator,
-          merger,
-          step => rescans += step.rescans,
-          Some(
-            EngineRange.Batch.of(batch, layout, MetricType.L2, SquaredDistance)
+        def collected(
+            collector: Option[ExecutorService],
+            threads: Int
+        ): (Seq[Seq[(Long, Double)]], Long) = {
+          val merger = new TopKMerger(queries.size, k, MetricType.L2)
+          var rescans = 0L
+          ExactScan.batch(
+            batch,
+            matrix,
+            7L,
+            k,
+            MetricType.L2,
+            allocator,
+            merger,
+            step => rescans += step.rescans,
+            Some(
+              EngineRange.Batch
+                .of(batch, layout, MetricType.L2, SquaredDistance)
+            ),
+            collector,
+            threads
           )
-        )
-        (
-          queries.indices.map(query =>
-            merger.results(query).map(c => (c.rowOffset, c.score))
-          ),
-          rescans
-        )
+          (
+            queries.indices.map(query =>
+              merger.results(query).map(c => (c.rowOffset, c.score))
+            ),
+            rescans
+          )
+        }
+        val sequential = collected(None, 1)
+        val collector = Executors.newSingleThreadExecutor()
+        try {
+          val parallel = collected(Some(collector), 4)
+          parallel shouldBe sequential
+          parallel
+        } finally SearchThreads.shutdown(collector)
       } finally matrix.close()
     } finally batch.close()
   }
