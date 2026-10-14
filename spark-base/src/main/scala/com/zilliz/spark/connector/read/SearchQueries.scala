@@ -1,14 +1,18 @@
 package com.zilliz.spark.connector.read
 
 import java.lang.{Float => JavaFloat}
+import java.util.Arrays
 import scala.collection.mutable
 
-import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.resource.ResourceProfile
+import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.Partitioner
 
 import com.zilliz.milvus.storage.index.{QueryMatrix, SearchPlan}
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.options.{MilvusOption, TaskResources}
 
 /** The query set a search takes: `query_id` and `vector`, the query rows of a
   * nearest-by join numbered by their position, packed into the bytes Knowhere
@@ -18,9 +22,9 @@ import com.zilliz.spark.connector.options.MilvusOption
   * fits `milvus.search.queries.max.bytes` the executors pack their partitions
   * and the driver only concatenates the bytes before broadcasting them
   * ([[packOnExecutors]]); when it does not, the packing job packs one group per
-  * task and the groups travel with the shuffle. A query vector is ARRAY<FLOAT>,
-  * what Spark's vector functions take, and is packed in the field's element
-  * type.
+  * task and the groups travel with the shuffle ([[packedGroups]]). A query
+  * vector is ARRAY<FLOAT>, what Spark's vector functions take, and is packed in
+  * the field's element type.
   */
 private[read] object SearchQueries {
 
@@ -40,10 +44,9 @@ private[read] object SearchQueries {
     */
   final case class Frame(selected: DataFrame, count: Long) extends Input
 
-  /** A set already packed on the driver, as [[pack]] packs one: row `i` of
-    * `vectors` is the query of `ids(i)`. It is broadcast as it is, and nothing
-    * about it runs a job (docs/design/architecture/dataframe-api.html section
-    * 4).
+  /** A set already packed on the driver: row `i` of `vectors` is the query of
+    * `ids(i)`. It is broadcast as it is, and nothing about it runs a job
+    * (docs/design/architecture/dataframe-api.html section 4).
     */
   final case class Packed(ids: Array[Long], vectors: Array[Byte])
       extends Input
@@ -61,6 +64,41 @@ private[read] object SearchQueries {
 
     /** Whether the query groups travel with the shuffle. */
     def shuffled: Boolean = false
+
+    /** How the plan log describes this delivery. */
+    def describe: String = this match {
+      case Packed(_, _) => "broadcast, packed on the driver"
+      case Broadcast(_) => "broadcast"
+      case Shuffled(_)  => "shuffle"
+    }
+
+    /** Delivers the query set as one partition for each planned group of
+      * `planned`.
+      */
+    def groups(
+        spark: SparkSession,
+        planned: Seq[SearchPlan.QueryGroup],
+        metric: MetricType,
+        layout: VectorLayout,
+        resources: TaskResources,
+        executorQueryHeapBytes: Long
+    ): RDD[Group] = this match {
+      case Packed(ids, vectors) =>
+        broadcastGroups(spark, ids, vectors, planned)
+      case Broadcast(selected) =>
+        // Packed where the rows are read: the driver gets bytes, not boxed
+        // vectors, and executors pack in parallel instead of one driver thread.
+        val (ids, vectors) = packOnExecutors(selected, layout, metric)
+        broadcastGroups(spark, ids, vectors, planned)
+      case Shuffled(selected) =>
+        packedGroups(
+          selected,
+          planned,
+          metric,
+          layout,
+          packProfile(planned, layout, resources, executorQueryHeapBytes)
+        )
+    }
   }
 
   /** A frame packed on the executors, concatenated on the driver and broadcast
@@ -120,28 +158,129 @@ private[read] object SearchQueries {
   def bytes(queries: Long, layout: VectorLayout): Long =
     queries * layout.rowBytes.toLong
 
-  /** Packs rows already in hand. Query ids keep the order they arrive in, and
-    * row `i` of the packed bytes is the query of `ids(i)`.
+  /** A query set broadcast whole, as one partition for each planned group. */
+  private def broadcastGroups(
+      spark: SparkSession,
+      ids: Array[Long],
+      vectors: Array[Byte],
+      groups: Seq[SearchPlan.QueryGroup]
+  ): RDD[Group] = {
+    val total = groups.map(_.queries.toLong).sum
+    require(
+      ids.length.toLong == total,
+      s"The query set packed to ${ids.length} queries, but the plan counted $total"
+    )
+    val held = spark.sparkContext.broadcast((ids, vectors))
+    val planned = groups.toVector
+    spark.sparkContext
+      .parallelize(planned.indices, planned.size)
+      .map { index =>
+        val (allIds, allVectors) = held.value
+        Group.of(allIds, allVectors, planned(index))
+      }
+  }
+
+  /** The task resources of the stage that packs the query groups for the
+    * shuffle. A packing task holds one group's ids and vectors on the heap,
+    * outside what Spark manages, so no more of them run at once on an executor
+    * than that heap holds with room to spare.
     */
-  def pack(
-      rows: Seq[Row],
+  private def packProfile(
+      groups: Seq[SearchPlan.QueryGroup],
       layout: VectorLayout,
-      metric: MetricType
-  ): (Array[Long], Array[Byte]) = {
-    val ids = new Array[Long](rows.size)
-    rows.iterator.zipWithIndex.foreach { case (row, index) =>
-      require(
-        !row.isNullAt(0),
-        s"Query ${index + 1} of the set has no $IdColumn"
-      )
-      require(
-        !row.isNullAt(1),
-        s"Query ${row.getLong(0)} has no $VectorColumn"
-      )
-      ids(index) = row.getLong(0)
+      resources: TaskResources,
+      executorQueryHeapBytes: Long
+  ): Option[ResourceProfile] = {
+    val perGroup = groups.map(_.queries.toLong).max *
+      (SearchPlan.QueryIdBytes + layout.rowBytes.toLong)
+    val fits =
+      math.max(1L, executorQueryHeapBytes / (perGroup + perGroup / 2))
+    resources.atMost(math.min(fits, Int.MaxValue.toLong).toInt)
+  }
+
+  /** The query set packed on the executors, one partition per query group, each
+    * the output of a shuffle.
+    *
+    * `zipWithIndex` gives every query the position that decides its group and
+    * its place in the group, so the groups are the same ones the driver planned
+    * and a group's rows are packed in query order without sorting. One task
+    * packs one group, and the groups are packed in parallel.
+    *
+    * The packed group then goes through a second shuffle, keyed by its group,
+    * so that it is written once to the local disk of the executor that packed
+    * it and every first-stage task that needs it reads it from there. Nothing
+    * is stored in memory: [[SearchQueryRanges]] reads a task's groups one at a
+    * time, and reading a group again is a shuffle read, not a second packing of
+    * the query set.
+    */
+  private[read] def packedGroups(
+      selected: DataFrame,
+      groups: Seq[SearchPlan.QueryGroup],
+      metric: MetricType,
+      layout: VectorLayout,
+      profile: Option[ResourceProfile] = None
+  ): RDD[Group] = {
+    // Where each planned group starts. The byte limit cuts equal groups and a
+    // shorter last one, an even cut puts the longer groups first (decision
+    // 32), so a position finds its group among the starts, not by dividing.
+    val starts = groups.map(_.firstQuery.toLong).toArray
+    val rowBytes = layout.rowBytes
+    val sizes = groups.map(_.queries).toVector
+    // A row arrives, is written where it belongs and is done with: its
+    // position says both its group and its place in the group, so the task
+    // holds the group's arrays and the row in hand. Holding the group's rows
+    // before copying them holds the group twice. `groupByKey` did that (a heap
+    // dump of a failed 1 GiB query set found 2.03 GB in `byte[4096]` beside
+    // the arrays they were being copied into), and so did sorting each group
+    // by position first: four packing tasks of 232 MB groups ran a 4 GiB
+    // executor heap out (UAT chenbiao-qs2c-31m-8g-ef151-0).
+    val byGroup = new Partitioner {
+      override def numPartitions: Int = sizes.size
+      override def getPartition(key: Any): Int = {
+        val found = Arrays.binarySearch(starts, key.asInstanceOf[Long])
+        if (found >= 0) found else -found - 2
+      }
     }
-    val floats = rows.map(row => finite(row, layout, metric))
-    (ids, QueryMatrix.packFloats(floats, layout))
+    // The packed group keeps its group's partition through the second shuffle.
+    val byIndex = new Partitioner {
+      override def numPartitions: Int = sizes.size
+      override def getPartition(key: Any): Int = key.asInstanceOf[Int]
+    }
+    // Numbered before they are packed: zipWithIndex first counts the rows of
+    // every partition in a job of its own, and that job has no need to pack.
+    val packed = selected.queryExecution.toRdd
+      .zipWithIndex()
+      .map { case (row, position) =>
+        val (id, values) = readQuery(row, position, layout, metric)
+        (position, (id, QueryMatrix.packFloats(Seq(values), layout)))
+      }
+      .partitionBy(byGroup)
+      .mapPartitionsWithIndex { (index, entries) =>
+        val queries = sizes(index)
+        val first = starts(index)
+        val ids = new Array[Long](queries)
+        val vectors = new Array[Byte](queries * rowBytes)
+        var placed = 0
+        entries.foreach { case (position, (id, packed)) =>
+          val at = position - first
+          require(
+            at >= 0L && at < queries,
+            s"Query at position $position does not belong to group $index"
+          )
+          ids(at.toInt) = id
+          System.arraycopy(packed, 0, vectors, at.toInt * rowBytes, rowBytes)
+          placed += 1
+        }
+        require(
+          placed == queries,
+          s"Query group $index takes $queries queries and was given $placed"
+        )
+        Iterator((index, Group(ids, vectors, 0)))
+      }
+    profile
+      .fold(packed)(packed.withResources)
+      .partitionBy(byIndex)
+      .values
   }
 
   /** Rows an executor packs at a time: 2,048 queries of 768 dimensions are 6
@@ -160,7 +299,7 @@ private[read] object SearchQueries {
     * partition reads its rows as `InternalRow`, takes the vector out as a
     * primitive array, and packs it in place; the driver receives `rowBytes` per
     * query and no objects. Partitions keep their order, so row `i` of the
-    * result is query `ids(i)` exactly as [[pack]] would have placed it.
+    * result is query `ids(i)`, the set's order.
     */
   def packOnExecutors(
       selected: DataFrame,
@@ -215,14 +354,8 @@ private[read] object SearchQueries {
     }
     var index = 0
     while (rows.hasNext) {
-      val row = rows.next()
-      require(
-        !row.isNullAt(0),
-        s"Query ${index + 1} of the set has no $IdColumn"
-      )
-      val id = row.getLong(0)
-      require(!row.isNullAt(1), s"Query $id has no $VectorColumn")
-      floats += finiteValues(id, row.getArray(1).toFloatArray(), layout, metric)
+      val (id, values) = readQuery(rows.next(), index, layout, metric)
+      floats += values
       ids += id
       index += 1
       if (index % PackChunkRows == 0) flush()
@@ -237,12 +370,21 @@ private[read] object SearchQueries {
     (ids.result(), packed)
   }
 
-  private def finite(
-      row: Row,
+  /** The id and values of the query at `position`, counted from zero. */
+  private def readQuery(
+      row: InternalRow,
+      position: Long,
       layout: VectorLayout,
       metric: MetricType
-  ): Array[Float] =
-    finiteValues(row.getLong(0), row.getSeq[Float](1).toArray, layout, metric)
+  ): (Long, Array[Float]) = {
+    require(
+      !row.isNullAt(0),
+      s"Query ${position + 1} of the set has no $IdColumn"
+    )
+    val id = row.getLong(0)
+    require(!row.isNullAt(1), s"Query $id has no $VectorColumn")
+    (id, finiteValues(id, row.getArray(1).toFloatArray(), layout, metric))
+  }
 
   private def finiteValues(
       id: Long,
