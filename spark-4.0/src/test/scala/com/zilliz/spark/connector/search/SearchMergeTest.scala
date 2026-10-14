@@ -13,7 +13,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.milvus.storage.index.{Candidate, CandidateBytes}
+import com.zilliz.milvus.storage.index.{Candidate, CandidateBytesFixture}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
@@ -56,7 +56,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
           .groupBy { case (query, segment, _, _) => (query, segment) }
           .toSeq
           .map { case ((query, _), grouped) =>
-            query -> CandidateBytes.of(
+            query -> CandidateBytesFixture.pack(
               grouped.map { case (_, segment, offset, score) =>
                 Candidate(0, segment, offset, score)
               },

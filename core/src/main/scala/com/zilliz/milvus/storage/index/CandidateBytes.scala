@@ -2,7 +2,6 @@ package com.zilliz.milvus.storage.index
 
 import java.lang.{Double => JavaDouble, Long => JavaLong}
 import java.nio.ByteBuffer
-import java.util.Arrays
 
 import com.zilliz.milvus.storage.schema.MetricType
 
@@ -60,17 +59,6 @@ object CandidateBytes {
     }
   }
 
-  /** These candidates, sorted best first and packed. For callers that hold
-    * candidates as objects — a test, or a caller that built them some other
-    * way; the search path packs straight out of [[TopKMerger]].
-    */
-  def of(candidates: Seq[Candidate], metric: MetricType): Array[Byte] = {
-    val sorted = candidates.toArray
-    Arrays.sort(sorted, Candidate.ranking(metric))
-    write(sorted, sorted.length)
-  }
-
-  /** `sorted` holds `size` candidates, best first already. */
   /** One query's run straight out of [[TopKMerger]]'s columns, which already
     * hold it best first, so this writes `size` candidates from `base` without
     * building a `Candidate` for any of them.
@@ -93,26 +81,6 @@ object CandidateBytes {
       buffer.putLong(offset, segments(from))
       buffer.putLong(offset + 8, offsets(from))
       buffer.putDouble(offset + 16, scores(from))
-      at += 1
-    }
-    packed
-  }
-
-  private[index] def write(sorted: Array[Candidate], size: Int): Array[Byte] = {
-    require(
-      size >= 0 && size <= sorted.length,
-      s"$size candidates of an array of ${sorted.length}"
-    )
-    if (size == 0) return Empty
-    val packed = new Array[Byte](size * Width)
-    val buffer = ByteBuffer.wrap(packed)
-    var at = 0
-    while (at < size) {
-      val candidate = sorted(at)
-      val offset = at * Width
-      buffer.putLong(offset, candidate.segmentId)
-      buffer.putLong(offset + 8, candidate.rowOffset)
-      buffer.putDouble(offset + 16, candidate.score)
       at += 1
     }
     packed

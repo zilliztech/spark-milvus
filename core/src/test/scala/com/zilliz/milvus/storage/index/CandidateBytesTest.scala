@@ -25,7 +25,8 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
 
   test("a candidate takes three fields and nothing else") {
     CandidateBytes.Width shouldBe 24
-    val packed = CandidateBytes.of(Seq(candidate(101L, 5L, 1.5)), MetricType.L2)
+    val packed =
+      CandidateBytesFixture.pack(Seq(candidate(101L, 5L, 1.5)), MetricType.L2)
     packed.length shouldBe 24
     CandidateBytes.count(packed) shouldBe 1
     CandidateBytes.segmentId(packed, 0) shouldBe 101L
@@ -33,22 +34,25 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
     CandidateBytes.score(packed, 0) shouldBe 1.5
   }
 
-  test("packing sorts by the metric, best first") {
-    val given =
-      Seq(
-        candidate(101L, 1L, 3.0),
-        candidate(102L, 2L, 1.0),
-        candidate(103L, 3L, 2.0)
-      )
-    places(CandidateBytes.of(given, MetricType.L2)).map(_._1) shouldBe
-      Vector(102L, 103L, 101L)
-    places(CandidateBytes.of(given, MetricType.Cosine)).map(_._1) shouldBe
-      Vector(101L, 103L, 102L)
+  test("column packing preserves the supplied order and range") {
+    val packed = CandidateBytes.writeColumns(
+      Array(100L, 101L, 102L, 103L),
+      Array(0L, 1L, 2L, 3L),
+      Array(0.0, 3.0, 1.0, 2.0),
+      base = 1,
+      size = 3
+    )
+    places(packed) shouldBe Vector(
+      (101L, 1L, 3.0),
+      (102L, 2L, 1.0),
+      (103L, 3L, 2.0)
+    )
   }
 
   test("an empty answer packs to no bytes and merges away") {
     CandidateBytes.count(CandidateBytes.Empty) shouldBe 0
-    val one = CandidateBytes.of(Seq(candidate(101L, 5L, 1.5)), MetricType.L2)
+    val one =
+      CandidateBytesFixture.pack(Seq(candidate(101L, 5L, 1.5)), MetricType.L2)
     places(
       CandidateBytes.merge(one, CandidateBytes.Empty, 10, MetricType.L2)
     ) shouldBe
@@ -61,12 +65,12 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
 
   test("a merge keeps the best k and drops the rest") {
     val left =
-      CandidateBytes.of(
+      CandidateBytesFixture.pack(
         Seq(candidate(101L, 1L, 1.0), candidate(101L, 2L, 4.0)),
         MetricType.L2
       )
     val right =
-      CandidateBytes.of(
+      CandidateBytesFixture.pack(
         Seq(candidate(102L, 3L, 2.0), candidate(102L, 4L, 5.0)),
         MetricType.L2
       )
@@ -78,7 +82,7 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
   }
 
   test("a side longer than k is cut to k") {
-    val long = CandidateBytes.of(
+    val long = CandidateBytesFixture.pack(
       (1 to 5).map(index => candidate(101L, index.toLong, index.toDouble)),
       MetricType.L2
     )
@@ -87,8 +91,9 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
   }
 
   test("ties break on segment then row, so a merge is order-independent") {
-    val left = CandidateBytes.of(Seq(candidate(102L, 9L, 1.0)), MetricType.L2)
-    val right = CandidateBytes.of(
+    val left =
+      CandidateBytesFixture.pack(Seq(candidate(102L, 9L, 1.0)), MetricType.L2)
+    val right = CandidateBytesFixture.pack(
       Seq(candidate(101L, 9L, 1.0), candidate(102L, 8L, 1.0)),
       MetricType.L2
     )
@@ -110,7 +115,7 @@ class CandidateBytesTest extends AnyFunSuite with Matchers {
         sides.flatten.foreach(merger.add)
         places(merger.sort(0).takePacked(0))
       }
-      val packed = sides.map(CandidateBytes.of(_, metric))
+      val packed = sides.map(CandidateBytesFixture.pack(_, metric))
       val straight =
         places(packed.reduce(CandidateBytes.merge(_, _, 6, metric)))
       straight shouldBe expected
