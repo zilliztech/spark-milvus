@@ -7,7 +7,7 @@ package com.zilliz.milvus.storage
   * vector-search filters. `PredicateExpr` and `PredicateEvaluator` implement
   * the schema-bound R6 Spark V2 predicate contract without changing R7 syntax
   * semantics. Both preserve null through three-valued logic and give the rows
-  * they exclude as a `Bitmap`. Capabilities: R6, R7 (see
+  * they exclude as a `ExclusionBitmap`. Capabilities: R6, R7 (see
   * docs/design/capabilities.md).
   */
 package object expr

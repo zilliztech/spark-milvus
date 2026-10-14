@@ -374,10 +374,10 @@ class PredicateEvaluatorTest extends AnyFunSuite with Matchers {
   private def evaluate(
       expression: PredicateExpr,
       root: VectorSchemaRoot
-  ): Bitmap =
+  ): ExclusionBitmap =
     PredicateEvaluator.evaluate(expression, root, _ => Some("column"))
 
-  private def excluded(bitmap: Bitmap): Seq[Int] =
+  private def excluded(bitmap: ExclusionBitmap): Seq[Int] =
     (0 until bitmap.rowCount).filter(bitmap.isExcluded)
 
   private def withBatch(

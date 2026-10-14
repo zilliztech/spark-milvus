@@ -89,7 +89,7 @@ object FilterEvaluator {
       expr: FilterExpr,
       batch: VectorSchemaRoot,
       column: String => String
-  ): Bitmap = {
+  ): ExclusionBitmap = {
     require(expr != null, "filter expression must not be null")
     require(batch != null, "filter batch must not be null")
     require(column != null, "filter column binding must not be null")
@@ -105,7 +105,7 @@ object FilterEvaluator {
       }
       row += 1
     }
-    Bitmap.fromWords(rowCount, words)
+    ExclusionBitmap.fromWords(rowCount, words)
   }
 
   def matches(

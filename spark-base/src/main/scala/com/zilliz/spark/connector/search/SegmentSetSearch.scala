@@ -30,9 +30,9 @@ import io.milvus.grpc.schema.CollectionSchema
   * candidates they produce.
   *
   * The task opens what the Milvus format side offers for each of its segments —
-  * the vector batches of an exact scan, or the index handle of an index probe —
-  * and the computation in `core.index` searches it. The plan chose which side
-  * the task keeps (docs/design/architecture/vector-search.html section 2.1).
+  * vector batches for exact scan, or an index handle for indexed search — and
+  * the computation in `core.index` searches it. The plan chose which side the
+  * task keeps (docs/design/architecture/vector-search.html section 2.1).
   * Keeping its queries, the task takes every group of its range first and reads
   * each segment once, one at a time, searching every group on it; that is also
   * what a task with one group does. Keeping its segments, it reads the set into
@@ -402,7 +402,7 @@ private[search] object SegmentSetSearch extends Logging {
       set: Seq[MilvusInputPartition],
       request: Request
   ): Boolean =
-    request.mode == SearchMode.Index && set.size > 1 && {
+    request.mode == SearchMode.PreferIndex && set.size > 1 && {
       val sizes = set.flatMap(partition =>
         SegmentIndexHandle
           .select(partition.task, request.fieldId, request.metric)
@@ -433,7 +433,7 @@ private[search] object SegmentSetSearch extends Logging {
       request.predicate
     )
     val selected = request.mode match {
-      case SearchMode.Index =>
+      case SearchMode.PreferIndex =>
         SegmentIndexHandle.select(task, request.fieldId, request.metric)
       case SearchMode.Exact => None
     }

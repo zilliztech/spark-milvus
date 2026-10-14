@@ -34,11 +34,11 @@ import com.zilliz.milvus.storage.schema.MetricType
   * candidates go to that query's heap alone, so the shards never touch the same
   * slot of the merger (2026-09-27 decision).
   */
-object IndexProbe {
+object IndexSearch {
 
   private val MaxAttempts = 8
 
-  /** The searchable side of an index handle: what a probe needs of it, and no
+  /** The searchable side of an index handle: what a search needs of it, and no
     * more, so that a pipeline can be driven by something other than a loaded
     * index in tests.
     */
@@ -240,7 +240,7 @@ object IndexProbe {
       Executors.newSingleThreadExecutor(new ThreadFactory {
         def newThread(runnable: Runnable): Thread = {
           val thread =
-            new Thread(runnable, s"index-probe-collect-${target.segmentId}")
+            new Thread(runnable, s"index-search-collect-${target.segmentId}")
           thread.setDaemon(true)
           thread
         }

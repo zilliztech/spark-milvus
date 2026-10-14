@@ -7,7 +7,7 @@ import java.util.Arrays
   * A set bit means that the row must not be returned. This is the same polarity
   * as row deletion, so readers combine the two exclusion decisions with OR.
   */
-final class Bitmap private (
+final class ExclusionBitmap private (
     val rowCount: Int,
     private val words: Array[Long]
 ) extends Serializable {
@@ -35,7 +35,7 @@ final class Bitmap private (
 
   def isFull: Boolean = excludedCount == rowCount
 
-  def or(other: Bitmap): Bitmap = {
+  def or(other: ExclusionBitmap): ExclusionBitmap = {
     require(
       other.rowCount == rowCount,
       s"cannot combine bitmaps with $rowCount and ${other.rowCount} rows"
@@ -46,11 +46,11 @@ final class Bitmap private (
       combined(i) = words(i) | other.words(i)
       i += 1
     }
-    new Bitmap(rowCount, combined)
+    new ExclusionBitmap(rowCount, combined)
   }
 
   override def equals(other: Any): Boolean = other match {
-    case that: Bitmap =>
+    case that: ExclusionBitmap =>
       rowCount == that.rowCount && Arrays.equals(words, that.words)
     case _ => false
   }
@@ -59,25 +59,25 @@ final class Bitmap private (
     31 * rowCount + Arrays.hashCode(words)
 
   override def toString: String =
-    s"Bitmap(rowCount=$rowCount, excludedCount=$excludedCount)"
+    s"ExclusionBitmap(rowCount=$rowCount, excludedCount=$excludedCount)"
 }
 
-object Bitmap {
-  def empty(rowCount: Int): Bitmap = {
+object ExclusionBitmap {
+  def empty(rowCount: Int): ExclusionBitmap = {
     require(rowCount >= 0, s"row count must be non-negative: $rowCount")
-    new Bitmap(rowCount, new Array[Long](wordCount(rowCount)))
+    new ExclusionBitmap(rowCount, new Array[Long](wordCount(rowCount)))
   }
 
   private[expr] def fromWords(
       rowCount: Int,
       words: Array[Long]
-  ): Bitmap = {
+  ): ExclusionBitmap = {
     require(rowCount >= 0, s"row count must be non-negative: $rowCount")
     require(
       words.length == wordCount(rowCount),
       s"${words.length} words cannot represent $rowCount rows"
     )
-    new Bitmap(rowCount, words)
+    new ExclusionBitmap(rowCount, words)
   }
 
   private def wordCount(rowCount: Int): Int =

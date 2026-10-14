@@ -165,9 +165,9 @@ input uses a different name, map it to the selected field:
 
 The selected join field is join-only and is not written as a target field. It
 must be declared non-nullable in the snapshot schema. The parquet key must be
-unique and non-null so each physical source row produces at most one output
-row. Source values may repeat: one parquet record is applied to every physical
-source row with the same key. Its Spark type must match exactly. Supported
+unique and non-null so each physical snapshot row produces at most one output
+row. Snapshot key values may repeat: one parquet record is applied to every physical
+snapshot row with the same key. Its Spark type must match exactly. Supported
 physical-key Milvus types are Int8, Int16, Int32, Int64, String, and VarChar.
 Floating-point, JSON, Geometry, Text, Timestamptz, unknown, array/struct/map,
 and vector fields are rejected. Logical file/row keys are not supported;
@@ -191,7 +191,7 @@ clients, plus already-encoded Milvus bytes:
 | `Int8Vector` | Integral array of length `dim` with values in `[-128, 127]`; JSON integral-array string; or internal binary. |
 | `SparseFloatVector` | Map of index to non-negative weight; `{indices, values}` struct; JSON object string; or Milvus sparse binary. |
 
-Before the join, vector values are validated and normalized to Milvus's
+Before the join, vector values are validated and encoded to Milvus's
 per-row byte layout. Non-nullable dense vectors are written as Arrow
 `FixedSizeBinary`; nullable dense vectors and sparse vectors are written as
 Arrow `Binary`, matching Milvus storage metadata and endianness.
@@ -200,15 +200,15 @@ Arrow `Binary`, matching Milvus storage metadata and endianness.
 
 Distinct from the read-mode choice above (snapshot vs client), `--mode`
 controls how per-row values are merged into each target field. All three
-modes use a LEFT JOIN from source (Milvus) to parquet on the resolved join key;
+modes use a LEFT JOIN from the Milvus snapshot to parquet on the resolved join key;
 parquet rows whose key is not in the collection are always dropped. They differ on
-what happens for matched rows and for source rows with no parquet match:
+what happens for matched rows and for snapshot rows with no parquet match:
 
-| Mode        | Default | Matched row (join key in both)   | Source row unmatched by parquet |
+| Mode        | Default | Matched row (join key in both)   | Snapshot row unmatched by parquet |
 |-------------|---------|----------------------------------|---------------------------------|
 | `replace`   |         | Parquet wins (null included)     | Target columns set to NULL      |
-| `coalesce`  | ✅      | `coalesce(src, parquet)` per field — source wins when non-null | Source preserved |
-| `overwrite` |         | Parquet wins (null included)     | Source preserved                |
+| `coalesce`  | ✅      | `coalesce(snapshot, parquet)` per field — snapshot wins when non-null | Snapshot value preserved |
+| `overwrite` |         | Parquet wins (null included)     | Snapshot value preserved                |
 
 Typical fits:
 
@@ -221,7 +221,7 @@ Typical fits:
 
 All modes require exact Parquet-to-Milvus target types; perform required casts
 in the input ETL. Additional `coalesce` / `overwrite` caveats (both read
-source-side target values):
+snapshot-side target values):
 
 - Require `--snapshot` — each target field is read from the snapshot so
   the merge can compare against the existing value. Client mode (no
@@ -232,7 +232,7 @@ source-side target values):
   segment's column groups. Use `replace` for the initial backfill of a newly
   added field.
 - For `overwrite`: an explicitly null value in the parquet **will** clobber
-  the existing source value on matched rows — the match flag drives the
+  the existing snapshot value on matched rows — the match flag drives the
   projection, not the file column's null-ness.
 
 See `docs/user-guide-snapshot-backfill.md` §6 for deeper discussion and
@@ -273,8 +273,8 @@ val config = BackfillConfig(
 
   // Merge mode. Defaults to "coalesce" (fill-if-null). Set to
   // MilvusOption.BackfillModeOverwrite for matched-rows-only overwrite
-  // (parquet wins on matched join keys, unmatched source rows preserved), or
-  // MilvusOption.BackfillModeReplace for full overwrite (unmatched source
+  // (parquet wins on matched join keys, unmatched snapshot rows preserved), or
+  // MilvusOption.BackfillModeReplace for full overwrite (unmatched snapshot
   // rows get null target columns). See "Merge modes" above.
   mode = MilvusOption.BackfillModeCoalesce,
 
@@ -328,7 +328,7 @@ result match {
 - `mode` — merge semantics (default `MilvusOption.BackfillModeCoalesce`).
   Set to `MilvusOption.BackfillModeOverwrite` for matched-rows-only
   overwrite, or `MilvusOption.BackfillModeReplace` for full overwrite
-  (unmatched source rows get null target columns). See "Merge modes"
+  (unmatched snapshot rows get null target columns). See "Merge modes"
   above for caveats.
 
 ## Error handling
@@ -373,10 +373,16 @@ Override via `customOutputPath` if needed.
    `spark.read.format("com.zilliz.spark.connector.sources.MilvusDataSource")`
    in snapshot mode (FQCN avoids shortName collisions with other connectors).
 6. Validate join-key type compatibility and parquet-side cardinality, then
-   left-join on the internal normalized key alias. Source keys may repeat.
+   left-join on the internal normalized key alias. Snapshot keys may repeat.
 7. For each segment, repartition with a custom segment partitioner, sort by
    `_row_offset`, and write per-segment column groups via `MilvusV3WriterFactory`.
 8. Return a `BackfillResult` with manifest paths and per-segment stats.
+
+Result fields `sourceRowCount`, `totalSourceRows`, `usedSourceByField`, and
+`totalUsedSourceByField` retain their legacy API and JSON names. Here `source`
+means the existing snapshot rows or values; summary labels use the same legacy
+spelling. `totalBackfillDataRows` counts the external input rows. This differs
+from `sourceS3*` and `--source-*`, which configure the external input bucket.
 
 ## Testing helper
 

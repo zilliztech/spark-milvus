@@ -48,7 +48,7 @@ class BackfillVectorColumnsTest
       nullable = Some(nullable)
     )
 
-  test("normalizes common parquet vector shapes to Milvus internal bytes") {
+  test("encodes common parquet vector shapes to Milvus internal bytes") {
     val schema = StructType(
       Seq(
         StructField("pk", LongType, nullable = false),
@@ -87,25 +87,25 @@ class BackfillVectorColumnsTest
       vectorField("sparse_vec", MilvusDataType.SparseFloatVector)
     ).map(field => field.name -> field).toMap
 
-    val normalized = BackfillVectorColumns
-      .normalize(df, targets)
+    val encoded = BackfillVectorColumns
+      .encode(df, targets)
       .toOption
       .get
 
     targets.keys.foreach { name =>
-      normalized.schema(name).dataType shouldBe BinaryType
-      normalized
+      encoded.schema(name).dataType shouldBe BinaryType
+      encoded
         .schema(name)
         .metadata
         .getLong(FieldMetadata.MilvusDataTypeMetadataKey) shouldBe
         targets(name).dataType.toLong
     }
-    normalized
+    encoded
       .schema("float_vec")
       .metadata
       .getLong(FieldMetadata.MilvusVectorDimensionMetadataKey) shouldBe 2L
 
-    val result = normalized.head()
+    val result = encoded.head()
     result.getAs[Array[Byte]]("float_vec") shouldBe ByteBuffer
       .allocate(8)
       .order(ByteOrder.LITTLE_ENDIAN)
@@ -236,7 +236,7 @@ class BackfillVectorColumnsTest
     )
 
     val error = BackfillVectorColumns
-      .normalize(df, Map(target.name -> target))
+      .encode(df, Map(target.name -> target))
       .left
       .toOption
       .get

@@ -7,7 +7,11 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.types.StructType
 
-import com.zilliz.milvus.storage.expr.{Bitmap, FilterExpr, PredicateExpr}
+import com.zilliz.milvus.storage.expr.{
+  ExclusionBitmap,
+  FilterExpr,
+  PredicateExpr
+}
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
@@ -41,7 +45,7 @@ class MilvusRowPartitionReader(
   private var segmentReader: SegmentReader = null
   private var allocatorOwner: AutoCloseable = taskAllocatorOwner.orNull
   private var currentBatch: VectorSchemaRoot = null
-  private var currentFilterBitmap: Bitmap = null
+  private var currentFilterBitmap: ExclusionBitmap = null
   private var currentRowIndex: Int = 0
   private var currentBatchStartRowOffset: Long = 0L
   private var _lastReturnedRowOffset: Long = -1L

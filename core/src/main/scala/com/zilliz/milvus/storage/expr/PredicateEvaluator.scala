@@ -31,7 +31,7 @@ object PredicateEvaluator {
       expression: PredicateExpr,
       batch: VectorSchemaRoot,
       columnNameFor: Long => Option[String]
-  ): Bitmap = {
+  ): ExclusionBitmap = {
     require(expression != null, "expression must not be null")
     require(batch != null, "batch must not be null")
     require(columnNameFor != null, "columnNameFor must not be null")
@@ -47,7 +47,7 @@ object PredicateEvaluator {
       }
       row += 1
     }
-    Bitmap.fromWords(rowCount, words)
+    ExclusionBitmap.fromWords(rowCount, words)
   }
 
   private sealed trait TruthValue

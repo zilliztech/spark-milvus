@@ -109,13 +109,13 @@ case class BackfillConfig(
 
     // Merge mode for backfill values:
     //   "coalesce" (default) — read the target field's current value from
-    //     source and pick coalesce(src, parquet) per row per field (source
-    //     wins when non-null; parquet fills nulls). Unmatched source rows
+    //     the snapshot and pick coalesce(snapshot, parquet) per row per field (snapshot
+    //     wins when non-null; parquet fills nulls). Unmatched snapshot rows
     //     keep their original target values.
     //   "overwrite" — parquet overrides the target field for rows whose join
-    //     key matches (null included). Unmatched source rows keep their
+    //     key matches (null included). Unmatched snapshot rows keep their
     //     original target values.
-    //   "replace" — parquet is the absolute source of truth: every source
+    //   "replace" — parquet is the absolute source of truth: every snapshot
     //     row's target field becomes the parquet value (null if the join key
     //     has no parquet match). Destructive on unmatched rows.
     mode: String = MilvusOption.BackfillModeCoalesce,
@@ -132,12 +132,12 @@ case class BackfillConfig(
     joinKey: BackfillJoinKey = BackfillJoinKey.PrimaryKey
 ) {
 
-  /** Whether the merge path needs to read each target field from the source
-    * side too. Coalesce and overwrite both compare source and parquet values
-    * per row at join time; replace takes parquet verbatim and therefore only
-    * needs the join key + segment tracking columns from source.
+  /** Whether the merge path needs to read each target field from the snapshot
+    * too. Coalesce and overwrite both compare snapshot and parquet values per
+    * row at join time; replace takes parquet verbatim and therefore only needs
+    * the join key + segment tracking columns from the snapshot.
     */
-  def readsSourceFields: Boolean =
+  def readsSnapshotFields: Boolean =
     mode != MilvusOption.BackfillModeReplace
 
   /** Validate S3 and writer configuration (always required)

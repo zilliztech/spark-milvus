@@ -41,7 +41,7 @@ object KnowhereHnswBench {
     val dists = env("BENCH_DISTS", "uniform,clustered").split(",").map(_.trim)
     val callers = env("BENCH_CALLERS", "1").toInt
     // BENCH_MASK=true hands Knowhere an all-zero exclusion bitmap over every row,
-    // as the connector's IndexProbe does, instead of null.
+    // as the connector's IndexSearch does, instead of null.
     val withMask = env("BENCH_MASK", "false").toBoolean
     // BENCH_RELOAD=true searches an index that was serialized and deserialized,
     // as the connector does after reading index files; BENCH_VERSION pins the

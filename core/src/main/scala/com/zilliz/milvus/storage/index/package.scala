@@ -2,7 +2,7 @@ package com.zilliz.milvus.storage
 
 /** Vector execution and its buffers, exclusions and per-segment top-k.
   *
-  * Main types: SegmentSearch with ExactScan and IndexProbe, SearchPlan,
+  * Main types: SegmentSearch with ExactScan and IndexSearch, SearchPlan,
   * TopKMerger, CandidateBytes, QueryMatrix, KnowhereBuffers, MachineResources,
   * IndexBuilder, RankingFunction and EngineRange. SearchPlan cuts a search into
   * one task per segment set and query range; TopKMerger keeps each query's best
@@ -13,7 +13,7 @@ package com.zilliz.milvus.storage
   * the layout allows and copied once otherwise. IndexBuilder gathers a
   * segment's vectors into one buffer, builds over it and hands over what
   * Knowhere serialized. A task loads its segment's index once and closes it;
-  * there is no cross-task index cache. IndexProbe.Pipeline overlaps collecting
+  * there is no cross-task index cache. IndexSearch.Pipeline overlaps collecting
   * one group's answer with the next group's search, and
   * SegmentSearch.Prefetcher opens the next segment's source on one background
   * thread inside the task; neither survives the task.
@@ -24,7 +24,7 @@ package com.zilliz.milvus.storage
   * tasks at once, and chooses which side a task keeps: its queries, when they
   * fit the task's heap budget, or its segment set, sized to the task's off-heap
   * budget. SegmentSearch searches a segment set with one of two strategies,
-  * ExactScan over vector batches or IndexProbe over an index handle (ExactScan
+  * ExactScan over vector batches or IndexSearch over an index handle (ExactScan
   * calls the batched distance entry for float32 fields, compacting excluded
   * rows out of a batch first, and Knowhere.bruteForce for the other element
   * types), and returns each query's merged candidates as (query, segment, row
@@ -47,8 +47,8 @@ package com.zilliz.milvus.storage
   * EngineRange says which vectors Knowhere scores as that function computes in
   * float; an exact scan reads each batch once to classify its rows, hands
   * Knowhere the rows in range and has the function score the rest against every
-  * query of the group, into the same TopKMerger, and an index probe ranks NaN
-  * and infinite scores instead of failing on them.
+  * query of the group, into the same TopKMerger, and an indexed search ranks
+  * NaN and infinite scores instead of failing on them.
   *
   * ExactScan and EngineRange take a VectorBatch, the format-neutral form of a
   * batch: a buffer of vectors, its exclusions and where it starts in its unit.

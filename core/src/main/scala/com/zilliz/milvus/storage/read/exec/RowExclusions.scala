@@ -56,7 +56,7 @@ final class RowExclusions private (
 
   /** The rows of a whole segment a search must not see, one bit per row.
     *
-    * An index holds every row of its segment, so probing it needs the whole
+    * An index holds every row of its segment, so searching it needs the whole
     * segment's bitmap before the first query runs. Building it reads the
     * primary key, the timestamp and the filter's columns and nothing else: the
     * vector column is never opened on this path
