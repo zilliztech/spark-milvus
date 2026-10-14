@@ -265,6 +265,16 @@ class MilvusPackedV2PartitionReaderTest extends AnyFunSuite {
 
       val laterDeletePlan = MilvusDeletePlan.fromLongPks(Map(1L -> 250L))
       assert(
+        !MilvusPackedV2PartitionReader.rowDeleted(
+          MilvusDeletePlan.fromLongPks(Map(1L -> 200L)),
+          pkField,
+          pkVector,
+          tsVector,
+          rowIndex = 0,
+          pkColumnName = "pk"
+        )
+      )
+      assert(
         MilvusPackedV2PartitionReader.rowDeleted(
           laterDeletePlan,
           pkField,
