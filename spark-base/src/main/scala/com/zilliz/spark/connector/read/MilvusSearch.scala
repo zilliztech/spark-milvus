@@ -123,14 +123,11 @@ object MilvusSearch extends Logging {
       function: RankingFunction,
       required: Option[Array[Long]]
   ): Hits = {
-    val caseInsensitive = new CaseInsensitiveStringMap(options.asJava)
     val limits = SearchLimits.from(options)
     val tasks = partitions.map(_.task)
     if (searchMode == SearchMode.Index) {
       SegmentIndexHandle.check(tasks, field.fieldID, searchMetric)
     }
-
-    val packedOnDriver = queries.isInstanceOf[SearchQueries.Packed]
     val queryCount = queries.count
     val hitSchema = if (required.isEmpty) HitSchema else NullableHitSchema
     val resultSchema = StructType(hitSchema.fields ++ outputSchema.fields)
@@ -143,79 +140,46 @@ object MilvusSearch extends Logging {
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
     )
-    // How many first-stage tasks run at once, and what one of them may keep
-    // (docs/design/architecture/vector-search.html section 2.1,
-    // search-resources.html section 3.3). An index search declares that its
-    // tasks take every core of their executor, so one runs per executor;
-    // otherwise a task takes `spark.task.cpus`.
-    val resources = TaskResources.of(spark)
-    val searchProfile =
-      if (searchMode == SearchMode.Index) resources.wholeExecutor else None
-    val slots = if (searchProfile.nonEmpty) 1 else resources.tasksPerExecutor
-    val concurrency = resources.executors * slots
-    val (memoryLimit, heap) = MilvusSearch.executorMemory(spark)
-    val segmentBudget = SearchResources.segmentBudget(
-      memoryLimit,
-      heap,
-      slots,
-      limits.segmentsMaxBytes,
-      index = searchMode == SearchMode.Index
-    )
-    val queryBudget =
-      SearchResources.queryBudget(heap, memoryFraction(spark), slots)
-    val blockBytes = SearchResources
-      .exactScanBatch(
-        if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
-          Some(MilvusOption(caseInsensitive).readLimits.batchMaxBytes)
-        else None
-      )
-      .bytes
-    // What a segment costs the task that searches it: the index the snapshot
-    // recorded, as Knowhere holds it once loaded, or the vectors an exact scan
-    // reads a block at a time.
-    val footprint: SegmentReadTask => SearchPlan.Footprint = task =>
-      (if (searchMode == SearchMode.Index)
-         SegmentIndexHandle.select(task, field.fieldID, searchMetric)
-       else None) match {
-        case Some(index) if index.serializedSize > 0L =>
-          SearchPlan.Footprint.index(index.serializedSize)
-        case Some(_) => SearchPlan.Footprint.unsizedIndex
-        case None    => SearchPlan.Footprint.vectors(task, layout, blockBytes)
-      }
-    val queryBytes = SearchQueries.bytes(queryCount, layout)
-    // What one Knowhere call answers: enough queries for the cores the task
-    // holds, within the heap the task has (search-resources.html 3.3; the
-    // explicit option is used as it is).
-    val taskCores =
-      if (searchProfile.nonEmpty) resources.executorCores
-      else math.max(1, resources.taskCpus)
-    val group = SearchResources.groupBytes(
-      limits.groupMaxBytes,
-      queryBudget.bytes,
-      taskCores,
-      SearchPlan.bytesPerQuery(layout, k)
-    )
+
+    val budget =
+      SearchBudget.of(spark, limits, searchMode == SearchMode.Index, layout, k)
+    // A set the driver packed is broadcast as it is; a frame is packed and
+    // broadcast when it fits `milvus.search.queries.max.bytes`, and otherwise
+    // travels by group with the shuffle (section 2.1).
+    val shuffled = queries match {
+      case SearchQueries.Packed(_, _) => false
+      case SearchQueries.Frame(_, count) =>
+        SearchQueries.bytes(count, layout) > limits.queriesMaxBytes
+    }
+    val caseInsensitive = new CaseInsensitiveStringMap(options.asJava)
+    val read = MilvusOption(caseInsensitive).readLimits
+    // A block the call named is used as it is; otherwise each executor
+    // chooses one for its own machine when it opens a segment.
+    val namedBatch =
+      if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
+        Some(read.batchMaxBytes)
+      else None
     val plan = SearchPlan.of(
       tasks,
       layout,
-      concurrency,
+      budget.concurrency,
       queryCount.toInt,
       k,
-      group.bytes,
-      SearchPlan.Budget(segmentBudget.bytes, queryBudget.bytes),
-      footprint,
-      shuffled = !packedOnDriver && queryBytes > limits.queriesMaxBytes,
+      budget.group.bytes,
+      SearchPlan.Budget(budget.segments.bytes, budget.queries.bytes),
+      footprint(
+        searchMode,
+        field,
+        searchMetric,
+        layout,
+        SearchResources.exactScanBatch(namedBatch).bytes
+      ),
+      shuffled,
       // The batched distance entry is single-threaded on its task, so an
       // exact search is as parallel as its tasks (decision 28).
       splitQueries = searchMode == SearchMode.Exact,
       rangesWanted = limits.queryRanges
     )
-    // Between two Knowhere calls a search task checks, collects and packs its
-    // candidates on as many threads as it holds cores, unless the call said.
-    val collectThreads =
-      if (limits.collectThreads > 0) limits.collectThreads
-      else if (searchProfile.nonEmpty) resources.executorCores
-      else math.max(1, resources.taskCpus)
     val spec = SegmentSetSearch.Spec(
       field.name,
       layout,
@@ -227,20 +191,18 @@ object MilvusSearch extends Logging {
       filter,
       searchParameters,
       plan.capacity,
-      MilvusOption(caseInsensitive).readLimits.arrowMaxBytes,
-      slots,
-      // A block the call named is used as it is; otherwise each executor
-      // chooses one for its own machine when it opens a segment.
-      if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
-        Some(MilvusOption(caseInsensitive).readLimits.batchMaxBytes)
-      else None,
+      read.arrowMaxBytes,
+      budget.slots,
+      namedBatch,
       plan.resident,
-      collectThreads,
+      // Between two Knowhere calls a search task checks, collects and packs
+      // its candidates on as many threads as it holds cores, unless the call
+      // said.
+      if (limits.collectThreads > 0) limits.collectThreads else budget.cores,
       predicate,
       Some(function),
       limits.callsInFlight
     )
-
     // What the first stage has to get through, so its progress has a
     // denominator. An index probe visits part of a segment and Knowhere does
     // not say how much, so index mode has no pair total and counts segment
@@ -248,67 +210,19 @@ object MilvusSearch extends Logging {
     val comparedPairsTotal =
       if (searchMode != SearchMode.Exact) 0L
       else SearchProgress.comparedPairs(queryCount, tasks)
-    val segmentSearchesTotal =
-      plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum
-    // The budgets and how the plan stands against them. A native allocation
-    // that fails does not surface as a Java exception, so this line is what
-    // there is to read afterwards (search-resources.html sections 3.3, 3.4).
-    val needs = plan.needs
-      .map(need =>
-        s"queries kept needs heap=${need.queriesHeap} offheap=${need.queriesOffHeap}, " +
-          s"segments kept needs offheap=${need.segmentsOffHeap}"
-      )
-      .getOrElse("no segments")
-    val over = plan.kept.count(_.exists(_ > plan.capacity))
-    logInfo(
-      s"Search budget: ${resources.describe}; $concurrency tasks at once " +
-        s"($slots per executor${if (searchProfile.nonEmpty) ", each taking every core"
-          else ""}); " +
-        s"segments ${segmentBudget.reason}; queries ${queryBudget.reason}; group ${group.reason}; " +
-        s"collectThreads=$collectThreads callsInFlight=${limits.callsInFlight}; $needs; " +
-        s"kept=${plan.resident}, sets=${plan.sets.size}" +
-        (if (plan.resident == SearchPlan.Resident.Segments)
-           s", capacity=${plan.capacity}, " +
-             (if (over == 0) "no set known to stream"
-              else s"$over sets stream once per query group")
-         else "") +
-        s", ${plan.estimated.size} segments estimated at half the budget"
+    logPlan(
+      budget,
+      plan,
+      spec,
+      queries,
+      shuffled,
+      tasks.size,
+      comparedPairsTotal
     )
-    // The stage that packs the query groups holds one group's ids and vectors
-    // per task on the heap, outside what Spark manages, so no more of them run
-    // at once on an executor than that heap holds with room to spare.
-    val packProfile =
-      if (
-        packedOnDriver || queryBytes <= limits.queriesMaxBytes ||
-        plan.groups.isEmpty
-      ) None
-      else {
-        val perGroup = plan.groups.map(_.queries.toLong).max *
-          (SearchPlan.QueryIdBytes + layout.rowBytes.toLong)
-        val heapRoom = SearchResources
-          .queryBudget(heap, memoryFraction(spark), 1)
-          .bytes
-        val fits = math.max(1L, heapRoom / (perGroup + perGroup / 2))
-        resources.atMost(math.min(fits, Int.MaxValue.toLong).toInt)
-      }
-    logInfo(
-      s"Search plan: mode=$searchMode, metric=$searchMetric, topK=$k, " +
-        s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
-        (if (packedOnDriver) "broadcast, packed on the driver"
-         else if (queryBytes <= limits.queriesMaxBytes) "broadcast"
-         else "shuffle") + ", " +
-        s"queryGroups=${plan.groups.size}, segments=${tasks.size} in " +
-        s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
-        s"${plan.tasks} tasks, collectThreads=$collectThreads, " +
-        s"work=${segmentSearchesTotal} segment searches" +
-        (if (comparedPairsTotal > 0L)
-           s" over $comparedPairsTotal distance pairs"
-         else "")
-    )
+
     // The merge and take stages run under Spark's own task slots, so a task's
     // share of the unmanaged heap is the queries' budget at that concurrency.
-    val stageHeap = SearchResources
-      .queryBudget(heap, memoryFraction(spark), resources.tasksPerExecutor)
+    val stageHeap = budget.heapFor(budget.resources.tasksPerExecutor)
     val mergeParts =
       mergePartitions(spark, queryCount, plan.tasks, k, stageHeap.bytes)
     logInfo(
@@ -323,10 +237,10 @@ object MilvusSearch extends Logging {
       plan,
       spec,
       layout,
-      limits,
+      shuffled,
       metrics,
-      searchProfile,
-      packProfile
+      budget.profile,
+      packProfile(budget, plan, layout, shuffled)
     )
     SearchProgress.watch(
       spark.sparkContext,
@@ -339,35 +253,239 @@ object MilvusSearch extends Logging {
     )
     val hits = merged(spark, found, k, searchMetric, mergeParts, required)
     if (outputSchema.isEmpty) Hits(hits.queryExecution.toRdd, hits.schema)
-    else {
-      // What a take task buffers is every hit of its partition (queries x k
-      // over the tasks), against the same heap share as the merge.
-      val takePartitioning = SearchTake.partitioning(
+    else
+      take(
+        spark,
+        hits,
+        outputSchema,
+        partitions,
+        spec.arrowMaxBytes,
+        metrics,
         queryCount * k,
-        math.max(1, partitions.size),
-        stageHeap.bytes,
-        spark.sessionState.conf.numShufflePartitions
+        stageHeap
       )
-      logInfo(
-        s"Take stage: ${queryCount * k} hits over ${takePartitioning.partitions} tasks" +
-          s" (${takePartitioning.buckets} bucket(s) per segment), " +
-          s"about ${queryCount * k / takePartitioning.partitions} hits a task at " +
-          s"${SearchTake.HitRowBytes} bytes each against ${stageHeap.bytes} bytes of heap a task"
-      )
-      Hits(
-        SearchTake.rows(
-          hits,
-          outputSchema,
-          partitions
-            .map(partition => partition.task.segmentId -> partition)
-            .toMap,
-          spec.arrowMaxBytes,
-          metrics,
-          takePartitioning
+  }
+
+  /** How many first-stage tasks run at once, and what one of them may keep
+    * (docs/design/architecture/vector-search.html section 2.1,
+    * search-resources.html section 3.3). An index search declares that its
+    * tasks take every core of their executor, so one runs per executor;
+    * otherwise a task takes `spark.task.cpus`.
+    *
+    * @param profile
+    *   the task resources the first stage declares, when it declares them
+    * @param slots
+    *   the first-stage tasks one executor runs at once
+    * @param cores
+    *   the cores one of them holds
+    * @param segments
+    *   what one of them may keep off the heap
+    * @param queries
+    *   what one of them may keep on the heap
+    * @param group
+    *   what one Knowhere call answers: enough queries for the cores the task
+    *   holds, within the heap the task has (search-resources.html 3.3; the
+    *   explicit option is used as it is)
+    */
+  private final case class SearchBudget(
+      resources: TaskResources,
+      profile: Option[ResourceProfile],
+      slots: Int,
+      cores: Int,
+      heap: Long,
+      fraction: Double,
+      segments: SearchResources.Choice,
+      queries: SearchResources.Choice,
+      group: SearchResources.Choice
+  ) {
+
+    /** The first-stage tasks the whole search runs at once. */
+    def concurrency: Int = resources.executors * slots
+
+    /** The unmanaged heap of one task when `tasks` run at once on an executor.
+      */
+    def heapFor(tasks: Int): SearchResources.Choice =
+      SearchResources.queryBudget(heap, fraction, tasks)
+  }
+
+  private object SearchBudget {
+
+    def of(
+        spark: SparkSession,
+        limits: SearchLimits,
+        index: Boolean,
+        layout: VectorLayout,
+        k: Int
+    ): SearchBudget = {
+      val resources = TaskResources.of(spark)
+      val profile = if (index) resources.wholeExecutor else None
+      val slots = if (profile.nonEmpty) 1 else resources.tasksPerExecutor
+      val cores =
+        if (profile.nonEmpty) resources.executorCores
+        else math.max(1, resources.taskCpus)
+      val (memoryLimit, heap) = executorMemory(spark)
+      val fraction = memoryFraction(spark)
+      val queries = SearchResources.queryBudget(heap, fraction, slots)
+      SearchBudget(
+        resources,
+        profile,
+        slots,
+        cores,
+        heap,
+        fraction,
+        SearchResources.segmentBudget(
+          memoryLimit,
+          heap,
+          slots,
+          limits.segmentsMaxBytes,
+          index = index
         ),
-        StructType(hits.schema.fields ++ outputSchema.fields)
+        queries,
+        SearchResources.groupBytes(
+          limits.groupMaxBytes,
+          queries.bytes,
+          cores,
+          SearchPlan.bytesPerQuery(layout, k)
+        )
       )
     }
+  }
+
+  /** What a segment costs the task that searches it: the index the snapshot
+    * recorded, as Knowhere holds it once loaded, or the vectors an exact scan
+    * reads `blockBytes` at a time.
+    */
+  private def footprint(
+      searchMode: SearchMode,
+      field: FieldSchema,
+      metric: MetricType,
+      layout: VectorLayout,
+      blockBytes: Long
+  ): SegmentReadTask => SearchPlan.Footprint = task =>
+    (if (searchMode == SearchMode.Index)
+       SegmentIndexHandle.select(task, field.fieldID, metric)
+     else None) match {
+      case Some(index) if index.serializedSize > 0L =>
+        SearchPlan.Footprint.index(index.serializedSize)
+      case Some(_) => SearchPlan.Footprint.unsizedIndex
+      case None    => SearchPlan.Footprint.vectors(task, layout, blockBytes)
+    }
+
+  /** The two lines a planned search leaves in the driver log: the budgets and
+    * how the plan stands against them, then the plan. A native allocation that
+    * fails does not surface as a Java exception, so these lines are what there
+    * is to read afterwards (search-resources.html sections 3.3, 3.4).
+    */
+  private def logPlan(
+      budget: SearchBudget,
+      plan: SearchPlan.Plan,
+      spec: SegmentSetSearch.Spec,
+      queries: SearchQueries.Input,
+      shuffled: Boolean,
+      segments: Int,
+      comparedPairsTotal: Long
+  ): Unit = {
+    val needs = plan.needs
+      .map(need =>
+        s"queries kept needs heap=${need.queriesHeap} offheap=${need.queriesOffHeap}, " +
+          s"segments kept needs offheap=${need.segmentsOffHeap}"
+      )
+      .getOrElse("no segments")
+    val over = plan.kept.count(_.exists(_ > plan.capacity))
+    logInfo(
+      s"Search budget: ${budget.resources.describe}; ${budget.concurrency} tasks at once " +
+        s"(${budget.slots} per executor${if (budget.profile.nonEmpty) ", each taking every core"
+          else ""}); " +
+        s"segments ${budget.segments.reason}; queries ${budget.queries.reason}; group ${budget.group.reason}; " +
+        s"collectThreads=${spec.collectThreads} callsInFlight=${spec.callsInFlight}; $needs; " +
+        s"kept=${plan.resident}, sets=${plan.sets.size}" +
+        (if (plan.resident == SearchPlan.Resident.Segments)
+           s", capacity=${plan.capacity}, " +
+             (if (over == 0) "no set known to stream"
+              else s"$over sets stream once per query group")
+         else "") +
+        s", ${plan.estimated.size} segments estimated at half the budget"
+    )
+    val delivery = queries match {
+      case SearchQueries.Packed(_, _) => "broadcast, packed on the driver"
+      case _ if shuffled              => "shuffle"
+      case _                          => "broadcast"
+    }
+    logInfo(
+      s"Search plan: mode=${spec.mode}, metric=${spec.metric}, topK=${spec.k}, " +
+        s"queries=${queries.count}, queryBytes=${SearchQueries
+            .bytes(queries.count, spec.layout)} " +
+        s"delivered by $delivery, " +
+        s"queryGroups=${plan.groups.size}, segments=$segments in " +
+        s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
+        s"${plan.tasks} tasks, collectThreads=${spec.collectThreads}, " +
+        s"work=${plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum} segment searches" +
+        (if (comparedPairsTotal > 0L)
+           s" over $comparedPairsTotal distance pairs"
+         else "")
+    )
+  }
+
+  /** The task resources of the stage that packs the query groups for the
+    * shuffle, or None when the query set does not travel by group. A packing
+    * task holds one group's ids and vectors on the heap, outside what Spark
+    * manages, so no more of them run at once on an executor than that heap
+    * holds with room to spare.
+    */
+  private def packProfile(
+      budget: SearchBudget,
+      plan: SearchPlan.Plan,
+      layout: VectorLayout,
+      shuffled: Boolean
+  ): Option[ResourceProfile] =
+    if (!shuffled) None
+    else {
+      val perGroup = plan.groups.map(_.queries.toLong).max *
+        (SearchPlan.QueryIdBytes + layout.rowBytes.toLong)
+      val fits =
+        math.max(1L, budget.heapFor(1).bytes / (perGroup + perGroup / 2))
+      budget.resources.atMost(math.min(fits, Int.MaxValue.toLong).toInt)
+    }
+
+  /** The take stage: the columns of `outputSchema` read for the hits alone.
+    * What a take task buffers is every hit of its partition, `hitCount` over
+    * the tasks, against the same heap share as the merge.
+    */
+  private def take(
+      spark: SparkSession,
+      hits: DataFrame,
+      outputSchema: StructType,
+      partitions: Seq[MilvusInputPartition],
+      arrowMaxBytes: Long,
+      metrics: SearchMetrics,
+      hitCount: Long,
+      stageHeap: SearchResources.Choice
+  ): Hits = {
+    val partitioning = SearchTake.partitioning(
+      hitCount,
+      math.max(1, partitions.size),
+      stageHeap.bytes,
+      spark.sessionState.conf.numShufflePartitions
+    )
+    logInfo(
+      s"Take stage: $hitCount hits over ${partitioning.partitions} tasks" +
+        s" (${partitioning.buckets} bucket(s) per segment), " +
+        s"about ${hitCount / partitioning.partitions} hits a task at " +
+        s"${SearchTake.HitRowBytes} bytes each against ${stageHeap.bytes} bytes of heap a task"
+    )
+    Hits(
+      SearchTake.rows(
+        hits,
+        outputSchema,
+        partitions
+          .map(partition => partition.task.segmentId -> partition)
+          .toMap,
+        arrowMaxBytes,
+        metrics,
+        partitioning
+      ),
+      StructType(hits.schema.fields ++ outputSchema.fields)
+    )
   }
 
   /** The candidates of the first stage, whichever way the query set travels.
@@ -385,7 +503,7 @@ object MilvusSearch extends Logging {
       plan: SearchPlan.Plan,
       spec: SegmentSetSearch.Spec,
       layout: VectorLayout,
-      limits: SearchLimits,
+      shuffled: Boolean,
       metrics: SearchMetrics,
       searchProfile: Option[ResourceProfile],
       packProfile: Option[ResourceProfile]
@@ -396,14 +514,7 @@ object MilvusSearch extends Logging {
     val sets = plan.sets.map(_.map(task => byId(task.segmentId)))
     val groups = plan.groups
     val ranges = plan.queryRanges
-    val queryBytes = SearchQueries.bytes(
-      groups.map(_.queries.toLong).sum,
-      layout
-    )
-    if (
-      queries.isInstanceOf[SearchQueries.Packed] ||
-      queryBytes <= limits.queriesMaxBytes
-    ) {
+    if (!shuffled) {
       // Packed where the rows are read: the driver gets bytes, not boxed
       // vectors, and eight executors pack in parallel instead of one thread.
       // A set the driver packed is broadcast as it is.
