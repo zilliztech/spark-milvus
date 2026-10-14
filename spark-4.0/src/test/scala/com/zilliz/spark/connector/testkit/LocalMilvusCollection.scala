@@ -20,7 +20,7 @@ import com.zilliz.milvus.storage.codec.{
   IndexObjectTarget,
   SegmentIndexObjects
 }
-import com.zilliz.milvus.storage.index.IndexWriter
+import com.zilliz.milvus.storage.index.IndexBuilder
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.manifest.{
   IndexFileEntry,
@@ -309,7 +309,7 @@ object LocalMilvusCollection {
           buffer.setFloat(i.toLong * layout.rowBytes + d * 4L, entity.vector(d))
         )
       }
-      val built = IndexWriter.build(
+      val built = IndexBuilder.build(
         buffer
           .nioBuffer(0, rows * layout.rowBytes)
           .order(ByteOrder.nativeOrder()),

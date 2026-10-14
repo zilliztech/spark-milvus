@@ -14,7 +14,7 @@ import com.zilliz.milvus.storage.schema.{
 /** What a build accepts and what it hands Knowhere
   * (docs/design/architecture/vector-search.html section 2.7).
   */
-class IndexWriterTest extends AnyFunSuite with Matchers {
+class IndexBuilderTest extends AnyFunSuite with Matchers {
 
   private val layout = VectorLayout(VectorElementType.Float32, 4)
 
@@ -22,13 +22,13 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
     ByteBuffer.allocateDirect(rows * layout.rowBytes)
 
   test("the build parameters carry the metric, the dimension and the tuning") {
-    IndexWriter.buildParameters(
+    IndexBuilder.buildParameters(
       MetricType.Cosine,
       layout,
       Map("M" -> "16", "efConstruction" -> "200")
     ) shouldBe """{"metric_type":"COSINE","dim":4,"M":16,"efConstruction":200}"""
 
-    IndexWriter.buildParameters(
+    IndexBuilder.buildParameters(
       MetricType.L2,
       layout,
       Map("sq_type" -> "SQ4U", "refine" -> "true", "refine_ratio" -> "1.5")
@@ -37,12 +37,12 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
   }
 
   test("the column and the search decide the metric and the dimension") {
-    the[IllegalArgumentException] thrownBy IndexWriter.buildParameters(
+    the[IllegalArgumentException] thrownBy IndexBuilder.buildParameters(
       MetricType.L2,
       layout,
       Map("metric_type" -> "IP")
     )
-    the[IllegalArgumentException] thrownBy IndexWriter.buildParameters(
+    the[IllegalArgumentException] thrownBy IndexBuilder.buildParameters(
       MetricType.L2,
       layout,
       Map("dim" -> "8")
@@ -50,7 +50,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
   }
 
   test("only the index types this connector can load again are built") {
-    val failure = the[IllegalArgumentException] thrownBy IndexWriter.build(
+    val failure = the[IllegalArgumentException] thrownBy IndexBuilder.build(
       buffer(4),
       4L,
       layout,
@@ -63,7 +63,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
   }
 
   test("a metric has to belong to the element type") {
-    the[IllegalArgumentException] thrownBy IndexWriter.build(
+    the[IllegalArgumentException] thrownBy IndexBuilder.build(
       buffer(4),
       4L,
       layout,
@@ -71,7 +71,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
       MetricType.Hamming,
       indexVersion = 8
     )
-    the[IllegalArgumentException] thrownBy IndexWriter.build(
+    the[IllegalArgumentException] thrownBy IndexBuilder.build(
       ByteBuffer.allocateDirect(8),
       4L,
       VectorLayout(VectorElementType.Bit, 16),
@@ -82,7 +82,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
   }
 
   test("a buffer that cannot hold the rows is refused") {
-    val failure = the[IllegalArgumentException] thrownBy IndexWriter.build(
+    val failure = the[IllegalArgumentException] thrownBy IndexBuilder.build(
       buffer(2),
       4L,
       layout,
@@ -92,7 +92,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
     )
 
     failure.getMessage should include("32 bytes")
-    the[IllegalArgumentException] thrownBy IndexWriter.build(
+    the[IllegalArgumentException] thrownBy IndexBuilder.build(
       buffer(4),
       0L,
       layout,
@@ -103,7 +103,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
   }
 
   test("a build from an address needs the address and enough bytes") {
-    val noAddress = the[IllegalArgumentException] thrownBy IndexWriter
+    val noAddress = the[IllegalArgumentException] thrownBy IndexBuilder
       .buildFromAddress(
         0L,
         4L * layout.rowBytes,
@@ -114,7 +114,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
         indexVersion = 8
       )
     noAddress.getMessage should include("native address")
-    val tooSmall = the[IllegalArgumentException] thrownBy IndexWriter
+    val tooSmall = the[IllegalArgumentException] thrownBy IndexBuilder
       .buildFromAddress(
         1L,
         2L * layout.rowBytes,
@@ -128,7 +128,7 @@ class IndexWriterTest extends AnyFunSuite with Matchers {
   }
 
   test("a build parameter without a name or a value is refused") {
-    the[IllegalArgumentException] thrownBy IndexWriter.build(
+    the[IllegalArgumentException] thrownBy IndexBuilder.build(
       buffer(4),
       4L,
       layout,
