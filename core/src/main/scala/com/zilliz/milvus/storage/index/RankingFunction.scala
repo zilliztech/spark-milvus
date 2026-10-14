@@ -8,7 +8,7 @@ package com.zilliz.milvus.storage.index
   * functions. Knowhere scores the pairs inside [[EngineRange]], where its
   * float32 inner product and cosine and its L2 computed pair by pair agree with
   * the function up to rounding (its batched L2 does not, and [[ExactScan]]
-  * takes its candidates computed again pair by pair, decision 35); a base row
+  * takes its candidates computed again pair by pair, decision 37); a base row
   * outside that range is scored by this function against every query of the
   * group, and the score joins Knowhere's in the same [[TopKMerger]]. The
   * implementation is the Spark line's own function, so the value is the one

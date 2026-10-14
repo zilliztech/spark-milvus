@@ -362,7 +362,7 @@ object SegmentSearch extends Logging {
     * every row and Knowhere does not say how many it did, so a probe reports
     * zero and counts its progress in `nativeCalls`. `rescans` is the queries an
     * L2 exact scan searched a batch for again through the per-query entry,
-    * because the batched entry's error could hide a nearer row (decision 35);
+    * because the batched entry's error could hide a nearer row (decision 37);
     * their pairs are not counted again in `compared`.
     */
   final case class Progress(

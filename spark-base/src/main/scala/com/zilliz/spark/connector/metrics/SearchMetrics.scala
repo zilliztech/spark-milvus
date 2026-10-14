@@ -72,7 +72,7 @@ object SearchMetrics {
   val ComparedPairs = "milvus.search.compared.pairs"
 
   /** The batch and query pairs an L2 exact scan searched again pair by pair,
-    * because the batched entry's error could hide a nearer row (decision 35).
+    * because the batched entry's error could hide a nearer row (decision 37).
     * Near zero for most data; a high count marks vectors far from the origin
     * and near each other.
     */

@@ -40,7 +40,7 @@ import io.knowhere.DType
   * variant computes again, pair by pair, those that can still be kept, a bound
   * on the entry's error shows that the rows it did not name cannot beat them,
   * and a query it cannot show that for is searched over the batch again pair by
-  * pair (decision 35,
+  * pair (decision 37,
   * docs/design/architecture/exact-search-and-index-build-internals.html section
   * 1.8).
   */
@@ -286,7 +286,7 @@ object ExactScan {
       ranked: Option[EngineRange.Batch]
   ): Unit = {
     val parameters = s"""{"metric_type":"${metric.name}"}"""
-    // Under L2 the entry's candidates are only nominations (decision 35).
+    // Under L2 the entry's candidates are only nominations (decision 37).
     val nominating = ranked.filter(_ => metric == MetricType.L2)
     val count = math.min(
       nominating.fold(k)(_ => nominated(k, visible, merger.scannedRows)),
@@ -394,7 +394,7 @@ object ExactScan {
   }
 
   /** L2 over the batched entry, whose ||x||^2 + ||y||^2 - 2x.y errs by as much
-    * as the squared norms are large (decision 35). Its candidates are only
+    * as the squared norms are large (decision 37). Its candidates are only
     * nominations: the rescored entry computes again, pair by pair, every
     * candidate of a query that keeps fewer than k, and of a full query those
     * whose estimate less the entry's error could still beat its worst, and the

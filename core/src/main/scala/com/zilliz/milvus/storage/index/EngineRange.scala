@@ -32,7 +32,7 @@ import com.zilliz.milvus.storage.schema.{
   * function's differ by rounding alone. Its L2 does not: |x|^2 + |y|^2 - 2x.y
   * errs by as much as the squared norms are large, whatever the distance, so
   * [[ExactScan]] takes the engine's L2 candidates as nominations the function
-  * scores (decision 35). Under COSINE a vector whose every element is zero has
+  * scores (decision 37). Under COSINE a vector whose every element is zero has
   * no value with a vector in range, the product of the squared norms being
   * zero. Every other vector is ranked by the function. The test is one integer
   * comparison per element.
@@ -205,7 +205,7 @@ object EngineRange {
     * @param largestSquaredNorm
     *   under L2 over float32 rows, the largest squared norm among the rows
     *   Knowhere scores, which bounds the error of its batched entry
-    *   ([[ExactScan]], decision 35); 0 otherwise
+    *   ([[ExactScan]], decision 37); 0 otherwise
     */
   final class Batch private[index] (
       val function: RankingFunction,
