@@ -42,7 +42,7 @@ object SegmentIndexObjects {
 
   /** Writes every payload and returns the objects in the order they were
     * written. `read` copies part of a payload into the buffer it is given, the
-    * way `IndexWriter.Built` does.
+    * way `IndexBuilder.Built` does.
     */
   def write(
       payloads: Seq[(String, Long)],

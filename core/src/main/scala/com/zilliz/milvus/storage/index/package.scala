@@ -4,19 +4,19 @@ package com.zilliz.milvus.storage
   *
   * Main types: SegmentSearch with ExactScan and IndexProbe, SearchPlan,
   * TopKMerger, CandidateBytes, QueryMatrix, KnowhereBuffers, MachineResources,
-  * IndexWriter, RankingFunction and EngineRange. SearchPlan cuts a search into
+  * IndexBuilder, RankingFunction and EngineRange. SearchPlan cuts a search into
   * one task per segment set and query range; TopKMerger keeps each query's best
   * k in a task, and CandidateBytes.merge joins the tasks' packed answers in the
   * Spark merge stage. MachineResources reads this machine's memory limit from
   * cgroup and /proc/meminfo, which local mode plans against. KnowhereBuffers
   * hands one Arrow batch of a dense vector column to Knowhere, as it lies when
-  * the layout allows and copied once otherwise. IndexWriter gathers a segment's
-  * vectors into one buffer, builds over it and hands over what Knowhere
-  * serialized. A task loads its segment's index once and closes it; there is no
-  * cross-task index cache. IndexProbe.Pipeline overlaps collecting one group's
-  * answer with the next group's search, and SegmentSearch.Prefetcher opens the
-  * next segment's source on one background thread inside the task; neither
-  * survives the task.
+  * the layout allows and copied once otherwise. IndexBuilder gathers a
+  * segment's vectors into one buffer, builds over it and hands over what
+  * Knowhere serialized. A task loads its segment's index once and closes it;
+  * there is no cross-task index cache. IndexProbe.Pipeline overlaps collecting
+  * one group's answer with the next group's search, and
+  * SegmentSearch.Prefetcher opens the next segment's source on one background
+  * thread inside the task; neither survives the task.
   *
   * This package keeps the computation only (docs/design/architecture/
   * vector-search.html sections 1-2). SearchPlan splits the query set into query
@@ -38,7 +38,7 @@ package com.zilliz.milvus.storage
   * keeps k per query for batches and segments alike and packs each query's best
   * k into CandidateBytes for the caller to send on, 24 bytes per candidate in
   * score order, which merges by walking two sorted lists; KnowhereBuffers hands
-  * Arrow data buffers to Knowhere as ByteBuffers, and IndexWriter builds a
+  * Arrow data buffers to Knowhere as ByteBuffers, and IndexBuilder builds a
   * segment's index and hands its BinarySet to the Milvus TableFormat side,
   * which encodes and writes the files (W6).
   *

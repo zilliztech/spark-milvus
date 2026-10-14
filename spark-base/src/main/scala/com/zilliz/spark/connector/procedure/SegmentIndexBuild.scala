@@ -7,7 +7,7 @@ import org.apache.spark.sql.types.StructType
 
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
 import com.zilliz.milvus.storage.codec.{IndexObjectTarget, SegmentIndexObjects}
-import com.zilliz.milvus.storage.index.IndexWriter
+import com.zilliz.milvus.storage.index.IndexBuilder
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.read.exec.{RowExclusions, SegmentVectors}
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
@@ -76,7 +76,7 @@ private[procedure] object SegmentIndexBuild extends Logging {
       )
       val assembled =
         try
-          IndexWriter.assemble(
+          IndexBuilder.assemble(
             vectors,
             spec.layout,
             segmentRows,
@@ -84,7 +84,7 @@ private[procedure] object SegmentIndexBuild extends Logging {
           )
         finally vectors.close()
       try {
-        val built = IndexWriter.buildFromAddress(
+        val built = IndexBuilder.buildFromAddress(
           assembled.address,
           assembled.byteLength,
           assembled.rows,
@@ -107,7 +107,7 @@ private[procedure] object SegmentIndexBuild extends Logging {
   private def write(
       task: SegmentReadTask,
       spec: Spec,
-      built: IndexWriter.Built,
+      built: IndexBuilder.Built,
       vectorIndexVersion: Int
   ): CommittedIndex = {
     val payloads = built.names.map(name => name -> built.length(name)) ++

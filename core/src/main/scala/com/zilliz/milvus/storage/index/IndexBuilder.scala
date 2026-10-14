@@ -25,7 +25,7 @@ import com.zilliz.milvus.storage.Logging
   * types, the same metrics per element type. An index this connector could not
   * load again would be delivered to nobody.
   */
-object IndexWriter extends Logging {
+object IndexBuilder extends Logging {
 
   private val mapper = new ObjectMapper()
 
