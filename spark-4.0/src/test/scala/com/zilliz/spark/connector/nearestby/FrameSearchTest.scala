@@ -22,7 +22,7 @@ import com.zilliz.milvus.storage.schema.{
   VectorLayout
 }
 import com.zilliz.spark.connector.extensions.ConnectorVectorRanking
-import com.zilliz.spark.connector.metrics.NearestByMetrics
+import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.SearchLimits
 import com.zilliz.spark.connector.read.{FrameSearch, NearestBySearch}
 
@@ -117,6 +117,7 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
           NearestBySearch.Computed(
             spark.sparkContext.parallelize(queryRows, 3)
           )
+      val metrics = NearestByMetrics.create(spark.sparkContext)
       val rows = NearestBySearch
         .run(
           spark,
@@ -142,7 +143,7 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
             queryFirst = true
           ),
           bySpark = _ => fail("no query row is Spark's"),
-          metrics = NearestByMetrics.create(spark.sparkContext)
+          metrics = metrics
         )
         .map(row =>
           row.getUTF8String(0).toString ->
@@ -152,6 +153,8 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         .toSeq
         .sorted
       rows shouldBe bruteForce(k, outer)
+      metrics(SearchMetrics.Candidates).value shouldBe
+        queryVectors.size.toLong * 4L * k
     }
   }
 }

@@ -27,13 +27,50 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
   private def answer(
       metric: MetricType,
       entries: (Long, Long, Double, String)*
-  ) =
-    CarriedCandidates.of(
-      entries.map { case (unit, row, score, text) =>
-        Candidate(0, unit, row, score) -> text.getBytes(UTF_8)
-      },
-      metric
+  ): Array[Byte] = {
+    val merger = new TopKMerger(1, math.max(1, entries.size), metric)
+    val rows = entries.map { case (unit, row, score, text) =>
+      merger.add(Candidate(0, unit, row, score))
+      (unit, row) -> text.getBytes(UTF_8)
+    }.toMap
+    CarriedCandidates.writeSorted(
+      merger
+        .results(0)
+        .map(candidate =>
+          candidate -> rows((candidate.segmentId, candidate.rowOffset))
+        )
     )
+  }
+
+  test("encoding keeps the supplied order and each associated row") {
+    val ascending = Vector(
+      (2L, 8L, 1.0, "first"),
+      (1L, 9L, 2.0, ""),
+      (0L, 7L, 3.0, "last")
+    )
+    // These are already ordered for L2 and IP respectively. Encoding needs
+    // neither the metric nor a second sort to preserve either answer.
+    Seq(ascending, ascending.reverse).foreach { ordered =>
+      val packed = CarriedCandidates.writeSorted(
+        ordered.map { case (unit, row, score, text) =>
+          Candidate(0, unit, row, score) -> text.getBytes(UTF_8)
+        }
+      )
+      carried(packed) shouldBe ordered
+    }
+  }
+
+  test("an empty sorted answer writes no bytes and merges away") {
+    val empty = CarriedCandidates.writeSorted(Vector.empty)
+    empty.length shouldBe 0
+    carried(empty) shouldBe Vector.empty
+    val one = answer(MetricType.L2, (1L, 2L, 3.0, "row"))
+    CarriedCandidates.merge(empty, one, 2, MetricType.L2).toSeq shouldBe
+      one.toSeq
+    CarriedCandidates.merge(one, empty, 2, MetricType.L2).toSeq shouldBe
+      one.toSeq
+    CarriedCandidates.merge(empty, empty, 2, MetricType.L2).length shouldBe 0
+  }
 
   test("each candidate keeps its row, best first") {
     val packed = answer(

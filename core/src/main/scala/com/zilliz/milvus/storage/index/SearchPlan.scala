@@ -46,17 +46,17 @@ object SearchPlan {
     * budget stays under it. Counting the fields alone once said 28 and a task
     * planned against a budget it then overran.
     *
-    * Packing a query's answer for the shuffle costs `k * CandidateBytes.Width`
-    * on top, and [[TopKMerger.takePacked]] releases each query's heap as it
-    * packs it, so a task's peak stays at what this counts rather than holding
-    * both forms of every candidate at once.
+    * Packing a query's answer for the shuffle adds up to 24 bytes per kept
+    * candidate. The primitive columns remain allocated for repeatable output,
+    * so this 48-byte figure covers both payloads while they coexist; array
+    * headers and per-query state are counted by [[TopKQueueBytes]].
     */
   val CandidateBytes: Int = 40 + 8
 
   /** What a query's top-k is planned to keep besides its candidates. The figure
     * dates from the priority queue and the backing array of sixteen references
-    * it started with; [[TopKMerger]] now keeps only a per-query size in a
-    * shared `Int` array, and the constant stays as headroom.
+    * it started with; [[TopKMerger]] now keeps a per-query size and sorted flag
+    * in shared primitive arrays, and the constant stays as headroom.
     */
   val TopKQueueBytes: Int = 128
 
