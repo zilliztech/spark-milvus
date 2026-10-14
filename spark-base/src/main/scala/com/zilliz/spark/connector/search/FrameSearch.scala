@@ -43,11 +43,7 @@ import com.zilliz.milvus.storage.schema.{
   VectorLayout
 }
 import com.zilliz.spark.connector.metrics.SearchMetrics
-import com.zilliz.spark.connector.options.{
-  SearchLimits,
-  SearchResources,
-  TaskResources
-}
+import com.zilliz.spark.connector.options.{SearchLimits, TaskResources}
 import com.zilliz.spark.connector.types.ArrowAllocator
 
 /** A nearest-by join's search over a DataFrame input: a base the connector

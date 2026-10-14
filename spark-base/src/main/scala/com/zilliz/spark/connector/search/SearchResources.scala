@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.options
+package com.zilliz.spark.connector.search
 
 import scala.util.Try
 
@@ -6,6 +6,7 @@ import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.index.MachineResources
+import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 
 /** The sizes of a search that are not the user's to know: the exact scan's base
   * block and what one task may keep, off the heap and on it.
@@ -24,7 +25,7 @@ import com.zilliz.milvus.storage.index.MachineResources
   * Spark does not manage. The search tasks that run at once on one executor
   * divide both.
   */
-object SearchResources {
+private[search] object SearchResources {
 
   final case class Choice(bytes: Long, reason: String)
 
