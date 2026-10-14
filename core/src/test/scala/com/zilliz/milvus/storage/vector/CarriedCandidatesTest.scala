@@ -1,6 +1,7 @@
 package com.zilliz.milvus.storage.vector
 
 import java.nio.charset.StandardCharsets.UTF_8
+import java.util.BitSet
 
 import org.apache.arrow.memory.RootAllocator
 import org.scalatest.funsuite.AnyFunSuite
@@ -116,25 +117,35 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "a batch of float vectors excludes its null rows and starts where it is told"
+    "a batch borrows only its buffer region and leaves memory with its owner"
   ) {
     val allocator = new RootAllocator()
     try {
-      val batch = VectorBatch.ofFloats(
-        Array(Array(1f, 2f), null, Array(3f, 4f), null),
-        3,
-        2,
-        100L,
-        allocator
-      )
+      val buffer = allocator.buffer(32L)
       try {
-        batch.rows shouldBe 3
+        buffer.setFloat(8L, 1f)
+        buffer.setFloat(12L, 2f)
+        val excluded = new BitSet(2)
+        excluded.set(1)
+        val view = buffer.nioBuffer(0L, 32)
+        view.position(8)
+        view.limit(24)
+        val batch = VectorBatch.borrow(view, 2, 100L, excluded)
+        view.position(0)
+        batch.rows shouldBe 2
         batch.firstRow shouldBe 100L
         batch.excluded.get(1) shouldBe true
-        batch.visibleRows shouldBe 2
+        batch.visibleRows shouldBe 1
+        batch.base.borrowed shouldBe true
+        batch.base.buffer.capacity() shouldBe 16
         batch.base.buffer.getFloat(0) shouldBe 1f
-        batch.base.buffer.getFloat(2 * 2 * 4 + 4) shouldBe 4f
-      } finally batch.close()
+        batch.base.buffer.getFloat(4) shouldBe 2f
+        batch.close()
+        allocator.getAllocatedMemory shouldBe 32L
+        buffer.setFloat(8L, 3f)
+        batch.base.buffer.getFloat(0) shouldBe 3f
+      } finally buffer.close()
+      allocator.getAllocatedMemory shouldBe 0L
     } finally allocator.close()
   }
 }

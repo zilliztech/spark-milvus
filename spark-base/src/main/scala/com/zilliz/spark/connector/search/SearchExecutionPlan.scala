@@ -302,7 +302,8 @@ private[connector] object SearchExecutionPlan {
         else SearchQueries.Broadcast(selected)
     }
 
-  /** Every frame block holds a copied row and float array for each base row. */
+  /** A frame block holds copied output rows and uses one shared vector buffer.
+    */
   private val MaxFrameBlockRows = 65536
 
   /** How many first-stage tasks run at once, and what one of them may keep

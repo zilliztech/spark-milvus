@@ -1,7 +1,9 @@
 package com.zilliz.spark.connector.search
 
+import java.util.BitSet
 import scala.reflect.ClassTag
 
+import org.apache.arrow.memory.ArrowBuf
 import org.apache.spark.{NarrowDependency, Partition, SparkContext, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
@@ -94,13 +96,7 @@ private[connector] object FrameSearch extends Logging {
       id => id -> new GenericInternalRow(width)
     val queryCount = queries.count
     if (queryCount == 0L)
-      return required match {
-        case None => spark.sparkContext.emptyRDD[(Long, InternalRow)]
-        case Some(ids) =>
-          spark.sparkContext
-            .parallelize(ids.toSeq, math.max(1, math.min(ids.length, 64)))
-            .map(absent)
-      }
+      return SearchMerge.missing(spark, required, width)
     require(
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
@@ -200,93 +196,109 @@ private[connector] object FrameSearch extends Logging {
       retainedMaxBytes: Long,
       metrics: SearchMetrics
   ): Iterator[(Long, Array[Byte])] = {
+    if (!rows.hasNext) return Iterator.empty
     val dimension = layout.dimension
     val allocator = ArrowAllocator.forSearchTask(
       TaskContext.get().partitionId(),
       ReadLimits.DefaultArrowMaxBytes
     )
-    val matrix = QueryMatrix.ofPacked(
-      group.vectors,
-      group.firstQuery,
-      group.queries,
-      layout,
-      allocator.allocator
-    )
     try {
-      // The first query, as the engine received it: the one a base vector of
-      // another length is compared with, so the failure is the function's.
-      val first = new Array[Float](dimension)
-      EngineRange.decode(matrix.buffer, 0, layout, first)
-      val merger = new TopKMerger(group.queries, k, metric)
-      val project = UnsafeProjection.create(projection)
-      val vectors = new Array[Array[Float]](blockRows)
-      val copies = new Array[UnsafeRow](blockRows)
-      // The rows some query's heap holds, by their position in the partition.
-      val kept = new java.util.HashMap[java.lang.Long, UnsafeRow]()
-      var position = 0L
-      while (rows.hasNext) {
-        val firstRow = position
-        var count = 0
-        var blockBytes = 0L
-        while (
-          count < blockRows && blockBytes < blockMaxBytes && rows.hasNext
-        ) {
-          val row = rows.next()
-          vectors(count) = baseVector(vector.eval(row), first, function)
-          copies(count) =
-            if (vectors(count) == null) null else project(row).copy()
-          blockBytes += layout.rowBytes.toLong +
-            (if (copies(count) == null) 0L
-             else copies(count).getSizeInBytes.toLong)
-          count += 1
-          position += 1
-        }
-        val batch = VectorBatch.ofFloats(
-          vectors,
-          count,
-          dimension,
-          firstRow,
-          allocator.allocator
-        )
-        try
-          ExactScan.batch(
-            batch,
-            matrix,
-            unit.toLong,
-            k,
-            metric,
-            allocator.allocator,
-            merger,
-            metrics.record,
-            Some(EngineRange.Batch.of(batch, layout, metric, function))
-          )
-        finally batch.close()
-        // Variable-width rows are measured, never bounded by their defaultSize.
-        keepHeld(kept, merger, copies, firstRow, retainedMaxBytes)
-        java.util.Arrays.fill(copies.asInstanceOf[Array[AnyRef]], null)
-        java.util.Arrays.fill(vectors.asInstanceOf[Array[AnyRef]], null)
-      }
-      val answers = carriedAnswers(merger, group, kept, retainedMaxBytes)
-      metrics.candidates.add(merger.size.toLong)
-      answers
-    } finally {
-      matrix.close()
-      allocator.close()
-    }
+      val matrix = QueryMatrix.ofPacked(
+        group.vectors,
+        group.firstQuery,
+        group.queries,
+        layout,
+        allocator.allocator
+      )
+      try {
+        // The first query, as the engine received it: the one a base vector of
+        // another length is compared with, so the failure is the function's.
+        val first = new Array[Float](dimension)
+        EngineRange.decode(matrix.buffer, 0, layout, first)
+        val merger = new TopKMerger(group.queries, k, metric)
+        val project = UnsafeProjection.create(projection)
+        val capacity = math
+          .min(blockRows.toLong, math.max(1L, blockMaxBytes / layout.rowBytes))
+          .toInt
+        val vectors =
+          allocator.allocator.buffer(capacity.toLong * layout.rowBytes)
+        try {
+          val copies = new Array[UnsafeRow](capacity)
+          // The rows some query's heap holds, by their position in the partition.
+          var kept = new java.util.HashMap[java.lang.Long, UnsafeRow]()
+          var position = 0L
+          while (rows.hasNext) {
+            val firstRow = position
+            val excluded = new BitSet(capacity)
+            var count = 0
+            var blockBytes = 0L
+            while (
+              count < capacity && blockBytes < blockMaxBytes && rows.hasNext
+            ) {
+              val row = rows.next()
+              copies(count) =
+                if (
+                  writeVector(
+                    vector.eval(row),
+                    first,
+                    function,
+                    vectors,
+                    count.toLong * layout.rowBytes
+                  )
+                )
+                  project(row).copy()
+                else {
+                  excluded.set(count)
+                  null
+                }
+              blockBytes += layout.rowBytes.toLong +
+                (if (copies(count) == null) 0L
+                 else copies(count).getSizeInBytes.toLong)
+              count += 1
+              position += 1
+            }
+            val batch = VectorBatch.borrow(
+              vectors.nioBuffer(0L, count * layout.rowBytes),
+              count,
+              firstRow,
+              excluded
+            )
+            ExactScan.batch(
+              batch,
+              matrix,
+              unit.toLong,
+              k,
+              metric,
+              allocator.allocator,
+              merger,
+              metrics.record,
+              Some(EngineRange.Batch.of(batch, layout, metric, function))
+            )
+            // The synchronous scan no longer borrows the vector buffer.
+            kept = keepHeld(kept, merger, copies, firstRow, retainedMaxBytes)
+            java.util.Arrays.fill(copies.asInstanceOf[Array[AnyRef]], null)
+          }
+          val answers = carriedAnswers(merger, group, kept, retainedMaxBytes)
+          metrics.candidates.add(merger.size.toLong)
+          answers
+        } finally vectors.close()
+      } finally matrix.close()
+    } finally allocator.close()
   }
 
-  /** A base row's vector as the scan takes it, or NULL for one that ranks
-    * nothing: a NULL vector, or one with a NULL element. A vector of another
-    * length than the queries' is scored against `first`, the first query as the
-    * engine received it, so that it fails as Spark's function fails on that
-    * pair.
+  /** Writes a base vector directly into the scan's buffer. A NULL vector or
+    * element excludes the whole row, including any prefix already written.
+    * Dimension mismatches fail through the ranking function before inspecting
+    * NULL elements, as they do for a Spark pair.
     */
-  private def baseVector(
+  private def writeVector(
       value: Any,
       first: Array[Float],
-      function: RankingFunction
-  ): Array[Float] = value match {
-    case null => null
+      function: RankingFunction,
+      buffer: ArrowBuf,
+      offset: Long
+  ): Boolean = value match {
+    case null => false
     case array: ArrayData =>
       val size = array.numElements()
       if (size != first.length) {
@@ -294,8 +306,14 @@ private[connector] object FrameSearch extends Logging {
         throw new IllegalStateException(
           s"A base vector of $size elements met a query of ${first.length}, and the ranking function did not fail"
         )
-      } else if ((0 until size).exists(array.isNullAt)) null
-      else array.toFloatArray()
+      }
+      var element = 0
+      while (element < size) {
+        if (array.isNullAt(element)) return false
+        buffer.setFloat(offset + element * 4L, array.getFloat(element))
+        element += 1
+      }
+      true
   }
 
   /** Retain only rows still held by a heap, measuring their actual bytes. */
@@ -305,7 +323,7 @@ private[connector] object FrameSearch extends Logging {
       copies: Array[UnsafeRow],
       firstRow: Long,
       maxBytes: Long
-  ): Unit = {
+  ): java.util.HashMap[java.lang.Long, UnsafeRow] = {
     val held = new java.util.HashMap[java.lang.Long, UnsafeRow]()
     var bytes = 0L
     merger.foreachKept { (_, offset) =>
@@ -319,8 +337,7 @@ private[connector] object FrameSearch extends Logging {
       bytes <= maxBytes,
       s"DataFrame search candidates retain $bytes row bytes, exceeding the task budget of $maxBytes; reduce k or the returned columns, or increase executor memory"
     )
-    kept.clear()
-    kept.putAll(held)
+    held
   }
 
   /** Encodes one query when pulled. The iterator owns only heap data, so the

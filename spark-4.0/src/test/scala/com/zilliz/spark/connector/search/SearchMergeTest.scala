@@ -20,8 +20,8 @@ import com.zilliz.milvus.storage.vector.{Candidate, CandidateBytesFixture}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.TaskResources
 
-/** The merge stage inside Spark: candidates from several tasks become one top-k
-  * per query, with the ranks the result contract promises.
+/** The merge stage inside Spark: candidates from several tasks become each
+  * query's selected addresses, best first.
   */
 class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
@@ -86,7 +86,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       )
     )
 
-  test("each query keeps its own best k, ranked from one") {
+  test("each query keeps its own best k addresses, best first") {
     val merged = this.merged(
       Seq(
         (1L, 10L, 0L, 5.0),
@@ -101,31 +101,18 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
     merged.schema.fieldNames shouldBe Array(
       "query_id",
-      "rank",
-      "_score",
       "_segment_id",
       "_row_offset"
     )
     val rows = merged
-      .orderBy("query_id", "rank")
       .collect()
-      .map(row =>
-        (
-          row.getAs[Long]("query_id"),
-          row.getAs[Int]("rank"),
-          row.getAs[Double]("_score"),
-          row.getAs[Long]("_segment_id"),
-          row.getAs[Long]("_row_offset")
-        )
-      )
-      .toSeq
+      .groupBy(_.getAs[Long]("query_id"))
 
-    rows shouldBe Seq(
-      (1L, 1, 1.0, 11L, 3L),
-      (1L, 2, 3.0, 11L, 4L),
-      (2L, 1, 2.0, 11L, 8L),
-      (2L, 2, 9.0, 10L, 7L)
-    )
+    rows.keySet shouldBe Set(1L, 2L)
+    rows(1L).map(row => row.getLong(1) -> row.getLong(2)).toSeq shouldBe
+      Seq(11L -> 3L, 11L -> 4L)
+    rows(2L).map(row => row.getLong(1) -> row.getLong(2)).toSeq shouldBe
+      Seq(11L -> 8L, 10L -> 7L)
   }
 
   test("a larger score wins under COSINE") {
@@ -133,19 +120,19 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       Seq((1L, 10L, 0L, 0.2), (1L, 10L, 1L, 0.9), (1L, 11L, 2L, 0.5)),
       2,
       MetricType.Cosine
-    ).orderBy("rank")
-      .collect()
-      .map(row => (row.getAs[Int]("rank"), row.getAs[Double]("_score")))
+    ).collect()
+      .map(row => row.getLong(1) -> row.getLong(2))
       .toSeq
 
-    rows shouldBe Seq((1, 0.9), (2, 0.5))
+    rows shouldBe Seq(10L -> 1L, 11L -> 2L)
   }
 
   test("a query with fewer candidates than k keeps them all") {
     val rows = merged(Seq((7L, 10L, 0L, 1.5)), 10, MetricType.L2).collect()
 
     rows.map(_.getAs[Long]("query_id")).toSeq shouldBe Seq(7L)
-    rows.map(_.getAs[Int]("rank")).toSeq shouldBe Seq(1)
+    rows.map(row => row.getLong(1) -> row.getLong(2)).toSeq shouldBe
+      Seq(10L -> 0L)
   }
 
   test("a local master's tasks all share one JVM's memory") {

@@ -6,6 +6,7 @@ import scala.collection.mutable
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.catalyst.expressions.{
+  BoundReference,
   GenericInternalRow,
   JoinedRow,
   UnsafeProjection
@@ -39,10 +40,10 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 private[search] object SearchTake {
 
   /** What one buffered hit costs on the heap in `bySegment`: the copied
-    * `UnsafeRow` of the five hit columns (48 bytes of row data, its object and
-    * byte array headers) and its slot in the buffer. 100k queries at k=10,000
-    * buffered 62.5 million hits per task in 16 tasks and ran an 8-core
-    * executor's 6 GiB heap out of memory (2026-09-25 decision).
+    * `UnsafeRow` and its slot in the buffer. The three address columns now use
+    * 32 bytes of row data; this keeps the previous conservative estimate. 100k
+    * queries at k=10,000 buffered 62.5 million hits per task in 16 tasks and
+    * ran an 8-core executor's 6 GiB heap out of memory (2026-09-25 decision).
     */
   private[search] val HitRowBytes: Long = 128L
 
@@ -103,25 +104,26 @@ private[search] object SearchTake {
     * [[SearchExecutionPlan.takePartitioning]], sized so that what one task
     * buffers fits the heap it has.
     *
-    * The rows come out as the hit columns and then `output`, never converted to
-    * Scala values on the way; an iterator hands the same row object back, so a
-    * consumer that keeps one copies it. A hit whose segment is NULL -- a query
-    * a LEFT OUTER nearest-by join keeps without a hit -- reads nothing and
-    * comes out with NULL output columns.
+    * Each query id comes out with its requested base columns in an owned row.
+    * `positions` selects them from the hit columns followed by `output`,
+    * without materializing that combined row. A hit whose segment is NULL -- a
+    * query a LEFT OUTER nearest-by join keeps without a hit -- reads nothing
+    * and comes out with NULL output columns.
     */
   def rows(
       hits: DataFrame,
       output: StructType,
+      positions: Seq[Int],
       partitions: Map[Long, MilvusInputPartition],
       arrowMaxBytes: Long,
       metrics: SearchMetrics,
       partitioning: Partitioning
-  ): RDD[InternalRow] = {
+  ): RDD[(Long, InternalRow)] = {
     val hitSchema = hits.schema
     val segmentColumn = hitSchema.fieldIndex("_segment_id")
     val offsetColumn = hitSchema.fieldIndex("_row_offset")
     val known = hits.sparkSession.sparkContext.broadcast(partitions)
-    val resultTypes = (hitSchema.fields ++ output.fields).map(_.dataType)
+    val resultSchema = StructType(hitSchema.fields ++ output.fields)
     // Hits of one segment land in one task unless the plan cut the segment
     // into buckets, in which case a slice of its row offsets does; the
     // bucket is a repartitioning expression, not a column the result carries.
@@ -148,11 +150,10 @@ private[search] object SearchTake {
         )
         Option(TaskContext.get())
           .foreach(_.addTaskCompletionListener[Unit](_ => allocator.close()))
-        val project = UnsafeProjection.create(resultTypes)
         val joined = new JoinedRow()
         val (withoutHit, bySegment) = SearchTake.bySegment(rows, segmentColumn)
         val nothing = new GenericInternalRow(output.size)
-        withoutHit.iterator.map(hit => project(joined(hit, nothing))) ++
+        val taken = withoutHit.iterator.map(hit => joined(hit, nothing)) ++
           bySegment.iterator.flatMap { case (segmentId, hitRows) =>
             val partition = known.value.getOrElse(
               segmentId,
@@ -167,9 +168,26 @@ private[search] object SearchTake {
               offsetColumn,
               allocator.allocator,
               metrics
-            ).map { case (hit, taken) => project(joined(hit, taken)) }
+            ).map { case (hit, taken) => joined(hit, taken) }
           }
+        project(taken, resultSchema, positions)
       }
+  }
+
+  /** Select requested base columns by position, owning the result before an
+    * upstream iterator reuses its row or a downstream join retains it.
+    */
+  def project(
+      rows: Iterator[InternalRow],
+      schema: StructType,
+      positions: Seq[Int]
+  ): Iterator[(Long, InternalRow)] = {
+    val columns = positions.map(at =>
+      // Outer hits may be NULL even where the storage field is non-nullable.
+      BoundReference(at, schema(at).dataType, nullable = true)
+    )
+    val projection = UnsafeProjection.create(columns)
+    rows.map(row => row.getLong(0) -> projection(row).copy())
   }
 
   /** The task's hits in one bucket per segment, and apart from them the hits
@@ -303,9 +321,8 @@ private[search] object SearchTake {
             index < taken.length,
             s"Segment $segmentId returned more rows than the ${taken.length} asked for"
           )
-          taken(index) = ArrowConverter
-            .arrowToInternalRow(batch, row, output, columnNames)
-            .copy()
+          taken(index) =
+            ArrowConverter.arrowToInternalRow(batch, row, output, columnNames)
           index += 1
           row += 1
         }

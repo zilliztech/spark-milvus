@@ -25,11 +25,12 @@ package com.zilliz.spark.connector
   * `SearchQueryRanges`, runs the first stage (`SegmentSetSearch`), merges every
   * query's top-k (`SearchMerge`: `CandidateBytes.merge` over an RDD shuffle by
   * query id) and reads the base columns of the rows that survived
-  * (`SearchTake`, which hands rows on as `InternalRow`s). A base that is not
-  * such a scan is a DataFrame input (`FrameSearch`): every pair of a base
-  * partition and a query group is one task, which reads the partition a block
-  * at a time into float32 batches for the exact scan and keeps the rows some
-  * query's heap holds; the candidates carry those rows through the merge
+  * (`SearchTake`, which projects requested columns once into owned rows paired
+  * with query ids). Rank and score stop at the global top-k merge. A base that
+  * is not such a scan is a DataFrame input (`FrameSearch`): every pair of a
+  * base partition and a query group is one task, which reads the partition a
+  * block at a time into float32 batches for the exact scan and keeps the rows
+  * some query's heap holds; the candidates carry those rows through the merge
   * (`CarriedCandidates`), so there is no take stage. Both inputs share the
   * delivery and the merge, and `NearestBySearch` handles their query rows the
   * same way; a DataFrame input's dimension is the commonest length among the

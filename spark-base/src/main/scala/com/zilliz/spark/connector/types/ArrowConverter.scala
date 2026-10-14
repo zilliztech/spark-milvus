@@ -41,7 +41,8 @@ object ArrowConverter extends Logging {
 
   private val ArrowVectorDimensionMetadataKey = "dim"
 
-  /** Convert an Arrow VectorSchemaRoot row to Spark InternalRow
+  /** Convert an Arrow VectorSchemaRoot row to an independently owned Spark
+    * InternalRow whose values remain valid after the batch is reused or closed.
     *
     * @param root
     *   Arrow VectorSchemaRoot containing the data

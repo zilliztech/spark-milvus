@@ -27,7 +27,7 @@ class SegmentSearchTest extends AnyFunSuite with Matchers {
       allocator: RootAllocator,
       failClassification: Boolean = false
   ) extends VectorBatch {
-    private val owned = VectorBatch.ofFloats(
+    private val owned = VectorBatchFixture.floats(
       Array(Array(Float.PositiveInfinity, value)),
       1,
       2,

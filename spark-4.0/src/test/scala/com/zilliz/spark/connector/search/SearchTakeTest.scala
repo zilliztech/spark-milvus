@@ -1,5 +1,13 @@
 package com.zilliz.spark.connector.search
 
+import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
+import org.apache.spark.sql.types.{
+  LongType,
+  StringType,
+  StructField,
+  StructType
+}
+import org.apache.spark.unsafe.types.UTF8String
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -9,6 +17,52 @@ import org.scalatest.matchers.should.Matchers
   */
 class SearchTakeTest extends AnyFunSuite with Matchers {
   private val MiB = 1L << 20
+
+  test(
+    "requested positions preserve names, order and duplicates across reused rows"
+  ) {
+    val schema = StructType(
+      SearchMerge.HitSchema.fields ++ Array(
+        StructField("query_id", LongType, nullable = false),
+        StructField("_score", StringType, nullable = false)
+      )
+    )
+    val reused = new GenericInternalRow(schema.size)
+    val rows = Iterator(1L, 2L).map { id =>
+      reused.setLong(0, id)
+      reused.setLong(1, 10L + id)
+      reused.setLong(2, 20L + id)
+      reused.setLong(3, 100L + id)
+      reused.update(4, UTF8String.fromString(s"value$id"))
+      reused
+    }
+    val found = SearchTake.project(rows, schema, Seq(4, 1, 3, 4)).toVector
+    found.map { case (id, row) =>
+      (
+        id,
+        row.getUTF8String(0).toString,
+        row.getLong(1),
+        row.getLong(2),
+        row.getUTF8String(3).toString
+      )
+    } shouldBe Vector(
+      (1L, "value1", 11L, 101L, "value1"),
+      (2L, "value2", 12L, 102L, "value2")
+    )
+
+    val absent = new GenericInternalRow(schema.size)
+    absent.setLong(0, 3L)
+    val missing =
+      SearchTake.project(Iterator(absent), schema, Seq(1, 3, 4)).next()
+    missing._1 shouldBe 3L
+    (0 until 3).forall(missing._2.isNullAt) shouldBe true
+    val empty =
+      SearchTake.project(Iterator(reused, absent), schema, Seq.empty).toVector
+    empty.map { case (id, row) => id -> row.numFields } shouldBe Vector(
+      2L -> 0,
+      3L -> 0
+    )
+  }
 
   test(
     "a range bucket is a run of consecutive rows, never past the last bucket"
