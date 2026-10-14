@@ -81,6 +81,20 @@ private[connector] object NearestBySearch {
     */
   private val FromCandidate = Set("_segment_id", "_row_offset")
 
+  /** The query set of rows kept on the executors: each row's number and its
+    * vector.
+    */
+  private val QuerySetSchema = StructType(
+    Seq(
+      StructField(QueryId, LongType, nullable = false),
+      StructField(
+        Vector,
+        ArrayType(FloatType, containsNull = false),
+        nullable = false
+      )
+    )
+  )
+
   /** The query side as the node hands it over. */
   sealed trait Queries
 
@@ -162,6 +176,21 @@ private[connector] object NearestBySearch {
 
   private object Counts {
     val Zero: Counts = Counts(0L, 0L, 0L, 0L, Map.empty)
+
+    /** One query row of `bytes`, by its kind. */
+    def of(kind: QueryVector, bytes: Long, packedBytes: Int => Long): Counts =
+      kind match {
+        case QueryVector.Unranked => Counts(1L, 0L, 0L, bytes, Map.empty)
+        case QueryVector.Searched(vector) =>
+          Counts(
+            0L,
+            1L,
+            0L,
+            bytes + packedBytes(vector.length),
+            Map(vector.length -> 1L)
+          )
+        case QueryVector.BySpark => Counts(0L, 0L, 1L, bytes, Map.empty)
+      }
   }
 
   /** What differs between the two inputs: how a query vector is first judged,
@@ -233,60 +262,64 @@ private[connector] object NearestBySearch {
         milvusTable(spark, table, approx, k, metric, function, metrics)
       case frame: Frame => dataFrame(spark, frame, k, metric, function, metrics)
     }
-    val width = outputTypes.size - queryTypes.size
-    val positions = searcher.positions.toArray
-    val baseTypes = searcher.baseTypes.toArray
-    val output = outputTypes.toArray
-
-    val judgement = searcher.judge
-    val packedBytes = searcher.packedBytes
-    def judge(row: InternalRow): QueryVector =
-      judgement(queryVector.eval(row))
-
-    // The kind once the dimension is known.
-    def settle(kind: QueryVector, dimension: Int): QueryVector = kind match {
-      case QueryVector.Searched(vector) if vector.length != dimension =>
-        QueryVector.BySpark
-      case other => other
+    val join = new Join(
+      spark,
+      searcher,
+      queryVector,
+      outer,
+      outputTypes.toArray,
+      outputTypes.size - queryTypes.size,
+      bySpark,
+      metrics
+    )
+    val result = queries match {
+      case Held(rows)     => join.held(rows)
+      case Computed(rows) => join.computed(rows, queryTypes.toArray)
     }
-
-    // What the driver settled, on the node.
-    def post(counts: Counts): Unit =
-      NearestByMetrics.postDriverValues(
-        spark.sparkContext,
-        metrics,
-        Map(
-          NearestByMetrics.SearchedQueries -> counts.searched,
-          NearestByMetrics.SparkQueries -> counts.bySpark,
-          NearestByMetrics.UnrankedQueries -> counts.unranked
-        ) ++ searcher.segments(counts.searched)
-      )
-
-    // The base values of a hit, NULL where the hit is.
-    def baseOf(hit: InternalRow): InternalRow = {
-      val values = new GenericInternalRow(width)
-      var i = 0
-      while (i < width) {
-        values.update(i, hit.get(positions(i), baseTypes(i)))
-        i += 1
+    val outputRows = metrics(NearestByMetrics.OutputRows)
+    result.mapPartitions { rows =>
+      rows.map { row =>
+        outputRows.add(1L)
+        row
       }
-      values
     }
+  }
 
-    def commonest(lengths: Map[Int, Long]): Int =
-      if (lengths.isEmpty) 0 else searcher.dimension(lengths)
+  /** One join on the driver: it classifies the query rows, has the searcher
+    * search the ones it can, and joins each to its hits -- by number from a
+    * broadcast when the driver holds the rows ([[held]]), by a join after the
+    * last stage when they stay on the executors ([[numbered]]).
+    *
+    * A join is never sent to a task. What its tasks run is built by
+    * [[judging]], [[kindAt]], [[baseValues]] and [[joiners]] from values copied
+    * out of it, so a closure holds those values and not the join.
+    *
+    * @param width
+    *   the base columns of the join's output
+    */
+  private final class Join(
+      spark: SparkSession,
+      searcher: Searcher,
+      queryVector: Expression,
+      outer: Boolean,
+      output: Array[DataType],
+      width: Int,
+      bySpark: RDD[InternalRow] => RDD[InternalRow],
+      metrics: Map[String, SQLMetric]
+  ) {
 
-    // The rows the driver holds: classified, numbered and packed here, and
-    // attached to the hits from a broadcast.
+    /** Rows the driver holds: classified, numbered and packed here, and
+      * attached to the hits from a broadcast.
+      */
     def held(rows: Array[InternalRow]): RDD[InternalRow] = {
-      val judged = rows.map(judge)
+      val judged = rows.map(judging)
       val dimension = commonest(
         judged
           .collect { case QueryVector.Searched(vector) => vector.length }
           .groupBy(identity)
           .map { case (length, all) => length -> all.length.toLong }
       )
-      val kinds = judged.map(settle(_, dimension))
+      val kinds = judged.map(_.at(dimension))
       val toSpark = rows.indices.filter(kinds(_) == QueryVector.BySpark)
       val joinedBySpark =
         if (toSpark.isEmpty) None
@@ -301,11 +334,8 @@ private[connector] object NearestBySearch {
           )
       val kept = rows.indices.filter(kinds(_) != QueryVector.BySpark)
       val keptRows = kept.map(rows(_).copy()).toArray
-      val searched = kept.zipWithIndex.flatMap { case (at, number) =>
-        kinds(at) match {
-          case QueryVector.Searched(vector) => Some(number.toLong -> vector)
-          case _                            => None
-        }
+      val searched = kept.map(kinds(_)).zipWithIndex.collect {
+        case (QueryVector.Searched(vector), number) => number.toLong -> vector
       }
       val counts = Counts(
         unranked = keptRows.length.toLong - searched.size,
@@ -315,6 +345,7 @@ private[connector] object NearestBySearch {
         lengths = Map.empty
       )
       val payload = spark.sparkContext.broadcast(keptRows)
+      val newJoiner = joiners
       val connector: RDD[InternalRow] =
         if (searched.isEmpty) {
           post(counts)
@@ -322,15 +353,13 @@ private[connector] object NearestBySearch {
           else
             spark.sparkContext
               .parallelize(
-                0 until keptRows.length,
+                keptRows.indices,
                 math.max(1, math.min(keptRows.length, 64))
               )
               .mapPartitions { numbers =>
-                val project = UnsafeProjection.create(output)
-                val joined = new JoinedRow()
-                val absent = new GenericInternalRow(width)
+                val joiner = newJoiner()
                 numbers.map(number =>
-                  project(joined(payload.value(number), absent)).copy()
+                  joiner(payload.value(number), None).copy()
                 )
               }
         } else {
@@ -347,25 +376,49 @@ private[connector] object NearestBySearch {
             else None
           )
           post(counts)
+          val baseOf = baseValues
           hits.rows.mapPartitions { found =>
-            val project = UnsafeProjection.create(output)
-            val joined = new JoinedRow()
-            found.map { hit =>
-              project(joined(payload.value(hit.getLong(0).toInt), baseOf(hit)))
-            }
+            val joiner = newJoiner()
+            found.map(hit =>
+              joiner(payload.value(hit.getLong(0).toInt), Some(baseOf(hit)))
+            )
           }
         }
       joinedBySpark.fold(connector)(connector.union(_))
     }
 
-    // The rows an RDD computes, kept and numbered on the executors, and
-    // joined to the hits after the last stage.
+    /** Rows an RDD computes, counted in one job that also says whether the
+      * driver can hold them: fetched and [[held]] when it can, kept on the
+      * executors and [[numbered]] when it cannot.
+      */
     def computed(
+        rows: RDD[InternalRow],
+        types: Array[DataType]
+    ): RDD[InternalRow] = {
+      // Kept before numbering: zipWithIndex counts the partitions in a job of
+      // its own, which then fills the cache instead of computing the rows
+      // twice.
+      val kept = rows.map(_.copy()).persist(StorageLevel.MEMORY_AND_DISK)
+      val judged = countKinds(kept, types, judging, searcher.packedBytes)
+      val dimension = commonest(judged.lengths)
+      val counts = judged.at(dimension)
+      if (counts.heldBytes <= searcher.limits.queriesMaxBytes) {
+        val fetched = kept.collect()
+        kept.unpersist(blocking = false)
+        held(fetched)
+      } else numbered(kept, counts, dimension)
+    }
+
+    /** Rows kept and numbered on the executors, joined to their hits after the
+      * last stage, so that a query side computed again in another order cannot
+      * pair a hit with the wrong row.
+      */
+    private def numbered(
         kept: RDD[InternalRow],
         counts: Counts,
         dimension: Int
     ): RDD[InternalRow] = {
-      def kind(row: InternalRow): QueryVector = settle(judge(row), dimension)
+      val kind = kindAt(dimension)
       val toSpark = kept.filter(kind(_) == QueryVector.BySpark)
       val joinedBySpark =
         if (counts.bySpark == 0L) None else Some(bySpark(toSpark))
@@ -376,19 +429,7 @@ private[connector] object NearestBySearch {
           case _                            => None
         }
       }
-      val querySet = spark.createDataFrame(
-        vectors,
-        StructType(
-          Seq(
-            StructField(QueryId, LongType, nullable = false),
-            StructField(
-              Vector,
-              ArrayType(FloatType, containsNull = false),
-              nullable = false
-            )
-          )
-        )
-      )
+      val querySet = spark.createDataFrame(vectors, QuerySetSchema)
       val hits =
         if (counts.searched == 0L) None
         else
@@ -400,6 +441,7 @@ private[connector] object NearestBySearch {
             )
           )
       post(counts)
+      val baseOf = baseValues
       val hitsByQuery = hits match {
         case Some(found) => found.rows.map(hit => hit.getLong(0) -> baseOf(hit))
         case None =>
@@ -417,66 +459,98 @@ private[connector] object NearestBySearch {
           byNumber.join(hitsByQuery).values.map { case (row, hit) =>
             row -> Some(hit)
           }
+      val newJoiner = joiners
       val searched: RDD[InternalRow] = paired.mapPartitions { pairs =>
-        val project = UnsafeProjection.create(output)
-        val absent = new GenericInternalRow(width)
-        val joined = new JoinedRow()
-        pairs.map { case (row, hit) =>
-          project(joined(row, hit.getOrElse(absent))): InternalRow
-        }
+        val joiner = newJoiner()
+        pairs.map { case (row, hit) => joiner(row, hit) }
       }
       joinedBySpark.fold(searched)(searched.union(_))
     }
 
-    val result = queries match {
-      case Held(rows)     => held(rows)
-      case Computed(rows) =>
-        // Kept before numbering: zipWithIndex counts the partitions in a job of
-        // its own, which then fills the cache instead of computing the rows
-        // twice.
-        val kept = rows.map(_.copy()).persist(StorageLevel.MEMORY_AND_DISK)
-        // One job: how the rows divide, and whether the driver can hold them.
-        val types = queryTypes.toArray
-        val judged = kept
-          .mapPartitions { rows =>
-            val toUnsafe = UnsafeProjection.create(types)
-            var counts = Counts.Zero
-            rows.foreach { row =>
-              val bytes = toUnsafe(row).getSizeInBytes.toLong
-              counts = counts + (judge(row) match {
-                case QueryVector.Unranked =>
-                  Counts(1L, 0L, 0L, bytes, Map.empty)
-                case QueryVector.Searched(vector) =>
-                  Counts(
-                    0L,
-                    1L,
-                    0L,
-                    bytes + packedBytes(vector.length),
-                    Map(vector.length -> 1L)
-                  )
-                case QueryVector.BySpark =>
-                  Counts(0L, 0L, 1L, bytes, Map.empty)
-              })
-            }
-            Iterator.single(counts)
-          }
-          .fold(Counts.Zero)(_ + _)
-        val dimension = commonest(judged.lengths)
-        val counts = judged.at(dimension)
-        if (counts.heldBytes <= searcher.limits.queriesMaxBytes) {
-          val fetched = kept.collect()
-          kept.unpersist(blocking = false)
-          held(fetched)
-        } else computed(kept, counts, dimension)
+    // What the driver settled, on the node.
+    private def post(counts: Counts): Unit =
+      NearestByMetrics.postDriverValues(
+        spark.sparkContext,
+        metrics,
+        Map(
+          NearestByMetrics.SearchedQueries -> counts.searched,
+          NearestByMetrics.SparkQueries -> counts.bySpark,
+          NearestByMetrics.UnrankedQueries -> counts.unranked
+        ) ++ searcher.segments(counts.searched)
+      )
+
+    private def commonest(lengths: Map[Int, Long]): Int =
+      if (lengths.isEmpty) 0 else searcher.dimension(lengths)
+
+    /** A query row's kind before the search's dimension is known. */
+    private def judging: InternalRow => QueryVector = {
+      val judgement = searcher.judge
+      val vector = queryVector
+      row => judgement(vector.eval(row))
     }
-    val outputRows = metrics(NearestByMetrics.OutputRows)
-    result.mapPartitions { rows =>
-      rows.map { row =>
-        outputRows.add(1L)
-        row
+
+    /** A query row's kind once the search's dimension is known. */
+    private def kindAt(dimension: Int): InternalRow => QueryVector = {
+      val judge = judging
+      row => judge(row).at(dimension)
+    }
+
+    /** A hit's base values, NULL where the hit is. */
+    private def baseValues: InternalRow => InternalRow = {
+      val positions = searcher.positions.toArray
+      val types = searcher.baseTypes.toArray
+      val columns = width
+      hit => {
+        val values = new GenericInternalRow(columns)
+        var i = 0
+        while (i < columns) {
+          values.update(i, hit.get(positions(i), types(i)))
+          i += 1
+        }
+        values
       }
     }
+
+    /** What makes a [[Joiner]] in a task. */
+    private def joiners: () => Joiner = {
+      val types = output
+      val columns = width
+      () => new Joiner(types, columns)
+    }
   }
+
+  /** A query row joined to its hit's base values, or to NULLs where it has no
+    * hit, as a row of the join's output. Each task makes its own: a projection
+    * is not shared.
+    */
+  private final class Joiner(output: Array[DataType], width: Int) {
+    private val project = UnsafeProjection.create(output)
+    private val joined = new JoinedRow()
+    private val absent = new GenericInternalRow(width)
+
+    def apply(row: InternalRow, base: Option[InternalRow]): InternalRow =
+      project(joined(row, base.getOrElse(absent)))
+  }
+
+  /** The query rows counted in one job: how they divide, and the bytes the
+    * driver would hold if it took them all.
+    */
+  private def countKinds(
+      rows: RDD[InternalRow],
+      types: Array[DataType],
+      judge: InternalRow => QueryVector,
+      packedBytes: Int => Long
+  ): Counts = rows
+    .mapPartitions { rows =>
+      val toUnsafe = UnsafeProjection.create(types)
+      var counts = Counts.Zero
+      rows.foreach { row =>
+        val bytes = toUnsafe(row).getSizeInBytes.toLong
+        counts = counts + Counts.of(judge(row), bytes, packedBytes)
+      }
+      Iterator.single(counts)
+    }
+    .fold(Counts.Zero)(_ + _)
 
   /** A Milvus table input: the field's layout and dimension, the two-stage
     * search over the scan's segments, and the take stage for the base columns.
@@ -718,7 +792,17 @@ private[connector] object NearestBySearch {
 /** What a query row's vector is to the search, under the ranking function's
   * rules.
   */
-private[read] sealed trait QueryVector
+private[read] sealed trait QueryVector {
+
+  /** The kind once the search's dimension is known: a searched vector of
+    * another length goes to Spark.
+    */
+  def at(dimension: Int): QueryVector = this match {
+    case QueryVector.Searched(vector) if vector.length != dimension =>
+      QueryVector.BySpark
+    case other => other
+  }
+}
 
 private[read] object QueryVector {
 
