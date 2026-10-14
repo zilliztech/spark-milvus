@@ -2,13 +2,7 @@ package com.zilliz.spark.connector.read
 
 import scala.reflect.ClassTag
 
-import org.apache.spark.{
-  HashPartitioner,
-  NarrowDependency,
-  Partition,
-  SparkContext,
-  TaskContext
-}
+import org.apache.spark.{NarrowDependency, Partition, SparkContext, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{
@@ -39,7 +33,6 @@ import com.zilliz.milvus.storage.index.{
   QueryMatrix,
   RankingFunction,
   SearchPlan,
-  SegmentSearch,
   TopKMerger,
   VectorBatch
 }
@@ -121,7 +114,10 @@ private[connector] object FrameSearch extends Logging {
     )
     val queryCount = queries.count
     if (queryCount == 0L)
-      return MilvusSearch.Hits(missing(spark, required, types.size), schema)
+      return MilvusSearch.Hits(
+        MilvusSearch.missing(spark, required, schema.size),
+        schema
+      )
     require(
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
@@ -203,33 +199,16 @@ private[connector] object FrameSearch extends Logging {
       taskHeap.bytes,
       CandidateBytes.Width.toLong + 4L + rowBytes
     )
-    val partitioner = new HashPartitioner(parts)
-    val merged = candidates.combineByKeyWithClassTag[Array[Byte]](
-      (packed: Array[Byte]) => packed,
-      (kept: Array[Byte], packed: Array[Byte]) =>
-        CarriedCandidates.merge(kept, packed, k, metric),
-      (left: Array[Byte], right: Array[Byte]) =>
-        CarriedCandidates.merge(left, right, k, metric),
-      partitioner,
-      mapSideCombine = false
-    )
     val width = types.size
-    val wanted = required.map(spark.sparkContext.broadcast(_))
-    val rows = merged.mapPartitionsWithIndex { (index, answers) =>
-      val found = new java.util.HashSet[java.lang.Long]()
-      val hits = answers.flatMap { case (query, packed) =>
-        found.add(query)
-        carried(query, packed, width)
-      }
-      val absent = wanted.iterator.flatMap(ids =>
-        ids.value.iterator
-          .filter(id =>
-            partitioner.getPartition(id) == index && !found.contains(id)
-          )
-          .map(id => absentRow(id, width))
-      )
-      hits ++ absent
-    }
+    val rows = MilvusSearch.mergedByQuery[InternalRow](
+      spark,
+      candidates,
+      parts,
+      CarriedCandidates.merge(_, _, k, metric),
+      carried(_, _, width),
+      required,
+      MilvusSearch.absentRow(_, schema.size)
+    )
     MilvusSearch.Hits(rows, schema)
   }
 
@@ -277,12 +256,7 @@ private[connector] object FrameSearch extends Logging {
       .parallelize(planned.indices, planned.size)
       .map { index =>
         val (allIds, allVectors) = held.value
-        val group = planned(index)
-        SearchQueries.Group(
-          allIds.slice(group.firstQuery, group.untilQuery),
-          allVectors,
-          group.firstQuery
-        )
+        SearchQueries.Group.of(allIds, allVectors, planned(index))
       }
   }
 
@@ -305,13 +279,6 @@ private[connector] object FrameSearch extends Logging {
       TaskContext.get().partitionId(),
       ReadLimits.DefaultArrowMaxBytes
     )
-    def stepped(step: SegmentSearch.Progress): Unit = {
-      if (step.nativeCalls != 0)
-        metrics.knowhereCalls.add(step.nativeCalls.toLong)
-      if (step.nativeNanos != 0L) metrics.knowhereNanos.add(step.nativeNanos)
-      if (step.compared != 0L) metrics.comparedPairs.add(step.compared)
-      if (step.rescans != 0L) metrics.exactRescans.add(step.rescans)
-    }
     val matrix = QueryMatrix.ofPacked(
       group.vectors,
       group.firstQuery,
@@ -369,7 +336,7 @@ private[connector] object FrameSearch extends Logging {
             metric,
             allocator.allocator,
             merger,
-            stepped,
+            metrics.record,
             Some(EngineRange.Batch.of(batch, layout, metric, function))
           )
         finally batch.close()
@@ -426,25 +393,6 @@ private[connector] object FrameSearch extends Logging {
       rows += new JoinedRow(id, row)
     }
     rows.result().iterator
-  }
-
-  private def absentRow(query: Long, width: Int): InternalRow = {
-    val row = new GenericInternalRow(width + 1)
-    row.setLong(0, query)
-    row
-  }
-
-  /** The rows of required ids when no search ran, every base column NULL. */
-  private def missing(
-      spark: SparkSession,
-      required: Option[Array[Long]],
-      width: Int
-  ): RDD[InternalRow] = required match {
-    case None => spark.sparkContext.emptyRDD[InternalRow]
-    case Some(ids) =>
-      spark.sparkContext
-        .parallelize(ids.toSeq, math.max(1, math.min(ids.length, 64)))
-        .map(absentRow(_, width))
   }
 
   /** One task for every base partition and query group: task `i` computes base

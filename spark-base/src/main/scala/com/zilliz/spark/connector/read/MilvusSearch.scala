@@ -2,6 +2,7 @@ package com.zilliz.spark.connector.read
 
 import java.util.Arrays
 import scala.jdk.CollectionConverters._
+import scala.reflect.ClassTag
 
 import org.apache.spark.{HashPartitioner, Partitioner}
 import org.apache.spark.internal.Logging
@@ -135,7 +136,7 @@ object MilvusSearch extends Logging {
     // ranking value is NULL search nothing, and all of them may be. The
     // snapshot may hold no segment.
     if (queryCount == 0L || tasks.isEmpty)
-      return Hits(missing(spark, required, resultSchema), resultSchema)
+      return Hits(missing(spark, required, resultSchema.size), resultSchema)
     require(
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
@@ -551,14 +552,9 @@ object MilvusSearch extends Logging {
         SegmentSetSearch.run(
           set,
           spec,
-          range.iterator.map { index =>
-            val group = groups(index)
-            SearchQueries.Group(
-              allIds.slice(group.firstQuery, group.untilQuery),
-              allVectors,
-              group.firstQuery
-            )
-          },
+          range.iterator.map(index =>
+            SearchQueries.Group.of(allIds, allVectors, groups(index))
+          ),
           range.size,
           planned,
           metrics
@@ -778,14 +774,9 @@ object MilvusSearch extends Logging {
     math.max(1L, math.min(queries, wanted)).toInt
   }
 
-  /** Every query's candidates become its global top-k, best first.
-    *
-    * Each task already merged its own segments, so what arrives here is one
-    * packed answer per (query, task) and the merge is a walk over two sorted
-    * lists, not an aggregation over candidates. Map-side combining is off on
-    * purpose: a task emits each of its queries once, so combining on the map
-    * side would hold every query's answer until the task ends instead of
-    * writing each one as it is packed (section 2.6).
+  /** Every query's candidates become its global top-k, best first, as rows of
+    * [[HitSchema]]; with `required`, an id that found nothing has a row whose
+    * hit columns are NULL.
     */
   private[read] def merged(
       spark: SparkSession,
@@ -794,60 +785,92 @@ object MilvusSearch extends Logging {
       metric: MetricType,
       partitions: Int,
       required: Option[Array[Long]] = None
-  ): DataFrame = {
+  ): DataFrame =
+    spark.createDataFrame(
+      mergedByQuery[Row](
+        spark,
+        candidates,
+        partitions,
+        CandidateBytes.merge(_, _, k, metric),
+        rows,
+        required,
+        id => Row(id, null, null, null, null)
+      ),
+      if (required.isEmpty) HitSchema else NullableHitSchema
+    )
+
+  /** The merge stage of either input: every query's answers merged into one,
+    * the rows `rowsOf` makes of it, and with `required` the `absent` row of
+    * each id that found nothing.
+    *
+    * Each task already merged its own segments, so what arrives here is one
+    * packed answer per (query, task) and the merge is a walk over two sorted
+    * lists, not an aggregation over candidates. Map-side combining is off on
+    * purpose: a task emits each of its queries once, so combining on the map
+    * side would hold every query's answer until the task ends instead of
+    * writing each one as it is packed (section 2.6).
+    */
+  private[read] def mergedByQuery[A: ClassTag](
+      spark: SparkSession,
+      answers: RDD[(Long, Array[Byte])],
+      partitions: Int,
+      merge: (Array[Byte], Array[Byte]) => Array[Byte],
+      rowsOf: (Long, Array[Byte]) => Iterator[A],
+      required: Option[Array[Long]],
+      absent: Long => A
+  ): RDD[A] = {
     require(partitions > 0, s"The merge needs a partition: $partitions")
     val partitioner = new HashPartitioner(partitions)
-    val combined = candidates
-      .combineByKeyWithClassTag[Array[Byte]](
-        (packed: Array[Byte]) => packed,
-        (merged: Array[Byte], packed: Array[Byte]) =>
-          CandidateBytes.merge(merged, packed, k, metric),
-        (left: Array[Byte], right: Array[Byte]) =>
-          CandidateBytes.merge(left, right, k, metric),
-        partitioner,
-        mapSideCombine = false
-      )
+    val combined = answers.combineByKeyWithClassTag[Array[Byte]](
+      (packed: Array[Byte]) => packed,
+      merge,
+      merge,
+      partitioner,
+      mapSideCombine = false
+    )
     required match {
       case None =>
-        spark.createDataFrame(
-          combined.flatMap { case (query, packed) => rows(query, packed) },
-          HitSchema
-        )
+        combined.flatMap { case (query, packed) => rowsOf(query, packed) }
       case Some(ids) =>
         // A required id that no task found anything for has no key here; the
         // partition its key would hash to says so after its own answers.
         val wanted = spark.sparkContext.broadcast(ids)
-        val hits = combined.mapPartitionsWithIndex { (index, answers) =>
+        combined.mapPartitionsWithIndex { (index, merged) =>
           val found = new java.util.HashSet[java.lang.Long]()
-          answers.flatMap { case (query, packed) =>
+          merged.flatMap { case (query, packed) =>
             found.add(query)
-            rows(query, packed)
+            rowsOf(query, packed)
           } ++ wanted.value.iterator
             .filter(id =>
               partitioner.getPartition(id) == index && !found.contains(id)
             )
-            .map(id => Row(id, null, null, null, null))
+            .map(absent)
         }
-        spark.createDataFrame(hits, NullableHitSchema)
     }
   }
 
-  /** The rows of required ids when no search ran, every hit column NULL. */
-  private def missing(
+  /** The rows of required ids when no search ran: each the id, then NULLs to
+    * make `width` columns.
+    */
+  private[read] def missing(
       spark: SparkSession,
       required: Option[Array[Long]],
-      schema: StructType
+      width: Int
   ): RDD[InternalRow] = required match {
     case None => spark.sparkContext.emptyRDD[InternalRow]
     case Some(ids) =>
-      val width = schema.size
       spark.sparkContext
         .parallelize(ids.toSeq, math.max(1, math.min(ids.length, 64)))
-        .map { id =>
-          val row = new GenericInternalRow(width)
-          row.setLong(0, id)
-          row: InternalRow
-        }
+        .map(absentRow(_, width))
+  }
+
+  /** A required id's row without a hit: the id, then NULLs to make `width`
+    * columns.
+    */
+  private[read] def absentRow(id: Long, width: Int): InternalRow = {
+    val row = new GenericInternalRow(width)
+    row.setLong(0, id)
+    row
   }
 
   /** One query's answer as the rows the result contract promises: rank from

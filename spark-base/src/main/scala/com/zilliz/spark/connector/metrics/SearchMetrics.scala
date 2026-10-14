@@ -3,6 +3,8 @@ package com.zilliz.spark.connector.metrics
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.SparkContext
 
+import com.zilliz.milvus.storage.index.SegmentSearch
+
 /** What a vector search counted.
   *
   * A search runs as RDD stages rather than as a DataSource V2 scan, so its
@@ -49,6 +51,19 @@ final class SearchMetrics private (
 
   def summary: String =
     all.map { case (name, value) => s"$name=${value.value}" }.mkString(", ")
+
+  /** One step of a search, counted as it finishes. A first-stage task runs for
+    * as long as its vectors take, and Spark carries a running task's
+    * accumulators on the executor heartbeat, so a total added at the end is a
+    * total nobody can see while it matters.
+    */
+  def record(step: SegmentSearch.Progress): Unit = {
+    if (step.nativeCalls != 0) knowhereCalls.add(step.nativeCalls.toLong)
+    if (step.nativeNanos != 0L) knowhereNanos.add(step.nativeNanos)
+    if (step.compared != 0L) comparedPairs.add(step.compared)
+    if (step.rescans != 0L) exactRescans.add(step.rescans)
+    if (step.segments != 0) segmentSearches.add(step.segments.toLong)
+  }
 }
 
 object SearchMetrics {
