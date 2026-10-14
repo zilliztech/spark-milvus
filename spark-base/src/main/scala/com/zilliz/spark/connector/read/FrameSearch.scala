@@ -154,37 +154,23 @@ private[connector] object FrameSearch extends Logging {
       .min(MaxBlockRows.toLong)
       .toInt
     val queryBytes = SearchQueries.bytes(queryCount, layout)
-    val shuffled = queries.isInstanceOf[SearchQueries.Frame] &&
-      queryBytes > limits.queriesMaxBytes
-    val delivered: RDD[SearchQueries.Group] = queries match {
-      case SearchQueries.Frame(selected, _) if shuffled =>
+    val delivery =
+      SearchQueries.Delivery.of(queries, layout, limits.queriesMaxBytes)
+    val delivered: RDD[SearchQueries.Group] = delivery match {
+      case SearchQueries.Packed(ids, vectors) =>
+        broadcastGroups(spark, ids, vectors, groups)
+      case SearchQueries.Broadcast(selected) =>
+        val (ids, vectors) =
+          SearchQueries.packOnExecutors(selected, layout, metric)
+        broadcastGroups(spark, ids, vectors, groups)
+      case SearchQueries.Shuffled(selected) =>
         MilvusSearch.packedGroups(selected, groups, metric, layout)
-      case _ =>
-        val (ids, vectors) = queries match {
-          case SearchQueries.Packed(packedIds, packedVectors) =>
-            (packedIds, packedVectors)
-          case SearchQueries.Frame(selected, _) =>
-            SearchQueries.packOnExecutors(selected, layout, metric)
-        }
-        val held = spark.sparkContext.broadcast((ids, vectors))
-        val planned = groups.toVector
-        spark.sparkContext
-          .parallelize(planned.indices, planned.size)
-          .map { index =>
-            val (allIds, allVectors) = held.value
-            val group = planned(index)
-            SearchQueries.Group(
-              allIds.slice(group.firstQuery, group.untilQuery),
-              allVectors,
-              group.firstQuery
-            )
-          }
     }
     val tasks = base.rows.getNumPartitions * groups.size
     logInfo(
       s"Search plan: DataFrame input, exact, metric=$metric, topK=$k, " +
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
-        s"${if (shuffled) "shuffle" else "broadcast"}, queryGroups=${groups.size}, " +
+        s"${if (delivery.shuffled) "shuffle" else "broadcast"}, queryGroups=${groups.size}, " +
         s"basePartitions=${base.rows.getNumPartitions}, tasks=$tasks, " +
         s"blockRows=$blockRows, rowBytes=$rowBytes"
     )
@@ -276,6 +262,28 @@ private[connector] object FrameSearch extends Logging {
     (0 until queries by size).map(first =>
       SearchPlan.QueryGroup(first, math.min(size, queries - first))
     )
+  }
+
+  /** A query set broadcast whole, as one partition for each planned group. */
+  private def broadcastGroups(
+      spark: SparkSession,
+      ids: Array[Long],
+      vectors: Array[Byte],
+      groups: Seq[SearchPlan.QueryGroup]
+  ): RDD[SearchQueries.Group] = {
+    val held = spark.sparkContext.broadcast((ids, vectors))
+    val planned = groups.toVector
+    spark.sparkContext
+      .parallelize(planned.indices, planned.size)
+      .map { index =>
+        val (allIds, allVectors) = held.value
+        val group = planned(index)
+        SearchQueries.Group(
+          allIds.slice(group.firstQuery, group.untilQuery),
+          allVectors,
+          group.firstQuery
+        )
+      }
   }
 
   /** One task: a base partition read a block at a time against one group. */

@@ -143,14 +143,8 @@ object MilvusSearch extends Logging {
 
     val budget =
       SearchBudget.of(spark, limits, searchMode == SearchMode.Index, layout, k)
-    // A set the driver packed is broadcast as it is; a frame is packed and
-    // broadcast when it fits `milvus.search.queries.max.bytes`, and otherwise
-    // travels by group with the shuffle (section 2.1).
-    val shuffled = queries match {
-      case SearchQueries.Packed(_, _) => false
-      case SearchQueries.Frame(_, count) =>
-        SearchQueries.bytes(count, layout) > limits.queriesMaxBytes
-    }
+    val delivery =
+      SearchQueries.Delivery.of(queries, layout, limits.queriesMaxBytes)
     val caseInsensitive = new CaseInsensitiveStringMap(options.asJava)
     val read = MilvusOption(caseInsensitive).readLimits
     // A block the call named is used as it is; otherwise each executor
@@ -174,7 +168,7 @@ object MilvusSearch extends Logging {
         layout,
         SearchResources.exactScanBatch(namedBatch).bytes
       ),
-      shuffled,
+      delivery.shuffled,
       // The batched distance entry is single-threaded on its task, so an
       // exact search is as parallel as its tasks (decision 28).
       splitQueries = searchMode == SearchMode.Exact,
@@ -215,7 +209,7 @@ object MilvusSearch extends Logging {
       plan,
       spec,
       queries,
-      shuffled,
+      delivery,
       tasks.size,
       comparedPairsTotal
     )
@@ -232,15 +226,14 @@ object MilvusSearch extends Logging {
     )
     val found = candidates(
       spark,
-      queries,
+      delivery,
       partitions,
       plan,
       spec,
       layout,
-      shuffled,
       metrics,
       budget.profile,
-      packProfile(budget, plan, layout, shuffled)
+      packProfile(budget, plan, layout, delivery.shuffled)
     )
     SearchProgress.watch(
       spark.sparkContext,
@@ -381,7 +374,7 @@ object MilvusSearch extends Logging {
       plan: SearchPlan.Plan,
       spec: SegmentSetSearch.Spec,
       queries: SearchQueries.Input,
-      shuffled: Boolean,
+      delivery: SearchQueries.Delivery,
       segments: Int,
       comparedPairsTotal: Long
   ): Unit = {
@@ -406,16 +399,16 @@ object MilvusSearch extends Logging {
          else "") +
         s", ${plan.estimated.size} segments estimated at half the budget"
     )
-    val delivery = queries match {
+    val delivered = delivery match {
       case SearchQueries.Packed(_, _) => "broadcast, packed on the driver"
-      case _ if shuffled              => "shuffle"
-      case _                          => "broadcast"
+      case SearchQueries.Broadcast(_) => "broadcast"
+      case SearchQueries.Shuffled(_)  => "shuffle"
     }
     logInfo(
       s"Search plan: mode=${spec.mode}, metric=${spec.metric}, topK=${spec.k}, " +
         s"queries=${queries.count}, queryBytes=${SearchQueries
             .bytes(queries.count, spec.layout)} " +
-        s"delivered by $delivery, " +
+        s"delivered by $delivered, " +
         s"queryGroups=${plan.groups.size}, segments=$segments in " +
         s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
         s"${plan.tasks} tasks, collectThreads=${spec.collectThreads}, " +
@@ -488,112 +481,132 @@ object MilvusSearch extends Logging {
     )
   }
 
-  /** The candidates of the first stage, whichever way the query set travels.
-    *
-    * A set the driver packed is broadcast as it is. A frame that fits
-    * `milvus.search.queries.max.bytes` is packed on the executors, concatenated
-    * on the driver and broadcast, and every executor keeps it whole. A larger
-    * one is packed by group on the executors, never through the driver, and
-    * each task reads the groups of its range one at a time (section 2.1).
+  /** The candidates of the first stage, the way `delivery` says the query set
+    * travels (section 2.1).
     */
   private def candidates(
       spark: SparkSession,
-      queries: SearchQueries.Input,
+      delivery: SearchQueries.Delivery,
       partitions: Seq[MilvusInputPartition],
       plan: SearchPlan.Plan,
       spec: SegmentSetSearch.Spec,
       layout: VectorLayout,
-      shuffled: Boolean,
       metrics: SearchMetrics,
       searchProfile: Option[ResourceProfile],
       packProfile: Option[ResourceProfile]
   ): RDD[(Long, Array[Byte])] = {
-    val kept = plan.kept.toVector
     val byId =
       partitions.map(partition => partition.task.segmentId -> partition).toMap
     val sets = plan.sets.map(_.map(task => byId(task.segmentId)))
-    val groups = plan.groups
-    val ranges = plan.queryRanges
-    if (!shuffled) {
-      // Packed where the rows are read: the driver gets bytes, not boxed
-      // vectors, and eight executors pack in parallel instead of one thread.
-      // A set the driver packed is broadcast as it is.
-      val (ids, vectors) = queries match {
-        case SearchQueries.Packed(packedIds, packedVectors) =>
-          (packedIds, packedVectors)
-        case SearchQueries.Frame(frame, _) =>
-          SearchQueries.packOnExecutors(frame, layout, spec.metric)
-      }
-      require(
-        ids.length.toLong == groups.map(_.queries.toLong).sum,
-        s"The query set packed to ${ids.length} queries, but the plan counted ${groups.map(_.queries.toLong).sum}"
-      )
-      val delivered = spark.sparkContext.broadcast((ids, vectors))
-      val work = for {
-        (set, index) <- sets.zipWithIndex
-        range <- ranges
-      } yield (set, kept.lift(index).flatten, range)
-      val searched = spark.sparkContext.parallelize(work, plan.tasks).flatMap {
-        case (set, planned, range) =>
-          val (allIds, allVectors) = delivered.value
-          SegmentSetSearch.run(
-            set,
-            spec,
-            range.iterator.map { index =>
-              val group = groups(index)
-              SearchQueries.Group(
-                allIds.slice(group.firstQuery, group.untilQuery),
-                allVectors,
-                group.firstQuery
-              )
-            },
-            range.size,
-            planned,
-            metrics
-          )
-      }
-      searchProfile.fold(searched)(searched.withResources)
-    } else {
-      // A set the driver packed went to the broadcast above.
-      val selected = queries match {
-        case SearchQueries.Frame(frame, _) => frame
-        case SearchQueries.Packed(_, _) =>
-          throw new IllegalStateException(
-            "A query set packed on the driver is broadcast, not read again"
-          )
-      }
-      val delivered = packedGroups(
-        selected,
-        plan.groups,
-        spec.metric,
-        layout,
-        packProfile
-      )
-      require(
-        delivered.getNumPartitions == groups.size,
-        s"The packed query set is ${groups.size} groups, not " +
-          s"${delivered.getNumPartitions} partitions"
-      )
-      // Task `index` is set `index / ranges` and range `index % ranges`, which
-      // is how `SearchQueryRanges` numbers its partitions. The task learns its
-      // set from that index before it reads a group, and the sets are
-      // broadcast once for the executor rather than once for each task.
-      val held = spark.sparkContext.broadcast(sets.toVector)
-      val rangeCount = ranges.size
-      val rangeSizes = ranges.map(_.size).toVector
-      val searched = new SearchQueryRanges(delivered, sets.size, ranges)
-        .mapPartitionsWithIndex { (index, streamed) =>
-          SegmentSetSearch.run(
-            held.value(index / rangeCount),
-            spec,
-            streamed,
-            rangeSizes(index % rangeCount),
-            kept.lift(index / rangeCount).flatten,
-            metrics
-          )
-        }
-      searchProfile.fold(searched)(searched.withResources)
+    val searched = delivery match {
+      case SearchQueries.Packed(ids, vectors) =>
+        broadcastSearch(spark, ids, vectors, sets, plan, spec, metrics)
+      case SearchQueries.Broadcast(selected) =>
+        // Packed where the rows are read: the driver gets bytes, not boxed
+        // vectors, and eight executors pack in parallel instead of one thread.
+        val (ids, vectors) =
+          SearchQueries.packOnExecutors(selected, layout, spec.metric)
+        broadcastSearch(spark, ids, vectors, sets, plan, spec, metrics)
+      case SearchQueries.Shuffled(selected) =>
+        shuffledSearch(
+          spark,
+          selected,
+          sets,
+          plan,
+          spec,
+          layout,
+          metrics,
+          packProfile
+        )
     }
+    searchProfile.fold(searched)(searched.withResources)
+  }
+
+  /** The first stage over a query set broadcast whole: every executor keeps it,
+    * and a task slices the groups of its range out of it.
+    */
+  private def broadcastSearch(
+      spark: SparkSession,
+      ids: Array[Long],
+      vectors: Array[Byte],
+      sets: Seq[Seq[MilvusInputPartition]],
+      plan: SearchPlan.Plan,
+      spec: SegmentSetSearch.Spec,
+      metrics: SearchMetrics
+  ): RDD[(Long, Array[Byte])] = {
+    val groups = plan.groups
+    require(
+      ids.length.toLong == groups.map(_.queries.toLong).sum,
+      s"The query set packed to ${ids.length} queries, but the plan counted ${groups.map(_.queries.toLong).sum}"
+    )
+    val kept = plan.kept.toVector
+    val delivered = spark.sparkContext.broadcast((ids, vectors))
+    val work = for {
+      (set, index) <- sets.zipWithIndex
+      range <- plan.queryRanges
+    } yield (set, kept.lift(index).flatten, range)
+    spark.sparkContext.parallelize(work, plan.tasks).flatMap {
+      case (set, planned, range) =>
+        val (allIds, allVectors) = delivered.value
+        SegmentSetSearch.run(
+          set,
+          spec,
+          range.iterator.map { index =>
+            val group = groups(index)
+            SearchQueries.Group(
+              allIds.slice(group.firstQuery, group.untilQuery),
+              allVectors,
+              group.firstQuery
+            )
+          },
+          range.size,
+          planned,
+          metrics
+        )
+    }
+  }
+
+  /** The first stage over a query set packed by group into a shuffle: a task
+    * reads the groups of its range one at a time.
+    */
+  private def shuffledSearch(
+      spark: SparkSession,
+      selected: DataFrame,
+      sets: Seq[Seq[MilvusInputPartition]],
+      plan: SearchPlan.Plan,
+      spec: SegmentSetSearch.Spec,
+      layout: VectorLayout,
+      metrics: SearchMetrics,
+      packProfile: Option[ResourceProfile]
+  ): RDD[(Long, Array[Byte])] = {
+    val groups = plan.groups
+    val delivered =
+      packedGroups(selected, groups, spec.metric, layout, packProfile)
+    require(
+      delivered.getNumPartitions == groups.size,
+      s"The packed query set is ${groups.size} groups, not " +
+        s"${delivered.getNumPartitions} partitions"
+    )
+    // Task `index` is set `index / ranges` and range `index % ranges`, which
+    // is how `SearchQueryRanges` numbers its partitions. The task learns its
+    // set from that index before it reads a group, and the sets are
+    // broadcast once for the executor rather than once for each task.
+    val kept = plan.kept.toVector
+    val held = spark.sparkContext.broadcast(sets.toVector)
+    val ranges = plan.queryRanges
+    val rangeCount = ranges.size
+    val rangeSizes = ranges.map(_.size).toVector
+    new SearchQueryRanges(delivered, sets.size, ranges)
+      .mapPartitionsWithIndex { (index, streamed) =>
+        SegmentSetSearch.run(
+          held.value(index / rangeCount),
+          spec,
+          streamed,
+          rangeSizes(index % rangeCount),
+          kept.lift(index / rangeCount).flatten,
+          metrics
+        )
+      }
   }
 
   /** The query set packed on the executors, one partition per query group, each
