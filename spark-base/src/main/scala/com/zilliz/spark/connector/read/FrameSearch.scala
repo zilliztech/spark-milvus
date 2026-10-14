@@ -127,18 +127,20 @@ private[connector] object FrameSearch extends Logging {
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
     )
     val rowBytes = rowWidth(types, dimension)
-    // One task per core here (the frame search runs under Spark's own slots),
-    // so a group is sized for one core within that task's share of the heap.
-    val (_, taskHeap) = MilvusSearch.executorMemory(spark)
+    // The frame search and its merge run under Spark's own task slots, so a
+    // task's share of the unmanaged heap is the queries' budget at that
+    // concurrency, as for a Milvus table input's merge.
+    val (_, heap) = MilvusSearch.executorMemory(spark)
+    val taskHeap = SearchResources.queryBudget(
+      heap,
+      MilvusSearch.memoryFraction(spark),
+      TaskResources.of(spark).tasksPerExecutor
+    )
+    // One task per core here, so a group is sized for one core within that
+    // task's share of the heap.
     val group = SearchResources.groupBytes(
       limits.groupMaxBytes,
-      SearchResources
-        .queryBudget(
-          taskHeap,
-          MilvusSearch.memoryFraction(spark),
-          TaskResources.of(spark).tasksPerExecutor
-        )
-        .bytes,
+      taskHeap.bytes,
       1,
       SearchPlan.bytesPerQuery(layout, k) + k.toLong * rowBytes
     )
@@ -206,21 +208,13 @@ private[connector] object FrameSearch extends Logging {
           metrics
         )
     )
-    // The merge runs under Spark's own task slots, so a task's share of the
-    // unmanaged heap is the queries' budget at that concurrency, as for a
-    // Milvus table input; here every candidate carries its row.
-    val (_, heap) = MilvusSearch.executorMemory(spark)
-    val stageHeap = SearchResources.queryBudget(
-      heap,
-      MilvusSearch.memoryFraction(spark),
-      TaskResources.of(spark).tasksPerExecutor
-    )
+    // Here every candidate carries its row.
     val parts = MilvusSearch.mergePartitions(
       spark,
       queryCount,
       math.max(1, tasks),
       k,
-      stageHeap.bytes,
+      taskHeap.bytes,
       CandidateBytes.Width.toLong + 4L + rowBytes
     )
     val partitioner = new HashPartitioner(parts)
