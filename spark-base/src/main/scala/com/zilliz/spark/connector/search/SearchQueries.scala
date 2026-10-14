@@ -2,7 +2,6 @@ package com.zilliz.spark.connector.search
 
 import java.lang.{Float => JavaFloat}
 import java.util.Arrays
-import scala.collection.mutable
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.resource.ResourceProfile
@@ -14,8 +13,7 @@ import com.zilliz.milvus.storage.vector.{QueryMatrix, SearchPlan}
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** The query set a search takes: `query_id` and `vector`, the query rows of a
-  * nearest-by join numbered by their position, packed into the bytes Knowhere
-  * reads.
+  * nearest-by join with stable ids, packed into the bytes Knowhere reads.
   *
   * The same packing serves both delivery paths of section 2.1: when the set
   * fits `milvus.search.queries.max.bytes` the executors pack their partitions
@@ -261,26 +259,23 @@ private[search] object SearchQueries {
     */
   private val PackChunkRows = 2048
 
-  /** The whole query set packed on the executors, one block per partition, and
-    * brought to the driver as bytes: what the broadcast path ships.
+  /** The whole query set packed on the executors in bounded chunks and brought
+    * to the driver as bytes: what the broadcast path ships.
     *
-    * Executors pack primitive query arrays in parallel. The driver only
-    * concatenates the packed blocks, preserving partition order: vector `i`
-    * belongs to query `ids(i)`.
+    * Collect preserves partition order and each partition's iterator order. The
+    * driver concatenates these chunks once: vector `i` belongs to query
+    * `ids(i)`. Collect still materializes all chunks before that final copy.
     */
   def packOnExecutors(
       selected: RDD[(Long, Array[Float])],
       layout: VectorLayout,
       metric: MetricType
   ): (Array[Long], Array[Byte]) = {
-    val blocks = selected
-      .mapPartitionsWithIndex { (partition, rows) =>
-        Iterator.single((partition, packPartition(rows, layout, metric)))
-      }
+    val chunks = selected
+      .mapPartitions(rows => packedChunks(rows, layout, metric))
       .collect()
-      .sortBy(_._1)
-    val queries = blocks.iterator.map(_._2._1.length.toLong).sum
-    val total = blocks.iterator.map(_._2._2.length.toLong).sum
+    val queries = chunks.iterator.map(_._1.length.toLong).sum
+    val total = chunks.iterator.map(_._2.length.toLong).sum
     require(
       total <= Int.MaxValue,
       s"The packed query set is $total bytes, over what one array holds; lower ${MilvusOption.SearchQueriesMaxBytes} so the set travels with the shuffle"
@@ -289,53 +284,36 @@ private[search] object SearchQueries {
     val vectors = new Array[Byte](total.toInt)
     var idAt = 0
     var byteAt = 0
-    blocks.foreach { case (_, (blockIds, blockBytes)) =>
-      System.arraycopy(blockIds, 0, ids, idAt, blockIds.length)
-      System.arraycopy(blockBytes, 0, vectors, byteAt, blockBytes.length)
-      idAt += blockIds.length
-      byteAt += blockBytes.length
+    chunks.foreach { case (chunkIds, chunkBytes) =>
+      System.arraycopy(chunkIds, 0, ids, idAt, chunkIds.length)
+      System.arraycopy(chunkBytes, 0, vectors, byteAt, chunkBytes.length)
+      idAt += chunkIds.length
+      byteAt += chunkBytes.length
     }
     (ids, vectors)
   }
 
-  /** One partition's query arrays packed on the executor that read them. Rows
-    * are taken as they come and never retained: a chunk of primitive arrays is
-    * packed and dropped before the next is read.
+  /** Each bounded chunk is encoded before the next is read; empty partitions
+    * emit nothing. Ids and vectors stay together in input order.
     */
-  private[search] def packPartition(
+  private[search] def packedChunks(
       rows: Iterator[(Long, Array[Float])],
       layout: VectorLayout,
       metric: MetricType
-  ): (Array[Long], Array[Byte]) = {
-    val ids = mutable.ArrayBuilder.make[Long]
-    val chunks = mutable.ArrayBuffer.empty[Array[Byte]]
-    var total = 0L
-    val floats = mutable.ArrayBuffer.empty[Array[Float]]
-    def flush(): Unit = {
-      val packed = QueryMatrix.packFloats(floats.toSeq, layout)
-      floats.clear()
-      if (packed.nonEmpty) {
-        chunks += packed
-        total += packed.length
+  ): Iterator[(Array[Long], Array[Byte])] =
+    rows
+      .map(row => readQuery(row, layout, metric))
+      .grouped(PackChunkRows)
+      .map { chunk =>
+        val ids = new Array[Long](chunk.size)
+        var at = 0
+        val floats = chunk.map { case (id, values) =>
+          ids(at) = id
+          at += 1
+          values
+        }
+        (ids, QueryMatrix.packFloats(floats, layout))
       }
-    }
-    var index = 0
-    while (rows.hasNext) {
-      val (id, values) = readQuery(rows.next(), layout, metric)
-      floats += values
-      ids += id
-      index += 1
-      if (index % PackChunkRows == 0) flush()
-    }
-    flush()
-    val packed = new Array[Byte](Math.toIntExact(total))
-    var at = 0
-    chunks.foreach { chunk =>
-      System.arraycopy(chunk, 0, packed, at, chunk.length)
-      at += chunk.length
-    }
-    (ids.result(), packed)
-  }
 
   /** The stable query id and its validated vector. */
   private def readQuery(

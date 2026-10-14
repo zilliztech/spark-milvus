@@ -104,8 +104,8 @@ object ConcurrentRangeReads extends Logging {
 
   /** Reads every range and calls `consume` with each one's bytes, in list
     * order, on the calling thread. A failed read fails the call with that
-    * read's own exception; ranges already requested finish in the background
-    * and give their bytes back to the budget when they do.
+    * read's own exception. Every submitted read finishes before this returns,
+    * so the caller can then close the borrowed store, even after a failure.
     */
   def foreach(store: ObjectStore, ranges: IndexedSeq[Range])(
       consume: (Range, Array[Byte]) => Unit
@@ -122,6 +122,7 @@ object ConcurrentRangeReads extends Logging {
     val held = new Array[Int](count)
     var issued = 0
     var next = 0
+    var failure: Throwable = null
     def issue(index: Int, permits: Int): Unit = {
       val range = ranges(index)
       try
@@ -176,20 +177,39 @@ object ConcurrentRangeReads extends Logging {
         }
         next += 1
       }
+    } catch {
+      case cause: Throwable => failure = cause
     } finally {
-      // Requested and not consumed: each read's bytes return to the budget
-      // when the read ends, whether or not this call is still waiting for it.
+      // Native reads cannot be cancelled. join waits through interruption and
+      // leaves its flag set; every borrower must finish before the store owner
+      // regains control. A failed consume already released its own permits.
       var index = next
       while (index < issued) {
         val permits = held(index)
         if (permits > 0) {
-          held(index) = 0
-          reads(index).whenComplete((_: Array[Byte], _: Throwable) =>
+          try reads(index).join()
+          catch {
+            case thrown: Throwable =>
+              val cause = thrown match {
+                case wrapped: CompletionException if wrapped.getCause != null =>
+                  wrapped.getCause
+                case other => other
+              }
+              if (failure == null) failure = cause
+              else if (cause ne failure) failure.addSuppressed(cause)
+          } finally {
             budget.release(permits)
-          )
+            held(index) = 0
+            reads(index) = null
+          }
         }
         index += 1
       }
+    }
+    if (failure != null) {
+      if (failure.isInstanceOf[InterruptedException])
+        Thread.currentThread().interrupt()
+      throw failure
     }
   }
 

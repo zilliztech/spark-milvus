@@ -37,7 +37,6 @@ class MilvusRowPartitionReader(
 ) extends RowOffsetReader
     with Logging {
 
-  private val applyDeletes: Boolean = setup.appliesDeletes
   private val arrowColumnNames: Map[String, String] = setup.arrowColumnNames
 
   // Native handles start out null so a constructor that throws can release
@@ -88,14 +87,8 @@ class MilvusRowPartitionReader(
           .orNull
   }
 
-  private def isDeleted(batch: VectorSchemaRoot, rowIndex: Int): Boolean =
-    applyDeletes && !setup.deletePlan.isEmpty && setup.isDeleted(
-      batch,
-      rowIndex
-    )
-
   private def isExcluded(batch: VectorSchemaRoot, rowIndex: Int): Boolean =
-    isDeleted(batch, rowIndex) ||
+    setup.isDeleted(batch, rowIndex) ||
       (currentFilterBitmap != null &&
         currentFilterBitmap.isExcluded(rowIndex))
 

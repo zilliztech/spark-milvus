@@ -1,6 +1,6 @@
 package com.zilliz.milvus.storage.vector
 
-import java.lang.{Float => JavaFloat}
+import java.lang.{Double => JavaDouble, Float => JavaFloat}
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util.BitSet
 
@@ -105,7 +105,7 @@ class EngineRangeTest extends AnyFunSuite with Matchers {
 
   private def float32Rows(rows: Seq[Float]*): ByteBuffer = {
     val buffer = ByteBuffer
-      .allocate(rows.size * float32.rowBytes)
+      .allocate(rows.map(_.size).sum * 4)
       .order(ByteOrder.nativeOrder())
     rows.flatten.foreach(buffer.putFloat)
     buffer
@@ -147,6 +147,61 @@ class EngineRangeTest extends AnyFunSuite with Matchers {
     // Of the rows Knowhere scores under L2, (1, 2) is the longest; the NaN and
     // the too large rows are the function's, and the excluded one is not read.
     l2Norm shouldBe 5.0
+  }
+
+  test("float32 L2 norms keep the scalar formula's bits and exclusions") {
+    val rows = Seq(
+      Seq(0f, -0.0f),
+      Seq(1.25f, -2.5f, 3.75f),
+      Seq(
+        JavaFloat.MIN_VALUE,
+        -JavaFloat.MIN_NORMAL,
+        Math.nextDown(JavaFloat.MIN_NORMAL)
+      ),
+      // Adding each 1 after 2^54 rounds it away; adding them first does not.
+      Seq(134217728f, 1f, 1f, 1f, 1f),
+      Seq(1f, 1f, 1f, 1f, 134217728f),
+      Seq(Math.nextDown(TwoTo33), -Math.nextDown(TwoTo33), 1f),
+      Seq(TwoTo33, 1f),
+      Seq(-TwoTo33, 1f),
+      Seq(JavaFloat.MAX_VALUE, 1f),
+      Seq(Float.NaN, 1f),
+      Seq(Float.PositiveInfinity, 1f),
+      Seq(Float.NegativeInfinity, 1f)
+    )
+    rows.foreach { values =>
+      withClue(s"$values: ") {
+        val inRange = values.forall(value =>
+          JavaFloat.isFinite(value) && math.abs(value) < TwoTo33
+        )
+        val expected =
+          if (inRange)
+            values.foldLeft(0.0) { (sum, value) =>
+              sum + value.toDouble * value.toDouble
+            }
+          else 0.0
+        val (excluded, ranked, norm) = EngineRange.classify(
+          float32Rows(values),
+          1,
+          new BitSet(),
+          VectorLayout(VectorElementType.Float32, values.size),
+          MetricType.L2
+        )
+        excluded shouldBe (if (inRange) new BitSet() else excluding(0))
+        ranked.toSeq shouldBe (if (inRange) Seq.empty[Int] else Seq(0))
+        JavaDouble.doubleToRawLongBits(norm) shouldBe
+          JavaDouble.doubleToRawLongBits(expected)
+      }
+    }
+
+    // Even an in-range row with a larger norm is not read when excluded.
+    val buffer = float32Rows(Seq(3f, 4f), Seq(100f, 100f))
+    buffer.limit(float32.rowBytes)
+    val (excluded, ranked, norm) =
+      EngineRange.classify(buffer, 2, excluding(1), float32, MetricType.L2)
+    excluded shouldBe excluding(1)
+    ranked shouldBe empty
+    norm shouldBe 25.0
   }
 
   test("float16 and bfloat16 rows are judged in their own bits") {

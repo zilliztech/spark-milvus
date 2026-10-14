@@ -1012,6 +1012,42 @@ class NearestByJoinTest
       }
   }
 
+  test("unranked queries keep Spark's fallback when no query is searched") {
+    needsNative()
+    val query = rawQueries(
+      ("none", null),
+      ("hole", Seq[java.lang.Float](null, 1f)),
+      ("large", boxed(math.pow(2, 40).toFloat, 1f))
+    )
+    for {
+      (where, side, read) <- whereQueriesLive(query)
+      joinType <- Seq("inner", "leftouter")
+      mode <- Seq("exact", "approx")
+    } withClue(s"$where $joinType $mode: ") {
+      val taken = nearest(side, docs(read), mode = mode, joinType = joinType)
+        .select(col("qid"), col("id"))
+      val found = taken
+        .collect()
+        .map(row =>
+          row.getString(0) -> (if (row.isNullAt(1)) -1L else row.getLong(1))
+        )
+        .toSeq
+        .sorted
+      found shouldBe pairs(bySpark(query, docs(), joinType = joinType))
+      found.count(_._1 == "large") shouldBe 3
+      found.filter(_._1 != "large") shouldBe
+        (if (joinType == "leftouter") Seq("hole" -> -1L, "none" -> -1L)
+         else Seq.empty)
+      val metrics = node(taken).getOrElse(fail("not taken over")).metrics
+      metrics(NearestByMetrics.SearchedQueries).value shouldBe 0L
+      metrics(NearestByMetrics.SparkQueries).value shouldBe 1L
+      metrics(NearestByMetrics.UnrankedQueries).value shouldBe 2L
+      metrics(NearestByMetrics.IndexSegments).value shouldBe 0L
+      metrics(NearestByMetrics.ExactSegments).value shouldBe 0L
+      metrics(NearestByMetrics.OutputRows).value shouldBe found.size.toLong
+    }
+  }
+
   /** Each standard query's k nearest live rows of the base, as (qid, id),
     * scored in double as the functions define them; COSINE leaves out a zero
     * vector, whose cosine is NULL. `from` keeps the rows of the base the join

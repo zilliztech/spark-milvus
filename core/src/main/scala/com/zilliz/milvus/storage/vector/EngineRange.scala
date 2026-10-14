@@ -247,7 +247,7 @@ object EngineRange {
   /** The rows of `buffer` Knowhere does not score -- `excluded`, the zero rows
     * under COSINE, the rows outside the range -- and, of those, the rows the
     * function scores; and under L2 over float32 rows, the largest squared norm
-    * of the rows Knowhere scores, read while each is in the cache. A row
+    * of the rows Knowhere scores, accumulated in the same traversal. A row
     * already excluded is not read.
     */
   private[vector] def classify(
@@ -264,13 +264,25 @@ object EngineRange {
     var largestSquaredNorm = 0.0
     var current = excluded.nextClearBit(0)
     while (current < rows) {
-      row(buffer, current * layout.rowBytes, layout, metric) match {
-        case Engine =>
-          if (norms) {
-            val norm =
-              squaredNorm(buffer, current * layout.rowBytes, layout.dimension)
-            if (norm > largestSquaredNorm) largestSquaredNorm = norm
+      var norm = 0.0
+      val kind =
+        if (norms) {
+          var largest = 0
+          var at = current * layout.rowBytes
+          val end = at + layout.rowBytes
+          while (at < end) {
+            val bits = buffer.getInt(at)
+            val magnitude = bits & 0x7fffffff
+            if (magnitude > largest) largest = magnitude
+            val value = JavaFloat.intBitsToFloat(bits).toDouble
+            norm += value * value
+            at += 4
           }
+          float32(largest, metric)
+        } else row(buffer, current * layout.rowBytes, layout, metric)
+      kind match {
+        case Engine =>
+          if (norm > largestSquaredNorm) largestSquaredNorm = norm
         case Zero => engineExcluded.set(current)
         case _ =>
           engineExcluded.set(current)
@@ -279,22 +291,5 @@ object EngineRange {
       current = excluded.nextClearBit(current + 1)
     }
     (engineExcluded, ranked.result(), largestSquaredNorm)
-  }
-
-  /** The sum of the squares of a float32 row's elements, in double. */
-  private def squaredNorm(
-      buffer: ByteBuffer,
-      offset: Int,
-      dimension: Int
-  ): Double = {
-    val end = offset + 4 * dimension
-    var sum = 0.0
-    var at = offset
-    while (at < end) {
-      val value = buffer.getFloat(at).toDouble
-      sum += value * value
-      at += 4
-    }
-    sum
   }
 }

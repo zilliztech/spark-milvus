@@ -167,7 +167,13 @@ private[connector] object NearestByQueryRows {
       if (counts.bySpark == 0L) None else Some(toSpark)
     }
 
-    def number(): RDD[(InternalRow, Long)] = rows.zipWithIndex()
+    // Association ids may have gaps; only packed group positions are dense.
+    def number(): RDD[(InternalRow, Long)] = rows.zipWithUniqueId()
+
+    def keptRows: RDD[InternalRow] = {
+      val judge = kind
+      rows.filter(judge(_) != QueryVector.BySpark)
+    }
 
     def vectors(
         numbered: RDD[(InternalRow, Long)]
@@ -214,7 +220,7 @@ private[connector] object NearestByQueryRows {
     source match {
       case Held(rows)     => local(rows)
       case Computed(rows) =>
-        // Count the cached copy before zipWithIndex can run its own job.
+        // Classification and both sides of the final join share owned rows.
         val kept = rows.map(_.copy()).persist(StorageLevel.MEMORY_AND_DISK)
         try {
           val judged = countKinds(kept, types, judge, searcher.packedBytes)
