@@ -1,8 +1,7 @@
 package com.zilliz.milvus.storage.vector
 
+import java.nio.{ByteBuffer, ByteOrder}
 import java.util.BitSet
-
-import org.apache.arrow.memory.BufferAllocator
 
 /** A batch of vectors as a search computes over it, whichever input it came
   * from: `rows` vectors laid out end to end in a buffer Knowhere reads, the
@@ -10,7 +9,7 @@ import org.apache.arrow.memory.BufferAllocator
   * `firstRow + i` of the unit is row `i` of the batch
   * (docs/design/architecture/table-version.html section 3). A Milvus segment's
   * batches come from `SegmentVectors`, a DataFrame input's from
-  * [[VectorBatch.ofFloats]].
+  * [[VectorBatch.borrow]].
   */
 trait VectorBatch extends AutoCloseable {
   def base: KnowhereBuffers.Base
@@ -46,31 +45,34 @@ object VectorBatch {
     def readCost: ReadCost
   }
 
-  /** Float vectors of `dimension` elements as a batch that owns its buffer: row
-    * `i` is `vectors(i)`, and a null one is excluded.
+  /** Borrows the remaining bytes of a direct buffer, containing `rows` vectors
+    * in the search's layout. The caller owns the buffer and exclusion bitmap,
+    * and may reuse them only after the synchronous scan returns. Closing this
+    * batch does not release the borrowed memory.
     */
-  def ofFloats(
-      vectors: Array[Array[Float]],
+  def borrow(
+      buffer: ByteBuffer,
       rows: Int,
-      dimension: Int,
       firstRow: Long,
-      allocator: BufferAllocator
+      excluded: BitSet
   ): VectorBatch = {
-    val excluded = new BitSet(rows)
-    var row = 0
-    while (row < rows) {
-      if (vectors(row) == null) excluded.set(row)
-      row += 1
-    }
-    new Owned(
-      KnowhereBuffers.ofFloats(vectors, rows, dimension, allocator),
+    require(buffer.isDirect, "A borrowed vector buffer must be direct")
+    require(rows >= 0, s"A batch holds $rows rows")
+    require(excluded.length() <= rows, "Excluded rows must belong to the batch")
+    new Borrowed(
+      new KnowhereBuffers.Base(
+        buffer.slice().order(ByteOrder.nativeOrder()),
+        rows,
+        true,
+        None
+      ),
       excluded,
       firstRow,
       rows
     )
   }
 
-  private final class Owned(
+  private final class Borrowed(
       val base: KnowhereBuffers.Base,
       val excluded: BitSet,
       val firstRow: Long,

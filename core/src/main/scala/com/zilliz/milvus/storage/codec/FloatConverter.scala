@@ -1,22 +1,17 @@
 package com.zilliz.milvus.storage.codec
 
+import java.lang.{Float => JavaFloat}
 import java.nio.{ByteBuffer, ByteOrder}
 
 import com.zilliz.milvus.storage.DataParseException
 
 object FloatConverter {
-  private def isFiniteFloat16Input(value: Float): Boolean =
-    !value.isNaN && !value.isInfinite
+  def toFloat16Bytes(value: Float): Seq[Byte] =
+    littleEndianBytes(floatToFloat16Bits(value))
 
-  private def isWithinBFloat16Range(value: Float): Boolean = {
-    // bfloat16 has 8 exponent bits, same as float32
-    // so it can represent the same range as float32
-    // but with less precision
-    !value.isNaN && !value.isInfinite
-  }
-
-  def toFloat16Bytes(value: Float): Seq[Byte] = {
-    if (!isFiniteFloat16Input(value)) {
+  /** IEEE-754 float16 bits, without allocating a per-element byte container. */
+  def floatToFloat16Bits(value: Float): Int = {
+    if (!JavaFloat.isFinite(value)) {
       throw new DataParseException(
         s"Value $value is not a finite float16 input"
       )
@@ -26,7 +21,7 @@ object FloatConverter {
     // round-to-nearest-even, including subnormal values. Truncating the
     // mantissa here makes normal ingestion produce different bytes from
     // Milvus import/backfill for values such as 0.3f and 0.7f.
-    val bits = java.lang.Float.floatToRawIntBits(value)
+    val bits = JavaFloat.floatToRawIntBits(value)
     val sign = (bits >>> 16) & 0x8000
     val exponent = (bits >>> 23) & 0xff
     val mantissa = bits & 0x7fffff
@@ -38,7 +33,7 @@ object FloatConverter {
       )
     }
 
-    val f16Bits = if (halfExponent <= 0) {
+    if (halfExponent <= 0) {
       if (halfExponent < -10) {
         sign
       } else {
@@ -69,39 +64,24 @@ object FloatConverter {
       }
       half
     }
-
-    // Create byte array in little-endian format (low byte first)
-    val bytes = new Array[Byte](2)
-    bytes(0) = (f16Bits & 0xff).toByte // Low byte
-    bytes(1) = ((f16Bits >>> 8) & 0xff).toByte // High byte
-    bytes.toSeq
   }
 
-  def toBFloat16Bytes(value: Float): Seq[Byte] = {
-    if (!isWithinBFloat16Range(value)) {
+  def toBFloat16Bytes(value: Float): Seq[Byte] =
+    littleEndianBytes(floatToBfloat16Bits(value))
+
+  /** Bfloat16 bits, retaining float32's upper 16 bits without rounding. */
+  def floatToBfloat16Bits(value: Float): Int = {
+    if (!JavaFloat.isFinite(value)) {
       throw new DataParseException(
         s"Value $value is out of bfloat16 range"
       )
     }
 
-    // Get raw 32-bit representation
-    val intValue = java.lang.Float.floatToRawIntBits(value)
-
-    // bfloat16 preserves the sign bit, all 8 exponent bits, and the top 7 bits of the fraction
-    // Create byte array in big-endian format (high byte first)
-    // val bytes = new Array[Byte](2)
-    // bytes(0) = ((intValue >>> 24) & 0xff).toByte
-    // bytes(1) = ((intValue >>> 16) & 0xff).toByte
-    // bytes.toSeq
-
-    // Create byte array in little-endian format (low byte first)
-    val bytes = new Array[Byte](2)
-    bytes(0) =
-      ((intValue >>> 16) & 0xff).toByte // Low byte (middle 8 bits of float32)
-    bytes(1) =
-      ((intValue >>> 24) & 0xff).toByte // High byte (top 8 bits of float32)
-    bytes.toSeq
+    JavaFloat.floatToRawIntBits(value) >>> 16
   }
+
+  private def littleEndianBytes(bits: Int): Seq[Byte] =
+    Array(bits.toByte, (bits >>> 8).toByte).toSeq
 
   def fromBFloat16Bytes(bytes: Seq[Byte]): Float = {
     if (bytes.length != 2) {
@@ -122,7 +102,7 @@ object FloatConverter {
   def bfloat16BitsToFloat(bits: Int): Float = {
     // bfloat16 has float32's exponent range and its mantissa is float32's upper
     // part, so widening is a shift with zero padding.
-    java.lang.Float.intBitsToFloat((bits & 0xffff) << 16)
+    JavaFloat.intBitsToFloat((bits & 0xffff) << 16)
   }
 
   def fromFloat16Bytes(bytes: Seq[Byte]): Float = {
@@ -180,7 +160,7 @@ object FloatConverter {
     // Combine float32 components into a 32-bit integer
     val float32Bits = (float32Sign << 31) | (float32Exp << 23) | float32Frac
 
-    java.lang.Float.intBitsToFloat(float32Bits)
+    JavaFloat.intBitsToFloat(float32Bits)
   }
 
   def toFloatBytes(value: Float): Seq[Byte] = {

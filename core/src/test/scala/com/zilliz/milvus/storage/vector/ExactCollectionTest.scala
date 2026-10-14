@@ -42,7 +42,7 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
       val block = new AtomicBoolean(false)
       val matrix =
         QueryMatrix.ofFloats(Seq.fill(8)(Array(0f, 0f)), layout, allocator)
-      val batch = VectorBatch.ofFloats(
+      val batch = VectorBatchFixture.floats(
         Array(Array(Float.PositiveInfinity, 0f)),
         1,
         2,
@@ -161,7 +161,7 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
       if (row % 19 == 0) null else Array(Float.PositiveInfinity, row.toFloat)
     }
     val batch =
-      VectorBatch.ofFloats(vectors, vectors.length, 2, 100L, allocator)
+      VectorBatchFixture.floats(vectors, vectors.length, 2, 100L, allocator)
     val queries = Seq(-1f, 42f, 3000f, 4999f)
     val matrix =
       QueryMatrix.ofFloats(queries.map(q => Array(q, 0f)), layout, allocator)

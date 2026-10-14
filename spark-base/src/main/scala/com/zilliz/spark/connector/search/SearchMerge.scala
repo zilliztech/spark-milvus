@@ -18,24 +18,16 @@ import com.zilliz.milvus.storage.vector.CandidateBytes
   * record of that query's best k; the merge combines a query's records, one per
   * task, into its global top k by query id over an RDD shuffle
   * (docs/design/architecture/vector-search.html sections 2.1 and 2.6). A Milvus
-  * table input merges `CandidateBytes` into rows of [[HitSchema]], which its
-  * take stage extends with the base columns; a DataFrame input's candidates
+  * table input merges `CandidateBytes` into addresses of [[HitSchema]], which
+  * its take stage reads for the base columns; a DataFrame input's candidates
   * carry their rows (`CarriedCandidates`), so its merge gives the hits whole.
   */
 private[search] object SearchMerge {
 
-  /** What a Milvus search gives back: each query's hits with the output columns
-    * asked for, as rows of `schema`. An iterator of these rows may hand the
-    * same object back with new values, so a consumer that keeps a row copies
-    * it.
+  /** Each query's selected row addresses. Scores are needed only until the
+    * global top-k is settled; the take reads the selected addresses.
     */
-  final case class Hits(rows: RDD[InternalRow], schema: StructType)
-
-  /** What a Milvus table input's search returns before the output columns, and
-    * the one place that shape is written down: [[SearchResult]] names the
-    * columns, so an empty result and a merged one cannot drift apart.
-    */
-  val HitSchema: StructType = Encoders.product[SearchResult].schema
+  val HitSchema: StructType = Encoders.product[SearchHit].schema
 
   /** The hit columns when some query is required to appear without a hit: the
     * columns of the hit are NULL in its row.
@@ -48,8 +40,8 @@ private[search] object SearchMerge {
   )
 
   /** A Milvus table input's merge: every query's candidates become its global
-    * top-k, best first, as rows of [[HitSchema]]; with `required`, an id that
-    * found nothing has a row whose hit columns are NULL.
+    * top-k addresses, best first, as rows of [[HitSchema]]; with `required`, an
+    * id that found nothing has a row whose hit columns are NULL.
     */
   def merged(
       spark: SparkSession,
@@ -67,7 +59,7 @@ private[search] object SearchMerge {
         CandidateBytes.merge(_, _, k, metric),
         rows,
         required,
-        id => Row(id, null, null, null, null)
+        id => Row(id, null, null)
       ),
       if (required.isEmpty) HitSchema else NullableHitSchema
     )
@@ -122,33 +114,20 @@ private[search] object SearchMerge {
     }
   }
 
-  /** The rows of required ids when no search ran: each the id, then NULLs to
-    * make `width` columns.
-    */
+  /** Required ids with NULL base columns when no search ran. */
   def missing(
       spark: SparkSession,
       required: Option[Array[Long]],
       width: Int
-  ): RDD[InternalRow] = required match {
-    case None => spark.sparkContext.emptyRDD[InternalRow]
+  ): RDD[(Long, InternalRow)] = required match {
+    case None => spark.sparkContext.emptyRDD[(Long, InternalRow)]
     case Some(ids) =>
       spark.sparkContext
         .parallelize(ids.toSeq, math.max(1, math.min(ids.length, 64)))
-        .map(absentRow(_, width))
+        .map(id => id -> (new GenericInternalRow(width): InternalRow))
   }
 
-  /** A required id's row without a hit: the id, then NULLs to make `width`
-    * columns.
-    */
-  def absentRow(id: Long, width: Int): InternalRow = {
-    val row = new GenericInternalRow(width)
-    row.setLong(0, id)
-    row
-  }
-
-  /** One query's answer as the rows the result contract promises: rank from
-    * one, best first.
-    */
+  /** One query's selected addresses, best first. */
   def rows(query: Long, packed: Array[Byte]): Iterator[Row] = {
     // One row at a time: at k=16,384 a query's answer is 16,384 rows, and a
     // vector of them per query is what the reduce task would otherwise hold
@@ -157,8 +136,6 @@ private[search] object SearchMerge {
     Iterator.tabulate(count)(at =>
       Row(
         query,
-        at + 1,
-        CandidateBytes.score(packed, at),
         CandidateBytes.segmentId(packed, at),
         CandidateBytes.rowOffset(packed, at)
       )
@@ -166,13 +143,9 @@ private[search] object SearchMerge {
   }
 }
 
-/** The columns a Milvus table input's search returns, before the output
-  * columns.
-  */
-private[search] case class SearchResult(
+/** A selected row address associated with its query. */
+private[search] case class SearchHit(
     query_id: Long,
-    rank: Int,
-    _score: Double,
     _segment_id: Long,
     _row_offset: Long
 )

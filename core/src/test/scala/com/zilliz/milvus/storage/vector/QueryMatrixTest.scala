@@ -1,5 +1,6 @@
 package com.zilliz.milvus.storage.vector
 
+import java.lang.{Float => JavaFloat}
 import java.nio.ByteOrder
 
 import org.apache.arrow.memory.RootAllocator
@@ -9,6 +10,7 @@ import org.scalatest.BeforeAndAfterEach
 
 import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.DataParseException
 
 /** The query side of the Knowhere contract: one group, one buffer. */
 class QueryMatrixTest
@@ -46,23 +48,62 @@ class QueryMatrixTest
     } finally matrix.close()
   }
 
-  test("float16 and bfloat16 queries are packed in the field's element type") {
+  test("half query encodings preserve boundaries, signed zero and byte order") {
+    val halfSubnormalTie = Math.scalb(1f, -25)
     Seq(
-      VectorElementType.Float16 -> ((value: Float) =>
-        FloatConverter.toFloat16Bytes(value)
+      (
+        VectorElementType.Float16,
+        FloatConverter.floatToFloat16Bits _,
+        FloatConverter.toFloat16Bytes _,
+        Seq(
+          0f -> 0x0000,
+          -0f -> 0x8000,
+          halfSubnormalTie -> 0x0000,
+          Math.nextUp(halfSubnormalTie) -> 0x0001,
+          (3f * halfSubnormalTie) -> 0x0002,
+          Math.scalb(1f, -14) -> 0x0400,
+          1f -> 0x3c00,
+          (1f + Math.scalb(1f, -11)) -> 0x3c00,
+          (1f + 3f * Math.scalb(1f, -11)) -> 0x3c02,
+          65519f -> 0x7bff,
+          -65504f -> 0xfbff
+        )
       ),
-      VectorElementType.BFloat16 -> ((value: Float) =>
-        FloatConverter.toBFloat16Bytes(value)
+      (
+        VectorElementType.BFloat16,
+        FloatConverter.floatToBfloat16Bits _,
+        FloatConverter.toBFloat16Bytes _,
+        Seq(
+          0f -> 0x0000,
+          -0f -> 0x8000,
+          JavaFloat.intBitsToFloat(0x00010000) -> 0x0001,
+          Math.scalb(1f, -126) -> 0x0080,
+          1f -> 0x3f80,
+          (1f + Math.scalb(1f, -8)) -> 0x3f80,
+          (1f + Math.scalb(1f, -7)) -> 0x3f81,
+          Float.MaxValue -> 0x7f7f,
+          -Float.MaxValue -> 0xff7f
+        )
       )
-    ).foreach { case (elementType, encode) =>
-      val layout = VectorLayout(elementType, 2)
-      val matrix =
-        QueryMatrix.ofFloats(Seq(Array(1.5f, -2.25f)), layout, allocator)
+    ).foreach { case (elementType, bitsOf, encode, cases) =>
+      cases.foreach { case (value, bits) =>
+        bitsOf(value) shouldBe bits
+        encode(value) shouldBe Seq(bits.toByte, (bits >>> 8).toByte)
+      }
+      val queries =
+        Seq(cases.map(_._1).toArray, cases.reverse.map(_._1).toArray)
+      val expected = (cases ++ cases.reverse).flatMap { case (_, bits) =>
+        Seq(bits.toByte, (bits >>> 8).toByte)
+      }
+      val layout = VectorLayout(elementType, cases.size)
+      QueryMatrix.packFloats(queries, layout).toSeq shouldBe expected
+      val matrix = QueryMatrix.ofFloats(queries, layout, allocator)
       try {
-        matrix.buffer.capacity() shouldBe 4
+        matrix.buffer.position() shouldBe 0
+        matrix.buffer.limit() shouldBe expected.size
+        matrix.buffer.capacity() shouldBe expected.size
         val buffer = read(matrix)
-        val bytes = (0 until 4).map(index => buffer.get(index))
-        bytes shouldBe (encode(1.5f) ++ encode(-2.25f))
+        expected.indices.map(buffer.get) shouldBe expected
       } finally matrix.close()
     }
   }
@@ -108,15 +149,23 @@ class QueryMatrixTest
   }
 
   test("a query with a value that is not finite is refused") {
-    val layout = VectorLayout(VectorElementType.Float32, 2)
+    for {
+      elementType <- Seq(
+        VectorElementType.Float32,
+        VectorElementType.Float16,
+        VectorElementType.BFloat16
+      )
+      value <- Seq(Float.NaN, Float.PositiveInfinity, Float.NegativeInfinity)
+    } {
+      val failure = the[IllegalArgumentException] thrownBy QueryMatrix.ofFloats(
+        Seq(Array(1f, 2f), Array(3f, value)),
+        VectorLayout(elementType, 2),
+        allocator
+      )
+      failure.getMessage should include("not finite")
+      allocator.getAllocatedMemory shouldBe 0L
+    }
 
-    val failure = the[IllegalArgumentException] thrownBy QueryMatrix.ofFloats(
-      Seq(Array(1f, Float.NaN)),
-      layout,
-      allocator
-    )
-
-    failure.getMessage should include("not finite")
   }
 
   test("bytes and floats are not interchangeable") {
@@ -189,6 +238,8 @@ class QueryMatrixTest
       val built = QueryMatrix.ofFloats(queries, layout, allocator)
       try {
         val buffer = read(built)
+        built.buffer.position() shouldBe 0
+        built.buffer.limit() shouldBe packed.length
         (0 until packed.length).map(buffer.get) shouldBe packed.toSeq
       } finally built.close()
     }
@@ -220,5 +271,16 @@ class QueryMatrixTest
     )
 
     allocator.getAllocatedMemory shouldBe 0L
+
+    Seq(65520f, -65520f, Float.MaxValue, -Float.MaxValue).foreach { value =>
+      val half = VectorLayout(VectorElementType.Float16, 2)
+      val queries = Seq(Array(1f, 2f), Array(3f, value))
+      val packedFailure = the[DataParseException] thrownBy
+        QueryMatrix.packFloats(queries, half)
+      val builtFailure = the[DataParseException] thrownBy
+        QueryMatrix.ofFloats(queries, half, allocator)
+      builtFailure.getMessage shouldBe packedFailure.getMessage
+      allocator.getAllocatedMemory shouldBe 0L
+    }
   }
 }

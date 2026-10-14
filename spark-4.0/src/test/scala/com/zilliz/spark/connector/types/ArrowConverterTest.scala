@@ -26,6 +26,7 @@ import org.apache.spark.sql.types.{
   StructField,
   StructType
 }
+import org.apache.spark.unsafe.types.UTF8String
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -38,6 +39,73 @@ import com.zilliz.spark.connector.types.SparkSchemaMapper
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 class ArrowConverterTest extends AnyFunSuite with Matchers {
+
+  test(
+    "converted strings, binary, arrays and maps survive batch reuse and close"
+  ) {
+    val schema = StructType(
+      Seq(
+        StructField("text", StringType),
+        StructField("bytes", BinaryType),
+        vectorField(
+          "list",
+          ArrayType(FloatType),
+          MilvusDataType.FloatVector,
+          Some(2)
+        ),
+        vectorField(
+          "map",
+          MapType(LongType, FloatType),
+          MilvusDataType.SparseFloatVector
+        )
+      )
+    )
+    val allocator = new RootAllocator(Long.MaxValue)
+    val converted =
+      try {
+        val root = VectorSchemaRoot.create(
+          SparkSchemaMapper.convertSparkSchemaToArrow(schema),
+          allocator
+        )
+        try {
+          root.allocateNew()
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow(
+              UTF8String.fromString("original"),
+              Array[Byte](1, 2),
+              ArrayData.toArrayData(Array(1f, 2f)),
+              ArrayBasedMapData(Array[Any](3L), Array[Any](2.5f))
+            ),
+            schema
+          )
+          root.setRowCount(1)
+          val row = ArrowConverter.arrowToInternalRow(root, 0, schema)
+          root.clear()
+          root.allocateNew()
+          ArrowConverter.internalRowToArrow(
+            root,
+            0,
+            InternalRow(
+              UTF8String.fromString("replacement"),
+              Array[Byte](9),
+              ArrayData.toArrayData(Array(9f, 9f)),
+              ArrayBasedMapData(Array[Any](9L), Array[Any](9f))
+            ),
+            schema
+          )
+          root.setRowCount(1)
+          row
+        } finally root.close()
+      } finally allocator.close()
+
+    converted.getUTF8String(0).toString shouldBe "original"
+    converted.getBinary(1) shouldBe Array[Byte](1, 2)
+    converted.getArray(2).toFloatArray shouldBe Array(1f, 2f)
+    converted.getMap(3).keyArray().toLongArray shouldBe Array(3L)
+    converted.getMap(3).valueArray().toFloatArray shouldBe Array(2.5f)
+  }
 
   private def withFixedSizeBinaryRoot(
       name: String,

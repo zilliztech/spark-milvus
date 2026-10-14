@@ -173,7 +173,7 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       new GenericInternalRow(
         Array[Any](
           i.toLong,
-          vector(i.toFloat, 0f),
+          if (i == 1 || i == 1278) null else vector(i.toFloat, 0f),
           UTF8String.fromString("x" * 65536)
         )
       ): InternalRow
@@ -183,7 +183,9 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       .run(
         spark,
         NearestByQueryRows.Held(
-          Array(new GenericInternalRow(Array[Any](vector(0f, 0f))))
+          Seq(0f, 514f, 1279f).map { value =>
+            new GenericInternalRow(Array[Any](vector(value, 0f))): InternalRow
+          }.toArray
         ),
         Seq(vectorType),
         BoundReference(0, vectorType, nullable = true),
@@ -210,10 +212,19 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         bySpark = _ => fail("no query row is Spark's"),
         metrics = metrics
       )
+      .map(row =>
+        (
+          row.getArray(0).getFloat(0),
+          row.getLong(1),
+          row.getUTF8String(2).numBytes()
+        )
+      )
       .collect()
-    result.length shouldBe 1
-    result.head.getLong(1) shouldBe 0L
-    result.head.getUTF8String(2).numBytes() shouldBe 65536
+    // Keep an early candidate, clear a NULL slot when the buffer is reused,
+    // and retain the last row from a shorter final batch containing a NULL.
+    result.toSeq.sorted shouldBe Seq(0, 514, 1279).map(id =>
+      (id.toFloat, id.toLong, 65536)
+    )
     metrics(SearchMetrics.KnowhereCalls).value should be >= 3L
   }
 

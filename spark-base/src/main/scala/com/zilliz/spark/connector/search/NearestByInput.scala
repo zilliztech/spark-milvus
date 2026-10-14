@@ -3,10 +3,6 @@ package com.zilliz.spark.connector.search
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.catalyst.expressions.{
-  BoundReference,
-  UnsafeProjection
-}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.{DataType, StructType}
@@ -157,8 +153,8 @@ private[connector] object NearestByInput {
         queries: SearchQueries.Input,
         dimension: Int,
         required: Option[Array[Long]]
-    ): RDD[(Long, InternalRow)] = {
-      val hits = MilvusSearch.execute(
+    ): RDD[(Long, InternalRow)] =
+      MilvusSearch.execute(
         spark,
         options,
         queries,
@@ -172,12 +168,11 @@ private[connector] object NearestByInput {
         MilvusOption(scan.options).milvusFilter,
         scan.pushedExpression,
         taken,
+        positions,
         SearchMetrics.of(metrics),
         function,
         required
       )
-      outputRows(hits, positions)
-    }
 
     // A hit row is the candidate's columns, then `taken` in order. Positions,
     // not names: a base column may share a name with a candidate column.
@@ -255,24 +250,6 @@ private[connector] object NearestByInput {
       )
 
     override def segments(searched: Long): Map[String, Long] = Map.empty
-  }
-
-  /** Milvus candidate columns stop here. Rows may enter a shuffle or be
-    * retained by the join, so each projected output owns its bytes.
-    */
-  private def outputRows(
-      hits: SearchMerge.Hits,
-      positions: Seq[Int]
-  ): RDD[(Long, InternalRow)] = {
-    val columns = positions.map { at =>
-      val field = hits.schema(at)
-      // Outer searches can return NULL even for a non-nullable base field.
-      BoundReference(at, field.dataType, nullable = true)
-    }
-    hits.rows.mapPartitions { rows =>
-      val project = UnsafeProjection.create(columns)
-      rows.map(row => row.getLong(0) -> project(row).copy())
-    }
   }
 
   private def dimensionOf(field: FieldSchema): Int = field.typeParams

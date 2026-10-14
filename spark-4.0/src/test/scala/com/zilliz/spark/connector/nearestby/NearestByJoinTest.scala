@@ -482,6 +482,33 @@ class NearestByJoinTest
     rows shouldBe expected
   }
 
+  test("metadata-only and zero-column base outputs keep hits without a take") {
+    needsNative()
+    val query = rawQueries(("q1", boxed(0.1f, 0f)), ("none", null))
+    val base =
+      docs(Map(MilvusOption.MilvusExtraColumns -> "_segment_id,_row_offset"))
+    for (
+      columns <- Seq(
+        Seq("qid", "_row_offset", "_segment_id", "_row_offset"),
+        Seq("qid")
+      )
+    ) {
+      val taken = nearest(query, base, joinType = "leftouter")
+        .select(columns.map(col): _*)
+      val expected = bySpark(query, base, joinType = "leftouter")
+        .select(columns.map(col): _*)
+      taken.collect().toSeq.groupBy(identity).map { case (row, all) =>
+        row -> all.size
+      } shouldBe
+        expected.collect().toSeq.groupBy(identity).map { case (row, all) =>
+          row -> all.size
+        }
+      val exec = node(taken).get.asInstanceOf[MilvusNearestByJoinExec]
+      exec.baseColumns.toSet shouldBe (columns.toSet - "qid")
+      exec.metrics(SearchMetrics.TakeRows).value shouldBe 0L
+    }
+  }
+
   test("APPROX searches the indexes and, on this data, finds the exact rows") {
     needsNative()
     val query = queries(standardQueries: _*)

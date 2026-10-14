@@ -5,6 +5,7 @@ import scala.jdk.CollectionConverters._
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
@@ -29,10 +30,9 @@ import io.milvus.grpc.schema.FieldSchema
   * is how a search is written (docs/design/architecture/dataframe-api.html
   * sections 2 and 4). The `exact` mode computes every distance in every
   * segment; the `index` mode searches the persisted index the snapshot pinned.
-  * A hit carries `query_id`, `rank`, `_score`, `_segment_id` and `_row_offset`,
-  * then the base columns asked for. A DataFrame input's search (`FrameSearch`)
-  * shares its delivery of the query set (`SearchQueries`) and its merge stage
-  * (`SearchMerge`).
+  * Each query id is paired with its requested base columns. A DataFrame input's
+  * search (`FrameSearch`) shares its query delivery (`SearchQueries`) and merge
+  * stage (`SearchMerge`).
   */
 object MilvusSearch extends Logging {
 
@@ -68,28 +68,22 @@ object MilvusSearch extends Logging {
       filter: Option[FilterExpr],
       predicate: Option[PredicateExpr],
       outputSchema: StructType,
+      outputPositions: Seq[Int],
       metrics: SearchMetrics,
       function: RankingFunction,
       required: Option[Array[Long]]
-  ): SearchMerge.Hits = {
+  ): RDD[(Long, InternalRow)] = {
     val limits = SearchLimits.from(options)
     val tasks = partitions.map(_.task)
     if (searchMode == SearchMode.PreferIndex) {
       SegmentIndexHandle.check(tasks, field.fieldID, searchMetric)
     }
     val queryCount = queries.count
-    val hitSchema =
-      if (required.isEmpty) SearchMerge.HitSchema
-      else SearchMerge.NullableHitSchema
-    val resultSchema = StructType(hitSchema.fields ++ outputSchema.fields)
     // The set is what a nearest-by join kept of its query rows: rows whose
     // ranking value is NULL search nothing, and all of them may be. The
     // snapshot may hold no segment.
     if (queryCount == 0L || tasks.isEmpty)
-      return SearchMerge.Hits(
-        SearchMerge.missing(spark, required, resultSchema.size),
-        resultSchema
-      )
+      return SearchMerge.missing(spark, required, outputPositions.size)
     require(
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
@@ -177,12 +171,16 @@ object MilvusSearch extends Logging {
     )
     val hits =
       SearchMerge.merged(spark, found, k, searchMetric, mergeParts, required)
-    if (outputSchema.isEmpty)
-      SearchMerge.Hits(hits.queryExecution.toRdd, hits.schema)
-    else
+    if (outputSchema.isEmpty) {
+      val schema = hits.schema
+      hits.queryExecution.toRdd.mapPartitions(rows =>
+        SearchTake.project(rows, schema, outputPositions)
+      )
+    } else
       take(
         hits,
         outputSchema,
+        outputPositions,
         partitions,
         request.arrowMaxBytes,
         metrics,
@@ -251,31 +249,30 @@ object MilvusSearch extends Logging {
   private def take(
       hits: DataFrame,
       outputSchema: StructType,
+      outputPositions: Seq[Int],
       partitions: Seq[MilvusInputPartition],
       arrowMaxBytes: Long,
       metrics: SearchMetrics,
       hitCount: Long,
       stageHeap: SearchResources.Choice,
       partitioning: SearchTake.Partitioning
-  ): SearchMerge.Hits = {
+  ): RDD[(Long, InternalRow)] = {
     logInfo(
       s"Take stage: $hitCount hits over ${partitioning.partitions} tasks" +
         s" (${partitioning.buckets} bucket(s) per segment), " +
         s"about ${hitCount / partitioning.partitions} hits a task at " +
         s"${SearchTake.HitRowBytes} bytes each against ${stageHeap.bytes} bytes of heap a task"
     )
-    SearchMerge.Hits(
-      SearchTake.rows(
-        hits,
-        outputSchema,
-        partitions
-          .map(partition => partition.task.segmentId -> partition)
-          .toMap,
-        arrowMaxBytes,
-        metrics,
-        partitioning
-      ),
-      StructType(hits.schema.fields ++ outputSchema.fields)
+    SearchTake.rows(
+      hits,
+      outputSchema,
+      outputPositions,
+      partitions
+        .map(partition => partition.task.segmentId -> partition)
+        .toMap,
+      arrowMaxBytes,
+      metrics,
+      partitioning
     )
   }
 

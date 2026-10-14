@@ -92,57 +92,6 @@ object KnowhereBuffers {
     }
   }
 
-  /** Float vectors of `dimension` elements as a base this object owns: row `i`
-    * is `vectors(i)`, copied element by element, and a null vector is a row of
-    * zeros its caller excludes. What a DataFrame input's batch is, its vectors
-    * taken out of Spark's arrays (docs/design/architecture/dataframe-api.html
-    * section 4).
-    */
-  def ofFloats(
-      vectors: Array[Array[Float]],
-      rows: Int,
-      dimension: Int,
-      allocator: BufferAllocator
-  ): Base = {
-    require(
-      rows >= 0 && rows <= vectors.length,
-      s"$rows rows of ${vectors.length} vectors"
-    )
-    require(dimension > 0, s"Vector dimension must be positive: $dimension")
-    val rowBytes = dimension.toLong * 4L
-    val bytes = Math.multiplyExact(rows.toLong, rowBytes)
-    require(
-      bytes <= Int.MaxValue,
-      s"Vector batch of $bytes bytes exceeds one ByteBuffer"
-    )
-    val target = allocator.buffer(math.max(bytes, 1L))
-    try {
-      target.setZero(0L, target.capacity())
-      var row = 0
-      while (row < rows) {
-        val vector = vectors(row)
-        if (vector != null) {
-          require(
-            vector.length == dimension,
-            s"Row $row holds ${vector.length} elements; the batch takes $dimension"
-          )
-          val at = row * rowBytes
-          var element = 0
-          while (element < dimension) {
-            target.setFloat(at + element * 4L, vector(element))
-            element += 1
-          }
-        }
-        row += 1
-      }
-      new Base(region(target, 0L, bytes), rows, false, Some(target))
-    } catch {
-      case failure: Throwable =>
-        target.close()
-        throw failure
-    }
-  }
-
   /** Every null row is reported through `excludeRow` before the buffer is
     * built; its bytes are zero and Knowhere never sees it as a candidate.
     */

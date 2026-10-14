@@ -56,8 +56,8 @@ package com.zilliz.milvus.storage
   *
   * ExactScan and EngineRange take a VectorBatch, the format-neutral form of a
   * batch: a buffer of vectors, its exclusions and where it starts in its unit.
-  * A Milvus segment's batches are SegmentVectors'; a DataFrame input's are
-  * built from its rows with VectorBatch.ofFloats, a candidate's place being the
+  * A Milvus segment's batches are SegmentVectors'; a DataFrame input's batches
+  * borrow the buffer FrameSearch fills directly, a candidate's place being the
   * base partition and the row's position in it, and CarriedCandidates packs
   * each query's best k with the rows they came from, since such an input has no
   * table to take them from after the merge (docs/design/architecture/

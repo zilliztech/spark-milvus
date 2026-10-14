@@ -58,9 +58,12 @@ object QueryMatrix {
     require(queries != null && queries.nonEmpty, "A group holds no queries")
     val target = allocate(queries.size, layout, allocator)
     try {
+      val buffer = target
+        .nioBuffer(0L, queries.size * layout.rowBytes)
+        .order(ByteOrder.nativeOrder())
       queries.zipWithIndex.foreach { case (query, index) =>
         checkFloats(query, index, layout)
-        write(target, index.toLong * layout.rowBytes, query, layout)
+        writeFloats(buffer, query, layout)
       }
       finished(target, queries.size, layout)
     } catch {
@@ -177,9 +180,7 @@ object QueryMatrix {
       bytes <= Int.MaxValue,
       s"A query group of $bytes bytes exceeds one ByteBuffer"
     )
-    val target = allocator.buffer(bytes)
-    target.setZero(0, bytes)
-    target
+    allocator.buffer(bytes)
   }
 
   private def finished(
@@ -230,47 +231,23 @@ object QueryMatrix {
       layout: VectorLayout
   ): Unit = layout.elementType match {
     case VectorElementType.Float32 =>
-      query.foreach(buffer.putFloat)
-    case VectorElementType.Float16 =>
-      query.foreach(value =>
-        FloatConverter.toFloat16Bytes(value).foreach(buffer.put)
-      )
-    case VectorElementType.BFloat16 =>
-      query.foreach(value =>
-        FloatConverter.toBFloat16Bytes(value).foreach(buffer.put)
-      )
-    case other =>
-      throw new IllegalArgumentException(
-        s"Float queries are for float32, float16 and bfloat16 fields, not for $other"
-      )
-  }
-
-  private def write(
-      target: ArrowBuf,
-      destination: Long,
-      query: Array[Float],
-      layout: VectorLayout
-  ): Unit = layout.elementType match {
-    case VectorElementType.Float32 =>
       var element = 0
-      while (element < layout.dimension) {
-        target.setFloat(destination + element * 4L, query(element))
+      while (element < query.length) {
+        buffer.putFloat(query(element))
         element += 1
       }
     case VectorElementType.Float16 =>
       var element = 0
-      while (element < layout.dimension) {
-        val bytes = FloatConverter.toFloat16Bytes(query(element))
-        target.setByte(destination + element * 2L, bytes.head)
-        target.setByte(destination + element * 2L + 1L, bytes(1))
+      while (element < query.length) {
+        val bits = FloatConverter.floatToFloat16Bits(query(element))
+        buffer.put(bits.toByte).put((bits >>> 8).toByte)
         element += 1
       }
     case VectorElementType.BFloat16 =>
       var element = 0
-      while (element < layout.dimension) {
-        val bytes = FloatConverter.toBFloat16Bytes(query(element))
-        target.setByte(destination + element * 2L, bytes.head)
-        target.setByte(destination + element * 2L + 1L, bytes(1))
+      while (element < query.length) {
+        val bits = FloatConverter.floatToBfloat16Bits(query(element))
+        buffer.put(bits.toByte).put((bits >>> 8).toByte)
         element += 1
       }
     case other =>

@@ -64,7 +64,13 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val dimension = vectors.head.length
     val layout = VectorLayout(VectorElementType.Float32, dimension)
     val batch =
-      VectorBatch.ofFloats(vectors, vectors.length, dimension, 0L, allocator)
+      VectorBatchFixture.floats(
+        vectors,
+        vectors.length,
+        dimension,
+        0L,
+        allocator
+      )
     try {
       val matrix = QueryMatrix.ofFloats(queries, layout, allocator)
       try {
@@ -283,14 +289,14 @@ class ExactScanTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       val layout = VectorLayout(VectorElementType.Float32, 2)
       // The function scores the NaN row NaN, which ranks after every number:
       // with k = 2 the query keeps both rows of the first batch, NaN worst.
-      val first = VectorBatch.ofFloats(
+      val first = VectorBatchFixture.floats(
         Array(Array(Float.NaN, 0f), Array(1f, 0f)),
         2,
         2,
         0L,
         allocator
       )
-      val second = VectorBatch.ofFloats(
+      val second = VectorBatchFixture.floats(
         Array(Array(0.5f, 0f), Array(3f, 0f), Array(4f, 0f)),
         3,
         2,
