@@ -55,8 +55,9 @@ object Candidate {
   * its place and measured 19 s slower per task: a task's first segment fills
   * every query's run from empty, and inserting 100 candidates into a sorted
   * array one at a time is an insertion sort, whatever the array holds. The heap
-  * pays the sort once, in [[takePacked]], and only for the k it kept
-  * (docs/design/architecture/vector-search.html section 2.6).
+  * pays the sort once on first output, and only for the k it kept. Both
+  * [[results]] and [[takePacked]] read the same finalized, sorted candidates
+  * (docs/design/architecture/topk-merger.html).
   */
 final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     extends Serializable {
@@ -72,11 +73,13 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     */
   private val better: Int = if (metric.smallerIsBetter) 1 else -1
 
-  // Query q owns slots [q * k, q * k + sizes(q)); slot q * k is its worst.
+  // Query q owns slots [q * k, q * k + sizes(q)). While collecting, its root
+  // is the worst; after output finalizes the query, its slots are best first.
   private val scores = new Array[Double](queries * k)
   private val segments = new Array[Long](queries * k)
   private val offsets = new Array[Long](queries * k)
   private val sizes = new Array[Int](queries)
+  private val sorted = new Array[Boolean](queries)
 
   /** Negative when the candidate at `slot` is better than the given one, zero
     * when they are the same place with the same score, positive when worse.
@@ -160,6 +163,10 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
       query >= 0 && query < queries,
       s"Candidate names query $query of $queries"
     )
+    if (sorted(query))
+      throw new IllegalStateException(
+        s"Query $query has been finalized for output"
+      )
     val base = query * k
     val size = sizes(query)
     if (size < k) {
@@ -188,7 +195,7 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
       s"Query $query is outside the $queries queries"
     )
     sizes(query) == k &&
-    JavaDouble.compare(scores(query * k), score) * better < 0
+    JavaDouble.compare(scores(worstSlot(query)), score) * better < 0
   }
 
   private var scanned = 0L
@@ -218,8 +225,11 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
   /** The score of the worst candidate a full query keeps. */
   def worstScore(query: Int): Double = {
     require(isFull(query), s"Query $query keeps fewer than $k candidates")
-    scores(query * k)
+    scores(worstSlot(query))
   }
+
+  private def worstSlot(query: Int): Int =
+    query * k + (if (sorted(query)) sizes(query) - 1 else 0)
 
   def addAll(candidates: Iterable[Candidate]): this.type = {
     candidates.iterator.foreach(add)
@@ -255,8 +265,8 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
 
   /** Orders the query's slots best first, in place. The heap's root is its
     * worst, so taking the root out to the end `size` times leaves the slots
-    * sorted from best to worst; the heap is gone afterwards, which is why only
-    * [[takePacked]] and [[results]] call this.
+    * sorted from best to worst. Only the first output of a query calls this,
+    * since the heap is gone afterwards.
     */
   private def sortInPlace(base: Int, size: Int): Unit = {
     var end = size
@@ -267,14 +277,32 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     }
   }
 
-  /** Best first; at most k for this query. Leaves the query as it was. */
-  def results(query: Int): Vector[Candidate] = {
+  /** Finalizes a query once, retaining its size and sorted primitive columns.
+    * All writers of this query must have finished. Marking it sorted before
+    * output allocation lets later reads, including retries, skip sorting. Even
+    * an empty output ends this query's collection.
+    */
+  private def prepareOutput(query: Int): Int = {
     require(
       query >= 0 && query < queries,
       s"Query $query is outside the $queries queries"
     )
-    val base = query * k
     val size = sizes(query)
+    if (!sorted(query)) {
+      if (size > 1) sortInPlace(query * k, size)
+      sorted(query) = true
+    }
+    size
+  }
+
+  /** This query's candidates best first, finalizing its current collection.
+    *
+    * Both output methods may read the same sorted candidates repeatedly. The
+    * returned objects own their data; this query no longer accepts additions.
+    */
+  def results(query: Int): Vector[Candidate] = {
+    val size = prepareOutput(query)
+    val base = query * k
     val built = Vector.newBuilder[Candidate]
     var slot = 0
     while (slot < size) {
@@ -286,37 +314,25 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
       )
       slot += 1
     }
-    built.result().sorted(Candidate.ranking(metric))
+    built.result()
   }
 
-  /** One query's results packed into bytes, best first, releasing the query's
-    * heap as it reads it. This is what a stage-one task gives Spark.
-    *
-    * Releasing each heap keeps what a task holds at the `queries * k *
-    * CandidateBytes` it planned against
-    * (docs/design/architecture/vector-search.html section 2.1). Reading the
-    * same query twice gives nothing the second time.
+  /** This query's candidates as bytes, best first, finalizing its collection.
+    * This is what a stage-one task over Milvus segments gives Spark. Repeated
+    * reads encode the retained sorted candidates without sorting again. Each
+    * nonempty output owns a new byte array; the primitive columns stay intact.
     */
   def takePacked(query: Int): Array[Byte] = {
-    require(
-      query >= 0 && query < queries,
-      s"Query $query is outside the $queries queries"
-    )
-    val size = sizes(query)
-    if (size == 0) return CandidateBytes.Empty
-    val base = query * k
-    sortInPlace(base, size)
-    val packed =
-      CandidateBytes.writeColumns(segments, offsets, scores, base, size)
-    sizes(query) = 0
-    packed
+    val size = prepareOutput(query)
+    if (size == 0) CandidateBytes.Empty
+    else CandidateBytes.writeColumns(segments, offsets, scores, query * k, size)
   }
 
   /** Every query's packed candidates at once, by query position, cut into
     * `threads` shards of queries on [[SearchThreads]]. A query's heap lives in
     * its own slice of the three arrays and its own `sizes` entry, so the shards
-    * never touch the same query; each heap is released as it is packed, as
-    * [[takePacked]] releases it.
+    * never touch the same query. Finalized columns remain available for later
+    * reads, as with [[takePacked]].
     */
   def packAll(threads: Int): Array[Array[Byte]] = {
     require(threads > 0, s"Packing takes at least one thread: $threads")

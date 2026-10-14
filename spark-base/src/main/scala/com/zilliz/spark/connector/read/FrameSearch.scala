@@ -319,7 +319,7 @@ private[connector] object FrameSearch extends Logging {
         java.util.Arrays.fill(copies.asInstanceOf[Array[AnyRef]], null)
         java.util.Arrays.fill(vectors.asInstanceOf[Array[AnyRef]], null)
       }
-      val answers = carriedAnswers(merger, group, kept, metric)
+      val answers = carriedAnswers(merger, group, kept)
       metrics.candidates.add(merger.size.toLong)
       answers
     } finally {
@@ -380,19 +380,17 @@ private[connector] object FrameSearch extends Logging {
   private def carriedAnswers(
       merger: TopKMerger,
       group: SearchQueries.Group,
-      kept: java.util.HashMap[java.lang.Long, UnsafeRow],
-      metric: MetricType
+      kept: java.util.HashMap[java.lang.Long, UnsafeRow]
   ): Iterator[(Long, Array[Byte])] = {
     val answers = Vector.newBuilder[(Long, Array[Byte])]
     var query = 0
     while (query < group.queries) {
       val results = merger.results(query)
       if (results.nonEmpty)
-        answers += group.ids(query) -> CarriedCandidates.of(
+        answers += group.ids(query) -> CarriedCandidates.writeSorted(
           results.map(candidate =>
             candidate -> kept.get(candidate.rowOffset).getBytes
-          ),
-          metric
+          )
         )
       query += 1
     }

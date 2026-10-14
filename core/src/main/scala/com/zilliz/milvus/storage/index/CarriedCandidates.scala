@@ -23,14 +23,15 @@ object CarriedCandidates {
   /** What precedes a row: its place, its score and its length. */
   private val Header: Int = CandidateBytes.Width + 4
 
-  /** These candidates, sorted best first, each followed by its row. */
-  def of(
-      rows: Seq[(Candidate, Array[Byte])],
-      metric: MetricType
+  /** Writes candidates already ranked best first, each followed by its row. The
+    * caller supplies the order used by the merge; encoding preserves it without
+    * sorting again.
+    */
+  def writeSorted(
+      rows: Seq[(Candidate, Array[Byte])]
   ): Array[Byte] = {
-    val sorted = rows.sortBy(_._1)(Candidate.ranking(metric))
-    val buffer = ByteBuffer.allocate(sorted.map(Header + _._2.length).sum)
-    sorted.foreach { case (candidate, row) =>
+    val buffer = ByteBuffer.allocate(rows.map(Header + _._2.length).sum)
+    rows.foreach { case (candidate, row) =>
       buffer
         .putLong(candidate.segmentId)
         .putLong(candidate.rowOffset)

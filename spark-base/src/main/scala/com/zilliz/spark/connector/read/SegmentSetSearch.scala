@@ -361,9 +361,9 @@ private[read] object SegmentSetSearch extends Logging {
     * stage's output at the `queries * k * CandidateBytes.Width` the plan counts
     * on, and what lets the merge stage walk two answers instead of aggregating
     * candidate by candidate (docs/design/architecture/vector-search.html
-    * section 2.1). Each query's heap is released as it is packed, so a task
-    * holds the queries behind it as bytes and the ones ahead as objects, never
-    * both forms of the same query.
+    * section 2.1). The merger retains its primitive columns alongside the
+    * packed bytes until the caller drops the group; SearchPlan budgets for both
+    * payloads.
     */
   private def candidates(
       merger: TopKMerger,
