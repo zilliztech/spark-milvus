@@ -219,7 +219,7 @@ private[connector] object NearestBySearch {
         input: SearchQueries.Input,
         dimension: Int,
         required: Option[Array[Long]]
-    ): MilvusSearch.Hits
+    ): SearchMerge.Hits
 
     /** Where in a hit row each base column is, and its type. */
     def positions: Seq[Int]
@@ -608,7 +608,7 @@ private[connector] object NearestBySearch {
         queries: SearchQueries.Input,
         dimension: Int,
         required: Option[Array[Long]]
-    ): MilvusSearch.Hits =
+    ): SearchMerge.Hits =
       MilvusSearch.execute(
         spark,
         options,
@@ -633,8 +633,8 @@ private[connector] object NearestBySearch {
     override val positions: Seq[Int] = {
       val takenNames = taken.fieldNames.toSeq
       input.columns.map { case (name, _) =>
-        if (FromCandidate(name)) MilvusSearch.HitSchema.fieldIndex(name)
-        else MilvusSearch.HitSchema.size + takenNames.indexOf(name)
+        if (FromCandidate(name)) SearchMerge.HitSchema.fieldIndex(name)
+        else SearchMerge.HitSchema.size + takenNames.indexOf(name)
       }
     }
 
@@ -702,7 +702,7 @@ private[connector] object NearestBySearch {
         queries: SearchQueries.Input,
         dimension: Int,
         required: Option[Array[Long]]
-    ): MilvusSearch.Hits =
+    ): SearchMerge.Hits =
       FrameSearch.execute(
         spark,
         queries,
