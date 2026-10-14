@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.Locale
@@ -67,7 +67,7 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
   *   a percentage that says zero while the work is half done is worse than
   *   none.
   */
-private[read] final class SearchProgress private (
+private[search] final class SearchProgress private (
     context: SparkContext,
     firstStage: Int,
     counters: Map[Long, String],
@@ -213,7 +213,7 @@ private[read] final class SearchProgress private (
   }
 }
 
-private[read] object SearchProgress {
+private[search] object SearchProgress {
 
   /** One line per heartbeat period; a shorter one would repeat the same
     * numbers, because the heartbeat is where they come from.
@@ -276,7 +276,7 @@ private[read] object SearchProgress {
     * and the value is still exact. The grouping is the root locale's, so a log
     * reads the same wherever it was written.
     */
-  private[read] def grouped(value: Long): String =
+  private[search] def grouped(value: Long): String =
     String.format(Locale.ROOT, "%,d", java.lang.Long.valueOf(value))
 
   /** This search's values in one report, by counter name, as longs.
@@ -288,7 +288,7 @@ private[read] object SearchProgress {
     * nearest-by join's SQL size or duration metric that the task never added
     * to, which reports Spark's -1 for no value: it counts as nothing.
     */
-  private[read] def searchValues(
+  private[search] def searchValues(
       infos: Seq[(Long, Option[Any])],
       counters: Map[Long, String]
   ): Map[String, Long] =

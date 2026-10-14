@@ -29,11 +29,8 @@ import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.spark.connector.metrics.NearestByMetrics
-import com.zilliz.spark.connector.read.{
-  FrameSearch,
-  MilvusScan,
-  NearestBySearch
-}
+import com.zilliz.spark.connector.read.MilvusScan
+import com.zilliz.spark.connector.search.{FrameSearch, NearestBySearch}
 
 /** A nearest-by join the connector executes: for each query row, the k base
   * rows nearest to it by one Milvus metric (docs/design/architecture/

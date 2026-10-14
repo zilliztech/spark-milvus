@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import java.lang.{Float => JavaFloat}
 import java.util.Arrays
@@ -26,7 +26,7 @@ import com.zilliz.spark.connector.options.{MilvusOption, TaskResources}
   * vector is ARRAY<FLOAT>, what Spark's vector functions take, and is packed in
   * the field's element type.
   */
-private[read] object SearchQueries {
+private[search] object SearchQueries {
 
   val IdColumn = "query_id"
   val VectorColumn = "vector"
@@ -213,7 +213,7 @@ private[read] object SearchQueries {
     * time, and reading a group again is a shuffle read, not a second packing of
     * the query set.
     */
-  private[read] def packedGroups(
+  private[search] def packedGroups(
       selected: DataFrame,
       groups: Seq[SearchPlan.QueryGroup],
       metric: MetricType,
@@ -335,7 +335,7 @@ private[read] object SearchQueries {
     * as they come and never retained: a chunk of primitive arrays is packed and
     * dropped before the next is read.
     */
-  private[read] def packPartition(
+  private[search] def packPartition(
       rows: Iterator[InternalRow],
       layout: VectorLayout,
       metric: MetricType

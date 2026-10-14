@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import scala.reflect.ClassTag
 
@@ -22,7 +22,7 @@ import com.zilliz.milvus.storage.schema.MetricType
   * take stage extends with the base columns; a DataFrame input's candidates
   * carry their rows (`CarriedCandidates`), so its merge gives the hits whole.
   */
-private[read] object SearchMerge {
+private[search] object SearchMerge {
 
   /** What a search gives back: the hits of every query with the output columns
     * asked for, as rows of `schema`. An iterator of these rows may hand the
@@ -215,7 +215,7 @@ private[read] object SearchMerge {
 /** The columns a Milvus table input's search returns, before the output
   * columns.
   */
-private[read] case class SearchResult(
+private[search] case class SearchResult(
     query_id: Long,
     rank: Int,
     _score: Double,

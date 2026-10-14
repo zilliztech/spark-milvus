@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import scala.reflect.ClassTag
 
@@ -418,7 +418,7 @@ private[connector] object FrameSearch extends Logging {
     * partition `i / groupCount` and reads group `i % groupCount`, each through
     * a narrow dependency, so neither side is shuffled to pair them.
     */
-  private[read] final class Pairs[G: ClassTag] private (
+  private[search] final class Pairs[G: ClassTag] private (
       context: SparkContext,
       @transient private var base: RDD[InternalRow],
       @transient private var groups: RDD[G],
@@ -476,7 +476,7 @@ private[connector] object FrameSearch extends Logging {
     }
   }
 
-  private[read] object Pairs {
+  private[search] object Pairs {
 
     def apply[G: ClassTag](
         context: SparkContext,

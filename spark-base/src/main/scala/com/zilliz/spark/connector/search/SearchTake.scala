@@ -1,4 +1,4 @@
-package com.zilliz.spark.connector.read
+package com.zilliz.spark.connector.search
 
 import java.util.Arrays
 import scala.collection.mutable
@@ -29,6 +29,7 @@ import com.zilliz.milvus.storage.read.exec.{
   SegmentReaderRegistry
 }
 import com.zilliz.spark.connector.metrics.SearchMetrics
+import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 
 /** The second stage: the output columns of the rows a search selected.
@@ -38,7 +39,7 @@ import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
   * side taking rows by address (docs/design/architecture/vector-search.html
   * section 2.1).
   */
-private[read] object SearchTake {
+private[search] object SearchTake {
 
   /** What one buffered hit costs on the heap in `bySegment`: the copied
     * `UnsafeRow` of the five hit columns (48 bytes of row data, its object and
@@ -46,7 +47,7 @@ private[read] object SearchTake {
     * buffered 62.5 million hits per task in 16 tasks and ran an 8-core
     * executor's 6 GiB heap out of memory (2026-09-25 decision).
     */
-  private[read] val HitRowBytes: Long = 128L
+  private[search] val HitRowBytes: Long = 128L
 
   /** How the hits are spread over the take tasks: `partitions` tasks, a
     * segment's hits cut into `buckets` slices of consecutive row offsets
@@ -101,7 +102,7 @@ private[read] object SearchTake {
     * hit of a segment whose row count the snapshot did not record falls back to
     * the hash of its offset, which only costs that segment the repeated reads.
     */
-  private[read] def bucketColumn(
+  private[search] def bucketColumn(
       buckets: Int,
       rowsBySegment: Map[Long, Long]
   ): Column = {
