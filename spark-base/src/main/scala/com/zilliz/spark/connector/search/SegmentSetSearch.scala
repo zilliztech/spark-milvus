@@ -21,7 +21,6 @@ import com.zilliz.milvus.storage.read.exec.{
 import com.zilliz.milvus.storage.read.exec.ReadMetrics
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
-import com.zilliz.spark.connector.options.SearchResources
 import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
 import com.zilliz.spark.connector.types.ArrowAllocator
 import io.milvus.grpc.schema.CollectionSchema

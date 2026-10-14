@@ -30,6 +30,9 @@ package com.zilliz.spark.connector
   * take stage. Both inputs share the delivery and the merge, and
   * `NearestBySearch` handles their query rows the same way; a DataFrame input's
   * dimension is the commonest length among the query vectors it could search.
+  * `SearchResources` turns an executor's memory into what one task may keep --
+  * segment data off the heap, queries on it -- and the block an exact scan
+  * reads (docs/design/architecture/search-resources.html section 3.3).
   *
   * The search evaluates `milvus.filter` on a Milvus table base (R7) and holds
   * the take stage's Arrow child allocators (G3). Capabilities: R7, V5, V7, V9,

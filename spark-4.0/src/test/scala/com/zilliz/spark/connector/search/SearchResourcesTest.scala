@@ -1,7 +1,9 @@
-package com.zilliz.spark.connector.options
+package com.zilliz.spark.connector.search
 
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+
+import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 
 /** The exact scan's base block and what one task may keep, off the heap and on
   * it, for an executor's memory (docs/design/architecture/search-resources.html

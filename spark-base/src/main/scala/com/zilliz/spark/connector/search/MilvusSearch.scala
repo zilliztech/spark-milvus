@@ -26,7 +26,6 @@ import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{
   MilvusOption,
   SearchLimits,
-  SearchResources,
   TaskResources
 }
 import com.zilliz.spark.connector.read.MilvusInputPartition
