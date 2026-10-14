@@ -18,6 +18,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.path.StoragePath
+import com.zilliz.milvus.storage.schema.HybridTimestamp
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.milvus.storage.write.commit.{
   JobManifest,
@@ -26,13 +27,8 @@ import com.zilliz.milvus.storage.write.commit.{
   SourceSnapshot
 }
 import com.zilliz.milvus.storage.write.exec.StagingLayout
-import com.zilliz.spark.connector.catalog.MilvusHybridTimestamp
-import com.zilliz.spark.connector.options.{
-  MilvusOption,
-  SnapshotReference,
-  StorageOptions
-}
-import com.zilliz.spark.connector.table.MilvusTables
+import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
+import com.zilliz.spark.connector.table.{MilvusTables, SnapshotReference}
 
 /** `CALL milvus.system.write_snapshot(...)`: writes the snapshot that describes
   * a build job's output.
@@ -194,7 +190,7 @@ object WriteSnapshotProcedure extends Procedure {
           .map(_.trim)
           .filter(_.nonEmpty)
           .getOrElse(s"$collection-$snapshotId"),
-        createTs = MilvusHybridTimestamp.ofMillis(nowMillis)
+        createTs = HybridTimestamp.ofMillis(nowMillis)
       )
       val written = SnapshotWriter.write(
         snapshot,

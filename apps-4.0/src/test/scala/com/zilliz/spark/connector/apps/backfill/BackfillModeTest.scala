@@ -19,6 +19,13 @@ import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.snapshot.{Segment, V2ColumnGroup}
 import com.zilliz.milvus.storage.snapshot.json.{CollectionSchemaJson, FieldJson}
+import com.zilliz.spark.connector.apps.backfill.BackfillSegmentWrite.{
+  usedBfCol,
+  usedSnapshotCol,
+  MatchFlagCol,
+  RowOffsetCol,
+  SegmentIdCol
+}
 import com.zilliz.spark.connector.options.MilvusOption
 
 /** Tests for the `--mode` backfill parameter: CLI/config validation and the
@@ -66,22 +73,22 @@ class BackfillModeTest
     )
     result.isLeft shouldBe true
     result.left.get.message should include("__BF_MATCHED__")
-    result.left.get.message should include(MilvusBackfill.MatchFlagCol)
+    result.left.get.message should include(MatchFlagCol)
   }
 
   test("internal column reservation rejects provenance flag names") {
     val result = MilvusBackfill.validateTargetNamesAgainstInternalColumns(
-      Seq("score", MilvusBackfill.usedSnapshotCol("score").toUpperCase),
+      Seq("score", usedSnapshotCol("score").toUpperCase),
       reservationJoinKey,
       caseInsensitiveResolution
     )
     result.isLeft shouldBe true
     result.left.get.message should include(
-      MilvusBackfill.usedSnapshotCol("score")
+      usedSnapshotCol("score")
     )
 
     val bf = MilvusBackfill.validateTargetNamesAgainstInternalColumns(
-      Seq("score", MilvusBackfill.usedBfCol("score")),
+      Seq("score", usedBfCol("score")),
       reservationJoinKey,
       caseSensitiveResolution
     )
@@ -521,8 +528,8 @@ class BackfillModeTest
         StructField("pk", IntegerType, nullable = false),
         StructField("f1", IntegerType, nullable = true),
         StructField("f2", StringType, nullable = true),
-        StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false),
-        StructField(MilvusBackfill.RowOffsetCol, LongType, nullable = false)
+        StructField(SegmentIdCol, LongType, nullable = false),
+        StructField(RowOffsetCol, LongType, nullable = false)
       )
     )
     val javaRows = rows.map { case (pk, f1, f2, seg, off) =>
@@ -694,7 +701,7 @@ class BackfillModeTest
         Seq(
           StructField("a", StringType, nullable = false),
           StructField("b", StringType, nullable = false),
-          StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false)
+          StructField(SegmentIdCol, LongType, nullable = false)
         )
       )
     )
@@ -705,7 +712,7 @@ class BackfillModeTest
 
     row.getAs[String]("b") shouldBe "A"
     row.getAs[String]("a") shouldBe "B"
-    row.getAs[Long](MilvusBackfill.SegmentIdCol) shouldBe 10L
+    row.getAs[Long](SegmentIdCol) shouldBe 10L
   }
 
   test("join-key compatibility checks normalized component types") {
@@ -748,8 +755,8 @@ class BackfillModeTest
         Seq(
           StructField("k1", IntegerType, nullable = false),
           StructField("k2", StringType, nullable = false),
-          StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false),
-          StructField(MilvusBackfill.RowOffsetCol, LongType, nullable = false)
+          StructField(SegmentIdCol, LongType, nullable = false),
+          StructField(RowOffsetCol, LongType, nullable = false)
         )
       )
     )
@@ -793,8 +800,8 @@ class BackfillModeTest
         Seq(
           StructField("id", LongType, nullable = false),
           StructField(physicalKey, StringType, nullable = false),
-          StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false),
-          StructField(MilvusBackfill.RowOffsetCol, LongType, nullable = false)
+          StructField(SegmentIdCol, LongType, nullable = false),
+          StructField(RowOffsetCol, LongType, nullable = false)
         )
       )
     )
@@ -832,8 +839,8 @@ class BackfillModeTest
     val snapshotSchema = StructType(
       Seq(
         StructField("pk", IntegerType, nullable = false),
-        StructField(MilvusBackfill.SegmentIdCol, LongType, nullable = false),
-        StructField(MilvusBackfill.RowOffsetCol, LongType, nullable = false)
+        StructField(SegmentIdCol, LongType, nullable = false),
+        StructField(RowOffsetCol, LongType, nullable = false)
       )
     )
     val snapshotRows = Seq(Row(1, 10L, 0L), Row(2, 10L, 1L), Row(3, 10L, 2L))
@@ -914,13 +921,13 @@ class BackfillModeTest
       "pk",
       "f1",
       "f2",
-      MilvusBackfill.SegmentIdCol,
-      MilvusBackfill.RowOffsetCol,
-      MilvusBackfill.MatchFlagCol,
-      MilvusBackfill.usedSnapshotCol("f1"),
-      MilvusBackfill.usedBfCol("f1"),
-      MilvusBackfill.usedSnapshotCol("f2"),
-      MilvusBackfill.usedBfCol("f2")
+      SegmentIdCol,
+      RowOffsetCol,
+      MatchFlagCol,
+      usedSnapshotCol("f1"),
+      usedBfCol("f1"),
+      usedSnapshotCol("f2"),
+      usedBfCol("f2")
     )
 
     val byPk = joined
@@ -1073,10 +1080,10 @@ class BackfillModeTest
       .map(r =>
         (
           r.getAs[Int]("pk"),
-          r.getAs[Boolean](MilvusBackfill.usedSnapshotCol("f1")),
-          r.getAs[Boolean](MilvusBackfill.usedBfCol("f1")),
-          r.getAs[Boolean](MilvusBackfill.usedSnapshotCol("f2")),
-          r.getAs[Boolean](MilvusBackfill.usedBfCol("f2"))
+          r.getAs[Boolean](usedSnapshotCol("f1")),
+          r.getAs[Boolean](usedBfCol("f1")),
+          r.getAs[Boolean](usedSnapshotCol("f2")),
+          r.getAs[Boolean](usedBfCol("f2"))
         )
       )
       .toSeq
@@ -1162,13 +1169,13 @@ class BackfillModeTest
       "pk",
       "f1",
       "f2",
-      MilvusBackfill.SegmentIdCol,
-      MilvusBackfill.RowOffsetCol,
-      MilvusBackfill.MatchFlagCol,
-      MilvusBackfill.usedSnapshotCol("f1"),
-      MilvusBackfill.usedBfCol("f1"),
-      MilvusBackfill.usedSnapshotCol("f2"),
-      MilvusBackfill.usedBfCol("f2")
+      SegmentIdCol,
+      RowOffsetCol,
+      MatchFlagCol,
+      usedSnapshotCol("f1"),
+      usedBfCol("f1"),
+      usedSnapshotCol("f2"),
+      usedBfCol("f2")
     )
 
     val byPk = joined
@@ -1220,10 +1227,10 @@ class BackfillModeTest
       .map(r =>
         (
           r.getAs[Int]("pk"),
-          r.getAs[Boolean](MilvusBackfill.usedSnapshotCol("f1")),
-          r.getAs[Boolean](MilvusBackfill.usedBfCol("f1")),
-          r.getAs[Boolean](MilvusBackfill.usedSnapshotCol("f2")),
-          r.getAs[Boolean](MilvusBackfill.usedBfCol("f2"))
+          r.getAs[Boolean](usedSnapshotCol("f1")),
+          r.getAs[Boolean](usedBfCol("f1")),
+          r.getAs[Boolean](usedSnapshotCol("f2")),
+          r.getAs[Boolean](usedBfCol("f2"))
         )
       )
       .toSeq

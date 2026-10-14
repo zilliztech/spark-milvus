@@ -16,6 +16,13 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
   private val MiB = 1L << 20
   private val GiB = 1L << 30
 
+  test("executor heap and overhead use Spark's MiB default units") {
+    SearchResources.memoryMiB("6144") shouldBe 6L * GiB
+    SearchResources.memoryMiB("512") shouldBe 512L * MiB
+    SearchResources.memoryMiB("6g") shouldBe 6L * GiB
+    SearchResources.memoryMiB("512m") shouldBe 512L * MiB
+  }
+
   test("an exact scan keeps half the off-heap room, shared by the tasks") {
     // The measured machine: 503 GiB, a 32 GiB heap, 16 tasks; the reserve is
     // capped at 8 GiB. (503 - 32 - 8) x 0.5 / 16 = 14.46875 GiB

@@ -5,7 +5,7 @@ import scala.util.Try
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.milvus.storage.index.MachineResources
+import com.zilliz.milvus.storage.vector.MachineResources
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 
 /** The sizes of a search that are not the user's to know: the exact scan's base
@@ -48,10 +48,10 @@ private[search] object SearchResources {
     } else {
       def bytes(key: String, default: String): Long =
         JavaUtils.byteStringAsBytes(spark.conf.get(key, default))
-      val heap = bytes("spark.executor.memory", "1g")
+      val heap = memoryMiB(spark.conf.get("spark.executor.memory", "1g"))
       val overhead =
         spark.conf.getOption("spark.executor.memoryOverhead") match {
-          case Some(set) => JavaUtils.byteStringAsBytes(set)
+          case Some(set) => memoryMiB(set)
           case None =>
             val factor = spark.conf
               .getOption("spark.executor.memoryOverheadFactor")
@@ -66,6 +66,10 @@ private[search] object SearchResources {
       (Some(heap + overhead + offHeap), heap)
     }
   }
+
+  /** Spark's executor heap and overhead options default to MiB. */
+  private[search] def memoryMiB(value: String): Long =
+    Math.multiplyExact(JavaUtils.byteStringAsMb(value), 1L << 20)
 
   /** `spark.memory.fraction`: the share of the heap Spark manages, the rest
     * being where a task's own objects live.

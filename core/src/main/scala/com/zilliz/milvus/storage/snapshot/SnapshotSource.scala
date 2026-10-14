@@ -10,7 +10,7 @@ import scala.util.control.NonFatal
   * after it opens storage to find out what the collection looks like.
   * Implementations: `SnapshotCatalog.at`, `latestOf` and `named` (core),
   * `BackupSnapshotSource` (compat.backup), and the client and option-string
-  * sources in `spark.options`, which need types core does not have.
+  * sources in `spark.table`, which need types core does not have.
   */
 trait SnapshotSource {
   def snapshot(): Either[Throwable, Snapshot]

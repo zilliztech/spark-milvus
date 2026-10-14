@@ -16,16 +16,16 @@ class SegmentReaderPropertiesTest extends AnyFunSuite with Matchers {
       schemaBytes = Array.emptyByteArray,
       properties = Map(
         "fs.storage_type" -> "local",
-        SegmentReaderRegistry.RecordBatchMaxRows -> "1",
-        SegmentReaderRegistry.RecordBatchMaxSize -> "2"
+        SegmentReader.RecordBatchMaxRows -> "1",
+        SegmentReader.RecordBatchMaxSize -> "2"
       ),
       limits = ReadLimits(2048, 16777216L, 67108864L)
     )
 
-    SegmentReaderRegistry.nativeProperties(task) should contain allOf (
+    SegmentReader.nativeProperties(task) should contain allOf (
       "fs.storage_type" -> "local",
-      SegmentReaderRegistry.RecordBatchMaxRows -> "2048",
-      SegmentReaderRegistry.RecordBatchMaxSize -> "16777216"
+      SegmentReader.RecordBatchMaxRows -> "2048",
+      SegmentReader.RecordBatchMaxSize -> "16777216"
     )
   }
 
@@ -40,27 +40,27 @@ class SegmentReaderPropertiesTest extends AnyFunSuite with Matchers {
         limits = ReadLimits(2048, batchMaxBytes, 67108864L)
       )
 
-    SegmentReaderRegistry.nativeProperties(
+    SegmentReader.nativeProperties(
       task(
         32L << 20,
         Map(
-          SegmentReaderRegistry.PrebufferLazy -> "true",
-          SegmentReaderRegistry.PrebufferRangeSizeLimit -> "1"
+          SegmentReader.PrebufferLazy -> "true",
+          SegmentReader.PrebufferRangeSizeLimit -> "1"
         )
       )
     ) should contain allOf (
-      SegmentReaderRegistry.PrebufferLazy -> "false",
-      SegmentReaderRegistry.PrebufferRangeSizeLimit -> (4L << 20).toString
+      SegmentReader.PrebufferLazy -> "false",
+      SegmentReader.PrebufferRangeSizeLimit -> (4L << 20).toString
     )
-    SegmentReaderRegistry.rangeBytes(256L << 20) shouldBe (32L << 20)
-    SegmentReaderRegistry.rangeBytes(8L << 20) shouldBe (4L << 20)
-    SegmentReaderRegistry.rangeBytes((32L << 20) + 1) shouldBe (4L << 20) + 1
+    SegmentReader.rangeBytes(256L << 20) shouldBe (32L << 20)
+    SegmentReader.rangeBytes(8L << 20) shouldBe (4L << 20)
+    SegmentReader.rangeBytes((32L << 20) + 1) shouldBe (4L << 20) + 1
   }
 
   test("the IO pool holds every range of one batch per processor") {
-    SegmentReaderRegistry.ioThreads(4) shouldBe 32
-    SegmentReaderRegistry.ioThreads(
+    SegmentReader.ioThreads(4) shouldBe 32
+    SegmentReader.ioThreads(
       1
-    ) shouldBe SegmentReaderRegistry.RangesPerBatch
+    ) shouldBe SegmentReader.RangesPerBatch
   }
 }

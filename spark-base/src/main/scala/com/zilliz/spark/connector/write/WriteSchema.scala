@@ -1,5 +1,8 @@
 package com.zilliz.spark.connector.write
 
+import scala.jdk.CollectionConverters._
+
+import org.apache.arrow.vector.types.pojo.{ArrowType, Field, FieldType, Schema}
 import org.apache.spark.sql.types.{
   BinaryType,
   DataType,
@@ -8,8 +11,8 @@ import org.apache.spark.sql.types.{
   StructType
 }
 
-import com.zilliz.milvus.storage.schema.MilvusTypes
-import com.zilliz.spark.connector.types.SparkTypes
+import com.zilliz.milvus.storage.schema.{MilvusTypes, SchemaMapper}
+import com.zilliz.spark.connector.types.{SparkSchemaMapper, SparkTypes}
 import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
 
 /** The schema a write goes out with: the DataFrame's columns, checked against
@@ -25,6 +28,41 @@ import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
   * Design: docs/design/architecture/write.html section 3.
   */
 object WriteSchema {
+
+  /** The Arrow schema a segment is written with: the declared columns, and the
+    * two system columns when this write makes a new segment (decision 22). A
+    * column is named by its Milvus field id, which is how the manifest line
+    * matches them up.
+    */
+  private[connector] def arrowSchemaFor(
+      sparkSchema: StructType,
+      fieldIds: Map[String, Long],
+      withSystemFields: Boolean
+  ): Schema = {
+    val declared = SparkSchemaMapper.convertSparkSchemaToArrow(
+      sparkSchema,
+      fieldIds = fieldIds
+    )
+    if (!withSystemFields) declared
+    else {
+      require(
+        !declared.getFields.asScala.exists(field =>
+          field.getName == SchemaMapper.RowIdFieldId.toString ||
+            field.getName == SchemaMapper.TimestampFieldId.toString
+        ),
+        "A write that carries RowID or Timestamp itself cannot also be given placeholders"
+      )
+      val system =
+        Seq(SchemaMapper.RowIdFieldId, SchemaMapper.TimestampFieldId).map(id =>
+          new Field(
+            id.toString,
+            FieldType.notNullable(new ArrowType.Int(64, true)),
+            null
+          )
+        )
+      new Schema((declared.getFields.asScala ++ system).asJava)
+    }
+  }
 
   sealed trait Mode
 

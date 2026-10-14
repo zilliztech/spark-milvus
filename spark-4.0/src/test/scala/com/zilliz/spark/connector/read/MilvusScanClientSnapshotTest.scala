@@ -48,12 +48,9 @@ import com.zilliz.milvus.storage.snapshot.json.{
 }
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.stats.PrimaryKeyStats
-import com.zilliz.spark.connector.options.{
-  MilvusOption,
-  OptionStringsSnapshotSource,
-  StorageOptions
-}
+import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import com.zilliz.spark.connector.table.MilvusTable
+import com.zilliz.spark.connector.table.OptionStringsSnapshotSource
 
 class MilvusScanClientSnapshotTest extends AnyFunSuite {
   private val emptySchemaBytes = java.util.Base64.getEncoder.encodeToString(

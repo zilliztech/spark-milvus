@@ -15,12 +15,12 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
-import com.zilliz.milvus.storage.index.SearchPlan
 import com.zilliz.milvus.storage.schema.{
   MetricType,
   VectorElementType,
   VectorLayout
 }
+import com.zilliz.milvus.storage.vector.SearchPlan
 import com.zilliz.spark.connector.extensions.ConnectorVectorRanking
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.SearchLimits
@@ -133,7 +133,9 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
           NearestByInput.Frame(
             FrameSearch.Base(
               base,
-              types,
+              types.zipWithIndex.map { case (dataType, i) =>
+                BoundReference(i, dataType, nullable = true)
+              },
               BoundReference(1, vectorType, nullable = true)
             ),
             limits
@@ -163,6 +165,58 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         queryVectors.size.toLong * 4L * k
     }
   }
+  test(
+    "wide returned rows bound scan blocks by actual bytes without changing top-k"
+  ) {
+    assume(available, "the native libraries are not on this machine")
+    val input = spark.sparkContext.parallelize(0 until 1280, 1).map { i =>
+      new GenericInternalRow(
+        Array[Any](
+          i.toLong,
+          vector(i.toFloat, 0f),
+          UTF8String.fromString("x" * 65536)
+        )
+      ): InternalRow
+    }
+    val metrics = NearestByMetrics.create(spark.sparkContext)
+    val result = NearestBySearch
+      .run(
+        spark,
+        NearestByQueryRows.Held(
+          Array(new GenericInternalRow(Array[Any](vector(0f, 0f))))
+        ),
+        Seq(vectorType),
+        BoundReference(0, vectorType, nullable = true),
+        NearestByInput.Frame(
+          FrameSearch.Base(
+            input,
+            Seq(
+              BoundReference(0, LongType, nullable = false),
+              BoundReference(2, StringType, nullable = false)
+            ),
+            BoundReference(1, vectorType, nullable = true)
+          )
+        ),
+        outer = false,
+        approx = false,
+        k = 1,
+        metric = MetricType.L2,
+        outputTypes = Seq(vectorType, LongType, StringType),
+        function = ConnectorVectorRanking(
+          MetricType.L2,
+          "vector_l2_distance",
+          queryFirst = true
+        ),
+        bySpark = _ => fail("no query row is Spark's"),
+        metrics = metrics
+      )
+      .collect()
+    result.length shouldBe 1
+    result.head.getLong(1) shouldBe 0L
+    result.head.getUTF8String(2).numBytes() shouldBe 65536
+    metrics(SearchMetrics.KnowhereCalls).value should be >= 3L
+  }
+
 }
 
 object FrameSearchTest {

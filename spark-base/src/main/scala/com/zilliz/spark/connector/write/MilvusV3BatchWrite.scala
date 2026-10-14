@@ -101,7 +101,7 @@ class MilvusV3BatchWrite(
     */
   val jobId: String = UUID.randomUUID().toString
 
-  private val layout = StagingLayout(MilvusV3Writer.stagingRoot(storage), jobId)
+  private val layout = StagingLayout(StagingLayout.rootFor(storage), jobId)
 
   private val writeMode: JobWriteMode =
     if (

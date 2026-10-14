@@ -145,7 +145,7 @@ class SegmentReaderTakeTest extends AnyFunSuite with Matchers {
       task: SegmentReadTask,
       allocator: BufferAllocator
   ): SegmentReader =
-    SegmentReaderRegistry.open(
+    SegmentReader.open(
       task,
       schema,
       Seq("100", "101", "102"),

@@ -24,8 +24,10 @@ import com.zilliz.milvus.client.{
   CollectionNotFoundException,
   DatabaseNotFoundException
 }
+import com.zilliz.milvus.storage.schema.HybridTimestamp
 import com.zilliz.milvus.storage.snapshot.SnapshotNotFoundException
-import com.zilliz.spark.connector.options.{MilvusOption, SnapshotReference}
+import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.table.SnapshotReference
 
 object MilvusCatalogTest {
   final case class LoadCall(
@@ -367,21 +369,21 @@ class MilvusCatalogTest extends AnyFunSuite {
     val logicalMask = (1L << 18) - 1L
 
     assert(
-      MilvusHybridTimestamp.upperBound(999999L) ==
+      HybridTimestamp.upperBound(999999L) ==
         ((999L << 18) | logicalMask)
     )
     assert(
-      MilvusHybridTimestamp.upperBound(1000000L) ==
+      HybridTimestamp.upperBound(1000000L) ==
         ((1000L << 18) | logicalMask)
     )
-    assert(MilvusHybridTimestamp.upperBound(-1L) == Long.MinValue)
-    assert(MilvusHybridTimestamp.upperBound(Long.MinValue) == Long.MinValue)
-    assert(MilvusHybridTimestamp.upperBound(Long.MaxValue) == Long.MaxValue)
+    assert(HybridTimestamp.upperBound(-1L) == Long.MinValue)
+    assert(HybridTimestamp.upperBound(Long.MinValue) == Long.MinValue)
+    assert(HybridTimestamp.upperBound(Long.MaxValue) == Long.MaxValue)
 
     val realSnapshotBoundary = 462324677975474190L
     val realSnapshotMillis = realSnapshotBoundary >>> 18
     assert(
-      MilvusHybridTimestamp.upperBound(realSnapshotMillis * 1000L) >=
+      HybridTimestamp.upperBound(realSnapshotMillis * 1000L) >=
         realSnapshotBoundary
     )
   }

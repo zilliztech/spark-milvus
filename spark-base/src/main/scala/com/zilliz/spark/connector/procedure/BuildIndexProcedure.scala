@@ -26,11 +26,10 @@ import com.zilliz.milvus.storage.write.exec.StagingLayout
 import com.zilliz.spark.connector.options.{
   MilvusOption,
   OptionParsing,
-  SnapshotReference,
   TaskResources
 }
 import com.zilliz.spark.connector.read.SnapshotPartitions
-import com.zilliz.spark.connector.table.MilvusTables
+import com.zilliz.spark.connector.table.{MilvusTables, SnapshotReference}
 import io.milvus.grpc.schema.FieldSchema
 
 /** `CALL milvus.system.build_index(...)`: builds a vector index for every
@@ -233,7 +232,7 @@ object BuildIndexProcedure extends Procedure {
     )
 
   /** `params => 'M=16,efConstruction=200'`: what the caller tunes, which the
-    * Spark layer parses and `core.index` hands to Knowhere.
+    * Spark layer parses and `core.vector` hands to Knowhere.
     */
   private[procedure] def parametersOf(
       params: Option[String]

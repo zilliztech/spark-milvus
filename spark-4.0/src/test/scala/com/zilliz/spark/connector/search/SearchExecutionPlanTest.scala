@@ -11,8 +11,8 @@ import org.apache.spark.resource.ResourceProfile
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.index.SearchPlan
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.vector.SearchPlan
 import com.zilliz.spark.connector.options.TaskResources
 
 class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
@@ -63,30 +63,54 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       SearchExecutionPlan.Retention.Segments
   }
 
-  test("index prefetch keeps the existing two-loaded-index capacity boundary") {
+  test("index prefetch fits two loaded indexes inside remaining task memory") {
     // Each loaded index retains two copies; current loading adds no copy.
     val sizes = Seq(Some(1000L), Some(900L))
-    SearchExecutionPlan.prefetchIndexes(true, sizes, 3999L) shouldBe false
-    SearchExecutionPlan.prefetchIndexes(true, sizes, 4000L) shouldBe true
+    SearchExecutionPlan.prefetchIndexes(
+      true,
+      sizes,
+      6999L,
+      1000L,
+      2000L
+    ) shouldBe false
+    SearchExecutionPlan.prefetchIndexes(
+      true,
+      sizes,
+      7000L,
+      1000L,
+      2000L
+    ) shouldBe true
   }
 
   test("exact mode and any missing or unknown index size disable prefetch") {
     val sizes = Seq(Some(1000L), Some(900L))
-    SearchExecutionPlan.prefetchIndexes(false, sizes, 10000L) shouldBe false
+    SearchExecutionPlan.prefetchIndexes(
+      false,
+      sizes,
+      10000L,
+      0L,
+      0L
+    ) shouldBe false
     SearchExecutionPlan.prefetchIndexes(
       true,
       sizes.take(1),
-      10000L
+      10000L,
+      0L,
+      0L
     ) shouldBe false
     SearchExecutionPlan.prefetchIndexes(
       true,
       Seq(Some(1000L), None),
-      10000L
+      10000L,
+      0L,
+      0L
     ) shouldBe false
     SearchExecutionPlan.prefetchIndexes(
       true,
       Seq(Some(1000L), Some(0L)),
-      10000L
+      10000L,
+      0L,
+      0L
     ) shouldBe false
   }
 

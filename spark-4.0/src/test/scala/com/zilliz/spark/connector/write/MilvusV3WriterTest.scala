@@ -4,6 +4,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.milvus.storage.write.exec.StagingLayout
 import com.zilliz.spark.connector.options.MilvusOption
 
 class MilvusV3WriterTest extends AnyFunSuite with Matchers {
@@ -27,20 +28,20 @@ class MilvusV3WriterTest extends AnyFunSuite with Matchers {
   ) {
     // The local backend is rooted at fs.root_path and appends every key to
     // it; repeating the root would put the segments under {root}/{root}/.
-    MilvusV3Writer.stagingRoot(
+    StagingLayout.rootFor(
       Map(StorageProperties.RootPath -> "files")
     ) shouldBe "files"
-    MilvusV3Writer.stagingRoot(Map.empty) shouldBe "files"
-    MilvusV3Writer.stagingRoot(
+    StagingLayout.rootFor(Map.empty) shouldBe "files"
+    StagingLayout.rootFor(
       Map(
         StorageProperties.StorageType -> "local",
         StorageProperties.RootPath -> "/tmp/run"
       )
     ) shouldBe ""
-    MilvusV3Writer.stagingRoot(
+    StagingLayout.rootFor(
       Map(StorageProperties.StorageType -> "LOCAL")
     ) shouldBe ""
-    MilvusV3Writer.stagingRoot(
+    StagingLayout.rootFor(
       Map(
         StorageProperties.StorageType -> "remote",
         StorageProperties.RootPath -> "milvus"

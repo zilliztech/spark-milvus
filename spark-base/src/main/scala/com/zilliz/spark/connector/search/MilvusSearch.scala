@@ -9,16 +9,12 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.storage.expr.{FilterExpr, PredicateExpr}
-import com.zilliz.milvus.storage.index.{
+import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
+import com.zilliz.milvus.storage.vector.{
   CandidateBytes,
   RankingFunction,
   SearchPlan
-}
-import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
-import com.zilliz.milvus.storage.schema.{
-  MetricType,
-  VectorElementType,
-  VectorLayout
 }
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
@@ -158,8 +154,8 @@ object MilvusSearch extends Logging {
     val stageHeap = execution.stageHeap
     val mergeParts = execution.mergePartitions
     logInfo(
-      s"Merge stage: $queryCount queries x ${plan.tasks} answers of $k over $mergeParts partitions, " +
-        s"about ${queryCount / mergeParts} queries a partition at ${plan.tasks.toLong * k * CandidateBytes.Width} bytes each " +
+      s"Merge stage: $queryCount queries x ${plan.sets.size} answers of $k over $mergeParts partitions, " +
+        s"about ${queryCount / mergeParts} queries a partition at ${plan.sets.size.toLong * k * CandidateBytes.Width} bytes each " +
         s"against ${stageHeap.bytes} bytes of heap a task"
     )
     val found = candidates(
@@ -333,37 +329,6 @@ object MilvusSearch extends Logging {
         )
       }
     profile.fold(searched)(searched.withResources)
-  }
-
-  private[search] def dimensionOf(field: FieldSchema): Int = field.typeParams
-    .find(_.key == "dim")
-    .map(_.value.toInt)
-    .getOrElse(
-      throw new IllegalArgumentException(
-        s"Field '${field.name}' declares no dimension"
-      )
-    )
-
-  /** A search runs over a float, float16, bfloat16 or int8 field, by a metric
-    * that field's indexes take. Binary vector fields are not searched
-    * (docs/design/README.md, decision log 2026-10-09).
-    */
-  private[search] def checkSearchable(
-      metric: MetricType,
-      layout: VectorLayout
-  ): Unit = {
-    require(
-      layout.elementType != VectorElementType.Bit,
-      "A binary vector field is not searched; the connector searches FloatVector, Float16Vector, BFloat16Vector and Int8Vector fields"
-    )
-    val supported = MetricType.forElementType(layout.elementType)
-    require(
-      supported.contains(metric),
-      s"A ${layout.elementType} field takes ${supported
-          .map(_.name)
-          .sorted
-          .mkString(" or ")}, not $metric"
-    )
   }
 
 }

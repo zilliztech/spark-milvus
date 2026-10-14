@@ -34,11 +34,7 @@ import com.zilliz.milvus.storage.snapshot.{
 import com.zilliz.milvus.storage.stats.{PrimaryKeyBloomPruner, PrimaryKeyFilter}
 import com.zilliz.spark.connector.expr.SparkPredicateTranslator
 import com.zilliz.spark.connector.metrics.ScanMetrics
-import com.zilliz.spark.connector.options.{
-  MilvusOption,
-  SnapshotSources,
-  StorageOptions
-}
+import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
 /** One read of one [[Snapshot]]: the table resolved it once, this plans one
@@ -244,7 +240,7 @@ class MilvusScan(
 
     if (needsDeleteStore || needsBloomStore) {
       try {
-        SnapshotSources.withStore(
+        StorageOptions.withStore(
           openPlanningStore()
         ) { store =>
           if (needsDeleteStore)

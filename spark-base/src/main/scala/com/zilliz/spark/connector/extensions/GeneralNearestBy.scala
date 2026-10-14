@@ -57,7 +57,7 @@ import org.apache.spark.sql.types.{
 }
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.milvus.storage.index.RankingFunction
+import com.zilliz.milvus.storage.vector.RankingFunction
 
 /** A plan with the result of Spark 4.2's `RewriteNearestByJoin`, built from
   * operators every line has, for the lines before 4.2

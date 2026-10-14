@@ -11,7 +11,6 @@ import com.zilliz.milvus.storage.codec.{
   MilvusIndexFileDecoder,
   VectorIndexFamilies
 }
-import com.zilliz.milvus.storage.index.IndexSearch
 import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{
@@ -24,6 +23,7 @@ import com.zilliz.milvus.storage.snapshot.{
   SegmentIndexes,
   SegmentLayout
 }
+import com.zilliz.milvus.storage.vector.IndexSearch
 
 /** One segment's vector index, open and ready to be searched.
   *

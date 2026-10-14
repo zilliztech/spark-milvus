@@ -5,27 +5,18 @@ import scala.jdk.CollectionConverters._
 
 import org.apache.spark.{Partition, SparkContext, TaskContext}
 import org.apache.spark.rdd.{RDD, ShuffledRDD}
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.catalyst.expressions.UnsafeArrayData
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.{
-  ArrayType,
-  FloatType,
-  LongType,
-  StructField,
-  StructType
-}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.storage.StorageLevel
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.milvus.storage.index.SearchPlan
 import com.zilliz.milvus.storage.schema.{
   MetricType,
   VectorElementType,
   VectorLayout
 }
+import com.zilliz.milvus.storage.vector.SearchPlan
 import com.zilliz.spark.connector.options.TaskResources
 
 /** How a query set reaches the first stage. Broadcast whole, or, when it is too
@@ -80,37 +71,19 @@ class SearchDeliveryTest
     SearchPlan.bytesPerQuery(layout, request.k) * 2
   )
 
-  private def rows(count: Int = queries): Seq[Row] =
+  private def rows(count: Int = queries): Seq[(Long, Array[Float])] =
     (0 until count).map(index =>
-      Row(index.toLong, Seq(index.toFloat, index.toFloat + 0.5f))
+      index.toLong -> Array(index.toFloat, index.toFloat + 0.5f)
     )
 
-  private def selected(count: Int = queries): DataFrame =
-    spark.createDataFrame(
-      rows(count).asJava,
-      StructType(
-        Seq(
-          StructField(SearchQueries.IdColumn, LongType),
-          StructField(SearchQueries.VectorColumn, ArrayType(FloatType))
-        )
-      )
-    )
+  private def selected(count: Int = queries): RDD[(Long, Array[Float])] =
+    spark.sparkContext.parallelize(rows(count), 2)
 
-  /** `rows` packed as an executor packs a partition of them. */
   private def pack(
-      rows: Seq[Row],
+      rows: Seq[(Long, Array[Float])],
       metric: MetricType = request.metric
   ): (Array[Long], Array[Byte]) =
-    SearchQueries.packPartition(
-      rows.iterator.map(row =>
-        InternalRow(
-          row.getLong(0),
-          UnsafeArrayData.fromPrimitiveArray(row.getSeq[Float](1).toArray)
-        )
-      ),
-      layout,
-      metric
-    )
+    SearchQueries.packPartition(rows.iterator, layout, metric)
 
   private def packed(): RDD[SearchQueries.Group] =
     SearchQueries.packedGroups(selected(), groups, request.metric, layout)
@@ -145,6 +118,14 @@ class SearchDeliveryTest
   test("packing gives one partition per group, each its queries in order") {
     groups.size shouldBe 4
     deliversGroups(packed(), groups, queries)
+  }
+
+  test("packing positions stay dense when stable query ids have gaps") {
+    val input = selected().map { case (id, vector) => (99L - id * 3L, vector) }
+    val delivered =
+      SearchQueries.packedGroups(input, groups, request.metric, layout)
+    delivered.flatMap(_.ids.toSeq).collect().toSeq shouldBe
+      (0 until queries).map(index => 99L - index * 3L)
   }
 
   test("packing follows the planned groups when the longer ones come first") {
@@ -252,14 +233,12 @@ class SearchDeliveryTest
 
   test("executor packing keeps partition order and crosses chunk boundaries") {
     val many = 5000
-    val frame = spark
-      .createDataFrame(
-        (0 until many)
-          .map(index => Row(index.toLong, Seq(index.toFloat, -index.toFloat)))
-          .asJava,
-        selected().schema
-      )
-      .coalesce(1)
+    val frame = spark.sparkContext.parallelize(
+      (0 until many).map(index =>
+        index.toLong -> Array(index.toFloat, -index.toFloat)
+      ),
+      1
+    )
 
     val (ids, vectors) =
       SearchQueries.packOnExecutors(frame, layout, MetricType.L2)
@@ -271,12 +250,9 @@ class SearchDeliveryTest
   }
 
   test("executor packing refuses a value that is not finite") {
-    val bad = spark.createDataFrame(
-      Seq(
-        Row(1L, Seq(1.0f, 2.0f)),
-        Row(2L, Seq(Float.NaN, 0.0f))
-      ).asJava,
-      selected().schema
+    val bad = spark.sparkContext.parallelize(
+      Seq(1L -> Array(1.0f, 2.0f), 2L -> Array(Float.NaN, 0.0f)),
+      2
     )
 
     val failure = the[org.apache.spark.SparkException] thrownBy
@@ -288,7 +264,7 @@ class SearchDeliveryTest
   test(
     "delivery broadcasts at the byte limit and always preserves driver-packed input"
   ) {
-    val frame = SearchQueries.Frame(selected(), queries.toLong)
+    val frame = SearchQueries.Rows(selected(), queries.toLong)
     val bytes = SearchQueries.bytes(frame.count, layout)
     SearchExecutionPlan.queryDelivery(frame, layout, bytes) shouldBe
       SearchQueries.Broadcast(frame.selected)
@@ -305,7 +281,7 @@ class SearchDeliveryTest
 
   test("every delivery hands SearchQueryRanges the same groups and bytes") {
     val (driverIds, driverVectors) = pack(rows())
-    val frame = SearchQueries.Frame(selected(), queries.toLong)
+    val frame = SearchQueries.Rows(selected(), queries.toLong)
     val packedInput = SearchQueries.Packed(driverIds, driverVectors)
     val deliveries = Seq(
       SearchExecutionPlan.queryDelivery(packedInput, layout, 0L),

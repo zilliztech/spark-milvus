@@ -464,7 +464,7 @@ engine; a shared HNSW name alone does not establish format compatibility.
 Each task owns and closes its index. There is no cross-task index cache.
 
 A NEAREST BY over a Milvus table returns each query's global TopK, running
-`core.index.SegmentSearch` over the segment sets `SearchPlan` cut. Missing
+`core.vector.SegmentSearch` over the segment sets `SearchPlan` cut. Missing
 native libraries fail the query. Planning, packing and merge tests run in the
 ordinary suite. `LocalEndToEndSmoke` runs the whole chain over real native code
 on local files -- a write, reads, deletes, EXACT NEAREST BY, `build_index`,

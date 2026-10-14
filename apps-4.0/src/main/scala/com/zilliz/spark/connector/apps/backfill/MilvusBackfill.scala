@@ -1,20 +1,13 @@
 package com.zilliz.spark.connector.apps.backfill
 
-import scala.collection.mutable
-import scala.collection.JavaConverters._
-
-import org.apache.hadoop.fs.Path
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.connector.write.DataWriter
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.slf4j.LoggerFactory
 
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
 import com.zilliz.milvus.storage.path.StoragePath
+import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.json.{
   CollectionSchemaJson,
   FieldJson,
@@ -23,13 +16,15 @@ import com.zilliz.milvus.storage.snapshot.json.{
   SnapshotJson
 }
 import com.zilliz.milvus.storage.snapshot.Segment
-import com.zilliz.spark.connector.options.{HadoopStorageKeys, MilvusOption}
-import com.zilliz.spark.connector.table.SnapshotSparkSchema
-import com.zilliz.spark.connector.write.{
-  MilvusV3CommitMessage,
-  MilvusV3WriterFactory,
-  WriteSchema
+import com.zilliz.spark.connector.apps.backfill.BackfillSegmentWrite.{
+  usedBfCol,
+  usedSnapshotCol,
+  MatchFlagCol,
+  RowOffsetCol,
+  SegmentIdCol
 }
+import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
 
 /** Backfill operation for Milvus collections
@@ -87,7 +82,7 @@ object MilvusBackfill {
           .getOrElse("default")
         JobDescriptor(JobOwner(database, collection), JobWriteMode.Backfill)
       }
-    val store = stagingStore(config)
+    val store = BackfillStorage.stagingStore(config)
     try
       commitJobManifest(
         store,
@@ -116,18 +111,6 @@ object MilvusBackfill {
         )
       )
     )
-
-  private def stagingStore(
-      config: BackfillConfig
-  ): com.zilliz.milvus.storage.io.ObjectStore = {
-    import com.zilliz.milvus.storage.credential.StorageProperties
-    import com.zilliz.milvus.storage.io.NativeObjectStore
-    NativeObjectStore
-      .Factory(
-        StorageProperties.from(config.getS3WriteOptionsForBasePath(""))
-      )
-      .open()
-  }
 
   /** Refuses a job id that already has a committed manifest, before a single
     * segment is written: a caller that names an id owns it, and reusing one is
@@ -190,14 +173,6 @@ object MilvusBackfill {
       checkpointRDD: Option[RDD[Row]]
   )
 
-  /** Marker column added to the backfill side before the left join so we can
-    * count how many snapshot rows found a join-key match (non-null marker →
-    * matched). Kept on the DataFrame all the way down to the per-segment
-    * partition function, and stripped from the projection written to parquet.
-    */
-  private[backfill] val MatchFlagCol = "__bf_matched__"
-  private[backfill] val SegmentIdCol = MilvusOption.MilvusExtraColumnSegmentID
-  private[backfill] val RowOffsetCol = MilvusOption.MilvusExtraColumnRowOffset
   private[backfill] val ApplyDeletesToSnapshotRows = false
 
   private val SupportedPhysicalJoinMilvusTypes: Set[Int] = Set(
@@ -210,8 +185,8 @@ object MilvusBackfill {
   )
 
   private val SystemFieldIdsByName: Map[String, Long] = Map(
-    "RowID" -> 0L,
-    "Timestamp" -> 1L
+    "RowID" -> SchemaMapper.RowIdFieldId,
+    "Timestamp" -> SchemaMapper.TimestampFieldId
   )
 
   private val ReservedJoinKeyFieldNames: Set[String] = Set(
@@ -368,22 +343,6 @@ object MilvusBackfill {
       }
     }
   }
-
-  /** Per-field flag columns added in any mode that reads snapshot-side target
-    * values (coalesce + overwrite). For each new field, one boolean marker
-    * records whether the written value came from the snapshot and another
-    * whether it came from the backfill data file. Semantics differ per mode:
-    *   - coalesce: usedSnapshot = snapshot non-null; usedBf = snapshot null AND
-    *     bf non-null
-    *   - overwrite: usedSnapshot = join key unmatched; usedBf = join key
-    *     matched
-    * Used by the writer to tally the per-field `usedSourceByField` /
-    * `usedDataFileByField` counts surfaced in `SegmentBackfillResult`.
-    */
-  private[backfill] def usedSnapshotCol(field: String): String =
-    s"__bf_used_src_${field}__"
-  private[backfill] def usedBfCol(field: String): String =
-    s"__bf_used_bf_${field}__"
 
   /** Suffix appended to backfill-side target columns while both sides of a
     * target field are live on the joined frame (coalesce + overwrite).
@@ -760,7 +719,7 @@ object MilvusBackfill {
       // Process each segment
       // The job id is checked before the first segment is written.
       try {
-        val store = stagingStore(runConfig)
+        val store = BackfillStorage.stagingStore(runConfig)
         try ensureJobIdUnused(store, stagingLayoutFor(runConfig))
         finally store.close()
       } catch {
@@ -775,7 +734,7 @@ object MilvusBackfill {
           )
       }
 
-      val segmentResults = processSegments(
+      val segmentResults = BackfillSegmentWrite.write(
         spark,
         joinedDF,
         collectionID,
@@ -885,27 +844,30 @@ object MilvusBackfill {
     // and per-bucket fs.s3a.bucket.<b>.* config is only honored by
     // S3AFileSystem. Force the s3a scheme so the credentials we just wrote
     // actually take effect.
-    val path = normalizeObjectStorageScheme(rawPath, config)
+    val path = BackfillStorage.normalizeObjectStorageScheme(rawPath, config)
     try {
       // Configure the source bucket before reading the parquet. OSS must be
       // fully materialized while this temporary credential scope is active;
       // S3A uses persistent per-bucket configuration and does not need it.
-      Right(withScopedHadoopStorage(spark, path, config, isSource = true) {
-        // Materialize while source-bucket credentials are installed. Spark
-        // evaluates DataFrame reads lazily, so returning an unmaterialized DF
-        // would allow later main-bucket configuration to leak into this read.
-        val df = spark.read.parquet(path)
-        if (df.columns.isEmpty) {
-          throw new IllegalArgumentException(
-            "Backfill parquet is empty (no columns)"
-          )
-        }
-        if (path.startsWith("oss://")) {
-          localCheckpointBackfillData(spark, df)
-        } else {
-          BackfillSource(df, None)
-        }
-      })
+      Right(
+        BackfillStorage
+          .withScopedHadoopStorage(spark, path, config, isSource = true) {
+            // Materialize while source-bucket credentials are installed. Spark
+            // evaluates DataFrame reads lazily, so returning an unmaterialized DF
+            // would allow later main-bucket configuration to leak into this read.
+            val df = spark.read.parquet(path)
+            if (df.columns.isEmpty) {
+              throw new IllegalArgumentException(
+                "Backfill parquet is empty (no columns)"
+              )
+            }
+            if (path.startsWith("oss://")) {
+              localCheckpointBackfillData(spark, df)
+            } else {
+              BackfillSource(df, None)
+            }
+          }
+      )
     } catch {
       case e: Exception =>
         logger.error(s"Failed to read Parquet file from $path", e)
@@ -1782,372 +1744,6 @@ object MilvusBackfill {
     }
   }
 
-  /** Process each segment separately by distributing to Spark executors Each
-    * segment is processed by exactly one FFI writer on a single executor
-    * Supports multi-partition collections by tracking partition ID per segment
-    */
-  private def processSegments(
-      spark: SparkSession,
-      joinedDF: DataFrame,
-      collectionID: Long,
-      segmentToPartitionMap: Map[Long, Long],
-      segmentBasePathMap: Map[Long, String],
-      v2SegmentIdSet: Set[Long],
-      config: BackfillConfig,
-      newFieldNames: Seq[String],
-      collectionSchema: CollectionSchema,
-      targetFieldOverrides: Map[
-        String,
-        org.apache.spark.sql.types.StructField
-      ]
-  ): Either[BackfillError, Map[Long, SegmentBackfillResult]] = {
-
-    try {
-      // Prepare data: select only needed columns and add _segment_id for
-      // partitioning. Trailing column is the backfill match flag — retained
-      // here so executors can count join-key-matched rows, stripped from the
-      // projection that reaches the writer. In any mode that reads snapshot fields
-      // (coalesce / overwrite), two extra boolean flag columns per new field
-      // follow the match flag (usedSnapshot, usedBf interleaved, in
-      // `newFieldNames` order) so the writer can compute per-field
-      // usedSourceByField / usedDataFileByField counts.
-      val readsSnapshotFields = config.readsSnapshotFields
-      val flagColNames: Seq[String] =
-        if (readsSnapshotFields)
-          newFieldNames.flatMap(n => Seq(usedSnapshotCol(n), usedBfCol(n)))
-        else Seq.empty
-      val preparedDF = joinedDF
-        .select(
-          (Seq(SegmentIdCol, RowOffsetCol) ++ newFieldNames ++ Seq(
-            MatchFlagCol
-          ) ++ flagColNames).map(col): _*
-        )
-
-      // Get the schema for new fields only (without _segment_id, _row_offset,
-      // or the match flag)
-      // The write schema: the new columns checked against the collection and
-      // carrying their field ids and dimensions, which is what names the
-      // columns in the written files.
-      val targetSchema =
-        try
-          WriteSchema.resolve(
-            org.apache.spark.sql.types.StructType(
-              newFieldNames.map(fieldName =>
-                targetFieldOverrides.getOrElse(
-                  fieldName,
-                  preparedDF.schema.fields.find(_.name == fieldName).get
-                )
-              )
-            ),
-            collectionSchema,
-            WriteSchema.Mode.Columns
-          )
-        catch {
-          case e: IllegalArgumentException =>
-            return Left(SchemaValidationError(e.getMessage))
-        }
-
-      val segmentIds = segmentToPartitionMap.keys.toArray
-      val segmentPartitioner = new SegmentPartitioner(segmentIds)
-
-      // Repartition using custom partitioner, then sort by _row_offset within each partition
-      // CRITICAL: .copy() is required because queryExecution.toRdd produces an iterator
-      // that reuses the same UnsafeRow buffer. Without copy, keyBy/partitionBy's
-      // ExternalSorter stores references to the same mutable buffer, causing all
-      // rows to contain the last row's data.
-      val repartitionedRDD = preparedDF.queryExecution.toRdd
-        .map(_.copy()) // Materialize each row to avoid UnsafeRow reuse
-        .keyBy(_.getLong(0)) // _segment_id is at index 0
-        .partitionBy(segmentPartitioner)
-        .values
-        .mapPartitions(iter =>
-          iter.toSeq.sortBy(_.getLong(1)).iterator
-        ) // Sort by _row_offset
-
-      // Broadcast configuration to executors
-      val broadcastConfig = spark.sparkContext.broadcast(config)
-      val broadcastCollectionID = spark.sparkContext.broadcast(collectionID)
-      val broadcastSegmentToPartitionMap =
-        spark.sparkContext.broadcast(segmentToPartitionMap)
-      val broadcastSegmentBasePathMap =
-        spark.sparkContext.broadcast(segmentBasePathMap)
-      val broadcastV2SegmentIdSet = spark.sparkContext.broadcast(v2SegmentIdSet)
-      val broadcastTargetSchema = spark.sparkContext.broadcast(targetSchema)
-
-      val results = repartitionedRDD
-        .mapPartitions { iter =>
-          if (!iter.hasNext) Iterator.empty
-          else
-            processSegmentPartition(
-              iter,
-              broadcastConfig.value,
-              broadcastCollectionID.value,
-              broadcastSegmentToPartitionMap.value,
-              broadcastSegmentBasePathMap.value,
-              broadcastV2SegmentIdSet.value,
-              broadcastTargetSchema.value
-            )
-        }
-        .collect()
-
-      // Cleanup broadcast variables
-      broadcastConfig.unpersist()
-      broadcastCollectionID.unpersist()
-      broadcastSegmentToPartitionMap.unpersist()
-      broadcastSegmentBasePathMap.unpersist()
-      broadcastV2SegmentIdSet.unpersist()
-      broadcastTargetSchema.unpersist()
-
-      // Check for failures
-      val failures = results.filter(_._2.isDefined)
-      if (failures.nonEmpty) {
-        val firstFailure = failures.head
-        val error = firstFailure._2.get
-        return Left(
-          WriteError(
-            segmentId = firstFailure._1.segmentId,
-            outputPath = firstFailure._1.outputPath,
-            message =
-              s"Failed to write ${failures.length} segment(s): ${error.getMessage}",
-            cause = Some(error)
-          )
-        )
-      }
-
-      // Extract successful results
-      val successfulResults = results.map { case (result, _) =>
-        result.segmentId -> result
-      }.toMap
-
-      // Log summary statistics
-      val totalTime = results.map(_._1.executionTimeMs).sum
-      val avgTime = if (results.nonEmpty) totalTime / results.length else 0
-      val totalRows = results.map(_._1.rowCount).sum
-      val totalSnapshotRows = results.map(_._1.sourceRowCount).sum
-      val totalMatched = results.map(_._1.matchedRowCount).sum
-      val matchRateStr =
-        if (totalSnapshotRows > 0)
-          f"${totalMatched.toDouble / totalSnapshotRows * 100}%.2f%%"
-        else "n/a"
-
-      logger.info("=== Backfill Summary ===")
-      logger.info(s"Total segments: ${results.length}")
-      logger.info(s"Total source rows: $totalSnapshotRows")
-      logger.info(
-        s"Total matched rows: $totalMatched (match rate: $matchRateStr)"
-      )
-      logger.info(s"Total rows written: $totalRows")
-      logger.info(s"Total time for all segments: ${totalTime}ms")
-      logger.info(s"Average time per segment: ${avgTime}ms")
-      if (readsSnapshotFields) {
-        logger.info(
-          s"Per-field provenance (mode=${config.mode}, aggregated):"
-        )
-        newFieldNames.foreach { f =>
-          val snapshotCount =
-            results.map(_._1.usedSourceByField.getOrElse(f, 0L)).sum
-          val df = results.map(_._1.usedDataFileByField.getOrElse(f, 0L)).sum
-          val nullOut = totalSnapshotRows - snapshotCount - df
-          logger.info(
-            s"  $f: source=$snapshotCount, dataFile=$df, null=$nullOut"
-          )
-        }
-      }
-      results.sortBy(_._1.segmentId).foreach { case (r, _) =>
-        val segRate =
-          if (r.sourceRowCount > 0)
-            f"${r.matchedRowCount.toDouble / r.sourceRowCount * 100}%.2f%%"
-          else "n/a"
-        logger.info(
-          s"Segment ${r.segmentId}: source=${r.sourceRowCount}, matched=${r.matchedRowCount} ($segRate), written=${r.rowCount}"
-        )
-      }
-
-      Right(successfulResults)
-
-    } catch {
-      case e: Exception =>
-        logger.error("Failed to process segments", e)
-        Left(
-          SegmentProcessingError(
-            segmentId = -1,
-            message = s"Failed to process segments: ${e.getMessage}",
-            cause = Some(e)
-          )
-        )
-    }
-  }
-
-  /** Process a single partition containing exactly one segment This is called
-    * by each Spark executor to write one segment's data
-    */
-  /** The writer of one segment's new column groups, built on the executor. The
-    * rows go into the segment's own directory (`milvus.writer.customPath`) and
-    * the run's job manifest is written once by the driver, so the segment write
-    * opens no job of its own and writes nothing under the staging prefix. The
-    * explicit `fs.*` of `writeOptions` is the whole storage configuration.
-    */
-  private[backfill] def segmentWriter(
-      targetSchema: StructType,
-      writeOptions: Map[String, String],
-      jobId: String
-  ): DataWriter[InternalRow] =
-    new MilvusV3WriterFactory(
-      targetSchema,
-      MilvusOption(new CaseInsensitiveStringMap(writeOptions.asJava)),
-      jobId,
-      HadoopStorageKeys.canonicalProperties(writeOptions)
-    ).createWriter(0, System.currentTimeMillis())
-
-  private def processSegmentPartition(
-      iter: Iterator[InternalRow],
-      config: BackfillConfig,
-      collectionID: Long,
-      segmentToPartitionMap: Map[Long, Long],
-      segmentBasePathMap: Map[Long, String],
-      v2SegmentIdSet: Set[Long],
-      targetSchema: org.apache.spark.sql.types.StructType
-  ): Iterator[(SegmentBackfillResult, Option[Throwable])] = {
-
-    val firstRow = iter.next()
-    val segmentID = firstRow.getLong(0)
-    val partitionID = segmentToPartitionMap(segmentID)
-    val startTime = System.currentTimeMillis()
-
-    // StorageV2 (packed-parquet, no manifest) segments: write one parquet per
-    // new field at files/insert_log/.../{fieldID}/{logID} via the V2 writer.
-    if (v2SegmentIdSet.contains(segmentID)) {
-      return processV2SegmentPartition(
-        iter,
-        firstRow,
-        segmentID,
-        partitionID,
-        collectionID,
-        targetSchema,
-        config,
-        startTime
-      )
-    }
-
-    // Create writer — use manifest basePath if available, otherwise generate path
-    val writeOptions = segmentBasePathMap.get(segmentID) match {
-      case Some(basePath) =>
-        config.getS3WriteOptionsForBasePath(basePath)
-      case None =>
-        config.getS3WriteOptions(collectionID, partitionID, segmentID)
-    }
-    val outputPath = writeOptions("milvus.writer.customPath")
-
-    val writer = segmentWriter(
-      targetSchema,
-      writeOptions,
-      config.jobId.getOrElse(
-        throw new IllegalStateException(
-          "the job id is resolved at the start of run"
-        )
-      )
-    )
-
-    val readsSnapshotFields = config.readsSnapshotFields
-    val newFieldNames = targetSchema.fieldNames.toSeq
-    val numNewFields = newFieldNames.size
-    // Row layout (fixed prefix): [_segment_id, _row_offset, ...newFields,
-    // __bf_matched__, (usedSnapshot, usedBf)*numNewFields in snapshot-reading modes
-    // (coalesce / overwrite) only].
-    val matchFlagIdx = 2 + numNewFields
-    val firstFlagIdx = matchFlagIdx + 1
-
-    try {
-      var rowCount = 0L
-      var nullRowCount = 0L
-      var matchedRowCount = 0L
-      val usedSnapshotCounts = Array.fill(numNewFields)(0L)
-      val usedBfCounts = Array.fill(numNewFields)(0L)
-
-      def writeRow(row: InternalRow): Unit = {
-        val dataEnd = matchFlagIdx
-        val targetFields = (2 until dataEnd)
-          .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
-          .toArray
-        if (targetFields.forall(_ == null)) nullRowCount += 1
-        if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
-        if (readsSnapshotFields) {
-          var i = 0
-          while (i < numNewFields) {
-            val snapshotIdx = firstFlagIdx + 2 * i
-            val bfIdx = snapshotIdx + 1
-            if (!row.isNullAt(snapshotIdx) && row.getBoolean(snapshotIdx))
-              usedSnapshotCounts(i) += 1
-            if (!row.isNullAt(bfIdx) && row.getBoolean(bfIdx))
-              usedBfCounts(i) += 1
-            i += 1
-          }
-        }
-        writer.write(
-          new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(
-            targetFields
-          )
-        )
-        rowCount += 1
-      }
-
-      writeRow(firstRow)
-      iter.foreach(writeRow)
-
-      val commitMessage = writer.commit()
-      val (manifestPaths, committedVersion) = commitMessage match {
-        case msg: MilvusV3CommitMessage =>
-          (Seq(msg.manifestPath), msg.committedVersion)
-        case _ => (Seq.empty[String], -1L)
-      }
-
-      writer.close()
-
-      val (usedSnapshotByField, usedBfByField) =
-        if (readsSnapshotFields)
-          (
-            newFieldNames.zip(usedSnapshotCounts).toMap,
-            newFieldNames.zip(usedBfCounts).toMap
-          )
-        else (Map.empty[String, Long], Map.empty[String, Long])
-
-      Iterator.single(
-        (
-          SegmentBackfillResult(
-            segmentId = segmentID,
-            rowCount = rowCount,
-            manifestPaths = manifestPaths,
-            outputPath = outputPath,
-            executionTimeMs = System.currentTimeMillis() - startTime,
-            committedVersion = committedVersion,
-            sourceRowCount = rowCount,
-            matchedRowCount = matchedRowCount,
-            usedSourceByField = usedSnapshotByField,
-            usedDataFileByField = usedBfByField
-          ),
-          None
-        )
-      )
-
-    } catch {
-      case e: Exception =>
-        writer.abort()
-        writer.close()
-        Iterator.single(
-          (
-            SegmentBackfillResult(
-              segmentId = segmentID,
-              rowCount = 0,
-              manifestPaths = Seq.empty,
-              outputPath = outputPath,
-              executionTimeMs = System.currentTimeMillis() - startTime
-            ),
-            Some(e)
-          )
-        )
-    }
-  }
-
   /** Workaround until Milvus snapshot exposes `FieldBinlog.child_fields`: when
     * the same Milvus fieldID is claimed by multiple V2 column groups (e.g. an
     * original multi-field group at slot < 100 PLUS a single-field group at slot
@@ -2214,7 +1810,7 @@ object MilvusBackfill {
               store,
               manifestSchemaVersion = metadata.manifestSchemaVersion,
               applyDeletes = ApplyDeletesToSnapshotRows,
-              storageScheme = storageScheme(config),
+              storageScheme = BackfillStorage.storageScheme(config),
               endpoint = config.s3Endpoint
             )
         finally store.close()
@@ -2261,7 +1857,7 @@ object MilvusBackfill {
   ): Either[BackfillError, Option[SnapshotJson]] = {
     if (snapshotPath == null || snapshotPath.isEmpty) return Right(None)
 
-    readSnapshotJson(snapshotPath, config) match {
+    BackfillStorage.readSnapshotJson(snapshotPath, config) match {
       case Right(json) if json.nonEmpty =>
         SnapshotJson.parse(json) match {
           case Right(metadata) => Right(Some(metadata))
@@ -2277,174 +1873,6 @@ object MilvusBackfill {
       case Left(e) =>
         Left(
           SchemaValidationError(s"Failed to read snapshot file: ${e.message}")
-        )
-    }
-  }
-
-  /** StorageV2 write path: writes one parquet per new field under
-    * `files/insert_log/{coll}/{part}/{seg}/{newFieldID}/{logID}` via
-    * [[com.zilliz.spark.connector.write.MilvusV2Writer]]. Backfill always emits
-    * single-field column groups, so `columnGroupID` in the path equals the new
-    * field's ID (milvus convention for 1-field groups).
-    */
-  private def processV2SegmentPartition(
-      iter: Iterator[InternalRow],
-      firstRow: InternalRow,
-      segmentID: Long,
-      partitionID: Long,
-      collectionID: Long,
-      targetSchema: org.apache.spark.sql.types.StructType,
-      config: BackfillConfig,
-      startTime: Long
-  ): Iterator[(SegmentBackfillResult, Option[Throwable])] = {
-    import com.zilliz.milvus.storage.schema.FieldMetadata
-    import com.zilliz.spark.connector.write.{MilvusV2Writer, V2BinlogFile}
-
-    // Field ids in targetSchema order, from the metadata WriteSchema put there.
-    val fieldNames = targetSchema.fieldNames.toSeq
-    val fieldIds = targetSchema.fields.toSeq.map(
-      _.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
-    )
-
-    // Simple monotonic logID allocator seeded by task-start nanos. Plan
-    // names this as a future injection point (caller-provided global ID),
-    // but a monotonic local sequence is sufficient for the single-task
-    // single-segment scope (no collisions expected within one file).
-    val logIdBase = System.nanoTime()
-    val logIdCounter = new java.util.concurrent.atomic.AtomicLong(logIdBase)
-    val allocator: () => Long = () => logIdCounter.incrementAndGet()
-
-    val outputRoot = storagePath(
-      config,
-      s"${config.s3RootPath.stripSuffix("/")}/insert_log/$collectionID/$partitionID/$segmentID"
-    )
-
-    // Reuse the same MilvusOption plumbing the V3 writer uses — the new V2
-    // writer talks to S3 via Arrow's filesystem (inside milvus-storage), so
-    // it needs the FS config, not Hadoop S3A config.
-    val writeOptions = config.getS3WriteOptionsForBasePath(
-      s"${config.s3RootPath.stripSuffix("/")}/insert_log/$collectionID/$partitionID/$segmentID"
-    )
-    val milvusOption = MilvusOption(
-      new CaseInsensitiveStringMap(writeOptions.asJava)
-    )
-
-    val writer = new MilvusV2Writer(
-      collectionId = collectionID,
-      partitionId = partitionID,
-      segmentId = segmentID,
-      newFieldNames = fieldNames,
-      newFieldIds = fieldIds,
-      targetSchema = targetSchema,
-      milvusOption = milvusOption,
-      allocateLogId = allocator
-    )
-
-    val readsSnapshotFields = config.readsSnapshotFields
-    val numNewFields = fieldNames.size
-    // Row layout (fixed prefix): [_segment_id, _row_offset, ...newFields,
-    // __bf_matched__, (usedSnapshot, usedBf)*numNewFields in snapshot-reading modes
-    // (coalesce / overwrite) only].
-    val matchFlagIdx = 2 + numNewFields
-    val firstFlagIdx = matchFlagIdx + 1
-
-    var rowCount = 0L
-    var matchedRowCount = 0L
-    val usedSnapshotCounts = Array.fill(numNewFields)(0L)
-    val usedBfCounts = Array.fill(numNewFields)(0L)
-    try {
-      // The V2 writer only wants the newField columns; strip the tracking
-      // columns, the match flag, and any snapshot-reading-mode provenance flags
-      // (the match flag + per-field flags are folded into the counters
-      // instead).
-      def projected(row: InternalRow): InternalRow = {
-        val dataEnd = matchFlagIdx
-        val values = (2 until dataEnd)
-          .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
-          .toArray
-        new org.apache.spark.sql.catalyst.expressions.GenericInternalRow(values)
-      }
-      def countMatch(row: InternalRow): Unit = {
-        if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
-        if (readsSnapshotFields) {
-          var i = 0
-          while (i < numNewFields) {
-            val snapshotIdx = firstFlagIdx + 2 * i
-            val bfIdx = snapshotIdx + 1
-            if (!row.isNullAt(snapshotIdx) && row.getBoolean(snapshotIdx))
-              usedSnapshotCounts(i) += 1
-            if (!row.isNullAt(bfIdx) && row.getBoolean(bfIdx))
-              usedBfCounts(i) += 1
-            i += 1
-          }
-        }
-      }
-
-      countMatch(firstRow)
-      writer.write(projected(firstRow))
-      rowCount += 1
-      iter.foreach { row =>
-        countMatch(row)
-        writer.write(projected(row))
-        rowCount += 1
-      }
-      val produced: Seq[V2BinlogFile] = writer.close()
-
-      val manifestPaths = produced.map(_.path)
-      // Single-field column groups (backfill invariant): one V2ColumnGroup
-      // artifact per produced file, with fieldIds = [fieldId].
-      val columnGroupArtifacts = produced.map { pf =>
-        V2ColumnGroupArtifact(
-          fieldIds = Seq(pf.fieldId),
-          binlogFiles = Seq(pf.path),
-          rowCount = pf.rowsWritten
-        )
-      }
-      val (usedSnapshotByField, usedBfByField) =
-        if (readsSnapshotFields)
-          (
-            fieldNames.zip(usedSnapshotCounts).toMap,
-            fieldNames.zip(usedBfCounts).toMap
-          )
-        else (Map.empty[String, Long], Map.empty[String, Long])
-      Iterator.single(
-        (
-          SegmentBackfillResult(
-            segmentId = segmentID,
-            rowCount = rowCount,
-            manifestPaths = manifestPaths,
-            outputPath = outputRoot,
-            executionTimeMs = System.currentTimeMillis() - startTime,
-            committedVersion = -1L,
-            v2Artifact = Some(
-              V2SegmentArtifact(
-                segmentId = segmentID,
-                storageVersion = 2L,
-                columnGroups = columnGroupArtifacts
-              )
-            ),
-            sourceRowCount = rowCount,
-            matchedRowCount = matchedRowCount,
-            usedSourceByField = usedSnapshotByField,
-            usedDataFileByField = usedBfByField
-          ),
-          None
-        )
-      )
-    } catch {
-      case e: Exception =>
-        writer.abort()
-        Iterator.single(
-          (
-            SegmentBackfillResult(
-              segmentId = segmentID,
-              rowCount = 0,
-              manifestPaths = Seq.empty,
-              outputPath = outputRoot,
-              executionTimeMs = System.currentTimeMillis() - startTime
-            ),
-            Some(e)
-          )
         )
     }
   }
@@ -2521,456 +1949,6 @@ object MilvusBackfill {
     )
 
     (collectionID, segmentToPartitionMap, segmentBasePathMap)
-  }
-
-  /** Write backfill result JSON to the given output path (S3 or local). Uses
-    * Spark's Hadoop FileSystem API for portability.
-    *
-    * Returns Right(()) on success and Left(BackfillError) on failure — callers
-    * MUST check the result and propagate failure to the user. The previous
-    * version swallowed exceptions, which caused silent successes (exit 0 with
-    * success message printed but no result file written).
-    *
-    * The output path may live in a bucket whose credentials are not yet
-    * configured on the Spark Hadoop conf, so we run
-    * [[configureHadoopS3ForPath]] for it first (treated as a "main bucket" path
-    * — same credentials as the Milvus storage bucket; override via --source-*
-    * if you need a separate sink for results).
-    */
-  def writeResultJson(
-      spark: SparkSession,
-      result: BackfillResult,
-      rawOutputPath: String,
-      config: BackfillConfig
-  ): Either[BackfillError, Unit] = {
-    // Same s3:// → s3a:// normalization as readSnapshotJson /
-    // readBackfillData. Without it, an s3:// URL would route to the legacy
-    // S3FileSystem which ignores fs.s3a.bucket.<b>.* config.
-    val outputPath = normalizeObjectStorageScheme(rawOutputPath, config)
-    try {
-      withScopedHadoopStorage(spark, outputPath, config, isSource = false) {
-        val hadoopPath = new Path(outputPath)
-        val fs =
-          hadoopPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
-        val out = fs.create(hadoopPath, true)
-        try {
-          out.write(
-            result.toJson.getBytes(java.nio.charset.StandardCharsets.UTF_8)
-          )
-        } finally {
-          out.close()
-        }
-      }
-      logger.info(s"Backfill result JSON written to: $outputPath")
-      Right(())
-    } catch {
-      case e: Exception =>
-        logger.error(
-          s"Failed to write result JSON to $outputPath: ${e.getMessage}",
-          e
-        )
-        Left(
-          WriteError(
-            segmentId = -1,
-            outputPath = outputPath,
-            message = s"Failed to write result JSON: ${e.getMessage}",
-            cause = Some(e)
-          )
-        )
-    }
-  }
-
-  /** Normalize an `s3://` URL to `s3a://`. The legacy `s3://` scheme maps to
-    * Hadoop's S3FileSystem (or, on 3.4.x, an alias that does NOT honor
-    * `fs.s3a.bucket.<b>.*` per-bucket config), so per-bucket credentials we
-    * write would be silently ignored. All read/write code paths in this object
-    * route through this helper before touching Hadoop FS APIs.
-    */
-  private[backfill] def normalizeS3Scheme(path: String): String = {
-    if (path == null) null
-    else if (path.startsWith("s3://")) "s3a://" + path.stripPrefix("s3://")
-    else path
-  }
-
-  private[backfill] def normalizeObjectStorageScheme(
-      path: String,
-      config: BackfillConfig
-  ): String = {
-    if (path == null) null
-    else if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun")) {
-      if (path.startsWith("s3://")) "oss://" + path.stripPrefix("s3://")
-      else if (path.startsWith("s3a://")) "oss://" + path.stripPrefix("s3a://")
-      else path
-    } else normalizeS3Scheme(path)
-  }
-
-  private[backfill] def storageScheme(config: BackfillConfig): String =
-    if (config.s3CloudProvider.trim.equalsIgnoreCase("aliyun")) "oss"
-    else "s3a"
-
-  private[backfill] def storagePath(
-      config: BackfillConfig,
-      suffix: String
-  ): String = {
-    storageScheme(config) + "://" + config.s3BucketName + "/" + suffix
-      .stripPrefix("/")
-  }
-
-  private val OssHadoopKeys = Seq(
-    "fs.oss.impl",
-    "fs.oss.impl.disable.cache",
-    "fs.oss.endpoint",
-    "fs.oss.connection.secure.enabled",
-    "fs.oss.accessKeyId",
-    "fs.oss.accessKeySecret",
-    BackfillConfig.HadoopOssSecurityToken,
-    BackfillConfig.HadoopOssCredentialsProvider
-  )
-
-  private[backfill] def withScopedHadoopStorage[T](
-      spark: SparkSession,
-      path: String,
-      config: BackfillConfig,
-      isSource: Boolean
-  )(operation: => T): T = {
-    val hadoopConf = spark.sparkContext.hadoopConfiguration
-    if (path == null || !path.startsWith("oss://")) {
-      configureHadoopStorageForPath(hadoopConf, path, config, isSource)
-      return operation
-    }
-
-    val previous = mutable.LinkedHashMap.empty[String, Option[String]]
-    OssHadoopKeys.foreach(key => previous.put(key, Option(hadoopConf.get(key))))
-    try {
-      configureHadoopStorageForPath(hadoopConf, path, config, isSource)
-      hadoopConf.set("fs.oss.impl.disable.cache", "true")
-      operation
-    } finally {
-      previous.foreach {
-        case (key, Some(value)) => hadoopConf.set(key, value)
-        case (key, None)        => hadoopConf.unset(key)
-      }
-    }
-  }
-
-  private[backfill] def configureHadoopStorageForPath(
-      hadoopConf: org.apache.hadoop.conf.Configuration,
-      path: String,
-      config: BackfillConfig,
-      isSource: Boolean
-  ): Unit = {
-    val normalized = path
-    if (normalized != null && normalized.startsWith("oss://")) {
-      configureHadoopOssForPath(hadoopConf, normalized, config, isSource)
-    } else {
-      configureHadoopS3ForPath(hadoopConf, normalized, config, isSource)
-    }
-  }
-
-  private[backfill] def configureHadoopStorageForPath(
-      spark: SparkSession,
-      path: String,
-      config: BackfillConfig,
-      isSource: Boolean
-  ): Unit = configureHadoopStorageForPath(
-    spark.sparkContext.hadoopConfiguration,
-    normalizeObjectStorageScheme(path, config),
-    config,
-    isSource
-  )
-
-  private[backfill] def configureHadoopOssForPath(
-      hadoopConf: org.apache.hadoop.conf.Configuration,
-      path: String,
-      config: BackfillConfig,
-      isSource: Boolean
-  ): Unit = {
-    if (path == null || !path.startsWith("oss://")) return
-    val withoutScheme = path.stripPrefix("oss://")
-    val slash = withoutScheme.indexOf('/')
-    val bucket =
-      if (slash < 0) withoutScheme else withoutScheme.substring(0, slash)
-    if (bucket.isEmpty) return
-
-    val endpoint =
-      if (isSource) config.sourceS3Endpoint.getOrElse(config.s3Endpoint)
-      else config.s3Endpoint
-    val accessKey =
-      if (isSource) config.sourceS3AccessKey.getOrElse(config.s3AccessKey)
-      else config.s3AccessKey
-    val secretKey =
-      if (isSource) config.sourceS3SecretKey.getOrElse(config.s3SecretKey)
-      else config.s3SecretKey
-    val useSSL =
-      if (isSource) config.sourceS3UseSSL.getOrElse(config.s3UseSSL)
-      else config.s3UseSSL
-    val useIam =
-      if (isSource) config.sourceS3UseIam.getOrElse(config.s3UseIam)
-      else config.s3UseIam
-    hadoopConf.set(
-      "fs.oss.impl",
-      "org.apache.hadoop.fs.aliyun.oss.AliyunOSSFileSystem"
-    )
-    if (endpoint != null && endpoint.nonEmpty)
-      hadoopConf.set("fs.oss.endpoint", endpoint)
-    if (useSSL) hadoopConf.set("fs.oss.connection.secure.enabled", "true")
-    else hadoopConf.unset("fs.oss.connection.secure.enabled")
-    if (useIam) {
-      val provider = Option(
-        hadoopConf.getTrimmed(BackfillConfig.HadoopOssCredentialsProvider)
-      ).filter(_.nonEmpty)
-      if (provider.isEmpty) {
-        throw new IllegalArgumentException(
-          s"${BackfillConfig.HadoopOssCredentialsProvider} must be configured for OSS IAM access"
-        )
-      }
-      hadoopConf.unset("fs.oss.accessKeyId")
-      hadoopConf.unset("fs.oss.accessKeySecret")
-    } else {
-      hadoopConf.set("fs.oss.accessKeyId", accessKey)
-      hadoopConf.set("fs.oss.accessKeySecret", secretKey)
-      hadoopConf.unset(BackfillConfig.HadoopOssSecurityToken)
-      // hadoop-aliyun constructs AliyunCredentialsProvider itself from the
-      // accessKeyId/accessKeySecret properties. The class has no (URI,
-      // Configuration) or no-arg constructor, so configuring it explicitly
-      // causes filesystem initialization to fail.
-      hadoopConf.unset(BackfillConfig.HadoopOssCredentialsProvider)
-    }
-  }
-
-  private[backfill] def configureHadoopOssForPath(
-      spark: SparkSession,
-      path: String,
-      config: BackfillConfig,
-      isSource: Boolean
-  ): Unit = configureHadoopOssForPath(
-    spark.sparkContext.hadoopConfiguration,
-    path,
-    config,
-    isSource
-  )
-
-  /** Configure Hadoop S3A credentials for the bucket referenced by `path`.
-    *
-    * Uses per-bucket keys (`fs.s3a.bucket.<bucket>.*`) so that the backfill
-    * *source* bucket and the Milvus storage bucket (snapshot / segments) can
-    * each use their own endpoint and credentials within the same Spark session.
-    * No-op for non-S3 paths.
-    *
-    * @param isSource
-    *   true when configuring the backfill input bucket — in that case we
-    *   consult the `sourceS3*` overrides and fall back to the main credentials
-    *   when a particular field is unset.
-    */
-  private[backfill] def configureHadoopS3ForPath(
-      hadoopConf: org.apache.hadoop.conf.Configuration,
-      path: String,
-      config: BackfillConfig,
-      isSource: Boolean
-  ): Unit = {
-    if (path == null) return
-    if (!(path.startsWith("s3://") || path.startsWith("s3a://"))) return
-
-    // Extract bucket name from s3(a)://bucket/key
-    val withoutScheme = path.stripPrefix("s3a://").stripPrefix("s3://")
-    val bucket = {
-      val slash = withoutScheme.indexOf('/')
-      if (slash < 0) withoutScheme else withoutScheme.substring(0, slash)
-    }
-    if (bucket.isEmpty) return
-
-    // Resolve the effective credentials for this bucket. For the source bucket
-    // any unset override falls back to the main credentials, preserving the
-    // existing single-bucket behavior.
-    val endpoint =
-      if (isSource) config.sourceS3Endpoint.getOrElse(config.s3Endpoint)
-      else config.s3Endpoint
-    val accessKey =
-      if (isSource) config.sourceS3AccessKey.getOrElse(config.s3AccessKey)
-      else config.s3AccessKey
-    val secretKey =
-      if (isSource) config.sourceS3SecretKey.getOrElse(config.s3SecretKey)
-      else config.s3SecretKey
-    val useSSL =
-      if (isSource) config.sourceS3UseSSL.getOrElse(config.s3UseSSL)
-      else config.s3UseSSL
-    val useIam =
-      if (isSource) config.sourceS3UseIam.getOrElse(config.s3UseIam)
-      else config.s3UseIam
-    val region =
-      if (isSource) config.sourceS3Region.getOrElse(config.s3Region)
-      else config.s3Region
-
-    val prefix = s"fs.s3a.bucket.$bucket"
-
-    val tencentRole =
-      if (useIam) HadoopStorageKeys.resolveTencentRole(hadoopConf, bucket)
-      else None
-    // Source overrides may point at another cloud. Its provider/endpoint,
-    // rather than the target bucket's cloud alone, determines COS behavior.
-    val endpointHost = Option(endpoint)
-      .getOrElse("")
-      .stripPrefix("https://")
-      .stripPrefix("http://")
-    val isTencent = tencentRole.nonEmpty ||
-      (config.s3CloudProvider.trim == "tencent" && (!isSource || config.sourceS3Endpoint.isEmpty)) ||
-      (endpointHost.startsWith("cos.") && endpointHost.endsWith(
-        ".myqcloud.com"
-      ))
-    require(
-      !useIam || !isTencent || tencentRole.nonEmpty,
-      "Tencent IAM storage requires TencentS3RoleCredentialsProvider in Hadoop configuration"
-    )
-
-    // Endpoint + path style + SSL are safe to set in both IAM and static modes
-    if (endpoint != null && endpoint.nonEmpty) {
-      hadoopConf.set(s"$prefix.endpoint", endpoint)
-    }
-    if (region != null && region.nonEmpty) {
-      // Newer hadoop-aws (3.3.x+) reads endpoint.region; set both keys for
-      // compatibility with older versions that only honor `region`.
-      hadoopConf.set(s"$prefix.endpoint.region", region)
-      hadoopConf.set(s"$prefix.region", region)
-    }
-    hadoopConf.set(s"$prefix.path.style.access", (!isTencent).toString)
-    if (isTencent) {
-      hadoopConf.set(s"$prefix.bucket.probe", "0")
-      hadoopConf.set(s"$prefix.multiobjectdelete.enable", "false")
-    }
-    hadoopConf.set(
-      s"$prefix.connection.ssl.enabled",
-      if (useSSL) "true" else "false"
-    )
-
-    if (useIam) {
-      val bucketProviderKey = s"$prefix.aws.credentials.provider"
-      val assumedRole =
-        if (tencentRole.nonEmpty) None
-        else BackfillConfig.resolveAwsS3AssumeRole(hadoopConf, bucket)
-
-      // Build an explicit IRSA/EKS-friendly provider chain instead of the
-      // v1 DefaultAWSCredentialsProviderChain, which has historically been
-      // unreliable on EKS pods (it does not always pick up the projected
-      // service-account web-identity token before falling back to the
-      // EC2 instance profile of the node — leaking the node's role).
-      //
-      // Order matters:
-      //   1. WebIdentityTokenCredentialsProvider — IRSA / GKE Workload Identity
-      //   2. EnvironmentVariableCredentialsProvider — local dev / CI overrides
-      //   3. IAMInstanceCredentialsProvider — EC2 / EKS node role fallback
-      // A managed runtime may already have selected an AssumeRole provider
-      // globally for its data role or per bucket for an external volume. Do
-      // not replace that security boundary with the pod's ambient identity.
-      if (assumedRole.isEmpty && tencentRole.isEmpty) {
-        hadoopConf.set(
-          bucketProviderKey,
-          Seq(
-            "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider",
-            "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider",
-            "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider"
-          ).mkString(",")
-        )
-      }
-    } else {
-      hadoopConf.set(s"$prefix.access.key", accessKey)
-      hadoopConf.set(s"$prefix.secret.key", secretKey)
-      // Force the simple static-credentials provider for this bucket so it
-      // doesn't get shadowed by a globally configured provider chain.
-      hadoopConf.set(
-        s"$prefix.aws.credentials.provider",
-        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
-      )
-    }
-
-    logger.info(
-      s"Configured Hadoop S3A for bucket '$bucket' " +
-        s"(endpoint=$endpoint, useIam=$useIam, isSource=$isSource)"
-    )
-  }
-
-  private[backfill] def configureHadoopS3ForPath(
-      spark: SparkSession,
-      path: String,
-      config: BackfillConfig,
-      isSource: Boolean
-  ): Unit = configureHadoopS3ForPath(
-    spark.sparkContext.hadoopConfiguration,
-    path,
-    config,
-    isSource
-  )
-
-  /** Read snapshot JSON content from S3 or local file system. Returns the JSON
-    * string.
-    */
-  private def readSnapshotJson(
-      snapshotPath: String,
-      config: BackfillConfig
-  ): Either[BackfillError, String] = {
-    if (snapshotPath == null || snapshotPath.isEmpty) {
-      return Right("") // Empty path means use client fallback
-    }
-
-    try {
-      // A standard object-store URI lives in its named bucket. A path without
-      // a scheme and file:// remain local CLI input.
-      val local = !snapshotPath.contains("://") ||
-        snapshotPath.startsWith("file://")
-      if (!local) {
-
-        // The snapshot JSON is read the way every other driver-side read
-        // goes: through the native store the fs.* options describe, at the
-        // (bucket, key) named by the user-supplied URI. Spark's Hadoop
-        // filesystem is not involved.
-        import com.zilliz.milvus.storage.credential.StorageProperties
-        import com.zilliz.milvus.storage.io.NativeObjectStore
-        import com.zilliz.milvus.storage.path.StoragePath
-        // The path is what Milvus printed for the snapshot, so the
-        // scheme://endpoint/bucket/key form is accepted when the host is the
-        // configured endpoint, as SnapshotCatalog.read accepts it.
-        val located = StoragePath.parseMilvus(
-          snapshotPath,
-          config.s3BucketName,
-          config.s3Endpoint
-        )
-        val properties = StorageProperties.from(
-          config.getMilvusReadOptions ++ Map(
-            StorageProperties.BucketName -> located.bucket
-          )
-        )
-        val store = NativeObjectStore.Factory(properties).open()
-        val json =
-          try
-            new String(
-              store.readAll(located.key),
-              java.nio.charset.StandardCharsets.UTF_8
-            )
-          finally store.close()
-
-        Right(json)
-
-      } else {
-        // Local file path, read directly
-        val source =
-          scala.io.Source.fromFile(snapshotPath.stripPrefix("file://"))
-        try {
-          val json = source.mkString
-          Right(json)
-        } finally {
-          source.close()
-        }
-      }
-    } catch {
-      case e: Exception =>
-        logger.error(s"Failed to read snapshot JSON: ${e.getMessage}", e)
-        Left(
-          DataReadError(
-            snapshotPath,
-            s"Failed to read snapshot file: ${e.getMessage}",
-            Some(e)
-          )
-        )
-    }
   }
 
 }

@@ -52,7 +52,7 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
     )
 
   test("a V2 reader accepts its declared physical row count at EOF") {
-    val guarded = SegmentReaderRegistry.withExpectedRows(
+    val guarded = SegmentReader.withExpectedRows(
       v2Task(expectedRows = 3L),
       new StubReader(rows = 3L)
     )
@@ -64,7 +64,7 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
 
   test("a V2 reader refuses both short and excess results at EOF") {
     Seq(2L, 4L).foreach { delivered =>
-      val guarded = SegmentReaderRegistry.withExpectedRows(
+      val guarded = SegmentReader.withExpectedRows(
         v2Task(expectedRows = 3L),
         new StubReader(rows = delivered)
       )
@@ -78,7 +78,7 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
 
   test("closing before EOF delegates without checking a partial read") {
     val delegate = new StubReader(rows = 1L)
-    val guarded = SegmentReaderRegistry.withExpectedRows(
+    val guarded = SegmentReader.withExpectedRows(
       v2Task(expectedRows = 3L),
       delegate
     )
@@ -90,7 +90,7 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
 
   test("the expected-row wrapper preserves read metrics") {
     val metrics = ReadMetrics(1L, 2L, 3L, 4L, 5L, 6L, 7L)
-    val guarded = SegmentReaderRegistry.withExpectedRows(
+    val guarded = SegmentReader.withExpectedRows(
       v2Task(expectedRows = 3L),
       new StubReader(rows = 3L, readMetrics = metrics)
     )
@@ -100,7 +100,7 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
 
   test("take delegates physical offsets without verifying sequential EOF") {
     val delegate = new StubReader(rows = 0L)
-    val guarded = SegmentReaderRegistry.withExpectedRows(
+    val guarded = SegmentReader.withExpectedRows(
       v2Task(expectedRows = 3L),
       delegate
     )
@@ -118,7 +118,7 @@ class ExpectedRowsSegmentReaderTest extends AnyFunSuite with Matchers {
       layout = SegmentLayout.Manifest("files/segment", readVersion = 2L)
     )
     val delegate = new StubReader(rows = 0L)
-    val unchanged = SegmentReaderRegistry.withExpectedRows(task, delegate)
+    val unchanged = SegmentReader.withExpectedRows(task, delegate)
 
     unchanged should be theSameInstanceAs delegate
   }

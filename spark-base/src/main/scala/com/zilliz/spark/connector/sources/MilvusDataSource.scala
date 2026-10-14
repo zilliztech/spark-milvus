@@ -8,8 +8,7 @@ import org.apache.spark.sql.sources.DataSourceRegister
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.spark.connector.options.SnapshotReference
-import com.zilliz.spark.connector.table.MilvusTables
+import com.zilliz.spark.connector.table.{MilvusTables, SnapshotReference}
 
 case class MilvusDataSource() extends TableProvider with DataSourceRegister {
   override def getTable(

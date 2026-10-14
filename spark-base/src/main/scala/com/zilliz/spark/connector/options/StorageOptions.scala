@@ -21,6 +21,35 @@ import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
   * rehydration in backup mode) and by every scan planner.
   */
 object StorageOptions extends Logging {
+
+  /** Owns a driver-side store until its operation completes, preserving the
+    * primary failure if releasing the store also fails.
+    */
+  private[connector] def withStore[A](
+      open: => ObjectStore
+  )(use: ObjectStore => A): A = {
+    val store = open
+    useAndClose(store.close())(use(store))
+  }
+
+  private[connector] def useAndClose[A](close: => Unit)(use: => A): A = {
+    var primaryFailure: Throwable = null
+    try use
+    catch {
+      case failure: Throwable =>
+        primaryFailure = failure
+        throw failure
+    } finally {
+      try close
+      catch {
+        case closeFailure: Throwable =>
+          if (primaryFailure == null) throw closeFailure
+          if (closeFailure ne primaryFailure)
+            primaryFailure.addSuppressed(closeFailure)
+      }
+    }
+  }
+
   private val DefaultAwsCredentialsProvider =
     "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
   private val SimpleAwsCredentialsProvider =

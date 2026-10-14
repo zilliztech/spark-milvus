@@ -23,9 +23,9 @@ class SearchableFieldTest extends AnyFunSuite with Matchers {
     ).foreach { elementType =>
       val layout = VectorLayout(elementType, 8)
       Seq(MetricType.L2, MetricType.IP, MetricType.Cosine).foreach(
-        MilvusSearch.checkSearchable(_, layout)
+        NearestByInput.checkSearchable(_, layout)
       )
-      val failure = the[IllegalArgumentException] thrownBy MilvusSearch
+      val failure = the[IllegalArgumentException] thrownBy NearestByInput
         .checkSearchable(MetricType.Hamming, layout)
       failure.getMessage should include("COSINE or IP or L2, not HAMMING")
     }
@@ -36,7 +36,7 @@ class SearchableFieldTest extends AnyFunSuite with Matchers {
 
     Seq(MetricType.Hamming, MetricType.Jaccard, MetricType.L2).foreach {
       metric =>
-        val failure = the[IllegalArgumentException] thrownBy MilvusSearch
+        val failure = the[IllegalArgumentException] thrownBy NearestByInput
           .checkSearchable(metric, binary)
         failure.getMessage should include("binary vector field is not searched")
     }

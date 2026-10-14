@@ -19,8 +19,8 @@ package com.zilliz.spark.connector
   *
   * `BuildIndexProcedure` (W6) plans a fixed snapshot's segments the way a read
   * does, builds one vector index per segment in a Spark job through
-  * `core.index.IndexBuilder`, writes the objects through `core.codec` under the
-  * prefix the call names, and records them in the job manifest;
+  * `core.vector.IndexBuilder`, writes the objects through `core.codec` under
+  * the prefix the call names, and records them in the job manifest;
   * `SegmentIndexBuild` is the task body. `WriteSnapshotProcedure` (W8) writes
   * the snapshot that describes a build job's output, through
   * `core.write.commit.SnapshotWriter`, and refuses at planning a snapshot

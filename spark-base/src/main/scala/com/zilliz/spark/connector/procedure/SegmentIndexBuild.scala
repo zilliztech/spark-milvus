@@ -7,11 +7,11 @@ import org.apache.spark.sql.types.StructType
 
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
 import com.zilliz.milvus.storage.codec.{IndexObjectTarget, SegmentIndexObjects}
-import com.zilliz.milvus.storage.index.IndexBuilder
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.read.exec.{RowExclusions, SegmentVectors}
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
+import com.zilliz.milvus.storage.vector.IndexBuilder
 import com.zilliz.milvus.storage.write.commit.CommittedIndex
 import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
 import com.zilliz.spark.connector.types.ArrowAllocator

@@ -437,6 +437,98 @@ class SegmentVectorsTest
     allocator.getAllocatedMemory shouldBe 0L
   }
 
+  test(
+    "interrupted read-ahead drains and releases its result before closing the reader"
+  ) {
+    val reading = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val done = new java.util.concurrent.CompletableFuture[Throwable]()
+    val reader = new ObservedReader(
+      Seq(
+        batch(Seq(1L), Seq(Some(Seq(1f, 2f)))),
+        batch(Seq(2L), Seq(Some(Seq(3f, 4f))))
+      ),
+      read => if (read == 2) { reading.countDown(); release.await() }
+    )
+    val vectors = SegmentVectors.over(
+      reader,
+      "101",
+      layout,
+      exclusions(None),
+      allocator,
+      SegmentVectorsTest.NoJoin
+    )
+    vectors.next().get.close()
+    reading.await(10, TimeUnit.SECONDS) shouldBe true
+    val caller = new Thread(() => {
+      try vectors.next()
+      catch { case failure: Throwable => done.complete(failure) }
+      finally vectors.close()
+    })
+    try {
+      caller.start()
+      caller.interrupt()
+      intercept[java.util.concurrent.TimeoutException] {
+        done.get(100, TimeUnit.MILLISECONDS)
+      }
+      reader.closed shouldBe false
+      release.countDown()
+      done.get(10, TimeUnit.SECONDS) shouldBe a[InterruptedException]
+      caller.join(10000)
+      reader.closed shouldBe true
+      allocator.getAllocatedMemory shouldBe 0L
+    } finally { release.countDown(); caller.join(10000); vectors.close() }
+  }
+
+  test(
+    "a later read failure releases every batch already collected for a block"
+  ) {
+    val reader = new ObservedReader(
+      Seq(
+        batch(Seq(1L), Seq(Some(Seq(1f, 2f)))),
+        batch(Seq(2L), Seq(Some(Seq(3f, 4f))))
+      ),
+      read => if (read == 2) throw new IllegalStateException("second batch")
+    )
+    val vectors = SegmentVectors.over(
+      reader,
+      "101",
+      layout,
+      exclusions(None),
+      allocator,
+      1L << 20
+    )
+    try
+      intercept[IllegalStateException](
+        vectors.next()
+      ).getMessage shouldBe "second batch"
+    finally vectors.close()
+    allocator.getAllocatedMemory shouldBe 0L
+  }
+
+  test(
+    "a joined buffer allocation failure releases its borrowed input batches"
+  ) {
+    val reader = new FakeReader(
+      Seq(
+        batch(Seq(1L), Seq(Some(Seq(1f, 2f)))),
+        batch(Seq(2L), Seq(Some(Seq(3f, 4f))))
+      )
+    )
+    val tiny = allocator.newChildAllocator("joined-budget", 0L, 1L)
+    val vectors = SegmentVectors.over(
+      reader,
+      "101",
+      layout,
+      exclusions(None),
+      tiny,
+      1L << 20
+    )
+    try intercept[org.apache.arrow.memory.OutOfMemoryException](vectors.next())
+    finally { vectors.close(); tiny.close() }
+    allocator.getAllocatedMemory shouldBe 0L
+  }
+
 }
 
 object SegmentVectorsTest {

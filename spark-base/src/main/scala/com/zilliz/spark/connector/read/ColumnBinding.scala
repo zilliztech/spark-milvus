@@ -6,11 +6,7 @@ import org.apache.arrow.vector.types.pojo.Schema
 import org.apache.spark.sql.types.StructType
 
 import com.zilliz.milvus.storage.delete.DeletePlan
-import com.zilliz.milvus.storage.read.exec.{
-  DeletePlans,
-  SegmentReader,
-  SegmentReaderRegistry
-}
+import com.zilliz.milvus.storage.read.exec.{DeletePlans, SegmentReader}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
@@ -86,7 +82,7 @@ sealed trait ColumnBinding {
     // columnar callers; in particular, passing isDeleted as a function to the
     // columnar reader must not defer delete I/O until its first batch.
     deletePlan
-    SegmentReaderRegistry.open(
+    SegmentReader.open(
       task,
       arrowSchema,
       neededColumns,

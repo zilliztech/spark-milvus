@@ -228,7 +228,9 @@ class NearestByJoinTest
   /** The collection's schema and no segment, as a snapshot a write resolves its
     * table from: a Milvus table with nothing to search.
     */
-  private def withoutSegments(): DataFrame =
+  private def withoutSegments(
+      read: Map[String, String] = Map.empty
+  ): DataFrame =
     spark.read
       .format("milvus")
       .options(
@@ -238,7 +240,7 @@ class NearestByJoinTest
             .encodeToString(
               LocalMilvusCollection.schema(2, floats = false).toByteArray
             )
-        )
+        ) ++ read
       )
       .load()
 
@@ -389,17 +391,23 @@ class NearestByJoinTest
   test("a Milvus table without segments answers as Spark does") {
     needsNative()
     val query = queries(standardQueries: _*)
-    val base = withoutSegments()
+    for ((where, side, read) <- whereQueriesLive(query))
+      withClue(s"$where: ") {
+        val base = withoutSegments(read)
+        base.schema("id").nullable shouldBe false
+        val inner = nearest(side, base)
+        val outer = nearest(side, base, joinType = "leftouter")
 
-    val inner = nearest(query, base)
-    val outer = nearest(query, base, joinType = "leftouter")
-
-    input(inner) shouldBe "Milvus table"
-    input(outer) shouldBe "Milvus table"
-    pairs(inner) shouldBe empty
-    pairs(outer) shouldBe Seq("q1" -> -1L, "q2" -> -1L, "q3" -> -1L)
-    pairs(inner) shouldBe pairs(bySpark(query, base))
-    pairs(outer) shouldBe pairs(bySpark(query, base, joinType = "leftouter"))
+        input(inner) shouldBe "Milvus table"
+        input(outer) shouldBe "Milvus table"
+        pairs(inner) shouldBe empty
+        // A non-nullable storage key is still NULL in an absent outer hit.
+        pairs(outer) shouldBe Seq("q1" -> -1L, "q2" -> -1L, "q3" -> -1L)
+        pairs(inner) shouldBe pairs(bySpark(query, base))
+        pairs(outer) shouldBe pairs(
+          bySpark(query, base, joinType = "leftouter")
+        )
+      }
   }
 
   test("the output is Spark's: query columns then base columns, all nullable") {
@@ -428,6 +436,22 @@ class NearestByJoinTest
 
     // the vector only ranks; the index answered that, so the take skips it
     exec.baseColumns shouldBe Seq("id")
+    exec.output.map(_.name) shouldBe Seq("qid", "qv", "id")
+    pairs(taken) shouldBe pairs(bySpark(query, base))
+  }
+
+  test(
+    "a DataFrame base returns only selected columns while retaining its ranking vector"
+  ) {
+    needsNative()
+    val query = queries(standardQueries: _*)
+    val base = docs().limit(100)
+    val taken = nearest(query, base).select(col("qid"), col("id"))
+    val exec = node(taken) match {
+      case Some(exec: MilvusNearestByJoinFrameExec) => exec
+      case other => fail(s"not taken over as a DataFrame: $other")
+    }
+    exec.baseOutput.map(_.name) shouldBe Seq("id")
     exec.output.map(_.name) shouldBe Seq("qid", "qv", "id")
     pairs(taken) shouldBe pairs(bySpark(query, base))
   }
@@ -904,11 +928,16 @@ class NearestByJoinTest
       mode <- Seq("exact", "approx")
     } withClue(s"$where $joinType $mode: ") {
       val base = docs(read)
+      base.schema("id").nullable shouldBe false
       val taken = nearest(side, base, mode = mode, joinType = joinType)
       takenOver(taken) shouldBe true
-      pairs(taken) shouldBe pairs(
+      val found = pairs(taken)
+      found shouldBe pairs(
         bySpark(query, docs(), joinType = joinType)
       )
+      if (joinType == "leftouter")
+        found.filter(pair => Set("none", "hole")(pair._1)) shouldBe
+          Seq("hole" -> -1L, "none" -> -1L)
     }
   }
 
