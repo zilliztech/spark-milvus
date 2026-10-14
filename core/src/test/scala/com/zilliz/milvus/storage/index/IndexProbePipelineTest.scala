@@ -1,7 +1,12 @@
 package com.zilliz.milvus.storage.index
 
 import java.nio.ByteBuffer
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.{
+  CompletableFuture,
+  CountDownLatch,
+  Executors,
+  TimeUnit
+}
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.BitSet
 
@@ -55,7 +60,8 @@ class IndexProbePipelineTest
       shortUntilEf: Int = 0,
       badRow: Boolean = false,
       // A score in place of the deterministic one, by (query, slot).
-      scoreAt: (Int, Int) => Option[Float] = (_, _) => None
+      scoreAt: (Int, Int) => Option[Float] = (_, _) => None,
+      beforeSearch: Int => Unit = _ => ()
   ) extends IndexProbe.Target {
     val calls = new AtomicInteger
     var lastParameters = ""
@@ -79,7 +85,7 @@ class IndexProbePipelineTest
         scores: ByteBuffer,
         parameters: String
     ): Unit = {
-      calls.incrementAndGet()
+      beforeSearch(calls.incrementAndGet())
       lastParameters = parameters
       lastExcluded = Option(excluded).map(_.duplicate())
       val ef = "\"ef\":(\\d+)".r
@@ -347,6 +353,134 @@ class IndexProbePipelineTest
         failure.getMessage should include("outside its 1000 rows")
       } finally pipeline.close()
     } finally m.close()
+  }
+
+  test(
+    "close waits for an uninterruptible retry before releasing its buffers"
+  ) {
+    Seq(false, true).foreach { shared =>
+      val collector = Executors.newSingleThreadExecutor()
+      val m = matrix(2, 0)
+      val queryBytes = allocator.getAllocatedMemory
+      val retrying = new CountDownLatch(1)
+      val release = new CountDownLatch(1)
+      val closing = new CountDownLatch(1)
+      val closed = new CompletableFuture[Throwable]()
+      val fake = new Fake(
+        5L,
+        shortUntilEf = 128,
+        beforeSearch = call => {
+          if (call == 2) {
+            retrying.countDown()
+            // A native call keeps running even if shutdownNow interrupts its
+            // Java thread. Check ownership before touching the output buffers.
+            var finished = false
+            while (!finished) {
+              try {
+                release.await()
+                finished = true
+              } catch {
+                case _: InterruptedException => ()
+              }
+            }
+            allocator.getAllocatedMemory should be > queryBytes
+          }
+        }
+      )
+      val excluded = new BitSet()
+      excluded.set(999)
+      val pipeline = new IndexProbe.Pipeline(
+        fake,
+        excluded,
+        k,
+        Map.empty,
+        allocator,
+        2,
+        collector = if (shared) Some(collector) else None
+      )
+      val closer = new Thread(() => {
+        closing.countDown()
+        try {
+          pipeline.close()
+          closed.complete(null)
+        } catch {
+          case failure: Throwable => closed.complete(failure)
+        }
+      })
+      try {
+        pipeline.run(m, new TopKMerger(2, k, MetricType.L2), _ => ())
+        retrying.await(10, TimeUnit.SECONDS) shouldBe true
+        closer.start()
+        closing.await(10, TimeUnit.SECONDS) shouldBe true
+        intercept[java.util.concurrent.TimeoutException] {
+          closed.get(100, TimeUnit.MILLISECONDS)
+        }
+        allocator.getAllocatedMemory should be > queryBytes
+        release.countDown()
+        closed.get(10, TimeUnit.SECONDS) shouldBe null
+        fake.calls.get() shouldBe 2
+        allocator.getAllocatedMemory shouldBe queryBytes
+        if (shared) collector.isShutdown shouldBe false
+      } finally {
+        release.countDown()
+        if (closer.getState == Thread.State.NEW) pipeline.close()
+        else closer.join(10000)
+        SearchThreads.shutdown(collector)
+        m.close()
+      }
+    }
+  }
+
+  test(
+    "finish drains both slots after a failed answer and close does not repeat it"
+  ) {
+    val collector = Executors.newSingleThreadExecutor()
+    val m = matrix(3, 0)
+    val blocked = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val finished = new CompletableFuture[Throwable]()
+    val pipeline = new IndexProbe.Pipeline(
+      new Fake(9L, badRow = true),
+      new BitSet(),
+      k,
+      Map.empty,
+      allocator,
+      3,
+      collector = Some(collector)
+    )
+    val caller = new Thread(() => {
+      try {
+        pipeline.finish(_ => ())
+        finished.complete(null)
+      } catch {
+        case failure: Throwable => finished.complete(failure)
+      }
+    })
+    try {
+      pipeline.run(m, new TopKMerger(3, k, MetricType.L2), _ => ())
+      collector.submit(new Runnable {
+        def run(): Unit = {
+          blocked.countDown()
+          release.await()
+        }
+      })
+      blocked.await(10, TimeUnit.SECONDS) shouldBe true
+      pipeline.run(m, new TopKMerger(3, k, MetricType.L2), _ => ())
+      caller.start()
+      intercept[java.util.concurrent.TimeoutException] {
+        finished.get(100, TimeUnit.MILLISECONDS)
+      }
+      release.countDown()
+      val failure = finished.get(10, TimeUnit.SECONDS)
+      failure shouldBe a[IllegalArgumentException]
+      failure.getSuppressed.length shouldBe 1
+    } finally {
+      release.countDown()
+      caller.join(10000)
+      pipeline.close()
+      SearchThreads.shutdown(collector)
+      m.close()
+    }
   }
 
   test("a NaN score fails the search unless a ranking function ranks it") {

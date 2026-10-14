@@ -161,16 +161,13 @@ object SegmentSearch extends Logging {
       // Index segments: up to callsInFlight native searches in flight, each
       // collected (on the shared collector, in order) once its search returns,
       // so the collect of segment s runs while segments s+1.. search and the
-      // tail of one call is filled by the next. Exact segments scan inline.
+      // tail of one call is filled by the next. Exact native calls stay on
+      // this thread; their merger phases run on the same collector.
       val inFlight =
         mutable.Queue.empty[(IndexProbe.Pipeline, IndexProbe.Answer, Future[_])]
       def settle(): Unit = {
         val (pipeline, answer, searched) = inFlight.dequeue()
-        try searched.get()
-        catch {
-          case wrapped: ExecutionException =>
-            throw Option(wrapped.getCause).getOrElse(wrapped)
-        }
+        SearchThreads.await(searched)
         pipeline.complete(answer, merger, counted)
         onProgress(Progress(0, 0L, 0L, 1))
       }
@@ -189,7 +186,9 @@ object SegmentSearch extends Logging {
                   allocator,
                   merger,
                   counted,
-                  ranked.get(batch)
+                  ranked.get(batch),
+                  Some(collector),
+                  threads
                 )
               )
               onProgress(Progress(0, 0L, 0L, 1))
@@ -214,25 +213,50 @@ object SegmentSearch extends Logging {
           }
         }
         while (inFlight.nonEmpty) settle()
+        // Every collect of the group is done before the merger returns to the
+        // task, including a failed collect whose buffer users must be drained.
+        pipelines.values.foreach(_.finish(counted))
       } catch {
         case failure: Throwable =>
-          inFlight.foreach { case (_, _, searched) => searched.cancel(true) }
+          def completed(body: => Unit): Unit = {
+            try body
+            catch {
+              case later: Throwable if later ne failure =>
+                failure.addSuppressed(later)
+            }
+          }
+          // The caller releases the query matrix as soon as this throws.
+          // Cancelled futures and Java interrupts do not stop native calls.
+          completed(stop())
+          pipelines.values.foreach(pipeline =>
+            completed(pipeline.finish(_ => ()))
+          )
           throw failure
       }
-      // Every collect of the group done before the merger goes back to the task.
-      pipelines.values.foreach(_.finish(counted))
       (merger, Counters(sources.size, nativeCalls, nativeNanos, compared))
     }
 
+    private def stop(): Unit = {
+      try SearchThreads.shutdown(searchers)
+      finally SearchThreads.shutdown(collector)
+    }
+
     override def close(): Unit = {
-      searchers.shutdownNow()
-      val failures =
-        (pipelines.values ++ batches.values.flatten ++ sources).flatMap(
-          closeable => scala.util.Try(closeable.close()).failed.toOption
-        )
+      var failure: Throwable = null
+      def completed(body: => Unit): Unit = {
+        try body
+        catch {
+          case cause: Throwable =>
+            if (failure == null) failure = cause
+            else if (failure ne cause) failure.addSuppressed(cause)
+        }
+      }
+      completed(stop())
+      (pipelines.values ++ batches.values.flatten ++ sources).foreach(
+        closeable => completed(closeable.close())
+      )
       pipelines.clear()
-      collector.shutdownNow()
-      failures.headOption.foreach(throw _)
+      if (failure != null) throw failure
     }
   }
 
@@ -466,7 +490,8 @@ object SegmentSearch extends Logging {
                       allocator,
                       mergers(group),
                       counted,
-                      ranked
+                      ranked,
+                      threads = threads
                     )
                   }
                 } finally batch.close()

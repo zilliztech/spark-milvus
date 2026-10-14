@@ -3,6 +3,7 @@ package com.zilliz.milvus.storage.index
 import java.lang.{Float => JavaFloat}
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util.{Arrays, BitSet}
+import java.util.concurrent.ExecutorService
 
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
@@ -132,9 +133,12 @@ object ExactScan {
       allocator: BufferAllocator,
       merger: TopKMerger,
       onProgress: SegmentSearch.Progress => Unit = _ => (),
-      ranked: Option[EngineRange.Batch] = None
+      ranked: Option[EngineRange.Batch] = None,
+      collector: Option[ExecutorService] = None,
+      threads: Int = 1
   ): Unit = {
     require(k > 0, s"topK must be positive: $k")
+    require(threads > 0, s"A scan collects on at least one thread: $threads")
     val excluded = ranked.fold(current.excluded)(_.engineExcluded)
     val visible = ranked.fold(current.visibleRows)(_.engineRows)
     if (visible > 0) {
@@ -150,7 +154,9 @@ object ExactScan {
           allocator,
           merger,
           onProgress,
-          ranked
+          ranked,
+          collector,
+          threads
         )
       else
         perQuery(
@@ -163,13 +169,26 @@ object ExactScan {
           metric,
           allocator,
           merger,
-          onProgress
+          onProgress,
+          collector,
+          threads
         )
     }
     ranked.foreach(
-      scoreByFunction(current, _, queries, segmentId, merger, onProgress)
+      scoreByFunction(
+        current,
+        _,
+        queries,
+        segmentId,
+        merger,
+        onProgress,
+        collector,
+        threads
+      )
     )
-    merger.countScanned(current.visibleRows)
+    SearchThreads.collect(collector) {
+      merger.countScanned(current.visibleRows)
+    }
   }
 
   /** The rows Knowhere was not given, scored by the function against every
@@ -182,8 +201,47 @@ object ExactScan {
       queries: QueryMatrix,
       segmentId: Long,
       merger: TopKMerger,
-      onProgress: SegmentSearch.Progress => Unit
+      onProgress: SegmentSearch.Progress => Unit,
+      collector: Option[ExecutorService],
+      threads: Int
   ): Unit = if (ranked.rankedRows.nonEmpty) {
+    // Keep function evaluation on the caller, handing over at most this many
+    // scores at once. The buffer is reused only after collection has returned.
+    val capacity =
+      math.min(4096L, queries.queries.toLong * ranked.rankedRows.length).toInt
+    val queryIds = new Array[Int](capacity)
+    val rowIds = new Array[Long](capacity)
+    val scores = new Array[Double](capacity)
+    var used = 0
+    def flush(): Unit = if (used > 0) {
+      val count = used
+      SearchThreads.collect(collector) {
+        val firstQuery = queryIds(0)
+        SearchThreads.shards(queryIds(count - 1) - firstQuery + 1, threads) {
+          (_, from, until) =>
+            val first = firstQuery + from
+            val end = firstQuery + until
+            // Candidates are in query order. A shard owns whole queries,
+            // including when one query fills the entire temporary buffer.
+            var low = 0
+            var high = count
+            while (low < high) {
+              val middle = low + (high - low) / 2
+              if (queryIds(middle) < first) low = middle + 1
+              else high = middle
+            }
+            var slot = low
+            while (slot < count && queryIds(slot) < end) {
+              val at = queryIds(slot)
+              val score = scores(slot)
+              if (!merger.rejectsScore(at, score))
+                merger.add(at, segmentId, rowIds(slot), score)
+              slot += 1
+            }
+        }
+      }
+      used = 0
+    }
     val query = new Array[Float](queries.dimension)
     var at = 0
     while (at < queries.queries) {
@@ -191,17 +249,18 @@ object ExactScan {
       var row = 0
       while (row < ranked.rankedRows.length) {
         val score = ranked.function.score(query, ranked.rankedValues(row))
-        if (score != null && !merger.rejectsScore(at, score.doubleValue()))
-          merger.add(
-            at,
-            segmentId,
-            current.firstRow + ranked.rankedRows(row),
-            score.doubleValue()
-          )
+        if (score != null) {
+          queryIds(used) = at
+          rowIds(used) = current.firstRow + ranked.rankedRows(row)
+          scores(used) = score.doubleValue()
+          used += 1
+          if (used == capacity) flush()
+        }
         row += 1
       }
       at += 1
     }
+    flush()
     onProgress(
       SegmentSearch.Progress(
         0,
@@ -283,13 +342,19 @@ object ExactScan {
       allocator: BufferAllocator,
       merger: TopKMerger,
       onProgress: SegmentSearch.Progress => Unit,
-      ranked: Option[EngineRange.Batch]
+      ranked: Option[EngineRange.Batch],
+      collector: Option[ExecutorService],
+      threads: Int
   ): Unit = {
     val parameters = s"""{"metric_type":"${metric.name}"}"""
     // Under L2 the entry's candidates are only nominations (decision 37).
     val nominating = ranked.filter(_ => metric == MetricType.L2)
     val count = math.min(
-      nominating.fold(k)(_ => nominated(k, visible, merger.scannedRows)),
+      nominating.fold(k)(_ =>
+        SearchThreads.collect(collector) {
+          nominated(k, visible, merger.scannedRows)
+        }
+      ),
       visible
     )
     val compacted =
@@ -331,7 +396,9 @@ object ExactScan {
               merger,
               compacted.map(_.batchRows),
               parameters,
-              onProgress
+              onProgress,
+              collector,
+              threads
             )
           case None =>
             val started = System.nanoTime()
@@ -355,18 +422,24 @@ object ExactScan {
                 0
               )
             )
-            collect(
-              excluded,
-              queries.queries,
-              count,
-              ids,
-              scores,
-              segmentId,
-              current.firstRow,
-              merger,
-              rows,
-              compacted.map(_.batchRows)
-            )
+            SearchThreads.collect(collector) {
+              SearchThreads.shards(queries.queries, threads) {
+                (_, from, until) =>
+                  collect(
+                    excluded,
+                    from,
+                    until,
+                    count,
+                    ids,
+                    scores,
+                    segmentId,
+                    current.firstRow,
+                    merger,
+                    rows,
+                    compacted.map(_.batchRows)
+                  )
+              }
+            }
             (Array.emptyIntArray, Array.empty[Array[Int]])
         }
       } finally {
@@ -388,7 +461,9 @@ object ExactScan {
           metric,
           allocator,
           merger,
-          onProgress
+          onProgress,
+          collector,
+          threads
         )
     )
   }
@@ -419,7 +494,9 @@ object ExactScan {
       merger: TopKMerger,
       batchRows: Option[Array[Int]],
       parameters: String,
-      onProgress: SegmentSearch.Progress => Unit
+      onProgress: SegmentSearch.Progress => Unit,
+      collector: Option[ExecutorService],
+      threads: Int
   ): (Array[Int], Array[Array[Int]]) = {
     val nq = queries.queries
     val gamma = (queries.dimension + 4) * UnitRoundoff
@@ -433,20 +510,24 @@ object ExactScan {
     val direct = allocator.buffer(nq.toLong * count * 4L)
     val counts = allocator.buffer(nq.toLong * 4L)
     try {
-      var at = 0
-      while (at < nq) {
-        // A full query keeps a row only when (estimate - error) * shrink can
-        // beat its worst, that is when the estimate is at most this. A worst of
-        // NaN, a row the function scored, ranks after every number.
-        val cutoff =
-          if (!merger.isFull(at)) Float.PositiveInfinity
-          else {
-            val worst = merger.worstScore(at)
-            if (worst.isNaN) Float.PositiveInfinity
-            else floatAbove(worst / shrink + errors(at))
+      SearchThreads.collect(collector) {
+        SearchThreads.shards(nq, threads) { (_, from, until) =>
+          var at = from
+          while (at < until) {
+            // A full query keeps a row only when (estimate - error) * shrink can
+            // beat its worst, that is when the estimate is at most this. A worst of
+            // NaN, a row the function scored, ranks after every number.
+            val cutoff =
+              if (!merger.isFull(at)) Float.PositiveInfinity
+              else {
+                val worst = merger.worstScore(at)
+                if (worst.isNaN) Float.PositiveInfinity
+                else floatAbove(worst / shrink + errors(at))
+              }
+            cutoffs.setFloat(at.toLong * 4L, cutoff)
+            at += 1
           }
-        cutoffs.setFloat(at.toLong * 4L, cutoff)
-        at += 1
+        }
       }
       val started = System.nanoTime()
       NativeVectorSearch.bruteForceBatchedL2Rescored(
@@ -472,51 +553,56 @@ object ExactScan {
           0
         )
       )
-      val offered = new Array[Int](count)
-      val again = Array.newBuilder[Int]
-      // The rows each query searched again was given already: the merger
-      // keeps a row once.
-      val alreadyOffered = Array.newBuilder[Array[Int]]
-      at = 0
-      while (at < nq) {
-        val computed = counts.getInt(at.toLong * 4L)
-        var slot = 0
-        while (slot < computed) {
-          val position = at.toLong * count + slot
-          val batchRow =
-            rowOf(
-              ids.getLong(position * 8L),
-              rows,
-              batchRows,
-              ranked.engineExcluded
-            )
-          val distance = finite(direct.getFloat(position * 4L), batchRow)
-          if (!merger.rejectsScore(at, distance))
-            merger.add(at, segmentId, current.firstRow + batchRow, distance)
-          offered(slot) = batchRow
-          slot += 1
-        }
-        if (count < visible) {
-          val position = at.toLong * count + count - 1
-          val last = finite(
-            scores.getFloat(position * 4L),
-            rowOf(
-              ids.getLong(position * 8L),
-              rows,
-              batchRows,
-              ranked.engineExcluded
-            )
-          )
-          if (!merger.rejectsScore(at, (last - errors(at)) * shrink)) {
-            again += at
-            val sorted = Arrays.copyOf(offered, computed)
-            Arrays.sort(sorted)
-            alreadyOffered += sorted
+      val collected = SearchThreads.collect(collector) {
+        SearchThreads.shards(nq, threads) { (_, from, until) =>
+          val offered = new Array[Int](count)
+          val again = Array.newBuilder[Int]
+          // The rows each query searched again was given already: the merger
+          // keeps a row once.
+          val alreadyOffered = Array.newBuilder[Array[Int]]
+          var at = from
+          while (at < until) {
+            val computed = counts.getInt(at.toLong * 4L)
+            var slot = 0
+            while (slot < computed) {
+              val position = at.toLong * count + slot
+              val batchRow =
+                rowOf(
+                  ids.getLong(position * 8L),
+                  rows,
+                  batchRows,
+                  ranked.engineExcluded
+                )
+              val distance = finite(direct.getFloat(position * 4L), batchRow)
+              if (!merger.rejectsScore(at, distance))
+                merger.add(at, segmentId, current.firstRow + batchRow, distance)
+              offered(slot) = batchRow
+              slot += 1
+            }
+            if (count < visible) {
+              val position = at.toLong * count + count - 1
+              val last = finite(
+                scores.getFloat(position * 4L),
+                rowOf(
+                  ids.getLong(position * 8L),
+                  rows,
+                  batchRows,
+                  ranked.engineExcluded
+                )
+              )
+              if (!merger.rejectsScore(at, (last - errors(at)) * shrink)) {
+                again += at
+                val sorted = Arrays.copyOf(offered, computed)
+                Arrays.sort(sorted)
+                alreadyOffered += sorted
+              }
+            }
+            at += 1
           }
+          (again.result(), alreadyOffered.result())
         }
-        at += 1
       }
-      (again.result(), alreadyOffered.result())
+      (collected.flatMap(_._1).toArray, collected.flatMap(_._2).toArray)
     } finally {
       counts.close()
       direct.close()
@@ -551,7 +637,9 @@ object ExactScan {
       metric: MetricType,
       allocator: BufferAllocator,
       merger: TopKMerger,
-      onProgress: SegmentSearch.Progress => Unit
+      onProgress: SegmentSearch.Progress => Unit,
+      collector: Option[ExecutorService],
+      threads: Int
   ): Unit = {
     val layout = queries.layout
     val parameters = s"""{"metric_type":"${metric.name}"}"""
@@ -591,33 +679,38 @@ object ExactScan {
               run.toLong
             )
           )
-          var query = from
-          while (query < until) {
-            // In ascending order: past the first the merger rejects, so is
-            // the rest.
-            val at = again(query)
-            var slot = 0
-            var open = true
-            while (open && slot < count) {
-              val position = (query - from).toLong * count + slot
-              val id = ids.getLong(position * 8L)
-              if (id == -1L) open = false
-              else {
-                val batchRow =
-                  rowOf(id, current.rows, None, ranked.engineExcluded)
-                val distance = finite(scores.getFloat(position * 4L), batchRow)
-                if (merger.rejectsScore(at, distance)) open = false
-                else if (Arrays.binarySearch(offered(query), batchRow) < 0)
-                  merger.add(
-                    at,
-                    segmentId,
-                    current.firstRow + batchRow,
-                    distance
-                  )
+          SearchThreads.collect(collector) {
+            SearchThreads.shards(run, threads) { (_, shardFrom, shardUntil) =>
+              var query = from + shardFrom
+              while (query < from + shardUntil) {
+                // In ascending order: past the first the merger rejects, so is
+                // the rest.
+                val at = again(query)
+                var slot = 0
+                var open = true
+                while (open && slot < count) {
+                  val position = (query - from).toLong * count + slot
+                  val id = ids.getLong(position * 8L)
+                  if (id == -1L) open = false
+                  else {
+                    val batchRow =
+                      rowOf(id, current.rows, None, ranked.engineExcluded)
+                    val distance =
+                      finite(scores.getFloat(position * 4L), batchRow)
+                    if (merger.rejectsScore(at, distance)) open = false
+                    else if (Arrays.binarySearch(offered(query), batchRow) < 0)
+                      merger.add(
+                        at,
+                        segmentId,
+                        current.firstRow + batchRow,
+                        distance
+                      )
+                  }
+                  slot += 1
+                }
+                query += 1
               }
-              slot += 1
             }
-            query += 1
           }
         } finally {
           scores.close()
@@ -676,7 +769,9 @@ object ExactScan {
       metric: MetricType,
       allocator: BufferAllocator,
       merger: TopKMerger,
-      onProgress: SegmentSearch.Progress => Unit
+      onProgress: SegmentSearch.Progress => Unit,
+      collector: Option[ExecutorService],
+      threads: Int
   ): Unit = {
     val parameters = s"""{"metric_type":"${metric.name}"}"""
     val dtype = queries.layout.dtype
@@ -711,18 +806,23 @@ object ExactScan {
           0
         )
       )
-      collect(
-        excluded,
-        queries.queries,
-        count,
-        ids,
-        scores,
-        segmentId,
-        current.firstRow,
-        merger,
-        current.rows,
-        None
-      )
+      SearchThreads.collect(collector) {
+        SearchThreads.shards(queries.queries, threads) { (_, from, until) =>
+          collect(
+            excluded,
+            from,
+            until,
+            count,
+            ids,
+            scores,
+            segmentId,
+            current.firstRow,
+            merger,
+            current.rows,
+            None
+          )
+        }
+      }
     } finally {
       mask.close()
       scores.close()
@@ -750,7 +850,8 @@ object ExactScan {
     */
   private def collect(
       excluded: BitSet,
-      queries: Int,
+      fromQuery: Int,
+      untilQuery: Int,
       count: Int,
       ids: ArrowBuf,
       scores: ArrowBuf,
@@ -760,8 +861,8 @@ object ExactScan {
       rows: Int,
       batchRows: Option[Array[Int]]
   ): Unit = {
-    var query = 0
-    while (query < queries) {
+    var query = fromQuery
+    while (query < untilQuery) {
       var slot = 0
       while (slot < count) {
         val position = query.toLong * count + slot
