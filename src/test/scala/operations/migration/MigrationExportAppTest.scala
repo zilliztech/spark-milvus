@@ -21,7 +21,7 @@ class MigrationExportAppTest extends AnyFunSuite with BeforeAndAfterAll {
     "items",
     9L,
     "backup/meta/full_meta.json",
-    "snapshot.json",
+    "final-backup",
     "output",
     Map.empty,
     true
@@ -81,7 +81,7 @@ class MigrationExportAppTest extends AnyFunSuite with BeforeAndAfterAll {
   }
 
   test(
-    "export selects the final insert/upsert values in (backup, snapshot], preserving payload"
+    "export selects the final insert/upsert values in (baseline backup, final backup], preserving payload"
   ) {
     val session = spark
     import session.implicits._
@@ -224,43 +224,83 @@ class MigrationExportAppTest extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  test(
-    "the complete app accepts an empty frozen V2 snapshot and emits a zero-row manifest"
-  ) {
-    val dir = Files.createTempDirectory("migration-app-")
-    val snapshot = """{
-      "snapshot-info":{"id":1,"name":"final","collection_id":9,"create_ts":300,"partition_ids":[]},
-      "collection":{"schema":{"name":"items","fields":[
-        {"fieldID":100,"name":"id","is_primary_key":true,"data_type":5}]}},
-      "manifest-list":[]
-    }"""
-    val backup = """{"collection_backups":[
+  private val emptyFinalBackup = """{
+    "id":"final", "format":"binlog", "milvus_version":"2.6.18",
+    "collection_backups":[{"collection_id":9,"collection_name":"items", "db_name":"default",
+      "backup_timestamp":300,"schema":{"name":"items","fields":[
+        {"fieldID":100,"name":"id","is_primary_key":true,"data_type":5}]},
+      "partition_backups":[]}]
+  }"""
+
+  private def configWithFinalBackup(meta: String): MigrationExportApp.Config = {
+    val dir = Files.createTempDirectory("migration-backup-app-")
+    Files.createDirectories(dir.resolve("final/meta"))
+    Files.writeString(dir.resolve("final/meta/full_meta.json"), meta)
+    Files.writeString(
+      dir.resolve("baseline.json"),
+      """{"collection_backups":[
       {"collection_id":9,"collection_name":"items","backup_timestamp":200}]}"""
-    Files.writeString(dir.resolve("snapshot.json"), snapshot)
-    Files.writeString(dir.resolve("backup.json"), backup)
-    MigrationExportApp.run(
-      spark,
-      config.copy(
-        snapshotPath = dir.resolve("snapshot.json").toString,
-        backupMetaPath = dir.resolve("backup.json").toString,
-        outputPath = dir.resolve("output").toString,
-        sourceOptions = Map(
-          FsConfig.FsBucketName -> "unused",
-          FsConfig.FsStorageType -> "local"
-        )
+    )
+    config.copy(
+      finalBackupDir = dir.resolve("final").toString,
+      backupMetaPath = dir.resolve("baseline.json").toString,
+      outputPath = dir.resolve("output").toString,
+      sourceOptions = Map(
+        FsConfig.FsBucketName -> "unused",
+        FsConfig.FsStorageType -> "local"
       )
     )
+  }
+
+  test(
+    "the complete app consumes a 2.6 binlog backup without server snapshot metadata"
+  ) {
+    val input = configWithFinalBackup(emptyFinalBackup)
+    MigrationExportApp.run(spark, input)
+    val manifest =
+      mapper.readTree(new java.io.File(input.outputPath, "manifest.json"))
+    assert(manifest.path("rowCount").asLong() == 0L)
+    assert(manifest.path("backupTimestampExclusive").asText() == "200")
+    assert(manifest.path("finalBackupTimestampInclusive").asText() == "300")
+    assert(manifest.path("finalBackupDir").asText() == input.finalBackupDir)
+    assert(!manifest.has("snapshotPath"))
     assert(
-      mapper
-        .readTree(dir.resolve("output/manifest.json").toFile)
-        .path("rowCount")
-        .asLong() == 0L
+      spark.read.parquet(input.outputPath + "/rows").columns.toSeq == Seq("id")
     )
-    assert(
-      spark.read
-        .parquet(dir.resolve("output/rows").toString)
-        .columns
-        .toSeq == Seq("id")
-    )
+  }
+
+  test(
+    "snapshot-format inputs, wrong collections and inverted backup boundaries are rejected"
+  ) {
+    Seq(
+      emptyFinalBackup.replace("\"binlog\"", "\"snapshot\""),
+      emptyFinalBackup.replace("\"collection_id\":9", "\"collection_id\":10"),
+      emptyFinalBackup.replace(
+        "\"backup_timestamp\":300",
+        "\"backup_timestamp\":100"
+      )
+    ).foreach { meta =>
+      val input = configWithFinalBackup(meta)
+      assertThrows[IllegalArgumentException](
+        MigrationExportApp.run(spark, input)
+      )
+      assert(!Files.exists(java.nio.file.Paths.get(input.outputPath)))
+    }
+  }
+
+  test(
+    "final backup refuses unreadable data instead of silently returning an empty export"
+  ) {
+    Seq(0, 2).foreach { storageVersion =>
+      val meta = emptyFinalBackup.replace(
+        "\"partition_backups\":[]",
+        s""""partition_backups":[
+        {"partition_id":1,"segment_backups":[{"segment_id":2,"collection_id":9,
+          "partition_id":1,"storage_version":$storageVersion,"num_of_rows":1,"binlogs":[]}]}]"""
+      )
+      val input = configWithFinalBackup(meta)
+      assertThrows[IllegalStateException](MigrationExportApp.run(spark, input))
+      assert(!Files.exists(java.nio.file.Paths.get(input.outputPath)))
+    }
   }
 }

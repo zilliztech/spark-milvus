@@ -16,12 +16,12 @@ import org.apache.spark.storage.StorageLevel
 
 import com.zilliz.spark.connector.{MilvusOption, TencentStorageAuth}
 import com.zilliz.spark.connector.loon.Properties.FsConfig
-import com.zilliz.spark.connector.read.{MilvusSnapshotReader, V2SegmentLoader}
+import com.zilliz.spark.connector.read.{BackupMetaReader, MilvusSnapshotReader}
 import com.zilliz.spark.connector.sources.MilvusScan
 
 /** Export surviving inserts/updates after one collection's backup cutoff.
-  * Inputs must refer to a snapshot taken after stopping and flushing source
-  * writes. This is a read-only export, not CDC or a target-side merge.
+  * Inputs must refer to a binlog backup taken after stopping and flushing
+  * source writes. This is a read-only export, not CDC or a target-side merge.
   */
 object MigrationExportApp {
   case class Config(
@@ -30,7 +30,7 @@ object MigrationExportApp {
       collectionName: String,
       collectionId: Long,
       backupMetaPath: String,
-      snapshotPath: String,
+      finalBackupDir: String,
       outputPath: String,
       sourceOptions: Map[String, String],
       sourceWritesStopped: Boolean = false
@@ -53,7 +53,7 @@ object MigrationExportApp {
   private[migration] def run(spark: SparkSession, config: Config): Unit = {
     require(
       config.sourceWritesStopped,
-      "Stop and flush source writes before taking the snapshot"
+      "Stop and flush source writes before taking the final backup"
     )
     require(
       Seq(
@@ -61,7 +61,7 @@ object MigrationExportApp {
         config.databaseName,
         config.collectionName,
         config.backupMetaPath,
-        config.snapshotPath,
+        config.finalBackupDir,
         config.outputPath
       )
         .forall(s => s != null && s.trim.nonEmpty),
@@ -75,39 +75,46 @@ object MigrationExportApp {
     )
     val bucket = config.sourceOptions.getOrElse(FsConfig.FsBucketName, "")
     require(bucket.nonEmpty, "sourceOptions.fs.bucket_name is required")
+    val backupBucket = new Path(config.finalBackupDir).toUri.getAuthority
+    require(
+      backupBucket == null || backupBucket == bucket,
+      "sourceOptions.fs.bucket_name must match the final backup bucket"
+    )
     val conf = MilvusScan.buildHadoopConfForOptions(
       config.sourceOptions,
-      config.snapshotPath,
+      config.finalBackupDir,
       spark.sparkContext.hadoopConfiguration
     )
-    val snapshot = MilvusSnapshotReader
-      .parseSnapshotMetadata(readJson(config.snapshotPath, conf).toString)
-      .fold(throw _, identity)
+    val finalMeta =
+      readJson(BackupMetaReader.metaPath(config.finalBackupDir), conf)
+    val backup =
+      BackupMetaReader.parse(finalMeta.toString).fold(throw _, identity)
     require(
-      snapshot.snapshotInfo.collectionId == config.collectionId &&
-        snapshot.collection.schema.name == config.collectionName,
-      "Snapshot collection does not match the requested source"
-    )
-    require(
-      snapshot.storageV2ManifestList.forall(_.isEmpty),
-      "Only StorageV2 data is supported"
+      backup.format.isEmpty || backup.format == "binlog",
+      "The final input must be a Milvus 2.6-compatible binlog backup"
     )
     val cutoff = backupTimestamp(readJson(config.backupMetaPath, conf), config)
-    val end = snapshot.snapshotInfo.createTs
-    require(end > cutoff, "Final snapshot must be newer than the backup cutoff")
-    val pkFields =
-      snapshot.collection.schema.fields.filter(_.isPrimaryKey.contains(true))
+    val end = backupTimestamp(finalMeta, config)
+    require(end > cutoff, "Final backup must be newer than the baseline backup")
+    val collections =
+      backup.collectionBackups.filter(_.collectionId == config.collectionId)
+    require(
+      collections.size == 1,
+      "Final backup contains ambiguous collection IDs"
+    )
+    val collection = collections.head
+    val schema = collection.schema.getOrElse {
+      throw new IllegalArgumentException(
+        "Final backup collection schema is missing"
+      )
+    }
+    val schemaBytes = BackupMetaReader.toProtobufSchemaBytes(schema)
+    val pkFields = schema.fields.filter(_.isPrimaryKey)
     require(pkFields.size == 1, "Exactly one primary key is required")
-    val userFields =
-      snapshot.collection.schema.fields.filter(_.getFieldIDAsLong >= 100L)
+    val userFields = schema.fields.filter(_.fieldId >= 100L)
     require(
       userFields.contains(pkFields.head),
-      "Primary key field ID is missing from the snapshot schema"
-    )
-    require(
-      !snapshot.collection.schema.enableDynamicField.contains(true) ||
-        userFields.exists(_.isDynamic.contains(true)),
-      "Dynamic field metadata is missing; refusing to silently omit dynamic values"
+      "Primary key field ID is missing from the backup schema"
     )
     require(
       !userFields.exists(f =>
@@ -115,33 +122,33 @@ object MigrationExportApp {
       ),
       "User fields conflict with migration metadata columns"
     )
-    val segments = V2SegmentLoader
-      .loadV2Segments(
-        snapshot.manifestList,
-        bucket,
+    val segments = BackupMetaReader
+      .toV2Segments(
+        backup,
         conf,
-        manifestSchemaVersion = snapshot.manifestSchemaVersion,
+        config.finalBackupDir,
         applyDeletes = true,
-        storageScheme = "s3a",
-        requireV2Data = true
+        collectionId = config.collectionId
       )
       .fold(throw _, identity)
+    // SnapshotMode is the connector's offline segment-plan format. The plan
+    // below comes entirely from a 2.6 binlog backup, not Milvus Snapshot APIs.
     val options = nativeSourceOptions(config.sourceOptions, conf) ++ Map(
       MilvusOption.SnapshotMode -> "true",
       MilvusOption.SnapshotV2Segments -> MilvusSnapshotReader
         .serializeV2Segments(segments),
       MilvusOption.SnapshotCollectionId -> config.collectionId.toString,
-      MilvusOption.SnapshotPartitionIds -> snapshot.snapshotInfo.partitionIds
+      MilvusOption.SnapshotPartitionIds -> collection.partitionBackups
+        .map(_.partitionId)
         .mkString(","),
       MilvusOption.SnapshotSchemaBytes -> Base64.getEncoder.encodeToString(
-        MilvusSnapshotReader.toProtobufSchemaBytes(snapshot.collection.schema)
+        schemaBytes
       ),
       MilvusOption.MilvusCollectionName -> config.collectionName,
       MilvusOption.ReadApplyDeletes -> "true",
       // Explicit IDs avoid positional field-ID inference after Spark pruning.
-      MilvusOption.ReaderFieldIDs -> (Seq(0L, 1L) ++ userFields.map(
-        _.getFieldIDAsLong
-      )).mkString(",")
+      MilvusOption.ReaderFieldIDs -> (Seq(0L, 1L) ++ userFields.map(_.fieldId))
+        .mkString(",")
     )
     val source = spark.read
       .format("com.zilliz.spark.connector.sources.MilvusDataSource")
@@ -159,10 +166,10 @@ object MigrationExportApp {
         manifest.put("databaseName", config.databaseName)
         manifest.put("collectionName", config.collectionName)
         manifest.put("collectionId", config.collectionId.toString)
-        manifest.put("snapshotPath", config.snapshotPath)
+        manifest.put("finalBackupDir", config.finalBackupDir)
         manifest.put("backupMetaPath", config.backupMetaPath)
         manifest.put("backupTimestampExclusive", cutoff.toString)
-        manifest.put("snapshotTimestampInclusive", end.toString)
+        manifest.put("finalBackupTimestampInclusive", end.toString)
         manifest.put("primaryKey", pkFields.head.name)
         manifest.put("rowCount", count)
         writeExport(
@@ -274,7 +281,7 @@ object MigrationExportApp {
         )
         .limit(1)
         .count() == 0,
-      "Invalid primary key/timestamp or source contains rows newer than the frozen snapshot"
+      "Invalid primary key/timestamp or source contains rows newer than the final backup"
     )
     val latest = source
       .withColumn(

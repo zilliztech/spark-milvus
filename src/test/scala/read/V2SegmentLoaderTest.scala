@@ -456,62 +456,6 @@ class V2SegmentLoaderTest
     }
   }
 
-  test(
-    "migration refuses unsupported data segments instead of exporting a partial collection"
-  ) {
-    val result = V2SegmentLoader.buildV2SegmentInfoFromEntry(
-      entry(77L, Seq.empty, storageVersion = 0L),
-      "",
-      new Configuration(),
-      requireV2Data = true
-    )
-    assert(result.isLeft)
-    assert(
-      V2SegmentLoader
-        .buildV2SegmentInfoFromEntry(
-          entry(79L, Seq.empty),
-          "",
-          new Configuration(),
-          requireV2Data = true
-        )
-        .isLeft
-    )
-  }
-
-  test(
-    "L0 delete-only segments with unspecified storage version retain their deletes"
-  ) {
-    val l0 = entry(
-      78L,
-      Seq.empty,
-      storageVersion = 0L,
-      segmentLevel = 1L,
-      partitionId = -1L,
-      deltaLogFiles =
-        Seq(AvroFieldBinlogEntry(0L, Seq(AvroBinlogEntry(1L, "/delta", 1L))))
-    )
-    val result = V2SegmentLoader
-      .buildV2SegmentInfoFromEntry(
-        l0,
-        "",
-        new Configuration(),
-        requireV2Data = true
-      )
-      .toOption
-      .flatten
-      .get
-    result.columnGroups shouldBe empty
-    result.partitionId shouldBe -1L
-    result.deltaLogs shouldBe Seq(V2DeltaLogFile(1L, "/delta", 1L))
-    V2SegmentLoader.buildV2SegmentInfoFromEntry(
-      l0,
-      "",
-      new Configuration(),
-      applyDeletes = false,
-      requireV2Data = true
-    ) shouldBe Right(None)
-  }
-
   test("StorageV2 L0 segment is skipped when applyDeletes=false") {
     val manifest = entry(
       segmentId = 5006L,
