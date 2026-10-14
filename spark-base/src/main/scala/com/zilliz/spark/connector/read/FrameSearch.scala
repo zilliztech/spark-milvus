@@ -126,11 +126,13 @@ private[connector] object FrameSearch extends Logging {
     // The frame search and its merge run under Spark's own task slots, so a
     // task's share of the unmanaged heap is the queries' budget at that
     // concurrency, as for a Milvus table input's merge.
-    val (_, heap) = MilvusSearch.executorMemory(spark)
+    val (_, heap) = SearchResources.executorMemory(spark)
+    val fraction = SearchResources.memoryFraction(spark)
+    val resources = TaskResources.of(spark)
     val taskHeap = SearchResources.queryBudget(
       heap,
-      MilvusSearch.memoryFraction(spark),
-      TaskResources.of(spark).tasksPerExecutor
+      fraction,
+      resources.tasksPerExecutor
     )
     // One task per core here, so a group is sized for one core within that
     // task's share of the heap.
@@ -152,21 +154,19 @@ private[connector] object FrameSearch extends Logging {
     val queryBytes = SearchQueries.bytes(queryCount, layout)
     val delivery =
       SearchQueries.Delivery.of(queries, layout, limits.queriesMaxBytes)
-    val delivered: RDD[SearchQueries.Group] = delivery match {
-      case SearchQueries.Packed(ids, vectors) =>
-        broadcastGroups(spark, ids, vectors, groups)
-      case SearchQueries.Broadcast(selected) =>
-        val (ids, vectors) =
-          SearchQueries.packOnExecutors(selected, layout, metric)
-        broadcastGroups(spark, ids, vectors, groups)
-      case SearchQueries.Shuffled(selected) =>
-        MilvusSearch.packedGroups(selected, groups, metric, layout)
-    }
+    val delivered = delivery.groups(
+      spark,
+      groups,
+      metric,
+      layout,
+      resources,
+      SearchResources.queryBudget(heap, fraction, 1).bytes
+    )
     val tasks = base.rows.getNumPartitions * groups.size
     logInfo(
       s"Search plan: DataFrame input, exact, metric=$metric, topK=$k, " +
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
-        s"${if (delivery.shuffled) "shuffle" else "broadcast"}, queryGroups=${groups.size}, " +
+        s"${delivery.describe}, queryGroups=${groups.size}, " +
         s"basePartitions=${base.rows.getNumPartitions}, tasks=$tasks, " +
         s"blockRows=$blockRows, rowBytes=$rowBytes"
     )
@@ -200,6 +200,7 @@ private[connector] object FrameSearch extends Logging {
       CandidateBytes.Width.toLong + 4L + rowBytes
     )
     val width = types.size
+    val hitWidth = schema.size
     val rows = MilvusSearch.mergedByQuery[InternalRow](
       spark,
       candidates,
@@ -207,7 +208,7 @@ private[connector] object FrameSearch extends Logging {
       CarriedCandidates.merge(_, _, k, metric),
       carried(_, _, width),
       required,
-      MilvusSearch.absentRow(_, schema.size)
+      MilvusSearch.absentRow(_, hitWidth)
     )
     MilvusSearch.Hits(rows, schema)
   }
@@ -241,23 +242,6 @@ private[connector] object FrameSearch extends Logging {
     (0 until queries by size).map(first =>
       SearchPlan.QueryGroup(first, math.min(size, queries - first))
     )
-  }
-
-  /** A query set broadcast whole, as one partition for each planned group. */
-  private def broadcastGroups(
-      spark: SparkSession,
-      ids: Array[Long],
-      vectors: Array[Byte],
-      groups: Seq[SearchPlan.QueryGroup]
-  ): RDD[SearchQueries.Group] = {
-    val held = spark.sparkContext.broadcast((ids, vectors))
-    val planned = groups.toVector
-    spark.sparkContext
-      .parallelize(planned.indices, planned.size)
-      .map { index =>
-        val (allIds, allVectors) = held.value
-        SearchQueries.Group.of(allIds, allVectors, planned(index))
-      }
   }
 
   /** One task: a base partition read a block at a time against one group. */

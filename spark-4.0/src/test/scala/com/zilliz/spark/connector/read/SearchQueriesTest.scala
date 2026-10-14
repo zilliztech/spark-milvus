@@ -2,7 +2,8 @@ package com.zilliz.spark.connector.read
 
 import java.nio.{ByteBuffer, ByteOrder}
 
-import org.apache.spark.sql.Row
+import org.apache.spark.sql.catalyst.expressions.UnsafeArrayData
+import org.apache.spark.sql.catalyst.InternalRow
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
@@ -22,62 +23,65 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
     (0 until packed.length / 4).map(index => buffer.getFloat(index * 4))
   }
 
-  test("queries are packed in the order they arrive, ids alongside") {
-    val (ids, vectors) = SearchQueries.pack(
-      Seq(Row(7L, Seq(1f, 2f)), Row(3L, Seq(3f, 4f))),
+  /** The queries packed as an executor packs a partition of them; a null id or
+    * vector stands for a NULL one.
+    */
+  private def pack(
+      queries: Seq[(java.lang.Long, Array[Float])],
+      metric: MetricType = MetricType.L2
+  ): (Array[Long], Array[Byte]) =
+    SearchQueries.packPartition(
+      queries.iterator.map { case (id, vector) =>
+        InternalRow(
+          id,
+          if (vector == null) null
+          else UnsafeArrayData.fromPrimitiveArray(vector)
+        )
+      },
       float32,
-      MetricType.L2
+      metric
     )
+
+  test("queries are packed in the order they arrive, ids alongside") {
+    val (ids, vectors) =
+      pack(Seq(Long.box(7L) -> Array(1f, 2f), Long.box(3L) -> Array(3f, 4f)))
 
     ids shouldBe Array(7L, 3L)
     floats(vectors) shouldBe Seq(1f, 2f, 3f, 4f)
   }
 
   test("a query of another dimension names its query id") {
-    val failure = the[IllegalArgumentException] thrownBy SearchQueries.pack(
-      Seq(Row(11L, Seq(1f, 2f)), Row(12L, Seq(1f))),
-      float32,
-      MetricType.L2
+    val failure = the[IllegalArgumentException] thrownBy pack(
+      Seq(Long.box(11L) -> Array(1f, 2f), Long.box(12L) -> Array(1f))
     )
 
     failure.getMessage should include("Query 12 has 1 values")
   }
 
   test("a query with a value that is not finite is refused") {
-    val failure = the[IllegalArgumentException] thrownBy SearchQueries.pack(
-      Seq(Row(5L, Seq(1f, Float.NaN))),
-      float32,
-      MetricType.L2
+    val failure = the[IllegalArgumentException] thrownBy pack(
+      Seq(Long.box(5L) -> Array(1f, Float.NaN))
     )
 
     failure.getMessage should include("not finite")
   }
 
   test("a zero query has no COSINE answer, and an L2 one is fine") {
-    val failure = the[IllegalArgumentException] thrownBy SearchQueries.pack(
-      Seq(Row(5L, Seq(0f, 0f))),
-      float32,
-      MetricType.Cosine
-    )
+    val zero = Seq(Long.box(5L) -> Array(0f, 0f))
+    val failure =
+      the[IllegalArgumentException] thrownBy pack(zero, MetricType.Cosine)
 
     failure.getMessage should include("zero norm")
-    SearchQueries
-      .pack(Seq(Row(5L, Seq(0f, 0f))), float32, MetricType.L2)
-      ._1 shouldBe
-      Array(5L)
+    pack(zero, MetricType.L2)._1 shouldBe Array(5L)
   }
 
   test("a query without an id or a vector is refused") {
-    the[IllegalArgumentException] thrownBy SearchQueries.pack(
-      Seq(Row(null, Seq(1f, 2f))),
-      float32,
-      MetricType.L2
-    )
-    the[IllegalArgumentException] thrownBy SearchQueries.pack(
-      Seq(Row(1L, null)),
-      float32,
-      MetricType.L2
-    )
+    val noId = the[IllegalArgumentException] thrownBy
+      pack(Seq((null: java.lang.Long) -> Array(1f, 2f)))
+    noId.getMessage should include("Query 1 of the set has no query_id")
+    val noVector = the[IllegalArgumentException] thrownBy
+      pack(Seq(Long.box(1L) -> (null: Array[Float])))
+    noVector.getMessage should include("Query 1 has no vector")
   }
 
   test("the bytes of a query set are its queries times its row") {

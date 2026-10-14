@@ -1,12 +1,9 @@
 package com.zilliz.spark.connector.read
 
-import java.util.Arrays
 import scala.jdk.CollectionConverters._
 import scala.reflect.ClassTag
 
-import org.apache.spark.{HashPartitioner, Partitioner}
 import org.apache.spark.internal.Logging
-import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.sql.{DataFrame, Encoders, Row, SparkSession}
@@ -14,11 +11,11 @@ import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
+import org.apache.spark.HashPartitioner
 
 import com.zilliz.milvus.storage.expr.{Expr, PredicateExpr}
 import com.zilliz.milvus.storage.index.{
   CandidateBytes,
-  MachineResources,
   RankingFunction,
   SearchPlan
 }
@@ -48,8 +45,7 @@ import io.milvus.grpc.schema.FieldSchema
   * segment; the `index` mode searches the persisted index the snapshot pinned.
   * A hit carries `query_id`, `rank`, `_score`, `_segment_id` and `_row_offset`,
   * then the base columns asked for. A DataFrame input's search (`FrameSearch`)
-  * shares the packed delivery of the query groups, the merge partitioning and
-  * the reading of the executors' memory kept here.
+  * shares the merge stage kept here.
   */
 object MilvusSearch extends Logging {
 
@@ -233,8 +229,7 @@ object MilvusSearch extends Logging {
       spec,
       layout,
       metrics,
-      budget.profile,
-      packProfile(budget, plan, layout, delivery.shuffled)
+      budget
     )
     SearchProgress.watch(
       spark.sparkContext,
@@ -317,8 +312,8 @@ object MilvusSearch extends Logging {
       val cores =
         if (profile.nonEmpty) resources.executorCores
         else math.max(1, resources.taskCpus)
-      val (memoryLimit, heap) = executorMemory(spark)
-      val fraction = memoryFraction(spark)
+      val (memoryLimit, heap) = SearchResources.executorMemory(spark)
+      val fraction = SearchResources.memoryFraction(spark)
       val queries = SearchResources.queryBudget(heap, fraction, slots)
       SearchBudget(
         resources,
@@ -400,16 +395,11 @@ object MilvusSearch extends Logging {
          else "") +
         s", ${plan.estimated.size} segments estimated at half the budget"
     )
-    val delivered = delivery match {
-      case SearchQueries.Packed(_, _) => "broadcast, packed on the driver"
-      case SearchQueries.Broadcast(_) => "broadcast"
-      case SearchQueries.Shuffled(_)  => "shuffle"
-    }
     logInfo(
       s"Search plan: mode=${spec.mode}, metric=${spec.metric}, topK=${spec.k}, " +
         s"queries=${queries.count}, queryBytes=${SearchQueries
             .bytes(queries.count, spec.layout)} " +
-        s"delivered by $delivered, " +
+        s"delivered by ${delivery.describe}, " +
         s"queryGroups=${plan.groups.size}, segments=$segments in " +
         s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
         s"${plan.tasks} tasks, collectThreads=${spec.collectThreads}, " +
@@ -419,27 +409,6 @@ object MilvusSearch extends Logging {
          else "")
     )
   }
-
-  /** The task resources of the stage that packs the query groups for the
-    * shuffle, or None when the query set does not travel by group. A packing
-    * task holds one group's ids and vectors on the heap, outside what Spark
-    * manages, so no more of them run at once on an executor than that heap
-    * holds with room to spare.
-    */
-  private def packProfile(
-      budget: SearchBudget,
-      plan: SearchPlan.Plan,
-      layout: VectorLayout,
-      shuffled: Boolean
-  ): Option[ResourceProfile] =
-    if (!shuffled) None
-    else {
-      val perGroup = plan.groups.map(_.queries.toLong).max *
-        (SearchPlan.QueryIdBytes + layout.rowBytes.toLong)
-      val fits =
-        math.max(1L, budget.heapFor(1).bytes / (perGroup + perGroup / 2))
-      budget.resources.atMost(math.min(fits, Int.MaxValue.toLong).toInt)
-    }
 
   /** The take stage: the columns of `outputSchema` read for the hits alone.
     * What a take task buffers is every hit of its partition, `hitCount` over
@@ -482,8 +451,9 @@ object MilvusSearch extends Logging {
     )
   }
 
-  /** The candidates of the first stage, the way `delivery` says the query set
-    * travels (section 2.1).
+  /** The candidates of the first stage: each task searches one segment set over
+    * one query range, reading the groups of its range one at a time
+    * (docs/design/architecture/vector-search.html section 2.1).
     */
   private def candidates(
       spark: SparkSession,
@@ -493,91 +463,20 @@ object MilvusSearch extends Logging {
       spec: SegmentSetSearch.Spec,
       layout: VectorLayout,
       metrics: SearchMetrics,
-      searchProfile: Option[ResourceProfile],
-      packProfile: Option[ResourceProfile]
+      budget: SearchBudget
   ): RDD[(Long, Array[Byte])] = {
     val byId =
       partitions.map(partition => partition.task.segmentId -> partition).toMap
     val sets = plan.sets.map(_.map(task => byId(task.segmentId)))
-    val searched = delivery match {
-      case SearchQueries.Packed(ids, vectors) =>
-        broadcastSearch(spark, ids, vectors, sets, plan, spec, metrics)
-      case SearchQueries.Broadcast(selected) =>
-        // Packed where the rows are read: the driver gets bytes, not boxed
-        // vectors, and eight executors pack in parallel instead of one thread.
-        val (ids, vectors) =
-          SearchQueries.packOnExecutors(selected, layout, spec.metric)
-        broadcastSearch(spark, ids, vectors, sets, plan, spec, metrics)
-      case SearchQueries.Shuffled(selected) =>
-        shuffledSearch(
-          spark,
-          selected,
-          sets,
-          plan,
-          spec,
-          layout,
-          metrics,
-          packProfile
-        )
-    }
-    searchProfile.fold(searched)(searched.withResources)
-  }
-
-  /** The first stage over a query set broadcast whole: every executor keeps it,
-    * and a task slices the groups of its range out of it.
-    */
-  private def broadcastSearch(
-      spark: SparkSession,
-      ids: Array[Long],
-      vectors: Array[Byte],
-      sets: Seq[Seq[MilvusInputPartition]],
-      plan: SearchPlan.Plan,
-      spec: SegmentSetSearch.Spec,
-      metrics: SearchMetrics
-  ): RDD[(Long, Array[Byte])] = {
     val groups = plan.groups
-    require(
-      ids.length.toLong == groups.map(_.queries.toLong).sum,
-      s"The query set packed to ${ids.length} queries, but the plan counted ${groups.map(_.queries.toLong).sum}"
+    val delivered = delivery.groups(
+      spark,
+      groups,
+      spec.metric,
+      layout,
+      budget.resources,
+      budget.heapFor(1).bytes
     )
-    val kept = plan.kept.toVector
-    val delivered = spark.sparkContext.broadcast((ids, vectors))
-    val work = for {
-      (set, index) <- sets.zipWithIndex
-      range <- plan.queryRanges
-    } yield (set, kept.lift(index).flatten, range)
-    spark.sparkContext.parallelize(work, plan.tasks).flatMap {
-      case (set, planned, range) =>
-        val (allIds, allVectors) = delivered.value
-        SegmentSetSearch.run(
-          set,
-          spec,
-          range.iterator.map(index =>
-            SearchQueries.Group.of(allIds, allVectors, groups(index))
-          ),
-          range.size,
-          planned,
-          metrics
-        )
-    }
-  }
-
-  /** The first stage over a query set packed by group into a shuffle: a task
-    * reads the groups of its range one at a time.
-    */
-  private def shuffledSearch(
-      spark: SparkSession,
-      selected: DataFrame,
-      sets: Seq[Seq[MilvusInputPartition]],
-      plan: SearchPlan.Plan,
-      spec: SegmentSetSearch.Spec,
-      layout: VectorLayout,
-      metrics: SearchMetrics,
-      packProfile: Option[ResourceProfile]
-  ): RDD[(Long, Array[Byte])] = {
-    val groups = plan.groups
-    val delivered =
-      packedGroups(selected, groups, spec.metric, layout, packProfile)
     require(
       delivered.getNumPartitions == groups.size,
       s"The packed query set is ${groups.size} groups, not " +
@@ -592,7 +491,7 @@ object MilvusSearch extends Logging {
     val ranges = plan.queryRanges
     val rangeCount = ranges.size
     val rangeSizes = ranges.map(_.size).toVector
-    new SearchQueryRanges(delivered, sets.size, ranges)
+    val searched = new SearchQueryRanges(delivered, sets.size, ranges)
       .mapPartitionsWithIndex { (index, streamed) =>
         SegmentSetSearch.run(
           held.value(index / rangeCount),
@@ -603,138 +502,8 @@ object MilvusSearch extends Logging {
           metrics
         )
       }
+    budget.profile.fold(searched)(searched.withResources)
   }
-
-  /** The query set packed on the executors, one partition per query group, each
-    * the output of a shuffle.
-    *
-    * `zipWithIndex` gives every query the position that decides its group and
-    * its place in the group, so the groups are the same ones the driver planned
-    * and a group's rows are packed in query order without sorting. One task
-    * packs one group, and the groups are packed in parallel.
-    *
-    * The packed group then goes through a second shuffle, keyed by its group,
-    * so that it is written once to the local disk of the executor that packed
-    * it and every first-stage task that needs it reads it from there. Nothing
-    * is stored in memory: [[SearchQueryRanges]] reads a task's groups one at a
-    * time, and reading a group again is a shuffle read, not a second packing of
-    * the query set.
-    */
-  private[read] def packedGroups(
-      selected: DataFrame,
-      groups: Seq[SearchPlan.QueryGroup],
-      metric: MetricType,
-      layout: VectorLayout,
-      profile: Option[ResourceProfile] = None
-  ): RDD[SearchQueries.Group] = {
-    // Where each planned group starts. The byte limit cuts equal groups and a
-    // shorter last one, an even cut puts the longer groups first (decision
-    // 32), so a position finds its group among the starts, not by dividing.
-    val starts = groups.map(_.firstQuery.toLong).toArray
-    val rowBytes = layout.rowBytes
-    val sizes = groups.map(_.queries).toVector
-    // A row arrives, is written where it belongs and is done with: its
-    // position says both its group and its place in the group, so the task
-    // holds the group's arrays and the row in hand. Holding the group's rows
-    // before copying them holds the group twice. `groupByKey` did that (a heap
-    // dump of a failed 1 GiB query set found 2.03 GB in `byte[4096]` beside
-    // the arrays they were being copied into), and so did sorting each group
-    // by position first: four packing tasks of 232 MB groups ran a 4 GiB
-    // executor heap out (UAT chenbiao-qs2c-31m-8g-ef151-0).
-    val byGroup = new Partitioner {
-      override def numPartitions: Int = sizes.size
-      override def getPartition(key: Any): Int = {
-        val found = Arrays.binarySearch(starts, key.asInstanceOf[Long])
-        if (found >= 0) found else -found - 2
-      }
-    }
-    // The packed group keeps its group's partition through the second shuffle.
-    val byIndex = new Partitioner {
-      override def numPartitions: Int = sizes.size
-      override def getPartition(key: Any): Int = key.asInstanceOf[Int]
-    }
-    val packed = selected.rdd
-      .map(row => SearchQueries.pack(Seq(row), layout, metric))
-      .zipWithIndex()
-      .map { case ((ids, vectors), position) =>
-        (position, (ids.head, vectors))
-      }
-      .partitionBy(byGroup)
-      .mapPartitionsWithIndex { (index, entries) =>
-        val queries = sizes(index)
-        val first = starts(index)
-        val ids = new Array[Long](queries)
-        val vectors = new Array[Byte](queries * rowBytes)
-        var placed = 0
-        entries.foreach { case (position, (id, packed)) =>
-          val at = position - first
-          require(
-            at >= 0L && at < queries,
-            s"Query at position $position does not belong to group $index"
-          )
-          ids(at.toInt) = id
-          System.arraycopy(packed, 0, vectors, at.toInt * rowBytes, rowBytes)
-          placed += 1
-        }
-        require(
-          placed == queries,
-          s"Query group $index takes $queries queries and was given $placed"
-        )
-        Iterator((index, SearchQueries.Group(ids, vectors, 0)))
-      }
-    profile
-      .fold(packed)(packed.withResources)
-      .partitionBy(byIndex)
-      .values
-  }
-
-  /** The executor's memory: its limit, when it can be known, and its heap.
-    *
-    * In local mode the executor is this JVM, so the limit is the cgroup's or
-    * the machine's and the heap is this runtime's. On a cluster the driver
-    * cannot read the executor's cgroup, but the container Spark asked for is
-    * its limit: `spark.executor.memory` plus the overhead and, when enabled,
-    * the off-heap size (docs/design/architecture/search-resources.html section
-    * 3.3).
-    */
-  private[read] def executorMemory(
-      spark: SparkSession
-  ): (Option[Long], Long) = {
-    val master = spark.sparkContext.master
-    if (master.startsWith("local[") || master == "local") {
-      (
-        MachineResources.probe().memoryLimitBytes,
-        Runtime.getRuntime.maxMemory()
-      )
-    } else {
-      def bytes(key: String, default: String): Long =
-        JavaUtils.byteStringAsBytes(spark.conf.get(key, default))
-      val heap = bytes("spark.executor.memory", "1g")
-      val overhead =
-        spark.conf.getOption("spark.executor.memoryOverhead") match {
-          case Some(set) => JavaUtils.byteStringAsBytes(set)
-          case None =>
-            val factor = spark.conf
-              .getOption("spark.executor.memoryOverheadFactor")
-              .flatMap(value => scala.util.Try(value.trim.toDouble).toOption)
-              .getOrElse(0.10)
-            math.max(384L << 20, (heap * factor).toLong)
-        }
-      val offHeap =
-        if (spark.conf.get("spark.memory.offHeap.enabled", "false") == "true")
-          bytes("spark.memory.offHeap.size", "0")
-        else 0L
-      (Some(heap + overhead + offHeap), heap)
-    }
-  }
-
-  /** `spark.memory.fraction`: the share of the heap Spark manages, the rest
-    * being where a task's own objects live.
-    */
-  private[read] def memoryFraction(spark: SparkSession): Double = spark.conf
-    .getOption("spark.memory.fraction")
-    .flatMap(value => scala.util.Try(value.trim.toDouble).toOption)
-    .getOrElse(0.6)
 
   /** How many partitions the merge runs in: one for each task slot the job has,
     * and never more than there are queries. The merge is an RDD shuffle rather

@@ -6,6 +6,8 @@ import scala.jdk.CollectionConverters._
 import org.apache.spark.{Partition, SparkContext, TaskContext}
 import org.apache.spark.rdd.{RDD, ShuffledRDD}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.catalyst.expressions.UnsafeArrayData
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.{
   ArrayType,
   FloatType,
@@ -24,12 +26,13 @@ import com.zilliz.milvus.storage.schema.{
   VectorElementType,
   VectorLayout
 }
+import com.zilliz.spark.connector.options.TaskResources
 
-/** How a query set too large to broadcast reaches the first stage: packed by
-  * group on the executors into a shuffle, one partition per group, and read by
-  * every first-stage task one group at a time, so a task holds the group it
-  * searches and the one being read, never the query set (section 2.1 of
-  * docs/design/architecture/vector-search.html).
+/** How a query set reaches the first stage. Broadcast whole, or, when it is too
+  * large for that, packed by group on the executors into a shuffle, one
+  * partition per group, and read by every first-stage task one group at a time,
+  * so a task holds the group it searches and the one being read, never the
+  * query set (section 2.1 of docs/design/architecture/vector-search.html).
   */
 class SearchDeliveryTest
     extends AnyFunSuite
@@ -96,8 +99,24 @@ class SearchDeliveryTest
       )
     )
 
+  /** `rows` packed as an executor packs a partition of them. */
+  private def pack(
+      rows: Seq[Row],
+      metric: MetricType = spec.metric
+  ): (Array[Long], Array[Byte]) =
+    SearchQueries.packPartition(
+      rows.iterator.map(row =>
+        InternalRow(
+          row.getLong(0),
+          UnsafeArrayData.fromPrimitiveArray(row.getSeq[Float](1).toArray)
+        )
+      ),
+      layout,
+      metric
+    )
+
   private def packed(): RDD[SearchQueries.Group] =
-    MilvusSearch.packedGroups(selected(), groups, spec.metric, layout)
+    SearchQueries.packedGroups(selected(), groups, spec.metric, layout)
 
   /** Checks that `delivered` holds one partition per group of `planned`, each
     * with its queries in order, starting at zero in its bytes.
@@ -119,8 +138,7 @@ class SearchDeliveryTest
     seen.map(_._1) shouldBe planned.indices
     planned.zip(seen).foreach { case (group, (_, ids, vectors, first)) =>
       val expected = rows(count).slice(group.firstQuery, group.untilQuery)
-      val (expectedIds, expectedVectors) =
-        SearchQueries.pack(expected, layout, spec.metric)
+      val (expectedIds, expectedVectors) = pack(expected)
       ids shouldBe expectedIds.toSeq
       vectors shouldBe expectedVectors.toSeq
       first shouldBe 0
@@ -139,7 +157,7 @@ class SearchDeliveryTest
     val even = SearchPlan.evenGroups(10, 4)
     even.map(_.queries) shouldBe Seq(3, 3, 2, 2)
     val delivered =
-      MilvusSearch.packedGroups(selected(10), even, spec.metric, layout)
+      SearchQueries.packedGroups(selected(10), even, spec.metric, layout)
     deliversGroups(delivered, even, 10)
   }
 
@@ -222,13 +240,12 @@ class SearchDeliveryTest
         .toSeq
     }.toMap
 
-  test("the broadcast path packs on the executors what the driver would have") {
+  test("the broadcast path packs on the executors what one pass would pack") {
     val spread = selected().repartition(3)
 
     val (ids, vectors) =
       SearchQueries.packOnExecutors(spread, layout, MetricType.L2)
-    val (driverIds, driverVectors) =
-      SearchQueries.pack(rows(), layout, MetricType.L2)
+    val (driverIds, driverVectors) = pack(rows(), MetricType.L2)
 
     ids.length shouldBe queries
     ids.toSet shouldBe (0L until queries.toLong).toSet
@@ -250,13 +267,13 @@ class SearchDeliveryTest
     val (ids, vectors) =
       SearchQueries.packOnExecutors(frame, layout, MetricType.L2)
     val (driverIds, driverVectors) =
-      SearchQueries.pack(frame.collect().toSeq, layout, MetricType.L2)
+      pack(frame.collect().toSeq, MetricType.L2)
 
     ids.toSeq shouldBe driverIds.toSeq
     vectors.toSeq shouldBe driverVectors.toSeq
   }
 
-  test("executor packing refuses what driver packing refuses") {
+  test("executor packing refuses a value that is not finite") {
     val bad = spark.createDataFrame(
       Seq(
         Row(1L, Seq(1.0f, 2.0f)),
@@ -269,6 +286,49 @@ class SearchDeliveryTest
       SearchQueries.packOnExecutors(bad, layout, MetricType.L2)
 
     failure.getMessage should include("not finite")
+  }
+
+  test("every delivery hands SearchQueryRanges the same groups and bytes") {
+    val (driverIds, driverVectors) = pack(rows())
+    val frame = SearchQueries.Frame(selected(), queries.toLong)
+    val packedInput = SearchQueries.Packed(driverIds, driverVectors)
+    val deliveries = Seq(
+      SearchQueries.Delivery.of(packedInput, layout, 0L),
+      SearchQueries.Delivery.of(frame, layout, Long.MaxValue),
+      SearchQueries.Delivery.of(frame, layout, 0L)
+    )
+    deliveries.map(_.describe) shouldBe Seq(
+      "broadcast, packed on the driver",
+      "broadcast",
+      "shuffle"
+    )
+    val ranges = Seq(0 until 2, 2 until 4)
+    val resources = TaskResources.of(spark)
+    val rowBytes = layout.rowBytes
+    val results = deliveries.map { delivery =>
+      val delivered = delivery.groups(
+        spark,
+        groups,
+        spec.metric,
+        layout,
+        resources,
+        1L << 20
+      )
+      new SearchQueryRanges(delivered, 2, ranges)
+        .mapPartitionsWithIndex { (task, streamed) =>
+          Iterator(
+            task -> streamed.map { group =>
+              val start = group.firstQuery * rowBytes
+              val end = (group.firstQuery + group.queries) * rowBytes
+              (group.ids.toSeq, group.vectors.slice(start, end).toSeq)
+            }.toSeq
+          )
+        }
+        .collect()
+        .toSeq
+    }
+    results(1) shouldBe results.head
+    results(2) shouldBe results.head
   }
 }
 

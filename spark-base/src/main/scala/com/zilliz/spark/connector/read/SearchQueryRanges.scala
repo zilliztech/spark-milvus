@@ -3,20 +3,22 @@ package com.zilliz.spark.connector.read
 import org.apache.spark.{NarrowDependency, Partition, TaskContext}
 import org.apache.spark.rdd.RDD
 
-/** The first stage's view of a packed query set: partition `set × ranges +
+/** The first stage's view of a delivered query set: partition `set × ranges +
   * range` holds the query groups of that range, in order, for that segment set
   * (docs/design/architecture/vector-search.html section 2.1, decision 28).
   *
-  * `groups` is the output of the shuffle that packed them, one partition per
-  * group, so a task reads its range one group at a time and never holds the
-  * range whole. A group's shuffle reader sends its remote requests as soon as
-  * it is opened. The task opens the first group's reader when it starts, so
-  * that fetch runs while the task loads its segment set. It opens the next
-  * group's reader when it hands a group on, so a remote group arrives while the
-  * group before it is searched. A group packed on this executor is read from
-  * its local disk when it is handed on. What a task holds of the query set is
-  * the group being searched and the group being read, whatever the size of the
-  * set.
+  * `groups` holds one partition per group, as [[SearchQueries.Delivery]] made
+  * them: slices of a set broadcast whole, cut as a task reads them, or the
+  * output of the shuffle that packed them. A task reads its range one group at
+  * a time and never holds the range whole. A shuffled group's reader sends its
+  * remote requests as soon as it is opened. The task opens the first group's
+  * reader when it starts, so that fetch runs while the task loads its segment
+  * set. It opens the next group's reader when it hands a group on, so a remote
+  * group arrives while the group before it is searched. A group packed on this
+  * executor is read from its local disk when it is handed on. What a task holds
+  * of a shuffled set is the group being searched and the group being read,
+  * whatever the size of the set; a broadcast set is held once on each executor,
+  * as the broadcast holds it.
   */
 private[read] final class SearchQueryRanges(
     @transient private var groups: RDD[SearchQueries.Group],

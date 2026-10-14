@@ -1,5 +1,12 @@
 package com.zilliz.spark.connector.options
 
+import scala.util.Try
+
+import org.apache.spark.network.util.JavaUtils
+import org.apache.spark.sql.SparkSession
+
+import com.zilliz.milvus.storage.index.MachineResources
+
 /** The sizes of a search that are not the user's to know: the exact scan's base
   * block and what one task may keep, off the heap and on it.
   *
@@ -20,6 +27,52 @@ package com.zilliz.spark.connector.options
 object SearchResources {
 
   final case class Choice(bytes: Long, reason: String)
+
+  /** The executor's memory: its limit, when it can be known, and its heap.
+    *
+    * In local mode the executor is this JVM, so the limit is the cgroup's or
+    * the machine's and the heap is this runtime's. On a cluster the driver
+    * cannot read the executor's cgroup, but the container Spark asked for is
+    * its limit: `spark.executor.memory` plus the overhead and, when enabled,
+    * the off-heap size (docs/design/architecture/search-resources.html section
+    * 3.3).
+    */
+  def executorMemory(spark: SparkSession): (Option[Long], Long) = {
+    val master = spark.sparkContext.master
+    if (master.startsWith("local[") || master == "local") {
+      (
+        MachineResources.probe().memoryLimitBytes,
+        Runtime.getRuntime.maxMemory()
+      )
+    } else {
+      def bytes(key: String, default: String): Long =
+        JavaUtils.byteStringAsBytes(spark.conf.get(key, default))
+      val heap = bytes("spark.executor.memory", "1g")
+      val overhead =
+        spark.conf.getOption("spark.executor.memoryOverhead") match {
+          case Some(set) => JavaUtils.byteStringAsBytes(set)
+          case None =>
+            val factor = spark.conf
+              .getOption("spark.executor.memoryOverheadFactor")
+              .flatMap(value => Try(value.trim.toDouble).toOption)
+              .getOrElse(0.10)
+            math.max(384L << 20, (heap * factor).toLong)
+        }
+      val offHeap =
+        if (spark.conf.get("spark.memory.offHeap.enabled", "false") == "true")
+          bytes("spark.memory.offHeap.size", "0")
+        else 0L
+      (Some(heap + overhead + offHeap), heap)
+    }
+  }
+
+  /** `spark.memory.fraction`: the share of the heap Spark manages, the rest
+    * being where a task's own objects live.
+    */
+  def memoryFraction(spark: SparkSession): Double = spark.conf
+    .getOption("spark.memory.fraction")
+    .flatMap(value => Try(value.trim.toDouble).toOption)
+    .getOrElse(0.6)
 
   /** What the JVM and Spark themselves take off the heap, at least: metaspace,
     * thread stacks, GC and JIT data, Netty's direct buffers, the shuffle
