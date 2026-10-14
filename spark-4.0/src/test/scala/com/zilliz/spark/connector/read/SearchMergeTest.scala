@@ -71,12 +71,12 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       k: Int,
       metric: MetricType
   ) =
-    MilvusSearch.merged(
+    SearchMerge.merged(
       spark,
       candidates(rows, metric),
       k,
       metric,
-      MilvusSearch.mergePartitions(
+      SearchMerge.partitions(
         spark,
         math.max(1, rows.map(_._1).distinct.size.toLong),
         2,
@@ -292,13 +292,13 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
   }
 
   test("no candidates give no rows") {
-    MilvusSearch
+    SearchMerge
       .merged(spark, candidates(Seq.empty), 3, MetricType.L2, 2)
       .collect() shouldBe empty
   }
 
   test("an empty result has the schema a merged one has") {
-    MilvusSearch.HitSchema shouldBe MilvusSearch
+    SearchMerge.HitSchema shouldBe SearchMerge
       .merged(spark, candidates(Seq((1L, 10L, 0L, 1.0))), 1, MetricType.L2, 2)
       .schema
   }
@@ -309,16 +309,16 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     // local[2]: two slots. A partition cannot hold part of a query, so one
     // query is one partition however wide the cluster is.
     val heap = 1L << 30
-    MilvusSearch.mergePartitions(spark, 1L, 1, 10, heap) shouldBe 1
-    MilvusSearch.mergePartitions(spark, 100L, 1, 10, heap) shouldBe 2
+    SearchMerge.partitions(spark, 1L, 1, 10, heap) shouldBe 1
+    SearchMerge.partitions(spark, 100L, 1, 10, heap) shouldBe 2
     // More first-stage tasks than slots: every task's output still lands in a
     // partition of its own, which is what a cluster of many executors needs.
-    MilvusSearch.mergePartitions(spark, 100L, 16, 10, heap) shouldBe 16
+    SearchMerge.partitions(spark, 100L, 16, 10, heap) shouldBe 16
     // A query count far above the parallelism: partitions grow with it so a
     // reduce-side map holds a few thousand queries, not all of them.
-    MilvusSearch.mergePartitions(spark, 1000000L, 6, 10, heap) shouldBe 245
-    the[IllegalArgumentException] thrownBy MilvusSearch
-      .mergePartitions(spark, 0L, 1, 10, heap)
+    SearchMerge.partitions(spark, 1000000L, 6, 10, heap) shouldBe 245
+    the[IllegalArgumentException] thrownBy SearchMerge
+      .partitions(spark, 0L, 1, 10, heap)
   }
 
   test("a large k cuts the merge into partitions whose queries fit the heap") {
@@ -328,7 +328,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val heap = 306393907L
     val perQuery = 15L * 16384L * 24L
     val expected = (100000L + heap / 2 / perQuery - 1) / (heap / 2 / perQuery)
-    MilvusSearch.mergePartitions(
+    SearchMerge.partitions(
       spark,
       100000L,
       15,
@@ -337,6 +337,6 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     ) shouldBe expected.toInt
     expected should be > 64L
     // k=100 stays at the fixed few thousand queries a partition: 100k / 4096 = 25.
-    MilvusSearch.mergePartitions(spark, 100000L, 15, 100, heap) shouldBe 25
+    SearchMerge.partitions(spark, 100000L, 15, 100, heap) shouldBe 25
   }
 }

@@ -103,7 +103,7 @@ private[connector] object FrameSearch extends Logging {
       limits: SearchLimits,
       metrics: SearchMetrics,
       required: Option[Array[Long]]
-  ): MilvusSearch.Hits = {
+  ): SearchMerge.Hits = {
     val layout = VectorLayout(VectorElementType.Float32, dimension)
     val types = base.types
     val schema = StructType(
@@ -114,8 +114,8 @@ private[connector] object FrameSearch extends Logging {
     )
     val queryCount = queries.count
     if (queryCount == 0L)
-      return MilvusSearch.Hits(
-        MilvusSearch.missing(spark, required, schema.size),
+      return SearchMerge.Hits(
+        SearchMerge.missing(spark, required, schema.size),
         schema
       )
     require(
@@ -191,7 +191,7 @@ private[connector] object FrameSearch extends Logging {
         )
     )
     // Here every candidate carries its row.
-    val parts = MilvusSearch.mergePartitions(
+    val parts = SearchMerge.partitions(
       spark,
       queryCount,
       math.max(1, tasks),
@@ -201,16 +201,16 @@ private[connector] object FrameSearch extends Logging {
     )
     val width = types.size
     val hitWidth = schema.size
-    val rows = MilvusSearch.mergedByQuery[InternalRow](
+    val rows = SearchMerge.byQuery[InternalRow](
       spark,
       candidates,
       parts,
       CarriedCandidates.merge(_, _, k, metric),
       carried(_, _, width),
       required,
-      MilvusSearch.absentRow(_, hitWidth)
+      SearchMerge.absentRow(_, hitWidth)
     )
-    MilvusSearch.Hits(rows, schema)
+    SearchMerge.Hits(rows, schema)
   }
 
   /** The bytes one base row takes as an `UnsafeRow`: its fixed part, and for a
