@@ -38,7 +38,7 @@ public final class NativeVectorSearch {
 
     /**
      * {@link #bruteForceBatched} for L2, followed by a direct pass over its candidates
-     * (decision 35): the ids and the estimated distances are written as there, and then,
+     * (decision 37): the ids and the estimated distances are written as there, and then,
      * for each query, the candidates whose estimate is below the query's float32 cutoff,
      * taken in order from the first, receive their squared distance computed pair by pair
      * in the same slot of {@code direct}; {@code counts} receives one int32 per query with
