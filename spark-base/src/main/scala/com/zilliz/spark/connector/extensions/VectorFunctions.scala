@@ -16,8 +16,8 @@ import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.types.{ArrayType, FloatType, StringType}
 import org.apache.spark.unsafe.types.UTF8String
 
-import com.zilliz.milvus.storage.index.RankingFunction
 import com.zilliz.milvus.storage.schema.MetricType
+import com.zilliz.milvus.storage.vector.RankingFunction
 
 /** `vector_l2_distance`, `vector_cosine_similarity` and `vector_inner_product`
   * on the Spark lines that do not have them built in, 3.5 to 4.1

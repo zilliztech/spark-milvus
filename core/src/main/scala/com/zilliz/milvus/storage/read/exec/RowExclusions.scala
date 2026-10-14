@@ -75,7 +75,7 @@ final class RowExclusions private (
     )
     val excluded = new BitSet(rows.toInt)
     if (neededColumns.isEmpty) return excluded
-    val reader = SegmentReaderRegistry.open(
+    val reader = SegmentReader.open(
       task,
       arrowSchema,
       neededColumns,

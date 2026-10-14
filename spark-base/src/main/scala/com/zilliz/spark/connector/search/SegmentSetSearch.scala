@@ -6,7 +6,13 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.TaskContext
 
 import com.zilliz.milvus.storage.expr.{FilterExpr, PredicateExpr}
-import com.zilliz.milvus.storage.index.{
+import com.zilliz.milvus.storage.read.exec.{
+  RowExclusions,
+  SegmentIndexHandle,
+  SegmentVectors
+}
+import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
+import com.zilliz.milvus.storage.vector.{
   QueryMatrix,
   RankingFunction,
   SearchThreads,
@@ -14,12 +20,6 @@ import com.zilliz.milvus.storage.index.{
   TopKMerger,
   VectorBatch
 }
-import com.zilliz.milvus.storage.read.exec.{
-  RowExclusions,
-  SegmentIndexHandle,
-  SegmentVectors
-}
-import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
 import com.zilliz.spark.connector.types.ArrowAllocator
@@ -30,7 +30,7 @@ import io.milvus.grpc.schema.CollectionSchema
   *
   * The task opens what the Milvus format side offers for each of its segments —
   * vector batches for exact scan, or an index handle for indexed search — and
-  * the computation in `core.index` searches it. The plan chose which side the
+  * the computation in `core.vector` searches it. The plan chose which side the
   * task keeps (docs/design/architecture/vector-search.html section 2.1).
   * Keeping its queries, the task takes every group of its range first and reads
   * each segment once, one at a time, searching every group on it; that is also

@@ -66,7 +66,7 @@ object BackfillApp {
           println(result.summary)
           println(result.segmentSummary)
           parsed.get("output-result").foreach { outputPath =>
-            MilvusBackfill
+            BackfillStorage
               .writeResultJson(spark, result, outputPath, baseConfig) match {
               case Right(_) =>
                 println(s"Result JSON written to: $outputPath")

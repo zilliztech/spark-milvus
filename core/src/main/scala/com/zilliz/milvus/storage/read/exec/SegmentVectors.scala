@@ -2,7 +2,6 @@ package com.zilliz.milvus.storage.read.exec
 
 import java.util.concurrent.{
   Callable,
-  ExecutionException,
   ExecutorService,
   Executors,
   Future,
@@ -13,9 +12,13 @@ import java.util.BitSet
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.types.pojo.Schema
 
-import com.zilliz.milvus.storage.index.{KnowhereBuffers, VectorBatch}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.VectorLayout
+import com.zilliz.milvus.storage.vector.{
+  KnowhereBuffers,
+  SearchThreads,
+  VectorBatch
+}
 
 /** One segment's vectors, batch by batch, with the rows a search must skip.
   *
@@ -76,34 +79,46 @@ final class SegmentVectors private (
     require(!closed, "Segment vectors are closed")
     val current = pending match {
       case Some(read) =>
-        pending = None
-        await(read)
+        try await(read)
+        finally pending = None
       case None => readBlock()
     }
     current.foreach { block =>
+      try pending = Some(readNextAhead())
+      catch {
+        case failure: Throwable =>
+          try block.close()
+          catch { case later: Throwable => failure.addSuppressed(later) }
+          throw failure
+      }
       handedOut += block.rows.toLong
-      pending = Some(readNextAhead())
     }
     current
   }
 
   /** The next block: batches joined until they fill `batchMaxBytes`. */
   private def readBlock(): Option[SegmentVectors.Batch] = {
-    val first = readBatch()
-    if (first.isEmpty) return first
-    val rowBytes = layout.rowBytes.toLong
-    var parts = List(first.get)
-    var bytes = first.get.rows.toLong * rowBytes
+    var parts = List.empty[SegmentVectors.Batch]
+    var bytes = 0L
     var reading = true
-    while (reading && bytes < batchMaxBytes) {
-      readBatch() match {
-        case Some(batch) =>
-          parts = batch :: parts
-          bytes += batch.rows.toLong * rowBytes
-        case None => reading = false
+    try {
+      while (reading && (parts.isEmpty || bytes < batchMaxBytes)) {
+        readBatch() match {
+          case Some(batch) =>
+            parts = batch :: parts
+            bytes += batch.rows.toLong * layout.rowBytes.toLong
+          case None => reading = false
+        }
       }
+    } catch {
+      case failure: Throwable =>
+        parts.foreach { part =>
+          try part.close()
+          catch { case later: Throwable => failure.addSuppressed(later) }
+        }
+        throw failure
     }
-    if (parts.size == 1) first
+    if (parts.size <= 1) parts.headOption
     else Some(SegmentVectors.join(parts.reverse, layout, allocator))
   }
 
@@ -125,8 +140,10 @@ final class SegmentVectors private (
         batch
       } catch {
         case failure: Throwable =>
-          if (base != null) base.close()
-          root.close()
+          (Option(base).toSeq :+ root).foreach { owned =>
+            try owned.close()
+            catch { case later: Throwable => failure.addSuppressed(later) }
+          }
           throw failure
       }
     }
@@ -146,24 +163,27 @@ final class SegmentVectors private (
   private def await(
       read: Future[Option[SegmentVectors.Batch]]
   ): Option[SegmentVectors.Batch] =
-    try read.get()
-    catch {
-      case failure: ExecutionException if failure.getCause != null =>
-        throw failure.getCause
-    }
+    SearchThreads.take(read)(_.foreach(_.close()))
 
   /** A read in flight owns native and Arrow resources, so it finishes and what
     * it read is released before the reader closes; its failure is not dropped.
     */
   override def close(): Unit = if (!closed) {
-    val inFlight = pending
-    pending = None
-    try inFlight.foreach(read => await(read).foreach(_.close()))
+    var failure: Throwable = null
+    try pending.foreach(read => await(read).foreach(_.close()))
+    catch { case cause: Throwable => failure = cause }
     finally {
+      pending = None
       closed = true
-      if (readAhead != null) readAhead.shutdown()
-      reader.close()
+      if (readAhead != null) SearchThreads.shutdown(readAhead)
+      try reader.close()
+      catch {
+        case cause: Throwable =>
+          if (failure == null) failure = cause
+          else if (cause ne failure) failure.addSuppressed(cause)
+      }
     }
+    if (failure != null) throw failure
   }
 }
 
@@ -196,13 +216,16 @@ object SegmentVectors {
     override def visibleRows: Int = rows - excluded.cardinality()
 
     override def close(): Unit = {
-      try base.close()
-      finally {
-        val failures = backing.flatMap(closeable =>
-          scala.util.Try(closeable.close()).failed.toOption
-        )
-        failures.headOption.foreach(throw _)
+      var failure: Throwable = null
+      (base +: backing).foreach { owned =>
+        try owned.close()
+        catch {
+          case cause: Throwable =>
+            if (failure == null) failure = cause
+            else if (cause ne failure) failure.addSuppressed(cause)
+        }
       }
+      if (failure != null) throw failure
     }
   }
 
@@ -210,46 +233,58 @@ object SegmentVectors {
     *
     * The exclusion bitmaps move with the rows: a row excluded at position `i`
     * of the third part is excluded at `rowsBefore + i` of the result. The parts
-    * are closed by [[KnowhereBuffers.joined]] once their bytes are copied, so
-    * the peak is one part above the result.
+    * are borrowed while their bytes are copied, then closed on both success and
+    * failure. Only the resulting buffer remains owned by the caller.
     */
   private[exec] def join(
       parts: Seq[Batch],
       layout: VectorLayout,
       allocator: BufferAllocator
   ): Batch = {
-    require(parts.nonEmpty, "A joined batch needs at least one part")
-    val rows = parts.map(_.rows.toLong).sum
-    require(
-      rows <= Int.MaxValue.toLong,
-      s"A joined batch of $rows rows exceeds what one batch addresses"
-    )
-    val excluded = new BitSet(math.max(rows.toInt, 1))
-    var before = 0
-    parts.foreach { part =>
-      var row = part.excluded.nextSetBit(0)
-      while (row >= 0) {
-        excluded.set(before + row)
-        row = part.excluded.nextSetBit(row + 1)
-      }
-      before += part.rows
-    }
-    val base =
-      KnowhereBuffers.joined(parts.map(_.base), layout.rowBytes, allocator)
-    // The bytes are the result's now, so what the parts were reading out of
-    // goes. Keeping it would hold the reader's Arrow data beside the copy for
-    // as long as the batch lives, which in a held segment set is every byte of
-    // the set twice over, and `hold` would count one of them.
-    val failures = parts.flatMap(part =>
-      part.backing.flatMap(closeable =>
-        scala.util.Try(closeable.close()).failed.toOption
+    var base: KnowhereBuffers.Base = null
+    var failure: Throwable = null
+    try {
+      require(parts.nonEmpty, "A joined batch needs at least one part")
+      val rows = parts.map(_.rows.toLong).sum
+      require(
+        rows <= Int.MaxValue.toLong,
+        s"A joined batch of $rows rows exceeds what one batch addresses"
       )
-    )
-    failures.headOption.foreach { failure =>
-      base.close()
-      throw failure
+      val excluded = new BitSet(math.max(rows.toInt, 1))
+      var before = 0
+      parts.foreach { part =>
+        var row = part.excluded.nextSetBit(0)
+        while (row >= 0) {
+          excluded.set(before + row)
+          row = part.excluded.nextSetBit(row + 1)
+        }
+        before += part.rows
+      }
+      base =
+        KnowhereBuffers.joined(parts.map(_.base), layout.rowBytes, allocator)
+      new Batch(base, excluded, parts.head.firstRow, rows.toInt, Seq.empty)
+    } catch {
+      case cause: Throwable =>
+        failure = cause
+        throw cause
+    } finally {
+      // joined borrows its inputs; this method owns and releases every part.
+      parts.foreach { part =>
+        try part.close()
+        catch {
+          case cause: Throwable =>
+            if (failure == null) failure = cause
+            else if (cause ne failure) failure.addSuppressed(cause)
+        }
+      }
+      if (failure != null) {
+        if (base != null) {
+          try base.close()
+          catch { case later: Throwable => failure.addSuppressed(later) }
+        }
+        throw failure
+      }
     }
-    new Batch(base, excluded, parts.head.firstRow, rows.toInt, Seq.empty)
   }
 
   /** Over a reader that is already open, which is how a test supplies batches
@@ -282,7 +317,7 @@ object SegmentVectors {
       allocator: BufferAllocator
   ): SegmentVectors = {
     val columns = (vectorColumn +: exclusions.neededColumns).distinct
-    val reader = SegmentReaderRegistry.open(
+    val reader = SegmentReader.open(
       task,
       arrowSchema,
       columns,

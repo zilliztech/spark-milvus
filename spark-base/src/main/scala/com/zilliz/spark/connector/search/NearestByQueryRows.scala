@@ -1,7 +1,6 @@
 package com.zilliz.spark.connector.search
 
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.{Expression, UnsafeProjection}
 import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.sql.catalyst.InternalRow
@@ -11,22 +10,16 @@ import org.apache.spark.sql.execution.{
   SparkPlan,
   WholeStageCodegenExec
 }
-import org.apache.spark.sql.types.{
-  ArrayType,
-  DataType,
-  FloatType,
-  LongType,
-  StructField,
-  StructType
-}
+import org.apache.spark.sql.types.DataType
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.storage.StorageLevel
 
-import com.zilliz.milvus.storage.index.{EngineRange, QueryMatrix}
 import com.zilliz.milvus.storage.schema.{
   MetricType,
   VectorElementType,
   VectorLayout
 }
+import com.zilliz.milvus.storage.vector.{EngineRange, QueryMatrix}
 
 /** Prepares the query rows of a nearest-by join: classifies their vectors,
   * counts and caches computed rows, chooses whether the driver can hold them,
@@ -55,17 +48,6 @@ private[connector] object NearestByQueryRows {
     case input: InputAdapter          => unwrapped(input.child)
     case other                        => other
   }
-
-  private val QuerySetSchema = StructType(
-    Seq(
-      StructField(SearchQueries.IdColumn, LongType, nullable = false),
-      StructField(
-        SearchQueries.VectorColumn,
-        ArrayType(FloatType, containsNull = false),
-        nullable = false
-      )
-    )
-  )
 
   /** How the query rows divide, the bytes the driver holds if it takes them all
     * -- the rows themselves and the packed vectors of the ones that could be
@@ -188,18 +170,16 @@ private[connector] object NearestByQueryRows {
     def number(): RDD[(InternalRow, Long)] = rows.zipWithIndex()
 
     def vectors(
-        spark: SparkSession,
         numbered: RDD[(InternalRow, Long)]
-    ): SearchQueries.Frame = {
+    ): SearchQueries.Rows = {
       val judge = kind
       val vectors = numbered.flatMap { case (row, number) =>
         judge(row) match {
-          case QueryVector.Searched(vector) => Some(Row(number, vector))
+          case QueryVector.Searched(vector) => Some(number -> vector)
           case _                            => None
         }
       }
-      val querySet = spark.createDataFrame(vectors, QuerySetSchema)
-      SearchQueries.Frame(querySet, counts.searched)
+      SearchQueries.Rows(vectors, counts.searched)
     }
 
     def kept(numbered: RDD[(InternalRow, Long)]): RDD[(Long, InternalRow)] = {
@@ -236,16 +216,23 @@ private[connector] object NearestByQueryRows {
       case Computed(rows) =>
         // Count the cached copy before zipWithIndex can run its own job.
         val kept = rows.map(_.copy()).persist(StorageLevel.MEMORY_AND_DISK)
-        val judged = countKinds(kept, types, judge, searcher.packedBytes)
-        val width = dimension(judged.lengths)
-        val counts = judged.at(width)
-        if (counts.heldBytes <= searcher.limits.queriesMaxBytes) {
-          val fetched = kept.collect()
-          kept.unpersist(blocking = false)
-          local(fetched)
-        } else {
-          val kind: InternalRow => QueryVector = row => judge(row).at(width)
-          new Distributed(kept, kind, counts, width)
+        try {
+          val judged = countKinds(kept, types, judge, searcher.packedBytes)
+          val width = dimension(judged.lengths)
+          val counts = judged.at(width)
+          if (counts.heldBytes <= searcher.limits.queriesMaxBytes) {
+            val fetched = kept.collect()
+            kept.unpersist(blocking = false)
+            local(fetched)
+          } else {
+            val kind: InternalRow => QueryVector = row => judge(row).at(width)
+            new Distributed(kept, kind, counts, width)
+          }
+        } catch {
+          case failure: Throwable =>
+            try kept.unpersist(blocking = false)
+            catch { case later: Throwable => failure.addSuppressed(later) }
+            throw failure
         }
     }
   }

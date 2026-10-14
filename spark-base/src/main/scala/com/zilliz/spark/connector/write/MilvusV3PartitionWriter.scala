@@ -24,7 +24,11 @@ import org.apache.spark.sql.connector.write.{
 import org.apache.spark.sql.types.StructType
 
 import com.zilliz.milvus.storage.io.NativeObjectStore
-import com.zilliz.milvus.storage.schema.FieldMetadata
+import com.zilliz.milvus.storage.schema.{
+  FieldMetadata,
+  HybridTimestamp,
+  SchemaMapper
+}
 import com.zilliz.milvus.storage.stats.PrimaryKeyStats
 import com.zilliz.milvus.storage.write.exec.{
   ColumnGroupSplit,
@@ -33,7 +37,6 @@ import com.zilliz.milvus.storage.write.exec.{
   V3SegmentWriter,
   WriteMetrics
 }
-import com.zilliz.spark.connector.catalog.MilvusHybridTimestamp
 import com.zilliz.spark.connector.metrics.WriteMetricsReport
 import com.zilliz.spark.connector.options.{MilvusOption, OptionParsing}
 import com.zilliz.spark.connector.types.ArrowConverter
@@ -137,11 +140,11 @@ class MilvusV3PartitionWriter(
       f.metadata.getBoolean(FieldMetadata.MilvusPrimaryKeyMetadataKey)
   )
   private val jobTimestamp: Long =
-    MilvusHybridTimestamp.ofMillis(System.currentTimeMillis())
+    HybridTimestamp.ofMillis(System.currentTimeMillis())
   private var writtenRows: Long = 0L
 
   private val arrowSchema =
-    MilvusV3Writer.arrowSchemaFor(sparkSchema, fieldIds, writesSystemFields)
+    WriteSchema.arrowSchemaFor(sparkSchema, fieldIds, writesSystemFields)
 
   // The segment directory: `milvus.writer.customPath` names it outright
   // (backfill writes into an existing segment's base path); otherwise the job
@@ -156,7 +159,7 @@ class MilvusV3PartitionWriter(
         logInfo(s"Using custom write path: $customPath")
         customPath
       case None =>
-        val path = StagingLayout(MilvusV3Writer.stagingRoot(storage), jobId)
+        val path = StagingLayout(StagingLayout.rootFor(storage), jobId)
           .segment(partitionId, taskId)
         logInfo(s"Writing to staging path: $path")
         path
@@ -296,11 +299,11 @@ class MilvusV3PartitionWriter(
     // RowID on load, and the timestamp only has to be older than any delete.
     if (writesSystemFields) {
       root
-        .getVector(MilvusV3Writer.RowIdFieldId.toString)
+        .getVector(SchemaMapper.RowIdFieldId.toString)
         .asInstanceOf[BigIntVector]
         .setSafe(currentBatchSize, writtenRows + currentBatchSize)
       root
-        .getVector(MilvusV3Writer.TimestampFieldId.toString)
+        .getVector(SchemaMapper.TimestampFieldId.toString)
         .asInstanceOf[BigIntVector]
         .setSafe(currentBatchSize, jobTimestamp)
     }

@@ -6,7 +6,7 @@ import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.spark.connector.catalog.MilvusHybridTimestamp
+import com.zilliz.milvus.storage.schema.HybridTimestamp
 
 /** The two system columns a connector-written segment carries (decision 22,
   * docs/design/architecture/write.html section 6).
@@ -23,7 +23,7 @@ class SystemFieldsWriteTest extends AnyFunSuite with Matchers {
   private val fieldIds = Map("id" -> 100L, "score" -> 101L)
 
   test("a new segment carries RowID and Timestamp after its own columns") {
-    val arrow = MilvusV3Writer.arrowSchemaFor(schema, fieldIds, true)
+    val arrow = WriteSchema.arrowSchemaFor(schema, fieldIds, true)
 
     arrow.getFields.asScala.map(_.getName).toSeq shouldBe
       Seq("100", "101", "0", "1")
@@ -31,7 +31,7 @@ class SystemFieldsWriteTest extends AnyFunSuite with Matchers {
   }
 
   test("a backfill adds columns to a segment that already has them") {
-    val arrow = MilvusV3Writer.arrowSchemaFor(schema, fieldIds, false)
+    val arrow = WriteSchema.arrowSchemaFor(schema, fieldIds, false)
 
     arrow.getFields.asScala.map(_.getName).toSeq shouldBe Seq("100", "101")
   }
@@ -41,7 +41,7 @@ class SystemFieldsWriteTest extends AnyFunSuite with Matchers {
       schema.fields :+ StructField("Timestamp", LongType, nullable = false)
     )
 
-    the[IllegalArgumentException] thrownBy MilvusV3Writer.arrowSchemaFor(
+    the[IllegalArgumentException] thrownBy WriteSchema.arrowSchemaFor(
       declared,
       fieldIds + ("Timestamp" -> 1L),
       true
@@ -50,11 +50,11 @@ class SystemFieldsWriteTest extends AnyFunSuite with Matchers {
 
   test("the job's time becomes the first HybridTS of its millisecond") {
     // Milvus packs a timestamp as physical milliseconds shifted by 18 bits.
-    MilvusHybridTimestamp.ofMillis(0L) shouldBe 0L
-    MilvusHybridTimestamp.ofMillis(1L) shouldBe (1L << 18)
-    MilvusHybridTimestamp.ofMillis(1789708541743L) shouldBe
+    HybridTimestamp.ofMillis(0L) shouldBe 0L
+    HybridTimestamp.ofMillis(1L) shouldBe (1L << 18)
+    HybridTimestamp.ofMillis(1789708541743L) shouldBe
       (1789708541743L << 18)
-    MilvusHybridTimestamp.ofMillis(-1L) shouldBe 0L
-    MilvusHybridTimestamp.ofMillis(Long.MaxValue) shouldBe Long.MaxValue
+    HybridTimestamp.ofMillis(-1L) shouldBe 0L
+    HybridTimestamp.ofMillis(Long.MaxValue) shouldBe Long.MaxValue
   }
 }

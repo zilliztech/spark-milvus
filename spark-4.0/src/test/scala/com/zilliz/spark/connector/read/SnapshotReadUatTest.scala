@@ -12,12 +12,8 @@ import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.snapshot.SnapshotCatalog
-import com.zilliz.spark.connector.options.{
-  MilvusOption,
-  SnapshotSources,
-  StorageOptions,
-  V2SegmentResolvers
-}
+import com.zilliz.spark.connector.options.{MilvusOption, StorageOptions}
+import com.zilliz.spark.connector.table.{SnapshotSources, V2SegmentResolvers}
 
 /** The whole read chain on a real snapshot in the UAT bucket: the snapshot JSON
   * is read through `SnapshotCatalog` on the driver, planned into partitions,

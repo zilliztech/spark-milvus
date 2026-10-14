@@ -3,7 +3,7 @@ package com.zilliz.spark.connector.metrics
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.SparkContext
 
-import com.zilliz.milvus.storage.index.SegmentSearch
+import com.zilliz.milvus.storage.vector.SegmentSearch
 
 /** What a vector search counted.
   *

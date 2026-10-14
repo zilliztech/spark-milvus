@@ -12,8 +12,8 @@ import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.milvus.storage.index.{EngineRange, RankingFunction}
 import com.zilliz.milvus.storage.schema.MetricType
+import com.zilliz.milvus.storage.vector.{EngineRange, RankingFunction}
 import com.zilliz.spark.connector.metrics.NearestByMetrics
 
 /** Coordinates a nearest-by join: adapts its input, prepares its query rows,
@@ -95,8 +95,8 @@ private[connector] object NearestBySearch {
     }
   }
 
-  /** Driver-side result assembly. Task closures are built from copied values by
-    * baseValues and joiners; they never capture this join or its searcher.
+  /** Driver-side result assembly. Task closures use copied values and joiners;
+    * they never capture this join or its searcher.
     */
   private final class Join(
       spark: SparkSession,
@@ -139,12 +139,11 @@ private[connector] object NearestBySearch {
             else None
           )
           post(counts)
-          val baseOf = baseValues
-          hits.rows.mapPartitions { found =>
+          hits.mapPartitions { found =>
             val joiner = newJoiner()
-            found.map(hit =>
-              joiner(payload.value(hit.getLong(0).toInt), Some(baseOf(hit)))
-            )
+            found.map { case (query, base) =>
+              joiner(payload.value(query.toInt), Some(base))
+            }
           }
         }
       connector
@@ -158,7 +157,7 @@ private[connector] object NearestBySearch {
       val counts = rows.counts
       val dimension = rows.dimension
       val numbered = rows.number()
-      val queries = rows.vectors(spark, numbered)
+      val queries = rows.vectors(numbered)
       val hits =
         if (counts.searched == 0L) None
         else
@@ -170,9 +169,8 @@ private[connector] object NearestBySearch {
             )
           )
       post(counts)
-      val baseOf = baseValues
       val hitsByQuery = hits match {
-        case Some(found) => found.rows.map(hit => hit.getLong(0) -> baseOf(hit))
+        case Some(found) => found
         case None =>
           spark.sparkContext.emptyRDD[(Long, InternalRow)]
       }
@@ -204,22 +202,6 @@ private[connector] object NearestBySearch {
           NearestByMetrics.UnrankedQueries -> counts.unranked
         ) ++ searcher.segments(counts.searched)
       )
-
-    /** A hit's base values, NULL where the hit is. */
-    private def baseValues: InternalRow => InternalRow = {
-      val positions = searcher.positions.toArray
-      val types = searcher.baseTypes.toArray
-      val columns = width
-      hit => {
-        val values = new GenericInternalRow(columns)
-        var i = 0
-        while (i < columns) {
-          values.update(i, hit.get(positions(i), types(i)))
-          i += 1
-        }
-        values
-      }
-    }
 
     /** What makes a [[Joiner]] in a task. */
     private def joiners: () => Joiner = {

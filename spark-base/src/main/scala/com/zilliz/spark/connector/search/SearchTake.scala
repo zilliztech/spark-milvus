@@ -24,10 +24,7 @@ import org.apache.spark.sql.functions.{
 import org.apache.spark.sql.types.{IntegerType, StructType}
 import org.apache.spark.TaskContext
 
-import com.zilliz.milvus.storage.read.exec.{
-  SegmentReader,
-  SegmentReaderRegistry
-}
+import com.zilliz.milvus.storage.read.exec.SegmentReader
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
@@ -248,7 +245,7 @@ private[search] object SearchTake {
     // rather than through a map keyed by a boxed Long.
     val taken = new Array[InternalRow](offsets.length)
     val started = System.nanoTime()
-    val reader = SegmentReaderRegistry.open(
+    val reader = SegmentReader.open(
       partition.task,
       binding.arrowSchema,
       projected,

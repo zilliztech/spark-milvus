@@ -16,12 +16,24 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
   */
 object SchemaMapper {
 
+  /** The canonical Milvus system fields, shared by readers and writers. */
+  val RowIdFieldId: Long = 0L
+  val TimestampFieldId: Long = 1L
+
   /** The two system columns every Milvus segment carries. They are appended
     * when the schema does not declare them, so the read path can project them.
     */
   val CanonicalSystemFields: Seq[FieldSchema] = Seq(
-    FieldSchema(name = "RowID", fieldID = 0, dataType = DataType.Int64),
-    FieldSchema(name = "Timestamp", fieldID = 1, dataType = DataType.Int64)
+    FieldSchema(
+      name = "RowID",
+      fieldID = RowIdFieldId,
+      dataType = DataType.Int64
+    ),
+    FieldSchema(
+      name = "Timestamp",
+      fieldID = TimestampFieldId,
+      dataType = DataType.Int64
+    )
   )
 
   /** The system columns the schema does not declare, decided by field id alone.

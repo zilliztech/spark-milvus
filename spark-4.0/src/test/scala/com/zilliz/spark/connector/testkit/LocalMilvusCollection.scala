@@ -20,7 +20,6 @@ import com.zilliz.milvus.storage.codec.{
   IndexObjectTarget,
   SegmentIndexObjects
 }
-import com.zilliz.milvus.storage.index.IndexBuilder
 import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.manifest.{
   IndexFileEntry,
@@ -32,6 +31,7 @@ import com.zilliz.milvus.storage.schema.{
   VectorElementType,
   VectorLayout
 }
+import com.zilliz.milvus.storage.vector.IndexBuilder
 import com.zilliz.milvus.storage.write.exec.{
   ManifestTransaction,
   V3SegmentWriter

@@ -2,24 +2,30 @@ package com.zilliz.spark.connector.search
 
 import scala.jdk.CollectionConverters._
 
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.catalyst.expressions.{
+  BoundReference,
+  UnsafeProjection
+}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.milvus.storage.index.RankingFunction
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.schema.{
   MetricType,
   VectorElementType,
   VectorLayout
 }
+import com.zilliz.milvus.storage.vector.RankingFunction
 import com.zilliz.spark.connector.metrics.{NearestByMetrics, SearchMetrics}
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 import com.zilliz.spark.connector.read.{MilvusInputPartition, MilvusScan}
 import io.milvus.grpc.schema.{DataType => MilvusDataType, FieldSchema}
 
 /** The base a nearest-by join searches. Its adapter supplies the vector rules,
-  * search execution and base-column positions; query preparation and joining
+  * search execution and requested output columns; query preparation and joining
   * the hits belong to [[NearestByQueryRows]] and [[NearestBySearch]].
   */
 private[connector] sealed trait NearestByInput
@@ -47,10 +53,9 @@ private[connector] object NearestByInput {
   ) extends NearestByInput
 
   /** What differs between the two inputs: how a query vector is first judged,
-    * the search's dimension and layout, the search itself, where a hit's base
-    * columns are, and what the node reports about segments. `judge` and
-    * `packedBytes` run in tasks, so they are functions that hold no more than
-    * they read.
+    * the search's dimension and layout, the search itself, and what the node
+    * reports about segments. `judge` and `packedBytes` run in tasks, so they
+    * are functions that hold no more than they read.
     */
   private[search] trait Searcher {
     def limits: SearchLimits
@@ -68,15 +73,12 @@ private[connector] object NearestByInput {
     /** The bytes a packed vector of this length takes. */
     def packedBytes: Int => Long
 
+    /** Each query id with its requested base columns, in output order. */
     def search(
         input: SearchQueries.Input,
         dimension: Int,
         required: Option[Array[Long]]
-    ): SearchMerge.Hits
-
-    /** Where in a hit row each base column is, and its type. */
-    def positions: Seq[Int]
-    def baseTypes: Seq[DataType]
+    ): RDD[(Long, InternalRow)]
 
     def segments(searched: Long): Map[String, Long]
   }
@@ -118,8 +120,8 @@ private[connector] object NearestByInput {
       identity
     )
     private val layout: VectorLayout =
-      VectorLayout.of(field.dataType, MilvusSearch.dimensionOf(field))
-    MilvusSearch.checkSearchable(metric, layout)
+      VectorLayout.of(field.dataType, dimensionOf(field))
+    checkSearchable(metric, layout)
     private val options =
       Map(scan.options.asCaseSensitiveMap().asScala.toSeq: _*)
     override val limits: SearchLimits = SearchLimits.from(options)
@@ -155,8 +157,8 @@ private[connector] object NearestByInput {
         queries: SearchQueries.Input,
         dimension: Int,
         required: Option[Array[Long]]
-    ): SearchMerge.Hits =
-      MilvusSearch.execute(
+    ): RDD[(Long, InternalRow)] = {
+      val hits = MilvusSearch.execute(
         spark,
         options,
         queries,
@@ -174,18 +176,18 @@ private[connector] object NearestByInput {
         function,
         required
       )
+      outputRows(hits, positions)
+    }
 
     // A hit row is the candidate's columns, then `taken` in order. Positions,
     // not names: a base column may share a name with a candidate column.
-    override val positions: Seq[Int] = {
+    private val positions: Seq[Int] = {
       val takenNames = taken.fieldNames.toSeq
       input.columns.map { case (name, _) =>
         if (FromCandidate(name)) SearchMerge.HitSchema.fieldIndex(name)
         else SearchMerge.HitSchema.size + takenNames.indexOf(name)
       }
     }
-
-    override val baseTypes: Seq[DataType] = input.columns.map(_._2)
 
     // The search has planned and checked every segment by now, so the
     // selection here cannot fail differently.
@@ -238,8 +240,8 @@ private[connector] object NearestByInput {
         queries: SearchQueries.Input,
         dimension: Int,
         required: Option[Array[Long]]
-    ): SearchMerge.Hits =
-      FrameSearch.execute(
+    ): RDD[(Long, InternalRow)] = {
+      val hits = FrameSearch.execute(
         spark,
         queries,
         input.base,
@@ -251,12 +253,53 @@ private[connector] object NearestByInput {
         SearchMetrics.of(metrics),
         required
       )
-
-    override val positions: Seq[Int] = input.base.types.indices.map(_ + 1)
-
-    override val baseTypes: Seq[DataType] = input.base.types
+      outputRows(hits, input.base.types.indices.map(_ + 1))
+    }
 
     override def segments(searched: Long): Map[String, Long] = Map.empty
+  }
+
+  /** Input-specific candidate columns stop here. Rows may enter a shuffle or be
+    * retained by the join, so each projected output owns its bytes.
+    */
+  private def outputRows(
+      hits: SearchMerge.Hits,
+      positions: Seq[Int]
+  ): RDD[(Long, InternalRow)] = {
+    val columns = positions.map { at =>
+      val field = hits.schema(at)
+      // Outer searches can return NULL even for a non-nullable base field.
+      BoundReference(at, field.dataType, nullable = true)
+    }
+    hits.rows.mapPartitions { rows =>
+      val project = UnsafeProjection.create(columns)
+      rows.map(row => row.getLong(0) -> project(row).copy())
+    }
+  }
+
+  private def dimensionOf(field: FieldSchema): Int = field.typeParams
+    .find(_.key == "dim")
+    .map(_.value.toInt)
+    .getOrElse(
+      throw new IllegalArgumentException(
+        s"Field '${field.name}' declares no dimension"
+      )
+    )
+
+  /** The field's element type determines the supported metrics. */
+  private[search] def checkSearchable(
+      metric: MetricType,
+      layout: VectorLayout
+  ): Unit = {
+    require(
+      layout.elementType != VectorElementType.Bit,
+      "A binary vector field is not searched; the connector searches FloatVector, Float16Vector, BFloat16Vector and Int8Vector fields"
+    )
+    val supported = MetricType.forElementType(layout.elementType)
+    require(
+      supported.contains(metric),
+      s"A ${layout.elementType} field takes ${supported.map(_.name).sorted.mkString(" or ")}, not $metric"
+    )
   }
 
   private val SearchedTypes: Set[MilvusDataType] = Set(

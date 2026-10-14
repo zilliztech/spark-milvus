@@ -10,8 +10,10 @@ package com.zilliz.spark.connector
   *
   * V3 driver coordination lives with `MilvusV3BatchWrite`, while executor
   * writers and their factory live with `MilvusV3PartitionWriter`.
-  * `MilvusV3Writer` provides the direct DataFrame entry and shared schema and
-  * staging-path helpers. The file split preserves their Spark interfaces.
+  * `MilvusV3Writer` provides the direct DataFrame entry. `WriteSchema`
+  * validates the Spark schema and builds its Arrow representation, using
+  * canonical system field ids from `core.schema.SchemaMapper`. Staging paths
+  * and their storage-root policy belong to `core.write.exec.StagingLayout`.
   *
   * Capabilities: W1, W2, G2 (see docs/design/capabilities.md).
   */

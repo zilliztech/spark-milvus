@@ -10,6 +10,7 @@ import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
 import com.zilliz.milvus.storage.credential.StorageProperties
+import com.zilliz.spark.connector.table.SnapshotSources
 
 /** The endpoint a snapshot URI is recognized against is the one the driver's
   * store uses, including an endpoint only the session's Hadoop keys supply.

@@ -14,10 +14,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
-import com.zilliz.milvus.storage.read.exec.{
-  SegmentReader,
-  SegmentReaderRegistry
-}
+import com.zilliz.milvus.storage.read.exec.SegmentReader
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
@@ -187,7 +184,7 @@ class WriterRoundTripTest extends AnyFunSuite with Matchers {
       )
       // Field ids 0 and 1 stand for the two columns, in schema order.
       val nameFor = Map(0L -> "id", 1L -> "name")
-      segmentReader = SegmentReaderRegistry.open(
+      segmentReader = SegmentReader.open(
         task,
         schema,
         Seq("id", "name"),

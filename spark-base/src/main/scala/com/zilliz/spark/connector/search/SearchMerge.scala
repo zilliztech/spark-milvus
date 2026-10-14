@@ -9,8 +9,8 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.HashPartitioner
 
-import com.zilliz.milvus.storage.index.CandidateBytes
 import com.zilliz.milvus.storage.schema.MetricType
+import com.zilliz.milvus.storage.vector.CandidateBytes
 
 /** The merge stage both inputs share, and the hits a search gives back.
   *

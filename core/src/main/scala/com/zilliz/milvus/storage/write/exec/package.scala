@@ -10,7 +10,9 @@ package com.zilliz.milvus.storage.write
   * column group at paths the caller names, the layout of a `storage_version =
   * 2` segment. `StagingLayout` is where an append writes before the job is
   * committed and registered: `{root}/staging/{job}/`, outside `insert_log/`,
-  * which DataCoord garbage-collects.
+  * which DataCoord garbage-collects. `StagingLayout.rootFor` chooses the key
+  * prefix from storage properties: the configured root on object storage and an
+  * empty prefix for a local backend already rooted at that directory.
   *
   * The rules a writer keeps are the ones the reader keeps
   * (docs/design/architecture/storage-io.html section 3): a handle never crosses

@@ -16,11 +16,7 @@ import org.apache.spark.sql.SparkSession
 
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.Snapshot
-import com.zilliz.spark.connector.options.{
-  MilvusOption,
-  SnapshotReference,
-  SnapshotSources
-}
+import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.types.SparkTypes
 import io.milvus.grpc.schema.CollectionSchema
 

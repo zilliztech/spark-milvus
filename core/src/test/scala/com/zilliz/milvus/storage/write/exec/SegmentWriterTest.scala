@@ -17,7 +17,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.jni.storage.NativeStorageLibrary
-import com.zilliz.milvus.storage.read.exec.SegmentReaderRegistry
+import com.zilliz.milvus.storage.read.exec.SegmentReader
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.snapshot.{SegmentLayout, V2ColumnGroup}
 
@@ -103,7 +103,7 @@ class SegmentWriterTest extends AnyFunSuite with Matchers {
       task: SegmentReadTask,
       allocator: RootAllocator
   ): Seq[(Long, String)] = {
-    val reader = SegmentReaderRegistry.open(
+    val reader = SegmentReader.open(
       task,
       schema,
       Seq("100", "101"),

@@ -25,7 +25,14 @@ import org.apache.spark.sql.types.{
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.unsafe.Platform
 
-import com.zilliz.milvus.storage.index.{
+import com.zilliz.milvus.storage.read.plan.ReadLimits
+import com.zilliz.milvus.storage.schema.{
+  MetricType,
+  VectorElementType,
+  VectorLayout
+}
+import com.zilliz.milvus.storage.vector.{
+  CandidateBytes,
   CarriedCandidates,
   EngineRange,
   ExactScan,
@@ -33,12 +40,6 @@ import com.zilliz.milvus.storage.index.{
   RankingFunction,
   TopKMerger,
   VectorBatch
-}
-import com.zilliz.milvus.storage.read.plan.ReadLimits
-import com.zilliz.milvus.storage.schema.{
-  MetricType,
-  VectorElementType,
-  VectorLayout
 }
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.SearchLimits
@@ -68,9 +69,11 @@ private[connector] object FrameSearch extends Logging {
     */
   final case class Base(
       rows: RDD[InternalRow],
-      types: Seq[DataType],
+      projection: Seq[Expression],
       vector: Expression
-  )
+  ) {
+    def types: Seq[DataType] = projection.map(_.dataType)
+  }
 
   /** Each searched query's best k base rows, as rows of the query id followed
     * by the base row. With `required`, an id that found nothing has a row with
@@ -93,7 +96,7 @@ private[connector] object FrameSearch extends Logging {
       required: Option[Array[Long]]
   ): SearchMerge.Hits = {
     val layout = VectorLayout(VectorElementType.Float32, dimension)
-    val types = base.types
+    val types = base.projection.map(_.dataType)
     val schema = StructType(
       StructField(SearchQueries.IdColumn, LongType, nullable = false) +:
         types.zipWithIndex.map { case (dataType, at) =>
@@ -140,6 +143,9 @@ private[connector] object FrameSearch extends Logging {
         s"blockRows=$blockRows, rowBytes=$rowBytes"
     )
     val vector = base.vector
+    val projection = base.projection
+    val blockMaxBytes = execution.blockMaxBytes
+    val retainedMaxBytes = execution.retainedMaxBytes
     val candidates = Pairs(
       spark.sparkContext,
       base.rows,
@@ -150,12 +156,14 @@ private[connector] object FrameSearch extends Logging {
           group,
           unit,
           vector,
-          types,
+          projection,
           layout,
           k,
           metric,
           function,
           blockRows,
+          blockMaxBytes,
+          retainedMaxBytes,
           metrics
         )
     )
@@ -193,12 +201,14 @@ private[connector] object FrameSearch extends Logging {
       group: SearchQueries.Group,
       unit: Int,
       vector: Expression,
-      types: Seq[DataType],
+      projection: Seq[Expression],
       layout: VectorLayout,
       k: Int,
       metric: MetricType,
       function: RankingFunction,
       blockRows: Int,
+      blockMaxBytes: Long,
+      retainedMaxBytes: Long,
       metrics: SearchMetrics
   ): Iterator[(Long, Array[Byte])] = {
     val dimension = layout.dimension
@@ -219,7 +229,7 @@ private[connector] object FrameSearch extends Logging {
       val first = new Array[Float](dimension)
       EngineRange.decode(matrix.buffer, 0, layout, first)
       val merger = new TopKMerger(group.queries, k, metric)
-      val project = UnsafeProjection.create(types.toArray)
+      val project = UnsafeProjection.create(projection)
       val vectors = new Array[Array[Float]](blockRows)
       val copies = new Array[UnsafeRow](blockRows)
       // The rows some query's heap holds, by their position in the partition.
@@ -228,11 +238,17 @@ private[connector] object FrameSearch extends Logging {
       while (rows.hasNext) {
         val firstRow = position
         var count = 0
-        while (count < blockRows && rows.hasNext) {
+        var blockBytes = 0L
+        while (
+          count < blockRows && blockBytes < blockMaxBytes && rows.hasNext
+        ) {
           val row = rows.next()
           vectors(count) = baseVector(vector.eval(row), first, function)
           copies(count) =
             if (vectors(count) == null) null else project(row).copy()
+          blockBytes += layout.rowBytes.toLong +
+            (if (copies(count) == null) 0L
+             else copies(count).getSizeInBytes.toLong)
           count += 1
           position += 1
         }
@@ -256,13 +272,12 @@ private[connector] object FrameSearch extends Logging {
             Some(EngineRange.Batch.of(batch, layout, metric, function))
           )
         finally batch.close()
-        // Rows pushed out of every heap are let go once they are as many as
-        // the heaps hold.
-        keepHeld(kept, merger, copies, firstRow, 2L * group.queries * k)
+        // Variable-width rows are measured, never bounded by their defaultSize.
+        keepHeld(kept, merger, copies, firstRow, retainedMaxBytes)
         java.util.Arrays.fill(copies.asInstanceOf[Array[AnyRef]], null)
         java.util.Arrays.fill(vectors.asInstanceOf[Array[AnyRef]], null)
       }
-      val answers = carriedAnswers(merger, group, kept)
+      val answers = carriedAnswers(merger, group, kept, retainedMaxBytes)
       metrics.candidates.add(merger.size.toLong)
       answers
     } finally {
@@ -294,51 +309,66 @@ private[connector] object FrameSearch extends Logging {
       else array.toFloatArray()
   }
 
-  /** Keeps, by position in the partition, the rows of the block starting at
-    * `firstRow` that some query's heap now holds; once `kept` holds more than
-    * `limit`, the rows no heap holds any more are let go.
-    */
+  /** Retain only rows still held by a heap, measuring their actual bytes. */
   private def keepHeld(
       kept: java.util.HashMap[java.lang.Long, UnsafeRow],
       merger: TopKMerger,
       copies: Array[UnsafeRow],
       firstRow: Long,
-      limit: Long
+      maxBytes: Long
   ): Unit = {
+    val held = new java.util.HashMap[java.lang.Long, UnsafeRow]()
+    var bytes = 0L
     merger.foreachKept { (_, offset) =>
-      if (offset >= firstRow)
-        kept.putIfAbsent(offset, copies((offset - firstRow).toInt))
+      val row =
+        if (offset >= firstRow) copies((offset - firstRow).toInt)
+        else kept.get(offset)
+      if (held.putIfAbsent(offset, row) == null)
+        bytes += row.getSizeInBytes.toLong
     }
-    if (kept.size > limit) {
-      val held = new java.util.HashMap[java.lang.Long, UnsafeRow]()
-      merger.foreachKept((_, offset) =>
-        held.putIfAbsent(offset, kept.get(offset))
-      )
-      kept.clear()
-      kept.putAll(held)
-    }
+    require(
+      bytes <= maxBytes,
+      s"DataFrame search candidates retain $bytes row bytes, exceeding the task budget of $maxBytes; reduce k or the returned columns, or increase executor memory"
+    )
+    kept.clear()
+    kept.putAll(held)
   }
 
-  /** Each query's best k, every candidate carrying its row. */
-  private def carriedAnswers(
+  /** Encodes one query when pulled. The iterator owns only heap data, so the
+    * query matrix and allocator can close before its answers are consumed.
+    */
+  private[search] def carriedAnswers(
       merger: TopKMerger,
       group: SearchQueries.Group,
-      kept: java.util.HashMap[java.lang.Long, UnsafeRow]
+      kept: java.util.HashMap[java.lang.Long, UnsafeRow],
+      maxBytes: Long
   ): Iterator[(Long, Array[Byte])] = {
-    val answers = Vector.newBuilder[(Long, Array[Byte])]
-    var query = 0
-    while (query < group.queries) {
+    val ids = group.ids
+    ids.indices.iterator.flatMap { query =>
       merger.sort(query)
       val results = merger.results(query)
-      if (results.nonEmpty)
-        answers += group.ids(query) -> CarriedCandidates.writeSorted(
-          results.map(candidate =>
-            candidate -> kept.get(candidate.rowOffset).getBytes
+      if (results.isEmpty) Iterator.empty
+      else {
+        val bytes = results.iterator
+          .map(candidate =>
+            CandidateBytes.Width.toLong + 4L +
+              kept.get(candidate.rowOffset).getSizeInBytes.toLong
+          )
+          .sum
+        require(
+          bytes <= maxBytes && bytes <= Int.MaxValue.toLong,
+          s"DataFrame search query ${ids(query)} encodes $bytes candidate bytes, exceeding the answer limit of ${math
+              .min(maxBytes, Int.MaxValue.toLong)}; reduce k or the returned columns, or increase executor memory"
+        )
+        Iterator.single(
+          ids(query) -> CarriedCandidates.writeSorted(
+            results.map(candidate =>
+              candidate -> kept.get(candidate.rowOffset).getBytes
+            )
           )
         )
-      query += 1
+      }
     }
-    answers.result().iterator
   }
 
   /** One query's merged answer as rows of the query id and the base row. */

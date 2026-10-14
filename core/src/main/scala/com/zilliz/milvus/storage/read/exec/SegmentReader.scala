@@ -43,10 +43,10 @@ trait SegmentReader extends AutoCloseable {
       parallelism: Int = 1
   ): SegmentReader.TakeResult
 
-  /** Rows handed over by sequential `next()` calls. The registry wraps a reader
-    * when its task declares an expected count, so reaching EOF with another
-    * count is an error rather than a partial result. `take` does not consume
-    * the sequential stream or contribute to this count.
+  /** Rows handed over by sequential `next()` calls. `SegmentReader.open` wraps
+    * a reader when its task declares an expected count, so reaching EOF with
+    * another count is an error rather than a partial result. `take` does not
+    * consume the sequential stream or contribute to this count.
     */
   def deliveredRows: Long
 
@@ -137,75 +137,7 @@ object SegmentReader {
       }
     }
   }
-}
 
-private[exec] final class NativeTakeResult(
-    reader: MilvusStorageReader,
-    private var handle: Long,
-    allocator: BufferAllocator,
-    calls: NativeCalls,
-    recordBatch: VectorSchemaRoot => Unit,
-    recordCopies: (Long, Long) => Unit
-) extends SegmentReader.TakeResult {
-
-  private var reportedCopies: Long = 0L
-  private var reportedBytes: Long = 0L
-
-  override def next(): Option[VectorSchemaRoot] = synchronized {
-    if (handle == 0L) return None
-    var batch: Option[VectorSchemaRoot] = None
-    try {
-      batch = SegmentReader.readBatch(reader, handle, allocator, calls)
-      reportStats()
-      batch.foreach(recordBatch)
-      if (batch.isEmpty) close()
-      batch
-    } catch {
-      case failure: Throwable =>
-        batch.foreach { root =>
-          try root.close()
-          catch {
-            case closeFailure: Throwable => failure.addSuppressed(closeFailure)
-          }
-        }
-        try close()
-        catch {
-          case closeFailure: Throwable => failure.addSuppressed(closeFailure)
-        }
-        throw failure
-    }
-  }
-
-  override def close(): Unit = synchronized {
-    if (handle != 0L) {
-      val owned = handle
-      try reportStats()
-      finally {
-        handle = 0L
-        calls.timed(reader.destroyRecordBatchReaderScala(owned))
-      }
-    }
-  }
-
-  private def reportStats(): Unit = {
-    val stats = reader.recordBatchReaderStatsScala(handle)
-    recordCopies(stats(1) - reportedCopies, stats(2) - reportedBytes)
-    reportedCopies = stats(1)
-    reportedBytes = stats(2)
-  }
-}
-
-/** Opens a [[SegmentReader]] for a segment's layout.
-  *
-  * Dispatch lives here rather than in the Spark layer, so the two layouts have
-  * one entry point instead of a branch per call site.
-  *
-  * Column naming is the caller's, and the two lines genuinely differ: a
-  * manifest matches columns by field id and its schema carries ids as names,
-  * while a column-group layout uses the field's own name. That is what
-  * `columnNameFor` is for; it is not something this object can decide.
-  */
-object SegmentReaderRegistry {
   private[exec] val RecordBatchMaxRows = "reader.record_batch_max_rows"
   private[exec] val RecordBatchMaxSize = "reader.record_batch_max_size"
   private[exec] val PrebufferLazy = "reader.parquet.prebuffer.lazy"
@@ -269,6 +201,16 @@ object SegmentReaderRegistry {
       MilvusStorageRuntime.setArrowIoThreadPoolCapacity(wanted)
   }
 
+  /** Opens a [[SegmentReader]] for a segment's layout.
+    *
+    * Dispatch lives here rather than in the Spark layer, so the two layouts
+    * have one entry point instead of a branch per call site.
+    *
+    * Column naming is the caller's, and the two lines genuinely differ: a
+    * manifest matches columns by field id and its schema carries ids as names,
+    * while a column-group layout uses the field's own name. That is what
+    * `columnNameFor` is for; it is not something this object can decide.
+    */
   def open(
       task: SegmentReadTask,
       arrowSchema: Schema,
@@ -303,6 +245,62 @@ object SegmentReaderRegistry {
         new ExpectedRowsSegmentReader(reader, task.segmentId, expected)
       case None => reader
     }
+}
+
+private[exec] final class NativeTakeResult(
+    reader: MilvusStorageReader,
+    private var handle: Long,
+    allocator: BufferAllocator,
+    calls: NativeCalls,
+    recordBatch: VectorSchemaRoot => Unit,
+    recordCopies: (Long, Long) => Unit
+) extends SegmentReader.TakeResult {
+
+  private var reportedCopies: Long = 0L
+  private var reportedBytes: Long = 0L
+
+  override def next(): Option[VectorSchemaRoot] = synchronized {
+    if (handle == 0L) return None
+    var batch: Option[VectorSchemaRoot] = None
+    try {
+      batch = SegmentReader.readBatch(reader, handle, allocator, calls)
+      reportStats()
+      batch.foreach(recordBatch)
+      if (batch.isEmpty) close()
+      batch
+    } catch {
+      case failure: Throwable =>
+        batch.foreach { root =>
+          try root.close()
+          catch {
+            case closeFailure: Throwable => failure.addSuppressed(closeFailure)
+          }
+        }
+        try close()
+        catch {
+          case closeFailure: Throwable => failure.addSuppressed(closeFailure)
+        }
+        throw failure
+    }
+  }
+
+  override def close(): Unit = synchronized {
+    if (handle != 0L) {
+      val owned = handle
+      try reportStats()
+      finally {
+        handle = 0L
+        calls.timed(reader.destroyRecordBatchReaderScala(owned))
+      }
+    }
+  }
+
+  private def reportStats(): Unit = {
+    val stats = reader.recordBatchReaderStatsScala(handle)
+    recordCopies(stats(1) - reportedCopies, stats(2) - reportedBytes)
+    reportedCopies = stats(1)
+    reportedBytes = stats(2)
+  }
 }
 
 /** Verifies a physical row count only when the delegate reaches EOF. Closing a
@@ -391,7 +389,7 @@ private[exec] final class NativeSegmentReader(
     schemaStruct.save(new ArrowSchema.Snapshot())
     Data.exportSchema(allocator, arrowSchema, null, schemaStruct)
     properties = calls.timed(new MilvusStorageProperties())
-    calls.timed(properties.create(SegmentReaderRegistry.nativeProperties(task)))
+    calls.timed(properties.create(SegmentReader.nativeProperties(task)))
     reader = new MilvusStorageReader()
     val columns = neededColumns.toArray
 

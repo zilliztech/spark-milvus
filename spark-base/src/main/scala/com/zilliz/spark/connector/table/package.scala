@@ -4,6 +4,12 @@ package com.zilliz.spark.connector
   * and Catalog loads, then constructs MilvusTable. MilvusTable owns that
   * Snapshot's schema, capability set and metadata columns, and
   * `MilvusTable.readOptions` the options one read of it runs with.
+  * `SnapshotSources` composes the catalog, backup, client and option-string
+  * sources; `SnapshotReference` states configured/latest/named/as-of selection.
+  * It materializes metadata with driver stores scoped by
+  * `StorageOptions.withStore`, then applies the common `milvus.partitions` and
+  * `milvus.segments` selectors. `V2SegmentResolvers` supplies compat's footer
+  * resolver to core without introducing a dependency from core to compat.
   * `MilvusTables.named` resolves a name Spark resolves (a catalog table or a
   * view) to the whole Milvus table it reads, for the procedures that take a
   * `table` (docs/design/architecture/dataframe-api.html section 9).
@@ -14,6 +20,6 @@ package com.zilliz.spark.connector
   * deletion through Spark SQL is deliberately not implemented (section 10 of
   * capabilities.md); the table does not implement SupportsDeleteV2.
   *
-  * Capabilities: R12 (see docs/design/capabilities.md).
+  * Capabilities: R12, R16 (see docs/design/capabilities.md).
   */
 package object table

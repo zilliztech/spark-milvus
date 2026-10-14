@@ -24,12 +24,9 @@ import com.zilliz.milvus.client.{
   DatabaseNotFoundException
 }
 import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
-import com.zilliz.spark.connector.options.{
-  MilvusOption,
-  ReadMode,
-  SnapshotReference
-}
-import com.zilliz.spark.connector.table.MilvusTables
+import com.zilliz.milvus.storage.schema.HybridTimestamp
+import com.zilliz.spark.connector.options.{MilvusOption, ReadMode}
+import com.zilliz.spark.connector.table.{MilvusTables, SnapshotReference}
 
 /** Shared TableCatalog behavior. Spark-line sources normalize only the
   * createTable signature preferred by that line.
@@ -75,7 +72,7 @@ private[catalog] abstract class MilvusCatalogBase(
     load(
       identifier,
       SnapshotReference.AtOrBefore(
-        MilvusHybridTimestamp.upperBound(timestamp)
+        HybridTimestamp.upperBound(timestamp)
       )
     )
 
@@ -421,29 +418,4 @@ private[catalog] object MilvusCatalogDiscovery {
       options: CaseInsensitiveStringMap,
       key: String
   ): String = Option(options.get(key)).getOrElse("")
-}
-
-/** Converts Spark's Unix epoch microseconds to the greatest Milvus HybridTS in
-  * the same physical millisecond. Saturating the two ends avoids shift overflow
-  * while preserving as-of ordering for every Long Spark can pass.
-  */
-private[connector] object MilvusHybridTimestamp {
-  private val LogicalBits = 18
-  private val LogicalMask = (1L << LogicalBits) - 1L
-  private val MaxPhysicalMillis = Long.MaxValue >>> LogicalBits
-
-  /** The first HybridTS of a physical millisecond, which is what a write stamps
-    * its rows with (decision 22).
-    */
-  def ofMillis(millis: Long): Long =
-    if (millis < 0L) 0L
-    else if (millis > MaxPhysicalMillis) Long.MaxValue
-    else millis << LogicalBits
-
-  def upperBound(epochMicros: Long): Long = {
-    val millis = Math.floorDiv(epochMicros, 1000L)
-    if (millis < 0L) Long.MinValue
-    else if (millis > MaxPhysicalMillis) Long.MaxValue
-    else (millis << LogicalBits) | LogicalMask
-  }
 }

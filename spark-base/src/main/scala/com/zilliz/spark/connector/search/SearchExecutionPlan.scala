@@ -3,10 +3,14 @@ package com.zilliz.spark.connector.search
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.milvus.storage.index.{CandidateBytes, SearchPlan}
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
+import com.zilliz.milvus.storage.vector.{
+  CandidateBytes,
+  IndexSearch,
+  SearchPlan
+}
 import com.zilliz.spark.connector.options.{SearchLimits, TaskResources}
 
 /** Driver-side execution choices shared by Milvus and DataFrame searches.
@@ -53,6 +57,8 @@ private[connector] object SearchExecutionPlan {
       delivery: SearchQueries.Delivery,
       packingProfile: Option[ResourceProfile],
       blockRows: Int,
+      blockMaxBytes: Long,
+      retainedMaxBytes: Long,
       tasks: Int,
       mergePartitions: Int
   )
@@ -99,7 +105,11 @@ private[connector] object SearchExecutionPlan {
         },
       delivery.shuffled,
       splitQueries = mode == SearchMode.Exact,
-      rangesWanted = limits.queryRanges
+      rangesWanted = limits.queryRanges,
+      workingBytes = groupQueries =>
+        if (index)
+          IndexSearch.resultBytes(groupQueries, k, limits.callsInFlight)
+        else 0L
     )
     val threads =
       if (limits.collectThreads > 0) limits.collectThreads else budget.cores
@@ -122,7 +132,15 @@ private[connector] object SearchExecutionPlan {
             set.map(segment =>
               selected(segment.segmentId).map(_.serializedSize)
             ),
-            plan.capacity
+            budget.segments.bytes,
+            range
+              .map(i => plan.groups(i).queries.toLong)
+              .sum * layout.rowBytes.toLong,
+            IndexSearch.resultBytes(
+              range.map(i => plan.groups(i).queries).max,
+              k,
+              1
+            )
           )
         )
       }
@@ -143,7 +161,14 @@ private[connector] object SearchExecutionPlan {
       policies,
       batch,
       stageHeap,
-      mergePartitions(spark, queries.count, plan.tasks, k, stageHeap.bytes),
+      mergePartitions(
+        spark,
+        queries.count,
+        plan.tasks,
+        plan.sets.size,
+        k,
+        stageHeap.bytes
+      ),
       if (takeColumns)
         Some(
           takePartitioning(
@@ -191,6 +216,18 @@ private[connector] object SearchExecutionPlan {
       .toInt
     val delivery = queryDelivery(queries, layout, limits.queriesMaxBytes)
     val tasks = basePartitions * groups.size
+    val blockMaxBytes = math.max(
+      1L,
+      math.min(SearchResources.exactScanBatch(None).bytes, taskHeap.bytes / 4L)
+    )
+    val queryHeap = groups.map(_.queries.toLong).max *
+      (SearchPlan.bytesPerQuery(
+        layout,
+        k
+      ) + SearchPlan.QueryIdBytes + SearchPlan.TopKQueueBytes)
+    // A retained row also appears in the packed answer during encoding.
+    val retainedMaxBytes =
+      math.max(1L, (taskHeap.bytes - queryHeap - blockMaxBytes) / 2L)
     Frame(
       groups,
       delivery,
@@ -203,11 +240,14 @@ private[connector] object SearchExecutionPlan {
         )
       else None,
       blockRows,
+      blockMaxBytes,
+      retainedMaxBytes,
       tasks,
       mergePartitions(
         spark,
         queries.count,
         math.max(1, tasks),
+        math.max(1, basePartitions),
         k,
         taskHeap.bytes,
         CandidateBytes.Width.toLong + 4L + rowBytes
@@ -233,18 +273,20 @@ private[connector] object SearchExecutionPlan {
         case _                               => Retention.Segments
       }
 
-  /** Preserve the existing prefetch rule: every segment has a sized index, and
-    * the capacity covers two kept indexes plus one loading footprint.
+  /** Every segment has a sized index, and remaining task off-heap memory covers
+    * two kept indexes plus one loading footprint.
     */
   def prefetchIndexes(
       index: Boolean,
       sizes: Seq[Option[Long]],
-      capacity: Long
+      offHeapBytes: Long,
+      queryBytes: Long,
+      resultBytes: Long
   ): Boolean =
     index && sizes.size > 1 && sizes.forall(_.exists(_ > 0L)) && {
       val copies =
         2L * SearchPlan.Footprint.IndexKeptCopies + SearchPlan.Footprint.IndexLoadingCopies
-      copies * sizes.flatten.max <= capacity
+      copies * sizes.flatten.max <= offHeapBytes - queryBytes - resultBytes
     }
 
   def queryDelivery(
@@ -254,7 +296,7 @@ private[connector] object SearchExecutionPlan {
   ): SearchQueries.Delivery =
     queries match {
       case packed: SearchQueries.Packed => packed
-      case SearchQueries.Frame(selected, count) =>
+      case SearchQueries.Rows(selected, count) =>
         if (SearchQueries.bytes(count, layout) > maxBytes)
           SearchQueries.Shuffled(selected)
         else SearchQueries.Broadcast(selected)
@@ -400,13 +442,21 @@ private[connector] object SearchExecutionPlan {
   def mergePartitions(
       spark: SparkSession,
       queries: Long,
-      tasks: Int,
+      firstStageTasks: Int,
+      candidateSourcesPerQuery: Int,
       k: Int,
       heapBytesPerTask: Long,
       candidateBytes: Long = CandidateBytes.Width.toLong
   ): Int = {
     require(queries > 0, s"A search needs at least one query: $queries")
-    require(tasks > 0, s"A search needs at least one task: $tasks")
+    require(
+      firstStageTasks > 0,
+      s"A search needs at least one task: $firstStageTasks"
+    )
+    require(
+      candidateSourcesPerQuery > 0,
+      "Every query needs at least one candidate source"
+    )
     require(k > 0, s"A search needs a positive k: $k")
     // At least one partition for every task slot the job has and for every
     // first-stage task, so no executor sits out the merge; more when the
@@ -415,18 +465,20 @@ private[connector] object SearchExecutionPlan {
     //
     // How many queries a partition may hold is the smaller of a fixed few
     // thousand and what the task's heap fits: every query arrives as one
-    // packed answer per first-stage task, `tasks x k x Width` bytes, and the
+    // packed answer per candidate source (segment set or base partition), and the
     // reduce-side map holds them until they are merged. 100k queries at
     // k=16,384 over 15 tasks were 5.9 MB a query; 64 partitions of 1,563
     // queries each ran the 6 GiB heap out (2026-09-26 decision). Half the
     // heap share is left for the merged answers and the rows they become.
     val slots = math.max(1, spark.sparkContext.defaultParallelism)
-    val bytesPerQuery = tasks.toLong * k.toLong * candidateBytes
+    val bytesPerQuery =
+      candidateSourcesPerQuery.toLong * k.toLong * candidateBytes
     val byHeap =
       math.max(1L, math.max(0L, heapBytesPerTask) / 2L / bytesPerQuery)
     val perPartition = math.min(QueriesPerMergePartition.toLong, byHeap)
     val byQueries = (queries + perPartition - 1L) / perPartition
-    val wanted = math.max(math.max(slots.toLong, tasks.toLong), byQueries)
+    val wanted =
+      math.max(math.max(slots.toLong, firstStageTasks.toLong), byQueries)
     math.max(1L, math.min(queries, wanted)).toInt
   }
 

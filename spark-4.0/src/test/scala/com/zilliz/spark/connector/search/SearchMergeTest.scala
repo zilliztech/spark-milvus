@@ -13,10 +13,10 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
-import com.zilliz.milvus.storage.index.{Candidate, CandidateBytesFixture}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.milvus.storage.vector.{Candidate, CandidateBytesFixture}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.TaskResources
 
@@ -79,6 +79,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       SearchExecutionPlan.mergePartitions(
         spark,
         math.max(1, rows.map(_._1).distinct.size.toLong),
+        2,
         2,
         k,
         1L << 30
@@ -309,22 +310,30 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     // local[2]: two slots. A partition cannot hold part of a query, so one
     // query is one partition however wide the cluster is.
     val heap = 1L << 30
-    SearchExecutionPlan.mergePartitions(spark, 1L, 1, 10, heap) shouldBe 1
-    SearchExecutionPlan.mergePartitions(spark, 100L, 1, 10, heap) shouldBe 2
+    SearchExecutionPlan.mergePartitions(spark, 1L, 1, 1, 10, heap) shouldBe 1
+    SearchExecutionPlan.mergePartitions(spark, 100L, 1, 1, 10, heap) shouldBe 2
     // More first-stage tasks than slots: every task's output still lands in a
     // partition of its own, which is what a cluster of many executors needs.
-    SearchExecutionPlan.mergePartitions(spark, 100L, 16, 10, heap) shouldBe 16
+    SearchExecutionPlan.mergePartitions(
+      spark,
+      100L,
+      16,
+      16,
+      10,
+      heap
+    ) shouldBe 16
     // A query count far above the parallelism: partitions grow with it so a
     // reduce-side map holds a few thousand queries, not all of them.
     SearchExecutionPlan.mergePartitions(
       spark,
       1000000L,
       6,
+      6,
       10,
       heap
     ) shouldBe 245
     the[IllegalArgumentException] thrownBy SearchExecutionPlan
-      .mergePartitions(spark, 0L, 1, 10, heap)
+      .mergePartitions(spark, 0L, 1, 1, 10, heap)
   }
 
   test("a large k cuts the merge into partitions whose queries fit the heap") {
@@ -338,6 +347,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       spark,
       100000L,
       15,
+      15,
       16384,
       heap
     ) shouldBe expected.toInt
@@ -347,8 +357,24 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       spark,
       100000L,
       15,
+      15,
       100,
       heap
     ) shouldBe 25
   }
+  test(
+    "query grouping changes task parallelism without multiplying candidate fan-in"
+  ) {
+    val heap = 306393907L
+    SearchExecutionPlan.mergePartitions(
+      spark,
+      100000L,
+      1500,
+      15,
+      16384,
+      heap
+    ) shouldBe
+      SearchExecutionPlan.mergePartitions(spark, 100000L, 15, 15, 16384, heap)
+  }
+
 }

@@ -1,5 +1,7 @@
 package com.zilliz.milvus.storage.write.exec
 
+import com.zilliz.milvus.storage.credential.StorageProperties
+
 /** Where a write job puts its files before it is committed and registered:
   * `{root}/staging/{job}/`, as keys relative to the bucket.
   *
@@ -41,6 +43,20 @@ final case class StagingLayout(rootPath: String, jobId: String) {
 }
 
 object StagingLayout {
+
+  /** The key prefix the staging directory goes under. On object storage that is
+    * `fs.root_path`, the prefix Milvus keeps its files under in the bucket. The
+    * local backend is rooted at `fs.root_path` itself and appends every key to
+    * it, so there the prefix is empty; repeating the root would put the
+    * segments under `{root}/{root}/staging/`.
+    */
+  def rootFor(storage: Map[String, String]): String =
+    if (
+      storage
+        .get(StorageProperties.StorageType)
+        .exists(_.equalsIgnoreCase(StorageProperties.StorageTypeLocal))
+    ) ""
+    else storage.getOrElse(StorageProperties.RootPath, "files")
 
   private val SafeJobId = "[A-Za-z0-9][A-Za-z0-9._-]*".r
 

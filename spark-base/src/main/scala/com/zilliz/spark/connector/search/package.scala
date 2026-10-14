@@ -5,11 +5,14 @@ package com.zilliz.spark.connector
   * `extensions` package plans the join into `MilvusNearestByJoinExec` over a
   * Milvus table or `MilvusNearestByJoinFrameExec` over any other base, and
   * either node's `doExecute` runs `NearestBySearch`; the distances are computed
-  * in `core.index`.
+  * in `core.vector`.
   *
   * `NearestBySearch` coordinates the join and assembles its output.
-  * `NearestByInput` adapts the base's fields, layout, options and search entry;
+  * `NearestByInput` adapts the base's fields, layout, options and search entry,
+  * then returns each query id with its requested base columns;
   * `NearestByQueryRows` classifies, caches, numbers and packs query rows.
+  * Executor query vectors travel directly as numbered arrays. Their stable ids
+  * identify join rows; dense packing positions only address query groups.
   * Queries outside Knowhere's range go to Spark's execution. Each hit gets its
   * query row back by number: from a broadcast when the driver holds the rows,
   * by a join after the take when they stay on the executors.
@@ -33,8 +36,8 @@ package com.zilliz.spark.connector
   * query vectors it could search. `SearchExecutionPlan` resolves budgets, task
   * resources, query delivery, retention, concurrency, prefetch and partition
   * counts for both inputs. `SearchResources` holds the resource formulas and
-  * `core.index.SearchPlan` the format-independent grouping algorithm. Executors
-  * consume the plan and check actual retained bytes as data loads
+  * `core.vector.SearchPlan` the format-independent grouping algorithm.
+  * Executors consume the plan and check actual retained bytes as data loads
   * (docs/design/architecture/search-resources.html section 3.3).
   *
   * The search evaluates `milvus.filter` on a Milvus table base (R7) and holds

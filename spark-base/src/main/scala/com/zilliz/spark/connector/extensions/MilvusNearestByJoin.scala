@@ -190,6 +190,7 @@ object MilvusNearestByJoinStrategy extends SparkStrategy {
           MilvusNearestByJoinFrameExec(
             planLater(join.left),
             planLater(join.right),
+            join.baseOutput,
             join.joinType,
             join.approx,
             join.k,
@@ -303,6 +304,7 @@ final case class MilvusNearestByJoinExec(
 final case class MilvusNearestByJoinFrameExec(
     left: SparkPlan,
     right: SparkPlan,
+    baseOutput: Seq[Attribute],
     joinType: JoinType,
     approx: Boolean,
     k: Int,
@@ -315,7 +317,7 @@ final case class MilvusNearestByJoinFrameExec(
 
   override def output: Seq[Attribute] =
     left.output.map(_.withNullability(true)) ++
-      right.output.map(_.withNullability(true))
+      baseOutput.map(_.withNullability(true))
 
   override lazy val metrics: Map[String, SQLMetric] =
     NearestByMetrics.create(sparkContext)
@@ -323,7 +325,7 @@ final case class MilvusNearestByJoinFrameExec(
   override def simpleString(maxFields: Int): String =
     s"MilvusNearestByJoin ${if (approx) "APPROX" else "EXACT"} $metric k=$k " +
       s"${joinType.sql} input=DataFrame ($reason), vector=${baseVector.sql}, " +
-      s"base=${right.output.map(_.name).mkString("[", ", ", "]")}, " +
+      s"base=${baseOutput.map(_.name).mkString("[", ", ", "]")}, " +
       (if (approx) "computed exactly" else "scanned exactly")
 
   override protected def doExecute(): RDD[InternalRow] = {
@@ -336,7 +338,9 @@ final case class MilvusNearestByJoinFrameExec(
       NearestByInput.Frame(
         FrameSearch.Base(
           right.execute(),
-          right.output.map(_.dataType),
+          baseOutput.map(attribute =>
+            BindReferences.bindReference[Expression](attribute, right.output)
+          ),
           BindReferences.bindReference(baseVector, right.output)
         )
       ),

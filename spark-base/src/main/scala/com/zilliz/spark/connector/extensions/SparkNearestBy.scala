@@ -6,7 +6,7 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.SparkSession
 
-import com.zilliz.milvus.storage.index.RankingFunction
+import com.zilliz.milvus.storage.vector.RankingFunction
 
 /** Spark's own computation of one NEAREST BY, which the Spark line that has the
   * syntax gives a [[MilvusNearestByJoin]] when it replaces the join

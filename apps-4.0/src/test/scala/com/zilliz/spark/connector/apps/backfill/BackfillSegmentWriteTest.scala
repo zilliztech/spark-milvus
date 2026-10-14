@@ -66,7 +66,8 @@ class BackfillSegmentWriteTest extends AnyFunSuite with Matchers {
         MilvusOption.WriterCustomPath -> "segment-0",
         MilvusOption.WriterCommitType -> "addfield"
       )
-      val writer = MilvusBackfill.segmentWriter(schema, options, "run-job")
+      val writer =
+        BackfillSegmentWrite.segmentWriter(schema, options, "run-job")
       try {
         writer.write(InternalRow(1L, 100L))
         writer.write(InternalRow(2L, 101L))
