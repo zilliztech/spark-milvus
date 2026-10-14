@@ -168,22 +168,6 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
     shuffled shouldBe straight
   }
 
-  test("merging two mergers is the same as adding every candidate to one") {
-    val candidates = (0 until 40).map(index =>
-      Candidate(index % 2, (index % 3).toLong, index.toLong, index % 7 / 7.0)
-    )
-    val (left, right) = candidates.splitAt(17)
-    val together =
-      packedPlaces(new TopKMerger(2, 3, MetricType.Cosine).addAll(candidates))
-    val apart = packedPlaces(
-      new TopKMerger(2, 3, MetricType.Cosine)
-        .addAll(left)
-        .merge(new TopKMerger(2, 3, MetricType.Cosine).addAll(right))
-    )
-
-    apart shouldBe together
-  }
-
   test("packing a query preserves its candidates for repeated output") {
     val merged = merger(MetricType.L2, queries = 1, k = 2)
     merged.add(Candidate(0, 101L, 5L, 0.1))
@@ -346,16 +330,6 @@ class TopKMergerTest extends AnyFunSuite with Matchers {
       the[IllegalArgumentException] thrownBy merged.results(query)
       the[IllegalArgumentException] thrownBy merged.takePacked(query)
     }
-  }
-
-  test("mergers that rank differently do not merge") {
-    val failure = the[IllegalArgumentException] thrownBy new TopKMerger(
-      2,
-      3,
-      MetricType.L2
-    ).merge(new TopKMerger(2, 3, MetricType.IP))
-
-    failure.getMessage should include("same query count")
   }
 
   test("a candidate outside the query set is refused") {

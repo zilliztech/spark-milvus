@@ -236,33 +236,6 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     this
   }
 
-  /** Takes over `other`'s candidates. Both mergers must rank the same way. */
-  def merge(other: TopKMerger): this.type = {
-    require(
-      other.queries == queries && other.k == k && other.metric == metric,
-      "Merged searches must have the same query count, topK and metric"
-    )
-    var query = 0
-    while (query < queries) {
-      val base = query * k
-      val size = other.sizes(query)
-      var slot = 0
-      while (slot < size) {
-        val from = base + slot
-        add(
-          query,
-          other.segments(from),
-          other.offsets(from),
-          other.scores(from)
-        )
-        slot += 1
-      }
-      query += 1
-    }
-    scanned += other.scanned
-    this
-  }
-
   /** Orders the query's slots best first, in place. The heap's root is its
     * worst, so taking the root out to the end `size` times leaves the slots
     * sorted from best to worst. Only the first output of a query calls this,
