@@ -1,12 +1,22 @@
 package com.zilliz.spark.connector.read
 
+import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
+import scala.collection.concurrent.TrieMap
+
+import org.apache.spark.scheduler.{
+  SparkListener,
+  SparkListenerJobEnd,
+  SparkListenerJobStart
+}
 import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.index.{Candidate, CandidateBytes}
+import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.MetricType
+import com.zilliz.milvus.storage.snapshot.SegmentLayout
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.TaskResources
 
@@ -156,19 +166,90 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     SearchProgress.grouped(53687091200L) shouldBe "53,687,091,200"
   }
 
-  test("progress reads only search counters, and an unset SQL metric as none") {
+  test("progress reads its own search's counters by id, an unset one as none") {
     SearchProgress.searchValues(
       Seq(
-        Some("milvus.search.compared.pairs") -> Some(
-          java.lang.Long.valueOf(7L)
-        ),
+        7L -> Some(java.lang.Long.valueOf(7L)),
+        // Another search's counter, under the same name.
+        9L -> Some(java.lang.Long.valueOf(40L)),
         // A nearest-by node's size or duration metric no task added to.
-        Some("milvus.search.read.bytes") -> Some(java.lang.Long.valueOf(-1L)),
-        Some("internal.metrics.executorRunTime") ->
-          Some(java.lang.Long.valueOf(5L)),
-        Some("milvus.search.candidates") -> Some("not a number")
+        8L -> Some(java.lang.Long.valueOf(-1L)),
+        // One of Spark's own task metrics.
+        1L -> Some(java.lang.Long.valueOf(5L)),
+        6L -> Some("not a number")
+      ),
+      Map(
+        7L -> "milvus.search.compared.pairs",
+        8L -> "milvus.search.read.bytes",
+        6L -> "milvus.search.candidates"
       )
     ) shouldBe Map("milvus.search.compared.pairs" -> 7L)
+  }
+
+  test("progress counts its search's tasks and leaves when the job ends") {
+    val context = spark.sparkContext
+    val ours = SearchMetrics.of(SearchMetrics.sqlMetrics(context))
+    val other = SearchMetrics.of(SearchMetrics.sqlMetrics(context))
+    val firstStage = context.parallelize(1 to 4, 2).map { row =>
+      ours.comparedPairs.add(1L)
+      other.comparedPairs.add(10L)
+      row
+    }
+    val later = context.parallelize(1 to 4, 2).map { row =>
+      ours.comparedPairs.add(1L)
+      row
+    }
+    // Says which of the two RDDs a job that ended ran. Added before the
+    // search's listener, it is on the same queue, so when it hears of an end,
+    // that listener has had every event before it.
+    val ended = new LinkedBlockingQueue[Int]()
+    val ends = new SparkListener {
+      private val jobs = TrieMap.empty[Int, Int]
+      override def onJobStart(event: SparkListenerJobStart): Unit =
+        event.stageInfos
+          .flatMap(_.rddInfos)
+          .map(_.id)
+          .find(Set(firstStage.id, later.id))
+          .foreach(jobs.put(event.jobId, _))
+      override def onJobEnd(event: SparkListenerJobEnd): Unit =
+        jobs.remove(event.jobId).foreach(ended.put)
+    }
+    context.addSparkListener(ends)
+    try {
+      val progress = SearchProgress.watch(
+        context,
+        firstStage,
+        ours,
+        comparedPairsTotal = 4L,
+        index = false,
+        queryGroups = 1,
+        segments = 1
+      )
+
+      firstStage.count()
+      ended.poll(60L, TimeUnit.SECONDS) shouldBe firstStage.id
+      progress.totals shouldBe Map(SearchMetrics.ComparedPairs -> 4L)
+
+      later.count()
+      ended.poll(60L, TimeUnit.SECONDS) shouldBe later.id
+      progress.totals shouldBe Map(SearchMetrics.ComparedPairs -> 4L)
+    } finally context.removeSparkListener(ends)
+  }
+
+  test("compared pairs have a total only when every row count is known") {
+    def task(rows: Option[Long]): SegmentReadTask = SegmentReadTask(
+      segmentId = 1L,
+      partitionId = 1L,
+      layout = SegmentLayout.Manifest("segments/1", 3L),
+      schemaBytes = Array.emptyByteArray,
+      properties = Map.empty,
+      snapshotRows = rows
+    )
+
+    val known = Seq(task(Some(10L)), task(Some(6L)))
+
+    SearchProgress.comparedPairs(3L, known) shouldBe 48L
+    SearchProgress.comparedPairs(3L, known :+ task(None)) shouldBe 0L
   }
 
   test("a search counts under the names the design gives its metrics") {

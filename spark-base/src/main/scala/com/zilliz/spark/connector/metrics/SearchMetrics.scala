@@ -87,12 +87,18 @@ object SearchMetrics {
     def add(value: Long): Unit
     def value: Long
     def name: Option[String]
+
+    /** The accumulator its tasks report it as. Every search counts under the
+      * same names; the ids are its own.
+      */
+    def id: Long
   }
 
   private final case class Measured(metric: SQLMetric) extends Counter {
     override def add(value: Long): Unit = metric.add(value)
     override def value: Long = metric.value
     override def name: Option[String] = metric.name
+    override def id: Long = metric.id
   }
 
   /** The SQL metrics of a plan node that runs a search, by name: bytes as sizes
