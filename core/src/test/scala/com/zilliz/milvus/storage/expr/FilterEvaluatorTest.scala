@@ -17,7 +17,7 @@ import org.scalatest.matchers.should.Matchers
 
 import io.milvus.grpc.schema.{DataType, FieldSchema}
 
-class EvaluatorTest extends AnyFunSuite with Matchers {
+class FilterEvaluatorTest extends AnyFunSuite with Matchers {
 
   test("batch evaluation resolves logical fields to physical numeric columns") {
     withBatch(
@@ -25,7 +25,7 @@ class EvaluatorTest extends AnyFunSuite with Matchers {
       Seq(Some(1L), Some(3L), None),
       "physical-id"
     ) { root =>
-      val result = Evaluator.evaluate(
+      val result = FilterEvaluator.evaluate(
         PlanParser.parse("id >= 2"),
         root,
         field => if (field == "id") "physical-id" else "absent"
@@ -44,7 +44,7 @@ class EvaluatorTest extends AnyFunSuite with Matchers {
       new ArrowType.Utf8(),
       Seq(Some(supplementary), Some(bmp), None)
     ) { root =>
-      val result = Evaluator.evaluate(
+      val result = FilterEvaluator.evaluate(
         PlanParser.parse(s"value > '$bmp'"),
         root,
         _ => "column"
@@ -60,7 +60,7 @@ class EvaluatorTest extends AnyFunSuite with Matchers {
       Seq(None, Some(1L))
     ) { root =>
       excluded(
-        Evaluator.evaluate(
+        FilterEvaluator.evaluate(
           PlanParser.parse("id IS NULL"),
           root,
           _ => "column"
@@ -71,7 +71,7 @@ class EvaluatorTest extends AnyFunSuite with Matchers {
 
   test("Text fields use the string validation and Arrow UTF-8 contracts") {
     val expression = PlanParser.parse("body == '\u5168\u6587'")
-    Evaluator.validate(
+    FilterEvaluator.validate(
       expression,
       Seq(FieldSchema(name = "body", dataType = DataType.Text))
     )
@@ -81,7 +81,7 @@ class EvaluatorTest extends AnyFunSuite with Matchers {
       Seq(Some("\u5168\u6587"), Some("other"), None)
     ) { root =>
       excluded(
-        Evaluator.evaluate(expression, root, _ => "column")
+        FilterEvaluator.evaluate(expression, root, _ => "column")
       ) shouldBe Seq(
         1,
         2
@@ -92,7 +92,7 @@ class EvaluatorTest extends AnyFunSuite with Matchers {
   test("a missing physical filter column fails before row evaluation") {
     withBatch(new ArrowType.Int(64, true), Seq(Some(1L))) { root =>
       val error = intercept[IllegalStateException] {
-        Evaluator.evaluate(
+        FilterEvaluator.evaluate(
           PlanParser.parse("id == 1"),
           root,
           _ => "absent"
@@ -111,7 +111,7 @@ class EvaluatorTest extends AnyFunSuite with Matchers {
       root.getVector("column").setValueCount(2)
 
       val error = intercept[IllegalStateException] {
-        Evaluator.evaluate(
+        FilterEvaluator.evaluate(
           PlanParser.parse("id == 1"),
           root,
           _ => "column"
@@ -126,7 +126,7 @@ class EvaluatorTest extends AnyFunSuite with Matchers {
   test("an incompatible physical vector fails even for an empty batch") {
     withBatch(new ArrowType.Int(32, true), Seq.empty) { root =>
       val error = intercept[IllegalStateException] {
-        Evaluator.evaluate(
+        FilterEvaluator.evaluate(
           PlanParser.parse("name == 'alice'"),
           root,
           _ => "column"

@@ -9,7 +9,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.milvus.storage.expr.{Expr, PredicateExpr}
+import com.zilliz.milvus.storage.expr.{FilterExpr, PredicateExpr}
 import com.zilliz.milvus.storage.index.{
   CandidateBytes,
   RankingFunction,
@@ -57,7 +57,7 @@ object MilvusSearch extends Logging {
     * `required` names the ids that must each have a row, one with NULL hit
     * columns when nothing was found for it, which is what a LEFT OUTER
     * nearest-by join whose query rows the driver holds needs. `filter` and
-    * `predicate` exclude rows before the top k: a Milvus expression, and what
+    * `predicate` exclude rows before the top k: the Milvus filter, and what
     * Spark pushed into the scan whose partitions these are
     * (docs/design/architecture/dataframe-api.html section 4). An index search
     * scans exactly a segment it has no usable index for, and `metrics` is where
@@ -75,7 +75,7 @@ object MilvusSearch extends Logging {
       searchMetric: MetricType,
       searchMode: SearchMode,
       searchParameters: Map[String, String],
-      filter: Option[Expr],
+      filter: Option[FilterExpr],
       predicate: Option[PredicateExpr],
       outputSchema: StructType,
       metrics: SearchMetrics,
@@ -138,7 +138,7 @@ object MilvusSearch extends Logging {
       splitQueries = searchMode == SearchMode.Exact,
       rangesWanted = limits.queryRanges
     )
-    val spec = SegmentSetSearch.Spec(
+    val request = SegmentSetSearch.Request(
       field.name,
       layout,
       field.fieldID,
@@ -171,7 +171,7 @@ object MilvusSearch extends Logging {
     logPlan(
       budget,
       plan,
-      spec,
+      request,
       queries,
       delivery,
       tasks.size,
@@ -193,7 +193,7 @@ object MilvusSearch extends Logging {
       delivery,
       partitions,
       plan,
-      spec,
+      request,
       layout,
       metrics,
       budget
@@ -217,7 +217,7 @@ object MilvusSearch extends Logging {
         hits,
         outputSchema,
         partitions,
-        spec.arrowMaxBytes,
+        request.arrowMaxBytes,
         metrics,
         queryCount * k,
         stageHeap
@@ -337,7 +337,7 @@ object MilvusSearch extends Logging {
   private def logPlan(
       budget: SearchBudget,
       plan: SearchPlan.Plan,
-      spec: SegmentSetSearch.Spec,
+      request: SegmentSetSearch.Request,
       queries: SearchQueries.Input,
       delivery: SearchQueries.Delivery,
       segments: Int,
@@ -355,7 +355,7 @@ object MilvusSearch extends Logging {
         s"(${budget.slots} per executor${if (budget.profile.nonEmpty) ", each taking every core"
           else ""}); " +
         s"segments ${budget.segments.reason}; queries ${budget.queries.reason}; group ${budget.group.reason}; " +
-        s"collectThreads=${spec.collectThreads} callsInFlight=${spec.callsInFlight}; $needs; " +
+        s"collectThreads=${request.collectThreads} callsInFlight=${request.callsInFlight}; $needs; " +
         s"kept=${plan.resident}, sets=${plan.sets.size}" +
         (if (plan.resident == SearchPlan.Resident.Segments)
            s", capacity=${plan.capacity}, " +
@@ -365,13 +365,13 @@ object MilvusSearch extends Logging {
         s", ${plan.estimated.size} segments estimated at half the budget"
     )
     logInfo(
-      s"Search plan: mode=${spec.mode}, metric=${spec.metric}, topK=${spec.k}, " +
+      s"Search plan: mode=${request.mode}, metric=${request.metric}, topK=${request.k}, " +
         s"queries=${queries.count}, queryBytes=${SearchQueries
-            .bytes(queries.count, spec.layout)} " +
+            .bytes(queries.count, request.layout)} " +
         s"delivered by ${delivery.describe}, " +
         s"queryGroups=${plan.groups.size}, segments=$segments in " +
         s"${plan.sets.size} sets x ${plan.queryRanges.size} query ranges = " +
-        s"${plan.tasks} tasks, collectThreads=${spec.collectThreads}, " +
+        s"${plan.tasks} tasks, collectThreads=${request.collectThreads}, " +
         s"work=${plan.groups.size.toLong * plan.sets.map(_.size.toLong).sum} segment searches" +
         (if (comparedPairsTotal > 0L)
            s" over $comparedPairsTotal distance pairs"
@@ -429,7 +429,7 @@ object MilvusSearch extends Logging {
       delivery: SearchQueries.Delivery,
       partitions: Seq[MilvusInputPartition],
       plan: SearchPlan.Plan,
-      spec: SegmentSetSearch.Spec,
+      request: SegmentSetSearch.Request,
       layout: VectorLayout,
       metrics: SearchMetrics,
       budget: SearchBudget
@@ -441,7 +441,7 @@ object MilvusSearch extends Logging {
     val delivered = delivery.groups(
       spark,
       groups,
-      spec.metric,
+      request.metric,
       layout,
       budget.resources,
       budget.heapFor(1).bytes
@@ -464,7 +464,7 @@ object MilvusSearch extends Logging {
       .mapPartitionsWithIndex { (index, streamed) =>
         SegmentSetSearch.run(
           held.value(index / rangeCount),
-          spec,
+          request,
           streamed,
           rangeSizes(index % rangeCount),
           kept.lift(index / rangeCount).flatten,

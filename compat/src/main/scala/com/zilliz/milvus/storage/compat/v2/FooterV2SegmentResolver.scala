@@ -9,7 +9,7 @@ import com.zilliz.milvus.storage.manifest.{
   SnapshotSegmentEntry
 }
 import com.zilliz.milvus.storage.manifest.SnapshotSegmentReader
-import com.zilliz.milvus.storage.path.{Located, StoragePath}
+import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.snapshot.{
   DeltaLogFile,
   Segment,
@@ -312,7 +312,7 @@ object FooterV2SegmentResolver extends com.zilliz.milvus.storage.Logging {
       bucket: String,
       endpoint: String,
       pathKind: String
-  ): Located = {
+  ): StoragePath = {
     val located = StoragePath.parseMilvus(rawPath, bucket, endpoint)
     val expectedBucket = Option(bucket).map(_.trim).getOrElse("")
     if (

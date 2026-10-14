@@ -21,7 +21,7 @@ class PlanParserTest extends AnyFunSuite with Matchers {
       values: (String, Any)*
   ): Option[Boolean] = {
     val expression = PlanParser.parse(text)
-    Evaluator.validate(expression, fields)
+    FilterEvaluator.validate(expression, fields)
     val row = values.toMap
     expression.evaluate(name => row.getOrElse(name, null))
   }
@@ -75,15 +75,18 @@ class PlanParserTest extends AnyFunSuite with Matchers {
         "left" -> values(left).fold[Any](null)(identity),
         "right" -> values(right).fold[Any](null)(identity)
       )
-      val a = Expr.Compare("left", "==", true)
-      val b = Expr.Compare("right", "==", true)
-      Expr.And(a, b).evaluate(row) shouldBe conjunction(left)(right)
-      Expr.Or(a, b).evaluate(row) shouldBe disjunction(left)(right)
-      Expr.And(a, b).matches(row) shouldBe conjunction(left)(right).contains(
-        true
-      )
+      val a = FilterExpr.Compare("left", "==", true)
+      val b = FilterExpr.Compare("right", "==", true)
+      FilterExpr.And(a, b).evaluate(row) shouldBe conjunction(left)(right)
+      FilterExpr.Or(a, b).evaluate(row) shouldBe disjunction(left)(right)
+      FilterExpr.And(a, b).matches(row) shouldBe conjunction(left)(right)
+        .contains(
+          true
+        )
     }
-    Expr.Not(Expr.Compare("left", "==", true)).evaluate(_ => null) shouldBe None
+    FilterExpr
+      .Not(FilterExpr.Compare("left", "==", true))
+      .evaluate(_ => null) shouldBe None
   }
 
   test("IN, NOT IN and IS NULL handle nullable rows before admission") {
@@ -106,7 +109,7 @@ class PlanParserTest extends AnyFunSuite with Matchers {
       "category" -> null
     ) shouldBe Some(true)
     // The IR also preserves an unknown supplied by another expression producer.
-    Expr
+    FilterExpr
       .In("category", Vector("books", null))
       .evaluate(_ => "music") shouldBe None
   }
@@ -178,7 +181,7 @@ class PlanParserTest extends AnyFunSuite with Matchers {
       "active > false"
     ).foreach { text =>
       intercept[IllegalArgumentException](
-        Evaluator.validate(PlanParser.parse(text), fields)
+        FilterEvaluator.validate(PlanParser.parse(text), fields)
       )
     }
   }

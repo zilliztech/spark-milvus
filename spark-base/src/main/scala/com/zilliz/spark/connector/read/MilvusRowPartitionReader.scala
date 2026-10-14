@@ -7,7 +7,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.types.StructType
 
-import com.zilliz.milvus.storage.expr.{Bitmap, Expr, PredicateExpr}
+import com.zilliz.milvus.storage.expr.{Bitmap, FilterExpr, PredicateExpr}
 import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.spark.connector.metrics.ScanMetrics
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
@@ -29,7 +29,7 @@ class MilvusRowPartitionReader(
     allocator: BufferAllocator = ArrowAllocator.get,
     taskAllocatorOwner: Option[AutoCloseable] = None,
     private[read] val preopenedSegmentReader: Option[SegmentReader] = None,
-    milvusFilter: Option[Expr] = None
+    milvusFilter: Option[FilterExpr] = None
 ) extends RowOffsetReader
     with Logging {
 
@@ -73,8 +73,8 @@ class MilvusRowPartitionReader(
     currentFilterBitmap =
       if (currentBatch == null) null
       else
-        BatchFilterEvaluator
-          .exclusions(
+        BatchExclusions
+          .of(
             currentBatch,
             milvusFilter,
             pushedExpression,

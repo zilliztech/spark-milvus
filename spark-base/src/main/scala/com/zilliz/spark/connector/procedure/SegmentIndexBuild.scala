@@ -27,7 +27,7 @@ import io.milvus.grpc.schema.CollectionSchema
 private[procedure] object SegmentIndexBuild extends Logging {
 
   /** What every task of one build needs and the driver already knows. */
-  final case class Spec(
+  final case class Request(
       vectorColumn: String,
       layout: VectorLayout,
       fieldId: Long,
@@ -42,7 +42,7 @@ private[procedure] object SegmentIndexBuild extends Logging {
       arrowMaxBytes: Long
   ) extends Serializable
 
-  def run(partition: MilvusInputPartition, spec: Spec): CommittedIndex = {
+  def run(partition: MilvusInputPartition, request: Request): CommittedIndex = {
     val task = partition.task
     val segmentRows = task.expectedRows.getOrElse(
       throw new IllegalArgumentException(
@@ -62,15 +62,15 @@ private[procedure] object SegmentIndexBuild extends Logging {
     val vectorIndexVersion = NativeVectorLibrary.load().currentIndexVersion()
     val allocator = ArrowAllocator.forIndexBuild(
       task.segmentId,
-      spec.arrowMaxBytes
+      request.arrowMaxBytes
     )
     try {
       val vectors = SegmentVectors.open(
         task,
         binding.arrowSchema,
         binding.columnNameFor,
-        binding.arrowColumnFor(spec.vectorColumn),
-        spec.layout,
+        binding.arrowColumnFor(request.vectorColumn),
+        request.layout,
         exclusions,
         allocator.allocator
       )
@@ -78,7 +78,7 @@ private[procedure] object SegmentIndexBuild extends Logging {
         try
           IndexBuilder.assemble(
             vectors,
-            spec.layout,
+            request.layout,
             segmentRows,
             allocator.allocator
           )
@@ -88,14 +88,14 @@ private[procedure] object SegmentIndexBuild extends Logging {
           assembled.address,
           assembled.byteLength,
           assembled.rows,
-          spec.layout,
-          spec.indexType,
-          spec.metric,
+          request.layout,
+          request.indexType,
+          request.metric,
           vectorIndexVersion,
-          spec.parameters,
+          request.parameters,
           assembled.validData
         )
-        try write(task, spec, built, vectorIndexVersion)
+        try write(task, request, built, vectorIndexVersion)
         finally built.close()
       } finally assembled.close()
     } finally allocator.close()
@@ -106,7 +106,7 @@ private[procedure] object SegmentIndexBuild extends Logging {
     */
   private def write(
       task: SegmentReadTask,
-      spec: Spec,
+      request: Request,
       built: IndexBuilder.Built,
       vectorIndexVersion: Int
   ): CommittedIndex = {
@@ -119,39 +119,39 @@ private[procedure] object SegmentIndexBuild extends Logging {
         case _ => built.read(name, offset, destination)
       }
     val target = IndexObjectTarget(
-      spec.collectionId,
+      request.collectionId,
       task.partitionId,
       task.segmentId,
-      spec.fieldId,
-      spec.buildId,
-      spec.indexVersion,
-      spec.storePathVersion,
+      request.fieldId,
+      request.buildId,
+      request.indexVersion,
+      request.storePathVersion,
       built.validData.nonEmpty,
-      spec.output
+      request.output
     )
     val store = NativeObjectStore.Factory(task.properties).open()
     val objects =
       try SegmentIndexObjects.write(payloads, read, target, store)
       finally store.close()
     logInfo(
-      s"Segment index built: segment=${task.segmentId}, type=${spec.indexType}, " +
-        s"metric=${spec.metric}, rows=${built.rows}, objects=${objects.size}, " +
+      s"Segment index built: segment=${task.segmentId}, type=${request.indexType}, " +
+        s"metric=${request.metric}, rows=${built.rows}, objects=${objects.size}, " +
         s"bytes=${objects.map(_.bytes).sum}"
     )
     CommittedIndex(
       segmentId = task.segmentId,
       partitionId = task.partitionId,
-      fieldId = spec.fieldId,
-      buildId = spec.buildId,
-      indexVersion = spec.indexVersion,
+      fieldId = request.fieldId,
+      buildId = request.buildId,
+      indexVersion = request.indexVersion,
       vectorIndexVersion = vectorIndexVersion,
-      storePathVersion = spec.storePathVersion,
-      indexType = spec.indexType,
-      metricType = spec.metric.name,
+      storePathVersion = request.storePathVersion,
+      indexType = request.indexType,
+      metricType = request.metric.name,
       rowCount = built.rows,
       serializedSize = objects.map(_.bytes).sum,
       filePaths = objects.map(_.key),
-      params = spec.parameters
+      params = request.parameters
     )
   }
 }

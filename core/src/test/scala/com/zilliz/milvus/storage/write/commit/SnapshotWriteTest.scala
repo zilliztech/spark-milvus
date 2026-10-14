@@ -489,8 +489,8 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
         restorable = true
       )
       written.metadataKey shouldBe "files/snapshots/10/metadata/6.json"
-      SnapshotBundle.rootOf(written.metadataKey) shouldBe Some("files")
-      SnapshotBundle.outsideRootOf(
+      SnapshotRestorePaths.rootOf(written.metadataKey) shouldBe Some("files")
+      SnapshotRestorePaths.outsideRootOf(
         store,
         written.metadataKey,
         ""
@@ -506,7 +506,7 @@ class SnapshotWriteTest extends AnyFunSuite with Matchers with Inside {
         sourceKey,
         restorable = false
       )
-      SnapshotBundle.outsideRootOf(
+      SnapshotRestorePaths.outsideRootOf(
         store,
         connectorOnly.metadataKey,
         ""

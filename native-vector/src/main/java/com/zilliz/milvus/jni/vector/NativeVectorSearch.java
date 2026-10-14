@@ -4,7 +4,12 @@ import io.knowhere.DType;
 import io.knowhere.Knowhere;
 import java.nio.ByteBuffer;
 
-/** Synchronous search over borrowed buffers using the upstream JNI. */
+/**
+ * Synchronous brute-force search, without an index, over borrowed buffers.
+ * Each method initializes NativeVectorLibrary before calling the upstream
+ * Knowhere entry of the same name, so library selection uses the unified
+ * bundle. Search over a persisted index belongs to {@link NativeVectorIndex}.
+ */
 public final class NativeVectorSearch {
     private NativeVectorSearch() {}
 

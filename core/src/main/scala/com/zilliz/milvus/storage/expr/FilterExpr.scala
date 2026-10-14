@@ -15,16 +15,16 @@ import java.util.{Arrays, Locale}
   * AND, OR and NOT. DataSource V2 predicates use [[PredicateExpr]] because
   * their literal typing and floating-point semantics follow Spark SQL.
   */
-sealed trait Expr extends Serializable {
+sealed trait FilterExpr extends Serializable {
   def fields: Set[String]
   def evaluate(value: String => Any): Option[Boolean]
   final def matches(value: String => Any): Boolean =
     evaluate(value).contains(true)
 }
 
-object Expr {
+object FilterExpr {
   final case class Compare(field: String, operator: String, literal: Any)
-      extends Expr {
+      extends FilterExpr {
     require(
       Set("==", "!=", "<", "<=", ">", ">=").contains(operator),
       s"Unsupported comparison '$operator'"
@@ -85,7 +85,7 @@ object Expr {
         case ">=" => left >= right
       }
   }
-  final case class In(field: String, literals: Vector[Any]) extends Expr {
+  final case class In(field: String, literals: Vector[Any]) extends FilterExpr {
     def fields: Set[String] = Set(field)
     def evaluate(value: String => Any): Option[Boolean] = {
       val results = literals.map(v => Compare(field, "==", v).evaluate(value))
@@ -94,18 +94,18 @@ object Expr {
       else Some(false)
     }
   }
-  final case class IsNull(field: String) extends Expr {
+  final case class IsNull(field: String) extends FilterExpr {
     def fields: Set[String] = Set(field)
     def evaluate(value: String => Any): Option[Boolean] = Some(
       value(field) == null
     )
   }
-  final case class Not(child: Expr) extends Expr {
+  final case class Not(child: FilterExpr) extends FilterExpr {
     def fields: Set[String] = child.fields
     def evaluate(value: String => Any): Option[Boolean] =
       child.evaluate(value).map(!_)
   }
-  final case class And(left: Expr, right: Expr) extends Expr {
+  final case class And(left: FilterExpr, right: FilterExpr) extends FilterExpr {
     def fields: Set[String] = left.fields ++ right.fields
     def evaluate(value: String => Any): Option[Boolean] =
       (left.evaluate(value), right.evaluate(value)) match {
@@ -114,7 +114,7 @@ object Expr {
         case _                                   => None
       }
   }
-  final case class Or(left: Expr, right: Expr) extends Expr {
+  final case class Or(left: FilterExpr, right: FilterExpr) extends FilterExpr {
     def fields: Set[String] = left.fields ++ right.fields
     def evaluate(value: String => Any): Option[Boolean] =
       (left.evaluate(value), right.evaluate(value)) match {
@@ -129,7 +129,7 @@ object Expr {
   * rather than forwarded as a filter over the already selected TopK.
   */
 object PlanParser {
-  def parse(text: String): Expr = new Parser(text).parse()
+  def parse(text: String): FilterExpr = new Parser(text).parse()
 
   private final case class Token(text: String, quoted: Boolean = false)
   private final class Parser(input: String) {
@@ -149,7 +149,7 @@ object PlanParser {
     }
     private def expect(s: String): Unit =
       require(accept(s), s"Expected '$s' at token $position")
-    def parse(): Expr = {
+    def parse(): FilterExpr = {
       val result = or()
       require(
         position == tokens.size,
@@ -163,36 +163,38 @@ object PlanParser {
         pending = pending.tail
         require(level <= 64, "Filter expression depth exceeds 64")
         expression match {
-          case Expr.Not(child) => pending = (child -> (level + 1)) :: pending
-          case Expr.And(left, right) =>
+          case FilterExpr.Not(child) =>
+            pending = (child -> (level + 1)) :: pending
+          case FilterExpr.And(left, right) =>
             pending = (left -> (level + 1)) :: (right -> (level + 1)) :: pending
-          case Expr.Or(left, right) =>
+          case FilterExpr.Or(left, right) =>
             pending = (left -> (level + 1)) :: (right -> (level + 1)) :: pending
           case _ =>
         }
       }
       result
     }
-    private def or(): Expr = {
+    private def or(): FilterExpr = {
       var result = and()
-      while (accept("or") || accept("||")) result = Expr.Or(result, and())
+      while (accept("or") || accept("||")) result = FilterExpr.Or(result, and())
       result
     }
-    private def and(): Expr = {
+    private def and(): FilterExpr = {
       var result = unary()
-      while (accept("and") || accept("&&")) result = Expr.And(result, unary())
+      while (accept("and") || accept("&&"))
+        result = FilterExpr.And(result, unary())
       result
     }
-    private def unary(): Expr = {
+    private def unary(): FilterExpr = {
       depth += 1
       require(depth <= 64, "Filter nesting exceeds 64")
       try {
-        if (accept("not") || accept("!")) Expr.Not(unary())
+        if (accept("not") || accept("!")) FilterExpr.Not(unary())
         else if (accept("(")) { val e = or(); expect(")"); e }
         else predicate()
       } finally depth -= 1
     }
-    private def predicate(): Expr = {
+    private def predicate(): FilterExpr = {
       val field = current
       require(
         !field.quoted && field.text.matches("[A-Za-z_][A-Za-z0-9_]*"),
@@ -202,8 +204,8 @@ object PlanParser {
       if (accept("is")) {
         val negate = accept("not")
         expect("null")
-        val e = Expr.IsNull(field.text)
-        if (negate) Expr.Not(e) else e
+        val e = FilterExpr.IsNull(field.text)
+        if (negate) FilterExpr.Not(e) else e
       } else {
         val negate = accept("not")
         if (accept("in")) {
@@ -214,8 +216,8 @@ object PlanParser {
             while (accept(",")) values += literal()
             expect("]")
           }
-          val e = Expr.In(field.text, values.result())
-          if (negate) Expr.Not(e) else e
+          val e = FilterExpr.In(field.text, values.result())
+          if (negate) FilterExpr.Not(e) else e
         } else {
           require(!negate, "NOT must be followed by IN")
           val operator = current.text
@@ -226,7 +228,7 @@ object PlanParser {
             s"Unsupported comparison '$operator'"
           )
           position += 1
-          Expr.Compare(field.text, operator, literal())
+          FilterExpr.Compare(field.text, operator, literal())
         }
       }
     }

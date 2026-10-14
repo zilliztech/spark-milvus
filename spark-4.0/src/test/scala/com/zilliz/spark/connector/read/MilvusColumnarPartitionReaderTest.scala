@@ -18,8 +18,8 @@ import com.zilliz.milvus.storage.codec.FloatConverter
 import com.zilliz.milvus.storage.expr.{
   Comparison,
   ComparisonOperator,
-  Expr,
   FieldRef,
+  FilterExpr,
   PredicateExpr
 }
 import com.zilliz.milvus.storage.expr.Literal.IntegerValue
@@ -213,7 +213,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       rawVectors: Boolean = false,
       requestedExtraColumns: Set[String] = Set.empty,
       pushedExpression: Option[PredicateExpr] = None,
-      milvusFilter: Option[Expr] = None,
+      milvusFilter: Option[FilterExpr] = None,
       columnNameFor: Long => Option[String] = (_: Long) => None
   ) = new MilvusColumnarPartitionReader(
     schema,
@@ -473,7 +473,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         deleted = (_, row) => row == 2,
         schema = outputSchema,
         pushedExpression = Some(expression),
-        milvusFilter = Some(Expr.Compare("id", ">=", 2L)),
+        milvusFilter = Some(FilterExpr.Compare("id", ">=", 2L)),
         columnNameFor = id => if (id == 100L) Some("id") else None
       )
       try {
@@ -510,7 +510,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
         Seq(root),
         arrowColumnFor = byFieldId(milvusSchema),
         pushedExpression = Some(expression),
-        milvusFilter = Some(Expr.Compare("id", "<=", 2L)),
+        milvusFilter = Some(FilterExpr.Compare("id", "<=", 2L)),
         columnNameFor = id => Some(id.toString)
       )
       try {
@@ -529,7 +529,7 @@ class MilvusColumnarPartitionReaderTest extends AnyFunSuite with Matchers {
       val r = reader(
         Seq(root),
         arrowColumnFor = name => if (name == "id") "missing-id" else name,
-        milvusFilter = Some(Expr.Compare("id", ">=", 1L))
+        milvusFilter = Some(FilterExpr.Compare("id", ">=", 1L))
       )
       try {
         val error = intercept[IllegalStateException](r.next())

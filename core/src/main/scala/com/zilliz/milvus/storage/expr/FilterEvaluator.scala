@@ -24,8 +24,8 @@ import io.milvus.grpc.schema.{DataType, FieldSchema}
   * DataSource V2 predicates use [[PredicateExpr]] and [[PredicateEvaluator]],
   * whose contract follows Spark SQL instead.
   */
-object Evaluator {
-  def validate(expr: Expr, fields: Seq[FieldSchema]): Unit = {
+object FilterEvaluator {
+  def validate(expr: FilterExpr, fields: Seq[FieldSchema]): Unit = {
     val byName = fields.map(f => f.name -> f).toMap
     val numeric = Set[DataType](
       DataType.Int8,
@@ -68,25 +68,25 @@ object Evaluator {
         s"Filter literal does not match $name ($t)"
       )
     }
-    def visit(e: Expr): Unit = e match {
-      case Expr.Compare(f, op, value) =>
+    def visit(e: FilterExpr): Unit = e match {
+      case FilterExpr.Compare(f, op, value) =>
         literal(f, value)
         require(
           byName(f).dataType != DataType.Bool || Set("==", "!=")(op),
           "Boolean filters support equality comparisons only"
         )
-      case Expr.In(f, values) => values.foreach(literal(f, _))
-      case Expr.IsNull(_)     =>
-      case Expr.Not(e)        => visit(e)
-      case Expr.And(l, r)     => visit(l); visit(r)
-      case Expr.Or(l, r)      => visit(l); visit(r)
+      case FilterExpr.In(f, values) => values.foreach(literal(f, _))
+      case FilterExpr.IsNull(_)     =>
+      case FilterExpr.Not(e)        => visit(e)
+      case FilterExpr.And(l, r)     => visit(l); visit(r)
+      case FilterExpr.Or(l, r)      => visit(l); visit(r)
     }
     visit(expr)
   }
 
   /** Evaluates one Arrow batch. A set bit excludes the corresponding row. */
   def evaluate(
-      expr: Expr,
+      expr: FilterExpr,
       batch: VectorSchemaRoot,
       column: String => String
   ): Bitmap = {
@@ -109,7 +109,7 @@ object Evaluator {
   }
 
   def matches(
-      expr: Expr,
+      expr: FilterExpr,
       batch: VectorSchemaRoot,
       row: Int,
       column: String => String
@@ -120,7 +120,7 @@ object Evaluator {
   }
 
   private def prepare(
-      expr: Expr,
+      expr: FilterExpr,
       batch: VectorSchemaRoot,
       column: String => String
   ): Map[String, FieldVector] = {
@@ -147,10 +147,10 @@ object Evaluator {
   }
 
   private def validateExpression(
-      expr: Expr,
+      expr: FilterExpr,
       vectors: Map[String, FieldVector]
   ): Unit = expr match {
-    case Expr.Compare(field, operator, literal) =>
+    case FilterExpr.Compare(field, operator, literal) =>
       val vector = vectors(field)
       if (
         vector.isInstanceOf[BitVector] &&
@@ -161,15 +161,15 @@ object Evaluator {
         )
       }
       validateLiteral(field, vector, literal)
-    case Expr.In(field, literals) =>
+    case FilterExpr.In(field, literals) =>
       literals.foreach(validateLiteral(field, vectors(field), _))
-    case Expr.IsNull(_) =>
-    case Expr.Not(child) =>
+    case FilterExpr.IsNull(_) =>
+    case FilterExpr.Not(child) =>
       validateExpression(child, vectors)
-    case Expr.And(left, right) =>
+    case FilterExpr.And(left, right) =>
       validateExpression(left, vectors)
       validateExpression(right, vectors)
-    case Expr.Or(left, right) =>
+    case FilterExpr.Or(left, right) =>
       validateExpression(left, vectors)
       validateExpression(right, vectors)
   }

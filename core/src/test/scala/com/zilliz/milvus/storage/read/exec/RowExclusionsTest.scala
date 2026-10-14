@@ -163,6 +163,6 @@ class RowExclusionsTest extends AnyFunSuite with Matchers {
     )
 
     exclusions.neededColumns shouldBe empty
-    exclusions.expressionFields shouldBe empty
+    exclusions.filterFields shouldBe empty
   }
 }

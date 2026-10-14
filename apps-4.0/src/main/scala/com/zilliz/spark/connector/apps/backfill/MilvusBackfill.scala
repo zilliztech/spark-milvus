@@ -633,7 +633,7 @@ object MilvusBackfill {
       // arrays, byte arrays, sparse maps/structs/JSON). Normalize vector
       // fields to Milvus's physical per-row bytes before caching or joining so
       // Spark never widens or rewrites half/int8/sparse representations.
-      val backfillDF = VectorBackfillSupport.normalizeVectorColumns(
+      val backfillDF = BackfillVectorColumns.normalize(
         mappedBackfillDF,
         targetFieldsByName
       ) match {
@@ -642,8 +642,8 @@ object MilvusBackfill {
       }
 
       val targetVectorFields = targetFieldsByName.collect {
-        case (name, field) if VectorBackfillSupport.isVectorField(field) =>
-          name -> VectorBackfillSupport.canonicalStructField(field)
+        case (name, field) if BackfillVectorColumns.isVectorField(field) =>
+          name -> BackfillVectorColumns.canonicalStructField(field)
       }
 
       val targetWriteFields = newFieldNames.map { n =>
@@ -752,7 +752,7 @@ object MilvusBackfill {
         }
 
       // Set of segment IDs that are StorageV2 (packed-parquet, no manifest).
-      // V3 segments continue to use the existing MilvusV3Writer flow.
+      // V3 segments are written through MilvusV3WriterFactory.
       val v2SegmentIdSet: Set[Long] = v2Segments.map(_.id).toSet
 
       // Process each segment

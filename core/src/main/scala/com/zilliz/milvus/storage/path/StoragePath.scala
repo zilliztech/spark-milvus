@@ -1,5 +1,29 @@
 package com.zilliz.milvus.storage.path
 
+/** A location in object storage, split the way the C layer wants it.
+  *
+  * `key` is bucket-relative and carries no leading slash.
+  *
+  * `bucket` is empty when nothing named one — a local path, or a relative path
+  * with no default bucket supplied. There is no object-storage location in that
+  * case, so `key` holds the original string verbatim and [[uri]] hands it back
+  * unchanged for whatever default filesystem the caller is on.
+  */
+final case class StoragePath(bucket: String, key: String) {
+
+  def hasBucket: Boolean = bucket.nonEmpty
+
+  /** Renders back to `scheme://bucket/key`, or to `key` when there is no
+    * bucket.
+    *
+    * Only the migration-period Hadoop callers need this. Code that talks to the
+    * C filesystem passes `key` and lets `fs.bucket_name` carry the bucket.
+    */
+  def uri(scheme: String): String =
+    if (hasBucket) s"${StoragePath.normalizeScheme(scheme)}://$bucket/$key"
+    else key
+}
+
 /** Normalizes the seven ways the format spells a location.
   *
   * The rules match `StorageUri::Parse` in milvus-storage's `fs.cpp`, because
@@ -23,7 +47,7 @@ object StoragePath {
     * the same shape as strings, so the caller says which bucket it means
     * instead of this function guessing at the first segment.
     */
-  def parse(raw: String, defaultBucket: String = ""): Located = {
+  def parse(raw: String, defaultBucket: String = ""): StoragePath = {
     val trimmed = Option(raw).map(_.trim).getOrElse("")
     if (trimmed.isEmpty) {
       throw new IllegalArgumentException("path must not be blank")
@@ -35,8 +59,8 @@ object StoragePath {
       // With no bucket there is no object-storage location to speak of; keep
       // the string verbatim so it still resolves against the default
       // filesystem, which is how local paths reach Hadoop today.
-      return if (bucketHint.isEmpty) Located("", trimmed)
-      else Located(bucketHint, stripLeadingSlash(trimmed))
+      return if (bucketHint.isEmpty) StoragePath("", trimmed)
+      else StoragePath(bucketHint, stripLeadingSlash(trimmed))
     }
 
     val authorityAndPath = trimmed.substring(separator + SchemeSeparator.length)
@@ -56,9 +80,9 @@ object StoragePath {
         s"storage URI is missing the key: $trimmed"
       )
     }
-    if (authority.nonEmpty) Located(authority, key)
-    else if (bucketHint.nonEmpty) Located(bucketHint, key)
-    else Located("", trimmed)
+    if (authority.nonEmpty) StoragePath(authority, key)
+    else if (bucketHint.nonEmpty) StoragePath(bucketHint, key)
+    else StoragePath("", trimmed)
   }
 
   /** Parses a path emitted by Milvus metadata.
@@ -77,7 +101,7 @@ object StoragePath {
       raw: String,
       defaultBucket: String = "",
       endpoint: String = ""
-  ): Located = {
+  ): StoragePath = {
     val standard = parse(raw, defaultBucket)
     val trimmed = raw.trim
     val separator = trimmed.indexOf(SchemeSeparator)
@@ -110,7 +134,7 @@ object StoragePath {
         s"endpoint URI is missing the bucket or key: $trimmed"
       )
     }
-    Located(bucket, key)
+    StoragePath(bucket, key)
   }
 
   /** Joins a fragment onto a location.
@@ -119,7 +143,7 @@ object StoragePath {
     * records full URIs alongside relative ones is read. Format fragments such
     * as `_delta/` are supplied by the caller; this function knows none of them.
     */
-  def resolve(base: Located, child: String): Located = {
+  def resolve(base: StoragePath, child: String): StoragePath = {
     val trimmed = Option(child).map(_.trim).getOrElse("")
     if (trimmed.isEmpty) return base
     if (trimmed.contains(SchemeSeparator)) return parse(trimmed, base.bucket)
@@ -131,7 +155,7 @@ object StoragePath {
   }
 
   /** Accepts `s3a` and `s3a://` alike so call sites need not agree on which. */
-  private[path] def normalizeScheme(scheme: String): String =
+  private def normalizeScheme(scheme: String): String =
     Option(scheme).map(_.trim).getOrElse("").stripSuffix(SchemeSeparator)
 
   private def stripLeadingSlash(value: String): String = {

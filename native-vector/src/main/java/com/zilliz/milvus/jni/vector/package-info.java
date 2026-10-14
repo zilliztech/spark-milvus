@@ -7,10 +7,9 @@
  * library path; an explicit {@code knowhere.native.path} that names another
  * file is rejected.
  *
- * NativeVectorSearch delegates synchronous brute-force search on borrowed
- * buffers: the per-query bruteForce, and for float32 without an exclusion
- * bitmap the batched bruteForceBatched entry that runs single-threaded on the
- * calling thread (decision 27).
+ * NativeVectorSearch delegates the upstream synchronous brute-force entries
+ * on borrowed buffers. Each method preserves the upstream name and documents
+ * its element types, exclusions, output and thread behavior.
  *
  * NativeVectorIndex delegates BinarySet loading and persisted index search, and
  * NativeVectorIndex.build delegates index building and serialization (W6) to

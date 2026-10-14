@@ -1,6 +1,6 @@
 package com.zilliz.milvus.storage.io
 
-import com.zilliz.milvus.storage.path.Located
+import com.zilliz.milvus.storage.path.StoragePath
 
 /** One entry of a directory listing. */
 final case class FileInfo(
@@ -14,7 +14,7 @@ final case class FileInfo(
   *
   * A store is bound to one bucket, so members take the key, not a URI: the C
   * layer wraps its backend in a subtree and appends whatever it is given, so a
-  * full path arrives doubled. `Located.key` is exactly what belongs here.
+  * full path arrives doubled. `StoragePath.key` is exactly what belongs here.
   *
   * Writing does not create parent directories. Object storage has no
   * directories, but the local backend does, so a caller that may run on either
@@ -24,7 +24,7 @@ trait ObjectStore extends AutoCloseable {
 
   def readAll(key: String): Array[Byte]
 
-  def readAll(at: Located): Array[Byte] = readAll(at.key)
+  def readAll(at: StoragePath): Array[Byte] = readAll(at.key)
 
   /** Bytes in the file. Throws when the key does not exist. */
   def size(key: String): Long
