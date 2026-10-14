@@ -381,6 +381,7 @@ private[connector] object FrameSearch extends Logging {
     val answers = Vector.newBuilder[(Long, Array[Byte])]
     var query = 0
     while (query < group.queries) {
+      merger.sort(query)
       val results = merger.results(query)
       if (results.nonEmpty)
         answers += group.ids(query) -> CarriedCandidates.writeSorted(
