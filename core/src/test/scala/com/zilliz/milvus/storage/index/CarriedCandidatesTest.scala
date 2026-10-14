@@ -35,6 +35,7 @@ class CarriedCandidatesTest extends AnyFunSuite with Matchers {
     }.toMap
     CarriedCandidates.writeSorted(
       merger
+        .sort(0)
         .results(0)
         .map(candidate =>
           candidate -> rows((candidate.segmentId, candidate.rowOffset))

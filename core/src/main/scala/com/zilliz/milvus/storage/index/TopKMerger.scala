@@ -55,9 +55,10 @@ object Candidate {
   * its place and measured 19 s slower per task: a task's first segment fills
   * every query's run from empty, and inserting 100 candidates into a sorted
   * array one at a time is an insertion sort, whatever the array holds. The heap
-  * pays the sort once on first output, and only for the k it kept. Both
-  * [[results]] and [[takePacked]] read the same finalized, sorted candidates
-  * (docs/design/architecture/topk-merger.html).
+  * sorts only when the caller requests [[sort]], and only for the k it kept.
+  * [[results]] reads the current order without ending collection; [[sort]]
+  * finalizes one query before its ordered output, and [[takePacked]] requires
+  * that explicit step (docs/design/architecture/topk-merger.html).
   */
 final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     extends Serializable {
@@ -74,7 +75,7 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
   private val better: Int = if (metric.smallerIsBetter) 1 else -1
 
   // Query q owns slots [q * k, q * k + sizes(q)). While collecting, its root
-  // is the worst; after output finalizes the query, its slots are best first.
+  // is the worst; after sort finalizes the query, its slots are best first.
   private val scores = new Array[Double](queries * k)
   private val segments = new Array[Long](queries * k)
   private val offsets = new Array[Long](queries * k)
@@ -165,7 +166,7 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     )
     if (sorted(query))
       throw new IllegalStateException(
-        s"Query $query has been finalized for output"
+        s"Query $query has been sorted and no longer accepts candidates"
       )
     val base = query * k
     val size = sizes(query)
@@ -238,8 +239,8 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
 
   /** Orders the query's slots best first, in place. The heap's root is its
     * worst, so taking the root out to the end `size` times leaves the slots
-    * sorted from best to worst. Only the first output of a query calls this,
-    * since the heap is gone afterwards.
+    * sorted from best to worst. Only the first explicit sort calls this, since
+    * the heap is gone afterwards.
     */
   private def sortInPlace(base: Int, size: Int): Unit = {
     var end = size
@@ -250,31 +251,35 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     }
   }
 
-  /** Finalizes a query once, retaining its size and sorted primitive columns.
-    * All writers of this query must have finished. Marking it sorted before
-    * output allocation lets later reads, including retries, skip sorting. Even
-    * an empty output ends this query's collection.
+  /** Sorts a query best first in place and ends its collection, once. All
+    * writers of this query must have finished. Repeated calls keep the same
+    * order without sorting again; even an empty query stops accepting adds.
     */
-  private def prepareOutput(query: Int): Int = {
-    require(
-      query >= 0 && query < queries,
-      s"Query $query is outside the $queries queries"
-    )
-    val size = sizes(query)
+  def sort(query: Int): this.type = {
+    val size = querySize(query)
     if (!sorted(query)) {
       if (size > 1) sortInPlace(query * k, size)
       sorted(query) = true
     }
-    size
+    this
   }
 
-  /** This query's candidates best first, finalizing its current collection.
+  private def querySize(query: Int): Int = {
+    require(
+      query >= 0 && query < queries,
+      s"Query $query is outside the $queries queries"
+    )
+    sizes(query)
+  }
+
+  /** An independent snapshot of this query's candidates in their current order.
     *
-    * Both output methods may read the same sorted candidates repeatedly. The
-    * returned objects own their data; this query no longer accepts additions.
+    * This neither sorts nor ends collection. Before [[sort]], the order is the
+    * heap's and further additions are allowed; afterwards it is best first.
+    * Later additions or sorting do not change the returned objects.
     */
   def results(query: Int): Vector[Candidate] = {
-    val size = prepareOutput(query)
+    val size = querySize(query)
     val base = query * k
     val built = Vector.newBuilder[Candidate]
     var slot = 0
@@ -290,34 +295,19 @@ final class TopKMerger(val queries: Int, val k: Int, val metric: MetricType)
     built.result()
   }
 
-  /** This query's candidates as bytes, best first, finalizing its collection.
-    * This is what a stage-one task over Milvus segments gives Spark. Repeated
-    * reads encode the retained sorted candidates without sorting again. Each
-    * nonempty output owns a new byte array; the primitive columns stay intact.
+  /** Encodes this query best first after the caller has explicitly [[sort]]ed
+    * it, including when it is empty. Refuses an unsorted query without changing
+    * its state: the merge stage requires ordered bytes. Repeated reads encode
+    * the same candidates without sorting; each nonempty output owns its bytes.
     */
   def takePacked(query: Int): Array[Byte] = {
-    val size = prepareOutput(query)
+    val size = querySize(query)
+    if (!sorted(query))
+      throw new IllegalStateException(
+        s"Query $query must be sorted before packing"
+      )
     if (size == 0) CandidateBytes.Empty
     else CandidateBytes.writeColumns(segments, offsets, scores, query * k, size)
-  }
-
-  /** Every query's packed candidates at once, by query position, cut into
-    * `threads` shards of queries on [[SearchThreads]]. A query's heap lives in
-    * its own slice of the three arrays and its own `sizes` entry, so the shards
-    * never touch the same query. Finalized columns remain available for later
-    * reads, as with [[takePacked]].
-    */
-  def packAll(threads: Int): Array[Array[Byte]] = {
-    require(threads > 0, s"Packing takes at least one thread: $threads")
-    val packed = new Array[Array[Byte]](queries)
-    SearchThreads.shards(queries, threads) { (_, from, until) =>
-      var query = from
-      while (query < until) {
-        packed(query) = takePacked(query)
-        query += 1
-      }
-    }
-    packed
   }
 
   /** Where every kept candidate is, query by query, in no particular order:
