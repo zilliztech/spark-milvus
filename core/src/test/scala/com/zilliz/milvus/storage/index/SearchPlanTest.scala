@@ -317,7 +317,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
         footprint = vectors,
         shuffled = false
       )
-      .isEmpty shouldBe true
+      .tasks shouldBe 0
   }
 
   test("every segment set answers every query group") {

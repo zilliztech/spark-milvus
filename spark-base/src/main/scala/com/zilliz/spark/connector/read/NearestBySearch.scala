@@ -392,7 +392,13 @@ private[connector] object NearestBySearch {
       val hits =
         if (counts.searched == 0L) None
         else
-          Some(searcher.search(SearchQueries.Frame(querySet), dimension, None))
+          Some(
+            searcher.search(
+              SearchQueries.Frame(querySet, counts.searched),
+              dimension,
+              None
+            )
+          )
       post(counts)
       val hitsByQuery = hits match {
         case Some(found) => found.rows.map(hit => hit.getLong(0) -> baseOf(hit))

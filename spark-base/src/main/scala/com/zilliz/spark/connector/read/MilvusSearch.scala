@@ -130,17 +130,14 @@ object MilvusSearch extends Logging {
       SegmentIndexHandle.check(tasks, field.fieldID, searchMetric)
     }
 
-    // A set the driver packed is counted already.
     val packedOnDriver = queries.isInstanceOf[SearchQueries.Packed]
-    val queryCount = queries match {
-      case SearchQueries.Frame(selected) => selected.count()
-      case SearchQueries.Packed(ids, _)  => ids.length.toLong
-    }
+    val queryCount = queries.count
     val hitSchema = if (required.isEmpty) HitSchema else NullableHitSchema
     val resultSchema = StructType(hitSchema.fields ++ outputSchema.fields)
     // The set is what a nearest-by join kept of its query rows: rows whose
-    // ranking value is NULL search nothing, and all of them may be.
-    if (queryCount == 0)
+    // ranking value is NULL search nothing, and all of them may be. The
+    // snapshot may hold no segment.
+    if (queryCount == 0L || tasks.isEmpty)
       return Hits(missing(spark, required, resultSchema), resultSchema)
     require(
       queryCount <= Int.MaxValue,
@@ -312,41 +309,35 @@ object MilvusSearch extends Logging {
     // share of the unmanaged heap is the queries' budget at that concurrency.
     val stageHeap = SearchResources
       .queryBudget(heap, memoryFraction(spark), resources.tasksPerExecutor)
-    if (plan.isEmpty && required.nonEmpty)
-      return Hits(missing(spark, required, resultSchema), resultSchema)
-    val hits =
-      if (plan.isEmpty) empty(spark)
-      else {
-        val mergeParts =
-          mergePartitions(spark, queryCount, plan.tasks, k, stageHeap.bytes)
-        logInfo(
-          s"Merge stage: $queryCount queries x ${plan.tasks} answers of $k over $mergeParts partitions, " +
-            s"about ${queryCount / mergeParts} queries a partition at ${plan.tasks.toLong * k * CandidateBytes.Width} bytes each " +
-            s"against ${stageHeap.bytes} bytes of heap a task"
-        )
-        val found = candidates(
-          spark,
-          queries,
-          partitions,
-          plan,
-          spec,
-          layout,
-          limits,
-          metrics,
-          searchProfile,
-          packProfile
-        )
-        SearchProgress.watch(
-          spark.sparkContext,
-          found,
-          metrics,
-          comparedPairsTotal,
-          index = searchMode == SearchMode.Index,
-          queryGroups = plan.groups.size,
-          segments = plan.sets.map(_.size).sum
-        )
-        merged(spark, found, k, searchMetric, mergeParts, required)
-      }
+    val mergeParts =
+      mergePartitions(spark, queryCount, plan.tasks, k, stageHeap.bytes)
+    logInfo(
+      s"Merge stage: $queryCount queries x ${plan.tasks} answers of $k over $mergeParts partitions, " +
+        s"about ${queryCount / mergeParts} queries a partition at ${plan.tasks.toLong * k * CandidateBytes.Width} bytes each " +
+        s"against ${stageHeap.bytes} bytes of heap a task"
+    )
+    val found = candidates(
+      spark,
+      queries,
+      partitions,
+      plan,
+      spec,
+      layout,
+      limits,
+      metrics,
+      searchProfile,
+      packProfile
+    )
+    SearchProgress.watch(
+      spark.sparkContext,
+      found,
+      metrics,
+      comparedPairsTotal,
+      index = searchMode == SearchMode.Index,
+      queryGroups = plan.groups.size,
+      segments = plan.sets.map(_.size).sum
+    )
+    val hits = merged(spark, found, k, searchMetric, mergeParts, required)
     if (outputSchema.isEmpty) Hits(hits.queryExecution.toRdd, hits.schema)
     else {
       // What a take task buffers is every hit of its partition (queries x k
@@ -419,7 +410,7 @@ object MilvusSearch extends Logging {
       val (ids, vectors) = queries match {
         case SearchQueries.Packed(packedIds, packedVectors) =>
           (packedIds, packedVectors)
-        case SearchQueries.Frame(frame) =>
+        case SearchQueries.Frame(frame, _) =>
           SearchQueries.packOnExecutors(frame, layout, spec.metric)
       }
       require(
@@ -454,7 +445,7 @@ object MilvusSearch extends Logging {
     } else {
       // A set the driver packed went to the broadcast above.
       val selected = queries match {
-        case SearchQueries.Frame(frame) => frame
+        case SearchQueries.Frame(frame, _) => frame
         case SearchQueries.Packed(_, _) =>
           throw new IllegalStateException(
             "A query set packed on the driver is broadcast, not read again"
@@ -752,11 +743,6 @@ object MilvusSearch extends Logging {
         CandidateBytes.rowOffset(packed, at)
       )
     )
-  }
-
-  private def empty(spark: SparkSession): DataFrame = {
-    import spark.implicits._
-    spark.emptyDataset[SearchResult].toDF()
   }
 
   private[read] def dimensionOf(field: FieldSchema): Int = field.typeParams
