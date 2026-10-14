@@ -6,7 +6,7 @@ import scala.collection.mutable
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.catalyst.InternalRow
 
-import com.zilliz.milvus.storage.index.QueryMatrix
+import com.zilliz.milvus.storage.index.{QueryMatrix, SearchPlan}
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.spark.connector.options.MilvusOption
 
@@ -97,6 +97,23 @@ private[read] object SearchQueries {
       firstQuery: Int
   ) extends Serializable {
     def queries: Int = ids.length
+  }
+
+  object Group {
+
+    /** The planned group `group` of a set broadcast whole: its ids sliced out,
+      * the bytes shared.
+      */
+    def of(
+        ids: Array[Long],
+        vectors: Array[Byte],
+        group: SearchPlan.QueryGroup
+    ): Group =
+      Group(
+        ids.slice(group.firstQuery, group.untilQuery),
+        vectors,
+        group.firstQuery
+      )
   }
 
   /** The bytes a query set of this many queries occupies. */

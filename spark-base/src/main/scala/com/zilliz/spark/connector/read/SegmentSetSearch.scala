@@ -115,18 +115,6 @@ private[read] object SegmentSetSearch extends Logging {
       TaskContext.get().partitionId(),
       spec.arrowMaxBytes
     )
-    // Every step goes to the accumulators as it finishes. A task of this
-    // stage runs for as long as its vectors take, and Spark carries a running
-    // task's accumulators on the executor heartbeat, so a total added at the
-    // end is a total nobody can see while it matters.
-    def stepped(step: SegmentSearch.Progress): Unit = {
-      if (step.nativeCalls != 0)
-        metrics.knowhereCalls.add(step.nativeCalls.toLong)
-      if (step.nativeNanos != 0L) metrics.knowhereNanos.add(step.nativeNanos)
-      if (step.compared != 0L) metrics.comparedPairs.add(step.compared)
-      if (step.rescans != 0L) metrics.exactRescans.add(step.rescans)
-      if (step.segments != 0) metrics.segmentSearches.add(step.segments.toLong)
-    }
     def open(segmentId: Long): SegmentSearch.Source =
       source(partitions(segmentId), spec, allocator.allocator, metrics)
     // One group over the set, reading every segment as it goes: what a task
@@ -142,7 +130,7 @@ private[read] object SegmentSetSearch extends Logging {
             spec.metric,
             spec.parameters,
             allocator.allocator,
-            stepped,
+            metrics.record,
             spec.function
           )
       }
@@ -163,7 +151,6 @@ private[read] object SegmentSetSearch extends Logging {
           spec,
           allocator.allocator,
           metrics,
-          stepped,
           prefetchIndexes(set, spec)
         )
       finally allocator.close()
@@ -187,7 +174,7 @@ private[read] object SegmentSetSearch extends Logging {
                   spec.metric,
                   spec.parameters,
                   allocator.allocator,
-                  stepped,
+                  metrics.record,
                   spec.collectThreads
                 )
               }
@@ -218,7 +205,6 @@ private[read] object SegmentSetSearch extends Logging {
       spec: Spec,
       allocator: BufferAllocator,
       metrics: SearchMetrics,
-      stepped: SegmentSearch.Progress => Unit,
       prefetch: Boolean
   ): Iterator[(Long, Array[Byte])] = {
     val ids = new Array[Array[Long]](groupCount)
@@ -258,7 +244,6 @@ private[read] object SegmentSetSearch extends Logging {
       spec,
       allocator,
       metrics,
-      stepped,
       prefetch
     )
   }
@@ -275,7 +260,6 @@ private[read] object SegmentSetSearch extends Logging {
       spec: Spec,
       allocator: BufferAllocator,
       metrics: SearchMetrics,
-      stepped: SegmentSearch.Progress => Unit,
       prefetch: Boolean
   ): Iterator[(Long, Array[Byte])] = {
     val groupCount = matrices.length
@@ -288,7 +272,7 @@ private[read] object SegmentSetSearch extends Logging {
         spec.metric,
         spec.parameters,
         allocator,
-        stepped,
+        metrics.record,
         prefetch,
         spec.collectThreads,
         spec.function
