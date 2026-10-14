@@ -24,7 +24,10 @@ import org.apache.spark.sql.functions.{
 import org.apache.spark.sql.types.{IntegerType, StructType}
 import org.apache.spark.TaskContext
 
-import com.zilliz.milvus.storage.read.exec.SegmentReaderRegistry
+import com.zilliz.milvus.storage.read.exec.{
+  SegmentReader,
+  SegmentReaderRegistry
+}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.types.{ArrowAllocator, ArrowConverter}
 
@@ -277,37 +280,15 @@ private[read] object SearchTake {
     )
     try {
       val batches = reader.take(offsets, projected)
-      var index = 0
-      try {
-        var next = batches.next()
-        while (next.nonEmpty) {
-          val batch = next.get
-          try {
-            var row = 0
-            while (row < batch.getRowCount) {
-              require(
-                index < offsets.length,
-                s"Segment ${partition.task.segmentId} returned more rows than the ${offsets.length} asked for"
-              )
-              taken(index) = ArrowConverter
-                .arrowToInternalRow(
-                  batch,
-                  row,
-                  output,
-                  binding.arrowColumnNames
-                )
-                .copy()
-              index += 1
-              row += 1
-            }
-          } finally batch.close()
-          next = batches.next()
-        }
-        require(
-          index == offsets.length,
-          s"Segment ${partition.task.segmentId} returned $index of the ${offsets.length} rows asked for"
+      try
+        copyRows(
+          batches,
+          taken,
+          output,
+          binding.arrowColumnNames,
+          partition.task.segmentId
         )
-      } finally batches.close()
+      finally batches.close()
     } finally {
       try reader.close()
       finally {
@@ -325,5 +306,41 @@ private[read] object SearchTake {
       )
       hit -> taken(at)
     }
+  }
+
+  /** Every row of `batches` copied into `taken`, in the order they come, each
+    * batch closed once its rows are out: exactly as many rows as `taken` holds.
+    */
+  private def copyRows(
+      batches: SegmentReader.TakeResult,
+      taken: Array[InternalRow],
+      output: StructType,
+      columnNames: Map[String, String],
+      segmentId: Long
+  ): Unit = {
+    var index = 0
+    var next = batches.next()
+    while (next.nonEmpty) {
+      val batch = next.get
+      try {
+        var row = 0
+        while (row < batch.getRowCount) {
+          require(
+            index < taken.length,
+            s"Segment $segmentId returned more rows than the ${taken.length} asked for"
+          )
+          taken(index) = ArrowConverter
+            .arrowToInternalRow(batch, row, output, columnNames)
+            .copy()
+          index += 1
+          row += 1
+        }
+      } finally batch.close()
+      next = batches.next()
+    }
+    require(
+      index == taken.length,
+      s"Segment $segmentId returned $index of the ${taken.length} rows asked for"
+    )
   }
 }

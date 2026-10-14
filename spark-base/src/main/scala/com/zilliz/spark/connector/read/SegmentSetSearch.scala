@@ -3,12 +3,10 @@ package com.zilliz.spark.connector.read
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.SparkEnv
 import org.apache.spark.TaskContext
 
 import com.zilliz.milvus.storage.expr.{Expr, PredicateExpr}
 import com.zilliz.milvus.storage.index.{
-  CandidateBytes,
   QueryMatrix,
   RankingFunction,
   SearchPlan,
@@ -117,30 +115,6 @@ private[read] object SegmentSetSearch extends Logging {
     )
     def open(segmentId: Long): SegmentSearch.Source =
       source(partitions(segmentId), spec, allocator.allocator, metrics)
-    // One group over the set, reading every segment as it goes: what a task
-    // keeping a set too large to hold does for each group.
-    def streamed(group: SearchQueries.Group): Seq[(Long, Array[Byte])] = {
-      val (merger, counters) = searching(group, spec, allocator.allocator) {
-        queries =>
-          SegmentSearch.run(
-            segments,
-            open,
-            queries,
-            spec.k,
-            spec.metric,
-            spec.parameters,
-            allocator.allocator,
-            metrics.record,
-            spec.function
-          )
-      }
-      report(metrics, counters, merger.size)
-      logInfo(
-        s"Search task: segments=${counters.segments}, groups=$groupCount, " +
-          s"queries=${group.queries}, candidates=${merger.size}, streamed"
-      )
-      candidates(merger, group.ids, spec.collectThreads)
-    }
     if (groupCount == 1 || spec.resident == SearchPlan.Resident.Queries) {
       try
         keepingQueries(
@@ -162,29 +136,43 @@ private[read] object SegmentSetSearch extends Logging {
           finally allocator.close()
         }
       )
-      held match {
-        case None => groups.flatMap(streamed)
-        case Some(kept) =>
-          groups.flatMap { group =>
-            val (merger, counters) =
-              searching(group, spec, allocator.allocator) { queries =>
-                kept.search(
-                  queries,
-                  spec.k,
-                  spec.metric,
-                  spec.parameters,
-                  allocator.allocator,
-                  metrics.record,
-                  spec.collectThreads
-                )
-              }
-            report(metrics, counters, merger.size)
-            logInfo(
-              s"Search task: segments=${counters.segments}, groups=$groupCount, " +
-                s"queries=${group.queries}, candidates=${merger.size}, held"
+      // A group searches the set held in memory or, when it did not fit,
+      // reads every segment again as it goes.
+      val search: QueryMatrix => (TopKMerger, SegmentSearch.Counters) =
+        held match {
+          case Some(kept) =>
+            kept.search(
+              _,
+              spec.k,
+              spec.metric,
+              spec.parameters,
+              allocator.allocator,
+              metrics.record,
+              spec.collectThreads
             )
-            candidates(merger, group.ids, spec.collectThreads)
-          }
+          case None =>
+            SegmentSearch.run(
+              segments,
+              open,
+              _,
+              spec.k,
+              spec.metric,
+              spec.parameters,
+              allocator.allocator,
+              metrics.record,
+              spec.function
+            )
+        }
+      val how = if (held.isEmpty) "streamed" else "held"
+      groups.flatMap { group =>
+        val (merger, counters) =
+          searching(group, spec, allocator.allocator)(search)
+        report(metrics, counters, merger.size)
+        logInfo(
+          s"Search task: segments=${counters.segments}, groups=$groupCount, " +
+            s"queries=${group.queries}, candidates=${merger.size}, $how"
+        )
+        candidates(merger, group.ids, spec.collectThreads)
       }
     }
   }
@@ -365,9 +353,6 @@ private[read] object SegmentSetSearch extends Logging {
     finally queries.close()
   }
 
-  /** The candidates of one group, named by query id rather than by position in
-    * the group.
-    */
   /** The candidates of one group: one record for each query that found
     * anything, named by query id rather than by its position in the group, and
     * holding that query's best k packed into bytes.
@@ -397,7 +382,6 @@ private[read] object SegmentSetSearch extends Logging {
     packed.result()
   }
 
-  /** What this segment offers the search: its vectors, or its index. */
   /** Whether the task may open the next segment's index while it searches the
     * current one: index mode, more than one segment, and room in the task's
     * budget for two loaded indexes plus one loading (2 + 2 + 1 copies of the
@@ -421,6 +405,7 @@ private[read] object SegmentSetSearch extends Logging {
       }
     }
 
+  /** What this segment offers the search: its vectors, or its index. */
   private def source(
       partition: MilvusInputPartition,
       spec: Spec,
