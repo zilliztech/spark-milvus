@@ -85,39 +85,6 @@ object ExactScan {
     2.0 * gamma * reach * reach
   }
 
-  /** Adds this segment's candidates to `merger`, which counts its queries the
-    * way the group does: query 0 is the group's first query. The buffers of a
-    * batch are borrowed for the length of the call and released with it.
-    */
-  def run(
-      vectors: VectorBatch.Stream,
-      queries: QueryMatrix,
-      segmentId: Long,
-      k: Int,
-      metric: MetricType,
-      allocator: BufferAllocator,
-      merger: TopKMerger,
-      onProgress: SegmentSearch.Progress => Unit = _ => ()
-  ): Unit = {
-    var next = vectors.next()
-    while (next.nonEmpty) {
-      val current = next.get
-      try
-        batch(
-          current,
-          queries,
-          segmentId,
-          k,
-          metric,
-          allocator,
-          merger,
-          onProgress
-        )
-      finally current.close()
-      next = vectors.next()
-    }
-  }
-
   /** One batch, one native call. The batch stays open: a task that answers more
     * than one query group keeps its batches and calls this once per group
     * (section 2.3). `ranked` is the batch as a ranking function sees it, worked

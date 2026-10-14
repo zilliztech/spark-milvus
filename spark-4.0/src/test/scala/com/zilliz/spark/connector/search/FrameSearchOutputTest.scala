@@ -31,7 +31,7 @@ class FrameSearchOutputTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "answers preserve query ids, rank and shared rows while skipping empty queries"
+    "answers preserve query ids, rank and owned rows while skipping empty queries"
   ) {
     val merger = new TopKMerger(3, 2, MetricType.L2)
     merger.add(0, 4L, 2L, 2.0)
@@ -48,6 +48,10 @@ class FrameSearchOutputTest extends AnyFunSuite with Matchers {
     first._1 shouldBe 17L
     first._2.length shouldBe 88
     values(first._2) shouldBe Seq((1L, 1.0, 101L), (2L, 2.0, 102L))
+    val output = FrameSearch.carried(first._1, first._2, 1).toVector
+    java.util.Arrays.fill(first._2, 0.toByte)
+    output.map { case (id, base) => id -> base.getLong(0) } shouldBe
+      Seq(17L -> 101L, 17L -> 102L)
     val second = answers.next()
     second._1 shouldBe 23L
     values(second._2) shouldBe Seq((1L, 0.0, 101L))

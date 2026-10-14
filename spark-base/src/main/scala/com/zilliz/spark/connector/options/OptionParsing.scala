@@ -1,12 +1,14 @@
 package com.zilliz.spark.connector.options
 
+import java.lang.{Double => JavaDouble}
 import scala.collection.{Map => CollectionMap}
+import scala.util.Try
 
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 /** Strict parsing shared by every user-facing connector option.
   *
-  * Numeric values use canonical decimal digits after surrounding whitespace is
+  * Integer values use canonical decimal digits after surrounding whitespace is
   * removed. The helpers report both the option name and the supplied value,
   * including empty, overflowing and non-positive inputs.
   */
@@ -107,6 +109,32 @@ private[connector] object OptionParsing {
         }
         parsed
     }
+
+  /** The writer's finite positive density, retaining its blank-value default.
+    */
+  def positiveDouble(
+      options: CollectionMap[String, String],
+      key: String,
+      defaultValue: Double
+  ): Double = {
+    options
+      .get(key.toLowerCase)
+      .filter(_.trim.nonEmpty)
+      .map { value =>
+        val parsed = Try(value.trim.toDouble).getOrElse {
+          throw new IllegalArgumentException(
+            s"$key must be a finite positive number, got '$value'"
+          )
+        }
+        if (!JavaDouble.isFinite(parsed) || parsed <= 0.0) {
+          throw new IllegalArgumentException(
+            s"$key must be a finite positive number, got '$value'"
+          )
+        }
+        parsed
+      }
+      .getOrElse(defaultValue)
+  }
 
   def nonNegativeLong(raw: String, key: String): Long = {
     val value = Option(raw).getOrElse("").trim

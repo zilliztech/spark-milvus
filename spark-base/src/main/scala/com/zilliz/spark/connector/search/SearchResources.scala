@@ -42,7 +42,7 @@ private[search] object SearchResources {
     val master = spark.sparkContext.master
     if (master.startsWith("local[") || master == "local") {
       (
-        MachineResources.probe().memoryLimitBytes,
+        MachineResources.memoryLimitBytes(),
         Runtime.getRuntime.maxMemory()
       )
     } else {

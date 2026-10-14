@@ -78,19 +78,19 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
   )
 
   private def v2(deletes: DeleteSource = DeleteSource.None) =
-    V2ColumnBinding(
-      MilvusV2InputPartition(
+    ColumnBinding(
+      MilvusInputPartition(
         task(SegmentLayout.ColumnGroups(columnGroups), deletes),
-        options
+        options.milvusFilter
       ),
       dataSchema
     )
 
   private def v3(deletes: DeleteSource = DeleteSource.None) =
-    V3ColumnBinding(
-      MilvusV3InputPartition(
+    ColumnBinding(
+      MilvusInputPartition(
         task(SegmentLayout.Manifest("files/seg"), deletes),
-        options
+        options.milvusFilter
       ),
       dataSchema
     )
@@ -140,11 +140,11 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     val deletes =
       DeleteSource.Materialized(DeletePlan.fromLongPks(Map(1L -> 100L)))
     val wanted = StructType(Seq(StructField("vec", ArrayType(FloatType))))
-    val v3Binding = V3ColumnBinding(
-      MilvusV3InputPartition(
+    val v3Binding = ColumnBinding(
+      MilvusInputPartition(
         task(SegmentLayout.Manifest("files/seg"), deletes)
           .copy(schemaBytes = schema.toByteArray),
-        options
+        options.milvusFilter
       ),
       wanted
     )
@@ -152,8 +152,8 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     v3Binding.arrowSchema.getFields.asScala.map(_.getName) should contain("1")
     v3Binding.arrowSchema.getFields.asScala.map(_.getName) should contain("101")
 
-    val v2Binding = V2ColumnBinding(
-      MilvusV2InputPartition(
+    val v2Binding = ColumnBinding(
+      MilvusInputPartition(
         task(
           SegmentLayout.ColumnGroups(
             Seq(
@@ -166,7 +166,7 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
           ),
           deletes
         ).copy(schemaBytes = schema.toByteArray),
-        options
+        options.milvusFilter
       ),
       wanted
     )
@@ -204,8 +204,8 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
       schemaBytes = dynamicSchema.toByteArray,
       neededFieldIds = Seq(407L)
     )
-    val v2Binding = V2ColumnBinding(
-      MilvusV2InputPartition(v2Task, options),
+    val v2Binding = ColumnBinding(
+      MilvusInputPartition(v2Task, options.milvusFilter),
       outputSchema
     )
 
@@ -213,8 +213,8 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
       schemaBytes = dynamicSchema.toByteArray,
       neededFieldIds = Seq(407L)
     )
-    val v3Binding = V3ColumnBinding(
-      MilvusV3InputPartition(v3Task, options),
+    val v3Binding = ColumnBinding(
+      MilvusInputPartition(v3Task, options.milvusFilter),
       outputSchema
     )
 
@@ -246,8 +246,8 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     val projectedTask = task(SegmentLayout.Manifest("files/seg")).copy(
       neededFieldIds = Seq(101L)
     )
-    val binding = V3ColumnBinding(
-      MilvusV3InputPartition(projectedTask, options),
+    val binding = ColumnBinding(
+      MilvusInputPartition(projectedTask, options.milvusFilter),
       StructType(Seq(StructField("id", LongType)))
     )
 
@@ -270,8 +270,8 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
         )
       )
     ).copy(schemaBytes = renamedTimestamp.toByteArray)
-    val binding = V2ColumnBinding(
-      MilvusV2InputPartition(projectedTask, options),
+    val binding = ColumnBinding(
+      MilvusInputPartition(projectedTask, options.milvusFilter),
       StructType(
         Seq(
           StructField(MilvusOption.MilvusExtraColumnTimestamp, LongType)
@@ -287,10 +287,10 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
   }
 
   test("the V3 timestamp metadata column reads stored field id 1") {
-    val binding = V3ColumnBinding(
-      MilvusV3InputPartition(
+    val binding = ColumnBinding(
+      MilvusInputPartition(
         task(SegmentLayout.Manifest("files/seg")),
-        options
+        options.milvusFilter
       ),
       StructType(
         Seq(
@@ -312,23 +312,23 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     val plan = DeletePlan.fromLongPks(Map(1L -> 100L))
     val narrow = StructType(Seq(StructField("vec", ArrayType(FloatType))))
 
-    val withDeletes = V3ColumnBinding(
-      MilvusV3InputPartition(
+    val withDeletes = ColumnBinding(
+      MilvusInputPartition(
         task(
           SegmentLayout.Manifest("files/seg"),
           DeleteSource.Materialized(plan)
         ),
-        options
+        options.milvusFilter
       ),
       narrow
     )
     withDeletes.neededColumns should contain allOf ("100", "1")
     withDeletes.appliesDeletes shouldBe true
 
-    val without = V3ColumnBinding(
-      MilvusV3InputPartition(
+    val without = ColumnBinding(
+      MilvusInputPartition(
         task(SegmentLayout.Manifest("files/seg")),
-        options
+        options.milvusFilter
       ),
       narrow
     )
@@ -336,19 +336,19 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     without.appliesDeletes shouldBe false
   }
 
-  test("a setup is chosen by the partition's line") {
+  test("column binding is chosen by the task layout") {
     ColumnBinding(
-      MilvusV2InputPartition(
+      MilvusInputPartition(
         task(SegmentLayout.ColumnGroups(columnGroups)),
-        options
+        options.milvusFilter
       ),
       dataSchema
     ) shouldBe a[V2ColumnBinding]
 
     ColumnBinding(
-      MilvusV3InputPartition(
+      MilvusInputPartition(
         task(SegmentLayout.Manifest("files/seg")),
-        options
+        options.milvusFilter
       ),
       dataSchema
     ) shouldBe a[V3ColumnBinding]

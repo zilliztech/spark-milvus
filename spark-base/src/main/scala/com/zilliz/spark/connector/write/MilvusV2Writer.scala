@@ -14,7 +14,7 @@ import org.apache.spark.sql.types._
 
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.write.exec.V2SegmentWriter
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.options.{MilvusOption, OptionParsing}
 import com.zilliz.spark.connector.types.ArrowConverter
 import com.zilliz.spark.connector.types.SparkSchemaMapper
 
@@ -37,17 +37,6 @@ case class V2BinlogFile(
     path: String,
     rowsWritten: Long
 )
-
-object MilvusV2Writer {
-  private[connector] def parseVariableWidthBytesPerValue(
-      options: scala.collection.Map[String, String]
-  ): Double =
-    MilvusV3PartitionWriter.parsePositiveDoubleOption(
-      options,
-      MilvusOption.WriterVariableWidthBytesPerValue,
-      defaultValue = 32.0
-    )
-}
 
 /** Writes StorageV2 per-field binlog parquet files for a single segment.
   *
@@ -88,7 +77,11 @@ class MilvusV2Writer(
   )
 
   private val variableWidthBytesPerValue: Double =
-    MilvusV2Writer.parseVariableWidthBytesPerValue(milvusOption.options)
+    OptionParsing.positiveDouble(
+      milvusOption.options,
+      MilvusOption.WriterVariableWidthBytesPerValue,
+      defaultValue = 32.0
+    )
 
   // Storage root comes from the same FS config the V3 writer already consumes
   // — see com.zilliz.milvus.storage.credential.StorageProperties. Paths passed to the

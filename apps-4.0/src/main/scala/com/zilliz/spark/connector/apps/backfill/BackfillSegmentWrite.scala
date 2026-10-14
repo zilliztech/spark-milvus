@@ -320,51 +320,12 @@ private[backfill] object BackfillSegmentWrite {
       )
     )
 
-    val readsSnapshotFields = config.readsSnapshotFields
-    val newFieldNames = targetSchema.fieldNames.toSeq
-    val numNewFields = newFieldNames.size
-    // Row layout (fixed prefix): [_segment_id, _row_offset, ...newFields,
-    // __bf_matched__, (usedSnapshot, usedBf)*numNewFields in snapshot-reading modes
-    // (coalesce / overwrite) only].
-    val matchFlagIdx = 2 + numNewFields
-    val firstFlagIdx = matchFlagIdx + 1
-
     try {
-      var rowCount = 0L
-      var nullRowCount = 0L
-      var matchedRowCount = 0L
-      val usedSnapshotCounts = Array.fill(numNewFields)(0L)
-      val usedBfCounts = Array.fill(numNewFields)(0L)
-
-      def writeRow(row: InternalRow): Unit = {
-        val dataEnd = matchFlagIdx
-        val targetFields = (2 until dataEnd)
-          .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
-          .toArray
-        if (targetFields.forall(_ == null)) nullRowCount += 1
-        if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
-        if (readsSnapshotFields) {
-          var i = 0
-          while (i < numNewFields) {
-            val snapshotIdx = firstFlagIdx + 2 * i
-            val bfIdx = snapshotIdx + 1
-            if (!row.isNullAt(snapshotIdx) && row.getBoolean(snapshotIdx))
-              usedSnapshotCounts(i) += 1
-            if (!row.isNullAt(bfIdx) && row.getBoolean(bfIdx))
-              usedBfCounts(i) += 1
-            i += 1
-          }
-        }
-        writer.write(
-          new GenericInternalRow(
-            targetFields
-          )
-        )
-        rowCount += 1
-      }
-
-      writeRow(firstRow)
-      iter.foreach(writeRow)
+      val counts = writeRows(
+        Iterator.single(firstRow) ++ iter,
+        targetSchema,
+        config.readsSnapshotFields
+      )(writer.write)
 
       val commitMessage = writer.commit()
       val (manifestPaths, committedVersion) = commitMessage match {
@@ -375,27 +336,19 @@ private[backfill] object BackfillSegmentWrite {
 
       writer.close()
 
-      val (usedSnapshotByField, usedBfByField) =
-        if (readsSnapshotFields)
-          (
-            newFieldNames.zip(usedSnapshotCounts).toMap,
-            newFieldNames.zip(usedBfCounts).toMap
-          )
-        else (Map.empty[String, Long], Map.empty[String, Long])
-
       Iterator.single(
         (
           SegmentBackfillResult(
             segmentId = segmentID,
-            rowCount = rowCount,
+            rowCount = counts.rows,
             manifestPaths = manifestPaths,
             outputPath = outputPath,
             executionTimeMs = System.currentTimeMillis() - startTime,
             committedVersion = committedVersion,
-            sourceRowCount = rowCount,
-            matchedRowCount = matchedRowCount,
-            usedSourceByField = usedSnapshotByField,
-            usedDataFileByField = usedBfByField
+            sourceRowCount = counts.rows,
+            matchedRowCount = counts.matched,
+            usedSourceByField = counts.usedSnapshot,
+            usedDataFileByField = counts.usedBackfill
           ),
           None
         )
@@ -477,54 +430,12 @@ private[backfill] object BackfillSegmentWrite {
       allocateLogId = allocator
     )
 
-    val readsSnapshotFields = config.readsSnapshotFields
-    val numNewFields = fieldNames.size
-    // Row layout (fixed prefix): [_segment_id, _row_offset, ...newFields,
-    // __bf_matched__, (usedSnapshot, usedBf)*numNewFields in snapshot-reading modes
-    // (coalesce / overwrite) only].
-    val matchFlagIdx = 2 + numNewFields
-    val firstFlagIdx = matchFlagIdx + 1
-
-    var rowCount = 0L
-    var matchedRowCount = 0L
-    val usedSnapshotCounts = Array.fill(numNewFields)(0L)
-    val usedBfCounts = Array.fill(numNewFields)(0L)
     try {
-      // The V2 writer only wants the newField columns; strip the tracking
-      // columns, the match flag, and any snapshot-reading-mode provenance flags
-      // (the match flag + per-field flags are folded into the counters
-      // instead).
-      def projected(row: InternalRow): InternalRow = {
-        val dataEnd = matchFlagIdx
-        val values = (2 until dataEnd)
-          .map(i => row.get(i, targetSchema.fields(i - 2).dataType))
-          .toArray
-        new GenericInternalRow(values)
-      }
-      def countMatch(row: InternalRow): Unit = {
-        if (!row.isNullAt(matchFlagIdx)) matchedRowCount += 1
-        if (readsSnapshotFields) {
-          var i = 0
-          while (i < numNewFields) {
-            val snapshotIdx = firstFlagIdx + 2 * i
-            val bfIdx = snapshotIdx + 1
-            if (!row.isNullAt(snapshotIdx) && row.getBoolean(snapshotIdx))
-              usedSnapshotCounts(i) += 1
-            if (!row.isNullAt(bfIdx) && row.getBoolean(bfIdx))
-              usedBfCounts(i) += 1
-            i += 1
-          }
-        }
-      }
-
-      countMatch(firstRow)
-      writer.write(projected(firstRow))
-      rowCount += 1
-      iter.foreach { row =>
-        countMatch(row)
-        writer.write(projected(row))
-        rowCount += 1
-      }
+      val counts = writeRows(
+        Iterator.single(firstRow) ++ iter,
+        targetSchema,
+        config.readsSnapshotFields
+      )(writer.write)
       val produced: Seq[V2BinlogFile] = writer.close()
 
       val manifestPaths = produced.map(_.path)
@@ -537,18 +448,11 @@ private[backfill] object BackfillSegmentWrite {
           rowCount = pf.rowsWritten
         )
       }
-      val (usedSnapshotByField, usedBfByField) =
-        if (readsSnapshotFields)
-          (
-            fieldNames.zip(usedSnapshotCounts).toMap,
-            fieldNames.zip(usedBfCounts).toMap
-          )
-        else (Map.empty[String, Long], Map.empty[String, Long])
       Iterator.single(
         (
           SegmentBackfillResult(
             segmentId = segmentID,
-            rowCount = rowCount,
+            rowCount = counts.rows,
             manifestPaths = manifestPaths,
             outputPath = outputRoot,
             executionTimeMs = System.currentTimeMillis() - startTime,
@@ -560,10 +464,10 @@ private[backfill] object BackfillSegmentWrite {
                 columnGroups = columnGroupArtifacts
               )
             ),
-            sourceRowCount = rowCount,
-            matchedRowCount = matchedRowCount,
-            usedSourceByField = usedSnapshotByField,
-            usedDataFileByField = usedBfByField
+            sourceRowCount = counts.rows,
+            matchedRowCount = counts.matched,
+            usedSourceByField = counts.usedSnapshot,
+            usedDataFileByField = counts.usedBackfill
           ),
           None
         )
@@ -584,5 +488,57 @@ private[backfill] object BackfillSegmentWrite {
           )
         )
     }
+  }
+
+  private[backfill] final case class RowCounts(
+      rows: Long,
+      matched: Long,
+      usedSnapshot: Map[String, Long],
+      usedBackfill: Map[String, Long]
+  )
+
+  /** Strip the internal columns and count provenance for either storage
+    * version. The input is already in snapshot row order. Count a written row
+    * only after the writer accepts it; a write failure propagates to that
+    * writer's abort.
+    */
+  private[backfill] def writeRows(
+      rows: Iterator[InternalRow],
+      schema: StructType,
+      readsSnapshotFields: Boolean
+  )(write: InternalRow => Unit): RowCounts = {
+    val fields = schema.fields
+    val fieldIndices = fields.indices
+    val matchFlag = 2 + fields.length
+    val usedSnapshot = Array.fill(fields.length)(0L)
+    val usedBackfill = Array.fill(fields.length)(0L)
+    var written = 0L
+    var matched = 0L
+    rows.foreach { row =>
+      val values =
+        fieldIndices.map(i => row.get(i + 2, fields(i).dataType)).toArray
+      if (!row.isNullAt(matchFlag)) matched += 1
+      if (readsSnapshotFields) {
+        var i = 0
+        while (i < fields.length) {
+          val snapshotFlag = matchFlag + 1 + 2 * i
+          val backfillFlag = snapshotFlag + 1
+          if (!row.isNullAt(snapshotFlag) && row.getBoolean(snapshotFlag))
+            usedSnapshot(i) += 1
+          if (!row.isNullAt(backfillFlag) && row.getBoolean(backfillFlag))
+            usedBackfill(i) += 1
+          i += 1
+        }
+      }
+      write(new GenericInternalRow(values))
+      written += 1
+    }
+    val names = schema.fieldNames
+    RowCounts(
+      written,
+      matched,
+      if (readsSnapshotFields) names.zip(usedSnapshot).toMap else Map.empty,
+      if (readsSnapshotFields) names.zip(usedBackfill).toMap else Map.empty
+    )
   }
 }

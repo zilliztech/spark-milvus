@@ -104,48 +104,19 @@ object IndexSearch {
     ef
   }
 
-  /** Searches one group on one index and adds the hits to the merger, waiting
-    * for the answer to be checked and collected before returning: a
-    * [[Pipeline]] of one group.
-    */
-  def run(
-      target: Target,
-      queries: QueryMatrix,
-      excluded: BitSet,
-      k: Int,
-      parameters: Map[String, String],
-      allocator: BufferAllocator,
-      merger: TopKMerger,
-      onProgress: SegmentSearch.Progress => Unit = _ => (),
-      threads: Int = 1
-  ): Unit = {
-    val pipeline = new Pipeline(
-      target,
-      excluded,
-      k,
-      parameters,
-      allocator,
-      queries.queries,
-      threads
-    )
-    try {
-      pipeline.run(queries, merger, onProgress)
-      pipeline.finish(onProgress)
-    } finally pipeline.close()
-  }
-
   /** One segment's index answering query groups, the search of a group
     * overlapping the checking and collecting of the one before.
     *
-    * The task thread calls [[run]] once per group: it searches into one of two
-    * buffer pairs and hands the answer to a single worker thread, which checks
-    * it (and, for a short answer, searches again wider on the same buffers
-    * before it collects), then adds the hits to that group's merger. The two
-    * buffer pairs mean a search can start while the previous answer is still
-    * being read; a third group waits for the first's worker to finish, which on
-    * the profiled chunk it never does, the worker being eight times faster than
-    * the search. Every group's merger is touched by the worker alone until
-    * [[finish]] returns, after which the task thread owns them again.
+    * The task thread calls [[Pipeline.run]] once per group: it searches into
+    * one of two buffer pairs and hands the answer to a single worker thread,
+    * which checks it (and, for a short answer, searches again wider on the same
+    * buffers before it collects), then adds the hits to that group's merger.
+    * The two buffer pairs mean a search can start while the previous answer is
+    * still being read; a third group waits for the first's worker to finish,
+    * which on the profiled chunk it never does, the worker being eight times
+    * faster than the search. Every group's merger is touched by the worker
+    * alone until [[Pipeline.finish]] returns, after which the task thread owns
+    * them again.
     *
     * `maxQueries` sizes the buffers once for the largest group; the exclusion
     * mask is written once for the segment rather than once per group. `threads`

@@ -202,7 +202,7 @@ object MilvusOption {
   // StorageV2 (segment-info storage_version = 2, non-manifest packed parquet).
   // Populated by backfill after decoding the per-segment AVROs + parquet
   // footers; consumed by MilvusDataSource's snapshot planner to create
-  // MilvusV2InputPartition instances.
+  // MilvusInputPartition tasks with column-group layouts.
   val SnapshotV2Segments = "milvus.snapshot.v2.segments"
 
   /** A snapshot JSON in the snapshot directory, as an `s3a://` URI or a key
@@ -284,12 +284,7 @@ object MilvusOption {
   }
 
   def isSnapshotMode(options: Map[String, String]): Boolean = {
-    isSnapshotModeFrom { key =>
-      options.collectFirst {
-        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
-          value
-      }
-    }
+    isSnapshotModeFrom(key => OptionParsing.value(options, key))
   }
 
   def isSnapshotMode(options: CaseInsensitiveStringMap): Boolean = {
@@ -297,12 +292,7 @@ object MilvusOption {
   }
 
   def validateSnapshotModeOptions(options: Map[String, String]): Unit = {
-    validateSnapshotModeOptionsFrom { key =>
-      options.collectFirst {
-        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
-          value
-      }
-    }
+    validateSnapshotModeOptionsFrom(key => OptionParsing.value(options, key))
   }
 
   def validateSnapshotModeOptions(options: CaseInsensitiveStringMap): Unit = {
@@ -324,12 +314,7 @@ object MilvusOption {
     if (dir.startsWith("s3://")) "s3a://" + dir.stripPrefix("s3://") else dir
 
   def backupDir(options: Map[String, String]): Option[String] = {
-    backupDirFrom { key =>
-      options.collectFirst {
-        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
-          value
-      }
-    }
+    backupDirFrom(key => OptionParsing.value(options, key))
   }
 
   def backupDir(options: CaseInsensitiveStringMap): Option[String] = {
@@ -393,12 +378,7 @@ object MilvusOption {
     booleanOption(getOption, ReadApplyDeletes, defaultValue = true)
 
   def readApplyDeletes(options: Map[String, String]): Boolean = {
-    readApplyDeletesFrom { key =>
-      options.collectFirst {
-        case (optionKey, value) if optionKey.equalsIgnoreCase(key) =>
-          value
-      }
-    }
+    readApplyDeletesFrom(key => OptionParsing.value(options, key))
   }
 
   def readApplyDeletes(options: CaseInsensitiveStringMap): Boolean = {
@@ -418,11 +398,7 @@ object MilvusOption {
     booleanOption(getOption, ReadVectorRaw, defaultValue = false)
 
   def readVectorRaw(options: Map[String, String]): Boolean = {
-    readVectorRawFrom { key =>
-      options.collectFirst {
-        case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
-      }
-    }
+    readVectorRawFrom(key => OptionParsing.value(options, key))
   }
 
   def readVectorRaw(options: CaseInsensitiveStringMap): Boolean = {
@@ -474,21 +450,14 @@ object MilvusOption {
   }
 
   def extraColumns(options: Map[String, String]): Seq[String] =
-    extraColumnsFrom { key =>
-      options.collectFirst {
-        case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
-      }
-    }
+    extraColumnsFrom(key => OptionParsing.value(options, key))
 
   def extraColumns(options: CaseInsensitiveStringMap): Seq[String] =
     extraColumnsFrom(key => Option(options.get(key)))
 
   def selectedPartitionIds(options: Map[String, String]): Seq[Long] =
     selectedIdsFrom(
-      key =>
-        options.collectFirst {
-          case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
-        },
+      key => OptionParsing.value(options, key),
       MilvusPartitions
     )
 
@@ -499,10 +468,7 @@ object MilvusOption {
 
   def selectedSegmentIds(options: Map[String, String]): Seq[Long] =
     selectedIdsFrom(
-      key =>
-        options.collectFirst {
-          case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
-        },
+      key => OptionParsing.value(options, key),
       MilvusSegments
     )
 
@@ -511,10 +477,7 @@ object MilvusOption {
 
   def readerFieldIds(options: Map[String, String]): Seq[Long] =
     selectedIdsFrom(
-      key =>
-        options.collectFirst {
-          case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
-        },
+      key => OptionParsing.value(options, key),
       ReaderFieldIDs
     )
 
@@ -522,11 +485,7 @@ object MilvusOption {
     selectedIdsFrom(key => Option(options.get(key)), ReaderFieldIDs)
 
   def readColumnar(options: Map[String, String]): Boolean = {
-    readColumnarFrom { key =>
-      options.collectFirst {
-        case (optionKey, value) if optionKey.equalsIgnoreCase(key) => value
-      }
-    }
+    readColumnarFrom(key => OptionParsing.value(options, key))
   }
 
   def readColumnar(options: CaseInsensitiveStringMap): Boolean = {

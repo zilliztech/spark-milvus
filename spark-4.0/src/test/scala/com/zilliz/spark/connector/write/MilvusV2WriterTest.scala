@@ -7,7 +7,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.spark.connector.options.MilvusOption
+import com.zilliz.spark.connector.options.{MilvusOption, OptionParsing}
 
 class MilvusV2WriterTest extends AnyFunSuite with Matchers {
 
@@ -15,27 +15,33 @@ class MilvusV2WriterTest extends AnyFunSuite with Matchers {
     Seq(StructField("payload", StringType, nullable = true))
   )
 
-  test("parseVariableWidthBytesPerValue accepts finite positive values") {
-    MilvusV2Writer.parseVariableWidthBytesPerValue(
-      Map(MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> "64.5")
+  test("positiveDouble accepts finite positive values") {
+    OptionParsing.positiveDouble(
+      Map(MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> "64.5"),
+      MilvusOption.WriterVariableWidthBytesPerValue,
+      defaultValue = 32.0
     ) shouldBe 64.5
   }
 
   test(
-    "parseVariableWidthBytesPerValue returns default when option is absent"
+    "positiveDouble returns default when option is absent"
   ) {
-    MilvusV2Writer.parseVariableWidthBytesPerValue(
-      Map.empty
+    OptionParsing.positiveDouble(
+      Map.empty,
+      MilvusOption.WriterVariableWidthBytesPerValue,
+      defaultValue = 32.0
     ) shouldBe 32.0
   }
 
-  test("parseVariableWidthBytesPerValue rejects invalid values") {
+  test("positiveDouble rejects invalid values") {
     Seq("0", "-1", "NaN", "Infinity", "-Infinity", "abc").foreach { value =>
       an[IllegalArgumentException] should be thrownBy {
-        MilvusV2Writer.parseVariableWidthBytesPerValue(
+        OptionParsing.positiveDouble(
           Map(
             MilvusOption.WriterVariableWidthBytesPerValue.toLowerCase -> value
-          )
+          ),
+          MilvusOption.WriterVariableWidthBytesPerValue,
+          defaultValue = 32.0
         )
       }
     }

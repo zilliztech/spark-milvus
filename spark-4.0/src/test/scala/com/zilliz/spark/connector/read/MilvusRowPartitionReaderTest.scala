@@ -19,7 +19,6 @@ import com.zilliz.milvus.storage.read.exec.{ReadMetrics, SegmentReader}
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
-import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
 class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
@@ -145,8 +144,8 @@ class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
       allocator: RootAllocator,
       pushedExpression: Option[PredicateExpr] = None
   ): Vector[Long] = {
-    val partition = MilvusV3InputPartition(task, MilvusOption(""))
-    val binding = V3ColumnBinding(partition, sparkSchema)
+    val partition = MilvusInputPartition(task)
+    val binding = ColumnBinding(partition, sparkSchema)
     val fake = new FakeSegmentReader(root)
     val reader = new MilvusRowPartitionReader(
       schema = sparkSchema,

@@ -115,7 +115,12 @@ class ColumnMappingTest
       Seq(Seq(1, "v1", "drop-me"), Seq(2, "v2", "drop-me-2"))
     )
     val mapping = Some(Map("pk" -> "id", "vec" -> "embedding"))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      mapping
+    )
     result.isRight shouldBe true
     val out = result.toOption.get
     out.columns.toSeq should contain theSameElementsAs Seq("id", "embedding")
@@ -130,7 +135,12 @@ class ColumnMappingTest
       Seq(Seq("A1", "B1", 1), Seq("A2", "B2", 2))
     )
     val mapping = Some(Map("a" -> "b", "b" -> "c", "pk" -> "id"))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      mapping
+    )
     result.isRight shouldBe true
     val out = result.toOption.get
     out.columns.toSet shouldBe Set("b", "c", "id")
@@ -147,7 +157,12 @@ class ColumnMappingTest
       Seq(Seq("A1", "B1", 1))
     )
     val mapping = Some(Map("a" -> "b", "b" -> "a", "pk" -> "id"))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      mapping
+    )
     result.isRight shouldBe true
     val out = result.toOption.get
     out.columns.toSet shouldBe Set("a", "b", "id")
@@ -158,7 +173,12 @@ class ColumnMappingTest
 
   test("applyColumnMapping: legacy path renames 'pk' to pkName") {
     val df = buildDf(Seq("pk", "vec"), Seq(Seq(1, "v1")))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", None)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      None
+    )
     result.isRight shouldBe true
     val out = result.toOption.get
     out.columns.toSeq should contain theSameElementsAs Seq("id", "vec")
@@ -166,7 +186,12 @@ class ColumnMappingTest
 
   test("applyColumnMapping: legacy path errors when 'pk' column missing") {
     val df = buildDf(Seq("id", "vec"), Seq(Seq(1, "v1")))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", None)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      None
+    )
     result.isLeft shouldBe true
     result.left.toOption.get shouldBe a[SchemaValidationError]
     result.left.toOption.get.message should include("'pk' column")
@@ -176,7 +201,12 @@ class ColumnMappingTest
     "applyColumnMapping: legacy path errors when both 'pk' and pkName exist"
   ) {
     val df = buildDf(Seq("pk", "id", "vec"), Seq(Seq(1, 2, "v1")))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", None)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      None
+    )
     result.isLeft shouldBe true
     val err = result.left.toOption.get
     err shouldBe a[SchemaValidationError]
@@ -190,7 +220,12 @@ class ColumnMappingTest
   ) {
     val df = buildDf(Seq("pk", "vec"), Seq(Seq(1, "v1")))
     val mapping = Some(Map("pk" -> "id", "missing" -> "x"))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      mapping
+    )
     result.isLeft shouldBe true
     val err = result.left.toOption.get
     err shouldBe a[SchemaValidationError]
@@ -200,7 +235,12 @@ class ColumnMappingTest
   test("applyColumnMapping: explicit mapping with duplicate targets errors") {
     val df = buildDf(Seq("pk", "a", "b"), Seq(Seq(1, "a1", "b1")))
     val mapping = Some(Map("pk" -> "id", "a" -> "x", "b" -> "x"))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      mapping
+    )
     result.isLeft shouldBe true
     val err = result.left.toOption.get
     err shouldBe a[SchemaValidationError]
@@ -210,7 +250,12 @@ class ColumnMappingTest
   test("applyColumnMapping: explicit mapping missing pkName as target errors") {
     val df = buildDf(Seq("pk", "vec"), Seq(Seq(1, "v1")))
     val mapping = Some(Map("pk" -> "wrong_pk", "vec" -> "embedding"))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      mapping
+    )
     result.isLeft shouldBe true
     val err = result.left.toOption.get
     err shouldBe a[SchemaValidationError]
@@ -220,7 +265,12 @@ class ColumnMappingTest
   test("applyColumnMapping: explicit mapping with only pkName target errors") {
     val df = buildDf(Seq("pk"), Seq(Seq(1)))
     val mapping = Some(Map("pk" -> "id"))
-    val result = MilvusBackfill.applyColumnMapping(df, "id", mapping)
+    val result = MilvusBackfill.applyColumnMapping(
+      df,
+      "id",
+      BackfillJoinKey.PrimaryKey,
+      mapping
+    )
     result.isLeft shouldBe true
     val err = result.left.toOption.get
     err shouldBe a[SchemaValidationError]
@@ -248,7 +298,13 @@ class ColumnMappingTest
     )
 
     val prepared = MilvusBackfill
-      .prepareBackfillData(df, resolvedPk("id"), None)
+      .prepareBackfillData(
+        df,
+        resolvedPk("id"),
+        BackfillJoinKey.PrimaryKey,
+        None,
+        Seq.empty
+      )
       .toOption
       .get
 
@@ -275,7 +331,13 @@ class ColumnMappingTest
     val mapping = Some(Map("source_id" -> "id", "vec" -> "embedding"))
 
     val prepared = MilvusBackfill
-      .prepareBackfillData(df, resolvedPk("id"), mapping)
+      .prepareBackfillData(
+        df,
+        resolvedPk("id"),
+        BackfillJoinKey.PrimaryKey,
+        mapping,
+        Seq.empty
+      )
       .toOption
       .get
 
@@ -388,7 +450,13 @@ class ColumnMappingTest
     )
 
     val prepared = MilvusBackfill
-      .prepareBackfillData(df, resolvedPk("id"), None)
+      .prepareBackfillData(
+        df,
+        resolvedPk("id"),
+        BackfillJoinKey.PrimaryKey,
+        None,
+        Seq.empty
+      )
       .toOption
       .get
 
@@ -415,7 +483,13 @@ class ColumnMappingTest
       )
 
       val prepared = MilvusBackfill
-        .prepareBackfillData(df, resolvedPk("id"), None)
+        .prepareBackfillData(
+          df,
+          resolvedPk("id"),
+          BackfillJoinKey.PrimaryKey,
+          None,
+          Seq.empty
+        )
         .toOption
         .get
 
@@ -442,7 +516,13 @@ class ColumnMappingTest
       )
 
       val prepared = MilvusBackfill
-        .prepareBackfillData(df, resolvedPk("id"), None)
+        .prepareBackfillData(
+          df,
+          resolvedPk("id"),
+          BackfillJoinKey.PrimaryKey,
+          None,
+          Seq.empty
+        )
         .toOption
         .get
 
@@ -464,7 +544,13 @@ class ColumnMappingTest
     val df = buildDf(Seq("pk", "vec"), Seq(Seq(1, "v1")))
 
     val prepared = MilvusBackfill
-      .prepareBackfillData(df, resolvedPk(internal), None)
+      .prepareBackfillData(
+        df,
+        resolvedPk(internal),
+        BackfillJoinKey.PrimaryKey,
+        None,
+        Seq.empty
+      )
       .toOption
       .get
 
@@ -482,6 +568,7 @@ class ColumnMappingTest
       .prepareBackfillData(
         df,
         resolvedPk("id"),
+        BackfillJoinKey.PrimaryKey,
         None,
         collectionFieldNames = Seq(defaultAlias)
       )
@@ -516,7 +603,13 @@ class ColumnMappingTest
     )
 
     val prepared = MilvusBackfill
-      .prepareBackfillData(df, joinKey, None)
+      .prepareBackfillData(
+        df,
+        joinKey,
+        BackfillJoinKey.PrimaryKey,
+        None,
+        Seq.empty
+      )
       .toOption
       .get
 

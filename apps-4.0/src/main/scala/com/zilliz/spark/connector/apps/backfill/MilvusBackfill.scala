@@ -5,7 +5,6 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions._
 import org.slf4j.LoggerFactory
 
-import com.zilliz.milvus.client.api.{MilvusClient, MilvusConnectionParams}
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.json.{
@@ -435,6 +434,14 @@ object MilvusBackfill {
       case Right(_) => // Continue
     }
 
+    if (Option(snapshotPath).forall(_.trim.isEmpty)) {
+      return Left(
+        SchemaValidationError(
+          "ADDFIELD backfill requires collection schema from a snapshot"
+        )
+      )
+    }
+
     // One job id for the whole run.
     val runConfig = config.copy(jobId = Some(jobIdFor(config)))
 
@@ -447,80 +454,27 @@ object MilvusBackfill {
 
     logger.info(s"Backfill mode: ${config.mode}")
 
-    // Step 1: Try to load snapshot metadata
-    val snapshotMetadataOpt =
-      loadSnapshotMetadata(snapshotPath, config) match {
-        case Left(error) => return Left(error)
-        case Right(opt)  => opt
-      }
+    val snapshotMetadata = loadSnapshotMetadata(snapshotPath, config) match {
+      case Left(error)     => return Left(error)
+      case Right(metadata) => metadata
+    }
 
-    // Step 1b: Eagerly materialize StorageV2 segments (AVRO manifests +
-    // parquet-footer join) so both the read path (which serializes them into
-    // the DataSource option) and the write path (which dispatches per
-    // segment's storage version) share the same view without hitting S3 twice.
-    val v2Segments: Seq[Segment] =
-      snapshotMetadataOpt match {
-        case Some(meta) if meta.manifestList.nonEmpty =>
-          loadV2Segments(meta, config) match {
-            case Right(segs) => segs
-            case Left(err)   => return Left(err)
-          }
-        case _ => Seq.empty
-      }
-
-    // Step 2: Create Milvus client only if no snapshot is available
-    var client: MilvusClient = null
-    if (snapshotMetadataOpt.isEmpty) {
-      config.joinKey match {
-        case BackfillJoinKey.PhysicalField(name) =>
-          return Left(
-            SchemaValidationError(
-              s"Physical join key '$name' requires a snapshot schema. " +
-                "Provide a snapshot path or use the default primary-key join."
-            )
-          )
-        case BackfillJoinKey.PrimaryKey =>
-      }
-      config.validateForClientMode() match {
-        case Left(error) =>
-          return Left(
-            SchemaValidationError(
-              s"No snapshot provided and invalid client configuration: $error"
-            )
-          )
-        case Right(_) =>
-      }
-      client = MilvusClient(
-        MilvusConnectionParams(
-          uri = config.milvusUri,
-          token = config.milvusToken,
-          databaseName = config.databaseName
-        )
-      )
+    // Materialize V2 segments once so the read and write paths share the
+    // snapshot's Avro manifests and parquet-footer field mapping.
+    val v2Segments = loadV2Segments(snapshotMetadata, config) match {
+      case Left(error)     => return Left(error)
+      case Right(segments) => segments
     }
 
     try {
-      // Step 3: Resolve the configured public join key into the component-based
-      // runtime model used by projection, validation, and join execution.
-      val baseJoinKey = snapshotMetadataOpt match {
-        case Some(metadata) =>
-          resolveJoinKey(metadata.collection.schema, config.joinKey) match {
-            case Left(error) => return Left(error)
-            case Right(key)  => key
-          }
-        case None =>
-          client.getPkField(config.databaseName, config.collectionName) match {
-            case scala.util.Success((name, id)) =>
-              ResolvedJoinKey.primaryKey(name, id, None)
-            case scala.util.Failure(e) =>
-              return Left(
-                ConnectionError(
-                  message = s"Failed to get PK field: ${e.getMessage}",
-                  cause = Some(e)
-                )
-              )
-          }
-      }
+      val baseJoinKey =
+        resolveJoinKey(
+          snapshotMetadata.collection.schema,
+          config.joinKey
+        ) match {
+          case Left(error) => return Left(error)
+          case Right(key)  => key
+        }
       logger.info(
         s"Backfill join key: kind=${baseJoinKey.kind}, " +
           s"fields=${baseJoinKey.fieldNames.mkString(",")}, " +
@@ -545,9 +499,7 @@ object MilvusBackfill {
         baseJoinKey,
         config.joinKey,
         config.columnMapping,
-        snapshotMetadataOpt.toSeq.flatMap(
-          _.collection.schema.fields.map(_.name)
-        )
+        snapshotMetadata.collection.schema.fields.map(_.name)
       ) match {
         case Left(error) => return Left(error)
         case Right(data) => data
@@ -571,13 +523,6 @@ object MilvusBackfill {
         case Right(_)    => // Continue
       }
 
-      val snapshotMetadata = snapshotMetadataOpt.getOrElse {
-        return Left(
-          SchemaValidationError(
-            "ADDFIELD backfill requires collection schema from a snapshot"
-          )
-        )
-      }
       val targetFieldsByName = resolveBackfillTargetFields(
         snapshotMetadata.collection.schema,
         newFieldNames
@@ -665,7 +610,7 @@ object MilvusBackfill {
         spark,
         config,
         joinKey,
-        snapshotMetadataOpt,
+        snapshotMetadata,
         v2Segments,
         extraReadFields
       ) match {
@@ -693,24 +638,13 @@ object MilvusBackfill {
         config.mode
       )
 
-      // Step 4: Get collection metadata (collectionID, segment-to-partition mapping, base paths)
       val (collectionID, segmentToPartitionMap, segmentBasePathMap) =
-        snapshotMetadataOpt match {
-          case Some(metadata) =>
-            extractMetadataFromSnapshot(
-              metadata,
-              v2Segments,
-              config.s3BucketName,
-              config.s3Endpoint
-            )
-          case None =>
-            val (colId, segPartMap) =
-              retrieveMilvusMetadata(config, client) match {
-                case Left(error)     => return Left(error)
-                case Right(metadata) => metadata
-              }
-            (colId, segPartMap, Map.empty[Long, String])
-        }
+        extractMetadataFromSnapshot(
+          snapshotMetadata,
+          v2Segments,
+          config.s3BucketName,
+          config.s3Endpoint
+        )
 
       // Set of segment IDs that are StorageV2 (packed-parquet, no manifest).
       // V3 segments are written through MilvusV3WriterFactory.
@@ -759,9 +693,7 @@ object MilvusBackfill {
         executionTimeMs = executionTime,
         collectionId = collectionID,
         partitionId = resolveResultPartitionId(partitionIDs),
-        schemaVersion = snapshotMetadataOpt
-          .map(_.collection.schema.version)
-          .getOrElse(0),
+        schemaVersion = snapshotMetadata.collection.schema.version,
         newFieldNames = newFieldNames,
         totalBackfillDataRows = backfillRowCount
       )
@@ -778,14 +710,6 @@ object MilvusBackfill {
         logger.error("Backfill operation failed", e)
         Left(BackfillError.fromException(e))
     } finally {
-      if (client != null) {
-        try {
-          client.close()
-        } catch {
-          case e: Exception =>
-            logger.warn("Failed to close Milvus client", e)
-        }
-      }
       if (cachedBackfillDF != null) {
         try {
           cachedBackfillDF.unpersist()
@@ -905,125 +829,49 @@ object MilvusBackfill {
     }
   }
 
-  /** Project the raw backfill DataFrame through a parquet-column → Milvus-field
-    * mapping so downstream code sees column names that match the Milvus schema
-    * exactly (including the PK, which must be named `pkName`).
-    *
-    * When `userMapping` is None, a legacy implicit mapping is synthesized: the
-    * literal `"pk"` column is renamed to `pkName`, every other column is kept
-    * as-is. This preserves the pre-existing contract (parquet must have a `pk`
-    * column plus one or more field columns).
+  /** Resolve the default mapping for the selected join key, validate its
+    * targets, and rename in one projection so chains and swaps stay intact.
     */
   private[backfill] def applyColumnMapping(
       df: DataFrame,
-      pkName: String,
+      joinFieldName: String,
+      joinSpec: BackfillJoinKey,
       userMapping: Option[Map[String, String]]
   ): Either[BackfillError, DataFrame] = {
-    val cols = df.columns.toSeq
-    val colSet = cols.toSet
-
-    val mapping: Map[String, String] = userMapping match {
-      case Some(m) => m
-      case None    =>
-        // Legacy: require a literal "pk" column; transparently rename it to pkName.
-        if (!colSet.contains("pk")) {
+    val columns = df.columns.toSeq
+    val columnSet = columns.toSet
+    val primaryKey = joinSpec == BackfillJoinKey.PrimaryKey
+    val mapping = userMapping.getOrElse {
+      if (primaryKey) {
+        if (!columnSet.contains("pk")) {
           return Left(
             SchemaValidationError(
               "Backfill parquet must contain a 'pk' column (or supply --column-mapping to rename the PK column)"
             )
           )
         }
-        // If the parquet already has a column named pkName, the implicit
-        // {pk→pkName} rename would collide with it. Surface a dedicated error
-        // rather than letting the generic duplicate-target check fire and
-        // reference "column mapping" — users in the legacy path never passed
-        // --column-mapping.
-        if (pkName != "pk" && colSet.contains(pkName)) {
+        if (joinFieldName != "pk" && columnSet.contains(joinFieldName)) {
           return Left(
             SchemaValidationError(
-              s"Backfill parquet contains both a 'pk' column and a column named '$pkName' " +
-                s"(the collection's primary-key field). Remove one, or supply --column-mapping to disambiguate."
+              s"Backfill parquet contains both a 'pk' column and a column named '$joinFieldName' " +
+                "(the collection's primary-key field). Remove one, or supply --column-mapping to disambiguate."
             )
           )
         }
-        cols.map(c => if (c == "pk") c -> pkName else c -> c).toMap
-    }
-
-    // Mapping keys must all exist in the parquet.
-    val missingSrc = mapping.keySet.diff(colSet)
-    if (missingSrc.nonEmpty) {
-      return Left(
-        SchemaValidationError(
-          s"column mapping references parquet columns that don't exist: " +
-            s"${missingSrc.mkString(", ")}. Available: ${cols.mkString(", ")}"
-        )
-      )
-    }
-
-    // Mapping values must be unique; two parquet columns cannot both point at
-    // the same Milvus field.
-    val dupTargets = mapping.values.groupBy(identity).collect {
-      case (k, v) if v.size > 1 => k
-    }
-    if (dupTargets.nonEmpty) {
-      return Left(
-        SchemaValidationError(
-          s"column mapping has duplicate targets: ${dupTargets.mkString(", ")}"
-        )
-      )
-    }
-
-    // The PK field must appear as a target so we can locate it after renaming.
-    if (!mapping.values.toSet.contains(pkName)) {
-      return Left(
-        SchemaValidationError(
-          s"column mapping must include the primary key field '$pkName' as a target"
-        )
-      )
-    }
-
-    // At least one non-pk field must remain.
-    val newFieldTargets = mapping.values.toSet - pkName
-    if (newFieldTargets.isEmpty) {
-      return Left(
-        SchemaValidationError(
-          "column mapping must include at least one non-PK field to backfill"
-        )
-      )
-    }
-
-    // Single-pass aliased select. A foldLeft of withColumnRenamed would rename
-    // sequentially and corrupt chains like {a→b, b→c} (the second rename would
-    // hit the already-renamed column) and swaps like {a→b, b→a}.
-    val orderedKeys = cols.filter(mapping.contains)
-    val renamed = df.select(
-      orderedKeys.map(src => df.col(src).as(mapping(src))): _*
-    )
-    Right(renamed)
-  }
-
-  /** Apply column mapping for an explicitly selected physical join field.
-    * Unlike the legacy primary-key path, an omitted mapping never treats a
-    * literal `pk` column specially: the input must contain the exact selected
-    * field name.
-    */
-  private[backfill] def applyPhysicalJoinColumnMapping(
-      df: DataFrame,
-      joinFieldName: String,
-      userMapping: Option[Map[String, String]]
-  ): Either[BackfillError, DataFrame] = {
-    val columns = df.columns.toSeq
-    val columnSet = columns.toSet
-    val mapping = userMapping.getOrElse {
-      if (!columnSet.contains(joinFieldName)) {
-        return Left(
-          SchemaValidationError(
-            s"Backfill parquet must contain the physical join-key column " +
-              s"'$joinFieldName' (or supply --column-mapping to rename the input key)"
+        columns
+          .map(name => name -> (if (name == "pk") joinFieldName else name))
+          .toMap
+      } else {
+        if (!columnSet.contains(joinFieldName)) {
+          return Left(
+            SchemaValidationError(
+              s"Backfill parquet must contain the physical join-key column " +
+                s"'$joinFieldName' (or supply --column-mapping to rename the input key)"
+            )
           )
-        )
+        }
+        columns.map(name => name -> name).toMap
       }
-      columns.map(name => name -> name).toMap
     }
 
     val missingSources = mapping.keySet.diff(columnSet)
@@ -1035,7 +883,6 @@ object MilvusBackfill {
         )
       )
     }
-
     val duplicateTargets = mapping.values.groupBy(identity).collect {
       case (name, values) if values.size > 1 => name
     }
@@ -1046,50 +893,32 @@ object MilvusBackfill {
         )
       )
     }
-
-    if (!mapping.values.toSet.contains(joinFieldName)) {
+    val targets = mapping.values.toSet
+    if (!targets.contains(joinFieldName)) {
+      val key =
+        if (primaryKey) "the primary key field" else "physical join-key field"
       return Left(
         SchemaValidationError(
-          s"column mapping must include physical join-key field " +
-            s"'$joinFieldName' as a target"
+          s"column mapping must include $key '$joinFieldName' as a target"
         )
       )
     }
-
-    val targetFields = mapping.values.toSet - joinFieldName
-    if (targetFields.isEmpty) {
+    if ((targets - joinFieldName).isEmpty) {
+      val target = if (primaryKey) "non-PK" else "non-join-key"
       return Left(
         SchemaValidationError(
-          "column mapping must include at least one non-join-key field to backfill"
+          s"column mapping must include at least one $target field to backfill"
         )
       )
     }
-
-    val orderedSources = columns.filter(mapping.contains)
     Right(
       df.select(
-        orderedSources.map(source => df.col(source).as(mapping(source))): _*
+        columns
+          .filter(mapping.contains)
+          .map(name => df.col(name).as(mapping(name))): _*
       )
     )
   }
-
-  /** Apply the legacy PK mapping contract, then normalize identity columns to
-    * private join aliases and return target fields explicitly. This overload
-    * remains for existing internal callers and tests.
-    */
-  private[backfill] def prepareBackfillData(
-      df: DataFrame,
-      joinKey: ResolvedJoinKey,
-      userMapping: Option[Map[String, String]],
-      collectionFieldNames: Seq[String] = Seq.empty
-  ): Either[BackfillError, PreparedBackfillData] =
-    prepareBackfillData(
-      df,
-      joinKey,
-      BackfillJoinKey.PrimaryKey,
-      userMapping,
-      collectionFieldNames
-    )
 
   private[backfill] def prepareBackfillData(
       df: DataFrame,
@@ -1099,12 +928,7 @@ object MilvusBackfill {
       collectionFieldNames: Seq[String]
   ): Either[BackfillError, PreparedBackfillData] = {
     val keyColumn = joinKey.fieldNames.head
-    val mappedResult = joinSpec match {
-      case BackfillJoinKey.PrimaryKey =>
-        applyColumnMapping(df, keyColumn, userMapping)
-      case BackfillJoinKey.PhysicalField(_) =>
-        applyPhysicalJoinColumnMapping(df, keyColumn, userMapping)
-    }
+    val mappedResult = applyColumnMapping(df, keyColumn, joinSpec, userMapping)
 
     mappedResult.flatMap { mapped =>
       val mappedColumns = mapped.columns.toSeq
@@ -1220,13 +1044,13 @@ object MilvusBackfill {
     * @param joinKey
     *   Resolved snapshot fields used to match backfill input rows
     * @param snapshotMetadata
-    *   Optional snapshot metadata for offline reading (no client connection)
+    *   Snapshot metadata that pins the collection schema and segments
     */
   private def readCollectionWithMetadata(
       spark: SparkSession,
       config: BackfillConfig,
       joinKey: ResolvedJoinKey,
-      snapshotMetadata: Option[SnapshotJson],
+      snapshotMetadata: SnapshotJson,
       v2Segments: Seq[Segment],
       extraReadFields: Seq[
         (String, Long, org.apache.spark.sql.types.StructField)
@@ -1234,98 +1058,80 @@ object MilvusBackfill {
   ): Either[BackfillError, DataFrame] = {
     try {
       var options = config.getMilvusReadOptions
-      val allFieldIds = (joinKey.fieldIds ++ extraReadFields.map(_._2)).distinct
-      options =
-        options + (MilvusOption.ReaderFieldIDs -> allFieldIds.mkString(","))
       // Backfill writes one value per physical snapshot row. Applying deletes
       // would remove rows and invalidate _row_offset-based field alignment.
       options = options + (MilvusOption.ReadApplyDeletes ->
         ApplyDeletesToSnapshotRows.toString)
 
-      // If snapshot metadata is available, use snapshot-based reading (no client calls)
-      snapshotMetadata.foreach { metadata =>
-        // Enable snapshot mode flag
-        options = options + (MilvusOption.SnapshotMode -> "true")
+      // Enable snapshot mode flag
+      options = options + (MilvusOption.SnapshotMode -> "true")
 
-        // Override connection options for snapshot mode (no client needed)
-        options = options + ("milvus.uri" -> "dummy://snapshot-mode")
-        options =
-          options + ("milvus.collection.name" -> metadata.collection.schema.name)
+      // Override connection options for snapshot mode (no client needed)
+      options = options + ("milvus.uri" -> "dummy://snapshot-mode")
+      options =
+        options + ("milvus.collection.name" -> snapshotMetadata.collection.schema.name)
 
-        // Add snapshot collection ID
-        options =
-          options + (MilvusOption.SnapshotCollectionId -> metadata.snapshotInfo.collectionId.toString)
+      // Add snapshot collection ID
+      options =
+        options + (MilvusOption.SnapshotCollectionId -> snapshotMetadata.snapshotInfo.collectionId.toString)
 
-        // Add snapshot partition IDs
-        options =
-          options + (MilvusOption.SnapshotPartitionIds -> metadata.snapshotInfo.partitionIds
-            .mkString(","))
+      // Add snapshot partition IDs
+      options =
+        options + (MilvusOption.SnapshotPartitionIds -> snapshotMetadata.snapshotInfo.partitionIds
+          .mkString(","))
 
-        // Convert snapshot schema to protobuf bytes and pass as Base64
-        val schemaBytes =
-          metadata.collection.schema.toProtobufBytes
-        val schemaBytesBase64 =
-          java.util.Base64.getEncoder.encodeToString(schemaBytes)
-        options =
-          options + (MilvusOption.SnapshotSchemaBytes -> schemaBytesBase64)
+      // Convert snapshot schema to protobuf bytes and pass as Base64
+      val schemaBytes =
+        snapshotMetadata.collection.schema.toProtobufBytes
+      val schemaBytesBase64 =
+        java.util.Base64.getEncoder.encodeToString(schemaBytes)
+      options =
+        options + (MilvusOption.SnapshotSchemaBytes -> schemaBytesBase64)
 
-        metadata.storageV2ManifestList.foreach { manifestList =>
-          // Pass original manifest JSON (containing both ver and base_path) so that
-          // the DataSource can extract readVersion and lock reads to snapshot version
-          if (manifestList.nonEmpty) {
-            val manifestJson =
-              SegmentListJson.encodeManifestItems(manifestList)
-            options = options + (MilvusOption.SnapshotManifests -> manifestJson)
-          } else {
-            logger.warn("No valid manifests found in snapshot")
-          }
-        }
-
-        // Pre-loaded StorageV2 (non-manifest packed parquet) segments — hand
-        // them to the DataSource via SnapshotV2Segments so planner can emit
-        // MilvusV2InputPartitions. Loading itself happened earlier in
-        // `run()` via `loadV2Segments`.
-        if (v2Segments.nonEmpty) {
-          val segJson = SegmentListJson.encodeV2Segments(v2Segments)
-          options = options + (MilvusOption.SnapshotV2Segments -> segJson)
-          logger.info(
-            s"Attached ${v2Segments.size} StorageV2 packed segment(s) to read options"
-          )
+      snapshotMetadata.storageV2ManifestList.foreach { manifestList =>
+        // Pass original manifest JSON (containing both ver and base_path) so that
+        // the DataSource can extract readVersion and lock reads to snapshot version
+        if (manifestList.nonEmpty) {
+          val manifestJson =
+            SegmentListJson.encodeManifestItems(manifestList)
+          options = options + (MilvusOption.SnapshotManifests -> manifestJson)
+        } else {
+          logger.warn("No valid manifests found in snapshot")
         }
       }
 
-      // Build schema from snapshot if available (for snapshot mode)
-      val df = snapshotMetadata match {
-        case Some(_) =>
-          // The supplied schema and ReaderFieldIDs must stay in the same order.
-          // The component sequence also supports future logical/composite key
-          // resolvers.
-          val projection =
-            buildSnapshotReadProjection(joinKey, extraReadFields) match {
-              case Left(error)  => return Left(error)
-              case Right(value) => value
-            }
-          options =
-            options + (MilvusOption.ReaderFieldIDs -> projection.fieldIds
-              .mkString(","))
-
-          logger.info(
-            s"Reading with schema: ${projection.schema.fieldNames.mkString(", ")}"
-          )
-
-          spark.read
-            .schema(projection.schema)
-            .format("com.zilliz.spark.connector.sources.MilvusDataSource")
-            .options(options)
-            .load()
-
-        case None =>
-          // Client-based mode (existing behavior)
-          spark.read
-            .format("com.zilliz.spark.connector.sources.MilvusDataSource")
-            .options(options)
-            .load()
+      // Pre-loaded StorageV2 (non-manifest packed parquet) segments — hand
+      // them to the DataSource via SnapshotV2Segments so planner can emit
+      // MilvusInputPartitions. Loading itself happened earlier in
+      // `run()` via `loadV2Segments`.
+      if (v2Segments.nonEmpty) {
+        val segJson = SegmentListJson.encodeV2Segments(v2Segments)
+        options = options + (MilvusOption.SnapshotV2Segments -> segJson)
+        logger.info(
+          s"Attached ${v2Segments.size} StorageV2 packed segment(s) to read options"
+        )
       }
+
+      // The supplied schema and ReaderFieldIDs must stay in the same order.
+      // The component sequence also supports future logical/composite key
+      // resolvers.
+      val projection =
+        buildSnapshotReadProjection(joinKey, extraReadFields) match {
+          case Left(error)  => return Left(error)
+          case Right(value) => value
+        }
+      options = options + (MilvusOption.ReaderFieldIDs -> projection.fieldIds
+        .mkString(","))
+
+      logger.info(
+        s"Reading with schema: ${projection.schema.fieldNames.mkString(", ")}"
+      )
+
+      val df = spark.read
+        .schema(projection.schema)
+        .format("com.zilliz.spark.connector.sources.MilvusDataSource")
+        .options(options)
+        .load()
 
       val missingSnapshotJoinColumns =
         joinKey.fieldNames.filterNot(df.columns.contains)
@@ -1626,58 +1432,6 @@ object MilvusBackfill {
     }
   }
 
-  /** Retrieve Milvus metadata (collection ID and segment-to-partition mapping)
-    * Supports multi-partition collections by tracking partition ID for each
-    * segment
-    */
-  private def retrieveMilvusMetadata(
-      config: BackfillConfig,
-      client: MilvusClient
-  ): Either[BackfillError, (Long, Map[Long, Long])] = {
-    try {
-      val segments = client
-        .getSegments(config.databaseName, config.collectionName)
-        .getOrElse {
-          return Left(
-            ConnectionError(
-              message =
-                s"No segments found for collection ${config.collectionName}"
-            )
-          )
-        }
-
-      if (segments.isEmpty) {
-        return Left(
-          ConnectionError(
-            message = s"Collection ${config.collectionName} has no segments"
-          )
-        )
-      }
-
-      val collectionID = segments.head.collectionID
-
-      // Build mapping of segment ID -> partition ID to support multi-partition collections
-      val segmentToPartitionMap = segments.map { seg =>
-        seg.segmentID -> seg.partitionID
-      }.toMap
-
-      Right((collectionID, segmentToPartitionMap))
-
-    } catch {
-      case e: Exception =>
-        logger.error(
-          s"Failed to retrieve Milvus metadata for collection ${config.collectionName}",
-          e
-        )
-        Left(
-          ConnectionError(
-            message = s"Failed to retrieve Milvus metadata: ${e.getMessage}",
-            cause = Some(e)
-          )
-        )
-    }
-  }
-
   /** Workaround until Milvus snapshot exposes `FieldBinlog.child_fields`: when
     * the same Milvus fieldID is claimed by multiple V2 column groups (e.g. an
     * original multi-field group at slot < 100 PLUS a single-field group at slot
@@ -1781,20 +1535,15 @@ object MilvusBackfill {
     }
   }
 
-  /** Load and parse snapshot metadata from file. Returns None if snapshot path
-    * is empty. Returns Left(error) if snapshot path is provided but parsing
-    * fails.
-    */
+  /** Load the required snapshot, reporting read and parse failures. */
   private def loadSnapshotMetadata(
       snapshotPath: String,
       config: BackfillConfig
-  ): Either[BackfillError, Option[SnapshotJson]] = {
-    if (snapshotPath == null || snapshotPath.isEmpty) return Right(None)
-
+  ): Either[BackfillError, SnapshotJson] = {
     BackfillStorage.readSnapshotJson(snapshotPath, config) match {
       case Right(json) if json.nonEmpty =>
         SnapshotJson.parse(json) match {
-          case Right(metadata) => Right(Some(metadata))
+          case Right(metadata) => Right(metadata)
           case Left(e) =>
             Left(
               SchemaValidationError(

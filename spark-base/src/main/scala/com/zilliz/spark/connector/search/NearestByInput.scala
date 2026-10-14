@@ -209,7 +209,7 @@ private[connector] object NearestByInput {
   }
 
   /** A DataFrame input: the dimension the queries make, an exact scan of the
-    * base's rows, and the hit rows carrying the base row after the query id.
+    * base's rows, and each query id with its requested base columns.
     */
   private def dataFrame(
       spark: SparkSession,
@@ -240,8 +240,8 @@ private[connector] object NearestByInput {
         queries: SearchQueries.Input,
         dimension: Int,
         required: Option[Array[Long]]
-    ): RDD[(Long, InternalRow)] = {
-      val hits = FrameSearch.execute(
+    ): RDD[(Long, InternalRow)] =
+      FrameSearch.execute(
         spark,
         queries,
         input.base,
@@ -253,13 +253,11 @@ private[connector] object NearestByInput {
         SearchMetrics.of(metrics),
         required
       )
-      outputRows(hits, input.base.types.indices.map(_ + 1))
-    }
 
     override def segments(searched: Long): Map[String, Long] = Map.empty
   }
 
-  /** Input-specific candidate columns stop here. Rows may enter a shuffle or be
+  /** Milvus candidate columns stop here. Rows may enter a shuffle or be
     * retained by the join, so each projected output owns its bytes.
     */
   private def outputRows(

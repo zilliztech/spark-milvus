@@ -71,12 +71,22 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     ) shouldBe Seq(SearchPlan.QueryGroup(0, 4))
   }
 
-  test("a task keeps the segment set the planner sized for it") {
-    val set = Seq(task(1L, 100L), task(2L, 250L))
+  test("the plan reports kept bytes and reserves query space separately") {
+    val plan = SearchPlan.of(
+      Seq(task(1L, 100L), task(2L, 250L)),
+      layout,
+      concurrency = 1,
+      queries = 1,
+      k = 1,
+      groupMaxBytes = 4000L,
+      budget = SearchPlan.Budget(10000L, 0L),
+      footprint = vectors,
+      shuffled = false
+    )
 
-    SearchPlan.retainedBytes(set, layout, 1L << 31) shouldBe 350L * 16L
-    SearchPlan.retainedBytes(set, layout, 1000L) shouldBe 1000L
-    SearchPlan.retainedBytes(Seq.empty, layout, 1000L) shouldBe 16L
+    plan.resident shouldBe SearchPlan.Resident.Segments
+    plan.kept shouldBe Seq(Some(350L * 16L))
+    plan.capacity shouldBe 10000L - 16L
   }
 
   test("segments are balanced over the sets by the bytes they hold") {
@@ -92,7 +102,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
         tasks,
         slots = 2,
         capacity = 1L << 31,
-        size = SearchPlan.vectorBytes(layout, 1L << 31)
+        size = segment => vectors(segment).kept.get
       )
 
     segments(sets) shouldBe Seq(Seq(1L), Seq(2L, 3L, 4L))
@@ -113,12 +123,12 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
         tasks,
         slots = 1,
         capacity = 4000L,
-        size = SearchPlan.vectorBytes(layout, 4000L)
+        size = segment => vectors(segment).kept.get
       )
 
     segments(sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
     sets.foreach(set =>
-      SearchPlan.retainedBytes(set, layout, 4000L) should be <= 4000L
+      set.map(segment => vectors(segment).kept.get).sum should be <= 4000L
     )
   }
 
@@ -130,10 +140,11 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
         tasks,
         slots = 1,
         capacity = 4000L,
-        size = SearchPlan.vectorBytes(layout, 4000L)
+        size = segment => vectors(segment).kept.get
       )
 
     segments(sets) shouldBe Seq(Seq(1L), Seq(2L))
+    vectors(tasks.head).kept shouldBe Some(8000L)
   }
 
   test(
@@ -146,7 +157,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
         tasks,
         slots = 8,
         capacity = 1L << 31,
-        size = SearchPlan.vectorBytes(layout, 1L << 31)
+        size = segment => vectors(segment).kept.get
       )
     ) shouldBe Seq(Seq(1L), Seq(2L))
   }
@@ -160,12 +171,12 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       tasks,
       slots = 8,
       capacity = 9600L,
-      size = SearchPlan.vectorBytes(layout, 9600L)
+      size = segment => vectors(segment).kept.get
     )
     sets.size shouldBe 16
     sets.map(_.size).sum shouldBe 74
     sets.foreach(set =>
-      SearchPlan.retainedBytes(set, layout, 9600L) should be <= 9600L
+      set.map(segment => vectors(segment).kept.get).sum should be <= 9600L
     )
     // Fewer segments than a wave stay one per set; a whole number of waves is
     // left alone.
@@ -174,7 +185,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
         tasks.take(5),
         slots = 8,
         capacity = 9600L,
-        size = SearchPlan.vectorBytes(layout, 9600L)
+        size = segment => vectors(segment).kept.get
       )
       .size shouldBe 5
     SearchPlan
@@ -182,7 +193,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
         tasks,
         slots = 8,
         capacity = 8000L,
-        size = SearchPlan.vectorBytes(layout, 8000L)
+        size = segment => vectors(segment).kept.get
       )
       .size shouldBe 16
   }
@@ -191,50 +202,10 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
     SearchPlan.Segment(segmentId, None)
 
   test("segments without a row count still spread over the sets") {
-    val tasks = Seq(unsized(1L), unsized(2L))
-
-    segments(
-      SearchPlan.segmentSets(
-        tasks,
-        slots = 2,
-        capacity = 1L << 31,
-        size = SearchPlan.vectorBytes(layout, 1L << 31)
-      )
-    ) shouldBe Seq(Seq(1L), Seq(2L))
-  }
-
-  test("a segment without a row count is planned at half the budget") {
-    // Four unsized segments at 2000 bytes each fill two sets of 4000; before,
-    // they counted as nothing and all four went into one set.
-    val tasks = Seq(unsized(1L), unsized(2L), unsized(3L), unsized(4L))
-
-    val sets =
-      SearchPlan.segmentSets(
-        tasks,
-        slots = 1,
-        capacity = 4000L,
-        size = SearchPlan.vectorBytes(layout, 4000L)
-      )
-
-    segments(sets) shouldBe Seq(Seq(1L, 3L), Seq(2L, 4L))
-    SearchPlan.retainedBytes(sets.head, layout, 4000L) shouldBe 4000L
-    // An unsized segment beside sized ones takes 2000 bytes of room: 2400,
-    // 2000 and 1600 bytes need two sets, and the 1600 join the lighter one.
-    segments(
-      SearchPlan.segmentSets(
-        Seq(task(1L, 150L), unsized(2L), task(3L, 100L)),
-        slots = 1,
-        capacity = 4000L,
-        size = SearchPlan.vectorBytes(layout, 4000L)
-      )
-    ) shouldBe Seq(Seq(1L), Seq(2L, 3L))
-  }
-
-  test("the plan names the segments it estimated, and a set's known bytes") {
     val plan = SearchPlan.of(
-      Seq(task(1L, 10L), unsized(2L), task(3L, 10L)),
+      Seq(unsized(1L), unsized(2L)),
       layout,
-      concurrency = 1,
+      concurrency = 2,
       queries = 1,
       k = 1,
       groupMaxBytes = 4000L,
@@ -243,11 +214,60 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       shuffled = false
     )
 
-    plan.estimated shouldBe Seq(2L)
-    SearchPlan.knownBytes(Seq(task(1L, 10L), task(3L, 10L)), layout) shouldBe
-      Some(320L)
-    SearchPlan.knownBytes(Seq(task(1L, 10L), unsized(2L)), layout) shouldBe None
-    SearchPlan.knownBytes(Seq.empty, layout) shouldBe Some(0L)
+    segments(plan.sets) shouldBe Seq(Seq(1L), Seq(2L))
+  }
+
+  test("a segment without a row count is planned at half the budget") {
+    // Each unsized segment counts as 2000 bytes. The query matrix takes 16
+    // bytes beside the set, so two estimates do not fit the remaining 3984.
+    val tasks = Seq(unsized(1L), unsized(2L), unsized(3L), unsized(4L))
+
+    def plan(segments: Seq[SearchPlan.Segment]): SearchPlan.Plan =
+      SearchPlan.of(
+        segments,
+        layout,
+        concurrency = 1,
+        queries = 1,
+        k = 1,
+        groupMaxBytes = 4000L,
+        budget = SearchPlan.Budget(4000L, 0L),
+        footprint = vectors,
+        shuffled = false
+      )
+
+    val unknown = plan(tasks)
+    unknown.capacity shouldBe 3984L
+    segments(unknown.sets) shouldBe Seq(Seq(1L), Seq(2L), Seq(3L), Seq(4L))
+    unknown.kept shouldBe Seq.fill(4)(None)
+    unknown.estimated shouldBe Seq(1L, 2L, 3L, 4L)
+    unknown.needs.get.segmentsOffHeap shouldBe 2016L
+    // An unsized segment beside sized ones takes 2000 bytes of room: 2400,
+    // 2000 and 1600 bytes need two sets, and the 1600 join the lighter one.
+    segments(
+      plan(Seq(task(1L, 150L), unsized(2L), task(3L, 100L))).sets
+    ) shouldBe Seq(Seq(1L), Seq(2L, 3L))
+  }
+
+  test("the plan names the segments it estimated, and a set's known bytes") {
+    def plan(segments: Seq[SearchPlan.Segment]): SearchPlan.Plan =
+      SearchPlan.of(
+        segments,
+        layout,
+        concurrency = 1,
+        queries = 1,
+        k = 1,
+        groupMaxBytes = 4000L,
+        budget = SearchPlan.Budget(1L << 31, 0L),
+        footprint = vectors,
+        shuffled = false
+      )
+
+    val unknown = plan(Seq(task(1L, 10L), unsized(2L), task(3L, 10L)))
+    unknown.estimated shouldBe Seq(2L)
+    unknown.kept shouldBe Seq(None)
+    val known = plan(Seq(task(1L, 10L), task(3L, 10L)))
+    known.estimated shouldBe empty
+    known.kept shouldBe Seq(Some(320L))
   }
 
   test("a search over no segments plans no tasks") {
@@ -255,21 +275,21 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       Seq.empty,
       slots = 4,
       capacity = 1L << 31,
-      size = SearchPlan.vectorBytes(layout, 1L << 31)
+      size = segment => vectors(segment).kept.get
     ) shouldBe empty
-    SearchPlan
-      .of(
-        Seq.empty,
-        layout,
-        concurrency = 4,
-        queries = 2,
-        k = 5,
-        groupMaxBytes = 2800L,
-        budget = SearchPlan.Budget(1L << 31, 0L),
-        footprint = vectors,
-        shuffled = false
-      )
-      .tasks shouldBe 0
+    val plan = SearchPlan.of(
+      Seq.empty,
+      layout,
+      concurrency = 4,
+      queries = 2,
+      k = 5,
+      groupMaxBytes = 2800L,
+      budget = SearchPlan.Budget(1L << 31, 0L),
+      footprint = vectors,
+      shuffled = false
+    )
+    plan.tasks shouldBe 0
+    plan.kept shouldBe empty
   }
 
   test("every segment set answers every query group") {

@@ -8,20 +8,12 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions.{
   Expression,
   GenericInternalRow,
-  JoinedRow,
   UnsafeProjection,
   UnsafeRow
 }
 import org.apache.spark.sql.catalyst.util.ArrayData
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.types.{
-  ArrayType,
-  DataType,
-  FloatType,
-  LongType,
-  StructField,
-  StructType
-}
+import org.apache.spark.sql.types.{ArrayType, DataType, FloatType}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.unsafe.Platform
 
@@ -75,9 +67,9 @@ private[connector] object FrameSearch extends Logging {
     def types: Seq[DataType] = projection.map(_.dataType)
   }
 
-  /** Each searched query's best k base rows, as rows of the query id followed
-    * by the base row. With `required`, an id that found nothing has a row with
-    * the base columns NULL, as a Milvus table input's search gives it.
+  /** Each searched query's id with its best k base rows, each owning its bytes.
+    * With `required`, an id that found nothing has a row with the base columns
+    * NULL, as a Milvus table input's search gives it.
     *
     * @param queries
     *   the searched queries, numbered by the caller, every vector `dimension`
@@ -94,21 +86,21 @@ private[connector] object FrameSearch extends Logging {
       limits: SearchLimits,
       metrics: SearchMetrics,
       required: Option[Array[Long]]
-  ): SearchMerge.Hits = {
+  ): RDD[(Long, InternalRow)] = {
     val layout = VectorLayout(VectorElementType.Float32, dimension)
-    val types = base.projection.map(_.dataType)
-    val schema = StructType(
-      StructField(SearchQueries.IdColumn, LongType, nullable = false) +:
-        types.zipWithIndex.map { case (dataType, at) =>
-          StructField(s"base_$at", dataType, nullable = true)
-        }
-    )
+    val types = base.types
+    val width = types.size
+    val absent: Long => (Long, InternalRow) =
+      id => id -> new GenericInternalRow(width)
     val queryCount = queries.count
     if (queryCount == 0L)
-      return SearchMerge.Hits(
-        SearchMerge.missing(spark, required, schema.size),
-        schema
-      )
+      return required match {
+        case None => spark.sparkContext.emptyRDD[(Long, InternalRow)]
+        case Some(ids) =>
+          spark.sparkContext
+            .parallelize(ids.toSeq, math.max(1, math.min(ids.length, 64)))
+            .map(absent)
+      }
     require(
       queryCount <= Int.MaxValue,
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
@@ -169,18 +161,15 @@ private[connector] object FrameSearch extends Logging {
     )
     // Here every candidate carries its row.
     val parts = execution.mergePartitions
-    val width = types.size
-    val hitWidth = schema.size
-    val rows = SearchMerge.byQuery[InternalRow](
+    SearchMerge.byQuery[(Long, InternalRow)](
       spark,
       candidates,
       parts,
       CarriedCandidates.merge(_, _, k, metric),
       carried(_, _, width),
       required,
-      SearchMerge.absentRow(_, hitWidth)
+      absent
     )
-    SearchMerge.Hits(rows, schema)
   }
 
   /** The bytes one base row takes as an `UnsafeRow`: its fixed part, and for a
@@ -371,21 +360,19 @@ private[connector] object FrameSearch extends Logging {
     }
   }
 
-  /** One query's merged answer as rows of the query id and the base row. */
-  private def carried(
+  /** Each merged base row owns its bytes when retained by the join. */
+  private[search] def carried(
       query: Long,
       packed: Array[Byte],
       width: Int
-  ): Iterator[InternalRow] = {
-    val rows = Vector.newBuilder[InternalRow]
+  ): Iterator[(Long, InternalRow)] = {
+    val rows = Vector.newBuilder[UnsafeRow]
     CarriedCandidates.foreach(packed) { (_, _, _, at, length) =>
       val row = new UnsafeRow(width)
       row.pointTo(packed, Platform.BYTE_ARRAY_OFFSET + at, length)
-      val id = new GenericInternalRow(1)
-      id.setLong(0, query)
-      rows += new JoinedRow(id, row)
+      rows += row
     }
-    rows.result().iterator
+    rows.result().iterator.map(row => query -> row.copy())
   }
 
   /** One task for every base partition and query group: task `i` computes base

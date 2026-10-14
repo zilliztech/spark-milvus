@@ -77,18 +77,18 @@ class MilvusPartitionReaderFactoryTest extends AnyFunSuite {
   )
 
   private def v3(milvusOption: MilvusOption = options) =
-    MilvusV3InputPartition(
+    MilvusInputPartition(
       task(SegmentLayout.Manifest("files/seg")),
-      milvusOption
+      milvusOption.milvusFilter
     )
 
-  private def v2(milvusOption: MilvusOption = options) = MilvusV2InputPartition(
+  private def v2(milvusOption: MilvusOption = options) = MilvusInputPartition(
     task(
       SegmentLayout.ColumnGroups(
         Seq(V2ColumnGroup(Seq(100L), Seq("a.parquet"), Seq(10L)))
       )
     ),
-    milvusOption
+    milvusOption.milvusFilter
   )
 
   private def factory(
