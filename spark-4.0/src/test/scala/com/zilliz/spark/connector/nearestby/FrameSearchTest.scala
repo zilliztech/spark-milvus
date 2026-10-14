@@ -10,8 +10,10 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.{ArrayType, FloatType, LongType, StringType}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.unsafe.types.UTF8String
+import org.scalatest.concurrent.Eventually
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import org.scalatest.time.{Seconds, Span}
 import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.jni.vector.NativeVectorLibrary
@@ -39,7 +41,11 @@ import com.zilliz.spark.connector.search.{
   * (docs/design/architecture/dataframe-api.html section 4). The answer is a
   * brute-force search's.
   */
-class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
+class FrameSearchTest
+    extends AnyFunSuite
+    with Matchers
+    with BeforeAndAfterAll
+    with Eventually {
 
   private var available = true
   private var spark: SparkSession = _
@@ -121,45 +127,67 @@ class FrameSearchTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
         if (held) NearestByQueryRows.Held(queryRows.toArray)
         else
           NearestByQueryRows.Computed(
-            spark.sparkContext.parallelize(queryRows, 3)
+            spark.sparkContext
+              .parallelize(queryRows, 3)
+              .union(spark.sparkContext.parallelize(Seq.empty[InternalRow], 2))
           )
       val metrics = NearestByMetrics.create(spark.sparkContext)
-      val rows = NearestBySearch
-        .run(
-          spark,
-          queries,
-          Seq(StringType, vectorType),
-          BoundReference(1, vectorType, nullable = true),
-          NearestByInput.Frame(
-            FrameSearch.Base(
-              base,
-              types.zipWithIndex.map { case (dataType, i) =>
-                BoundReference(i, dataType, nullable = true)
-              },
-              BoundReference(1, vectorType, nullable = true)
+      val context = spark.sparkContext
+      val preparation = s"prepare-frame-queries-$held-$outer"
+      val collection = s"collect-frame-queries-$held-$outer"
+      context.setJobGroup(preparation, "Prepare query groups")
+      val result =
+        try {
+          NearestBySearch.run(
+            spark,
+            queries,
+            Seq(StringType, vectorType),
+            BoundReference(1, vectorType, nullable = true),
+            NearestByInput.Frame(
+              FrameSearch.Base(
+                base,
+                types.zipWithIndex.map { case (dataType, i) =>
+                  BoundReference(i, dataType, nullable = true)
+                },
+                BoundReference(1, vectorType, nullable = true)
+              ),
+              limits
             ),
-            limits
-          ),
-          outer = outer,
-          approx = false,
-          k = k,
-          metric = MetricType.L2,
-          outputTypes = Seq(StringType, vectorType, LongType, vectorType),
-          function = ConnectorVectorRanking(
-            MetricType.L2,
-            "vector_l2_distance",
-            queryFirst = true
-          ),
-          bySpark = _ => fail("no query row is Spark's"),
-          metrics = metrics
-        )
-        .map(row =>
-          row.getUTF8String(0).toString ->
-            (if (row.isNullAt(2)) -1L else row.getLong(2))
-        )
-        .collect()
-        .toSeq
-        .sorted
+            outer = outer,
+            approx = false,
+            k = k,
+            metric = MetricType.L2,
+            outputTypes = Seq(StringType, vectorType, LongType, vectorType),
+            function = ConnectorVectorRanking(
+              MetricType.L2,
+              "vector_l2_distance",
+              queryFirst = true
+            ),
+            bySpark = _ => fail("no query row is Spark's"),
+            metrics = metrics
+          )
+        } finally context.clearJobGroup()
+      context.setJobGroup(collection, "Collect joined rows")
+      val rows =
+        try {
+          result
+            .map(row =>
+              row.getUTF8String(0).toString ->
+                (if (row.isNullAt(2)) -1L else row.getLong(2))
+            )
+            .collect()
+            .toSeq
+            .sorted
+        } finally context.clearJobGroup()
+      // Seeing the later collection job means the status listener has also
+      // consumed every preparation job's start event.
+      eventually(timeout(Span(10, Seconds))) {
+        context.statusTracker.getJobIdsForGroup(collection) should not be empty
+      }
+      // Classification and dense group positions need one job each; stable
+      // association ids must not count the cached query rows a third time.
+      context.statusTracker.getJobIdsForGroup(preparation).length shouldBe
+        (if (held) 0 else 2)
       rows shouldBe bruteForce(k, outer)
       metrics(SearchMetrics.Candidates).value shouldBe
         queryVectors.size.toLong * 4L * k

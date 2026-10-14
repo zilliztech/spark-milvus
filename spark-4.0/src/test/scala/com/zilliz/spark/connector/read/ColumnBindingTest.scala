@@ -1,15 +1,22 @@
 package com.zilliz.spark.connector.read
 
+import java.nio.file.Files
 import scala.collection.JavaConverters._
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import org.apache.arrow.memory.RootAllocator
+import org.apache.arrow.vector.types.pojo.Schema
+import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.jni.storage.NativeStorageLibrary
+import com.zilliz.milvus.storage.codec.BinlogCodec
 import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.read.plan.{DeleteSource, SegmentReadTask}
-import com.zilliz.milvus.storage.snapshot.SegmentLayout
+import com.zilliz.milvus.storage.snapshot.{DeltaLogFile, SegmentLayout}
 import com.zilliz.milvus.storage.snapshot.V2ColumnGroup
 import com.zilliz.spark.connector.options.MilvusOption
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -359,5 +366,72 @@ class ColumnBindingTest extends AnyFunSuite with Matchers {
     // lookup, no column lookup, no exception when neither is loaded.
     v2().isDeleted(null, 0) shouldBe false
     v3().isDeleted(null, 0) shouldBe false
+  }
+
+  test("valid empty delete files keep a narrow V2 projection readable") {
+    try NativeStorageLibrary.load()
+    catch {
+      case missing: UnsatisfiedLinkError =>
+        cancel("the native storage library is not available", missing)
+    }
+    val directory = Files.createTempDirectory("empty-delete-plan-")
+    val file = directory.resolve("empty.binlog")
+    val bytes = BinlogCodec.envelope(
+      2,
+      10L,
+      20L,
+      30L,
+      100L,
+      DataType.Int64.value,
+      new ObjectMapper().createObjectNode().put("version", "MULTI_FIELD"),
+      Array.emptyByteArray
+    )
+    def binding = ColumnBinding(
+      MilvusInputPartition(
+        task(
+          SegmentLayout.ColumnGroups(columnGroups),
+          DeleteSource.Files(Seq(DeltaLogFile(1L, "empty.binlog", 0L)))
+        ).copy(
+          properties = Map(
+            "fs.storage_type" -> "local",
+            "fs.root_path" -> directory.toString
+          ),
+          neededFieldIds = Seq(101L)
+        ),
+        options.milvusFilter
+      ),
+      StructType(Seq(dataSchema("vec")))
+    )
+    try {
+      Files.write(file, bytes)
+      val setup = binding
+      setup.appliesDeletes shouldBe true
+      setup.neededColumns shouldBe Seq("vec")
+      setup.deletePlan.isEmpty shouldBe true
+      val allocator = new RootAllocator()
+      val root = VectorSchemaRoot.create(
+        new Schema(
+          setup.arrowSchema.getFields.asScala.filter(_.getName == "vec").asJava
+        ),
+        allocator
+      )
+      try {
+        root.allocateNew()
+        root.setRowCount(2)
+        (0 until root.getRowCount).foreach(row =>
+          setup.isDeleted(root, row) shouldBe false
+        )
+      } finally {
+        root.close()
+        allocator.close()
+      }
+      Files.write(file, bytes.take(10))
+      an[IllegalStateException] should be thrownBy binding.isDeleted(null, 0)
+      Files.delete(file)
+      an[IllegalStateException] should be thrownBy binding.isDeleted(null, 0)
+    } finally {
+      Files.deleteIfExists(file)
+      Files.delete(directory)
+    }
   }
 }

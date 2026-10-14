@@ -4,7 +4,7 @@ import scala.collection.JavaConverters._
 import scala.util.{Failure, Success, Try}
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.connector.write.BatchWrite
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.DataFrame
 
@@ -54,7 +54,9 @@ object MilvusV3Writer extends Logging {
       val schema = WriteSchema.resolve(df.schema, collection, mode)
       val storage =
         StorageOptions.writeStorageProperties(milvusOption.options, "")
-      Success(writeV3(df, schema, milvusOption, storage))
+      Success(
+        writeV3(df, new MilvusV3BatchWrite(schema, milvusOption, storage))
+      )
     } catch {
       case e: Exception =>
         logError(
@@ -65,43 +67,45 @@ object MilvusV3Writer extends Logging {
     }
   }
 
-  private def writeV3(
+  private[write] def writeV3(
       df: DataFrame,
-      schema: StructType,
-      milvusOption: MilvusOption,
-      storage: Map[String, String]
+      batchWrite: BatchWrite
   ): Seq[String] = {
-
-    // Create batch write
-    val batchWrite = new MilvusV3BatchWrite(schema, milvusOption, storage)
-    val writerFactory = batchWrite.createBatchWriterFactory(null)
-
-    // Execute write on each partition using queryExecution to get InternalRow
-    val messages = df.queryExecution.toRdd
-      .mapPartitionsWithIndex { (partitionId, rows) =>
-        val writer =
-          writerFactory.createWriter(partitionId, System.currentTimeMillis())
-
-        try {
-          rows.foreach { row =>
-            writer.write(row)
+    val messages =
+      try {
+        val writerFactory = batchWrite.createBatchWriterFactory(null)
+        df.queryExecution.toRdd
+          .mapPartitionsWithIndex { (partitionId, rows) =>
+            val writer =
+              writerFactory.createWriter(
+                partitionId,
+                System.currentTimeMillis()
+              )
+            try {
+              rows.foreach(writer.write)
+              Iterator(writer.commit())
+            } catch {
+              case e: Exception =>
+                writer.abort()
+                throw e
+            } finally {
+              writer.close()
+            }
           }
-          val commitMessage = writer.commit()
-          Iterator(commitMessage)
-        } catch {
-          case e: Exception =>
-            writer.abort()
-            throw e
-        } finally {
-          writer.close()
-        }
+          .collect()
+      } catch {
+        case failure: Throwable =>
+          try batchWrite.abort(Array.empty)
+          catch {
+            case aborted: Throwable =>
+              if (aborted ne failure) failure.addSuppressed(aborted)
+          }
+          throw failure
       }
-      .collect()
 
-    // Commit all partitions
+    // Commit stops the heartbeat itself. Its marker may already be durable if
+    // closing storage fails, so a commit failure must not delete the output.
     batchWrite.commit(messages)
-
-    // Extract manifest paths
     messages.collect { case msg: MilvusV3CommitMessage =>
       msg.manifestPath
     }.toSeq

@@ -110,43 +110,33 @@ private[connector] object NearestBySearch {
     /** Attaches the query rows held on the driver to their hits by a broadcast.
       */
     def held(rows: NearestByQueryRows.Local): RDD[InternalRow] = {
-      val keptRows = rows.keptRows
       val counts = rows.counts
+      if (counts.searched == 0L) {
+        return missing(counts) {
+          val keptRows = rows.keptRows
+          spark.sparkContext.parallelize(
+            keptRows.toIndexedSeq,
+            math.max(1, math.min(keptRows.length, 64))
+          )
+        }
+      }
+      val keptRows = rows.keptRows
       val dimension = rows.dimension
       val payload = spark.sparkContext.broadcast(keptRows)
+      val hits = searcher.search(
+        rows.packed(searcher.layoutAt(dimension)),
+        dimension,
+        if (outer) Some(Array.tabulate(keptRows.length)(_.toLong))
+        else None
+      )
+      post(counts)
       val newJoiner = joiners
-      val connector: RDD[InternalRow] =
-        if (counts.searched == 0L) {
-          post(counts)
-          if (!outer) spark.sparkContext.emptyRDD[InternalRow]
-          else
-            spark.sparkContext
-              .parallelize(
-                keptRows.indices,
-                math.max(1, math.min(keptRows.length, 64))
-              )
-              .mapPartitions { numbers =>
-                val joiner = newJoiner()
-                numbers.map(number =>
-                  joiner(payload.value(number), None).copy()
-                )
-              }
-        } else {
-          val hits = searcher.search(
-            rows.packed(searcher.layoutAt(dimension)),
-            dimension,
-            if (outer) Some(Array.tabulate(keptRows.length)(_.toLong))
-            else None
-          )
-          post(counts)
-          hits.mapPartitions { found =>
-            val joiner = newJoiner()
-            found.map { case (query, base) =>
-              joiner(payload.value(query.toInt), Some(base))
-            }
-          }
+      hits.mapPartitions { found =>
+        val joiner = newJoiner()
+        found.map { case (query, base) =>
+          joiner(payload.value(query.toInt), Some(base))
         }
-      connector
+      }
     }
 
     /** Rows kept and numbered on the executors, joined to their hits after the
@@ -155,40 +145,42 @@ private[connector] object NearestBySearch {
       */
     def numbered(rows: NearestByQueryRows.Distributed): RDD[InternalRow] = {
       val counts = rows.counts
-      val dimension = rows.dimension
+      if (counts.searched == 0L) return missing(counts)(rows.keptRows)
       val numbered = rows.number()
-      val queries = rows.vectors(numbered)
-      val hits =
-        if (counts.searched == 0L) None
-        else
-          Some(
-            searcher.search(
-              queries,
-              dimension,
-              None
-            )
-          )
+      val hits = searcher.search(rows.vectors(numbered), rows.dimension, None)
       post(counts)
-      val hitsByQuery = hits match {
-        case Some(found) => found
-        case None =>
-          spark.sparkContext.emptyRDD[(Long, InternalRow)]
-      }
       // The rows Spark joins are not this side's to keep or drop.
       val byNumber = rows.kept(numbered)
       val paired: RDD[(InternalRow, Option[InternalRow])] =
         if (outer)
-          byNumber.leftOuterJoin(hitsByQuery).values
+          byNumber.leftOuterJoin(hits).values
         else
-          byNumber.join(hitsByQuery).values.map { case (row, hit) =>
+          byNumber.join(hits).values.map { case (row, hit) =>
             row -> Some(hit)
           }
       val newJoiner = joiners
-      val searched: RDD[InternalRow] = paired.mapPartitions { pairs =>
+      paired.mapPartitions { pairs =>
         val joiner = newJoiner()
         pairs.map { case (row, hit) => joiner(row, hit) }
       }
-      searched
+    }
+
+    /** With no searched queries, INNER needs no rows and OUTER only NULLs.
+      * Delay obtaining the rows so INNER also skips copying local rows.
+      */
+    private def missing(counts: NearestByQueryRows.Counts)(
+        rows: => RDD[InternalRow]
+    ): RDD[InternalRow] = {
+      post(counts)
+      if (!outer || counts.unranked == 0L)
+        spark.sparkContext.emptyRDD[InternalRow]
+      else {
+        val newJoiner = joiners
+        rows.mapPartitions { queries =>
+          val joiner = newJoiner()
+          queries.map(row => joiner(row, None))
+        }
+      }
     }
 
     // What the driver settled, on the node.

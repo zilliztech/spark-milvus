@@ -42,17 +42,16 @@ object MilvusSearch extends Logging {
     * section 2.1).
     *
     * `queries` is the query set: a frame of `query_id` and `vector`, or a set
-    * the driver already packed. The ids are the positions the nearest-by join
-    * numbered its query rows by, so they cannot repeat and are not checked.
-    * `required` names the ids that must each have a row, one with NULL hit
-    * columns when nothing was found for it, which is what a LEFT OUTER
-    * nearest-by join whose query rows the driver holds needs. `filter` and
-    * `predicate` exclude rows before the top k: the Milvus filter, and what
-    * Spark pushed into the scan whose partitions these are
-    * (docs/design/architecture/dataframe-api.html section 4). An index search
-    * scans exactly a segment it has no usable index for, and `metrics` is where
-    * the tasks count. `function` is what the join ranks by where Knowhere does
-    * not score a pair as it does (section 2).
+    * the driver already packed. The nearest-by join assigns unique association
+    * ids; they may have gaps and are not checked again here. `required` names
+    * the ids that must each have a row, one with NULL hit columns when nothing
+    * was found for it, which is what a LEFT OUTER nearest-by join whose query
+    * rows the driver holds needs. `filter` and `predicate` exclude rows before
+    * the top k: the Milvus filter, and what Spark pushed into the scan whose
+    * partitions these are (docs/design/architecture/dataframe-api.html section
+    * 4). An index search scans exactly a segment it has no usable index for,
+    * and `metrics` is where the tasks count. `function` is what the join ranks
+    * by where Knowhere does not score a pair as it does (section 2).
     */
   private[connector] def execute(
       spark: SparkSession,

@@ -4,9 +4,16 @@ import java.util.concurrent.{
   CountDownLatch,
   ExecutorService,
   Executors,
+  LinkedBlockingQueue,
+  RejectedExecutionException,
+  ThreadPoolExecutor,
   TimeUnit
 }
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
+import java.util.concurrent.atomic.{
+  AtomicBoolean,
+  AtomicInteger,
+  AtomicReference
+}
 import scala.collection.mutable.ArrayBuffer
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -65,15 +72,6 @@ class ConcurrentRangeReadsTest extends AnyFunSuite {
     (0 until count).map(i =>
       Range(key, i.toLong * length, length, count.toLong * length)
     )
-
-  /** Background reads give their bytes back when they end, not when the call
-    * returns.
-    */
-  private def eventually(condition: => Boolean): Unit = {
-    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-    while (!condition && System.nanoTime() < deadline) Thread.sleep(5)
-    assert(condition)
-  }
 
   test("ranges come back in list order with their own bytes") {
     val store = new Store((_, offset, _) => Thread.sleep((offset / 10) % 4))
@@ -160,7 +158,7 @@ class ConcurrentRangeReadsTest extends AnyFunSuite {
         }
       }
       assert(failure.getMessage == "read 30 failed")
-      eventually(budget.available == 50)
+      assert(budget.available == 50)
     }
     assert(consumed == Seq(0L, 10L, 20L))
   }
@@ -174,9 +172,121 @@ class ConcurrentRangeReadsTest extends AnyFunSuite {
           (range, _) => require(range.offset != 20L, "stop at 20")
         }
       }
-      eventually(budget.available == 40)
+      assert(budget.available == 40)
     }
   }
+
+  Seq(
+    "read failure",
+    "consumer failure",
+    "interruption",
+    "submission rejection"
+  )
+    .foreach { scenario =>
+      test(s"$scenario drains all reads before returning the store") {
+        val started = new CountDownLatch(2)
+        val releaseFirst = new CountDownLatch(1)
+        val releaseRest = new CountDownLatch(1)
+        val failing = new CountDownLatch(1)
+        val returned = new CountDownLatch(1)
+        val primary =
+          if (scenario == "submission rejection")
+            new RejectedExecutionException("submission rejected")
+          else new IllegalArgumentException(scenario)
+        val secondary = new IllegalStateException("later read failed")
+        val observed = new AtomicReference[Throwable]()
+        val interrupted = new AtomicBoolean()
+        val closedWhileReading = new AtomicBoolean()
+        val store = new Store((_, offset, _) => {
+          started.countDown()
+          val release = if (offset == 0L) releaseFirst else releaseRest
+          assert(release.await(5, TimeUnit.SECONDS), "read was not released")
+          if (offset != 0L) throw secondary
+          if (scenario == "read failure") {
+            failing.countDown()
+            throw primary
+          }
+        }) {
+          override def close(): Unit =
+            closedWhileReading.set(inFlight.get() != 0)
+        }
+        val budget = new Budget(30)
+        val submissions = new AtomicInteger()
+        val pool = new ThreadPoolExecutor(
+          2,
+          2,
+          0L,
+          TimeUnit.MILLISECONDS,
+          new LinkedBlockingQueue[Runnable]()
+        ) {
+          override def execute(command: Runnable): Unit = {
+            if (submissions.incrementAndGet() == 3) {
+              failing.countDown()
+              throw primary
+            }
+            super.execute(command)
+          }
+        }
+        val caller = new Thread(() => {
+          try {
+            val count = if (scenario == "submission rejection") 3 else 2
+            ConcurrentRangeReads.foreach(
+              store,
+              ranges("a", count, 10),
+              budget,
+              pool
+            ) { (_, _) =>
+              if (scenario == "consumer failure") {
+                failing.countDown()
+                throw primary
+              }
+            }
+          } catch {
+            case failure: Throwable => observed.set(failure)
+          } finally {
+            interrupted.set(Thread.currentThread().isInterrupted)
+            store.close()
+            returned.countDown()
+          }
+        })
+        caller.setDaemon(true)
+        caller.start()
+        try {
+          assert(started.await(5, TimeUnit.SECONDS), "reads did not start")
+          if (scenario == "interruption") caller.interrupt()
+          else {
+            if (scenario != "submission rejection") releaseFirst.countDown()
+            assert(failing.await(5, TimeUnit.SECONDS), "failure did not start")
+          }
+          assert(
+            !returned.await(100, TimeUnit.MILLISECONDS),
+            "returned with a pending read"
+          )
+          // Interruption during cleanup must not replace the consumer failure.
+          if (scenario == "consumer failure") caller.interrupt()
+          releaseFirst.countDown()
+          releaseRest.countDown()
+          assert(returned.await(5, TimeUnit.SECONDS), "caller did not finish")
+          assert(!closedWhileReading.get())
+          assert(store.inFlight.get() == 0)
+          assert(
+            budget.available == 30,
+            "permits must be released exactly once"
+          )
+          if (scenario == "interruption") {
+            assert(observed.get().isInstanceOf[InterruptedException])
+            assert(interrupted.get())
+          } else assert(observed.get() eq primary)
+          if (scenario == "consumer failure") assert(interrupted.get())
+          assert(observed.get().getSuppressed.toSeq == Seq(secondary))
+        } finally {
+          releaseFirst.countDown()
+          releaseRest.countDown()
+          caller.join(5000L)
+          pool.shutdownNow()
+        }
+      }
+    }
 
   test("a range that comes back short fails the call") {
     val store = new Store() {

@@ -10,6 +10,7 @@ import com.zilliz.milvus.storage.schema.{
   VectorElementType,
   VectorLayout
 }
+import com.zilliz.milvus.storage.DataParseException
 
 /** The query set a search takes, packed before anything is read. */
 class SearchQueriesTest extends AnyFunSuite with Matchers {
@@ -25,12 +26,51 @@ class SearchQueriesTest extends AnyFunSuite with Matchers {
   private def pack(
       queries: Seq[(Long, Array[Float])],
       metric: MetricType = MetricType.L2
-  ): (Array[Long], Array[Byte]) =
-    SearchQueries.packPartition(
-      queries.iterator,
-      float32,
-      metric
+  ): (Array[Long], Array[Byte]) = {
+    val chunks = SearchQueries
+      .packedChunks(queries.iterator, float32, metric)
+      .toVector
+    (chunks.flatMap(_._1).toArray, chunks.flatMap(_._2).toArray)
+  }
+
+  test("packing reads at most one chunk ahead and emits no empty tail") {
+    var read = 0
+    val rows = (0 until 4096).iterator.map { index =>
+      read += 1
+      index.toLong -> Array(index.toFloat, -index.toFloat)
+    }
+    val chunks = SearchQueries.packedChunks(rows, float32, MetricType.L2)
+    read shouldBe 0
+    chunks.next()._1 shouldBe (0L until 2048L).toArray
+    read shouldBe 2048
+    chunks.next()._1 shouldBe (2048L until 4096L).toArray
+    read shouldBe 4096
+    chunks.hasNext shouldBe false
+    SearchQueries
+      .packedChunks(Iterator.empty, float32, MetricType.L2)
+      .hasNext shouldBe false
+  }
+
+  test("invalid rows fail before reading later input") {
+    val rows = Iterator(12L -> (null: Array[Float])) ++
+      Iterator.continually(throw new IllegalStateException("read too far"))
+    val chunks = SearchQueries.packedChunks(rows, float32, MetricType.L2)
+    val failure = the[IllegalArgumentException] thrownBy chunks.next()
+    failure.getMessage should include("Query 12 has no vector")
+  }
+
+  test("encoding overflow fails after previously packed chunks") {
+    val rows = Iterator.fill(2048)(1L -> Array(1f, 2f)) ++
+      Iterator(2L -> Array(65520f, 0f))
+    val chunks = SearchQueries.packedChunks(
+      rows,
+      VectorLayout(VectorElementType.Float16, 2),
+      MetricType.L2
     )
+    chunks.next()._1.length shouldBe 2048
+    val failure = the[DataParseException] thrownBy chunks.next()
+    failure.getMessage should include("float16 range")
+  }
 
   test("queries are packed in the order they arrive, ids alongside") {
     val (ids, vectors) =

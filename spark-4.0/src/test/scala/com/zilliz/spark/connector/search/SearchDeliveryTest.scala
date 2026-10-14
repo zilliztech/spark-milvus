@@ -16,7 +16,7 @@ import com.zilliz.milvus.storage.schema.{
   VectorElementType,
   VectorLayout
 }
-import com.zilliz.milvus.storage.vector.SearchPlan
+import com.zilliz.milvus.storage.vector.{QueryMatrix, SearchPlan}
 import com.zilliz.spark.connector.options.TaskResources
 
 /** How a query set reaches the first stage. Broadcast whole, or, when it is too
@@ -81,9 +81,12 @@ class SearchDeliveryTest
 
   private def pack(
       rows: Seq[(Long, Array[Float])],
-      metric: MetricType = request.metric
+      vectorLayout: VectorLayout = layout
   ): (Array[Long], Array[Byte]) =
-    SearchQueries.packPartition(rows.iterator, layout, metric)
+    (
+      rows.map(_._1).toArray,
+      QueryMatrix.packFloats(rows.map(_._2), vectorLayout)
+    )
 
   private def packed(): RDD[SearchQueries.Group] =
     SearchQueries.packedGroups(selected(), groups, request.metric, layout)
@@ -223,7 +226,7 @@ class SearchDeliveryTest
 
     val (ids, vectors) =
       SearchQueries.packOnExecutors(spread, layout, MetricType.L2)
-    val (driverIds, driverVectors) = pack(rows(), MetricType.L2)
+    val (driverIds, driverVectors) = pack(rows())
 
     ids.length shouldBe queries
     ids.toSet shouldBe (0L until queries.toLong).toSet
@@ -231,28 +234,62 @@ class SearchDeliveryTest
     packedById(ids, vectors) shouldBe packedById(driverIds, driverVectors)
   }
 
-  test("executor packing keeps partition order and crosses chunk boundaries") {
-    val many = 5000
-    val frame = spark.sparkContext.parallelize(
-      (0 until many).map(index =>
-        index.toLong -> Array(index.toFloat, -index.toFloat)
-      ),
-      1
+  test(
+    "broadcast chunks preserve input order, empty partitions and encoded bytes"
+  ) {
+    val boundary = Array(
+      0f,
+      -0.0f,
+      java.lang.Float.MIN_VALUE,
+      0.00006103515625f,
+      1.00048828125f,
+      1.00390625f,
+      -65504f,
+      65504f
     )
+    val input = (0 until 6146).map(index =>
+      (Long.MaxValue - index * 31L) -> Array(
+        boundary(index % boundary.length),
+        boundary((index + 1) % boundary.length)
+      )
+    )
+    // Two full chunks and a tail; an exact chunk; a single row. Empty
+    // partitions before, between and after them contribute no chunk.
+    val partitions = Seq(
+      Seq.empty,
+      input.take(4097),
+      Seq.empty,
+      input.slice(4097, 6145),
+      input.drop(6145),
+      Seq.empty
+    )
+    val frame = spark.sparkContext
+      .parallelize(partitions, partitions.size)
+      .flatMap(partition => partition)
 
+    Seq(
+      VectorElementType.Float32,
+      VectorElementType.Float16,
+      VectorElementType.BFloat16
+    ).foreach { elementType =>
+      val encoding = VectorLayout(elementType, 2)
+      val (ids, vectors) =
+        SearchQueries.packOnExecutors(frame, encoding, MetricType.L2)
+      val (driverIds, driverVectors) = pack(input, encoding)
+      ids.toSeq shouldBe driverIds.toSeq
+      vectors.toSeq shouldBe driverVectors.toSeq
+    }
+    val emptyRows = frame.filter(_ => false)
     val (ids, vectors) =
-      SearchQueries.packOnExecutors(frame, layout, MetricType.L2)
-    val (driverIds, driverVectors) =
-      pack(frame.collect().toSeq, MetricType.L2)
-
-    ids.toSeq shouldBe driverIds.toSeq
-    vectors.toSeq shouldBe driverVectors.toSeq
+      SearchQueries.packOnExecutors(emptyRows, layout, MetricType.L2)
+    ids shouldBe Array.empty[Long]
+    vectors shouldBe Array.empty[Byte]
   }
 
-  test("executor packing refuses a value that is not finite") {
+  test("executor packing still rejects an invalid row after a complete chunk") {
     val bad = spark.sparkContext.parallelize(
-      Seq(1L -> Array(1.0f, 2.0f), 2L -> Array(Float.NaN, 0.0f)),
-      2
+      rows(2048) :+ (2048L -> Array(Float.NaN, 0.0f)),
+      1
     )
 
     val failure = the[org.apache.spark.SparkException] thrownBy

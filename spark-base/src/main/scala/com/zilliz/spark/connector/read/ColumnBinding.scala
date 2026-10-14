@@ -98,7 +98,7 @@ sealed trait ColumnBinding {
     * even when the query did not ask for them.
     */
   final def isDeleted(batch: VectorSchemaRoot, rowIndex: Int): Boolean = {
-    if (!appliesDeletes) return false
+    if (!appliesDeletes || deletePlan.isEmpty) return false
     val field = pkField.getOrElse {
       throw new IllegalArgumentException(
         "applying deletes needs a primary key field in the schema"
