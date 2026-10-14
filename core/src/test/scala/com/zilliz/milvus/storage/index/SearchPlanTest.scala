@@ -3,35 +3,22 @@ package com.zilliz.milvus.storage.index
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
-import com.zilliz.milvus.storage.snapshot.{
-  SegmentIndex,
-  SegmentIndexes,
-  SegmentLayout
-}
 
 /** How one search becomes first-stage tasks: vector-search.html section 2.1. */
 class SearchPlanTest extends AnyFunSuite with Matchers {
 
   private val layout = VectorLayout(VectorElementType.Float32, 4)
 
-  private def task(segmentId: Long, rows: Long): SegmentReadTask =
-    SegmentReadTask(
-      segmentId = segmentId,
-      partitionId = 1L,
-      layout = SegmentLayout.Manifest("segments/" + segmentId, 3L),
-      schemaBytes = Array.emptyByteArray,
-      properties = Map.empty,
-      snapshotRows = Some(rows)
-    )
+  private def task(segmentId: Long, rows: Long): SearchPlan.Segment =
+    SearchPlan.Segment(segmentId, Some(rows))
 
-  private def segments(sets: Seq[Seq[SegmentReadTask]]): Seq[Seq[Long]] =
+  private def segments(sets: Seq[Seq[SearchPlan.Segment]]): Seq[Seq[Long]] =
     sets.map(_.map(_.segmentId))
 
   /** Vectors scanned in 64-byte blocks: what an exact search's segments cost.
     */
-  private val vectors: SegmentReadTask => SearchPlan.Footprint =
+  private val vectors: SearchPlan.Segment => SearchPlan.Footprint =
     SearchPlan.Footprint.vectors(_, layout, 64L)
 
   test("a group holds as many queries as the byte limit allows") {
@@ -200,14 +187,8 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       .size shouldBe 16
   }
 
-  private def unsized(segmentId: Long): SegmentReadTask =
-    SegmentReadTask(
-      segmentId,
-      1L,
-      SegmentLayout.Manifest("segments/" + segmentId, 3L),
-      Array.emptyByteArray,
-      Map.empty
-    )
+  private def unsized(segmentId: Long): SearchPlan.Segment =
+    SearchPlan.Segment(segmentId, None)
 
   test("segments without a row count still spread over the sets") {
     val tasks = Seq(unsized(1L), unsized(2L))
@@ -267,35 +248,6 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
       Some(320L)
     SearchPlan.knownBytes(Seq(task(1L, 10L), unsized(2L)), layout) shouldBe None
     SearchPlan.knownBytes(Seq.empty, layout) shouldBe Some(0L)
-  }
-
-  test("a persisted index's row count sizes a segment the snapshot did not") {
-    val indexed = unsized(7L).copy(indexes =
-      SegmentIndexes.Available(
-        Vector(
-          SegmentIndex(
-            collectionId = 1L,
-            partitionId = 1L,
-            segmentId = 7L,
-            fieldId = 100L,
-            indexId = 1L,
-            buildId = 1L,
-            name = "v",
-            parameters = Map("index_type" -> "HNSW"),
-            filePaths = Vector("index/7"),
-            rowCount = 25L,
-            serializedSize = 1L,
-            indexVersion = 1L,
-            currentIndexVersion = None,
-            indexStorePathVersion = None
-          )
-        )
-      )
-    )
-
-    SearchPlan.knownRows(indexed) shouldBe Some(25L)
-    SearchPlan.knownRows(unsized(8L)) shouldBe None
-    SearchPlan.knownBytes(Seq(indexed), layout) shouldBe Some(400L)
   }
 
   test("a search over no segments plans no tasks") {
@@ -473,7 +425,7 @@ class SearchPlanTest extends AnyFunSuite with Matchers {
   test(
     "a loaded index holds two copies of its bytes and loads at that footprint"
   ) {
-    val indexes: SegmentReadTask => SearchPlan.Footprint =
+    val indexes: SearchPlan.Segment => SearchPlan.Footprint =
       _ => SearchPlan.Footprint.index(1000L)
     def keeping(segmentBytes: Long) = SearchPlan.of(
       Seq(task(1L, 10L), task(2L, 10L), task(3L, 10L), task(4L, 10L)),

@@ -26,13 +26,11 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.unsafe.Platform
 
 import com.zilliz.milvus.storage.index.{
-  CandidateBytes,
   CarriedCandidates,
   EngineRange,
   ExactScan,
   QueryMatrix,
   RankingFunction,
-  SearchPlan,
   TopKMerger,
   VectorBatch
 }
@@ -43,7 +41,7 @@ import com.zilliz.milvus.storage.schema.{
   VectorLayout
 }
 import com.zilliz.spark.connector.metrics.SearchMetrics
-import com.zilliz.spark.connector.options.{SearchLimits, TaskResources}
+import com.zilliz.spark.connector.options.SearchLimits
 import com.zilliz.spark.connector.types.ArrowAllocator
 
 /** A nearest-by join's search over a DataFrame input: a base the connector
@@ -64,12 +62,6 @@ import com.zilliz.spark.connector.types.ArrowAllocator
   * [[EngineRange]] is scored by the ranking function.
   */
 private[connector] object FrameSearch extends Logging {
-
-  /** The most rows a block takes, whatever its vectors' size: every row of a
-    * block is an `UnsafeRow` copy and a float array on the heap until the block
-    * is searched.
-    */
-  private val MaxBlockRows = 65536
 
   /** The base as the first stage reads it: its rows, the types of its output,
     * and its vector, bound to that output.
@@ -119,46 +111,27 @@ private[connector] object FrameSearch extends Logging {
       s"A search takes at most ${Int.MaxValue} queries at a time, not $queryCount"
     )
     val rowBytes = rowWidth(types, dimension)
-    // The frame search and its merge run under Spark's own task slots, so a
-    // task's share of the unmanaged heap is the queries' budget at that
-    // concurrency, as for a Milvus table input's merge.
-    val (_, heap) = SearchResources.executorMemory(spark)
-    val fraction = SearchResources.memoryFraction(spark)
-    val resources = TaskResources.of(spark)
-    val taskHeap = SearchResources.queryBudget(
-      heap,
-      fraction,
-      resources.tasksPerExecutor
+    val execution = SearchExecutionPlan.frame(
+      spark,
+      limits,
+      queries,
+      layout,
+      k,
+      rowBytes,
+      base.rows.getNumPartitions
     )
-    // One task per core here, so a group is sized for one core within that
-    // task's share of the heap.
-    val group = SearchResources.groupBytes(
-      limits.groupMaxBytes,
-      taskHeap.bytes,
-      1,
-      SearchPlan.bytesPerQuery(layout, k) + k.toLong * rowBytes
-    )
-    val groups =
-      cut(queryCount.toInt, layout, k, rowBytes, group.bytes)
-    val blockRows = math
-      .max(
-        1L,
-        SearchResources.exactScanBatch(None).bytes / layout.rowBytes.toLong
-      )
-      .min(MaxBlockRows.toLong)
-      .toInt
+    val groups = execution.groups
+    val delivery = execution.delivery
+    val blockRows = execution.blockRows
     val queryBytes = SearchQueries.bytes(queryCount, layout)
-    val delivery =
-      SearchQueries.Delivery.of(queries, layout, limits.queriesMaxBytes)
     val delivered = delivery.groups(
       spark,
       groups,
       metric,
       layout,
-      resources,
-      SearchResources.queryBudget(heap, fraction, 1).bytes
+      execution.packingProfile
     )
-    val tasks = base.rows.getNumPartitions * groups.size
+    val tasks = execution.tasks
     logInfo(
       s"Search plan: DataFrame input, exact, metric=$metric, topK=$k, " +
         s"queries=$queryCount, queryBytes=$queryBytes delivered by " +
@@ -187,14 +160,7 @@ private[connector] object FrameSearch extends Logging {
         )
     )
     // Here every candidate carries its row.
-    val parts = SearchMerge.partitions(
-      spark,
-      queryCount,
-      math.max(1, tasks),
-      k,
-      taskHeap.bytes,
-      CandidateBytes.Width.toLong + 4L + rowBytes
-    )
+    val parts = execution.mergePartitions
     val width = types.size
     val hitWidth = schema.size
     val rows = SearchMerge.byQuery[InternalRow](
@@ -220,25 +186,6 @@ private[connector] object FrameSearch extends Logging {
         case dataType if UnsafeRow.isFixedLength(dataType) => 0L
         case dataType => dataType.defaultSize.toLong
       }.sum
-
-  /** Query groups of equal size, the last one shorter, each within the group
-    * limit with its candidates and the rows they carry. One query is a group
-    * however large it is: a DataFrame input takes no options to raise the limit
-    * with.
-    */
-  private[connector] def cut(
-      queries: Int,
-      layout: VectorLayout,
-      k: Int,
-      rowBytes: Long,
-      groupMaxBytes: Long
-  ): Seq[SearchPlan.QueryGroup] = {
-    val perQuery = SearchPlan.bytesPerQuery(layout, k) + k.toLong * rowBytes
-    val size = math.max(1L, groupMaxBytes / perQuery).min(queries.toLong).toInt
-    (0 until queries by size).map(first =>
-      SearchPlan.QueryGroup(first, math.min(size, queries - first))
-    )
-  }
 
   /** One task: a base partition read a block at a time against one group. */
   private def search(

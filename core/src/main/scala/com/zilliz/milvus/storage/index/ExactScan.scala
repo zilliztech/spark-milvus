@@ -8,7 +8,6 @@ import java.util.concurrent.ExecutorService
 import org.apache.arrow.memory.{ArrowBuf, BufferAllocator}
 
 import com.zilliz.milvus.jni.vector.NativeVectorSearch
-import com.zilliz.milvus.storage.read.exec.SegmentVectors
 import com.zilliz.milvus.storage.schema.MetricType
 
 import io.knowhere.DType
@@ -91,7 +90,7 @@ object ExactScan {
     * batch are borrowed for the length of the call and released with it.
     */
   def run(
-      vectors: SegmentVectors,
+      vectors: VectorBatch.Stream,
       queries: QueryMatrix,
       segmentId: Long,
       k: Int,

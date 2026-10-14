@@ -47,52 +47,6 @@ private[search] object SearchMerge {
     )
   )
 
-  /** How many queries one merge partition is meant to take. The merge walks
-    * sorted lists, so a partition's work is linear in the candidates it reads;
-    * this only keeps a partition's reduce-side map from holding more than a few
-    * thousand queries' answers at once on a cluster whose parallelism is far
-    * below its query count.
-    */
-  val QueriesPerMergePartition: Int = 4096
-
-  /** How many partitions the merge runs in: one for each task slot the job has,
-    * and never more than there are queries. The merge is an RDD shuffle rather
-    * than a SQL aggregation, so nothing downstream re-partitions it and
-    * `spark.sql.shuffle.partitions` does not apply.
-    */
-  def partitions(
-      spark: SparkSession,
-      queries: Long,
-      tasks: Int,
-      k: Int,
-      heapBytesPerTask: Long,
-      candidateBytes: Long = CandidateBytes.Width.toLong
-  ): Int = {
-    require(queries > 0, s"A search needs at least one query: $queries")
-    require(tasks > 0, s"A search needs at least one task: $tasks")
-    require(k > 0, s"A search needs a positive k: $k")
-    // At least one partition for every task slot the job has and for every
-    // first-stage task, so no executor sits out the merge; more when the
-    // queries would otherwise pile up in one partition; never more than there
-    // are queries, since a query is one key and cannot be split.
-    //
-    // How many queries a partition may hold is the smaller of a fixed few
-    // thousand and what the task's heap fits: every query arrives as one
-    // packed answer per first-stage task, `tasks x k x Width` bytes, and the
-    // reduce-side map holds them until they are merged. 100k queries at
-    // k=16,384 over 15 tasks were 5.9 MB a query; 64 partitions of 1,563
-    // queries each ran the 6 GiB heap out (2026-09-26 decision). Half the
-    // heap share is left for the merged answers and the rows they become.
-    val slots = math.max(1, spark.sparkContext.defaultParallelism)
-    val bytesPerQuery = tasks.toLong * k.toLong * candidateBytes
-    val byHeap =
-      math.max(1L, math.max(0L, heapBytesPerTask) / 2L / bytesPerQuery)
-    val perPartition = math.min(QueriesPerMergePartition.toLong, byHeap)
-    val byQueries = (queries + perPartition - 1L) / perPartition
-    val wanted = math.max(math.max(slots.toLong, tasks.toLong), byQueries)
-    math.max(1L, math.min(queries, wanted)).toInt
-  }
-
   /** A Milvus table input's merge: every query's candidates become its global
     * top-k, best first, as rows of [[HitSchema]]; with `required`, an id that
     * found nothing has a row whose hit columns are NULL.

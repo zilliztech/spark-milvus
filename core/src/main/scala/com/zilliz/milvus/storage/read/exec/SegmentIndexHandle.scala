@@ -1,6 +1,7 @@
 package com.zilliz.milvus.storage.read.exec
 
-import java.util.Locale
+import java.nio.ByteBuffer
+import java.util.{BitSet, Locale}
 import scala.util.Try
 
 import com.zilliz.milvus.jni.vector.NativeVectorIndex
@@ -10,6 +11,7 @@ import com.zilliz.milvus.storage.codec.{
   MilvusIndexFileDecoder,
   VectorIndexFamilies
 }
+import com.zilliz.milvus.storage.index.IndexSearch
 import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.{
@@ -40,7 +42,7 @@ final class SegmentIndexHandle private (
     val bytes: Long,
     val loadNanos: Long,
     val mapping: IndexRowMapping
-) extends AutoCloseable {
+) extends IndexSearch.Target {
   private var closed = false
 
   def rows: Long = index.rows()
@@ -53,6 +55,21 @@ final class SegmentIndexHandle private (
 
   /** Which family the search parameters belong to (section 2.4). */
   def family: String = SegmentIndexHandle.familyOf(indexType)
+
+  override def rowOf(label: Long): Long = mapping.rowOf(label)
+
+  override def labelsOf(excluded: BitSet): BitSet = mapping.labelsOf(excluded)
+
+  override def search(
+      queries: ByteBuffer,
+      queryRows: Long,
+      topK: Int,
+      excluded: ByteBuffer,
+      ids: ByteBuffer,
+      scores: ByteBuffer,
+      parameters: String
+  ): Unit =
+    index.search(queries, queryRows, topK, excluded, ids, scores, parameters)
 
   override def close(): Unit = synchronized {
     if (!closed) {

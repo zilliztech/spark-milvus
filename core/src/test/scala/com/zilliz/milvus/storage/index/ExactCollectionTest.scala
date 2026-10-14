@@ -15,7 +15,6 @@ import org.apache.arrow.memory.RootAllocator
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
-import com.zilliz.milvus.storage.read.exec.IndexRowMapping
 import com.zilliz.milvus.storage.schema.{
   MetricType,
   VectorElementType,
@@ -57,12 +56,15 @@ class ExactCollectionTest extends AnyFunSuite with Matchers {
         def metric: MetricType = MetricType.L2
         def indexType: String = "FLAT"
         def family: String = "FLAT"
-        def mapping: IndexRowMapping = {
+        def bytes: Long = 0L
+        def labelsOf(excluded: BitSet): BitSet = excluded
+        def close(): Unit = ()
+        def rowOf(label: Long): Long = {
           if (block.get()) {
             collecting.countDown()
             assert(release.await(10, TimeUnit.SECONDS))
           }
-          IndexRowMapping.identity(rows)
+          label
         }
         def search(
             queries: ByteBuffer,

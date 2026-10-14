@@ -12,11 +12,6 @@ import scala.util.Try
 
 import org.apache.arrow.memory.BufferAllocator
 
-import com.zilliz.milvus.storage.read.exec.{
-  ReadMetrics,
-  SegmentIndexHandle,
-  SegmentVectors
-}
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.milvus.storage.Logging
 
@@ -38,14 +33,14 @@ object SegmentSearch extends Logging {
     def segmentId: Long
   }
 
-  final case class Exact(segmentId: Long, vectors: SegmentVectors)
+  final case class Exact(segmentId: Long, vectors: VectorBatch.Stream)
       extends Source {
     override def close(): Unit = vectors.close()
   }
 
   final case class Index(
       segmentId: Long,
-      handle: SegmentIndexHandle,
+      handle: IndexSearch.Target,
       excluded: BitSet
   ) extends Source {
     override def close(): Unit = handle.close()
@@ -62,10 +57,9 @@ object SegmentSearch extends Logging {
     */
   final class Held private[index] (
       private val sources: Seq[Source],
-      private val batches: Map[Long, Seq[SegmentVectors.Batch]],
-      val read: ReadMetrics = ReadMetrics.Zero,
-      private val ranked: Map[SegmentVectors.Batch, EngineRange.Batch] =
-        Map.empty,
+      private val batches: Map[Long, Seq[VectorBatch]],
+      val read: VectorBatch.ReadCost = VectorBatch.ReadCost.Zero,
+      private val ranked: Map[VectorBatch, EngineRange.Batch] = Map.empty,
       private val rankNonFinite: Boolean = false,
       // How many segments' index searches a group keeps in flight at once
       // (section 4 of docs/design/enhance/2026-10-13-search-task-pipelining.html):
@@ -122,7 +116,7 @@ object SegmentSearch extends Logging {
       case other =>
         other.foreach(_.close())
         val pipeline = new IndexSearch.Pipeline(
-          IndexSearch.target(source.handle),
+          source.handle,
           source.excluded,
           k,
           parameters,
@@ -270,7 +264,7 @@ object SegmentSearch extends Logging {
       segmentId: Long,
       retainedBytes: Long,
       budgetBytes: Long,
-      read: ReadMetrics
+      read: VectorBatch.ReadCost
   )
 
   /** Reads the segment set into memory: every batch of an exact scan, every
@@ -292,38 +286,41 @@ object SegmentSearch extends Logging {
   ): Either[Overflow, Held] = {
     require(segments != null, "A task must name its segments")
     val sources = Seq.newBuilder[Source]
-    val batches = Map.newBuilder[Long, Seq[SegmentVectors.Batch]]
-    val ranked = Map.newBuilder[SegmentVectors.Batch, EngineRange.Batch]
+    val batches = mutable.Map.empty[Long, mutable.ArrayBuffer[VectorBatch]]
+    val ranked = Map.newBuilder[VectorBatch, EngineRange.Batch]
     var retained = 0L
-    var read = ReadMetrics.Zero
+    var read = VectorBatch.ReadCost.Zero
     def opened = new Held(
       sources.result(),
-      batches.result().toMap,
+      batches.iterator.map { case (id, held) => id -> held.toVector }.toMap,
       read,
       ranked.result(),
       function.nonEmpty,
       callsInFlight
     )
     try {
-      segments.indices.foreach { index =>
-        val segmentId = segments(index)
+      val remaining = segments.iterator
+      while (remaining.hasNext) {
+        val segmentId = remaining.next()
         val source = open(segmentId)
         sources += source
         source match {
           case Exact(id, vectors) =>
-            val held = Seq.newBuilder[SegmentVectors.Batch]
+            val held = mutable.ArrayBuffer.empty[VectorBatch]
+            // A returned batch belongs to this task immediately, including
+            // when sizing, classification or the following read fails.
+            batches(id) = held
             var next = vectors.next()
             while (next.nonEmpty) {
               val batch = next.get
-              retained += batch.base.buffer.capacity().toLong
               held += batch
+              retained += batch.base.buffer.capacity().toLong
               function.foreach(f =>
                 ranked += batch -> EngineRange.Batch
                   .of(batch, layout, metric, f)
               )
               if (retained > keptMaxBytes) {
-                batches += id -> held.result()
-                read = read + vectors.metrics
+                read = read + vectors.readCost
                 opened.close()
                 logInfo(
                   s"Segment set not held: segment $id brings the vectors read to $retained bytes, " +
@@ -333,8 +330,7 @@ object SegmentSearch extends Logging {
               }
               next = vectors.next()
             }
-            batches += id -> held.result()
-            read = read + vectors.metrics
+            read = read + vectors.readCost
           case Index(id, handle, _) =>
             retained += handle.bytes
             if (retained > keptMaxBytes) {
@@ -371,7 +367,7 @@ object SegmentSearch extends Logging {
       nativeCalls: Int,
       nativeNanos: Long,
       compared: Long = 0L,
-      read: ReadMetrics = ReadMetrics.Zero
+      read: VectorBatch.ReadCost = VectorBatch.ReadCost.Zero
   )
 
   /** One finished step of a search, handed to the caller as it happens.
@@ -467,7 +463,7 @@ object SegmentSearch extends Logging {
       compared += step.compared
       onProgress(step)
     }
-    var read = ReadMetrics.Zero
+    var read = VectorBatch.ReadCost.Zero
     val sources = new Prefetcher[Source](segments, open, prefetch)
     try
       sources.foreach { source =>
@@ -498,7 +494,7 @@ object SegmentSearch extends Logging {
                 } finally batch.close()
                 next = vectors.next()
               }
-              read = read + vectors.metrics
+              read = read + vectors.readCost
             case Index(id, handle, excluded) =>
               require(
                 handle.metric == metric,
@@ -507,7 +503,7 @@ object SegmentSearch extends Logging {
               // Every group through one pipeline: the index searches group g+1
               // while a worker checks and collects group g.
               val pipeline = new IndexSearch.Pipeline(
-                IndexSearch.target(handle),
+                handle,
                 excluded,
                 k,
                 parameters,

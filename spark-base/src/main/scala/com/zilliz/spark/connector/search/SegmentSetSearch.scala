@@ -9,17 +9,16 @@ import com.zilliz.milvus.storage.expr.{FilterExpr, PredicateExpr}
 import com.zilliz.milvus.storage.index.{
   QueryMatrix,
   RankingFunction,
-  SearchPlan,
   SearchThreads,
   SegmentSearch,
-  TopKMerger
+  TopKMerger,
+  VectorBatch
 }
 import com.zilliz.milvus.storage.read.exec.{
   RowExclusions,
   SegmentIndexHandle,
   SegmentVectors
 }
-import com.zilliz.milvus.storage.read.exec.ReadMetrics
 import com.zilliz.milvus.storage.schema.{MetricType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.read.{ColumnBinding, MilvusInputPartition}
@@ -43,27 +42,8 @@ import io.milvus.grpc.schema.CollectionSchema
   */
 private[search] object SegmentSetSearch extends Logging {
 
-  private val chosenBatches =
-    new java.util.concurrent.ConcurrentHashMap[(Int, Option[Long]), Long]()
-
-  /** The exact scan's base block for this JVM: the option when the call set it,
-    * otherwise the default (docs/design/architecture/search-resources.html
-    * section 3.2). Logged once per JVM for each distinct slot count and
-    * configured block size.
-    */
-  private[search] def exactScanBatch(request: Request): Long =
-    chosenBatches.computeIfAbsent(
-      (request.slots, request.batchMaxBytes),
-      _ => {
-        val choice = SearchResources.exactScanBatch(request.batchMaxBytes)
-        logInfo(s"exact scan batch: ${choice.reason}")
-        choice.bytes
-      }
-    )
-
-  /** What every task of one search needs and the driver already knows.
-    * `keptMaxBytes` is the most a task that keeps its segment set may keep, and
-    * `slots` the search tasks that run at once on one executor.
+  /** The search semantics and Arrow read limit shared by every task. Runtime
+    * execution choices arrive separately in [[SearchExecutionPlan.Task]].
     */
   final case class Request(
       vectorColumn: String,
@@ -75,35 +55,25 @@ private[search] object SegmentSetSearch extends Logging {
       mode: SearchMode,
       filter: Option[FilterExpr],
       parameters: Map[String, String],
-      keptMaxBytes: Long,
       arrowMaxBytes: Long,
-      slots: Int,
-      batchMaxBytes: Option[Long],
-      resident: SearchPlan.Resident = SearchPlan.Resident.Segments,
-      collectThreads: Int = 1,
       // What Spark pushed into the scan the search reads; it excludes rows
       // before the top k, with SQL three-valued logic.
       predicate: Option[PredicateExpr] = None,
       // The function a nearest-by join ranks by, for the pairs Knowhere does
       // not score as it does (docs/design/architecture/dataframe-api.html
       // section 2); without one Knowhere scores every pair.
-      function: Option[RankingFunction] = None,
-      // Index segments searched at once within a group when the set is held
-      // (`milvus.search.calls.in.flight`).
-      callsInFlight: Int = 2
+      function: Option[RankingFunction] = None
   ) extends Serializable
 
-  /** @param plannedBytes
-    *   what the plan knows the set keeps, when it knows every segment's size; a
-    *   task keeping its segments streams from the start when this is over its
-    *   budget
+  /** Executes the chosen traversal. Retention attempts still account actual
+    * loaded bytes and fall back to streaming when they exceed the capacity.
     */
   def run(
       set: Seq[MilvusInputPartition],
       request: Request,
+      execution: SearchExecutionPlan.Task,
       groups: Iterator[SearchQueries.Group],
       groupCount: Int,
-      plannedBytes: Option[Long],
       metrics: SearchMetrics
   ): Iterator[(Long, Array[Byte])] = {
     require(set.nonEmpty, "A first-stage task has no segments")
@@ -116,8 +86,14 @@ private[search] object SegmentSetSearch extends Logging {
       request.arrowMaxBytes
     )
     def open(segmentId: Long): SegmentSearch.Source =
-      source(partitions(segmentId), request, allocator.allocator, metrics)
-    if (groupCount == 1 || request.resident == SearchPlan.Resident.Queries) {
+      source(
+        partitions(segmentId),
+        request,
+        allocator.allocator,
+        metrics,
+        execution.batchMaxBytes
+      )
+    if (execution.retention == SearchExecutionPlan.Retention.Queries) {
       try
         keepingQueries(
           segments,
@@ -127,11 +103,11 @@ private[search] object SegmentSetSearch extends Logging {
           request,
           allocator.allocator,
           metrics,
-          prefetchIndexes(set, request)
+          execution
         )
       finally allocator.close()
     } else {
-      val held = holdOrStream(plannedBytes, request, segments, open, metrics)
+      val held = holdOrStream(execution, request, segments, open, metrics)
       Option(TaskContext.get()).foreach(
         _.addTaskCompletionListener[Unit] { _ =>
           try held.foreach(_.close())
@@ -150,7 +126,7 @@ private[search] object SegmentSetSearch extends Logging {
               request.parameters,
               allocator.allocator,
               metrics.record,
-              request.collectThreads
+              execution.collectThreads
             )
           case None =>
             SegmentSearch.run(
@@ -174,7 +150,7 @@ private[search] object SegmentSetSearch extends Logging {
           s"Search task: segments=${counters.segments}, groups=$groupCount, " +
             s"queries=${group.queries}, candidates=${merger.size}, $how"
         )
-        candidates(merger, group.ids, request.collectThreads)
+        candidates(merger, group.ids, execution.collectThreads)
       }
     }
   }
@@ -195,7 +171,7 @@ private[search] object SegmentSetSearch extends Logging {
       request: Request,
       allocator: BufferAllocator,
       metrics: SearchMetrics,
-      prefetch: Boolean
+      execution: SearchExecutionPlan.Task
   ): Iterator[(Long, Array[Byte])] = {
     val ids = new Array[Array[Long]](groupCount)
     val matrices = new Array[QueryMatrix](groupCount)
@@ -234,7 +210,7 @@ private[search] object SegmentSetSearch extends Logging {
       request,
       allocator,
       metrics,
-      prefetch
+      execution
     )
   }
 
@@ -250,7 +226,7 @@ private[search] object SegmentSetSearch extends Logging {
       request: Request,
       allocator: BufferAllocator,
       metrics: SearchMetrics,
-      prefetch: Boolean
+      execution: SearchExecutionPlan.Task
   ): Iterator[(Long, Array[Byte])] = {
     val groupCount = matrices.length
     try {
@@ -263,8 +239,8 @@ private[search] object SegmentSetSearch extends Logging {
         request.parameters,
         allocator,
         metrics.record,
-        prefetch,
-        request.collectThreads,
+        execution.prefetchIndexes,
+        execution.collectThreads,
         request.function
       )
       val kept = mergers.toArray
@@ -275,7 +251,7 @@ private[search] object SegmentSetSearch extends Logging {
           s"candidates=${kept.iterator.map(_.size).sum}, queries kept"
       )
       Iterator.range(0, groupCount).flatMap { index =>
-        val rows = candidates(kept(index), ids(index), request.collectThreads)
+        val rows = candidates(kept(index), ids(index), execution.collectThreads)
         kept(index) = null
         ids(index) = null
         rows
@@ -293,16 +269,16 @@ private[search] object SegmentSetSearch extends Logging {
     * (docs/design/architecture/search-resources.html section 3.3).
     */
   private def holdOrStream(
-      plannedBytes: Option[Long],
+      execution: SearchExecutionPlan.Task,
       request: Request,
       segments: Seq[Long],
       open: Long => SegmentSearch.Source,
       metrics: SearchMetrics
   ): Option[SegmentSearch.Held] =
-    plannedBytes match {
-      case Some(bytes) if bytes > request.keptMaxBytes =>
+    execution.retention match {
+      case SearchExecutionPlan.Retention.Stream(bytes) =>
         logInfo(
-          s"Segment set streamed: $bytes bytes over the ${request.keptMaxBytes} " +
+          s"Segment set streamed: $bytes bytes over the ${execution.keptMaxBytes} " +
             s"a task keeps; every query group reads the ${segments.size} segments again"
         )
         None
@@ -310,11 +286,11 @@ private[search] object SegmentSetSearch extends Logging {
         SegmentSearch.hold(
           segments,
           open,
-          request.keptMaxBytes,
+          execution.keptMaxBytes,
           request.layout,
           request.metric,
           request.function,
-          request.callsInFlight
+          execution.callsInFlight
         ) match {
           case Right(held) =>
             read(metrics, held.read)
@@ -334,9 +310,9 @@ private[search] object SegmentSetSearch extends Logging {
     read(metrics, counters.read)
   }
 
-  private def read(metrics: SearchMetrics, of: ReadMetrics): Unit = {
-    metrics.readBytes.add(of.arrowBytes)
-    metrics.readNanos.add(of.jniNanos)
+  private def read(metrics: SearchMetrics, of: VectorBatch.ReadCost): Unit = {
+    metrics.readBytes.add(of.bytes)
+    metrics.readNanos.add(of.nanos)
   }
 
   private def searching[A](
@@ -392,35 +368,13 @@ private[search] object SegmentSetSearch extends Logging {
     packed.result()
   }
 
-  /** Whether the task may open the next segment's index while it searches the
-    * current one: index mode, more than one segment, and room in the task's
-    * budget for two loaded indexes plus one loading (2 + 2 + 1 copies of the
-    * largest index, by the planner's own footprint rule). An index whose size
-    * the snapshot did not record is not prefetched.
-    */
-  private[search] def prefetchIndexes(
-      set: Seq[MilvusInputPartition],
-      request: Request
-  ): Boolean =
-    request.mode == SearchMode.PreferIndex && set.size > 1 && {
-      val sizes = set.flatMap(partition =>
-        SegmentIndexHandle
-          .select(partition.task, request.fieldId, request.metric)
-          .map(_.serializedSize)
-      )
-      sizes.size == set.size && sizes.forall(_ > 0L) && {
-        val copies =
-          2L * SearchPlan.Footprint.IndexKeptCopies + SearchPlan.Footprint.IndexLoadingCopies
-        copies * sizes.max <= request.keptMaxBytes
-      }
-    }
-
   /** What this segment offers the search: its vectors, or its index. */
   private def source(
       partition: MilvusInputPartition,
       request: Request,
       allocator: BufferAllocator,
-      metrics: SearchMetrics
+      metrics: SearchMetrics,
+      batchMaxBytes: Long
   ): SegmentSearch.Source = {
     val task = partition.task
     val binding = ColumnBinding(partition, StructType(Seq.empty))
@@ -445,7 +399,8 @@ private[search] object SegmentSetSearch extends Logging {
           binding.arrowSchema,
           descriptor.rowCount,
           allocator,
-          read(metrics, _)
+          cost =>
+            read(metrics, VectorBatch.ReadCost(cost.arrowBytes, cost.jniNanos))
         )
         metrics.bitmapNanos.add(System.nanoTime() - started)
         val handle = SegmentIndexHandle.open(
@@ -460,11 +415,10 @@ private[search] object SegmentSetSearch extends Logging {
       case None =>
         // The block one exact-scan call takes: the option when the call set
         // it, otherwise 32 MiB (search-resources.html section 3.2).
-        val batch = exactScanBatch(request)
         SegmentSearch.Exact(
           task.segmentId,
           SegmentVectors.open(
-            task.copy(limits = task.limits.copy(batchMaxBytes = batch)),
+            task.copy(limits = task.limits.copy(batchMaxBytes = batchMaxBytes)),
             binding.arrowSchema,
             binding.columnNameFor,
             binding.arrowColumnFor(request.vectorColumn),

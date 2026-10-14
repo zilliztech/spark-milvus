@@ -59,31 +59,6 @@ private[search] object SearchTake {
     require(partitions > 0 && buckets > 0, s"A take stage needs tasks: $this")
   }
 
-  /** The partitioning that keeps a task's buffered hits inside
-    * `heapBytesPerTask`, at half that to leave room for hash skew: never fewer
-    * partitions than `minimum` (the session's shuffle partitions, so a small
-    * search keeps its shape), never more than a bucket per hit.
-    */
-  def partitioning(
-      hits: Long,
-      segments: Int,
-      heapBytesPerTask: Long,
-      minimum: Int
-  ): Partitioning = {
-    require(
-      hits >= 0L && segments > 0 && minimum > 0,
-      s"$hits hits, $segments segments, $minimum minimum"
-    )
-    val rowsPerTask =
-      math.max(1L, math.max(0L, heapBytesPerTask) / HitRowBytes / 2L)
-    val needed = (hits + rowsPerTask - 1L) / rowsPerTask
-    val partitions =
-      math.max(minimum.toLong, math.min(needed, Int.MaxValue.toLong)).toInt
-    val buckets =
-      math.max(1L, (partitions.toLong + segments - 1L) / segments).toInt
-    Partitioning(partitions, buckets)
-  }
-
   /** The bucket of a hit at `offset` in a segment of `rows` rows, cut into
     * `buckets` slices of consecutive rows: slice i holds the rows from i × rows
     * ÷ buckets on. A slice's hits sit in a run of the segment's row groups, so
@@ -127,8 +102,9 @@ private[search] object SearchTake {
     * bound on memory -- a task held one segment's hits at a time -- so the hits
     * are buffered as `InternalRow` instead of `Row`, which is the same 25
     * million rows in about half the bytes, and the number of tasks and the
-    * buckets a segment is cut into come from [[partitioning]], sized so that
-    * what one task buffers fits the heap it has.
+    * buckets a segment is cut into come from
+    * [[SearchExecutionPlan.takePartitioning]], sized so that what one task
+    * buffers fits the heap it has.
     *
     * The rows come out as the hit columns and then `output`, never converted to
     * Scala values on the way; an iterator hands the same row object back, so a

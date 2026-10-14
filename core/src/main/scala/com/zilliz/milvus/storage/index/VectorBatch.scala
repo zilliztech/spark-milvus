@@ -24,6 +24,28 @@ trait VectorBatch extends AutoCloseable {
 
 object VectorBatch {
 
+  /** The input cost a search reports, sampled at the end of a read or when a
+    * held set exceeds its budget. The format keeps its fuller reader metrics.
+    */
+  final case class ReadCost(bytes: Long, nanos: Long) {
+    def +(other: ReadCost): ReadCost =
+      ReadCost(bytes + other.bytes, nanos + other.nanos)
+  }
+
+  object ReadCost {
+    val Zero: ReadCost = ReadCost(0L, 0L)
+  }
+
+  /** Owned input to a scan or build. Each returned batch belongs to the caller
+    * until it closes it; batches may be kept while the stream advances. Closing
+    * the stream drains any read in flight and releases unread resources,
+    * without releasing batches already handed to the caller.
+    */
+  trait Stream extends AutoCloseable {
+    def next(): Option[VectorBatch]
+    def readCost: ReadCost
+  }
+
   /** Float vectors of `dimension` elements as a batch that owns its buffer: row
     * `i` is `vectors(i)`, and a null one is excluded.
     */

@@ -68,10 +68,7 @@ class SearchDeliveryTest
     mode = SearchMode.Exact,
     filter = None,
     parameters = Map.empty,
-    keptMaxBytes = 1L << 20,
-    arrowMaxBytes = 1L << 20,
-    slots = 2,
-    batchMaxBytes = None
+    arrowMaxBytes = 1L << 20
   )
 
   /** Eight queries the planner splits into four groups of two. */
@@ -288,14 +285,32 @@ class SearchDeliveryTest
     failure.getMessage should include("not finite")
   }
 
+  test(
+    "delivery broadcasts at the byte limit and always preserves driver-packed input"
+  ) {
+    val frame = SearchQueries.Frame(selected(), queries.toLong)
+    val bytes = SearchQueries.bytes(frame.count, layout)
+    SearchExecutionPlan.queryDelivery(frame, layout, bytes) shouldBe
+      SearchQueries.Broadcast(frame.selected)
+    SearchExecutionPlan.queryDelivery(frame, layout, bytes - 1L) shouldBe
+      SearchQueries.Shuffled(frame.selected)
+    val (ids, vectors) = pack(rows())
+    val packedInput = SearchQueries.Packed(ids, vectors)
+    SearchExecutionPlan.queryDelivery(
+      packedInput,
+      layout,
+      1L
+    ) should be theSameInstanceAs packedInput
+  }
+
   test("every delivery hands SearchQueryRanges the same groups and bytes") {
     val (driverIds, driverVectors) = pack(rows())
     val frame = SearchQueries.Frame(selected(), queries.toLong)
     val packedInput = SearchQueries.Packed(driverIds, driverVectors)
     val deliveries = Seq(
-      SearchQueries.Delivery.of(packedInput, layout, 0L),
-      SearchQueries.Delivery.of(frame, layout, Long.MaxValue),
-      SearchQueries.Delivery.of(frame, layout, 0L)
+      SearchExecutionPlan.queryDelivery(packedInput, layout, 0L),
+      SearchExecutionPlan.queryDelivery(frame, layout, Long.MaxValue),
+      SearchExecutionPlan.queryDelivery(frame, layout, 0L)
     )
     deliveries.map(_.describe) shouldBe Seq(
       "broadcast, packed on the driver",
@@ -311,8 +326,10 @@ class SearchDeliveryTest
         groups,
         request.metric,
         layout,
-        resources,
-        1L << 20
+        if (delivery.shuffled)
+          SearchExecutionPlan
+            .packingProfile(groups, layout, resources, 1L << 20)
+        else None
       )
       new SearchQueryRanges(delivered, 2, ranges)
         .mapPartitionsWithIndex { (task, streamed) =>
