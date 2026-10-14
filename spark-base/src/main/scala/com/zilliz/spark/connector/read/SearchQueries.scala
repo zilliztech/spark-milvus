@@ -41,12 +41,49 @@ private[read] object SearchQueries {
   final case class Frame(selected: DataFrame, count: Long) extends Input
 
   /** A set already packed on the driver, as [[pack]] packs one: row `i` of
-    * `vectors` is the query of `ids(i)`. It is broadcast, and nothing about it
-    * runs a job (docs/design/architecture/dataframe-api.html section 4).
+    * `vectors` is the query of `ids(i)`. It is broadcast as it is, and nothing
+    * about it runs a job (docs/design/architecture/dataframe-api.html section
+    * 4).
     */
   final case class Packed(ids: Array[Long], vectors: Array[Byte])
-      extends Input {
+      extends Input
+      with Delivery {
     override def count: Long = ids.length.toLong
+  }
+
+  /** How a query set reaches the first-stage tasks, decided once for a search
+    * (docs/design/architecture/vector-search.html section 2.1): a set the
+    * driver packed is broadcast as it is, a frame that fits
+    * `milvus.search.queries.max.bytes` is packed on the executors and
+    * broadcast, and a larger one travels by group with the shuffle.
+    */
+  sealed trait Delivery {
+
+    /** Whether the query groups travel with the shuffle. */
+    def shuffled: Boolean = false
+  }
+
+  /** A frame packed on the executors, concatenated on the driver and broadcast
+    * whole ([[packOnExecutors]]).
+    */
+  final case class Broadcast(selected: DataFrame) extends Delivery
+
+  /** A frame packed by group on the executors, never through the driver, each
+    * group read with the shuffle by the tasks of its range.
+    */
+  final case class Shuffled(selected: DataFrame) extends Delivery {
+    override def shuffled: Boolean = true
+  }
+
+  object Delivery {
+
+    def of(queries: Input, layout: VectorLayout, maxBytes: Long): Delivery =
+      queries match {
+        case packed: Packed => packed
+        case Frame(selected, count) =>
+          if (bytes(count, layout) > maxBytes) Shuffled(selected)
+          else Broadcast(selected)
+      }
   }
 
   /** One query group as it reaches a task: the ids of its queries, the bytes
