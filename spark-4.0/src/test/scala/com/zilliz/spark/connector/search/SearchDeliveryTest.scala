@@ -58,7 +58,7 @@ class SearchDeliveryTest
 
   private val layout = VectorLayout(VectorElementType.Float32, 2)
 
-  private val spec = SegmentSetSearch.Spec(
+  private val request = SegmentSetSearch.Request(
     vectorColumn = "v",
     layout = layout,
     fieldId = 100L,
@@ -79,8 +79,8 @@ class SearchDeliveryTest
   private val groups: Seq[SearchPlan.QueryGroup] = SearchPlan.groups(
     queries,
     layout,
-    spec.k,
-    SearchPlan.bytesPerQuery(layout, spec.k) * 2
+    request.k,
+    SearchPlan.bytesPerQuery(layout, request.k) * 2
   )
 
   private def rows(count: Int = queries): Seq[Row] =
@@ -102,7 +102,7 @@ class SearchDeliveryTest
   /** `rows` packed as an executor packs a partition of them. */
   private def pack(
       rows: Seq[Row],
-      metric: MetricType = spec.metric
+      metric: MetricType = request.metric
   ): (Array[Long], Array[Byte]) =
     SearchQueries.packPartition(
       rows.iterator.map(row =>
@@ -116,7 +116,7 @@ class SearchDeliveryTest
     )
 
   private def packed(): RDD[SearchQueries.Group] =
-    SearchQueries.packedGroups(selected(), groups, spec.metric, layout)
+    SearchQueries.packedGroups(selected(), groups, request.metric, layout)
 
   /** Checks that `delivered` holds one partition per group of `planned`, each
     * with its queries in order, starting at zero in its bytes.
@@ -157,7 +157,7 @@ class SearchDeliveryTest
     val even = SearchPlan.evenGroups(10, 4)
     even.map(_.queries) shouldBe Seq(3, 3, 2, 2)
     val delivered =
-      SearchQueries.packedGroups(selected(10), even, spec.metric, layout)
+      SearchQueries.packedGroups(selected(10), even, request.metric, layout)
     deliversGroups(delivered, even, 10)
   }
 
@@ -309,7 +309,7 @@ class SearchDeliveryTest
       val delivered = delivery.groups(
         spark,
         groups,
-        spec.metric,
+        request.metric,
         layout,
         resources,
         1L << 20

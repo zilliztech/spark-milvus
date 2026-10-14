@@ -15,7 +15,12 @@ import org.apache.spark.sql.connector.read.{
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
-import com.zilliz.milvus.storage.expr.{And, Evaluator, Expr, PredicateExpr}
+import com.zilliz.milvus.storage.expr.{
+  And,
+  FilterEvaluator,
+  FilterExpr,
+  PredicateExpr
+}
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.Snapshot
 import com.zilliz.spark.connector.expr.SparkPredicateTranslator
@@ -46,10 +51,10 @@ class MilvusScanBuilder(
   private var currentOptions = options
   private val milvusOption = MilvusOption(options)
   private val extraColumns = milvusOption.extraColumns
-  private val milvusFilter: Option[Expr] = milvusOption.milvusFilter
+  private val milvusFilter: Option[FilterExpr] = milvusOption.milvusFilter
   private val milvusFilterFieldIds: Set[Long] = milvusFilter
     .map { expression =>
-      try Evaluator.validate(expression, snapshot.schema.fields)
+      try FilterEvaluator.validate(expression, snapshot.schema.fields)
       catch {
         case error: IllegalArgumentException =>
           throw new IllegalArgumentException(

@@ -52,7 +52,7 @@ object CreateIndexProcedure extends Procedure {
     val field = ProcedureSupport.nonBlank(args.string("field"), name, "field")
     val indexName =
       ProcedureSupport.nonBlank(args.string("index_name"), name, "index_name")
-    val waitOptions = ProcedureSupport.waitOptions(args, name)
+    val waitOptions = ProcedureWait.options(args, name)
     val baseParams = Map(
       "index_type" -> args.stringOpt("index_type").getOrElse("AUTOINDEX"),
       "metric_type" -> args.stringOpt("metric_type").getOrElse("L2")
@@ -75,7 +75,7 @@ object CreateIndexProcedure extends Procedure {
     val state =
       if (!waitOptions.enabled) "submitted"
       else {
-        ProcedureSupport.await(
+        ProcedureWait.await(
           s"procedure $name for ${target.database}.${target.collection}",
           waitOptions.timeoutSeconds
         )(remainingMillis =>

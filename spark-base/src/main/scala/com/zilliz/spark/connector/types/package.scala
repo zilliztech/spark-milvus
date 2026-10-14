@@ -10,6 +10,9 @@ package com.zilliz.spark.connector
   * cover the supported fields whose stored Arrow type differs from their Spark
   * type. `ArrowAllocator` keeps the process root alive and creates a bounded
   * child for each read task; the final partition reader owns that child.
+  * `ConstantColumn` supplies one value for every row, `RowOffsetColumn`
+  * supplies consecutive row positions, and `SelectedRowsColumn` presents
+  * selected rows of another column without copying its buffers.
   *
   * Capabilities: R15, G3 (see docs/design/capabilities.md).
   */

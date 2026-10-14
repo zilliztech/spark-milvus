@@ -30,7 +30,7 @@ import io.milvus.grpc.schema.{DataType => MilvusDataType}
   * Binary for nullable dense vectors / sparse vectors, matching Milvus's
   * storage schema.
   */
-private[backfill] object VectorBackfillSupport {
+private[backfill] object BackfillVectorColumns {
 
   private val DenseVectorTypes: Set[MilvusDataType] = Set(
     MilvusDataType.FloatVector,
@@ -80,7 +80,7 @@ private[backfill] object VectorBackfillSupport {
   /** Convert every vector column in `targetFieldsByName` to canonical Milvus
     * bytes while preserving non-vector columns unchanged.
     */
-  def normalizeVectorColumns(
+  def normalize(
       df: DataFrame,
       targetFieldsByName: Map[String, FieldJson]
   ): Either[BackfillError, DataFrame] = {

@@ -15,7 +15,7 @@ import com.zilliz.milvus.storage.snapshot.json.{FieldJson, KeyValueJson}
 import com.zilliz.spark.connector.types.ArrowConverter
 import io.milvus.grpc.schema.{DataType => MilvusDataType}
 
-class VectorBackfillSupportTest
+class BackfillVectorColumnsTest
     extends AnyFunSuite
     with Matchers
     with BeforeAndAfterAll {
@@ -25,7 +25,7 @@ class VectorBackfillSupportTest
   override def beforeAll(): Unit = {
     spark = SparkSession
       .builder()
-      .appName("VectorBackfillSupportTest")
+      .appName("BackfillVectorColumnsTest")
       .master("local[1]")
       .config("spark.ui.enabled", "false")
       .getOrCreate()
@@ -87,8 +87,8 @@ class VectorBackfillSupportTest
       vectorField("sparse_vec", MilvusDataType.SparseFloatVector)
     ).map(field => field.name -> field).toMap
 
-    val normalized = VectorBackfillSupport
-      .normalizeVectorColumns(df, targets)
+    val normalized = BackfillVectorColumns
+      .normalize(df, targets)
       .toOption
       .get
 
@@ -114,7 +114,7 @@ class VectorBackfillSupportTest
       .array()
     result.getAs[Array[Byte]]("binary_vec") shouldBe Array[Byte](0, -1)
     result.getAs[Array[Byte]]("float16_vec") shouldBe
-      VectorBackfillSupport.encodeDenseJsonArray(
+      BackfillVectorColumns.encodeDenseJsonArray(
         "float16_vec",
         MilvusDataType.Float16Vector,
         2,
@@ -125,18 +125,18 @@ class VectorBackfillSupportTest
       Array[Byte](192.toByte, 63.toByte, 0.toByte, 192.toByte)
     result.getAs[Array[Byte]]("int8_vec") shouldBe Array[Byte](-128, 127)
     result.getAs[Array[Byte]]("sparse_vec") shouldBe
-      VectorBackfillSupport.encodeSparseJson(
+      BackfillVectorColumns.encodeSparseJson(
         "sparse_vec",
         """{"1":1.25,"3":2.5}"""
       )
   }
 
   test("sparse map JSON and indices-values struct encode identically") {
-    val mapBytes = VectorBackfillSupport.encodeSparseJson(
+    val mapBytes = BackfillVectorColumns.encodeSparseJson(
       "sparse",
       """{"5":3.0,"1":2.0}"""
     )
-    val structBytes = VectorBackfillSupport.encodeSparseJson(
+    val structBytes = BackfillVectorColumns.encodeSparseJson(
       "sparse",
       """{"indices":[5,1],"values":[3.0,2.0]}"""
     )
@@ -150,7 +150,7 @@ class VectorBackfillSupportTest
   }
 
   test("Float16 conversion matches Milvus round-to-nearest byte layout") {
-    VectorBackfillSupport.encodeDenseJsonArray(
+    BackfillVectorColumns.encodeDenseJsonArray(
       "float16",
       MilvusDataType.Float16Vector,
       2,
@@ -161,7 +161,7 @@ class VectorBackfillSupportTest
     val rounded = Array[Byte](0xcd.toByte, 0x34, 0x9a.toByte, 0x39)
     FloatConverter.toFloat16Bytes(0.3f).toArray ++
       FloatConverter.toFloat16Bytes(0.7f).toArray shouldBe rounded
-    VectorBackfillSupport.encodeDenseJsonArray(
+    BackfillVectorColumns.encodeDenseJsonArray(
       "float16",
       MilvusDataType.Float16Vector,
       2,
@@ -171,7 +171,7 @@ class VectorBackfillSupportTest
 
     val maxFinite = Array[Byte](0xff.toByte, 0x7b)
     FloatConverter.toFloat16Bytes(65510.0f).toArray shouldBe maxFinite
-    VectorBackfillSupport.encodeDenseJsonArray(
+    BackfillVectorColumns.encodeDenseJsonArray(
       "float16",
       MilvusDataType.Float16Vector,
       1,
@@ -187,7 +187,7 @@ class VectorBackfillSupportTest
 
   test("rejects negative sparse weights like Milvus validation") {
     val error = intercept[IllegalArgumentException] {
-      VectorBackfillSupport.encodeSparseJson(
+      BackfillVectorColumns.encodeSparseJson(
         "sparse",
         """{"1":-0.5}"""
       )
@@ -203,7 +203,7 @@ class VectorBackfillSupportTest
       .putFloat(2.0f)
       .array()
 
-    VectorBackfillSupport.validateInternalBytes(
+    BackfillVectorColumns.validateInternalBytes(
       "vec",
       MilvusDataType.FloatVector,
       2,
@@ -211,7 +211,7 @@ class VectorBackfillSupportTest
     ) shouldBe valid
 
     val error = intercept[IllegalArgumentException] {
-      VectorBackfillSupport.validateInternalBytes(
+      BackfillVectorColumns.validateInternalBytes(
         "vec",
         MilvusDataType.FloatVector,
         2,
@@ -235,8 +235,8 @@ class VectorBackfillSupportTest
       Some(16)
     )
 
-    val error = VectorBackfillSupport
-      .normalizeVectorColumns(df, Map(target.name -> target))
+    val error = BackfillVectorColumns
+      .normalize(df, Map(target.name -> target))
       .left
       .toOption
       .get

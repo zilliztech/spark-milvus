@@ -1,7 +1,8 @@
 package com.zilliz.spark.connector.apps
 
 /** BackfillApp, its configuration, join keys, column mapping, merge modes and
-  * the result JSON.
+  * the result JSON. `BackfillVectorColumns` normalizes the input's vector
+  * columns for the collection schema before the backfill merge.
   *
   * Capabilities: O1 (see docs/design/capabilities.md).
   */

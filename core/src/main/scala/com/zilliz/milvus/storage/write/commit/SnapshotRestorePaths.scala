@@ -23,7 +23,7 @@ import com.zilliz.milvus.storage.snapshot.json.ManifestContentJson
   * time, and `restore_snapshot` checks before it asks
   * (docs/design/architecture/vector-search.html section 2.7).
   */
-object SnapshotBundle {
+object SnapshotRestorePaths {
 
   private val mapper = new ObjectMapper()
 

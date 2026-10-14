@@ -41,13 +41,13 @@ object LoadProcedure extends Procedure {
       target: ProcedureTarget,
       client: MilvusClient
   ): Seq[Row] = {
-    val waitOptions = ProcedureSupport.waitOptions(args, name)
+    val waitOptions = ProcedureWait.options(args, name)
     client.loadCollection(target.database, target.collection).get
 
     val state =
       if (!waitOptions.enabled) "submitted"
       else {
-        ProcedureSupport
+        ProcedureWait
           .await(
             s"procedure $name for ${target.database}.${target.collection}",
             waitOptions.timeoutSeconds
@@ -152,7 +152,7 @@ object CompactProcedure extends Procedure {
       target: ProcedureTarget,
       client: MilvusClient
   ): Seq[Row] = {
-    val waitOptions = ProcedureSupport.waitOptions(args, name)
+    val waitOptions = ProcedureWait.options(args, name)
     val submitted =
       client.manualCompaction(target.database, target.collection).get
 
@@ -171,7 +171,7 @@ object CompactProcedure extends Procedure {
         )
       )
     } else {
-      val state = ProcedureSupport.await(
+      val state = ProcedureWait.await(
         s"procedure $name for ${target.database}.${target.collection}",
         waitOptions.timeoutSeconds
       )(remainingMillis =>

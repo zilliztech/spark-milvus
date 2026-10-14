@@ -16,25 +16,25 @@ import com.zilliz.milvus.storage.Logging
 
 import io.knowhere.DType
 
-/** Loads the exact snapshot object set and restores named Knowhere payloads. */
+/** Defines index slice metadata and loads the exact snapshot object set,
+  * restoring named Knowhere payloads.
+  */
 private[storage] object IndexFileCodec extends Logging {
-  private val SliceMeta = "SLICE_META"
+  private[codec] val SliceMeta = "SLICE_META"
   private val CardinalFile = "_mem.index.bin"
   private val ValidData = "valid_data"
   private val ValidDataNames = Set(ValidData, "valid_data_count")
   private val MaxValidDataBytes = 256L * 1024 * 1024
-  private val MaxObjectBytes = 256L * 1024 * 1024
+  private[codec] val MaxObjectBytes = 256L * 1024 * 1024
   // A payload has no size cap of its own: it streams into the native BinarySet
   // in 1 MiB chunks, and what is allocated for it is held against the bytes its
   // slice objects have on the store before anything is allocated. Only
   // SLICE_META and valid_data are materialized as Java arrays and have caps
   // (docs/design/architecture/search-resources.html section 3.4).
-  private val ChunkBytes = 1024 * 1024
+  private[codec] val ChunkBytes = 1024 * 1024
   // One request for an unsliced object reads this much; several are in flight
   // at once (ConcurrentRangeReads).
   private val RangeBytes = 8 * 1024 * 1024
-  // Milvus slices an index payload at common.indexSliceSize, 16 MiB by default.
-  private val DefaultSliceBytes = 16L * 1024 * 1024
   private val mapper = new ObjectMapper()
     .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
 
@@ -52,176 +52,18 @@ private[storage] object IndexFileCodec extends Logging {
 
   private[codec] final case class Slice(name: String, count: Int, length: Long)
 
-  /** Where a built index's objects go, and what the segment record will say
-    * about them.
-    */
-  private[storage] final case class IndexTarget(
-      collectionId: Long,
-      partitionId: Long,
-      segmentId: Long,
-      fieldId: Long,
-      buildId: Long,
-      indexVersion: Long,
-      storePathVersion: Int,
-      nullable: Boolean,
-      rootPath: String = ""
-  )
-
-  private[storage] final case class IndexObject(key: String, bytes: Long)
-
-  /** The prefix Milvus reads an index from, which its store path version
-    * decides (internal/core/src/storage/FileManager.h
-    * `GetRemoteIndexObjectPrefix`).
-    */
-  private[storage] def prefixOf(target: IndexTarget): String = {
-    val root = target.rootPath.stripSuffix("/")
-    val parts =
-      if (target.storePathVersion >= 1)
-        Seq(
-          "index_v1",
-          target.collectionId,
-          target.partitionId,
-          target.segmentId,
-          target.buildId,
-          target.indexVersion
-        )
-      else
-        Seq(
-          "index_files",
-          target.buildId,
-          target.indexVersion,
-          target.partitionId,
-          target.segmentId
-        )
-    (if (root.isEmpty) parts.mkString("/")
-     else root + "/" + parts.mkString("/"))
-  }
-
-  /** Writes a built index as the objects Milvus reads back.
-    *
-    * Each payload becomes one object under the index prefix, in the same
-    * envelope Milvus writes: a descriptor naming the segment and field, then
-    * one `IndexFileEvent` carrying the bytes. A payload longer than
-    * `sliceBytes` is split into `name_0`, `name_1`…; a payload that fits is
-    * still written as `name_0`, because that is what Milvus writes and what its
-    * loader parses. Every payload is declared in the `SLICE_META` object says
-    * how to put it back, which is what the loader in section 2.5 reads.
-    */
-  private[storage] def write(
-      payloads: Seq[(String, Long)],
-      read: (String, Long, ByteBuffer) => Unit,
-      target: IndexTarget,
-      store: ObjectStore,
-      sliceBytes: Long = DefaultSliceBytes
-  ): Seq[IndexObject] = {
-    require(payloads.nonEmpty, "A built index has no payloads")
-    require(
-      payloads.map(_._1).distinct.size == payloads.size,
-      "A built index repeats a payload name"
-    )
-    require(sliceBytes > 0, s"The slice size must be positive: $sliceBytes")
-    val prefix = prefixOf(target)
-    // A local filesystem needs the directory before the first object; on object
-    // storage this is a marker and costs nothing.
-    store.createDir(prefix, recursive = true)
-    // Milvus writes originSize and indexBuildID as strings and nullable as a
-    // boolean (internal/core/src/storage/Event.cpp).
-    def extrasOf(originSize: Long) = {
-      val node = mapper.createObjectNode()
-      node.put("originSize", originSize.toString)
-      node.put("indexBuildID", target.buildId.toString)
-      node.put("nullable", target.nullable)
-      node
+  /** Encodes the slice metadata the loader reads through [[parseSlices]]. */
+  private[codec] def sliceMeta(slices: Seq[Slice]): Array[Byte] = {
+    val root = mapper.createObjectNode()
+    val meta = root.putArray("meta")
+    slices.foreach { slice =>
+      meta
+        .addObject()
+        .put("name", slice.name)
+        .put("slice_num", slice.count)
+        .put("total_len", slice.length)
     }
-    val written = Seq.newBuilder[IndexObject]
-    val slices = Vector.newBuilder[(String, Int, Long)]
-    payloads.foreach { case (name, length) =>
-      require(
-        validName(name),
-        s"A payload name has to be a plain object name: $name"
-      )
-      require(length > 0, s"Payload $name is empty")
-      def objectOf(objectName: String, offset: Long, size: Long): Unit = {
-        require(
-          size <= MaxObjectBytes,
-          s"Index object $objectName of $size bytes exceeds the supported size"
-        )
-        val bytes = new Array[Byte](size.toInt)
-        // The upstream payloads copy into direct memory only, so the bytes come
-        // back one chunk at a time.
-        var copied = 0
-        while (copied < bytes.length) {
-          val count = math.min(ChunkBytes, bytes.length - copied)
-          val chunk = ByteBuffer.allocateDirect(count)
-          read(name, offset + copied, chunk)
-          // Whether the copy left the position at the end or at the start is
-          // the caller's business; the bytes are read from the start either way.
-          val view = chunk.duplicate()
-          view.clear()
-          view.get(bytes, copied, count)
-          copied += count
-        }
-        val envelope = BinlogCodec.envelope(
-          7,
-          target.collectionId,
-          target.partitionId,
-          target.segmentId,
-          target.fieldId,
-          0,
-          extrasOf(size),
-          bytes
-        )
-        val key = s"$prefix/$objectName"
-        store.write(key, envelope)
-        written += IndexObject(key, envelope.length.toLong)
-      }
-      // Always the sliced names, even for a payload that fits in one object:
-      // Milvus writes `name_0` whatever the size, and its segment loader takes
-      // the number after the last underscore as the slice index, so a file
-      // called `HNSW` fails there with `invalided index file path`.
-      val count = math.max(1, ((length + sliceBytes - 1L) / sliceBytes).toInt)
-      (0 until count).foreach { number =>
-        val offset = number.toLong * sliceBytes
-        objectOf(
-          s"${name}_$number",
-          offset,
-          math.min(sliceBytes, length - offset)
-        )
-      }
-      slices += ((name, count, length))
-    }
-    val sliced = slices.result()
-    if (sliced.nonEmpty) {
-      val root = mapper.createObjectNode()
-      val meta = root.putArray("meta")
-      sliced.foreach { case (name, count, length) =>
-        meta
-          .addObject()
-          .put("name", name)
-          .put("slice_num", count)
-          .put("total_len", length)
-      }
-      val bytes = mapper.writeValueAsBytes(root)
-      val envelope = BinlogCodec.envelope(
-        7,
-        target.collectionId,
-        target.partitionId,
-        target.segmentId,
-        target.fieldId,
-        0,
-        extrasOf(bytes.length.toLong),
-        bytes
-      )
-      val key = s"$prefix/$SliceMeta"
-      store.write(key, envelope)
-      written += IndexObject(key, envelope.length.toLong)
-    }
-    val objects = written.result()
-    logInfo(
-      s"Index written: segment=${target.segmentId}, build=${target.buildId}, " +
-        s"objects=${objects.size}, bytes=${objects.map(_.bytes).sum}, prefix=$prefix"
-    )
-    objects
+    mapper.writeValueAsBytes(root)
   }
 
   private[codec] def parseSlices(bytes: Array[Byte]): Vector[Slice] = {
@@ -279,7 +121,7 @@ private[storage] object IndexFileCodec extends Logging {
     slices
   }
 
-  private def validName(name: String): Boolean =
+  private[codec] def validName(name: String): Boolean =
     name.matches("[A-Za-z0-9_+.-]+") && name != "." && name != ".."
 
   private[codec] def validateIdentity(

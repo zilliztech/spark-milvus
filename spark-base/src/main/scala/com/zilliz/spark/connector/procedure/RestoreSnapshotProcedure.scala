@@ -13,7 +13,7 @@ import org.apache.spark.sql.Row
 import com.zilliz.milvus.client.api.MilvusClient
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.io.{NativeObjectStore, ObjectStore}
-import com.zilliz.milvus.storage.write.commit.SnapshotBundle
+import com.zilliz.milvus.storage.write.commit.SnapshotRestorePaths
 import com.zilliz.spark.connector.options.StorageOptions
 import io.milvus.grpc.milvus.RestoreSnapshotState
 
@@ -30,12 +30,12 @@ import io.milvus.grpc.milvus.RestoreSnapshotState
   *
   * Before Milvus is asked, the document and its segment manifests are read
   * through the same `fs.*` options a read uses, and every path they name is
-  * checked against the root the key derives ([[SnapshotBundle]]): a snapshot a
-  * restore would refuse is refused here, with the paths named, instead of after
-  * Milvus has opened a job for it. Without `wait` the row reports the job
-  * Milvus opened; with `wait` the job is polled with the bounded rule the other
-  * management procedures share, and the row reports how it ended
-  * (docs/design/architecture/vector-search.html section 2.7).
+  * checked against the root the key derives ([[SnapshotRestorePaths]]): a
+  * snapshot a restore would refuse is refused here, with the paths named,
+  * instead of after Milvus has opened a job for it. Without `wait` the row
+  * reports the job Milvus opened; with `wait` the job is polled with the
+  * bounded rule the other management procedures share, and the row reports how
+  * it ended (docs/design/architecture/vector-search.html section 2.7).
   */
 object RestoreSnapshotProcedure extends Procedure {
 
@@ -64,7 +64,7 @@ object RestoreSnapshotProcedure extends Procedure {
   )
 
   override def run(args: ProcedureArgs): Seq[Row] = {
-    val waitOptions = ProcedureSupport.waitOptions(args, name)
+    val waitOptions = ProcedureWait.options(args, name)
     val key = snapshotKey(args.string("snapshot"))
     val (database, collection) =
       ProcedureSupport.parseCollection(args.string("collection"), name)
@@ -104,12 +104,12 @@ object RestoreSnapshotProcedure extends Procedure {
       store.exists(key),
       s"No snapshot document at '$key'; 'snapshot' is the key write_snapshot returned"
     )
-    val outside = SnapshotBundle.outsideRootOf(store, key, bucket)
+    val outside = SnapshotRestorePaths.outsideRootOf(store, key, bucket)
     require(
       outside.isEmpty,
       "Milvus refuses a restore whose files are outside the root its snapshot document derives; " +
-        SnapshotBundle.describeOutside(
-          SnapshotBundle.rootOf(key).getOrElse(""),
+        SnapshotRestorePaths.describeOutside(
+          SnapshotRestorePaths.rootOf(key).getOrElse(""),
           outside
         ) +
         ". Write the snapshot under a prefix the data already sits below"
@@ -147,7 +147,7 @@ object RestoreSnapshotProcedure extends Procedure {
         )
       )
     } else {
-      val job = ProcedureSupport.await(
+      val job = ProcedureWait.await(
         s"procedure $name for ${target.database}.${target.collection}",
         waitOptions.timeoutSeconds
       )(remainingMillis =>

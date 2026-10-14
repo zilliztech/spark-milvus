@@ -8,7 +8,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 import com.zilliz.milvus.client.api.MilvusConnectionParams
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.expr.{Expr, PlanParser}
+import com.zilliz.milvus.storage.expr.{FilterExpr, PlanParser}
 import com.zilliz.milvus.storage.read.plan.ReadLimits
 
 case class MilvusOption(
@@ -34,7 +34,7 @@ case class MilvusOption(
     options: Map[String, String] = Map.empty,
     readLimits: ReadLimits = ReadLimits.Default,
     writeFileRollingBytes: Long = MilvusOption.DefaultWriteFileRollingBytes,
-    milvusFilter: Option[Expr] = None
+    milvusFilter: Option[FilterExpr] = None
 ) {
 
   /** Just the fields needed to connect to Milvus. The client does not know
@@ -623,7 +623,7 @@ object MilvusOption {
 
   private def parseMilvusFilter(
       options: CaseInsensitiveStringMap
-  ): Option[Expr] = {
+  ): Option[FilterExpr] = {
     if (!options.containsKey(MilvusFilter)) return None
 
     val text = Option(options.get(MilvusFilter)).map(_.trim).getOrElse("")

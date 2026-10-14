@@ -1,7 +1,7 @@
 package com.zilliz.milvus.storage
 
-/** Byte-level encoding and decoding of Milvus column values. Pure JVM, shared
-  * by the read and write paths.
+/** Milvus column-value encoding and decoding, and persisted-index file
+  * handling, shared by the read and write paths.
   *
   * Float16 and BFloat16 packing lives here, as does the (index, value) encoding
   * of sparse vectors and the protobuf `ScalarField` an Array value is stored
@@ -14,8 +14,9 @@ package com.zilliz.milvus.storage
   * assembles the slices of a persisted index and hands the payload to the
   * vector library; both belong to the Milvus format side rather than to the
   * computation (docs/design/architecture/vector-search.html section 2.5).
-  * `SegmentIndexObjects` encodes what a build produced into the same files,
-  * beside the decoder, so both directions share one format definition (W6).
+  * `SegmentIndexObjects` names, slices, encodes and writes what a build
+  * produced into those files through `ObjectStore`. It shares the envelope and
+  * slice-metadata format with `IndexFileCodec` (W6).
   *
   * `VectorIndexFamilies` is the one list of index types this connector reads
   * and writes, with the byte markers each family's persisted stream starts

@@ -137,7 +137,7 @@ object BuildIndexProcedure extends Procedure {
         )
       )
     val jobId = "index-" + System.currentTimeMillis()
-    val spec = SegmentIndexBuild.Spec(
+    val request = SegmentIndexBuild.Request(
       vectorColumn = column,
       layout = VectorLayout.of(field.dataType, dimensionOf(field)),
       fieldId = field.fieldID,
@@ -165,10 +165,13 @@ object BuildIndexProcedure extends Procedure {
       output = output,
       arrowMaxBytes = MilvusOption(caseInsensitive).readLimits.arrowMaxBytes
     )
-    require(spec.buildId > 0, s"'build_id' must be positive: ${spec.buildId}")
     require(
-      spec.indexVersion > 0,
-      s"'index_version' must be positive: ${spec.indexVersion}"
+      request.buildId > 0,
+      s"'build_id' must be positive: ${request.buildId}"
+    )
+    require(
+      request.indexVersion > 0,
+      s"'index_version' must be positive: ${request.indexVersion}"
     )
 
     // Segments go to tasks in the order they were planned, so a task's segments
@@ -178,7 +181,7 @@ object BuildIndexProcedure extends Procedure {
     // section 1.1).
     val built = spark.sparkContext
       .parallelize(partitions, partitions.size)
-      .map(partition => SegmentIndexBuild.run(partition, spec))
+      .map(partition => SegmentIndexBuild.run(partition, request))
     val indexes = TaskResources
       .of(spark)
       .wholeExecutor

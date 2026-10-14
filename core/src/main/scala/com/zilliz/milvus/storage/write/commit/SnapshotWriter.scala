@@ -58,8 +58,8 @@ final case class WrittenSnapshot(
   *
   * Restoring the result into a collection is Milvus's side; `restore_snapshot`
   * asks it to. A restore refuses a snapshot whose files are not under the root
-  * its document's key derives ([[SnapshotBundle]]), so a restorable write is
-  * refused here, before anything is written, when a path would be outside
+  * its document's key derives ([[SnapshotRestorePaths]]), so a restorable write
+  * is refused here, before anything is written, when a path would be outside
   * `rootPath`.
   */
 object SnapshotWriter extends Logging {
@@ -221,16 +221,16 @@ object SnapshotWriter extends Logging {
     // every data, delete, statistics and index file has to sit under the root.
     if (restorable) {
       val root = Option(target.rootPath).map(_.trim).getOrElse("")
-      val outside = SnapshotBundle.outsideRoot(
+      val outside = SnapshotRestorePaths.outsideRoot(
         root,
-        SnapshotBundle.pathsOf(document, parsed.map(_._2)) ++
+        SnapshotRestorePaths.pathsOf(document, parsed.map(_._2)) ++
           indexes.flatMap(_.filePaths),
         snapshot.bucket
       )
       require(
         outside.isEmpty,
         "A restorable snapshot keeps every file under its root; " +
-          SnapshotBundle.describeOutside(root, outside) +
+          SnapshotRestorePaths.describeOutside(root, outside) +
           ". Write it under a prefix the data already sits below, or pass " +
           "restorable => false for a snapshot only this connector reads"
       )

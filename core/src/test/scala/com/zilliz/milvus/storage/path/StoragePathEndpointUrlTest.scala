@@ -21,12 +21,14 @@ class StoragePathEndpointUrlTest extends AnyFunSuite {
     "http endpoint URL works the same, and s3a keeps the authority as bucket"
   ) {
     assert(
-      StoragePath.parseMilvus("http://minio:9000/b/k/1.json") == Located(
+      StoragePath.parseMilvus("http://minio:9000/b/k/1.json") == StoragePath(
         "b",
         "k/1.json"
       )
     )
-    assert(StoragePath.parse("s3a://b/k/1.json") == Located("b", "k/1.json"))
+    assert(
+      StoragePath.parse("s3a://b/k/1.json") == StoragePath("b", "k/1.json")
+    )
   }
 
   test("an endpoint URL with only a bucket and no key is refused") {

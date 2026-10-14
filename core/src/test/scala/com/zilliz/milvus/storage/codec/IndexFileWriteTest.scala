@@ -14,7 +14,7 @@ import com.zilliz.milvus.storage.io.LocalObjectStore
   */
 class IndexFileWriteTest extends AnyFunSuite with Matchers {
 
-  private val target = IndexFileCodec.IndexTarget(
+  private val target = IndexObjectTarget(
     collectionId = 10L,
     partitionId = 20L,
     segmentId = 30L,
@@ -40,11 +40,13 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
   }
 
   test("an index prefix follows the store path version") {
-    IndexFileCodec.prefixOf(target) shouldBe "files/index_files/900/1/20/30"
-    IndexFileCodec.prefixOf(
+    SegmentIndexObjects.prefixOf(
+      target
+    ) shouldBe "files/index_files/900/1/20/30"
+    SegmentIndexObjects.prefixOf(
       target.copy(storePathVersion = 1)
     ) shouldBe "files/index_v1/10/20/30/900/1"
-    IndexFileCodec.prefixOf(
+    SegmentIndexObjects.prefixOf(
       target.copy(rootPath = "")
     ) shouldBe "index_files/900/1/20/30"
   }
@@ -54,7 +56,7 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
     val store = new LocalObjectStore(directory.toString)
     val bytes = Array.tabulate(1000)(index => (index % 251).toByte)
     try {
-      val written = IndexFileCodec.write(
+      val written = SegmentIndexObjects.write(
         Seq(payload("HNSW", bytes)),
         reader(Map("HNSW" -> bytes)),
         target,
@@ -91,7 +93,7 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
     val store = new LocalObjectStore(directory.toString)
     val bytes = Array.tabulate(2500)(index => (index % 97).toByte)
     try {
-      val written = IndexFileCodec.write(
+      val written = SegmentIndexObjects.write(
         Seq(payload("HNSW", bytes)),
         reader(Map("HNSW" -> bytes)),
         target,
@@ -141,7 +143,7 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
     val index = Array.tabulate(64)(_.toByte)
     val bitmap = Array[Byte](0x0f, 0x33)
     try {
-      val written = IndexFileCodec.write(
+      val written = SegmentIndexObjects.write(
         Seq(payload("HNSW", index), payload("valid_data", bitmap)),
         reader(Map("HNSW" -> index, "valid_data" -> bitmap)),
         target.copy(nullable = true),
@@ -169,19 +171,19 @@ class IndexFileWriteTest extends AnyFunSuite with Matchers {
       Files.createTempDirectory("index-refuse-test-").toString
     )
     try {
-      the[IllegalArgumentException] thrownBy IndexFileCodec.write(
+      the[IllegalArgumentException] thrownBy SegmentIndexObjects.write(
         Seq.empty,
         reader(Map.empty),
         target,
         store
       )
-      the[IllegalArgumentException] thrownBy IndexFileCodec.write(
+      the[IllegalArgumentException] thrownBy SegmentIndexObjects.write(
         Seq(("HNSW", 0L)),
         reader(Map("HNSW" -> Array.emptyByteArray)),
         target,
         store
       )
-      the[IllegalArgumentException] thrownBy IndexFileCodec.write(
+      the[IllegalArgumentException] thrownBy SegmentIndexObjects.write(
         Seq(("HNSW", 4L), ("HNSW", 4L)),
         reader(Map("HNSW" -> Array[Byte](1, 2, 3, 4))),
         target,

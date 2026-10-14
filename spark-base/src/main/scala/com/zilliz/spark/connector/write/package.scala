@@ -8,6 +8,11 @@ package com.zilliz.spark.connector
   * file-rolling byte limit is mapped to the upstream writer for both storage
   * lines.
   *
+  * V3 driver coordination lives with `MilvusV3BatchWrite`, while executor
+  * writers and their factory live with `MilvusV3PartitionWriter`.
+  * `MilvusV3Writer` provides the direct DataFrame entry and shared schema and
+  * staging-path helpers. The file split preserves their Spark interfaces.
+  *
   * Capabilities: W1, W2, G2 (see docs/design/capabilities.md).
   */
 package object write

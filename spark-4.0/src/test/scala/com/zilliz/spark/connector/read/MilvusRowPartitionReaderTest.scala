@@ -10,8 +10,8 @@ import com.zilliz.milvus.storage.delete.DeletePlan
 import com.zilliz.milvus.storage.expr.{
   Comparison,
   ComparisonOperator,
-  Expr,
   FieldRef,
+  FilterExpr,
   PredicateExpr
 }
 import com.zilliz.milvus.storage.expr.Literal.IntegerValue
@@ -83,7 +83,7 @@ class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
       readIds(
         root(allocator),
         task(),
-        milvusFilter = Some(Expr.Compare("id", ">=", 12L)),
+        milvusFilter = Some(FilterExpr.Compare("id", ">=", 12L)),
         allocator = allocator
       ) shouldBe Vector(12L, 13L)
 
@@ -100,7 +100,7 @@ class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
       readIds(
         root(allocator),
         taskWithDelete,
-        milvusFilter = Some(Expr.Compare("id", ">=", 11L)),
+        milvusFilter = Some(FilterExpr.Compare("id", ">=", 11L)),
         allocator = allocator,
         pushedExpression = Some(sparkPredicate)
       ) shouldBe Vector(12L)
@@ -141,7 +141,7 @@ class MilvusRowPartitionReaderTest extends AnyFunSuite with Matchers {
   private def readIds(
       root: VectorSchemaRoot,
       task: SegmentReadTask,
-      milvusFilter: Option[Expr],
+      milvusFilter: Option[FilterExpr],
       allocator: RootAllocator,
       pushedExpression: Option[PredicateExpr] = None
   ): Vector[Long] = {

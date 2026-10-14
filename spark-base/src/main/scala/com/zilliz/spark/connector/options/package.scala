@@ -17,7 +17,7 @@ package com.zilliz.spark.connector
   * task Arrow limits become a typed `ReadLimits` carried in every
   * `SegmentReadTask`; the write rolling limit is mapped once to the upstream
   * `writer.file_rolling.size` property. `milvus.filter` is parsed into a typed
-  * core `Expr` on the driver; schema binding and execution belong to
+  * core `FilterExpr` on the driver; schema binding and execution belong to
   * `spark.read` and `core.expr`.
   *
   * A vector search's options and the executors it runs on come from here:

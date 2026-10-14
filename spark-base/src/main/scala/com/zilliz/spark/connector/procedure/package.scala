@@ -8,11 +8,14 @@ package com.zilliz.spark.connector
   *
   * Snapshot, index, collection-lifecycle, and describe procedures delegate to
   * `client.api` and own their client for the duration of one driver-side call.
-  * `Register` additionally reads a committed write job and hands its existing
-  * segments to Milvus through `BatchUpdateManifest` (the backfill branch of
-  * A4). `CleanupStagingProcedure` exposes A7's safe candidate audit, dry-run
-  * and file-object deletion; recursive directory deletion remains blocked on a
-  * native filesystem API, so it never reports a staging prefix deleted.
+  * `ProcedureSupport` resolves targets and owns clients; `ProcedureWait` parses
+  * wait options and polls operation state until completion or failure, subject
+  * to the requested timeout. `Register` additionally reads a committed write
+  * job and hands its existing segments to Milvus through `BatchUpdateManifest`
+  * (the backfill branch of A4). `CleanupStagingProcedure` exposes A7's safe
+  * candidate audit, dry-run and file-object deletion; recursive directory
+  * deletion remains blocked on a native filesystem API, so it never reports a
+  * staging prefix deleted.
   *
   * `BuildIndexProcedure` (W6) plans a fixed snapshot's segments the way a read
   * does, builds one vector index per segment in a Spark job through
