@@ -3,11 +3,15 @@
 Read and write Milvus collections from Apache Spark by going straight at the
 Milvus storage format on object storage, rather than through the Milvus query
 path. A read lists a snapshot, plans one Spark partition per segment, and pulls
-Arrow column batches out of the segment files. A write produces segment files in
-the same format and registers them back with Milvus.
+Arrow column batches out of the segment files. A write stages segment files in
+the same format on object storage; ordinary DataFrame append does not register
+new segments with Milvus and does not make them queryable there. See the
+[write contract](docs/reference-en.md#24-write-parameters) before using it.
 
-**Requires Milvus 2.6 or later** (Storage V2). For Milvus 2.5 and earlier use
-the `legacy` branch, which is no longer maintained.
+Storage V2 requires Milvus 2.6 or later. Service operations also require the
+corresponding Milvus APIs; the end-to-end demos below use Milvus 3.0+ for
+snapshot creation. For Milvus 2.5 and earlier use the `legacy` branch, which is
+no longer maintained.
 
 The 1.x line stopped at tag `v1.6.0` and is no longer maintained. The 2.0 line
 is a rewrite on branch `refactor/v2`, versioned
@@ -238,37 +242,91 @@ docker rm temp
 
 ## Using the connector
 
-The published coordinate is `com.zilliz:spark-connector_2.13`
-([Maven](https://mvnrepository.com/artifact/com.zilliz/spark-connector_2.13)).
-Released versions currently exist to exercise the release process; active work
-lands in the snapshots, which need the snapshot repository:
+Use an assembly built from this 2.0 checkout for your Spark line and native
+platform: root's assembly for Spark 4.0, or `spark42/assembly` for Spark 4.2.
+The historical 1.x examples and artifacts do not implement the APIs below.
+The root Maven coordinate remains `com.zilliz:spark-connector_2.13`; 2.0
+snapshots use the snapshot repository:
 
 ```scala
 ThisBuild / resolvers +=
   "Sonatype Snapshots" at "https://central.sonatype.com/repository/maven-snapshots/"
 ```
 
-A runnable example lives in
-[milvus-spark-connector-example](https://github.com/SimFG/milvus-spark-connector-example).
-Build it with `sbt clean compile package`, then:
+### Run the read and search demo
+
+[scripts/spark_submit_demo.sh](scripts/spark_submit_demo.sh) runs the maintained
+[search demo](scripts/search_demo.py). It creates a temporary collection,
+inserts 2,000 vectors through the Milvus SDK, flushes and snapshots it, then
+uses Spark to search that snapshot exactly. It checks that the connector
+executes the join and compares the results with NumPy. It does not exercise
+persisted-index APPROX search.
+
+Prerequisites: Milvus 3.0+ with its object storage reachable from Spark, Spark
+4.0 for Scala 2.13, Java 21, Python with `pymilvus` 3.0+ and `numpy`, and root's
+assembly containing the matching native bundle (see [Building](#building)).
+For a local Milvus and MinIO using the script's defaults:
 
 ```bash
-spark-submit-wrapper \
-  --jars /xxx/spark-connector-assembly-x.x.x-SNAPSHOT.jar \
-  --class "example.HelloDemo" \
-  /xxx/milvus-spark-connector-example_2.13-0.1.0-SNAPSHOT.jar
+export SPARK_HOME=/path/to/spark-4.0-bin-hadoop3
+export JAVA_HOME=/path/to/jdk-21
+export JAR=/path/to/spark-connector-assembly-2.0.0-refactor-v2-amd64-SNAPSHOT.jar
+./scripts/spark_submit_demo.sh
 ```
 
-`HelloDemo` reads a collection called `hello_spark_milvus`, so create it first
-and make sure the local Milvus is reachable. Pre-built assembly jars are also
-attached to the
-[GitHub releases](https://github.com/SimFG/milvus-spark-connector/releases).
+The script defaults to `http://localhost:19530`, MinIO at `localhost:9000`,
+bucket `a-bucket` and root `files`, with local-development credentials.
+Override `MILVUS_URI`, `MILVUS_TOKEN` and the `S3_*` variables documented in the
+script for your installation. The Milvus identity and object-storage identity
+are separate. Driver and executors both need access to the storage. The demo
+drops only its newly created collection and snapshot on exit; `KEEP=1` keeps
+them for inspection. A successful run prints `Search demo passed`.
 
-Search jobs set
-`spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin` so that
-every executor loads the native bundle at start; the
-[API reference](docs/reference-en.md) explains the setting. For the option
-names and entry points, see the same reference.
+The script configures the session extension, `MilvusSparkPlugin`, catalog,
+credential redaction and `libjsig` preload before Spark starts. Use the same
+startup settings in your jobs; a cluster's executor preload path must point
+to the JDK installed on its workers. The plugin is required for connector
+search execution, not just faster library initialization.
+
+### Query with Scala DataFrames
+
+With a Spark session configured as above, this example reads an existing
+collection snapshot and finds three matches per query. Replace the collection,
+field names and query vectors with your own; here `embedding` is a
+three-dimensional float vector and `id` and `title` are collection fields.
+
+```scala
+import com.zilliz.spark.connector.implicits._
+import org.apache.spark.sql.functions.call_function
+import spark.implicits._
+
+val docs = spark.table("milvus.default.docs")
+val queries = Seq(
+  (1L, Seq(0.1f, 0.2f, 0.3f)),
+  (2L, Seq(0.4f, 0.5f, 0.6f))
+).toDF("qid", "vec")
+
+val hits = queries.nearestByJoin(
+  docs,
+  call_function("vector_l2_distance", queries("vec"), docs("embedding")),
+  3, "exact", "distance"
+).select(queries("qid"), docs("id"), docs("title"))
+
+hits.explain(true) // Look for MilvusNearestByJoin with input=Milvus table.
+hits.show(false)
+```
+
+The import supplies `nearestByJoin` on Spark 3.5–4.1; Spark 4.2 has the method
+built in. Reading uses a fixed snapshot. `approx` can use compatible persisted
+indexes; inspect `explain` for indexed segments and exact-scan fallbacks. See
+the [search reference](docs/reference-en.md#vector-search) for these semantics
+and the [read examples](docs/reference-en.md#31-reading-data) for direct
+`spark.read.format("milvus")` options.
+
+For the separate field-backfill workflow, start with the
+[backfill guide](docs/user-guide-snapshot-backfill.md) and its runnable
+[demo](scripts/run_backfill_demo.sh). Ordinary DataFrame append is staging
+only; it is not an online insert or a full-refresh workflow.
 
 ## License
 

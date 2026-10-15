@@ -67,6 +67,7 @@ env "$PRELOAD=$JSIG" "$SPARK_HOME/bin/spark-submit" \
   --packages "org.apache.hadoop:hadoop-aws:$HADOOP_VERSION" \
   --exclude-packages software.amazon.awssdk:bundle \
   --conf spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin \
+  --conf 'spark.redaction.regex=(?i)secret|password|token|access[._]?key' \
   --conf "spark.executorEnv.$PRELOAD=$JSIG" \
   --class com.zilliz.spark.connector.apps.backfill.BackfillApp \
   "$JAR" \
