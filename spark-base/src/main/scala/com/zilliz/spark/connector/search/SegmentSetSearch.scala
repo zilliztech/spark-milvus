@@ -108,13 +108,33 @@ private[search] object SegmentSetSearch extends Logging {
         )
       finally allocator.close()
     } else {
-      val held = holdOrStream(execution, request, segments, open, metrics)
-      Option(TaskContext.get()).foreach(
-        _.addTaskCompletionListener[Unit] { _ =>
-          try held.foreach(_.close())
-          finally allocator.close()
+      val held =
+        try holdOrStream(execution, request, segments, open, metrics)
+        catch {
+          case failure: Throwable =>
+            try allocator.close()
+            catch {
+              case later: Throwable if later ne failure =>
+                failure.addSuppressed(later)
+            }
+            throw failure
         }
-      )
+      var released = false
+      def release(): Unit = {
+        if (!released) {
+          released = true
+          var failure: Throwable = null
+          try held.foreach(_.close())
+          catch { case cause: Throwable => failure = cause }
+          try allocator.close()
+          catch {
+            case cause: Throwable =>
+              if (failure == null) failure = cause
+              else if (failure ne cause) failure.addSuppressed(cause)
+          }
+          if (failure != null) throw failure
+        }
+      }
       // A group searches the set held in memory or, when it did not fit,
       // reads every segment again as it goes.
       val search: QueryMatrix => (TopKMerger, SegmentSearch.Counters) =
@@ -143,15 +163,48 @@ private[search] object SegmentSetSearch extends Logging {
             )
         }
       val how = if (held.isEmpty) "streamed" else "held"
-      groups.flatMap { group =>
+      def searchGroup(
+          group: SearchQueries.Group
+      ): (Array[Long], TopKMerger, SegmentSearch.Counters) = {
         val (merger, counters) =
           searching(group, request, allocator.allocator)(search)
+        (group.ids, merger, counters)
+      }
+      val pipelineGroups = execution.pipelineGroups && held.nonEmpty
+      val searched = if (pipelineGroups) {
+        // Spark input stays on the task thread. The worker only searches a
+        // copied query matrix through core; it never consumes a Spark iterator
+        // or needs a TaskContext / SQLExecution thread-local. The next group
+        // starts before this group is sorted, packed and handed to shuffle.
+        val pipeline =
+          try new SearchGroupPipeline(groups, searchGroup, () => release())
+          catch {
+            case failure: Throwable =>
+              try release()
+              catch {
+                case later: Throwable if later ne failure =>
+                  failure.addSuppressed(later)
+              }
+              throw failure
+          }
+        Option(TaskContext.get()).foreach(
+          _.addTaskCompletionListener[Unit](_ => pipeline.close())
+        )
+        pipeline
+      } else {
+        Option(TaskContext.get()).foreach(
+          _.addTaskCompletionListener[Unit](_ => release())
+        )
+        groups.map(searchGroup)
+      }
+      searched.flatMap { case (ids, merger, counters) =>
         report(metrics, counters, merger.size)
         logInfo(
           s"Search task: segments=${counters.segments}, groups=$groupCount, " +
-            s"queries=${group.queries}, candidates=${merger.size}, $how"
+            s"queries=${ids.length}, candidates=${merger.size}, $how, " +
+            s"groupPipeline=$pipelineGroups"
         )
-        candidates(merger, group.ids, execution.collectThreads)
+        candidates(merger, ids, execution.collectThreads)
       }
     }
   }

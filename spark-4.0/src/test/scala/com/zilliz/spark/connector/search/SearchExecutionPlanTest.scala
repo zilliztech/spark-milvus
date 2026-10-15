@@ -324,7 +324,8 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       32L << 20,
       8,
       2,
-      prefetchIndexes = false
+      prefetchIndexes = false,
+      pipelineGroups = false
     )
     val bytes = new ByteArrayOutputStream()
     val output = new ObjectOutputStream(bytes)

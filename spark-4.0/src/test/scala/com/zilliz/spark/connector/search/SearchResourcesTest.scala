@@ -3,6 +3,8 @@ package com.zilliz.spark.connector.search
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 
+import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.milvus.storage.vector.SearchPlan
 import com.zilliz.spark.connector.options.{MilvusOption, SearchLimits}
 
 /** The exact scan's base block and what one task may keep, off the heap and on
@@ -16,6 +18,60 @@ class SearchResourcesTest extends AnyFunSuite with Matchers {
 
   private val MiB = 1L << 20
   private val GiB = 1L << 30
+
+  test("overlapping search and output fit the execution group budget") {
+    val layout = VectorLayout(VectorElementType.Float32, 768)
+    val k = 100000
+    val perQuery = SearchResources.groupBytesPerQuery(layout, k, true)
+    // Current primitive and packed candidates plus the next primitive merger,
+    // and two groups' vectors, ids and queue metadata.
+    perQuery shouldBe 7206416L
+    val heap = SearchResources.queryBudget(24L * GiB, 0.6, 1).bytes
+    val budget = SearchResources.groupBytes(None, heap, 32, perQuery)
+    val coreLimit =
+      SearchResources.groupPlanBytes(budget.bytes, layout, k, true)
+    val group = SearchPlan.groups(1000, layout, k, coreLimit).head
+    group.queries shouldBe 256
+    group.queries.toLong * perQuery should be <= budget.bytes
+    val explicit = 512L * MiB
+    val limited = SearchPlan
+      .groups(
+        1000,
+        layout,
+        k,
+        SearchResources.groupPlanBytes(explicit, layout, k, true)
+      )
+      .head
+    limited.queries shouldBe 74
+    limited.queries.toLong * perQuery should be <= explicit
+    (limited.queries.toLong + 1L) * perQuery should be > explicit
+  }
+
+  test("pipeline budgets retain the single-query and serial-path contracts") {
+    val layout = VectorLayout(VectorElementType.Float32, 768)
+    val k = 1000000
+    val perQuery = SearchResources.groupBytesPerQuery(layout, k, true)
+    val smallest = SearchResources.groupBytes(None, 0L, 32, perQuery)
+    SearchPlan
+      .groups(
+        2,
+        layout,
+        k,
+        SearchResources.groupPlanBytes(smallest.bytes, layout, k, true)
+      )
+      .map(_.queries) shouldBe Seq(1, 1)
+    intercept[IllegalArgumentException] {
+      SearchResources.groupPlanBytes(perQuery - 1L, layout, k, true)
+    }.getMessage should include("overlapping search and output")
+    SearchResources.groupBytesPerQuery(layout, k, false) shouldBe
+      SearchPlan.bytesPerQuery(layout, k)
+    SearchResources.groupPlanBytes(
+      512L * MiB,
+      layout,
+      k,
+      false
+    ) shouldBe 512L * MiB
+  }
 
   test("executor heap and overhead use Spark's MiB default units") {
     SearchResources.memoryMiB("6144") shouldBe 6L * GiB
