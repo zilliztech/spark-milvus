@@ -180,8 +180,9 @@ class NativeVectorSearchBatchedTest
         val failures = new ConcurrentLinkedQueue[Throwable]()
         val threads = (0 until 6).map { _ =>
           new Thread(() =>
-            try (0 until 20).foreach(_ => results.add(search()))
-            catch { case failure: Throwable => failures.add(failure) }
+            try {
+              (0 until 20).foreach(_ => results.add(search()))
+            } catch { case failure: Throwable => failures.add(failure) }
           )
         }
         threads.foreach(_.start())

@@ -3,11 +3,13 @@ package com.zilliz.spark.connector.search
 import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
 import scala.collection.concurrent.TrieMap
 
+import org.apache.spark.{SparkEnv, TaskContext}
 import org.apache.spark.scheduler.{
   SparkListener,
   SparkListenerJobEnd,
   SparkListenerJobStart
 }
+import org.apache.spark.serializer.{JavaSerializer, KryoSerializer, Serializer}
 import org.apache.spark.sql.SparkSession
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -16,7 +18,12 @@ import org.scalatest.BeforeAndAfterAll
 import com.zilliz.milvus.storage.read.plan.SegmentReadTask
 import com.zilliz.milvus.storage.schema.MetricType
 import com.zilliz.milvus.storage.snapshot.SegmentLayout
-import com.zilliz.milvus.storage.vector.{Candidate, CandidateBytesFixture}
+import com.zilliz.milvus.storage.vector.{
+  Candidate,
+  CandidateBytesFixture,
+  CandidateRuns,
+  CarriedCandidates
+}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.TaskResources
 
@@ -74,16 +81,18 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     SearchMerge.merged(
       spark,
       candidates(rows, metric),
-      k,
       metric,
-      SearchExecutionPlan.mergePartitions(
-        spark,
-        math.max(1, rows.map(_._1).distinct.size.toLong),
-        2,
-        2,
-        k,
-        1L << 30
-      )
+      plan(math.max(1, rows.map(_._1).distinct.size.toLong), k)
+    )
+
+  /** The merge plan of two first-stage tasks over two candidate sources. */
+  private def plan(queries: Long, k: Int, heap: Long = 1L << 30) =
+    SearchMerge.plan(
+      SearchExecutionPlan.mergePartitions(spark, queries, 2, 2, k, heap),
+      queries,
+      2,
+      k,
+      heap
     )
 
   test("each query keeps its own best k addresses, best first") {
@@ -281,13 +290,18 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
   test("no candidates give no rows") {
     SearchMerge
-      .merged(spark, candidates(Seq.empty), 3, MetricType.L2, 2)
+      .merged(spark, candidates(Seq.empty), MetricType.L2, plan(2L, 3))
       .collect() shouldBe empty
   }
 
   test("an empty result has the schema a merged one has") {
     SearchMerge.HitSchema shouldBe SearchMerge
-      .merged(spark, candidates(Seq((1L, 10L, 0L, 1.0))), 1, MetricType.L2, 2)
+      .merged(
+        spark,
+        candidates(Seq((1L, 10L, 0L, 1.0))),
+        MetricType.L2,
+        plan(1L, 1)
+      )
       .schema
   }
 
@@ -364,4 +378,209 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       SearchExecutionPlan.mergePartitions(spark, 100000L, 15, 15, 16384, heap)
   }
 
+  test("a merge plan budgets its batch from the partitions it was given") {
+    for {
+      queries <- Seq(1L, 100L, 100000L)
+      sources <- Seq(1, 8, 128)
+      k <- Seq(1, 100, 16384)
+      heap <- Seq(0L, 1L << 20, 1L << 30)
+    } {
+      val partitions =
+        SearchExecutionPlan.mergePartitions(
+          spark,
+          queries,
+          sources,
+          sources,
+          k,
+          heap
+        )
+      val plain = SearchMerge.plan(partitions, queries, sources, k, heap)
+      val carried = SearchMerge.plan(
+        partitions,
+        queries,
+        sources,
+        k,
+        heap,
+        CandidateRuns.Carried,
+        1052L
+      )
+      plain.partitions shouldBe partitions
+      plain.queriesPerPartition shouldBe (queries + partitions - 1) / partitions
+      plain.bytesPerQuery should be > sources.toLong * k * 24L
+      carried.bytesPerQuery should be > plain.bytesPerQuery
+      plain.targetBytes should be > 0L
+      plain.targetBytes should be <= math
+        .min(sources, plain.maxRuns)
+        .toLong * k * 24L
+      if (heap == 0L) plain.targetBytes shouldBe 1L
+    }
+    // 15 sources at k=16,384 over the 3,847 partitions the heap test above
+    // plans: 26 queries a partition share half of a 306 MB heap, and after the
+    // two output copies and the scratch of a compaction, half of what remains
+    // retains about six and a half answers, under the eight of a full batch.
+    val heap = 306393907L
+    val answer = 16384L * 24L
+    val temporary = 2L * answer + (96L * 8L) + (512L + 64L * 8L)
+    val planned = SearchMerge.plan(3847, 100000L, 15, 16384, heap)
+    planned.queriesPerPartition shouldBe 26L
+    planned.targetBytes shouldBe (heap / 2L / 26L - temporary) / 2L
+    planned.targetBytes should be < 8L * answer
+    planned.targetBytes should be > 6L * answer
+  }
+
+  test(
+    "merge budget arithmetic saturates without wrapping or losing partitions"
+  ) {
+    val plan = SearchMerge.plan(
+      100,
+      100L,
+      Int.MaxValue,
+      Int.MaxValue,
+      Long.MaxValue,
+      CandidateRuns.Carried,
+      Long.MaxValue
+    )
+    plan.partitions shouldBe 100
+    plan.bytesPerQuery shouldBe Long.MaxValue
+    plan.targetBytes shouldBe 1L
+    the[IllegalArgumentException] thrownBy SearchMerge.plan(0, 1L, 1, 1, 0L)
+    the[IllegalArgumentException] thrownBy SearchMerge.plan(1, 0L, 1, 1, 0L)
+    the[IllegalArgumentException] thrownBy SearchMerge
+      .plan(1, 1L, 1, 1, 1L, candidateBytes = 0L)
+    the[IllegalArgumentException] thrownBy SearchMerge
+      .plan(1, 1L, 1, 1, 1L, maxRuns = 1)
+  }
+
+  private def packed(
+      layout: CandidateRuns.Layout,
+      entries: Seq[Candidate]
+  ): Array[Byte] = layout match {
+    case CandidateRuns.Plain =>
+      CandidateBytesFixture.pack(entries, MetricType.L2)
+    case CandidateRuns.Carried =>
+      CarriedCandidates.writeSorted(
+        entries.sorted(Candidate.ranking(MetricType.L2)).map { candidate =>
+          val bytes = Array.fill[Byte](1024 + candidate.rowOffset.toInt)(
+            (candidate.segmentId + candidate.rowOffset).toByte
+          )
+          candidate -> bytes
+        }
+      )
+  }
+
+  test("Java and Kryo preserve both candidate states across serialization") {
+    val conf = spark.sparkContext.getConf
+    val serializers: Seq[Serializer] =
+      Seq(new JavaSerializer(conf), new KryoSerializer(conf))
+    val entries =
+      (0 until 12).map(at => Candidate(0, at.toLong, 0L, (12 - at).toDouble))
+    for {
+      serializer <- serializers
+      layout <- Seq(CandidateRuns.Plain, CandidateRuns.Carried)
+    } {
+      def state() = new CandidateRuns(4, MetricType.L2, layout, 8, 1L << 20)
+      val original = state()
+        .append(packed(layout, entries.take(3)))
+        .append(packed(layout, entries.slice(3, 6)))
+      val instance = serializer.newInstance()
+      val restored =
+        instance.deserialize[CandidateRuns](instance.serialize(original))
+      restored.append(packed(layout, entries.slice(6, 9)))
+      restored.absorb(state().append(packed(layout, entries.drop(9))))
+      val expected =
+        packed(layout, entries.sorted(Candidate.ranking(MetricType.L2)).take(4))
+      restored.finish() shouldBe expected
+      restored.finish() shouldBe expected
+      original.finish() shouldBe packed(
+        layout,
+        entries.take(6).sorted(Candidate.ranking(MetricType.L2)).take(4)
+      )
+    }
+  }
+
+  test(
+    "both layouts survive repeated reducer spills and preserve absent queries"
+  ) {
+    val inputs = (0 until 72).flatMap { run =>
+      // Query zero receives three times as many answers as the other keys.
+      val queryIds = if (run < 24) 0 until 8 else 0 until 1
+      queryIds.map { query =>
+        val entries = (0 until 3).map { offset =>
+          Candidate(
+            query,
+            run.toLong,
+            offset.toLong,
+            ((run * 3 + offset) * 7 % 67).toDouble
+          )
+        }
+        query.toLong -> entries
+      }
+    }
+    val spillOption = "spark.shuffle.spill.numElementsForceSpillThreshold"
+    val conf = SparkEnv.get.conf
+    val previous = conf.getOption(spillOption)
+    try {
+      for {
+        layout <- Seq(CandidateRuns.Plain, CandidateRuns.Carried)
+        required <- Seq(None, Some((0L until 9L).toArray))
+      } {
+        val source = inputs.map { case (query, entries) =>
+          query -> packed(layout, entries)
+        }
+        val expected = inputs.groupBy(_._1).map { case (query, runs) =>
+          query -> packed(
+            layout,
+            runs.flatMap(_._2).sorted(Candidate.ranking(MetricType.L2)).take(7)
+          ).toVector
+        } ++ (if (required.isDefined) Map(8L -> Vector.empty[Byte])
+              else Map.empty[Long, Vector[Byte]])
+        val plan = SearchMerge.plan(
+          2,
+          9L,
+          72,
+          7,
+          1L << 30,
+          layout,
+          if (layout == CandidateRuns.Plain) 24L else 1054L
+        )
+
+        def run(threshold: Int): (Map[Long, Vector[Byte]], Long) = {
+          conf.set(spillOption, threshold.toString)
+          val result = SearchMerge.byQuery[(Long, Array[Byte])](
+            spark,
+            spark.sparkContext.parallelize(source, 4),
+            plan,
+            MetricType.L2,
+            (query, bytes) => Iterator.single(query -> bytes),
+            required,
+            query => query -> Array.emptyByteArray
+          )
+          val parts = result
+            .mapPartitions { rows =>
+              val answers = rows.map { case (query, bytes) =>
+                query -> bytes.toVector
+              }.toVector
+              // This runs after the reducer consumed its combined iterator;
+              // it observes this reducer's spill, not the map shuffle writer's.
+              Iterator.single(
+                answers -> TaskContext.get().taskMetrics().diskBytesSpilled
+              )
+            }
+            .collect()
+          parts.flatMap(_._1).toMap -> parts.map(_._2).sum
+        }
+
+        val (withoutSpill, noSpillBytes) = run(Int.MaxValue)
+        val (withSpill, spillBytes) = run(7)
+        withoutSpill shouldBe expected
+        withSpill shouldBe expected
+        noSpillBytes shouldBe 0L
+        spillBytes should be > 0L
+      }
+    } finally
+      previous match {
+        case Some(value) => conf.set(spillOption, value)
+        case None        => conf.remove(spillOption)
+      }
+  }
 }
