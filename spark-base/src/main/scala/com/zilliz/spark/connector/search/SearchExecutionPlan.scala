@@ -199,14 +199,28 @@ private[connector] object SearchExecutionPlan {
     val resources = TaskResources.of(spark)
     val taskHeap =
       SearchResources.queryBudget(heap, fraction, resources.tasksPerExecutor)
+    val blockMaxBytes = math.max(
+      1L,
+      math.min(SearchResources.exactScanBatch(None).bytes, taskHeap.bytes / 4L)
+    )
+    val availableHeapBytes = math.max(0L, taskHeap.bytes - blockMaxBytes)
     val group = SearchResources.groupBytes(
       limits.groupMaxBytes,
       taskHeap.bytes,
       1,
-      SearchPlan.bytesPerQuery(layout, k) + k.toLong * rowBytes
+      Math.addExact(
+        frameQueryBytes(layout, k),
+        Math.multiplyExact(k.toLong, rowBytes)
+      )
     )
-    val groups =
-      frameGroups(queries.count.toInt, layout, k, rowBytes, group.bytes)
+    val groups = frameGroups(
+      queries.count.toInt,
+      layout,
+      k,
+      rowBytes,
+      group.bytes,
+      availableHeapBytes
+    )
     val blockRows = math
       .max(
         1L,
@@ -216,18 +230,11 @@ private[connector] object SearchExecutionPlan {
       .toInt
     val delivery = queryDelivery(queries, layout, limits.queriesMaxBytes)
     val tasks = basePartitions * groups.size
-    val blockMaxBytes = math.max(
-      1L,
-      math.min(SearchResources.exactScanBatch(None).bytes, taskHeap.bytes / 4L)
-    )
-    val queryHeap = groups.map(_.queries.toLong).max *
-      (SearchPlan.bytesPerQuery(
-        layout,
-        k
-      ) + SearchPlan.QueryIdBytes + SearchPlan.TopKQueueBytes)
+    val queryHeap =
+      groups.map(_.queries.toLong).max * frameQueryBytes(layout, k)
     // A retained row also appears in the packed answer during encoding.
     val retainedMaxBytes =
-      math.max(1L, (taskHeap.bytes - queryHeap - blockMaxBytes) / 2L)
+      math.max(0L, (availableHeapBytes - queryHeap) / 2L)
     Frame(
       groups,
       delivery,
@@ -391,19 +398,52 @@ private[connector] object SearchExecutionPlan {
     }
   }
 
-  /** Query groups of equal size, the last one shorter, each within the group
-    * limit with its candidates and the rows they carry. One query is a group
-    * however large it is; a query is never split across groups.
+  /** Query matrix, ids and bounded top-k state for one frame query. */
+  private def frameQueryBytes(layout: VectorLayout, k: Int): Long =
+    SearchPlan.bytesPerQuery(layout, k) + SearchPlan.QueryIdBytes +
+      SearchPlan.TopKQueueBytes
+
+  /** Query groups of equal size, the last one shorter, bounded by the group
+    * limit and the heap left after reserving the scan block. The retained rows
+    * and the one answer being encoded each fit half the remaining heap.
+    *
+    * One query remains indivisible when its maximum answer would not fit: fewer
+    * than k rows may exist, so the executor checks the actual bytes.
     */
   private[connector] def frameGroups(
       queries: Int,
       layout: VectorLayout,
       k: Int,
       rowBytes: Long,
-      groupMaxBytes: Long
+      groupMaxBytes: Long,
+      availableHeapBytes: Long
   ): Seq[SearchPlan.QueryGroup] = {
-    val perQuery = SearchPlan.bytesPerQuery(layout, k) + k.toLong * rowBytes
-    val size = math.max(1L, groupMaxBytes / perQuery).min(queries.toLong).toInt
+    require(queries > 0, s"A frame search needs queries: $queries")
+    require(rowBytes >= 0L, s"A frame row has negative bytes: $rowBytes")
+    require(
+      availableHeapBytes >= 0L,
+      s"A frame has negative heap: $availableHeapBytes"
+    )
+    val queryHeap = frameQueryBytes(layout, k)
+    val retainedRows = Math.multiplyExact(k.toLong, rowBytes)
+    val answer = Math.multiplyExact(
+      k.toLong,
+      Math.addExact(CandidateBytes.Width.toLong + 4L, rowBytes)
+    )
+    val perQuery = Math.addExact(queryHeap, retainedRows)
+    // Both regions use the same half-heap limit. Only one query's encoded
+    // answer coexists with the group's retained rows, not every answer.
+    val byRows =
+      if (
+        queryHeap > availableHeapBytes ||
+        retainedRows > (availableHeapBytes - queryHeap) / 2L
+      ) 0L
+      else availableHeapBytes / (queryHeap + 2L * retainedRows)
+    val byAnswer =
+      if (answer > availableHeapBytes / 2L) 0L
+      else (availableHeapBytes - 2L * answer) / queryHeap
+    val bounded = math.min(groupMaxBytes / perQuery, math.min(byRows, byAnswer))
+    val size = math.max(1L, bounded).min(queries.toLong).toInt
     (0 until queries by size).map(first =>
       SearchPlan.QueryGroup(first, math.min(size, queries - first))
     )
