@@ -18,8 +18,10 @@ enough to build, test and change the code.
 Spark reads and writes Milvus collections by going straight at the Milvus
 storage format on object storage, not through the Milvus query path. A read
 lists a snapshot, plans one Spark partition per segment, and pulls Arrow column
-batches out of the segment files. A write produces segment files in the same
-format and registers them back with Milvus. Vector search is written as a
+batches out of the segment files. A DataFrame append stages segment files and
+commits a job manifest on object storage. Registering new segments still waits
+for Milvus's `RegisterSegments` API; successful staging does not make the new
+rows queryable in Milvus. Vector search is written as a
 NEAREST BY join: Spark 4.2's own, and the connector's `nearestByJoin` and
 `nearest_by_join` on 3.5 to 4.1. Over a Milvus table the connector executes it
 and returns each query's top-k over the snapshot's persisted indexes or by
